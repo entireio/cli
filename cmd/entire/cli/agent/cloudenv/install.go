@@ -38,7 +38,7 @@ func WriteInstallScript(ctx context.Context) error {
 	if err := os.MkdirAll(filepath.Dir(dest), 0o750); err != nil {
 		return fmt.Errorf("create .entire directory: %w", err)
 	}
-	if existing, err := os.ReadFile(dest); err == nil && string(existing) == string(installCLIScript) {
+	if existing, err := os.ReadFile(dest); err == nil && string(existing) == string(installCLIScript) { //nolint:gosec // dest is worktree + fixed relative path
 		return nil
 	}
 	if err := os.WriteFile(dest, installCLIScript, 0o755); err != nil { //nolint:gosec // executable helper, not a secret

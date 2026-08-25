@@ -608,10 +608,8 @@ func applyAgentChanges(ctx context.Context, w io.Writer, selectedAgentNames []st
 	}
 	var successfullyAddedAgents []agent.Agent
 	for _, ag := range addedAgents {
-		if _, err := setupAgentHooks(ctx, ag, opts.ForceHooks); err != nil {
+		if _, err := setupAgentHooksAndCloud(ctx, w, ag, opts.ForceHooks); err != nil {
 			errs = append(errs, fmt.Errorf("failed to setup %s hooks: %w", ag.Type(), err))
-		} else if err := setupCloudCLIInstall(ctx, w, ag); err != nil {
-			errs = append(errs, fmt.Errorf("failed to setup %s cloud environment: %w", ag.Type(), err))
 		} else {
 			successfullyAddedAgents = append(successfullyAddedAgents, ag)
 		}
@@ -619,10 +617,8 @@ func applyAgentChanges(ctx context.Context, w io.Writer, selectedAgentNames []st
 
 	var successfullyReinstalledAgents []agent.Agent
 	for _, ag := range reinstalledAgents {
-		if _, err := setupAgentHooks(ctx, ag, opts.ForceHooks); err != nil {
+		if _, err := setupAgentHooksAndCloud(ctx, w, ag, opts.ForceHooks); err != nil {
 			errs = append(errs, fmt.Errorf("failed to setup %s hooks: %w", ag.Type(), err))
-		} else if err := setupCloudCLIInstall(ctx, w, ag); err != nil {
-			errs = append(errs, fmt.Errorf("failed to setup %s cloud environment: %w", ag.Type(), err))
 		} else {
 			successfullyReinstalledAgents = append(successfullyReinstalledAgents, ag)
 		}
@@ -1259,11 +1255,8 @@ func runEnableInteractive(ctx context.Context, w io.Writer, agents []agent.Agent
 
 	// Setup agent hooks for all selected agents
 	for _, ag := range agents {
-		if _, err := setupAgentHooks(ctx, ag, opts.ForceHooks); err != nil {
+		if _, err := setupAgentHooksAndCloud(ctx, w, ag, opts.ForceHooks); err != nil {
 			return fmt.Errorf("failed to setup %s hooks: %w", ag.Type(), err)
-		}
-		if err := setupCloudCLIInstall(ctx, w, ag); err != nil {
-			return err
 		}
 		if err := setupOptionalSearchSkill(ctx, w, ag, opts); err != nil {
 			return err
@@ -1693,6 +1686,17 @@ func setupAgentHooks(ctx context.Context, ag agent.Agent, forceHooks bool) (int,
 	return count, nil
 }
 
+func setupAgentHooksAndCloud(ctx context.Context, w io.Writer, ag agent.Agent, forceHooks bool) (int, error) {
+	count, err := setupAgentHooks(ctx, ag, forceHooks)
+	if err != nil {
+		return 0, err
+	}
+	if err := setupCloudCLIInstall(ctx, w, ag); err != nil {
+		return count, err
+	}
+	return count, nil
+}
+
 // setupCloudCLIInstall wires the Entire CLI into a remote/Cloud Agent
 // environment when the agent implements CloudCLIInstaller. No-op otherwise.
 func setupCloudCLIInstall(ctx context.Context, w io.Writer, ag agent.Agent) error {
@@ -1916,12 +1920,9 @@ func setupAgentHooksNonInteractive(ctx context.Context, w io.Writer, ag agent.Ag
 	fmt.Fprintf(w, "  Agent: %s\n", ag.Type())
 
 	// Install agent hooks (agent hooks don't depend on settings)
-	installedHooks, err := setupAgentHooks(ctx, ag, opts.ForceHooks)
+	installedHooks, err := setupAgentHooksAndCloud(ctx, w, ag, opts.ForceHooks)
 	if err != nil {
 		return fmt.Errorf("failed to setup %s hooks: %w", agentName, err)
-	}
-	if err := setupCloudCLIInstall(ctx, w, ag); err != nil {
-		return err
 	}
 	if err := setupOptionalSearchSkill(ctx, w, ag, opts); err != nil {
 		return err

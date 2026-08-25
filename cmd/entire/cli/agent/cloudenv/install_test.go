@@ -77,7 +77,7 @@ func TestWriteInstallScript_Idempotent(t *testing.T) {
 		t.Fatal(err)
 	}
 	path := filepath.Join(dir, ".entire", InstallCLIScriptName)
-	first, err := os.ReadFile(path) //nolint:gosec // test path
+	first, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -94,7 +94,7 @@ func TestWriteInstallScript_Idempotent(t *testing.T) {
 	if err := WriteInstallScript(ctx); err != nil {
 		t.Fatal(err)
 	}
-	second, err := os.ReadFile(path) //nolint:gosec // test path
+	second, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
 	}

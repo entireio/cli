@@ -104,7 +104,10 @@ func RemoveCursorEnvironment(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("marshal %s: %w", EnvironmentJSONRel, err)
 	}
-	return os.WriteFile(envPath, output, 0o644) //nolint:gosec // project JSON
+	if err := os.WriteFile(envPath, output, 0o644); err != nil { //nolint:gosec // project JSON
+		return fmt.Errorf("write %s: %w", EnvironmentJSONRel, err)
+	}
+	return nil
 }
 
 func cursorEnvPath(ctx context.Context) (root, envPath string) {

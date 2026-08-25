@@ -9,6 +9,8 @@ import (
 	"testing"
 )
 
+const npmCi = "npm ci"
+
 func TestEnsureCursorEnvironment_DoesNotCreateFile(t *testing.T) {
 	dir := t.TempDir()
 	t.Chdir(dir)
@@ -42,7 +44,7 @@ func TestEnsureCursorEnvironment_AppendsInstall(t *testing.T) {
 	}
 	original := `{
   "name": "app",
-  "install": "npm ci",
+  "install": "` + npmCi + `",
   "unknownField": true
 }
 `
@@ -66,7 +68,7 @@ func TestEnsureCursorEnvironment_AppendsInstall(t *testing.T) {
 	if err := json.Unmarshal(raw["install"], &install); err != nil {
 		t.Fatal(err)
 	}
-	if install != "npm ci && "+InstallCLIStep {
+	if install != npmCi+" && "+InstallCLIStep {
 		t.Fatalf("install = %q", install)
 	}
 
@@ -104,7 +106,7 @@ func TestEnsureCursorEnvironment_SkipsWhenReferencedScriptInstallsEntire(t *test
 	if res.Changed {
 		t.Fatal("must not rewrite an install that already puts entire on PATH")
 	}
-	after, err := os.ReadFile(envPath) //nolint:gosec // test path
+	after, err := os.ReadFile(envPath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -121,7 +123,7 @@ func TestRemoveCursorEnvironment_StripsStepOnly(t *testing.T) {
 	if err := os.MkdirAll(envDir, 0o750); err != nil {
 		t.Fatal(err)
 	}
-	env := `{"name":"app","install":"npm ci && bash .entire/install-cli.sh"}` + "\n"
+	env := `{"name":"app","install":"` + npmCi + ` && bash .entire/install-cli.sh"}` + "\n"
 	if err := os.WriteFile(filepath.Join(envDir, "environment.json"), []byte(env), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -134,8 +136,8 @@ func TestRemoveCursorEnvironment_StripsStepOnly(t *testing.T) {
 	if err := json.Unmarshal(raw["install"], &install); err != nil {
 		t.Fatal(err)
 	}
-	if install != "npm ci" {
-		t.Fatalf("install = %q, want npm ci", install)
+	if install != npmCi {
+		t.Fatalf("install = %q, want %s", install, npmCi)
 	}
 	if _, ok := raw["name"]; !ok {
 		t.Fatal("name field dropped")
@@ -167,7 +169,7 @@ func TestEnsureCursorEnvironment_MalformedJSONDoesNotFail(t *testing.T) {
 
 func readRawEnv(t *testing.T, dir string) map[string]json.RawMessage {
 	t.Helper()
-	data, err := os.ReadFile(filepath.Join(dir, ".cursor", "environment.json")) //nolint:gosec // test path
+	data, err := os.ReadFile(filepath.Join(dir, ".cursor", "environment.json"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -181,7 +183,7 @@ func readRawEnv(t *testing.T, dir string) map[string]json.RawMessage {
 func TestCommittedCursorEnvironmentAlreadyInstallsEntire(t *testing.T) {
 	t.Parallel()
 	root := moduleRoot(t)
-	data, err := os.ReadFile(filepath.Join(root, ".cursor", "environment.json")) //nolint:gosec // module root
+	data, err := os.ReadFile(filepath.Join(root, ".cursor", "environment.json"))
 	if err != nil {
 		t.Fatal(err)
 	}

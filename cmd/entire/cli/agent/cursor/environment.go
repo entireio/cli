@@ -2,6 +2,7 @@ package cursor
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/cloudenv"
@@ -15,12 +16,15 @@ var _ agent.CloudCLIInstaller = (*CursorAgent)(nil)
 func (c *CursorAgent) EnsureCloudCLIInstall(ctx context.Context) (agent.CloudCLIInstallResult, error) {
 	res, err := cloudenv.EnsureCursorEnvironment(ctx)
 	if err != nil {
-		return agent.CloudCLIInstallResult{}, err
+		return agent.CloudCLIInstallResult{}, fmt.Errorf("cursor cloud environment: %w", err)
 	}
 	return agent.CloudCLIInstallResult{Message: res.Message}, nil
 }
 
 // RemoveCloudCLIInstall strips the Entire install step from environment.json.
 func (c *CursorAgent) RemoveCloudCLIInstall(ctx context.Context) error {
-	return cloudenv.RemoveCursorEnvironment(ctx)
+	if err := cloudenv.RemoveCursorEnvironment(ctx); err != nil {
+		return fmt.Errorf("cursor cloud environment: %w", err)
+	}
+	return nil
 }
