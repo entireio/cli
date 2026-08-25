@@ -824,10 +824,16 @@ func initGitRepo(t *testing.T, dir string) {
 	t.Helper()
 	cmd := exec.CommandContext(t.Context(), "git", "init", "-q")
 	cmd.Dir = dir
-	// Keep the repo self-contained: no signing, no reliance on global config.
+	// Keep the repo self-contained: no reliance on the developer's git config
+	// (core.hooksPath or init templates would otherwise leak in). Point both
+	// config vars at paths inside a temp dir rather than a null device — git
+	// treats a missing config file as empty, and a real filesystem path is
+	// portable, whereas /dev/null does not exist on Windows. Matches the
+	// GIT_CONFIG_GLOBAL convention in gitrepo/reftable_test.go.
+	emptyCfg := t.TempDir()
 	cmd.Env = append(os.Environ(),
-		"GIT_CONFIG_GLOBAL=/dev/null",
-		"GIT_CONFIG_SYSTEM=/dev/null",
+		"GIT_CONFIG_GLOBAL="+filepath.Join(emptyCfg, "gitconfig"),
+		"GIT_CONFIG_SYSTEM="+filepath.Join(emptyCfg, "gitconfig-system"),
 	)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("git init failed: %v\n%s", err, out)
