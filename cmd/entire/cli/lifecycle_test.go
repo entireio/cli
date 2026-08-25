@@ -3221,6 +3221,54 @@ func TestHandleLifecycleSubagentEnd_ConcurrentCleanupBetweenResolveAndLoadSkipsC
 	}
 }
 
+// TestHandleLifecycleSubagentEnd_SingleActiveFallbackCleansPreTaskAfterSuccessfulCapture
+// is the counterpart to TestHandleLifecycleSubagentEnd_NoChangesKeepsUncorroboratedPreTaskState:
+// when the single-active-file fallback (no ID, no description) successfully
+// completes a task record, the consumed pre-task baseline must be removed so
+// ResolvePreTaskToolUseID does not keep naming a stale file.
+func TestHandleLifecycleSubagentEnd_SingleActiveFallbackCleansPreTaskAfterSuccessfulCapture(t *testing.T) {
+	// NOT parallel: uses t.Chdir.
+	tmpDir := t.TempDir()
+	testutil.InitRepo(t, tmpDir)
+	testutil.WriteFile(t, tmpDir, "init.txt", "init")
+	testutil.GitAdd(t, tmpDir, "init.txt")
+	testutil.GitCommit(t, tmpDir, "init")
+	t.Chdir(tmpDir)
+
+	ctx := context.Background()
+
+	const toolUseID = "toolu_only"
+	if err := CapturePreTaskStateWithMeta(ctx, toolUseID, ""); err != nil {
+		t.Fatalf("CapturePreTaskStateWithMeta() error = %v", err)
+	}
+
+	testutil.WriteFile(t, tmpDir, "docs/release.md", "release notes")
+
+	transcriptPath := filepath.Join(t.TempDir(), "main.jsonl")
+	if err := os.WriteFile(transcriptPath, nil, 0o644); err != nil {
+		t.Fatalf("write transcript: %v", err)
+	}
+
+	ag := newMockAgent()
+	event := &agent.Event{
+		Type:       agent.SubagentEnd,
+		SessionID:  "test-session",
+		SessionRef: transcriptPath,
+		ToolUseID:  "", // no ID and no description: single-active-file fallback
+		Timestamp:  time.Now(),
+	}
+
+	if err := DispatchLifecycleEvent(ctx, ag, event); err != nil {
+		t.Fatalf("DispatchLifecycleEvent(SubagentEnd) error = %v", err)
+	}
+	if event.ToolUseID != toolUseID {
+		t.Fatalf("event.ToolUseID = %q, want %q (single-active-file fallback)", event.ToolUseID, toolUseID)
+	}
+	if _, err := os.Stat(preTaskStateFile(ctx, toolUseID)); !os.IsNotExist(err) {
+		t.Errorf("pre-task file for %q should be cleaned up after successful capture, stat err = %v", toolUseID, err)
+	}
+}
+
 // TestHandleLifecycleSubagentEnd_NoChangesKeepsUncorroboratedPreTaskState pins
 // the other half of the ambiguous-resolve contract. The vanished-state guard
 // covers preState == nil; this covers preState != nil with no file changes,

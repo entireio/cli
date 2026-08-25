@@ -1797,9 +1797,11 @@ func completeSubagentTaskRecord(logCtx context.Context, ag agent.Agent, event *a
 			slog.String("tool_use_id", event.ToolUseID))
 	}
 
-	if !opts.resolvedAmbiguously || event.TaskDescription != "" {
-		_ = CleanupPreTaskState(logCtx, event.ToolUseID) //nolint:errcheck // best-effort cleanup
-	}
+	// Sibling protection for uncorroborated single-active-file resolves lives
+	// on the no-changes skip and ambiguousWithoutDescription paths above. Once
+	// a record is completed here the baseline was consumed — a stale pre-task
+	// file would break ResolvePreTaskToolUseID for later subagents.
+	_ = CleanupPreTaskState(logCtx, event.ToolUseID) //nolint:errcheck // best-effort cleanup
 	return nil
 }
 
