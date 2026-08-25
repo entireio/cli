@@ -12,6 +12,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
+	"github.com/entireio/cli/cmd/entire/cli/strategy"
 )
 
 const (
@@ -77,14 +78,20 @@ func reportSearchSkillScaffold(w io.Writer, ag agent.Agent, result managedScaffo
 	}
 }
 
+// searchSkillTemplate names the scaffolded files after
+// strategy.EntireSearchSubagentName — the value the commit-condensed telemetry
+// probe matches subagent dispatches against. The template bodies below must
+// declare the same name; TestSearchSkillTemplates_NameMatchesTelemetryProbe
+// pins that, so renaming the subagent without updating the probe fails a test
+// instead of silently zeroing the used_search=subagent signal.
 func searchSkillTemplate(agentName types.AgentName) (string, []byte, bool) {
 	switch agentName {
 	case agent.AgentNameClaudeCode:
-		return filepath.Join(".claude", "agents", "entire-search.md"), []byte(strings.TrimSpace(claudeSearchSkillTemplate) + "\n"), true
+		return filepath.Join(".claude", "agents", strategy.EntireSearchSubagentName+".md"), []byte(strings.TrimSpace(claudeSearchSkillTemplate) + "\n"), true
 	case agent.AgentNameCodex:
-		return filepath.Join(".codex", "agents", "entire-search.toml"), []byte(strings.TrimSpace(codexSearchSkillTemplate) + "\n"), true
+		return filepath.Join(".codex", "agents", strategy.EntireSearchSubagentName+".toml"), []byte(strings.TrimSpace(codexSearchSkillTemplate) + "\n"), true
 	case agent.AgentNameGemini:
-		return filepath.Join(".gemini", "agents", "entire-search.md"), []byte(strings.TrimSpace(geminiSearchSkillTemplate) + "\n"), true
+		return filepath.Join(".gemini", "agents", strategy.EntireSearchSubagentName+".md"), []byte(strings.TrimSpace(geminiSearchSkillTemplate) + "\n"), true
 	default:
 		return "", nil, false
 	}

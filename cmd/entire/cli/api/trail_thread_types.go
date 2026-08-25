@@ -57,21 +57,11 @@ type TrailThreadsResponse struct {
 	EventCursor   string               `json:"eventCursor"`
 }
 
-func (r *TrailThreadsResponse) UnmarshalJSON(data []byte) error {
-	type plain TrailThreadsResponse
-	return decodeNormalizedTrailJSON(data, (*plain)(r))
-}
-
 // TrailThreadDetailResponse is the response from GET .../:number/threads/:id.
 type TrailThreadDetailResponse struct {
 	Thread      TrailThreadSummary   `json:"thread"`
 	Messages    []TrailThreadMessage `json:"messages"`
 	EventCursor string               `json:"eventCursor"`
-}
-
-func (r *TrailThreadDetailResponse) UnmarshalJSON(data []byte) error {
-	type plain TrailThreadDetailResponse
-	return decodeNormalizedTrailJSON(data, (*plain)(r))
 }
 
 // TrailThreadCreateRequest is the body for POST .../:number/threads.
@@ -87,11 +77,6 @@ type TrailThreadCreateResponse struct {
 	Message *TrailThreadMessage `json:"message"`
 }
 
-func (r *TrailThreadCreateResponse) UnmarshalJSON(data []byte) error {
-	type plain TrailThreadCreateResponse
-	return decodeNormalizedTrailJSON(data, (*plain)(r))
-}
-
 // TrailThreadUpdateRequest is the body for PATCH .../:number/threads/:id.
 // Pointer fields distinguish "not provided" from an explicit value.
 type TrailThreadUpdateRequest struct {
@@ -104,11 +89,6 @@ type TrailThreadUpdateResponse struct {
 	Thread TrailThreadSummary `json:"thread"`
 }
 
-func (r *TrailThreadUpdateResponse) UnmarshalJSON(data []byte) error {
-	type plain TrailThreadUpdateResponse
-	return decodeNormalizedTrailJSON(data, (*plain)(r))
-}
-
 // TrailThreadMessageRequest is the body for POST/PATCH message endpoints.
 type TrailThreadMessageRequest struct {
 	Body string `json:"body"`
@@ -117,9 +97,4 @@ type TrailThreadMessageRequest struct {
 // TrailThreadMessageResponse is the response from the message endpoints.
 type TrailThreadMessageResponse struct {
 	Message TrailThreadMessage `json:"message"`
-}
-
-func (r *TrailThreadMessageResponse) UnmarshalJSON(data []byte) error {
-	type plain TrailThreadMessageResponse
-	return decodeNormalizedTrailJSON(data, (*plain)(r))
 }

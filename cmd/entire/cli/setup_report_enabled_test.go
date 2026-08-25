@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/api"
 	"github.com/entireio/cli/cmd/entire/cli/gitremote"
@@ -110,5 +111,82 @@ func TestProbeAndCacheTrailsEnablement_NotOnboardedSavesDisabledCache(t *testing
 	wantRepoKey := trailEnablementRepoKey("gh", "acme", "widget")
 	if prefs.TrailsEnabledRepoKey != wantRepoKey {
 		t.Fatalf("cached repo key = %q, want %q", prefs.TrailsEnabledRepoKey, wantRepoKey)
+	}
+}
+
+// The probe must apply its OWN deadline rather than inheriting whatever the
+// enable report left behind: it now costs ~4 sequential round trips since it
+// moved onto the repo's cell, and sharing one budget let a slow enable report
+// starve it to nothing.
+// Not parallel: changes the process working directory.
+func TestProbeAndCacheTrailsEnablement_AppliesItsOwnBudget(t *testing.T) {
+	t.Chdir(t.TempDir())
+
+	previous := trailRefreshAPIClient
+	var deadline time.Time
+	var hasDeadline bool
+	trailRefreshAPIClient = func(ctx context.Context, _ bool, _ string) (*api.Client, error) {
+		deadline, hasDeadline = ctx.Deadline()
+		return nil, errors.New("stop before any network call")
+	}
+	t.Cleanup(func() { trailRefreshAPIClient = previous })
+
+	// A parent with a far-off deadline: the probe must still narrow to its own
+	// budget, so the bound cannot be something the caller happened to grant.
+	ctx, cancel := context.WithTimeout(t.Context(), time.Hour)
+	defer cancel()
+
+	probeAndCacheTrailsEnablement(ctx, false, &gitremote.Info{Forge: "gh", Owner: "acme", Repo: "widget"})
+
+	if !hasDeadline {
+		t.Fatal("probe ran with no deadline; a hung control plane would stall `entire enable` after success")
+	}
+	if remaining := time.Until(deadline); remaining > enableTrailsProbeBudget {
+		t.Fatalf("probe deadline is %s out, want at most enableTrailsProbeBudget (%s)", remaining, enableTrailsProbeBudget)
+	}
+}
+
+// The cache write is the point of the probe, so it must not be gated on the
+// probe's own budget: a probe that resolved an answer and then failed to record
+// it leaves the cache unknown and re-forks a refresh child next SessionStart.
+// Not parallel: changes the process working directory and env.
+func TestProbeAndCacheTrailsEnablement_CachesEvenWhenTheParentIsDone(t *testing.T) {
+	t.Setenv("ENTIRE_CONFIG_DIR", t.TempDir())
+	repoDir := t.TempDir()
+	testutil.InitRepo(t, repoDir)
+	t.Chdir(repoDir)
+
+	previous := trailRefreshAPIClient
+	trailRefreshAPIClient = func(context.Context, bool, string) (*api.Client, error) {
+		return nil, fmt.Errorf("resolve the Entire cell for acme/widget: %w", errRepoNotOnboarded)
+	}
+	t.Cleanup(func() { trailRefreshAPIClient = previous })
+
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+
+	probeAndCacheTrailsEnablement(ctx, false, &gitremote.Info{Forge: "gh", Owner: "acme", Repo: "widget"})
+
+	prefs, err := settings.LoadClonePreferences(t.Context())
+	if err != nil {
+		t.Fatalf("load clone preferences: %v", err)
+	}
+	if prefs.TrailsEnabled == nil || *prefs.TrailsEnabled {
+		t.Fatalf("cached trails-enabled decision = %v, want false recorded despite the cancelled parent", prefs.TrailsEnabled)
+	}
+}
+
+// The two budgets are a split of one ceiling, not independent knobs: raising
+// either without the other in mind lengthens how long `entire enable` sits
+// silent after it has already printed success.
+func TestEnableBudgetsSumToTheSynchronousCeiling(t *testing.T) {
+	t.Parallel()
+
+	if total := enableReportBudget + enableTrailsProbeBudget; total > 5*time.Second {
+		t.Errorf("enableReportBudget + enableTrailsProbeBudget = %s, want at most the 5s this path used to spend", total)
+	}
+	if enableTrailsProbeBudget <= enableReportBudget {
+		t.Errorf("probe budget %s <= report budget %s; the probe is the step that grew to ~4 round trips and needs the larger share",
+			enableTrailsProbeBudget, enableReportBudget)
 	}
 }

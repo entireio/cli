@@ -6,12 +6,14 @@ import (
 	"slices"
 	"time"
 
+	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/session"
+	"github.com/entireio/cli/cmd/entire/cli/strategy"
 )
 
-// sweepCondenseBudget caps how much wall clock one sweep may spend condensing,
-// across all sessions it finalizes.
+// interactiveSweepCondenseBudget caps how much wall clock an interactive sweep
+// may spend condensing, across all sessions it finalizes.
 //
 // Marking a session ENDED is a single atomic state-file rename; condensing it
 // costs ~120ms at best and seconds for a large transcript. Since sessions stay
@@ -23,60 +25,71 @@ import (
 // So every candidate is always marked ended (that is what un-sticks it from
 // `entire status`), while condensing runs only while the budget lasts. Skipping
 // it is the same fail-open path a failed condense already takes: FullyCondensed
-// stays false and PostCommit retries, with `entire doctor` reporting the session
-// as "ended with uncondensed checkpoint data" in the meantime. A backlog
-// therefore drains over successive invocations instead of stalling one.
-const sweepCondenseBudget = time.Second
+// stays false, PostCommit handles sessions with pending files, and doctor retries
+// no-files ENDED sessions. A backlog therefore drains over successive
+// invocations instead of stalling one.
+const interactiveSweepCondenseBudget = time.Second
+
+// isExitedSessionFinalizationCandidate keeps the exited-owner sweep away from
+// imported sessions, which are immutable historical records even if a legacy
+// state carries an inconsistent non-ended phase.
+func isExitedSessionFinalizationCandidate(st *session.State) bool {
+	return !st.Kind.IsImported() && st.OwnerExited()
+}
 
 // finalizeExitedSessions finalizes every non-ended session in states whose
 // owning agent process has exited (clean /exit, crash, kill, terminal close,
 // reboot) without a SessionStop hook firing — ACTIVE mid-turn, or IDLE because
 // the agent finished its turn before quitting. Each is finalized exactly as a
 // clean session stop would be: the session-stop transition runs (PhaseEnded +
-// EndedAt) and pending work is eagerly condensed, subject to
-// sweepCondenseBudget.
+// EndedAt) and pending work is eagerly condensed. condenseDeadline controls
+// how long the eager-condense work may run; a zero deadline is unbounded for a
+// detached caller, while status and doctor pass a bounded deadline because the
+// user is waiting for them.
 //
 // It refreshes the matched in-memory states from disk after finalizing — so
 // callers can re-filter/re-render without their own reload — and returns the
 // number finalized. Each session is best-effort: a failure to mark one ended is
 // logged and skipped; a condense failure is logged but the session is still
-// counted (PostCommit will retry the condense later).
-//
-// Callers that keep logging after this returns must install their own
-// command-scoped logging (ensureCommandLogging) rather than rely on the sweep's:
-// the early return below leaves logging untouched, so on the common
-// nothing-to-do path there is none. `entire doctor` does exactly that — it goes
-// on to condense and discard sessions, whose handlers log.
-func finalizeExitedSessions(ctx context.Context, states []*session.State) int {
+// counted so PostCommit or doctor can retry it later, depending on pending files.
+func finalizeExitedSessions(ctx context.Context, states []*session.State, condenseDeadline time.Time) int {
 	// Nothing to do is overwhelmingly the common case, and returning here keeps
 	// the sweep off the logging and store setup below entirely.
-	if !slices.ContainsFunc(states, (*session.State).OwnerExited) {
+	if !slices.ContainsFunc(states, isExitedSessionFinalizationCandidate) {
 		return 0
 	}
 
-	// Neither caller (`entire status`, `entire doctor`) initializes logging, so
-	// the phase-transition and condense lines below would land on the user's
-	// terminal via slog.Default() instead of the log file. A no-op when the
-	// caller already installed one for the whole command.
-	defer ensureCommandLogging(ctx)()
-
 	logCtx := logging.WithComponent(ctx, "session")
-	condenseDeadline := time.Now().Add(sweepCondenseBudget)
 
-	var store *session.StateStore // lazily created on first finalize
+	// This sweep writes checkpoints; a scanner-config failure must not silently
+	// use the default scanner set, so skip the condense work (an already-expired
+	// deadline) while still marking sessions ended below.
+	if err := strategy.EnsureRedactionConfigured(ctx); err != nil {
+		logging.Warn(logging.WithComponent(ctx, "redaction"),
+			"skipping sweep condense: redaction scanner configuration failed",
+			slog.String("error", err.Error()))
+		condenseDeadline = time.Now()
+	}
+
+	// Created up front: the record-completion pre-check and the post-finalize
+	// refresh below both need fresh loads.
+	store, storeErr := session.NewStateStore(ctx)
+	if storeErr != nil {
+		store = nil
+	}
 	finalized := 0
 	for _, st := range states {
-		if !st.OwnerExited() {
+		if !isExitedSessionFinalizationCandidate(st) {
 			continue // cheap pre-filter on the (possibly stale) list snapshot
 		}
+
+		sweepCompleteLiveTaskRecords(ctx, store, st)
 
 		// Finalize via the same path a clean SessionStop hook would take, but
 		// re-validate OwnerExited on the freshly-loaded state under the lock:
 		// a turn may have started since the snapshot and replaced the dead
 		// owner with a live one, in which case ended is false and we leave it be.
-		ended, err := endSessionNow(ctx, nil, st.SessionID, func(s *session.State) bool {
-			return s.OwnerExited()
-		}, condenseDeadline, endedWhenLastSeen)
+		ended, err := endSessionNow(ctx, nil, st.SessionID, isExitedSessionFinalizationCandidate, condenseDeadline, endedWhenLastSeen)
 		if err != nil {
 			logging.Warn(logCtx, "failed to finalize exited session",
 				slog.String("session_id", st.SessionID),
@@ -93,11 +106,6 @@ func finalizeExitedSessions(ctx context.Context, states []*session.State) int {
 		// fail-open and budget-capped, so StepCount/FullyCondensed must not be
 		// assumed). Fall back to a minimal ended-marking if the reload fails —
 		// enough for the caller's "active" filter to drop it.
-		if store == nil {
-			if s, serr := session.NewStateStore(ctx); serr == nil {
-				store = s
-			}
-		}
 		refreshed := false
 		if store != nil {
 			if reloaded, lerr := store.Load(ctx, st.SessionID); lerr == nil && reloaded != nil {
@@ -113,4 +121,27 @@ func finalizeExitedSessions(ctx context.Context, states []*session.State) int {
 		finalized++
 	}
 	return finalized
+}
+
+// sweepCompleteLiveTaskRecords completes a dead-owner session's live task
+// records ahead of the sweep's endSessionNow, exactly as a clean SessionEnd
+// does: the owner is gone, so no SubagentStop can ever arrive, and an
+// un-completed record would otherwise keep the session carrying pending task
+// content forever. Re-checks OwnerExited on a fresh load so a session revived
+// since the caller's snapshot is left alone; best-effort throughout.
+func sweepCompleteLiveTaskRecords(ctx context.Context, store *session.StateStore, st *session.State) {
+	fresh := st
+	if store != nil {
+		if reloaded, err := store.Load(ctx, st.SessionID); err == nil && reloaded != nil {
+			fresh = reloaded
+		}
+	}
+	if !fresh.OwnerExited() || len(fresh.LiveTaskRecords()) == 0 {
+		return
+	}
+	ag, err := agent.GetByAgentType(fresh.AgentType)
+	if err != nil || ag == nil {
+		return
+	}
+	completeLiveTaskRecords(ctx, ag, fresh.SessionID, fresh.TranscriptPath)
 }
