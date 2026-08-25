@@ -646,6 +646,10 @@ func (s *ManualCommitStrategy) CondenseSession(ctx context.Context, repo *git.Re
 	// Opt-in entity deltas are computed and attached AFTER the checkpoint
 	// exists, by a detached child — see entity_deltas.go. This call forks and
 	// returns; it yields nothing and can fail nothing.
+	attrBase := state.AttributionBaseCommit
+	if attrBase == "" {
+		attrBase = state.BaseCommit
+	}
 	scheduleEntityDeltas(ctx, logCtx, repo, o, checkpointID, state.SessionID, attrBase, writeOpts.FilesTouched)
 
 	// Deferred prompt-window reset: a checkpoint was written, so the window base

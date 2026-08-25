@@ -315,7 +315,10 @@ func (s *treeWriter) applyEntityDeltasBackfill(ctx context.Context, existing *ob
 	// Same regex-only redaction every other checkpoint file gets on the
 	// post-commit path; the pre-push OPF rewrite re-redacts it with the 9th
 	// layer along with the rest of the tree.
-	redacted := RedactBlobBytes(ctx, document, paths.EntityDeltasFileName, false)
+	redacted, err := RedactBlobBytes(ctx, document, paths.EntityDeltasFileName, false)
+	if err != nil {
+		return plumbing.ZeroHash, fmt.Errorf("redact entity deltas: %w", err)
+	}
 	blobHash, err := CreateBlobFromContent(s.repo, redacted)
 	if err != nil {
 		return plumbing.ZeroHash, fmt.Errorf("failed to create entity deltas blob: %w", err)
