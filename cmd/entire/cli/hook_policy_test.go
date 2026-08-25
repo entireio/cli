@@ -7,17 +7,11 @@ import (
 	"testing"
 
 	"github.com/entireio/cli/cmd/entire/cli/settings/repopolicy"
-	"github.com/entireio/cli/cmd/entire/cli/testutil"
 )
 
 func TestPrepareHookPolicyMigratesVerifiedLegacyActivation(t *testing.T) {
-	root := t.TempDir()
-	testutil.InitRepo(t, root)
-	testutil.WriteFile(t, root, "README.md", "test\n")
-	testutil.GitAdd(t, root, "README.md")
-	testutil.GitCommit(t, root, "initial")
-	testutil.WriteFile(t, root, ".entire/settings.json", `{"enabled":true}`)
-	t.Chdir(root)
+	setupTestRepo(t)
+	writeSettings(t, `{"enabled":true}`)
 	t.Setenv("ENTIRE_CONFIG_DIR", t.TempDir())
 
 	repository, err := repopolicy.ResolveRepository(t.Context())

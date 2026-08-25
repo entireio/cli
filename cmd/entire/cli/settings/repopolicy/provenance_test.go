@@ -94,7 +94,7 @@ func TestVerifySettingsProvenance_OwnershipErrorsPreserveBoundLocalData(t *testi
 	}
 }
 
-func TestEffectiveEnabledSetting_OwnershipUnknownPreservesLocalDisableVeto(t *testing.T) {
+func TestEffectiveEnabledSetting_OwnershipUnknownIgnoresLocalDisable(t *testing.T) {
 	t.Parallel()
 	root, repository := newPolicyRepo(t)
 	writePolicyFile(t, root, ".entire/settings.json", `{"enabled":true}`)
@@ -108,8 +108,8 @@ func TestEffectiveEnabledSetting_OwnershipUnknownPreservesLocalDisableVeto(t *te
 	if err != nil {
 		t.Fatal(err)
 	}
-	if enabled == nil || *enabled {
-		t.Fatalf("effective enabled = %v, want local false veto under unknown ownership", enabled)
+	if enabled == nil || !*enabled {
+		t.Fatalf("effective enabled = %v, want verified project true when local ownership is unknown", enabled)
 	}
 }
 

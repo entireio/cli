@@ -299,6 +299,18 @@ func TestClassifyRepoPolicy_TrackedLocalDisableCannotVetoGlobal(t *testing.T) {
 	}
 }
 
+func TestClassifyRepoPolicy_ExcludedPushOriginVetoesGlobal(t *testing.T) {
+	root, _ := newPolicyRepo(t)
+	runPolicyGit(t, root, "remote", "add", "origin", "https://github.com/acme/widgets.git")
+	runPolicyGit(t, root, "remote", "set-url", "--push", "origin", "git@codeberg.org:acme/widgets.git")
+	setPolicyGlobal(t, `{"global":{"enabled":true,"exclude_origins":["codeberg.org/acme/**"]}}`)
+
+	policy := policyAt(t, root)
+	if policy.Active || policy.InactiveReason != InactiveReasonGlobalExcluded {
+		t.Fatalf("policy = %+v, push origin exclusion must disable global tracking", policy)
+	}
+}
+
 func TestClassifyRepoPolicy_CorruptActivationFailsClosedUntilExplicitEnable(t *testing.T) {
 	root, repository := newPolicyRepo(t)
 	setPolicyGlobal(t, `{"global":{"enabled":true}}`)
@@ -354,29 +366,19 @@ func TestBootstrapLegacyActivation_SingleWorktreeRequiresVerifiedEvidence(t *tes
 		}
 	})
 
-	t.Run("exact active session record is accepted", func(t *testing.T) {
-		t.Parallel()
-		root, repository := newPolicyRepo(t)
-		writePolicyFile(t, root, ".entire/settings.json", `{"enabled":true}`)
-		body := `{"session_id":"session-1","phase":"active","worktree_path":` + quoteJSON(repository.WorktreeRoot) + `,"worktree_id":` + quoteJSON(repository.WorktreeID) + `}`
-		writePolicyFile(t, repository.GitCommonDir, "entire-sessions/session-1.json", body)
-		activated, err := BootstrapLegacyActivation(t.Context(), repository)
-		if err != nil || !activated {
-			t.Fatalf("BootstrapLegacyActivation = %v, %v; want true", activated, err)
-		}
-	})
-
-	t.Run("legacy active_committed session record is accepted", func(t *testing.T) {
-		t.Parallel()
-		root, repository := newPolicyRepo(t)
-		writePolicyFile(t, root, ".entire/settings.json", `{"enabled":true}`)
-		body := `{"session_id":"session-1","phase":"active_committed","worktree_path":` + quoteJSON(repository.WorktreeRoot) + `,"worktree_id":` + quoteJSON(repository.WorktreeID) + `}`
-		writePolicyFile(t, repository.GitCommonDir, "entire-sessions/session-1.json", body)
-		activated, err := BootstrapLegacyActivation(t.Context(), repository)
-		if err != nil || !activated {
-			t.Fatalf("BootstrapLegacyActivation = %v, %v; want true", activated, err)
-		}
-	})
+	for _, phase := range []string{"active", "active_committed"} {
+		t.Run("session phase "+phase+" is accepted", func(t *testing.T) {
+			t.Parallel()
+			root, repository := newPolicyRepo(t)
+			writePolicyFile(t, root, ".entire/settings.json", `{"enabled":true}`)
+			body := `{"session_id":"session-1","phase":` + quoteJSON(phase) + `,"worktree_path":` + quoteJSON(repository.WorktreeRoot) + `,"worktree_id":` + quoteJSON(repository.WorktreeID) + `}`
+			writePolicyFile(t, repository.GitCommonDir, "entire-sessions/session-1.json", body)
+			activated, err := BootstrapLegacyActivation(t.Context(), repository)
+			if err != nil || !activated {
+				t.Fatalf("BootstrapLegacyActivation = %v, %v; want true", activated, err)
+			}
+		})
+	}
 
 	t.Run("untracked local enabled setting plus exact evidence is accepted", func(t *testing.T) {
 		t.Parallel()

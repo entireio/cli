@@ -136,13 +136,20 @@ func ClassifyGlobalConfig(ctx context.Context, config *GlobalConfig, resolve Rep
 		return policy, nil
 	}
 	if len(config.ExcludeOrigins) > 0 {
-		origins, found, lookupErr := gitremote.GetRemoteURLsInDirIfSet(ctx, repository.WorktreeRoot, "origin")
+		origins, fetchFound, lookupErr := gitremote.GetRemoteURLsInDirIfSet(ctx, repository.WorktreeRoot, "origin")
 		if lookupErr != nil {
 			policy.ActivationSource = ActivationInactive
 			policy.InactiveReason = InactiveReasonGlobalExcluded
 			return policy, fmt.Errorf("reading origin remote: %w", lookupErr)
 		}
-		if found {
+		pushOrigins, pushFound, lookupErr := gitremote.GetRemotePushURLsInDirIfSet(ctx, repository.WorktreeRoot, "origin")
+		if lookupErr != nil {
+			policy.ActivationSource = ActivationInactive
+			policy.InactiveReason = InactiveReasonGlobalExcluded
+			return policy, fmt.Errorf("reading origin pushurl: %w", lookupErr)
+		}
+		origins = append(origins, pushOrigins...)
+		if fetchFound || pushFound {
 			for _, origin := range origins {
 				normalized := NormalizeOrigin(origin)
 				if normalized == "" {

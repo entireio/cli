@@ -427,7 +427,7 @@ func effectiveEnabledSettingWithOptions(
 		{
 			data: provenance.LocalData,
 			verified: provenance.LocalPathSafe &&
-				provenance.LocalOwnership != SettingsOwnershipTracked,
+				provenance.LocalOwnership == SettingsOwnershipUntracked,
 		},
 	} {
 		if !candidate.verified {

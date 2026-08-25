@@ -81,6 +81,8 @@ func MaybeEnsureGlobalSetup(ctx context.Context) {
 			// explains the hooksPath situation.
 			logging.Debug(logCtx, "global lazy setup: hooks dir inside worktree; skipping git hook install",
 				slog.String("hooks_dir", hooksDir))
+			record.GitHooksSpec = globalSetupComponentSpec
+			changed = true
 		default:
 			if IsGitHookInstalled(ctx) {
 				record.GitHooksSpec = globalSetupComponentSpec

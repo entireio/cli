@@ -9,26 +9,10 @@ import (
 	"testing"
 )
 
-// TestNoDirectEntireJoins is a call-site guard for invisible routing: every
-// runtime-data path under .entire must resolve through paths.AbsPath, which
-// reroutes globally tracked repos to the git common dir. A direct
-// filepath.Join(<base dir>, ".entire"...) (or with the paths.Entire*
-// constants) bypasses that routing and silently writes into the worktree of
-// a repo that must stay invisible.
-//
-// The test scans non-test production sources under cmd/ and internal/ and
-// fails on any new bypass. A deliberate, audited call site is exempted by an
-// inline marker on its own line:
+// TestNoDirectEntireJoins prevents production paths from bypassing invisible
+// runtime routing. Deliberate joins require a per-call-site rationale:
 //
 //	x := filepath.Join(root, paths.EntireDir, "runners") // entire-join-ok: <reason>
-//
-// The marker is per-call-site, not per-file, so a new bypass added to a file
-// that already contains an audited join is still flagged; deleting a marker
-// re-flags its call site. Joins whose FIRST argument is itself an Entire*
-// constant only build a relative subpath (which is then fed to AbsPath) and
-// are not flagged. (.entire/worktrees — trail checkout worktrees — is
-// deliberately worktree-resolved and documented on runtimeDataPrefixes; it is
-// referenced via its own constant, not these patterns.)
 func TestNoDirectEntireJoins(t *testing.T) {
 	t.Parallel()
 

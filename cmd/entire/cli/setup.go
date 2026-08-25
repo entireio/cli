@@ -2524,16 +2524,6 @@ func runUninstall(ctx context.Context, w, errW io.Writer, force bool) error {
 		fmt.Fprintln(errW, "Not a git repository. Nothing to uninstall.")
 		return NewSilentError(errors.New("not a git repository"))
 	}
-	repository, err := repopolicy.ResolveRepository(ctx)
-	if err != nil {
-		return fmt.Errorf("resolve repository for uninstall: %w", err)
-	}
-	// Publish the tombstone even when no runtime artifacts exist. An uninstall
-	// of a globally eligible repository must remain explicitly disabled.
-	if err := repopolicy.SetLocalActivation(ctx, repopolicy.ActivationDisabled); err != nil {
-		return fmt.Errorf("record disabled worktree before uninstall: %w", err)
-	}
-
 	// Gather counts for display
 	sessionStateCount := countSessionStates(ctx)
 	shadowBranchCount := countShadowBranches(ctx)
@@ -2593,6 +2583,12 @@ func runUninstall(ctx context.Context, w, errW io.Writer, force bool) error {
 	}
 
 	fmt.Fprintln(w, "\nUninstalling Entire CLI...")
+	repository, repoErr := repopolicy.ResolveRepository(ctx)
+	if repoErr != nil {
+		fmt.Fprintf(errW, "Warning: failed to resolve repository policy for uninstall: %v\n", repoErr)
+	} else if activationErr := repopolicy.SetLocalActivationForRepository(repository, repopolicy.ActivationDisabled); activationErr != nil {
+		fmt.Fprintf(errW, "Warning: failed to record disabled worktree: %v\n", activationErr)
+	}
 
 	// 1. Remove agent hooks (lowest risk)
 	if err := removeAgentHooks(ctx, w); err != nil {
@@ -2640,8 +2636,10 @@ func runUninstall(ctx context.Context, w, errW io.Writer, force bool) error {
 
 	// 6. Drop only this worktree's route/setup/runtime registry entries. The
 	// disabled activation tombstone above is intentionally retained.
-	if err := repopolicy.RemoveWorktreeRuntime(repository); err != nil {
-		fmt.Fprintf(errW, "Warning: failed to remove worktree runtime registry: %v\n", err)
+	if repoErr == nil {
+		if err := repopolicy.RemoveWorktreeRuntime(repository); err != nil {
+			fmt.Fprintf(errW, "Warning: failed to remove worktree runtime registry: %v\n", err)
+		}
 	}
 
 	fmt.Fprintln(w, "\nEntire CLI uninstalled successfully.")
@@ -2739,6 +2737,9 @@ func removeAllSessionStates(ctx context.Context) (int, error) {
 			return count, fmt.Errorf("remove session %s: %w", state.SessionID, err)
 		}
 		count++
+	}
+	if remaining, listErr := store.List(ctx); listErr == nil && len(remaining) == 0 {
+		_ = os.RemoveAll(filepath.Join(repository.GitCommonDir, "entire-session-locks"))
 	}
 
 	return count, nil

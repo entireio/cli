@@ -809,7 +809,7 @@ func EnsurePrimaryRefTo(ctx context.Context, repo *git.Repository, out io.Writer
 			if err := setRefHash(repo, refs.Primary, originRef.Hash()); err != nil {
 				return fmt.Errorf("failed to create metadata ref from origin under failed election: %w", err)
 			}
-			fmt.Fprintf(os.Stderr, "✓ Created local ref '%s' from origin (checkpoint sync remote election failed; fix checkpoint_push_remote to resume syncing)\n", primaryName)
+			fmt.Fprintf(out, "✓ Created local ref '%s' from origin (checkpoint sync remote election failed; fix checkpoint_push_remote to resume syncing)\n", primaryName)
 			return nil
 		}
 	}

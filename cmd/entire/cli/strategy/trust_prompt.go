@@ -46,7 +46,9 @@ func resolveTrustDecision(ctx context.Context, hasTTY bool, ask func() (trustCho
 // resolveTrustDecisionForPrePush is the production wiring: TTY detection plus
 // the real uiform prompt. errOut receives persistence-failure warnings.
 func resolveTrustDecisionForPrePush(ctx context.Context, errOut io.Writer) (TrustDecision, error) {
-	return resolveTrustDecision(ctx, interactive.CanPromptInteractively(),
+	// Huh's accessible mode reads stdin, which carries Git's pre-push ref
+	// protocol. Hold here; the user can grant explicitly with `entire trust`.
+	return resolveTrustDecision(ctx, interactive.CanPromptInteractively() && !uiform.IsAccessibleMode(),
 		func() (trustChoice, error) { return askTrustPrompt(ctx) }, errOut)
 }
 
@@ -92,7 +94,7 @@ func askTrustPrompt(ctx context.Context) (trustChoice, error) {
 		huh.NewGroup(
 			huh.NewSelect[trustChoice]().
 				Title("Entire captured agent sessions in this repo via global mode.").
-				Description("Trust this folder and sync its checkpoints to your checkpoint sync remote?").
+				Description("Trust this repo and sync its checkpoints to your checkpoint sync remote?").
 				Options(
 					huh.NewOption(yesLabel, trustChoiceYes),
 					huh.NewOption("Not now — keep capturing locally, ask again next push", trustChoiceNotNow),

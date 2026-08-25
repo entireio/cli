@@ -197,10 +197,6 @@ func computeGlobalTrackingInfo(ctx context.Context) globalTrackingInfo {
 			info.ActivationSource = policy.ActivationSource
 			info.RuntimeLayout = policy.Route.Layout
 			info.TrustState, info.TrustSource = computeRepoTrustState(policy)
-		} else {
-			info.InactiveReason = settings.InactiveReasonGlobalOff
-			info.TrustState = trustStateNotApplicable
-			info.TrustSource = settings.TrustSourceNone
 		}
 		if info.TrustState == trustStateUntrusted {
 			info.HeldCheckpoints = heldCheckpointCount(ctx)

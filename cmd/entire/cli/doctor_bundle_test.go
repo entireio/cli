@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/entireio/cli/cmd/entire/cli/logging"
+	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 )
 
@@ -296,7 +297,33 @@ func TestDoctorBundleCmd_HelpAdvertisesRedaction(t *testing.T) {
 // join would silently produce a bundle without logs for exactly these repos.
 // No t.Parallel: the fixture uses t.Chdir and t.Setenv.
 func TestDoctorBundleCmd_IncludesRoutedLogsInGloballyTrackedRepo(t *testing.T) {
-	newGloballyTrackedDiagRepo(t, "routed-log-line-doctor-bundle")
+	dir := t.TempDir()
+	if resolved, err := filepath.EvalSymlinks(dir); err == nil {
+		dir = resolved
+	}
+	testutil.InitRepo(t, dir)
+	t.Chdir(dir)
+	configDir := t.TempDir()
+	t.Setenv("ENTIRE_CONFIG_DIR", configDir)
+	if err := os.WriteFile(filepath.Join(configDir, "settings.json"), []byte(`{"global":{"enabled":true}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	paths.ClearWorktreeRootCache()
+	paths.ClearInvisibleRuntimeCache()
+	t.Cleanup(func() {
+		paths.ClearWorktreeRootCache()
+		paths.ClearInvisibleRuntimeCache()
+	})
+	logPath, err := paths.AbsPath(t.Context(), filepath.Join(logging.LogsDir, "entire.log"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(logPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(logPath, []byte("routed-log-line-doctor-bundle\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 
 	outZip := filepath.Join(t.TempDir(), "bundle.zip")
 	cmd := newDoctorBundleCmd()

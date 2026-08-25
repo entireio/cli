@@ -23,6 +23,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
+	"github.com/entireio/cli/cmd/entire/cli/settings/repopolicy"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 )
@@ -1160,6 +1161,14 @@ func TestRunUninstall_Force_NothingInstalled(t *testing.T) {
 	if !strings.Contains(output, "not installed") {
 		t.Errorf("Expected output to indicate nothing installed, got: %s", output)
 	}
+	repository, err := repopolicy.ResolveRepository(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	state, err := repopolicy.ReadLocalActivation(repository)
+	if err != nil || state != repopolicy.ActivationAbsent {
+		t.Fatalf("no-op uninstall activation = %v, %v; want absent", state, err)
+	}
 }
 
 func TestRunUninstall_Force_RemovesEntireDirectory(t *testing.T) {
@@ -1167,6 +1176,17 @@ func TestRunUninstall_Force_RemovesEntireDirectory(t *testing.T) {
 
 	// Create .entire directory with settings
 	writeSettings(t, testSettingsEnabled)
+	commonDir, err := strategy.GetGitCommonDir(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	lockDir := filepath.Join(commonDir, "entire-session-locks")
+	if err := os.MkdirAll(lockDir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(lockDir, "stale.lock"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
 
 	// Verify directory exists
 	entireDir := paths.EntireDir
@@ -1175,7 +1195,7 @@ func TestRunUninstall_Force_RemovesEntireDirectory(t *testing.T) {
 	}
 
 	var stdout, stderr bytes.Buffer
-	err := runUninstall(context.Background(), &stdout, &stderr, true)
+	err = runUninstall(context.Background(), &stdout, &stderr, true)
 	if err != nil {
 		t.Fatalf("runUninstall() error = %v", err)
 	}
@@ -1183,6 +1203,9 @@ func TestRunUninstall_Force_RemovesEntireDirectory(t *testing.T) {
 	// Verify directory is removed
 	if _, err := os.Stat(entireDir); !os.IsNotExist(err) {
 		t.Error(".entire directory should be removed after uninstall")
+	}
+	if _, err := os.Stat(lockDir); !os.IsNotExist(err) {
+		t.Error("session lock directory should be removed after uninstall")
 	}
 
 	output := stdout.String()
