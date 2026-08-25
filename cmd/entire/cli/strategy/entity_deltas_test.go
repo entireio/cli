@@ -225,6 +225,8 @@ func TestScheduleEntityDeltas_ProducerAbsentLogsOneInfoLine(t *testing.T) {
 
 	assert.Empty(t, *jobs, "a missing producer must not schedule work")
 
+	require.NoError(t, logger.Close(), "flush log buffer before reading entire.log")
+
 	raw, err := os.ReadFile(filepath.Join(dir, ".entire", "logs", "entire.log"))
 	require.NoError(t, err)
 	assert.Equal(t, 1, strings.Count(string(raw), "entity deltas enabled but the producer is unavailable"),
