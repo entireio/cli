@@ -410,10 +410,8 @@ func RewriteUnpushedV1WithOPF(ctx context.Context, repo *git.Repository, target 
 
 	// Hold the backfill lock only for the CAS window. A multi-second rewrite
 	// must not block detached backfill children for its whole duration.
-	var release func()
 	if r, lockErr := lockOutEntityDeltasBackfills(ctx, repo); lockErr == nil {
-		release = r
-		defer release()
+		defer r()
 	} else {
 		logging.Debug(ctx, "OPF pre-push: proceeding without the entity-deltas lock",
 			slog.String("error", lockErr.Error()))
