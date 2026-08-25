@@ -52,19 +52,22 @@ func promptHashJaccard(a, b []string) float64 {
 	if len(a) == 0 || len(b) == 0 {
 		return 0
 	}
-	set := make(map[string]struct{}, len(a))
+	setA := make(map[string]struct{}, len(a))
 	for _, value := range a {
-		set[value] = struct{}{}
+		setA[value] = struct{}{}
+	}
+	setB := make(map[string]struct{}, len(b))
+	for _, value := range b {
+		setB[value] = struct{}{}
 	}
 	intersection := 0
-	for _, value := range b {
-		if _, ok := set[value]; ok {
+	for value := range setA {
+		if _, ok := setB[value]; ok {
 			intersection++
-		} else {
-			set[value] = struct{}{}
 		}
 	}
-	return float64(intersection) / float64(len(set))
+	union := len(setA) + len(setB) - intersection
+	return float64(intersection) / float64(union)
 }
 
 func crossRepoContextEligible(state strategy.CrossRepoContextState, prompt string, now time.Time) bool {
@@ -187,9 +190,11 @@ func buildCrossRepoContextInjection(ctx context.Context, ag agent.Agent, event *
 	// this turn finds evidence. Recording the active session here makes it
 	// available to another authorized repo on its next prompt.
 	if scope != nil && scope.Enabled && scope.IncludeLocalLive {
-		if registerErr := registerLocalContextSession(hookCtx, ag, event, targetRepoID, targetRepoName); registerErr != nil {
-			logging.Debug(hookCtx, "local context registration skipped", "error", registerErr.Error())
+		registerCtx, registerCancel := sessionMutationCtx()
+		if registerErr := registerLocalContextSession(registerCtx, ag, event, targetRepoID, targetRepoName); registerErr != nil {
+			logging.Debug(registerCtx, "local context registration skipped", "error", registerErr.Error())
 		}
+		registerCancel()
 	}
 	if err != nil {
 		fail()
@@ -211,18 +216,15 @@ func buildCrossRepoContextInjection(ctx context.Context, ag agent.Agent, event *
 		fail()
 		return "", nil
 	}
+	persistedIDs := make([]string, 0, len(evidence))
+	persistCtx, persistCancel := sessionMutationCtx()
+	defer persistCancel()
 	for _, item := range evidence {
-		persistCtx, persistCancel := sessionMutationCtx()
-		persistErr := persistContextEvidence(persistCtx, item)
-		persistCancel()
-		if persistErr != nil {
+		if persistErr := persistContextEvidence(persistCtx, item); persistErr != nil {
 			fail()
 			return "", nil
 		}
-	}
-	renderedIDs := make([]string, len(evidence))
-	for i, item := range evidence {
-		renderedIDs[i] = item.ID
+		persistedIDs = append(persistedIDs, item.ID)
 	}
 	finalize := func() error {
 		finishedAt := time.Now()
@@ -234,7 +236,7 @@ func buildCrossRepoContextInjection(ctx context.Context, ag agent.Agent, event *
 			state.CrossRepoContext.LastSuccessfulAt = finishedAt
 			state.CrossRepoContext.LastPromptTokenHashes = promptTokenHashes(prompt)
 			state.CrossRepoContext.PacketCount++
-			state.CrossRepoContext.EvidenceIDs = append(state.CrossRepoContext.EvidenceIDs, renderedIDs...)
+			state.CrossRepoContext.EvidenceIDs = append(state.CrossRepoContext.EvidenceIDs, persistedIDs...)
 			return nil
 		})
 	}
