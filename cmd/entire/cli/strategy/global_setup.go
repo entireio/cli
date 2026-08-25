@@ -10,14 +10,17 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
+	"github.com/entireio/cli/cmd/entire/cli/settings/repopolicy"
 )
 
-// MaybeEnsureGlobalSetup performs the lazy, invisible, once-per-clone setup
+const globalSetupComponentSpec = 1
+
+// MaybeEnsureGlobalSetup performs lazy, invisible per-worktree setup
 // for a globally tracked repo: a repo with no explicit repo activation whose
 // hooks run because the user-global tier is active (settings.GlobalModeActive).
 // It installs the git hooks (skipped when core.hooksPath resolves inside the
-// worktree — see below), ensures the checkpoint metadata ref, and marks the
-// clone preferences with global_setup_completed. Everything it writes lives
+// worktree — see below), ensures the checkpoint metadata ref, and records the
+// completed components in the worktree registry. Everything it writes lives
 // inside .git/; it never creates a worktree file. Called from both hook routes
 // (agent hooks in executeAgentHook, git hooks in the hooks-git
 // PersistentPreRunE), in both cases after hook logging is initialized so the
@@ -28,9 +31,8 @@ import (
 // commit or agent session. Both hook routes initialize logging before calling
 // this, so those Debug lines reach the routed log file; globally tracked
 // repos have no repo settings to raise log_level, so set ENTIRE_LOG_LEVEL=debug
-// to see them. The clone-prefs marker makes the repeat call cheap: one
-// preferences read and no git mutations (locating the preferences file spawns
-// one `git rev-parse --git-common-dir`).
+// to see them. The per-worktree component record makes repeat calls cheap and
+// lets a later invocation repair only the component that became stale.
 func MaybeEnsureGlobalSetup(ctx context.Context) {
 	logCtx := logging.WithComponent(ctx, "global-setup")
 
@@ -46,26 +48,24 @@ func MaybeEnsureGlobalSetup(ctx context.Context) {
 		return
 	}
 
-	// Among the global-mode-only steps, the clone-prefs marker comes first:
-	// it is the "already done" signal that makes the repeat call cheap.
-	prefs, err := settings.LoadClonePreferences(ctx)
+	repository, err := repopolicy.ResolveRepository(ctx)
 	if err != nil {
-		// A corrupt or unreadable preferences file must not permanently kill
-		// the lazy setup. Treat it as fresh and attempt setup; the marker
-		// write at the end goes through ModifyClonePreferences, which
-		// recreates a corrupt file from scratch under the preferences lock.
-		logging.Debug(logCtx, "global lazy setup: clone preferences unreadable; treating as fresh",
+		logging.Debug(logCtx, "global lazy setup: repository identity unavailable",
 			slog.String("error", err.Error()))
-		prefs = &settings.ClonePreferences{}
+		return
 	}
-	if prefs.GlobalSetupCompleted {
+	record, _, err := repopolicy.ReadSetupRecord(repository)
+	if err != nil {
+		logging.Debug(logCtx, "global lazy setup: setup record unreadable; skipping",
+			slog.String("error", err.Error()))
 		return
 	}
 	if !settings.GlobalModeActive(ctx) {
 		return
 	}
 
-	if !IsGitHookInstalled(ctx) {
+	changed := false
+	if record.GitHooksSpec < globalSetupComponentSpec || !IsGitHookInstalled(ctx) {
 		worktreeResident, hooksDir, resolveErr := HooksDirIsWorktreeResident(ctx)
 		switch {
 		case resolveErr != nil:
@@ -86,6 +86,11 @@ func MaybeEnsureGlobalSetup(ctx context.Context) {
 			logging.Debug(logCtx, "global lazy setup: hooks dir inside worktree; skipping git hook install",
 				slog.String("hooks_dir", hooksDir))
 		default:
+			if IsGitHookInstalled(ctx) {
+				record.GitHooksSpec = globalSetupComponentSpec
+				changed = true
+				break
+			}
 			absoluteHookPath := hookSettingsFromConfig(ctx)
 			// installGitHooks with a discarded notice writer: lazy setup runs
 			// inside agent hooks, where a "[entire] Backed up existing..."
@@ -95,35 +100,33 @@ func MaybeEnsureGlobalSetup(ctx context.Context) {
 					slog.String("error", err.Error()))
 				return
 			}
+			record.GitHooksSpec = globalSetupComponentSpec
+			changed = true
 		}
 	}
 
-	repo, err := OpenRepository(ctx)
-	if err != nil {
-		logging.Debug(logCtx, "global lazy setup: open repository failed",
-			slog.String("error", err.Error()))
-		return
-	}
-	defer repo.Close()
-	// Same ref bootstrap as EnsureSetup; no WithCheckpointRemoteBootstrap —
-	// this runs on the hook hot path, which must stay network-free. Notices go
-	// to io.Discard for the same reason installGitHooks above discards them:
-	// a "✓ Created local ref ..." line would leak into the agent's hook output.
-	if err := EnsurePrimaryRefTo(ctx, repo, io.Discard); err != nil {
-		logging.Debug(logCtx, "global lazy setup: ensure primary metadata ref failed",
-			slog.String("error", err.Error()))
-		return
+	if record.PrimaryRefSpec < globalSetupComponentSpec {
+		repo, openErr := OpenRepository(ctx)
+		if openErr != nil {
+			logging.Debug(logCtx, "global lazy setup: open repository failed",
+				slog.String("error", openErr.Error()))
+			return
+		}
+		defer repo.Close()
+		if err := EnsurePrimaryRefTo(ctx, repo, io.Discard); err != nil {
+			logging.Debug(logCtx, "global lazy setup: ensure primary metadata ref failed",
+				slog.String("error", err.Error()))
+			return
+		}
+		record.PrimaryRefSpec = globalSetupComponentSpec
+		changed = true
 	}
 
-	// Marked only after hooks and ref succeeded, so partial failures retry on
-	// the next hook instead of being latched as done. (The deliberate
-	// exception is the skipped-hooks case above, which is a stable property
-	// of the repo, not a transient failure.)
-	if err := settings.ModifyClonePreferences(ctx, func(p *settings.ClonePreferences) error {
-		p.GlobalSetupCompleted = true
-		return nil
-	}); err != nil {
-		logging.Debug(logCtx, "global lazy setup: marking clone preferences failed",
+	if !changed {
+		return
+	}
+	if err := repopolicy.WriteSetupRecord(repository, record); err != nil {
+		logging.Debug(logCtx, "global lazy setup: writing setup record failed",
 			slog.String("error", err.Error()))
 		return
 	}

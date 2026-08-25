@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/entireio/cli/cmd/entire/cli/paths"
+	"github.com/entireio/cli/cmd/entire/cli/settings/repopolicy"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 	"github.com/entireio/cli/cmd/entire/cli/trailers"
@@ -82,7 +83,7 @@ func assertNoWorktreeEntireDir(t *testing.T, env *TestEnv) {
 
 // TestGlobalEnable_LazyInvisibleSetup exercises the full lazy invisible
 // enable in a repo with no repo-level setup and the user-global tier on:
-// the first hook event installs git hooks and marks the clone, every runtime
+// the first hook event installs git hooks and records this worktree, every runtime
 // write lands under .git/entire/worktree/, and git status stays clean.
 func TestGlobalEnable_LazyInvisibleSetup(t *testing.T) {
 	t.Parallel()
@@ -100,18 +101,16 @@ func TestGlobalEnable_LazyInvisibleSetup(t *testing.T) {
 	if !strategy.IsGitHookInstalledInDir(ctx, env.RepoDir) {
 		t.Error("git hooks not installed after first hook event")
 	}
-	prefsData, err := os.ReadFile(filepath.Join(env.RepoDir, ".git", "entire", "preferences.json"))
+	repository, err := repopolicy.ResolveRepositoryAt(ctx, env.RepoDir)
 	if err != nil {
-		t.Fatalf("clone preferences not written: %v", err)
+		t.Fatalf("resolve repository: %v", err)
 	}
-	var prefs struct {
-		GlobalSetupCompleted bool `json:"global_setup_completed"`
+	record, found, err := repopolicy.ReadSetupRecord(repository)
+	if err != nil || !found {
+		t.Fatalf("setup record = (%+v, %v, %v), want per-worktree record", record, found, err)
 	}
-	if err := json.Unmarshal(prefsData, &prefs); err != nil {
-		t.Fatalf("parse clone preferences: %v", err)
-	}
-	if !prefs.GlobalSetupCompleted {
-		t.Errorf("clone preferences not marked global_setup_completed: %s", prefsData)
+	if record.GitHooksSpec != 1 || record.PrimaryRefSpec != 1 {
+		t.Errorf("setup components not recorded: %+v", record)
 	}
 	if !env.BranchExists("entire/checkpoints/v1") {
 		t.Error("checkpoint metadata ref not created by lazy enable")
@@ -192,9 +191,9 @@ func TestGlobalEnable_LazyInvisibleSetup(t *testing.T) {
 }
 
 // TestGlobalEnable_GitHookRouteTriggersSetup pins the git-hook half of the
-// lazy-setup trigger: with hooks already present but the clone-prefs marker
+// lazy-setup trigger: with hooks already present but the per-worktree setup record
 // absent (e.g. cleared by doctor after drift), a plain git-hook invocation —
-// no agent hook involved — re-runs the setup and restores the marker.
+// no agent hook involved — re-runs the setup and restores the record.
 func TestGlobalEnable_GitHookRouteTriggersSetup(t *testing.T) {
 	t.Parallel()
 	env, extraEnv := newGloballyTrackedEnv(t, true)
@@ -210,10 +209,14 @@ func TestGlobalEnable_GitHookRouteTriggersSetup(t *testing.T) {
 		t.Fatal("git hooks not installed after first hook event")
 	}
 
-	// Clear the marker, keep the hooks — the doctor-after-drift shape.
-	prefsPath := filepath.Join(env.RepoDir, ".git", "entire", "preferences.json")
-	if err := os.Remove(prefsPath); err != nil {
-		t.Fatalf("remove clone preferences: %v", err)
+	// Clear the record, keep the hooks — the doctor-after-drift shape.
+	repository, err := repopolicy.ResolveRepositoryAt(ctx, env.RepoDir)
+	if err != nil {
+		t.Fatalf("resolve repository: %v", err)
+	}
+	setupPath := filepath.Join(repopolicy.WorktreeRegistryDir(repository.GitCommonDir, repository.WorktreeKey), "setup.json")
+	if err := os.Remove(setupPath); err != nil {
+		t.Fatalf("remove setup record: %v", err)
 	}
 
 	// A plain git commit through the installed hooks (prepare-commit-msg +
@@ -221,25 +224,16 @@ func TestGlobalEnable_GitHookRouteTriggersSetup(t *testing.T) {
 	env.WriteFile("hook-route.txt", "via git hooks\n")
 	env.GitCommitWithShadowHooksAsAgent("Add file via git hook route", "hook-route.txt")
 
-	prefsData, err := os.ReadFile(prefsPath)
-	if err != nil {
-		t.Fatalf("clone preferences not rewritten by the git-hook route: %v", err)
-	}
-	var prefs struct {
-		GlobalSetupCompleted bool `json:"global_setup_completed"`
-	}
-	if err := json.Unmarshal(prefsData, &prefs); err != nil {
-		t.Fatalf("parse clone preferences: %v", err)
-	}
-	if !prefs.GlobalSetupCompleted {
-		t.Errorf("git-hook route did not restore the setup marker: %s", prefsData)
+	record, found, err := repopolicy.ReadSetupRecord(repository)
+	if err != nil || !found || record.GitHooksSpec != 1 || record.PrimaryRefSpec != 1 {
+		t.Errorf("git-hook route did not restore the setup record: (%+v, %v, %v)", record, found, err)
 	}
 	assertNoWorktreeEntireDir(t, env)
 }
 
 // TestGlobalEnable_TierAbsent_CreatesNothing is the negative: with no
 // user-global settings, a hook event in a repo without repo-level setup must
-// leave zero traces — no hooks, no clone preferences, no runtime data,
+// leave zero traces — no hooks, no setup record, no runtime data,
 // nothing in the worktree.
 func TestGlobalEnable_TierAbsent_CreatesNothing(t *testing.T) {
 	t.Parallel()

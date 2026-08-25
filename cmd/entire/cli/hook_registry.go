@@ -123,17 +123,6 @@ func executeAgentHook(cmd *cobra.Command, agentName types.AgentName, hookName st
 		return nil
 	}
 
-	// Repo-level takeover moves invisible runtime data into the worktree. Every
-	// active hook participates in the same worktree-scoped gate so migration
-	// cannot copy or rename a file while this hook is writing it. Take the gate
-	// before session stamping and lazy setup: both can inspect or create runtime
-	// state used by lifecycle dispatch.
-	releaseMigrationGate, err := acquireGlobalRuntimeMigrationGate(cmd.Context(), worktreeRoot)
-	if err != nil {
-		return fmt.Errorf("acquire global runtime migration gate: %w", err)
-	}
-	defer releaseMigrationGate()
-
 	if stampSession {
 		cmd.SetContext(withHookSession(cmd.Context()))
 	}
@@ -269,8 +258,7 @@ const notGitRepoSessionStartNotice = "entire: not tracking this session (not a g
 // InactiveReasonRepoDisabled (the repo-level veto) and
 // InactiveReasonGlobalOff (the user answered no to — or later disabled —
 // machine-wide tracking). Nagging a globally-off user to re-enable on every
-// SessionStart would also contradict disable --global's "inert while global
-// tracking is off" report about user-level hooks left in place.
+// SessionStart must remain silent while global tracking is off.
 func inactiveSessionStartNotice(reason settings.InactiveReason) string {
 	switch reason {
 	case settings.InactiveReasonGlobalExcluded:

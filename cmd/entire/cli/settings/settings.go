@@ -213,22 +213,6 @@ type ClonePreferences struct {
 	TrailsAgentHelpFailureRepoKey  string     `json:"trails_agent_help_failure_repo_key,omitempty"`
 	TrailsAgentHelpFailureAPIBase  string     `json:"trails_agent_help_failure_api_base,omitempty"`
 	TrailsAgentHelpFailureAuthKey  string     `json:"trails_agent_help_failure_auth_key,omitempty"`
-
-	// GlobalSetupCompleted records that this clone completed the lazy invisible
-	// setup for user-global tracking (git hooks installed, checkpoint metadata
-	// ref ensured) without any repo-level settings. It is the once-per-clone
-	// "already done" marker consulted before that setup does any work; a later
-	// repo-level `entire enable` is unaffected by it. The marker means "setup
-	// believed converged", not "setup verified": any component that detects
-	// drift (e.g. the git hooks are gone) must clear it so the lazy setup
-	// re-runs on the next hook activity.
-	//
-	// Deliberate nuance: when core.hooksPath resolves inside the worktree,
-	// the lazy setup skips hook installation (a worktree write would break
-	// invisibility) but still sets this marker — setup did everything it
-	// safely could, and that repo property is stable, not transient. `entire
-	// doctor` is the surface that explains the hooksPath situation.
-	GlobalSetupCompleted bool `json:"global_setup_completed,omitempty"`
 }
 
 // SummaryGenerationSettings configures provider selection for on-demand
@@ -719,6 +703,12 @@ func LoadProjectRaw(ctx context.Context) (path string, raw map[string]json.RawMe
 	return loadRaw(ctx, EntireSettingsFile, "project")
 }
 
+// LoadProjectRawForWorktree reads project settings from the literal worktree
+// location. Configuration is never runtime-routed.
+func LoadProjectRawForWorktree(worktreeRoot string) (path string, raw map[string]json.RawMessage, exists bool, err error) {
+	return loadRawPath(filepath.Join(worktreeRoot, EntireSettingsFile), "project")
+}
+
 // LoadLocalRaw reads the raw local file and is deliberately UNGATED: it is the
 // read half of read-modify-write for every caller that saves the file back, so
 // hiding a tracked file here would make those writers clobber its other keys.
@@ -736,6 +726,12 @@ func LoadLocalRaw(ctx context.Context) (path string, raw map[string]json.RawMess
 	return loadRaw(ctx, EntireSettingsLocalFile, "local")
 }
 
+// LoadLocalRawForWorktree reads local settings from the literal worktree
+// location. Configuration is never runtime-routed.
+func LoadLocalRawForWorktree(worktreeRoot string) (path string, raw map[string]json.RawMessage, exists bool, err error) {
+	return loadRawPath(filepath.Join(worktreeRoot, EntireSettingsLocalFile), "local")
+}
+
 // loadRaw reads a settings file as a generic JSON object. label ("project" or
 // "local") only differentiates error wording so failures name the file
 // actually being read.
@@ -744,6 +740,10 @@ func loadRaw(ctx context.Context, file, label string) (path string, raw map[stri
 	if err != nil {
 		path = file
 	}
+	return loadRawPath(path, label)
+}
+
+func loadRawPath(path, label string) (string, map[string]json.RawMessage, bool, error) {
 	data, readErr := readConfined(path)
 	if readErr != nil {
 		if errors.Is(readErr, fs.ErrNotExist) {
@@ -751,7 +751,7 @@ func loadRaw(ctx context.Context, file, label string) (path string, raw map[stri
 		}
 		return path, nil, false, fmt.Errorf("reading %s settings: %w", label, readErr)
 	}
-	raw = map[string]json.RawMessage{}
+	raw := map[string]json.RawMessage{}
 	if err := json.Unmarshal(data, &raw); err != nil {
 		return path, nil, true, fmt.Errorf("parsing %s settings: %w", label, err)
 	}
@@ -1822,6 +1822,16 @@ func SaveLocal(ctx context.Context, settings *EntireSettings) error {
 	return saveToFile(ctx, settings, EntireSettingsLocalFile)
 }
 
+// SaveForWorktree writes settings beneath the literal worktree root. It is
+// the setup-path writer used before a runtime route exists.
+func SaveForWorktree(worktreeRoot string, settings *EntireSettings, local bool) error {
+	file := EntireSettingsFile
+	if local {
+		file = EntireSettingsLocalFile
+	}
+	return saveToLiteralFile(settings, filepath.Join(worktreeRoot, file))
+}
+
 // saveToFile saves settings to the specified file path.
 func saveToFile(ctx context.Context, settings *EntireSettings, filePath string) error {
 	// Get absolute path for the file
@@ -1830,6 +1840,10 @@ func saveToFile(ctx context.Context, settings *EntireSettings, filePath string) 
 		filePathAbs = filePath // Fallback to relative
 	}
 
+	return saveToLiteralFile(settings, filePathAbs)
+}
+
+func saveToLiteralFile(settings *EntireSettings, filePathAbs string) error {
 	// Ensure directory exists
 	dir := filepath.Dir(filePathAbs)
 	if err := os.MkdirAll(dir, 0o750); err != nil {

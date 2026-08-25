@@ -124,7 +124,7 @@ See Guide: [Testing Patterns](agent-guide.md#testing-patterns)
 extension of `HookSupport` for agents whose hooks can also be installed at the
 USER level (home-directory config), so they fire in every repository —
 including repos with no repo-level Entire setup. This is what lets global
-tracking (`entire enable --global`) reach a repo that was never enabled:
+tracking (configured in the user settings file) reaches a repo that was never enabled:
 without a user-level hook no agent hook fires there, so the lazy global enable
 never gets a chance to run.
 
@@ -140,7 +140,7 @@ Contract:
 - Implement the interface only for agents with a verified user/repo dedup
   story (both scopes installed must never double-fire hooks); never fake it
   for agents without a real user-level surface.
-- Before any THIRD agent gains `UserHookSupport`, `enable --global` must grow
+- Before any THIRD agent gains `UserHookSupport`, user-level setup must grow
   an agent-availability gate — install user-level hooks only for agents whose
   config surface is detected (e.g. `~/.claude`, `~/.gemini` exist), or via a
   picker — and doctor's USER-LEVEL AGENT HOOKS MISSING check must scope

@@ -52,8 +52,7 @@ func maybeWarnGlobalTracking(ctx context.Context, errW io.Writer) {
 }
 
 // ackGlobalWarnMarker records that the current enabled generation has been
-// announced — called by the detection warn AND by enable --global, whose own
-// confirmation is the announcement. Best-effort: a failed write only re-warns.
+// announced by the detection warning. Best-effort: a failed write only re-warns.
 func ackGlobalWarnMarker(ctx context.Context) {
 	if err := os.MkdirAll(userdirs.Config(), 0o700); err != nil {
 		logging.Debug(ctx, "global warn marker not written", slog.String("error", err.Error()))
@@ -61,15 +60,6 @@ func ackGlobalWarnMarker(ctx context.Context) {
 	}
 	if err := os.WriteFile(globalWarnMarkerPath(), nil, 0o600); err != nil {
 		logging.Debug(ctx, "global warn marker not written", slog.String("error", err.Error()))
-	}
-}
-
-// retireGlobalWarnMarker ends the announced generation without printing —
-// called by disable --global, whose own held-data line replaces the off-note.
-// Best-effort: a missing marker is already the desired state.
-func retireGlobalWarnMarker(ctx context.Context) {
-	if err := os.Remove(globalWarnMarkerPath()); err != nil && !errors.Is(err, fs.ErrNotExist) {
-		logging.Debug(ctx, "global warn marker not removed", slog.String("error", err.Error()))
 	}
 }
 

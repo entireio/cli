@@ -6,8 +6,6 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-
-	"github.com/entireio/cli/cmd/entire/cli/settings"
 )
 
 // No t.Parallel in this file: every test uses t.Setenv.
@@ -49,50 +47,5 @@ func TestMaybeWarnGlobalTracking(t *testing.T) {
 				t.Errorf("second observation must be silent, got: %q", first.String())
 			}
 		})
-	}
-}
-
-// TestRootCmd_GlobalWarnMarkerSelfFiresOnExplicitCommands drives the real
-// root command to pin the marker handshake: enable --global acks the marker
-// (no stacked warn), disable --global retires it (no duplicated off-note).
-func TestRootCmd_GlobalWarnMarkerSelfFiresOnExplicitCommands(t *testing.T) {
-	setupTestRepo(t)
-	isolateUserHome(t)
-	cfg := t.TempDir()
-	t.Setenv("ENTIRE_CONFIG_DIR", cfg)
-	t.Cleanup(settings.ClearGlobalModeCache)
-
-	runRoot := func(t *testing.T, args ...string) (stdout, stderr string) {
-		t.Helper()
-		root := NewRootCmd()
-		var out, errBuf bytes.Buffer
-		root.SetOut(&out)
-		root.SetErr(&errBuf)
-		root.SetArgs(args)
-		root.SetContext(t.Context())
-		if err := root.Execute(); err != nil {
-			t.Fatalf("entire %s: %v\nstderr: %s", strings.Join(args, " "), err, errBuf.String())
-		}
-		return out.String(), errBuf.String()
-	}
-	markerPresent := func() bool {
-		_, err := os.Stat(filepath.Join(cfg, globalWarnMarkerName))
-		return err == nil
-	}
-
-	_, stderr := runRoot(t, "enable", "--global")
-	if strings.Contains(stderr, "Warning: global tracking is enabled") {
-		t.Fatalf("detection warn must not stack on enable --global's own confirmation, got: %q", stderr)
-	}
-	if !markerPresent() {
-		t.Fatal("enable --global must ack the warn marker itself")
-	}
-
-	stdout, stderr := runRoot(t, "disable", "--global")
-	if got := strings.Count(stdout+stderr, "will not sync"); got != 1 {
-		t.Fatalf("held-data consequence must print exactly once, got %d in stdout %q stderr %q", got, stdout, stderr)
-	}
-	if markerPresent() {
-		t.Fatal("disable --global must retire the warn marker itself")
 	}
 }

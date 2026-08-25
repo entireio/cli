@@ -73,3 +73,50 @@ func TestNoDeprecatedCommandFormsInUserFacingStrings(t *testing.T) {
 			strings.Join(offenders, "\n  "))
 	}
 }
+
+func TestUserFacingStrings_DoNotReferenceRemovedGlobalFlags(t *testing.T) {
+	t.Parallel()
+
+	var offenders []string
+	for _, root := range []string{".", "../../../docs"} {
+		err := filepath.WalkDir(root, func(path string, d fs.DirEntry, walkErr error) error {
+			if walkErr != nil {
+				return walkErr
+			}
+			if d.IsDir() {
+				if d.Name() == "testdata" || d.Name() == ".git" ||
+					filepath.ToSlash(path) == "../../../docs/superpowers/specs" {
+					return filepath.SkipDir
+				}
+				return nil
+			}
+			if strings.HasSuffix(path, "_test.go") ||
+				(!strings.HasSuffix(path, ".go") && !strings.HasSuffix(path, ".md")) {
+				return nil
+			}
+			content, readErr := os.ReadFile(path)
+			if readErr != nil {
+				return readErr
+			}
+			for i, line := range strings.Split(string(content), "\n") {
+				trimmed := strings.TrimSpace(line)
+				if strings.HasSuffix(path, ".go") && strings.HasPrefix(trimmed, "//") {
+					continue
+				}
+				for _, removed := range []string{"entire enable --global", "entire disable --global"} {
+					if strings.Contains(line, removed) {
+						offenders = append(offenders, fmt.Sprintf("%s:%d: %s", path, i+1, trimmed))
+					}
+				}
+			}
+			return nil
+		})
+		if err != nil {
+			t.Fatalf("walking %s: %v", root, err)
+		}
+	}
+
+	if len(offenders) > 0 {
+		t.Fatalf("user-facing strings reference removed global activation flags:\n  %s", strings.Join(offenders, "\n  "))
+	}
+}

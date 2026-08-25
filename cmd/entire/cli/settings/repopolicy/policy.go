@@ -7,7 +7,14 @@ import (
 
 // ClassifyRepoPolicy resolves one read-only repository-policy snapshot.
 func ClassifyRepoPolicy(ctx context.Context) (RepoPolicy, error) {
-	repository, err := ResolveRepository(ctx)
+	return ClassifyRepoPolicyAt(ctx, ".")
+}
+
+// ClassifyRepoPolicyAt resolves one read-only repository-policy snapshot for
+// an explicit worktree. It is used by clone-wide infrastructure decisions
+// that must evaluate linked worktrees without changing process cwd.
+func ClassifyRepoPolicyAt(ctx context.Context, dir string) (RepoPolicy, error) {
+	repository, err := ResolveRepositoryAt(ctx, dir)
 	if err != nil {
 		return inactiveGlobalPolicy(InactiveReasonGlobalOff), err
 	}

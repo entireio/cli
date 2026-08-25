@@ -28,6 +28,17 @@ type RuntimeRoute struct {
 	CanonicalGitCommon string        `json:"canonical_git_common"`
 }
 
+// SetupRecord tracks independently repairable lazy-setup components for one
+// worktree. Identity fields prevent a copied registry record from suppressing
+// setup in another worktree.
+type SetupRecord struct {
+	Version            int    `json:"version"`
+	GitHooksSpec       int    `json:"git_hooks_spec,omitempty"`
+	PrimaryRefSpec     int    `json:"primary_ref_spec,omitempty"`
+	CanonicalWorktree  string `json:"canonical_worktree"`
+	CanonicalGitCommon string `json:"canonical_git_common"`
+}
+
 // TrustDecision is the repository's checkpoint-egress decision. Trust
 // identity and persistence are added independently of activation inputs.
 type TrustDecision struct {

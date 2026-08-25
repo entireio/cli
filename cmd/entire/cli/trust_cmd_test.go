@@ -35,7 +35,7 @@ func TestTrustCmd_Refusals(t *testing.T) {
 		exclude      bool
 		wantStderr   string
 	}{
-		{"unconfigured tier points at enable --global", "", false, "entire enable --global"},
+		{"unconfigured tier points at user settings", "", false, "Enable global tracking in"},
 		{"disabled tier names the reason", `{"global":{"enabled":false}}`, false, "global tracking is off"},
 		{"excluded repo names the exclusion", `{"global":{"enabled":true}}`, true, "excluded in your settings"},
 	} {

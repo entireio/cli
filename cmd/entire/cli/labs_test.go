@@ -110,6 +110,24 @@ func TestRootHelp_AlwaysShowsLabs(t *testing.T) {
 	}
 }
 
+func TestRootHelp_DoesNotAdvertiseGlobalActivationFlags(t *testing.T) {
+	t.Parallel()
+
+	root := NewRootCmd()
+	for _, args := range [][]string{{"enable", "--help"}, {"disable", "--help"}} {
+		var out bytes.Buffer
+		root.SetOut(&out)
+		root.SetErr(&out)
+		root.SetArgs(args)
+		if err := root.Execute(); err != nil {
+			t.Fatalf("entire %s failed: %v", strings.Join(args, " "), err)
+		}
+		if strings.Contains(out.String(), "--global") {
+			t.Fatalf("entire %s advertises removed global activation flag:\n%s", strings.Join(args, " "), out.String())
+		}
+	}
+}
+
 // experimentalCommandMarkers are substrings that only appear in root help when
 // experimental commands are visible. Do not pin cobra's Use/Short column
 // padding — group membership and longest-command width shift the spaces.

@@ -72,9 +72,8 @@ func TestInactiveSessionStartNotice_Matrix(t *testing.T) {
 		{"repo disabled is silent", settings.InactiveReasonRepoDisabled, ""},
 		{"excluded names the exclusion", settings.InactiveReasonGlobalExcluded,
 			"entire: not tracking this session (repo excluded by global settings)"},
-		// Global off is an equally explicit, durable answer (declined wizard,
-		// enable --global never run, or disable --global): silence, never a
-		// nag to re-enable.
+		// Global off is an equally explicit, durable user-settings answer:
+		// silence, never a nag to re-enable.
 		{"global off is silent", settings.InactiveReasonGlobalOff, ""},
 	}
 	for _, tc := range cases {
@@ -211,9 +210,8 @@ func TestExecuteAgentHook_InactiveWarnings(t *testing.T) {
 		stdout, stderr := runAgentHook(t, agent.AgentNameClaudeCode, "session-start")
 		expectSilence(t, stdout, stderr, "unconfigured tier")
 
-		// Explicitly disabled tier (disable --global): equally silent — this
-		// is what keeps the "inert while global tracking is off" wording of
-		// disable --global truthful for left-behind user-level hooks.
+		// Explicitly disabled user-global tier: equally silent for the
+		// user-level hooks that remain installed as machine infrastructure.
 		setUserGlobalSettings(t, `{"global":{"enabled":false}}`)
 		stdout, stderr = runAgentHook(t, agent.AgentNameClaudeCode, "session-start")
 		expectSilence(t, stdout, stderr, "explicitly disabled tier")

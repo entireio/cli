@@ -8,7 +8,7 @@ import (
 
 // UserHookSupport is an optional extension of HookSupport for agents whose
 // hooks can also be installed at the USER level (home-directory config) — the
-// activation surface behind global tracking (`entire enable --global`).
+// infrastructure used by settings-driven global tracking.
 // Implement it only for agents with a verified user/repo dedup story (both
 // scopes installed must never double-fire hooks); never fake it for agents
 // without a real user-level surface. The full contract and the per-agent

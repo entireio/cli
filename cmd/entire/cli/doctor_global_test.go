@@ -2,14 +2,18 @@ package cli
 
 import (
 	"bytes"
+	"context"
 	"errors"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
+	"github.com/entireio/cli/cmd/entire/cli/settings/repopolicy"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 
@@ -29,6 +33,24 @@ func runCheckGlobalTracking(t *testing.T) string {
 	return out.String()
 }
 
+func isolateUserHome(t *testing.T) string {
+	t.Helper()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	return home
+}
+
+func installUserAgentHooks(ctx context.Context, t *testing.T, _ io.Writer) {
+	t.Helper()
+	supports, _ := agent.UserHookSupports()
+	for _, ua := range supports {
+		if _, err := ua.Support.InstallUserHooks(ctx); err != nil {
+			t.Fatalf("install %s user hooks: %v", ua.Name, err)
+		}
+	}
+}
+
 // TestCheckGlobalTracking_SettingsShapes drives the pure settings→output rows:
 // silence while off/unconfigured/clean, and each validation warning.
 func TestCheckGlobalTracking_SettingsShapes(t *testing.T) {
@@ -44,7 +66,7 @@ func TestCheckGlobalTracking_SettingsShapes(t *testing.T) {
 		{"off tier is silent even with bad patterns", `{"global":{"enabled":false,"exclude_paths":["relative/path"]}}`, nil,
 			[]string{"UNUSABLE SETTINGS ENTRIES"}},
 		{"enabled without user hooks warns", `{"global":{"enabled":true}}`,
-			[]string{"USER-LEVEL AGENT HOOKS MISSING", "claude-code", "gemini", "entire enable --global"}, nil},
+			[]string{"USER-LEVEL AGENT HOOKS MISSING", "claude-code", "gemini", "affected agent settings"}, nil},
 		{"malformed settings warn machine-wide", `{"global":`,
 			[]string{"USER SETTINGS UNREADABLE", "<settings-path>", "machine-wide"}, nil},
 		{"unusable exclude patterns are enumerated",
@@ -89,7 +111,7 @@ func TestCheckGlobalTracking_OKWhenUserHooksInstalled(t *testing.T) {
 	isolateUserHome(t)
 	writeGlobalUserSettings(t, cfg, `{"global":{"enabled":true}}`)
 	var buf bytes.Buffer
-	installUserAgentHooks(t.Context(), &buf)
+	installUserAgentHooks(t.Context(), t, &buf)
 
 	if got := runCheckGlobalTracking(t); !strings.Contains(got, "✓ Global tracking: user-level agent hooks OK") {
 		t.Fatalf("expected OK line, got: %q", got)
@@ -103,28 +125,29 @@ func TestCheckGlobalTracking_WarnsOnMarkedCloneWithoutGitHooks(t *testing.T) {
 	isolateUserHome(t)
 	writeGlobalUserSettings(t, cfg, `{"global":{"enabled":true}}`)
 	var buf bytes.Buffer
-	installUserAgentHooks(t.Context(), &buf)
+	installUserAgentHooks(t.Context(), t, &buf)
 
 	// Mark this clone as lazily enabled without installing its git hooks.
-	if err := settings.ModifyClonePreferences(t.Context(), func(p *settings.ClonePreferences) error {
-		p.GlobalSetupCompleted = true
-		return nil
-	}); err != nil {
+	repository, err := repopolicy.ResolveRepository(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := repopolicy.WriteSetupRecord(repository, repopolicy.SetupRecord{GitHooksSpec: 1, PrimaryRefSpec: 1}); err != nil {
 		t.Fatal(err)
 	}
 
 	got := runCheckGlobalTracking(t)
-	if !strings.Contains(got, "GIT HOOKS MISSING") || !strings.Contains(got, "Marker cleared") {
+	if !strings.Contains(got, "GIT HOOKS MISSING") || !strings.Contains(got, "marked stale") {
 		t.Fatalf("missing drift warning with marker note, got: %q", got)
 	}
 	// The marker is a run-once latch the lazy setup never revisits, so doctor
 	// must have cleared it, letting the next hook activity reconverge.
-	prefs, err := settings.LoadClonePreferences(t.Context())
+	record, _, err := repopolicy.ReadSetupRecord(repository)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if prefs.GlobalSetupCompleted {
-		t.Fatal("doctor must clear the global_setup_completed marker when git hooks are missing")
+	if record.GitHooksSpec != 0 {
+		t.Fatal("doctor must mark the git-hooks component stale when git hooks are missing")
 	}
 	settings.ClearGlobalModeCache()
 	t.Cleanup(settings.ClearGlobalModeCache)
@@ -156,11 +179,12 @@ func TestCheckGlobalTracking_ExplainsWorktreeResidentHooksPath(t *testing.T) {
 	isolateUserHome(t)
 	writeGlobalUserSettings(t, cfg, `{"global":{"enabled":true}}`)
 	var buf bytes.Buffer
-	installUserAgentHooks(t.Context(), &buf)
-	if err := settings.ModifyClonePreferences(t.Context(), func(p *settings.ClonePreferences) error {
-		p.GlobalSetupCompleted = true
-		return nil
-	}); err != nil {
+	installUserAgentHooks(t.Context(), t, &buf)
+	repository, err := repopolicy.ResolveRepository(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := repopolicy.WriteSetupRecord(repository, repopolicy.SetupRecord{GitHooksSpec: 1, PrimaryRefSpec: 1}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -173,12 +197,12 @@ func TestCheckGlobalTracking_ExplainsWorktreeResidentHooksPath(t *testing.T) {
 			t.Errorf("hooksPath shape must not be treated as drift (%q), got: %q", banned, got)
 		}
 	}
-	prefs, err := settings.LoadClonePreferences(t.Context())
+	record, _, err := repopolicy.ReadSetupRecord(repository)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !prefs.GlobalSetupCompleted {
-		t.Error("doctor must NOT clear the marker for a worktree-resident hooksPath")
+	if record.GitHooksSpec != 1 {
+		t.Error("doctor must NOT stale the setup record for a worktree-resident hooksPath")
 	}
 }
 
@@ -192,11 +216,12 @@ func TestCheckGlobalTracking_ProbeErrorReportsUnverifiedWithoutClearing(t *testi
 	isolateUserHome(t)
 	writeGlobalUserSettings(t, cfg, `{"global":{"enabled":true}}`)
 	var buf bytes.Buffer
-	installUserAgentHooks(t.Context(), &buf)
-	if err := settings.ModifyClonePreferences(t.Context(), func(p *settings.ClonePreferences) error {
-		p.GlobalSetupCompleted = true
-		return nil
-	}); err != nil {
+	installUserAgentHooks(t.Context(), t, &buf)
+	repository, err := repopolicy.ResolveRepository(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := repopolicy.WriteSetupRecord(repository, repopolicy.SetupRecord{GitHooksSpec: 1, PrimaryRefSpec: 1}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -212,12 +237,12 @@ func TestCheckGlobalTracking_ProbeErrorReportsUnverifiedWithoutClearing(t *testi
 			t.Errorf("probe-error shape must not be treated as drift (%q), got: %q", banned, got)
 		}
 	}
-	prefs, err := settings.LoadClonePreferences(t.Context())
+	record, _, err := repopolicy.ReadSetupRecord(repository)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !prefs.GlobalSetupCompleted {
-		t.Error("doctor must NOT clear the marker when the residency probe fails")
+	if record.GitHooksSpec != 1 {
+		t.Error("doctor must NOT stale the setup record when the residency probe fails")
 	}
 }
 

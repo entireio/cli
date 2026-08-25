@@ -19,6 +19,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
+	"github.com/entireio/cli/cmd/entire/cli/settings/repopolicy"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
 
 	"github.com/go-git/go-git/v6"
@@ -772,8 +773,7 @@ func checkCodexHookTrust(cmd *cobra.Command) {
 }
 
 // checkGlobalTracking runs the global-mode diagnostics. Read-only except for
-// check 5's drift shape, which clears the clone's global_setup_completed
-// marker (the marker's documented drift contract):
+// check 5's drift shape, which marks the per-worktree Git-hook component stale:
 //
 //  1. The user-global settings file exists but cannot be read or parsed —
 //     global tracking is silently off machine-wide (fail closed). This is
@@ -782,8 +782,8 @@ func checkCodexHookTrust(cmd *cobra.Command) {
 //     failed.
 //  2. Global tracking is on but user-level agent hooks are missing for an
 //     agent that supports them — sessions in never-enabled repos cannot fire
-//     a hook for those agents. Fix: `entire enable --global` (idempotent)
-//     re-installs them. An agent whose user-level config cannot be READ gets
+//     a hook for those agents. The user settings and affected agent config
+//     files are the repair surfaces. An agent whose config cannot be READ gets
 //     its own warning: it is unverified, not missing, and the missing-hooks
 //     remedy would refuse to run against the broken file anyway.
 //  3. Unusable exclude patterns (relative, unsupported ~user form, invalid
@@ -792,14 +792,12 @@ func checkCodexHookTrust(cmd *cobra.Command) {
 //  4. exclude_origins is configured and this repo's origin is present but
 //     cannot be normalized to host/owner/repo — informational: the tier
 //     stays off in this repo (fail closed).
-//  5. This clone carries the global_setup_completed clone-preferences marker
-//     but its git hooks are gone. Two shapes: when core.hooksPath resolves
+//  5. This worktree's component record says Git hooks are installed but they
+//     are gone. Two shapes: when core.hooksPath resolves
 //     inside the worktree the absence is deliberate (the lazy setup skips
-//     worktree writes and still sets the marker), so doctor explains that
-//     hook capture requires repo-level enable and leaves the marker alone.
-//     Otherwise it is drift — the marker is a run-once latch, so the lazy
-//     setup would never revisit it; per the marker's contract (any component
-//     detecting drift must clear it) doctor clears it so the next hook
+//     worktree writes), so doctor explains that hook capture requires
+//     repo-level enable and leaves the component alone. Otherwise it is drift;
+//     doctor marks the component stale so the next hook
 //     activity re-runs the lazy setup. A residency probe that ERRORS is its
 //     own warn with no marker mutation: the same probe error makes the lazy
 //     setup skip hook installation, so clearing would promise a reinstall
@@ -840,7 +838,7 @@ func checkGlobalTracking(cmd *cobra.Command) {
 		fmt.Fprintln(w, "Global tracking: USER-LEVEL AGENT HOOKS MISSING")
 		fmt.Fprintf(w, "  Global tracking is on, but user-level hooks are not installed for: %s\n", strings.Join(missing, ", "))
 		fmt.Fprintln(w, "  Sessions in repos without repo-level setup are not tracked for those agents.")
-		fmt.Fprintln(w, "  Run `entire enable --global` to install them.")
+		fmt.Fprintf(w, "  Install Entire's user-level hooks in the affected agent settings, or disable global tracking in %s.\n", settings.UserSettingsPath())
 	}
 	if len(unverifiable) > 0 {
 		fmt.Fprintln(w, "Global tracking: USER-LEVEL AGENT HOOKS UNVERIFIABLE")
@@ -848,7 +846,7 @@ func checkGlobalTracking(cmd *cobra.Command) {
 		for _, u := range unverifiable {
 			fmt.Fprintf(w, "    - %s\n", u)
 		}
-		fmt.Fprintln(w, "  Fix the named files, then run `entire enable --global` to (re)install the hooks.")
+		fmt.Fprintf(w, "  Fix the named files, then repair Entire's user-level hook entries or disable global tracking in %s.\n", settings.UserSettingsPath())
 	}
 
 	// us was loaded (and the tier confirmed enabled) at the top of this
@@ -888,9 +886,14 @@ func checkGlobalTracking(cmd *cobra.Command) {
 		fmt.Fprintln(w, "  This is intended until you opt in; run `entire trust` to sync.")
 	}
 
-	// Clone-local check: only meaningful when the lazy setup already ran here.
-	prefs, prefsErr := settings.LoadClonePreferences(ctx)
-	if prefsErr != nil || !prefs.GlobalSetupCompleted {
+	// Worktree-local check: only meaningful when the hook component was
+	// recorded as installed for this exact worktree.
+	repository, repoErr := repopolicy.ResolveRepository(ctx)
+	if repoErr != nil {
+		return
+	}
+	record, found, recordErr := repopolicy.ReadSetupRecord(repository)
+	if recordErr != nil || !found || record.GitHooksSpec == 0 {
 		return
 	}
 	if !strategy.IsGitHookInstalled(ctx) {
@@ -922,19 +925,13 @@ func checkGlobalTracking(cmd *cobra.Command) {
 		}
 		fmt.Fprintln(w, "Globally tracked clone: GIT HOOKS MISSING")
 		fmt.Fprintln(w, "  This clone was enabled by global tracking but its git hooks are gone.")
-		// The global_setup_completed marker is a run-once latch: MaybeEnsureGlobalSetup
-		// returns on it before ever checking the hooks, so a latched clone with
-		// missing hooks never converges on its own. Clear the marker (the marker's
-		// documented drift contract) so the next hook activity re-runs the setup.
-		if clearErr := settings.ModifyClonePreferences(ctx, func(p *settings.ClonePreferences) error {
-			p.GlobalSetupCompleted = false
-			return nil
-		}); clearErr != nil {
-			fmt.Fprintf(w, "  Could not clear the clone's global_setup_completed marker (%v).\n", clearErr)
-			fmt.Fprintln(w, "  Run `entire enable` here, or clear the marker manually, to restore tracking.")
+		record.GitHooksSpec = 0
+		if clearErr := repopolicy.WriteSetupRecord(repository, record); clearErr != nil {
+			fmt.Fprintf(w, "  Could not mark the git-hook setup component stale (%v).\n", clearErr)
+			fmt.Fprintln(w, "  Run `entire enable` here to restore tracking.")
 			return
 		}
-		fmt.Fprintln(w, "  Marker cleared — the next hook activity in this repo re-runs the lazy setup and reinstalls them.")
+		fmt.Fprintln(w, "  Git-hook setup marked stale — the next hook activity in this repo reinstalls them.")
 	}
 }
 

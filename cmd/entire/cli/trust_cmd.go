@@ -105,7 +105,7 @@ func refuseTrustWhenInactive(cmd *cobra.Command) error {
 			return NewSilentError(errors.New("repo is excluded from global tracking"))
 		}
 		fmt.Fprintln(errW, "Not recording trust: global tracking is off, so Entire is not capturing this repo.")
-		fmt.Fprintln(errW, "Run 'entire enable --global' to turn it back on, then re-run 'entire trust'.")
+		fmt.Fprintf(errW, "Enable global tracking in %s, then re-run 'entire trust'.\n", settings.UserSettingsPath())
 		return NewSilentError(errors.New("global tracking is off"))
 	}
 	return nil
@@ -116,7 +116,7 @@ func refuseTrustWhenInactive(cmd *cobra.Command) error {
 func unconfiguredTrustTierError(cmd *cobra.Command, err error) error {
 	cmd.SilenceUsage = true
 	fmt.Fprintln(cmd.ErrOrStderr(), "Global tracking is not set up on this machine, so there is nothing to trust yet.")
-	fmt.Fprintln(cmd.ErrOrStderr(), "Run 'entire enable --global' to track repos machine-wide, or 'entire enable' to set up this repo directly.")
+	fmt.Fprintf(cmd.ErrOrStderr(), "Enable global tracking in %s, or run 'entire enable' to set up this repo directly.\n", settings.UserSettingsPath())
 	return NewSilentError(err)
 }
 

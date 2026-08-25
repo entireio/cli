@@ -230,7 +230,7 @@ func TestSaveUserSettings_PreservesSymlinkedSettingsFile(t *testing.T) {
 }
 
 // TestSaveUserSettings_LoadModifySavePreservesExcludes pins the writer
-// contract used by `enable --global`: flipping enabled must not drop the
+// contract used by user-settings editors: flipping enabled must not drop the
 // exclude lists already in the file.
 func TestSaveUserSettings_LoadModifySavePreservesExcludes(t *testing.T) {
 	dir := t.TempDir()
