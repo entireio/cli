@@ -1440,6 +1440,8 @@ func handleSubagentStopFinal(logCtx context.Context, ag agent.Agent, event *agen
 		return nil
 	}
 
+	ambiguousWithoutDescription := resolvedAmbiguously && event.TaskDescription == ""
+
 	// SubagentStop payloads carry no tool_input, so event.SubagentType/
 	// TaskDescription/SubagentID are typically empty at this point; the marker
 	// recorded all three at launch time. Each field falls back independently —
@@ -1463,9 +1465,10 @@ func handleSubagentStopFinal(logCtx context.Context, ag agent.Agent, event *agen
 	// would risk sweeping in the parent's or another agent's later edits. See
 	// subagentCaptureOptions.analyzerFilesOnly.
 	captureErr := completeSubagentTaskRecord(logCtx, ag, event, subagentCaptureOptions{
-		bypassNoChangesSkip: true,
-		analyzerFilesOnly:   true,
-		resolvedAmbiguously: resolvedAmbiguously,
+		bypassNoChangesSkip:         true,
+		analyzerFilesOnly:           true,
+		resolvedAmbiguously:         resolvedAmbiguously,
+		ambiguousWithoutDescription: ambiguousWithoutDescription,
 	})
 	if captureErr != nil {
 		return captureErr
@@ -1547,6 +1550,11 @@ type subagentCaptureOptions struct {
 	// skip capture when the pre-task file vanished between resolve and load, and
 	// to avoid deleting an uncorroborated pre-task baseline on the no-changes path.
 	resolvedAmbiguously bool
+
+	// ambiguousWithoutDescription is set when resolvedAmbiguously was true before
+	// marker backfill could populate event.TaskDescription — the guard must not
+	// consult the backfilled description.
+	ambiguousWithoutDescription bool
 }
 
 // completeSubagentTaskRecord detects a completed subagent invocation's changes
@@ -1556,7 +1564,7 @@ type subagentCaptureOptions struct {
 //
 //nolint:maintidx // sequential orchestration of validation, transcript resolve, file detection, token calc, record write, and cleanup — splitting would obscure the flow
 func completeSubagentTaskRecord(logCtx context.Context, ag agent.Agent, event *agent.Event, opts subagentCaptureOptions) error {
-	if opts.resolvedAmbiguously && event.TaskDescription == "" {
+	if opts.ambiguousWithoutDescription {
 		logging.Warn(logCtx, "skipping task record: tool_use_id resolved only by the single-active-file fallback with no corroborating task description",
 			slog.String("tool_use_id", event.ToolUseID))
 		return nil
