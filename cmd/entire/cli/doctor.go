@@ -145,7 +145,7 @@ func runSessionsFix(cmd *cobra.Command, force bool) error {
 
 	// Global tracking tier: user-level agent hook coverage and this clone's
 	// lazy-setup state.
-	checkGlobalTracking(cmd)
+	checkGlobalTracking(cmd, force)
 
 	// Where checkpoints land, when the repo's remotes make that ambiguous.
 	printCheckpointDestinationNote(ctx, cmd.OutOrStdout(), "Checkpoint destination: REVIEW")
@@ -804,7 +804,7 @@ func checkCodexHookTrust(cmd *cobra.Command) {
 //     that never happens.
 //
 // All checks except 1 stay silent while the global tier is unconfigured or off.
-func checkGlobalTracking(cmd *cobra.Command) {
+func checkGlobalTracking(cmd *cobra.Command, force bool) {
 	ctx := cmd.Context()
 	w := cmd.OutOrStdout()
 	us, err := settings.LoadUserSettings(ctx)
@@ -819,8 +819,18 @@ func checkGlobalTracking(cmd *cobra.Command) {
 	if !us.GlobalEnabled() {
 		return
 	}
+	// Diagnostics classify repository policy once and keep the snapshot
+	// read-only. Repair paths below remain separately confirmation-gated.
+	if _, repoErr := paths.WorktreeRoot(ctx); repoErr == nil {
+		policy, policyErr := repopolicy.ClassifyRepoPolicy(ctx)
+		if policyErr == nil {
+			ctx = repopolicy.WithRepoPolicy(ctx, policy)
+			cmd.SetContext(ctx)
+		}
+	}
 
 	var missing, unverifiable []string
+	var missingSupports []agent.UserHookAgent
 	supports, _ := agent.UserHookSupports()
 	for _, ua := range supports {
 		installed, hookErr := ua.Support.AreUserHooksInstalled(ctx)
@@ -829,6 +839,7 @@ func checkGlobalTracking(cmd *cobra.Command) {
 			unverifiable = append(unverifiable, fmt.Sprintf("%s (%v)", ua.Name, hookErr))
 		case !installed:
 			missing = append(missing, string(ua.Name))
+			missingSupports = append(missingSupports, ua)
 		}
 	}
 	if len(missing) == 0 && len(unverifiable) == 0 {
@@ -839,6 +850,24 @@ func checkGlobalTracking(cmd *cobra.Command) {
 		fmt.Fprintf(w, "  Global tracking is on, but user-level hooks are not installed for: %s\n", strings.Join(missing, ", "))
 		fmt.Fprintln(w, "  Sessions in repos without repo-level setup are not tracked for those agents.")
 		fmt.Fprintf(w, "  Install Entire's user-level hooks in the affected agent settings, or disable global tracking in %s.\n", settings.UserSettingsPath())
+		proceed := force
+		if !proceed {
+			confirmed, promptErr := confirmDoctorFix(ctx, w, "Install missing user-level agent hooks?")
+			if promptErr != nil {
+				fmt.Fprintf(w, "  Repair skipped: %v\n", promptErr)
+			} else {
+				proceed = confirmed
+			}
+		}
+		if proceed {
+			for _, ua := range missingSupports {
+				if _, installErr := ua.Support.InstallUserHooks(ctx); installErr != nil {
+					fmt.Fprintf(w, "  Could not repair %s user hooks: %v\n", ua.Name, installErr)
+					continue
+				}
+				fmt.Fprintf(w, "  ✓ Repaired %s user hooks\n", ua.Name)
+			}
+		}
 	}
 	if len(unverifiable) > 0 {
 		fmt.Fprintln(w, "Global tracking: USER-LEVEL AGENT HOOKS UNVERIFIABLE")

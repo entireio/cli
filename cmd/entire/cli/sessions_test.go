@@ -18,6 +18,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
+	"github.com/entireio/cli/cmd/entire/cli/settings/repopolicy"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 	"github.com/entireio/cli/redact"
@@ -45,6 +46,17 @@ func setupStopTestRepo(t *testing.T) {
 	t.Chdir(tmpDir)
 	paths.ClearWorktreeRootCache()
 	session.ClearGitCommonDirCache()
+}
+
+func markCurrentRepoLocallyActivated(t *testing.T) {
+	t.Helper()
+	repository, err := repopolicy.ResolveRepository(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := repopolicy.SetLocalActivationForRepository(repository, repopolicy.ActivationEnabled); err != nil {
+		t.Fatal(err)
+	}
 }
 
 // makeSessionState returns a minimal SessionState suitable for test setup.

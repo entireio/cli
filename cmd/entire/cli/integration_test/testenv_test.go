@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/entireio/cli/cmd/entire/cli/paths"
+	"github.com/entireio/cli/cmd/entire/cli/settings/repopolicy"
 )
 
 func TestNewTestEnv(t *testing.T) {
@@ -71,6 +72,14 @@ func TestTestEnv_InitEntire(t *testing.T) {
 	tmpDir := filepath.Join(entireDir, "tmp")
 	if _, err := os.Stat(tmpDir); os.IsNotExist(err) {
 		t.Error(".entire/tmp directory should exist")
+	}
+
+	repository, err := repopolicy.ResolveRepositoryAt(t.Context(), env.RepoDir)
+	if err != nil {
+		t.Fatalf("resolve fixture repository: %v", err)
+	}
+	if state, err := repopolicy.ReadLocalActivation(repository); err != nil || state != repopolicy.ActivationEnabled {
+		t.Fatalf("local activation = %q, %v; want %q", state, err, repopolicy.ActivationEnabled)
 	}
 }
 

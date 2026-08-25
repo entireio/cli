@@ -11,6 +11,7 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/agent/claudecode"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
+	"github.com/entireio/cli/cmd/entire/cli/settings/repopolicy"
 )
 
 // No t.Parallel in this file: every test uses t.Chdir and/or t.Setenv.
@@ -44,6 +45,7 @@ type globalStatusFixture struct {
 	userSettings string // "" = no user settings file
 	installHooks bool
 	excludeSelf  bool // exclude this worktree root via exclude_paths
+	localActive  bool // machine-local explicit enable marker
 }
 
 func setUpGlobalStatus(t *testing.T, f globalStatusFixture) {
@@ -55,6 +57,15 @@ func setUpGlobalStatus(t *testing.T, f globalStatusFixture) {
 	}
 	if f.repoSettings != "" {
 		writeSettings(t, f.repoSettings)
+	}
+	if f.localActive {
+		repository, err := repopolicy.ResolveRepository(t.Context())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := repopolicy.SetLocalActivationForRepository(repository, repopolicy.ActivationEnabled); err != nil {
+			t.Fatal(err)
+		}
 	}
 	cfg := t.TempDir()
 	t.Setenv("ENTIRE_CONFIG_DIR", cfg)
@@ -97,7 +108,7 @@ func TestRunStatus_GlobalTrackingLine(t *testing.T) {
 			globalStatusFixture{gitRepo: true, userSettings: `{"global":{"enabled":false}}`},
 			[]string{"global tracking: off"}, nil},
 		{"shown alongside repo-level status when set up",
-			globalStatusFixture{gitRepo: true, repoSettings: testSettingsEnabled, userSettings: `{"global":{"enabled":true}}`},
+			globalStatusFixture{gitRepo: true, repoSettings: testSettingsEnabled, userSettings: `{"global":{"enabled":true}}`, localActive: true},
 			[]string{"Enabled", "global tracking: on (0 agents covered)"}, nil},
 		// Carve-outs must not read as covered.
 		{"excluded repo names the carve-out",
@@ -153,20 +164,21 @@ func TestRunStatus_GlobalTrust(t *testing.T) {
 		userSettings string
 		trustRepo    bool
 		repoSettings string
+		localActive  bool
 		wantText     string // "" = neither trust line renders
 		wantJSON     []string
 	}{
-		{"untrusted enrolled repo shows sync held", `{"global":{"enabled":true}}`, false, "",
+		{"untrusted enrolled repo shows sync held", `{"global":{"enabled":true}}`, false, "", false,
 			"sync held — repo not trusted · run `entire trust`",
 			[]string{`"trust_state":"untrusted"`, `"trust_source":"none"`}},
-		{"trusted repo names the per-repo source", `{"global":{"enabled":true}}`, true, "",
+		{"trusted repo names the per-repo source", `{"global":{"enabled":true}}`, true, "", false,
 			"trusted (this repo)",
 			[]string{`"trust_state":"trusted"`, `"trust_source":"repo"`}},
-		{"trust_all names trust_all", `{"global":{"enabled":true,"trust_all":true}}`, false, "",
+		{"trust_all names trust_all", `{"global":{"enabled":true,"trust_all":true}}`, false, "", false,
 			"trusted (trust_all)", []string{`"trust_source":"trust_all"`}},
-		{"incidental repo settings retain global trust", `{"global":{"enabled":true,"trust_all":true}}`, false, `{"investigate":{"max_turns":4}}`,
+		{"incidental repo settings retain global trust", `{"global":{"enabled":true,"trust_all":true}}`, false, `{"investigate":{"max_turns":4}}`, false,
 			"trusted (trust_all)", []string{`"trust_state":"trusted"`, `"trust_source":"trust_all"`}},
-		{"repo-level setup is not_applicable and silent", `{"global":{"enabled":true}}`, false, `{"enabled":true}`,
+		{"repo-level setup is not_applicable and silent", `{"global":{"enabled":true}}`, false, `{"enabled":true}`, true,
 			"", []string{`"trust_state":"not_applicable"`}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -178,6 +190,15 @@ func TestRunStatus_GlobalTrust(t *testing.T) {
 			}
 			if tc.repoSettings != "" {
 				writeSettings(t, tc.repoSettings)
+			}
+			if tc.localActive {
+				repository, err := repopolicy.ResolveRepository(t.Context())
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := repopolicy.SetLocalActivationForRepository(repository, repopolicy.ActivationEnabled); err != nil {
+					t.Fatal(err)
+				}
 			}
 
 			var text bytes.Buffer

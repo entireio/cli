@@ -36,23 +36,23 @@ const globalSetupComponentSpec = 1
 func MaybeEnsureGlobalSetup(ctx context.Context) {
 	logCtx := logging.WithComponent(ctx, "global-setup")
 
-	// Explicit repo-level activation owns installation via EnsureSetup /
-	// `entire enable`. Incidental settings files keep inheriting global mode.
-	repoConfigured, err := settings.RepoActivationConfigured(ctx)
-	if err != nil {
-		logging.Debug(logCtx, "global lazy setup: repo settings unreadable; skipping",
-			slog.String("error", err.Error()))
-		return
+	policy, ok := repopolicy.RepoPolicyFromContext(ctx)
+	if !ok {
+		var err error
+		policy, err = repopolicy.ClassifyRepoPolicy(ctx)
+		if err != nil {
+			logging.Debug(logCtx, "global lazy setup: policy unavailable", slog.String("error", err.Error()))
+			return
+		}
 	}
-	if repoConfigured {
+	if !policy.Active || policy.ActivationSource != repopolicy.ActivationGlobal {
 		return
 	}
 
-	repository, err := repopolicy.ResolveRepository(ctx)
-	if err != nil {
-		logging.Debug(logCtx, "global lazy setup: repository identity unavailable",
-			slog.String("error", err.Error()))
-		return
+	repository := repopolicy.Repository{
+		WorktreeRoot: policy.WorktreeRoot,
+		GitCommonDir: policy.GitCommonDir,
+		WorktreeKey:  policy.WorktreeKey,
 	}
 	record, _, err := repopolicy.ReadSetupRecord(repository)
 	if err != nil {
@@ -60,10 +60,6 @@ func MaybeEnsureGlobalSetup(ctx context.Context) {
 			slog.String("error", err.Error()))
 		return
 	}
-	if !settings.GlobalModeActive(ctx) {
-		return
-	}
-
 	changed := false
 	if record.GitHooksSpec < globalSetupComponentSpec || !IsGitHookInstalled(ctx) {
 		worktreeResident, hooksDir, resolveErr := HooksDirIsWorktreeResident(ctx)

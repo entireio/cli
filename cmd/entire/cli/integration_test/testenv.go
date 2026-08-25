@@ -27,6 +27,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
+	"github.com/entireio/cli/cmd/entire/cli/settings/repopolicy"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 	"github.com/entireio/cli/cmd/entire/cli/trailers"
 
@@ -392,6 +393,24 @@ func (env *TestEnv) initEntireInternal(strategyOptions map[string]any) {
 	settingsPath := filepath.Join(entireDir, paths.SettingsFileName)
 	if err := os.WriteFile(settingsPath, data, 0o644); err != nil {
 		env.T.Fatalf("failed to write %s: %v", paths.SettingsFileName, err)
+	}
+
+	// Match the machine-local provenance written by a real `entire enable`.
+	// A committed settings file alone intentionally cannot activate a fresh
+	// clone or grant checkpoint egress.
+	env.RecordLocalActivation()
+}
+
+// RecordLocalActivation completes hand-built explicit-enable fixtures with
+// the machine-local provenance written by the production enable command.
+func (env *TestEnv) RecordLocalActivation() {
+	env.T.Helper()
+	repository, err := repopolicy.ResolveRepositoryAt(env.T.Context(), env.RepoDir)
+	if err != nil {
+		env.T.Fatalf("resolve repository for local activation: %v", err)
+	}
+	if err := repopolicy.SetLocalActivationForRepository(repository, repopolicy.ActivationEnabled); err != nil {
+		env.T.Fatalf("record local activation: %v", err)
 	}
 }
 

@@ -250,6 +250,7 @@ func TestHooksRunAfterLocalOnlyEnable(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(entireDir, "settings.json")); err == nil {
 		t.Fatal("precondition: settings.json must not exist for the enable --local scenario")
 	}
+	env.RecordLocalActivation()
 
 	session := env.NewSession()
 	if err := env.SimulateUserPromptSubmitWithPrompt(session.ID, "Create a hello file"); err != nil {

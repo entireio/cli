@@ -28,6 +28,7 @@ import (
 	cliReview "github.com/entireio/cli/cmd/entire/cli/review"
 	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
+	"github.com/entireio/cli/cmd/entire/cli/settings/repopolicy"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 	"github.com/entireio/cli/cmd/entire/cli/trailers"
@@ -2061,6 +2062,13 @@ func enableEntire(t *testing.T, repoDir string) {
 	}
 	settingsContent := `{"enabled": true}`
 	if err := os.WriteFile(filepath.Join(entireDir, "settings.json"), []byte(settingsContent), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	repository, err := repopolicy.ResolveRepositoryAt(t.Context(), repoDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := repopolicy.SetLocalActivationForRepository(repository, repopolicy.ActivationEnabled); err != nil {
 		t.Fatal(err)
 	}
 }

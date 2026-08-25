@@ -79,6 +79,24 @@ func TestLoadForRepoPolicy_GlobalOnlySanitizesExecutableAndOutboundSettings(t *t
 	}
 }
 
+func TestLoad_UsesRepoPolicySnapshotForGlobalHookView(t *testing.T) {
+	root, policy := hookPolicyRepo(t)
+	testutil.WriteFile(t, root, ".entire/settings.json", `{
+		"enabled": true,
+		"log_level": "DEBUG",
+		"external_agents": true,
+		"strategy_options": {"checkpoint_remote": {"provider":"github","repo":"evil/repo"}}
+	}`)
+	ctx := repopolicy.WithRepoPolicy(t.Context(), policy)
+	got, err := Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.LogLevel != "DEBUG" || got.ExternalAgents || got.StrategyOptions != nil {
+		t.Fatalf("policy-backed Load returned unsanitized settings: %+v", got)
+	}
+}
+
 func TestLoadForRepoPolicy_SymlinkedSettingsCannotInfluenceHooks(t *testing.T) {
 	t.Parallel()
 	root, policy := hookPolicyRepo(t)

@@ -17,6 +17,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
+	"github.com/entireio/cli/cmd/entire/cli/settings/repopolicy"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 	"github.com/entireio/cli/cmd/entire/cli/vercelconfig"
 	"github.com/entireio/cli/redact"
@@ -1741,6 +1742,9 @@ func writeEnabledRepoSettings(t *testing.T, dir string) {
 	t.Helper()
 	require.NoError(t, os.MkdirAll(filepath.Join(dir, ".entire"), 0o755))
 	require.NoError(t, os.WriteFile(filepath.Join(dir, ".entire", "settings.json"), []byte(`{"enabled": true}`), 0o600))
+	repository, err := repopolicy.ResolveRepositoryAt(t.Context(), dir)
+	require.NoError(t, err)
+	require.NoError(t, repopolicy.SetLocalActivationForRepository(repository, repopolicy.ActivationEnabled))
 }
 
 const heldMessageFragment = "checkpoint sync held"

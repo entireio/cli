@@ -78,10 +78,6 @@ func matchesExcludeOrigin(ctx context.Context, patterns []string, normalizedOrig
 	return repopolicy.MatchesExcludeOrigin(ctx, patterns, normalizedOrigin) //nolint:wrapcheck // compatibility test facade
 }
 
-// worktreeRootFn remains the existing trust-identity seam until trust moves to
-// repopolicy. Global classification no longer depends on this parent variable.
-var worktreeRootFn = paths.WorktreeRoot
-
 // ClearGlobalModeCache clears leaf-owned global classification state.
 func ClearGlobalModeCache() {
 	repopolicy.ClearGlobalModeCache()
@@ -118,6 +114,9 @@ func GlobalTierEnabled(ctx context.Context) bool {
 // IsActiveForRepoWithReason returns the existing repository-local override
 // result before falling back to leaf-owned global classification.
 func IsActiveForRepoWithReason(ctx context.Context) (bool, InactiveReason) {
+	if policy, ok := repopolicy.RepoPolicyFromContext(ctx); ok {
+		return policy.Active, policy.InactiveReason
+	}
 	configured, err := RepoActivationConfigured(ctx)
 	if err != nil {
 		logging.Debug(ctx, "repo settings unreadable; treating repo as inactive", slog.String("error", err.Error()))

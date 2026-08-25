@@ -30,7 +30,7 @@ func newTrustTestRepo(t *testing.T) (dir, cfg string) {
 }
 
 // TestCheckpointEgressAllowed drives the gate across the identity rules:
-// fetch AND push URL keys all required, unkeyable URLs flip to path,
+// fetch AND push URL keys all required, unkeyable configured URLs hold,
 // exclusive identity sides, every failure holds.
 func TestCheckpointEgressAllowed(t *testing.T) {
 	multiURLOrigin := [][]string{
@@ -50,7 +50,7 @@ func TestCheckpointEgressAllowed(t *testing.T) {
 		want            bool
 	}{
 		// checkpoint_remote is moot: it can only live in repo-level settings.
-		{"repo-level setup passes even with checkpoint_remote configured", nil, "", true, false, true},
+		{"committed repo settings never grant consent", nil, "", true, false, false},
 		{"trust_all passes", nil, `{"global":{"enabled":true,"trust_all":true}}`, false, false, true},
 		{"a trusted subset of a multi-URL origin holds", multiURLOrigin,
 			`{"global":{"enabled":true,"trusted_origins":["github.com/acme/widgets"]}}`, false, false, false},
@@ -61,11 +61,12 @@ func TestCheckpointEgressAllowed(t *testing.T) {
 			`{"global":{"enabled":true,"trusted_origins":["github.com/acme/widgets"]}}`, false, false, false},
 		{"fetch-URL and pushurl keys together pass", normalOriginWithPushurl,
 			`{"global":{"enabled":true,"trusted_origins":["github.com/acme/widgets","gitlab.example.com/team/proj"]}}`, false, false, true},
-		// Any unkeyable URL flips the WHOLE identity to path (never partial keys).
-		{"unnormalizable pushurl flips the identity to path", [][]string{
+		// A configured but unkeyable URL holds; path identity is only for repos
+		// without an origin.
+		{"unnormalizable pushurl holds even when path trusted", [][]string{
 			{"remote", "add", "origin", "https://github.com/acme/widgets.git"},
 			{"config", "remote.origin.pushurl", "file:///srv/git/secret.git"}},
-			`{"global":{"enabled":true,"trusted_paths":["%ROOT%"]}}`, false, false, true},
+			`{"global":{"enabled":true,"trusted_paths":["%ROOT%"]}}`, false, false, false},
 		{"a mixed origin holds even with its normalizable key trusted", [][]string{
 			{"remote", "add", "origin", "https://github.com/acme/widgets.git"},
 			{"remote", "set-url", "--add", "origin", "file:///srv/git/secret.git"}},
@@ -137,9 +138,8 @@ func TestCheckpointEgressAllowed_IncidentalRepoSettingsRequireGlobalTrust(t *tes
 	}
 }
 
-// TestTrustAndRevokeCurrentRepo: trusting writes ALL origin keys once
-// (idempotent) and prunes the stale path entry; revoking removes the keys AND
-// the path entry, so removing the origin later cannot resurrect trust.
+// TestTrustAndRevokeCurrentRepo: trusting writes all origin keys once and
+// revoke removes the CLI-recorded keys without guessing at hand edits.
 func TestTrustAndRevokeCurrentRepo(t *testing.T) {
 	dir, cfg := newTrustTestRepo(t)
 	root := resolvedRoot(t, dir)
@@ -159,16 +159,13 @@ func TestTrustAndRevokeCurrentRepo(t *testing.T) {
 	if !slices.Equal(us.Global.TrustedOrigins, wantKeys) {
 		t.Fatalf("trusted_origins = %v, want ALL configured URL keys %v once", us.Global.TrustedOrigins, wantKeys)
 	}
-	if !slices.Equal(us.Global.TrustedPaths, []string{"/srv/other"}) {
-		t.Fatalf("trusted_paths = %v, want this root pruned and other entries kept", us.Global.TrustedPaths)
+	if !slices.Equal(us.Global.TrustedPaths, []string{root, "/srv/other"}) {
+		t.Fatalf("trusted_paths = %v, want hand-authored entries preserved", us.Global.TrustedPaths)
 	}
 	if !CheckpointEgressAllowed(t.Context()) {
 		t.Fatal("the gate must open immediately after trusting")
 	}
 
-	// Re-seed a hand-added path entry for the root: revoke itself must drop it.
-	writeUserSettings(t, cfg,
-		`{"global":{"enabled":true,"trusted_origins":["gitlab.example.com/team/proj","github.com/acme/widgets"],"trusted_paths":["`+root+`"]}}`)
 	id, err := RevokeCurrentRepo(t.Context())
 	if err != nil {
 		t.Fatal(err)
@@ -180,8 +177,65 @@ func TestTrustAndRevokeCurrentRepo(t *testing.T) {
 		t.Fatal("the revoked origin identity must hold")
 	}
 	addTestRemote(t, dir, "remote", "remove", "origin")
+	if !CheckpointEgressAllowed(t.Context()) {
+		t.Fatal("revoke must preserve a hand-authored path grant")
+	}
+}
+
+func TestTrustGrantAndRevoke_TracksOnlyCLIOwnedIdentityHistory(t *testing.T) {
+	dir, cfg := newTrustTestRepo(t)
+	root := resolvedRoot(t, dir)
+	writeUserSettings(t, cfg, `{"global":{"enabled":true,"trusted_paths":["/srv/hand-authored"],"trusted_origins":["example.com/hand/authored"]}}`)
+
+	// path
+	if _, err := TrustCurrentRepo(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	// origin A
+	addTestRemote(t, dir, "remote", "add", "origin", "https://github.com/acme/one.git")
+	if _, err := TrustCurrentRepo(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	// path again
+	addTestRemote(t, dir, "remote", "remove", "origin")
+	if _, err := TrustCurrentRepo(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	// origin B
+	addTestRemote(t, dir, "remote", "add", "origin", "https://gitlab.example.com/team/two.git")
+	if _, err := TrustCurrentRepo(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+
+	us, err := LoadUserSettings(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if slices.Contains(us.Global.TrustedPaths, root) || slices.Contains(us.Global.TrustedOrigins, "github.com/acme/one") {
+		t.Fatalf("stale CLI grants survived transition: %+v", us.Global)
+	}
+	if !slices.Contains(us.Global.TrustedOrigins, "gitlab.example.com/team/two") {
+		t.Fatalf("current CLI grant missing: %+v", us.Global)
+	}
+
+	if _, err := RevokeCurrentRepo(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	us, err = LoadUserSettings(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(us.Global.TrustedPaths, []string{"/srv/hand-authored"}) ||
+		!slices.Equal(us.Global.TrustedOrigins, []string{"example.com/hand/authored"}) {
+		t.Fatalf("revoke changed hand-authored trust: %+v", us.Global)
+	}
+}
+
+func TestCheckpointEgressAllowed_GlobalOffDeniesTrustAll(t *testing.T) {
+	_, cfg := newTrustTestRepo(t)
+	writeUserSettings(t, cfg, `{"global":{"enabled":false,"trust_all":true}}`)
 	if CheckpointEgressAllowed(t.Context()) {
-		t.Fatal("after the origin is removed, a stale path entry must not resurrect trust")
+		t.Fatal("trust_all must not override a disabled global tier")
 	}
 }
 

@@ -834,7 +834,9 @@ func TestCaptureCheckpointSyncRemote_OnlyOnDelivery(t *testing.T) {
 func TestPrePush_TrustGrantedAtPromptSyncsInSameCall(t *testing.T) {
 	testutil.IsolateGitConfigEnv(t)
 	workDir, bareDir, refs := setupRepoWithCheckpointRefs(t)
-	testutil.AddRemote(t, workDir, "origin", bareDir)
+	// No origin means trust is path-scoped. Use a separate delivery remote so
+	// the hermetic bare path is not mistaken for an invalid configured origin.
+	testutil.AddRemote(t, workDir, "sync", bareDir)
 	t.Chdir(workDir)
 	t.Setenv(settings.EnvCheckpointsPrimary, checkpoint.BackendTypeGitRefs)
 	enrollRepoGlobally(t, `{"global":{"enabled":true}}`)
@@ -853,7 +855,7 @@ func TestPrePush_TrustGrantedAtPromptSyncsInSameCall(t *testing.T) {
 	enqueueRefs(t, repo, refs)
 	stderr := captureStderrWriter(t)
 
-	require.NoError(t, NewManualCommitStrategy().PrePush(context.Background(), "origin"))
+	require.NoError(t, NewManualCommitStrategy().PrePush(context.Background(), "sync"))
 
 	require.Equal(t, 1, prompted, "the closed gate must consult the resolver exactly once")
 	require.NotContains(t, stderr.String(), heldMessageFragment)

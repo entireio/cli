@@ -64,6 +64,44 @@ const metadataDenyRule = "Read(./.entire/metadata/**)"
 // PostToolUse[Agent], PostToolUse[TaskCreate|TaskUpdate]).
 const entireClaudeHookCount = 8
 
+// claudeHookSpec is the single inventory entry used by repo/user install and
+// user-hook completeness checks. Claude's native matcher model stays typed;
+// only the shared orchestration is declarative.
+type claudeHookSpec struct {
+	section  string
+	matcher  string
+	hookName string
+	warnWrap bool
+}
+
+var claudeHookSpecs = []claudeHookSpec{
+	{section: "SessionStart", hookName: HookNameSessionStart, warnWrap: true},
+	{section: "SessionEnd", hookName: HookNameSessionEnd},
+	{section: "Stop", hookName: HookNameStop},
+	{section: "SubagentStop", hookName: HookNameSubagentStop},
+	{section: "UserPromptSubmit", hookName: HookNameUserPromptSubmit},
+	{section: "PreToolUse", matcher: subagentToolMatcher, hookName: HookNamePreTask},
+	{section: "PostToolUse", matcher: subagentToolMatcher, hookName: HookNamePostTask},
+	{section: "PostToolUse", matcher: taskToolMatcher, hookName: HookNamePostTodo},
+}
+
+func (s claudeHookSpec) productionCommand() string {
+	cmd := "entire hooks claude-code " + s.hookName
+	if s.warnWrap {
+		return agent.WrapProductionJSONWarningHookCommand(cmd, agent.WarningFormatMultiLine)
+	}
+	return agent.WrapProductionSilentHookCommand(cmd)
+}
+
+func claudeProductionCommand(hookName string) string {
+	for _, spec := range claudeHookSpecs {
+		if spec.hookName == hookName {
+			return spec.productionCommand()
+		}
+	}
+	return ""
+}
+
 // InstallHooks installs Claude Code hooks in .claude/settings.json.
 // If force is true, removes existing Entire hooks before installing.
 // Returns the number of hooks installed.
@@ -129,14 +167,14 @@ type claudeHookCommands struct {
 
 func buildClaudeHookCommands() claudeHookCommands {
 	return claudeHookCommands{
-		sessionStart:     agent.WrapProductionJSONWarningHookCommand("entire hooks claude-code session-start", agent.WarningFormatMultiLine),
-		sessionEnd:       agent.WrapProductionSilentHookCommand("entire hooks claude-code session-end"),
-		stop:             agent.WrapProductionSilentHookCommand("entire hooks claude-code stop"),
-		subagentStop:     agent.WrapProductionSilentHookCommand("entire hooks claude-code subagent-stop"),
-		userPromptSubmit: agent.WrapProductionSilentHookCommand("entire hooks claude-code user-prompt-submit"),
-		preTask:          agent.WrapProductionSilentHookCommand("entire hooks claude-code pre-task"),
-		postTask:         agent.WrapProductionSilentHookCommand("entire hooks claude-code post-task"),
-		postTodo:         agent.WrapProductionSilentHookCommand("entire hooks claude-code post-todo"),
+		sessionStart:     claudeProductionCommand(HookNameSessionStart),
+		sessionEnd:       claudeProductionCommand(HookNameSessionEnd),
+		stop:             claudeProductionCommand(HookNameStop),
+		subagentStop:     claudeProductionCommand(HookNameSubagentStop),
+		userPromptSubmit: claudeProductionCommand(HookNameUserPromptSubmit),
+		preTask:          claudeProductionCommand(HookNamePreTask),
+		postTask:         claudeProductionCommand(HookNamePostTask),
+		postTodo:         claudeProductionCommand(HookNamePostTodo),
 	}
 }
 
@@ -270,14 +308,28 @@ func installHooksToFile(settingsPath string, force, projectScope bool) (count in
 		return addHookToMatcher(matchers, matcherName, cmd)
 	}
 
-	sessionStart = ensureHook(sessionStart, checkSessionStart, "", cmds.sessionStart)
-	sessionEnd = ensureHook(sessionEnd, checkSessionEnd, "", cmds.sessionEnd)
-	stop = ensureHook(stop, checkStop, "", cmds.stop)
-	subagentStop = ensureHook(subagentStop, checkSubagentStop, "", cmds.subagentStop)
-	userPromptSubmit = ensureHook(userPromptSubmit, checkUserPromptSubmit, "", cmds.userPromptSubmit)
-	preToolUse = ensureHook(preToolUse, checkPreToolUse, subagentToolMatcher, cmds.preTask)
-	postToolUse = ensureHook(postToolUse, checkPostToolUse, subagentToolMatcher, cmds.postTask)
-	postToolUse = ensureHook(postToolUse, checkPostToolUse, taskToolMatcher, cmds.postTodo)
+	sections := map[string]*[]ClaudeHookMatcher{
+		"SessionStart":     &sessionStart,
+		"SessionEnd":       &sessionEnd,
+		"Stop":             &stop,
+		"SubagentStop":     &subagentStop,
+		"UserPromptSubmit": &userPromptSubmit,
+		"PreToolUse":       &preToolUse,
+		"PostToolUse":      &postToolUse,
+	}
+	checks := map[string][]ClaudeHookMatcher{
+		"SessionStart":     checkSessionStart,
+		"SessionEnd":       checkSessionEnd,
+		"Stop":             checkStop,
+		"SubagentStop":     checkSubagentStop,
+		"UserPromptSubmit": checkUserPromptSubmit,
+		"PreToolUse":       checkPreToolUse,
+		"PostToolUse":      checkPostToolUse,
+	}
+	for _, spec := range claudeHookSpecs {
+		matchers := sections[spec.section]
+		*matchers = ensureHook(*matchers, checks[spec.section], spec.matcher, spec.productionCommand())
+	}
 
 	// Add permissions.deny rule if not present (repo scope only: the rule is
 	// repo-relative and user-level installs must not modify user permissions).

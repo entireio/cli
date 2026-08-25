@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	"github.com/entireio/cli/cmd/entire/cli/logging"
+	"github.com/entireio/cli/cmd/entire/cli/settings/repopolicy"
 )
 
 // ErrInvalidCheckpointsConfig is returned when a present "checkpoints" settings
@@ -70,6 +71,9 @@ func LoadCheckpointsConfig(ctx context.Context) (*CheckpointsConfig, error) {
 			return nil, err
 		}
 		return cfg, nil
+	}
+	if policy, ok := repopolicy.RepoPolicyFromContext(ctx); ok && policy.ActivationSource == repopolicy.ActivationGlobal {
+		return nil, nil //nolint:nilnil // global hook policy always uses the compiled default backend
 	}
 
 	base, local := checkpointsSettingsPaths(ctx)

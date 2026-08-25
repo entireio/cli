@@ -61,8 +61,8 @@ func TestWithHookSession_StampsMostRecentSession(t *testing.T) {
 
 // TestGitHookPreRun_GateSkipsRepo covers the Git-hook pre-run gate before
 // withHookSession scans state and loads redactors. Agent hooks perform the same
-// gate and stamping inside executeAgentHook so they can first take the runtime
-// migration lock; their disabled/global behavior is covered in
+// gate and stamping inside executeAgentHook after establishing the repository
+// policy route; their disabled/global behavior is covered in
 // hook_registry_test.go.
 func TestGitHookPreRun_GateSkipsRepo(t *testing.T) {
 	tests := []struct {
@@ -243,6 +243,7 @@ func TestHooksGitCmd_DiscoverExternalAgents_WhenEnabled(t *testing.T) {
 	if err := os.WriteFile(settingsFile, []byte(`{"enabled":true,"external_agents":true}`), 0o644); err != nil {
 		t.Fatalf("failed to write settings file: %v", err)
 	}
+	markCurrentRepoLocallyActivated(t)
 
 	// Create a mock external agent binary in a temp PATH directory.
 	// Use a unique name to avoid conflicts with agents registered by other tests.

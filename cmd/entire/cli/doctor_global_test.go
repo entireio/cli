@@ -29,7 +29,7 @@ func runCheckGlobalTracking(t *testing.T) string {
 	cmd.SetContext(t.Context())
 	cmd.SetOut(&out)
 	cmd.SetErr(&out)
-	checkGlobalTracking(cmd)
+	checkGlobalTracking(cmd, false)
 	return out.String()
 }
 
@@ -115,6 +115,30 @@ func TestCheckGlobalTracking_OKWhenUserHooksInstalled(t *testing.T) {
 
 	if got := runCheckGlobalTracking(t); !strings.Contains(got, "✓ Global tracking: user-level agent hooks OK") {
 		t.Fatalf("expected OK line, got: %q", got)
+	}
+}
+
+func TestCheckGlobalTracking_ForceRepairsMissingUserHooks(t *testing.T) {
+	setupTestRepo(t)
+	cfg := t.TempDir()
+	t.Setenv("ENTIRE_CONFIG_DIR", cfg)
+	isolateUserHome(t)
+	writeGlobalUserSettings(t, cfg, `{"global":{"enabled":true}}`)
+	var out bytes.Buffer
+	cmd := &cobra.Command{}
+	cmd.SetContext(t.Context())
+	cmd.SetOut(&out)
+	cmd.SetErr(&out)
+	checkGlobalTracking(cmd, true)
+
+	for _, ua := range func() []agent.UserHookAgent {
+		supported, _ := agent.UserHookSupports()
+		return supported
+	}() {
+		installed, err := ua.Support.AreUserHooksInstalled(t.Context())
+		if err != nil || !installed {
+			t.Fatalf("%s user hooks after doctor --force = %v, %v", ua.Name, installed, err)
+		}
 	}
 }
 

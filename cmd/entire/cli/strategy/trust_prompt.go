@@ -85,7 +85,9 @@ func askTrustPrompt(ctx context.Context) (trustChoice, error) {
 	if id, err := settings.RepoTrustIdentity(ctx); err == nil && id.OriginKeyed() {
 		yesLabel = fmt.Sprintf("Yes — trust this repo (all clones of %s)", id.DisplayScope())
 	}
-	choice := trustChoiceYes
+	// Start unset so accessible mode cannot turn an empty/default submission
+	// into consent. Only one of the explicit option values grants anything.
+	choice := trustChoice("")
 	form := uiform.New(
 		huh.NewGroup(
 			huh.NewSelect[trustChoice]().
@@ -105,5 +107,10 @@ func askTrustPrompt(ctx context.Context) (trustChoice, error) {
 		}
 		return trustChoiceNotNow, fmt.Errorf("trust prompt: %w", err)
 	}
-	return choice, nil
+	switch choice {
+	case trustChoiceYes, trustChoiceNotNow, trustChoiceAlways:
+		return choice, nil
+	default:
+		return trustChoiceNotNow, nil
+	}
 }

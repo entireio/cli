@@ -78,7 +78,7 @@ func getHookType(hookName string) string {
 	case geminicli.HookNameBeforeTool, geminicli.HookNameAfterTool:
 		return "tool"
 	default:
-		return "agent" //nolint:goconst // hook-type label; coincides with the agentFlagName constant's value but is unrelated to the --agent flag
+		return agentIdentifier
 	}
 }
 
@@ -86,9 +86,10 @@ func getHookType(hookName string) string {
 // It handles git repo checks, enabled checks, the hook logging context, event
 // parsing, and lifecycle dispatch.
 // Used by both the registered subcommand path and the RunE fallback for external agents.
-// When stampSession is true, it attaches the hook session context after taking
-// the runtime-migration gate. Production built-in and external hook commands
-// both pass true; tests may pass false when session stamping is irrelevant.
+// When stampSession is true, it attaches the hook session context after the
+// repository policy and sticky runtime route are established. Production
+// built-in and external hook commands both pass true; tests may pass false
+// when session stamping is irrelevant.
 func executeAgentHook(cmd *cobra.Command, agentName types.AgentName, hookName string, stampSession bool) error {
 	// Skip if not in a git repository - hooks shouldn't prevent the agent
 	// from working. On SessionStart only, and only when the user opted in to
@@ -105,6 +106,13 @@ func executeAgentHook(cmd *cobra.Command, agentName types.AgentName, hookName st
 		}
 		return nil
 	}
+	ctx, policy, policyErr := prepareHookPolicy(cmd.Context())
+	if policyErr != nil {
+		logging.Debug(cmd.Context(), "repository policy unavailable; skipping agent hook",
+			slog.String("error", policyErr.Error()))
+		return nil
+	}
+	cmd.SetContext(ctx)
 
 	// Skip if Entire is not set up and enabled. This must fail closed: any
 	// settings read error (missing file, corrupted JSON, transient I/O
@@ -118,8 +126,8 @@ func executeAgentHook(cmd *cobra.Command, agentName types.AgentName, hookName st
 	// git hooks use (see PersistentPreRun in hooks_git_cmd.go). It extends
 	// IsSetUpAndEnabled with the user-global tier: repos with no repo-level
 	// setup proceed when global mode is on and the repo is not excluded.
-	if active, reason := settings.IsActiveForRepoWithReason(cmd.Context()); !active {
-		warnInactiveOnSessionStart(cmd.Context(), cmd.ErrOrStderr(), agentName, hookName, inactiveSessionStartNotice(reason))
+	if !policy.Active {
+		warnInactiveOnSessionStart(cmd.Context(), cmd.ErrOrStderr(), agentName, hookName, inactiveSessionStartNotice(policy.InactiveReason))
 		return nil
 	}
 
@@ -139,7 +147,7 @@ func executeAgentHook(cmd *cobra.Command, agentName types.AgentName, hookName st
 	strategy.MaybeEnsureGlobalSetup(cmd.Context())
 
 	// Initialize logging context with agent name
-	ctx := logging.WithAgent(logging.WithComponent(cmd.Context(), "hooks"), agentName)
+	ctx = logging.WithAgent(logging.WithComponent(cmd.Context(), "hooks"), agentName)
 
 	// Strategy name for logging
 	strategyName := strategy.StrategyNameManualCommit

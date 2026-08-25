@@ -5,9 +5,35 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
+
+func TestGeminiHookSpecs_ExactInventory(t *testing.T) {
+	t.Parallel()
+	want := []string{
+		"SessionStart/entire-session-start/session-start",
+		"SessionEnd/entire-session-end-exit/session-end",
+		"SessionEnd/entire-session-end-logout/session-end",
+		"BeforeAgent/entire-before-agent/before-agent",
+		"AfterAgent/entire-after-agent/after-agent",
+		"BeforeModel/entire-before-model/before-model",
+		"AfterModel/entire-after-model/after-model",
+		"BeforeToolSelection/entire-before-tool-selection/before-tool-selection",
+		"BeforeTool/entire-before-tool/before-tool",
+		"AfterTool/entire-after-tool/after-tool",
+		"PreCompress/entire-pre-compress/pre-compress",
+		"Notification/entire-notification/notification",
+	}
+	got := make([]string, 0, len(geminiHookSpecs))
+	for _, spec := range geminiHookSpecs {
+		got = append(got, spec.section+"/"+spec.name+"/"+spec.hookName)
+	}
+	if !slices.Equal(got, want) {
+		t.Fatalf("gemini inventory = %q, want %q", got, want)
+	}
+}
 
 // No t.Parallel in this file: every test redirects the user home via t.Setenv.
 

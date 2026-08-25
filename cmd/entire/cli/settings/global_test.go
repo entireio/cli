@@ -6,8 +6,20 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/entireio/cli/cmd/entire/cli/settings/repopolicy"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 )
+
+func markLocallyActivated(t *testing.T, dir string) {
+	t.Helper()
+	repository, err := repopolicy.ResolveRepositoryAt(t.Context(), dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := repopolicy.SetLocalActivationForRepository(repository, repopolicy.ActivationEnabled); err != nil {
+		t.Fatal(err)
+	}
+}
 
 func writeUserSettings(t *testing.T, dir, content string) {
 	t.Helper()
@@ -417,6 +429,7 @@ func TestIsActiveForRepo(t *testing.T) {
 		if err := os.WriteFile(filepath.Join(dir, ".entire", "settings.local.json"), []byte(`{"enabled":true}`), 0o600); err != nil {
 			t.Fatal(err)
 		}
+		markLocallyActivated(t, dir)
 		t.Chdir(dir)
 		if !IsActiveForRepo(t.Context()) {
 			t.Fatal("a local-only enabled setup must activate")
@@ -432,6 +445,7 @@ func TestIsActiveForRepo(t *testing.T) {
 		if err := os.WriteFile(filepath.Join(dir, ".entire", "settings.json"), []byte(`{"enabled":true}`), 0o600); err != nil {
 			t.Fatal(err)
 		}
+		markLocallyActivated(t, dir)
 		t.Chdir(dir)
 		if !IsActiveForRepo(t.Context()) {
 			t.Fatal("repo-level enabled must be active regardless of global tier")

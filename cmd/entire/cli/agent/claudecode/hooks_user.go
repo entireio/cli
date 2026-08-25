@@ -38,22 +38,32 @@ func UserSettingsPath() (string, error) {
 // and re-added in the current form, so a pre-existing alternate-form entry
 // can never double-fire alongside the one this install writes. Never touches
 // user-level permissions and preserves unrelated keys.
-func (c *ClaudeCodeAgent) InstallUserHooks(_ context.Context) (agent.UserHookInstallResult, error) {
+func (c *ClaudeCodeAgent) InstallUserHooks(ctx context.Context) (agent.UserHookInstallResult, error) {
 	settingsPath, err := UserSettingsPath()
 	if err != nil {
 		return agent.UserHookInstallResult{}, err
 	}
+	release, err := agent.AcquireUserHookConfigLock(ctx, settingsPath)
+	if err != nil {
+		return agent.UserHookInstallResult{}, fmt.Errorf("lock Claude Code user hook settings: %w", err)
+	}
+	defer release()
 	count, repaired, err := installHooksToFile(settingsPath, false, false)
 	return agent.UserHookInstallResult{Installed: count, Repaired: repaired}, err
 }
 
 // UninstallUserHooks removes Entire's hooks (and only Entire's) from
 // ~/.claude/settings.json. A missing file is not an error.
-func (c *ClaudeCodeAgent) UninstallUserHooks(_ context.Context) error {
+func (c *ClaudeCodeAgent) UninstallUserHooks(ctx context.Context) error {
 	settingsPath, err := UserSettingsPath()
 	if err != nil {
 		return err
 	}
+	release, err := agent.AcquireUserHookConfigLock(ctx, settingsPath)
+	if err != nil {
+		return fmt.Errorf("lock Claude Code user hook settings: %w", err)
+	}
+	defer release()
 	return uninstallHooksFromFile(settingsPath, false)
 }
 
@@ -76,16 +86,25 @@ func (c *ClaudeCodeAgent) AreUserHooksInstalled(_ context.Context) (bool, error)
 		}
 		return false, err
 	}
-	if !hasEntireHook(settings.Hooks.SessionStart) ||
-		!hasEntireHook(settings.Hooks.SessionEnd) ||
-		!hasEntireHook(settings.Hooks.UserPromptSubmit) ||
-		!hasEntireHook(settings.Hooks.Stop) ||
-		!hasEntireHook(settings.Hooks.SubagentStop) {
-		return false, nil
+	sections := map[string][]ClaudeHookMatcher{
+		"SessionStart":     settings.Hooks.SessionStart,
+		"SessionEnd":       settings.Hooks.SessionEnd,
+		"Stop":             settings.Hooks.Stop,
+		"SubagentStop":     settings.Hooks.SubagentStop,
+		"UserPromptSubmit": settings.Hooks.UserPromptSubmit,
+		"PreToolUse":       settings.Hooks.PreToolUse,
+		"PostToolUse":      settings.Hooks.PostToolUse,
 	}
-	subagentTools := splitMatcherTools(subagentToolMatcher)
-	taskTools := splitMatcherTools(taskToolMatcher)
-	return hasEntireHookCoveringTools(settings.Hooks.PreToolUse, subagentTools) &&
-		hasEntireHookCoveringTools(settings.Hooks.PostToolUse, subagentTools) &&
-		hasEntireHookCoveringTools(settings.Hooks.PostToolUse, taskTools), nil
+	for _, spec := range claudeHookSpecs {
+		var present bool
+		if spec.matcher == "" {
+			present = hookCommandExists(sections[spec.section], spec.productionCommand())
+		} else {
+			present = hookCommandExistsWithMatcher(sections[spec.section], spec.matcher, spec.productionCommand())
+		}
+		if !present {
+			return false, nil
+		}
+	}
+	return true, nil
 }

@@ -17,6 +17,7 @@ import (
 	checkpointremote "github.com/entireio/cli/cmd/entire/cli/checkpoint/remote"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
+	"github.com/entireio/cli/cmd/entire/cli/settings/repopolicy"
 	"github.com/entireio/cli/perf"
 	"github.com/entireio/cli/redact"
 )
@@ -105,6 +106,20 @@ func (s *ManualCommitStrategy) prePush(ctx context.Context, remote string, prote
 		}
 	}
 
+	// Do not ask for consent when this push has no Entire data to send. A
+	// count failure also holds silently: checkpoint egress must never make the
+	// user's branch push fail or consume Git's stdin.
+	pendingCheckpoints, pendingErr := CountUnpushedCheckpoints(ctx, ps.remote)
+	if pendingErr != nil {
+		logging.Warn(ctx, "could not determine pending checkpoints; holding checkpoint sync",
+			slog.String("error", pendingErr.Error()),
+		)
+		return nil
+	}
+	if pendingCheckpoints == 0 {
+		return nil
+	}
+
 	// Egress trust gate, above both backend branches: a globally enrolled repo
 	// syncs only after the user trusts it once. A hold pairs with exactly one
 	// stderr explanation and never fails the user's own push.
@@ -119,7 +134,18 @@ func (s *ManualCommitStrategy) prePush(ctx context.Context, remote string, prote
 			fmt.Fprintln(stderrWriter, "Entire: checkpoint sync held — this repo isn't trusted yet.\nSessions are captured locally. Run `entire trust` to sync them to your checkpoint sync remote.")
 			return nil
 		}
-		// Granted at the prompt: re-evaluate the gate, never reuse a boolean.
+		// Granted at the prompt: replace any stale context snapshot with a fresh
+		// classification. Rechecking through a pre-write snapshot would keep the
+		// gate closed for the remainder of this same push.
+		policy, policyErr := repopolicy.ClassifyRepoPolicy(ctx)
+		if policyErr != nil {
+			logging.Warn(ctx, "could not reclassify repository after saving trust; holding checkpoint sync",
+				slog.String("error", policyErr.Error()),
+			)
+			fmt.Fprintln(stderrWriter, "Warning: trust was saved but repository policy could not be refreshed; checkpoint sync skipped for this push.")
+			return nil
+		}
+		ctx = repopolicy.WithRepoPolicy(ctx, policy)
 		if !settings.CheckpointEgressAllowed(ctx) {
 			fmt.Fprintln(stderrWriter, "Warning: trust was saved but the gate still holds; checkpoint sync skipped for this push.")
 			return nil

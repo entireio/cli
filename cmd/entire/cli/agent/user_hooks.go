@@ -2,9 +2,35 @@ package agent
 
 import (
 	"context"
+	"fmt"
+	"os"
+	"path/filepath"
+	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
+	"github.com/entireio/cli/cmd/entire/cli/internal/flock"
 )
+
+const userHookLockTimeout = 5 * time.Second
+
+// AcquireUserHookConfigLock serializes a complete user-config read/modify/write
+// transaction. The bounded wait keeps foreground setup responsive while still
+// preserving unrelated concurrent agent-config edits.
+func AcquireUserHookConfigLock(ctx context.Context, settingsPath string) (func(), error) {
+	if err := os.MkdirAll(filepath.Dir(settingsPath), 0o750); err != nil {
+		return nil, fmt.Errorf("create user hook config directory: %w", err)
+	}
+	lockCtx, cancel := context.WithTimeout(ctx, userHookLockTimeout)
+	release, err := flock.AcquireContext(lockCtx, settingsPath+".entire.lock")
+	if err != nil {
+		cancel()
+		return nil, fmt.Errorf("lock user hook config: %w", err)
+	}
+	return func() {
+		release()
+		cancel()
+	}, nil
+}
 
 // UserHookSupport is an optional extension of HookSupport for agents whose
 // hooks can also be installed at the USER level (home-directory config) — the

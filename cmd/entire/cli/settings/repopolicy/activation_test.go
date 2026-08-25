@@ -512,6 +512,77 @@ func TestBootstrapLegacyActivation_RejectsTrackedOrSymlinkedEvidence(t *testing.
 	})
 }
 
+func TestRebindMovedRepository_RequiresMovedPathAndActiveSession(t *testing.T) {
+	t.Parallel()
+	t.Run("moved repository rebinds identity-bound records", func(t *testing.T) {
+		t.Parallel()
+		root, repository := newPolicyRepo(t)
+		if err := SetLocalActivationForRepository(repository, ActivationEnabled); err != nil {
+			t.Fatal(err)
+		}
+		policy := RepoPolicy{
+			Active:           true,
+			ActivationSource: ActivationLocal,
+			WorktreeRoot:     repository.WorktreeRoot,
+			GitCommonDir:     repository.GitCommonDir,
+			WorktreeKey:      repository.WorktreeKey,
+			Route:            proposedRoute(repository, RuntimeWorktree),
+		}
+		if _, err := EnsureRuntimeRoute(t.Context(), policy); err != nil {
+			t.Fatal(err)
+		}
+		if err := WriteSetupRecord(repository, SetupRecord{GitHooksSpec: 1, PrimaryRefSpec: 1}); err != nil {
+			t.Fatal(err)
+		}
+		body := `{"session_id":"session-1","phase":"active","worktree_path":` + quoteJSON(repository.WorktreeRoot) + `,"worktree_id":` + quoteJSON(repository.WorktreeID) + `}`
+		writePolicyFile(t, repository.GitCommonDir, "entire-sessions/session-1.json", body)
+
+		moved := filepath.Join(filepath.Dir(root), filepath.Base(root)+"-moved")
+		if err := os.Rename(root, moved); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = os.RemoveAll(moved) })
+		movedRepository, err := ResolveRepositoryAt(t.Context(), moved)
+		if err != nil {
+			t.Fatal(err)
+		}
+		rebound, err := RebindMovedRepository(t.Context(), movedRepository)
+		if err != nil || !rebound {
+			t.Fatalf("RebindMovedRepository = %v, %v; want true", rebound, err)
+		}
+		if state, err := ReadLocalActivation(movedRepository); err != nil || state != ActivationEnabled {
+			t.Fatalf("activation after move = %q, %v", state, err)
+		}
+		if _, found, err := ReadRuntimeRoute(movedRepository); err != nil || !found {
+			t.Fatalf("route after move = found %v, %v", found, err)
+		}
+		if _, found, err := ReadSetupRecord(movedRepository); err != nil || !found {
+			t.Fatalf("setup after move = found %v, %v", found, err)
+		}
+	})
+
+	t.Run("existing source path rejects copied registry", func(t *testing.T) {
+		t.Parallel()
+		_, repository := newPolicyRepo(t)
+		if err := SetLocalActivationForRepository(repository, ActivationEnabled); err != nil {
+			t.Fatal(err)
+		}
+		body := `{"session_id":"session-1","phase":"active","worktree_path":` + quoteJSON(repository.WorktreeRoot) + `,"worktree_id":` + quoteJSON(repository.WorktreeID) + `}`
+		writePolicyFile(t, repository.GitCommonDir, "entire-sessions/session-1.json", body)
+		copiedRoot := t.TempDir()
+		copied := repository
+		copied.WorktreeRoot = canonicalPath(copiedRoot)
+
+		rebound, err := RebindMovedRepository(t.Context(), copied)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if rebound {
+			t.Fatal("copied registry must not rebind while its source worktree still exists")
+		}
+	})
+}
+
 func runPolicyGit(t *testing.T, dir string, args ...string) {
 	t.Helper()
 	cmd := exec.CommandContext(t.Context(), "git", args...)

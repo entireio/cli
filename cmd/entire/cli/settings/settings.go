@@ -23,6 +23,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
+	"github.com/entireio/cli/cmd/entire/cli/settings/repopolicy"
 	"github.com/entireio/cli/redact"
 )
 
@@ -550,6 +551,9 @@ func validateScannerSettings(s *EntireSettings) error {
 // Returns default settings if no settings or preferences file exists.
 // Works correctly from any subdirectory within the repository.
 func Load(ctx context.Context) (*EntireSettings, error) {
+	if policy, ok := repopolicy.RepoPolicyFromContext(ctx); ok {
+		return LoadForRepoPolicy(ctx, policy)
+	}
 	if worktreeRoot, ok := worktreeRootFromContext(ctx); ok {
 		return loadForWorktreeRoot(ctx, worktreeRoot)
 	}

@@ -217,6 +217,178 @@ func BootstrapLegacyActivation(ctx context.Context, repository Repository) (bool
 	return true, nil
 }
 
+// RebindMovedRepository repairs identity-bound machine-local records after the
+// repository directory itself moves. Recovery requires an active session tied
+// to the old worktree identity and the old path must no longer exist, so a
+// copied registry cannot activate another checkout.
+func RebindMovedRepository(ctx context.Context, repository Repository) (bool, error) {
+	if err := ctx.Err(); err != nil {
+		return false, fmt.Errorf("rebinding moved repository: %w", err)
+	}
+	if err := validateRepository(repository); err != nil {
+		return false, err
+	}
+	release, err := acquireTrustGrantLedgerLock(ctx, repository)
+	if err != nil {
+		return false, fmt.Errorf("locking repository relocation: %w", err)
+	}
+	defer release()
+	return rebindMovedRepositoryLocked(repository)
+}
+
+func rebindMovedRepositoryLocked(repository Repository) (bool, error) {
+	var activation ActivationRecord
+	activationFound, err := readOptionalPolicyRecord(activationPath(repository), &activation)
+	if err != nil {
+		return false, fmt.Errorf("reading activation record for relocation: %w", err)
+	}
+	var route RuntimeRoute
+	routeFound, err := readOptionalPolicyRecord(routePath(repository), &route)
+	if err != nil {
+		return false, fmt.Errorf("reading runtime route for relocation: %w", err)
+	}
+	if !activationFound && !routeFound {
+		return false, nil
+	}
+	if activationFound {
+		if activation.Version != recordVersion || activation.State != ActivationEnabled {
+			return false, nil
+		}
+	}
+	if routeFound && (route.Version != recordVersion || (route.Layout != RuntimeWorktree && route.Layout != RuntimeGitCommon)) {
+		return false, nil
+	}
+
+	oldWorktree, oldGitCommon := "", ""
+	for _, identity := range [][2]string{
+		{activation.CanonicalWorktree, activation.CanonicalGitCommon},
+		{route.CanonicalWorktree, route.CanonicalGitCommon},
+	} {
+		if identity[0] == "" && identity[1] == "" {
+			continue
+		}
+		if identity[0] == repository.WorktreeRoot && identity[1] == repository.GitCommonDir {
+			continue
+		}
+		if oldWorktree == "" {
+			oldWorktree, oldGitCommon = filepath.Clean(identity[0]), filepath.Clean(identity[1])
+			continue
+		}
+		if filepath.Clean(identity[0]) != oldWorktree || filepath.Clean(identity[1]) != oldGitCommon {
+			return false, errors.New("repository relocation records disagree on prior identity")
+		}
+	}
+	if oldWorktree == "" || !filepath.IsAbs(oldWorktree) || !filepath.IsAbs(oldGitCommon) {
+		return false, nil
+	}
+	if exists, statErr := policyPathExists(oldWorktree); statErr != nil || exists {
+		return false, statErr
+	}
+	if oldGitCommon != repository.GitCommonDir {
+		if exists, statErr := policyPathExists(oldGitCommon); statErr != nil || exists {
+			return false, statErr
+		}
+	}
+	evidence, err := hasActiveSessionEvidence(repository, oldWorktree, repository.WorktreeID, func(string) verifiedReadHooks {
+		return verifiedReadHooks{}
+	})
+	if err != nil || !evidence {
+		return false, err
+	}
+
+	var setup SetupRecord
+	setupFound, err := readOptionalPolicyRecord(setupPath(repository), &setup)
+	if err != nil {
+		return false, fmt.Errorf("reading setup record for relocation: %w", err)
+	}
+	var ledger TrustGrantLedger
+	ledgerFound, err := readOptionalPolicyRecord(trustLedgerPath(repository), &ledger)
+	if err != nil {
+		return false, fmt.Errorf("reading trust ledger for relocation: %w", err)
+	}
+	for name, identity := range map[string][2]string{
+		"setup record": {setup.CanonicalWorktree, setup.CanonicalGitCommon},
+		"trust ledger": {ledger.CanonicalWorktree, ledger.CanonicalGitCommon},
+	} {
+		if (name == "setup record" && !setupFound) || (name == "trust ledger" && !ledgerFound) {
+			continue
+		}
+		if identity != [2]string{oldWorktree, oldGitCommon} && identity != [2]string{repository.WorktreeRoot, repository.GitCommonDir} {
+			return false, fmt.Errorf("%s does not match repository relocation identity", name)
+		}
+	}
+	if setupFound && (setup.Version != recordVersion || setup.GitHooksSpec < 0 || setup.PrimaryRefSpec < 0) {
+		return false, errors.New("invalid setup record during repository relocation")
+	}
+	if ledgerFound && ledger.Version != recordVersion {
+		return false, errors.New("invalid trust ledger during repository relocation")
+	}
+
+	if routeFound {
+		route.CanonicalWorktree = repository.WorktreeRoot
+		route.CanonicalGitCommon = repository.GitCommonDir
+		if err := writePolicyRecord(routePath(repository), route); err != nil {
+			return false, fmt.Errorf("rebinding runtime route: %w", err)
+		}
+	}
+	if setupFound {
+		setup.CanonicalWorktree = repository.WorktreeRoot
+		setup.CanonicalGitCommon = repository.GitCommonDir
+		if err := writePolicyRecord(setupPath(repository), setup); err != nil {
+			return false, fmt.Errorf("rebinding setup record: %w", err)
+		}
+	}
+	if ledgerFound {
+		ledger.CanonicalWorktree = repository.WorktreeRoot
+		ledger.CanonicalGitCommon = repository.GitCommonDir
+		if err := writePolicyRecord(trustLedgerPath(repository), ledger); err != nil {
+			return false, fmt.Errorf("rebinding trust ledger: %w", err)
+		}
+	}
+	if activationFound {
+		if err := setLocalActivation(repository, ActivationEnabled); err != nil {
+			return false, fmt.Errorf("rebinding activation record: %w", err)
+		}
+	}
+	return true, nil
+}
+
+func readOptionalPolicyRecord(path string, target any) (bool, error) {
+	data, err := os.ReadFile(path) //nolint:gosec // callers provide package-owned registry paths, never user-supplied paths
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return false, nil
+		}
+		return false, fmt.Errorf("read policy record: %w", err)
+	}
+	if err := decodeStrict(data, target); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+func writePolicyRecord(path string, value any) error {
+	data, err := jsonutil.MarshalIndentWithNewline(value, "", "  ")
+	if err != nil {
+		return fmt.Errorf("encode policy record: %w", err)
+	}
+	if err := jsonutil.WriteFileAtomic(path, data, 0o600); err != nil {
+		return fmt.Errorf("write policy record: %w", err)
+	}
+	return nil
+}
+
+func policyPathExists(path string) (bool, error) {
+	_, err := os.Lstat(path)
+	if err == nil {
+		return true, nil
+	}
+	if errors.Is(err, fs.ErrNotExist) {
+		return false, nil
+	}
+	return false, fmt.Errorf("inspect prior repository path: %w", err)
+}
+
 func enabledFromSettingsData(data []byte) (*bool, error) {
 	var raw map[string]json.RawMessage
 	if err := decodeStrict(data, &raw); err != nil {
@@ -284,6 +456,15 @@ func hasExactSessionEvidence(repository Repository) (bool, error) {
 }
 
 func hasExactSessionEvidenceWithHooks(repository Repository, hooks func(string) verifiedReadHooks) (bool, error) {
+	return hasActiveSessionEvidence(repository, repository.WorktreeRoot, repository.WorktreeID, hooks)
+}
+
+func hasActiveSessionEvidence(
+	repository Repository,
+	worktreeRoot string,
+	worktreeID string,
+	hooks func(string) verifiedReadHooks,
+) (bool, error) {
 	root, err := os.OpenRoot(repository.GitCommonDir)
 	if err != nil {
 		return false, fmt.Errorf("opening Git common root: %w", err)
@@ -320,7 +501,7 @@ func hasExactSessionEvidenceWithHooks(repository Repository, hooks func(string) 
 		if json.Unmarshal(data, &record) != nil || !isLegacyActivePhase(record.Phase) || hasNonNullJSON(record.EndedAt) {
 			continue
 		}
-		if canonicalPath(record.WorktreePath) == repository.WorktreeRoot && record.WorktreeID == repository.WorktreeID {
+		if canonicalPath(record.WorktreePath) == canonicalPath(worktreeRoot) && record.WorktreeID == worktreeID {
 			return true, nil
 		}
 	}

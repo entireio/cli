@@ -23,6 +23,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
+	"github.com/entireio/cli/cmd/entire/cli/settings/repopolicy"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
 	"github.com/entireio/cli/cmd/entire/cli/stringutil"
 	"github.com/entireio/cli/cmd/entire/cli/trailers"
@@ -129,8 +130,11 @@ type globalTrackingInfo struct {
 	// Configured is false while the machine-wide question was never answered
 	// (global tier absent from the user settings file, or the file is
 	// unreadable) — the status line is omitted entirely then.
-	Configured bool
-	Enabled    bool
+	Configured       bool
+	Enabled          bool
+	SettingsPath     string
+	ActivationSource repopolicy.ActivationSource
+	RuntimeLayout    repopolicy.RuntimeLayout
 	// AgentsCovered counts agents whose user-level hooks are installed; only
 	// meaningful when Enabled.
 	AgentsCovered int
@@ -163,7 +167,11 @@ func computeGlobalTrackingInfo(ctx context.Context) globalTrackingInfo {
 	if err != nil || !us.GlobalConfigured() {
 		return globalTrackingInfo{}
 	}
-	info := globalTrackingInfo{Configured: true, Enabled: us.GlobalEnabled()}
+	info := globalTrackingInfo{
+		Configured:   true,
+		Enabled:      us.GlobalEnabled(),
+		SettingsPath: settings.UserSettingsPath(),
+	}
 	if !info.Enabled {
 		if _, err := paths.WorktreeRoot(ctx); err == nil {
 			info.TrustState = trustStateNotApplicable
@@ -181,8 +189,19 @@ func computeGlobalTrackingInfo(ctx context.Context) globalTrackingInfo {
 	}
 	if _, err := paths.WorktreeRoot(ctx); err == nil {
 		info.InRepo = true
-		info.ActiveHere, info.InactiveReason = settings.IsActiveForRepoWithReason(ctx)
-		info.TrustState, info.TrustSource = computeRepoTrustState(ctx, info.ActiveHere)
+		policy, policyErr := repopolicy.ClassifyRepoPolicy(ctx)
+		if policyErr == nil {
+			ctx = repopolicy.WithRepoPolicy(ctx, policy)
+			info.ActiveHere = policy.Active
+			info.InactiveReason = policy.InactiveReason
+			info.ActivationSource = policy.ActivationSource
+			info.RuntimeLayout = policy.Route.Layout
+			info.TrustState, info.TrustSource = computeRepoTrustState(policy)
+		} else {
+			info.InactiveReason = settings.InactiveReasonGlobalOff
+			info.TrustState = trustStateNotApplicable
+			info.TrustSource = settings.TrustSourceNone
+		}
 		if info.TrustState == trustStateUntrusted {
 			info.HeldCheckpoints = heldCheckpointCount(ctx)
 		}
@@ -193,15 +212,14 @@ func computeGlobalTrackingInfo(ctx context.Context) globalTrackingInfo {
 // computeRepoTrustState classifies this repo's egress consent for status.
 // Only a globally enrolled repo has a per-repo trust decision; everything
 // else is not_applicable.
-func computeRepoTrustState(ctx context.Context, activeHere bool) (string, settings.TrustSource) {
-	if settings.RepoUntrustedEnrolled(ctx) {
-		return trustStateUntrusted, settings.TrustSourceNone
-	}
-	configured, err := settings.RepoActivationConfigured(ctx)
-	if !activeHere || err != nil || configured {
+func computeRepoTrustState(policy repopolicy.RepoPolicy) (string, settings.TrustSource) {
+	if !policy.Active || policy.ActivationSource != repopolicy.ActivationGlobal {
 		return trustStateNotApplicable, settings.TrustSourceNone
 	}
-	return trustStateTrusted, settings.CurrentTrustSource(ctx)
+	if !policy.Trust.Allowed {
+		return trustStateUntrusted, settings.TrustSourceNone
+	}
+	return trustStateTrusted, policy.Trust.Source
 }
 
 // heldCheckpointCount counts checkpoints held locally against the elected
@@ -976,7 +994,10 @@ type statusJSON struct {
 
 // globalTrackingJSON mirrors globalTrackingInfo for `entire status --json`.
 type globalTrackingJSON struct {
-	Enabled bool `json:"enabled"`
+	Enabled          bool   `json:"enabled"`
+	SettingsPath     string `json:"settings_path,omitempty"`
+	ActivationSource string `json:"activation_source,omitempty"`
+	RuntimeLayout    string `json:"runtime_layout,omitempty"`
 	// AgentsCovered counts agents whose user-level hooks are installed.
 	AgentsCovered int `json:"agents_covered"`
 	// ActiveHere is the hook gate's per-repo answer and InactiveReason names
@@ -987,8 +1008,9 @@ type globalTrackingJSON struct {
 	InactiveReason string `json:"inactive_reason,omitempty"`
 	// TrustState is "trusted"|"untrusted"|"not_applicable"; TrustSource is
 	// "trust_all"|"repo"|"none". Both omitted outside a repository.
-	TrustState  string `json:"trust_state,omitempty"`
-	TrustSource string `json:"trust_source,omitempty"`
+	TrustState      string `json:"trust_state,omitempty"`
+	TrustSource     string `json:"trust_source,omitempty"`
+	HeldCheckpoints int    `json:"held_checkpoints,omitempty"`
 }
 
 // inactiveReasonJSON maps the gate's inactive reason to its stable JSON
@@ -1022,7 +1044,14 @@ func runStatusJSON(ctx context.Context, w io.Writer) error {
 	// error shapes) so `status --json` is useful outside a git repository.
 	var gt *globalTrackingJSON
 	if info := computeGlobalTrackingInfo(ctx); info.Configured {
-		gt = &globalTrackingJSON{Enabled: info.Enabled, AgentsCovered: info.AgentsCovered}
+		gt = &globalTrackingJSON{
+			Enabled:          info.Enabled,
+			AgentsCovered:    info.AgentsCovered,
+			SettingsPath:     info.SettingsPath,
+			ActivationSource: string(info.ActivationSource),
+			RuntimeLayout:    string(info.RuntimeLayout),
+			HeldCheckpoints:  info.HeldCheckpoints,
+		}
 		if info.InRepo {
 			active := info.ActiveHere
 			gt.ActiveHere = &active

@@ -5,9 +5,30 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 )
+
+func TestClaudeHookSpecs_ExactInventory(t *testing.T) {
+	t.Parallel()
+	want := []claudeHookSpec{
+		{section: "SessionStart", hookName: HookNameSessionStart, warnWrap: true},
+		{section: "SessionEnd", hookName: HookNameSessionEnd},
+		{section: "Stop", hookName: HookNameStop},
+		{section: "SubagentStop", hookName: HookNameSubagentStop},
+		{section: "UserPromptSubmit", hookName: HookNameUserPromptSubmit},
+		{section: "PreToolUse", matcher: subagentToolMatcher, hookName: HookNamePreTask},
+		{section: "PostToolUse", matcher: subagentToolMatcher, hookName: HookNamePostTask},
+		{section: "PostToolUse", matcher: taskToolMatcher, hookName: HookNamePostTodo},
+	}
+	if !reflect.DeepEqual(claudeHookSpecs, want) {
+		t.Fatalf("claudeHookSpecs = %#v, want %#v", claudeHookSpecs, want)
+	}
+	if len(claudeHookSpecs) != entireClaudeHookCount {
+		t.Fatalf("hook count = %d, want %d", len(claudeHookSpecs), entireClaudeHookCount)
+	}
+}
 
 // No t.Parallel in this file: every test redirects the user home via t.Setenv.
 

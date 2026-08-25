@@ -71,6 +71,7 @@ func TestNewAgentHookVerbCmd_LogsInvocation(t *testing.T) {
 	if err := os.WriteFile(settingsFile, []byte(`{"enabled":true,"strategy":"manual-commit"}`), 0o644); err != nil {
 		t.Fatalf("failed to create settings file: %v", err)
 	}
+	enableEntire(t, tmpDir)
 
 	// Create logs directory
 	logsDir := filepath.Join(entireDir, "logs")
@@ -385,6 +386,7 @@ func TestExecuteAgentHookCapturesWhenEnabledViaLocalSettingsOnly(t *testing.T) {
 	require.NoError(t, os.MkdirAll(entireDir, 0o750))
 	// Local-only enablement: settings.local.json present, base settings.json absent.
 	require.NoError(t, os.WriteFile(filepath.Join(entireDir, "settings.local.json"), []byte(`{"enabled":true}`), 0o600))
+	markCurrentRepoLocallyActivated(t)
 	require.NoFileExists(t, filepath.Join(entireDir, "settings.json"))
 
 	transcriptPath := filepath.Join(repoRoot, "transcript.jsonl")
@@ -579,8 +581,8 @@ func TestExecuteAgentHookPostTodoFailsWhenPolicyUnsupported(t *testing.T) {
 }
 
 // Agent hook trees must defer session stamping to executeAgentHook, after it
-// acquires the runtime-migration gate. A parent pre-run would execute first and
-// reopen the migration race. Post-runs stay unset because main.go owns the log
+// establishes the repository policy route. A parent pre-run would execute too
+// early and select session/log paths before routing. Post-runs stay unset because main.go owns the log
 // sink's only close site, including Cobra's error path.
 func TestAgentHooksCmd_DefersSessionContextUntilGatedRun(t *testing.T) {
 	hooksCmd := newHooksCmd()
@@ -597,9 +599,9 @@ func TestAgentHooksCmd_DefersSessionContextUntilGatedRun(t *testing.T) {
 			require.NotNil(t, agentCmd, "expected to find %s subcommand under hooks", agentSubcommand)
 
 			require.Nil(t, agentCmd.PersistentPreRun,
-				"session stamping must happen inside the migration-gated RunE")
+				"session stamping must happen inside the policy-routed RunE")
 			require.Nil(t, agentCmd.PersistentPreRunE,
-				"session stamping must happen inside the migration-gated RunE")
+				"session stamping must happen inside the policy-routed RunE")
 			require.Nil(t, agentCmd.PersistentPostRun,
 				"PersistentPostRun must stay unset: main.go flushes the log sink")
 			require.Nil(t, agentCmd.PersistentPostRunE,

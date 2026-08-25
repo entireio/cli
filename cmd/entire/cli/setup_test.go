@@ -52,6 +52,52 @@ func setupTestRepo(t *testing.T) {
 	testutil.InitRepo(t, tmpDir)
 }
 
+func TestSetupAgentHooks_InstallsMatchingUserInfrastructure(t *testing.T) {
+	setupTestRepo(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	ag, err := agent.Get(agent.AgentNameClaudeCode)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := setupAgentHooks(t.Context(), ag, false); err != nil {
+		t.Fatal(err)
+	}
+	userHooks, ok := agent.AsUserHookSupport(ag)
+	if !ok {
+		t.Fatal("Claude Code unexpectedly lacks user-hook support")
+	}
+	installed, err := userHooks.AreUserHooksInstalled(t.Context())
+	if err != nil || !installed {
+		t.Fatalf("user hooks after agent setup = %v, %v; want installed", installed, err)
+	}
+}
+
+func TestReconcileDetectedUserHooks_CreatesOnlyInstalledAgentConfig(t *testing.T) {
+	setupTestDir(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	previous := userHookLookPath
+	userHookLookPath = func(name string) (string, error) {
+		if name == "claude" {
+			return "/test/bin/claude", nil
+		}
+		return "", exec.ErrNotFound
+	}
+	t.Cleanup(func() { userHookLookPath = previous })
+
+	var out bytes.Buffer
+	reconcileDetectedUserHooks(t.Context(), &out)
+	if _, err := os.Stat(filepath.Join(home, ".claude", "settings.json")); err != nil {
+		t.Fatalf("Claude config was not installed: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(home, ".gemini", "settings.json")); !os.IsNotExist(err) {
+		t.Fatalf("absent Gemini config was created: %v", err)
+	}
+}
+
 func TestEnableCommand_HasNoGlobalFlag(t *testing.T) {
 	t.Parallel()
 

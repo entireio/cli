@@ -43,6 +43,11 @@ func (g *GeminiCLIAgent) InstallUserHooks(ctx context.Context) (agent.UserHookIn
 	if err != nil {
 		return agent.UserHookInstallResult{}, err
 	}
+	release, err := agent.AcquireUserHookConfigLock(ctx, settingsPath)
+	if err != nil {
+		return agent.UserHookInstallResult{}, fmt.Errorf("lock Gemini CLI user hook settings: %w", err)
+	}
+	defer release()
 	count, repaired, err := installHooksToFile(ctx, settingsPath, false, true)
 	return agent.UserHookInstallResult{Installed: count, Repaired: repaired}, err
 }
@@ -54,6 +59,11 @@ func (g *GeminiCLIAgent) UninstallUserHooks(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	release, err := agent.AcquireUserHookConfigLock(ctx, settingsPath)
+	if err != nil {
+		return fmt.Errorf("lock Gemini CLI user hook settings: %w", err)
+	}
+	defer release()
 	return uninstallHooksFromFile(ctx, settingsPath)
 }
 

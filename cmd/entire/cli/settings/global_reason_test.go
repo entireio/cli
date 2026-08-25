@@ -20,18 +20,19 @@ func TestIsActiveForRepoWithReason(t *testing.T) {
 		repoSettings string // "" = no repo-level file
 		userSettings string // "" = no user file
 		excludeSelf  bool
+		localActive  bool
 		wantActive   bool
 		wantReason   InactiveReason
 	}{
-		{"repo enabled is active with no reason", `{"enabled":true}`, "", false, true, InactiveReasonNone},
+		{"repo enabled is active with no reason", `{"enabled":true}`, "", false, true, true, InactiveReasonNone},
 		// Even with the global tier on: repo-level setup makes its answer final.
-		{"repo disabled is the explicit veto", `{"enabled":false}`, `{"global":{"enabled":true}}`, false, false, InactiveReasonRepoDisabled},
-		{"no setup and global unconfigured is global-off", "", "", false, false, InactiveReasonGlobalOff},
-		{"no setup and global disabled is global-off", "", `{"global":{"enabled":false}}`, false, false, InactiveReasonGlobalOff},
-		{"global on is active", "", `{"global":{"enabled":true}}`, false, true, InactiveReasonNone},
-		{"incidental repo settings inherit global on", `{"investigate":{"max_turns":4}}`, `{"global":{"enabled":true}}`, false, true, InactiveReasonNone},
-		{"incidental repo settings inherit global off", `{"investigate":{"max_turns":4}}`, `{"global":{"enabled":false}}`, false, false, InactiveReasonGlobalOff},
-		{"excluded worktree reads as excluded", "", "", true, false, InactiveReasonGlobalExcluded},
+		{"repo disabled is the explicit veto", `{"enabled":false}`, `{"global":{"enabled":true}}`, false, false, false, InactiveReasonRepoDisabled},
+		{"no setup and global unconfigured is global-off", "", "", false, false, false, InactiveReasonGlobalOff},
+		{"no setup and global disabled is global-off", "", `{"global":{"enabled":false}}`, false, false, false, InactiveReasonGlobalOff},
+		{"global on is active", "", `{"global":{"enabled":true}}`, false, false, true, InactiveReasonNone},
+		{"incidental repo settings inherit global on", `{"investigate":{"max_turns":4}}`, `{"global":{"enabled":true}}`, false, false, true, InactiveReasonNone},
+		{"incidental repo settings inherit global off", `{"investigate":{"max_turns":4}}`, `{"global":{"enabled":false}}`, false, false, false, InactiveReasonGlobalOff},
+		{"excluded worktree reads as excluded", "", "", true, false, false, InactiveReasonGlobalExcluded},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -47,6 +48,9 @@ func TestIsActiveForRepoWithReason(t *testing.T) {
 				if err := os.WriteFile(filepath.Join(dir, ".entire", "settings.json"), []byte(c.repoSettings), 0o600); err != nil {
 					t.Fatal(err)
 				}
+			}
+			if c.localActive {
+				markLocallyActivated(t, dir)
 			}
 			userSettings := c.userSettings
 			if c.excludeSelf {

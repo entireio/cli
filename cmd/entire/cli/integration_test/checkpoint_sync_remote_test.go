@@ -773,6 +773,27 @@ func gitPushWithHooksOutput(t *testing.T, env *TestEnv, remote, refSpec string) 
 	return string(output)
 }
 
+// routeHermeticOrigin gives trust policy a production-shaped origin identity
+// while keeping Git transport entirely local. Trust reads the raw remote URL;
+// Git applies insteadOf only when it opens the transport.
+func routeHermeticOrigin(t *testing.T, env *TestEnv, bareOrigin string) {
+	t.Helper()
+	const originURL = "https://github.com/entireio/global-trust-integration.git"
+	localURL := "file://" + filepath.ToSlash(bareOrigin)
+	for _, args := range [][]string{
+		{"remote", "set-url", "origin", originURL},
+		{"config", "url." + localURL + ".insteadOf", originURL},
+	} {
+		cmd := exec.CommandContext(t.Context(), "git", args...)
+		cmd.Dir = env.RepoDir
+		cmd.Env = testutil.GitIsolatedEnv()
+		if output, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %s: %v\n%s", strings.Join(args, " "), err, output)
+		}
+	}
+	env.setGitConfigBaseline()
+}
+
 // commitGlobalSession produces a checkpoint through the global lazy-enable
 // flow (agent hooks fire; the commit condenses the session).
 func commitGlobalSession(t *testing.T, env *TestEnv, extraEnv []string, sessionID, file, content, prompt string) {
@@ -808,6 +829,7 @@ func TestGlobalEnrolledRepoHoldsCheckpointSyncUntilTrusted(t *testing.T) {
 		env, extraEnv := newGloballyTrackedEnv(t, true)
 		env.CheckpointStore = backend
 		bareOrigin := env.SetupEmptyNamedBareRemote("origin")
+		routeHermeticOrigin(t, env, bareOrigin)
 
 		commitGlobalSession(t, env, extraEnv, "trust-gate-session-1", "gate.txt", "held until trusted\n", "Create gate file")
 

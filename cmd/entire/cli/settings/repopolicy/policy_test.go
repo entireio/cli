@@ -4,6 +4,7 @@ import (
 	"errors"
 	"io/fs"
 	"os"
+	"reflect"
 	"testing"
 )
 
@@ -24,7 +25,7 @@ func TestRepoPolicyContext_RoundTripsSnapshot(t *testing.T) {
 	want := RepoPolicy{Active: true, ActivationSource: ActivationGlobal}
 	ctx := WithRepoPolicy(t.Context(), want)
 	got, ok := RepoPolicyFromContext(ctx)
-	if !ok || got != want {
+	if !ok || !reflect.DeepEqual(got, want) {
 		t.Fatalf("RepoPolicyFromContext = %+v, %v; want %+v", got, ok, want)
 	}
 }

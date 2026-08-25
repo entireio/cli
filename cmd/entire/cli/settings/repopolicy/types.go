@@ -39,11 +39,50 @@ type SetupRecord struct {
 	CanonicalGitCommon string `json:"canonical_git_common"`
 }
 
-// TrustDecision is the repository's checkpoint-egress decision. Trust
-// identity and persistence are added independently of activation inputs.
+// TrustSource names the authority behind an egress decision.
+type TrustSource string
+
+const (
+	TrustSourceNone  TrustSource = "none"
+	TrustSourceLocal TrustSource = "local_activation"
+	TrustSourceAll   TrustSource = "trust_all"
+	TrustSourceRepo  TrustSource = "repo"
+)
+
+// TrustReason explains a held egress decision.
+type TrustReason string
+
+const (
+	TrustReasonNone          TrustReason = ""
+	TrustReasonInactive      TrustReason = "inactive"
+	TrustReasonUntrusted     TrustReason = "untrusted"
+	TrustReasonInvalidOrigin TrustReason = "invalid_origin"
+	TrustReasonSettings      TrustReason = "settings_error"
+)
+
+// TrustIdentity is the exclusive origin-or-path key used for egress consent.
+type TrustIdentity struct {
+	OriginKeys []string `json:"origin_keys,omitempty"`
+	Path       string   `json:"path,omitempty"`
+}
+
+// OriginKeyed reports whether this identity is remote-origin based.
+func (id TrustIdentity) OriginKeyed() bool { return len(id.OriginKeys) > 0 }
+
+// DisplayScope returns the user-facing identity scope.
+func (id TrustIdentity) DisplayScope() string {
+	if id.OriginKeyed() {
+		return id.OriginKeys[0]
+	}
+	return id.Path
+}
+
+// TrustDecision is the repository's checkpoint-egress decision.
 type TrustDecision struct {
-	Allowed bool
-	Source  string
+	Allowed  bool
+	Source   TrustSource
+	Reason   TrustReason
+	Identity TrustIdentity
 }
 
 // InactiveReason explains why repository tracking is inactive.

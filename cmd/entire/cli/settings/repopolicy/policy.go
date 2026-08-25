@@ -32,6 +32,7 @@ func ClassifyRepoPolicyAt(ctx context.Context, dir string) (RepoPolicy, error) {
 		policy.ActivationSource = ActivationInactive
 		policy.InactiveReason = InactiveReasonRepoDisabled
 		policy.Route = routeForClassification(repository, existingRoute, routeFound, RuntimeWorktree)
+		policy.Trust = DecideEgress(ctx, policy, nil, repository)
 		return policy, nil
 	}
 	veto, err := repositoryDisabledVeto(ctx, repository)
@@ -43,6 +44,7 @@ func ClassifyRepoPolicyAt(ctx context.Context, dir string) (RepoPolicy, error) {
 		policy.ActivationSource = ActivationInactive
 		policy.InactiveReason = InactiveReasonRepoDisabled
 		policy.Route = routeForClassification(repository, existingRoute, routeFound, RuntimeWorktree)
+		policy.Trust = DecideEgress(ctx, policy, nil, repository)
 		return policy, nil
 	}
 	if state == ActivationEnabled {
@@ -50,6 +52,7 @@ func ClassifyRepoPolicyAt(ctx context.Context, dir string) (RepoPolicy, error) {
 		policy.Active = true
 		policy.ActivationSource = ActivationLocal
 		policy.Route = routeForClassification(repository, existingRoute, routeFound, RuntimeWorktree)
+		policy.Trust = DecideEgress(ctx, policy, nil, repository)
 		return policy, nil
 	}
 
@@ -70,6 +73,7 @@ func ClassifyRepoPolicyAt(ctx context.Context, dir string) (RepoPolicy, error) {
 	} else {
 		policy.Route = routeForClassification(repository, existingRoute, routeFound, RuntimeWorktree)
 	}
+	policy.Trust = DecideEgress(ctx, policy, userSettings.Global, repository)
 	return policy, err
 }
 
@@ -102,9 +106,7 @@ func proposedRoute(repository Repository, layout RuntimeLayout) RuntimeRoute {
 func repositoryDisabledVeto(ctx context.Context, repository Repository) (bool, error) {
 	enabled, err := effectiveEnabledSetting(ctx, repository)
 	if errors.Is(err, errInvalidActivationSettings) {
-		// Invalid repository content cannot establish a trusted veto. Hook-time
-		// settings loading still rejects malformed allowed fields before capture.
-		return false, nil
+		return false, err
 	}
 	return enabled != nil && !*enabled, err
 }

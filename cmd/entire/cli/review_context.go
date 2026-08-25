@@ -265,7 +265,7 @@ func formatReviewSessionLine(ctx context.Context, st *session.State) string {
 	}
 	agentName := string(st.AgentType)
 	if agentName == "" {
-		agentName = "agent"
+		agentName = agentIdentifier
 	}
 
 	parts := []string{"  " + short, agentName}
