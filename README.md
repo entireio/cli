@@ -676,3 +676,5 @@ entire <command> --help    # Command-specific help
 ## License
 
 MIT License - see [LICENSE](LICENSE) for details.
+
+<!-- cloud-env checkpoint sync test -->
