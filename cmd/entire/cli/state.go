@@ -643,6 +643,12 @@ func StampPreTaskAgentID(ctx context.Context, toolUseID, agentID string) error {
 		return fmt.Errorf("invalid agent ID for pre-task agent stamp: %w", err)
 	}
 
+	release, err := flock.Acquire(agentTaskBootstrapLockPath(ctx))
+	if err != nil {
+		return fmt.Errorf("acquire agent-task bootstrap lock for pre-task stamp: %w", err)
+	}
+	defer release()
+
 	state, err := LoadPreTaskState(ctx, toolUseID)
 	if err != nil {
 		return err
