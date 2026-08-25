@@ -128,6 +128,46 @@ func promptForContextInjection(ag agent.Agent, event *agent.Event) string {
 	return sanitizeEvidenceText(prompts[len(prompts)-1])
 }
 
+func crossRepoDeliveredSet(ids []string) map[string]struct{} {
+	delivered := make(map[string]struct{}, len(ids))
+	for _, id := range ids {
+		delivered[id] = struct{}{}
+	}
+	return delivered
+}
+
+func filterUndeliveredCrossRepoEvidence(evidence []contextEvidence, delivered map[string]struct{}) []contextEvidence {
+	filtered := evidence[:0]
+	for _, item := range evidence {
+		if _, seen := delivered[item.ID]; !seen {
+			filtered = append(filtered, item)
+		}
+	}
+	return filtered
+}
+
+// reserveCrossRepoContextTurn checks eligibility without claiming the pending
+// lease. Scope and consent are resolved during retrieval; PendingUntil is set
+// only after that succeeds so a denied policy does not block the session.
+func reserveCrossRepoContextTurn(state *strategy.SessionState, prompt string, now time.Time) bool {
+	if state.Kind.IsReview() || state.Kind.IsInvestigate() || !crossRepoContextEligible(state.CrossRepoContext, prompt, now) {
+		return false
+	}
+	return true
+}
+
+// claimCrossRepoContextDelivery records the in-flight lease and returns evidence
+// not yet delivered to this session. EvidenceIDs are read under the session lock
+// so a concurrent finalize cannot leave filtering on a stale delivered snapshot.
+func claimCrossRepoContextDelivery(state *strategy.SessionState, prompt string, now time.Time, evidence []contextEvidence) ([]contextEvidence, bool) {
+	if !reserveCrossRepoContextTurn(state, prompt, now) {
+		return nil, false
+	}
+	delivered := crossRepoDeliveredSet(state.CrossRepoContext.EvidenceIDs)
+	state.CrossRepoContext.PendingUntil = now.Add(crossRepoPendingLease)
+	return filterUndeliveredCrossRepoEvidence(evidence, delivered), true
+}
+
 func crossRepoContextInjectionEligible(ctx context.Context, sessionID, prompt string) bool {
 	now := time.Now()
 	if len(promptTokenHashes(prompt)) == 0 {
@@ -168,20 +208,15 @@ func buildCrossRepoContextInjection(ctx context.Context, ag agent.Agent, event *
 		logging.Debug(hookCtx, "local context heartbeat skipped", "error", err.Error())
 	}
 	now := time.Now()
-	delivered := map[string]struct{}{}
-	claimed := false
+	reserved := false
 	mutErr := strategy.MutateSessionState(strategy.WithSessionLockWait(hookCtx, 250*time.Millisecond), event.SessionID, func(state *strategy.SessionState) error {
-		if state.Kind.IsReview() || state.Kind.IsInvestigate() || !crossRepoContextEligible(state.CrossRepoContext, prompt, now) {
+		if !reserveCrossRepoContextTurn(state, prompt, now) {
 			return strategy.ErrMutationSkip
 		}
-		for _, id := range state.CrossRepoContext.EvidenceIDs {
-			delivered[id] = struct{}{}
-		}
-		state.CrossRepoContext.PendingUntil = now.Add(crossRepoPendingLease)
-		claimed = true
+		reserved = true
 		return nil
 	})
-	if mutErr != nil || !claimed {
+	if mutErr != nil || !reserved {
 		return "", nil
 	}
 
@@ -218,11 +253,21 @@ func buildCrossRepoContextInjection(ctx context.Context, ag agent.Agent, event *
 		fail()
 		return "", nil
 	}
-	filtered := evidence[:0]
-	for _, item := range evidence {
-		if _, seen := delivered[item.ID]; !seen {
-			filtered = append(filtered, item)
+	claimNow := time.Now()
+	var filtered []contextEvidence
+	claimed := false
+	claimErr := strategy.MutateSessionState(strategy.WithSessionLockWait(hookCtx, 250*time.Millisecond), event.SessionID, func(state *strategy.SessionState) error {
+		var ok bool
+		filtered, ok = claimCrossRepoContextDelivery(state, prompt, claimNow, evidence)
+		if !ok {
+			return strategy.ErrMutationSkip
 		}
+		claimed = true
+		return nil
+	})
+	if claimErr != nil || !claimed {
+		fail()
+		return "", nil
 	}
 	evidence = filtered
 	if len(evidence) == 0 {

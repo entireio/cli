@@ -54,6 +54,43 @@ func TestCrossRepoContextEligibilityPendingAndFailureBackoff(t *testing.T) {
 	}
 }
 
+func TestReserveCrossRepoContextTurnDoesNotClaimPendingLease(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 8, 25, 12, 0, 0, 0, time.UTC)
+	state := &strategy.SessionState{}
+	if !reserveCrossRepoContextTurn(state, "debug oauth refresh failure", now) {
+		t.Fatal("eligible session should reserve")
+	}
+	if !state.CrossRepoContext.PendingUntil.IsZero() {
+		t.Fatalf("PendingUntil = %v, want zero before scope resolution", state.CrossRepoContext.PendingUntil)
+	}
+}
+
+func TestClaimCrossRepoContextDeliverySetsLeaseAndFiltersFreshEvidenceIDs(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 8, 25, 12, 0, 0, 0, time.UTC)
+	state := &strategy.SessionState{
+		CrossRepoContext: strategy.CrossRepoContextState{
+			EvidenceIDs: []string{"ctx_already"},
+		},
+	}
+	evidence := []contextEvidence{{ID: "ctx_already"}, {ID: "ctx_new"}}
+	staleDelivered := crossRepoDeliveredSet(nil)
+	if got := filterUndeliveredCrossRepoEvidence(evidence, staleDelivered); len(got) != 2 {
+		t.Fatalf("stale delivered snapshot kept %d items, want 2 (would re-inject delivered evidence)", len(got))
+	}
+	filtered, ok := claimCrossRepoContextDelivery(state, "debug oauth refresh failure", now, evidence)
+	if !ok {
+		t.Fatal("claim should succeed for eligible session")
+	}
+	if len(filtered) != 1 || filtered[0].ID != "ctx_new" {
+		t.Fatalf("filtered evidence = %#v, want only ctx_new", filtered)
+	}
+	if !state.CrossRepoContext.PendingUntil.Equal(now.Add(crossRepoPendingLease)) {
+		t.Fatalf("PendingUntil = %v, want %v", state.CrossRepoContext.PendingUntil, now.Add(crossRepoPendingLease))
+	}
+}
+
 func TestPromptHashJaccardIsSymmetric(t *testing.T) {
 	t.Parallel()
 	a := promptTokenHashes("debug oauth refresh failure")
