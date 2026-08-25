@@ -630,6 +630,70 @@ func LoadPreTaskState(ctx context.Context, toolUseID string) (*PreTaskState, err
 	return &state, nil
 }
 
+// modifyPreTaskStateUnderBootstrapLock runs fn over the pre-task file in one
+// flock-guarded read-modify-write. fn returns (save, err): when save is false
+// the on-disk file is left unchanged. Missing files are ignored (fn is not called).
+//
+// CleanupPreTaskState may delete the pre-task file without holding this lock
+// when flock acquisition fails, so the write is skipped if the file disappeared
+// after the load — otherwise the stamp would resurrect a cleaned-up task file.
+func modifyPreTaskStateUnderBootstrapLock(ctx context.Context, toolUseID string, fn func(*PreTaskState) (save bool, err error)) error {
+	if err := validation.ValidateToolUseID(toolUseID); err != nil {
+		return fmt.Errorf("invalid tool use ID for pre-task state mutation: %w", err)
+	}
+
+	release, err := flock.Acquire(agentTaskBootstrapLockPath(ctx))
+	if err != nil {
+		return fmt.Errorf("acquire agent-task bootstrap lock for pre-task mutation: %w", err)
+	}
+	defer release()
+
+	tmpDirAbs := resolveTmpDir(ctx)
+	root, err := os.OpenRoot(tmpDirAbs)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("failed to open tmp directory root: %w", err)
+	}
+	defer root.Close()
+
+	fileName := fmt.Sprintf("pre-task-%s.json", toolUseID)
+	data, err := osroot.ReadFile(root, fileName)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("failed to read pre-task state: %w", err)
+	}
+
+	var state PreTaskState
+	if err := json.Unmarshal(data, &state); err != nil {
+		return fmt.Errorf("failed to unmarshal pre-task state: %w", err)
+	}
+
+	save, err := fn(&state)
+	if err != nil || !save {
+		return err
+	}
+
+	if _, err := root.Stat(fileName); err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("failed to stat pre-task state before write: %w", err)
+	}
+
+	out, err := jsonutil.MarshalIndentWithNewline(state, "", "  ")
+	if err != nil {
+		return fmt.Errorf("failed to marshal pre-task state: %w", err)
+	}
+	if err := osroot.WriteFile(root, fileName, out, 0o600); err != nil {
+		return fmt.Errorf("failed to write pre-task state: %w", err)
+	}
+	return nil
+}
+
 // StampPreTaskAgentID records the subagent instance id on its pre-task file
 // once the post-task hook delivers it. Best-effort: a missing file is ignored.
 func StampPreTaskAgentID(ctx context.Context, toolUseID, agentID string) error {
@@ -643,40 +707,13 @@ func StampPreTaskAgentID(ctx context.Context, toolUseID, agentID string) error {
 		return fmt.Errorf("invalid agent ID for pre-task agent stamp: %w", err)
 	}
 
-	release, err := flock.Acquire(agentTaskBootstrapLockPath(ctx))
-	if err != nil {
-		return fmt.Errorf("acquire agent-task bootstrap lock for pre-task stamp: %w", err)
-	}
-	defer release()
-
-	state, err := LoadPreTaskState(ctx, toolUseID)
-	if err != nil {
-		return err
-	}
-	if state == nil {
-		return nil
-	}
-	if state.AgentID == agentID {
-		return nil
-	}
-	state.AgentID = agentID
-
-	tmpDirAbs := resolveTmpDir(ctx)
-	data, err := jsonutil.MarshalIndentWithNewline(state, "", "  ")
-	if err != nil {
-		return fmt.Errorf("failed to marshal pre-task state: %w", err)
-	}
-	root, err := os.OpenRoot(tmpDirAbs)
-	if err != nil {
-		return fmt.Errorf("failed to open tmp directory root: %w", err)
-	}
-	defer root.Close()
-
-	fileName := fmt.Sprintf("pre-task-%s.json", toolUseID)
-	if err := osroot.WriteFile(root, fileName, data, 0o600); err != nil {
-		return fmt.Errorf("failed to write pre-task state: %w", err)
-	}
-	return nil
+	return modifyPreTaskStateUnderBootstrapLock(ctx, toolUseID, func(state *PreTaskState) (bool, error) {
+		if state.AgentID == agentID {
+			return false, nil
+		}
+		state.AgentID = agentID
+		return true, nil
+	})
 }
 
 // CleanupPreTaskState removes the task state file after use, along with any

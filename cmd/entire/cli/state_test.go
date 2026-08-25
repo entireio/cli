@@ -499,6 +499,34 @@ func TestCleanupPreTaskState_RemovesMatchingAgentTaskLinks(t *testing.T) {
 	}
 }
 
+// TestModifyPreTaskStateUnderBootstrapLock_DoesNotResurrectDeletedFile proves
+// that a mutation bails without writing when CleanupPreTaskState removed the
+// pre-task file after the load (Cleanup may proceed without the bootstrap lock).
+func TestModifyPreTaskStateUnderBootstrapLock_DoesNotResurrectDeletedFile(t *testing.T) {
+	setupTmpDirRepo(t)
+	ctx := context.Background()
+	const toolUseID = "toolu_task_stamp"
+
+	if err := CapturePreTaskState(ctx, toolUseID); err != nil {
+		t.Fatalf("CapturePreTaskState() error = %v", err)
+	}
+
+	preTaskPath := filepath.Join(paths.EntireTmpDir, fmt.Sprintf("pre-task-%s.json", toolUseID))
+	if err := modifyPreTaskStateUnderBootstrapLock(ctx, toolUseID, func(state *PreTaskState) (bool, error) {
+		state.AgentID = "agent-stamp"
+		if err := os.Remove(preTaskPath); err != nil {
+			t.Fatalf("failed to remove pre-task file during mutation: %v", err)
+		}
+		return true, nil
+	}); err != nil {
+		t.Fatalf("modifyPreTaskStateUnderBootstrapLock() error = %v", err)
+	}
+
+	if _, err := os.Stat(preTaskPath); !os.IsNotExist(err) {
+		t.Fatalf("pre-task file should stay deleted, stat err = %v", err)
+	}
+}
+
 func TestCleanupPreTaskState_NoLinksIsNotAnError(t *testing.T) {
 	setupTmpDirRepo(t)
 	ctx := context.Background()
