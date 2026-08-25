@@ -251,7 +251,7 @@ func CheckGitHookStateInDir(ctx context.Context, repoDir string) GitHookState {
 	if err != nil {
 		return GitHooksAbsent
 	}
-	return gitHookStateInHooksDir(ctx, hooksDir)
+	return gitHookStateInHooksDir(settings.WithWorktreeRoot(ctx, repoDir), hooksDir)
 }
 
 // huskyForwardingStubsPresent reports whether each managed hook under the
@@ -1390,10 +1390,12 @@ func injectEntireManagedBlock(hookName, existing, entireContent string) string {
 	b.WriteByte('\n')
 	rest = strings.TrimLeft(rest, "\n")
 	if rest != "" {
+		b.WriteString("_entire_status=$?\n")
 		b.WriteString(rest)
 		if !strings.HasSuffix(rest, "\n") {
 			b.WriteByte('\n')
 		}
+		b.WriteString("exit $_entire_status\n")
 	}
 	return b.String()
 }
