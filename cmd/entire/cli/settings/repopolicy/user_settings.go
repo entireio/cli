@@ -99,15 +99,6 @@ func ModifyUserSettings(ctx context.Context, fn func(*UserSettings) error) error
 	return persistUserSettings(path, settings)
 }
 
-// SaveUserSettings atomically replaces the complete settings value while
-// retaining the strict-load and locking guarantees of ModifyUserSettings.
-func SaveUserSettings(ctx context.Context, settings *UserSettings) error {
-	return ModifyUserSettings(ctx, func(current *UserSettings) error {
-		*current = *settings
-		return nil
-	})
-}
-
 func persistUserSettings(path string, settings *UserSettings) error {
 	data, err := jsonutil.MarshalIndentWithNewline(settings, "", "  ")
 	if err != nil {
@@ -325,18 +316,6 @@ func MatchesExcludeOrigin(_ context.Context, patterns []string, normalizedOrigin
 		}
 	}
 	return false, nil
-}
-
-// ValidateGlobalConfig loads and validates an enabled global tier.
-func ValidateGlobalConfig(ctx context.Context) ([]string, error) {
-	settings, err := LoadUserSettings(ctx)
-	if err != nil {
-		return nil, err
-	}
-	if !settings.GlobalEnabled() {
-		return nil, nil
-	}
-	return ValidateGlobalPatterns(settings.Global), nil
 }
 
 // ValidateGlobalPatterns validates exclusion and trusted path entries without

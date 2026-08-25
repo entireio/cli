@@ -62,6 +62,7 @@ var entireGeminiHookNames = map[string]bool{
 // subcommand behind its command string.
 type geminiHookSpec struct {
 	section  string
+	matcher  string
 	name     string
 	hookName string
 	// warnWrap selects the JSON-warning production wrapper (session-start,
@@ -74,18 +75,18 @@ type geminiHookSpec struct {
 // lockstep with what installHooksToFile writes; the fresh-install-reads-as-
 // installed regression test pins that.
 var geminiHookSpecs = []geminiHookSpec{
-	{"SessionStart", "entire-session-start", HookNameSessionStart, true},
-	{"SessionEnd", "entire-session-end-exit", HookNameSessionEnd, false},
-	{"SessionEnd", "entire-session-end-logout", HookNameSessionEnd, false},
-	{"BeforeAgent", "entire-before-agent", HookNameBeforeAgent, false},
-	{"AfterAgent", "entire-after-agent", HookNameAfterAgent, false},
-	{"BeforeModel", "entire-before-model", HookNameBeforeModel, false},
-	{"AfterModel", "entire-after-model", HookNameAfterModel, false},
-	{"BeforeToolSelection", "entire-before-tool-selection", HookNameBeforeToolSelection, false},
-	{"BeforeTool", "entire-before-tool", HookNameBeforeTool, false},
-	{"AfterTool", "entire-after-tool", HookNameAfterTool, false},
-	{"PreCompress", "entire-pre-compress", HookNamePreCompress, false},
-	{"Notification", "entire-notification", HookNameNotification, false},
+	{"SessionStart", "", "entire-session-start", HookNameSessionStart, true},
+	{"SessionEnd", "exit", "entire-session-end-exit", HookNameSessionEnd, false},
+	{"SessionEnd", "logout", "entire-session-end-logout", HookNameSessionEnd, false},
+	{"BeforeAgent", "", "entire-before-agent", HookNameBeforeAgent, false},
+	{"AfterAgent", "", "entire-after-agent", HookNameAfterAgent, false},
+	{"BeforeModel", "", "entire-before-model", HookNameBeforeModel, false},
+	{"AfterModel", "", "entire-after-model", HookNameAfterModel, false},
+	{"BeforeToolSelection", "", "entire-before-tool-selection", HookNameBeforeToolSelection, false},
+	{"BeforeTool", "*", "entire-before-tool", HookNameBeforeTool, false},
+	{"AfterTool", "*", "entire-after-tool", HookNameAfterTool, false},
+	{"PreCompress", "", "entire-pre-compress", HookNamePreCompress, false},
+	{"Notification", "", "entire-notification", HookNameNotification, false},
 }
 
 // productionCommand returns the exact production command an install writes
@@ -143,6 +144,10 @@ func (h *GeminiHooks) hookSections() map[string]*[]GeminiHookMatcher {
 		"PreCompress":         &h.PreCompress,
 		"Notification":        &h.Notification,
 	}
+}
+
+func newGeminiHookSections() map[string]*[]GeminiHookMatcher {
+	return (&GeminiHooks{}).hookSections()
 }
 
 // areUserHooksCurrentInFile reports whether the settings file carries the FULL
@@ -241,46 +246,12 @@ func installHooksToFile(ctx context.Context, settingsPath string, force, userSco
 	// hooksConfig.enabled must be true for Gemini CLI to execute hooks.
 	hooksConfig["enabled"] = json.RawMessage("true")
 
-	// Define hook commands up front: the idempotency check below needs the full
-	// expected set, not just session-start, to tell "already installed" from
-	// "some hook is still on an older command".
 	const cmdPrefix = "entire hooks gemini "
-	sessionStartCmd := agent.WrapProductionJSONWarningHookCommand(cmdPrefix+"session-start", agent.WarningFormatSingleLine)
-	sessionEndCmd := agent.WrapProductionSilentHookCommand(cmdPrefix + "session-end")
-	beforeAgentCmd := agent.WrapProductionSilentHookCommand(cmdPrefix + "before-agent")
-	afterAgentCmd := agent.WrapProductionSilentHookCommand(cmdPrefix + "after-agent")
-	beforeModelCmd := agent.WrapProductionSilentHookCommand(cmdPrefix + "before-model")
-	afterModelCmd := agent.WrapProductionSilentHookCommand(cmdPrefix + "after-model")
-	beforeToolSelectionCmd := agent.WrapProductionSilentHookCommand(cmdPrefix + "before-tool-selection")
-	beforeToolCmd := agent.WrapProductionSilentHookCommand(cmdPrefix + "before-tool")
-	afterToolCmd := agent.WrapProductionSilentHookCommand(cmdPrefix + "after-tool")
-	preCompressCmd := agent.WrapProductionSilentHookCommand(cmdPrefix + "pre-compress")
-	notificationCmd := agent.WrapProductionSilentHookCommand(cmdPrefix + "notification")
-	// wantCommands is the full current set, for the stale-entry check below.
-	wantCommands := []string{
-		sessionStartCmd, sessionEndCmd, beforeAgentCmd, afterAgentCmd,
-		beforeModelCmd, afterModelCmd, beforeToolSelectionCmd, beforeToolCmd,
-		afterToolCmd, preCompressCmd, notificationCmd,
+	wantCommands := make([]string, 0, len(geminiHookSpecs))
+	for _, spec := range geminiHookSpecs {
+		wantCommands = append(wantCommands, spec.productionCommand())
 	}
-
-	// Parse only the hook types we need to modify. The section map points at
-	// the local slices, so later reassignments stay visible through it.
-	var sessionStart, sessionEnd, beforeAgent, afterAgent []GeminiHookMatcher
-	var beforeModel, afterModel, beforeToolSelection []GeminiHookMatcher
-	var beforeTool, afterTool, preCompress, notification []GeminiHookMatcher
-	sections := map[string]*[]GeminiHookMatcher{
-		"SessionStart":        &sessionStart,
-		"SessionEnd":          &sessionEnd,
-		"BeforeAgent":         &beforeAgent,
-		"AfterAgent":          &afterAgent,
-		"BeforeModel":         &beforeModel,
-		"AfterModel":          &afterModel,
-		"BeforeToolSelection": &beforeToolSelection,
-		"BeforeTool":          &beforeTool,
-		"AfterTool":           &afterTool,
-		"PreCompress":         &preCompress,
-		"Notification":        &notification,
-	}
+	sections := newGeminiHookSections()
 	if err := parseGeminiHookSections(rawHooks, settingsPath, sections); err != nil {
 		return 0, false, err
 	}
@@ -303,70 +274,17 @@ func installHooksToFile(ctx context.Context, settingsPath string, force, userSco
 	// normalized), not a fresh install.
 	hadOurs := anyEntireHook(sections)
 
-	// Remove existing Entire hooks first (for clean installs and mode switching)
-	sessionStart = removeEntireHooks(sessionStart)
-	sessionEnd = removeEntireHooks(sessionEnd)
-	beforeAgent = removeEntireHooks(beforeAgent)
-	afterAgent = removeEntireHooks(afterAgent)
-	beforeModel = removeEntireHooks(beforeModel)
-	afterModel = removeEntireHooks(afterModel)
-	beforeToolSelection = removeEntireHooks(beforeToolSelection)
-	beforeTool = removeEntireHooks(beforeTool)
-	afterTool = removeEntireHooks(afterTool)
-	preCompress = removeEntireHooks(preCompress)
-	notification = removeEntireHooks(notification)
-
-	// Install all hooks
-	// Session lifecycle hooks
-	sessionStart = addGeminiHook(sessionStart, "", "entire-session-start", sessionStartCmd)
-	// SessionEnd fires on both "exit" and "logout" - install hooks for both matchers
-	sessionEnd = addGeminiHook(sessionEnd, "exit", "entire-session-end-exit", sessionEndCmd)
-	sessionEnd = addGeminiHook(sessionEnd, "logout", "entire-session-end-logout", sessionEndCmd)
-
-	// Agent hooks (user prompt and response)
-	beforeAgent = addGeminiHook(beforeAgent, "", "entire-before-agent", beforeAgentCmd)
-	afterAgent = addGeminiHook(afterAgent, "", "entire-after-agent", afterAgentCmd)
-
-	// Model hooks (LLM request/response - fires on every LLM call)
-	beforeModel = addGeminiHook(beforeModel, "", "entire-before-model", beforeModelCmd)
-	afterModel = addGeminiHook(afterModel, "", "entire-after-model", afterModelCmd)
-
-	// Tool selection hook (before planner selects tools)
-	beforeToolSelection = addGeminiHook(beforeToolSelection, "", "entire-before-tool-selection", beforeToolSelectionCmd)
-
-	// Tool hooks (before/after tool execution)
-	beforeTool = addGeminiHook(beforeTool, "*", "entire-before-tool", beforeToolCmd)
-	afterTool = addGeminiHook(afterTool, "*", "entire-after-tool", afterToolCmd)
-
-	// Compression hook (before chat history compression)
-	preCompress = addGeminiHook(preCompress, "", "entire-pre-compress", preCompressCmd)
-
-	// Notification hook (errors, warnings, info)
-	notification = addGeminiHook(notification, "", "entire-notification", notificationCmd)
-
-	// 12 hooks total:
-	// - session-start (1)
-	// - session-end exit + logout (2)
-	// - before-agent, after-agent (2)
-	// - before-model, after-model (2)
-	// - before-tool-selection (1)
-	// - before-tool, after-tool (2)
-	// - pre-compress (1)
-	// - notification (1)
-	count = 12
-
-	// Marshal modified hook types back to rawHooks
-	marshalGeminiHookType(rawHooks, "SessionStart", sessionStart)
-	marshalGeminiHookType(rawHooks, "SessionEnd", sessionEnd)
-	marshalGeminiHookType(rawHooks, "BeforeAgent", beforeAgent)
-	marshalGeminiHookType(rawHooks, "AfterAgent", afterAgent)
-	marshalGeminiHookType(rawHooks, "BeforeModel", beforeModel)
-	marshalGeminiHookType(rawHooks, "AfterModel", afterModel)
-	marshalGeminiHookType(rawHooks, "BeforeToolSelection", beforeToolSelection)
-	marshalGeminiHookType(rawHooks, "BeforeTool", beforeTool)
-	marshalGeminiHookType(rawHooks, "AfterTool", afterTool)
-	marshalGeminiHookType(rawHooks, "PreCompress", preCompress)
-	marshalGeminiHookType(rawHooks, "Notification", notification)
+	for _, matchers := range sections {
+		*matchers = removeEntireHooks(*matchers)
+	}
+	for _, spec := range geminiHookSpecs {
+		matchers := sections[spec.section]
+		*matchers = addGeminiHook(*matchers, spec.matcher, spec.name, spec.productionCommand())
+	}
+	count = len(geminiHookSpecs)
+	for section, matchers := range sections {
+		marshalGeminiHookType(rawHooks, section, *matchers)
+	}
 
 	if err := writeGeminiSettingsFile(rawSettings, rawHooks, hooksConfig, settingsPath); err != nil {
 		return 0, false, err
@@ -520,51 +438,14 @@ func uninstallHooksFromFile(ctx context.Context, settingsPath string) error {
 	// Strip the legacy hooks.enabled field (same migration as InstallHooks)
 	stripLegacyHooksEnabledField(ctx, rawHooks)
 
-	// Parse only the hook types we need to modify
-	var sessionStart, sessionEnd, beforeAgent, afterAgent []GeminiHookMatcher
-	var beforeModel, afterModel, beforeToolSelection []GeminiHookMatcher
-	var beforeTool, afterTool, preCompress, notification []GeminiHookMatcher
-	if err := parseGeminiHookSections(rawHooks, settingsPath, map[string]*[]GeminiHookMatcher{
-		"SessionStart":        &sessionStart,
-		"SessionEnd":          &sessionEnd,
-		"BeforeAgent":         &beforeAgent,
-		"AfterAgent":          &afterAgent,
-		"BeforeModel":         &beforeModel,
-		"AfterModel":          &afterModel,
-		"BeforeToolSelection": &beforeToolSelection,
-		"BeforeTool":          &beforeTool,
-		"AfterTool":           &afterTool,
-		"PreCompress":         &preCompress,
-		"Notification":        &notification,
-	}); err != nil {
+	sections := newGeminiHookSections()
+	if err := parseGeminiHookSections(rawHooks, settingsPath, sections); err != nil {
 		return err
 	}
-
-	// Remove Entire hooks from all hook types
-	sessionStart = removeEntireHooks(sessionStart)
-	sessionEnd = removeEntireHooks(sessionEnd)
-	beforeAgent = removeEntireHooks(beforeAgent)
-	afterAgent = removeEntireHooks(afterAgent)
-	beforeModel = removeEntireHooks(beforeModel)
-	afterModel = removeEntireHooks(afterModel)
-	beforeToolSelection = removeEntireHooks(beforeToolSelection)
-	beforeTool = removeEntireHooks(beforeTool)
-	afterTool = removeEntireHooks(afterTool)
-	preCompress = removeEntireHooks(preCompress)
-	notification = removeEntireHooks(notification)
-
-	// Marshal modified hook types back to rawHooks
-	marshalGeminiHookType(rawHooks, "SessionStart", sessionStart)
-	marshalGeminiHookType(rawHooks, "SessionEnd", sessionEnd)
-	marshalGeminiHookType(rawHooks, "BeforeAgent", beforeAgent)
-	marshalGeminiHookType(rawHooks, "AfterAgent", afterAgent)
-	marshalGeminiHookType(rawHooks, "BeforeModel", beforeModel)
-	marshalGeminiHookType(rawHooks, "AfterModel", afterModel)
-	marshalGeminiHookType(rawHooks, "BeforeToolSelection", beforeToolSelection)
-	marshalGeminiHookType(rawHooks, "BeforeTool", beforeTool)
-	marshalGeminiHookType(rawHooks, "AfterTool", afterTool)
-	marshalGeminiHookType(rawHooks, "PreCompress", preCompress)
-	marshalGeminiHookType(rawHooks, "Notification", notification)
+	for section, matchers := range sections {
+		*matchers = removeEntireHooks(*matchers)
+		marshalGeminiHookType(rawHooks, section, *matchers)
+	}
 
 	// Marshal hooks back (preserving unknown hook types)
 	if len(rawHooks) > 0 {

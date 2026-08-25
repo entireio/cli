@@ -20,15 +20,20 @@ const (
 )
 
 func RepoTrustIdentity(ctx context.Context) (TrustIdentity, error) {
+	_, identity, err := resolveRepoTrustIdentity(ctx)
+	return identity, err
+}
+
+func resolveRepoTrustIdentity(ctx context.Context) (repopolicy.Repository, TrustIdentity, error) {
 	repository, err := repopolicy.ResolveRepository(ctx)
 	if err != nil {
-		return TrustIdentity{}, fmt.Errorf("resolving repository: %w", err)
+		return repopolicy.Repository{}, TrustIdentity{}, fmt.Errorf("resolving repository: %w", err)
 	}
 	identity, err := repopolicy.ResolveTrustIdentity(ctx, repository)
 	if err != nil {
-		return TrustIdentity{}, fmt.Errorf("resolving trust identity: %w", err)
+		return repopolicy.Repository{}, TrustIdentity{}, fmt.Errorf("resolving trust identity: %w", err)
 	}
-	return identity, nil
+	return repository, identity, nil
 }
 
 func currentPolicy(ctx context.Context) (repopolicy.RepoPolicy, error) {
@@ -68,14 +73,10 @@ func RepoUntrustedEnrolled(ctx context.Context) bool {
 	return err == nil && policy.Active && policy.ActivationSource == repopolicy.ActivationGlobal && !policy.Trust.Allowed
 }
 
-func TrustCurrentRepo(ctx context.Context) (TrustIdentity, error) { //nolint:unparam // command output reports the persisted identity scope
-	repository, err := repopolicy.ResolveRepository(ctx)
+func TrustCurrentRepo(ctx context.Context) (TrustIdentity, error) {
+	repository, identity, err := resolveRepoTrustIdentity(ctx)
 	if err != nil {
-		return TrustIdentity{}, fmt.Errorf("resolving repository: %w", err)
-	}
-	identity, err := repopolicy.ResolveTrustIdentity(ctx, repository)
-	if err != nil {
-		return TrustIdentity{}, fmt.Errorf("resolving trust identity: %w", err)
+		return TrustIdentity{}, err
 	}
 	err = repopolicy.ModifyTrustGrantLedger(ctx, repository, func(ledger repopolicy.TrustGrantLedger) (repopolicy.TrustGrantLedger, error) {
 		err := ModifyUserSettings(ctx, func(us *UserSettings) error {
@@ -190,7 +191,7 @@ func containsTrustedOrigin(entries []string, key string) bool {
 }
 
 func pathEntryIsRoot(ctx context.Context, entry, root string) bool {
-	ok, err := matchesExcludePathExact(ctx, []string{entry}, root)
+	ok, err := repopolicy.MatchesExcludePathExact(ctx, []string{entry}, root)
 	return err == nil && ok
 }
 

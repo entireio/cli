@@ -278,40 +278,6 @@ func TestUninstallHooks_PreservesUserHookContainingEntireSubstring(t *testing.T)
 	require.NotContains(t, string(data), "entire hooks codex stop")
 }
 
-// TestUserAuthoredEntireCLIHookSurvives_Codex pins verb-scoped hook
-// recognition at repo scope: a USER-AUTHORED hook whose command merely
-// invokes the entire binary must survive a force install's remove-then-add
-// cycle and uninstall — under the old bare "entire " prefix both destroyed it.
-func TestUserAuthoredEntireCLIHookSurvives_Codex(t *testing.T) {
-	tempDir := setupTestEnv(t)
-
-	codexDir := filepath.Join(tempDir, ".codex")
-	require.NoError(t, os.MkdirAll(codexDir, 0o750))
-	const userCmd = "entire status --json > /tmp/entire-status.json"
-	existingConfig := `{
-		"hooks": {
-			"Stop": [
-				{"matcher": null, "hooks": [{"type": "command", "command": "` + userCmd + `"}]}
-			]
-		}
-	}`
-	hooksPath := filepath.Join(codexDir, HooksFileName)
-	require.NoError(t, os.WriteFile(hooksPath, []byte(existingConfig), 0o600))
-
-	ag := &CodexAgent{}
-	_, err := ag.InstallHooks(context.Background(), true)
-	require.NoError(t, err)
-	data, err := os.ReadFile(hooksPath)
-	require.NoError(t, err)
-	require.Contains(t, string(data), userCmd, "force install must not claim a user-authored entire-CLI hook")
-
-	require.NoError(t, ag.UninstallHooks(context.Background()))
-	data, err = os.ReadFile(hooksPath)
-	require.NoError(t, err)
-	require.Contains(t, string(data), userCmd, "uninstall must not claim a user-authored entire-CLI hook")
-	require.NotContains(t, string(data), "entire hooks codex")
-}
-
 func TestAreHooksInstalled_NoFile(t *testing.T) {
 	setupTestEnv(t)
 

@@ -15,8 +15,8 @@ func prepareHookPolicy(ctx context.Context) (context.Context, repopolicy.RepoPol
 		return ctx, policy, nil
 	}
 	policy, err := repopolicy.ClassifyRepoPolicy(ctx)
+	repository, repoErr := repopolicy.ResolveRepository(ctx)
 	if err != nil {
-		repository, repoErr := repopolicy.ResolveRepository(ctx)
 		if repoErr == nil {
 			rebound, rebindErr := repopolicy.RebindMovedRepository(ctx, repository)
 			if rebindErr != nil {
@@ -28,6 +28,18 @@ func prepareHookPolicy(ctx context.Context) (context.Context, repopolicy.RepoPol
 		}
 		if err != nil {
 			return ctx, policy, fmt.Errorf("classifying repository policy: %w", err)
+		}
+	}
+	if repoErr == nil && policy.ActivationSource != repopolicy.ActivationLocal {
+		migrated, migrateErr := repopolicy.BootstrapLegacyActivation(ctx, repository)
+		if migrateErr != nil {
+			return ctx, policy, fmt.Errorf("migrating legacy repository activation: %w", migrateErr)
+		}
+		if migrated {
+			policy, err = repopolicy.ClassifyRepoPolicy(ctx)
+			if err != nil {
+				return ctx, policy, fmt.Errorf("classifying migrated repository policy: %w", err)
+			}
 		}
 	}
 	if policy.Active {

@@ -14,18 +14,9 @@ import (
 // Ensure GeminiCLIAgent implements UserHookSupport.
 var _ agent.UserHookSupport = (*GeminiCLIAgent)(nil)
 
-// UserSettingsPath returns the path of Gemini CLI's user-level settings file
-// (~/.gemini/settings.json). It accepts the same hooks schema as the repo's
-// .gemini/settings.json. There is NO per-key settings precedence for hooks:
-// Gemini concatenates hook event arrays across user and workspace scopes,
-// and the no-double-fire guarantee comes from its execution layer, which
-// deduplicates entries keyed by `name:command`
-// (hookPlanner.deduplicateHooks / getHookKey in gemini-cli). Our user- and
-// repo-level production installs write byte-identical name+command pairs, so
-// each hook executes once — but the dedup is command-sensitive: a repo-level
-// dev-mode install (localDev=true, entire-dev command form) alongside these
-// entries has same names with different commands and double-fires every
-// hook, including SessionEnd condensation.
+// UserSettingsPath returns ~/.gemini/settings.json. Gemini concatenates hook
+// scopes and deduplicates byte-identical name+command pairs, which is why the
+// user and repository installers share production forms.
 func UserSettingsPath() (string, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -67,12 +58,8 @@ func (g *GeminiCLIAgent) UninstallUserHooks(ctx context.Context) error {
 	return uninstallHooksFromFile(ctx, settingsPath)
 }
 
-// AreUserHooksInstalled reports whether Entire's hooks are COMPLETELY
-// installed in ~/.gemini/settings.json — the full expected entry set in
-// current production form, so a partial install reads as not-installed,
-// doctor prompts repair, and the idempotent installer repairs it. A missing
-// file is (false, nil); an unreadable or unparseable one returns the error
-// rather than posing as "not installed".
+// AreUserHooksInstalled requires the complete current inventory. Missing is
+// false; unreadable or invalid settings return an error.
 func (g *GeminiCLIAgent) AreUserHooksInstalled(_ context.Context) (bool, error) {
 	settingsPath, err := UserSettingsPath()
 	if err != nil {

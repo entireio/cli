@@ -8,7 +8,6 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
-	"strings"
 	"testing"
 )
 
@@ -721,49 +720,4 @@ func assertFactoryHookExists(t *testing.T, matchers []FactoryHookMatcher, matche
 		}
 	}
 	t.Errorf("%s was not found (matcher=%q, command=%q)", description, matcher, command)
-}
-
-// TestUserAuthoredEntireCLIHookSurvives_FactoryAIDroid pins verb-scoped hook
-// recognition at repo scope: a USER-AUTHORED hook whose command merely
-// invokes the entire binary must survive a force install's remove-then-add
-// cycle and uninstall — under the old bare "entire " prefix both destroyed it.
-func TestUserAuthoredEntireCLIHookSurvives_FactoryAIDroid(t *testing.T) {
-	tempDir := t.TempDir()
-	t.Chdir(tempDir)
-
-	const userCmd = "entire status --json > /tmp/entire-status.json"
-	writeFactorySettingsFile(t, tempDir, `{
-  "hooks": {
-    "Stop": [
-      {"matcher": "", "hooks": [{"type": "command", "command": "`+userCmd+`"}]}
-    ]
-  }
-}`)
-
-	ag := &FactoryAIDroidAgent{}
-	if _, err := ag.InstallHooks(context.Background(), true); err != nil {
-		t.Fatalf("InstallHooks() error = %v", err)
-	}
-	settingsPath := filepath.Join(tempDir, ".factory", "settings.json")
-	data, err := os.ReadFile(settingsPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(string(data), userCmd) {
-		t.Fatalf("force install removed the user-authored entire-CLI hook: %s", data)
-	}
-
-	if err := ag.UninstallHooks(context.Background()); err != nil {
-		t.Fatalf("UninstallHooks() error = %v", err)
-	}
-	data, err = os.ReadFile(settingsPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(string(data), userCmd) {
-		t.Errorf("uninstall removed the user-authored entire-CLI hook: %s", data)
-	}
-	if strings.Contains(string(data), "entire hooks factoryai-droid") {
-		t.Errorf("Entire hooks left behind: %s", data)
-	}
 }

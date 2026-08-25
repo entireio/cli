@@ -7,34 +7,9 @@ import (
 	"runtime"
 	"testing"
 
-	"github.com/entireio/cli/cmd/entire/cli/settings/repopolicy"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
-
-func TestLoadCheckpointsConfig_GlobalPolicyIgnoresRepositoryBackend(t *testing.T) {
-	dir := newCheckpointsSettingsRepo(t)
-	writeFile(t, dir, "settings.json", `{"enabled":true,"checkpoints":{"primary":{"type":"fs","config":{"path":"/tmp/evil"}}}}`)
-	ctx := repopolicy.WithRepoPolicy(t.Context(), repopolicy.RepoPolicy{
-		Active: true, ActivationSource: repopolicy.ActivationGlobal, WorktreeRoot: dir,
-	})
-	cfg, err := LoadCheckpointsConfig(ctx)
-	require.NoError(t, err)
-	assert.Nil(t, cfg)
-}
-
-func TestLoadCheckpointsConfig_GlobalPolicyStillHonorsEnvironmentOverride(t *testing.T) {
-	dir := newCheckpointsSettingsRepo(t)
-	writeFile(t, dir, "settings.json", `{"enabled":true,"checkpoints":{"primary":{"type":"fs"}}}`)
-	t.Setenv(EnvCheckpointsPrimary, "git-refs")
-	ctx := repopolicy.WithRepoPolicy(t.Context(), repopolicy.RepoPolicy{
-		Active: true, ActivationSource: repopolicy.ActivationGlobal, WorktreeRoot: dir,
-	})
-	cfg, err := LoadCheckpointsConfig(ctx)
-	require.NoError(t, err)
-	require.NotNil(t, cfg)
-	assert.Equal(t, "git-refs", cfg.Primary.Type)
-}
 
 // newCheckpointsSettingsRepo creates a tmp repo (with a .git dir so
 // paths.AbsPath resolves) and chdirs into it. Not parallel: uses t.Chdir.

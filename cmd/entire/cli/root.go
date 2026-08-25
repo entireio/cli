@@ -147,7 +147,7 @@ func NewRootCmd() *cobra.Command {
 			// repo-level setup: completing it writes .entire/settings.json,
 			// which permanently pins the repo out of the global tier (exclude
 			// lists stop applying to it). The enabled BIT gates here, not
-			// GlobalModeActive: the gate's fail-closed answer reads "tier off"
+			// The activation gate's fail-closed answer reads "tier off"
 			// for an unusable config too, and at THIS call site that answer
 			// would run the wizard and pin the repo — the opposite of failing
 			// safe. An unreadable file is surfaced instead of acted on.

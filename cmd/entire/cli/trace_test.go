@@ -12,31 +12,6 @@ import (
 
 const testOpPostCommit = "post-commit"
 
-// TestTraceCmd_FindsRoutedLogsInGloballyTrackedRepo pins that `entire doctor
-// trace` resolves the log file through paths.AbsPath: in a globally tracked
-// repo the log (and its perf entries) lives under the git common dir, and a
-// worktree-only join would show "No trace entries found." for exactly these
-// repos. No t.Parallel: the fixture uses t.Chdir and t.Setenv.
-func TestTraceCmd_FindsRoutedLogsInGloballyTrackedRepo(t *testing.T) {
-	newGloballyTrackedDiagRepo(t,
-		`{"time":"2026-01-15T10:30:00Z","level":"DEBUG","msg":"perf","op":"post-commit","duration_ms":150}`)
-
-	cmd := newTraceCmd()
-	var out bytes.Buffer
-	cmd.SetOut(&out)
-	cmd.SetErr(&out)
-	cmd.SetArgs([]string{})
-	if err := cmd.Execute(); err != nil {
-		t.Fatalf("doctor trace: %v", err)
-	}
-	if strings.Contains(out.String(), "No trace entries found.") {
-		t.Fatalf("doctor trace did not find the routed log file:\n%s", out.String())
-	}
-	if !strings.Contains(out.String(), testOpPostCommit) {
-		t.Fatalf("doctor trace output missing the routed perf entry:\n%s", out.String())
-	}
-}
-
 func TestParseTraceEntry(t *testing.T) {
 	t.Parallel()
 

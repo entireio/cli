@@ -93,13 +93,20 @@ func (s claudeHookSpec) productionCommand() string {
 	return agent.WrapProductionSilentHookCommand(cmd)
 }
 
-func claudeProductionCommand(hookName string) string {
-	for _, spec := range claudeHookSpecs {
-		if spec.hookName == hookName {
-			return spec.productionCommand()
-		}
+func (h *ClaudeHooks) hookSections() map[string]*[]ClaudeHookMatcher {
+	return map[string]*[]ClaudeHookMatcher{
+		"SessionStart":     &h.SessionStart,
+		"SessionEnd":       &h.SessionEnd,
+		"Stop":             &h.Stop,
+		"SubagentStop":     &h.SubagentStop,
+		"UserPromptSubmit": &h.UserPromptSubmit,
+		"PreToolUse":       &h.PreToolUse,
+		"PostToolUse":      &h.PostToolUse,
 	}
-	return ""
+}
+
+func newClaudeHookSections() map[string]*[]ClaudeHookMatcher {
+	return (&ClaudeHooks{}).hookSections()
 }
 
 // InstallHooks installs Claude Code hooks in .claude/settings.json.
@@ -160,24 +167,6 @@ func readClaudeRawSettings(settingsPath string, projectScope bool) (rawSettings,
 	return rawSettings, rawHooks, rawPermissions, nil
 }
 
-// claudeHookCommands is the full set of hook commands one install writes.
-type claudeHookCommands struct {
-	sessionStart, sessionEnd, stop, subagentStop, userPromptSubmit, preTask, postTask, postTodo string
-}
-
-func buildClaudeHookCommands() claudeHookCommands {
-	return claudeHookCommands{
-		sessionStart:     claudeProductionCommand(HookNameSessionStart),
-		sessionEnd:       claudeProductionCommand(HookNameSessionEnd),
-		stop:             claudeProductionCommand(HookNameStop),
-		subagentStop:     claudeProductionCommand(HookNameSubagentStop),
-		userPromptSubmit: claudeProductionCommand(HookNameUserPromptSubmit),
-		preTask:          claudeProductionCommand(HookNamePreTask),
-		postTask:         claudeProductionCommand(HookNamePostTask),
-		postTodo:         claudeProductionCommand(HookNamePostTodo),
-	}
-}
-
 // ensureMetadataDenyRule adds the repo-scoped metadata deny rule to
 // rawPermissions when absent, reporting whether it changed anything.
 func ensureMetadataDenyRule(rawPermissions map[string]json.RawMessage, settingsPath string) (bool, error) {
@@ -212,25 +201,17 @@ func installHooksToFile(settingsPath string, force, projectScope bool) (count in
 		return 0, false, err
 	}
 
-	// Parse only the hook types we need to modify
-	var sessionStart, sessionEnd, stop, subagentStop, userPromptSubmit, preToolUse, postToolUse []ClaudeHookMatcher
-	if err := parseHookSections(rawHooks, settingsPath, map[string]*[]ClaudeHookMatcher{
-		"SessionStart":     &sessionStart,
-		"SessionEnd":       &sessionEnd,
-		"Stop":             &stop,
-		"SubagentStop":     &subagentStop,
-		"UserPromptSubmit": &userPromptSubmit,
-		"PreToolUse":       &preToolUse,
-		"PostToolUse":      &postToolUse,
-	}); err != nil {
+	sections := newClaudeHookSections()
+	if err := parseHookSections(rawHooks, settingsPath, sections); err != nil {
 		return 0, false, err
 	}
 
 	// Presence checks run against these pre-removal snapshots so a user-scope
 	// repair pass (below) does not defeat the idempotency accounting.
-	checkSessionStart, checkSessionEnd, checkStop := sessionStart, sessionEnd, stop
-	checkSubagentStop := subagentStop
-	checkUserPromptSubmit, checkPreToolUse, checkPostToolUse := userPromptSubmit, preToolUse, postToolUse
+	checks := make(map[string][]ClaudeHookMatcher, len(sections))
+	for section, matchers := range sections {
+		checks[section] = *matchers
+	}
 
 	// force removes all existing Entire hooks before reinstalling (mode
 	// switch). The user-scope install ALWAYS runs this remove-ours-then-re-add
@@ -241,21 +222,12 @@ func installHooksToFile(settingsPath string, force, projectScope bool) (count in
 	userScope := !projectScope
 	removedOurs := 0
 	if force || userScope {
-		strip := func(matchers []ClaudeHookMatcher) []ClaudeHookMatcher {
-			out, n := removeEntireHooksCounting(matchers)
+		for _, matchers := range sections {
+			out, n := removeEntireHooksCounting(*matchers)
 			removedOurs += n
-			return out
+			*matchers = out
 		}
-		sessionStart = strip(sessionStart)
-		sessionEnd = strip(sessionEnd)
-		stop = strip(stop)
-		subagentStop = strip(subagentStop)
-		userPromptSubmit = strip(userPromptSubmit)
-		preToolUse = strip(preToolUse)
-		postToolUse = strip(postToolUse)
 	}
-
-	cmds := buildClaudeHookCommands()
 
 	// Drop Entire hooks left by older versions before adding the current ones,
 	// so a stale command (e.g. the removed local-dev launcher, which ran a
@@ -263,22 +235,17 @@ func installHooksToFile(settingsPath string, force, projectScope bool) (count in
 	// Unconditional: a plain `entire enable` must migrate too, not just --force.
 	staleDropped := false
 	if !force && !userScope {
-		// Only meaningful when the strip pass above did not run: after it,
-		// every Entire entry is already gone from these slices.
-		drop := func(matchers []ClaudeHookMatcher, want ...string) []ClaudeHookMatcher {
-			out, dropped := dropStaleEntireHooks(matchers, want...)
+		wanted := make(map[string][]string, len(sections))
+		for _, spec := range claudeHookSpecs {
+			wanted[spec.section] = append(wanted[spec.section], spec.productionCommand())
+		}
+		for section, matchers := range sections {
+			out, dropped := dropStaleEntireHooks(*matchers, wanted[section]...)
 			if dropped {
 				staleDropped = true
 			}
-			return out
+			*matchers = out
 		}
-		sessionStart = drop(sessionStart, cmds.sessionStart)
-		sessionEnd = drop(sessionEnd, cmds.sessionEnd)
-		stop = drop(stop, cmds.stop)
-		subagentStop = drop(subagentStop, cmds.subagentStop)
-		userPromptSubmit = drop(userPromptSubmit, cmds.userPromptSubmit)
-		preToolUse = drop(preToolUse, cmds.preTask)
-		postToolUse = drop(postToolUse, cmds.postTask, cmds.postTodo)
 	}
 
 	// ensureHook counts a hook as newly installed when its exact command was
@@ -308,24 +275,6 @@ func installHooksToFile(settingsPath string, force, projectScope bool) (count in
 		return addHookToMatcher(matchers, matcherName, cmd)
 	}
 
-	sections := map[string]*[]ClaudeHookMatcher{
-		"SessionStart":     &sessionStart,
-		"SessionEnd":       &sessionEnd,
-		"Stop":             &stop,
-		"SubagentStop":     &subagentStop,
-		"UserPromptSubmit": &userPromptSubmit,
-		"PreToolUse":       &preToolUse,
-		"PostToolUse":      &postToolUse,
-	}
-	checks := map[string][]ClaudeHookMatcher{
-		"SessionStart":     checkSessionStart,
-		"SessionEnd":       checkSessionEnd,
-		"Stop":             checkStop,
-		"SubagentStop":     checkSubagentStop,
-		"UserPromptSubmit": checkUserPromptSubmit,
-		"PreToolUse":       checkPreToolUse,
-		"PostToolUse":      checkPostToolUse,
-	}
 	for _, spec := range claudeHookSpecs {
 		matchers := sections[spec.section]
 		*matchers = ensureHook(*matchers, checks[spec.section], spec.matcher, spec.productionCommand())
@@ -353,14 +302,9 @@ func installHooksToFile(settingsPath string, force, projectScope bool) (count in
 		return 0, false, nil
 	}
 
-	// Marshal modified hook types back to rawHooks
-	marshalHookType(rawHooks, "SessionStart", sessionStart)
-	marshalHookType(rawHooks, "SessionEnd", sessionEnd)
-	marshalHookType(rawHooks, "Stop", stop)
-	marshalHookType(rawHooks, "SubagentStop", subagentStop)
-	marshalHookType(rawHooks, "UserPromptSubmit", userPromptSubmit)
-	marshalHookType(rawHooks, "PreToolUse", preToolUse)
-	marshalHookType(rawHooks, "PostToolUse", postToolUse)
+	for section, matchers := range sections {
+		marshalHookType(rawHooks, section, *matchers)
+	}
 
 	// Marshal hooks and update raw settings
 	hooksJSON, err := jsonutil.MarshalWithNoHTMLEscape(rawHooks)
@@ -470,37 +414,14 @@ func uninstallHooksFromFile(settingsPath string, projectScope bool) error {
 		rawHooks = make(map[string]json.RawMessage)
 	}
 
-	// Parse only the hook types we need to modify
-	var sessionStart, sessionEnd, stop, subagentStop, userPromptSubmit, preToolUse, postToolUse []ClaudeHookMatcher
-	if err := parseHookSections(rawHooks, settingsPath, map[string]*[]ClaudeHookMatcher{
-		"SessionStart":     &sessionStart,
-		"SessionEnd":       &sessionEnd,
-		"Stop":             &stop,
-		"SubagentStop":     &subagentStop,
-		"UserPromptSubmit": &userPromptSubmit,
-		"PreToolUse":       &preToolUse,
-		"PostToolUse":      &postToolUse,
-	}); err != nil {
+	sections := newClaudeHookSections()
+	if err := parseHookSections(rawHooks, settingsPath, sections); err != nil {
 		return err
 	}
-
-	// Remove Entire hooks from all hook types
-	sessionStart = removeEntireHooks(sessionStart)
-	sessionEnd = removeEntireHooks(sessionEnd)
-	stop = removeEntireHooks(stop)
-	subagentStop = removeEntireHooks(subagentStop)
-	userPromptSubmit = removeEntireHooks(userPromptSubmit)
-	preToolUse = removeEntireHooksFromMatchers(preToolUse)
-	postToolUse = removeEntireHooksFromMatchers(postToolUse)
-
-	// Marshal modified hook types back to rawHooks
-	marshalHookType(rawHooks, "SessionStart", sessionStart)
-	marshalHookType(rawHooks, "SessionEnd", sessionEnd)
-	marshalHookType(rawHooks, "Stop", stop)
-	marshalHookType(rawHooks, "SubagentStop", subagentStop)
-	marshalHookType(rawHooks, "UserPromptSubmit", userPromptSubmit)
-	marshalHookType(rawHooks, "PreToolUse", preToolUse)
-	marshalHookType(rawHooks, "PostToolUse", postToolUse)
+	for section, matchers := range sections {
+		*matchers = removeEntireHooks(*matchers)
+		marshalHookType(rawHooks, section, *matchers)
+	}
 
 	// Also remove the metadata deny rule from permissions (repo scope only:
 	// user-level installs never wrote it, so leave user permissions alone).
@@ -837,11 +758,4 @@ func removeEntireHooksCounting(matchers []ClaudeHookMatcher) ([]ClaudeHookMatche
 		}
 	}
 	return result, removed
-}
-
-// removeEntireHooksFromMatchers removes Entire hooks from tool-use matchers (PreToolUse, PostToolUse)
-// This handles the nested structure where hooks are grouped by tool matcher (e.g., "Agent", "TaskCreate|TaskUpdate")
-func removeEntireHooksFromMatchers(matchers []ClaudeHookMatcher) []ClaudeHookMatcher {
-	// Same logic as removeEntireHooks - both work on the same structure
-	return removeEntireHooks(matchers)
 }

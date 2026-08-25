@@ -17,7 +17,7 @@ const globalSetupComponentSpec = 1
 
 // MaybeEnsureGlobalSetup performs lazy, invisible per-worktree setup
 // for a globally tracked repo: a repo with no explicit repo activation whose
-// hooks run because the user-global tier is active (settings.GlobalModeActive).
+// hooks run because the user-global tier is active.
 // It installs the git hooks (skipped when core.hooksPath resolves inside the
 // worktree — see below), ensures the checkpoint metadata ref, and records the
 // completed components in the worktree registry. Everything it writes lives

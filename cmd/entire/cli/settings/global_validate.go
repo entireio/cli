@@ -8,11 +8,6 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/settings/repopolicy"
 )
 
-// ValidateGlobalConfig is the compatibility facade for leaf-owned validation.
-func ValidateGlobalConfig(ctx context.Context) ([]string, error) {
-	return repopolicy.ValidateGlobalConfig(ctx) //nolint:wrapcheck // compatibility facade preserves the public error contract
-}
-
 // ValidateGlobalPatterns validates an already-loaded global config.
 func ValidateGlobalPatterns(config *GlobalConfig) []string {
 	return repopolicy.ValidateGlobalPatterns(config)

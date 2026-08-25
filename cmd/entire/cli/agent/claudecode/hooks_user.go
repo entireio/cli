@@ -25,19 +25,9 @@ func UserSettingsPath() (string, error) {
 	return filepath.Join(home, ".claude", ClaudeSettingsFileName), nil
 }
 
-// InstallUserHooks installs Entire's hooks in ~/.claude/settings.json so they
-// fire in every repository (the user-level surface behind global tracking).
-// Always the plain production `entire` command form — byte-identical to the
-// repo-level production entries, so Claude Code's cross-scope dedup of
-// identical hook commands keeps a repo with both installs firing each hook
-// once. That dedup covers byte-identical commands ONLY: a repo whose hooks
-// were installed with --local-dev (scripts/entire-dev form) or by a legacy
-// go-run install has different command strings at repo scope, so its hooks
-// double-fire alongside these user-level entries. It self-heals within the
-// user file: existing Entire entries in any other command form are removed
-// and re-added in the current form, so a pre-existing alternate-form entry
-// can never double-fire alongside the one this install writes. Never touches
-// user-level permissions and preserves unrelated keys.
+// InstallUserHooks installs the production-form hook inventory in user
+// settings, preserving unrelated keys and permissions. Matching repo/user
+// commands let Claude deduplicate entries across scopes.
 func (c *ClaudeCodeAgent) InstallUserHooks(ctx context.Context) (agent.UserHookInstallResult, error) {
 	settingsPath, err := UserSettingsPath()
 	if err != nil {
@@ -67,13 +57,8 @@ func (c *ClaudeCodeAgent) UninstallUserHooks(ctx context.Context) error {
 	return uninstallHooksFromFile(settingsPath, false)
 }
 
-// AreUserHooksInstalled reports whether Entire's hooks are COMPLETELY
-// installed in ~/.claude/settings.json — the same completeness spec as the
-// install contract (all lifecycle hooks plus the current tool-use matchers),
-// so a partial install reads as not-installed, doctor prompts
-// repair, and the idempotent installer repairs it. A missing file is
-// (false, nil); an unreadable or unparseable one returns the error rather
-// than posing as "not installed".
+// AreUserHooksInstalled requires the complete current inventory. Missing is
+// false; unreadable or invalid settings return an error.
 func (c *ClaudeCodeAgent) AreUserHooksInstalled(_ context.Context) (bool, error) {
 	settingsPath, err := UserSettingsPath()
 	if err != nil {
@@ -86,21 +71,13 @@ func (c *ClaudeCodeAgent) AreUserHooksInstalled(_ context.Context) (bool, error)
 		}
 		return false, err
 	}
-	sections := map[string][]ClaudeHookMatcher{
-		"SessionStart":     settings.Hooks.SessionStart,
-		"SessionEnd":       settings.Hooks.SessionEnd,
-		"Stop":             settings.Hooks.Stop,
-		"SubagentStop":     settings.Hooks.SubagentStop,
-		"UserPromptSubmit": settings.Hooks.UserPromptSubmit,
-		"PreToolUse":       settings.Hooks.PreToolUse,
-		"PostToolUse":      settings.Hooks.PostToolUse,
-	}
+	sections := settings.Hooks.hookSections()
 	for _, spec := range claudeHookSpecs {
 		var present bool
 		if spec.matcher == "" {
-			present = hookCommandExists(sections[spec.section], spec.productionCommand())
+			present = hookCommandExists(*sections[spec.section], spec.productionCommand())
 		} else {
-			present = hookCommandExistsWithMatcher(sections[spec.section], spec.matcher, spec.productionCommand())
+			present = hookCommandExistsWithMatcher(*sections[spec.section], spec.matcher, spec.productionCommand())
 		}
 		if !present {
 			return false, nil

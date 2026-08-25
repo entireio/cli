@@ -32,45 +32,26 @@ func AcquireUserHookConfigLock(ctx context.Context, settingsPath string) (func()
 	}, nil
 }
 
-// UserHookSupport is an optional extension of HookSupport for agents whose
-// hooks can also be installed at the USER level (home-directory config) — the
-// infrastructure used by settings-driven global tracking.
-// Implement it only for agents with a verified user/repo dedup story (both
-// scopes installed must never double-fire hooks); never fake it for agents
-// without a real user-level surface. The full contract and the per-agent
-// audit live in docs/architecture/agent-integration-checklist.md under
-// "User-Level Hook Support (Global Tracking)".
+// UserHookSupport is implemented only by agents with a verified user-level
+// config and cross-scope deduplication contract.
 type UserHookSupport interface {
 	HookSupport
 
-	// InstallUserHooks installs Entire's hooks in the agent's user-level
-	// config. Idempotent: a fully current install is left untouched and
-	// reported as the zero result.
+	// InstallUserHooks idempotently installs the complete user inventory.
 	InstallUserHooks(ctx context.Context) (UserHookInstallResult, error)
 
-	// UninstallUserHooks removes Entire's hooks (and only Entire's) from the
-	// agent's user-level config. A missing config file is not an error.
+	// UninstallUserHooks removes only Entire's entries; missing is a no-op.
 	UninstallUserHooks(ctx context.Context) error
 
-	// AreUserHooksInstalled reports whether Entire's hooks are present in the
-	// agent's user-level config. A missing config file is (false, nil); a
-	// config that cannot be read or parsed returns a non-nil error — callers
-	// must not fold that into "not installed", which is how an EACCES-broken
-	// config once read as a repo the installer should overwrite.
+	// AreUserHooksInstalled distinguishes missing from unreadable or invalid.
 	AreUserHooksInstalled(ctx context.Context) (bool, error)
 }
 
-// UserHookInstallResult reports what a user-level hook install actually did,
-// so callers can tell an untouched file from a rewritten one. The zero value
-// means "already installed, nothing written".
+// UserHookInstallResult distinguishes a no-op from additions and repairs.
 type UserHookInstallResult struct {
-	// Installed is the number of hook entries the install added that were not
-	// already present in current form.
+	// Installed counts newly added current-form entries.
 	Installed int
-	// Repaired reports that pre-existing Entire entries were rewritten
-	// (duplicates, alternate command forms, a partial install, or legacy
-	// config fields normalized) — the file changed even when Installed is 0,
-	// so "already installed" would be dishonest.
+	// Repaired reports normalization of pre-existing Entire entries.
 	Repaired bool
 }
 
@@ -88,11 +69,7 @@ type UserHookAgent struct {
 	Support UserHookSupport
 }
 
-// UserHookSupports enumerates the registered, non-test agents by user-level
-// hook capability, in sorted name order: supports are the agents implementing
-// UserHookSupport, unsupported the remaining agent names. The single home for
-// the List→Get→skip-test-only→AsUserHookSupport walk that enable/disable,
-// status, and doctor all need.
+// UserHookSupports partitions registered non-test agents by capability.
 func UserHookSupports() (supports []UserHookAgent, unsupported []types.AgentName) {
 	for _, name := range List() {
 		ag, err := Get(name)

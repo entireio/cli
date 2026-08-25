@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -24,7 +23,6 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
-	"github.com/entireio/cli/cmd/entire/cli/settings/repopolicy"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 )
@@ -50,87 +48,6 @@ func setupTestRepo(t *testing.T) {
 	t.Helper()
 	tmpDir := setupTestDir(t)
 	testutil.InitRepo(t, tmpDir)
-}
-
-func TestSetupAgentHooks_InstallsMatchingUserInfrastructure(t *testing.T) {
-	setupTestRepo(t)
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("USERPROFILE", home)
-	ag, err := agent.Get(agent.AgentNameClaudeCode)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := setupAgentHooks(t.Context(), ag, false); err != nil {
-		t.Fatal(err)
-	}
-	userHooks, ok := agent.AsUserHookSupport(ag)
-	if !ok {
-		t.Fatal("Claude Code unexpectedly lacks user-hook support")
-	}
-	installed, err := userHooks.AreUserHooksInstalled(t.Context())
-	if err != nil || !installed {
-		t.Fatalf("user hooks after agent setup = %v, %v; want installed", installed, err)
-	}
-}
-
-func TestReconcileDetectedUserHooks_CreatesOnlyInstalledAgentConfig(t *testing.T) {
-	setupTestDir(t)
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("USERPROFILE", home)
-	previous := userHookLookPath
-	userHookLookPath = func(name string) (string, error) {
-		if name == "claude" {
-			return "/test/bin/claude", nil
-		}
-		return "", exec.ErrNotFound
-	}
-	t.Cleanup(func() { userHookLookPath = previous })
-
-	var out bytes.Buffer
-	reconcileDetectedUserHooks(t.Context(), &out)
-	if _, err := os.Stat(filepath.Join(home, ".claude", "settings.json")); err != nil {
-		t.Fatalf("Claude config was not installed: %v", err)
-	}
-	if _, err := os.Stat(filepath.Join(home, ".gemini", "settings.json")); !os.IsNotExist(err) {
-		t.Fatalf("absent Gemini config was created: %v", err)
-	}
-}
-
-func TestEnableCommand_HasNoGlobalFlag(t *testing.T) {
-	t.Parallel()
-
-	if flag := newEnableCmd().Flags().Lookup("global"); flag != nil {
-		t.Fatalf("enable still exposes removed --global flag: %+v", flag)
-	}
-}
-
-func TestDisableCommand_HasNoGlobalFlag(t *testing.T) {
-	t.Parallel()
-
-	if flag := newDisableCmd().Flags().Lookup("global"); flag != nil {
-		t.Fatalf("disable still exposes removed --global flag: %+v", flag)
-	}
-}
-
-func TestSetupFlow_DoesNotAskGlobalTrackingQuestion(t *testing.T) {
-	setupTestRepo(t)
-	t.Setenv("ENTIRE_CONFIG_DIR", t.TempDir())
-
-	ag, err := agent.Get(types.AgentName("claude-code"))
-	if err != nil {
-		t.Fatalf("agent.Get(claude-code): %v", err)
-	}
-	var out bytes.Buffer
-	if err := runEnableInteractive(t.Context(), &out, []agent.Agent{ag}, EnableOptions{Yes: true, Telemetry: true}); err != nil {
-		t.Fatalf("runEnableInteractive: %v", err)
-	}
-	for _, removed := range []string{"track every repo", "--global"} {
-		if strings.Contains(strings.ToLower(out.String()), removed) {
-			t.Fatalf("setup flow advertised removed global activation surface %q:\n%s", removed, out.String())
-		}
-	}
 }
 
 // writeSettings writes settings content to the settings file.
@@ -299,33 +216,6 @@ func TestRunEnable(t *testing.T) {
 	}
 }
 
-func TestRunEnable_ActivatesAfterStickyWorktreeRoute(t *testing.T) {
-	setupTestRepo(t)
-	writeSettings(t, testSettingsDisabled)
-
-	if err := runEnable(t.Context(), io.Discard, false); err != nil {
-		t.Fatalf("runEnable() error = %v", err)
-	}
-	repository, err := repopolicy.ResolveRepository(t.Context())
-	if err != nil {
-		t.Fatalf("ResolveRepository: %v", err)
-	}
-	route, found, err := repopolicy.ReadRuntimeRoute(repository)
-	if err != nil || !found {
-		t.Fatalf("ReadRuntimeRoute() = (%+v, %v, %v), want persisted route", route, found, err)
-	}
-	if route.Layout != repopolicy.RuntimeWorktree {
-		t.Fatalf("route layout = %q, want %q", route.Layout, repopolicy.RuntimeWorktree)
-	}
-	activation, err := repopolicy.ReadLocalActivation(repository)
-	if err != nil {
-		t.Fatalf("ReadLocalActivation: %v", err)
-	}
-	if activation != repopolicy.ActivationEnabled {
-		t.Fatalf("activation = %q, want %q", activation, repopolicy.ActivationEnabled)
-	}
-}
-
 func TestRunEnable_AlreadyEnabled(t *testing.T) {
 	setupTestRepo(t)
 	writeSettings(t, testSettingsEnabled)
@@ -426,7 +316,7 @@ func TestRunEnableOnConfiguredRepo_AlreadyEnabled_NoSplit(t *testing.T) {
 // --project` clears a real local disable override. The precondition is seeded
 // directly (settings.local.json enabled:false with a local-only field) rather
 // than through runDisable, so the "local override wins and must be cleared"
-// scenario is genuinely exercised — the project activation write's local sync
+// scenario is genuinely exercised — the local-sync in setEnabledFlag's project
 // branch is what makes the re-enable stick.
 func TestRunEnable_ProjectFlag_ClearsLocalDisable(t *testing.T) {
 	setupTestRepo(t)
@@ -476,7 +366,7 @@ func TestRunEnable_ProjectFlag_ClearsLocalDisable(t *testing.T) {
 // disabled (committed settings.json enabled:false AND settings.local.json
 // enabled:false with absolute_git_hook_path) and asserts that a project-scope enable flips
 // both and retains the local-only field. This is the mutation-sensitive test
-// for the project activation write's local sync: skipping the sync leaves the
+// for setEnabledFlag's project-branch local sync: skipping the sync leaves the
 // local override at enabled:false, which would win and keep IsEnabled false.
 func TestRunEnable_ProjectScope_ClearsExplicitLocalDisable(t *testing.T) {
 	setupTestRepo(t)
@@ -609,7 +499,7 @@ func TestSetupAgentHooksNonInteractive_ClearsLocalDisable(t *testing.T) {
 // TestSetupAgentHooksNonInteractive_DoesNotLeakLocalOverridesIntoProject:
 // `entire enable --agent <name>` on an already-configured repo used to load the
 // merged settings view (LoadEntireSettings) and write it back wholesale to the
-// project file via the activation write, flattening settings.local.json-only
+// project file via saveEnabledState, flattening settings.local.json-only
 // overrides (e.g. log_level) into the shared, committed settings.json — the
 // same leak fixed for the bare enable/disable path, just via a different
 // entry point (setupAgentHooksNonInteractive).
@@ -807,29 +697,6 @@ func TestRunDisable(t *testing.T) {
 	}
 	if enabled {
 		t.Error("Entire should be disabled after running disable command")
-	}
-}
-
-func TestRunDisable_DoesNotCreateRuntimeRoute(t *testing.T) {
-	setupTestRepo(t)
-	writeSettings(t, testSettingsEnabled)
-
-	if err := runDisable(t.Context(), io.Discard, false); err != nil {
-		t.Fatalf("runDisable() error = %v", err)
-	}
-	repository, err := repopolicy.ResolveRepository(t.Context())
-	if err != nil {
-		t.Fatalf("ResolveRepository: %v", err)
-	}
-	if route, found, err := repopolicy.ReadRuntimeRoute(repository); err != nil || found {
-		t.Fatalf("ReadRuntimeRoute() = (%+v, %v, %v), want no route", route, found, err)
-	}
-	activation, err := repopolicy.ReadLocalActivation(repository)
-	if err != nil {
-		t.Fatalf("ReadLocalActivation: %v", err)
-	}
-	if activation != repopolicy.ActivationDisabled {
-		t.Fatalf("activation = %q, want %q", activation, repopolicy.ActivationDisabled)
 	}
 }
 
@@ -1355,159 +1222,6 @@ func TestRunUninstall_Force_RemovesGitHooks(t *testing.T) {
 	if !strings.Contains(output, "Removed git hooks") {
 		t.Errorf("Expected output to mention removed git hooks, got: %s", output)
 	}
-}
-
-func TestUninstall_RemovesOnlyCurrentWorktreeRuntimeAndRefs(t *testing.T) {
-	mainRoot, linkedRoot, mainRepo, linkedRepo := setupUninstallLinkedWorktrees(t)
-
-	for _, repo := range []repopolicy.Repository{mainRepo, linkedRepo} {
-		if err := repopolicy.SetLocalActivationForRepository(repo, repopolicy.ActivationEnabled); err != nil {
-			t.Fatalf("activate %s: %v", repo.WorktreeRoot, err)
-		}
-	}
-	mainPolicy, err := repopolicy.ClassifyRepoPolicyAt(t.Context(), mainRoot)
-	if err != nil {
-		t.Fatalf("classify main: %v", err)
-	}
-	_, err = repopolicy.EnsureRuntimeRoute(t.Context(), mainPolicy)
-	if err != nil {
-		t.Fatalf("route main: %v", err)
-	}
-	linkedPolicy, err := repopolicy.ClassifyRepoPolicyAt(t.Context(), linkedRoot)
-	if err != nil {
-		t.Fatalf("classify linked: %v", err)
-	}
-	_, err = repopolicy.EnsureRuntimeRoute(t.Context(), linkedPolicy)
-	if err != nil {
-		t.Fatalf("route linked: %v", err)
-	}
-
-	mainRuntime := repopolicy.WorktreeRegistryDir(mainRepo.GitCommonDir, mainRepo.WorktreeKey)
-	linkedRuntime := repopolicy.WorktreeRegistryDir(linkedRepo.GitCommonDir, linkedRepo.WorktreeKey)
-	testutil.WriteFile(t, mainRuntime, "metadata/main.txt", "main")
-	testutil.WriteFile(t, linkedRuntime, "metadata/linked.txt", "linked")
-	testutil.WriteFile(t, mainRoot, ".entire/main.txt", "main")
-	testutil.WriteFile(t, linkedRoot, ".entire/linked.txt", "linked")
-
-	head := strings.TrimSpace(runUninstallGitInDir(t, mainRoot, "rev-parse", "HEAD"))
-	mainShadow := checkpoint.ShadowBranchNameForCommit(head, mainRepo.WorktreeID)
-	linkedShadow := checkpoint.ShadowBranchNameForCommit(head, linkedRepo.WorktreeID)
-	runUninstallGitInDir(t, mainRoot, "branch", mainShadow, head)
-	runUninstallGitInDir(t, mainRoot, "branch", linkedShadow, head)
-
-	t.Chdir(linkedRoot)
-	paths.ClearWorktreeRootCache()
-	session.ClearGitCommonDirCache()
-	var stdout, stderr bytes.Buffer
-	if err := runUninstall(t.Context(), &stdout, &stderr, true); err != nil {
-		t.Fatalf("runUninstall: %v\nstderr: %s", err, stderr.String())
-	}
-
-	if state, err := repopolicy.ReadLocalActivation(linkedRepo); err != nil || state != repopolicy.ActivationDisabled {
-		t.Fatalf("linked activation = %q, %v; want disabled tombstone", state, err)
-	}
-	if _, found, err := repopolicy.ReadRuntimeRoute(linkedRepo); err != nil || found {
-		t.Fatalf("linked route = found %v, err %v; want removed", found, err)
-	}
-	if state, err := repopolicy.ReadLocalActivation(mainRepo); err != nil || state != repopolicy.ActivationEnabled {
-		t.Fatalf("main activation = %q, %v; want enabled", state, err)
-	}
-	if _, found, err := repopolicy.ReadRuntimeRoute(mainRepo); err != nil || !found {
-		t.Fatalf("main route = found %v, err %v; want preserved", found, err)
-	}
-	if _, err := os.Stat(filepath.Join(mainRuntime, "metadata", "main.txt")); err != nil {
-		t.Fatalf("main runtime removed: %v", err)
-	}
-	if _, err := os.Stat(filepath.Join(linkedRuntime, "metadata", "linked.txt")); !os.IsNotExist(err) {
-		t.Fatalf("linked runtime survived uninstall: %v", err)
-	}
-	if _, err := os.Stat(filepath.Join(mainRoot, ".entire", "main.txt")); err != nil {
-		t.Fatalf("main .entire removed: %v", err)
-	}
-	if _, err := os.Stat(filepath.Join(linkedRoot, ".entire")); !os.IsNotExist(err) {
-		t.Fatalf("linked .entire survived uninstall: %v", err)
-	}
-	if out := runUninstallGitInDir(t, mainRoot, "branch", "--list", mainShadow); strings.TrimSpace(out) == "" {
-		t.Fatal("main shadow branch removed")
-	}
-	if out := runUninstallGitInDir(t, mainRoot, "branch", "--list", linkedShadow); strings.TrimSpace(out) != "" {
-		t.Fatal("linked shadow branch survived uninstall")
-	}
-}
-
-func TestUninstall_PreservesSharedGitHooksForActiveSibling(t *testing.T) {
-	_, linkedRoot, mainRepo, linkedRepo := setupUninstallLinkedWorktrees(t)
-	if err := repopolicy.SetLocalActivationForRepository(mainRepo, repopolicy.ActivationEnabled); err != nil {
-		t.Fatal(err)
-	}
-	if err := repopolicy.SetLocalActivationForRepository(linkedRepo, repopolicy.ActivationEnabled); err != nil {
-		t.Fatal(err)
-	}
-	t.Chdir(linkedRoot)
-	paths.ClearWorktreeRootCache()
-	session.ClearGitCommonDirCache()
-	testutil.WriteFile(t, linkedRoot, ".entire/settings.json", testSettingsEnabled)
-	if _, err := strategy.InstallGitHook(t.Context(), true, false); err != nil {
-		t.Fatalf("InstallGitHook: %v", err)
-	}
-	if err := runUninstall(t.Context(), io.Discard, io.Discard, true); err != nil {
-		t.Fatalf("runUninstall: %v", err)
-	}
-	if !strategy.AnyGitHookInstalled(t.Context()) {
-		t.Fatal("shared git hooks removed while an active sibling worktree remains")
-	}
-}
-
-func TestUninstall_NeverRemovesUserLevelAgentHooks(t *testing.T) {
-	setupTestRepo(t)
-	t.Setenv("ENTIRE_CONFIG_DIR", t.TempDir())
-	testutil.WriteFile(t, ".", ".entire/settings.json", testSettingsEnabled)
-	supports, _ := agent.UserHookSupports()
-	for _, ua := range supports {
-		if _, err := ua.Support.InstallUserHooks(t.Context()); err != nil {
-			t.Fatalf("install %s user hooks: %v", ua.Name, err)
-		}
-	}
-	if err := runUninstall(t.Context(), io.Discard, io.Discard, true); err != nil {
-		t.Fatalf("runUninstall: %v", err)
-	}
-	for _, ua := range supports {
-		installed, err := ua.Support.AreUserHooksInstalled(t.Context())
-		if err != nil || !installed {
-			t.Fatalf("%s user hooks = %v, %v; repo uninstall must preserve them", ua.Name, installed, err)
-		}
-	}
-}
-
-func setupUninstallLinkedWorktrees(t *testing.T) (string, string, repopolicy.Repository, repopolicy.Repository) {
-	t.Helper()
-	mainRoot := setupTestDir(t)
-	testutil.InitRepo(t, mainRoot)
-	testutil.WriteFile(t, mainRoot, "README.md", "test\n")
-	testutil.GitAdd(t, mainRoot, "README.md")
-	testutil.GitCommit(t, mainRoot, "initial")
-	linkedRoot := filepath.Join(t.TempDir(), "linked")
-	runUninstallGitInDir(t, mainRoot, "worktree", "add", "-b", "linked", linkedRoot)
-	mainRepo, err := repopolicy.ResolveRepositoryAt(t.Context(), mainRoot)
-	if err != nil {
-		t.Fatalf("resolve main: %v", err)
-	}
-	linkedRepo, err := repopolicy.ResolveRepositoryAt(t.Context(), linkedRoot)
-	if err != nil {
-		t.Fatalf("resolve linked: %v", err)
-	}
-	return mainRoot, linkedRoot, mainRepo, linkedRepo
-}
-
-func runUninstallGitInDir(t *testing.T, dir string, args ...string) string {
-	t.Helper()
-	cmd := exec.CommandContext(t.Context(), "git", args...)
-	cmd.Dir = dir
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("git %s: %v\n%s", strings.Join(args, " "), err, out)
-	}
-	return string(out)
 }
 
 func TestRunUninstall_NotAGitRepo(t *testing.T) {
@@ -4137,15 +3851,6 @@ func TestRunEnableInteractive_FirstRunDefaultsToGitRefs(t *testing.T) {
 		cfg := enable(t, EnableOptions{Yes: true, Telemetry: true})
 		if cfg == nil || cfg.Primary.Type != checkpoint.BackendTypeGitRefs {
 			t.Errorf("Checkpoints = %+v, want explicit git-refs primary", cfg)
-		}
-	})
-
-	t.Run("incidental settings still count as first run", func(t *testing.T) {
-		setupTestRepo(t)
-		writeLocalSettings(t, `{"investigate":{"max_turns":4}}`)
-		cfg := enable(t, EnableOptions{Yes: true, Telemetry: true})
-		if cfg == nil || cfg.Primary.Type != checkpoint.BackendTypeGitRefs {
-			t.Errorf("Checkpoints = %+v, want first-run git-refs primary", cfg)
 		}
 	})
 

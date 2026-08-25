@@ -43,50 +43,9 @@ func ModifyUserSettings(ctx context.Context, fn func(*UserSettings) error) error
 	return nil
 }
 
-// SaveUserSettings atomically replaces the user-global settings file.
-func SaveUserSettings(ctx context.Context, settings *UserSettings) error {
-	if err := repopolicy.SaveUserSettings(ctx, settings); err != nil {
-		return err //nolint:wrapcheck // compatibility facade preserves the public error contract
-	}
-	paths.ClearInvisibleRuntimeCache()
-	return nil
-}
-
-// These package-private facades preserve focused parent-package tests and
-// trust call sites without retaining a second normalization or matching tree.
-func normalizeOrigin(rawURL string) string {
-	return repopolicy.NormalizeOrigin(rawURL)
-}
-
-func matchesExcludePath(ctx context.Context, patterns []string, worktreeRoot string) (bool, error) {
-	return repopolicy.MatchesExcludePath(ctx, patterns, worktreeRoot) //nolint:wrapcheck // compatibility test facade
-}
-
-func matchesExcludePathFold(ctx context.Context, patterns []string, worktreeRoot string, fold bool) (bool, error) {
-	return repopolicy.MatchesExcludePathFold(ctx, patterns, worktreeRoot, fold) //nolint:wrapcheck // compatibility test facade
-}
-
-func matchesExcludePathExact(ctx context.Context, entries []string, worktreeRoot string) (bool, error) {
-	return repopolicy.MatchesExcludePathExact(ctx, entries, worktreeRoot) //nolint:wrapcheck // compatibility test/trust facade
-}
-
-func matchesExcludePathExactFold(ctx context.Context, entries []string, worktreeRoot string, fold bool) (bool, error) {
-	return repopolicy.MatchesExcludePathExactFold(ctx, entries, worktreeRoot, fold) //nolint:wrapcheck // compatibility test facade
-}
-
-func matchesExcludeOrigin(ctx context.Context, patterns []string, normalizedOrigin string) (bool, error) {
-	return repopolicy.MatchesExcludeOrigin(ctx, patterns, normalizedOrigin) //nolint:wrapcheck // compatibility test facade
-}
-
 // ClearGlobalModeCache clears leaf-owned global classification state.
 func ClearGlobalModeCache() {
 	repopolicy.ClearGlobalModeCache()
-}
-
-// GlobalModeActive reports whether global settings activate this repository.
-func GlobalModeActive(ctx context.Context) bool {
-	active, _ := globalModeStatus(ctx)
-	return active
 }
 
 func globalModeStatus(ctx context.Context) (bool, InactiveReason) {

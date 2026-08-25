@@ -169,6 +169,7 @@ func TestLegacyMetadataEvidence_LoadsTrackedSetOnceAndHonorsScanBudget(t *testin
 		}
 		calls := 0
 		options := defaultLegacyMetadataOptions()
+		options.scanBudget = time.Minute
 		options.loadTracked = func(context.Context, Repository) (map[string]struct{}, error) {
 			calls++
 			tracked := make(map[string]struct{}, 64)

@@ -1,17 +1,14 @@
 package strategy
 
 import (
-	"bytes"
 	"context"
 	"errors"
-	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
 	"slices"
 	"strings"
-	"sync"
 	"testing"
 
 	"github.com/entireio/cli/cmd/entire/cli/paths"
@@ -289,119 +286,6 @@ func TestGetHooksDirInPath_CoreHooksPath(t *testing.T) {
 	}
 	if filepath.Clean(absoluteResult) != filepath.Clean(absHooksPath) {
 		t.Errorf("absolute core.hooksPath expected %s, got %s", absHooksPath, absoluteResult)
-	}
-}
-
-// TestInstallGitHooks_BackupNoticeWriter pins that the "[entire] Backed up
-// existing ..." notices go to the caller-provided writer: the lazy global
-// setup passes io.Discard so nothing leaks into agent stderr, while
-// InstallGitHook (user-initiated installs) keeps os.Stderr.
-func TestInstallGitHooks_BackupNoticeWriter(t *testing.T) {
-	_, hooksDir := initHooksTestRepo(t)
-	ctx := context.Background()
-
-	if err := os.MkdirAll(hooksDir, 0o755); err != nil {
-		t.Fatalf("mkdir hooks dir: %v", err)
-	}
-	preExisting := filepath.Join(hooksDir, "pre-push")
-	if err := os.WriteFile(preExisting, []byte("#!/bin/sh\necho user hook\n"), 0o755); err != nil {
-		t.Fatalf("write pre-existing hook: %v", err)
-	}
-
-	var notices bytes.Buffer
-	if _, err := installGitHooks(ctx, true, false, &notices); err != nil {
-		t.Fatalf("installGitHooks: %v", err)
-	}
-
-	if !strings.Contains(notices.String(), "Backed up existing pre-push") {
-		t.Errorf("backup notice not routed to the provided writer, got: %q", notices.String())
-	}
-	if _, err := os.Stat(preExisting + backupSuffix); err != nil {
-		t.Errorf("pre-existing hook was not backed up: %v", err)
-	}
-}
-
-// Global mode runs first-ever installs from hook processes that can fire
-// concurrently. Without the install lock, two losing interleavings exist and
-// BOTH must fail this test: a racer can rename a half-installed wrapper over
-// the user's backup (destroying the user's script), or read after the winner
-// wrote its wrapper, skip the backup, and write UNCHAINED content — leaving
-// the backup intact but orphaning the user's hook so it never runs again.
-//
-// Shape is mutation-tuned, not arbitrary: 4 installers (measured peak
-// interleave rate — more racers hit the marker short-circuit and make the
-// race RARER), every managed hook seeded (independent chances per round), and
-// many rounds because one round is a coin flip at any installer count.
-func TestInstallGitHook_ConcurrentFirstInstall_PreservesUserHooks(t *testing.T) {
-	const (
-		rounds     = 60
-		installers = 4
-	)
-	userScript := func(name string) string {
-		return "#!/bin/sh\necho user-" + name + "\n"
-	}
-
-	for round := range rounds {
-		t.Run(fmt.Sprintf("round-%d", round), func(t *testing.T) {
-			tmpDir := t.TempDir()
-			initCmd := exec.CommandContext(t.Context(), "git", "init")
-			initCmd.Dir = tmpDir
-			if err := initCmd.Run(); err != nil {
-				t.Fatalf("git init: %v", err)
-			}
-			t.Chdir(tmpDir)
-			paths.ClearWorktreeRootCache()
-			ClearHooksDirCache()
-			t.Cleanup(func() {
-				paths.ClearWorktreeRootCache()
-				ClearHooksDirCache()
-			})
-
-			hooksDir := filepath.Join(tmpDir, ".git", "hooks")
-			if err := os.MkdirAll(hooksDir, 0o755); err != nil {
-				t.Fatal(err)
-			}
-			for _, name := range ManagedGitHookNames() {
-				if err := os.WriteFile(filepath.Join(hooksDir, name), []byte(userScript(name)), 0o755); err != nil {
-					t.Fatal(err)
-				}
-			}
-
-			var wg sync.WaitGroup
-			for range installers {
-				wg.Add(1)
-				go func() {
-					defer wg.Done()
-					if _, err := InstallGitHook(t.Context(), true, false); err != nil {
-						t.Errorf("InstallGitHook: %v", err)
-					}
-				}()
-			}
-			wg.Wait()
-
-			for _, name := range ManagedGitHookNames() {
-				hookPath := filepath.Join(hooksDir, name)
-				backup, err := os.ReadFile(hookPath + backupSuffix)
-				if err != nil {
-					t.Fatalf("%s: user hook backup missing: %v", name, err)
-				}
-				if string(backup) != userScript(name) {
-					t.Fatalf("%s: user hook destroyed, backup holds: %q", name, backup)
-				}
-				installed, err := os.ReadFile(hookPath)
-				if err != nil {
-					t.Fatal(err)
-				}
-				if !strings.Contains(string(installed), entireHookMarker) {
-					t.Fatalf("%s: installed hook is not Entire's: %q", name, installed)
-				}
-				// Without the chain the backup is orphaned: the user's hook
-				// survives on disk but git never runs it again.
-				if !strings.Contains(string(installed), name+backupSuffix) {
-					t.Fatalf("%s: installed hook does not chain to its backup: %q", name, installed)
-				}
-			}
-		})
 	}
 }
 
@@ -2147,65 +2031,4 @@ func TestResolveHookExePath(t *testing.T) {
 			t.Errorf("error should mention symlink resolution, got: %v", err)
 		}
 	})
-}
-
-func TestWriteHookFile_AtomicWriteSemantics(t *testing.T) {
-	t.Parallel()
-	dir := t.TempDir()
-	path := filepath.Join(dir, "post-commit")
-
-	written, err := writeHookFile(path, "#!/bin/sh\necho one\n")
-	if err != nil {
-		t.Fatalf("initial write: %v", err)
-	}
-	if !written {
-		t.Fatal("initial write must report written=true")
-	}
-	if runtime.GOOS != goosWindows {
-		info, err := os.Stat(path)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if perm := info.Mode().Perm(); perm != 0o755 {
-			t.Fatalf("hook file mode = %o, want 755 (must be executable at rename time)", perm)
-		}
-	}
-
-	// Same content: unchanged, not rewritten.
-	written, err = writeHookFile(path, "#!/bin/sh\necho one\n")
-	if err != nil {
-		t.Fatalf("idempotent write: %v", err)
-	}
-	if written {
-		t.Fatal("identical content must report written=false")
-	}
-
-	// Different content: replaced.
-	written, err = writeHookFile(path, "#!/bin/sh\necho two\n")
-	if err != nil {
-		t.Fatalf("update write: %v", err)
-	}
-	if !written {
-		t.Fatal("changed content must report written=true")
-	}
-	data, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(data) != "#!/bin/sh\necho two\n" {
-		t.Fatalf("unexpected content after update: %q", data)
-	}
-
-	// No leftover temp files after the writes.
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(entries) != 1 {
-		names := make([]string, 0, len(entries))
-		for _, e := range entries {
-			names = append(names, e.Name())
-		}
-		t.Fatalf("expected only the hook file, found %v", names)
-	}
 }

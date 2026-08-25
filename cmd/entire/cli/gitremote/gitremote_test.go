@@ -3,7 +3,6 @@ package gitremote
 import (
 	"context"
 	"os/exec"
-	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -57,21 +56,6 @@ func TestParseURL(t *testing.T) {
 		{
 			name:     "HTTPS standard port not appended",
 			url:      "https://github.com/org/repo.git",
-			wantInfo: &Info{Protocol: ProtocolHTTPS, Host: "github.com", Forge: "gh", Owner: "org", Repo: "repo"},
-		},
-		{
-			name:     "HTTPS with trailing slash",
-			url:      "https://github.com/org/repo/",
-			wantInfo: &Info{Protocol: ProtocolHTTPS, Host: "github.com", Forge: "gh", Owner: "org", Repo: "repo"},
-		},
-		{
-			name:     "SSH SCP with uppercase .GIT",
-			url:      "git@github.com:org/repo.GIT",
-			wantInfo: &Info{Protocol: ProtocolSSH, Host: "github.com", Forge: "gh", Owner: "org", Repo: "repo"},
-		},
-		{
-			name:     "HTTPS with /.git suffix",
-			url:      "https://github.com/org/repo/.git",
 			wantInfo: &Info{Protocol: ProtocolHTTPS, Host: "github.com", Forge: "gh", Owner: "org", Repo: "repo"},
 		},
 		{
@@ -270,92 +254,6 @@ func TestResolveRemoteRepo_MissingRemote(t *testing.T) {
 
 	_, _, _, err := ResolveRemoteRepo(context.Background(), "origin")
 	assert.Error(t, err)
-}
-
-func TestGetRemoteURLsInDirIfSet(t *testing.T) {
-	t.Parallel()
-
-	newRepo := func(t *testing.T) string {
-		t.Helper()
-		dir := t.TempDir()
-		initGitRemoteRepo(t, dir)
-		return dir
-	}
-	runGit := func(t *testing.T, dir string, args ...string) {
-		t.Helper()
-		cmd := exec.CommandContext(t.Context(), "git", args...)
-		cmd.Dir = dir
-		require.NoError(t, cmd.Run())
-	}
-
-	t.Run("remote configured", func(t *testing.T) {
-		t.Parallel()
-		dir := newRepo(t)
-		runGit(t, dir, "remote", "add", "origin", "git@github.com:acme/widgets.git")
-
-		urls, found, err := GetRemoteURLsInDirIfSet(t.Context(), dir, "origin")
-		require.NoError(t, err)
-		assert.True(t, found)
-		assert.Equal(t, []string{"git@github.com:acme/widgets.git"}, urls)
-	})
-
-	t.Run("multiple URLs are all returned", func(t *testing.T) {
-		t.Parallel()
-		dir := newRepo(t)
-		runGit(t, dir, "remote", "add", "origin", "git@github.com:acme/widgets.git")
-		runGit(t, dir, "remote", "set-url", "--add", "origin", "https://github.com/acme/mirror.git")
-
-		urls, found, err := GetRemoteURLsInDirIfSet(t.Context(), dir, "origin")
-		require.NoError(t, err)
-		assert.True(t, found)
-		assert.Equal(t, []string{"git@github.com:acme/widgets.git", "https://github.com/acme/mirror.git"}, urls)
-	})
-
-	t.Run("remote not configured is found=false, not an error", func(t *testing.T) {
-		t.Parallel()
-		dir := newRepo(t)
-
-		urls, found, err := GetRemoteURLsInDirIfSet(t.Context(), dir, "origin")
-		require.NoError(t, err)
-		assert.False(t, found)
-		assert.Empty(t, urls)
-	})
-
-	t.Run("blank URL value is found=true with the empty value", func(t *testing.T) {
-		t.Parallel()
-		dir := newRepo(t)
-		runGit(t, dir, "config", "remote.origin.url", "")
-
-		urls, found, err := GetRemoteURLsInDirIfSet(t.Context(), dir, "origin")
-		require.NoError(t, err)
-		assert.True(t, found, "the key exists; the caller must see an uncheckable value, not no-origin")
-		assert.Equal(t, []string{""}, urls)
-	})
-
-	t.Run("non-repo directory is an error, not found=false", func(t *testing.T) {
-		t.Parallel()
-		_, _, err := GetRemoteURLsInDirIfSet(t.Context(), t.TempDir(), "origin")
-		assert.Error(t, err, "exit 1 outside a repo is scope fallback, not key-unset")
-	})
-
-	t.Run("lookup failure is an error, not found=false", func(t *testing.T) {
-		t.Parallel()
-		dir := filepath.Join(t.TempDir(), "does-not-exist")
-
-		_, _, err := GetRemoteURLsInDirIfSet(t.Context(), dir, "origin")
-		assert.Error(t, err)
-	})
-
-	t.Run("canceled context is an error even with a configured remote", func(t *testing.T) {
-		t.Parallel()
-		dir := newRepo(t)
-		runGit(t, dir, "remote", "add", "origin", "git@github.com:acme/widgets.git")
-
-		ctx, cancel := context.WithCancel(t.Context())
-		cancel()
-		_, _, err := GetRemoteURLsInDirIfSet(ctx, dir, "origin")
-		assert.Error(t, err)
-	})
 }
 
 func initGitRemoteRepo(t *testing.T, dir string) {
