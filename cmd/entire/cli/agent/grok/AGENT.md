@@ -483,7 +483,23 @@ still.
 5. **Foreign-config collision** — see above; needs a product decision.
 6. **Project trust gate** — see above; silent failure mode for `entire enable`.
 7. **Subagent transcripts** — a `subagents/` directory exists per session but its layout is undocumented. Relevant to `SubagentSessionResolver` and `Event.SubagentTranscriptPath`; the Droid Workers path is the closest precedent.
-8. **Subagents are unimplemented.** `SubagentStart`/`SubagentStop` are parsed and mapped, but `SubagentSessionResolver` is not implemented and no subagent run has ever been observed. Grok's docs say `SubagentStop` fires *inside* the child, and child sessions live in the normal sessions tree with only `meta.json` under the parent's `subagents/` — which is the Droid Workers shape, not Claude Code's blocking-tool shape. Decide that against a real subagent transcript, not the docs.
+8. **Subagent linkage is implemented but its on-disk layout is unverified.** A real `spawn_subagent` run *was* captured (E2E `TestSubagentCommitFlow`) and settles the shape question: Grok subagents are **independent child sessions**, confirming the `SubagentSessionResolver` (Droid Workers) shape rather than Claude Code's blocking-tool shape. Observed in that run:
+
+   - Two distinct session IDs for one `spawn_subagent`.
+   - Two `user_prompt_submit`, two `stop`, two `session_end` — one set each for parent and child.
+   - Only **one** `session_start`, matching the doc note that it does not fire for a child.
+   - `tool_use_id` empty on `SubagentStart`.
+   - **The bug:** the checkpoint recorded **2 top-level sessions**, both claiming `docs/red.md`, so the subagent's single edit was double-counted. `TestSubagentCommitFlow` still passed — it never asserts session count.
+
+   `ResolveSubagentSession` (subagent.go) now links child → parent by scanning
+   sibling sessions in the same group for the child's ID inside their
+   `subagents/` metadata. **The `subagents/` schema is undocumented and was not
+   captured before the quota ran out**, so the scan is written to fail closed:
+   it requires valid JSON, a string-value (not substring) match, and exactly
+   one claimant — zero, two, or anything unexpected returns false and restores
+   today's behaviour. If Grok keys that metadata by something other than the
+   child session ID, this is inert rather than wrong. Verify against a real
+   `subagents/` directory and tighten it to the actual field.
 9. **Coverage of the live run was one trivial turn** — no subagent, no compaction, no interrupt, no failure, no multi-turn session. `SubagentStart`/`SubagentStop`/`StopCancelled`/`StopFailure`/`PreCompact`/`PostCompact` and `Notification` are **still unobserved**, and those are exactly the paths with the trickiest mappings.
 9. **`SessionStart` does not fire for a subagent's own session** *(doc, `10-hooks.md:90`)*, and **`SessionEnd` carries `subagentType` for a child session** so a host can distinguish a child teardown from its own. Both matter for subagent bookkeeping.
 10. **`SubagentStop` fires once, inside the subagent** *(doc, `10-hooks.md:101`)* — not in the parent. Child sessions live in the normal sessions tree with only `meta.json` under the parent's `subagents/`, which is the `SubagentSessionResolver` shape (cf. Droid Workers), not a blocking tool call.
@@ -503,7 +519,7 @@ Implemented in this package and registered as `grok`
 | `TranscriptAnalyzer` | done — diff blocks, `locations[]` fallback |
 | `TokenCalculator` | done — `turn_completed.usage`, fresh input derived |
 | `ModelExtractor` | done — `_meta.modelId` |
-| `SubagentSessionResolver` | **not implemented** — see gaps |
+| `SubagentSessionResolver` | implemented, **layout unverified** — see gaps |
 | `TranscriptCompactor` | not implemented (regenerable; `full.jsonl` is authoritative) |
 | `TextGenerator` / `Launcher` | not implemented |
 
