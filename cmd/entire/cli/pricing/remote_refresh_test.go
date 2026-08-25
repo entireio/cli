@@ -13,8 +13,11 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-const validRemoteDoc = `{"schema_version":1,"models":[` +
-	`{"id":"gpt-5.5","provider":"openai","input_per_mtok":999,"output_per_mtok":1000}]}`
+// The fetched document is entire-api's WIRE shape: camelCase per CASING-001.
+// The on-disk cache and the embedded files stay snake_case — see
+// remoteCatalog.toFileSchema.
+const validRemoteDoc = `{"schemaVersion":1,"models":[` +
+	`{"id":"gpt-5.5","provider":"openai","inputPerMTok":999,"outputPerMTok":1000}]}`
 
 // priorInputRate is the gpt-5.5 input rate a seeded (pre-existing) cache carries,
 // distinct from the embedded (5) and the fetched (999) rates so a test can tell
@@ -177,8 +180,8 @@ func TestRefreshRemoteCache_SchemaVersion99NotStored(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		//nolint:errcheck // test helper
-		io.WriteString(w, `{"schema_version":99,"models":[`+
-			`{"id":"gpt-5.5","provider":"openai","input_per_mtok":999,"output_per_mtok":1000}]}`)
+		io.WriteString(w, `{"schemaVersion":99,"models":[`+
+			`{"id":"gpt-5.5","provider":"openai","inputPerMTok":999,"outputPerMTok":1000}]}`)
 	}))
 	defer srv.Close()
 	t.Setenv("ENTIRE_PRICING_URL", srv.URL)

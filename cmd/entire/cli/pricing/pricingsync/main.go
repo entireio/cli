@@ -25,8 +25,10 @@
 //
 // Flags:
 //
-//	-source  catalog URL or local file path (fileSchema-shaped: {schema_version,
-//	         models: [...]}). Defaults to the CLI's own production pricing
+//	-source  catalog URL or local file path, in the canonical catalog's WIRE
+//	         shape ({schemaVersion, models: [{inputPerMTok, ...}]}) — camelCase,
+//	         which is what entire-api serves and what the embedded snake_case
+//	         files are written FROM, not in. Defaults to the CLI's own production pricing
 //	         source (https://entire.io/pricing/v1/models.json — the same URL
 //	         pricing/remote.go's opt-in runtime refresh already polls), so this
 //	         command and the runtime refresh always agree on where "current" is
@@ -85,6 +87,43 @@ type modelRate struct {
 type fileSchema struct {
 	SchemaVersion int         `json:"schema_version"`
 	Models        []modelRate `json:"models"`
+}
+
+// catalogModelRate is the WIRE shape entire-api serves the canonical catalog
+// in: camelCase, per that repo's CASING-001 API rule. It is deliberately
+// separate from modelRate above, which is the snake_case shape of the embedded
+// files this command WRITES — those are a storage format shared with the
+// user-facing pricing.models override block in .entire/settings.json, so they
+// must not be re-cased to follow the wire.
+type catalogModelRate struct {
+	ID                  string   `json:"id"`
+	Provider            string   `json:"provider"`
+	Aliases             []string `json:"aliases"`
+	InputPerMTok        float64  `json:"inputPerMTok"`
+	OutputPerMTok       float64  `json:"outputPerMTok"`
+	CacheReadPerMTok    *float64 `json:"cacheReadPerMTok"`
+	CacheWritePerMTok   *float64 `json:"cacheWritePerMTok"`
+	CacheWrite1hPerMTok *float64 `json:"cacheWrite1hPerMTok"`
+	EffectiveDate       string   `json:"effectiveDate"`
+}
+
+// catalogSchema is the wire envelope: {"schemaVersion": 1, "models": [...]}.
+type catalogSchema struct {
+	SchemaVersion int                `json:"schemaVersion"`
+	Models        []catalogModelRate `json:"models"`
+}
+
+// toFileSchema converts the fetched wire catalog into the embedded files'
+// shape, so every downstream step (validateCatalog, diff, applyReport) keeps
+// working on one type. A nil cache rate stays nil rather than becoming 0 —
+// the embedded files omit those keys deliberately so pricing.Estimate applies
+// the provider's cache multipliers, and a zero would price cached tokens free.
+func (c catalogSchema) toFileSchema() fileSchema {
+	models := make([]modelRate, 0, len(c.Models))
+	for _, m := range c.Models {
+		models = append(models, modelRate(m))
+	}
+	return fileSchema{SchemaVersion: c.SchemaVersion, Models: models}
 }
 
 // errDriftFound is a sentinel returned by run in read-only mode when the
@@ -171,11 +210,11 @@ func fetchCatalog(source string) (fileSchema, error) {
 		}
 	}
 
-	var schema fileSchema
-	if err := json.Unmarshal(body, &schema); err != nil {
+	var catalog catalogSchema
+	if err := json.Unmarshal(body, &catalog); err != nil {
 		return fileSchema{}, fmt.Errorf("parse catalog: %w", err)
 	}
-	return schema, nil
+	return catalog.toFileSchema(), nil
 }
 
 // validateCatalog rejects a catalog too broken or too small to sync from —

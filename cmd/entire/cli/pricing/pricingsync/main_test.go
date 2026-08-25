@@ -29,22 +29,24 @@ func TestRun_ReadOnlyDriftReturnsSentinel(t *testing.T) {
 	// pollute the comparison.
 	catalogPath := filepath.Join(t.TempDir(), "catalog.json")
 
-	// Drifted: catalog disagrees with the embedded table.
-	writeSchema(t, catalogPath, fileSchema{SchemaVersion: 1, Models: []modelRate{
+	// Drifted: catalog disagrees with the embedded table. Catalog fixtures use
+	// writeCatalog (camelCase wire shape) rather than writeSchema — fetchCatalog
+	// parses the shape entire-api serves, which is NOT the embedded files' shape.
+	writeCatalog(t, catalogPath, catalogSchema{SchemaVersion: 1, Models: []catalogModelRate{
 		{ID: "a", Provider: "anthropic", InputPerMTok: 2, OutputPerMTok: 1},
 	}})
 	err := run(catalogPath, dir, false)
 	require.ErrorIs(t, err, errDriftFound)
 
 	// No drift: catalog matches the embedded table exactly.
-	writeSchema(t, catalogPath, fileSchema{SchemaVersion: 1, Models: []modelRate{
+	writeCatalog(t, catalogPath, catalogSchema{SchemaVersion: 1, Models: []catalogModelRate{
 		{ID: "a", Provider: "anthropic", InputPerMTok: 1, OutputPerMTok: 1},
 	}})
 	require.NoError(t, run(catalogPath, dir, false))
 
 	// -write must never return the drift sentinel — it either applies
 	// cleanly (nil, as here) or fails for a real reason.
-	writeSchema(t, catalogPath, fileSchema{SchemaVersion: 1, Models: []modelRate{
+	writeCatalog(t, catalogPath, catalogSchema{SchemaVersion: 1, Models: []catalogModelRate{
 		{ID: "a", Provider: "anthropic", InputPerMTok: 3, OutputPerMTok: 1},
 	}})
 	require.NoError(t, run(catalogPath, dir, true))
@@ -212,6 +214,57 @@ func writeSchema(t *testing.T, path string, s fileSchema) {
 	data, err := json.MarshalIndent(s, "", "  ")
 	require.NoError(t, err)
 	require.NoError(t, os.WriteFile(path, data, 0o600))
+}
+
+// writeCatalog writes a fixture in the canonical catalog's camelCase WIRE
+// shape — what fetchCatalog reads. writeSchema above writes the embedded
+// files' snake_case shape. Keeping the two helpers distinct is what makes a
+// test that confuses them fail loudly instead of silently comparing zero
+// values, which is exactly how the casing split can regress unnoticed.
+func writeCatalog(t *testing.T, path string, c catalogSchema) {
+	t.Helper()
+	data, err := json.MarshalIndent(c, "", "  ")
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(path, data, 0o600))
+}
+
+// TestFetchCatalog_ParsesWireCasing pins the wire contract: a camelCase
+// document parses with every field populated, and a snake_case one (the shape
+// this command used to accept, and the shape the embedded files still use)
+// does NOT silently parse as zero values. Without the second half, a
+// regression to snake_case would surface as "0 models drifted" rather than an
+// error — a green CI freshness gate reporting on nothing.
+func TestFetchCatalog_ParsesWireCasing(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+
+	wire := filepath.Join(dir, "wire.json")
+	require.NoError(t, os.WriteFile(wire, []byte(`{"schemaVersion":1,"models":[`+
+		`{"id":"claude-opus-4-8","provider":"anthropic","inputPerMTok":5,"outputPerMTok":25,`+
+		`"cacheWrite1hPerMTok":10,"effectiveDate":"2026-08-25"}]}`), 0o600))
+
+	got, err := fetchCatalog(wire)
+	require.NoError(t, err)
+	require.Len(t, got.Models, 1)
+	assert.Equal(t, 1, got.SchemaVersion)
+	assert.Equal(t, "claude-opus-4-8", got.Models[0].ID)
+	assert.InDelta(t, 5.0, got.Models[0].InputPerMTok, 0)
+	assert.InDelta(t, 25.0, got.Models[0].OutputPerMTok, 0)
+	require.NotNil(t, got.Models[0].CacheWrite1hPerMTok)
+	assert.InDelta(t, 10.0, *got.Models[0].CacheWrite1hPerMTok, 0)
+	assert.Equal(t, "2026-08-25", got.Models[0].EffectiveDate)
+
+	legacy := filepath.Join(dir, "legacy.json")
+	require.NoError(t, os.WriteFile(legacy, []byte(`{"schema_version":1,"models":[`+
+		`{"id":"claude-opus-4-8","provider":"anthropic","input_per_mtok":5,"output_per_mtok":25}]}`), 0o600))
+
+	stale, err := fetchCatalog(legacy)
+	require.NoError(t, err, "unknown keys parse, they just populate nothing")
+	assert.Equal(t, 0, stale.SchemaVersion, "snake_case must not satisfy the wire contract")
+	require.Len(t, stale.Models, 1)
+	assert.Zero(t, stale.Models[0].InputPerMTok, "snake_case rate keys must not bind")
+	// validateCatalog is the backstop that turns this into a hard failure.
+	require.Error(t, validateCatalog(stale))
 }
 
 func readSchema(t *testing.T, path string) fileSchema {

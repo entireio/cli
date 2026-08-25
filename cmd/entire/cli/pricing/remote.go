@@ -17,12 +17,60 @@ import (
 	"github.com/entireio/cli/internal/entireclient/userdirs"
 )
 
+// remoteModelRate is the WIRE shape of one model rate as entire-api serves it
+// from GET /api/v1/pricing/models.json: camelCase, per that repo's CASING-001
+// API rule.
+//
+// It is deliberately distinct from ModelRate, whose snake_case tags are a
+// STORAGE format shared by two things that must not move: the embedded
+// models/*.json build assets, and the user-facing `pricing.models` override
+// block in .entire/settings.json. Re-casing ModelRate to match the wire would
+// silently invalidate every existing user override file. Wire and storage are
+// separate contracts; toModelRates is the seam between them.
+type remoteModelRate struct {
+	ID                  string   `json:"id"`
+	Provider            string   `json:"provider"`
+	Aliases             []string `json:"aliases"`
+	InputPerMTok        float64  `json:"inputPerMTok"`
+	OutputPerMTok       float64  `json:"outputPerMTok"`
+	CacheReadPerMTok    *float64 `json:"cacheReadPerMTok"`
+	CacheWritePerMTok   *float64 `json:"cacheWritePerMTok"`
+	CacheWrite1hPerMTok *float64 `json:"cacheWrite1hPerMTok"`
+	EffectiveDate       string   `json:"effectiveDate"`
+}
+
+// remoteCatalog is the wire envelope: {"schemaVersion": 1, "models": [...]}.
+type remoteCatalog struct {
+	SchemaVersion int               `json:"schemaVersion"`
+	Models        []remoteModelRate `json:"models"`
+}
+
+// toFileSchema converts a fetched wire catalog into the internal (snake_case)
+// shape the cache file and validateRate already use, so everything downstream
+// of the fetch — LoadRemoteEntries, countValidEntries, the on-disk cache — is
+// untouched by the wire's casing.
+//
+// A nil cache rate stays nil rather than collapsing to 0: Estimate's
+// provider-aware fallback keys on absence to apply Anthropic's 0.1x/1.25x/2x
+// multipliers, so a zeroed rate would price cached tokens as free.
+func (c remoteCatalog) toFileSchema() fileSchema {
+	models := make([]ModelRate, 0, len(c.Models))
+	for _, m := range c.Models {
+		models = append(models, ModelRate(m))
+	}
+	return fileSchema{SchemaVersion: c.SchemaVersion, Models: models}
+}
+
 // RemoteCache is the on-disk shape of the cached remote pricing table. It wraps
 // the same fileSchema the embedded models/*.json files use — so validateRate and
 // the schema_version contract are shared, not reimplemented — with the fetch
 // bookkeeping the background refresh needs: FetchedAt drives the 24h refresh
 // backoff, ETag drives conditional (If-None-Match) requests, SourceURL records
 // where the table came from for diagnostics.
+//
+// The cache file stays snake_case even though the wire is camelCase: it is a
+// local artifact, not an API, and keeping it aligned with the embedded files
+// means an existing cache written by an earlier build still parses.
 type RemoteCache struct {
 	FetchedAt time.Time   `json:"fetched_at"`
 	ETag      string      `json:"etag,omitempty"`
@@ -343,10 +391,11 @@ func fetchRemote(ctx context.Context, prev *RemoteCache) (*RemoteCache, string) 
 		// as the client.Do error above, not a well-formed-but-unusable response.
 		return transportFailure(out), refreshOutcomeUnchanged
 	}
-	var doc fileSchema
-	if err := json.Unmarshal(body, &doc); err != nil {
+	var catalog remoteCatalog
+	if err := json.Unmarshal(body, &catalog); err != nil {
 		return out, refreshOutcomeUnchanged
 	}
+	doc := catalog.toFileSchema()
 	if !remoteDocUsable(&doc) {
 		return out, refreshOutcomeUnchanged
 	}
