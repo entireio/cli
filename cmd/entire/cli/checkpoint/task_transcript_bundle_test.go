@@ -284,7 +284,7 @@ func TestTaskBundle_PersistentFailedWriteLeavesStoredPairIntact(t *testing.T) {
 			CheckpointID: cpID, SessionID: "s-bundle", Strategy: "manual-commit",
 			Transcript: redact.AlreadyRedacted([]byte(`{"msg":"safe"}` + "\n")),
 			AuthorName: "T", AuthorEmail: "t@t.com",
-			Agent:      agent.AgentTypeClaudeCode,
+			Agent: agent.AgentTypeClaudeCode,
 			Tasks: []TaskPayload{{
 				ToolUseID:                   "toolu_bundle3",
 				AgentID:                     "agent1",
