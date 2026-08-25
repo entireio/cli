@@ -153,10 +153,17 @@ func RemoteFetchedAt() time.Time {
 	return rc.FetchedAt
 }
 
-// RemoteURL is the default source for the remote pricing table. It is a var so
-// tests can point it at an httptest server; the ENTIRE_PRICING_URL environment
-// variable overrides it at fetch time for self-hosted setups.
-var RemoteURL = "https://entire.io/pricing/v1/models.json"
+// RemoteURL is the default source for the remote pricing table: a single static
+// file on the apex domain, proxied by entire.io from entire-api's canonical
+// catalog. There is no version segment in the path — the document's own
+// schemaVersion carries it (LoadRemoteEntries ignores anything but 1), so a
+// future breaking change arrives as a different filename rather than as a
+// path prefix whose meaning silently shifts.
+//
+// It is a var so tests can point it at an httptest server; the
+// ENTIRE_PRICING_URL environment variable overrides it at fetch time for
+// self-hosted setups.
+var RemoteURL = "https://entire.io/model-pricing.json"
 
 const (
 	// remoteRefreshInterval is the minimum cache age before a refresh is

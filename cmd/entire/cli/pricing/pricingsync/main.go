@@ -29,7 +29,7 @@
 //	         shape ({schemaVersion, models: [{inputPerMTok, ...}]}) — camelCase,
 //	         which is what entire-api serves and what the embedded snake_case
 //	         files are written FROM, not in. Defaults to the CLI's own production pricing
-//	         source (https://entire.io/pricing/v1/models.json — the same URL
+//	         source (https://entire.io/model-pricing.json — the same URL
 //	         pricing/remote.go's opt-in runtime refresh already polls), so this
 //	         command and the runtime refresh always agree on where "current" is
 //	         defined.
@@ -59,7 +59,7 @@ import (
 	"time"
 )
 
-const defaultSource = "https://entire.io/pricing/v1/models.json"
+const defaultSource = "https://entire.io/model-pricing.json"
 
 const defaultDir = "cmd/entire/cli/pricing/models"
 
