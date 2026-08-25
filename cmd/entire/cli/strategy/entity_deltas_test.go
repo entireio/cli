@@ -11,6 +11,8 @@ import (
 	"testing"
 	"time"
 
+	"log/slog"
+
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
 	"github.com/entireio/cli/cmd/entire/cli/internal/flock"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
@@ -209,9 +211,17 @@ func TestScheduleEntityDeltas_ProducerAbsentLogsOneInfoLine(t *testing.T) {
 	t.Setenv("ENTIRE_LOG_LEVEL", "info")
 	jobs := captureEntityDeltasJobs(t)
 
-	require.NoError(t, logging.Init(context.Background(), ""))
-	scheduleForTest(t, dir, repo, base, []string{"test.txt"})
-	logging.Close()
+	logger, err := logging.New(logging.Config{
+		Dir:   filepath.Join(dir, logging.LogsDir),
+		Level: slog.LevelInfo,
+	})
+	require.NoError(t, err)
+	defer func() { _ = logger.Close() }()
+	logCtx := logging.WithLogger(context.Background(), logger)
+
+	scheduleEntityDeltas(context.Background(), logCtx, repo,
+		condenseOpts{repoDir: dir}, id.MustCheckpointID("e0e0e0e0e0e0"), "entity-deltas-session",
+		base, []string{"test.txt"})
 
 	assert.Empty(t, *jobs, "a missing producer must not schedule work")
 
