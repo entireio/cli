@@ -366,6 +366,12 @@ func (s *gitRefsStore) backfillEntityDeltas(ctx context.Context, req SessionEnti
 		return err //nolint:wrapcheck // Propagating context cancellation
 	}
 
+	release, err := acquireEntityDeltasLockFromRepo(ctx, s.repo)
+	if err != nil {
+		return fmt.Errorf("serialize entity deltas backfill: %w", err)
+	}
+	defer release()
+
 	return writeWithRefRaceRetry(ctx, "entity deltas backfill", func() error {
 		return s.tryBackfillEntityDeltas(ctx, req)
 	})
