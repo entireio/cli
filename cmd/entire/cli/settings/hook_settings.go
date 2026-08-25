@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"os"
 
 	"github.com/entireio/cli/cmd/entire/cli/settings/repopolicy"
 )
@@ -53,6 +52,14 @@ var hookRedactionFieldPolicy = map[string]hookFieldDisposition{
 	"goredact":              hookFieldIgnored,
 }
 
+var hookPIIFieldPolicy = map[string]hookFieldDisposition{
+	"enabled":         hookFieldAllowed,
+	"email":           hookFieldAllowed,
+	"phone":           hookFieldAllowed,
+	"address":         hookFieldAllowed,
+	"custom_patterns": hookFieldAllowed,
+}
+
 // LoadForRepoPolicy returns the hook-time settings view for one already
 // classified repository. Locally activated repositories retain the complete
 // merged loader. Global-only repositories receive a positive whitelist of
@@ -72,12 +79,12 @@ func LoadForRepoPolicy(ctx context.Context, policy repopolicy.RepoPolicy) (*Enti
 	}
 	settings := &EntireSettings{Enabled: true}
 	if provenance.ProjectVerified {
-		if err := mergeHookSettingsFile(settings, provenance.ProjectPath); err != nil {
+		if err := mergeHookSettingsData(settings, provenance.ProjectData); err != nil {
 			return nil, fmt.Errorf("reading project hook settings: %w", err)
 		}
 	}
 	if provenance.LocalVerified {
-		if err := mergeHookSettingsFile(settings, provenance.LocalPath); err != nil {
+		if err := mergeHookSettingsData(settings, provenance.LocalData); err != nil {
 			return nil, fmt.Errorf("reading local hook settings: %w", err)
 		}
 	}
@@ -94,26 +101,14 @@ func loadLocalPolicySettings(ctx context.Context, policy repopolicy.RepoPolicy) 
 	if err != nil {
 		return nil, fmt.Errorf("verifying local hook settings provenance: %w", err)
 	}
-	projectPath := ""
-	if provenance.ProjectPathSafe {
-		projectPath = provenance.ProjectPath
-	}
-	localPath := ""
-	if provenance.LocalPathSafe {
-		localPath = provenance.LocalPath
-	}
 	preferencesPath, err := clonePreferencesPathForWorktreeRoot(ctx, policy.WorktreeRoot)
 	if err != nil {
 		return nil, fmt.Errorf("resolving clone preferences: %w", err)
 	}
-	return loadMergedSettings(ctx, projectPath, preferencesPath, localPath)
+	return loadVerifiedPolicySettings(provenance, preferencesPath)
 }
 
-func mergeHookSettingsFile(settings *EntireSettings, path string) error {
-	data, err := os.ReadFile(path) //nolint:gosec // fixed path verified from the canonical worktree root
-	if err != nil {
-		return fmt.Errorf("reading settings file: %w", err)
-	}
+func mergeHookSettingsData(settings *EntireSettings, data []byte) error {
 	var raw map[string]json.RawMessage
 	if err := decodeHookObject(data, &raw); err != nil {
 		return fmt.Errorf("parsing settings: %w", err)
@@ -211,12 +206,49 @@ func mergeHookStringMap(name string, data json.RawMessage, destination *map[stri
 		return err
 	}
 	if *destination == nil {
-		*destination = map[string]string{}
+		*destination = values
+		return nil
+	}
+	if values == nil {
+		return nil
 	}
 	for label, pattern := range values {
 		(*destination)[label] = pattern
 	}
 	return nil
+}
+
+func loadVerifiedPolicySettings(provenance repopolicy.SettingsProvenance, preferencesPath string) (*EntireSettings, error) {
+	settings := &EntireSettings{Enabled: true}
+	var err error
+	if provenance.ProjectVerified {
+		settings, err = loadSettingsData(provenance.ProjectData)
+		if err != nil {
+			return nil, fmt.Errorf("reading settings file: %w", err)
+		}
+	}
+	if preferencesPath != "" {
+		preferences, preferencesErr := loadClonePreferencesFromFile(preferencesPath)
+		if preferencesErr != nil {
+			return nil, fmt.Errorf("reading clone preferences file: %w", preferencesErr)
+		}
+		applyClonePreferences(settings, preferences)
+	}
+	if provenance.LocalVerified {
+		if err := mergeJSON(settings, provenance.LocalData); err != nil {
+			return nil, fmt.Errorf("merging local settings: %w", err)
+		}
+	} else if provenance.LocalPathSafe {
+		settings.localLayerRejection = localLayerTrackedReason
+	}
+	enforceOPFCommandTrustForVerifiedData(settings, provenance.LocalData, provenance.LocalOPFVerified)
+	if err := settings.SummaryGeneration.Validate(); err != nil {
+		return nil, fmt.Errorf("merged settings invalid: %w", err)
+	}
+	if err := validateScannerSettings(settings); err != nil {
+		return nil, fmt.Errorf("merged settings invalid: %w", err)
+	}
+	return settings, nil
 }
 
 func unmarshalHookField(name string, data json.RawMessage, destination any) error {

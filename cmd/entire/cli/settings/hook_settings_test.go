@@ -179,6 +179,23 @@ func TestLoadForRepoPolicy_LocalActivationPreservesMergedLoaderAndOPFProvenance(
 	}
 }
 
+func TestLoadForRepoPolicy_LocalActivationPreservesTrackedLayerRejection(t *testing.T) {
+	t.Parallel()
+	root, policy := hookPolicyRepo(t)
+	policy.ActivationSource = repopolicy.ActivationLocal
+	testutil.WriteFile(t, root, ".entire/settings.json", `{"external_agents":false}`)
+	testutil.WriteFile(t, root, ".entire/settings.local.json", `{"external_agents":true}`)
+	testutil.RunGit(t, root, "add", "-f", ".entire/settings.local.json")
+
+	got, err := LoadForRepoPolicy(t.Context(), policy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.ExternalAgents || !strings.Contains(got.LocalLayerRejection(), "tracked in git") {
+		t.Fatalf("tracked local layer semantics changed: %+v rejection=%q", got, got.LocalLayerRejection())
+	}
+}
+
 func TestLoadForRepoPolicy_LocalActivationRejectsSymlinkTraversingSettings(t *testing.T) {
 	t.Parallel()
 	root, policy := hookPolicyRepo(t)
@@ -203,6 +220,7 @@ func TestHookFieldClassification_Exhaustive(t *testing.T) {
 	t.Parallel()
 	assertJSONFieldsClassified(t, reflect.TypeOf(EntireSettings{}), hookEntireFieldPolicy)
 	assertJSONFieldsClassified(t, reflect.TypeOf(RedactionSettings{}), hookRedactionFieldPolicy)
+	assertJSONFieldsClassified(t, reflect.TypeOf(PIISettings{}), hookPIIFieldPolicy)
 
 	for _, allowed := range []string{"enabled", "log_level", "redaction"} {
 		if hookEntireFieldPolicy[allowed] != hookFieldAllowed {
@@ -213,6 +231,74 @@ func TestHookFieldClassification_Exhaustive(t *testing.T) {
 		if hookRedactionFieldPolicy[allowed] != hookFieldAllowed {
 			t.Errorf("RedactionSettings.%s must be allowed", allowed)
 		}
+	}
+	for _, allowed := range []string{"enabled", "email", "phone", "address", "custom_patterns"} {
+		if hookPIIFieldPolicy[allowed] != hookFieldAllowed {
+			t.Errorf("PIISettings.%s must be allowed", allowed)
+		}
+	}
+}
+
+func TestLoadForRepoPolicy_PreservesNilAndEmptyStringMaps(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct {
+		name      string
+		value     string
+		wantNil   bool
+		wantEmpty bool
+	}{
+		{name: "null", value: "null", wantNil: true},
+		{name: "empty object", value: `{}`, wantEmpty: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			root, policy := hookPolicyRepo(t)
+			testutil.WriteFile(t, root, ".entire/settings.json", `{"redaction":{"custom_redactions":`+tt.value+`,"pii":{"custom_patterns":`+tt.value+`}}}`)
+
+			got, err := LoadForRepoPolicy(t.Context(), policy)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got.Redaction == nil || got.Redaction.PII == nil {
+				t.Fatalf("missing redaction objects: %+v", got.Redaction)
+			}
+			if (got.Redaction.CustomRedactions == nil) != tt.wantNil || (got.Redaction.PII.CustomPatterns == nil) != tt.wantNil {
+				t.Fatalf("nil shape changed: redactions=%#v patterns=%#v", got.Redaction.CustomRedactions, got.Redaction.PII.CustomPatterns)
+			}
+			if tt.wantEmpty && (len(got.Redaction.CustomRedactions) != 0 || len(got.Redaction.PII.CustomPatterns) != 0) {
+				t.Fatalf("empty maps gained values: redactions=%#v patterns=%#v", got.Redaction.CustomRedactions, got.Redaction.PII.CustomPatterns)
+			}
+		})
+	}
+}
+
+func TestLoadVerifiedPolicySettings_ConsumesProvenanceBytesWithoutReopening(t *testing.T) {
+	t.Parallel()
+	root, policy := hookPolicyRepo(t)
+	path := filepath.Join(root, ".entire", "settings.json")
+	testutil.WriteFile(t, root, ".entire/settings.json", `{"external_agents":false}`)
+	repository := repopolicy.Repository{
+		WorktreeRoot: policy.WorktreeRoot,
+		GitCommonDir: policy.GitCommonDir,
+		WorktreeKey:  policy.WorktreeKey,
+	}
+	provenance, err := repopolicy.VerifySettingsProvenance(t.Context(), repository)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(path, path+".verified"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(`{"external_agents":true}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := loadVerifiedPolicySettings(provenance, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.ExternalAgents {
+		t.Fatal("replacement settings content was reopened and consumed")
 	}
 }
 

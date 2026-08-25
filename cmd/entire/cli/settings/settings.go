@@ -876,18 +876,18 @@ func readConfined(filePath string) ([]byte, error) {
 // loadFromFile loads settings from a specific file path.
 // Returns default settings if the file doesn't exist.
 func loadFromFile(filePath string) (*EntireSettings, error) {
-	settings := &EntireSettings{
-		Enabled: true, // Default to enabled
-	}
-
 	data, err := readConfined(filePath)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
-			return settings, nil
+			return &EntireSettings{Enabled: true}, nil
 		}
 		return nil, fmt.Errorf("%w", err)
 	}
+	return loadSettingsData(data)
+}
 
+func loadSettingsData(data []byte) (*EntireSettings, error) {
+	settings := &EntireSettings{Enabled: true}
 	dec := json.NewDecoder(bytes.NewReader(data))
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(settings); err != nil {

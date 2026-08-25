@@ -14,6 +14,7 @@ import (
 	"github.com/go-git/go-git/v6/plumbing/object"
 
 	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
+	"github.com/entireio/cli/cmd/entire/cli/internal/gitpath"
 )
 
 // localLayerTrackedReason explains why a tracked .entire/settings.local.json
@@ -60,6 +61,14 @@ const localLayerTrackedReason = "it is tracked in git, so it is not local to thi
 // pre-push rewrite fails closed rather than pushing content the user believed
 // OPF had scanned.
 func enforceOPFCommandTrust(ctx context.Context, s *EntireSettings, localSettingsPath string, localData []byte) {
+	if s == nil || s.Redaction == nil || s.Redaction.OpenAIPrivacyFilter == nil || s.Redaction.OpenAIPrivacyFilter.Command == "" {
+		return
+	}
+	localVerified := classifyLocalSettingsDeep(ctx, localSettingsPath) == localOwn
+	enforceOPFCommandTrustForVerifiedData(s, localData, localVerified)
+}
+
+func enforceOPFCommandTrustForVerifiedData(s *EntireSettings, localData []byte, localVerified bool) {
 	if s == nil || s.Redaction == nil || s.Redaction.OpenAIPrivacyFilter == nil {
 		return
 	}
@@ -72,7 +81,7 @@ func enforceOPFCommandTrust(ctx context.Context, s *EntireSettings, localSetting
 	switch {
 	case !localSetsOPFCommand(localData):
 		reason = "it did not come from .entire/settings.local.json"
-	case classifyLocalSettingsDeep(ctx, localSettingsPath) != localOwn:
+	case !localVerified:
 		reason = "the local settings file could not be verified as untracked"
 	default:
 		return
@@ -357,20 +366,7 @@ func probeLocalSettingsIsVersioned(ctx context.Context, path string, deep bool) 
 // rather than a committable name, and 8.3 short names are generated aliases
 // for long names rather than the reverse, so neither is a route in.
 func pathsEqualFold(a, b string) bool {
-	return strings.EqualFold(normalizePathForFilesystemCompare(a), normalizePathForFilesystemCompare(b))
-}
-
-// normalizePathForFilesystemCompare drops the trailing dots and spaces Win32
-// strips, per path component. A component that is nothing but those characters
-// (".", "..") is left alone: emptying it would change the path's meaning.
-func normalizePathForFilesystemCompare(path string) string {
-	parts := strings.Split(path, "/")
-	for i, part := range parts {
-		if trimmed := strings.TrimRight(part, ". "); trimmed != "" {
-			parts[i] = trimmed
-		}
-	}
-	return strings.Join(parts, "/")
+	return gitpath.Equivalent(a, b)
 }
 
 // treeHasPathFold reports whether any fold-matching chain of tree entries

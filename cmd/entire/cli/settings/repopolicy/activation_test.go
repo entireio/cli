@@ -1,11 +1,18 @@
 package repopolicy
 
 import (
+	"context"
+	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"testing"
+	"time"
 )
+
+const windowsGOOS = "windows"
 
 func newPolicyRepo(t *testing.T) (string, Repository) {
 	t.Helper()
@@ -86,6 +93,9 @@ func TestClassifyRepoPolicy_LocalMarkerActivatesOnlyItsWorktree(t *testing.T) {
 
 func assertActivationRecordModes(t *testing.T, repository Repository) {
 	t.Helper()
+	if runtime.GOOS == windowsGOOS {
+		return
+	}
 	dirInfo, err := os.Stat(registryDir(repository))
 	if err != nil {
 		t.Fatal(err)
@@ -100,6 +110,146 @@ func assertActivationRecordModes(t *testing.T, repository Repository) {
 	if got := fileInfo.Mode().Perm(); got != 0o600 {
 		t.Errorf("activation mode = %o, want 600", got)
 	}
+}
+
+func TestEnsureRegistryDir_SyncsEveryPublishedDirectory(t *testing.T) {
+	t.Parallel()
+	_, repository := newPolicyRepo(t)
+	var synced []string
+	if err := ensureRegistryDirWithSync(repository, func(path string) error {
+		synced = append(synced, path)
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{
+		repository.GitCommonDir,
+		filepath.Join(repository.GitCommonDir, "entire"),
+		filepath.Join(repository.GitCommonDir, "entire", "worktree"),
+	}
+	if !reflectStringSlicesEqual(synced, want) {
+		t.Fatalf("synced = %q, want %q", synced, want)
+	}
+}
+
+func TestEnsureRegistryDir_SyncFailureFailsClosed(t *testing.T) {
+	t.Parallel()
+	_, repository := newPolicyRepo(t)
+	wantErr := errors.New("sync failed")
+	if err := ensureRegistryDirWithSync(repository, func(string) error { return wantErr }); !errors.Is(err, wantErr) {
+		t.Fatalf("ensureRegistryDirWithSync error = %v, want %v", err, wantErr)
+	}
+	if _, err := os.Stat(filepath.Join(repository.GitCommonDir, "entire", "worktree")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("registry creation continued after sync failure: %v", err)
+	}
+}
+
+func reflectStringSlicesEqual(got, want []string) bool {
+	if len(got) != len(want) {
+		return false
+	}
+	for i := range got {
+		if filepath.Clean(got[i]) != filepath.Clean(want[i]) {
+			return false
+		}
+	}
+	return true
+}
+
+func TestLegacyMetadataEvidence_LoadsTrackedSetOnceAndHonorsScanBudget(t *testing.T) {
+	t.Parallel()
+	t.Run("one tracked query for many candidates", func(t *testing.T) {
+		t.Parallel()
+		root, repository := newPolicyRepo(t)
+		for i := range 64 {
+			writePolicyFile(t, root, filepath.Join(".entire", "metadata", fmt.Sprintf("session-%03d", i), "prompt.txt"), "prompt")
+		}
+		calls := 0
+		options := defaultLegacyMetadataOptions()
+		options.loadTracked = func(context.Context, Repository) (map[string]struct{}, error) {
+			calls++
+			tracked := make(map[string]struct{}, 64)
+			for i := range 64 {
+				tracked[filepath.ToSlash(filepath.Join(".entire", "metadata", fmt.Sprintf("session-%03d", i), "prompt.txt"))] = struct{}{}
+			}
+			return tracked, nil
+		}
+		found, err := hasRecognizedMetadataEvidenceWithOptions(t.Context(), repository, options)
+		if err != nil || found {
+			t.Fatalf("evidence = %v, %v; want none", found, err)
+		}
+		if calls != 1 {
+			t.Fatalf("tracked metadata queries = %d, want 1", calls)
+		}
+	})
+
+	t.Run("expired filesystem budget fails closed", func(t *testing.T) {
+		t.Parallel()
+		root, repository := newPolicyRepo(t)
+		writePolicyFile(t, root, ".entire/metadata/session-1/prompt.txt", "prompt")
+		options := defaultLegacyMetadataOptions()
+		base := time.Now()
+		calls := 0
+		options.now = func() time.Time {
+			calls++
+			if calls == 1 {
+				return base
+			}
+			return base.Add(options.scanBudget + time.Second)
+		}
+		found, err := hasRecognizedMetadataEvidenceWithOptions(t.Context(), repository, options)
+		if found || !errors.Is(err, errLegacyMetadataBudget) {
+			t.Fatalf("evidence = %v, %v; want budget failure", found, err)
+		}
+	})
+}
+
+func TestLegacyEvidence_RejectsDeterministicFileSwaps(t *testing.T) {
+	t.Parallel()
+	t.Run("session record", func(t *testing.T) {
+		t.Parallel()
+		_, repository := newPolicyRepo(t)
+		rel := "entire-sessions/session-1.json"
+		writePolicyFile(t, repository.GitCommonDir, rel, `{"phase":"active","worktree_path":"/not-this-worktree","worktree_id":"wrong"}`)
+		found, err := hasExactSessionEvidenceWithHooks(repository, func(string) verifiedReadHooks {
+			return verifiedReadHooks{afterOpen: func() {
+				path := filepath.Join(repository.GitCommonDir, filepath.FromSlash(rel))
+				if err := os.Rename(path, path+".validated"); err != nil {
+					t.Fatal(err)
+				}
+				body := `{"phase":"active","worktree_path":` + quoteJSON(repository.WorktreeRoot) + `,"worktree_id":` + quoteJSON(repository.WorktreeID) + `}`
+				if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}}
+		})
+		if err != nil || found {
+			t.Fatalf("session evidence = %v, %v; swapped record must not be accepted", found, err)
+		}
+	})
+
+	t.Run("metadata file", func(t *testing.T) {
+		t.Parallel()
+		root, repository := newPolicyRepo(t)
+		rel := ".entire/metadata/session-1/prompt.txt"
+		writePolicyFile(t, root, rel, "validated")
+		options := defaultLegacyMetadataOptions()
+		options.readHooks = func(string) verifiedReadHooks {
+			return verifiedReadHooks{afterOpen: func() {
+				path := filepath.Join(root, filepath.FromSlash(rel))
+				if err := os.Rename(path, path+".validated"); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(path, []byte("swapped"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}}
+		}
+		found, err := hasRecognizedMetadataEvidenceWithOptions(t.Context(), repository, options)
+		if err != nil || found {
+			t.Fatalf("metadata evidence = %v, %v; swapped file must not be accepted", found, err)
+		}
+	})
 }
 
 func TestClassifyRepoPolicy_DisabledMarkerVetoesGlobalActivation(t *testing.T) {

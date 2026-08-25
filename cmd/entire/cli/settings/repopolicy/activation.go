@@ -11,7 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strings"
+	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
 )
@@ -146,11 +146,35 @@ func setLocalActivation(repository Repository, state ActivationState) error {
 }
 
 func ensureRegistryDir(repository Repository) error {
-	dir := registryDir(repository)
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return fmt.Errorf("creating repository policy registry: %w", err)
+	return ensureRegistryDirWithSync(repository, jsonutil.SyncDir)
+}
+
+func ensureRegistryDirWithSync(repository Repository, syncDir func(string) error) error {
+	parent := repository.GitCommonDir
+	for _, name := range []string{"entire", "worktree", repository.WorktreeKey} {
+		dir := filepath.Join(parent, name)
+		err := os.Mkdir(dir, 0o700)
+		switch {
+		case err == nil:
+			if err := syncDir(parent); err != nil {
+				return fmt.Errorf("syncing repository policy registry parent: %w", err)
+			}
+		case errors.Is(err, fs.ErrExist):
+			info, statErr := os.Lstat(dir)
+			if statErr != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+				return fmt.Errorf("verifying repository policy registry: %w", errUnverifiedPath)
+			}
+		default:
+			return fmt.Errorf("creating repository policy registry: %w", err)
+		}
+		if err != nil {
+			if syncErr := syncDir(parent); syncErr != nil {
+				return fmt.Errorf("syncing repository policy registry parent: %w", syncErr)
+			}
+		}
+		parent = dir
 	}
-	if err := os.Chmod(dir, 0o700); err != nil { //nolint:gosec // registry directories require owner-only traversal
+	if err := os.Chmod(registryDir(repository), 0o700); err != nil { //nolint:gosec // registry directories require owner-only traversal
 		return fmt.Errorf("securing repository policy registry: %w", err)
 	}
 	return nil
@@ -192,11 +216,7 @@ func BootstrapLegacyActivation(ctx context.Context, repository Repository) (bool
 	return true, nil
 }
 
-func enabledFromSettingsFile(path string) (*bool, error) {
-	data, err := os.ReadFile(path) //nolint:gosec // caller passes a provenance-verified canonical worktree path
-	if err != nil {
-		return nil, fmt.Errorf("%w: reading settings: %w", errInvalidActivationSettings, err)
-	}
+func enabledFromSettingsData(data []byte) (*bool, error) {
 	var raw map[string]json.RawMessage
 	if err := decodeStrict(data, &raw); err != nil {
 		return nil, fmt.Errorf("%w: parsing settings: %w", errInvalidActivationSettings, err)
@@ -219,16 +239,16 @@ func effectiveEnabledSetting(ctx context.Context, repository Repository) (*bool,
 	}
 	var effective *bool
 	for _, candidate := range []struct {
-		path     string
+		data     []byte
 		verified bool
 	}{
-		{path: provenance.ProjectPath, verified: provenance.ProjectVerified},
-		{path: provenance.LocalPath, verified: provenance.LocalVerified},
+		{data: provenance.ProjectData, verified: provenance.ProjectVerified},
+		{data: provenance.LocalData, verified: provenance.LocalVerified},
 	} {
 		if !candidate.verified {
 			continue
 		}
-		value, err := enabledFromSettingsFile(candidate.path)
+		value, err := enabledFromSettingsData(candidate.data)
 		if err != nil {
 			return nil, err
 		}
@@ -247,19 +267,39 @@ type legacySessionRecord struct {
 }
 
 func hasExactSessionEvidence(repository Repository) (bool, error) {
-	dir := filepath.Join(repository.GitCommonDir, "entire-sessions")
-	entries, err := os.ReadDir(dir)
+	return hasExactSessionEvidenceWithHooks(repository, func(string) verifiedReadHooks { return verifiedReadHooks{} })
+}
+
+func hasExactSessionEvidenceWithHooks(repository Repository, hooks func(string) verifiedReadHooks) (bool, error) {
+	root, err := os.OpenRoot(repository.GitCommonDir)
+	if err != nil {
+		return false, fmt.Errorf("opening Git common root: %w", err)
+	}
+	defer root.Close()
+	if _, err := lstatRootPath(root, "entire-sessions", true); err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return false, nil
+		}
+		return false, nil
+	}
+	dir, err := root.Open("entire-sessions")
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
 			return false, nil
 		}
 		return false, fmt.Errorf("reading legacy session records: %w", err)
 	}
+	entries, err := dir.ReadDir(-1)
+	_ = dir.Close()
+	if err != nil {
+		return false, fmt.Errorf("reading legacy session records: %w", err)
+	}
 	for _, entry := range entries {
 		if entry.IsDir() || entry.Type()&os.ModeSymlink != 0 || filepath.Ext(entry.Name()) != ".json" {
 			continue
 		}
-		data, readErr := os.ReadFile(filepath.Join(dir, entry.Name())) //nolint:gosec // entry is from Git-owned state directory
+		rel := filepath.Join("entire-sessions", entry.Name())
+		data, readErr := readVerifiedRegular(root, rel, nil, hooks(rel))
 		if readErr != nil {
 			continue
 		}
@@ -293,61 +333,145 @@ var legacyMetadataFiles = map[string]struct{}{
 	"content_hash.txt": {},
 }
 
+const (
+	legacyMetadataGitBudget  = 500 * time.Millisecond
+	legacyMetadataScanBudget = 250 * time.Millisecond
+)
+
+var errLegacyMetadataBudget = errors.New("legacy metadata scan budget exceeded")
+
+type legacyMetadataOptions struct {
+	loadTracked func(context.Context, Repository) (map[string]struct{}, error)
+	now         func() time.Time
+	scanBudget  time.Duration
+	readHooks   func(string) verifiedReadHooks
+}
+
+func defaultLegacyMetadataOptions() legacyMetadataOptions {
+	return legacyMetadataOptions{
+		loadTracked: loadTrackedMetadataPaths,
+		now:         time.Now,
+		scanBudget:  legacyMetadataScanBudget,
+		readHooks:   func(string) verifiedReadHooks { return verifiedReadHooks{} },
+	}
+}
+
 func hasRecognizedMetadataEvidence(ctx context.Context, repository Repository) (bool, error) {
-	metadataDir := filepath.Join(repository.WorktreeRoot, ".entire", "metadata") // entire-join-ok: legacy provenance must inspect the literal worktree, never the runtime route
-	if err := verifyPathComponents(repository.WorktreeRoot, filepath.FromSlash(".entire/metadata"), true); err != nil {
+	return hasRecognizedMetadataEvidenceWithOptions(ctx, repository, defaultLegacyMetadataOptions())
+}
+
+func hasRecognizedMetadataEvidenceWithOptions(ctx context.Context, repository Repository, options legacyMetadataOptions) (bool, error) {
+	root, err := os.OpenRoot(repository.WorktreeRoot)
+	if err != nil {
+		return false, fmt.Errorf("opening worktree root: %w", err)
+	}
+	defer root.Close()
+	metadataRel := filepath.FromSlash(".entire/metadata")
+	if _, err := lstatRootPath(root, metadataRel, true); err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
 			return false, nil
 		}
 		return false, nil
 	}
-	sessions, err := os.ReadDir(metadataDir)
+	tracked, err := options.loadTracked(ctx, repository)
+	if err != nil {
+		return false, err
+	}
+	started := options.now()
+	budgetExpired := func() bool { return options.now().Sub(started) > options.scanBudget }
+	dir, err := root.Open(metadataRel)
 	if err != nil {
 		return false, fmt.Errorf("reading legacy metadata: %w", err)
 	}
-	for _, sessionEntry := range sessions {
-		if !sessionEntry.IsDir() || sessionEntry.Type()&os.ModeSymlink != 0 {
-			continue
+	defer dir.Close()
+	for {
+		if budgetExpired() {
+			return false, errLegacyMetadataBudget
 		}
-		sessionRel := filepath.Join(".entire", "metadata", sessionEntry.Name())
-		if err := verifyPathComponents(repository.WorktreeRoot, sessionRel, true); err != nil {
-			continue
+		sessions, readErr := dir.ReadDir(32)
+		if readErr != nil && !errors.Is(readErr, io.EOF) {
+			return false, fmt.Errorf("reading legacy metadata: %w", readErr)
 		}
-		files, readErr := os.ReadDir(filepath.Join(repository.WorktreeRoot, sessionRel))
-		if readErr != nil {
-			continue
-		}
-		for _, file := range files {
-			if _, recognized := legacyMetadataFiles[file.Name()]; !recognized || file.IsDir() || file.Type()&os.ModeSymlink != 0 {
+		for _, sessionEntry := range sessions {
+			if budgetExpired() {
+				return false, errLegacyMetadataBudget
+			}
+			if !sessionEntry.IsDir() || sessionEntry.Type()&os.ModeSymlink != 0 {
 				continue
 			}
-			rel := filepath.ToSlash(filepath.Join(sessionRel, file.Name()))
-			if err := verifyPathComponents(repository.WorktreeRoot, filepath.FromSlash(rel), false); err != nil {
-				continue
+			sessionRel := filepath.Join(".entire", "metadata", sessionEntry.Name())
+			found, evidenceErr := recognizedMetadataInSession(root, sessionRel, tracked, options, budgetExpired)
+			if evidenceErr != nil || found {
+				return found, evidenceErr
 			}
-			tracked, trackErr := gitPathTracked(ctx, repository.WorktreeRoot, rel)
-			if trackErr != nil {
-				return false, trackErr
-			}
-			if !tracked {
-				return true, nil
-			}
+		}
+		if errors.Is(readErr, io.EOF) {
+			break
 		}
 	}
 	return false, nil
 }
 
-func gitPathTracked(ctx context.Context, root, rel string) (bool, error) {
-	cmd := exec.CommandContext(ctx, "git", "-C", root, "ls-files", "--error-unmatch", "--", rel)
-	err := cmd.Run()
-	if err == nil {
-		return true, nil
-	}
-	var exitErr *exec.ExitError
-	if errors.As(err, &exitErr) && exitErr.ExitCode() == 1 {
+func recognizedMetadataInSession(
+	root *os.Root,
+	sessionRel string,
+	tracked map[string]struct{},
+	options legacyMetadataOptions,
+	budgetExpired func() bool,
+) (bool, error) {
+	if _, err := lstatRootPath(root, sessionRel, true); err != nil {
 		return false, nil
 	}
-	return false, fmt.Errorf("checking runtime evidence ownership: %w", err)
+	sessionDir, err := root.Open(sessionRel)
+	if err != nil {
+		return false, nil
+	}
+	defer sessionDir.Close()
+	for {
+		if budgetExpired() {
+			return false, errLegacyMetadataBudget
+		}
+		files, readErr := sessionDir.ReadDir(32)
+		if readErr != nil && !errors.Is(readErr, io.EOF) {
+			return false, nil
+		}
+		for _, file := range files {
+			if budgetExpired() {
+				return false, errLegacyMetadataBudget
+			}
+			if _, recognized := legacyMetadataFiles[file.Name()]; !recognized || file.IsDir() || file.Type()&os.ModeSymlink != 0 {
+				continue
+			}
+			rel := filepath.ToSlash(filepath.Join(sessionRel, file.Name()))
+			if readErr := verifyRegular(root, filepath.FromSlash(rel), options.readHooks(rel)); readErr != nil {
+				continue
+			}
+			if _, isTracked := tracked[rel]; !isTracked {
+				return true, nil
+			}
+		}
+		if errors.Is(readErr, io.EOF) {
+			break
+		}
+	}
+	return false, nil
+}
+
+func loadTrackedMetadataPaths(ctx context.Context, repository Repository) (map[string]struct{}, error) {
+	gitCtx, cancel := context.WithTimeout(ctx, legacyMetadataGitBudget)
+	defer cancel()
+	cmd := exec.CommandContext(gitCtx, "git", "-C", repository.WorktreeRoot, "ls-files", "-z", "--", ".entire/metadata")
+	output, err := cmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("loading tracked runtime evidence: %w", err)
+	}
+	tracked := make(map[string]struct{})
+	for _, name := range bytes.Split(output, []byte{0}) {
+		if len(name) != 0 {
+			tracked[filepath.ToSlash(string(name))] = struct{}{}
+		}
+	}
+	return tracked, nil
 }
 
 func decodeStrict(data []byte, value any) error {
@@ -362,35 +486,6 @@ func decodeStrict(data []byte, value any) error {
 			return errors.New("multiple JSON values")
 		}
 		return fmt.Errorf("decoding trailing JSON value: %w", err)
-	}
-	return nil
-}
-
-func verifyPathComponents(root, rel string, finalDir bool) error {
-	if !filepath.IsAbs(root) || filepath.IsAbs(rel) {
-		return errors.New("path provenance requires absolute root and relative path")
-	}
-	current := root
-	parts := strings.Split(filepath.Clean(rel), string(filepath.Separator))
-	for i, part := range parts {
-		if part == "" || part == "." || part == ".." {
-			return errors.New("invalid worktree-relative path")
-		}
-		current = filepath.Join(current, part)
-		info, err := os.Lstat(current)
-		if err != nil {
-			return fmt.Errorf("inspecting path component: %w", err)
-		}
-		if info.Mode()&os.ModeSymlink != 0 {
-			return fmt.Errorf("path component %s is a symlink", filepath.Join(parts[:i+1]...))
-		}
-		isFinal := i == len(parts)-1
-		if (!isFinal || finalDir) && !info.IsDir() {
-			return fmt.Errorf("path component %s is not a directory", filepath.Join(parts[:i+1]...))
-		}
-		if isFinal && !finalDir && !info.Mode().IsRegular() {
-			return fmt.Errorf("path component %s is not a regular file", filepath.Join(parts[:i+1]...))
-		}
 	}
 	return nil
 }

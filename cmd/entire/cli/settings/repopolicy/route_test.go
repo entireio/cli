@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sync"
 	"testing"
 	"time"
@@ -204,6 +205,9 @@ func TestEnsureRuntimeRoute_CorruptRecordFailsClosed(t *testing.T) {
 
 func assertRecordModes(t *testing.T, repository Repository) {
 	t.Helper()
+	if runtime.GOOS == windowsGOOS {
+		return
+	}
 	dirInfo, err := os.Stat(registryDir(repository))
 	if err != nil {
 		t.Fatal(err)
