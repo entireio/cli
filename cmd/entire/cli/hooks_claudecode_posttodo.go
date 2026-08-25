@@ -214,7 +214,7 @@ func resolveIncrementalCheckpointTask(ctx context.Context, agentID string) (task
 
 	if agentID != "" {
 		var candidates int
-		taskToolUseID, candidates, found = FindUnclaimedActivePreTaskFile(ctx)
+		taskToolUseID, candidates, found = FindUnclaimedPreTaskForAgent(ctx, agentID)
 		if found && candidates > 1 {
 			// Spawn order is the only signal available here, so with several
 			// unclaimed siblings this pairing may not be the true one. Log it so

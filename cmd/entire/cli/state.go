@@ -520,6 +520,11 @@ type PreTaskState struct {
 	Timestamp      string   `json:"timestamp"`
 	UntrackedFiles []string `json:"untracked_files"`
 
+	// AgentID is stamped from the post-task hook once the subagent instance id
+	// is known. Bootstrap matches TodoWrite agent_id to this field so a nested
+	// subagent does not inherit a still-unclaimed parent pre-task file.
+	AgentID string `json:"agent_id,omitempty"`
+
 	// UntrackedScanSkipped mirrors PrePromptState.UntrackedScanSkipped for the
 	// subagent path: when set, subagent-end must skip new-file detection.
 	UntrackedScanSkipped bool `json:"untracked_scan_skipped,omitempty"`
@@ -623,6 +628,49 @@ func LoadPreTaskState(ctx context.Context, toolUseID string) (*PreTaskState, err
 	}
 
 	return &state, nil
+}
+
+// StampPreTaskAgentID records the subagent instance id on its pre-task file
+// once the post-task hook delivers it. Best-effort: a missing file is ignored.
+func StampPreTaskAgentID(ctx context.Context, toolUseID, agentID string) error {
+	if toolUseID == "" || agentID == "" {
+		return nil
+	}
+	if err := validation.ValidateToolUseID(toolUseID); err != nil {
+		return fmt.Errorf("invalid tool use ID for pre-task agent stamp: %w", err)
+	}
+	if err := validation.ValidateAgentID(agentID); err != nil {
+		return fmt.Errorf("invalid agent ID for pre-task agent stamp: %w", err)
+	}
+
+	state, err := LoadPreTaskState(ctx, toolUseID)
+	if err != nil {
+		return err
+	}
+	if state == nil {
+		return nil
+	}
+	if state.AgentID == agentID {
+		return nil
+	}
+	state.AgentID = agentID
+
+	tmpDirAbs := resolveTmpDir(ctx)
+	data, err := jsonutil.MarshalIndentWithNewline(state, "", "  ")
+	if err != nil {
+		return fmt.Errorf("failed to marshal pre-task state: %w", err)
+	}
+	root, err := os.OpenRoot(tmpDirAbs)
+	if err != nil {
+		return fmt.Errorf("failed to open tmp directory root: %w", err)
+	}
+	defer root.Close()
+
+	fileName := fmt.Sprintf("pre-task-%s.json", toolUseID)
+	if err := osroot.WriteFile(root, fileName, data, 0o600); err != nil {
+		return fmt.Errorf("failed to write pre-task state: %w", err)
+	}
+	return nil
 }
 
 // CleanupPreTaskState removes the task state file after use, along with any
@@ -847,6 +895,58 @@ func FindActivePreTaskFile(ctx context.Context) (taskToolUseID string, found boo
 // claimed by at most one agent; it cannot guarantee the pairing is the true one.
 func FindUnclaimedActivePreTaskFile(ctx context.Context) (taskToolUseID string, candidates int, found bool) {
 	return findActivePreTaskFile(ctx, claimedTaskToolUseIDs(ctx), oldestPreTask)
+}
+
+// FindUnclaimedPreTaskForAgent returns an unclaimed pre-task for bootstrap.
+// When agentID is set and exactly one unclaimed pre-task file carries that
+// agent_id stamp from the post-task hook, that task wins over spawn-order
+// heuristics — fixing nested subagents whose first TodoWrite races a still-
+// unclaimed parent pre-task. Otherwise it falls back to
+// FindUnclaimedActivePreTaskFile (oldest-first for parallel siblings).
+func FindUnclaimedPreTaskForAgent(ctx context.Context, agentID string) (taskToolUseID string, candidates int, found bool) {
+	if agentID == "" {
+		return FindUnclaimedActivePreTaskFile(ctx)
+	}
+
+	claimed := claimedTaskToolUseIDs(ctx)
+	tmpDirAbs := resolveTmpDir(ctx)
+	entries, err := os.ReadDir(tmpDirAbs)
+	if err != nil {
+		return "", 0, false
+	}
+
+	var agentMatches []string
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		name := entry.Name()
+		if !strings.HasPrefix(name, preTaskFilePrefix) || !strings.HasSuffix(name, ".json") {
+			continue
+		}
+		candidateID := strings.TrimSuffix(strings.TrimPrefix(name, preTaskFilePrefix), ".json")
+		if _, taken := claimed[candidateID]; taken {
+			continue
+		}
+		candidates++
+
+		state, err := LoadPreTaskState(ctx, candidateID)
+		if err != nil || state == nil || state.AgentID != agentID {
+			continue
+		}
+		agentMatches = append(agentMatches, candidateID)
+	}
+
+	switch len(agentMatches) {
+	case 1:
+		return agentMatches[0], candidates, true
+	case 0:
+		return FindUnclaimedActivePreTaskFile(ctx)
+	default:
+		// Several unclaimed files stamped with the same agent_id should not
+		// happen; pick deterministically and let bootstrap logging surface it.
+		return agentMatches[0], candidates, true
+	}
 }
 
 // claimedTaskToolUseIDs returns the set of task tool_use_ids currently pointed at by

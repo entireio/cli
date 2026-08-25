@@ -9,6 +9,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/require"
+
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 )
 
@@ -141,12 +143,6 @@ func TestResolveIncrementalCheckpointTask_BootstrapPrefersUnclaimed(t *testing.T
 	}
 }
 
-// TestResolveIncrementalCheckpointTask_BootstrapClaimsInSpawnOrder pins the
-// bootstrap ordering. Sibling Tasks are spawned in tool-call order, so pre-task
-// mtimes ascend in spawn order. Claiming the NEWEST unclaimed file hands the
-// most recently spawned task to whichever agent reports first, which is the
-// reversed assignment in the common case where subagents start reporting in the
-// order they were launched. Claims must go out oldest-first instead.
 func TestResolveIncrementalCheckpointTask_BootstrapClaimsInSpawnOrder(t *testing.T) {
 	setupTmpDirRepo(t)
 	ctx := context.Background()
@@ -166,6 +162,28 @@ func TestResolveIncrementalCheckpointTask_BootstrapClaimsInSpawnOrder(t *testing
 	second, found := resolveIncrementalCheckpointTask(ctx, "agent-B")
 	if !found || second != testTaskToolUseB {
 		t.Errorf("second bootstrap = (%q, %v), want (%q, true)", second, found, testTaskToolUseB)
+	}
+}
+
+// Nested subagent bootstrap: when a parent pre-task is still unclaimed, a child
+// whose post-task hook stamped agent_id on its own pre-task must not inherit the
+// parent's older unclaimed file on its first TodoWrite.
+func TestResolveIncrementalCheckpointTask_BootstrapPrefersStampedAgentID(t *testing.T) {
+	setupTmpDirRepo(t)
+	ctx := context.Background()
+
+	writePreTaskFileWithModTime(t, testTaskToolUseA, time.Now().Add(-2*time.Minute))
+	writePreTaskFileWithModTime(t, testTaskToolUseB, time.Now())
+
+	require.NoError(t, StampPreTaskAgentID(ctx, testTaskToolUseB, "agent-nested"))
+
+	taskToolUseID, found := resolveIncrementalCheckpointTask(ctx, "agent-nested")
+	if !found {
+		t.Fatal("resolveIncrementalCheckpointTask() found = false, want true")
+	}
+	if taskToolUseID != testTaskToolUseB {
+		t.Errorf("resolveIncrementalCheckpointTask() = %q, want %q (agent_id stamp beats oldest unclaimed parent)",
+			taskToolUseID, testTaskToolUseB)
 	}
 }
 
