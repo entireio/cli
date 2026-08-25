@@ -139,12 +139,20 @@ type transcriptUpdate struct {
 	SessionUpdate string `json:"sessionUpdate"`
 
 	// tool_call / tool_call_update
-	ToolCallID string          `json:"toolCallId"`
-	Status     string          `json:"status"`
-	Kind       string          `json:"kind"`
-	Title      string          `json:"title"`
-	Content    []updateContent `json:"content"`
-	Locations  []updateLoc     `json:"locations"`
+	ToolCallID string      `json:"toolCallId"`
+	Status     string      `json:"status"`
+	Kind       string      `json:"kind"`
+	Title      string      `json:"title"`
+	Locations  []updateLoc `json:"locations"`
+
+	// Content is deliberately raw: Grok overloads the key with two different
+	// shapes. On tool_call_update it is an ARRAY of blocks; on
+	// user_message_chunk / agent_message_chunk it is a single OBJECT
+	// ({"type":"text","text":...}). Typing it as a slice makes every message
+	// chunk fail to unmarshal, and since the readers skip unparseable lines the
+	// failure is silent — it cost the model lookup, which lives in a chunk's
+	// _meta. Decode it with diffBlocks() instead.
+	Content json.RawMessage `json:"content"`
 
 	// user_message_chunk / agent_message_chunk
 	Meta struct {
@@ -167,6 +175,19 @@ type updateContent struct {
 
 type updateLoc struct {
 	Path string `json:"path"`
+}
+
+// diffBlocks returns the content blocks when Content holds an array, and nil
+// for the single-object (message chunk) shape.
+func (u transcriptUpdate) diffBlocks() []updateContent {
+	if len(u.Content) == 0 {
+		return nil
+	}
+	var blocks []updateContent
+	if err := json.Unmarshal(u.Content, &blocks); err != nil {
+		return nil
+	}
+	return blocks
 }
 
 // transcriptUsge is turn_completed's usage block.

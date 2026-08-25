@@ -51,18 +51,39 @@ func (g *Grok) Bootstrap() error {
 	return nil
 }
 
+// quotaExhaustedMarkers identify an account that is out of Grok Build quota.
+//
+// These are deliberately NOT transient: the balance does not refill within a
+// test run, so retrying burns the remaining wall-clock budget and still fails.
+// Keeping them separate is what makes the suite report "out of quota" instead
+// of three identical timeouts per test.
+var quotaExhaustedMarkers = []string{
+	"usage limit",
+	"SuperGrok",
+}
+
 // IsTransientError matches Grok's own StopFailure error taxonomy
 // (rate_limit, server_error, ...) plus the usual network failures.
+//
+// resource-exhausted / "Too many requests" is per-team throttling rather than
+// an exhausted balance, so it IS worth retrying — unlike the quota markers
+// above, which are checked first and always lose.
 func (g *Grok) IsTransientError(out Output, err error) bool {
 	if err == nil {
 		return false
 	}
+	combined := out.Stdout + out.Stderr
+	for _, p := range quotaExhaustedMarkers {
+		if strings.Contains(combined, p) {
+			return false
+		}
+	}
 	if errors.Is(err, context.DeadlineExceeded) {
 		return true
 	}
-	combined := out.Stdout + out.Stderr
 	for _, p := range []string{
 		"overloaded", "rate limit", "rate_limit", "server_error",
+		"resource-exhausted", "Too many requests",
 		"503", "529", "ECONNRESET", "ETIMEDOUT",
 	} {
 		if strings.Contains(combined, p) {

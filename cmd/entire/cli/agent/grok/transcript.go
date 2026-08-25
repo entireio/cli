@@ -98,7 +98,7 @@ func modifiedFilesFrom(data []byte, startOffset int) ([]string, int) {
 		if u.SessionUpdate != "tool_call_update" && u.SessionUpdate != "tool_call" {
 			continue
 		}
-		for _, c := range u.Content {
+		for _, c := range u.diffBlocks() {
 			if c.Type == "diff" && c.Path != "" {
 				diffed[u.ToolCallID] = true
 				add(c.Path)

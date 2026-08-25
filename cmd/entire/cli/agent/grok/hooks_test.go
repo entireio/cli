@@ -1,0 +1,281 @@
+package grok
+
+import (
+	"context"
+	"encoding/json"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"github.com/entireio/cli/cmd/entire/cli/agent"
+)
+
+// hookRepo makes a temp dir the working directory so hooksPath resolves there.
+// It cannot run in parallel: paths.WorktreeRoot falls back to the process CWD.
+func hookRepo(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	t.Chdir(dir)
+	return dir
+}
+
+func installedPath(dir string) string { return filepath.Join(dir, hooksFileRelPath) }
+
+func TestInstallHooks_WritesOwnedFile(t *testing.T) {
+	dir := hookRepo(t)
+	g := &GrokAgent{}
+	ctx := context.Background()
+
+	n, err := g.InstallHooks(ctx, false)
+	if err != nil {
+		t.Fatalf("InstallHooks: %v", err)
+	}
+	if n != 1 {
+		t.Errorf("installed = %d, want 1", n)
+	}
+
+	data, err := os.ReadFile(installedPath(dir))
+	if err != nil {
+		t.Fatalf("read installed hooks: %v", err)
+	}
+
+	var file grokHooksFile
+	if err := json.Unmarshal(data, &file); err != nil {
+		t.Fatalf("installed hooks are not valid JSON: %v", err)
+	}
+
+	// Every verb we advertise must appear under its Grok event key, or the
+	// `entire hooks grok <verb>` subcommand exists with nothing invoking it.
+	for _, verb := range g.HookNames() {
+		event, ok := grokEventForHook[verb]
+		if !ok {
+			t.Errorf("verb %q has no Grok event mapping", verb)
+			continue
+		}
+		groups, ok := file.Hooks[event]
+		if !ok || len(groups) == 0 || len(groups[0].Hooks) == 0 {
+			t.Errorf("event %q missing from installed config", event)
+			continue
+		}
+		cmd := groups[0].Hooks[0].Command
+		if !strings.Contains(cmd, "entire hooks grok "+verb) {
+			t.Errorf("event %q command = %q, want it to invoke verb %q", event, cmd, verb)
+		}
+	}
+}
+
+// TestInstallHooks_CommandsNameTheEntireBinary guards the rule that a hook must
+// never run something out of the working tree: the command is executed on every
+// agent turn, so a repo-relative path would let any checked-out branch run code.
+func TestInstallHooks_CommandsNameTheEntireBinary(t *testing.T) {
+	dir := hookRepo(t)
+	g := &GrokAgent{}
+
+	if _, err := g.InstallHooks(context.Background(), false); err != nil {
+		t.Fatalf("InstallHooks: %v", err)
+	}
+	data, err := os.ReadFile(installedPath(dir))
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+
+	var file grokHooksFile
+	if err := json.Unmarshal(data, &file); err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	for event, groups := range file.Hooks {
+		for _, g := range groups {
+			for _, h := range g.Hooks {
+				if !agent.IsManagedHookCommand(h.Command) {
+					t.Errorf("event %q: %q is not recognised as an Entire-managed command", event, h.Command)
+				}
+				if strings.Contains(h.Command, dir) {
+					t.Errorf("event %q: command references the working tree: %q", event, h.Command)
+				}
+			}
+		}
+	}
+}
+
+func TestInstallHooks_Idempotent(t *testing.T) {
+	hookRepo(t)
+	g := &GrokAgent{}
+	ctx := context.Background()
+
+	if _, err := g.InstallHooks(ctx, false); err != nil {
+		t.Fatalf("first install: %v", err)
+	}
+	n, err := g.InstallHooks(ctx, false)
+	if err != nil {
+		t.Fatalf("second install: %v", err)
+	}
+	if n != 0 {
+		t.Errorf("second install wrote %d, want 0 (already current)", n)
+	}
+}
+
+func TestInstallHooks_RewritesStaleEntireConfig(t *testing.T) {
+	dir := hookRepo(t)
+	g := &GrokAgent{}
+	ctx := context.Background()
+
+	// A config an older CLI could have written: ours by marker, but stale.
+	stale := `{"hooks":{"Stop":[{"matcher":"","hooks":[{"type":"command","command":"entire hooks grok stop"}]}]}}`
+	if err := os.MkdirAll(filepath.Dir(installedPath(dir)), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(installedPath(dir), []byte(stale), 0o644); err != nil {
+		t.Fatalf("write stale: %v", err)
+	}
+
+	if got := g.CheckHookConfig(ctx); got != agent.HooksOutdated {
+		t.Errorf("CheckHookConfig = %v, want HooksOutdated", got)
+	}
+	if _, err := g.InstallHooks(ctx, false); err != nil {
+		t.Fatalf("InstallHooks over stale config: %v", err)
+	}
+	if got := g.CheckHookConfig(ctx); got != agent.HooksCurrent {
+		t.Errorf("after reinstall CheckHookConfig = %v, want HooksCurrent", got)
+	}
+}
+
+// TestInstallHooks_RefusesForeignFile protects a user-authored entire.json that
+// happens to sit at our path.
+func TestInstallHooks_RefusesForeignFile(t *testing.T) {
+	dir := hookRepo(t)
+	g := &GrokAgent{}
+	ctx := context.Background()
+
+	foreign := `{"hooks":{"Stop":[{"matcher":"","hooks":[{"type":"command","command":"make lint"}]}]}}`
+	if err := os.MkdirAll(filepath.Dir(installedPath(dir)), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(installedPath(dir), []byte(foreign), 0o644); err != nil {
+		t.Fatalf("write foreign: %v", err)
+	}
+
+	if _, err := g.InstallHooks(ctx, false); err == nil {
+		t.Error("expected an error installing over a foreign file")
+	}
+	after, err := os.ReadFile(installedPath(dir))
+	if err != nil {
+		t.Fatalf("read back: %v", err)
+	}
+	if string(after) != foreign {
+		t.Error("foreign file was modified")
+	}
+
+	// --force is the documented escape hatch.
+	if _, err := g.InstallHooks(ctx, true); err != nil {
+		t.Fatalf("forced install: %v", err)
+	}
+	if !g.AreHooksInstalled(ctx) {
+		t.Error("hooks not installed after --force")
+	}
+}
+
+func TestAreHooksInstalledAndUninstall(t *testing.T) {
+	dir := hookRepo(t)
+	g := &GrokAgent{}
+	ctx := context.Background()
+
+	if g.AreHooksInstalled(ctx) {
+		t.Error("hooks reported installed in a fresh repo")
+	}
+	if got := g.CheckHookConfig(ctx); got != agent.HooksAbsent {
+		t.Errorf("CheckHookConfig = %v, want HooksAbsent", got)
+	}
+
+	if _, err := g.InstallHooks(ctx, false); err != nil {
+		t.Fatalf("InstallHooks: %v", err)
+	}
+	if !g.AreHooksInstalled(ctx) {
+		t.Error("hooks not detected after install")
+	}
+	if got := g.CheckHookConfig(ctx); got != agent.HooksCurrent {
+		t.Errorf("CheckHookConfig = %v, want HooksCurrent", got)
+	}
+
+	if err := g.UninstallHooks(ctx); err != nil {
+		t.Fatalf("UninstallHooks: %v", err)
+	}
+	if g.AreHooksInstalled(ctx) {
+		t.Error("hooks still detected after uninstall")
+	}
+	if _, err := os.Stat(installedPath(dir)); !os.IsNotExist(err) {
+		t.Error("hooks file still present after uninstall")
+	}
+}
+
+// TestUninstallHooks_LeavesForeignFile is the counterpart to the install
+// refusal: uninstall must not delete a file we never owned.
+func TestUninstallHooks_LeavesForeignFile(t *testing.T) {
+	dir := hookRepo(t)
+	g := &GrokAgent{}
+
+	foreign := `{"hooks":{"Stop":[{"matcher":"","hooks":[{"type":"command","command":"make lint"}]}]}}`
+	if err := os.MkdirAll(filepath.Dir(installedPath(dir)), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(installedPath(dir), []byte(foreign), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	if err := g.UninstallHooks(context.Background()); err != nil {
+		t.Fatalf("UninstallHooks: %v", err)
+	}
+	if _, err := os.Stat(installedPath(dir)); err != nil {
+		t.Error("foreign file was removed")
+	}
+}
+
+func TestUninstallHooks_NoConfigIsNotAnError(t *testing.T) {
+	hookRepo(t)
+	g := &GrokAgent{}
+	if err := g.UninstallHooks(context.Background()); err != nil {
+		t.Errorf("UninstallHooks on a fresh repo: %v", err)
+	}
+}
+
+func TestHookNames_MatchEventMapping(t *testing.T) {
+	t.Parallel()
+
+	g := &GrokAgent{}
+	names := g.HookNames()
+	if len(names) != len(grokEventForHook) {
+		t.Errorf("HookNames has %d entries, grokEventForHook has %d", len(names), len(grokEventForHook))
+	}
+	seen := map[string]bool{}
+	for _, n := range names {
+		if seen[n] {
+			t.Errorf("duplicate hook verb %q", n)
+		}
+		seen[n] = true
+		if _, ok := grokEventForHook[n]; !ok {
+			t.Errorf("verb %q has no Grok event mapping", n)
+		}
+	}
+}
+
+// TestRenderHooks_IsDeterministic matters because CheckHookConfig compares the
+// installed file byte-for-byte against a fresh render; map iteration order
+// leaking into the output would report permanent phantom drift.
+func TestRenderHooks_IsDeterministic(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	first, err := renderHooks(ctx)
+	if err != nil {
+		t.Fatalf("renderHooks: %v", err)
+	}
+	for range 10 {
+		next, err := renderHooks(ctx)
+		if err != nil {
+			t.Fatalf("renderHooks: %v", err)
+		}
+		if next != first {
+			t.Fatal("renderHooks output varies between calls")
+		}
+	}
+}
