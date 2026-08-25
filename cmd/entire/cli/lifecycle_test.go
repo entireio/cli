@@ -3284,6 +3284,48 @@ func TestHandleLifecycleSubagentEnd_NoChangesKeepsUncorroboratedPreTaskState(t *
 	}
 }
 
+// TestHandleLifecycleSubagentEnd_SubagentStop_KeepsUncorroboratedPreTaskState
+// pins the Final-path twin of TestHandleLifecycleSubagentEnd_NoChangesKeepsUncorroboratedPreTaskState.
+// When SubagentStop arrives with an empty tool_use_id (Claude Code's anticipated
+// payload shape) and no task description, the single-active-file fallback names
+// the one pre-task file — which may belong to a still-running sibling. The
+// ambiguousWithoutDescription early exit must not delete that baseline.
+func TestHandleLifecycleSubagentEnd_SubagentStop_KeepsUncorroboratedPreTaskState(t *testing.T) {
+	repoDir, headHash := setupSubagentEndTestRepo(t)
+	ctx := context.Background()
+	sessionID := "subagent-stop-ambiguous-session"
+
+	const siblingToolUseID = "toolu_sibling"
+	if err := CapturePreTaskStateWithMeta(ctx, siblingToolUseID, ""); err != nil {
+		t.Fatalf("CapturePreTaskStateWithMeta() error = %v", err)
+	}
+
+	saveInFlightSession(ctx, t, sessionID, headHash, session.TaskRecord{
+		ToolUseID: siblingToolUseID,
+		AgentID:   "agent-sibling",
+		StartedAt: time.Now(),
+	})
+
+	mainTranscriptPath, _ := writeSubagentTranscripts(t, "agent-sibling")
+	ag := newMockAgent()
+	event := finalSubagentEvent(sessionID, "", "") // empty ID: single-active-file fallback
+	event.SessionRef = mainTranscriptPath
+
+	if err := handleLifecycleSubagentEnd(ctx, ag, event); err != nil {
+		t.Fatalf("handleLifecycleSubagentEnd(SubagentStop) error = %v", err)
+	}
+
+	if _, err := os.Stat(preTaskStateFile(ctx, siblingToolUseID)); err != nil {
+		t.Errorf("pre-task file for %q must survive an uncorroborated SubagentStop resolve, stat err = %v", siblingToolUseID, err)
+	}
+
+	// No checkpoint should have been written from this misattributed stop.
+	shadowBranch := checkpoint.ShadowBranchNameForCommit(headHash, "")
+	if testutil.BranchExists(t, repoDir, shadowBranch) {
+		t.Error("expected no shadow checkpoint branch after ambiguous SubagentStop skip")
+	}
+}
+
 // TestHandleLifecycleSubagentEnd_NoChangesCleansDescriptionMatchedPreTaskState
 // is the counterpart: a description-corroborated resolve is evidence that the
 // pre-task file really is this subagent's, so the no-changes path must still

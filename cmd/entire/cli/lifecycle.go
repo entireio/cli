@@ -1567,7 +1567,10 @@ func completeSubagentTaskRecord(logCtx context.Context, ag agent.Agent, event *a
 	if opts.ambiguousWithoutDescription {
 		logging.Warn(logCtx, "skipping task record: tool_use_id resolved only by the single-active-file fallback with no corroborating task description",
 			slog.String("tool_use_id", event.ToolUseID))
-		_ = CleanupPreTaskState(logCtx, event.ToolUseID) //nolint:errcheck // drop uncorroborated fallback baseline
+		// Leave the pre-task file in place — same contract as the no-changes and
+		// vanished-state guards below: an uncorroborated fallback may have named a
+		// sibling's baseline, and deleting it would make the sibling's own
+		// SubagentEnd hit the vanished-state guard and drop a real checkpoint.
 		return nil
 	}
 	// Prefer what the agent declared (Claude Code's SubagentStop, Codex, and
