@@ -510,6 +510,9 @@ func (s *ephemeralStore) buildSubagentTranscriptChanges(ctx context.Context, opt
 	// content is not valid JSONL (avoids silently dropping the transcript).
 	var body []byte
 	if redacted, jsonlErr := redact.JSONLBytes(prepared); jsonlErr != nil {
+		if errors.Is(jsonlErr, redact.ErrScannerDegraded) {
+			return nil, fmt.Errorf("redact subagent transcript: %w", jsonlErr)
+		}
 		logging.Warn(ctx, "subagent transcript is not valid JSONL, falling back to plain redaction",
 			slog.String("path", opts.SubagentTranscriptPath),
 			slog.String("error", jsonlErr.Error()),
