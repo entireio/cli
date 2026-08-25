@@ -1390,12 +1390,16 @@ func injectEntireManagedBlock(hookName, existing, entireContent string) string {
 	b.WriteByte('\n')
 	rest = strings.TrimLeft(rest, "\n")
 	if rest != "" {
-		b.WriteString("_entire_status=$?\n")
+		if hookName == "pre-push" {
+			b.WriteString("_entire_status=$?\n")
+		}
 		b.WriteString(rest)
 		if !strings.HasSuffix(rest, "\n") {
 			b.WriteByte('\n')
 		}
-		b.WriteString("exit $_entire_status\n")
+		if hookName == "pre-push" {
+			b.WriteString("exit $_entire_status\n")
+		}
 	}
 	return b.String()
 }
