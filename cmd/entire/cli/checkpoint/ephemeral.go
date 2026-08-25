@@ -445,6 +445,9 @@ func (s *ephemeralStore) addTaskMetadataToTree(ctx context.Context, baseTreeHash
 		if opts.SubagentTranscriptPath != "" && opts.AgentID != "" {
 			bundle, bundleErr := s.buildSubagentTranscriptChanges(ctx, opts, taskMetadataDir)
 			if bundleErr != nil {
+				if errors.Is(bundleErr, redact.ErrScannerDegraded) {
+					return plumbing.ZeroHash, bundleErr
+				}
 				logging.Warn(ctx, "failed to store subagent transcript, checkpoint written without it",
 					slog.String("path", opts.SubagentTranscriptPath),
 					slog.String("error", bundleErr.Error()),
