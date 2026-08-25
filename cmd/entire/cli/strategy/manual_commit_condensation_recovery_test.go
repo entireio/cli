@@ -144,7 +144,7 @@ func TestPostCommitProcessSessionLocked_PreservesDifferentReservedAttempt(t *tes
 
 	(&ManualCommitStrategy{}).postCommitProcessSessionLocked(
 		context.Background(), nil, state, nil, commitID, nil, nil, "", "",
-		nil, nil, nil, nil, preservedBranches, nil, 0,
+		nil, nil, nil, nil, preservedBranches, nil, 0, nil,
 	)
 
 	require.Equal(t, reservedID, state.PendingCondensationID())

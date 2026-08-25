@@ -222,6 +222,14 @@ func AsSkillEventExtractor(ag Agent) (SkillEventExtractor, bool) {
 	return builtinCapability[SkillEventExtractor](ag)
 }
 
+// AsToolInvocationScanner returns the agent as ToolInvocationScanner if it
+// implements the interface. Built-in only: reading tool calls out of a
+// transcript needs knowledge of that transcript's shape, which an external
+// agent's parse-hook does not convey.
+func AsToolInvocationScanner(ag Agent) (ToolInvocationScanner, bool) {
+	return builtinCapability[ToolInvocationScanner](ag)
+}
+
 // AsSessionEndBudgeter returns the agent as SessionEndBudgeter if it implements
 // the interface. Built-in only because no external agent needs it yet — not
 // because external agents could enforce a budget themselves: a plugin supplies

@@ -72,7 +72,7 @@ func writeAndRedact(t *testing.T, repo *git.Repository, cache *redactCache, dir,
 	require.NoError(t, os.WriteFile(path, []byte(content), 0o600))
 	hash, _, err := createRedactedBlobFromFile(context.Background(), repo, cache, path, name)
 	require.NoError(t, err)
-	got, err := readBlobBytes(repo, hash)
+	got, err := readBlobBytes(repo, hash, 0)
 	require.NoError(t, err)
 	return got
 }
@@ -81,6 +81,7 @@ func writeAndRedact(t *testing.T, repo *git.Repository, cache *redactCache, dir,
 // a transcript across checkpoints must produce exactly what redacting the final
 // file in one pass produces.
 func TestIncrementalRedaction_MatchesFullRedaction(t *testing.T) {
+	withSmallRedactCacheThreshold(t)
 	repo, dir := newTestRepoForCache(t)
 	cache := newRedactCache(filepath.Join(dir, ".git"))
 	require.NotNil(t, cache)
@@ -108,6 +109,7 @@ func TestIncrementalRedaction_MatchesFullRedaction(t *testing.T) {
 // earlier bytes changed (a compaction, say). Reusing the old prefix there would
 // store stale content, so it must redact everything again.
 func TestIncrementalRedaction_RewrittenPrefixFallsBack(t *testing.T) {
+	withSmallRedactCacheThreshold(t)
 	repo, dir := newTestRepoForCache(t)
 	cache := newRedactCache(filepath.Join(dir, ".git"))
 
@@ -131,6 +133,7 @@ func TestIncrementalRedaction_RewrittenPrefixFallsBack(t *testing.T) {
 // TestIncrementalRedaction_FingerprintMismatchFallsBack ensures output redacted
 // under different rules is never spliced into a new result.
 func TestIncrementalRedaction_FingerprintMismatchFallsBack(t *testing.T) {
+	withSmallRedactCacheThreshold(t)
 	repo, dir := newTestRepoForCache(t)
 	cache := newRedactCache(filepath.Join(dir, ".git"))
 
@@ -154,6 +157,7 @@ func TestIncrementalRedaction_FingerprintMismatchFallsBack(t *testing.T) {
 // that only newline-terminated content is cacheable, and that a file with a
 // partial final line still redacts correctly.
 func TestIncrementalRedaction_PartialTrailingLineNotCached(t *testing.T) {
+	withSmallRedactCacheThreshold(t)
 	repo, dir := newTestRepoForCache(t)
 	cache := newRedactCache(filepath.Join(dir, ".git"))
 
@@ -171,6 +175,7 @@ func TestIncrementalRedaction_PartialTrailingLineNotCached(t *testing.T) {
 // TestIncrementalRedaction_UnchangedContentReusesPrefix covers a Stop hook that
 // fires with no new transcript lines.
 func TestIncrementalRedaction_UnchangedContentReusesPrefix(t *testing.T) {
+	withSmallRedactCacheThreshold(t)
 	repo, dir := newTestRepoForCache(t)
 	cache := newRedactCache(filepath.Join(dir, ".git"))
 
@@ -183,6 +188,7 @@ func TestIncrementalRedaction_UnchangedContentReusesPrefix(t *testing.T) {
 // TestIncrementalRedaction_SkippedUnlessLargeSessionTranscript keeps the fast
 // path narrow: only a large full.jsonl takes it.
 func TestIncrementalRedaction_SkippedUnlessLargeSessionTranscript(t *testing.T) {
+	withSmallRedactCacheThreshold(t)
 	repo, dir := newTestRepoForCache(t)
 	cache := newRedactCache(filepath.Join(dir, ".git"))
 	ctx := context.Background()
@@ -202,15 +208,33 @@ func TestIncrementalRedaction_SkippedUnlessLargeSessionTranscript(t *testing.T) 
 		"chunked transcript parts must not qualify")
 	require.True(t, incrementalRedactionCandidate([]byte(big), ".entire/metadata/s1/full.jsonl"))
 
-	noCacheResult, noCacheErr := redactIncrementally(ctx, repo, nil, []byte(big), "full.jsonl")
+	// A nil cache disables reuse but must still return a correct full redaction:
+	// the whole-content fallback lives inside redactIncrementally so both callers
+	// cannot spell it differently.
+	noCacheResult, noCacheErr := redactIncrementally(ctx, repo, nil, []byte(big), "full.jsonl", testRedactor)
 	require.NoError(t, noCacheErr)
-	require.Nil(t, noCacheResult.Redacted,
-		"a nil cache must disable the incremental path")
+	require.False(t, noCacheResult.StorePrefix, "a nil cache must not record a prefix")
+	want, wantErr := RedactBlobBytes(ctx, []byte(big), "full.jsonl", false)
+	require.NoError(t, wantErr)
+	require.Equal(t, string(want), string(noCacheResult.Redacted),
+		"a nil cache must still redact the whole content")
+}
+
+// testRedactor adapts jsonlRedactor to redactIncrementally's []byte signature.
+// Same pipeline RedactBlobBytes uses for a .jsonl blob, so cached prefixes and
+// freshly redacted suffixes agree.
+func testRedactor(ctx context.Context, b []byte) ([]byte, error) {
+	out, err := jsonlRedactor(ctx, b)
+	if err != nil {
+		return nil, err
+	}
+	return out.Bytes(), nil
 }
 
 // TestRedactCache_IgnoresCorruptEntry proves a damaged cache file degrades to a
 // full redaction rather than failing the checkpoint.
 func TestRedactCache_IgnoresCorruptEntry(t *testing.T) {
+	withSmallRedactCacheThreshold(t)
 	repo, dir := newTestRepoForCache(t)
 	cache := newRedactCache(filepath.Join(dir, ".git"))
 
@@ -230,6 +254,7 @@ func TestRedactCache_IgnoresCorruptEntry(t *testing.T) {
 // TestRedactCache_MissingBlobFallsBack covers a cache entry pointing at an object
 // that is no longer reachable (pruned, or a different clone).
 func TestRedactCache_MissingBlobFallsBack(t *testing.T) {
+	withSmallRedactCacheThreshold(t)
 	repo, dir := newTestRepoForCache(t)
 	cache := newRedactCache(filepath.Join(dir, ".git"))
 
@@ -290,6 +315,7 @@ func openCodeExport(t *testing.T, minBytes int) string {
 // it must never enter the cache no matter how large it gets or that it lands on
 // the full.jsonl path.
 func TestIncrementalRedaction_SingleJSONValueNeverCached(t *testing.T) {
+	withSmallRedactCacheThreshold(t)
 	repo, dir := newTestRepoForCache(t)
 	cache := newRedactCache(filepath.Join(dir, ".git"))
 
@@ -303,4 +329,23 @@ func TestIncrementalRedaction_SingleJSONValueNeverCached(t *testing.T) {
 	writeAndRedact(t, repo, cache, dir, "full.jsonl", content)
 	require.Nil(t, cache.load("full.jsonl"),
 		"a single-JSON-value transcript must leave no cache entry")
+}
+
+// withSmallRedactCacheThreshold lowers the size gate for one test so fixtures can
+// be kilobytes instead of a megabyte. What these tests exercise is the splice
+// logic, not the threshold; paying real redaction cost on megabyte fixtures cost
+// ~5 minutes under -race across this file and timed out CI. The one test that
+// cares about the gate itself sets its own sizes.
+func withSmallRedactCacheThreshold(t *testing.T) {
+	t.Helper()
+	original := redactCacheMinBytes
+	redactCacheMinBytes = 8 << 10 // 8KiB
+	t.Cleanup(func() { redactCacheMinBytes = original })
+}
+
+// TestRedactCacheMinBytes_ProductionDefault pins the shipped threshold, since
+// every other test in this file overrides it and would not notice a change.
+func TestRedactCacheMinBytes_ProductionDefault(t *testing.T) {
+	require.Equal(t, 1<<20, redactCacheMinBytes,
+		"production default must stay 1MiB; tests override it via withSmallRedactCacheThreshold")
 }
