@@ -483,10 +483,61 @@ still.
 5. **Foreign-config collision** — see above; needs a product decision.
 6. **Project trust gate** — see above; silent failure mode for `entire enable`.
 7. **Subagent transcripts** — a `subagents/` directory exists per session but its layout is undocumented. Relevant to `SubagentSessionResolver` and `Event.SubagentTranscriptPath`; the Droid Workers path is the closest precedent.
-8. **Coverage of the live run was one trivial turn** — no subagent, no compaction, no interrupt, no failure, no multi-turn session. `SubagentStart`/`SubagentStop`/`StopCancelled`/`StopFailure`/`PreCompact`/`PostCompact` and `Notification` are **still unobserved**, and those are exactly the paths with the trickiest mappings.
+8. **Subagents are unimplemented.** `SubagentStart`/`SubagentStop` are parsed and mapped, but `SubagentSessionResolver` is not implemented and no subagent run has ever been observed. Grok's docs say `SubagentStop` fires *inside* the child, and child sessions live in the normal sessions tree with only `meta.json` under the parent's `subagents/` — which is the Droid Workers shape, not Claude Code's blocking-tool shape. Decide that against a real subagent transcript, not the docs.
+9. **Coverage of the live run was one trivial turn** — no subagent, no compaction, no interrupt, no failure, no multi-turn session. `SubagentStart`/`SubagentStop`/`StopCancelled`/`StopFailure`/`PreCompact`/`PostCompact` and `Notification` are **still unobserved**, and those are exactly the paths with the trickiest mappings.
 9. **`SessionStart` does not fire for a subagent's own session** *(doc, `10-hooks.md:90`)*, and **`SessionEnd` carries `subagentType` for a child session** so a host can distinguish a child teardown from its own. Both matter for subagent bookkeeping.
 10. **`SubagentStop` fires once, inside the subagent** *(doc, `10-hooks.md:101`)* — not in the parent. Child sessions live in the normal sessions tree with only `meta.json` under the parent's `subagents/`, which is the `SubagentSessionResolver` shape (cf. Droid Workers), not a blocking tool call.
 11. **Grok has its own worktree system** under `~/.grok/worktrees/` with `grok worktree gc`/`rm` and `grok du`. Unexamined; may interact with Entire's own worktree assumptions.
+
+## Implementation Status
+
+Implemented in this package and registered as `grok`
+(`agent.AgentNameGrok` / `agent.AgentTypeGrok` = "Grok Build"). Marked
+`IsPreview() == true`.
+
+| Interface | Status |
+|---|---|
+| `Agent` (core) | done |
+| `HookSupport` | done — `.grok/hooks/entire.json` |
+| `HookFreshness` | done — `GeneratedHookFileState` |
+| `TranscriptAnalyzer` | done — diff blocks, `locations[]` fallback |
+| `TokenCalculator` | done — `turn_completed.usage`, fresh input derived |
+| `ModelExtractor` | done — `_meta.modelId` |
+| `SubagentSessionResolver` | **not implemented** — see gaps |
+| `TranscriptCompactor` | not implemented (regenerable; `full.jsonl` is authoritative) |
+| `TextGenerator` / `Launcher` | not implemented |
+
+Event mapping is as tabled above, with two behaviours worth restating
+because they have no analogue in the other agents:
+
+- `StopCancelled` and `StopFailure` both map to `TurnEnd`.
+- The teardown `Stop` (reason `shutdown`/`channel_closed`, no `promptId`)
+  maps to nothing; `isTeardownStop` drops it.
+
+### Verified end to end
+
+A full lifecycle was replayed through the built binary against a scratch
+repo using the captured payloads and a real transcript: hooks install,
+session start, prompt capture, mid-turn `post-tool-use`, turn end, shadow
+branch, user commit, `Entire-Checkpoint` trailer, and commit linkage.
+`entire checkpoint tokens` reported
+
+```
+total 32057 · input 15914 · cache_read 15744 · output 399 · api_calls 2
+```
+
+matching Grok's own headless summary for that turn.
+
+### E2E results
+
+`TestHumanOnlyChangesAndCommits`, `TestSingleSessionManualCommit`, and
+`TestCheckpointMetadataDeepValidation` each pass when run individually.
+A full-suite run reached **22 of 56** before the xAI account exhausted its
+free Grok Build quota; all 34 remaining failures are
+`You've reached your free Grok Build usage limit` (25 logs) or
+`resource-exhausted: Too many requests` (2), with no failure attributable
+to this package. Completing the suite needs SuperGrok or a billed
+`XAI_API_KEY`.
 
 ## E2E Runner
 
