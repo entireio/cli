@@ -1567,6 +1567,7 @@ func completeSubagentTaskRecord(logCtx context.Context, ag agent.Agent, event *a
 	if opts.ambiguousWithoutDescription {
 		logging.Warn(logCtx, "skipping task record: tool_use_id resolved only by the single-active-file fallback with no corroborating task description",
 			slog.String("tool_use_id", event.ToolUseID))
+		_ = CleanupPreTaskState(logCtx, event.ToolUseID) //nolint:errcheck // drop uncorroborated fallback baseline
 		return nil
 	}
 	// Prefer what the agent declared (Claude Code's SubagentStop, Codex, and
