@@ -4367,6 +4367,24 @@ func TestFormatBranchCheckpoints_SessionFilter(t *testing.T) {
 		}
 	})
 
+	t.Run("truncated scan with no filtered matches is not definitive", func(t *testing.T) {
+		output := formatBranchCheckpointsWithTruncation(
+			io.Discard, "main", points, "nonexistent-session", true,
+		)
+		if !strings.Contains(output, "checkpoints  0") {
+			t.Errorf("expected 'checkpoints  0' in output, got:\n%s", output)
+		}
+		if !strings.Contains(output, "No checkpoints matching this session were found in the scanned results.") {
+			t.Errorf("expected non-definitive filtered result, got:\n%s", output)
+		}
+		if !strings.Contains(output, "checkpoint scan was truncated") {
+			t.Errorf("expected truncation explanation, got:\n%s", output)
+		}
+		if strings.Contains(output, "No checkpoints found on this branch.") {
+			t.Errorf("must not claim the branch has no checkpoints, got:\n%s", output)
+		}
+	})
+
 	t.Run("filter matches archived SessionIDs contributor", func(t *testing.T) {
 		// Multi-session checkpoint: latest SessionID is beta, but alpha is still
 		// in SessionIDs. The shared matcher must keep it when filtering for alpha.

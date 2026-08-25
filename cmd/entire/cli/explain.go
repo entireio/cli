@@ -2935,7 +2935,7 @@ func runExplainBranchWithFilter(ctx context.Context, w, errW io.Writer, noPager 
 	}
 
 	// Format output
-	output := formatBranchCheckpoints(w, branchName, points, sessionFilter)
+	output := formatBranchCheckpointsWithTruncation(w, branchName, points, sessionFilter, truncated)
 
 	outputExplainContent(w, output, noPager)
 
@@ -3117,6 +3117,12 @@ const (
 // Groups commits by checkpoint ID and shows the prompt for each checkpoint.
 // If sessionFilter is non-empty, only shows checkpoints matching that session ID (or prefix).
 func formatBranchCheckpoints(w io.Writer, branchName string, points []strategy.RewindPoint, sessionFilter string) string {
+	return formatBranchCheckpointsWithTruncation(w, branchName, points, sessionFilter, false)
+}
+
+// formatBranchCheckpointsWithTruncation formats a branch view while preserving
+// whether the underlying checkpoint scan was truncated before filtering.
+func formatBranchCheckpointsWithTruncation(w io.Writer, branchName string, points []strategy.RewindPoint, sessionFilter string, truncated bool) string {
 	var sb strings.Builder
 	styles := newStatusStyles(w)
 
@@ -3149,8 +3155,13 @@ func formatBranchCheckpoints(w io.Writer, branchName string, points []strategy.R
 	sb.WriteString("\n")
 
 	if len(groups) == 0 {
-		sb.WriteString("No checkpoints found on this branch.\n")
-		sb.WriteString("Checkpoints will appear here after you save changes during an agent session.\n")
+		if truncated && sessionFilter != "" {
+			sb.WriteString("No checkpoints matching this session were found in the scanned results.\n")
+			sb.WriteString("The checkpoint scan was truncated; older checkpoints may be hidden.\n")
+		} else {
+			sb.WriteString("No checkpoints found on this branch.\n")
+			sb.WriteString("Checkpoints will appear here after you save changes during an agent session.\n")
+		}
 		return sb.String()
 	}
 
