@@ -1398,7 +1398,11 @@ func injectEntireManagedBlock(hookName, existing, entireContent string) string {
 			b.WriteByte('\n')
 		}
 		if hookName == "pre-push" {
-			b.WriteString("exit $_entire_status\n")
+			b.WriteString("_user_status=$?\n")
+			b.WriteString("if [ \"$_entire_status\" -ne 0 ]; then\n")
+			b.WriteString("\texit \"$_entire_status\"\n")
+			b.WriteString("fi\n")
+			b.WriteString("exit \"$_user_status\"\n")
 		}
 	}
 	return b.String()
@@ -1453,12 +1457,19 @@ func stripEntireManagedBlock(content string) string {
 func stripPrePushManagedExitWrapper(content string) string {
 	shebang, rest := splitShebang(content)
 	rest = strings.TrimPrefix(rest, "_entire_status=$?\n")
-	trimmed := strings.TrimRight(rest, "\n")
-	if strings.HasSuffix(trimmed, "exit $_entire_status") {
-		rest = strings.TrimSuffix(trimmed, "exit $_entire_status")
-		if rest != "" && !strings.HasSuffix(rest, "\n") {
-			rest += "\n"
+	lines := strings.Split(strings.TrimRight(rest, "\n"), "\n")
+	for len(lines) > 0 {
+		switch lines[len(lines)-1] {
+		case `exit "$_user_status"`, "exit $_entire_status", `_user_status=$?`, `if [ "$_entire_status" -ne 0 ]; then`, "fi", "\texit \"$_entire_status\"":
+			lines = lines[:len(lines)-1]
+		default:
+			goto done
 		}
+	}
+done:
+	rest = strings.Join(lines, "\n")
+	if rest != "" {
+		rest += "\n"
 	}
 	if shebang != "" {
 		if rest == "" {
