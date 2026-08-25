@@ -677,12 +677,14 @@ func modifyPreTaskStateUnderBootstrapLock(ctx context.Context, toolUseID string,
 		return err
 	}
 
-	if _, err := root.Stat(fileName); err != nil {
+	info, err := root.Stat(fileName)
+	if err != nil {
 		if os.IsNotExist(err) {
 			return nil
 		}
 		return fmt.Errorf("failed to stat pre-task state before write: %w", err)
 	}
+	preservedModTime := info.ModTime()
 
 	out, err := jsonutil.MarshalIndentWithNewline(state, "", "  ")
 	if err != nil {
@@ -690,6 +692,10 @@ func modifyPreTaskStateUnderBootstrapLock(ctx context.Context, toolUseID string,
 	}
 	if err := osroot.WriteFile(root, fileName, out, 0o600); err != nil {
 		return fmt.Errorf("failed to write pre-task state: %w", err)
+	}
+	// Agent-id stamps must not refresh mtime; spawn-order heuristics key off it.
+	if err := os.Chtimes(filepath.Join(tmpDirAbs, fileName), preservedModTime, preservedModTime); err != nil {
+		return fmt.Errorf("failed to preserve pre-task state mtime: %w", err)
 	}
 	return nil
 }
