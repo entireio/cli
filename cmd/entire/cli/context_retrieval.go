@@ -58,9 +58,11 @@ type contextEvidence struct {
 	Score        float64  `json:"-"`
 }
 
-func redactContextQuery(ctx context.Context, query string) string {
-	_ = strategy.EnsureRedactionConfigured(ctx)
-	return truncateUTF8Bytes(sanitizeEvidenceText(redact.String(query)), maxContextQueryBytes)
+func redactContextQuery(ctx context.Context, query string) (string, error) {
+	if err := strategy.EnsureRedactionConfigured(ctx); err != nil {
+		return "", fmt.Errorf("configure redaction: %w", err)
+	}
+	return truncateUTF8Bytes(sanitizeEvidenceText(redact.String(query)), maxContextQueryBytes), nil
 }
 
 func truncateUTF8Bytes(value string, limit int) string {
@@ -458,7 +460,10 @@ func retrieveContextEvidence(ctx context.Context, coreClient *coreapi.Client, ta
 	if !scope.Enabled {
 		return nil, scope, errors.New("cross-repository context sharing is disabled; run `entire context enable`")
 	}
-	safeQuery := redactContextQuery(ctx, query)
+	safeQuery, err := redactContextQuery(ctx, query)
+	if err != nil {
+		return nil, scope, err
+	}
 	if safeQuery == "" {
 		return nil, scope, errors.New("query is empty after redaction")
 	}
@@ -594,7 +599,9 @@ func loadLocalContextEvidence(ctx context.Context, query, targetRepoID, currentS
 	if err := ctx.Err(); err != nil {
 		return nil, fmt.Errorf("load local context evidence: %w", err)
 	}
-	strategy.EnsureRedactionConfigured(ctx)
+	if err := strategy.EnsureRedactionConfigured(ctx); err != nil {
+		return nil, fmt.Errorf("configure redaction: %w", err)
+	}
 	path, err := currentContextRegistryPath(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("resolve context registry: %w", err)
