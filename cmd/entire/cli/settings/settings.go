@@ -636,9 +636,13 @@ func clonePreferencesPathForWorktreeRoot(ctx context.Context, worktreeRoot strin
 
 func loadMergedSettings(ctx context.Context, settingsFileAbs, preferencesFileAbs, localSettingsFileAbs string) (*EntireSettings, error) {
 	// Load base settings
-	settings, err := loadFromFile(settingsFileAbs)
-	if err != nil {
-		return nil, fmt.Errorf("reading settings file: %w", err)
+	var err error
+	settings := &EntireSettings{Enabled: true}
+	if settingsFileAbs != "" {
+		settings, err = loadFromFile(settingsFileAbs)
+		if err != nil {
+			return nil, fmt.Errorf("reading settings file: %w", err)
+		}
 	}
 
 	if preferencesFileAbs != "" {
@@ -651,21 +655,24 @@ func loadMergedSettings(ctx context.Context, settingsFileAbs, preferencesFileAbs
 
 	// Apply local overrides if they exist — but only from a file that is
 	// genuinely local. See localLayerTrackedReason.
-	localData, err := readConfined(localSettingsFileAbs)
-	if err != nil {
-		if !errors.Is(err, fs.ErrNotExist) {
-			return nil, fmt.Errorf("reading local settings file: %w", err)
+	var localData []byte
+	if localSettingsFileAbs != "" {
+		localData, err = readConfined(localSettingsFileAbs)
+		if err != nil {
+			if !errors.Is(err, fs.ErrNotExist) {
+				return nil, fmt.Errorf("reading local settings file: %w", err)
+			}
+			// Local file doesn't exist, continue without overrides
+		} else if classifyLocalSettings(ctx, localSettingsFileAbs) == localTracked {
+			// Dropped only on PROOF that the file is tracked. Discarding every
+			// local setting because a repository could not be read would be a
+			// worse failure than the one being guarded against — the exec-bearing
+			// OPF command applies the stricter policy for itself.
+			settings.localLayerRejection = localLayerTrackedReason
+			localData = nil
+		} else if err := mergeJSON(settings, localData); err != nil {
+			return nil, fmt.Errorf("merging local settings: %w", err)
 		}
-		// Local file doesn't exist, continue without overrides
-	} else if classifyLocalSettings(ctx, localSettingsFileAbs) == localTracked {
-		// Dropped only on PROOF that the file is tracked. Discarding every
-		// local setting because a repository could not be read would be a
-		// worse failure than the one being guarded against — the exec-bearing
-		// OPF command applies the stricter policy for itself.
-		settings.localLayerRejection = localLayerTrackedReason
-		localData = nil
-	} else if err := mergeJSON(settings, localData); err != nil {
-		return nil, fmt.Errorf("merging local settings: %w", err)
 	}
 
 	// openai_privacy_filter.command is executed, so it is honored only from a

@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/entireio/cli/cmd/entire/cli/paths"
+	"github.com/entireio/cli/cmd/entire/cli/settings/repopolicy"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 )
 
@@ -98,6 +99,13 @@ func TestAbsPath_InvisibleRouting_RepoLevelSetupWins(t *testing.T) {
 			repo := newInvisibleTestRepo(t)
 			setGlobalTier(t, `{"global":{"enabled":true}}`)
 			testutil.WriteFile(t, repo, filepath.Join(".entire", settingsFile), `{"enabled": true}`)
+			repository, err := repopolicy.ResolveRepositoryAt(t.Context(), repo)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := repopolicy.SetLocalActivationForRepository(repository, repopolicy.ActivationEnabled); err != nil {
+				t.Fatal(err)
+			}
 			paths.ClearInvisibleRuntimeCache()
 
 			want := filepath.Join(repo, ".entire", "metadata", "s1")
@@ -112,11 +120,23 @@ func TestAbsPath_InvisibleRouting_RepoActivationWinsWithCanceledContext(t *testi
 	repo := newInvisibleTestRepo(t)
 	setGlobalTier(t, `{"global":{"enabled":true}}`)
 	testutil.WriteFile(t, repo, ".entire/settings.json", `{"enabled": true}`)
+	repository, err := repopolicy.ResolveRepositoryAt(t.Context(), repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := repopolicy.SetLocalActivationForRepository(repository, repopolicy.ActivationEnabled); err != nil {
+		t.Fatal(err)
+	}
+	policy, err := repopolicy.ClassifyRepoPolicy(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
 	_ = mustAbsPath(t, ".entire/settings.json") // prime the worktree-root cache
 	paths.ClearInvisibleRuntimeCache()
 
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
+	ctx = repopolicy.WithRepoPolicy(ctx, policy)
 	want := filepath.Join(repo, ".entire", "metadata", "s1")
 	got, err := paths.AbsPath(ctx, ".entire/metadata/s1")
 	if err != nil {
@@ -177,7 +197,6 @@ func TestAbsPath_InvisibleRouting_GlobalTierOff(t *testing.T) {
 		"absent file": "",
 		"disabled":    `{"global":{"enabled":false}}`,
 		"no global":   `{}`,
-		"malformed":   `{not json`,
 	}
 	for name, content := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -189,6 +208,15 @@ func TestAbsPath_InvisibleRouting_GlobalTierOff(t *testing.T) {
 				t.Errorf("AbsPath = %q, want worktree path %q", got, want)
 			}
 		})
+	}
+}
+
+func TestAbsPath_InvisibleRouting_MalformedGlobalPolicyFailsClosed(t *testing.T) {
+	newInvisibleTestRepo(t)
+	setGlobalTier(t, `{not json`)
+	_, err := paths.AbsPath(t.Context(), ".entire/metadata/s1")
+	if err == nil || !paths.IsUnroutableRuntimePath(err) {
+		t.Fatalf("AbsPath error = %v, want ErrUnroutableRuntimePath", err)
 	}
 }
 

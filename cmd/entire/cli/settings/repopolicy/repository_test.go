@@ -7,8 +7,6 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-
-	"github.com/entireio/cli/cmd/entire/cli/testutil"
 )
 
 func TestClassifyGlobalConfig_DisabledDoesNotResolveRepository(t *testing.T) {
@@ -40,10 +38,10 @@ func TestResolveRepository_MainAndLinkedWorktree(t *testing.T) {
 	t.Parallel()
 
 	root := t.TempDir()
-	testutil.InitRepo(t, root)
-	testutil.WriteFile(t, root, "README.md", "test\n")
-	testutil.GitAdd(t, root, "README.md")
-	testutil.GitCommit(t, root, "initial")
+	initPolicyRepo(t, root)
+	writePolicyFile(t, root, "README.md", "test\n")
+	runPolicyGit(t, root, "add", "README.md")
+	runPolicyGit(t, root, "commit", "--no-gpg-sign", "-m", "initial")
 
 	mainRepo, err := ResolveRepositoryAt(t.Context(), root)
 	if err != nil {
@@ -63,7 +61,6 @@ func TestResolveRepository_MainAndLinkedWorktree(t *testing.T) {
 	linked := filepath.Join(t.TempDir(), "linked")
 	cmd := exec.CommandContext(t.Context(), "git", "worktree", "add", "-b", "linked-test", linked)
 	cmd.Dir = root
-	cmd.Env = testutil.GitIsolatedEnv()
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("git worktree add: %v\n%s", err, out)
 	}
@@ -86,14 +83,13 @@ func TestClassifyGlobalConfig_UnnormalizableOriginDoesNotLeakCredentials(t *test
 	t.Parallel()
 
 	root := t.TempDir()
-	testutil.InitRepo(t, root)
+	initPolicyRepo(t, root)
 	const (
 		secret = "super-secret"
 		origin = "https://user:super-secret@example.com"
 	)
 	cmd := exec.CommandContext(t.Context(), "git", "remote", "add", "origin", origin)
 	cmd.Dir = root
-	cmd.Env = testutil.GitIsolatedEnv()
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("git remote add: %v\n%s", err, out)
 	}

@@ -1458,8 +1458,9 @@ func TestEnableSetupPathsActivateBeforeActiveSessionMigration(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if routedTmp != filepath.Join(dir, paths.EntireTmpDir) {
-				t.Fatalf("new hooks must route to repo runtime immediately: got %q", routedTmp)
+			wantTmp := filepath.Join(dir, filepath.FromSlash(sourceRel), "tmp")
+			if routedTmp != wantTmp {
+				t.Fatalf("existing global-first runtime route must stay sticky: got %q, want %q", routedTmp, wantTmp)
 			}
 			if _, err := os.Stat(sourceFile); err != nil {
 				t.Fatalf("active-session source must remain for retry: %v", err)

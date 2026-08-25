@@ -112,10 +112,8 @@ func ClearWorktreeRootCache() {
 // Uses WorktreeRoot() to resolve paths relative to the worktree root.
 //
 // Exception: runtime-data paths (.entire/metadata, .entire/logs, .entire/tmp)
-// in a repo tracked only by the user-global tier resolve under the git common
-// dir instead of the worktree, so a globally tracked repo never gains worktree
-// files (see invisibleRuntimeBase in invisible.go). Repos with any repo-level
-// setup resolve every path to the worktree, exactly as before.
+// resolve through the sticky repository policy route. A policy snapshot in ctx
+// wins; otherwise a read-only classification provides compatibility behavior.
 //
 // When the global tier owns the repo but the git-side location cannot be
 // resolved, runtime-data paths return an error carrying
@@ -133,13 +131,11 @@ func AbsPath(ctx context.Context, relPath string) (string, error) {
 	}
 
 	if sub, ok := runtimeDataSubpath(relPath); ok {
-		base, baseErr := invisibleRuntimeBase(ctx, root)
+		base, baseErr := runtimeRootForPath(ctx, root)
 		if baseErr != nil {
 			return "", fmt.Errorf("resolving runtime path %s: %w", relPath, baseErr)
 		}
-		if base != "" {
-			return filepath.Join(base, filepath.FromSlash(sub)), nil
-		}
+		return filepath.Join(base, filepath.FromSlash(sub)), nil
 	}
 
 	return filepath.Join(root, relPath), nil

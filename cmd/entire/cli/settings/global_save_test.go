@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/entireio/cli/cmd/entire/cli/paths"
+	"github.com/entireio/cli/cmd/entire/cli/settings/repopolicy"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 )
 
@@ -117,12 +118,9 @@ func TestModifyUserSettings_ConcurrentWritersLoseNoUpdates(t *testing.T) {
 	}
 }
 
-// TestRepoSettingsWrites_ClearInvisibleRoutingCache pins the invalidation
-// contract documented on paths' invisibleCache: creating a repo settings
-// file — through the struct save path (saveToFile) or the raw path (saveRaw)
-// — is a discriminator write, so the writer process must observe runtime-data
-// routing flip from the git common dir back to the worktree.
-func TestRepoSettingsWrites_ClearInvisibleRoutingCache(t *testing.T) {
+// TestRepoSettingsWrites_PreserveStickyRuntimeRoute pins that configuration
+// writes cannot change an already selected runtime layout.
+func TestRepoSettingsWrites_PreserveStickyRuntimeRoute(t *testing.T) {
 	cases := []struct {
 		name  string
 		write func(ctx context.Context) error
@@ -159,13 +157,19 @@ func TestRepoSettingsWrites_ClearInvisibleRoutingCache(t *testing.T) {
 			}
 			reset()
 			t.Cleanup(reset)
+			policy, err := repopolicy.ClassifyRepoPolicy(t.Context())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := repopolicy.EnsureRuntimeRoute(t.Context(), policy); err != nil {
+				t.Fatal(err)
+			}
 
 			routed, err := paths.AbsPath(t.Context(), paths.EntireMetadataDir)
 			if err != nil {
 				t.Fatal(err)
 			}
-			worktreeMeta := filepath.Join(dir, ".entire", "metadata")
-			if routed == worktreeMeta {
+			if routed == filepath.Join(dir, ".entire", "metadata") {
 				t.Fatalf("precondition: a globally tracked repo must route runtime data into .git, got %s", routed)
 			}
 			if err := tc.write(t.Context()); err != nil {
@@ -175,8 +179,8 @@ func TestRepoSettingsWrites_ClearInvisibleRoutingCache(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if after != worktreeMeta {
-				t.Fatalf("settings write must flip routing worktree-ward in-process: got %s, want %s", after, worktreeMeta)
+			if after != routed {
+				t.Fatalf("settings write changed sticky route: before %s, after %s", routed, after)
 			}
 		})
 	}

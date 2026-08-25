@@ -20,12 +20,12 @@ const (
 	RuntimeGitCommon RuntimeLayout = "git_common"
 )
 
-// RuntimeRoute is the selected or proposed runtime-data location. Route
-// establishment is implemented separately from the input classification in
-// this package.
+// RuntimeRoute is the selected or proposed runtime-data location.
 type RuntimeRoute struct {
-	Layout RuntimeLayout
-	Root   string
+	Version            int           `json:"version"`
+	Layout             RuntimeLayout `json:"layout"`
+	CanonicalWorktree  string        `json:"canonical_worktree"`
+	CanonicalGitCommon string        `json:"canonical_git_common"`
 }
 
 // TrustDecision is the repository's checkpoint-egress decision. Trust

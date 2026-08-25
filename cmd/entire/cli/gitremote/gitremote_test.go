@@ -6,8 +6,6 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/entireio/cli/cmd/entire/cli/testutil"
-
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -247,11 +245,10 @@ func TestResolveRemoteRepo(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			repoDir := t.TempDir()
-			testutil.InitRepo(t, repoDir)
+			initGitRemoteRepo(t, repoDir)
 
 			cmd := exec.CommandContext(ctx, "git", "remote", "add", "origin", tt.originURL)
 			cmd.Dir = repoDir
-			cmd.Env = testutil.GitIsolatedEnv()
 			require.NoError(t, cmd.Run())
 
 			t.Chdir(repoDir)
@@ -268,7 +265,7 @@ func TestResolveRemoteRepo(t *testing.T) {
 // Not parallel: uses t.Chdir()
 func TestResolveRemoteRepo_MissingRemote(t *testing.T) {
 	repoDir := t.TempDir()
-	testutil.InitRepo(t, repoDir)
+	initGitRemoteRepo(t, repoDir)
 	t.Chdir(repoDir)
 
 	_, _, _, err := ResolveRemoteRepo(context.Background(), "origin")
@@ -281,14 +278,13 @@ func TestGetRemoteURLsInDirIfSet(t *testing.T) {
 	newRepo := func(t *testing.T) string {
 		t.Helper()
 		dir := t.TempDir()
-		testutil.InitRepo(t, dir)
+		initGitRemoteRepo(t, dir)
 		return dir
 	}
 	runGit := func(t *testing.T, dir string, args ...string) {
 		t.Helper()
 		cmd := exec.CommandContext(t.Context(), "git", args...)
 		cmd.Dir = dir
-		cmd.Env = testutil.GitIsolatedEnv()
 		require.NoError(t, cmd.Run())
 	}
 
@@ -360,4 +356,20 @@ func TestGetRemoteURLsInDirIfSet(t *testing.T) {
 		_, _, err := GetRemoteURLsInDirIfSet(ctx, dir, "origin")
 		assert.Error(t, err)
 	})
+}
+
+func initGitRemoteRepo(t *testing.T, dir string) {
+	t.Helper()
+	for _, args := range [][]string{
+		{"init"},
+		{"config", "user.name", "Entire Test"},
+		{"config", "user.email", "test@entire.invalid"},
+		{"config", "commit.gpgsign", "false"},
+	} {
+		cmd := exec.CommandContext(t.Context(), "git", args...)
+		cmd.Dir = dir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
 }
