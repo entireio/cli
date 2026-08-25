@@ -15,11 +15,13 @@ import (
 // custom names never leave the machine verbatim. Skill names and signal kinds
 // only, never prompt text or transcript content.
 //
-// Call this AFTER the surrounding MutateSessionState returns, never inside its
-// closure: the settings load (disk I/O) and detached-process spawn must not
-// extend the session gate hold time and block concurrent hooks. Emitting only
-// after a successful save also keeps reporting exactly-once — events whose
-// append was never persisted are re-derived by the next extraction pass.
+// Hand this to MutateSessionStateOnSaved as the post-save effect rather than
+// calling it inside the mutation closure. That helper runs the effect only once
+// the state was durably written, and only after the session gate is released:
+// the settings load (disk I/O) and detached-process spawn must not extend the
+// gate hold time and block concurrent hooks, and emitting only after a save
+// keeps reporting exactly-once — events whose append was never persisted are
+// re-derived, and re-announced, by the next extraction pass.
 func EmitSkillInvocationTelemetry(ctx context.Context, events []agent.SkillEvent) {
 	if len(events) == 0 {
 		return

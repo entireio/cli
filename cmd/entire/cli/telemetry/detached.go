@@ -15,6 +15,10 @@ import (
 	"github.com/spf13/pflag"
 )
 
+// autoAgentName is the default value for the agent property when no agent
+// was selected or reported.
+const autoAgentName = "auto"
+
 var (
 	// PostHogAPIKey is set at build time for production
 	PostHogAPIKey = "phc_development_key"
@@ -61,7 +65,7 @@ func BuildEventPayload(cmd *cobra.Command, agent string, isEntireEnabled bool, v
 
 	selectedAgent := agent
 	if selectedAgent == "" {
-		selectedAgent = "auto"
+		selectedAgent = autoAgentName
 	}
 
 	properties := map[string]any{
@@ -158,11 +162,19 @@ func spawnDetachedAnalyticsBatch(payloads []*EventPayload) {
 	flush()
 }
 
+// IsEnvOptedOut reports whether the ENTIRE_TELEMETRY_OPTOUT environment
+// opt-out is set. Every tracker honors it internally; callers that do
+// expensive work before tracking (e.g. a git-log probe) should check it
+// first so an opted-out user never pays for signal computation.
+func IsEnvOptedOut() bool {
+	return os.Getenv("ENTIRE_TELEMETRY_OPTOUT") != ""
+}
+
 // TrackCommandDetached tracks a command execution by spawning a detached subprocess.
 // This returns immediately without blocking the CLI.
 func TrackCommandDetached(cmd *cobra.Command, agent string, isEntireEnabled bool, version string) {
 	// Check opt-out environment variables
-	if os.Getenv("ENTIRE_TELEMETRY_OPTOUT") != "" {
+	if IsEnvOptedOut() {
 		return
 	}
 
@@ -216,7 +228,7 @@ func BuildPluginEventPayload(pluginName string, isEntireEnabled bool, version st
 // TrackPluginDetached records a plugin invocation. Call sites must gate
 // on the plugin allowlist — this function does no name filtering itself.
 func TrackPluginDetached(pluginName string, isEntireEnabled bool, version string) {
-	if os.Getenv("ENTIRE_TELEMETRY_OPTOUT") != "" {
+	if IsEnvOptedOut() {
 		return
 	}
 
@@ -265,7 +277,7 @@ func BuildSkillEventPayload(inv SkillInvocation, isEntireEnabled bool, version s
 	// non-empty, queryable value.
 	agentName := inv.Agent
 	if agentName == "" {
-		agentName = "auto"
+		agentName = autoAgentName
 	}
 
 	properties := map[string]any{
@@ -298,7 +310,7 @@ func BuildSkillEventPayload(inv SkillInvocation, isEntireEnabled bool, version s
 // backlog in one call, and a dropped event is never re-reported because the
 // dedupe in session state has already recorded it.
 func TrackSkillInvocationsDetached(invocations []SkillInvocation, isEntireEnabled bool, version string) {
-	if os.Getenv("ENTIRE_TELEMETRY_OPTOUT") != "" {
+	if IsEnvOptedOut() {
 		return
 	}
 
@@ -309,6 +321,110 @@ func TrackSkillInvocationsDetached(invocations []SkillInvocation, isEntireEnable
 		}
 	}
 	spawnDetachedAnalyticsBatch(payloads)
+}
+
+// CommitCondensedSignal is the content-free adoption signal emitted when a
+// commit condenses a session checkpoint: whether the session consulted entire
+// search, and whether the committed files already carried AI checkpoint
+// history. Together these give the "sessions that edited history-dense files
+// without searching" denominator that raw command counts cannot. Content-free
+// metadata only — booleans, a count, and the agent identifier; never file
+// paths, prompts, or transcript content.
+//
+// A commit is part of the event's identity, not an incidental trigger, which is
+// why it is named for one. FilesCommitted and PriorAIHistory are commit-scoped:
+// the former counts that commit's files, the latter asks whether commits
+// *before* this one already touched them. UsedSearch is deliberately
+// SESSION-scoped — the metric asks whether the session EVER consulted search
+// before landing this commit, so one search early in a session rightly covers
+// its later commits. The condensation paths that run without a commit (doctor
+// repair, session-end leftovers) deliberately emit nothing — see
+// newCommitCondensedSignal for why folding them in would corrupt the
+// denominator rather than complete it.
+type CommitCondensedSignal struct {
+	// Agent is the session-owning agent's registry key (e.g. "claude-code"),
+	// matching the agent property on skill and command events.
+	Agent string
+	// UsedSearch reports whether the session invoked `entire search`. Nil means
+	// the question was not answerable for this agent's transcript format, and
+	// the property is then OMITTED from the payload rather than sent as false —
+	// so a consumer filtering on `used_search = false` excludes unknowns instead
+	// of silently counting them as "did not search". UsedSearchSource always
+	// says which case this is.
+	UsedSearch *bool
+	// UsedSearchSource records how UsedSearch was determined: "unsupported",
+	// "none", "command", or "subagent". Always present.
+	UsedSearchSource string
+	// PriorAIHistory reports whether any committed file was touched by a
+	// recent AI checkpoint commit before this one. Nil means the git-log probe
+	// could not run (git unavailable, cancelled ctx, shallow-clone failure) and
+	// the property is then OMITTED from the payload rather than sent as false —
+	// same rationale as UsedSearch: a fabricated "no prior history" deflates
+	// the very miss rate this event exists to measure. A commit that landed no
+	// files is a measured false, not an omission.
+	PriorAIHistory *bool
+	// FilesCommitted is the number of files this checkpoint touched.
+	FilesCommitted int
+}
+
+// BuildCommitCondensedPayload constructs the telemetry payload for one
+// condensed checkpoint. Exported for testing. Returns nil if the payload
+// cannot be built.
+func BuildCommitCondensedPayload(sig CommitCondensedSignal, isEntireEnabled bool, version string) *EventPayload {
+	machineID, err := telemetryMachineID()
+	if err != nil {
+		return nil
+	}
+
+	// Match BuildEventPayload's defaulting so the agent property is always a
+	// non-empty, queryable value.
+	agentName := sig.Agent
+	if agentName == "" {
+		agentName = autoAgentName
+	}
+
+	properties := map[string]any{
+		"agent":              agentName,
+		"used_search_source": sig.UsedSearchSource,
+		"files_committed":    sig.FilesCommitted,
+		"isEntireEnabled":    isEntireEnabled,
+		"cli_version":        version,
+		"os":                 runtime.GOOS,
+		"arch":               runtime.GOARCH,
+	}
+	// Omitted, not false, when unmeasurable — see the doc comments on
+	// UsedSearch and PriorAIHistory.
+	if sig.UsedSearch != nil {
+		properties["used_search"] = *sig.UsedSearch
+	}
+	if sig.PriorAIHistory != nil {
+		properties["prior_ai_history"] = *sig.PriorAIHistory
+	}
+
+	return &EventPayload{
+		Event:      "cli_commit_condensed",
+		DistinctID: machineID,
+		Properties: properties,
+		Timestamp:  time.Now(),
+	}
+}
+
+// TrackCommitCondensedDetached records one condensed checkpoint's adoption
+// signal. Like TrackPluginDetached, it only honors the env opt-out itself —
+// call sites must gate on the user's opt-in telemetry setting.
+func TrackCommitCondensedDetached(sig CommitCondensedSignal, isEntireEnabled bool, version string) {
+	if IsEnvOptedOut() {
+		return
+	}
+
+	payload := BuildCommitCondensedPayload(sig, isEntireEnabled, version)
+	if payload == nil {
+		return
+	}
+
+	if payloadJSON, err := json.Marshal(payload); err == nil {
+		spawnDetachedAnalytics(string(payloadJSON))
+	}
 }
 
 // SendEvents processes one or more event payloads in the detached subprocess.

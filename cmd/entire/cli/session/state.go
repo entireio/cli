@@ -334,7 +334,38 @@ type State struct {
 	// SkillEvents records explicit native skill signals observed during this session.
 	// Stored as sidecar metadata so consumers can collapse skill-related transcript events
 	// without mutating the raw agent transcript.
+	//
+	// This grows for the life of the session and is deliberately uncapped. It is
+	// also the durable half of the exactly-once contract for skill telemetry:
+	// extraction re-derives events from transcript offset 0 on every pass and
+	// dedupes against this ledger (strategy.appendNewSkillEvents), so an event
+	// whose entry never reached disk is announced twice. Trimming it therefore
+	// re-enables double-reporting for exactly the long sessions a cap would
+	// target.
+	//
+	// The cost is real but bounded, and it is paid on EVERY MutateSessionState —
+	// i.e. every hook, including PostToolUse — because state is read and written
+	// whole. Measured JSON round-trip: 0 events / 106 B / 1.6us; 10 / 6.0 KB /
+	// 42us; 50 / 29.7 KB / 201us; 200 / 119 KB / 785us, i.e. ~594 B per event
+	// and sub-millisecond at any realistic N. The steady-state dedupe rebuild is
+	// cheap by comparison: 13us at 200 existing events.
+	//
+	// So a 100 KB session state is expected, not a leak. If the envelope ever
+	// does need shrinking, the move is a narrower ledger — persist only the
+	// dedupe keys (~40 B/event) and keep the full events transient — not a
+	// truncation, which would break exactly-once.
 	SkillEvents []agent.SkillEvent `json:"skill_events,omitempty"`
+
+	// CommitCondensedSignalCheckpointID is the checkpoint ID of the last
+	// cli_commit_condensed telemetry signal this session snapshotted, the
+	// durable half of that signal's at-most-once contract. A `git commit
+	// --amend` re-runs PostCommit with the SAME trailer checkpoint ID (an
+	// ACTIVE session re-condenses unconditionally), so without this ledger one
+	// logical commit is counted twice in both halves of the miss-rate ratio.
+	// Persisted by the same state save that gates the emit, so a failed save
+	// retries cleanly; a crash between save and emit loses the row, which is
+	// the signal's accepted best-effort posture.
+	CommitCondensedSignalCheckpointID string `json:"commit_condensed_signal_checkpoint_id,omitempty"`
 
 	// Hook-provided session metrics (for agents like Cursor that report via hooks)
 	SessionDurationMs int64 `json:"session_duration_ms,omitempty"`
