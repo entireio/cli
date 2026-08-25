@@ -74,7 +74,7 @@ func manifestAssetNames(t *testing.T, manifestJSON string) []string {
 	return names
 }
 
-func taskPayloadFromTranscriptFile(ctx context.Context, t *testing.T, toolUseID, agentID, transcriptPath string) TaskPayload {
+func taskPayloadFromTranscriptFile(ctx context.Context, t *testing.T, toolUseID, transcriptPath string) TaskPayload {
 	t.Helper()
 	content, err := os.ReadFile(transcriptPath)
 	require.NoError(t, err)
@@ -86,7 +86,7 @@ func taskPayloadFromTranscriptFile(ctx context.Context, t *testing.T, toolUseID,
 	}
 	return TaskPayload{
 		ToolUseID:   toolUseID,
-		AgentID:     agentID,
+		AgentID:     "agent1",
 		Transcript:  redacted,
 		Assets:      assets,
 		StartedAt:   time.Now(),
@@ -120,7 +120,7 @@ func TestTaskBundle_PersistentWritesTranscriptAndAssetsTogether(t *testing.T) {
 	taskDir := cpID.Path() + "/tasks/toolu_bundle1/"
 
 	transcriptPath, img := taskImageTranscript(t, t.TempDir(), "bundled")
-	task := taskPayloadFromTranscriptFile(context.Background(), t, "toolu_bundle1", "agent1", transcriptPath)
+	task := taskPayloadFromTranscriptFile(context.Background(), t, "toolu_bundle1", transcriptPath)
 	writeSessionWithTask(t, store, cpID, task)
 
 	stored, ok := readBranchFile(t, store, taskDir+paths.AgentTranscriptFileName("agent1"))
@@ -154,7 +154,7 @@ func TestTaskBundle_PersistentRewriteWithoutImagesClearsAssets(t *testing.T) {
 
 	withImage, _ := taskImageTranscript(t, tmp, "stale")
 	write := func(transcriptPath string) {
-		task := taskPayloadFromTranscriptFile(context.Background(), t, "toolu_bundle2", "agent1", transcriptPath)
+		task := taskPayloadFromTranscriptFile(context.Background(), t, "toolu_bundle2", transcriptPath)
 		writeSessionWithTask(t, store, cpID, task)
 	}
 
@@ -275,7 +275,7 @@ func TestTaskBundle_PersistentFailedWriteLeavesStoredPairIntact(t *testing.T) {
 	transcriptPath, img := taskImageTranscript(t, t.TempDir(), "intact")
 	write := func(path string) {
 		if path == transcriptPath {
-			task := taskPayloadFromTranscriptFile(context.Background(), t, "toolu_bundle3", "agent1", path)
+			task := taskPayloadFromTranscriptFile(context.Background(), t, "toolu_bundle3", path)
 			writeSessionWithTask(t, store, cpID, task)
 			return
 		}
@@ -331,7 +331,7 @@ func TestTaskBundle_StoredBundleReinjectsByteExact(t *testing.T) {
 	original, err := os.ReadFile(transcriptPath)
 	require.NoError(t, err)
 
-	task := taskPayloadFromTranscriptFile(context.Background(), t, "toolu_bundle4", "agent1", transcriptPath)
+	task := taskPayloadFromTranscriptFile(context.Background(), t, "toolu_bundle4", transcriptPath)
 	writeSessionWithTask(t, store, cpID, task)
 
 	stored, ok := readBranchFile(t, store, taskDir+paths.AgentTranscriptFileName("agent1"))
