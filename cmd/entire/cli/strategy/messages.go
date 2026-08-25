@@ -63,6 +63,21 @@ func SanitizeSubjectContent(s string) string {
 	return stripSubjectControls(s)
 }
 
+// SanitizeTaskDescription redacts secrets and strips unsafe controls from task
+// descriptions persisted in checkpoint metadata. Unlike SanitizeSubjectContent
+// it does not apply commit-subject length limits — task.json is not a subject.
+func SanitizeTaskDescription(s string) string {
+	if utf8.RuneCountInString(s) > maxSubjectRedactionInput {
+		return omittedSubjectLabel
+	}
+	s = stripSubjectControls(s)
+	if s == "" {
+		return ""
+	}
+	s = redact.String(s)
+	return stripSubjectControls(s)
+}
+
 // stripSubjectControls removes characters that must never reach a commit
 // subject and folds every whitespace run into a single space, preserving normal
 // Unicode (including non-Latin scripts and emoji) otherwise.
