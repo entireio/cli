@@ -181,7 +181,7 @@ func buildCrossRepoContextInjection(ctx context.Context, ag agent.Agent, event *
 				return nil
 			})
 			if stateErr != nil && !errors.Is(stateErr, strategy.ErrStateNotFound) {
-				logging.Debug(ctx, "failed to record context injection backoff", "error", stateErr.Error())
+				logging.Debug(c, "failed to record context injection backoff", "error", stateErr.Error())
 			}
 		})
 	}
