@@ -1553,6 +1553,8 @@ type subagentCaptureOptions struct {
 // and completes its durable task record (#2058): files, labels, tokens, and the
 // declared transcript path land on the record; condensation later materializes
 // the transcript into the checkpoint. No shadow task step is written.
+//
+//nolint:maintidx // sequential orchestration of validation, transcript resolve, file detection, token calc, record write, and cleanup — splitting would obscure the flow
 func completeSubagentTaskRecord(logCtx context.Context, ag agent.Agent, event *agent.Event, opts subagentCaptureOptions) error {
 	// Prefer what the agent declared (Claude Code's SubagentStop, Codex, and
 	// Cursor all carry agent_transcript_path); see Event.SubagentTranscriptPath.
