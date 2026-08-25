@@ -198,6 +198,26 @@ func TestResolvePreTaskToolUseID_AmbiguousWithoutDescriptionNotFound(t *testing.
 	}
 }
 
+func TestResolvePreTaskToolUseID_AmbiguousWithDescriptionNotFound(t *testing.T) {
+	ctx := context.Background()
+	setupTestRepoForPreTask(t)
+
+	const sharedTask = "run the same task in parallel"
+	if err := CapturePreTaskStateWithMeta(ctx, "toolu_one", sharedTask); err != nil {
+		t.Fatalf("CapturePreTaskStateWithMeta(one) error = %v", err)
+	}
+	if err := CapturePreTaskStateWithMeta(ctx, "toolu_two", sharedTask); err != nil {
+		t.Fatalf("CapturePreTaskStateWithMeta(two) error = %v", err)
+	}
+
+	// Same task description on multiple active files: ambiguous, must not
+	// pick the most recently modified one.
+	_, found := ResolvePreTaskToolUseID(ctx, "", sharedTask)
+	if found {
+		t.Error("ResolvePreTaskToolUseID() found = true, want false (ambiguous with 2 matching descriptions)")
+	}
+}
+
 func TestResolvePreTaskToolUseID_DescriptionNoMatchNotFound(t *testing.T) {
 	ctx := context.Background()
 	setupTestRepoForPreTask(t)

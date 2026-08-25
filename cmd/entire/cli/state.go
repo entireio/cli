@@ -699,25 +699,6 @@ func FindActivePreTaskFile(ctx context.Context) (taskToolUseID string, found boo
 	return toolUseID, true
 }
 
-// preTaskFileCandidate pairs a discovered pre-task file's tool_use_id with its
-// modification time, for picking the most recent among several matches.
-type preTaskFileCandidate struct {
-	toolUseID string
-	modTime   time.Time
-}
-
-// mostRecent returns the candidate with the latest modification time.
-// Panics if candidates is empty — callers must check length first.
-func mostRecent(candidates []preTaskFileCandidate) string {
-	latest := candidates[0]
-	for _, c := range candidates[1:] {
-		if c.modTime.After(latest.modTime) {
-			latest = c
-		}
-	}
-	return latest.toolUseID
-}
-
 // ResolvePreTaskToolUseID resolves the tool_use_id that should key a
 // SubagentEnd event's LoadPreTaskState/SaveTaskStep/CleanupPreTaskState calls,
 // for agents whose "subagent ended" hook payload does not carry the ID that
@@ -736,11 +717,10 @@ func mostRecent(candidates []preTaskFileCandidate) string {
 //     already-correct path for agents like Claude Code that do report one).
 //  2. Else, taskDescription, if non-empty: scan pre-task-*.json files in
 //     .entire/tmp for ones whose stored TaskDescription matches exactly.
-//     Multiple matches (parallel subagents launched with the same task
-//     string) resolve to the most recently modified file. No match with a
-//     non-empty taskDescription is reported as not-found rather than falling
-//     back to case 3 — a task description that doesn't match anything is a
-//     stronger negative signal than having no description at all.
+//     Exactly one match wins; zero or multiple matches are reported as
+//     not-found rather than falling back to case 3 — a task description that
+//     doesn't match anything, or matches more than one file, is a stronger
+//     negative signal than having no description at all.
 //  3. Else (no ID, no description): if exactly one active pre-task file
 //     exists, it's unambiguous — use it.
 //
@@ -762,8 +742,8 @@ func ResolvePreTaskToolUseID(ctx context.Context, toolUseID, taskDescription str
 	}
 	defer root.Close()
 
-	var active []preTaskFileCandidate
-	var matching []preTaskFileCandidate
+	var active []string
+	var matching []string
 
 	for _, entry := range entries {
 		if entry.IsDir() {
@@ -771,10 +751,6 @@ func ResolvePreTaskToolUseID(ctx context.Context, toolUseID, taskDescription str
 		}
 		name := entry.Name()
 		if !strings.HasPrefix(name, preTaskFilePrefix) || !strings.HasSuffix(name, ".json") {
-			continue
-		}
-		info, err := entry.Info()
-		if err != nil {
 			continue
 		}
 		candidateID := strings.TrimSuffix(strings.TrimPrefix(name, preTaskFilePrefix), ".json")
@@ -788,8 +764,7 @@ func ResolvePreTaskToolUseID(ctx context.Context, toolUseID, taskDescription str
 			// a usable candidate, skip it rather than risk returning it below.
 			continue
 		}
-		candidate := preTaskFileCandidate{toolUseID: candidateID, modTime: info.ModTime()}
-		active = append(active, candidate)
+		active = append(active, candidateID)
 
 		if taskDescription == "" {
 			continue
@@ -805,19 +780,19 @@ func ResolvePreTaskToolUseID(ctx context.Context, toolUseID, taskDescription str
 			continue
 		}
 		if state.TaskDescription == taskDescription {
-			matching = append(matching, candidate)
+			matching = append(matching, candidateID)
 		}
 	}
 
 	if taskDescription != "" {
-		if len(matching) == 0 {
+		if len(matching) != 1 {
 			return "", false
 		}
-		return mostRecent(matching), true
+		return matching[0], true
 	}
 
 	if len(active) == 1 {
-		return active[0].toolUseID, true
+		return active[0], true
 	}
 
 	return "", false
