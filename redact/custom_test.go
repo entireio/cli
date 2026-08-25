@@ -179,6 +179,38 @@ func TestConfigureCustomRules_SamplesFailEmitWarnButKeepRule(t *testing.T) {
 	}
 }
 
+// TestConfigureCustomRules_CompileErrorDoesNotLogPattern pins the privacy
+// contract for compile-failure warnings: regexp error strings quote the
+// pattern verbatim, and these warnings persist to .entire/logs/ and ship in
+// doctor bundles — a pasted-literal-secret-as-pattern must not leak there.
+func TestConfigureCustomRules_CompileErrorDoesNotLogPattern(t *testing.T) {
+	resetCustomRulesForTest(t)
+
+	var buf bytes.Buffer
+	restore := captureSlogForTest(&buf)
+	defer restore()
+
+	// Trailing "(" specifically: Go's missing-closing-paren error quotes the
+	// FULL pattern ("missing closing ): `SECRET_LITERAL_hunter2(`"), unlike
+	// the missing-bracket error, which quotes only the offending "[" — a
+	// bracket fixture would pass even against unsanitized err.Error() logging.
+	const leakyPattern = `SECRET_LITERAL_hunter2(`
+	ConfigureCustomRules(CustomRulesConfig{
+		Inline: map[string]string{"oops": leakyPattern},
+	})
+
+	logs := buf.String()
+	if !strings.Contains(logs, "skipping invalid custom_redactions pattern") {
+		t.Fatalf("expected a compile warning, got logs: %s", logs)
+	}
+	if strings.Contains(logs, "SECRET_LITERAL_hunter2") {
+		t.Errorf("compile warning leaked the raw pattern: %s", logs)
+	}
+	if !strings.Contains(logs, `"label":"oops"`) {
+		t.Errorf("warning must still identify the failing rule by label: %s", logs)
+	}
+}
+
 func TestConfigureCustomRules_SampleMismatchWarnDoesNotLogRawInput(t *testing.T) {
 	resetCustomRulesForTest(t)
 

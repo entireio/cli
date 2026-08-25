@@ -149,8 +149,8 @@ func euClusters() []coreapi.Cluster {
 	}
 }
 
-// clustersWithSlugs is keyed by Slug, the join the owner/repo path uses
-// (cellTargetForClusterSlug / matchClusterBySlug) against a RepoPlacement's
+// clustersWithSlugs is keyed by Slug, the first join the owner/repo path uses
+// (cellTargetForPlacement / matchClusterBySlug) against a RepoPlacement's
 // ClusterSlug.
 func clustersWithSlugs() []coreapi.Cluster {
 	return []coreapi.Cluster{
@@ -163,8 +163,13 @@ func clustersWithSlugs() []coreapi.Cluster {
 
 // placementFixture is one entry of a RepoIndexEntry.Placements list.
 type placementFixture struct {
-	id     string
-	slug   string
+	id   string
+	slug string
+	// cell is the placement's Cell name, the second join key
+	// cellTargetForPlacement falls back to. Defaults to slug, which is the
+	// common case; set it explicitly to exercise a slug that is missing from
+	// the catalog.
+	cell   string
 	status coreapi.RepoPlacementStatus
 }
 
@@ -180,10 +185,14 @@ func repoIndexFixture(fullName, processingID string, placements ...placementFixt
 		if status == "" {
 			status = coreapi.RepoPlacementStatusReady
 		}
+		cell := p.cell
+		if cell == "" {
+			cell = p.slug
+		}
 		out = append(out, coreapi.RepoPlacement{
 			ID:          p.id,
 			ClusterSlug: p.slug,
-			Cell:        p.slug,
+			Cell:        cell,
 			Status:      status,
 		})
 	}
@@ -376,7 +385,7 @@ func TestResolveRepoCellTarget_OwnerRepo_JurisdictionLowercased(t *testing.T) {
 // processingResolutionErrorCase names one way processing-placement
 // resolution can fail. Shared between resolveRepoCellTarget's owner/repo path
 // and resolveRepoCellPlacement, since both now go through
-// resolveProcessingPlacement + cellTargetForClusterSlug.
+// resolveProcessingPlacement + cellTargetForPlacement.
 type processingResolutionErrorCase struct {
 	name        string
 	repos       *coreapi.ListReposOutputBody
@@ -536,6 +545,28 @@ func TestResolveRepoCellPlacement_PairsIDWithItsOwnCell(t *testing.T) {
 	}
 }
 
+// Both placement resolvers share one ID matcher (placementByID), so a
+// whitespace-padded placement id resolves the same way here as in the search
+// fan-out. Before they shared it, this resolver compared a trimmed
+// primaries.processing against an untrimmed p.ID and reported the repo as
+// having no processing placement at all. RepoID must come back trimmed: it
+// becomes a path segment in entire-api URLs.
+func TestResolveRepoCellPlacement_ToleratesPaddedPlacementID(t *testing.T) {
+	withFakeCellCore(t, &fakeCellCore{
+		repos: reposOutput(repoIndexFixture("acme/widget", "mirror-eu",
+			placementFixture{id: " mirror-eu ", slug: euClusterSlug},
+		)),
+		clusters: clustersWithSlugs(),
+	})
+	got, err := resolveRepoCellPlacement(context.Background(), "acme", "widget")
+	if err != nil {
+		t.Fatalf("resolveRepoCellPlacement: %v", err)
+	}
+	if got.RepoID != "mirror-eu" {
+		t.Errorf("RepoID = %q, want the trimmed mirror-eu", got.RepoID)
+	}
+}
+
 // A multi-homed repo must resolve to its PROCESSING placement specifically,
 // not merely "some" placement (the pre-fix behavior in resolveRepoCellTarget
 // was to refuse; resolveRepoCellPlacement's pre-fix behavior was to take
@@ -689,5 +720,75 @@ func TestRequiredCellResolveTimeoutIsItsOwnBudget(t *testing.T) {
 	if requiredCellResolveTimeout <= cellResolveTimeout {
 		t.Errorf("requiredCellResolveTimeout (%s) should be more patient than the best-effort cellResolveTimeout (%s): a timeout here fails the command instead of degrading",
 			requiredCellResolveTimeout, cellResolveTimeout)
+	}
+}
+
+// A placement whose ClusterSlug is absent from the catalog must still resolve
+// via its Cell name, the way the repo-SET path (resolveCellBaseURLs ->
+// matchClusterByCellInURL) already does. Before this tier existed, the
+// single-repo path hard-failed on exactly the catalog gap the fan-out was
+// written to tolerate, making `entire trail`/`experts`/`explain --repo`
+// strictly narrower than `entire search` on the same data.
+func TestResolveRepoCellTarget_OwnerRepo_FallsBackToCellNameWhenSlugMissing(t *testing.T) {
+	withFakeCellCore(t, &fakeCellCore{
+		repos: reposOutput(repoIndexFixture("acme/widget", "placement-1",
+			placementFixture{id: "placement-1", slug: "slug-not-in-catalog", cell: "aws-ap-south-1"},
+		)),
+		clusters: clustersWithSlugs(),
+	})
+
+	target, err := resolveRepoCellTarget(context.Background(), "acme/widget", "")
+	if err != nil {
+		t.Fatalf("resolveRepoCellTarget: %v", err)
+	}
+	if target == nil {
+		t.Fatal("expected a target resolved via the placement's cell name")
+	}
+	if target.Jurisdiction != "ap-south" {
+		t.Errorf("jurisdiction = %q, want ap-south (the cluster whose apiUrl host carries the cell name)", target.Jurisdiction)
+	}
+}
+
+// The slug join still wins when it matches, so adding the cell tier cannot
+// silently reroute a placement whose slug is in the catalog.
+func TestResolveRepoCellTarget_OwnerRepo_PrefersSlugOverCellName(t *testing.T) {
+	withFakeCellCore(t, &fakeCellCore{
+		repos: reposOutput(repoIndexFixture("acme/widget", "placement-1",
+			// Slug says EU; the cell name would match the ap-south cluster's
+			// apiUrl host. Slug must win.
+			placementFixture{id: "placement-1", slug: euClusterSlug, cell: "aws-ap-south-1"},
+		)),
+		clusters: clustersWithSlugs(),
+	})
+
+	target, err := resolveRepoCellTarget(context.Background(), "acme/widget", "")
+	if err != nil {
+		t.Fatalf("resolveRepoCellTarget: %v", err)
+	}
+	if target.Jurisdiction != "eu" {
+		t.Errorf("jurisdiction = %q, want eu (the slug match, not the cell-name fallback)", target.Jurisdiction)
+	}
+}
+
+// Neither join matching is still a loud failure: the deliberate difference from
+// the fan-out, which degrades to jurisdiction routing here. That degradation is
+// the wrong-region "success" this resolver exists to refuse.
+func TestResolveRepoCellTarget_OwnerRepo_NoJurisdictionFallback(t *testing.T) {
+	withFakeCellCore(t, &fakeCellCore{
+		repos: reposOutput(repoIndexFixture("acme/widget", "placement-1",
+			placementFixture{id: "placement-1", slug: "slug-not-in-catalog", cell: "cell-not-in-any-url"},
+		)),
+		clusters: clustersWithSlugs(),
+	})
+
+	target, err := resolveRepoCellTarget(context.Background(), "acme/widget", "")
+	if err == nil {
+		t.Fatalf("expected an error rather than jurisdiction-default routing, got target %+v", target)
+	}
+	if target != nil {
+		t.Errorf("target = %+v, want nil", target)
+	}
+	if !strings.Contains(err.Error(), "cell-not-in-any-url") {
+		t.Errorf("error = %q, want it to name the cell it could not place", err)
 	}
 }

@@ -25,7 +25,7 @@ func ShouldCheckCheckpointPolicyWarning(cmd *cobra.Command) bool {
 
 func isCheckpointPolicyWarningExcludedCommand(name string) bool {
 	switch name {
-	case "hooks", "__send_analytics", "__refresh_trail_enablement", "curl-bash-post-install":
+	case "hooks", "__send_analytics", "__refresh_trail_enablement", "curl-bash-post-install", "__sweep_sessions":
 		return true
 	default:
 		return false

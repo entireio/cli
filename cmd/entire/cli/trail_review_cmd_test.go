@@ -96,7 +96,7 @@ func TestResolveTrailReviewTargetRejectsUnsupportedForge(t *testing.T) {
 	}
 }
 
-func TestTrailReviewCommentsPathPreservesSharedBFFQueryContract(t *testing.T) {
+func TestTrailReviewCommentsPathUsesReviewQueryContract(t *testing.T) {
 	t.Parallel()
 	got := trailReviewCommentsPath("trail id/with slash", trailReviewListOptions{
 		Status:           "open,resolved",
