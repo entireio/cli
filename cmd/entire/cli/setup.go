@@ -609,7 +609,7 @@ func applyAgentChanges(ctx context.Context, w io.Writer, selectedAgentNames []st
 	var successfullyAddedAgents []agent.Agent
 	for _, ag := range addedAgents {
 		if _, err := setupAgentHooksAndCloud(ctx, w, ag, opts.ForceHooks); err != nil {
-			errs = append(errs, fmt.Errorf("failed to setup %s hooks: %w", ag.Type(), err))
+			errs = append(errs, err)
 		} else {
 			successfullyAddedAgents = append(successfullyAddedAgents, ag)
 		}
@@ -618,7 +618,7 @@ func applyAgentChanges(ctx context.Context, w io.Writer, selectedAgentNames []st
 	var successfullyReinstalledAgents []agent.Agent
 	for _, ag := range reinstalledAgents {
 		if _, err := setupAgentHooksAndCloud(ctx, w, ag, opts.ForceHooks); err != nil {
-			errs = append(errs, fmt.Errorf("failed to setup %s hooks: %w", ag.Type(), err))
+			errs = append(errs, err)
 		} else {
 			successfullyReinstalledAgents = append(successfullyReinstalledAgents, ag)
 		}
@@ -636,6 +636,9 @@ func applyAgentChanges(ctx context.Context, w io.Writer, selectedAgentNames []st
 			errs = append(errs, fmt.Errorf("failed to remove %s hooks: %w", ag.Type(), err))
 		} else {
 			uninstalledAgents = append(uninstalledAgents, ag)
+		}
+		if err := removeCloudCLIInstall(ctx, ag); err != nil {
+			errs = append(errs, err)
 		}
 	}
 
@@ -1661,10 +1664,8 @@ func uninstallDeselectedAgentHooks(ctx context.Context, w io.Writer, selectedAge
 		} else {
 			fmt.Fprintf(w, "Removed %s hooks\n", ag.Type())
 		}
-		if installer, ok := agent.AsCloudCLIInstaller(ag); ok {
-			if err := installer.RemoveCloudCLIInstall(ctx); err != nil {
-				errs = append(errs, fmt.Errorf("failed to remove %s cloud environment wiring: %w", ag.Type(), err))
-			}
+		if err := removeCloudCLIInstall(ctx, ag); err != nil {
+			errs = append(errs, err)
 		}
 	}
 	return errors.Join(errs...)
@@ -1710,6 +1711,17 @@ func setupCloudCLIInstall(ctx context.Context, w io.Writer, ag agent.Agent) erro
 	}
 	if result.Message != "" {
 		fmt.Fprintln(w, result.Message)
+	}
+	return nil
+}
+
+func removeCloudCLIInstall(ctx context.Context, ag agent.Agent) error {
+	installer, ok := agent.AsCloudCLIInstaller(ag)
+	if !ok {
+		return nil
+	}
+	if err := installer.RemoveCloudCLIInstall(ctx); err != nil {
+		return fmt.Errorf("failed to remove %s cloud environment wiring: %w", ag.Type(), err)
 	}
 	return nil
 }
@@ -2575,10 +2587,8 @@ func removeAgentHooks(ctx context.Context, w io.Writer) error {
 		} else if wasInstalled {
 			fmt.Fprintf(w, "  Removed %s hooks\n", ag.Type())
 		}
-		if installer, ok := agent.AsCloudCLIInstaller(ag); ok {
-			if err := installer.RemoveCloudCLIInstall(ctx); err != nil {
-				errs = append(errs, err)
-			}
+		if err := removeCloudCLIInstall(ctx, ag); err != nil {
+			errs = append(errs, err)
 		}
 	}
 	return errors.Join(errs...)

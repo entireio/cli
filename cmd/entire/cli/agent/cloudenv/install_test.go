@@ -3,7 +3,6 @@ package cloudenv
 import (
 	"os"
 	"path/filepath"
-	"runtime"
 	"testing"
 )
 
@@ -90,7 +89,7 @@ func TestWriteInstallScript_Idempotent(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Windows does not set execute bits, so the mode check is Unix-only.
-	if runtime.GOOS != "windows" && info.Mode()&0o111 == 0 {
+	if !onWindows() && info.Mode()&0o111 == 0 {
 		t.Fatalf("install-cli.sh is not executable: %v", info.Mode())
 	}
 	if err := WriteInstallScript(ctx); err != nil {

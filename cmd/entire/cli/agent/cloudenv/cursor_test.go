@@ -79,6 +79,8 @@ func TestEnsureCursorEnvironment_AppendsInstall(t *testing.T) {
 	if res2.Changed {
 		t.Fatal("second ensure should be a no-op")
 	}
+
+	assertModePreserved(t, filepath.Join(envDir, "environment.json"), 0o600)
 }
 
 func TestEnsureCursorEnvironment_SkipsWhenReferencedScriptInstallsEntire(t *testing.T) {
@@ -142,6 +144,8 @@ func TestRemoveCursorEnvironment_StripsStepOnly(t *testing.T) {
 	if _, ok := raw["name"]; !ok {
 		t.Fatal("name field dropped")
 	}
+
+	assertModePreserved(t, filepath.Join(envDir, "environment.json"), 0o600)
 }
 
 func TestEnsureCursorEnvironment_MalformedJSONDoesNotFail(t *testing.T) {
@@ -198,6 +202,24 @@ func TestCommittedCursorEnvironmentAlreadyInstallsEntire(t *testing.T) {
 	if !MentionsEntireInstall(install, root) {
 		t.Fatalf("this repo's %s install %q does not put entire on PATH; Cloud Agent hooks would no-op",
 			EnvironmentJSONRel, install)
+	}
+}
+
+func onWindows() bool {
+	return runtime.GOOS == "windows"
+}
+
+func assertModePreserved(t *testing.T, path string, want os.FileMode) {
+	t.Helper()
+	if onWindows() {
+		return
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != want {
+		t.Fatalf("%s mode = %o, want %o", path, info.Mode().Perm(), want)
 	}
 }
 

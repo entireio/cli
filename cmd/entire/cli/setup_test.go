@@ -3577,6 +3577,51 @@ func TestEnableCmd_CursorPatchesExistingEnvironmentJSON(t *testing.T) {
 	}
 }
 
+func TestApplyAgentChanges_RemovesCursorCloudInstall(t *testing.T) {
+	setupTestRepo(t)
+	testutil.WriteFile(t, ".", "f.txt", "init")
+	testutil.GitAdd(t, ".", "f.txt")
+	testutil.GitCommit(t, ".", "init")
+
+	if err := os.MkdirAll(".cursor", 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(".cursor/environment.json", []byte(`{"name":"app","install":"npm ci"}`+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := newEnableCmd()
+	var stdout, stderr bytes.Buffer
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&stderr)
+	cmd.SetArgs([]string{"--yes", "--agent", "cursor"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("enable: %v\nstdout: %s\nstderr: %s", err, stdout.String(), stderr.String())
+	}
+
+	var buf bytes.Buffer
+	err := applyAgentChanges(context.Background(), &buf, []string{}, []types.AgentName{agent.AgentNameCursor}, EnableOptions{})
+	if err != nil {
+		t.Fatalf("applyAgentChanges: %v", err)
+	}
+
+	data, err := os.ReadFile(".cursor/environment.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		t.Fatal(err)
+	}
+	var install string
+	if err := json.Unmarshal(raw["install"], &install); err != nil {
+		t.Fatal(err)
+	}
+	if install != "npm ci" {
+		t.Fatalf("deselecting Cursor left install = %q, want %q", install, "npm ci")
+	}
+}
+
 func TestEnableCmd_CursorDoesNotCreateEnvironmentJSON(t *testing.T) {
 	setupTestRepo(t)
 	testutil.WriteFile(t, ".", "f.txt", "init")

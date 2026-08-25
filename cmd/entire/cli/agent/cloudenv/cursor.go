@@ -67,8 +67,8 @@ func EnsureCursorEnvironment(ctx context.Context) (CursorEnvironmentResult, erro
 	if err != nil {
 		return CursorEnvironmentResult{}, fmt.Errorf("marshal %s: %w", EnvironmentJSONRel, err)
 	}
-	if err := os.WriteFile(envPath, output, 0o644); err != nil { //nolint:gosec // project JSON, same as hooks.json
-		return CursorEnvironmentResult{}, fmt.Errorf("write %s: %w", EnvironmentJSONRel, err)
+	if err := writeCursorEnv(envPath, output); err != nil {
+		return CursorEnvironmentResult{}, err
 	}
 	return CursorEnvironmentResult{
 		Changed: true,
@@ -104,7 +104,15 @@ func RemoveCursorEnvironment(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("marshal %s: %w", EnvironmentJSONRel, err)
 	}
-	if err := os.WriteFile(envPath, output, 0o644); err != nil { //nolint:gosec // project JSON
+	return writeCursorEnv(envPath, output)
+}
+
+func writeCursorEnv(envPath string, output []byte) error {
+	mode := os.FileMode(0o644)
+	if info, err := os.Stat(envPath); err == nil {
+		mode = info.Mode().Perm()
+	}
+	if err := os.WriteFile(envPath, output, mode); err != nil {
 		return fmt.Errorf("write %s: %w", EnvironmentJSONRel, err)
 	}
 	return nil
