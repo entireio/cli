@@ -497,6 +497,16 @@ type Response struct {
 	Reranked *bool       `json:"reranked,omitempty"`
 	Counts   *TypeCounts `json:"counts,omitempty"`
 
+	// Completeness metadata, same names and semantics as the BFF's merged
+	// response (entire.io api/src/routes/search.ts mergeCellResponses) so web
+	// and CLI surface identical signals (ENT-1777). Parsed from each cell and
+	// re-synthesized by the CLI's own merge.
+	Partial            bool            `json:"partial,omitempty"`
+	Truncated          bool            `json:"truncated,omitempty"`
+	CoverageIncomplete bool            `json:"coverage_incomplete,omitempty"`
+	TruncatedTypes     map[string]bool `json:"truncated_types,omitempty"`
+	CountsLowerBound   map[string]bool `json:"counts_lower_bound,omitempty"`
+
 	// Warnings are client-side completeness notes (e.g. a truncated repo
 	// index or a failed region in a cross-cell fan-out) surfaced to the user
 	// on stderr. Never part of the wire format.

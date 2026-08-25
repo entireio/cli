@@ -112,10 +112,11 @@ That budget bounds only the eager condense; marking the session ENDED is left
 unbounded so the cheap step is never the one given up on. Unbounded is not
 guaranteed, though: it runs under the session flock, so a concurrent condense can
 push it past the cap and get the process tree killed — the exited-owner sweep
-reclaims those. A curtailed condense is otherwise safe (`FullyCondensed` stays
-false and PostCommit retries), except between the v1 checkpoint write and the
-state save, where a kill leaves a committed checkpoint whose bookkeeping never
-advanced and PostCommit writes a second one over the same transcript range.
+reclaims those. A curtailed condense leaves `FullyCondensed` false: PostCommit
+handles sessions with pending files, while doctor retries no-file ENDED
+sessions. If a kill lands between the checkpoint write and state save, the
+persisted `CondensationAttemptID` makes the retry reuse the same checkpoint ID
+instead of duplicating the transcript range.
 
 ### Hook Input (stdin JSON)
 

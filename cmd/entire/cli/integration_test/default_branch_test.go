@@ -4,8 +4,6 @@ package integration
 
 import (
 	"testing"
-
-	"github.com/entireio/cli/cmd/entire/cli/paths"
 )
 
 // TestDefaultBranch_WorksOnMain tests that the strategy works on main branch.
@@ -121,12 +119,12 @@ func TestDefaultBranch_PostTaskWorksOnMain(t *testing.T) {
 		t.Fatalf("SimulatePostTask failed: %v", err)
 	}
 
-	shadowBranch := env.GetShadowBranchName()
-	if !env.BranchExists(shadowBranch) {
-		t.Fatalf("shadow branch %s should exist after task checkpoint on main", shadowBranch)
+	state, err := env.GetSessionState(session.ID)
+	if err != nil {
+		t.Fatalf("GetSessionState failed: %v", err)
 	}
-	taskCheckpointPath := ".entire/metadata/" + session.ID + "/tasks/" + taskID + "/" + paths.CheckpointFileName
-	if !env.FileExistsInBranch(shadowBranch, taskCheckpointPath) {
-		t.Errorf("task checkpoint %s should exist on shadow branch %s", taskCheckpointPath, shadowBranch)
+	rec := state.FindTaskRecord(taskID)
+	if rec == nil || rec.CompletedAt.IsZero() || !containsFile(rec.Files, "task.txt") {
+		t.Errorf("expected a completed task record carrying task.txt on main, got %+v", rec)
 	}
 }

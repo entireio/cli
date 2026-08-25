@@ -81,6 +81,8 @@ func NewAuthenticatedEntireAPICellClient(ctx context.Context, insecureHTTP bool,
 var newTrailAPIClient = func(ctx context.Context, insecureHTTP bool, fullName string) (*api.Client, error) {
 	client, err := NewAuthenticatedEntireAPICellClient(ctx, insecureHTTP, fullName, "")
 	if errors.Is(err, clusterdiscovery.ErrNoAuthContext) {
+		// Preserve cluster discovery's detailed host/context hint while restoring
+		// the sentinel trail commands use for the standard login UX.
 		return nil, fmt.Errorf("%w: %w", auth.ErrNotLoggedIn, err)
 	}
 	if err != nil {

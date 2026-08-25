@@ -110,6 +110,10 @@ func searchTranscriptInProjectDirs(sessionID string, ag agentpkg.Agent) (string,
 // where a subagent's edits never appear.
 //
 // An empty agentID never resolves — agent-.jsonl is not a real transcript.
+//
+// strategy.resolveTaskTranscriptPath duplicates this exact layout logic (the
+// strategy package cannot import cli, so it cannot call this function
+// directly) — a layout change here must be mirrored there.
 func ResolveAgentTranscriptPath(transcriptDir, sessionID, agentID string) string {
 	if agentID == "" {
 		return ""

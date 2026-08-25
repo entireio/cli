@@ -7,6 +7,7 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"slices"
 	"strings"
 	"time"
 
@@ -23,6 +24,7 @@ var (
 	_ agent.ModelExtractor         = (*ClaudeCodeAgent)(nil)
 	_ agent.SkillEventExtractor    = (*ClaudeCodeAgent)(nil)
 	_ agent.SubagentAwareExtractor = (*ClaudeCodeAgent)(nil)
+	_ agent.ToolInvocationScanner  = (*ClaudeCodeAgent)(nil)
 	_ agent.HookResponseWriter     = (*ClaudeCodeAgent)(nil)
 	_ agent.ContextInjector        = (*ClaudeCodeAgent)(nil)
 )
@@ -64,12 +66,13 @@ func (c *ClaudeCodeAgent) HookNames() []string {
 		HookNamePreTask,
 		HookNamePostTask,
 		HookNamePostTodo,
+		HookNameSubagentStop,
 	}
 }
 
 // ParseHookEvent translates a Claude Code hook into a normalized lifecycle Event.
 // Returns nil if the hook has no lifecycle significance.
-func (c *ClaudeCodeAgent) ParseHookEvent(_ context.Context, hookName string, stdin io.Reader) (*agent.Event, error) {
+func (c *ClaudeCodeAgent) ParseHookEvent(ctx context.Context, hookName string, stdin io.Reader) (*agent.Event, error) {
 	switch hookName {
 	case HookNameSessionStart:
 		return c.parseSessionInfoEvent(stdin, agent.SessionStart)
@@ -83,6 +86,8 @@ func (c *ClaudeCodeAgent) ParseHookEvent(_ context.Context, hookName string, std
 		return c.parseSubagentStart(stdin)
 	case HookNamePostTask:
 		return c.parseSubagentEnd(stdin)
+	case HookNameSubagentStop:
+		return c.parseSubagentStop(ctx, stdin)
 	case HookNamePostTodo:
 		// PostTodo is Claude-specific; handled outside the generic dispatcher.
 		return nil, nil //nolint:nilnil // nil event = no lifecycle action
@@ -174,11 +179,74 @@ func (c *ClaudeCodeAgent) parseSubagentEnd(stdin io.Reader) (*agent.Event, error
 		ToolUseID:  raw.ToolUseID,
 		ToolInput:  raw.ToolInput,
 		Timestamp:  time.Now(),
+		// Final stays false: PostToolUse fires at the background launch stub,
+		// seconds after launch, not at true completion. SubagentStop
+		// (parseSubagentStop) is the true-completion signal.
+		Final: false,
 	}
 	if raw.ToolResponse.AgentID != "" {
 		event.SubagentID = raw.ToolResponse.AgentID
 	}
 	return event, nil
+}
+
+// parseSubagentStop parses Claude Code's SubagentStop hook, the true
+// completion signal for a subagent — including background subagents, which
+// finish long after the launch-time PostToolUse (post-task) stub fires. It
+// translates into the same agent.SubagentEnd event parseSubagentEnd produces,
+// but marked Final so downstream lifecycle code captures now rather than
+// deferring, and carrying the subagent's own transcript path directly from
+// the payload (authoritative) instead of leaving it to be resolved.
+func (c *ClaudeCodeAgent) parseSubagentStop(ctx context.Context, stdin io.Reader) (*agent.Event, error) {
+	rawBytes, err := agent.ReadHookInputRaw(stdin)
+	if err != nil {
+		return nil, fmt.Errorf("read hook input: %w", err)
+	}
+
+	// Debug log of the RAW payload's key names (never values), not the parsed
+	// struct's non-empty fields: a parsed-struct view can't tell key-absent
+	// from key-present-but-empty, and can't reveal an alternate key spelling
+	// in the real settings-file payload. Removable once real-payload key sets
+	// have been observed and the parse below is confirmed against them.
+	var rawMap map[string]json.RawMessage
+	if err := json.Unmarshal(rawBytes, &rawMap); err == nil {
+		keys := make([]string, 0, len(rawMap))
+		for k := range rawMap {
+			keys = append(keys, k)
+		}
+		slices.Sort(keys)
+		logCtx := logging.WithComponent(ctx, "agent.claudecode")
+		logging.Debug(logCtx, "subagent-stop payload keys present",
+			slog.Any("keys", keys),
+		)
+	}
+
+	var raw subagentStopHookInputRaw
+	if err := json.Unmarshal(rawBytes, &raw); err != nil {
+		return nil, fmt.Errorf("failed to parse hook input: %w", err)
+	}
+
+	// Tripwire for the defensive-parse assumption: a well-formed SubagentStop
+	// payload always carries these two fields, so an empty value here means
+	// the payload shape diverged from what this parse expects (e.g. an
+	// alternate key spelling — see the key-name log above).
+	if raw.ToolUseID == "" || raw.SessionID == "" {
+		logging.Warn(logging.WithComponent(ctx, "agent.claudecode"),
+			"subagent-stop payload missing tool_use_id or session_id — structurally impossible for a well-formed payload",
+			slog.Bool("has_tool_use_id", raw.ToolUseID != ""),
+			slog.Bool("has_session_id", raw.SessionID != ""))
+	}
+
+	return &agent.Event{
+		Type:                   agent.SubagentEnd,
+		SessionID:              raw.SessionID,
+		SessionRef:             raw.TranscriptPath,
+		ToolUseID:              raw.ToolUseID,
+		SubagentID:             raw.AgentID,
+		SubagentTranscriptPath: raw.AgentTranscriptPath,
+		Final:                  true,
+		Timestamp:              time.Now(),
+	}, nil
 }
 
 // --- Transcript flush sentinel ---

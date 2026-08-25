@@ -192,17 +192,21 @@ func TestSafelyAdvanceLocalRef_LogsTheReplay(t *testing.T) {
 	run("checkout", "main")
 
 	t.Chdir(cloneDir)
-	require.NoError(t, logging.Init(t.Context(), ""))
+	l, logErr := logging.New(logging.Config{Dir: filepath.Join(cloneDir, logging.LogsDir)})
+	require.NoError(t, logErr)
 	// Registered immediately: an assertion failing before the explicit flush below
-	// would otherwise leave the process-global logger holding the file handle.
-	// Close is safe to call twice.
-	t.Cleanup(logging.Close)
+	// would otherwise leave the logger holding the file handle. Close is safe to
+	// call twice.
+	t.Cleanup(func() { _ = l.Close() })
+	// The root pre-run installs this in production; the ref writer reads it from
+	// the context, so the test has to hand it over the same way.
+	logCtx := logging.WithLogger(t.Context(), l)
 
 	repo, err := git.PlainOpen(cloneDir)
 	require.NoError(t, err)
 	localRefName := plumbing.NewBranchReferenceName(paths.MetadataBranchName)
-	require.NoError(t, SafelyAdvanceLocalRef(t.Context(), repo, localRefName, plumbing.NewHash(remoteTip)))
-	logging.Close() // flush the buffered writer
+	require.NoError(t, SafelyAdvanceLocalRef(logCtx, repo, localRefName, plumbing.NewHash(remoteTip)))
+	require.NoError(t, l.Close()) // flush the buffered writer
 
 	data, err := os.ReadFile(filepath.Join(cloneDir, logging.LogsDir, "entire.log"))
 	require.NoError(t, err)
