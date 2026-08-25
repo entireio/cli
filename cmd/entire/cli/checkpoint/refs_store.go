@@ -361,16 +361,14 @@ func (s *gitRefsStore) backfillSummary(ctx context.Context, checkpointID id.Chec
 // the same checkpoint condensing while this runs advances the very ref this
 // write targets. Compare-and-swap plus rebuild-on-the-new-tip, so the loser
 // stacks on the winner instead of erasing it.
+//
+// Locking matches GitStore.backfillEntityDeltas: strategy.runEntityDeltasBackfill
+// already holds the shared entity-deltas lock for the whole store.Write call,
+// so re-acquiring here would self-deadlock on the git-refs backend.
 func (s *gitRefsStore) backfillEntityDeltas(ctx context.Context, req SessionEntityDeltas) error {
 	if err := ctx.Err(); err != nil {
 		return err //nolint:wrapcheck // Propagating context cancellation
 	}
-
-	release, err := acquireEntityDeltasLockFromRepo(ctx, s.repo)
-	if err != nil {
-		return fmt.Errorf("serialize entity deltas backfill: %w", err)
-	}
-	defer release()
 
 	return writeWithRefRaceRetry(ctx, "entity deltas backfill", func() error {
 		return s.tryBackfillEntityDeltas(ctx, req)

@@ -43,7 +43,7 @@ func acquireEntityDeltasLockFromRepo(ctx context.Context, repo *git.Repository) 
 func entityDeltasLockPath(ctx context.Context, worktreePath string) (string, error) {
 	commonDir, err := gitdir.CommonDirForWorktree(ctx, worktreePath)
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("resolve git common dir: %w", err)
 	}
 	return filepath.Join(commonDir, entityDeltasLockFile), nil
 }
