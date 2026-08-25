@@ -2597,7 +2597,7 @@ func TestMigrateEntireHooksFromHuskyOwnedDir_MixedLegacyState(t *testing.T) {
 	withBackup := "prepare-commit-msg"
 	withoutBackup := "commit-msg"
 	alreadyStub := "post-commit"
-	missing := "pre-push"
+	missing := gitHookNames[4] // pre-push
 
 	legacy := "#!/bin/sh\n# " + entireHookMarker + "\nentire hooks git x\n"
 	if err := os.WriteFile(filepath.Join(owned, withBackup), []byte(legacy), 0o755); err != nil {
@@ -2830,7 +2830,7 @@ func TestStripDelimitedBlock_IgnoresEndMarkerInsideManagedBody(t *testing.T) {
 
 func TestStripEntireManagedBlock_RemovesPrePushExitWrapper(t *testing.T) {
 	user := "#!/bin/sh\necho lint\n"
-	injected := injectEntireManagedBlock("pre-push", user, "# entire body\n")
+	injected := injectEntireManagedBlock(gitHookNames[4], user, "# entire body\n")
 	got := stripEntireManagedBlock(injected)
 	if got != user {
 		t.Fatalf("round-trip pre-push managed inject:\ngot:\n%q\nwant:\n%q", got, user)
