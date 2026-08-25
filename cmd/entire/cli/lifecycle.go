@@ -1785,7 +1785,7 @@ func completeSubagentTaskRecord(logCtx context.Context, ag agent.Agent, event *a
 			slog.String("tool_use_id", event.ToolUseID))
 	}
 
-	if !(opts.resolvedAmbiguously && event.TaskDescription == "") {
+	if !opts.resolvedAmbiguously || event.TaskDescription != "" {
 		_ = CleanupPreTaskState(logCtx, event.ToolUseID) //nolint:errcheck // best-effort cleanup
 	}
 	return nil
