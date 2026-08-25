@@ -2,7 +2,6 @@ package telemetry
 
 import (
 	"encoding/json"
-	"os"
 	"runtime"
 	"time"
 )
@@ -72,7 +71,7 @@ func BuildCheckpointPolicyBlockedPayload(event CheckpointPolicyBlockedEvent, ver
 // responsible for the settings.Telemetry opt-in check. Honors
 // ENTIRE_TELEMETRY_OPTOUT like the other trackers.
 func TrackCheckpointPolicyBlocked(event CheckpointPolicyBlockedEvent, version string) {
-	if os.Getenv("ENTIRE_TELEMETRY_OPTOUT") != "" {
+	if IsEnvOptedOut() {
 		return
 	}
 

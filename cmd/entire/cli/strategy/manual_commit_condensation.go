@@ -116,6 +116,16 @@ type condenseOpts struct {
 	// and updateCombinedAttributionForCheckpoint writing attribution under the
 	// same non-existent ID.
 	reconcileInterrupted bool
+
+	// searchProbeAllowed gates the telemetry-only search-usage transcript scan
+	// (detectSearchUsage). nil or false means don't scan: the probe then stays
+	// its zero value, which the payload layer refuses to present as a
+	// measurement (searchProbe.measured). Only PostCommit — the sole path that
+	// emits the commit-condensed signal — passes a gate; the doctor and
+	// session-end condensation paths never scan because nothing would read the
+	// result. The gate is memoized per commit by commitCondensedEmitter, so the
+	// settings load behind it runs at most once per PostCommit.
+	searchProbeAllowed func() bool
 }
 
 // redactSessionJSONLBytes runs the regex-only redaction pipeline (the
@@ -584,6 +594,18 @@ func (s *ManualCommitStrategy) CondenseSession(ctx context.Context, repo *git.Re
 		return skipped, nil
 	}
 
+	// Telemetry-only search probe, computed exactly once for every result this
+	// function can return (the recovery result below included) so no
+	// construction site can ship the zero value by omission — the fabricated
+	// negative searchProbe.measured exists to catch. Gated: the scan is a
+	// full-transcript pass, and only the PostCommit path, with telemetry
+	// enabled, has a reader for it. detectSearchUsage maps a nil agent or
+	// empty transcript to unsupported, which is the honest answer for the
+	// no-transcript extraction branch.
+	if o.searchProbeAllowed != nil && o.searchProbeAllowed() {
+		sessionData.SearchProbe = detectSearchUsage(ag, sessionData.Transcript)
+	}
+
 	// Capture agent sidecar images (e.g. Cursor's SQLite store) after the skip
 	// check, so the sqlite3 shell-out is avoided when the checkpoint is discarded.
 	extractedAssets = append(extractedAssets, sidecarSessionImages(ctx, logCtx, ag, state)...)
@@ -649,6 +671,7 @@ func (s *ManualCommitStrategy) CondenseSession(ctx context.Context, repo *git.Re
 		TotalTranscriptLines:   sessionData.FullTranscriptLines,
 		TranscriptSizeBaseline: transcriptSizeBaseline,
 		NewSkillEvents:         newSkillEvents,
+		SearchProbe:            sessionData.SearchProbe,
 	}, nil
 }
 
@@ -1711,6 +1734,13 @@ func (s *ManualCommitStrategy) CondenseSessionByID(ctx context.Context, sessionI
 		return mutErr
 	}
 	if stateSaved {
+		// Skill telemetry only. commitCondensedEmitter.emit is deliberately NOT
+		// called here: its payload is commit-scoped (files_committed counts a
+		// commit's files, and prior_ai_history's git-log probe uses --skip=1 to
+		// exclude the commit just made). This path condenses without a commit —
+		// doctor repairing an uncondensed session — so those fields would be
+		// meaningless and --skip=1 would exclude an unrelated HEAD. See
+		// newCommitCondensedSignal.
 		EmitSkillInvocationTelemetry(ctx, newSkillEvents)
 	}
 
@@ -1886,6 +1916,9 @@ func (s *ManualCommitStrategy) CondenseAndMarkFullyCondensed(ctx context.Context
 		return fmt.Errorf("failed to save session state: %w", mutErr)
 	}
 	if stateSaved {
+		// Skill telemetry only — same reason as CondenseSessionByID: this
+		// condenses the work left over after the last commit, so there is no
+		// commit for the commit-condensed signal to describe.
 		EmitSkillInvocationTelemetry(ctx, newSkillEvents)
 	}
 

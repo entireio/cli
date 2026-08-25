@@ -54,6 +54,11 @@ type CondenseResult struct {
 	TotalTranscriptLines int      // Total transcript units after this condensation (JSONL line count or message count by agent format)
 	Skipped              bool     // True if condensation was skipped (no transcript or files to condense)
 
+	// SearchProbe records whether the session invoked Entire's history search
+	// and how that was determined. Telemetry only; see detectSearchUsage for why
+	// "could not tell" is a distinct state from "did not search".
+	SearchProbe searchProbe
+
 	// TranscriptSizeBaseline is the byte size to record as
 	// SessionState.CheckpointTranscriptSize. It must be measured on the SANITIZED,
 	// pre-externalization transcript so it lives in the same coordinate as the
@@ -78,6 +83,14 @@ type ExtractedSessionData struct {
 	FullTranscriptLines int      // Total line count in full transcript
 	Prompts             []string // User prompts from the current checkpoint portion
 	FilesTouched        []string
-	TokenUsage          *agent.TokenUsage  // Token usage calculated from transcript (since CheckpointTranscriptStart)
-	SkillEvents         []agent.SkillEvent // Skill events detected from transcript data
+	TokenUsage          *agent.TokenUsage // Token usage calculated from transcript (since CheckpointTranscriptStart)
+	// SkillEvents are this condensation's extracted events. Transient — the
+	// durable ledger, and the per-hook cost of carrying it, is
+	// session.SessionState.SkillEvents; see its size note.
+	SkillEvents []agent.SkillEvent
+	// SearchProbe is `entire search` usage; see detectSearchUsage. Not set by
+	// the extractors: CondenseSession assigns it exactly once, gated on
+	// condenseOpts.searchProbeAllowed, so every result path carries the same
+	// value and ungated paths never pay the scan.
+	SearchProbe searchProbe
 }
