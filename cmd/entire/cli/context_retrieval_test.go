@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -22,7 +23,7 @@ func TestRedactContextQueryBoundsAndScrubs(t *testing.T) {
 	t.Parallel()
 	secret := "sk-ant-api03-xK9mZ2vL8nQ5rT1wY4bC7dF0gH3jE6pA"
 	query := "fix auth with " + secret + " " + strings.Repeat("é", 400)
-	got := redactContextQuery(query)
+	got := redactContextQuery(context.Background(), query)
 	if strings.Contains(got, secret) {
 		t.Fatal("query retained secret")
 	}
