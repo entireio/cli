@@ -1330,8 +1330,8 @@ func handleLifecycleSubagentEnd(ctx context.Context, ag agent.Agent, event *agen
 	}
 
 	return completeSubagentTaskRecord(logCtx, ag, event, subagentCaptureOptions{
-		ensureSessionState:   true,
-		resolvedAmbiguously:  resolvedAmbiguously,
+		ensureSessionState:  true,
+		resolvedAmbiguously: resolvedAmbiguously,
 	})
 }
 
