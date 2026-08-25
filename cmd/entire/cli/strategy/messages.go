@@ -24,6 +24,11 @@ const MaxDescriptionLength = 60
 // TruncateDescription regardless.
 const maxSubjectRedactionInput = 4096
 
+// omittedSubjectLabel is returned when agent-supplied text exceeds the redaction
+// window. Truncating before redact would let a secret straddling the boundary
+// leak its prefix; failing closed is safer than a partial scan.
+const omittedSubjectLabel = "[agent description omitted]"
+
 // SanitizeSubjectContent prepares agent-supplied text for use inside a
 // single-line Git commit subject.
 //
@@ -38,20 +43,19 @@ const maxSubjectRedactionInput = 4096
 //     collapsing and can make `git log`, rewind output, and terminal UIs
 //     display something other than what was committed.
 //
-// Redaction runs on a bounded prefix of the input: feeding whole model replies
-// through the full regex/entropy pipeline is unbounded cost on a hook path.
-// Content past maxSubjectRedactionInput is dropped before redaction, so secrets
-// beyond that window never reach Git subjects anyway.
+// Redaction runs on inputs up to maxSubjectRedactionInput runes. Inputs larger
+// than that fail closed to omittedSubjectLabel so a secret straddling the
+// boundary cannot leak a prefix that truncation would have cut mid-match.
 func SanitizeSubjectContent(s string) string {
 	s = stripSubjectControls(s)
 	if s == "" {
 		return ""
 	}
-	// Bound what enters the redaction pipeline first (whole model replies can be
-	// megabytes), then redact within that window. Content past the bound is
-	// dropped, not scanned.
-	bound := stringutil.TruncateRunes(s, maxSubjectRedactionInput, "")
-	s = stringutil.TruncateRunes(redact.String(bound), maxSubjectRedactionInput, "")
+	if utf8.RuneCountInString(s) > maxSubjectRedactionInput {
+		return omittedSubjectLabel
+	}
+	s = redact.String(s)
+	s = stringutil.TruncateRunes(s, maxSubjectRedactionInput, "")
 	// Redaction placeholders are plain text, but a custom rule's replacement is
 	// caller-supplied, so re-run the control strip rather than trust it.
 	return stripSubjectControls(s)

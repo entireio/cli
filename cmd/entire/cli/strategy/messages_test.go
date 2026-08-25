@@ -56,14 +56,30 @@ func TestFormatSubagentEndMessage_RedactsSecretBeforeGit(t *testing.T) {
 }
 
 // TestSanitizeSubjectContent_RedactsBeforeTruncating pins that secrets inside
-// the redaction window are removed even when the raw input exceeds it.
+// the redaction window are removed.
 func TestSanitizeSubjectContent_RedactsBeforeTruncating(t *testing.T) {
 	const secret = "ghp_1234567890abcdefghijklmnopqrstuvwx"
-	description := strings.Repeat("a", 100) + " " + secret + " " + strings.Repeat("b", maxSubjectRedactionInput)
+	description := strings.Repeat("a", 100) + " " + secret + " " + strings.Repeat("b", 100)
 
 	got := SanitizeSubjectContent(description)
 	if strings.Contains(got, secret[:6]) {
 		t.Errorf("secret inside the bounded redaction window must be redacted, got %q", got)
+	}
+}
+
+// TestSanitizeSubjectContent_FailsClosedWhenInputExceedsRedactionWindow guards
+// against truncating before redact: a secret whose match straddles the cap would
+// leave a raw prefix in Git if the input were truncated first.
+func TestSanitizeSubjectContent_FailsClosedWhenInputExceedsRedactionWindow(t *testing.T) {
+	const secret = "ghp_1234567890abcdefghijklmnopqrstuvwx"
+	description := strings.Repeat("a", maxSubjectRedactionInput-len(secret)+5) + secret
+
+	got := SanitizeSubjectContent(description)
+	if strings.Contains(got, "ghp_") {
+		t.Errorf("must not leak a secret prefix straddling the cap, got %q", got)
+	}
+	if got != omittedSubjectLabel {
+		t.Errorf("SanitizeSubjectContent() = %q, want %q", got, omittedSubjectLabel)
 	}
 }
 
