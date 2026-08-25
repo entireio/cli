@@ -2,11 +2,8 @@ package telemetry
 
 import (
 	"encoding/json"
-	"os"
 	"runtime"
 	"time"
-
-	"github.com/denisbrodbeck/machineid"
 )
 
 // Property values for the checkpoint_policy_blocked event.
@@ -37,7 +34,7 @@ type CheckpointPolicyBlockedEvent struct {
 // BuildCheckpointPolicyBlockedPayload constructs the event payload. Exported for
 // testing. Returns nil if the machine ID cannot be resolved.
 func BuildCheckpointPolicyBlockedPayload(event CheckpointPolicyBlockedEvent, version string) *EventPayload {
-	machineID, err := machineid.ProtectedID("entire-cli")
+	machineID, err := telemetryMachineID()
 	if err != nil {
 		return nil
 	}
@@ -74,7 +71,7 @@ func BuildCheckpointPolicyBlockedPayload(event CheckpointPolicyBlockedEvent, ver
 // responsible for the settings.Telemetry opt-in check. Honors
 // ENTIRE_TELEMETRY_OPTOUT like the other trackers.
 func TrackCheckpointPolicyBlocked(event CheckpointPolicyBlockedEvent, version string) {
-	if os.Getenv("ENTIRE_TELEMETRY_OPTOUT") != "" {
+	if IsEnvOptedOut() {
 		return
 	}
 

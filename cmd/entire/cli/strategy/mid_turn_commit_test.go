@@ -97,6 +97,23 @@ func TestSessionHasNewContentFromLiveTranscript_NormalizesAbsolutePaths(t *testi
 			"that match repo-relative staged files after normalization")
 }
 
+// A records-only session must read as having new content — the predicate the pending-task triggers rest on.
+func TestSessionHasNewContent_RecordsOnlySession(t *testing.T) {
+	dir := setupGitRepo(t)
+	t.Chdir(dir)
+	repo, err := git.PlainOpen(dir)
+	require.NoError(t, err)
+
+	state := &SessionState{SessionID: "records-only", BaseCommit: "abc1234", StartedAt: time.Now(), Phase: session.PhaseEnded}
+	hasNew, err := (&ManualCommitStrategy{}).sessionHasNewContent(context.Background(), repo, state, contentCheckOpts{})
+	require.NoError(t, err)
+	assert.False(t, hasNew, "no records, no transcript, no files: no new content")
+	state.TaskRecords = []session.TaskRecord{{ToolUseID: "toolu_1", StartedAt: time.Now(), CompletedAt: time.Now()}}
+	hasNew, err = (&ManualCommitStrategy{}).sessionHasNewContent(context.Background(), repo, state, contentCheckOpts{})
+	require.NoError(t, err)
+	assert.True(t, hasNew, "a task record is pending checkpoint content")
+}
+
 // TestSessionHasNewContentFromLiveTranscript_IncludesSubagentFiles verifies
 // that sessionHasNewContentFromLiveTranscript detects file modifications made by
 // subagents spawned via the Task tool.

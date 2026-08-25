@@ -402,7 +402,7 @@ type reviewStreamEvent struct {
 
 func printReadyEvent(w io.Writer, data string) {
 	var p reviewReadyPayload
-	if err := unmarshalTrailEventJSON(data, &p); err == nil {
+	if err := json.Unmarshal([]byte(data), &p); err == nil {
 		parts := []string{"● connected"}
 		if p.TrailID != "" {
 			parts = append(parts, "to trail "+p.TrailID)
@@ -434,7 +434,7 @@ func printStreamError(errW io.Writer, data string) {
 
 func parseReviewStreamEvent(eventName, data string) (reviewStreamEvent, bool) {
 	var ev reviewStreamEvent
-	if err := unmarshalTrailEventJSON(data, &ev); err != nil {
+	if err := json.Unmarshal([]byte(data), &ev); err != nil {
 		return ev, false
 	}
 	if ev.EventType == "" {
@@ -444,46 +444,6 @@ func parseReviewStreamEvent(eventName, data string) (reviewStreamEvent, bool) {
 		return ev, false
 	}
 	return ev, true
-}
-
-func unmarshalTrailEventJSON(data string, dest any) error {
-	var value any
-	if err := json.Unmarshal([]byte(data), &value); err != nil {
-		return fmt.Errorf("decode trail event: %w", err)
-	}
-	value = normalizeTrailEventValue(value)
-	normalized, err := json.Marshal(value)
-	if err != nil {
-		return fmt.Errorf("normalize trail event: %w", err)
-	}
-	if err := json.Unmarshal(normalized, dest); err != nil {
-		return fmt.Errorf("decode normalized trail event: %w", err)
-	}
-	return nil
-}
-
-func normalizeTrailEventValue(value any) any {
-	switch v := value.(type) {
-	case map[string]any:
-		out := make(map[string]any, len(v))
-		for key, child := range v {
-			if key == "payload" {
-				out[key] = child
-				continue
-			}
-			out[trailEventCamelKey(key)] = normalizeTrailEventValue(child)
-		}
-		return out
-	case []any:
-		for i := range v {
-			v[i] = normalizeTrailEventValue(v[i])
-		}
-	}
-	return value
-}
-
-func trailEventCamelKey(key string) string {
-	return api.NormalizeTrailJSONKey(key)
 }
 
 func printReviewStreamEvent(w io.Writer, ev reviewStreamEvent) {
@@ -498,11 +458,11 @@ func printReviewStreamEvent(w io.Writer, ev reviewStreamEvent) {
 
 	switch ev.EventType {
 	case "code_version.created":
-		fmt.Fprintf(w, "%scode version %s created (head %s)\n", prefix, ev.TargetID, payloadString(ev.Payload, "head_sha"))
+		fmt.Fprintf(w, "%scode version %s created (head %s)\n", prefix, ev.TargetID, payloadString(ev.Payload, "headSha"))
 	case "code_version.base_sha_set":
-		fmt.Fprintf(w, "%scode version %s base set to %s\n", prefix, ev.TargetID, payloadString(ev.Payload, "base_sha"))
+		fmt.Fprintf(w, "%scode version %s base set to %s\n", prefix, ev.TargetID, payloadString(ev.Payload, "baseSha"))
 	case "session.started":
-		fmt.Fprintf(w, "%ssession started by %s (code version %s)\n", prefix, actor, payloadString(ev.Payload, "code_version_id"))
+		fmt.Fprintf(w, "%ssession started by %s (code version %s)\n", prefix, actor, payloadString(ev.Payload, "codeVersionId"))
 	case "session.ended":
 		reason := payloadString(ev.Payload, "reason")
 		if reason != "" {
@@ -511,7 +471,7 @@ func printReviewStreamEvent(w io.Writer, ev reviewStreamEvent) {
 			fmt.Fprintf(w, "%ssession ended by %s\n", prefix, actor)
 		}
 	case "comment.created":
-		file := payloadString(ev.Payload, "file_path")
+		file := payloadString(ev.Payload, "filePath")
 		severity := payloadString(ev.Payload, "severity")
 		switch {
 		case file != "" && severity != "":
@@ -528,24 +488,42 @@ func printReviewStreamEvent(w io.Writer, ev reviewStreamEvent) {
 	case "comment.stale_checked":
 		fmt.Fprintf(w, "%sfinding %s marked %s (%s)\n", prefix, ev.TargetID, payloadString(ev.Payload, "outcome"), payloadString(ev.Payload, "reason"))
 	case "suggested_change.created":
-		fmt.Fprintf(w, "%ssuggested change %s created for finding %s (%s)\n", prefix, ev.TargetID, payloadString(ev.Payload, "review_comment_id"), payloadString(ev.Payload, "change_type"))
+		fmt.Fprintf(w, "%ssuggested change %s created for finding %s (%s)\n", prefix, ev.TargetID, payloadString(ev.Payload, "reviewCommentId"), payloadString(ev.Payload, "changeType"))
 	case "suggested_change.updated":
 		fmt.Fprintf(w, "%ssuggested change %s updated by %s\n", prefix, ev.TargetID, actor)
 	case "suggested_change.check_result", "suggested_change.apply_result":
-		fmt.Fprintf(w, "%s%s for %s: %s\n", prefix, ev.EventType, payloadString(ev.Payload, "suggested_change_id"), payloadString(ev.Payload, "status"))
+		fmt.Fprintf(w, "%s%s for %s: %s\n", prefix, ev.EventType, payloadString(ev.Payload, "suggestedChangeId"), payloadString(ev.Payload, "status"))
 	case "thread.created":
-		fmt.Fprintf(w, "%sthread %s created for finding %s\n", prefix, ev.TargetID, payloadString(ev.Payload, "review_comment_id"))
+		fmt.Fprintf(w, "%sthread %s created for finding %s\n", prefix, ev.TargetID, payloadString(ev.Payload, "reviewCommentId"))
 	case "thread.message_added":
 		fmt.Fprintf(w, "%sthread message %s added by %s\n", prefix, ev.TargetID, actor)
 	case "thread.message_edited":
 		fmt.Fprintf(w, "%sthread message %s edited by %s\n", prefix, ev.TargetID, actor)
 	case "comment.linked":
-		fmt.Fprintf(w, "%sfinding link created: %s → %s\n", prefix, payloadString(ev.Payload, "source_comment_id"), payloadString(ev.Payload, "target_comment_id"))
+		fmt.Fprintf(w, "%sfinding link created: %s → %s\n", prefix, payloadString(ev.Payload, "sourceCommentId"), payloadString(ev.Payload, "targetCommentId"))
 	case "comment.unlinked":
-		fmt.Fprintf(w, "%sfinding link removed: %s → %s\n", prefix, payloadString(ev.Payload, "source_comment_id"), payloadString(ev.Payload, "target_comment_id"))
+		fmt.Fprintf(w, "%sfinding link removed: %s → %s\n", prefix, payloadString(ev.Payload, "sourceCommentId"), payloadString(ev.Payload, "targetCommentId"))
 	default:
 		fmt.Fprintf(w, "%s%s %s/%s by %s\n", prefix, ev.EventType, ev.TargetType, ev.TargetID, actor)
 	}
+}
+
+// importedTrailEventPayloadAliases covers historical event payloads imported
+// into entire-api. The server always writes the event envelope in camelCase,
+// but forwards its stored payload JSONB verbatim; the importer preserves those
+// bytes, so imported rows can still contain these snake_case keys. Keep this
+// compatibility scoped to known payload fields rather than normalizing the
+// envelope or arbitrary user data.
+var importedTrailEventPayloadAliases = map[string]string{
+	"headSha":           "head_sha",
+	"baseSha":           "base_sha",
+	"codeVersionId":     "code_version_id",
+	"filePath":          "file_path",
+	"reviewCommentId":   "review_comment_id",
+	"changeType":        "change_type",
+	"suggestedChangeId": "suggested_change_id",
+	"sourceCommentId":   "source_comment_id",
+	"targetCommentId":   "target_comment_id",
 }
 
 func payloadString(payload map[string]any, key string) string {
@@ -553,10 +531,10 @@ func payloadString(payload map[string]any, key string) string {
 		return ""
 	}
 	v, ok := payload[key]
-	if !ok && strings.ContainsRune(key, '_') {
-		// Historical event payloads used snake_case while entire-api emits
-		// camelCase. Human rendering accepts both during the migration.
-		v, ok = payload[trailEventCamelKey(key)]
+	if !ok {
+		if alias, exists := importedTrailEventPayloadAliases[key]; exists {
+			v, ok = payload[alias]
+		}
 	}
 	if !ok || v == nil {
 		return ""

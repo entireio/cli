@@ -86,7 +86,7 @@ func TestCheckpointResumeAuto_ChecksCheckpointBeforeBranch(t *testing.T) {
 // must delegate to the branch flow, i.e. check the branch out.
 func TestCheckpointResumeAuto_BranchBeforeCommit(t *testing.T) {
 	repo, w, _ := setupCheckpointResumeRepo(t)
-	// Ignore .entire/ (as `entire enable` would) so the RunE's logging.Init
+	// Ignore .entire/ (as `entire enable` would) so the RunE's logger
 	// creating .entire/logs/ doesn't register as an uncommitted change and
 	// trip switchToBranchForResume's dirty-worktree check.
 	if err := os.WriteFile(".gitignore", []byte(".entire/\n"), 0o600); err != nil {

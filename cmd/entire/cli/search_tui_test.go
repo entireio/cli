@@ -326,6 +326,33 @@ func TestSearchModel_SearchModeEnter(t *testing.T) {
 	}
 }
 
+// TestSearchModel_ReSearchClearsCodeWarning pins that a re-search drops the
+// previous query's code-scope note, like it drops stale results and errors.
+// Both re-search paths are covered: the one that dispatches a code search
+// (the note is replaced when the response lands) and the repo-only input that
+// dispatches none — there, nothing would ever arrive to overwrite it, so a
+// stale "skipped repos" warning would sit beside "0 results" indefinitely.
+func TestSearchModel_ReSearchClearsCodeWarning(t *testing.T) {
+	t.Parallel()
+	cases := []struct{ name, query string }{
+		{"dispatches a code search", newQuery},
+		{"repo-only input dispatches none", "repo:acme/web"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			m := testModel()
+			m.codeWarning = "skipped repos with no searchable placement: acme/cloning"
+			m = updateModel(t, m, tea.KeyPressMsg{Code: '/', Text: "/"})
+			m.input.SetValue(tc.query)
+			m = updateModel(t, m, tea.KeyPressMsg{Code: tea.KeyEnter})
+			if m.codeWarning != "" {
+				t.Fatalf("codeWarning = %q after re-search, want cleared", m.codeWarning)
+			}
+		})
+	}
+}
+
 func TestSearchModel_SearchModeEnterEmpty(t *testing.T) {
 	t.Parallel()
 	m := testModel()
@@ -907,7 +934,7 @@ func TestRenderSearchStatic(t *testing.T) {
 	var buf bytes.Buffer
 	styles := statusStyles{colorEnabled: false, width: 120}
 	results := testMultiTypeResults()
-	renderSearchStatic(&buf, results, "auth", len(results), styles)
+	renderSearchStatic(&buf, results, "auth", len(results), false, styles)
 	output := buf.String()
 
 	if !strings.Contains(output, `Found 4 results matching "auth"`) {

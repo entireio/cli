@@ -27,6 +27,11 @@ type OPFConfig struct {
 	Command    string // path or name of the opf binary; "" defaults to "opf"
 	Timeout    int    // seconds; 0 defaults to 30
 
+	// Logger receives OPF runtime-failure diagnostics. nil means
+	// slog.Default(); the CLI injects its entry-point-initialized logger
+	// so warnings land in .entire/logs/.
+	Logger *slog.Logger
+
 	// runtime is private and constructed by ConfigurePrivacyFilter.
 	// Tests inject a fake via ConfigurePrivacyFilterWithRuntime.
 	runtime opfRuntime
@@ -297,7 +302,7 @@ func handleOPFFailure(ctx context.Context, cfg *OPFConfig, err error) {
 	if !opfBreakerTripped.CompareAndSwap(false, true) {
 		return
 	}
-	slog.WarnContext(ctx, "OpenAI Privacy Filter call failed; disabling for the rest of this process",
+	loggerOrDefault(cfg.Logger).WarnContext(ctx, "OpenAI Privacy Filter call failed; disabling for the rest of this process",
 		slog.String("component", "redaction"),
 		slog.String("command", cfg.Command),
 		slog.String("error", err.Error()),
