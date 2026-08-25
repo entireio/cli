@@ -381,6 +381,20 @@ func runEntityDeltasBackfill(ctx context.Context, job entityDeltasJob) {
 	}
 	document = append(document, '\n')
 
+	repo, err := gitrepo.OpenPath(job.RepoDir)
+	if err != nil {
+		logging.Debug(ctx, "entity deltas skipped: repository unavailable",
+			slog.String("repo_dir", job.RepoDir),
+			slog.String("error", err.Error()))
+		return
+	}
+	store, err := (&ManualCommitStrategy{}).getPersistentStore(ctx, repo)
+	if err != nil {
+		logging.Debug(ctx, "entity deltas skipped: checkpoint store unavailable",
+			slog.String("error", err.Error()))
+		return
+	}
+
 	// A commit that condenses N sessions forks N children, and on the
 	// git-branch backend they all rewrite the same ref (on git-refs, the same
 	// per-checkpoint ref). Without serializing, each would read the same base
@@ -399,20 +413,6 @@ func runEntityDeltasBackfill(ctx context.Context, job entityDeltasJob) {
 		return
 	}
 	defer release()
-
-	repo, err := gitrepo.OpenPath(job.RepoDir)
-	if err != nil {
-		logging.Debug(ctx, "entity deltas skipped: repository unavailable",
-			slog.String("repo_dir", job.RepoDir),
-			slog.String("error", err.Error()))
-		return
-	}
-	store, err := (&ManualCommitStrategy{}).getPersistentStore(ctx, repo)
-	if err != nil {
-		logging.Debug(ctx, "entity deltas skipped: checkpoint store unavailable",
-			slog.String("error", err.Error()))
-		return
-	}
 
 	if err := store.Write(ctx, cpkg.SessionEntityDeltas{
 		CheckpointID: job.CheckpointID,
