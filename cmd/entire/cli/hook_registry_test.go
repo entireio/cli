@@ -386,7 +386,6 @@ func TestExecuteAgentHookCapturesWhenEnabledViaLocalSettingsOnly(t *testing.T) {
 	require.NoError(t, os.MkdirAll(entireDir, 0o750))
 	// Local-only enablement: settings.local.json present, base settings.json absent.
 	require.NoError(t, os.WriteFile(filepath.Join(entireDir, "settings.local.json"), []byte(`{"enabled":true}`), 0o600))
-	markCurrentRepoLocallyActivated(t)
 	require.NoFileExists(t, filepath.Join(entireDir, "settings.json"))
 
 	transcriptPath := filepath.Join(repoRoot, "transcript.jsonl")

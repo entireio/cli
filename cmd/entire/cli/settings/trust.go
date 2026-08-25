@@ -19,45 +19,39 @@ const (
 	TrustSourceRepo  = repopolicy.TrustSourceRepo
 )
 
+// RepoTrustIdentity derives the current repository's egress-consent identity:
+// its normalized origin keys, or its canonical path when it has no origin.
 func RepoTrustIdentity(ctx context.Context) (TrustIdentity, error) {
-	_, identity, err := resolveRepoTrustIdentity(ctx)
-	return identity, err
-}
-
-func resolveRepoTrustIdentity(ctx context.Context) (repopolicy.Repository, TrustIdentity, error) {
 	repository, err := repopolicy.ResolveRepository(ctx)
 	if err != nil {
-		return repopolicy.Repository{}, TrustIdentity{}, fmt.Errorf("resolving repository: %w", err)
+		return TrustIdentity{}, fmt.Errorf("resolving repository: %w", err)
 	}
 	identity, err := repopolicy.ResolveTrustIdentity(ctx, repository)
 	if err != nil {
-		return repopolicy.Repository{}, TrustIdentity{}, fmt.Errorf("resolving trust identity: %w", err)
+		return TrustIdentity{}, fmt.Errorf("resolving trust identity: %w", err)
 	}
-	return repository, identity, nil
+	return identity, nil
 }
 
+// currentPolicy reuses a hook-boundary snapshot when one is attached to ctx
+// and classifies fresh otherwise — foreground commands that mutate
+// activation or trust (enable, disable, trust) rely on the fresh read.
 func currentPolicy(ctx context.Context) (repopolicy.RepoPolicy, error) {
 	if policy, ok := repopolicy.RepoPolicyFromContext(ctx); ok {
 		return policy, nil
 	}
 	policy, err := repopolicy.ClassifyRepoPolicy(ctx)
 	if err != nil {
-		return repopolicy.RepoPolicy{}, fmt.Errorf("classifying repository policy: %w", err)
+		return policy, fmt.Errorf("classifying repository policy: %w", err)
 	}
 	return policy, nil
 }
 
+// CheckpointEgressAllowed is the single predicate for whether checkpoint
+// data may leave this machine (see repopolicy.DecideEgress).
 func CheckpointEgressAllowed(ctx context.Context) bool {
 	policy, err := currentPolicy(ctx)
-	if err != nil || !policy.Active || !policy.Trust.Allowed {
-		return false
-	}
-	if policy.ActivationSource == repopolicy.ActivationGlobal {
-		if _, err := LoadForRepoPolicy(ctx, policy); err != nil {
-			return false
-		}
-	}
-	return true
+	return err == nil && policy.Active && policy.Trust.Allowed
 }
 
 func CurrentTrustSource(ctx context.Context) TrustSource {
@@ -68,42 +62,35 @@ func CurrentTrustSource(ctx context.Context) TrustSource {
 	return policy.Trust.Source
 }
 
-func RepoUntrustedEnrolled(ctx context.Context) bool {
+// CheckpointEgressHeld reports an active repo whose checkpoints are held
+// locally pending trust.
+func CheckpointEgressHeld(ctx context.Context) bool {
 	policy, err := currentPolicy(ctx)
-	return err == nil && policy.Active && policy.ActivationSource == repopolicy.ActivationGlobal && !policy.Trust.Allowed
+	return err == nil && policy.Active && !policy.Trust.Allowed
 }
 
+// TrustCurrentRepo records trust for the current repository identity.
 func TrustCurrentRepo(ctx context.Context) (TrustIdentity, error) {
-	repository, identity, err := resolveRepoTrustIdentity(ctx)
+	identity, err := RepoTrustIdentity(ctx)
 	if err != nil {
 		return TrustIdentity{}, err
 	}
-	err = repopolicy.ModifyTrustGrantLedger(ctx, repository, func(ledger repopolicy.TrustGrantLedger) (repopolicy.TrustGrantLedger, error) {
-		err := ModifyUserSettings(ctx, func(us *UserSettings) error {
-			if err := requireConfiguredGlobal(us); err != nil {
-				return err
-			}
-			removeLedgerOwnedTrust(ctx, us.Global, ledger)
-			if identity.OriginKeyed() {
-				for _, key := range identity.OriginKeys {
-					if !containsTrustedOrigin(us.Global.TrustedOrigins, key) {
-						us.Global.TrustedOrigins = append(us.Global.TrustedOrigins, key)
-					}
-					if !slices.Contains(ledger.OriginKeys, key) {
-						ledger.OriginKeys = append(ledger.OriginKeys, key)
-					}
-				}
-			} else {
-				if !anyPathEntryIsRoot(ctx, us.Global.TrustedPaths, identity.Path) {
-					us.Global.TrustedPaths = append(us.Global.TrustedPaths, identity.Path)
-				}
-				if !slices.Contains(ledger.Paths, identity.Path) {
-					ledger.Paths = append(ledger.Paths, identity.Path)
+	err = ModifyUserSettings(ctx, func(us *UserSettings) error {
+		if err := requireConfiguredGlobal(us); err != nil {
+			return err
+		}
+		if identity.OriginKeyed() {
+			for _, key := range identity.OriginKeys {
+				if !containsTrustedOrigin(us.Global.TrustedOrigins, key) {
+					us.Global.TrustedOrigins = append(us.Global.TrustedOrigins, key)
 				}
 			}
 			return nil
-		})
-		return ledger, err
+		}
+		if !anyPathEntryIsRoot(ctx, us.Global.TrustedPaths, identity.Path) {
+			us.Global.TrustedPaths = append(us.Global.TrustedPaths, identity.Path)
+		}
+		return nil
 	})
 	if err != nil {
 		return TrustIdentity{}, fmt.Errorf("updating repository trust: %w", err)
@@ -130,6 +117,12 @@ func TrustAllRepos(ctx context.Context) error {
 	})
 }
 
+// RevokeCurrentRepo withdraws trust for the current repository. It removes
+// both the repo's current origin keys and its current path, so a repo
+// trusted by folder that later gained an origin (or vice versa) is fully
+// revoked. Entries for other repositories are never touched. A key from a
+// PREVIOUS origin URL of this repo is not recognized and stays; the settings
+// file is the audit trail for that.
 func RevokeCurrentRepo(ctx context.Context) (TrustIdentity, error) {
 	repository, err := repopolicy.ResolveRepository(ctx)
 	if err != nil {
@@ -139,46 +132,22 @@ func RevokeCurrentRepo(ctx context.Context) (TrustIdentity, error) {
 	if identityErr != nil {
 		identity = TrustIdentity{Path: repository.WorktreeRoot}
 	}
-	err = repopolicy.ModifyTrustGrantLedger(ctx, repository, func(ledger repopolicy.TrustGrantLedger) (repopolicy.TrustGrantLedger, error) {
-		err := ModifyUserSettings(ctx, func(us *UserSettings) error {
-			if err := requireConfiguredGlobal(us); err != nil {
-				return err
-			}
-			removeLedgerOwnedTrust(ctx, us.Global, ledger)
-			ledger.OriginKeys = nil
-			ledger.Paths = nil
-			return nil
+	err = ModifyUserSettings(ctx, func(us *UserSettings) error {
+		if err := requireConfiguredGlobal(us); err != nil {
+			return err
+		}
+		us.Global.TrustedOrigins = slices.DeleteFunc(us.Global.TrustedOrigins, func(entry string) bool {
+			return slices.Contains(identity.OriginKeys, repopolicy.CanonicalTrustOrigin(entry))
 		})
-		return ledger, err
+		us.Global.TrustedPaths = slices.DeleteFunc(us.Global.TrustedPaths, func(entry string) bool {
+			return pathEntryIsRoot(ctx, entry, repository.WorktreeRoot)
+		})
+		return nil
 	})
 	if err != nil {
 		return TrustIdentity{}, fmt.Errorf("revoking repository trust: %w", err)
 	}
 	return identity, nil
-}
-
-func removeLedgerOwnedTrust(ctx context.Context, global *GlobalConfig, ledger repopolicy.TrustGrantLedger) {
-	origins := global.TrustedOrigins[:0]
-	for _, entry := range global.TrustedOrigins {
-		if !slices.Contains(ledger.OriginKeys, repopolicy.CanonicalTrustOrigin(entry)) {
-			origins = append(origins, entry)
-		}
-	}
-	global.TrustedOrigins = origins
-	paths := global.TrustedPaths[:0]
-	for _, entry := range global.TrustedPaths {
-		owned := false
-		for _, recorded := range ledger.Paths {
-			if pathEntryIsRoot(ctx, entry, recorded) {
-				owned = true
-				break
-			}
-		}
-		if !owned {
-			paths = append(paths, entry)
-		}
-	}
-	global.TrustedPaths = paths
 }
 
 func containsTrustedOrigin(entries []string, key string) bool {

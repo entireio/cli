@@ -4,11 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
-	"sync"
 
 	"github.com/entireio/cli/cmd/entire/cli/gitremote"
 	"github.com/entireio/cli/cmd/entire/cli/internal/worktreeid"
@@ -174,51 +172,4 @@ func ClassifyGlobalConfig(ctx context.Context, config *GlobalConfig, resolve Rep
 	policy.Active = true
 	policy.InactiveReason = InactiveReasonNone
 	return policy, nil
-}
-
-var globalModeCache struct {
-	sync.Mutex
-
-	key    string
-	set    bool
-	policy RepoPolicy
-	err    error
-}
-
-// GlobalModeStatus loads and memoizes global classification per working
-// directory. The resolver is reached only for an enabled, valid tier.
-func GlobalModeStatus(ctx context.Context) (RepoPolicy, error) {
-	cwd, err := os.Getwd() //nolint:forbidigo // cache key; resolving Git here would defeat the disabled fast path
-	if err != nil {
-		cwd = ""
-	}
-	globalModeCache.Lock()
-	defer globalModeCache.Unlock()
-	if globalModeCache.set && globalModeCache.key == cwd {
-		return globalModeCache.policy, globalModeCache.err
-	}
-	settings, loadErr := LoadUserSettings(ctx)
-	if loadErr != nil {
-		globalModeCache.key = cwd
-		globalModeCache.set = true
-		globalModeCache.policy = inactiveGlobalPolicy(InactiveReasonGlobalOff)
-		globalModeCache.err = loadErr
-		return globalModeCache.policy, loadErr
-	}
-	policy, classifyErr := ClassifyGlobalConfig(ctx, settings.Global, ResolveRepository)
-	globalModeCache.key = cwd
-	globalModeCache.set = true
-	globalModeCache.policy = policy
-	globalModeCache.err = classifyErr
-	return policy, classifyErr
-}
-
-// ClearGlobalModeCache clears package-owned classification state.
-func ClearGlobalModeCache() {
-	globalModeCache.Lock()
-	globalModeCache.key = ""
-	globalModeCache.set = false
-	globalModeCache.policy = RepoPolicy{}
-	globalModeCache.err = nil
-	globalModeCache.Unlock()
 }

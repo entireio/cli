@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"os"
 	"path/filepath"
 
 	"github.com/entireio/cli/cmd/entire/cli/logging"
@@ -13,26 +14,26 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/settings/repopolicy"
 )
 
-const globalSetupComponentSpec = 1
+// primaryRefStamp marks that this worktree's primary metadata ref has been
+// ensured once. It lives in the (git-side) runtime root, so it is never a
+// worktree file, and it exists only to keep the per-hook cost at a stat:
+// EnsurePrimaryRefTo opens the repository and may talk to remotes.
+const primaryRefStamp = "primary-ref-ready"
 
-// MaybeEnsureGlobalSetup performs lazy, invisible per-worktree setup
-// for a globally tracked repo: a repo with no explicit repo activation whose
-// hooks run because the user-global tier is active.
-// It installs the git hooks (skipped when core.hooksPath resolves inside the
-// worktree — see below), ensures the checkpoint metadata ref, and records the
-// completed components in the worktree registry. Everything it writes lives
-// inside .git/; it never creates a worktree file. Called from both hook routes
-// (agent hooks in executeAgentHook, git hooks in the hooks-git
-// PersistentPreRunE), in both cases after hook logging is initialized so the
-// failure ladder below is actually recorded.
+// MaybeEnsureGlobalSetup performs lazy, invisible per-worktree setup for a
+// globally tracked repo: a repo with no repo-level activation whose hooks run
+// because the user-global tier is active. It installs the git hooks (skipped
+// when core.hooksPath resolves inside the worktree — see below) and ensures
+// the checkpoint metadata ref. Everything it writes lives inside .git/; it
+// never creates a worktree file. Called from both hook routes (agent hooks in
+// executeAgentHook, git hooks in the hooks-git PersistentPreRun), after hook
+// logging is initialized so the failure ladder below is recorded.
 //
 // Best-effort by contract: this runs on hook hot paths, so every failure logs
 // at Debug and returns — a lazy-enable failure must never break the user's
-// commit or agent session. Both hook routes initialize logging before calling
-// this, so those Debug lines reach the routed log file; globally tracked
-// repos have no repo settings to raise log_level, so set ENTIRE_LOG_LEVEL=debug
-// to see them. The per-worktree component record makes repeat calls cheap and
-// lets a later invocation repair only the component that became stale.
+// commit or agent session. Git-hook presence is re-checked on every hook (a
+// file read), so hooks a user deleted or that are out of date come back on
+// the next activity without any marker bookkeeping.
 func MaybeEnsureGlobalSetup(ctx context.Context) {
 	logCtx := logging.WithComponent(ctx, "global-setup")
 
@@ -49,25 +50,12 @@ func MaybeEnsureGlobalSetup(ctx context.Context) {
 		return
 	}
 
-	repository := repopolicy.Repository{
-		WorktreeRoot: policy.WorktreeRoot,
-		GitCommonDir: policy.GitCommonDir,
-		WorktreeKey:  policy.WorktreeKey,
-	}
-	record, _, err := repopolicy.ReadSetupRecord(repository)
-	if err != nil {
-		logging.Debug(logCtx, "global lazy setup: setup record unreadable; skipping",
-			slog.String("error", err.Error()))
-		return
-	}
-	changed := false
-	if record.GitHooksSpec < globalSetupComponentSpec || !IsGitHookInstalled(ctx) {
+	if !IsGitHookInstalled(ctx) {
 		worktreeResident, hooksDir, resolveErr := HooksDirIsWorktreeResident(ctx)
 		switch {
 		case resolveErr != nil:
 			// Can't tell where the hooks would land — installing anyway could
-			// write into the worktree. Return without the marker so the next
-			// hook retries.
+			// write into the worktree. Return so the next hook retries.
 			logging.Debug(logCtx, "global lazy setup: cannot resolve hooks dir",
 				slog.String("error", resolveErr.Error()))
 			return
@@ -76,57 +64,39 @@ func MaybeEnsureGlobalSetup(ctx context.Context) {
 			// .husky directory). Installing would create worktree files,
 			// which global tracking must never do — skip the hooks half.
 			// Agent-side capture still works; commit-time trailers require a
-			// repo-level `entire enable`. The marker is still set below:
-			// setup did everything it safely could, and `entire doctor`
-			// explains the hooksPath situation.
+			// repo-level `entire enable`. `entire doctor` explains this.
 			logging.Debug(logCtx, "global lazy setup: hooks dir inside worktree; skipping git hook install",
 				slog.String("hooks_dir", hooksDir))
-			record.GitHooksSpec = globalSetupComponentSpec
-			changed = true
 		default:
-			if IsGitHookInstalled(ctx) {
-				record.GitHooksSpec = globalSetupComponentSpec
-				changed = true
-				break
-			}
-			absoluteHookPath := hookSettingsFromConfig(ctx)
 			// installGitHooks with a discarded notice writer: lazy setup runs
 			// inside agent hooks, where a "[entire] Backed up existing..."
 			// stderr line would leak into the agent's output.
-			if _, err := installGitHooks(ctx, true, absoluteHookPath, io.Discard); err != nil {
+			if _, err := installGitHooks(ctx, true, hookSettingsFromConfig(ctx), io.Discard); err != nil {
 				logging.Debug(logCtx, "global lazy setup: git hook install failed",
 					slog.String("error", err.Error()))
 				return
 			}
-			record.GitHooksSpec = globalSetupComponentSpec
-			changed = true
 		}
 	}
 
-	if record.PrimaryRefSpec < globalSetupComponentSpec {
-		repo, openErr := OpenRepository(ctx)
-		if openErr != nil {
-			logging.Debug(logCtx, "global lazy setup: open repository failed",
-				slog.String("error", openErr.Error()))
-			return
-		}
-		defer repo.Close()
-		if err := EnsurePrimaryRefTo(ctx, repo, io.Discard); err != nil {
-			logging.Debug(logCtx, "global lazy setup: ensure primary metadata ref failed",
-				slog.String("error", err.Error()))
-			return
-		}
-		record.PrimaryRefSpec = globalSetupComponentSpec
-		changed = true
-	}
-
-	if !changed {
+	stamp := filepath.Join(policy.RuntimeRoot(), primaryRefStamp)
+	if _, err := os.Stat(stamp); err == nil {
 		return
 	}
-	if err := repopolicy.WriteSetupRecord(repository, record); err != nil {
-		logging.Debug(logCtx, "global lazy setup: writing setup record failed",
+	repo, openErr := OpenRepository(ctx)
+	if openErr != nil {
+		logging.Debug(logCtx, "global lazy setup: open repository failed",
+			slog.String("error", openErr.Error()))
+		return
+	}
+	defer repo.Close()
+	if err := EnsurePrimaryRefTo(ctx, repo, io.Discard); err != nil {
+		logging.Debug(logCtx, "global lazy setup: ensure primary metadata ref failed",
 			slog.String("error", err.Error()))
 		return
+	}
+	if err := os.MkdirAll(filepath.Dir(stamp), 0o700); err == nil {
+		_ = os.WriteFile(stamp, nil, 0o600) //nolint:errcheck // a missing stamp only costs a repeat ensure next hook
 	}
 	logging.Debug(logCtx, "global lazy setup completed")
 }

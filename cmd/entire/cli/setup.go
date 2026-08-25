@@ -16,14 +16,12 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/external"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
-	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/gitremote"
 	"github.com/entireio/cli/cmd/entire/cli/interactive"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
-	"github.com/entireio/cli/cmd/entire/cli/settings/repopolicy"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
 	"github.com/entireio/cli/cmd/entire/cli/vercelconfig"
 
@@ -347,17 +345,17 @@ func settingsTargetFile(ctx context.Context, useLocal, useProject bool) (string,
 
 	// No explicit flag — write to whichever file exists.
 	// Check project file first, then local.
-	root, err := paths.WorktreeRoot(ctx)
-	if err != nil {
-		root = "."
+	projectAbs, err := paths.AbsPath(ctx, settings.EntireSettingsFile)
+	if err == nil {
+		if _, statErr := os.Lstat(projectAbs); statErr == nil {
+			return settings.EntireSettingsFile, configDisplayProject
+		}
 	}
-	projectAbs := filepath.Join(root, settings.EntireSettingsFile)
-	if _, statErr := os.Lstat(projectAbs); statErr == nil {
-		return settings.EntireSettingsFile, configDisplayProject
-	}
-	localAbs := filepath.Join(root, settings.EntireSettingsLocalFile)
-	if _, statErr := os.Lstat(localAbs); statErr == nil {
-		return settings.EntireSettingsLocalFile, configDisplayLocal
+	localAbs, err := paths.AbsPath(ctx, settings.EntireSettingsLocalFile)
+	if err == nil {
+		if _, statErr := os.Lstat(localAbs); statErr == nil {
+			return settings.EntireSettingsLocalFile, configDisplayLocal
+		}
 	}
 
 	// Neither exists — default to project
@@ -373,130 +371,6 @@ func saveSettingsToTarget(ctx context.Context, s *EntireSettings, targetFile str
 	default:
 		return fmt.Errorf("unknown settings target %q", targetFile)
 	}
-}
-
-// persistRepoSettingsWithoutRuntimeRouting writes repository configuration to
-// the literal worktree, establishes the sticky runtime route, and only then
-// publishes the local activation marker. A failure before the marker leaves
-// capture fail-closed; a failure after the settings write includes an
-// actionable retry instruction.
-func persistRepoSettingsWithoutRuntimeRouting(ctx context.Context, s *EntireSettings, targetFile string) (context.Context, error) {
-	root, err := paths.WorktreeRoot(ctx)
-	if err != nil {
-		return ctx, fmt.Errorf("resolve worktree before enabling: %w", err)
-	}
-	local := targetFile == settings.EntireSettingsLocalFile
-	if err := settings.SaveForWorktree(root, s, local); err != nil {
-		return ctx, fmt.Errorf("save repository settings: %w", err)
-	}
-	// A project-scoped enable must also clear an existing local disable before
-	// policy classification. settings.local.json wins in the merged view, so
-	// leaving enabled:false there would make an explicit enable publish a route
-	// while capture remained vetoed. Preserve every unrelated local key.
-	if !local {
-		if err := syncLocalEnabledIfPresent(root, s.Enabled); err != nil {
-			return ctx, fmt.Errorf("synchronize local repository activation: %w", err)
-		}
-	}
-	return activateRepoAfterSettings(ctx)
-}
-
-func syncLocalEnabledIfPresent(root string, enabled bool) error {
-	path, raw, exists, err := settings.LoadLocalRawForWorktree(root)
-	if err != nil {
-		return fmt.Errorf("load local repository settings: %w", err)
-	}
-	if !exists {
-		return nil
-	}
-	value := json.RawMessage("false")
-	if enabled {
-		value = json.RawMessage("true")
-	}
-	raw["enabled"] = value
-	if err := settings.SaveLocalRaw(path, raw); err != nil {
-		return fmt.Errorf("save local repository settings: %w", err)
-	}
-	return nil
-}
-
-func activateRepoAfterSettings(ctx context.Context) (context.Context, error) {
-	policy, err := repopolicy.ClassifyRepoPolicy(ctx)
-	if err != nil {
-		return ctx, fmt.Errorf("repository settings were saved, but activation could not be classified; fix the reported repository policy error and re-run 'entire enable': %w", err)
-	}
-	repository, err := repopolicy.ResolveRepository(ctx)
-	if err != nil {
-		return ctx, fmt.Errorf("repository settings were saved, but repository identity could not be resolved; re-run 'entire enable': %w", err)
-	}
-	if _, found, readErr := repopolicy.ReadRuntimeRoute(repository); readErr != nil {
-		return ctx, fmt.Errorf("repository settings were saved, but the runtime route is unreadable; repair the route record and re-run 'entire enable': %w", readErr)
-	} else if !found {
-		policy.Route.Layout = repopolicy.RuntimeWorktree
-	}
-	_, err = repopolicy.EnsureRuntimeRoute(ctx, policy)
-	if err != nil {
-		return ctx, fmt.Errorf("repository settings were saved, but the runtime route could not be established; re-run 'entire enable': %w", err)
-	}
-	if err := repopolicy.SetLocalActivation(ctx, repopolicy.ActivationEnabled); err != nil {
-		return ctx, fmt.Errorf("repository settings and runtime route were saved, but activation could not be recorded; re-run 'entire enable': %w", err)
-	}
-	policy, err = repopolicy.ClassifyRepoPolicy(ctx)
-	if err != nil {
-		return ctx, fmt.Errorf("repository activation was recorded, but final policy could not be classified: %w", err)
-	}
-	return repopolicy.WithRepoPolicy(ctx, policy), nil
-}
-
-func persistDisabledActivation(ctx context.Context, useProject bool) error {
-	root, err := paths.WorktreeRoot(ctx)
-	if err != nil {
-		return fmt.Errorf("resolve worktree before disabling: %w", err)
-	}
-	if err := setWorktreeEnabled(root, false, useProject); err != nil {
-		return err
-	}
-	// Do not establish a route solely to disable an un-routed worktree. An
-	// existing route is sticky and remains untouched; the tombstone below is
-	// sufficient to veto user-global activation when no route exists.
-	if err := repopolicy.SetLocalActivation(ctx, repopolicy.ActivationDisabled); err != nil {
-		return fmt.Errorf("record disabled worktree: %w", err)
-	}
-	return nil
-}
-
-func setWorktreeEnabled(root string, enabled, useProject bool) error {
-	load := settings.LoadLocalRawForWorktree
-	save := settings.SaveLocalRaw
-	if useProject {
-		load = settings.LoadProjectRawForWorktree
-		save = settings.SaveProjectRaw
-	}
-	path, raw, _, err := load(root)
-	if err != nil {
-		return fmt.Errorf("load repository settings: %w", err)
-	}
-	value := json.RawMessage("false")
-	if enabled {
-		value = json.RawMessage("true")
-	}
-	raw["enabled"] = value
-	if err := save(path, raw); err != nil {
-		return fmt.Errorf("save repository settings: %w", err)
-	}
-	if useProject {
-		localPath, localRaw, exists, localErr := settings.LoadLocalRawForWorktree(root)
-		if localErr != nil {
-			return fmt.Errorf("load local repository settings: %w", localErr)
-		}
-		if exists {
-			localRaw["enabled"] = value
-			if err := settings.SaveLocalRaw(localPath, localRaw); err != nil {
-				return fmt.Errorf("save local repository settings: %w", err)
-			}
-		}
-	}
-	return nil
 }
 
 // parseCheckpointRemoteFlag parses a "provider:owner/repo" string into its components.
@@ -1392,9 +1266,9 @@ func repoActivationConfiguredOrUnreadable(ctx context.Context) bool {
 }
 
 func runEnableInteractive(ctx context.Context, w io.Writer, agents []agent.Agent, opts EnableOptions) error {
-	// Capture first-run status before we write enabled: setupEntireDirectory may
-	// already exist for unrelated features, but only explicit activation intent
-	// makes this a reconfiguration. maybeOfferSessionImport uses the result too.
+	// Capture first-run status before we write any settings: setupEntireDirectory
+	// and saveSettings below make IsSetUpAny report true. maybeOfferSessionImport
+	// uses this so the import offer only fires on the very first enable.
 	firstRun := !repoActivationConfiguredOrUnreadable(ctx)
 
 	// Uninstall hooks for agents that were previously active but are no longer selected
@@ -1413,6 +1287,11 @@ func runEnableInteractive(ctx context.Context, w io.Writer, agents []agent.Agent
 		if err := setupOptionalAgentHelpSkill(ctx, w, ag, opts); err != nil {
 			return err
 		}
+	}
+
+	// Setup .entire directory
+	if _, err := setupEntireDirectory(ctx); err != nil {
+		return fmt.Errorf("failed to setup .entire directory: %w", err)
 	}
 
 	// Load existing settings to preserve other options (like strategy_options.push)
@@ -1444,11 +1323,10 @@ func runEnableInteractive(ctx context.Context, w io.Writer, agents []agent.Agent
 
 	// Determine which settings file to write to
 	// First run always creates settings.json (no prompt)
-	root, err := paths.WorktreeRoot(ctx)
+	entireDirAbs, err := paths.AbsPath(ctx, paths.EntireDir)
 	if err != nil {
-		return fmt.Errorf("resolve worktree for settings: %w", err)
+		entireDirAbs = paths.EntireDir // Fallback to relative
 	}
-	entireDirAbs := filepath.Join(root, paths.EntireDir) // entire-join-ok: project settings always live in the literal worktree
 	shouldUseLocal, showNotification := determineSettingsTarget(entireDirAbs, opts.UseLocalSettings, opts.UseProjectSettings)
 
 	if showNotification {
@@ -1461,14 +1339,12 @@ func runEnableInteractive(ctx context.Context, w io.Writer, agents []agent.Agent
 	if shouldUseLocal {
 		targetFile = EntireSettingsLocalFile
 	}
-	ctx, err = persistRepoSettingsWithoutRuntimeRouting(ctx, settings, targetFile)
-	if err != nil {
+	saveSettings := func() error {
+		return saveSettingsToTarget(ctx, settings, targetFile)
+	}
+	if err := saveSettings(); err != nil {
 		return fmt.Errorf("failed to save settings: %w", err)
 	}
-	if _, err := setupEntireDirectory(ctx); err != nil {
-		return fmt.Errorf("failed to setup .entire directory: %w", err)
-	}
-	saveSettings := func() error { return saveSettingsToTarget(ctx, settings, targetFile) }
 
 	// Use settings values (merged from existing config + flags) for hook installation
 	// This ensures re-running `entire enable` without flags preserves existing settings
@@ -1589,19 +1465,12 @@ func firstRunCheckpointBackendDefault() string {
 	return checkpointBackendRefsAlias
 }
 
-// runEnable flips the enabled flag to true in the scope chosen by the caller.
-// Callers resolve the scope: runEnableOnConfiguredRepo
+// runEnable flips the enabled flag to true in the scope chosen by the caller
+// (see setEnabledFlag). Callers resolve the scope: runEnableOnConfiguredRepo
 // uses settingsTargetFile so a bare `entire enable` targets the committed
 // settings.json when present and can recover a repo disabled there.
 func runEnable(ctx context.Context, w io.Writer, useProjectSettings bool) error {
-	root, err := paths.WorktreeRoot(ctx)
-	if err != nil {
-		return fmt.Errorf("resolve worktree before enabling: %w", err)
-	}
-	if err := setWorktreeEnabled(root, true, useProjectSettings); err != nil {
-		return err
-	}
-	if _, err := activateRepoAfterSettings(ctx); err != nil {
+	if err := setEnabledFlag(ctx, true, useProjectSettings); err != nil {
 		return err
 	}
 
@@ -1617,8 +1486,8 @@ func runEnable(ctx context.Context, w io.Writer, useProjectSettings bool) error 
 //   - bare `entire disable` (and --local) writes settings.local.json — the
 //     minimal, always-effective way to silence Entire on one machine without
 //     editing committed team config;
-//   - --project writes the committed settings.json and syncs the local file if
-//     present, so a stale local override can't leave
+//   - --project writes the committed settings.json (and setEnabledFlag also
+//     syncs the local file if present, so a stale local override can't leave
 //     the repo enabled).
 //
 // This restores origin/main's default (bare disable -> local) and matches the
@@ -1634,12 +1503,108 @@ func runDisable(ctx context.Context, w io.Writer, useProjectSettings bool) error
 		configDisplay = configDisplayProject
 	}
 
-	if err := persistDisabledActivation(ctx, targetFile == settings.EntireSettingsFile); err != nil {
+	if err := setEnabledFlag(ctx, false, targetFile == settings.EntireSettingsFile); err != nil {
 		return err
 	}
 
 	fmt.Fprintf(w, "Entire is now disabled (%s).\n", configDisplay)
 	return nil
+}
+
+// setEnabledFlag flips only the "enabled" key in the target scope's settings
+// file, and — when writing the project scope — also syncs that one key into
+// settings.local.json if it exists. The sync is one-directional (project ->
+// local) because settings.local.json overrides settings.json in the merged
+// view, so a stale local "enabled": false would otherwise keep the repo
+// disabled after a project-scope re-enable.
+//
+// This is the canonical explanation of the merged-vs-scoped write rule that the
+// whole enable/disable surface follows; other sites point here.
+//
+// The write path stays scoped to a single file's own raw JSON on purpose.
+// Enable/disable *read* current state through the LoadEntireSettings merged
+// view (e.g. IsEnabled), which flattens settings.local.json overrides
+// (log_level, absolute_git_hook_path, personal strategy_options/checkpoint_remote, ...) on
+// top of settings.json. Writing that merged struct back into one file would
+// leak a developer's local-only overrides into the shared, committed project
+// file whenever a write resolves to settings.json. setEnabledRaw
+// therefore edits only the "enabled" key in each file's own content; its
+// sibling saveEnabledState applies the same rule to a caller-provided,
+// already-target-scoped struct.
+func setEnabledFlag(ctx context.Context, enabled, useProjectSettings bool) error {
+	if useProjectSettings {
+		if err := setEnabledRaw(ctx, settings.LoadProjectRaw, settings.SaveProjectRaw, enabled); err != nil {
+			return fmt.Errorf("failed to save settings: %w", err)
+		}
+		// Also update local if it exists, so it doesn't override.
+		if localExists(ctx) {
+			if err := setEnabledRaw(ctx, settings.LoadLocalRaw, settings.SaveLocalRaw, enabled); err != nil {
+				return fmt.Errorf("failed to save local settings: %w", err)
+			}
+		}
+	} else {
+		if err := setEnabledRaw(ctx, settings.LoadLocalRaw, settings.SaveLocalRaw, enabled); err != nil {
+			return fmt.Errorf("failed to save local settings: %w", err)
+		}
+	}
+	return nil
+}
+
+// setEnabledRaw loads a settings file via load, sets its "enabled" key, and
+// writes it back via save, preserving every other key already in that file.
+func setEnabledRaw(
+	ctx context.Context,
+	load func(context.Context) (path string, raw map[string]json.RawMessage, exists bool, err error),
+	save func(path string, raw map[string]json.RawMessage) error,
+	enabled bool,
+) error {
+	path, raw, _, err := load(ctx)
+	if err != nil {
+		return err
+	}
+	value, err := json.Marshal(enabled)
+	if err != nil {
+		return fmt.Errorf("marshal enabled flag: %w", err)
+	}
+	raw["enabled"] = value
+	return save(path, raw)
+}
+
+// saveEnabledState writes the caller-provided, already-target-scoped struct s
+// to the target file, then applies the same one-directional project -> local
+// sync of the "enabled" key as setEnabledFlag (see that function for the full
+// merged-vs-scoped rationale). s must already be scoped to the target file's
+// own content: it is intentionally NOT written into the other scope, which
+// would overwrite that file's own fields (log_level, absolute_git_hook_path, personal
+// strategy_options, ...) — the same leak this rule prevents, in the other
+// direction.
+func saveEnabledState(ctx context.Context, s *EntireSettings, useProjectSettings bool) error {
+	if useProjectSettings {
+		if err := SaveEntireSettings(ctx, s); err != nil {
+			return fmt.Errorf("failed to save settings: %w", err)
+		}
+		// Also sync just the enabled key to local if it exists, so it doesn't override.
+		if localExists(ctx) {
+			if err := setEnabledRaw(ctx, settings.LoadLocalRaw, settings.SaveLocalRaw, s.Enabled); err != nil {
+				return fmt.Errorf("failed to save local settings: %w", err)
+			}
+		}
+	} else {
+		if err := SaveEntireSettingsLocal(ctx, s); err != nil {
+			return fmt.Errorf("failed to save local settings: %w", err)
+		}
+	}
+	return nil
+}
+
+// localExists checks if settings.local.json exists.
+func localExists(ctx context.Context) bool {
+	localFile := settings.EntireSettingsLocalFile
+	if abs, err := paths.AbsPath(ctx, localFile); err == nil {
+		localFile = abs
+	}
+	_, err := os.Lstat(localFile)
+	return err == nil
 }
 
 // runRemoveAgent removes hooks for a specific agent.
@@ -2001,8 +1966,8 @@ func printWrongAgentError(w io.Writer, name string) {
 // setupAgentHooksNonInteractive sets up hooks for a specific agent non-interactively.
 // If strategyName is provided, it sets the strategy; otherwise uses default.
 func setupAgentHooksNonInteractive(ctx context.Context, w io.Writer, ag agent.Agent, opts EnableOptions) error {
-	// Capture first-run status before repository settings record activation.
-	// Incidental settings files do not make this a reconfiguration.
+	// Capture first-run status before setupEntireDirectory/saveEnabledState make
+	// IsSetUpAny report true, so the import offer fires only on first enable.
 	firstRun := !repoActivationConfiguredOrUnreadable(ctx)
 
 	agentName := ag.Name()
@@ -2025,15 +1990,20 @@ func setupAgentHooksNonInteractive(ctx context.Context, w io.Writer, ag agent.Ag
 		return err
 	}
 
-	// Resolve the target file up front so the load below is scoped to that
-	// file's own content rather than the merged view: writing the merged struct
-	// back into a single scope leaks the other scope's fields into it.
-	targetFile, configDisplay := settingsTargetFile(ctx, opts.UseLocalSettings, opts.UseProjectSettings)
-	root, err := paths.WorktreeRoot(ctx)
-	if err != nil {
-		return fmt.Errorf("resolve worktree for settings: %w", err)
+	// Setup .entire directory
+	if _, err := setupEntireDirectory(ctx); err != nil {
+		return fmt.Errorf("failed to setup .entire directory: %w", err)
 	}
-	targetFileAbs := filepath.Join(root, targetFile) // entire-join-ok: project settings always live in the literal worktree
+
+	// Resolve the target file up front so the load below is scoped to that
+	// file's own content rather than the merged view (see setEnabledFlag for
+	// why: writing the merged struct back into a single scope leaks the other
+	// scope's fields into it).
+	targetFile, configDisplay := settingsTargetFile(ctx, opts.UseLocalSettings, opts.UseProjectSettings)
+	targetFileAbs, err := paths.AbsPath(ctx, targetFile)
+	if err != nil {
+		targetFileAbs = targetFile
+	}
 
 	// Load existing settings from the target file only, to preserve other
 	// options already set there (like strategy_options.push) without pulling
@@ -2080,12 +2050,8 @@ func setupAgentHooksNonInteractive(ctx context.Context, w io.Writer, ag agent.Ag
 		targetSettings.Telemetry = &f
 	}
 
-	ctx, err = persistRepoSettingsWithoutRuntimeRouting(ctx, targetSettings, targetFile)
-	if err != nil {
+	if err := saveEnabledState(ctx, targetSettings, targetFile == EntireSettingsFile); err != nil {
 		return fmt.Errorf("failed to save settings: %w", err)
-	}
-	if _, err := setupEntireDirectory(ctx); err != nil {
-		return fmt.Errorf("failed to setup .entire directory: %w", err)
 	}
 
 	// Hook installation decisions need the merged view across both settings
@@ -2094,7 +2060,8 @@ func setupAgentHooksNonInteractive(ctx context.Context, w io.Writer, ag agent.Ag
 	// settings.json (or vice versa). Using the target-scoped struct here would
 	// silently drop that override when regenerating the git hook script. This
 	// mirrors runEnableInteractive, which uses the merged view for the same
-	// field; only the write path above stays scoped to the target file.
+	// field; only the *write* path (saveEnabledState above) stays scoped to the
+	// target file (see setEnabledFlag for why).
 	mergedSettings, err := LoadEntireSettings(ctx)
 	if err != nil {
 		logging.Warn(ctx, "could not load merged settings for hook installation; proceeding with target-scoped settings only, so a local override (absolute_git_hook_path) may not be applied to the generated git hook", "error", err)
@@ -2506,11 +2473,11 @@ func promptVercelDeploymentDisable() (bool, error) {
 // runUninstall completely removes Entire from the repository.
 func runUninstall(ctx context.Context, w, errW io.Writer, force bool) error {
 	// Check if we're in a git repository
-	root, err := paths.WorktreeRoot(ctx)
-	if err != nil {
+	if _, err := paths.WorktreeRoot(ctx); err != nil {
 		fmt.Fprintln(errW, "Not a git repository. Nothing to uninstall.")
 		return NewSilentError(errors.New("not a git repository"))
 	}
+
 	// Gather counts for display
 	sessionStateCount := countSessionStates(ctx)
 	shadowBranchCount := countShadowBranches(ctx)
@@ -2570,32 +2537,18 @@ func runUninstall(ctx context.Context, w, errW io.Writer, force bool) error {
 	}
 
 	fmt.Fprintln(w, "\nUninstalling Entire CLI...")
-	repository, repoErr := repopolicy.ResolveRepository(ctx)
-	if repoErr != nil {
-		fmt.Fprintf(errW, "Warning: failed to resolve repository policy for uninstall: %v\n", repoErr)
-	} else if activationErr := repopolicy.SetLocalActivationForRepository(repository, repopolicy.ActivationDisabled); activationErr != nil {
-		fmt.Fprintf(errW, "Warning: failed to record disabled worktree: %v\n", activationErr)
-	}
 
 	// 1. Remove agent hooks (lowest risk)
 	if err := removeAgentHooks(ctx, w); err != nil {
 		fmt.Fprintf(errW, "Warning: failed to remove agent hooks: %v\n", err)
 	}
 
-	// 2. Git hooks are shared by every linked worktree. Remove them only when
-	// every real sibling is verifiably inactive; uncertainty preserves them.
-	keepSharedHooks, classifyErr := cloneHasOtherActiveWorktree(ctx, root)
-	if classifyErr != nil {
-		keepSharedHooks = true
-		fmt.Fprintf(errW, "Warning: preserving shared git hooks because sibling activity could not be verified: %v\n", classifyErr)
-	}
-	if !keepSharedHooks {
-		removed, removeErr := strategy.RemoveGitHook(ctx)
-		if removeErr != nil {
-			fmt.Fprintf(errW, "Warning: failed to remove git hooks: %v\n", removeErr)
-		} else if removed > 0 {
-			fmt.Fprintf(w, "  Removed git hooks (%d)\n", removed)
-		}
+	// 2. Remove git hooks
+	removed, err := strategy.RemoveGitHook(ctx)
+	if err != nil {
+		fmt.Fprintf(errW, "Warning: failed to remove git hooks: %v\n", err)
+	} else if removed > 0 {
+		fmt.Fprintf(w, "  Removed git hooks (%d)\n", removed)
 	}
 
 	// 3. Remove session state files
@@ -2621,14 +2574,6 @@ func runUninstall(ctx context.Context, w, errW io.Writer, force bool) error {
 		fmt.Fprintf(w, "  Removed %d shadow branches\n", branchesRemoved)
 	}
 
-	// 6. Drop only this worktree's route/setup/runtime registry entries. The
-	// disabled activation tombstone above is intentionally retained.
-	if repoErr == nil {
-		if err := repopolicy.RemoveWorktreeRuntime(repository); err != nil {
-			fmt.Fprintf(errW, "Warning: failed to remove worktree runtime registry: %v\n", err)
-		}
-	}
-
 	fmt.Fprintln(w, "\nEntire CLI uninstalled successfully.")
 	return nil
 }
@@ -2643,17 +2588,7 @@ func countSessionStates(ctx context.Context) int {
 	if err != nil {
 		return 0
 	}
-	repository, err := repopolicy.ResolveRepository(ctx)
-	if err != nil {
-		return 0
-	}
-	count := 0
-	for _, state := range states {
-		if sessionStateBelongsToWorktree(state, repository) {
-			count++
-		}
-	}
-	return count
+	return len(states)
 }
 
 // countShadowBranches returns the number of shadow branches.
@@ -2662,18 +2597,16 @@ func countShadowBranches(ctx context.Context) int {
 	if err != nil {
 		return 0
 	}
-	repository, err := repopolicy.ResolveRepository(ctx)
-	if err != nil {
-		return 0
-	}
-	return len(shadowBranchesForWorktree(branches, repository.WorktreeID))
+	return len(branches)
 }
 
 // checkEntireDirExists checks if the .entire directory exists.
 func checkEntireDirExists(ctx context.Context) bool {
-	root := literalWorktreeRootOrCWD(ctx)
-	entireDirAbs := filepath.Join(root, paths.EntireDir) // entire-join-ok: uninstall inspects the literal current-worktree config/runtime directory
-	_, err := os.Lstat(entireDirAbs)
+	entireDirAbs, err := paths.AbsPath(ctx, paths.EntireDir)
+	if err != nil {
+		entireDirAbs = paths.EntireDir
+	}
+	_, err = os.Lstat(entireDirAbs)
 	return err == nil
 }
 
@@ -2711,22 +2644,19 @@ func removeAllSessionStates(ctx context.Context) (int, error) {
 	if err != nil {
 		return 0, fmt.Errorf("failed to list session states: %w", err)
 	}
-	repository, err := repopolicy.ResolveRepository(ctx)
-	if err != nil {
-		return 0, fmt.Errorf("resolve worktree for session cleanup: %w", err)
+	count := len(states)
+
+	// Remove the entire directory
+	if err := store.RemoveAll(); err != nil {
+		return 0, fmt.Errorf("failed to remove session states: %w", err)
 	}
-	count := 0
-	for _, state := range states {
-		if !sessionStateBelongsToWorktree(state, repository) {
-			continue
-		}
-		if err := store.Clear(ctx, state.SessionID); err != nil {
-			return count, fmt.Errorf("remove session %s: %w", state.SessionID, err)
-		}
-		count++
-	}
-	if remaining, listErr := store.List(ctx); listErr == nil && len(remaining) == 0 {
-		_ = os.RemoveAll(filepath.Join(repository.GitCommonDir, "entire-session-locks"))
+
+	// Sweep the per-session advisory lock files. These live alongside the
+	// state directory rather than inside it (see strategy.stateLockPath) so
+	// session-listing code doesn't have to filter them out. Best-effort:
+	// failing here doesn't undo the state-file removal.
+	if commonDir, cdErr := strategy.GetGitCommonDir(ctx); cdErr == nil {
+		_ = os.RemoveAll(filepath.Join(commonDir, "entire-session-locks"))
 	}
 
 	return count, nil
@@ -2734,25 +2664,14 @@ func removeAllSessionStates(ctx context.Context) (int, error) {
 
 // removeEntireDirectory removes the .entire directory.
 func removeEntireDirectory(ctx context.Context) error {
-	root := literalWorktreeRootOrCWD(ctx)
-	entireDirAbs := filepath.Join(root, paths.EntireDir) // entire-join-ok: uninstall removes only the literal current-worktree directory
+	entireDirAbs, err := paths.AbsPath(ctx, paths.EntireDir)
+	if err != nil {
+		entireDirAbs = paths.EntireDir
+	}
 	if err := os.RemoveAll(entireDirAbs); err != nil {
 		return fmt.Errorf("failed to remove .entire directory: %w", err)
 	}
 	return nil
-}
-
-func literalWorktreeRootOrCWD(ctx context.Context) string {
-	if root, ok := settings.WorktreeRoot(ctx); ok {
-		return root
-	}
-	if root, err := paths.WorktreeRoot(ctx); err == nil {
-		return root
-	}
-	// runUninstall validates the repository before reaching these helpers.
-	// Keeping a CWD fallback preserves their narrow, non-destructive helper
-	// contract for callers that only inspect/remove the literal .entire path.
-	return "."
 }
 
 // removeAllShadowBranches removes all shadow branches.
@@ -2761,62 +2680,9 @@ func removeAllShadowBranches(ctx context.Context) (int, error) {
 	if err != nil {
 		return 0, fmt.Errorf("failed to list shadow branches: %w", err)
 	}
-	repository, err := repopolicy.ResolveRepository(ctx)
-	if err != nil {
-		return 0, fmt.Errorf("resolve worktree for shadow branch cleanup: %w", err)
-	}
-	branches = shadowBranchesForWorktree(branches, repository.WorktreeID)
 	if len(branches) == 0 {
 		return 0, nil
 	}
 	deleted, _, err := strategy.DeleteShadowBranches(ctx, branches)
 	return len(deleted), err
-}
-
-func sessionStateBelongsToWorktree(state *session.State, repository repopolicy.Repository) bool {
-	if state.WorktreeID != "" || repository.WorktreeID != "" {
-		return state.WorktreeID == repository.WorktreeID
-	}
-	if state.WorktreePath == "" {
-		return true
-	}
-	return filepath.Clean(state.WorktreePath) == repository.WorktreeRoot
-}
-
-func shadowBranchesForWorktree(branches []string, worktreeID string) []string {
-	want := checkpoint.HashWorktreeID(worktreeID)
-	filtered := make([]string, 0, len(branches))
-	for _, branch := range branches {
-		_, got, ok := checkpoint.ParseShadowBranchName(branch)
-		if ok && got == want {
-			filtered = append(filtered, branch)
-		}
-	}
-	return filtered
-}
-
-func cloneHasOtherActiveWorktree(ctx context.Context, currentRoot string) (bool, error) {
-	cmd := exec.CommandContext(ctx, "git", "worktree", "list", "--porcelain", "-z")
-	cmd.Dir = currentRoot
-	out, err := cmd.Output()
-	if err != nil {
-		return true, fmt.Errorf("list linked worktrees: %w", err)
-	}
-	for _, field := range strings.Split(string(out), "\x00") {
-		if !strings.HasPrefix(field, "worktree ") {
-			continue
-		}
-		root := strings.TrimPrefix(field, "worktree ")
-		if filepath.Clean(root) == filepath.Clean(currentRoot) {
-			continue
-		}
-		policy, classifyErr := repopolicy.ClassifyRepoPolicyAt(ctx, root)
-		if classifyErr != nil {
-			return true, fmt.Errorf("classify sibling worktree %s: %w", root, classifyErr)
-		}
-		if policy.Active {
-			return true, nil
-		}
-	}
-	return false, nil
 }

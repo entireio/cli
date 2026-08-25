@@ -2,6 +2,8 @@
 // classify repository tracking policy.
 package repopolicy
 
+import "path/filepath"
+
 // ActivationSource identifies the authority that activated tracking.
 type ActivationSource string
 
@@ -10,34 +12,6 @@ const (
 	ActivationLocal    ActivationSource = "local"
 	ActivationGlobal   ActivationSource = "global"
 )
-
-// RuntimeLayout identifies where mutable runtime data belongs.
-type RuntimeLayout string
-
-const (
-	RuntimeUnknown   RuntimeLayout = "unknown"
-	RuntimeWorktree  RuntimeLayout = "worktree"
-	RuntimeGitCommon RuntimeLayout = "git_common"
-)
-
-// RuntimeRoute is the selected or proposed runtime-data location.
-type RuntimeRoute struct {
-	Version            int           `json:"version"`
-	Layout             RuntimeLayout `json:"layout"`
-	CanonicalWorktree  string        `json:"canonical_worktree"`
-	CanonicalGitCommon string        `json:"canonical_git_common"`
-}
-
-// SetupRecord tracks independently repairable lazy-setup components for one
-// worktree. Identity fields prevent a copied registry record from suppressing
-// setup in another worktree.
-type SetupRecord struct {
-	Version            int    `json:"version"`
-	GitHooksSpec       int    `json:"git_hooks_spec,omitempty"`
-	PrimaryRefSpec     int    `json:"primary_ref_spec,omitempty"`
-	CanonicalWorktree  string `json:"canonical_worktree"`
-	CanonicalGitCommon string `json:"canonical_git_common"`
-}
 
 // TrustSource names the authority behind an egress decision.
 type TrustSource string
@@ -95,7 +69,9 @@ const (
 	InactiveReasonGlobalOff
 )
 
-// RepoPolicy is one immutable repository-policy classification.
+// RepoPolicy is one immutable, derived repository-policy classification.
+// Nothing here is persisted: it is recomputed from the repo's own settings
+// files and the user-global settings file on every classification.
 type RepoPolicy struct {
 	Active           bool
 	ActivationSource ActivationSource
@@ -103,8 +79,31 @@ type RepoPolicy struct {
 	WorktreeRoot     string
 	GitCommonDir     string
 	WorktreeKey      string
-	Route            RuntimeRoute
 	Trust            TrustDecision
+}
+
+// RuntimeRoot is the base directory for runtime data (metadata, logs, tmp).
+// It is a pure function of the activation source: repo-level activation
+// keeps main's <worktree>/.entire layout; global activation keeps runtime
+// data out of the checked-out tree, under the clone's git common dir,
+// namespaced per worktree so linked worktrees never share a root. An
+// inactive policy resolves to the worktree layout so read-only commands
+// (doctor logs, status) look where main always looked.
+func (p RepoPolicy) RuntimeRoot() string {
+	if p.ActivationSource == ActivationGlobal {
+		return filepath.Join(p.GitCommonDir, WorktreeRegistryRelative, p.WorktreeKey)
+	}
+	return filepath.Join(p.WorktreeRoot, ".entire") // entire-join-ok: repo-level layout is the worktree .entire directory by definition
+}
+
+// RepoActivation is what the repository's own settings files say.
+// Configured mirrors main's "set up" notion: a project settings.json (any
+// content) or a settings.local.json that carries an explicit "enabled" key.
+// A local file written by an unrelated feature (investigate config, ...)
+// without that key does not pin the repo out of the global tier.
+type RepoActivation struct {
+	Configured bool
+	Enabled    bool
 }
 
 // GlobalConfig is the "global" section of the user-global settings file.

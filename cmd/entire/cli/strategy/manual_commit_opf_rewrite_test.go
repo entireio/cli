@@ -15,7 +15,6 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
-	"github.com/entireio/cli/cmd/entire/cli/settings/repopolicy"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 	"github.com/entireio/cli/cmd/entire/cli/trailers"
 	"github.com/entireio/cli/redact"
@@ -843,9 +842,6 @@ func setupGitRefsOPFRepo(t *testing.T, cpIDs ...string) (bareDir string, repo *g
 	require.NoError(t, err)
 	_, err = repo.CreateRemote(&gitconfig.RemoteConfig{Name: "origin", URLs: []string{bareDir}})
 	require.NoError(t, err)
-	require.NoError(t, repopolicy.SetLocalActivationForRepository(
-		mustResolvePolicyRepository(t, workDir), repopolicy.ActivationEnabled,
-	))
 
 	t.Chdir(workDir)
 	paths.ClearWorktreeRootCache()

@@ -21,10 +21,8 @@ func TestGetNextCheckpointSequence_CanceledContextDoesNotReadRelativeFallback(t 
 	testutil.InitRepo(t, repoDir)
 	t.Chdir(repoDir)
 	paths.ClearWorktreeRootCache()
-	paths.ClearInvisibleRuntimeCache()
 	t.Cleanup(func() {
 		paths.ClearWorktreeRootCache()
-		paths.ClearInvisibleRuntimeCache()
 	})
 
 	configDir := t.TempDir()

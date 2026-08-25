@@ -107,7 +107,6 @@ func persistUserSettings(path string, settings *UserSettings) error {
 	if err := jsonutil.WriteFileAtomicFollowingSymlinks(path, data, 0o600); err != nil {
 		return fmt.Errorf("writing user settings: %w", err)
 	}
-	ClearGlobalModeCache()
 	return nil
 }
 

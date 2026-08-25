@@ -1,8 +1,6 @@
 package repopolicy
 
 import (
-	"errors"
-	"os"
 	"path/filepath"
 	"testing"
 )
@@ -60,64 +58,73 @@ func TestEgressDecision_GlobalOffDeniesEvenWhenTrustAllIsTrue(t *testing.T) {
 	}
 }
 
-func TestEgressDecision_CommittedProjectSettingsNeverGrantConsent(t *testing.T) {
-	root, _ := newPolicyRepo(t)
-	setPolicyGlobal(t, `{"global":{"enabled":true}}`)
-	writePolicyFile(t, root, ".entire/settings.json", `{"enabled":true}`)
-	runPolicyGit(t, root, "add", ".entire/settings.json")
-	runPolicyGit(t, root, "commit", "--no-gpg-sign", "-m", "tracked settings")
-
-	policy := policyAt(t, root)
-	if !policy.Active || policy.ActivationSource != ActivationGlobal || policy.Trust.Allowed {
-		t.Fatalf("policy = %+v, committed project settings must not grant egress", policy)
-	}
-}
-
-func TestTrustLedger_RejectsCopiedRepositoryIdentity(t *testing.T) {
-	_, first := newPolicyRepo(t)
-	_, second := newPolicyRepo(t)
-	if err := WriteTrustGrantLedger(first, TrustGrantLedger{OriginKeys: []string{"github.com/acme/widgets"}}); err != nil {
-		t.Fatal(err)
-	}
-	data, err := os.ReadFile(trustLedgerPath(first))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := ensureRegistryDir(second); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(trustLedgerPath(second), data, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if _, _, err := ReadTrustGrantLedger(second); err == nil {
-		t.Fatal("copied trust ledger unexpectedly passed repository identity validation")
-	}
-}
-
-func TestModifyTrustGrantLedger_CallbackFailureDropsOwnership(t *testing.T) {
+// A repo-enabled repository is gated exactly like a globally tracked one
+// while the global tier is on: once user-level hooks fire everywhere,
+// consent has to live in the user settings file. With the tier off (or
+// unconfigured) nothing changes from main.
+func TestEgressDecision_LocalActivationIsGatedWhileGlobalIsOn(t *testing.T) {
 	t.Parallel()
-	_, repository := newPolicyRepo(t)
-	if err := WriteTrustGrantLedger(repository, TrustGrantLedger{
-		OriginKeys: []string{"github.com/acme/widgets"},
-	}); err != nil {
-		t.Fatal(err)
+	_, repository := newPolicyRepo(t) // git-initialized, no origin: identity is the path
+	policy := RepoPolicy{Active: true, ActivationSource: ActivationLocal, WorktreeRoot: repository.WorktreeRoot}
+
+	held := DecideEgress(t.Context(), policy, &GlobalConfig{Enabled: true}, repository)
+	if held.Allowed || held.Reason != TrustReasonUntrusted || held.Identity.Path != repository.WorktreeRoot {
+		t.Fatalf("untrusted local repo with global on = %+v, want held by path identity", held)
 	}
 
-	wantErr := errors.New("settings write failed")
-	err := ModifyTrustGrantLedger(t.Context(), repository, func(TrustGrantLedger) (TrustGrantLedger, error) {
-		return TrustGrantLedger{}, wantErr
-	})
-	if !errors.Is(err, wantErr) {
-		t.Fatalf("ModifyTrustGrantLedger error = %v, want %v", err, wantErr)
+	trusted := DecideEgress(t.Context(), policy, &GlobalConfig{Enabled: true, TrustedPaths: []string{repository.WorktreeRoot}}, repository)
+	if !trusted.Allowed || trusted.Source != TrustSourceRepo {
+		t.Fatalf("trusted-path local repo with global on = %+v, want allowed by repo trust", trusted)
 	}
-	ledger, found, err := ReadTrustGrantLedger(repository)
-	if err != nil {
-		t.Fatal(err)
+
+	tierOff := DecideEgress(t.Context(), policy, nil, repository)
+	if !tierOff.Allowed || tierOff.Source != TrustSourceLocal {
+		t.Fatalf("local repo with global unconfigured = %+v, want main's behavior (allowed)", tierOff)
 	}
-	if !found {
-		t.Fatal("trust ledger missing after failed mutation")
+}
+
+func TestReadRepoActivation(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		project string // "" means absent
+		local   string // "" means absent
+		want    RepoActivation
+		wantErr bool
+	}{
+		{name: "no files"},
+		{name: "project enabled", project: `{"enabled":true}`, want: RepoActivation{Configured: true, Enabled: true}},
+		{name: "project without key defaults enabled", project: `{}`, want: RepoActivation{Configured: true, Enabled: true}},
+		{name: "project disabled", project: `{"enabled":false}`, want: RepoActivation{Configured: true}},
+		{name: "local without key is not activation", local: `{"log_level":"DEBUG"}`},
+		{name: "local enabled", local: `{"enabled":true}`, want: RepoActivation{Configured: true, Enabled: true}},
+		{name: "local veto wins over project", project: `{"enabled":true}`, local: `{"enabled":false}`, want: RepoActivation{Configured: true}},
+		{name: "non-boolean enabled is an error", project: `{"enabled":"yes"}`, wantErr: true},
+		{name: "malformed json is an error", project: `{"enabled":tru`, wantErr: true},
 	}
-	if len(ledger.OriginKeys) != 0 || len(ledger.Paths) != 0 {
-		t.Fatalf("trust ledger retained stale ownership after failed mutation: %+v", ledger)
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			root := t.TempDir()
+			if tc.project != "" {
+				writePolicyFile(t, root, ".entire/settings.json", tc.project)
+			}
+			if tc.local != "" {
+				writePolicyFile(t, root, ".entire/settings.local.json", tc.local)
+			}
+			got, err := ReadRepoActivation(root)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("ReadRepoActivation = %+v, want error", got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("ReadRepoActivation: %v", err)
+			}
+			if got != tc.want {
+				t.Fatalf("ReadRepoActivation = %+v, want %+v", got, tc.want)
+			}
+		})
 	}
 }

@@ -134,7 +134,6 @@ type globalTrackingInfo struct {
 	Enabled          bool
 	SettingsPath     string
 	ActivationSource repopolicy.ActivationSource
-	RuntimeLayout    repopolicy.RuntimeLayout
 	// AgentsCovered counts agents whose user-level hooks are installed; only
 	// meaningful when Enabled.
 	AgentsCovered int
@@ -195,7 +194,6 @@ func computeGlobalTrackingInfo(ctx context.Context) globalTrackingInfo {
 			info.ActiveHere = policy.Active
 			info.InactiveReason = policy.InactiveReason
 			info.ActivationSource = policy.ActivationSource
-			info.RuntimeLayout = policy.Route.Layout
 			info.TrustState, info.TrustSource = computeRepoTrustState(policy)
 		}
 		if info.TrustState == trustStateUntrusted {
@@ -206,10 +204,11 @@ func computeGlobalTrackingInfo(ctx context.Context) globalTrackingInfo {
 }
 
 // computeRepoTrustState classifies this repo's egress consent for status.
-// Only a globally enrolled repo has a per-repo trust decision; everything
-// else is not_applicable.
+// While the global tier is off an active repo syncs as on main and has no
+// per-repo decision (not_applicable); with the tier on, every active repo
+// is either trusted or held.
 func computeRepoTrustState(policy repopolicy.RepoPolicy) (string, settings.TrustSource) {
-	if !policy.Active || policy.ActivationSource != repopolicy.ActivationGlobal {
+	if !policy.Active || policy.Trust.Source == settings.TrustSourceLocal {
 		return trustStateNotApplicable, settings.TrustSourceNone
 	}
 	if !policy.Trust.Allowed {
@@ -993,7 +992,6 @@ type globalTrackingJSON struct {
 	Enabled          bool   `json:"enabled"`
 	SettingsPath     string `json:"settings_path,omitempty"`
 	ActivationSource string `json:"activation_source,omitempty"`
-	RuntimeLayout    string `json:"runtime_layout,omitempty"`
 	// AgentsCovered counts agents whose user-level hooks are installed.
 	AgentsCovered int `json:"agents_covered"`
 	// ActiveHere is the hook gate's per-repo answer and InactiveReason names
@@ -1045,7 +1043,6 @@ func runStatusJSON(ctx context.Context, w io.Writer) error {
 			AgentsCovered:    info.AgentsCovered,
 			SettingsPath:     info.SettingsPath,
 			ActivationSource: string(info.ActivationSource),
-			RuntimeLayout:    string(info.RuntimeLayout),
 			HeldCheckpoints:  info.HeldCheckpoints,
 		}
 		if info.InRepo {

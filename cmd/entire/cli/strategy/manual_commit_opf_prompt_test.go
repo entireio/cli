@@ -14,7 +14,6 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
-	"github.com/entireio/cli/cmd/entire/cli/settings/repopolicy"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 	"github.com/stretchr/testify/require"
 )
@@ -190,9 +189,6 @@ func TestPrePush_OPFProgressUsesConfiguredWriter(t *testing.T) {
 	_, err := git.PlainInit(remoteDir, true)
 	require.NoError(t, err)
 	testutil.AddRemote(t, tmpDir, "origin", remoteDir)
-	require.NoError(t, repopolicy.SetLocalActivationForRepository(
-		mustResolvePolicyRepository(t, tmpDir), repopolicy.ActivationEnabled,
-	))
 	t.Chdir(tmpDir)
 	configureFakeOPF(t, &fakeOPFForRewrite{})
 
@@ -201,13 +197,6 @@ func TestPrePush_OPFProgressUsesConfiguredWriter(t *testing.T) {
 
 	require.NoError(t, (&ManualCommitStrategy{}).PrePush(t.Context(), "origin"))
 	require.Contains(t, out.String(), "OpenAI Privacy Filter: scanning checkpoints before push")
-}
-
-func mustResolvePolicyRepository(t *testing.T, dir string) repopolicy.Repository {
-	t.Helper()
-	repository, err := repopolicy.ResolveRepositoryAt(t.Context(), dir)
-	require.NoError(t, err)
-	return repository
 }
 
 func withOPFPrePushProgressWriterForTest(t testing.TB, w io.Writer) {

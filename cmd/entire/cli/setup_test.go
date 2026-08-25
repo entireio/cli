@@ -24,7 +24,6 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
-	"github.com/entireio/cli/cmd/entire/cli/settings/repopolicy"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 )
@@ -1200,14 +1199,6 @@ func TestRunUninstall_Force_NothingInstalled(t *testing.T) {
 	output := stdout.String()
 	if !strings.Contains(output, "not installed") {
 		t.Errorf("Expected output to indicate nothing installed, got: %s", output)
-	}
-	repository, err := repopolicy.ResolveRepository(t.Context())
-	if err != nil {
-		t.Fatal(err)
-	}
-	state, err := repopolicy.ReadLocalActivation(repository)
-	if err != nil || state != repopolicy.ActivationAbsent {
-		t.Fatalf("no-op uninstall activation = %v, %v; want absent", state, err)
 	}
 }
 

@@ -288,11 +288,13 @@ func sessionStartMessage(agentName types.AgentName, emptyRepo bool) string {
 	return "\n\nEntire CLI will link this conversation to your next commit."
 }
 
-// globalTrustBannerSuffix returns the untrusted-enrollment banner line, empty
-// for every consented state (settings.RepoUntrustedEnrolled decides). Codex
-// banners are single-line, so the suffix joins with a space there.
+// globalTrustBannerSuffix returns the held-sync banner line, empty for every
+// consented state (settings.CheckpointEgressHeld decides). With the global
+// tier on it fires for any active repo that is not yet trusted — a
+// repo-enabled one included — which is intended. Codex banners are
+// single-line, so the suffix joins with a space there.
 func globalTrustBannerSuffix(ctx context.Context, agentName types.AgentName) string {
-	if !settings.RepoUntrustedEnrolled(ctx) {
+	if !settings.CheckpointEgressHeld(ctx) {
 		return ""
 	}
 	// "checkpoint sync remote", not "origin": sync targets the elected remote.

@@ -11,7 +11,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/settings/repopolicy"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
@@ -85,22 +84,16 @@ func TestGlobalEnable_LazyInvisibleSetup(t *testing.T) {
 	if !strategy.IsGitHookInstalledInDir(ctx, env.RepoDir) {
 		t.Error("git hooks not installed after first hook event")
 	}
-	repository, err := repopolicy.ResolveRepositoryAt(ctx, env.RepoDir)
-	if err != nil {
-		t.Fatalf("resolve repository: %v", err)
-	}
-	record, found, err := repopolicy.ReadSetupRecord(repository)
-	if err != nil || !found {
-		t.Fatalf("setup record = (%+v, %v, %v), want per-worktree record", record, found, err)
-	}
-	if record.GitHooksSpec != 1 || record.PrimaryRefSpec != 1 {
-		t.Errorf("setup components not recorded: %+v", record)
-	}
 	if !env.BranchExists("entire/checkpoints/v1") {
 		t.Error("checkpoint metadata ref not created by lazy enable")
 	}
 
-	invisibleBase := filepath.Join(env.RepoDir, ".git", "entire", "worktree", paths.HashWorktreeID(""))
+	// Pure path math, never an in-process classification: the per-test user
+	// settings file reaches only the spawned binary via extraEnv.
+	invisibleBase := globalRuntimeRoot(t, env)
+	if _, err := os.Stat(filepath.Join(invisibleBase, primaryRefStampName)); err != nil {
+		t.Errorf("primary-ref stamp not written by lazy enable: %v", err)
+	}
 	assertNoWorktreeEntireDir(t, env)
 	if status := gitStatusPorcelain(t, env); status != "" {
 		t.Errorf("git status not empty after hook event:\n%s", status)
@@ -164,35 +157,86 @@ func TestGlobalEnable_LazyInvisibleSetup(t *testing.T) {
 	}
 }
 
-func TestGlobalEnable_GitHookRouteTriggersSetup(t *testing.T) {
+// primaryRefStampName mirrors strategy.primaryRefStamp: the lazy setup's
+// only bookkeeping file, written beside the routed runtime data.
+const primaryRefStampName = "primary-ref-ready"
+
+// globalRuntimeRoot is the git-side runtime root of env's worktree, computed
+// with pure path math (repopolicy.RuntimeDir) — never via an in-process
+// ClassifyRepoPolicy, which would read the test process's shared
+// ENTIRE_CONFIG_DIR rather than the per-test one the spawned binary sees.
+func globalRuntimeRoot(t *testing.T, env *TestEnv) string {
+	t.Helper()
+	repository, err := repopolicy.ResolveRepositoryAt(context.Background(), env.RepoDir)
+	if err != nil {
+		t.Fatalf("resolve repository: %v", err)
+	}
+	return repopolicy.RuntimeDir(repository)
+}
+
+// TestGlobalEnable_GitHookRouteRepairsPrimaryRef: the git-hook route runs the
+// same lazy setup as the agent route. Post-commit condensation can recreate
+// the v1 branch on its own, so the STAMP reappearing is the assertion that
+// proves MaybeEnsureGlobalSetup ran — do not simplify it away.
+func TestGlobalEnable_GitHookRouteRepairsPrimaryRef(t *testing.T) {
 	t.Parallel()
 	env, extraEnv := newGloballyTrackedEnv(t, true)
-	ctx := context.Background()
 
 	runClaudeHook(t, env, extraEnv, "user-prompt-submit", map[string]string{
 		"session_id":      "global-test-session-3",
 		"transcript_path": "",
 		"prompt":          "Prime the lazy setup",
 	})
-	if !strategy.IsGitHookInstalledInDir(ctx, env.RepoDir) {
-		t.Fatal("git hooks not installed after first hook event")
+	stamp := filepath.Join(globalRuntimeRoot(t, env), primaryRefStampName)
+	if _, err := os.Stat(stamp); err != nil {
+		t.Fatalf("primary-ref stamp not written by first hook: %v", err)
 	}
-
-	repository, err := repopolicy.ResolveRepositoryAt(ctx, env.RepoDir)
-	if err != nil {
-		t.Fatalf("resolve repository: %v", err)
+	if err := os.Remove(stamp); err != nil {
+		t.Fatalf("remove stamp: %v", err)
 	}
-	setupPath := filepath.Join(repopolicy.WorktreeRegistryDir(repository.GitCommonDir, repository.WorktreeKey), "setup.json")
-	if err := os.Remove(setupPath); err != nil {
-		t.Fatalf("remove setup record: %v", err)
+	deleteRef := exec.CommandContext(context.Background(), "git", "update-ref", "-d", "refs/heads/entire/checkpoints/v1")
+	deleteRef.Dir = env.RepoDir
+	deleteRef.Env = testutil.GitIsolatedEnv()
+	if out, err := deleteRef.CombinedOutput(); err != nil {
+		t.Fatalf("delete primary ref: %v\n%s", err, out)
 	}
 
 	env.WriteFile("hook-route.txt", "via git hooks\n")
 	env.GitCommitWithShadowHooksAsAgent("Add file via git hook route", "hook-route.txt")
 
-	record, found, err := repopolicy.ReadSetupRecord(repository)
-	if err != nil || !found || record.GitHooksSpec != 1 || record.PrimaryRefSpec != 1 {
-		t.Errorf("git-hook route did not restore the setup record: (%+v, %v, %v)", record, found, err)
+	if !env.BranchExists("entire/checkpoints/v1") {
+		t.Error("git-hook route did not restore the checkpoint metadata ref")
+	}
+	if _, err := os.Stat(stamp); err != nil {
+		t.Errorf("git-hook route did not re-run lazy setup (stamp missing): %v", err)
+	}
+	assertNoWorktreeEntireDir(t, env)
+}
+
+// TestGlobalEnable_AgentRouteReinstallsGitHooks: hook presence is re-checked
+// on every hook, so deleted git hooks come back on the next agent activity
+// without any marker bookkeeping.
+func TestGlobalEnable_AgentRouteReinstallsGitHooks(t *testing.T) {
+	t.Parallel()
+	env, extraEnv := newGloballyTrackedEnv(t, true)
+	ctx := context.Background()
+	prompt := map[string]string{
+		"session_id":      "global-test-session-4",
+		"transcript_path": "",
+		"prompt":          "Prime the lazy setup",
+	}
+
+	runClaudeHook(t, env, extraEnv, "user-prompt-submit", prompt)
+	if !strategy.IsGitHookInstalledInDir(ctx, env.RepoDir) {
+		t.Fatal("git hooks not installed after first hook event")
+	}
+	if err := os.RemoveAll(filepath.Join(env.RepoDir, ".git", "hooks")); err != nil {
+		t.Fatalf("remove hooks dir: %v", err)
+	}
+
+	runClaudeHook(t, env, extraEnv, "user-prompt-submit", prompt)
+	if !strategy.IsGitHookInstalledInDir(ctx, env.RepoDir) {
+		t.Error("agent route did not reinstall the deleted git hooks")
 	}
 	assertNoWorktreeEntireDir(t, env)
 }

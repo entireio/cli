@@ -13,7 +13,6 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
-	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 	"github.com/entireio/cli/redact"
@@ -116,9 +115,6 @@ func TestGitHookPreRun_ProceedUnderGlobalMode(t *testing.T) {
 		t.Fatalf("failed to write user-global settings file: %v", err)
 	}
 
-	paths.ClearInvisibleRuntimeCache()
-	t.Cleanup(paths.ClearInvisibleRuntimeCache)
-
 	hookCmd := newHooksGitCmd()
 	base := context.Background()
 	hookCmd.SetContext(base)
@@ -167,14 +163,10 @@ func TestWithHookSession_ConfiguresRedactionUnderGlobalMode(t *testing.T) {
 	}
 
 	paths.ClearWorktreeRootCache()
-	paths.ClearInvisibleRuntimeCache()
 	session.ClearGitCommonDirCache()
-	settings.ClearGlobalModeCache()
 	t.Cleanup(func() {
 		paths.ClearWorktreeRootCache()
-		paths.ClearInvisibleRuntimeCache()
 		session.ClearGitCommonDirCache()
-		settings.ClearGlobalModeCache()
 	})
 
 	// A committed redactor pack is repo content the user put there, not
@@ -243,7 +235,6 @@ func TestHooksGitCmd_DiscoverExternalAgents_WhenEnabled(t *testing.T) {
 	if err := os.WriteFile(settingsFile, []byte(`{"enabled":true,"external_agents":true}`), 0o644); err != nil {
 		t.Fatalf("failed to write settings file: %v", err)
 	}
-	markCurrentRepoLocallyActivated(t)
 
 	// Create a mock external agent binary in a temp PATH directory.
 	// Use a unique name to avoid conflicts with agents registered by other tests.

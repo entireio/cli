@@ -551,9 +551,6 @@ func validateScannerSettings(s *EntireSettings) error {
 // Returns default settings if no settings or preferences file exists.
 // Works correctly from any subdirectory within the repository.
 func Load(ctx context.Context) (*EntireSettings, error) {
-	if policy, ok := repopolicy.RepoPolicyFromContext(ctx); ok {
-		return LoadForRepoPolicy(ctx, policy)
-	}
 	if worktreeRoot, ok := worktreeRootFromContext(ctx); ok {
 		return loadForWorktreeRoot(ctx, worktreeRoot)
 	}
@@ -624,13 +621,9 @@ func clonePreferencesPathForWorktreeRoot(ctx context.Context, worktreeRoot strin
 
 func loadMergedSettings(ctx context.Context, settingsFileAbs, preferencesFileAbs, localSettingsFileAbs string) (*EntireSettings, error) {
 	// Load base settings
-	var err error
-	settings := &EntireSettings{Enabled: true}
-	if settingsFileAbs != "" {
-		settings, err = loadFromFile(settingsFileAbs)
-		if err != nil {
-			return nil, fmt.Errorf("reading settings file: %w", err)
-		}
+	settings, err := loadFromFile(settingsFileAbs)
+	if err != nil {
+		return nil, fmt.Errorf("reading settings file: %w", err)
 	}
 
 	if preferencesFileAbs != "" {
@@ -643,24 +636,21 @@ func loadMergedSettings(ctx context.Context, settingsFileAbs, preferencesFileAbs
 
 	// Apply local overrides if they exist — but only from a file that is
 	// genuinely local. See localLayerTrackedReason.
-	var localData []byte
-	if localSettingsFileAbs != "" {
-		localData, err = readConfined(localSettingsFileAbs)
-		if err != nil {
-			if !errors.Is(err, fs.ErrNotExist) {
-				return nil, fmt.Errorf("reading local settings file: %w", err)
-			}
-			// Local file doesn't exist, continue without overrides
-		} else if classifyLocalSettings(ctx, localSettingsFileAbs) == localTracked {
-			// Dropped only on PROOF that the file is tracked. Discarding every
-			// local setting because a repository could not be read would be a
-			// worse failure than the one being guarded against — the exec-bearing
-			// OPF command applies the stricter policy for itself.
-			settings.localLayerRejection = localLayerTrackedReason
-			localData = nil
-		} else if err := mergeJSON(settings, localData); err != nil {
-			return nil, fmt.Errorf("merging local settings: %w", err)
+	localData, err := readConfined(localSettingsFileAbs)
+	if err != nil {
+		if !errors.Is(err, fs.ErrNotExist) {
+			return nil, fmt.Errorf("reading local settings file: %w", err)
 		}
+		// Local file doesn't exist, continue without overrides
+	} else if classifyLocalSettings(ctx, localSettingsFileAbs) == localTracked {
+		// Dropped only on PROOF that the file is tracked. Discarding every
+		// local setting because a repository could not be read would be a
+		// worse failure than the one being guarded against — the exec-bearing
+		// OPF command applies the stricter policy for itself.
+		settings.localLayerRejection = localLayerTrackedReason
+		localData = nil
+	} else if err := mergeJSON(settings, localData); err != nil {
+		return nil, fmt.Errorf("merging local settings: %w", err)
 	}
 
 	// openai_privacy_filter.command is executed, so it is honored only from a
@@ -707,12 +697,6 @@ func LoadProjectRaw(ctx context.Context) (path string, raw map[string]json.RawMe
 	return loadRaw(ctx, EntireSettingsFile, "project")
 }
 
-// LoadProjectRawForWorktree reads project settings from the literal worktree
-// location. Configuration is never runtime-routed.
-func LoadProjectRawForWorktree(worktreeRoot string) (path string, raw map[string]json.RawMessage, exists bool, err error) {
-	return loadRawPath(filepath.Join(worktreeRoot, EntireSettingsFile), "project")
-}
-
 // LoadLocalRaw reads the raw local file and is deliberately UNGATED: it is the
 // read half of read-modify-write for every caller that saves the file back, so
 // hiding a tracked file here would make those writers clobber its other keys.
@@ -728,12 +712,6 @@ func LoadProjectRawForWorktree(worktreeRoot string) (path string, raw map[string
 // unrelated keys in the per-developer override file.
 func LoadLocalRaw(ctx context.Context) (path string, raw map[string]json.RawMessage, exists bool, err error) {
 	return loadRaw(ctx, EntireSettingsLocalFile, "local")
-}
-
-// LoadLocalRawForWorktree reads local settings from the literal worktree
-// location. Configuration is never runtime-routed.
-func LoadLocalRawForWorktree(worktreeRoot string) (path string, raw map[string]json.RawMessage, exists bool, err error) {
-	return loadRawPath(filepath.Join(worktreeRoot, EntireSettingsLocalFile), "local")
 }
 
 // loadRaw reads a settings file as a generic JSON object. label ("project" or
@@ -798,11 +776,6 @@ func saveRaw(path, label string, raw map[string]json.RawMessage) error {
 	if err := jsonutil.WriteFileAtomic(path, data, 0o644); err != nil {
 		return fmt.Errorf("writing %s settings: %w", label, err)
 	}
-	// Same invalidation contract as saveToFile below: a repo settings file's
-	// existence is the invisible-routing discriminator, and the raw path can
-	// CREATE that file (e.g. a bare `entire disable` in a fresh repo), so the
-	// writer process must observe its own write.
-	paths.ClearInvisibleRuntimeCache()
 	return nil
 }
 
@@ -1492,103 +1465,45 @@ func IsSetUpAny(ctx context.Context) bool {
 	return err == nil
 }
 
-// RepoActivationConfigured reports whether either repository settings file
-// contains an explicit top-level "enabled" key. This is narrower than
-// IsSetUpAny: unrelated features may create a settings file without choosing
-// repo-local activation, and those repositories must continue inheriting the
-// user-global tier. A malformed or unreadable settings file returns an error
-// so activation gates can fail closed.
+// RepoActivationConfigured reports whether the repository's own settings
+// files express repo-level activation (see repopolicy.ReadRepoActivation).
+// A malformed settings file, or one whose effective schema fails Load (e.g.
+// both secret scanners disabled), is an error so setup and consent flows
+// fail closed rather than treating invalid configuration as intent.
 func RepoActivationConfigured(ctx context.Context) (bool, error) {
-	_, project, _, err := LoadProjectRaw(ctx)
+	root, err := paths.WorktreeRoot(ctx)
 	if err != nil {
-		return false, err
+		return false, err //nolint:wrapcheck // paths error already names the failure
 	}
-	projectConfigured, err := activationKeyPresent(project, "project")
+	activation, err := repopolicy.ReadRepoActivation(root)
 	if err != nil {
-		return false, err
+		return false, fmt.Errorf("reading repo activation settings: %w", err)
 	}
-	localPath, local, _, err := LoadLocalRaw(ctx)
-	if err != nil {
-		return false, err
-	}
-
-	localConfigured := false
-	if _, present := local["enabled"]; present {
-		switch classifyLocalSettings(ctx, localPath) {
-		case localTracked:
-			// A versioned "local" file is repository content, not this
-			// developer's activation choice. The normal loader ignores it too.
-		case localOwn:
-			localConfigured, err = activationKeyPresent(local, "local")
-		case localUnverifiable:
-			if _, keyErr := activationKeyPresent(local, "local"); keyErr != nil {
-				return false, keyErr
-			}
-			if !projectConfigured {
-				return false, errors.New("cannot verify that local activation settings are developer-owned")
-			}
-		}
-		if err != nil {
-			return false, err
-		}
-	}
-
-	configured := projectConfigured || localConfigured
-	if !configured {
+	if !activation.Configured {
 		return false, nil
 	}
-	// Key presence is policy intent only when the effective settings schema is
-	// valid. In particular, consent callers must not treat an unknown field or
-	// invalid enabled value as permission merely because raw JSON contained it.
 	if _, err := Load(ctx); err != nil {
 		return false, fmt.Errorf("validating repo activation settings: %w", err)
 	}
 	return true, nil
 }
 
-func activationKeyPresent(raw map[string]json.RawMessage, label string) (bool, error) {
-	v, ok := raw["enabled"]
-	if !ok {
-		return false, nil
-	}
-	if bytes.Equal(bytes.TrimSpace(v), []byte("null")) {
-		return false, fmt.Errorf("%s settings enabled must be a boolean", label)
-	}
-	var enabled bool
-	if err := json.Unmarshal(v, &enabled); err != nil {
-		return false, fmt.Errorf("%s settings enabled must be a boolean: %w", label, err)
-	}
-	return true, nil
-}
-
-// IsSetUpAndEnabled returns true if Entire is both set up and enabled.
-// "Set up" spans either scope — .entire/settings.json OR
-// .entire/settings.local.json — so it must check IsSetUpAny, not IsSetUp.
-// `entire enable --local` writes only settings.local.json and never creates the
-// base file; gating on the base file alone would treat such a local-only repo
-// as inactive and make every hook a silent no-op, dropping all checkpoint
-// capture for that documented workflow. The IsSetUpAny guard is still required
-// so a never-enabled repo (no settings file in any scope) is not treated as
-// enabled by Load's default Enabled: true. Any settings read error is treated
-// as disabled (fail closed).
-// Use this for hooks that should be no-ops when Entire is not active.
+// IsSetUpAndEnabled reports repo-level activation: a project settings.json
+// (default enabled) or a settings.local.json carrying an explicit "enabled"
+// key, with the local value winning. Any read error, and any settings file
+// the full loader rejects (ErrScannerConfig, unknown keys), is disabled —
+// fail closed.
 func IsSetUpAndEnabled(ctx context.Context) bool {
-	return IsSetUpAny(ctx) && repoSettingsEnabled(ctx)
-}
-
-// repoSettingsEnabled loads the repo settings and reports Enabled, treating
-// any read error as disabled (fail closed). Callers must have already
-// established that some settings file exists (IsSetUpAny) — without that
-// guard, Load's default Enabled: true would report a never-enabled repo as
-// enabled. Split out so gates that have just called IsSetUpAny (e.g.
-// IsActiveForRepo) don't pay its Lstat pair a second time via
-// IsSetUpAndEnabled on every hook invocation.
-func repoSettingsEnabled(ctx context.Context) bool {
-	s, err := Load(ctx)
+	root, err := paths.WorktreeRoot(ctx)
 	if err != nil {
 		return false
 	}
-	return s.Enabled
+	activation, err := repopolicy.ReadRepoActivation(root)
+	if err != nil || !activation.Configured || !activation.Enabled {
+		return false
+	}
+	_, err = Load(ctx)
+	return err == nil
 }
 
 // IsFilteredFetchesEnabled checks if filtered fetches should be used.
@@ -1826,16 +1741,6 @@ func SaveLocal(ctx context.Context, settings *EntireSettings) error {
 	return saveToFile(ctx, settings, EntireSettingsLocalFile)
 }
 
-// SaveForWorktree writes settings beneath the literal worktree root. It is
-// the setup-path writer used before a runtime route exists.
-func SaveForWorktree(worktreeRoot string, settings *EntireSettings, local bool) error {
-	file := EntireSettingsFile
-	if local {
-		file = EntireSettingsLocalFile
-	}
-	return saveToLiteralFile(settings, filepath.Join(worktreeRoot, file))
-}
-
 // saveToFile saves settings to the specified file path.
 func saveToFile(ctx context.Context, settings *EntireSettings, filePath string) error {
 	// Get absolute path for the file
@@ -1844,10 +1749,6 @@ func saveToFile(ctx context.Context, settings *EntireSettings, filePath string) 
 		filePathAbs = filePath // Fallback to relative
 	}
 
-	return saveToLiteralFile(settings, filePathAbs)
-}
-
-func saveToLiteralFile(settings *EntireSettings, filePathAbs string) error {
 	// Ensure directory exists
 	dir := filepath.Dir(filePathAbs)
 	if err := os.MkdirAll(dir, 0o750); err != nil {
@@ -1862,10 +1763,5 @@ func saveToLiteralFile(settings *EntireSettings, filePathAbs string) error {
 	if err := jsonutil.WriteFileAtomic(filePathAbs, data, 0o644); err != nil {
 		return fmt.Errorf("writing settings file: %w", err)
 	}
-	// A repo settings file's existence is the invisible-routing discriminator:
-	// creating one during enable must flip runtime-data resolution back to the
-	// worktree for the rest of this process (e.g. session import right after
-	// enabling a formerly globally-tracked clone).
-	paths.ClearInvisibleRuntimeCache()
 	return nil
 }

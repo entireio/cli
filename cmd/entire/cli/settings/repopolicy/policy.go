@@ -1,114 +1,76 @@
 package repopolicy
 
-import (
-	"context"
-	"errors"
-)
+import "context"
 
-// ClassifyRepoPolicy resolves one read-only repository-policy snapshot.
+// ClassifyRepoPolicy resolves one read-only repository-policy snapshot for
+// the current directory. It never writes.
 func ClassifyRepoPolicy(ctx context.Context) (RepoPolicy, error) {
 	return ClassifyRepoPolicyAt(ctx, ".")
 }
 
-// ClassifyRepoPolicyAt resolves one read-only repository-policy snapshot for
-// an explicit worktree. It is used by clone-wide infrastructure decisions
-// that must evaluate linked worktrees without changing process cwd.
+// ClassifyRepoPolicyAt classifies an explicit worktree. Precedence:
+//
+//  1. The repository's own settings files (repo-level activation). A
+//     configured repo is active iff enabled — an explicit enabled:false is a
+//     veto that also blocks the global tier.
+//  2. Otherwise the user-global tier: enabled, valid, and not excluding this
+//     repo. Any error there fails closed (inactive + the error).
+//
+// Trust (checkpoint egress) is decided last from the same inputs.
 func ClassifyRepoPolicyAt(ctx context.Context, dir string) (RepoPolicy, error) {
 	repository, err := ResolveRepositoryAt(ctx, dir)
 	if err != nil {
 		return inactiveGlobalPolicy(InactiveReasonGlobalOff), err
 	}
-	base := inactivePolicyForRepository(repository)
-	existingRoute, routeFound, err := ReadRuntimeRoute(repository)
-	if err != nil {
-		return base, err
-	}
-	state, err := ReadLocalActivation(repository)
-	if err != nil {
-		return base, err
-	}
-	if state == ActivationDisabled {
-		policy := policyForRepository(repository)
-		policy.ActivationSource = ActivationInactive
-		policy.InactiveReason = InactiveReasonRepoDisabled
-		policy.Route = routeForClassification(repository, existingRoute, routeFound, RuntimeWorktree)
-		policy.Trust = DecideEgress(ctx, policy, nil, repository)
-		return policy, nil
-	}
-	veto, err := repositoryDisabledVeto(ctx, repository)
-	if err != nil {
-		return base, err
-	}
-	if veto {
-		policy := policyForRepository(repository)
-		policy.ActivationSource = ActivationInactive
-		policy.InactiveReason = InactiveReasonRepoDisabled
-		policy.Route = routeForClassification(repository, existingRoute, routeFound, RuntimeWorktree)
-		policy.Trust = DecideEgress(ctx, policy, nil, repository)
-		return policy, nil
-	}
-	if state == ActivationEnabled {
-		policy := policyForRepository(repository)
-		policy.Active = true
-		policy.ActivationSource = ActivationLocal
-		policy.Route = routeForClassification(repository, existingRoute, routeFound, RuntimeWorktree)
-		policy.Trust = DecideEgress(ctx, policy, nil, repository)
-		return policy, nil
-	}
-
-	userSettings, err := LoadUserSettings(ctx)
-	if err != nil {
-		return base, err
-	}
-	policy, err := ClassifyGlobalConfig(ctx, userSettings.Global, func(context.Context) (Repository, error) {
-		return repository, nil
-	})
-	if policy.WorktreeRoot == "" {
-		policy.WorktreeRoot = repository.WorktreeRoot
-		policy.GitCommonDir = repository.GitCommonDir
-		policy.WorktreeKey = repository.WorktreeKey
-	}
-	if policy.Active {
-		policy.Route = routeForClassification(repository, existingRoute, routeFound, RuntimeGitCommon)
-	} else {
-		policy.Route = routeForClassification(repository, existingRoute, routeFound, RuntimeWorktree)
-	}
-	policy.Trust = DecideEgress(ctx, policy, userSettings.Global, repository)
-	return policy, err
-}
-
-func inactivePolicyForRepository(repository Repository) RepoPolicy {
-	return RepoPolicy{
+	policy := RepoPolicy{
 		ActivationSource: ActivationInactive,
 		InactiveReason:   InactiveReasonGlobalOff,
 		WorktreeRoot:     repository.WorktreeRoot,
 		GitCommonDir:     repository.GitCommonDir,
 		WorktreeKey:      repository.WorktreeKey,
 	}
-}
 
-func routeForClassification(repository Repository, existing RuntimeRoute, found bool, proposed RuntimeLayout) RuntimeRoute {
-	if found {
-		return existing
+	// Repo-level settings first: a repo the user enabled here must keep
+	// capturing even when the user-global file is unreadable (main never
+	// consulted that file at all). Only egress is affected in that case.
+	activation, err := ReadRepoActivation(repository.WorktreeRoot)
+	if err != nil {
+		policy.InactiveReason = InactiveReasonRepoDisabled
+		return policy, err
 	}
-	return proposedRoute(repository, proposed)
-}
-
-func proposedRoute(repository Repository, layout RuntimeLayout) RuntimeRoute {
-	return RuntimeRoute{
-		Version:            recordVersion,
-		Layout:             layout,
-		CanonicalWorktree:  repository.WorktreeRoot,
-		CanonicalGitCommon: repository.GitCommonDir,
+	userSettings, settingsErr := LoadUserSettings(ctx)
+	switch {
+	case activation.Configured && activation.Enabled:
+		policy.Active = true
+		policy.ActivationSource = ActivationLocal
+		policy.InactiveReason = InactiveReasonNone
+		if settingsErr != nil {
+			// Capture stays on; egress fails closed until the file is fixed.
+			policy.Trust = TrustDecision{Source: TrustSourceNone, Reason: TrustReasonSettings}
+			return policy, nil //nolint:nilerr // deliberate: repo-level activation survives an unreadable user settings file; only egress is held
+		}
+	case activation.Configured:
+		policy.InactiveReason = InactiveReasonRepoDisabled
+		return policy, nil
+	default:
+		if settingsErr != nil {
+			return policy, settingsErr
+		}
+		// ClassifyGlobalConfig's inactive returns carry an empty identity, so
+		// copy only the activation fields; identity always comes from
+		// repository.
+		global, classifyErr := ClassifyGlobalConfig(ctx, userSettings.Global, func(context.Context) (Repository, error) {
+			return repository, nil
+		})
+		policy.Active = global.Active
+		policy.ActivationSource = global.ActivationSource
+		policy.InactiveReason = global.InactiveReason
+		if classifyErr != nil {
+			return policy, classifyErr
+		}
 	}
-}
-
-func repositoryDisabledVeto(ctx context.Context, repository Repository) (bool, error) {
-	enabled, err := effectiveEnabledSetting(ctx, repository)
-	if errors.Is(err, errInvalidActivationSettings) {
-		return false, err
-	}
-	return enabled != nil && !*enabled, err
+	policy.Trust = DecideEgress(ctx, policy, userSettings.Global, repository)
+	return policy, nil
 }
 
 type repoPolicyContextKey struct{}
@@ -120,7 +82,7 @@ func WithRepoPolicy(ctx context.Context, policy RepoPolicy) context.Context {
 
 // RepoPolicyFromContext returns a policy snapshot previously attached to ctx.
 //
-//nolint:revive // The task's public compatibility API requires this exact name.
+//nolint:revive // Established public name; every consumer imports it as repopolicy.RepoPolicyFromContext.
 func RepoPolicyFromContext(ctx context.Context) (RepoPolicy, bool) {
 	policy, ok := ctx.Value(repoPolicyContextKey{}).(RepoPolicy)
 	return policy, ok

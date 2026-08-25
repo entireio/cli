@@ -17,7 +17,6 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
-	"github.com/entireio/cli/cmd/entire/cli/settings/repopolicy"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 	"github.com/entireio/cli/cmd/entire/cli/vercelconfig"
 	"github.com/entireio/cli/redact"
@@ -1729,10 +1728,8 @@ func enrollRepoGlobally(t *testing.T, userSettingsJSON string) {
 	t.Setenv("ENTIRE_CONFIG_DIR", cfgDir)
 	require.NoError(t, os.WriteFile(filepath.Join(cfgDir, "settings.json"), []byte(userSettingsJSON), 0o600))
 	paths.ClearWorktreeRootCache()
-	paths.ClearInvisibleRuntimeCache()
 	t.Cleanup(func() {
 		paths.ClearWorktreeRootCache()
-		paths.ClearInvisibleRuntimeCache()
 	})
 }
 
@@ -1742,9 +1739,6 @@ func writeEnabledRepoSettings(t *testing.T, dir string) {
 	t.Helper()
 	require.NoError(t, os.MkdirAll(filepath.Join(dir, ".entire"), 0o755))
 	require.NoError(t, os.WriteFile(filepath.Join(dir, ".entire", "settings.json"), []byte(`{"enabled": true}`), 0o600))
-	repository, err := repopolicy.ResolveRepositoryAt(t.Context(), dir)
-	require.NoError(t, err)
-	require.NoError(t, repopolicy.SetLocalActivationForRepository(repository, repopolicy.ActivationEnabled))
 }
 
 const heldMessageFragment = "checkpoint sync held"

@@ -5,7 +5,6 @@ import (
 	"log/slog"
 
 	"github.com/entireio/cli/cmd/entire/cli/logging"
-	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/settings/repopolicy"
 )
 
@@ -35,25 +34,7 @@ func LoadUserSettings(ctx context.Context) (*UserSettings, error) {
 
 // ModifyUserSettings atomically mutates the user-global settings file.
 func ModifyUserSettings(ctx context.Context, fn func(*UserSettings) error) error {
-	if err := repopolicy.ModifyUserSettings(ctx, fn); err != nil {
-		return err //nolint:wrapcheck // compatibility facade preserves the public error contract
-	}
-	// Runtime routing still lives in paths during this compatibility stage.
-	paths.ClearInvisibleRuntimeCache()
-	return nil
-}
-
-// ClearGlobalModeCache clears leaf-owned global classification state.
-func ClearGlobalModeCache() {
-	repopolicy.ClearGlobalModeCache()
-}
-
-func globalModeStatus(ctx context.Context) (bool, InactiveReason) {
-	policy, err := repopolicy.GlobalModeStatus(ctx)
-	if err != nil {
-		logging.Debug(ctx, "global repository policy inactive (fail closed)", slog.String("error", err.Error()))
-	}
-	return policy.Active, policy.InactiveReason
+	return repopolicy.ModifyUserSettings(ctx, fn) //nolint:wrapcheck // compatibility facade preserves the public error contract
 }
 
 // IsActiveForRepo reports whether repository-local or global policy activates
@@ -70,22 +51,12 @@ func GlobalTierEnabled(ctx context.Context) bool {
 	return err == nil && settings.GlobalEnabled()
 }
 
-// IsActiveForRepoWithReason returns the existing repository-local override
-// result before falling back to leaf-owned global classification.
+// IsActiveForRepoWithReason classifies once (or reuses a hook-boundary
+// snapshot). Any classification error is logged and reads as inactive.
 func IsActiveForRepoWithReason(ctx context.Context) (bool, InactiveReason) {
-	if policy, ok := repopolicy.RepoPolicyFromContext(ctx); ok {
-		return policy.Active, policy.InactiveReason
-	}
-	configured, err := RepoActivationConfigured(ctx)
+	policy, err := currentPolicy(ctx)
 	if err != nil {
-		logging.Debug(ctx, "repo settings unreadable; treating repo as inactive", slog.String("error", err.Error()))
-		return false, InactiveReasonRepoDisabled
+		logging.Debug(ctx, "repository policy inactive (fail closed)", slog.String("error", err.Error()))
 	}
-	if configured {
-		if repoSettingsEnabled(ctx) {
-			return true, InactiveReasonNone
-		}
-		return false, InactiveReasonRepoDisabled
-	}
-	return globalModeStatus(ctx)
+	return policy.Active, policy.InactiveReason
 }

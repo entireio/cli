@@ -309,10 +309,8 @@ func TestDoctorBundleCmd_IncludesRoutedLogsInGloballyTrackedRepo(t *testing.T) {
 		t.Fatal(err)
 	}
 	paths.ClearWorktreeRootCache()
-	paths.ClearInvisibleRuntimeCache()
 	t.Cleanup(func() {
 		paths.ClearWorktreeRootCache()
-		paths.ClearInvisibleRuntimeCache()
 	})
 	logPath, err := paths.AbsPath(t.Context(), filepath.Join(logging.LogsDir, "entire.log"))
 	if err != nil {

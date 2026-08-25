@@ -902,65 +902,41 @@ func checkGlobalTracking(cmd *cobra.Command, force bool) {
 
 	// Untrusted enrolled repo: informational, never a failure — the hold is
 	// the intended state until the user opts in.
-	if settings.RepoUntrustedEnrolled(ctx) {
+	if settings.CheckpointEgressHeld(ctx) {
 		fmt.Fprintln(w, "Global tracking: checkpoint sync held in this repo (informational)")
 		switch n := heldCheckpointCount(ctx); {
 		case n == 1:
-			fmt.Fprintln(w, "  This repo is enrolled but not trusted; 1 checkpoint is held locally.")
+			fmt.Fprintln(w, "  This repo is tracked but not trusted; 1 checkpoint is held locally.")
 		case n > 1:
-			fmt.Fprintf(w, "  This repo is enrolled but not trusted; %d checkpoints are held locally.\n", n)
+			fmt.Fprintf(w, "  This repo is tracked but not trusted; %d checkpoints are held locally.\n", n)
 		default:
-			fmt.Fprintln(w, "  This repo is enrolled but not trusted.")
+			fmt.Fprintln(w, "  This repo is tracked but not trusted.")
 		}
 		fmt.Fprintln(w, "  This is intended until you opt in; run `entire trust` to sync.")
 	}
 
-	// Worktree-local check: only meaningful when the hook component was
-	// recorded as installed for this exact worktree.
-	repository, repoErr := repopolicy.ResolveRepository(ctx)
-	if repoErr != nil {
+	// Globally tracked here but the git hooks are gone: either deliberate
+	// (worktree-resident core.hooksPath) or drift the next hook activity
+	// repairs on its own — MaybeEnsureGlobalSetup re-checks hook presence
+	// every time. Report; never write.
+	policy, ok := repopolicy.RepoPolicyFromContext(ctx)
+	if !ok || !policy.Active || policy.ActivationSource != repopolicy.ActivationGlobal || strategy.IsGitHookInstalled(ctx) {
 		return
 	}
-	record, found, recordErr := repopolicy.ReadSetupRecord(repository)
-	if recordErr != nil || !found || record.GitHooksSpec == 0 {
-		return
-	}
-	if !strategy.IsGitHookInstalled(ctx) {
-		// A worktree-resident core.hooksPath (e.g. a committed .husky dir) is
-		// the one shape where missing hooks are NOT drift: the lazy setup
-		// deliberately skipped installation there (a worktree write would
-		// break invisibility) and still set the marker. Explain instead of
-		// clearing — clearing would just re-run a setup that skips again and
-		// promise a reinstall that never happens.
-		resident, hooksDir, resErr := strategy.HooksDirIsWorktreeResident(ctx)
-		if resErr != nil {
-			// A probe ERROR is neither shape: the lazy setup treats the same
-			// error as "skip hook installation", so falling into the drift
-			// branch would clear the marker and promise a reinstall that never
-			// happens — an infinite mis-advice loop. Report, mutate nothing.
-			fmt.Fprintln(w, "Globally tracked clone: GIT HOOK STATE UNVERIFIED")
-			fmt.Fprintf(w, "  Could not resolve this clone's hooks directory: %v\n", resErr)
-			fmt.Fprintln(w, "  Git hooks appear missing but the cause could not be determined; nothing was changed.")
-			return
-		}
-		if resident {
-			fmt.Fprintln(w, "Globally tracked clone: GIT HOOKS SKIPPED (core.hooksPath inside the worktree)")
-			fmt.Fprintf(w, "  core.hooksPath resolves to %s, inside this worktree; global tracking never\n", hooksDir)
-			fmt.Fprintln(w, "  writes worktree files, so its git hooks were deliberately not installed.")
-			fmt.Fprintln(w, "  Agent-side session capture still works; commit-time checkpoint trailers do not.")
-			fmt.Fprintln(w, "  For hook capture, enable Entire in this repo: 'entire enable' (repo-level setup")
-			fmt.Fprintln(w, "  chains into an existing hooks dir), or point core.hooksPath back at .git/hooks.")
-			return
-		}
-		fmt.Fprintln(w, "Globally tracked clone: GIT HOOKS MISSING")
-		fmt.Fprintln(w, "  This clone was enabled by global tracking but its git hooks are gone.")
-		record.GitHooksSpec = 0
-		if clearErr := repopolicy.WriteSetupRecord(repository, record); clearErr != nil {
-			fmt.Fprintf(w, "  Could not mark the git-hook setup component stale (%v).\n", clearErr)
-			fmt.Fprintln(w, "  Run `entire enable` here to restore tracking.")
-			return
-		}
-		fmt.Fprintln(w, "  Git-hook setup marked stale — the next hook activity in this repo reinstalls them.")
+	resident, hooksDir, resErr := strategy.HooksDirIsWorktreeResident(ctx)
+	switch {
+	case resErr != nil:
+		fmt.Fprintln(w, "Globally tracked clone: GIT HOOK STATE UNVERIFIED")
+		fmt.Fprintf(w, "  Could not resolve this clone's hooks directory: %v\n", resErr)
+	case resident:
+		fmt.Fprintln(w, "Globally tracked clone: GIT HOOKS SKIPPED (core.hooksPath inside the worktree)")
+		fmt.Fprintf(w, "  core.hooksPath resolves to %s, inside this worktree; global tracking never\n", hooksDir)
+		fmt.Fprintln(w, "  writes worktree files, so its git hooks were deliberately not installed.")
+		fmt.Fprintln(w, "  Agent-side session capture still works; commit-time checkpoint trailers do not.")
+		fmt.Fprintln(w, "  For hook capture, enable Entire in this repo: 'entire enable', or point core.hooksPath back at .git/hooks.")
+	default:
+		fmt.Fprintln(w, "Globally tracked clone: git hooks not installed yet")
+		fmt.Fprintln(w, "  They are installed by the next agent session or git hook activity in this repo.")
 	}
 }
 
