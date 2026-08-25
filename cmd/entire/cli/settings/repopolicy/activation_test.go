@@ -168,7 +168,7 @@ func TestBootstrapLegacyActivation_SingleWorktreeRequiresVerifiedEvidence(t *tes
 		}
 	})
 
-	t.Run("git-dir Entire hook is accepted for a single worktree", func(t *testing.T) {
+	t.Run("git-dir Entire hook is not activation evidence", func(t *testing.T) {
 		t.Parallel()
 		root, repository := newPolicyRepo(t)
 		writePolicyFile(t, root, ".entire/settings.json", `{"enabled":true}`)
@@ -177,12 +177,8 @@ func TestBootstrapLegacyActivation_SingleWorktreeRequiresVerifiedEvidence(t *tes
 		if err != nil {
 			t.Fatal(err)
 		}
-		if !activated {
-			t.Fatal("verified Git-dir hook should bootstrap the single worktree")
-		}
-		state, err := ReadLocalActivation(repository)
-		if err != nil || state != ActivationEnabled {
-			t.Fatalf("ReadLocalActivation = %q, %v; want enabled", state, err)
+		if activated {
+			t.Fatal("Git-dir hook must not bootstrap activation")
 		}
 	})
 
@@ -190,7 +186,19 @@ func TestBootstrapLegacyActivation_SingleWorktreeRequiresVerifiedEvidence(t *tes
 		t.Parallel()
 		root, repository := newPolicyRepo(t)
 		writePolicyFile(t, root, ".entire/settings.json", `{"enabled":true}`)
-		body := `{"session_id":"session-1","worktree_path":` + quoteJSON(repository.WorktreeRoot) + `,"worktree_id":` + quoteJSON(repository.WorktreeID) + `}`
+		body := `{"session_id":"session-1","phase":"active","worktree_path":` + quoteJSON(repository.WorktreeRoot) + `,"worktree_id":` + quoteJSON(repository.WorktreeID) + `}`
+		writePolicyFile(t, repository.GitCommonDir, "entire-sessions/session-1.json", body)
+		activated, err := BootstrapLegacyActivation(t.Context(), repository)
+		if err != nil || !activated {
+			t.Fatalf("BootstrapLegacyActivation = %v, %v; want true", activated, err)
+		}
+	})
+
+	t.Run("legacy active_committed session record is accepted", func(t *testing.T) {
+		t.Parallel()
+		root, repository := newPolicyRepo(t)
+		writePolicyFile(t, root, ".entire/settings.json", `{"enabled":true}`)
+		body := `{"session_id":"session-1","phase":"active_committed","worktree_path":` + quoteJSON(repository.WorktreeRoot) + `,"worktree_id":` + quoteJSON(repository.WorktreeID) + `}`
 		writePolicyFile(t, repository.GitCommonDir, "entire-sessions/session-1.json", body)
 		activated, err := BootstrapLegacyActivation(t.Context(), repository)
 		if err != nil || !activated {
@@ -208,6 +216,27 @@ func TestBootstrapLegacyActivation_SingleWorktreeRequiresVerifiedEvidence(t *tes
 			t.Fatalf("BootstrapLegacyActivation = %v, %v; want true", activated, err)
 		}
 	})
+}
+
+func TestBootstrapLegacyActivation_RejectsNonActiveSessionPhases(t *testing.T) {
+	t.Parallel()
+	for _, phase := range []string{"", "idle", "ended", "unknown"} {
+		t.Run(phase, func(t *testing.T) {
+			t.Parallel()
+			root, repository := newPolicyRepo(t)
+			writePolicyFile(t, root, ".entire/settings.json", `{"enabled":true}`)
+			body := `{"session_id":"session-1","phase":` + quoteJSON(phase) + `,"worktree_path":` + quoteJSON(repository.WorktreeRoot) + `,"worktree_id":` + quoteJSON(repository.WorktreeID) + `}`
+			writePolicyFile(t, repository.GitCommonDir, "entire-sessions/session-1.json", body)
+
+			activated, err := BootstrapLegacyActivation(t.Context(), repository)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if activated {
+				t.Fatalf("phase %q must not bootstrap activation", phase)
+			}
+		})
+	}
 }
 
 func TestBootstrapLegacyActivation_LinkedWorktreeRejectsSharedHookEvidence(t *testing.T) {

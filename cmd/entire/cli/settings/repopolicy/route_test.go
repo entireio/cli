@@ -8,6 +8,9 @@ import (
 	"path/filepath"
 	"sync"
 	"testing"
+	"time"
+
+	"github.com/entireio/cli/cmd/entire/cli/internal/flock"
 )
 
 func routePolicy(repository Repository, source ActivationSource) RepoPolicy {
@@ -118,11 +121,39 @@ func TestEnsureRuntimeRoute_ConcurrentWritersUseOneCompleteWinner(t *testing.T) 
 func TestEnsureRuntimeRoute_CanceledWaiterDoesNotPoisonWinner(t *testing.T) {
 	t.Parallel()
 	_, repository := newPolicyRepo(t)
-	canceled, cancel := context.WithCancel(t.Context())
-	cancel()
-	if _, err := EnsureRuntimeRoute(canceled, routePolicy(repository, ActivationGlobal)); !errors.Is(err, context.Canceled) {
-		t.Fatalf("canceled EnsureRuntimeRoute = %v, want context.Canceled", err)
+	if err := ensureRegistryDir(repository); err != nil {
+		t.Fatal(err)
 	}
+	release, err := flock.Acquire(routePath(repository) + ".lock")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { release() }()
+
+	waiterCtx, cancel := context.WithCancel(t.Context())
+	waiterStarted := make(chan struct{})
+	waiterDone := make(chan error, 1)
+	go func() {
+		close(waiterStarted)
+		_, waitErr := EnsureRuntimeRoute(waiterCtx, routePolicy(repository, ActivationGlobal))
+		waiterDone <- waitErr
+	}()
+	<-waiterStarted
+	select {
+	case waitErr := <-waiterDone:
+		t.Fatalf("waiter returned before cancellation while lock was held: %v", waitErr)
+	case <-time.After(75 * time.Millisecond):
+		// Three lock polling intervals establish that the waiter is contending.
+	}
+	cancel()
+	if waitErr := <-waiterDone; !errors.Is(waitErr, context.Canceled) {
+		t.Fatalf("canceled EnsureRuntimeRoute = %v, want context.Canceled", waitErr)
+	}
+	if _, found, readErr := ReadRuntimeRoute(repository); readErr != nil || found {
+		t.Fatalf("canceled waiter published route: found=%v err=%v", found, readErr)
+	}
+	release()
+	release = func() {}
 	winner, err := EnsureRuntimeRoute(t.Context(), routePolicy(repository, ActivationLocal))
 	if err != nil {
 		t.Fatal(err)

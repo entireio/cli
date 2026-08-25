@@ -99,10 +99,65 @@ func TestLoadForRepoPolicy_SymlinkedSettingsCannotInfluenceHooks(t *testing.T) {
 
 func TestLoadForRepoPolicy_MalformedAllowedFieldFailsClosed(t *testing.T) {
 	t.Parallel()
+	tests := []struct {
+		name string
+		body string
+		want string
+	}{
+		{name: "enabled wrong type", body: `{"enabled":"yes"}`, want: "enabled"},
+		{name: "enabled null", body: `{"enabled":null}`, want: "enabled"},
+		{name: "log level wrong type", body: `{"log_level":false}`, want: "log_level"},
+		{name: "log level null", body: `{"log_level":null}`, want: "log_level"},
+		{name: "externalize images wrong type", body: `{"redaction":{"externalize_images":"yes"}}`, want: "externalize_images"},
+		{name: "externalize images null", body: `{"redaction":{"externalize_images":null}}`, want: "externalize_images"},
+		{name: "pii enabled null", body: `{"redaction":{"pii":{"enabled":null}}}`, want: "redaction.pii.enabled"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			root, policy := hookPolicyRepo(t)
+			testutil.WriteFile(t, root, ".entire/settings.json", tt.body)
+			if _, err := LoadForRepoPolicy(t.Context(), policy); err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("error = %v, want malformed %s failure", err, tt.want)
+			}
+		})
+	}
+}
+
+func TestLoadForRepoPolicy_PreservesPIICategoryPointerNullSemantics(t *testing.T) {
+	t.Parallel()
 	root, policy := hookPolicyRepo(t)
-	testutil.WriteFile(t, root, ".entire/settings.json", `{"enabled":"yes","strategy_options":"ignored"}`)
-	if _, err := LoadForRepoPolicy(t.Context(), policy); err == nil || !strings.Contains(err.Error(), "enabled") {
-		t.Fatalf("error = %v, want malformed enabled failure", err)
+	testutil.WriteFile(t, root, ".entire/settings.json", `{
+  "redaction": {
+    "pii": {
+      "enabled": true,
+      "email": true,
+      "phone": false,
+      "address": null,
+      "custom_patterns": {"employee_id": "E-[0-9]+"}
+    }
+  }
+}`)
+
+	got, err := LoadForRepoPolicy(t.Context(), policy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Redaction == nil || got.Redaction.PII == nil {
+		t.Fatalf("missing PII settings: %+v", got.Redaction)
+	}
+	pii := got.Redaction.PII
+	if pii.Email == nil || !*pii.Email {
+		t.Fatalf("email = %v, want pointer to true", pii.Email)
+	}
+	if pii.Phone == nil || *pii.Phone {
+		t.Fatalf("phone = %v, want pointer to false", pii.Phone)
+	}
+	if pii.Address != nil {
+		t.Fatalf("address = %v, want nil for JSON null", pii.Address)
+	}
+	if reflect.TypeOf(pii.CustomPatterns) != reflect.TypeOf(map[string]string{}) || pii.CustomPatterns["employee_id"] != "E-[0-9]+" {
+		t.Fatalf("custom_patterns shape/value changed: %#v", pii.CustomPatterns)
 	}
 }
 

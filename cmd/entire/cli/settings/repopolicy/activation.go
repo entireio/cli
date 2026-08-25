@@ -18,9 +18,12 @@ import (
 
 const (
 	recordVersion      = 1
-	registryRelative   = "entire/worktree"
 	activationFileName = "activation.json"
 )
+
+// WorktreeRegistryRelative is the single shared Git-common subpath for
+// machine-local activation, route records, and git-common runtime data.
+const WorktreeRegistryRelative = "entire/worktree"
 
 var errInvalidActivationSettings = errors.New("invalid activation settings")
 
@@ -42,7 +45,12 @@ type ActivationRecord struct {
 }
 
 func registryDir(repository Repository) string {
-	return filepath.Join(repository.GitCommonDir, filepath.FromSlash(registryRelative), repository.WorktreeKey)
+	return WorktreeRegistryDir(repository.GitCommonDir, repository.WorktreeKey)
+}
+
+// WorktreeRegistryDir constructs one worktree's machine-local registry path.
+func WorktreeRegistryDir(gitCommonDir, worktreeKey string) string {
+	return filepath.Join(gitCommonDir, filepath.FromSlash(WorktreeRegistryRelative), worktreeKey)
 }
 
 func activationPath(repository Repository) string {
@@ -175,12 +183,6 @@ func BootstrapLegacyActivation(ctx context.Context, repository Repository) (bool
 			return false, err
 		}
 	}
-	if !evidence && repository.WorktreeID == "" {
-		evidence, err = hasGitDirHookEvidence(repository)
-		if err != nil {
-			return false, err
-		}
-	}
 	if !evidence {
 		return false, nil
 	}
@@ -237,27 +239,6 @@ func effectiveEnabledSetting(ctx context.Context, repository Repository) (*bool,
 	return effective, nil
 }
 
-func hasGitDirHookEvidence(repository Repository) (bool, error) {
-	hooksDir := filepath.Join(repository.GitCommonDir, "hooks")
-	entries, err := os.ReadDir(hooksDir)
-	if err != nil {
-		if errors.Is(err, fs.ErrNotExist) {
-			return false, nil
-		}
-		return false, fmt.Errorf("reading Git hooks: %w", err)
-	}
-	for _, entry := range entries {
-		if entry.Type()&os.ModeSymlink != 0 || entry.IsDir() {
-			continue
-		}
-		data, readErr := os.ReadFile(filepath.Join(hooksDir, entry.Name())) //nolint:gosec // entry is from trusted Git hooks directory
-		if readErr == nil && bytes.Contains(data, []byte("Entire CLI hooks")) {
-			return true, nil
-		}
-	}
-	return false, nil
-}
-
 type legacySessionRecord struct {
 	WorktreePath string          `json:"worktree_path"`
 	WorktreeID   string          `json:"worktree_id"`
@@ -283,7 +264,7 @@ func hasExactSessionEvidence(repository Repository) (bool, error) {
 			continue
 		}
 		var record legacySessionRecord
-		if json.Unmarshal(data, &record) != nil || record.Phase == "ended" || hasNonNullJSON(record.EndedAt) {
+		if json.Unmarshal(data, &record) != nil || !isLegacyActivePhase(record.Phase) || hasNonNullJSON(record.EndedAt) {
 			continue
 		}
 		if canonicalPath(record.WorktreePath) == repository.WorktreeRoot && record.WorktreeID == repository.WorktreeID {
@@ -291,6 +272,10 @@ func hasExactSessionEvidence(repository Repository) (bool, error) {
 		}
 	}
 	return false, nil
+}
+
+func isLegacyActivePhase(phase string) bool {
+	return phase == "active" || phase == "active_committed"
 }
 
 func hasNonNullJSON(value json.RawMessage) bool {

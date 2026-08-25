@@ -21,15 +21,13 @@ func IsUnroutableRuntimePath(err error) bool {
 	return errors.Is(err, ErrUnroutableRuntimePath)
 }
 
-const invisibleRuntimeSubdir = "entire/worktree"
-
 // InvisibleRuntimeDir returns the git-common runtime registry for root.
 func InvisibleRuntimeDir(commonDir, root string) (string, error) {
 	worktreeID, err := GetWorktreeID(root)
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(commonDir, filepath.FromSlash(invisibleRuntimeSubdir), HashWorktreeID(worktreeID)), nil
+	return repopolicy.WorktreeRegistryDir(commonDir, HashWorktreeID(worktreeID)), nil
 }
 
 var runtimeDataPrefixes = []string{EntireMetadataDir, EntireLogsDir, EntireTmpDir}

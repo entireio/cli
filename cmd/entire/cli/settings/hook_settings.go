@@ -119,13 +119,13 @@ func mergeHookSettingsFile(settings *EntireSettings, path string) error {
 		return fmt.Errorf("parsing settings: %w", err)
 	}
 	if value, ok := raw["enabled"]; ok {
-		if err := unmarshalHookField("enabled", value, &settings.Enabled); err != nil {
+		if err := unmarshalHookNonNullField("enabled", value, &settings.Enabled); err != nil {
 			return err
 		}
 	}
 	if value, ok := raw["log_level"]; ok {
 		var level string
-		if err := unmarshalHookField("log_level", value, &level); err != nil {
+		if err := unmarshalHookNonNullField("log_level", value, &level); err != nil {
 			return err
 		}
 		if level != "" {
@@ -169,7 +169,7 @@ func mergeHookRedaction(settings *RedactionSettings, data json.RawMessage) error
 		}
 	}
 	if value, ok := raw["externalize_images"]; ok {
-		if err := unmarshalHookField("redaction.externalize_images", value, &settings.ExternalizeImages); err != nil {
+		if err := unmarshalHookNonNullField("redaction.externalize_images", value, &settings.ExternalizeImages); err != nil {
 			return err
 		}
 	}
@@ -182,7 +182,7 @@ func mergeHookPII(settings *PIISettings, data json.RawMessage) error {
 		return fmt.Errorf("parsing pii: %w", err)
 	}
 	if value, ok := raw["enabled"]; ok {
-		if err := unmarshalHookField("redaction.pii.enabled", value, &settings.Enabled); err != nil {
+		if err := unmarshalHookNonNullField("redaction.pii.enabled", value, &settings.Enabled); err != nil {
 			return err
 		}
 	}
@@ -190,11 +190,11 @@ func mergeHookPII(settings *PIISettings, data json.RawMessage) error {
 		"email": &settings.Email, "phone": &settings.Phone, "address": &settings.Address,
 	} {
 		if value, ok := raw[key]; ok {
-			var enabled bool
+			var enabled *bool
 			if err := unmarshalHookField("redaction.pii."+key, value, &enabled); err != nil {
 				return err
 			}
-			*destination = &enabled
+			*destination = enabled
 		}
 	}
 	if value, ok := raw["custom_patterns"]; ok {
@@ -224,6 +224,13 @@ func unmarshalHookField(name string, data json.RawMessage, destination any) erro
 		return fmt.Errorf("parsing %s field: %w", name, err)
 	}
 	return nil
+}
+
+func unmarshalHookNonNullField(name string, data json.RawMessage, destination any) error {
+	if bytes.Equal(bytes.TrimSpace(data), []byte("null")) {
+		return fmt.Errorf("parsing %s field: null is not allowed", name)
+	}
+	return unmarshalHookField(name, data, destination)
 }
 
 func decodeHookObject(data []byte, destination any) error {

@@ -68,10 +68,7 @@ func WriteFileAtomic(filePath string, data []byte, perm fs.FileMode) error {
 	// Directory fsync isn't supported on Windows, and on POSIX an error
 	// after a successful rename would mislead callers who already have the
 	// file in place.
-	if d, err := os.Open(dir); err == nil { //nolint:gosec // G304: dir is filepath.Dir of caller-supplied filePath, not user input
-		_ = d.Sync() //nolint:errcheck // best-effort directory fsync; failure does not roll back the rename
-		_ = d.Close()
-	}
+	_ = SyncDir(dir) //nolint:errcheck // best-effort: failure cannot roll back the successful rename
 	return nil
 }
 

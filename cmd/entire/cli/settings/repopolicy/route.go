@@ -145,16 +145,8 @@ func publishRouteNoReplace(path string, route RuntimeRoute) error {
 	if err := os.Link(tmpName, path); err != nil {
 		return fmt.Errorf("linking route record: %w", err)
 	}
-	dir, err := os.Open(filepath.Dir(path))
-	if err != nil {
-		return fmt.Errorf("opening route registry: %w", err)
-	}
-	if err := dir.Sync(); err != nil {
-		_ = dir.Close()
+	if err := jsonutil.SyncDir(filepath.Dir(path)); err != nil {
 		return fmt.Errorf("syncing route registry: %w", err)
-	}
-	if err := dir.Close(); err != nil {
-		return fmt.Errorf("closing route registry: %w", err)
 	}
 	return nil
 }
