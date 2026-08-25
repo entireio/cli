@@ -55,7 +55,7 @@ func newContextEnableCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().BoolVar(&cross, "cross-jurisdiction", false, "Allow sources in other jurisdictions when repository owners also allow it")
-	cmd.Flags().BoolVar(&localLive, "local-live", true, "Include eligible local live sessions")
+	cmd.Flags().BoolVar(&localLive, "local-live", false, "Include eligible local live sessions in shared context (opt-in)")
 	addJSONFlag(cmd)
 	return cmd
 }

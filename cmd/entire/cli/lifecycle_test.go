@@ -1600,7 +1600,7 @@ type deliveringContextInjectorAgent struct {
 
 func (d *deliveringContextInjectorAgent) RenderContextInjection(in agent.ContextInjection) ([]byte, error) {
 	if in.Text == "" {
-		return nil, fmt.Errorf("empty context injection")
+		return nil, errors.New("empty context injection")
 	}
 	return []byte(in.Text), nil
 }
