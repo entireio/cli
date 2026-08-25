@@ -15,6 +15,7 @@ import (
 	cpkg "github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
 	"github.com/entireio/cli/cmd/entire/cli/execx"
+	"github.com/entireio/cli/cmd/entire/cli/gitdir"
 	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/entireio/cli/cmd/entire/cli/internal/flock"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
@@ -472,7 +473,7 @@ var entityDeltasLockWait = 2 * time.Minute
 // the detached backfill child and the pre-push OPF rewrite — must agree on the
 // path byte for byte or the lock excludes nobody.
 func entityDeltasLockPath(ctx context.Context, worktreePath string) (string, error) {
-	commonDir, err := gitCommonDirForWorktree(ctx, worktreePath)
+	commonDir, err := gitdir.CommonDirForWorktree(ctx, worktreePath)
 	if err != nil {
 		return "", fmt.Errorf("resolve git common dir: %w", err)
 	}

@@ -12,6 +12,8 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
+
+	"github.com/entireio/cli/cmd/entire/cli/gitdir"
 	"github.com/entireio/cli/cmd/entire/cli/trailers"
 	"github.com/go-git/go-git/v6/plumbing"
 	"github.com/stretchr/testify/require"
@@ -319,7 +321,7 @@ func TestGitCommonDirForWorktree_IgnoresHookGitDirEnv(t *testing.T) {
 	t.Setenv("GIT_DIR", filepath.Join(otherDir, ".git"))
 	t.Chdir(otherDir)
 
-	commonDir, err := gitCommonDirForWorktree(ctx, mainDir)
+	commonDir, err := gitdir.CommonDirForWorktree(ctx, mainDir)
 	require.NoError(t, err)
 	require.Equal(t, filepath.Join(mainDir, ".git"), commonDir)
 }
