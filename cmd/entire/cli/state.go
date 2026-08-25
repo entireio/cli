@@ -946,11 +946,26 @@ func FindUnclaimedActivePreTaskFile(ctx context.Context) (taskToolUseID string, 
 // heuristics — fixing nested subagents whose first TodoWrite races a still-
 // unclaimed parent pre-task. Otherwise it falls back to
 // FindUnclaimedActivePreTaskFile (oldest-first for parallel siblings).
+//
+// The claimed snapshot and directory scan run under the bootstrap lock so they
+// stay consistent with concurrent cleanup and sibling claims.
 func FindUnclaimedPreTaskForAgent(ctx context.Context, agentID string) (taskToolUseID string, candidates int, found bool) {
 	if agentID == "" {
 		return FindUnclaimedActivePreTaskFile(ctx)
 	}
 
+	release, err := flock.Acquire(agentTaskBootstrapLockPath(ctx))
+	if err != nil {
+		return "", 0, false
+	}
+	defer release()
+
+	return findUnclaimedPreTaskForAgentUnderLock(ctx, agentID)
+}
+
+// findUnclaimedPreTaskForAgentUnderLock is the agent-aware bootstrap lookup.
+// agentTaskBootstrapLockPath must already be held.
+func findUnclaimedPreTaskForAgentUnderLock(ctx context.Context, agentID string) (taskToolUseID string, candidates int, found bool) {
 	claimed := claimedTaskToolUseIDs(ctx)
 	tmpDirAbs := resolveTmpDir(ctx)
 	entries, err := os.ReadDir(tmpDirAbs)
@@ -959,6 +974,7 @@ func FindUnclaimedPreTaskForAgent(ctx context.Context, agentID string) (taskTool
 	}
 
 	var agentMatches []string
+	var agentMatchTimes []time.Time
 	for _, entry := range entries {
 		if entry.IsDir() {
 			continue
@@ -971,24 +987,35 @@ func FindUnclaimedPreTaskForAgent(ctx context.Context, agentID string) (taskTool
 		if _, taken := claimed[candidateID]; taken {
 			continue
 		}
-		candidates++
 
 		state, err := LoadPreTaskState(ctx, candidateID)
 		if err != nil || state == nil || state.AgentID != agentID {
 			continue
 		}
+		info, err := entry.Info()
+		if err != nil {
+			continue
+		}
 		agentMatches = append(agentMatches, candidateID)
+		agentMatchTimes = append(agentMatchTimes, info.ModTime())
 	}
 
 	switch len(agentMatches) {
 	case 1:
-		return agentMatches[0], candidates, true
+		return agentMatches[0], 1, true
 	case 0:
-		return FindUnclaimedActivePreTaskFile(ctx)
+		return findActivePreTaskFile(ctx, claimed, oldestPreTask)
 	default:
 		// Several unclaimed files stamped with the same agent_id should not
-		// happen; pick deterministically and let bootstrap logging surface it.
-		return agentMatches[0], candidates, true
+		// happen; pick oldest-first like the non-stamped path and let bootstrap
+		// logging surface the ambiguity.
+		bestIdx := 0
+		for i := 1; i < len(agentMatches); i++ {
+			if betterPreTaskCandidate(oldestPreTask, agentMatchTimes[i], agentMatchTimes[bestIdx], agentMatches[i], agentMatches[bestIdx]) {
+				bestIdx = i
+			}
+		}
+		return agentMatches[bestIdx], len(agentMatches), true
 	}
 }
 

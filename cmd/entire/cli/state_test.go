@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent/claudecode"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
@@ -537,6 +538,49 @@ func TestCleanupPreTaskState_NoLinksIsNotAnError(t *testing.T) {
 
 	if err := CleanupPreTaskState(ctx, "toolu_task_a"); err != nil {
 		t.Fatalf("CleanupPreTaskState() error = %v, want nil (no agent-task links exist)", err)
+	}
+}
+
+func TestFindUnclaimedPreTaskForAgent_CandidatesCountsStampMatchesOnly(t *testing.T) {
+	setupTmpDirRepo(t)
+	ctx := context.Background()
+
+	writePreTaskFileWithModTime(t, "toolu_parent", time.Now().Add(-2*time.Minute))
+	writePreTaskFileWithModTime(t, "toolu_child", time.Now())
+	require.NoError(t, StampPreTaskAgentID(ctx, "toolu_child", "agent-nested"))
+
+	taskToolUseID, candidates, found := FindUnclaimedPreTaskForAgent(ctx, "agent-nested")
+	if !found {
+		t.Fatal("FindUnclaimedPreTaskForAgent() found = false, want true")
+	}
+	if taskToolUseID != "toolu_child" {
+		t.Errorf("FindUnclaimedPreTaskForAgent() task = %q, want toolu_child", taskToolUseID)
+	}
+	if candidates != 1 {
+		t.Errorf("FindUnclaimedPreTaskForAgent() candidates = %d, want 1 (only stamped matches count)", candidates)
+	}
+}
+
+func TestFindUnclaimedPreTaskForAgent_MultipleStampsPicksOldest(t *testing.T) {
+	setupTmpDirRepo(t)
+	ctx := context.Background()
+
+	older := time.Now().Add(-2 * time.Minute)
+	newer := time.Now()
+	writePreTaskFileWithModTime(t, "toolu_old", older)
+	writePreTaskFileWithModTime(t, "toolu_new", newer)
+	require.NoError(t, StampPreTaskAgentID(ctx, "toolu_old", "agent-dup"))
+	require.NoError(t, StampPreTaskAgentID(ctx, "toolu_new", "agent-dup"))
+
+	taskToolUseID, candidates, found := FindUnclaimedPreTaskForAgent(ctx, "agent-dup")
+	if !found {
+		t.Fatal("FindUnclaimedPreTaskForAgent() found = false, want true")
+	}
+	if taskToolUseID != "toolu_old" {
+		t.Errorf("FindUnclaimedPreTaskForAgent() task = %q, want toolu_old (oldest stamped match)", taskToolUseID)
+	}
+	if candidates != 2 {
+		t.Errorf("FindUnclaimedPreTaskForAgent() candidates = %d, want 2", candidates)
 	}
 }
 

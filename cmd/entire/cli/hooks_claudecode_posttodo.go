@@ -187,69 +187,57 @@ func handleClaudeCodePostTodoFromReader(ctx context.Context, reader io.Reader) e
 // siblings' first PostTodos firing at the same instant could otherwise both read the same
 // unclaimed pre-task before either had written its claim, and double-claim it.
 func resolveIncrementalCheckpointTask(ctx context.Context, agentID string) (taskToolUseID string, found bool) {
-	if agentID != "" {
-		if linked, ok := LookupAgentTaskLink(ctx, agentID); ok {
-			return linked, true
-		}
+	if agentID == "" {
+		return FindActivePreTaskFile(ctx)
 	}
 
-	if agentID != "" {
-		release, err := flock.Acquire(agentTaskBootstrapLockPath(ctx))
-		if err != nil {
-			// The lock is required, not best-effort: proceeding without it would
-			// recreate the exact double-claim race this function exists to close.
-			// Bailing loses at most one incremental checkpoint for this call; a
-			// later TodoWrite from the same agentID retries the whole bootstrap.
-			logging.Warn(ctx, "failed to acquire agent-task bootstrap lock; skipping bootstrap for this call",
-				slog.String("error", err.Error()))
-			return "", false
-		}
-		defer release()
-		// Re-check under the lock: another sibling's bootstrap may have remembered
-		// our link while we were waiting to acquire it.
-		if linked, ok := LookupAgentTaskLink(ctx, agentID); ok {
-			return linked, true
-		}
+	if linked, ok := LookupAgentTaskLink(ctx, agentID); ok {
+		return linked, true
 	}
 
-	if agentID != "" {
-		var candidates int
-		taskToolUseID, candidates, found = FindUnclaimedPreTaskForAgent(ctx, agentID)
-		if found && candidates > 1 {
-			// Spawn order is the only signal available here, so with several
-			// unclaimed siblings this pairing may not be the true one. Log it so
-			// a misattributed checkpoint is diagnosable rather than silent.
-			logging.Warn(ctx, "bootstrapping agent-task link with several unclaimed pre-tasks; assignment follows spawn order and may not be this agent's own task",
-				slog.String("agent_id", agentID),
-				slog.Int("unclaimed_candidates", candidates),
-				slog.String("task", taskToolUseID[:min(12, len(taskToolUseID))]))
-		}
+	release, err := flock.Acquire(agentTaskBootstrapLockPath(ctx))
+	if err != nil {
+		// The lock is required, not best-effort: proceeding without it would
+		// recreate the exact double-claim race this function exists to close.
+		// Bailing loses at most one incremental checkpoint for this call; a
+		// later TodoWrite from the same agentID retries the whole bootstrap.
+		logging.Warn(ctx, "failed to acquire agent-task bootstrap lock; skipping bootstrap for this call",
+			slog.String("error", err.Error()))
+		return "", false
 	}
-	if !found {
-		taskToolUseID, found = FindActivePreTaskFile(ctx)
-		if found && agentID != "" {
-			logging.Warn(ctx, "bootstrapping agent-task link from mtime heuristic; no unclaimed pre-task left",
-				slog.String("agent_id", agentID),
-				slog.String("task", taskToolUseID[:min(12, len(taskToolUseID))]))
-		}
+	defer release()
+	// Re-check under the lock: another sibling's bootstrap may have remembered
+	// our link while we were waiting to acquire it.
+	if linked, ok := LookupAgentTaskLink(ctx, agentID); ok {
+		return linked, true
+	}
+
+	var candidates int
+	taskToolUseID, candidates, found = findUnclaimedPreTaskForAgentUnderLock(ctx, agentID)
+	if found && candidates > 1 {
+		// Spawn order is the only signal available here, so with several
+		// unclaimed siblings this pairing may not be the true one. Log it so
+		// a misattributed checkpoint is diagnosable rather than silent.
+		logging.Warn(ctx, "bootstrapping agent-task link with several unclaimed pre-tasks; assignment follows spawn order and may not be this agent's own task",
+			slog.String("agent_id", agentID),
+			slog.Int("unclaimed_candidates", candidates),
+			slog.String("task", taskToolUseID[:min(12, len(taskToolUseID))]))
 	}
 	if !found {
 		return "", false
 	}
 
-	if agentID != "" {
-		if err := RememberAgentTaskLink(ctx, agentID, taskToolUseID); err != nil {
-			// Fail closed, matching the lock-acquisition policy above. Returning
-			// the task anyway would checkpoint against a claim that was never
-			// durably recorded, so a later sibling could select the same task and
-			// this agent could be remapped on its next TodoWrite. Losing this one
-			// incremental checkpoint is recoverable; the next TodoWrite retries
-			// the whole bootstrap.
-			logging.Warn(ctx, "failed to remember agent-task link; skipping this incremental checkpoint",
-				slog.String("agent_id", agentID),
-				slog.String("error", err.Error()))
-			return "", false
-		}
+	if err := RememberAgentTaskLink(ctx, agentID, taskToolUseID); err != nil {
+		// Fail closed, matching the lock-acquisition policy above. Returning
+		// the task anyway would checkpoint against a claim that was never
+		// durably recorded, so a later sibling could select the same task and
+		// this agent could be remapped on its next TodoWrite. Losing this one
+		// incremental checkpoint is recoverable; the next TodoWrite retries
+		// the whole bootstrap.
+		logging.Warn(ctx, "failed to remember agent-task link; skipping this incremental checkpoint",
+			slog.String("agent_id", agentID),
+			slog.String("error", err.Error()))
+		return "", false
 	}
 	return taskToolUseID, true
 }

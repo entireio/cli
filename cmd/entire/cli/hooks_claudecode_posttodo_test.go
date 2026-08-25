@@ -44,8 +44,8 @@ func TestResolveIncrementalCheckpointTask_NoPreTaskFile(t *testing.T) {
 }
 
 // Bootstrap: the first PostTodo for a subagent instance has no remembered link yet, so
-// it must fall back to FindActivePreTaskFile - and then remember the result so future
-// calls for the same agent_id don't need to fall back again.
+// it claims the sole unclaimed pre-task and remembers the result so future calls for
+// the same agent_id don't need to bootstrap again.
 func TestResolveIncrementalCheckpointTask_Bootstrap(t *testing.T) {
 	setupTmpDirRepo(t)
 	ctx := context.Background()
@@ -264,6 +264,27 @@ func TestResolveIncrementalCheckpointTask_LockAcquireFailureBailsRatherThanRaces
 
 	if _, linkFound := LookupAgentTaskLink(ctx, "agent-A"); linkFound {
 		t.Error("no agent-task link should be written when the bootstrap lock could not be acquired")
+	}
+}
+
+// TestResolveIncrementalCheckpointTask_AllClaimedReturnsFalse proves that when every
+// pre-task is already claimed, bootstrap fails closed instead of falling back to the
+// mtime heuristic that would assign an already-claimed task.
+func TestResolveIncrementalCheckpointTask_AllClaimedReturnsFalse(t *testing.T) {
+	setupTmpDirRepo(t)
+	ctx := context.Background()
+
+	writePreTaskFileWithModTime(t, testTaskToolUseA, time.Now())
+	if err := RememberAgentTaskLink(ctx, "agent-other", testTaskToolUseA); err != nil {
+		t.Fatalf("RememberAgentTaskLink() error = %v", err)
+	}
+
+	taskToolUseID, found := resolveIncrementalCheckpointTask(ctx, "agent-A")
+	if found {
+		t.Errorf("resolveIncrementalCheckpointTask() = (%q, true), want (\"\", false) when no unclaimed pre-task remains", taskToolUseID)
+	}
+	if _, linkFound := LookupAgentTaskLink(ctx, "agent-A"); linkFound {
+		t.Error("no agent-task link should be written when bootstrap found no unclaimed pre-task")
 	}
 }
 
