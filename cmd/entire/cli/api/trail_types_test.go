@@ -82,7 +82,7 @@ func TestTrailRequestsUseEntireAPICasing(t *testing.T) {
 		}
 	}
 	if strings.Contains(text, "branch_name") || strings.Contains(text, "branch_action") {
-		t.Fatalf("request still uses BFF casing: %s", text)
+		t.Fatalf("request still uses snake_case: %s", text)
 	}
 }
 
@@ -124,26 +124,22 @@ func TestToMetadataMapsTypePriorityReviewers(t *testing.T) {
 	}
 }
 
-// TestTrailApprovalDecodesStringAuthor pins the wire shape of an approval's
-// author. GET .../trails/{forge}/{owner}/{repo}/{number}/approvals sends it as a
-// plain GitHub login string:
+// TestTrailApprovalDecodesStringAuthor pins the current entire-api approvals
+// wire shape. Re-verified against entire-api's TrailApprovalWire: the HTTP
+// response uses commitSha/createdAt and a bare login string for author. The
+// server's similarly named storedTrailApproval remains snake_case, but is an
+// internal JSONB shape that is converted before the response is written.
 //
-//	{"approvals":[{"id":"59ef5b87","event":"approved","author":"nodo",…}]}
-//
-// This is deliberately unlike TrailResource.author, which is an
-// {"id":…,"login":…} object — so the two cannot share a type. Declaring the
-// approval's author as *trail.Author made every populated response fail to
-// decode with "cannot unmarshal string into Go struct field
-// TrailApproval.approvals.author", which meant `entire trail approvals` could
-// only ever print approvals it did not have: an empty list decodes fine, so a
-// trail with no approvals looked healthy while an approved trail errored out.
+// Author deliberately remains a string rather than *trail.Author. A populated
+// approvals response otherwise fails to decode even though an empty response
+// appears healthy, breaking both `trail approvals` and the post-write response
+// from `trail approve`.
 func TestTrailApprovalDecodesStringAuthor(t *testing.T) {
 	t.Parallel()
 
-	// Verbatim response body from the production API.
 	const body = `{"approvals":[{"id":"59ef5b87","body":null,"event":"approved",` +
-		`"author":"nodo","commit_sha":"e9a9dcbf1fbc55580e7212096824a01e1691853d",` +
-		`"created_at":"2026-08-11T09:35:11.714Z"}]}`
+		`"author":"nodo","commitSha":"e9a9dcbf1fbc55580e7212096824a01e1691853d",` +
+		`"createdAt":"2026-08-11T09:35:11.714Z"}]}`
 
 	var got TrailApprovalsResponse
 	if err := json.Unmarshal([]byte(body), &got); err != nil {
@@ -172,14 +168,12 @@ func TestTrailApprovalDecodesStringAuthor(t *testing.T) {
 	}
 }
 
-// TestTrailApprovalResponseDecodesStringAuthor covers the POST path. It embeds the
-// same struct, so `entire trail approve` reported a decode failure *after* the
-// server had already recorded the approval.
+// The submit response embeds the same camelCase TrailApprovalWire shape.
 func TestTrailApprovalResponseDecodesStringAuthor(t *testing.T) {
 	t.Parallel()
 
 	const body = `{"ok":true,"approval":{"id":"9f65e574","event":"approved",` +
-		`"author":"nodo","created_at":"2026-08-11T09:35:34.998Z"}}`
+		`"author":"nodo","createdAt":"2026-08-11T09:35:34.998Z"}}`
 
 	var got TrailApprovalResponse
 	if err := json.Unmarshal([]byte(body), &got); err != nil {

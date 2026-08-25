@@ -678,9 +678,8 @@ func trailReviewSummaryOptions() trailReviewListOptions {
 }
 
 func trailReviewCommentsPath(trailID string, opts trailReviewListOptions) string {
-	// These names intentionally remain the BFF-compatible query contract on
-	// both backends. entire-api's review reads use include_dismissed plus
-	// limit/offset and return hasMore/nextOffset; they are not pageSize/pageToken.
+	// entire-api's review reads use include_dismissed plus limit/offset and
+	// return hasMore/nextOffset; they are not pageSize/pageToken.
 	q := url.Values{}
 	if opts.Status != "" && opts.Status != trailReviewStatusAny {
 		q.Set("status", opts.Status)
@@ -1230,8 +1229,8 @@ func fetchTrailReviewState(ctx context.Context, client *api.Client, trailID, rev
 }
 
 func trailReviewStatePath(trailID, reviewID, cursor string) string {
-	// The entire-api snapshot route deliberately preserves the BFF's
-	// include_dismissed/limit/cursor contract rather than pageSize/pageToken.
+	// The entire-api snapshot route uses include_dismissed/limit/cursor rather
+	// than pageSize/pageToken.
 	q := url.Values{}
 	q.Set("include_dismissed", "true")
 	q.Set("stale", trailReviewFreshnessAny)

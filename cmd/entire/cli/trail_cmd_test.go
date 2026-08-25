@@ -39,6 +39,9 @@ const (
 	trailListTestAuthorBob   = "bob"
 	// trailTestBasePath is the trails endpoint for the gh/acme/repo fixture.
 	trailTestBasePath = "/api/v1/trails/gh/acme/repo"
+	// trailTestListBody is the stand-in list-resource body used across the
+	// resolveTrailUpdateBody fallback tests.
+	trailTestListBody = "list body"
 )
 
 func TestNewTrailCreateRequestUsesLinkBranchAction(t *testing.T) {
@@ -83,7 +86,7 @@ func TestPrepareTrailCreateBranchSkipsBranchlessTrail(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			state, err := prepareTrailCreateBranch(io.Discard, io.Discard, nil, tc.branch, "main", tc.noBranch)
+			state, err := prepareTrailCreateBranch(context.Background(), io.Discard, io.Discard, nil, "origin", tc.branch, "main", tc.noBranch)
 
 			require.NoError(t, err)
 			require.False(t, state.NeedsCreation)
@@ -328,7 +331,7 @@ func TestCleanupCreatedTrailBranch(t *testing.T) {
 			}
 
 			var errBuf bytes.Buffer
-			cleanupCreatedTrailBranch(repo, branch, tc.localCreated, tc.remotePushed, &errBuf)
+			cleanupCreatedTrailBranch(context.Background(), repo, "origin", branch, tc.localCreated, tc.remotePushed, &errBuf)
 
 			require.Equal(t, tc.wantLocalBranch, gitBranchExistsTrailTest(t, localDir, branch), "local branch mismatch; stderr: %s", errBuf.String())
 			require.Equal(t, tc.wantRemoteBranch, gitBranchExistsTrailTest(t, originDir, branch), "remote branch mismatch; stderr: %s", errBuf.String())
@@ -342,6 +345,7 @@ func TestCleanupCreatedTrailBranch(t *testing.T) {
 func initTrailCleanupRepo(t *testing.T) (localDir, originDir string, repo *git.Repository) {
 	t.Helper()
 
+	testutil.IsolateGitConfigEnv(t)
 	tmp := t.TempDir()
 	localDir = filepath.Join(tmp, "local")
 	originDir = filepath.Join(tmp, "origin.git")
@@ -608,7 +612,7 @@ func TestFetchTrailDescription_ReadsNestedBodyDocument(t *testing.T) {
 	defer srv.Close()
 
 	client := api.NewClientWithBaseURL("tok", srv.URL)
-	bodyText, err := fetchTrailDescription(t.Context(), client, "gh", "acme", "repo", 777)
+	bodyText, _, err := fetchTrailDescription(t.Context(), client, "gh", "acme", "repo", 777)
 	if err != nil {
 		t.Fatalf("fetchTrailDescription: %v", err)
 	}
@@ -623,7 +627,7 @@ func TestFetchTrailDescription_ReadsNestedBodyDocument(t *testing.T) {
 func TestResolveTrailUpdateBody_PrefersDetailSnapshot(t *testing.T) {
 	t.Parallel()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		if _, err := io.WriteString(w, `{"number":42,"bodyDocument":{"textSnapshot":"the real body"},"checkpoints":[],"hasWritePermission":true}`); err != nil {
+		if _, err := io.WriteString(w, `{"number":42,"bodyDocument":{"textSnapshot":"the real body","etag":"W/\"etag-real\""},"checkpoints":[],"hasWritePermission":true}`); err != nil {
 			t.Errorf("write response: %v", err)
 		}
 	}))
@@ -633,12 +637,43 @@ func TestResolveTrailUpdateBody_PrefersDetailSnapshot(t *testing.T) {
 	// The list resource omits the description, so found.Body is empty. The
 	// seed must come from the detail endpoint, not the empty list body.
 	found := &api.TrailResource{Number: 42, Body: ""}
-	body, err := resolveTrailUpdateBody(t.Context(), client, "gh", "acme", "repo", found)
+	body, etag, err := resolveTrailUpdateBody(t.Context(), client, "gh", "acme", "repo", found)
 	if err != nil {
 		t.Fatalf("resolveTrailUpdateBody: %v", err)
 	}
 	if body != "the real body" {
 		t.Fatalf("body = %q, want %q", body, "the real body")
+	}
+	if etag != `W/"etag-real"` {
+		t.Fatalf("etag = %q, want the detail's real etag to survive the round trip", etag)
+	}
+}
+
+// TestResolveTrailUpdateBody_ReturnsETagEvenWhenSnapshotEmpty covers a real
+// document whose description happens to be empty (already cleared): the etag
+// describes the document that was read, not its text, so it must still come
+// back — dropping it here would force the non-interactive best-effort refetch
+// in runTrailUpdateWithClient to redo a read that already succeeded.
+func TestResolveTrailUpdateBody_ReturnsETagEvenWhenSnapshotEmpty(t *testing.T) {
+	t.Parallel()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if _, err := io.WriteString(w, `{"number":42,"bodyDocument":{"textSnapshot":"","etag":"W/\"etag-empty-doc\""},"checkpoints":[],"hasWritePermission":true}`); err != nil {
+			t.Errorf("write response: %v", err)
+		}
+	}))
+	defer srv.Close()
+
+	client := api.NewClientWithBaseURL("tok", srv.URL)
+	found := &api.TrailResource{Number: 42, Body: trailTestListBody}
+	body, etag, err := resolveTrailUpdateBody(t.Context(), client, "gh", "acme", "repo", found)
+	if err != nil {
+		t.Fatalf("resolveTrailUpdateBody: %v", err)
+	}
+	if body != trailTestListBody {
+		t.Fatalf("body = %q, want fallback %q (empty snapshot doesn't override it)", body, trailTestListBody)
+	}
+	if etag != `W/"etag-empty-doc"` {
+		t.Fatalf("etag = %q, want the real etag even though the snapshot was empty", etag)
 	}
 }
 
@@ -654,13 +689,16 @@ func TestResolveTrailUpdateBody_FallsBackToListBody(t *testing.T) {
 	defer srv.Close()
 
 	client := api.NewClientWithBaseURL("tok", srv.URL)
-	found := &api.TrailResource{Number: 42, Body: "list body"}
-	body, err := resolveTrailUpdateBody(t.Context(), client, "gh", "acme", "repo", found)
+	found := &api.TrailResource{Number: 42, Body: trailTestListBody}
+	body, etag, err := resolveTrailUpdateBody(t.Context(), client, "gh", "acme", "repo", found)
 	if err != nil {
 		t.Fatalf("resolveTrailUpdateBody: %v", err)
 	}
-	if body != "list body" {
-		t.Fatalf("body = %q, want %q", body, "list body")
+	if body != trailTestListBody {
+		t.Fatalf("body = %q, want %q", body, trailTestListBody)
+	}
+	if etag != "" {
+		t.Fatalf("etag = %q, want empty when falling back to the list body", etag)
 	}
 }
 
@@ -674,13 +712,16 @@ func TestResolveTrailUpdateBody_ReturnsErrorOnFetchFailure(t *testing.T) {
 	defer srv.Close()
 
 	client := api.NewClientWithBaseURL("tok", srv.URL)
-	found := &api.TrailResource{Number: 42, Body: "list body"}
-	body, err := resolveTrailUpdateBody(t.Context(), client, "gh", "acme", "repo", found)
+	found := &api.TrailResource{Number: 42, Body: trailTestListBody}
+	body, etag, err := resolveTrailUpdateBody(t.Context(), client, "gh", "acme", "repo", found)
 	if err == nil {
 		t.Fatal("expected error on fetch failure, got nil")
 	}
-	if body != "list body" {
-		t.Fatalf("body = %q, want fallback %q", body, "list body")
+	if body != trailTestListBody {
+		t.Fatalf("body = %q, want fallback %q", body, trailTestListBody)
+	}
+	if etag != "" {
+		t.Fatalf("etag = %q, want empty on fetch failure", etag)
 	}
 }
 
@@ -1280,6 +1321,14 @@ func TestRunTrailUpdateClearsDescriptionWithEmptyBody(t *testing.T) {
 			}); err != nil {
 				t.Errorf("encode list response: %v", err)
 			}
+		case r.Method == http.MethodGet && r.URL.Path == trailTestBasePath+"/7":
+			// No bodyDocument, so the etag fetch below comes back empty and
+			// the write still falls back to Overwrite — the case this test
+			// pins.
+			w.Header().Set("Content-Type", "application/json")
+			if err := json.NewEncoder(w).Encode(api.TrailResource{ID: "trl_1", Number: 7, Branch: "feature/x"}); err != nil {
+				t.Errorf("encode detail response: %v", err)
+			}
 		case r.Method == http.MethodPut && r.URL.Path == trailTestBasePath+"/7/body":
 			mu.Lock()
 			defer mu.Unlock()
@@ -1701,7 +1750,7 @@ func TestRunTrailShowJSONLeavesBodyEmptyWithoutDescription(t *testing.T) {
 func TestRunTrailShowJSONKeepsStdoutParseableWhenDescriptionFetchFails(t *testing.T) {
 	t.Parallel()
 
-	srv := trailShowTestServer(t, api.TrailResource{ID: "trl_1", Number: 7, Branch: "feature/x", Title: "T", Body: "list body", Status: string(trail.StatusOpen)}, "", http.StatusInternalServerError)
+	srv := trailShowTestServer(t, api.TrailResource{ID: "trl_1", Number: 7, Branch: "feature/x", Title: "T", Body: trailTestListBody, Status: string(trail.StatusOpen)}, "", http.StatusInternalServerError)
 
 	var out, errOut bytes.Buffer
 	err := runTrailShowWithClient(t.Context(), &out, &errOut, api.NewClientWithBaseURL("tok", srv.URL), "gh", "acme", "repo", trailShowOptions{Selector: "feature/x", JSON: true})
@@ -1711,7 +1760,7 @@ func TestRunTrailShowJSONKeepsStdoutParseableWhenDescriptionFetchFails(t *testin
 
 	var got trail.Metadata
 	require.NoError(t, json.Unmarshal(out.Bytes(), &got), "stdout must stay valid JSON: %s", out.String())
-	require.Equal(t, "list body", got.Body, "the list body is the fallback when the detail fetch fails")
+	require.Equal(t, trailTestListBody, got.Body, "the list body is the fallback when the detail fetch fails")
 }
 
 func TestRunTrailShowTextStillRendersTheHumanView(t *testing.T) {
@@ -2065,6 +2114,13 @@ func TestRunTrailUpdateSendsTitleAsPatchAndBodyAsPut(t *testing.T) {
 			}); err != nil {
 				t.Errorf("encode list response: %v", err)
 			}
+		case r.Method == http.MethodGet && r.URL.Path == trailTestBasePath+"/7":
+			// No bodyDocument, so the etag fetch below comes back empty and
+			// the write falls back to Overwrite, as asserted below.
+			w.Header().Set("Content-Type", "application/json")
+			if err := json.NewEncoder(w).Encode(api.TrailResource{ID: "trl_1", Number: 7, Branch: "feature/x", Title: "old title"}); err != nil {
+				t.Errorf("encode detail response: %v", err)
+			}
 		case r.Method == http.MethodPatch && r.URL.Path == trailTestBasePath+"/7":
 			got := record(r)
 			if got == nil {
@@ -2169,6 +2225,11 @@ func TestRunTrailUpdateReportsAppliedMetadataWhenBodyWriteFails(t *testing.T) {
 			}); err != nil {
 				t.Errorf("encode list response: %v", err)
 			}
+		case r.Method == http.MethodGet && r.URL.Path == trailTestBasePath+"/7":
+			w.Header().Set("Content-Type", "application/json")
+			if err := json.NewEncoder(w).Encode(api.TrailResource{ID: "trl_1", Number: 7, Branch: "feature/x"}); err != nil {
+				t.Errorf("encode detail response: %v", err)
+			}
 		case r.Method == http.MethodPut && strings.HasSuffix(r.URL.Path, "/body"):
 			w.WriteHeader(http.StatusServiceUnavailable)
 			if err := json.NewEncoder(w).Encode(map[string]string{"error": "yjs engine is not configured"}); err != nil {
@@ -2196,10 +2257,298 @@ func TestRunTrailUpdateReportsAppliedMetadataWhenBodyWriteFails(t *testing.T) {
 	require.ErrorContains(t, err, "trail metadata was updated, but the body update failed")
 }
 
+// overwriteFieldOrFalse reads the "overwrite" field from a decoded JSON map,
+// treating a missing (omitempty-dropped) key the same as an explicit false.
+func overwriteFieldOrFalse(m map[string]any) bool {
+	v, ok := m["overwrite"].(bool)
+	if !ok {
+		return false
+	}
+	return v
+}
+
+// TestSendTrailBody_DispatchModes drives sendTrailBody's three-way dispatch
+// directly against a fake body route, asserting on the exact request the
+// server received: which of Overwrite/If-Match went out, and which didn't.
+// Flipping the mode logic to always send Overwrite, or dropping the If-Match
+// header, or refusing the no-etag case, each fails a case here.
+func TestSendTrailBody_DispatchModes(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name          string
+		ifMatch       string
+		overwrite     bool
+		wantIfMatch   string
+		wantOverwrite bool
+	}{
+		{
+			name:          "overwrite flag wins even with an etag in hand",
+			ifMatch:       "W/\"etag-1\"",
+			overwrite:     true,
+			wantIfMatch:   "",
+			wantOverwrite: true,
+		},
+		{
+			name:          "etag available, no overwrite: If-Match, no Overwrite",
+			ifMatch:       "W/\"etag-1\"",
+			overwrite:     false,
+			wantIfMatch:   "W/\"etag-1\"",
+			wantOverwrite: false,
+		},
+		{
+			name:          "no etag, no overwrite: falls back to Overwrite",
+			ifMatch:       "",
+			overwrite:     false,
+			wantIfMatch:   "",
+			wantOverwrite: true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			var gotIfMatch string
+			var gotBody map[string]any
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				gotIfMatch = r.Header.Get("If-Match")
+				if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
+					t.Errorf("decode request body: %v", err)
+					return
+				}
+				w.Header().Set("Content-Type", "application/json")
+				if err := json.NewEncoder(w).Encode(api.TrailBodyDocument{TextSnapshot: "new body"}); err != nil {
+					t.Errorf("encode response: %v", err)
+				}
+			}))
+			defer srv.Close()
+
+			client := api.NewClientWithBaseURL("tok", srv.URL)
+			err := sendTrailBody(t.Context(), client, "/api/v1/trails/gh/acme/repo/7/body", "new body", tc.ifMatch, tc.overwrite)
+			require.NoError(t, err)
+
+			require.Equal(t, tc.wantIfMatch, gotIfMatch, "If-Match header")
+			require.Equal(t, "new body", gotBody["markdown"])
+			require.Equal(t, tc.wantOverwrite, overwriteFieldOrFalse(gotBody), "overwrite field")
+		})
+	}
+}
+
+// TestSendTrailBody_PreconditionFailedMapsToRerunOrOverwriteHint covers the
+// 412 the route returns when the If-Match etag is stale: the CLI must not
+// retry with Overwrite on its own, only explain the two ways out.
+func TestSendTrailBody_PreconditionFailedMapsToRerunOrOverwriteHint(t *testing.T) {
+	t.Parallel()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusPreconditionFailed)
+		if err := json.NewEncoder(w).Encode(map[string]string{"error": "etag mismatch"}); err != nil {
+			t.Errorf("encode rejection: %v", err)
+		}
+	}))
+	defer srv.Close()
+
+	client := api.NewClientWithBaseURL("tok", srv.URL)
+	err := sendTrailBody(t.Context(), client, "/api/v1/trails/gh/acme/repo/7/body", "new body", "W/\"stale\"", false)
+	require.Error(t, err)
+	require.ErrorContains(t, err, "re-run")
+	require.ErrorContains(t, err, "--overwrite")
+	require.True(t, api.IsHTTPErrorStatus(err, http.StatusPreconditionFailed))
+}
+
+// TestSendTrailBody_ConflictMapsToOverwriteHint covers the 409 the route
+// returns when writing without Overwrite against a non-empty description that
+// carried no etag (e.g. an older server) — the caller must be told the flag
+// that unblocks it, not just "conflict". Note this pins the message-mapping
+// logic in isolation rather than a request shape sendTrailBody's own dispatch
+// would produce today: with ifMatch=="" it always sets Overwrite:true, so the
+// route (which only 409s when Overwrite is absent) would not actually reject
+// this exact request. Kept as a direct unit test of the mapping regardless,
+// since a future dispatch change (or a server behavior change) could make it
+// reachable again.
+func TestSendTrailBody_ConflictMapsToOverwriteHint(t *testing.T) {
+	t.Parallel()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusConflict)
+		if err := json.NewEncoder(w).Encode(map[string]string{"error": "document_not_empty"}); err != nil {
+			t.Errorf("encode rejection: %v", err)
+		}
+	}))
+	defer srv.Close()
+
+	client := api.NewClientWithBaseURL("tok", srv.URL)
+	err := sendTrailBody(t.Context(), client, "/api/v1/trails/gh/acme/repo/7/body", "new body", "", false)
+	require.Error(t, err)
+	require.ErrorContains(t, err, "--overwrite")
+	require.True(t, api.IsHTTPErrorStatus(err, http.StatusConflict))
+}
+
+// TestRunTrailUpdateWithClient_EtagThreadsToIfMatch is the end-to-end
+// non-interactive case: --body with no --overwrite must fetch the trail
+// detail purely for its etag (the interactive path already reads the body
+// itself; --body skips straight to sendTrailBody, so runTrailUpdateWithClient
+// has to do that read itself) and carry it through as If-Match.
+func TestRunTrailUpdateWithClient_EtagThreadsToIfMatch(t *testing.T) {
+	t.Parallel()
+
+	var gotIfMatch string
+	var gotOverwrite bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == trailTestBasePath:
+			w.Header().Set("Content-Type", "application/json")
+			if err := json.NewEncoder(w).Encode(api.TrailListResponse{
+				Trails: []api.TrailResource{{ID: "trl_1", Number: 7, Branch: "feature/x", Status: string(trail.StatusOpen)}},
+				Total:  1,
+			}); err != nil {
+				t.Errorf("encode list response: %v", err)
+			}
+		case r.Method == http.MethodGet && r.URL.Path == trailTestBasePath+"/7":
+			w.Header().Set("Content-Type", "application/json")
+			if err := json.NewEncoder(w).Encode(api.TrailResource{
+				ID: "trl_1", Number: 7, Branch: "feature/x",
+				BodyDocument: &api.TrailBodyDocument{TextSnapshot: "old body", ETag: `W/"etag-current"`},
+			}); err != nil {
+				t.Errorf("encode detail response: %v", err)
+			}
+		case r.Method == http.MethodPut && r.URL.Path == trailTestBasePath+"/7/body":
+			gotIfMatch = r.Header.Get("If-Match")
+			var got map[string]any
+			if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
+				t.Errorf("decode body request: %v", err)
+				return
+			}
+			gotOverwrite = overwriteFieldOrFalse(got)
+			w.Header().Set("Content-Type", "application/json")
+			if err := json.NewEncoder(w).Encode(api.TrailBodyDocument{TextSnapshot: "new body"}); err != nil {
+				t.Errorf("encode body response: %v", err)
+			}
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+
+	err := runTrailUpdateWithClient(t.Context(), io.Discard, io.Discard, api.NewClientWithBaseURL("tok", srv.URL), "gh", "acme", "repo", trailUpdateInputs{
+		Branch:      "feature/x",
+		Body:        "new body",
+		BodyChanged: true,
+	})
+
+	require.NoError(t, err)
+	require.Equal(t, `W/"etag-current"`, gotIfMatch, "the etag read from the detail fetch must reach the wire as If-Match")
+	require.False(t, gotOverwrite, "an etag in hand must not also send Overwrite")
+}
+
+// TestRunTrailUpdateWithClient_OverwriteFlagSkipsEtagFetch covers --overwrite:
+// no etag needed, so the extra detail fetch must not happen at all — a
+// request to the detail route here would fail the test via the switch's
+// default case.
+func TestRunTrailUpdateWithClient_OverwriteFlagSkipsEtagFetch(t *testing.T) {
+	t.Parallel()
+
+	var gotOverwrite bool
+	var gotIfMatch string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == trailTestBasePath:
+			w.Header().Set("Content-Type", "application/json")
+			if err := json.NewEncoder(w).Encode(api.TrailListResponse{
+				Trails: []api.TrailResource{{ID: "trl_1", Number: 7, Branch: "feature/x", Status: string(trail.StatusOpen)}},
+				Total:  1,
+			}); err != nil {
+				t.Errorf("encode list response: %v", err)
+			}
+		case r.Method == http.MethodPut && r.URL.Path == trailTestBasePath+"/7/body":
+			gotIfMatch = r.Header.Get("If-Match")
+			var got map[string]any
+			if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
+				t.Errorf("decode body request: %v", err)
+				return
+			}
+			gotOverwrite = overwriteFieldOrFalse(got)
+			w.Header().Set("Content-Type", "application/json")
+			if err := json.NewEncoder(w).Encode(api.TrailBodyDocument{TextSnapshot: "new body"}); err != nil {
+				t.Errorf("encode body response: %v", err)
+			}
+		default:
+			t.Errorf("unexpected request (etag fetch must be skipped under --overwrite): %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+
+	err := runTrailUpdateWithClient(t.Context(), io.Discard, io.Discard, api.NewClientWithBaseURL("tok", srv.URL), "gh", "acme", "repo", trailUpdateInputs{
+		Branch:      "feature/x",
+		Body:        "new body",
+		BodyChanged: true,
+		Overwrite:   true,
+	})
+
+	require.NoError(t, err)
+	require.True(t, gotOverwrite)
+	require.Empty(t, gotIfMatch)
+}
+
+// TestRunTrailUpdateWithClient_EtagFetchFailureWarnsAndFallsBackToOverwrite
+// covers the non-interactive best-effort etag fetch actually failing (a hard
+// server error, not just an absent bodyDocument): the command must still
+// succeed by falling back to Overwrite, but — unlike the graceful
+// no-bodyDocument case — this is a real failure, so the caller must be warned
+// that the conflict check was skipped rather than have it disappear silently.
+func TestRunTrailUpdateWithClient_EtagFetchFailureWarnsAndFallsBackToOverwrite(t *testing.T) {
+	t.Parallel()
+
+	var gotOverwrite bool
+	var gotIfMatch string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == trailTestBasePath:
+			w.Header().Set("Content-Type", "application/json")
+			if err := json.NewEncoder(w).Encode(api.TrailListResponse{
+				Trails: []api.TrailResource{{ID: "trl_1", Number: 7, Branch: "feature/x", Status: string(trail.StatusOpen)}},
+				Total:  1,
+			}); err != nil {
+				t.Errorf("encode list response: %v", err)
+			}
+		case r.Method == http.MethodGet && r.URL.Path == trailTestBasePath+"/7":
+			w.WriteHeader(http.StatusInternalServerError)
+		case r.Method == http.MethodPut && r.URL.Path == trailTestBasePath+"/7/body":
+			gotIfMatch = r.Header.Get("If-Match")
+			var got map[string]any
+			if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
+				t.Errorf("decode body request: %v", err)
+				return
+			}
+			gotOverwrite = overwriteFieldOrFalse(got)
+			w.Header().Set("Content-Type", "application/json")
+			if err := json.NewEncoder(w).Encode(api.TrailBodyDocument{TextSnapshot: "new body"}); err != nil {
+				t.Errorf("encode body response: %v", err)
+			}
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+
+	var errBuf bytes.Buffer
+	err := runTrailUpdateWithClient(t.Context(), io.Discard, &errBuf, api.NewClientWithBaseURL("tok", srv.URL), "gh", "acme", "repo", trailUpdateInputs{
+		Branch:      "feature/x",
+		Body:        "new body",
+		BodyChanged: true,
+	})
+
+	require.NoError(t, err, "a failed best-effort etag read must not fail the whole command")
+	require.True(t, gotOverwrite, "no etag in hand must fall back to Overwrite")
+	require.Empty(t, gotIfMatch)
+	require.Contains(t, errBuf.String(), "Warning", "the caller must be told the conflict check was skipped, not have it disappear silently")
+}
+
 func TestTrailUpdateCmdHasCollaborationFlags(t *testing.T) {
 	t.Parallel()
 	cmd := newTrailUpdateCmd()
-	for _, name := range []string{"add-assignee", "remove-assignee", "add-reviewer", "remove-reviewer", "type", "priority"} {
+	for _, name := range []string{"add-assignee", "remove-assignee", "add-reviewer", "remove-reviewer", "type", "priority", "overwrite"} {
 		if cmd.Flags().Lookup(name) == nil {
 			t.Errorf("trail update missing --%s flag", name)
 		}
@@ -2261,4 +2610,137 @@ func TestBuildTrailUpdateRequestTrimsTypeAndPriority(t *testing.T) {
 	if req.Priority == nil || *req.Priority != string(trail.PriorityHigh) {
 		t.Fatalf("Priority on wire = %v, want trimmed high", req.Priority)
 	}
+}
+
+// TestResolveTrailPushRemote covers the precedence a trail branch's delivery
+// follows. The tiers are git's own, so a repo whose branch pushes somewhere other
+// than "origin" (a fork workflow, remote.pushDefault) gets its branch delivered
+// there instead of silently to whatever "origin" happens to be.
+func TestResolveTrailPushRemote(t *testing.T) {
+	cases := []struct {
+		name    string
+		config  [][]string
+		branch  string
+		want    string
+		wantErr string
+	}{
+		{
+			name:   "nothing declared falls back to origin",
+			branch: "feature/x",
+			want:   "origin",
+		},
+		{
+			name:   "remote.pushDefault wins over nothing",
+			config: [][]string{{"remote.pushDefault", "fork"}},
+			branch: "feature/x",
+			want:   "fork",
+		},
+		{
+			name:   "branch.<name>.remote is used when it is all that is set",
+			config: [][]string{{"branch.feature/x.remote", "base"}},
+			branch: "feature/x",
+			want:   "base",
+		},
+		{
+			name: "branch.<name>.pushRemote outranks both",
+			config: [][]string{
+				{"remote.pushDefault", "fork"},
+				{"branch.feature/x.remote", "base"},
+				{"branch.feature/x.pushRemote", "mine"},
+			},
+			branch: "feature/x",
+			want:   "mine",
+		},
+		{
+			name: "remote.pushDefault outranks branch.<name>.remote",
+			config: [][]string{
+				{"remote.pushDefault", "fork"},
+				{"branch.feature/x.remote", "base"},
+			},
+			branch: "feature/x",
+			want:   "fork",
+		},
+		{
+			// The declaration is read for the branch being created, not for HEAD:
+			// `trail create --branch other` while on feature/x must not inherit
+			// feature/x's push remote.
+			name:   "declaration is read for the target branch, not HEAD",
+			config: [][]string{{"branch.feature/x.pushRemote", "mine"}},
+			branch: "other",
+			want:   "origin",
+		},
+		{
+			// Loud, not silently retargeted at origin: silent retargeting is the
+			// failure this resolver replaced.
+			name:    "a declared name git would read as a flag fails loudly",
+			config:  [][]string{{"remote.pushDefault", "--upload-pack=touched"}},
+			branch:  "feature/x",
+			wantErr: "would read as a command-line flag",
+		},
+		{
+			// A legal git value that the stricter write-direction validator in
+			// repo_mirror_use.go would reject. "." means the local repo.
+			name:   "a legal dot remote is accepted",
+			config: [][]string{{"branch.feature/x.remote", "."}},
+			branch: "feature/x",
+			want:   ".",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			// Without this, a developer or CI machine carrying a global
+			// remote.pushDefault resolves that instead of the repo-local config
+			// under test — and the "falls back to origin" case fails.
+			testutil.IsolateGitConfigEnv(t)
+			dir := t.TempDir()
+			testutil.InitRepo(t, dir)
+			for _, kv := range tc.config {
+				runGitTrailTest(t, dir, "config", kv[0], kv[1])
+			}
+			t.Chdir(dir)
+
+			got, err := resolveTrailPushRemote(context.Background(), tc.branch)
+
+			if tc.wantErr != "" {
+				require.ErrorContains(t, err, tc.wantErr)
+				return
+			}
+			require.NoError(t, err)
+			require.Equal(t, tc.want, got)
+		})
+	}
+}
+
+// TestPrepareTrailCreateBranchPushesToDeclaredRemote is the end-to-end shape of
+// the bug: origin exists and is a perfectly good remote, but the branch's
+// declared push destination is a different one. The branch must arrive there and
+// nowhere else, and cleanup must undo it on that same remote.
+func TestPrepareTrailCreateBranchPushesToDeclaredRemote(t *testing.T) {
+	localDir, originDir, repo := initTrailCleanupRepo(t)
+	defer repo.Close()
+	forkDir := filepath.Join(filepath.Dir(localDir), "fork.git")
+	runGitTrailTest(t, localDir, "init", "--bare", forkDir)
+	runGitTrailTest(t, localDir, "remote", "add", "fork", forkDir)
+	runGitTrailTest(t, localDir, "config", "remote.pushDefault", "fork")
+	t.Chdir(localDir)
+
+	const branch = "feature/declared"
+	ctx := context.Background()
+	remote, err := resolveTrailPushRemote(ctx, branch)
+	require.NoError(t, err)
+	require.Equal(t, "fork", remote)
+
+	var out, errOut bytes.Buffer
+	state, err := prepareTrailCreateBranch(ctx, &out, &errOut, repo, remote, branch, "main", false)
+
+	require.NoError(t, err, "stderr: %s", errOut.String())
+	require.True(t, state.NeedsCreation)
+	require.True(t, state.RemotePushed)
+	require.True(t, gitBranchExistsTrailTest(t, forkDir, branch), "branch missing from declared remote")
+	require.False(t, gitBranchExistsTrailTest(t, originDir, branch), "branch leaked to origin")
+	require.Contains(t, out.String(), "Pushed branch "+branch+" to fork")
+
+	cleanupCreatedTrailBranch(ctx, repo, remote, branch, state.LocalCreated, state.RemotePushed, &errOut)
+	require.False(t, gitBranchExistsTrailTest(t, forkDir, branch), "cleanup left the branch on the declared remote; stderr: %s", errOut.String())
 }

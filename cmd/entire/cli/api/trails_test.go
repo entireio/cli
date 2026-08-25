@@ -15,7 +15,7 @@ func TestClient_TrailsEnabledEscapesPathComponents(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotURI = r.RequestURI
 		w.WriteHeader(http.StatusOK)
-		w.Write([]byte(`{"trails":[]}`)) //nolint:errcheck // test handler
+		w.Write([]byte(`{"items":[],"nextPageToken":null,"totalCount":0}`)) //nolint:errcheck // test handler
 	}))
 	defer server.Close()
 
@@ -93,8 +93,8 @@ func TestClient_TrailsEnabled(t *testing.T) {
 		wantOK     bool
 		wantErrNil bool
 	}{
-		{"enabled (200)", http.StatusOK, `{"trails":[],"total":0}`, true, true},
-		{"enabled empty (200)", http.StatusOK, `{"trails":[]}`, true, true},
+		{"enabled (200)", http.StatusOK, `{"items":[],"nextPageToken":null,"totalCount":0}`, true, true},
+		{"enabled empty (200)", http.StatusOK, `{"items":[],"nextPageToken":null,"totalCount":0}`, true, true},
 		{"not enabled (404)", http.StatusNotFound, `{"error":"not found"}`, false, true},
 		{"forbidden (403)", http.StatusForbidden, `{"error":"forbidden"}`, false, true},
 		{"gone (410)", http.StatusGone, `{"error":"gone"}`, false, true},
