@@ -15,6 +15,8 @@ import (
 	"charm.land/huh/v2"
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	_ "github.com/entireio/cli/cmd/entire/cli/agent/claudecode"
+	"github.com/entireio/cli/cmd/entire/cli/agent/cloudenv"
+	_ "github.com/entireio/cli/cmd/entire/cli/agent/cursor"
 	"github.com/entireio/cli/cmd/entire/cli/agent/external"
 	_ "github.com/entireio/cli/cmd/entire/cli/agent/geminicli"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
@@ -3527,6 +3529,73 @@ func TestEnableCmd_YesFreshRepo_SkipsPromptsAndEnables(t *testing.T) {
 	}
 	if !s.Enabled {
 		t.Error("expected enabled=true")
+	}
+}
+
+func TestEnableCmd_CursorPatchesExistingEnvironmentJSON(t *testing.T) {
+	setupTestRepo(t)
+	testutil.WriteFile(t, ".", "f.txt", "init")
+	testutil.GitAdd(t, ".", "f.txt")
+	testutil.GitCommit(t, ".", "init")
+
+	if err := os.MkdirAll(".cursor", 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(".cursor/environment.json", []byte(`{"name":"app","install":"npm ci"}`+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := newEnableCmd()
+	var stdout, stderr bytes.Buffer
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&stderr)
+	cmd.SetArgs([]string{"--yes", "--agent", "cursor"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("enable: %v\nstdout: %s\nstderr: %s", err, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "Cloud Agent install includes Entire CLI") {
+		t.Fatalf("expected cloud-agent wiring message, got: %s", stdout.String())
+	}
+
+	data, err := os.ReadFile(".cursor/environment.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		t.Fatal(err)
+	}
+	var install string
+	if err := json.Unmarshal(raw["install"], &install); err != nil {
+		t.Fatal(err)
+	}
+	if install != "npm ci && "+cloudenv.InstallCLIStep {
+		t.Fatalf("install = %q", install)
+	}
+	if _, err := os.Stat(filepath.Join(".entire", cloudenv.InstallCLIScriptName)); err != nil {
+		t.Fatalf("missing install helper: %v", err)
+	}
+}
+
+func TestEnableCmd_CursorDoesNotCreateEnvironmentJSON(t *testing.T) {
+	setupTestRepo(t)
+	testutil.WriteFile(t, ".", "f.txt", "init")
+	testutil.GitAdd(t, ".", "f.txt")
+	testutil.GitCommit(t, ".", "init")
+
+	cmd := newEnableCmd()
+	var stdout, stderr bytes.Buffer
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&stderr)
+	cmd.SetArgs([]string{"--yes", "--agent", "cursor"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("enable: %v\nstdout: %s\nstderr: %s", err, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "did not create one") {
+		t.Fatalf("expected dashboard-override hint, got: %s", stdout.String())
+	}
+	if _, err := os.Stat(".cursor/environment.json"); !os.IsNotExist(err) {
+		t.Fatal("must not create .cursor/environment.json")
 	}
 }
 

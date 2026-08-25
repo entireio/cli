@@ -239,3 +239,10 @@ func AsToolInvocationScanner(ag Agent) (ToolInvocationScanner, bool) {
 func AsSessionEndBudgeter(ag Agent) (SessionEndBudgeter, bool) {
 	return builtinCapability[SessionEndBudgeter](ag)
 }
+
+// AsCloudCLIInstaller returns the agent as CloudCLIInstaller if it implements
+// the interface. Built-in only: wiring a host-specific environment file is
+// not expressible through the external-agent protocol.
+func AsCloudCLIInstaller(ag Agent) (CloudCLIInstaller, bool) {
+	return builtinCapability[CloudCLIInstaller](ag)
+}
