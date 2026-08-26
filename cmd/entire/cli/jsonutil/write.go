@@ -88,6 +88,14 @@ func WriteFileAtomicFollowingSymlinks(filePath string, data []byte, perm fs.File
 	if info, err := os.Stat(target); err == nil && info.Mode().IsRegular() {
 		perm = info.Mode().Perm()
 	}
+	if target != filePath {
+		// A dotfile manager can link to a target whose directory does not
+		// exist yet; the caller only created the LINK's parent. Create the
+		// target's parent (user-private) so the write lands through the link.
+		if err := os.MkdirAll(filepath.Dir(target), 0o700); err != nil {
+			return fmt.Errorf("%s resolves through a symlink to %s: create parent: %w", filePath, target, err)
+		}
+	}
 	err := WriteFileAtomic(target, data, perm)
 	if err != nil && target != filePath {
 		// Name both paths: the failure is about the resolved target (whose
@@ -112,7 +120,14 @@ const maxSymlinkHops = 40
 // os.WriteFile would.
 func resolveWriteTarget(filePath string) string {
 	path := filePath
+	// Any revisited path is a cycle (a -> b -> a as much as a -> a): stop
+	// there and let the write surface ELOOP instead of walking to the cap.
+	seen := make(map[string]struct{}, 4)
 	for range maxSymlinkHops {
+		if _, cycled := seen[path]; cycled {
+			return path
+		}
+		seen[path] = struct{}{}
 		prev := path
 		if resolved, err := filepath.EvalSymlinks(path); err == nil {
 			return resolved

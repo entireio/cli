@@ -220,3 +220,52 @@ func TestWriteFileAtomic_ParentMissing(t *testing.T) {
 		t.Errorf("expected ErrNotExist; got: %v", err)
 	}
 }
+
+// A dotfile manager can create the link before the target's directory exists;
+// the write must create that directory and land through the link.
+func TestWriteFileAtomicFollowingSymlinks_DanglingSymlinkMissingTargetDir(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	target := filepath.Join(dir, "dotfiles", "entire", "settings.json")
+	link := filepath.Join(dir, "settings.json")
+	if err := os.Symlink(target, link); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+
+	data := []byte(`{"a":1}`)
+	if err := WriteFileAtomicFollowingSymlinks(link, data, 0o600); err != nil {
+		t.Fatalf("WriteFileAtomicFollowingSymlinks: %v", err)
+	}
+	got, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatalf("target not created through the link: %v", err)
+	}
+	if string(got) != string(data) {
+		t.Errorf("target content: got %q want %q", got, data)
+	}
+	if fi, err := os.Lstat(link); err != nil || fi.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("link was replaced by a regular file (err=%v)", err)
+	}
+}
+
+// A symlink cycle that is not self-referential (a -> b -> a) is detected as a
+// revisit rather than walked to the hop cap, and the write reports ELOOP.
+func TestWriteFileAtomicFollowingSymlinks_CycleFails(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	a := filepath.Join(dir, "a")
+	b := filepath.Join(dir, "b")
+	if err := os.Symlink(b, a); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	if err := os.Symlink(a, b); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := resolveWriteTarget(a); got != a && got != b {
+		t.Fatalf("resolveWriteTarget on a cycle = %q, want one of the cycle members", got)
+	}
+	if err := WriteFileAtomicFollowingSymlinks(a, []byte("x"), 0o600); err == nil {
+		t.Fatal("writing through a symlink cycle must fail")
+	}
+}
