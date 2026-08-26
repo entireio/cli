@@ -456,6 +456,33 @@ File an issue when the rule would benefit every Entire user (e.g., a major SaaS 
 - **My pack file is silently ignored.** Filenames must end in `.yaml`, `.yml`, or `.json`. Other extensions are skipped.
 - **I want to disable a rule temporarily.** Comment it out (prefix the YAML key with `#`) or remove the entry from `custom_redactions`. The rule reloads on the next CLI invocation.
 
+## Global tracking and checkpoint-sync trust
+
+Global tracking (`"global": {"enabled": true}` in `~/.config/entire/settings.json`)
+captures agent sessions in every git repository you touch with Claude Code or
+Gemini CLI, without `entire enable` in each one. In a repo you never enabled,
+all runtime data lives under `.git/` (`entire/worktree/<hash>/`), so the
+worktree stays byte-clean; `exclude_paths`, `exclude_paths_exact`, and
+`exclude_origins` carve repos out and fail closed on unusable patterns.
+
+Capture and sync are separate consents. While global tracking is on, a repo's
+checkpoints leave this machine only after you trust it — whether the repo is
+tracked globally or was enabled with `entire enable`. Trust is recorded in the
+same settings file (`trust_all`, `trusted_origins`, `trusted_paths`) by:
+
+- `entire enable` in a repo (the explicit enable is the consent);
+- the pre-push prompt — **Yes** (this repo, or every clone of its origin),
+  **Not now** (keep capturing locally, ask again next push), **Always**
+  (`trust_all`). It reads the terminal, never Git's stdin, and never grants
+  implicitly (accessible mode holds);
+- `entire trust`, and `entire trust --revoke` to withdraw it.
+
+A held repo never blocks your own `git push`: the branch lands, checkpoint data
+stays local, one stderr line explains, and the first trusted push syncs the
+backlog. Non-interactive pushes hold silently apart from that line. With the
+tier off or unconfigured nothing changes from today. See
+`docs/architecture/global-tracking.md` for the activation and layout rules.
+
 ## Limitations
 
 - **Best-effort.** Novel or low-entropy secrets (short passwords, predictable tokens) may not be caught.
