@@ -922,6 +922,7 @@ func preserveCurrentHookOverStaleBackup(hookPath, backupPath string, current []b
 		_ = os.Remove(newPath)
 		return fmt.Errorf("install updated backup: %w", err)
 	}
+	_ = os.Remove(stalePath)
 	return nil
 }
 
