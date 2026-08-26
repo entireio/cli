@@ -262,10 +262,13 @@ func TestWriteFileAtomicFollowingSymlinks_CycleFails(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if got := resolveWriteTarget(a); got != a && got != b {
-		t.Fatalf("resolveWriteTarget on a cycle = %q, want one of the cycle members", got)
+	if _, err := resolveWriteTarget(a); err == nil {
+		t.Fatal("resolveWriteTarget on a cycle must fail")
 	}
 	if err := WriteFileAtomicFollowingSymlinks(a, []byte("x"), 0o600); err == nil {
 		t.Fatal("writing through a symlink cycle must fail")
+	}
+	if fi, err := os.Lstat(a); err != nil || fi.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("the link must survive a refused write (err=%v)", err)
 	}
 }

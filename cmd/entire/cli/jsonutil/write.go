@@ -84,7 +84,10 @@ func WriteFileAtomic(filePath string, data []byte, perm fs.FileMode) error {
 // When the resolved target already exists its file mode is preserved; perm
 // applies only when the write creates the file.
 func WriteFileAtomicFollowingSymlinks(filePath string, data []byte, perm fs.FileMode) error {
-	target := resolveWriteTarget(filePath)
+	target, err := resolveWriteTarget(filePath)
+	if err != nil {
+		return err
+	}
 	if info, err := os.Stat(target); err == nil && info.Mode().IsRegular() {
 		perm = info.Mode().Perm()
 	}
@@ -96,7 +99,7 @@ func WriteFileAtomicFollowingSymlinks(filePath string, data []byte, perm fs.File
 			return fmt.Errorf("%s resolves through a symlink to %s: create parent: %w", filePath, target, err)
 		}
 	}
-	err := WriteFileAtomic(target, data, perm)
+	err = WriteFileAtomic(target, data, perm)
 	if err != nil && target != filePath {
 		// Name both paths: the failure is about the resolved target (whose
 		// directory may be unwritable, or owned by someone else), but the
@@ -117,20 +120,19 @@ const maxSymlinkHops = 40
 // "no symlink here" is how an existing dangling settings.json link got
 // replaced by a regular file. A relative filePath stays relative —
 // EvalSymlinks never absolutizes — so it resolves against the CWD exactly as
-// os.WriteFile would.
-func resolveWriteTarget(filePath string) string {
+// os.WriteFile would. A symlink cycle (a -> a, a -> b -> a) or a chain past the
+// hop cap is an error: rename(2) onto a link would otherwise replace the link
+// itself with a regular file instead of failing.
+func resolveWriteTarget(filePath string) (string, error) {
 	path := filePath
-	// Any revisited path is a cycle (a -> b -> a as much as a -> a): stop
-	// there and let the write surface ELOOP instead of walking to the cap.
 	seen := make(map[string]struct{}, 4)
 	for range maxSymlinkHops {
 		if _, cycled := seen[path]; cycled {
-			return path
+			return "", fmt.Errorf("resolve %s: symlink cycle at %s", filePath, path)
 		}
 		seen[path] = struct{}{}
-		prev := path
 		if resolved, err := filepath.EvalSymlinks(path); err == nil {
-			return resolved
+			return resolved, nil
 		}
 		// Some component of path does not exist. Resolve the parent so the
 		// temp file and rename land in the real directory, then follow the
@@ -142,23 +144,16 @@ func resolveWriteTarget(filePath string) string {
 		if err != nil || info.Mode()&fs.ModeSymlink == 0 {
 			// The final component is genuinely absent (create it here) or not
 			// a symlink — the literal path is the write target.
-			return path
+			return path, nil //nolint:nilerr // absent final component is the create-here case, not a failure
 		}
 		target, err := os.Readlink(path)
 		if err != nil {
-			return path
+			return path, nil //nolint:nilerr // unreadable link: write to the literal path and let WriteFileAtomic report it
 		}
 		if !filepath.IsAbs(target) {
 			target = filepath.Join(filepath.Dir(path), target)
 		}
-		if target == prev {
-			// A self-referential link (a -> a): the kernel answers ELOOP at
-			// once, so stop here instead of re-walking it to the hop cap.
-			return path
-		}
 		path = target
 	}
-	// Hop cap exceeded (a link cycle); the kernel would fail this path with
-	// ELOOP, so let the write surface whatever error the last hop produces.
-	return path
+	return "", fmt.Errorf("resolve %s: symlink chain exceeds %d hops", filePath, maxSymlinkHops)
 }
