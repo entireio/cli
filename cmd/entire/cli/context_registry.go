@@ -235,14 +235,6 @@ func refreshContextRegistrySession(ctx context.Context, path, repoID, sessionID 
 	})
 }
 
-func refreshLocalContextSessionHeartbeat(ctx context.Context, repoID, sessionID string) error {
-	path, err := currentContextRegistryPath(ctx)
-	if err != nil {
-		return err
-	}
-	return refreshContextRegistrySession(ctx, path, repoID, sessionID, time.Now())
-}
-
 // refreshRegisteredLocalContextSessionHeartbeat updates LastSeen for a session
 // already present in the local registry without any control-plane network calls.
 func refreshRegisteredLocalContextSessionHeartbeat(ctx context.Context, sessionID string) error {
