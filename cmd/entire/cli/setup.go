@@ -1528,10 +1528,11 @@ func runDisable(ctx context.Context, w io.Writer, useProjectSettings bool) error
 	}
 
 	// A repo tracked only by the global tier has no repo-level setup to
-	// disable, and writing a veto file here would be the first worktree
-	// footprint the tier ever leaves. The off-switch for global tracking is
-	// the user settings file, so point there and write nothing.
-	if policy, err := repopolicy.ClassifyRepoPolicy(ctx); err == nil && policy.ActivationSource == repopolicy.ActivationGlobal {
+	// disable, and a bare disable's local veto file would be the first worktree
+	// footprint the tier ever leaves — the machine-local off-switch is the user
+	// settings file, so point there and write nothing. --project is different:
+	// the committed enabled:false is the team-wide opt-out and must be written.
+	if policy, err := repopolicy.ClassifyRepoPolicy(ctx); err == nil && !useProjectSettings && policy.ActivationSource == repopolicy.ActivationGlobal {
 		fmt.Fprintln(w, "This repo has no repo-level Entire setup; it is tracked by global tracking.")
 		fmt.Fprintf(w, "To stop tracking it, add %s to exclude_paths in %s (or set global.enabled to false).\n", policy.WorktreeRoot, settings.UserSettingsPath())
 		fmt.Fprintln(w, "Nothing was written.")

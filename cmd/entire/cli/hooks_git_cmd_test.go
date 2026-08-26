@@ -133,7 +133,7 @@ func TestGitHookPreRun_ProceedUnderGlobalMode(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	wantPrefix := filepath.Join(canonicalTmpDir, ".git", "entire", "worktree", paths.HashWorktreeID(""))
+	wantPrefix := filepath.Join(canonicalTmpDir, ".git", "entire", "worktree") + string(filepath.Separator)
 	if !strings.HasPrefix(logsDir, wantPrefix) {
 		t.Errorf("logs dir = %q, want it under %q", logsDir, wantPrefix)
 	}

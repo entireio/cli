@@ -4030,6 +4030,15 @@ func TestRunDisable_GloballyTrackedRepoWritesNothing(t *testing.T) {
 		t.Fatal("repo stays globally tracked until the user edits the settings file")
 	}
 
+	// --project is the team-wide opt-out and must still write the committed veto.
+	out.Reset()
+	if err := runDisable(t.Context(), &out, true); err != nil {
+		t.Fatalf("runDisable --project: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, ".entire", "settings.json")); err != nil || settings.IsActiveForRepo(t.Context()) {
+		t.Fatalf("disable --project must write the committed veto (err=%v):\n%s", err, out.String())
+	}
+
 	// A repo-enabled repo keeps today's behavior.
 	out.Reset()
 	writeSettings(t, `{"enabled": true}`)

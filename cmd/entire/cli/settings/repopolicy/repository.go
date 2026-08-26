@@ -2,6 +2,8 @@ package repopolicy
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"os/exec"
@@ -24,9 +26,17 @@ type Repository struct {
 // and exclusion validation have passed their no-Git fast path.
 type RepositoryResolver func(context.Context) (Repository, error)
 
-// HashWorktreeID returns the stable namespace key used for a Git worktree.
-func HashWorktreeID(worktreeID string) string {
-	return worktreeid.Hash(worktreeID)
+// runtimeKeyLength is the hex length of the per-worktree runtime directory
+// name: 64 bits. The 6-char hash that names shadow branches tolerates a
+// collision (checkpoints interleave on a shared branch by design); a runtime
+// root does not — two linked worktrees colliding would merge their session
+// state, logs, and tmp on disk — so the directory gets a wider key.
+const runtimeKeyLength = 16
+
+// runtimeKey returns the stable runtime-directory name for a Git worktree ID.
+func runtimeKey(worktreeID string) string {
+	sum := sha256.Sum256([]byte(worktreeID))
+	return hex.EncodeToString(sum[:])[:runtimeKeyLength]
 }
 
 // ResolveRepository resolves repository facts for the current directory.
@@ -61,7 +71,7 @@ func ResolveRepositoryAt(ctx context.Context, dir string) (Repository, error) {
 		WorktreeRoot: root,
 		GitCommonDir: commonDir,
 		WorktreeID:   worktreeID,
-		WorktreeKey:  HashWorktreeID(worktreeID),
+		WorktreeKey:  runtimeKey(worktreeID),
 	}, nil
 }
 
