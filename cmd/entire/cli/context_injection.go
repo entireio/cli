@@ -190,10 +190,23 @@ func crossRepoContextInjectionEligible(ctx context.Context, sessionID, prompt st
 	return crossRepoContextEligible(state.CrossRepoContext, prompt, now)
 }
 
+func maybeRefreshLocalContextSessionHeartbeat(ctx context.Context, sessionID string) {
+	hookCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	targetRepoID, _, err := currentContextTargetForHeartbeat(hookCtx)
+	if err != nil {
+		return
+	}
+	if err := refreshLocalContextSessionHeartbeat(hookCtx, targetRepoID, sessionID); err != nil {
+		logging.Debug(hookCtx, "local context heartbeat skipped", "error", err.Error())
+	}
+}
+
+// currentContextTargetForHeartbeat is the heartbeat seam; tests stub repo resolution.
+var currentContextTargetForHeartbeat = currentContextTarget
+
 // persistContextEvidenceHook is the injection-path persist seam; tests stub partial failures.
 var persistContextEvidenceHook = persistContextEvidence
-
-// hookBoundedMutationCtx returns a context bounded by hookCtx's remaining deadline.
 // Post-retrieve session mutations must not mint a fresh timeout on context.Background().
 func hookBoundedMutationCtx(hookCtx context.Context) (context.Context, context.CancelFunc) {
 	return context.WithTimeout(hookCtx, 5*time.Second)
@@ -207,6 +220,7 @@ func buildCrossRepoContextInjection(ctx context.Context, ag agent.Agent, event *
 	if prompt == "" {
 		return "", nil
 	}
+	maybeRefreshLocalContextSessionHeartbeat(ctx, event.SessionID)
 	if !crossRepoContextInjectionEligible(ctx, event.SessionID, prompt) {
 		return "", nil
 	}
@@ -219,9 +233,6 @@ func buildCrossRepoContextInjection(ctx context.Context, ag agent.Agent, event *
 	targetRepoID, targetRepoName, err := currentContextTarget(hookCtx)
 	if err != nil {
 		return "", nil
-	}
-	if err := refreshLocalContextSessionHeartbeat(hookCtx, targetRepoID, event.SessionID); err != nil {
-		logging.Debug(hookCtx, "local context heartbeat skipped", "error", err.Error())
 	}
 	now := time.Now()
 	reserved := false

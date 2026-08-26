@@ -10,6 +10,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	"github.com/entireio/cli/cmd/entire/cli/auth"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
 )
 
@@ -250,5 +251,48 @@ func TestCrossRepoContextPersistedIDsOnlyOnSuccessfulPersist(t *testing.T) {
 	}
 	if len(persistedIDs) != 1 || persistedIDs[0] != "ctx_ok" {
 		t.Fatalf("persistedIDs = %#v, want only ctx_ok from partial persist", persistedIDs)
+	}
+}
+
+func TestMaybeRefreshLocalContextSessionHeartbeatIgnoresInjectionQuota(t *testing.T) {
+	const (
+		coreURL   = "https://ci-core.example"
+		accountID = "ci-runner"
+		repoID    = "repo-heartbeat"
+	)
+	cacheRoot := t.TempDir()
+	t.Setenv("XDG_CACHE_HOME", cacheRoot)
+	t.Setenv("ENTIRE_CONFIG_DIR", t.TempDir())
+	t.Setenv(auth.EnvTokenVar, makeJWT(t, `{"alg":"RS256"}`, `{"sub":"`+accountID+`","aud":"`+coreURL+`"}`))
+
+	path, err := currentContextRegistryPath(t.Context())
+	if err != nil {
+		t.Fatalf("resolve registry path: %v", err)
+	}
+	old := time.Date(2026, 8, 19, 8, 0, 0, 0, time.UTC)
+	if err := writeContextRegistry(path, contextRegistry{Sessions: []localContextSession{{
+		RepoID: repoID, SessionID: "s-quota", LastSeen: old,
+	}}}); err != nil {
+		t.Fatal(err)
+	}
+	state := strategy.CrossRepoContextState{PacketCount: crossRepoMaxPackets}
+	if crossRepoContextEligible(state, "entirely different topic", old.Add(time.Hour)) {
+		t.Fatal("quota-exhausted session must not be injection-eligible")
+	}
+
+	prev := currentContextTargetForHeartbeat
+	currentContextTargetForHeartbeat = func(context.Context) (string, string, error) {
+		return repoID, "acme/cli", nil
+	}
+	t.Cleanup(func() { currentContextTargetForHeartbeat = prev })
+
+	maybeRefreshLocalContextSessionHeartbeat(t.Context(), "s-quota")
+
+	got, err := readContextRegistry(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Sessions) != 1 || !got.Sessions[0].LastSeen.After(old) {
+		t.Fatalf("heartbeat not refreshed for quota-exhausted session: %+v", got.Sessions)
 	}
 }
