@@ -207,6 +207,7 @@ var currentContextTargetForHeartbeat = currentContextTarget
 
 // persistContextEvidenceHook is the injection-path persist seam; tests stub partial failures.
 var persistContextEvidenceHook = persistContextEvidence
+
 // Post-retrieve session mutations must not mint a fresh timeout on context.Background().
 func hookBoundedMutationCtx(hookCtx context.Context) (context.Context, context.CancelFunc) {
 	return context.WithTimeout(hookCtx, 5*time.Second)
