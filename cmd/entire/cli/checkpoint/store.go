@@ -170,6 +170,9 @@ func writeWithRefRaceRetry(ctx context.Context, what string, write func() error)
 		if err == nil {
 			return nil
 		}
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return fmt.Errorf("checkpoint write canceled: %w", ctxErr)
+		}
 		if !errors.Is(err, storage.ErrReferenceHasChanged) {
 			return err
 		}
