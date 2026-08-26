@@ -1010,6 +1010,9 @@ func findUnclaimedPreTaskForAgentUnderLock(ctx context.Context, agentID string) 
 	case 1:
 		return agentMatches[0], 1, true
 	case 0:
+		if agentID != "" {
+			return "", 0, false
+		}
 		return findActivePreTaskFile(ctx, claimed, oldestPreTask)
 	default:
 		// Several unclaimed files stamped with the same agent_id should not
