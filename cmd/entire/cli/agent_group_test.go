@@ -3,10 +3,12 @@ package cli
 import (
 	"bytes"
 	"context"
+	"os/exec"
 	"strings"
 	"testing"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
+	agenttestutil "github.com/entireio/cli/cmd/entire/cli/agent/testutil"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 )
 
@@ -80,5 +82,46 @@ func TestAgentGroupBareCommandRunsAgentMenu(t *testing.T) {
 	}
 	if strings.Contains(out, "Usage:") {
 		t.Fatalf("bare agent command should not fall through to help, got:\n%s", out)
+	}
+}
+
+// TestRunAgentList_ShowsBrokenExternalAgents covers the payoff of recording
+// discovery failures: a plugin the user installed but that cannot be loaded is
+// named, with its reason, instead of silently missing from the listing.
+//
+// Not parallel: it sets PATH and mutates the process-wide agent registry.
+func TestRunAgentList_ShowsBrokenExternalAgents(t *testing.T) {
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("sh not available")
+	}
+	agent.ResetExternalsForTesting()
+	t.Cleanup(agent.ResetExternalsForTesting)
+
+	dir := t.TempDir()
+	readyName := "list-ready-ext"
+	brokenName := "list-broken-ext"
+	agenttestutil.WriteExternalAgentBinary(t, dir, readyName, "#!/bin/sh\ncase \"$1\" in info) echo '"+
+		`{"protocol_version":1,"name":"`+readyName+`","type":"Ready Ext","description":"d","is_preview":false,"protected_dirs":[],"hook_names":[],"capabilities":{}}`+
+		"' ;; esac\n")
+	brokenPath := agenttestutil.WriteExternalAgentBinary(t, dir, brokenName, "#!/bin/sh\necho 'not json'\n")
+	t.Setenv("PATH", dir)
+
+	var buf bytes.Buffer
+	if err := runAgentList(context.Background(), &buf); err != nil {
+		t.Fatalf("runAgentList: %v", err)
+	}
+	out := buf.String()
+
+	if !strings.Contains(out, readyName) {
+		t.Errorf("ready external agent %q missing from the listing:\n%s", readyName, out)
+	}
+	if !strings.Contains(out, "Broken external agents:") {
+		t.Errorf("missing broken-agent section:\n%s", out)
+	}
+	if !strings.Contains(out, brokenPath) {
+		t.Errorf("broken agent listed without its binary path:\n%s", out)
+	}
+	if !strings.Contains(out, "invalid JSON") {
+		t.Errorf("broken agent listed without a reason:\n%s", out)
 	}
 }

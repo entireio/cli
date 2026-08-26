@@ -269,6 +269,14 @@ Measured on macOS (Apple silicon), forking a freshly written shell script:
 | Each further *newly written* file, same process | 140–170ms |
 | Re-exec of a file already run once | 7–12ms |
 | `paths.WorktreeRoot` shelling out to git, *inside* the budget | ~13ms |
+| Five freshly written files exec'd **concurrently** | >1000ms each |
+
+That last row was measured while implementing this plan, and it is worse than
+the sequential numbers suggest: cold starts contend with each other, so the very
+parallelism that fixes the serialization problem also makes the first-run cost
+spike. A healthy mock breached a **1s** budget while four neighbours were
+starting cold. Two tests therefore execute their mock once before the measured
+call, to keep cold-start cost out of the budget under test.
 
 The cost is dominated by **first exec of a given binary**, not process warm-up:
 on macOS a newly installed binary pays code-signing / Gatekeeper validation and
@@ -281,11 +289,20 @@ cold page-in on its first run. Consequences:
   strictly slower to start than the `sh` script measured above.
 - **Every test that writes a mock agent into a fresh `t.TempDir()` hits the cold
   path.** At 300ms essentially every discovery test that execs a mock fails.
-  This is not a test bug; do not "fix" it by loosening assertions. Make
-  `infoTimeout` a package `var` and have those tests raise it (~2s), keeping the
-  shipped default at 300ms for the requester to tune.
+  This is not a test bug; do not "fix" it by loosening assertions. `infoTimeout`
+  is a package `var` so those tests can raise it, keeping the shipped default at
+  300ms for the requester to tune. Where the budget itself is what a test
+  measures, warm the mock with one throwaway exec instead of raising it.
 - `Agent.run` additionally calls `paths.WorktreeRoot(ctx)`, which can shell out
   to git (~13ms) *inside* the budget, before the plugin is even executed.
+- **Four pre-existing tests broke on the budget alone.** The
+  `TestRunExplain*ExternalNativeTranscript` cases each write a mock agent into a
+  fresh `t.TempDir()` and rely on discovery to find it. They passed in isolation
+  and failed in a full package run, purely because the cold exec exceeded 300ms
+  under load. Nothing about those tests is wrong; the budget is. They pass now
+  only because every test that writes a mock goes through
+  `agenttestutil.WriteExternalAgentBinary`, which warms the binary first — a
+  luxury no real user gets on their first command after installing a plugin.
 
 Whatever value is chosen, `ErrInfoTimeout` must stay distinguishable from a
 genuine load failure.

@@ -14,45 +14,98 @@ import (
 
 var (
 	registryMu sync.RWMutex
-	registry   = make(map[types.AgentName]Factory)
+	registry   = make(map[types.AgentName]entry)
 )
 
 // Factory creates a new agent instance
 type Factory func() Agent
+
+// entry is one slot in the registry. Exactly one of factory and err is set: a
+// usable agent has a factory, while an external binary that was found on $PATH
+// but could not be loaded carries the reason instead. binary is set for
+// external agents only, and is what lets discovery skip a binary it has
+// already asked for info.
+type entry struct {
+	factory Factory
+	binary  string
+	err     error
+}
+
+// ExternalFailure is an external agent binary that exists on $PATH but could
+// not be loaded. Listing commands use it to answer "why isn't my plugin
+// showing up?", which used to be a Debug log line and nothing else.
+type ExternalFailure struct {
+	Name   types.AgentName
+	Binary string
+	Err    error
+}
 
 // Register adds an agent factory to the registry.
 // Called from init() in each agent implementation.
 func Register(name types.AgentName, factory Factory) {
 	registryMu.Lock()
 	defer registryMu.Unlock()
-	registry[name] = factory
+	registry[name] = entry{factory: factory}
 }
 
-// Get retrieves an agent by name.
-//
+// RegisterExternal adds a usable external agent, remembering which binary it
+// came from so discovery can skip that binary on a later pass.
+func RegisterExternal(name types.AgentName, binary string, factory Factory) {
+	registryMu.Lock()
+	defer registryMu.Unlock()
+	registry[name] = entry{factory: factory, binary: binary}
+}
 
+// RegisterExternalFailure records an external agent binary that was found but
+// could not be loaded, so the reason survives until something lists it.
+//
+// A failure can never displace a working built-in: discovery skips any binary
+// whose derived name collides with an already-registered agent, without
+// executing it.
+func RegisterExternalFailure(name types.AgentName, binary string, err error) {
+	registryMu.Lock()
+	defer registryMu.Unlock()
+	registry[name] = entry{binary: binary, err: err}
+}
+
+// Get retrieves an agent by name. An external agent that failed to load
+// returns its load error rather than looking like it was never installed.
 func Get(name types.AgentName) (Agent, error) {
 	registryMu.RLock()
 	defer registryMu.RUnlock()
 
-	factory, ok := registry[name]
+	e, ok := registry[name]
 	if !ok {
-		return nil, fmt.Errorf("unknown agent: %s (available: %v)", name, List())
+		return nil, fmt.Errorf("unknown agent: %s (available: %v)", name, usableNamesLocked())
 	}
-	return factory(), nil
+	if e.err != nil {
+		return nil, fmt.Errorf("external agent %q (%s) is not usable: %w", name, e.binary, e.err)
+	}
+	return e.factory(), nil
 }
 
-// List returns all registered agent names in sorted order.
-func List() []types.AgentName {
-	registryMu.RLock()
-	defer registryMu.RUnlock()
-
+// usableNamesLocked returns the sorted usable agent names. The caller must
+// already hold registryMu. List cannot be reused here: re-entering RLock
+// deadlocks whenever a writer queues between the two acquisitions.
+func usableNamesLocked() []types.AgentName {
 	names := make([]types.AgentName, 0, len(registry))
-	for name := range registry {
+	for name, e := range registry {
+		if e.factory == nil {
+			continue
+		}
 		names = append(names, name)
 	}
 	slices.Sort(names)
 	return names
+}
+
+// List returns all usable agent names in sorted order. An external agent whose
+// binary failed to load is not usable and is reported by ExternalFailures
+// instead, so every List consumer keeps meaning "agents you can actually use".
+func List() []types.AgentName {
+	registryMu.RLock()
+	defer registryMu.RUnlock()
+	return usableNamesLocked()
 }
 
 // StringList returns user-facing agent names, excluding test-only agents.
@@ -61,14 +114,67 @@ func StringList() []string {
 	defer registryMu.RUnlock()
 
 	names := make([]string, 0, len(registry))
-	for name, factory := range registry {
-		if to, ok := factory().(TestOnly); ok && to.IsTestOnly() {
+	for name, e := range registry {
+		if e.factory == nil {
+			continue
+		}
+		if to, ok := e.factory().(TestOnly); ok && to.IsTestOnly() {
 			continue
 		}
 		names = append(names, string(name))
 	}
 	slices.Sort(names)
 	return names
+}
+
+// ExternalFailures returns every discovered external agent binary that could
+// not be loaded, sorted by name. The result is a copy.
+func ExternalFailures() []ExternalFailure {
+	registryMu.RLock()
+	defer registryMu.RUnlock()
+
+	failures := make([]ExternalFailure, 0, len(registry))
+	for name, e := range registry {
+		if e.err == nil {
+			continue
+		}
+		failures = append(failures, ExternalFailure{Name: name, Binary: e.binary, Err: e.err})
+	}
+	slices.SortFunc(failures, func(a, b ExternalFailure) int {
+		return strings.Compare(string(a.Name), string(b.Name))
+	})
+	return failures
+}
+
+// ProbedExternalBinaries returns the set of external binary paths already
+// probed in this process, loaded or not. Discovery uses it to avoid re-running
+// info on a binary it has already asked, which matters because one setup flow
+// calls discovery several times.
+func ProbedExternalBinaries() map[string]struct{} {
+	registryMu.RLock()
+	defer registryMu.RUnlock()
+
+	probed := make(map[string]struct{})
+	for _, e := range registry {
+		if e.binary != "" {
+			probed[e.binary] = struct{}{}
+		}
+	}
+	return probed
+}
+
+// ResetExternalsForTesting drops every external agent entry, ready or failed.
+// Both the registry and the probe memo are process-wide, so without this
+// discovery results leak between tests and the memo makes failures depend on
+// test order. Built-in entries are left alone.
+func ResetExternalsForTesting() {
+	registryMu.Lock()
+	defer registryMu.Unlock()
+	for name, e := range registry {
+		if e.binary != "" {
+			delete(registry, name)
+		}
+	}
 }
 
 // DetectAll returns all agents whose DetectPresence reports true.
@@ -194,8 +300,11 @@ func GetByAgentType(agentType types.AgentType) (Agent, error) {
 	registryMu.RLock()
 	defer registryMu.RUnlock()
 
-	for _, factory := range registry {
-		ag := factory()
+	for _, e := range registry {
+		if e.factory == nil {
+			continue
+		}
+		ag := e.factory()
 		if ag.Type() == agentType {
 			return ag, nil
 		}
@@ -209,8 +318,11 @@ func AllProtectedDirs() []string {
 	// Copy factories under the lock, then release before calling external code.
 	registryMu.RLock()
 	factories := make([]Factory, 0, len(registry))
-	for _, f := range registry {
-		factories = append(factories, f)
+	for _, e := range registry {
+		if e.factory == nil {
+			continue
+		}
+		factories = append(factories, e.factory)
 	}
 	registryMu.RUnlock()
 
@@ -233,8 +345,11 @@ func AllProtectedFiles() []string {
 	// Copy factories under the lock, then release before calling external code.
 	registryMu.RLock()
 	factories := make([]Factory, 0, len(registry))
-	for _, f := range registry {
-		factories = append(factories, f)
+	for _, e := range registry {
+		if e.factory == nil {
+			continue
+		}
+		factories = append(factories, e.factory)
 	}
 	registryMu.RUnlock()
 

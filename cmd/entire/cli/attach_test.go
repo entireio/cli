@@ -21,6 +21,7 @@ import (
 	_ "github.com/entireio/cli/cmd/entire/cli/agent/factoryaidroid" // register agent
 	_ "github.com/entireio/cli/cmd/entire/cli/agent/geminicli"      // register agent
 	piagent "github.com/entireio/cli/cmd/entire/cli/agent/pi"
+	agenttestutil "github.com/entireio/cli/cmd/entire/cli/agent/testutil"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	cpkg "github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
@@ -2102,7 +2103,6 @@ func TestAttach_DiscoversExternalAgents(t *testing.T) {
 	agentName := types.AgentName("attachtest-discovery-agent")
 
 	binDir := t.TempDir()
-	binPath := filepath.Join(binDir, "entire-agent-"+string(agentName))
 	infoJSON := `{
   "protocol_version": 1,
   "name": "` + string(agentName) + `",
@@ -2114,9 +2114,7 @@ func TestAttach_DiscoversExternalAgents(t *testing.T) {
   "capabilities": {}
 }`
 	script := "#!/bin/sh\nif [ \"$1\" = \"info\" ]; then\n  echo '" + infoJSON + "'\nfi\n"
-	if err := os.WriteFile(binPath, []byte(script), 0o755); err != nil {
-		t.Fatalf("failed to write mock agent binary: %v", err)
-	}
+	agenttestutil.WriteExternalAgentBinary(t, binDir, string(agentName), script)
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
 	cmd := newAttachCmd()

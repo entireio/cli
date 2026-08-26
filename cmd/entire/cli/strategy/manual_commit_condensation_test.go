@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
+	agenttestutil "github.com/entireio/cli/cmd/entire/cli/agent/testutil"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
@@ -64,9 +65,7 @@ case "$1" in
 esac
 `
 
-	if err := os.WriteFile(filepath.Join(dir, "entire-agent-"+name), []byte(script), 0o755); err != nil {
-		t.Fatalf("write external summary agent binary: %v", err)
-	}
+	agenttestutil.WriteExternalAgentBinary(t, dir, name, script)
 }
 func TestCalculateTokenUsage_CursorAlwaysNil(t *testing.T) {
 	t.Parallel()
