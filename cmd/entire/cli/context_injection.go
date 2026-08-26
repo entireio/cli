@@ -250,7 +250,9 @@ func buildCrossRepoContextInjection(ctx context.Context, ag agent.Agent, event *
 	}
 	fail := func() {
 		failed.Do(func() {
-			c, cancel := hookMutationCtx()
+			// abort() may run after buildCrossRepoContextInjection returns, when
+			// hookCtx's defer cancel() has already fired; use outer ctx instead.
+			c, cancel := postHookMutationCtx()
 			defer cancel()
 			stateErr := strategy.MutateSessionState(strategy.WithSessionLockWait(c, 250*time.Millisecond), event.SessionID, func(state *strategy.SessionState) error {
 				state.CrossRepoContext.PendingUntil = time.Time{}
