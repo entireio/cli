@@ -461,6 +461,14 @@ Each agent stores its hook configuration in its own directory. When you run `ent
 
 You can enable multiple agents at the same time — each agent's hooks are independent. Entire detects which agents are active by checking for installed hooks, not by a setting in `settings.json`.
 
+#### Cloud Agent / remote environments
+
+Committed hooks invoke the `entire` binary on `PATH`. A Cloud Agent VM does not inherit a developer's local install, so `entire enable` writes `.entire/install-cli.sh` (idempotent: no-op when `entire` is already on `PATH`) and, when Cursor is selected, appends `bash .entire/install-cli.sh` to an **existing** `.cursor/environment.json` `install` command.
+
+It does not create `.cursor/environment.json`. A committed copy overrides dashboard-managed personal and team Cloud Agent environments. If the file is missing, enable prints the one-liner to add to the dashboard install command. If `install` already puts Entire on `PATH` (for example by building this CLI from source), it is left unchanged.
+
+Commit `.entire/install-cli.sh` with the rest of the Entire config so Cloud Agent checkouts can run it.
+
 ### Checkpoint Remote
 
 By default, Entire pushes `entire/checkpoints/v1` to the same remote as your code. If you want to push checkpoint data to a separate repo (e.g., a private repo for public projects), configure `checkpoint_remote` with a structured provider and repo:

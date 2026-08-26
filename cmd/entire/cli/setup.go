@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
+	"github.com/entireio/cli/cmd/entire/cli/agent/cloudenv"
 	"github.com/entireio/cli/cmd/entire/cli/agent/external"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/gitremote"
@@ -609,8 +610,8 @@ func applyAgentChanges(ctx context.Context, w io.Writer, selectedAgentNames []st
 	}
 	var successfullyAddedAgents []agent.Agent
 	for _, ag := range addedAgents {
-		if _, err := setupAgentHooks(ctx, ag, opts.ForceHooks); err != nil {
-			errs = append(errs, fmt.Errorf("failed to setup %s hooks: %w", ag.Type(), err))
+		if _, err := setupAgentHooksAndCloud(ctx, w, ag, opts.ForceHooks); err != nil {
+			errs = append(errs, err)
 		} else {
 			successfullyAddedAgents = append(successfullyAddedAgents, ag)
 		}
@@ -618,8 +619,8 @@ func applyAgentChanges(ctx context.Context, w io.Writer, selectedAgentNames []st
 
 	var successfullyReinstalledAgents []agent.Agent
 	for _, ag := range reinstalledAgents {
-		if _, err := setupAgentHooks(ctx, ag, opts.ForceHooks); err != nil {
-			errs = append(errs, fmt.Errorf("failed to setup %s hooks: %w", ag.Type(), err))
+		if _, err := setupAgentHooksAndCloud(ctx, w, ag, opts.ForceHooks); err != nil {
+			errs = append(errs, err)
 		} else {
 			successfullyReinstalledAgents = append(successfullyReinstalledAgents, ag)
 		}
@@ -637,6 +638,9 @@ func applyAgentChanges(ctx context.Context, w io.Writer, selectedAgentNames []st
 			errs = append(errs, fmt.Errorf("failed to remove %s hooks: %w", ag.Type(), err))
 		} else {
 			uninstalledAgents = append(uninstalledAgents, ag)
+		}
+		if err := removeCloudCLIInstall(ctx, ag); err != nil {
+			errs = append(errs, err)
 		}
 	}
 
@@ -1256,7 +1260,7 @@ func runEnableInteractive(ctx context.Context, w io.Writer, agents []agent.Agent
 
 	// Setup agent hooks for all selected agents
 	for _, ag := range agents {
-		if _, err := setupAgentHooks(ctx, ag, opts.ForceHooks); err != nil {
+		if _, err := setupAgentHooksAndCloud(ctx, w, ag, opts.ForceHooks); err != nil {
 			return fmt.Errorf("failed to setup %s hooks: %w", ag.Type(), err)
 		}
 		if err := setupOptionalSearchSkill(ctx, w, ag, opts); err != nil {
@@ -1662,6 +1666,9 @@ func uninstallDeselectedAgentHooks(ctx context.Context, w io.Writer, selectedAge
 		} else {
 			fmt.Fprintf(w, "Removed %s hooks\n", ag.Type())
 		}
+		if err := removeCloudCLIInstall(ctx, ag); err != nil {
+			errs = append(errs, err)
+		}
 	}
 	return errors.Join(errs...)
 }
@@ -1680,6 +1687,45 @@ func setupAgentHooks(ctx context.Context, ag agent.Agent, forceHooks bool) (int,
 	}
 
 	return count, nil
+}
+
+func setupAgentHooksAndCloud(ctx context.Context, w io.Writer, ag agent.Agent, forceHooks bool) (int, error) {
+	count, err := setupAgentHooks(ctx, ag, forceHooks)
+	if err != nil {
+		return 0, err
+	}
+	if err := setupCloudCLIInstall(ctx, w, ag); err != nil {
+		return count, err
+	}
+	return count, nil
+}
+
+// setupCloudCLIInstall wires the Entire CLI into a remote/Cloud Agent
+// environment when the agent implements CloudCLIInstaller. No-op otherwise.
+func setupCloudCLIInstall(ctx context.Context, w io.Writer, ag agent.Agent) error {
+	installer, ok := agent.AsCloudCLIInstaller(ag)
+	if !ok {
+		return nil
+	}
+	result, err := installer.EnsureCloudCLIInstall(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to set up %s cloud environment: %w", ag.Type(), err)
+	}
+	if result.Message != "" {
+		fmt.Fprintln(w, result.Message)
+	}
+	return nil
+}
+
+func removeCloudCLIInstall(ctx context.Context, ag agent.Agent) error {
+	installer, ok := agent.AsCloudCLIInstaller(ag)
+	if !ok {
+		return nil
+	}
+	if err := installer.RemoveCloudCLIInstall(ctx); err != nil {
+		return fmt.Errorf("failed to remove %s cloud environment wiring: %w", ag.Type(), err)
+	}
+	return nil
 }
 
 // promptAgentSelection shows the interactive multi-select agent picker and
@@ -1889,7 +1935,7 @@ func setupAgentHooksNonInteractive(ctx context.Context, w io.Writer, ag agent.Ag
 	fmt.Fprintf(w, "  Agent: %s\n", ag.Type())
 
 	// Install agent hooks (agent hooks don't depend on settings)
-	installedHooks, err := setupAgentHooks(ctx, ag, opts.ForceHooks)
+	installedHooks, err := setupAgentHooksAndCloud(ctx, w, ag, opts.ForceHooks)
 	if err != nil {
 		return fmt.Errorf("failed to setup %s hooks: %w", agentName, err)
 	}
@@ -2094,6 +2140,13 @@ func setupEntireDirectory(ctx context.Context) (bool, error) { //nolint:unparam 
 	// Create/update .gitignore with all required entries
 	if err := strategy.EnsureEntireGitignore(ctx); err != nil {
 		return false, fmt.Errorf("failed to setup .gitignore: %w", err)
+	}
+
+	// Shared Cloud Agent / remote bootstrap: any host can invoke this script
+	// from its environment install command. Cursor auto-wires it into an
+	// existing .cursor/environment.json; other hosts get the committed helper.
+	if err := cloudenv.WriteInstallScript(ctx); err != nil {
+		return false, fmt.Errorf("failed to write cloud-agent CLI install helper: %w", err)
 	}
 
 	return created, nil
@@ -2536,6 +2589,9 @@ func removeAgentHooks(ctx context.Context, w io.Writer) error {
 			errs = append(errs, err)
 		} else if wasInstalled {
 			fmt.Fprintf(w, "  Removed %s hooks\n", ag.Type())
+		}
+		if err := removeCloudCLIInstall(ctx, ag); err != nil {
+			errs = append(errs, err)
 		}
 	}
 	return errors.Join(errs...)

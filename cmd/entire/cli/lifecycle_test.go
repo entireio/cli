@@ -379,6 +379,7 @@ func TestDispatchLifecycleEvent_UnknownEventType(t *testing.T) {
 	t.Parallel()
 
 	ag := newMockAgent()
+	ag.name = agent.AgentNameCursor
 	event := &agent.Event{
 		Type:      agent.EventType(999), // Unknown type
 		SessionID: "test-session",
@@ -744,11 +745,17 @@ func TestHandleLifecycleTurnEnd_EmptyTranscriptRef(t *testing.T) {
 func TestHandleLifecycleTurnEnd_NonexistentTranscript(t *testing.T) {
 	t.Parallel()
 
+	// Parent directory exists but the file does not — still a hard error
+	// (late flush / wrong path). Distinct from the Cloud case where the
+	// agent-transcripts directory itself is never created.
+	tmpDir := t.TempDir()
+	transcriptPath := filepath.Join(tmpDir, "missing-transcript.jsonl")
+
 	ag := newMockAgent()
 	event := &agent.Event{
 		Type:       agent.TurnEnd,
 		SessionID:  "test-session",
-		SessionRef: "/nonexistent/path/to/transcript.jsonl",
+		SessionRef: transcriptPath,
 	}
 
 	err := handleLifecycleTurnEnd(context.Background(), ag, event)
@@ -757,6 +764,49 @@ func TestHandleLifecycleTurnEnd_NonexistentTranscript(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "transcript file not found") {
 		t.Errorf("expected error about transcript file, got: %v", err)
+	}
+}
+
+func TestHandleLifecycleTurnEnd_MissingTranscriptParent_OtherAgentErrors(t *testing.T) {
+	t.Parallel()
+
+	ag := newMockAgent()
+	event := &agent.Event{
+		Type:       agent.TurnEnd,
+		SessionID:  "other-agent-session",
+		SessionRef: filepath.Join(t.TempDir(), "missing-parent", "transcript.jsonl"),
+	}
+
+	err := handleLifecycleTurnEnd(context.Background(), ag, event)
+	if err == nil || !strings.Contains(err.Error(), "transcript file not found") {
+		t.Fatalf("expected non-Cursor agent to retain hard error, got: %v", err)
+	}
+}
+
+func TestHandleLifecycleTurnEnd_MissingTranscriptParent_Continues(t *testing.T) {
+	// Cannot use t.Parallel() because we use t.Chdir().
+	tmpDir := t.TempDir()
+	t.Chdir(tmpDir)
+	setupGitRepoWithCommit(t, tmpDir)
+	paths.ClearWorktreeRootCache()
+
+	// Cloud Agent layout: computed session_ref points under a directory that
+	// was never created. Turn-end must not hard-fail on "transcript file not
+	// found" — git-based capture and phase transition still need to run.
+	transcriptPath := filepath.Join(tmpDir, "agent-transcripts", "cloud-sess.jsonl")
+
+	ag := newMockAgent()
+	ag.name = agent.AgentNameCursor
+	event := &agent.Event{
+		Type:       agent.TurnEnd,
+		SessionID:  "cloud-sess",
+		SessionRef: transcriptPath,
+		Timestamp:  time.Now(),
+	}
+
+	err := handleLifecycleTurnEnd(context.Background(), ag, event)
+	if err != nil && strings.Contains(err.Error(), "transcript file not found") {
+		t.Fatalf("expected fail-open when transcript parent is absent, got: %v", err)
 	}
 }
 

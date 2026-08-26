@@ -101,6 +101,14 @@ See Guide: [Step 6 - InstallHooks](agent-guide.md)
 - [ ] **A committed generated config is drift-guarded** — see
       `testutil.AssertCommittedDogfoodFile` / `AssertCommittedDogfoodConfigStable`
       if this repo commits the agent's config for its own dogfooding.
+- [ ] **Remote/Cloud Agent environments install the Entire CLI** when the host
+      has a repo-managed bootstrap file (`CloudCLIInstaller`). Cursor patches
+      an existing `.cursor/environment.json` `install` command to run
+      `.entire/install-cli.sh`; it does **not** create that JSON file, because
+      a committed copy overrides dashboard-managed Cloud Agent environments.
+      Other hosts can invoke the same script from their own install/start
+      command. If the install already puts `entire` on PATH (this repo's
+      `.cursor/install.sh` is the example), leave it alone.
 
 ### Rewind/Resume Support
 

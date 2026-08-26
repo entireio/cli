@@ -53,7 +53,8 @@ type sessionStartRaw struct {
 }
 
 // stopHookInputRaw is the JSON structure from Stop hooks.
-// IDE provides transcript_path; CLI sends null.
+// IDE provides transcript_path; CLI and Cloud can send null. When a local
+// transcript file exists, command hooks may also receive CURSOR_TRANSCRIPT_PATH.
 // Both provide status and loop_count.
 //
 // Token fields (input_tokens, output_tokens, cache_read_tokens,
@@ -81,7 +82,8 @@ type stopHookInputRaw struct {
 }
 
 // sessionEndRaw is the JSON structure from SessionEnd hooks.
-// IDE provides transcript_path; CLI sends null.
+// IDE provides transcript_path; CLI and Cloud can send null. When a local
+// transcript file exists, command hooks may also receive CURSOR_TRANSCRIPT_PATH.
 // Both provide reason, duration_ms, is_background_agent, final_status.
 type sessionEndRaw struct {
 	// common

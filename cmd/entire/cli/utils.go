@@ -64,6 +64,19 @@ func fileExists(path string) bool {
 	return err == nil
 }
 
+// transcriptParentMissing reports whether the directory that should contain
+// the transcript path is absent. Cursor Cloud Agents never create
+// ~/.cursor/projects/.../agent-transcripts, so a missing parent means the
+// local layout is unavailable (not merely a late flush).
+func transcriptParentMissing(path string) bool {
+	parent := filepath.Dir(path)
+	if parent == "" || parent == "." {
+		return false
+	}
+	_, err := os.Stat(parent)
+	return os.IsNotExist(err)
+}
+
 // copyFile copies a file from src to dst using os.Root for traversal-resistant
 // writes (Go 1.24+). dst must be absolute and reside under either the repo
 // worktree root, the user's home directory (for agent session dirs such as

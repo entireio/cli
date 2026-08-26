@@ -62,7 +62,15 @@ All hooks share these common fields:
 }
 ```
 
-**Important:** `transcript_path` is **always `null`** in CLI mode. The existing cursor agent handles this via `resolveTranscriptRef()` which computes the path dynamically from the repo root.
+**Important:** `transcript_path` is **always `null`** in CLI mode and is also
+null on Cursor Cloud Agents when no local transcript file exists. Cloud Agents
+advertise `AGENT_TRANSCRIPTS=~/.cursor/projects/<slug>/agent-transcripts` but
+never create that directory — conversation history is remote-only (retrievable
+via the Cloud Agent API as `transcript.json`, not as local JSONL).
+`resolveTranscriptRef()` prefers a JSON `transcript_path`, then
+`CURSOR_TRANSCRIPT_PATH` when Cursor sets it (only once a local file exists),
+then computes the local CLI/IDE path. `PrepareTranscript` skips its flush wait
+when that path's parent directory is absent so Cloud TurnEnd hooks do not stall.
 
 #### sessionStart additional fields
 
@@ -218,7 +226,7 @@ Note: IDE also sends `composer_mode: "agent"` — CLI omits this field.
 ## Gaps & Limitations
 
 1. **`beforeSubmitPrompt` and `stop` don't fire in `-p` mode**: This is the main limitation. In headless mode, Entire won't get TurnStart/TurnEnd events. Checkpoints can only be created via sessionStart/sessionEnd flow. E2E tests using `RunPrompt` won't trigger the normal TurnStart→TurnEnd checkpoint flow.
-2. **`transcript_path` is always `null` in CLI mode**: Handled by existing `resolveTranscriptRef()` which computes the path dynamically.
+2. **`transcript_path` can be `null`**: CLI resolves the local `agent-transcripts` path. Cloud Agents typically have no local transcript file or directory — history is remote-only — so Entire skips the flush wait and turn-end continues with git-based file detection plus stop-hook token fields.
 3. **No `composer_mode` field in CLI**: IDE sends `"agent"`, CLI omits it. Not impactful.
 4. **Shell-driven file changes are unattributable**: `ExtractModifiedFiles` covers `Write` and `StrReplace`, but a file changed by a `Shell` command records only the command string, so git status stays the backstop. (Through 2026-08 this entry instead read "transcript lacks tool_use blocks", which was never true of the format and disabled file extraction entirely; see the transcript section above.)
 5. **`tool_use_id` format**: Contains newline (`call_xxx\nctc_xxx`) — may need sanitization if used as identifiers.
