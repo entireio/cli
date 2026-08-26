@@ -656,7 +656,7 @@ func retirePendingSource(
 		// before finalize can never be retired here — clear the marker anyway so
 		// post-commit does not warn forever on an unrecoverable source state.
 		finishCleanupDespiteRecheckFailure := sourceRetiredThisCall || sourceState == nil
-		// Release before clearing the marker. If the target save fails, the next
+		// Clear before releasing the claim. If the target save fails, the next
 		// post-commit observes the already-retired source and safely retries the
 		// marker clear without requiring a claim that no longer exists.
 		//
