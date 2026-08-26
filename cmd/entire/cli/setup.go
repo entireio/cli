@@ -1527,11 +1527,15 @@ func runDisable(ctx context.Context, w io.Writer, useProjectSettings bool) error
 		configDisplay = configDisplayProject
 	}
 
-	// Classify before the write: a repo tracked only by the global tier has no
-	// .entire directory yet, and this disable is about to create one.
-	wasGlobal := false
+	// A repo tracked only by the global tier has no repo-level setup to
+	// disable, and writing a veto file here would be the first worktree
+	// footprint the tier ever leaves. The off-switch for global tracking is
+	// the user settings file, so point there and write nothing.
 	if policy, err := repopolicy.ClassifyRepoPolicy(ctx); err == nil && policy.ActivationSource == repopolicy.ActivationGlobal {
-		wasGlobal = true
+		fmt.Fprintln(w, "This repo has no repo-level Entire setup; it is tracked by global tracking.")
+		fmt.Fprintf(w, "To stop tracking it, add %s to exclude_paths in %s (or set global.enabled to false).\n", policy.WorktreeRoot, settings.UserSettingsPath())
+		fmt.Fprintln(w, "Nothing was written.")
+		return nil
 	}
 
 	if err := setEnabledFlag(ctx, false, targetFile == settings.EntireSettingsFile); err != nil {
@@ -1539,10 +1543,6 @@ func runDisable(ctx context.Context, w io.Writer, useProjectSettings bool) error
 	}
 
 	fmt.Fprintf(w, "Entire is now disabled (%s).\n", configDisplay)
-	if wasGlobal {
-		fmt.Fprintf(w, "This repo was tracked by global tracking; %s now vetoes it but is an untracked file in the worktree.\n", configDisplay)
-		fmt.Fprintf(w, "To keep it out without a worktree file, add it to exclude_paths in %s instead.\n", settings.UserSettingsPath())
-	}
 	return nil
 }
 

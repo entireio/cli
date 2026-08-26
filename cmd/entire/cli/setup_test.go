@@ -4006,10 +4006,10 @@ func TestRunEnable_RecordsTrust(t *testing.T) {
 	}
 }
 
-// TestRunDisable_GloballyTrackedRepoHintsAtExclude: disabling a repo that was
-// tracked only by the global tier writes the veto (so hooks go inactive) and
-// points at exclude_paths as the footprint-free alternative.
-func TestRunDisable_GloballyTrackedRepoHintsAtExclude(t *testing.T) {
+// TestRunDisable_GloballyTrackedRepoWritesNothing: a repo tracked only by the
+// global tier has no repo-level setup to disable; disable points at
+// exclude_paths and leaves the worktree untouched.
+func TestRunDisable_GloballyTrackedRepoWritesNothing(t *testing.T) {
 	isolatedUserHome(t)
 	pretendAgentBinaries(t)
 	dir := setupTestDir(t)
@@ -4020,20 +4020,23 @@ func TestRunDisable_GloballyTrackedRepoHintsAtExclude(t *testing.T) {
 	if err := runDisable(t.Context(), &out, false); err != nil {
 		t.Fatalf("runDisable: %v", err)
 	}
-	if !strings.Contains(out.String(), "exclude_paths") {
-		t.Fatalf("expected the exclude_paths hint for a globally tracked repo, got:\n%s", out.String())
+	if !strings.Contains(out.String(), "exclude_paths") || !strings.Contains(out.String(), "Nothing was written") {
+		t.Fatalf("expected the exclude_paths pointer, got:\n%s", out.String())
 	}
-	if settings.IsActiveForRepo(t.Context()) {
-		t.Fatal("repo must be inactive after disable")
+	if _, err := os.Lstat(filepath.Join(dir, ".entire")); !os.IsNotExist(err) {
+		t.Fatalf("disable must not create a worktree .entire directory in a globally tracked repo (err=%v)", err)
+	}
+	if !settings.IsActiveForRepo(t.Context()) {
+		t.Fatal("repo stays globally tracked until the user edits the settings file")
 	}
 
-	// A repo-enabled repo gets no such hint.
+	// A repo-enabled repo keeps today's behavior.
 	out.Reset()
 	writeSettings(t, `{"enabled": true}`)
 	if err := runDisable(t.Context(), &out, false); err != nil {
 		t.Fatalf("runDisable: %v", err)
 	}
-	if strings.Contains(out.String(), "exclude_paths") {
-		t.Fatalf("repo-enabled disable must not print the global hint, got:\n%s", out.String())
+	if !strings.Contains(out.String(), "Entire is now disabled") || settings.IsActiveForRepo(t.Context()) {
+		t.Fatalf("repo-enabled disable must write the veto, got:\n%s", out.String())
 	}
 }
