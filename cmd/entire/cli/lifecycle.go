@@ -1440,14 +1440,6 @@ func handleSubagentStopFinal(logCtx context.Context, ag agent.Agent, event *agen
 		return nil
 	}
 
-	ambiguousWithoutDescription := resolvedAmbiguously && event.TaskDescription == ""
-
-	// SubagentStop payloads carry no tool_input, so event.SubagentType/
-	// TaskDescription/SubagentID are typically empty at this point; the marker
-	// recorded all three at launch time. Each field falls back independently —
-	// not as an all-or-nothing pair — so a marker that only captured one of
-	// them (e.g. a legacy marker written before a field existed) still
-	// contributes what it has instead of being discarded wholesale.
 	if marker.SubagentType != "" {
 		event.SubagentType = marker.SubagentType
 	}
@@ -1457,6 +1449,8 @@ func handleSubagentStopFinal(logCtx context.Context, ag agent.Agent, event *agen
 	if event.SubagentID == "" && marker.AgentID != "" {
 		event.SubagentID = marker.AgentID
 	}
+
+	ambiguousWithoutDescription := resolvedAmbiguously && event.TaskDescription == ""
 
 	// analyzerFilesOnly: true because reaching this point means a live marker
 	// WAS found above — every Final capture that runs through this function is
