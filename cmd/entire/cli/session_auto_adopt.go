@@ -655,8 +655,7 @@ func retirePendingSource(
 		// Once the bound checkpoint is committed, a source that independently ended
 		// before finalize can never be retired here — clear the marker anyway so
 		// post-commit does not warn forever on an unrecoverable source state.
-		finishCleanupDespiteRecheckFailure := sourceRetiredThisCall ||
-			sourceState == nil || !isAdoptableSourceSession(sourceState)
+		finishCleanupDespiteRecheckFailure := sourceRetiredThisCall || sourceState == nil
 		// Release before clearing the marker. If the target save fails, the next
 		// post-commit observes the already-retired source and safely retries the
 		// marker clear without requiring a claim that no longer exists.
@@ -675,12 +674,12 @@ func retirePendingSource(
 		} else if _, ok := committed[marker.ExpectedCheckpointID]; !ok && !finishCleanupDespiteRecheckFailure {
 			return errors.New("pending adoption checkpoint is not in any recent commit")
 		}
-		if _, err := session.ReleaseLiveSessionClaimIfOwned(retireCtx, adopted.SessionID, expectedClaim); err != nil {
-			return fmt.Errorf("release live-session claim: %w", err)
-		}
 		target.PendingSourceRetire = nil
 		if err := targetStore.Save(retireCtx, target); err != nil {
 			return fmt.Errorf("clear pending source retire marker: %w", err)
+		}
+		if _, err := session.ReleaseLiveSessionClaimIfOwned(retireCtx, adopted.SessionID, expectedClaim); err != nil {
+			return fmt.Errorf("release live-session claim: %w", err)
 		}
 		return nil
 	})
