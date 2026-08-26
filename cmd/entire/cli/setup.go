@@ -1527,11 +1527,22 @@ func runDisable(ctx context.Context, w io.Writer, useProjectSettings bool) error
 		configDisplay = configDisplayProject
 	}
 
+	// Classify before the write: a repo tracked only by the global tier has no
+	// .entire directory yet, and this disable is about to create one.
+	wasGlobal := false
+	if policy, err := repopolicy.ClassifyRepoPolicy(ctx); err == nil && policy.ActivationSource == repopolicy.ActivationGlobal {
+		wasGlobal = true
+	}
+
 	if err := setEnabledFlag(ctx, false, targetFile == settings.EntireSettingsFile); err != nil {
 		return err
 	}
 
 	fmt.Fprintf(w, "Entire is now disabled (%s).\n", configDisplay)
+	if wasGlobal {
+		fmt.Fprintf(w, "This repo was tracked by global tracking; %s now vetoes it but is an untracked file in the worktree.\n", configDisplay)
+		fmt.Fprintf(w, "To keep it out without a worktree file, add it to exclude_paths in %s instead.\n", settings.UserSettingsPath())
+	}
 	return nil
 }
 

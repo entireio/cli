@@ -4005,3 +4005,35 @@ func TestRunEnable_RecordsTrust(t *testing.T) {
 		})
 	}
 }
+
+// TestRunDisable_GloballyTrackedRepoHintsAtExclude: disabling a repo that was
+// tracked only by the global tier writes the veto (so hooks go inactive) and
+// points at exclude_paths as the footprint-free alternative.
+func TestRunDisable_GloballyTrackedRepoHintsAtExclude(t *testing.T) {
+	isolatedUserHome(t)
+	pretendAgentBinaries(t)
+	dir := setupTestDir(t)
+	testutil.InitRepo(t, dir)
+	writeUserSettings(t, `{"global":{"enabled":true}}`)
+
+	var out bytes.Buffer
+	if err := runDisable(t.Context(), &out, false); err != nil {
+		t.Fatalf("runDisable: %v", err)
+	}
+	if !strings.Contains(out.String(), "exclude_paths") {
+		t.Fatalf("expected the exclude_paths hint for a globally tracked repo, got:\n%s", out.String())
+	}
+	if settings.IsActiveForRepo(t.Context()) {
+		t.Fatal("repo must be inactive after disable")
+	}
+
+	// A repo-enabled repo gets no such hint.
+	out.Reset()
+	writeSettings(t, `{"enabled": true}`)
+	if err := runDisable(t.Context(), &out, false); err != nil {
+		t.Fatalf("runDisable: %v", err)
+	}
+	if strings.Contains(out.String(), "exclude_paths") {
+		t.Fatalf("repo-enabled disable must not print the global hint, got:\n%s", out.String())
+	}
+}
