@@ -259,21 +259,24 @@ func unregisterLiveSession(ctx context.Context, sessionID, commonDir, worktreePa
 			// a corrupt read. Leave it to the age-bounded registry sweep.
 			return fmt.Errorf("read live session before unregister: %w", readErr)
 		}
-		if found && existing.CommonDir != "" && strings.TrimSpace(commonDir) != "" {
-			// A live adoption claim is the cross-repository handoff token. A target
-			// may become ended/condensed during strategy.PostCommit before the
-			// deferred source retire runs; its StateStore.Save must not erase that
-			// token out from under finalization.
+		if found {
+			// A live adoption claim is the cross-repository handoff token. Protect
+			// it even when CommonDir is empty (claim-only upsert entries).
 			if existing.AdoptClaim != nil && !existing.AdoptClaim.At.IsZero() &&
 				time.Since(existing.AdoptClaim.At) <= AdoptClaimMaxAge {
 				return nil
 			}
-			if normalizeCommonDir(existing.CommonDir) != normalizeCommonDir(commonDir) {
-				return nil
-			}
-			if worktreePath != "" && existing.WorktreePath != "" &&
-				!sameRegistryPath(existing.WorktreePath, worktreePath) {
-				return nil
+			if existing.CommonDir != "" && strings.TrimSpace(commonDir) != "" {
+				// A target may become ended/condensed during strategy.PostCommit before
+				// the deferred source retire runs; its StateStore.Save must not erase that
+				// token out from under finalization.
+				if normalizeCommonDir(existing.CommonDir) != normalizeCommonDir(commonDir) {
+					return nil
+				}
+				if worktreePath != "" && existing.WorktreePath != "" &&
+					!sameRegistryPath(existing.WorktreePath, worktreePath) {
+					return nil
+				}
 			}
 		}
 		_ = osroot.Remove(root, fileName) //nolint:errcheck // best-effort
