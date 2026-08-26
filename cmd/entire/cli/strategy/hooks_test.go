@@ -1825,12 +1825,8 @@ func TestInstallGitHook_DoesNotOverwriteExistingBackup(t *testing.T) {
 	if string(backupData) != secondCustomContent {
 		t.Errorf("backup content = %q, want newer current %q", string(backupData), secondCustomContent)
 	}
-	staleData, err := os.ReadFile(backupPath + ".stale")
-	if err != nil {
-		t.Fatalf("stale backup should be preserved: %v", err)
-	}
-	if string(staleData) != firstBackupContent {
-		t.Errorf("stale backup = %q, want original %q", string(staleData), firstBackupContent)
+	if _, err := os.ReadFile(backupPath + ".stale"); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("stale backup should be removed after successful rotation: %v", err)
 	}
 
 	// Verify our hook was installed with chain call
@@ -2852,12 +2848,8 @@ func TestPreserveCurrentHookOverStaleBackup_KeepsHookUntilOverwrite(t *testing.T
 	if string(gotBackup) != current {
 		t.Errorf("backup = %q, want %q", gotBackup, current)
 	}
-	gotStale, err := os.ReadFile(backupPath + ".stale")
-	if err != nil {
-		t.Fatalf("stale: %v", err)
-	}
-	if string(gotStale) != oldBackup {
-		t.Errorf("stale = %q, want %q", gotStale, oldBackup)
+	if _, err := os.ReadFile(backupPath + ".stale"); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("stale should be removed after successful rotation: %v", err)
 	}
 }
 
@@ -3140,12 +3132,8 @@ func TestRewriteHuskyOwnedHooks_RotatesStaleBackupBeforeHeal(t *testing.T) {
 	if string(gotBackup) != current {
 		t.Fatalf("backup = %q, want current %q", gotBackup, current)
 	}
-	gotStale, err := os.ReadFile(backupPath + ".stale")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(gotStale) != oldBackup {
-		t.Fatalf("stale = %q, want %q", gotStale, oldBackup)
+	if _, err := os.ReadFile(backupPath + ".stale"); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("stale should be removed after successful rotation: %v", err)
 	}
 	gotHook, err := os.ReadFile(hookPath)
 	if err != nil {

@@ -796,7 +796,7 @@ func InstallGitHook(ctx context.Context, silent, absolutePath bool) (int, bool, 
 			return installedCount, huskySafe, fmt.Errorf("failed to migrate hooks out of husky-owned directory: %w", err)
 		}
 		// Keep any leftover legacy .pre-entire backups out of accidental commits.
-		if backedUpUserHook || huskyUserDirHasPreEntireBackups(installDir) {
+		if backedUpUserHook || huskyUserDirHasPreEntireBackups(installDir) || huskyUserDirHasPreEntireBackups(hooksDir) {
 			if exclErr := ensurePreEntireExcluded(ctx); exclErr != nil {
 				fmt.Fprintf(os.Stderr, "[entire] Warning: could not exclude %s backups from git: %v\n", backupSuffix, exclErr)
 			}
