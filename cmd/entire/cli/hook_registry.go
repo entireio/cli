@@ -127,12 +127,13 @@ func executeAgentHook(cmd *cobra.Command, agentName types.AgentName, hookName st
 	// IsSetUpAndEnabled with the user-global tier: repos with no repo-level
 	// setup proceed when global mode is on and the repo is not excluded.
 	if !policy.Active {
-		warnInactiveOnSessionStart(cmd.Context(), cmd.ErrOrStderr(), agentName, hookName, inactiveSessionStartNotice(policy.InactiveReason))
+		warnInactiveOnSessionStart(ctx, cmd.ErrOrStderr(), agentName, hookName, inactiveSessionStartNotice(policy.InactiveReason))
 		return nil
 	}
 
 	if stampSession {
-		cmd.SetContext(withHookSession(cmd.Context()))
+		ctx = withHookSession(ctx)
+		cmd.SetContext(ctx)
 	}
 
 	// Lazy invisible setup for globally tracked repos (no repo-level setup,
@@ -144,10 +145,12 @@ func executeAgentHook(cmd *cobra.Command, agentName types.AgentName, hookName st
 	// already installed the logger by here, so its Debug-level failure ladder
 	// is recorded. The git-hook route triggers the same setup
 	// (hooks_git_cmd.go).
-	strategy.MaybeEnsureGlobalSetup(cmd.Context())
+	strategy.MaybeEnsureGlobalSetup(ctx)
 
 	// Initialize logging context with agent name
-	ctx = logging.WithAgent(logging.WithComponent(cmd.Context(), "hooks"), agentName)
+	// ctx carries the policy snapshot from prepareHookPolicy (and the hook
+	// session); every downstream read derives from it.
+	ctx = logging.WithAgent(logging.WithComponent(ctx, "hooks"), agentName)
 
 	// Strategy name for logging
 	strategyName := strategy.StrategyNameManualCommit
