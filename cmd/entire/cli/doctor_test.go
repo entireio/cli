@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent/claudecode"
+	"github.com/entireio/cli/cmd/entire/cli/agent/cursor"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
@@ -843,6 +844,86 @@ func TestCheckHookDrift_ClaudeCodeOKWhenCurrent(t *testing.T) {
 	cmd, stdout := newTestCmd(t)
 	checkHookDrift(cmd)
 	require.Contains(t, stdout.String(), "✓ Claude Code hook config: OK")
+}
+
+// TestCheckCursorUNCMode_SilentWhenCursorHooksNotInstalled — under WSL but
+// with no Cursor hooks installed in this repo, the check exits at
+// AreHooksInstalled and never gets to consult the Windows-side fingerprint.
+// The users root is deliberately POPULATED with a fingerprint that would
+// otherwise match, so the silence here proves the hooks gate is what's
+// firing — not merely that /mnt/c/Users is absent on this dev/CI machine.
+func TestCheckCursorUNCMode_SilentWhenCursorHooksNotInstalled(t *testing.T) {
+	dir := setupGitRepoForPhaseTest(t)
+	t.Chdir(dir)
+	t.Setenv("WSL_DISTRO_NAME", "Ubuntu")
+
+	usersRoot := writeCursorUNCFingerprint(t.Context(), t, "Ubuntu", time.Now())
+	restoreCursorWindowsUsersRoot(t, usersRoot)
+
+	cmd, stdout := newTestCmd(t)
+	checkCursorUNCMode(cmd)
+	require.Empty(t, stdout.String())
+}
+
+// TestCheckCursorUNCMode_WarnsOnFreshUNCFingerprint is the positive-path
+// counterpart: WSL, cursor hooks installed in this repo, and a Windows-side
+// fingerprint dir with fresh agent-transcripts evidence for this exact repo
+// root — the check must print the warning headline.
+func TestCheckCursorUNCMode_WarnsOnFreshUNCFingerprint(t *testing.T) {
+	dir := setupGitRepoForPhaseTest(t)
+	t.Chdir(dir)
+	t.Setenv("WSL_DISTRO_NAME", "Ubuntu")
+
+	installCursorHooksFixture(t, dir)
+
+	usersRoot := writeCursorUNCFingerprint(t.Context(), t, "Ubuntu", time.Now())
+	restoreCursorWindowsUsersRoot(t, usersRoot)
+
+	cmd, stdout := newTestCmd(t)
+	checkCursorUNCMode(cmd)
+	out := stdout.String()
+	require.Contains(t, out, "Cursor IDE hooks: NOT FIRING")
+	require.Contains(t, out, "Reopen Folder in WSL")
+}
+
+// installCursorHooksFixture writes a minimal .cursor/hooks.json declaring one
+// Entire-managed hook, which is all AreHooksInstalled requires to report true.
+func installCursorHooksFixture(t *testing.T, repoDir string) {
+	t.Helper()
+	cursorDir := filepath.Join(repoDir, ".cursor")
+	require.NoError(t, os.MkdirAll(cursorDir, 0o750))
+	hooksJSON := `{"version":1,"hooks":{"sessionStart":[{"command":"entire hooks cursor session-start"}]}}`
+	require.NoError(t, os.WriteFile(filepath.Join(cursorDir, "hooks.json"), []byte(hooksJSON), 0o600))
+}
+
+// writeCursorUNCFingerprint creates <usersRoot>/winuser/.cursor/projects/wsl-<distro>-<repoRoot>/agent-transcripts/
+// with one evidence entry timestamped at evidenceTime, for the repo root of
+// the currently chdir'd worktree. Returns usersRoot.
+func writeCursorUNCFingerprint(ctx context.Context, t *testing.T, distro string, evidenceTime time.Time) string {
+	t.Helper()
+	repoRoot, err := paths.WorktreeRoot(ctx)
+	require.NoError(t, err)
+
+	usersRoot := t.TempDir()
+	name := cursor.UNCProjectDirNames(distro, repoRoot)[0]
+	transcriptsDir := filepath.Join(usersRoot, "winuser", ".cursor", "projects", name, "agent-transcripts")
+	require.NoError(t, os.MkdirAll(transcriptsDir, 0o750))
+
+	evidence := filepath.Join(transcriptsDir, "session.jsonl")
+	require.NoError(t, os.WriteFile(evidence, []byte("{}"), 0o600))
+	require.NoError(t, os.Chtimes(evidence, evidenceTime, evidenceTime))
+
+	return usersRoot
+}
+
+// restoreCursorWindowsUsersRoot points the package-level cursorWindowsUsersRoot
+// var at usersRoot for the duration of the test, restoring the original value
+// afterward.
+func restoreCursorWindowsUsersRoot(t *testing.T, usersRoot string) {
+	t.Helper()
+	prev := cursorWindowsUsersRoot
+	cursorWindowsUsersRoot = usersRoot
+	t.Cleanup(func() { cursorWindowsUsersRoot = prev })
 }
 
 // TestCheckHookDrift_ClaudeCodeWarnsWhenOutdated — a Claude Code config left by

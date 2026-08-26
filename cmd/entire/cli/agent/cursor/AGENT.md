@@ -160,6 +160,26 @@ Note: IDE also sends `composer_mode: "agent"` — CLI omits this field.
 }
 ```
 
+## Windows + WSL
+
+Cursor IDE on Windows opens WSL repos in one of two modes, and only one works
+with hooks (verified empirically, Cursor 3.16.29 on Windows Server 2022 + WSL2):
+
+- **WSL-remote mode** ("Reopen Folder in WSL" / `cursor .` from a WSL terminal;
+  window title ends in `[WSL: <distro>]`): hooks execute inside WSL with
+  cwd=repo, `workspace_roots` carry Linux paths, and the stop payload's
+  `transcript_path` points into the WSL-side `~/.cursor/projects/<sanitized>/`
+  — matching `GetSessionDir`. Tracking works end-to-end.
+- **UNC mode** (`\\wsl$\...` via File → Open Folder or Explorer): Cursor runs
+  the agent but executes **no hooks at all** — silently. Sessions never track;
+  `entire session attach` is the only fallback. Cursor's own dialog marks the
+  mode not recommended. `entire doctor` detects this via the Windows-side
+  project-dir fingerprint (`DetectUNCProjectDirs`).
+
+Multi-root workspaces (macOS-verified): every root's hooks.json fires for the
+same conversation with per-root CWDs, and the stop `transcript_path` keys to
+the FIRST workspace root. Known quirks; follow-ups recorded in PR #2078.
+
 ## Transcript
 
 - Location: `~/.cursor/projects/<sanitized-repo-path>/agent-transcripts/<conversation-id>.jsonl`
