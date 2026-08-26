@@ -1330,8 +1330,9 @@ func handleLifecycleSubagentEnd(ctx context.Context, ag agent.Agent, event *agen
 	}
 
 	return completeSubagentTaskRecord(logCtx, ag, event, subagentCaptureOptions{
-		ensureSessionState:  true,
-		resolvedAmbiguously: resolvedAmbiguously,
+		ensureSessionState:          true,
+		resolvedAmbiguously:         resolvedAmbiguously,
+		ambiguousWithoutDescription: resolvedAmbiguously && event.TaskDescription == "",
 	})
 }
 
@@ -1440,6 +1441,11 @@ func handleSubagentStopFinal(logCtx context.Context, ag agent.Agent, event *agen
 		return nil
 	}
 
+	// Must be computed before marker backfill: backfill can populate
+	// event.TaskDescription from the marker even when the SubagentStop payload
+	// carried none, which would falsely clear this guard.
+	ambiguousWithoutDescription := resolvedAmbiguously && event.TaskDescription == ""
+
 	if marker.SubagentType != "" {
 		event.SubagentType = marker.SubagentType
 	}
@@ -1449,8 +1455,6 @@ func handleSubagentStopFinal(logCtx context.Context, ag agent.Agent, event *agen
 	if event.SubagentID == "" && marker.AgentID != "" {
 		event.SubagentID = marker.AgentID
 	}
-
-	ambiguousWithoutDescription := resolvedAmbiguously && event.TaskDescription == ""
 
 	// analyzerFilesOnly: true because reaching this point means a live marker
 	// WAS found above — every Final capture that runs through this function is
@@ -1740,7 +1744,7 @@ func completeSubagentTaskRecord(logCtx context.Context, ag agent.Agent, event *a
 			// that baseline makes the sibling's own SubagentEnd hit the
 			// vanished-state guard above and drop a real checkpoint, so leave the
 			// file for the sibling — or for this subagent's own later retry.
-			if opts.resolvedAmbiguously && event.TaskDescription == "" {
+			if opts.ambiguousWithoutDescription {
 				logging.Warn(logCtx, "leaving pre-task state in place: resolved only by the single-active-file fallback with nothing to checkpoint",
 					slog.String("tool_use_id", event.ToolUseID))
 				return nil
