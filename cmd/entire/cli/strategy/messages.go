@@ -75,6 +75,9 @@ func SanitizeTaskDescription(s string) string {
 		return ""
 	}
 	s = redact.String(s)
+	if utf8.RuneCountInString(s) > maxSubjectRedactionInput {
+		return omittedSubjectLabel
+	}
 	return stripSubjectControls(s)
 }
 
