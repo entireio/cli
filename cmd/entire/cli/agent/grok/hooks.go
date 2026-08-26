@@ -73,17 +73,37 @@ var hookInstallOrder = []string{
 // more.
 const hookTimeoutSeconds = 30
 
-// gateHooks are the blocking events Grok already gives a 600s timeout, because
-// they can hold up the agent's turn.
+// turnEndTimeoutSeconds is the budget for hooks that end a turn.
 //
-// These deliberately get NO explicit timeout: turn-end is where the expensive
-// work happens (redaction, condensation, checkpoint write), and on a large repo
-// it can exceed any short bound. Writing 30 here would override Grok's own 600s
-// default, and since Grok fails open on timeout the checkpoint would simply be
-// dropped with nothing surfaced.
-var gateHooks = map[string]bool{
-	HookNameStop:         true,
-	HookNameSubagentStop: true,
+// Turn end is where the expensive work happens — redaction, condensation, the
+// checkpoint write — and on a large repo it can exceed any short bound. Grok
+// fails open on timeout, so a budget that is too small does not surface an
+// error: the checkpoint is simply dropped. 600s matches what Grok already
+// allows its own blocking gates.
+const turnEndTimeoutSeconds = 600
+
+// hookTimeout returns the timeout to write for a verb. Zero means "omit the
+// field", leaving Grok's own default in place.
+//
+// Three tiers, because Grok's defaults are not uniform:
+//
+//   - Stop and SubagentStop are blocking gates Grok already defaults to 600s.
+//     Writing anything here would only lower that, so the field is omitted.
+//   - StopCancelled and StopFailure end a turn too — they map to TurnEnd and
+//     run the identical checkpoint path — but Grok treats them as ordinary
+//     events with a 5s default, so they need the long budget stated
+//     explicitly. Omitting it would leave them at 5s, which is worse than the
+//     30s this originally shipped with.
+//   - Everything else is observational and comfortably fits the shorter bound.
+func hookTimeout(verb string) int {
+	switch verb {
+	case HookNameStop, HookNameSubagentStop:
+		return 0
+	case HookNameStopCancelled, HookNameStopFailure:
+		return turnEndTimeoutSeconds
+	default:
+		return hookTimeoutSeconds
+	}
 }
 
 // HookNames returns the hook verbs Grok supports.
@@ -146,15 +166,9 @@ func renderHooks(ctx context.Context) (string, error) {
 			continue
 		}
 		cmd := agent.WrapProductionSilentHookCommandForOS(entireMarker+verb, useWindowsHooks)
-		// Timeout is omitempty: zero leaves Grok's own default in place, which
-		// is what the gate events need.
-		timeout := hookTimeoutSeconds
-		if gateHooks[verb] {
-			timeout = 0
-		}
 		file.Hooks[event] = []grokHookGroup{{
 			Matcher: "",
-			Hooks:   []grokHookCommand{{Type: "command", Command: cmd, Timeout: timeout}},
+			Hooks:   []grokHookCommand{{Type: "command", Command: cmd, Timeout: hookTimeout(verb)}},
 		}}
 	}
 

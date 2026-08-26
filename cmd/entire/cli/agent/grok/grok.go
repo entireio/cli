@@ -8,7 +8,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"net/url"
 	"os"
 	"path/filepath"
 	"time"
@@ -114,21 +113,40 @@ func (g *GrokAgent) GetSessionBaseDir() (string, error) {
 	return filepath.Join(home, "sessions"), nil
 }
 
-// encodeCWD percent-encodes every byte url.QueryEscape would, but with "/"
-// escaped and " " rendered as %20 rather than "+", matching what Grok writes.
+// encodeCWD percent-encodes a path the way Grok names a session group:
+// everything outside the RFC 3986 unreserved set is escaped, separators
+// included, and a space becomes %20 rather than "+".
+//
+// This is written out rather than layered on net/url because neither helper
+// has the right unreserved set. url.PathEscape leaves the sub-delims
+// "@ $ & + = :" alone, so /home/a@corp would encode to %2Fhome%2Fa@corp and
+// miss the directory Grok actually created; url.QueryEscape renders a space
+// as "+". Both look correct on a plain path and are wrong on a real one.
 func encodeCWD(path string) string {
-	escaped := url.PathEscape(path)
-	// PathEscape leaves "/" and a few sub-delims alone; Grok escapes them.
-	var out []byte
-	for i := range len(escaped) {
-		switch c := escaped[i]; c {
-		case '/':
-			out = append(out, '%', '2', 'F')
-		default:
+	const upperhex = "0123456789ABCDEF"
+	out := make([]byte, 0, len(path))
+	for i := range len(path) {
+		c := path[i]
+		if isUnreservedByte(c) {
 			out = append(out, c)
+			continue
 		}
+		out = append(out, '%', upperhex[c>>4], upperhex[c&0x0F])
 	}
 	return string(out)
+}
+
+// isUnreservedByte reports whether c is RFC 3986 unreserved (ALPHA / DIGIT /
+// "-" / "." / "_" / "~"), the only bytes left literal in a group name.
+func isUnreservedByte(c byte) bool {
+	switch {
+	case c >= 'A' && c <= 'Z', c >= 'a' && c <= 'z', c >= '0' && c <= '9':
+		return true
+	case c == '-', c == '.', c == '_', c == '~':
+		return true
+	default:
+		return false
+	}
 }
 
 // ResolveSessionFile returns the transcript path for a session.

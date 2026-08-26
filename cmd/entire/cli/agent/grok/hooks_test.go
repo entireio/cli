@@ -281,7 +281,7 @@ func TestRenderHooks_IsDeterministic(t *testing.T) {
 	}
 }
 
-// TestInstallHooks_GateEventsKeepGrokDefaultTimeout guards a silent
+// TestInstallHooks_TimeoutsMatchTheirTier guards a silent
 // checkpoint-dropping regression.
 //
 // Stop and SubagentStop are blocking gates that Grok gives a 600s timeout;
@@ -290,7 +290,7 @@ func TestRenderHooks_IsDeterministic(t *testing.T) {
 // checkpoint would simply vanish — no error, no log. Turn-end is exactly where
 // the expensive work (redaction, condensation, checkpoint write) happens, so
 // the gates must carry no timeout at all.
-func TestInstallHooks_GateEventsKeepGrokDefaultTimeout(t *testing.T) {
+func TestInstallHooks_TimeoutsMatchTheirTier(t *testing.T) {
 	dir := hookRepo(t)
 	g := &GrokAgent{}
 
@@ -312,20 +312,74 @@ func TestInstallHooks_GateEventsKeepGrokDefaultTimeout(t *testing.T) {
 			t.Errorf("%s: no hook installed", event)
 			continue
 		}
-		got := groups[0].Hooks[0].Timeout
-		if gateHooks[verb] {
-			if got != 0 {
-				t.Errorf("%s is a gate: timeout = %d, want 0 (leave Grok's 600s default)", event, got)
-			}
-			continue
-		}
-		if got != hookTimeoutSeconds {
-			t.Errorf("%s: timeout = %d, want %d", event, got, hookTimeoutSeconds)
+		if got, want := groups[0].Hooks[0].Timeout, hookTimeout(verb); got != want {
+			t.Errorf("%s: timeout = %d, want %d", event, got, want)
 		}
 	}
 
 	// The gate events must not emit the key at all, not merely emit zero.
 	if bytes.Contains(data, []byte(`"timeout": 0`)) {
 		t.Error(`rendered config contains "timeout": 0; the field should be omitted entirely`)
+	}
+}
+
+// TestHookTimeout_TurnEndingHooksGetTheLongBudget covers all three tiers.
+//
+// The subtle one is StopCancelled/StopFailure: they map to TurnEnd and run the
+// same redaction/condensation/checkpoint path as Stop, but Grok treats them as
+// ordinary events with a 5s default rather than 600s gates. Omitting their
+// timeout would leave them at 5s — worse than doing nothing — so they need the
+// long budget written explicitly.
+func TestHookTimeout_TurnEndingHooksGetTheLongBudget(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		verb string
+		want int
+	}{
+		{HookNameStop, 0},                              // Grok's own 600s gate
+		{HookNameSubagentStop, 0},                      // Grok's own 600s gate
+		{HookNameStopCancelled, turnEndTimeoutSeconds}, // 5s default; must be raised
+		{HookNameStopFailure, turnEndTimeoutSeconds},   // 5s default; must be raised
+		{HookNameSessionStart, hookTimeoutSeconds},     // observational
+		{HookNameUserPromptSubmit, hookTimeoutSeconds}, // observational
+		{HookNamePostToolUse, hookTimeoutSeconds},      // observational
+	}
+	for _, tt := range tests {
+		if got := hookTimeout(tt.verb); got != tt.want {
+			t.Errorf("hookTimeout(%s) = %d, want %d", tt.verb, got, tt.want)
+		}
+	}
+}
+
+// TestInstallHooks_NoTurnEndingHookIsLeftOnGroksShortDefault is the property
+// behind the table above: nothing that ends a turn may run on Grok's 5s
+// default, because Grok fails open and the checkpoint disappears silently.
+func TestInstallHooks_NoTurnEndingHookIsLeftOnGroksShortDefault(t *testing.T) {
+	dir := hookRepo(t)
+	g := &GrokAgent{}
+	if _, err := g.InstallHooks(context.Background(), false); err != nil {
+		t.Fatalf("InstallHooks: %v", err)
+	}
+	data, err := os.ReadFile(installedPath(dir))
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	var file grokHooksFile
+	if err := json.Unmarshal(data, &file); err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+
+	// Every verb whose ParseHookEvent yields TurnEnd.
+	for _, verb := range []string{HookNameStop, HookNameStopCancelled, HookNameStopFailure} {
+		groups := file.Hooks[grokEventForHook[verb]]
+		if len(groups) == 0 || len(groups[0].Hooks) == 0 {
+			t.Fatalf("%s: not installed", verb)
+		}
+		got := groups[0].Hooks[0].Timeout
+		if got != 0 && got < turnEndTimeoutSeconds {
+			t.Errorf("%s: timeout = %d, too short for turn-end work (want 0 or >= %d)",
+				verb, got, turnEndTimeoutSeconds)
+		}
 	}
 }
