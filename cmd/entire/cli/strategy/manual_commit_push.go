@@ -131,7 +131,7 @@ func (s *ManualCommitStrategy) prePush(ctx context.Context, remote string, prote
 			)
 		}
 		if decisionErr != nil || decision != TrustGranted {
-			fmt.Fprintln(stderrWriter, "Entire: checkpoint sync held — this repo isn't trusted yet.\nSessions are captured locally. Run `entire trust` to sync them to your checkpoint sync remote.")
+			fmt.Fprintln(stderrWriter, "Entire: checkpoint sync held — this repo isn't trusted yet. Sessions are captured locally; run `entire trust` to sync them to your checkpoint sync remote.")
 			return nil
 		}
 		// Granted at the prompt: replace any stale context snapshot with a fresh

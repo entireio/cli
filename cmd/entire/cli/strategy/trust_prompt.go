@@ -93,8 +93,8 @@ func askTrustPrompt(ctx context.Context) (trustChoice, error) {
 	form := uiform.New(
 		huh.NewGroup(
 			huh.NewSelect[trustChoice]().
-				Title("Entire captured agent sessions in this repo via global mode.").
-				Description("Trust this repo and sync its checkpoints to your checkpoint sync remote?").
+				Title("Global tracking is on, and this repo's checkpoints haven't been synced yet.").
+				Description("Checkpoints leave this machine only for repos you trust. Sync this repo's checkpoints to your checkpoint sync remote?").
 				Options(
 					huh.NewOption(yesLabel, trustChoiceYes),
 					huh.NewOption("Not now — keep capturing locally, ask again next push", trustChoiceNotNow),

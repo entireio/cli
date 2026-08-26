@@ -298,7 +298,7 @@ func globalTrustBannerSuffix(ctx context.Context, agentName types.AgentName) str
 		return ""
 	}
 	// "checkpoint sync remote", not "origin": sync targets the elected remote.
-	const notice = "Entire is capturing this repo locally via global mode. Checkpoints aren't synced yet — run `entire trust` to sync them to your checkpoint sync remote."
+	const notice = "Entire is capturing this repo locally. Checkpoints aren't synced yet — run `entire trust` to sync them to your checkpoint sync remote."
 	if agentName == agent.AgentNameCodex {
 		return " " + notice
 	}

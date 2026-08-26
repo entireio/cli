@@ -15,14 +15,16 @@ func newTrustCmd() *cobra.Command {
 	var revoke bool
 	cmd := &cobra.Command{
 		Use:   "trust",
-		Short: "Sync this repo's checkpoints captured via global mode",
-		Long: `Grant egress consent for the current repository: checkpoints captured via
-global mode start syncing to the checkpoint sync remote on your next 'git push'.
+		Short: "Allow this repo's checkpoints to sync while global tracking is on",
+		Long: `Grant egress consent for the current repository: its checkpoints start
+syncing to the checkpoint sync remote on your next 'git push'.
 Repos with an origin remote are trusted by origin (covers every clone of the
 project on this machine); repos without a usable origin are trusted by folder.
 
-Only applies to globally tracked repos — a repo with its own Entire setup
-('entire enable') already syncs.`,
+While global tracking is on, every tracked repo needs this consent before its
+checkpoints leave the machine. 'entire enable' records it automatically, so
+this command is for repos that are tracked globally or that were enabled
+before global tracking was turned on.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			return runTrust(cmd, revoke)
@@ -39,14 +41,6 @@ func runTrust(cmd *cobra.Command, revoke bool) error {
 		cmd.SilenceUsage = true
 		fmt.Fprintln(cmd.ErrOrStderr(), "Not a git repository. Run 'entire trust' from within a git repository.")
 		return NewSilentError(errors.New("not a git repository"))
-	}
-	configured, err := settings.RepoActivationConfigured(ctx)
-	if err != nil {
-		return fmt.Errorf("reading repo activation settings: %w", err)
-	}
-	if configured {
-		fmt.Fprintln(out, "not applicable — this repo is explicitly enabled; trust applies only to globally tracked repos")
-		return nil
 	}
 	if revoke {
 		// Not guarded by the inactive-tier refusal: revoking in an inactive
@@ -93,12 +87,22 @@ func refuseTrustWhenInactive(cmd *cobra.Command) error {
 	ctx := cmd.Context()
 	// Unreadable settings and an unconfigured tier fall through: the trust
 	// writer owns those messages.
-	if us, err := settings.LoadUserSettings(ctx); err != nil || !us.GlobalConfigured() {
+	us, err := settings.LoadUserSettings(ctx)
+	if err != nil || !us.GlobalConfigured() {
 		return nil //nolint:nilerr // deliberate fall-through, see above
+	}
+	errW := cmd.ErrOrStderr()
+	if !us.GlobalEnabled() {
+		// A repo-enabled repo is active regardless of the tier, and already
+		// syncs while the tier is off — recording trust into a disabled tier
+		// would be a no-op that prints "Trusted".
+		cmd.SilenceUsage = true
+		fmt.Fprintln(errW, "Not recording trust: global tracking is off, so checkpoint sync is not gated.")
+		fmt.Fprintf(errW, "Enable global tracking in %s, then re-run 'entire trust'.\n", settings.UserSettingsPath())
+		return NewSilentError(errors.New("global tracking is off"))
 	}
 	if active, reason := settings.IsActiveForRepoWithReason(ctx); !active {
 		cmd.SilenceUsage = true
-		errW := cmd.ErrOrStderr()
 		if reason == settings.InactiveReasonGlobalExcluded {
 			fmt.Fprintln(errW, "Not recording trust: this repo is excluded in your settings, so Entire is not capturing it.")
 			fmt.Fprintf(errW, "Remove the exclude from %s first if you want it tracked and synced.\n", settings.UserSettingsPath())
