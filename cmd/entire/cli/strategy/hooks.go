@@ -743,7 +743,7 @@ func InstallGitHook(ctx context.Context, silent, absolutePath bool) (int, bool, 
 			if written {
 				installedCount++
 			}
-			if backupExists {
+			if backupExists && touchedUser {
 				_ = os.Remove(backupPath)
 			}
 			continue
