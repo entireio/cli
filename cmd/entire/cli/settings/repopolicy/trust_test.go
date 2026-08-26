@@ -112,7 +112,7 @@ func TestReadRepoActivation(t *testing.T) {
 			if tc.local != "" {
 				writePolicyFile(t, root, ".entire/settings.local.json", tc.local)
 			}
-			got, err := ReadRepoActivation(root)
+			got, err := ReadRepoActivation(t.Context(), root)
 			if tc.wantErr {
 				if err == nil {
 					t.Fatalf("ReadRepoActivation = %+v, want error", got)

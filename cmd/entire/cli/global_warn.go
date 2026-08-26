@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
@@ -45,18 +46,22 @@ func globalPostRun(ctx context.Context, errW io.Writer) {
 	reconcileUserHooks(ctx, us, errW)
 }
 
-// maybeWarnGlobalTracking is the foreground detection warn.
+// maybeWarnGlobalTracking is the foreground detection warn. The marker holds
+// the announced generation — "enabled" or "enabled+trust_all" — so flipping
+// trust_all on while already enabled re-warns with the wider "captured AND
+// synced" copy instead of staying silent.
 func maybeWarnGlobalTracking(ctx context.Context, us *settings.UserSettings, errW io.Writer) {
-	_, statErr := os.Stat(globalWarnMarkerPath())
+	acked, statErr := os.ReadFile(globalWarnMarkerPath())
 	markerPresent := statErr == nil
 	if statErr != nil && !errors.Is(statErr, fs.ErrNotExist) {
 		// Treated as marker-absent: can only over-warn, never suppress.
 		logging.Debug(ctx, "global warn marker unreadable; treating as absent", slog.String("error", statErr.Error()))
 	}
+	generation := globalWarnGeneration(us)
 	switch {
-	case us.GlobalEnabled() && !markerPresent:
+	case us.GlobalEnabled() && (!markerPresent || strings.TrimSpace(string(acked)) != generation):
 		fmt.Fprintln(errW, globalTrackingWarnText(us))
-		ackGlobalWarnMarker(ctx)
+		ackGlobalWarnMarker(ctx, generation)
 	case !us.GlobalEnabled() && markerPresent:
 		// Off-detection: a hand-edited disable still owes the held-data note.
 		if err := os.Remove(globalWarnMarkerPath()); err != nil {
@@ -66,14 +71,22 @@ func maybeWarnGlobalTracking(ctx context.Context, us *settings.UserSettings, err
 	}
 }
 
-// ackGlobalWarnMarker records that the current enabled generation has been
-// announced by the detection warning. Best-effort: a failed write only re-warns.
-func ackGlobalWarnMarker(ctx context.Context) {
+// globalWarnGeneration names the enabled state the warning describes.
+func globalWarnGeneration(us *settings.UserSettings) string {
+	if us.Global != nil && us.Global.TrustAll {
+		return "enabled+trust_all"
+	}
+	return "enabled"
+}
+
+// ackGlobalWarnMarker records which enabled generation the detection warning
+// announced. Best-effort: a failed write only re-warns.
+func ackGlobalWarnMarker(ctx context.Context, generation string) {
 	if err := os.MkdirAll(userdirs.Config(), 0o700); err != nil {
 		logging.Debug(ctx, "global warn marker not written", slog.String("error", err.Error()))
 		return
 	}
-	if err := os.WriteFile(globalWarnMarkerPath(), nil, 0o600); err != nil {
+	if err := os.WriteFile(globalWarnMarkerPath(), []byte(generation+"\n"), 0o600); err != nil {
 		logging.Debug(ctx, "global warn marker not written", slog.String("error", err.Error()))
 	}
 }

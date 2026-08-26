@@ -2448,6 +2448,15 @@ func runUninstall(ctx context.Context, w, errW io.Writer, force bool) error {
 		return NewSilentError(errors.New("not a git repository"))
 	}
 
+	// A globally tracked repo keeps its runtime data under .git/ — captured
+	// sessions that may never have synced. Disclose and remove it too.
+	var globalRuntimeRoot string
+	if policy, err := repopolicy.ClassifyRepoPolicy(ctx); err == nil && policy.ActivationSource == repopolicy.ActivationGlobal {
+		if _, statErr := os.Stat(policy.RuntimeRoot()); statErr == nil {
+			globalRuntimeRoot = policy.RuntimeRoot()
+		}
+	}
+
 	// Gather counts for display
 	sessionStateCount := countSessionStates(ctx)
 	shadowBranchCount := countShadowBranches(ctx)
@@ -2459,7 +2468,7 @@ func runUninstall(ctx context.Context, w, errW io.Writer, force bool) error {
 	entireDirExists := checkEntireDirExists(ctx)
 
 	// Check if there's anything to uninstall
-	if !entireDirExists && !gitHooksInstalled && sessionStateCount == 0 &&
+	if !entireDirExists && globalRuntimeRoot == "" && !gitHooksInstalled && sessionStateCount == 0 &&
 		shadowBranchCount == 0 && len(agentsWithInstalledHooks) == 0 {
 		fmt.Fprintln(w, "Entire is not installed in this repository.")
 		return nil
@@ -2470,6 +2479,9 @@ func runUninstall(ctx context.Context, w, errW io.Writer, force bool) error {
 		fmt.Fprintln(w, "\nThis will completely remove Entire from this repository:")
 		if entireDirExists {
 			fmt.Fprintln(w, "  - .entire/ directory")
+		}
+		if globalRuntimeRoot != "" {
+			fmt.Fprintf(w, "  - Global-mode runtime data under .git (%s) — locally captured sessions that may never have synced\n", globalRuntimeRoot)
 		}
 		if gitHooksInstalled {
 			fmt.Fprintln(w, "  - Git hooks (prepare-commit-msg, commit-msg, post-commit, pre-push)")
@@ -2538,9 +2550,11 @@ func runUninstall(ctx context.Context, w, errW io.Writer, force bool) error {
 
 	// A globally tracked repo keeps its runtime data under .git/, not in
 	// <worktree>/.entire — remove that too so uninstall means what it says.
-	if policy, err := repopolicy.ClassifyRepoPolicy(ctx); err == nil && policy.ActivationSource == repopolicy.ActivationGlobal {
-		if err := os.RemoveAll(policy.RuntimeRoot()); err != nil {
+	if globalRuntimeRoot != "" {
+		if err := os.RemoveAll(globalRuntimeRoot); err != nil {
 			fmt.Fprintf(errW, "Warning: failed to remove global-mode runtime data: %v\n", err)
+		} else {
+			fmt.Fprintln(w, "  Removed global-mode runtime data")
 		}
 	}
 

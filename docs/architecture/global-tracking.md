@@ -57,7 +57,11 @@ deliberate refinement: a `settings.local.json` written by an unrelated feature
 (investigate config, …) without an `enabled` key does not pin a globally
 tracked repo into local mode. Committed `.entire/settings.json` activates a
 fresh clone exactly as it does today — consent for *egress* is a separate
-question (below), so cloned content never opens the sync path by itself.
+question (below), so cloned content never opens the sync path by itself. A
+*tracked* (or symlinked) `settings.local.json` is ignored wholesale, as the
+merged loader ignores it: a clone cannot force activation, or bypass the user's
+exclusions, by shipping a "local" file (`repopolicy.LocalSettingsTrusted`,
+installed by the `settings` package).
 
 Hooks classify once (`prepareHookPolicy`) and carry the snapshot on `ctx`; a
 repo-enabled repo whose settings the full loader rejects (`ErrScannerConfig`)

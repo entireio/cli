@@ -1475,7 +1475,7 @@ func RepoActivationConfigured(ctx context.Context) (bool, error) {
 	if err != nil {
 		return false, err //nolint:wrapcheck // paths error already names the failure
 	}
-	activation, err := repopolicy.ReadRepoActivation(root)
+	activation, err := repopolicy.ReadRepoActivation(ctx, root)
 	if err != nil {
 		return false, fmt.Errorf("reading repo activation settings: %w", err)
 	}
@@ -1498,7 +1498,7 @@ func IsSetUpAndEnabled(ctx context.Context) bool {
 	if err != nil {
 		return false
 	}
-	activation, err := repopolicy.ReadRepoActivation(root)
+	activation, err := repopolicy.ReadRepoActivation(ctx, root)
 	if err != nil || !activation.Configured || !activation.Enabled {
 		return false
 	}

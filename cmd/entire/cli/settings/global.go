@@ -22,6 +22,20 @@ const (
 	InactiveReasonGlobalOff      = repopolicy.InactiveReasonGlobalOff
 )
 
+// The leaf cannot import this package (cycle through paths), so it takes the
+// tracked-file probe by injection at package initialization: a local settings
+// file counts for activation only when it is provably this developer's — not
+// in the git index and not reached through a symlink
+// (probeLocalSettingsIsVersioned checks both; memoized per process).
+var _ = installLocalSettingsProbe()
+
+func installLocalSettingsProbe() struct{} {
+	repopolicy.LocalSettingsTrusted = func(ctx context.Context, path string) bool {
+		return classifyLocalSettings(ctx, path) != localTracked
+	}
+	return struct{}{}
+}
+
 // UserSettingsPath returns the user-global settings path.
 func UserSettingsPath() string {
 	return repopolicy.UserSettingsPath()

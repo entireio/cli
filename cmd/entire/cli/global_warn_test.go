@@ -165,3 +165,43 @@ func TestGlobalPostRun_UnreadableSettingsIsSilent(t *testing.T) {
 		t.Fatal("fixture should be unreadable")
 	}
 }
+
+// TestMaybeWarnGlobalTracking_ReWarnsWhenTrustAllTurnsOn: the ack marker is
+// keyed on the announced generation, so widening egress to every repo
+// (trust_all) while already enabled is announced too.
+func TestMaybeWarnGlobalTracking_ReWarnsWhenTrustAllTurnsOn(t *testing.T) {
+	isolatedUserHome(t)
+	pretendAgentBinaries(t)
+	cfg := t.TempDir()
+	t.Setenv("ENTIRE_CONFIG_DIR", cfg)
+	write := func(body string) {
+		if err := os.WriteFile(filepath.Join(cfg, "settings.json"), []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ctx := context.Background()
+
+	write(`{"global":{"enabled":true}}`)
+	var out bytes.Buffer
+	globalPostRun(ctx, &out)
+	if !strings.Contains(out.String(), "captured locally") {
+		t.Fatalf("first enable must warn, got:\n%s", out.String())
+	}
+	out.Reset()
+	globalPostRun(ctx, &out)
+	if strings.Contains(out.String(), "Warning: global tracking") {
+		t.Fatalf("same generation must not re-warn, got:\n%s", out.String())
+	}
+
+	write(`{"global":{"enabled":true,"trust_all":true}}`)
+	out.Reset()
+	globalPostRun(ctx, &out)
+	if !strings.Contains(out.String(), "captured AND synced") {
+		t.Fatalf("turning trust_all on must re-warn with the wider copy, got:\n%s", out.String())
+	}
+	out.Reset()
+	globalPostRun(ctx, &out)
+	if strings.Contains(out.String(), "Warning: global tracking") {
+		t.Fatalf("trust_all generation must be acked once, got:\n%s", out.String())
+	}
+}

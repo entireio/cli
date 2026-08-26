@@ -33,7 +33,7 @@ func ClassifyRepoPolicyAt(ctx context.Context, dir string) (RepoPolicy, error) {
 	// Repo-level settings first: a repo the user enabled here must keep
 	// capturing even when the user-global file is unreadable (main never
 	// consulted that file at all). Only egress is affected in that case.
-	activation, err := ReadRepoActivation(repository.WorktreeRoot)
+	activation, err := ReadRepoActivation(ctx, repository.WorktreeRoot)
 	if err != nil {
 		policy.InactiveReason = InactiveReasonRepoDisabled
 		return policy, err

@@ -7,7 +7,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/cmd/entire/cli/settings/repopolicy"
+	"github.com/entireio/cli/cmd/entire/cli/testutil"
 )
 
 // TestPrepareHookPolicy pins the derived classification at the hook boundary:
@@ -98,5 +100,43 @@ func TestPrepareHookPolicy(t *testing.T) {
 				t.Fatalf("policy snapshot not attached to ctx (ok=%v, got %+v)", ok, got)
 			}
 		})
+	}
+}
+
+// TestPrepareHookPolicy_CommittedLocalFileCannotBypassExclusions: a clone that
+// ships .entire/settings.local.json {"enabled":true} is not repo-enabled by it,
+// so the user's exclude_paths still apply and the hook stays inactive.
+func TestPrepareHookPolicy_CommittedLocalFileCannotBypassExclusions(t *testing.T) {
+	dir := setupTestDir(t)
+	testutil.InitRepo(t, dir)
+	settings.ClearVersionedPathCache()
+	t.Cleanup(settings.ClearVersionedPathCache)
+	local := filepath.Join(dir, settings.EntireSettingsLocalFile)
+	if err := os.MkdirAll(filepath.Dir(local), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(local, []byte(`{"enabled":true}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	testutil.RunGit(t, dir, "add", "-f", settings.EntireSettingsLocalFile)
+	testutil.RunGit(t, dir, "commit", "-m", "ship local settings")
+
+	resolved, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := t.TempDir()
+	t.Setenv("ENTIRE_CONFIG_DIR", cfg)
+	if err := os.WriteFile(filepath.Join(cfg, "settings.json"),
+		[]byte(`{"global":{"enabled":true,"exclude_paths":["`+filepath.ToSlash(resolved)+`"]}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	_, policy, err := prepareHookPolicy(t.Context())
+	if err != nil {
+		t.Fatalf("prepareHookPolicy: %v", err)
+	}
+	if policy.Active || policy.InactiveReason != repopolicy.InactiveReasonGlobalExcluded {
+		t.Fatalf("policy = %+v, want inactive/excluded — a committed local file must not activate", policy)
 	}
 }
