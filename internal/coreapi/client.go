@@ -10,6 +10,7 @@ import (
 	"github.com/ogen-go/ogen/ogenerrors"
 
 	"github.com/entireio/cli/cmd/entire/cli/auth"
+	"github.com/entireio/cli/internal/entireclient/userdirs"
 )
 
 // apiBasePath is appended to the control-plane origin to reach the v1
@@ -47,24 +48,35 @@ func New() (*Client, error) {
 // whose subject is a mirror on clusterHost (mirror create/remove, mirror
 // collaborators list).
 //
-// Unlike New — which dials the active context — the core is discovered from the
-// cluster's /.well-known/entire-cluster.json and the matching local context
-// supplies the bearer (see auth.ResolveControlPlaneTargetForCluster). This is
-// what lets a command act on a cluster fronted by a federation other than the
-// active login, e.g. running `repo mirror collaborators list … aws-us-east-2.entire.io`
-// while the active context is a partial.to login: without it the active
-// context's core 400s with "unknown cluster_host" because it doesn't front the
-// cluster. ENTIRE_TOKEN is honoured identically to New.
+// The client is the same one New returns — the acting identity is the active
+// context (or ENTIRE_TOKEN), and its core is the core we dial. What
+// NewForCluster adds is a gate: clusterHost must name a cluster that core
+// actually fronts, per its own cluster registry (VerifyClusterRegistered).
+//
+// The core is deliberately NOT discovered from the cluster's
+// /.well-known/entire-cluster.json any more. That document is self-reported by
+// the host under scrutiny, and let a host nominate the login servers a client
+// should trust it with; the control plane's registry is the authoritative
+// record of which clusters exist, and is already what cell routing resolves
+// against. The cost of the change is that acting on a cluster fronted by a
+// federation other than your active login now fails instead of silently
+// switching cores — with an error naming the core consulted and pointing at
+// `entire auth use`.
 func NewForCluster(ctx context.Context, clusterHost string) (*Client, error) {
-	if client, ok, err := clientFromEnvToken(); ok {
-		return client, err
-	}
-	target, err := auth.ResolveControlPlaneTargetForCluster(ctx, clusterHost)
+	client, err := newActiveClient()
 	if err != nil {
-		return nil, fmt.Errorf("resolve control-plane target for cluster %q: %w", clusterHost, err)
+		return nil, err
 	}
-	return clientForTarget(target)
+	if err := VerifyClusterRegistered(ctx, client, userdirs.Cache(), client.CoreOrigin(), clusterHost); err != nil {
+		return nil, err
+	}
+	return client, nil
 }
+
+// newActiveClient is New, as a seam: NewForCluster's own test needs a client
+// pointed at a fake control plane, which no amount of env/context fixture can
+// produce (New builds an https client from real credentials).
+var newActiveClient = New
 
 // clientFromEnvToken handles the ENTIRE_TOKEN bypass shared by New and
 // NewForCluster. ok=true commits the caller to this mode (the var is present);
@@ -81,24 +93,18 @@ func NewForCluster(ctx context.Context, clusterHost string) (*Client, error) {
 // CoreURLFromEnvToken validates aud is a https bare-origin URL, and makes that
 // the resource the static bearer is sent to.
 //
-// NO TRUST GATE — and deliberately so, in contrast to the env-token path
-// in cmd/git-remote-entire/main.go:resolveEnvTokenCreds. That path derives
-// coreURL from the same unverified aud claim, then gates it through
-// clusterdiscovery.ResolveClusterCores + coreTrusted, anchored to the host
-// the user typed in the clone URL — exactly the verification
-// CoreURLFromEnvToken's doc mandates of callers. We cannot reuse that gate:
-// control-plane commands have no user-supplied resource host to anchor
-// against, so coreURL would only ever be the token's own (unverified) aud,
-// gating it against itself. We skip it because aud-redirection carries no
-// escalation here: git-remote uses the env token as an STS subject_token
-// (exchanged via repocreds for a repo-scoped credential), whereas coreapi
-// sends the token verbatim as the control-plane bearer — the token IS the
-// credential, so re-pointing aud at an attacker host requires already
-// holding a valid token and yields nothing the holder didn't already have.
+// NO CLUSTER GATE — the target-host check lives one level up, in
+// NewForCluster / VerifyClusterRegistered, because it needs a cluster host to
+// check and New has none: a control-plane command addressed at no particular
+// cluster has nothing to anchor against, so the token's aud would only ever be
+// gated against itself.
 //
-// (NewForCluster doesn't tighten this even though it has a cluster host to
-// anchor against: the same no-escalation argument holds — the env token is the
-// credential, sent verbatim, not exchanged.)
+// That is safe here because aud-redirection carries no escalation for a
+// verbatim bearer: the token IS the credential, so re-pointing aud at an
+// attacker host requires already holding a valid token and yields nothing the
+// holder didn't already have. (The git remote helper's env-token path uses the
+// token as an STS subject_token instead, and does gate it — against the
+// registry of the core aud names, anchored by the cluster host the user typed.)
 func clientFromEnvToken() (*Client, bool, error) {
 	raw, ok := os.LookupEnv(auth.EnvTokenVar)
 	if !ok {
@@ -144,8 +150,29 @@ func (c *Client) CoreOrigin() string {
 // cross-jurisdiction call still follows the home core's 421 and exchanges
 // this token for that core's audience (see newCrossJurisHTTPClient).
 func NewWithBearer(coreBaseURL, token string) (*Client, error) {
+	return NewWithBearerSkipTLS(coreBaseURL, token, false)
+}
+
+// NewWithBearerSkipTLS is NewWithBearer with the ENTIRE_TLS_SKIP_VERIFY
+// local-dev escape hatch plumbed through. Only git-remote-entire passes true:
+// it honours that variable for the whole clone, and its cluster-registry check
+// must not be the one call that hard-fails against a self-signed dev core.
+func NewWithBearerSkipTLS(coreBaseURL, token string, skipTLS bool) (*Client, error) {
 	base := strings.TrimRight(coreBaseURL, "/")
-	client, err := NewClient(base+apiBasePath, staticBearer{token: token}, WithClient(newCrossJurisHTTPClient()))
+	client, err := NewClient(base+apiBasePath, staticBearer{token: token}, WithClient(newCrossJurisHTTPClientSkipTLS(skipTLS)))
+	if err != nil {
+		return nil, fmt.Errorf("build Entire API client: %w", err)
+	}
+	return client, nil
+}
+
+// NewWithTokenSource returns a *Client that resolves its bearer per request
+// from provide — the shape a caller holding a refreshing login credential
+// wants, so a registry lookup shares that credential (and its silent re-mint)
+// instead of pinning a token snapshot.
+func NewWithTokenSource(coreBaseURL string, provide func(context.Context) (string, error), skipTLS bool) (*Client, error) {
+	src := &providerSource{provide: provide}
+	client, err := NewClient(strings.TrimRight(coreBaseURL, "/")+apiBasePath, src, WithClient(newCrossJurisHTTPClientSkipTLS(skipTLS)))
 	if err != nil {
 		return nil, fmt.Errorf("build Entire API client: %w", err)
 	}

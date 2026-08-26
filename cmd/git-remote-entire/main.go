@@ -11,11 +11,12 @@
 // or log line corrupts the transfer. Diagnostics go to stderr (and the
 // ENTIRE_DEBUG-gated debuglog).
 //
-// Authentication resolves the login context for the target cluster from the
-// shared contexts.json: the cluster's cores come from the cluster_cores.json
-// cache (or a live /.well-known fetch on miss), then the account is selected
-// from local contexts. It uses that context's login JWT (or ENTIRE_TOKEN in
-// CI) directly as the git-transport bearer.
+// Authentication acts as the active login context from the shared
+// contexts.json (or ENTIRE_TOKEN in CI), and confirms the target cluster is one
+// that identity's control-plane core actually fronts by consulting the core's
+// cluster registry (GET /api/v1/clusters) — the same authoritative source the
+// cell-routed commands resolve against. It then uses that context's login JWT
+// (or the env token) directly as the git-transport bearer.
 package main
 
 import (
@@ -37,7 +38,8 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/auth"
 	"github.com/entireio/cli/cmd/entire/cli/gitremote"
 	"github.com/entireio/cli/cmd/entire/cli/versioninfo"
-	"github.com/entireio/cli/internal/entireclient/clusterdiscovery"
+	"github.com/entireio/cli/internal/coreapi"
+	"github.com/entireio/cli/internal/entireclient/contexts"
 	"github.com/entireio/cli/internal/entireclient/httpclient"
 	"github.com/entireio/cli/internal/entireclient/httputil"
 	"github.com/entireio/cli/internal/entireclient/userdirs"
@@ -122,7 +124,7 @@ func run(args []string) int {
 		},
 	}
 
-	creds, onUnauthorized, err := resolveCreds(ctx, parsedURL, skipTLS, httpClient)
+	creds, onUnauthorized, err := resolveCreds(ctx, parsedURL, skipTLS, httpClient, userdirs.Cache(), defaultClusterRegistry)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "fatal: %v\n", err)
 		return 128
@@ -346,14 +348,35 @@ func parseProtocolVersion(raw string, warn io.Writer) int {
 	return defaultVersion
 }
 
+// clusterRegistryFactory builds the control-plane client the auth path asks
+// "is this a cluster you front?". Injected (rather than called directly) so the
+// credential gate is unit-testable against a fake registry, with no network and
+// no keyring.
+type clusterRegistryFactory func(coreURL string, token credentialProvider, skipTLS bool) (coreapi.ClusterLister, error)
+
+// defaultClusterRegistry dials the core with the same credential the git
+// transport will use, so the registry lookup shares its silent re-mint instead
+// of pinning a token snapshot.
+func defaultClusterRegistry(coreURL string, token credentialProvider, skipTLS bool) (coreapi.ClusterLister, error) {
+	return coreapi.NewWithTokenSource(coreURL, token, skipTLS)
+}
+
 // resolveCreds returns the credential provider used by the git transport:
 //
 //   - ENTIRE_TOKEN set: use the env JWT verbatim. Skips contexts.json and the
 //     keyring entirely — the CI / workload path. A non-URL aud is a hard error,
 //     never a silent fallback to context resolution.
-//   - otherwise: resolve the login context for this cluster from contexts.json
-//     and use its refreshed login JWT.
-func resolveCreds(ctx context.Context, parsedURL *url.URL, skipTLS bool, httpClient *http.Client) (credentialProvider, func(), error) {
+//   - otherwise: use the active login context from contexts.json and its
+//     refreshed login JWT.
+//
+// Either way the target cluster host is confirmed against the *core's* cluster
+// registry before any credential is handed out — see
+// coreapi.VerifyClusterRegistered for why the cluster's own
+// /.well-known/entire-cluster.json no longer decides this. cacheDir carries the
+// positive-answer cache that keeps a warm git op off the control plane
+// (userdirs.Cache() in production); a confirmed cluster therefore costs no
+// round trip on the next fetch, and survives a brief core outage.
+func resolveCreds(ctx context.Context, parsedURL *url.URL, skipTLS bool, httpClient *http.Client, cacheDir string, newRegistry clusterRegistryFactory) (credentialProvider, func(), error) {
 	// Presence of ENTIRE_TOKEN is the signal: if it's set at all (LookupEnv,
 	// not Getenv, so we can tell set-empty from unset), we commit to the
 	// env-token path and any failure to use it is fatal — never a silent
@@ -367,20 +390,18 @@ func resolveCreds(ctx context.Context, parsedURL *url.URL, skipTLS bool, httpCli
 		if envToken == "" {
 			return nil, nil, fmt.Errorf("%s is set but blank", auth.EnvTokenVar)
 		}
-		return resolveEnvTokenCreds(ctx, envToken, parsedURL.Host, userdirs.Cache(), httpClient)
+		return resolveEnvTokenCreds(ctx, envToken, parsedURL.Host, skipTLS, cacheDir, newRegistry)
 	}
 
-	// Resolve which login context authenticates this cluster: the cluster's
-	// login servers are taken from the cluster_cores.json cache (or a live
-	// /.well-known fetch on miss/expiry), and the ACTIVE context must be issued
-	// by one of them. No other saved login is substituted, so which identity
-	// pushed or fetched is always readable from current_context.
-	cfgDir := userdirs.Config()
-	clusterAuth, err := clusterdiscovery.ResolveClusterAuth(ctx, cfgDir, userdirs.Cache(), parsedURL.Host, httpClient, debuglog.Printf)
+	// The acting identity is the ACTIVE context — `--context`/$ENTIRE_CONTEXT
+	// for one invocation, else the stored current_context, and nothing else. No
+	// other saved login is substituted, so which identity pushed or fetched is
+	// always readable from current_context. Its core is then the core we ask
+	// about the cluster.
+	clusterCtx, err := activeLoginContext(parsedURL.Host)
 	if err != nil {
-		return nil, nil, err //nolint:wrapcheck // ResolveClusterAuth already returns a user-facing error; preserved verbatim for the "fatal: <msg>" surface
+		return nil, nil, err
 	}
-	clusterCtx := clusterAuth.Context
 
 	// The login-JWT provider transparently refreshes an expired login JWT
 	// from the stored refresh token (serialised across processes, rotated
@@ -389,60 +410,79 @@ func resolveCreds(ctx context.Context, parsedURL *url.URL, skipTLS bool, httpCli
 	if err != nil {
 		return nil, nil, err //nolint:wrapcheck // NewRefreshingLoginCredential already returns a user-facing error
 	}
-
-	debuglog.Printf("auth: login token bearer (core=%s)", clusterCtx.CoreURL)
 	provider, onUnauthorized := refreshingProvider(loginCredential)
+
+	coreURL := strings.TrimRight(clusterCtx.CoreURL, "/")
+	registry, err := newRegistry(coreURL, provider, skipTLS)
+	if err != nil {
+		return nil, nil, err
+	}
+	if err := coreapi.VerifyClusterRegistered(ctx, registry, cacheDir, coreURL, parsedURL.Host); err != nil {
+		return nil, nil, err
+	}
+
+	debuglog.Printf("auth: login token bearer (core=%s)", coreURL)
 	return provider, onUnauthorized, nil
 }
 
-// resolveEnvTokenCreds returns a fixed ENTIRE_TOKEN provider after validating
-// its control-plane audience against the target cluster. Split out of
-// resolveCreds with explicit clusterHost/cacheDir params (no os.Getenv /
-// userdirs.Cache globals) so the trust gate below is unit-testable against a
-// fake well-known server.
+// activeLoginContext returns the active contexts.json login, or an error
+// naming the cluster we were about to authenticate against. A context with no
+// CoreURL is an unusable pointer: it names no core to consult, so it is
+// reported as "no active login" rather than dialing an empty host.
+func activeLoginContext(clusterHost string) (*contexts.Context, error) {
+	f, err := contexts.Load(userdirs.Config())
+	if err != nil {
+		return nil, fmt.Errorf("load contexts: %w", err)
+	}
+	sel, err := f.Active()
+	if err != nil {
+		return nil, err //nolint:wrapcheck // UnknownContextError is already a complete operator message
+	}
+	if sel.Context == nil || sel.Context.CoreURL == "" {
+		return nil, errors.New(noActiveContextHint(clusterHost))
+	}
+	return sel.Context, nil
+}
+
+// noActiveContextHint renders the "nothing to authenticate as" message. Built
+// as a string so the multi-line, punctuated operator text stays out of an
+// error-string literal.
+func noActiveContextHint(clusterHost string) string {
+	return fmt.Sprintf("no active auth context for cluster %s.\nRun `entire login`, or select a saved login with `entire auth use <context>`.", clusterHost)
+}
+
+// resolveEnvTokenCreds returns a fixed ENTIRE_TOKEN provider after confirming
+// the target cluster is one the token's own core fronts. Split out of
+// resolveCreds with explicit clusterHost / cacheDir / registry-factory params
+// (no os.Getenv, no userdirs globals, no network) so the trust gate below is
+// unit-testable.
 //
-// SECURITY: coreURL is derived from the env token's *unverified* aud claim, and
-// we confirm the core is one the target cluster actually advertises — anchored
-// to the clone URL's host the user typed (TLS to its
-// /.well-known/entire-cluster.json), not to the token's own claims.
-//
-// The gate is only as strong as that TLS verification: with
-// ENTIRE_TLS_SKIP_VERIFY=true (a local-dev escape hatch) the well-known fetch
-// is no longer authenticated, so a MITM could advertise an attacker host as a
-// trusted core. Do not combine ENTIRE_TOKEN with ENTIRE_TLS_SKIP_VERIFY in
-// CI / workload environments.
-func resolveEnvTokenCreds(ctx context.Context, envToken, clusterHost, cacheDir string, httpClient *http.Client) (credentialProvider, func(), error) {
+// SECURITY: coreURL is derived from the env token's *unverified* aud claim, so
+// the gate can't stop there — an attacker-minted aud would otherwise pick its
+// own core. What anchors it is that the core named by aud must ALSO claim the
+// cluster host the user typed: a token pointing at an attacker core reaches a
+// registry that does not list the real cluster, and the clone fails before any
+// credential is attached. The previous shape asked the target host which cores
+// to trust, which inverted the trust: the host under scrutiny got to nominate
+// its own auditors.
+func resolveEnvTokenCreds(ctx context.Context, envToken, clusterHost string, skipTLS bool, cacheDir string, newRegistry clusterRegistryFactory) (credentialProvider, func(), error) {
 	coreURL, err := auth.CoreURLFromEnvToken(envToken)
 	if err != nil {
 		return nil, nil, err //nolint:wrapcheck // CoreURLFromEnvToken already returns a user-facing, ENTIRE_TOKEN-prefixed error
 	}
-	cluster, err := clusterdiscovery.ResolveClusterCores(ctx, cacheDir, clusterHost, httpClient, debuglog.Printf)
+	provider := func(context.Context) (string, error) { return envToken, nil }
+	registry, err := newRegistry(coreURL, provider, skipTLS)
 	if err != nil {
-		return nil, nil, err //nolint:wrapcheck // ResolveClusterCores returns a user-facing discovery error
+		return nil, nil, err
 	}
-	if !coreTrusted(coreURL, cluster.CoreURLs) {
-		return nil, nil, fmt.Errorf("%s aud %q is not a trusted login server for cluster %s (advertised: %s); the token belongs to a different cluster",
-			auth.EnvTokenVar, coreURL, clusterHost, strings.Join(cluster.CoreURLs, ", "))
+	if err := coreapi.VerifyClusterRegistered(ctx, registry, cacheDir, coreURL, clusterHost); err != nil {
+		return nil, nil, fmt.Errorf("%s aud %q does not front cluster %s: %w", auth.EnvTokenVar, coreURL, clusterHost, err)
 	}
 	debuglog.Printf("auth: %s bearer (core=%s)", auth.EnvTokenVar, coreURL)
-	provider := func(context.Context) (string, error) { return envToken, nil }
 	onUnauthorized := func() {
 		debuglog.Printf("data plane rejected static %s bearer; transport will retry once with the configured token", auth.EnvTokenVar)
 	}
 	return provider, onUnauthorized, nil
-}
-
-// coreTrusted reports whether coreURL is in the cluster's advertised core
-// set, comparing on trailing-slash-insensitive equality to match how core
-// URLs are compared elsewhere (contexts.ContextsForIssuer, auth.sameIssuer).
-func coreTrusted(coreURL string, trusted []string) bool {
-	want := strings.TrimRight(coreURL, "/")
-	for _, t := range trusted {
-		if strings.TrimRight(t, "/") == want {
-			return true
-		}
-	}
-	return false
 }
 
 // gitActionFromRequest classifies a smart-HTTP request as "pull" or "push".

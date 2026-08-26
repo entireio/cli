@@ -6,9 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net"
 	"net/url"
-	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -407,44 +405,12 @@ func clusterArgAt(args []string, idx int) string {
 	return defaultClusterHost
 }
 
-// clusterHostLabelRe matches one DNS label: alphanumeric, internal hyphens
-// allowed, no leading/trailing hyphen.
-var clusterHostLabelRe = regexp.MustCompile(`^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?$`)
-
 // validateClusterHost rejects a cluster host that is anything other than a
-// bare DNS name or IP with an optional :port. The host is concatenated as
-// "https://"+host into the clone URL and the STS audience
-// (entireclient/repocreds), so a value carrying URL metacharacters can redirect
-// the request — and the repo-scoped basic-auth token it carries — somewhere
-// other than the intended cluster. Classic case:
-// `aws-us-east-2.entire.io@evil.com`, which Go's URL parser reads as
-// host=evil.com with the real cluster demoted to userinfo, leaking the token
-// to evil.com. We parse the host the same way the rest of the code does and
-// require it to round-trip to a bare host with no userinfo, path, query, or
-// fragment, then confirm the hostname is a valid IP or DNS name. This is
-// cheap client-side defense-in-depth and doesn't depend on the server's STS
-// invalid_target canonicalization catching the trick.
+// bare DNS name or IP with an optional :port — see coreapi.ValidateClusterHost
+// for why the shape matters. It lives in coreapi so the git remote helper and
+// the control-plane client share one definition with these commands.
 func validateClusterHost(host string) error {
-	if strings.TrimSpace(host) == "" {
-		return errors.New("cluster host is empty")
-	}
-	u, err := url.Parse("https://" + host)
-	if err != nil {
-		return fmt.Errorf("%q is not a valid host", host)
-	}
-	if u.User != nil || u.Path != "" || u.RawQuery != "" || u.Fragment != "" || u.Host != host {
-		return fmt.Errorf("%q must be a bare host[:port] (no scheme, userinfo, path, query, or fragment)", host)
-	}
-	hostname := u.Hostname()
-	if net.ParseIP(hostname) != nil {
-		return nil
-	}
-	for _, label := range strings.Split(hostname, ".") {
-		if !clusterHostLabelRe.MatchString(label) {
-			return fmt.Errorf("%q is not a valid DNS name or IP", host)
-		}
-	}
-	return nil
+	return coreapi.ValidateClusterHost(host)
 }
 
 // newRepoMirrorCmd is the `entire repo mirror` subtree: manage EntireDB

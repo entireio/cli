@@ -331,22 +331,11 @@ func isActiveMirror(m coreapi.Mirror) bool {
 // matchClusterByHost finds the catalog cluster whose public host equals
 // clusterHost (case-insensitive). The cluster's apiUrl + jurisdiction are the
 // authoritative cell coordinates. Used by the ULID path (GetRepo returns a
-// host, not a slug).
+// host, not a slug), and by the cluster-host gate on the credential paths
+// (coreapi.VerifyClusterRegistered), which is why the matcher itself lives in
+// coreapi.
 func matchClusterByHost(clusters []coreapi.Cluster, clusterHost string) (coreapi.Cluster, bool) {
-	want := strings.ToLower(strings.TrimSpace(clusterHost))
-	if want == "" {
-		return coreapi.Cluster{}, false
-	}
-	for _, cl := range clusters {
-		host, err := hostFromPublicURL(cl.PublicUrl)
-		if err != nil {
-			continue
-		}
-		if strings.EqualFold(strings.TrimSpace(host), want) {
-			return cl, true
-		}
-	}
-	return coreapi.Cluster{}, false
+	return coreapi.MatchClusterByHost(clusters, clusterHost)
 }
 
 // matchClusterBySlug finds the catalog cluster whose Slug equals clusterSlug

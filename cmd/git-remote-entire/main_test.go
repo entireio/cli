@@ -4,16 +4,18 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
 	"strings"
 	"testing"
 
 	"github.com/entireio/cli/cmd/entire/cli/auth"
+	"github.com/entireio/cli/internal/coreapi"
+	"github.com/entireio/cli/internal/entireclient/contexts"
 	"github.com/entireio/cli/internal/entireclient/httputil"
 )
 
@@ -265,41 +267,10 @@ func TestMissingClusterHostMessage(t *testing.T) {
 	}
 }
 
-func TestCoreTrusted(t *testing.T) {
-	t.Parallel()
-	trusted := []string{"https://core.us.entire.io", "https://core.eu.entire.io/"}
-	tests := []struct {
-		name    string
-		coreURL string
-		want    bool
-	}{
-		{"exact match", "https://core.us.entire.io", true},
-		{"trailing slash on candidate", "https://core.us.entire.io/", true},
-		{"trailing slash on trusted entry", "https://core.eu.entire.io", true},
-		{"not in set", "https://attacker.example.com", false},
-		{"empty against set", "", false},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			if got := coreTrusted(tc.coreURL, trusted); got != tc.want {
-				t.Fatalf("coreTrusted(%q) = %v, want %v", tc.coreURL, got, tc.want)
-			}
-		})
-	}
-}
-
-func TestCoreTrusted_EmptyTrustedSet(t *testing.T) {
-	t.Parallel()
-	if coreTrusted("https://core.us.entire.io", nil) {
-		t.Fatal("coreTrusted should be false against an empty trusted set")
-	}
-}
-
 // makeTestJWT builds a three-segment JWT (alg:HS256 so ParseClaims accepts it)
 // carrying the given aud. The signature segment is filler — the env-token path
-// reads the aud unverified and gates it on cluster-advertised cores, never on
-// the signature.
+// reads the aud unverified and gates it on that core's cluster registry, never
+// on the signature.
 func makeTestJWT(t *testing.T, aud string) string {
 	t.Helper()
 	enc := base64.RawURLEncoding
@@ -308,98 +279,222 @@ func makeTestJWT(t *testing.T, aud string) string {
 	return header + "." + payload + "." + enc.EncodeToString([]byte("sig"))
 }
 
-// wellKnownServer serves /.well-known/entire-cluster.json advertising the
-// given cores, jurisdiction audience, and jurisdiction core over TLS,
-// returning the server and the host:port to use as clusterHost. An empty
-// audience models a cluster predating jurisdiction-token git auth.
-func wellKnownServer(t *testing.T, cores []string, jurisdictionAudience, jurisdictionCoreURL string) (*httptest.Server, string) {
+// fakeRegistry stands in for the core's GET /api/v1/clusters. It records the
+// core it was built for so tests can assert which core the credential decision
+// consulted — the whole point of the change is that it is the acting identity's
+// core, never the target host itself.
+type fakeRegistry struct {
+	hosts   []string
+	err     error
+	coreURL string
+	calls   int
+}
+
+func (f *fakeRegistry) ListClusters(context.Context) (*coreapi.ListClustersOutputBody, error) {
+	f.calls++
+	if f.err != nil {
+		return nil, f.err
+	}
+	clusters := make([]coreapi.Cluster, 0, len(f.hosts))
+	for _, h := range f.hosts {
+		clusters = append(clusters, coreapi.Cluster{
+			PublicUrl:    "https://" + h,
+			ApiUrl:       coreapi.NewOptString("https://api." + h),
+			Jurisdiction: "us",
+			Slug:         h,
+		})
+	}
+	return &coreapi.ListClustersOutputBody{Clusters: clusters}, nil
+}
+
+// registryFactory returns a clusterRegistryFactory serving reg, capturing the
+// core URL it is asked to dial.
+func registryFactory(reg *fakeRegistry) clusterRegistryFactory {
+	return func(coreURL string, _ credentialProvider, _ bool) (coreapi.ClusterLister, error) {
+		reg.coreURL = coreURL
+		return reg, nil
+	}
+}
+
+func TestResolveEnvTokenCreds_RegisteredClusterSucceeds(t *testing.T) {
+	t.Parallel()
+	const core = "https://core.us.entire.io"
+	const clusterHost = "aws-us-east-2.entire.io"
+	envToken := makeTestJWT(t, core)
+	reg := &fakeRegistry{hosts: []string{"other.entire.io", clusterHost}}
+
+	creds, _, err := resolveEnvTokenCreds(t.Context(), envToken, clusterHost, false, t.TempDir(), registryFactory(reg))
+	if err != nil {
+		t.Fatalf("expected a registered cluster to resolve, got: %v", err)
+	}
+	if reg.coreURL != core {
+		t.Errorf("registry dialed %q, want the env token's aud core %q", reg.coreURL, core)
+	}
+	got, err := creds(t.Context())
+	if err != nil {
+		t.Fatalf("provider: %v", err)
+	}
+	if got != envToken {
+		t.Errorf("creds = %q, want ENTIRE_TOKEN verbatim", got)
+	}
+}
+
+// A second git operation against an already-confirmed cluster must not pay
+// another control-plane round trip: every clone/fetch/push resolves credentials,
+// and the path this replaced served a warm on-disk cache.
+func TestResolveEnvTokenCreds_WarmCacheSkipsTheRegistry(t *testing.T) {
+	t.Parallel()
+	const clusterHost = "aws-us-east-2.entire.io"
+	envToken := makeTestJWT(t, "https://core.us.entire.io")
+	reg := &fakeRegistry{hosts: []string{clusterHost}}
+	cacheDir := t.TempDir()
+
+	for i := range 3 {
+		if _, _, err := resolveEnvTokenCreds(t.Context(), envToken, clusterHost, false, cacheDir, registryFactory(reg)); err != nil {
+			t.Fatalf("op %d: %v", i, err)
+		}
+	}
+	if reg.calls != 1 {
+		t.Fatalf("registry consulted %d times across 3 git ops, want 1", reg.calls)
+	}
+}
+
+// A cluster host the token's core does not front must fail closed, with no
+// credential built and no second opinion sought from the host itself.
+func TestResolveEnvTokenCreds_UnregisteredClusterFails(t *testing.T) {
+	t.Parallel()
+	const core = "https://core.us.entire.io"
+	envToken := makeTestJWT(t, core)
+	reg := &fakeRegistry{hosts: []string{"aws-us-east-2.entire.io"}}
+
+	creds, onUnauthorized, err := resolveEnvTokenCreds(t.Context(), envToken, "evil.example.com", false, t.TempDir(), registryFactory(reg))
+	if err == nil {
+		t.Fatal("an unregistered cluster host must fail")
+	}
+	if creds != nil || onUnauthorized != nil {
+		t.Fatal("no credential may be built for an unregistered cluster host")
+	}
+	if !errors.Is(err, coreapi.ErrClusterNotRegistered) {
+		t.Errorf("err = %v, want it to wrap ErrClusterNotRegistered", err)
+	}
+	for _, want := range []string{"evil.example.com", core, "entire auth use"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("err = %q, missing %q", err.Error(), want)
+		}
+	}
+}
+
+// A registry we cannot consult is a failure, never a fallback to the target
+// host's own /.well-known claims.
+func TestResolveEnvTokenCreds_RegistryUnavailableFails(t *testing.T) {
+	t.Parallel()
+	envToken := makeTestJWT(t, "https://core.us.entire.io")
+	reg := &fakeRegistry{err: errors.New("connection refused")}
+
+	creds, _, err := resolveEnvTokenCreds(t.Context(), envToken, "aws-us-east-2.entire.io", false, t.TempDir(), registryFactory(reg))
+	if err == nil {
+		t.Fatal("an unreachable cluster registry must fail the clone")
+	}
+	if creds != nil {
+		t.Fatal("no credential may be built when the registry is unavailable")
+	}
+	if !strings.Contains(err.Error(), "connection refused") {
+		t.Errorf("err = %q, want the underlying registry failure", err.Error())
+	}
+}
+
+// seedActiveContext writes a contexts.json with one active login on coreURL and
+// points $ENTIRE_CONFIG_DIR at it. The keychain slot is populated because
+// NewRefreshingLoginCredential requires one to build the token manager; no
+// token is ever fetched — the registry fake never calls the provider.
+func seedActiveContext(t *testing.T, coreURL string) {
 	t.Helper()
-	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/.well-known/entire-cluster.json" {
-			http.NotFound(w, r)
-			return
-		}
-		body := map[string]any{"core_urls": cores}
-		if jurisdictionAudience != "" {
-			body["jurisdiction_audience"] = jurisdictionAudience
-		}
-		if jurisdictionCoreURL != "" {
-			body["jurisdiction_core_url"] = jurisdictionCoreURL
-		}
-		_ = json.NewEncoder(w).Encode(body) //nolint:errcheck // best-effort in test stub
-	}))
-	t.Cleanup(srv.Close)
-	u, err := url.Parse(srv.URL)
-	if err != nil {
-		t.Fatalf("parse server URL: %v", err)
+	configDir := t.TempDir()
+	t.Setenv("ENTIRE_CONFIG_DIR", configDir)
+	c := &contexts.Context{Name: "alice@us", CoreURL: coreURL, Handle: "alice", KeychainService: "entire-cli-test"}
+	if err := contexts.Save(configDir, &contexts.File{CurrentContext: c.Name, Contexts: []*contexts.Context{c}}); err != nil {
+		t.Fatalf("write contexts.json: %v", err)
 	}
-	return srv, u.Host
 }
 
-func TestResolveEnvTokenCreds_TrustedAudSucceeds(t *testing.T) {
-	t.Parallel()
+// The context path resolves the cluster against the ACTIVE context's core —
+// not the target host's self-reported discovery document. Sets process-global
+// env, so not parallel.
+func TestResolveCreds_ContextPathVerifiesAgainstActiveCore(t *testing.T) {
 	const core = "https://core.us.entire.io"
-	const audience = "https://us.entire.io"
-	srv, clusterHost := wellKnownServer(t, []string{core}, audience, core)
-	envToken := makeTestJWT(t, core)
+	const clusterHost = "aws-us-east-2.entire.io"
+	seedActiveContext(t, core)
+	t.Setenv(auth.EnvTokenVar, "")
+	os.Unsetenv(auth.EnvTokenVar)
 
-	creds, _, err := resolveEnvTokenCreds(
-		t.Context(), envToken, clusterHost, t.TempDir(), srv.Client(),
+	reg := &fakeRegistry{hosts: []string{clusterHost}}
+	creds, onUnauthorized, err := resolveCreds(
+		t.Context(),
+		&url.URL{Scheme: "entire", Host: clusterHost},
+		false,
+		&http.Client{},
+		t.TempDir(),
+		registryFactory(reg),
 	)
 	if err != nil {
-		t.Fatalf("expected trusted aud to succeed, got: %v", err)
+		t.Fatalf("resolveCreds: %v", err)
 	}
-	got, err := creds(t.Context())
-	if err != nil {
-		t.Fatalf("provider: %v", err)
+	if creds == nil || onUnauthorized == nil {
+		t.Fatal("expected a credential provider for a registered cluster")
 	}
-	if got != envToken {
-		t.Errorf("creds = %q, want ENTIRE_TOKEN verbatim", got)
+	if reg.coreURL != core {
+		t.Errorf("registry dialed %q, want the active context's core %q", reg.coreURL, core)
+	}
+	if reg.calls != 1 {
+		t.Errorf("registry consulted %d times, want exactly 1", reg.calls)
 	}
 }
 
-func TestResolveEnvTokenCreds_CrossJurisdictionTokenUsesBearer(t *testing.T) {
-	t.Parallel()
-	// Clusters advertise every jurisdiction's cores, so a token minted at a
-	// sibling core passes the trust gate and is used directly as the bearer.
-	const tokenCore = "https://core.eu.entire.io"
-	const jurisdictionCore = "https://core.us.entire.io"
-	srv, clusterHost := wellKnownServer(t, []string{tokenCore, jurisdictionCore}, "https://us.entire.io", jurisdictionCore)
-	envToken := makeTestJWT(t, tokenCore)
-
-	creds, _, err := resolveEnvTokenCreds(
-		t.Context(), envToken, clusterHost, t.TempDir(), srv.Client(),
-	)
-	if err != nil {
-		t.Fatalf("cross-jurisdiction token must resolve, got: %v", err)
-	}
-	got, err := creds(t.Context())
-	if err != nil {
-		t.Fatalf("provider: %v", err)
-	}
-	if got != envToken {
-		t.Errorf("creds = %q, want ENTIRE_TOKEN verbatim", got)
-	}
-}
-
-func TestResolveEnvTokenCreds_DoesNotRequireJurisdictionAudience(t *testing.T) {
-	t.Parallel()
+func TestResolveCreds_ContextPathUnregisteredClusterFails(t *testing.T) {
 	const core = "https://core.us.entire.io"
-	srv, clusterHost := wellKnownServer(t, []string{core}, "", "")
-	envToken := makeTestJWT(t, core)
+	seedActiveContext(t, core)
+	t.Setenv(auth.EnvTokenVar, "")
+	os.Unsetenv(auth.EnvTokenVar)
 
-	creds, _, err := resolveEnvTokenCreds(
-		t.Context(), envToken, clusterHost, t.TempDir(), srv.Client(),
+	reg := &fakeRegistry{hosts: []string{"aws-us-east-2.entire.io"}}
+	creds, _, err := resolveCreds(
+		t.Context(),
+		&url.URL{Scheme: "entire", Host: "evil.example.com"},
+		false,
+		&http.Client{},
+		t.TempDir(),
+		registryFactory(reg),
 	)
-	if err != nil {
-		t.Fatalf("resolve direct bearer without jurisdiction audience: %v", err)
+	if err == nil {
+		t.Fatal("an unregistered cluster host must fail")
 	}
-	got, err := creds(t.Context())
-	if err != nil {
-		t.Fatalf("provider: %v", err)
+	if creds != nil {
+		t.Fatal("no credential may be built for an unregistered cluster host")
 	}
-	if got != envToken {
-		t.Errorf("creds = %q, want ENTIRE_TOKEN verbatim", got)
+	if !errors.Is(err, coreapi.ErrClusterNotRegistered) {
+		t.Errorf("err = %v, want it to wrap ErrClusterNotRegistered", err)
+	}
+}
+
+func TestResolveCreds_ContextPathRegistryUnavailableFails(t *testing.T) {
+	seedActiveContext(t, "https://core.us.entire.io")
+	t.Setenv(auth.EnvTokenVar, "")
+	os.Unsetenv(auth.EnvTokenVar)
+
+	reg := &fakeRegistry{err: errors.New("connection refused")}
+	creds, _, err := resolveCreds(
+		t.Context(),
+		&url.URL{Scheme: "entire", Host: "aws-us-east-2.entire.io"},
+		false,
+		&http.Client{},
+		t.TempDir(),
+		registryFactory(reg),
+	)
+	if err == nil {
+		t.Fatal("an unreachable cluster registry must fail the clone")
+	}
+	if creds != nil {
+		t.Fatal("no credential may be built when the registry is unavailable")
 	}
 }
 
@@ -411,7 +506,7 @@ func TestResolveCreds_BlankEnvTokenFailsClosed(t *testing.T) {
 	dummyURL := &url.URL{Scheme: "entire", Host: "cluster.example.com"}
 	for _, blank := range []string{"", " ", "\t", "\n", " \t\n "} {
 		t.Setenv(auth.EnvTokenVar, blank)
-		creds, _, err := resolveCreds(t.Context(), dummyURL, false, nil)
+		creds, _, err := resolveCreds(t.Context(), dummyURL, false, nil, t.TempDir(), registryFactory(&fakeRegistry{}))
 		if err == nil {
 			t.Fatalf("blank ENTIRE_TOKEN %q should fail closed", blank)
 		}
@@ -495,76 +590,37 @@ func TestRefreshingProvider_ForceRefreshesAfterUnauthorized(t *testing.T) {
 	}
 }
 
-func TestResolveEnvTokenCreds_UntrustedAudAborts(t *testing.T) {
+// An aud pointing at an attacker-chosen core buys nothing: that core's
+// registry is then the one consulted, and it does not list the cluster the
+// user typed, so the clone fails before any credential is attached.
+func TestResolveEnvTokenCreds_AttackerAudAborts(t *testing.T) {
 	t.Parallel()
-	// The cluster advertises only core.us; the token's aud points elsewhere.
-	// The gate must abort before building creds (i.e. before any exchange).
-	srv, clusterHost := wellKnownServer(t, []string{"https://core.us.entire.io"}, "https://us.entire.io", "https://core.us.entire.io")
+	const clusterHost = "aws-us-east-2.entire.io"
+	reg := &fakeRegistry{hosts: []string{"attacker-owned.example.com"}}
 
 	creds, _, err := resolveEnvTokenCreds(
-		t.Context(), makeTestJWT(t, "https://attacker.example.com"), clusterHost, t.TempDir(), srv.Client(),
+		t.Context(), makeTestJWT(t, "https://attacker.example.com"), clusterHost, false, t.TempDir(), registryFactory(reg),
 	)
 	if err == nil {
-		t.Fatal("expected untrusted aud to be rejected")
+		t.Fatal("expected an aud whose core does not front the cluster to be rejected")
 	}
 	if creds != nil {
-		t.Fatal("expected nil creds when aud is untrusted")
+		t.Fatal("expected nil creds when the token's core does not front the cluster")
 	}
-	if !strings.Contains(err.Error(), "not a trusted login server") {
-		t.Fatalf("expected trust-gate error, got: %v", err)
-	}
-}
-
-func TestResolveEnvTokenCreds_EmptyAdvertisedCoresAborts(t *testing.T) {
-	t.Parallel()
-	// Discovery succeeds (HTTP 200) but advertises no cores. With nothing to
-	// trust, the gate must fail closed rather than trusting the token's aud.
-	srv, clusterHost := wellKnownServer(t, []string{}, "https://us.entire.io", "https://core.us.entire.io")
-
-	creds, _, err := resolveEnvTokenCreds(
-		t.Context(), makeTestJWT(t, "https://core.us.entire.io"), clusterHost, t.TempDir(), srv.Client(),
-	)
-	if err == nil {
-		t.Fatal("expected empty advertised core set to be rejected")
-	}
-	if creds != nil {
-		t.Fatal("expected nil creds when no cores are advertised")
-	}
-}
-
-func TestResolveEnvTokenCreds_DiscoveryFailureAborts(t *testing.T) {
-	t.Parallel()
-	// Cluster advertises no cores (HTTP 503) → discovery fails → we must abort
-	// rather than fall back to trusting the token's own aud.
-	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusServiceUnavailable)
-	}))
-	t.Cleanup(srv.Close)
-	u, err := url.Parse(srv.URL)
-	if err != nil {
-		t.Fatalf("parse server URL: %v", err)
-	}
-
-	creds, _, err := resolveEnvTokenCreds(
-		t.Context(), makeTestJWT(t, "https://core.us.entire.io"), u.Host, t.TempDir(), srv.Client(),
-	)
-	if err == nil {
-		t.Fatal("expected discovery failure to abort")
-	}
-	if creds != nil {
-		t.Fatal("expected nil creds on discovery failure")
+	if !errors.Is(err, coreapi.ErrClusterNotRegistered) {
+		t.Fatalf("err = %v, want it to wrap ErrClusterNotRegistered", err)
 	}
 }
 
 func TestResolveEnvTokenCreds_MalformedTokenAborts(t *testing.T) {
 	t.Parallel()
-	// A malformed aud must fail at the parse/validate step, before any network
-	// discovery happens — so a nil httpClient is safe here.
+	// A malformed aud must fail at the parse/validate step, before the registry
+	// is consulted at all — so a nil factory is safe here.
 	creds, _, err := resolveEnvTokenCreds(
-		t.Context(), makeTestJWT(t, "http://core.us.entire.io"), "cluster.example.com", t.TempDir(), nil,
+		t.Context(), makeTestJWT(t, "http://core.us.entire.io"), "cluster.example.com", false, t.TempDir(), nil,
 	)
 	if err == nil {
-		t.Fatal("expected http aud to be rejected before discovery")
+		t.Fatal("expected http aud to be rejected before the registry lookup")
 	}
 	if creds != nil {
 		t.Fatal("expected nil creds for invalid aud")

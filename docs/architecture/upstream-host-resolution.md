@@ -19,7 +19,7 @@ accept a core's JWTs.
 | Role | Service (prod / staging) | Hit by | Trusted-core discovery |
 |---|---|---|---|
 | **Core** — IdP **and** control-plane API, co-located | `entire-core`, per region (`us.auth.entire.io`, `eu.auth.entire.io`), fronted by the apex `auth.entire.io` | `org` / `repo` / `project` / `grant`, `auth *`, `login` | none needed — the host *is* the core |
-| **Resource: git cluster** | `entire-server` / `entiredb` | `git-remote-entire` (clone/push) | `/.well-known/entire-cluster.json` → `core_urls` |
+| **Resource: git cluster** | `entire-server` / `entiredb` | `git-remote-entire` (clone/push), cluster-addressed `repo mirror …` | the acting identity's core: `GET /api/v1/clusters` → `publicUrl` |
 | **Resource: web/data API** | `entire.io` (`partial.to`) | `activity` / `search` / `trail` / `dispatch` | `/.well-known/entire-api.json` → `trusted_issuers` (audience = the host origin) |
 
 `contexts.json` (`$ENTIRE_CONFIG_DIR/contexts.json`, shared with entiredb's
@@ -61,13 +61,50 @@ that persisted `CoreURL`. The apex is only ever the entry point.
 
 ## Resolution per call type
 
-### Git cluster (done — `internal/entireclient/clusterdiscovery`)
+### Git cluster (done — the core's cluster registry)
 
-`ResolveContextForCluster(host)` fetches+caches the cluster's
-`/.well-known/entire-cluster.json`, reads `core_urls`, then requires the
-**active context** to be issued by one of them. There is no implicit
-selection — see [Account selection](#account-selection) below. The token is
-then exchanged for the cluster.
+The acting identity is the **active context** (or `ENTIRE_TOKEN`), and its core
+is the core we dial. The cluster host the user typed
+(`entire://<host>/…`, or the positional arg of a cluster-addressed `repo
+mirror …`) must name a cluster **that core fronts**, per the core's own
+registry: `GET /api/v1/clusters`, matched on `publicUrl`
+(`coreapi.VerifyClusterRegistered`). If it doesn't match, or the registry can't
+be consulted, the command fails — naming the core it asked and pointing at
+`entire auth use`. There is no fallback tier.
+
+A confirmed pairing is cached on disk — `cluster_registry.json` in the cache
+dir, keyed on (core origin, cluster host), 24h TTL, the same shape and lifetime
+the old host→cores cache had — so a warm clone/fetch/push costs no round trip
+and a known cluster keeps working through a brief core outage. **Only successes
+are cached.** A host the core does not list, and a registry that could not be
+consulted, are re-checked every time: the refusal is the security-relevant
+answer, and a newly onboarded cluster resolves on the very next command.
+
+This is the same authoritative source cell routing already resolves against
+(`cell_target.go`'s `resolveRepoCellTarget` → `matchClusterByHost`), so cluster
+identity comes from one place.
+
+It deliberately replaced a per-host `/.well-known/entire-cluster.json` fetch
+whose `core_urls` decided which login was acceptable. That document is
+**self-reported**: the host under scrutiny nominated the login servers a client
+should trust it with. The registry is the record of which clusters exist and
+what public host each has.
+
+Two consequences worth knowing:
+
+- Acting on a cluster fronted by a federation *other* than your active login now
+  fails instead of silently switching cores. Switch with `entire auth use
+  <context>`.
+- `ENTIRE_TOKEN` still derives its core from the token's own (unverified) `aud`,
+  but that buys nothing: the core named by `aud` must **also** list the cluster
+  host the user typed, so a token pointing at an attacker core reaches a registry
+  that doesn't list the real cluster and the clone fails before any credential is
+  attached.
+
+Key files: `internal/coreapi/clusters.go` (the gate and the host matcher),
+`internal/entireclient/discovery/cluster_registry.go` (the positive-answer cache),
+`cmd/git-remote-entire/main.go` (`resolveCreds` / `resolveEnvTokenCreds`),
+`internal/coreapi/client.go` (`NewForCluster`).
 
 ### Control plane (done — this slice)
 

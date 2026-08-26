@@ -24,8 +24,16 @@ import (
 // requires, so a home-region login JWT can operate on a resource whose
 // home jurisdiction is another region. Inert for same-jurisdiction calls.
 func newCrossJurisHTTPClient() *http.Client {
+	return newCrossJurisHTTPClientSkipTLS(false)
+}
+
+// newCrossJurisHTTPClientSkipTLS is newCrossJurisHTTPClient with certificate
+// verification optionally disabled — the ENTIRE_TLS_SKIP_VERIFY local-dev
+// escape hatch, plumbed through for git-remote-entire only. Every other caller
+// passes false via newCrossJurisHTTPClient.
+func newCrossJurisHTTPClientSkipTLS(skipTLS bool) *http.Client {
 	return &http.Client{
-		Transport: newCrossJurisRoundTripper(httpclient.NewTransport(false)),
+		Transport: newCrossJurisRoundTripper(httpclient.NewTransport(skipTLS)),
 	}
 }
 

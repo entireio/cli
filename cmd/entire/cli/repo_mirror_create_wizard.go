@@ -5,9 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net/url"
 	"sort"
-	"strings"
 	"sync"
 	"time"
 
@@ -81,40 +79,11 @@ func clustersToRegions(clusters []coreapi.Cluster) []regionChoice {
 }
 
 // hostFromPublicURL extracts the bare cluster host from a cluster's public_url
-// (with or without a scheme) and runs it through validateClusterHost, the same
-// anti-token-leak guard the positional <cluster-host> arg uses. Kept separate
-// so the ListClusters → regionChoice mapping is unit-testable without a live
-// catalog.
+// and runs it through the anti-token-leak guard the positional <cluster-host>
+// arg uses. Shared with the git remote helper's registry check, so the two can
+// never disagree about which catalog rows name a usable host.
 func hostFromPublicURL(raw string) (string, error) {
-	s := strings.TrimSpace(raw)
-	if s == "" {
-		return "", errors.New("empty public_url")
-	}
-	if !strings.Contains(s, "://") {
-		s = "https://" + s
-	}
-	u, err := url.Parse(s)
-	if err != nil {
-		return "", fmt.Errorf("parse public_url %q: %w", raw, err)
-	}
-	if u.Host == "" {
-		return "", fmt.Errorf("public_url %q has no host", raw)
-	}
-	// Reject anything beyond scheme://host[:port]. url.Parse demotes the
-	// `host@evil.com` userinfo trick into u.User (leaving u.Host=evil.com) and
-	// stashes a trailing path in u.Path, neither of which validateClusterHost
-	// would otherwise see. A bare "/" path is tolerated: publicUrl is a trusted
-	// catalog field, and a trailing slash (https://host/) is benign — rejecting
-	// it would silently drop the cluster and could leave the wizard with no
-	// regions. Anything richer (a real path, query, fragment, userinfo) is still
-	// refused, since the host flows into clone URLs and the STS audience.
-	if u.User != nil || (u.Path != "" && u.Path != "/") || u.RawQuery != "" || u.Fragment != "" {
-		return "", fmt.Errorf("public_url %q must be scheme://host[:port] only", raw)
-	}
-	if err := validateClusterHost(u.Host); err != nil {
-		return "", err
-	}
-	return u.Host, nil
+	return coreapi.HostFromPublicURL(raw)
 }
 
 // selectableAvailableRepos narrows the ListAvailableMirrors result to repos the

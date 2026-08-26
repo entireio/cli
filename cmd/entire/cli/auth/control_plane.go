@@ -2,26 +2,12 @@ package auth
 
 import (
 	"context"
-	"errors"
 	"fmt"
-	"net/http"
 	"strings"
-	"time"
 
-	"github.com/entireio/cli/internal/entireclient/clusterdiscovery"
 	"github.com/entireio/cli/internal/entireclient/contexts"
 	"github.com/entireio/cli/internal/entireclient/userdirs"
 )
-
-// controlPlaneClusterDiscoveryTimeout bounds the one
-// /.well-known/entire-cluster.json GET a cluster-addressed control-plane
-// command makes to learn which core fronts the cluster. Short so an absent or
-// slow endpoint fails the command promptly.
-const controlPlaneClusterDiscoveryTimeout = 8 * time.Second
-
-// resolveContextForCluster is the discovery seam, swapped in tests so they
-// don't reach the network. Mirrors clusterdiscovery.ResolveContextForCluster.
-var resolveContextForCluster resolveContextFunc = clusterdiscovery.ResolveContextForCluster
 
 // ControlPlaneTarget is the resolved login server a control-plane request
 // (org/repo/project/grant) should dial, plus the bearer source for it.
@@ -56,36 +42,6 @@ func ResolveControlPlaneTarget() (ControlPlaneTarget, error) {
 		}
 	}
 
-	return targetForContext(c)
-}
-
-// ResolveControlPlaneTargetForCluster chooses which core a *resource-provider*
-// control-plane command should dial — one whose subject is a mirror on a
-// specific cluster (mirror create/remove, mirror collaborators list)
-// rather than the caller's own account.
-//
-// Unlike ResolveControlPlaneTarget, the core is NOT taken from the active
-// context: a cluster's mirror lives in the federation that fronts that cluster,
-// which may differ from the active login (e.g. a partial.to context acting on a
-// prod entire.io cluster). We discover the cluster's trusted cores from its
-// /.well-known/entire-cluster.json and require the ACTIVE context to be issued
-// by one of them — exactly as git and data-API resolution do (see
-// ResolveDataAPIToken). The bearer is that context's refreshing login provider
-// (silent JWT re-mint from its stored refresh token).
-//
-// When the active context isn't trusted by the cluster the discovery resolver
-// says so and names the saved logins that are (or, when none is, the cluster's
-// cores), so the user switches with `entire auth use` or logs in to the right
-// federation rather than seeing an opaque "unknown cluster_host" 400.
-func ResolveControlPlaneTargetForCluster(ctx context.Context, clusterHost string) (ControlPlaneTarget, error) {
-	if clusterHost == "" {
-		return ControlPlaneTarget{}, errors.New("cluster-addressed control-plane command requires a target cluster host")
-	}
-	httpClient := &http.Client{Timeout: controlPlaneClusterDiscoveryTimeout}
-	c, err := resolveContextForCluster(ctx, userdirs.Config(), userdirs.Cache(), clusterHost, httpClient, nil)
-	if err != nil {
-		return ControlPlaneTarget{}, err
-	}
 	return targetForContext(c)
 }
 

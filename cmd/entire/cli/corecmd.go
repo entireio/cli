@@ -565,8 +565,8 @@ var activeCoreClient = func(context.Context) (*coreapi.Client, error) { return c
 
 // clusterCoreClient builds the control-plane client for cluster-addressed
 // commands (see runCoreForCluster). Same test seam as activeCoreClient —
-// production wiring is coreapi.NewForCluster, which does live /.well-known
-// discovery that command-level tests must not reach.
+// production wiring is coreapi.NewForCluster, whose cluster-registry lookup
+// command-level tests must not reach.
 var clusterCoreClient func(ctx context.Context, clusterHost string) (*coreapi.Client, error) = coreapi.NewForCluster
 
 // runCore is the shared base for every active-context control-plane command:
@@ -581,12 +581,11 @@ func runCore(cmd *cobra.Command, fn func(ctx context.Context, c *coreapi.Client)
 }
 
 // runCoreForCluster is runCore for resource-provider commands addressed at a
-// specific cluster (mirror create/remove, mirror collaborators list):
-// it dials the core that fronts clusterHost — discovered from the cluster's
-// /.well-known/entire-cluster.json, authenticating with the matching local
-// context — instead of the active context. So the command works on a cluster in
-// a federation other than the active login, instead of failing with "unknown
-// cluster_host". See coreapi.NewForCluster.
+// specific cluster (mirror create/remove, mirror collaborators list): it dials
+// the active context's core like runCore, but only after that core's cluster
+// registry confirms it fronts clusterHost — so a typo'd or foreign host fails
+// with an actionable error naming the core consulted, rather than an opaque
+// "unknown cluster_host" 400. See coreapi.NewForCluster.
 func runCoreForCluster(cmd *cobra.Command, clusterHost string, fn func(ctx context.Context, c *coreapi.Client) error) error {
 	return runCoreClient(cmd, func(ctx context.Context) (*coreapi.Client, error) {
 		return clusterCoreClient(ctx, clusterHost)
