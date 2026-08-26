@@ -668,10 +668,9 @@ func retirePendingSource(
 		// the source was correctly retired.
 		committed, headErr = committedCheckpointSet(retireCtx, targetWorktree)
 		if headErr != nil {
-			if !finishCleanupDespiteRecheckFailure {
-				return fmt.Errorf("revalidate committed checkpoint before release: %w", headErr)
-			}
-		} else if _, ok := committed[marker.ExpectedCheckpointID]; !ok && !finishCleanupDespiteRecheckFailure {
+			return fmt.Errorf("revalidate committed checkpoint before release: %w", headErr)
+		}
+		if _, ok := committed[marker.ExpectedCheckpointID]; !ok && !finishCleanupDespiteRecheckFailure {
 			return errors.New("pending adoption checkpoint is not in any recent commit")
 		}
 		target.PendingSourceRetire = nil
