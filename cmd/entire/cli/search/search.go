@@ -364,9 +364,10 @@ func (r *Result) ResultAuthor() string {
 }
 
 // ResultID returns the primary ID for any result type. Types without a typed
-// struct (repo, pr) fall back to the "id" field of the raw payload, so a
-// cross-cell merge can still identify the same logical result returned by two
-// cells (e.g. a repo mirrored in both).
+// struct (repo, pr) fall back to the "id" field of the raw payload; for a repo
+// row that is the placement ULID query-serve keys the namespace on (ENT-1912,
+// entire-search#198), the same identifier the repo index and the `repo` filter
+// use.
 func (r *Result) ResultID() string {
 	if id := resultField(r,
 		func(c *CheckpointResult) string { return c.ID },
@@ -448,13 +449,6 @@ func (r *Result) ResultTitle() string {
 		return v
 	}
 	return r.rawString("title", "name", "fullName")
-}
-
-// ResultDescription returns the repo description for raw-payload rows
-// (searcher.RepoResult). Typed rows return "" — rawFields is never populated
-// for them.
-func (r *Result) ResultDescription() string {
-	return r.rawString("description")
 }
 
 // ResultCheckpointCount returns the indexed checkpoint count for raw-payload

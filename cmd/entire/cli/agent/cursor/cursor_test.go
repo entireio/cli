@@ -12,8 +12,12 @@ import (
 )
 
 // sampleTranscriptLines returns JSONL lines matching real Cursor transcript format.
-// Based on an actual Cursor session: uses "role" (not "type"), wraps user text
-// in <user_query> tags, and contains no tool_use blocks.
+// Based on an actual Cursor session: uses "role" (not "type") and wraps user text
+// in <user_query> tags.
+//
+// This particular sample is a text-only exchange, which is a property of the sample
+// and not of the format -- Cursor does record tool_use blocks. For those, use
+// testdata/real_session_tool_use.jsonl (see transcript_test.go).
 func sampleTranscriptLines() []string {
 	return []string{
 		`{"role":"user","message":{"content":[{"type":"text","text":"<timestamp>Tuesday, Aug 18, 2026, 2:37 PM GMT+2</timestamp>\n<user_query>\n<timestamp>2026-01-01</timestamp> is my format, hello\n</user_query>"}]}}`,
@@ -303,10 +307,11 @@ func TestReadSession_ModifiedFilesEmpty(t *testing.T) {
 		t.Fatalf("ReadSession() error = %v", err)
 	}
 
-	// Cursor transcripts don't contain tool_use blocks, so ModifiedFiles
-	// should not be populated (file detection relies on git status instead).
+	// This sample makes no tool calls, so there is nothing to attribute. Cursor
+	// transcripts in general do carry tool_use blocks -- see
+	// TestReadSession_PopulatesModifiedFilesFromRealSession for the populated case.
 	if len(session.ModifiedFiles) != 0 {
-		t.Errorf("ModifiedFiles = %v, want empty (Cursor relies on git status)", session.ModifiedFiles)
+		t.Errorf("ModifiedFiles = %v, want empty (sample makes no tool calls)", session.ModifiedFiles)
 	}
 }
 

@@ -1675,7 +1675,7 @@ func (s *ManualCommitStrategy) CondenseSessionByID(ctx context.Context, sessionI
 	var shadowBranchName string
 	var clearAfter bool
 	var newSkillEvents []agent.SkillEvent
-	stateSaved, mutErr := MutateSessionStateSaved(ctx, sessionID, func(state *SessionState) error {
+	mutErr := MutateSessionStateOnSaved(ctx, sessionID, func(state *SessionState) error {
 		if state.PendingCondensationID() != checkpointID {
 			return ErrMutationSkip
 		}
@@ -1726,14 +1726,7 @@ func (s *ManualCommitStrategy) CondenseSessionByID(ctx context.Context, sessionI
 		state.PromptAttributions = nil
 		state.PendingPromptAttribution = nil
 		return nil
-	})
-	if errors.Is(mutErr, ErrStateNotFound) {
-		return fmt.Errorf("session not found: %s", sessionID)
-	}
-	if mutErr != nil {
-		return mutErr
-	}
-	if stateSaved {
+	}, func() {
 		// Skill telemetry only. commitCondensedEmitter.emit is deliberately NOT
 		// called here: its payload is commit-scoped (files_committed counts a
 		// commit's files, and prior_ai_history's git-log probe uses --skip=1 to
@@ -1742,6 +1735,12 @@ func (s *ManualCommitStrategy) CondenseSessionByID(ctx context.Context, sessionI
 		// meaningless and --skip=1 would exclude an unrelated HEAD. See
 		// newCommitCondensedSignal.
 		EmitSkillInvocationTelemetry(ctx, newSkillEvents)
+	})
+	if errors.Is(mutErr, ErrStateNotFound) {
+		return fmt.Errorf("session not found: %s", sessionID)
+	}
+	if mutErr != nil {
+		return mutErr
 	}
 
 	if clearAfter {
@@ -1861,7 +1860,7 @@ func (s *ManualCommitStrategy) CondenseAndMarkFullyCondensed(ctx context.Context
 
 	var didCondense bool
 	var newSkillEvents []agent.SkillEvent
-	stateSaved, mutErr := MutateSessionStateSaved(ctx, sessionID, func(state *SessionState) error {
+	mutErr := MutateSessionStateOnSaved(ctx, sessionID, func(state *SessionState) error {
 		var preflightErr error
 		shadowBranchName, shouldCondense, preflightErr = prepareEagerCondensation(logCtx, repo, state)
 		if preflightErr != nil || !shouldCondense {
@@ -1908,18 +1907,17 @@ func (s *ManualCommitStrategy) CondenseAndMarkFullyCondensed(ctx context.Context
 		)
 		didCondense = true
 		return nil
+	}, func() {
+		// Skill telemetry only — same reason as CondenseSessionByID: this
+		// condenses the work left over after the last commit, so there is no
+		// commit for the commit-condensed signal to describe.
+		EmitSkillInvocationTelemetry(ctx, newSkillEvents)
 	})
 	if errors.Is(mutErr, ErrStateNotFound) {
 		return nil
 	}
 	if mutErr != nil {
 		return fmt.Errorf("failed to save session state: %w", mutErr)
-	}
-	if stateSaved {
-		// Skill telemetry only — same reason as CondenseSessionByID: this
-		// condenses the work left over after the last commit, so there is no
-		// commit for the commit-condensed signal to describe.
-		EmitSkillInvocationTelemetry(ctx, newSkillEvents)
 	}
 
 	if didCondense && shadowBranchName != "" {

@@ -1047,10 +1047,11 @@ type compactSearchHit struct {
 	Date         string   `json:"date,omitempty"`
 	Title        string   `json:"title"`
 	FilesTouched []string `json:"filesTouched,omitempty"`
-	// Description and CheckpointCount only appear on repo rows — without them
-	// a repo hit is just {id, repo, title, score}, too thin for the skill's
-	// "summarize from the compact fields alone" instruction.
-	Description     string  `json:"description,omitempty"`
+	// CheckpointCount only appears on repo rows — without it a repo hit is
+	// just {id, repo, title, score}, too thin for the skill's "summarize from
+	// the compact fields alone" instruction. The repo description is not
+	// carried: its only source was the retired MySQL repos table, so the v1
+	// wire keeps the key but it is always null (ENT-1912, entire-search#198).
 	CheckpointCount int     `json:"checkpointCount,omitempty"`
 	Score           float64 `json:"score"`
 	// Snippet is the matched text (the title is just the commit subject or
@@ -1100,7 +1101,6 @@ func writeSearchCompactJSON(w io.Writer, resp *search.Response, limit, page int)
 			Author:          r.ResultAuthor(),
 			Date:            r.ResultCreatedAt(),
 			Title:           title,
-			Description:     r.ResultDescription(),
 			CheckpointCount: r.ResultCheckpointCount(),
 			Score:           r.Meta.Score,
 			Snippet:         compactSnippet(title, truncateOneLine(r.Meta.Snippet, compactTitleMaxLen)),
