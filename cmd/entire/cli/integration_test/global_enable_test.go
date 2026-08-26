@@ -3,39 +3,52 @@
 package integration
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
+	"github.com/entireio/cli/cmd/entire/cli/execx"
 	"github.com/entireio/cli/cmd/entire/cli/settings/repopolicy"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 	"github.com/entireio/cli/cmd/entire/cli/trailers"
 )
 
-func newGloballyTrackedEnv(t *testing.T, globalEnabled bool) (*TestEnv, []string) {
+// newGloballyTrackedEnv builds a repo with no repo-level Entire setup and a
+// per-test user settings file the SPAWNED binary sees via extraEnv. HOME is
+// isolated too: with global tracking on, every foreground `entire` command
+// reconciles user-level agent hooks, which would otherwise edit the
+// developer's real ~/.claude/settings.json. Returns configDir so tests can
+// read the user settings file directly.
+func newGloballyTrackedEnv(t *testing.T, globalEnabled bool) (env *TestEnv, extraEnv []string, configDir string) {
 	t.Helper()
-	env := NewTestEnv(t)
+	env = NewTestEnv(t)
 	env.InitRepo()
 	env.WriteFile("README.md", "# Global tracking test")
 	env.GitAdd("README.md")
 	env.GitCommit("Initial commit")
 	env.GitCheckoutNewBranch("feature/global")
 
-	configDir := t.TempDir()
+	configDir = t.TempDir()
 	if globalEnabled {
 		if err := os.WriteFile(filepath.Join(configDir, "settings.json"),
 			[]byte(`{"global":{"enabled":true}}`), 0o600); err != nil {
 			t.Fatalf("write user-global settings: %v", err)
 		}
 	}
-	extraEnv := []string{"ENTIRE_CONFIG_DIR=" + configDir}
+	home := t.TempDir()
+	// Later duplicates win in exec.Cmd.Env, so these override the inherited
+	// values. The NewHookRunner-based env.Simulate* helpers do not read
+	// env.ExtraEnv — drive hooks through runClaudeHook / commitGlobalSession.
+	extraEnv = []string{"ENTIRE_CONFIG_DIR=" + configDir, "HOME=" + home, "USERPROFILE=" + home}
 	env.ExtraEnv = append(env.ExtraEnv, extraEnv...)
-	return env, extraEnv
+	return env, extraEnv, configDir
 }
 
 func gitStatusPorcelain(t *testing.T, env *TestEnv) string {
@@ -71,7 +84,7 @@ func assertNoWorktreeEntireDir(t *testing.T, env *TestEnv) {
 
 func TestGlobalEnable_LazyInvisibleSetup(t *testing.T) {
 	t.Parallel()
-	env, extraEnv := newGloballyTrackedEnv(t, true)
+	env, extraEnv, _ := newGloballyTrackedEnv(t, true)
 	ctx := context.Background()
 
 	sessionID := "global-test-session-1"
@@ -180,7 +193,7 @@ func globalRuntimeRoot(t *testing.T, env *TestEnv) string {
 // proves MaybeEnsureGlobalSetup ran — do not simplify it away.
 func TestGlobalEnable_GitHookRouteRepairsPrimaryRef(t *testing.T) {
 	t.Parallel()
-	env, extraEnv := newGloballyTrackedEnv(t, true)
+	env, extraEnv, _ := newGloballyTrackedEnv(t, true)
 
 	runClaudeHook(t, env, extraEnv, "user-prompt-submit", map[string]string{
 		"session_id":      "global-test-session-3",
@@ -218,7 +231,7 @@ func TestGlobalEnable_GitHookRouteRepairsPrimaryRef(t *testing.T) {
 // without any marker bookkeeping.
 func TestGlobalEnable_AgentRouteReinstallsGitHooks(t *testing.T) {
 	t.Parallel()
-	env, extraEnv := newGloballyTrackedEnv(t, true)
+	env, extraEnv, _ := newGloballyTrackedEnv(t, true)
 	ctx := context.Background()
 	prompt := map[string]string{
 		"session_id":      "global-test-session-4",
@@ -243,7 +256,7 @@ func TestGlobalEnable_AgentRouteReinstallsGitHooks(t *testing.T) {
 
 func TestGlobalEnable_TierAbsent_CreatesNothing(t *testing.T) {
 	t.Parallel()
-	env, extraEnv := newGloballyTrackedEnv(t, false)
+	env, extraEnv, _ := newGloballyTrackedEnv(t, false)
 
 	runClaudeHook(t, env, extraEnv, "user-prompt-submit", map[string]string{
 		"session_id":      "global-test-session-2",
@@ -264,4 +277,160 @@ func TestGlobalEnable_TierAbsent_CreatesNothing(t *testing.T) {
 	if status := gitStatusPorcelain(t, env); status != "" {
 		t.Errorf("git status not empty:\n%s", status)
 	}
+}
+
+// statusGlobalJSON is the global_tracking slice of `entire status --json`.
+type statusGlobalJSON struct {
+	GlobalTracking struct {
+		ActivationSource string `json:"activation_source"`
+		TrustState       string `json:"trust_state"`
+		TrustSource      string `json:"trust_source"`
+	} `json:"global_tracking"`
+}
+
+// statusGlobalJSONOutput runs `status --json` through the real binary,
+// keeping stderr (where the post-run's hook notices land) out of the JSON.
+func statusGlobalJSONOutput(t *testing.T, env *TestEnv) statusGlobalJSON {
+	t.Helper()
+	cmd := execx.NonInteractive(t.Context(), getTestBinary(), "status", "--json")
+	cmd.Dir = env.RepoDir
+	cmd.Env = env.cliEnv()
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("status --json failed: %v\nStderr: %s", err, stderr.String())
+	}
+	var parsed statusGlobalJSON
+	if err := json.Unmarshal(out, &parsed); err != nil {
+		t.Fatalf("parse status --json: %v\nOutput: %s", err, out)
+	}
+	return parsed
+}
+
+// TestGlobalEnable_ExplicitEnableAfterGlobalCapture: a repo first captured
+// globally, then explicitly enabled, switches to repo-level activation and
+// the worktree layout; enable records trust (path identity here — no origin);
+// the old git-side runtime data is left in place (no migration).
+func TestGlobalEnable_ExplicitEnableAfterGlobalCapture(t *testing.T) {
+	t.Parallel()
+	env, extraEnv, configDir := newGloballyTrackedEnv(t, true)
+
+	runClaudeHook(t, env, extraEnv, "user-prompt-submit", map[string]string{
+		"session_id":      "global-then-local-1",
+		"transcript_path": "",
+		"prompt":          "Captured globally",
+	})
+	oldRoot := globalRuntimeRoot(t, env)
+	if _, err := os.Stat(filepath.Join(oldRoot, "metadata", "global-then-local-1", "prompt.txt")); err != nil {
+		t.Fatalf("global capture did not land under the git common dir: %v", err)
+	}
+	before := statusGlobalJSONOutput(t, env)
+	if before.GlobalTracking.ActivationSource != "global" || before.GlobalTracking.TrustState != "untrusted" {
+		t.Fatalf("pre-enable status = %+v, want global/untrusted", before.GlobalTracking)
+	}
+
+	out := env.RunCLI("enable", "--agent", "claude-code", "--telemetry=false")
+	if !strings.Contains(out, "Trusted") {
+		t.Fatalf("enable did not record trust while global tracking is on:\n%s", out)
+	}
+	if _, err := os.Stat(filepath.Join(env.RepoDir, ".entire", "settings.json")); err != nil {
+		t.Fatalf("explicit enable did not write repo settings: %v", err)
+	}
+	after := statusGlobalJSONOutput(t, env)
+	if after.GlobalTracking.ActivationSource != "local" || after.GlobalTracking.TrustState != "trusted" || after.GlobalTracking.TrustSource != "repo" {
+		t.Fatalf("post-enable status = %+v, want local/trusted/repo", after.GlobalTracking)
+	}
+	data, err := os.ReadFile(filepath.Join(configDir, "settings.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var us repopolicy.UserSettings
+	if err := json.Unmarshal(data, &us); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.ContainsFunc(us.Global.TrustedPaths, func(p string) bool {
+		resolved, rerr := filepath.EvalSymlinks(p)
+		return rerr == nil && resolved == env.RepoDir
+	}) {
+		t.Fatalf("trusted_paths = %v, want the repo root", us.Global.TrustedPaths)
+	}
+
+	// A new session now lands in the worktree layout; the old data is left.
+	runClaudeHook(t, env, extraEnv, "user-prompt-submit", map[string]string{
+		"session_id":      "global-then-local-2",
+		"transcript_path": "",
+		"prompt":          "Captured locally",
+	})
+	if _, err := os.Stat(filepath.Join(env.RepoDir, ".entire", "metadata", "global-then-local-2", "prompt.txt")); err != nil {
+		t.Errorf("post-enable capture did not land in the worktree layout: %v", err)
+	}
+	if _, err := os.Stat(oldRoot); err != nil {
+		t.Errorf("git-side runtime data from the global phase should be left in place: %v", err)
+	}
+}
+
+// TestGlobalEnable_CommittedSettingsInFreshCloneAreGated: a fresh clone that
+// brings a committed .entire/settings.json {"enabled":true} is repo-enabled
+// exactly as on main — but while global tracking is on, its checkpoints are
+// held until trusted, on both storage backends.
+func TestGlobalEnable_CommittedSettingsInFreshCloneAreGated(t *testing.T) {
+	t.Parallel()
+	ForEachBackend(t, func(t *testing.T, backend string) {
+		src, extraEnv, _ := newGloballyTrackedEnv(t, true)
+		src.CheckpointStore = backend
+		src.WriteFile(".entire/settings.json", `{"enabled":true}`)
+		src.GitAdd(".entire/settings.json")
+		src.GitCommit("Commit Entire settings")
+		bare := src.SetupEmptyNamedBareRemote("origin")
+		push := exec.CommandContext(t.Context(), "git", "push", "origin", "HEAD")
+		push.Dir = src.RepoDir
+		push.Env = testutil.GitIsolatedEnv()
+		if out, err := push.CombinedOutput(); err != nil {
+			t.Fatalf("seed origin: %v\n%s", err, out)
+		}
+
+		clone := src.CloneFromWithoutInit(bare)
+		routeHermeticOrigin(t, clone, bare)
+		if _, err := os.Stat(filepath.Join(clone.RepoDir, ".entire", "settings.json")); err != nil {
+			t.Fatalf("clone did not bring the committed settings: %v", err)
+		}
+		status := statusGlobalJSONOutput(t, clone)
+		if status.GlobalTracking.ActivationSource != "local" || status.GlobalTracking.TrustState != "untrusted" {
+			t.Fatalf("fresh clone status = %+v, want local/untrusted", status.GlobalTracking)
+		}
+
+		commitGlobalSession(t, clone, extraEnv, "clone-session-1", "clone.txt", "held\n", "Create clone file")
+		heldID := clone.GetCheckpointIDFromCommitMessage(clone.GetHeadHash())
+		if heldID == "" {
+			t.Fatal("commit has no Entire-Checkpoint trailer; nothing to hold")
+		}
+		output := gitPushHeadWithHooksOutput(t, clone)
+		if got := strings.Count(output, heldSyncMessageFragment); got != 1 {
+			t.Errorf("held push should print exactly one hold explanation, got %d in:\n%s", got, output)
+		}
+		if !clone.BranchExistsOnRemote(bare, clone.GetCurrentBranch()) {
+			t.Error("the user's branch must land on the remote despite the hold")
+		}
+		if anyRefUnderPrefix(t, bare) {
+			t.Error("no refs/entire/* may reach the remote while the repo is untrusted")
+		}
+		if clone.CheckpointExistsOnRemote(bare, heldID) {
+			t.Error("the held checkpoint must not reach the remote while untrusted")
+		}
+
+		if out := clone.RunCLI("trust"); !strings.Contains(out, "Trusted") {
+			t.Fatalf("entire trust did not confirm trust:\n%s", out)
+		}
+		clone.WriteFile("after-trust.txt", "synced\n")
+		clone.GitAdd("after-trust.txt")
+		clone.GitCommit("Add after-trust file")
+		output = gitPushHeadWithHooksOutput(t, clone)
+		if strings.Contains(output, heldSyncMessageFragment) {
+			t.Errorf("a trusted push is silent about holds, got:\n%s", output)
+		}
+		if !clone.CheckpointExistsOnRemote(bare, heldID) {
+			t.Errorf("held checkpoint %s should drain on the first trusted push", heldID)
+		}
+	})
 }

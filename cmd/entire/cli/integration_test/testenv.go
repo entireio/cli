@@ -1812,7 +1812,11 @@ func (env *TestEnv) SetupEmptyNamedBareRemote(remoteName string) string {
 // CloneFrom clones from a bare repo into a new temp directory and returns a new TestEnv
 // pointing at the clone. The clone has its own .entire directory initialized.
 // The clone checks out the same branch as the current env's HEAD.
-func (env *TestEnv) CloneFrom(bareDir string) *TestEnv {
+// CloneFromWithoutInit clones bareDir into a fresh TestEnv WITHOUT touching
+// Entire configuration, so whatever .entire/settings.json the clone brought
+// with it is what the binary sees — the fixture for "committed settings in a
+// fresh clone" scenarios.
+func (env *TestEnv) CloneFromWithoutInit(bareDir string) *TestEnv {
 	env.T.Helper()
 
 	ctx := env.T.Context()
@@ -1873,12 +1877,21 @@ func (env *TestEnv) CloneFrom(bareDir string) *TestEnv {
 		GeminiProjectDir:   geminiProjectDir,
 		OpenCodeProjectDir: openCodeProjectDir,
 		CheckpointStore:    env.CheckpointStore,
+		// The spawned binary must see the same isolation (ENTIRE_CONFIG_DIR,
+		// HOME, ...) as the source env.
+		ExtraEnv: append([]string(nil), env.ExtraEnv...),
 	}
+	cloneEnv.setGitConfigBaseline()
+	return cloneEnv
+}
 
-	// Initialize Entire in the clone
+// CloneFrom clones bareDir and initializes Entire in the clone (hand-built
+// settings file), the shape most cross-clone tests want.
+func (env *TestEnv) CloneFrom(bareDir string) *TestEnv {
+	env.T.Helper()
+	cloneEnv := env.CloneFromWithoutInit(bareDir)
 	cloneEnv.InitEntire()
 	cloneEnv.setGitConfigBaseline()
-
 	return cloneEnv
 }
 

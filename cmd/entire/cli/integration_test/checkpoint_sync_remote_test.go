@@ -758,17 +758,18 @@ func TestCheckpointSyncRemote_DedicatedCheckpointRemoteExemptFromGate(t *testing
 // heldSyncMessageFragment identifies the pre-push hold explanation on stderr.
 const heldSyncMessageFragment = "checkpoint sync held"
 
-// gitPushWithHooksOutput pushes with the real pre-push hook installed and
-// returns the combined output (git surfaces hook stderr there).
-func gitPushWithHooksOutput(t *testing.T, env *TestEnv, remote, refSpec string) string {
+// gitPushHeadWithHooksOutput pushes HEAD to origin with the real pre-push
+// hook installed and returns the combined output (git surfaces hook stderr
+// there).
+func gitPushHeadWithHooksOutput(t *testing.T, env *TestEnv) string {
 	t.Helper()
 	env.InstallRealPrePushHook()
-	cmd := execx.NonInteractive(t.Context(), "git", "push", remote, refSpec)
+	cmd := execx.NonInteractive(t.Context(), "git", "push", "origin", "HEAD")
 	cmd.Dir = env.RepoDir
 	cmd.Env = env.cliEnv()
 	output, err := cmd.CombinedOutput()
 	if err != nil {
-		t.Fatalf("git push (with hooks) %s %s failed: %v\n%s", remote, refSpec, err, output)
+		t.Fatalf("git push (with hooks) origin HEAD failed: %v\n%s", err, output)
 	}
 	return string(output)
 }
@@ -826,7 +827,7 @@ func commitGlobalSession(t *testing.T, env *TestEnv, extraEnv []string, sessionI
 func TestGlobalEnrolledRepoHoldsCheckpointSyncUntilTrusted(t *testing.T) {
 	t.Parallel()
 	ForEachBackend(t, func(t *testing.T, backend string) {
-		env, extraEnv := newGloballyTrackedEnv(t, true)
+		env, extraEnv, _ := newGloballyTrackedEnv(t, true)
 		env.CheckpointStore = backend
 		bareOrigin := env.SetupEmptyNamedBareRemote("origin")
 		routeHermeticOrigin(t, env, bareOrigin)
@@ -838,14 +839,14 @@ func TestGlobalEnrolledRepoHoldsCheckpointSyncUntilTrusted(t *testing.T) {
 			t.Fatal("commit has no Entire-Checkpoint trailer; nothing to hold")
 		}
 
-		output := gitPushWithHooksOutput(t, env, "origin", "HEAD")
+		output := gitPushHeadWithHooksOutput(t, env)
 		if got := strings.Count(output, heldSyncMessageFragment); got != 1 {
 			t.Errorf("held push should print exactly one hold explanation, got %d in:\n%s", got, output)
 		}
 		if !env.BranchExistsOnRemote(bareOrigin, env.GetCurrentBranch()) {
 			t.Error("the user's branch must land on the remote despite the hold")
 		}
-		if anyRefUnderPrefix(t, bareOrigin, checkpointRefPrefix) {
+		if anyRefUnderPrefix(t, bareOrigin) {
 			t.Error("no refs/entire/* may reach the remote while the repo is untrusted")
 		}
 		if env.BranchExistsOnRemote(bareOrigin, paths.MetadataBranchName) {
@@ -863,7 +864,7 @@ func TestGlobalEnrolledRepoHoldsCheckpointSyncUntilTrusted(t *testing.T) {
 		env.GitAdd("after-trust.txt")
 		env.GitCommit("Add after-trust file")
 
-		output = gitPushWithHooksOutput(t, env, "origin", "HEAD")
+		output = gitPushHeadWithHooksOutput(t, env)
 		if strings.Contains(output, heldSyncMessageFragment) {
 			t.Errorf("a trusted push is silent about holds, got:\n%s", output)
 		}
@@ -877,7 +878,7 @@ func TestGlobalEnrolledRepoHoldsCheckpointSyncUntilTrusted(t *testing.T) {
 
 		commitGlobalSession(t, env, extraEnv, "trust-gate-session-2", "revoked.txt", "held again after revoke\n", "Create revoked file")
 
-		output = gitPushWithHooksOutput(t, env, "origin", "HEAD")
+		output = gitPushHeadWithHooksOutput(t, env)
 		if got := strings.Count(output, heldSyncMessageFragment); got != 1 {
 			t.Errorf("a post-revoke push should print exactly one hold explanation, got %d in:\n%s", got, output)
 		}
