@@ -31,8 +31,28 @@ func init() {
 // Headless (-p) mode skips beforeSubmitPrompt and stop hooks.
 type CursorCLI struct{}
 
-func (a *CursorCLI) Name() string               { return "cursor-cli" }
-func (a *CursorCLI) Binary() string             { return "agent" }
+func (a *CursorCLI) Name() string { return "cursor-cli" }
+
+// Binary resolves Cursor's CLI, preferring the unambiguous `cursor-agent`
+// alias over the contested `agent` name.
+//
+// `agent` is not a name Cursor has to itself, and the conflict is destructive
+// rather than cosmetic: Cursor's installer does
+// `rm -f ~/.local/bin/agent && ln -s …/cursor-agent ~/.local/bin/agent`, and
+// xAI's Grok installer does `ln -sf …/.grok/bin/agent ~/.local/bin/agent`.
+// Both target the same path and both force, so whichever is installed second
+// silently owns `agent` — there is only one file, which is why no amount of
+// $PATH ordering resolves it. Cursor's own `cursor-agent` symlink points at
+// the same executable and no other vendor claims it.
+func (a *CursorCLI) Binary() string {
+	if bin := os.Getenv("E2E_CURSOR_BIN"); bin != "" {
+		return bin
+	}
+	if _, err := exec.LookPath("cursor-agent"); err == nil {
+		return "cursor-agent"
+	}
+	return "agent"
+}
 func (a *CursorCLI) EntireAgent() string        { return "cursor" }
 func (a *CursorCLI) TimeoutMultiplier() float64 { return 1.5 }
 
@@ -80,14 +100,14 @@ func (a *CursorCLI) Bootstrap() error {
 	return nil
 }
 
-// verifyBinaryIsCursor guards against another tool owning the name "agent".
+// verifyBinaryIsCursor is the backstop for when Binary() had to fall back to
+// the contested `agent` name.
 //
-// Cursor's CLI binary is called `agent`, which is not a name it has to itself:
-// xAI's Grok installer symlinks both `grok` and `agent` into ~/.local/bin. On a
-// machine with both, whichever wins $PATH decides what this leg actually runs,
-// and preflight only does LookPath("agent") — so it passes either way and the
+// Preflight only does LookPath, so it passes whoever owns that name and the
 // suite would exercise Grok while reporting Cursor. Silently testing the wrong
-// agent is worse than failing, so fail loudly and name the fix.
+// agent is worse than failing, so fail loudly and name a fix that actually
+// works — reinstalling Cursor restores `cursor-agent`, which Binary() then
+// prefers.
 func (a *CursorCLI) verifyBinaryIsCursor() error {
 	path, err := exec.LookPath(a.Binary())
 	if err != nil {
@@ -105,8 +125,11 @@ func (a *CursorCLI) verifyBinaryIsCursor() error {
 	if v := strings.ToLower(string(out)); strings.Contains(v, "grok") {
 		return fmt.Errorf(
 			"%q resolves to Grok, not the Cursor CLI (%s reported %q).\n"+
-				"xAI's installer symlinks `agent` alongside `grok`. Put Cursor's `agent` "+
-				"earlier in $PATH, or run the Grok leg instead with --agent grok",
+				"Cursor and Grok both install a binary named `agent` at the same path, "+
+				"and whichever was installed second owns it — $PATH ordering cannot "+
+				"separate them. Reinstall Cursor (curl https://cursor.com/install | bash) "+
+				"to restore the unambiguous `cursor-agent`, set E2E_CURSOR_BIN to Cursor's "+
+				"executable, or run the Grok leg instead with --agent grok",
 			a.Binary(), path, strings.TrimSpace(string(out)))
 	}
 	return nil
