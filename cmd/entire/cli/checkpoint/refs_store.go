@@ -280,6 +280,12 @@ func (s *gitRefsStore) writeSession(ctx context.Context, opts WriteOptions) erro
 		return fmt.Errorf("invalid checkpoint options: %w", err)
 	}
 
+	return writeWithRefRaceRetry(ctx, "session write", func() error {
+		return s.tryWriteSession(ctx, opts)
+	})
+}
+
+func (s *gitRefsStore) tryWriteSession(ctx context.Context, opts WriteOptions) error {
 	parentHash, existing, err := s.refBase(opts.CheckpointID)
 	if err != nil {
 		return err
@@ -295,7 +301,7 @@ func (s *gitRefsStore) writeSession(ctx context.Context, opts WriteOptions) erro
 	if err != nil {
 		return err
 	}
-	return s.setRef(ctx, opts.CheckpointID, commitHash)
+	return s.casRef(ctx, opts.CheckpointID, parentHash, commitHash)
 }
 
 func (s *gitRefsStore) backfillTranscript(ctx context.Context, opts UpdateOptions) error {
@@ -306,6 +312,12 @@ func (s *gitRefsStore) backfillTranscript(ctx context.Context, opts UpdateOption
 		return errors.New("invalid update options: checkpoint ID is required")
 	}
 
+	return writeWithRefRaceRetry(ctx, "transcript backfill", func() error {
+		return s.tryBackfillTranscript(ctx, opts)
+	})
+}
+
+func (s *gitRefsStore) tryBackfillTranscript(ctx context.Context, opts UpdateOptions) error {
 	parentHash, existing, err := s.refBaseForBackfill(ctx, opts.CheckpointID)
 	if err != nil {
 		return err
@@ -325,7 +337,7 @@ func (s *gitRefsStore) backfillTranscript(ctx context.Context, opts UpdateOption
 	if err != nil {
 		return err
 	}
-	return s.setRef(ctx, opts.CheckpointID, commitHash)
+	return s.casRef(ctx, opts.CheckpointID, parentHash, commitHash)
 }
 
 func (s *gitRefsStore) backfillSummary(ctx context.Context, checkpointID id.CheckpointID, summary *Summary) error {
@@ -333,6 +345,12 @@ func (s *gitRefsStore) backfillSummary(ctx context.Context, checkpointID id.Chec
 		return err //nolint:wrapcheck // Propagating context cancellation
 	}
 
+	return writeWithRefRaceRetry(ctx, "summary backfill", func() error {
+		return s.tryBackfillSummary(ctx, checkpointID, summary)
+	})
+}
+
+func (s *gitRefsStore) tryBackfillSummary(ctx context.Context, checkpointID id.CheckpointID, summary *Summary) error {
 	parentHash, existing, err := s.refBaseForBackfill(ctx, checkpointID)
 	if err != nil {
 		return err
@@ -349,7 +367,7 @@ func (s *gitRefsStore) backfillSummary(ctx context.Context, checkpointID id.Chec
 	if err != nil {
 		return err
 	}
-	return s.setRef(ctx, checkpointID, commitHash)
+	return s.casRef(ctx, checkpointID, parentHash, commitHash)
 }
 
 // backfillEntityDeltas attaches a session's entity-delta document to an
@@ -402,6 +420,12 @@ func (s *gitRefsStore) backfillAttribution(ctx context.Context, checkpointID id.
 		return err //nolint:wrapcheck // Propagating context cancellation
 	}
 
+	return writeWithRefRaceRetry(ctx, "attribution backfill", func() error {
+		return s.tryBackfillAttribution(ctx, checkpointID, combinedAttribution)
+	})
+}
+
+func (s *gitRefsStore) tryBackfillAttribution(ctx context.Context, checkpointID id.CheckpointID, combinedAttribution *Attribution) error {
 	parentHash, existing, err := s.refBaseForBackfill(ctx, checkpointID)
 	if err != nil {
 		return err
@@ -418,7 +442,7 @@ func (s *gitRefsStore) backfillAttribution(ctx context.Context, checkpointID id.
 	if err != nil {
 		return err
 	}
-	return s.setRef(ctx, checkpointID, commitHash)
+	return s.casRef(ctx, checkpointID, parentHash, commitHash)
 }
 
 // checkpointTree resolves a FetchingTree rooted at a checkpoint's ref commit
