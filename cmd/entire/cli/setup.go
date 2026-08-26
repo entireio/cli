@@ -2553,7 +2553,7 @@ func runUninstall(ctx context.Context, w, errW io.Writer, force bool) error {
 	}
 
 	if settings.GlobalTierEnabled(ctx) {
-		fmt.Fprintf(w, "\nNote: global tracking is on (%s). The next agent session here will track this repo again\n  unless you add it to exclude_paths there or run 'entire disable' in this repo.\n", settings.UserSettingsPath())
+		fmt.Fprintf(w, "\nNote: global tracking is on (%s). The next agent session here will track this repo again\n  unless you add it to exclude_paths there.\n", settings.UserSettingsPath())
 	}
 
 	fmt.Fprintln(w, "\nEntire CLI uninstalled successfully.")

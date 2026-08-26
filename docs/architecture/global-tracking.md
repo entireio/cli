@@ -80,6 +80,11 @@ layout for new activity; its earlier git-side runtime data is left in place
 (no migration — `full.jsonl` is regenerated each Stop, and session state lives
 in `.git/entire-sessions` regardless). `disable --uninstall` removes it.
 
+`entire disable` in a globally tracked repo writes nothing: there is no
+repo-level setup to disable, and a veto file would be the tier's first worktree
+footprint. It points at `exclude_paths` (or `global.enabled: false`) instead.
+Repo-enabled repos keep today's disable behavior.
+
 ## Lazy per-repo setup
 
 The first hook in a globally tracked repo (`strategy.MaybeEnsureGlobalSetup`,
