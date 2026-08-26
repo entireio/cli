@@ -206,27 +206,27 @@ func hookBoundedMutationCtx(hookCtx context.Context) (context.Context, context.C
 	return context.WithTimeout(hookCtx, 5*time.Second)
 }
 
-func buildCrossRepoContextInjection(ctx context.Context, ag agent.Agent, event *agent.Event) (string, func() error) {
+func buildCrossRepoContextInjection(ctx context.Context, ag agent.Agent, event *agent.Event) (string, func() error, func()) {
 	if (event.Type != agent.TurnStart && event.Type != agent.ContextRequest) || event.SessionID == "" {
-		return "", nil
+		return "", nil, nil
 	}
 	prompt := promptForContextInjection(ag, event)
 	if prompt == "" {
-		return "", nil
+		return "", nil, nil
 	}
 	maybeRefreshLocalContextSessionHeartbeat(ctx, event.SessionID)
 	if !crossRepoContextInjectionEligible(ctx, event.SessionID, prompt) {
-		return "", nil
+		return "", nil, nil
 	}
 	hookCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 	coreClient, err := coreapi.New()
 	if err != nil {
-		return "", nil
+		return "", nil, nil
 	}
 	targetRepoID, targetRepoName, err := currentContextTarget(hookCtx)
 	if err != nil {
-		return "", nil
+		return "", nil, nil
 	}
 	now := time.Now()
 	reserved := false
@@ -238,16 +238,19 @@ func buildCrossRepoContextInjection(ctx context.Context, ag agent.Agent, event *
 		return nil
 	})
 	if mutErr != nil || !reserved {
-		return "", nil
+		return "", nil, nil
 	}
 
 	var failed sync.Once
-	sessionMutationCtx := func() (context.Context, context.CancelFunc) {
+	hookMutationCtx := func() (context.Context, context.CancelFunc) {
 		return hookBoundedMutationCtx(hookCtx)
+	}
+	postHookMutationCtx := func() (context.Context, context.CancelFunc) {
+		return hookBoundedMutationCtx(ctx)
 	}
 	fail := func() {
 		failed.Do(func() {
-			c, cancel := sessionMutationCtx()
+			c, cancel := hookMutationCtx()
 			defer cancel()
 			stateErr := strategy.MutateSessionState(strategy.WithSessionLockWait(c, 250*time.Millisecond), event.SessionID, func(state *strategy.SessionState) error {
 				state.CrossRepoContext.PendingUntil = time.Time{}
@@ -264,7 +267,7 @@ func buildCrossRepoContextInjection(ctx context.Context, ag agent.Agent, event *
 	// this turn finds evidence. Recording the active session here makes it
 	// available to another authorized repo on its next prompt.
 	if scope != nil && scope.Enabled && scope.IncludeLocalLive {
-		registerCtx, registerCancel := sessionMutationCtx()
+		registerCtx, registerCancel := hookMutationCtx()
 		if registerErr := registerLocalContextSession(registerCtx, ag, event, targetRepoID, targetRepoName); registerErr != nil {
 			logging.Debug(registerCtx, "local context registration skipped", "error", registerErr.Error())
 		}
@@ -272,7 +275,7 @@ func buildCrossRepoContextInjection(ctx context.Context, ag agent.Agent, event *
 	}
 	if err != nil {
 		fail()
-		return "", nil
+		return "", nil, nil
 	}
 	claimNow := time.Now()
 	var filtered []contextEvidence
@@ -288,31 +291,31 @@ func buildCrossRepoContextInjection(ctx context.Context, ag agent.Agent, event *
 	})
 	if claimErr != nil || !claimed {
 		fail()
-		return "", nil
+		return "", nil, nil
 	}
 	evidence = filtered
 	if len(evidence) == 0 {
 		fail()
-		return "", nil
+		return "", nil, nil
 	}
 	packet := renderCrossRepoContextPacket(evidence)
 	if packet == "" {
 		fail()
-		return "", nil
+		return "", nil, nil
 	}
 	persistedIDs := make([]string, 0, len(evidence))
-	persistCtx, persistCancel := sessionMutationCtx()
+	persistCtx, persistCancel := hookMutationCtx()
 	defer persistCancel()
 	for _, item := range evidence {
 		if persistErr := persistContextEvidenceHook(persistCtx, item); persistErr != nil {
 			fail()
-			return "", nil
+			return "", nil, nil
 		}
 		persistedIDs = append(persistedIDs, item.ID)
 	}
 	finalize := func() error {
 		finishedAt := time.Now()
-		c, cancel := sessionMutationCtx()
+		c, cancel := postHookMutationCtx()
 		defer cancel()
 		return strategy.MutateSessionState(strategy.WithSessionLockWait(c, 250*time.Millisecond), event.SessionID, func(state *strategy.SessionState) error {
 			state.CrossRepoContext.PendingUntil = time.Time{}
@@ -324,7 +327,8 @@ func buildCrossRepoContextInjection(ctx context.Context, ag agent.Agent, event *
 			return nil
 		})
 	}
-	return packet, finalize
+	abort := func() { fail() }
+	return packet, finalize, abort
 }
 
 // localContextRegisterSpawn is the process-spawn seam used by

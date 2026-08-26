@@ -490,16 +490,20 @@ func emitContextInjection(ctx context.Context, ag agent.Agent, event *agent.Even
 	logCtx := logging.WithAgent(logging.WithComponent(ctx, "lifecycle"), ag.Name())
 	var injectionTexts []string
 	var finalizeInjections []func() error
+	var abortInjections []func()
 	if trail, finalize := legacyTrailContextInjection(ctx, ag, event); trail != "" {
 		injectionTexts = append(injectionTexts, trail)
 		if finalize != nil {
 			finalizeInjections = append(finalizeInjections, finalize)
 		}
 	}
-	if crossRepo, finalize := buildCrossRepoContextInjection(ctx, ag, event); crossRepo != "" {
+	if crossRepo, finalize, abort := buildCrossRepoContextInjection(ctx, ag, event); crossRepo != "" {
 		injectionTexts = append(injectionTexts, crossRepo)
 		if finalize != nil {
 			finalizeInjections = append(finalizeInjections, finalize)
+		}
+		if abort != nil {
+			abortInjections = append(abortInjections, abort)
 		}
 	}
 	if len(injectionTexts) == 0 {
@@ -512,13 +516,22 @@ func emitContextInjection(ctx context.Context, ag agent.Agent, event *agent.Even
 	})
 	if err != nil {
 		logging.Warn(logCtx, "failed to render context injection", slog.String("error", err.Error()))
+		for _, abort := range abortInjections {
+			abort()
+		}
 		return
 	}
 	if len(payload) == 0 {
+		for _, abort := range abortInjections {
+			abort()
+		}
 		return
 	}
 	if _, err := os.Stdout.Write(payload); err != nil {
 		logging.Warn(logCtx, "failed to write context injection", slog.String("error", err.Error()))
+		for _, abort := range abortInjections {
+			abort()
+		}
 		return
 	}
 	for _, finalize := range finalizeInjections {

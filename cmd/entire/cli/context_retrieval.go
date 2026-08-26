@@ -751,6 +751,10 @@ func persistContextEvidence(ctx context.Context, evidence contextEvidence) error
 		_ = tmp.Close()
 		return fmt.Errorf("write context evidence temp file: %w", err)
 	}
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("sync context evidence temp file: %w", err)
+	}
 	if err := tmp.Close(); err != nil {
 		return fmt.Errorf("close context evidence temp file: %w", err)
 	}
