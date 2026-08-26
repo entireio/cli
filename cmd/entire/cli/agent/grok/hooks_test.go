@@ -1,6 +1,7 @@
 package grok
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"os"
@@ -277,5 +278,54 @@ func TestRenderHooks_IsDeterministic(t *testing.T) {
 		if next != first {
 			t.Fatal("renderHooks output varies between calls")
 		}
+	}
+}
+
+// TestInstallHooks_GateEventsKeepGrokDefaultTimeout guards a silent
+// checkpoint-dropping regression.
+//
+// Stop and SubagentStop are blocking gates that Grok gives a 600s timeout;
+// every other event defaults to 5s. Writing an explicit short timeout on the
+// gates overrides that, and because Grok fails open on timeout the turn's
+// checkpoint would simply vanish — no error, no log. Turn-end is exactly where
+// the expensive work (redaction, condensation, checkpoint write) happens, so
+// the gates must carry no timeout at all.
+func TestInstallHooks_GateEventsKeepGrokDefaultTimeout(t *testing.T) {
+	dir := hookRepo(t)
+	g := &GrokAgent{}
+
+	if _, err := g.InstallHooks(context.Background(), false); err != nil {
+		t.Fatalf("InstallHooks: %v", err)
+	}
+	data, err := os.ReadFile(installedPath(dir))
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	var file grokHooksFile
+	if err := json.Unmarshal(data, &file); err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+
+	for verb, event := range grokEventForHook {
+		groups := file.Hooks[event]
+		if len(groups) == 0 || len(groups[0].Hooks) == 0 {
+			t.Errorf("%s: no hook installed", event)
+			continue
+		}
+		got := groups[0].Hooks[0].Timeout
+		if gateHooks[verb] {
+			if got != 0 {
+				t.Errorf("%s is a gate: timeout = %d, want 0 (leave Grok's 600s default)", event, got)
+			}
+			continue
+		}
+		if got != hookTimeoutSeconds {
+			t.Errorf("%s: timeout = %d, want %d", event, got, hookTimeoutSeconds)
+		}
+	}
+
+	// The gate events must not emit the key at all, not merely emit zero.
+	if bytes.Contains(data, []byte(`"timeout": 0`)) {
+		t.Error(`rendered config contains "timeout": 0; the field should be omitted entirely`)
 	}
 }

@@ -5,6 +5,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
@@ -288,5 +289,64 @@ func TestParseTurnStart_PromptIsUnwrapped(t *testing.T) {
 	}
 	if want := "Create a file named hello.txt containing exactly the word hello. Then stop."; ev.Prompt != want {
 		t.Errorf("Prompt = %q, want %q", ev.Prompt, want)
+	}
+}
+
+// TestSessionStart_UsesCWDNotWorkspaceRoot pins which field names the session
+// group directory.
+//
+// Grok sends both, and they differ by a trailing slash: cwd is "/repo",
+// workspaceRoot is "/repo/". The group directory is named from the unslashed
+// form, so encoding workspaceRoot yields a name ending in %2F that matches no
+// session on disk. session_start is the only event without transcriptPath, so
+// it is the only place this derivation is used — and the only place it can go
+// wrong silently.
+func TestSessionStart_UsesCWDNotWorkspaceRoot(t *testing.T) {
+	t.Setenv("GROK_HOME", filepath.Join("/tmp", "grokhome"))
+
+	body := []byte(`{"hookEventName":"session_start","sessionId":"01a03a9f-0f3b-78d2-bad3-cf2ad4e0ff2e",` +
+		`"cwd":"/repo/project","workspaceRoot":"/repo/project/","source":"new"}`)
+
+	g := &GrokAgent{}
+	ev, err := g.ParseHookEvent(context.Background(), HookNameSessionStart, bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("ParseHookEvent: %v", err)
+	}
+	if ev == nil {
+		t.Fatal("nil event")
+	}
+
+	want := g.ResolveSessionFile(
+		filepath.Join("/tmp", "grokhome", "sessions", "%2Frepo%2Fproject"),
+		"01a03a9f-0f3b-78d2-bad3-cf2ad4e0ff2e")
+	if ev.SessionRef != want {
+		t.Errorf("SessionRef = %q\nwant             %q", ev.SessionRef, want)
+	}
+	// The failure this guards: a group directory ending in an encoded slash.
+	group := filepath.Base(filepath.Dir(filepath.Dir(ev.SessionRef)))
+	if strings.HasSuffix(group, "%2F") {
+		t.Errorf("group %q ends in %%2F; workspaceRoot's trailing slash leaked in", group)
+	}
+}
+
+// TestSessionStart_FallsBackToWorkspaceRoot covers a payload carrying only
+// workspaceRoot, where the trailing slash must still be trimmed.
+func TestSessionStart_FallsBackToWorkspaceRoot(t *testing.T) {
+	t.Setenv("GROK_HOME", filepath.Join("/tmp", "grokhome"))
+
+	body := []byte(`{"hookEventName":"session_start","sessionId":"01a03a9f-0f3b-78d2-bad3-cf2ad4e0ff2e",` +
+		`"workspaceRoot":"/repo/project/","source":"new"}`)
+
+	g := &GrokAgent{}
+	ev, err := g.ParseHookEvent(context.Background(), HookNameSessionStart, bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("ParseHookEvent: %v", err)
+	}
+	if ev == nil {
+		t.Fatal("nil event")
+	}
+	group := filepath.Base(filepath.Dir(filepath.Dir(ev.SessionRef)))
+	if group != "%2Frepo%2Fproject" {
+		t.Errorf("group = %q, want %%2Frepo%%2Fproject", group)
 	}
 }

@@ -68,10 +68,23 @@ var hookInstallOrder = []string{
 	HookNameSessionEnd,
 }
 
-// hookTimeoutSeconds bounds each hook. Grok defaults non-gate events to 5s,
+// hookTimeoutSeconds bounds the non-gate hooks. Grok defaults those to 5s,
 // which is tight for a cold `entire` invocation on a large repo, so ask for
-// more. Stop and SubagentStop are gates and already default to 600s.
+// more.
 const hookTimeoutSeconds = 30
+
+// gateHooks are the blocking events Grok already gives a 600s timeout, because
+// they can hold up the agent's turn.
+//
+// These deliberately get NO explicit timeout: turn-end is where the expensive
+// work happens (redaction, condensation, checkpoint write), and on a large repo
+// it can exceed any short bound. Writing 30 here would override Grok's own 600s
+// default, and since Grok fails open on timeout the checkpoint would simply be
+// dropped with nothing surfaced.
+var gateHooks = map[string]bool{
+	HookNameStop:         true,
+	HookNameSubagentStop: true,
+}
 
 // HookNames returns the hook verbs Grok supports.
 func (g *GrokAgent) HookNames() []string {
@@ -133,9 +146,15 @@ func renderHooks(ctx context.Context) (string, error) {
 			continue
 		}
 		cmd := agent.WrapProductionSilentHookCommandForOS(entireMarker+verb, useWindowsHooks)
+		// Timeout is omitempty: zero leaves Grok's own default in place, which
+		// is what the gate events need.
+		timeout := hookTimeoutSeconds
+		if gateHooks[verb] {
+			timeout = 0
+		}
 		file.Hooks[event] = []grokHookGroup{{
 			Matcher: "",
-			Hooks:   []grokHookCommand{{Type: "command", Command: cmd, Timeout: hookTimeoutSeconds}},
+			Hooks:   []grokHookCommand{{Type: "command", Command: cmd, Timeout: timeout}},
 		}}
 	}
 

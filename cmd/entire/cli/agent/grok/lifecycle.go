@@ -58,9 +58,15 @@ func (g *GrokAgent) sessionRef(ctx context.Context, in baseHookInput) string {
 	if in.TranscriptPath != "" {
 		return in.TranscriptPath
 	}
-	cwd := in.WorkspaceRoot
+	// cwd, not workspaceRoot. Grok names the session group after the working
+	// directory exactly as given, and the two differ: workspaceRoot carries a
+	// trailing slash where cwd does not. Encoding that slash yields a group
+	// name ending in %2F, which no session directory matches. The trailing
+	// separator is trimmed anyway so the fallback stays correct if only
+	// workspaceRoot is present.
+	cwd := strings.TrimRight(in.CWD, "/")
 	if cwd == "" {
-		cwd = in.CWD
+		cwd = strings.TrimRight(in.WorkspaceRoot, "/")
 	}
 	if cwd == "" || in.SessionID == "" {
 		return ""
