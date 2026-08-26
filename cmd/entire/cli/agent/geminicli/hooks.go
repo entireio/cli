@@ -601,7 +601,7 @@ func hasStaleEntireHook(lists [][]GeminiHookMatcher, want []string) bool {
 	for _, list := range lists {
 		for _, matcher := range list {
 			for _, hook := range matcher.Hooks {
-				if isEntireHook(hook.Command) && !slices.Contains(want, hook.Command) {
+				if isEntireHookEntry(hook) && !slices.Contains(want, hook.Command) {
 					return true
 				}
 			}

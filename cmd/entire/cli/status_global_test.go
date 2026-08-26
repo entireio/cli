@@ -89,6 +89,14 @@ func TestStatusJSON_GlobalTracking(t *testing.T) {
 		}
 	})
 
+	t.Run("unreadable user settings are reported, not hidden", func(t *testing.T) {
+		writeUserSettings(t, `{"global":{"enabled":tru`)
+		raw, _ := run(t)
+		if !strings.Contains(raw, `"settings_error"`) {
+			t.Errorf("a broken user settings file must surface in status:\n%s", raw)
+		}
+	})
+
 	t.Run("unclassifiable repo reports the error, not a fake reason", func(t *testing.T) {
 		writeUserSettings(t, `{"global":{"enabled":true}}`)
 		writeSettings(t, `{"enabled":tru`)

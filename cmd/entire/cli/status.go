@@ -130,9 +130,12 @@ type globalTrackingInfo struct {
 	// Configured is false while the machine-wide question was never answered
 	// (global tier absent from the user settings file, or the file is
 	// unreadable) — the status line is omitted entirely then.
-	Configured       bool
-	Enabled          bool
-	SettingsPath     string
+	Configured   bool
+	Enabled      bool
+	SettingsPath string
+	// SettingsError is set when the user settings file exists but cannot be
+	// read or parsed; the tier is then off machine-wide (fail closed).
+	SettingsError    string
 	ActivationSource repopolicy.ActivationSource
 	// AgentsCovered counts agents whose user-level hooks are installed; only
 	// meaningful when Enabled.
@@ -166,7 +169,12 @@ const (
 
 func computeGlobalTrackingInfo(ctx context.Context) globalTrackingInfo {
 	us, err := settings.LoadUserSettings(ctx)
-	if err != nil || !us.GlobalConfigured() {
+	if err != nil {
+		// The file exists but cannot be read: global tracking is silently off
+		// machine-wide. Unlike an absent file, that deserves a line.
+		return globalTrackingInfo{Configured: true, SettingsPath: settings.UserSettingsPath(), SettingsError: err.Error()}
+	}
+	if !us.GlobalConfigured() {
 		return globalTrackingInfo{}
 	}
 	info := globalTrackingInfo{
@@ -243,6 +251,10 @@ func heldCheckpointCount(ctx context.Context) int {
 func writeGlobalTrackingLine(ctx context.Context, w io.Writer, sty statusStyles) {
 	info := computeGlobalTrackingInfo(ctx)
 	if !info.Configured {
+		return
+	}
+	if info.SettingsError != "" {
+		fmt.Fprintln(w, sty.render(sty.yellow, "global tracking: off — "+info.SettingsPath+" cannot be read; run `entire doctor`"))
 		return
 	}
 	if !info.Enabled {
@@ -1019,6 +1031,8 @@ type globalTrackingJSON struct {
 	// PolicyError is set when this repo could not be classified; active_here
 	// and inactive_reason are then omitted rather than reported as false.
 	PolicyError string `json:"policy_error,omitempty"`
+	// SettingsError is set when the user settings file exists but is unreadable.
+	SettingsError string `json:"settings_error,omitempty"`
 }
 
 // inactiveReasonJSON maps the gate's inactive reason to its stable JSON
@@ -1053,6 +1067,7 @@ func runStatusJSON(ctx context.Context, w io.Writer) error {
 	var gt *globalTrackingJSON
 	if info := computeGlobalTrackingInfo(ctx); info.Configured {
 		gt = &globalTrackingJSON{
+			SettingsError:    info.SettingsError,
 			Enabled:          info.Enabled,
 			AgentsCovered:    info.AgentsCovered,
 			SettingsPath:     info.SettingsPath,

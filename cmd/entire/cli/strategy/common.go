@@ -116,9 +116,10 @@ func ensureSetup(ctx context.Context, out io.Writer) error {
 		return fmt.Errorf("failed to ensure primary metadata ref: %w", err)
 	}
 
-	// Install generic hooks (they delegate to strategy at runtime)
+	// Install generic hooks (they delegate to strategy at runtime). Backup
+	// notices follow out too: hook-context callers pass io.Discard.
 	if !IsGitHookInstalled(ctx) {
-		if _, err := ReinstallGitHooks(ctx); err != nil {
+		if _, err := installGitHooks(ctx, true, hookSettingsFromConfig(ctx), out); err != nil {
 			return fmt.Errorf("failed to install git hooks: %w", err)
 		}
 	}
