@@ -243,6 +243,25 @@ func refreshLocalContextSessionHeartbeat(ctx context.Context, repoID, sessionID 
 	return refreshContextRegistrySession(ctx, path, repoID, sessionID, time.Now())
 }
 
+// refreshRegisteredLocalContextSessionHeartbeat updates LastSeen for a session
+// already present in the local registry without any control-plane network calls.
+func refreshRegisteredLocalContextSessionHeartbeat(ctx context.Context, sessionID string) error {
+	path, err := currentContextRegistryPath(ctx)
+	if err != nil {
+		return err
+	}
+	return mutateContextRegistry(ctx, path, func(registry *contextRegistry) {
+		now := time.Now()
+		for i := range registry.Sessions {
+			if registry.Sessions[i].SessionID == sessionID {
+				registry.Sessions[i].LastSeen = now
+				captureContextSessionOwner(&registry.Sessions[i])
+				return
+			}
+		}
+	})
+}
+
 func pruneContextRegistry(registry *contextRegistry, now time.Time) {
 	cutoff := now.Add(-contextRegistryRetention)
 	kept := registry.Sessions[:0]

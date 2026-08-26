@@ -191,19 +191,12 @@ func crossRepoContextInjectionEligible(ctx context.Context, sessionID, prompt st
 }
 
 func maybeRefreshLocalContextSessionHeartbeat(ctx context.Context, sessionID string) {
-	hookCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	hookCtx, cancel := context.WithTimeout(ctx, 500*time.Millisecond)
 	defer cancel()
-	targetRepoID, _, err := currentContextTargetForHeartbeat(hookCtx)
-	if err != nil {
-		return
-	}
-	if err := refreshLocalContextSessionHeartbeat(hookCtx, targetRepoID, sessionID); err != nil {
+	if err := refreshRegisteredLocalContextSessionHeartbeat(hookCtx, sessionID); err != nil {
 		logging.Debug(hookCtx, "local context heartbeat skipped", "error", err.Error())
 	}
 }
-
-// currentContextTargetForHeartbeat is the heartbeat seam; tests stub repo resolution.
-var currentContextTargetForHeartbeat = currentContextTarget
 
 // persistContextEvidenceHook is the injection-path persist seam; tests stub partial failures.
 var persistContextEvidenceHook = persistContextEvidence

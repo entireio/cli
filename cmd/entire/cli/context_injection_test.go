@@ -280,12 +280,6 @@ func TestMaybeRefreshLocalContextSessionHeartbeatIgnoresInjectionQuota(t *testin
 		t.Fatal("quota-exhausted session must not be injection-eligible")
 	}
 
-	prev := currentContextTargetForHeartbeat
-	currentContextTargetForHeartbeat = func(context.Context) (string, string, error) {
-		return repoID, "acme/cli", nil
-	}
-	t.Cleanup(func() { currentContextTargetForHeartbeat = prev })
-
 	maybeRefreshLocalContextSessionHeartbeat(t.Context(), "s-quota")
 
 	got, err := readContextRegistry(path)
