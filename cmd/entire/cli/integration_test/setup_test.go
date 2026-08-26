@@ -76,6 +76,11 @@ func TestMain(m *testing.M) {
 		os.RemoveAll(tmpDir)
 		os.Exit(1)
 	}
+	if err := os.Setenv("ENTIRE_TEST_HARNESS", "1"); err != nil {
+		fmt.Fprintf(os.Stderr, "failed to set ENTIRE_TEST_HARNESS: %v\n", err)
+		os.RemoveAll(tmpDir)
+		os.Exit(1)
+	}
 
 	// Run tests
 	code := m.Run()

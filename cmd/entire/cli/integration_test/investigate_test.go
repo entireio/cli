@@ -193,6 +193,7 @@ printf '%%s\n' '{"session_id":"%s","transcript_path":"","prompt":"%s"}' | "$ENTI
 		script: fakeAgentScript,
 		extraEnv: []string{
 			"ENTIRE_TEST_BINARY=" + getTestBinary(),
+			"ENTIRE_TEST_HARNESS=1",
 			"ENTIRE_TEST_CLAUDE_PROJECT_DIR=" + env.ClaudeProjectDir,
 			// Force the hook child to operate inside env.RepoDir so it
 			// resolves the same git repo the test set up.
@@ -455,6 +456,7 @@ func TestInvestigate_IssueLink_ResolvesViaFakeGh(t *testing.T) {
 	cmd.Env = envWithOverrides(env.cliEnv(),
 		"PATH="+fakeBinDir+string(os.PathListSeparator)+os.Getenv("PATH"),
 		"ENTIRE_TEST_BINARY="+getTestBinary(),
+		"ENTIRE_TEST_HARNESS=1",
 	)
 	output, err := cmd.CombinedOutput()
 	if err != nil {

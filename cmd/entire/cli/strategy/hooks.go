@@ -891,6 +891,7 @@ func preserveCurrentHookOverStaleBackup(hookPath, backupPath string, current []b
 	}
 
 	newPath := backupPath + ".new"
+	defer func() { _ = os.Remove(newPath) }()
 	if err := os.WriteFile(newPath, current, mode); err != nil { //nolint:gosec // preserve caller mode
 		return fmt.Errorf("write updated backup: %w", err)
 	}
@@ -922,7 +923,9 @@ func preserveCurrentHookOverStaleBackup(hookPath, backupPath string, current []b
 		_ = os.Remove(newPath)
 		return fmt.Errorf("install updated backup: %w", err)
 	}
-	_ = os.Remove(stalePath)
+	if err := os.Remove(stalePath); err != nil {
+		return fmt.Errorf("remove stale backup: %w", err)
+	}
 	return nil
 }
 
@@ -1655,13 +1658,12 @@ func splitShebang(content string) (shebang, rest string) {
 // the working tree contains run on every git operation.
 func hookCmdPrefix(absolutePath bool) (string, error) {
 	if absolutePath {
-		exe := os.Getenv("ENTIRE_TEST_BINARY")
-		if exe == "" {
-			var err error
-			exe, err = os.Executable()
-			if err != nil {
-				return "", fmt.Errorf("--absolute-git-hook-path: failed to resolve binary path: %w", err)
-			}
+		exe, err := os.Executable()
+		if err != nil {
+			return "", fmt.Errorf("--absolute-git-hook-path: failed to resolve binary path: %w", err)
+		}
+		if testExe := strings.TrimSpace(os.Getenv("ENTIRE_TEST_BINARY")); testExe != "" && os.Getenv("ENTIRE_TEST_HARNESS") != "" {
+			exe = testExe
 		}
 		resolved, err := resolveHookExePath(exe, filepath.EvalSymlinks, runtime.GOOS)
 		if err != nil {

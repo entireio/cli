@@ -148,6 +148,7 @@ printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"usage":{"i
 	cmd.Env = envWithOverrides(env.cliEnv(),
 		"PATH="+fakeBinDir+string(os.PathListSeparator)+os.Getenv("PATH"),
 		"ENTIRE_TEST_BINARY="+getTestBinary(),
+		"ENTIRE_TEST_HARNESS=1",
 	)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
