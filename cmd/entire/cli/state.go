@@ -950,8 +950,11 @@ func FindUnclaimedActivePreTaskFile(ctx context.Context) (taskToolUseID string, 
 // When agentID is set and exactly one unclaimed pre-task file carries that
 // agent_id stamp from the post-task hook, that task wins over spawn-order
 // heuristics — fixing nested subagents whose first TodoWrite races a still-
-// unclaimed parent pre-task. Otherwise it falls back to
-// FindUnclaimedActivePreTaskFile (oldest-first for parallel siblings).
+// unclaimed parent pre-task. When agentID is set but no stamped match exists,
+// this returns not-found rather than falling back to spawn-order heuristics,
+// which would mis-assign a sibling's pre-task to the wrong agent. When agentID
+// is empty, it delegates to FindUnclaimedActivePreTaskFile (oldest-first for
+// parallel siblings).
 //
 // The claimed snapshot and directory scan run under the bootstrap lock so they
 // stay consistent with concurrent cleanup and sibling claims.
@@ -1010,10 +1013,7 @@ func findUnclaimedPreTaskForAgentUnderLock(ctx context.Context, agentID string) 
 	case 1:
 		return agentMatches[0], 1, true
 	case 0:
-		if agentID != "" {
-			return "", 0, false
-		}
-		return findActivePreTaskFile(ctx, claimed, oldestPreTask)
+		return "", 0, false
 	default:
 		// Several unclaimed files stamped with the same agent_id should not
 		// happen; pick oldest-first like the non-stamped path and let bootstrap

@@ -561,6 +561,18 @@ func TestFindUnclaimedPreTaskForAgent_CandidatesCountsStampMatchesOnly(t *testin
 	}
 }
 
+func TestFindUnclaimedPreTaskForAgent_NoStampMatchDoesNotFallback(t *testing.T) {
+	setupTmpDirRepo(t)
+	ctx := context.Background()
+
+	writePreTaskFileWithModTime(t, "toolu_sibling", time.Now())
+	// agent-other has no stamped pre-task; must not grab toolu_sibling via spawn-order fallback.
+	_, _, found := FindUnclaimedPreTaskForAgent(ctx, "agent-other")
+	if found {
+		t.Fatal("FindUnclaimedPreTaskForAgent() found = true, want false when agent has no stamped match")
+	}
+}
+
 func TestFindUnclaimedPreTaskForAgent_MultipleStampsPicksOldest(t *testing.T) {
 	setupTmpDirRepo(t)
 	ctx := context.Background()
