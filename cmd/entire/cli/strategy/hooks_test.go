@@ -2552,6 +2552,49 @@ func TestInstallGitHook_HealsMissingHuskyStub(t *testing.T) {
 	}
 }
 
+func TestRemoveGitHook_DispatcherDeletedKeepsExcludeWhenParentBackupRemains(t *testing.T) {
+	tmpDir, _ := initHooksTestRepo(t)
+	ctx := context.Background()
+
+	cmd := exec.CommandContext(ctx, "git", "config", "core.hooksPath", ".husky/_")
+	cmd.Dir = tmpDir
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("failed to set core.hooksPath: %v", err)
+	}
+
+	huskyParent := filepath.Join(tmpDir, ".husky")
+	huskyOwnedDir := filepath.Join(huskyParent, "_")
+	if err := os.MkdirAll(huskyOwnedDir, 0o755); err != nil {
+		t.Fatalf("mkdir .husky/_: %v", err)
+	}
+	// Leftover husky-safe backup in parent with a foreign hook still present so
+	// restore leaves the .pre-entire file in place (warning path).
+	hookPath := filepath.Join(huskyParent, "prepare-commit-msg")
+	if err := os.WriteFile(hookPath, []byte("#!/bin/sh\necho user\n"), 0o644); err != nil {
+		t.Fatalf("write user hook: %v", err)
+	}
+	backupPath := hookPath + backupSuffix
+	if err := os.WriteFile(backupPath, []byte("#!/bin/sh\necho backup\n"), 0o644); err != nil {
+		t.Fatalf("write backup: %v", err)
+	}
+	if err := ensurePreEntireExcluded(ctx); err != nil {
+		t.Fatalf("ensurePreEntireExcluded: %v", err)
+	}
+
+	if _, err := RemoveGitHook(ctx); err != nil {
+		t.Fatalf("RemoveGitHook() error = %v", err)
+	}
+
+	excludePath := filepath.Join(tmpDir, ".git", "info", "exclude")
+	data, err := os.ReadFile(excludePath)
+	if err != nil {
+		t.Fatalf("read exclude: %v", err)
+	}
+	if !strings.Contains(string(data), preEntireExcludePattern) {
+		t.Errorf("exclude must stay while parent .pre-entire backups remain, got %q", data)
+	}
+}
+
 func TestRemoveGitHook_DispatcherDeletedScrubsParentUserHooks(t *testing.T) {
 	tmpDir, _ := initHooksTestRepo(t)
 	ctx := context.Background()

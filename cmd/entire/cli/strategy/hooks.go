@@ -1181,7 +1181,11 @@ func RemoveGitHook(ctx context.Context) (int, error) {
 	}
 
 	// Drop the managed exclude block once no backups remain in either dir.
-	if !huskyUserDirHasPreEntireBackups(installDir) && !huskyUserDirHasPreEntireBackups(hooksDir) {
+	backupsRemain := huskyUserDirHasPreEntireBackups(installDir) || huskyUserDirHasPreEntireBackups(hooksDir)
+	if filepath.Base(hooksDir) == "_" {
+		backupsRemain = backupsRemain || huskyUserDirHasPreEntireBackups(filepath.Dir(hooksDir))
+	}
+	if !backupsRemain {
 		if exclErr := removePreEntireExcluded(ctx); exclErr != nil {
 			fmt.Fprintf(os.Stderr, "[entire] Warning: could not remove %s exclude rule: %v\n", backupSuffix, exclErr)
 		}
