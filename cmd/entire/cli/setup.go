@@ -1,14 +1,12 @@
 package cli
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -37,8 +35,6 @@ const (
 	configDisplayLocal   = ".entire/settings.local.json"
 )
 
-var userHookLookPath = exec.LookPath
-
 // Flag names used across setup commands.
 const (
 	agentIdentifier          = "agent"
@@ -56,7 +52,6 @@ const (
 	flagAgentHelpSkill       = "agent-help-skill"
 	flagImportHistory        = "import-history"
 	checkpointProviderGitHub = "github"
-	userHookReconcileEnv     = "ENTIRE_INTERNAL_USER_HOOK_RECONCILING"
 )
 
 // externalAgentsAutoEnabledNotice is printed when picking an external summary
@@ -1732,74 +1727,8 @@ func setupAgentHooks(ctx context.Context, ag agent.Agent, forceHooks bool) (int,
 	if err != nil {
 		return 0, fmt.Errorf("failed to install %s hooks: %w", ag.Name(), err)
 	}
-	if userHooks, ok := agent.AsUserHookSupport(ag); ok && !userHookMutationSuppressed() {
-		if _, userErr := userHooks.InstallUserHooks(ctx); userErr != nil {
-			// User-level hooks are shared infrastructure for settings-driven
-			// global tracking. A failure must not invalidate explicit repo setup.
-			logging.Warn(ctx, "could not reconcile user-level agent hooks",
-				"agent", string(ag.Name()), "error", userErr.Error())
-		}
-	}
 
 	return count, nil
-}
-
-func userHookMutationSuppressed() bool {
-	return currentHookAgentName != "" || os.Getenv(userHookReconcileEnv) == "1"
-}
-
-// reconcileDetectedUserHooks repairs shared user-hook infrastructure only for
-// agents that are actually installed or already contain an Entire entry. It is
-// used by installer/update integration; ordinary read-only commands never call
-// it and absent agent configs are not created.
-func reconcileDetectedUserHooks(ctx context.Context, w io.Writer) {
-	if userHookMutationSuppressed() {
-		return
-	}
-	binaries := map[types.AgentName]string{
-		agent.AgentNameClaudeCode: "claude",
-		agent.AgentNameGemini:     "gemini",
-	}
-	supported, _ := agent.UserHookSupports()
-	for _, candidate := range supported {
-		installed, inspectErr := candidate.Support.AreUserHooksInstalled(ctx)
-		if inspectErr != nil && !userHookConfigContainsEntire(candidate.Name) {
-			fmt.Fprintf(w, "Note: could not inspect %s user hooks: %v\n", candidate.Name, inspectErr)
-			continue
-		}
-		_, binaryPresent := binaries[candidate.Name]
-		if binaryPresent {
-			_, binaryErr := userHookLookPath(binaries[candidate.Name])
-			binaryPresent = binaryErr == nil
-		}
-		if !installed && !binaryPresent && !userHookConfigContainsEntire(candidate.Name) {
-			continue
-		}
-		if _, installErr := candidate.Support.InstallUserHooks(ctx); installErr != nil {
-			fmt.Fprintf(w, "Note: could not reconcile %s user hooks: %v\n", candidate.Name, installErr)
-		}
-	}
-}
-
-func userHookConfigContainsEntire(name types.AgentName) bool {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return false
-	}
-	var path string
-	switch name {
-	case agent.AgentNameClaudeCode:
-		path = filepath.Join(home, ".claude", "settings.json")
-	case agent.AgentNameGemini:
-		path = filepath.Join(home, ".gemini", "settings.json")
-	default:
-		return false
-	}
-	data, err := os.ReadFile(path) //nolint:gosec // fixed per-user agent settings location
-	if err != nil {
-		return false
-	}
-	return bytes.Contains(data, []byte("entire hooks")) || bytes.Contains(data, []byte("entire-dev"))
 }
 
 // promptAgentSelection shows the interactive multi-select agent picker and
@@ -2226,7 +2155,7 @@ func newCurlBashPostInstallCmd() *cobra.Command {
 		Hidden: true,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			w := cmd.OutOrStdout()
-			reconcileDetectedUserHooks(cmd.Context(), w)
+			globalPostRun(cmd.Context(), w) // hidden command: the root post-run skips it, and the installer is when a fresh global user needs hooks (w is stdout here — intended)
 			if err := promptShellCompletion(w); err != nil {
 				fmt.Fprintf(w, "Note: Shell completion setup skipped: %v\n", err)
 			}

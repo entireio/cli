@@ -128,9 +128,10 @@ func NewRootCmd() *cobra.Command {
 				telemetry.TrackCommandDetached(cmd, agentStr, settings.Enabled, versioninfo.Version)
 			}
 
-			// One-time global-tracking detection warn; the hidden-command
-			// walk above scopes it to foreground commands.
-			maybeWarnGlobalTracking(cmd.Context(), cmd.ErrOrStderr())
+			// Global tier: one-time detection warn plus user-hook
+			// reconciliation; the hidden-command walk above scopes it to
+			// foreground commands.
+			globalPostRun(cmd.Context(), cmd.ErrOrStderr())
 
 			// Version check and notification (synchronous with 2s timeout)
 			// Runs AFTER command completes to avoid interfering with interactive modes.

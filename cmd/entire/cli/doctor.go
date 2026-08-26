@@ -145,7 +145,7 @@ func runSessionsFix(cmd *cobra.Command, force bool) error {
 
 	// Global tracking tier: user-level agent hook coverage and this clone's
 	// lazy-setup state.
-	checkGlobalTracking(cmd, force)
+	checkGlobalTracking(cmd)
 
 	// Where checkpoints land, when the repo's remotes make that ambiguous.
 	printCheckpointDestinationNote(ctx, cmd.OutOrStdout(), "Checkpoint destination: REVIEW")
@@ -781,30 +781,26 @@ func checkCodexHookTrust(cmd *cobra.Command) {
 //     logging.Init runs only after the gate that reads this file has already
 //     failed.
 //  2. Global tracking is on but user-level agent hooks are missing for an
-//     agent that supports them — sessions in never-enabled repos cannot fire
-//     a hook for those agents. The user settings and affected agent config
-//     files are the repair surfaces. An agent whose config cannot be READ gets
-//     its own warning: it is unverified, not missing, and the missing-hooks
-//     remedy would refuse to run against the broken file anyway.
+//     agent that supports them — report-only: globalPostRun installs them
+//     for agents present on this machine right after doctor, and agents that
+//     are not detected are listed as informational. An agent whose config
+//     cannot be READ gets its own warning: it is unverified, not missing.
 //  3. Unusable exclude patterns (relative, unsupported ~user form, invalid
 //     glob) — under the fail-closed rule each one deactivates the tier in
 //     every repo it is checked against.
 //  4. exclude_origins is configured and this repo's origin is present but
 //     cannot be normalized to host/owner/repo — informational: the tier
 //     stays off in this repo (fail closed).
-//  5. This worktree's component record says Git hooks are installed but they
-//     are gone. Two shapes: when core.hooksPath resolves
-//     inside the worktree the absence is deliberate (the lazy setup skips
-//     worktree writes), so doctor explains that hook capture requires
-//     repo-level enable and leaves the component alone. Otherwise it is drift;
-//     doctor marks the component stale so the next hook
-//     activity re-runs the lazy setup. A residency probe that ERRORS is its
-//     own warn with no marker mutation: the same probe error makes the lazy
-//     setup skip hook installation, so clearing would promise a reinstall
-//     that never happens.
+//  5. This repo is globally tracked but its git hooks are absent. Three
+//     shapes: a worktree-resident core.hooksPath makes the absence deliberate
+//     (the lazy setup never writes into the worktree), so doctor explains
+//     that hook capture requires repo-level enable; a probe ERROR is reported
+//     as unverified; anything else is drift the next hook activity repairs by
+//     itself — MaybeEnsureGlobalSetup re-checks hook presence every time, so
+//     doctor only reports and never writes.
 //
 // All checks except 1 stay silent while the global tier is unconfigured or off.
-func checkGlobalTracking(cmd *cobra.Command, force bool) {
+func checkGlobalTracking(cmd *cobra.Command) {
 	ctx := cmd.Context()
 	w := cmd.OutOrStdout()
 	us, err := settings.LoadUserSettings(ctx)
@@ -829,45 +825,33 @@ func checkGlobalTracking(cmd *cobra.Command, force bool) {
 		}
 	}
 
-	var missing, unverifiable []string
-	var missingSupports []agent.UserHookAgent
+	var present, absent, unverifiable []string
 	supports, _ := agent.UserHookSupports()
 	for _, ua := range supports {
 		installed, hookErr := ua.Support.AreUserHooksInstalled(ctx)
 		switch {
 		case hookErr != nil:
 			unverifiable = append(unverifiable, fmt.Sprintf("%s (%v)", ua.Name, hookErr))
-		case !installed:
-			missing = append(missing, string(ua.Name))
-			missingSupports = append(missingSupports, ua)
+		case installed:
+		case userHookAgentPresent(ua.Name):
+			present = append(present, string(ua.Name))
+		default:
+			absent = append(absent, string(ua.Name))
 		}
 	}
-	if len(missing) == 0 && len(unverifiable) == 0 {
+	if len(present) == 0 && len(absent) == 0 && len(unverifiable) == 0 {
 		fmt.Fprintln(w, "✓ Global tracking: user-level agent hooks OK")
 	}
-	if len(missing) > 0 {
+	// Report-only: globalPostRun runs after doctor and installs the hooks for
+	// present agents itself, so a confirm prompt here would only be overridden.
+	if len(present) > 0 {
 		fmt.Fprintln(w, "Global tracking: USER-LEVEL AGENT HOOKS MISSING")
-		fmt.Fprintf(w, "  Global tracking is on, but user-level hooks are not installed for: %s\n", strings.Join(missing, ", "))
-		fmt.Fprintln(w, "  Sessions in repos without repo-level setup are not tracked for those agents.")
-		fmt.Fprintf(w, "  Install Entire's user-level hooks in the affected agent settings, or disable global tracking in %s.\n", settings.UserSettingsPath())
-		proceed := force
-		if !proceed {
-			confirmed, promptErr := confirmDoctorFix(ctx, w, "Install missing user-level agent hooks?")
-			if promptErr != nil {
-				fmt.Fprintf(w, "  Repair skipped: %v\n", promptErr)
-			} else {
-				proceed = confirmed
-			}
-		}
-		if proceed {
-			for _, ua := range missingSupports {
-				if _, installErr := ua.Support.InstallUserHooks(ctx); installErr != nil {
-					fmt.Fprintf(w, "  Could not repair %s user hooks: %v\n", ua.Name, installErr)
-					continue
-				}
-				fmt.Fprintf(w, "  ✓ Repaired %s user hooks\n", ua.Name)
-			}
-		}
+		fmt.Fprintf(w, "  Global tracking is on, but user-level hooks are not installed for: %s\n", strings.Join(present, ", "))
+		fmt.Fprintln(w, "  They are installed automatically by the next `entire` command (including this one).")
+	}
+	if len(absent) > 0 {
+		fmt.Fprintln(w, "Global tracking: agents not detected on this machine (informational)")
+		fmt.Fprintf(w, "  %s: hooks are installed once the agent is.\n", strings.Join(absent, ", "))
 	}
 	if len(unverifiable) > 0 {
 		fmt.Fprintln(w, "Global tracking: USER-LEVEL AGENT HOOKS UNVERIFIABLE")
