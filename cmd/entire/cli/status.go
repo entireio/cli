@@ -145,6 +145,9 @@ type globalTrackingInfo struct {
 	// read as coverage in a repo the gate carves out (excluded, disabled).
 	ActiveHere     bool
 	InactiveReason settings.InactiveReason
+	// PolicyError is set when the per-repo classification itself failed
+	// (unreadable settings, git unavailable); ActiveHere is then unknown.
+	PolicyError string
 	// TrustState is the per-repo checkpoint egress consent
 	// (trustStateTrusted/Untrusted/NotApplicable), "" outside a repository.
 	TrustState  string
@@ -189,7 +192,11 @@ func computeGlobalTrackingInfo(ctx context.Context) globalTrackingInfo {
 	if _, err := paths.WorktreeRoot(ctx); err == nil {
 		info.InRepo = true
 		policy, policyErr := repopolicy.ClassifyRepoPolicy(ctx)
-		if policyErr == nil {
+		if policyErr != nil {
+			// Not "inactive here": the answer is unknown. Say so instead of
+			// letting the zero-value reason read as a deliberate carve-out.
+			info.PolicyError = policyErr.Error()
+		} else {
 			ctx = repopolicy.WithRepoPolicy(ctx, policy)
 			info.ActiveHere = policy.Active
 			info.InactiveReason = policy.InactiveReason
@@ -240,6 +247,10 @@ func writeGlobalTrackingLine(ctx context.Context, w io.Writer, sty statusStyles)
 	}
 	if !info.Enabled {
 		fmt.Fprintln(w, sty.render(sty.dim, "global tracking: off"))
+		return
+	}
+	if info.InRepo && info.PolicyError != "" {
+		fmt.Fprintln(w, sty.render(sty.yellow, "global tracking: on (this repo could not be classified: "+info.PolicyError+")"))
 		return
 	}
 	if info.InRepo && !info.ActiveHere {
@@ -1005,6 +1016,9 @@ type globalTrackingJSON struct {
 	TrustState      string `json:"trust_state,omitempty"`
 	TrustSource     string `json:"trust_source,omitempty"`
 	HeldCheckpoints int    `json:"held_checkpoints,omitempty"`
+	// PolicyError is set when this repo could not be classified; active_here
+	// and inactive_reason are then omitted rather than reported as false.
+	PolicyError string `json:"policy_error,omitempty"`
 }
 
 // inactiveReasonJSON maps the gate's inactive reason to its stable JSON
@@ -1045,7 +1059,10 @@ func runStatusJSON(ctx context.Context, w io.Writer) error {
 			ActivationSource: string(info.ActivationSource),
 			HeldCheckpoints:  info.HeldCheckpoints,
 		}
-		if info.InRepo {
+		switch {
+		case info.InRepo && info.PolicyError != "":
+			gt.PolicyError = info.PolicyError
+		case info.InRepo:
 			active := info.ActiveHere
 			gt.ActiveHere = &active
 			if !active {

@@ -89,6 +89,28 @@ func TestStatusJSON_GlobalTracking(t *testing.T) {
 		}
 	})
 
+	t.Run("unclassifiable repo reports the error, not a fake reason", func(t *testing.T) {
+		writeUserSettings(t, `{"global":{"enabled":true}}`)
+		writeSettings(t, `{"enabled":tru`)
+		t.Cleanup(func() { writeSettings(t, `{"enabled": true}`) })
+		raw, _ := run(t)
+		var parsed struct {
+			GlobalTracking struct {
+				PolicyError string `json:"policy_error"`
+				ActiveHere  *bool  `json:"active_here"`
+			} `json:"global_tracking"`
+		}
+		if err := json.Unmarshal([]byte(raw), &parsed); err != nil {
+			t.Fatal(err)
+		}
+		if parsed.GlobalTracking.PolicyError == "" || parsed.GlobalTracking.ActiveHere != nil {
+			t.Errorf("want policy_error set and active_here omitted, got:\n%s", raw)
+		}
+		if strings.Contains(raw, `"inactive_reason"`) {
+			t.Errorf("a classification error must not masquerade as an inactive reason:\n%s", raw)
+		}
+	})
+
 	if _, err := os.Stat(filepath.Join(dir, ".git")); err != nil {
 		t.Fatal(err)
 	}

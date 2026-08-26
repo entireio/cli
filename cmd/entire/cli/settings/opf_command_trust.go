@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -283,6 +284,24 @@ func localSettingsIsVersioned(ctx context.Context, path string, deep bool) (bool
 func probeLocalSettingsIsVersioned(ctx context.Context, path string, deep bool) (bool, error) {
 	if err := ctx.Err(); err != nil {
 		return false, fmt.Errorf("verify %s: %w", EntireSettingsLocalFile, err)
+	}
+
+	// A symlink at `.entire` or at the file itself defeats the index probe:
+	// the literal path is absent from the index while os.ReadFile follows the
+	// link into whatever tracked content it points at (a committed
+	// `.entire -> payload` ships an OPF command through a fresh clone). Treat
+	// the file as not locally owned — the same downgrade as a tracked file.
+	for _, candidate := range []string{filepath.Dir(path), path} {
+		info, lstatErr := os.Lstat(candidate)
+		if lstatErr != nil {
+			if errors.Is(lstatErr, fs.ErrNotExist) {
+				continue
+			}
+			return false, fmt.Errorf("inspect %s: %w", candidate, lstatErr)
+		}
+		if info.Mode()&fs.ModeSymlink != 0 {
+			return true, nil
+		}
 	}
 
 	repo, err := gitrepo.OpenPath(filepath.Dir(filepath.Dir(path)))

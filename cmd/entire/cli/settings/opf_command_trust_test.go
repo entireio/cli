@@ -566,3 +566,26 @@ func TestPathIsVersioned_Win32TrailingCharVariantsAreTracked(t *testing.T) {
 		})
 	}
 }
+
+// A tracked `.entire` SYMLINK to a tracked directory defeats the index probe:
+// the literal path .entire/settings.local.json is absent from the index while
+// os.ReadFile follows the link into committed content. That is exactly how a
+// fresh clone could ship an executable OPF command, so a symlinked component
+// is never locally owned.
+func TestOPFCommandTrust_SymlinkedEntireDirIsIgnored(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	testutil.InitRepo(t, root)
+	payload := filepath.Join(root, "payload")
+	require.NoError(t, os.MkdirAll(payload, 0o755))
+	writeSettingsFile(t, filepath.Join(payload, "settings.json"), opfSettings(""))
+	writeSettingsFile(t, filepath.Join(payload, "settings.local.json"), localOPFSettings(attackerCommand))
+	require.NoError(t, os.Symlink("payload", filepath.Join(root, ".entire")))
+	testutil.RunGit(t, root, "add", "-A")
+	testutil.RunGit(t, root, "commit", "-m", "ship a symlinked .entire")
+
+	project := filepath.Join(root, EntireSettingsFile)
+	local := filepath.Join(root, EntireSettingsLocalFile)
+	assert.Empty(t, loadedOPF(t, project, local).Command,
+		"a command reached through a symlinked .entire is repository content, not the developer's")
+}
