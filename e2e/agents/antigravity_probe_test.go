@@ -24,7 +24,11 @@ func TestAntigravityProbeCommandRunsUnderSh(t *testing.T) {
 		t.Fatal(err)
 	}
 	data, _ := os.ReadFile(hooksPath)
-	var hooks map[string]struct{ PreInvocation []struct{ Command string } }
+	var hooks map[string]struct {
+		PreInvocation []struct {
+			Command string `json:"command"`
+		} `json:"PreInvocation"`
+	}
 	if err := json.Unmarshal(data, &hooks); err != nil {
 		t.Fatal(err)
 	}
@@ -41,8 +45,11 @@ func TestAntigravityProbeCommandRunsUnderSh(t *testing.T) {
 		t.Fatalf("probe log missing: %v", err)
 	}
 	s := string(logData)
-	wantCwd, _ := filepath.EvalSymlinks(filepath.Join(repoDir, ".agents"))
-	if !strings.Contains(s, "--- ") || !strings.Contains(s, "cwd="+wantCwd) || !strings.Contains(s, `"conversationId":"c1"`) {
+	// pwd may report the path as given or symlink-resolved (macOS /var → /private/var).
+	agentsDir := filepath.Join(repoDir, ".agents")
+	resolvedDir, _ := filepath.EvalSymlinks(agentsDir)
+	hasCwd := strings.Contains(s, "cwd="+agentsDir) || strings.Contains(s, "cwd="+resolvedDir)
+	if !strings.Contains(s, "--- ") || !hasCwd || !strings.Contains(s, `"conversationId":"c1"`) {
 		t.Fatalf("probe log content unexpected:\n%s\ncmd=%s", s, cmdStr)
 	}
 }
