@@ -778,8 +778,8 @@ func runExplainCheckpointWithLookup(ctx context.Context, w, errW io.Writer, chec
 	}
 
 	// One spinner covers the entire data-loading pipeline: prefetch's
-	// missing-blob analysis (which spawns one cat-file -e per blob and
-	// can take seconds on a deep checkpoint subtree), the prefetch fetch
+	// missing-blob analysis (one batched cat-file over the subtree, which
+	// can still take a moment on a deep one), the prefetch fetch
 	// itself, the committed checkpoint metadata read, session content
 	// reads, and getAssociatedCommits' git log walk. Stop strictly before
 	// any write to w (stdout) so stderr spinner frames and stdout output
@@ -896,9 +896,9 @@ func loadCheckpointForExplain(ctx context.Context, lookup *explainCheckpointLook
 // FetchingTree's per-File fetcher.
 //
 // Caller is expected to wrap this with a spinner; both the missing-blob
-// analysis (one cat-file -e per blob) and the actual fetch are silent
-// inside this function so the caller's spinner provides continuous
-// feedback.
+// analysis (one batched cat-file over the subtree) and the actual fetch
+// are silent inside this function so the caller's spinner provides
+// continuous feedback.
 func prefetchCheckpointBlobs(ctx context.Context, repo *git.Repository, cpID id.CheckpointID) {
 	refs := checkpoint.ResolveRefs(ctx)
 	loadPrimaryRoot := func(repo *git.Repository) (*object.Tree, error) {

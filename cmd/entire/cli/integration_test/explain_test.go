@@ -347,7 +347,8 @@ func TestExplain_CheckpointSucceedsAfterTreelessFetch(t *testing.T) {
 		output = stdout + stderr
 
 		traceLines := strings.Split(strings.TrimSpace(string(trace)), "\n")
-		require.Contains(t, traceLines, "-e\t1", "missing-blob probes must disable lazy fetch")
+		require.Contains(t, traceLines, "--batch-check\t1", "missing-blob probes must disable lazy fetch")
+		require.NotContains(t, traceLines, "-e\t1", "missing-blob probes must be batched, not one cat-file per blob")
 		for _, line := range traceLines {
 			require.True(t, strings.HasSuffix(line, "\t1"), "cat-file ran without lazy fetch disabled: %q", line)
 		}

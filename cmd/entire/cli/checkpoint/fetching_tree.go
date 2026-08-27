@@ -6,6 +6,7 @@ import (
 	"io"
 	"log/slog"
 	"os/exec"
+	"strings"
 
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 
@@ -183,34 +184,100 @@ func (t *FetchingTree) CollectMissingBlobs() []plumbing.Hash {
 }
 
 // collectMissingBlobs recursively walks a tree and returns hashes of blob
-// entries that are not present in the local object store.
+// entries that are not present in the local object store. The walk asks
+// go-git first and settles every storer miss in a single `git cat-file
+// --batch-check`, so the cost is one subprocess per tree rather than one per
+// candidate blob.
 func (t *FetchingTree) collectMissingBlobs(tree *object.Tree) []plumbing.Hash {
-	var missing []plumbing.Hash
+	candidates := t.collectStorerMisses(tree)
+	if len(candidates) == 0 {
+		return nil
+	}
+	return t.rejectBlobsOnDisk(candidates)
+}
+
+// collectStorerMisses walks a tree recursively and returns the hash of every
+// blob entry go-git's storer cannot see. That is only half an answer: in a
+// partial-clone repo the storer also misses blobs that ARE on disk (filtered
+// out of its index, or in a packfile written after this process opened the
+// repo), which is what rejectBlobsOnDisk settles.
+func (t *FetchingTree) collectStorerMisses(tree *object.Tree) []plumbing.Hash {
+	var candidates []plumbing.Hash
 	for _, entry := range tree.Entries {
 		if entry.Mode.IsFile() {
-			if t.storer.HasEncodedObject(entry.Hash) != nil && !t.blobOnDisk(entry.Hash) {
-				missing = append(missing, entry.Hash)
+			if t.storer.HasEncodedObject(entry.Hash) != nil {
+				candidates = append(candidates, entry.Hash)
 			}
-		} else {
-			// Recurse into subtrees (tree objects are local after treeless fetch).
-			subtree, err := tree.Tree(entry.Name)
-			if err == nil {
-				missing = append(missing, t.collectMissingBlobs(subtree)...)
-			}
+			continue
+		}
+		// Recurse into subtrees (tree objects are local after treeless fetch).
+		subtree, err := tree.Tree(entry.Name)
+		if err == nil {
+			candidates = append(candidates, t.collectStorerMisses(subtree)...)
+		}
+	}
+	return candidates
+}
+
+// rejectBlobsOnDisk returns the candidates that git cannot find in the local
+// object store, preserving order. A failed probe is treated as "nothing is on
+// disk" — the same direction the per-hash check failed in, and the safe one: a
+// candidate wrongly reported missing costs one batched fetch, while one wrongly
+// reported present makes File() fall back to a per-blob fetch.
+func (t *FetchingTree) rejectBlobsOnDisk(candidates []plumbing.Hash) []plumbing.Hash {
+	onDisk, err := t.blobsOnDisk(candidates)
+	if err != nil {
+		logging.Debug(t.ctx, "FetchingTree.rejectBlobsOnDisk: batch probe failed, treating every candidate as missing",
+			slog.Int("candidates", len(candidates)),
+			slog.String("error", err.Error()),
+		)
+		return candidates
+	}
+
+	missing := make([]plumbing.Hash, 0, len(candidates))
+	for _, hash := range candidates {
+		if !onDisk[hash.String()] {
+			missing = append(missing, hash)
 		}
 	}
 	return missing
 }
 
-// blobOnDisk returns true if `git cat-file -e <hash>` finds the blob in
-// the local object store. Used as a second-opinion check before deciding
-// a blob needs to be fetched: in partial-clone repos a blob can be on
-// disk but invisible to go-git's storer (filtered out, or in a packfile
-// not in the cached index). We'd rather skip a wasted network round-trip.
-func (t *FetchingTree) blobOnDisk(hash plumbing.Hash) bool {
-	cmd := exec.CommandContext(t.ctx, "git", "cat-file", "-e", hash.String())
+// blobsOnDisk reports which of the given hashes the local object store holds,
+// keyed by hex string, asking `git cat-file --batch-check` once for the whole
+// set — git prints "<oid> missing" for an object it cannot find and
+// "<oid> <type> <size>" for one it can.
+//
+// GIT_NO_LAZY_FETCH is what makes the answer an answer: in a promisor repo
+// (any partial clone, including the URL-keyed remote section our own filtered
+// fetches leave behind) an unguarded probe fetches the very blob it is asking
+// about — one `git fetch --stdin` per missing object — and then reports it
+// present. --batch-check batches the lookups, not the promisor fetches.
+func (t *FetchingTree) blobsOnDisk(hashes []plumbing.Hash) (map[string]bool, error) {
+	lines := make([]string, len(hashes))
+	for i, hash := range hashes {
+		lines[i] = hash.String()
+	}
+
+	cmd := exec.CommandContext(t.ctx, "git", "cat-file", "--batch-check")
 	cmd.Env = append(cmd.Environ(), "GIT_NO_LAZY_FETCH=1")
-	return cmd.Run() == nil
+	cmd.Stdin = strings.NewReader(strings.Join(lines, "\n") + "\n")
+	out, err := cmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("cat-file --batch-check over %d hashes: %w", len(hashes), err)
+	}
+
+	onDisk := make(map[string]bool, len(hashes))
+	for line := range strings.Lines(string(out)) {
+		fields := strings.Fields(line)
+		// "<oid> missing" carries two fields as well, so test the verdict
+		// rather than the field count.
+		if len(fields) < 2 || fields[1] == "missing" {
+			continue
+		}
+		onDisk[fields[0]] = true
+	}
+	return onDisk, nil
 }
 
 // readFileViaGit reads a blob via "git cat-file -p <hash>" and returns an
