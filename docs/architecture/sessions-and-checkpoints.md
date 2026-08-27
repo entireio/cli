@@ -171,6 +171,58 @@ the session's branch/worktree/base metadata to the target, clears target-local
 checkpoint windows and checkpoint IDs, and snapshots the target's current file
 changes so the next commit can link to the adopted session.
 
+#### Commit-to-session linking
+
+The commit hooks (prepare-commit-msg / post-commit) resolve which sessions a
+commit belongs to via `findSessionsForCommitLinking`
+(`strategy/session_identity.go`): the **worktree-matched set** (every session
+with pending content in the commit's worktree — concurrent sessions interleave
+by design) **plus the identity-matched session** when the committing process's
+ancestry names one that path matching missed.
+
+**Identity matching**: reuses the owner fingerprint liveness already
+records — `SessionState.Owner`, a `proclive.Identity` captured on every turn
+start by `captureSessionOwner` (the first non-transient ancestor of the hook:
+agents run hooks as children, possibly via `sh -c`, and proclive skips
+shells, the `entire` binary itself, and the Go toolchain). At commit time the
+hook snapshots its ancestry once (`proclive.CurrentAncestry`) and asks
+`Ancestry.Depth(owner)` per candidate: was this commit's process spawned,
+however indirectly, by that session's agent? Snapshotting once matters — the
+shared store holds one state file per session, so a per-candidate walk would
+repeat the hostname, boot-id, and proc reads dozens of times per commit.
+Host, boot, and start-time guards mean a recycled PID or an identity recorded
+on another machine can never match. The nearest ancestor wins, so a nested
+agent is attributed over the outer agent that spawned it; only sessions
+matching at the same depth (one agent process hosting several sessions) fall
+back to the most recently interacting one. On platforms proclive cannot introspect (Windows),
+identity matching reports nothing and linking falls back to worktree
+matching. This makes an agent-made commit link to
+its own session **in any worktree**, with no bookkeeping to drift. Any session
+matched outside its home worktree is **guest-linked**, whether it came from
+identity matching or the pre-existing single-worktree fallback below: it
+condenses and links, but never mutates worktree-coupled state (`BaseCommit`,
+shadow-branch realignment) — those follow only the session's own worktree HEAD.
+
+**Worktree matching** (always computed; the sole mechanism for commits with
+no recorded agent in their ancestry — human commits, detached runners): exact
+`WorktreePath` match first, then sessions from a sibling worktree of the same
+repo, provided they resolve to a single worktree. Imported sessions (`Kind=imported`) never link —
+they are historical records. When candidates span several worktrees, sessions
+that interacted within the last 15 minutes are preferred; if a single live
+worktree remains it links, otherwise the hook declines with a stderr hint
+naming `entire session adopt` (two genuinely live sessions in different
+worktrees are never guessed between). This liveness filter intentionally turns
+some cases the old code declined outright into a best-candidate link. The
+15-minute `recentSessionWindow` is therefore a correctness tradeoff: a session
+in a long-running build or tool call can age out, allowing the remaining recent
+worktree to win.
+
+Under `go test`, the session state store refuses to open outside the temp
+root (both `session.NewStateStore` and `NewStateStoreForWorktree`), so a test
+missing repo isolation fails loudly instead of leaking fixture sessions into
+a real repo's `.git/entire-sessions` — leaked fixtures once hijacked commit
+linking and produced a dangling `Entire-Checkpoint` trailer.
+
 **Background zombie sweep.** The session-start hook checks the shared
 session-state directory for zombies — non-ended sessions whose owning agent
 process has exited (including the common IDLE case), and ENDED sessions that
@@ -342,6 +394,23 @@ incremental-only — it errors on non-incremental use — and its sole productio
 caller is the Claude Code post-todo hook, writing under
 `.entire/metadata/<session-id>/tasks/<tool-use-id>/` when a TodoWrite fires
 inside a subagent.
+
+**Commit linkage while idle.** A background subagent's `git commit` normally
+lands between the parent session's turns, while the session is IDLE — the
+fast-path trailer decision (`tryAgentCommitFastPath`,
+`strategy/manual_commit_hooks.go`) used to trust only ACTIVE sessions, so
+these commits shipped with no `Entire-Checkpoint` trailer at all. An IDLE
+session with a fresh task record (`idleWithTaskContent`: in-flight or
+completed-unmaterialized, each record bounded by its `StartedAt` age against
+`activeSessionInteractionThreshold`, 24h) is now linkable too, so a subagent
+that dies without a completion signal doesn't leave the session trusted
+forever. The same predicate feeds `shouldCondenseWithOverlapCheck`'s
+overlap-check bypass, so the trigger and the condensation trust share one
+rule. The trailer's content guarantee is the materializer itself: the
+commit's condensation stores each record's transcript-so-far under the
+checkpoint's `tasks/` subtree, so no separate commit-time capture is needed.
+Ordinary idle commits with no task records are unaffected — they stay exactly
+as before.
 
 ### Committed Checkpoints
 

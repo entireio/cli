@@ -678,6 +678,73 @@ func TestSetupAgentHooksNonInteractive_RefusesToClobberUnparseableSettings(t *te
 	}
 }
 
+func TestSetupAgentHooksNonInteractive_InstallsCodexWhenDiscoveryIsUnresolved(t *testing.T) {
+	ag, linkedRoot := setupCodexAgentWithUnresolvedDiscovery(t)
+
+	var output bytes.Buffer
+	if err := setupAgentHooksNonInteractive(t.Context(), &output, ag, EnableOptions{}); err != nil {
+		t.Fatalf("enable Codex with unresolved discovery: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(linkedRoot, ".codex", "hooks.json")); err != nil {
+		t.Fatalf("current-worktree hooks were not installed: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(linkedRoot, ".entire")); err != nil {
+		t.Fatalf("enable did not write project state: %v", err)
+	}
+}
+
+func TestRunEnableInteractive_InstallsCodexWhenDiscoveryIsUnresolved(t *testing.T) {
+	ag, linkedRoot := setupCodexAgentWithUnresolvedDiscovery(t)
+
+	var output bytes.Buffer
+	if err := runEnableInteractive(t.Context(), &output, []agent.Agent{ag}, EnableOptions{Yes: true, Telemetry: true}); err != nil {
+		t.Fatalf("interactive enable Codex with unresolved discovery: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(linkedRoot, ".codex", "hooks.json")); err != nil {
+		t.Fatalf("current-worktree hooks were not installed: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(linkedRoot, ".entire")); err != nil {
+		t.Fatalf("enable did not write project state: %v", err)
+	}
+}
+
+func setupCodexAgentWithUnresolvedDiscovery(t *testing.T) (agent.Agent, string) {
+	t.Helper()
+	tmp := setupTestDir(t)
+	primaryRoot := filepath.Join(tmp, "primary")
+	linkedRoot := filepath.Join(tmp, "linked")
+	runGit := func(dir string, args ...string) {
+		t.Helper()
+		cmd := exec.CommandContext(t.Context(), "git", args...)
+		cmd.Dir = dir
+		cmd.Env = testutil.GitIsolatedEnv()
+		output, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("git %v: %v: %s", args, err, output)
+		}
+	}
+	testutil.InitRepo(t, primaryRoot)
+	testutil.WriteFile(t, primaryRoot, "README.md", "initial\n")
+	testutil.GitAdd(t, primaryRoot, "README.md")
+	testutil.GitCommit(t, primaryRoot, "initial")
+	runGit(primaryRoot, "worktree", "add", "-b", "feature", linkedRoot)
+	t.Chdir(linkedRoot)
+	paths.ClearWorktreeRootCache()
+	session.ClearGitCommonDirCache()
+	// Codex discovery refuses a project layer that is also CODEX_HOME, while
+	// current-worktree installation remains independently valid.
+	if err := os.MkdirAll(filepath.Join(primaryRoot, ".codex"), 0o750); err != nil {
+		t.Fatalf("create colliding CODEX_HOME: %v", err)
+	}
+	t.Setenv("CODEX_HOME", filepath.Join(primaryRoot, ".codex"))
+
+	ag, err := agent.Get(agent.AgentNameCodex)
+	if err != nil {
+		t.Fatalf("get Codex agent: %v", err)
+	}
+	return ag, linkedRoot
+}
+
 func TestRunDisable(t *testing.T) {
 	setupTestDir(t)
 	writeSettings(t, testSettingsEnabled)
@@ -2290,6 +2357,232 @@ func TestUninstallDeselectedAgentHooks(t *testing.T) {
 	}
 }
 
+func TestRunUninstall_CodexLinkedWorktreeDoesNotRemovePrimaryHooks(t *testing.T) {
+	setupCodexRepositoryWithLinkedWorktree(t)
+	repoRoot, err := paths.WorktreeRoot(t.Context())
+	if err != nil {
+		t.Fatalf("resolve primary worktree: %v", err)
+	}
+	linkedRoot := filepath.Join(filepath.Dir(repoRoot), "linked")
+	if err := os.RemoveAll(filepath.Join(linkedRoot, ".codex")); err != nil {
+		t.Fatalf("remove linked Codex project layer: %v", err)
+	}
+	t.Chdir(linkedRoot)
+	paths.ClearWorktreeRootCache()
+	session.ClearGitCommonDirCache()
+
+	ag, err := agent.Get(agent.AgentNameCodex)
+	if err != nil {
+		t.Fatalf("get Codex agent: %v", err)
+	}
+	hookAgent, ok := agent.AsHookSupport(ag)
+	if !ok {
+		t.Fatal("Codex agent does not support hooks")
+	}
+	if hookAgent.AreHooksInstalled(t.Context()) {
+		t.Fatal("Codex hooks must be inactive without the linked checkout's .codex project layer")
+	}
+	freshness, ok := ag.(agent.HookFreshness)
+	if !ok || freshness.CheckHookConfig(t.Context()) != agent.HooksAbsent {
+		t.Fatal("primary-checkout Codex hooks must not count as local removable configuration")
+	}
+
+	var stdout, stderr bytes.Buffer
+	if err := runUninstall(t.Context(), &stdout, &stderr, true); err != nil {
+		t.Fatalf("uninstall Entire: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(repoRoot, ".codex", "hooks.json")); err != nil {
+		t.Fatalf("primary-checkout Codex hooks changed after uninstall from linked worktree: %v", err)
+	}
+	if strings.Contains(stdout.String(), "Removed Codex hooks") {
+		t.Fatalf("uninstall reported removing non-local Codex hooks: %s", stdout.String())
+	}
+}
+
+func TestUninstallDeselectedAgentHooks_CodexIgnoresPrimaryOnlyHooks(t *testing.T) {
+	setupCodexRepositoryWithLinkedWorktree(t)
+	repoRoot, err := paths.WorktreeRoot(t.Context())
+	if err != nil {
+		t.Fatalf("resolve primary worktree: %v", err)
+	}
+	linkedRoot := filepath.Join(filepath.Dir(repoRoot), "linked")
+	if err := os.RemoveAll(filepath.Join(linkedRoot, ".codex")); err != nil {
+		t.Fatalf("remove linked Codex project layer: %v", err)
+	}
+	t.Chdir(linkedRoot)
+	paths.ClearWorktreeRootCache()
+	session.ClearGitCommonDirCache()
+
+	ag, err := agent.Get(agent.AgentNameCodex)
+	if err != nil {
+		t.Fatalf("get Codex agent: %v", err)
+	}
+	hookAgent, ok := agent.AsHookSupport(ag)
+	if !ok {
+		t.Fatal("Codex agent does not support hooks")
+	}
+	if hookAgent.AreHooksInstalled(t.Context()) {
+		t.Fatal("Codex hooks must be inactive without the linked checkout's .codex project layer")
+	}
+	freshness, ok := ag.(agent.HookFreshness)
+	if !ok || freshness.CheckHookConfig(t.Context()) != agent.HooksAbsent {
+		t.Fatal("primary-checkout Codex hooks must not count as local removable configuration")
+	}
+
+	var output bytes.Buffer
+	if err := uninstallDeselectedAgentHooks(t.Context(), &output, nil); err != nil {
+		t.Fatalf("uninstallDeselectedAgentHooks() error = %v", err)
+	}
+
+	if _, err := os.Stat(filepath.Join(repoRoot, ".codex", "hooks.json")); err != nil {
+		t.Fatalf("primary-checkout Codex hooks changed after deselection from linked worktree: %v", err)
+	}
+	if strings.Contains(output.String(), "Removed Codex hooks") {
+		t.Fatalf("deselection reported removing non-local Codex hooks: %s", output.String())
+	}
+}
+
+func TestUninstallDeselectedAgentHooks_CodexLinkedWorktreeOwnership(t *testing.T) {
+	t.Parallel()
+	assertCodexLinkedWorktreeCleanupOwnership(t, "deselect", "deselection")
+}
+
+func TestRemoveAgentHooks_CodexLinkedWorktreeOwnership(t *testing.T) {
+	t.Parallel()
+	assertCodexLinkedWorktreeCleanupOwnership(t, "clean", "clean")
+}
+
+func assertCodexLinkedWorktreeCleanupOwnership(t *testing.T, action, description string) {
+	t.Helper()
+	repoRoot, linkedRoot := setupCodexOwnershipWorktrees(t)
+	primaryPath := filepath.Join(repoRoot, ".codex", "hooks.json")
+	linkedPath := filepath.Join(linkedRoot, ".codex", "hooks.json")
+	primaryBefore := readSetupTestFile(t, primaryPath)
+
+	runSetupCodexOwnershipHelper(t, linkedRoot, action)
+
+	if got := readSetupTestFile(t, primaryPath); got != primaryBefore {
+		t.Fatalf("primary hooks changed after linked-worktree %s\nwant: %s\n got: %s", description, primaryBefore, got)
+	}
+	if data := readSetupTestFile(t, linkedPath); strings.Contains(data, "entire hooks codex") {
+		t.Fatalf("linked-worktree Entire hooks still exist after %s: %s", description, data)
+	}
+}
+
+func TestSetupCodexLinkedWorktreeOwnershipHelper(t *testing.T) {
+	t.Parallel()
+	action := os.Getenv("ENTIRE_SETUP_CODEX_OWNERSHIP_HELPER")
+	if action == "" {
+		t.Skip("subprocess helper")
+	}
+	var output bytes.Buffer
+	switch action {
+	case "deselect":
+		if err := uninstallDeselectedAgentHooks(t.Context(), &output, nil); err != nil {
+			t.Fatal(err)
+		}
+	case "clean":
+		if err := removeAgentHooks(t.Context(), &output); err != nil {
+			t.Fatal(err)
+		}
+	default:
+		t.Fatalf("unknown ownership helper action %q", action)
+	}
+}
+
+func setupCodexOwnershipWorktrees(t *testing.T) (repoRoot, linkedRoot string) {
+	t.Helper()
+	tmp := t.TempDir()
+	repoRoot = filepath.Join(tmp, "repo")
+	linkedRoot = filepath.Join(tmp, "linked")
+	testutil.InitRepo(t, repoRoot)
+	testutil.WriteFile(t, repoRoot, "README.md", "initial\n")
+	testutil.GitAdd(t, repoRoot, "README.md")
+	testutil.GitCommit(t, repoRoot, "initial")
+	cmd := exec.CommandContext(t.Context(), "git", "-C", repoRoot, "worktree", "add", "-b", "feature", linkedRoot)
+	cmd.Env = testutil.GitIsolatedEnv()
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("create linked worktree: %v: %s", err, output)
+	}
+	for _, root := range []string{repoRoot, linkedRoot} {
+		hooksPath := filepath.Join(root, ".codex", "hooks.json")
+		if err := os.MkdirAll(filepath.Dir(hooksPath), 0o750); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(hooksPath, []byte(canonicalCodexHooksJSON()), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return repoRoot, linkedRoot
+}
+
+func runSetupCodexOwnershipHelper(t *testing.T, dir, action string) {
+	t.Helper()
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.CommandContext(t.Context(), executable, "-test.run=^TestSetupCodexLinkedWorktreeOwnershipHelper$", "-test.count=1")
+	cmd.Dir = dir
+	cmd.Env = append(os.Environ(),
+		"ENTIRE_SETUP_CODEX_OWNERSHIP_HELPER="+action,
+		"ENTIRE_TEST_TTY=0",
+		"CODEX_HOME="+filepath.Join(t.TempDir(), "codex-home"),
+	)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("run ownership helper: %v: %s", err, output)
+	}
+}
+
+func readSetupTestFile(t *testing.T, path string) string {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(data)
+}
+
+func setupCodexRepositoryWithLinkedWorktree(t *testing.T) {
+	t.Helper()
+	tmp := setupTestDir(t)
+	repoRoot := filepath.Join(tmp, "repo")
+	linkedRoot := filepath.Join(tmp, "linked")
+	testutil.InitRepo(t, repoRoot)
+	testutil.WriteFile(t, repoRoot, "README.md", "initial\n")
+	testutil.GitAdd(t, repoRoot, "README.md")
+	testutil.GitCommit(t, repoRoot, "initial")
+
+	cmd := exec.CommandContext(t.Context(), "git", "-C", repoRoot, "worktree", "add", "-b", "feature", linkedRoot)
+	cmd.Env = testutil.GitIsolatedEnv()
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("create linked worktree: %v: %s", err, output)
+	}
+	if err := os.MkdirAll(filepath.Join(linkedRoot, ".codex"), 0o750); err != nil {
+		t.Fatalf("create linked Codex project layer: %v", err)
+	}
+
+	t.Chdir(repoRoot)
+	paths.ClearWorktreeRootCache()
+	session.ClearGitCommonDirCache()
+	t.Setenv("CODEX_HOME", filepath.Join(tmp, "codex-home"))
+
+	ag, err := agent.Get(agent.AgentNameCodex)
+	if err != nil {
+		t.Fatalf("get Codex agent: %v", err)
+	}
+	hookAgent, ok := agent.AsHookSupport(ag)
+	if !ok {
+		t.Fatal("Codex agent does not support hooks")
+	}
+	if _, err := hookAgent.InstallHooks(context.Background(), false); err != nil {
+		t.Fatalf("install Codex hooks: %v", err)
+	}
+}
+
 func TestUninstallDeselectedAgentHooks_KeepsSelectedAgents(t *testing.T) {
 	// Cannot use t.Parallel() because we use t.Chdir
 	setupTestRepo(t)
@@ -2429,6 +2722,78 @@ func TestManageAgents_DeselectAll_RemovesAllAndShowsGuidance(t *testing.T) {
 
 	if checkClaudeCodeHooksInstalled() {
 		t.Error("Expected Claude Code hooks to be uninstalled after deselecting all")
+	}
+}
+
+func TestManageAgents_DeselectIgnoresPrimaryOnlyCodexHooks(t *testing.T) {
+	setupCodexRepositoryWithLinkedWorktree(t)
+	repoRoot, err := paths.WorktreeRoot(t.Context())
+	if err != nil {
+		t.Fatalf("resolve primary worktree: %v", err)
+	}
+	linkedRoot := filepath.Join(filepath.Dir(repoRoot), "linked")
+	if err := os.RemoveAll(filepath.Join(linkedRoot, ".codex")); err != nil {
+		t.Fatalf("remove linked Codex project layer: %v", err)
+	}
+	t.Chdir(linkedRoot)
+	paths.ClearWorktreeRootCache()
+	session.ClearGitCommonDirCache()
+
+	ag, err := agent.Get(agent.AgentNameCodex)
+	if err != nil {
+		t.Fatalf("get Codex agent: %v", err)
+	}
+	hookAgent, ok := agent.AsHookSupport(ag)
+	if !ok {
+		t.Fatal("Codex agent does not support hooks")
+	}
+	if hookAgent.AreHooksInstalled(t.Context()) {
+		t.Fatal("Codex hooks must be inactive without the linked checkout's .codex project layer")
+	}
+	freshness, ok := ag.(agent.HookFreshness)
+	if !ok || freshness.CheckHookConfig(t.Context()) != agent.HooksAbsent {
+		t.Fatal("primary-checkout Codex hooks must not count as local removable configuration")
+	}
+
+	var output bytes.Buffer
+	selectNone := func(_ []string) ([]string, error) { return nil, nil }
+	if err := runManageAgents(t.Context(), &output, EnableOptions{}, selectNone); err != nil {
+		t.Fatalf("runManageAgents() error = %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(repoRoot, ".codex", "hooks.json")); err != nil {
+		t.Fatalf("primary-checkout Codex hooks changed after deselection: %v", err)
+	}
+	if strings.Contains(output.String(), "Removed Codex hooks") {
+		t.Fatalf("deselection reported removing non-local Codex hooks: %s", output.String())
+	}
+}
+
+func TestManageAgents_DoesNotRemoveInvalidCodexFile(t *testing.T) {
+	setupCodexRepositoryWithLinkedWorktree(t)
+	repoRoot, err := paths.WorktreeRoot(t.Context())
+	if err != nil {
+		t.Fatalf("resolve primary worktree: %v", err)
+	}
+	hooksPath := filepath.Join(repoRoot, ".codex", "hooks.json")
+	const malformed = `{not-json`
+	if err := os.WriteFile(hooksPath, []byte(malformed), 0o600); err != nil {
+		t.Fatalf("write malformed Codex hooks: %v", err)
+	}
+
+	var output bytes.Buffer
+	selectNone := func(_ []string) ([]string, error) { return nil, nil }
+	if err := runManageAgents(t.Context(), &output, EnableOptions{}, selectNone); err != nil {
+		t.Fatalf("runManageAgents() error = %v", err)
+	}
+	data, err := os.ReadFile(hooksPath)
+	if err != nil {
+		t.Fatalf("read malformed Codex hooks: %v", err)
+	}
+	if string(data) != malformed {
+		t.Fatalf("invalid Codex file was changed: %q", data)
+	}
+	if strings.Contains(output.String(), "Removed Codex") {
+		t.Fatalf("invalid Codex file was offered for removal: %s", output.String())
 	}
 }
 

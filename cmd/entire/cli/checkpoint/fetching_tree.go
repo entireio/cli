@@ -209,6 +209,7 @@ func (t *FetchingTree) collectMissingBlobs(tree *object.Tree) []plumbing.Hash {
 // not in the cached index). We'd rather skip a wasted network round-trip.
 func (t *FetchingTree) blobOnDisk(hash plumbing.Hash) bool {
 	cmd := exec.CommandContext(t.ctx, "git", "cat-file", "-e", hash.String())
+	cmd.Env = append(cmd.Environ(), "GIT_NO_LAZY_FETCH=1")
 	return cmd.Run() == nil
 }
 
@@ -217,6 +218,7 @@ func (t *FetchingTree) blobOnDisk(hash plumbing.Hash) bool {
 // stale packfile index after external git commands fetched new objects.
 func (t *FetchingTree) readFileViaGit(path string, entry *object.TreeEntry) (*object.File, error) {
 	cmd := exec.CommandContext(t.ctx, "git", "cat-file", "-p", entry.Hash.String())
+	cmd.Env = append(cmd.Environ(), "GIT_NO_LAZY_FETCH=1")
 	content, cmdErr := cmd.Output()
 	if cmdErr != nil {
 		logging.Warn(t.ctx, "FetchingTree.readFileViaGit: cat-file failed",

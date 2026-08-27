@@ -161,6 +161,13 @@ type HookFreshness interface {
 	CheckHookConfig(ctx context.Context) HookConfigState
 }
 
+// EffectiveHookDiagnostics marks agents whose effective hook state is reported
+// by an agent-owned diagnostic surface rather than generic freshness output.
+type EffectiveHookDiagnostics interface {
+	Agent
+	OwnsEffectiveHookDiagnostics()
+}
+
 // FileWatcher is implemented by agents that use file-based detection.
 // Agents like Aider that don't support hooks can use file watching
 // to detect session activity.

@@ -13,6 +13,8 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+
+	"github.com/entireio/cli/cmd/entire/cli/api"
 )
 
 // Path mirrors server/cluster_discovery.go: the cluster advertises which
@@ -39,6 +41,15 @@ type Response struct {
 	// JurisdictionAudience — the endpoint a cross-jurisdiction
 	// token exchange dials. The audience itself is not dialable.
 	JurisdictionCoreURL string `json:"jurisdiction_core_url"`
+	// LoginURL is the cluster's advertised login server — the apex auth
+	// router (e.g. https://auth.entire.io), which fans an authorization
+	// request out to the caller's own regional core. Empty when the cluster
+	// advertises none or predates the field.
+	//
+	// Never a member of CoreURLs, and never eligible to be: the apex issues
+	// no tokens, so no login can carry it as an issuer. It answers "what do
+	// I type", not "whose tokens are accepted".
+	LoginURL string `json:"login_url"`
 }
 
 // Sentinel errors returned by Discover so callers can branch on the
@@ -145,35 +156,56 @@ func Discover(ctx context.Context, clusterHost string, c *http.Client, debugf De
 	return &body, nil
 }
 
+// loginTargets is what a resource says about authenticating to it. The two
+// fields answer different questions and are not interchangeable: coreURLs is
+// the trust set, which decides whether a saved login is *accepted*; loginURL is
+// the one server to send the operator to, which is the *remedy*.
+type loginTargets struct {
+	coreURLs []string
+	loginURL string
+}
+
 // renderLoginHint formats a fatal-ready "no auth context for <subject>"
 // message telling the operator how to get one. subject is a noun phrase like
 // "cluster nyc.entire.io" or "API host partial.to" so the same hint serves both
 // the git-cluster and data-API resolvers.
 //
-// The advertised login servers are named because for anything outside the
-// default federation they are the only actionable part: bare `entire login`
-// re-authenticates against api.DefaultAuthBaseURL, which for a resource that
-// doesn't trust that server reproduces the very failure being reported. Callers
-// reach this with no active login, or with one no saved login can replace, and
-// in both cases the remedy is a login against one of these servers.
-//
 // The instruction half is shared with the "active login rejected and nothing
 // saved fits" error, which supplies its own first line — see
 // renderLoginInstruction.
-func renderLoginHint(subject string, coreURLs []string) string {
-	return fmt.Sprintf("no auth context for %s.\n%s", subject, renderLoginInstruction(coreURLs))
+func renderLoginHint(subject string, t loginTargets) string {
+	return fmt.Sprintf("no auth context for %s.\n%s", subject, renderLoginInstruction(t))
 }
 
-// renderLoginInstruction is the actionable tail of a login hint: the servers the
-// resource trusts, and the command to obtain a login from one of them. Split out
-// so callers that have already explained the situation in their own words can
-// append the remedy without repeating "no auth context for <subject>".
+// renderLoginInstruction is the actionable tail of a login hint: the command
+// that obtains a login the resource will accept. Split out so callers that have
+// already explained the situation in their own words can append the remedy
+// without repeating "no auth context for <subject>".
 //
-// coreURLs is normalised and de-duplicated so a resource advertising the same
-// core twice (or with an inconsistent trailing slash) doesn't repeat itself, and
-// the order is the resource's own — its preferred core first.
-func renderLoginInstruction(coreURLs []string) string {
-	servers := trustedLoginServers(coreURLs)
+// An advertised login server ends it — that host is the apex router, and it
+// dispatches to whichever regional core owns the operator's account, so one URL
+// serves every account on the federation. When that host is the one `entire
+// login` already defaults to, the flag is dropped: naming it would teach a flag
+// whose own help text says it is rarely needed, and a user who learns it here is
+// liable to carry it to a host it doesn't belong on. Compared against the
+// constant rather than a literal, so the message follows if the default moves.
+//
+// Without one, the trusted issuers are named instead. They are a set of
+// candidates rather than an instruction, but for anything outside the default
+// federation they are the only actionable part: bare `entire login`
+// re-authenticates against api.DefaultAuthBaseURL, which for a resource that
+// doesn't trust that server reproduces the very failure being reported. They are
+// normalised and de-duplicated so a resource advertising the same core twice (or
+// with an inconsistent trailing slash) doesn't repeat itself, and the order is
+// the resource's own — its preferred core first.
+func renderLoginInstruction(t loginTargets) string {
+	if loginURL := normalizeCoreURL(t.loginURL); loginURL != "" {
+		if loginURL == normalizeCoreURL(api.DefaultAuthBaseURL) {
+			return "Log in with `entire login`, then re-run your command."
+		}
+		return fmt.Sprintf("Log in with `entire login --server %s`, then re-run your command.", loginURL)
+	}
+	servers := trustedLoginServers(t.coreURLs)
 	if len(servers) == 0 {
 		return "Log in with `entire login`, then re-run your command."
 	}

@@ -206,9 +206,9 @@ func attachPrompts(meta transcriptMetadata) []string {
 }
 
 func runAttach(ctx context.Context, w, errW io.Writer, sessionID string, agentName types.AgentName, opts attachOptions) error {
-	// The logger arrives in ctx from the root PersistentPreRun, and the root
-	// PersistentPostRun flushes it (main.go does for the error path cobra skips
-	// that hook on) — so attach neither builds nor closes one, the way
+	// The logger arrives in ctx from the root PersistentPreRun, and main.go
+	// closes it — the only close site, covering every path ExecuteContextC
+	// returns from — so attach neither builds nor closes one, the way
 	// resume/clean/reset/explain do not either. Only the session is attach's to
 	// add, so its lines are filterable.
 	ctx = logging.WithSessionID(ctx, sessionID)

@@ -75,6 +75,12 @@ func AsHookFreshness(ag Agent) (HookFreshness, bool) {
 	return builtinCapability[HookFreshness](ag)
 }
 
+// AsEffectiveHookDiagnostics returns the agent as EffectiveHookDiagnostics if
+// it owns diagnostics for its effective hook configuration.
+func AsEffectiveHookDiagnostics(ag Agent) (EffectiveHookDiagnostics, bool) {
+	return builtinCapability[EffectiveHookDiagnostics](ag)
+}
+
 // AsTranscriptAnalyzer returns the agent as TranscriptAnalyzer if it both
 // implements the interface and (for CapabilityDeclarer agents) has declared the capability.
 func AsTranscriptAnalyzer(ag Agent) (TranscriptAnalyzer, bool) {
@@ -220,6 +226,14 @@ func AsModelExtractor(ag Agent) (ModelExtractor, bool) {
 // agents do not expose this optional interface through declared capabilities.
 func AsSkillEventExtractor(ag Agent) (SkillEventExtractor, bool) {
 	return builtinCapability[SkillEventExtractor](ag)
+}
+
+// AsToolInvocationScanner returns the agent as ToolInvocationScanner if it
+// implements the interface. Built-in only: reading tool calls out of a
+// transcript needs knowledge of that transcript's shape, which an external
+// agent's parse-hook does not convey.
+func AsToolInvocationScanner(ag Agent) (ToolInvocationScanner, bool) {
+	return builtinCapability[ToolInvocationScanner](ag)
 }
 
 // AsSessionEndBudgeter returns the agent as SessionEndBudgeter if it implements

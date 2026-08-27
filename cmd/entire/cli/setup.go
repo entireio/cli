@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
+	codexagent "github.com/entireio/cli/cmd/entire/cli/agent/codex"
 	"github.com/entireio/cli/cmd/entire/cli/agent/external"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/gitremote"
@@ -21,6 +22,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
+	"github.com/entireio/cli/cmd/entire/cli/uiform"
 	"github.com/entireio/cli/cmd/entire/cli/vercelconfig"
 
 	"charm.land/huh/v2"
@@ -520,6 +522,7 @@ func runManageAgents(ctx context.Context, w io.Writer, opts EnableOptions, selec
 					Title("Manage agents").
 					Description("Use space to select/deselect, enter to confirm.").
 					Options(options...).
+					Height(uiform.SingleLineMultiSelectHeight(len(options))).
 					Value(&selectedAgentNames),
 			),
 		)
@@ -605,23 +608,10 @@ func applyAgentChanges(ctx context.Context, w io.Writer, selectedAgentNames []st
 		}
 		return nil
 	}
-	var successfullyAddedAgents []agent.Agent
-	for _, ag := range addedAgents {
-		if _, err := setupAgentHooks(ctx, ag, opts.ForceHooks); err != nil {
-			errs = append(errs, fmt.Errorf("failed to setup %s hooks: %w", ag.Type(), err))
-		} else {
-			successfullyAddedAgents = append(successfullyAddedAgents, ag)
-		}
-	}
-
-	var successfullyReinstalledAgents []agent.Agent
-	for _, ag := range reinstalledAgents {
-		if _, err := setupAgentHooks(ctx, ag, opts.ForceHooks); err != nil {
-			errs = append(errs, fmt.Errorf("failed to setup %s hooks: %w", ag.Type(), err))
-		} else {
-			successfullyReinstalledAgents = append(successfullyReinstalledAgents, ag)
-		}
-	}
+	successfullyAddedAgents, setupErrs := setupAgentHookSet(ctx, w, addedAgents, opts.ForceHooks)
+	errs = append(errs, setupErrs...)
+	successfullyReinstalledAgents, setupErrs := setupAgentHookSet(ctx, w, reinstalledAgents, opts.ForceHooks)
+	errs = append(errs, setupErrs...)
 
 	var uninstalledAgents []agent.Agent
 	for _, ag := range removedAgents {
@@ -1257,6 +1247,7 @@ func runEnableInteractive(ctx context.Context, w io.Writer, agents []agent.Agent
 		if _, err := setupAgentHooks(ctx, ag, opts.ForceHooks); err != nil {
 			return fmt.Errorf("failed to setup %s hooks: %w", ag.Type(), err)
 		}
+		warnCodexHooksAfterSetup(ctx, w, ag)
 		if err := setupOptionalSearchSkill(ctx, w, ag, opts); err != nil {
 			return err
 		}
@@ -1264,7 +1255,6 @@ func runEnableInteractive(ctx context.Context, w io.Writer, agents []agent.Agent
 			return err
 		}
 	}
-
 	// Setup .entire directory
 	if _, err := setupEntireDirectory(ctx); err != nil {
 		return fmt.Errorf("failed to setup .entire directory: %w", err)
@@ -1604,6 +1594,7 @@ func runRemoveAgent(ctx context.Context, w io.Writer, name string) error {
 	if err := hookAgent.UninstallHooks(ctx); err != nil {
 		return fmt.Errorf("failed to remove %s hooks: %w", ag.Type(), err)
 	}
+	warnCodexHooksAfterRemoval(ctx, w, ag)
 
 	fmt.Fprintf(w, "Removed %s hooks.\n", ag.Type())
 	return nil
@@ -1658,6 +1649,7 @@ func uninstallDeselectedAgentHooks(ctx context.Context, w io.Writer, selectedAge
 		if err := hookAgent.UninstallHooks(ctx); err != nil {
 			errs = append(errs, fmt.Errorf("failed to uninstall %s hooks: %w", ag.Type(), err))
 		} else {
+			warnCodexHooksAfterRemoval(ctx, w, ag)
 			fmt.Fprintf(w, "Removed %s hooks\n", ag.Type())
 		}
 	}
@@ -1680,6 +1672,48 @@ func setupAgentHooks(ctx context.Context, ag agent.Agent, forceHooks bool) (int,
 	return count, nil
 }
 
+func setupAgentHookSet(ctx context.Context, w io.Writer, agents []agent.Agent, forceHooks bool) ([]agent.Agent, []error) {
+	var successful []agent.Agent
+	var errs []error
+	for _, ag := range agents {
+		if _, err := setupAgentHooks(ctx, ag, forceHooks); err != nil {
+			errs = append(errs, fmt.Errorf("failed to setup %s hooks: %w", ag.Type(), err))
+			continue
+		}
+		warnCodexHooksAfterSetup(ctx, w, ag)
+		successful = append(successful, ag)
+	}
+	return successful, errs
+}
+
+func warnCodexHooksAfterSetup(ctx context.Context, w io.Writer, ag agent.Agent) {
+	if ag.Name() != agent.AgentNameCodex {
+		return
+	}
+
+	diagnostics := codexagent.InspectHookDiagnosticsLightweight(ctx)
+	if !diagnostics.PathsDiffer() {
+		return
+	}
+	fmt.Fprintf(w, "  Codex reads hooks from: %s\n", diagnostics.Discovery.DiscoveredHooks.Path())
+	fmt.Fprintf(w, "  Entire configured this worktree at: %s\n", diagnostics.WorktreeHooks.Path())
+	fmt.Fprintln(w, "  Hooks in the current-worktree file will not run here.")
+	writeCodexPrimaryCheckoutRemedy(w)
+}
+
+func warnCodexHooksAfterRemoval(ctx context.Context, w io.Writer, ag agent.Agent) {
+	if ag.Name() != agent.AgentNameCodex {
+		return
+	}
+
+	diagnostics := codexagent.InspectHookDiagnosticsLightweight(ctx)
+	if diagnostics.Discovered.State != codexagent.HookFileEntire {
+		return
+	}
+	fmt.Fprintf(w, "  Codex still reads Entire hooks from: %s\n", diagnostics.Discovery.DiscoveredHooks.Path())
+	fmt.Fprintln(w, "  .codex/hooks.json is tracked — remove the Entire-managed entries there and commit the change.")
+}
+
 // promptAgentSelection shows the interactive multi-select agent picker and
 // returns the chosen agent names. It is a package-level var so tests can
 // substitute it — no real TTY/form is available under `go test`.
@@ -1691,6 +1725,7 @@ var promptAgentSelection = func(options []huh.Option[string]) ([]string, error) 
 				Title("Select the agents you want to use").
 				Description("Use space to select, enter to confirm.").
 				Options(options...).
+				Height(uiform.SingleLineMultiSelectHeight(len(options))).
 				Validate(func(sel []string) error {
 					if len(sel) == 0 {
 						return errors.New("please select at least one agent")
@@ -1890,6 +1925,7 @@ func setupAgentHooksNonInteractive(ctx context.Context, w io.Writer, ag agent.Ag
 	if err != nil {
 		return fmt.Errorf("failed to setup %s hooks: %w", agentName, err)
 	}
+	warnCodexHooksAfterSetup(ctx, w, ag)
 	if err := setupOptionalSearchSkill(ctx, w, ag, opts); err != nil {
 		return err
 	}
@@ -1994,7 +2030,6 @@ func setupAgentHooksNonInteractive(ctx context.Context, w io.Writer, ag agent.Ag
 		}
 		fmt.Fprintf(w, "  %s\n", msg)
 	}
-
 	fmt.Fprintln(w, "  ✓ Configured project")
 	fmt.Fprintf(w, "    %s\n", configDisplay)
 
@@ -2391,12 +2426,12 @@ func runUninstall(ctx context.Context, w, errW io.Writer, force bool) error {
 	// version is stale but still ours, and uninstall must still offer to remove
 	// it rather than reporting that Entire is not installed here.
 	gitHooksInstalled := strategy.AnyGitHookInstalled(ctx)
-	agentsWithInstalledHooks := GetAgentsWithHooksInstalled(ctx)
+	agentsWithRemovableHooks := GetAgentsWithHooksInstalled(ctx)
 	entireDirExists := checkEntireDirExists(ctx)
 
 	// Check if there's anything to uninstall
 	if !entireDirExists && !gitHooksInstalled && sessionStateCount == 0 &&
-		shadowBranchCount == 0 && len(agentsWithInstalledHooks) == 0 {
+		shadowBranchCount == 0 && len(agentsWithRemovableHooks) == 0 {
 		fmt.Fprintln(w, "Entire is not installed in this repository.")
 		return nil
 	}
@@ -2416,8 +2451,8 @@ func runUninstall(ctx context.Context, w, errW io.Writer, force bool) error {
 		if shadowBranchCount > 0 {
 			fmt.Fprintf(w, "  - Shadow branches (%d)\n", shadowBranchCount)
 		}
-		if len(agentsWithInstalledHooks) > 0 {
-			fmt.Fprintf(w, "  - Agent hooks (%s)\n", strings.Join(agentDisplayNames(agentsWithInstalledHooks), ", "))
+		if len(agentsWithRemovableHooks) > 0 {
+			fmt.Fprintf(w, "  - Agent hooks (%s)\n", strings.Join(agentDisplayNames(agentsWithRemovableHooks), ", "))
 		}
 		fmt.Fprintln(w)
 
@@ -2516,7 +2551,8 @@ func checkEntireDirExists(ctx context.Context) bool {
 	return err == nil
 }
 
-// removeAgentHooks removes hooks from all agents that support hooks.
+// removeAgentHooks sweeps every hook-capable agent so legacy configurations
+// that predate an agent's current detection logic are still cleaned up.
 func removeAgentHooks(ctx context.Context, w io.Writer) error {
 	var errs []error
 	for _, name := range agent.List() {
@@ -2531,8 +2567,11 @@ func removeAgentHooks(ctx context.Context, w io.Writer) error {
 		wasInstalled := hs.AreHooksInstalled(ctx)
 		if err := hs.UninstallHooks(ctx); err != nil {
 			errs = append(errs, err)
-		} else if wasInstalled {
-			fmt.Fprintf(w, "  Removed %s hooks\n", ag.Type())
+		} else {
+			warnCodexHooksAfterRemoval(ctx, w, ag)
+			if wasInstalled {
+				fmt.Fprintf(w, "  Removed %s hooks\n", ag.Type())
+			}
 		}
 	}
 	return errors.Join(errs...)

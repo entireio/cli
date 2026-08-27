@@ -9,6 +9,8 @@ import (
 	"github.com/stretchr/testify/require"
 	"os"
 	"path/filepath"
+	"runtime"
+	"strings"
 	"testing"
 )
 
@@ -127,6 +129,59 @@ func TestInstallHooks_Idempotent(t *testing.T) {
 	count2, err := ag.InstallHooks(context.Background(), false)
 	require.NoError(t, err)
 	require.Equal(t, 0, count2)
+}
+
+func TestInstallHooks_RejectsOversizedHooksFile(t *testing.T) {
+	tempDir := setupTestEnv(t)
+	hooksPath := filepath.Join(tempDir, ".codex", HooksFileName)
+	require.NoError(t, os.MkdirAll(filepath.Dir(hooksPath), 0o750))
+	contents := `{"padding":"` + strings.Repeat("x", maxHooksFileBytes) + `"}`
+	require.NoError(t, os.WriteFile(hooksPath, []byte(contents), 0o600))
+
+	_, err := (&CodexAgent{}).InstallHooks(context.Background(), false)
+	require.ErrorContains(t, err, "exceeds 1048576 bytes")
+}
+
+func TestInstallAndUninstallHooks_RejectRedirectedTargets(t *testing.T) {
+	if runtime.GOOS == testWindowsOS {
+		t.Skip("symlink creation is not generally available on Windows")
+	}
+	tempDir := setupTestEnv(t)
+	outside := t.TempDir()
+	outsideHooks := filepath.Join(outside, HooksFileName)
+	require.NoError(t, os.WriteFile(outsideHooks, []byte(`{"keep":true}`), 0o600))
+	require.NoError(t, os.Symlink(outside, filepath.Join(tempDir, ".codex")))
+
+	_, err := (&CodexAgent{}).InstallHooks(context.Background(), false)
+	require.Error(t, err)
+	data, readErr := os.ReadFile(outsideHooks)
+	require.NoError(t, readErr)
+	require.Equal(t, `{"keep":true}`, string(data))
+
+	require.Error(t, (&CodexAgent{}).UninstallHooks(context.Background()))
+	data, readErr = os.ReadFile(outsideHooks)
+	require.NoError(t, readErr)
+	require.Equal(t, `{"keep":true}`, string(data))
+}
+
+func TestInstallAndUninstallHooks_RejectRedirectedHooksFile(t *testing.T) {
+	if runtime.GOOS == testWindowsOS {
+		t.Skip("symlink creation is not generally available on Windows")
+	}
+	tempDir := setupTestEnv(t)
+	outside := t.TempDir()
+	outsideHooks := filepath.Join(outside, HooksFileName)
+	require.NoError(t, os.WriteFile(outsideHooks, []byte(`{"keep":true}`), 0o600))
+	projectDir := filepath.Join(tempDir, ".codex")
+	require.NoError(t, os.Mkdir(projectDir, 0o750))
+	require.NoError(t, os.Symlink(outsideHooks, filepath.Join(projectDir, HooksFileName)))
+
+	_, err := (&CodexAgent{}).InstallHooks(context.Background(), false)
+	require.Error(t, err)
+	require.Error(t, (&CodexAgent{}).UninstallHooks(context.Background()))
+	data, readErr := os.ReadFile(outsideHooks)
+	require.NoError(t, readErr)
+	require.Equal(t, `{"keep":true}`, string(data))
 }
 
 func TestInstallHooks_ReplacesLegacyLocalDevHook(t *testing.T) {

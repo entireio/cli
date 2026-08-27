@@ -116,6 +116,16 @@ type condenseOpts struct {
 	// and updateCombinedAttributionForCheckpoint writing attribution under the
 	// same non-existent ID.
 	reconcileInterrupted bool
+
+	// searchProbeAllowed gates the telemetry-only search-usage transcript scan
+	// (detectSearchUsage). nil or false means don't scan: the probe then stays
+	// its zero value, which the payload layer refuses to present as a
+	// measurement (searchProbe.measured). Only PostCommit — the sole path that
+	// emits the commit-condensed signal — passes a gate; the doctor and
+	// session-end condensation paths never scan because nothing would read the
+	// result. The gate is memoized per commit by commitCondensedEmitter, so the
+	// settings load behind it runs at most once per PostCommit.
+	searchProbeAllowed func() bool
 }
 
 // redactSessionJSONLBytes runs the regex-only redaction pipeline (the
@@ -250,7 +260,9 @@ func prepareTaskTranscriptForStorage(
 		return redact.RedactedBytes{}, nil, true, nil
 	}
 	externalized, assets := externalizeSessionImages(ctx, logCtx, state, sanitized)
-	redacted, _, err = redactSessionTranscript(logCtx, externalized)
+	// nil repo declines prefix reuse: a subagent transcript is written once per
+	// task, not appended across checkpoints, so there is nothing to reuse.
+	redacted, _, err = redactSessionTranscript(logCtx, nil, "", externalized)
 	if err != nil {
 		return redact.RedactedBytes{}, nil, false, err
 	}
@@ -577,9 +589,21 @@ func (s *ManualCommitStrategy) CondenseSession(ctx context.Context, repo *git.Re
 	// externalized, redacted copy is stored.
 	externalizedTranscript, extractedAssets, transcriptSizeBaseline := prepareTranscriptForStorage(ctx, logCtx, ag, state, sessionData.Transcript)
 
-	redactedTranscript, redactDuration := redactOrDrop(logCtx, externalizedTranscript, state.SessionID, checkpointID)
+	redactedTranscript, redactDuration := redactOrDrop(logCtx, repo, state.SessionID, externalizedTranscript, checkpointID)
 	if skipped := skipIfPostRedactionEmpty(logCtx, redactedTranscript, sessionData, state, checkpointID); skipped != nil {
 		return skipped, nil
+	}
+
+	// Telemetry-only search probe, computed exactly once for every result this
+	// function can return (the recovery result below included) so no
+	// construction site can ship the zero value by omission — the fabricated
+	// negative searchProbe.measured exists to catch. Gated: the scan is a
+	// full-transcript pass, and only the PostCommit path, with telemetry
+	// enabled, has a reader for it. detectSearchUsage maps a nil agent or
+	// empty transcript to unsupported, which is the honest answer for the
+	// no-transcript extraction branch.
+	if o.searchProbeAllowed != nil && o.searchProbeAllowed() {
+		sessionData.SearchProbe = detectSearchUsage(ag, sessionData.Transcript)
 	}
 
 	// Capture agent sidecar images (e.g. Cursor's SQLite store) after the skip
@@ -647,6 +671,7 @@ func (s *ManualCommitStrategy) CondenseSession(ctx context.Context, repo *git.Re
 		TotalTranscriptLines:   sessionData.FullTranscriptLines,
 		TranscriptSizeBaseline: transcriptSizeBaseline,
 		NewSkillEvents:         newSkillEvents,
+		SearchProbe:            sessionData.SearchProbe,
 	}, nil
 }
 
@@ -760,8 +785,8 @@ func buildCondensationWriteOptions(
 // redactOrDrop runs redactSessionTranscript and, on failure, logs a warning
 // and returns empty bytes. Drop-on-failure is the long-standing contract here:
 // hooks have no retry path, and a failed redaction must not block the commit.
-func redactOrDrop(logCtx context.Context, transcript []byte, sessionID string, checkpointID id.CheckpointID) (redact.RedactedBytes, time.Duration) {
-	redactedTranscript, redactDuration, err := redactSessionTranscript(logCtx, transcript)
+func redactOrDrop(logCtx context.Context, repo *git.Repository, sessionID string, transcript []byte, checkpointID id.CheckpointID) (redact.RedactedBytes, time.Duration) {
+	redactedTranscript, redactDuration, err := redactSessionTranscript(logCtx, repo, sessionID, transcript)
 	if err != nil {
 		logging.Warn(logCtx, "failed to redact transcript secrets, dropping transcript for checkpoint",
 			slog.String("session_id", sessionID),
@@ -828,7 +853,17 @@ func newSkippedResult(checkpointID id.CheckpointID, sessionID string) *CondenseR
 // package and the checkpoint stores. Returns the redacted bytes and the duration
 // of the redaction operation for perf logging. Also the redaction step
 // prepareTaskTranscriptForStorage reuses for a subagent's own transcript.
-func redactSessionTranscript(ctx context.Context, transcript []byte) (redact.RedactedBytes, time.Duration, error) {
+//
+// A non-nil repo with a sessionID opts into prefix reuse (see
+// checkpoint/redact_cache.go); a nil repo or empty sessionID redacts the whole
+// content, which is what the per-subagent caller wants -- a task transcript is
+// not the append-only stream the cache assumes.
+func redactSessionTranscript(
+	ctx context.Context,
+	repo *git.Repository,
+	sessionID string,
+	transcript []byte,
+) (redact.RedactedBytes, time.Duration, error) {
 	start := time.Now()
 	_, span := perf.Start(ctx, "redact_transcript")
 	defer span.End()
@@ -837,7 +872,7 @@ func redactSessionTranscript(ctx context.Context, transcript []byte) (redact.Red
 		return redact.RedactedBytes{}, time.Since(start), nil
 	}
 
-	redacted, err := redactSessionJSONLBytes(ctx, transcript)
+	redacted, err := cpkg.RedactTranscriptCached(ctx, repo, sessionID, transcript, redactSessionJSONLBytes)
 	if err != nil {
 		span.RecordError(err)
 		return redact.RedactedBytes{}, time.Since(start), fmt.Errorf("failed to redact transcript secrets: %w", err)
@@ -1640,7 +1675,7 @@ func (s *ManualCommitStrategy) CondenseSessionByID(ctx context.Context, sessionI
 	var shadowBranchName string
 	var clearAfter bool
 	var newSkillEvents []agent.SkillEvent
-	stateSaved, mutErr := MutateSessionStateSaved(ctx, sessionID, func(state *SessionState) error {
+	mutErr := MutateSessionStateOnSaved(ctx, sessionID, func(state *SessionState) error {
 		if state.PendingCondensationID() != checkpointID {
 			return ErrMutationSkip
 		}
@@ -1691,15 +1726,21 @@ func (s *ManualCommitStrategy) CondenseSessionByID(ctx context.Context, sessionI
 		state.PromptAttributions = nil
 		state.PendingPromptAttribution = nil
 		return nil
+	}, func() {
+		// Skill telemetry only. commitCondensedEmitter.emit is deliberately NOT
+		// called here: its payload is commit-scoped (files_committed counts a
+		// commit's files, and prior_ai_history's git-log probe uses --skip=1 to
+		// exclude the commit just made). This path condenses without a commit —
+		// doctor repairing an uncondensed session — so those fields would be
+		// meaningless and --skip=1 would exclude an unrelated HEAD. See
+		// newCommitCondensedSignal.
+		EmitSkillInvocationTelemetry(ctx, newSkillEvents)
 	})
 	if errors.Is(mutErr, ErrStateNotFound) {
 		return fmt.Errorf("session not found: %s", sessionID)
 	}
 	if mutErr != nil {
 		return mutErr
-	}
-	if stateSaved {
-		EmitSkillInvocationTelemetry(ctx, newSkillEvents)
 	}
 
 	if clearAfter {
@@ -1819,7 +1860,7 @@ func (s *ManualCommitStrategy) CondenseAndMarkFullyCondensed(ctx context.Context
 
 	var didCondense bool
 	var newSkillEvents []agent.SkillEvent
-	stateSaved, mutErr := MutateSessionStateSaved(ctx, sessionID, func(state *SessionState) error {
+	mutErr := MutateSessionStateOnSaved(ctx, sessionID, func(state *SessionState) error {
 		var preflightErr error
 		shadowBranchName, shouldCondense, preflightErr = prepareEagerCondensation(logCtx, repo, state)
 		if preflightErr != nil || !shouldCondense {
@@ -1866,15 +1907,17 @@ func (s *ManualCommitStrategy) CondenseAndMarkFullyCondensed(ctx context.Context
 		)
 		didCondense = true
 		return nil
+	}, func() {
+		// Skill telemetry only — same reason as CondenseSessionByID: this
+		// condenses the work left over after the last commit, so there is no
+		// commit for the commit-condensed signal to describe.
+		EmitSkillInvocationTelemetry(ctx, newSkillEvents)
 	})
 	if errors.Is(mutErr, ErrStateNotFound) {
 		return nil
 	}
 	if mutErr != nil {
 		return fmt.Errorf("failed to save session state: %w", mutErr)
-	}
-	if stateSaved {
-		EmitSkillInvocationTelemetry(ctx, newSkillEvents)
 	}
 
 	if didCondense && shadowBranchName != "" {

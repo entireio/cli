@@ -38,8 +38,9 @@ func skillEventKey(ev agent.SkillEvent) string {
 // turn-end finalize both re-extract skill events from the full transcript
 // (offset 0) on every run, so without a durable record each pass would
 // re-surface the same events. Callers forward the returned slice to telemetry
-// only after their surrounding MutateSessionState saves the state — an
-// unsaved append is re-derived (and re-returned) by the next pass.
+// from MutateSessionStateOnSaved's post-save effect, so it is announced only
+// once the append is on disk — an unsaved append is re-derived (and
+// re-returned) by the next pass.
 func appendNewSkillEvents(state *SessionState, candidates []agent.SkillEvent) []agent.SkillEvent {
 	if len(candidates) == 0 {
 		return nil
