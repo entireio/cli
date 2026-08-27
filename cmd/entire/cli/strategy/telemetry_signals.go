@@ -10,6 +10,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
+	"github.com/entireio/cli/cmd/entire/cli/gitdir"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/cmd/entire/cli/telemetry"
 	"github.com/entireio/cli/cmd/entire/cli/trailers"
@@ -326,7 +327,7 @@ func detectSearchUsage(ag agent.Agent, transcriptData []byte) searchProbe {
 // ambient HEAD matters twice over: the probe runs after the session gate
 // releases, so HEAD may have moved (a chained hook amending, a concurrent
 // commit), and hooks inherit git's exported GIT_DIR/GIT_WORK_TREE, which
-// override -C's repo selection — gitEnvWithoutRepoOverrides scrubs those, same
+// override -C's repo selection — gitdir.EnvWithoutRepoOverrides scrubs those, same
 // as this package's other `git -C` call site. Paths match git log --name-only
 // output, i.e. the same form as SessionState.FilesTouched.
 //
@@ -364,7 +365,7 @@ func priorAICommitFiles(ctx context.Context, repoRoot, commit string) (result ma
 	cmd := exec.CommandContext(ctx, "git", "-C", repoRoot, "log", "-z",
 		"--skip=1", "-n", strconv.Itoa(priorAICheckpointsLookback),
 		"--name-only", "--format=%x00%H%n%B", commit)
-	cmd.Env = gitEnvWithoutRepoOverrides()
+	cmd.Env = gitdir.EnvWithoutRepoOverrides()
 	out, err := cmd.Output()
 	if err != nil {
 		return nil, false

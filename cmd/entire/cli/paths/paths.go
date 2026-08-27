@@ -32,9 +32,14 @@ const (
 	// begins at the session metadata's compact_transcript_start.
 	CompactTranscriptFileName = "transcript.jsonl"
 	MetadataFileName          = "metadata.json"
-	CheckpointFileName        = "checkpoint.json"
-	ContentHashFileName       = "content_hash.txt"
-	SettingsFileName          = "settings.json"
+	// EntityDeltasFileName holds the code entities (functions, classes, types)
+	// that changed during a session, backfilled into the session's directory
+	// after the checkpoint is written. The document schema is a cross-repo
+	// contract — see strategy/entity_deltas.go.
+	EntityDeltasFileName = "entity_deltas.json"
+	CheckpointFileName   = "checkpoint.json"
+	ContentHashFileName  = "content_hash.txt"
+	SettingsFileName     = "settings.json"
 
 	// AssetsDir is the per-session subfolder holding externalized transcript
 	// assets (e.g. images); AssetsManifestFile indexes them. AssetsDirName is the

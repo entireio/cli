@@ -80,6 +80,12 @@ func (s *GitStore) writeSession(ctx context.Context, opts WriteOptions) error {
 		return fmt.Errorf("failed to ensure sessions branch: %w", err)
 	}
 
+	return writeWithRefRaceRetry(ctx, "session write", func() error {
+		return s.tryWriteSession(ctx, opts)
+	})
+}
+
+func (s *GitStore) tryWriteSession(ctx context.Context, opts WriteOptions) error {
 	// Get branch ref and root tree hash (O(1), no flatten)
 	parentHash, rootTreeHash, err := s.getSessionsBranchRef()
 	if err != nil {
@@ -113,7 +119,7 @@ func (s *GitStore) writeSession(ctx context.Context, opts WriteOptions) error {
 		return err
 	}
 
-	return s.setPrimaryRef(newCommitHash)
+	return s.casPrimaryRef(parentHash, newCommitHash)
 }
 
 // subtreeObjAt returns the tree object for one checkpoint's subtree within a root
@@ -266,6 +272,61 @@ func (s *treeWriter) applyAttributionBackfill(ctx context.Context, existing *obj
 		Name: rootMetadataPath,
 		Mode: filemode.Regular,
 		Hash: metadataHash,
+	}
+
+	return s.buildCheckpointSubtree(ctx, entries, basePath)
+}
+
+// applyEntityDeltasBackfill writes one session's entity-delta document into
+// that session's directory on the checkpoint's current subtree, returning the
+// new subtree hash. Returns ErrCheckpointNotFound when the checkpoint has no
+// root summary, and a plain (non-sentinel, so store routing does not fall
+// through) error when no session in it carries sessionID.
+//
+// Unlike applySummaryBackfill (which targets the latest session), the target is
+// resolved from the session ID: entity deltas are produced per session and a
+// checkpoint can hold several, so writing into "the latest" would attribute one
+// session's deltas to another.
+func (s *treeWriter) applyEntityDeltasBackfill(ctx context.Context, existing *object.Tree, basePath, sessionID string, document []byte) (plumbing.Hash, error) {
+	entries, err := s.flattenExisting(existing, basePath)
+	if err != nil {
+		return plumbing.ZeroHash, err
+	}
+
+	rootMetadataPath := checkpointSubtreePath(basePath, paths.MetadataFileName)
+	entry, exists := entries[rootMetadataPath]
+	if !exists {
+		return plumbing.ZeroHash, ErrCheckpointNotFound
+	}
+	summary, err := s.readSummaryFromBlob(entry.Hash)
+	if err != nil {
+		return plumbing.ZeroHash, fmt.Errorf("failed to read checkpoint summary: %w", err)
+	}
+
+	// findSessionIndex returns len(Sessions) for "not present" — for a backfill
+	// that is a miss, not an append slot: there is no session document to attach
+	// the deltas to.
+	sessionIndex := s.findSessionIndex(ctx, basePath, summary, entries, sessionID)
+	if sessionIndex >= len(summary.Sessions) {
+		return plumbing.ZeroHash, fmt.Errorf("entity deltas: session %q not found in checkpoint", sessionID)
+	}
+
+	deltasPath := checkpointSubtreePath(basePath, strconv.Itoa(sessionIndex), paths.EntityDeltasFileName)
+	// Same regex-only redaction every other checkpoint file gets on the
+	// post-commit path; the pre-push OPF rewrite re-redacts it with the 9th
+	// layer along with the rest of the tree.
+	redacted, err := RedactBlobBytes(ctx, document, paths.EntityDeltasFileName, false)
+	if err != nil {
+		return plumbing.ZeroHash, fmt.Errorf("redact entity deltas: %w", err)
+	}
+	blobHash, err := CreateBlobFromContent(s.repo, redacted)
+	if err != nil {
+		return plumbing.ZeroHash, fmt.Errorf("failed to create entity deltas blob: %w", err)
+	}
+	entries[deltasPath] = object.TreeEntry{
+		Name: deltasPath,
+		Mode: filemode.Regular,
+		Hash: blobHash,
 	}
 
 	return s.buildCheckpointSubtree(ctx, entries, basePath)
@@ -849,6 +910,12 @@ func (s *GitStore) backfillAttribution(ctx context.Context, checkpointID id.Chec
 		return err
 	}
 
+	return writeWithRefRaceRetry(ctx, "attribution backfill", func() error {
+		return s.tryBackfillAttribution(ctx, checkpointID, combinedAttribution)
+	})
+}
+
+func (s *GitStore) tryBackfillAttribution(ctx context.Context, checkpointID id.CheckpointID, combinedAttribution *Attribution) error {
 	parentHash, rootTreeHash, err := s.getSessionsBranchRef()
 	if err != nil {
 		return err
@@ -875,7 +942,69 @@ func (s *GitStore) backfillAttribution(ctx context.Context, checkpointID id.Chec
 		return err
 	}
 
-	return s.setPrimaryRef(newCommitHash)
+	return s.casPrimaryRef(parentHash, newCommitHash)
+}
+
+// backfillEntityDeltas attaches a session's entity-delta document to an
+// existing checkpoint on the v1 branch. Like backfillAttribution it is a
+// post-hoc write: the checkpoint is already committed, so a failure here leaves
+// it exactly as it was.
+//
+// CONCURRENCY. This one runs in a detached child (see strategy.RunEntityDeltasBackfill)
+// that shares no lock with the condense path — condensation serializes on the
+// per-session state lock, the children on their own backfill lock — so the v1
+// tip genuinely can move between the read below and the write. A force-set here
+// would commit onto a stale parent and silently orphan whatever landed in
+// between (another session's checkpoint, an attribution backfill). Hence the
+// compare-and-swap, and hence the rebuild: on a lost race the document is
+// rebuilt on the winner's tip so BOTH survive.
+func (s *GitStore) backfillEntityDeltas(ctx context.Context, req SessionEntityDeltas) error {
+	if err := ctx.Err(); err != nil {
+		return err //nolint:wrapcheck // Propagating context cancellation
+	}
+
+	// Backfills require the branch to exist; a miss must not create it.
+	if err := s.requireSessionsBranch(); err != nil {
+		return err
+	}
+
+	return writeWithRefRaceRetry(ctx, "entity deltas backfill", func() error {
+		return s.tryBackfillEntityDeltas(ctx, req)
+	})
+}
+
+// tryBackfillEntityDeltas is one attempt of backfillEntityDeltas: read the tip,
+// build the document into it, and compare-and-swap. It re-reads the tip on
+// every call, so a retry after a lost race rebuilds on the new parent rather
+// than replaying a commit built on the old one.
+func (s *GitStore) tryBackfillEntityDeltas(ctx context.Context, req SessionEntityDeltas) error {
+	parentHash, rootTreeHash, err := s.getSessionsBranchRef()
+	if err != nil {
+		return err
+	}
+
+	existing, err := s.subtreeObjAt(rootTreeHash, req.CheckpointID.Path())
+	if err != nil {
+		return err
+	}
+	checkpointSubtree, err := s.applyEntityDeltasBackfill(ctx, existing, req.CheckpointID.Path()+"/", req.SessionID, req.Document)
+	if err != nil {
+		return err
+	}
+
+	newTreeHash, err := s.spliceCheckpointSubtree(rootTreeHash, req.CheckpointID, checkpointSubtree)
+	if err != nil {
+		return err
+	}
+
+	authorName, authorEmail := GetGitAuthorFromRepo(s.repo)
+	commitMsg := fmt.Sprintf("Record entity deltas for checkpoint %s (session: %s)", req.CheckpointID, req.SessionID)
+	newCommitHash, err := CreateCommit(ctx, s.repo, newTreeHash, parentHash, commitMsg, authorName, authorEmail)
+	if err != nil {
+		return err
+	}
+
+	return s.casPrimaryRef(parentHash, newCommitHash)
 }
 
 // findSessionIndex returns the index of an existing session with the given ID,
@@ -1715,6 +1844,12 @@ func (s *GitStore) backfillSummary(ctx context.Context, checkpointID id.Checkpoi
 		return err
 	}
 
+	return writeWithRefRaceRetry(ctx, "summary backfill", func() error {
+		return s.tryBackfillSummary(ctx, checkpointID, summary)
+	})
+}
+
+func (s *GitStore) tryBackfillSummary(ctx context.Context, checkpointID id.CheckpointID, summary *Summary) error {
 	// Get branch ref and root tree hash (O(1), no flatten)
 	parentHash, rootTreeHash, err := s.getSessionsBranchRef()
 	if err != nil {
@@ -1742,7 +1877,7 @@ func (s *GitStore) backfillSummary(ctx context.Context, checkpointID id.Checkpoi
 		return err
 	}
 
-	return s.setPrimaryRef(newCommitHash)
+	return s.casPrimaryRef(parentHash, newCommitHash)
 }
 
 // backfillTranscript replaces the transcript, prompts, and context for an existing
@@ -1766,6 +1901,12 @@ func (s *GitStore) backfillTranscript(ctx context.Context, opts UpdateOptions) e
 		return err
 	}
 
+	return writeWithRefRaceRetry(ctx, "transcript backfill", func() error {
+		return s.tryBackfillTranscript(ctx, opts)
+	})
+}
+
+func (s *GitStore) tryBackfillTranscript(ctx context.Context, opts UpdateOptions) error {
 	// Get branch ref and root tree hash (O(1), no flatten)
 	parentHash, rootTreeHash, err := s.getSessionsBranchRef()
 	if err != nil {
@@ -1797,7 +1938,7 @@ func (s *GitStore) backfillTranscript(ctx context.Context, opts UpdateOptions) e
 		return err
 	}
 
-	return s.setPrimaryRef(newCommitHash)
+	return s.casPrimaryRef(parentHash, newCommitHash)
 }
 
 // updateSessionMetadata reads the session metadata blob from entries, applies

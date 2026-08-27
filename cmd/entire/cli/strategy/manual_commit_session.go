@@ -2,18 +2,15 @@ package strategy
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"log/slog"
-	"os"
-	"os/exec"
 	"path/filepath"
-	"strings"
 	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
+	"github.com/entireio/cli/cmd/entire/cli/gitdir"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
@@ -233,7 +230,7 @@ func (s *ManualCommitStrategy) findSessionsForWorktreeFromStates(ctx context.Con
 		return exact, false
 	}
 
-	worktreeCommonDir, err := gitCommonDirForWorktree(ctx, worktreePath)
+	worktreeCommonDir, err := gitdir.CommonDirForWorktree(ctx, worktreePath)
 	if err != nil {
 		logging.Debug(logging.WithComponent(ctx, "checkpoint"),
 			"session matching: cannot resolve common dir for fallback matching",
@@ -251,7 +248,7 @@ func (s *ManualCommitStrategy) findSessionsForWorktreeFromStates(ctx context.Con
 
 		stateCommonDir, seen := commonDirByPath[state.WorktreePath]
 		if !seen {
-			stateCommonDir = gitCommonDirForWorktreeOrEmpty(ctx, state.WorktreePath)
+			stateCommonDir = gitdirCommonDirOrEmpty(ctx, state.WorktreePath)
 			commonDirByPath[state.WorktreePath] = stateCommonDir
 		}
 		if stateCommonDir == "" || stateCommonDir != worktreeCommonDir {
@@ -406,11 +403,11 @@ func reconcileWorktreePathForResumedTurn(ctx context.Context, state *SessionStat
 	// current common dir means we can't establish our own repo — bail. When the
 	// recorded path still resolves to our common dir it remains a valid
 	// worktree, so leave it alone.
-	currentCommonDir := gitCommonDirForWorktreeOrEmpty(ctx, current)
+	currentCommonDir := gitdirCommonDirOrEmpty(ctx, current)
 	if currentCommonDir == "" {
 		return
 	}
-	if gitCommonDirForWorktreeOrEmpty(ctx, state.WorktreePath) == currentCommonDir {
+	if gitdirCommonDirOrEmpty(ctx, state.WorktreePath) == currentCommonDir {
 		return
 	}
 
@@ -426,57 +423,12 @@ func reconcileWorktreePathForResumedTurn(ctx context.Context, state *SessionStat
 	)
 }
 
-func gitCommonDirForWorktreeOrEmpty(ctx context.Context, worktreePath string) string {
-	commonDir, err := gitCommonDirForWorktree(ctx, worktreePath)
+func gitdirCommonDirOrEmpty(ctx context.Context, worktreePath string) string {
+	commonDir, err := gitdir.CommonDirForWorktree(ctx, worktreePath)
 	if err != nil {
 		return ""
 	}
 	return commonDir
-}
-
-func gitCommonDirForWorktree(ctx context.Context, worktreePath string) (string, error) {
-	if worktreePath == "" {
-		return "", errors.New("empty worktree path")
-	}
-
-	cmd := exec.CommandContext(ctx, "git", "-C", worktreePath, "rev-parse", "--git-common-dir")
-	cmd.Env = gitEnvWithoutRepoOverrides()
-	output, err := cmd.Output()
-	if err != nil {
-		return "", fmt.Errorf("failed to get git common dir for %s: %w", worktreePath, err)
-	}
-
-	commonDir := strings.TrimSpace(string(output))
-	if commonDir == "" {
-		return "", fmt.Errorf("empty git common dir for %s", worktreePath)
-	}
-	if !filepath.IsAbs(commonDir) {
-		commonDir = filepath.Join(worktreePath, commonDir)
-	}
-	commonDir = filepath.Clean(commonDir)
-	if resolved, err := filepath.EvalSymlinks(commonDir); err == nil {
-		commonDir = resolved
-	}
-	return commonDir, nil
-}
-
-// gitEnvWithoutRepoOverrides returns the current environment minus git's
-// repo-selector variables. Git hooks run with GIT_DIR (and sometimes
-// GIT_WORK_TREE / GIT_INDEX_FILE) exported for the hook's own repo; inheriting
-// them would make `git -C <other-worktree>` resolve against the hook's repo
-// instead of the requested path.
-func gitEnvWithoutRepoOverrides() []string {
-	env := os.Environ()
-	filtered := make([]string, 0, len(env))
-	for _, kv := range env {
-		if strings.HasPrefix(kv, "GIT_DIR=") ||
-			strings.HasPrefix(kv, "GIT_WORK_TREE=") ||
-			strings.HasPrefix(kv, "GIT_INDEX_FILE=") {
-			continue
-		}
-		filtered = append(filtered, kv)
-	}
-	return filtered
 }
 
 func isNestedWorktreeOfRecordedRepo(recordedWorktreePath, commitWorktreePath string) bool {

@@ -2,6 +2,7 @@ package execx
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
@@ -20,12 +21,25 @@ import (
 // binary, and re-execing it would fork the whole suite. Tests exercise the
 // call sites through their spawn seams instead.
 func SpawnDetached(dir string, args ...string) {
+	//nolint:errcheck // the swallow-everything variant, by contract
+	_ = SpawnDetachedErr(dir, args...)
+}
+
+// SpawnDetachedErr is SpawnDetached for callers that left something behind for
+// the child to pick up (a job file, a claim) and must clean it up when there is
+// no child. It reports why the spawn never happened; it says nothing about what
+// the child then did, which nobody waits for either way.
+//
+// The `go test` no-op returns nil: from the caller's side the spawn did not
+// fail, it did not happen at all, and reporting a failure would make tests
+// exercise a cleanup path production never takes.
+func SpawnDetachedErr(dir string, args ...string) error {
 	if testing.Testing() {
-		return
+		return nil
 	}
 	executable, err := os.Executable()
 	if err != nil {
-		return
+		return fmt.Errorf("resolve current executable: %w", err)
 	}
 
 	// context.Background(): the child must outlive the parent, so it is never
@@ -41,9 +55,10 @@ func SpawnDetached(dir string, args ...string) {
 	cmd.Stderr = io.Discard
 
 	if err := cmd.Start(); err != nil {
-		return
+		return fmt.Errorf("start detached %s: %w", executable, err)
 	}
 	// Release the process so it can run independently of the parent.
 	//nolint:errcheck // best effort — the child continues regardless
 	_ = cmd.Process.Release()
+	return nil
 }

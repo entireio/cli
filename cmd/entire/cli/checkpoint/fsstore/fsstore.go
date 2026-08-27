@@ -55,6 +55,10 @@ type storedSession struct {
 	Metadata   cp.Metadata `json:"metadata"`
 	Transcript []byte      `json:"transcript,omitempty"`
 	Prompts    string      `json:"prompts,omitempty"`
+	// EntityDeltas is the opaque entity_deltas.json document backfilled after
+	// the session was written. The git backends store it as a file in the
+	// session directory; here it is just a field.
+	EntityDeltas json.RawMessage `json:"entity_deltas,omitempty"`
 }
 
 type storedCheckpoint struct {
@@ -119,6 +123,8 @@ func (s *Store) Write(_ context.Context, req cp.WriteRequest) error {
 		return s.backfillTranscript(cp.UpdateOptions(r))
 	case cp.SessionSummary:
 		return s.writeSessionSummary(r)
+	case cp.SessionEntityDeltas:
+		return s.writeEntityDeltas(r)
 	case cp.CheckpointAttribution:
 		return s.writeAttribution(r)
 	default:
@@ -187,6 +193,22 @@ func (s *Store) writeSessionSummary(r cp.SessionSummary) error {
 		return fmt.Errorf("fsstore: cannot set summary for unknown checkpoint %s", r.CheckpointID)
 	}
 	sc.Sessions[len(sc.Sessions)-1].Metadata.Summary = checkpoint.RedactSummary(r.Summary)
+	return s.save(sc)
+}
+
+func (s *Store) writeEntityDeltas(r cp.SessionEntityDeltas) error {
+	sc, err := s.load(r.CheckpointID)
+	if err != nil {
+		return err
+	}
+	if sc == nil {
+		return fmt.Errorf("fsstore: cannot set entity deltas for unknown checkpoint %s", r.CheckpointID)
+	}
+	idx := sessionIndexByID(sc.Sessions, r.SessionID)
+	if idx < 0 {
+		return fmt.Errorf("fsstore: cannot set entity deltas for unknown session %q in %s", r.SessionID, r.CheckpointID)
+	}
+	sc.Sessions[idx].EntityDeltas = r.Document
 	return s.save(sc)
 }
 

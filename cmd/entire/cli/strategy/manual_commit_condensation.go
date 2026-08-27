@@ -583,6 +583,7 @@ func (s *ManualCommitStrategy) CondenseSession(ctx context.Context, repo *git.Re
 		return skipped, nil
 	}
 
+	entityDeltaFiles := entityDeltaSessionFiles(sessionData, committedFiles)
 	filterFilesTouched(sessionData, committedFiles, state)
 
 	// sessionData.Transcript is left as the raw transcript; only the sanitized,
@@ -632,7 +633,6 @@ func (s *ManualCommitStrategy) CondenseSession(ctx context.Context, repo *git.Re
 		ctx, repo, ref, state, sessionData, redactedTranscript, extractedAssets,
 		taskPayloads, checkpointID, shadowBranchName, o,
 	)
-
 	writeV1Start := time.Now()
 	writeCtx, writeCommittedSpan := perf.Start(ctx, "write_committed_v1")
 	writeRequest := condensationSessionWriteRequest(writeOpts)
@@ -643,6 +643,15 @@ func (s *ManualCommitStrategy) CondenseSession(ctx context.Context, repo *git.Re
 	}
 	writeCommittedSpan.End()
 	writeV1Duration := time.Since(writeV1Start)
+
+	// Opt-in entity deltas are computed and attached AFTER the checkpoint
+	// exists, by a detached child — see entity_deltas.go. This call forks and
+	// returns; it yields nothing and can fail nothing.
+	attrBase := state.AttributionBaseCommit
+	if attrBase == "" {
+		attrBase = state.BaseCommit
+	}
+	scheduleEntityDeltas(ctx, logCtx, repo, o, checkpointID, state.SessionID, attrBase, entityDeltaFiles)
 
 	// Deferred prompt-window reset: a checkpoint was written, so the window base
 	// must be re-anchored — but not now. We defer until the next counted turn (in
@@ -919,6 +928,24 @@ func filterFilesTouched(sessionData *ExtractedSessionData, committedFiles map[st
 		return
 	}
 	sessionData.FilesTouched = committedFilesExcludingMetadata(committedFiles)
+}
+
+// entityDeltaSessionFiles returns the file set entity deltas may attribute to
+// this session. Unlike filterFilesTouched, it never applies the committed-files
+// fallback: that fallback is for checkpoint attribution when evidence-of-work
+// exists but no per-file list was recorded, and reusing it here would mis-assign
+// other sessions' and the human's changes into this session's entity_deltas.json.
+func entityDeltaSessionFiles(sessionData *ExtractedSessionData, committedFiles map[string]struct{}) []string {
+	if len(sessionData.FilesTouched) == 0 || len(committedFiles) == 0 {
+		return nil
+	}
+	filtered := make([]string, 0, len(sessionData.FilesTouched))
+	for _, f := range sessionData.FilesTouched {
+		if _, ok := committedFiles[f]; ok {
+			filtered = append(filtered, f)
+		}
+	}
+	return filtered
 }
 
 // sessionHasEvidenceOfWork returns true when the session looks like a real

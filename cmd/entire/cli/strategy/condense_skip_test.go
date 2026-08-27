@@ -217,6 +217,30 @@ func TestFilterFilesTouched_AppliesFallbackWithTranscriptEvidence(t *testing.T) 
 		"should fall back when transcript is non-empty even without StepCount")
 }
 
+func TestEntityDeltaSessionFiles_SkipsCommittedFilesFallback(t *testing.T) {
+	t.Parallel()
+
+	sessionData := &ExtractedSessionData{
+		Transcript:   []byte(`{"role":"user","content":"hi"}` + "\n"),
+		FilesTouched: nil,
+	}
+	committedFiles := map[string]struct{}{"app/foo.go": {}, "app/bar.go": {}}
+
+	assert.Nil(t, entityDeltaSessionFiles(sessionData, committedFiles),
+		"entity deltas must not inherit filterFilesTouched's committed-files fallback")
+}
+
+func TestEntityDeltaSessionFiles_IntersectsExplicitFiles(t *testing.T) {
+	t.Parallel()
+
+	sessionData := &ExtractedSessionData{
+		FilesTouched: []string{"app/foo.go", "app/other.go"},
+	}
+	committedFiles := map[string]struct{}{"app/foo.go": {}}
+
+	require.Equal(t, []string{"app/foo.go"}, entityDeltaSessionFiles(sessionData, committedFiles))
+}
+
 // filterFilesTouched must NOT apply the fallback when there is no evidence the
 // session did anything (no transcript, no prior SaveStep). This is the bug
 // scenario that produced false attribution to ephemeral Codex sessions.

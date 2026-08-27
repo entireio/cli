@@ -7,6 +7,7 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/checkpointpolicy"
 	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
+	"github.com/entireio/cli/cmd/entire/cli/strategy"
 	"github.com/entireio/cli/cmd/entire/cli/versioncheck"
 	"github.com/spf13/cobra"
 )
@@ -25,7 +26,7 @@ func ShouldCheckCheckpointPolicyWarning(cmd *cobra.Command) bool {
 
 func isCheckpointPolicyWarningExcludedCommand(name string) bool {
 	switch name {
-	case "hooks", "__send_analytics", "__refresh_trail_enablement", "curl-bash-post-install", "__sweep_sessions":
+	case "hooks", "__send_analytics", "__refresh_trail_enablement", strategy.EntityDeltasCommandName, "curl-bash-post-install", "__sweep_sessions":
 		return true
 	default:
 		return false
