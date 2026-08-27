@@ -87,7 +87,7 @@ To diagnose: read `console.log` in the failing test's artifact directory. Compar
 
 ## CI Workflows
 
-- **`.github/workflows/e2e.yml`** — Runs full suite on push to main. Matrix: `[claude-code, opencode, gemini-cli, codex, cursor-cli, factoryai-droid, copilot-cli, grok]`.
+- **`.github/workflows/e2e.yml`** — Runs full suite on push to main. Matrix: `[claude-code, opencode, factoryai-droid, cursor-cli, copilot-cli, roger-roger, codex]`. `grok` is a `workflow_dispatch` choice only (it needs an `XAI_API_KEY` secret); promote it into the array once the secret is configured.
 - **`.github/workflows/e2e-isolated.yml`** — Manual dispatch for debugging a single test. Inputs: agent + test name filter.
 
 Both workflows run `go run ./e2e/bootstrap` before tests to handle agent-specific CI setup (auth config, warmup).
