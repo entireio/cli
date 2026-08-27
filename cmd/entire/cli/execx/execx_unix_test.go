@@ -36,6 +36,46 @@ func TestTerminateOnCancel_SetsWaitDelayAndGroupKill(t *testing.T) {
 	}
 }
 
+// hangCmdArgs backgrounds a grandchild that holds stdout; "ready" prints after
+// it backgrounds so callers cancel strictly after it exists (no race). `wait`
+// keeps the shell alive as group leader so only a group-wide kill ends both.
+var hangCmdArgs = []string{"/bin/sh", "-c", "sleep 60 & echo ready; wait"}
+
+// assertGroupKillReleasesPipe starts cmd, waits until the grandchild holds
+// stdout, then cancels and requires the pipe to close promptly. Its deadline
+// stays strictly below KillWaitDelay: that backstop force-closes the pipes on
+// its own, so a looser bound would pass even if the group-kill regressed.
+func assertGroupKillReleasesPipe(t *testing.T, cmd *exec.Cmd, cancel context.CancelFunc) {
+	t.Helper()
+
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		t.Fatalf("stdout pipe: %v", err)
+	}
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+
+	br := bufio.NewReader(stdout)
+	if line, err := br.ReadString('\n'); err != nil || strings.TrimSpace(line) != "ready" {
+		t.Fatalf("did not observe ready marker: line=%q err=%v", line, err)
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		_, _ = io.Copy(io.Discard, br) //nolint:errcheck // draining to block until the pipe closes; copy errors are irrelevant
+		done <- cmd.Wait()
+	}()
+
+	cancel()
+
+	select {
+	case <-done:
+	case <-time.After(KillWaitDelay / 2):
+		t.Fatal("read did not return after cancellation; the pipe-holding grandchild outlived the group-kill")
+	}
+}
+
 // End-to-end: a backgrounded grandchild inherits stdout, so cancelling the parent
 // must kill the whole group — otherwise the read blocks for the full sleep.
 func TestTerminateOnCancel_KillsProcessGroup(t *testing.T) {
@@ -44,87 +84,29 @@ func TestTerminateOnCancel_KillsProcessGroup(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	// `sleep 60 &` backgrounds a grandchild that holds stdout; "ready" prints after
-	// it backgrounds so we cancel strictly after it exists (no race). `wait` keeps
-	// the shell alive as group leader so only a group-wide kill ends both.
-	cmd := exec.CommandContext(ctx, "/bin/sh", "-c", "sleep 60 & echo ready; wait")
+	cmd := exec.CommandContext(ctx, hangCmdArgs[0], hangCmdArgs[1:]...)
 	TerminateOnCancel(cmd)
 
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		t.Fatalf("stdout pipe: %v", err)
-	}
-	if err := cmd.Start(); err != nil {
-		t.Fatalf("start: %v", err)
-	}
-
-	// Wait for "ready" so the grandchild is up and holding the pipe.
-	br := bufio.NewReader(stdout)
-	if line, err := br.ReadString('\n'); err != nil || strings.TrimSpace(line) != "ready" {
-		t.Fatalf("did not observe ready marker: line=%q err=%v", line, err)
-	}
-
-	done := make(chan error, 1)
-	go func() {
-		_, _ = io.Copy(io.Discard, br) //nolint:errcheck // draining to block until the pipe closes; copy errors are irrelevant
-		done <- cmd.Wait()
-	}()
-
-	cancel()
-
-	// Deadline must stay strictly below KillWaitDelay: that backstop would force
-	// the pipe closed on its own, letting this test pass even if group-kill regressed.
-	select {
-	case <-done:
-	case <-time.After(KillWaitDelay / 2):
-		t.Fatal("read did not return after cancellation; the pipe-holding grandchild outlived the group-kill")
-	}
+	assertGroupKillReleasesPipe(t, cmd, cancel)
 }
 
-// NonInteractive and TerminateOnCancel must compose: setpgid(2) on a session
-// leader fails with EPERM, which surfaces from fork/exec as a bare "operation
-// not permitted". The setsid child is already its own group leader, so the
-// group kill must still reach the backgrounded grandchild.
+// Regression guard: TerminateOnCancel must skip Setpgid on a NonInteractive cmd
+// (see killProcessGroupOnCancel for the EPERM reason) and still reach the
+// grandchild, since the setsid child is already its own process-group leader.
 func TestTerminateOnCancel_ComposesWithNonInteractive(t *testing.T) {
 	t.Parallel()
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	cmd := NonInteractive(ctx, "/bin/sh", "-c", "sleep 60 & echo ready; wait")
+	cmd := NonInteractive(ctx, hangCmdArgs[0], hangCmdArgs[1:]...)
 	TerminateOnCancel(cmd)
 
 	if cmd.SysProcAttr.Setpgid {
 		t.Error("Setpgid = true alongside Setsid; setpgid on a session leader fails with EPERM")
 	}
 
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		t.Fatalf("stdout pipe: %v", err)
-	}
-	if err := cmd.Start(); err != nil {
-		t.Fatalf("start: %v", err)
-	}
-
-	br := bufio.NewReader(stdout)
-	if line, err := br.ReadString('\n'); err != nil || strings.TrimSpace(line) != "ready" {
-		t.Fatalf("did not observe ready marker: line=%q err=%v", line, err)
-	}
-
-	done := make(chan error, 1)
-	go func() {
-		_, _ = io.Copy(io.Discard, br) //nolint:errcheck // draining to block until the pipe closes; copy errors are irrelevant
-		done <- cmd.Wait()
-	}()
-
-	cancel()
-
-	// Below KillWaitDelay so the backstop cannot mask a group-kill regression.
-	select {
-	case <-done:
-	case <-time.After(KillWaitDelay / 2):
-		t.Fatal("read did not return after cancellation; the setsid child's group was not killed")
-	}
+	assertGroupKillReleasesPipe(t, cmd, cancel)
 }
 
 // Cancel must return cleanly *and* actually terminate the leader.

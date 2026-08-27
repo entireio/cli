@@ -12,7 +12,6 @@ import (
 	"strings"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
-	"github.com/entireio/cli/cmd/entire/cli/execx"
 )
 
 // buildGenerateArgs assembles the claude CLI argv for a --print text-generation
@@ -175,13 +174,7 @@ func (c *ClaudeCodeAgent) GenerateText(ctx context.Context, prompt string, model
 
 	cmd := commandRunner(ctx, claudePath, buildGenerateArgs(model, settingsPath)...)
 
-	// Isolate from the user's git repo to prevent recursive hook triggers
-	// and index pollution (matches agent.RunIsolatedTextGeneratorCLI behavior).
-	cmd.Dir = os.TempDir()
-	cmd.Env = agent.StripGitEnv(os.Environ())
-	// A killed provider CLI can leave a sandbox/MCP grandchild holding the
-	// output pipe open, which blocks cmd.Run past the ctx deadline. Bound it.
-	execx.TerminateOnCancel(cmd)
+	agent.PrepareIsolatedCLICmd(cmd)
 	cmd.Stdin = strings.NewReader(prompt)
 
 	var stdout, stderr bytes.Buffer

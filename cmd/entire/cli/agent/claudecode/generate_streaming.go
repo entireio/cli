@@ -7,12 +7,10 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"os"
 	"os/exec"
 	"strings"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
-	"github.com/entireio/cli/cmd/entire/cli/execx"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 )
 
@@ -53,11 +51,9 @@ func (c *ClaudeCodeAgent) GenerateTextStreaming(
 
 	cmd := commandRunner(ctx, "claude", buildStreamingGenerateArgs(model, settingsPath)...)
 
-	cmd.Dir = os.TempDir()
-	cmd.Env = agent.StripGitEnv(os.Environ())
-	// A killed provider CLI can leave a sandbox/MCP grandchild holding the
-	// output pipe open, which blocks the drain below past the ctx deadline.
-	execx.TerminateOnCancel(cmd)
+	// Bounds the drain below as well as Wait: a grandchild holding stdout would
+	// otherwise outlive the direct child and block it past the ctx deadline.
+	agent.PrepareIsolatedCLICmd(cmd)
 	cmd.Stdin = strings.NewReader(prompt)
 
 	stdout, err := cmd.StdoutPipe()

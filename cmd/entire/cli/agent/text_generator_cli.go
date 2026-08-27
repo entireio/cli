@@ -27,6 +27,27 @@ type TextGenerationError struct {
 func (e *TextGenerationError) Error() string { return e.Err.Error() }
 func (e *TextGenerationError) Unwrap() error { return e.Err }
 
+// PrepareIsolatedCLICmd applies the isolation contract every provider-CLI
+// subprocess shares: run outside the user's repo, with GIT_* stripped so the
+// child cannot trigger hooks or pollute the index, and bounded on ctx-cancel.
+//
+// It exists because not every provider goes through RunIsolatedTextGeneratorCLI
+// — Claude Code runs the CLI itself on both its text-generation paths, because
+// it needs structured access to stdout, stderr and the exit code. Those paths
+// previously restated this preamble and drifted from it: #2140 added the
+// cancellation bound to the shared helper only, leaving the judge (which
+// defaults to claude-code) hanging. Keeping the contract in one function is
+// what makes the next isolation-level change reach every site.
+//
+// Callers still own Stdin/Stdout/Stderr and how they run the command.
+func PrepareIsolatedCLICmd(cmd *exec.Cmd) {
+	cmd.Dir = os.TempDir()
+	cmd.Env = StripGitEnv(os.Environ())
+	// A killed provider CLI can leave a sandbox/MCP grandchild holding the
+	// output pipe open, which blocks the parent's read past the ctx deadline.
+	execx.TerminateOnCancel(cmd)
+}
+
 // TextCommandRunner matches exec.CommandContext and allows tests to inject a runner.
 //
 // An injected runner must build the *exec.Cmd with exec.CommandContext, not
@@ -48,11 +69,7 @@ func RunIsolatedTextGeneratorCLI(ctx context.Context, runner TextCommandRunner, 
 	}
 
 	cmd := runner(ctx, binary, args...)
-	cmd.Dir = os.TempDir()
-	cmd.Env = StripGitEnv(os.Environ())
-	// A killed provider CLI can leave a sandbox/MCP grandchild holding the
-	// output pipe open, which blocks cmd.Run past the ctx deadline. Bound it.
-	execx.TerminateOnCancel(cmd)
+	PrepareIsolatedCLICmd(cmd)
 	if stdin != "" {
 		cmd.Stdin = strings.NewReader(stdin)
 	}
