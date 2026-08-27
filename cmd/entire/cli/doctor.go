@@ -16,6 +16,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/interactive"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
+	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
@@ -140,6 +141,9 @@ func runSessionsFix(cmd *cobra.Command, force bool) error {
 
 	// Agent-specific: Antigravity title-tee (token-usage surface).
 	checkAntigravityTitleTee(cmd)
+
+	// Agent-specific: does agy actually load the workspace hooks?
+	checkAntigravityHooksLoaded(cmd)
 
 	// Agent-specific: Claude Code hook config drift.
 	checkHookDrift(cmd)
@@ -841,6 +845,47 @@ func checkAntigravityTitleTee(cmd *cobra.Command) {
 	fmt.Fprintln(w, "  agy's title command isn't routed through Entire, so token counts")
 	fmt.Fprintln(w, "  will be missing for Antigravity checkpoints.")
 	fmt.Fprintln(w, "  Re-run agent setup (`entire agent add antigravity`) to configure it.")
+}
+
+// checkAntigravityHooksLoaded asks agy itself whether it loads this
+// workspace's .agents/hooks.json — the file being on disk is not enough: agy
+// only loads workspace hooks for a trusted workspace, and `agy -p` in an
+// untrusted folder silently runs in agy's scratch workspace where no hooks
+// fire and no session is created (exit 0, no warning). The probe is
+// zero-quota on agy >= 1.1.12 (`/hooks` is answered locally in print mode)
+// and is skipped, with an upgrade hint, on older releases where it would run
+// a real model turn. Warn-only: a failed probe (e.g. agy not logged in) means
+// "could not verify", not "broken". Same gating as the title-tee check.
+func checkAntigravityHooksLoaded(cmd *cobra.Command) {
+	ag := &antigravity.AntigravityAgent{}
+	installed, err := ag.AreHooksInstalled(cmd.Context())
+	if err != nil || !installed {
+		return
+	}
+	if _, err := exec.LookPath("agy"); err != nil {
+		return
+	}
+	repoRoot, err := paths.WorktreeRoot(cmd.Context())
+	if err != nil {
+		return
+	}
+
+	w := cmd.OutOrStdout()
+	probe, err := antigravity.ProbeLoadedHooks(cmd.Context(), repoRoot)
+	switch {
+	case errors.Is(err, antigravity.ErrHooksProbeUnsupported):
+		fmt.Fprintf(w, "Antigravity hooks: NOT VERIFIED (agy %s is too old to answer `/hooks` headlessly; %s+ needed — run `agy update`)\n",
+			probe.Version, antigravity.MinHooksProbeVersion)
+	case err != nil:
+		fmt.Fprintf(w, "Antigravity hooks: NOT VERIFIED (%v)\n", err)
+	case probe.Loaded:
+		fmt.Fprintln(w, "✓ Antigravity hooks: LOADED by agy")
+	default:
+		fmt.Fprintln(w, "Antigravity hooks: NOT LOADED by agy")
+		fmt.Fprintln(w, "  .agents/hooks.json exists but agy does not load it for this workspace,")
+		fmt.Fprintln(w, "  so Entire's hooks never fire. Trust the folder in an interactive `agy`")
+		fmt.Fprintln(w, "  session, and pass `--add-dir <repo>` to `agy -p` runs.")
+	}
 }
 
 func writeCodexInactiveWorktreeWarning(w io.Writer, worktreePath, discoveredPath string) {

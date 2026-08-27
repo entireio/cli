@@ -54,13 +54,14 @@ e2e/
 | `E2E_AGENT` | Agent to test (`claude-code`, `gemini-cli`, `antigravity`, `opencode`, `codex`, `cursor`, `factoryai-droid`, `copilot-cli`) | all registered |
 | `E2E_ENTIRE_BIN` | Path to a pre-built `entire` binary | builds from source |
 | `E2E_TIMEOUT` | Timeout per prompt | `2m` |
-| `E2E_ANTIGRAVITY_MODEL` | Optional Antigravity model override | `Gemini 3.5 Flash (Low)` |
+| `E2E_ANTIGRAVITY_MODEL` | Optional Antigravity model override (slug from `agy models`) | `gemini-3.5-flash-low` |
 | `E2E_KEEP_REPOS` | Set to `1` to preserve temp repos after test | unset |
 | `E2E_CHECKPOINT_STORE` | Checkpoint backend to run the suite against (`git-branch`, `git-refs`). Maps to the `ENTIRE_CHECKPOINTS_PRIMARY` override that every spawned binary/hook honors. | `git-branch` |
 | `E2E_ARTIFACT_DIR` | Override artifact output directory | `e2e/artifacts/<timestamp>` |
 | `ANTHROPIC_API_KEY` | Required for Claude Code | — |
 | `GEMINI_API_KEY` | Required for Gemini CLI | — |
-| `GOOGLE_APPLICATION_CREDENTIALS` | Required for Antigravity in CI; optional locally if using existing `agy` OAuth | — |
+| `GEMINI_API_KEY` | Also enables Antigravity's API-key mode (agy ≥ 1.1.13); the default in CI | — |
+| `GOOGLE_APPLICATION_CREDENTIALS` | Optional Antigravity ADC (service account); takes precedence over `GEMINI_API_KEY` when set | — |
 | `GOOGLE_CLOUD_PROJECT` | Optional Antigravity ADC project override | ADC JSON `project_id` |
 | `E2E_ANTIGRAVITY_PROJECT` | Optional Antigravity E2E project override; takes precedence over `GOOGLE_CLOUD_PROJECT` | ADC JSON `project_id` |
 | `OPENAI_API_KEY` | Required for Codex | — |
@@ -68,14 +69,41 @@ e2e/
 
 ### Antigravity credentials
 
-Antigravity E2E uses Google ADC. In GitHub Actions, set the repository or organization secret `ANTIGRAVITY_GOOGLE_APPLICATION_CREDENTIALS_JSON` to the service-account JSON. The E2E workflows write that secret to `$RUNNER_TEMP/antigravity-google-credentials.json` and export `GOOGLE_APPLICATION_CREDENTIALS` for bootstrap and test steps. The harness passes `agy --project` from `E2E_ANTIGRAVITY_PROJECT`, `GOOGLE_CLOUD_PROJECT`, or the ADC JSON `project_id`.
+Antigravity E2E resolves its auth mode from the environment, in this order:
 
-> **Entitlement caveat:** agy has no API-key auth. Its backend (`cloudcode-pa.googleapis.com`) is a gated private API that cannot be enabled with `gcloud services enable` (fails with `AUTH_PERMISSION_DENIED`, subject 110002) — project Owner is not sufficient. The ADC path only works once a Gemini Code Assist Standard/Enterprise subscription is provisioned on the project (its onboarding binds the backend server-side); Code Assist licenses attach to user identities, so plain service accounts are not entitled. Until then, agy E2E runs are consumer-OAuth only (small rolling quota) and the harness fails fast on `Individual quota reached` / `SERVICE_DISABLED` instead of retrying. This is also why antigravity is a dispatch-only option in the CI workflows rather than part of the default matrix.
+1. **ADC** — `GOOGLE_APPLICATION_CREDENTIALS` set: agy runs against its default
+   (`cloudcode-pa`) backend with `USE_ADC=1`, an isolated per-repo `HOME`, and
+   `--project` from `E2E_ANTIGRAVITY_PROJECT`, `GOOGLE_CLOUD_PROJECT`, or the ADC
+   JSON `project_id`. This path needs a Gemini Code Assist entitlement on the
+   project (see caveat below). In GitHub Actions it is enabled by the optional
+   `ANTIGRAVITY_GOOGLE_APPLICATION_CREDENTIALS_JSON` secret.
+2. **Gemini API key** (default in CI) — `GEMINI_API_KEY` set: agy ≥ 1.1.13 talks
+   to the Gemini API directly with no account session. The harness isolates
+   `HOME` per repo, writes `{"modelProvider":"gemini"}` into that home's
+   `~/.gemini/antigravity-cli/settings.json`, passes `GEMINI_API_KEY` (and
+   `GOOGLE_GEMINI_BASE_URL` if set) through, and scrubs `GOOGLE_API_KEY` — agy
+   prefers it over `GEMINI_API_KEY` when both are set. This is the same secret
+   gemini-cli uses, which is why antigravity is in the default CI matrix.
+3. **OAuth** — neither set: the developer's real `HOME` (existing `agy` login) is
+   used for local runs.
 
-For local runs, either authenticate `agy` with OAuth or set ADC explicitly:
+The harness fails fast (no scenario restart) on the walls that don't clear on
+retry: `Individual quota reached` / `SERVICE_DISABLED` / `AUTH_PERMISSION_DENIED`
+(ADC/OAuth entitlement), `GEMINI_API_KEY environment variable is not set`
+(API-key misconfiguration) and `API_KEY_INVALID`.
+
+> **ADC entitlement caveat:** agy's default backend (`cloudcode-pa.googleapis.com`)
+> is a gated private API that cannot be enabled with `gcloud services enable`
+> (fails with `AUTH_PERMISSION_DENIED`, subject 110002) — project Owner is not
+> sufficient. ADC only works once a Gemini Code Assist Standard/Enterprise
+> subscription is provisioned on the project; Code Assist licenses attach to user
+> identities, so plain service accounts are not entitled. Prefer the API-key mode
+> unless you specifically need the Code Assist backend.
+
+For local runs, either authenticate `agy` with OAuth, or:
 
 ```bash
-export GOOGLE_APPLICATION_CREDENTIALS=/absolute/path/to/google-credentials.json
+export GEMINI_API_KEY=...            # API-key mode (agy >= 1.1.13)
 mise run test:e2e --agent antigravity TestSingleSessionManualCommit
 ```
 
@@ -105,7 +133,7 @@ To diagnose: read `console.log` in the failing test's artifact directory. Compar
 
 ## CI Workflows
 
-- **`.github/workflows/e2e.yml`** — Runs full suite on push to main. Default matrix: `[claude-code, opencode, gemini-cli, codex, cursor-cli, factoryai-droid, copilot-cli, roger-roger]`. Antigravity is **not** in the push-run matrix — it is `workflow_dispatch`-only (select it via the `agent` input) because of the entitlement caveat above.
+- **`.github/workflows/e2e.yml`** — Runs full suite on push to main. Default matrix: `[claude-code, opencode, factoryai-droid, cursor-cli, copilot-cli, roger-roger, codex, antigravity]` (gemini-cli is dispatch-only, see the workflow comment). Antigravity runs in agy's Gemini API-key mode using the shared `GEMINI_API_KEY` secret; the optional `ANTIGRAVITY_GOOGLE_APPLICATION_CREDENTIALS_JSON` secret switches it to ADC.
 - **`.github/workflows/e2e-isolated.yml`** — Manual dispatch for debugging a single test. Inputs: agent + test name filter.
 
 Both workflows run `go run ./e2e/bootstrap` before tests to handle agent-specific CI setup (auth config, warmup).

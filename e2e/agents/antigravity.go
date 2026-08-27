@@ -24,14 +24,70 @@ func init() {
 }
 
 const (
-	antigravityBinary             = "agy"
-	antigravityDefaultModel       = "Gemini 3.5 Flash (Low)"
+	antigravityBinary = "agy"
+	// antigravityDefaultModel is the model slug agy lists in `agy models`
+	// (gemini-3.5-flash-low ↔ "Gemini 3.5 Flash (Low)"). Slugs are the
+	// documented --model form and resolve in every auth mode.
+	antigravityDefaultModel       = "gemini-3.5-flash-low"
 	antigravityDefaultConcurrency = 1
 	antigravityADCEnvKey          = "USE_ADC"
 	googleCredentialsEnvKey       = "GOOGLE_APPLICATION_CREDENTIALS"
 	googleCloudProjectEnvKey      = "GOOGLE_CLOUD_PROJECT"
 	antigravityProjectEnvKey      = "E2E_ANTIGRAVITY_PROJECT"
+	// geminiAPIKeyEnvKey enables agy's API-key auth (agy >= 1.1.13): with
+	// modelProvider "gemini" in the isolated HOME's settings.json, model
+	// requests go straight to the Gemini API and no account session, keyring
+	// or browser flow is involved. This is what lets antigravity run in the
+	// default CI matrix alongside gemini-cli, which shares the same secret.
+	geminiAPIKeyEnvKey = "GEMINI_API_KEY"
+	// googleAPIKeyEnvKey is scrubbed from every spawned env: agy prefers it
+	// over GEMINI_API_KEY when both are set ("Warning: Both GOOGLE_API_KEY and
+	// GEMINI_API_KEY are set. Using GOOGLE_API_KEY."), so a stray developer
+	// key must not silently replace the one the harness was told to use.
+	googleAPIKeyEnvKey = "GOOGLE_API_KEY"
 )
+
+// antigravityAuthMode is how the spawned agy authenticates. Resolution order
+// is deliberate: explicit ADC credentials are an antigravity-specific choice
+// and win; GEMINI_API_KEY is ambient in CI (shared with gemini-cli) and is the
+// default there; with neither, the developer's real HOME (interactive OAuth
+// login) is used so local runs work without extra setup.
+type antigravityAuthMode int
+
+const (
+	antigravityAuthOAuth antigravityAuthMode = iota
+	antigravityAuthADC
+	antigravityAuthAPIKey
+)
+
+func (m antigravityAuthMode) String() string {
+	switch m {
+	case antigravityAuthADC:
+		return "adc"
+	case antigravityAuthAPIKey:
+		return "gemini-api-key"
+	case antigravityAuthOAuth:
+		return "oauth"
+	}
+	return "oauth"
+}
+
+func antigravityAuthModeFrom(env []string) antigravityAuthMode {
+	if antigravityHasADCCredentials(env) {
+		return antigravityAuthADC
+	}
+	if value, ok := antigravityEnvValue(env, geminiAPIKeyEnvKey); ok && strings.TrimSpace(value) != "" {
+		return antigravityAuthAPIKey
+	}
+	return antigravityAuthOAuth
+}
+
+// antigravityUsesIsolatedHome reports whether agy runs with HOME redirected to
+// the per-repo test home (every non-OAuth mode). Every path that peeks at agy's
+// on-disk state must agree with this or it reads the wrong tree.
+func antigravityUsesIsolatedHome(env []string) bool {
+	return antigravityAuthModeFrom(env) != antigravityAuthOAuth
+}
 
 // Antigravity implements the Agent interface for the agy CLI (Antigravity 2.0,
 // successor to Gemini CLI).
@@ -65,8 +121,11 @@ func antigravityBootstrap(env []string) error {
 		}
 		return nil
 	}
+	if antigravityAuthModeFrom(env) == antigravityAuthAPIKey {
+		return nil
+	}
 	if antigravityInCI(env) {
-		return errors.New("antigravity E2E in CI requires GOOGLE_APPLICATION_CREDENTIALS; configure the ANTIGRAVITY_GOOGLE_APPLICATION_CREDENTIALS_JSON GitHub secret")
+		return errors.New("antigravity E2E in CI requires GEMINI_API_KEY (agy API-key mode) or GOOGLE_APPLICATION_CREDENTIALS (ADC via the ANTIGRAVITY_GOOGLE_APPLICATION_CREDENTIALS_JSON GitHub secret)")
 	}
 	return nil
 }
@@ -117,9 +176,16 @@ func antigravityFatalError(content string) (string, bool) {
 		strings.Contains(content, "AUTH_PERMISSION_DENIED"),
 		strings.Contains(content, "agy backend not provisioned"):
 		return "agy backend not provisioned for this project/identity (cloudcode-pa is gated) — needs a Gemini Code Assist subscription + seat, not just an enabled API", true
+	case strings.Contains(content, "GEMINI_API_KEY environment variable is not set"),
+		strings.Contains(content, "agy Gemini API key mode misconfigured"):
+		return "agy Gemini API key mode misconfigured: modelProvider is gemini but GEMINI_API_KEY is unset in the spawned env", true
+	case strings.Contains(content, "API_KEY_INVALID"),
+		strings.Contains(content, "API key not valid"),
+		strings.Contains(content, "agy rejected the Gemini API key"):
+		return "agy rejected the Gemini API key (API_KEY_INVALID) — check the GEMINI_API_KEY secret", true
 	case strings.Contains(content, "not logged into Antigravity"),
 		strings.Contains(content, "agy is not logged in"):
-		return "agy is not logged in — authenticate with `agy` interactively or provide ADC credentials", true
+		return "agy is not logged in — authenticate with `agy` interactively, set GEMINI_API_KEY, or provide ADC credentials", true
 	}
 	return "", false
 }
@@ -245,6 +311,10 @@ func (a *Antigravity) runPromptOnce(ctx context.Context, dir string, prompt stri
 	// pins agy to the workspace we actually want it to modify.
 	args, displayArgs := antigravityPromptArgs(prompt, dir, model)
 
+	if err := antigravityPrepareHome(os.Environ(), dir); err != nil {
+		return Output{Command: a.Binary() + " " + strings.Join(displayArgs, " ")}, err
+	}
+
 	cmd := exec.CommandContext(ctx, a.Binary(), args...)
 	cmd.Dir = dir
 	cmd.Stdin = nil
@@ -287,6 +357,9 @@ func (a *Antigravity) runPromptOnce(ctx context.Context, dir string, prompt stri
 func (a *Antigravity) StartSession(_ context.Context, dir string) (Session, error) {
 	name := fmt.Sprintf("antigravity-test-%d", time.Now().UnixNano())
 
+	if err := antigravityPrepareHome(os.Environ(), dir); err != nil {
+		return nil, err
+	}
 	envArgs, unsetEnv := antigravitySessionEnv(os.Environ(), dir)
 
 	args := append([]string{"env"}, envArgs...)
@@ -459,12 +532,12 @@ func antigravityTestHomeDir(repoDir string) string {
 }
 
 // antigravityHomeDir resolves the HOME the agy subprocess actually ran with:
-// the per-repo isolated test home in ADC mode (antigravityPromptEnvFrom sets
-// HOME=antigravityTestHomeDir), the developer's real HOME otherwise. Every
-// path that peeks at agy's on-disk state (brain, CLI logs) must go through
-// this, or ADC-mode runs read the wrong tree.
+// the per-repo isolated test home in ADC and API-key mode
+// (antigravityPromptEnvFrom sets HOME=antigravityTestHomeDir), the developer's
+// real HOME otherwise. Every path that peeks at agy's on-disk state (brain,
+// CLI logs) must go through this, or isolated-home runs read the wrong tree.
 func antigravityHomeDir(repoDir string) string {
-	if antigravityHasADCCredentials(os.Environ()) {
+	if antigravityUsesIsolatedHome(os.Environ()) {
 		return antigravityTestHomeDir(repoDir)
 	}
 	homeDir, err := os.UserHomeDir()
@@ -548,13 +621,22 @@ func antigravityPromptEnv(repoDir string) []string {
 }
 
 // antigravityPromptEnvFrom returns the env for spawning agy in print mode.
-// Antigravity's OAuth state lives under HOME/.gemini. If service-account ADC
-// credentials are available, USE_ADC lets tests isolate HOME without opening a
-// browser auth flow. Otherwise keep the developer's real HOME for local E2E.
+// Antigravity's OAuth state lives under HOME/.gemini, so both credential modes
+// isolate HOME to the per-repo test home so no browser/keyring flow can start:
+//   - ADC: USE_ADC=1 plus the ADC project; API keys are scrubbed so agy's
+//     default backend is used.
+//   - GEMINI_API_KEY: the key passes through (GOOGLE_GEMINI_BASE_URL too);
+//     GOOGLE_API_KEY is scrubbed (agy would prefer it), and ADC-only knobs are
+//     dropped. antigravityPrepareHome writes the modelProvider setting the
+//     mode requires.
+//
+// With neither, the developer's real HOME is kept for local OAuth E2E.
 func antigravityPromptEnvFrom(base []string, repoDir string) []string {
-	if antigravityHasADCCredentials(base) {
+	switch antigravityAuthModeFrom(base) {
+	case antigravityAuthADC:
 		env := append(
-			filterEnv(base, "ENTIRE_TEST_TTY", "ACCESSIBLE", "HOME", antigravityADCEnvKey, googleCloudProjectEnvKey),
+			filterEnv(base, "ENTIRE_TEST_TTY", "ACCESSIBLE", "HOME", antigravityADCEnvKey, googleCloudProjectEnvKey,
+				geminiAPIKeyEnvKey, googleAPIKeyEnvKey),
 			"ACCESSIBLE=1",
 			antigravityADCEnvKey+"=1",
 			"HOME="+antigravityTestHomeDir(repoDir),
@@ -563,8 +645,60 @@ func antigravityPromptEnvFrom(base []string, repoDir string) []string {
 			env = append(env, googleCloudProjectEnvKey+"="+projectID)
 		}
 		return env
+	case antigravityAuthAPIKey:
+		return append(
+			filterEnv(base, "ENTIRE_TEST_TTY", "ACCESSIBLE", "HOME", antigravityADCEnvKey, googleCloudProjectEnvKey, googleAPIKeyEnvKey),
+			"ACCESSIBLE=1",
+			"HOME="+antigravityTestHomeDir(repoDir),
+		)
+	case antigravityAuthOAuth:
+		return append(filterEnv(base, "ENTIRE_TEST_TTY", "ACCESSIBLE"), "ACCESSIBLE=1")
 	}
 	return append(filterEnv(base, "ENTIRE_TEST_TTY", "ACCESSIBLE"), "ACCESSIBLE=1")
+}
+
+// antigravityPrepareHome makes the isolated test home ready for the resolved
+// auth mode before agy is spawned. Only API-key mode needs on-disk state:
+// agy reads modelProvider from HOME/.gemini/antigravity-cli/settings.json and
+// refuses to start in API-key mode without it. No-op for ADC/OAuth.
+func antigravityPrepareHome(env []string, repoDir string) error {
+	if antigravityAuthModeFrom(env) != antigravityAuthAPIKey {
+		return nil
+	}
+	return antigravityEnsureAPIKeyHome(repoDir)
+}
+
+// antigravityEnsureAPIKeyHome writes modelProvider "gemini" into the isolated
+// home's agy settings.json, preserving any other keys already there (agy
+// itself writes into this file once it runs). Idempotent.
+func antigravityEnsureAPIKeyHome(repoDir string) error {
+	dir := filepath.Join(antigravityTestHomeDir(repoDir), ".gemini", "antigravity-cli")
+	if err := os.MkdirAll(dir, 0o750); err != nil {
+		return fmt.Errorf("antigravity E2E: create isolated agy home: %w", err)
+	}
+	settingsPath := filepath.Join(dir, "settings.json")
+	settings := map[string]json.RawMessage{}
+	if data, err := os.ReadFile(settingsPath); err == nil {
+		if len(strings.TrimSpace(string(data))) > 0 {
+			if err := json.Unmarshal(data, &settings); err != nil {
+				return fmt.Errorf("antigravity E2E: parse %s: %w", settingsPath, err)
+			}
+		}
+	} else if !os.IsNotExist(err) {
+		return fmt.Errorf("antigravity E2E: read %s: %w", settingsPath, err)
+	}
+	if string(settings["modelProvider"]) == `"gemini"` {
+		return nil
+	}
+	settings["modelProvider"] = json.RawMessage(`"gemini"`)
+	out, err := json.MarshalIndent(settings, "", "  ")
+	if err != nil {
+		return fmt.Errorf("antigravity E2E: encode settings: %w", err)
+	}
+	if err := os.WriteFile(settingsPath, append(out, '\n'), 0o600); err != nil {
+		return fmt.Errorf("antigravity E2E: write %s: %w", settingsPath, err)
+	}
+	return nil
 }
 
 func antigravitySessionEnv(base []string, repoDir string) ([]string, []string) {
@@ -573,13 +707,19 @@ func antigravitySessionEnv(base []string, repoDir string) ([]string, []string) {
 	if term, ok := antigravityEnvValue(base, "TERM"); ok && term != "" {
 		envArgs = append(envArgs, "TERM="+term)
 	}
-	if antigravityHasADCCredentials(base) {
+	switch antigravityAuthModeFrom(base) {
+	case antigravityAuthADC:
 		envArgs = append(envArgs, antigravityADCEnvKey+"=1", "HOME="+antigravityTestHomeDir(repoDir))
-		unsetEnv = append(unsetEnv, "HOME", antigravityADCEnvKey)
+		unsetEnv = append(unsetEnv, "HOME", antigravityADCEnvKey, geminiAPIKeyEnvKey, googleAPIKeyEnvKey)
 		if projectID := antigravityProjectID(base); projectID != "" {
 			envArgs = append(envArgs, googleCloudProjectEnvKey+"="+projectID)
 			unsetEnv = append(unsetEnv, googleCloudProjectEnvKey)
 		}
+	case antigravityAuthAPIKey:
+		envArgs = append(envArgs, "HOME="+antigravityTestHomeDir(repoDir))
+		unsetEnv = append(unsetEnv, "HOME", antigravityADCEnvKey, googleCloudProjectEnvKey, googleAPIKeyEnvKey)
+	case antigravityAuthOAuth:
+		// Developer's real HOME and login; nothing to redirect.
 	}
 	return envArgs, unsetEnv
 }

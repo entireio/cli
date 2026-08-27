@@ -996,9 +996,10 @@ limitations while in preview:
 - **Token capture depends on the global title slot**: `entire hooks antigravity
   title-tee` must own (or wrap) agy's `title` command in the global
   settings.json. `entire doctor` checks this and setup repairs it.
-- **Live E2E / CI is quota- and entitlement-gated**: agy has no API-key auth;
-  see the entitlement caveat in `e2e/README.md`. The CI e2e leg is
-  workflow_dispatch-only.
+- **Live E2E / CI runs in agy's Gemini API-key mode** (agy ≥ 1.1.13, `GEMINI_API_KEY`
+  + `modelProvider: gemini`), so antigravity is in the default e2e matrix; the
+  default `cloudcode-pa` backend (OAuth/ADC) remains entitlement-gated. See
+  `e2e/README.md` → "Antigravity credentials".
 - **Wire format captured on agy 1.0.14/1.0.15, re-verified unchanged on agy
   1.1.1** (2026-07-13, docs + binary + live run): hook payloads, hooks.json
   shape, and the statusline/title schema are stable so far, but agy is

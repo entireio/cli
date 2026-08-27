@@ -303,3 +303,54 @@ func jsonQuote(t *testing.T, s string) string {
 	}
 	return string(b)
 }
+
+// TestExtractModifiedFiles_TruncatedStepDoesNotPanicAndKeepsOthers pins the
+// degrade path for agy's `truncated_fields`: a mutating tool call whose
+// TargetFile was trimmed away (observed live, ~0.8% of replace_file_content
+// calls in a daily-driver corpus) must not abort extraction or poison the
+// other files in the same range. The dropped call is reported via a WARN log
+// (not asserted here; the logging package has no capture hook) — the
+// contract this test locks in is "no error, other files intact, position
+// still advances".
+func TestExtractModifiedFiles_TruncatedStepDoesNotPanicAndKeepsOthers(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "t.jsonl")
+	lines := []string{
+		`{"step_index":0,"source":"USER_EXPLICIT","type":"USER_INPUT","content":"<USER_REQUEST>go</USER_REQUEST>"}`,
+		// TargetFile trimmed by agy; every other arg survived.
+		`{"step_index":1,"source":"MODEL","type":"PLANNER_RESPONSE","truncated_fields":["tool_calls[0].args.TargetFile"],"tool_calls":[{"name":"replace_file_content","args":{"ReplacementChunks":"\"[]\"","TargetContent":"\"x\""}}]}`,
+		`{"step_index":2,"source":"MODEL","type":"PLANNER_RESPONSE","tool_calls":[{"name":"write_to_file","args":{"TargetFile":"\"/repo/b.txt\""}}]}`,
+	}
+	if err := os.WriteFile(path, []byte(strings.Join(lines, "\n")+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	a := &AntigravityAgent{}
+	files, pos, err := a.ExtractModifiedFilesFromOffset(path, 0)
+	if err != nil {
+		t.Fatalf("truncated step must degrade, not error: %v", err)
+	}
+	if pos != 3 {
+		t.Errorf("want pos 3, got %d", pos)
+	}
+	if len(files) != 1 || files[0] != "/repo/b.txt" {
+		t.Fatalf("want only the intact file, got %#v", files)
+	}
+}
+
+func TestAgyStepTruncated(t *testing.T) {
+	t.Parallel()
+	cases := map[string]bool{
+		``:                                  false,
+		`null`:                              false,
+		`[]`:                                false,
+		`["tool_calls[0].args.TargetFile"]`: true,
+		`{"tool_calls":["TargetFile"]}`:     true,
+	}
+	for raw, want := range cases {
+		step := agyStep{TruncatedFields: json.RawMessage(raw)}
+		if got := step.truncated(); got != want {
+			t.Errorf("truncated_fields=%s: truncated() = %v, want %v", raw, got, want)
+		}
+	}
+}

@@ -69,9 +69,11 @@ jobs:
           ANTIGRAVITY_GOOGLE_APPLICATION_CREDENTIALS_JSON: ${{ secrets.ANTIGRAVITY_GOOGLE_APPLICATION_CREDENTIALS_JSON }}
         run: |
           set -euo pipefail
+          # ADC is optional since agy 1.1.13: without the secret the harness runs
+          # agy in Gemini API-key mode (GEMINI_API_KEY, shared with gemini-cli).
           if [ -z "${ANTIGRAVITY_GOOGLE_APPLICATION_CREDENTIALS_JSON:-}" ]; then
-            echo "::error::ANTIGRAVITY_GOOGLE_APPLICATION_CREDENTIALS_JSON secret is required for Antigravity E2E"
-            exit 1
+            echo "No ANTIGRAVITY_GOOGLE_APPLICATION_CREDENTIALS_JSON secret; Antigravity E2E uses GEMINI_API_KEY (agy API-key mode)"
+            exit 0
           fi
           creds="$RUNNER_TEMP/antigravity-google-credentials.json"
           install -m 600 /dev/null "$creds"

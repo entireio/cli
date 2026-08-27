@@ -1478,3 +1478,84 @@ func TestCheckDisconnectedMetadata_Aligned_StaysQuiet(t *testing.T) {
 	assert.Contains(t, output, "✓ Metadata branches: OK")
 	assert.NotContains(t, output, "DIVERGED")
 }
+
+// stubAgyHooksProbeOnPath installs a fake agy that answers `--version` with
+// version and `-p /hooks` with a JSON envelope listing hooksSource as an
+// enabled "entire" entry (or no hooks when hooksSource is empty).
+func stubAgyHooksProbeOnPath(t *testing.T, version, hooksSource string) {
+	t.Helper()
+	binDir := t.TempDir()
+	hooks := "[]"
+	if hooksSource != "" {
+		hooks = `[{"name":"entire","enabled":true,"source":"` + hooksSource + `"}]`
+	}
+	script := "#!/bin/sh\n" +
+		"case \"$1\" in\n" +
+		"  --version) echo '" + version + "' ;;\n" +
+		"  -p) printf '%s' '{\"status\":\"SUCCESS\",\"command\":{\"name\":\"hooks\",\"data\":{\"hooks\":" + hooks + "}}}' ;;\n" +
+		"  *) exit 0 ;;\n" +
+		"esac\n"
+	require.NoError(t, os.WriteFile(filepath.Join(binDir, "agy"), []byte(script), 0o755))
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+}
+
+func writeAntigravityHooksForDoctor(t *testing.T, dir string) string {
+	t.Helper()
+	agentsDir := filepath.Join(dir, ".agents")
+	require.NoError(t, os.MkdirAll(agentsDir, 0o750))
+	hooksPath := filepath.Join(agentsDir, "hooks.json")
+	require.NoError(t, os.WriteFile(hooksPath, []byte(antigravityHooksJSON()), 0o600))
+	return hooksPath
+}
+
+func TestCheckAntigravityHooksLoaded_OKWhenAgyListsWorkspaceHooks(t *testing.T) {
+	dir := setupGitRepoForPhaseTest(t)
+	t.Chdir(dir)
+	hooksPath := writeAntigravityHooksForDoctor(t, dir)
+	stubAgyHooksProbeOnPath(t, "1.1.22", hooksPath)
+
+	cmd, stdout := newTestCmd(t)
+	checkAntigravityHooksLoaded(cmd)
+	require.Contains(t, stdout.String(), "✓ Antigravity hooks: LOADED by agy")
+}
+
+func TestCheckAntigravityHooksLoaded_WarnsWhenAgyDoesNotLoadThem(t *testing.T) {
+	dir := setupGitRepoForPhaseTest(t)
+	t.Chdir(dir)
+	writeAntigravityHooksForDoctor(t, dir)
+	stubAgyHooksProbeOnPath(t, "1.1.22", "")
+
+	cmd, stdout := newTestCmd(t)
+	checkAntigravityHooksLoaded(cmd)
+	require.Contains(t, stdout.String(), "Antigravity hooks: NOT LOADED by agy")
+	require.Contains(t, stdout.String(), "--add-dir")
+}
+
+// TestCheckAntigravityHooksLoaded_SkipsOldAgy pins the quota guard: before
+// 1.1.12, `agy -p "/hooks"` is a real model turn, so doctor must not run it.
+func TestCheckAntigravityHooksLoaded_SkipsOldAgy(t *testing.T) {
+	dir := setupGitRepoForPhaseTest(t)
+	t.Chdir(dir)
+	hooksPath := writeAntigravityHooksForDoctor(t, dir)
+	stubAgyHooksProbeOnPath(t, "1.1.1", hooksPath)
+
+	cmd, stdout := newTestCmd(t)
+	checkAntigravityHooksLoaded(cmd)
+	require.Contains(t, stdout.String(), "NOT VERIFIED")
+	require.Contains(t, stdout.String(), "agy update")
+	require.NotContains(t, stdout.String(), "LOADED by agy")
+}
+
+func TestCheckAntigravityHooksLoaded_SilentWithoutHooksOrAgy(t *testing.T) {
+	dir := setupGitRepoForPhaseTest(t)
+	t.Chdir(dir)
+	t.Setenv("PATH", t.TempDir())
+
+	cmd, stdout := newTestCmd(t)
+	checkAntigravityHooksLoaded(cmd)
+	require.Empty(t, stdout.String())
+
+	writeAntigravityHooksForDoctor(t, dir) // hooks present but no agy on PATH
+	checkAntigravityHooksLoaded(cmd)
+	require.Empty(t, stdout.String())
+}

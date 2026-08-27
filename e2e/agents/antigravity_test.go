@@ -1,6 +1,7 @@
 package agents
 
 import (
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -38,8 +39,8 @@ func TestAntigravityDefaultConcurrencyIsSerial(t *testing.T) {
 func TestAntigravityModelUsesDefault(t *testing.T) {
 	t.Setenv("E2E_ANTIGRAVITY_MODEL", "")
 
-	if got := antigravityModel(); got != "Gemini 3.5 Flash (Low)" {
-		t.Fatalf("antigravityModel() = %q, want stable default Gemini 3.5 Flash (Low)", got)
+	if got := antigravityModel(); got != "gemini-3.5-flash-low" {
+		t.Fatalf("antigravityModel() = %q, want stable default gemini-3.5-flash-low slug", got)
 	}
 }
 
@@ -51,17 +52,18 @@ func TestAntigravityModelReadsEnv(t *testing.T) {
 	}
 }
 
-func TestAntigravityBootstrapRequiresADCInCI(t *testing.T) {
+func TestAntigravityBootstrapRequiresCredentialsInCI(t *testing.T) {
 	t.Setenv("CI", "true")
 	t.Setenv("GITHUB_ACTIONS", "true")
 	t.Setenv("GOOGLE_APPLICATION_CREDENTIALS", "")
+	t.Setenv("GEMINI_API_KEY", "")
 
 	err := (&Antigravity{}).Bootstrap()
 	if err == nil {
-		t.Fatal("Bootstrap() error = nil, want missing ADC error")
+		t.Fatal("Bootstrap() error = nil, want missing credentials error")
 	}
-	if !strings.Contains(err.Error(), "ANTIGRAVITY_GOOGLE_APPLICATION_CREDENTIALS_JSON") {
-		t.Fatalf("Bootstrap() error = %q, want CI secret guidance", err)
+	if !strings.Contains(err.Error(), "GEMINI_API_KEY") || !strings.Contains(err.Error(), "ANTIGRAVITY_GOOGLE_APPLICATION_CREDENTIALS_JSON") {
+		t.Fatalf("Bootstrap() error = %q, want guidance naming both GEMINI_API_KEY and the ADC secret", err)
 	}
 }
 
@@ -94,6 +96,7 @@ func TestAntigravityBootstrapAllowsLocalOAuthWithoutADC(t *testing.T) {
 	t.Setenv("CI", "")
 	t.Setenv("GITHUB_ACTIONS", "")
 	t.Setenv("GOOGLE_APPLICATION_CREDENTIALS", "")
+	t.Setenv("GEMINI_API_KEY", "")
 
 	if err := (&Antigravity{}).Bootstrap(); err != nil {
 		t.Fatalf("Bootstrap() error = %v, want nil for local OAuth fallback", err)
@@ -706,10 +709,197 @@ func TestAntigravityFatalErrorMatchesOwnMessages(t *testing.T) {
 	for _, msg := range []string{
 		"agy individual quota exhausted (consumer tier resets on a multi-day window) — use an entitled account/ADC or wait for the reset shown in the error",
 		"agy backend not provisioned for this project/identity (cloudcode-pa is gated) — needs a Gemini Code Assist subscription + seat, not just an enabled API",
-		"agy is not logged in — authenticate with `agy` interactively or provide ADC credentials",
+		"agy is not logged in — authenticate with `agy` interactively, set GEMINI_API_KEY, or provide ADC credentials",
+		"agy Gemini API key mode misconfigured: modelProvider is gemini but GEMINI_API_KEY is unset in the spawned env",
+		"agy rejected the Gemini API key (API_KEY_INVALID) — check the GEMINI_API_KEY secret",
 	} {
 		if (&Antigravity{}).IsTransientError(Output{}, stringError(msg+": some wrapped transient 429 overloaded text")) {
 			t.Errorf("classifier must treat its own fatal message as fatal: %q", msg)
+		}
+	}
+}
+
+func TestAntigravityBootstrapAcceptsGeminiAPIKeyInCI(t *testing.T) {
+	t.Setenv("CI", "true")
+	t.Setenv("GITHUB_ACTIONS", "true")
+	t.Setenv("GOOGLE_APPLICATION_CREDENTIALS", "")
+	t.Setenv("GEMINI_API_KEY", "test-key")
+
+	if err := (&Antigravity{}).Bootstrap(); err != nil {
+		t.Fatalf("Bootstrap() error = %v, want nil with GEMINI_API_KEY", err)
+	}
+}
+
+func TestAntigravityAuthModePrecedence(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		env  []string
+		want antigravityAuthMode
+	}{
+		{"oauth when nothing set", []string{"HOME=/h"}, antigravityAuthOAuth},
+		{"api key", []string{"HOME=/h", "GEMINI_API_KEY=k"}, antigravityAuthAPIKey},
+		{"adc", []string{"HOME=/h", "GOOGLE_APPLICATION_CREDENTIALS=/c.json"}, antigravityAuthADC},
+		{"adc wins over api key", []string{"HOME=/h", "GEMINI_API_KEY=k", "GOOGLE_APPLICATION_CREDENTIALS=/c.json"}, antigravityAuthADC},
+		{"empty api key is unset", []string{"HOME=/h", "GEMINI_API_KEY="}, antigravityAuthOAuth},
+	}
+	for _, tc := range cases {
+		if got := antigravityAuthModeFrom(tc.env); got != tc.want {
+			t.Errorf("%s: antigravityAuthModeFrom() = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}
+
+func TestAntigravityPromptEnvUsesGeminiAPIKeyWithIsolatedHome(t *testing.T) {
+	t.Parallel()
+
+	base := []string{
+		"PATH=/bin",
+		"ENTIRE_TEST_TTY=1",
+		"HOME=/real-home",
+		"USE_ADC=1",
+		"GOOGLE_CLOUD_PROJECT=stale",
+		"GEMINI_API_KEY=test-key",
+		"GOOGLE_API_KEY=other-key",
+		"GOOGLE_GEMINI_BASE_URL=https://proxy.example",
+	}
+
+	got := antigravityPromptEnvFrom(base, "/tmp/repo")
+
+	if gotHome, _ := envValue(got, "HOME"); gotHome != "/tmp/repo-antigravity-home" {
+		t.Fatalf("HOME = %q, want isolated test home in API-key mode", gotHome)
+	}
+	if gotKey, _ := envValue(got, "GEMINI_API_KEY"); gotKey != "test-key" {
+		t.Fatalf("GEMINI_API_KEY = %q, want passed through", gotKey)
+	}
+	if _, ok := envValue(got, "GOOGLE_API_KEY"); ok {
+		t.Fatalf("GOOGLE_API_KEY must be scrubbed (agy prefers it over GEMINI_API_KEY when both are set), env=%#v", got)
+	}
+	if _, ok := envValue(got, "USE_ADC"); ok {
+		t.Fatalf("USE_ADC must not leak into API-key mode, env=%#v", got)
+	}
+	if _, ok := envValue(got, "GOOGLE_CLOUD_PROJECT"); ok {
+		t.Fatalf("GOOGLE_CLOUD_PROJECT must not leak into API-key mode, env=%#v", got)
+	}
+	if gotURL, _ := envValue(got, "GOOGLE_GEMINI_BASE_URL"); gotURL != "https://proxy.example" {
+		t.Fatalf("GOOGLE_GEMINI_BASE_URL = %q, want passed through", gotURL)
+	}
+	if countEnv(got, "HOME") != 1 {
+		t.Fatalf("HOME should be upserted once, env=%#v", got)
+	}
+}
+
+func TestAntigravityPromptEnvADCScrubsAPIKeys(t *testing.T) {
+	t.Parallel()
+
+	base := []string{
+		"HOME=/real-home",
+		"GOOGLE_APPLICATION_CREDENTIALS=/creds.json",
+		"GEMINI_API_KEY=test-key",
+		"GOOGLE_API_KEY=other-key",
+	}
+
+	got := antigravityPromptEnvFrom(base, "/tmp/repo")
+
+	if _, ok := envValue(got, "GEMINI_API_KEY"); ok {
+		t.Fatalf("GEMINI_API_KEY must be scrubbed in ADC mode, env=%#v", got)
+	}
+	if _, ok := envValue(got, "GOOGLE_API_KEY"); ok {
+		t.Fatalf("GOOGLE_API_KEY must be scrubbed in ADC mode, env=%#v", got)
+	}
+	if gotADC, _ := envValue(got, "USE_ADC"); gotADC != "1" {
+		t.Fatalf("USE_ADC = %q, want 1", gotADC)
+	}
+}
+
+func TestAntigravitySessionEnvUsesGeminiAPIKeyWithIsolatedHome(t *testing.T) {
+	t.Parallel()
+
+	base := []string{
+		"HOME=/real-home",
+		"TERM=xterm-256color",
+		"GEMINI_API_KEY=test-key",
+		"GOOGLE_API_KEY=other-key",
+	}
+
+	envArgs, unsetEnv := antigravitySessionEnv(base, "/tmp/repo")
+
+	if gotHome, _ := envValue(envArgs, "HOME"); gotHome != "/tmp/repo-antigravity-home" {
+		t.Fatalf("HOME = %q, want isolated test home in API-key mode", gotHome)
+	}
+	for _, name := range []string{"HOME", "GOOGLE_API_KEY", "USE_ADC"} {
+		if !slices.Contains(unsetEnv, name) {
+			t.Fatalf("unsetEnv = %#v, want %s cleared before the tmux `env` override", unsetEnv, name)
+		}
+	}
+	if slices.Contains(unsetEnv, "GEMINI_API_KEY") {
+		t.Fatalf("GEMINI_API_KEY must be inherited by the interactive session, unsetEnv=%#v", unsetEnv)
+	}
+}
+
+func TestAntigravityEnsureAPIKeyHomeWritesModelProvider(t *testing.T) {
+	t.Parallel()
+
+	repoDir := filepath.Join(t.TempDir(), "repo")
+	if err := os.MkdirAll(repoDir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	settingsPath := filepath.Join(antigravityTestHomeDir(repoDir), ".gemini", "antigravity-cli", "settings.json")
+
+	if err := antigravityEnsureAPIKeyHome(repoDir); err != nil {
+		t.Fatalf("antigravityEnsureAPIKeyHome() error = %v", err)
+	}
+	data, err := os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatalf("settings.json not written: %v", err)
+	}
+	var settings map[string]any
+	if err := json.Unmarshal(data, &settings); err != nil {
+		t.Fatalf("settings.json is not JSON: %v\n%s", err, data)
+	}
+	if settings["modelProvider"] != "gemini" {
+		t.Fatalf("modelProvider = %v, want gemini", settings["modelProvider"])
+	}
+
+	// Idempotent and preserving: a pre-existing key survives a second call.
+	if err := os.WriteFile(settingsPath, []byte(`{"enableTelemetry":false,"modelProvider":"gemini"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := antigravityEnsureAPIKeyHome(repoDir); err != nil {
+		t.Fatalf("second antigravityEnsureAPIKeyHome() error = %v", err)
+	}
+	data, _ = os.ReadFile(settingsPath)
+	if err := json.Unmarshal(data, &settings); err != nil {
+		t.Fatal(err)
+	}
+	if settings["enableTelemetry"] != false || settings["modelProvider"] != "gemini" {
+		t.Fatalf("settings after second call = %s, want enableTelemetry preserved and modelProvider gemini", data)
+	}
+}
+
+func TestAntigravityHomeDirUsesIsolatedHomeInAPIKeyMode(t *testing.T) {
+	t.Setenv("GOOGLE_APPLICATION_CREDENTIALS", "")
+	t.Setenv("GEMINI_API_KEY", "test-key")
+
+	if got := antigravityHomeDir("/tmp/repo"); got != "/tmp/repo-antigravity-home" {
+		t.Fatalf("antigravityHomeDir() = %q, want isolated home so brain/log peeks read agy's real state", got)
+	}
+}
+
+func TestAntigravityFatalErrorDetectsAPIKeyWalls(t *testing.T) {
+	t.Parallel()
+	cases := map[string]string{
+		`modelProvider is set to "gemini" in settings.json, but the GEMINI_API_KEY environment variable is not set. Set GEMINI_API_KEY to your Gemini API key, or remove "modelProvider" from settings.json to use the default backend.`: "GEMINI_API_KEY is unset",
+		`Error: API key not valid. Please pass a valid API key. [reason: API_KEY_INVALID]`: "API_KEY_INVALID",
+	}
+	for content, want := range cases {
+		msg, fatal := antigravityFatalError(content)
+		if !fatal {
+			t.Errorf("antigravityFatalError(%q) fatal = false, want true", content)
+			continue
+		}
+		if !strings.Contains(msg, want) {
+			t.Errorf("antigravityFatalError(%q) = %q, want message containing %q", content, msg, want)
 		}
 	}
 }

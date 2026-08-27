@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -12,6 +13,7 @@ import (
 	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
+	"github.com/entireio/cli/cmd/entire/cli/logging"
 )
 
 // Compile-time interface assertions.
@@ -45,6 +47,18 @@ type agyStep struct {
 	Type      string            `json:"type"`
 	Content   string            `json:"content"`
 	ToolCalls []agyStepToolCall `json:"tool_calls"`
+	// TruncatedFields is set by agy when it trimmed parts of the step while
+	// persisting it (observed on PLANNER_RESPONSE steps: ~0.8% of
+	// replace_file_content calls in a daily-driver corpus lose TargetFile while
+	// every other arg survives). Kept raw: only its presence matters here.
+	TruncatedFields json.RawMessage `json:"truncated_fields"`
+}
+
+// truncated reports whether agy flagged the step as having truncated fields.
+// Absent, null and empty-array all mean "intact".
+func (s *agyStep) truncated() bool {
+	t := bytes.TrimSpace(s.TruncatedFields)
+	return len(t) > 0 && string(t) != "null" && string(t) != "[]" && string(t) != "{}"
 }
 
 type agyStepToolCall struct {
@@ -170,6 +184,7 @@ func (a *AntigravityAgent) ExtractModifiedFilesFromOffset(path string, startOffs
 		return nil, 0, fmt.Errorf("antigravity: extract modified files: %w", readErr)
 	}
 	seen := map[string]bool{}
+	dropped := 0
 	lineNum := forEachNonBlankLine(data, startOffset, func(raw []byte) {
 		var step agyStep
 		if json.Unmarshal(raw, &step) != nil {
@@ -179,13 +194,36 @@ func (a *AntigravityAgent) ExtractModifiedFilesFromOffset(path string, startOffs
 			switch tc.Name {
 			case "write_to_file", "replace_file_content", "multi_replace_file_content":
 				target := resolveAgySymlinks(decodeAgyString(tc.Args["TargetFile"]))
-				if target != "" && !seen[target] {
+				if target == "" {
+					// A mutating call with no decodable TargetFile is a file we
+					// know was modified but cannot name. When agy flagged the
+					// step as truncated that is the cause (TargetFile was
+					// trimmed away); say so instead of silently skipping, because
+					// this analyzer feeds the fallbacks (late-flush, first-turn
+					// mid-turn commit) where git status may not cover the file.
+					if step.truncated() {
+						dropped++
+						logging.Warn(logging.WithComponent(context.Background(), "antigravity"),
+							"transcript step truncated by agy; modified file cannot be named and is missing from the file list",
+							slog.String("transcript", path),
+							slog.Int("step_index", step.StepIndex),
+							slog.String("tool", tc.Name))
+					}
+					continue
+				}
+				if !seen[target] {
 					seen[target] = true
 					files = append(files, target)
 				}
 			}
 		}
 	})
+	if dropped > 0 {
+		logging.Warn(logging.WithComponent(context.Background(), "antigravity"),
+			"antigravity transcript-derived file list is incomplete",
+			slog.String("transcript", path),
+			slog.Int("dropped_truncated_calls", dropped))
+	}
 	return files, lineNum, nil
 }
 

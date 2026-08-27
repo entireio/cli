@@ -21,9 +21,20 @@ hook payloads); tool args can arrive double-encoded.
 - Headless: `agy -p "<prompt>" --add-dir <workspace>` (without `--add-dir`, agy
   runs in `~/.gemini/antigravity-cli/scratch/`, not the cwd).
 - Resume: `agy --conversation <id>` (used by `FormatResumeCommand`).
-- Auth: consumer OAuth or ADC + `--project` only — **no API-key auth exists**
-  in external builds. The backend (`cloudcode-pa.googleapis.com`) is a gated
-  private API; see the entitlement caveat in `e2e/README.md`.
+- Auth: consumer OAuth, ADC + `--project`, or (agy ≥ 1.1.13) **Gemini API-key
+  mode**: `{"modelProvider":"gemini"}` in `~/.gemini/antigravity-cli/settings.json`
+  plus `GEMINI_API_KEY` in the environment — no account session, keyring or
+  browser flow; startup fails fast if the key is unset. Optional
+  `GOOGLE_GEMINI_BASE_URL`. agy prefers `GOOGLE_API_KEY` when both keys are set.
+  The default (`cloudcode-pa.googleapis.com`) backend remains entitlement-gated;
+  see `e2e/README.md`.
+- Version notes (1.1.1 → 1.1.22): hook surface unchanged (5 hook types);
+  1.1.10 fixed hook ordering so `Stop`/`PostInvocation` fire reliably;
+  1.1.12 answers `-p "/hooks"` (and `/help`, `/changelog`) locally without a
+  model turn — `entire doctor` uses `agy -p /hooks --add-dir <root>
+  --output-format json` to verify the workspace hooks actually load;
+  1.1.8/1.1.20 added `--output-format json|stream-json` and made headless exit
+  codes reflect only run-level failures; 1.1.9 expands `/skill` in `-p`.
 
 ## Hook Mechanism
 
@@ -148,12 +159,22 @@ worktree than the install still cleans up, including the legacy local-dev
   content (see Transcript above).
 - **Token capture depends on the title slot** staying routed through the tee
   (doctor-checked, setup-repaired).
-- **Live E2E / CI is quota- and entitlement-gated**: no API-key auth; consumer
-  OAuth quota is a small rolling window; `cloudcode-pa` cannot be enabled on
-  arbitrary GCP projects (AUTH_PERMISSION_DENIED, subject 110002) without a
-  Gemini Code Assist subscription. The CI e2e leg is `workflow_dispatch`-only
-  and the harness fails fast on `Individual quota reached` / `SERVICE_DISABLED`
-  instead of retrying. Details: `e2e/README.md`.
+- **Live E2E / CI runs in Gemini API-key mode** (agy ≥ 1.1.13) with the shared
+  `GEMINI_API_KEY` secret, so antigravity is in the default e2e matrix. The
+  default `cloudcode-pa` backend (OAuth/ADC) stays entitlement-gated
+  (AUTH_PERMISSION_DENIED, subject 110002 without a Gemini Code Assist
+  subscription); the harness fails fast on those walls and on
+  `GEMINI_API_KEY … not set` / `API_KEY_INVALID`. Details: `e2e/README.md`.
+- **Transcript-derived file lists can be incomplete**: agy sometimes persists a
+  `PLANNER_RESPONSE` step with `truncated_fields`, dropping `TargetFile` from a
+  mutating tool call (~0.8% of `replace_file_content` calls in one corpus).
+  `ExtractModifiedFilesFromOffset` logs a WARN per dropped call instead of
+  silently skipping; live PreToolUse stdin is never truncated, so normal turns
+  are unaffected — only the late-flush / first-turn mid-turn fallbacks are.
+- **Untrusted-workspace trap**: `agy -p` in a folder agy doesn't trust resolves
+  cwd to `~/.gemini/antigravity-cli/scratch/` — no hooks fire, no session, exit
+  0. Always pass `--add-dir <workspace>` (the e2e harness does); `entire doctor`
+  reports when the workspace hooks are not loaded.
 - **Review**: agy is eligible in the `entire review` skill picker (skill
   discovery across `~/.gemini/config/skills` (agy 1.1+ global),
   `~/.gemini/antigravity-cli/skills`, `~/.gemini/skills`,
