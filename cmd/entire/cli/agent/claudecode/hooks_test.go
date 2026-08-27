@@ -270,6 +270,88 @@ func containsRule(rules []string, rule string) bool {
 	return slices.Contains(rules, rule)
 }
 
+// TestAreHooksInstalled_ManagedHookTypeOtherThanStop pins that an Entire hook
+// under any type UninstallHooks strips counts as an installation. Callers gate
+// removal on this answer, so a narrower probe leaves hooks on disk that go on
+// invoking an Entire that is no longer configured here.
+func TestAreHooksInstalled_ManagedHookTypeOtherThanStop(t *testing.T) {
+	for _, hookType := range []string{"SessionStart", "SessionEnd", "SubagentStop", "UserPromptSubmit"} {
+		t.Run(hookType, func(t *testing.T) {
+			tempDir := t.TempDir()
+			t.Chdir(tempDir)
+			writeSettingsFile(t, tempDir, fmt.Sprintf(`{
+  "hooks": {
+    %q: [{"matcher": "", "hooks": [{"type": "command", "command": "entire hooks claude-code stop"}]}]
+  }
+}`, hookType))
+
+			if !(&ClaudeCodeAgent{}).AreHooksInstalled(context.Background()) {
+				t.Errorf("AreHooksInstalled() = false for a config carrying an Entire hook under %s, "+
+					"which UninstallHooks strips", hookType)
+			}
+		})
+	}
+}
+
+// TestAreHooksInstalled_ToolUseMatcherOnly covers the nested shape: the
+// PreToolUse/PostToolUse entries live under a tool matcher rather than directly
+// under the hook type.
+func TestAreHooksInstalled_ToolUseMatcherOnly(t *testing.T) {
+	tempDir := t.TempDir()
+	t.Chdir(tempDir)
+	writeSettingsFile(t, tempDir, `{
+  "hooks": {
+    "PreToolUse": [{"matcher": "Agent", "hooks": [{"type": "command", "command": "entire hooks claude-code pre-task"}]}]
+  }
+}`)
+
+	if !(&ClaudeCodeAgent{}).AreHooksInstalled(context.Background()) {
+		t.Error("AreHooksInstalled() = false for a config carrying an Entire PreToolUse hook")
+	}
+}
+
+// TestAreHooksInstalled_DenyRuleAlone pins that the metadata deny rule counts.
+// It is Entire's artifact — InstallHooks writes it and UninstallHooks strips it
+// — so a repo carrying only that rule still has something to remove.
+func TestAreHooksInstalled_DenyRuleAlone(t *testing.T) {
+	tempDir := t.TempDir()
+	t.Chdir(tempDir)
+	writeSettingsFile(t, tempDir, fmt.Sprintf(`{
+  "permissions": {
+    "deny": [%q]
+  }
+}`, metadataDenyRuleTest))
+
+	if !(&ClaudeCodeAgent{}).AreHooksInstalled(context.Background()) {
+		t.Error("AreHooksInstalled() = false for a config carrying only the metadata deny rule, " +
+			"which UninstallHooks strips")
+	}
+}
+
+// TestAreHooksInstalled_UnownedConfigIsNotAnInstall guards the other direction.
+// UninstallHooks also prunes empty containers and leaves the file tidier, but
+// that tidying is not an installation: counting it would report Claude Code
+// installed in every repo that merely has an empty hooks stanza.
+func TestAreHooksInstalled_UnownedConfigIsNotAnInstall(t *testing.T) {
+	for name, content := range map[string]string{
+		"empty containers": `{"hooks": {}, "permissions": {"deny": []}}`,
+		"user hooks only": `{
+  "hooks": {"Stop": [{"matcher": "", "hooks": [{"type": "command", "command": "my-own-tool"}]}]},
+  "permissions": {"deny": ["Read(./secrets/**)"]}
+}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			tempDir := t.TempDir()
+			t.Chdir(tempDir)
+			writeSettingsFile(t, tempDir, content)
+
+			if (&ClaudeCodeAgent{}).AreHooksInstalled(context.Background()) {
+				t.Error("AreHooksInstalled() = true for a config Entire does not own")
+			}
+		})
+	}
+}
+
 func TestUninstallHooks(t *testing.T) {
 	tempDir := t.TempDir()
 	t.Chdir(tempDir)

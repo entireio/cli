@@ -3,12 +3,14 @@ package pi
 import (
 	"context"
 	_ "embed"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
+	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 )
 
@@ -102,15 +104,40 @@ func (a *PiAgent) InstallHooks(ctx context.Context, force bool) (int, error) {
 	return 1, nil
 }
 
-// UninstallHooks removes the entire pi extension directory (if present).
+// UninstallHooks removes the extension Entire installed, and the directory that
+// held it once it is empty.
+//
+// It removes the file rather than the directory tree, and only a file carrying
+// the marker: that is the same ownership test AreHooksInstalled applies, so
+// detection and removal agree on what is Entire's, and it is the same test
+// InstallHooks applies when it refuses to overwrite a foreign file. Deleting the
+// directory outright took anything else the user kept in there with it.
 func (a *PiAgent) UninstallHooks(ctx context.Context) error {
 	path, err := extensionPath(ctx)
 	if err != nil {
 		return err
 	}
-	dir := filepath.Dir(path)
-	if err := os.RemoveAll(dir); err != nil {
-		return fmt.Errorf("remove pi extension dir: %w", err)
+	//nolint:gosec // path from validated repo root
+	data, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("read pi extension: %w", err)
+	}
+	if !strings.Contains(string(data), entireMarker) {
+		// Not ours. Install refuses to overwrite this file, so removal must not
+		// delete it either.
+		return nil
+	}
+	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("remove pi extension: %w", err)
+	}
+	// Entire created this directory, so tidy it away — but only while it is
+	// empty, which os.Remove enforces for us. A directory still holding someone
+	// else's files stays where it is.
+	if err := os.Remove(filepath.Dir(path)); err != nil {
+		logging.Debug(ctx, "left pi extension dir in place", "path", filepath.Dir(path), "err", err)
 	}
 	return nil
 }

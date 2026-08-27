@@ -1912,8 +1912,13 @@ func TestRunStatusJSON_CodexLinkedWorktreeHooksReportInactiveDiscovery(t *testin
 	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
 		t.Fatalf("json.Unmarshal() error = %v", err)
 	}
-	if slices.Contains(result.Agents, "Codex") {
-		t.Fatalf("ignored worktree-local hooks must not report Codex installed: %v", result.Agents)
+	// Codex is listed: these hooks are Entire's and this checkout's to remove,
+	// which is what the paths gating removal on that answer need. That they will
+	// not fire is a different fact, and codex_hooks below is what reports it —
+	// asserted there rather than by omitting Codex from the agent list, which
+	// only held while detection required a complete install.
+	if !slices.Contains(result.Agents, "Codex") {
+		t.Fatalf("worktree-local Entire hooks must report Codex installed: %v", result.Agents)
 	}
 	if slices.Contains(result.HooksOutdated, "codex") {
 		t.Fatalf("Codex freshness must be represented by codex_hooks only: %v", result.HooksOutdated)

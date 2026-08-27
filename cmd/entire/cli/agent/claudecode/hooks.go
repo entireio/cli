@@ -74,7 +74,10 @@ func (c *ClaudeCodeAgent) InstallHooks(ctx context.Context, force bool) (int, er
 		return 0, err
 	}
 
-	count, staleDropped := installHookEntries(rawHooks, force)
+	count, staleDropped, err := installHookEntries(rawHooks, force)
+	if err != nil {
+		return 0, err
+	}
 
 	permissionsChanged, err := applyMetadataDenyRule(rawPermissions)
 	if err != nil {
@@ -151,10 +154,14 @@ func loadRawClaudeSettingsForInstall(settingsPath string) (rawSettings, rawHooks
 // set, any current Entire hook) first. Returns the number of hooks newly
 // added and whether any stale entry was dropped (see the staleDropped comment
 // at its InstallHooks call site for why that forces a write on its own).
-func installHookEntries(rawHooks map[string]json.RawMessage, force bool) (count int, staleDropped bool) {
+func installHookEntries(rawHooks map[string]json.RawMessage, force bool) (count int, staleDropped bool, err error) {
 	var preToolUse, postToolUse []ClaudeHookMatcher
-	parseHookType(rawHooks, "PreToolUse", &preToolUse)
-	parseHookType(rawHooks, "PostToolUse", &postToolUse)
+	if err := parseHookType(rawHooks, "PreToolUse", &preToolUse); err != nil {
+		return 0, false, err
+	}
+	if err := parseHookType(rawHooks, "PostToolUse", &postToolUse); err != nil {
+		return 0, false, err
+	}
 
 	// The "simple" hook types all share one shape: a single Entire command
 	// under an empty-string matcher, no tool-use targeting. Handling them
@@ -174,7 +181,9 @@ func installHookEntries(rawHooks map[string]json.RawMessage, force bool) (count 
 	simpleMatchers := make(map[string][]ClaudeHookMatcher, len(simpleHooks))
 	for _, h := range simpleHooks {
 		var m []ClaudeHookMatcher
-		parseHookType(rawHooks, h.hookType, &m)
+		if err := parseHookType(rawHooks, h.hookType, &m); err != nil {
+			return 0, false, err
+		}
 		simpleMatchers[h.hookType] = m
 	}
 
@@ -238,7 +247,7 @@ func installHookEntries(rawHooks map[string]json.RawMessage, force bool) (count 
 	marshalHookType(rawHooks, "PreToolUse", preToolUse)
 	marshalHookType(rawHooks, "PostToolUse", postToolUse)
 
-	return count, staleDropped
+	return count, staleDropped, nil
 }
 
 // applyMetadataDenyRule adds the Entire metadata deny rule to rawPermissions
@@ -296,12 +305,18 @@ func writeClaudeSettingsFile(settingsPath string, rawSettings, rawHooks, rawPerm
 }
 
 // parseHookType parses a specific hook type from rawHooks into the target slice.
-// Silently ignores parse errors (leaves target unchanged).
-func parseHookType(rawHooks map[string]json.RawMessage, hookType string, target *[]ClaudeHookMatcher) {
-	if data, ok := rawHooks[hookType]; ok {
-		//nolint:errcheck,gosec // Intentionally ignoring parse errors - leave target as nil/empty
-		json.Unmarshal(data, target)
+// A hook type that will not parse is reported rather than treated as empty: to
+// removal that is the difference between "Entire owns nothing here" and "we
+// could not tell", and the two must not be collapsed.
+func parseHookType(rawHooks map[string]json.RawMessage, hookType string, target *[]ClaudeHookMatcher) error {
+	data, ok := rawHooks[hookType]
+	if !ok {
+		return nil
 	}
+	if err := json.Unmarshal(data, target); err != nil {
+		return fmt.Errorf("failed to parse %s hooks: %w", hookType, err)
+	}
+	return nil
 }
 
 // marshalHookType marshals a hook type back to rawHooks.
@@ -318,126 +333,98 @@ func marshalHookType(rawHooks map[string]json.RawMessage, hookType string, match
 	rawHooks[hookType] = data
 }
 
-// UninstallHooks removes Entire hooks from Claude Code settings.
-func (c *ClaudeCodeAgent) UninstallHooks(ctx context.Context) error {
-	// Use repo root to find .claude directory when run from a subdirectory
-	repoRoot, err := paths.WorktreeRoot(ctx)
-	if err != nil {
-		repoRoot = "." // Fallback to CWD if not in a git repo
-	}
-	settingsPath := filepath.Join(repoRoot, ".claude", ClaudeSettingsFileName)
-	data, err := os.ReadFile(settingsPath) //nolint:gosec // path is constructed from repo root + fixed path
-	if err != nil {
-		return nil //nolint:nilerr // No settings file means nothing to uninstall
-	}
+// managedHookTypes is every .claude/settings.json key Entire installs hooks
+// under. Removal walks this list and detection is derived from removal, so a
+// hook type cannot be stripped by one and missed by the other.
+//
+// InstallHooks keeps its own table because it also carries each type's command;
+// TestAreHooksInstalledMatchesUninstallHooks is what pins the two together.
+var managedHookTypes = []string{
+	"SessionStart",
+	"SessionEnd",
+	"Stop",
+	"SubagentStop",
+	"UserPromptSubmit",
+	"PreToolUse",
+	"PostToolUse",
+}
 
+// claudeSettingsPath resolves .claude/settings.json for the current repo, so
+// install, detection and removal all look at the same file.
+func claudeSettingsPath(ctx context.Context) string {
+	return agent.HookConfigPath(ctx, ".claude", ClaudeSettingsFileName)
+}
+
+// UninstallHooks removes Entire's hooks and its metadata deny rule from Claude
+// Code settings.
+func (c *ClaudeCodeAgent) UninstallHooks(ctx context.Context) error {
+	if err := agent.RemoveHookArtifacts(claudeSettingsPath(ctx), removeEntireArtifacts); err != nil {
+		return fmt.Errorf("remove Claude Code hooks: %w", err)
+	}
+	return nil
+}
+
+// removeEntireArtifacts implements agent.HookArtifactRemoval for Claude Code:
+// Entire's hooks under every managed hook type, plus the metadata deny rule it
+// adds to permissions. Everything else in the file survives, which is why the
+// transforms work on the raw JSON maps rather than a typed struct — an unknown
+// hook type or an unrelated setting must round-trip untouched.
+func removeEntireArtifacts(data []byte) ([]byte, bool, error) {
 	var rawSettings map[string]json.RawMessage
 	if err := json.Unmarshal(data, &rawSettings); err != nil {
-		return fmt.Errorf("failed to parse settings.json: %w", err)
+		return nil, false, fmt.Errorf("failed to parse settings.json: %w", err)
 	}
 
-	// rawHooks preserves unknown hook types (e.g., "Notification")
+	// rawHooks preserves unknown hook types (e.g. "Notification").
 	var rawHooks map[string]json.RawMessage
 	if hooksRaw, ok := rawSettings["hooks"]; ok {
 		if err := json.Unmarshal(hooksRaw, &rawHooks); err != nil {
-			return fmt.Errorf("failed to parse hooks: %w", err)
-		}
-	}
-	if rawHooks == nil {
-		rawHooks = make(map[string]json.RawMessage)
-	}
-
-	// Parse only the hook types we need to modify
-	var sessionStart, sessionEnd, stop, subagentStop, userPromptSubmit, preToolUse, postToolUse []ClaudeHookMatcher
-	parseHookType(rawHooks, "SessionStart", &sessionStart)
-	parseHookType(rawHooks, "SessionEnd", &sessionEnd)
-	parseHookType(rawHooks, "Stop", &stop)
-	parseHookType(rawHooks, "SubagentStop", &subagentStop)
-	parseHookType(rawHooks, "UserPromptSubmit", &userPromptSubmit)
-	parseHookType(rawHooks, "PreToolUse", &preToolUse)
-	parseHookType(rawHooks, "PostToolUse", &postToolUse)
-
-	// Remove Entire hooks from all hook types
-	sessionStart = removeEntireHooks(sessionStart)
-	sessionEnd = removeEntireHooks(sessionEnd)
-	stop = removeEntireHooks(stop)
-	subagentStop = removeEntireHooks(subagentStop)
-	userPromptSubmit = removeEntireHooks(userPromptSubmit)
-	preToolUse = removeEntireHooksFromMatchers(preToolUse)
-	postToolUse = removeEntireHooksFromMatchers(postToolUse)
-
-	// Marshal modified hook types back to rawHooks
-	marshalHookType(rawHooks, "SessionStart", sessionStart)
-	marshalHookType(rawHooks, "SessionEnd", sessionEnd)
-	marshalHookType(rawHooks, "Stop", stop)
-	marshalHookType(rawHooks, "SubagentStop", subagentStop)
-	marshalHookType(rawHooks, "UserPromptSubmit", userPromptSubmit)
-	marshalHookType(rawHooks, "PreToolUse", preToolUse)
-	marshalHookType(rawHooks, "PostToolUse", postToolUse)
-
-	// Also remove the metadata deny rule from permissions
-	var rawPermissions map[string]json.RawMessage
-	if permRaw, ok := rawSettings["permissions"]; ok {
-		if err := json.Unmarshal(permRaw, &rawPermissions); err != nil {
-			// If parsing fails, just skip permissions cleanup
-			rawPermissions = nil
+			return nil, false, fmt.Errorf("failed to parse hooks: %w", err)
 		}
 	}
 
-	if rawPermissions != nil {
-		if denyRaw, ok := rawPermissions["deny"]; ok {
-			var denyRules []string
-			if err := json.Unmarshal(denyRaw, &denyRules); err == nil {
-				// Filter out the metadata deny rule
-				filteredRules := make([]string, 0, len(denyRules))
-				for _, rule := range denyRules {
-					if rule != metadataDenyRule {
-						filteredRules = append(filteredRules, rule)
-					}
-				}
-				if len(filteredRules) > 0 {
-					denyJSON, err := json.Marshal(filteredRules)
-					if err == nil {
-						rawPermissions["deny"] = denyJSON
-					}
-				} else {
-					// Remove empty deny array
-					delete(rawPermissions, "deny")
-				}
-			}
+	changed := false
+	for _, hookType := range managedHookTypes {
+		var matchers []ClaudeHookMatcher
+		if err := parseHookType(rawHooks, hookType, &matchers); err != nil {
+			return nil, false, err
 		}
-
-		// If permissions is empty, remove it entirely
-		if len(rawPermissions) > 0 {
-			permJSON, err := jsonutil.MarshalWithNoHTMLEscape(rawPermissions)
-			if err == nil {
-				rawSettings["permissions"] = permJSON
-			}
-		} else {
-			delete(rawSettings, "permissions")
+		remaining, dropped := dropStaleEntireHooks(matchers)
+		if !dropped {
+			continue
 		}
+		changed = true
+		marshalHookType(rawHooks, hookType, remaining)
 	}
 
-	// Marshal hooks back (preserving unknown hook types)
+	denyRuleRemoved, err := agent.RemoveDenyRule(rawSettings, metadataDenyRule)
+	if err != nil {
+		return nil, false, fmt.Errorf("remove metadata deny rule: %w", err)
+	}
+	changed = changed || denyRuleRemoved
+
+	// Nothing of Entire's was here. Report that rather than rewriting a file we
+	// have no artifacts in: removal sweeps every agent, including ones the user
+	// never enabled.
+	if !changed {
+		return nil, false, nil
+	}
+
 	if len(rawHooks) > 0 {
 		hooksJSON, err := jsonutil.MarshalWithNoHTMLEscape(rawHooks)
 		if err != nil {
-			return fmt.Errorf("failed to marshal hooks: %w", err)
+			return nil, false, fmt.Errorf("failed to marshal hooks: %w", err)
 		}
 		rawSettings["hooks"] = hooksJSON
 	} else {
 		delete(rawSettings, "hooks")
 	}
 
-	// Write back
 	output, err := jsonutil.MarshalIndentWithNewline(rawSettings, "", "  ")
 	if err != nil {
-		return fmt.Errorf("failed to marshal settings: %w", err)
+		return nil, false, fmt.Errorf("failed to marshal settings: %w", err)
 	}
-	if err := os.WriteFile(settingsPath, output, 0o600); err != nil {
-		return fmt.Errorf("failed to write settings.json: %w", err)
-	}
-	return nil
+	return output, true, nil
 }
 
 // loadClaudeSettings reads and parses .claude/settings.json from the repo root.
@@ -461,14 +448,13 @@ func loadClaudeSettings(ctx context.Context) (ClaudeSettings, bool) {
 	return settings, true
 }
 
-// AreHooksInstalled checks if Entire hooks are installed.
+// AreHooksInstalled reports whether Entire owns anything in Claude Code's
+// settings, by asking whether UninstallHooks would strip anything — the two
+// answers are derived from one description of what Entire owns here, so
+// detection can never be narrower than removal. It answers presence, not
+// completeness; CheckHookConfig is the one that reports a stale install.
 func (c *ClaudeCodeAgent) AreHooksInstalled(ctx context.Context) bool {
-	settings, ok := loadClaudeSettings(ctx)
-	if !ok {
-		return false
-	}
-	// Check for at least one of our hooks (new, wrapped, or legacy format)
-	return hasEntireHook(settings.Hooks.Stop)
+	return agent.HookArtifactsInstalled(ctx, string(c.Name()), claudeSettingsPath(ctx), removeEntireArtifacts)
 }
 
 // HookConfigState describes how Entire's Claude Code hooks compare to what
@@ -505,12 +491,24 @@ func (c *ClaudeCodeAgent) CheckHookConfig(ctx context.Context) agent.HookConfigS
 // tool-use matchers does not carry its Entire hook.
 func CheckHookConfig(ctx context.Context) HookConfigState {
 	settings, ok := loadClaudeSettings(ctx)
-	if !ok || !hasEntireHook(settings.Hooks.Stop) {
+	if !ok {
+		return HooksAbsent
+	}
+	// Absent is gated on the same question AreHooksInstalled asks, so the two
+	// cannot disagree about whether there is an install to report on. Gating it
+	// on the Stop hook instead left this silent on exactly the configs detection
+	// calls installed — a settings file carrying only Entire's tool-use hooks or
+	// only its deny rule was listed as an enabled agent by `entire status` while
+	// `entire doctor` reported nothing wrong, its Stop hook missing and no
+	// checkpoints being written.
+	installed, err := agent.HookArtifactsPresent(claudeSettingsPath(ctx), removeEntireArtifacts)
+	if err != nil || !installed {
 		return HooksAbsent
 	}
 	subagentTools := splitMatcherTools(subagentToolMatcher)
 	taskTools := splitMatcherTools(taskToolMatcher)
-	if !hasEntireHookCoveringTools(settings.Hooks.PreToolUse, subagentTools) ||
+	if !hasEntireHook(settings.Hooks.Stop) ||
+		!hasEntireHookCoveringTools(settings.Hooks.PreToolUse, subagentTools) ||
 		!hasEntireHookCoveringTools(settings.Hooks.PostToolUse, subagentTools) ||
 		!hasEntireHookCoveringTools(settings.Hooks.PostToolUse, taskTools) ||
 		!hasEntireHook(settings.Hooks.SubagentStop) {

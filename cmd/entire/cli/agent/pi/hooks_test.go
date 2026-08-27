@@ -152,6 +152,77 @@ func TestUninstallHooks(t *testing.T) {
 	}
 }
 
+// TestUninstallHooks_OnlyRemovesWhatEntireOwns pins that removal is bounded by
+// the same ownership test detection and install apply. Removing the whole
+// extension directory took files with it that Entire never wrote and that
+// InstallHooks explicitly refuses to touch.
+func TestUninstallHooks_OnlyRemovesWhatEntireOwns(t *testing.T) {
+	t.Run("foreign extension survives", func(t *testing.T) {
+		dir := t.TempDir()
+		t.Chdir(dir)
+		path := filepath.Join(dir, ".pi", "extensions", "entire", "index.ts")
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		userContent := []byte("// user's own extension\n")
+		if err := os.WriteFile(path, userContent, 0o644); err != nil {
+			t.Fatal(err)
+		}
+
+		if err := (&PiAgent{}).UninstallHooks(context.Background()); err != nil {
+			t.Fatalf("UninstallHooks() error = %v", err)
+		}
+
+		got, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("uninstall deleted a file Entire does not own: %v", err)
+		}
+		if string(got) != string(userContent) {
+			t.Errorf("foreign extension content = %q, want it untouched", got)
+		}
+	})
+
+	t.Run("neighbouring files survive", func(t *testing.T) {
+		dir := t.TempDir()
+		t.Chdir(dir)
+		if _, err := (&PiAgent{}).InstallHooks(context.Background(), false); err != nil {
+			t.Fatalf("InstallHooks() error = %v", err)
+		}
+		extensionDir := filepath.Join(dir, ".pi", "extensions", "entire")
+		neighbour := filepath.Join(extensionDir, "notes.md")
+		if err := os.WriteFile(neighbour, []byte("mine\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+
+		if err := (&PiAgent{}).UninstallHooks(context.Background()); err != nil {
+			t.Fatalf("UninstallHooks() error = %v", err)
+		}
+
+		if _, err := os.Stat(filepath.Join(extensionDir, "index.ts")); !os.IsNotExist(err) {
+			t.Errorf("Stat(index.ts) error = %v, want it removed", err)
+		}
+		if _, err := os.Stat(neighbour); err != nil {
+			t.Errorf("uninstall removed a neighbouring file: %v", err)
+		}
+	})
+
+	t.Run("empty extension dir is tidied away", func(t *testing.T) {
+		dir := t.TempDir()
+		t.Chdir(dir)
+		if _, err := (&PiAgent{}).InstallHooks(context.Background(), false); err != nil {
+			t.Fatalf("InstallHooks() error = %v", err)
+		}
+
+		if err := (&PiAgent{}).UninstallHooks(context.Background()); err != nil {
+			t.Fatalf("UninstallHooks() error = %v", err)
+		}
+
+		if _, err := os.Stat(filepath.Join(dir, ".pi", "extensions", "entire")); !os.IsNotExist(err) {
+			t.Errorf("Stat(extension dir) error = %v, want the directory Entire created removed", err)
+		}
+	})
+}
+
 func TestAreHooksInstalled_RejectsForeignFile(t *testing.T) {
 	dir := t.TempDir()
 	t.Chdir(dir)

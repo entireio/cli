@@ -14,7 +14,7 @@ import (
 
 	"charm.land/huh/v2"
 	"github.com/entireio/cli/cmd/entire/cli/agent"
-	_ "github.com/entireio/cli/cmd/entire/cli/agent/claudecode"
+	"github.com/entireio/cli/cmd/entire/cli/agent/claudecode"
 	"github.com/entireio/cli/cmd/entire/cli/agent/external"
 	_ "github.com/entireio/cli/cmd/entire/cli/agent/geminicli"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
@@ -2199,8 +2199,73 @@ func TestDetectOrSelectAgent_BothDirectoriesExist_NoTTY_UsesAll(t *testing.T) {
 	}
 }
 
-// writeClaudeHooksFixture writes a minimal .claude/settings.json with Entire hooks installed.
-// Only the Stop hook is needed — AreHooksInstalled() checks for it first.
+// TestRunRemoveAgent_RemovesHooksUnderAnyManagedType pins that `entire agent
+// remove` acts on what removal can remove, not on a narrower probe.
+//
+// It skips removal entirely when the agent reports no hooks, so any artifact
+// detection failed to see survived the command — and went on invoking an Entire
+// that the repo no longer configures. Claude Code is the worst case: detection
+// looked at the Stop hook while removal covers six hook types plus the metadata
+// deny rule.
+func TestRunRemoveAgent_RemovesHooksUnderAnyManagedType(t *testing.T) {
+	// Cannot use t.Parallel: mutates cwd.
+	setupTestRepo(t)
+	if err := os.MkdirAll(".claude", 0o755); err != nil {
+		t.Fatalf("failed to create .claude directory: %v", err)
+	}
+	settings := `{
+		"hooks": {
+			"SessionStart": [{"matcher": "", "hooks": [{"type": "command", "command": "entire hooks claude-code session-start"}]}],
+			"PreToolUse": [{"matcher": "Agent", "hooks": [{"type": "command", "command": "entire hooks claude-code pre-task"}]}]
+		},
+		"permissions": {"deny": ["Read(./.entire/metadata/**)"]}
+	}`
+	if err := os.WriteFile(".claude/settings.json", []byte(settings), 0o644); err != nil {
+		t.Fatalf("failed to write .claude/settings.json: %v", err)
+	}
+
+	var out bytes.Buffer
+	if err := runRemoveAgent(context.Background(), &out, "claude-code"); err != nil {
+		t.Fatalf("runRemoveAgent() error = %v\noutput: %s", err, out.String())
+	}
+
+	data, err := os.ReadFile(".claude/settings.json")
+	if err != nil {
+		t.Fatalf("failed to read back .claude/settings.json: %v", err)
+	}
+	remaining := string(data)
+	if strings.Contains(remaining, "entire hooks ") {
+		t.Errorf("Entire hooks survived `agent remove`, settings:\n%s\noutput: %s", remaining, out.String())
+	}
+	if strings.Contains(remaining, ".entire/metadata") {
+		t.Errorf("metadata deny rule survived `agent remove`, settings:\n%s", remaining)
+	}
+	if !strings.Contains(out.String(), "Removed") {
+		t.Errorf("output = %q, want it to report the removal", out.String())
+	}
+}
+
+// installAgentHooksForTest installs an agent's real hook config in the current
+// repo, for tests that need a complete install rather than the minimal fixtures
+// below.
+func installAgentHooksForTest(t *testing.T, name types.AgentName) {
+	t.Helper()
+	ag, err := agent.Get(name)
+	if err != nil {
+		t.Fatalf("agent.Get(%s): %v", name, err)
+	}
+	hooks, ok := agent.AsHookSupport(ag)
+	if !ok {
+		t.Fatalf("agent %s does not support hooks", name)
+	}
+	if _, err := hooks.InstallHooks(context.Background(), false); err != nil {
+		t.Fatalf("InstallHooks() for %s: %v", name, err)
+	}
+}
+
+// writeClaudeHooksFixture writes a minimal .claude/settings.json with Entire
+// hooks installed. A single Stop hook is enough: any hook Entire owns marks the
+// agent as installed.
 func writeClaudeHooksFixture(t *testing.T) {
 	t.Helper()
 	if err := os.MkdirAll(".claude", 0o755); err != nil {
@@ -2802,7 +2867,10 @@ func TestManageAgents_NoChanges(t *testing.T) {
 	setupTestRepo(t)
 	t.Setenv("ENTIRE_TEST_TTY", "1")
 	writeSettings(t, testSettingsEnabled)
-	writeClaudeHooksFixture(t)
+	// A complete install, not the minimal one-hook fixture: keeping the same
+	// selection now completes a partial config instead of reporting nothing to
+	// do, so "no changes" is only the truth when there was nothing missing.
+	installAgentHooksForTest(t, agent.AgentNameClaudeCode)
 
 	// Keep the same selection
 	selectFn := func(_ []string) ([]string, error) {
@@ -2817,6 +2885,39 @@ func TestManageAgents_NoChanges(t *testing.T) {
 
 	if !strings.Contains(buf.String(), "No changes made.") {
 		t.Errorf("Expected 'No changes made.' output, got: %s", buf.String())
+	}
+}
+
+// TestManageAgents_CompletesPartialInstall pins that keeping an agent selected
+// repairs a config that is only partly installed.
+//
+// "Installed" means Entire owns at least one artifact in that agent's config,
+// which is equally true of a config an older release wrote with fewer hooks, or
+// one an interrupted enable left half-written. Treating installed as nothing to
+// do left those permanently half-wired: nothing else revisits an installed agent
+// without --force, so the missing hooks never arrived.
+func TestManageAgents_CompletesPartialInstall(t *testing.T) {
+	// Cannot use t.Parallel() because we use t.Chdir and t.Setenv
+	setupTestRepo(t)
+	t.Setenv("ENTIRE_TEST_TTY", "1")
+	writeSettings(t, testSettingsEnabled)
+	// One Stop hook and nothing else: installed, but missing most of the set.
+	writeClaudeHooksFixture(t)
+
+	selectFn := func(_ []string) ([]string, error) {
+		return []string{string(agent.AgentNameClaudeCode)}, nil
+	}
+
+	var buf bytes.Buffer
+	if err := runManageAgents(context.Background(), &buf, EnableOptions{}, selectFn); err != nil {
+		t.Fatalf("runManageAgents() error = %v", err)
+	}
+
+	if !strings.Contains(buf.String(), "Completed hooks for: Claude Code") {
+		t.Errorf("expected the partial install to be reported as completed, got: %s", buf.String())
+	}
+	if state := claudecode.CheckHookConfig(context.Background()); state != agent.HooksCurrent {
+		t.Errorf("CheckHookConfig() = %v after re-selecting a partial install, want HooksCurrent", state)
 	}
 }
 

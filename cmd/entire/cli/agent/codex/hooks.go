@@ -188,51 +188,24 @@ func (c *CodexAgent) UninstallHooks(ctx context.Context) error {
 	if err := validateMutableHookTarget(worktreeHooks); err != nil {
 		return err
 	}
-	hooksPath := worktreeHooks.Path()
-	data, exists, err := readHooksFileForMutation(hooksPath)
+	data, exists, err := readHooksFileForMutation(worktreeHooks.Path())
+	if err != nil || !exists {
+		return err
+	}
+	output, changed, err := removeEntireArtifacts(data)
 	if err != nil {
 		return err
 	}
-	if !exists {
+	// Nothing of Entire's was here. Report that rather than rewriting a config we
+	// have no artifacts in: removal sweeps every agent, including ones the user
+	// never enabled.
+	if !changed {
 		return nil
-	}
-	var topLevel map[string]json.RawMessage
-	if err := json.Unmarshal(data, &topLevel); err != nil {
-		return fmt.Errorf("failed to parse hooks.json: %w", err)
-	}
-	var rawHooks map[string]json.RawMessage
-	if hooksRaw, ok := topLevel["hooks"]; ok {
-		if err := json.Unmarshal(hooksRaw, &rawHooks); err != nil {
-			return fmt.Errorf("failed to parse hooks: %w", err)
-		}
-	}
-	if rawHooks == nil {
-		return nil
-	}
-	for _, h := range managedHooks {
-		var groups []MatcherGroup
-		if err := parseHookType(rawHooks, h.event, &groups); err != nil {
-			return err
-		}
-		marshalHookType(rawHooks, h.event, removeEntireHooks(groups))
-	}
-	if len(rawHooks) > 0 {
-		hooksJSON, err := jsonutil.MarshalWithNoHTMLEscape(rawHooks)
-		if err != nil {
-			return fmt.Errorf("failed to marshal hooks: %w", err)
-		}
-		topLevel["hooks"] = hooksJSON
-	} else {
-		delete(topLevel, "hooks")
-	}
-	output, err := jsonutil.MarshalIndentWithNewline(topLevel, "", "  ")
-	if err != nil {
-		return fmt.Errorf("failed to marshal hooks.json: %w", err)
 	}
 	if err := validateMutableHookTarget(worktreeHooks); err != nil {
 		return err
 	}
-	if err := os.WriteFile(hooksPath, output, 0o600); err != nil {
+	if err := os.WriteFile(worktreeHooks.Path(), output, 0o600); err != nil {
 		return fmt.Errorf("failed to write hooks.json: %w", err)
 	}
 	return nil
@@ -240,45 +213,78 @@ func (c *CodexAgent) UninstallHooks(ctx context.Context) error {
 
 // AreHooksInstalled reports whether Codex is wired up to Entire in this repo.
 //
-// It requires only the core events, not everything InstallHooks writes today.
-// The two questions are different: this one decides whether Codex is listed as
-// an installed agent (`entire status`, the review and investigate pickers), and
-// answering it with the full set would drop Codex out of all of them the moment
-// a release adds an event — every existing install predates the addition. Drift
-// against today's set is part of hook-config inspection, which `entire doctor`
-// reports with the fix (`entire enable`).
+// It asks the hook-config inspection about the file Codex actually reads, and
+// HookFileEntire is the same predicate removeEntireArtifacts strips on: any one
+// managed event counts. Requiring the full set an install writes today would
+// drop Codex out of `entire status` and the agent pickers the moment a release
+// adds an event, since every existing install predates the addition. Requiring
+// all the *core* events, as this used to, meant a config carrying only a
+// non-core event read as "not installed" while UninstallHooks still had hooks to
+// remove there — and the callers that skip removal on a negative answer left
+// them running against an Entire the repo no longer configures. Drift against
+// today's set is the inspection's other job, which `entire doctor` reports with
+// the fix (`entire enable`).
+//
+// It reports on the file Entire writes in this checkout, which is also the file
+// removal acts on. In a linked worktree that can differ from the file Codex
+// reads, and hooks in this worktree's copy then never fire — but they are still
+// Entire's, and still this checkout's to remove, which is what the callers
+// gating removal on this answer need to know. That they are inactive is a
+// separate fact, reported by `codex_hooks` ("NOT ACTIVE IN THIS WORKTREE") with
+// the fix.
 func (c *CodexAgent) AreHooksInstalled(ctx context.Context) bool {
-	worktreeHooks, err := ResolveWorktreeHooksPath(ctx)
-	if err != nil {
-		return false
-	}
-	if err := validateMutableHookTarget(worktreeHooks); err != nil {
-		return false
-	}
-	data, exists, err := readHooksFileForMutation(worktreeHooks.Path())
-	if err != nil || !exists {
-		return false
-	}
+	return InspectHookDiagnosticsLightweight(ctx).Worktree.State == HookFileEntire
+}
+
+// removeEntireArtifacts implements agent.HookArtifactRemoval for Codex
+// hooks.json: Entire's hook entries under every managed event. Unknown events
+// and every other top-level key (e.g. "$schema") round-trip untouched.
+//
+// Codex keeps its own file handling rather than agent.RemoveHookArtifacts
+// because its config may live outside the worktree and has to pass
+// validateMutableHookTarget before Entire writes to it.
+func removeEntireArtifacts(data []byte) ([]byte, bool, error) {
 	var topLevel map[string]json.RawMessage
 	if err := json.Unmarshal(data, &topLevel); err != nil {
-		return false
+		return nil, false, fmt.Errorf("failed to parse hooks.json: %w", err)
 	}
 	var rawHooks map[string]json.RawMessage
 	if hooksRaw, ok := topLevel["hooks"]; ok {
 		if err := json.Unmarshal(hooksRaw, &rawHooks); err != nil {
-			return false
+			return nil, false, fmt.Errorf("failed to parse hooks: %w", err)
 		}
 	}
+
+	changed := false
 	for _, h := range managedHooks {
-		if !h.core {
+		var groups []MatcherGroup
+		if err := parseHookType(rawHooks, h.event, &groups); err != nil {
+			return nil, false, err
+		}
+		if !hasEntireHook(groups) {
 			continue
 		}
-		var groups []MatcherGroup
-		if err := parseHookType(rawHooks, h.event, &groups); err != nil || !hasEntireHook(groups) {
-			return false
-		}
+		changed = true
+		marshalHookType(rawHooks, h.event, removeEntireHooks(groups))
 	}
-	return true
+	if !changed {
+		return nil, false, nil
+	}
+
+	if len(rawHooks) > 0 {
+		hooksJSON, err := jsonutil.MarshalWithNoHTMLEscape(rawHooks)
+		if err != nil {
+			return nil, false, fmt.Errorf("failed to marshal hooks: %w", err)
+		}
+		topLevel["hooks"] = hooksJSON
+	} else {
+		delete(topLevel, "hooks")
+	}
+	output, err := jsonutil.MarshalIndentWithNewline(topLevel, "", "  ")
+	if err != nil {
+		return nil, false, fmt.Errorf("failed to marshal hooks.json: %w", err)
+	}
+	return output, true, nil
 }
 
 // CheckHookConfig reports whether the current checkout's Codex hook

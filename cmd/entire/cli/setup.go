@@ -569,6 +569,7 @@ func applyAgentChanges(ctx context.Context, w io.Writer, selectedAgentNames []st
 
 	var addedAgents []agent.Agent
 	var reinstalledAgents []agent.Agent
+	var repairAgents []agent.Agent
 	for _, name := range selectedAgentNames {
 		ag, err := agent.Get(types.AgentName(name))
 		if err != nil {
@@ -578,6 +579,8 @@ func applyAgentChanges(ctx context.Context, w io.Writer, selectedAgentNames []st
 		if _, wasInstalled := installedSet[types.AgentName(name)]; wasInstalled {
 			if opts.ForceHooks {
 				reinstalledAgents = append(reinstalledAgents, ag)
+			} else {
+				repairAgents = append(repairAgents, ag)
 			}
 			continue
 		}
@@ -597,7 +600,18 @@ func applyAgentChanges(ctx context.Context, w io.Writer, selectedAgentNames []st
 		removedAgents = append(removedAgents, ag)
 	}
 
-	if len(addedAgents) == 0 && len(reinstalledAgents) == 0 && len(removedAgents) == 0 && len(errs) == 0 && !opts.SearchSkill && !opts.AgentHelpSkill {
+	// An agent that is still selected has its hooks installed even though the
+	// sweep already reports it installed. "Installed" means Entire owns at least
+	// one artifact in that agent's config, which is equally true of a partial
+	// config — one an older release wrote with fewer hooks, or an interrupted
+	// enable left half-written. Skipping install for those left them permanently
+	// half-wired, because nothing else revisits an installed agent without
+	// --force. Install is idempotent, so a complete config costs a no-op.
+	_, repairedAgents, repairErrs := setupAgentHookSet(ctx, w, repairAgents, false)
+	errs = append(errs, repairErrs...)
+
+	if len(addedAgents) == 0 && len(reinstalledAgents) == 0 && len(removedAgents) == 0 &&
+		len(repairedAgents) == 0 && len(errs) == 0 && !opts.SearchSkill && !opts.AgentHelpSkill {
 		targetFile, _ := settingsTargetFile(ctx, opts.UseLocalSettings, opts.UseProjectSettings)
 		changed, err := maybePromptVercelDeploymentDisable(ctx, w, targetFile, nil)
 		if err != nil {
@@ -608,9 +622,9 @@ func applyAgentChanges(ctx context.Context, w io.Writer, selectedAgentNames []st
 		}
 		return nil
 	}
-	successfullyAddedAgents, setupErrs := setupAgentHookSet(ctx, w, addedAgents, opts.ForceHooks)
+	successfullyAddedAgents, _, setupErrs := setupAgentHookSet(ctx, w, addedAgents, opts.ForceHooks)
 	errs = append(errs, setupErrs...)
-	successfullyReinstalledAgents, setupErrs := setupAgentHookSet(ctx, w, reinstalledAgents, opts.ForceHooks)
+	successfullyReinstalledAgents, _, setupErrs := setupAgentHookSet(ctx, w, reinstalledAgents, opts.ForceHooks)
 	errs = append(errs, setupErrs...)
 
 	var uninstalledAgents []agent.Agent
@@ -672,6 +686,13 @@ func applyAgentChanges(ctx context.Context, w io.Writer, selectedAgentNames []st
 			names = append(names, string(ag.Type()))
 		}
 		fmt.Fprintf(w, "✓ Reinstalled agents: %s\n", strings.Join(names, ", "))
+	}
+	if len(repairedAgents) > 0 {
+		names := make([]string, 0, len(repairedAgents))
+		for _, ag := range repairedAgents {
+			names = append(names, string(ag.Type()))
+		}
+		fmt.Fprintf(w, "✓ Completed hooks for: %s\n", strings.Join(names, ", "))
 	}
 	if len(uninstalledAgents) > 0 {
 		if len(successfullyAddedAgents) == 0 && len(successfullyReinstalledAgents) == 0 && len(addedAgents) == 0 && len(removedAgents) == len(installedNames) {
@@ -1672,18 +1693,24 @@ func setupAgentHooks(ctx context.Context, ag agent.Agent, forceHooks bool) (int,
 	return count, nil
 }
 
-func setupAgentHookSet(ctx context.Context, w io.Writer, agents []agent.Agent, forceHooks bool) ([]agent.Agent, []error) {
-	var successful []agent.Agent
-	var errs []error
+// setupAgentHookSet installs hooks for each agent, returning those that
+// succeeded and, separately, those where hooks were actually written. The second
+// set matters for agents that already report as installed: install is idempotent
+// there, so only a non-zero count means something had been missing.
+func setupAgentHookSet(ctx context.Context, w io.Writer, agents []agent.Agent, forceHooks bool) (successful, changed []agent.Agent, errs []error) {
 	for _, ag := range agents {
-		if _, err := setupAgentHooks(ctx, ag, forceHooks); err != nil {
+		count, err := setupAgentHooks(ctx, ag, forceHooks)
+		if err != nil {
 			errs = append(errs, fmt.Errorf("failed to setup %s hooks: %w", ag.Type(), err))
 			continue
 		}
 		warnCodexHooksAfterSetup(ctx, w, ag)
 		successful = append(successful, ag)
+		if count > 0 {
+			changed = append(changed, ag)
+		}
 	}
-	return successful, errs
+	return successful, changed, errs
 }
 
 func warnCodexHooksAfterSetup(ctx context.Context, w io.Writer, ag agent.Agent) {

@@ -121,7 +121,24 @@ type HookSupport interface {
 	// UninstallHooks removes installed hooks
 	UninstallHooks(ctx context.Context) error
 
-	// AreHooksInstalled checks if hooks are currently installed
+	// AreHooksInstalled reports whether Entire owns anything in this agent's
+	// config here — equivalently, whether UninstallHooks would remove something.
+	//
+	// It is a gate on removal, not only a display signal: `entire agent remove`
+	// and the `entire enable` deselect path skip an agent that answers false, so
+	// anything this misses is left on disk still invoking an Entire the repo no
+	// longer configures. The built-in agents whose config is a JSON file
+	// therefore derive it from their removal via HookArtifactRemoval, rather than
+	// implementing a second, independent probe — which is how Claude Code came to
+	// check one hook type while its removal covered six plus a permissions rule.
+	// Pi and OpenCode, whose whole integration is one generated file, test the
+	// same ownership marker in both places instead.
+	//
+	// It answers presence, not completeness. A partial config — an older release
+	// that wrote fewer hooks, an interrupted enable — is installed: there is
+	// something to remove, and reporting otherwise would drop the agent out of
+	// `entire status` and the agent pickers. HookFreshness is what reports that
+	// such a config is stale.
 	AreHooksInstalled(ctx context.Context) bool
 }
 
@@ -143,13 +160,19 @@ const (
 // HookFreshness is implemented by hook-supporting agents that can report
 // whether their installed config has drifted from the current one.
 //
-// AreHooksInstalled answers "is Entire wired up here at all?" — for agents
-// whose hook config is a generated file checked into the repo, that stays true
-// forever even after the generated content goes stale, because the file is
-// still present and still recognisably Entire's. CheckHookConfig answers the
-// separate question "is what's installed still what we'd write today?", so
+// AreHooksInstalled answers "is Entire wired up here at all?" — anything of
+// Entire's in the agent's config counts, so the answer stays true for a config
+// that has gone stale: a generated file checked into the repo is still present
+// and still recognisably Entire's, and a settings file written by an older
+// release still carries the hooks that release wrote. CheckHookConfig answers
+// the separate question "is what's installed still what we'd write today?", so
 // `entire status` and `entire doctor` can flag a stale config instead of
 // reporting it healthy while its hooks silently no-op.
+//
+// Because the two questions divide that way, a freshness check must not gate its
+// absent case on a narrower test than AreHooksInstalled uses. One that did went
+// silent on exactly the configs detection calls installed, leaving the agent
+// listed as enabled with nothing reported wrong.
 //
 // Implementations must be read-only: they are diagnostics and must never
 // modify the agent's config.
