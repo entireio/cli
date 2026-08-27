@@ -10,8 +10,10 @@ import (
 	_ "github.com/entireio/cli/cmd/entire/cli/agent/copilotcli"
 	_ "github.com/entireio/cli/cmd/entire/cli/agent/factoryaidroid"
 	_ "github.com/entireio/cli/cmd/entire/cli/agent/geminicli"
+	_ "github.com/entireio/cli/cmd/entire/cli/agent/goose"
 	_ "github.com/entireio/cli/cmd/entire/cli/agent/opencode"
 	_ "github.com/entireio/cli/cmd/entire/cli/agent/pi"
+	_ "github.com/entireio/cli/cmd/entire/cli/agent/qwencode"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 )
 
@@ -25,7 +27,9 @@ func TestResumeCommandSpecMatchesFormattedResumeCommand(t *testing.T) {
 		agent.AgentNameCopilotCLI,
 		agent.AgentNameFactoryAIDroid,
 		agent.AgentNameGemini,
+		agent.AgentNameGoose,
 		agent.AgentNameOpenCode,
+		agent.AgentNameQwenCode,
 		agent.AgentNamePi,
 	} {
 		t.Run(string(name), func(t *testing.T) {

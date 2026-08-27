@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+
+- Two new agents, both preview, each reading its transcript a different way:
+  - **Goose** (`--agent goose`): hooks at `.agents/plugins/entire/hooks/hooks.json`. Goose keeps conversations in SQLite, so this follows the OpenCode pattern — read through `goose session export --format json`, restore through `goose session import`, never touch the database
+  - **Qwen Code** (`--agent qwen-code`): hooks in `.qwen/settings.json`. Qwen hands the hook a `transcript_path`, so Entire reads its JSONL directly with no export step
+
+  Both map their `SessionStart` / `UserPromptSubmit` / `Stop` / `SessionEnd` events onto Entire's lifecycle
+
 ## [0.10.2] - 2026-08-19
 
 ### Added

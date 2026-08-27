@@ -44,6 +44,9 @@ var knownAgents = map[string]string{
 	"cursor":     "cursor",
 	"droid":      "droid",
 	"kiro":       "kiro",
+	"goose":      "goose",
+	"qwen":       "qwen",
+	"qwencode":   "qwen",
 }
 
 func newActivityCmd() *cobra.Command {

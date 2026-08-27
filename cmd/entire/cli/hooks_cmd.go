@@ -15,8 +15,10 @@ import (
 	_ "github.com/entireio/cli/cmd/entire/cli/agent/cursor"
 	_ "github.com/entireio/cli/cmd/entire/cli/agent/factoryaidroid"
 	_ "github.com/entireio/cli/cmd/entire/cli/agent/geminicli"
+	_ "github.com/entireio/cli/cmd/entire/cli/agent/goose"
 	_ "github.com/entireio/cli/cmd/entire/cli/agent/opencode"
 	_ "github.com/entireio/cli/cmd/entire/cli/agent/pi"
+	_ "github.com/entireio/cli/cmd/entire/cli/agent/qwencode"
 	_ "github.com/entireio/cli/cmd/entire/cli/agent/vogon"
 
 	// support external agents

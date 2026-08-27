@@ -160,7 +160,9 @@ const (
 	AgentNameCursor         types.AgentName = "cursor"
 	AgentNameFactoryAIDroid types.AgentName = "factoryai-droid"
 	AgentNameGemini         types.AgentName = "gemini"
+	AgentNameGoose          types.AgentName = "goose"
 	AgentNameOpenCode       types.AgentName = "opencode"
+	AgentNameQwenCode       types.AgentName = "qwen-code"
 	AgentNamePi             types.AgentName = "pi"
 )
 
@@ -172,7 +174,9 @@ const (
 	AgentTypeCursor         types.AgentType = "Cursor"
 	AgentTypeFactoryAIDroid types.AgentType = "Factory AI Droid"
 	AgentTypeGemini         types.AgentType = "Gemini CLI"
+	AgentTypeGoose          types.AgentType = "Goose"
 	AgentTypeOpenCode       types.AgentType = "OpenCode"
+	AgentTypeQwenCode       types.AgentType = "Qwen Code"
 	AgentTypePi             types.AgentType = "Pi"
 	AgentTypeUnknown        types.AgentType = "Unknown"
 )
