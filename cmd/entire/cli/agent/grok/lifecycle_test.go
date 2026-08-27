@@ -5,6 +5,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -348,5 +349,33 @@ func TestSessionStart_FallsBackToWorkspaceRoot(t *testing.T) {
 	group := filepath.Base(filepath.Dir(filepath.Dir(ev.SessionRef)))
 	if group != "%2Frepo%2Fproject" {
 		t.Errorf("group = %q, want %%2Frepo%%2Fproject", group)
+	}
+}
+
+// TestSessionStart_RejectsUnsafeSessionID guards the path-traversal class of
+// bug (GHSA-2h46): session_start is the one hook without transcriptPath, so
+// its sessionId becomes a directory component. An ID carrying separators or
+// a reserved segment must yield no SessionRef rather than a path that escapes
+// the session group.
+func TestSessionStart_RejectsUnsafeSessionID(t *testing.T) {
+	t.Setenv("GROK_HOME", filepath.Join("/tmp", "grokhome"))
+
+	for _, id := range []string{"../../etc/passwd", "..", "a/b", `a\b`, "C:evil", "-flag", "sess*"} {
+		t.Run(id, func(t *testing.T) {
+			body := []byte(`{"hookEventName":"session_start","sessionId":` + strconv.Quote(id) + `,` +
+				`"cwd":"/repo/project","source":"new"}`)
+
+			g := &GrokAgent{}
+			ev, err := g.ParseHookEvent(context.Background(), HookNameSessionStart, bytes.NewReader(body))
+			if err != nil {
+				t.Fatalf("ParseHookEvent: %v", err)
+			}
+			if ev == nil {
+				t.Fatal("nil event")
+			}
+			if ev.SessionRef != "" {
+				t.Errorf("SessionRef = %q, want empty for unsafe session ID", ev.SessionRef)
+			}
+		})
 	}
 }

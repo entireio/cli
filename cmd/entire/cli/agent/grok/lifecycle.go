@@ -9,6 +9,7 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
+	"github.com/entireio/cli/cmd/entire/cli/validation"
 )
 
 // ParseHookEvent translates a Grok hook into a normalized lifecycle Event.
@@ -69,6 +70,15 @@ func (g *GrokAgent) sessionRef(ctx context.Context, in baseHookInput) string {
 		cwd = strings.TrimRight(in.WorkspaceRoot, "/")
 	}
 	if cwd == "" || in.SessionID == "" {
+		return ""
+	}
+	// sessionId arrives on stdin from the hook payload and becomes a directory
+	// component below, ahead of the lifecycle dispatcher's own validation of
+	// event.SessionID. Validate at this choke point (see the SECURITY CONTRACT
+	// on agent.Agent.ResolveSessionFile) so an unsafe ID cannot point the
+	// transcript path outside the session group; "" signals no capture.
+	if err := validation.ValidateSessionID(in.SessionID); err != nil {
+		logging.Warn(ctx, "grok: refusing to derive transcript path from unsafe session ID", "err", err)
 		return ""
 	}
 	dir, err := g.GetSessionDir(cwd)
