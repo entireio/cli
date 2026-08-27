@@ -84,6 +84,11 @@ Antigravity E2E resolves its auth mode from the environment, in this order:
    `GOOGLE_GEMINI_BASE_URL` if set) through, and scrubs `GOOGLE_API_KEY` — agy
    prefers it over `GEMINI_API_KEY` when both are set. This is the same secret
    gemini-cli uses, which is why antigravity is in the default CI matrix.
+
+Both isolated modes also pre-trust the test repo (`trustedWorkspaces` in that
+`settings.json`, agy's equivalent of `GEMINI_CLI_TRUST_WORKSPACE=true`): agy only
+loads a workspace's `.agents/hooks.json` for a trusted workspace, so in a fresh
+`HOME` a headless run would otherwise do the work with no Entire hooks firing.
 3. **OAuth** — neither set: the developer's real `HOME` (existing `agy` login) is
    used for local runs.
 

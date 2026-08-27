@@ -837,7 +837,7 @@ func TestAntigravitySessionEnvUsesGeminiAPIKeyWithIsolatedHome(t *testing.T) {
 	}
 }
 
-func TestAntigravityEnsureAPIKeyHomeWritesModelProvider(t *testing.T) {
+func TestAntigravityEnsureIsolatedHomeWritesModelProviderAndTrust(t *testing.T) {
 	t.Parallel()
 
 	repoDir := filepath.Join(t.TempDir(), "repo")
@@ -846,8 +846,8 @@ func TestAntigravityEnsureAPIKeyHomeWritesModelProvider(t *testing.T) {
 	}
 	settingsPath := filepath.Join(antigravityTestHomeDir(repoDir), ".gemini", "antigravity-cli", "settings.json")
 
-	if err := antigravityEnsureAPIKeyHome(repoDir); err != nil {
-		t.Fatalf("antigravityEnsureAPIKeyHome() error = %v", err)
+	if err := antigravityEnsureIsolatedHome(repoDir, true); err != nil {
+		t.Fatalf("antigravityEnsureIsolatedHome() error = %v", err)
 	}
 	data, err := os.ReadFile(settingsPath)
 	if err != nil {
@@ -860,13 +860,17 @@ func TestAntigravityEnsureAPIKeyHomeWritesModelProvider(t *testing.T) {
 	if settings["modelProvider"] != "gemini" {
 		t.Fatalf("modelProvider = %v, want gemini", settings["modelProvider"])
 	}
+	trusted, _ := settings["trustedWorkspaces"].([]any)
+	if !slices.Contains(trusted, any(repoDir)) {
+		t.Fatalf("trustedWorkspaces = %v, want the test repo pre-trusted so agy loads .agents/hooks.json", trusted)
+	}
 
 	// Idempotent and preserving: a pre-existing key survives a second call.
 	if err := os.WriteFile(settingsPath, []byte(`{"enableTelemetry":false,"modelProvider":"gemini"}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := antigravityEnsureAPIKeyHome(repoDir); err != nil {
-		t.Fatalf("second antigravityEnsureAPIKeyHome() error = %v", err)
+	if err := antigravityEnsureIsolatedHome(repoDir, true); err != nil {
+		t.Fatalf("second antigravityEnsureIsolatedHome() error = %v", err)
 	}
 	data, _ = os.ReadFile(settingsPath)
 	if err := json.Unmarshal(data, &settings); err != nil {
@@ -901,5 +905,43 @@ func TestAntigravityFatalErrorDetectsAPIKeyWalls(t *testing.T) {
 		if !strings.Contains(msg, want) {
 			t.Errorf("antigravityFatalError(%q) = %q, want message containing %q", content, msg, want)
 		}
+	}
+}
+
+func TestAntigravityEnsureIsolatedHomeADCTrustsWithoutProvider(t *testing.T) {
+	t.Parallel()
+
+	repoDir := filepath.Join(t.TempDir(), "repo")
+	if err := os.MkdirAll(repoDir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := antigravityEnsureIsolatedHome(repoDir, false); err != nil {
+		t.Fatalf("antigravityEnsureIsolatedHome() error = %v", err)
+	}
+	data, err := os.ReadFile(filepath.Join(antigravityTestHomeDir(repoDir), ".gemini", "antigravity-cli", "settings.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var settings map[string]any
+	if err := json.Unmarshal(data, &settings); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := settings["modelProvider"]; ok {
+		t.Fatalf("ADC mode must not set modelProvider (agy would then demand GEMINI_API_KEY): %s", data)
+	}
+	trusted, _ := settings["trustedWorkspaces"].([]any)
+	if !slices.Contains(trusted, any(repoDir)) {
+		t.Fatalf("trustedWorkspaces = %v, want the test repo", trusted)
+	}
+}
+
+func TestAntigravityPrepareHomeIsNoOpForOAuth(t *testing.T) {
+	t.Parallel()
+	repoDir := filepath.Join(t.TempDir(), "repo")
+	if err := antigravityPrepareHome([]string{"HOME=/real-home"}, repoDir); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(antigravityTestHomeDir(repoDir)); !os.IsNotExist(err) {
+		t.Fatalf("OAuth mode must not create an isolated home, stat err = %v", err)
 	}
 }

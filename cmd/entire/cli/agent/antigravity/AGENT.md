@@ -173,7 +173,11 @@ worktree than the install still cleans up, including the legacy local-dev
   are unaffected — only the late-flush / first-turn mid-turn fallbacks are.
 - **Untrusted-workspace trap**: `agy -p` in a folder agy doesn't trust resolves
   cwd to `~/.gemini/antigravity-cli/scratch/` — no hooks fire, no session, exit
-  0. Always pass `--add-dir <workspace>` (the e2e harness does); `entire doctor`
+  0. Workspace hooks (`.agents/hooks.json`) only load for a **trusted**
+  workspace (`trustedWorkspaces` array of absolute paths in agy's global
+  `settings.json`; interactive prompt "Do you trust the contents of this
+  project?"). Always pass `--add-dir <workspace>` and, in a fresh HOME,
+  pre-seed `trustedWorkspaces` (the e2e harness does both); `entire doctor`
   reports when the workspace hooks are not loaded.
 - **Review**: agy is eligible in the `entire review` skill picker (skill
   discovery across `~/.gemini/config/skills` (agy 1.1+ global),

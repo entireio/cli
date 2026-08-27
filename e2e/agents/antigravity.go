@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 )
@@ -658,20 +659,28 @@ func antigravityPromptEnvFrom(base []string, repoDir string) []string {
 }
 
 // antigravityPrepareHome makes the isolated test home ready for the resolved
-// auth mode before agy is spawned. Only API-key mode needs on-disk state:
-// agy reads modelProvider from HOME/.gemini/antigravity-cli/settings.json and
-// refuses to start in API-key mode without it. No-op for ADC/OAuth.
+// auth mode before agy is spawned. No-op for OAuth (developer's real HOME).
+// For both isolated modes it pre-trusts the test repo: agy only loads a
+// workspace's .agents/hooks.json for a trusted workspace, and a fresh HOME
+// trusts nothing — headless `-p` then silently runs with no hooks at all
+// (observed in CI: agy created the file, git hooks fired, no agy hook did).
+// This is agy's equivalent of gemini-cli's GEMINI_CLI_TRUST_WORKSPACE=true.
+// API-key mode additionally needs modelProvider "gemini", without which agy
+// refuses to start.
 func antigravityPrepareHome(env []string, repoDir string) error {
-	if antigravityAuthModeFrom(env) != antigravityAuthAPIKey {
+	mode := antigravityAuthModeFrom(env)
+	if mode == antigravityAuthOAuth {
 		return nil
 	}
-	return antigravityEnsureAPIKeyHome(repoDir)
+	return antigravityEnsureIsolatedHome(repoDir, mode == antigravityAuthAPIKey)
 }
 
-// antigravityEnsureAPIKeyHome writes modelProvider "gemini" into the isolated
-// home's agy settings.json, preserving any other keys already there (agy
+// antigravityEnsureIsolatedHome writes the isolated home's agy settings.json:
+// trustedWorkspaces gains the test repo (given and symlink-resolved forms,
+// since agy compares resolved paths and macOS /var is a symlink), and with
+// apiKey set, modelProvider becomes "gemini". Other keys are preserved (agy
 // itself writes into this file once it runs). Idempotent.
-func antigravityEnsureAPIKeyHome(repoDir string) error {
+func antigravityEnsureIsolatedHome(repoDir string, apiKey bool) error {
 	dir := filepath.Join(antigravityTestHomeDir(repoDir), ".gemini", "antigravity-cli")
 	if err := os.MkdirAll(dir, 0o750); err != nil {
 		return fmt.Errorf("antigravity E2E: create isolated agy home: %w", err)
@@ -687,10 +696,32 @@ func antigravityEnsureAPIKeyHome(repoDir string) error {
 	} else if !os.IsNotExist(err) {
 		return fmt.Errorf("antigravity E2E: read %s: %w", settingsPath, err)
 	}
-	if string(settings["modelProvider"]) == `"gemini"` {
+
+	changed := false
+	if apiKey && string(settings["modelProvider"]) != `"gemini"` {
+		settings["modelProvider"] = json.RawMessage(`"gemini"`)
+		changed = true
+	}
+	var trusted []string
+	if raw, ok := settings["trustedWorkspaces"]; ok {
+		_ = json.Unmarshal(raw, &trusted) // unparseable list is rebuilt below
+	}
+	for _, want := range antigravityTrustPaths(repoDir) {
+		if !slices.Contains(trusted, want) {
+			trusted = append(trusted, want)
+			changed = true
+		}
+	}
+	if changed {
+		raw, err := json.Marshal(trusted)
+		if err != nil {
+			return fmt.Errorf("antigravity E2E: encode trustedWorkspaces: %w", err)
+		}
+		settings["trustedWorkspaces"] = raw
+	}
+	if !changed {
 		return nil
 	}
-	settings["modelProvider"] = json.RawMessage(`"gemini"`)
 	out, err := json.MarshalIndent(settings, "", "  ")
 	if err != nil {
 		return fmt.Errorf("antigravity E2E: encode settings: %w", err)
@@ -699,6 +730,16 @@ func antigravityEnsureAPIKeyHome(repoDir string) error {
 		return fmt.Errorf("antigravity E2E: write %s: %w", settingsPath, err)
 	}
 	return nil
+}
+
+// antigravityTrustPaths returns the workspace paths to trust for repoDir: as
+// given and symlink-resolved (deduplicated).
+func antigravityTrustPaths(repoDir string) []string {
+	paths := []string{repoDir}
+	if resolved, err := filepath.EvalSymlinks(repoDir); err == nil && resolved != repoDir {
+		paths = append(paths, resolved)
+	}
+	return paths
 }
 
 func antigravitySessionEnv(base []string, repoDir string) ([]string, []string) {
