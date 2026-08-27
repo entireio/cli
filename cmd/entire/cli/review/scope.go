@@ -233,7 +233,9 @@ func countFilesChanged(ctx context.Context, repoRoot, baseRef string) (int, erro
 // countUncommitted returns the number of lines in `git status --porcelain`
 // (each line corresponds to one changed or untracked file).
 func countUncommitted(ctx context.Context, repoRoot string) (int, error) {
-	out, err := runGit(ctx, repoRoot, "status", "--porcelain")
+	// --no-optional-locks keeps this a read: a bare `git status` rewrites
+	// .git/index to refresh its stat cache (issue #2111).
+	out, err := runGit(ctx, repoRoot, "--no-optional-locks", "status", "--porcelain")
 	if err != nil {
 		return 0, err
 	}

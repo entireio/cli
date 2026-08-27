@@ -551,6 +551,68 @@ where a user is actively waiting on a command (review, rewind, and
 `session adopt` via `detectFileChangesUnbounded`) keep the unbounded
 `gitrepo.Status`.
 
+#### `git status` Is a Write - Always Pass `--no-optional-locks`
+
+**Every `git status` Entire runs must pass `--no-optional-locks`.** A guard test
+(`TestGitStatusCallSitesPassNoOptionalLocks` in `cmd/entire/cli/gitrepo/`) fails the build on
+any call site that omits it.
+
+`git status` is not a read. It refreshes the index's stat cache and, whenever any
+entry is stale, writes the result back: `builtin/commit.c` takes
+`.git/index.lock` for the duration of the *whole worktree walk*, then renames a
+fresh index over `.git/index` (`tempfile.c`, `rename(2)`). The gate is
+`use_optional_locks()`, and `--no-optional-locks` is literally `setenv(
+GIT_OPTIONAL_LOCKS, "0")` — so the flag also propagates to child git processes,
+and `GIT_OPTIONAL_LOCKS=0` in the environment is an equivalent user-side
+mitigation. Output is byte-identical either way. The write fires on
+mtime-moved-but-content-identical files — the ordinary aftermath of an agent
+turn, a formatter, or an editor save — not on content edits.
+
+That refresh is git working as designed, and running `git status` is not itself
+a mistake. The reason we always drop the write is that **Entire never benefits
+from it**: every call site reads the porcelain output once and discards it, so
+the stat-cache update is a cost with no return.
+
+Three consequences, all observed in the field (issue #2111):
+
+- **A repo-deleting commit.** The rename replaces `.git/index` with a new inode.
+  On a filesystem where rename-over-existing is not atomic against a concurrent
+  lookup — Docker Desktop / virtiofs bind mounts, measured at 9.9% of opens
+  during continuous replacement versus 0 on ext4 — a concurrent reader gets
+  ENOENT. Git silently treats ENOENT on the index, **and only ENOENT**, as an
+  *empty* index (every other errno calls `die_errno`), so a `git commit` landing
+  in that window records the empty tree with exit code 0 and no warning: a commit
+  that deletes every tracked file. Recovery is `git reset --mixed HEAD~1`.
+- **The user's own `git add` failing** with `Unable to create '.git/index.lock':
+  File exists` while Entire holds the lock across its walk.
+- **A permanently stale `index.lock`** when a budget (`StatusWalkBudget`)
+  SIGKILLs the child mid-walk, breaking every later `git add`/`git commit` until
+  someone removes the file by hand.
+
+**Passing the flag does not make the hazard go away, and must not be described
+as if it did.** On an affected filesystem *any* concurrent `git status` opens the
+same window: the user's own, another tool's, a file watcher's — and in
+particular **N agents working the same repo**, each running its own hooks, which
+is precisely the workflow Entire encourages. Our share is the one write that is
+both unnecessary and asynchronous to the human's terminal, so it is the one that
+can land between someone's `git add` and their `git commit`. For the writers we
+do not control, the mitigation is `GIT_OPTIONAL_LOCKS=0` in the environment
+(devcontainers: `containerEnv`), which covers every git process in the session.
+
+Related: any git subprocess that can run inside a git hook and names its target
+with `cmd.Dir` or `-C` must also set `cmd.Env = gitrepo.EnvWithoutRepoOverrides()`
+(`gitrepo/env.go`). Git exports `GIT_DIR` / `GIT_WORK_TREE` / `GIT_INDEX_FILE` to
+hooks and those take precedence over `cmd.Dir`, so a bare `exec.Command`
+silently operates on the hook's repo. Deliberately *not* applied to user-invoked
+commands that act on the current directory (`status`, `doctor`, `review`): there
+a `GIT_DIR` the user exported is an instruction, not contamination.
+
+This exact producer was diagnosed once before (ENT-242, Feb 2026) and lost: the
+fix was closed unmerged on the premise that `git status --porcelain -z` "reads
+without rewriting", which is false, and it would have grown the number of
+index-rewriting call sites from one to eleven. That is why the guard test exists
+rather than a comment.
+
 #### go-git v5 Bugs - Use CLI Instead
 
 **Do NOT use go-git v5 for `checkout` or `reset --hard` operations.**
