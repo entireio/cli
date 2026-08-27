@@ -913,3 +913,58 @@ func TestStripSystemReminders(t *testing.T) {
 // Compile-time interface checks are in transcript.go.
 // Verify the unused import guard by referencing the agent package.
 var _ = agent.AgentNameOpenCode
+
+// OpenCode's tokens.total tells us whether reasoning was already counted inside
+// output. Both shapes occur in this repo's committed history (2026-08-27):
+//
+//	7,456 assistant messages: total = input + output + reasoning + cache.read + cache.write
+//	2,991 assistant messages: total = input + output + cache.read + cache.write
+//
+// Billed output must include reasoning exactly once either way.
+func openCodeExportWithTokens(tokens string) []byte {
+	return []byte(`{
+  "info": {"id": "ses_1", "title": "t"},
+  "messages": [
+    {"info": {"id": "m1", "role": "user", "time": {"created": 1}}, "parts": [{"type": "text", "text": "hi"}]},
+    {"info": {"id": "m2", "role": "assistant", "time": {"created": 2}, "tokens": ` + tokens + `}, "parts": [{"type": "text", "text": "ok"}]}
+  ]
+}`)
+}
+
+func TestCalculateTokenUsage_ReasoningExcludedFromOutput(t *testing.T) {
+	t.Parallel()
+	ag := &OpenCodeAgent{}
+
+	// total 1000 = 500 in + 100 out + 300 reasoning + 80 read + 20 write → reasoning is NOT in output
+	usage, err := ag.CalculateTokenUsage(openCodeExportWithTokens(
+		`{"input": 500, "output": 100, "reasoning": 300, "cache": {"read": 80, "write": 20}, "total": 1000}`), 0)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	require.NotNil(t, usage)
+	if usage.OutputTokens != 400 {
+		t.Errorf("OutputTokens = %d, want 400 (output 100 + reasoning 300)", usage.OutputTokens)
+	}
+	if sum := usage.InputTokens + usage.OutputTokens + usage.CacheReadTokens + usage.CacheCreationTokens; sum != 1000 {
+		t.Errorf("sum of classes = %d, want OpenCode total 1000", sum)
+	}
+}
+
+func TestCalculateTokenUsage_ReasoningIncludedInOutput(t *testing.T) {
+	t.Parallel()
+	ag := &OpenCodeAgent{}
+
+	// total 700 = 500 in + 100 out + 80 read + 20 write → reasoning (300) is already inside output
+	usage, err := ag.CalculateTokenUsage(openCodeExportWithTokens(
+		`{"input": 500, "output": 100, "reasoning": 300, "cache": {"read": 80, "write": 20}, "total": 700}`), 0)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	require.NotNil(t, usage)
+	if usage.OutputTokens != 100 {
+		t.Errorf("OutputTokens = %d, want 100 (reasoning already counted in output)", usage.OutputTokens)
+	}
+	if sum := usage.InputTokens + usage.OutputTokens + usage.CacheReadTokens + usage.CacheCreationTokens; sum != 700 {
+		t.Errorf("sum of classes = %d, want OpenCode total 700", sum)
+	}
+}

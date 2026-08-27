@@ -3311,8 +3311,9 @@ func TestCondenseSession_GeminiTranscript(t *testing.T) {
 	if content.Metadata.TokenUsage == nil {
 		t.Fatal("TokenUsage should not be nil for Gemini transcript")
 	}
-	if content.Metadata.TokenUsage.InputTokens != 50 {
-		t.Errorf("InputTokens = %d, want 50", content.Metadata.TokenUsage.InputTokens)
+	// Gemini's cached is a subset of input: fresh input = 50 − 10
+	if content.Metadata.TokenUsage.InputTokens != 40 {
+		t.Errorf("InputTokens = %d, want 40", content.Metadata.TokenUsage.InputTokens)
 	}
 	if content.Metadata.TokenUsage.OutputTokens != 20 {
 		t.Errorf("OutputTokens = %d, want 20", content.Metadata.TokenUsage.OutputTokens)
@@ -3540,10 +3541,11 @@ func TestCondenseSession_GeminiMultiCheckpoint(t *testing.T) {
 		t.Fatal("TokenUsage should not be nil")
 	}
 
-	// Expected: Only the second gemini message tokens (input=200, output=75, cached=30)
-	// NOT the first gemini message tokens (input=100, output=50, cached=20)
-	if content.Metadata.TokenUsage.InputTokens != 200 {
-		t.Errorf("InputTokens = %d, want 200 (should only count from checkpoint start, not entire transcript)",
+	// Expected: Only the second gemini message tokens (input=200, output=75, cached=30),
+	// NOT the first gemini message tokens (input=100, output=50, cached=20).
+	// Gemini's cached is a subset of input, so fresh input = 200 − 30.
+	if content.Metadata.TokenUsage.InputTokens != 170 {
+		t.Errorf("InputTokens = %d, want 170 (should only count from checkpoint start, not entire transcript)",
 			content.Metadata.TokenUsage.InputTokens)
 	}
 	if content.Metadata.TokenUsage.OutputTokens != 75 {

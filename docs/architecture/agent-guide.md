@@ -494,6 +494,27 @@ The framework dispatcher (`DispatchLifecycleEvent` in `lifecycle.go`) handles ea
 **Method:**
 - `CalculateTokenUsage(sessionRef, fromOffset) (*TokenUsage, error)` - Sum token usage from offset to end of transcript.
 
+**The classes must be disjoint and sum to what the provider billed.** `TokenUsage` has four
+classes — fresh input, cache write, cache read, output — and every downstream consumer
+(`session tokens`, `checkpoint tokens`, `tokens profile`, the web) adds them up. Providers do
+not report disjoint fields, so each agent's parser has to normalise, and each has been wrong
+before:
+
+- **Gemini**: `cached` is a subset of `input` and `thoughts` are reported outside `output`
+  (`total = input + output + thoughts + tool`). Fresh input is `input − cached (+ tool)`;
+  billed output is `output + thoughts`. Summing `input` and `cached` double-counted the cache.
+- **OpenCode**: `reasoning` is inside `output` in some versions and outside in others; the
+  per-message `total` identity says which (`Tokens.BilledOutput`). Ignoring it dropped the
+  reasoning tokens.
+- **Codex**: `cached_input_tokens` is a subset of `input_tokens`; `reasoning_output_tokens` is a
+  subset of `output_tokens`. `token_count` events repeat; take deltas between distinct
+  cumulative totals, never a sum of `last_token_usage`.
+- **Claude Code**: thinking is inside `output_tokens`; `cache_creation` splits into 5-minute and
+  1-hour writes, which are priced differently.
+
+When adding an agent, write the test first: build one message from a real transcript and assert
+that the four classes sum to the provider's own total.
+
 ### `SubagentAwareExtractor`
 
 **What it enables:** Includes files modified by spawned subagents in the checkpoint file list and aggregates subagent token usage.

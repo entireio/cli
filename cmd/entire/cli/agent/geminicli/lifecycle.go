@@ -134,9 +134,17 @@ func (g *GeminiCLIAgent) CalculateTokenUsage(transcriptData []byte, fromOffset i
 			continue
 		}
 
+		// Gemini's usageMetadata is not disjoint: cached is a subset of input
+		// (cachedContentTokenCount ⊂ promptTokenCount) and thoughts are reported
+		// outside output (total = input + output + thoughts + tool). Entire's
+		// classes are disjoint, so split cached out of input and fold thoughts —
+		// billed at the output rate — into output. Tool tokens are prompt-side
+		// and count as fresh input. Verified against every committed Gemini
+		// transcript in this repo's history (2026-08-27); the sum of the three
+		// classes reproduces Gemini's total.
 		usage.APICallCount++
-		usage.InputTokens += msg.Tokens.Input
-		usage.OutputTokens += msg.Tokens.Output
+		usage.InputTokens += msg.Tokens.Input - msg.Tokens.Cached + msg.Tokens.Tool
+		usage.OutputTokens += msg.Tokens.Output + msg.Tokens.Thoughts
 		usage.CacheReadTokens += msg.Tokens.Cached
 	}
 

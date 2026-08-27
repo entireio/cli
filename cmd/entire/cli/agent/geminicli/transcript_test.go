@@ -412,9 +412,9 @@ func TestCalculateTokenUsage_BasicMessages(t *testing.T) {
 		t.Errorf("APICallCount = %d, want 2", usage.APICallCount)
 	}
 
-	// Input tokens: 10 + 15 = 25
-	if usage.InputTokens != 25 {
-		t.Errorf("InputTokens = %d, want 25", usage.InputTokens)
+	// Fresh input tokens: (10−5) + (15−3) = 17 — Gemini's cached is a subset of input
+	if usage.InputTokens != 17 {
+		t.Errorf("InputTokens = %d, want 17", usage.InputTokens)
 	}
 
 	// Output tokens: 20 + 25 = 45
@@ -454,8 +454,8 @@ func TestCalculateTokenUsage_StartIndex(t *testing.T) {
 	}
 
 	// Only tokens from message at index 3
-	if usage.InputTokens != 15 {
-		t.Errorf("InputTokens = %d, want 15", usage.InputTokens)
+	if usage.InputTokens != 10 { // fresh input = 15 − 5 cached
+		t.Errorf("InputTokens = %d, want 10", usage.InputTokens)
 	}
 
 	if usage.OutputTokens != 25 {
@@ -489,8 +489,8 @@ func TestCalculateTokenUsage_IgnoresUserMessages(t *testing.T) {
 		t.Errorf("APICallCount = %d, want 1", usage.APICallCount)
 	}
 
-	if usage.InputTokens != 10 {
-		t.Errorf("InputTokens = %d, want 10", usage.InputTokens)
+	if usage.InputTokens != 5 { // fresh input = 10 − 5 cached
+		t.Errorf("InputTokens = %d, want 5", usage.InputTokens)
 	}
 
 	if usage.OutputTokens != 20 {
@@ -623,4 +623,47 @@ func TestGeminiCLIAgent_GetTranscriptPosition_NonexistentFile(t *testing.T) {
 func writeTestFile(t *testing.T, path string, data []byte) error {
 	t.Helper()
 	return os.WriteFile(path, data, 0o644)
+}
+
+// Gemini's usageMetadata identities, verified against every committed Gemini
+// transcript in this repo's checkpoint history (2026-08-27):
+//
+//	cached ⊂ input                    (cachedContentTokenCount is part of promptTokenCount)
+//	total  = input + output + thoughts + tool   (output EXCLUDES thoughts)
+//
+// Entire's classes must be disjoint, so fresh input is input−cached(+tool) and
+// billed output is output+thoughts. Summing the classes must reproduce Gemini's total.
+func TestCalculateTokenUsage_GeminiIdentities(t *testing.T) {
+	t.Parallel()
+
+	data := []byte(`{
+  "messages": [
+    {"id": "1", "type": "user", "content": "hello"},
+    {"id": "2", "type": "gemini", "content": "hi", "tokens": {"input": 100, "output": 20, "cached": 60, "thoughts": 15, "tool": 5, "total": 140}}
+  ]
+}`)
+
+	ag := &GeminiCLIAgent{}
+	usage, err := ag.CalculateTokenUsage(data, 0)
+	if err != nil {
+		t.Fatalf("CalculateTokenUsage error: %v", err)
+	}
+
+	// fresh input = input − cached + tool = 100 − 60 + 5
+	if usage.InputTokens != 45 {
+		t.Errorf("InputTokens = %d, want 45 (input minus cached, plus tool)", usage.InputTokens)
+	}
+	if usage.CacheReadTokens != 60 {
+		t.Errorf("CacheReadTokens = %d, want 60", usage.CacheReadTokens)
+	}
+	// billed output = output + thoughts = 20 + 15
+	if usage.OutputTokens != 35 {
+		t.Errorf("OutputTokens = %d, want 35 (output plus thoughts)", usage.OutputTokens)
+	}
+	if usage.CacheCreationTokens != 0 {
+		t.Errorf("CacheCreationTokens = %d, want 0 (Gemini reports no cache writes)", usage.CacheCreationTokens)
+	}
+	if sum := usage.InputTokens + usage.CacheReadTokens + usage.OutputTokens; sum != 140 {
+		t.Errorf("sum of classes = %d, want Gemini total 140", sum)
+	}
 }
