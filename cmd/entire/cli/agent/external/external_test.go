@@ -454,7 +454,7 @@ func TestExternalAgent_HookSupport(t *testing.T) {
 		t.Errorf("InstallHooks() = %d, want 2", installed)
 	}
 
-	if !ea.AreHooksInstalled(context.Background()) {
+	if !hooksInstalledNow(t, ea) {
 		t.Error("AreHooksInstalled() = false, want true")
 	}
 }
@@ -883,4 +883,122 @@ func TestStripExeExt(t *testing.T) {
 			}
 		})
 	}
+}
+
+// probeScript returns a mock whose are-hooks-installed behaves as mode says:
+// "installed", "absent", "crash", or "garbage".
+func probeScript(mode string) string {
+	return probeScriptWithInfo(validInfoJSON, mode)
+}
+
+func probeScriptWithInfo(infoJSON, mode string) string {
+	base := mockInfoScript(infoJSON)
+	var reply string
+	switch mode {
+	case "installed":
+		reply = `echo '{"installed": true}'`
+	case "absent":
+		reply = `echo '{"installed": false}'`
+	case "crash":
+		reply = `echo 'plugin exploded' >&2; exit 3`
+	case "garbage":
+		reply = `echo 'not json at all'`
+	}
+	return strings.Replace(base,
+		`  are-hooks-installed)
+    echo '{"installed": true}'
+    ;;`,
+		"  are-hooks-installed)\n    "+reply+"\n    ;;", 1)
+}
+
+func TestAreHooksInstalled_ReportsWhyItCouldNotAnswer(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		mode          string
+		wantInstalled bool
+		wantErr       bool
+		// errContains pins that the plugin's own stderr survives into the error,
+		// since that text is what the user is shown to act on.
+		errContains string
+	}{
+		{mode: "installed", wantInstalled: true},
+		{mode: "absent"},
+		{mode: "crash", wantErr: true, errContains: "plugin exploded"},
+		{mode: "garbage", wantErr: true, errContains: "invalid JSON"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.mode, func(t *testing.T) {
+			t.Parallel()
+
+			ea := newExternalAgent(t, testBinaryDir(t, probeScript(tt.mode)))
+
+			installed, err := ea.AreHooksInstalled(context.Background())
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("AreHooksInstalled() error = nil, want an error for a plugin that cannot answer")
+				}
+				if tt.errContains != "" && !strings.Contains(err.Error(), tt.errContains) {
+					t.Errorf("error = %q, want it to carry %q", err, tt.errContains)
+				}
+			} else if err != nil {
+				t.Fatalf("AreHooksInstalled() error = %v", err)
+			}
+			if installed != tt.wantInstalled {
+				t.Errorf("AreHooksInstalled() = %v, want %v", installed, tt.wantInstalled)
+			}
+		})
+	}
+}
+
+func TestWrappedAgentForwardsAreHooksInstalled(t *testing.T) {
+	t.Parallel()
+
+	// Both wrappers, because wrappedAgentWithProtectedFiles embeds *wrappedAgent
+	// and inherits the forwarder by promotion — a plugin declaring protected_files
+	// must still be able to report why it could not answer.
+	for _, tt := range []struct {
+		name     string
+		infoJSON string
+	}{
+		{name: "plain wrapper", infoJSON: validInfoJSON},
+		{name: "protected-files wrapper", infoJSON: strings.Replace(validInfoJSON,
+			`"protected_dirs": [".test"],`,
+			`"protected_dirs": [".test"], "protected_files": [".testrc"],`, 1)},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			ea := newExternalAgent(t, testBinaryDir(t, probeScriptWithInfo(tt.infoJSON, "crash")))
+			wrapped, err := Wrap(ea)
+			if err != nil {
+				t.Fatalf("Wrap() error = %v", err)
+			}
+
+			hs, ok := agent.AsHookSupport(wrapped)
+			if !ok {
+				t.Fatalf("AsHookSupport() ok = false, want true")
+			}
+			if _, err := hs.AreHooksInstalled(context.Background()); err == nil {
+				t.Error("AreHooksInstalled() error = nil through the wrapper, want the plugin's failure")
+			}
+		})
+	}
+}
+
+// hooksInstalledNow reports whether the plugin's hooks are installed, failing the
+// test if it could not answer. For the tests that exercise a plugin which cannot
+// answer, the error is asserted directly instead.
+func hooksInstalledNow(t *testing.T, ag interface {
+	AreHooksInstalled(ctx context.Context) (bool, error)
+},
+) bool {
+	t.Helper()
+
+	installed, err := ag.AreHooksInstalled(context.Background())
+	if err != nil {
+		t.Fatalf("AreHooksInstalled() error = %v", err)
+	}
+	return installed
 }

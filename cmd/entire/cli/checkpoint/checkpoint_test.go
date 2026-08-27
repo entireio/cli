@@ -4607,6 +4607,111 @@ func TestWriteCommitted_TaskPayload_UnavailableTranscript_RecordsReasonWithoutJS
 	}
 }
 
+// TestWriteCommitted_TaskDescriptionRedacted: task.json's task_description is
+// the agent's free text for the Task call and is pushed with the checkpoint,
+// so the writer must redact it like the summary fields — the transcript beside
+// it is pre-redacted by condensation, but the description used to be copied
+// verbatim. A low-entropy AWS-key shaped secret keeps this deterministic on
+// the regex-only pipeline.
+//
+// Table-driven across both persistent backends. They share one writer
+// (treeWriter.writeTaskRecordEntry, embedded by GitStore and gitRefsStore), so
+// this pins that sharing rather than guarding two implementations: if a future
+// change gives either store its own task-record path, the redaction has to
+// come with it.
+func TestWriteCommitted_TaskDescriptionRedacted(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		newStore  func(repo *git.Repository) sessionMetadataStore
+		fetchTree func(t *testing.T, repo *git.Repository, cid id.CheckpointID) *FetchingTree
+	}{
+		{
+			name:     "git-branch store",
+			newStore: func(repo *git.Repository) sessionMetadataStore { return NewGitStore(repo, DefaultV1Refs()) },
+			fetchTree: func(t *testing.T, repo *git.Repository, cid id.CheckpointID) *FetchingTree {
+				t.Helper()
+				store := NewGitStore(repo, DefaultV1Refs())
+				tree, err := store.getCheckpointFetchingTree(context.Background(), cid)
+				if err != nil {
+					t.Fatalf("getCheckpointFetchingTree() error = %v", err)
+				}
+				return tree
+			},
+		},
+		{
+			name:     "git-refs store",
+			newStore: func(repo *git.Repository) sessionMetadataStore { return newGitRefsStore(repo) },
+			fetchTree: func(t *testing.T, repo *git.Repository, cid id.CheckpointID) *FetchingTree {
+				t.Helper()
+				store := newGitRefsStore(repo)
+				tree, err := store.checkpointTree(context.Background(), cid)
+				if err != nil {
+					t.Fatalf("checkpointTree() error = %v", err)
+				}
+				return tree
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			repo, _ := setupBranchTestRepo(t)
+			store := tt.newStore(repo)
+			checkpointID := id.MustCheckpointID("aabbccddeefc")
+
+			err := store.Write(context.Background(), Session{
+				CheckpointID:     checkpointID,
+				SessionID:        "task-description-session",
+				Strategy:         "manual-commit",
+				Transcript:       redact.AlreadyRedacted([]byte(`{"msg":"safe"}` + "\n")),
+				CheckpointsCount: 1,
+				AuthorName:       "Test Author",
+				AuthorEmail:      "test@example.com",
+				Tasks: []TaskPayload{
+					{
+						ToolUseID:       "toolu_desc",
+						AgentID:         "agent3",
+						SubagentType:    "general-purpose",
+						TaskDescription: "rotate key=AKIAYRWQG5EJLPZLBYNP in staging",
+						Transcript:      redact.AlreadyRedacted([]byte(`{"msg":"child"}` + "\n")),
+					},
+				},
+			})
+			if err != nil {
+				t.Fatalf("Write() error = %v", err)
+			}
+
+			tree := tt.fetchTree(t, repo, checkpointID)
+
+			taskJSONPath := "tasks/toolu_desc/task.json"
+			taskFile, err := tree.File(taskJSONPath)
+			if err != nil {
+				t.Fatalf("task.json should exist at %s: %v", taskJSONPath, err)
+			}
+			taskContent, err := taskFile.Contents()
+			if err != nil {
+				t.Fatalf("failed to read task.json: %v", err)
+			}
+			if strings.Contains(taskContent, "AKIAYRWQG5EJLPZLBYNP") {
+				t.Errorf("task.json still carries the secret: %s", taskContent)
+			}
+			var meta taskRecordMetadata
+			if err := json.Unmarshal([]byte(taskContent), &meta); err != nil {
+				t.Fatalf("failed to unmarshal task.json: %v", err)
+			}
+			if !strings.Contains(meta.TaskDescription, "REDACTED") || !strings.HasPrefix(meta.TaskDescription, "rotate key=") {
+				t.Errorf("task_description = %q, want the secret replaced in place", meta.TaskDescription)
+			}
+			if meta.SubagentType != "general-purpose" {
+				t.Errorf("subagent_type = %q, want it untouched", meta.SubagentType)
+			}
+		})
+	}
+}
+
 // TestWriteCommitted_NoTasks_NoTaskDirectory guards the no-op path: an empty
 // Tasks slice (every session before subagent-work durability landed, and
 // every ordinary session with no subagent work) must not create a tasks/

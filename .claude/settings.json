@@ -60,7 +60,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash ${CLAUDE_PROJECT_DIR}/.claude/scripts/remote-setup.sh"
+            "command": "bash \"${CLAUDE_PROJECT_DIR}\"/.claude/scripts/remote-setup.sh"
           },
           {
             "type": "command",

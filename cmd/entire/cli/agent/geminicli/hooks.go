@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -309,7 +310,12 @@ func (g *GeminiCLIAgent) UninstallHooks(ctx context.Context) error {
 	settingsPath := filepath.Join(repoRoot, ".gemini", GeminiSettingsFileName)
 	data, err := os.ReadFile(settingsPath) //nolint:gosec // path is constructed from repo root + fixed path
 	if err != nil {
-		return nil //nolint:nilerr // No settings file means nothing to uninstall
+		// An absent file means nothing to uninstall; an unreadable one does not.
+		// Collapsing both leaves hooks on disk while reporting success.
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return fmt.Errorf("read %s: %w", settingsPath, err)
 	}
 
 	var rawSettings map[string]json.RawMessage
@@ -397,7 +403,13 @@ func (g *GeminiCLIAgent) UninstallHooks(ctx context.Context) error {
 }
 
 // AreHooksInstalled checks if Entire hooks are installed.
-func (g *GeminiCLIAgent) AreHooksInstalled(ctx context.Context) bool {
+//
+// A missing config file is an answer, not a failure: that file is where the
+// state lives, so its absence means no hooks. Anything that stops us reading the
+// answer — an unreadable file, malformed config — is returned as an error, since
+// "we could not tell" and "there are none" are different things to a caller
+// deciding whether hooks can be left alone.
+func (g *GeminiCLIAgent) AreHooksInstalled(ctx context.Context) (bool, error) {
 	// Use repo root to find .gemini directory when run from a subdirectory
 	repoRoot, err := paths.WorktreeRoot(ctx)
 	if err != nil {
@@ -405,13 +417,18 @@ func (g *GeminiCLIAgent) AreHooksInstalled(ctx context.Context) bool {
 	}
 	settingsPath := filepath.Join(repoRoot, ".gemini", GeminiSettingsFileName)
 	data, err := os.ReadFile(settingsPath) //nolint:gosec // path is constructed from repo root + fixed path
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
 	if err != nil {
-		return false
+		logging.Warn(ctx, "gemini: failed to read settings file", "path", settingsPath, "err", err)
+		return false, fmt.Errorf("read %s: %w", settingsPath, err)
 	}
 
 	var settings GeminiSettings
 	if err := json.Unmarshal(data, &settings); err != nil {
-		return false
+		logging.Warn(ctx, "gemini: failed to parse settings file", "path", settingsPath, "err", err)
+		return false, fmt.Errorf("parse hook config: %w", err)
 	}
 
 	// Check for at least one of our hooks using isEntireHook (matches legacy hook shapes too)
@@ -425,7 +442,7 @@ func (g *GeminiCLIAgent) AreHooksInstalled(ctx context.Context) bool {
 		hasEntireHook(settings.Hooks.BeforeTool) ||
 		hasEntireHook(settings.Hooks.AfterTool) ||
 		hasEntireHook(settings.Hooks.PreCompress) ||
-		hasEntireHook(settings.Hooks.Notification)
+		hasEntireHook(settings.Hooks.Notification), nil
 }
 
 // Helper functions for hook management

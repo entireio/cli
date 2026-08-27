@@ -236,6 +236,13 @@ Removes installed agent hooks.
 
 **Output:** Exit 0 on success.
 
+Only your binary can remove your hooks, so `entire disable --uninstall` cannot
+finish without you. A non-zero exit fails the whole uninstall: the command
+exits non-zero, reports that Entire was not fully removed, and prints the exact
+command line the user can run to invoke this subcommand by hand. Write anything
+the user needs in order to act to stderr — the CLI captures it and shows it
+verbatim.
+
 #### `are-hooks-installed`
 
 Checks whether hooks are currently installed.
@@ -247,6 +254,13 @@ Checks whether hooks are currently installed.
 ```json
 {"installed": true}
 ```
+
+A non-zero exit or unparseable stdout is not read as "no hooks" — it means the
+state is unknown, which the CLI must treat as "hooks may still be installed".
+`entire disable --uninstall` then exits non-zero and hands the user the manual
+`uninstall-hooks` command rather than claiming Entire was fully removed. Report
+"installed": false when you know there are none; fail only when you genuinely
+could not find out.
 
 ### Capability: `transcript_analyzer`
 

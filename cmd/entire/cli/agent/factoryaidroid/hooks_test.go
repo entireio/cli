@@ -63,7 +63,7 @@ func TestInstallHooks_FreshInstall(t *testing.T) {
 	assertFactoryHookExists(t, settings.Hooks.PreCompact, "", agentpkg.WrapProductionSilentHookCommand("entire hooks factoryai-droid pre-compact"), "PreCompact")
 
 	// Verify AreHooksInstalled returns true
-	if !agent.AreHooksInstalled(context.Background()) {
+	if !hooksInstalledNow(t, agent) {
 		t.Error("AreHooksInstalled() should return true after install")
 	}
 }
@@ -456,7 +456,7 @@ func TestUninstallHooks(t *testing.T) {
 	}
 
 	// Verify hooks are installed
-	if !agent.AreHooksInstalled(context.Background()) {
+	if !hooksInstalledNow(t, agent) {
 		t.Error("hooks should be installed before uninstall")
 	}
 
@@ -467,7 +467,7 @@ func TestUninstallHooks(t *testing.T) {
 	}
 
 	// Verify hooks are removed
-	if agent.AreHooksInstalled(context.Background()) {
+	if hooksInstalledNow(t, agent) {
 		t.Error("hooks should not be installed after uninstall")
 	}
 }
@@ -482,6 +482,24 @@ func TestUninstallHooks_NoSettingsFile(t *testing.T) {
 	err := agent.UninstallHooks(context.Background())
 	if err != nil {
 		t.Fatalf("UninstallHooks() should not error when no settings file: %v", err)
+	}
+}
+
+// TestUninstallHooks_UnreadableSettingsErrors pins the absent-vs-unreadable
+// split: an absent settings file means nothing to uninstall, but a read error
+// must surface instead of reporting success with hooks still on disk. The
+// settings path is created as a directory so os.ReadFile fails with a
+// non-ErrNotExist error on every platform.
+func TestUninstallHooks_UnreadableSettingsErrors(t *testing.T) {
+	tempDir := t.TempDir()
+	t.Chdir(tempDir)
+
+	if err := os.MkdirAll(filepath.Join(tempDir, ".factory", FactorySettingsFileName), 0o755); err != nil {
+		t.Fatalf("MkdirAll() error = %v", err)
+	}
+
+	if err := (&FactoryAIDroidAgent{}).UninstallHooks(context.Background()); err == nil {
+		t.Fatal("UninstallHooks() = nil for unreadable settings, want error")
 	}
 }
 
@@ -720,4 +738,20 @@ func assertFactoryHookExists(t *testing.T, matchers []FactoryHookMatcher, matche
 		}
 	}
 	t.Errorf("%s was not found (matcher=%q, command=%q)", description, matcher, command)
+}
+
+// hooksInstalledNow reports whether the agent's hooks are installed, failing the
+// test if it could not tell. Built-in agents read a local config file where
+// absent means absent, so an error here is a bug, not a state to tolerate.
+func hooksInstalledNow(t *testing.T, ag interface {
+	AreHooksInstalled(ctx context.Context) (bool, error)
+},
+) bool {
+	t.Helper()
+
+	installed, err := ag.AreHooksInstalled(context.Background())
+	if err != nil {
+		t.Fatalf("AreHooksInstalled() error = %v", err)
+	}
+	return installed
 }

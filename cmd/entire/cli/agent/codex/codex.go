@@ -53,7 +53,7 @@ func (c *CodexAgent) IsPreview() bool { return true }
 
 // DetectPresence checks if Codex is configured in the repository.
 func (c *CodexAgent) DetectPresence(ctx context.Context) (bool, error) {
-	return c.AreHooksInstalled(ctx), nil
+	return c.AreHooksInstalled(ctx)
 }
 
 // GetSessionID extracts the session ID from hook input.
