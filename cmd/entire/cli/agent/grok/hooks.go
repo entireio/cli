@@ -2,6 +2,7 @@ package grok
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -237,16 +238,23 @@ func (g *GrokAgent) UninstallHooks(ctx context.Context) error {
 }
 
 // AreHooksInstalled reports whether Entire's hooks file is present.
-func (g *GrokAgent) AreHooksInstalled(ctx context.Context) bool {
+//
+// A missing hook file is a definite "no hooks"; anything that stops the file
+// from being read is reported as an error so callers can distinguish "absent"
+// from "unknown" (see agent.HookSupport).
+func (g *GrokAgent) AreHooksInstalled(ctx context.Context) (bool, error) {
 	path, err := hooksPath(ctx)
 	if err != nil {
-		return false
+		return false, err
 	}
 	data, err := os.ReadFile(path) //nolint:gosec // path from validated repo root
-	if err != nil {
-		return false
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
 	}
-	return strings.Contains(string(data), entireMarker)
+	if err != nil {
+		return false, fmt.Errorf("read grok hook file: %w", err)
+	}
+	return strings.Contains(string(data), entireMarker), nil
 }
 
 // CheckHookConfig reports whether the installed config matches what

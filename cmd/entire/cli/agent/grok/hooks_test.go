@@ -171,9 +171,20 @@ func TestInstallHooks_RefusesForeignFile(t *testing.T) {
 	if _, err := g.InstallHooks(ctx, true); err != nil {
 		t.Fatalf("forced install: %v", err)
 	}
-	if !g.AreHooksInstalled(ctx) {
+	if !hooksInstalled(ctx, t, g) {
 		t.Error("hooks not installed after --force")
 	}
+}
+
+// hooksInstalled wraps AreHooksInstalled, failing the test on an error so the
+// assertions below stay about the bool.
+func hooksInstalled(ctx context.Context, t *testing.T, g *GrokAgent) bool {
+	t.Helper()
+	ok, err := g.AreHooksInstalled(ctx)
+	if err != nil {
+		t.Fatalf("AreHooksInstalled: %v", err)
+	}
+	return ok
 }
 
 func TestAreHooksInstalledAndUninstall(t *testing.T) {
@@ -181,7 +192,7 @@ func TestAreHooksInstalledAndUninstall(t *testing.T) {
 	g := &GrokAgent{}
 	ctx := context.Background()
 
-	if g.AreHooksInstalled(ctx) {
+	if hooksInstalled(ctx, t, g) {
 		t.Error("hooks reported installed in a fresh repo")
 	}
 	if got := g.CheckHookConfig(ctx); got != agent.HooksAbsent {
@@ -191,7 +202,7 @@ func TestAreHooksInstalledAndUninstall(t *testing.T) {
 	if _, err := g.InstallHooks(ctx, false); err != nil {
 		t.Fatalf("InstallHooks: %v", err)
 	}
-	if !g.AreHooksInstalled(ctx) {
+	if !hooksInstalled(ctx, t, g) {
 		t.Error("hooks not detected after install")
 	}
 	if got := g.CheckHookConfig(ctx); got != agent.HooksCurrent {
@@ -201,7 +212,7 @@ func TestAreHooksInstalledAndUninstall(t *testing.T) {
 	if err := g.UninstallHooks(ctx); err != nil {
 		t.Fatalf("UninstallHooks: %v", err)
 	}
-	if g.AreHooksInstalled(ctx) {
+	if hooksInstalled(ctx, t, g) {
 		t.Error("hooks still detected after uninstall")
 	}
 	if _, err := os.Stat(installedPath(dir)); !os.IsNotExist(err) {
