@@ -3,6 +3,7 @@ package factoryaidroid
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -10,6 +11,7 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
+	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 )
 
@@ -36,21 +38,12 @@ const FactorySettingsFileName = "settings.json"
 // metadataDenyRule blocks Factory Droid from reading Entire session metadata
 const metadataDenyRule = "Read(./.entire/metadata/**)"
 
-// entireHookPrefixes are command prefixes that identify Entire hooks. The
-// "go run" prefix is retained so hooks installed by older versions are still
-// recognized.
-var entireHookPrefixes = []string{
-	"entire ",
-	agent.LocalDevHookScript + " ",
-	`go run "$(git rev-parse --show-toplevel)"/cmd/entire/main.go `,
-}
-
 // InstallHooks installs Factory AI Droid hooks in .factory/settings.json.
 // If force is true, removes existing Entire hooks before installing.
 // Returns the number of hooks installed.
 //
 //nolint:maintidx // Hook installation is intentionally centralized here; splitting it further would add churn for a config-assembly path.
-func (f *FactoryAIDroidAgent) InstallHooks(ctx context.Context, localDev bool, force bool) (int, error) {
+func (f *FactoryAIDroidAgent) InstallHooks(ctx context.Context, force bool) (int, error) {
 	// Use repo root instead of CWD to find .factory directory
 	// This ensures hooks are installed correctly when run from a subdirectory
 	repoRoot, err := paths.WorktreeRoot(ctx)
@@ -121,25 +114,32 @@ func (f *FactoryAIDroidAgent) InstallHooks(ctx context.Context, localDev bool, f
 	}
 
 	// Define hook commands
-	var sessionStartCmd, sessionEndCmd, stopCmd, userPromptSubmitCmd, preTaskCmd, postTaskCmd, preCompactCmd string
-	localDevPrefix := agent.LocalDevHookScript + " hooks factoryai-droid "
-	if localDev {
-		sessionStartCmd = localDevPrefix + "session-start"
-		sessionEndCmd = localDevPrefix + "session-end"
-		stopCmd = localDevPrefix + "stop"
-		userPromptSubmitCmd = localDevPrefix + "user-prompt-submit"
-		preTaskCmd = localDevPrefix + "pre-tool-use"
-		postTaskCmd = localDevPrefix + "post-tool-use"
-		preCompactCmd = localDevPrefix + "pre-compact"
-	} else {
-		sessionStartCmd = agent.WrapProductionSilentHookCommand("entire hooks factoryai-droid session-start")
-		sessionEndCmd = agent.WrapProductionSilentHookCommand("entire hooks factoryai-droid session-end")
-		stopCmd = agent.WrapProductionPlainTextWarningHookCommand("entire hooks factoryai-droid stop", agent.WarningFormatSingleLine)
-		userPromptSubmitCmd = agent.WrapProductionSilentHookCommand("entire hooks factoryai-droid user-prompt-submit")
-		preTaskCmd = agent.WrapProductionSilentHookCommand("entire hooks factoryai-droid pre-tool-use")
-		postTaskCmd = agent.WrapProductionSilentHookCommand("entire hooks factoryai-droid post-tool-use")
-		preCompactCmd = agent.WrapProductionSilentHookCommand("entire hooks factoryai-droid pre-compact")
+	sessionStartCmd := agent.WrapProductionSilentHookCommand("entire hooks factoryai-droid session-start")
+	sessionEndCmd := agent.WrapProductionSilentHookCommand("entire hooks factoryai-droid session-end")
+	stopCmd := agent.WrapProductionPlainTextWarningHookCommand("entire hooks factoryai-droid stop", agent.WarningFormatSingleLine)
+	userPromptSubmitCmd := agent.WrapProductionSilentHookCommand("entire hooks factoryai-droid user-prompt-submit")
+	preTaskCmd := agent.WrapProductionSilentHookCommand("entire hooks factoryai-droid pre-tool-use")
+	postTaskCmd := agent.WrapProductionSilentHookCommand("entire hooks factoryai-droid post-tool-use")
+	preCompactCmd := agent.WrapProductionSilentHookCommand("entire hooks factoryai-droid pre-compact")
+
+	// Drop Entire hooks left by older versions before adding the current ones,
+	// so a stale command (e.g. the removed local-dev launcher) does not survive
+	// alongside them. Unconditional: a plain `entire enable` must migrate too.
+	staleDropped := false
+	drop := func(matchers []FactoryHookMatcher, want ...string) []FactoryHookMatcher {
+		out, dropped := dropStaleEntireHooks(matchers, want...)
+		if dropped {
+			staleDropped = true
+		}
+		return out
 	}
+	sessionStart = drop(sessionStart, sessionStartCmd, userPromptSubmitCmd)
+	sessionEnd = drop(sessionEnd, sessionEndCmd)
+	stop = drop(stop, stopCmd)
+	userPromptSubmit = drop(userPromptSubmit, userPromptSubmitCmd)
+	preToolUse = drop(preToolUse, preTaskCmd)
+	postToolUse = drop(postToolUse, postTaskCmd)
+	preCompact = drop(preCompact, preCompactCmd)
 
 	count := 0
 
@@ -199,7 +199,10 @@ func (f *FactoryAIDroidAgent) InstallHooks(ctx context.Context, localDev bool, f
 		permissionsChanged = true
 	}
 
-	if count == 0 && !permissionsChanged {
+	// staleDropped forces a write even when nothing was added: a file holding
+	// both a stale and a current hook adds nothing, and returning early here
+	// would leave the stale hook on disk.
+	if count == 0 && !permissionsChanged && !staleDropped {
 		return 0, nil // All hooks and permissions already installed
 	}
 
@@ -276,7 +279,12 @@ func (f *FactoryAIDroidAgent) UninstallHooks(ctx context.Context) error {
 	settingsPath := filepath.Join(repoRoot, ".factory", FactorySettingsFileName)
 	data, err := os.ReadFile(settingsPath) //nolint:gosec // path is constructed from repo root + fixed path
 	if err != nil {
-		return nil //nolint:nilerr // No settings file means nothing to uninstall
+		// An absent file means nothing to uninstall; an unreadable one does not.
+		// Collapsing both leaves hooks on disk while reporting success.
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return fmt.Errorf("read %s: %w", settingsPath, err)
 	}
 
 	var rawSettings map[string]json.RawMessage
@@ -389,7 +397,13 @@ func (f *FactoryAIDroidAgent) UninstallHooks(ctx context.Context) error {
 }
 
 // AreHooksInstalled checks if Entire hooks are installed.
-func (f *FactoryAIDroidAgent) AreHooksInstalled(ctx context.Context) bool {
+//
+// A missing config file is an answer, not a failure: that file is where the
+// state lives, so its absence means no hooks. Anything that stops us reading the
+// answer — an unreadable file, malformed config — is returned as an error, since
+// "we could not tell" and "there are none" are different things to a caller
+// deciding whether hooks can be left alone.
+func (f *FactoryAIDroidAgent) AreHooksInstalled(ctx context.Context) (bool, error) {
 	// Use repo root to find .factory directory when run from a subdirectory
 	repoRoot, err := paths.WorktreeRoot(ctx)
 	if err != nil {
@@ -397,17 +411,22 @@ func (f *FactoryAIDroidAgent) AreHooksInstalled(ctx context.Context) bool {
 	}
 	settingsPath := filepath.Join(repoRoot, ".factory", FactorySettingsFileName)
 	data, err := os.ReadFile(settingsPath) //nolint:gosec // path is constructed from repo root + fixed path
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
 	if err != nil {
-		return false
+		logging.Warn(ctx, "factoryai-droid: failed to read settings file", "path", settingsPath, "err", err)
+		return false, fmt.Errorf("read %s: %w", settingsPath, err)
 	}
 
 	var settings FactorySettings
 	if err := json.Unmarshal(data, &settings); err != nil {
-		return false
+		logging.Warn(ctx, "factoryai-droid: failed to parse settings file", "path", settingsPath, "err", err)
+		return false, fmt.Errorf("parse hook config: %w", err)
 	}
 
 	// Check for at least one of our hooks (production, wrapped, or local-dev format)
-	return hasEntireHook(settings.Hooks.Stop)
+	return hasEntireHook(settings.Hooks.Stop), nil
 }
 
 // Helper functions for hook management
@@ -460,24 +479,40 @@ func addHookToMatcher(matchers []FactoryHookMatcher, matcherName, command string
 
 // isEntireHook checks if a command is an Entire hook
 func isEntireHook(command string) bool {
-	return agent.IsManagedHookCommand(command, entireHookPrefixes)
+	return agent.IsManagedHookCommand(command)
 }
 
-// removeEntireHooks removes all Entire hooks from a list of matchers (for simple hooks like Stop)
-func removeEntireHooks(matchers []FactoryHookMatcher) []FactoryHookMatcher {
+// dropStaleEntireHooks removes Entire-owned hooks whose command is not one of
+// want, per matcher, pruning matchers left with no hooks. want is a set because
+// one hook list can hold several Entire commands (SessionStart carries both
+// session-start and user-prompt-submit). See agent.DropStaleManagedHooks for why
+// this runs on every install and why the dropped flag matters.
+func dropStaleEntireHooks(matchers []FactoryHookMatcher, want ...string) ([]FactoryHookMatcher, bool) {
 	result := make([]FactoryHookMatcher, 0, len(matchers))
+	dropped := false
 	for _, matcher := range matchers {
-		filteredHooks := make([]FactoryHookEntry, 0, len(matcher.Hooks))
-		for _, hook := range matcher.Hooks {
-			if !isEntireHook(hook.Command) {
-				filteredHooks = append(filteredHooks, hook)
-			}
+		kept, d := agent.DropStaleManagedHooks(matcher.Hooks, hookEntryCommand, want)
+		if d {
+			dropped = true
 		}
-		// Only keep the matcher if it has hooks remaining
-		if len(filteredHooks) > 0 {
-			matcher.Hooks = filteredHooks
+		if len(kept) > 0 {
+			matcher.Hooks = kept
 			result = append(result, matcher)
 		}
 	}
-	return result
+	if !dropped {
+		return matchers, false
+	}
+	return result, true
+}
+
+// hookEntryCommand reads the command off a hook entry for the shared helpers.
+func hookEntryCommand(e FactoryHookEntry) string { return e.Command }
+
+// removeEntireHooks removes all Entire hooks from a list of matchers (for simple
+// hooks like Stop). It is dropStaleEntireHooks with an empty want set: nothing is
+// wanted, so every managed hook is stale.
+func removeEntireHooks(matchers []FactoryHookMatcher) []FactoryHookMatcher {
+	out, _ := dropStaleEntireHooks(matchers)
+	return out
 }

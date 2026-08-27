@@ -2,17 +2,22 @@ package opencode
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
+	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 )
 
-// Compile-time interface assertion
-var _ agent.HookSupport = (*OpenCodeAgent)(nil)
+// Compile-time interface assertions
+var (
+	_ agent.HookSupport   = (*OpenCodeAgent)(nil)
+	_ agent.HookFreshness = (*OpenCodeAgent)(nil)
+)
 
 const (
 	// pluginFileName is the name of the plugin file written to .opencode/plugins/
@@ -39,25 +44,24 @@ func getPluginPath(ctx context.Context) (string, error) {
 	return filepath.Join(repoRoot, ".opencode", pluginDirName, pluginFileName), nil
 }
 
+// renderPlugin returns the plugin file content. The template names the "entire"
+// binary directly — there is nothing to substitute, and deliberately so: a plugin
+// that shelled out to a path inside the working tree would run whatever the
+// checked-out branch contains.
+func renderPlugin() string {
+	return pluginTemplate
+}
+
 // InstallHooks writes the Entire plugin file to .opencode/plugins/entire.ts.
 // Returns 1 if the plugin was written, 0 if already up-to-date (idempotent).
-// If the file exists but content differs (e.g., localDev vs production), it is rewritten.
-func (a *OpenCodeAgent) InstallHooks(ctx context.Context, localDev bool, force bool) (int, error) {
+// If the file exists but content differs (e.g., an older render), it is rewritten.
+func (a *OpenCodeAgent) InstallHooks(ctx context.Context, force bool) (int, error) {
 	pluginPath, err := getPluginPath(ctx)
 	if err != nil {
 		return 0, err
 	}
 
-	// Build the command prefix
-	var cmdPrefix string
-	if localDev {
-		cmdPrefix = agent.LocalDevHookScript
-	} else {
-		cmdPrefix = "entire"
-	}
-
-	// Generate plugin content from template
-	content := strings.ReplaceAll(pluginTemplate, entireCmdPlaceholder, cmdPrefix)
+	content := renderPlugin()
 
 	// Check if already installed with identical content (idempotent) unless force
 	if !force {
@@ -99,18 +103,45 @@ func (a *OpenCodeAgent) UninstallHooks(ctx context.Context) error {
 }
 
 // AreHooksInstalled checks if the Entire plugin file exists and contains the marker.
-func (a *OpenCodeAgent) AreHooksInstalled(ctx context.Context) bool {
+//
+// A missing config file is an answer, not a failure: that file is where the
+// state lives, so its absence means no hooks. Anything that stops us reading the
+// answer — an unreadable file, malformed config — is returned as an error, since
+// "we could not tell" and "there are none" are different things to a caller
+// deciding whether hooks can be left alone.
+func (a *OpenCodeAgent) AreHooksInstalled(ctx context.Context) (bool, error) {
 	pluginPath, err := getPluginPath(ctx)
 	if err != nil {
-		return false
+		logging.Warn(ctx, "opencode: failed to resolve plugin path", "err", err)
+		return false, err
 	}
 
 	data, err := os.ReadFile(pluginPath) //nolint:gosec // Path constructed from repo root
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
 	if err != nil {
-		return false
+		logging.Warn(ctx, "opencode: failed to read plugin file", "path", pluginPath, "err", err)
+		return false, fmt.Errorf("read %s: %w", pluginPath, err)
 	}
 
-	return strings.Contains(string(data), entireMarker)
+	return strings.Contains(string(data), entireMarker), nil
+}
+
+// CheckHookConfig reports whether the installed plugin matches what
+// InstallHooks would write today. Read-only diagnostic for `entire status` and
+// `entire doctor`; same committed-and-stale exposure as Pi's extension, since
+// .opencode/plugins/entire.ts is likewise a generated file repos commit so
+// every clone is covered.
+func (a *OpenCodeAgent) CheckHookConfig(ctx context.Context) agent.HookConfigState {
+	pluginPath, err := getPluginPath(ctx)
+	if err != nil {
+		return agent.HooksAbsent
+	}
+	// Only the binary render counts as current. A plugin left behind by
+	// local-dev mode still carries entireMarker, so it reads as ours but
+	// outdated and gets rewritten rather than being trusted as up to date.
+	return agent.GeneratedHookFileState(pluginPath, entireMarker, renderPlugin())
 }
 
 // GetSupportedHooks returns the normalized lifecycle events this agent supports.

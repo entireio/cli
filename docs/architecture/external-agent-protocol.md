@@ -210,13 +210,17 @@ Parses a raw agent hook payload into a structured event.
 
 **Output (stdout):** JSON — the parsed [Event object](#event-object), or `null` if the payload is not relevant.
 
-#### `install-hooks [--local-dev] [--force]`
+#### `install-hooks [--force]`
 
 Installs agent hooks for Entire integration.
 
 **Arguments:**
-- `--local-dev` — Use local development binary path (optional)
 - `--force` — Overwrite existing hooks (optional)
+
+`--local-dev` was removed: it asked the agent to point hooks at a build inside
+the working tree, which meant installed hooks ran whatever the checked-out
+branch contained. The CLI never sends it. Agents that still accept the flag
+should treat it as a no-op; hook commands must name the `entire` binary.
 
 **Output (stdout):** JSON
 
@@ -232,6 +236,13 @@ Removes installed agent hooks.
 
 **Output:** Exit 0 on success.
 
+Only your binary can remove your hooks, so `entire disable --uninstall` cannot
+finish without you. A non-zero exit fails the whole uninstall: the command
+exits non-zero, reports that Entire was not fully removed, and prints the exact
+command line the user can run to invoke this subcommand by hand. Write anything
+the user needs in order to act to stderr — the CLI captures it and shows it
+verbatim.
+
 #### `are-hooks-installed`
 
 Checks whether hooks are currently installed.
@@ -243,6 +254,13 @@ Checks whether hooks are currently installed.
 ```json
 {"installed": true}
 ```
+
+A non-zero exit or unparseable stdout is not read as "no hooks" — it means the
+state is unknown, which the CLI must treat as "hooks may still be installed".
+`entire disable --uninstall` then exits non-zero and hands the user the manual
+`uninstall-hooks` command rather than claiming Entire was fully removed. Report
+"installed": false when you know there are none; fail only when you genuinely
+could not find out.
 
 ### Capability: `transcript_analyzer`
 

@@ -57,7 +57,10 @@ func TestShadow_DeferredTranscriptFinalization(t *testing.T) {
 	})
 
 	// Debug: verify session state before commit
-	preCommitState, _ := env.GetSessionState(sess.ID)
+	preCommitState, err := env.GetSessionState(sess.ID)
+	if err != nil {
+		t.Fatalf("GetSessionState failed: %v", err)
+	}
 	if preCommitState == nil {
 		t.Fatal("Session state should exist before commit")
 	}
@@ -66,45 +69,7 @@ func TestShadow_DeferredTranscriptFinalization(t *testing.T) {
 
 	// User commits while agent is still ACTIVE
 	// This triggers condensation with the provisional transcript
-	// Using custom commit with verbose output for debugging
-	{
-		env.GitAdd("feature.go")
-		msgFile := filepath.Join(env.RepoDir, ".git", "COMMIT_EDITMSG")
-		if err := os.WriteFile(msgFile, []byte("Add feature"), 0o644); err != nil {
-			t.Fatalf("failed to write commit message: %v", err)
-		}
-
-		// Run prepare-commit-msg
-		prepCmd := exec.Command(getTestBinary(), "hooks", "git", "prepare-commit-msg", msgFile, "message")
-		prepCmd.Dir = env.RepoDir
-		prepCmd.Env = append(testutil.GitIsolatedEnv(), "ENTIRE_TEST_TTY=1")
-		prepOutput, prepErr := prepCmd.CombinedOutput()
-		t.Logf("prepare-commit-msg output: %s (err: %v)", prepOutput, prepErr)
-
-		// Read modified message
-		modifiedMsg, _ := os.ReadFile(msgFile)
-		t.Logf("Commit message after prepare-commit-msg: %s", modifiedMsg)
-
-		// Create commit
-		repo, _ := git.PlainOpen(env.RepoDir)
-		worktree, _ := repo.Worktree()
-		_, err := worktree.Commit(string(modifiedMsg), &git.CommitOptions{
-			Author: &object.Signature{
-				Name:  "Test User",
-				Email: "test@example.com",
-				When:  time.Now(),
-			},
-		})
-		if err != nil {
-			t.Fatalf("failed to commit: %v", err)
-		}
-
-		// Run post-commit
-		postCmd := exec.Command(getTestBinary(), "hooks", "git", "post-commit")
-		postCmd.Dir = env.RepoDir
-		postOutput, postErr := postCmd.CombinedOutput()
-		t.Logf("post-commit output: %s (err: %v)", postOutput, postErr)
-	}
+	commitDrivingGitHooksVerbosely(t, env, "feature.go", "Add feature")
 	commitHash := env.GetHeadHash()
 
 	checkpointID := env.GetCheckpointIDFromCommitMessage(commitHash)
@@ -114,7 +79,10 @@ func TestShadow_DeferredTranscriptFinalization(t *testing.T) {
 	t.Logf("Checkpoint ID after mid-session commit: %s", checkpointID)
 
 	// Debug: verify session state after commit
-	postCommitState, _ := env.GetSessionState(sess.ID)
+	postCommitState, postCommitErr := env.GetSessionState(sess.ID)
+	if postCommitErr != nil {
+		t.Logf("GetSessionState failed: %v", postCommitErr)
+	}
 	if postCommitState != nil {
 		t.Logf("Post-commit session state: phase=%s, baseCommit=%s, turnCheckpointIDs=%v",
 			postCommitState.Phase, postCommitState.BaseCommit[:7], postCommitState.TurnCheckpointIDs)
@@ -250,14 +218,14 @@ func TestShadow_CarryForward_ActiveSession(t *testing.T) {
 	}
 
 	// Create multiple files
-	env.WriteFile("fileA.go", "package main\n\nfunc A() {}\n")
-	env.WriteFile("fileB.go", "package main\n\nfunc B() {}\n")
+	env.WriteFile("fileA.go", pkgFuncA)
+	env.WriteFile("fileB.go", pkgFuncB)
 	env.WriteFile("fileC.go", "package main\n\nfunc C() {}\n")
 
 	// Create transcript with all files
 	sess.CreateTranscript("Create files A, B, and C", []FileChange{
-		{Path: "fileA.go", Content: "package main\n\nfunc A() {}\n"},
-		{Path: "fileB.go", Content: "package main\n\nfunc B() {}\n"},
+		{Path: "fileA.go", Content: pkgFuncA},
+		{Path: "fileB.go", Content: pkgFuncB},
 		{Path: "fileC.go", Content: "package main\n\nfunc C() {}\n"},
 	})
 
@@ -409,12 +377,12 @@ func TestShadow_CarryForward_IdleSession(t *testing.T) {
 	}
 
 	// Create multiple files
-	env.WriteFile("fileA.go", "package main\n\nfunc A() {}\n")
-	env.WriteFile("fileB.go", "package main\n\nfunc B() {}\n")
+	env.WriteFile("fileA.go", pkgFuncA)
+	env.WriteFile("fileB.go", pkgFuncB)
 
 	sess.CreateTranscript("Create files A and B", []FileChange{
-		{Path: "fileA.go", Content: "package main\n\nfunc A() {}\n"},
-		{Path: "fileB.go", Content: "package main\n\nfunc B() {}\n"},
+		{Path: "fileA.go", Content: pkgFuncA},
+		{Path: "fileB.go", Content: pkgFuncB},
 	})
 
 	// Stop session (becomes IDLE)
@@ -484,14 +452,14 @@ func TestShadow_AgentCommitsMidTurn_UserCommitsRemainder(t *testing.T) {
 	}
 
 	// Create all three files
-	env.WriteFile("fileA.go", "package main\n\nfunc A() {}\n")
-	env.WriteFile("fileB.go", "package main\n\nfunc B() {}\n")
+	env.WriteFile("fileA.go", pkgFuncA)
+	env.WriteFile("fileB.go", pkgFuncB)
 	env.WriteFile("fileC.go", "package main\n\nfunc C() {}\n")
 
 	// Create transcript reflecting agent creating all files
 	sess.CreateTranscript("Create files A, B, and C", []FileChange{
-		{Path: "fileA.go", Content: "package main\n\nfunc A() {}\n"},
-		{Path: "fileB.go", Content: "package main\n\nfunc B() {}\n"},
+		{Path: "fileA.go", Content: pkgFuncA},
+		{Path: "fileB.go", Content: pkgFuncB},
 		{Path: "fileC.go", Content: "package main\n\nfunc C() {}\n"},
 	})
 
@@ -607,13 +575,13 @@ func TestShadow_MultipleCommits_SameActiveTurn(t *testing.T) {
 	}
 
 	// Create multiple files
-	env.WriteFile("fileA.go", "package main\n\nfunc A() {}\n")
-	env.WriteFile("fileB.go", "package main\n\nfunc B() {}\n")
+	env.WriteFile("fileA.go", pkgFuncA)
+	env.WriteFile("fileB.go", pkgFuncB)
 	env.WriteFile("fileC.go", "package main\n\nfunc C() {}\n")
 
 	sess.CreateTranscript("Create files A, B, and C", []FileChange{
-		{Path: "fileA.go", Content: "package main\n\nfunc A() {}\n"},
-		{Path: "fileB.go", Content: "package main\n\nfunc B() {}\n"},
+		{Path: "fileA.go", Content: pkgFuncA},
+		{Path: "fileB.go", Content: pkgFuncB},
 		{Path: "fileC.go", Content: "package main\n\nfunc C() {}\n"},
 	})
 
@@ -730,9 +698,9 @@ func TestShadow_OverlapCheck_UnrelatedCommit(t *testing.T) {
 	}
 
 	// Create file A through session
-	env.WriteFile("fileA.go", "package main\n\nfunc A() {}\n")
+	env.WriteFile("fileA.go", pkgFuncA)
 	sess.CreateTranscript("Create file A", []FileChange{
-		{Path: "fileA.go", Content: "package main\n\nfunc A() {}\n"},
+		{Path: "fileA.go", Content: pkgFuncA},
 	})
 
 	// Stop session (becomes IDLE)
@@ -750,7 +718,7 @@ func TestShadow_OverlapCheck_UnrelatedCommit(t *testing.T) {
 	t.Logf("First checkpoint ID: %s", firstCheckpointID)
 
 	// Create file B manually (not through session)
-	env.WriteFile("fileB.go", "package main\n\nfunc B() {}\n")
+	env.WriteFile("fileB.go", pkgFuncB)
 
 	// Commit file B - should NOT get checkpoint (no overlap with session files)
 	env.GitCommitWithShadowHooks("Add file B (manual)", "fileB.go")
@@ -787,9 +755,9 @@ func TestShadow_OverlapCheck_PartialOverlap(t *testing.T) {
 	}
 
 	// Create file A through session
-	env.WriteFile("fileA.go", "package main\n\nfunc A() {}\n")
+	env.WriteFile("fileA.go", pkgFuncA)
 	sess.CreateTranscript("Create file A", []FileChange{
-		{Path: "fileA.go", Content: "package main\n\nfunc A() {}\n"},
+		{Path: "fileA.go", Content: pkgFuncA},
 	})
 
 	// Stop session (becomes IDLE)
@@ -798,7 +766,7 @@ func TestShadow_OverlapCheck_PartialOverlap(t *testing.T) {
 	}
 
 	// Create file B manually (not through session)
-	env.WriteFile("fileB.go", "package main\n\nfunc B() {}\n")
+	env.WriteFile("fileB.go", pkgFuncB)
 
 	// Commit both files together - should get checkpoint (partial overlap is enough)
 	env.GitCommitWithShadowHooks("Add files A and B", "fileA.go", "fileB.go")
@@ -837,12 +805,12 @@ func TestShadow_SessionDepleted_ManualEditNoCheckpoint(t *testing.T) {
 	}
 
 	// Create 3 files through session
-	env.WriteFile("fileA.go", "package main\n\nfunc A() {}\n")
-	env.WriteFile("fileB.go", "package main\n\nfunc B() {}\n")
+	env.WriteFile("fileA.go", pkgFuncA)
+	env.WriteFile("fileB.go", pkgFuncB)
 	env.WriteFile("fileC.go", "package main\n\nfunc C() {}\n")
 	sess.CreateTranscript("Create files A, B, and C", []FileChange{
-		{Path: "fileA.go", Content: "package main\n\nfunc A() {}\n"},
-		{Path: "fileB.go", Content: "package main\n\nfunc B() {}\n"},
+		{Path: "fileA.go", Content: pkgFuncA},
+		{Path: "fileB.go", Content: pkgFuncB},
 		{Path: "fileC.go", Content: "package main\n\nfunc C() {}\n"},
 	})
 
@@ -927,12 +895,12 @@ func TestShadow_RevertedFiles_ManualEditNoCheckpoint(t *testing.T) {
 	}
 
 	// Create 3 files through session
-	env.WriteFile("fileA.go", "package main\n\nfunc A() {}\n")
-	env.WriteFile("fileB.go", "package main\n\nfunc B() {}\n")
+	env.WriteFile("fileA.go", pkgFuncA)
+	env.WriteFile("fileB.go", pkgFuncB)
 	env.WriteFile("fileC.go", "package main\n\nfunc C() {}\n")
 	sess.CreateTranscript("Create files A, B, and C", []FileChange{
-		{Path: "fileA.go", Content: "package main\n\nfunc A() {}\n"},
-		{Path: "fileB.go", Content: "package main\n\nfunc B() {}\n"},
+		{Path: "fileA.go", Content: pkgFuncA},
+		{Path: "fileB.go", Content: pkgFuncB},
 		{Path: "fileC.go", Content: "package main\n\nfunc C() {}\n"},
 	})
 
@@ -988,7 +956,7 @@ func TestShadow_RevertedFiles_ManualEditNoCheckpoint(t *testing.T) {
 // Flow:
 // 1. Agent starts working (ACTIVE)
 // 2. User commits mid-turn → TurnCheckpointIDs populated
-// 3. User calls "entire reset --session <id> --force"
+// 3. User calls "entire clean --session <id> --force"
 // 4. Session state file should be deleted
 // 5. A new session can start cleanly without orphaned state
 func TestShadow_ResetSession_ClearsTurnCheckpointIDs(t *testing.T) {
@@ -1027,8 +995,8 @@ func TestShadow_ResetSession_ClearsTurnCheckpointIDs(t *testing.T) {
 	}
 	t.Logf("TurnCheckpointIDs before reset: %v", state.TurnCheckpointIDs)
 
-	// Reset the session using the CLI
-	output, resetErr := env.RunCLIWithError("reset", "--session", sess.ID, "--force")
+	// Clean the session using the CLI
+	output, resetErr := env.RunCLIWithError("clean", "--session", sess.ID, "--force")
 	t.Logf("Reset output: %s", output)
 	if resetErr != nil {
 		t.Fatalf("Reset failed: %v", resetErr)
@@ -1090,12 +1058,12 @@ func TestShadow_EndedSession_UserCommitsRemainingFiles(t *testing.T) {
 	}
 
 	// Create files
-	env.WriteFile("fileA.go", "package main\n\nfunc A() {}\n")
-	env.WriteFile("fileB.go", "package main\n\nfunc B() {}\n")
+	env.WriteFile("fileA.go", pkgFuncA)
+	env.WriteFile("fileB.go", pkgFuncB)
 
 	sess.CreateTranscript("Create files A and B", []FileChange{
-		{Path: "fileA.go", Content: "package main\n\nfunc A() {}\n"},
-		{Path: "fileB.go", Content: "package main\n\nfunc B() {}\n"},
+		{Path: "fileA.go", Content: pkgFuncA},
+		{Path: "fileB.go", Content: pkgFuncB},
 	})
 
 	// Stop session (IDLE)
@@ -1375,4 +1343,51 @@ func TestShadow_CarryForward_ModifiedExistingFiles(t *testing.T) {
 	}
 
 	t.Log("CarryForward_ModifiedExistingFiles test completed successfully")
+}
+
+// commitDrivingGitHooksVerbosely commits path by invoking prepare-commit-msg
+// and post-commit directly, logging each hook's output.
+func commitDrivingGitHooksVerbosely(t *testing.T, env *TestEnv, path, msg string) {
+	t.Helper()
+
+	env.GitAdd(path)
+	msgFile := filepath.Join(env.RepoDir, ".git", "COMMIT_EDITMSG")
+	if err := os.WriteFile(msgFile, []byte(msg), 0o644); err != nil {
+		t.Fatalf("failed to write commit message: %v", err)
+	}
+
+	prepCmd := exec.CommandContext(t.Context(), getTestBinary(), "hooks", "git", "prepare-commit-msg", msgFile, "message")
+	prepCmd.Dir = env.RepoDir
+	prepCmd.Env = append(testutil.GitIsolatedEnv(), "ENTIRE_TEST_TTY=1")
+	prepOutput, prepErr := prepCmd.CombinedOutput()
+	t.Logf("prepare-commit-msg output: %s (err: %v)", prepOutput, prepErr)
+
+	modifiedMsg, err := os.ReadFile(msgFile)
+	if err != nil {
+		t.Fatalf("failed to read commit message: %v", err)
+	}
+	t.Logf("Commit message after prepare-commit-msg: %s", modifiedMsg)
+
+	repo, err := git.PlainOpen(env.RepoDir)
+	if err != nil {
+		t.Fatalf("failed to open repo: %v", err)
+	}
+	worktree, err := repo.Worktree()
+	if err != nil {
+		t.Fatalf("failed to get worktree: %v", err)
+	}
+	if _, err := worktree.Commit(string(modifiedMsg), &git.CommitOptions{
+		Author: &object.Signature{
+			Name:  "Test User",
+			Email: "test@example.com",
+			When:  time.Now(),
+		},
+	}); err != nil {
+		t.Fatalf("failed to commit: %v", err)
+	}
+
+	postCmd := exec.CommandContext(t.Context(), getTestBinary(), "hooks", "git", "post-commit")
+	postCmd.Dir = env.RepoDir
+	postOutput, postErr := postCmd.CombinedOutput()
+	t.Logf("post-commit output: %s (err: %v)", postOutput, postErr)
 }

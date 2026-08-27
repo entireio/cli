@@ -41,11 +41,11 @@ func (m *mockBuiltinHookAgent) HookNames() []string { return nil }
 func (m *mockBuiltinHookAgent) ParseHookEvent(context.Context, string, io.Reader) (*Event, error) {
 	return nil, nil //nolint:nilnil // test mock
 }
-func (m *mockBuiltinHookAgent) InstallHooks(context.Context, bool, bool) (int, error) {
+func (m *mockBuiltinHookAgent) InstallHooks(context.Context, bool) (int, error) {
 	return 0, nil
 }
-func (m *mockBuiltinHookAgent) UninstallHooks(context.Context) error   { return nil }
-func (m *mockBuiltinHookAgent) AreHooksInstalled(context.Context) bool { return false }
+func (m *mockBuiltinHookAgent) UninstallHooks(context.Context) error            { return nil }
+func (m *mockBuiltinHookAgent) AreHooksInstalled(context.Context) (bool, error) { return false, nil }
 
 // mockFullAgent implements all optional interfaces AND CapabilityDeclarer.
 type mockFullAgent struct {
@@ -61,9 +61,9 @@ func (m *mockFullAgent) HookNames() []string { return nil }
 func (m *mockFullAgent) ParseHookEvent(context.Context, string, io.Reader) (*Event, error) {
 	return nil, nil //nolint:nilnil // test mock
 }
-func (m *mockFullAgent) InstallHooks(context.Context, bool, bool) (int, error) { return 0, nil }
-func (m *mockFullAgent) UninstallHooks(context.Context) error                  { return nil }
-func (m *mockFullAgent) AreHooksInstalled(context.Context) bool                { return false }
+func (m *mockFullAgent) InstallHooks(context.Context, bool) (int, error) { return 0, nil }
+func (m *mockFullAgent) UninstallHooks(context.Context) error            { return nil }
+func (m *mockFullAgent) AreHooksInstalled(context.Context) (bool, error) { return false, nil }
 
 // TranscriptAnalyzer
 func (m *mockFullAgent) GetTranscriptPosition(string) (int, error) { return 0, nil }
@@ -96,6 +96,11 @@ func (m *mockFullAgent) CalculateTokenUsageSince(context.Context, string, json.R
 	return nil, nil //nolint:nilnil // test mock
 }
 
+// StreamingTextGenerator
+func (m *mockFullAgent) GenerateTextStreaming(context.Context, string, string, ProgressFn) (string, error) {
+	return "", nil
+}
+
 // TranscriptCompactor
 func (m *mockFullAgent) CompactTranscript(context.Context, string) (*CompactedTranscript, error) {
 	return &CompactedTranscript{}, nil
@@ -110,6 +115,15 @@ func (m *mockFullAgent) ExtractAllModifiedFiles([]byte, int, string) ([]string, 
 }
 func (m *mockFullAgent) CalculateTotalTokenUsage([]byte, int, string) (*TokenUsage, error) {
 	return nil, nil //nolint:nilnil // test mock
+}
+
+// mockBuiltinStreamingAgent is a built-in agent that implements StreamingTextGenerator but NOT CapabilityDeclarer.
+type mockBuiltinStreamingAgent struct {
+	mockBaseAgent
+}
+
+func (m *mockBuiltinStreamingAgent) GenerateTextStreaming(context.Context, string, string, ProgressFn) (string, error) {
+	return "", nil
 }
 
 // mockBuiltinPromptAgent is a built-in agent that implements PromptExtractor but NOT CapabilityDeclarer.
@@ -497,6 +511,46 @@ func TestAsPromptExtractor(t *testing.T) {
 		_, ok := AsPromptExtractor(nil)
 		if ok {
 			t.Error("expected false for nil agent")
+		}
+	})
+}
+
+func TestAsStreamingTextGenerator(t *testing.T) {
+	t.Parallel()
+
+	t.Run("not implemented", func(t *testing.T) {
+		t.Parallel()
+		ag := &mockBaseAgent{}
+		_, ok := AsStreamingTextGenerator(ag)
+		if ok {
+			t.Error("expected false for agent not implementing StreamingTextGenerator")
+		}
+	})
+
+	t.Run("builtin agent", func(t *testing.T) {
+		t.Parallel()
+		ag := &mockBuiltinStreamingAgent{}
+		stg, ok := AsStreamingTextGenerator(ag)
+		if !ok || stg == nil {
+			t.Error("expected true for built-in agent implementing StreamingTextGenerator")
+		}
+	})
+
+	t.Run("declared true", func(t *testing.T) {
+		t.Parallel()
+		ag := &mockFullAgent{caps: DeclaredCaps{StreamingTextGenerator: true}}
+		stg, ok := AsStreamingTextGenerator(ag)
+		if !ok || stg == nil {
+			t.Error("expected true when capability declared true")
+		}
+	})
+
+	t.Run("declared false", func(t *testing.T) {
+		t.Parallel()
+		ag := &mockFullAgent{caps: DeclaredCaps{StreamingTextGenerator: false}}
+		_, ok := AsStreamingTextGenerator(ag)
+		if ok {
+			t.Error("expected false when capability declared false")
 		}
 	})
 }

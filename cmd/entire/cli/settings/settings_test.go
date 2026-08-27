@@ -1,8 +1,11 @@
 package settings
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -10,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 )
@@ -348,6 +352,135 @@ func TestLoad_LocalMergesRedactionSubfields(t *testing.T) {
 	}
 	if _, ok := settings.Redaction.PII.CustomPatterns["ssn"]; !ok {
 		t.Error("expected ssn pattern from local override")
+	}
+}
+
+// TestLoad_LocalIgnoresScannerToggles pins the "committed settings file only"
+// rule for the scanner toggles: settings.local.json is not permitted to pick
+// which scanner binaries run, so an attempt to flip them there must be
+// silently ignored rather than applied. It also pins that ignoring is not
+// silent to the user: a WARNING is logged naming both scanner keys found in
+// the local file.
+func TestLoad_LocalIgnoresScannerToggles(t *testing.T) {
+	tmpDir := t.TempDir()
+	entireDir := filepath.Join(tmpDir, ".entire")
+	if err := os.MkdirAll(entireDir, 0o755); err != nil {
+		t.Fatalf("failed to create .entire directory: %v", err)
+	}
+
+	// Base settings: defaults (no scanner config).
+	baseContent := `{"enabled": true}`
+	if err := os.WriteFile(filepath.Join(entireDir, "settings.json"), []byte(baseContent), 0o644); err != nil {
+		t.Fatalf("failed to write settings file: %v", err)
+	}
+
+	// Local file tries to flip both scanner toggles away from their defaults.
+	localContent := `{"redaction": {"betterleaks": {"enabled": false}, "goredact": {"enabled": true}}}`
+	if err := os.WriteFile(filepath.Join(entireDir, "settings.local.json"), []byte(localContent), 0o644); err != nil {
+		t.Fatalf("failed to write local settings file: %v", err)
+	}
+
+	if err := os.MkdirAll(filepath.Join(tmpDir, ".git"), 0o755); err != nil {
+		t.Fatalf("failed to create .git directory: %v", err)
+	}
+	t.Chdir(tmpDir)
+
+	// Swapping the default slog logger is process-global state, which is why
+	// this test (like the t.Chdir above) does not call t.Parallel().
+	var logBuf bytes.Buffer
+	savedLogger := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logBuf, nil)))
+	t.Cleanup(func() { slog.SetDefault(savedLogger) })
+
+	settings, err := Load(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !settings.BetterleaksEnabled() {
+		t.Error("BetterleaksEnabled() = false, want true (settings.local.json must not override scanner toggles)")
+	}
+	if settings.GoredactEnabled() {
+		t.Error("GoredactEnabled() = true, want false (settings.local.json must not override scanner toggles)")
+	}
+
+	logOutput := logBuf.String()
+	if !strings.Contains(logOutput, "redaction.betterleaks") {
+		t.Errorf("expected warning log to mention redaction.betterleaks, got: %s", logOutput)
+	}
+	if !strings.Contains(logOutput, "redaction.goredact") {
+		t.Errorf("expected warning log to mention redaction.goredact, got: %s", logOutput)
+	}
+}
+
+// TestScannerSettings_BothDisabledFailsLoad pins the fail-closed rule: Load
+// must reject a merged config with zero enabled scanners (wrapping
+// ErrScannerConfig) while accepting legal one-scanner and default selections.
+func TestScannerSettings_BothDisabledFailsLoad(t *testing.T) {
+	// Nil-receiver accessors must report the defaults (betterleaks on, goredact off).
+	var nilSettings *EntireSettings
+	if !nilSettings.BetterleaksEnabled() || nilSettings.GoredactEnabled() {
+		t.Error("nil-receiver scanner accessors should report defaults (betterleaks on, goredact off)")
+	}
+
+	cases := []struct {
+		name    string
+		json    string
+		wantErr bool
+	}{
+		{"explicit both false", `{"enabled":true,"strategy":"manual-commit","redaction":{"betterleaks":{"enabled":false},"goredact":{"enabled":false}}}`, true},
+		{"betterleaks false, goredact omitted", `{"enabled":true,"strategy":"manual-commit","redaction":{"betterleaks":{"enabled":false}}}`, true},
+		{"goredact only", `{"enabled":true,"strategy":"manual-commit","redaction":{"betterleaks":{"enabled":false},"goredact":{"enabled":true}}}`, false},
+		{"empty scanner objects keep defaults", `{"enabled":true,"strategy":"manual-commit","redaction":{"betterleaks":{},"goredact":{}}}`, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			setupSettingsDir(t, tc.json, "")
+
+			_, err := Load(context.Background())
+			if tc.wantErr {
+				if err == nil {
+					t.Fatal("expected error when both scanners are disabled")
+				}
+				if !errors.Is(err, ErrScannerConfig) {
+					t.Fatalf("expected error wrapping ErrScannerConfig, got: %v", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("expected no error with at least one scanner enabled, got: %v", err)
+			}
+		})
+	}
+}
+
+// TestScannerSettings_PerFileLoadersTolerant pins the regression that entire
+// status depends on: per-file loaders (LoadFromFile, LoadFromBytes) must NOT
+// run the fail-closed scanner validation. Both loaders serve display/inspection
+// consumers that read one file in isolation (entire status via LoadFromFile on
+// the local file, investigate via LoadFromBytes), and a local file may legally
+// contain scanner keys that are inert even after merge, so validation runs only on
+// the merged effective config.
+func TestScannerSettings_PerFileLoadersTolerant(t *testing.T) {
+	t.Parallel()
+
+	fragment := []byte(`{"redaction":{"betterleaks":{"enabled":false}}}`)
+
+	// A legal local-file FRAGMENT that would fail merged validation if it
+	// were the whole config; per-file loaders must accept it.
+	if _, err := LoadFromBytes(fragment); err != nil {
+		t.Fatalf("LoadFromBytes on local fragment = %v, want nil (per-file loaders must not run scanner validation)", err)
+	}
+
+	// LoadFromFile is a separate implementation from LoadFromBytes, and it is
+	// the one entire status actually calls on the local settings file, so pin
+	// it independently rather than relying on LoadFromBytes coverage alone.
+	tmpDir := t.TempDir()
+	localFile := filepath.Join(tmpDir, "settings.local.json")
+	if err := os.WriteFile(localFile, fragment, 0o644); err != nil {
+		t.Fatalf("failed to write local settings fragment: %v", err)
+	}
+	if _, err := LoadFromFile(localFile); err != nil {
+		t.Fatalf("LoadFromFile on local fragment = %v, want nil (per-file loaders must not run scanner validation)", err)
 	}
 }
 
@@ -789,7 +922,7 @@ func TestLoadMerged_CustomRedactionsPerKeyOverride(t *testing.T) {
 
 	// preferencesFileAbs="" skips the clone-preferences layer; this test only
 	// exercises the project + local merge.
-	merged, err := loadMergedSettings(base, "", local)
+	merged, err := loadMergedSettings(context.Background(), base, "", local)
 	if err != nil {
 		t.Fatalf("loadMergedSettings: %v", err)
 	}
@@ -1328,5 +1461,122 @@ func TestMergeReviewProfiles_PureAndPrecedence(t *testing.T) {
 	}
 	if got := mergeReviewProfiles(nil, map[string]ReviewProfileConfig{}); got == nil {
 		t.Error("merge(nil, emptyNonNil) should return a non-nil empty map, got nil")
+	}
+}
+
+// TestSaveProjectRaw_CreatesMissingParentDir verifies the raw save path creates
+// its parent directory, mirroring the struct save path (saveToFile). Without
+// this, a raw enabled-flag flip in a repo that has never created .entire/
+// (e.g. a bare `entire disable` in a fresh repo) hard-fails with "no such file
+// or directory". Regression test for the saveRaw MkdirAll fix.
+func TestSaveProjectRaw_CreatesMissingParentDir(t *testing.T) {
+	tmpDir := t.TempDir()
+	path := filepath.Join(tmpDir, ".entire", "settings.json")
+
+	raw := map[string]json.RawMessage{"enabled": json.RawMessage("false")}
+	if err := SaveProjectRaw(path, raw); err != nil {
+		t.Fatalf("SaveProjectRaw() into a missing .entire dir should succeed, got: %v", err)
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("settings file should have been created: %v", err)
+	}
+	if !strings.Contains(string(data), `"enabled": false`) {
+		t.Errorf("expected enabled:false, got: %s", data)
+	}
+}
+
+// TestSaveLocalRaw_CreatesMissingParentDir is the local-scope mirror of
+// TestSaveProjectRaw_CreatesMissingParentDir.
+func TestSaveLocalRaw_CreatesMissingParentDir(t *testing.T) {
+	tmpDir := t.TempDir()
+	path := filepath.Join(tmpDir, ".entire", "settings.local.json")
+
+	raw := map[string]json.RawMessage{"enabled": json.RawMessage("false")}
+	if err := SaveLocalRaw(path, raw); err != nil {
+		t.Fatalf("SaveLocalRaw() into a missing .entire dir should succeed, got: %v", err)
+	}
+
+	if _, err := os.ReadFile(path); err != nil {
+		t.Fatalf("local settings file should have been created: %v", err)
+	}
+}
+
+// Regression: `entire enable --local` writes only .entire/settings.local.json,
+// but the hook activation check (IsSetUpAndEnabled) only looked for
+// .entire/settings.json, so hooks silently no-op'd. It must recognize a
+// local-only setup.
+func TestIsSetUpAndEnabled_LocalSettingsOnly(t *testing.T) {
+	root := t.TempDir()
+	testutil.InitRepo(t, root)
+	entireDir := filepath.Join(root, ".entire")
+	if err := os.MkdirAll(entireDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// Only the local settings file exists (no settings.json), enabled.
+	if err := os.WriteFile(filepath.Join(entireDir, "settings.local.json"), []byte(`{"enabled":true}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Chdir(root)
+	paths.ClearWorktreeRootCache()
+
+	if IsSetUp(context.Background()) {
+		t.Fatal("precondition: IsSetUp should be false with only settings.local.json")
+	}
+	if !IsSetUpAndEnabled(context.Background()) {
+		t.Fatal("IsSetUpAndEnabled should be true when only settings.local.json exists and is enabled")
+	}
+}
+
+// The hook trees log rather than fail on a scanner-config error because this
+// gate already rejects it (see withHookSession). That makes the composition
+// load-bearing: pin it here, in the package that owns both halves.
+func TestIsSetUpAndEnabled_FalseOnInvalidScannerConfig(t *testing.T) {
+	root := t.TempDir()
+	testutil.InitRepo(t, root)
+	entireDir := filepath.Join(root, ".entire")
+	if err := os.MkdirAll(entireDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// Enabled, but both scanners disabled: Load fails with ErrScannerConfig.
+	body := `{"enabled":true,"strategy":"manual-commit","redaction":{"betterleaks":{"enabled":false}}}`
+	if err := os.WriteFile(filepath.Join(entireDir, "settings.json"), []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Chdir(root)
+	paths.ClearWorktreeRootCache()
+
+	if _, err := Load(context.Background()); !errors.Is(err, ErrScannerConfig) {
+		t.Fatalf("precondition: Load error = %v, want ErrScannerConfig", err)
+	}
+	if IsSetUpAndEnabled(context.Background()) {
+		t.Fatal("IsSetUpAndEnabled must fail closed on an invalid scanner config")
+	}
+}
+
+func TestGetCheckpointPushRemote(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		opts map[string]any
+		want string
+	}{
+		{"unset", map[string]any{}, ""},
+		{"nil options", nil, ""},
+		{"set", map[string]any{"checkpoint_push_remote": "private"}, "private"},
+		{"empty string", map[string]any{"checkpoint_push_remote": ""}, ""},
+		{"wrong type", map[string]any{"checkpoint_push_remote": true}, ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			s := &EntireSettings{StrategyOptions: tt.opts}
+			if got := s.GetCheckpointPushRemote(); got != tt.want {
+				t.Errorf("GetCheckpointPushRemote() = %q, want %q", got, tt.want)
+			}
+		})
 	}
 }

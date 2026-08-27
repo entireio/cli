@@ -58,7 +58,7 @@ func TestInstallTitle_FreshConfig(t *testing.T) {
 	cfgDir := t.TempDir()
 	t.Setenv(configDirEnv, cfgDir)
 
-	if err := InstallTitleTee(false); err != nil {
+	if err := InstallTitleTee(); err != nil {
 		t.Fatalf("InstallTitleTee: %v", err)
 	}
 
@@ -76,7 +76,7 @@ func TestInstallTitle_WrapsExistingCommand(t *testing.T) {
 
 	writeAgySettingsFile(t, cfgDir, `{"theme":"dark","title":{"type":"command","command":"~/bin/my-status.sh"}}`)
 
-	if err := InstallTitleTee(false); err != nil {
+	if err := InstallTitleTee(); err != nil {
 		t.Fatalf("InstallTitleTee: %v", err)
 	}
 
@@ -101,12 +101,12 @@ func TestInstallTitle_Idempotent(t *testing.T) {
 	cfgDir := t.TempDir()
 	t.Setenv(configDirEnv, cfgDir)
 
-	if err := InstallTitleTee(false); err != nil {
+	if err := InstallTitleTee(); err != nil {
 		t.Fatalf("first InstallTitleTee: %v", err)
 	}
 	first := readTitleCommand(t, cfgDir)
 
-	if err := InstallTitleTee(false); err != nil {
+	if err := InstallTitleTee(); err != nil {
 		t.Fatalf("second InstallTitleTee: %v", err)
 	}
 	second := readTitleCommand(t, cfgDir)
@@ -218,7 +218,7 @@ func TestInstallTitle_WrapsCommandContainingWrapSubstring(t *testing.T) {
 	content := `{"title":{"type":"command","command":` + string(origJSON) + `}}`
 	writeAgySettingsFile(t, cfgDir, content)
 
-	if err := InstallTitleTee(false); err != nil {
+	if err := InstallTitleTee(); err != nil {
 		t.Fatalf("InstallTitleTee: %v", err)
 	}
 
@@ -244,8 +244,9 @@ func TestUninstallTitle_RemovesBareLocalDevTee(t *testing.T) {
 	cfgDir := t.TempDir()
 	t.Setenv(configDirEnv, cfgDir)
 
-	// Exactly the localDev tee command — must be removed.
-	localDevCmd := titleTeeCommand(true, "")
+	// The bare local-dev tee command older versions wrote (local-dev mode was
+	// removed; see isBareTitleTeeCommand) — must still be removed, from any path.
+	localDevCmd := "go run '/some/other/worktree/cmd/entire/main.go' hooks antigravity title-tee"
 	cmdJSON := mustJSON(t, localDevCmd)
 	content := `{"title":{"type":"command","command":` + string(cmdJSON) + `}}`
 	writeAgySettingsFile(t, cfgDir, content)
@@ -270,7 +271,7 @@ func TestInstallUninstall_RoundTripsEmbeddedSingleQuotes(t *testing.T) {
 	content := `{"title":{"type":"command","command":` + string(origJSON) + `}}`
 	writeAgySettingsFile(t, cfgDir, content)
 
-	if err := InstallTitleTee(false); err != nil {
+	if err := InstallTitleTee(); err != nil {
 		t.Fatalf("InstallTitleTee: %v", err)
 	}
 	if err := UninstallTitleTee(); err != nil {
@@ -289,7 +290,7 @@ func TestTitleTeeInstalled(t *testing.T) {
 	t.Run("configured", func(t *testing.T) {
 		cfgDir := t.TempDir()
 		t.Setenv(configDirEnv, cfgDir)
-		if err := InstallTitleTee(false); err != nil {
+		if err := InstallTitleTee(); err != nil {
 			t.Fatalf("InstallTitleTee: %v", err)
 		}
 		if !TitleTeeInstalled() {

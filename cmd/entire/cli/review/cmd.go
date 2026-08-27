@@ -73,6 +73,19 @@ type Deps struct {
 	// line to out. nil when trail delivery is unavailable (e.g. tests), in which
 	// case the run falls back to local output with a notice.
 	PostReviewToTrail func(ctx context.Context, out io.Writer, profileName, verdict string) error
+
+	// PrepareTarget resolves a branch, trail ID, or trail URL and checks its
+	// branch out in a worktree. It returns the worktree in which review should
+	// be re-run. Injected because trail API access lives in the parent package.
+	PrepareTarget func(ctx context.Context, out, errOut io.Writer, selector string) (TargetWorktree, error)
+
+	// RemoveTarget removes a worktree created specifically for this review.
+	// Reused worktrees are never passed to it.
+	RemoveTarget func(ctx context.Context, worktreeRoot string) error
+
+	// RunInWorktree re-runs the current CLI invocation in worktreeRoot after the
+	// target flags have been removed. nil uses the production subprocess runner.
+	RunInWorktree func(ctx context.Context, worktreeRoot string, args, env []string, stdin io.Reader, stdout, stderr io.Writer) error
 }
 
 // NewCommand returns the `entire review` cobra command wired with the
@@ -98,6 +111,8 @@ func NewCommand(deps Deps) *cobra.Command {
 	var setTask string
 	var setModels []string
 	var setSlots []string
+	var target string
+	var cleanupWorktree bool
 
 	cmd := &cobra.Command{
 		Use: "review",
@@ -105,9 +120,9 @@ func NewCommand(deps Deps) *cobra.Command {
 		// users who know about it can still run `entire review` / `entire
 		// review --help` and the command works normally.
 		Hidden: true,
-		Short:  "Run a multi-agent review against the current branch",
-		Long: `Run a multi-agent review against the current branch: several reviewer
-agents review the change in parallel, then a single judge consolidates their
+		Short:  "Run a multi-agent review against a branch",
+		Long: `Run a multi-agent review against the current branch or a --target branch:
+several reviewer agents review the change in parallel, then a single judge consolidates their
 reports into the final verdict in a closing round. Reviews are saved as named
 profiles in Entire settings and clone-local preferences. On first run, guided
 setup writes a profile and asks before starting agents.
@@ -145,9 +160,14 @@ Flags:
                  PRs where the base is the parent feature branch, not main.
                  Default: first existing of origin/HEAD, origin/main,
                  origin/master, main, master.
+  --target REF   check out a branch identified by branch name, trail ID, or
+                 Entire trail URL in a worktree and run the review there.
+  --cleanup-worktree
+                 remove a newly-created target worktree after a successful
+                 review. Interactive runs ask when this flag is omitted.
 
 To tag an already-finished session as a review, use
-'entire attach --review <id>'.`,
+'entire session attach --review <id>'.`,
 		Args: func(_ *cobra.Command, args []string) error {
 			if len(args) > 1 {
 				return fmt.Errorf("accepts at most one argument, received %d", len(args))
@@ -159,6 +179,14 @@ To tag an already-finished session as a review, use
 		},
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := cmd.Context()
+			if target != "" {
+				modeSelected := configure || edit || findings || listProfiles || listAgents || listModels
+				return runTargetReview(ctx, cmd, target, reviewTargetChildArgs(cmd, args), cleanupWorktree, modeSelected, deps)
+			}
+			if cleanupWorktree {
+				return errors.New("--cleanup-worktree requires --target")
+			}
+
 			// Discover external agents so review configs that target them
 			// resolve correctly — without this, GetAgentsWithHooksInstalled
 			// and agent.Get can't see them.
@@ -210,7 +238,7 @@ To tag an already-finished session as a review, use
 				}, deps)
 			}
 			if edit {
-				if !interactive.IsTerminalWriter(cmd.OutOrStdout()) || !interactive.CanPromptInteractively() {
+				if !reviewCommandIsInteractive(cmd) {
 					err := errors.New("--edit requires an interactive terminal")
 					cmd.SilenceUsage = true
 					fmt.Fprintln(cmd.ErrOrStderr(), "--edit requires an interactive terminal.")
@@ -251,6 +279,8 @@ To tag an already-finished session as a review, use
 	cmd.Flags().StringVar(&profileOverride, "profile", "", "review profile to run (default: review_default_profile or general)")
 	cmd.Flags().StringVar(&perRunPrompt, "prompt", "", "one-off instructions appended to this review run")
 	cmd.Flags().StringVar(&baseOverride, "base", "", "git ref to scope the review against (default: origin/HEAD → origin/main → origin/master → main → master)")
+	cmd.Flags().StringVar(&target, "target", "", "branch, trail ID, or Entire trail URL to check out in a worktree and review")
+	cmd.Flags().BoolVar(&cleanupWorktree, "cleanup-worktree", false, "remove a newly-created target worktree after a successful review (interactive runs ask when omitted)")
 	cmd.Flags().DurationVar(&reviewTimeout, "timeout", 0, "optional hard cap per reviewer (default: none — reviewers run until they finish, like a skill invoked directly in a session). When set, it also bounds the consolidating judge; unset, the judge keeps its own 20m default")
 	// The listing modes and the action modes each select a distinct command
 	// behavior; combining them silently runs one and drops the rest, so reject
@@ -268,6 +298,41 @@ type reviewConfigureOptions struct {
 	Task   string   // profile task text (--set-task)
 	Models []string // per-reviewer "agent=model" entries (--set-model)
 	Slots  []string // reviewer slots as "agent[=model]" entries (--set-slot)
+}
+
+// reviewCommandIsInteractive requires the exact stdin consumed by huh and
+// Bubble Tea, plus stdout, to be terminals. CanPromptInteractively adds the
+// independent policy gate for tests, CI, and agent subprocess sentinels; a
+// controlling /dev/tty alone is insufficient because stdin may still be piped.
+func reviewCommandIsInteractive(cmd *cobra.Command) bool {
+	hardDisabled := reviewInteractivityHardDisabled(
+		os.Getenv(interactive.EnvTestTTY),
+		os.Getenv("CI"),
+		interactive.UnderTest(),
+	)
+	return reviewTTYIsInteractive(
+		interactive.IsTerminalReader(cmd.InOrStdin()),
+		interactive.IsTerminalWriter(cmd.OutOrStdout()),
+		interactive.CanPromptInteractively(),
+		hardDisabled,
+	)
+}
+
+func reviewInteractivityHardDisabled(testTTY, ci string, underTest bool) bool {
+	// Match CanPromptInteractively's precedence: ENTIRE_TEST_TTY=1 may opt an
+	// in-process test into interaction, while tests without that explicit
+	// override must never read from a developer's real terminal.
+	if testTTY != "" {
+		return testTTY != "1"
+	}
+	return underTest || (ci != "" && ci != "false")
+}
+
+func reviewTTYIsInteractive(stdinTTY, stdoutTTY, canPrompt, hardDisabled bool) bool {
+	// Real stdio terminals are necessary but not sufficient: agent shells can
+	// allocate a PTY while advertising that no human is available through the
+	// sentinels enforced by CanPromptInteractively.
+	return !hardDisabled && stdinTTY && stdoutTTY && canPrompt
 }
 
 func (o reviewConfigureOptions) scripted() bool {
@@ -329,7 +394,7 @@ func runReviewConfigure(ctx context.Context, cmd *cobra.Command, profileOverride
 	// duplicate the catalog here. Pass the raw --profile value (empty when not
 	// given) so the guided setup runs the "what kind of review?" type picker
 	// instead of being silently defaulted to the general profile.
-	if interactive.IsTerminalWriter(out) && interactive.CanPromptInteractively() {
+	if reviewCommandIsInteractive(cmd) {
 		name, profile, setupErr := RunReviewGuidedSetup(ctx, out, installed, deps.ReviewerFor, strings.TrimSpace(profileOverride), false, s)
 		if setupErr != nil {
 			return handlePickerError(cmd, silentErr, setupErr)
@@ -755,7 +820,7 @@ func runReview(ctx context.Context, cmd *cobra.Command, agentOverride, modelOver
 	applyLegacyReviewProfileFallback(s)
 
 	profileOverride = strings.TrimSpace(profileOverride)
-	interactiveTTY := interactive.IsTerminalWriter(out) && interactive.CanPromptInteractively()
+	interactiveTTY := reviewCommandIsInteractive(cmd)
 
 	// Bare `entire review` never auto-runs a profile. Without a TTY we cannot
 	// prompt, so list the profiles (or point at setup) and require an explicit
@@ -784,7 +849,7 @@ func runReview(ctx context.Context, cmd *cobra.Command, agentOverride, modelOver
 		// Non-interactive first run writes the shared project settings; interactive
 		// setup asks the user where to save below.
 		saveScope := reviewScopeProject
-		guidedSetup := interactive.IsTerminalWriter(out) && interactive.CanPromptInteractively()
+		guidedSetup := interactiveTTY
 		if guidedSetup {
 			var setupErr error
 			profileForSetup, profile, setupErr = RunReviewGuidedSetup(ctx, out, installed, deps.ReviewerFor, profileForSetup, true, s)
@@ -942,12 +1007,12 @@ func nonLaunchableEligibleNames(profile settings.ReviewProfileConfig, eligible [
 // (true, nil). In a non-interactive context it cannot prompt, so it proceeds
 // (the user explicitly invoked `entire review`) after printing a note rather
 // than blocking on a confirm form that would error out.
-func confirmReReviewOrProceed(ctx context.Context, out io.Writer, deps Deps) (bool, error) {
+func confirmReReviewOrProceed(ctx context.Context, out io.Writer, deps Deps, canPrompt bool) (bool, error) {
 	reviewed, meta := deps.HeadHasReviewCheckpoint(ctx)
 	if !reviewed {
 		return true, nil
 	}
-	if !interactive.CanPromptInteractively() {
+	if !canPrompt {
 		fmt.Fprintf(out, "Note: HEAD was already reviewed (%s); re-running.\n", meta)
 		return true, nil
 	}
@@ -1009,7 +1074,8 @@ func runSingleAgentPath(
 	}
 
 	// 4. Re-run guard: check if HEAD's checkpoint already has a review.
-	if proceed, guardErr := confirmReReviewOrProceed(ctx, out, deps); guardErr != nil {
+	canPrompt := reviewCommandIsInteractive(cmd)
+	if proceed, guardErr := confirmReReviewOrProceed(ctx, out, deps, canPrompt); guardErr != nil {
 		fmt.Fprintln(out, "prompt cancelled")
 		return silentErr(guardErr)
 	} else if !proceed {
@@ -1063,10 +1129,9 @@ func runSingleAgentPath(
 	defer cancelRun()
 
 	runCfg.EnrichSummary = reviewSummaryTokenEnricher(worktreeRoot, headSHA)
-	canPrompt := interactive.CanPromptInteractively()
 	sinks := composeSingleAgentSinks(singleAgentSinkInputs{
 		out:       out,
-		isTTY:     interactive.IsTerminalWriter(out) && canPrompt,
+		isTTY:     canPrompt,
 		canPrompt: canPrompt,
 		agentName: displayName,
 		cancelRun: cancelRun,
@@ -1153,7 +1218,8 @@ func runMultiAgentPath(
 		return fmt.Errorf("resolve HEAD: %w", shaErr)
 	}
 
-	if proceed, guardErr := confirmReReviewOrProceed(ctx, out, deps); guardErr != nil {
+	canPrompt := reviewCommandIsInteractive(cmd)
+	if proceed, guardErr := confirmReReviewOrProceed(ctx, out, deps, canPrompt); guardErr != nil {
 		fmt.Fprintln(out, "prompt cancelled")
 		return deps.NewSilentError(guardErr)
 	} else if !proceed {
@@ -1171,6 +1237,7 @@ func runMultiAgentPath(
 		checkpointContext = deps.ReviewCheckpointContext(ctx, worktreeRoot, scopeBaseRef)
 	}
 	reviewers := make([]reviewtypes.AgentReviewer, 0, len(launchableEligible))
+	var excludedWorkers []string
 	for _, choice := range launchableEligible {
 		workerName := choice.Name
 		agentCfg := profile.Agents[workerName]
@@ -1181,9 +1248,14 @@ func runMultiAgentPath(
 				return fmt.Errorf("resolve agent %s: %w", agentName, agErr)
 			}
 			if err := VerifyConfiguredSkillsInstalled(ctx, ag, agentCfg); err != nil {
-				cmd.SilenceUsage = true
-				fmt.Fprintln(cmd.ErrOrStderr(), err.Error())
-				return deps.NewSilentError(err)
+				// One worker's stale config must not hold the whole crew
+				// hostage (e.g. codex's legacy auto-preselected "/review",
+				// orphaned when its curated builtin was removed). Exclude
+				// the worker loudly and let the remaining reviewers run;
+				// the all-excluded case fails below.
+				excludedWorkers = append(excludedWorkers, workerName)
+				fmt.Fprintf(cmd.ErrOrStderr(), "skipping reviewer %s: %s\n", workerName, err.Error())
+				continue
 			}
 		}
 		reviewer := deps.ReviewerFor(agentName)
@@ -1205,6 +1277,14 @@ func runMultiAgentPath(
 		})
 	}
 
+	if len(reviewers) == 0 {
+		cmd.SilenceUsage = true
+		err := fmt.Errorf("no runnable reviewers: every configured worker failed skill validation (%s); run `entire review --edit` to reconfigure",
+			strings.Join(excludedWorkers, ", "))
+		fmt.Fprintln(cmd.ErrOrStderr(), err.Error())
+		return deps.NewSilentError(err)
+	}
+
 	runCtx, cancelRun := context.WithCancel(ctx)
 	defer cancelRun()
 
@@ -1221,7 +1301,7 @@ func runMultiAgentPath(
 	masterLabel := judgeLabel(judge)
 	sinks := composeMultiAgentSinks(multiAgentSinkInputs{
 		out:               out,
-		isTTY:             interactive.IsTerminalWriter(out) && interactive.CanPromptInteractively(),
+		isTTY:             canPrompt,
 		agentNames:        agentNames,
 		cancelRun:         cancelRun,
 		runContext:        runCtx,
@@ -1295,11 +1375,10 @@ func handlePickerError(cmd *cobra.Command, silentErr func(error) error, pickErr 
 // instead of monkey-patching interactive helpers at run time.
 //
 // isTTY here means "the TUI sink is safe to compose" — production callers
-// AND IsTerminalWriter(out) with CanPromptInteractively() before passing
-// it in, since the TUI both writes ANSI to stdout AND reads keypresses
-// from stdin. A terminal-stdout-but-non-interactive-stdin scenario (an
-// agent host like Claude Code invoking `entire review`) must NOT use the
-// TUI — its dismissal loop would block forever.
+// use reviewCommandIsInteractive before passing it in, since the TUI both
+// writes ANSI to stdout and reads keypresses from stdin. A terminal stdout
+// with non-interactive stdin must not use the TUI; its dismissal loop would
+// block forever.
 type multiAgentSinkInputs struct {
 	out               io.Writer
 	isTTY             bool
@@ -1517,6 +1596,7 @@ func writePostReviewManifest(
 		warnManifestNotWritten(out, "could not load session state: "+err.Error())
 		return
 	}
+	manifest.WorktreePath = reviewManifestWorktreePath(worktreeRoot)
 	if len(manifest.Sources) == 0 {
 		reason, sentinel := explainEmptyManifest(worktreeRoot, headSHA, summary, states)
 		if sentinel {
@@ -1541,6 +1621,13 @@ func writePostReviewManifest(
 		return
 	}
 	writeReviewCompletionFooter(out, manifest)
+}
+
+func reviewManifestWorktreePath(actualWorktree string) string {
+	if ownerWorktree := strings.TrimSpace(os.Getenv(envReviewFindingsWorktree)); ownerWorktree != "" {
+		return ownerWorktree
+	}
+	return actualWorktree
 }
 
 // warnManifestNotWritten prints a user-visible note explaining that the

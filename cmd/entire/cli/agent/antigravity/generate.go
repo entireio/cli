@@ -21,9 +21,13 @@ func (a *AntigravityAgent) GenerateText(ctx context.Context, prompt string, mode
 	if model != "" {
 		args = append(args, "--model", model)
 	}
-	result, err := agent.RunIsolatedTextGeneratorCLI(ctx, a.CommandRunner, "agy", "antigravity", args, prompt)
+	result, capturedStderr, stdoutBytes, err := agent.RunIsolatedTextGeneratorCLI(ctx, a.CommandRunner, "agy", "antigravity", args, prompt)
 	if err != nil {
-		return "", fmt.Errorf("antigravity text generation failed: %w", err)
+		return "", &agent.TextGenerationError{
+			Err:         fmt.Errorf("antigravity text generation failed: %w", err),
+			Stderr:      capturedStderr,
+			StdoutBytes: stdoutBytes,
+		}
 	}
 	return result, nil
 }

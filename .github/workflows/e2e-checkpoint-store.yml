@@ -46,7 +46,10 @@ jobs:
           if [ -n "$input" ]; then
             echo "agents=[\"$input\"]" >> "$GITHUB_OUTPUT"
           else
-            echo 'agents=["claude-code","opencode","gemini-cli","factoryai-droid","cursor-cli","copilot-cli","roger-roger","codex"]' >> "$GITHUB_OUTPUT"
+            # gemini-cli is excluded from the fan-out for the same reason as in
+            # e2e.yml (Gemini CLI >=0.57.0 forces `core.hooksPath=''`); select it
+            # explicitly to run it anyway.
+            echo 'agents=["claude-code","opencode","factoryai-droid","cursor-cli","copilot-cli","roger-roger","codex"]' >> "$GITHUB_OUTPUT"
           fi
 
   e2e-checkpoint-store:
@@ -70,7 +73,7 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
           # Don't persist the (copilot-scoped) GITHUB_TOKEN in .git/config, where
@@ -84,7 +87,7 @@ jobs:
           echo 'somecredstorepass' | gnome-keyring-daemon --unlock
 
       - name: Setup mise
-        uses: jdx/mise-action@e6a8b3978addb5a52f2b4cd9d91eafa7f0ab959d # v4
+        uses: jdx/mise-action@f10502fc09dadecfefb962fff68ce77213930204 # v4
 
       - name: Build entire CLI
         run: go build -o /usr/local/bin/entire ./cmd/entire

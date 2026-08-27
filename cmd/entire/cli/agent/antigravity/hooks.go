@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -20,20 +21,10 @@ var _ agent.HookSupport = (*AntigravityAgent)(nil)
 // AgentsHooksFileName is the hooks file used by Antigravity.
 const AgentsHooksFileName = "hooks.json"
 
-// entireHookPrefixes are command prefixes that identify Entire hooks. The
-// localDev prefix is the full canonical form (matching cursor/claudecode) —
-// a bare "go run " prefix would misclassify any user-authored go-run command
-// under the "entire" hooks key as Entire-managed.
-var entireHookPrefixes = []string{
-	"entire hooks antigravity ",
-	`go run "$(git rev-parse --show-toplevel)"/cmd/entire/main.go `,
-}
-
 // InstallHooks installs Antigravity hooks in .agents/hooks.json.
-// If localDev is true, hooks point to the local development build.
 // If force is true, removes existing Entire hooks before installing.
 // Returns the number of hooks installed.
-func (a *AntigravityAgent) InstallHooks(ctx context.Context, localDev bool, force bool) (int, error) {
+func (a *AntigravityAgent) InstallHooks(ctx context.Context, force bool) (int, error) {
 	repoRoot, err := paths.WorktreeRoot(ctx)
 	if err != nil {
 		repoRoot, err = os.Getwd() //nolint:forbidigo // Intentional fallback when WorktreeRoot() fails (tests run outside git repos)
@@ -53,15 +44,10 @@ func (a *AntigravityAgent) InstallHooks(ctx context.Context, localDev bool, forc
 		}
 	}
 
-	// Build the candidate Entire hook config
-	var cmdPrefix string
-	if localDev {
-		cmdPrefix = `go run "$(git rev-parse --show-toplevel)"/cmd/entire/main.go hooks antigravity `
-	} else {
-		cmdPrefix = "entire hooks antigravity "
-	}
-
-	candidate := buildEntireHookConfig(cmdPrefix, localDev)
+	// Build the candidate Entire hook config. The whole "entire" entry is
+	// replaced on install, so a hook written by an older version cannot
+	// survive alongside the current one.
+	candidate := buildEntireHookConfig()
 
 	// Title tee: agy's only token-usage surface (same payload as the
 	// statusline script). Run this BEFORE the idempotency early-return: the
@@ -72,7 +58,7 @@ func (a *AntigravityAgent) InstallHooks(ctx context.Context, localDev bool, forc
 	// must still repair it — otherwise the doctor's "re-run setup" hint is a
 	// no-op. InstallTitleTee is itself idempotent. Best-effort: a failure to
 	// claim the global slot must not fail repo-level hook setup.
-	if err := InstallTitleTee(localDev); err != nil {
+	if err := InstallTitleTee(); err != nil {
 		logging.Warn(ctx, "failed to install antigravity title tee",
 			"error", err.Error())
 	}
@@ -138,7 +124,7 @@ func (a *AntigravityAgent) UninstallHooks(ctx context.Context) error {
 }
 
 // AreHooksInstalled checks if Entire hooks are installed.
-func (a *AntigravityAgent) AreHooksInstalled(ctx context.Context) bool {
+func (a *AntigravityAgent) AreHooksInstalled(ctx context.Context) (bool, error) {
 	repoRoot, err := paths.WorktreeRoot(ctx)
 	if err != nil {
 		repoRoot = "." // Fallback to CWD if not in a git repo
@@ -146,8 +132,11 @@ func (a *AntigravityAgent) AreHooksInstalled(ctx context.Context) bool {
 
 	hooksPath := filepath.Join(repoRoot, ".agents", AgentsHooksFileName)
 	data, err := os.ReadFile(hooksPath) //nolint:gosec // path is constructed from repo root + fixed path
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
 	if err != nil {
-		return false
+		return false, fmt.Errorf("read %s: %w", hooksPath, err)
 	}
 
 	// Parse per-entry: foreign hook entries are free-form user content and
@@ -156,15 +145,15 @@ func (a *AntigravityAgent) AreHooksInstalled(ctx context.Context) bool {
 	// even though our entry is fine. Only the "entire" entry must conform.
 	var raw map[string]json.RawMessage
 	if err := json.Unmarshal(data, &raw); err != nil {
-		return false
+		return false, fmt.Errorf("parse hook config: %w", err)
 	}
 	entireRaw, ok := raw["entire"]
 	if !ok {
-		return false
+		return false, nil
 	}
 	var cfg HookConfig
 	if err := json.Unmarshal(entireRaw, &cfg); err != nil {
-		return false
+		return false, fmt.Errorf("parse entire hook entry: %w", err)
 	}
 
 	// Check at least one of our hook commands is present
@@ -172,7 +161,7 @@ func (a *AntigravityAgent) AreHooksInstalled(ctx context.Context) bool {
 		hasEntireHookInToolHandlers(cfg.PostToolUse) ||
 		hasEntireHookInSimpleHandlers(cfg.PreInvocation) ||
 		hasEntireHookInSimpleHandlers(cfg.PostInvocation) ||
-		hasEntireHookInSimpleHandlers(cfg.Stop)
+		hasEntireHookInSimpleHandlers(cfg.Stop), nil
 }
 
 // stopHookTimeoutSeconds is the explicit timeout installed on the Stop
@@ -182,13 +171,10 @@ func (a *AntigravityAgent) AreHooksInstalled(ctx context.Context) bool {
 const stopHookTimeoutSeconds = 300
 
 // buildEntireHookConfig constructs the HookConfig for the "entire" entry.
-func buildEntireHookConfig(cmdPrefix string, localDev bool) HookConfig {
+func buildEntireHookConfig() HookConfig {
+	const cmdPrefix = "entire hooks antigravity "
 	makeCmd := func(verb string) string {
-		cmd := cmdPrefix + verb
-		if !localDev {
-			cmd = agent.WrapProductionSilentHookCommand(cmd)
-		}
-		return cmd
+		return agent.WrapProductionSilentHookCommand(cmdPrefix + verb)
 	}
 
 	// PostToolUse and PostInvocation are deliberately NOT installed: neither
@@ -239,7 +225,7 @@ func writeJSONMapFile(rawFile map[string]json.RawMessage, path, what string) err
 func hasEntireHookInToolHandlers(handlers []ToolHandler) bool {
 	for _, th := range handlers {
 		for _, hc := range th.Hooks {
-			if agent.IsManagedHookCommand(hc.Command, entireHookPrefixes) {
+			if agent.IsManagedHookCommand(hc.Command) {
 				return true
 			}
 		}
@@ -250,7 +236,7 @@ func hasEntireHookInToolHandlers(handlers []ToolHandler) bool {
 // hasEntireHookInSimpleHandlers checks if any SimpleHandler entry is an Entire hook.
 func hasEntireHookInSimpleHandlers(handlers []SimpleHandler) bool {
 	for _, sh := range handlers {
-		if agent.IsManagedHookCommand(sh.Command, entireHookPrefixes) {
+		if agent.IsManagedHookCommand(sh.Command) {
 			return true
 		}
 	}

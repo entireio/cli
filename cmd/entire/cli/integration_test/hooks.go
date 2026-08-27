@@ -4,12 +4,14 @@ package integration
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 
+	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 )
@@ -36,12 +38,6 @@ func NewHookRunner(repoDir, claudeProjectDir string, t interface {
 		ClaudeProjectDir: claudeProjectDir,
 		T:                t,
 	}
-}
-
-// HookResponse represents the JSON response from Claude Code hooks.
-type HookResponse struct {
-	Continue   bool   `json:"continue"`
-	StopReason string `json:"stopReason,omitempty"`
 }
 
 // SimulateUserPromptSubmit simulates the UserPromptSubmit hook.
@@ -169,6 +165,10 @@ type PostTaskInput struct {
 	TranscriptPath string
 	ToolUseID      string
 	AgentID        string
+	// RunInBackground, when true, sets tool_input.run_in_background so the
+	// hook is parsed as a background subagent launch stub (isBackgroundLaunch)
+	// instead of a foreground completion.
+	RunInBackground bool
 }
 
 // SimulatePostTask simulates the PostToolUse[Task] hook.
@@ -179,13 +179,48 @@ func (r *HookRunner) SimulatePostTask(input PostTaskInput) error {
 		"session_id":      input.SessionID,
 		"transcript_path": input.TranscriptPath,
 		"tool_use_id":     input.ToolUseID,
-		"tool_input":      map[string]string{},
+		"tool_input": map[string]interface{}{
+			"run_in_background": input.RunInBackground,
+		},
 		"tool_response": map[string]string{
 			"agentId": input.AgentID,
 		},
 	}
 
 	return r.runHookWithInput("post-task", hookInput)
+}
+
+// SubagentStopInput contains the input for the SubagentStop hook.
+type SubagentStopInput struct {
+	SessionID           string // Parent session ID.
+	TranscriptPath      string // Parent session's transcript path.
+	AgentID             string
+	AgentTranscriptPath string // Path to the subagent's own transcript.
+	ToolUseID           string // The Task tool_use_id that launched this subagent.
+}
+
+// SimulateSubagentStop simulates Claude Code's SubagentStop hook: the true
+// completion signal for a subagent, including background subagents that
+// finish long after the launch-time PostToolUse (post-task) stub fired.
+func (r *HookRunner) SimulateSubagentStop(input SubagentStopInput) error {
+	r.T.Helper()
+
+	hookInput := map[string]interface{}{
+		"session_id":            input.SessionID,
+		"transcript_path":       input.TranscriptPath,
+		"agent_id":              input.AgentID,
+		"agent_transcript_path": input.AgentTranscriptPath,
+		"tool_use_id":           input.ToolUseID,
+	}
+
+	return r.runHookWithInput("subagent-stop", hookInput)
+}
+
+// SimulateSubagentStop is a convenience method on TestEnv.
+func (env *TestEnv) SimulateSubagentStop(input SubagentStopInput) error {
+	env.T.Helper()
+	runner := NewHookRunner(env.RepoDir, env.ClaudeProjectDir, env.T)
+	return runner.SimulateSubagentStop(input)
 }
 
 func (r *HookRunner) runHookWithInput(flag string, input interface{}) error {
@@ -209,7 +244,7 @@ func (r *HookRunner) runHookInRepoDir(hookName string, inputJSON []byte) error {
 func (r *HookRunner) runHookInRepoDirWithExtraEnv(hookName string, inputJSON []byte, extraEnv []string) error {
 	// Run using the shared test binary
 	// Command structure: entire hooks claude-code <hook-name>
-	cmd := exec.Command(getTestBinary(), "hooks", "claude-code", hookName)
+	cmd := exec.CommandContext(context.Background(), getTestBinary(), "hooks", agentClaudeCode, hookName)
 	cmd.Dir = r.RepoDir
 	cmd.Stdin = bytes.NewReader(inputJSON)
 	cmd.Env = append(testutil.GitIsolatedEnv(),
@@ -296,6 +331,54 @@ func (s *Session) CreateTranscript(prompt string, changes []FileChange) string {
 	}
 
 	return s.TranscriptPath
+}
+
+// CreateSubagentTranscript writes a transcript for a subagent of this session,
+// where current agent versions store it: paths.SubagentsDir/agent-<agentID>.jsonl.
+// Returns the path.
+//
+// A subagent's Write/Edit tool uses appear only in its own transcript, never in the
+// main one, so tests that exercise subagent file extraction or task-checkpoint
+// storage need this rather than CreateTranscript.
+func (s *Session) CreateSubagentTranscript(agentID string, changes []FileChange) string {
+	s.env.T.Helper()
+
+	dir := paths.SubagentsDir(filepath.Dir(s.TranscriptPath), s.ID)
+	if err := os.MkdirAll(dir, 0o750); err != nil {
+		s.env.T.Fatalf("failed to create subagents dir: %v", err)
+	}
+	path := filepath.Join(dir, paths.AgentTranscriptFileName(agentID))
+	s.writeSubagentTranscriptTo(path, changes)
+	return path
+}
+
+// CreateLegacySubagentTranscript writes a subagent transcript in the pre-nesting
+// layout — agent-<agentID>.jsonl as a sibling of the main transcript — for tests
+// that must keep older sessions resolving.
+func (s *Session) CreateLegacySubagentTranscript(agentID string, changes []FileChange) string {
+	s.env.T.Helper()
+
+	path := filepath.Join(filepath.Dir(s.TranscriptPath), paths.AgentTranscriptFileName(agentID))
+	s.writeSubagentTranscriptTo(path, changes)
+	return path
+}
+
+// writeSubagentTranscriptTo builds a minimal subagent transcript (its own builder,
+// so it never pollutes the main session transcript) and writes it to path.
+func (s *Session) writeSubagentTranscriptTo(path string, changes []FileChange) {
+	s.env.T.Helper()
+
+	builder := NewTranscriptBuilder()
+	builder.AddUserMessage("subagent task")
+	for _, change := range changes {
+		toolID := builder.AddToolUse("mcp__acp__Write", change.Path, change.Content)
+		builder.AddToolResult(toolID)
+	}
+	builder.AddAssistantMessage("Done!")
+
+	if err := builder.WriteToFile(path); err != nil {
+		s.env.T.Fatalf("failed to write subagent transcript %s: %v", path, err)
+	}
 }
 
 // SimulateUserPromptSubmit is a convenience method on TestEnv.
@@ -427,15 +510,14 @@ type HookOutput struct {
 }
 
 // runAgentHookWithOutput runs a hook for the given agent and returns stdout/stderr separately.
-func (r *HookRunner) runAgentHookWithOutput(agentName, hookName string, inputJSON []byte, extraEnv ...string) HookOutput {
-	cmd := exec.Command(getTestBinary(), "hooks", agentName, hookName)
+func (r *HookRunner) runAgentHookWithOutput(agentName, hookName string, inputJSON []byte) HookOutput {
+	cmd := exec.CommandContext(context.Background(), getTestBinary(), "hooks", agentName, hookName)
 	cmd.Dir = r.RepoDir
 	cmd.Stdin = bytes.NewReader(inputJSON)
 	cmd.Env = append(testutil.GitIsolatedEnv(),
 		"ENTIRE_TEST_CLAUDE_PROJECT_DIR="+r.ClaudeProjectDir,
 		"GOCACHE=/tmp/go-build",
 	)
-	cmd.Env = append(cmd.Env, extraEnv...)
 
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
@@ -452,7 +534,7 @@ func (r *HookRunner) runAgentHookWithOutput(agentName, hookName string, inputJSO
 // runShellHookCommandWithOutput runs an installed hook shell command exactly as written
 // in the hook file and returns stdout/stderr separately.
 func (r *HookRunner) runShellHookCommandWithOutput(command string, inputJSON []byte, extraEnv ...string) HookOutput {
-	cmd := exec.Command("/bin/sh", "-c", command)
+	cmd := exec.CommandContext(context.Background(), "/bin/sh", "-c", command)
 	cmd.Dir = r.RepoDir
 	cmd.Stdin = bytes.NewReader(inputJSON)
 	cmd.Env = append(testutil.GitIsolatedEnv(),
@@ -475,7 +557,7 @@ func (r *HookRunner) runShellHookCommandWithOutput(command string, inputJSON []b
 
 // runHookWithOutput runs a hook and returns both stdout and stderr separately.
 func (r *HookRunner) runHookWithOutput(hookName string, inputJSON []byte) HookOutput {
-	return r.runAgentHookWithOutput("claude-code", hookName, inputJSON)
+	return r.runAgentHookWithOutput(agentClaudeCode, hookName, inputJSON)
 }
 
 // SimulateSessionStartWithOutput simulates the SessionStart hook and returns the output.
@@ -503,6 +585,11 @@ func (env *TestEnv) SimulateSessionStartWithOutput(sessionID string) HookOutput 
 }
 
 // GetSessionState reads and returns the session state for the given session ID.
+// A missing state file is a normal outcome, not an error: sessions get cleaned
+// up (e.g. ENDED with an empty LastCheckpointID), and callers check for a nil
+// state to detect it.
+//
+//nolint:nilnil // (nil, nil) means "no state file", which callers rely on
 func (env *TestEnv) GetSessionState(sessionID string) (*strategy.SessionState, error) {
 	env.T.Helper()
 
@@ -571,7 +658,7 @@ func NewCodexHookRunner(repoDir string, t interface {
 // runCodexHook runs a Codex hook subcommand with the given JSON stdin.
 func (r *CodexHookRunner) runCodexHook(hookName string, inputJSON []byte) error {
 	r.T.Helper()
-	cmd := exec.Command(getTestBinary(), "hooks", "codex", hookName)
+	cmd := exec.CommandContext(context.Background(), getTestBinary(), "hooks", "codex", hookName)
 	cmd.Dir = r.RepoDir
 	cmd.Stdin = bytes.NewReader(inputJSON)
 	cmd.Env = testutil.GitIsolatedEnv()
@@ -613,24 +700,6 @@ func (r *CodexHookRunner) SimulateCodexPostToolUseApplyPatch(sessionID, cwd, pat
 	return r.runCodexHook("post-tool-use", inputJSON)
 }
 
-// GeminiHookRunner executes Gemini CLI hooks in the test environment.
-type GeminiHookRunner struct {
-	RepoDir          string
-	GeminiProjectDir string
-	T                interface {
-		Helper()
-		Fatalf(format string, args ...interface{})
-		Logf(format string, args ...interface{})
-	}
-}
-
-// GeminiSession represents a simulated Gemini CLI session.
-type GeminiSession struct {
-	ID             string // Raw model session ID (e.g., "gemini-session-1")
-	TranscriptPath string
-	env            *TestEnv
-}
-
 // --- Factory AI Droid Hook Runner ---
 
 // FactoryDroidHookRunner executes Factory AI Droid hooks in the test environment.
@@ -668,7 +737,7 @@ func (r *FactoryDroidHookRunner) runDroidHookWithInput(hookName string, input in
 }
 
 func (r *FactoryDroidHookRunner) runDroidHookInRepoDir(hookName string, inputJSON []byte) error {
-	cmd := exec.Command(getTestBinary(), "hooks", "factoryai-droid", hookName)
+	cmd := exec.CommandContext(context.Background(), getTestBinary(), "hooks", "factoryai-droid", hookName)
 	cmd.Dir = r.RepoDir
 	cmd.Stdin = bytes.NewReader(inputJSON)
 	cmd.Env = os.Environ()
@@ -733,7 +802,7 @@ func (env *TestEnv) NewFactoryDroidSession() *FactoryDroidSession {
 // CreateDroidTranscript creates a Droid-envelope JSONL transcript file.
 // Droid wraps messages as {"type":"message","id":"...","message":{"role":"...","content":[...]}},
 // unlike Claude Code which uses {"type":"assistant","uuid":"...","message":{"content":[...]}}.
-func (s *FactoryDroidSession) CreateDroidTranscript(prompt string, changes []FileChange) string {
+func (s *FactoryDroidSession) CreateDroidTranscript(prompt string, changes []FileChange) {
 	var lines []map[string]interface{}
 
 	// User message with prompt
@@ -817,8 +886,39 @@ func (s *FactoryDroidSession) CreateDroidTranscript(prompt string, changes []Fil
 			s.env.T.Fatalf("failed to encode transcript line: %v", err)
 		}
 	}
+}
 
-	return s.TranscriptPath
+// MarkAsWorkerSession prepends the session_start entry Droid writes at the head
+// of a Worker transcript, naming the session and tool use that spawned it.
+// Droid dispatches Workers as detached sessions, so this line is what ties the
+// Worker's work back to its parent turn.
+//
+// Call after CreateDroidTranscript — it rewrites the file in place.
+func (s *FactoryDroidSession) MarkAsWorkerSession(parentSessionID, toolUseID, sessionTitle string) {
+	s.env.T.Helper()
+
+	existing, err := os.ReadFile(s.TranscriptPath)
+	if err != nil {
+		s.env.T.Fatalf("failed to read transcript to mark as worker: %v", err)
+	}
+
+	sessionStart, err := json.Marshal(map[string]interface{}{
+		"type":             "session_start",
+		"id":               s.ID,
+		"title":            "# Task Tool Invocation Subagent type: worker",
+		"sessionTitle":     sessionTitle,
+		"callingSessionId": parentSessionID,
+		"callingToolUseId": toolUseID,
+		"version":          2,
+	})
+	if err != nil {
+		s.env.T.Fatalf("failed to encode session_start: %v", err)
+	}
+
+	updated := append(append(sessionStart, '\n'), existing...)
+	if err := os.WriteFile(s.TranscriptPath, updated, 0o600); err != nil {
+		s.env.T.Fatalf("failed to write worker transcript: %v", err)
+	}
 }
 
 // SimulateFactoryDroidUserPromptSubmit is a convenience method on TestEnv.
@@ -874,7 +974,7 @@ func (r *OpenCodeHookRunner) runOpenCodeHookWithInput(hookName string, input int
 
 func (r *OpenCodeHookRunner) runOpenCodeHookInRepoDir(hookName string, inputJSON []byte) error {
 	// Command structure: entire hooks opencode <hook-name>
-	cmd := exec.Command(getTestBinary(), "hooks", "opencode", hookName)
+	cmd := exec.CommandContext(context.Background(), getTestBinary(), "hooks", "opencode", hookName)
 	cmd.Dir = r.RepoDir
 	cmd.Stdin = bytes.NewReader(inputJSON)
 	cmd.Env = append(testutil.GitIsolatedEnv(),

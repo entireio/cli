@@ -1,9 +1,9 @@
 // Pre-push OPF rewrite for entire/checkpoints/v1.
 //
 // This is the ONLY production code path that runs the OPF-augmented
-// redaction entry points. Post-commit condensation stays on 7-layer
-// for predictable latency; OPF runs here, once per push, after the
-// user opted in via settings.
+// redaction entry points. Post-commit condensation stays on the
+// regex-only pipeline for predictable latency; OPF runs here, once per
+// push, after the user opted in via settings.
 package strategy
 
 import (
@@ -51,15 +51,17 @@ func (e *V1DivergedError) Error() string {
 		e.Local.String()[:7], e.Remote.String()[:7], e.MergeBase.String()[:7])
 }
 
-// BootstrapTooLargeError: first push to a remote with no v1 yet, but
-// more unpushed commits than the safety cap. OPF inference is ~30s per
-// commit, so unbounded bootstraps could take hours.
+// BootstrapTooLargeError: more un-OPF'd commits to rewrite than the
+// safety cap — a first push to a remote with no v1 yet, or a checkpoint
+// ref whose un-trailered ancestry runs deep because OPF was enabled
+// late. OPF inference is ~30s per commit, so unbounded bootstraps could
+// take hours.
 type BootstrapTooLargeError struct {
 	Count, Limit int
 }
 
 func (e *BootstrapTooLargeError) Error() string {
-	return fmt.Sprintf("OPF bootstrap would rewrite %d entire/checkpoints/v1 commits "+
+	return fmt.Sprintf("OPF bootstrap would rewrite %d checkpoint commits "+
 		"(limit %d). Set ENTIRE_OPF_BOOTSTRAP_LIMIT=<N> or =unlimited to override, "+
 		"or push without OPF (ENTIRE_OPF=no git push) to bring the remote into sync first",
 		e.Count, e.Limit)
@@ -80,20 +82,58 @@ func (e *V1RefMovedError) Error() string {
 }
 
 // OPFRuntimeFailedError: the OPF circuit breaker tripped mid-rewrite.
-// Some blobs were silently downgraded to 7-layer; tagging those commits
-// as Entire-OPF-Applied would be a privacy regression (future pushes
-// would skip them while their content is 7-layer-only). Abort before
-// CAS so the user fixes their OPF install and retries.
+// Some blobs were silently downgraded to regex-only; tagging those
+// commits as Entire-OPF-Applied would be a privacy regression (future
+// pushes would skip them while their content is regex-only). Abort
+// before CAS so the user fixes their OPF install and retries.
+//
+// Cause carries the underlying batch error when there is one (the
+// breaker-tripped-at-start construction has none) so the real failure
+// survives into the pre-push abort message and errors.Is/As chains.
 type OPFRuntimeFailedError struct {
 	OPFCommand string
+	Cause      error
 }
 
 func (e *OPFRuntimeFailedError) Error() string {
-	return fmt.Sprintf("OPF runtime failed during pre-push rewrite (command=%q); "+
-		"aborting push so 7-layer content isn't tagged as 8-layer-applied. "+
+	msg := fmt.Sprintf("OPF runtime failed during pre-push rewrite (command=%q); "+
+		"aborting push so regex-only content isn't tagged as OPF-applied. "+
 		"Run `%s --help` to verify your OPF install, then retry. Or set "+
 		"ENTIRE_OPF=no on the push to skip OPF for this push only.",
 		e.OPFCommand, e.OPFCommand)
+	if e.Cause != nil {
+		msg += fmt.Sprintf(" (cause: %v)", e.Cause)
+	}
+	return msg
+}
+
+func (e *OPFRuntimeFailedError) Unwrap() error {
+	return e.Cause
+}
+
+// OPFNoCategoriesError: OPF is enabled but the effective category set
+// is empty (categories omitted, {}, or all-false), so the model scan
+// cannot run. Proceeding would stamp Entire-OPF-Applied on commits OPF
+// never saw, and later rewrites would skip them permanently — even
+// after the user fixes the config. Abort the push with remediation
+// instead. Two gates enforce this: the decision gate in prePush runs
+// whenever OPF is enabled, with no knowledge of whether anything is
+// unpushed, so a misconfigured repo aborts every push — including one
+// with nothing to rewrite. The rewrite-level gate in
+// RewriteUnpushedV1WithOPF sits after the no-work early returns and
+// fires only when commits are unpushed; it deliberately aborts even a
+// re-parent-only push (every unpushed commit already tagged) rather
+// than poking a no-new-stamping hole through the invariant.
+type OPFNoCategoriesError struct{}
+
+func (e *OPFNoCategoriesError) Error() string {
+	return "OpenAI Privacy Filter is enabled but no detection category is enabled, " +
+		"so the model scan cannot run; aborting push so unscanned content isn't " +
+		"tagged as OPF-applied. Enable at least one category (e.g. " +
+		`"private_person": true) under redaction.openai_privacy_filter.categories ` +
+		"in .entire/settings.json (or .entire/settings.local.json), set " +
+		"enabled: false to push regex-only content, or set ENTIRE_OPF=no on the " +
+		"push to skip OPF for this push only."
 }
 
 const (
@@ -213,8 +253,10 @@ const rawByteCapMultiplier = 100
 //
 // Caller checks redact.OPFEnabled() and skips this when OPF is off.
 // Returns one of {V1DivergedError, BootstrapTooLargeError,
-// V1RefMovedError, OPFRuntimeFailedError} for privacy-critical
-// failures — the pre-push hook propagates these so git push aborts.
+// V1RefMovedError, OPFRuntimeFailedError, OPFNoCategoriesError,
+// OPFBatchTooLargeError, OPFRawBytesTooLargeError} for
+// privacy-critical failures — the pre-push hook propagates these so
+// git push aborts.
 func RewriteUnpushedV1WithOPF(ctx context.Context, repo *git.Repository, target string) (plumbing.Hash, error) {
 	localTip, err := readV1Tip(repo, plumbing.NewBranchReferenceName(paths.MetadataBranchName))
 	if err != nil {
@@ -251,11 +293,21 @@ func RewriteUnpushedV1WithOPF(ctx context.Context, repo *git.Repository, target 
 		}
 	}
 
+	// Fail-closed defense: enabled-with-no-categories means the model
+	// scan can't run at all. The decision resolution in prePush already
+	// rejects this state before any prompt; this second gate covers
+	// direct callers and sits before the breaker check so the user gets
+	// the config-specific remediation rather than OPFRuntimeFailedError's
+	// "verify your OPF install".
+	if redact.OPFMisconfiguredNoCategories() {
+		return plumbing.ZeroHash, &OPFNoCategoriesError{}
+	}
+
 	// Fail-closed defense: if OPF is already broken at the start of
 	// this push (an earlier process step tripped the breaker), abort
 	// before tagging any commits as OPF-applied. Without this, the
 	// per-blob fallback inside the no-OPF cases of BatchBytesWithPrivacyFilter
-	// could let 7-layer content slip out with the trailer attached.
+	// could let regex-only content slip out with the trailer attached.
 	if redact.OPFBreakerTripped() {
 		return plumbing.ZeroHash, &OPFRuntimeFailedError{OPFCommand: redact.OPFCommand()}
 	}
@@ -293,7 +345,7 @@ func RewriteUnpushedV1WithOPF(ctx context.Context, repo *git.Repository, target 
 			}
 			pc.startIdx = len(globalBlobs)
 			// Whole-tree redaction: each v1 commit tree is cumulative, so the
-			// newest commit can still carry older shards that were 7-layer-only
+			// newest commit can still carry older shards that were regex-only
 			// before this rewrite. Redacting the whole tree for every unapplied
 			// commit keeps the final rewritten tip from reintroducing an
 			// un-OPF-redacted older shard. collect and apply walk the tree the
@@ -323,7 +375,13 @@ func RewriteUnpushedV1WithOPF(ctx context.Context, repo *git.Repository, target 
 		}
 		globalRedacted, err = redact.BatchBytesWithPrivacyFilter(ctx, globalBlobs)
 		if err != nil {
-			return plumbing.ZeroHash, &OPFRuntimeFailedError{OPFCommand: redact.OPFCommand()}
+			// Converge with the up-front gate: the misconfiguration
+			// sentinel must surface config remediation, not "verify
+			// your OPF install".
+			if errors.Is(err, redact.ErrOPFNoEnabledCategories) {
+				return plumbing.ZeroHash, &OPFNoCategoriesError{}
+			}
+			return plumbing.ZeroHash, &OPFRuntimeFailedError{OPFCommand: redact.OPFCommand(), Cause: err}
 		}
 	}
 
@@ -339,7 +397,7 @@ func RewriteUnpushedV1WithOPF(ctx context.Context, repo *git.Repository, target 
 				redactedByPath[path] = globalRedacted[pc.startIdx+i]
 			}
 		}
-		newHash, err := rebuildV1Commit(ctx, repo, pc.commit, parent, redactedByPath)
+		newHash, err := rebuildCheckpointCommit(ctx, repo, pc.commit, parent, redactedByPath)
 		if err != nil {
 			return plumbing.ZeroHash, fmt.Errorf("rebuild commit %s: %w", pc.commit.Hash.String()[:7], err)
 		}
@@ -388,7 +446,7 @@ func resolveRemoteV1Tip(ctx context.Context, repo *git.Repository, target string
 	if wt, wtErr := repo.Worktree(); wtErr == nil {
 		worktreeRoot = wt.Filesystem().Root()
 	}
-	if err := fetchURLIntoTmpRef(ctx, worktreeRoot, target, srcRef, opfRewriteFetchTmpRef, "v1 for OPF rewrite", true); err != nil {
+	if err := fetchURLIntoTmpRef(ctx, worktreeRoot, target, srcRef, opfRewriteFetchTmpRef, "v1 for OPF rewrite", true, checkpointRemoteFetchTimeout); err != nil {
 		if !remote.IsURL(target) {
 			logging.Warn(ctx, "OPF rewrite: failed to fetch remote v1; using local remote-tracking ref",
 				slog.String("remote", target),
@@ -476,7 +534,9 @@ func listUnpushedV1Commits(repo *git.Repository, localTip, remoteTip plumbing.Ha
 	return unpushed, nil
 }
 
-// rebuildV1Commit re-parents the commit onto parent. Already-applied
+// rebuildCheckpointCommit re-parents the commit onto parent (backend-agnostic:
+// the v1 chain passes the rewritten predecessor, a standalone checkpoint ref
+// passes the commit's own original parent). Already-applied
 // commits keep their tree (idempotent); unapplied commits get a tree
 // rebuilt from redactedByPath (precomputed by the orchestrator's single
 // OPF batch call) plus an Entire-OPF-Applied: true trailer.
@@ -487,10 +547,10 @@ func listUnpushedV1Commits(repo *git.Repository, localTip, remoteTip plumbing.Ha
 //
 // Correctness note: each v1 commit tree is cumulative. During a multi-commit
 // rewrite, the newest original commit can still contain older shards that were
-// 7-layer-only before this rewrite. The collect/apply walkers redact the whole
+// regex-only before this rewrite. The collect/apply walkers redact the whole
 // tree for every unapplied commit so the final rewritten tip cannot
 // reintroduce an older un-OPF-redacted shard.
-func rebuildV1Commit(ctx context.Context, repo *git.Repository, oldCommit *object.Commit, parent plumbing.Hash, redactedByPath map[string][]byte) (plumbing.Hash, error) {
+func rebuildCheckpointCommit(ctx context.Context, repo *git.Repository, oldCommit *object.Commit, parent plumbing.Hash, redactedByPath map[string][]byte) (plumbing.Hash, error) {
 	newTree := oldCommit.TreeHash
 	if !trailers.HasOPFApplied(oldCommit.Message) {
 		tree, err := repo.TreeObject(oldCommit.TreeHash)
@@ -545,10 +605,11 @@ func rebuildV1Commit(ctx context.Context, repo *git.Repository, oldCommit *objec
 // to "redact everything except the deferred file" means new types are
 // covered by default; opting out requires an explicit code change.
 //
-// RedactBlobBytes itself handles arbitrary content: .jsonl/.json go
-// through JSON-aware leaf redaction; anything else gets byte
-// redaction over the raw content. The OPF has-space gate excludes
-// binary blobs from paying inference cost.
+// The batch redactor (redact.BatchBytesWithPrivacyFilter, via
+// NamedBlob) handles arbitrary content: .jsonl/.json go through
+// JSON-aware leaf redaction; anything else gets byte redaction over
+// the raw content. The OPF has-space gate excludes binary blobs from
+// paying inference cost.
 func isRedactableBlobName(name string) bool {
 	return name != paths.ContentHashFileName
 }

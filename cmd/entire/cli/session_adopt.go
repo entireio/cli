@@ -478,8 +478,17 @@ func buildAdoptedSessionState(ctx context.Context, source *session.State) (*sess
 	adopted.TurnID = ""
 	adopted.TurnCheckpointIDs = nil
 	adopted.LastCheckpointID = id.EmptyCheckpointID
+	adopted.ClearCondensationAttempt()
 	adopted.LastCheckpointCommitHash = ""
 	adopted.CheckpointTokenUsage = nil
+	// Re-baseline the subagent cumulative for the fresh target-local window. The
+	// cloned TokenUsage carries the SOURCE session's full cumulative subagent
+	// total; without re-baselining here, the first post-adopt checkpoint would
+	// subtract the source's (stale or nil) baseline and over-report — potentially
+	// the source session's entire subagent usage. Mirrors resetCheckpointWindow's
+	// baseline capture so the first adopted checkpoint only counts target-side
+	// subagent growth, consistent with the PromptWindowBase reset below.
+	adopted.RebaselineSubagentTokens()
 
 	adopted.FullyCondensed = false
 	adopted.UntrackedFilesAtStart = untrackedFiles
@@ -584,7 +593,9 @@ func canonicalAdoptPath(path string) string {
 }
 
 func currentFilesTouched(ctx context.Context) ([]string, error) {
-	changes, err := DetectFileChanges(ctx, nil)
+	// Unbounded walk: adopt is a user-attended command, so a slow-but-healthy
+	// repo should finish rather than fail at the hook-path status budget.
+	changes, err := detectFileChangesUnbounded(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("detect current file changes: %w", err)
 	}

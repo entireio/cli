@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/api"
+	"github.com/entireio/cli/cmd/entire/cli/versioninfo"
 	"github.com/entireio/cli/internal/entireclient/clusterdiscovery"
 	"github.com/entireio/cli/internal/entireclient/contexts"
 	"github.com/entireio/cli/internal/entireclient/userdirs"
@@ -43,15 +44,21 @@ func SetResolveContextForAPIForTest(t interface{ Helper() }, fn resolveContextFu
 // ResolveDataAPIToken returns a bearer for the data API at dataBaseURL.
 //
 // It dials the API's /.well-known/entire-api.json to learn which login
-// server(s) the API trusts and which audience to exchange for, picks the
-// matching local auth context (active-wins-if-eligible → sole → explicit
-// choice), and exchanges that context's login JWT for the advertised audience
-// at that context's core. This is what makes
+// server(s) the API trusts and which audience to exchange for, requires the
+// ACTIVE auth context to be issued by one of those servers, and exchanges that
+// context's login JWT for the advertised audience at that context's core.
 //
+// Pointing the CLI at another environment therefore takes two steps, because
+// the acting identity is never inferred from the target host:
+//
+//	entire auth use staging
 //	ENTIRE_API_BASE_URL=https://partial.to entire activity
 //
-// authenticate as the partial.to login even while the active context is a
-// prod entire.io login — with no per-command override needed.
+// An earlier revision skipped the first line by falling back to whichever saved
+// login the host happened to trust. That made an env var silently change which
+// account a command ran as, which is exactly the ambiguity the single active
+// context exists to remove; a wrong-context run now fails with a message naming
+// the logins that would work (see clusterdiscovery.requireActiveContext).
 //
 // Discovery is the only path: an API host that doesn't advertise
 // /.well-known/entire-api.json (unreachable / 404 / 503 / malformed) is an
@@ -105,17 +112,12 @@ func (t dataAPIHTTPDiscoveryTransport) RoundTrip(req *http.Request) (*http.Respo
 }
 
 func dataAPIDiscoveryClient(dataOrigin string) *http.Client {
-	client := &http.Client{Timeout: dataAPIDiscoveryTimeout}
+	client := &http.Client{Timeout: dataAPIDiscoveryTimeout, Transport: versioninfo.WrapTransport(nil)}
 	if !shouldUsePlainHTTPDiscovery(dataOrigin) {
 		return client
 	}
 
-	var base http.RoundTripper
-	base = http.DefaultTransport
-	if client.Transport != nil {
-		base = client.Transport
-	}
-	client.Transport = dataAPIHTTPDiscoveryTransport{base: base}
+	client.Transport = dataAPIHTTPDiscoveryTransport{base: client.Transport}
 	return client
 }
 

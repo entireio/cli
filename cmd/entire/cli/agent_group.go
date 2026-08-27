@@ -93,7 +93,6 @@ func runAgentList(ctx context.Context, w io.Writer) error {
 }
 
 func newAgentAddCmd() *cobra.Command {
-	var localDev bool
 	var forceHooks bool
 	var searchSkill bool
 	var agentHelpSkill bool
@@ -115,7 +114,6 @@ Examples:
 				return NewSilentError(errors.New("wrong agent name"))
 			}
 			opts := EnableOptions{
-				LocalDev:       localDev,
 				ForceHooks:     forceHooks,
 				SearchSkill:    searchSkill,
 				AgentHelpSkill: agentHelpSkill,
@@ -125,7 +123,6 @@ Examples:
 		},
 	}
 
-	cmd.Flags().BoolVar(&localDev, "local-dev", false, "Install hooks in local-dev mode")
 	cmd.Flags().BoolVar(&forceHooks, "force", false, "Reinstall hooks even if already present")
 	cmd.Flags().BoolVar(&searchSkill, flagSearchSkill, false, "Install the optional Entire search skill")
 	cmd.Flags().BoolVar(&agentHelpSkill, flagAgentHelpSkill, false, "Install the stable Entire agent-help skill (points agents at `entire agent-help`)")

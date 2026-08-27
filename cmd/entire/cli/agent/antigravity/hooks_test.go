@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 )
 
@@ -15,7 +14,7 @@ func TestInstallHooks_FreshRepo(t *testing.T) {
 	t.Setenv(configDirEnv, t.TempDir())
 
 	a := &AntigravityAgent{}
-	n, err := a.InstallHooks(context.Background(), false, false)
+	n, err := a.InstallHooks(context.Background(), false)
 	if err != nil {
 		t.Fatalf("InstallHooks: %v", err)
 	}
@@ -63,7 +62,7 @@ func TestInstallHooks_Idempotent(t *testing.T) {
 	a := &AntigravityAgent{}
 
 	// First install
-	n, err := a.InstallHooks(context.Background(), false, false)
+	n, err := a.InstallHooks(context.Background(), false)
 	if err != nil {
 		t.Fatalf("first InstallHooks: %v", err)
 	}
@@ -72,7 +71,7 @@ func TestInstallHooks_Idempotent(t *testing.T) {
 	}
 
 	// Second install — idempotent, should return 0
-	n, err = a.InstallHooks(context.Background(), false, false)
+	n, err = a.InstallHooks(context.Background(), false)
 	if err != nil {
 		t.Fatalf("second InstallHooks: %v", err)
 	}
@@ -107,7 +106,7 @@ func TestInstallHooks_PreservesForeignHooks(t *testing.T) {
 	}
 
 	a := &AntigravityAgent{}
-	n, err := a.InstallHooks(context.Background(), false, false)
+	n, err := a.InstallHooks(context.Background(), false)
 	if err != nil {
 		t.Fatalf("InstallHooks: %v", err)
 	}
@@ -143,7 +142,7 @@ func TestUninstallHooks_LeavesForeignHooks(t *testing.T) {
 	a := &AntigravityAgent{}
 
 	// Install entire hooks first
-	if _, err := a.InstallHooks(context.Background(), false, false); err != nil {
+	if _, err := a.InstallHooks(context.Background(), false); err != nil {
 		t.Fatalf("InstallHooks: %v", err)
 	}
 
@@ -196,31 +195,6 @@ func TestUninstallHooks_LeavesForeignHooks(t *testing.T) {
 	}
 }
 
-func TestInstallHooks_LocalDevWritesQuotedSubshell(t *testing.T) {
-	tmpDir := t.TempDir()
-	t.Chdir(tmpDir)
-	t.Setenv(configDirEnv, t.TempDir())
-
-	a := &AntigravityAgent{}
-	if _, err := a.InstallHooks(context.Background(), true, false); err != nil {
-		t.Fatalf("InstallHooks: %v", err)
-	}
-
-	data, err := os.ReadFile(filepath.Join(tmpDir, ".agents", "hooks.json"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	var f HooksFile
-	if err := json.Unmarshal(data, &f); err != nil {
-		t.Fatalf("parse hooks.json: %v", err)
-	}
-	cmd := f["entire"].PreToolUse[0].Hooks[0].Command
-	// The subshell must be quoted so paths with spaces don't break shell word-splitting.
-	if !strings.Contains(cmd, `"$(git rev-parse --show-toplevel)"`) {
-		t.Errorf("localDev command missing quoted subshell: %q", cmd)
-	}
-}
-
 func TestAreHooksInstalled(t *testing.T) {
 	tmpDir := t.TempDir()
 	t.Chdir(tmpDir)
@@ -228,16 +202,16 @@ func TestAreHooksInstalled(t *testing.T) {
 
 	a := &AntigravityAgent{}
 
-	if a.AreHooksInstalled(context.Background()) {
-		t.Error("AreHooksInstalled() = true before install, want false")
+	if installed, err := a.AreHooksInstalled(context.Background()); err != nil || installed {
+		t.Errorf("AreHooksInstalled() = (%v, %v) before install, want (false, nil)", installed, err)
 	}
 
-	if _, err := a.InstallHooks(context.Background(), false, false); err != nil {
+	if _, err := a.InstallHooks(context.Background(), false); err != nil {
 		t.Fatalf("InstallHooks: %v", err)
 	}
 
-	if !a.AreHooksInstalled(context.Background()) {
-		t.Error("AreHooksInstalled() = false after install, want true")
+	if installed, err := a.AreHooksInstalled(context.Background()); err != nil || !installed {
+		t.Errorf("AreHooksInstalled() = (%v, %v) after install, want (true, nil)", installed, err)
 	}
 }
 
@@ -253,7 +227,7 @@ func TestAreHooksInstalled_ToleratesForeignEntryShapes(t *testing.T) {
 	t.Setenv(configDirEnv, t.TempDir())
 
 	a := &AntigravityAgent{}
-	if _, err := a.InstallHooks(context.Background(), false, false); err != nil {
+	if _, err := a.InstallHooks(context.Background(), false); err != nil {
 		t.Fatalf("InstallHooks: %v", err)
 	}
 
@@ -277,8 +251,8 @@ func TestAreHooksInstalled_ToleratesForeignEntryShapes(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if !a.AreHooksInstalled(context.Background()) {
-		t.Error("AreHooksInstalled() = false with a malformed foreign entry present, want true")
+	if installed, err := a.AreHooksInstalled(context.Background()); err != nil || !installed {
+		t.Errorf("AreHooksInstalled() = (%v, %v) with a malformed foreign entry present, want (true, nil)", installed, err)
 	}
 }
 
@@ -292,7 +266,7 @@ func TestInstallHooks_RespectsUserDisabledEntry(t *testing.T) {
 	t.Setenv(configDirEnv, t.TempDir())
 
 	a := &AntigravityAgent{}
-	if _, err := a.InstallHooks(context.Background(), false, false); err != nil {
+	if _, err := a.InstallHooks(context.Background(), false); err != nil {
 		t.Fatalf("InstallHooks: %v", err)
 	}
 
@@ -324,7 +298,7 @@ func TestInstallHooks_RespectsUserDisabledEntry(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	n, err := a.InstallHooks(context.Background(), false, false)
+	n, err := a.InstallHooks(context.Background(), false)
 	if err != nil {
 		t.Fatalf("InstallHooks after disable: %v", err)
 	}
@@ -349,7 +323,7 @@ func TestInstallHooks_RespectsUserDisabledEntry(t *testing.T) {
 	}
 
 	// --force is the explicit override: it may rewrite (and re-arm) the entry.
-	if _, err := a.InstallHooks(context.Background(), true, false); err != nil {
+	if _, err := a.InstallHooks(context.Background(), true); err != nil {
 		t.Fatalf("InstallHooks --force: %v", err)
 	}
 }
@@ -366,7 +340,7 @@ func TestInstallHooks_IdempotentStillRepairsTitleTee(t *testing.T) {
 	t.Setenv(configDirEnv, t.TempDir())
 
 	a := &AntigravityAgent{}
-	if _, err := a.InstallHooks(context.Background(), false, false); err != nil {
+	if _, err := a.InstallHooks(context.Background(), false); err != nil {
 		t.Fatalf("first InstallHooks: %v", err)
 	}
 	if !TitleTeeInstalled() {
@@ -383,7 +357,7 @@ func TestInstallHooks_IdempotentStillRepairsTitleTee(t *testing.T) {
 
 	// Second install hits the repo-hooks idempotency early-return, but must
 	// still re-install the missing global title tee.
-	if _, err := a.InstallHooks(context.Background(), false, false); err != nil {
+	if _, err := a.InstallHooks(context.Background(), false); err != nil {
 		t.Fatalf("second InstallHooks: %v", err)
 	}
 	if !TitleTeeInstalled() {

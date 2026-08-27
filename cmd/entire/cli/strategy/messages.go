@@ -36,6 +36,12 @@ func FormatSubagentEndMessage(agentType, description, toolUseID string) string {
 	return formatSubagentMessage("Completed", agentType, description, toolUseID)
 }
 
+// FormatSubagentRunningMessage is FormatSubagentEndMessage's in-flight
+// counterpart, for pending-list rows whose task record is still live.
+func FormatSubagentRunningMessage(agentType, description, toolUseID string) string {
+	return formatSubagentMessage("Running", agentType, description, toolUseID)
+}
+
 // formatSubagentMessage is a shared helper for start/end messages.
 func formatSubagentMessage(verb, agentType, description, toolUseID string) string {
 	// Both empty - fall back to simple format
@@ -57,25 +63,6 @@ func formatSubagentMessage(verb, agentType, description, toolUseID string) strin
 	}
 	// agentType is empty, description is present
 	return fmt.Sprintf("%s agent: %s (%s)", verb, description, toolUseID)
-}
-
-// FormatIncrementalSubject formats the commit message subject for incremental checkpoints.
-// Delegates to FormatIncrementalMessage.
-//
-// Note: The incrementalType, subagentType, and taskDescription parameters are kept for
-// API compatibility but are not currently used. They may be used in the future for
-// different checkpoint types.
-func FormatIncrementalSubject(
-	incrementalType string, //nolint:unparam // kept for API compatibility
-	subagentType string, //nolint:unparam // kept for API compatibility
-	taskDescription string, //nolint:unparam // kept for API compatibility
-	todoContent string,
-	incrementalSequence int,
-	shortToolUseID string,
-) string {
-	// Currently all incremental checkpoints use the same format
-	_, _, _ = incrementalType, subagentType, taskDescription // Silence unused warnings
-	return FormatIncrementalMessage(todoContent, incrementalSequence, shortToolUseID)
 }
 
 // FormatIncrementalMessage formats a commit message for an incremental checkpoint.
@@ -140,63 +127,4 @@ func CountTodos(todosJSON []byte) int {
 	}
 
 	return len(todos)
-}
-
-// ExtractInProgressTodo extracts the content of the in-progress todo item from tool_input.
-// This is used for commit messages in incremental checkpoints.
-//
-// Priority order:
-//  1. in_progress item (current work)
-//  2. first pending item (next work - fallback)
-//  3. last completed item (final work just finished)
-//  4. first item with unknown status (edge case)
-//  5. empty string (no items)
-//
-// Returns empty string if no suitable item is found or JSON is invalid.
-func ExtractInProgressTodo(todosJSON []byte) string {
-	if len(todosJSON) == 0 {
-		return ""
-	}
-
-	var todos []todoItem
-	if err := json.Unmarshal(todosJSON, &todos); err != nil {
-		return ""
-	}
-
-	if len(todos) == 0 {
-		return ""
-	}
-
-	// Look for in_progress item first (case-sensitive match)
-	for _, todo := range todos {
-		if todo.Status == "in_progress" {
-			return todo.Content
-		}
-	}
-
-	// Fall back to first pending item
-	for _, todo := range todos {
-		if todo.Status == "pending" {
-			return todo.Content
-		}
-	}
-
-	// Fall back to last completed item (represents the work that was just finished)
-	var lastCompleted string
-	for _, todo := range todos {
-		if todo.Status == "completed" {
-			lastCompleted = todo.Content
-		}
-	}
-	if lastCompleted != "" {
-		return lastCompleted
-	}
-
-	// If no in_progress, pending, or completed items, but there are items with
-	// unrecognized status, return first item's content as a fallback (handles edge cases).
-	if todos[0].Content != "" {
-		return todos[0].Content
-	}
-
-	return ""
 }

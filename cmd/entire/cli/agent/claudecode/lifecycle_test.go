@@ -99,6 +99,23 @@ func TestParseHookEvent_TurnStart(t *testing.T) {
 	}
 }
 
+// The VS Code extension prepends an <ide_opened_file> context block to the
+// prompt; it must be stripped so the session/checkpoint title and prompt show
+// only what the user typed.
+func TestParseHookEvent_TurnStart_StripsIDEContextTags(t *testing.T) {
+	t.Parallel()
+
+	ag := &ClaudeCodeAgent{}
+	input := `{"session_id":"s1","transcript_path":"/tmp/t.jsonl","prompt":"<ide_opened_file>The user opened /a/b.md in the IDE.</ide_opened_file>\n\nrewrite these docs as one plan"}`
+
+	event, err := ag.ParseHookEvent(context.Background(), HookNameUserPromptSubmit, strings.NewReader(input))
+	require.NoError(t, err)
+	require.NotNil(t, event)
+	if event.Prompt != "rewrite these docs as one plan" {
+		t.Errorf("IDE context tag not stripped; prompt = %q", event.Prompt)
+	}
+}
+
 func TestParseHookEvent_TurnEnd(t *testing.T) {
 	t.Parallel()
 
@@ -242,6 +259,12 @@ func TestParseHookEvent_SubagentEnd(t *testing.T) {
 	if event.SubagentID != "agent-subagent-001" {
 		t.Errorf("expected subagent_id 'agent-subagent-001', got %q", event.SubagentID)
 	}
+	// PostToolUse fires at the background launch stub, seconds after launch,
+	// not at true completion — Final must stay false so downstream lifecycle
+	// code can key its capture-now-vs-defer decision on this flag alone.
+	if event.Final {
+		t.Error("expected Final to be false for post-task (launch-time) event")
+	}
 }
 
 func TestParseHookEvent_SubagentEnd_NoAgentID(t *testing.T) {
@@ -269,6 +292,72 @@ func TestParseHookEvent_SubagentEnd_NoAgentID(t *testing.T) {
 	if event.SubagentID != "" {
 		t.Errorf("expected empty subagent_id, got %q", event.SubagentID)
 	}
+}
+
+// TestParseHookEvent_SubagentStop covers the true-completion signal for
+// background subagents. Background subagents return a launch stub
+// immediately, so the launch-time post-task (PostToolUse) hook fires seconds
+// after launch, before any work happens — the resulting SubagentEnd event is
+// never captured beyond the stub. SubagentStop fires at real completion, even
+// after the parent's turn ended, and must translate into the same
+// agent.SubagentEnd event, marked Final so lifecycle code can tell the two
+// apart and prefer the payload's own transcript path over resolution.
+func TestParseHookEvent_SubagentStop(t *testing.T) {
+	t.Parallel()
+
+	ag := &ClaudeCodeAgent{}
+	input := `{"session_id":"parent-sess","transcript_path":"/tmp/parent.jsonl","hook_event_name":"SubagentStop","agent_id":"a123","agent_transcript_path":"/tmp/parent/subagents/agent-a123.jsonl","tool_use_id":"toolu_01X","cwd":"/repo"}`
+
+	event, err := ag.ParseHookEvent(context.Background(), HookNameSubagentStop, strings.NewReader(input))
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	require.NotNil(t, event, "expected event, got nil")
+	if event.Type != agent.SubagentEnd {
+		t.Errorf("expected event type %v, got %v", agent.SubagentEnd, event.Type)
+	}
+	if event.SessionID != "parent-sess" {
+		t.Errorf("expected session_id 'parent-sess', got %q", event.SessionID)
+	}
+	if event.SessionRef != "/tmp/parent.jsonl" {
+		t.Errorf("expected session_ref '/tmp/parent.jsonl', got %q", event.SessionRef)
+	}
+	if event.SubagentID != "a123" {
+		t.Errorf("expected subagent_id 'a123', got %q", event.SubagentID)
+	}
+	if event.ToolUseID != "toolu_01X" {
+		t.Errorf("expected tool_use_id 'toolu_01X', got %q", event.ToolUseID)
+	}
+	if event.SubagentTranscriptPath != "/tmp/parent/subagents/agent-a123.jsonl" {
+		t.Errorf("expected subagent_transcript '/tmp/parent/subagents/agent-a123.jsonl', got %q", event.SubagentTranscriptPath)
+	}
+	if !event.Final {
+		t.Error("expected Final to be true for SubagentStop (true-completion) event")
+	}
+
+	// Defensive case: agent_transcript_path is SDK-documented for the Agent
+	// SDK but unverified for Claude Code's settings-file hook payloads, so a
+	// payload missing it must leave SubagentTranscriptPath empty rather than
+	// error, falling back to ResolveAgentTranscriptPath downstream.
+	t.Run("no transcript path", func(t *testing.T) {
+		t.Parallel()
+
+		input := `{"session_id":"parent-sess","transcript_path":"/tmp/parent.jsonl","hook_event_name":"SubagentStop","agent_id":"a123","tool_use_id":"toolu_01X","cwd":"/repo"}`
+
+		event, err := ag.ParseHookEvent(context.Background(), HookNameSubagentStop, strings.NewReader(input))
+
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		require.NotNil(t, event, "expected event, got nil")
+		if event.SubagentTranscriptPath != "" {
+			t.Errorf("expected empty subagent_transcript, got %q", event.SubagentTranscriptPath)
+		}
+		if !event.Final {
+			t.Error("expected Final to be true for SubagentStop event")
+		}
+	})
 }
 
 func TestParseHookEvent_PostTodo_ReturnsNil(t *testing.T) {
@@ -510,23 +599,146 @@ func TestWaitForTranscriptFlush_StaleFile_SkipsWait(t *testing.T) {
 	}
 }
 
-func TestWaitForTranscriptFlush_RecentFile_WaitsForSentinel(t *testing.T) {
+func TestWaitForTranscriptFlush_RecentStableFile_ReturnsFast(t *testing.T) {
 	t.Parallel()
 
-	// Create a transcript file with recent mtime (no sentinel present)
+	// A recent transcript that has stopped growing (the healthy turn-end case:
+	// the assistant finished streaming). Even though the "hooks claude-code stop"
+	// sentinel is never present in the file, the wait must settle on size
+	// stability and return quickly instead of burning the full 3s maxWait.
 	transcriptFile := filepath.Join(t.TempDir(), "transcript.jsonl")
 	if err := os.WriteFile(transcriptFile, []byte(`{"type":"human"}`+"\n"), 0o644); err != nil {
 		t.Fatalf("failed to write transcript: %v", err)
 	}
-	// File was just created, so mtime is now — should NOT skip the wait
 
 	start := time.Now()
 	waitForTranscriptFlush(context.Background(), transcriptFile, time.Now())
 	elapsed := time.Since(start)
 
-	// Should wait close to maxWait (3s) since no sentinel will be found
-	if elapsed < 2*time.Second {
-		t.Errorf("expected to wait ~3s for recent file without sentinel, but only took %v", elapsed)
+	// A stable file settles once its size has held steady for the quiet window
+	// (~500ms) — comfortably under the 3s cap that the old sentinel-only wait
+	// always hit.
+	if elapsed > 1500*time.Millisecond {
+		t.Errorf("expected fast return for a stable recent transcript, but took %v", elapsed)
+	}
+}
+
+func TestWaitForTranscriptFlush_GrowingFile_WaitsUntilSettled(t *testing.T) {
+	t.Parallel()
+
+	// A transcript that is still being written must NOT be treated as settled
+	// while it grows; the wait returns only after the writes stop.
+	transcriptFile := filepath.Join(t.TempDir(), "transcript.jsonl")
+	if err := os.WriteFile(transcriptFile, []byte(`{"type":"human"}`+"\n"), 0o644); err != nil {
+		t.Fatalf("failed to write transcript: %v", err)
+	}
+
+	const growFor = 600 * time.Millisecond
+	stop := make(chan struct{})
+	go func() {
+		f, err := os.OpenFile(transcriptFile, os.O_APPEND|os.O_WRONLY, 0o644)
+		if err != nil {
+			return
+		}
+		defer f.Close()
+		ticker := time.NewTicker(40 * time.Millisecond)
+		defer ticker.Stop()
+		deadline := time.Now().Add(growFor)
+		for {
+			select {
+			case <-stop:
+				return
+			case <-ticker.C:
+				if time.Now().After(deadline) {
+					return
+				}
+				if _, werr := f.WriteString(`{"type":"assistant"}` + "\n"); werr != nil {
+					return
+				}
+			}
+		}
+	}()
+
+	start := time.Now()
+	waitForTranscriptFlush(context.Background(), transcriptFile, time.Now())
+	elapsed := time.Since(start)
+	close(stop)
+
+	// It should keep waiting while the file grows (i.e. not return near-instantly),
+	// but still return once writes stop (bounded by the 3s cap).
+	if elapsed < 300*time.Millisecond {
+		t.Errorf("expected to keep waiting while transcript grew, returned after only %v", elapsed)
+	}
+	if elapsed > 3500*time.Millisecond {
+		t.Errorf("expected to return once settled/within cap, but took %v", elapsed)
+	}
+}
+
+func TestWaitForTranscriptFlush_BriefMidWritePause_NotDeclaredDoneEarly(t *testing.T) {
+	t.Parallel()
+
+	// A writer that stalls briefly mid-write (shorter than the quiet window) and
+	// then resumes must NOT be treated as settled during the lull. With a
+	// too-short stability check the ~300ms pause below would be mistaken for
+	// completion and turn-end would read a truncated transcript.
+	transcriptFile := filepath.Join(t.TempDir(), "transcript.jsonl")
+	if err := os.WriteFile(transcriptFile, []byte(`{"type":"human"}`+"\n"), 0o644); err != nil {
+		t.Fatalf("failed to write transcript: %v", err)
+	}
+
+	const (
+		pauseDur  = 300 * time.Millisecond // stable, but shorter than the 500ms quiet window
+		resumeDur = 200 * time.Millisecond // further writes after the pause
+	)
+
+	lastWrite := make(chan time.Time, 1)
+	go func() {
+		f, err := os.OpenFile(transcriptFile, os.O_APPEND|os.O_WRONLY, 0o644)
+		if err != nil {
+			lastWrite <- time.Now()
+			return
+		}
+		defer f.Close()
+
+		// Hold the file size steady for pauseDur — a brief mid-write stall.
+		time.Sleep(pauseDur)
+
+		// Resume writing; record when the final write lands.
+		ticker := time.NewTicker(40 * time.Millisecond)
+		defer ticker.Stop()
+		deadline := time.Now().Add(resumeDur)
+		last := time.Now()
+		for range ticker.C {
+			if time.Now().After(deadline) {
+				break
+			}
+			if _, werr := f.WriteString(`{"type":"assistant"}` + "\n"); werr != nil {
+				break
+			}
+			last = time.Now()
+		}
+		lastWrite <- last
+	}()
+
+	start := time.Now()
+	waitForTranscriptFlush(context.Background(), transcriptFile, time.Now())
+	returnedAt := time.Now()
+	elapsed := returnedAt.Sub(start)
+
+	final := <-lastWrite
+
+	// The wait must not have returned during the pause: a truncated early return
+	// would land near the old ~100ms stability window, before writing resumed.
+	if !returnedAt.After(final) {
+		t.Errorf("returned at %v before the writer's final write at %v (declared done during mid-write pause)",
+			returnedAt.Sub(start), final.Sub(start))
+	}
+	// Sanity: it keeps waiting past the pause, and still returns within the cap.
+	if elapsed < pauseDur {
+		t.Errorf("expected to keep waiting through the mid-write pause, returned after only %v", elapsed)
+	}
+	if elapsed > 3500*time.Millisecond {
+		t.Errorf("expected to return once settled/within cap, but took %v", elapsed)
 	}
 }
 

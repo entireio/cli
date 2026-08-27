@@ -5,8 +5,11 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/entireio/cli/cmd/entire/cli/checkpoint/remote"
 	"github.com/entireio/cli/cmd/entire/cli/checkpointpolicy"
 	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
+	"github.com/entireio/cli/cmd/entire/cli/paths"
+	"github.com/entireio/cli/cmd/entire/cli/strategy"
 	"github.com/spf13/cobra"
 )
 
@@ -65,7 +68,7 @@ func runCheckpointPolicy(cmd *cobra.Command, opts checkpointPolicyOptions) error
 	}
 	defer repo.Close()
 
-	target, err := checkpointpolicy.ResolveTarget(ctx)
+	readTargets, pushTarget, err := resolveCheckpointPolicyTargets(ctx)
 	if err != nil {
 		return checkpointPolicyError("resolve checkpoint policy remote", err)
 	}
@@ -74,7 +77,11 @@ func runCheckpointPolicy(cmd *cobra.Command, opts checkpointPolicyOptions) error
 	checkpointVersionSet := cmd.Flags().Changed(checkpointVersionFlag)
 	checkpointMinVersionSet := cmd.Flags().Changed(checkpointMinVersionFlag)
 	if hasCheckpointPolicyUpdate(checkpointVersionSet, checkpointMinVersionSet) {
-		state, err = checkpointpolicy.Update(ctx, repo, target, checkpointpolicy.UpdateOptions{
+		if pushTarget == nil {
+			return checkpointPolicyError("resolve checkpoint policy push remote",
+				errors.New("cannot resolve the checkpoint sync remote to push the policy to"))
+		}
+		state, err = checkpointpolicy.Update(ctx, repo, *pushTarget, checkpointpolicy.UpdateOptions{
 			CheckpointVersion:       opts.version,
 			CheckpointVersionSet:    checkpointVersionSet,
 			CheckpointMinVersion:    opts.minVersion,
@@ -84,12 +91,12 @@ func runCheckpointPolicy(cmd *cobra.Command, opts checkpointPolicyOptions) error
 		if err != nil {
 			return checkpointPolicyError("update checkpoint policy", err)
 		}
-		if err := checkpointpolicy.Push(ctx, target); err != nil {
+		if err := checkpointpolicy.Push(ctx, *pushTarget); err != nil {
 			return checkpointPolicyError("push checkpoint policy", err)
 		}
 		state.Source = checkpointpolicy.SourceRemote
 	} else {
-		state, err = checkpointpolicy.Sync(ctx, repo, target)
+		state, err = checkpointpolicy.SyncFrom(ctx, repo, readTargets)
 		if err != nil {
 			return checkpointPolicyError("sync checkpoint policy", err)
 		}
@@ -104,6 +111,54 @@ func runCheckpointPolicy(cmd *cobra.Command, opts checkpointPolicyOptions) error
 
 func hasCheckpointPolicyUpdate(checkpointVersionSet, checkpointMinVersionSet bool) bool {
 	return checkpointVersionSet || checkpointMinVersionSet
+}
+
+// resolveCheckpointPolicyTargets splits the checkpoint policy remotes into the
+// READ candidates (iterated in order: elected sync remote, then the legacy
+// origin tier — the legacy tier is read-only and marked SkipLocalUpdate so its
+// baseline never advances the local policy ref) and the single PUSH target
+// (the elected sync remote only; nil when the election fails or elects
+// nothing). A configured checkpoint_remote is a dedicated store: it is both
+// the sole read target and the push target, unchanged from the historical
+// behavior. The elected remote is resolved explicitly rather than inferred
+// from the read chain's first entry, which can be the fail-open origin.
+func resolveCheckpointPolicyTargets(ctx context.Context) ([]checkpointpolicy.Target, *checkpointpolicy.Target, error) {
+	if remote.Configured(ctx) {
+		target, err := checkpointpolicy.ResolveTarget(ctx)
+		if err != nil {
+			return nil, nil, err
+		}
+		return []checkpointpolicy.Target{target}, &target, nil
+	}
+
+	dir, err := paths.WorktreeRoot(ctx)
+	if err != nil {
+		return nil, nil, fmt.Errorf("resolve worktree root: %w", err)
+	}
+
+	// One resolver call yields both the chain and the election, so the
+	// read-only marking below cannot disagree with the push target.
+	resolution := strategy.CheckpointReadRemotesWithElection(ctx)
+	if len(resolution.Candidates) == 0 {
+		if resolution.ElectionErr != nil {
+			return nil, nil, fmt.Errorf("no checkpoint policy remote available: %w", resolution.ElectionErr)
+		}
+		return nil, nil, errors.New("no git remotes configured to resolve the checkpoint policy from")
+	}
+	readTargets := make([]checkpointpolicy.Target, 0, len(resolution.Candidates))
+	for _, name := range resolution.Candidates {
+		readTargets = append(readTargets, checkpointpolicy.Target{
+			Remote:          name,
+			Dir:             dir,
+			SkipLocalUpdate: name != resolution.ElectedName,
+		})
+	}
+
+	var pushTarget *checkpointpolicy.Target
+	if resolution.ElectedName != "" {
+		pushTarget = &checkpointpolicy.Target{Remote: resolution.ElectedName, Dir: dir}
+	}
+	return readTargets, pushTarget, nil
 }
 
 func formatCheckpointPolicyValue(configured, effective string) string {

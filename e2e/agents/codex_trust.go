@@ -11,24 +11,15 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+
+	"github.com/entireio/cli/cmd/entire/cli/agent/codex"
 )
 
 // codexHookFile mirrors the on-disk shape of .codex/hooks.json. Field types
 // match Codex's serde definitions (codex-rs/config/src/hook_config.rs) so the
 // trust-hash computation below stays faithful to discover_handlers.
 type codexHookFile struct {
-	Hooks codexHookEvents `json:"hooks"`
-}
-
-type codexHookEvents struct {
-	PreToolUse        []codexHookGroup `json:"PreToolUse"`
-	PermissionRequest []codexHookGroup `json:"PermissionRequest"`
-	PostToolUse       []codexHookGroup `json:"PostToolUse"`
-	PreCompact        []codexHookGroup `json:"PreCompact"`
-	PostCompact       []codexHookGroup `json:"PostCompact"`
-	SessionStart      []codexHookGroup `json:"SessionStart"`
-	UserPromptSubmit  []codexHookGroup `json:"UserPromptSubmit"`
-	Stop              []codexHookGroup `json:"Stop"`
+	Hooks map[string][]codexHookGroup `json:"hooks"`
 }
 
 type codexHookGroup struct {
@@ -42,23 +33,6 @@ type codexHookHandlers struct {
 	Timeout       *uint64 `json:"timeout"`
 	Async         bool    `json:"async"`
 	StatusMessage *string `json:"statusMessage"`
-}
-
-// codexHookEventLabels lists every event name in the order Codex emits in
-// the JSON schema, paired with the snake_case label it uses for trust state
-// keys (codex-rs/hooks/src/lib.rs:hook_event_key_label).
-var codexHookEventLabels = []struct {
-	displayName string
-	keyLabel    string
-}{
-	{"PreToolUse", "pre_tool_use"},
-	{"PermissionRequest", "permission_request"},
-	{"PostToolUse", "post_tool_use"},
-	{"PreCompact", "pre_compact"},
-	{"PostCompact", "post_compact"},
-	{"SessionStart", "session_start"},
-	{"UserPromptSubmit", "user_prompt_submit"},
-	{"Stop", "stop"},
 }
 
 // codexHookTrustState reads .codex/hooks.json from projectDir and returns the
@@ -87,13 +61,24 @@ func codexHookTrustState(projectDir string) (string, error) {
 	}
 
 	var sb strings.Builder
-	for _, ev := range codexHookEventLabels {
-		groups := codexEventGroups(&file.Hooks, ev.displayName)
+	for _, ev := range codex.HookEventSpecs() {
+		groups := codexEventGroups(file.Hooks, ev.Event)
 		for groupIdx, group := range groups {
 			for handlerIdx, handler := range group.Hooks {
 				if handler.Type != "command" {
 					continue
 				}
+				// Codex's own normalization, mirrored: absent means its 600s
+				// default, and a sub-1s value is raised to 1.
+				//
+				// NOT mirrored: the SessionEnd ceiling. Codex caps SessionEnd
+				// handlers at SESSION_END_MAX_TIMEOUT_SEC (3), and whether that
+				// clamp lands before or after command_hook_hash decides which
+				// value it hashes. Entire installs SessionEnd at exactly 3
+				// (SessionEndTimeoutSec), so both orderings agree today and
+				// guessing wrong would break trust rather than preserve it —
+				// TestCodexHookTrustState_CoversEveryInstalledEvent pins that
+				// premise, so this stays honest without a guess.
 				timeoutSec := uint64(600)
 				if handler.Timeout != nil {
 					timeoutSec = *handler.Timeout
@@ -101,8 +86,8 @@ func codexHookTrustState(projectDir string) (string, error) {
 				if timeoutSec < 1 {
 					timeoutSec = 1
 				}
-				hash := codexCommandHookHash(ev.keyLabel, group.Matcher, handler.Command, timeoutSec, handler.Async, handler.StatusMessage)
-				key := fmt.Sprintf("%s:%s:%d:%d", hooksPath, ev.keyLabel, groupIdx, handlerIdx)
+				hash := codexCommandHookHash(ev.Label, group.Matcher, handler.Command, timeoutSec, handler.Async, handler.StatusMessage)
+				key := fmt.Sprintf("%s:%s:%d:%d", hooksPath, ev.Label, groupIdx, handlerIdx)
 				fmt.Fprintf(&sb, "[hooks.state.%q]\ntrusted_hash = %q\n\n", key, hash)
 			}
 		}
@@ -110,26 +95,8 @@ func codexHookTrustState(projectDir string) (string, error) {
 	return sb.String(), nil
 }
 
-func codexEventGroups(events *codexHookEvents, displayName string) []codexHookGroup {
-	switch displayName {
-	case "PreToolUse":
-		return events.PreToolUse
-	case "PermissionRequest":
-		return events.PermissionRequest
-	case "PostToolUse":
-		return events.PostToolUse
-	case "PreCompact":
-		return events.PreCompact
-	case "PostCompact":
-		return events.PostCompact
-	case "SessionStart":
-		return events.SessionStart
-	case "UserPromptSubmit":
-		return events.UserPromptSubmit
-	case "Stop":
-		return events.Stop
-	}
-	return nil
+func codexEventGroups(events map[string][]codexHookGroup, displayName string) []codexHookGroup {
+	return events[displayName]
 }
 
 // codexCommandHookHash mirrors command_hook_hash + version_for_toml. Codex

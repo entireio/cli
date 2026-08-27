@@ -53,7 +53,7 @@ func (c *CodexAgent) IsPreview() bool { return true }
 
 // DetectPresence checks if Codex is configured in the repository.
 func (c *CodexAgent) DetectPresence(ctx context.Context) (bool, error) {
-	return c.AreHooksInstalled(ctx), nil
+	return c.AreHooksInstalled(ctx)
 }
 
 // GetSessionID extracts the session ID from hook input.
@@ -175,7 +175,7 @@ func (c *CodexAgent) WriteSession(_ context.Context, session *agent.AgentSession
 		return errors.New("session has no native data to write")
 	}
 
-	dataToWrite := sanitizeRestoredTranscript(session.NativeData)
+	dataToWrite := SanitizePortableTranscript(session.NativeData)
 	if err := os.WriteFile(session.SessionRef, dataToWrite, 0o600); err != nil {
 		return fmt.Errorf("failed to write transcript: %w", err)
 	}

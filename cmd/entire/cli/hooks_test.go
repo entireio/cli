@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"strings"
 	"testing"
 )
@@ -152,64 +153,49 @@ func TestParseSubagentTypeAndDescription(t *testing.T) {
 	}
 }
 
-func TestExtractTodoContentFromToolInput(t *testing.T) {
+// TestIsBackgroundLaunch pins background-subagent detection: this is the
+// signal handleLifecycleSubagentEnd uses to decide whether a launch-time
+// PostToolUse event should defer capture to SubagentStop (background) or
+// capture immediately (foreground, unchanged legacy behavior).
+func TestIsBackgroundLaunch(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name      string
 		toolInput string
-		want      string
+		want      bool
 	}{
 		{
-			name:      "in_progress item present",
-			toolInput: `{"todos": [{"content": "First task", "status": "completed"}, {"content": "Second task", "status": "in_progress"}, {"content": "Third task", "status": "pending"}]}`,
-			want:      "Second task",
+			name:      "run_in_background true",
+			toolInput: `{"subagent_type": "dev", "run_in_background": true}`,
+			want:      true,
 		},
 		{
-			name:      "no in_progress - fallback to first pending",
-			toolInput: `{"todos": [{"content": "First task", "status": "completed"}, {"content": "Second task", "status": "pending"}, {"content": "Third task", "status": "pending"}]}`,
-			want:      "Second task",
+			name:      "run_in_background false",
+			toolInput: `{"subagent_type": "dev", "run_in_background": false}`,
+			want:      false,
 		},
 		{
-			name:      "all pending - first TodoWrite scenario",
-			toolInput: `{"todos": [{"content": "First pending task", "status": "pending", "activeForm": "Doing first task"}, {"content": "Second pending task", "status": "pending", "activeForm": "Doing second task"}]}`,
-			want:      "First pending task",
-		},
-		{
-			name:      "no in_progress or pending - returns last completed",
-			toolInput: `{"todos": [{"content": "First task", "status": "completed"}]}`,
-			want:      "First task",
-		},
-		{
-			name:      "empty todos array",
-			toolInput: `{"todos": []}`,
-			want:      "",
-		},
-		{
-			name:      "no todos field",
-			toolInput: `{"other_field": "value"}`,
-			want:      "",
-		},
-		{
-			name:      "null todos field",
-			toolInput: `{"todos": null}`,
-			want:      "",
+			name:      "run_in_background absent",
+			toolInput: `{"subagent_type": "dev"}`,
+			want:      false,
 		},
 		{
 			name:      "empty input",
 			toolInput: ``,
-			want:      "",
+			want:      false,
 		},
 		{
 			name:      "invalid json",
 			toolInput: `not valid json`,
-			want:      "",
+			want:      false,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := ExtractTodoContentFromToolInput([]byte(tt.toolInput))
-			if got != tt.want {
-				t.Errorf("ExtractTodoContentFromToolInput() = %q, want %q", got, tt.want)
+			t.Parallel()
+			if got := isBackgroundLaunch(context.Background(), []byte(tt.toolInput)); got != tt.want {
+				t.Errorf("isBackgroundLaunch(%q) = %v, want %v", tt.toolInput, got, tt.want)
 			}
 		})
 	}

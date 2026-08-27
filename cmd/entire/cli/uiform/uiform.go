@@ -87,6 +87,14 @@ func New(groups ...*huh.Group) *huh.Form {
 	return form
 }
 
+// SingleLineMultiSelectHeight reserves three rows for rendered field headers.
+// Callers with multiline options or headers taller than three rows need a
+// different height strategy. The form still clamps this on short terminals.
+func SingleLineMultiSelectHeight(optionCount int) int {
+	const headerRows = 3
+	return optionCount + headerRows
+}
+
 // PromptYN renders a Confirm form with the standard theme/accessibility
 // behavior and returns the user's answer. On user cancellation (Ctrl+C or
 // context.Canceled) returns (false, nil) so callers treat it as a "no";

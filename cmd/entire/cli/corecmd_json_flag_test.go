@@ -34,15 +34,19 @@ func TestControlPlaneJSONFlag_OnlyOnHonoringCommands(t *testing.T) {
 		"project get":    true,
 		"project delete": false,
 		// repo
-		"repo create":                    true,
-		"repo list":                      true,
-		"repo get":                       true,
-		"repo delete":                    false,
-		"repo clone":                     false,
-		"repo mirror create":             false,
-		"repo mirror list":               true,
-		"repo mirror get":                true,
-		"repo mirror remove":             false,
+		"repo create":        true,
+		"repo list":          true,
+		"repo get":           true,
+		"repo delete":        false,
+		"repo clone":         false,
+		"repo mirror create": false,
+		"repo mirror list":   true,
+		"repo mirror get":    true,
+		"repo mirror remove": false,
+		// `use` writes local git config and reports what it changed; there is no
+		// object to render, so it stays off the --json surface like the other
+		// side-effect verbs.
+		"repo mirror use":                false,
 		"repo mirror collaborators list": true,
 		"repo visibility get":            true,
 		"repo visibility set":            true,

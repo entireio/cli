@@ -214,7 +214,7 @@ section reflects the current best hypothesis with confidence ("likely",
 <!-- What was searched, what was found, what was ruled out. If nothing
 relevant, say "no prior work found; searched for: <queries>". When a
 finding cites a commit hash, also note the Entire-Checkpoint trailer
-(if any) and what `+"`entire explain --checkpoint <id> --no-pager`"+`
+(if any) and what `+"`entire checkpoint explain --checkpoint <id> --no-pager`"+`
 revealed. -->
 
 ## System under investigation

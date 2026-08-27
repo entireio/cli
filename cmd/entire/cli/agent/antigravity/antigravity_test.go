@@ -55,7 +55,7 @@ func TestDetectPresence(t *testing.T) {
 		t.Setenv(configDirEnv, t.TempDir())
 
 		ag := &AntigravityAgent{}
-		if _, err := ag.InstallHooks(context.Background(), false, false); err != nil {
+		if _, err := ag.InstallHooks(context.Background(), false); err != nil {
 			t.Fatalf("InstallHooks: %v", err)
 		}
 		present, err := ag.DetectPresence(context.Background())

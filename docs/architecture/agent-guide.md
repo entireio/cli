@@ -50,9 +50,19 @@ Every agent must implement all 19 methods on the `Agent` interface:
 | `TranscriptPreparer` | `PrepareTranscript` | Agent writes transcripts asynchronously and needs a flush/sync step |
 | `TokenCalculator` | `CalculateTokenUsage` | Agent's transcript contains token usage data |
 | `SubagentAwareExtractor` | `ExtractAllModifiedFiles`, `CalculateTotalTokenUsage` | Agent spawns subagents (like Claude Code's Task tool) |
+| `SubagentSessionResolver` | `ResolveSubagentSession` | Agent runs subagents as **detached sessions of their own** rather than as a blocking tool call (Factory AI Droid's Workers) |
 | `HookResponseWriter` | `WriteHookResponse` | Agent can display messages from hook responses (e.g., session start banner). Claude Code uses JSON `systemMessage` on stdout; Factory AI Droid uses plain text on stdout. |
 | `ContextInjector` | `InjectionEvent`, `RenderContextInjection` | Agent can inject text into the **model's** context window (distinct from `HookResponseWriter`, which targets the *user*). The agent declares which lifecycle event it injects at and renders a native stdout payload. The dispatcher (`emitContextInjection`) emits it once per normal session via `session.State.ContextInjectionDecided`, skipping review/investigate sessions, and only when fresh clone-local preferences say trails are enabled for the current repo/API/auth target. The API check happens before the prompt path (`entire enable`, successful `entire trail ...` commands, and stale/missing cache refresh on SessionStart all refresh `ClonePreferences.TrailsEnabled` using `api.Client.TrailsEnabled`); TurnStart performs no auth/network work and leaves unknown/stale caches undecided so a later refresh can still inject. Claude Code / Codex / Gemini inject at `TurnStart` using `hookSpecificOutput.additionalContext` (UserPromptSubmit / BeforeAgent); Pi and OpenCode emit a `{"inject_context":...}` envelope that their embedded extension applies (Pi via a `before_agent_start` message, OpenCode via `experimental.chat.system.transform`). |
 | `FileWatcher` | `GetWatchPaths`, `OnFileChange` | Agent doesn't support hooks; uses file-based detection instead |
+
+### Declaring a subagent transcript
+
+Not an interface — a field. On `SubagentEnd`, set `Event.SubagentTranscriptPath` when
+the agent's hook payload names the subagent's own transcript (Codex and Cursor both
+send `agent_transcript_path`). Leave it empty and the framework probes the layout
+Claude Code and Factory AI Droid share, which finds nothing for any other agent and
+fails silently — the task checkpoint simply stores no subagent transcript. See the
+field's doc comment in `cmd/entire/cli/agent/event.go`.
 
 ## Step-by-Step Implementation Guide
 
@@ -373,7 +383,7 @@ var (
 If your agent uses a JSON config file for hooks (like Claude Code's `.claude/settings.json`, Gemini's `.gemini/settings.json`, Cursor's `.cursor/hooks.json`, Factory AI Droid's `.factory/settings.json`, or Copilot CLI's `.github/hooks/entire.json`), implement `HookSupport`:
 
 ```go
-func (a *YourAgent) InstallHooks(localDev bool, force bool) (int, error) {
+func (a *YourAgent) InstallHooks(force bool) (int, error) {
     // 1. Find repo root
     repoRoot, err := paths.RepoRoot()
     if err != nil {
@@ -384,21 +394,18 @@ func (a *YourAgent) InstallHooks(localDev bool, force bool) (int, error) {
     settingsPath := filepath.Join(repoRoot, ".youragent", "settings.json")
     // ... read and parse ...
 
-    // 3. Build hook commands
-    // localDev mode delegates to scripts/entire-dev (agent.LocalDevHookScript),
-    // which compiles the CLI on demand and falls back to the entire binary on
-    // PATH when the tree does not build. It uses $(git rev-parse --show-toplevel)
-    // to resolve the repo root at runtime, so it works regardless of where the
-    // repo is checked out on disk.
-    // Note: Only Claude Code provides a PROJECT_DIR env var (CLAUDE_PROJECT_DIR);
-    // its prefix uses ${CLAUDE_PROJECT_DIR}/scripts/entire-dev instead. Other
-    // agents should use agent.LocalDevHookScript as shown here.
-    var cmdPrefix string
-    if localDev {
-        cmdPrefix = agent.LocalDevHookScript + " hooks your-agent "
-    } else {
-        cmdPrefix = "entire hooks your-agent "
-    }
+    // 3. Build hook commands.
+    // Always name the "entire" binary, resolved through PATH. Never build a
+    // hook command from a path inside the working tree: the hook would then run
+    // whatever the checked-out branch contains, on every agent turn. Wrap it so
+    // a missing binary exits cleanly instead of failing the agent's operation.
+    const cmdPrefix = "entire hooks your-agent "
+    hookCmd := agent.WrapProductionSilentHookCommand(cmdPrefix + "stop")
+
+    // Drop Entire-owned hooks carrying any other command before adding this
+    // one, even without force — otherwise a hook written by an older version
+    // survives alongside it and both fire. agent.LegacyLocalDevHookScript is
+    // matched for exactly this reason; see entireHookPrefixes in any agent.
 
     // 4. Add hooks if they don't exist (idempotent)
     // 5. Write settings back (preserving unknown fields)
@@ -435,7 +442,7 @@ The framework dispatcher (`DispatchLifecycleEvent` in `lifecycle.go`) handles ea
 | `Compaction` | Fires compaction transition (stays ACTIVE), resets transcript offset | *(not used)* | `pre-compress` | `pre-compact` | `compaction` | `pre-compact` | *(not used)* |
 | `SessionEnd` | Marks session as ENDED in state machine | `session-end` | `session-end` | `session-end` | `session-end` | `session-end` | `session-end` |
 | `SubagentStart` | Captures pre-task state (git status snapshot) | `pre-task` (PreToolUse[Task]) | *(not used)* | `subagent-start` | *(not used)* | `pre-tool-use` (config-level `matcher: Task`) | *(not used)* |
-| `SubagentEnd` | Extracts subagent modified files, detects changes, saves task checkpoint | `post-task` (PostToolUse[Task]) | *(not used)* | `subagent-stop` | *(not used)* | `post-tool-use` (config-level `matcher: Task`) | `subagent-stop` |
+| `SubagentEnd` | Extracts subagent modified files and completes the task record (see the "Task Records (Subagent Work)" section of [Sessions and Checkpoints](sessions-and-checkpoints.md) for the launch-stub vs. `Final` split) | `post-task` (PostToolUse[Task], `Final: false`) + `subagent-stop` (SubagentStop, `Final: true`) | *(not used)* | `subagent-stop` | *(not used)* | `post-tool-use` (config-level `matcher: Task`) | `subagent-stop` |
 
 ### Event Field Requirements
 
@@ -447,7 +454,7 @@ The framework dispatcher (`DispatchLifecycleEvent` in `lifecycle.go`) handles ea
 | `Compaction` | `SessionID` | `SessionRef`, `Metadata` |
 | `SessionEnd` | `SessionID` | `SessionRef`, `Metadata` |
 | `SubagentStart` | `SessionID`, `SessionRef`, `ToolUseID` | `ToolInput`, `Metadata` |
-| `SubagentEnd` | `SessionID`, `SessionRef`, `ToolUseID` | `SubagentID`, `ToolInput`, `Metadata` |
+| `SubagentEnd` | `SessionID`, `SessionRef`, `ToolUseID` | `SubagentID`, `ToolInput`, `Metadata`, `SubagentTranscript` (authoritative subagent transcript path when the hook payload supplies one), `Final` (only for agents with a two-signal subagent model — a launch-time stub plus a separate true-completion signal, e.g. Claude Code's `SubagentStop`: the stub sets false, the completion signal sets true; single-signal agents leave it false) |
 
 `Metadata` (`map[string]string`) holds agent-specific state that the framework stores and makes available on subsequent events. Use it for agent-internal tracking (e.g., cursor positions, background agent flags) that doesn't map to a dedicated Event field.
 
@@ -498,6 +505,34 @@ The framework dispatcher (`DispatchLifecycleEvent` in `lifecycle.go`) handles ea
 **Methods:**
 - `ExtractAllModifiedFiles(sessionRef, fromOffset, subagentsDir) ([]string, error)` - Deduplicated file list from main + subagent transcripts.
 - `CalculateTotalTokenUsage(sessionRef, fromOffset, subagentsDir) (*TokenUsage, error)` - Aggregated usage including subagents.
+
+### `SubagentSessionResolver`
+
+**What it enables:** Attributing a detached subagent session's turn to the parent
+task invocation, as a task checkpoint under `.entire/metadata/<parent>/tasks/<tool-use-id>/`.
+
+**Without it:** Turn-end treats the subagent's session as an ordinary top-level
+session and mints a session checkpoint for it — the subagent's files land on the
+shadow branch under a session the user never drove, and no task checkpoint exists.
+
+**Implement when:** Your agent dispatches subagents as sessions of their own,
+firing a full SessionStart/UserPromptSubmit/Stop cycle for each. Factory AI
+Droid does this for Workers: its `PostToolUse` fires when the Worker is
+*dispatched*, not when it finishes, so the worktree is still untouched at
+`SubagentEnd` and only the Worker's own session boundary delimits its work.
+
+**Do NOT implement** when subagents block the parent's turn (Claude Code's Task
+tool) — the `SubagentEnd` path already bounds that work correctly.
+
+**Method:**
+- `ResolveSubagentSession(sessionRef) (SubagentSessionLink, bool)` — returns the
+  parent session ID, the parent's tool-use ID, and (optionally) the parent's
+  transcript path. Must return `false` for ordinary sessions and whenever the
+  link cannot be read; the caller then keeps the session on the normal path.
+
+Resolve the link from data the agent itself persists (Droid records
+`callingSessionId`/`callingToolUseId` on its transcript's `session_start` line)
+rather than from hook ordering, so it survives asynchronous dispatch.
 
 ### `HookSupport`
 
@@ -644,7 +679,7 @@ Claude Code, Gemini CLI, Cursor, Factory AI Droid, and Copilot CLI use a JSON se
 Key principles:
 - **Preserve unknown fields** - don't destroy user's custom hooks or settings
 - **Idempotent installs** - running `entire enable` twice doesn't duplicate hooks
-- **Support `localDev` mode** - use `go run "$(git rev-parse --show-toplevel)"/...` for development (only Claude Code provides a `PROJECT_DIR` env var; other agents use `git rev-parse` to resolve the repo root at runtime)
+- **Never point a hook at repository content** - hook commands must name the `entire` binary (via PATH), not a path inside the working tree. Recognize the legacy shapes in `entireHookPrefixes` (including `agent.LegacyLocalDevHookScript`) so hooks written by older versions are replaced rather than left in place
 - **Identify Entire hooks** by command prefix (e.g., `"entire "` or `go run "$(git rev-parse --show-toplevel)"/...`)
 
 ### Example: Claude Code Hook Config
@@ -734,21 +769,44 @@ Pi extension hooks fire via `execFile` (non-blocking) to avoid blocking the agen
 Key differences from JSON config agents:
 - Extension file is written/removed entirely (not partial JSON edits)
 - Uses `node:child_process.execFile` for all hook invocations
-- Session ID is cached to `.entire/tmp/pi/pi-active-session` to bridge races between `session_start` and `before_agent_start`/`agent_end`
+- Session ID is written to `.entire/tmp/pi/pi-active-session` at `session_start` / `before_agent_start` and cleared at `session_shutdown`. It was meant to bridge races where a later hook arrives without an ID, but nothing reads it any more — see the nesting note below
 - On `agent_end`, the Pi JSONL transcript is captured to `.entire/tmp/pi/<id>.json` for stable reference even if native Pi sessions are deleted
 - `session_shutdown` is cleanup-only (no `SessionEnd` event) to avoid a race with `agent_end`'s checkpoint save
 - Idempotency via marker string check: `"Auto-generated by \`entire enable --agent pi\`"`
+- **Nested Pi processes do not forward session lifecycle.** Pi has no subagent
+  events; subagents come from an extension (Pi's `subagent/` example) that spawns
+  `pi --mode json -p --no-session` with cwd inside the project — where Pi
+  auto-discovers this same extension, so the child would otherwise forward its own
+  lifecycle as the user's session. Two independent guards:
+
+  1. **Extension**: sets `ENTIRE_PI_NESTED` on its process (inherited by any Pi it
+     spawns) and, when it is already set, registers only the `tool_call` bash
+     hardening and skips the lifecycle handlers. The hardening stays on purpose — a
+     nested Pi is non-interactive while inheriting the parent's TTY, and Entire's git
+     hooks fire from `.git/hooks` regardless of this extension. The marker is read
+     **only** here: Entire's own hook subprocesses inherit it from the parent, so
+     treating it as a skip signal in Go would disable tracking for everyone.
+  2. **CLI**: `ParseHookEvent` skips any hook whose payload carries no resolvable
+     session ID, rather than resolving it against the per-repo session-ID cache —
+     that single-slot cache is what handed a sessionless child its *parent's* ID,
+     letting the nested turn overwrite the parent's prompt and turn window.
+     `session_shutdown` is exempt (it carries no session identity at all and must
+     still clear the cache). Same shape as Copilot CLI's subordinate-session guard.
+
+  The guard removed the cache's only two readers, so it is now write-only; removing
+  it outright is a follow-up, tracked with the separate problem that a single-slot
+  per-repo store cannot represent two concurrent Pi sessions in one worktree.
 
 See `cmd/entire/cli/agent/pi/entire_extension.ts` for the full extension source.
 
 ### Plugin File Pattern (OpenCode)
 
-OpenCode uses a TypeScript plugin file (`.opencode/plugins/entire.ts`) instead of a JSON config. The plugin is auto-generated by `entire enable --agent opencode` and uses OpenCode's Bun-based plugin API.
+OpenCode uses a TypeScript plugin file (`.opencode/plugins/entire.ts`) instead of a JSON config. The plugin is auto-generated by `entire enable --agent opencode`.
 
 Key differences from JSON config agents:
 - Plugin file is written/removed entirely (not partial JSON edits)
-- Uses `Bun.spawnSync()` for hooks near process exit (`turn-end`, `session-end`)
-- Async `callHook()` for non-critical hooks (`session-start`, `turn-start`, `compaction`)
+- Uses `node:child_process` `spawn`/`spawnSync` for hooks so both Bun (CLI/TUI) and Node (Desktop Electron sidecar) work — do not call Bun globals (#2014)
+- Sync `spawnSync` for hooks that must finish before mid-turn commits or process exit (`turn-start`, `turn-end`, `session-end`); async `spawn` for non-critical hooks (`session-start`, `compaction`)
 - Calls `opencode export <sessionID>` on turn-end to fetch transcript (not file-based)
 - Idempotency via marker string check: `"Auto-generated by \`entire enable --agent opencode\`"`
 
@@ -890,7 +948,7 @@ func TestInstallHooks_Idempotent(t *testing.T) {
 
 ### go-git v5 Bugs
 
-**Do NOT use go-git v5 for `checkout` or `reset --hard` operations.** go-git v5 has a bug where `worktree.Reset()` with `HardReset` and `worktree.Checkout()` incorrectly delete untracked directories even when listed in `.gitignore`. This would destroy `.entire/` and agent config directories. Use the git CLI instead. See `CLAUDE.md` for details and `hard_reset_test.go` for regression tests.
+**Do NOT use go-git v5 for `checkout` or `reset --hard` operations.** go-git v5 has a bug where `worktree.Reset()` with `HardReset` and `worktree.Checkout()` incorrectly delete untracked directories even when listed in `.gitignore`. This would destroy `.entire/` and agent config directories. Use the git CLI instead. See `CLAUDE.md` for details.
 
 ### Repo Root vs Current Working Directory
 

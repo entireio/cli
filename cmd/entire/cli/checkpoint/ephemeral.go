@@ -17,6 +17,7 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
+	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
@@ -442,9 +443,16 @@ func (s *ephemeralStore) addTaskMetadataToTree(ctx context.Context, baseTreeHash
 
 		// Add subagent transcript if available
 		if opts.SubagentTranscriptPath != "" && opts.AgentID != "" {
-			if agentContent, readErr := os.ReadFile(opts.SubagentTranscriptPath); readErr == nil {
+			agentContent, readErr := os.ReadFile(opts.SubagentTranscriptPath)
+			agentContent, tooLarge := prepareSubagentTranscript(ctx, opts.Agent, opts.SubagentTranscriptPath, agentContent)
+			if readErr == nil && !tooLarge {
+				// Try JSONL-aware redaction first; fall back to plain string redaction
+				// only on a JSONL parse error (avoids silently dropping the transcript).
 				redacted, jsonlErr := redact.JSONLBytes(agentContent)
 				if jsonlErr != nil {
+					if errors.Is(jsonlErr, redact.ErrScannerDegraded) {
+						return plumbing.ZeroHash, fmt.Errorf("redact subagent transcript %s: %w", opts.SubagentTranscriptPath, jsonlErr)
+					}
 					logging.Warn(ctx, "subagent transcript is not valid JSONL, falling back to plain redaction",
 						slog.String("path", opts.SubagentTranscriptPath),
 						slog.String("error", jsonlErr.Error()),
@@ -834,7 +842,7 @@ func (s *ephemeralStore) buildTreeWithChanges(
 		if relErr != nil {
 			logInvalidGitTreePath(ctx, "add metadata directory", metadataDir, relErr)
 		} else {
-			metaChanges, metaErr := addDirectoryToChanges(ctx, s.repo, metadataDirAbs, metadataRel)
+			metaChanges, metaErr := addDirectoryToChanges(ctx, s.repo, repoRedactCache(ctx, s.repo), metadataDirAbs, metadataRel)
 			if metaErr != nil {
 				return plumbing.ZeroHash, fmt.Errorf("failed to add metadata directory: %w", metaErr)
 			}
@@ -948,7 +956,7 @@ type treeNode struct {
 // addDirectoryToChanges walks a filesystem directory and returns TreeChange entries
 // for each file, suitable for use with ApplyTreeChanges.
 // dirPathAbs is the absolute filesystem path; dirPathRel is the git tree-relative path.
-func addDirectoryToChanges(ctx context.Context, repo *git.Repository, dirPathAbs, dirPathRel string) ([]TreeChange, error) {
+func addDirectoryToChanges(ctx context.Context, repo *git.Repository, cache *redactCache, dirPathAbs, dirPathRel string) ([]TreeChange, error) {
 	var changes []TreeChange
 	err := filepath.Walk(dirPathAbs, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
@@ -987,7 +995,7 @@ func addDirectoryToChanges(ctx context.Context, repo *git.Repository, dirPathAbs
 
 		treePath := filepath.ToSlash(filepath.Join(dirPathRel, relWithinDir))
 
-		blobHash, mode, blobErr := createRedactedBlobFromFile(ctx, repo, path, treePath)
+		blobHash, mode, blobErr := createRedactedBlobFromFile(ctx, repo, cache, path, treePath)
 		if blobErr != nil {
 			return fmt.Errorf("failed to create blob for %s: %w", path, blobErr)
 		}
@@ -1195,6 +1203,57 @@ func filterGitIgnoredFiles(ctx context.Context, repo *git.Repository, files []st
 	return kept
 }
 
+// isProtectedCheckpointPath reports whether a repo-relative path must be kept
+// out of checkpoint snapshots: the .entire infrastructure dir, or any
+// registered agent's declared protected dir/file (e.g. .claude, or an external
+// plugin's protected_dirs).
+//
+// This mirrors shouldIgnoreSessionTrackingPath in the cli package. The two
+// cannot share an implementation because cli imports checkpoint, so the logic
+// is duplicated deliberately. The first-checkpoint path (collectChangedFiles)
+// must apply the same exclusions as the session-tracking and rewind paths, or
+// protected-dir content is captured into the shadow tree on session start
+// (see the DetectFileChanges / isProtectedPath call sites).
+func isProtectedCheckpointPath(relPath string) bool {
+	cleanPath := filepath.Clean(filepath.FromSlash(relPath))
+	if paths.IsInfrastructurePath(cleanPath) {
+		return true
+	}
+	for _, file := range agent.AllProtectedFiles() {
+		if paths.Equal(cleanPath, file) {
+			return true
+		}
+	}
+	for _, dir := range agent.AllProtectedDirs() {
+		if paths.IsProtectedSubpath(filepath.Clean(filepath.FromSlash(dir)), cleanPath) {
+			return true
+		}
+	}
+	return false
+}
+
+// gitStatusBudget bounds the first-checkpoint `git status` subprocess in
+// collectChangedFiles. A var rather than a direct use of the const so tests
+// can shrink it to force the breach path without a multi-million-file fixture.
+//
+// Deliberately independent of the go-git walk's breach latch: after a turn's
+// go-git walk breached, this subprocess still gets its own full budget rather
+// than failing fast. C git is typically orders of magnitude faster and honors
+// ignore files, so it often produces a real first checkpoint where the go-git
+// walk could not — and unlike the walk it is reliably killed on expiry, so the
+// worst case is the two budgets stacking to ~40s of the agent's ~60s hook
+// timeout (the hook still exits with degradation), never a zombie.
+var gitStatusBudget = gitrepo.StatusWalkBudget
+
+// SetGitStatusBudgetForTesting overrides the first-checkpoint git-status
+// budget so lifecycle tests can exercise the save-breach degrade path; the
+// returned func restores the real budget.
+func SetGitStatusBudgetForTesting(budget time.Duration) (restore func()) {
+	orig := gitStatusBudget
+	gitStatusBudget = budget
+	return func() { gitStatusBudget = orig }
+}
+
 // collectChangedFiles returns all changed files from git status for the first checkpoint.
 //
 // For the first checkpoint, we need to capture:
@@ -1214,14 +1273,61 @@ func collectChangedFiles(ctx context.Context, repo *git.Repository) (changedFile
 	}
 	repoRoot := wt.Filesystem().Root()
 
+	// Bound the subprocess with the shared status budget: this runs on the
+	// agent-hook first-checkpoint path, and on a pathological worktree an
+	// undeadlined C git can outlive the agent's ~60s hook timeout just like
+	// the go-git walk StatusWithBudget bounds — leaving the hook process
+	// stuck in a child git instead of a goroutine. CommandContext kills the
+	// child on expiry, so nothing survives the breach.
+	statusCtx, cancel := context.WithTimeout(ctx, gitStatusBudget)
+	defer cancel()
+
 	// Use -z for NUL-separated output (handles quoted filenames with spaces/special chars)
 	// Use -uall to list individual untracked files instead of collapsed directories.
 	// Note: CLAUDE.md warns against -uall for user-facing display, but we need the full list
 	// for checkpointing.
-	cmd := exec.CommandContext(ctx, "git", "status", "--porcelain", "-z", "-uall")
+	//
+	// --no-optional-locks matters because `git status` is a WRITE, not a read.
+	// It refreshes the index's stat cache and, whenever any entry is stale,
+	// takes .git/index.lock for the whole worktree walk and renames a fresh
+	// index over .git/index. That behaviour is git working as designed — the
+	// refresh is what makes later status calls cheap — and running `git status`
+	// here was never wrong. The point is that *we get nothing from the write*:
+	// we read the porcelain output once per hook and discard it, so the flag
+	// drops a cost we were paying for no benefit. Output is byte-identical.
+	//
+	// The cost is only visible on a filesystem where rename-over-existing is
+	// not atomic against a concurrent lookup (virtiofs / gRPC-FUSE bind mounts,
+	// i.e. Docker Desktop devcontainers): there a concurrent reader can see
+	// ENOENT on .git/index, git silently treats ENOENT — and only ENOENT — as
+	// an *empty* index, and a `git commit` in that window records the empty
+	// tree with exit code 0 and no warning: a commit deleting every tracked
+	// file (issue #2111). Dropping the write also removes the index.lock
+	// contention that makes a concurrent `git add` fail, and the stale lock
+	// left behind when the budget SIGKILLs this child.
+	//
+	// Removing our write does not remove the hazard: on such a filesystem ANY
+	// concurrent `git status` opens the same window — the user's own, another
+	// tool's, and in particular N agents working the same repo, each firing
+	// this path. What we can own is not contributing a write we don't need,
+	// from a hook that runs asynchronously to the human's terminal. Users on
+	// affected mounts should set GIT_OPTIONAL_LOCKS=0 for the writers we do
+	// not control.
+	//
+	// EnvWithoutRepoOverrides is required because this runs inside git hooks,
+	// which export GIT_DIR / GIT_WORK_TREE / GIT_INDEX_FILE; those take
+	// precedence over cmd.Dir and would silently point this at another repo.
+	cmd := exec.CommandContext(statusCtx, "git", "--no-optional-locks", "status", "--porcelain", "-z", "-uall")
 	cmd.Dir = repoRoot
+	cmd.Env = gitrepo.EnvWithoutRepoOverrides()
 	output, err := cmd.Output()
 	if err != nil {
+		if errors.Is(statusCtx.Err(), context.DeadlineExceeded) {
+			// Wrap the shared sentinel so hook callers' warn-and-skip degrade
+			// paths recognize the breach and never fail the hook on it.
+			return changedFilesResult{}, fmt.Errorf("git status in %s exceeded budget %s: %w",
+				repoRoot, gitStatusBudget, gitrepo.ErrStatusBudgetExceeded)
+		}
 		return changedFilesResult{}, fmt.Errorf("failed to get git status in %s: %w", repoRoot, err)
 	}
 
@@ -1246,16 +1352,16 @@ func collectChangedFiles(ctx context.Context, repo *git.Repository) (changedFile
 		filename := entry[3:] // No TrimSpace needed with -z format
 
 		// Handle R/C (rename/copy) first - they have a second entry we must skip
-		// even if the new filename is an infrastructure path
+		// even if the new filename is a protected path
 		if staging == 'R' || staging == 'C' {
 			// Renamed or copied: current entry is new name, next entry is old name
-			if !paths.IsInfrastructurePath(filename) {
+			if !isProtectedCheckpointPath(filename) {
 				changedSeen[filename] = struct{}{}
 			}
 			// The old name follows as the next NUL-separated entry - must always skip it
 			if i+1 < len(entries) && entries[i+1] != "" {
 				oldName := entries[i+1]
-				if staging == 'R' && !paths.IsInfrastructurePath(oldName) {
+				if staging == 'R' && !isProtectedCheckpointPath(oldName) {
 					// For renames, old file is effectively deleted
 					deletedSeen[oldName] = struct{}{}
 				}
@@ -1264,8 +1370,8 @@ func collectChangedFiles(ctx context.Context, repo *git.Repository) (changedFile
 			continue
 		}
 
-		// Skip .entire directory for non-R/C entries
-		if paths.IsInfrastructurePath(filename) {
+		// Skip .entire and agent-protected dirs/files for non-R/C entries
+		if isProtectedCheckpointPath(filename) {
 			continue
 		}
 

@@ -47,7 +47,7 @@ func (a *AntigravityAgent) IsPreview() bool { return true }
 // ~/.gemini/antigravity-cli/, so the only meaningful workspace-level signal is
 // whether our entry exists in .agents/hooks.json.
 func (a *AntigravityAgent) DetectPresence(ctx context.Context) (bool, error) {
-	return a.AreHooksInstalled(ctx), nil
+	return a.AreHooksInstalled(ctx)
 }
 
 func (a *AntigravityAgent) ProtectedDirs() []string { return []string{".agents", ".gemini"} }

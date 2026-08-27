@@ -86,14 +86,13 @@ func resolveAPICores(ctx context.Context, cacheDir, apiHost string, httpClient *
 // ResolveContextForAPI picks the local login context to authenticate data-API
 // calls against apiHost.
 //
-// It mirrors ResolveContextForCluster: active context wins when its CoreURL is
-// among the API's trusted issuers, else the sole eligible context, else an
-// explicit-choice / login error — sourcing the trusted issuers from
+// It mirrors ResolveContextForCluster, sharing requireActiveContext: the active
+// context is used when its CoreURL is among the API's trusted issuers, and
+// anything else is an error. It sources those issuers from
 // /.well-known/entire-api.json (cached in api_discovery.json, long TTL,
 // re-fetched on expiry with stale fallback) instead of entire-cluster.json.
-// Account selection is recomputed every call from the live contexts, never
-// persisted. The caller exchanges the chosen context's token for the data host
-// origin (which is the audience the API requires); no audience is read here.
+// The caller exchanges the active context's token for the data host origin
+// (which is the audience the API requires); no audience is read here.
 //
 // When the API doesn't advertise discovery (404 / unreachable / 503 /
 // malformed) and no cache entry exists, the returned error wraps
@@ -115,5 +114,7 @@ func ResolveContextForAPI(ctx context.Context, configDir, cacheDir, apiHost stri
 	if err != nil {
 		return nil, fmt.Errorf("load contexts: %w", err)
 	}
-	return selectContext(f, "API host "+apiHost, trustedIssuers, debugf)
+	// The data-API well-known advertises no login server, so the hint falls
+	// back to naming the issuers it trusts.
+	return requireActiveContext(f, "API host "+apiHost, loginTargets{coreURLs: trustedIssuers}, debugf)
 }

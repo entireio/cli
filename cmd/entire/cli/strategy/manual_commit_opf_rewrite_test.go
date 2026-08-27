@@ -1,10 +1,12 @@
 package strategy
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -21,6 +23,7 @@ import (
 	"github.com/go-git/go-git/v6/plumbing"
 	"github.com/go-git/go-git/v6/plumbing/filemode"
 	"github.com/go-git/go-git/v6/plumbing/object"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -98,11 +101,16 @@ type testOPFRuntime interface {
 // process-global OPF.
 func configureFakeOPF(t *testing.T, rt testOPFRuntime) {
 	t.Helper()
+	configureFakeOPFWithCategories(t, rt, map[string]bool{"private_person": true})
+}
+
+func configureFakeOPFWithCategories(t *testing.T, rt testOPFRuntime, cats map[string]bool) {
+	t.Helper()
 	redact.ResetOPFConfigForTest()
 	t.Cleanup(redact.ResetOPFConfigForTest)
 	redact.ConfigurePrivacyFilterWithRuntime(redact.OPFConfig{
 		Enabled:    true,
-		Categories: map[string]bool{"private_person": true},
+		Categories: cats,
 		Command:    "/tmp/test-opf",
 	}, rt)
 }
@@ -110,6 +118,11 @@ func configureFakeOPF(t *testing.T, rt testOPFRuntime) {
 // setupV1Repo creates a repo + one v1 checkpoint with "PERSONABC" in
 // both the transcript and prompt. Returns the repo and the v1 tip.
 func setupV1Repo(t *testing.T) (*git.Repository, plumbing.Hash) {
+	_, repo, tip := setupV1RepoInDir(t)
+	return repo, tip
+}
+
+func setupV1RepoInDir(t *testing.T) (string, *git.Repository, plumbing.Hash) {
 	t.Helper()
 	tempDir := t.TempDir()
 	testutil.InitRepo(t, tempDir)
@@ -127,7 +140,7 @@ func setupV1Repo(t *testing.T) (*git.Repository, plumbing.Hash) {
 	require.NoError(t, err)
 
 	tip := addV1Checkpoint(t, repo, "a1b2c3d4e5f6", "test-session", "Hello, PERSONABC asked", "Look up PERSONABC")
-	return repo, tip
+	return tempDir, repo, tip
 }
 
 func addV1Checkpoint(t *testing.T, repo *git.Repository, cpIDString, sessionID, transcript, prompt string) plumbing.Hash {
@@ -229,6 +242,138 @@ func TestRewriteUnpushedV1WithOPF_HappyPath_RewritesAndTagsApplied(t *testing.T)
 		}
 		return nil
 	}))
+}
+
+// Regression: OPF enabled with an empty effective category set used
+// to succeed silently — the model scan
+// never ran, yet the rewrite stamped Entire-OPF-Applied: true, so later
+// rewrites skipped the commit permanently even after the user fixed the
+// config. The rewrite must abort instead, and a corrected config must
+// then scan the same commits normally.
+func TestRewriteUnpushedV1WithOPF_NoEnabledCategoriesAbortsThenRepairs(t *testing.T) {
+	fake := &fakeOPFForRewrite{}
+	configureFakeOPFWithCategories(t, fake, map[string]bool{})
+	repo, originalTip := setupV1Repo(t)
+
+	_, err := RewriteUnpushedV1WithOPF(context.Background(), repo, "origin")
+	var noCatErr *OPFNoCategoriesError
+	require.ErrorAs(t, err, &noCatErr)
+	require.Equal(t, 0, fake.batchCallCount(), "OPF must not be invoked with zero categories")
+
+	ref, err := repo.Reference(plumbing.NewBranchReferenceName(paths.MetadataBranchName), true)
+	require.NoError(t, err)
+	require.Equal(t, originalTip, ref.Hash(), "aborted rewrite must not move the v1 ref")
+	commit, err := repo.CommitObject(ref.Hash())
+	require.NoError(t, err)
+	require.False(t, trailers.HasOPFApplied(commit.Message),
+		"no commit may carry Entire-OPF-Applied when the scan never ran")
+
+	// Fix the config: because the abort left no trailer behind, the same
+	// commits are still eligible and the next push scans them normally.
+	redact.ConfigurePrivacyFilterWithRuntime(redact.OPFConfig{
+		Enabled:    true,
+		Categories: map[string]bool{"private_person": true},
+		Command:    "/tmp/test-opf",
+	}, fake)
+	newTip, err := RewriteUnpushedV1WithOPF(context.Background(), repo, "origin")
+	require.NoError(t, err)
+	require.NotEqual(t, originalTip, newTip)
+	require.Equal(t, 1, fake.batchCallCount())
+	repaired, err := repo.CommitObject(newTip)
+	require.NoError(t, err)
+	require.True(t, trailers.HasOPFApplied(repaired.Message))
+}
+
+func TestPrePushFromGitHook_DeferralStillRunsOPF(t *testing.T) {
+	fake := &fakeOPFForRewrite{}
+	configureFakeOPF(t, fake)
+
+	dir, repo, originalTip := setupV1RepoInDir(t)
+	remoteDir := filepath.Join(t.TempDir(), "origin.git")
+	_, err := git.PlainInit(remoteDir, true)
+	require.NoError(t, err)
+	_, err = repo.CreateRemote(&gitconfig.RemoteConfig{Name: "origin", URLs: []string{remoteDir}})
+	require.NoError(t, err)
+
+	t.Chdir(dir)
+	paths.ClearWorktreeRootCache()
+	t.Cleanup(paths.ClearWorktreeRootCache)
+
+	// The empty remote defers Entire's automatic metadata push. The OPF rewrite
+	// still must run because the user's outer git push may include v1 directly.
+	require.NoError(t, NewManualCommitStrategy().PrePushFromGitHook(t.Context(), "origin"))
+
+	ref, err := repo.Reference(plumbing.NewBranchReferenceName(paths.MetadataBranchName), true)
+	require.NoError(t, err)
+	require.NotEqual(t, originalTip, ref.Hash(), "OPF rewrite must advance the local v1 ref before deferral")
+	commit, err := repo.CommitObject(ref.Hash())
+	require.NoError(t, err)
+	require.True(t, trailers.HasOPFApplied(commit.Message))
+	require.Equal(t, 1, fake.batchCallCount())
+}
+
+// Regression: the no-categories abort must reach the git hook boundary.
+// PrePush deliberately swallows transient checkpoint-push failures, so
+// without this pin a refactor could downgrade the rewrite's fail-closed
+// errors to logged warnings and ship unscanned content off-machine.
+func TestPrePushFromGitHook_NoEnabledCategoriesAbortsPush(t *testing.T) {
+	fake := &fakeOPFForRewrite{}
+	configureFakeOPFWithCategories(t, fake, map[string]bool{})
+
+	dir, repo, originalTip := setupV1RepoInDir(t)
+	remoteDir := filepath.Join(t.TempDir(), "origin.git")
+	_, err := git.PlainInit(remoteDir, true)
+	require.NoError(t, err)
+	_, err = repo.CreateRemote(&gitconfig.RemoteConfig{Name: "origin", URLs: []string{remoteDir}})
+	require.NoError(t, err)
+
+	t.Chdir(dir)
+	paths.ClearWorktreeRootCache()
+	t.Cleanup(paths.ClearWorktreeRootCache)
+
+	err = NewManualCommitStrategy().PrePushFromGitHook(t.Context(), "origin")
+	var noCatErr *OPFNoCategoriesError
+	require.ErrorAs(t, err, &noCatErr)
+	require.Equal(t, 0, fake.batchCallCount())
+
+	ref, err := repo.Reference(plumbing.NewBranchReferenceName(paths.MetadataBranchName), true)
+	require.NoError(t, err)
+	require.Equal(t, originalTip, ref.Hash(), "aborted push must not move the v1 ref")
+	commit, err := repo.CommitObject(ref.Hash())
+	require.NoError(t, err)
+	require.False(t, trailers.HasOPFApplied(commit.Message))
+}
+
+// Regression: ENTIRE_OPF=no must stay a working opt-out under the
+// no-categories misconfiguration — an explicit skip pushes regex-only
+// content without the trailer, so failing closed there would remove
+// the one-command unblock the abort message advertises.
+func TestPrePushFromGitHook_EnvSkipBypassesNoCategoriesAbort(t *testing.T) {
+	fake := &fakeOPFForRewrite{}
+	configureFakeOPFWithCategories(t, fake, map[string]bool{})
+
+	dir, repo, originalTip := setupV1RepoInDir(t)
+	remoteDir := filepath.Join(t.TempDir(), "origin.git")
+	_, err := git.PlainInit(remoteDir, true)
+	require.NoError(t, err)
+	_, err = repo.CreateRemote(&gitconfig.RemoteConfig{Name: "origin", URLs: []string{remoteDir}})
+	require.NoError(t, err)
+
+	t.Chdir(dir)
+	paths.ClearWorktreeRootCache()
+	t.Cleanup(paths.ClearWorktreeRootCache)
+	t.Setenv("ENTIRE_OPF", "no")
+
+	require.NoError(t, NewManualCommitStrategy().PrePushFromGitHook(t.Context(), "origin"))
+	require.Equal(t, 0, fake.batchCallCount())
+
+	ref, err := repo.Reference(plumbing.NewBranchReferenceName(paths.MetadataBranchName), true)
+	require.NoError(t, err)
+	require.Equal(t, originalTip, ref.Hash(), "skipped OPF must leave the v1 ref as-is")
+	commit, err := repo.CommitObject(ref.Hash())
+	require.NoError(t, err)
+	require.False(t, trailers.HasOPFApplied(commit.Message),
+		"opted-out push must not carry the OPF-applied trailer")
 }
 
 func TestRewriteUnpushedV1WithOPF_MultiCommitTipCarriesPriorRedactedShards(t *testing.T) {
@@ -656,8 +801,8 @@ func TestOPFRewrite_PreservesAssetsSubtreeVerbatim(t *testing.T) {
 
 // Fail-closed regression: when the OPF runtime fails and the breaker
 // trips, the rewrite must NOT CAS the ref. Otherwise the new commits
-// would carry Entire-OPF-Applied: true while their content is 7-layer
-// only, and future pushes would skip them — silently shipping unredacted
+// would carry Entire-OPF-Applied: true while their content is regex-only,
+// and future pushes would skip them — silently shipping unredacted
 // content to the remote.
 func TestRewriteUnpushedV1WithOPF_BreakerTrippedMidRewrite_AbortsBeforeCAS(t *testing.T) {
 	configureFakeOPF(t, &fakeRuntimeAlwaysFails{})
@@ -671,4 +816,245 @@ func TestRewriteUnpushedV1WithOPF_BreakerTrippedMidRewrite_AbortsBeforeCAS(t *te
 	ref, err := repo.Reference(plumbing.NewBranchReferenceName(paths.MetadataBranchName), true)
 	require.NoError(t, err)
 	require.Equal(t, originalTip, ref.Hash(), "local v1 ref must not move on OPF failure")
+}
+
+// --- git-refs backend ---
+
+// setupGitRefsOPFRepo builds a repo on the git-refs checkpoint backend with one
+// real checkpoint ref per ID (each carrying the OPF sentinel and queued for
+// push), an "origin" pointing at a fresh bare remote, and cwd set to the repo.
+func setupGitRefsOPFRepo(t *testing.T, cpIDs ...string) (bareDir string, repo *git.Repository, refs []plumbing.ReferenceName) {
+	t.Helper()
+	workDir := t.TempDir()
+	testutil.InitRepo(t, workDir)
+	testutil.WriteFile(t, workDir, "README.md", "# test")
+	testutil.GitAdd(t, workDir, "README.md")
+	testutil.GitCommit(t, workDir, "init")
+	writeGitRefsBackendSetting(t, workDir)
+
+	bareDir = filepath.Join(t.TempDir(), "origin.git")
+	_, err := git.PlainInit(bareDir, true)
+	require.NoError(t, err)
+
+	repo, err = git.PlainOpen(workDir)
+	require.NoError(t, err)
+	_, err = repo.CreateRemote(&gitconfig.RemoteConfig{Name: "origin", URLs: []string{bareDir}})
+	require.NoError(t, err)
+
+	t.Chdir(workDir)
+	paths.ClearWorktreeRootCache()
+	t.Cleanup(paths.ClearWorktreeRootCache)
+
+	for _, cpID := range cpIDs {
+		addGitRefsSession(t, repo, cpID, "sess-"+cpID)
+		refs = append(refs, mustRefName(t, id.MustCheckpointID(cpID)))
+	}
+	return bareDir, repo, refs
+}
+
+// addGitRefsSession writes one sentinel-bearing session to a checkpoint through
+// the git-refs backend, advancing (or creating) its ref and queuing it. Called
+// twice for the same checkpoint, it leaves the ref with two unpushed commits —
+// the shape a write followed by a backfill produces.
+func addGitRefsSession(t *testing.T, repo *git.Repository, cpID, sessionID string) {
+	t.Helper()
+	stores, err := checkpoint.Open(t.Context(), repo, checkpoint.OpenOptions{})
+	require.NoError(t, err)
+	cid := id.MustCheckpointID(cpID)
+	require.NoError(t, stores.Persistent.Write(t.Context(), checkpoint.Session{
+		CheckpointID: cid,
+		SessionID:    sessionID,
+		Strategy:     "manual-commit",
+		Transcript:   redact.AlreadyRedacted([]byte(`{"role":"user","content":"Hello, PERSONABC asked"}` + "\n")),
+		Prompts:      []string{"Look up PERSONABC"},
+		AuthorName:   "Test",
+		AuthorEmail:  "test@test.com",
+	}))
+	_, refErr := repo.Reference(mustRefName(t, cid), true)
+	require.NoError(t, refErr, "git-refs write should have created the checkpoint ref")
+}
+
+// walkRefAncestry returns every commit on a checkpoint ref, tip-first.
+func walkRefAncestry(t *testing.T, repo *git.Repository, tip plumbing.Hash) []*object.Commit {
+	t.Helper()
+	var out []*object.Commit
+	for h := tip; !h.IsZero(); {
+		c, err := repo.CommitObject(h)
+		require.NoError(t, err)
+		out = append(out, c)
+		if len(c.ParentHashes) == 0 {
+			break
+		}
+		h = c.ParentHashes[0]
+	}
+	return out
+}
+
+func refHashes(t *testing.T, repo *git.Repository, refs []plumbing.ReferenceName) []plumbing.Hash {
+	t.Helper()
+	out := make([]plumbing.Hash, 0, len(refs))
+	for _, ref := range refs {
+		r, err := repo.Reference(ref, true)
+		require.NoError(t, err)
+		out = append(out, r.Hash())
+	}
+	return out
+}
+
+// treeContents concatenates every file in the commit's tree.
+func treeContents(t *testing.T, repo *git.Repository, hash plumbing.Hash) string {
+	t.Helper()
+	commit, err := repo.CommitObject(hash)
+	require.NoError(t, err)
+	tree, err := commit.Tree()
+	require.NoError(t, err)
+	var sb strings.Builder
+	require.NoError(t, tree.Files().ForEach(func(f *object.File) error {
+		c, contentErr := f.Contents()
+		if contentErr != nil {
+			return contentErr
+		}
+		sb.WriteString(c)
+		return nil
+	}))
+	return sb.String()
+}
+
+func queuedRefs(t *testing.T, repo *git.Repository) []plumbing.ReferenceName {
+	t.Helper()
+	queue, err := checkpoint.PushQueueForRepo(t.Context(), repo)
+	require.NoError(t, err)
+	got, err := queue.Peek()
+	require.NoError(t, err)
+	return got
+}
+
+// Queued checkpoint refs are OPF-rewritten and stamped applied; a second run is
+// a no-op because the trailer marks them done (no re-scan, no ref movement).
+func TestRewriteQueuedCheckpointRefsWithOPF_RewritesThenIsIdempotent(t *testing.T) {
+	fake := &fakeOPFForRewrite{}
+	configureFakeOPF(t, fake)
+	_, repo, refs := setupGitRefsOPFRepo(t, "a1b2c3d4e5f6", "b2c3d4e5f6a1")
+	before := refHashes(t, repo, refs)
+
+	require.NoError(t, RewriteQueuedCheckpointRefsWithOPF(t.Context(), repo))
+	require.Equal(t, 1, fake.batchCallCount(), "one OPF call for the whole flush")
+
+	after := refHashes(t, repo, refs)
+	for i, ref := range refs {
+		require.NotEqual(t, before[i], after[i], "ref %s should have been rewritten", ref)
+		commit, err := repo.CommitObject(after[i])
+		require.NoError(t, err)
+		require.True(t, trailers.HasOPFApplied(commit.Message), "rewritten ref must carry the OPF trailer")
+		require.NotContains(t, treeContents(t, repo, after[i]), "PERSONABC")
+	}
+
+	require.NoError(t, RewriteQueuedCheckpointRefsWithOPF(t.Context(), repo))
+	require.Equal(t, 1, fake.batchCallCount(), "already-applied refs must not be re-scanned")
+	require.Equal(t, after, refHashes(t, repo, refs), "already-applied refs must keep their exact hash")
+}
+
+// Fail-closed: an OPF failure anywhere in the batch must leave EVERY queued ref
+// where it was, so no ref is stamped applied over content OPF never saw.
+func TestRewriteQueuedCheckpointRefsWithOPF_FailureLeavesEveryRefUnmoved(t *testing.T) {
+	configureFakeOPF(t, &fakeRuntimeAlwaysFails{})
+	_, repo, refs := setupGitRefsOPFRepo(t, "a1b2c3d4e5f6", "b2c3d4e5f6a1")
+	before := refHashes(t, repo, refs)
+
+	err := RewriteQueuedCheckpointRefsWithOPF(t.Context(), repo)
+	var runtimeFail *OPFRuntimeFailedError
+	require.ErrorAs(t, err, &runtimeFail)
+	require.Equal(t, before, refHashes(t, repo, refs))
+}
+
+// Backend divergence: the v1 path aborts the user's push on OPF failure; the
+// refs path fails closed by withholding the flush instead — the user's push
+// succeeds, nothing un-OPF'd ships, and the refs stay queued.
+func TestPrePushCheckpointRefs_OPFFailureWithholdsFlush(t *testing.T) {
+	configureFakeOPF(t, &fakeRuntimeAlwaysFails{})
+	bareDir, repo, refs := setupGitRefsOPFRepo(t, "a1b2c3d4e5f6")
+
+	var buf bytes.Buffer
+	oldWriter := stderrWriter
+	stderrWriter = &buf
+	t.Cleanup(func() { stderrWriter = oldWriter })
+
+	require.NoError(t, NewManualCommitStrategy().PrePushFromGitHook(t.Context(), "origin"),
+		"an OPF failure must not block the user's git push")
+
+	assert.Contains(t, buf.String(), "checkpoint refs", "the withheld push must be visible to the user")
+	assert.ElementsMatch(t, refs, queuedRefs(t, repo), "withheld refs stay queued for the next push")
+	lsCmd := exec.CommandContext(t.Context(), "git", "ls-remote", bareDir)
+	lsCmd.Env = testutil.GitIsolatedEnv()
+	out, err := lsCmd.CombinedOutput()
+	require.NoError(t, err, "ls-remote failed: %s", out)
+	assert.NotContains(t, string(out), refs[0].String(), "no ref may reach the remote when OPF failed")
+}
+
+// With OPF off the git-refs path is unchanged: refs push as written, unrewritten.
+func TestPrePushCheckpointRefs_OPFDisabledFlushesUnchanged(t *testing.T) {
+	redact.ResetOPFConfigForTest()
+	t.Cleanup(redact.ResetOPFConfigForTest)
+	bareDir, repo, refs := setupGitRefsOPFRepo(t, "a1b2c3d4e5f6")
+	before := refHashes(t, repo, refs)
+
+	require.NoError(t, NewManualCommitStrategy().PrePushFromGitHook(t.Context(), "origin"))
+
+	assert.Equal(t, before, refHashes(t, repo, refs), "no rewrite may happen with OPF off")
+	assert.Equal(t, before[0].String(), remoteRefHash(t, bareDir, refs[0]), "the ref as written must reach the remote")
+	assert.Empty(t, queuedRefs(t, repo), "pushed refs leave the queue")
+}
+
+// Regression: pushing a checkpoint ref carries its whole unpushed ancestry, so
+// rewriting only the tip shipped un-OPF'd ancestor blobs. Every un-applied
+// commit on the ref must be rewritten.
+func TestRewriteQueuedCheckpointRefsWithOPF_RewritesEveryUnpushedAncestor(t *testing.T) {
+	configureFakeOPF(t, &fakeOPFForRewrite{})
+	_, repo, refs := setupGitRefsOPFRepo(t, "a1b2c3d4e5f6")
+	addGitRefsSession(t, repo, "a1b2c3d4e5f6", "sess-2")
+	require.Len(t, walkRefAncestry(t, repo, refHashes(t, repo, refs)[0]), 2, "fixture must have two unpushed commits")
+
+	require.NoError(t, RewriteQueuedCheckpointRefsWithOPF(t.Context(), repo))
+
+	chain := walkRefAncestry(t, repo, refHashes(t, repo, refs)[0])
+	require.Len(t, chain, 2, "the chain length must survive the rewrite")
+	for _, c := range chain {
+		require.True(t, trailers.HasOPFApplied(c.Message), "ancestor %s must be OPF-applied", c.Hash.String()[:7])
+		require.NotContains(t, treeContents(t, repo, c.Hash), "PERSONABC")
+	}
+}
+
+// Steady state (OPF on all along): the tip's parent already carries the
+// trailer, so the walk stops there and the already-applied ancestor is neither
+// re-scanned nor rewritten.
+func TestRewriteQueuedCheckpointRefsWithOPF_StopsAtTrailedParent(t *testing.T) {
+	fake := &fakeOPFForRewrite{}
+	configureFakeOPF(t, fake)
+	_, repo, refs := setupGitRefsOPFRepo(t, "a1b2c3d4e5f6")
+	require.NoError(t, RewriteQueuedCheckpointRefsWithOPF(t.Context(), repo))
+	applied := refHashes(t, repo, refs)[0]
+
+	addGitRefsSession(t, repo, "a1b2c3d4e5f6", "sess-2")
+	require.NoError(t, RewriteQueuedCheckpointRefsWithOPF(t.Context(), repo))
+
+	require.Equal(t, 2, fake.batchCallCount(), "one scan per push, not a re-scan of applied history")
+	chain := walkRefAncestry(t, repo, refHashes(t, repo, refs)[0])
+	require.Equal(t, applied, chain[1].Hash, "the already-applied parent must be kept as-is")
+}
+
+// A deep un-trailered ancestry (OPF enabled late) fails closed with the same
+// bounded, remediated stop the v1 path gives a large first push.
+func TestRewriteQueuedCheckpointRefsWithOPF_AncestryOverBootstrapLimit(t *testing.T) {
+	configureFakeOPF(t, &fakeOPFForRewrite{})
+	t.Setenv("ENTIRE_OPF_BOOTSTRAP_LIMIT", "1")
+	_, repo, refs := setupGitRefsOPFRepo(t, "a1b2c3d4e5f6")
+	addGitRefsSession(t, repo, "a1b2c3d4e5f6", "sess-2")
+	before := refHashes(t, repo, refs)
+
+	err := RewriteQueuedCheckpointRefsWithOPF(t.Context(), repo)
+	var tooLarge *BootstrapTooLargeError
+	require.ErrorAs(t, err, &tooLarge)
+	require.Equal(t, 2, tooLarge.Count)
+	require.Equal(t, 1, tooLarge.Limit)
+	require.Equal(t, before, refHashes(t, repo, refs), "an over-limit ancestry must not move any ref")
 }

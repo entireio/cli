@@ -30,7 +30,9 @@ const EnvTestTTY = "ENTIRE_TEST_TTY"
 //     Subprocess tests must spawn via execx.NonInteractive (or set EnvTestTTY).
 //  3. Agent sentinels — vendor-set by agent subprocesses.
 //  4. CI=<non-empty-non-false> — de-facto CI convention.
-//  5. /dev/tty probe.
+//  5. /dev/tty probe, plus its terminal mode: a controlling terminal held in
+//     raw mode belongs to a full-screen TUI (lazygit, gitui, tig, …) that
+//     spawned us, not to a shell we can prompt. See rawmode_unix.go.
 func CanPromptInteractively() bool {
 	if v := os.Getenv(EnvTestTTY); v != "" {
 		return v == "1"
@@ -54,8 +56,11 @@ func CanPromptInteractively() bool {
 	if err != nil {
 		return false
 	}
-	_ = tty.Close()
-	return true
+	defer tty.Close()
+	// Having a controlling terminal isn't enough — a TUI that spawned us holds
+	// that same terminal in raw mode for its own screen and keys. See
+	// rawmode_unix.go.
+	return !ttyInRawMode(tty)
 }
 
 // UnderTest reports whether the process is running in a test context — either
@@ -78,6 +83,17 @@ func isAgentSubprocessEnv() bool {
 		os.Getenv("COPILOT_CLI") != "" ||
 		os.Getenv("PI_CODING_AGENT") != "" ||
 		os.Getenv("GIT_TERMINAL_PROMPT") == "0"
+}
+
+// IsTerminalReader reports whether r is an *os.File backed by a terminal.
+// It is useful when an explicitly interactive command needs to distinguish a
+// human at stdin from an agent process that merely inherited a controlling TTY.
+func IsTerminalReader(r io.Reader) bool {
+	f, ok := r.(*os.File)
+	if !ok {
+		return false
+	}
+	return term.IsTerminal(int(f.Fd())) //nolint:gosec // G115: uintptr->int is safe for fd
 }
 
 // IsTerminalWriter reports whether w is an *os.File backed by a terminal.

@@ -42,6 +42,7 @@ func TestLogin_SavesTokenAfterApproval(t *testing.T) {
 
 	type state struct {
 		sync.Mutex
+
 		approved bool
 		polls    int
 	}
@@ -49,7 +50,7 @@ func TestLogin_SavesTokenAfterApproval(t *testing.T) {
 	serverState := &state{}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
-		case r.Method == http.MethodPost && r.URL.Path == "/device_authorization":
+		case r.Method == http.MethodPost && r.URL.Path == pathDeviceAuthorization:
 			writeJSON(t, w, http.StatusOK, map[string]any{
 				"device_code":               "device-123",
 				"user_code":                 "ABCD-EFGH",
@@ -58,7 +59,7 @@ func TestLogin_SavesTokenAfterApproval(t *testing.T) {
 				"expires_in":                10,
 				"interval":                  1,
 			})
-		case r.Method == http.MethodPost && r.URL.Path == "/oauth/token":
+		case r.Method == http.MethodPost && r.URL.Path == pathOAuthToken:
 			serverState.Lock()
 			serverState.polls++
 			approved := serverState.approved
@@ -81,7 +82,9 @@ func TestLogin_SavesTokenAfterApproval(t *testing.T) {
 	}))
 	defer server.Close()
 
-	proc := runLoginProcess(t, server.URL)
+	// Force the interactive device flow. The subprocess cannot read a real TTY
+	// under test, so successful completion proves polling began without a key.
+	proc := startLoginProcess(t, server.URL, []string{"ENTIRE_TEST_TTY=1"}, "login", "--device", "--insecure-http-auth")
 
 	approvalURL, deviceCode := waitForLoginPrompt(t, proc.stdout)
 	if deviceCode != "ABCD-EFGH" {
@@ -92,7 +95,7 @@ func TestLogin_SavesTokenAfterApproval(t *testing.T) {
 		t.Fatalf("approval URL = %q, want prefix %q", approvalURL, server.URL+"/")
 	}
 
-	approveReq, reqErr := http.NewRequest(http.MethodPost, approvalURL, http.NoBody)
+	approveReq, reqErr := http.NewRequestWithContext(t.Context(), http.MethodPost, approvalURL, http.NoBody)
 	if reqErr != nil {
 		t.Fatalf("create approve request: %v", reqErr)
 	}
@@ -108,7 +111,7 @@ func TestLogin_SavesTokenAfterApproval(t *testing.T) {
 		t.Fatalf("login command failed: %v\nOutput:\n%s", waitErr, output)
 	}
 
-	if !strings.Contains(output, "Waiting for approval...") {
+	if !strings.Contains(output, "Waiting for approval…") {
 		t.Fatalf("output missing wait message:\n%s", output)
 	}
 
@@ -140,7 +143,7 @@ func TestLogin_ExpiredFlow(t *testing.T) {
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
-		case r.Method == http.MethodPost && r.URL.Path == "/device_authorization":
+		case r.Method == http.MethodPost && r.URL.Path == pathDeviceAuthorization:
 			writeJSON(t, w, http.StatusOK, map[string]any{
 				"device_code":               "device-expired",
 				"user_code":                 "WXYZ-0000",
@@ -149,7 +152,7 @@ func TestLogin_ExpiredFlow(t *testing.T) {
 				"expires_in":                10,
 				"interval":                  1,
 			})
-		case r.Method == http.MethodPost && r.URL.Path == "/oauth/token":
+		case r.Method == http.MethodPost && r.URL.Path == pathOAuthToken:
 			writeJSON(t, w, http.StatusBadRequest, map[string]any{"error": "expired_token"})
 		default:
 			http.NotFound(w, r)
@@ -179,7 +182,7 @@ func TestLogin_DeniedFlow(t *testing.T) {
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
-		case r.Method == http.MethodPost && r.URL.Path == "/device_authorization":
+		case r.Method == http.MethodPost && r.URL.Path == pathDeviceAuthorization:
 			writeJSON(t, w, http.StatusOK, map[string]any{
 				"device_code":               "device-denied",
 				"user_code":                 "QRST-9999",
@@ -188,7 +191,7 @@ func TestLogin_DeniedFlow(t *testing.T) {
 				"expires_in":                10,
 				"interval":                  1,
 			})
-		case r.Method == http.MethodPost && r.URL.Path == "/oauth/token":
+		case r.Method == http.MethodPost && r.URL.Path == pathOAuthToken:
 			writeJSON(t, w, http.StatusBadRequest, map[string]any{"error": "access_denied"})
 		default:
 			http.NotFound(w, r)
@@ -214,16 +217,14 @@ func TestLogin_DeniedFlow(t *testing.T) {
 }
 
 // TestLogin_BrowserFlow_SavesToken drives the loopback authorization-code
-// flow end to end: ENTIRE_TEST_TTY=1 forces the interactive (browser)
-// default, openBrowser reports failure under test (no usable browser on a
-// headless host) so the flow prints the fallback URL, and the test plays
-// the role of the browser by parsing that URL and GETting the loopback
-// callback with a code + the state from it.
+// flow end to end: ENTIRE_TEST_TTY=1 forces the interactive browser default,
+// terminal actions are disabled under test, and the test completes sign-in
+// solely through the always-visible URL and loopback callback.
 func TestLogin_BrowserFlow_SavesToken(t *testing.T) {
 	t.Parallel()
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodPost && r.URL.Path == "/oauth/token" {
+		if r.Method == http.MethodPost && r.URL.Path == pathOAuthToken {
 			if err := r.ParseForm(); err != nil {
 				t.Errorf("parse token form: %v", err)
 			}
@@ -353,6 +354,7 @@ func waitForLoginPrompt(t *testing.T, stdout *bufio.Reader) (string, string) {
 	deadline := time.Now().Add(10 * time.Second)
 	var approvalURL string
 	var deviceCode string
+	wantURL := false
 
 	for time.Now().Before(deadline) {
 		line, err := stdout.ReadString('\n')
@@ -364,8 +366,11 @@ func waitForLoginPrompt(t *testing.T, stdout *bufio.Reader) (string, string) {
 		switch {
 		case strings.HasPrefix(line, "Device code: "):
 			deviceCode = strings.TrimPrefix(line, "Device code: ")
-		case strings.HasPrefix(line, "Login URL:"):
-			approvalURL = strings.TrimSpace(strings.TrimPrefix(line, "Login URL:"))
+		case line == "Login URL:":
+			wantURL = true
+		case wantURL && line != "":
+			approvalURL = line
+			wantURL = false
 		}
 
 		if approvalURL != "" && deviceCode != "" {
@@ -377,24 +382,25 @@ func waitForLoginPrompt(t *testing.T, stdout *bufio.Reader) (string, string) {
 	return "", ""
 }
 
-// waitForBrowserPrompt reads login stdout until it finds the
-// "Open this URL in your browser to sign in: <url>" fallback line and
-// returns the URL. Under test openBrowser reports failure (no usable
-// browser on a headless host), so the browser flow always prints this
-// fallback — which is how the test recovers the ephemeral callback URL.
+// waitForBrowserPrompt reads login stdout until it finds the always-visible
+// full browser authorization URL and returns it.
 func waitForBrowserPrompt(t *testing.T, stdout *bufio.Reader) string {
 	t.Helper()
 
-	const prefix = "Open this URL in your browser to sign in: "
 	deadline := time.Now().Add(10 * time.Second)
+	wantURL := false
 	for time.Now().Before(deadline) {
 		line, err := stdout.ReadString('\n')
 		if err != nil {
 			t.Fatalf("read login output: %v", err)
 		}
 		line = strings.TrimSpace(line)
-		if after, ok := strings.CutPrefix(line, prefix); ok {
-			return after
+		if line == "Login URL:" {
+			wantURL = true
+			continue
+		}
+		if wantURL && line != "" {
+			return line
 		}
 	}
 

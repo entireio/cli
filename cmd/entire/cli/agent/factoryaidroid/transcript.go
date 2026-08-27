@@ -3,6 +3,7 @@ package factoryaidroid
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -13,6 +14,8 @@ import (
 	"strings"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
+	"github.com/entireio/cli/cmd/entire/cli/logging"
+	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/transcript"
 	"github.com/entireio/cli/cmd/entire/cli/validation"
 )
@@ -296,7 +299,7 @@ type droidSettings struct {
 // The settings file contains the actual model being used, unlike the transcript's
 // system-reminder text which can be stale after provider switches.
 // Returns empty string if the settings file cannot be read or has no model.
-func ExtractModelFromTranscript(transcriptPath string) string {
+func ExtractModelFromTranscript(ctx context.Context, transcriptPath string) string {
 	if transcriptPath == "" {
 		return ""
 	}
@@ -309,9 +312,9 @@ func ExtractModelFromTranscript(transcriptPath string) string {
 
 	var settings droidSettings
 	if err := json.Unmarshal(data, &settings); err != nil {
-		slog.Warn("corrupt settings file, cannot extract model",
+		logging.Warn(ctx, "factoryai-droid: corrupt settings file, cannot extract model",
 			slog.String("path", settingsPath),
-			slog.Any("error", err))
+			slog.String("error", err.Error()))
 		return ""
 	}
 
@@ -366,11 +369,35 @@ func CalculateTotalTokenUsageFromBytes(data []byte, startLine int, subagentsDir 
 
 	mainUsage := CalculateTokenUsage(parsed)
 
-	agentIDs := ExtractSpawnedAgentIDs(parsed)
-	if len(agentIDs) > 0 && subagentsDir != "" {
+	if subagentsDir == "" {
+		return mainUsage, nil
+	}
+
+	// Extract spawned agent IDs from the FULL transcript (startLine=0): a
+	// subagent spawned before this checkpoint's startLine can keep writing to
+	// its transcript, so scanning only the slice would undercount it (#329).
+	//
+	// PERF (considered, retained deliberately): this re-parses the full
+	// transcript in addition to the sliced parse above — two JSONL parses per
+	// call, growing with session length. A single-pass version was rejected:
+	// the Droid parser drops non-message / malformed lines, so a parsed-entry
+	// index does not map to a raw line number and naively slicing the full parse
+	// at startLine would misattribute main-agent usage; doing it safely would
+	// mean threading raw-line numbers through the shared parser. The common
+	// no-subagent case already avoids this via the subagentsDir == "" guard.
+	fullParsed, _, err := ParseDroidTranscriptFromBytes(data, 0)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse full transcript: %w", err)
+	}
+	agentIDs := ExtractSpawnedAgentIDs(fullParsed)
+	// This re-reads each subagent transcript from line 0 on every call below, so
+	// mainUsage.SubagentTokens ends up cumulative-since-session-start — see the
+	// CalculateTotalTokenUsage interface contract in cmd/entire/cli/agent for how
+	// callers must accumulate it (shared with Claude Code).
+	if len(agentIDs) > 0 {
 		subagentUsage := &agent.TokenUsage{}
 		for agentID := range agentIDs {
-			agentPath := filepath.Join(subagentsDir, fmt.Sprintf("agent-%s.jsonl", agentID))
+			agentPath := filepath.Join(subagentsDir, paths.AgentTranscriptFileName(agentID))
 			agentUsage, err := CalculateTokenUsageFromFile(agentPath, 0)
 			if err != nil {
 				continue
@@ -409,12 +436,25 @@ func ExtractAllModifiedFilesFromBytes(data []byte, startLine int, subagentsDir s
 		fileSet[f] = true
 	}
 
-	agentIDs := ExtractSpawnedAgentIDs(parsed)
 	if subagentsDir == "" {
 		return files, nil
 	}
+
+	// Find spawned subagents from the FULL transcript (startLine=0): a subagent
+	// spawned before this checkpoint's startLine may keep modifying files in
+	// later turns, and scanning only the slice would miss it (#329). Main-agent
+	// file extraction above stays scoped to the slice.
+	//
+	// PERF: the second full-transcript parse is retained deliberately for the
+	// same reasons documented on CalculateTotalTokenUsageFromBytes above; the
+	// common no-subagent case is short-circuited by the subagentsDir == "" guard.
+	fullParsed, _, err := ParseDroidTranscriptFromBytes(data, 0)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse full transcript: %w", err)
+	}
+	agentIDs := ExtractSpawnedAgentIDs(fullParsed)
 	for agentID := range agentIDs {
-		agentPath := filepath.Join(subagentsDir, fmt.Sprintf("agent-%s.jsonl", agentID))
+		agentPath := filepath.Join(subagentsDir, paths.AgentTranscriptFileName(agentID))
 		agentLines, _, agentErr := ParseDroidTranscript(agentPath, 0)
 		if agentErr != nil {
 			continue

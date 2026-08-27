@@ -76,18 +76,6 @@ func TestIsTrailerLine(t *testing.T) {
 	}
 }
 
-func TestFormatMetadata(t *testing.T) {
-	message := "Update authentication logic"
-	metadataDir := ".entire/metadata/2025-01-28-abc123"
-
-	expected := "Update authentication logic\n\nEntire-Metadata: .entire/metadata/2025-01-28-abc123\n"
-	got := FormatMetadata(message, metadataDir)
-
-	if got != expected {
-		t.Errorf("FormatMetadata() = %q, want %q", got, expected)
-	}
-}
-
 func TestParseMetadata(t *testing.T) {
 	tests := []struct {
 		name      string
@@ -351,8 +339,9 @@ func TestParseCheckpoint(t *testing.T) {
 
 // TestHasOPFApplied covers the Entire-OPF-Applied trailer reader. The
 // trailer marks a v1 commit whose blobs have been redacted by the
-// OpenAI Privacy Filter (8-layer); commits without it carry 7-layer
-// content and are eligible for the pre-push rewrite to add OPF.
+// OpenAI Privacy Filter (OPF-applied, 9-layer); commits without it carry
+// regex-only (8-layer) content and are eligible for the pre-push rewrite
+// to add OPF.
 func TestHasOPFApplied(t *testing.T) {
 	t.Parallel()
 	cases := []struct {

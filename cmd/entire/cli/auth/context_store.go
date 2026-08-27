@@ -3,18 +3,32 @@ package auth
 import (
 	"errors"
 	"fmt"
+	"slices"
+	"strings"
 
 	"github.com/entireio/cli/internal/entireclient/contexts"
 	"github.com/entireio/cli/internal/entireclient/tokenstore"
 	"github.com/entireio/cli/internal/entireclient/userdirs"
 )
 
-// RemoveCurrentContext deletes the active context's keyring tokens and its
-// contexts.json entry, clearing current_context. It is a no-op (returns nil)
-// when there is no current context. Used by logout.
+// RemoveCurrentContext deletes the acting context's keyring tokens and its
+// contexts.json entry, clearing current_context when it pointed there. It is a
+// no-op (returns nil) when there is no acting context. Used by logout.
+//
+// It resolves through File.Active, so `entire logout --context staging` removes
+// the login it just revoked. Resolving the removal target differently from the
+// revocation target (which comes from resolveStatusTarget, also via Active)
+// would end one session server-side while deleting a different login's
+// credentials locally.
 func RemoveCurrentContext() error {
 	if err := removeContextLocked(func(f *contexts.File) *contexts.Context {
-		return f.Find(f.CurrentContext)
+		sel, err := f.Active()
+		if err != nil {
+			// Unresolvable explicit selection: remove nothing rather than
+			// falling back to current_context, which is not what was asked for.
+			return nil
+		}
+		return sel.Context
 	}); err != nil {
 		return fmt.Errorf("remove current context: %w", err)
 	}
@@ -30,6 +44,34 @@ func RemoveContext(name string) error {
 		return f.Find(name)
 	}); err != nil {
 		return fmt.Errorf("remove context %q: %w", name, err)
+	}
+	return nil
+}
+
+// RememberJurisdictionAudience adds audience to context `name`'s
+// JurisdictionAudiences, so logout can find the matching keyring slot.
+// Idempotent: an already-recorded audience rewrites nothing.
+//
+// Callers MUST record before writing the token to the credential store — a
+// persisted-but-unrecorded token is a bearer logout can't find, whereas a
+// failed record that aborts the write costs only one token exchange.
+func RememberJurisdictionAudience(name, audience string) error {
+	aud := strings.TrimRight(strings.TrimSpace(audience), "/")
+	if name == "" || aud == "" {
+		return errors.New("context name and jurisdiction audience are both required")
+	}
+	if err := contexts.Modify(userdirs.Config(), func(f *contexts.File) (bool, error) {
+		c := f.Find(name)
+		if c == nil {
+			return false, fmt.Errorf("no login context named %q", name)
+		}
+		if slices.Contains(c.JurisdictionAudiences, aud) {
+			return false, nil
+		}
+		c.JurisdictionAudiences = append(c.JurisdictionAudiences, aud)
+		return true, nil
+	}); err != nil {
+		return fmt.Errorf("record jurisdiction audience %q for context %q: %w", aud, name, err)
 	}
 	return nil
 }
@@ -53,7 +95,7 @@ func removeContextLocked(pick func(*contexts.File) *contexts.Context) error {
 		if c == nil {
 			return false, nil
 		}
-		if err := deleteContextKeychain(c.KeychainService, c.Handle); err != nil {
+		if err := deleteContextKeychain(c); err != nil {
 			return false, fmt.Errorf("remove credentials for %q: %w", c.Name, err)
 		}
 		f.Delete(c.Name)
@@ -61,20 +103,40 @@ func removeContextLocked(pick func(*contexts.File) *contexts.Context) error {
 	})
 }
 
-// deleteContextKeychain removes a context's keyring slots. A missing entry
-// is fine; any other failure surfaces so logout doesn't claim success over
-// surviving credentials. The refresh slot goes first — it's the long-lived
-// credential, and if the second delete then fails, the leftover access
-// token at least expires on its own.
-func deleteContextKeychain(svc, handle string) error {
-	if svc == "" || handle == "" {
+// deleteContextKeychain removes every keyring slot a context owns: the paired
+// refresh + access tokens, plus one jurisdiction (data-plane) access token per
+// recorded audience — each of those authorizes git against every repo the
+// account can reach. A missing entry is fine; any other failure surfaces so
+// logout doesn't claim success over surviving credentials.
+//
+// Deletion runs longest-lived-first — refresh (indefinite), jurisdiction (8h),
+// access (an hour at most) — so a mid-sequence failure leaves behind only the
+// shorter-lived credential. Unrecorded jurisdiction slots are unreachable (no
+// enumeration API) and left to expire.
+func deleteContextKeychain(c *contexts.Context) error {
+	if c == nil || c.Handle == "" {
 		return nil
 	}
-	if err := tokenstore.Delete(tokenstore.RefreshService(svc), handle); err != nil && !errors.Is(err, tokenstore.ErrNotFound) {
-		return fmt.Errorf("delete refresh token: %w", err)
+	if c.KeychainService != "" {
+		if err := tokenstore.Delete(tokenstore.RefreshService(c.KeychainService), c.Handle); err != nil && !errors.Is(err, tokenstore.ErrNotFound) {
+			return fmt.Errorf("delete refresh token: %w", err)
+		}
 	}
-	if err := tokenstore.Delete(svc, handle); err != nil && !errors.Is(err, tokenstore.ErrNotFound) {
-		return fmt.Errorf("delete access token: %w", err)
+	for _, audience := range c.JurisdictionAudiences {
+		// A blank entry can only come from a hand-edited or corrupted
+		// contexts.json, and would resolve to the bare service prefix — no
+		// token lives there, so skip rather than round-trip the keyring.
+		if strings.TrimSpace(audience) == "" {
+			continue
+		}
+		if err := tokenstore.Delete(tokenstore.JurisdictionService(audience), c.Handle); err != nil && !errors.Is(err, tokenstore.ErrNotFound) {
+			return fmt.Errorf("delete jurisdiction token for %s: %w", audience, err)
+		}
+	}
+	if c.KeychainService != "" {
+		if err := tokenstore.Delete(c.KeychainService, c.Handle); err != nil && !errors.Is(err, tokenstore.ErrNotFound) {
+			return fmt.Errorf("delete access token: %w", err)
+		}
 	}
 	return nil
 }
@@ -97,9 +159,39 @@ func SetCurrentContext(name string) error {
 	return nil
 }
 
-// Contexts returns all stored login contexts and the current context name,
-// for listing/switching. Order matches on-disk order.
+// Contexts returns all stored login contexts and the name of the one currently
+// acting, for listing/switching and for the status/logout targets. Order matches
+// on-disk order.
+//
+// The second return is the EFFECTIVE active name, so a `--context`/
+// $ENTIRE_CONTEXT selection is what `auth status` reports, what `auth contexts`
+// marks, and what `logout` revokes — the alternative is status describing one
+// identity while every other command uses another.
 func Contexts() ([]*contexts.Context, string, error) {
+	f, err := contexts.Load(userdirs.Config())
+	if err != nil {
+		return nil, "", fmt.Errorf("load contexts: %w", err)
+	}
+	sel, err := f.Active()
+	if err != nil {
+		return nil, "", err //nolint:wrapcheck // UnknownContextError is already a complete operator message
+	}
+	if sel.Context == nil {
+		return f.Contexts, "", nil
+	}
+	return f.Contexts, sel.Context.Name, nil
+}
+
+// StoredContexts returns all stored login contexts and the STORED
+// current_context, ignoring any `--context`/$ENTIRE_CONTEXT override.
+//
+// Use this for questions about what is *persisted* — does a default exist, what
+// should become the new default — as opposed to which identity is *acting*,
+// which is Contexts. Resolving the acting identity here would answer the wrong
+// question: after `logout --context staging` the override names a context that
+// no longer exists, so Active fails and a caller asking "is a default still
+// set?" would silently get an error instead of "no".
+func StoredContexts() ([]*contexts.Context, string, error) {
 	f, err := contexts.Load(userdirs.Config())
 	if err != nil {
 		return nil, "", fmt.Errorf("load contexts: %w", err)

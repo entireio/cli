@@ -4,9 +4,11 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
@@ -96,7 +98,7 @@ func TestMaybeOfferSessionImport_FirstRunGate(t *testing.T) {
 	}
 }
 
-func TestMaybeOfferSessionImport_NonInteractiveAutoImportsAll(t *testing.T) {
+func TestMaybeOfferSessionImport_ImportHistoryImportsAllWithoutPrompting(t *testing.T) {
 	// Not parallel: overrides seams and chdirs into a temp repo.
 	dir := t.TempDir()
 	testutil.InitRepo(t, dir)
@@ -117,17 +119,81 @@ func TestMaybeOfferSessionImport_NonInteractiveAutoImportsAll(t *testing.T) {
 		func(_ context.Context, _ io.Writer, _ string, sel []eligibleImport) { ran = sel },
 	)
 
-	// opts.Yes forces the non-interactive path even if a TTY is present.
-	maybeOfferSessionImport(context.Background(), io.Discard, nil, EnableOptions{Yes: true}, true)
+	// --import-history is the explicit, non-interactive opt-in: it imports
+	// every eligible agent and never asks.
+	maybeOfferSessionImport(context.Background(), io.Discard, nil, EnableOptions{ImportHistory: true}, true)
 	if promptCalled {
-		t.Error("prompt shown under --yes; non-interactive enable must not prompt")
+		t.Error("prompt shown under --import-history; the flag is already the answer")
 	}
 	if len(ran) != len(eligible) {
 		t.Fatalf("imported %d agents, want all %d", len(ran), len(eligible))
 	}
 }
 
-func TestMaybeOfferSessionImport_NonInteractiveWithoutYesSkips(t *testing.T) {
+// TestMaybeOfferSessionImport_YesDoesNotImport pins the decision that --yes
+// ("accept all defaults") does not import agent history. The interactive
+// default is to import nothing — the multi-select pre-checks nothing — so
+// implying an import from --yes would make the unattended path do the opposite
+// of the attended one, and ingesting a month of local transcripts is its own
+// decision rather than a setup default.
+func TestMaybeOfferSessionImport_YesDoesNotImport(t *testing.T) {
+	// Not parallel: overrides seams, chdirs into a temp repo, and sets env.
+	dir := t.TempDir()
+	testutil.InitRepo(t, dir)
+	t.Chdir(dir)
+	// A real TTY is available: --yes must still not import, and must not fall
+	// through to the prompt either.
+	t.Setenv("ENTIRE_TEST_TTY", "1")
+
+	promptCalled := false
+	var ran []eligibleImport
+	withImportSeams(t,
+		func(context.Context, []agent.Agent, string) []eligibleImport {
+			return []eligibleImport{{displayName: testAgentClaude, sessionCount: 3}}
+		},
+		func(context.Context, io.Writer, []eligibleImport) ([]eligibleImport, error) {
+			promptCalled = true
+			return nil, nil
+		},
+		func(_ context.Context, _ io.Writer, _ string, sel []eligibleImport) { ran = sel },
+	)
+
+	var buf bytes.Buffer
+	maybeOfferSessionImport(context.Background(), &buf, nil, EnableOptions{Yes: true}, true)
+	if promptCalled {
+		t.Error("prompt shown under --yes; it means accept defaults without prompting")
+	}
+	if len(ran) != 0 {
+		t.Errorf("--yes auto-imported %d agent(s); history import needs its own opt-in", len(ran))
+	}
+	if got := buf.String(); !strings.Contains(got, "entire import") {
+		t.Errorf("expected a pointer to 'entire import', got %q", got)
+	}
+}
+
+// TestMaybeOfferSessionImport_ImportHistoryOnNonFirstRunIsReported proves the
+// flag is not silently dropped when it cannot apply — the user would otherwise
+// believe their history had been imported.
+func TestMaybeOfferSessionImport_ImportHistoryOnNonFirstRunIsReported(t *testing.T) {
+	// Not parallel: overrides package seams.
+	called := false
+	withImportSeams(t,
+		func(context.Context, []agent.Agent, string) []eligibleImport {
+			called = true
+			return nil
+		}, nil, nil)
+
+	var buf bytes.Buffer
+	maybeOfferSessionImport(context.Background(), &buf, nil, EnableOptions{ImportHistory: true}, false /* firstRun */)
+	if called {
+		t.Error("discovery ran on a non-first-run enable")
+	}
+	if got := buf.String(); !strings.Contains(got, flagImportHistory) || !strings.Contains(got, "entire import") {
+		t.Errorf("expected a note that --%s does not apply plus a pointer to the command, got %q", flagImportHistory, got)
+	}
+}
+
+func TestMaybeOfferSessionImport_NonInteractiveWithoutOptInSkips(t *testing.T) {
 	// Not parallel: overrides seams and chdirs into a temp repo.
 	dir := t.TempDir()
 	testutil.InitRepo(t, dir)
@@ -148,15 +214,15 @@ func TestMaybeOfferSessionImport_NonInteractiveWithoutYesSkips(t *testing.T) {
 		func(_ context.Context, _ io.Writer, _ string, sel []eligibleImport) { ran = sel },
 	)
 
-	// No --yes and no TTY: neither prompt nor auto-import; just hint at the
-	// manual command.
+	// No opt-in flag and no TTY: neither prompt nor auto-import; just hint at
+	// the manual command.
 	var buf bytes.Buffer
 	maybeOfferSessionImport(context.Background(), &buf, nil, EnableOptions{}, true)
 	if promptCalled {
 		t.Error("prompt shown in a non-interactive context")
 	}
 	if len(ran) != 0 {
-		t.Errorf("auto-imported %d agent(s) without --yes in a non-interactive context; expected skip", len(ran))
+		t.Errorf("auto-imported %d agent(s) without --import-history in a non-interactive context; expected skip", len(ran))
 	}
 	if got := buf.String(); !strings.Contains(got, "entire import") {
 		t.Errorf("expected a pointer to 'entire import', got %q", got)
@@ -280,5 +346,232 @@ func TestMaybeOfferSessionImport_PromptErrorIsBestEffort(t *testing.T) {
 	maybeOfferSessionImport(context.Background(), io.Discard, nil, EnableOptions{}, true)
 	if runCalled {
 		t.Error("import ran after a prompt error; expected skip")
+	}
+}
+
+// fixedDiscoverImporter wraps a real agentimport.Importer but overrides
+// Discover to return a fixed, caller-supplied set of session files instead of
+// scanning the agent's real transcript directory. runSelectedImports (unlike
+// the standalone `entire import` command) has no --path flag to redirect
+// discovery, so this is the seam tests use to feed it a fixture.
+type fixedDiscoverImporter struct {
+	agentimport.Importer
+
+	sessions []agentimport.SessionFile
+	// onDiscover, when set, runs as Discover is reached — the seam for
+	// observing that the import loop got this far, or for injecting a
+	// cancellation at that moment.
+	onDiscover func()
+}
+
+func (f fixedDiscoverImporter) Discover(string, string, time.Time, []string) ([]agentimport.SessionFile, error) {
+	if f.onDiscover != nil {
+		f.onDiscover()
+	}
+	return f.sessions, nil
+}
+
+// writeImportProgressFixtureSession writes a 2-turn Claude Code transcript
+// fixture, matching the format agentimport's claude importer parses.
+func writeImportProgressFixtureSession(t *testing.T, dir, name string) {
+	t.Helper()
+	content := strings.Join([]string{
+		`{"type":"user","uuid":"u1","timestamp":"2026-06-20T00:00:00Z","message":{"role":"user","content":"first"}}`,
+		`{"type":"assistant","uuid":"a1","message":{"id":"m1","model":"claude-x","content":[{"type":"text","text":"ok"}],"usage":{"output_tokens":5}}}`,
+		`{"type":"user","uuid":"u2","timestamp":"2026-06-20T00:01:00Z","message":{"role":"user","content":"second"}}`,
+	}, "\n") + "\n"
+	testutil.WriteFile(t, dir, name, content)
+}
+
+// TestRunSelectedImports_NonTTYProgressLines proves the wired-in progress
+// reporter, running against a plain (non-terminal) writer, prints exactly one
+// plain line per session — carrying the agent name, its position, and its
+// turn count — writes no ANSI escapes, and leaves the pre-existing final
+// summary line unchanged.
+func TestRunSelectedImports_NonTTYProgressLines(t *testing.T) {
+	// Not parallel: chdirs into a temp repo and performs real checkpoint writes.
+	dir := t.TempDir()
+	testutil.InitRepo(t, dir)
+	testutil.WriteFile(t, dir, "f.txt", "x")
+	testutil.GitAdd(t, dir, "f.txt")
+	testutil.GitCommit(t, dir, "init")
+	t.Chdir(dir)
+	ctx := context.Background()
+
+	sessionsDir := t.TempDir()
+	writeImportProgressFixtureSession(t, sessionsDir, "sess1.jsonl")
+	writeImportProgressFixtureSession(t, sessionsDir, "sess2.jsonl")
+
+	var claudeImp agentimport.Importer
+	for _, imp := range agentimport.All() {
+		if imp.Name() == testAgentName {
+			claudeImp = imp
+		}
+	}
+	if claudeImp == nil {
+		t.Fatal("claude-code importer not registered")
+	}
+	sessions, err := claudeImp.Discover(dir, sessionsDir, time.Now(), nil)
+	if err != nil {
+		t.Fatalf("discover fixture sessions: %v", err)
+	}
+	if len(sessions) != 2 {
+		t.Fatalf("want 2 fixture sessions, got %d", len(sessions))
+	}
+	imp := fixedDiscoverImporter{Importer: claudeImp, sessions: sessions}
+	agentName := string(claudeImp.AgentType())
+
+	var buf bytes.Buffer
+	runSelectedImports(ctx, &buf, dir, []eligibleImport{{imp: imp, displayName: agentName}})
+	out := buf.String()
+
+	if strings.ContainsRune(out, '\x1b') {
+		t.Fatalf("output contains an ESC byte on a non-TTY writer: %q", out)
+	}
+
+	wantLines := []string{
+		fmt.Sprintf("Importing %s session 1/2 (2 turns)...", agentName),
+		fmt.Sprintf("Importing %s session 2/2 (2 turns)...", agentName),
+	}
+	for _, line := range wantLines {
+		if !strings.Contains(out, line) {
+			t.Errorf("missing progress line %q in output:\n%s", line, out)
+		}
+	}
+	if got := strings.Count(out, fmt.Sprintf("Importing %s session", agentName)); got != 2 {
+		t.Errorf("got %d progress lines, want exactly 2 (one per session):\n%s", got, out)
+	}
+
+	if want := "Imported 4 turn(s) from 2 session(s) (0 already imported).\n"; !strings.Contains(out, want) {
+		t.Errorf("final summary line missing or changed; want %q in:\n%s", want, out)
+	}
+}
+
+// TestRunSelectedImports_NonTTYProgressLines_Reimport proves a second,
+// idempotent pass over an already-imported corpus (every turn hits
+// agentimport's TurnSkipped path, not TurnWritten) still prints one plain
+// progress line per session and reports the correct "0 imported" summary —
+// the non-TTY side of the bug the P2 Codex's pre-push review caught. The TTY
+// side (a fully-skipped session must still sweep the spinner to turn M/M) is
+// covered at the agentimport layer by
+// TestRun_ReimportFiresTurnSkippedNotTurnWritten; the cli wiring it depends on
+// — newImportProgressReporter routing TurnSkipped and TurnWritten through one
+// shared advance path — has no direct test because the spinner branch only
+// runs against a real terminal.
+func TestRunSelectedImports_NonTTYProgressLines_Reimport(t *testing.T) {
+	// Not parallel: chdirs into a temp repo and performs real checkpoint writes.
+	dir := t.TempDir()
+	testutil.InitRepo(t, dir)
+	testutil.WriteFile(t, dir, "f.txt", "x")
+	testutil.GitAdd(t, dir, "f.txt")
+	testutil.GitCommit(t, dir, "init")
+	t.Chdir(dir)
+	ctx := context.Background()
+
+	sessionsDir := t.TempDir()
+	writeImportProgressFixtureSession(t, sessionsDir, "sess1.jsonl")
+	writeImportProgressFixtureSession(t, sessionsDir, "sess2.jsonl")
+
+	var claudeImp agentimport.Importer
+	for _, imp := range agentimport.All() {
+		if imp.Name() == testAgentName {
+			claudeImp = imp
+		}
+	}
+	if claudeImp == nil {
+		t.Fatal("claude-code importer not registered")
+	}
+	sessions, err := claudeImp.Discover(dir, sessionsDir, time.Now(), nil)
+	if err != nil {
+		t.Fatalf("discover fixture sessions: %v", err)
+	}
+	agentName := string(claudeImp.AgentType())
+	selected := []eligibleImport{{
+		imp:         fixedDiscoverImporter{Importer: claudeImp, sessions: sessions},
+		displayName: agentName,
+	}}
+
+	// First pass actually imports; discard its output.
+	runSelectedImports(ctx, io.Discard, dir, selected)
+
+	// Second pass: every turn is already imported, so agentimport.Run's loop
+	// only ever calls TurnSkipped for it — this is the scenario that used to
+	// leave a TTY reporter frozen at "turn 0/M".
+	var buf bytes.Buffer
+	runSelectedImports(ctx, &buf, dir, selected)
+	out := buf.String()
+
+	if strings.ContainsRune(out, '\x1b') {
+		t.Fatalf("re-import output contains an ESC byte on a non-TTY writer: %q", out)
+	}
+	wantLines := []string{
+		fmt.Sprintf("Importing %s session 1/2 (2 turns)...", agentName),
+		fmt.Sprintf("Importing %s session 2/2 (2 turns)...", agentName),
+	}
+	for _, line := range wantLines {
+		if !strings.Contains(out, line) {
+			t.Errorf("missing progress line %q in re-import output:\n%s", line, out)
+		}
+	}
+	if want := "Imported 0 turn(s) from 2 session(s) (4 already imported).\n"; !strings.Contains(out, want) {
+		t.Errorf("re-import summary line missing or wrong; want %q in:\n%s", want, out)
+	}
+}
+
+// TestRunSelectedImports_InterruptedStopsBeforeNextAgent proves Ctrl-C during
+// one agent's import ends the whole offer instead of moving straight on to the
+// next agent's history — the last thing a user who just interrupted wants —
+// and that the interruption is reported as a resumable state rather than a
+// bare "context canceled" failure note.
+func TestRunSelectedImports_InterruptedStopsBeforeNextAgent(t *testing.T) {
+	// Not parallel: chdirs into a temp repo and performs real checkpoint writes.
+	dir := t.TempDir()
+	testutil.InitRepo(t, dir)
+	testutil.WriteFile(t, dir, "f.txt", "x")
+	testutil.GitAdd(t, dir, "f.txt")
+	testutil.GitCommit(t, dir, "init")
+	t.Chdir(dir)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	sessionsDir := t.TempDir()
+	writeImportProgressFixtureSession(t, sessionsDir, "sess1.jsonl")
+
+	var claudeImp agentimport.Importer
+	for _, imp := range agentimport.All() {
+		if imp.Name() == testAgentName {
+			claudeImp = imp
+		}
+	}
+	if claudeImp == nil {
+		t.Fatal("claude-code importer not registered")
+	}
+	sessions, err := claudeImp.Discover(dir, sessionsDir, time.Now(), nil)
+	if err != nil {
+		t.Fatalf("discover fixture sessions: %v", err)
+	}
+
+	var secondReached bool
+	var buf bytes.Buffer
+	runSelectedImports(ctx, &buf, dir, []eligibleImport{
+		// The first agent's import is interrupted as it starts; the second must
+		// never be reached.
+		{imp: fixedDiscoverImporter{Importer: claudeImp, sessions: sessions, onDiscover: cancel}, displayName: testAgentClaude},
+		{imp: fixedDiscoverImporter{Importer: claudeImp, onDiscover: func() { secondReached = true }}, displayName: "Cursor"},
+	})
+	out := buf.String()
+
+	if secondReached {
+		t.Error("import continued to the next agent after the run was interrupted")
+	}
+	if !strings.Contains(out, "Import interrupted") {
+		t.Errorf("interruption not reported to the user, got %q", out)
+	}
+	if want := "entire import " + testAgentName; !strings.Contains(out, want) {
+		t.Errorf("missing resume hint %q in output %q", want, out)
+	}
+	if strings.Contains(out, "could not import") {
+		t.Errorf("interruption reported as an import failure: %q", out)
 	}
 }

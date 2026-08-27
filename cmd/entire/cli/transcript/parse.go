@@ -55,9 +55,25 @@ func ParseFromBytes(content []byte) ([]Line, error) {
 // The startLine parameter is 0-indexed (startLine=0 reads from the beginning).
 // This is useful for incremental parsing when you've already processed some lines.
 func ParseFromFileAtLine(path string, startLine int) ([]Line, error) {
+	lines, _, err := ParseFromFileAtLineWithTotal(path, startLine)
+	return lines, err
+}
+
+// ParseFromFileAtLineWithTotal is ParseFromFileAtLine plus the file's total line
+// count, gathered in the same pass.
+//
+// Callers implementing agent.TranscriptAnalyzer.ExtractModifiedFilesFromOffset need
+// both halves at once: the slice from startLine, and the new position to record for
+// the next call. Reading the file twice (parse, then count) is the thing to avoid —
+// these run on hook paths where transcripts reach tens of megabytes.
+//
+// The total counts every non-empty line in the file, including lines before
+// startLine and lines too malformed to unmarshal, so it stays a faithful position
+// marker for a subsequent startLine.
+func ParseFromFileAtLineWithTotal(path string, startLine int) ([]Line, int, error) {
 	file, err := os.Open(path) //nolint:gosec // path is a controlled transcript file path
 	if err != nil {
-		return nil, fmt.Errorf("failed to open transcript: %w", err)
+		return nil, 0, fmt.Errorf("failed to open transcript: %w", err)
 	}
 	defer func() { _ = file.Close() }()
 
@@ -68,7 +84,7 @@ func ParseFromFileAtLine(path string, startLine int) ([]Line, error) {
 	for {
 		lineBytes, err := reader.ReadBytes('\n')
 		if err != nil && err != io.EOF {
-			return nil, fmt.Errorf("failed to read transcript: %w", err)
+			return nil, 0, fmt.Errorf("failed to read transcript: %w", err)
 		}
 
 		// Handle empty line or EOF without content
@@ -94,7 +110,7 @@ func ParseFromFileAtLine(path string, startLine int) ([]Line, error) {
 		}
 	}
 
-	return lines, nil
+	return lines, totalLines, nil
 }
 
 // normalizeLineType ensures line.Type is populated for all transcript formats.

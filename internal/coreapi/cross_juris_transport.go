@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/entireio/cli/cmd/entire/cli/versioninfo"
 	"github.com/entireio/cli/internal/entireclient/httpclient"
 	"github.com/entireio/cli/internal/entireclient/httputil"
 )
@@ -25,7 +26,11 @@ import (
 // home jurisdiction is another region. Inert for same-jurisdiction calls.
 func newCrossJurisHTTPClient() *http.Client {
 	return &http.Client{
-		Transport: newCrossJurisRoundTripper(httpclient.NewTransport(false)),
+		// The User-Agent wrapper goes *under* the cross-juris round tripper,
+		// not over it. That transport sends requests it builds itself — the
+		// RFC 8693 exchange and the federation manifest fetch, both straight
+		// to t.base — and those bypass anything wrapped outside it.
+		Transport: newCrossJurisRoundTripper(versioninfo.WrapTransport(httpclient.NewTransport(false))),
 	}
 }
 
@@ -213,7 +218,14 @@ func (t *crossJurisRoundTripper) send(req *http.Request, body []byte, originalAu
 
 	resp, err := t.base.RoundTrip(req)
 	if err != nil {
-		return nil, fmt.Errorf("cross-juris transport: base round trip: %w", err)
+		// Returned verbatim: http.Client wraps every RoundTripper failure in a
+		// *url.Error that already names the method and URL, so a prefix here
+		// only pads the one line a user sees when a core is unreachable
+		// ("...: cross-juris transport: base round trip: dial tcp ...: connection
+		// refused") without locating the failure any better. The other failure
+		// sites in this file keep their prefixes — they name mechanisms a bare
+		// error wouldn't reveal (body buffering, the 421/401 exchange).
+		return nil, err //nolint:wrapcheck // see above
 	}
 
 	switch resp.StatusCode {

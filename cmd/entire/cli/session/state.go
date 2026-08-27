@@ -3,6 +3,7 @@ package session
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -10,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"testing"
 	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
@@ -94,6 +96,14 @@ func (k Kind) IsInvestigate() bool {
 func (k Kind) IsImported() bool {
 	// See IsReview for why this is an equality check rather than a switch.
 	return k == KindImported
+}
+
+// CondensationAttempt records the durable intent for an in-progress
+// condensation. RecoveryPending is set only when doctor must first look for a
+// checkpoint written before attempt IDs existed.
+type CondensationAttempt struct {
+	CheckpointID    id.CheckpointID `json:"checkpoint_id"`
+	RecoveryPending bool            `json:"recovery_pending,omitempty"`
 }
 
 // State represents the state of an active session.
@@ -201,6 +211,13 @@ type State struct {
 	// Used for stale session detection in "entire doctor".
 	LastInteractionTime *time.Time `json:"last_interaction_time,omitempty"`
 
+	// CaptureDegradedAt records when the session's most recent turn degraded
+	// capture because a worktree status scan breached its budget (new-file
+	// detection skipped, or the checkpoint itself skipped). Set at turn end,
+	// cleared by the next turn whose scans stay within budget. Surfaced as a
+	// warning by `entire status`.
+	CaptureDegradedAt *time.Time `json:"capture_degraded_at,omitempty"`
+
 	// StepCount is the number of checkpoints/steps created in this session.
 	// JSON tag kept as "checkpoint_count" for backward compatibility with existing state files.
 	StepCount int `json:"checkpoint_count"`
@@ -242,6 +259,10 @@ type State struct {
 	// sessions that have been condensed at least once. Cleared on new prompt.
 	LastCheckpointID id.CheckpointID `json:"last_checkpoint_id,omitempty"`
 
+	// CondensationAttempt is saved before a persistent checkpoint write so a
+	// retry after process death keeps both the intended ID and recovery mode.
+	CondensationAttempt *CondensationAttempt `json:"condensation_attempt,omitempty"`
+
 	// LastCheckpointCommitHash is the exact commit SHA that carried
 	// LastCheckpointID at condensation time. Used by the reconcile path to
 	// distinguish "reset back to the condensed commit" (same SHA) from
@@ -266,8 +287,9 @@ type State struct {
 	// successful condensation). Prevents repeated warnings on every commit.
 	DivergenceNoticeShown bool `json:"divergence_notice_shown,omitempty"`
 
-	// AttachedManually indicates this session was imported via `entire attach` rather
-	// than being captured by hooks during normal agent execution.
+	// AttachedManually indicates this session was imported via
+	// `entire session attach` rather than being captured by hooks during
+	// normal agent execution.
 	AttachedManually bool `json:"attached_manually,omitempty"`
 
 	// ContextInjectionDecided records that the once-per-session model-context
@@ -286,17 +308,74 @@ type State struct {
 	// Set from hook data when the agent provides it.
 	ModelName string `json:"model_name,omitempty"`
 
-	// Token usage tracking (accumulated across all checkpoints in this session)
+	// Token usage tracking (accumulated across all checkpoints in this session).
+	//
+	// DECISION: SubagentTokens is "latest snapshot wins", not summed. Subagent
+	// usage arrives as a cumulative-since-session-start total (each subagent
+	// transcript is re-read from line 0 every call), so accumulateTokenUsage
+	// replaces rather than adds it (see cmd/entire/cli/strategy). Tradeoff: if
+	// the main transcript resets or rotates mid-session (compaction writing a
+	// fresh file, or a resume that truncates), a subsequent snapshot can be
+	// SMALLER than a previous one, so this session-wide total regresses
+	// (undercounts) for the rest of the session. This is accepted: undercounting
+	// after a transcript reset is preferable to the multiplicative overcount the
+	// summing approach produced, and the alternative (a session-wide high-water
+	// mark) would mask genuine subagent-transcript cleanup. Checkpoint deltas do
+	// not share this exposure — CheckpointTokenUsage.SubagentTokens is derived as
+	// (this total - SubagentTokensBaseline) and floored at 0 by clampSubtract, so
+	// a shrunk snapshot yields 0, never a negative or stale delta.
 	TokenUsage *agent.TokenUsage `json:"token_usage,omitempty"`
 
 	// CheckpointTokenUsage tracks hook-provided token usage since the last condensation.
 	// This is checkpoint-scoped; TokenUsage remains the session-wide total.
 	CheckpointTokenUsage *agent.TokenUsage `json:"checkpoint_token_usage,omitempty"`
 
+	// SubagentTokensBaseline is a snapshot of TokenUsage.SubagentTokens captured
+	// at the last condensation reset. Subagent token usage is always re-read
+	// from the start of each subagent transcript (agent IDs are discovered from
+	// the full main transcript so subagents spawned before the checkpoint
+	// window are still found), so it arrives as a cumulative-since-session-start
+	// total rather than a per-checkpoint delta. This baseline lets
+	// CheckpointTokenUsage.SubagentTokens be rescoped to "since last
+	// condensation" via SubtractTokenUsage instead of re-adding the same
+	// cumulative total on every checkpoint.
+	SubagentTokensBaseline *agent.TokenUsage `json:"subagent_tokens_baseline,omitempty"`
+
 	// SkillEvents records explicit native skill signals observed during this session.
 	// Stored as sidecar metadata so consumers can collapse skill-related transcript events
 	// without mutating the raw agent transcript.
+	//
+	// This grows for the life of the session and is deliberately uncapped. It is
+	// also the durable half of the exactly-once contract for skill telemetry:
+	// extraction re-derives events from transcript offset 0 on every pass and
+	// dedupes against this ledger (strategy.appendNewSkillEvents), so an event
+	// whose entry never reached disk is announced twice. Trimming it therefore
+	// re-enables double-reporting for exactly the long sessions a cap would
+	// target.
+	//
+	// The cost is real but bounded, and it is paid on EVERY MutateSessionState —
+	// i.e. every hook, including PostToolUse — because state is read and written
+	// whole. Measured JSON round-trip: 0 events / 106 B / 1.6us; 10 / 6.0 KB /
+	// 42us; 50 / 29.7 KB / 201us; 200 / 119 KB / 785us, i.e. ~594 B per event
+	// and sub-millisecond at any realistic N. The steady-state dedupe rebuild is
+	// cheap by comparison: 13us at 200 existing events.
+	//
+	// So a 100 KB session state is expected, not a leak. If the envelope ever
+	// does need shrinking, the move is a narrower ledger — persist only the
+	// dedupe keys (~40 B/event) and keep the full events transient — not a
+	// truncation, which would break exactly-once.
 	SkillEvents []agent.SkillEvent `json:"skill_events,omitempty"`
+
+	// CommitCondensedSignalCheckpointID is the checkpoint ID of the last
+	// cli_commit_condensed telemetry signal this session snapshotted, the
+	// durable half of that signal's at-most-once contract. A `git commit
+	// --amend` re-runs PostCommit with the SAME trailer checkpoint ID (an
+	// ACTIVE session re-condenses unconditionally), so without this ledger one
+	// logical commit is counted twice in both halves of the miss-rate ratio.
+	// Persisted by the same state save that gates the emit, so a failed save
+	// retries cleanly; a crash between save and emit loses the row, which is
+	// the signal's accepted best-effort posture.
+	CommitCondensedSignalCheckpointID string `json:"commit_condensed_signal_checkpoint_id,omitempty"`
 
 	// Hook-provided session metrics (for agents like Cursor that report via hooks)
 	SessionDurationMs int64 `json:"session_duration_ms,omitempty"`
@@ -350,6 +429,164 @@ type State struct {
 	// resolved, in which case liveness falls back to the StuckActiveThreshold
 	// timeout. Only meaningful on Owner.Host.
 	Owner *proclive.Identity `json:"owner,omitempty"`
+
+	// TaskRecords tracks subagents dispatched by this session — the durable
+	// pointer ledger for subagent work. See TaskRecord.
+	TaskRecords []TaskRecord `json:"task_records,omitempty"`
+}
+
+// TaskRecord is the durable pointer ledger entry for a subagent dispatched by
+// this session: a small session-state record (correlation ID, agent type,
+// description, declared transcript path, files touched, tokens) rather than a
+// shadow-tree write. Condensation is what materializes a record's transcript
+// (sanitize → externalize → redact) into the parent session's checkpoint —
+// see docs/superpowers/plans/2026-08-19-subagent-durable-records.md.
+//
+// CompletedAt zero means the record is still in flight (background launch
+// observed, no completion signal yet); non-zero means the record was
+// completed — via CompleteTaskRecord — by a foreground/background post-task
+// capture, SubagentStop, or the SessionEnd sweep. Unlike the prior
+// remove-on-claim model, a completed record is NOT deleted: it must persist
+// so a later condensation can materialize its transcript. Consumed by the
+// Final captures — the SubagentStop handler (handleSubagentStopFinal) and the
+// SessionEnd sweep (completeLiveTaskRecords). A Final capture completes the
+// record LAST, after successful extraction (strategy.CompleteTaskRecord's
+// exactly-once mutation), so a failed capture leaves the record live for the
+// SessionEnd sweep to retry.
+type TaskRecord struct {
+	// ToolUseID is the Task tool invocation's tool_use_id — the same ID used
+	// to key TaskMetadataDir. Dedup key for AddTaskRecord.
+	ToolUseID string `json:"tool_use_id"`
+
+	// AgentID is the subagent identifier (tool_response.agentId at launch
+	// time), used to resolve the subagent's own transcript file.
+	AgentID string `json:"agent_id,omitempty"`
+
+	// StartedAt is when the background launch was observed.
+	StartedAt time.Time `json:"started_at"`
+
+	// SubagentType and TaskDescription are captured at launch time because
+	// SubagentStop payloads carry no tool_input — a Final-path capture has no
+	// way to derive them from the event itself (ParseSubagentTypeAndDescription
+	// yields empty strings on a nil ToolInput). The Final handler reads these
+	// from the record to label the task step, falling back to the event's own
+	// fields only when the record is absent.
+	SubagentType    string `json:"subagent_type,omitempty"`
+	TaskDescription string `json:"task_description,omitempty"`
+
+	// DeclaredTranscriptPath is the subagent transcript path an agent's stop
+	// hook declared (e.g. Claude Code's agent_transcript_path, or the
+	// equivalent Codex/Cursor field) — the path #2058 says must not be lost
+	// between mid-turn capture and condensation-time materialization. Empty
+	// when no declared path was available; the materializer falls back to
+	// ResolveAgentTranscriptPath in that case.
+	DeclaredTranscriptPath string `json:"declared_transcript_path,omitempty"`
+
+	// Files is the set of files touched by this subagent, merged into the
+	// session's FilesTouched at completion time. Populated when the record
+	// is completed; empty for a still in-flight record and for a completed
+	// read-only subagent.
+	Files []string `json:"files,omitempty"`
+
+	// TokenUsage is this subagent's token usage, when the completing hook
+	// payload provided one. nil when unavailable.
+	TokenUsage *agent.TokenUsage `json:"token_usage,omitempty"`
+
+	// CompletedAt is when this record was completed (CompleteTaskRecord).
+	// Zero means the record is still in flight. See the type doc comment.
+	CompletedAt time.Time `json:"completed_at,omitempty"`
+}
+
+// AddTaskRecord records a subagent launch, replacing any existing entry with
+// the same ToolUseID. Dedup by ToolUseID: a retried or duplicate launch event
+// must not create two records for the same task, which would make
+// RemoveTaskRecord leave a stale entry behind after the first is cleared.
+func (s *State) AddTaskRecord(task TaskRecord) {
+	for i, existing := range s.TaskRecords {
+		if existing.ToolUseID == task.ToolUseID {
+			s.TaskRecords[i] = task
+			return
+		}
+	}
+	s.TaskRecords = append(s.TaskRecords, task)
+}
+
+// RemoveTaskRecord clears the record for toolUseID, if present. No-op when no
+// record matches. Retained for tests and any caller that genuinely wants to
+// discard a record outright — ordinary completion should use
+// CompleteTaskRecord instead, which keeps the record for the materializer.
+func (s *State) RemoveTaskRecord(toolUseID string) {
+	for i, existing := range s.TaskRecords {
+		if existing.ToolUseID == toolUseID {
+			s.TaskRecords = append(s.TaskRecords[:i], s.TaskRecords[i+1:]...)
+			return
+		}
+	}
+}
+
+// FindTaskRecord returns a pointer to the record for toolUseID, or nil if
+// none exists. The pointer aliases the slice element, so callers must not
+// retain it across a mutation that could reallocate TaskRecords (e.g.
+// AddTaskRecord, RemoveTaskRecord).
+func (s *State) FindTaskRecord(toolUseID string) *TaskRecord {
+	for i := range s.TaskRecords {
+		if s.TaskRecords[i].ToolUseID == toolUseID {
+			return &s.TaskRecords[i]
+		}
+	}
+	return nil
+}
+
+// CompleteTaskRecord marks the record for toolUseID as consumed exactly
+// once: it sets CompletedAt and returns true, or returns false — a no-op —
+// when no record exists for toolUseID or it was already completed
+// (CompletedAt already non-zero). This is the exactly-once completion guard
+// equivalent to the old claim-and-remove semantics: whichever caller
+// observes true proceeds with the capture, a racing duplicate sees false and
+// skips.
+//
+// The data fields (DeclaredTranscriptPath, Files, TokenUsage) are NOT set
+// here. They are populated separately by the producer after successful
+// extraction, via direct field mutation on the claimed record within the
+// same MutateSessionState closure that called CompleteTaskRecord — see
+// strategy.CompleteTaskRecord, the producer-facing wrapper that pairs the
+// claim with the attach inside one lock.
+func (s *State) CompleteTaskRecord(toolUseID string, completedAt time.Time) bool {
+	for i := range s.TaskRecords {
+		if s.TaskRecords[i].ToolUseID != toolUseID {
+			continue
+		}
+		if !s.TaskRecords[i].CompletedAt.IsZero() {
+			return false
+		}
+		s.TaskRecords[i].CompletedAt = completedAt
+		return true
+	}
+	return false
+}
+
+// HasTaskContent reports whether this session carries pending subagent task
+// content: any task record — live (transcript-so-far still needs capturing)
+// or completed-unmaterialized (awaiting condensation) — counts. Condensation
+// triggers and session-empty guards key on this, not on shadow-branch
+// existence: task records never touch the shadow branch.
+func (s *State) HasTaskContent() bool {
+	return len(s.TaskRecords) > 0
+}
+
+// LiveTaskRecords returns the records not yet completed (CompletedAt zero) —
+// i.e. still in flight. In-flight consumers (the SessionEnd sweep's "any
+// in-flight work?" check) must use this rather than the raw TaskRecords
+// slice: since CompleteTaskRecord no longer removes a record, TaskRecords
+// mixes live records with already-completed ones awaiting materialization.
+func (s *State) LiveTaskRecords() []TaskRecord {
+	var live []TaskRecord
+	for _, r := range s.TaskRecords {
+		if r.CompletedAt.IsZero() {
+			live = append(live, r)
+		}
+	}
+	return live
 }
 
 // PromptAttribution captures line-level attribution data at the start of each prompt.
@@ -439,6 +676,54 @@ func (s *State) ClearLegacyTranscriptOffsets() {
 	s.TranscriptLinesAtStart = 0
 }
 
+// PendingCondensationID returns the checkpoint ID reserved for an in-progress
+// condensation, or the empty ID when no attempt is pending.
+func (s *State) PendingCondensationID() id.CheckpointID {
+	if s.CondensationAttempt == nil {
+		return id.EmptyCheckpointID
+	}
+	return s.CondensationAttempt.CheckpointID
+}
+
+// BeginCondensationAttempt records a checkpoint ID before its persistent write.
+func (s *State) BeginCondensationAttempt(checkpointID id.CheckpointID) {
+	s.CondensationAttempt = &CondensationAttempt{CheckpointID: checkpointID}
+}
+
+// RequireCondensationRecovery keeps legacy orphan reconciliation enabled for
+// the current attempt. It has no effect when no attempt is pending.
+func (s *State) RequireCondensationRecovery() {
+	if s.CondensationAttempt != nil {
+		s.CondensationAttempt.RecoveryPending = true
+	}
+}
+
+// NeedsCondensationRecovery reports whether doctor must reconcile a checkpoint
+// written before attempt IDs existed.
+func (s *State) NeedsCondensationRecovery() bool {
+	return s.CondensationAttempt != nil && s.CondensationAttempt.RecoveryPending
+}
+
+// ClearCondensationAttempt completes or abandons the pending condensation.
+func (s *State) ClearCondensationAttempt() {
+	s.CondensationAttempt = nil
+}
+
+// RebaselineSubagentTokens snapshots the current cumulative subagent total
+// (TokenUsage.SubagentTokens) into SubagentTokensBaseline so the next checkpoint
+// window's CheckpointTokenUsage.SubagentTokens is rescoped to "since this
+// re-baseline" rather than re-reporting the full cumulative subagent total.
+//
+// The invariant is: every site that starts a fresh checkpoint window by clearing
+// CheckpointTokenUsage MUST also re-baseline. Callers: the condensation reset
+// helper (resetCheckpointWindow) and cross-repo session adoption, which likewise
+// opens a fresh target-local window. Sharing this here keeps the two in step.
+func (s *State) RebaselineSubagentTokens() {
+	if s.TokenUsage != nil {
+		s.SubagentTokensBaseline = s.TokenUsage.SubagentTokens
+	}
+}
+
 // RealignAttributionBase sets AttributionBaseCommit to newBase and clears any
 // bookkeeping whose meaning depends on attribution being diverged from the
 // shadow-branch base. Call this every time a code path intentionally brings
@@ -478,18 +763,38 @@ func (s *State) OwnerLiveness() proclive.Liveness {
 	return proclive.Check(*s.Owner)
 }
 
-// OwnerExited reports true when this session is ACTIVE but its owning agent
-// process is gone — exited cleanly, crashed, was killed, or the machine
-// rebooted — without a SessionStop hook firing. Unlike IsStuckActive (a
-// time-based heuristic), this is detected immediately, regardless of how
-// recently the session interacted. It returns false when liveness is Unknown
-// (no owner recorded, cross-host state, or an unsupported platform) so behavior
-// degrades to the StuckActiveThreshold timeout.
+// OwnerExited reports true when this session's owning agent process is gone —
+// exited cleanly, crashed, was killed, or the machine rebooted — without a
+// SessionStop hook firing. Unlike IsStuckActive (a time-based heuristic), this
+// is detected immediately, regardless of how recently the session interacted.
+// It returns false when liveness is Unknown (no owner recorded, cross-host
+// state, or an unsupported platform) so behavior degrades to the
+// StuckActiveThreshold timeout.
+//
+// It deliberately covers IDLE as well as ACTIVE. An agent that finishes its
+// last turn and then quits leaves the session IDLE, so gating on ACTIVE alone
+// missed precisely the sessions left behind by agents with no session-end hook
+// (Codex before 0.146) or killed before that hook could run: they lingered as
+// "active" in `entire status` until StaleSessionThreshold deleted the state
+// file outright, discarding pending checkpoint work instead of condensing it.
+// Only already-finalized sessions are excluded — see IsEnded.
 func (s *State) OwnerExited() bool {
-	if !s.Phase.IsActive() {
+	if s.IsEnded() {
 		return false
 	}
 	return s.OwnerLiveness() == proclive.LivenessDead
+}
+
+// IsEnded reports whether this session has been finalized — the canonical
+// "no longer a live session" predicate.
+//
+// Both halves matter and neither implies the other in practice: Phase is what
+// the state machine sets, EndedAt is what the finalizing write stamps, and a
+// state file can carry one without the other (a legacy record, or a partial
+// write). Callers that filter for active sessions must agree on this rule, so
+// it lives here rather than being re-spelled at each site.
+func (s *State) IsEnded() bool {
+	return s.Phase == PhaseEnded || s.EndedAt != nil
 }
 
 func (s *State) IsStale() bool {
@@ -529,9 +834,93 @@ func NewStateStore(ctx context.Context) (*StateStore, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to get git common dir: %w", err)
 	}
+	if err := ensureTestIsolatedStateDir(commonDir); err != nil {
+		return nil, err
+	}
 	return &StateStore{
 		stateDir: filepath.Join(commonDir, SessionStateDirName),
 	}, nil
+}
+
+// NewStateStoreForWorktree returns the state store for the repository at
+// worktreeRoot, independent of the process's working directory. Callers that
+// operate on a repo passed as an argument (e.g. agent import) must use this:
+// the CWD-resolved NewStateStore writes session state into whatever repo the
+// process happens to run in, which is how test fixtures once leaked into a
+// developer's real .git/entire-sessions and hijacked commit linking.
+func NewStateStoreForWorktree(ctx context.Context, worktreeRoot string) (*StateStore, error) {
+	// An empty root would silently degrade to the process CWD (cmd.Dir = ""),
+	// reproducing exactly the accidental-repo leak this constructor exists to
+	// prevent.
+	if worktreeRoot == "" {
+		return nil, errors.New("worktree root required to scope the session state store")
+	}
+	cmd := exec.CommandContext(ctx, "git", "rev-parse", "--git-common-dir")
+	cmd.Dir = worktreeRoot
+	output, err := cmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("resolve git common dir for %s: %w", worktreeRoot, err)
+	}
+	commonDir := strings.TrimSpace(string(output))
+	if !filepath.IsAbs(commonDir) {
+		commonDir = filepath.Join(worktreeRoot, commonDir)
+	}
+	// Same go-test guard as NewStateStore: an explicit root computed from the
+	// process CWD in a non-isolated test is just as accidental as the CWD
+	// itself.
+	if err := ensureTestIsolatedStateDir(commonDir); err != nil {
+		return nil, err
+	}
+	return &StateStore{
+		stateDir: filepath.Join(filepath.Clean(commonDir), SessionStateDirName),
+	}, nil
+}
+
+// ensureTestIsolatedStateDir fails loud when `go test` code reaches a
+// session state directory outside the temp root: the test is missing repo
+// isolation (testutil.InitRepo + t.Chdir, or NewStateStoreForWorktree /
+// NewStateStoreWithDir with a temp repo). Silence here is how fixture
+// sessions once landed in a real repo's .git/entire-sessions and were then
+// picked up by commit-to-session linking. Spawned binaries are unaffected:
+// testing.Testing() is false in subprocesses, and integration/e2e harnesses
+// isolate via environment instead.
+func ensureTestIsolatedStateDir(commonDir string) error {
+	if !testing.Testing() {
+		return nil
+	}
+	// getGitCommonDir can return a cwd-relative ".git"; the temp-root
+	// comparison needs the absolute location.
+	if abs, err := filepath.Abs(commonDir); err == nil {
+		commonDir = abs
+	}
+	if underTempRoot(commonDir) {
+		return nil
+	}
+	return fmt.Errorf(
+		"session state dir %q escapes test isolation; give the test an isolated repo (testutil.InitRepo + t.Chdir) or scope the store explicitly",
+		filepath.Join(commonDir, SessionStateDirName))
+}
+
+// underTempRoot reports whether path is inside the OS temp root, comparing
+// both the literal and symlink-resolved forms (macOS presents /var/folders
+// and /private/var/folders for the same tree).
+func underTempRoot(path string) bool {
+	roots := []string{filepath.Clean(os.TempDir())}
+	if resolved, err := filepath.EvalSymlinks(roots[0]); err == nil && resolved != roots[0] {
+		roots = append(roots, resolved)
+	}
+	candidates := []string{filepath.Clean(path)}
+	if resolved, err := filepath.EvalSymlinks(candidates[0]); err == nil && resolved != candidates[0] {
+		candidates = append(candidates, resolved)
+	}
+	for _, root := range roots {
+		for _, c := range candidates {
+			if c == root || strings.HasPrefix(c, root+string(os.PathSeparator)) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // NewStateStoreWithDir creates a new state store with a custom directory.

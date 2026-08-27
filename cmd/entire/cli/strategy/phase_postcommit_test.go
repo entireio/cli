@@ -15,6 +15,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 	"github.com/entireio/cli/cmd/entire/cli/trailers"
+	"github.com/entireio/cli/redact"
 
 	"github.com/go-git/go-git/v6"
 	"github.com/go-git/go-git/v6/plumbing"
@@ -1379,6 +1380,59 @@ func TestHandleTurnEnd_PartialFailure(t *testing.T) {
 	}
 }
 
+// TestFinalizeAllTurnCheckpoints_ScannerDegraded verifies that a degraded sole
+// scanner skips the finalize rewrite entirely: the provisional checkpoint's
+// transcript stays intact (no empty-transcript finalize), the call counts as
+// an error, and TurnCheckpointIDs is preserved so the next turn's fresh hook
+// process retries instead of orphaning the provisional checkpoints.
+func TestFinalizeAllTurnCheckpoints_ScannerDegraded(t *testing.T) {
+	// No t.Parallel: t.Chdir plus redact's process-global scanner state.
+	workDir := setupGitRepo(t)
+	t.Chdir(workDir)
+	paths.ClearWorktreeRootCache()
+
+	repo, err := git.PlainOpen(workDir)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = repo.Close() })
+
+	sessionID := "degraded-turn-finalize"
+	store := checkpoint.NewGitStore(repo, checkpoint.DefaultV1Refs())
+	require.NoError(t, store.Write(context.Background(), checkpoint.Session{
+		CheckpointID: testTrailerCheckpointID,
+		SessionID:    sessionID,
+		Strategy:     StrategyNameManualCommit,
+		Transcript:   redact.AlreadyRedacted([]byte("old transcript\n")),
+		Prompts:      []string{"old prompt"},
+		AuthorName:   "Test",
+		AuthorEmail:  "test@test.com",
+		Agent:        "Claude Code",
+	}))
+
+	metadataDir := filepath.Join(workDir, ".entire", "metadata", sessionID)
+	require.NoError(t, os.MkdirAll(metadataDir, 0o755))
+	transcriptPath := filepath.Join(metadataDir, paths.TranscriptFileName)
+	require.NoError(t, os.WriteFile(transcriptPath, []byte(testTranscriptPromptResponse), 0o644))
+
+	state := &SessionState{
+		SessionID:         sessionID,
+		AgentType:         "Claude Code",
+		TranscriptPath:    transcriptPath,
+		TurnCheckpointIDs: []string{testTrailerCheckpointID.String()},
+	}
+
+	redact.WithScannerDegradedSole(t)
+
+	errCount := NewManualCommitStrategy().finalizeAllTurnCheckpoints(context.Background(), state)
+	require.Equal(t, 1, errCount)
+	require.Equal(t, []string{testTrailerCheckpointID.String()}, state.TurnCheckpointIDs,
+		"TurnCheckpointIDs must survive a degraded finalize so a later process retries")
+
+	content, err := store.ReadSessionContent(context.Background(), testTrailerCheckpointID, 0)
+	require.NoError(t, err)
+	require.Equal(t, "old transcript\n", string(content.Transcript),
+		"prior checkpoint transcript must stay intact when the finalize is skipped")
+}
+
 // setupSessionWithCheckpoint initializes a session and creates one checkpoint
 // on the shadow branch so there is content available for condensation.
 // Also modifies test.txt to "agent modified content" and includes it in the checkpoint,
@@ -2377,9 +2431,21 @@ func TestCountWarnableStaleEndedSessions(t *testing.T) {
 			FullyCondensed: false,
 			StepCount:      3,
 		},
+		{
+			// Record-bearing: no steps and no shadow branch, but pending task
+			// records still condense — they never live on the shadow branch —
+			// so this counts where "no-shadow-branch" above does not.
+			SessionID:      "record-bearing",
+			BaseCommit:     "1234567890abcdef1234567890abcdef12345678",
+			WorktreeID:     warnableState.WorktreeID,
+			Phase:          session.PhaseEnded,
+			FullyCondensed: false,
+			StepCount:      0,
+			TaskRecords:    []session.TaskRecord{{ToolUseID: "tool-1"}},
+		},
 	}
 
-	assert.Equal(t, 1, countWarnableStaleEndedSessions(repo, sessions))
+	assert.Equal(t, 2, countWarnableStaleEndedSessions(repo, sessions))
 }
 
 // TestPostCommit_WarnStaleEndedSessions_AfterProcessing verifies that the
@@ -2462,4 +2528,145 @@ func TestWarnStaleEndedSessions_RateLimit(t *testing.T) {
 	buf.Reset()
 	warnStaleEndedSessionsTo(ctx, 5, &buf)
 	assert.Contains(t, buf.String(), "entire doctor")
+}
+
+// TestPostCommit_TaskRecordCondensationScope pins both sides of
+// idleWithTaskContent's overlap-check bypass. Idle+fresh is the incident fix: a
+// background subagent commits its own work mid-task, so the session never picks
+// up the FilesTouched overlap a non-active session normally needs, and only the
+// bypass lets the condensation run and materialize the record's
+// transcript-so-far under the checkpoint's tasks/ subtree — proving the trailer
+// resolves to something real. Ended+lingering is the scoping regression: a
+// crashed ENDED session can carry a stale record indefinitely, and an earlier
+// bypass keyed only on "has a record" condensed a later, unrelated human commit
+// into it.
+func TestPostCommit_TaskRecordCondensationScope(t *testing.T) {
+	tests := []struct {
+		name string
+		run  func(t *testing.T, s *ManualCommitStrategy, repo *git.Repository, dir string)
+	}{
+		{
+			name: "IdleSessionWithTaskRecord_CondensesMaterializedContent",
+			run:  runIdleTaskRecordCondenses,
+		},
+		{
+			name: "EndedSessionWithLingeringRecord_UnrelatedCommitNotCondensed",
+			run:  runEndedLingeringRecordNotCondensed,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := setupGitRepo(t)
+			t.Chdir(dir)
+			repo, err := git.PlainOpen(dir)
+			require.NoError(t, err)
+			tt.run(t, &ManualCommitStrategy{}, repo, dir)
+		})
+	}
+}
+
+func runIdleTaskRecordCondenses(t *testing.T, s *ManualCommitStrategy, repo *git.Repository, dir string) {
+	t.Helper()
+	const (
+		sessionID = "test-postcommit-idle-record"
+		toolUseID = "toolu_idlerecord1"
+		agentID   = "agent-idlerecord1"
+	)
+
+	worktreePath, err := paths.WorktreeRoot(context.Background())
+	require.NoError(t, err)
+	worktreeID, err := paths.GetWorktreeID(worktreePath)
+	require.NoError(t, err)
+	head, err := repo.Head()
+	require.NoError(t, err)
+
+	transcriptDir := t.TempDir()
+	mainTranscriptPath := filepath.Join(transcriptDir, "main.jsonl")
+	require.NoError(t, os.WriteFile(mainTranscriptPath, []byte(`{"type":"human","message":{"content":"work in background"}}`+"\n"), 0o644))
+	subagentTranscriptPath := filepath.Join(transcriptDir, "agent-"+agentID+".jsonl")
+	require.NoError(t, os.WriteFile(subagentTranscriptPath, []byte(`{"role":"assistant","content":"background widget progress"}`+"\n"), 0o644))
+
+	now := time.Now()
+	state := &SessionState{
+		SessionID:      sessionID,
+		BaseCommit:     head.Hash().String(),
+		WorktreePath:   worktreePath,
+		WorktreeID:     worktreeID,
+		StartedAt:      now,
+		Phase:          session.PhaseIdle,
+		AgentType:      agent.AgentTypeClaudeCode,
+		TranscriptPath: mainTranscriptPath,
+		TaskRecords: []session.TaskRecord{
+			{ToolUseID: toolUseID, AgentID: agentID, StartedAt: now, SubagentType: "dev", TaskDescription: "background widget work", DeclaredTranscriptPath: subagentTranscriptPath},
+		},
+	}
+	require.NoError(t, s.saveSessionState(context.Background(), state))
+
+	// The subagent's own commit: the file it wrote, landing in HEAD alongside
+	// the Entire-Checkpoint trailer tryAgentCommitFastPath would have added.
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "widget.txt"), []byte("written by background subagent"), 0o644))
+	commitFilesWithTrailer(t, repo, dir, "a1a1a1a1a1a1", "widget.txt")
+
+	require.NoError(t, s.PostCommit(context.Background()))
+
+	_, err = repo.Reference(plumbing.NewBranchReferenceName(paths.MetadataBranchName), true)
+	require.NoError(t, err, "entire/checkpoints/v1 branch should exist after condensing the idle+record session")
+
+	jsonlContent, ok := checkpointTaskFile(t, repo, id.MustCheckpointID("a1a1a1a1a1a1"), "tasks/"+toolUseID+"/agent-"+agentID+".jsonl")
+	require.True(t, ok, "the condensed checkpoint must materialize the task record's transcript under tasks/")
+	assert.Contains(t, jsonlContent, "background widget progress")
+}
+
+func runEndedLingeringRecordNotCondensed(t *testing.T, s *ManualCommitStrategy, repo *git.Repository, dir string) {
+	t.Helper()
+	const sessionID = "test-postcommit-ended-lingering-record"
+
+	// Real earlier work: test.txt modified, shadow branch has content.
+	setupSessionWithCheckpoint(t, s, repo, dir, sessionID)
+
+	state, err := s.loadSessionState(context.Background(), sessionID)
+	require.NoError(t, err)
+	now := time.Now()
+	state.Phase = session.PhaseEnded
+	state.EndedAt = &now
+	state.FilesTouched = []string{"test.txt"}
+	// A record left behind by a crashed agent: never completed by a real
+	// SubagentStop/SessionEnd capture, still here though the session is ENDED.
+	state.TaskRecords = []session.TaskRecord{
+		{ToolUseID: "toolu_crashed1", AgentID: "agent-crashed1", StartedAt: now},
+	}
+	require.NoError(t, s.saveSessionState(context.Background(), state))
+
+	shadowBranch := getShadowBranchNameForCommit(state.BaseCommit, state.WorktreeID)
+	originalBaseCommit := state.BaseCommit
+
+	// A later, completely unrelated human commit: a new file, test.txt
+	// untouched. It carries a trailer so PostCommit's no-trailer early bail
+	// doesn't short-circuit before ever reaching the overlap check.
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "other-work.txt"), []byte("unrelated work"), 0o644))
+	wt, err := repo.Worktree()
+	require.NoError(t, err)
+	_, err = wt.Add("other-work.txt")
+	require.NoError(t, err)
+	cpID := id.MustCheckpointID("c1c1c1c1c1c1")
+	commitMsg := "unrelated human commit\n\n" + trailers.CheckpointTrailerKey + ": " + cpID.String() + "\n"
+	_, err = wt.Commit(commitMsg, &git.CommitOptions{
+		Author: &object.Signature{Name: "Test", Email: "test@test.com", When: time.Now()},
+	})
+	require.NoError(t, err)
+
+	require.NoError(t, s.PostCommit(context.Background()))
+
+	_, err = repo.Reference(plumbing.NewBranchReferenceName(paths.MetadataBranchName), true)
+	require.Error(t, err, "an unrelated commit must not condense a stale ended session's lingering record")
+
+	_, err = repo.Reference(plumbing.NewBranchReferenceName(shadowBranch), true)
+	require.NoError(t, err, "shadow branch must survive an unrelated commit")
+
+	state, err = s.loadSessionState(context.Background(), sessionID)
+	require.NoError(t, err)
+	assert.Equal(t, originalBaseCommit, state.BaseCommit,
+		"BaseCommit must not move for an ended session on an unrelated commit")
+	assert.Len(t, state.TaskRecords, 1,
+		"the lingering record must remain untouched by an unrelated commit")
 }

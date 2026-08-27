@@ -23,11 +23,19 @@ This repo contains the CLI for Entire.
 ### Command Layout
 
 The visible CLI is organized around a set of noun groups plus a small set of
-top-level verbs. The groups are the canonical home for each verb; legacy
-top-level shortcuts remain functional but hidden, and emit a deprecation hint
-pointing at the canonical group form. Newer experimental command families are
-discoverable through `entire labs` and may remain hidden from root help while
-their canonical paths are still runnable.
+top-level verbs. The groups are the canonical home for each verb. Newer
+experimental command families are discoverable through `entire labs` and
+their canonical paths are always runnable.
+
+Experimental commands are gated by a build-time visibility flag (the
+`cmd/entire/cli/experimental` package): they are shown — grouped under an
+"Experimental commands:" help section — in developer and nightly builds, and
+hidden in stable release builds. Visibility is toggled by `experimental.Visible`
+(default `"true"`), which GoReleaser stamps `"false"` only on stable tags
+(`.Prerelease` empty); nightly (`vX.Y.Z-nightly.*`) and local builds leave it at
+the default. Register a command as experimental with `experimental.Register(parent,
+child)` instead of `parent.AddCommand(child)`. Gating only controls visibility —
+the commands are always runnable in every build.
 
 - `session` (alias: `sessions`): `list`, `info`, `tokens`, `stop`, `attach`, `adopt`, `resume`, `current`.
   `resume` with a branch arg switches to it and resumes its session; with no arg
@@ -38,9 +46,17 @@ their canonical paths are still runnable.
   `adopt` moves an active session from another repo or worktree into the current
   worktree and resets target-local checkpoint bookkeeping so future commits link
   to the adopted session from the new location.
-- `checkpoint` (aliases: `cp`, `checkpoints`): `list`, `explain`, `tokens`, `search`, plus
-  the deprecated `rewind` (functional, prints a cobra deprecation message, will
-  be removed in a future release)
+- `checkpoint` (aliases: `cp`, `checkpoints`): `list`, `explain`, `tokens`, `search`.
+  `explain` also takes `--repo <owner/name>`, the drill-down for a cross-repo
+  `search` hit: it reads the checkpoint from that repo's entire-api cell over
+  HTTP (`/repos/{repo_id}/checkpoints/{id}` plus `.../transcript/raw`) rather
+  than fetching git objects, so a foreign checkpoint never enters this repo's
+  object store, ref namespace, or `tokens profile`. It needs a full checkpoint
+  ID and a pushed checkpoint; `--commit`, `--session`, `--search-all`, and
+  `--generate` are rejected with it, and naming the current repo is a no-op
+  that falls through to the local path. See `checkpoint_api_reader.go`
+  (`apiCheckpointReader`, which implements the two checkpoint reader tiers and
+  deliberately not `Writer`) and `explain_repo.go`.
 - `agent`: bare opens the interactive agent selector, plus `list`, `add`, `remove`
 - `configure`: bare prints help and a hint pointing at `entire agent`; flags
   manage non-agent settings (telemetry, git-hook installation mode, strategy
@@ -62,17 +78,28 @@ their canonical paths are still runnable.
 - `project`: control-plane project management — `create`, `list`, `get`, `delete`
 - `repo`: control-plane repository lifecycle — `create`, `list`, `get`, `delete`,
   `clone`, plus the `mirror` and `visibility` subtrees. Git content operations
-  (log, diff, …) are intentionally out of scope.
+  (log, diff, …) are intentionally out of scope. The `mirror` subtree is
+  server-side (`create`, `list`, `get`, `remove`, `collaborators`) with one
+  exception: `mirror use` repoints the *current clone's* git remote at a mirror
+  (local git config only — it creates nothing server-side). Interactively it
+  picks among the repo's placements and asks whether to replace the remote
+  (preserving the old URL under `--upstream`) or add a separate one;
+  non-interactively it repoints `--remote` directly. Both `use` and `clone`
+  choose a placement through the shared `selectPlacement` picker.
 - `grant`: manage access grants and org membership — `org`, `project`, and `repo`
   each support `add` / `list` / `remove`
 
-Experimental command families advertised through `entire labs`:
-
-- `tokens`: `profile` (hidden from root help while token diagnostics mature)
+Experimental commands (gated by the build-time visibility flag above — visible
+and grouped under "Experimental commands:" in developer/nightly builds, hidden
+in stable releases, always runnable): `tokens`, `import`, `review`,
+`investigate`, `blame`, `why`, `experts`, `runner`, and `checkpoint policy`.
+`tokens` is also advertised through `entire labs`.
 
 Top-level lifecycle and standalone commands: `enable`, `disable`, `status`,
 `login`, `logout`, `clean`, `version`, `dispatch`, `activity`, `help`,
-`configure`, `agent-help`, `api`.
+`configure`, `agent-help`, `api`, `search`. `search` is the canonical
+spelling (visible in every build, grouped with Sessions & Checkpoints);
+`checkpoint search` stays a working alias of the same command.
 
 `api` is an authenticated passthrough to Entire's HTTP APIs (gh-style): it
 attaches the right bearer and dials the right host so callers don't plumb auth
@@ -81,17 +108,44 @@ entire-api cell. `--jurisdiction <slug>` (e.g. `us`, `eu`) targets a specific
 jurisdiction's cell instead of the caller's home cell and implies `--to cell`
 (cell routing + identity-token exchange live in `auth.NewEntireAPICellClient`
 via `auth.CellTarget`). `{owner}`/`{repo}`/`{repo_id}` in the path are filled
-from the current repo's origin remote. It is visible in `entire help` and
-`entire agent-help`, so agents discover it as the supported way to call the API.
+from the current repo's origin remote. It is an escape hatch, so it is absent
+from `agent-help`'s curated listing but stays in `entire help` and agent-help's
+footer — an agent that needs raw access must find it rather than hand-roll curl
+with a token.
 
 `agent-help` renders machine-readable, agent-facing usage live from the Cobra
-command tree (so it always matches the installed binary): bare prints a
-"when to use entire / which subcommand" map; `agent-help <command>` drills into
-one command's current flags; `--json` emits structured output. It is the single
-source of truth the first-turn context injection and the `--agent-help-skill`
-skill point agents at, instead of enumerating a surface that goes stale.
+command tree (so it always matches the installed binary): bare prints a curated
+"when to use entire" map; `agent-help <command>` drills into one command's
+current flags; `--json` emits structured output. It is the single source of
+truth the first-turn context injection and the `--agent-help-skill` skill point
+agents at, instead of enumerating a surface that goes stale.
+
+#### Where agent-facing text goes
+
+| What you have | Where it goes |
+| --- | --- |
+| A new command | `agentHelpClassification` in `agent_help_cmd.go` — one entry, keyed by command path, carrying `audience` and `listed` |
+| "When to use this at all" advice for agents | `agentHelpGuidance` — **never** cobra `Short`/`Long` |
+| A fact humans need too (e.g. "this output is not stable") | cobra `Long`. Human help is a reference, not a lecture: whoever typed `--help` already chose the command |
+| A per-task command recommendation | `agent-help`, which is pulled on demand. **Never** the first-turn injection, which carries only invariants true on every turn |
+
+**Flag it; don't decide it.** Whether a command is `listed`, and whether it is
+read-only / task-driven / user-owned, are product judgment calls — they change
+what agents do unprompted in every user's repo. Take the safe default
+(unlisted, user-owned), then say in the PR what you picked and why so a human
+can move it. Never quietly promote a command into the listing or into
+read-only.
+
+CI enforces the mechanical parts, so trust these rather than re-deriving them:
+every advertised top-level command and every child of a listed group is
+classified; a read-only group contains no writing subcommand; guidance text
+never appears in a command's `Short`/`Long`.
+
 Hidden commands opt into being advertised here by setting
-`Annotations[agentHelpAnnotation] = "true"` (e.g. `trail`).
+`Annotations[agentHelpAnnotation] = "true"` (e.g. `trail`). Because `agent-help`
+renders live and lists non-hidden commands, the experimental commands appear in
+`agent-help` in developer/nightly builds and are absent in stable releases — the
+advertised surface is build-dependent, matching what `entire help` shows.
 No-channel agents (Cursor, Copilot CLI, Factory Droid, MCP hosts — no
 context-injection channel and no agent-help skill template) reach it without an
 active push. All of them can discover it passively: it is visible in `entire
@@ -103,23 +157,13 @@ MCP-host agents can launch the hidden `entire mcp` stdio server, which exposes
 Enabling a no-channel agent with `--agent-help-skill` reports the skill
 unsupported and points the agent at this passive path instead.
 
-Hidden top-level shortcuts (functional, emit a one-line deprecation hint):
-`resume` → `session resume`, `attach` → `session attach`, `explain` →
-`checkpoint explain`, `trace` → `doctor trace`.
 Cobra-native aliases (no hint): `sessions` → `session`, `cp`/`checkpoints` →
-`checkpoint`. The `search` top-level remains hidden without a hint.
-
-Deprecated top-level commands (functional, print a cobra deprecation message):
-`reset` → `clean`, and `rewind` (no replacement, announces removal — same
-deprecation as `checkpoint rewind`).
+`checkpoint`.
 
 Hidden infrastructure commands: `hooks`, `trail`,
-`curl-bash-post-install`, `__send_analytics`, `mcp` (MCP stdio server for
-MCP-host agents).
+`curl-bash-post-install`, `__send_analytics`, `__sweep_sessions`, `mcp` (MCP
+stdio server for MCP-host agents).
 
-The `hideAsAlias(cmd, canonical)` helper in `cmd/entire/cli/aliascmd.go`
-marks a command Hidden and sets cobra's `Deprecated` field so the hint
-renders to stderr on every invocation while the command stays functional.
 Diagnostic subcommands live alongside `doctor.go` as `doctor_logs.go` and
 `doctor_bundle.go`. Group roots and noun-group children live in files
 named `<noun>_group.go` and `<noun>_<verb>.go` respectively.
@@ -274,7 +318,12 @@ Tests that spawn the real `entire` or `git` binary need the child to be non-inte
 2. `testing.Testing()` → false. In-process `go test` runs are non-interactive by default; no per-test `t.Setenv("ENTIRE_TEST_TTY", "0")` is needed.
 3. Agent sentinels (`GEMINI_CLI`, `COPILOT_CLI`, `PI_CODING_AGENT`, `GIT_TERMINAL_PROMPT=0`) → false.
 4. `CI=<non-empty-non-false>` → false.
-5. `/dev/tty` probe.
+5. `/dev/tty` probe, plus its terminal mode → a terminal held in raw mode
+   (canonical input off) belongs to a full-screen TUI that spawned us, not to a
+   shell we can prompt: TUI git clients (lazygit, gitui, tig) run `git commit`
+   as a child while owning the screen, so the hook inherits a `/dev/tty` it
+   must not prompt on. Fails open when the mode can't be read. See
+   `interactive/rawmode_unix.go` for the rationale.
 
 For subprocesses spawning the real `entire` binary (e2e, integration tests, `entire` calling itself from a hook), prefer `execx.NonInteractive` over env-var plumbing:
 
@@ -442,6 +491,128 @@ Don't use `fmt.Print*` for operational messages (checkpoint saves, hook invocati
 
 We use github.com/go-git/go-git for most git operations, but with important exceptions:
 
+#### Opening Repositories - Always Use `gitrepo`
+
+**Never call `git.Open`, `git.PlainOpen`, or `git.PlainOpenWithOptions` directly.
+`cmd/entire/cli/gitrepo` is the single source of truth for opening a
+repository.** Use `gitrepo.OpenCurrent(ctx)` for the current worktree or
+`gitrepo.OpenPath(root)` for a specific worktree root. Both funnel through
+`openPathWithAlternates`, which is the only place that opens a `*git.Repository`.
+
+Routing every open through `gitrepo` guarantees two behaviours no ad-hoc
+`git.PlainOpen` call gets right:
+
+- **Object alternates** are rewritten to absolute paths so shared clones resolve
+  their objects (`PlainOpen` cannot follow relative/absolute alternates).
+- **Reftable repositories** are detected and opened through the git-CLI-backed
+  reference storer (`reftableStorer`). A direct `git.PlainOpen` on a reftable
+  repo fails outright with `unknown extension: refstorage`, because go-git's
+  filesystem storer cannot read the reftable backend. The reftable storer also
+  re-approves the `objectformat` (sha1/sha256) and `worktreeconfig` extensions
+  that go-git verifies at open time.
+
+If a code path opens a repo with a bare go-git call, it silently breaks on
+reftable and sha256 repositories. Reviewers should flag any new
+`git.PlainOpen*`/`git.Open` outside `gitrepo`. Key files: `gitrepo/repository.go`
+(open entry points) and `gitrepo/reftable.go` (`reftableStorer`).
+
+#### Reading Worktree Status - Always Use `gitrepo.Status`
+
+**Never call go-git's `worktree.Status()` directly.** Use
+`gitrepo.Status(ctx, repo)`; a `forbidigo` rule in `.golangci.yaml` enforces
+this, and `gitrepo/status.go` is the only sanctioned call site.
+
+`Worktree.Status()` walks the worktree, so its cost scales with working-set size
+rather than with the size of the change being inspected, which makes it the most
+expensive git read on the hook paths. Avoid calling it more than once per hook.
+Do not memoize it either: a context-scoped cache was tried and removed, because
+the write-free window it required cost more to maintain than the walk saved (see
+`git log` on `gitrepo/status.go` for the measurements). The turn-start hook
+currently walks twice — `CapturePrePromptState` and the strategy's prompt
+attribution each read their own status.
+
+Agent-hook capture paths must use `gitrepo.StatusWithBudget` instead: it bounds
+the walk with a wall-clock budget (`gitrepo.StatusWalkBudget`) because go-git's walk is
+not context-cancellable and a pathological worktree (e.g. a stray `git init` in
+`$HOME`) otherwise leaves the hook process grinding for hours after the agent's
+own hook timeout fires. On breach it returns an error wrapping
+`gitrepo.ErrStatusBudgetExceeded` — hook callers warn and continue with
+transcript-derived data (capture is fail-open; new-file detection is skipped for
+the turn via the pre-prompt/pre-task `UntrackedScanSkipped` marker) — and a
+process-local latch makes every later `StatusWithBudget` call in the same hook
+process fail fast rather than re-entering the walk. The first-checkpoint
+`git status` subprocess in the checkpoint store is bounded by the same
+`StatusWalkBudget` (a killed child, not an abandoned goroutine) and reports the
+same sentinel; the lifecycle handlers warn-and-skip the checkpoint on it. Turn
+end persists whether the turn degraded (`SessionState.CaptureDegradedAt` — set
+on breach, cleared by the next healthy turn) so `entire status` surfaces the
+degradation instead of it living only in `.entire/logs`. Paths
+where a user is actively waiting on a command (review, rewind, and
+`session adopt` via `detectFileChangesUnbounded`) keep the unbounded
+`gitrepo.Status`.
+
+#### `git status` Is a Write - Always Pass `--no-optional-locks`
+
+**Every `git status` Entire runs must pass `--no-optional-locks`.** A guard test
+(`TestGitStatusCallSitesPassNoOptionalLocks` in `cmd/entire/cli/gitrepo/`) fails the build on
+any call site that omits it.
+
+`git status` is not a read. It refreshes the index's stat cache and, whenever any
+entry is stale, writes the result back: `builtin/commit.c` takes
+`.git/index.lock` for the duration of the *whole worktree walk*, then renames a
+fresh index over `.git/index` (`tempfile.c`, `rename(2)`). The gate is
+`use_optional_locks()`, and `--no-optional-locks` is literally `setenv(
+GIT_OPTIONAL_LOCKS, "0")` — so the flag also propagates to child git processes,
+and `GIT_OPTIONAL_LOCKS=0` in the environment is an equivalent user-side
+mitigation. Output is byte-identical either way. The write fires on
+mtime-moved-but-content-identical files — the ordinary aftermath of an agent
+turn, a formatter, or an editor save — not on content edits.
+
+That refresh is git working as designed, and running `git status` is not itself
+a mistake. The reason we always drop the write is that **Entire never benefits
+from it**: every call site reads the porcelain output once and discards it, so
+the stat-cache update is a cost with no return.
+
+Three consequences, all observed in the field (issue #2111):
+
+- **A repo-deleting commit.** The rename replaces `.git/index` with a new inode.
+  On a filesystem where rename-over-existing is not atomic against a concurrent
+  lookup — Docker Desktop / virtiofs bind mounts, measured at 9.9% of opens
+  during continuous replacement versus 0 on ext4 — a concurrent reader gets
+  ENOENT. Git silently treats ENOENT on the index, **and only ENOENT**, as an
+  *empty* index (every other errno calls `die_errno`), so a `git commit` landing
+  in that window records the empty tree with exit code 0 and no warning: a commit
+  that deletes every tracked file. Recovery is `git reset --mixed HEAD~1`.
+- **The user's own `git add` failing** with `Unable to create '.git/index.lock':
+  File exists` while Entire holds the lock across its walk.
+- **A permanently stale `index.lock`** when a budget (`StatusWalkBudget`)
+  SIGKILLs the child mid-walk, breaking every later `git add`/`git commit` until
+  someone removes the file by hand.
+
+**Passing the flag does not make the hazard go away, and must not be described
+as if it did.** On an affected filesystem *any* concurrent `git status` opens the
+same window: the user's own, another tool's, a file watcher's — and in
+particular **N agents working the same repo**, each running its own hooks, which
+is precisely the workflow Entire encourages. Our share is the one write that is
+both unnecessary and asynchronous to the human's terminal, so it is the one that
+can land between someone's `git add` and their `git commit`. For the writers we
+do not control, the mitigation is `GIT_OPTIONAL_LOCKS=0` in the environment
+(devcontainers: `containerEnv`), which covers every git process in the session.
+
+Related: any git subprocess that can run inside a git hook and names its target
+with `cmd.Dir` or `-C` must also set `cmd.Env = gitrepo.EnvWithoutRepoOverrides()`
+(`gitrepo/env.go`). Git exports `GIT_DIR` / `GIT_WORK_TREE` / `GIT_INDEX_FILE` to
+hooks and those take precedence over `cmd.Dir`, so a bare `exec.Command`
+silently operates on the hook's repo. Deliberately *not* applied to user-invoked
+commands that act on the current directory (`status`, `doctor`, `review`): there
+a `GIT_DIR` the user exported is an instruction, not contamination.
+
+This exact producer was diagnosed once before (ENT-242, Feb 2026) and lost: the
+fix was closed unmerged on the premise that `git status --porcelain -z` "reads
+without rewriting", which is false, and it would have grown the number of
+index-rewriting call sites from one to eleven. That is why the guard test exists
+rather than a comment.
+
 #### go-git v5 Bugs - Use CLI Instead
 
 **Do NOT use go-git v5 for `checkout` or `reset --hard` operations.**
@@ -461,9 +632,7 @@ worktree.Reset(&git.ResetOptions{
 cmd := exec.CommandContext(ctx, "git", "reset", "--hard", hash.String())
 ```
 
-See `HardResetWithProtection()` in `common.go` and `CheckoutBranch()` in `git_operations.go` for examples.
-
-Regression tests in `hard_reset_test.go` verify this behavior - if go-git v6 fixes this issue, those tests can be used to validate switching back.
+See `CheckoutBranch()` in `git_operations.go` for an example.
 
 #### Repo Root vs Current Working Directory
 
@@ -499,6 +668,35 @@ relPath := paths.ToRelativePath("/repo/api/file.ts", repoRoot)  // returns "api/
 
 Test case in `state_test.go`: `TestFilterAndNormalizePaths_SiblingDirectories` documents this bug pattern.
 
+#### Invoking Commands on Windows - Never Put a Dynamic Value on a cmd.exe Line
+
+**When Entire performs the exec itself, do not go through `cmd.exe`.** Pass the
+program and its arguments as separate argv elements (`exec.Command(prog, arg)`),
+or call the Win32 API directly.
+
+cmd.exe treats `&`, `|`, `<`, `>` as command separators/redirections and expands
+`%VAR%`, and **Go's argv escaping will not protect you**: `syscall.EscapeArg`
+only quotes an argument containing a space, tab, quote, or backslash. A URL,
+a percent-encoded path, or any `&`-bearing string therefore reaches cmd.exe bare
+and is silently cut at the first metacharacter. That is exactly how
+`entire login` shipped a Windows build that opened
+`…/authorize?client_id=entire-cli` and got rejected for a missing
+`redirect_uri` — the `cmd /c start "" <url>` launcher lost everything from the
+first `&` on, and because the truncation happened inside the released child, the
+CLI saw a successful launch and printed no fallback URL.
+
+Escaping is the right tool in exactly one situation: **a third party owns the
+exec.** When Entire writes a command into an agent's config file (Cursor/Codex
+`hooks.json`) and that agent runs it through cmd.exe, there is no shell to
+avoid — use `agent.escapeWindowsCMD`. Reviewers should flag any new
+`exec.Command("cmd", …)` / `"cmd.exe"` call site that interpolates a
+non-constant value.
+
+Key files: `cmd/entire/cli/browser_open_windows.go` (ShellExecute, the
+avoid-the-shell side) and `cmd/entire/cli/agent/hook_command.go`
+(`escapeWindowsCMD`, the third-party-exec side). Each doc comment points at the
+other.
+
 ### Control-Plane Core Resolution (which core am I talking to?)
 
 Control-plane commands dial one of three cores: the active context's
@@ -531,10 +729,19 @@ caller's home cell, and no server-side cross-cell aggregator exists. The CLI
 therefore has exactly three routing shapes, mirroring the entire.io BFF:
 
 - **Repo-scoped → one cell**: `resolveRepoCellTarget` (`cell_target.go`) maps
-  a repo (ULID or owner/repo) to the cell hosting it via mirrors + the cluster
-  catalog. Best-effort: any failure returns nil and the auth layer falls back
-  to home-jurisdiction routing. Used by experts
-  (`NewAuthenticatedEntireAPICellClient` in `api_client.go`).
+  a repo (ULID or owner/repo) to the cell hosting it — via `GetRepo`'s
+  `ClusterHost` for a ULID, or via the control plane's consolidated repos
+  index (`ListRepos`) for owner/repo, resolved to the repo's PROCESSING
+  placement (`primaries.processing`), not just any active mirror, since a
+  repo can be mirrored in several regions but only one placement holds its
+  actual data. NOT best-effort: any failure (not onboarded, no/failed/
+  suspended processing placement, control-plane error, timeout) returns an
+  error instead of falling back to home-jurisdiction routing — a wrong-region
+  "success" is worse than a command failure for repo-scoped data. Used by
+  trails and experts (`NewAuthenticatedEntireAPICellClient` in
+  `api_client.go`). `resolveRepoCellPlacement` performs the same lookup for
+  callers that also need the placement's id (repo_id) alongside its cell —
+  used by cross-repo checkpoint reads (`explain --repo`, `explain_repo.go`).
 - **User-scoped `/me` → home cell, never fan out**:
   `auth.NewEntireAPICellClient(ctx, insecure, nil)` routes by the
   `home_jurisdiction` JWT claim; activity/recap use it with a data-API
@@ -544,7 +751,16 @@ therefore has exactly three routing shapes, mirroring the entire.io BFF:
   `ClusterSlug`↔`Cluster.Slug`, NOT the cell name, which the catalog does not
   expose), `resolveCellBaseURLs`, and `fanOutCells` (parallel per-cell calls,
   per-cell timeout, partial failures isolated per slot). Merge semantics stay
-  with the command.
+  with the command. Each repo routes to exactly ONE placement — its home,
+  picked by `routedRepoPlacement` (the elected `primaries.processing`, else
+  the canonical row-ID convention). Mirrors are never searched: they are
+  replicated copies indexed under their own namespaces, so an extra leg
+  returns duplicate and stale rows, and diverges from the web
+  (ENT-1672/ENT-1776). Unlike the repo-scoped resolver above, this one fails
+  SOFT — a home placement that is not ready is skipped and reported
+  (`reportableSkippedRepos`: pinned requests always warn, broad ones only
+  when the skips left no cell to query), never substituted with a ready
+  mirror.
 
 Token rule: identity tokens are **per-jurisdiction, not per-cell**. Multi-cell
 callers must build one `auth.CellClientFactory`
@@ -565,6 +781,18 @@ The `Strategy` interface provides:
 - `GetRewindPoints()` / `Rewind()` - List and restore to checkpoints
 - `GetSessionLog()` / `GetSessionInfo()` - Retrieve session data
 
+`Rewind()` has **no CLI surface**. The `rewind` commands were removed, so
+nothing outside tests calls it; `GetRewindPoints()` is still live, feeding
+`checkpoint list --pending`. Treat the restore path as machinery pending
+removal rather than as a supported entry point — do not build on it, and do not
+re-expose it without deciding whether the removal was meant to be permanent.
+Mind the split in its test coverage: `PreviewRewind` tests cover which untracked
+files are *planned* for deletion, while
+`TestShadowStrategy_Rewind_PreservesIgnoredFiles` covers what survives an actual
+execution — that ignored paths such as `.entire/` are still there afterwards.
+The second half is where the go-git hazard lives, so keep it covered for as long
+as the restore path exists.
+
 #### How It Works
 
 The manual-commit strategy (`manual_commit*.go`) does not modify the active branch - no commits are created on the working branch. Instead it:
@@ -573,17 +801,30 @@ The manual-commit strategy (`manual_commit*.go`) does not modify the active bran
 - **Worktree-specific branches** - each git worktree gets its own shadow branch namespace, preventing conflicts
 - **Supports multiple concurrent sessions** - checkpoints from different sessions in the same directory interleave on the same shadow branch
 - Condenses session logs to permanent `entire/checkpoints/v1` branch on user commits
-- Each committed session stores the raw transcript (`full.jsonl`, read by CLI rewind/resume/explain) plus a best-effort compact transcript (`transcript.jsonl`, generated via `transcript/compact`). Like `full.jsonl`, `transcript.jsonl` stores the **full compacted session** on every checkpoint (via `compact.FullWithBoundary`), so each checkpoint is self-contained and the session survives a mid-history checkpoint being lost/reverted/rebased. This checkpoint's slice begins at the session metadata's `compact_transcript_start` (a line offset in compact-output coordinates, distinct from `checkpoint_transcript_start` which indexes raw `full.jsonl` lines); a nil/absent marker means a legacy delta-only `transcript.jsonl` (read from line 0). The marker rounds toward inclusion when a streaming message straddles the boundary, so the slice never drops this checkpoint's content but may repeat ≤1 merged line at its head. Compact generation is best-effort and is skipped when the compacted output exceeds the 50MB blob cap (unlike `full.jsonl`, `transcript.jsonl` is not chunked — `full.jsonl` stays authoritative and the compact is regenerable); in the OPF finalize rewrite a failed/skipped regeneration drops the prior `transcript.jsonl` and clears the marker rather than shipping a stale, less-redacted compact. Both files are pushed with the v1 branch. The root `metadata.json` `sessions[].transcript` pointer keeps targeting `full.jsonl`; when the compact transcript was generated the session entry also carries a `compact_transcript` path pointing at `transcript.jsonl` (omitted otherwise) so external readers can locate it next to `full.jsonl`.
+- Every path that builds a stored transcript sanitizes before redacting; the committed paths also externalize images in between, giving **sanitize → externalize images → redact**. Sanitization is the agent's optional `agent.TranscriptSanitizer` capability, applied via `agent.SanitizeTranscriptForStorage`; it strips non-portable agent state (Codex's encrypted reasoning payloads and compaction blobs, which are bound to the originating session and cannot be replayed out of a checkpoint). The three paths are the Stop/shadow write (`lifecycle.go` sanitizes before `.entire/metadata/<session>/full.jsonl` is written, then the metadata-dir walker redacts it into the shadow tree — **no externalization**, so inline images in a shadow transcript are subject to redaction and assets exist only under committed checkpoints), post-commit condensation (`prepareTranscriptForStorage` in `manual_commit_condensation.go`), and the Stop finalize full-session rewrite (`manual_commit_hooks.go`). Where all three steps run, order is load-bearing at each step: sanitizing first avoids externalizing images out of items about to be discarded (storing an asset whose referencing line disappears) and avoids redacting megabytes of ciphertext only to discard it — base64 is the pathological input for the entropy layer, so a large Codex rollout otherwise costs tens of seconds per Stop *and* per commit; externalizing before redaction is required because redaction would otherwise flag and destroy the high-entropy base64. Sanitization is idempotent, so downstream paths call it without knowing whether an upstream path already did (`checkpoint.sanitizeForAgentType` is the store's belt-and-braces call). The agent's own transcript is never modified. Coupling to respect: `SessionState.CheckpointTranscriptSize` is a growth baseline compared against the shadow transcript blob size in `sessionHasNewContent`, so it must be measured in the same sanitized (pre-externalization) coordinate — that is `CondenseResult.TranscriptSizeBaseline`; using the raw size makes the comparison false forever and the session silently stops condensing.
+- **Redaction cost and the two mechanisms that contain it.** Redaction dominates the Stop hook on a large session: it is ~99.7% of the metadata-walk blob write (git object writing is milliseconds), and ~82% of that is the betterleaks regex ruleset. Two things keep it bounded, and both rest on redaction being **per-line and stateless** (`redact.redactJSONLLines`) — a rule that looked at neighbouring lines would silently break both:
+  - `jsonlContentImpl` shards the line pass into ~1MiB byte-balanced groups across goroutines. Output is byte-identical to the sequential pass. Sharding is gated on an explicit `concurrencySafe` argument describing the **redactor**, not on which entry point was called: `String` is pure and opts in (including `batch.go`'s OPF-disabled fast path), while the OPF collector closures accumulate into a shared map/slice and pass `concurrencyUnsafeRedactor`. Shards are balanced by bytes rather than line count because transcripts mix short lines with occasional multi-MB tool results.
+  - The checkpoint metadata walk reuses the previous checkpoint's redacted blob as a prefix and redacts only appended lines (`checkpoint/redact_cache.go`), turning a per-Stop cost of O(whole transcript) into O(appended). The stored prefix must always end immediately after a `\n`, which is what makes plain byte concatenation reproduce the full result; content with a partial trailing line is therefore never cached. Eligibility is keyed on `paths.TranscriptFileName` (`full.jsonl`), **not** a `.jsonl` suffix — `transcript.jsonl` is regenerated in full each checkpoint and `full.jsonl.001` chunks are not appended, so neither should qualify. Reuse requires the prefix bytes to still hash the same and `redactionFingerprint()` (CLI version + commit + `redact.ConfigFingerprint()`) to match, so a rewritten transcript, changed custom rules, or a CLI upgrade all fall back to a full redaction. Bump `configFingerprintVersion` in `redact/fingerprint.go` whenever the regex layers change behaviour, or stale output can be reused. The cache lives in the git common dir (via the memoized `resolveGitCommonDir`), never under `.entire/`, because anything in the metadata directory would be walked into the checkpoint tree and committed. All three whole-transcript paths are covered: the shadow write walks files through `createRedactedBlobFromFile`, while condensation and the Stop finalize rewrite hold the transcript in memory and go through `checkpoint.RedactTranscriptCached`. Those paths do **not** redact the same bytes — the shadow write stores a sanitized transcript, condensation and finalize a sanitized *and* image-externalized one — and they stay separate simply because their keys are different strings: the walk uses its real tree path, the in-memory callers a synthetic key carrying the session ID (so concurrent sessions never share an entry). There is deliberately no scope enum; sharing a key would be safe (the prefix hash rejects a mismatch) but would miss on every checkpoint. The in-memory prefix is stored as a **file** in the cache dir, not a git blob: go-git deflates the whole payload before discovering the object exists (dotgit dedups the rename, not the compression), and above `agent.MaxChunkSize` the whole-transcript blob matches no chunk the store writes, so it would linger unreachable until `git gc` pruned it and silently reverted the cache to full redaction. `redactIncrementally` owns the whole-content fallback and takes the redactor as a parameter, so prefix and suffix cannot come from different pipelines; condensation and finalize share that pipeline by both routing through `redactSessionTranscript`. A per-subagent task transcript opts out with a nil repo: it is written once per task rather than appended across checkpoints.
+- Each committed session stores the (sanitized, redacted) transcript (`full.jsonl`, read by CLI resume/explain) plus a best-effort compact transcript (`transcript.jsonl`, generated via `transcript/compact`). Like `full.jsonl`, `transcript.jsonl` stores the **full compacted session** on every checkpoint (via `compact.FullWithBoundary`), so each checkpoint is self-contained and the session survives a mid-history checkpoint being lost/reverted/rebased. This checkpoint's slice begins at the session metadata's `compact_transcript_start` (a line offset in compact-output coordinates, distinct from `checkpoint_transcript_start` which indexes raw `full.jsonl` lines); a nil/absent marker means a legacy delta-only `transcript.jsonl` (read from line 0). The marker rounds toward inclusion when a streaming message straddles the boundary, so the slice never drops this checkpoint's content but may repeat ≤1 merged line at its head. Compact generation is best-effort and is skipped when the compacted output exceeds the 50MB blob cap (unlike `full.jsonl`, `transcript.jsonl` is not chunked — `full.jsonl` stays authoritative and the compact is regenerable); in the OPF finalize rewrite a failed/skipped regeneration drops the prior `transcript.jsonl` and clears the marker rather than shipping a stale, less-redacted compact. Both files are pushed with the v1 branch. The root `metadata.json` `sessions[].transcript` pointer keeps targeting `full.jsonl`; when the compact transcript was generated the session entry also carries a `compact_transcript` path pointing at `transcript.jsonl` (omitted otherwise) so external readers can locate it next to `full.jsonl`.
+- **Subagent task records** - subagent work (Claude Code's Task tool) is captured as durable `session.TaskRecord` entries on session state, a pointer mid-turn (declared transcript path + labels; background launches record at launch, completions attach files/tokens/path exactly-once via `strategy.CompleteTaskRecord`, Factory Droid Workers upsert). Condensation materializes each record — declared path first, agent-layout fallback, same sanitize → externalize → redact pipeline — into `tasks/<toolUseID>/{agent-<agentID>.jsonl, task.json}` inside the parent session's checkpoint (unavailable transcript → `task.json` with a stable path-free reason; the writer redacts `task.json`'s free-text `task_description` itself, since the record carries it verbatim); live records store transcript-so-far each condensation, completed records are removed after a successful write. `State.HasTaskContent()` is the trigger currency: records-only sessions condense, records never live on the shadow branch, and shadow-branch existence does not imply task content (shadow pinning keys on `StepCount` only). `SaveTaskStep` is incremental-only (post-todo).
 - Uses the `post-rewrite` Git hook to keep local session linkage aligned after amend/rebase rewrites
 - Builds git trees in-memory using go-git plumbing APIs
 - Rewind restores files from shadow branch commit tree (does not use `git reset`)
 - **Location-independent transcript resolution** - transcript paths are always computed dynamically from the current repo location (via `agent.GetSessionDir` + `agent.ResolveSessionFile`), never stored in checkpoint metadata. This ensures restore/rewind works after repo relocation or across machines.
-- **Token usage scoping** - `SessionState.TokenUsage` is the session-wide total used by `entire status`; `SessionState.CheckpointTokenUsage` is the pending checkpoint delta since the last condensation. Checkpoint metadata must stay scoped to `CheckpointTranscriptStart` or the pending checkpoint delta. Cursor tokens come only from stop-hook payloads, while Copilot CLI can also backfill full-session totals from `session.shutdown`.
+- **Token usage scoping** - `SessionState.TokenUsage` is the session-wide total used by `entire status`; `SessionState.CheckpointTokenUsage` is the pending checkpoint delta since the last condensation. Checkpoint metadata must stay scoped to `CheckpointTranscriptStart` or the pending checkpoint delta. Cursor tokens come only from stop-hook payloads, while Copilot CLI can also backfill full-session totals from `session.shutdown`. Condensation's transcript recompute runs with `subagentsDir=""` and so drops `SubagentTokens`; `withSubagentTokensFrom` refills it from the already-rescoped `state.CheckpointTokenUsage`, and the store sums it across a checkpoint's sessions via `types.AddTokenUsage` (the single token-summing primitive — do not hand-roll another; a field-by-field copy is how the nested total came to be dropped in the first place).
 - Tracks session state in `.git/entire-sessions/` (shared across worktrees)
+- **Commit-to-session linking is identity-first** (`strategy/session_identity.go`): identity comes from `SessionState.Owner`, the `proclive.Identity` that `captureSessionOwner` already records on every turn start (first non-transient ancestor — proclive skips shells, `entire` itself, and the Go toolchain, so a human commit typed in the same terminal never matches). Commit hooks snapshot their own ancestry once (`proclive.CurrentAncestry`) and match every candidate against it in memory (`Ancestry.Depth`) — one hostname/boot-id/proc walk per commit, not one per session state — linking the commit to the session whose agent process is an ancestor — in any worktree (nearest ancestor wins, so a nested agent beats the outer agent that spawned it, and only a tie at equal depth falls to the latest interaction; host/boot/start-time guards defeat PID reuse and cross-machine matches; Windows cannot introspect and falls back to worktree matching). The identity match is UNIONED with the worktree-matched set, never a replacement: a commit condenses every session with pending content in its worktree. Any session matched outside its home worktree is guest-linked — whether identity-matched or selected by the pre-existing single-worktree fallback — and is condensed and linked without mutating worktree-coupled state (`BaseCommit`, shadow-branch realignment) from the foreign worktree (`isSessionHomeWorktree`). Worktree matching is always computed (it is the sole mechanism for commits with no agent ancestry): imported sessions never link, and multi-worktree ambiguity is filtered to recently-interacting sessions (15 min) before declining. This deliberately turns some former ambiguity declines into a best-candidate link; `recentSessionWindow` is a correctness tradeoff because a session in a long-running build or tool call can age out and leave the other recent worktree to win. The stderr hint naming `entire session adopt` fires only from the commit-linking path, and only when identity matching could not rescue the commit either. Under `go test`, `session.NewStateStore` and `NewStateStoreForWorktree` refuse to open outside the temp root so non-isolated tests fail loudly instead of leaking fixture sessions into a real repo.
+- **Reclaiming sessions whose agent vanished** - not every agent fires a session-end hook, and any agent can be killed before its hook runs, so a session can be left un-finalized forever. `SessionState.Owner` — the same fingerprint commit linking matches above — is captured at every turn start by `captureSessionOwner`, and `State.OwnerExited()` reports it gone via `proclive.Check`. `finalizeExitedSessions` sweeps those inside `entire status` (text and `--json`) and `entire doctor`, ending them exactly as a clean stop would. **`OwnerExited` deliberately covers IDLE as well as ACTIVE** — an agent that finishes its last turn and then quits leaves IDLE, so gating on ACTIVE alone missed the common case; only already-finalized sessions are excluded, per the shared `State.IsEnded()` predicate. Liveness is Unknown on Windows and for cross-host state, where behaviour degrades to the `StuckActiveThreshold` timeout. Because the sweep runs inside interactive commands, its eager condensing is capped by `sweepCondenseBudget` across the whole sweep: every candidate is always marked ENDED (a single atomic rename — that is what un-sticks it from `entire status`), while condensing runs only while the budget lasts, so a multi-day backlog drains over successive invocations instead of stalling one. Skipping a condense is the existing fail-open path — PostCommit retries, and `doctor` reports the session as "ended with uncondensed checkpoint data".
+- **Session-end hooks that run under a host deadline** - an agent whose session-end hook fires inside its own shutdown may be killed part-way through. Such agents declare `agent.SessionEndBudgeter` (Codex: 3s cap, process tree killed on expiry). The budget bounds **only** the eager condense in `endSessionNow`, so the cheap step that un-sticks the session is never the one given up on; it is set below the host cap with enough headroom for the shell wrapper and binary load, which happen before Entire's own clock starts. Unbounded is not the same as guaranteed, though: mark-ended runs under `MutateSessionState`, whose flock acquire blocks, so a concurrent condense holding the lock can push it past the cap and get the tree killed — the exited-owner sweep above is the backstop. The bound is best-effort (condensation doesn't poll ctx between stages), and being cut off costs duplication rather than data: an incomplete condense leaves `FullyCondensed` false and PostCommit retries, except in the window between the v1 checkpoint write and the state save, where the checkpoint is already committed and PostCommit mints a second one over the same transcript range.
 - **Shadow branch migration** - if user does stash/pull/rebase (HEAD changes without commit), shadow branch is automatically moved to new base commit
 - **Orphaned branch cleanup** - if a shadow branch exists without a corresponding session state file, it is automatically reset when a new session starts
 - PrePush hook can push `entire/checkpoints/v1` branch alongside user pushes
-- **OPF (OpenAI Privacy Filter) runs at pre-push, not post-commit**: when `redaction.openai_privacy_filter.enabled` is true, the PrePush hook re-redacts unpushed `entire/checkpoints/v1` commits with the OPF 8th layer, builds new commits carrying an `Entire-OPF-Applied: true` trailer, and atomically updates the local v1 ref before pushing. Per-commit condensation stays on the fast 7-layer pipeline. See `strategy/manual_commit_opf_rewrite.go` and `docs/security-and-privacy.md` for the full flow, including divergence detection, bootstrap caps, and CAS-on-conflict semantics.
+- **Single checkpoint sync remote** - checkpoint data syncs only to the elected checkpoint sync remote (`strategy_options.checkpoint_push_remote` setting → captured election → `origin` → sole remote → first remote in `.git/config` order; fail-closed only when the setting names a missing remote — the captured tier is fail-soft), on both the git-branch and git-refs backends. **Capture**: during pre-push, a push whose target agrees with the branch's declared push destination (`branch.<name>.pushRemote` → `remote.pushDefault` → `branch.<name>.remote`) and differs from the current election persists that remote as the captured election (git common dir, `entire-checkpoint-sync-remotes.json`), announces it on stderr, and the same push carries the checkpoints — see `strategy/checkpoint_sync_capture.go`. Declaration alone is deliberately **not** a tier: electing from tracking config at rest silently drops checkpoint sync on every push to a different remote (`git push <other> HEAD`, a `git clone -o base` pushing checkpoints to a separately added `origin`, any repo with `remote.pushDefault` — the `74e239a9` regression), and a bare push to an undeclared remote never elects (the pre-single-remote transcript leak). Phase-1 capture rules: at most one captured remote, first still-configured capture sticks (no per-push ping-pong in mixed-habit repos; a captured remote that was renamed or removed no longer vetoes the next capture), explicit `checkpoint_push_remote` outranks and disables capture. Pushes to any other remote or to a raw URL never carry checkpoint data; the dedicated `checkpoint_remote` URL mode is exempt. `entire status` shows the sync destination, its source (`observed` renders as "follows your branch's push destination"), and an unpushed-checkpoint count.
+- **Checkpoint reads follow the election** - reads consult an ordered candidate chain: the elected sync remote first, then `origin` as a **read-only legacy tier** (pre-single-remote checkpoints live there; `strategy.CheckpointReadRemotes` / `CheckpointReadRemotesWithElection` resolve the chain, failing OPEN to `[origin]` on an election error). Metadata-branch fetches refresh every candidate tracking ref because branch existence does not prove a requested checkpoint exists there; other fetch targets, tracking-ref readers, blob hydration, and checkpoint-policy reads try candidates in order. Git-refs remote discovery ls-remotes every candidate **without** needing a dedicated `checkpoint_remote` and merges the listings. Local-ref writers stay **elected-remote-only**: `EnsurePrimaryRef`, the metadata-fetch advance, `promoteRemoteTrackingPrimary`, and the local checkpoint-policy ref update never act on the legacy tier (a stale origin feeding `SafelyAdvanceLocalRef` is the #1374-class hazard), keyed on the explicit election result, never on the chain's first entry. A remoteless repo keeps its "checkpoint absent" classification, which requires positive evidence (successful empty `git remote` listing, live ctx, readable settings without a `checkpoint_remote` key).
+- **Scanner engine selection is a settings-only, fail-closed choice**: `redaction.betterleaks.enabled` (default `true`) and `redaction.goredact.enabled` (default `false`) pick which pattern-matching engine(s) feed layer 2 of `detectAllLayers` (`redact.ConfigureScanners`, `redact/scanners.go`). Both keys are honored from committed `.entire/settings.json` only — a `settings.local.json` copy is ignored with a logged warning, because the choice affects everyone who reads the repo's checkpoints, not just the developer who set it. `validateScannerSettings` fails settings load with `settings.ErrScannerConfig` when both engines are disabled. If goredact is the sole enabled engine and its scan fails at runtime, `redact.ErrScannerDegraded` propagates out of `JSONLBytes`/`JSONLBytesWithPrivacyFilter`; every checkpoint-write call site (`checkpoint/ephemeral.go`, `checkpoint/persistent.go`, `strategy/manual_commit_hooks.go`) must `errors.Is` for it and fail the write rather than fall back to under-scanned content. See `docs/security-and-privacy.md` for user-facing details.
+- **OPF (OpenAI Privacy Filter) runs at pre-push, not post-commit**: when `redaction.openai_privacy_filter.enabled` is true, the PrePush hook re-redacts unpushed commits with the OPF 9th layer, builds new commits carrying an `Entire-OPF-Applied: true` trailer, and updates the local refs before pushing. Per-commit condensation stays on the fast 8-layer pipeline. **Both backends are covered, by two rewrites sharing one policy**: `manual_commit_opf_rewrite.go` walks unpushed `entire/checkpoints/v1` commits bounded by the remote tip and CAS-updates the branch; `manual_commit_opf_refs.go` walks the push queue and, per queued ref, rewrites every unpushed commit — stopping at the first commit already carrying the trailer, which makes the trailer its own watermark (steady state stops at the tip's parent) and is bounded by the shared `BootstrapTooLargeError` cap for repos that enable OPF late. Blob policy, byte caps, the single batched shell-out, and the error taxonomy are shared; only discovery and ref update differ. **Fail-closed differs by backend on purpose**: git-branch aborts the user's push, while git-refs withholds the (separately-pushed) checkpoint refs and leaves them queued, so nothing under-redacted ships without blocking the user's own push. See `docs/security-and-privacy.md` for the full flow, including divergence detection, bootstrap caps, and CAS-on-conflict semantics.
+- **OPF's `command` is a trust boundary, not a setting**: `redaction.openai_privacy_filter.command` becomes `argv[0]` of an exec during pre-push, and `.entire/settings.json` is version-controlled — so reading it from the project file would let a pull request execute code on every developer who pushes (the prompt is no defense: it never names the command, `prompt_default: "always"` skips it, and non-TTY pushes auto-run). `settings.enforceOPFCommandTrust` (`settings/opf_command_trust.go`) honors `command` only from `.entire/settings.local.json`, and only when that file is untracked in **both** the index and `HEAD` — the filename is not the check, because `.gitignore` does not apply to an already-tracked path. The probe goes through go-git (`gitrepo.OpenPath`), not the git CLI, and is memoized per process: shelling out cost ~15 subprocesses per hook (`settings.Load` is uncached and runs several times per hook) and would fail verification wherever `git` is off `$PATH` — the GUI-git-client population that most needs an explicit `command`. **Two depths**: the layer check reads the index only, because a PR-delivered file is always in the index of a clone that checks it out, and checkout cannot produce a file absent from the index; the `command` check also reads HEAD. That split matters because HEAD is the expensive half — measured 8.3ms → 2.5ms per hook process in this repo, and 39ms → 11ms on reftable, where `gitrepo` routes reference reads back through the git CLI. The cost falls on everyone with a `settings.local.json`, not just OPF users, so keep it off the HEAD path. Rejection is a downgrade to the documented `$PATH` default plus a warning, never a hard error; verification failure (no repo, git missing) counts as untrusted. Do not add other exec-bearing fields to the project settings file without the same gate.
+- **A tracked `.entire/settings.local.json` is ignored wholesale**: the local layer's premise is that it is per-clone and per-developer (it is gitignored, `entire enable --local` writes it, and `CheckpointRemoteIsLocalOnly` treats presence there as proof the developer chose it). `.gitignore` does not apply to an already-tracked path, so a committed one arrives by cloning and would override project settings for everyone. `loadMergedSettings` drops the layer when the file is **proven** tracked, records `EntireSettings.LocalLayerRejection()`, and the redaction consumer prints it with the `git rm --cached` fix. It never errors — one committed file must not brick `status`/`doctor`. Two deliberately opposite failure directions, expressed as the three-state `localTrust` (`localUnverifiable` is the zero value so a forgotten assignment fails safe): an *unverifiable* repo keeps the layer (losing all local settings is worse than the risk) but still drops the exec-bearing OPF `command` (being wrong means running someone else's binary); *no* repository counts as proof of locality. `CheckpointRemoteIsLocalOnly` reads the raw file outside the loader, so it repeats the check itself.
 - Safe to use on main/master since it never modifies commit history
 
 #### Key Files
@@ -591,7 +832,9 @@ The manual-commit strategy (`manual_commit*.go`) does not modify the active bran
 - `strategy.go` - Interface definition and context structs (`StepContext`, `TaskStepContext`, `RewindPoint`, etc.)
 - `common.go` - Helpers for metadata extraction, tree building, rewind validation, `ListCheckpoints()`
 - `manual_commit*.go` - Manual-commit strategy: main impl, types, session state, condensation, rewind, git ops, logs, hook handlers (prepare-commit-msg, post-commit, post-rewrite, pre-push), reset
-- `manual_commit_opf_rewrite.go` - Pre-push OPF re-redaction: walks unpushed v1 commits, runs OPF over their blobs, rebuilds commits with `Entire-OPF-Applied: true` trailer, CAS-updates the local ref. Sentinel error types (use `errors.As`): `V1DivergedError`, `BootstrapTooLargeError`, `V1RefMovedError`, `OPFRuntimeFailedError`.
+- `manual_commit_opf_rewrite.go` - Pre-push OPF re-redaction: walks unpushed v1 commits, runs OPF over their blobs, rebuilds commits with `Entire-OPF-Applied: true` trailer, CAS-updates the local ref. Sentinel error types (use `errors.As`): `V1DivergedError`, `BootstrapTooLargeError`, `V1RefMovedError`, `OPFRuntimeFailedError`, `OPFBatchTooLargeError`, `OPFRawBytesTooLargeError`, `OPFNoCategoriesError` (OPF enabled with zero effective categories — the pre-push decision and the rewrite both fail closed instead of stamping the trailer without a scan).
+- `manual_commit_opf_refs.go` - The git-refs half of pre-push OPF: `RewriteQueuedCheckpointRefsWithOPF` walks the push queue and rewrites every unpushed commit on each queued ref, reusing the v1 rewrite's blob walk, caps, and error types. See the OPF bullet above for why the two backends fail closed differently.
+- `settings/opf_command_trust.go` - Ownership gate for the executed OPF `command` (local-only + untracked); see the OPF trust-boundary bullet above
 - `cleanup.go` - Cleanup discovery/deletion for shadow branches, session states, and checkpoint metadata
 - `session_state.go` - Package-level session state functions
 - `hooks.go` - Git hook installation
@@ -604,6 +847,7 @@ The phase state machine, metadata directory layout, sharded checkpoint format, m
 
 - [Sessions and Checkpoints](docs/architecture/sessions-and-checkpoints.md) - domain model, storage layout, checkpoint ID linking, commit trailers, package structure
 - [Checkpoint Scenarios](docs/architecture/checkpoint-scenarios.md) - phase state machine and worked condensation scenarios
+- [Ref-Based Checkpoint Backend](docs/architecture/ref-checkpoint-backend.md) - git-refs backend: primary/mirror taxonomy, ref layout + sharding, push-discovery queue, read routing, config + rollout
 
 #### When Modifying the Strategy
 

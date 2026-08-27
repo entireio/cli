@@ -176,7 +176,19 @@ Note: IDE also sends `composer_mode: "agent"` — CLI omits this field.
 {"role":"assistant","message":{"content":[{"type":"text","text":"Created the file."}]}}
 ```
 
-- Note: Transcript does NOT contain tool_use blocks — file detection relies on git status
+- Cursor may prepend a `<timestamp>...</timestamp>` line inside the text before `<user_query>`; both are stripped by `textutil.StripIDEContextTags`. The timestamp strip is anchored to the start of the message so `<timestamp>` elements in pasted user content survive.
+- Transcript DOES contain `tool_use` content blocks, in the same shape as Claude Code: `message.content[i].type == "tool_use"` with `name` and `input`. Verified against a real session captured 2026-08-24 and pinned by `testdata/real_session_tool_use.jsonl` (`TestCursorAgent_RealSessionContainsToolUseBlocks`). Observed tools and their input keys:
+
+  | Tool | Input keys | Modifies files |
+  | --- | --- | --- |
+  | `Write` | `path`, `contents` | yes |
+  | `StrReplace` | `path`, `old_string`, `new_string` | yes |
+  | `Read` | `path`, optional `limit`, `offset` | no |
+  | `Grep` | `pattern`, `path`, optional `glob`, `head_limit` | no |
+  | `Glob` | `glob_pattern`, `target_directory` | no |
+  | `Shell` | `command`, `description`, optional `working_directory` | unattributable |
+
+  `path` values are absolute. Note the divergence from Claude Code, which keys the target file as `file_path` — this is why `transcript.ToolInput` does not fit and `cursor.toolInput` exists. Blocks carry no `id` field. `ExtractModifiedFiles` reads `Write` and `StrReplace`; git status remains the broader signal because `Shell` can modify files while recording only a command string.
 - Override for testing: set `ENTIRE_TEST_CURSOR_PROJECT_DIR` env var to override the transcript directory
 
 ## Config Preservation
@@ -208,7 +220,7 @@ Note: IDE also sends `composer_mode: "agent"` — CLI omits this field.
 1. **`beforeSubmitPrompt` and `stop` don't fire in `-p` mode**: This is the main limitation. In headless mode, Entire won't get TurnStart/TurnEnd events. Checkpoints can only be created via sessionStart/sessionEnd flow. E2E tests using `RunPrompt` won't trigger the normal TurnStart→TurnEnd checkpoint flow.
 2. **`transcript_path` is always `null` in CLI mode**: Handled by existing `resolveTranscriptRef()` which computes the path dynamically.
 3. **No `composer_mode` field in CLI**: IDE sends `"agent"`, CLI omits it. Not impactful.
-4. **Transcript lacks tool_use blocks**: Modified file detection relies on git status (already handled).
+4. **Shell-driven file changes are unattributable**: `ExtractModifiedFiles` covers `Write` and `StrReplace`, but a file changed by a `Shell` command records only the command string, so git status stays the backstop. (Through 2026-08 this entry instead read "transcript lacks tool_use blocks", which was never true of the format and disabled file extraction entirely; see the transcript section above.)
 5. **`tool_use_id` format**: Contains newline (`call_xxx\nctc_xxx`) — may need sanitization if used as identifiers.
 
 ## Captured Payloads

@@ -1,11 +1,9 @@
 package antigravity
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 
@@ -50,38 +48,15 @@ func agyConfigDir() (string, error) {
 // titleTeeCommand returns the full shell command string for the title-tee shim.
 // If original is non-empty, the original command is wrapped via --wrap.
 //
-// localDev note: unlike the repo-scoped lifecycle hooks (.agents/hooks.json),
-// the title command lives in agy's GLOBAL settings.json and is invoked from
-// whatever directory agy runs in. A runtime "$(git rev-parse --show-toplevel)"
-// would resolve against the wrong repo — or fail entirely outside one — so we
-// resolve the repo root at install time and bake in the absolute main.go path.
-// If resolution fails, we fall back to the production "entire ..." form, which
-// resolves the dev binary via $PATH.
-func titleTeeCommand(localDev bool, original string) string {
+// The command always names the `entire` binary (resolved via $PATH): the title
+// slot lives in agy's GLOBAL settings.json and is invoked from whatever
+// directory agy runs in, so it must never depend on a repository path.
+func titleTeeCommand(original string) string {
 	base := "entire hooks antigravity title-tee"
-	if localDev {
-		if mainPath := localDevMainPath(); mainPath != "" {
-			base = "go run " + shellSingleQuote(mainPath) + " hooks antigravity title-tee"
-		}
-	}
 	if original == "" {
 		return base
 	}
 	return base + " --wrap " + shellSingleQuote(original)
-}
-
-// localDevMainPath resolves the absolute path to cmd/entire/main.go in the
-// current repo at call time, or "" if not inside a git repo.
-func localDevMainPath() string {
-	out, err := exec.CommandContext(context.Background(), "git", "rev-parse", "--show-toplevel").Output()
-	if err != nil {
-		return ""
-	}
-	root := strings.TrimSpace(string(out))
-	if root == "" {
-		return ""
-	}
-	return filepath.Join(root, "cmd", "entire", "main.go")
 }
 
 // shellSingleQuote wraps s in POSIX single quotes. Embedded single quotes are
@@ -95,7 +70,7 @@ func shellSingleQuote(s string) string {
 // InstallTitleTee installs the title-tee shim into agy's global settings.json.
 // If a user's own title command is already present, it is preserved via --wrap.
 // The call is idempotent: if our marker is already in the command, it returns nil.
-func InstallTitleTee(localDev bool) error {
+func InstallTitleTee() error {
 	cfgDir, err := agyConfigDir()
 	if err != nil {
 		return err
@@ -121,7 +96,7 @@ func InstallTitleTee(localDev bool) error {
 	// Build new title config, wrapping any pre-existing command.
 	cfg := titleConfig{
 		Type:    "command",
-		Command: titleTeeCommand(localDev, existing.Command),
+		Command: titleTeeCommand(existing.Command),
 	}
 
 	cfgBytes, err := jsonutil.MarshalWithNoHTMLEscape(cfg)
@@ -229,14 +204,15 @@ func UninstallTitleTee() error {
 
 // isBareTitleTeeCommand reports whether command is one of the bare (no --wrap)
 // tee commands any Entire install could have written: the production form, or
-// a localDev form `go run '<repo>/cmd/entire/main.go' hooks antigravity
-// title-tee` from ANY repo/worktree. Matched by SHAPE, not by re-resolving
-// localDevMainPath at uninstall time — uninstall may run from a different
-// worktree (or outside a repo) than install did, and an exact-path comparison
-// would silently orphan the global entry, leaving agy to spawn a failing
-// `go run` on every state change after the original worktree is deleted.
+// the legacy local-dev form `go run '<repo>/cmd/entire/main.go' hooks
+// antigravity title-tee` that older versions wrote (local-dev mode was removed
+// in a9a676e79). The legacy form is matched by SHAPE, from ANY repo/worktree:
+// uninstall may run from a different worktree (or outside a repo) than install
+// did, and an exact-path comparison would silently orphan the global entry,
+// leaving agy to spawn a failing `go run` on every state change after the
+// original worktree is deleted.
 func isBareTitleTeeCommand(command string) bool {
-	if command == titleTeeCommand(false, "") {
+	if command == titleTeeCommand("") {
 		return true
 	}
 	return strings.HasPrefix(command, "go run ") &&

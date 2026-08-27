@@ -12,13 +12,57 @@ import (
 	"strings"
 	"time"
 
-	"github.com/entireio/cli/cmd/entire/cli/versioninfo"
+	ulid "github.com/oklog/ulid/v2"
+
+	"github.com/entireio/cli/cmd/entire/cli/api"
 )
 
 const apiTimeout = 30 * time.Second
 
-// DefaultServiceURL is the production search service URL.
-const DefaultServiceURL = "https://entire.io"
+// v4ServicePath is the per-repo v4 query-serve route exposed by the entire-api
+// cell gateway. It takes repo=<ULID>. The BFF (entire.io /api/v1/search)
+// forwards to this same path; the CLI dials the cell directly with a
+// jurisdictional identity token, skipping the BFF hop.
+const v4ServicePath = "/api/v1/semantic-search/search/v1/search"
+
+// ErrCellUnavailable reports that a cell's gateway does not expose the
+// semantic-search route at all (HTTP 404 at the route level) — query-serve is
+// not deployed in that cell yet. Callers fanning out across cells match it
+// with errors.Is and skip the cell quietly instead of warning the user about
+// a "failed" region.
+var ErrCellUnavailable = errors.New("semantic search is not available in this cell")
+
+// ErrRepoFilterUnmatched reports that query-serve answered (the route exists)
+// but the explicit repo filter matched nothing the caller can search — the
+// repo isn't indexed yet, or its owner org isn't enabled on the
+// semantic-search feature flag (entire-search fails closed with a JSON 404,
+// existence not disclosed). A typo'd repo can't produce this from the CLI:
+// the slug was already resolved against the control-plane index before any
+// cell was contacted. Distinct from ErrCellUnavailable so fan-out callers
+// don't misreport a repo-level miss as a region without query-serve.
+var ErrRepoFilterUnmatched = errors.New("no requested repo was found in this cell")
+
+// HTTPStatusError reports a non-OK search-service response. It preserves the
+// long-standing message wording (asserted by callers and tests) while exposing
+// the status code so outcome telemetry can classify server errors from the
+// type rather than the message text (ENT-1938).
+type HTTPStatusError struct {
+	StatusCode int
+	Message    string
+}
+
+func (e *HTTPStatusError) Error() string { return e.Message }
+
+// MalformedResponseError reports a 200 whose body was not a usable search
+// response: undecodable JSON, or a decoded body carrying an application-level
+// error field. Typed for the same reason as HTTPStatusError — the service
+// answered unusably, which outcome telemetry counts as a server failure, not
+// an unclassified one. Message wording is preserved verbatim.
+type MalformedResponseError struct {
+	Message string
+}
+
+func (e *MalformedResponseError) Error() string { return e.Message }
 
 // WildcardQuery is the query string used when only filters are provided (no search terms).
 const WildcardQuery = "*"
@@ -31,23 +75,32 @@ const (
 	TypeCheckpoint = "checkpoint"
 	TypeCommit     = "commit"
 	TypeSession    = "session"
+	// TypeRepo and TypePR are returned by the backend but have no typed struct
+	// (decoded via rawData). They're named so the cross-cell v4 merge can bucket
+	// and tally them without string literals.
+	TypeRepo = "repo"
+	TypePR   = "pr"
 )
-
-// MaxLimit is the maximum number of results the search API will return per request.
-const MaxLimit = 200
 
 // DefaultLimit is the default number of results to fetch per request, matching the UI.
 const DefaultLimit = 100
 
 // Meta contains search ranking metadata for a result.
 type Meta struct {
-	MatchType string   `json:"matchType"`
-	Score     float64  `json:"score"`
-	Tier      *int     `json:"tier,omitempty"`
-	Snippet   string   `json:"snippet,omitempty"`
-	Summary   string   `json:"summary,omitempty"`
-	BM25Score *float64 `json:"bm25Score,omitempty"`
-	ANNScore  *float64 `json:"annScore,omitempty"`
+	MatchType string  `json:"matchType"`
+	Score     float64 `json:"score"`
+	Tier      *int    `json:"tier,omitempty"`
+	Snippet   string  `json:"snippet,omitempty"`
+	Summary   string  `json:"summary,omitempty"`
+	// RerankScore is query-serve's cross-encoder (Cohere) relevance judgement,
+	// present only on results that went through reranking. Where present it is
+	// the signal the final ordering was built from and the only score
+	// comparable across repos — Score is per-namespace retrieval strength, so
+	// sorting by it undoes reranking. The cross-cell merge orders tier 0 and
+	// tier 1 by this field, matching the BFF (ENT-1425/ENT-1431).
+	RerankScore *float64 `json:"rerankScore,omitempty"`
+	BM25Score   *float64 `json:"bm25Score,omitempty"`
+	ANNScore    *float64 `json:"annScore,omitempty"`
 }
 
 // CheckpointResult represents a checkpoint returned by the search service.
@@ -86,17 +139,25 @@ type CommitResult struct {
 
 // SessionResult represents a session returned by the search service.
 type SessionResult struct {
-	SessionID      string  `json:"sessionId"`
-	DisplayName    string  `json:"displayName"`
-	Prompt         *string `json:"prompt"`
-	Agent          *string `json:"agent"`
-	Model          *string `json:"model"`
-	StepCount      int     `json:"stepCount"`
-	Org            string  `json:"org"`
-	Repo           string  `json:"repo"`
-	Branch         *string `json:"branch"`
-	AuthorUsername *string `json:"authorUsername"`
-	CreatedAt      string  `json:"createdAt"`
+	SessionID string `json:"sessionId"`
+	// MatchedCheckpointID is the carrier checkpoint the search service anchors a
+	// session row to — present on every session row. For a server-folded legacy
+	// session (ENT-1595) the sessionId is empty and this IS the row's identity
+	// (the checkpoint predates the sessionId attribute), so ResultID and the
+	// cross-cell dedupe (DedupID) fall back to it, repo-qualified, and a mirrored
+	// repo reports the row once instead of twice. Drill-down is
+	// `entire checkpoint explain <id>`, not `entire session info`.
+	MatchedCheckpointID string  `json:"matchedCheckpointId,omitempty"`
+	DisplayName         string  `json:"displayName"`
+	Prompt              *string `json:"prompt"`
+	Agent               *string `json:"agent"`
+	Model               *string `json:"model"`
+	StepCount           int     `json:"stepCount"`
+	Org                 string  `json:"org"`
+	Repo                string  `json:"repo"`
+	Branch              *string `json:"branch"`
+	AuthorUsername      *string `json:"authorUsername"`
+	CreatedAt           string  `json:"createdAt"`
 }
 
 // Result wraps a search result with its type and ranking metadata.
@@ -108,8 +169,12 @@ type Result struct {
 	Commit     *CommitResult     `json:"-"`
 	Session    *SessionResult    `json:"-"`
 
-	// rawData preserves the original JSON for unknown types (repo, pr)
+	// rawData preserves the original JSON for unknown types (repo, pr).
 	rawData json.RawMessage
+	// rawFields is rawData decoded once at unmarshal time, and only for types
+	// without a typed struct (repo, pr) — accessors never read raw fields for
+	// typed rows, so a backend field addition cannot change what they return.
+	rawFields map[string]json.RawMessage
 }
 
 // resultJSON is the wire format for JSON marshaling/unmarshaling.
@@ -159,6 +224,7 @@ func (r *Result) UnmarshalJSON(b []byte) error {
 	// Clear any previously-decoded payloads so a reused Result keeps the
 	// "exactly one typed pointer is non-nil" invariant.
 	r.Checkpoint, r.Commit, r.Session = nil, nil, nil
+	r.rawFields = nil
 
 	switch raw.Type {
 	case TypeCheckpoint:
@@ -179,6 +245,11 @@ func (r *Result) UnmarshalJSON(b []byte) error {
 			return fmt.Errorf("unmarshaling session data: %w", err)
 		}
 		r.Session = &d
+	default:
+		// Unknown types (repo, pr): decode the payload once so accessors can
+		// read identifying fields without re-parsing per call (the TUI calls
+		// them per row per render).
+		_ = json.Unmarshal(raw.Data, &r.rawFields) //nolint:errcheck // best-effort; accessors return "" when nil
 	}
 	return nil
 }
@@ -203,25 +274,66 @@ func resultField(r *Result, fromCheckpoint func(*CheckpointResult) string, fromC
 	return ""
 }
 
-// ResultOrg returns the org for any result type.
+// rawString returns the first non-empty string value among the given keys in
+// the raw payload of a result without a typed struct (repo, pr). Returns ""
+// for typed results — rawFields is only populated for unknown types — or when
+// no key matches.
+func (r *Result) rawString(keys ...string) string {
+	for _, k := range keys {
+		var s string
+		if err := json.Unmarshal(r.rawFields[k], &s); err == nil && s != "" {
+			return s
+		}
+	}
+	return ""
+}
+
+// ResultOrg returns the org for any result type. Repo/PR raw payloads may
+// only carry an owner-qualified "fullName"; its owner segment is the org.
 func (r *Result) ResultOrg() string {
-	return resultField(r,
+	if v := resultField(r,
 		func(c *CheckpointResult) string { return c.Org },
 		func(c *CommitResult) string { return c.Org },
-		func(s *SessionResult) string { return s.Org })
+		func(s *SessionResult) string { return s.Org }); v != "" {
+		return v
+	}
+	if v := r.rawString("org"); v != "" {
+		return v
+	}
+	owner, _ := splitFullName(r.rawString("fullName"))
+	return owner
 }
 
-// ResultRepo returns the repo for any result type.
+// ResultRepo returns the bare repo name (no owner) for any result type, so
+// callers can join it with ResultOrg without doubling the owner. Repo/PR raw
+// payloads carry it under "repo" or "name", or qualified inside "fullName".
 func (r *Result) ResultRepo() string {
-	return resultField(r,
+	if v := resultField(r,
 		func(c *CheckpointResult) string { return c.Repo },
 		func(c *CommitResult) string { return c.Repo },
-		func(s *SessionResult) string { return s.Repo })
+		func(s *SessionResult) string { return s.Repo }); v != "" {
+		return v
+	}
+	if v := r.rawString("repo", "name"); v != "" {
+		return v
+	}
+	_, name := splitFullName(r.rawString("fullName"))
+	return name
 }
 
-// ResultBranch returns the branch for any result type.
+// splitFullName splits an "owner/repo" full name; without a slash the whole
+// value is the repo name.
+func splitFullName(fullName string) (owner, name string) {
+	if i := strings.IndexByte(fullName, '/'); i >= 0 {
+		return fullName[:i], fullName[i+1:]
+	}
+	return "", fullName
+}
+
+// ResultBranch returns the branch for any result type. PR raw payloads carry
+// the head branch under "headBranch" (searcher.PRResult).
 func (r *Result) ResultBranch() string {
-	return resultField(r,
+	if v := resultField(r,
 		func(c *CheckpointResult) string { return c.Branch },
 		func(c *CommitResult) string { return c.Branch },
 		func(s *SessionResult) string {
@@ -229,20 +341,27 @@ func (r *Result) ResultBranch() string {
 				return *s.Branch
 			}
 			return ""
-		})
+		}); v != "" {
+		return v
+	}
+	return r.rawString("headBranch")
 }
 
 // ResultCreatedAt returns the createdAt for any result type.
 func (r *Result) ResultCreatedAt() string {
-	return resultField(r,
+	if v := resultField(r,
 		func(c *CheckpointResult) string { return c.CreatedAt },
 		func(c *CommitResult) string { return c.CreatedAt },
-		func(s *SessionResult) string { return s.CreatedAt })
+		func(s *SessionResult) string { return s.CreatedAt }); v != "" {
+		return v
+	}
+	return r.rawString("createdAt")
 }
 
-// ResultAuthor returns the display author for any result type.
+// ResultAuthor returns the display author for any result type. PR raw payloads
+// carry the author login under "userLogin" (searcher.PRResult).
 func (r *Result) ResultAuthor() string {
-	return resultField(r,
+	if v := resultField(r,
 		func(c *CheckpointResult) string {
 			if c.AuthorUsername != nil && *c.AuthorUsername != "" {
 				return *c.AuthorUsername
@@ -260,20 +379,77 @@ func (r *Result) ResultAuthor() string {
 				return *s.AuthorUsername
 			}
 			return ""
-		})
+		}); v != "" {
+		return v
+	}
+	return r.rawString("userLogin")
 }
 
-// ResultID returns the primary ID for any result type.
+// ResultID returns the primary ID for any result type. Types without a typed
+// struct (repo, pr) fall back to the "id" field of the raw payload; for a repo
+// row that is the placement ULID query-serve keys the namespace on (ENT-1912,
+// entire-search#198), the same identifier the repo index and the `repo` filter
+// use.
 func (r *Result) ResultID() string {
-	return resultField(r,
+	if id := resultField(r,
 		func(c *CheckpointResult) string { return c.ID },
 		func(c *CommitResult) string { return c.CommitSHA },
-		func(s *SessionResult) string { return s.SessionID })
+		func(s *SessionResult) string {
+			if s.SessionID != "" {
+				return s.SessionID
+			}
+			return s.MatchedCheckpointID // server-folded legacy session (ENT-1595)
+		}); id != "" {
+		return id
+	}
+	return r.rawString("id")
 }
 
-// ResultTitle returns the primary display text for any result type.
+// DedupID is the identity used to collapse cross-cell duplicates. It matches
+// ResultID except for the id types that can REPEAT across repos, which it
+// repo-qualifies so two repos' rows sharing an id don't collide in the deduper
+// and drop a valid result:
+//   - a raw checkpoint id, and the checkpoint id a server-folded legacy session
+//     (ENT-1595) falls back to — checkpoint ids are a mixed space (legacy 12-hex
+//     ids repeat across repos; newer ULIDs are global), so qualifying by repo is
+//     safe for both and necessary for the legacy half;
+//   - a commit SHA — globally unique as a content address, but the SAME commit
+//     legitimately lives in many repos (a fork and its upstream), so a bare SHA
+//     would drop one repo's hit for every shared commit.
+//
+// Repo ULIDs and real session ids are globally unique, so they pass through.
+// Mirrors of the SAME repo still carry the same org/repo and collapse correctly.
+// ResultID stays the raw, machine-lookup id for display.
+func (r *Result) DedupID() string {
+	switch r.Type {
+	case TypeCheckpoint:
+		if r.Checkpoint != nil && r.Checkpoint.ID != "" {
+			return repoQualifiedKey(r.Checkpoint.Org, r.Checkpoint.Repo, r.Checkpoint.ID)
+		}
+	case TypeCommit:
+		if r.Commit != nil && r.Commit.CommitSHA != "" {
+			return repoQualifiedKey(r.Commit.Org, r.Commit.Repo, r.Commit.CommitSHA)
+		}
+	case TypeSession:
+		if r.Session != nil && r.Session.SessionID == "" && r.Session.MatchedCheckpointID != "" {
+			return repoQualifiedKey(r.Session.Org, r.Session.Repo, r.Session.MatchedCheckpointID)
+		}
+	}
+	return r.ResultID()
+}
+
+// repoQualifiedKey namespaces a repo-scoped (or repo-shared) id by its repo.
+// org/repo are lowercased because the same repo can reach different cells under
+// different casing (git remote entireio/CLI vs repo index entireio/cli — see
+// resolveRepoFilters), and a casing skew would otherwise leak a duplicate.
+func repoQualifiedKey(org, repo, id string) string {
+	return strings.ToLower(org) + "\x00" + strings.ToLower(repo) + "\x00" + id
+}
+
+// ResultTitle returns the primary display text for any result type. Repo/PR
+// raw payloads identify themselves via "title", "name", or "fullName".
 func (r *Result) ResultTitle() string {
-	return resultField(r,
+	if v := resultField(r,
 		func(c *CheckpointResult) string {
 			// Prefer the commit title over the prompt; fall back to the prompt
 			// for uncommitted checkpoints. The full prompt remains in the detail view.
@@ -291,7 +467,20 @@ func (r *Result) ResultTitle() string {
 			}
 			return c.CommitMessage
 		},
-		func(s *SessionResult) string { return s.DisplayName })
+		func(s *SessionResult) string { return s.DisplayName }); v != "" {
+		return v
+	}
+	return r.rawString("title", "name", "fullName")
+}
+
+// ResultCheckpointCount returns the indexed checkpoint count for raw-payload
+// repo rows (searcher.RepoResult), 0 elsewhere.
+func (r *Result) ResultCheckpointCount() int {
+	var n int
+	if err := json.Unmarshal(r.rawFields["checkpointCount"], &n); err != nil {
+		return 0
+	}
+	return n
 }
 
 // TypeCounts holds per-type result counts.
@@ -323,22 +512,58 @@ type Response struct {
 	Timing   *Timing     `json:"timing,omitempty"`
 	Reranked *bool       `json:"reranked,omitempty"`
 	Counts   *TypeCounts `json:"counts,omitempty"`
+
+	// Completeness metadata, same names and semantics as the BFF's merged
+	// response (entire.io api/src/routes/search.ts mergeCellResponses) so web
+	// and CLI surface identical signals (ENT-1777). Parsed from each cell and
+	// re-synthesized by the CLI's own merge.
+	Partial            bool            `json:"partial,omitempty"`
+	Truncated          bool            `json:"truncated,omitempty"`
+	CoverageIncomplete bool            `json:"coverage_incomplete,omitempty"`
+	TruncatedTypes     map[string]bool `json:"truncated_types,omitempty"`
+	CountsLowerBound   map[string]bool `json:"counts_lower_bound,omitempty"`
+
+	// Warnings are client-side completeness notes (e.g. a truncated repo
+	// index or a failed region in a cross-cell fan-out) surfaced to the user
+	// on stderr. Never part of the wire format.
+	Warnings []string `json:"-"`
 }
 
 // Config holds the configuration for a search request.
 type Config struct {
-	ServiceURL  string // Base URL of the search service
-	GitHubToken string
-	Owner       string
-	Repo        string
-	Repos       []string
-	AllRepos    bool // When true, search all accessible repos (no repo scoping)
-	Query       string
-	Limit       int
-	Author      string // Filter by author name
-	Date        string // Filter by time period: "week" or "month"
-	Branch      string // Filter by branch name
-	Page        int    // 1-based page number (0 means omit, API defaults to 1)
+	Owner    string
+	Repo     string
+	Repos    []string
+	AllRepos bool // When true, search all accessible repos (no repo scoping)
+	Query    string
+	Limit    int
+	Author   string // Filter by author name
+	Date     string // Filter by time period: "week" or "month"
+	Branch   string // Filter by branch name
+	Page     int    // 1-based page number (0 means omit, API defaults to 1)
+}
+
+// ScopeSlugs resolves the repo scope of a search: the explicit repo filters
+// (an explicit owner/name filter always scopes the search, even when
+// --all-repos is also set — the more specific filter wins), else allRepos for
+// an unfiltered repo:* / --all-repos search, else the current-repo default.
+// slugs empty with allRepos false means no scope could be determined.
+func (c Config) ScopeSlugs() (slugs []string, allRepos bool) {
+	for _, repo := range c.Repos {
+		if repo != AllReposFilter {
+			slugs = append(slugs, repo)
+		}
+	}
+	if len(slugs) > 0 {
+		return slugs, false
+	}
+	if c.AllRepos || (len(c.Repos) == 1 && c.Repos[0] == AllReposFilter) {
+		return nil, true
+	}
+	if c.Owner != "" && c.Repo != "" {
+		return []string{c.Owner + "/" + c.Repo}, false
+	}
+	return nil, false
 }
 
 // HasFilters reports whether any filter fields are set on the config.
@@ -372,7 +597,7 @@ func ParseSearchInput(raw string) ParsedInput {
 		case strings.HasPrefix(tok, "branch:"):
 			p.Branch = strings.Trim(tok[len("branch:"):], "\"")
 		case strings.HasPrefix(tok, "repo:"):
-			p.Repos = appendUnique(p.Repos, parseListFilter(strings.TrimPrefix(tok, "repo:"))...)
+			p.Repos = AppendUnique(p.Repos, parseListFilter(strings.TrimPrefix(tok, "repo:"))...)
 		default:
 			queryParts = append(queryParts, tok)
 		}
@@ -438,32 +663,57 @@ func parseListFilter(raw string) []string {
 	return values
 }
 
-// ValidateRepoFilters ensures repo filters match backend semantics.
+// ValidateRepoFilters ensures each repo filter matches backend semantics.
+// Multiple explicit repo filters are accepted: the v4 query-serve path resolves
+// each and fans out across the cells hosting them, mirroring code search.
 func ValidateRepoFilters(repos []string) error {
-	if len(repos) > 1 {
-		return errors.New("only one explicit repo filter is currently supported")
-	}
-	if len(repos) == 1 && !isValidRepoFilter(repos[0]) {
-		return fmt.Errorf(
-			"invalid repo filter %q: expected owner/name or *; if you meant all repos, quote the asterisk: --repo '*'",
-			repos[0],
-		)
+	for _, repo := range repos {
+		if !isValidRepoFilter(repo) {
+			return fmt.Errorf(
+				"invalid repo filter %q: expected owner/name, gh/owner/repo, a repo ULID, or *; if you meant all repos, quote the asterisk: --repo '*'",
+				repo,
+			)
+		}
 	}
 	return nil
 }
 
+// isValidRepoFilter reports whether repo is a filter shape the search backends
+// can resolve. It accepts every form the CLI help advertises and that the
+// resolvers handle downstream — a bare owner/name slug, a prefixed path
+// (gh/owner/repo, et/proj/repo, git/owner/repo), a raw repo ULID, or the
+// all-repos wildcard — so validation never rejects a filter the semantic v4
+// lookup (lookupFilter) or code-search resolver (resolveRepoFilters) would
+// otherwise resolve. It still rejects obvious mistakes like a bare filename.
 func isValidRepoFilter(repo string) bool {
 	if repo == AllReposFilter {
 		return true
 	}
-	if strings.Contains(repo, " ") {
+	if repo == "" || strings.Contains(repo, " ") {
 		return false
 	}
+	// Raw repo ULID: the v4 route keys on ULIDs and lookupFilter matches a
+	// prefix-less token against repo IDs.
+	if _, err := ulid.Parse(repo); err == nil {
+		return true
+	}
+	// A slug or prefixed path: owner/name or <prefix>/owner/repo. Every
+	// path segment must be non-empty.
 	parts := strings.Split(repo, "/")
-	return len(parts) == 2 && parts[0] != "" && parts[1] != ""
+	if len(parts) < 2 || len(parts) > 3 {
+		return false
+	}
+	for _, part := range parts {
+		if part == "" {
+			return false
+		}
+	}
+	return true
 }
 
-func appendUnique(existing []string, values ...string) []string {
+// AppendUnique appends values to existing, skipping any already present, and
+// returns the result. Order is preserved (first occurrence wins).
+func AppendUnique(existing []string, values ...string) []string {
 	if len(values) == 0 {
 		return existing
 	}
@@ -483,52 +733,67 @@ func appendUnique(existing []string, values ...string) []string {
 	return existing
 }
 
-var httpClient = &http.Client{}
-
-// Search calls the search service to perform a hybrid search.
-func Search(ctx context.Context, cfg Config) (*Response, error) {
+// CellV4 performs a v4 query-serve search against a single entire-api
+// cell, via the pre-authenticated client (bearer = jurisdictional identity
+// token; host = the cell). repoIDs are repo ULIDs to scope to (the v4 route is
+// per-repo and keys on ULIDs, not owner/name slugs); an empty repoIDs means
+// "every repo the caller can access in this cell" — query-serve fans out across
+// those namespaces itself. The cross-cell fan-out and merge live in the cli
+// layer (mirroring code search), so this is the single-cell primitive it calls.
+func CellV4(ctx context.Context, client *api.Client, cfg Config, repoIDs []string) (*Response, error) {
 	ctx, cancel := context.WithTimeout(ctx, apiTimeout)
 	defer cancel()
 
-	serviceURL := cfg.ServiceURL
-	if serviceURL == "" {
-		serviceURL = DefaultServiceURL
-	}
-
-	u, err := url.Parse(serviceURL)
-	if err != nil {
-		return nil, fmt.Errorf("parsing service URL: %w", err)
-	}
-	u.Path = "/search/v1/search"
-
-	q := u.Query()
+	q := url.Values{}
 	q.Set("q", cfg.Query)
-	if err := ValidateRepoFilters(cfg.Repos); err != nil {
-		return nil, err
-	}
-	allRepos := cfg.AllRepos || (len(cfg.Repos) == 1 && cfg.Repos[0] == AllReposFilter)
-	hasExplicitRepo := false
-	for _, repo := range cfg.Repos {
-		if repo != AllReposFilter {
-			hasExplicitRepo = true
-			break
+	filtered := false
+	for _, id := range repoIDs {
+		if id != "" {
+			q.Add("repo", id)
+			filtered = true
 		}
 	}
-	switch {
-	case hasExplicitRepo:
-		// An explicit owner/name filter always scopes the search, even when
-		// --all-repos is also set (the more specific filter wins).
-		for _, repo := range cfg.Repos {
-			if repo != AllReposFilter {
-				q.Add("repo", repo)
-			}
-		}
-	case allRepos:
-		// No repo scoping — search every accessible repo.
-	case cfg.Owner != "" && cfg.Repo != "":
-		q.Set("repo", cfg.Owner+"/"+cfg.Repo)
+	addCommonSearchParams(q, cfg)
+
+	resp, err := client.Get(ctx, v4ServicePath+"?"+q.Encode())
+	if err != nil {
+		return nil, fmt.Errorf("calling search service: %w", err)
 	}
-	// Don't set types — let the API return all types (checkpoints, commits, sessions, etc.)
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return nil, fmt.Errorf("reading response: %w", err)
+	}
+	if resp.StatusCode == http.StatusNotFound {
+		// Two distinct 404s share this status. A JSON error body is
+		// query-serve answering through the gateway: the route exists but the
+		// repo filter matched nothing the caller may search (not indexed, or
+		// the owner org isn't flag-enabled — entire-search fails closed,
+		// existence not disclosed). A plain "404 page not found" is the
+		// gateway itself: no semantic-search route, query-serve not deployed
+		// in this cell. Deployed cells answer unfiltered searches of unknown
+		// repos with an empty 200, so the split is unambiguous. The
+		// repo-filter-miss reading only holds when a filter was actually sent
+		// — an unfiltered call named no repo to blame, so its JSON 404
+		// (whatever produced it) degrades to the ErrCellUnavailable fail-safe.
+		var errResp struct {
+			Error string `json:"error"`
+		}
+		if filtered && json.Unmarshal(body, &errResp) == nil && errResp.Error != "" {
+			// Wrap rather than return the bare sentinel so the server's own
+			// message survives into debug logs; errors.Is still matches.
+			return nil, fmt.Errorf("%w: %s", ErrRepoFilterUnmatched, errResp.Error)
+		}
+		return nil, ErrCellUnavailable
+	}
+	return parseSearchResponse(resp.StatusCode, body)
+}
+
+// addCommonSearchParams sets the query params other than the repo scoping
+// (repo IDs are added by CellV4's caller). types is deliberately never sent —
+// the backend returns all types.
+func addCommonSearchParams(q url.Values, cfg Config) {
 	if cfg.Limit > 0 {
 		q.Set("limit", strconv.Itoa(cfg.Limit))
 	}
@@ -544,43 +809,29 @@ func Search(ctx context.Context, cfg Config) (*Response, error) {
 	if cfg.Page > 0 {
 		q.Set("page", strconv.Itoa(cfg.Page))
 	}
-	u.RawQuery = q.Encode()
+}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
-	if err != nil {
-		return nil, fmt.Errorf("creating request: %w", err)
-	}
-	req.Header.Set("Authorization", "Bearer "+cfg.GitHubToken)
-	req.Header.Set("User-Agent", versioninfo.UserAgent())
-
-	resp, err := httpClient.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("calling search service: %w", err)
-	}
-	defer resp.Body.Close()
-
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-	if err != nil {
-		return nil, fmt.Errorf("reading response: %w", err)
-	}
-
-	if resp.StatusCode != http.StatusOK {
+// parseSearchResponse decodes a search response body, preserving the
+// long-standing error wording so callers (and error-message assertions) are
+// unchanged.
+func parseSearchResponse(statusCode int, body []byte) (*Response, error) {
+	if statusCode != http.StatusOK {
 		var errResp struct {
 			Error string `json:"error"`
 		}
 		if json.Unmarshal(body, &errResp) == nil && errResp.Error != "" {
-			return nil, fmt.Errorf("search service error (%d): %s", resp.StatusCode, errResp.Error)
+			return nil, &HTTPStatusError{StatusCode: statusCode, Message: fmt.Sprintf("search service error (%d): %s", statusCode, errResp.Error)}
 		}
-		return nil, fmt.Errorf("search service returned %d: %s", resp.StatusCode, string(body))
+		return nil, &HTTPStatusError{StatusCode: statusCode, Message: fmt.Sprintf("search service returned %d: %s", statusCode, string(body))}
 	}
 
 	var result Response
 	if err := json.Unmarshal(body, &result); err != nil {
-		return nil, fmt.Errorf("unexpected response from search service: %s", string(body))
+		return nil, &MalformedResponseError{Message: "unexpected response from search service: " + string(body)}
 	}
 
 	if result.Error != "" {
-		return nil, fmt.Errorf("search service error: %s", result.Error)
+		return nil, &MalformedResponseError{Message: "search service error: " + result.Error}
 	}
 
 	return &result, nil

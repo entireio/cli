@@ -38,13 +38,18 @@ type searchResultsMsg struct {
 	results []search.Result
 	total   int
 	counts  *search.TypeCounts
-	err     error
+	// countsLowerBound marks facets whose lists were capped upstream, so
+	// their counts are "at least N" (rendered as "N+", matching the web).
+	countsLowerBound map[string]bool
+	warnings         []string
+	err              error
 }
 
 // searchMoreResultsMsg is sent when a fetch-more-results call completes.
 type searchMoreResultsMsg struct {
-	results []search.Result
-	err     error
+	results  []search.Result
+	warnings []string
+	err      error
 }
 
 // codeSearchResultsMsg is sent when an async code search call completes.
@@ -73,11 +78,13 @@ type searchStyles struct {
 
 // Search palette draws from the shared base16 palette: the primary accent
 // styles titles/tabs/selection, the detail accent frames the detail card, and
-// the link accent is reserved for links inside markdown snippets.
+// the commit accent colors commit nodes/type tags in the result list. Snippet
+// links use the same Cyan/Blue pair as mdrender so markdown reads identically
+// across the CLI.
 const (
 	searchAccent       = palette.Accent  // primary accent (titles, tabs, selection)
 	searchDetailAccent = palette.Accent2 // detail card framing
-	searchLinkAccent   = palette.Blue    // links in markdown snippets
+	searchCommitAccent = palette.Blue    // commit nodes and type tags
 )
 
 func newSearchStyles(ss statusStyles) searchStyles {
@@ -107,7 +114,13 @@ func (s searchStyles) helpItem(keyLabel, desc string) string {
 	return s.render(s.helpKey, keyLabel) + " " + desc
 }
 
+// resultsPerPage is the page size of the non-interactive (JSON) output modes.
+// The TUI itself scrolls continuously and does not page.
 const resultsPerPage = 10
+
+// fetchAheadRows is how close to the end of the loaded list the cursor may get
+// before the next API page is fetched, so continuous scroll stays smooth.
+const fetchAheadRows = 3
 
 // typeFilter represents the active type tab in the TUI.
 type typeFilter string
@@ -115,7 +128,7 @@ type typeFilter string
 const (
 	// typeFilterAll is no longer user-selectable in the TUI (no "All" tab), but
 	// remains the internal sentinel for "show every loaded result" used by the
-	// pagination/fetch-more math that reasons about the grand result total.
+	// fetch-more math that reasons about the grand result total.
 	typeFilterAll         typeFilter = ""
 	typeFilterCheckpoints typeFilter = typeFilter(search.TypeCheckpoint)
 	typeFilterCommits     typeFilter = typeFilter(search.TypeCommit)
@@ -123,39 +136,68 @@ const (
 	typeFilterCode        typeFilter = "code"
 )
 
+// tabOrder is the left-to-right tab sequence cycled by the ←/→ keys.
+var tabOrder = []typeFilter{typeFilterCommits, typeFilterSessions, typeFilterCode}
+
 // searchModel is the bubbletea model for interactive search results.
 type searchModel struct {
-	results      []search.Result
-	cursor       int
-	page         int // 0-based display page index
-	total        int
-	width        int
-	height       int
-	mode         searchMode
-	loading      bool
-	fetchingMore bool // true while fetching next API page
-	searchErr    string
-	input        textinput.Model
-	searchCfg    search.Config
-	apiPage      int // 1-based last-fetched API page
-	styles       searchStyles
-	detailVP     viewport.Model     // full-screen detail view
-	browseVP     viewport.Model     // scrollable browse view
-	filterType   typeFilter         // active type tab filter
-	counts       *search.TypeCounts // per-type counts from API
+	results          []search.Result
+	cursor           int  // index into the active tab's full loaded list
+	pinToEnd         bool // End/G pressed: follow the triggered fetch's rows to the new bottom, then release
+	total            int
+	width            int
+	height           int
+	mode             searchMode
+	loading          bool
+	fetchingMore     bool // true while fetching next API page
+	searchErr        string
+	input            textinput.Model
+	searchCfg        search.Config
+	apiPage          int // 1-based last-fetched API page
+	styles           searchStyles
+	detailVP         viewport.Model     // full-screen detail view
+	browseVP         viewport.Model     // scrollable browse view
+	filterType       typeFilter         // active type tab filter
+	counts           *search.TypeCounts // per-type counts from API
+	countsLowerBound map[string]bool    // facets whose counts are lower bounds
+
+	// semanticSearch performs checkpoint searches (initial, re-search, and
+	// pagination). The command layer injects its session searcher so every
+	// TUI search shares the invocation's discovery cache.
+	semanticSearch semanticSearcher
+
+	// warning is the current search's completeness note (partial cell
+	// failure, truncated repo index), shown in the status row — the TUI
+	// counterpart of the one-shot path's stderr warnings.
+	warning string
 
 	// darkBg is captured once before bubbletea takes over the terminal so the
 	// snippet renderer never re-queries the terminal via OSC during the Update
 	// loop (which would race against bubbletea's stdin reader and stall).
 	darkBg bool
 
-	// Code search state (behind ENTIRE_CODE_SEARCH=1 feature flag).
+	// Code search state.
 	codeResults    []codesearch.Result // results from peregrine
 	codeStats      codesearch.Stats    // aggregate stats
 	codeLoading    bool                // true while async code search runs
 	codeSearchErr  string              // error from code search
+	codeWarning    string              // code tab's completeness note (failed regions, skipped repos)
 	codeSearchOpts codeSearchOpts      // opts for code search (set by caller)
 	codeSearchGen  uint64              // generation counter; incremented on each new code search
+}
+
+// codeSearchWarning summarizes a code response's scope loss for the status
+// row — the code-tab counterpart of the semantic path's Warnings, so a
+// narrowed scope is not invisible in the TUI.
+func codeSearchWarning(resp *codesearch.SearchResponse) string {
+	var parts []string
+	if len(resp.FailedJurisdictions) > 0 {
+		parts = append(parts, "some regions failed: "+strings.Join(resp.FailedJurisdictions, ", "))
+	}
+	if len(resp.SkippedRepos) > 0 {
+		parts = append(parts, "skipped repos with no searchable placement: "+strings.Join(resp.SkippedRepos, ", "))
+	}
+	return strings.Join(parts, "; ")
 }
 
 // filteredResults returns results matching the active type filter.
@@ -176,80 +218,67 @@ func (m searchModel) filteredResults() []search.Result {
 	return out
 }
 
-// pageResults returns the slice of results for the current page.
-func (m searchModel) pageResults() []search.Result {
-	filtered := m.filteredResults()
-	start := m.page * resultsPerPage
-	if start >= len(filtered) {
-		return nil
-	}
-	end := start + resultsPerPage
-	if end > len(filtered) {
-		end = len(filtered)
-	}
-	return filtered[start:end]
-}
-
-// codePageResults returns the slice of code results for the current page.
-func (m searchModel) codePageResults() []codesearch.Result {
-	start := m.page * resultsPerPage
-	if start >= len(m.codeResults) {
-		return nil
-	}
-	end := start + resultsPerPage
-	if end > len(m.codeResults) {
-		end = len(m.codeResults)
-	}
-	return m.codeResults[start:end]
-}
-
-// totalPages returns the number of pages based on the filtered result count.
-func (m searchModel) totalPages() int {
-	var n int
+// visibleCount returns the number of rows in the active tab's loaded list.
+func (m searchModel) visibleCount() int {
 	if m.filterType == typeFilterCode {
-		n = len(m.codeResults)
-	} else {
-		n = len(m.filteredResults())
-		// When showing all types, use the API total if it's larger than loaded results
-		// (we may not have fetched everything yet).
-		if m.filterType == typeFilterAll && m.total > n {
-			n = m.total
-		}
+		return len(m.codeResults)
 	}
-	if n == 0 {
-		return 1
-	}
-	return (n + resultsPerPage - 1) / resultsPerPage
+	return len(m.filteredResults())
 }
 
-// selectedResult returns the currently selected result, accounting for pagination.
+// selectedResult returns the currently selected result.
 func (m searchModel) selectedResult() *search.Result {
-	pageResults := m.pageResults()
-	if m.cursor >= 0 && m.cursor < len(pageResults) {
-		return &pageResults[m.cursor]
+	filtered := m.filteredResults()
+	if m.cursor >= 0 && m.cursor < len(filtered) {
+		return &filtered[m.cursor]
 	}
 	return nil
 }
 
-// computeTypeCounts calculates per-type counts from the loaded results,
-// falling back to API-provided counts when available.
-func (m searchModel) computeTypeCounts() (checkpoints, commits, sessions int) {
+// selectedCodeResult returns the currently selected code result, or nil.
+func (m searchModel) selectedCodeResult() *codesearch.Result {
+	if m.cursor >= 0 && m.cursor < len(m.codeResults) {
+		return &m.codeResults[m.cursor]
+	}
+	return nil
+}
+
+// computeTypeCounts calculates per-tab counts from the loaded results,
+// falling back to API-provided counts when available. Checkpoints have no tab
+// (they fold into sessions server-side), so they are not counted here.
+func (m searchModel) computeTypeCounts() (commits, sessions int) {
 	if m.counts != nil {
-		return m.counts.Checkpoints, m.counts.Commits, m.counts.Sessions
+		return m.counts.Commits, m.counts.Sessions
 	}
 	for _, r := range m.results {
 		switch typeFilter(r.Type) {
-		case typeFilterCheckpoints:
-			checkpoints++
 		case typeFilterCommits:
 			commits++
 		case typeFilterSessions:
 			sessions++
-		case typeFilterAll, typeFilterCode:
-			// not a valid result type; skip
+		case typeFilterAll, typeFilterCode, typeFilterCheckpoints:
+			// not shown as a tab; skip
 		}
 	}
 	return
+}
+
+// tabTotal returns the active tab's server-side result count and whether it is
+// a lower bound. Falls back to the loaded count where no per-type total exists.
+func (m searchModel) tabTotal() (total int, lowerBound bool) {
+	cm, ss := m.computeTypeCounts()
+	switch m.filterType {
+	case typeFilterCommits:
+		return cm, m.countsLowerBound["commits"]
+	case typeFilterSessions:
+		return ss, m.countsLowerBound["sessions"] || m.countsLowerBound["checkpoints"]
+	case typeFilterAll:
+		return max(m.total, len(m.results)), false
+	case typeFilterCode, typeFilterCheckpoints:
+		return m.visibleCount(), false
+	default:
+		return m.visibleCount(), false
+	}
 }
 
 func newSearchModel(results []search.Result, query string, total int, cfg search.Config, ss statusStyles, codeOpts *codeSearchOpts) searchModel {
@@ -258,7 +287,7 @@ func newSearchModel(results []search.Result, query string, total int, cfg search
 	ti := textinput.New()
 	ti.SetValue(query)
 	ti.Prompt = " › "
-	ti.Placeholder = "search checkpoints... (author:name date:week branch:main repo:owner/name or repo:*)"
+	ti.Placeholder = "search sessions, commits, code... (author:name date:week branch:main repo:owner/name or repo:*)"
 	ti.CharLimit = 200
 	ti.SetWidth(max(ss.width-6, 30))
 	ti.SetVirtualCursor(true)
@@ -289,7 +318,10 @@ func newSearchModel(results []search.Result, query string, total int, cfg search
 		styles:     styles,
 		browseVP:   viewport.New(viewport.WithWidth(ss.width), viewport.WithHeight(1)), // height set on first WindowSizeMsg
 		darkBg:     termenv.HasDarkBackground(),
-		filterType: typeFilterCheckpoints, // default the results table to checkpoints
+		filterType: typeFilterCommits, // default to the leftmost tab (Commits), matching the web UI order
+		// Command layer overrides with its session searcher; instrumented
+		// anyway so a forgotten override never silently drops telemetry.
+		semanticSearch: instrumentSemanticSearcher("entire search", newSemanticSearcher(false)),
 	}
 	if codeOpts != nil {
 		m.codeSearchOpts = *codeOpts
@@ -319,7 +351,7 @@ func (m searchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) { //nolint:cyclop 
 		m.loading = false
 		m.fetchingMore = false
 		if msg.err != nil {
-			m.searchErr = msg.err.Error()
+			m.searchErr = RenderUserFacingError(msg.err).Error()
 			m = m.refreshBrowseContent()
 			return m, nil
 		}
@@ -327,9 +359,11 @@ func (m searchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) { //nolint:cyclop 
 		m.results = msg.results
 		m.total = msg.total
 		m.counts = msg.counts
+		m.countsLowerBound = msg.countsLowerBound
+		m.warning = strings.Join(msg.warnings, "; ")
 		m.apiPage = 1
 		m.cursor = 0
-		m.page = 0
+		m.pinToEnd = false
 		m.browseVP.GotoTop()
 		m = m.refreshBrowseContent()
 		return m, nil
@@ -337,19 +371,40 @@ func (m searchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) { //nolint:cyclop 
 	case searchMoreResultsMsg:
 		m.fetchingMore = false
 		if msg.err != nil {
-			m.searchErr = msg.err.Error()
+			m.searchErr = RenderUserFacingError(msg.err).Error()
+			m.pinToEnd = false
 			m = m.refreshBrowseContent()
 			return m, nil
+		}
+		if len(msg.warnings) > 0 {
+			m.warning = strings.Join(msg.warnings, "; ")
 		}
 		m.apiPage++
 		if len(msg.results) > 0 {
 			m.results = append(m.results, msg.results...)
 		} else {
-			// API returned no more results — cap total to what we have
+			// API returned no more results — cap total so fetch-ahead stops asking.
 			m.total = len(m.results)
 		}
+		// End/G follows its triggered fetch to the new bottom, then releases:
+		// the pin repositions once and must not chain further fetches, or one
+		// keypress would download every remaining page. While the tab is still
+		// empty (n == 0) the pin stays armed so the sparse-tab chain below can
+		// keep hunting for the tab's first rows.
+		if m.pinToEnd {
+			if n := m.visibleCount(); n > 0 {
+				m.cursor = n - 1
+				m.pinToEnd = false
+				m = m.refreshBrowseContent()
+				m.browseVP.GotoBottom()
+				return m, nil
+			}
+		}
 		m = m.refreshBrowseContent()
-		return m, nil
+		// A fetched page may add nothing to the active tab (pages interleave
+		// types); keep fetching while the cursor still sits at the end and the
+		// server has more, so one keypress scrolls through sparse tabs too.
+		return m.withFetchAhead()
 
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
@@ -370,15 +425,15 @@ func (m searchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) { //nolint:cyclop 
 		}
 		m.codeLoading = false
 		if msg.err != nil {
-			m.codeSearchErr = msg.err.Error()
+			m.codeSearchErr = RenderUserFacingError(msg.err).Error()
 		} else if msg.resp != nil {
 			m.codeResults = msg.resp.Results
 			m.codeStats = msg.resp.Stats
 			m.codeSearchErr = ""
+			m.codeWarning = codeSearchWarning(msg.resp)
 		}
 		if m.filterType == typeFilterCode {
 			m.cursor = 0
-			m.page = 0
 			m.browseVP.GotoTop()
 		}
 		m = m.refreshBrowseContent()
@@ -410,8 +465,8 @@ func (m searchModel) updateSearchMode(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) 
 			return m, nil
 		}
 		// Checkpoint search: ParseSearchInput extracts author:/date:/branch:/repo:.
-		// ValidateRepoFilters only applies to checkpoint search (single repo limit);
-		// code search handles multiple repos via fan-out.
+		// ValidateRepoFilters only checks each repo value's shape; both semantic
+		// and code search accept multiple repos and fan out across cells.
 		parsed := search.ParseSearchInput(raw)
 		checkpointRepoErr := search.ValidateRepoFilters(parsed.Repos)
 
@@ -423,37 +478,38 @@ func (m searchModel) updateSearchMode(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) 
 		// Code search uses extractInlineRepoFilters (not ParseSearchInput)
 		// so author:/date:/branch: tokens are preserved as literal search
 		// text, matching the --code CLI path.
-		if codeSearchEnabled() {
-			codeQuery, inlineRepos := extractInlineRepoFilters(raw)
-			if codeQuery != "" {
-				willFireCodeSearch = true
-				opts := m.codeSearchOpts
-				opts.query = codeQuery
-				// Always reset to the model's default repo scope, then apply
-				// inline overrides. This prevents a stale repo list from a
-				// previous query leaking into the next one.
-				opts.repoFilters = m.codeSearchOpts.repoFilters
-				if len(inlineRepos) > 0 {
-					if hasAllReposFilter(inlineRepos) {
-						opts.repoFilters = nil
-					} else {
-						opts.repoFilters = filterRepoWildcards(inlineRepos)
-					}
+		codeQuery, inlineRepos := extractInlineRepoFilters(raw)
+		if codeQuery != "" {
+			willFireCodeSearch = true
+			opts := m.codeSearchOpts
+			opts.query = codeQuery
+			// Always reset to the model's default repo scope, then apply
+			// inline overrides. This prevents a stale repo list from a
+			// previous query leaking into the next one.
+			opts.repoFilters = m.codeSearchOpts.repoFilters
+			if len(inlineRepos) > 0 {
+				if hasAllReposFilter(inlineRepos) {
+					opts.repoFilters = nil
+				} else {
+					opts.repoFilters = filterRepoWildcards(inlineRepos)
 				}
-				m.codeSearchGen++
-				m.codeLoading = true
-				m.codeResults = nil
-				m.codeSearchErr = ""
-				cmds = append(cmds, performCodeSearch(opts, m.codeSearchGen))
-			} else {
-				// No code query (e.g. repo-only input) — clear stale code
-				// results and bump the generation so any in-flight search
-				// from a prior query is discarded when it completes.
-				m.codeSearchGen++
-				m.codeLoading = false
-				m.codeResults = nil
-				m.codeSearchErr = ""
 			}
+			m.codeSearchGen++
+			m.codeLoading = true
+			m.codeResults = nil
+			m.codeSearchErr = ""
+			m.codeWarning = ""
+			cmds = append(cmds, performCodeSearch(opts, m.codeSearchGen))
+		} else {
+			// No code query (e.g. repo-only input) — clear stale code
+			// results and bump the generation so any in-flight search
+			// from a prior query is discarded when it completes. Nothing
+			// will arrive to overwrite the warning, so clear it here too.
+			m.codeSearchGen++
+			m.codeLoading = false
+			m.codeResults = nil
+			m.codeSearchErr = ""
+			m.codeWarning = ""
 		}
 
 		// Checkpoint search (only if repo filters are valid for the checkpoint API).
@@ -477,7 +533,7 @@ func (m searchModel) updateSearchMode(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) 
 			cfg.Branch = parsed.Branch
 			cfg.Repos = parsed.Repos
 			m.searchCfg = cfg
-			cmds = append(cmds, performSearch(cfg))
+			cmds = append(cmds, m.performSearch(cfg))
 		}
 
 		m.mode = modeBrowse
@@ -491,121 +547,100 @@ func (m searchModel) updateSearchMode(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) 
 	return m, cmd
 }
 
-func (m searchModel) updateBrowseMode(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
-	// Type tab keys (1/2/3)
-	switch msg.String() {
-	case "1":
-		m.filterType = typeFilterCheckpoints
-		m.cursor = 0
-		m.page = 0
-		m.browseVP.GotoTop()
-		m = m.refreshBrowseContent()
-		return m, nil
-	case "2":
-		m.filterType = typeFilterSessions
-		m.cursor = 0
-		m.page = 0
-		m.browseVP.GotoTop()
-		m = m.refreshBrowseContent()
-		return m, nil
-	case "3":
-		m.filterType = typeFilterCommits
-		m.cursor = 0
-		m.page = 0
-		m.browseVP.GotoTop()
-		m = m.refreshBrowseContent()
-		return m, nil
-	case "4":
-		if codeSearchEnabled() {
-			m.filterType = typeFilterCode
-			m.cursor = 0
-			m.page = 0
-			m.browseVP.GotoTop()
-			m = m.refreshBrowseContent()
-			return m, nil
+// switchTab activates a type tab and resets the list position.
+func (m searchModel) switchTab(f typeFilter) searchModel {
+	m.filterType = f
+	m.cursor = 0
+	m.pinToEnd = false
+	m.browseVP.GotoTop()
+	return m.refreshBrowseContent()
+}
+
+// cycleTab moves the active tab left (delta -1) or right (+1) through
+// tabOrder, wrapping at the ends.
+func (m searchModel) cycleTab(delta int) searchModel {
+	for i, f := range tabOrder {
+		if f == m.filterType {
+			return m.switchTab(tabOrder[(i+delta+len(tabOrder))%len(tabOrder)])
 		}
 	}
+	// Internal filters (all/checkpoints) have no tab; snap to the first one.
+	return m.switchTab(tabOrder[0])
+}
 
-	var pageLen int
-	if m.filterType == typeFilterCode {
-		pageLen = len(m.codePageResults())
-	} else {
-		pageLen = len(m.pageResults())
+// withFetchAhead fires the next API page fetch when the cursor is near the end
+// of the loaded list and the server may have more results — the continuous
+// scroll counterpart of explicit paging.
+//
+// ponytail: the semantic total spans all types while tabs filter client-side,
+// so on a sparse tab this can fetch pages that add no visible rows (bounded by
+// the server total). The upgrade path is per-type server pagination.
+func (m searchModel) withFetchAhead() (tea.Model, tea.Cmd) {
+	if m.filterType == typeFilterCode || m.fetchingMore || m.loading {
+		return m, nil
 	}
+	if len(m.results) >= m.total {
+		return m, nil
+	}
+	if m.cursor < m.visibleCount()-fetchAheadRows {
+		return m, nil
+	}
+	m.fetchingMore = true
+	m = m.refreshBrowseContent()
+	return m, m.fetchMoreResults(m.searchCfg, m.apiPage+1)
+}
+
+func (m searchModel) updateBrowseMode(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	switch {
 	case key.Matches(msg, keys.Quit), key.Matches(msg, keys.Back), msg.String() == "h":
 		return m, tea.Quit
+	case key.Matches(msg, keys.NextTab):
+		// Fetch-ahead so a sparse tab loads rows instead of sitting on
+		// "No results for this type." while later pages may hold some.
+		return m.cycleTab(1).withFetchAhead()
+	case key.Matches(msg, keys.PrevTab):
+		return m.cycleTab(-1).withFetchAhead()
 	case key.Matches(msg, keys.Up):
+		m.pinToEnd = false
 		if m.cursor > 0 {
 			m.cursor--
 			m = m.refreshBrowseContent()
 		}
 	case key.Matches(msg, keys.Down):
-		if m.cursor < pageLen-1 {
+		m.pinToEnd = false
+		if m.cursor < m.visibleCount()-1 {
 			m.cursor++
 			m = m.refreshBrowseContent()
 		}
+		return m.withFetchAhead()
 	case key.Matches(msg, keys.Home):
-		m.page = 0
 		m.cursor = 0
+		m.pinToEnd = false
 		m = m.refreshBrowseContent()
 		m.browseVP.GotoTop()
 	case key.Matches(msg, keys.End):
-		var totalItems int
-		if m.filterType == typeFilterCode {
-			totalItems = len(m.codeResults)
-		} else {
-			totalItems = len(m.filteredResults())
-		}
-		if totalItems > 0 {
-			lastLoaded := totalItems - 1
-			m.page = min(lastLoaded/resultsPerPage, m.totalPages()-1)
-			var lastPageLen int
-			if m.filterType == typeFilterCode {
-				lastPageLen = len(m.codePageResults())
-			} else {
-				lastPageLen = len(m.pageResults())
-			}
-			if lastPageLen > 0 {
-				m.cursor = lastPageLen - 1
-			}
+		m.pinToEnd = true
+		if n := m.visibleCount(); n > 0 {
+			m.cursor = n - 1
 			m = m.refreshBrowseContent()
 			m.browseVP.GotoBottom()
 		}
-	case key.Matches(msg, keys.NextPage):
-		if m.page < m.totalPages()-1 {
-			m.page++
-			m.cursor = 0
-			m.browseVP.GotoTop()
-			// Fetch next API page if we've scrolled past loaded results
-			// (code search loads all results at once, no fetch-more).
-			start := m.page * resultsPerPage
-			if m.filterType != typeFilterCode && start >= len(m.filteredResults()) && !m.fetchingMore {
-				m.fetchingMore = true
-				m = m.refreshBrowseContent()
-				return m, fetchMoreResults(m.searchCfg, m.apiPage+1)
-			}
-			m = m.refreshBrowseContent()
-		}
-	case key.Matches(msg, keys.PrevPage):
-		if m.page > 0 {
-			m.page--
-			m.cursor = 0
-			m.browseVP.GotoTop()
-			m = m.refreshBrowseContent()
-		}
+		return m.withFetchAhead()
 	case key.Matches(msg, keys.Confirm):
+		// Leaving browse mode releases the End pin so a fetch landing while
+		// the detail view is open can't move the highlight underneath it.
 		if m.filterType == typeFilterCode {
-			codeResults := m.codePageResults()
-			if m.cursor >= 0 && m.cursor < len(codeResults) {
+			if r := m.selectedCodeResult(); r != nil {
 				m.mode = modeDetail
-				content := m.renderCodeDetail(codeResults[m.cursor], m.width, true)
+				m.pinToEnd = false
+				content := m.renderCodeDetail(*r, m.width, true)
 				m.detailVP = viewport.New(viewport.WithWidth(m.width), viewport.WithHeight(max(m.height-2, 1)))
 				m.detailVP.SetContent(content)
 				return m, nil
 			}
 		} else if r := m.selectedResult(); r != nil {
 			m.mode = modeDetail
+			m.pinToEnd = false
 			content := m.renderDetailContent(*r, m.width, true)
 			m.detailVP = viewport.New(viewport.WithWidth(m.width), viewport.WithHeight(max(m.height-2, 1)))
 			m.detailVP.SetContent(content)
@@ -613,6 +648,7 @@ func (m searchModel) updateBrowseMode(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) 
 		}
 	case key.Matches(msg, keys.Search):
 		m.mode = modeSearch
+		m.pinToEnd = false
 		m.input.Focus()
 		return m, textinput.Blink
 	default:
@@ -641,13 +677,14 @@ func (m searchModel) updateDetailMode(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) 
 	return m, cmd
 }
 
-func performSearch(cfg search.Config) tea.Cmd {
+func (m searchModel) performSearch(cfg search.Config) tea.Cmd {
+	searcher := m.semanticSearch
 	return func() tea.Msg {
-		resp, err := search.Search(context.Background(), cfg)
+		resp, err := searcher(context.Background(), cfg)
 		if err != nil {
 			return searchResultsMsg{err: err}
 		}
-		return searchResultsMsg{results: resp.Results, total: resp.Total, counts: resp.Counts}
+		return searchResultsMsg{results: resp.Results, total: resp.Total, counts: resp.Counts, countsLowerBound: resp.CountsLowerBound, warnings: resp.Warnings}
 	}
 }
 
@@ -658,14 +695,18 @@ func performCodeSearch(opts codeSearchOpts, gen uint64) tea.Cmd {
 	}
 }
 
-func fetchMoreResults(cfg search.Config, page int) tea.Cmd {
+func (m searchModel) fetchMoreResults(cfg search.Config, page int) tea.Cmd {
+	// Pages server-side: the fan-out forwards Page to every cell (each cell's
+	// page N is interleaved by the merge), so results past the first fetch
+	// stay reachable.
+	searcher := m.semanticSearch
 	return func() tea.Msg {
 		cfg.Page = page
-		resp, err := search.Search(context.Background(), cfg)
+		resp, err := searcher(context.Background(), cfg)
 		if err != nil {
 			return searchMoreResultsMsg{err: err}
 		}
-		return searchMoreResultsMsg{results: resp.Results}
+		return searchMoreResultsMsg{results: resp.Results, warnings: resp.Warnings}
 	}
 }
 
@@ -776,23 +817,33 @@ func (m searchModel) viewSearchMode() string {
 
 // viewTypeTabs renders the type filter tabs with counts.
 func (m searchModel) viewTypeTabs() string {
-	cpCount, cmCount, ssCount := m.computeTypeCounts()
+	cmCount, ssCount := m.computeTypeCounts()
 
-	renderTab := func(label string, filter typeFilter, count int, keyHint string) string {
-		text := fmt.Sprintf("[%s] %s %d", keyHint, label, count)
+	renderTab := func(label string, filter typeFilter, count int, lowerBound bool) string {
+		suffix := ""
+		if lowerBound {
+			// The count is a lower bound — that facet's list was capped
+			// upstream. Same "+" the web renders (ENT-1777).
+			suffix = "+"
+		}
+		text := fmt.Sprintf("%s %d%s", label, count, suffix)
 		if m.filterType == filter {
-			return m.styles.render(m.styles.tabActive, text)
+			return m.styles.render(m.styles.tabActive, "‹ "+text+" ›")
 		}
 		return m.styles.render(m.styles.tabInactive, text)
 	}
 
+	// No Checkpoints tab: the search service folds checkpoint hits into their
+	// owning sessions (ENT-1595), so a checkpoint surfaces as its session. This
+	// matches the web, which dropped its Checkpoints tab. Raw checkpoints stay
+	// reachable by ID via `entire checkpoint explain <id>` (folded session rows
+	// route there).
+	// Sessions ORs the checkpoints flag like the web: session rows fold in
+	// checkpoint hits, so a capped checkpoints list bounds sessions too.
 	tabs := []string{
-		renderTab("Checkpoints", typeFilterCheckpoints, cpCount, "1"),
-		renderTab("Sessions", typeFilterSessions, ssCount, "2"),
-		renderTab("Commits", typeFilterCommits, cmCount, "3"),
-	}
-	if codeSearchEnabled() {
-		tabs = append(tabs, renderTab("Code", typeFilterCode, len(m.codeResults), "4"))
+		renderTab("Commits", typeFilterCommits, cmCount, m.countsLowerBound["commits"]),
+		renderTab("Sessions", typeFilterSessions, ssCount, m.countsLowerBound["sessions"] || m.countsLowerBound["checkpoints"]),
+		renderTab("Code", typeFilterCode, len(m.codeResults), false),
 	}
 
 	return strings.Join(tabs, "  ")
@@ -812,30 +863,17 @@ func (m searchModel) viewBrowseHeader() (string, bool) {
 	b.WriteString(pad + m.styles.render(m.styles.sectionTitle, "›") + " " + m.styles.render(m.styles.bold, query))
 	b.WriteString("\n\n")
 
-	// When code search is available, always show type tabs so the user can
-	// switch to the Code tab even when checkpoint search is loading/errored/empty.
-	hasCodeTab := codeSearchEnabled()
-	checkpointBlocked := m.loading || m.searchErr != "" || len(m.results) == 0
-
-	if checkpointBlocked && !hasCodeTab {
-		// No code tab — show the checkpoint-only loading/error/empty state.
-		switch {
-		case m.loading:
-			b.WriteString(pad + m.styles.render(m.styles.dim, "Searching..."))
-		case m.searchErr != "":
-			b.WriteString(pad + m.styles.render(m.styles.red, "Error: "+m.searchErr))
-		default:
-			b.WriteString(pad + m.styles.render(m.styles.dim, "No results found."))
-		}
-		return b.String(), false
-	}
+	// Always show type tabs so the user can switch to the Code tab even when
+	// the semantic search is loading/errored/empty.
+	resultsBlocked := m.loading || m.searchErr != "" || len(m.results) == 0
 
 	// Type tabs
 	b.WriteString(pad + m.viewTypeTabs())
 	b.WriteString("\n\n")
 
-	// Checkpoint-specific loading/error/empty when on a checkpoint tab.
-	if checkpointBlocked && m.filterType != typeFilterCode {
+	// Loading/error/empty state for the semantic-result tabs (Sessions,
+	// Commits). Code has its own state below and is exempt.
+	if resultsBlocked && m.filterType != typeFilterCode {
 		switch {
 		case m.loading:
 			b.WriteString(pad + m.styles.render(m.styles.dim, "Searching..."))
@@ -870,11 +908,11 @@ func (m searchModel) viewBrowseHeader() (string, bool) {
 
 	filtered := m.filteredResults()
 	if len(filtered) == 0 {
-		b.WriteString("\n" + pad + m.styles.render(m.styles.dim, "No results for this type."))
-		return b.String(), false
-	}
-	if m.fetchingMore && m.pageResults() == nil {
-		b.WriteString("\n" + pad + m.styles.render(m.styles.dim, "Loading more results..."))
+		if m.fetchingMore {
+			b.WriteString("\n" + pad + m.styles.render(m.styles.dim, "Loading more results..."))
+		} else {
+			b.WriteString("\n" + pad + m.styles.render(m.styles.dim, "No results for this type."))
+		}
 		return b.String(), false
 	}
 
@@ -911,8 +949,7 @@ func (m searchModel) refreshBrowseContent() searchModel {
 func (m searchModel) detailPaneHeight(headerLines int) int {
 	hasSelection := m.selectedResult() != nil
 	if m.filterType == typeFilterCode {
-		codeResults := m.codePageResults()
-		hasSelection = m.cursor >= 0 && m.cursor < len(codeResults)
+		hasSelection = m.selectedCodeResult() != nil
 	}
 	if m.height <= 0 || !hasSelection {
 		return 0
@@ -972,16 +1009,27 @@ func (m searchModel) viewListStatusRow() string {
 		}
 	}
 
-	// Right: page X/Y · N results (drops the page clause for a single page).
-	var n int
-	if m.filterType == typeFilterCode {
-		n = len(m.codeResults)
-	} else {
-		n = len(m.filteredResults())
-	}
+	// Right: loaded count, with the tab's server-side total when more exist
+	// ("N of M results"; "+" marks a lower-bound count, matching the tabs).
+	n := m.visibleCount()
+	tabTotal, lb := m.tabTotal()
 	right := fmt.Sprintf("%d results", n)
-	if pages := m.totalPages(); pages > 1 {
-		right = fmt.Sprintf("page %d/%d · %d results", m.page+1, pages, n)
+	if tabTotal > n || lb {
+		suffix := ""
+		if lb {
+			suffix = "+"
+		}
+		right = fmt.Sprintf("%d of %d%s results", n, tabTotal, suffix)
+	}
+	if m.fetchingMore {
+		right = "loading more… · " + right
+	}
+	warning := m.warning
+	if m.filterType == typeFilterCode {
+		warning = m.codeWarning
+	}
+	if warning != "" {
+		right = "⚠ " + warning + " · " + right
 	}
 	if lipgloss.Width(right) > contentWidth {
 		right = stringutil.TruncateRunes(right, contentWidth, "…")
@@ -1017,7 +1065,7 @@ const (
 	detailGap = 1
 )
 
-// viewResultList renders the current page of results as a two-line list:
+// viewResultList renders the active tab's loaded results as a two-line list:
 // a type-colored graph node + bold title with a right-aligned relative age,
 // then a dim metadata line (type · repo · ⎇ branch · author). Items are
 // separated by a thin rule, mirroring the web activity list.
@@ -1029,8 +1077,7 @@ func (m searchModel) viewResultList() string {
 	rule := pad + m.styles.render(m.styles.dim, strings.Repeat("─", contentWidth)) + "\n"
 
 	if m.filterType == typeFilterCode {
-		codeResults := m.codePageResults()
-		for i, r := range codeResults {
+		for i, r := range m.codeResults {
 			if i > 0 {
 				b.WriteString(rule)
 			}
@@ -1039,7 +1086,7 @@ func (m searchModel) viewResultList() string {
 		return b.String()
 	}
 
-	results := m.pageResults()
+	results := m.filteredResults()
 	for i, r := range results {
 		if i > 0 {
 			b.WriteString(rule)
@@ -1182,7 +1229,7 @@ func resultNodeStyle(s searchStyles, resultType string, selected bool) lipgloss.
 	case search.TypeSession:
 		return lipgloss.NewStyle().Foreground(lipgloss.Color(searchDetailAccent))
 	case search.TypeCommit:
-		return lipgloss.NewStyle().Foreground(lipgloss.Color(searchLinkAccent))
+		return lipgloss.NewStyle().Foreground(lipgloss.Color(searchCommitAccent))
 	default: // checkpoint and unknown
 		return lipgloss.NewStyle().Foreground(lipgloss.Color(searchAccent))
 	}
@@ -1448,8 +1495,7 @@ func (m searchModel) viewDetailPane(paneH int) string {
 	// Code tab uses codeResults; other tabs use selectedResult().
 	var r *search.Result
 	if m.filterType == typeFilterCode {
-		codeResults := m.codePageResults()
-		if m.cursor < 0 || m.cursor >= len(codeResults) {
+		if m.selectedCodeResult() == nil {
 			return strings.TrimSuffix(padToHeight("", paneH), "\n")
 		}
 	} else {
@@ -1478,9 +1524,8 @@ func (m searchModel) viewDetailPane(paneH int) string {
 	contentLines := max(paneH-chrome, 1)
 	var detailContent string
 	if m.filterType == typeFilterCode {
-		codeResults := m.codePageResults()
-		if m.cursor >= 0 && m.cursor < len(codeResults) {
-			detailContent = m.renderCodeDetail(codeResults[m.cursor], contentWidth, false)
+		if cr := m.selectedCodeResult(); cr != nil {
+			detailContent = m.renderCodeDetail(*cr, contentWidth, false)
 		}
 	} else {
 		detailContent = m.renderDetailContent(*r, contentWidth, false)
@@ -1539,22 +1584,13 @@ func (m searchModel) viewHelp() string {
 			m.styles.helpItem(keys.Back.Help().Key, "cancel") + "\n"
 	}
 
-	pages := m.totalPages()
-
 	left := m.styles.helpItem(keys.Search.Help().Key, keys.Search.Help().Desc) + dot +
 		m.styles.helpItem("↑/↓, j/k", "scroll") + dot +
-		m.styles.helpItem("home/end, g/G", "top/bottom")
-	if pages > 1 {
-		left += dot + m.styles.helpItem("n/p", "page")
-	}
-	typeHint := "1-3"
-	if codeSearchEnabled() {
-		typeHint = "1-4"
-	}
-	left += dot + m.styles.helpItem(typeHint, "type") + dot +
+		m.styles.helpItem("home/end, g/G", "top/bottom") + dot +
+		m.styles.helpItem("←/→", "type") + dot +
 		m.styles.helpItem(keys.Quit.Help().Key, keys.Quit.Help().Desc)
 
-	// The page / results count lives on the status row beneath the list
+	// The results count lives on the status row beneath the list
 	// (viewListStatusRow), so the footer holds only the key hints.
 	return left + "\n"
 }
@@ -1772,10 +1808,11 @@ func snippetMarkdownStyles(dark bool) ansi.StyleConfig {
 	s.List.Color = nil
 
 	// Links are the one place we *want* a colour: an underline alone is easy
-	// to miss inline.
-	linkColor := searchLinkAccent
+	// to miss inline. Match mdrender's link pair (Cyan URL, Blue link text).
+	linkColor := palette.Cyan
+	linkTextColor := palette.Blue
 	s.Link.Color = &linkColor
-	s.LinkText.Color = &linkColor
+	s.LinkText.Color = &linkTextColor
 
 	return s
 }
@@ -1783,8 +1820,14 @@ func snippetMarkdownStyles(dark bool) ansi.StyleConfig {
 // ─── Static Fallback ─────────────────────────────────────────────────────────
 
 // renderSearchStatic writes a non-interactive table for accessible mode.
-func renderSearchStatic(w io.Writer, results []search.Result, query string, total int, styles statusStyles) {
-	fmt.Fprintf(w, "Found %d results matching %q\n\n", total, query)
+func renderSearchStatic(w io.Writer, results []search.Result, query string, total int, lowerBound bool, styles statusStyles) {
+	// "+" marks a lower bound — some type's list was capped, so more matches
+	// exist than are counted (the web renders the same suffix; ENT-1777).
+	suffix := ""
+	if lowerBound {
+		suffix = "+"
+	}
+	fmt.Fprintf(w, "Found %d%s results matching %q\n\n", total, suffix, query)
 
 	cols := computeColumns(styles.width)
 

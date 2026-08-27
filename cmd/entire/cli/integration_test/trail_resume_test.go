@@ -4,7 +4,9 @@ package integration
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -17,10 +19,16 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/api"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
+	"github.com/entireio/cli/internal/coreapi"
 	"github.com/entireio/cli/internal/entireclient/contexts"
 	"github.com/entireio/cli/internal/entireclient/discovery"
 	"github.com/entireio/cli/internal/entireclient/tokenstore"
 )
+
+// trailResumeIntegrationClusterSlug is the fake processing placement's
+// cluster, used to join /api/v1/repos' RepoPlacement.ClusterSlug to
+// /api/v1/clusters' Cluster.Slug (see cell_target.go's cellTargetForPlacement).
+const trailResumeIntegrationClusterSlug = "trail-resume-cluster"
 
 func TestTrailResume_UsesCheckpointSessionsWhenLocalStateIsMissing(t *testing.T) {
 	t.Parallel()
@@ -122,36 +130,79 @@ func TestTrailResume_UsesCheckpointSessionsWhenLocalStateIsMissing(t *testing.T)
 func newTrailResumeIntegrationAPIServer(t *testing.T, trail api.TrailResource) *httptest.Server {
 	t.Helper()
 
-	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
-		case r.Method == http.MethodPost && r.URL.Path == "/oauth/token":
-			writeTrailResumeIntegrationJSON(t, w, http.StatusOK, map[string]any{
+		case r.Method == http.MethodPost && r.URL.Path == pathOAuthToken:
+			writeTrailResumeIntegrationJSON(t, w, map[string]any{
 				"access_token": "trail-resume-data-token",
 				"token_type":   "Bearer",
 				"expires_in":   3600,
 			})
-		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/trails/gh/entireio/cli":
-			writeTrailResumeIntegrationJSON(t, w, http.StatusOK, api.TrailListResponse{
-				Trails:       []api.TrailResource{trail},
-				Total:        1,
-				Limit:        200,
-				RepoFullName: "entireio/cli",
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/repos":
+			// Backs resolveRepoCellTarget/resolveRepoCellPlacement's
+			// processing-placement lookup (cell_target.go): a single placement,
+			// named as this repo's processing placement, joined to the cluster
+			// below by ClusterSlug.
+			// *ListReposOutputBody, not the value: its MarshalJSON (which
+			// correctly omits unset Opt* fields via the generated jx encoder)
+			// has a pointer receiver, and stdlib encoding/json only picks that
+			// up if the boxed value's dynamic type is the pointer.
+			writeTrailResumeIntegrationJSON(t, w, &coreapi.ListReposOutputBody{
+				Repos: []coreapi.RepoIndexEntry{
+					{
+						FullName: "entireio/cli",
+						ID:       "repo-entireio-cli",
+						Primaries: coreapi.NewOptRepoPrimaries(coreapi.RepoPrimaries{
+							Processing: "placement-primary",
+							GitData:    "placement-primary",
+						}),
+						Placements: []coreapi.RepoPlacement{
+							{
+								ID:           "placement-primary",
+								ClusterSlug:  trailResumeIntegrationClusterSlug,
+								Cell:         trailResumeIntegrationClusterSlug,
+								Jurisdiction: "us",
+								Status:       coreapi.RepoPlacementStatusReady,
+							},
+						},
+					},
+				},
 			})
-		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/trails/"+url.PathEscape(trail.ID)+"/reviews/comments":
-			writeTrailResumeIntegrationJSON(t, w, http.StatusOK, map[string]any{
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/clusters":
+			writeTrailResumeIntegrationJSON(t, w, &coreapi.ListClustersOutputBody{
+				Clusters: []coreapi.Cluster{
+					{
+						Slug:         trailResumeIntegrationClusterSlug,
+						Jurisdiction: "us",
+						PublicUrl:    serverURLWithPath(r, ""),
+						ApiUrl:       coreapi.NewOptString(serverURLWithPath(r, "")),
+						IsDefault:    true,
+					},
+				},
+			})
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/trails/gh/entireio/cli":
+			writeTrailResumeIntegrationJSON(t, w, api.TrailListResponse{
+				Trails: []api.TrailResource{trail},
+				Total:  1,
+			})
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/trails/gh/entireio/cli/321":
+			writeTrailResumeIntegrationJSON(t, w, trail)
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/trails/gh/entireio/cli/321/reviews/comments":
+			writeTrailResumeIntegrationJSON(t, w, map[string]any{
 				"comments": []any{},
-				"has_more": false,
+				"hasMore":  false,
 			})
 		default:
 			http.NotFound(w, r)
 		}
 	}))
+	return server
 }
 
-func writeTrailResumeIntegrationJSON(t *testing.T, w http.ResponseWriter, status int, body any) {
+func writeTrailResumeIntegrationJSON(t *testing.T, w http.ResponseWriter, body any) {
 	t.Helper()
 	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
+	w.WriteHeader(http.StatusOK)
 	if err := json.NewEncoder(w).Encode(body); err != nil {
 		t.Fatalf("encode JSON response: %v", err)
 	}
@@ -191,7 +242,7 @@ func configureTrailResumeIntegrationAuth(t *testing.T, env *TestEnv, coreURL str
 
 	tokenStore := map[string]map[string]string{
 		service: {
-			handle: tokenstore.EncodeTokenWithExpiration(fakeLoginJWT(coreURL), 7200),
+			handle: tokenstore.EncodeTokenWithExpiration(fakeTrailCellLoginJWT(coreURL), 7200),
 		},
 	}
 	tokenData, err := json.Marshal(tokenStore)
@@ -209,6 +260,15 @@ func configureTrailResumeIntegrationAuth(t *testing.T, env *TestEnv, coreURL str
 		"ENTIRE_TOKEN_STORE=file",
 		"ENTIRE_TOKEN_STORE_PATH="+tokenStorePath,
 	)
+}
+
+func fakeTrailCellLoginJWT(iss string) string {
+	enc := base64.RawURLEncoding
+	header := enc.EncodeToString([]byte(`{"alg":"RS256","typ":"JWT"}`))
+	payload := enc.EncodeToString(fmt.Appendf(nil,
+		`{"iss":%q,"sub":"user-123","home_jurisdiction":"us","exp":%d}`,
+		iss, time.Now().Add(time.Hour).Unix()))
+	return header + "." + payload + "." + enc.EncodeToString([]byte("sig"))
 }
 
 func mustTrailResumeIntegrationHost(t *testing.T, rawURL string) string {

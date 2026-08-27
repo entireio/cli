@@ -120,7 +120,8 @@ slots (`context_window`: `total_input_tokens`, `total_output_tokens`,
 `entire doctor` warns when hooks are installed but the title slot doesn't
 route through the tee; `entire agent remove antigravity` restores/removes the
 slot (matching the bare tee **by shape**, so uninstalling from a different
-worktree than the localDev install still cleans up).
+worktree than the install still cleans up, including the legacy local-dev
+`go run …` form older versions wrote).
 
 ## Config Preservation
 

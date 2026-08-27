@@ -106,7 +106,10 @@ func TestAntigravity_FullEventFlow(t *testing.T) {
 		t.Errorf("session_id = %v, want %q", state["session_id"], conversationID)
 	}
 
-	rawFiles, _ := state["files_touched"].([]any)
+	var rawFiles []any
+	if v, ok := state["files_touched"].([]any); ok {
+		rawFiles = v
+	}
 	got := make([]string, 0, len(rawFiles))
 	for _, v := range rawFiles {
 		if s, ok := v.(string); ok {
@@ -299,7 +302,7 @@ func TestAntigravity_StopAfterAgentCommitDoesNotCreateNewShadowBranch(t *testing
 func gitCLICommitWithEntireHooks(t *testing.T, env *TestEnv, message string, files ...string) {
 	t.Helper()
 	for _, file := range files {
-		cmd := exec.Command("git", "add", "--", file)
+		cmd := exec.CommandContext(t.Context(), "git", "add", "--", file)
 		cmd.Dir = env.RepoDir
 		cmd.Env = env.gitHookEnv()
 		if output, err := cmd.CombinedOutput(); err != nil {
@@ -313,14 +316,14 @@ func gitCLICommitWithEntireHooks(t *testing.T, env *TestEnv, message string, fil
 		t.Fatalf("prepare-commit-msg failed: %v\nOutput: %s", err, output)
 	}
 
-	commitCmd := exec.Command("git", "commit", "-F", msgFile)
+	commitCmd := exec.CommandContext(t.Context(), "git", "commit", "-F", msgFile)
 	commitCmd.Dir = env.RepoDir
 	commitCmd.Env = env.gitHookEnv()
 	if output, err := commitCmd.CombinedOutput(); err != nil {
 		t.Fatalf("git commit failed: %v\nOutput: %s", err, output)
 	}
 
-	postCmd := exec.Command(getTestBinary(), "hooks", "git", "post-commit")
+	postCmd := exec.CommandContext(t.Context(), getTestBinary(), "hooks", "git", "post-commit")
 	postCmd.Dir = env.RepoDir
 	postCmd.Env = env.gitHookEnv()
 	if output, err := postCmd.CombinedOutput(); err != nil {

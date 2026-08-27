@@ -2,12 +2,16 @@ package strategy
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
+	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
+	"github.com/entireio/cli/cmd/entire/cli/checkpoint/remote"
 	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/go-git/go-git/v6"
+	"github.com/go-git/go-git/v6/plumbing"
 )
 
 // ManualCommitStrategy implements the manual-commit strategy for session management.
@@ -24,6 +28,13 @@ type ManualCommitStrategy struct {
 	// blobFetcher, when set, is passed to the checkpoint store to enable
 	// on-demand blob fetching after treeless fetches. Set via SetBlobFetcher.
 	blobFetcher checkpoint.BlobFetchFunc
+
+	// blobFetchBudget bounds one blob fetch on a git-hook path. Zero means
+	// remote.WriteProbeFetchBudget. Per-instance rather than a package var so
+	// tests can shorten it without mutating process-global state, which
+	// t.Parallel() makes a data race (CLAUDE.md: "Tests that modify
+	// process-global state cannot be parallelized").
+	blobFetchBudget time.Duration
 }
 
 // getStateStore returns the session state store, initializing it lazily if needed.
@@ -41,7 +52,7 @@ func (s *ManualCommitStrategy) getStateStore(_ context.Context) (*session.StateS
 }
 
 func (s *ManualCommitStrategy) getCheckpointStores(ctx context.Context, repo *git.Repository) (*checkpoint.Stores, error) {
-	stores, err := checkpoint.Open(ctx, repo, checkpoint.OpenOptions{BlobFetcher: s.blobFetcher})
+	stores, err := checkpoint.Open(ctx, repo, checkpoint.OpenOptions{BlobFetcher: s.blobFetcher, ReadRemotes: CheckpointReadRemotes(ctx)})
 	if err != nil {
 		return nil, fmt.Errorf("open checkpoint store: %w", err)
 	}
@@ -85,6 +96,92 @@ func (s *ManualCommitStrategy) SetBlobFetcher(f checkpoint.BlobFetchFunc) {
 // Used in tests to verify the strategy is properly wired for treeless fetch support.
 func (s *ManualCommitStrategy) HasBlobFetcher() bool {
 	return s.blobFetcher != nil
+}
+
+// hookCheckpointStoreOptions is the store envelope for a git-hook read: the
+// bounded ref probe, the bounded blob fetch, and the read-candidate chain. The
+// two bounds live together because a hook that has one and not the other still
+// fails — a ref fetcher with no blob fetcher resolves the checkpoint's ref and
+// then reads its filtered-out metadata.json as absent, reporting a checkpoint
+// that exists as missing.
+func (s *ManualCommitStrategy) hookCheckpointStoreOptions(ctx context.Context) checkpoint.OpenOptions {
+	return checkpoint.OpenOptions{
+		RefFetcher:  remote.HookCheckpointRefFetcher(),
+		BlobFetcher: s.hookBlobFetcher(),
+		ReadRemotes: CheckpointReadRemotes(ctx),
+	}
+}
+
+// hookBlobFetcher returns the strategy's blob fetcher bounded for git-hook
+// contexts: the write-probe budget over the whole call plus BatchMode SSH, the
+// same envelope remote.HookCheckpointRefFetcher puts around the ref probe those
+// hooks already run. Reads there must not inherit the interactive read chain's
+// minutes while a user's git command waits on the hook.
+//
+// It fires only when a checkpoint blob is genuinely absent from the local
+// object store, which on a full clone never happens — the cost lands on
+// partial clones, where the alternative is not "no network" but a checkpoint
+// read that reports the checkpoint missing.
+//
+// The returned fetcher also memoizes budget exhaustion for its own lifetime
+// (one hook invocation), which is the blob-side counterpart of
+// gitRefsStore.fetchFailure. The ref memo is consulted only in
+// resolveRefMaybeFetch, so it does not cover blob reads: those go through
+// NewFetchingTree, which holds no memo. Without one, finalizeAllTurnCheckpoints
+// looping state.TurnCheckpointIDs against a single store paid
+// WriteProbeFetchBudget PER CHECKPOINT on a dead network — and FetchingTree.File
+// fetches one hash at a time, so a read touching several missing blobs paid it
+// several times. Nothing bounds the total: newGitHookContext adds no deadline,
+// and an agent kills the hook long before the loop ends.
+//
+// Only budget exhaustion is memoized, deliberately. It is the dead-network
+// signature and the only failure expensive enough to be worth not repeating; a
+// fast error is cheap to retry and may be one blob's genuine remote absence,
+// which must not stop the next blob from being fetched. As in the ref memo, a
+// cancellation originating from the CALLER says nothing about the remote and is
+// never memoized.
+func (s *ManualCommitStrategy) hookBlobFetcher() checkpoint.BlobFetchFunc {
+	if s.blobFetcher == nil {
+		return nil
+	}
+	var (
+		mu        sync.Mutex
+		exhausted error
+	)
+	return func(ctx context.Context, hashes []plumbing.Hash) error {
+		// The lock covers the read and is then released — deliberately not held
+		// across the check and fetch below. Two things forbid widening it: the
+		// fetch is a bounded network call, and the memo write further down
+		// re-acquires this same non-reentrant mutex, so holding it here
+		// deadlocks. That leaves a check-then-act window where two concurrent
+		// first-callers would both fetch, which is acceptable: every caller on
+		// these paths is sequential (finalizeAllTurnCheckpoints loops one
+		// checkpoint at a time; FetchingTree.File and PreFetch are sequential
+		// within a read), and if it were ever reached the cost is one duplicate
+		// fetch, not a wrong answer.
+		mu.Lock()
+		prior := exhausted
+		mu.Unlock()
+		if prior != nil {
+			return prior
+		}
+
+		budget := s.blobFetchBudget
+		if budget == 0 {
+			budget = remote.WriteProbeFetchBudget
+		}
+		fetchCtx, cancel := context.WithTimeout(remote.WithNonInteractiveSSH(ctx), budget)
+		defer cancel()
+		err := s.blobFetcher(fetchCtx, hashes)
+		if err != nil && ctx.Err() == nil && errors.Is(fetchCtx.Err(), context.DeadlineExceeded) {
+			mu.Lock()
+			if exhausted == nil {
+				exhausted = err
+			}
+			mu.Unlock()
+		}
+		return err
+	}
 }
 
 // ValidateRepository validates that the repository is suitable for this strategy.

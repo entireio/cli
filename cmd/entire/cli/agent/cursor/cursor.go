@@ -16,6 +16,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
+	"github.com/entireio/cli/cmd/entire/cli/transcript"
 )
 
 // Compile-time interface assertion.
@@ -122,9 +123,9 @@ func (c *CursorAgent) GetSessionBaseDir() (string, error) {
 }
 
 // ReadSession reads a session from Cursor's storage (JSONL transcript file).
-// Note: ModifiedFiles is left empty because Cursor's transcript does not contain
-// tool_use blocks for file detection. TranscriptAnalyzer extracts prompts and
-// summaries; file detection relies on git status.
+// ModifiedFiles is populated from the transcript's tool_use blocks; see
+// ExtractModifiedFiles. Git status remains the broader signal, since Cursor can
+// also change files through Shell commands that record no path.
 func (c *CursorAgent) ReadSession(input *agent.HookInput) (*agent.AgentSession, error) {
 	if input.SessionRef == "" {
 		return nil, errors.New("session reference (transcript path) is required")
@@ -135,12 +136,18 @@ func (c *CursorAgent) ReadSession(input *agent.HookInput) (*agent.AgentSession, 
 		return nil, fmt.Errorf("failed to read transcript: %w", err)
 	}
 
+	lines, err := transcript.ParseFromBytes(data)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse transcript: %w", err)
+	}
+
 	return &agent.AgentSession{
-		SessionID:  input.SessionID,
-		AgentName:  c.Name(),
-		SessionRef: input.SessionRef,
-		StartTime:  time.Now(),
-		NativeData: data,
+		SessionID:     input.SessionID,
+		AgentName:     c.Name(),
+		SessionRef:    input.SessionRef,
+		StartTime:     time.Now(),
+		NativeData:    data,
+		ModifiedFiles: ExtractModifiedFiles(lines),
 	}, nil
 }
 

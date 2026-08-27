@@ -59,9 +59,9 @@ func (m *mockHookSupport) HookNames() []string { return nil }
 func (m *mockHookSupport) ParseHookEvent(_ context.Context, _ string, _ io.Reader) (*Event, error) {
 	return nil, nil
 }
-func (m *mockHookSupport) InstallHooks(_ context.Context, _, _ bool) (int, error) { return 0, nil }
-func (m *mockHookSupport) UninstallHooks(_ context.Context) error                 { return nil }
-func (m *mockHookSupport) AreHooksInstalled(_ context.Context) bool               { return false }
+func (m *mockHookSupport) InstallHooks(_ context.Context, _ bool) (int, error) { return 0, nil }
+func (m *mockHookSupport) UninstallHooks(_ context.Context) error              { return nil }
+func (m *mockHookSupport) AreHooksInstalled(_ context.Context) (bool, error)   { return false, nil }
 
 // mockFileWatcher implements both Agent and FileWatcher interfaces.
 type mockFileWatcher struct {

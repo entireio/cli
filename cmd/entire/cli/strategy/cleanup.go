@@ -4,11 +4,12 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
-	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
@@ -20,13 +21,6 @@ import (
 	"github.com/go-git/go-git/v6/plumbing/object"
 )
 
-const (
-	// sessionGracePeriod is the minimum age a session must have before it can be
-	// considered orphaned. This protects active sessions that haven't created
-	// their first checkpoint yet.
-	sessionGracePeriod = 10 * time.Minute
-)
-
 // CleanupType identifies the type of item to clean up.
 type CleanupType string
 
@@ -34,6 +28,10 @@ const (
 	CleanupTypeShadowBranch CleanupType = "shadow-branch"
 	CleanupTypeSessionState CleanupType = "session-state"
 	CleanupTypeCheckpoint   CleanupType = "checkpoint"
+	// CleanupTypeRedactCache is the redaction prefix cache in the git common dir.
+	// Purely derived data -- it is rebuilt on the next checkpoint -- so it is
+	// removed wholesale rather than per entry.
+	CleanupTypeRedactCache CleanupType = "redact-cache"
 )
 
 // CleanupItem represents an item that can be cleaned up.
@@ -45,12 +43,14 @@ type CleanupItem struct {
 
 // CleanupResult contains the results of a cleanup operation.
 type CleanupResult struct {
+	RedactCaches      []string // Deleted redaction prefix cache directories
 	ShadowBranches    []string // Deleted shadow branches
 	SessionStates     []string // Deleted session state files
 	Checkpoints       []string // Deleted checkpoint metadata
 	FailedBranches    []string // Shadow branches that failed to delete
 	FailedStates      []string // Session states that failed to delete
 	FailedCheckpoints []string // Checkpoints that failed to delete
+	FailedRedactCache []string // Redaction caches that failed to delete
 }
 
 // shadowBranchPattern matches shadow branch names in both old and new formats:
@@ -283,99 +283,6 @@ func DeleteShadowBranches(ctx context.Context, branches []string) (deleted []str
 	return deleted, failed, nil
 }
 
-// ListOrphanedSessionStates returns session state files that are orphaned.
-// A session state is orphaned if:
-//   - No checkpoints on the configured committed read ref reference this session ID
-//   - No shadow branch exists for the session's base commit
-//
-// This is strategy-agnostic as session states are shared by all strategies.
-func ListOrphanedSessionStates(ctx context.Context) ([]CleanupItem, error) {
-	repo, err := OpenRepository(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("failed to open git repository: %w", err)
-	}
-	defer repo.Close()
-
-	// Get all session states
-	store, err := session.NewStateStore(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create state store: %w", err)
-	}
-
-	states, err := store.List(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("failed to list session states: %w", err)
-	}
-
-	if len(states) == 0 {
-		return []CleanupItem{}, nil
-	}
-
-	// Get all committed checkpoints from the configured read ref to find which sessions have checkpoints
-	cpStores, err := checkpoint.Open(ctx, repo, checkpoint.OpenOptions{})
-	if err != nil {
-		return nil, fmt.Errorf("open checkpoint store: %w", err)
-	}
-
-	sessionsWithCheckpoints := make(map[string]bool)
-	checkpoints, listErr := cpStores.Persistent.List(ctx)
-	if listErr == nil {
-		for _, cp := range checkpoints {
-			// cp.SessionID is the most-recent session in a multi-session checkpoint;
-			// cp.SessionIDs lists every session that contributed. Track all of them so
-			// archived sessions of condensed checkpoints aren't flagged as orphaned.
-			sessionsWithCheckpoints[cp.SessionID] = true
-			for _, sid := range cp.SessionIDs {
-				sessionsWithCheckpoints[sid] = true
-			}
-		}
-	}
-
-	// Get all shadow branches as a set for quick lookup
-	shadowBranches, _ := ListShadowBranches(ctx) //nolint:errcheck // Best effort
-	shadowBranchSet := make(map[string]bool)
-	for _, branch := range shadowBranches {
-		shadowBranchSet[branch] = true
-	}
-
-	var orphaned []CleanupItem
-	now := time.Now()
-
-	for _, state := range states {
-		// Skip sessions that started recently - they may be actively in use
-		// but haven't created their first checkpoint yet
-		if now.Sub(state.StartedAt) < sessionGracePeriod {
-			continue
-		}
-
-		// Imported sessions are read-only and commit-less by design — no shadow
-		// branch is ever expected. Never offer them for cleanup.
-		if state.Kind.IsImported() {
-			continue
-		}
-
-		// Check if session has checkpoints in committed checkpoint storage
-		hasCheckpoints := sessionsWithCheckpoints[state.SessionID]
-
-		// Check if shadow branch exists for this session's base commit and worktree
-		// Shadow branches are now worktree-specific: entire/<commit[:7]>-<worktreeHash[:6]>
-		expectedBranch := checkpoint.ShadowBranchNameForCommit(state.BaseCommit, state.WorktreeID)
-		hasShadowBranch := shadowBranchSet[expectedBranch]
-
-		// Session is orphaned if it has no checkpoints AND no shadow branch
-		if !hasCheckpoints && !hasShadowBranch {
-			reason := "no checkpoints or shadow branch found"
-			orphaned = append(orphaned, CleanupItem{
-				Type:   CleanupTypeSessionState,
-				ID:     state.SessionID,
-				Reason: reason,
-			})
-		}
-	}
-
-	return orphaned, nil
-}
-
 // DeleteOrphanedSessionStates deletes the specified session state files.
 func DeleteOrphanedSessionStates(ctx context.Context, sessionIDs []string) (deleted []string, failed []string, err error) {
 	if len(sessionIDs) == 0 {
@@ -532,7 +439,29 @@ func ListAllItems(ctx context.Context) ([]CleanupItem, error) {
 		})
 	}
 
+	// The redaction prefix cache accumulates one small entry per session and is
+	// never superseded, so without this it would survive every `entire clean`.
+	if dir, err := redactCacheDir(ctx); err == nil && dir != "" {
+		if _, statErr := os.Stat(dir); statErr == nil {
+			cleanupItems = append(cleanupItems, CleanupItem{
+				Type:   CleanupTypeRedactCache,
+				ID:     checkpoint.RedactCacheDirName,
+				Reason: "clean all",
+			})
+		}
+	}
+
 	return cleanupItems, nil
+}
+
+// redactCacheDir resolves the redaction prefix cache directory, or "" when the
+// git common dir cannot be resolved.
+func redactCacheDir(ctx context.Context) (string, error) {
+	commonDir, err := session.GetGitCommonDir(ctx)
+	if err != nil {
+		return "", fmt.Errorf("resolve git common dir: %w", err)
+	}
+	return filepath.Join(commonDir, checkpoint.RedactCacheDirName), nil
 }
 
 // DeleteAllCleanupItems deletes all specified cleanup items.
@@ -548,15 +477,32 @@ func DeleteAllCleanupItems(ctx context.Context, items []CleanupItem) (*CleanupRe
 	}
 
 	// Group items by type
-	var branches, states, checkpoints []string
+	var branches, states, checkpoints, redactCaches []string
 	for _, item := range items {
 		switch item.Type {
 		case CleanupTypeShadowBranch:
 			branches = append(branches, item.ID)
 		case CleanupTypeSessionState:
 			states = append(states, item.ID)
+		case CleanupTypeRedactCache:
+			redactCaches = append(redactCaches, item.ID)
 		case CleanupTypeCheckpoint:
 			checkpoints = append(checkpoints, item.ID)
+		}
+	}
+
+	// Remove the redaction prefix cache. Derived data, so a failure is recorded
+	// but never blocks the rest of the cleanup.
+	if len(redactCaches) > 0 {
+		if err := deleteRedactCache(ctx); err != nil {
+			result.FailedRedactCache = redactCaches
+			logging.Warn(logCtx, "failed to delete redaction cache",
+				slog.String("type", string(CleanupTypeRedactCache)),
+				slog.String("error", err.Error()))
+		} else {
+			result.RedactCaches = redactCaches
+			logging.Info(logCtx, "deleted redaction cache",
+				slog.String("type", string(CleanupTypeRedactCache)))
 		}
 	}
 
@@ -656,4 +602,18 @@ func DeleteAllCleanupItems(ctx context.Context, items []CleanupItem) (*CleanupRe
 	}
 
 	return result, nil
+}
+
+// deleteRedactCache removes the redaction prefix cache directory. Every entry is
+// derived data rebuilt on the next checkpoint, so removing the whole directory is
+// always safe; a missing directory is not an error.
+func deleteRedactCache(ctx context.Context) error {
+	dir, err := redactCacheDir(ctx)
+	if err != nil {
+		return err
+	}
+	if err := os.RemoveAll(dir); err != nil {
+		return fmt.Errorf("remove redaction cache %s: %w", dir, err)
+	}
+	return nil
 }

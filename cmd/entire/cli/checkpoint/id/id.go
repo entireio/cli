@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"regexp"
+	"time"
 
 	ulid "github.com/oklog/ulid/v2"
 )
@@ -222,6 +223,24 @@ func (id CheckpointID) DisplayShort() string {
 // IsEmpty returns true if the checkpoint ID is empty or unset.
 func (id CheckpointID) IsEmpty() bool {
 	return id == EmptyCheckpointID
+}
+
+// Time returns the creation time encoded in this ID and whether one is
+// available. A ULID embeds a millisecond Unix timestamp in its leading
+// characters, so the time is recoverable from the ID alone — no store read
+// required. This is what lets remote-ref discovery (which learns only ref names
+// via ls-remote) present and sort a not-yet-hydrated checkpoint by its real
+// creation time. Legacy 12-hex IDs carry no timestamp, so this returns
+// (zero, false) for them.
+func (id CheckpointID) Time() (time.Time, bool) {
+	if id.Kind() != KindULID {
+		return time.Time{}, false
+	}
+	u, err := ulid.ParseStrict(string(id))
+	if err != nil {
+		return time.Time{}, false
+	}
+	return ulid.Time(u.Time()), true
 }
 
 // Path returns the sharded path for this checkpoint ID on entire/checkpoints/v1.

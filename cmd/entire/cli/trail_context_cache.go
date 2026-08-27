@@ -13,18 +13,35 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/api"
 	"github.com/entireio/cli/cmd/entire/cli/auth"
+	"github.com/entireio/cli/cmd/entire/cli/execx"
 	"github.com/entireio/cli/cmd/entire/cli/gitremote"
+	"github.com/entireio/cli/cmd/entire/cli/internal/flock"
 	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
+	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/cmd/entire/cli/validation"
+
+	"github.com/spf13/cobra"
 )
 
 const (
 	trailEnablementCacheTTL                   = time.Hour
+	agentHelpTrailsRefreshFailureBackoff      = 5 * time.Minute
 	trailEnablementSessionStartRefreshTimeout = time.Second
-	trailEnablementRefreshTimeout             = 3 * time.Second
+	// trailEnablementRefreshTimeout bounds a full enablement refresh. Since
+	// the probe moved onto the repo's own cell it covers ~4 sequential round
+	// trips (repos index, cluster catalog, identity-token exchange,
+	// TrailsEnabled), so requiredCellResolveTimeout's 15s inner budget is
+	// inert underneath it — this is the effective bound.
+	//
+	// Kept at 3s rather than grown to match: expiry is soft everywhere it
+	// applies (agent-help falls back to agentHelpTrailsRefreshFailureBackoff
+	// and reports trails unavailable; the detached SessionStart child just
+	// leaves the cache unknown for the next turn), whereas raising it makes
+	// every offline invocation wait longer for the same answer.
+	trailEnablementRefreshTimeout = 3 * time.Second
 )
 
 type trailEnablementCacheStatus int
@@ -179,7 +196,20 @@ func saveTrailsEnabledForRemote(ctx context.Context, forge, owner, repo string, 
 	return saveTrailsEnabledForScope(ctx, scope, enabled, time.Now())
 }
 
+// saveTrailsEnabledForScope is the single writer behind every trails-enablement
+// cache save (saveTrailsEnabledForRepo/ForRemote both funnel here), which is why
+// the outlives-the-deadline guarantee lives at this one point rather than at
+// each call site.
+//
+// The write is not purely local: ClonePreferencesPath resolves the git common
+// dir with `git rev-parse` under the passed ctx (session.getGitCommonDir). So a
+// refresh that answers the question at 2.9s of a 3s budget could then fail to
+// STORE the answer, leaving the cache "unknown" — precisely the state the
+// callers' branches exist to escape, and the one that makes SessionStart
+// re-fork a refresh child on every invocation. Losing the answer is strictly
+// worse than spending a few extra milliseconds past the deadline to keep it.
 func saveTrailsEnabledForScope(ctx context.Context, scope trailEnablementScope, enabled bool, checkedAt time.Time) error {
+	ctx = context.WithoutCancel(ctx)
 	enabledCopy := enabled
 	checkedAtUTC := checkedAt.UTC()
 	if err := settings.ModifyClonePreferences(ctx, func(prefs *settings.ClonePreferences) error {
@@ -195,6 +225,50 @@ func saveTrailsEnabledForScope(ctx context.Context, scope trailEnablementScope, 
 	return nil
 }
 
+// recentAgentHelpTrailsRefreshFailure reports whether agent-help should back off
+// after a failed availability refresh for this exact repo/API/auth scope. This
+// marker is deliberately separate from TrailsEnabled: lifecycle SessionStart
+// must still perform its authoritative probe and decide context injection.
+func recentAgentHelpTrailsRefreshFailure(ctx context.Context, scope trailEnablementScope, now time.Time) bool {
+	prefs, err := settings.LoadClonePreferences(ctx)
+	if err != nil || prefs.TrailsAgentHelpRefreshFailedAt == nil {
+		return false
+	}
+	if prefs.TrailsAgentHelpFailureRepoKey != scope.RepoKey ||
+		prefs.TrailsAgentHelpFailureAPIBase != scope.APIBase ||
+		prefs.TrailsAgentHelpFailureAuthKey != scope.AuthKey {
+		return false
+	}
+	failedAt := *prefs.TrailsAgentHelpRefreshFailedAt
+	if failedAt.IsZero() || now.Before(failedAt) {
+		return false
+	}
+	return now.Sub(failedAt) <= agentHelpTrailsRefreshFailureBackoff
+}
+
+func saveAgentHelpTrailsRefreshFailure(ctx context.Context, scope trailEnablementScope, failedAt time.Time) error {
+	failedAtUTC := failedAt.UTC()
+	if err := settings.ModifyClonePreferences(ctx, func(prefs *settings.ClonePreferences) error {
+		prefs.TrailsAgentHelpRefreshFailedAt = &failedAtUTC
+		prefs.TrailsAgentHelpFailureRepoKey = scope.RepoKey
+		prefs.TrailsAgentHelpFailureAPIBase = scope.APIBase
+		prefs.TrailsAgentHelpFailureAuthKey = scope.AuthKey
+		return nil
+	}); err != nil {
+		return fmt.Errorf("save clone preferences: %w", err)
+	}
+	return nil
+}
+
+// refreshTrailsEnabledCacheIfStaleForScope refreshes the trails-enablement
+// cache when it's unknown/expired for scope. Callers on hot, latency-sensitive
+// paths (SessionStart) must not block on this: resolving the API token and
+// dialing TrailsEnabled can stall for seconds when the host is slow or
+// unreachable (VPN, firewall, offline). Instead of doing that
+// network work inline, hand it off to a detached `__refresh_trail_enablement`
+// subprocess and return immediately; a later SessionStart will observe the
+// freshly written cache once the subprocess completes. The "not supported"
+// case is answered locally (no network) since it's free.
 func refreshTrailsEnabledCacheIfStaleForScope(ctx context.Context, scope trailEnablementScope) error {
 	if cachedTrailsEnablementForScope(ctx, scope, time.Now()) != trailEnablementCacheUnknown {
 		return nil
@@ -202,12 +276,217 @@ func refreshTrailsEnabledCacheIfStaleForScope(ctx context.Context, scope trailEn
 	if !scope.Supported {
 		return saveTrailsEnabledForScope(ctx, scope, false, time.Now())
 	}
-	client, err := NewAuthenticatedAPIClient(ctx, false)
-	if err != nil {
-		return err
+	spawnDetachedTrailEnablementRefresh(ctx)
+	return nil
+}
+
+// trailRefreshAPIClient is the authenticated-client seam used by
+// runTrailEnablementRefresh, refreshAgentHelpTrailsEnabledCacheIfStaleForScope,
+// and probeAndCacheTrailsEnablement, swapped in tests so they can force the
+// refreshTrailsEnabledCacheForScope error branch (e.g. a broken API host)
+// without a real login context. Production code always uses the repo-routed
+// entire-api cell client (newTrailAPIClient) rather than the generic
+// data-API/BFF client: the BFF does not proxy /api/v1/trails/... for bearer
+// callers (COR-666), so probing it via the generic client silently misreads a
+// supported repo as disabled.
+var trailRefreshAPIClient = func(ctx context.Context, insecureHTTP bool, fullName string) (*api.Client, error) {
+	return newTrailAPIClient(ctx, insecureHTTP, fullName)
+}
+
+// trailsCellClient resolves the entire-api cell client for ownerRepo via
+// trailRefreshAPIClient, classifying the one failure every caller must treat
+// specially instead of leaving each to re-derive it.
+//
+// notOnboarded reports errRepoNotOnboarded (cell_target.go): a DEFINITIVE, not
+// transient, negative — the repo has no processing placement — which callers
+// must PERSIST rather than treat as an ordinary client-construction failure,
+// because leaving the cache unknown means every future refresh re-attempts
+// (and re-fails) the same client build forever.
+//
+// The save itself stays with the caller because its key differs (scope- vs
+// remote-keyed), and err always describes the client build — never a save — so
+// a caller can log it without having to know which of the two it got. When
+// notOnboarded is true, err is the sentinel-wrapping error, kept for logging;
+// callers must act on notOnboarded, not propagate err.
+func trailsCellClient(ctx context.Context, insecureHTTP bool, ownerRepo string) (client *api.Client, notOnboarded bool, err error) {
+	client, err = trailRefreshAPIClient(ctx, insecureHTTP, ownerRepo)
+	switch {
+	case err == nil:
+		return client, false, nil
+	case errors.Is(err, errRepoNotOnboarded):
+		return nil, true, err
+	default:
+		return nil, false, err
 	}
-	_, err = refreshTrailsEnabledCacheForScope(ctx, client, scope)
-	return err
+}
+
+// runTrailEnablementRefresh performs the actual (potentially slow) network
+// refresh. It is invoked from the detached `__refresh_trail_enablement`
+// subprocess spawned by refreshTrailsEnabledCacheIfStaleForScope, never
+// synchronously from a hook path.
+func runTrailEnablementRefresh(ctx context.Context) error {
+	ctx, cancel := context.WithTimeout(ctx, trailEnablementRefreshTimeout)
+	defer cancel()
+
+	// This runs detached with stdout/stderr discarded, so log at debug to the
+	// repo's .entire/logs/entire.log (initialized by newRefreshTrailEnablementCmd).
+	// Without this, an unreachable/failing host would leave the background
+	// refresh silently failing with no diagnostic trail.
+	logCtx := logging.WithComponent(ctx, "trail-refresh")
+
+	scope, err := currentTrailEnablementScope(ctx)
+	if err != nil {
+		logging.Debug(logCtx, "trails enablement refresh skipped: scope unresolved", "error", err.Error())
+		return nil
+	}
+	// Another process (e.g. a fast-following SessionStart, or a concurrent
+	// refresh already in flight) may have populated the cache first.
+	if cachedTrailsEnablementForScope(ctx, scope, time.Now()) != trailEnablementCacheUnknown {
+		return nil
+	}
+	if !scope.Supported {
+		if err := saveTrailsEnabledForScope(ctx, scope, false, time.Now()); err != nil {
+			logging.Debug(logCtx, "trails enablement refresh failed to save unsupported scope", "error", err.Error())
+		}
+		return nil
+	}
+	client, notOnboarded, err := trailsCellClient(ctx, false, scope.Owner+"/"+scope.Repo)
+	if notOnboarded {
+		// A definitive, permanent negative: without this, every SessionStart
+		// re-forks a refresh child for this repo forever (see
+		// trailRefreshSpawnThrottle above), because the cache is never
+		// written and so never leaves "unknown".
+		if saveErr := saveTrailsEnabledForScope(ctx, scope, false, time.Now()); saveErr != nil {
+			logging.Debug(logCtx, "trails enablement refresh failed to save not-onboarded scope", "error", saveErr.Error())
+		}
+		return nil
+	}
+	if err != nil {
+		logging.Debug(logCtx, "trails enablement refresh skipped: authenticated client unavailable", "error", err.Error())
+		return nil
+	}
+	// Best-effort: this runs from the detached __refresh_trail_enablement
+	// subprocess (stdout/stderr discarded, see newRefreshTrailEnablementCmd),
+	// so a transient network/API failure here must not surface as a non-zero
+	// process exit — there's no one watching it and no user-visible benefit,
+	// only a spurious failure signal. The failure is still diagnosable via the
+	// debug log above.
+	if _, err := refreshTrailsEnabledCacheForScope(ctx, client, scope); err != nil {
+		logging.Debug(logCtx, "trails enablement refresh failed", "error", err.Error())
+		return nil
+	}
+	logging.Debug(logCtx, "trails enablement refresh completed", "enabled_repo_key", scope.RepoKey)
+	return nil
+}
+
+// trailRefreshSpawn is the process-spawn seam used by
+// spawnDetachedTrailEnablementRefresh. Swapped in tests so they can assert
+// SessionStart never blocks on it without forking a real subprocess (a real
+// `go test` binary doesn't understand `__refresh_trail_enablement` as an
+// argument). Production code always uses spawnDetachedTrailRefreshProcess.
+var trailRefreshSpawn = spawnDetachedTrailRefreshProcess
+
+// spawnDetachedTrailRefreshProcess starts `entire __refresh_trail_enablement`
+// as a detached child so the trails-enablement network refresh can't add
+// latency to the SessionStart hook that spawned it. The child runs from the
+// worktree root because the refresh resolves the origin remote and
+// git-common-dir for cache storage from its working directory.
+func spawnDetachedTrailRefreshProcess(worktreeRoot string) {
+	execx.SpawnDetached(worktreeRoot, "__refresh_trail_enablement")
+}
+
+// trailRefreshSpawnThrottle bounds how often SessionStart forks a detached
+// refresh child for a given repo. When the API host is unreachable the refresh
+// never writes the cache, so cachedTrailsEnablementForScope stays unknown and
+// the hourly TTL never starts — without this guard every SessionStart (and
+// every concurrent worktree) would fork a fresh child that re-opens the repo,
+// re-resolves auth, and re-dials the dead host. Tying the window to the child's
+// own timeout collapses a burst of hooks to roughly one child per window while
+// still retrying promptly once the host recovers.
+const trailRefreshSpawnThrottle = trailEnablementRefreshTimeout
+
+// spawnDetachedTrailEnablementRefresh starts a detached child process that
+// runs runTrailEnablementRefresh in the background. Best-effort: if the
+// worktree root can't be resolved or the subprocess can't be spawned, the
+// cache simply stays unknown and the next SessionStart tries again. A recent
+// spawn for the same repo short-circuits so a burst of hooks doesn't fork a
+// herd of redundant refresh children (see trailRefreshRecentlySpawned).
+func spawnDetachedTrailEnablementRefresh(ctx context.Context) {
+	worktreeRoot, err := paths.WorktreeRoot(ctx)
+	if err != nil {
+		return
+	}
+	if commonDir, err := session.GetGitCommonDir(ctx); err == nil &&
+		trailRefreshRecentlySpawned(commonDir, time.Now()) {
+		return
+	}
+	trailRefreshSpawn(worktreeRoot)
+}
+
+// trailRefreshRecentlySpawned reports whether a detached refresh was spawned for
+// this repo within trailRefreshSpawnThrottle and, when it wasn't, records now as
+// the most recent spawn. The read-and-record is serialized with a flock keyed to
+// the shared git-common-dir (so every worktree of the repo agrees), collapsing a
+// burst of concurrent SessionStart hooks to a single child rather than one per
+// hook. Best-effort: any error resolving, locking, or writing the marker falls
+// through to spawning — never worse than before this guard existed.
+func trailRefreshRecentlySpawned(commonDir string, now time.Time) bool {
+	return recentlySpawnedMarker(commonDir, "trail-refresh-spawn", trailRefreshSpawnThrottle, now)
+}
+
+// recentlySpawnedMarker reports whether the named spawn marker under the
+// shared git-common-dir was refreshed within ttl and, when it wasn't, records
+// now as the most recent spawn. The read-and-record is serialized with a flock
+// keyed to the marker (so every worktree of the repo agrees), collapsing a
+// burst of concurrent hooks to a single detached child rather than one per
+// hook. Best-effort: any error resolving, locking, or writing the marker falls
+// through to spawning — never worse than having no guard at all. Shared by the
+// trail-enablement refresh and the zombie-session sweep, each with its own
+// marker name and ttl.
+func recentlySpawnedMarker(commonDir, marker string, ttl time.Duration, now time.Time) bool {
+	dir := filepath.Join(commonDir, "entire")
+	// Create the directory before acquiring the lock: flock.Acquire opens the
+	// lock file, which fails if its parent doesn't exist yet (mirrors
+	// ModifyClonePreferences, which MkdirAlls before locking).
+	if err := os.MkdirAll(dir, 0o750); err != nil {
+		return false
+	}
+	markerPath := filepath.Join(dir, marker)
+	release, err := flock.Acquire(markerPath + ".lock")
+	if err != nil {
+		return false
+	}
+	defer release()
+
+	if data, readErr := os.ReadFile(markerPath); readErr == nil { //nolint:gosec // markerPath is derived from the trusted git-common-dir, not user input
+		if last, parseErr := time.Parse(time.RFC3339Nano, strings.TrimSpace(string(data))); parseErr == nil &&
+			now.After(last) && now.Sub(last) < ttl {
+			return true
+		}
+	}
+	//nolint:errcheck // best-effort marker; a failed write just means the next hook re-spawns
+	_ = os.WriteFile(markerPath, []byte(now.UTC().Format(time.RFC3339Nano)), 0o600)
+	return false
+}
+
+// newRefreshTrailEnablementCmd creates the hidden command that performs the
+// (potentially slow) trails-enablement network refresh out of band. It is
+// invoked by spawnDetachedTrailEnablementRefresh from a detached subprocess
+// and should not be called directly.
+func newRefreshTrailEnablementCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:    "__refresh_trail_enablement",
+		Hidden: true,
+		Args:   cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			// Detached child with discarded stdout/stderr: the root
+			// PersistentPreRun has already routed logging into
+			// .entire/logs/entire.log, so a failing background refresh (e.g.
+			// an unreachable host) is diagnosable there rather than vanishing.
+			ctx := cmd.Context()
+			return runTrailEnablementRefresh(ctx)
+		},
+	}
 }
 
 func refreshTrailsEnabledCache(ctx context.Context, client *api.Client) (bool, error) {
@@ -263,17 +542,22 @@ func noteTrailCommandEnablement(ctx context.Context, client *api.Client, command
 	refreshTrailsEnabledCacheBestEffort(ctx, client)
 }
 
-// runAuthenticatedTrailAPI runs fn against the data API as the current user.
-// repoOverride is the raw --repo flag: when non-empty the trails-enablement
-// cache is skipped, because that cache is keyed to the local clone's origin and
-// a cross-repo query says nothing about the local clone (recording it would
-// mis-attribute enablement to the wrong repo).
+// runAuthenticatedTrailAPI runs fn against the entire-api cell that owns the
+// target repository. repoOverride is the raw --repo flag: when non-empty the
+// local clone's enablement cache is skipped because the result belongs to a
+// different repository.
 func runAuthenticatedTrailAPI(ctx context.Context, errW io.Writer, insecureHTTP bool, repoOverride string, fn func(context.Context, *api.Client) error) error {
-	return runAuthenticatedDataAPI(ctx, errW, insecureHTTP, func(ctx context.Context, client *api.Client) error {
-		err := fn(ctx, client)
-		if repoOverride == "" {
-			noteTrailCommandEnablement(ctx, client, err)
-		}
+	_, owner, repo, err := resolveTrailRepoOrRemote(ctx, repoOverride)
+	if err != nil {
 		return err
-	})
+	}
+	client, err := newTrailAPIClient(ctx, insecureHTTP, owner+"/"+repo)
+	if err != nil {
+		return renderDataAPIAuthError(ctx, errW, owner+"/"+repo, err)
+	}
+	err = fn(ctx, client)
+	if repoOverride == "" {
+		noteTrailCommandEnablement(ctx, client, err)
+	}
+	return err
 }

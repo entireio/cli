@@ -146,3 +146,35 @@ go test -v -run TestCommitHookPerformance -tags hookperf -timeout 15m ./cmd/enti
 ```
 
 Requires GitHub access for cloning. Sessions are generated from repo commit history (no external templates needed).
+
+## Measuring a real hook instead of a synthetic one
+
+The synthetic harness above took several iterations to match production (see
+"Impact of test methodology"), which is the usual failure mode: a hook that is slow
+in a real repo often is not slow in a reconstructed one. Prefer reading production
+timings first.
+
+Every hook is wrapped in a root `perf` span (`perf/span.go`), so each invocation
+emits one log line carrying the full per-step tree. Root spans that take at least
+1.5s log at WARN with `slow=true`, so a slow hook records its own breakdown in a
+default (INFO-level) session — no DEBUG, no reproduction:
+
+```bash
+grep '"slow":true' .entire/logs/entire.log   # slow hooks, with steps.*_ms
+entire doctor trace --last 5                 # rendered as a step table
+```
+
+Set `ENTIRE_PERF_SLOW_MS` to change the threshold (`0` disables escalation). Every
+hook — fast ones included — is traced at DEBUG.
+
+Two traps worth avoiding when benchmarking hooks by hand:
+
+- **Measurements taken in this repo before 2026-08-17 are inflated.** Its hooks
+  ran through `scripts/entire-dev`, which built and `go run` the CLI on every
+  invocation — a fixed ~1.53s cost no other repo and no user paid, and it silently
+  dominated anything measured here. #1999 removed `local_dev` mode and deleted the
+  launcher, so hooks now exec the plain `entire` binary from PATH and timings taken
+  here are ordinary product timings. Keep the date in mind when reading old numbers.
+- **`git clone` does not copy `refs/entire/*`.** A clone silently has no checkpoint
+  history, so it cannot reproduce costs that scale with accumulated sessions or
+  refs. Copy the repo (`cp -Rc` on APFS) instead.

@@ -18,6 +18,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/api"
 	"github.com/entireio/cli/cmd/entire/cli/auth"
 	"github.com/entireio/cli/cmd/entire/cli/interactive"
+	"github.com/entireio/cli/cmd/entire/cli/uiform"
 	"github.com/entireio/cli/internal/coreapi"
 )
 
@@ -139,18 +140,6 @@ func selectableAvailableRepos(avail []coreapi.AvailableMirror) []coreapi.Availab
 		return out[i].Repo < out[j].Repo
 	})
 	return out
-}
-
-// multiSelectHeight returns an explicit huh multi-select Height that keeps every
-// option visible. huh auto-sizes an unset height to (rendered option lines −
-// title/description rows), which collapses to ~1 visible row for short lists
-// (e.g. 3 regions vs. a long repo list) — the cause of the region picker
-// appearing clamped to one option. We set it to the option count plus slack for
-// the title + (possibly wrapped) description so the whole list shows; huh still
-// scrolls if the list outgrows the terminal.
-func multiSelectHeight(n int) int {
-	const headerSlack = 3 // title (1) + description (1–2 when wrapped)
-	return n + headerSlack
 }
 
 // clusterChoices maps regions to multi-select options (value = bare host),
@@ -359,7 +348,7 @@ func runMirrorCreateWizard(cmd *cobra.Command, noWait bool, waitTimeout time.Dur
 	repos := selectableAvailableRepos(avail.Available)
 	if len(repos) == 0 {
 		fmt.Fprintln(errW, "No GitHub repos available to mirror (you need write access to a repo that isn't mirrored yet).")
-		fmt.Fprintln(errW, "Run 'entire repo mirror list --show-available' to see what's onboardable.")
+		fmt.Fprintln(errW, "Run 'entire repo mirror list' to see what's onboardable.")
 		return nil
 	}
 	selectedRepos, err := pickRepos(ctx, outW, repos)
@@ -449,7 +438,7 @@ func pickRepos(ctx context.Context, w io.Writer, repos []coreapi.AvailableMirror
 				Title("Select repos to mirror").
 				Description("Space to select, enter to confirm.").
 				Options(options...).
-				Height(multiSelectHeight(len(options))).
+				Height(uiform.SingleLineMultiSelectHeight(len(options))).
 				Validate(func(s []string) error {
 					if len(s) == 0 {
 						return errors.New("select at least one repo")
@@ -489,7 +478,7 @@ func pickRegions(ctx context.Context, w io.Writer, regions []regionChoice, juris
 				Title("Select regions to mirror into").
 				Description("Each repo is mirrored into every selected region.").
 				Options(opts...).
-				Height(multiSelectHeight(len(opts))).
+				Height(uiform.SingleLineMultiSelectHeight(len(opts))).
 				Validate(func(s []string) error {
 					if len(s) == 0 {
 						return errors.New("select at least one region")

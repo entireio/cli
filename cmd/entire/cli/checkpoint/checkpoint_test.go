@@ -8,13 +8,17 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
+	_ "github.com/entireio/cli/cmd/entire/cli/agent/claudecode" // register claude-code so its .claude protected dir is discoverable
+	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
+	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 	"github.com/entireio/cli/cmd/entire/cli/trailers"
@@ -101,6 +105,127 @@ func TestCopyMetadataDir_SkipsSymlinks(t *testing.T) {
 	if len(entries) != 1 {
 		t.Errorf("expected 1 entry, got %d", len(entries))
 	}
+}
+
+// fakePluginAgent is a minimal agent stub used to prove that protected dirs
+// and files reported by an external-plugin-style agent (via the AllProtectedDirs
+// / AllProtectedFiles union) are honored by the first-checkpoint path, not just
+// the built-in claude-code .claude dir.
+type fakePluginAgent struct{}
+
+var (
+	_ agent.Agent                  = (*fakePluginAgent)(nil)
+	_ agent.ProtectedFilesProvider = (*fakePluginAgent)(nil)
+)
+
+func (fakePluginAgent) Name() types.AgentName                { return "terminalhire-plugin" }
+func (fakePluginAgent) Type() types.AgentType                { return "TerminalHire" }
+func (fakePluginAgent) Description() string                  { return "fake external plugin for tests" }
+func (fakePluginAgent) IsPreview() bool                      { return true }
+func (fakePluginAgent) ProtectedDirs() []string              { return []string{".terminalhire"} }
+func (fakePluginAgent) ProtectedFiles() []string             { return []string{".terminalhirerc"} }
+func (fakePluginAgent) GetSessionID(*agent.HookInput) string { return "" }
+
+func (fakePluginAgent) DetectPresence(context.Context) (bool, error) { return false, nil }
+func (fakePluginAgent) ReadTranscript(string) ([]byte, error)        { return nil, nil }
+func (fakePluginAgent) ChunkTranscript(_ context.Context, c []byte, _ int) ([][]byte, error) {
+	return [][]byte{c}, nil
+}
+func (fakePluginAgent) ReassembleTranscript(chunks [][]byte) ([]byte, error) {
+	var out []byte
+	for _, c := range chunks {
+		out = append(out, c...)
+	}
+	return out, nil
+}
+func (fakePluginAgent) GetSessionDir(string) (string, error)                      { return "", nil }
+func (fakePluginAgent) ResolveSessionFile(dir, sid string) string                 { return dir + "/" + sid }
+func (fakePluginAgent) ReadSession(*agent.HookInput) (*agent.AgentSession, error) { return nil, nil } //nolint:nilnil // test stub
+func (fakePluginAgent) WriteSession(context.Context, *agent.AgentSession) error   { return nil }
+func (fakePluginAgent) FormatResumeCommand(string) string                         { return "" }
+
+// TestCollectChangedFiles_ExcludesProtectedDirs verifies that the
+// first-checkpoint path keeps agent-protected dirs (e.g. .claude) and the
+// .entire infrastructure dir out of the checkpoint snapshot, while ordinary
+// untracked files are still captured. Regression for protected-dir content
+// leaking into the shadow tree on session start.
+func TestCollectChangedFiles_ExcludesProtectedDirs(t *testing.T) {
+	t.Parallel()
+
+	// Register an external-plugin-style agent so its protected dir/file join the
+	// AllProtectedDirs/AllProtectedFiles union alongside the built-in .claude.
+	// Registration is additive and concurrency-safe; no test asserts the exact set.
+	agent.Register("terminalhire-plugin", func() agent.Agent { return fakePluginAgent{} })
+
+	tempDir := t.TempDir()
+	// Resolve symlinks so the repo root matches git's resolved path.
+	// On macOS, t.TempDir() returns /var/... but git resolves to /private/var/...
+	tempDir, err := filepath.EvalSymlinks(tempDir)
+	require.NoError(t, err)
+
+	testutil.InitRepo(t, tempDir)
+	testutil.WriteFile(t, tempDir, "base.txt", "base")
+	testutil.GitAdd(t, tempDir, "base.txt")
+	testutil.GitCommit(t, tempDir, "init")
+
+	// Disable any global core.excludesFile so a developer/CI-runner gitignore
+	// convention (e.g. one that ignores .claude) can't mask the leak. The fix
+	// must exclude protected dirs on its own, independent of gitignore state.
+	cfgCmd := exec.CommandContext(context.Background(), "git", "config", "core.excludesFile", os.DevNull)
+	cfgCmd.Dir = tempDir
+	require.NoError(t, cfgCmd.Run())
+
+	// Planted untracked, non-gitignored files.
+	testutil.WriteFile(t, tempDir, ".claude/marker.txt", "MARKER-secret")         // built-in agent-protected dir
+	testutil.WriteFile(t, tempDir, ".terminalhire/profile.json", "MARKER-plugin") // plugin-protected dir
+	testutil.WriteFile(t, tempDir, ".terminalhirerc", "MARKER-plugin-file")       // plugin-protected file
+	testutil.WriteFile(t, tempDir, ".entire/state.json", "{}")                    // infrastructure
+	testutil.WriteFile(t, tempDir, "src/keep.txt", "user work")                   // ordinary
+
+	repo, err := git.PlainOpen(tempDir)
+	require.NoError(t, err)
+
+	result, err := collectChangedFiles(context.Background(), repo)
+	require.NoError(t, err)
+
+	require.NotContains(t, result.Changed, ".claude/marker.txt",
+		"built-in agent protected dir content must not be captured into the checkpoint")
+	require.NotContains(t, result.Changed, ".terminalhire/profile.json",
+		"external-plugin protected dir content must not be captured into the checkpoint")
+	require.NotContains(t, result.Changed, ".terminalhirerc",
+		"external-plugin protected file must not be captured into the checkpoint")
+	require.NotContains(t, result.Changed, ".entire/state.json",
+		"infrastructure dir must not be captured into the checkpoint")
+	require.Contains(t, result.Changed, "src/keep.txt",
+		"ordinary untracked files must still be captured")
+}
+
+// TestCollectChangedFiles_BudgetExceededReturnsSentinel pins the second half
+// of the zombie-hook regression: the first-checkpoint `git status` subprocess
+// had no deadline, so on a pathological worktree the hook process could
+// outlive the agent's ~60s hook timeout stuck in a child git rather than a
+// goroutine. When the budget expires, the child is killed and the error must
+// wrap gitrepo.ErrStatusBudgetExceeded so the lifecycle handlers' warn-and-skip
+// degrade path recognizes it (rather than failing the hook on a generic error).
+func TestCollectChangedFiles_BudgetExceededReturnsSentinel(t *testing.T) {
+	// Not parallel: overrides the package-level budget seam.
+	origBudget := gitStatusBudget
+	// An already-expired deadline deterministically forces the breach path
+	// without needing a slow git or a multi-million-file fixture.
+	gitStatusBudget = time.Nanosecond
+	t.Cleanup(func() { gitStatusBudget = origBudget })
+
+	tempDir := t.TempDir()
+	testutil.InitRepo(t, tempDir)
+	testutil.WriteFile(t, tempDir, "base.txt", "base")
+	testutil.GitAdd(t, tempDir, "base.txt")
+	testutil.GitCommit(t, tempDir, "init")
+
+	repo, err := git.PlainOpen(tempDir)
+	require.NoError(t, err)
+
+	_, err = collectChangedFiles(context.Background(), repo)
+	require.ErrorIs(t, err, gitrepo.ErrStatusBudgetExceeded)
 }
 
 // TestWriteCommitted_AgentField verifies that the Agent field is written
@@ -935,6 +1060,107 @@ func TestListCommitted_FallsBackToRemote(t *testing.T) {
 	}
 }
 
+// Regression (PR #1951 review): attach's local-presence gates require reads
+// that see ONLY the local primary branch — a checkpoint present solely on a
+// remote-tracking ref must read as absent, or attach would treat it as safe
+// to write and clobber the remote's sessions on push. The read chain's
+// per-checkpoint fall-through defeated that: a stale-but-existing local
+// branch fell through to origin's tracking tree and reported the checkpoint
+// present. PrimaryAsLocalRead pins reads to the local ref with no remote
+// tiers; the default chain keeps the fall-through for ordinary reads.
+func TestRead_PrimaryAsLocalRead_IgnoresRemoteTrackingPresence(t *testing.T) {
+	remoteDir := t.TempDir()
+	testutil.InitRepo(t, remoteDir)
+	remoteRepo, err := git.PlainOpen(remoteDir)
+	if err != nil {
+		t.Fatalf("failed to open remote repo: %v", err)
+	}
+	remoteWorktree, err := remoteRepo.Worktree()
+	if err != nil {
+		t.Fatalf("failed to get remote worktree: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(remoteDir, "README.md"), []byte("# Test"), 0o644); err != nil {
+		t.Fatalf("failed to write README: %v", err)
+	}
+	if _, err := remoteWorktree.Add("README.md"); err != nil {
+		t.Fatalf("failed to add README: %v", err)
+	}
+	if _, err := remoteWorktree.Commit("Initial commit", &git.CommitOptions{
+		Author: &object.Signature{Name: "Test", Email: "test@test.com"},
+	}); err != nil {
+		t.Fatalf("failed to create initial commit: %v", err)
+	}
+
+	remoteStore := NewGitStore(remoteRepo, DefaultV1Refs())
+	remoteOnlyID := id.MustCheckpointID("abcdef123456")
+	if err := remoteStore.Write(context.Background(), Session{
+		CheckpointID: remoteOnlyID,
+		SessionID:    "remote-only-session",
+		Strategy:     "manual-commit",
+		Transcript:   redact.AlreadyRedacted([]byte(`{"test": true}`)),
+		AuthorName:   "Test",
+		AuthorEmail:  "test@test.com",
+	}); err != nil {
+		t.Fatalf("failed to write checkpoint to remote: %v", err)
+	}
+
+	localDir := t.TempDir()
+	localRepo, err := git.PlainClone(localDir, &git.CloneOptions{URL: remoteDir})
+	if err != nil {
+		t.Fatalf("failed to clone repo: %v", err)
+	}
+	refSpec := fmt.Sprintf("+refs/heads/%s:refs/remotes/origin/%s", paths.MetadataBranchName, paths.MetadataBranchName)
+	if err := localRepo.Fetch(&git.FetchOptions{
+		RemoteName: "origin",
+		RefSpecs:   []config.RefSpec{config.RefSpec(refSpec)},
+	}); err != nil && !errors.Is(err, git.NoErrAlreadyUpToDate) {
+		t.Fatalf("failed to fetch metadata branch: %v", err)
+	}
+
+	// A stale LOCAL v1 branch: it exists (so a naive local-branch-exists gate
+	// passes) but holds a different checkpoint, not remoteOnlyID.
+	localStore := NewGitStore(localRepo, DefaultV1Refs())
+	localOnlyID := id.MustCheckpointID("fedcba654321")
+	if err := localStore.Write(context.Background(), Session{
+		CheckpointID: localOnlyID,
+		SessionID:    "local-session",
+		Strategy:     "manual-commit",
+		Transcript:   redact.AlreadyRedacted([]byte(`{"local": true}`)),
+		AuthorName:   "Test",
+		AuthorEmail:  "test@test.com",
+	}); err != nil {
+		t.Fatalf("failed to write local checkpoint: %v", err)
+	}
+
+	// Default chain: the remote-only checkpoint IS readable (fall-through).
+	chainSummary, err := localStore.Read(context.Background(), remoteOnlyID)
+	if err != nil {
+		t.Fatalf("chain Read() error = %v", err)
+	}
+	if chainSummary == nil {
+		t.Fatal("chain read should fall through to the remote-tracking tree")
+	}
+
+	// Local-pinned reads: the same checkpoint must be ABSENT.
+	pinnedStore := NewGitStore(localRepo, DefaultV1Refs().PrimaryAsLocalRead())
+	pinnedSummary, err := pinnedStore.Read(context.Background(), remoteOnlyID)
+	if err != nil && !errors.Is(err, ErrCheckpointNotFound) {
+		t.Fatalf("pinned Read() error = %v", err)
+	}
+	if pinnedSummary != nil {
+		t.Fatal("local-pinned read must not see a checkpoint that exists only on a remote-tracking ref")
+	}
+
+	// And the local checkpoint stays readable through the pin.
+	localSummary, err := pinnedStore.Read(context.Background(), localOnlyID)
+	if err != nil {
+		t.Fatalf("pinned Read(local) error = %v", err)
+	}
+	if localSummary == nil {
+		t.Fatal("local-pinned read must still serve locally present checkpoints")
+	}
+}
+
 // TestGetCheckpointAuthor verifies that GetCheckpointAuthor retrieves the
 // author of the commit that created the checkpoint on the entire/checkpoints/v1 branch.
 func TestGetCheckpointAuthor(t *testing.T) {
@@ -1101,6 +1327,137 @@ func TestWriteCommitted_MultipleSessionsSameCheckpoint(t *testing.T) {
 	if content1.Metadata.SessionID != "session-two" {
 		t.Errorf("session 1 SessionID = %q, want %q", content1.Metadata.SessionID, "session-two")
 	}
+}
+
+// sessionMetadataStore is the slice of the store surface the dedup tests
+// need. Both persistent backends satisfy it; testing each one directly (not
+// just the shared treeWriter) guards against a backend later shadowing or
+// de-embedding the shared write path.
+type sessionMetadataStore interface {
+	Write(ctx context.Context, req WriteRequest) error
+	ReadSessionMetadata(ctx context.Context, checkpointID id.CheckpointID, sessionIndex int) (*Metadata, error)
+}
+
+// TestWriteCommitted_DeduplicatesFilesTouched verifies the write boundary
+// enforces uniqueness on files_touched instead of trusting the caller. Every
+// known producer dedupes before writing, yet duplicated paths have reached the
+// permanent record in the wild until a session's metadata.json exceeded
+// GitHub's 100 MB blob limit and the checkpoints branch became unpushable —
+// so the invariant is enforced where the record is written, and verified
+// against each live backend rather than only the shared implementation.
+func TestWriteCommitted_DeduplicatesFilesTouched(t *testing.T) {
+	tests := []struct {
+		name     string
+		newStore func(repo *git.Repository) sessionMetadataStore
+	}{
+		{
+			name:     "git-branch store",
+			newStore: func(repo *git.Repository) sessionMetadataStore { return NewGitStore(repo, DefaultV1Refs()) },
+		},
+		{
+			name:     "git-refs store",
+			newStore: func(repo *git.Repository) sessionMetadataStore { return newGitRefsStore(repo) },
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			repo, _ := setupBranchTestRepo(t)
+			store := tt.newStore(repo)
+			checkpointID := id.MustCheckpointID("c1c2c3c4c5c6")
+
+			err := store.Write(context.Background(), Session{
+				CheckpointID:     checkpointID,
+				SessionID:        "session-dup",
+				Strategy:         "manual-commit",
+				Transcript:       redact.AlreadyRedacted([]byte(`{"message": "dup session"}`)),
+				FilesTouched:     []string{"b.go", "a.go", "b.go", "a.go", "a.go"},
+				CheckpointsCount: 1,
+				AuthorName:       "Test Author",
+				AuthorEmail:      "test@example.com",
+			})
+			if err != nil {
+				t.Fatalf("Write() error = %v", err)
+			}
+
+			metadata, err := store.ReadSessionMetadata(context.Background(), checkpointID, 0)
+			if err != nil {
+				t.Fatalf("ReadSessionMetadata() error = %v", err)
+			}
+			want := []string{"a.go", "b.go"}
+			if !slices.Equal(metadata.FilesTouched, want) {
+				t.Errorf("FilesTouched = %v, want %v", metadata.FilesTouched, want)
+			}
+		})
+	}
+}
+
+// TestWriteCommitted_FilesTouchedPreservesEmptyVsNil pins the wire format of
+// files_touched, which is marshaled without omitempty: a non-nil empty input
+// must stay [] and a nil input must stay null. Normalizing at the write
+// boundary must not silently rewrite one into the other — readers outside Go
+// distinguish them. Asserted on the raw JSON because unmarshaling into
+// []string erases exactly the difference under test.
+func TestWriteCommitted_FilesTouchedPreservesEmptyVsNil(t *testing.T) {
+	tests := []struct {
+		name         string
+		filesTouched []string
+		want         string
+	}{
+		{name: "empty stays []", filesTouched: []string{}, want: `"files_touched": []`},
+		{name: "nil stays null", filesTouched: nil, want: `"files_touched": null`},
+	}
+	for i, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			repo, _ := setupBranchTestRepo(t)
+			store := NewGitStore(repo, DefaultV1Refs())
+			checkpointID := id.MustCheckpointID(fmt.Sprintf("d%dd2d3d4d5d6", i))
+
+			err := store.Write(context.Background(), Session{
+				CheckpointID: checkpointID,
+				SessionID:    "session-empty",
+				Strategy:     "manual-commit",
+				Transcript:   redact.AlreadyRedacted([]byte(`{"message": "m"}`)),
+				FilesTouched: tt.filesTouched,
+				AuthorName:   "Test Author",
+				AuthorEmail:  "test@example.com",
+			})
+			if err != nil {
+				t.Fatalf("Write() error = %v", err)
+			}
+
+			raw := readRawSessionMetadata(t, repo, checkpointID)
+			if !strings.Contains(raw, tt.want) {
+				t.Errorf("session metadata JSON does not contain %q:\n%s", tt.want, raw)
+			}
+		})
+	}
+}
+
+// readRawSessionMetadata returns session 0's metadata.json contents verbatim
+// from the metadata branch, for tests asserting on the wire format itself.
+func readRawSessionMetadata(t *testing.T, repo *git.Repository, checkpointID id.CheckpointID) string {
+	t.Helper()
+	ref, err := repo.Reference(plumbing.NewBranchReferenceName(paths.MetadataBranchName), true)
+	if err != nil {
+		t.Fatalf("metadata branch reference: %v", err)
+	}
+	commit, err := repo.CommitObject(ref.Hash())
+	if err != nil {
+		t.Fatalf("metadata branch commit: %v", err)
+	}
+	tree, err := commit.Tree()
+	if err != nil {
+		t.Fatalf("metadata branch tree: %v", err)
+	}
+	file, err := tree.File(checkpointID.Path() + "/0/" + paths.MetadataFileName)
+	if err != nil {
+		t.Fatalf("session metadata not found: %v", err)
+	}
+	content, err := file.Contents()
+	if err != nil {
+		t.Fatalf("session metadata contents: %v", err)
+	}
+	return content
 }
 
 // TestWriteCommitted_Aggregation verifies that CheckpointSummary correctly
@@ -1366,10 +1723,17 @@ func TestWriteCommitted_CodexSanitizesPortableTranscript(t *testing.T) {
 
 	got := string(content.Transcript)
 	require.NotContains(t, got, `"encrypted_content":"REDACTED"`)
-	require.NotContains(t, got, `"type":"compaction"`)
-	require.NotContains(t, got, `"type":"compaction_summary"`)
 	require.Contains(t, got, `"summary":[{"text":"brief"}]`)
 	require.Contains(t, got, `"summary":[{"text":"nested"}]`)
+
+	// The top-level compaction item keeps its line (payload stripped) so the stored
+	// transcript stays line-aligned with the agent's rollout. Items nested inside a
+	// compacted line's replacement_history are still removed outright — they are
+	// array elements, so removing them cannot shift line numbers.
+	require.Contains(t, got, `"type":"compaction"`)
+	require.NotContains(t, got, `"type":"compaction_summary"`)
+	require.Len(t, strings.Split(strings.TrimRight(got, "\n"), "\n"), 3,
+		"stored transcript must keep one line per rollout line")
 }
 
 // TestReadSessionContent_InvalidIndex verifies that ReadSessionContent returns
@@ -4032,38 +4396,172 @@ func TestUpdateSummary_RedactsSecrets(t *testing.T) {
 	}
 }
 
-func TestWriteCommitted_SubagentTranscript_JSONLFallback(t *testing.T) {
+// TestWriteCommitted_TaskPayload_MaterializesTranscriptAndMetadata is the core
+// #2058 regression: subagent task data used to die at condensation because no
+// producer ever set the old IsTask/ToolUseID route, leaving
+// writeTaskCheckpointEntries permanently unreachable. WriteOptions.Tasks
+// replaces that route; this proves a TaskPayload actually lands under the
+// checkpoint's tasks/<tool-use-id>/ subtree on both persistent backends —
+// which applySessionWrite backs identically (see writeTaskRecordEntries), so
+// covering both here guards against a backend later shadowing or
+// de-embedding that shared write path.
+func TestWriteCommitted_TaskPayload_MaterializesTranscriptAndMetadata(t *testing.T) {
+	tests := []struct {
+		name      string
+		newStore  func(repo *git.Repository) sessionMetadataStore
+		fetchTree func(t *testing.T, repo *git.Repository, cid id.CheckpointID) *FetchingTree
+	}{
+		{
+			name:     "git-branch store",
+			newStore: func(repo *git.Repository) sessionMetadataStore { return NewGitStore(repo, DefaultV1Refs()) },
+			fetchTree: func(t *testing.T, repo *git.Repository, cid id.CheckpointID) *FetchingTree {
+				t.Helper()
+				store := NewGitStore(repo, DefaultV1Refs())
+				tree, err := store.getCheckpointFetchingTree(context.Background(), cid)
+				if err != nil {
+					t.Fatalf("getCheckpointFetchingTree() error = %v", err)
+				}
+				return tree
+			},
+		},
+		{
+			name:     "git-refs store",
+			newStore: func(repo *git.Repository) sessionMetadataStore { return newGitRefsStore(repo) },
+			fetchTree: func(t *testing.T, repo *git.Repository, cid id.CheckpointID) *FetchingTree {
+				t.Helper()
+				store := newGitRefsStore(repo)
+				tree, err := store.checkpointTree(context.Background(), cid)
+				if err != nil {
+					t.Fatalf("checkpointTree() error = %v", err)
+				}
+				return tree
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			repo, _ := setupBranchTestRepo(t)
+			store := tt.newStore(repo)
+			checkpointID := id.MustCheckpointID("aabbccddeef9")
+
+			redactedTranscript := `{"role":"assistant","content":"secret is ` + highEntropySecret + `"}` + "\n"
+			redacted, err := redact.JSONLBytes([]byte(redactedTranscript))
+			if err != nil {
+				t.Fatalf("redact.JSONLBytes() error = %v", err)
+			}
+
+			started := time.Date(2026, 8, 19, 10, 0, 0, 0, time.UTC)
+			completed := started.Add(2 * time.Minute)
+
+			err = store.Write(context.Background(), Session{
+				CheckpointID:     checkpointID,
+				SessionID:        "task-payload-session",
+				Strategy:         "manual-commit",
+				Transcript:       redact.AlreadyRedacted([]byte(`{"msg":"safe"}` + "\n")),
+				CheckpointsCount: 1,
+				AuthorName:       "Test Author",
+				AuthorEmail:      "test@example.com",
+				Tasks: []TaskPayload{
+					{
+						ToolUseID:       "toolu_test123",
+						AgentID:         "agent1",
+						SubagentType:    "explore",
+						TaskDescription: "look for the bug",
+						Transcript:      redacted,
+						Files:           []string{"a.go"},
+						StartedAt:       started,
+						CompletedAt:     completed,
+					},
+				},
+			})
+			if err != nil {
+				t.Fatalf("Write() error = %v", err)
+			}
+
+			tree := tt.fetchTree(t, repo, checkpointID)
+
+			agentPath := "tasks/toolu_test123/agent-agent1.jsonl"
+			file, err := tree.File(agentPath)
+			if err != nil {
+				t.Fatalf("task transcript should exist at %s: %v", agentPath, err)
+			}
+			content, err := file.Contents()
+			if err != nil {
+				t.Fatalf("failed to read task transcript: %v", err)
+			}
+			if strings.Contains(content, highEntropySecret) {
+				t.Error("task transcript should not contain the raw secret")
+			}
+			if !strings.Contains(content, "REDACTED") {
+				t.Error("task transcript should contain REDACTED placeholder")
+			}
+
+			taskJSONPath := "tasks/toolu_test123/task.json"
+			taskFile, err := tree.File(taskJSONPath)
+			if err != nil {
+				t.Fatalf("task.json should exist at %s: %v", taskJSONPath, err)
+			}
+			taskContent, err := taskFile.Contents()
+			if err != nil {
+				t.Fatalf("failed to read task.json: %v", err)
+			}
+			var meta taskRecordMetadata
+			if err := json.Unmarshal([]byte(taskContent), &meta); err != nil {
+				t.Fatalf("failed to unmarshal task.json: %v", err)
+			}
+			if meta.ToolUseID != "toolu_test123" || meta.AgentID != "agent1" {
+				t.Errorf("task.json identifiers = %+v, want tool_use_id=toolu_test123 agent_id=agent1", meta)
+			}
+			if meta.SubagentType != "explore" || meta.TaskDescription != "look for the bug" {
+				t.Errorf("task.json labels = %+v, want subagent_type=explore task_description=%q", meta, "look for the bug")
+			}
+			if !slices.Equal(meta.Files, []string{"a.go"}) {
+				t.Errorf("task.json Files = %v, want [a.go]", meta.Files)
+			}
+			if !meta.StartedAt.Equal(started) || !meta.CompletedAt.Equal(completed) {
+				t.Errorf("task.json timestamps = started=%v completed=%v, want started=%v completed=%v",
+					meta.StartedAt, meta.CompletedAt, started, completed)
+			}
+			if meta.TranscriptUnavailableReason != "" {
+				t.Errorf("task.json TranscriptUnavailableReason = %q, want empty", meta.TranscriptUnavailableReason)
+			}
+		})
+	}
+}
+
+// TestWriteCommitted_TaskPayload_UnavailableTranscript_RecordsReasonWithoutJSONL
+// covers the "missing/unreadable transcript" half of the materializer contract:
+// an empty TaskPayload.Transcript must still produce task.json (with the
+// unavailable reason recorded so the pointer is not silently lost) but no
+// agent-<id>.jsonl, and the rest of the checkpoint (the session's own
+// transcript) must be unaffected.
+func TestWriteCommitted_TaskPayload_UnavailableTranscript_RecordsReasonWithoutJSONL(t *testing.T) {
 	t.Parallel()
 	repo, _ := setupBranchTestRepo(t)
 	store := NewGitStore(repo, DefaultV1Refs())
-	checkpointID := id.MustCheckpointID("aabbccddeef9")
-
-	// Create a temp file with invalid JSONL containing a secret
-	tmpDir := t.TempDir()
-	transcriptPath := filepath.Join(tmpDir, "agent.jsonl")
-	invalidJSONL := "this is not valid JSON but has a secret " + highEntropySecret + " in it"
-	if err := os.WriteFile(transcriptPath, []byte(invalidJSONL), 0o644); err != nil {
-		t.Fatalf("failed to write transcript: %v", err)
-	}
+	checkpointID := id.MustCheckpointID("aabbccddeefa")
 
 	err := store.Write(context.Background(), Session{
-		CheckpointID:           checkpointID,
-		SessionID:              "jsonl-fallback-session",
-		Strategy:               "manual-commit",
-		Transcript:             redact.AlreadyRedacted([]byte(`{"msg":"safe"}` + "\n")),
-		CheckpointsCount:       1,
-		AuthorName:             "Test Author",
-		AuthorEmail:            "test@example.com",
-		IsTask:                 true,
-		ToolUseID:              "toolu_test123",
-		AgentID:                "agent1",
-		SubagentTranscriptPath: transcriptPath,
+		CheckpointID:     checkpointID,
+		SessionID:        "task-payload-unavailable-session",
+		Strategy:         "manual-commit",
+		Transcript:       redact.AlreadyRedacted([]byte(`{"msg":"session transcript intact"}` + "\n")),
+		CheckpointsCount: 1,
+		AuthorName:       "Test Author",
+		AuthorEmail:      "test@example.com",
+		Tasks: []TaskPayload{
+			{
+				ToolUseID:                   "toolu_missing",
+				AgentID:                     "agent2",
+				TranscriptUnavailableReason: "transcript path unresolvable",
+			},
+		},
 	})
 	if err != nil {
-		t.Fatalf("WriteCommitted() error = %v", err)
+		t.Fatalf("Write() error = %v", err)
 	}
 
-	// Read back the subagent transcript from the tree
 	ref, err := repo.Reference(plumbing.NewBranchReferenceName(paths.MetadataBranchName), true)
 	if err != nil {
 		t.Fatalf("failed to get branch ref: %v", err)
@@ -4077,26 +4575,181 @@ func TestWriteCommitted_SubagentTranscript_JSONLFallback(t *testing.T) {
 		t.Fatalf("failed to get tree: %v", err)
 	}
 
-	agentPath := checkpointID.Path() + "/tasks/toolu_test123/agent-agent1.jsonl"
-	file, err := tree.File(agentPath)
-	if err != nil {
-		t.Fatalf("subagent transcript should exist at %s (JSONL fallback should not drop it): %v", agentPath, err)
+	agentPath := checkpointID.Path() + "/tasks/toolu_missing/agent-agent2.jsonl"
+	if _, err := tree.File(agentPath); err == nil {
+		t.Errorf("agent-agent2.jsonl should not exist when Transcript is nil, but was found at %s", agentPath)
 	}
 
-	content, err := file.Contents()
+	taskJSONPath := checkpointID.Path() + "/tasks/toolu_missing/task.json"
+	taskFile, err := tree.File(taskJSONPath)
 	if err != nil {
-		t.Fatalf("failed to read subagent transcript: %v", err)
+		t.Fatalf("task.json should exist at %s: %v", taskJSONPath, err)
+	}
+	taskContent, err := taskFile.Contents()
+	if err != nil {
+		t.Fatalf("failed to read task.json: %v", err)
+	}
+	var meta taskRecordMetadata
+	if err := json.Unmarshal([]byte(taskContent), &meta); err != nil {
+		t.Fatalf("failed to unmarshal task.json: %v", err)
+	}
+	if meta.TranscriptUnavailableReason != "transcript path unresolvable" {
+		t.Errorf("task.json TranscriptUnavailableReason = %q, want %q", meta.TranscriptUnavailableReason, "transcript path unresolvable")
 	}
 
-	// Verify the transcript was stored (not dropped) and secret was redacted
-	if content == "" {
-		t.Error("subagent transcript should not be empty")
+	// The session's own transcript must be unaffected by the unavailable task transcript.
+	sessionContent, err := store.ReadSessionContent(context.Background(), checkpointID, 0)
+	if err != nil {
+		t.Fatalf("ReadSessionContent() error = %v", err)
 	}
-	if strings.Contains(content, highEntropySecret) {
-		t.Error("subagent transcript should not contain the secret after fallback redaction")
+	if !strings.Contains(string(sessionContent.Transcript), "session transcript intact") {
+		t.Errorf("session transcript = %q, want it to contain %q", sessionContent.Transcript, "session transcript intact")
 	}
-	if !strings.Contains(content, "REDACTED") {
-		t.Error("subagent transcript should contain REDACTED from fallback redaction")
+}
+
+// TestWriteCommitted_TaskDescriptionRedacted: task.json's task_description is
+// the agent's free text for the Task call and is pushed with the checkpoint,
+// so the writer must redact it like the summary fields — the transcript beside
+// it is pre-redacted by condensation, but the description used to be copied
+// verbatim. A low-entropy AWS-key shaped secret keeps this deterministic on
+// the regex-only pipeline.
+//
+// Table-driven across both persistent backends. They share one writer
+// (treeWriter.writeTaskRecordEntry, embedded by GitStore and gitRefsStore), so
+// this pins that sharing rather than guarding two implementations: if a future
+// change gives either store its own task-record path, the redaction has to
+// come with it.
+func TestWriteCommitted_TaskDescriptionRedacted(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		newStore  func(repo *git.Repository) sessionMetadataStore
+		fetchTree func(t *testing.T, repo *git.Repository, cid id.CheckpointID) *FetchingTree
+	}{
+		{
+			name:     "git-branch store",
+			newStore: func(repo *git.Repository) sessionMetadataStore { return NewGitStore(repo, DefaultV1Refs()) },
+			fetchTree: func(t *testing.T, repo *git.Repository, cid id.CheckpointID) *FetchingTree {
+				t.Helper()
+				store := NewGitStore(repo, DefaultV1Refs())
+				tree, err := store.getCheckpointFetchingTree(context.Background(), cid)
+				if err != nil {
+					t.Fatalf("getCheckpointFetchingTree() error = %v", err)
+				}
+				return tree
+			},
+		},
+		{
+			name:     "git-refs store",
+			newStore: func(repo *git.Repository) sessionMetadataStore { return newGitRefsStore(repo) },
+			fetchTree: func(t *testing.T, repo *git.Repository, cid id.CheckpointID) *FetchingTree {
+				t.Helper()
+				store := newGitRefsStore(repo)
+				tree, err := store.checkpointTree(context.Background(), cid)
+				if err != nil {
+					t.Fatalf("checkpointTree() error = %v", err)
+				}
+				return tree
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			repo, _ := setupBranchTestRepo(t)
+			store := tt.newStore(repo)
+			checkpointID := id.MustCheckpointID("aabbccddeefc")
+
+			err := store.Write(context.Background(), Session{
+				CheckpointID:     checkpointID,
+				SessionID:        "task-description-session",
+				Strategy:         "manual-commit",
+				Transcript:       redact.AlreadyRedacted([]byte(`{"msg":"safe"}` + "\n")),
+				CheckpointsCount: 1,
+				AuthorName:       "Test Author",
+				AuthorEmail:      "test@example.com",
+				Tasks: []TaskPayload{
+					{
+						ToolUseID:       "toolu_desc",
+						AgentID:         "agent3",
+						SubagentType:    "general-purpose",
+						TaskDescription: "rotate key=AKIAYRWQG5EJLPZLBYNP in staging",
+						Transcript:      redact.AlreadyRedacted([]byte(`{"msg":"child"}` + "\n")),
+					},
+				},
+			})
+			if err != nil {
+				t.Fatalf("Write() error = %v", err)
+			}
+
+			tree := tt.fetchTree(t, repo, checkpointID)
+
+			taskJSONPath := "tasks/toolu_desc/task.json"
+			taskFile, err := tree.File(taskJSONPath)
+			if err != nil {
+				t.Fatalf("task.json should exist at %s: %v", taskJSONPath, err)
+			}
+			taskContent, err := taskFile.Contents()
+			if err != nil {
+				t.Fatalf("failed to read task.json: %v", err)
+			}
+			if strings.Contains(taskContent, "AKIAYRWQG5EJLPZLBYNP") {
+				t.Errorf("task.json still carries the secret: %s", taskContent)
+			}
+			var meta taskRecordMetadata
+			if err := json.Unmarshal([]byte(taskContent), &meta); err != nil {
+				t.Fatalf("failed to unmarshal task.json: %v", err)
+			}
+			if !strings.Contains(meta.TaskDescription, "REDACTED") || !strings.HasPrefix(meta.TaskDescription, "rotate key=") {
+				t.Errorf("task_description = %q, want the secret replaced in place", meta.TaskDescription)
+			}
+			if meta.SubagentType != "general-purpose" {
+				t.Errorf("subagent_type = %q, want it untouched", meta.SubagentType)
+			}
+		})
+	}
+}
+
+// TestWriteCommitted_NoTasks_NoTaskDirectory guards the no-op path: an empty
+// Tasks slice (every session before subagent-work durability landed, and
+// every ordinary session with no subagent work) must not create a tasks/
+// subtree at all.
+func TestWriteCommitted_NoTasks_NoTaskDirectory(t *testing.T) {
+	t.Parallel()
+	repo, _ := setupBranchTestRepo(t)
+	store := NewGitStore(repo, DefaultV1Refs())
+	checkpointID := id.MustCheckpointID("aabbccddeefb")
+
+	err := store.Write(context.Background(), Session{
+		CheckpointID:     checkpointID,
+		SessionID:        "no-tasks-session",
+		Strategy:         "manual-commit",
+		Transcript:       redact.AlreadyRedacted([]byte(`{"msg":"safe"}` + "\n")),
+		CheckpointsCount: 1,
+		AuthorName:       "Test Author",
+		AuthorEmail:      "test@example.com",
+	})
+	if err != nil {
+		t.Fatalf("Write() error = %v", err)
+	}
+
+	ref, err := repo.Reference(plumbing.NewBranchReferenceName(paths.MetadataBranchName), true)
+	if err != nil {
+		t.Fatalf("failed to get branch ref: %v", err)
+	}
+	commit, err := repo.CommitObject(ref.Hash())
+	if err != nil {
+		t.Fatalf("failed to get commit: %v", err)
+	}
+	tree, err := commit.Tree()
+	if err != nil {
+		t.Fatalf("failed to get tree: %v", err)
+	}
+
+	if _, err := tree.Tree(checkpointID.Path() + "/tasks"); err == nil {
+		t.Error("tasks/ subtree should not exist when Tasks is empty")
 	}
 }
 
@@ -4191,6 +4844,26 @@ func TestWriteTemporaryTask_SubagentTranscript_RedactsSecrets(t *testing.T) {
 	if !strings.Contains(content, "REDACTED") {
 		t.Error("subagent transcript on shadow branch should contain REDACTED")
 	}
+
+	// The same task write must fail closed instead of persisting a
+	// plain-redaction fallback blob like the write above.
+	t.Run("degraded sole scanner", func(t *testing.T) {
+		redact.WithScannerDegradedSole(t)
+		_, err := store.Write(context.Background(), TaskStep{
+			SessionID:              "degraded-task-session",
+			BaseCommit:             baseCommit,
+			ToolUseID:              "toolu_degraded",
+			AgentID:                "agent1",
+			SubagentTranscriptPath: transcriptPath,
+			CheckpointUUID:         "test-uuid-degraded",
+			CommitMessage:          "Task checkpoint",
+			AuthorName:             "Test",
+			AuthorEmail:            "test@test.com",
+		})
+		if !errors.Is(err, redact.ErrScannerDegraded) {
+			t.Fatalf("Write() under degraded sole scanner error = %v, want ErrScannerDegraded", err)
+		}
+	})
 }
 
 func TestAddDirectoryToChanges_PathTraversal(t *testing.T) {
@@ -4216,7 +4889,7 @@ func TestAddDirectoryToChanges_PathTraversal(t *testing.T) {
 		t.Fatalf("failed to write file: %v", err)
 	}
 
-	changes, err := addDirectoryToChanges(context.Background(), repo, metadataDir, ".entire/metadata/session")
+	changes, err := addDirectoryToChanges(context.Background(), repo, nil, metadataDir, ".entire/metadata/session")
 	if err != nil {
 		t.Fatalf("addDirectoryToChanges failed: %v", err)
 	}
@@ -4247,7 +4920,7 @@ func TestMetadataDirectoryWalkersAllowDotDotPrefixedNames(t *testing.T) {
 
 	expectedPath := filepath.ToSlash(filepath.Join("checkpoint", "..generated", "schema.json"))
 
-	changes, err := addDirectoryToChanges(context.Background(), repo, metadataDir, "checkpoint")
+	changes, err := addDirectoryToChanges(context.Background(), repo, nil, metadataDir, "checkpoint")
 	if err != nil {
 		t.Fatalf("addDirectoryToChanges failed: %v", err)
 	}
@@ -4299,7 +4972,7 @@ func TestAddDirectoryToChanges_SkipsSymlinks(t *testing.T) {
 		t.Fatalf("failed to create symlink: %v", err)
 	}
 
-	changes, err := addDirectoryToChanges(context.Background(), repo, metadataDir, "checkpoint/")
+	changes, err := addDirectoryToChanges(context.Background(), repo, nil, metadataDir, "checkpoint/")
 	if err != nil {
 		t.Fatalf("addDirectoryToChanges failed: %v", err)
 	}
@@ -4359,7 +5032,7 @@ func TestAddDirectoryToChanges_SkipsSymlinkedDirectories(t *testing.T) {
 		t.Fatalf("failed to create directory symlink: %v", err)
 	}
 
-	changes, err := addDirectoryToChanges(context.Background(), repo, metadataDir, "checkpoint/")
+	changes, err := addDirectoryToChanges(context.Background(), repo, nil, metadataDir, "checkpoint/")
 	if err != nil {
 		t.Fatalf("addDirectoryToChanges failed: %v", err)
 	}
@@ -4695,7 +5368,7 @@ func TestCheckpointSummary_HasReview(t *testing.T) {
 // Summary.Intent and ReviewPrompt that previously bypassed redaction because
 // the dispatcher only matched .jsonl. The PR 1236 fix extended the JSON-aware
 // branch to .json. We assert via a low-entropy AWS-key shaped secret (catches
-// the 7-layer pipeline) so the test stays deterministic without the OPF binary.
+// the regex-only pipeline) so the test stays deterministic without the OPF binary.
 func TestRedactBlobBytes_JSONMetadata(t *testing.T) {
 	t.Parallel()
 
@@ -4711,7 +5384,10 @@ func TestRedactBlobBytes_JSONMetadata(t *testing.T) {
 		t.Fatalf("marshal: %v", err)
 	}
 
-	got := RedactBlobBytes(context.Background(), b, "metadata.json", false)
+	got, err := RedactBlobBytes(context.Background(), b, "metadata.json", false)
+	if err != nil {
+		t.Fatalf("RedactBlobBytes() error = %v", err)
+	}
 	if strings.Contains(string(got), "AKIAYRWQG5EJLPZLBYNP") {
 		t.Errorf("expected AWS key redacted in metadata.json blob, got %s", string(got))
 	}
@@ -4726,6 +5402,42 @@ func TestRedactBlobBytes_JSONMetadata(t *testing.T) {
 	}
 	if roundTripped["kind"] != "agent_review" {
 		t.Errorf(`expected "kind":"agent_review" preserved after redaction, got %v`, roundTripped["kind"])
+	}
+}
+
+// TestRedactBlobBytes_ScannerDegraded pins both directions of the sentinel
+// dispatch: a JSON-shaped path fails closed under a degraded sole scanner,
+// while a plain path still falls through to infallible redact.Bytes.
+func TestRedactBlobBytes_ScannerDegraded(t *testing.T) {
+	// No t.Parallel: mutates redact's process-global scanner state.
+	redact.WithScannerDegradedSole(t)
+
+	content := []byte(`{"msg":"hello"}` + "\n")
+	got, err := RedactBlobBytes(context.Background(), content, "full.jsonl", false)
+	if !errors.Is(err, redact.ErrScannerDegraded) {
+		t.Fatalf("RedactBlobBytes(.jsonl) error = %v, want ErrScannerDegraded", err)
+	}
+	if got != nil {
+		t.Errorf("RedactBlobBytes(.jsonl) content = %q, want nil under degradation", got)
+	}
+
+	// Non-JSON paths never hit the JSON-aware branch, so they stay infallible
+	// even while the flag is set — the sentinel is confined to transcript-shaped
+	// blobs whose only scanner produced no coverage. The AWS-key shaped secret
+	// is caught by the always-on regex layers, independent of scanner selection.
+	secretContent := []byte("credential leak: key=AKIAYRWQG5EJLPZLBYNP")
+	got, err = RedactBlobBytes(context.Background(), secretContent, "prompt.txt", false)
+	if err != nil {
+		t.Fatalf("RedactBlobBytes(.txt) error = %v, want nil", err)
+	}
+	if want := redact.Bytes(secretContent); string(got) != string(want) {
+		t.Errorf("RedactBlobBytes(.txt) = %q, want redact.Bytes output %q", got, want)
+	}
+	if strings.Contains(string(got), "AKIAYRWQG5EJLPZLBYNP") {
+		t.Error("RedactBlobBytes(.txt) left the secret unredacted")
+	}
+	if !strings.Contains(string(got), "REDACTED") {
+		t.Error("RedactBlobBytes(.txt) should contain REDACTED placeholder")
 	}
 }
 
@@ -4956,4 +5668,51 @@ func TestCommittedMetadata_InvestigateFieldsRoundTrip(t *testing.T) {
 	if meta.InvestigateTopic != "topic-x" {
 		t.Errorf("InvestigateTopic: got %q", meta.InvestigateTopic)
 	}
+}
+
+// TestWriteCommitted_CodexSanitizesTranscriptFromPath covers writeTranscript's
+// TranscriptPath fallback — the one way raw bytes reach the store, and previously
+// the only transcript path with no test at all.
+//
+// It asserts the stored result: sanitized, line-aligned, conversation intact. It
+// deliberately does NOT claim to pin the sanitize-before-redact ORDER on this path,
+// because the two orders are indistinguishable by output — redaction is JSON-aware,
+// so redact-then-sanitize still ends with the encrypted_content key deleted. Getting
+// the order right there is a wasted-work fix (redaction scanning ciphertext that
+// sanitization discards), not a content fix, and it is not observable from here.
+func TestWriteCommitted_CodexSanitizesTranscriptFromPath(t *testing.T) {
+	repo, _ := setupBranchTestRepo(t)
+	store := NewGitStore(repo, DefaultV1Refs())
+	checkpointID := id.MustCheckpointID("c0de5a1712ed")
+
+	rollout := `{"timestamp":"2026-03-25T11:31:11.754Z","type":"response_item","payload":{"type":"reasoning","summary":[{"text":"brief"}],"encrypted_content":"Y2lwaGVydGV4dA=="}}
+{"timestamp":"2026-03-25T11:31:11.755Z","type":"response_item","payload":{"type":"compaction","encrypted_content":"Y2lwaGVydGV4dA=="}}
+{"timestamp":"2026-03-25T11:31:11.756Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"hello"}]}}
+`
+	path := filepath.Join(t.TempDir(), "rollout.jsonl")
+	require.NoError(t, os.WriteFile(path, []byte(rollout), 0o600))
+
+	// No in-memory Transcript: force the TranscriptPath fallback.
+	err := store.Write(context.Background(), Session{
+		CheckpointID:     checkpointID,
+		SessionID:        "codex-session",
+		Strategy:         "manual-commit",
+		Agent:            agent.AgentTypeCodex,
+		TranscriptPath:   path,
+		CheckpointsCount: 1,
+		AuthorName:       "Test Author",
+		AuthorEmail:      "test@example.com",
+	})
+	require.NoError(t, err)
+
+	content, err := store.ReadLatestSessionContent(context.Background(), checkpointID)
+	require.NoError(t, err)
+
+	got := string(content.Transcript)
+	require.NotContains(t, got, "Y2lwaGVydGV4dA==", "ciphertext survived into storage")
+	require.NotContains(t, got, "encrypted_content")
+	require.Contains(t, got, `"type":"compaction"`, "compaction line must survive, payload stripped")
+	require.Contains(t, got, "hello", "conversation content was lost")
+	require.Len(t, strings.Split(strings.TrimRight(got, "\n"), "\n"), 3,
+		"stored transcript must stay line-aligned with the rollout")
 }

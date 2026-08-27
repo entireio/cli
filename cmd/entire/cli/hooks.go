@@ -1,11 +1,13 @@
 package cli
 
 import (
+	"context"
 	"encoding/json"
-	"errors"
-	"fmt"
 	"io"
+	"log/slog"
 
+	"github.com/entireio/cli/cmd/entire/cli/agent"
+	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
 )
 
@@ -20,23 +22,12 @@ type SubagentCheckpointHookInput struct {
 	ToolResponse   json.RawMessage `json:"tool_response"`
 }
 
-// parseSubagentCheckpointHookInput parses PostToolUse hook input for subagent checkpoints
+// parseSubagentCheckpointHookInput parses PostToolUse hook input for subagent
+// checkpoints. It streams a single JSON value rather than reading to EOF so the
+// claude-code post-todo hook never blocks waiting for a stdin close that some
+// agents don't send on Windows (issue #1398).
 func parseSubagentCheckpointHookInput(r io.Reader) (*SubagentCheckpointHookInput, error) {
-	data, err := io.ReadAll(r)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read input: %w", err)
-	}
-
-	if len(data) == 0 {
-		return nil, errors.New("empty input")
-	}
-
-	var input SubagentCheckpointHookInput
-	if err := json.Unmarshal(data, &input); err != nil {
-		return nil, fmt.Errorf("failed to parse JSON: %w", err)
-	}
-
-	return &input, nil
+	return agent.ReadAndParseHookInput[SubagentCheckpointHookInput](r)
 }
 
 // taskToolInput represents the tool_input structure for the Task tool.
@@ -61,31 +52,35 @@ func ParseSubagentTypeAndDescription(toolInput json.RawMessage) (agentType, desc
 	return input.SubagentType, input.Description
 }
 
-// todoWriteToolInput represents the tool_input structure for the TodoWrite tool.
-// Used to extract the todos array which is then passed to strategy.ExtractInProgressTodo.
-type todoWriteToolInput struct {
-	Todos json.RawMessage `json:"todos"`
+// backgroundTaskToolInput represents the tool_input structure for the Task
+// tool, used to detect a background subagent launch.
+type backgroundTaskToolInput struct {
+	RunInBackground bool `json:"run_in_background"`
 }
 
-// ExtractTodoContentFromToolInput extracts the content of the in-progress todo item from TodoWrite tool_input.
-// Falls back to the first pending item if no in-progress item is found.
-// Returns empty string if no suitable item is found or JSON is invalid.
-//
-// This function unwraps the outer tool_input object to extract the todos array,
-// then delegates to strategy.ExtractInProgressTodo for the actual parsing logic.
-func ExtractTodoContentFromToolInput(toolInput json.RawMessage) string {
+// isBackgroundLaunch reports whether a Task tool invocation requested
+// run_in_background: true. Mirrors ParseSubagentTypeAndDescription's
+// ToolInput parsing. Returns false (foreground) when toolInput is empty or
+// invalid — defaulting to the existing foreground behavior is always safe.
+func isBackgroundLaunch(ctx context.Context, toolInput json.RawMessage) bool {
 	if len(toolInput) == 0 {
-		return ""
+		return false
 	}
 
-	// First extract the todos array from tool_input
-	var input todoWriteToolInput
+	var input backgroundTaskToolInput
 	if err := json.Unmarshal(toolInput, &input); err != nil {
-		return ""
+		logging.Debug(ctx, "failed to parse tool_input for background-launch detection; treating as foreground",
+			slog.String("error", err.Error()))
+		return false
 	}
 
-	// Delegate to strategy package for the actual extraction logic
-	return strategy.ExtractInProgressTodo(input.Todos)
+	return input.RunInBackground
+}
+
+// todoWriteToolInput represents the tool_input structure for the TodoWrite tool.
+// Used to extract the todos array for the strategy-package todo helpers.
+type todoWriteToolInput struct {
+	Todos json.RawMessage `json:"todos"`
 }
 
 // ExtractLastCompletedTodoFromToolInput extracts the content of the last completed todo item.

@@ -16,14 +16,12 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	cpkg "github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
-	"github.com/entireio/cli/cmd/entire/cli/interactive"
 	"github.com/entireio/cli/cmd/entire/cli/osroot"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
+	"github.com/entireio/cli/cmd/entire/cli/textutil"
 	"github.com/entireio/cli/cmd/entire/cli/trailers"
-	"github.com/entireio/cli/cmd/entire/cli/uiform"
 	"github.com/entireio/cli/cmd/entire/cli/validation"
 
-	"charm.land/huh/v2"
 	"github.com/go-git/go-git/v6"
 	"github.com/go-git/go-git/v6/plumbing"
 	"github.com/go-git/go-git/v6/plumbing/filemode"
@@ -86,6 +84,32 @@ func (s *ManualCommitStrategy) GetRewindPoints(ctx context.Context, limit int) (
 				ToolUseID:        cp.ToolUseID,
 				SessionID:        cp.SessionID,
 				SessionPrompt:    sessionPrompt,
+				Agent:            state.AgentType,
+			})
+		}
+
+		// [Task] rows come from task records (#2058) — live and completed-unmaterialized
+		// entries are both pending until condensed; no shadow commit exists, so no ID.
+		for _, rec := range state.TaskRecords {
+			date := rec.CompletedAt
+			if date.IsZero() {
+				date = rec.StartedAt
+			}
+			shortToolUseID := rec.ToolUseID
+			if len(shortToolUseID) > id.ShortIDLength {
+				shortToolUseID = shortToolUseID[:id.ShortIDLength]
+			}
+			message := FormatSubagentEndMessage(rec.SubagentType, rec.TaskDescription, shortToolUseID)
+			if rec.CompletedAt.IsZero() {
+				message = FormatSubagentRunningMessage(rec.SubagentType, rec.TaskDescription, shortToolUseID)
+			}
+			allPoints = append(allPoints, RewindPoint{
+				Message:          message,
+				Date:             date,
+				IsTaskCheckpoint: true,
+				ToolUseID:        rec.ToolUseID,
+				SessionID:        state.SessionID,
+				SessionPrompt:    state.LastPrompt,
 				Agent:            state.AgentType,
 			})
 		}
@@ -642,8 +666,8 @@ func (s *ManualCommitStrategy) RestoreLogsOnly(ctx context.Context, w, errW io.W
 	}
 	defer repo.Close()
 
-	WarnIfMetadataDisconnected()
-	stores, err := cpkg.Open(ctx, repo, cpkg.OpenOptions{BlobFetcher: s.blobFetcher})
+	WarnIfMetadataDisconnected(ctx)
+	stores, err := cpkg.Open(ctx, repo, cpkg.OpenOptions{BlobFetcher: s.blobFetcher, ReadRemotes: CheckpointReadRemotes(ctx)})
 	if err != nil {
 		return nil, fmt.Errorf("open checkpoint store: %w", err)
 	}
@@ -819,25 +843,29 @@ func restoredPromptPreview(sessionAgent agent.Agent, promptContent string, trans
 	if err != nil || len(prompts) == 0 {
 		return ""
 	}
-	return firstRestoredDisplayPrompt(prompts)
-}
-
-func firstRestoredDisplayPrompt(prompts []string) string {
-	for _, prompt := range prompts {
-		cleaned := strings.TrimSpace(prompt)
-		if cleaned == "" || isOnlySeparators(cleaned) || isInjectedInstructionPrompt(cleaned) {
-			continue
-		}
-		return TruncateDescription(cleaned, MaxDescriptionLength)
+	if first := FirstDisplayPrompt(prompts); first != "" {
+		return TruncateDescription(first, MaxDescriptionLength)
 	}
 	return ""
 }
 
-func isInjectedInstructionPrompt(prompt string) bool {
-	trimmed := strings.TrimSpace(prompt)
-	return strings.HasPrefix(trimmed, "# AGENTS.md instructions for ") ||
-		strings.HasPrefix(trimmed, "<environment_context>") ||
-		(strings.Contains(trimmed, "<INSTRUCTIONS>") && strings.Contains(trimmed, "AGENTS.md instructions"))
+// FirstDisplayPrompt returns the first prompt in the list worth showing as a
+// title/preview: the first entry that is non-empty, not separator-only, and not
+// agent-injected (runtime preambles, AGENTS.md dumps — see
+// textutil.IsInjectedPrompt). Returns "" if none qualifies, which callers that
+// must show something should treat as "fall back to the raw first prompt".
+//
+// The returned text is not truncated; callers that render it into a fixed-width
+// display are responsible for that (see restoredPromptPreview).
+func FirstDisplayPrompt(prompts []string) string {
+	for _, prompt := range prompts {
+		cleaned := strings.TrimSpace(prompt)
+		if cleaned == "" || isOnlySeparators(cleaned) || textutil.IsInjectedPrompt(cleaned) {
+			continue
+		}
+		return cleaned
+	}
+	return ""
 }
 
 func extractPromptsFromTranscriptBytes(extractor agent.PromptExtractor, transcript []byte) ([]string, error) {
@@ -1000,83 +1028,4 @@ func ClassifyTimestamps(localTime, checkpointTime time.Time) SessionRestoreStatu
 		return StatusCheckpointNewer
 	}
 	return StatusUnchanged
-}
-
-// StatusToText returns a human-readable status string.
-func StatusToText(status SessionRestoreStatus) string {
-	switch status {
-	case StatusNew:
-		return "(new)"
-	case StatusUnchanged:
-		return "(unchanged)"
-	case StatusCheckpointNewer:
-		return "(checkpoint is newer)"
-	case StatusLocalNewer:
-		return "(local is newer)" // shouldn't appear in non-conflict list
-	default:
-		return ""
-	}
-}
-
-// PromptOverwriteNewerLogs asks the user for confirmation to overwrite local
-// session logs that have newer timestamps than the checkpoint versions.
-func PromptOverwriteNewerLogs(errW io.Writer, sessions []SessionRestoreInfo) (bool, error) {
-	if !interactive.CanPromptInteractively() {
-		return false, errors.New("cannot prompt to overwrite local session logs in non-interactive mode; rerun with --force to overwrite or use a TTY to confirm")
-	}
-
-	// Separate conflicting and non-conflicting sessions
-	var conflicting, nonConflicting []SessionRestoreInfo
-	for _, s := range sessions {
-		if s.Status == StatusLocalNewer {
-			conflicting = append(conflicting, s)
-		} else {
-			nonConflicting = append(nonConflicting, s)
-		}
-	}
-
-	fmt.Fprintf(errW, "\nWarning: Local session log(s) have newer entries than the checkpoint:\n")
-	for _, info := range conflicting {
-		// Show prompt if available, otherwise fall back to session ID
-		if info.Prompt != "" {
-			fmt.Fprintf(errW, "  \"%s\"\n", info.Prompt)
-		} else {
-			fmt.Fprintf(errW, "  Session: %s\n", info.SessionID)
-		}
-		fmt.Fprintf(errW, "    Local last entry:      %s\n", info.LocalTime.Local().Format("2006-01-02 15:04:05"))
-		fmt.Fprintf(errW, "    Checkpoint last entry: %s\n", info.CheckpointTime.Local().Format("2006-01-02 15:04:05"))
-	}
-
-	// Show non-conflicting sessions with their status
-	if len(nonConflicting) > 0 {
-		fmt.Fprintf(errW, "\nThese other session(s) will also be restored:\n")
-		for _, info := range nonConflicting {
-			statusText := StatusToText(info.Status)
-			if info.Prompt != "" {
-				fmt.Fprintf(errW, "  \"%s\" %s\n", info.Prompt, statusText)
-			} else {
-				fmt.Fprintf(errW, "  Session: %s %s\n", info.SessionID, statusText)
-			}
-		}
-	}
-
-	fmt.Fprintf(errW, "\nOverwriting will lose the newer local entries.\n\n")
-
-	var confirmed bool
-	form := uiform.New(
-		huh.NewGroup(
-			huh.NewConfirm().
-				Title("Overwrite local session logs with checkpoint versions?").
-				Value(&confirmed),
-		),
-	)
-
-	if err := form.Run(); err != nil {
-		if errors.Is(err, huh.ErrUserAborted) {
-			return false, nil
-		}
-		return false, fmt.Errorf("failed to get confirmation: %w", err)
-	}
-
-	return confirmed, nil
 }

@@ -109,3 +109,85 @@ func TestResolveOwner_ReturnsSomething(t *testing.T) {
 		t.Errorf("resolved owner Check = %v, want alive", got)
 	}
 }
+
+// Commit attribution asks a different question than liveness: not "is the
+// recorded owner alive" but "is the recorded owner an ANCESTOR of the process
+// asking". A commit hook whose ancestry contains a session's owner was spawned
+// (however indirectly) by that session's agent, in whatever worktree — the
+// identity-linking contract (PR #2013), served by the same Identity that
+// captureSessionOwner already persists every turn start.
+func TestHasAncestor_ParentMatches(t *testing.T) {
+	parent, ok := IdentityOf(os.Getppid())
+	if !ok {
+		t.Fatal("IdentityOf(parent) should resolve on a supported platform")
+	}
+	if !HasAncestor(parent) {
+		t.Fatalf("the test process's parent %+v must be reported as an ancestor", parent)
+	}
+}
+
+func TestHasAncestor_RejectsRecycledPID(t *testing.T) {
+	parent, ok := IdentityOf(os.Getppid())
+	if !ok {
+		t.Fatal("IdentityOf(parent) should resolve")
+	}
+	parent.Start += "-not-the-same-boot-instant"
+	if HasAncestor(parent) {
+		t.Fatal("same PID with a different start fingerprint is a recycled PID, not an ancestor")
+	}
+}
+
+func TestHasAncestor_RejectsForeignHost(t *testing.T) {
+	parent, ok := IdentityOf(os.Getppid())
+	if !ok {
+		t.Fatal("IdentityOf(parent) should resolve")
+	}
+	parent.Host += "-elsewhere"
+	if HasAncestor(parent) {
+		t.Fatal("a PID recorded on another host is meaningless here and must never match")
+	}
+}
+
+func TestHasAncestor_NonAncestorDoesNotMatch(t *testing.T) {
+	pid, _ := startSleeper(t)
+	sibling, ok := IdentityOf(pid)
+	if !ok {
+		t.Fatal("IdentityOf(sleeper) should resolve")
+	}
+	if HasAncestor(sibling) {
+		t.Fatal("a sibling child process is not an ancestor")
+	}
+}
+
+func TestHasAncestor_EmptyIdentityNeverMatches(t *testing.T) {
+	if HasAncestor(Identity{}) {
+		t.Fatal("the zero identity must never match")
+	}
+}
+
+func TestCurrentAncestry_DepthAndGuards(t *testing.T) {
+	ancestry, ok := CurrentAncestry()
+	if !ok {
+		t.Fatal("CurrentAncestry should resolve on a supported platform")
+	}
+	parent, ok := IdentityOf(os.Getppid())
+	if !ok {
+		t.Fatal("IdentityOf(parent) should resolve")
+	}
+	if depth := ancestry.Depth(parent); depth != 0 {
+		t.Fatalf("the parent must be the nearest ancestor (depth 0), got %d", depth)
+	}
+	recycled := parent
+	recycled.Start += "-recycled"
+	if depth := ancestry.Depth(recycled); depth != -1 {
+		t.Fatalf("same PID with a different start fingerprint must not match, got depth %d", depth)
+	}
+	foreign := parent
+	foreign.Host += "-elsewhere"
+	if depth := ancestry.Depth(foreign); depth != -1 {
+		t.Fatalf("an identity recorded on another host must not match, got depth %d", depth)
+	}
+	if chain := ancestry.Chain(); len(chain) == 0 || chain[0].PID != os.Getppid() {
+		t.Fatalf("the chain must start at the parent, got %+v", chain)
+	}
+}

@@ -4,10 +4,12 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
+	"slices"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
@@ -36,19 +38,10 @@ const (
 // GeminiSettingsFileName is the settings file used by Gemini CLI.
 const GeminiSettingsFileName = "settings.json"
 
-// entireHookPrefixes are command prefixes that identify Entire hooks. The
-// "go run" prefix is retained so hooks installed by older versions are still
-// recognized.
-var entireHookPrefixes = []string{
-	"entire ",
-	agent.LocalDevHookScript + " ",
-	`go run "$(git rev-parse --show-toplevel)"/cmd/entire/main.go `,
-}
-
 // InstallHooks installs Gemini CLI hooks in .gemini/settings.json.
 // If force is true, removes existing Entire hooks before installing.
 // Returns the number of hooks installed.
-func (g *GeminiCLIAgent) InstallHooks(ctx context.Context, localDev bool, force bool) (int, error) {
+func (g *GeminiCLIAgent) InstallHooks(ctx context.Context, force bool) (int, error) {
 	// Use repo root instead of CWD to find .gemini directory
 	// This ensures hooks are installed correctly when run from a subdirectory
 	repoRoot, err := paths.WorktreeRoot(ctx)
@@ -102,12 +95,25 @@ func (g *GeminiCLIAgent) InstallHooks(ctx context.Context, localDev bool, force 
 	// hooksConfig.Enabled must be true for Gemini CLI to execute hooks
 	hooksConfig.Enabled = true
 
-	// Define hook commands based on localDev mode
-	var cmdPrefix string
-	if localDev {
-		cmdPrefix = agent.LocalDevHookScript + " hooks gemini "
-	} else {
-		cmdPrefix = "entire hooks gemini "
+	// Define hook commands up front: the idempotency check below needs the full
+	// expected set, not just session-start, to tell "already installed" from
+	// "some hook is still on an older command".
+	const cmdPrefix = "entire hooks gemini "
+	sessionStartCmd := agent.WrapProductionJSONWarningHookCommand(cmdPrefix+"session-start", agent.WarningFormatSingleLine)
+	sessionEndCmd := agent.WrapProductionSilentHookCommand(cmdPrefix + "session-end")
+	beforeAgentCmd := agent.WrapProductionSilentHookCommand(cmdPrefix + "before-agent")
+	afterAgentCmd := agent.WrapProductionSilentHookCommand(cmdPrefix + "after-agent")
+	beforeModelCmd := agent.WrapProductionSilentHookCommand(cmdPrefix + "before-model")
+	afterModelCmd := agent.WrapProductionSilentHookCommand(cmdPrefix + "after-model")
+	beforeToolSelectionCmd := agent.WrapProductionSilentHookCommand(cmdPrefix + "before-tool-selection")
+	beforeToolCmd := agent.WrapProductionSilentHookCommand(cmdPrefix + "before-tool")
+	afterToolCmd := agent.WrapProductionSilentHookCommand(cmdPrefix + "after-tool")
+	preCompressCmd := agent.WrapProductionSilentHookCommand(cmdPrefix + "pre-compress")
+	notificationCmd := agent.WrapProductionSilentHookCommand(cmdPrefix + "notification")
+	wantCommands := []string{
+		sessionStartCmd, sessionEndCmd, beforeAgentCmd, afterAgentCmd,
+		beforeModelCmd, afterModelCmd, beforeToolSelectionCmd, beforeToolCmd,
+		afterToolCmd, preCompressCmd, notificationCmd,
 	}
 
 	// Parse only the hook types we need to modify
@@ -130,15 +136,20 @@ func (g *GeminiCLIAgent) InstallHooks(ctx context.Context, localDev bool, force 
 	// If the exact same hook command already exists, hooks are already installed.
 	// When cleanupDone, we still need to write the file to persist the cleanup,
 	// but we return 0 (not 12) so callers know no hooks were added.
+	//
+	// Sampling session-start alone is not enough: a stale Entire hook on any
+	// other type (notably one left by the removed local-dev mode, which ran a
+	// script inside the working tree) would then survive every non-force install
+	// because this returns before the remove+add cycle below.
+	allHookLists := [][]GeminiHookMatcher{
+		sessionStart, sessionEnd, beforeAgent, afterAgent, beforeModel, afterModel,
+		beforeToolSelection, beforeTool, afterTool, preCompress, notification,
+	}
 	if !force {
 		existingCmd := getFirstEntireHookCommand(sessionStart)
-		expectedCmd := cmdPrefix + "session-start"
-		if !localDev {
-			expectedCmd = agent.WrapProductionJSONWarningHookCommand(expectedCmd, agent.WarningFormatSingleLine)
-		}
-		if existingCmd == expectedCmd {
+		if existingCmd == sessionStartCmd && !hasStaleEntireHook(allHookLists, wantCommands) {
 			if !cleanupDone {
-				return 0, nil // Already installed with same mode, nothing to write
+				return 0, nil // Already installed with this exact command, nothing to write
 			}
 			// Cleanup needed but hooks already installed — write cleaned rawHooks
 			// without running the full remove+add cycle.
@@ -146,7 +157,10 @@ func (g *GeminiCLIAgent) InstallHooks(ctx context.Context, localDev bool, force 
 		}
 	}
 
-	// Remove existing Entire hooks first (for clean installs and mode switching)
+	// Remove existing Entire hooks first. Besides clean installs, this is what
+	// replaces hooks left by older versions — including local-dev hooks that
+	// pointed at a script inside the working tree (see
+	// agent.LegacyLocalDevHookScript, still matched by entireHookPrefixes).
 	sessionStart = removeEntireHooks(sessionStart)
 	sessionEnd = removeEntireHooks(sessionEnd)
 	beforeAgent = removeEntireHooks(beforeAgent)
@@ -161,40 +175,12 @@ func (g *GeminiCLIAgent) InstallHooks(ctx context.Context, localDev bool, force 
 
 	// Install all hooks
 	// Session lifecycle hooks
-	sessionStartCmd := cmdPrefix + "session-start"
-	if !localDev {
-		sessionStartCmd = agent.WrapProductionJSONWarningHookCommand(sessionStartCmd, agent.WarningFormatSingleLine)
-	}
 	sessionStart = addGeminiHook(sessionStart, "", "entire-session-start", sessionStartCmd)
 	// SessionEnd fires on both "exit" and "logout" - install hooks for both matchers
-	sessionEndCmd := cmdPrefix + "session-end"
-	if !localDev {
-		sessionEndCmd = agent.WrapProductionSilentHookCommand(sessionEndCmd)
-	}
 	sessionEnd = addGeminiHook(sessionEnd, "exit", "entire-session-end-exit", sessionEndCmd)
 	sessionEnd = addGeminiHook(sessionEnd, "logout", "entire-session-end-logout", sessionEndCmd)
 
 	// Agent hooks (user prompt and response)
-	beforeAgentCmd := cmdPrefix + "before-agent"
-	afterAgentCmd := cmdPrefix + "after-agent"
-	beforeModelCmd := cmdPrefix + "before-model"
-	afterModelCmd := cmdPrefix + "after-model"
-	beforeToolSelectionCmd := cmdPrefix + "before-tool-selection"
-	beforeToolCmd := cmdPrefix + "before-tool"
-	afterToolCmd := cmdPrefix + "after-tool"
-	preCompressCmd := cmdPrefix + "pre-compress"
-	notificationCmd := cmdPrefix + "notification"
-	if !localDev {
-		beforeAgentCmd = agent.WrapProductionSilentHookCommand(beforeAgentCmd)
-		afterAgentCmd = agent.WrapProductionSilentHookCommand(afterAgentCmd)
-		beforeModelCmd = agent.WrapProductionSilentHookCommand(beforeModelCmd)
-		afterModelCmd = agent.WrapProductionSilentHookCommand(afterModelCmd)
-		beforeToolSelectionCmd = agent.WrapProductionSilentHookCommand(beforeToolSelectionCmd)
-		beforeToolCmd = agent.WrapProductionSilentHookCommand(beforeToolCmd)
-		afterToolCmd = agent.WrapProductionSilentHookCommand(afterToolCmd)
-		preCompressCmd = agent.WrapProductionSilentHookCommand(preCompressCmd)
-		notificationCmd = agent.WrapProductionSilentHookCommand(notificationCmd)
-	}
 	beforeAgent = addGeminiHook(beforeAgent, "", "entire-before-agent", beforeAgentCmd)
 	afterAgent = addGeminiHook(afterAgent, "", "entire-after-agent", afterAgentCmd)
 
@@ -324,7 +310,12 @@ func (g *GeminiCLIAgent) UninstallHooks(ctx context.Context) error {
 	settingsPath := filepath.Join(repoRoot, ".gemini", GeminiSettingsFileName)
 	data, err := os.ReadFile(settingsPath) //nolint:gosec // path is constructed from repo root + fixed path
 	if err != nil {
-		return nil //nolint:nilerr // No settings file means nothing to uninstall
+		// An absent file means nothing to uninstall; an unreadable one does not.
+		// Collapsing both leaves hooks on disk while reporting success.
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return fmt.Errorf("read %s: %w", settingsPath, err)
 	}
 
 	var rawSettings map[string]json.RawMessage
@@ -412,7 +403,13 @@ func (g *GeminiCLIAgent) UninstallHooks(ctx context.Context) error {
 }
 
 // AreHooksInstalled checks if Entire hooks are installed.
-func (g *GeminiCLIAgent) AreHooksInstalled(ctx context.Context) bool {
+//
+// A missing config file is an answer, not a failure: that file is where the
+// state lives, so its absence means no hooks. Anything that stops us reading the
+// answer — an unreadable file, malformed config — is returned as an error, since
+// "we could not tell" and "there are none" are different things to a caller
+// deciding whether hooks can be left alone.
+func (g *GeminiCLIAgent) AreHooksInstalled(ctx context.Context) (bool, error) {
 	// Use repo root to find .gemini directory when run from a subdirectory
 	repoRoot, err := paths.WorktreeRoot(ctx)
 	if err != nil {
@@ -420,16 +417,21 @@ func (g *GeminiCLIAgent) AreHooksInstalled(ctx context.Context) bool {
 	}
 	settingsPath := filepath.Join(repoRoot, ".gemini", GeminiSettingsFileName)
 	data, err := os.ReadFile(settingsPath) //nolint:gosec // path is constructed from repo root + fixed path
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
 	if err != nil {
-		return false
+		logging.Warn(ctx, "gemini: failed to read settings file", "path", settingsPath, "err", err)
+		return false, fmt.Errorf("read %s: %w", settingsPath, err)
 	}
 
 	var settings GeminiSettings
 	if err := json.Unmarshal(data, &settings); err != nil {
-		return false
+		logging.Warn(ctx, "gemini: failed to parse settings file", "path", settingsPath, "err", err)
+		return false, fmt.Errorf("parse hook config: %w", err)
 	}
 
-	// Check for at least one of our hooks using isEntireHook (works for both localDev and production)
+	// Check for at least one of our hooks using isEntireHook (matches legacy hook shapes too)
 	return hasEntireHook(settings.Hooks.SessionStart) ||
 		hasEntireHook(settings.Hooks.SessionEnd) ||
 		hasEntireHook(settings.Hooks.BeforeAgent) ||
@@ -440,7 +442,7 @@ func (g *GeminiCLIAgent) AreHooksInstalled(ctx context.Context) bool {
 		hasEntireHook(settings.Hooks.BeforeTool) ||
 		hasEntireHook(settings.Hooks.AfterTool) ||
 		hasEntireHook(settings.Hooks.PreCompress) ||
-		hasEntireHook(settings.Hooks.Notification)
+		hasEntireHook(settings.Hooks.Notification), nil
 }
 
 // Helper functions for hook management
@@ -474,7 +476,7 @@ func addGeminiHook(matchers []GeminiHookMatcher, matcherName, hookName, command 
 
 // isEntireHook checks if a command is an Entire hook
 func isEntireHook(command string) bool {
-	return agent.IsManagedHookCommand(command, entireHookPrefixes)
+	return agent.IsManagedHookCommand(command)
 }
 
 // hasEntireHook checks if any hook in the matchers is an Entire hook
@@ -501,7 +503,24 @@ func getFirstEntireHookCommand(matchers []GeminiHookMatcher) string {
 	return ""
 }
 
-// removeEntireHooks removes all Entire hooks from a list of matchers
+// hasStaleEntireHook reports whether any list holds an Entire-owned hook whose
+// command is not in want — i.e. a hook this version would not write. Foreign
+// hooks are ignored; only commands recognized by entireHookPrefixes count, which
+// includes the shapes older versions wrote (see agent.LegacyLocalDevHookScript).
+func hasStaleEntireHook(lists [][]GeminiHookMatcher, want []string) bool {
+	for _, list := range lists {
+		for _, matcher := range list {
+			for _, hook := range matcher.Hooks {
+				if isEntireHook(hook.Command) && !slices.Contains(want, hook.Command) {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+// removeEntireHooks removes all Entire hooks from a list of matchers.
 func removeEntireHooks(matchers []GeminiHookMatcher) []GeminiHookMatcher {
 	result := make([]GeminiHookMatcher, 0, len(matchers))
 	for _, matcher := range matchers {

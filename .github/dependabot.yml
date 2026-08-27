@@ -18,11 +18,9 @@ updates:
     ignore:
       - dependency-name: "*"
         update-types: ["version-update:semver-major"]
-      # betterleaks >=1.6.0 has a data race in internal/exprruntime
-      # (concurrent DetectString), see betterleaks/betterleaks#224.
-      # Pinned to 1.5.0 until fixed upstream.
-      - dependency-name: "github.com/betterleaks/betterleaks"
-        versions: [">=1.6.0"]
+      # goredact bumps are gated by the redaction corpus A/B (same regime as
+      # betterleaks); upgrade deliberately, never automatically.
+      - dependency-name: "github.com/lastpersonlabs/goredact"
 
   # Maintain dependencies for GitHub Actions
   - package-ecosystem: "github-actions"
@@ -30,3 +28,11 @@ updates:
     schedule:
       interval: "daily"
     open-pull-requests-limit: 5
+    groups:
+      # CodeQL subactions (init, analyze, ...) share one monorepo release and
+      # must move together — a version mismatch fails the CodeQL job with
+      # "Loaded a configuration file for version X, but running version Y".
+      # Grouping bundles every github/codeql-action/* bump into one PR.
+      codeql-action:
+        patterns:
+          - "github/codeql-action/*"

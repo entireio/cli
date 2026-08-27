@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -14,7 +15,11 @@ import (
 	"strings"
 	"time"
 
+	"github.com/entireio/cli/cmd/entire/cli/agent"
+	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
+	checkpointremote "github.com/entireio/cli/cmd/entire/cli/checkpoint/remote"
 	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
+	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
@@ -142,13 +147,22 @@ func runStatusDetailed(ctx context.Context, w io.Writer, sty statusStyles, setti
 		fmt.Fprintln(w, formatSettingsStatus("Project", projectSettings, sty))
 	}
 
-	// Show local settings if it exists
+	// Show local settings if it exists. LoadFromFile is ungated, so this
+	// renders the file's own contents — say so when the loader ignored them,
+	// or the display contradicts the settings actually in effect.
 	if localExists {
 		localSettings, err := settings.LoadFromFile(localSettingsPath)
 		if err != nil {
 			return fmt.Errorf("failed to load local settings: %w", err)
 		}
-		fmt.Fprintln(w, formatSettingsStatus("Local", localSettings, sty))
+		label := "Local"
+		if effectiveSettings.LocalLayerRejection() != "" {
+			label = "Local (ignored)"
+		}
+		fmt.Fprintln(w, formatSettingsStatus(label, localSettings, sty))
+		if reason := effectiveSettings.LocalLayerRejection(); reason != "" {
+			fmt.Fprintf(w, "  %s\n  fix with: git rm --cached %s\n", reason, settings.EntireSettingsLocalFile)
+		}
 	}
 
 	if effectiveSettings.Enabled {
@@ -160,10 +174,9 @@ func runStatusDetailed(ctx context.Context, w io.Writer, sty statusStyles, setti
 }
 
 // formatSettingsStatusShort formats a short settings status line.
-// Output format: "● Enabled · manual-commit · branch main" or "○ Disabled"
+// Output format: "● Enabled · branch main" or "○ Disabled · branch main"
+// (the branch segment is appended whenever it can be resolved).
 func formatSettingsStatusShort(ctx context.Context, s *EntireSettings, sty statusStyles) string {
-	displayName := strategy.StrategyNameManualCommit
-
 	var b strings.Builder
 
 	if s.Enabled {
@@ -175,9 +188,6 @@ func formatSettingsStatusShort(ctx context.Context, s *EntireSettings, sty statu
 		b.WriteString(" ")
 		b.WriteString(sty.render(sty.bold, "Disabled"))
 	}
-
-	b.WriteString(sty.render(sty.dim, " · "))
-	b.WriteString(displayName)
 
 	// Resolve branch from repo root
 	if repoRoot, err := paths.WorktreeRoot(ctx); err == nil {
@@ -196,6 +206,31 @@ func formatSettingsStatusShort(ctx context.Context, s *EntireSettings, sty statu
 
 			b.WriteString(strings.Join(displayNames, ", "))
 		}
+
+		// Warn when installed hooks are out of date (read-only; fix is manual).
+		for _, name := range OutdatedHookAgents(ctx) {
+			ag, err := agent.Get(name)
+			if err != nil {
+				continue
+			}
+			b.WriteString("\n")
+			b.WriteString(sty.render(sty.yellow, "  ! "+string(ag.Type())+" hooks out of date"))
+			b.WriteString(sty.render(sty.dim, " · run 'entire enable --force'"))
+		}
+		if warning := codexStatusWarning(inspectCodexHookIssue(ctx)); warning != "" {
+			b.WriteString("\n")
+			b.WriteString(sty.render(sty.yellow, "  ! "+warning))
+		}
+	}
+
+	// Where checkpoint data syncs (the single elected remote), and how many
+	// checkpoints have not reached it yet. Local-only computation.
+	if s.Enabled {
+		writeCheckpointSyncLines(ctx, &b, s, sty)
+	}
+
+	if s.Enabled {
+		writeSecretScannersLine(&b, s, sty)
 	}
 
 	// Show review status for HEAD's checkpoint, if any.
@@ -221,11 +256,37 @@ func formatSettingsStatusShort(ctx context.Context, s *EntireSettings, sty statu
 	return b.String()
 }
 
-// formatSettingsStatus formats a settings status line with source prefix.
-// Output format: "Project · enabled · manual-commit" or "Local · disabled"
-func formatSettingsStatus(prefix string, s *EntireSettings, sty statusStyles) string {
-	displayName := strategy.StrategyNameManualCommit
+// nonDefaultSecretScanners reports the enabled engines (betterleaks, then
+// goredact) when the selection differs from the default (betterleaks only);
+// nil otherwise. Both disabled is unreachable via these callers:
+// validateScannerSettings fail-closes merged settings before status loads them.
+func nonDefaultSecretScanners(s *EntireSettings) []string {
+	if s.BetterleaksEnabled() && !s.GoredactEnabled() {
+		return nil
+	}
+	var parts []string
+	if s.BetterleaksEnabled() {
+		parts = append(parts, "betterleaks")
+	}
+	if s.GoredactEnabled() {
+		parts = append(parts, "goredact")
+	}
+	return parts
+}
 
+func writeSecretScannersLine(b *strings.Builder, s *EntireSettings, sty statusStyles) {
+	parts := nonDefaultSecretScanners(s)
+	if len(parts) == 0 {
+		return
+	}
+	b.WriteString("\n")
+	b.WriteString(sty.render(sty.dim, "  Secret scanners · "))
+	b.WriteString(strings.Join(parts, ", "))
+}
+
+// formatSettingsStatus formats a settings status line with source prefix.
+// Output format: "Project · enabled" or "Local · disabled"
+func formatSettingsStatus(prefix string, s *EntireSettings, sty statusStyles) string {
 	var b strings.Builder
 	b.WriteString(sty.render(sty.bold, prefix))
 	b.WriteString(sty.render(sty.dim, " · "))
@@ -236,10 +297,139 @@ func formatSettingsStatus(prefix string, s *EntireSettings, sty statusStyles) st
 		b.WriteString("disabled")
 	}
 
-	b.WriteString(sty.render(sty.dim, " · "))
-	b.WriteString(displayName)
-
 	return b.String()
+}
+
+// checkpointSyncSourceDedicated is synthesized by the status layer when a
+// structured checkpoint_remote resolves to a dedicated store. It is never
+// returned by strategy.ResolveCheckpointSyncRemote — the resolver's contract
+// stays pure "which configured git remote" (spec Unit 1).
+const checkpointSyncSourceDedicated = "dedicated"
+
+// checkpointSyncInfo is the single shared computation behind both the text and
+// JSON checkpoint-sync sections of `entire status`, so the two outputs cannot
+// drift. Everything here reads local state only (settings, .git/config, local
+// refs, the push queue) — status must stay network-free.
+type checkpointSyncInfo struct {
+	// Remote is the elected git remote name, or the org/repo slug in
+	// dedicated checkpoint_remote mode. Empty when nothing resolved (no
+	// remotes configured, or the fail-closed case).
+	Remote string
+	// Source is config|observed|default|sole|first (resolver values) or
+	// "dedicated".
+	Source string
+	// Err is the fail-closed misconfiguration message from the resolver.
+	Err string
+	// Unpushed approximates checkpoints not yet on the sync destination; 0
+	// when none, when counting failed, or when the count would be a lie
+	// (dedicated URL mode on the git-branch backend).
+	Unpushed int
+}
+
+func computeCheckpointSyncInfo(ctx context.Context, s *EntireSettings) checkpointSyncInfo {
+	elected, err := strategy.ResolveCheckpointSyncRemote(ctx)
+	if err != nil {
+		// Fail-closed: checkpoint_push_remote names a remote that does not
+		// exist. The pre-push gate is silently skipping checkpoint sync, so
+		// status is the user's signal.
+		// Accepted divergence: if a structured checkpoint_remote is also
+		// configured, the gate's dedicated exemption may still sync checkpoint
+		// data even while this fail-closed warning is shown, since there is no
+		// elected remote left to probe PushURL against here.
+		return checkpointSyncInfo{Err: err.Error()}
+	}
+	if elected.Name == "" {
+		return checkpointSyncInfo{} // no remotes configured: show nothing
+	}
+
+	// Dedicated checkpoint_remote mode is reported only when PushURL derives
+	// an eligible URL for the elected remote, mirroring the pre-push
+	// exemption (ps.hasCheckpointURL); otherwise the gate applies normal
+	// single-remote sync, so status reports that instead. PushURL is
+	// local-only; never call resolvePushSettings here — its follow-up
+	// metadata fetch dials, and status must stay network-free.
+	// Accepted divergence: a real push to a different named remote may derive
+	// PushURL differently than this elected-remote probe does.
+	if cr := s.GetCheckpointRemote(); cr != nil {
+		if _, enabled, purlErr := checkpointremote.PushURL(ctx, elected.Name); purlErr == nil && enabled {
+			info := checkpointSyncInfo{Remote: cr.Repo, Source: checkpointSyncSourceDedicated}
+			// The unpushed counter is meaningful here only on the git-refs
+			// backend (push-queue length is local and accurate). The
+			// git-branch comparison is omitted: pushes to a raw URL update
+			// no remote-tracking ref, so it would permanently read "all
+			// unpushed".
+			if cpCfg, cfgErr := settings.LoadCheckpointsConfig(ctx); cfgErr == nil && checkpoint.PrimaryIsRefs(cpCfg) {
+				info.Unpushed = countUnpushedCheckpointsForStatus(ctx, "")
+			}
+			return info
+		}
+	}
+
+	return checkpointSyncInfo{
+		Remote:   elected.Name,
+		Source:   string(elected.Source),
+		Unpushed: countUnpushedCheckpointsForStatus(ctx, elected.Name),
+	}
+}
+
+// countUnpushedCheckpointsForStatus counts best-effort: status must never fail
+// because counting failed, so errors log at debug and read as "no counter".
+func countUnpushedCheckpointsForStatus(ctx context.Context, remoteName string) int {
+	n, err := strategy.CountUnpushedCheckpoints(ctx, remoteName)
+	if err != nil {
+		logging.Debug(ctx, "unpushed checkpoint count failed; omitting from status",
+			slog.String("error", err.Error()))
+		return 0
+	}
+	return n
+}
+
+// writeCheckpointSyncLines appends the checkpoint sync destination line (and
+// the unpushed counter, when non-zero) to the enabled status block. Rendered
+// whenever something resolved: an elected remote, a dedicated store, or the
+// fail-closed misconfiguration. No remotes configured -> no lines.
+func writeCheckpointSyncLines(ctx context.Context, b *strings.Builder, s *EntireSettings, sty statusStyles) {
+	info := computeCheckpointSyncInfo(ctx, s)
+	switch {
+	case info.Err != "":
+		b.WriteString("\n")
+		b.WriteString(sty.render(sty.yellow, "  ! Checkpoints NOT syncing: "+info.Err))
+	case info.Remote == "":
+		return
+	case info.Source == checkpointSyncSourceDedicated:
+		b.WriteString("\n  Checkpoints sync to: ")
+		b.WriteString(sty.render(sty.cyan, "dedicated checkpoint remote ("+info.Remote+")"))
+	default:
+		b.WriteString("\n  Checkpoints sync to: ")
+		b.WriteString(sty.render(sty.cyan, info.Remote))
+		switch info.Source {
+		case string(strategy.SyncRemoteSourceConfig):
+			b.WriteString(sty.render(sty.dim, " (set by checkpoint_push_remote)"))
+		case string(strategy.SyncRemoteSourceObserved):
+			b.WriteString(sty.render(sty.dim, " (follows your branch's push destination)"))
+		}
+	}
+	if info.Unpushed > 0 {
+		b.WriteString("\n  ")
+		b.WriteString(sty.render(sty.dim, formatUnpushedCheckpointsLine(info)))
+	}
+}
+
+// formatUnpushedCheckpointsLine phrases the unpushed counter. Dedicated URL
+// mode has no git remote to name (and only reaches here on the git-refs
+// backend), so it drops the remote-name phrasing.
+func formatUnpushedCheckpointsLine(info checkpointSyncInfo) string {
+	noun := "checkpoints"
+	pronoun := "they sync"
+	if info.Unpushed == 1 {
+		noun = "checkpoint"
+		pronoun = "it syncs"
+	}
+	if info.Source == checkpointSyncSourceDedicated {
+		return fmt.Sprintf("%d %s not yet pushed", info.Unpushed, noun)
+	}
+	return fmt.Sprintf("%d %s not yet on %s — %s with your next 'git push %s'",
+		info.Unpushed, noun, info.Remote, pronoun, info.Remote)
 }
 
 // timeAgo formats a time as a human-readable relative duration.
@@ -287,18 +477,21 @@ func writeActiveSessions(ctx context.Context, w io.Writer, sty statusStyles) {
 		return
 	}
 
-	// Finalize any ACTIVE session whose agent process has exited without a
+	// Finalize any non-ended session whose agent process has exited without a
 	// SessionStop hook firing, so it doesn't linger as "active" until the
 	// inactivity timeout. The sweep marks them ended in place, so the filter
 	// below drops them.
-	if n := finalizeExitedSessions(ctx, states); n > 0 {
+	if n := finalizeExitedSessions(ctx, states, time.Now().Add(interactiveSweepCondenseBudget)); n > 0 {
 		fmt.Fprintln(w, sty.render(sty.dim, fmt.Sprintf("Finalized %d exited session(s) (agent process gone).", n)))
 	}
 
-	// Filter to active sessions only
+	// Filter to active sessions only, per session.State.IsEnded — the same rule
+	// `entire session stop` filters on, so status can't advertise a session that
+	// stop then refuses to list. EndedAt alone is not it: `entire session attach`
+	// sets Phase to ended without stamping EndedAt.
 	var active []*session.State
 	for _, s := range states {
-		if s.EndedAt == nil {
+		if !s.IsEnded() {
 			active = append(active, s)
 		}
 	}
@@ -418,6 +611,11 @@ func writeActiveSessions(ctx context.Context, w io.Writer, sty statusStyles) {
 				fmt.Fprintln(w, sty.render(sty.dim, statsLine))
 			}
 			if warning := divergenceWarnings[st.SessionID]; warning != "" {
+				fmt.Fprintf(w, "%s %s\n", sty.render(sty.yellow, "!"), sty.render(sty.yellow, warning))
+			}
+			if st.CaptureDegradedAt != nil {
+				warning := fmt.Sprintf("capture degraded %s: status scan over budget; new-file detection skipped (see 'entire doctor logs')",
+					timeAgo(*st.CaptureDegradedAt))
 				fmt.Fprintf(w, "%s %s\n", sty.render(sty.yellow, "!"), sty.render(sty.yellow, warning))
 			}
 			fmt.Fprintln(w)
@@ -599,13 +797,56 @@ type statusJSON struct {
 	// `entire status --json` instead of the human footer. Set only on the
 	// success path (mirrors writeAgentHelpHint, which only renders when set up).
 	AgentHelp string `json:"agent_help,omitempty"`
-	Error     string `json:"error,omitempty"`
+	// HooksOutdated lists agents whose installed hook config is out of date and
+	// should be refreshed with `entire enable --force`.
+	HooksOutdated []string `json:"hooks_outdated,omitempty"`
+	// CodexHooks reports effective discovery/trust warnings separately from
+	// current-checkout installation and freshness semantics.
+	CodexHooks *codexHooksStatusJSON `json:"codex_hooks,omitempty"`
+	// CheckpointSyncRemote is the elected checkpoint sync remote name, or the
+	// org/repo slug in dedicated checkpoint_remote mode. Deliberately not named
+	// checkpoint_remote, which is the existing GitHub-coupled setting.
+	CheckpointSyncRemote       string `json:"checkpoint_sync_remote,omitempty"`
+	CheckpointSyncRemoteSource string `json:"checkpoint_sync_remote_source,omitempty"` // config|observed|default|sole|first|dedicated
+	CheckpointSyncError        string `json:"checkpoint_sync_error,omitempty"`         // fail-closed message
+	UnpushedCheckpoints        int    `json:"unpushed_checkpoints,omitempty"`
+	// SecretScanners lists the enabled engines when non-default; omitted when default.
+	SecretScanners []string `json:"secret_scanners,omitempty"`
+	Error          string   `json:"error,omitempty"`
+}
+
+type codexHooksStatusJSON struct {
+	State            string   `json:"state"`
+	WorktreePath     string   `json:"worktree_path,omitempty"`
+	DiscoveredPath   string   `json:"discovered_path,omitempty"`
+	ProjectLayerPath string   `json:"project_layer_path,omitempty"`
+	Error            string   `json:"error,omitempty"`
+	MissingHooks     []string `json:"missing_hooks,omitempty"`
+	MissingApprovals []string `json:"missing_approvals,omitempty"`
+}
+
+func codexHooksStatusFromIssue(issue *codexHookIssue) *codexHooksStatusJSON {
+	if issue == nil {
+		return nil
+	}
+	return &codexHooksStatusJSON{
+		State:            issue.State,
+		WorktreePath:     issue.WorktreePath,
+		DiscoveredPath:   issue.DiscoveredPath,
+		ProjectLayerPath: issue.ProjectLayerPath,
+		Error:            issue.Error,
+		MissingHooks:     issue.MissingHooks,
+		MissingApprovals: issue.MissingApprovals,
+	}
 }
 
 type sessionBriefJSON struct {
 	Agent  string `json:"agent"`
 	Model  string `json:"model,omitempty"`
 	Status string `json:"status"`
+	// CaptureDegraded reports that a session for this agent last turned with a
+	// status scan over budget, so new-file detection was skipped.
+	CaptureDegraded bool `json:"capture_degraded,omitempty"`
 }
 
 func runStatusJSON(ctx context.Context, w io.Writer) error {
@@ -656,12 +897,27 @@ func runStatusJSON(ctx context.Context, w io.Writer) error {
 			result.Agents = names
 		}
 
+		result.SecretScanners = nonDefaultSecretScanners(s)
+
+		for _, name := range OutdatedHookAgents(ctx) {
+			result.HooksOutdated = append(result.HooksOutdated, string(name))
+		}
+		result.CodexHooks = codexHooksStatusFromIssue(inspectCodexHookIssue(ctx))
+
+		// Same computation as the text path (writeCheckpointSyncLines);
+		// empty fields drop out via omitempty when nothing resolved.
+		syncInfo := computeCheckpointSyncInfo(ctx, s)
+		result.CheckpointSyncRemote = syncInfo.Remote
+		result.CheckpointSyncRemoteSource = syncInfo.Source
+		result.CheckpointSyncError = syncInfo.Err
+		result.UnpushedCheckpoints = syncInfo.Unpushed
+
 		if store, err := session.NewStateStore(ctx); err == nil {
 			if states, err := store.List(ctx); err == nil {
 				// Finalize sessions whose agent has exited (matches the human
-				// status path) so --json doesn't leave them orphaned ACTIVE or
+				// status path) so --json doesn't leave them orphaned or
 				// report them under active_sessions.
-				finalizeExitedSessions(ctx, states)
+				finalizeExitedSessions(ctx, states, time.Now().Add(interactiveSweepCondenseBudget))
 				// Deduplicate by agent: one entry per agent, "active" wins over "idle".
 				type agentEntry struct {
 					brief    sessionBriefJSON
@@ -669,7 +925,7 @@ func runStatusJSON(ctx context.Context, w io.Writer) error {
 				}
 				byAgent := make(map[string]*agentEntry)
 				for _, st := range states {
-					if st.EndedAt != nil {
+					if st.IsEnded() {
 						continue
 					}
 					agent := string(st.AgentType)
@@ -683,12 +939,16 @@ func runStatusJSON(ctx context.Context, w io.Writer) error {
 							existing.brief.Status = sessionStatusLabel(st)
 							existing.isActive = true
 						}
+						// Degradation is sticky across the dedupe: any degraded
+						// session for this agent must not be hidden by a healthy one.
+						existing.brief.CaptureDegraded = existing.brief.CaptureDegraded || st.CaptureDegradedAt != nil
 					} else {
 						byAgent[agent] = &agentEntry{
 							brief: sessionBriefJSON{
-								Agent:  agent,
-								Model:  st.ModelName,
-								Status: sessionStatusLabel(st),
+								Agent:           agent,
+								Model:           st.ModelName,
+								Status:          sessionStatusLabel(st),
+								CaptureDegraded: st.CaptureDegradedAt != nil,
 							},
 							isActive: active,
 						}
@@ -709,7 +969,7 @@ func runStatusJSON(ctx context.Context, w io.Writer) error {
 
 // sessionStatusLabel derives a display status from a session state.
 func sessionStatusLabel(s *session.State) string {
-	if s.EndedAt != nil {
+	if s.IsEnded() {
 		return "ended"
 	}
 	if s.OwnerExited() {

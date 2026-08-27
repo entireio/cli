@@ -31,9 +31,12 @@ func TestDefaultBranch_WorksOnMain(t *testing.T) {
 		t.Fatalf("SimulateStop failed: %v", err)
 	}
 
-	points := env.GetRewindPoints()
-	if len(points) != 1 {
-		t.Errorf("expected 1 rewind point on main branch, got %d", len(points))
+	shadowBranch := env.GetShadowBranchName()
+	if !env.BranchExists(shadowBranch) {
+		t.Fatalf("shadow branch %s should exist after checkpoint on main branch", shadowBranch)
+	}
+	if content, found := env.ReadFileFromBranch(shadowBranch, "file.txt"); !found || content != "content on main" {
+		t.Errorf("file.txt on shadow branch = %q (found=%v), want %q", content, found, "content on main")
 	}
 }
 
@@ -61,9 +64,12 @@ func TestDefaultBranch_WorksOnFeatureBranch(t *testing.T) {
 		t.Fatalf("SimulateStop failed: %v", err)
 	}
 
-	points := env.GetRewindPoints()
-	if len(points) != 1 {
-		t.Errorf("expected 1 rewind point on feature branch, got %d", len(points))
+	shadowBranch := env.GetShadowBranchName()
+	if !env.BranchExists(shadowBranch) {
+		t.Fatalf("shadow branch %s should exist after checkpoint on feature branch", shadowBranch)
+	}
+	if content, found := env.ReadFileFromBranch(shadowBranch, "feature.txt"); !found || content != "content on feature branch" {
+		t.Errorf("feature.txt on shadow branch = %q (found=%v), want %q", content, found, "content on feature branch")
 	}
 }
 
@@ -113,8 +119,12 @@ func TestDefaultBranch_PostTaskWorksOnMain(t *testing.T) {
 		t.Fatalf("SimulatePostTask failed: %v", err)
 	}
 
-	points := env.GetRewindPoints()
-	if len(points) != 1 {
-		t.Errorf("expected 1 rewind point (completed checkpoint) on main, got %d", len(points))
+	state, err := env.GetSessionState(session.ID)
+	if err != nil {
+		t.Fatalf("GetSessionState failed: %v", err)
+	}
+	rec := state.FindTaskRecord(taskID)
+	if rec == nil || rec.CompletedAt.IsZero() || !containsFile(rec.Files, "task.txt") {
+		t.Errorf("expected a completed task record carrying task.txt on main, got %+v", rec)
 	}
 }

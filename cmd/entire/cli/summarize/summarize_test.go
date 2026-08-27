@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 
@@ -663,7 +664,7 @@ func TestGenerateFromTranscript(t *testing.T) {
 	transcript := []byte(`{"type":"user","message":{"content":"Hello"}}
 {"type":"assistant","message":{"content":[{"type":"text","text":"Hi there"}]}}`)
 
-	summary, err := GenerateFromTranscript(context.Background(), redact.AlreadyRedacted(transcript), []string{"file.go"}, "", mockGenerator)
+	summary, err := GenerateFromTranscript(context.Background(), redact.AlreadyRedacted(transcript), []string{"file.go"}, "", mockGenerator, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -692,7 +693,7 @@ func TestGenerateFromTranscript_PreservesClaudeError(t *testing.T) {
 	transcript := []byte(`{"type":"user","message":{"content":"Hello"}}
 {"type":"assistant","message":{"content":[{"type":"text","text":"Hi there"}]}}`)
 
-	_, err := GenerateFromTranscript(context.Background(), redact.AlreadyRedacted(transcript), []string{}, "", gen)
+	_, err := GenerateFromTranscript(context.Background(), redact.AlreadyRedacted(transcript), []string{}, "", gen, nil)
 	wrapped := fmt.Errorf("explain generate call: %w", err)
 
 	var ce *claudecode.ClaudeError
@@ -710,7 +711,7 @@ func TestGenerateFromTranscript_PreservesClaudeError(t *testing.T) {
 func TestGenerateFromTranscript_EmptyTranscript(t *testing.T) {
 	mockGenerator := &ClaudeGenerator{}
 
-	summary, err := GenerateFromTranscript(context.Background(), redact.AlreadyRedacted([]byte{}), []string{}, "", mockGenerator)
+	summary, err := GenerateFromTranscript(context.Background(), redact.AlreadyRedacted([]byte{}), []string{}, "", mockGenerator, nil)
 	if err == nil {
 		t.Error("expected error for empty transcript")
 	}
@@ -724,7 +725,7 @@ func TestGenerateFromTranscript_NilGenerator(t *testing.T) {
 
 	// With nil generator, should use default ClaudeGenerator
 	// This will fail because claude CLI isn't available in test, but tests the nil handling
-	_, err := GenerateFromTranscript(context.Background(), redact.AlreadyRedacted(transcript), []string{}, "", nil)
+	_, err := GenerateFromTranscript(context.Background(), redact.AlreadyRedacted(transcript), []string{}, "", nil, nil)
 	// Error is expected (claude CLI not available), but function should not panic
 	if err == nil {
 		t.Log("Unexpectedly succeeded - claude CLI must be available")
@@ -944,7 +945,31 @@ func TestBuildCondensedTranscriptFromBytes_OpenCodeInvalidJSON(t *testing.T) {
 	}
 }
 
+func TestBuildCondensedTranscriptFromBytes_PiNativeJSONL(t *testing.T) {
+	t.Parallel()
+
+	piJSONL := `{"type":"session","version":3,"id":"pi-session","cwd":"/tmp/repo"}
+{"type":"message","id":"m1","parentId":null,"timestamp":"2026-07-25T10:00:00Z","message":{"role":"user","content":[{"type":"text","text":"Review this trail"}]}}
+{"type":"message","id":"m2","parentId":"m1","timestamp":"2026-07-25T10:00:01Z","message":{"role":"assistant","content":[{"type":"text","text":"The trail needs two fixes."}],"model":"gpt-5.6-sol"}}
+`
+
+	entries, err := BuildCondensedTranscriptFromBytes(redact.AlreadyRedacted([]byte(piJSONL)), agent.AgentTypePi)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(entries) != 2 {
+		t.Fatalf("expected 2 entries, got %d", len(entries))
+	}
+	if entries[0].Type != EntryTypeUser || entries[0].Content != "Review this trail" {
+		t.Fatalf("unexpected first entry: %+v", entries[0])
+	}
+	if entries[1].Type != EntryTypeAssistant || entries[1].Content != "The trail needs two fixes." {
+		t.Fatalf("unexpected second entry: %+v", entries[1])
+	}
+}
+
 func TestBuildCondensedTranscriptFromBytes_CompactTranscriptFallback(t *testing.T) {
+	t.Parallel()
 	compactJSONL := `{"v":1,"agent":"pi","cli_version":"test","type":"user","ts":"2026-01-01T00:00:00Z","content":[{"text":"Create bye.txt"}]}
 {"v":1,"agent":"pi","cli_version":"test","type":"assistant","ts":"2026-01-01T00:00:01Z","content":[{"type":"tool_use","id":"tc1","name":"Write","input":{"path":"bye.txt"}},{"type":"text","text":"Created bye.txt"}]}
 `
@@ -1013,9 +1038,11 @@ func TestBuildCondensedTranscriptFromBytes_CursorRoleBasedJSONL(t *testing.T) {
 	}
 }
 
-func TestBuildCondensedTranscriptFromBytes_CursorNoToolUseBlocks(t *testing.T) {
-	// Cursor transcripts have no tool_use blocks — only text content.
-	// This verifies we get entries (not an empty result) even without tool calls.
+func TestBuildCondensedTranscriptFromBytes_CursorTextOnly(t *testing.T) {
+	t.Parallel()
+	// A text-only Cursor exchange still yields entries (not an empty result).
+	// Cursor transcripts can also carry tool_use blocks -- see
+	// TestBuildCondensedTranscriptFromBytes_CursorToolUse for that case.
 	cursorJSONL := `{"role":"user","message":{"content":[{"type":"text","text":"write a poem"}]}}
 {"role":"assistant","message":{"content":[{"type":"text","text":"Here is a poem about code."}]}}
 `
@@ -1029,11 +1056,41 @@ func TestBuildCondensedTranscriptFromBytes_CursorNoToolUseBlocks(t *testing.T) {
 		t.Fatalf("expected 2 entries, got %d", len(entries))
 	}
 
-	// No tool entries should appear
+	// This exchange makes no tool calls, so no tool entries should appear.
 	for i, e := range entries {
 		if e.Type == EntryTypeTool {
-			t.Errorf("entry %d: unexpected tool entry in Cursor transcript", i)
+			t.Errorf("entry %d: unexpected tool entry in a text-only Cursor transcript", i)
 		}
+	}
+}
+
+// TestBuildCondensedTranscriptFromBytes_CursorToolUse pins that Cursor tool calls
+// reach the condensed transcript. Cursor shares Claude Code's JSONL shape and is
+// routed through the same parser, so this needs no Cursor-specific code -- but
+// nothing covered it while this package assumed Cursor had no tool_use blocks.
+// Tool names and input keys here match a real session
+// (cmd/entire/cli/agent/cursor/testdata/real_session_tool_use.jsonl).
+func TestBuildCondensedTranscriptFromBytes_CursorToolUse(t *testing.T) {
+	t.Parallel()
+	cursorJSONL := `{"role":"user","message":{"content":[{"type":"text","text":"create notes.md"}]}}
+{"role":"assistant","message":{"content":[{"type":"text","text":"Creating it."},{"type":"tool_use","name":"Write","input":{"path":"/tmp/cursor-probe/notes.md","contents":"line 1\n"}}]}}
+{"role":"assistant","message":{"content":[{"type":"tool_use","name":"StrReplace","input":{"new_string":"line 1 CHANGED","old_string":"line 1","path":"/tmp/cursor-probe/notes.md"}}]}}
+`
+
+	entries, err := BuildCondensedTranscriptFromBytes(redact.AlreadyRedacted([]byte(cursorJSONL)), agent.AgentTypeCursor)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var tools []string
+	for _, e := range entries {
+		if e.Type == EntryTypeTool {
+			tools = append(tools, e.ToolName)
+		}
+	}
+	want := []string{"Write", "StrReplace"}
+	if !slices.Equal(tools, want) {
+		t.Errorf("tool entries = %v, want %v", tools, want)
 	}
 }
 

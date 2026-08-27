@@ -35,15 +35,27 @@ jobs:
       agents: ${{ steps.set.outputs.agents }}
     steps:
       - id: set
+        # Pass the input through env rather than interpolating it into the script:
+        # `type: choice` only constrains the UI, so a REST-API dispatch could inject
+        # shell metacharacters here otherwise.
+        env:
+          AGENT_INPUT: ${{ github.event.inputs.agent }}
+        # gemini-cli is deliberately absent from the all-agents list. Since
+        # Gemini CLI 0.57.0 the agent forces `core.hooksPath=''` on every shell
+        # command it runs, so no checkpoint is recorded for a commit it makes and
+        # the leg fails for a reason no change on our side can fix. It stays in
+        # the workflow_dispatch choices above so the leg can be run by hand
+        # against a newer Gemini release; put it back in this list (it is still
+        # in the RED "reliable" tier in notify-slack) once one restores hooks.
         run: |
-          input="${{ github.event.inputs.agent }}"
+          input="$AGENT_INPUT"
           if [ -n "$input" ]; then
             echo "agents=[\"$input\"]" >> "$GITHUB_OUTPUT"
           else
             # antigravity is dispatch-only: it has no API-key auth (needs an entitled
             # Google identity), so including it in the default list would fail every
             # push-to-main run on the auth wall. Run it via workflow_dispatch.
-            echo 'agents=["claude-code","opencode","gemini-cli","factoryai-droid","cursor-cli","copilot-cli","roger-roger","codex"]' >> "$GITHUB_OUTPUT"
+            echo 'agents=["claude-code","opencode","factoryai-droid","cursor-cli","copilot-cli","roger-roger","codex"]' >> "$GITHUB_OUTPUT"
           fi
 
   e2e-tests:
@@ -67,14 +79,14 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           # Don't persist the (copilot-scoped) GITHUB_TOKEN in .git/config, where
           # an agent process running in the checkout could read it.
           persist-credentials: false
 
       - name: Setup mise
-        uses: jdx/mise-action@e6a8b3978addb5a52f2b4cd9d91eafa7f0ab959d # v4
+        uses: jdx/mise-action@f10502fc09dadecfefb962fff68ce77213930204 # v4
 
       - name: Install system dependencies
         run: sudo apt-get update && sudo apt-get install -y tmux
@@ -236,7 +248,7 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
       - name: Notify Slack of E2E failure
-        uses: slackapi/slack-github-action@45a88b9581bfab2566dc881e2cd66d334e621e2c # v3.0.3
+        uses: slackapi/slack-github-action@dcb1066f776dd043e64d0e8ba94ca15cc7e1875d # v4.0.0
         with:
           webhook: ${{ secrets.E2E_SLACK_WEBHOOK_URL }}
           webhook-type: incoming-webhook

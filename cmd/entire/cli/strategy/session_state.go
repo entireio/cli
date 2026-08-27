@@ -8,10 +8,12 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"runtime/debug"
 	"slices"
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
@@ -22,6 +24,41 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/validation"
 )
+
+// sessionLockDeadlineKey carries an optional wall-clock deadline bounding how
+// long acquireSessionGate waits for the cross-process session flock. It exists
+// so latency-critical, best-effort callers (the pre-agent TurnStart hook) can
+// degrade gracefully instead of blocking behind a long-running lock holder —
+// e.g. the previous turn's checkpoint condensation, which holds the same
+// per-session lock while it reads and rewrites the multi-MB transcript. Without
+// a bound the blocking flock stalls TurnStart for the full duration of that work
+// (observed ~30s on large sessions), even though TurnStart's own state update is
+// trivial and repaired on the next turn / at turn-end.
+//
+// The bound is a single absolute deadline shared across every acquisition on the
+// path (a caller like TurnStart runs several best-effort mutations), so the
+// worst-case contended cost is the budget once — not the budget times the number
+// of mutations. A passed deadline only fails an acquisition when the lock is
+// actually held; a free lock is always taken (non-blocking), so the deadline
+// never penalizes the common uncontended case.
+type sessionLockDeadlineKey struct{}
+
+// WithSessionLockWait returns a context whose session-state flock acquisitions
+// are bounded to complete within wait from now (a shared wall-clock budget).
+// Zero or negative leaves the wait unbounded (the default, used by
+// turn-end/condensation which must not drop work). Only the lock acquisition is
+// bounded; the mutation itself still runs under the caller's original context.
+func WithSessionLockWait(ctx context.Context, wait time.Duration) context.Context {
+	if wait <= 0 {
+		return ctx
+	}
+	return context.WithValue(ctx, sessionLockDeadlineKey{}, time.Now().Add(wait))
+}
+
+func sessionLockDeadlineFromContext(ctx context.Context) (time.Time, bool) {
+	deadline, ok := ctx.Value(sessionLockDeadlineKey{}).(time.Time)
+	return deadline, ok
+}
 
 // Session state management functions shared across all strategies.
 // SessionState is stored in .git/entire-sessions/{session_id}.json
@@ -72,15 +109,6 @@ func openSessionStateRootForRead(ctx context.Context) (*os.Root, error) {
 		return nil, fmt.Errorf("failed to open session state directory: %w", err)
 	}
 	return root, nil
-}
-
-// sessionStateFile returns the path to a session state file.
-func sessionStateFile(ctx context.Context, sessionID string) (string, error) {
-	stateDir, err := getSessionStateDir(ctx)
-	if err != nil {
-		return "", err
-	}
-	return filepath.Join(stateDir, sessionID+".json"), nil
 }
 
 // LoadSessionState loads the session state for the given session ID.
@@ -446,6 +474,12 @@ type sessionGate struct {
 	depth       int
 	flockRel    func()
 	activeState *SessionState // shared state pointer for nested mutations
+	// afterSave holds post-save effects registered by nested frames, in
+	// registration order. Only the outermost frame saves, so only it can
+	// know whether those effects are owed; it drains this queue (and clears
+	// it) when it exits. Guarded by gate ownership rather than gate.mu: only
+	// the owning goroutine ever touches it.
+	afterSave []func()
 }
 
 // goroutineID extracts the runtime goroutine ID from the stack header. Used
@@ -495,7 +529,74 @@ func goroutineID() int64 {
 // All session-state mutations funnel through this helper so the hot-path
 // PostToolUse hook cannot revert fields written by lifecycle handlers
 // (TurnEnd, PostCommit, ModelUpdate) that ran between our load and our save.
+//
+// A nil return is not proof that anything was written. Callers with a side
+// effect that must follow a durable write want MutateSessionStateOnSaved.
 func MutateSessionState(ctx context.Context, sessionID string, fn func(*SessionState) error) error {
+	return MutateSessionStateOnSaved(ctx, sessionID, fn, nil)
+}
+
+// runPostSaveEffect runs one post-save effect, containing a panic to that
+// effect rather than letting it escape.
+//
+// Two things make propagating wrong here, and neither is about the effect being
+// likely to panic. The effects are best-effort telemetry — a settings read and a
+// detached spawn — and they run from the outermost frame's defer, so an escaping
+// panic both skips every effect queued behind it and unwinds out of
+// MutateSessionStateOnSaved into callers that do not recover (PostCommit),
+// killing a git hook mid-commit over a signal that is fail-open everywhere else.
+// Note the asymmetry this closes: a panic in the mutation function is already
+// handled deliberately (the queue is discarded, and the gate is released first
+// so it stays usable), so the effects were the one path where the same
+// discipline was not applied.
+//
+// The panic is logged rather than swallowed. It is a bug wherever it comes from,
+// and .entire/logs is where the next person looks for it; a silent recover would
+// trade a crash for an invisible failure.
+func runPostSaveEffect(ctx context.Context, effect func()) {
+	defer func() {
+		if r := recover(); r != nil {
+			logging.Error(ctx, "post-save effect panicked",
+				slog.Any("panic", r),
+				slog.String("stack", string(debug.Stack())))
+		}
+	}()
+	effect()
+}
+
+// MutateSessionStateOnSaved is MutateSessionState plus onSaved, an effect that
+// runs only once the state fn mutated has been durably written — and never
+// while the session gate is held.
+//
+// It exists because a nil error is not proof of a save (ErrMutationSkip reports
+// success without writing) and because *this* frame is not necessarily the one
+// that saves. Only the outermost frame loads and saves; a nested frame's
+// mutations are flushed by whoever owns that save. So a nested frame cannot
+// answer "was this persisted?" at the moment it returns — the answer arrives
+// later, from a frame further up the stack. Handing the effect to the helper
+// rather than returning a bool moves the decision to the only frame that can
+// make it: nested registrations are queued on the gate, and the outermost frame
+// runs them after its own save succeeds, discarding them if it skips or fails.
+//
+// That distinction is load-bearing for anything irreversible. Skill-invocation
+// telemetry is the motivating case: extraction re-derives from transcript
+// offset 0 on every pass and dedupes against a ledger in session state, so
+// announcing an event whose ledger entry never landed does not self-correct —
+// the next pass sees an unrecorded event and reports it again, duplicating it
+// in PostHog. Not emitting is the recoverable direction: the append is
+// re-derived and re-announced by the next pass.
+//
+// onSaved runs after the gate is released, so its I/O (settings load, detached
+// process spawn) never extends the hold time for a concurrent hook. Effects run
+// in registration order, so nested registrations precede the outermost frame's
+// own effect.
+//
+// One gap this does not close: a nested frame whose fn *errors* has already
+// mutated the shared state, and an outer frame that swallows that error still
+// saves those mutations — with no effect registered. That direction loses an
+// announcement rather than duplicating one, and is inherent to nested frames
+// sharing a state pointer.
+func MutateSessionStateOnSaved(ctx context.Context, sessionID string, fn func(*SessionState) error, onSaved func()) error {
 	if sessionID == "" {
 		return ErrStateNotFound
 	}
@@ -503,19 +604,38 @@ func MutateSessionState(ctx context.Context, sessionID string, fn func(*SessionS
 	if err != nil {
 		return err
 	}
-	defer release()
 
 	if !isOuter {
+		defer release()
 		// Nested call: reuse the outer's state pointer. The outer save will
 		// flush our mutations; we don't load or save here.
 		if gate.activeState == nil {
 			return ErrStateNotFound
 		}
-		if err := fn(gate.activeState); err != nil && !errors.Is(err, ErrMutationSkip) {
+		if err := fn(gate.activeState); err != nil {
+			if errors.Is(err, ErrMutationSkip) {
+				return nil
+			}
 			return err
+		}
+		if onSaved != nil {
+			gate.afterSave = append(gate.afterSave, onSaved)
 		}
 		return nil
 	}
+
+	// Outermost frame: it owns the save, so it owns every queued effect too.
+	// One defer keeps the order explicit — clear the gate's per-frame fields,
+	// drop the lock, then run the effects outside it.
+	var effects []func()
+	defer func() {
+		gate.activeState = nil
+		gate.afterSave = nil
+		release()
+		for _, effect := range effects {
+			runPostSaveEffect(ctx, effect)
+		}
+	}()
 
 	state, err := LoadSessionState(ctx, sessionID)
 	if err != nil {
@@ -525,7 +645,6 @@ func MutateSessionState(ctx context.Context, sessionID string, fn func(*SessionS
 		return ErrStateNotFound
 	}
 	gate.activeState = state
-	defer func() { gate.activeState = nil }()
 
 	if err := fn(state); err != nil {
 		if errors.Is(err, ErrMutationSkip) {
@@ -535,6 +654,17 @@ func MutateSessionState(ctx context.Context, sessionID string, fn func(*SessionS
 	}
 	if err := SaveSessionState(ctx, state); err != nil {
 		return fmt.Errorf("save session state: %w", err)
+	}
+	// Copied out before the defer clears gate.afterSave, into a fresh slice so
+	// the queue never shares a backing array with the gate. Guarded because the
+	// overwhelmingly common case is a plain MutateSessionState with nothing
+	// queued, and that runs on the PostToolUse hot path — no effects, no alloc.
+	if len(gate.afterSave) > 0 || onSaved != nil {
+		effects = make([]func(), 0, len(gate.afterSave)+1)
+		effects = append(effects, gate.afterSave...)
+		if onSaved != nil {
+			effects = append(effects, onSaved)
+		}
 	}
 	return nil
 }
@@ -566,7 +696,19 @@ func acquireSessionGate(ctx context.Context, sessionID string) (gate *sessionGat
 	if err != nil {
 		return nil, false, nil, fmt.Errorf("resolve state lock path: %w", err)
 	}
-	flockRel, err := flock.Acquire(lockPath)
+	// Bound the acquisition when the caller opted in (TurnStart), so a
+	// best-effort mutation can't stall behind a long-running lock holder. The
+	// deadline is shared across the whole path, so several mutations don't sum
+	// their waits. Only the acquire is bounded — the mutation runs under the
+	// original ctx.
+	var flockRel func()
+	if deadline, ok := sessionLockDeadlineFromContext(ctx); ok {
+		acqCtx, cancel := context.WithDeadline(ctx, deadline)
+		flockRel, err = flock.AcquireContext(acqCtx, lockPath)
+		cancel()
+	} else {
+		flockRel, err = flock.Acquire(lockPath)
+	}
 	if err != nil {
 		return nil, false, nil, fmt.Errorf("acquire state lock: %w", err)
 	}

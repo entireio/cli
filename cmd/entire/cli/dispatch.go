@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 
 	dispatchpkg "github.com/entireio/cli/cmd/entire/cli/dispatch"
 	"github.com/entireio/cli/cmd/entire/cli/interactive"
@@ -18,6 +19,10 @@ var renderDispatchMarkdown = dispatchpkg.RenderMarkdown
 var dispatchTerminalMode = interactive.IsTerminalWriter
 var runInteractiveDispatch = defaultRunInteractiveDispatch
 var renderTerminalMarkdown = defaultRenderTerminalMarkdown
+var shouldRunDispatchWizardForCommand = shouldRunDispatchWizard
+var runDispatchWizardForCommand = runDispatchWizard
+var prepareLocalDispatch = dispatchpkg.PrepareLocal
+var resolveDispatchProvider = resolveDispatchSummaryProvider
 
 func newDispatchCmd() *cobra.Command {
 	var (
@@ -27,6 +32,7 @@ func newDispatchCmd() *cobra.Command {
 		flagAllBranches      bool
 		flagRepos            []string
 		flagVoice            string
+		flagAgent            string
 		flagInsecureHTTPAuth bool
 	)
 
@@ -38,16 +44,26 @@ func newDispatchCmd() *cobra.Command {
 Examples:
   entire dispatch
   entire dispatch --local --all-branches
+  entire dispatch --local --agent codex
   entire dispatch --repos entireio/cli
   entire dispatch --voice neutral`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			agentOverride := strings.TrimSpace(flagAgent)
+			agentFlagSet := cmd.Flags().Changed("agent")
+			if agentFlagSet && !flagLocal {
+				return errors.New("--agent only applies to --local (cloud dispatch uses Entire's server-side generator)")
+			}
+			if agentFlagSet && agentOverride == "" {
+				return errors.New("--agent requires a non-empty value")
+			}
+
 			var (
 				opts dispatchpkg.Options
 				err  error
 			)
 
-			if shouldRunDispatchWizard(cmd.Flags().NFlag(), isTerminalStdin(os.Stdin), interactive.IsTerminalWriter(cmd.OutOrStdout())) {
-				opts, err = runDispatchWizard(cmd)
+			if shouldRunDispatchWizardForCommand(cmd.Flags().NFlag(), isTerminalStdin(os.Stdin), interactive.IsTerminalWriter(cmd.OutOrStdout())) {
+				opts, err = runDispatchWizardForCommand(cmd)
 			} else {
 				opts, err = parseDispatchFlags(cmd, flagLocal, flagSince, flagUntil, flagAllBranches, flagRepos, flagVoice, flagInsecureHTTPAuth)
 			}
@@ -56,6 +72,18 @@ Examples:
 					return nil
 				}
 				return err
+			}
+			if opts.Mode == dispatchpkg.ModeLocal {
+				opts, err = prepareLocalDispatch(cmd.Context(), opts)
+				if err != nil {
+					return err
+				}
+				provider, err := resolveDispatchProvider(cmd.Context(), cmd.ErrOrStderr(), agentOverride)
+				if err != nil {
+					return err
+				}
+				opts.TextGenerator = provider.TextGenerator
+				opts.Model = provider.Model
 			}
 
 			if err := runDispatchCommand(cmd.Context(), cmd.OutOrStdout(), opts); err != nil {
@@ -74,6 +102,7 @@ Examples:
 	cmd.Flags().BoolVar(&flagAllBranches, "all-branches", false, "include every existing local branch (--local only; renamed or deleted branches are skipped)")
 	cmd.Flags().StringSliceVar(&flagRepos, "repos", nil, fmt.Sprintf("cloud repo slugs, up to %d (for example entireio/cli)", dispatchpkg.CloudRepoLimit))
 	cmd.Flags().StringVar(&flagVoice, "voice", "", "voice preset name or literal description")
+	cmd.Flags().StringVar(&flagAgent, "agent", "", "local text-generation agent (requires --local)")
 	cmd.Flags().BoolVar(&flagInsecureHTTPAuth, "insecure-http-auth", false, "Allow authentication over plain HTTP (insecure, for local development only)")
 	if err := cmd.Flags().MarkHidden("insecure-http-auth"); err != nil {
 		panic(fmt.Sprintf("hide insecure-http-auth flag: %v", err))

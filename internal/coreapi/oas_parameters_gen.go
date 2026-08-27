@@ -244,8 +244,15 @@ type ListRepoGrantsParams struct {
 
 // ListReposParams is parameters of listRepos operation.
 type ListReposParams struct {
+	// Maximum entries to return; server may cap further.
+	PageSize OptInt32 `json:",omitempty,omitzero"`
+	// Opaque cursor from a previous response's nextPageToken.
+	PageToken OptString `json:",omitempty,omitzero"`
 	// Onboarded (default): repos in Entire; all: also include onboardable GitHub candidates.
 	Scope OptListReposScope `json:",omitempty,omitzero"`
+	// Optional: exact-match full_name (owner/repo, case-insensitive). Returns that repo's zero-or-one
+	// entries; pagination and scope are ignored.
+	Filter OptString `json:",omitempty,omitzero"`
 }
 
 // ListServiceAccountGrantsParams is parameters of listServiceAccountGrants operation.
@@ -304,6 +311,15 @@ type ResolveHandleParams struct {
 	Provider string
 	// User-visible handle at the provider.
 	Handle string
+}
+
+// ResolveMirrorPlacementsParams is parameters of resolveMirrorPlacements operation.
+type ResolveMirrorPlacementsParams struct {
+	Provider ResolveMirrorPlacementsProvider
+	// Upstream owner login (case-insensitive).
+	Owner string
+	// Upstream repo name (case-insensitive).
+	Repo string
 }
 
 // RevokeProjectAccessParams is parameters of revokeProjectAccess operation.

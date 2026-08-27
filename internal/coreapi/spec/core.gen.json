@@ -292,6 +292,28 @@
         ],
         "type": "object"
       },
+      "CompleteOnboardingOutputBody": {
+        "additionalProperties": true,
+        "properties": {
+          "$schema": {
+            "description": "A URL to the JSON Schema for this object.",
+            "examples": [
+              "/api/v1/schemas/CompleteOnboardingOutputBody.json"
+            ],
+            "format": "uri",
+            "readOnly": true,
+            "type": "string"
+          },
+          "needsOnboarding": {
+            "description": "Always false after onboarding completion is recorded.",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "needsOnboarding"
+        ],
+        "type": "object"
+      },
       "CreateBindingInputBody": {
         "additionalProperties": true,
         "properties": {
@@ -870,7 +892,7 @@
             "type": "string"
           },
           "needsOnboarding": {
-            "description": "True when the account has no mirrored repo yet and should be sent through onboarding.",
+            "description": "True until the account completes web onboarding at least once.",
             "type": "boolean"
           }
         },
@@ -1597,6 +1619,10 @@
             ],
             "format": "uri",
             "readOnly": true,
+            "type": "string"
+          },
+          "nextPageToken": {
+            "description": "Pass back to fetch the next page; empty when no more entries.",
             "type": "string"
           },
           "repos": {
@@ -2397,6 +2423,13 @@
             },
             "type": "array"
           },
+          "primaries": {
+            "$ref": "#/components/schemas/RepoPrimaries"
+          },
+          "stars": {
+            "format": "int64",
+            "type": "integer"
+          },
           "visibility": {
             "type": "string"
           }
@@ -2451,6 +2484,46 @@
         ],
         "type": "object"
       },
+      "RepoPrimaries": {
+        "additionalProperties": true,
+        "properties": {
+          "git_data": {
+            "type": "string"
+          },
+          "processing": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "git_data",
+          "processing"
+        ],
+        "type": "object"
+      },
+      "ResolvePlacementsOutputBody": {
+        "additionalProperties": true,
+        "properties": {
+          "$schema": {
+            "description": "A URL to the JSON Schema for this object.",
+            "examples": [
+              "/api/v1/schemas/ResolvePlacementsOutputBody.json"
+            ],
+            "format": "uri",
+            "readOnly": true,
+            "type": "string"
+          },
+          "placements": {
+            "items": {
+              "$ref": "#/components/schemas/ResolvedPlacement"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "placements"
+        ],
+        "type": "object"
+      },
       "ResolvedIdentity": {
         "additionalProperties": true,
         "properties": {
@@ -2481,6 +2554,30 @@
           "provider",
           "handle",
           "providerUserId"
+        ],
+        "type": "object"
+      },
+      "ResolvedPlacement": {
+        "additionalProperties": true,
+        "properties": {
+          "cell": {
+            "description": "Physical cell the mirror's cluster runs in, e.g. aws-us-east-2.",
+            "type": "string"
+          },
+          "clusterHost": {
+            "description": "Public host of the cluster serving this mirror.",
+            "type": "string"
+          },
+          "jurisdiction": {
+            "type": "string"
+          },
+          "mirrorId": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "mirrorId",
+          "clusterHost"
         ],
         "type": "object"
       },
@@ -3346,7 +3443,46 @@
             "sessionAuth": []
           }
         ],
-        "summary": "Report whether the calling account still needs to onboard (has no mirror yet)",
+        "summary": "Report whether the calling account still needs to complete onboarding",
+        "tags": [
+          "identity"
+        ]
+      }
+    },
+    "/me/onboarding/complete": {
+      "post": {
+        "operationId": "completeOnboarding",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CompleteOnboardingOutputBody"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionAuth": []
+          }
+        ],
+        "summary": "Record that the calling account completed web onboarding",
         "tags": [
           "identity"
         ]
@@ -3700,6 +3836,83 @@
           }
         ],
         "summary": "List the principals with access to a mirror (live GitHub-admin gated)",
+        "tags": [
+          "mirrors"
+        ]
+      }
+    },
+    "/mirrors/placements": {
+      "get": {
+        "operationId": "resolveMirrorPlacements",
+        "parameters": [
+          {
+            "explode": false,
+            "in": "query",
+            "name": "provider",
+            "required": true,
+            "schema": {
+              "enum": [
+                "github"
+              ],
+              "type": "string"
+            }
+          },
+          {
+            "description": "Upstream owner login (case-insensitive).",
+            "explode": false,
+            "in": "query",
+            "name": "owner",
+            "required": true,
+            "schema": {
+              "description": "Upstream owner login (case-insensitive).",
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          {
+            "description": "Upstream repo name (case-insensitive).",
+            "explode": false,
+            "in": "query",
+            "name": "repo",
+            "required": true,
+            "schema": {
+              "description": "Upstream repo name (case-insensitive).",
+              "minLength": 1,
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResolvePlacementsOutputBody"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionAuth": []
+          }
+        ],
+        "summary": "Resolve the pullable cluster placements of a mirrored upstream (clone discovery)",
         "tags": [
           "mirrors"
         ]
@@ -4885,6 +5098,29 @@
         "operationId": "listRepos",
         "parameters": [
           {
+            "description": "Maximum entries to return; server may cap further.",
+            "explode": false,
+            "in": "query",
+            "name": "pageSize",
+            "schema": {
+              "description": "Maximum entries to return; server may cap further.",
+              "format": "int32",
+              "maximum": 500,
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Opaque cursor from a previous response's nextPageToken.",
+            "explode": false,
+            "in": "query",
+            "name": "pageToken",
+            "schema": {
+              "description": "Opaque cursor from a previous response's nextPageToken.",
+              "type": "string"
+            }
+          },
+          {
             "description": "onboarded (default): repos in Entire; all: also include onboardable GitHub candidates.",
             "explode": false,
             "in": "query",
@@ -4896,6 +5132,16 @@
                 "onboarded",
                 "all"
               ],
+              "type": "string"
+            }
+          },
+          {
+            "description": "Optional: exact-match full_name (owner/repo, case-insensitive). Returns that repo's zero-or-one entries; pagination and scope are ignored.",
+            "explode": false,
+            "in": "query",
+            "name": "filter",
+            "schema": {
+              "description": "Optional: exact-match full_name (owner/repo, case-insensitive). Returns that repo's zero-or-one entries; pagination and scope are ignored.",
               "type": "string"
             }
           }

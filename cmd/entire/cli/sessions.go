@@ -278,17 +278,17 @@ func runStop(ctx context.Context, cmd *cobra.Command, sessionID string, all, for
 	return runStopMultiSelect(ctx, cmd, activeSessions, force)
 }
 
-// filterActiveSessions returns sessions that have not been explicitly ended.
-// A session is considered ended if Phase == PhaseEnded OR EndedAt is set.
-// This matches the logic in status.go's writeActiveSessions for consistency:
-// any session visible in `entire status` should also be visible in `sessions stop`.
+// filterActiveSessions returns sessions that have not been explicitly ended,
+// per session.State.IsEnded. `entire status` filters on the same predicate
+// (writeActiveSessions, runStatusJSON), so any session it lists as active is
+// also one `sessions stop` will offer.
 func filterActiveSessions(states []*strategy.SessionState) []*strategy.SessionState {
 	var active []*strategy.SessionState
 	for _, s := range states {
 		if s == nil {
 			continue
 		}
-		if s.Phase != session.PhaseEnded && s.EndedAt == nil {
+		if !s.IsEnded() {
 			active = append(active, s)
 		}
 	}
@@ -659,7 +659,7 @@ func writeSessionInfoText(w io.Writer, state *strategy.SessionState, status stri
 	fmt.Fprintf(w, "Status:      %s\n", status)
 
 	if state.Kind.IsImported() {
-		fmt.Fprintf(w, "Note:        imported history — read-only (not resumable or rewindable)\n")
+		fmt.Fprintf(w, "Note:        imported history — read-only (not resumable)\n")
 	}
 
 	wt := sessionWorktreeLabel(state)
@@ -736,7 +736,7 @@ func runStopSession(ctx context.Context, cmd *cobra.Command, sessionID string, f
 		return NewSilentError(fmt.Errorf("session not found: %s", sessionID))
 	}
 
-	if state.Phase == session.PhaseEnded || state.EndedAt != nil {
+	if state.IsEnded() {
 		fmt.Fprintf(cmd.OutOrStdout(), "Session %s is already stopped.\n", sessionID)
 		return nil
 	}
@@ -884,9 +884,9 @@ func stopSelectedSessions(ctx context.Context, cmd *cobra.Command, sessions []*s
 func stopSessionAndPrint(ctx context.Context, cmd *cobra.Command, state *strategy.SessionState) error {
 	sessionID := state.SessionID
 	lastCheckpointID := state.LastCheckpointID
-	stepCount := state.StepCount
+	hasCondensableSteps := state.StepCount > 0 || state.HasTaskContent()
 
-	if _, err := markSessionEnded(ctx, nil, sessionID, nil); err != nil {
+	if _, err := markSessionEnded(ctx, nil, sessionID, nil, endedNow); err != nil {
 		return fmt.Errorf("failed to stop session %s: %w", sessionID, err)
 	}
 
@@ -894,7 +894,7 @@ func stopSessionAndPrint(ctx context.Context, cmd *cobra.Command, state *strateg
 	switch {
 	case lastCheckpointID != "":
 		fmt.Fprintf(cmd.OutOrStdout(), "  Checkpoint: %s\n", lastCheckpointID)
-	case stepCount > 0:
+	case hasCondensableSteps:
 		fmt.Fprintln(cmd.OutOrStdout(), "  Work will be captured in your next checkpoint.")
 	default:
 		fmt.Fprintln(cmd.OutOrStdout(), "  No work recorded.")

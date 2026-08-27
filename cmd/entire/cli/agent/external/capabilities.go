@@ -83,11 +83,11 @@ func (w *wrappedAgent) HookNames() []string { return w.ea.HookNames() }
 func (w *wrappedAgent) ParseHookEvent(ctx context.Context, name string, stdin io.Reader) (*agent.Event, error) {
 	return w.ea.ParseHookEvent(ctx, name, stdin)
 }
-func (w *wrappedAgent) InstallHooks(ctx context.Context, localDev bool, force bool) (int, error) {
-	return w.ea.InstallHooks(ctx, localDev, force)
+func (w *wrappedAgent) InstallHooks(ctx context.Context, force bool) (int, error) {
+	return w.ea.InstallHooks(ctx, force)
 }
 func (w *wrappedAgent) UninstallHooks(ctx context.Context) error { return w.ea.UninstallHooks(ctx) }
-func (w *wrappedAgent) AreHooksInstalled(ctx context.Context) bool {
+func (w *wrappedAgent) AreHooksInstalled(ctx context.Context) (bool, error) {
 	return w.ea.AreHooksInstalled(ctx)
 }
 

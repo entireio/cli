@@ -19,6 +19,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
+	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
 	"github.com/entireio/cli/cmd/entire/cli/telemetry"
 	"github.com/entireio/cli/cmd/entire/cli/versioncheck"
@@ -27,10 +28,6 @@ import (
 
 	"github.com/spf13/cobra"
 )
-
-// agentHookLogCleanup stores the cleanup function for agent hook logging.
-// Set by PersistentPreRunE, called by PersistentPostRunE.
-var agentHookLogCleanup func()
 
 // currentHookAgentName stores the agent name for the currently executing hook.
 // Set by newAgentHookVerbCmdWithLogging before calling the handler.
@@ -60,15 +57,17 @@ func newAgentHooksCmd(agentName types.AgentName, handler agent.HookSupport) *cob
 		Use:    string(agentName),
 		Short:  handler.Description() + " hook handlers",
 		Hidden: true,
-		PersistentPreRunE: func(cmd *cobra.Command, _ []string) error {
-			agentHookLogCleanup = initHookLogging(cmd.Context())
-			return nil
-		},
-		PersistentPostRunE: func(_ *cobra.Command, _ []string) error {
-			if agentHookLogCleanup != nil {
-				agentHookLogCleanup()
+		PersistentPreRun: func(cmd *cobra.Command, _ []string) {
+			// withHookSession scans session state and loads redactors, so it must
+			// not run in a repo that never enabled Entire. Same fail-closed gate
+			// the git-hook tree applies before its own call.
+			if !settings.IsSetUpAndEnabled(cmd.Context()) {
+				return
 			}
-			return nil
+			// Cobra invokes this PersistentPreRun with the leaf command, so
+			// SetContext hands the session-stamped context straight to the
+			// hook verb's RunE via cmd.Context().
+			cmd.SetContext(withHookSession(cmd.Context()))
 		},
 	}
 
@@ -80,12 +79,13 @@ func newAgentHooksCmd(agentName types.AgentName, handler agent.HookSupport) *cob
 }
 
 // getHookType returns the hook type based on the hook name.
-// Returns "subagent" for task-related hooks (pre-task, post-task, post-todo),
-// "tool" for tool-related hooks (before-tool, after-tool),
+// Returns "subagent" for task-related hooks (pre-task, post-task, post-todo,
+// subagent-stop), "tool" for tool-related hooks (before-tool, after-tool),
 // "agent" for all other agent hooks.
 func getHookType(hookName string) string {
 	switch hookName {
-	case claudecode.HookNamePreTask, claudecode.HookNamePostTask, claudecode.HookNamePostTodo:
+	case claudecode.HookNamePreTask, claudecode.HookNamePostTask, claudecode.HookNamePostTodo,
+		claudecode.HookNameSubagentStop:
 		return "subagent"
 	case geminicli.HookNameBeforeTool, geminicli.HookNameAfterTool:
 		return "tool"
@@ -95,27 +95,36 @@ func getHookType(hookName string) string {
 }
 
 // executeAgentHook runs the core hook execution logic for a given agent and hook name.
-// It handles git repo checks, enabled checks, logging, event parsing, and lifecycle dispatch.
+// It handles git repo checks, enabled checks, the hook logging context, event
+// parsing, and lifecycle dispatch.
 // Used by both the registered subcommand path and the RunE fallback for external agents.
-// When initLogging is true, it initializes and cleans up hook logging (used by the RunE fallback
-// since it doesn't go through PersistentPreRunE). Built-in agent subcommands pass false since
-// their parent command's PersistentPreRunE already handles logging.
-func executeAgentHook(cmd *cobra.Command, agentName types.AgentName, hookName string, initLogging bool) error {
+// When stampSession is true, it attaches the hook session context itself (used by
+// the RunE fallback since it doesn't go through PersistentPreRun). Built-in agent
+// subcommands pass false since their parent command's PersistentPreRun already
+// did it.
+func executeAgentHook(cmd *cobra.Command, agentName types.AgentName, hookName string, stampSession bool) error {
 	// Skip silently if not in a git repository - hooks shouldn't prevent the agent from working
 	worktreeRoot, err := paths.WorktreeRoot(cmd.Context())
 	if err != nil {
 		return nil
 	}
 
-	// Skip if Entire is not enabled
-	enabled, err := IsEnabled(cmd.Context())
-	if err == nil && !enabled {
+	// Skip if Entire is not set up and enabled. This must fail closed: any
+	// settings read error (missing file, corrupted JSON, transient I/O
+	// failure) is treated as disabled so a hook never silently falls through
+	// to full lifecycle work just because settings couldn't be read. Using
+	// IsEnabled here previously failed OPEN on error (`err == nil && !enabled`
+	// only short-circuits when the read succeeded), which meant a corrupted
+	// or unreadable settings file made every hook invocation pay the full
+	// dispatch cost instead of exiting fast (#524).
+	// settings.IsSetUpAndEnabled is the same fail-closed gate the git hooks
+	// use (see PersistentPreRun in hooks_git_cmd.go).
+	if !settings.IsSetUpAndEnabled(cmd.Context()) {
 		return nil
 	}
 
-	if initLogging {
-		cleanup := initHookLogging(cmd.Context())
-		defer cleanup()
+	if stampSession {
+		cmd.SetContext(withHookSession(cmd.Context()))
 	}
 
 	// Initialize logging context with agent name

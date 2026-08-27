@@ -1,6 +1,7 @@
 package factoryaidroid
 
 import (
+	"context"
 	"encoding/json"
 	"os"
 	"strings"
@@ -843,7 +844,7 @@ func TestExtractModelFromTranscript_SettingsFile(t *testing.T) {
 		t.Fatalf("failed to write settings: %v", err)
 	}
 
-	model := ExtractModelFromTranscript(transcriptPath)
+	model := ExtractModelFromTranscript(context.Background(), transcriptPath)
 	if model != "Gemini-2.5-Pro-0" {
 		t.Errorf("ExtractModelFromTranscript() = %q, want %q", model, "Gemini-2.5-Pro-0")
 	}
@@ -865,7 +866,7 @@ func TestExtractModelFromTranscript_NoCustomPrefix(t *testing.T) {
 		t.Fatalf("failed to write settings: %v", err)
 	}
 
-	model := ExtractModelFromTranscript(transcriptPath)
+	model := ExtractModelFromTranscript(context.Background(), transcriptPath)
 	if model != "claude-opus-4-6" {
 		t.Errorf("ExtractModelFromTranscript() = %q, want %q", model, "claude-opus-4-6")
 	}
@@ -882,7 +883,7 @@ func TestExtractModelFromTranscript_NoSettingsFile(t *testing.T) {
 		t.Fatalf("failed to write transcript: %v", err)
 	}
 
-	model := ExtractModelFromTranscript(transcriptPath)
+	model := ExtractModelFromTranscript(context.Background(), transcriptPath)
 	if model != "" {
 		t.Errorf("ExtractModelFromTranscript() = %q, want empty", model)
 	}
@@ -904,7 +905,7 @@ func TestExtractModelFromTranscript_CorruptSettingsFile(t *testing.T) {
 		t.Fatalf("failed to write settings: %v", err)
 	}
 
-	model := ExtractModelFromTranscript(transcriptPath)
+	model := ExtractModelFromTranscript(context.Background(), transcriptPath)
 	if model != "" {
 		t.Errorf("ExtractModelFromTranscript() = %q, want empty for corrupt settings", model)
 	}
@@ -913,7 +914,7 @@ func TestExtractModelFromTranscript_CorruptSettingsFile(t *testing.T) {
 func TestExtractModelFromTranscript_EmptyPath(t *testing.T) {
 	t.Parallel()
 
-	model := ExtractModelFromTranscript("")
+	model := ExtractModelFromTranscript(context.Background(), "")
 	if model != "" {
 		t.Errorf("ExtractModelFromTranscript(\"\") = %q, want empty", model)
 	}
@@ -1222,5 +1223,75 @@ func TestExtractAllModifiedFilesFromBytes_SubagentOnlyChanges(t *testing.T) {
 	}
 	for f := range wantFiles {
 		t.Errorf("missing expected file %q", f)
+	}
+}
+
+// Regression for #329: a subagent spawned BEFORE the checkpoint's startLine must
+// still be discovered for file extraction (it can keep modifying files later).
+func TestExtractAllModifiedFilesFromBytes_FindsSubagentSpawnedBeforeStartLine(t *testing.T) {
+	t.Parallel()
+
+	tmpDir := t.TempDir()
+	subagentsDir := tmpDir + "/tasks/toolu_task1"
+	if err := os.MkdirAll(subagentsDir, 0o755); err != nil {
+		t.Fatalf("failed to create subagents dir: %v", err)
+	}
+
+	data := joinJSONL(
+		makeTaskToolUseLine(t, "a1", "toolu_taskC"),        // line 0 (before startLine)
+		makeTaskResultLine(t, "uC", "toolu_taskC", "sub1"), // line 1 (before startLine)
+		makeWriteToolLine(t, "a2", "/repo/main.go"),        // line 2 (>= startLine)
+	)
+	writeJSONLFile(t, subagentsDir+"/agent-sub1.jsonl",
+		makeWriteToolLine(t, "sa1", "/repo/helper.go"),
+	)
+
+	files, err := ExtractAllModifiedFilesFromBytes(data, 2, subagentsDir)
+	if err != nil {
+		t.Fatalf("ExtractAllModifiedFilesFromBytes() error: %v", err)
+	}
+
+	got := make(map[string]bool, len(files))
+	for _, f := range files {
+		got[f] = true
+	}
+	if !got["/repo/main.go"] {
+		t.Errorf("missing main-agent file /repo/main.go: %v", files)
+	}
+	if !got["/repo/helper.go"] {
+		t.Errorf("subagent spawned before startLine was not discovered; missing /repo/helper.go: %v", files)
+	}
+}
+
+// Regression for #329: subagent token usage must be counted even when the
+// subagent was spawned before the checkpoint's startLine.
+func TestCalculateTotalTokenUsageFromBytes_CountsSubagentSpawnedBeforeStartLine(t *testing.T) {
+	t.Parallel()
+
+	tmpDir := t.TempDir()
+	subagentsDir := tmpDir + "/tasks/toolu_task1"
+	if err := os.MkdirAll(subagentsDir, 0o755); err != nil {
+		t.Fatalf("failed to create subagents dir: %v", err)
+	}
+
+	data := joinJSONL(
+		makeTaskToolUseLine(t, "a1", "toolu_taskD"),           // line 0 (before startLine)
+		makeTaskResultLine(t, "uD", "toolu_taskD", "sub1"),    // line 1 (before startLine)
+		makeAssistantTokenLine(t, "a2", "msg_main", 300, 150), // line 2
+	)
+	writeJSONLFile(t, subagentsDir+"/agent-sub1.jsonl",
+		makeAssistantTokenLine(t, "sa1", "msg_sub", 50, 25),
+	)
+
+	usage, err := CalculateTotalTokenUsageFromBytes(data, 2, subagentsDir)
+	if err != nil {
+		t.Fatalf("CalculateTotalTokenUsageFromBytes() error: %v", err)
+	}
+	if usage.SubagentTokens == nil {
+		t.Fatal("subagent spawned before startLine was not counted (SubagentTokens is nil)")
+	}
+	if usage.SubagentTokens.InputTokens != 50 || usage.SubagentTokens.OutputTokens != 25 {
+		t.Errorf("subagent tokens = input %d output %d, want input 50 output 25",
+			usage.SubagentTokens.InputTokens, usage.SubagentTokens.OutputTokens)
 	}
 }

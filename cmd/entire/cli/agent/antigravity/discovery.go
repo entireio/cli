@@ -45,15 +45,15 @@ func (a *AntigravityAgent) DiscoverReviewSkills(ctx context.Context) ([]agent.Di
 	}
 
 	var found []agent.DiscoveredSkill
-	found = append(found, skilldiscovery.ScanSkillsDir(ctx, filepath.Join(home, ".gemini", "config", "skills"), "")...)
-	found = append(found, skilldiscovery.ScanSkillsDir(ctx, filepath.Join(home, ".gemini", "antigravity-cli", "skills"), "")...)
-	found = append(found, skilldiscovery.ScanSkillsDir(ctx, filepath.Join(home, ".gemini", "skills"), "")...)
+	found = append(found, skilldiscovery.ScanSkillsDir(ctx, filepath.Join(home, ".gemini", "config", "skills"), "", skilldiscovery.SlashForm)...)
+	found = append(found, skilldiscovery.ScanSkillsDir(ctx, filepath.Join(home, ".gemini", "antigravity-cli", "skills"), "", skilldiscovery.SlashForm)...)
+	found = append(found, skilldiscovery.ScanSkillsDir(ctx, filepath.Join(home, ".gemini", "skills"), "", skilldiscovery.SlashForm)...)
 	if root, rootErr := paths.WorktreeRoot(ctx); rootErr == nil {
-		found = append(found, skilldiscovery.ScanSkillsDir(ctx, filepath.Join(root, ".agents", "skills"), "")...)
-		found = append(found, skilldiscovery.ScanSkillsDir(ctx, filepath.Join(root, ".agent", "skills"), "")...)
+		found = append(found, skilldiscovery.ScanSkillsDir(ctx, filepath.Join(root, ".agents", "skills"), "", skilldiscovery.SlashForm)...)
+		found = append(found, skilldiscovery.ScanSkillsDir(ctx, filepath.Join(root, ".agent", "skills"), "", skilldiscovery.SlashForm)...)
 	}
 
-	found = skilldiscovery.Dedupe(found)
+	found = skilldiscovery.DedupeByInvocation(found)
 	if len(found) == 0 {
 		return nil, nil
 	}
