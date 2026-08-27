@@ -1154,10 +1154,13 @@ func (s *StateStore) Clear(ctx context.Context, sessionID string) error {
 	var registryOwner struct {
 		WorktreePath string `json:"worktree_path"`
 	}
-	if data, err := os.ReadFile(filepath.Join(s.stateDir, sessionID+".json")); err == nil { //nolint:gosec // validated session ID and owned state dir
-		if err := json.Unmarshal(data, &registryOwner); err != nil {
-			registryOwner.WorktreePath = ""
+	if root, rootErr := os.OpenRoot(s.stateDir); rootErr == nil {
+		if data, err := readStateFile(ctx, root, sessionID+".json"); err == nil {
+			if err := json.Unmarshal(data, &registryOwner); err != nil {
+				registryOwner.WorktreePath = ""
+			}
 		}
+		root.Close()
 	}
 	primaryFile := sessionID + ".json"
 	matches := matchSessionFiles(s.stateDir, sessionID)
