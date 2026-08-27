@@ -30,19 +30,36 @@ func Register(name types.AgentName, factory Factory) {
 
 // Get retrieves an agent by name.
 //
-
+// The lock is released before building the error so the "available" list can
+// go through StringList, which resolves each agent to apply the test-only
+// filter and would otherwise re-enter registryMu underneath us.
 func Get(name types.AgentName) (Agent, error) {
 	registryMu.RLock()
-	defer registryMu.RUnlock()
-
 	factory, ok := registry[name]
+	registryMu.RUnlock()
+
 	if !ok {
-		return nil, fmt.Errorf("unknown agent: %s (available: %v)", name, List())
+		return nil, fmt.Errorf("unknown agent: %s (available: %v)", name, StringList())
 	}
 	return factory(), nil
 }
 
-// List returns all registered agent names in sorted order.
+// IsRegistered reports whether name is in the registry.
+//
+// Existence probes belong here rather than on a discarded Get error: Get's
+// miss path resolves every registered agent to build its "available: ..."
+// listing, which is wasted work when the caller only wants a yes/no.
+func IsRegistered(name types.AgentName) bool {
+	registryMu.RLock()
+	defer registryMu.RUnlock()
+
+	_, ok := registry[name]
+	return ok
+}
+
+// List returns all registered agent names in sorted order, test-only agents
+// included. Anything that offers the user a choice of agent wants
+// ListAvailable or StringList instead.
 func List() []types.AgentName {
 	registryMu.RLock()
 	defer registryMu.RUnlock()
@@ -55,19 +72,47 @@ func List() []types.AgentName {
 	return names
 }
 
-// StringList returns user-facing agent names, excluding test-only agents.
-func StringList() []string {
-	registryMu.RLock()
-	defer registryMu.RUnlock()
+// ResolvedAgent pairs an agent with the registry name it is addressed by.
+// The registry name — not Agent.Name() — is the identity users type and
+// Get accepts; an external plugin's self-reported name can differ from the
+// name derived from its binary, which is what it is registered under.
+type ResolvedAgent struct {
+	Name  types.AgentName
+	Agent Agent
+}
 
-	names := make([]string, 0, len(registry))
-	for name, factory := range registry {
-		if to, ok := factory().(TestOnly); ok && to.IsTestOnly() {
+// ListAvailable returns the resolved agents a user may pick, in sorted name
+// order: every registered agent except the test-only ones. It is the single
+// place the test-only filter is applied, so callers that need the Agent value
+// (to check hook support or externality) get the same answer as callers that
+// only need names via StringList.
+//
+// Agents that vanish from the registry between listing and resolving (a
+// concurrent restore of a testing snapshot is the only way that happens) are
+// skipped.
+func ListAvailable() []ResolvedAgent {
+	names := List()
+	agents := make([]ResolvedAgent, 0, len(names))
+	for _, name := range names {
+		ag, err := Get(name)
+		if err != nil {
 			continue
 		}
-		names = append(names, string(name))
+		if to, ok := ag.(TestOnly); ok && to.IsTestOnly() {
+			continue
+		}
+		agents = append(agents, ResolvedAgent{Name: name, Agent: ag})
 	}
-	slices.Sort(names)
+	return agents
+}
+
+// StringList returns the names of ListAvailable, for display.
+func StringList() []string {
+	resolved := ListAvailable()
+	names := make([]string, 0, len(resolved))
+	for _, ra := range resolved {
+		names = append(names, string(ra.Name))
+	}
 	return names
 }
 

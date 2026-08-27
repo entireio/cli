@@ -4,6 +4,7 @@ import (
 	"context"
 	"os/exec"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 
@@ -69,6 +70,100 @@ func TestRegistryOperations(t *testing.T) {
 			t.Errorf("expected sorted list [agent-a, agent-b], got %v", names)
 		}
 	})
+}
+
+// testOnlyAgent is a mock that reports itself test-only, like the Vogon canary.
+type testOnlyAgent struct{ mockAgent }
+
+func (testOnlyAgent) IsTestOnly() bool { return true }
+
+// TestGet_UnknownAgentErrorExcludesTestOnly pins that the "available" list in
+// Get's error is a user-facing listing and therefore filtered: the error is
+// printed verbatim by main.go on paths that do not intercept it.
+func TestGet_UnknownAgentErrorExcludesTestOnly(t *testing.T) {
+	// Not parallel: mutates the process-global registry.
+	t.Cleanup(SnapshotForTesting())
+
+	const canary types.AgentName = "get-error-testonly-probe"
+	const shipped types.AgentName = "get-error-real-probe"
+	Register(canary, func() Agent { return &testOnlyAgent{} })
+	Register(shipped, func() Agent { return &mockAgent{} })
+
+	_, err := Get("no-such-agent")
+	if err == nil {
+		t.Fatal("expected an error for an unregistered agent")
+	}
+	if strings.Contains(err.Error(), string(canary)) {
+		t.Errorf("test-only agent %q must not be advertised in Get's error: %v", canary, err)
+	}
+	if !strings.Contains(err.Error(), string(shipped)) {
+		t.Errorf("expected real agent %q in Get's error: %v", shipped, err)
+	}
+}
+
+// TestIsRegistered pins the existence probe, including that it answers for
+// test-only agents: it reports registry membership, not user-facing
+// availability, so external discovery's "already loaded?" check cannot be
+// fooled into re-registering over the Vogon canary.
+func TestIsRegistered(t *testing.T) {
+	// Not parallel: mutates the process-global registry.
+	t.Cleanup(SnapshotForTesting())
+
+	const probe types.AgentName = "is-registered-probe"
+	const canary types.AgentName = "is-registered-testonly-probe"
+
+	if IsRegistered(probe) {
+		t.Fatalf("agent %q should not be registered yet", probe)
+	}
+
+	Register(probe, func() Agent { return &mockAgent{} })
+	Register(canary, func() Agent { return &testOnlyAgent{} })
+
+	if !IsRegistered(probe) {
+		t.Errorf("agent %q should be registered", probe)
+	}
+	if !IsRegistered(canary) {
+		t.Errorf("test-only agent %q is registered, so IsRegistered must say so", canary)
+	}
+}
+
+func TestSnapshotForTesting_RestoresRegistry(t *testing.T) {
+	// Not parallel: mutates the process-global registry.
+	restore := SnapshotForTesting()
+	t.Cleanup(restore)
+
+	const probe types.AgentName = "snapshot-probe-agent"
+	Register(probe, func() Agent { return &mockAgent{} })
+	if !slices.Contains(List(), probe) {
+		t.Fatalf("probe agent %q was not registered before restore", probe)
+	}
+
+	restore()
+
+	if slices.Contains(List(), probe) {
+		t.Fatalf("probe agent %q leaked past restore()", probe)
+	}
+}
+
+// TestSnapshotForTesting_RestoreIsRepeatable pins that restore can run more than
+// once. Tests routinely both t.Cleanup the restore and call it inline; if the
+// first call aliased the snapshot into the registry, a Register after it would
+// edit the snapshot and the cleanup would hand that mock back to later tests.
+func TestSnapshotForTesting_RestoreIsRepeatable(t *testing.T) {
+	// Not parallel: mutates the process-global registry.
+	restore := SnapshotForTesting()
+	t.Cleanup(restore)
+
+	const probe types.AgentName = "snapshot-repeat-probe-agent"
+	Register(probe, func() Agent { return &mockAgent{} })
+	restore()
+
+	Register(probe, func() Agent { return &mockAgent{} })
+	restore()
+
+	if slices.Contains(List(), probe) {
+		t.Fatalf("probe agent %q survived the second restore()", probe)
+	}
 }
 
 // sessionDirAgent is a mock with a configurable session dir, for path-prefix tests.

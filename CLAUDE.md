@@ -57,7 +57,11 @@ the commands are always runnable in every build.
   that falls through to the local path. See `checkpoint_api_reader.go`
   (`apiCheckpointReader`, which implements the two checkpoint reader tiers and
   deliberately not `Writer`) and `explain_repo.go`.
-- `agent`: bare opens the interactive agent selector, plus `list`, `add`, `remove`
+- `agent`: bare opens the interactive agent selector, plus `list`, `add`, `remove`.
+  `list` shows built-in agents only and never scans `$PATH`; `list --external`
+  is the superset that also lists external plugins found on `$PATH`, marked
+  `(external)`. `add`/`remove` resolve a single external plugin by name, so they
+  work for an external agent without executing every other plugin on `$PATH`.
 - `configure`: bare prints help and a hint pointing at `entire agent`; flags
   manage non-agent settings (telemetry, git-hook installation mode, strategy
   options, summary provider). Agent CRUD lives under `entire agent`.

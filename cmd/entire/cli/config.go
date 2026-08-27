@@ -135,6 +135,8 @@ func newLogger(ctx context.Context) (*logging.Logger, error) {
 }
 
 // GetAgentsWithHooksInstalled returns names of agents that have hooks installed.
+// Test-only agents are included: the Vogon canary installs real hooks and the
+// callers here (status, review, investigate) report what is actually wired up.
 func GetAgentsWithHooksInstalled(ctx context.Context) []types.AgentName {
 	var installed []types.AgentName
 	for _, name := range agent.List() {
@@ -142,11 +144,19 @@ func GetAgentsWithHooksInstalled(ctx context.Context) []types.AgentName {
 		if err != nil {
 			continue
 		}
-		if hs, ok := agent.AsHookSupport(ag); ok && hs.AreHooksInstalled(ctx) {
+		if hooksInstalled(ctx, ag) {
 			installed = append(installed, name)
 		}
 	}
 	return installed
+}
+
+// hooksInstalled reports whether ag supports hooks and has them installed in
+// this repo. Shared with the `entire agent list` rendering, which needs the
+// same answer per agent while it walks agent.ListAvailable for other reasons.
+func hooksInstalled(ctx context.Context, ag agent.Agent) bool {
+	hs, ok := agent.AsHookSupport(ag)
+	return ok && hs.AreHooksInstalled(ctx)
 }
 
 // InstalledAgentDisplayNames returns user-facing display names for agents with hooks installed.

@@ -4,10 +4,12 @@ import (
 	"context"
 	"errors"
 	"reflect"
+	"slices"
 	"testing"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
+	"github.com/entireio/cli/cmd/entire/cli/agent/vogon"
 	reviewtypes "github.com/entireio/cli/cmd/entire/cli/review/types"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
 )
@@ -40,6 +42,35 @@ func reviewerForSet(launchable ...string) func(string) reviewtypes.AgentReviewer
 			return pureHelperReviewer{name: name}
 		}
 		return nil
+	}
+}
+
+// TestAvailableReviewAgents_ExcludesTestOnly pins that the `--configure`
+// catalog and the `--agent` rejection listing are user-facing choices of agent:
+// the Vogon canary is registered and gets a reviewer here, yet must be offered
+// by neither. Registering an adapter for a test-only agent is the only way it
+// could leak, which is exactly what a registry walk that skips the test-only
+// filter would do.
+func TestAvailableReviewAgents_ExcludesTestOnly(t *testing.T) {
+	t.Parallel()
+
+	const canary = string(vogon.AgentNameVogon)
+	// Guard against a vacuous pass: the canary is only excluded by the test-only
+	// filter if it is in the registry to begin with.
+	if !agent.IsRegistered(vogon.AgentNameVogon) {
+		t.Fatalf("expected the Vogon canary to be registered by its package init")
+	}
+	reviewerFor := reviewerForSet(canary, helperTestAgent)
+
+	for _, entry := range availableReviewAgents(nil, reviewerFor) {
+		if entry.Name == canary {
+			t.Errorf("test-only agent %q must not be offered in the review catalog", canary)
+		}
+	}
+
+	names := reviewAgentNames(Deps{ReviewerFor: reviewerFor})
+	if slices.Contains(names, canary) {
+		t.Errorf("test-only agent %q must not be listed as an available review agent, got %v", canary, names)
 	}
 }
 
