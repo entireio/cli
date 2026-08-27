@@ -385,7 +385,7 @@ func (s *gitRefsStore) tryBackfillSummary(ctx context.Context, checkpointID id.C
 // so re-acquiring here would self-deadlock on the git-refs backend.
 func (s *gitRefsStore) backfillEntityDeltas(ctx context.Context, req SessionEntityDeltas) error {
 	if err := ctx.Err(); err != nil {
-		return err //nolint:wrapcheck // Propagating context cancellation
+		return fmt.Errorf("context canceled: %w", err)
 	}
 
 	return writeWithRefRaceRetry(ctx, "entity deltas backfill", func() error {
