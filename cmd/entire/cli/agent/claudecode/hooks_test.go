@@ -12,6 +12,7 @@ import (
 
 	agentpkg "github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/testutil"
+	"github.com/stretchr/testify/require"
 )
 
 // metadataDenyRuleTest is the rule that blocks Claude from reading Entire metadata
@@ -326,6 +327,35 @@ func TestUninstallHooks_NoSettingsFile(t *testing.T) {
 	}
 }
 
+func TestUninstallHooks_RemovesHooksKeyWhenOnlyEntireHooksExist(t *testing.T) {
+	tempDir := t.TempDir()
+	t.Chdir(tempDir)
+
+	writeSettingsFile(t, tempDir, `{
+  "hooks": {
+    "Stop": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "entire hooks claude-code stop"
+          }
+        ]
+      }
+    ]
+  }
+}`)
+
+	agent := &ClaudeCodeAgent{}
+	require.NoError(t, agent.UninstallHooks(context.Background()))
+
+	settingsPath := filepath.Join(tempDir, ".claude", "settings.json")
+	data, err := os.ReadFile(settingsPath)
+	require.NoError(t, err)
+	require.JSONEq(t, `{}`, string(data))
+}
+
 func TestUninstallHooks_PreservesUserHooks(t *testing.T) {
 	tempDir := t.TempDir()
 	t.Chdir(tempDir)
@@ -367,7 +397,101 @@ func TestUninstallHooks_PreservesUserHooks(t *testing.T) {
 	}
 }
 
-func TestUninstallHooks_RemovesDenyRule(t *testing.T) {
+func TestUninstallHooks_PreservesClaudePermissions(t *testing.T) {
+	tempDir := t.TempDir()
+	t.Chdir(tempDir)
+
+	settingsJSON := `{
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "entire hooks claude-code session-start"
+          }
+        ]
+      }
+    ]
+  },
+  "permissions": {
+    "deny": [
+      "Read(./.entire/metadata/**)",
+      "Bash(rm -rf *)"
+    ],
+    "allow": ["Read(README.md)"],
+    "ask": ["Write(**)"],
+    "customField": {"nested": "value"}
+  }
+}`
+	var settingsBefore map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal([]byte(settingsJSON), &settingsBefore))
+	writeSettingsFile(t, tempDir, settingsJSON)
+
+	agent := &ClaudeCodeAgent{}
+	if err := agent.UninstallHooks(context.Background()); err != nil {
+		t.Fatalf("UninstallHooks() error = %v", err)
+	}
+
+	settings := readClaudeSettings(t, tempDir)
+	if len(settings.Hooks.SessionStart) != 0 {
+		t.Errorf("SessionStart hooks = %d after uninstall, want 0", len(settings.Hooks.SessionStart))
+	}
+
+	settingsPath := filepath.Join(tempDir, ".claude", "settings.json")
+	data, err := os.ReadFile(settingsPath)
+	require.NoError(t, err)
+	var settingsAfter map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal(data, &settingsAfter))
+	require.JSONEq(t, string(settingsBefore["permissions"]), string(settingsAfter["permissions"]))
+}
+
+func TestUninstallHooks_PreservesOtherTopLevelSettings(t *testing.T) {
+	tempDir := t.TempDir()
+	t.Chdir(tempDir)
+
+	writeSettingsFile(t, tempDir, `{
+  "hooks": {
+    "Stop": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "entire hooks claude-code stop"
+          }
+        ]
+      }
+    ]
+  },
+  "model": "claude-sonnet-4-5",
+  "env": {
+    "CLAUDE_CODE_ENABLE_TELEMETRY": "0"
+  },
+  "customField": {
+    "nested": "value"
+  }
+}`)
+
+	agent := &ClaudeCodeAgent{}
+	require.NoError(t, agent.UninstallHooks(context.Background()))
+
+	settingsPath := filepath.Join(tempDir, ".claude", "settings.json")
+	data, err := os.ReadFile(settingsPath)
+	require.NoError(t, err)
+	require.JSONEq(t, `{
+  "model": "claude-sonnet-4-5",
+  "env": {
+    "CLAUDE_CODE_ENABLE_TELEMETRY": "0"
+  },
+  "customField": {
+    "nested": "value"
+  }
+}`, string(data))
+}
+
+func TestUninstallHooks_PreservesInstalledDenyRule(t *testing.T) {
 	tempDir := t.TempDir()
 	t.Chdir(tempDir)
 
@@ -391,10 +515,10 @@ func TestUninstallHooks_RemovesDenyRule(t *testing.T) {
 		t.Fatalf("UninstallHooks() error = %v", err)
 	}
 
-	// Verify deny rule was removed
+	// The command uninstalls hooks without changing Claude permissions.
 	perms = readPermissions(t, tempDir)
-	if containsRule(perms.Deny, metadataDenyRuleTest) {
-		t.Error("deny rule should be removed after uninstall")
+	if !containsRule(perms.Deny, metadataDenyRuleTest) {
+		t.Error("deny rule should be preserved after uninstall")
 	}
 }
 
@@ -429,9 +553,9 @@ func TestUninstallHooks_PreservesUserDenyRules(t *testing.T) {
 		t.Errorf("user deny rule was removed, got: %v", perms.Deny)
 	}
 
-	// Verify entire deny rule is removed
-	if containsRule(perms.Deny, metadataDenyRuleTest) {
-		t.Errorf("entire deny rule should be removed, got: %v", perms.Deny)
+	// Verify the metadata deny rule is also preserved
+	if !containsRule(perms.Deny, metadataDenyRuleTest) {
+		t.Errorf("metadata deny rule should be preserved, got: %v", perms.Deny)
 	}
 }
 

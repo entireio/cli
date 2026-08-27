@@ -375,49 +375,6 @@ func (c *ClaudeCodeAgent) UninstallHooks(ctx context.Context) error {
 	marshalHookType(rawHooks, "PreToolUse", preToolUse)
 	marshalHookType(rawHooks, "PostToolUse", postToolUse)
 
-	// Also remove the metadata deny rule from permissions
-	var rawPermissions map[string]json.RawMessage
-	if permRaw, ok := rawSettings["permissions"]; ok {
-		if err := json.Unmarshal(permRaw, &rawPermissions); err != nil {
-			// If parsing fails, just skip permissions cleanup
-			rawPermissions = nil
-		}
-	}
-
-	if rawPermissions != nil {
-		if denyRaw, ok := rawPermissions["deny"]; ok {
-			var denyRules []string
-			if err := json.Unmarshal(denyRaw, &denyRules); err == nil {
-				// Filter out the metadata deny rule
-				filteredRules := make([]string, 0, len(denyRules))
-				for _, rule := range denyRules {
-					if rule != metadataDenyRule {
-						filteredRules = append(filteredRules, rule)
-					}
-				}
-				if len(filteredRules) > 0 {
-					denyJSON, err := json.Marshal(filteredRules)
-					if err == nil {
-						rawPermissions["deny"] = denyJSON
-					}
-				} else {
-					// Remove empty deny array
-					delete(rawPermissions, "deny")
-				}
-			}
-		}
-
-		// If permissions is empty, remove it entirely
-		if len(rawPermissions) > 0 {
-			permJSON, err := jsonutil.MarshalWithNoHTMLEscape(rawPermissions)
-			if err == nil {
-				rawSettings["permissions"] = permJSON
-			}
-		} else {
-			delete(rawSettings, "permissions")
-		}
-	}
-
 	// Marshal hooks back (preserving unknown hook types)
 	if len(rawHooks) > 0 {
 		hooksJSON, err := jsonutil.MarshalWithNoHTMLEscape(rawHooks)
