@@ -136,22 +136,32 @@ func TestParseHookEvent_CancelledAndFailedTurnsEndTheTurn(t *testing.T) {
 	}
 }
 
-func TestParseHookEvent_SubagentStopIsFinal(t *testing.T) {
+func TestParseHookEvent_SubagentStopIsChildTurnEnd(t *testing.T) {
 	t.Parallel()
 
-	body := []byte(`{"hookEventName":"subagent_stop","sessionId":"s1","transcriptPath":"/tmp/u.jsonl","subagentType":"worker","phase":"end"}`)
+	body := []byte(`{"hookEventName":"subagent_stop","sessionId":"child-1","transcriptPath":"/tmp/child/updates.jsonl","subagentType":"worker","phase":"end"}`)
 	g := &GrokAgent{}
 	ev, err := g.ParseHookEvent(context.Background(), HookNameSubagentStop, bytes.NewReader(body))
 	if err != nil {
 		t.Fatalf("subagent stop: %v", err)
 	}
-	if ev == nil || ev.Type != agent.SubagentEnd {
-		t.Fatalf("got %v, want SubagentEnd", ev)
+	// subagent_stop fires inside the child session and is the child's only
+	// turn-scoped end signal (it never fires a plain stop). It must therefore be
+	// the child's TurnEnd, keyed by the child's own session and transcript, so
+	// the turn-end handler can resolve the parent link; as SubagentEnd it was
+	// dropped for lack of an in-flight marker and the child leaked into the
+	// checkpoint as a second top-level session.
+	if ev == nil || ev.Type != agent.TurnEnd {
+		t.Fatalf("got %v, want TurnEnd", ev)
 	}
-	// Grok fires SubagentStop once, at true completion — there is no launch
-	// stub to disambiguate from, so Final must be set.
-	if !ev.Final {
-		t.Error("Final = false, want true (Grok has no separate launch stub)")
+	if ev.SessionID != "child-1" {
+		t.Errorf("SessionID = %q, want the child's own ID", ev.SessionID)
+	}
+	if ev.SessionRef != "/tmp/child/updates.jsonl" {
+		t.Errorf("SessionRef = %q, want the child's transcript", ev.SessionRef)
+	}
+	if ev.SubagentType != "worker" {
+		t.Errorf("SubagentType = %q, want worker", ev.SubagentType)
 	}
 }
 
@@ -377,5 +387,26 @@ func TestSessionStart_RejectsUnsafeSessionID(t *testing.T) {
 				t.Errorf("SessionRef = %q, want empty for unsafe session ID", ev.SessionRef)
 			}
 		})
+	}
+}
+
+// TestParseHookEvent_SubagentStartIsNoOp: Grok's subagent_start fires in the
+// parent with no tool-use ID, so the launch-marker path it would feed cannot
+// work; the child is attributed at its own TurnEnd instead. A valid payload
+// must parse cleanly and yield no event; a malformed one must still error.
+func TestParseHookEvent_SubagentStartIsNoOp(t *testing.T) {
+	t.Parallel()
+
+	g := &GrokAgent{}
+	body := []byte(`{"hookEventName":"subagent_start","sessionId":"parent-1","transcriptPath":"/tmp/parent/updates.jsonl","subagentType":"worker","phase":"start"}`)
+	ev, err := g.ParseHookEvent(context.Background(), HookNameSubagentStart, bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("subagent start: %v", err)
+	}
+	if ev != nil {
+		t.Errorf("got event %+v, want nil (no lifecycle action)", ev)
+	}
+	if _, err := g.ParseHookEvent(context.Background(), HookNameSubagentStart, bytes.NewReader([]byte(`{not json`))); err == nil {
+		t.Error("malformed payload: want error, got nil")
 	}
 }

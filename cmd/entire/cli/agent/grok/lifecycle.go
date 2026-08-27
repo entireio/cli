@@ -246,18 +246,21 @@ func (g *GrokAgent) parseCompaction(stdin io.Reader) (*agent.Event, error) {
 	}, nil
 }
 
+// parseSubagentStart validates the payload and deliberately yields no event.
+//
+// SubagentStart exists for agents that run a subagent as a blocking tool call
+// inside the parent's turn: the handler captures pre-task state keyed by the
+// tool-use ID so the matching SubagentEnd can diff against it. Grok's
+// subagent_start fires in the parent but carries no tool-use ID — the child is
+// an independent session, not a tool call — so that capture failed on every
+// launch (observed in the 2026-08-27 E2E run as a perf error on
+// subagent-start). The child's work is attributed at its own TurnEnd via
+// ResolveSubagentSession instead, which needs nothing from this hook.
 func (g *GrokAgent) parseSubagentStart(stdin io.Reader) (*agent.Event, error) {
-	raw, err := agent.ReadAndParseHookInput[subagentInput](stdin)
-	if err != nil {
+	if _, err := agent.ReadAndParseHookInput[subagentInput](stdin); err != nil {
 		return nil, err
 	}
-	return &agent.Event{
-		Type:         agent.SubagentStart,
-		SessionID:    raw.SessionID,
-		SessionRef:   raw.TranscriptPath,
-		SubagentType: raw.SubagentType,
-		Timestamp:    parseTime(raw.Timestamp),
-	}, nil
+	return nil, nil //nolint:nilnil // valid payload, no lifecycle action
 }
 
 // parseSubagentStop maps Grok's subagent completion to SubagentEnd.
@@ -265,17 +268,36 @@ func (g *GrokAgent) parseSubagentStart(stdin io.Reader) (*agent.Event, error) {
 // Final is true because Grok fires SubagentStop once, at real completion —
 // there is no separate launch stub to disambiguate from, unlike Claude Code's
 // two-signal background-task model.
+// parseSubagentStop maps Grok's subagent_stop to the *child's* TurnEnd.
+//
+// Grok runs a subagent as an independent child session, and subagent_stop
+// fires once, inside that child, carrying the child's sessionId and
+// transcriptPath (doc 10-hooks.md:101; confirmed by the 2026-08-27 E2E run,
+// where the hook's session_id was the child's). The child never fires a plain
+// stop — its only turn-scoped end signal is this one.
+//
+// Mapping it to SubagentEnd was therefore a dead end: that handler expects the
+// in-flight marker a blocking-tool agent (Claude Code's Task) writes at launch,
+// Grok has no tool-use ID to key such a marker, and the event was dropped as
+// "no live in-flight marker". The child's work then reached the checkpoint
+// only via session_end, as a second top-level session claiming the same files
+// as the parent — the double-count TestSubagentCommitFlow showed.
+//
+// As TurnEnd, the child's turn takes the same path a Droid Worker's does:
+// handleLifecycleTurnEnd consults ResolveSubagentSession (subagent.go) and,
+// on a match, records the work as a task on the parent; when the link cannot
+// be established it falls back to today's top-level-session behaviour, so this
+// mapping is never worse than what it replaces.
 func (g *GrokAgent) parseSubagentStop(stdin io.Reader) (*agent.Event, error) {
 	raw, err := agent.ReadAndParseHookInput[subagentInput](stdin)
 	if err != nil {
 		return nil, err
 	}
 	return &agent.Event{
-		Type:         agent.SubagentEnd,
+		Type:         agent.TurnEnd,
 		SessionID:    raw.SessionID,
 		SessionRef:   raw.TranscriptPath,
 		SubagentType: raw.SubagentType,
-		Final:        true,
 		Timestamp:    parseTime(raw.Timestamp),
 	}, nil
 }

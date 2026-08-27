@@ -100,8 +100,8 @@ form.
 | `SessionEnd` | session closes | no | `SessionEnd` |
 | `PreCompact` | compaction begins | no | `Compaction` |
 | `PostCompact` | compaction finishes | no | — (offset already reset by `PreCompact`) |
-| `SubagentStart` | child agent starts | no | `SubagentStart` |
-| `SubagentStop` | child agent's turn ends | **yes** | `SubagentEnd`, `Final: true` |
+| `SubagentStart` | child agent starts (fires in the parent, no tool-use ID) | no | — (no-op; see [Subagent linkage](#subagent-linkage)) |
+| `SubagentStop` | child agent's turn ends (fires *inside the child*) | **yes** | `TurnEnd` for the child session |
 | `PostToolUse` (matcher `spawn_subagent\|Task`) | subagent launch returns | no | `SubagentEnd`, `Final: false` (launch stub) |
 | `PostToolUse` (file tools) | tool completed | no | `ToolUse` |
 | `PreToolUse` | tool about to run | **yes** | — (not needed) |
@@ -516,6 +516,23 @@ still.
 
    Recovering these names needed no quota: `strings` on
    `~/.grok/downloads/grok-macos-aarch64`.
+
+   **2026-08-27 E2E re-run (`TestSubagentCommitFlow`, passing):** the
+   double-count was still present — the checkpoint held two top-level
+   sessions, parent `…698c` and child `…9700`, each claiming `docs/red.md` —
+   and the logs show why the resolver never ran. The child fired
+   `user_prompt_submit`, `post_tool_use`, `subagent_stop`, `session_end` and
+   **no `stop`**; `subagent_stop` was mapped to `SubagentEnd`, whose handler
+   dropped it ("no live in-flight marker", because Grok supplies no tool-use
+   ID for a launch marker). `ResolveSubagentSession` is consulted only from
+   the `TurnEnd` handler, so the child was checkpointed via `session_end` as
+   an ordinary session. The parent's `subagent_start` also failed on every
+   launch (`CapturePreTaskState` with an empty tool-use ID). Both are fixed
+   in the mapping: `subagent_stop` → the child's `TurnEnd`, `subagent_start`
+   → no-op. The run's isolated `GROK_HOME` is removed on cleanup, so the
+   real `subagents/<id>/meta.json` layout is *still* unverified; the next
+   quota window should run `TestSubagentCommitFlow` with `E2E_KEEP_REPOS=1`
+   and inspect the parent's `subagents/` directory directly.
 9. **Coverage of the live run was one trivial turn** — no subagent, no compaction, no interrupt, no failure, no multi-turn session. `SubagentStart`/`SubagentStop`/`StopCancelled`/`StopFailure`/`PreCompact`/`PostCompact` and `Notification` are **still unobserved**, and those are exactly the paths with the trickiest mappings.
 9. **`SessionStart` does not fire for a subagent's own session** *(doc, `10-hooks.md:90`)*, and **`SessionEnd` carries `subagentType` for a child session** so a host can distinguish a child teardown from its own. Both matter for subagent bookkeeping.
 10. **`SubagentStop` fires once, inside the subagent** *(doc, `10-hooks.md:101`)* — not in the parent. Child sessions live in the normal sessions tree with only `meta.json` under the parent's `subagents/`, which is the `SubagentSessionResolver` shape (cf. Droid Workers), not a blocking tool call.
@@ -563,14 +580,26 @@ matching Grok's own headless summary for that turn.
 
 ### E2E results
 
-`TestHumanOnlyChangesAndCommits`, `TestSingleSessionManualCommit`, and
-`TestCheckpointMetadataDeepValidation` each pass when run individually.
-A full-suite run reached **22 of 56** before the xAI account exhausted its
-free Grok Build quota; all 34 remaining failures are
-`You've reached your free Grok Build usage limit` (25 logs) or
-`resource-exhausted: Too many requests` (2), with no failure attributable
-to this package. Completing the suite needs SuperGrok or a billed
-`XAI_API_KEY`.
+Two passes on the personal free tier, both cut short by quota.
+
+- **2026-08-25** full-suite run: 22 of 56 passed, 3 skipped (attach/doctor
+  scenarios not applicable), 31 failed on
+  `You've reached your free Grok Build usage limit` / `resource-exhausted`.
+- **2026-08-27** targeted run of the 31 unverified tests plus
+  `TestSubagentCommitFlow`: quota returned briefly and 7 more passed —
+  `TestSingleSessionManualCommit`, `TestAgentContinuesAfterCommit`,
+  `TestEndedSessionUserCommitsAfterExit`, `TestInteractiveAttributionOnAgentCommit`,
+  `TestInteractiveMultiStep`, `TestTrailerRemovalSkipsCondensation`,
+  `TestSubagentCommitFlow` — before the free allowance ran out again
+  (24 quota failures, 1 rate-limit failure at 21 requests/minute).
+  `TestCheckpointMetadataDeepValidation` had passed individually on 08-25.
+
+Net: **30 of 56 scenarios verified**, no failure attributable to this
+package. `TestSubagentCommitFlow` passes but surfaced the subagent
+double-count described under Gaps (the test does not assert session count).
+Completing the suite needs SuperGrok, a billed `XAI_API_KEY`, or an xAI team
+plan; the free tier also rate-limits at 21 requests/minute, which the
+runner's concurrency gate of 2 can exceed.
 
 ## E2E Runner
 
