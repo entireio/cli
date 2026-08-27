@@ -137,13 +137,13 @@ func TestUninstallHooks(t *testing.T) {
 	if _, err := a.InstallHooks(context.Background(), false); err != nil {
 		t.Fatal(err)
 	}
-	if !a.AreHooksInstalled(context.Background()) {
+	if !hooksInstalledNow(t, a) {
 		t.Fatal("AreHooksInstalled should be true after install")
 	}
 	if err := a.UninstallHooks(context.Background()); err != nil {
 		t.Fatalf("UninstallHooks: %v", err)
 	}
-	if a.AreHooksInstalled(context.Background()) {
+	if hooksInstalledNow(t, a) {
 		t.Error("AreHooksInstalled should be false after uninstall")
 	}
 	// Idempotent uninstall.
@@ -162,7 +162,7 @@ func TestAreHooksInstalled_RejectsForeignFile(t *testing.T) {
 	if err := os.WriteFile(path, []byte("// user's own extension\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if (&PiAgent{}).AreHooksInstalled(context.Background()) {
+	if hooksInstalledNow(t, (&PiAgent{})) {
 		t.Error("should not claim a non-Entire file")
 	}
 }
@@ -235,7 +235,7 @@ func TestCheckHookConfig_CommittedExtensionGoesStale(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if !a.AreHooksInstalled(ctx) {
+	if !hooksInstalledNow(t, a) {
 		t.Error("AreHooksInstalled = false; a stale-but-marked extension is still installed")
 	}
 	if got := a.CheckHookConfig(ctx); got != agent.HooksOutdated {
@@ -298,7 +298,7 @@ func TestCheckHookConfig_LegacyLocalDevIsDrift(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if !a.AreHooksInstalled(ctx) {
+	if !hooksInstalledNow(t, a) {
 		t.Error("AreHooksInstalled = false; a legacy local-dev extension is still ours")
 	}
 	if got := a.CheckHookConfig(ctx); got != agent.HooksOutdated {
@@ -336,4 +336,20 @@ func TestCheckHookConfig_AbsentAndForeign(t *testing.T) {
 func TestCommittedDogfoodExtensionIsCurrent(t *testing.T) {
 	t.Parallel()
 	testutil.AssertCommittedDogfoodFile(t, ".pi/extensions/entire/index.ts", renderExtension())
+}
+
+// hooksInstalledNow reports whether the agent's hooks are installed, failing the
+// test if it could not tell. Built-in agents read a local config file where
+// absent means absent, so an error here is a bug, not a state to tolerate.
+func hooksInstalledNow(t *testing.T, ag interface {
+	AreHooksInstalled(ctx context.Context) (bool, error)
+},
+) bool {
+	t.Helper()
+
+	installed, err := ag.AreHooksInstalled(context.Background())
+	if err != nil {
+		t.Fatalf("AreHooksInstalled() error = %v", err)
+	}
+	return installed
 }

@@ -551,6 +551,68 @@ where a user is actively waiting on a command (review, rewind, and
 `session adopt` via `detectFileChangesUnbounded`) keep the unbounded
 `gitrepo.Status`.
 
+#### `git status` Is a Write - Always Pass `--no-optional-locks`
+
+**Every `git status` Entire runs must pass `--no-optional-locks`.** A guard test
+(`TestGitStatusCallSitesPassNoOptionalLocks` in `cmd/entire/cli/gitrepo/`) fails the build on
+any call site that omits it.
+
+`git status` is not a read. It refreshes the index's stat cache and, whenever any
+entry is stale, writes the result back: `builtin/commit.c` takes
+`.git/index.lock` for the duration of the *whole worktree walk*, then renames a
+fresh index over `.git/index` (`tempfile.c`, `rename(2)`). The gate is
+`use_optional_locks()`, and `--no-optional-locks` is literally `setenv(
+GIT_OPTIONAL_LOCKS, "0")` — so the flag also propagates to child git processes,
+and `GIT_OPTIONAL_LOCKS=0` in the environment is an equivalent user-side
+mitigation. Output is byte-identical either way. The write fires on
+mtime-moved-but-content-identical files — the ordinary aftermath of an agent
+turn, a formatter, or an editor save — not on content edits.
+
+That refresh is git working as designed, and running `git status` is not itself
+a mistake. The reason we always drop the write is that **Entire never benefits
+from it**: every call site reads the porcelain output once and discards it, so
+the stat-cache update is a cost with no return.
+
+Three consequences, all observed in the field (issue #2111):
+
+- **A repo-deleting commit.** The rename replaces `.git/index` with a new inode.
+  On a filesystem where rename-over-existing is not atomic against a concurrent
+  lookup — Docker Desktop / virtiofs bind mounts, measured at 9.9% of opens
+  during continuous replacement versus 0 on ext4 — a concurrent reader gets
+  ENOENT. Git silently treats ENOENT on the index, **and only ENOENT**, as an
+  *empty* index (every other errno calls `die_errno`), so a `git commit` landing
+  in that window records the empty tree with exit code 0 and no warning: a commit
+  that deletes every tracked file. Recovery is `git reset --mixed HEAD~1`.
+- **The user's own `git add` failing** with `Unable to create '.git/index.lock':
+  File exists` while Entire holds the lock across its walk.
+- **A permanently stale `index.lock`** when a budget (`StatusWalkBudget`)
+  SIGKILLs the child mid-walk, breaking every later `git add`/`git commit` until
+  someone removes the file by hand.
+
+**Passing the flag does not make the hazard go away, and must not be described
+as if it did.** On an affected filesystem *any* concurrent `git status` opens the
+same window: the user's own, another tool's, a file watcher's — and in
+particular **N agents working the same repo**, each running its own hooks, which
+is precisely the workflow Entire encourages. Our share is the one write that is
+both unnecessary and asynchronous to the human's terminal, so it is the one that
+can land between someone's `git add` and their `git commit`. For the writers we
+do not control, the mitigation is `GIT_OPTIONAL_LOCKS=0` in the environment
+(devcontainers: `containerEnv`), which covers every git process in the session.
+
+Related: any git subprocess that can run inside a git hook and names its target
+with `cmd.Dir` or `-C` must also set `cmd.Env = gitrepo.EnvWithoutRepoOverrides()`
+(`gitrepo/env.go`). Git exports `GIT_DIR` / `GIT_WORK_TREE` / `GIT_INDEX_FILE` to
+hooks and those take precedence over `cmd.Dir`, so a bare `exec.Command`
+silently operates on the hook's repo. Deliberately *not* applied to user-invoked
+commands that act on the current directory (`status`, `doctor`, `review`): there
+a `GIT_DIR` the user exported is an instruction, not contamination.
+
+This exact producer was diagnosed once before (ENT-242, Feb 2026) and lost: the
+fix was closed unmerged on the premise that `git status --porcelain -z` "reads
+without rewriting", which is false, and it would have grown the number of
+index-rewriting call sites from one to eleven. That is why the guard test exists
+rather than a comment.
+
 #### go-git v5 Bugs - Use CLI Instead
 
 **Do NOT use go-git v5 for `checkout` or `reset --hard` operations.**
@@ -744,7 +806,7 @@ The manual-commit strategy (`manual_commit*.go`) does not modify the active bran
   - `jsonlContentImpl` shards the line pass into ~1MiB byte-balanced groups across goroutines. Output is byte-identical to the sequential pass. Sharding is gated on an explicit `concurrencySafe` argument describing the **redactor**, not on which entry point was called: `String` is pure and opts in (including `batch.go`'s OPF-disabled fast path), while the OPF collector closures accumulate into a shared map/slice and pass `concurrencyUnsafeRedactor`. Shards are balanced by bytes rather than line count because transcripts mix short lines with occasional multi-MB tool results.
   - The checkpoint metadata walk reuses the previous checkpoint's redacted blob as a prefix and redacts only appended lines (`checkpoint/redact_cache.go`), turning a per-Stop cost of O(whole transcript) into O(appended). The stored prefix must always end immediately after a `\n`, which is what makes plain byte concatenation reproduce the full result; content with a partial trailing line is therefore never cached. Eligibility is keyed on `paths.TranscriptFileName` (`full.jsonl`), **not** a `.jsonl` suffix — `transcript.jsonl` is regenerated in full each checkpoint and `full.jsonl.001` chunks are not appended, so neither should qualify. Reuse requires the prefix bytes to still hash the same and `redactionFingerprint()` (CLI version + commit + `redact.ConfigFingerprint()`) to match, so a rewritten transcript, changed custom rules, or a CLI upgrade all fall back to a full redaction. Bump `configFingerprintVersion` in `redact/fingerprint.go` whenever the regex layers change behaviour, or stale output can be reused. The cache lives in the git common dir (via the memoized `resolveGitCommonDir`), never under `.entire/`, because anything in the metadata directory would be walked into the checkpoint tree and committed. All three whole-transcript paths are covered: the shadow write walks files through `createRedactedBlobFromFile`, while condensation and the Stop finalize rewrite hold the transcript in memory and go through `checkpoint.RedactTranscriptCached`. Those paths do **not** redact the same bytes — the shadow write stores a sanitized transcript, condensation and finalize a sanitized *and* image-externalized one — and they stay separate simply because their keys are different strings: the walk uses its real tree path, the in-memory callers a synthetic key carrying the session ID (so concurrent sessions never share an entry). There is deliberately no scope enum; sharing a key would be safe (the prefix hash rejects a mismatch) but would miss on every checkpoint. The in-memory prefix is stored as a **file** in the cache dir, not a git blob: go-git deflates the whole payload before discovering the object exists (dotgit dedups the rename, not the compression), and above `agent.MaxChunkSize` the whole-transcript blob matches no chunk the store writes, so it would linger unreachable until `git gc` pruned it and silently reverted the cache to full redaction. `redactIncrementally` owns the whole-content fallback and takes the redactor as a parameter, so prefix and suffix cannot come from different pipelines; condensation and finalize share that pipeline by both routing through `redactSessionTranscript`. A per-subagent task transcript opts out with a nil repo: it is written once per task rather than appended across checkpoints.
 - Each committed session stores the (sanitized, redacted) transcript (`full.jsonl`, read by CLI resume/explain) plus a best-effort compact transcript (`transcript.jsonl`, generated via `transcript/compact`). Like `full.jsonl`, `transcript.jsonl` stores the **full compacted session** on every checkpoint (via `compact.FullWithBoundary`), so each checkpoint is self-contained and the session survives a mid-history checkpoint being lost/reverted/rebased. This checkpoint's slice begins at the session metadata's `compact_transcript_start` (a line offset in compact-output coordinates, distinct from `checkpoint_transcript_start` which indexes raw `full.jsonl` lines); a nil/absent marker means a legacy delta-only `transcript.jsonl` (read from line 0). The marker rounds toward inclusion when a streaming message straddles the boundary, so the slice never drops this checkpoint's content but may repeat ≤1 merged line at its head. Compact generation is best-effort and is skipped when the compacted output exceeds the 50MB blob cap (unlike `full.jsonl`, `transcript.jsonl` is not chunked — `full.jsonl` stays authoritative and the compact is regenerable); in the OPF finalize rewrite a failed/skipped regeneration drops the prior `transcript.jsonl` and clears the marker rather than shipping a stale, less-redacted compact. Both files are pushed with the v1 branch. The root `metadata.json` `sessions[].transcript` pointer keeps targeting `full.jsonl`; when the compact transcript was generated the session entry also carries a `compact_transcript` path pointing at `transcript.jsonl` (omitted otherwise) so external readers can locate it next to `full.jsonl`.
-- **Subagent task records** - subagent work (Claude Code's Task tool) is captured as durable `session.TaskRecord` entries on session state, a pointer mid-turn (declared transcript path + labels; background launches record at launch, completions attach files/tokens/path exactly-once via `strategy.CompleteTaskRecord`, Factory Droid Workers upsert). Condensation materializes each record — declared path first, agent-layout fallback, same sanitize → externalize → redact pipeline — into `tasks/<toolUseID>/{agent-<agentID>.jsonl, task.json}` inside the parent session's checkpoint (unavailable transcript → `task.json` with a stable path-free reason); live records store transcript-so-far each condensation, completed records are removed after a successful write. `State.HasTaskContent()` is the trigger currency: records-only sessions condense, records never live on the shadow branch, and shadow-branch existence does not imply task content (shadow pinning keys on `StepCount` only). `SaveTaskStep` is incremental-only (post-todo).
+- **Subagent task records** - subagent work (Claude Code's Task tool) is captured as durable `session.TaskRecord` entries on session state, a pointer mid-turn (declared transcript path + labels; background launches record at launch, completions attach files/tokens/path exactly-once via `strategy.CompleteTaskRecord`, Factory Droid Workers upsert). Condensation materializes each record — declared path first, agent-layout fallback, same sanitize → externalize → redact pipeline — into `tasks/<toolUseID>/{agent-<agentID>.jsonl, task.json}` inside the parent session's checkpoint (unavailable transcript → `task.json` with a stable path-free reason; the writer redacts `task.json`'s free-text `task_description` itself, since the record carries it verbatim); live records store transcript-so-far each condensation, completed records are removed after a successful write. `State.HasTaskContent()` is the trigger currency: records-only sessions condense, records never live on the shadow branch, and shadow-branch existence does not imply task content (shadow pinning keys on `StepCount` only). `SaveTaskStep` is incremental-only (post-todo).
 - Uses the `post-rewrite` Git hook to keep local session linkage aligned after amend/rebase rewrites
 - Builds git trees in-memory using go-git plumbing APIs
 - Rewind restores files from shadow branch commit tree (does not use `git reset`)

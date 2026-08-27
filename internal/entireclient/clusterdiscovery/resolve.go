@@ -88,7 +88,8 @@ func resolveClusterAuth(ctx context.Context, configDir, cacheDir, clusterHost st
 		return nil, err
 	}
 
-	selected, err := requireActiveContext(f, "cluster "+clusterHost, entry.CoreURLs, debugf)
+	selected, err := requireActiveContext(f, "cluster "+clusterHost,
+		loginTargets{coreURLs: entry.CoreURLs, loginURL: entry.LoginURL}, debugf)
 	if err != nil {
 		return nil, err
 	}
@@ -140,6 +141,14 @@ func normalizeClusterHost(clusterHost string) string {
 // an audience-less entry is NOT used as the discovery-failure fallback:
 // returning it would make the caller misdiagnose a transient discovery
 // failure as "this cluster doesn't do jurisdiction tokens".
+//
+// An entry written against an older discovery.CoresSchemaVersion is stale for
+// every caller, because a field this client knows about cannot be told apart
+// from one the resource declined to advertise. Without this, a warm cache
+// pins a client to the old shape for a full TTL — and the people with a warm
+// entry are exactly the ones who just hit the error the new field improves.
+// It costs one re-fetch per host, after which the rewritten entry is current
+// and caches normally even when the field is genuinely absent.
 func resolveCachedCores(
 	cacheDir, host, label string,
 	requireAudience bool,
@@ -159,12 +168,14 @@ func resolveCachedCores(
 	if cache != nil {
 		if entry, fresh, ok := cache.GetEntry(host); ok {
 			preAudience := requireAudience && entry.JurisdictionAudience == ""
-			if fresh && !preAudience {
+			outdated := entry.SchemaVersion < discovery.CoresSchemaVersion
+			if fresh && !preAudience && !outdated {
 				debugf("%s %s cores from cache: %v", label, host, entry.CoreURLs)
 				return entry, nil
 			}
 			stale = entry
-			debugf("%s %s cores cache expired or pre-audience; re-fetching /.well-known", label, host)
+			debugf("%s %s cores cache expired, pre-audience, or schema v%d < v%d; re-fetching /.well-known",
+				label, host, entry.SchemaVersion, discovery.CoresSchemaVersion)
 		}
 	}
 
@@ -204,6 +215,7 @@ func resolveClusterCores(ctx context.Context, cacheDir, clusterHost string, requ
 				CoreURLs:             body.CoreURLs,
 				JurisdictionAudience: body.JurisdictionAudience,
 				JurisdictionCoreURL:  body.JurisdictionCoreURL,
+				LoginURL:             body.LoginURL,
 			}, nil
 		}, debugf)
 }
@@ -241,7 +253,7 @@ func (e *noAuthContextError) Unwrap() error { return ErrNoAuthContext }
 // error beats a convenient guess.
 //
 // See docs/architecture/upstream-host-resolution.md#account-selection.
-func requireActiveContext(f *contexts.File, subject string, coreURLs []string, debugf DebugFunc) (*contexts.Context, error) {
+func requireActiveContext(f *contexts.File, subject string, t loginTargets, debugf DebugFunc) (*contexts.Context, error) {
 	// An explicit --context/$ENTIRE_CONTEXT naming no saved login fails here,
 	// before any eligibility talk: "that context doesn't exist" and "that context
 	// isn't trusted here" are different mistakes with different fixes.
@@ -249,15 +261,15 @@ func requireActiveContext(f *contexts.File, subject string, coreURLs []string, d
 	if err != nil {
 		return nil, err //nolint:wrapcheck // UnknownContextError is already a complete operator message
 	}
-	if sel.Context != nil && contextEligible(sel.Context, coreURLs) {
+	if sel.Context != nil && contextEligible(sel.Context, t.coreURLs) {
 		debugf("%s -> %s", subject, describeSelection(sel))
 		return sel.Context, nil
 	}
 	if sel.Context != nil {
 		debugf("%s -> %s (%s) is not trusted here", subject, describeSelection(sel), sel.Context.CoreURL)
 	}
-	eligible := eligibleContexts(f, coreURLs)
-	message := renderUnusableActiveContext(subject, sel, eligible, coreURLs)
+	eligible := eligibleContexts(f, t.coreURLs)
+	message := renderUnusableActiveContext(subject, sel, eligible, t)
 	if sel.Context == nil && len(eligible) == 0 {
 		return nil, &noAuthContextError{message: message}
 	}
@@ -344,7 +356,7 @@ func eligibleContexts(f *contexts.File, coreURLs []string) []*contexts.Context {
 //
 // Returns a string, matching renderLoginHint and leaving the single errors.New
 // to the caller.
-func renderUnusableActiveContext(subject string, sel contexts.Selection, eligible []*contexts.Context, coreURLs []string) string {
+func renderUnusableActiveContext(subject string, sel contexts.Selection, eligible []*contexts.Context, t loginTargets) string {
 	names := strings.Join(contextNames(eligible), ", ")
 	switchHint := "Switch with `entire auth use <context>`, then re-run your command."
 	if sel.Explicit() {
@@ -357,13 +369,13 @@ func renderUnusableActiveContext(subject string, sel contexts.Selection, eligibl
 		return fmt.Sprintf("no active auth context for %s.\nThese saved logins can authenticate it: %s\n%s",
 			subject, names, switchHint)
 	case sel.Context == nil:
-		return renderLoginHint(subject, coreURLs)
+		return renderLoginHint(subject, t)
 	case len(eligible) > 0:
 		return fmt.Sprintf("%s does not accept %s.\nThese saved logins can authenticate it: %s\n%s",
 			subject, loginLabel(sel), names, switchHint)
 	default:
 		return fmt.Sprintf("%s does not accept %s, and no other saved login does either.\n%s",
-			subject, loginLabel(sel), renderLoginInstruction(coreURLs))
+			subject, loginLabel(sel), renderLoginInstruction(t))
 	}
 }
 

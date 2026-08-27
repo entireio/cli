@@ -57,7 +57,8 @@ for test_name in $tests; do
     TestOpenCodeMidTurnCommit|\
     TestOpenCodeMultiTurnCondensation|\
     TestOpenCodeResumedSessionAfterCommit|\
-    TestOpenCodeRewind)
+    TestOpenCodeRewind|\
+    TestCodexAppServerHooksList_*)
       target_shard="b"
       ;;
   esac

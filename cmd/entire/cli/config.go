@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
+	"github.com/entireio/cli/cmd/entire/cli/agent/external"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
@@ -134,19 +135,87 @@ func newLogger(ctx context.Context) (*logging.Logger, error) {
 	return l, nil
 }
 
-// GetAgentsWithHooksInstalled returns names of agents that have hooks installed.
-func GetAgentsWithHooksInstalled(ctx context.Context) []types.AgentName {
-	var installed []types.AgentName
+// agentHookState is the result of one hooks-installed sweep. Detecting is a
+// subprocess per external plugin, so a caller needing both answers takes them
+// from a single sweep rather than probing twice.
+type agentHookState struct {
+	// installed are the agents that reported hooks installed.
+	installed []types.AgentName
+	// unchecked are the agents that could not answer. Their hooks may or may not
+	// be on disk, which is not the same as cleanly reporting none.
+	unchecked []uncheckedAgent
+}
+
+// uncheckedAgent is an agent that could not be asked, with the reason. The
+// reason travels with it because the sweep is the only place it exists: asking
+// an external plugin again would cost another subprocess.
+type uncheckedAgent struct {
+	name types.AgentName
+	err  error
+	// external distinguishes the two remedies offered to the user. Neither kind
+	// is uninstalled blind — a check that failed is not a licence to mutate the
+	// agent's config — but a plugin owns its own hooks, so its warning can hand
+	// out the exact binary invocation that removes them; a built-in's config is
+	// ours to read, so the only honest remedy is to say what broke and let a
+	// re-run retry it.
+	external bool
+}
+
+// uncheckedNames returns the unchecked agents' registry names, for display.
+func (s agentHookState) uncheckedNames() []types.AgentName {
+	names := make([]types.AgentName, 0, len(s.unchecked))
+	for _, u := range s.unchecked {
+		names = append(names, u.name)
+	}
+	return names
+}
+
+// getAgentHookState probes every hook-supporting agent exactly once, keeping a
+// plugin that could not answer distinct from one reporting no hooks.
+//
+// A binary that fails `info` is never registered, so "unchecked" only ever
+// covers a plugin that introduced itself and then failed to answer this.
+func getAgentHookState(ctx context.Context) agentHookState {
+	var state agentHookState
 	for _, name := range agent.List() {
 		ag, err := agent.Get(name)
 		if err != nil {
 			continue
 		}
-		if hs, ok := agent.AsHookSupport(ag); ok && hs.AreHooksInstalled(ctx) {
-			installed = append(installed, name)
+		hs, ok := agent.AsHookSupport(ag)
+		if !ok {
+			continue
+		}
+		installed, err := hs.AreHooksInstalled(ctx)
+		switch {
+		case installed:
+			state.installed = append(state.installed, name)
+		case err == nil:
+			// Cleanly reported no hooks.
+		case ctx.Err() != nil:
+			// The context died, not the agent. Blaming every plugin on $PATH for
+			// our own cancellation would turn one Ctrl-C into a page of diagnoses.
+			logging.Debug(ctx, "hooks-installed check abandoned: context ended",
+				"agent", string(name))
+		default:
+			// Built-in or plugin: if we have a reason, the caller can say so. A
+			// broken .cursor/hooks.json is as worth reporting as a plugin that
+			// crashed — what differs is the remedy, not whether to mention it.
+			state.unchecked = append(state.unchecked, uncheckedAgent{
+				name:     name,
+				err:      err,
+				external: external.IsExternal(ag),
+			})
 		}
 	}
-	return installed
+	return state
+}
+
+// GetAgentsWithHooksInstalled returns names of agents that have hooks installed.
+// An agent that could not be asked is absent; callers that must act on that
+// difference use getAgentHookState.
+func GetAgentsWithHooksInstalled(ctx context.Context) []types.AgentName {
+	return getAgentHookState(ctx).installed
 }
 
 // InstalledAgentDisplayNames returns user-facing display names for agents with hooks installed.
@@ -154,23 +223,24 @@ func InstalledAgentDisplayNames(ctx context.Context) []string {
 	return agentDisplayNames(GetAgentsWithHooksInstalled(ctx))
 }
 
-// OutdatedHookAgents returns installed agents whose Entire hook config has
-// drifted from what the CLI would write today, for `entire status` and
-// `entire doctor` to surface. Agents that don't implement agent.HookFreshness
-// are skipped: absence of a drift check reads as "nothing to report", never as
-// a warning.
+// OutdatedHookAgents returns agents whose Entire hook config has drifted from
+// what the CLI would write today, for `entire status` and `entire doctor` to
+// surface. Agents that don't implement agent.HookFreshness are skipped: absence
+// of a drift check reads as "nothing to report", never as a warning.
 //
-// Scoped to agents AreHooksInstalled reports as installed here. Note what that
-// means for generated-file agents (Pi, OpenCode): the committed file *is* the
-// installation, so a repo that ships one gets drift warnings even where nobody
-// ran `entire agent add`. That is the intent — such a repo is relying on the
-// committed file to work — but it does mean this is not scoped to people who
-// opted in on this machine.
+// Every freshness implementation is asked directly so it can report a stale
+// artifact that no longer qualifies as an active installation. For generated-
+// file agents (Pi, OpenCode), the committed file *is* the installation, so a
+// repo that ships one gets drift warnings even where nobody ran
+// `entire agent add`.
 func OutdatedHookAgents(ctx context.Context) []types.AgentName {
 	var outdated []types.AgentName
-	for _, name := range GetAgentsWithHooksInstalled(ctx) {
+	for _, name := range agent.List() {
 		ag, err := agent.Get(name)
 		if err != nil {
+			continue
+		}
+		if _, ownsDiagnostics := agent.AsEffectiveHookDiagnostics(ag); ownsDiagnostics {
 			continue
 		}
 		if hf, ok := agent.AsHookFreshness(ag); ok && hf.CheckHookConfig(ctx) == agent.HooksOutdated {
@@ -191,11 +261,26 @@ func OutdatedHookAgentDisplayNames(ctx context.Context) []string {
 func agentDisplayNames(names []types.AgentName) []string {
 	displayNames := make([]string, 0, len(names))
 	for _, name := range names {
-		if ag, err := agent.Get(name); err == nil {
-			displayNames = append(displayNames, string(ag.Type()))
-		}
+		displayNames = append(displayNames, agentDisplayName(name))
 	}
 	return displayNames
+}
+
+// agentDisplayName returns one agent's user-facing name, falling back to the
+// registry name when it cannot be looked up. Prose names an agent this way;
+// only a command line the user is meant to run keeps the registry name, which
+// is what the binary is called.
+//
+// The fallback matters because these names are how the user learns what a
+// command is about to touch, or has left behind. Dropping an unresolvable name
+// would list one fewer agent than will be acted on, and an empty one renders as
+// a gap in the sentence.
+func agentDisplayName(name types.AgentName) string {
+	ag, err := agent.Get(name)
+	if err != nil {
+		return string(name)
+	}
+	return string(ag.Type())
 }
 
 // JoinAgentNames joins agent names into a comma-separated string.

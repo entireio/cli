@@ -105,8 +105,7 @@ func TestCodexHookTrustState_CoversEveryInstalledEvent(t *testing.T) {
 	raw, err := os.ReadFile(filepath.Join(dir, ".codex", "hooks.json"))
 	require.NoError(t, err)
 
-	// Read the events generically rather than through codexHookEvents, whose
-	// fields are the very thing under test.
+	// Read the events generically so the JSON shape remains the thing under test.
 	var installed struct {
 		Hooks map[string][]codexHookGroup `json:"hooks"`
 	}
@@ -115,9 +114,9 @@ func TestCodexHookTrustState_CoversEveryInstalledEvent(t *testing.T) {
 	state, err := codexHookTrustState(dir)
 	require.NoError(t, err)
 
-	known := make(map[string]string, len(codexHookEventLabels))
-	for _, ev := range codexHookEventLabels {
-		known[ev.displayName] = ev.keyLabel
+	known := make(map[string]string, len(codex.HookEventSpecs()))
+	for _, ev := range codex.HookEventSpecs() {
+		known[ev.Event] = ev.Label
 	}
 
 	for event, groups := range installed.Hooks {
@@ -127,7 +126,7 @@ func TestCodexHookTrustState_CoversEveryInstalledEvent(t *testing.T) {
 					continue
 				}
 				label, ok := known[event]
-				require.Truef(t, ok, "codexHookEventLabels has no entry for %s: the CLI installs it, so e2e leaves it untrusted and Codex never fires it", event)
+				require.Truef(t, ok, "Codex event metadata has no entry for %s: the CLI installs it, so e2e leaves it untrusted and Codex never fires it", event)
 				require.Containsf(t, state, label+":", "no trusted_hash generated for %s", event)
 
 				// The hash is computed over the configured timeout, while Codex

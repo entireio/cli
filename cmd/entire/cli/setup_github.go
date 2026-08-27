@@ -805,7 +805,9 @@ func doInitialCommit(ctx context.Context, runner bootstrapRunner, dir, message s
 		return false, wrapExecError("git add", err)
 	}
 	// Check if the staging area has anything at all.
-	out, err := runner.RunInDir(ctx, dir, "git", "status", "--porcelain")
+	// --no-optional-locks keeps this a read: a bare `git status` rewrites
+	// .git/index to refresh its stat cache (issue #2111).
+	out, err := runner.RunInDir(ctx, dir, "git", "--no-optional-locks", "status", "--porcelain")
 	if err != nil {
 		return false, wrapExecError("git status", err)
 	}

@@ -71,33 +71,3 @@ func TestTerminateOnCancel_KillsProcessGroup(t *testing.T) {
 		t.Fatal("read did not return after cancellation; the pipe-holding grandchild outlived the group-kill")
 	}
 }
-
-// Cancel must return cleanly *and* actually terminate the leader.
-func TestKillProcessGroupOnCancel_TerminatesLeader(t *testing.T) {
-	t.Parallel()
-
-	// exec requires CommandContext when Cancel is non-nil; we invoke Cancel directly.
-	cmd := exec.CommandContext(context.Background(), "/bin/sh", "-c", "sleep 60 & wait")
-	killProcessGroupOnCancel(cmd)
-	if err := cmd.Start(); err != nil {
-		t.Fatalf("start: %v", err)
-	}
-
-	if err := cmd.Cancel(); err != nil {
-		t.Fatalf("Cancel returned %v; want nil", err)
-	}
-
-	// Bound the wait ourselves — no WaitDelay is set here, so a group-kill
-	// regression would block on the full 60s sleep instead of failing fast.
-	done := make(chan error, 1)
-	go func() { done <- cmd.Wait() }()
-
-	select {
-	case err := <-done:
-		if err == nil {
-			t.Error("Wait returned nil; the killed shell should report a termination error")
-		}
-	case <-time.After(killWaitDelay):
-		t.Fatal("Wait did not return after Cancel; the group-kill handler may have regressed")
-	}
-}

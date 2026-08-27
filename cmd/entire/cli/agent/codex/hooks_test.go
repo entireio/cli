@@ -9,6 +9,8 @@ import (
 	"github.com/stretchr/testify/require"
 	"os"
 	"path/filepath"
+	"runtime"
+	"strings"
 	"testing"
 )
 
@@ -129,6 +131,59 @@ func TestInstallHooks_Idempotent(t *testing.T) {
 	require.Equal(t, 0, count2)
 }
 
+func TestInstallHooks_RejectsOversizedHooksFile(t *testing.T) {
+	tempDir := setupTestEnv(t)
+	hooksPath := filepath.Join(tempDir, ".codex", HooksFileName)
+	require.NoError(t, os.MkdirAll(filepath.Dir(hooksPath), 0o750))
+	contents := `{"padding":"` + strings.Repeat("x", maxHooksFileBytes) + `"}`
+	require.NoError(t, os.WriteFile(hooksPath, []byte(contents), 0o600))
+
+	_, err := (&CodexAgent{}).InstallHooks(context.Background(), false)
+	require.ErrorContains(t, err, "exceeds 1048576 bytes")
+}
+
+func TestInstallAndUninstallHooks_RejectRedirectedTargets(t *testing.T) {
+	if runtime.GOOS == testWindowsOS {
+		t.Skip("symlink creation is not generally available on Windows")
+	}
+	tempDir := setupTestEnv(t)
+	outside := t.TempDir()
+	outsideHooks := filepath.Join(outside, HooksFileName)
+	require.NoError(t, os.WriteFile(outsideHooks, []byte(`{"keep":true}`), 0o600))
+	require.NoError(t, os.Symlink(outside, filepath.Join(tempDir, ".codex")))
+
+	_, err := (&CodexAgent{}).InstallHooks(context.Background(), false)
+	require.Error(t, err)
+	data, readErr := os.ReadFile(outsideHooks)
+	require.NoError(t, readErr)
+	require.Equal(t, `{"keep":true}`, string(data))
+
+	require.Error(t, (&CodexAgent{}).UninstallHooks(context.Background()))
+	data, readErr = os.ReadFile(outsideHooks)
+	require.NoError(t, readErr)
+	require.Equal(t, `{"keep":true}`, string(data))
+}
+
+func TestInstallAndUninstallHooks_RejectRedirectedHooksFile(t *testing.T) {
+	if runtime.GOOS == testWindowsOS {
+		t.Skip("symlink creation is not generally available on Windows")
+	}
+	tempDir := setupTestEnv(t)
+	outside := t.TempDir()
+	outsideHooks := filepath.Join(outside, HooksFileName)
+	require.NoError(t, os.WriteFile(outsideHooks, []byte(`{"keep":true}`), 0o600))
+	projectDir := filepath.Join(tempDir, ".codex")
+	require.NoError(t, os.Mkdir(projectDir, 0o750))
+	require.NoError(t, os.Symlink(outsideHooks, filepath.Join(projectDir, HooksFileName)))
+
+	_, err := (&CodexAgent{}).InstallHooks(context.Background(), false)
+	require.Error(t, err)
+	require.Error(t, (&CodexAgent{}).UninstallHooks(context.Background()))
+	data, readErr := os.ReadFile(outsideHooks)
+	require.NoError(t, readErr)
+	require.Equal(t, `{"keep":true}`, string(data))
+}
+
 func TestInstallHooks_ReplacesLegacyLocalDevHook(t *testing.T) {
 	tempDir := setupTestEnv(t)
 	ctx := context.Background()
@@ -242,7 +297,23 @@ func TestUninstallHooks(t *testing.T) {
 	err = ag.UninstallHooks(context.Background())
 	require.NoError(t, err)
 
-	require.False(t, ag.AreHooksInstalled(context.Background()))
+	installed, hooksErr := ag.AreHooksInstalled(context.Background())
+	require.NoError(t, hooksErr)
+	require.False(t, installed)
+}
+
+// TestUninstallHooks_UnreadableHooksFileErrors pins the absent-vs-unreadable
+// split: an absent hooks.json means nothing to uninstall, but a read error
+// must surface instead of reporting success with hooks still on disk. The
+// hooks path is created as a directory so os.ReadFile fails with a
+// non-ErrNotExist error on every platform.
+func TestUninstallHooks_UnreadableHooksFileErrors(t *testing.T) {
+	tempDir := setupTestEnv(t)
+
+	require.NoError(t, os.MkdirAll(filepath.Join(tempDir, ".codex", HooksFileName), 0o755))
+
+	require.Error(t, (&CodexAgent{}).UninstallHooks(context.Background()),
+		"UninstallHooks() must error for an unreadable hooks file")
 }
 
 func TestUninstallHooks_PreservesUserHookContainingEntireSubstring(t *testing.T) {
@@ -282,7 +353,9 @@ func TestAreHooksInstalled_NoFile(t *testing.T) {
 	setupTestEnv(t)
 
 	ag := &CodexAgent{}
-	require.False(t, ag.AreHooksInstalled(context.Background()))
+	installed, hooksErr := ag.AreHooksInstalled(context.Background())
+	require.NoError(t, hooksErr)
+	require.False(t, installed)
 }
 
 func TestAreHooksInstalled_WithHooks(t *testing.T) {
@@ -292,7 +365,9 @@ func TestAreHooksInstalled_WithHooks(t *testing.T) {
 	_, err := ag.InstallHooks(context.Background(), false)
 	require.NoError(t, err)
 
-	require.True(t, ag.AreHooksInstalled(context.Background()))
+	installed, hooksErr := ag.AreHooksInstalled(context.Background())
+	require.NoError(t, hooksErr)
+	require.True(t, installed)
 }
 
 func TestAreHooksInstalled_PartialHooks(t *testing.T) {
@@ -314,7 +389,9 @@ func TestAreHooksInstalled_PartialHooks(t *testing.T) {
 	}`), 0o600))
 
 	ag := &CodexAgent{}
-	require.False(t, ag.AreHooksInstalled(context.Background()))
+	installed, hooksErr := ag.AreHooksInstalled(context.Background())
+	require.NoError(t, hooksErr)
+	require.False(t, installed)
 }
 
 // TestAreHooksInstalled_PreSessionEndInstall — a user who enabled Codex before
@@ -337,7 +414,9 @@ func TestAreHooksInstalled_PreSessionEndInstall(t *testing.T) {
 	}`), 0o600))
 
 	ag := &CodexAgent{}
-	require.True(t, ag.AreHooksInstalled(context.Background()))
+	installed, hooksErr := ag.AreHooksInstalled(context.Background())
+	require.NoError(t, hooksErr)
+	require.True(t, installed)
 	require.Equal(t, []string{"session_end", "subagent_start", "subagent_stop"}, MissingEntireHooks(tempDir))
 }
 

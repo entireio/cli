@@ -57,6 +57,18 @@ func OpenPath(repoRoot string) (*git.Repository, error) {
 	return repo, nil
 }
 
+// ResolveDotGitPath resolves the .git entry for a worktree without opening the
+// repository. Callers that need Git metadata should use this shared resolver.
+func ResolveDotGitPath(repoRoot string) (string, error) {
+	return resolveDotGitPath(repoRoot)
+}
+
+// ResolveCommonGitPath resolves the shared Git directory for a resolved .git
+// directory. An empty result means the repository has no commondir file.
+func ResolveCommonGitPath(dotGitPath string) (string, error) {
+	return resolveCommonGitPath(dotGitPath)
+}
+
 func hasObjectAlternates(repoRoot string) (bool, error) {
 	repoRoot, err := filepath.Abs(repoRoot)
 	if err != nil {

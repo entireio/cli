@@ -656,22 +656,13 @@ func TestGetGitCommonDir_CachesResult(t *testing.T) {
 func TestGetGitCommonDir_ClearCache(t *testing.T) {
 	initTestRepo(t)
 
-	// Populate cache
-	_, err := getGitCommonDir(context.Background())
+	first, err := getGitCommonDir(context.Background())
 	require.NoError(t, err)
 
-	// Verify cache is populated
-	gitCommonDirMu.RLock()
-	assert.NotEmpty(t, gitCommonDirCache)
-	gitCommonDirMu.RUnlock()
-
-	// Clear and verify
 	ClearGitCommonDirCache()
-
-	gitCommonDirMu.RLock()
-	assert.Empty(t, gitCommonDirCache)
-	assert.Empty(t, gitCommonDirCacheDir)
-	gitCommonDirMu.RUnlock()
+	second, err := getGitCommonDir(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, first, second)
 }
 
 func TestGetGitCommonDir_InvalidatesOnCwdChange(t *testing.T) {

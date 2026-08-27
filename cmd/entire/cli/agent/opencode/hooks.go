@@ -2,12 +2,14 @@ package opencode
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
+	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 )
 
@@ -101,18 +103,29 @@ func (a *OpenCodeAgent) UninstallHooks(ctx context.Context) error {
 }
 
 // AreHooksInstalled checks if the Entire plugin file exists and contains the marker.
-func (a *OpenCodeAgent) AreHooksInstalled(ctx context.Context) bool {
+//
+// A missing config file is an answer, not a failure: that file is where the
+// state lives, so its absence means no hooks. Anything that stops us reading the
+// answer — an unreadable file, malformed config — is returned as an error, since
+// "we could not tell" and "there are none" are different things to a caller
+// deciding whether hooks can be left alone.
+func (a *OpenCodeAgent) AreHooksInstalled(ctx context.Context) (bool, error) {
 	pluginPath, err := getPluginPath(ctx)
 	if err != nil {
-		return false
+		logging.Warn(ctx, "opencode: failed to resolve plugin path", "err", err)
+		return false, err
 	}
 
 	data, err := os.ReadFile(pluginPath) //nolint:gosec // Path constructed from repo root
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
 	if err != nil {
-		return false
+		logging.Warn(ctx, "opencode: failed to read plugin file", "path", pluginPath, "err", err)
+		return false, fmt.Errorf("read %s: %w", pluginPath, err)
 	}
 
-	return strings.Contains(string(data), entireMarker)
+	return strings.Contains(string(data), entireMarker), nil
 }
 
 // CheckHookConfig reports whether the installed plugin matches what

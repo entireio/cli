@@ -190,7 +190,7 @@ func TestAreHooksInstalled_NotInstalled(t *testing.T) {
 	t.Chdir(tempDir)
 
 	ag := &CursorAgent{}
-	if ag.AreHooksInstalled(context.Background()) {
+	if hooksInstalledNow(t, ag) {
 		t.Error("AreHooksInstalled() = true, want false (no hooks.json)")
 	}
 }
@@ -206,7 +206,7 @@ func TestAreHooksInstalled_AfterInstall(t *testing.T) {
 		t.Fatalf("InstallHooks() error = %v", err)
 	}
 
-	if !ag.AreHooksInstalled(context.Background()) {
+	if !hooksInstalledNow(t, ag) {
 		t.Error("AreHooksInstalled() = false, want true")
 	}
 }
@@ -222,7 +222,7 @@ func TestUninstallHooks(t *testing.T) {
 	if err != nil {
 		t.Fatalf("InstallHooks() error = %v", err)
 	}
-	if !ag.AreHooksInstalled(context.Background()) {
+	if !hooksInstalledNow(t, ag) {
 		t.Fatal("hooks should be installed before uninstall")
 	}
 
@@ -232,7 +232,7 @@ func TestUninstallHooks(t *testing.T) {
 		t.Fatalf("UninstallHooks() error = %v", err)
 	}
 
-	if ag.AreHooksInstalled(context.Background()) {
+	if hooksInstalledNow(t, ag) {
 		t.Error("AreHooksInstalled() = true after uninstall, want false")
 	}
 }
@@ -247,6 +247,24 @@ func TestUninstallHooks_NoHooksFile(t *testing.T) {
 	err := ag.UninstallHooks(context.Background())
 	if err != nil {
 		t.Fatalf("UninstallHooks() should not error when no hooks file: %v", err)
+	}
+}
+
+// TestUninstallHooks_UnreadableHooksFileErrors pins the absent-vs-unreadable
+// split: an absent hooks file means nothing to uninstall, but a read error
+// must surface instead of reporting success with hooks still on disk. The
+// hooks path is created as a directory so os.ReadFile fails with a
+// non-ErrNotExist error on every platform.
+func TestUninstallHooks_UnreadableHooksFileErrors(t *testing.T) {
+	tempDir := t.TempDir()
+	t.Chdir(tempDir)
+
+	if err := os.MkdirAll(filepath.Join(tempDir, ".cursor", HooksFileName), 0o755); err != nil {
+		t.Fatalf("MkdirAll() error = %v", err)
+	}
+
+	if err := (&CursorAgent{}).UninstallHooks(context.Background()); err == nil {
+		t.Fatal("UninstallHooks() = nil for unreadable hooks file, want error")
 	}
 }
 
@@ -478,7 +496,7 @@ func TestUninstallHooks_PreservesUnknownFields(t *testing.T) {
 	}
 
 	// Verify Entire hooks were actually removed
-	if ag.AreHooksInstalled(context.Background()) {
+	if hooksInstalledNow(t, ag) {
 		t.Error("Entire hooks should be removed after uninstall")
 	}
 }
@@ -585,4 +603,20 @@ func TestCommittedDogfoodHooksIsCurrent(t *testing.T) {
 		t.Chdir(dir)
 		return (&CursorAgent{}).InstallHooks(context.Background(), false)
 	})
+}
+
+// hooksInstalledNow reports whether the agent's hooks are installed, failing the
+// test if it could not tell. Built-in agents read a local config file where
+// absent means absent, so an error here is a bug, not a state to tolerate.
+func hooksInstalledNow(t *testing.T, ag interface {
+	AreHooksInstalled(ctx context.Context) (bool, error)
+},
+) bool {
+	t.Helper()
+
+	installed, err := ag.AreHooksInstalled(context.Background())
+	if err != nil {
+		t.Fatalf("AreHooksInstalled() error = %v", err)
+	}
+	return installed
 }

@@ -51,7 +51,7 @@ func (c *CopilotCLIAgent) IsPreview() bool { return true }
 // DetectPresence checks if Entire hooks are installed in the Copilot CLI config.
 // Delegates to AreHooksInstalled which checks .github/hooks/entire.json for Entire hook entries.
 func (c *CopilotCLIAgent) DetectPresence(ctx context.Context) (bool, error) {
-	return c.AreHooksInstalled(ctx), nil
+	return c.AreHooksInstalled(ctx)
 }
 
 // GetSessionID extracts the session ID from hook input.

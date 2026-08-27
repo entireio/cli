@@ -3,29 +3,64 @@ package codex
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
-	"github.com/entireio/cli/cmd/entire/cli/paths"
+	"github.com/entireio/cli/cmd/entire/cli/logging"
 )
 
 // HooksFileName is the hooks config file used by Codex.
 const HooksFileName = "hooks.json"
 
+const maxHooksFileBytes = 1 << 20
+
 // defaultHookTimeoutSec is the timeout Entire configures for Codex hooks that
 // run between turns, where Codex allows up to its standard 600s.
 const defaultHookTimeoutSec = 30
 
-// managedHook describes one hooks.json event Entire owns. Keeping the event
-// key, verb, timeout and production wrapper together means adding or removing
-// an event is a single table edit rather than parallel edits in InstallHooks,
-// UninstallHooks and AreHooksInstalled.
+// HookEventSpec is the shared Codex event metadata used by installation,
+// trust inspection, and the Codex integration tests.
+type HookEventSpec struct {
+	Event       string
+	Label       string
+	Verb        string
+	Timeout     int
+	Managed     bool
+	Core        bool
+	JSONWarning bool
+}
+
+var hookEventSpecs = []HookEventSpec{
+	{Event: "SessionStart", Label: "session_start", Verb: HookNameSessionStart, Timeout: defaultHookTimeoutSec, Managed: true, Core: true, JSONWarning: true},
+	{Event: "SessionEnd", Label: "session_end", Verb: HookNameSessionEnd, Timeout: SessionEndTimeoutSec, Managed: true},
+	{Event: "UserPromptSubmit", Label: "user_prompt_submit", Verb: HookNameUserPromptSubmit, Timeout: defaultHookTimeoutSec, Managed: true, Core: true},
+	{Event: "Stop", Label: "stop", Verb: HookNameStop, Timeout: defaultHookTimeoutSec, Managed: true, Core: true},
+	{Event: "PostToolUse", Label: "post_tool_use", Verb: HookNamePostToolUse, Timeout: defaultHookTimeoutSec, Managed: true, Core: true},
+	{Event: "SubagentStart", Label: "subagent_start", Verb: HookNameSubagentStart, Timeout: defaultHookTimeoutSec, Managed: true},
+	{Event: "SubagentStop", Label: "subagent_stop", Verb: HookNameSubagentStop, Timeout: defaultHookTimeoutSec, Managed: true},
+	{Event: "PreToolUse", Label: "pre_tool_use"},
+	{Event: "PermissionRequest", Label: "permission_request"},
+	{Event: "PreCompact", Label: "pre_compact"},
+	{Event: "PostCompact", Label: "post_compact"},
+}
+
+// HookEventSpecs returns a copy so callers cannot mutate the canonical table.
+func HookEventSpecs() []HookEventSpec {
+	return append([]HookEventSpec(nil), hookEventSpecs...)
+}
+
+// managedHook adds the platform-specific command wrapper to one canonical
+// event specification.
 type managedHook struct {
 	event   string // hooks.json key
+	label   string // Codex trust-state key
 	verb    string // `entire hooks codex <verb>`
 	timeout int
 	wrap    func(cmd string, windows bool) string
@@ -36,48 +71,44 @@ type managedHook struct {
 	core bool
 }
 
-// managedHooks is the full set of Codex events Entire installs.
-var managedHooks = []managedHook{
-	{event: "SessionStart", verb: HookNameSessionStart, timeout: defaultHookTimeoutSec, core: true, wrap: func(cmd string, windows bool) string {
-		return agent.WrapProductionJSONWarningHookCommandForOS(cmd, agent.WarningFormatSingleLine, windows)
-	}},
-	// SessionEnd is the one event Codex clamps: it caps handlers at
-	// SESSION_END_MAX_TIMEOUT_SEC and warns at every startup when a config asks
-	// for more, so it is installed at exactly the ceiling. See SessionEndTimeoutSec.
-	//
-	// Not core: it postdates the four events below, so requiring it would
-	// un-enable Codex for everyone who enabled it before this release.
-	{event: "SessionEnd", verb: HookNameSessionEnd, timeout: SessionEndTimeoutSec, wrap: agent.WrapProductionSilentHookCommandForOS},
-	{event: "UserPromptSubmit", verb: HookNameUserPromptSubmit, timeout: defaultHookTimeoutSec, core: true, wrap: agent.WrapProductionSilentHookCommandForOS},
-	{event: "Stop", verb: HookNameStop, timeout: defaultHookTimeoutSec, core: true, wrap: agent.WrapProductionSilentHookCommandForOS},
-	{event: "PostToolUse", verb: HookNamePostToolUse, timeout: defaultHookTimeoutSec, core: true, wrap: agent.WrapProductionSilentHookCommandForOS},
-	// Codex keys hooks.json by PascalCase event name (its own fixtures do the
-	// same), even though HookEventName serializes snake_case elsewhere in its
-	// protocol — following that would install hooks that never fire.
-	//
-	// Not core, for the same reason as SessionEnd: both postdate the four events
-	// above, so requiring them would un-enable Codex for anyone who enabled it
-	// before this release.
-	{event: "SubagentStart", verb: HookNameSubagentStart, timeout: defaultHookTimeoutSec, wrap: agent.WrapProductionSilentHookCommandForOS},
-	{event: "SubagentStop", verb: HookNameSubagentStop, timeout: defaultHookTimeoutSec, wrap: agent.WrapProductionSilentHookCommandForOS},
+func buildManagedHooks() []managedHook {
+	managed := make([]managedHook, 0, len(hookEventSpecs))
+	for _, spec := range hookEventSpecs {
+		if !spec.Managed {
+			continue
+		}
+		wrap := agent.WrapProductionSilentHookCommandForOS
+		if spec.JSONWarning {
+			wrap = func(cmd string, windows bool) string {
+				return agent.WrapProductionJSONWarningHookCommandForOS(cmd, agent.WarningFormatSingleLine, windows)
+			}
+		}
+		managed = append(managed, managedHook{
+			event: spec.Event, label: spec.Label, verb: spec.Verb,
+			timeout: spec.Timeout, core: spec.Core, wrap: wrap,
+		})
+	}
+	return managed
 }
+
+var managedHooks = buildManagedHooks()
 
 // InstallHooks installs Codex hooks in .codex/hooks.json.
 func (c *CodexAgent) InstallHooks(ctx context.Context, force bool) (int, error) {
-	repoRoot, err := paths.WorktreeRoot(ctx)
+	worktreeHooks, err := ResolveWorktreeHooksPath(ctx)
 	if err != nil {
-		repoRoot, err = os.Getwd() //nolint:forbidigo // Intentional fallback when WorktreeRoot() fails (tests)
-		if err != nil {
-			return 0, fmt.Errorf("failed to get current directory: %w", err)
-		}
+		return 0, err
 	}
-
-	hooksPath := filepath.Join(repoRoot, ".codex", HooksFileName)
-
-	// Read existing hooks.json if present
+	if err := validateMutableHookTarget(worktreeHooks); err != nil {
+		return 0, err
+	}
+	hooksPath := worktreeHooks.Path()
+	existingData, exists, err := readHooksFileForMutation(hooksPath)
+	if err != nil {
+		return 0, err
+	}
 	var rawHooks map[string]json.RawMessage
-	existingData, readErr := os.ReadFile(hooksPath) //nolint:gosec // path constructed from repo root
-	if readErr == nil {
+	if exists {
 		var hooksFile map[string]json.RawMessage
 		if err := json.Unmarshal(existingData, &hooksFile); err != nil {
 			return 0, fmt.Errorf("failed to parse existing hooks.json: %w", err)
@@ -88,14 +119,12 @@ func (c *CodexAgent) InstallHooks(ctx context.Context, force bool) (int, error) 
 			}
 		}
 	}
-
 	if rawHooks == nil {
 		rawHooks = make(map[string]json.RawMessage)
 	}
 
 	const cmdPrefix = "entire hooks codex "
 	useWindowsProductionHooks := agent.UseWindowsProductionHooks(ctx)
-
 	count := 0
 	updated := make([][]MatcherGroup, len(managedHooks))
 	for i, h := range managedHooks {
@@ -113,37 +142,32 @@ func (c *CodexAgent) InstallHooks(ctx context.Context, force bool) (int, error) 
 		}
 		updated[i] = groups
 	}
-
 	if count == 0 {
 		return 0, nil
 	}
-
 	for i, h := range managedHooks {
 		marshalHookType(rawHooks, h.event, updated[i])
 	}
 
-	// Preserve existing top-level keys (e.g., $schema) by reusing the parsed file
 	topLevel := make(map[string]json.RawMessage)
-	if readErr == nil {
-		// Re-parse the original file to preserve all top-level keys
-		_ = json.Unmarshal(existingData, &topLevel) //nolint:errcheck // best-effort preservation
+	if exists {
+		_ = json.Unmarshal(existingData, &topLevel) //nolint:errcheck // parsed above
 	}
 	hooksJSON, err := jsonutil.MarshalWithNoHTMLEscape(rawHooks)
 	if err != nil {
 		return 0, fmt.Errorf("failed to marshal hooks: %w", err)
 	}
 	topLevel["hooks"] = hooksJSON
-
-	// Write to file
 	if err := os.MkdirAll(filepath.Dir(hooksPath), 0o750); err != nil {
 		return 0, fmt.Errorf("failed to create .codex directory: %w", err)
 	}
-
+	if err := validateMutableHookTarget(worktreeHooks); err != nil {
+		return 0, err
+	}
 	output, err := jsonutil.MarshalIndentWithNewline(topLevel, "", "  ")
 	if err != nil {
 		return 0, fmt.Errorf("failed to marshal hooks.json: %w", err)
 	}
-
 	if err := os.WriteFile(hooksPath, output, 0o600); err != nil {
 		return 0, fmt.Errorf("failed to write hooks.json: %w", err)
 	}
@@ -158,22 +182,28 @@ func (c *CodexAgent) InstallHooks(ctx context.Context, force bool) (int, error) 
 
 // UninstallHooks removes Entire hooks from Codex hooks.json.
 func (c *CodexAgent) UninstallHooks(ctx context.Context) error {
-	repoRoot, err := paths.WorktreeRoot(ctx)
+	worktreeHooks, err := ResolveWorktreeHooksPath(ctx)
 	if err != nil {
-		repoRoot = "."
+		return err
 	}
-
-	hooksPath := filepath.Join(repoRoot, ".codex", HooksFileName)
-	data, err := os.ReadFile(hooksPath) //nolint:gosec // path constructed from repo root
+	if err := validateMutableHookTarget(worktreeHooks); err != nil {
+		return err
+	}
+	hooksPath := worktreeHooks.Path()
+	data, exists, err := readHooksFileForMutation(hooksPath)
 	if err != nil {
-		return nil //nolint:nilerr // No hooks.json means nothing to uninstall
+		// readHooksFileForMutation reports an absent file as !exists with no
+		// error, so a real read failure never masquerades as "nothing to
+		// uninstall" — that would leave the hooks on disk and report success.
+		return err
 	}
-
+	if !exists {
+		return nil
+	}
 	var topLevel map[string]json.RawMessage
 	if err := json.Unmarshal(data, &topLevel); err != nil {
 		return fmt.Errorf("failed to parse hooks.json: %w", err)
 	}
-
 	var rawHooks map[string]json.RawMessage
 	if hooksRaw, ok := topLevel["hooks"]; ok {
 		if err := json.Unmarshal(hooksRaw, &rawHooks); err != nil {
@@ -183,7 +213,6 @@ func (c *CodexAgent) UninstallHooks(ctx context.Context) error {
 	if rawHooks == nil {
 		return nil
 	}
-
 	for _, h := range managedHooks {
 		var groups []MatcherGroup
 		if err := parseHookType(rawHooks, h.event, &groups); err != nil {
@@ -191,7 +220,6 @@ func (c *CodexAgent) UninstallHooks(ctx context.Context) error {
 		}
 		marshalHookType(rawHooks, h.event, removeEntireHooks(groups))
 	}
-
 	if len(rawHooks) > 0 {
 		hooksJSON, err := jsonutil.MarshalWithNoHTMLEscape(rawHooks)
 		if err != nil {
@@ -201,10 +229,12 @@ func (c *CodexAgent) UninstallHooks(ctx context.Context) error {
 	} else {
 		delete(topLevel, "hooks")
 	}
-
 	output, err := jsonutil.MarshalIndentWithNewline(topLevel, "", "  ")
 	if err != nil {
 		return fmt.Errorf("failed to marshal hooks.json: %w", err)
+	}
+	if err := validateMutableHookTarget(worktreeHooks); err != nil {
+		return err
 	}
 	if err := os.WriteFile(hooksPath, output, 0o600); err != nil {
 		return fmt.Errorf("failed to write hooks.json: %w", err)
@@ -219,44 +249,389 @@ func (c *CodexAgent) UninstallHooks(ctx context.Context) error {
 // an installed agent (`entire status`, the review and investigate pickers), and
 // answering it with the full set would drop Codex out of all of them the moment
 // a release adds an event — every existing install predates the addition. Drift
-// against today's set is MissingEntireHooks' job, which `entire doctor` reports
-// with the fix (`entire enable`).
-func (c *CodexAgent) AreHooksInstalled(ctx context.Context) bool {
-	repoRoot, err := paths.WorktreeRoot(ctx)
+// against today's set is part of hook-config inspection, which `entire doctor`
+// reports with the fix (`entire enable`).
+//
+// A missing config file is an answer, not a failure: that file is where the
+// state lives, so its absence means no hooks. Anything that stops us reading the
+// answer — an unreadable file, malformed config — is returned as an error, since
+// "we could not tell" and "there are none" are different things to a caller
+// deciding whether hooks can be left alone.
+func (c *CodexAgent) AreHooksInstalled(ctx context.Context) (bool, error) {
+	worktreeHooks, err := ResolveWorktreeHooksPath(ctx)
 	if err != nil {
-		repoRoot = "."
+		logging.Warn(ctx, "codex: failed to resolve hooks path", "err", err)
+		return false, fmt.Errorf("resolve Codex hooks path: %w", err)
 	}
-
-	hooksPath := filepath.Join(repoRoot, ".codex", HooksFileName)
-	data, err := os.ReadFile(hooksPath) //nolint:gosec // path constructed from repo root
+	hooksPath := worktreeHooks.Path()
+	if err := validateMutableHookTarget(worktreeHooks); err != nil {
+		logging.Warn(ctx, "codex: hooks path is not usable", "path", hooksPath, "err", err)
+		return false, err
+	}
+	data, exists, err := readHooksFileForMutation(hooksPath)
 	if err != nil {
-		return false
+		logging.Warn(ctx, "codex: failed to read hooks file", "path", hooksPath, "err", err)
+		return false, err
 	}
-
+	if !exists {
+		return false, nil
+	}
 	var topLevel map[string]json.RawMessage
 	if err := json.Unmarshal(data, &topLevel); err != nil {
-		return false
+		logging.Warn(ctx, "codex: failed to parse hooks file", "path", hooksPath, "err", err)
+		return false, fmt.Errorf("parse hook config: %w", err)
 	}
 	var rawHooks map[string]json.RawMessage
 	if hooksRaw, ok := topLevel["hooks"]; ok {
 		if err := json.Unmarshal(hooksRaw, &rawHooks); err != nil {
-			return false
+			logging.Warn(ctx, "codex: failed to parse hooks object", "path", hooksPath, "err", err)
+			return false, fmt.Errorf("parse hook config: %w", err)
 		}
 	}
-
 	for _, h := range managedHooks {
 		if !h.core {
 			continue
 		}
 		var groups []MatcherGroup
 		if err := parseHookType(rawHooks, h.event, &groups); err != nil {
-			return false
+			logging.Warn(ctx, "codex: failed to parse hook event", "path", hooksPath, "event", h.event, "err", err)
+			return false, fmt.Errorf("parse hook config: %w", err)
 		}
 		if !hasEntireHook(groups) {
-			return false
+			return false, nil
 		}
 	}
-	return true
+	return true, nil
+}
+
+// CheckHookConfig reports whether the current checkout's Codex hook
+// configuration is absent, current, or needs installation.
+func (c *CodexAgent) CheckHookConfig(ctx context.Context) agent.HookConfigState {
+	worktreeHooks, err := ResolveWorktreeHooksPath(ctx)
+	if err != nil {
+		return agent.HooksAbsent
+	}
+	inspection := inspectWorktreeHookConfig(ctx, worktreeHooks)
+	switch inspection.State {
+	case HookFileMalformed, HookFileUnavailable:
+		return agent.HooksAbsent
+	case HookFileEntire:
+		if inspection.Current {
+			return agent.HooksCurrent
+		}
+		return agent.HooksOutdated
+	case HookFileAbsent, HookFileUserOnly:
+		return agent.HooksAbsent
+	}
+	return agent.HooksAbsent
+}
+
+type managedHookSpec struct {
+	event   string
+	label   string
+	command string
+	timeout int
+	core    bool
+}
+
+// HookFileState distinguishes Entire's installation from unrelated user
+// configuration, malformed JSON, and a file that cannot be inspected.
+type HookFileState uint8
+
+const (
+	HookFileAbsent HookFileState = iota
+	HookFileUserOnly
+	HookFileEntire
+	HookFileMalformed
+	HookFileUnavailable
+)
+
+// HookConfigInspection is the single parsed view used by Codex presence,
+// freshness, missing-hook, and doctor reporting.
+type HookConfigInspection struct {
+	State         HookFileState
+	Missing       []string
+	Declared      []string
+	Current       bool
+	CoreInstalled bool
+	Err           error
+}
+
+type hooksDocument struct {
+	topLevel map[string]json.RawMessage
+	rawHooks map[string]json.RawMessage
+	exists   bool
+}
+
+func managedHookSpecs(ctx context.Context) []managedHookSpec {
+	const cmdPrefix = "entire hooks codex "
+	useWindowsProductionHooks := agent.UseWindowsProductionHooks(ctx)
+	specs := make([]managedHookSpec, 0, len(managedHooks))
+	for _, hook := range managedHooks {
+		command := hook.wrap(cmdPrefix+hook.verb, useWindowsProductionHooks)
+		specs = append(specs, managedHookSpec{
+			event:   hook.event,
+			label:   hook.label,
+			command: command,
+			timeout: hook.timeout,
+			core:    hook.core,
+		})
+	}
+	return specs
+}
+
+// InspectHookConfig resolves and parses the hooks file Codex discovers.
+func InspectHookConfig(ctx context.Context) HookConfigInspection {
+	discovery := ResolveHookDiscovery(ctx)
+	if discovery.State != HookDiscoveryResolved {
+		return HookConfigInspection{State: HookFileUnavailable, Err: discovery.Diagnostic}
+	}
+	return inspectDiscoveredHookConfig(ctx, discovery.DiscoveredHooks)
+}
+
+func inspectWorktreeHookConfig(ctx context.Context, hooks WorktreeHooksPath) HookConfigInspection {
+	projectDir, err := validateWorktreeHookTarget(hooks)
+	if err != nil {
+		return HookConfigInspection{State: HookFileUnavailable, Err: err}
+	}
+	if err := validateExistingProjectDir(projectDir); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return HookConfigInspection{State: HookFileAbsent}
+		}
+		return HookConfigInspection{State: HookFileUnavailable, Err: err}
+	}
+	return inspectHookConfigAt(ctx, hooks.Path())
+}
+
+func inspectDiscoveredHookConfig(ctx context.Context, hooks DiscoveredHooksPath) HookConfigInspection {
+	if err := validateDiscoveredHookTarget(hooks); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return HookConfigInspection{State: HookFileAbsent}
+		}
+		return HookConfigInspection{State: HookFileUnavailable, Err: err}
+	}
+	return inspectHookConfigAt(ctx, hooks.Path())
+}
+
+func inspectWorktreeHookConfigLightweight(hooks WorktreeHooksPath) HookConfigInspection {
+	projectDir, err := validateWorktreeHookTarget(hooks)
+	if err != nil {
+		return HookConfigInspection{State: HookFileUnavailable, Err: err}
+	}
+	if err := validateExistingProjectDir(projectDir); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return HookConfigInspection{State: HookFileAbsent}
+		}
+		return HookConfigInspection{State: HookFileUnavailable, Err: err}
+	}
+	return inspectHookConfigLightweightAt(hooks.Path())
+}
+
+func inspectDiscoveredHookConfigLightweight(hooks DiscoveredHooksPath) HookConfigInspection {
+	if err := validateDiscoveredHookTarget(hooks); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return HookConfigInspection{State: HookFileAbsent}
+		}
+		return HookConfigInspection{State: HookFileUnavailable, Err: err}
+	}
+	return inspectHookConfigLightweightAt(hooks.Path())
+}
+
+func inspectHookConfigLightweightAt(path string) HookConfigInspection {
+	document, err := readHooksDocument(path)
+	if err != nil {
+		return HookConfigInspection{State: hookFileStateForReadError(err), Err: err}
+	}
+	if !document.exists {
+		return HookConfigInspection{State: HookFileAbsent}
+	}
+	inspection := HookConfigInspection{State: HookFileUserOnly, Current: true, CoreInstalled: true}
+	inspection.Declared, err = declaredCodexEventsFromDocument(document)
+	if err != nil {
+		return HookConfigInspection{State: HookFileMalformed, Err: err}
+	}
+	for _, hook := range managedHooks {
+		var groups []MatcherGroup
+		if err := parseHookType(document.rawHooks, hook.event, &groups); err != nil {
+			return HookConfigInspection{State: HookFileMalformed, Err: err}
+		}
+		if hasEntireHook(groups) {
+			inspection.State = HookFileEntire
+		} else if hook.core {
+			inspection.CoreInstalled = false
+		}
+	}
+	if inspection.State == HookFileUserOnly {
+		inspection.Current = false
+		inspection.CoreInstalled = false
+	}
+	return inspection
+}
+
+func inspectHookConfigAt(ctx context.Context, path string) HookConfigInspection {
+	document, err := readHooksDocument(path)
+	if err != nil {
+		return HookConfigInspection{State: hookFileStateForReadError(err), Err: err}
+	}
+	if !document.exists {
+		return HookConfigInspection{State: HookFileAbsent}
+	}
+
+	inspection := HookConfigInspection{
+		State:         HookFileUserOnly,
+		Current:       true,
+		CoreInstalled: true,
+	}
+	inspection.Declared, err = declaredCodexEventsFromDocument(document)
+	if err != nil {
+		return HookConfigInspection{State: HookFileMalformed, Err: err}
+	}
+	for _, spec := range managedHookSpecs(ctx) {
+		var groups []MatcherGroup
+		if err := parseHookType(document.rawHooks, spec.event, &groups); err != nil {
+			return HookConfigInspection{State: HookFileMalformed, Err: err}
+		}
+		installed := hasEntireHook(groups)
+		if installed {
+			inspection.State = HookFileEntire
+		} else {
+			inspection.Missing = append(inspection.Missing, spec.label)
+			if spec.core {
+				inspection.CoreInstalled = false
+			}
+		}
+		if !managedHookIsCurrent(groups, spec.command, spec.timeout) {
+			inspection.Current = false
+		}
+	}
+	if inspection.State == HookFileUserOnly {
+		inspection.Missing = nil
+		inspection.Current = false
+		inspection.CoreInstalled = false
+	}
+	return inspection
+}
+
+func readHooksDocument(path string) (*hooksDocument, error) {
+	document := &hooksDocument{
+		topLevel: make(map[string]json.RawMessage),
+		rawHooks: make(map[string]json.RawMessage),
+	}
+	root, err := os.OpenRoot(filepath.Dir(path))
+	if errors.Is(err, os.ErrNotExist) {
+		return document, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("open Codex project directory for %q: %w", path, err)
+	}
+	defer root.Close()
+
+	name := filepath.Base(path)
+	before, err := root.Stat(name)
+	if errors.Is(err, os.ErrNotExist) {
+		return document, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("inspect Codex hooks file %q: %w", path, err)
+	}
+	if !before.Mode().IsRegular() {
+		return nil, fmt.Errorf("codex hooks path %q is not a regular file", path)
+	}
+	if before.Size() > maxHooksFileBytes {
+		return nil, fmt.Errorf("codex hooks file %q exceeds %d bytes", path, maxHooksFileBytes)
+	}
+
+	file, err := root.Open(name)
+	if err != nil {
+		return nil, fmt.Errorf("open Codex hooks file %q: %w", path, err)
+	}
+	defer file.Close()
+
+	opened, err := file.Stat()
+	if err != nil {
+		return nil, fmt.Errorf("inspect opened Codex hooks file %q: %w", path, err)
+	}
+	if !opened.Mode().IsRegular() || !os.SameFile(before, opened) {
+		return nil, fmt.Errorf("codex hooks file %q changed while opening", path)
+	}
+	data, err := io.ReadAll(io.LimitReader(file, maxHooksFileBytes+1))
+	if err != nil {
+		return nil, fmt.Errorf("read Codex hooks file %q: %w", path, err)
+	}
+	if len(data) > maxHooksFileBytes {
+		return nil, fmt.Errorf("codex hooks file %q exceeds %d bytes", path, maxHooksFileBytes)
+	}
+	after, err := root.Stat(name)
+	if err != nil {
+		return nil, fmt.Errorf("reinspect Codex hooks file %q: %w", path, err)
+	}
+	if !after.Mode().IsRegular() || !os.SameFile(before, after) {
+		return nil, fmt.Errorf("codex hooks file %q changed while reading", path)
+	}
+	document.exists = true
+	if err := json.Unmarshal(data, &document.topLevel); err != nil {
+		return nil, fmt.Errorf("failed to parse existing hooks.json %q: %w", path, err)
+	}
+	if document.topLevel == nil {
+		document.topLevel = make(map[string]json.RawMessage)
+	}
+	if hooksRaw, ok := document.topLevel["hooks"]; ok {
+		if err := json.Unmarshal(hooksRaw, &document.rawHooks); err != nil {
+			return nil, fmt.Errorf("failed to parse hooks in hooks.json %q: %w", path, err)
+		}
+	}
+	if document.rawHooks == nil {
+		document.rawHooks = make(map[string]json.RawMessage)
+	}
+	return document, nil
+}
+
+func readHooksFileForMutation(path string) ([]byte, bool, error) {
+	file, err := os.Open(path) //nolint:gosec // path is validated against the current worktree
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, false, nil
+	}
+	if err != nil {
+		return nil, false, fmt.Errorf("read Codex hooks file %q: %w", path, err)
+	}
+	defer file.Close()
+
+	data, err := io.ReadAll(io.LimitReader(file, maxHooksFileBytes+1))
+	if err != nil {
+		return nil, false, fmt.Errorf("read Codex hooks file %q: %w", path, err)
+	}
+	if len(data) > maxHooksFileBytes {
+		return nil, false, fmt.Errorf("codex hooks file %q exceeds %d bytes", path, maxHooksFileBytes)
+	}
+	return data, true, nil
+}
+
+func hookFileStateForReadError(err error) HookFileState {
+	var syntaxErr *json.SyntaxError
+	var typeErr *json.UnmarshalTypeError
+	if errors.As(err, &syntaxErr) || errors.As(err, &typeErr) {
+		return HookFileMalformed
+	}
+	if strings.Contains(err.Error(), "failed to parse") {
+		return HookFileMalformed
+	}
+	return HookFileUnavailable
+}
+
+func managedHookIsCurrent(groups []MatcherGroup, command string, timeoutSec int) bool {
+	count := 0
+	for _, group := range groups {
+		for _, hook := range group.Hooks {
+			if !isEntireHook(hook.Command) {
+				continue
+			}
+			if hook.Command != command || hook.Timeout != timeoutSec {
+				return false
+			}
+			count++
+		}
+	}
+	return count == 1
 }
 
 // --- Helpers ---
@@ -298,14 +673,8 @@ func hookCommandExists(groups []MatcherGroup, command string, timeoutSec int) bo
 	return false
 }
 
-// syncHookCommand ensures groups contains exactly the given Entire hook command
-// at the given timeout, and no other Entire-owned entry, reporting whether the
-// config changed.
-//
-// Stale entries are dropped even when command is already present. Checking
-// presence first (as this did before) left a hook written by an older version
-// sitting next to the current one, so both fired — for the removed local-dev mode
-// that meant a script inside the working tree kept running on every agent turn.
+// syncHookCommand ensures groups contains exactly the requested Entire hook and
+// removes stale commands left by an older install.
 func syncHookCommand(groups []MatcherGroup, command string, timeoutSec int) ([]MatcherGroup, bool) {
 	groups, dropped := dropStaleEntireHooks(groups, command, timeoutSec)
 	if hookCommandExists(groups, command, timeoutSec) {
@@ -314,26 +683,13 @@ func syncHookCommand(groups []MatcherGroup, command string, timeoutSec int) ([]M
 	return addHook(groups, command, timeoutSec), true
 }
 
-// dropStaleEntireHooks removes Entire-owned hooks that are not command at
-// timeoutSec, per matcher group, pruning groups left with no hooks. See
-// agent.DropStaleManagedHooks for why this runs on every install.
-//
-// The timeout is part of what counts as stale here, which the shared helper
-// cannot express: it matches on the command alone, and Codex budgets per event.
-// A SessionEnd hook left at the old 30s keeps its command but makes Codex print
-// a clamping warning at every startup — see SessionEndTimeoutSec.
 func dropStaleEntireHooks(groups []MatcherGroup, command string, timeoutSec int) ([]MatcherGroup, bool) {
 	staleTimeout := func(e HookEntry) bool { return e.Command == command && e.Timeout != timeoutSec }
-
 	result := make([]MatcherGroup, 0, len(groups))
 	dropped := false
 	for _, group := range groups {
-		kept, d := agent.DropStaleManagedHooks(group.Hooks, hookEntryCommand, []string{command})
-		if d {
-			dropped = true
-		}
-		// Clone before deleting: with nothing dropped above, kept still aliases
-		// the caller's slice.
+		kept, removed := agent.DropStaleManagedHooks(group.Hooks, hookEntryCommand, []string{command})
+		dropped = dropped || removed
 		if slices.ContainsFunc(kept, staleTimeout) {
 			kept = slices.DeleteFunc(slices.Clone(kept), staleTimeout)
 			dropped = true
@@ -349,7 +705,6 @@ func dropStaleEntireHooks(groups []MatcherGroup, command string, timeoutSec int)
 	return result, true
 }
 
-// hookEntryCommand reads the command off a hook entry for the shared helpers.
 func hookEntryCommand(e HookEntry) string { return e.Command }
 
 func addHook(groups []MatcherGroup, command string, timeoutSec int) []MatcherGroup {

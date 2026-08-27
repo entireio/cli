@@ -36,6 +36,8 @@ type TaskPayload struct {
 	AgentID string
 
 	// SubagentType and TaskDescription label the task in task.json.
+	// TaskDescription is free text from the agent and is redacted by the
+	// writer; callers pass it as recorded.
 	SubagentType    string
 	TaskDescription string
 

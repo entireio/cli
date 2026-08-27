@@ -20,7 +20,6 @@ import (
 	"unicode"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
-	"github.com/entireio/cli/cmd/entire/cli/agent/codex"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
@@ -186,16 +185,10 @@ func handleLifecycleSessionStart(ctx context.Context, ag agent.Agent, event *age
 	}
 	countSessionsSpan.End()
 
-	// Codex-only: surface untrusted hooks. Reaching this point means
-	// SessionStart is itself trusted, but a newer entire release may have
-	// added hooks (e.g. PostToolUse) that the user hasn't approved on
-	// this machine. Trust state is keyed by the absolute hooks.json
-	// path, so missing entries here flag exactly that case.
+	// Codex-only: append a bounded, read-only discovery or trust warning.
 	if ag.Name() == agent.AgentNameCodex {
-		if root, err := paths.WorktreeRoot(ctx); err == nil {
-			if gaps := codex.HookTrustGaps(root); len(gaps) > 0 {
-				message += fmt.Sprintf(" %d new hook(s) await approval (%s). Open /hooks to trust them.", len(gaps), strings.Join(gaps, ", "))
-			}
+		if warning := codexSessionStartWarning(inspectCodexSessionStartHookIssue(ctx)); warning != "" {
+			message += " " + warning
 		}
 	}
 

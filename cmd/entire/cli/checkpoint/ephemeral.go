@@ -1286,8 +1286,40 @@ func collectChangedFiles(ctx context.Context, repo *git.Repository) (changedFile
 	// Use -uall to list individual untracked files instead of collapsed directories.
 	// Note: CLAUDE.md warns against -uall for user-facing display, but we need the full list
 	// for checkpointing.
-	cmd := exec.CommandContext(statusCtx, "git", "status", "--porcelain", "-z", "-uall")
+	//
+	// --no-optional-locks matters because `git status` is a WRITE, not a read.
+	// It refreshes the index's stat cache and, whenever any entry is stale,
+	// takes .git/index.lock for the whole worktree walk and renames a fresh
+	// index over .git/index. That behaviour is git working as designed — the
+	// refresh is what makes later status calls cheap — and running `git status`
+	// here was never wrong. The point is that *we get nothing from the write*:
+	// we read the porcelain output once per hook and discard it, so the flag
+	// drops a cost we were paying for no benefit. Output is byte-identical.
+	//
+	// The cost is only visible on a filesystem where rename-over-existing is
+	// not atomic against a concurrent lookup (virtiofs / gRPC-FUSE bind mounts,
+	// i.e. Docker Desktop devcontainers): there a concurrent reader can see
+	// ENOENT on .git/index, git silently treats ENOENT — and only ENOENT — as
+	// an *empty* index, and a `git commit` in that window records the empty
+	// tree with exit code 0 and no warning: a commit deleting every tracked
+	// file (issue #2111). Dropping the write also removes the index.lock
+	// contention that makes a concurrent `git add` fail, and the stale lock
+	// left behind when the budget SIGKILLs this child.
+	//
+	// Removing our write does not remove the hazard: on such a filesystem ANY
+	// concurrent `git status` opens the same window — the user's own, another
+	// tool's, and in particular N agents working the same repo, each firing
+	// this path. What we can own is not contributing a write we don't need,
+	// from a hook that runs asynchronously to the human's terminal. Users on
+	// affected mounts should set GIT_OPTIONAL_LOCKS=0 for the writers we do
+	// not control.
+	//
+	// EnvWithoutRepoOverrides is required because this runs inside git hooks,
+	// which export GIT_DIR / GIT_WORK_TREE / GIT_INDEX_FILE; those take
+	// precedence over cmd.Dir and would silently point this at another repo.
+	cmd := exec.CommandContext(statusCtx, "git", "--no-optional-locks", "status", "--porcelain", "-z", "-uall")
 	cmd.Dir = repoRoot
+	cmd.Env = gitrepo.EnvWithoutRepoOverrides()
 	output, err := cmd.Output()
 	if err != nil {
 		if errors.Is(statusCtx.Err(), context.DeadlineExceeded) {

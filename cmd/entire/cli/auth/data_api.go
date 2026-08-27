@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/api"
+	"github.com/entireio/cli/cmd/entire/cli/versioninfo"
 	"github.com/entireio/cli/internal/entireclient/clusterdiscovery"
 	"github.com/entireio/cli/internal/entireclient/contexts"
 	"github.com/entireio/cli/internal/entireclient/userdirs"
@@ -111,17 +112,12 @@ func (t dataAPIHTTPDiscoveryTransport) RoundTrip(req *http.Request) (*http.Respo
 }
 
 func dataAPIDiscoveryClient(dataOrigin string) *http.Client {
-	client := &http.Client{Timeout: dataAPIDiscoveryTimeout}
+	client := &http.Client{Timeout: dataAPIDiscoveryTimeout, Transport: versioninfo.WrapTransport(nil)}
 	if !shouldUsePlainHTTPDiscovery(dataOrigin) {
 		return client
 	}
 
-	var base http.RoundTripper
-	base = http.DefaultTransport
-	if client.Transport != nil {
-		base = client.Transport
-	}
-	client.Transport = dataAPIHTTPDiscoveryTransport{base: base}
+	client.Transport = dataAPIHTTPDiscoveryTransport{base: client.Transport}
 	return client
 }
 

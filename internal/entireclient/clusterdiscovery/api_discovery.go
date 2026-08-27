@@ -114,5 +114,7 @@ func ResolveContextForAPI(ctx context.Context, configDir, cacheDir, apiHost stri
 	if err != nil {
 		return nil, fmt.Errorf("load contexts: %w", err)
 	}
-	return requireActiveContext(f, "API host "+apiHost, trustedIssuers, debugf)
+	// The data-API well-known advertises no login server, so the hint falls
+	// back to naming the issuers it trusts.
+	return requireActiveContext(f, "API host "+apiHost, loginTargets{coreURLs: trustedIssuers}, debugf)
 }
