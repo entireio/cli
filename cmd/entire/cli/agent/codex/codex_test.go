@@ -46,6 +46,21 @@ func TestCodexAgent_IsPreview(t *testing.T) {
 	require.True(t, ag.IsPreview())
 }
 
+func TestCodexAgent_DetectPresence(t *testing.T) {
+	tempDir := t.TempDir()
+	t.Chdir(tempDir)
+
+	ag := &CodexAgent{}
+	present, err := ag.DetectPresence(context.Background())
+	require.NoError(t, err)
+	require.False(t, present)
+
+	require.NoError(t, os.MkdirAll(filepath.Join(tempDir, ".codex"), 0o750))
+	present, err = ag.DetectPresence(context.Background())
+	require.NoError(t, err)
+	require.True(t, present)
+}
+
 func TestCodexAgent_ProtectedDirs(t *testing.T) {
 	t.Parallel()
 	ag := &CodexAgent{}
