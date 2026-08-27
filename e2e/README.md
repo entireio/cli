@@ -1,6 +1,6 @@
 # E2E Tests
 
-End-to-end tests for the `entire` CLI against real agents (Claude Code, Gemini CLI, OpenCode, Codex, Cursor, Factory AI Droid, Copilot CLI).
+End-to-end tests for the `entire` CLI against real agents (Claude Code, Gemini CLI, OpenCode, Codex, Cursor, Factory AI Droid, Copilot CLI, Pi, Grok Build).
 
 ## Commands
 
@@ -50,7 +50,7 @@ e2e/
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `E2E_AGENT` | Agent to test (`claude-code`, `gemini-cli`, `opencode`, `codex`, `cursor`, `factoryai-droid`, `copilot-cli`) | all registered |
+| `E2E_AGENT` | Agent to test (`claude-code`, `gemini-cli`, `opencode`, `codex`, `cursor`, `factoryai-droid`, `copilot-cli`, `pi`, `grok`) | all registered |
 | `E2E_ENTIRE_BIN` | Path to a pre-built `entire` binary | builds from source |
 | `E2E_TIMEOUT` | Timeout per prompt | `2m` |
 | `E2E_KEEP_REPOS` | Set to `1` to preserve temp repos after test | unset |
@@ -87,7 +87,7 @@ To diagnose: read `console.log` in the failing test's artifact directory. Compar
 
 ## CI Workflows
 
-- **`.github/workflows/e2e.yml`** — Runs full suite on push to main. Matrix: `[claude-code, opencode, gemini-cli, codex, cursor-cli, factoryai-droid, copilot-cli]`.
+- **`.github/workflows/e2e.yml`** — Runs full suite on push to main. Matrix: `[claude-code, opencode, gemini-cli, codex, cursor-cli, factoryai-droid, copilot-cli, grok]`.
 - **`.github/workflows/e2e-isolated.yml`** — Manual dispatch for debugging a single test. Inputs: agent + test name filter.
 
 Both workflows run `go run ./e2e/bootstrap` before tests to handle agent-specific CI setup (auth config, warmup).

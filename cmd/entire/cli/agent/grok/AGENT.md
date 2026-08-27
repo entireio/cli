@@ -538,6 +538,7 @@ Implemented in this package and registered as `grok`
 | `SubagentSessionResolver` | implemented, **layout unverified** — see gaps |
 | `TranscriptCompactor` | not implemented (regenerable; `full.jsonl` is authoritative) |
 | `TextGenerator` / `Launcher` | not implemented |
+| `ResumeCommandSpecFor` (`agent/resume_command.go`) | done — `grok --resume <id>`, or `grok --continue` when no ID is known |
 
 Event mapping is as tabled above, with two behaviours worth restating
 because they have no analogue in the other agents:

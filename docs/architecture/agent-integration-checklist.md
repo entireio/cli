@@ -54,7 +54,7 @@ See Guide: [Transcript Format Guide](agent-guide.md#transcript-format-guide), [T
 See Guide: [Step 3 - Core Agent Interface](agent-guide.md#step-3-implement-core-agent-interface-youragentgo)
 
 - [ ] **`WriteSession` implementation**: Agent must implement `WriteSession(AgentSession)` to restore sessions
-- [ ] **File-based agents** (Claude, Gemini, Cursor, Factory AI Droid, Copilot CLI, Pi): Write `NativeData` to `SessionRef` path
+- [ ] **File-based agents** (Claude, Gemini, Cursor, Factory AI Droid, Copilot CLI, Pi, Grok Build): Write `NativeData` to `SessionRef` path
 - [ ] **Database-backed agents** (OpenCode): Write `NativeData` to file, then import into native storage (the native format should be what the agent's import command expects)
 - [ ] **Single format per agent**: Store only the agent's native format in `NativeData` - no separate fields for different representations of the same data
 
