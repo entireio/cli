@@ -43,7 +43,9 @@ jobs:
               tmp="$(mktemp -d)"
               curl -fsSL https://github.com/google-antigravity/antigravity-cli/releases/latest/download/agy_cli_linux_x64.tar.gz -o "$tmp/agy.tar.gz"
               tar -xzf "$tmp/agy.tar.gz" -C "$tmp"
-              agy_bin="$(find "$tmp" -type f -name agy | head -n 1)"
+              # The release tarball ships the binary as `antigravity` (every 1.x
+              # release so far); `agy` is the name it is installed under.
+              agy_bin="$(find "$tmp" -type f \( -name antigravity -o -name agy \) | head -n 1)"
               test -n "$agy_bin"
               install -m 0755 "$agy_bin" "$HOME/.local/bin/agy"
               ;;
