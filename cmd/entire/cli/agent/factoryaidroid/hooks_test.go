@@ -659,6 +659,50 @@ type testPermissions struct {
 	Deny  []string `json:"deny,omitempty"`
 }
 
+// TestAreHooksInstalled_ManagedArtifactOtherThanStop pins that any artifact
+// UninstallHooks strips counts as an installation. The probe used to look at the
+// Stop hook alone while removal covered seven hook types and the metadata deny
+// rule, so the callers that gate removal on this answer left the rest on disk.
+func TestAreHooksInstalled_ManagedArtifactOtherThanStop(t *testing.T) {
+	for name, content := range map[string]string{
+		"SessionStart": `{
+  "hooks": {"SessionStart": [{"matcher": "", "hooks": [{"type": "command", "command": "entire hooks factoryai-droid session-start"}]}]}
+}`,
+		"PreToolUse": `{
+  "hooks": {"PreToolUse": [{"matcher": "Task", "hooks": [{"type": "command", "command": "entire hooks factoryai-droid pre-tool-use"}]}]}
+}`,
+		"PreCompact": `{
+  "hooks": {"PreCompact": [{"matcher": "", "hooks": [{"type": "command", "command": "entire hooks factoryai-droid pre-compact"}]}]}
+}`,
+		"deny rule alone": `{
+  "permissions": {"deny": ["Read(./.entire/metadata/**)"]}
+}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			tempDir := t.TempDir()
+			t.Chdir(tempDir)
+			writeFactorySettingsFile(t, tempDir, content)
+
+			if !(&FactoryAIDroidAgent{}).AreHooksInstalled(context.Background()) {
+				t.Errorf("AreHooksInstalled() = false for a config whose %s artifact UninstallHooks strips", name)
+			}
+		})
+	}
+}
+
+// TestAreHooksInstalled_UnownedConfigIsNotAnInstall guards the other direction:
+// the tidying UninstallHooks does on the way out (pruning empty containers) must
+// not read as an installation.
+func TestAreHooksInstalled_UnownedConfigIsNotAnInstall(t *testing.T) {
+	tempDir := t.TempDir()
+	t.Chdir(tempDir)
+	writeFactorySettingsFile(t, tempDir, `{"hooks": {}, "permissions": {"deny": []}}`)
+
+	if (&FactoryAIDroidAgent{}).AreHooksInstalled(context.Background()) {
+		t.Error("AreHooksInstalled() = true for a config Entire does not own")
+	}
+}
+
 func writeFactorySettingsFile(t *testing.T, tempDir, content string) {
 	t.Helper()
 	factoryDir := filepath.Join(tempDir, ".factory")

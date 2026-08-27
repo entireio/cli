@@ -88,7 +88,11 @@ func (g *GeminiCLIAgent) InstallHooks(ctx context.Context, force bool) (int, err
 	// Strip non-array values from hooks (removes legacy fields like "enabled": true
 	// that old Entire versions wrote directly into hooks, which Gemini CLI 0.33+
 	// rejects because hooks.additionalProperties requires arrays).
-	cleanupDone := stripNonArrayHookFields(ctx, rawHooks)
+	strippedHookFields := stripNonArrayHookFields(rawHooks)
+	for _, key := range strippedHookFields {
+		logging.Debug(ctx, "removed non-array field from hooks", slog.String("key", key))
+	}
+	cleanupDone := len(strippedHookFields) > 0
 
 	// Enable hooks via hooksConfig
 	// hooksConfig.Enabled must be true for Gemini CLI to execute hooks
@@ -119,17 +123,26 @@ func (g *GeminiCLIAgent) InstallHooks(ctx context.Context, force bool) (int, err
 	var sessionStart, sessionEnd, beforeAgent, afterAgent []GeminiHookMatcher
 	var beforeModel, afterModel, beforeToolSelection []GeminiHookMatcher
 	var beforeTool, afterTool, preCompress, notification []GeminiHookMatcher
-	parseGeminiHookType(rawHooks, "SessionStart", &sessionStart)
-	parseGeminiHookType(rawHooks, "SessionEnd", &sessionEnd)
-	parseGeminiHookType(rawHooks, "BeforeAgent", &beforeAgent)
-	parseGeminiHookType(rawHooks, "AfterAgent", &afterAgent)
-	parseGeminiHookType(rawHooks, "BeforeModel", &beforeModel)
-	parseGeminiHookType(rawHooks, "AfterModel", &afterModel)
-	parseGeminiHookType(rawHooks, "BeforeToolSelection", &beforeToolSelection)
-	parseGeminiHookType(rawHooks, "BeforeTool", &beforeTool)
-	parseGeminiHookType(rawHooks, "AfterTool", &afterTool)
-	parseGeminiHookType(rawHooks, "PreCompress", &preCompress)
-	parseGeminiHookType(rawHooks, "Notification", &notification)
+	for _, parsed := range []struct {
+		hookType string
+		target   *[]GeminiHookMatcher
+	}{
+		{"SessionStart", &sessionStart},
+		{"SessionEnd", &sessionEnd},
+		{"BeforeAgent", &beforeAgent},
+		{"AfterAgent", &afterAgent},
+		{"BeforeModel", &beforeModel},
+		{"AfterModel", &afterModel},
+		{"BeforeToolSelection", &beforeToolSelection},
+		{"BeforeTool", &beforeTool},
+		{"AfterTool", &afterTool},
+		{"PreCompress", &preCompress},
+		{"Notification", &notification},
+	} {
+		if err := parseGeminiHookType(rawHooks, parsed.hookType, parsed.target); err != nil {
+			return 0, err
+		}
+	}
 
 	// Check for idempotency BEFORE removing hooks.
 	// If the exact same hook command already exists, hooks are already installed.
@@ -234,17 +247,17 @@ func (g *GeminiCLIAgent) InstallHooks(ctx context.Context, force bool) (int, err
 // "enabled": true that old Entire versions wrote directly into hooks, which
 // Gemini CLI 0.33+ rejects because hooks.additionalProperties requires arrays).
 // Returns true if any fields were removed.
-func stripNonArrayHookFields(ctx context.Context, rawHooks map[string]json.RawMessage) bool {
-	var cleaned bool
+func stripNonArrayHookFields(rawHooks map[string]json.RawMessage) []string {
+	var removed []string
 	for key, val := range rawHooks {
 		trimmed := bytes.TrimSpace(val)
 		if len(trimmed) == 0 || trimmed[0] != '[' {
 			delete(rawHooks, key)
-			logging.Debug(ctx, "removed non-array field from hooks", slog.String("key", key))
-			cleaned = true
+			removed = append(removed, key)
 		}
 	}
-	return cleaned
+	slices.Sort(removed)
+	return removed
 }
 
 // writeGeminiSettingsFile marshals rawHooks and hooksConfig back into rawSettings and writes to disk.
@@ -278,11 +291,18 @@ func writeGeminiSettingsFile(rawSettings map[string]json.RawMessage, rawHooks ma
 
 // parseGeminiHookType parses a specific hook type from rawHooks into the target slice.
 // Silently ignores parse errors (leaves target unchanged).
-func parseGeminiHookType(rawHooks map[string]json.RawMessage, hookType string, target *[]GeminiHookMatcher) {
-	if data, ok := rawHooks[hookType]; ok {
-		//nolint:errcheck,gosec // Intentionally ignoring parse errors - leave target as nil/empty
-		json.Unmarshal(data, target)
+// A hook type that will not parse is reported rather than treated as empty: to
+// removal that is the difference between "Entire owns nothing here" and "we
+// could not tell", and the two must not be collapsed.
+func parseGeminiHookType(rawHooks map[string]json.RawMessage, hookType string, target *[]GeminiHookMatcher) error {
+	data, ok := rawHooks[hookType]
+	if !ok {
+		return nil
 	}
+	if err := json.Unmarshal(data, target); err != nil {
+		return fmt.Errorf("failed to parse %s hooks: %w", hookType, err)
+	}
+	return nil
 }
 
 // marshalGeminiHookType marshals a hook type back to rawHooks.
@@ -299,133 +319,145 @@ func marshalGeminiHookType(rawHooks map[string]json.RawMessage, hookType string,
 	rawHooks[hookType] = data
 }
 
+// managedHookTypes is every .gemini/settings.json hook key Entire installs
+// under. Removal walks this list and detection is derived from removal, so a
+// hook type cannot be stripped by one and missed by the other.
+//
+// InstallHooks keeps its own table because it also carries each type's matcher,
+// name and command; TestAreHooksInstalledMatchesUninstallHooks pins the two
+// together.
+var managedHookTypes = []string{
+	"SessionStart",
+	"SessionEnd",
+	"BeforeAgent",
+	"AfterAgent",
+	"BeforeModel",
+	"AfterModel",
+	"BeforeToolSelection",
+	"BeforeTool",
+	"AfterTool",
+	"PreCompress",
+	"Notification",
+}
+
+// geminiSettingsPath resolves .gemini/settings.json for the current repo, so
+// install, detection and removal all look at the same file.
+func geminiSettingsPath(ctx context.Context) string {
+	return agent.HookConfigPath(ctx, ".gemini", GeminiSettingsFileName)
+}
+
 // UninstallHooks removes Entire hooks from Gemini CLI settings.
 func (g *GeminiCLIAgent) UninstallHooks(ctx context.Context) error {
-	// Use repo root to find .gemini directory when run from a subdirectory
-	repoRoot, err := paths.WorktreeRoot(ctx)
-	if err != nil {
-		repoRoot = "." // Fallback to CWD if not in a git repo
-	}
-	settingsPath := filepath.Join(repoRoot, ".gemini", GeminiSettingsFileName)
-	data, err := os.ReadFile(settingsPath) //nolint:gosec // path is constructed from repo root + fixed path
-	if err != nil {
-		return nil //nolint:nilerr // No settings file means nothing to uninstall
-	}
-
-	var rawSettings map[string]json.RawMessage
-	if err := json.Unmarshal(data, &rawSettings); err != nil {
-		return fmt.Errorf("failed to parse settings.json: %w", err)
-	}
-
-	// rawHooks preserves unknown hook types
-	var rawHooks map[string]json.RawMessage
-	if hooksRaw, ok := rawSettings["hooks"]; ok {
-		if err := json.Unmarshal(hooksRaw, &rawHooks); err != nil {
-			return fmt.Errorf("failed to parse hooks: %w", err)
-		}
-	}
-	if rawHooks == nil {
-		rawHooks = make(map[string]json.RawMessage)
-	}
-
-	// Strip non-array values from hooks (same migration as InstallHooks)
-	stripNonArrayHookFields(ctx, rawHooks)
-
-	// Parse only the hook types we need to modify
-	var sessionStart, sessionEnd, beforeAgent, afterAgent []GeminiHookMatcher
-	var beforeModel, afterModel, beforeToolSelection []GeminiHookMatcher
-	var beforeTool, afterTool, preCompress, notification []GeminiHookMatcher
-	parseGeminiHookType(rawHooks, "SessionStart", &sessionStart)
-	parseGeminiHookType(rawHooks, "SessionEnd", &sessionEnd)
-	parseGeminiHookType(rawHooks, "BeforeAgent", &beforeAgent)
-	parseGeminiHookType(rawHooks, "AfterAgent", &afterAgent)
-	parseGeminiHookType(rawHooks, "BeforeModel", &beforeModel)
-	parseGeminiHookType(rawHooks, "AfterModel", &afterModel)
-	parseGeminiHookType(rawHooks, "BeforeToolSelection", &beforeToolSelection)
-	parseGeminiHookType(rawHooks, "BeforeTool", &beforeTool)
-	parseGeminiHookType(rawHooks, "AfterTool", &afterTool)
-	parseGeminiHookType(rawHooks, "PreCompress", &preCompress)
-	parseGeminiHookType(rawHooks, "Notification", &notification)
-
-	// Remove Entire hooks from all hook types
-	sessionStart = removeEntireHooks(sessionStart)
-	sessionEnd = removeEntireHooks(sessionEnd)
-	beforeAgent = removeEntireHooks(beforeAgent)
-	afterAgent = removeEntireHooks(afterAgent)
-	beforeModel = removeEntireHooks(beforeModel)
-	afterModel = removeEntireHooks(afterModel)
-	beforeToolSelection = removeEntireHooks(beforeToolSelection)
-	beforeTool = removeEntireHooks(beforeTool)
-	afterTool = removeEntireHooks(afterTool)
-	preCompress = removeEntireHooks(preCompress)
-	notification = removeEntireHooks(notification)
-
-	// Marshal modified hook types back to rawHooks
-	marshalGeminiHookType(rawHooks, "SessionStart", sessionStart)
-	marshalGeminiHookType(rawHooks, "SessionEnd", sessionEnd)
-	marshalGeminiHookType(rawHooks, "BeforeAgent", beforeAgent)
-	marshalGeminiHookType(rawHooks, "AfterAgent", afterAgent)
-	marshalGeminiHookType(rawHooks, "BeforeModel", beforeModel)
-	marshalGeminiHookType(rawHooks, "AfterModel", afterModel)
-	marshalGeminiHookType(rawHooks, "BeforeToolSelection", beforeToolSelection)
-	marshalGeminiHookType(rawHooks, "BeforeTool", beforeTool)
-	marshalGeminiHookType(rawHooks, "AfterTool", afterTool)
-	marshalGeminiHookType(rawHooks, "PreCompress", preCompress)
-	marshalGeminiHookType(rawHooks, "Notification", notification)
-
-	// Marshal hooks back (preserving unknown hook types)
-	if len(rawHooks) > 0 {
-		hooksJSON, err := jsonutil.MarshalWithNoHTMLEscape(rawHooks)
-		if err != nil {
-			return fmt.Errorf("failed to marshal hooks: %w", err)
-		}
-		rawSettings["hooks"] = hooksJSON
-	} else {
-		delete(rawSettings, "hooks")
-	}
-
-	// Write back
-	output, err := jsonutil.MarshalIndentWithNewline(rawSettings, "", "  ")
-	if err != nil {
-		return fmt.Errorf("failed to marshal settings: %w", err)
-	}
-
-	if err := os.WriteFile(settingsPath, output, 0o600); err != nil {
-		return fmt.Errorf("failed to write settings.json: %w", err)
+	if err := agent.RemoveHookArtifacts(geminiSettingsPath(ctx), removeEntireArtifacts); err != nil {
+		return fmt.Errorf("remove Gemini CLI hooks: %w", err)
 	}
 	return nil
 }
 
-// AreHooksInstalled checks if Entire hooks are installed.
+// AreHooksInstalled reports whether Entire owns anything in Gemini CLI's
+// settings, by asking whether UninstallHooks would strip anything. Both answers
+// come from removeEntireArtifacts, so detection cannot drift narrower than
+// removal.
 func (g *GeminiCLIAgent) AreHooksInstalled(ctx context.Context) bool {
-	// Use repo root to find .gemini directory when run from a subdirectory
-	repoRoot, err := paths.WorktreeRoot(ctx)
-	if err != nil {
-		repoRoot = "." // Fallback to CWD if not in a git repo
-	}
-	settingsPath := filepath.Join(repoRoot, ".gemini", GeminiSettingsFileName)
-	data, err := os.ReadFile(settingsPath) //nolint:gosec // path is constructed from repo root + fixed path
-	if err != nil {
-		return false
+	return agent.HookArtifactsInstalled(ctx, string(g.Name()), geminiSettingsPath(ctx), removeEntireArtifacts)
+}
+
+// removeEntireArtifacts implements agent.HookArtifactRemoval for Gemini CLI
+// settings: Entire's hooks under every managed hook type, the legacy
+// "hooks.enabled" field older versions of Entire wrote, and the hooksConfig
+// switch Entire flips to make Gemini run hooks at all. Unknown hook types and
+// unrelated settings round-trip untouched.
+func removeEntireArtifacts(data []byte) ([]byte, bool, error) {
+	var rawSettings map[string]json.RawMessage
+	if err := json.Unmarshal(data, &rawSettings); err != nil {
+		return nil, false, fmt.Errorf("failed to parse settings.json: %w", err)
 	}
 
-	var settings GeminiSettings
-	if err := json.Unmarshal(data, &settings); err != nil {
-		return false
+	// rawHooks preserves unknown hook types.
+	var rawHooks map[string]json.RawMessage
+	if hooksRaw, ok := rawSettings["hooks"]; ok {
+		if err := json.Unmarshal(hooksRaw, &rawHooks); err != nil {
+			return nil, false, fmt.Errorf("failed to parse hooks: %w", err)
+		}
 	}
 
-	// Check for at least one of our hooks using isEntireHook (matches legacy hook shapes too)
-	return hasEntireHook(settings.Hooks.SessionStart) ||
-		hasEntireHook(settings.Hooks.SessionEnd) ||
-		hasEntireHook(settings.Hooks.BeforeAgent) ||
-		hasEntireHook(settings.Hooks.AfterAgent) ||
-		hasEntireHook(settings.Hooks.BeforeModel) ||
-		hasEntireHook(settings.Hooks.AfterModel) ||
-		hasEntireHook(settings.Hooks.BeforeToolSelection) ||
-		hasEntireHook(settings.Hooks.BeforeTool) ||
-		hasEntireHook(settings.Hooks.AfterTool) ||
-		hasEntireHook(settings.Hooks.PreCompress) ||
-		hasEntireHook(settings.Hooks.Notification)
+	// A non-array value under "hooks" is Entire's own leftover: older versions
+	// wrote "hooks.enabled" there, and Gemini CLI 0.33+ rejects the whole hooks
+	// object over it. That makes it an artifact worth removing on its own, unlike
+	// the unowned scaffolding below — leaving it behind means a config Gemini
+	// refuses to load surviving an uninstall that reported success.
+	changed := len(stripNonArrayHookFields(rawHooks)) > 0
+
+	for _, hookType := range managedHookTypes {
+		var matchers []GeminiHookMatcher
+		if err := parseGeminiHookType(rawHooks, hookType, &matchers); err != nil {
+			return nil, false, err
+		}
+		if !hasEntireHook(matchers) {
+			continue
+		}
+		changed = true
+		marshalGeminiHookType(rawHooks, hookType, removeEntireHooks(matchers))
+	}
+
+	// Nothing of Entire's was here. Report that rather than rewriting a file we
+	// have no artifacts in: removal sweeps every agent, including ones the user
+	// never enabled.
+	if !changed {
+		return nil, false, nil
+	}
+
+	if len(rawHooks) > 0 {
+		hooksJSON, err := jsonutil.MarshalWithNoHTMLEscape(rawHooks)
+		if err != nil {
+			return nil, false, fmt.Errorf("failed to marshal hooks: %w", err)
+		}
+		rawSettings["hooks"] = hooksJSON
+	} else {
+		delete(rawSettings, "hooks")
+		// With no hooks left to run, the switch InstallHooks flipped to make
+		// Gemini run them is ours to put back. It is only ever cleared as a
+		// consequence of removing real artifacts, never counted as one: on its own
+		// it is an ordinary Gemini setting, and treating it as Entire's would keep
+		// reporting an installation forever after a successful uninstall.
+		if err := clearHooksConfigEnabled(rawSettings); err != nil {
+			return nil, false, err
+		}
+	}
+
+	output, err := jsonutil.MarshalIndentWithNewline(rawSettings, "", "  ")
+	if err != nil {
+		return nil, false, fmt.Errorf("failed to marshal settings: %w", err)
+	}
+	return output, true, nil
+}
+
+// clearHooksConfigEnabled drops the "enabled" flag from hooksConfig, and
+// hooksConfig itself when that leaves it empty. Any other field a user put there
+// is preserved.
+func clearHooksConfigEnabled(rawSettings map[string]json.RawMessage) error {
+	configRaw, ok := rawSettings["hooksConfig"]
+	if !ok {
+		return nil
+	}
+	var rawConfig map[string]json.RawMessage
+	if err := json.Unmarshal(configRaw, &rawConfig); err != nil {
+		return fmt.Errorf("failed to parse hooksConfig: %w", err)
+	}
+	if _, ok := rawConfig["enabled"]; !ok {
+		return nil
+	}
+	delete(rawConfig, "enabled")
+	if len(rawConfig) == 0 {
+		delete(rawSettings, "hooksConfig")
+		return nil
+	}
+	configJSON, err := jsonutil.MarshalWithNoHTMLEscape(rawConfig)
+	if err != nil {
+		return fmt.Errorf("failed to marshal hooksConfig: %w", err)
+	}
+	rawSettings["hooksConfig"] = configJSON
+	return nil
 }
 
 // Helper functions for hook management

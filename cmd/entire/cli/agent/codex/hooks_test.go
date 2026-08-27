@@ -350,6 +350,13 @@ func TestAreHooksInstalled_WithHooks(t *testing.T) {
 	require.True(t, ag.AreHooksInstalled(context.Background()))
 }
 
+// TestAreHooksInstalled_PartialHooks — a single Entire hook is an installation,
+// because UninstallHooks would strip it. Detection has to answer the question
+// removal answers: the callers that skip removal on a false answer would
+// otherwise leave this hook invoking an Entire no longer configured here.
+//
+// How complete the install is stays a separate question, and MissingEntireHooks
+// is the one that answers it.
 func TestAreHooksInstalled_PartialHooks(t *testing.T) {
 	tempDir := setupTestEnv(t)
 
@@ -369,7 +376,10 @@ func TestAreHooksInstalled_PartialHooks(t *testing.T) {
 	}`), 0o600))
 
 	ag := &CodexAgent{}
-	require.False(t, ag.AreHooksInstalled(context.Background()))
+	require.True(t, ag.AreHooksInstalled(context.Background()))
+	require.Equal(t, []string{
+		"session_start", "session_end", "user_prompt_submit", "post_tool_use", "subagent_start", "subagent_stop",
+	}, MissingEntireHooks(tempDir))
 }
 
 // TestAreHooksInstalled_PreSessionEndInstall — a user who enabled Codex before

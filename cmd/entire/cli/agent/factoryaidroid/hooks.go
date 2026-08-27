@@ -92,13 +92,22 @@ func (f *FactoryAIDroidAgent) InstallHooks(ctx context.Context, force bool) (int
 
 	// Parse only the hook types we need to modify
 	var sessionStart, sessionEnd, stop, userPromptSubmit, preToolUse, postToolUse, preCompact []FactoryHookMatcher
-	parseHookType(rawHooks, "SessionStart", &sessionStart)
-	parseHookType(rawHooks, "SessionEnd", &sessionEnd)
-	parseHookType(rawHooks, "Stop", &stop)
-	parseHookType(rawHooks, "UserPromptSubmit", &userPromptSubmit)
-	parseHookType(rawHooks, "PreToolUse", &preToolUse)
-	parseHookType(rawHooks, "PostToolUse", &postToolUse)
-	parseHookType(rawHooks, "PreCompact", &preCompact)
+	for _, parsed := range []struct {
+		hookType string
+		target   *[]FactoryHookMatcher
+	}{
+		{"SessionStart", &sessionStart},
+		{"SessionEnd", &sessionEnd},
+		{"Stop", &stop},
+		{"UserPromptSubmit", &userPromptSubmit},
+		{"PreToolUse", &preToolUse},
+		{"PostToolUse", &postToolUse},
+		{"PreCompact", &preCompact},
+	} {
+		if err := parseHookType(rawHooks, parsed.hookType, parsed.target); err != nil {
+			return 0, err
+		}
+	}
 
 	// If force is true, remove all existing Entire hooks first
 	if force {
@@ -245,12 +254,18 @@ func (f *FactoryAIDroidAgent) InstallHooks(ctx context.Context, force bool) (int
 }
 
 // parseHookType parses a specific hook type from rawHooks into the target slice.
-// Silently ignores parse errors (leaves target unchanged).
-func parseHookType(rawHooks map[string]json.RawMessage, hookType string, target *[]FactoryHookMatcher) {
-	if data, ok := rawHooks[hookType]; ok {
-		//nolint:errcheck,gosec // Intentionally ignoring parse errors - leave target as nil/empty
-		json.Unmarshal(data, target)
+// A hook type that will not parse is reported rather than treated as empty: to
+// removal that is the difference between "Entire owns nothing here" and "we
+// could not tell", and the two must not be collapsed.
+func parseHookType(rawHooks map[string]json.RawMessage, hookType string, target *[]FactoryHookMatcher) error {
+	data, ok := rawHooks[hookType]
+	if !ok {
+		return nil
 	}
+	if err := json.Unmarshal(data, target); err != nil {
+		return fmt.Errorf("failed to parse %s hooks: %w", hookType, err)
+	}
+	return nil
 }
 
 // marshalHookType marshals a hook type back to rawHooks.
@@ -267,148 +282,105 @@ func marshalHookType(rawHooks map[string]json.RawMessage, hookType string, match
 	rawHooks[hookType] = data
 }
 
-// UninstallHooks removes Entire hooks from Factory AI Droid settings.
-func (f *FactoryAIDroidAgent) UninstallHooks(ctx context.Context) error {
-	// Use repo root to find .factory directory when run from a subdirectory
-	repoRoot, err := paths.WorktreeRoot(ctx)
-	if err != nil {
-		repoRoot = "." // Fallback to CWD if not in a git repo
-	}
-	settingsPath := filepath.Join(repoRoot, ".factory", FactorySettingsFileName)
-	data, err := os.ReadFile(settingsPath) //nolint:gosec // path is constructed from repo root + fixed path
-	if err != nil {
-		return nil //nolint:nilerr // No settings file means nothing to uninstall
-	}
+// managedHookTypes is every .factory/settings.json key Entire installs hooks
+// under. Removal walks this list and detection is derived from removal, so a
+// hook type cannot be stripped by one and missed by the other.
+//
+// InstallHooks keeps its own table because it also carries each type's command
+// and matcher; TestAreHooksInstalledMatchesUninstallHooks pins the two together.
+var managedHookTypes = []string{
+	"SessionStart",
+	"SessionEnd",
+	"Stop",
+	"UserPromptSubmit",
+	"PreToolUse",
+	"PostToolUse",
+	"PreCompact",
+}
 
+// factorySettingsPath resolves .factory/settings.json for the current repo, so
+// install, detection and removal all look at the same file.
+func factorySettingsPath(ctx context.Context) string {
+	return agent.HookConfigPath(ctx, ".factory", FactorySettingsFileName)
+}
+
+// UninstallHooks removes Entire's hooks and its metadata deny rule from Factory
+// AI Droid settings.
+func (f *FactoryAIDroidAgent) UninstallHooks(ctx context.Context) error {
+	if err := agent.RemoveHookArtifacts(factorySettingsPath(ctx), removeEntireArtifacts); err != nil {
+		return fmt.Errorf("remove Factory AI Droid hooks: %w", err)
+	}
+	return nil
+}
+
+// AreHooksInstalled reports whether Entire owns anything in Factory AI Droid's
+// settings, by asking whether UninstallHooks would strip anything. Both answers
+// come from one description of what Entire owns here, so detection cannot be
+// narrower than removal — it used to look at the Stop hook alone while removal
+// covered seven hook types and the metadata deny rule.
+func (f *FactoryAIDroidAgent) AreHooksInstalled(ctx context.Context) bool {
+	return agent.HookArtifactsInstalled(ctx, string(f.Name()), factorySettingsPath(ctx), removeEntireArtifacts)
+}
+
+// removeEntireArtifacts implements agent.HookArtifactRemoval for Factory AI
+// Droid: Entire's hooks under every managed hook type, plus the metadata deny
+// rule it adds to permissions. Everything else in the file survives, which is
+// why the transforms work on the raw JSON maps rather than a typed struct.
+func removeEntireArtifacts(data []byte) ([]byte, bool, error) {
 	var rawSettings map[string]json.RawMessage
 	if err := json.Unmarshal(data, &rawSettings); err != nil {
-		return fmt.Errorf("failed to parse settings.json: %w", err)
+		return nil, false, fmt.Errorf("failed to parse settings.json: %w", err)
 	}
 
-	// rawHooks preserves unknown hook types
+	// rawHooks preserves unknown hook types.
 	var rawHooks map[string]json.RawMessage
 	if hooksRaw, ok := rawSettings["hooks"]; ok {
 		if err := json.Unmarshal(hooksRaw, &rawHooks); err != nil {
-			return fmt.Errorf("failed to parse hooks: %w", err)
-		}
-	}
-	if rawHooks == nil {
-		rawHooks = make(map[string]json.RawMessage)
-	}
-
-	// Parse only the hook types we need to modify
-	var sessionStart, sessionEnd, stop, userPromptSubmit, preToolUse, postToolUse, preCompact []FactoryHookMatcher
-	parseHookType(rawHooks, "SessionStart", &sessionStart)
-	parseHookType(rawHooks, "SessionEnd", &sessionEnd)
-	parseHookType(rawHooks, "Stop", &stop)
-	parseHookType(rawHooks, "UserPromptSubmit", &userPromptSubmit)
-	parseHookType(rawHooks, "PreToolUse", &preToolUse)
-	parseHookType(rawHooks, "PostToolUse", &postToolUse)
-	parseHookType(rawHooks, "PreCompact", &preCompact)
-
-	// Remove Entire hooks from all hook types
-	sessionStart = removeEntireHooks(sessionStart)
-	sessionEnd = removeEntireHooks(sessionEnd)
-	stop = removeEntireHooks(stop)
-	userPromptSubmit = removeEntireHooks(userPromptSubmit)
-	preToolUse = removeEntireHooks(preToolUse)
-	postToolUse = removeEntireHooks(postToolUse)
-	preCompact = removeEntireHooks(preCompact)
-
-	// Marshal modified hook types back to rawHooks
-	marshalHookType(rawHooks, "SessionStart", sessionStart)
-	marshalHookType(rawHooks, "SessionEnd", sessionEnd)
-	marshalHookType(rawHooks, "Stop", stop)
-	marshalHookType(rawHooks, "UserPromptSubmit", userPromptSubmit)
-	marshalHookType(rawHooks, "PreToolUse", preToolUse)
-	marshalHookType(rawHooks, "PostToolUse", postToolUse)
-	marshalHookType(rawHooks, "PreCompact", preCompact)
-
-	// Also remove the metadata deny rule from permissions
-	var rawPermissions map[string]json.RawMessage
-	if permRaw, ok := rawSettings["permissions"]; ok {
-		if err := json.Unmarshal(permRaw, &rawPermissions); err != nil {
-			// If parsing fails, just skip permissions cleanup
-			rawPermissions = nil
+			return nil, false, fmt.Errorf("failed to parse hooks: %w", err)
 		}
 	}
 
-	if rawPermissions != nil {
-		if denyRaw, ok := rawPermissions["deny"]; ok {
-			var denyRules []string
-			if err := json.Unmarshal(denyRaw, &denyRules); err == nil {
-				// Filter out the metadata deny rule
-				filteredRules := make([]string, 0, len(denyRules))
-				for _, rule := range denyRules {
-					if rule != metadataDenyRule {
-						filteredRules = append(filteredRules, rule)
-					}
-				}
-				if len(filteredRules) > 0 {
-					denyJSON, err := json.Marshal(filteredRules)
-					if err == nil {
-						rawPermissions["deny"] = denyJSON
-					}
-				} else {
-					// Remove empty deny array
-					delete(rawPermissions, "deny")
-				}
-			}
+	changed := false
+	for _, hookType := range managedHookTypes {
+		var matchers []FactoryHookMatcher
+		if err := parseHookType(rawHooks, hookType, &matchers); err != nil {
+			return nil, false, err
 		}
-
-		// If permissions is empty, remove it entirely
-		if len(rawPermissions) > 0 {
-			permJSON, err := jsonutil.MarshalWithNoHTMLEscape(rawPermissions)
-			if err == nil {
-				rawSettings["permissions"] = permJSON
-			}
-		} else {
-			delete(rawSettings, "permissions")
+		if !hasEntireHook(matchers) {
+			continue
 		}
+		changed = true
+		marshalHookType(rawHooks, hookType, removeEntireHooks(matchers))
 	}
 
-	// Marshal hooks back (preserving unknown hook types)
+	denyRuleRemoved, err := agent.RemoveDenyRule(rawSettings, metadataDenyRule)
+	if err != nil {
+		return nil, false, fmt.Errorf("remove metadata deny rule: %w", err)
+	}
+	changed = changed || denyRuleRemoved
+
+	// Nothing of Entire's was here. Report that rather than rewriting a file we
+	// have no artifacts in: removal sweeps every agent, including ones the user
+	// never enabled.
+	if !changed {
+		return nil, false, nil
+	}
+
 	if len(rawHooks) > 0 {
 		hooksJSON, err := jsonutil.MarshalWithNoHTMLEscape(rawHooks)
 		if err != nil {
-			return fmt.Errorf("failed to marshal hooks: %w", err)
+			return nil, false, fmt.Errorf("failed to marshal hooks: %w", err)
 		}
 		rawSettings["hooks"] = hooksJSON
 	} else {
 		delete(rawSettings, "hooks")
 	}
 
-	// Write back
 	output, err := jsonutil.MarshalIndentWithNewline(rawSettings, "", "  ")
 	if err != nil {
-		return fmt.Errorf("failed to marshal settings: %w", err)
+		return nil, false, fmt.Errorf("failed to marshal settings: %w", err)
 	}
-	if err := os.WriteFile(settingsPath, output, 0o600); err != nil {
-		return fmt.Errorf("failed to write settings.json: %w", err)
-	}
-	return nil
-}
-
-// AreHooksInstalled checks if Entire hooks are installed.
-func (f *FactoryAIDroidAgent) AreHooksInstalled(ctx context.Context) bool {
-	// Use repo root to find .factory directory when run from a subdirectory
-	repoRoot, err := paths.WorktreeRoot(ctx)
-	if err != nil {
-		repoRoot = "." // Fallback to CWD if not in a git repo
-	}
-	settingsPath := filepath.Join(repoRoot, ".factory", FactorySettingsFileName)
-	data, err := os.ReadFile(settingsPath) //nolint:gosec // path is constructed from repo root + fixed path
-	if err != nil {
-		return false
-	}
-
-	var settings FactorySettings
-	if err := json.Unmarshal(data, &settings); err != nil {
-		return false
-	}
-
-	// Check for at least one of our hooks (production, wrapped, or local-dev format)
-	return hasEntireHook(settings.Hooks.Stop)
+	return output, true, nil
 }
 
 // Helper functions for hook management
