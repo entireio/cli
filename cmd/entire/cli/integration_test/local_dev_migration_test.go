@@ -338,3 +338,65 @@ func TestDoctor_LeavesNeverEnabledRepoAlone(t *testing.T) {
 		t.Error("doctor backed up the repo's own hook, so it installed over it")
 	}
 }
+
+// TestDoctor_MigratesCommittedAbsoluteGitHookPath covers the staged rollout for
+// absolute_git_hook_path.
+//
+// The only way to enable that feature used to write it exclusively to the
+// committed .entire/settings.json, so everyone who ever used it has it there. It
+// is still honored from that scope; doctor warns and offers to copy it to the
+// local file, so a later release can stop honoring the committed value without
+// unpinning anyone's hooks. Copy, not move: editing a tracked file would land an
+// unexpected change in the user's next commit.
+func TestDoctor_MigratesCommittedAbsoluteGitHookPath(t *testing.T) {
+	t.Parallel()
+
+	env := NewRepoWithCommit(t)
+	settingsPath := filepath.Join(env.RepoDir, ".entire", "settings.json")
+	if err := os.WriteFile(settingsPath, []byte(`{
+  "enabled": true,
+  "absolute_git_hook_path": true
+}
+`), 0o600); err != nil {
+		t.Fatalf("failed to seed committed settings: %v", err)
+	}
+
+	out, err := env.RunCLIWithError("doctor", "--force")
+	if err != nil {
+		t.Fatalf("doctor --force failed: %v\noutput: %s", err, out)
+	}
+	if !strings.Contains(out, "absolute_git_hook_path: COMMITTED") {
+		t.Errorf("doctor should warn about the committed setting, got:\n%s", out)
+	}
+	if !strings.Contains(out, "Copied to") {
+		t.Errorf("doctor --force should perform the copy, got:\n%s", out)
+	}
+
+	localPath := filepath.Join(env.RepoDir, ".entire", "settings.local.json")
+	local, err := os.ReadFile(localPath)
+	if err != nil {
+		t.Fatalf("the migration should have written the local file: %v", err)
+	}
+	if !strings.Contains(string(local), "absolute_git_hook_path") {
+		t.Errorf("local settings should carry the migrated key, got:\n%s", local)
+	}
+
+	// Copy, not move: the committed file is untouched, so the user gets no
+	// surprise diff and nothing breaks if they never upgrade.
+	project, err := os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(project), "absolute_git_hook_path") {
+		t.Errorf("the committed value must be left in place, got:\n%s", project)
+	}
+
+	// Having migrated, the warning stops: the committed value is now redundant.
+	out, err = env.RunCLIWithError("doctor", "--force")
+	if err != nil {
+		t.Fatalf("second doctor --force failed: %v\noutput: %s", err, out)
+	}
+	if strings.Contains(out, "absolute_git_hook_path: COMMITTED") {
+		t.Errorf("the warning should stop once the local file sets the key, got:\n%s", out)
+	}
+}

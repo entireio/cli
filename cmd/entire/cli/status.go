@@ -165,6 +165,10 @@ func runStatusDetailed(ctx context.Context, w io.Writer, sty statusStyles, setti
 		}
 	}
 
+	if notice := effectiveSettings.AbsoluteGitHookPathDeprecation(); notice != "" {
+		fmt.Fprintf(w, "absolute_git_hook_path: %s\n", notice)
+	}
+
 	if effectiveSettings.Enabled {
 		writeActiveSessions(ctx, w, sty)
 	}

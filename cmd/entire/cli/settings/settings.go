@@ -97,7 +97,16 @@ type EntireSettings struct {
 	// AbsoluteGitHookPath embeds the full binary path in git hooks instead of
 	// bare "entire". This is needed for GUI git clients (Xcode, Tower, etc.)
 	// that don't source shell profiles and can't find "entire" on PATH.
+	//
+	// Honored ONLY from .entire/settings.local.json — it describes one machine's
+	// installation, not the repository. See recordAbsoluteGitHookPathDeprecation.
 	AbsoluteGitHookPath bool `json:"absolute_git_hook_path,omitempty"`
+
+	// absoluteGitHookPathDeprecation records that absolute_git_hook_path is being
+	// honored from the committed project file, which a future release will stop
+	// doing. Unexported so it never serializes to disk.
+	// See recordAbsoluteGitHookPathDeprecation.
+	absoluteGitHookPathDeprecation string
 
 	// Telemetry controls anonymous usage analytics.
 	// nil = not asked yet (show prompt), true = opted in, false = opted out
@@ -341,6 +350,17 @@ type OPFSettings struct {
 	// "always" runs without asking. ENTIRE_OPF=yes|no on the push
 	// invocation overrides this setting per-push.
 	PromptDefault string `json:"prompt_default,omitempty"`
+}
+
+// AbsoluteGitHookPathDeprecation reports that absolute_git_hook_path is being
+// honored from the committed project file, or "" when it is not. Callers that
+// report on hook configuration should surface this: it is the only warning before
+// a future release stops honoring that scope.
+func (s *EntireSettings) AbsoluteGitHookPathDeprecation() string {
+	if s == nil {
+		return ""
+	}
+	return s.absoluteGitHookPathDeprecation
 }
 
 // CommandRejection reports a Command that Load dropped as untrusted: the
@@ -656,6 +676,10 @@ func loadMergedSettings(ctx context.Context, settingsFileAbs, preferencesFileAbs
 	// local file positively verified as this developer's own.
 	enforceOPFCommandTrust(ctx, settings, localSettingsFileAbs, localData)
 
+	// Still honored from the project file for now; this only warns. See
+	// recordAbsoluteGitHookPathDeprecation for why the switch is staged.
+	recordAbsoluteGitHookPathDeprecation(settings, localData)
+
 	// Re-validate after merge. Individual files are validated by loadFromFile,
 	// but mergeJSON patches fields independently and can produce combinations
 	// (e.g. model without provider when the local override sets only a model
@@ -674,6 +698,12 @@ func loadMergedSettings(ctx context.Context, settingsFileAbs, preferencesFileAbs
 // LoadFromFile loads settings from a specific file path without merging local overrides.
 // Returns default settings if the file doesn't exist.
 // Use this when you need to display individual settings files separately.
+//
+// Reads the file verbatim: none of the scope gating Load applies is run here, so
+// a field that is only honored from a particular scope (absolute_git_hook_path,
+// redaction.openai_privacy_filter.command) comes back ungated. Treat the result
+// as "what this file says", never as "what is in effect" — deciding behavior from
+// it reintroduces exactly the imposition those gates prevent.
 func LoadFromFile(filePath string) (*EntireSettings, error) {
 	return loadFromFile(filePath)
 }
@@ -1718,6 +1748,13 @@ func saveToFile(ctx context.Context, settings *EntireSettings, filePath string) 
 		return fmt.Errorf("creating settings directory: %w", err)
 	}
 
+	// Deliberately no stripping of machine-local fields here. It is tempting —
+	// the writer is the one place that could guarantee absolute_git_hook_path
+	// never reaches the committed file — but while that value is still honored
+	// from the project scope, stripping it would delete a working setting out of
+	// a tracked file as a side effect of an unrelated `entire configure`. The
+	// callers keep it out instead (see setAbsoluteGitHookPathLocal). Revisit when
+	// the project scope stops being honored and the key is inert.
 	data, err := jsonutil.MarshalIndentWithNewline(settings, "", "  ")
 	if err != nil {
 		return fmt.Errorf("marshaling settings: %w", err)

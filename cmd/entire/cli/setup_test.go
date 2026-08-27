@@ -4251,3 +4251,94 @@ func TestRunEnableInteractive_FirstRunDefaultsToGitRefs(t *testing.T) {
 		}
 	})
 }
+
+// TestConfigureCmd_AbsoluteGitHookPathFlag_KeepsProjectFileClean pins the scope
+// rule at the write side.
+//
+// The pre-existing flag test asserts only against the merged view, so it passes
+// whether or not the key also lands in the committed file — and it did: the
+// struct assignment stayed and saveSettingsToTarget marshals the whole struct to
+// the target, which defaults to the project file whenever one exists. One
+// `configure` plus a commit and every cloner's hooks get pinned to a path chosen
+// on somebody else's machine, which is the imposition this setting's scope rule
+// exists to prevent.
+func TestConfigureCmd_AbsoluteGitHookPathFlag_KeepsProjectFileClean(t *testing.T) {
+	// Cannot use t.Parallel() because we use t.Chdir
+	setupTestRepo(t)
+	writeSettings(t, testSettingsEnabled)
+
+	cmd := newSetupCmd()
+	var stdout bytes.Buffer
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&stdout)
+	cmd.SetArgs([]string{"--absolute-git-hook-path"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("configure --absolute-git-hook-path failed: %v\noutput: %s", err, stdout.String())
+	}
+
+	projectContent, err := os.ReadFile(EntireSettingsFile)
+	if err != nil {
+		t.Fatalf("failed to read project settings: %v", err)
+	}
+	if strings.Contains(string(projectContent), "absolute_git_hook_path") {
+		t.Errorf("absolute_git_hook_path must not reach the committed file, got:\n%s", projectContent)
+	}
+
+	localContent, err := os.ReadFile(EntireSettingsLocalFile)
+	if err != nil {
+		t.Fatalf("the flag should have written the local file: %v", err)
+	}
+	if !strings.Contains(string(localContent), "absolute_git_hook_path") {
+		t.Errorf("expected the flag to persist locally, got:\n%s", localContent)
+	}
+
+	// The feature must still work: the hook is pinned, not left on PATH.
+	hooksDir, err := strategy.GetHooksDir(context.Background())
+	if err != nil {
+		t.Fatalf("GetHooksDir() error = %v", err)
+	}
+	hook, err := os.ReadFile(filepath.Join(hooksDir, "post-commit"))
+	if err != nil {
+		t.Fatalf("failed to read post-commit hook: %v", err)
+	}
+	if strings.Contains(string(hook), "command -v entire") {
+		t.Errorf("hook should be pinned to an absolute path, got:\n%s", hook)
+	}
+}
+
+// TestConfigureCmd_ForceHonorsLocalAbsoluteHookPath pins that the hook-install
+// decision comes from the merged view.
+//
+// updateGlobalSettings loads its target scope with settings.LoadFromFile, which
+// reads one file verbatim. Deciding from that missed a value set only in the local
+// file — the only scope that will be honored once the project scope is retired —
+// so `entire configure --force` would silently unpin a correctly configured repo.
+// It also read the project scope ungated, which is the route by which a committed
+// value will keep imposing itself after the loader stops honoring it.
+func TestConfigureCmd_ForceHonorsLocalAbsoluteHookPath(t *testing.T) {
+	// Cannot use t.Parallel() because we use t.Chdir
+	setupTestRepo(t)
+	writeSettings(t, testSettingsEnabled)
+	writeLocalSettings(t, `{"absolute_git_hook_path": true}`)
+
+	cmd := newSetupCmd()
+	var stdout bytes.Buffer
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&stdout)
+	cmd.SetArgs([]string{"--force"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("configure --force failed: %v\noutput: %s", err, stdout.String())
+	}
+
+	hooksDir, err := strategy.GetHooksDir(context.Background())
+	if err != nil {
+		t.Fatalf("GetHooksDir() error = %v", err)
+	}
+	hook, err := os.ReadFile(filepath.Join(hooksDir, "post-commit"))
+	if err != nil {
+		t.Fatalf("failed to read post-commit hook: %v", err)
+	}
+	if strings.Contains(string(hook), "command -v entire") {
+		t.Errorf("a local absolute_git_hook_path must pin the hook, got:\n%s", hook)
+	}
+}
