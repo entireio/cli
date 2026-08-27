@@ -1562,15 +1562,6 @@ type subagentCaptureOptions struct {
 //
 //nolint:maintidx // sequential orchestration of validation, transcript resolve, file detection, token calc, record write, and cleanup — splitting would obscure the flow
 func completeSubagentTaskRecord(logCtx context.Context, ag agent.Agent, event *agent.Event, opts subagentCaptureOptions) error {
-	if opts.ambiguousWithoutDescription {
-		logging.Warn(logCtx, "skipping task record: tool_use_id resolved only by the single-active-file fallback with no corroborating task description",
-			slog.String("tool_use_id", event.ToolUseID))
-		// Leave the pre-task file in place — same contract as the no-changes and
-		// vanished-state guards below: an uncorroborated fallback may have named a
-		// sibling's baseline, and deleting it would make the sibling's own
-		// SubagentEnd hit the vanished-state guard and drop a real checkpoint.
-		return nil
-	}
 	// Prefer what the agent declared (Claude Code's SubagentStop, Codex, and
 	// Cursor all carry agent_transcript_path); see Event.SubagentTranscriptPath.
 	// The layout probe is the fallback for launch-time PostToolUse events, which
@@ -1750,6 +1741,11 @@ func completeSubagentTaskRecord(logCtx context.Context, ag agent.Agent, event *a
 				return nil
 			}
 			_ = CleanupPreTaskState(logCtx, event.ToolUseID) //nolint:errcheck // best-effort cleanup
+			return nil
+		}
+		if opts.ambiguousWithoutDescription {
+			logging.Warn(logCtx, "leaving pre-task state in place: uncorroborated single-active-file resolve with nothing to checkpoint",
+				slog.String("tool_use_id", event.ToolUseID))
 			return nil
 		}
 		logging.Info(logCtx, "no file changes detected but completing record anyway (final subagent-stop capture)")
