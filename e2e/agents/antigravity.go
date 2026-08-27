@@ -528,6 +528,86 @@ func antigravityWorkspacePrompt(prompt, dir string) string {
 	return fmt.Sprintf("Use the workspace at %s. Resolve any relative file paths in the request relative to that workspace, and write files inside that workspace unless the request says otherwise. Complete every requested operation before responding, including every git command or commit mentioned in the request. If the request asks for a commit, run a shell command such as git add and git commit; editing files is not a completed commit. Do not claim a file was committed until the git command has completed successfully. Do not run verification commands such as list_dir or view_file unless requested. If the request has numbered steps, complete every numbered step in order. For multi-step requests with file contents and git commands, use shell commands when that is the most direct way to preserve order. Do not create artifacts for repository files; create or edit files in the workspace. After completing the requested change, do not run extra checks or commands; immediately respond with a short confirmation.\n\nRequest:\n%s", dir, prompt)
 }
 
+// antigravityHookProbeEnvKey turns on the hook probe (see PrepareRepo). It is
+// on by default in CI, where artifacts are the only evidence a run leaves.
+const antigravityHookProbeEnvKey = "E2E_ANTIGRAVITY_HOOK_PROBE"
+
+// antigravityHookProbeLog is where the probe hook records each hook firing,
+// under .entire/logs so captureEntireLogs picks it up with the CLI logs.
+const antigravityHookProbeLog = ".entire/logs/agy-hook-probe.log"
+
+func antigravityHookProbeEnabled(env []string) bool {
+	if value, ok := antigravityEnvValue(env, antigravityHookProbeEnvKey); ok {
+		return antigravityTruthyEnv(env, antigravityHookProbeEnvKey) && value != ""
+	}
+	return antigravityInCI(env)
+}
+
+// PrepareRepo runs after `entire enable`. When the hook probe is enabled it
+// adds a second, independent entry to the repo's .agents/hooks.json that
+// appends the hook's cwd and stdin payload to antigravityHookProbeLog for
+// PreInvocation, PreToolUse and Stop. Entire's own entry is untouched. This
+// answers "did agy run hooks at all, from where, with what payload" when a run
+// leaves no session state — the failure mode that is otherwise invisible.
+func (a *Antigravity) PrepareRepo(repoDir string) error {
+	return antigravityPrepareRepo(os.Environ(), repoDir)
+}
+
+func antigravityPrepareRepo(env []string, repoDir string) error {
+	if !antigravityHookProbeEnabled(env) {
+		return nil
+	}
+	hooksPath := filepath.Join(repoDir, ".agents", "hooks.json")
+	data, err := os.ReadFile(hooksPath)
+	if err != nil {
+		return fmt.Errorf("antigravity E2E: read %s: %w", hooksPath, err)
+	}
+	var hooks map[string]json.RawMessage
+	if err := json.Unmarshal(data, &hooks); err != nil {
+		return fmt.Errorf("antigravity E2E: parse %s: %w", hooksPath, err)
+	}
+	logPath := filepath.Join(repoDir, antigravityHookProbeLog)
+	if err := os.MkdirAll(filepath.Dir(logPath), 0o750); err != nil {
+		return fmt.Errorf("antigravity E2E: create probe log dir: %w", err)
+	}
+	// Format starts with %s: a leading "---" would be parsed by printf as an option.
+	probeCmd := fmt.Sprintf(`sh -c 'printf "%%s cwd=%%s\n" "--- $(date +%%T)" "$(pwd)" >> %q; cat >> %q; printf "\n" >> %q'`, logPath, logPath, logPath)
+	probe := map[string]any{
+		"PreInvocation": []map[string]any{{"type": "command", "command": probeCmd}},
+		"PreToolUse":    []map[string]any{{"matcher": "*", "hooks": []map[string]any{{"type": "command", "command": probeCmd}}}},
+		"Stop":          []map[string]any{{"type": "command", "command": probeCmd}},
+	}
+	raw, err := json.Marshal(probe)
+	if err != nil {
+		return fmt.Errorf("antigravity E2E: encode probe hooks: %w", err)
+	}
+	hooks["entire-e2e-probe"] = raw
+	out, err := json.MarshalIndent(hooks, "", "  ")
+	if err != nil {
+		return fmt.Errorf("antigravity E2E: encode hooks.json: %w", err)
+	}
+	return os.WriteFile(hooksPath, append(out, '\n'), 0o600)
+}
+
+// ExtraArtifacts exposes agy's own state from the isolated HOME (its CLI log
+// directory and the settings.json the harness wrote) so CI failures inside
+// agy are diagnosable from artifacts. Nothing is captured in OAuth mode: the
+// developer's real HOME is not a test artifact.
+func (a *Antigravity) ExtraArtifacts(repoDir string) map[string]string {
+	return antigravityExtraArtifacts(os.Environ(), repoDir)
+}
+
+func antigravityExtraArtifacts(env []string, repoDir string) map[string]string {
+	if !antigravityUsesIsolatedHome(env) {
+		return nil
+	}
+	cli := filepath.Join(antigravityTestHomeDir(repoDir), ".gemini", "antigravity-cli")
+	return map[string]string{
+		"agy-home-logs":          filepath.Join(cli, "log"),
+		"agy-home-settings.json": filepath.Join(cli, "settings.json"),
+	}
+}
+
 func antigravityTestHomeDir(repoDir string) string {
 	return filepath.Join(filepath.Dir(repoDir), filepath.Base(repoDir)+"-antigravity-home")
 }

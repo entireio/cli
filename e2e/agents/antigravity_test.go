@@ -945,3 +945,63 @@ func TestAntigravityPrepareHomeIsNoOpForOAuth(t *testing.T) {
 		t.Fatalf("OAuth mode must not create an isolated home, stat err = %v", err)
 	}
 }
+
+func TestAntigravityPrepareRepoAddsProbeHookWhenEnabled(t *testing.T) {
+	t.Parallel()
+	repoDir := t.TempDir()
+	hooksPath := filepath.Join(repoDir, ".agents", "hooks.json")
+	if err := os.MkdirAll(filepath.Dir(hooksPath), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	original := `{"entire":{"PreInvocation":[{"type":"command","command":"entire hooks antigravity pre-invocation"}]}}`
+	if err := os.WriteFile(hooksPath, []byte(original), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// Disabled: file untouched.
+	if err := antigravityPrepareRepo([]string{"E2E_ANTIGRAVITY_HOOK_PROBE=0", "CI=true"}, repoDir); err != nil {
+		t.Fatal(err)
+	}
+	if data, _ := os.ReadFile(hooksPath); string(data) != original {
+		t.Fatalf("probe disabled must leave hooks.json untouched, got %s", data)
+	}
+
+	// Enabled by CI default.
+	if err := antigravityPrepareRepo([]string{"CI=true"}, repoDir); err != nil {
+		t.Fatal(err)
+	}
+	data, _ := os.ReadFile(hooksPath)
+	var hooks map[string]json.RawMessage
+	if err := json.Unmarshal(data, &hooks); err != nil {
+		t.Fatalf("hooks.json not JSON after probe: %v\n%s", err, data)
+	}
+	if _, ok := hooks["entire"]; !ok {
+		t.Fatalf("entire entry must be preserved, got %s", data)
+	}
+	probe, ok := hooks["entire-e2e-probe"]
+	if !ok {
+		t.Fatalf("probe entry missing, got %s", data)
+	}
+	for _, want := range []string{"PreInvocation", "PreToolUse", "Stop", "agy-hook-probe.log", "cwd="} {
+		if !strings.Contains(string(probe), want) {
+			t.Errorf("probe entry missing %q: %s", want, probe)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(repoDir, ".entire", "logs")); err != nil {
+		t.Fatalf("probe log dir should exist so the hook can append: %v", err)
+	}
+}
+
+func TestAntigravityExtraArtifactsOnlyForIsolatedHome(t *testing.T) {
+	t.Parallel()
+	if got := antigravityExtraArtifacts([]string{"HOME=/real"}, "/tmp/repo"); got != nil {
+		t.Fatalf("OAuth mode must not expose the developer HOME as artifacts, got %v", got)
+	}
+	got := antigravityExtraArtifacts([]string{"HOME=/real", "GEMINI_API_KEY=k"}, "/tmp/repo")
+	if got["agy-home-logs"] != "/tmp/repo-antigravity-home/.gemini/antigravity-cli/log" {
+		t.Fatalf("agy-home-logs = %q", got["agy-home-logs"])
+	}
+	if got["agy-home-settings.json"] != "/tmp/repo-antigravity-home/.gemini/antigravity-cli/settings.json" {
+		t.Fatalf("agy-home-settings.json = %q", got["agy-home-settings.json"])
+	}
+}

@@ -102,6 +102,11 @@ func SetupRepo(t *testing.T, agent agents.Agent) *RepoState {
 	}
 
 	entire.Enable(t, dir, agent.EntireAgent())
+	if preparer, ok := agent.(agents.RepoPreparer); ok {
+		if err := preparer.PrepareRepo(dir); err != nil {
+			t.Fatalf("prepare repo for %s: %v", agent.Name(), err)
+		}
+	}
 	if agent.Name() == "gemini-cli" {
 		setupGeminiTestHome(t, dir)
 	}
