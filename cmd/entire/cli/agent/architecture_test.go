@@ -45,6 +45,7 @@ func TestAgentPackages_NoForbiddenImports(t *testing.T) {
 	allowedPrefixes := []string{
 		repoPrefix + "agent",      // agent contract + sub-packages
 		repoPrefix + "gitrepo",    // repository layout utilities
+		repoPrefix + "execx",      // subprocess helpers (TTY detachment, cancel-on-ctx)
 		repoPrefix + "logging",    // logging utilities
 		repoPrefix + "paths",      // path utilities
 		repoPrefix + "jsonutil",   // JSON utilities

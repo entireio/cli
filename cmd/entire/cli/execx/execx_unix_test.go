@@ -81,6 +81,52 @@ func TestTerminateOnCancel_KillsProcessGroup(t *testing.T) {
 	}
 }
 
+// NonInteractive and TerminateOnCancel must compose: setpgid(2) on a session
+// leader fails with EPERM, which surfaces from fork/exec as a bare "operation
+// not permitted". The setsid child is already its own group leader, so the
+// group kill must still reach the backgrounded grandchild.
+func TestTerminateOnCancel_ComposesWithNonInteractive(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	cmd := NonInteractive(ctx, "/bin/sh", "-c", "sleep 60 & echo ready; wait")
+	TerminateOnCancel(cmd)
+
+	if cmd.SysProcAttr.Setpgid {
+		t.Error("Setpgid = true alongside Setsid; setpgid on a session leader fails with EPERM")
+	}
+
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		t.Fatalf("stdout pipe: %v", err)
+	}
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+
+	br := bufio.NewReader(stdout)
+	if line, err := br.ReadString('\n'); err != nil || strings.TrimSpace(line) != "ready" {
+		t.Fatalf("did not observe ready marker: line=%q err=%v", line, err)
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		_, _ = io.Copy(io.Discard, br) //nolint:errcheck // draining to block until the pipe closes; copy errors are irrelevant
+		done <- cmd.Wait()
+	}()
+
+	cancel()
+
+	// Below KillWaitDelay so the backstop cannot mask a group-kill regression.
+	select {
+	case <-done:
+	case <-time.After(KillWaitDelay / 2):
+		t.Fatal("read did not return after cancellation; the setsid child's group was not killed")
+	}
+}
+
 // Cancel must return cleanly *and* actually terminate the leader.
 func TestKillProcessGroupOnCancel_TerminatesLeader(t *testing.T) {
 	t.Parallel()

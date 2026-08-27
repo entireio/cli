@@ -28,6 +28,11 @@ func (e *TextGenerationError) Error() string { return e.Err.Error() }
 func (e *TextGenerationError) Unwrap() error { return e.Err }
 
 // TextCommandRunner matches exec.CommandContext and allows tests to inject a runner.
+//
+// An injected runner must build the *exec.Cmd with exec.CommandContext, not
+// exec.Command: RunIsolatedTextGeneratorCLI sets cmd.Cancel (see
+// execx.TerminateOnCancel), and exec rejects a non-nil Cancel on a context-less
+// cmd with "command with a non-nil Cancel was not created with CommandContext".
 type TextCommandRunner func(ctx context.Context, name string, args ...string) *exec.Cmd
 
 // RunIsolatedTextGeneratorCLI executes a text-generation CLI in an isolated temp

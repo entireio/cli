@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
+	"github.com/entireio/cli/cmd/entire/cli/execx"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 )
 
@@ -54,6 +55,9 @@ func (c *ClaudeCodeAgent) GenerateTextStreaming(
 
 	cmd.Dir = os.TempDir()
 	cmd.Env = agent.StripGitEnv(os.Environ())
+	// A killed provider CLI can leave a sandbox/MCP grandchild holding the
+	// output pipe open, which blocks the drain below past the ctx deadline.
+	execx.TerminateOnCancel(cmd)
 	cmd.Stdin = strings.NewReader(prompt)
 
 	stdout, err := cmd.StdoutPipe()
