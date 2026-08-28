@@ -1,6 +1,10 @@
 package tokenreport
 
-import "github.com/entireio/cli/cmd/entire/cli/agent/types"
+import (
+	"sort"
+
+	"github.com/entireio/cli/cmd/entire/cli/agent/types"
+)
 
 // Agent type identifiers. These duplicate the string values of the
 // agent.AgentType* constants in cmd/entire/cli/agent/registry.go rather than
@@ -67,7 +71,8 @@ type AgentProfile struct {
 	TotalsOnly bool
 	// Verified is true when this profile was checked against real committed
 	// checkpoints for the agent. False for agents with no checkpoints to
-	// verify against (Copilot CLI, Factory AI Droid) and for unknown agents.
+	// verify against (Factory AI Droid) and for unknown agents; Copilot CLI
+	// is verified for totals only (see TotalsOnly).
 	Verified bool
 	// Levers lists agent-specific advice vocabulary for recommendations.
 	// Left nil for every agent in B1 (setting names are unverified; see
@@ -173,12 +178,13 @@ var agentProfiles = map[types.AgentType]AgentProfile{
 		TotalsOnly:          true,
 		Verified:            true,
 	},
-	// Copilot CLI: session.shutdown's modelMetrics reports token totals
-	// per model (not per call), so RecordsModelPerCall is true only in that
-	// coarser per-model sense; otherwise totals-only, no effort, tool-call,
-	// subagent, cache-TTL, or cost recording. No checkpoints exist to verify
-	// this profile against, so Verified is false despite TotalsOnly being
-	// set from the same survey.
+	// Copilot CLI: session.shutdown's modelMetrics reports per-model totals
+	// (input/output/cache read/cache write tokens; agent/copilotcli/
+	// transcript.go:212-280), not per-call data, so RecordsModelPerCall is
+	// true only in that coarser per-model sense; otherwise no effort,
+	// tool-call, subagent, cache-TTL, or cost recording. Those per-model
+	// totals are verified against real transcripts, so Verified is true;
+	// with no per-call breakdown available, TotalsOnly is also true.
 	agentCopilotCLI: {
 		RecordsThinking:     false,
 		RecordsCacheTTL:     false,
@@ -208,13 +214,14 @@ var agentProfiles = map[types.AgentType]AgentProfile{
 }
 
 // KnownAgents returns the agent types tokenreport has a capability profile
-// for. Used by tests to guard against drift from the agent.AgentType*
-// registry constants tokenreport cannot import.
+// for, sorted for deterministic output. Used by tests to guard against drift
+// from the agent.AgentType* registry constants tokenreport cannot import.
 func KnownAgents() []types.AgentType {
 	agents := make([]types.AgentType, 0, len(agentProfiles))
 	for a := range agentProfiles {
 		agents = append(agents, a)
 	}
+	sort.Slice(agents, func(i, j int) bool { return agents[i] < agents[j] })
 	return agents
 }
 

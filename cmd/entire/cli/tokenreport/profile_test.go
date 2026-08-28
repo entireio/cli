@@ -195,4 +195,8 @@ func TestKnownAgents(t *testing.T) {
 			t.Errorf("ProfileFor(%q) returned zero value; every known agent should have a non-zero profile", a)
 		}
 	}
+
+	if again := KnownAgents(); !reflect.DeepEqual(known, again) {
+		t.Errorf("KnownAgents() is not deterministic: got %v then %v", known, again)
+	}
 }
