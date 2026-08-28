@@ -853,7 +853,7 @@ func createOrphanMetadataRef(ctx context.Context, repo *git.Repository, refs che
 		TreeHash:  emptyTreeHash,
 		Author:    sig,
 		Committer: sig,
-		Message:   "Initialize metadata ref\n\nThis ref stores session metadata.\n",
+		Message:   metadataRefInitSubject + "\n\nThis ref stores session metadata.\n",
 	}
 	// Note: No ParentHashes - this is an orphan commit
 

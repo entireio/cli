@@ -123,3 +123,81 @@ func TestStatusJSON_GlobalTracking(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// TestStatus_GloballyTrackedRepoWithoutRepoSetup: a repo the user-global tier
+// captures, but which was never `entire enable`d, must not read as "not set
+// up" — that hint would tell the user to do the very thing global tracking
+// exists to make unnecessary, and an agent parsing --json would conclude
+// Entire is off while its session is being captured.
+func TestStatus_GloballyTrackedRepoWithoutRepoSetup(t *testing.T) {
+	isolatedUserHome(t)
+	pretendAgentBinaries(t)
+	dir := setupTestDir(t)
+	testutil.InitRepo(t, dir)
+	testutil.AddRemote(t, dir, "origin", "https://github.com/acme/widgets.git")
+
+	text := func(t *testing.T) string {
+		t.Helper()
+		var out bytes.Buffer
+		if err := runStatus(context.Background(), &out, false, false); err != nil {
+			t.Fatalf("runStatus: %v", err)
+		}
+		return out.String()
+	}
+	parsed := func(t *testing.T) (string, statusJSON) {
+		t.Helper()
+		var out bytes.Buffer
+		if err := runStatus(context.Background(), &out, false, true); err != nil {
+			t.Fatalf("runStatus --json: %v", err)
+		}
+		var result statusJSON
+		if err := json.Unmarshal(out.Bytes(), &result); err != nil {
+			t.Fatalf("status --json not parseable: %v\n%s", err, out.String())
+		}
+		return out.String(), result
+	}
+
+	t.Run("tracked repo renders as enabled", func(t *testing.T) {
+		writeUserSettings(t, `{"global":{"enabled":true}}`)
+		out := text(t)
+		for _, want := range []string{"● Tracked globally", "branch ", "global tracking: on", agentHelpCommand} {
+			if !strings.Contains(out, want) {
+				t.Errorf("want %q in status output:\n%s", want, out)
+			}
+		}
+		for _, reject := range []string{"not set up", "entire enable"} {
+			if strings.Contains(out, reject) {
+				t.Errorf("a globally tracked repo must not print %q:\n%s", reject, out)
+			}
+		}
+		raw, result := parsed(t)
+		if !result.Enabled || result.Error != "" || result.AgentHelp != agentHelpCommand {
+			t.Errorf("want enabled=true, no error, agent_help set; got:\n%s", raw)
+		}
+		if result.ActiveSessions == nil || result.Agents == nil {
+			t.Errorf("active_sessions and agents must encode as [] not null:\n%s", raw)
+		}
+		if !strings.Contains(raw, `"activation_source":"global"`) {
+			t.Errorf("want activation_source=global:\n%s", raw)
+		}
+	})
+
+	t.Run("excluded repo stays not set up", func(t *testing.T) {
+		writeUserSettings(t, `{"global":{"enabled":true,"exclude_paths":["`+filepath.ToSlash(dir)+`"]}}`)
+		out := text(t)
+		if !strings.Contains(out, "○ not set up") || !strings.Contains(out, "this repo is excluded") {
+			t.Errorf("want not-set-up header plus the exclusion reason:\n%s", out)
+		}
+		raw, result := parsed(t)
+		if result.Enabled || result.Error != "not set up" {
+			t.Errorf("want enabled=false/error=not set up:\n%s", raw)
+		}
+	})
+
+	t.Run("tier off stays not set up", func(t *testing.T) {
+		writeUserSettings(t, `{"global":{"enabled":false}}`)
+		if out := text(t); !strings.Contains(out, "○ not set up") {
+			t.Errorf("want not-set-up header:\n%s", out)
+		}
+	})
+}

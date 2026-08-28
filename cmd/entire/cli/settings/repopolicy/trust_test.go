@@ -21,14 +21,49 @@ func TestEgressDecision_RequiresEveryFetchAndPushURL(t *testing.T) {
 	}
 }
 
-func TestEgressDecision_UnparseableConfiguredOriginHolds(t *testing.T) {
+// A bare local path is a legitimate origin (a mirror, a bare repo on a share)
+// that does not reduce to host/owner/repo. It must neither defeat trust_all
+// nor leave the repo with no way to be trusted: the identity flips to the
+// path key, exactly as it does for a repo with no origin at all.
+func TestEgressDecision_UnparseableOriginFallsBackToPathKey(t *testing.T) {
 	root, _ := newPolicyRepo(t)
 	runPolicyGit(t, root, "remote", "add", "origin", filepath.Join(t.TempDir(), "origin.git"))
+
+	setPolicyGlobal(t, `{"global":{"enabled":true}}`)
+	held := policyAt(t, root)
+	if held.Trust.Allowed || held.Trust.Reason != TrustReasonUntrusted {
+		t.Fatalf("trust = %+v, want held as untrusted (not an identity error)", held.Trust)
+	}
+	if held.Trust.Identity.OriginKeyed() || held.Trust.Identity.Path == "" {
+		t.Fatalf("identity = %+v, want the path key", held.Trust.Identity)
+	}
+
+	setPolicyGlobal(t, `{"global":{"enabled":true,"trusted_paths":["`+filepath.ToSlash(root)+`"]}}`)
+	if byPath := policyAt(t, root); !byPath.Trust.Allowed || byPath.Trust.Source != TrustSourceRepo {
+		t.Fatalf("trust = %+v, want trusted by path", byPath.Trust)
+	}
+
+	setPolicyGlobal(t, `{"global":{"enabled":true,"trust_all":true}}`)
+	if all := policyAt(t, root); !all.Trust.Allowed || all.Trust.Source != TrustSourceAll {
+		t.Fatalf("trust = %+v, want trust_all to cover a repo whose origin cannot be normalized", all.Trust)
+	}
+}
+
+// Consent for every repo cannot depend on being able to name this one: a
+// mixed origin (one keyable URL, one bare path) and a repo with no origin
+// are both covered by trust_all.
+func TestEgressDecision_TrustAllNeedsNoIdentity(t *testing.T) {
+	root, _ := newPolicyRepo(t)
+	runPolicyGit(t, root, "remote", "add", "origin", "https://github.com/acme/widgets.git")
+	runPolicyGit(t, root, "remote", "set-url", "--add", "--push", "origin", filepath.Join(t.TempDir(), "mirror.git"))
 	setPolicyGlobal(t, `{"global":{"enabled":true,"trust_all":true}}`)
 
 	policy := policyAt(t, root)
-	if policy.Trust.Allowed || policy.Trust.Reason != TrustReasonInvalidOrigin {
-		t.Fatalf("trust = %+v, want invalid configured origin to hold", policy.Trust)
+	if !policy.Trust.Allowed || policy.Trust.Source != TrustSourceAll {
+		t.Fatalf("trust = %+v, want allowed by trust_all", policy.Trust)
+	}
+	if policy.Trust.Identity.OriginKeyed() {
+		t.Fatalf("identity = %+v, want the path key (one push URL is unkeyable, so the key set must not be partial)", policy.Trust.Identity)
 	}
 }
 

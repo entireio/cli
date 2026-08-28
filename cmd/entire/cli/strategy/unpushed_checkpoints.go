@@ -46,8 +46,15 @@ func countQueuedCheckpointRefs(ctx context.Context) (int, error) {
 	return len(refs), nil
 }
 
-// countUnpushedV1Commits counts v1-branch commits not on the remote-tracking
-// ref (git-branch backend). No local v1 branch means nothing to push (0).
+// metadataRefInitSubject is the subject of the orphan commit that seeds
+// entire/checkpoints/v1 (see the metadata-ref initialization in common.go).
+// It carries no checkpoint and must not count as one.
+const metadataRefInitSubject = "Initialize metadata ref"
+
+// countUnpushedV1Commits counts v1-branch checkpoint commits not on the
+// remote-tracking ref (git-branch backend). No local v1 branch means nothing
+// to push (0). The orphan init commit is excluded: a freshly seeded branch
+// would otherwise read as "1 held" before any session was captured.
 func countUnpushedV1Commits(ctx context.Context, remoteName string) (int, error) {
 	local := checkpoint.ResolveRefs(ctx).Primary
 	if !gitCommitRefExists(ctx, local.String()) {
@@ -60,7 +67,8 @@ func countUnpushedV1Commits(ctx context.Context, remoteName string) (int, error)
 			rangeSpec = tracking + ".." + local.String()
 		}
 	}
-	out, err := exec.CommandContext(ctx, "git", "rev-list", "--count", rangeSpec).Output()
+	out, err := exec.CommandContext(ctx, "git", "rev-list", "--count",
+		"--invert-grep", "--grep=^"+metadataRefInitSubject+"$", rangeSpec).Output()
 	if err != nil {
 		return 0, fmt.Errorf("count unpushed v1 commits: %w", err)
 	}

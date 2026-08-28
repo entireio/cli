@@ -121,8 +121,14 @@ predicate for whether checkpoint data may leave the machine:
 - Tier off or unconfigured → an active repo syncs as on main.
 - Tier on → **every** active repo, repo-enabled or globally tracked, needs
   `trust_all`, every configured origin URL's normalized key in
-  `trusted_origins`, or (only when there is no origin) its canonical path in
-  `trusted_paths`. Errors fail closed.
+  `trusted_origins`, or its canonical path in `trusted_paths`. The path key
+  applies when there is no origin **or** when any origin URL does not reduce
+  to `host/owner/repo` (a bare local path, `file://`): the identity flips to
+  the path as a whole — partial origin keys would fail open on a multi-URL
+  push — so such a repo can still be trusted, as "this folder only".
+  `trust_all` is checked before any identity is resolved: consent for every
+  repo must not depend on being able to name this one. Errors reading the
+  origin config fail closed.
 
 Consent is recorded three ways, all into the same file: `entire enable`
 records it for the repo being enabled; the pre-push prompt offers **Yes**
@@ -141,7 +147,18 @@ push drains the backlog. Both egress entry points are gated
 `entire status` prints the global-tracking line (on/off, agents covered, why
 this repo is inactive) and the per-repo trust state; `--json` exposes
 `global_tracking.{enabled, settings_path, activation_source, active_here,
-inactive_reason, trust_state, trust_source, held_checkpoints}`. `entire doctor`
+inactive_reason, trust_state, trust_source, held_checkpoints}`. A repo with
+no repo-level settings that the tier captures renders as enabled — header
+`● Tracked globally · branch <b>`, active sessions, the agent-help hint;
+`--json` reports `enabled: true` with `activation_source: "global"` and no
+`error` — never as `○ not set up (run entire enable)`, which would tell the
+user to do the one thing the tier makes unnecessary and would read to an
+agent as Entire being off while its session is captured. An excluded or
+unclassifiable repo, or a tier that is off, keeps the not-set-up shape.
+`held_checkpoints` (and the enabled repo's unpushed count) count checkpoint
+commits only: the orphan `Initialize metadata ref` commit that seeds
+`entire/checkpoints/v1` is excluded, so a fresh repo does not read "1 held"
+before any session was captured. `entire doctor`
 reports an unreadable user file, missing or unverifiable user-level hooks
 (report-only — the post-run installs them), unusable exclude patterns, an
 origin that cannot be normalized, a held repo, and a globally tracked repo

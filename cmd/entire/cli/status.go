@@ -97,10 +97,20 @@ func runStatus(ctx context.Context, w io.Writer, detailed, jsonOutput bool) erro
 	sty := newStatusStyles(w)
 
 	if !projectExists && !localExists {
-		fmt.Fprintln(w, "○ not set up (run `entire enable` to get started)")
 		// This is exactly where the global tier matters: a repo with no
-		// repo-level setup may still be tracked machine-wide.
-		writeGlobalTrackingLine(ctx, w, sty)
+		// repo-level setup may still be tracked machine-wide. Telling that
+		// user to run `entire enable` would contradict the feature — so a
+		// globally tracked repo gets the enabled-shaped block instead.
+		info := computeGlobalTrackingInfo(ctx)
+		if info.trackedHere() {
+			fmt.Fprintln(w, formatGloballyTrackedStatusShort(ctx, sty))
+			renderGlobalTrackingLine(w, sty, info)
+			writeActiveSessions(ctx, w, sty)
+			writeAgentHelpHint(w, sty)
+			return nil
+		}
+		fmt.Fprintln(w, "○ not set up (run `entire enable` to get started)")
+		renderGlobalTrackingLine(w, sty, info)
 		return nil
 	}
 
@@ -157,6 +167,15 @@ type globalTrackingInfo struct {
 	TrustSource settings.TrustSource
 	// HeldCheckpoints counts checkpoints held locally (untrusted state only).
 	HeldCheckpoints int
+}
+
+// trackedHere reports that the user-global tier is capturing sessions in
+// this worktree: the tier is on and readable, the repo classified, and the
+// hook gate did not carve it out. This is the condition under which a repo
+// with no repo-level settings is "enabled" from the user's point of view.
+func (info globalTrackingInfo) trackedHere() bool {
+	return info.Configured && info.SettingsError == "" && info.Enabled &&
+		info.InRepo && info.PolicyError == "" && info.ActiveHere
 }
 
 // Trust-state identifiers, shared between the human line and the JSON field so
@@ -249,7 +268,12 @@ func heldCheckpointCount(ctx context.Context) int {
 // carve-out instead — "on (2 agents covered)" in an excluded repo reads as
 // covered when no session here is tracked.
 func writeGlobalTrackingLine(ctx context.Context, w io.Writer, sty statusStyles) {
-	info := computeGlobalTrackingInfo(ctx)
+	renderGlobalTrackingLine(w, sty, computeGlobalTrackingInfo(ctx))
+}
+
+// renderGlobalTrackingLine is writeGlobalTrackingLine for a caller that has
+// already computed the info (the not-set-up branch reads it twice otherwise).
+func renderGlobalTrackingLine(w io.Writer, sty statusStyles, info globalTrackingInfo) {
 	if !info.Configured {
 		return
 	}
@@ -374,6 +398,33 @@ func runStatusDetailed(ctx context.Context, w io.Writer, sty statusStyles, setti
 	return nil
 }
 
+// writeBranchSegment appends " · branch <name>" whenever the worktree branch
+// can be resolved.
+func writeBranchSegment(ctx context.Context, b *strings.Builder, sty statusStyles) {
+	repoRoot, err := paths.WorktreeRoot(ctx)
+	if err != nil {
+		return
+	}
+	if branch := resolveWorktreeBranch(ctx, repoRoot); branch != "" {
+		b.WriteString(sty.render(sty.dim, " · "))
+		b.WriteString("branch ")
+		b.WriteString(sty.render(sty.cyan, branch))
+	}
+}
+
+// formatGloballyTrackedStatusShort is the header for a repo with no
+// repo-level settings that the user-global tier captures anyway:
+// "● Tracked globally · branch main". The agents covered and the trust state
+// follow on the global-tracking lines, so the header carries neither.
+func formatGloballyTrackedStatusShort(ctx context.Context, sty statusStyles) string {
+	var b strings.Builder
+	b.WriteString(sty.render(sty.green, "●"))
+	b.WriteString(" ")
+	b.WriteString(sty.render(sty.bold, "Tracked globally"))
+	writeBranchSegment(ctx, &b, sty)
+	return b.String()
+}
+
 // formatSettingsStatusShort formats a short settings status line.
 // Output format: "● Enabled · branch main" or "○ Disabled · branch main"
 // (the branch segment is appended whenever it can be resolved).
@@ -390,14 +441,7 @@ func formatSettingsStatusShort(ctx context.Context, s *EntireSettings, sty statu
 		b.WriteString(sty.render(sty.bold, "Disabled"))
 	}
 
-	// Resolve branch from repo root
-	if repoRoot, err := paths.WorktreeRoot(ctx); err == nil {
-		if branch := resolveWorktreeBranch(ctx, repoRoot); branch != "" {
-			b.WriteString(sty.render(sty.dim, " · "))
-			b.WriteString("branch ")
-			b.WriteString(sty.render(sty.cyan, branch))
-		}
-	}
+	writeBranchSegment(ctx, &b, sty)
 
 	// Show enabled agents
 	if s.Enabled {
@@ -983,6 +1027,10 @@ func normalizeWorktreePath(path string) string {
 
 // statusJSON is the JSON output for `entire status --json`.
 type statusJSON struct {
+	// Enabled reports whether Entire captures sessions in this repo — through
+	// repo-level settings or through the user-global tier (then
+	// global_tracking.activation_source is "global" and agents is empty,
+	// because the hooks are user-level; see global_tracking.agents_covered).
 	Enabled        bool               `json:"enabled"`
 	Agents         []string           `json:"agents"`
 	ActiveSessions []sessionBriefJSON `json:"active_sessions"`
@@ -1065,7 +1113,8 @@ func runStatusJSON(ctx context.Context, w io.Writer) error {
 	// Attach the global-tracking tier to every output shape (including the
 	// error shapes) so `status --json` is useful outside a git repository.
 	var gt *globalTrackingJSON
-	if info := computeGlobalTrackingInfo(ctx); info.Configured {
+	info := computeGlobalTrackingInfo(ctx)
+	if info.Configured {
 		gt = &globalTrackingJSON{
 			SettingsError:    info.SettingsError,
 			Enabled:          info.Enabled,
@@ -1118,7 +1167,18 @@ func runStatusJSON(ctx context.Context, w io.Writer) error {
 	}
 
 	if projectErr != nil && localErr != nil {
-		return writeJSON(statusJSON{Error: "not set up"})
+		if !info.trackedHere() {
+			return writeJSON(statusJSON{Error: "not set up"})
+		}
+		// Same reasoning as the text path: a globally tracked repo is enabled
+		// from the agent's point of view, and it must find the agent-help
+		// pointer here — this is the discovery path for no-channel agents.
+		return writeJSON(statusJSON{
+			Enabled:        true,
+			Agents:         []string{},
+			ActiveSessions: collectActiveSessionsJSON(ctx),
+			AgentHelp:      agentHelpCommand,
+		})
 	}
 
 	s, err := LoadEntireSettings(ctx)
@@ -1152,59 +1212,70 @@ func runStatusJSON(ctx context.Context, w io.Writer) error {
 		result.CheckpointSyncError = syncInfo.Err
 		result.UnpushedCheckpoints = syncInfo.Unpushed
 
-		if store, err := session.NewStateStore(ctx); err == nil {
-			if states, err := store.List(ctx); err == nil {
-				// Finalize sessions whose agent has exited (matches the human
-				// status path) so --json doesn't leave them orphaned or
-				// report them under active_sessions.
-				finalizeExitedSessions(ctx, states, time.Now().Add(interactiveSweepCondenseBudget))
-				// Deduplicate by agent: one entry per agent, "active" wins over "idle".
-				type agentEntry struct {
-					brief    sessionBriefJSON
-					isActive bool
-				}
-				byAgent := make(map[string]*agentEntry)
-				for _, st := range states {
-					if st.IsEnded() {
-						continue
-					}
-					agent := string(st.AgentType)
-					if agent == "" {
-						agent = unknownPlaceholder
-					}
-					active := st.Phase == session.PhaseActive
-					if existing, ok := byAgent[agent]; ok {
-						if active && !existing.isActive {
-							existing.brief.Model = st.ModelName
-							existing.brief.Status = sessionStatusLabel(st)
-							existing.isActive = true
-						}
-						// Degradation is sticky across the dedupe: any degraded
-						// session for this agent must not be hidden by a healthy one.
-						existing.brief.CaptureDegraded = existing.brief.CaptureDegraded || st.CaptureDegradedAt != nil
-					} else {
-						byAgent[agent] = &agentEntry{
-							brief: sessionBriefJSON{
-								Agent:           agent,
-								Model:           st.ModelName,
-								Status:          sessionStatusLabel(st),
-								CaptureDegraded: st.CaptureDegradedAt != nil,
-							},
-							isActive: active,
-						}
-					}
-				}
-				for _, e := range byAgent {
-					result.ActiveSessions = append(result.ActiveSessions, e.brief)
-				}
-				sort.Slice(result.ActiveSessions, func(i, j int) bool {
-					return result.ActiveSessions[i].Agent < result.ActiveSessions[j].Agent
-				})
-			}
-		}
+		result.ActiveSessions = collectActiveSessionsJSON(ctx)
 	}
 
 	return writeJSON(result)
+}
+
+// collectActiveSessionsJSON lists the live sessions for `status --json`, one
+// entry per agent with "active" winning over "idle". Always non-nil so the
+// field encodes as [] rather than null. Errors yield the empty list: session
+// state is best-effort context, not a reason to fail status.
+func collectActiveSessionsJSON(ctx context.Context) []sessionBriefJSON {
+	out := []sessionBriefJSON{}
+	store, err := session.NewStateStore(ctx)
+	if err != nil {
+		return out
+	}
+	states, err := store.List(ctx)
+	if err != nil {
+		return out
+	}
+	// Finalize sessions whose agent has exited (matches the human status
+	// path) so --json doesn't leave them orphaned or report them under
+	// active_sessions.
+	finalizeExitedSessions(ctx, states, time.Now().Add(interactiveSweepCondenseBudget))
+	type agentEntry struct {
+		brief    sessionBriefJSON
+		isActive bool
+	}
+	byAgent := make(map[string]*agentEntry)
+	for _, st := range states {
+		if st.IsEnded() {
+			continue
+		}
+		agent := string(st.AgentType)
+		if agent == "" {
+			agent = unknownPlaceholder
+		}
+		active := st.Phase == session.PhaseActive
+		if existing, ok := byAgent[agent]; ok {
+			if active && !existing.isActive {
+				existing.brief.Model = st.ModelName
+				existing.brief.Status = sessionStatusLabel(st)
+				existing.isActive = true
+			}
+			// Degradation is sticky across the dedupe: any degraded session
+			// for this agent must not be hidden by a healthy one.
+			existing.brief.CaptureDegraded = existing.brief.CaptureDegraded || st.CaptureDegradedAt != nil
+			continue
+		}
+		byAgent[agent] = &agentEntry{
+			brief: sessionBriefJSON{
+				Agent:           agent,
+				Model:           st.ModelName,
+				Status:          sessionStatusLabel(st),
+				CaptureDegraded: st.CaptureDegradedAt != nil,
+			},
+			isActive: active,
+		}
+	}
+	for _, e := range byAgent {
+		out = append(out, e.brief)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Agent < out[j].Agent })
+	return out
 }
 
 // sessionStatusLabel derives a display status from a session state.

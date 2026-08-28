@@ -35,6 +35,12 @@ const (
 )
 
 // TrustIdentity is the exclusive origin-or-path key used for egress consent.
+// OriginKeys is set when an origin remote exists and EVERY configured fetch
+// and push URL normalizes to host/owner/repo (one key per URL; consent needs
+// all of them). Path — the worktree root — is the key when there is no origin
+// or when ANY origin URL cannot be normalized (a bare local path, file://):
+// the flip is whole, never a partial key set, and a repo keyed by path is not
+// covered by a trusted origin or vice versa.
 type TrustIdentity struct {
 	OriginKeys []string `json:"origin_keys,omitempty"`
 	Path       string   `json:"path,omitempty"`

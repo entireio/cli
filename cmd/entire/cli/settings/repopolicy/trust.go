@@ -2,7 +2,6 @@ package repopolicy
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"slices"
 	"strings"
@@ -10,9 +9,10 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/gitremote"
 )
 
-// ResolveTrustIdentity derives an exclusive origin or path identity. A
-// configured but unparseable origin is an error; path identity is allowed only
-// when origin is absent.
+// ResolveTrustIdentity derives an exclusive origin or path identity: origin
+// keys when every configured origin URL normalizes, the worktree path when
+// origin is absent or any URL cannot be normalized (see TrustIdentity). Only a
+// failure to read the origin config is an error.
 func ResolveTrustIdentity(ctx context.Context, repository Repository) (TrustIdentity, error) {
 	urls, fetchFound, err := gitremote.GetRemoteURLsInDirIfSet(ctx, repository.WorktreeRoot, "origin")
 	if err != nil {
@@ -28,16 +28,22 @@ func ResolveTrustIdentity(ctx context.Context, repository Repository) (TrustIden
 		for _, raw := range urls {
 			key := NormalizeOrigin(raw)
 			if key == "" {
-				return TrustIdentity{}, errors.New("configured origin cannot be normalized")
+				// A bare local path, file://, or any other URL that does not
+				// reduce to host/owner/repo. The whole identity flips to the
+				// path key rather than dropping this URL from the key set: a
+				// multi-URL push delivers to every URL, so partial origin keys
+				// would fail open — while a hard error would leave the repo
+				// with no way to be trusted at all.
+				keys = nil
+				break
 			}
 			if !slices.Contains(keys, key) {
 				keys = append(keys, key)
 			}
 		}
-		if len(keys) == 0 {
-			return TrustIdentity{}, errors.New("configured origin has no usable URLs")
+		if len(keys) > 0 {
+			return TrustIdentity{OriginKeys: keys}, nil
 		}
-		return TrustIdentity{OriginKeys: keys}, nil
 	}
 	return TrustIdentity{Path: repository.WorktreeRoot}, nil
 }
@@ -59,15 +65,19 @@ func DecideEgress(ctx context.Context, policy RepoPolicy, global *GlobalConfig, 
 	if global == nil || !global.Enabled {
 		return TrustDecision{Allowed: true, Source: TrustSourceLocal}
 	}
+	// trust_all is consent for every repo on the machine, whatever its remote
+	// looks like — it must not depend on resolving an identity. The identity
+	// is still attached when it resolves (status names the scope), but a
+	// failure to read the origin config never turns "Always" into a hold.
+	if global.TrustAll {
+		identity, _ := ResolveTrustIdentity(ctx, repository) //nolint:errcheck // display-only under trust_all; see above
+		return TrustDecision{Allowed: true, Source: TrustSourceAll, Reason: TrustReasonNone, Identity: identity}
+	}
 	identity, err := ResolveTrustIdentity(ctx, repository)
 	if err != nil {
 		return TrustDecision{Source: TrustSourceNone, Reason: TrustReasonInvalidOrigin}
 	}
 	decision := TrustDecision{Source: TrustSourceNone, Reason: TrustReasonUntrusted, Identity: identity}
-	if global.TrustAll {
-		decision.Allowed, decision.Source, decision.Reason = true, TrustSourceAll, TrustReasonNone
-		return decision
-	}
 	if identityTrusted(ctx, global, identity) {
 		decision.Allowed, decision.Source, decision.Reason = true, TrustSourceRepo, TrustReasonNone
 	}
