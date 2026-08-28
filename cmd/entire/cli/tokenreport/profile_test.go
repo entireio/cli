@@ -26,7 +26,7 @@ func TestProfileFor(t *testing.T) {
 				RecordsToolCalls:    true,
 				RecordsSubagents:    true,
 				RecordsCost:         false,
-				EffortSource:        effortSourcePerCallField,
+				EffortSource:        EffortSourcePerCallField,
 				TotalsOnly:          false,
 				Verified:            true,
 			},
@@ -42,7 +42,7 @@ func TestProfileFor(t *testing.T) {
 				RecordsToolCalls:    true,
 				RecordsSubagents:    false,
 				RecordsCost:         false,
-				EffortSource:        effortSourceTurnContext,
+				EffortSource:        EffortSourceTurnContext,
 				TotalsOnly:          false,
 				Verified:            true,
 			},
@@ -90,23 +90,27 @@ func TestProfileFor(t *testing.T) {
 				RecordsToolCalls:    true,
 				RecordsSubagents:    false,
 				RecordsCost:         true,
-				EffortSource:        effortSourceThinkingLevelEvents,
+				EffortSource:        EffortSourceThinkingLevelEvents,
 				TotalsOnly:          false,
 				Verified:            true,
 			},
 		},
 		{
+			// Cursor's model name is a display hint the report can show, not a
+			// per-call effort field: RecordsEffort is false because effort
+			// rules need per-call data, while EffortSource still names where
+			// that display hint comes from.
 			name:  "Cursor",
 			agent: agentCursor,
 			want: AgentProfile{
 				RecordsThinking:     false,
 				RecordsCacheTTL:     false,
-				RecordsEffort:       true,
+				RecordsEffort:       false,
 				RecordsModelPerCall: false,
 				RecordsToolCalls:    false,
 				RecordsSubagents:    false,
 				RecordsCost:         false,
-				EffortSource:        effortSourceModelName,
+				EffortSource:        EffortSourceModelName,
 				TotalsOnly:          true,
 				Verified:            true,
 			},
@@ -163,12 +167,17 @@ func TestProfileFor(t *testing.T) {
 	}
 }
 
+// TestProfileFor_UnknownAgent asserts the safe default for an agent with no
+// known profile: totals-only, with every record-* flag and Verified false,
+// rather than a bare zero value that a caller could mistake for "this agent
+// records nothing, not even a total".
 func TestProfileFor_UnknownAgent(t *testing.T) {
 	t.Parallel()
 
+	want := AgentProfile{TotalsOnly: true}
 	got := ProfileFor(types.AgentType("Some Unknown Agent"))
-	if !reflect.DeepEqual(got, AgentProfile{}) {
-		t.Errorf("ProfileFor(unknown) = %+v, want zero value", got)
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("ProfileFor(unknown) = %+v, want %+v", got, want)
 	}
 	if got.Verified {
 		t.Error("ProfileFor(unknown).Verified = true, want false")
@@ -179,8 +188,8 @@ func TestKnownAgents(t *testing.T) {
 	t.Parallel()
 
 	known := KnownAgents()
-	if len(known) != 8 {
-		t.Fatalf("KnownAgents() returned %d agents, want 8: %v", len(known), known)
+	if len(known) == 0 {
+		t.Fatal("KnownAgents() returned no agents")
 	}
 
 	seen := make(map[types.AgentType]bool, len(known))

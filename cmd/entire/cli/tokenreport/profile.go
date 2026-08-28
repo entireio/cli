@@ -1,7 +1,8 @@
 package tokenreport
 
 import (
-	"sort"
+	"maps"
+	"slices"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 )
@@ -23,14 +24,28 @@ const (
 	agentFactoryAIDroid types.AgentType = "Factory AI Droid"
 )
 
-// Effort source vocabulary for AgentProfile.EffortSource. A value states
-// where an agent's effort/reasoning-level signal is read from in its
-// transcript; the empty string means the agent does not record it.
+// EffortSource identifies where an agent's effort/reasoning-level signal is
+// read from in its transcript. The zero value ("") means no such signal is
+// available at all — distinct from a signal that exists but is display-only
+// (see EffortSourceModelName), which AgentProfile.RecordsEffort governs.
+type EffortSource string
+
+// Effort source vocabulary for AgentProfile.EffortSource.
 const (
-	effortSourcePerCallField        = "per-call field"
-	effortSourceTurnContext         = "turn context"
-	effortSourceThinkingLevelEvents = "thinking-level events"
-	effortSourceModelName           = "model name"
+	// EffortSourcePerCallField means effort is recorded as its own field on
+	// each call, usable directly by effort-tuning rules.
+	EffortSourcePerCallField EffortSource = "per-call field"
+	// EffortSourceTurnContext means effort is set once per turn rather than
+	// per call.
+	EffortSourceTurnContext EffortSource = "turn context"
+	// EffortSourceThinkingLevelEvents means effort is inferred from
+	// thinking-level events rather than an explicit field.
+	EffortSourceThinkingLevelEvents EffortSource = "thinking-level events"
+	// EffortSourceModelName means only the model name hints at effort. This
+	// is display-only: a model name is not a per-call field that effort
+	// rules can act on, so an agent using only this source still has
+	// RecordsEffort false.
+	EffortSourceModelName EffortSource = "model name"
 )
 
 // AgentProfile states what an agent's transcript records, so reports print
@@ -43,10 +58,13 @@ type AgentProfile struct {
 	// by TTL tier (e.g. 1h vs 5m ephemeral cache creation).
 	RecordsCacheTTL bool
 	// RecordsEffort is true when the transcript records an effort/reasoning
-	// level signal in some form; see EffortSource for where.
+	// level signal usable by effort rules; see EffortSource for where. A
+	// display-only hint (EffortSourceModelName) does not count.
 	RecordsEffort bool
 	// RecordsModelPerCall is true when the model used is attributable to
-	// individual calls (as opposed to only a session-wide or per-model total).
+	// individual calls. It is also true when only per-model totals are
+	// recorded (Copilot CLI) rather than nothing at all — check TotalsOnly
+	// to know whether that granularity is per-call or per-model.
 	RecordsModelPerCall bool
 	// RecordsToolCalls is true when individual tool invocations are recorded.
 	RecordsToolCalls bool
@@ -56,18 +74,22 @@ type AgentProfile struct {
 	// RecordsCost is true when the transcript records a cost figure directly
 	// (as opposed to one derived by the report from token counts and prices).
 	RecordsCost bool
-	// EffortSource names where RecordsEffort's signal comes from: one of
-	// effortSourcePerCallField, effortSourceTurnContext,
-	// effortSourceThinkingLevelEvents, effortSourceModelName, or "" when
-	// RecordsEffort is false.
-	EffortSource string
+	// EffortSource names where an effort/reasoning-level signal, if any, is
+	// read from. This may be set even when RecordsEffort is false: Cursor
+	// sets it to EffortSourceModelName as a display hint even though a
+	// model name is not a field effort rules can act on. The zero value
+	// means no signal is available at all.
+	EffortSource EffortSource
 	// EffortSettingVerified is true only when the printed effort-tuning
 	// setting name has been verified against the agent's real config surface.
 	// False for every agent in B1 (spec §8.5 open); a setting name may be
 	// printed only when this is true.
 	EffortSettingVerified bool
 	// TotalsOnly is true when the agent's transcript only supports a
-	// session-wide usage total, not a per-category breakdown.
+	// session-wide usage total, not a per-category breakdown. It is also
+	// the value ProfileFor uses for an agent with no known profile, since
+	// totals-only is the safe assumption for an unrecognized transcript
+	// shape.
 	TotalsOnly bool
 	// Verified is true when this profile was checked against real committed
 	// checkpoints for the agent. False for agents with no checkpoints to
@@ -85,9 +107,10 @@ type AgentProfile struct {
 // are facts about what each agent writes, not aspirational targets — do not
 // "improve" a row without a new survey to back it.
 var agentProfiles = map[types.AgentType]AgentProfile{
-	// Claude Code 2.1.246: usage.output_tokens_details.thinking_tokens,
-	// cache_creation.ephemeral_1h_input_tokens, top-level effort, per-call
-	// model, tool_use blocks, Task tool subagent records. No cost field.
+	// Claude Code: usage.output_tokens_details.thinking_tokens has been
+	// recorded since ~2026-08-11; cache_creation.ephemeral_1h_input_tokens,
+	// top-level effort, per-call model, tool_use blocks, and Task tool
+	// subagent records are all present. No cost field.
 	agentClaudeCode: {
 		RecordsThinking:     true,
 		RecordsCacheTTL:     true,
@@ -96,14 +119,14 @@ var agentProfiles = map[types.AgentType]AgentProfile{
 		RecordsToolCalls:    true,
 		RecordsSubagents:    true,
 		RecordsCost:         false,
-		EffortSource:        effortSourcePerCallField,
+		EffortSource:        EffortSourcePerCallField,
 		TotalsOnly:          false,
 		Verified:            true,
 	},
-	// Codex: reasoning summaries yield thinking tokens; effort is set once
-	// per turn context, not per call; per-call model and tool calls present;
-	// spawn_agent events are seen but not aggregated into subagent totals; no
-	// cache-TTL breakdown; no cost field.
+	// Codex: reasoning_output_tokens yields thinking token counts; effort is
+	// set once per turn context, not per call; per-call model and tool
+	// calls present; spawn_agent events are seen but not aggregated into
+	// subagent totals; no cache-TTL breakdown; no cost field.
 	agentCodex: {
 		RecordsThinking:     true,
 		RecordsCacheTTL:     false,
@@ -112,7 +135,7 @@ var agentProfiles = map[types.AgentType]AgentProfile{
 		RecordsToolCalls:    true,
 		RecordsSubagents:    false,
 		RecordsCost:         false,
-		EffortSource:        effortSourceTurnContext,
+		EffortSource:        EffortSourceTurnContext,
 		TotalsOnly:          false,
 		Verified:            true,
 	},
@@ -133,7 +156,8 @@ var agentProfiles = map[types.AgentType]AgentProfile{
 		Verified:            true,
 	},
 	// Gemini CLI: thinking tokens and tool calls present; per-message model
-	// field verified on real data; no effort signal, no subagent records, no
+	// field verified on real data (the Gemini parser reads `model` from
+	// Task 14 onward); no effort signal, no subagent records, no
 	// cache-TTL breakdown, no cost field.
 	agentGemini: {
 		RecordsThinking:     true,
@@ -159,22 +183,24 @@ var agentProfiles = map[types.AgentType]AgentProfile{
 		RecordsToolCalls:    true,
 		RecordsSubagents:    false,
 		RecordsCost:         true,
-		EffortSource:        effortSourceThinkingLevelEvents,
+		EffortSource:        EffortSourceThinkingLevelEvents,
 		TotalsOnly:          false,
 		Verified:            true,
 	},
-	// Cursor: transcript exposes only a session-wide usage total; effort can
-	// only be inferred from the model name; no per-call model, tool calls,
-	// subagent records, thinking, cache-TTL, or cost field.
+	// Cursor: transcript exposes only a session-wide usage total; the model
+	// name is a display-only hint, not a per-call effort field, so
+	// RecordsEffort is false even though EffortSource names it; no per-call
+	// model, tool calls, subagent records, thinking, cache-TTL, or cost
+	// field.
 	agentCursor: {
 		RecordsThinking:     false,
 		RecordsCacheTTL:     false,
-		RecordsEffort:       true,
+		RecordsEffort:       false,
 		RecordsModelPerCall: false,
 		RecordsToolCalls:    false,
 		RecordsSubagents:    false,
 		RecordsCost:         false,
-		EffortSource:        effortSourceModelName,
+		EffortSource:        EffortSourceModelName,
 		TotalsOnly:          true,
 		Verified:            true,
 	},
@@ -214,19 +240,19 @@ var agentProfiles = map[types.AgentType]AgentProfile{
 }
 
 // KnownAgents returns the agent types tokenreport has a capability profile
-// for, sorted for deterministic output. Used by tests to guard against drift
-// from the agent.AgentType* registry constants tokenreport cannot import.
+// for, sorted for deterministic output.
 func KnownAgents() []types.AgentType {
-	agents := make([]types.AgentType, 0, len(agentProfiles))
-	for a := range agentProfiles {
-		agents = append(agents, a)
-	}
-	sort.Slice(agents, func(i, j int) bool { return agents[i] < agents[j] })
-	return agents
+	return slices.Sorted(maps.Keys(agentProfiles))
 }
 
-// ProfileFor returns the capability profile for agent, or the zero
-// AgentProfile (Verified false) for an agent with no known profile.
+// ProfileFor returns the capability profile for agent. An agent with no
+// known profile gets the safe default AgentProfile{TotalsOnly: true} —
+// totals only, no breakdown, Verified false — rather than a bare zero
+// value, so an unrecognized agent's report degrades to a totals view
+// instead of implying that nothing at all was recorded.
 func ProfileFor(agent types.AgentType) AgentProfile {
-	return agentProfiles[agent]
+	if profile, ok := agentProfiles[agent]; ok {
+		return profile
+	}
+	return AgentProfile{TotalsOnly: true}
 }
