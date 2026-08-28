@@ -159,12 +159,14 @@ worktree than the install still cleans up, including the legacy local-dev
   content (see Transcript above).
 - **Token capture depends on the title slot** staying routed through the tee
   (doctor-checked, setup-repaired).
-- **Live E2E / CI runs in Gemini API-key mode** (agy ≥ 1.1.13) with the shared
-  `GEMINI_API_KEY` secret, so antigravity is in the default e2e matrix. The
-  default `cloudcode-pa` backend (OAuth/ADC) stays entitlement-gated
-  (AUTH_PERMISSION_DENIED, subject 110002 without a Gemini Code Assist
-  subscription); the harness fails fast on those walls and on
-  `GEMINI_API_KEY … not set` / `API_KEY_INVALID`. Details: `e2e/README.md`.
+- **agy does not execute hooks in Gemini API-key mode** (verified 1.1.22: hooks
+  load, tools run, no hook fires — on OAuth/ADC the same hooks fire). So the
+  e2e harness's API-key mode authenticates fine but cannot produce checkpoints,
+  and the CI leg stays dispatch-only (ADC or OAuth needed to pass). The default
+  `cloudcode-pa` backend stays entitlement-gated (AUTH_PERMISSION_DENIED,
+  subject 110002 without a Gemini Code Assist subscription); the harness fails
+  fast on those walls and on `GEMINI_API_KEY … not set` / `API_KEY_INVALID`.
+  Details: `e2e/README.md`.
 - **Transcript-derived file lists can be incomplete**: agy sometimes persists a
   `PLANNER_RESPONSE` step with `truncated_fields`, dropping `TargetFile` from a
   mutating tool call (~0.8% of `replace_file_content` calls in one corpus).

@@ -77,13 +77,16 @@ Antigravity E2E resolves its auth mode from the environment, in this order:
    JSON `project_id`. This path needs a Gemini Code Assist entitlement on the
    project (see caveat below). In GitHub Actions it is enabled by the optional
    `ANTIGRAVITY_GOOGLE_APPLICATION_CREDENTIALS_JSON` secret.
-2. **Gemini API key** (default in CI) — `GEMINI_API_KEY` set: agy ≥ 1.1.13 talks
+2. **Gemini API key** — `GEMINI_API_KEY` set: agy ≥ 1.1.13 talks
    to the Gemini API directly with no account session. The harness isolates
    `HOME` per repo, writes `{"modelProvider":"gemini"}` into that home's
    `~/.gemini/antigravity-cli/settings.json`, passes `GEMINI_API_KEY` (and
    `GOOGLE_GEMINI_BASE_URL` if set) through, and scrubs `GOOGLE_API_KEY` — agy
-   prefers it over `GEMINI_API_KEY` when both are set. This is the same secret
-   gemini-cli uses, which is why antigravity is in the default CI matrix.
+   prefers it over `GEMINI_API_KEY` when both are set. **Caveat (agy 1.1.22):** on
+   this route agy loads `.agents/hooks.json` but never executes the hooks, so
+   Entire records nothing and e2e cannot pass; the mode is wired and ready for
+   when agy fixes that. The CI hook probe (`.entire/logs/agy-hook-probe.log` in
+   artifacts) is how to tell "hooks not executed" from "hooks not loaded".
 
 Both isolated modes also pre-trust the test repo (`trustedWorkspaces` in that
 `settings.json`, agy's equivalent of `GEMINI_CLI_TRUST_WORKSPACE=true`): agy only
@@ -138,7 +141,7 @@ To diagnose: read `console.log` in the failing test's artifact directory. Compar
 
 ## CI Workflows
 
-- **`.github/workflows/e2e.yml`** — Runs full suite on push to main. Default matrix: `[claude-code, opencode, factoryai-droid, cursor-cli, copilot-cli, roger-roger, codex, antigravity]` (gemini-cli is dispatch-only, see the workflow comment). Antigravity runs in agy's Gemini API-key mode using the shared `GEMINI_API_KEY` secret; the optional `ANTIGRAVITY_GOOGLE_APPLICATION_CREDENTIALS_JSON` secret switches it to ADC.
+- **`.github/workflows/e2e.yml`** — Runs full suite on push to main. Default matrix: `[claude-code, opencode, factoryai-droid, cursor-cli, copilot-cli, roger-roger, codex]`. gemini-cli and antigravity are dispatch-only (see the workflow comments): antigravity authenticates fine in agy's Gemini API-key mode but agy does not execute hooks on that route, so the leg only passes on ADC (`ANTIGRAVITY_GOOGLE_APPLICATION_CREDENTIALS_JSON`).
 - **`.github/workflows/e2e-isolated.yml`** — Manual dispatch for debugging a single test. Inputs: agent + test name filter.
 
 Both workflows run `go run ./e2e/bootstrap` before tests to handle agent-specific CI setup (auth config, warmup).

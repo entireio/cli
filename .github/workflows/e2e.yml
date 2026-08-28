@@ -52,10 +52,17 @@ jobs:
           if [ -n "$input" ]; then
             echo "agents=[\"$input\"]" >> "$GITHUB_OUTPUT"
           else
-            # antigravity runs in agy's Gemini API-key mode (agy >= 1.1.13) using the
-            # same GEMINI_API_KEY secret as gemini-cli, so it no longer needs an
-            # entitled Google identity and sits in the default list.
-            echo 'agents=["claude-code","opencode","factoryai-droid","cursor-cli","copilot-cli","roger-roger","codex","antigravity"]' >> "$GITHUB_OUTPUT"
+            # antigravity is deliberately absent from the all-agents list. The
+            # harness can run agy in Gemini API-key mode (agy >= 1.1.13, the shared
+            # GEMINI_API_KEY secret), and agy authenticates and runs the model that
+            # way — but agy does not EXECUTE hooks.json hooks on that auth route
+            # (verified on 1.1.22: hooks load, tools run, no hook ever fires), so no
+            # checkpoint is recorded and the leg fails for a reason no change on
+            # our side can fix. It stays in the workflow_dispatch choices above;
+            # with the ANTIGRAVITY_GOOGLE_APPLICATION_CREDENTIALS_JSON secret the
+            # leg runs on ADC, where hooks do fire. Put it back in this list once
+            # agy runs hooks in API-key mode.
+            echo 'agents=["claude-code","opencode","factoryai-droid","cursor-cli","copilot-cli","roger-roger","codex"]' >> "$GITHUB_OUTPUT"
           fi
 
   e2e-tests:
