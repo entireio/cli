@@ -51,6 +51,9 @@ func TestRegistryOperations(t *testing.T) {
 		if !strings.Contains(err.Error(), "unknown agent") {
 			t.Errorf("expected 'unknown agent' in error, got: %v", err)
 		}
+		if !errors.Is(err, ErrUnknownAgent) {
+			t.Errorf("Get() error = %v, want ErrUnknownAgent", err)
+		}
 	})
 
 	t.Run("List returns registered agents", func(t *testing.T) {
@@ -506,6 +509,24 @@ func TestExternalFailures_SortedSnapshot(t *testing.T) {
 	}
 	if failures[0].Binary != "/bin/entire-agent-abe" {
 		t.Errorf("ExternalFailures()[0].Binary = %q, want the discovered path", failures[0].Binary)
+	}
+}
+
+func TestExternalFailureFor(t *testing.T) {
+	snapshotRegistry(t)
+
+	loadErr := errors.New("boom")
+	RegisterExternalFailure("broken", "/bin/entire-agent-broken", loadErr)
+
+	failure, ok := ExternalFailureFor("broken")
+	if !ok {
+		t.Fatal("ExternalFailureFor() ok = false, want true")
+	}
+	if failure.Binary != "/bin/entire-agent-broken" || !errors.Is(failure.Err, loadErr) {
+		t.Errorf("ExternalFailureFor() = %+v, want recorded path and error", failure)
+	}
+	if _, ok := ExternalFailureFor("missing"); ok {
+		t.Error("ExternalFailureFor(missing) ok = true, want false")
 	}
 }
 

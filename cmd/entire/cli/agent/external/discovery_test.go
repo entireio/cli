@@ -25,15 +25,14 @@ import (
 // probe memo built from it are process-wide: without this, results leak
 // between tests and the memo makes failures depend on test order.
 //
-// It also raises the info budget. A mock written into a fresh t.TempDir() is
-// always a cold exec — on macOS the first run of a freshly written file was
-// measured at 320-394ms, past the shipped 300ms — so a test that execs a mock
-// must raise the budget rather than loosen its assertions.
+// It also raises the info budget so behavioral tests do not depend on machine
+// load. Timeout tests set their own smaller budget. Fixtures are never warmed,
+// so call-site tests still exercise the cold execution path users get.
 func discoveryTest(t *testing.T) {
 	t.Helper()
 	agent.ResetExternalsForTesting()
 	t.Cleanup(agent.ResetExternalsForTesting)
-	setInfoTimeout(t, 5*time.Second)
+	setInfoTimeout(t, 15*time.Second)
 }
 
 func setInfoTimeout(t *testing.T, d time.Duration) {
@@ -110,18 +109,6 @@ func touchOnRunScript(name, marker string) string {
 func countOnRunScript(counter, reply string) string {
 	return "#!/bin/sh\necho x >> " + counter + "\n" +
 		"case \"$1\" in\n  info)\n    echo '" + reply + "'\n    ;;\nesac\n"
-}
-
-// warmUp executes a mock binary once so its cold-start cost is not charged to
-// the budget under test. A freshly written file pays code-signing validation
-// and page-in on its first run, and that cost grows sharply when several such
-// binaries start at once — measured here as a healthy mock breaching a 1s
-// budget while four neighbours were also starting cold.
-func warmUp(t *testing.T, binPath string) {
-	t.Helper()
-	if err := exec.CommandContext(context.Background(), binPath, "info").Run(); err != nil {
-		t.Fatalf("warm up %s: %v", binPath, err)
-	}
 }
 
 func runCount(t *testing.T, counter string) int {
@@ -238,6 +225,34 @@ func TestDiscoverAndRegister_DedupesOnDerivedAgentName(t *testing.T) {
 	}
 }
 
+// TestDiscoverAndRegister_InvalidEarlierPathEntryDoesNotHideValidBinary pins
+// normal PATH lookup behavior: a directory with an executable-looking name is
+// not a command and must not hide a runnable binary in a later PATH directory.
+func TestDiscoverAndRegister_InvalidEarlierPathEntryDoesNotHideValidBinary(t *testing.T) {
+	requireSh(t)
+	discoveryTest(t)
+	enableExternalAgents(t)
+
+	name := "disc-invalid-before-valid"
+	invalidDir := t.TempDir()
+	if err := os.Mkdir(filepath.Join(invalidDir, binaryPrefix+name), 0o755); err != nil {
+		t.Fatalf("create invalid PATH entry: %v", err)
+	}
+	validDir := setupDiscoveryDir(t, name, makeInfoJSON(name))
+	t.Setenv("PATH", invalidDir+string(os.PathListSeparator)+validDir)
+
+	DiscoverAndRegister(context.Background())
+
+	if _, err := agent.Get(types.AgentName(name)); err != nil {
+		t.Fatalf("valid later-PATH agent %q was hidden by a directory: %v", name, err)
+	}
+	for _, failure := range agent.ExternalFailures() {
+		if failure.Name == types.AgentName(name) {
+			t.Errorf("usable agent %q remained recorded as broken: %v", name, failure.Err)
+		}
+	}
+}
+
 // TestDiscoverAndRegister_SkipsNameConflict covers the rule that a built-in
 // always wins: the colliding binary must not even be executed, because the
 // gated discovery path runs inside the git and agent hook trees.
@@ -327,7 +342,7 @@ func TestDiscoverAndRegister_ParallelProbesDoNotSerialize(t *testing.T) {
 	discoveryTest(t)
 	enableExternalAgents(t)
 
-	const budget = time.Second
+	const budget = 10 * time.Second
 	setInfoTimeout(t, budget)
 
 	dir := t.TempDir()
@@ -337,8 +352,7 @@ func TestDiscoverAndRegister_ParallelProbesDoNotSerialize(t *testing.T) {
 		writeAgentBinary(t, dir, name, stalled)
 	}
 	goodName := "disc-par-good"
-	goodPath := writeAgentBinary(t, dir, goodName, mockInfoScript(makeInfoJSON(goodName)))
-	warmUp(t, goodPath)
+	writeAgentBinary(t, dir, goodName, mockInfoScript(makeInfoJSON(goodName)))
 	t.Setenv("PATH", dir)
 
 	started := time.Now()
@@ -670,6 +684,29 @@ func TestDiscoverAndRegisterNamedAlways_InvalidInfo(t *testing.T) {
 	}
 	// The explicit caller gets the error, and it is also recorded for listing.
 	failureFor(t, string(name))
+}
+
+func TestDiscoverAndRegisterNamedAlways_MemoizesFailedBinary(t *testing.T) {
+	requireSh(t)
+	discoveryTest(t)
+
+	name := types.AgentName("disc-named-failure-memo")
+	dir := t.TempDir()
+	counter := filepath.Join(dir, "runs")
+	writeAgentBinary(t, dir, string(name), countOnRunScript(counter, "not json"))
+	t.Setenv("PATH", dir)
+
+	firstErr := DiscoverAndRegisterNamedAlways(context.Background(), name)
+	if firstErr == nil {
+		t.Fatal("first named discovery error = nil, want invalid info error")
+	}
+	secondErr := DiscoverAndRegisterNamedAlways(context.Background(), name)
+	if secondErr == nil {
+		t.Fatal("second named discovery error = nil, want memoized invalid info error")
+	}
+	if got := runCount(t, counter); got != 1 {
+		t.Errorf("failed named binary executed %d times, want once per process", got)
+	}
 }
 
 // TestDiscoverAndRegisterNamedAlways_MissingHelper pins that a missing binary is

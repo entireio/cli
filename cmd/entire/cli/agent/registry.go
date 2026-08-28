@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"runtime"
@@ -40,6 +41,10 @@ type ExternalFailure struct {
 	Err    error
 }
 
+// ErrUnknownAgent marks a name that has no registry entry. Callers use it to
+// distinguish a typo from an installed external agent that failed to load.
+var ErrUnknownAgent = errors.New("unknown agent")
+
 // Register adds an agent factory to the registry.
 // Called from init() in each agent implementation.
 func Register(name types.AgentName, factory Factory) {
@@ -76,7 +81,7 @@ func Get(name types.AgentName) (Agent, error) {
 
 	e, ok := registry[name]
 	if !ok {
-		return nil, fmt.Errorf("unknown agent: %s (available: %v)", name, usableNamesLocked())
+		return nil, fmt.Errorf("%w: %s (available: %v)", ErrUnknownAgent, name, usableNamesLocked())
 	}
 	if e.err != nil {
 		return nil, fmt.Errorf("external agent %q (%s) is not usable: %w", name, e.binary, e.err)
@@ -144,6 +149,18 @@ func ExternalFailures() []ExternalFailure {
 		return strings.Compare(string(a.Name), string(b.Name))
 	})
 	return failures
+}
+
+// ExternalFailureFor returns the recorded failure for name, if any.
+func ExternalFailureFor(name types.AgentName) (ExternalFailure, bool) {
+	registryMu.RLock()
+	defer registryMu.RUnlock()
+
+	e, ok := registry[name]
+	if !ok || e.err == nil {
+		return ExternalFailure{}, false
+	}
+	return ExternalFailure{Name: name, Binary: e.binary, Err: e.err}, true
 }
 
 // ProbedExternalBinaries returns the set of external binary paths already

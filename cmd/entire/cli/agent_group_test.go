@@ -125,3 +125,32 @@ func TestRunAgentList_ShowsBrokenExternalAgents(t *testing.T) {
 		t.Errorf("broken agent listed without a reason:\n%s", out)
 	}
 }
+
+func TestAgentAdd_ReportsBrokenExternalAgentError(t *testing.T) {
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("sh not available")
+	}
+	agent.ResetExternalsForTesting()
+	t.Cleanup(agent.ResetExternalsForTesting)
+
+	name := "add-broken-ext"
+	dir := t.TempDir()
+	agenttestutil.WriteExternalAgentBinary(t, dir, name, "#!/bin/sh\necho 'not json'\n")
+	t.Setenv("PATH", dir)
+
+	cmd := newAgentAddCmd()
+	var stdout bytes.Buffer
+	cmd.SetOut(&stdout)
+	cmd.SetArgs([]string{name})
+
+	if err := cmd.Execute(); err == nil {
+		t.Fatal("agent add error = nil, want broken external agent error")
+	}
+	out := stdout.String()
+	if !strings.Contains(out, "invalid JSON") {
+		t.Errorf("agent add output omitted the load error:\n%s", out)
+	}
+	if strings.Contains(out, "Unknown agent") {
+		t.Errorf("agent add mislabeled a known broken plugin as unknown:\n%s", out)
+	}
+}

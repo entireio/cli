@@ -126,10 +126,12 @@ Examples:
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			name := args[0]
+			if err := external.DiscoverAndRegisterNamedAlways(cmd.Context(), types.AgentName(name)); err != nil {
+				return printAgentLookupError(cmd.OutOrStdout(), name, err)
+			}
 			ag, err := agent.Get(types.AgentName(name))
 			if err != nil {
-				printWrongAgentError(cmd.OutOrStdout(), name)
-				return NewSilentError(errors.New("wrong agent name"))
+				return printAgentLookupError(cmd.OutOrStdout(), name, err)
 			}
 			opts := EnableOptions{
 				ForceHooks:     forceHooks,

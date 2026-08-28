@@ -902,8 +902,7 @@ for you and (optionally) create a matching GitHub repository via the gh CLI.`,
 			if agentName != "" {
 				ag, err := agent.Get(types.AgentName(agentName))
 				if err != nil {
-					printWrongAgentError(cmd.ErrOrStderr(), agentName)
-					return NewSilentError(errors.New("wrong agent name"))
+					return printAgentLookupError(cmd.ErrOrStderr(), agentName, err)
 				}
 				selectedAgent = ag
 			}
@@ -1585,10 +1584,12 @@ func localExists(ctx context.Context) bool {
 
 // runRemoveAgent removes hooks for a specific agent.
 func runRemoveAgent(ctx context.Context, w io.Writer, name string) error {
+	if err := external.DiscoverAndRegisterNamedAlways(ctx, types.AgentName(name)); err != nil {
+		return printAgentLookupError(w, name, err)
+	}
 	ag, err := agent.Get(types.AgentName(name))
 	if err != nil {
-		printWrongAgentError(w, name)
-		return NewSilentError(errors.New("wrong agent name"))
+		return printAgentLookupError(w, name, err)
 	}
 
 	hookAgent, ok := agent.AsHookSupport(ag)
@@ -1868,6 +1869,15 @@ func printMissingAgentError(w io.Writer) {
 // printWrongAgentError writes a helpful error when an unknown agent name is provided.
 func printWrongAgentError(w io.Writer, name string) {
 	printAgentError(w, fmt.Sprintf("Unknown agent %q.", name))
+}
+
+func printAgentLookupError(w io.Writer, name string, err error) error {
+	if errors.Is(err, agent.ErrUnknownAgent) {
+		printWrongAgentError(w, name)
+		return NewSilentError(errors.New("wrong agent name"))
+	}
+	fmt.Fprintf(w, "Agent %q is unavailable: %v\n", name, err)
+	return NewSilentError(err)
 }
 
 // setupAgentHooksNonInteractive sets up hooks for a specific agent non-interactively.

@@ -27,13 +27,11 @@ const (
 // budget and they all run concurrently, so a scan costs roughly one budget
 // rather than one per binary.
 //
-// A var, not a const, for two reasons: the value is provisional and expected to
-// be retuned, and tests need to raise it. A binary written into a fresh
-// t.TempDir() is always a cold exec — on macOS the first run of a freshly
-// written file pays code-signing validation and cold page-in, measured at
-// 320-394ms, well past this budget. A test that execs a mock must raise this
-// rather than loosen its assertions.
-var infoTimeout = 300 * time.Millisecond //nolint:gochecknoglobals // provisional budget, raised by tests
+// Ten seconds covers cold starts even on a saturated machine. This matches the
+// old aggregate scan budget, but each binary gets the budget concurrently, so
+// several stalled plugins still cost roughly ten seconds rather than N times
+// ten seconds. A var keeps timeout-path tests fast and deterministic.
+var infoTimeout = 10 * time.Second //nolint:gochecknoglobals // policy knob overridden by timeout tests
 
 // Errors that classify why a discovered binary is unusable. exec reports only
 // "signal: killed" when a context kills the child, so without these a budget
@@ -134,7 +132,12 @@ func collectCandidates(ctx context.Context, pathEnv string) []candidate {
 	}
 	probed := agent.ProbedExternalBinaries()
 
-	seen := make(map[types.AgentName]bool) // first $PATH dir wins, as $PATH itself does
+	seen := make(map[types.AgentName]bool) // first runnable $PATH entry wins
+	type staticFailure struct {
+		path string
+		err  error
+	}
+	staticFailures := make(map[types.AgentName]staticFailure)
 	var candidates []candidate
 
 	for _, dir := range filepath.SplitList(pathEnv) {
@@ -150,14 +153,15 @@ func collectCandidates(ctx context.Context, pathEnv string) []candidate {
 			if name == "" || seen[name] {
 				continue
 			}
-			seen[name] = true
 
 			// Already probed this exact binary in this process, ready or failed.
 			if _, ok := probed[binPath]; ok {
+				seen[name] = true
 				continue
 			}
 
 			if usable[name] {
+				seen[name] = true
 				// A built-in always wins, and the colliding binary is never
 				// executed. The gated DiscoverAndRegister runs inside the hook
 				// trees, so an override would let a binary dropped anywhere on
@@ -171,13 +175,22 @@ func collectCandidates(ctx context.Context, pathEnv string) []candidate {
 
 			ok, err := inspectBinary(name, binPath)
 			if err != nil {
-				agent.RegisterExternalFailure(name, binPath, err)
+				if _, exists := staticFailures[name]; !exists {
+					staticFailures[name] = staticFailure{path: binPath, err: err}
+				}
 				continue
 			}
 			if !ok {
 				continue
 			}
+			seen[name] = true
+			delete(staticFailures, name)
 			candidates = append(candidates, candidate{name: name, path: binPath})
+		}
+	}
+	for name, failure := range staticFailures {
+		if !seen[name] {
+			agent.RegisterExternalFailure(name, failure.path, failure.err)
 		}
 	}
 	return candidates
@@ -328,6 +341,9 @@ func discoverAndRegisterNamed(ctx context.Context, name types.AgentName) error {
 			return nil
 		}
 		return fmt.Errorf("looking up external agent %q binary %q: %w", name, binName, err)
+	}
+	if failure, ok := agent.ExternalFailureFor(name); ok && failure.Binary == binPath {
+		return failure.Err
 	}
 
 	c := candidate{name: name, path: binPath}
