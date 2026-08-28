@@ -61,7 +61,8 @@ jobs:
             # our side can fix. It stays in the workflow_dispatch choices above;
             # with the ANTIGRAVITY_GOOGLE_APPLICATION_CREDENTIALS_JSON secret the
             # leg runs on ADC, where hooks do fire. Put it back in this list once
-            # agy runs hooks in API-key mode.
+            # agy runs hooks in API-key mode (upstream:
+            # https://github.com/google-antigravity/antigravity-cli/issues/893).
             echo 'agents=["claude-code","opencode","factoryai-droid","cursor-cli","copilot-cli","roger-roger","codex"]' >> "$GITHUB_OUTPUT"
           fi
 

@@ -160,7 +160,8 @@ worktree than the install still cleans up, including the legacy local-dev
 - **Token capture depends on the title slot** staying routed through the tee
   (doctor-checked, setup-repaired).
 - **agy does not execute hooks in Gemini API-key mode** (verified 1.1.22: hooks
-  load, tools run, no hook fires — on OAuth/ADC the same hooks fire). So the
+  load, tools run, no hook fires — on OAuth/ADC the same hooks fire; reported as
+  google-antigravity/antigravity-cli#893). So the
   e2e harness's API-key mode authenticates fine but cannot produce checkpoints,
   and the CI leg stays dispatch-only (ADC or OAuth needed to pass). The default
   `cloudcode-pa` backend stays entitlement-gated (AUTH_PERMISSION_DENIED,

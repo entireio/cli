@@ -85,7 +85,7 @@ Antigravity E2E resolves its auth mode from the environment, in this order:
    prefers it over `GEMINI_API_KEY` when both are set. **Caveat (agy 1.1.22):** on
    this route agy loads `.agents/hooks.json` but never executes the hooks, so
    Entire records nothing and e2e cannot pass; the mode is wired and ready for
-   when agy fixes that. The CI hook probe (`.entire/logs/agy-hook-probe.log` in
+   when agy fixes that (google-antigravity/antigravity-cli#893). The CI hook probe (`.entire/logs/agy-hook-probe.log` in
    artifacts) is how to tell "hooks not executed" from "hooks not loaded".
 
 Both isolated modes also pre-trust the test repo (`trustedWorkspaces` in that
