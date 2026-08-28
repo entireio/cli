@@ -170,6 +170,12 @@ type WriteOptions struct {
 	// Transcript position at checkpoint start - tracks what was added during this checkpoint
 	TranscriptIdentifierAtStart string // Last identifier when checkpoint started (UUID for Claude, message ID for Gemini)
 	CheckpointTranscriptStart   int    // Transcript line offset at start of this checkpoint's data
+	// TokenTranscriptStart is the transcript offset where this checkpoint's
+	// token_usage window began (SessionState.TokenTranscriptStart). It equals
+	// CheckpointTranscriptStart except after a carry-forward, which resets only
+	// the transcript offset; readers slicing the stored transcript for
+	// per-checkpoint token attribution must use this one.
+	TokenTranscriptStart int
 
 	// CheckpointTranscriptStart is written to both Metadata.CheckpointTranscriptStart
 	// and the deprecated Metadata.TranscriptLinesAtStart for backward compatibility.
@@ -421,6 +427,12 @@ type Metadata struct {
 	// Transcript position at checkpoint start - tracks what was added during this checkpoint
 	TranscriptIdentifierAtStart string `json:"transcript_identifier_at_start,omitempty"` // Last identifier when checkpoint started (UUID for Claude, message ID for Gemini)
 	CheckpointTranscriptStart   int    `json:"checkpoint_transcript_start,omitempty"`    // Raw transcript (full.jsonl) line offset at start of this checkpoint's data
+	// TokenTranscriptStart is the raw transcript offset where this checkpoint's
+	// token_usage window begins. Differs from CheckpointTranscriptStart after a
+	// carry-forward (which resets the transcript offset to 0 so the stored
+	// transcript is self-contained, but leaves the token window alone). Present
+	// on checkpoints with token_usage_version ≥ 2; absent on legacy ones.
+	TokenTranscriptStart int `json:"token_transcript_start,omitempty"`
 
 	// Deprecated: Use CheckpointTranscriptStart instead. Written for backward compatibility with older CLI versions.
 	TranscriptLinesAtStart int `json:"transcript_lines_at_start,omitempty"`

@@ -766,6 +766,7 @@ func buildCondensationWriteOptions(
 		TurnID:                      state.TurnID,
 		TranscriptIdentifierAtStart: state.TranscriptIdentifierAtStart,
 		CheckpointTranscriptStart:   state.CheckpointTranscriptStart,
+		TokenTranscriptStart:        state.TokenTranscriptStart,
 		TokenUsage:                  sessionData.TokenUsage,
 		SkillEvents:                 skillEvents,
 		SessionMetrics:              buildSessionMetrics(state),

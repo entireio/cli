@@ -4321,6 +4321,7 @@ func TestCondenseSession_TokenWindowSurvivesCarryForward(t *testing.T) {
 	// The transcript is self-contained (starts at 0, both calls present), but the
 	// tokens are this checkpoint's own: only msg_2.
 	assert.Equal(t, 0, content.Metadata.CheckpointTranscriptStart, "transcript scope stays self-contained")
+	assert.Equal(t, 2, content.Metadata.TokenTranscriptStart, "the token window start is persisted so readers can slice the stored transcript to it")
 	assert.Equal(t, 200, content.Metadata.TokenUsage.InputTokens, "input tokens must cover only the new window")
 	assert.Equal(t, 75, content.Metadata.TokenUsage.OutputTokens, "output tokens must cover only the new window")
 	assert.Equal(t, 1, content.Metadata.TokenUsage.APICallCount, "one API call in the new window")

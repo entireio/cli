@@ -728,6 +728,7 @@ func (s *treeWriter) writeSessionToSubdirectory(ctx context.Context, opts WriteO
 		TurnID:                      opts.TurnID,
 		TranscriptIdentifierAtStart: opts.TranscriptIdentifierAtStart,
 		CheckpointTranscriptStart:   opts.CheckpointTranscriptStart,
+		TokenTranscriptStart:        opts.TokenTranscriptStart,
 		TranscriptLinesAtStart:      opts.CheckpointTranscriptStart, // Deprecated: kept for backward compat
 		CompactTranscriptStart:      compactTranscriptStart,
 		TokenUsage:                  opts.TokenUsage,
