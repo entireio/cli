@@ -158,7 +158,11 @@ it. Revoke removes the repo's current origin keys and its current path; an
 entry from a *previous* origin URL is not recognized and stays. A hold never
 blocks the user's own push: the branch lands, checkpoint data stays local (the
 refs backend keeps its queue), one stderr line explains, and the first trusted
-push drains the backlog. Both egress entry points are gated
+push drains the backlog. The SessionStart banner names the hold in an
+untrusted repo, and in a globally tracked repo that will sync only because
+`trust_all` is on it says so and points at `exclude_paths` — captured *and*
+synced in silence is the one state the user never chose for that repo;
+per-repo consent and repo-enabled repos stay quiet. Both egress entry points are gated
 (`ManualCommitStrategy.prePush` and `PushQueuedCheckpointRefs`).
 
 ## Status and doctor

@@ -288,17 +288,26 @@ func sessionStartMessage(agentName types.AgentName, emptyRepo bool) string {
 	return "\n\nEntire CLI will link this conversation to your next commit."
 }
 
-// globalTrustBannerSuffix returns the held-sync banner line, empty for every
-// consented state (settings.CheckpointEgressHeld decides). With the global
-// tier on it fires for any active repo that is not yet trusted — a
-// repo-enabled one included — which is intended. Codex banners are
-// single-line, so the suffix joins with a space there.
+// globalTrustBannerSuffix returns the trust banner line. Two states earn one:
+// a held repo (settings.CheckpointEgressHeld — with the tier on that is any
+// active repo not yet trusted, a repo-enabled one included), and a globally
+// tracked repo that will sync only because trust_all is on — the user never
+// chose that for this repo, so it must not be captured AND synced in silence.
+// Per-repo consent (trusted_origins/paths, a repo the user enabled) and a
+// tier that is off stay silent. Codex banners are single-line, so the suffix
+// joins with a space there.
 func globalTrustBannerSuffix(ctx context.Context, agentName types.AgentName) string {
-	if !settings.CheckpointEgressHeld(ctx) {
+	var notice string
+	switch {
+	case settings.CheckpointEgressHeld(ctx):
+		// "checkpoint sync remote", not "origin": sync targets the elected remote.
+		notice = "Entire is capturing this repo locally. Checkpoints aren't synced yet — run `entire trust` to sync them to your checkpoint sync remote."
+	case settings.GloballyTrackedUnderTrustAll(ctx):
+		notice = "Entire is capturing this repo (global tracking) and will sync its checkpoints on your next push because trust_all is on in " +
+			settings.UserSettingsPath() + ". Add this repo to exclude_paths there to opt it out."
+	default:
 		return ""
 	}
-	// "checkpoint sync remote", not "origin": sync targets the elected remote.
-	const notice = "Entire is capturing this repo locally. Checkpoints aren't synced yet — run `entire trust` to sync them to your checkpoint sync remote."
 	if agentName == agent.AgentNameCodex {
 		return " " + notice
 	}

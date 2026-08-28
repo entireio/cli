@@ -62,6 +62,16 @@ func CurrentTrustSource(ctx context.Context) TrustSource {
 	return policy.Trust.Source
 }
 
+// GloballyTrackedUnderTrustAll reports a repo the user-global tier captures
+// (no repo-level setup of its own) whose checkpoints will sync because
+// trust_all is on — the one consented state the user never chose for THIS
+// repo, which is why the SessionStart banner names it.
+func GloballyTrackedUnderTrustAll(ctx context.Context) bool {
+	policy, err := currentPolicy(ctx)
+	return err == nil && policy.Active && policy.ActivationSource == repopolicy.ActivationGlobal &&
+		policy.Trust.Allowed && policy.Trust.Source == repopolicy.TrustSourceAll
+}
+
 // CheckpointEgressHeld reports an active repo whose checkpoints are held
 // locally pending trust.
 func CheckpointEgressHeld(ctx context.Context) bool {
