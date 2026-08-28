@@ -945,7 +945,7 @@ func (s *ManualCommitStrategy) extractOrCreateSessionData(ctx context.Context, r
 	case hasShadowBranch:
 		// Shadow branch exists (from SaveStep commits) — extract transcript and
 		// metadata from the branch tree, preferring the live transcript if fresher.
-		data, err := s.extractSessionData(ctx, repo, shadowHash, state.SessionID, state.FilesTouched, state.AgentType, state.TranscriptPath, state.CheckpointTranscriptStart, state.Phase.IsActive())
+		data, err := s.extractSessionData(ctx, repo, shadowHash, state.SessionID, state.FilesTouched, state.AgentType, state.TranscriptPath, state.TokenTranscriptStart, state.Phase.IsActive())
 		if err != nil {
 			return nil, fmt.Errorf("failed to extract session data: %w", err)
 		}
@@ -1391,8 +1391,10 @@ func committedFilesExcludingMetadata(committedFiles map[string]struct{}) []strin
 // liveTranscriptPath, when non-empty and readable, is preferred over the shadow branch copy.
 // This handles the case where SaveStep was skipped (no code changes) but the transcript
 // continued growing — the shadow branch copy would be stale.
-// checkpointTranscriptStart is the line offset (Claude) or message index (Gemini) where the current checkpoint began.
-func (s *ManualCommitStrategy) extractSessionData(ctx context.Context, repo *git.Repository, shadowRef plumbing.Hash, sessionID string, filesTouched []string, agentType types.AgentType, liveTranscriptPath string, checkpointTranscriptStart int, isActive bool) (*ExtractedSessionData, error) {
+// tokenTranscriptStart is the line offset (Claude) or message index (Gemini) where this checkpoint's token window
+// began. It equals state.CheckpointTranscriptStart except after a carry-forward, which resets only the transcript
+// offset (see advanceTranscriptWindows); the stored transcript itself is always the full file.
+func (s *ManualCommitStrategy) extractSessionData(ctx context.Context, repo *git.Repository, shadowRef plumbing.Hash, sessionID string, filesTouched []string, agentType types.AgentType, liveTranscriptPath string, tokenTranscriptStart int, isActive bool) (*ExtractedSessionData, error) {
 	ag, _ := agent.GetByAgentType(agentType) //nolint:errcheck // ag may be nil for unknown agent types; callers use type assertions so nil is safe
 	commit, err := repo.CommitObject(shadowRef)
 	if err != nil {
@@ -1467,7 +1469,7 @@ func (s *ManualCommitStrategy) extractSessionData(ctx context.Context, repo *git
 		// cumulative snapshot needing the same rescoping SaveStep already did.
 		// CondenseSession fills the already-rescoped window total in instead;
 		// see withSubagentTokensFrom.
-		data.TokenUsage = agent.CalculateTokenUsage(ctx, ag, data.Transcript, checkpointTranscriptStart, "")
+		data.TokenUsage = agent.CalculateTokenUsage(ctx, ag, data.Transcript, tokenTranscriptStart, "")
 		data.SkillEvents = agent.ExtractSkillEvents(ctx, ag, data.Transcript, 0)
 	}
 
@@ -1513,7 +1515,7 @@ func (s *ManualCommitStrategy) extractSessionDataFromLiveTranscript(ctx context.
 		// for the cleanup reason: this is the live mid-turn path, where the subagent
 		// transcripts are still on disk. It is the one place the gap noted on
 		// withSubagentTokensFrom could be closed by reading them.
-		data.TokenUsage = agent.CalculateTokenUsage(ctx, ag, data.Transcript, state.CheckpointTranscriptStart, "")
+		data.TokenUsage = agent.CalculateTokenUsage(ctx, ag, data.Transcript, state.TokenTranscriptStart, "")
 		data.SkillEvents = agent.ExtractSkillEvents(ctx, ag, data.Transcript, 0)
 	}
 
@@ -1717,7 +1719,7 @@ func (s *ManualCommitStrategy) CondenseSessionByID(ctx context.Context, sessionI
 		)
 
 		resetCheckpointWindow(state)
-		state.CheckpointTranscriptStart = result.TotalTranscriptLines
+		advanceTranscriptWindows(state, result.TotalTranscriptLines)
 		state.CheckpointTranscriptSize = result.TranscriptSizeBaseline
 		state.Phase = session.PhaseIdle
 		state.LastCheckpointID = result.CheckpointID
@@ -1892,7 +1894,7 @@ func (s *ManualCommitStrategy) CondenseAndMarkFullyCondensed(ctx context.Context
 		}
 
 		resetCheckpointWindow(state)
-		state.CheckpointTranscriptStart = result.TotalTranscriptLines
+		advanceTranscriptWindows(state, result.TotalTranscriptLines)
 		state.LastCheckpointID = result.CheckpointID
 		state.LastCheckpointCommitHash = state.BaseCommit
 		state.RealignAttributionBase(state.BaseCommit)

@@ -488,6 +488,19 @@ func accumulateTokenUsage(existing, incoming *agent.TokenUsage) *agent.TokenUsag
 // successful (non-skipped) CondenseSession write, so this is exactly the
 // point at which materializeTaskRecords' payloads have just been durably
 // stored — see removeCompletedTaskRecords.
+// advanceTranscriptWindows moves both per-checkpoint offsets to the end of the
+// transcript just condensed. CheckpointTranscriptStart scopes the next
+// checkpoint's stored transcript; TokenTranscriptStart scopes its token_usage.
+// They advance together here and diverge in exactly one place:
+// carryForwardToNewShadowBranch resets the transcript offset to 0 (so the
+// post-partial-commit checkpoint's transcript is self-contained) and leaves the
+// token offset alone (so its token_usage stays a delta). Every condensation
+// site must go through this helper rather than setting one offset by hand.
+func advanceTranscriptWindows(state *SessionState, transcriptEnd int) {
+	state.CheckpointTranscriptStart = transcriptEnd
+	state.TokenTranscriptStart = transcriptEnd
+}
+
 func resetCheckpointWindow(state *SessionState) {
 	state.StepCount = 0
 	state.CheckpointTokenUsage = nil

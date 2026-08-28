@@ -1121,6 +1121,12 @@ func TestPostCommit_ActiveSession_CarryForward_PartialCommit(t *testing.T) {
 	assert.Equal(t, 0, state.CheckpointTranscriptStart,
 		"carry-forward should reset CheckpointTranscriptStart to 0 for full transcript reprocessing")
 
+	// The token window must NOT follow the transcript reset: the two transcript
+	// lines were condensed into the commit's checkpoint, so the next checkpoint's
+	// token_usage starts after them (see advanceTranscriptWindows).
+	assert.Equal(t, 2, state.TokenTranscriptStart,
+		"carry-forward must leave TokenTranscriptStart at the condensed transcript end")
+
 	// Verify LastCheckpointID was cleared (next commit generates fresh ID)
 	assert.Empty(t, state.LastCheckpointID,
 		"carry-forward should clear LastCheckpointID")

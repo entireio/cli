@@ -3481,8 +3481,8 @@ func TestCondenseSession_GeminiMultiCheckpoint(t *testing.T) {
 
 	// Before checkpoint 2, manually update CheckpointTranscriptStart to simulate
 	// what would happen after condensing checkpoint 1
-	state.CheckpointTranscriptStart = 2 // Start from message index 2 (the second user prompt)
-	state.StepCount = 1                 // Set to 1 (will be incremented to 2 by SaveStep)
+	advanceTranscriptWindows(state, 2) // Start from message index 2 (the second user prompt), as a condensation would
+	state.StepCount = 1                // Set to 1 (will be incremented to 2 by SaveStep)
 	// CheckpointsCount is now the prompt window (SessionTurnCount - PromptWindowBase),
 	// not StepCount. Simulate two counted turns so the assertion below still expects 2.
 	state.SessionTurnCount = 2
@@ -3630,6 +3630,7 @@ func TestCondenseSession_CopilotScopedCheckpointMetadataAndSessionBackfill(t *te
 		AgentType:                 agent.AgentTypeCopilotCLI,
 		ModelName:                 "claude-sonnet-4.6",
 		CheckpointTranscriptStart: 5,
+		TokenTranscriptStart:      5, // both offsets advance together after a condensation
 	}
 
 	s := &ManualCommitStrategy{}
@@ -4234,4 +4235,94 @@ func TestMarshalPromptAttributionsIncludingPending(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestCondenseSession_TokenWindowSurvivesCarryForward pins the fix for the
+// checkpoint token double-count. carryForwardToNewShadowBranch resets
+// CheckpointTranscriptStart to 0 after a partial commit so the next
+// checkpoint's *transcript* is self-contained. Checkpoint token_usage used to
+// be computed from that same offset, so every post-carry-forward checkpoint
+// re-reported the whole session's tokens (53% of non-first checkpoints in this
+// repo's history). Token scope has its own offset, TokenTranscriptStart, which
+// carry-forward must not reset.
+func TestCondenseSession_TokenWindowSurvivesCarryForward(t *testing.T) {
+	dir := t.TempDir()
+	testutil.InitRepo(t, dir)
+	repo, err := git.PlainOpen(dir)
+	require.NoError(t, err)
+	worktree, err := repo.Worktree()
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "code.go"), []byte("package main"), 0o644))
+	_, err = worktree.Add("code.go")
+	require.NoError(t, err)
+	_, err = worktree.Commit("Initial commit", &git.CommitOptions{
+		Author: &object.Signature{Name: "Test", Email: "test@test.com", When: time.Now()},
+	})
+	require.NoError(t, err)
+	t.Chdir(dir)
+
+	s := &ManualCommitStrategy{}
+	sessionID := "2026-08-27-token-window"
+	metadataDir := ".entire/metadata/" + sessionID
+	metadataDirAbs := filepath.Join(dir, metadataDir)
+	require.NoError(t, os.MkdirAll(metadataDirAbs, 0o755))
+	transcriptPath := filepath.Join(metadataDirAbs, paths.TranscriptFileName)
+
+	// Checkpoint 1: one API call — input 100, output 50.
+	part1 := `{"type":"user","message":{"role":"user","content":"do the thing"}}
+{"type":"assistant","message":{"id":"msg_1","role":"assistant","content":"done","usage":{"input_tokens":100,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":50}}}
+`
+	require.NoError(t, os.WriteFile(transcriptPath, []byte(part1), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "code.go"), []byte("package main // v2"), 0o644))
+	step := StepContext{
+		SessionID: sessionID, ModifiedFiles: []string{"code.go"}, NewFiles: []string{}, DeletedFiles: []string{},
+		MetadataDir: metadataDir, MetadataDirAbs: metadataDirAbs, CommitMessage: "Checkpoint 1",
+		AuthorName: "Test", AuthorEmail: "test@test.com", AgentType: agent.AgentTypeClaudeCode,
+	}
+	require.NoError(t, s.SaveStep(context.Background(), step))
+	state, err := s.loadSessionState(context.Background(), sessionID)
+	require.NoError(t, err)
+	result, err := s.CondenseSession(context.Background(), repo, id.MustCheckpointID("aaaa11112222"), state, nil)
+	require.NoError(t, err)
+	// Every condensation wrapper (CondenseSessionByID, condenseAndUpdateState, …)
+	// applies the result through advanceTranscriptWindows; do the same here.
+	advanceTranscriptWindows(state, result.TotalTranscriptLines)
+	require.Equal(t, 2, state.CheckpointTranscriptStart, "condensation advances the transcript window")
+	require.Equal(t, 2, state.TokenTranscriptStart, "condensation advances the token window alongside it")
+	require.NoError(t, s.saveSessionState(context.Background(), state))
+
+	// Partial commit → carry-forward: exactly what carryForwardToNewShadowBranch
+	// does to the transcript window, and must NOT do to the token window.
+	state.CheckpointTranscriptStart = 0
+	require.NoError(t, s.saveSessionState(context.Background(), state))
+
+	// Checkpoint 2: one more API call — input 200, output 75.
+	part2 := part1 + `{"type":"user","message":{"role":"user","content":"and another"}}
+{"type":"assistant","message":{"id":"msg_2","role":"assistant","content":"done again","usage":{"input_tokens":200,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":75}}}
+`
+	require.NoError(t, os.WriteFile(transcriptPath, []byte(part2), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "code.go"), []byte("package main // v3"), 0o644))
+	step.CommitMessage = "Checkpoint 2"
+	require.NoError(t, s.SaveStep(context.Background(), step))
+	state, err = s.loadSessionState(context.Background(), sessionID)
+	require.NoError(t, err)
+	require.Equal(t, 0, state.CheckpointTranscriptStart, "carry-forward reset is in effect")
+	require.Equal(t, 2, state.TokenTranscriptStart, "token window is untouched by carry-forward")
+
+	cp2 := id.MustCheckpointID("bbbb33334444")
+	result2, err := s.CondenseSession(context.Background(), repo, cp2, state, nil)
+	require.NoError(t, err)
+	advanceTranscriptWindows(state, result2.TotalTranscriptLines)
+
+	store := checkpoint.NewGitStore(repo, checkpoint.DefaultV1Refs())
+	content, err := store.ReadLatestSessionContent(t.Context(), cp2)
+	require.NoError(t, err)
+	require.NotNil(t, content.Metadata.TokenUsage)
+	// The transcript is self-contained (starts at 0, both calls present), but the
+	// tokens are this checkpoint's own: only msg_2.
+	assert.Equal(t, 0, content.Metadata.CheckpointTranscriptStart, "transcript scope stays self-contained")
+	assert.Equal(t, 200, content.Metadata.TokenUsage.InputTokens, "input tokens must cover only the new window")
+	assert.Equal(t, 75, content.Metadata.TokenUsage.OutputTokens, "output tokens must cover only the new window")
+	assert.Equal(t, 1, content.Metadata.TokenUsage.APICallCount, "one API call in the new window")
+	assert.Equal(t, 4, state.TokenTranscriptStart, "token window advances to the transcript end after condensing")
 }

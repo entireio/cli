@@ -1526,7 +1526,7 @@ func (s *ManualCommitStrategy) condenseAndUpdateState(
 		// content was not. Keep its existing SaveStep count as the ownership
 		// pin used by cleanup and doctor until a home commit consumes it.
 		state.StepCount = pendingStepCount
-		state.CheckpointTranscriptStart = result.TotalTranscriptLines
+		advanceTranscriptWindows(state, result.TotalTranscriptLines)
 		state.CheckpointTranscriptSize = result.TranscriptSizeBaseline
 		logging.Info(logCtx, "session guest-condensed from a sibling worktree; shadow state untouched",
 			slog.String("strategy", "manual-commit"),
@@ -1545,7 +1545,7 @@ func (s *ManualCommitStrategy) condenseAndUpdateState(
 	state.BaseCommit = newHead
 	state.RealignAttributionBase(newHead)
 	resetCheckpointWindow(state)
-	state.CheckpointTranscriptStart = result.TotalTranscriptLines
+	advanceTranscriptWindows(state, result.TotalTranscriptLines)
 	state.CheckpointTranscriptSize = result.TranscriptSizeBaseline
 
 	// Clear attribution tracking — condensation already used these values
@@ -2937,7 +2937,7 @@ func (s *ManualCommitStrategy) HandleTurnEnd(ctx context.Context, state *Session
 							slog.Int("old_offset", state.CheckpointTranscriptStart),
 							slog.Int("new_offset", pos),
 						)
-						state.CheckpointTranscriptStart = pos
+						advanceTranscriptWindows(state, pos)
 					}
 				}
 			}
@@ -3332,6 +3332,9 @@ func (s *ManualCommitStrategy) carryForwardToNewShadowBranch(
 	//   the full transcript, which could be large
 	// An alternative would be incremental checkpoints (only new content since last condensation),
 	// but this would complicate checkpoint retrieval and require careful tracking of dependencies.
+	// TokenTranscriptStart is deliberately NOT reset: token_usage must stay "since
+	// the previous checkpoint" or every post-carry-forward checkpoint re-reports the
+	// session total (see advanceTranscriptWindows and SessionState.TokenTranscriptStart).
 	state.StepCount = 1
 	state.CheckpointTranscriptStart = 0
 	state.CheckpointTranscriptSize = 0

@@ -588,6 +588,8 @@ failed or skipped regeneration **drops** the prior `transcript.jsonl` and clears
 
 `checkpoints_count` in the root summary is the aggregate displayed "steps" count: the sum of per-session prompt-window counts. Despite the historical name, it is not a count of checkpoint records.
 
+`token_usage` (root and per-session) is **this checkpoint's delta** — the API calls since the previous checkpoint of the same session — never the session's running total. Its scope is `SessionState.TokenTranscriptStart`, which advances with `CheckpointTranscriptStart` at every condensation but is not reset by carry-forward (a partial commit resets only the transcript offset, so the stored transcript starts at line 0 while the tokens stay a delta). Checkpoints written before the two offsets were split (CLI ≤ 0.10.x) computed tokens from the transcript offset, so a non-first checkpoint with `checkpoint_transcript_start` 0/absent may carry the session's cumulative total; readers summing across checkpoints must dedupe those per session (keep the latest cumulative snapshot, add only later deltas).
+
 **Session-level metadata.json (`Metadata`, abbreviated):**
 ```json
 {
