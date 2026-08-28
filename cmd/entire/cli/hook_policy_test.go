@@ -140,3 +140,56 @@ func TestPrepareHookPolicy_CommittedLocalFileCannotBypassExclusions(t *testing.T
 		t.Fatalf("policy = %+v, want inactive/excluded — a committed local file must not activate", policy)
 	}
 }
+
+// TestPrepareHookPolicy_CommittedProjectFileCannotBypassExclusions: a clone
+// that ships .entire/settings.json (the normal way teams share Entire
+// settings) is repository content, and with the tier on the user's
+// exclude_paths outrank it — otherwise any third-party clone could activate
+// capture, install git hooks, and (under trust_all) sync transcripts from a
+// folder the user explicitly excluded.
+func TestPrepareHookPolicy_CommittedProjectFileCannotBypassExclusions(t *testing.T) {
+	dir := setupTestDir(t)
+	testutil.InitRepo(t, dir)
+	settings.ClearVersionedPathCache()
+	t.Cleanup(settings.ClearVersionedPathCache)
+	writeSettings(t, `{}`)
+	testutil.RunGit(t, dir, "add", settings.EntireSettingsFile)
+	testutil.RunGit(t, dir, "commit", "-m", "ship project settings")
+
+	resolved, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := t.TempDir()
+	t.Setenv("ENTIRE_CONFIG_DIR", cfg)
+	if err := os.WriteFile(filepath.Join(cfg, "settings.json"),
+		[]byte(`{"global":{"enabled":true,"exclude_paths":["`+filepath.ToSlash(resolved)+`"]}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	_, policy, err := prepareHookPolicy(t.Context())
+	if err != nil {
+		t.Fatalf("prepareHookPolicy: %v", err)
+	}
+	if policy.Active || policy.InactiveReason != repopolicy.InactiveReasonGlobalExcluded {
+		t.Fatalf("policy = %+v, want inactive/excluded — a committed project file must not outrank the user's exclusions", policy)
+	}
+	if policy.Trust.Allowed {
+		t.Fatalf("trust = %+v, want egress held for an inactive repo", policy.Trust)
+	}
+
+	// The developer's own untracked local file is their action on this clone
+	// and keeps the explicit-enable semantics even inside an excluded path.
+	local := filepath.Join(dir, settings.EntireSettingsLocalFile)
+	if err := os.WriteFile(local, []byte(`{"enabled":true}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	settings.ClearVersionedPathCache()
+	_, policy, err = prepareHookPolicy(t.Context())
+	if err != nil {
+		t.Fatalf("prepareHookPolicy (local override): %v", err)
+	}
+	if !policy.Active || policy.ActivationSource != repopolicy.ActivationLocal {
+		t.Fatalf("policy = %+v, want active/local — an untracked local enable is the user's own choice", policy)
+	}
+}

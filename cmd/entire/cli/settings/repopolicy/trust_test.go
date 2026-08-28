@@ -134,8 +134,8 @@ func TestReadRepoActivation(t *testing.T) {
 		{name: "project without key defaults enabled", project: `{}`, want: RepoActivation{Configured: true, Enabled: true}},
 		{name: "project disabled", project: `{"enabled":false}`, want: RepoActivation{Configured: true}},
 		{name: "local without key is not activation", local: `{"log_level":"DEBUG"}`},
-		{name: "local enabled", local: `{"enabled":true}`, want: RepoActivation{Configured: true, Enabled: true}},
-		{name: "local veto wins over project", project: `{"enabled":true}`, local: `{"enabled":false}`, want: RepoActivation{Configured: true}},
+		{name: "local enabled", local: `{"enabled":true}`, want: RepoActivation{Configured: true, Enabled: true, LocalOverride: true}},
+		{name: "local veto wins over project", project: `{"enabled":true}`, local: `{"enabled":false}`, want: RepoActivation{Configured: true, LocalOverride: true}},
 		{name: "non-boolean enabled is an error", project: `{"enabled":"yes"}`, wantErr: true},
 		{name: "malformed json is an error", project: `{"enabled":tru`, wantErr: true},
 	}

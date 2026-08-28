@@ -12,6 +12,7 @@ import (
 	"sync"
 
 	"github.com/go-git/go-git/v6/plumbing"
+	"github.com/go-git/go-git/v6/plumbing/filemode"
 	"github.com/go-git/go-git/v6/plumbing/object"
 
 	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
@@ -57,19 +58,25 @@ const localLayerTrackedReason = "it is tracked in git, so it is not local to thi
 // than losing a preference.
 //
 // Rejection is a downgrade, never an error: Command resets to "" and
-// ConfigurePrivacyFilter falls back to resolving "opf" on $PATH, which Go's
-// exec.ErrDot protects against "." entries. If that binary is missing, the
-// pre-push rewrite fails closed rather than pushing content the user believed
-// OPF had scanned.
+// ConfigurePrivacyFilter falls back to resolving "opf" on $PATH, where Go's
+// exec.LookPath refuses a match from the current directory (exec.ErrDot). That
+// protection covers $PATH lookups only: a command that itself contains a path
+// separator never consults $PATH, so a `./…` or worktree-absolute command is
+// rejected here on location, independent of ownership. If the fallback binary
+// is missing, the pre-push rewrite fails closed rather than pushing content
+// the user believed OPF had scanned.
 func enforceOPFCommandTrust(ctx context.Context, s *EntireSettings, localSettingsPath string, localData []byte) {
 	if s == nil || s.Redaction == nil || s.Redaction.OpenAIPrivacyFilter == nil || s.Redaction.OpenAIPrivacyFilter.Command == "" {
 		return
 	}
 	localVerified := classifyLocalSettingsDeep(ctx, localSettingsPath) == localOwn
-	enforceOPFCommandTrustForVerifiedData(s, localData, localVerified)
+	enforceOPFCommandTrustForVerifiedData(s, localData, localVerified, filepath.Dir(filepath.Dir(localSettingsPath)))
 }
 
-func enforceOPFCommandTrustForVerifiedData(s *EntireSettings, localData []byte, localVerified bool) {
+// enforceOPFCommandTrustForVerifiedData applies the ownership verdict and the
+// location rule. worktreeRoot may be "" when unknown (the location rule is
+// then skipped; ownership still decides).
+func enforceOPFCommandTrustForVerifiedData(s *EntireSettings, localData []byte, localVerified bool, worktreeRoot string) {
 	if s == nil || s.Redaction == nil || s.Redaction.OpenAIPrivacyFilter == nil {
 		return
 	}
@@ -84,6 +91,13 @@ func enforceOPFCommandTrustForVerifiedData(s *EntireSettings, localData []byte, 
 		reason = "it did not come from .entire/settings.local.json"
 	case !localVerified:
 		reason = "the local settings file could not be verified as untracked"
+	case commandInsideWorktree(opf.Command, worktreeRoot):
+		// Ownership of the settings file is one gate; the binary's location
+		// is the other. An executable that lives inside the repository is by
+		// definition deliverable through it, whichever probe shape a clone
+		// used to make the settings file look locally owned — so it is never
+		// run, even from a genuinely untracked local file.
+		reason = "it points inside the repository worktree; install the binary outside the repo or use a $PATH name"
 	default:
 		return
 	}
@@ -98,6 +112,44 @@ func enforceOPFCommandTrustForVerifiedData(s *EntireSettings, localData []byte, 
 	opf.rejectedCommand = opf.Command
 	opf.rejectionReason = reason
 	opf.Command = ""
+}
+
+// commandInsideWorktree reports whether an OPF command names an executable
+// under the repository worktree. A bare name (no separator) is a $PATH lookup
+// and is left alone; a relative path resolves against the hook's working
+// directory, which git sets to the worktree root; an absolute path is compared
+// after symlink resolution on both sides.
+func commandInsideWorktree(command, worktreeRoot string) bool {
+	if worktreeRoot == "" || !strings.ContainsAny(command, `/\`) {
+		return false
+	}
+	target := filepath.FromSlash(command)
+	if !filepath.IsAbs(target) {
+		target = filepath.Join(worktreeRoot, target)
+	}
+	target = canonicalizeBestEffort(target)
+	root := canonicalizeBestEffort(worktreeRoot)
+	return gitpath.Equivalent(target, root) || strings.HasPrefix(target, root+string(filepath.Separator))
+}
+
+// canonicalizeBestEffort resolves symlinks in the deepest existing ancestor of
+// p and re-appends the rest, so a path whose final components do not exist yet
+// (the binary need not be installed) still compares against the canonical
+// worktree root — /var vs /private/var on macOS, for instance.
+func canonicalizeBestEffort(p string) string {
+	p = filepath.Clean(p)
+	rest := ""
+	for cur := p; ; {
+		if resolved, err := filepath.EvalSymlinks(cur); err == nil {
+			return filepath.Join(resolved, rest)
+		}
+		parent := filepath.Dir(cur)
+		if parent == cur {
+			return p
+		}
+		rest = filepath.Join(filepath.Base(cur), rest)
+		cur = parent
+	}
 }
 
 // localSetsOPFCommand reports whether the local override file explicitly sets
@@ -303,6 +355,16 @@ func probeLocalSettingsIsVersioned(ctx context.Context, path string, deep bool) 
 			return true, nil
 		}
 	}
+	// A submodule (or nested repository) checked out AT `.entire` is a real
+	// directory, so the symlink probe passes, while the superproject's index
+	// and HEAD record only a gitlink named `.entire` — the file's own path
+	// appears in neither. Its contents arrived by `git clone
+	// --recurse-submodules` all the same. `.entire/.git` (a file for a
+	// submodule, a directory for a nested clone) is the filesystem tell; the
+	// index and HEAD scans below catch the gitlink itself.
+	if _, statErr := os.Lstat(filepath.Join(filepath.Dir(path), ".git")); statErr == nil {
+		return true, nil
+	}
 
 	repo, err := gitrepo.OpenPath(filepath.Dir(filepath.Dir(path)))
 	if err != nil {
@@ -323,8 +385,12 @@ func probeLocalSettingsIsVersioned(ctx context.Context, path string, deep bool) 
 	if err != nil {
 		return false, fmt.Errorf("read index: %w", err)
 	}
+	// An entry NAMED `.entire` — a gitlink, or a blob standing where the
+	// directory should be — means the directory itself is repository content,
+	// so anything under it is too.
+	entireDir := filepath.ToSlash(filepath.Dir(EntireSettingsLocalFile))
 	for _, entry := range idx.Entries {
-		if pathsEqualFold(entry.Name, EntireSettingsLocalFile) {
+		if pathsEqualFold(entry.Name, EntireSettingsLocalFile) || pathsEqualFold(entry.Name, entireDir) {
 			return true, nil
 		}
 	}
@@ -410,6 +476,13 @@ func treeHasPathFold(tree *object.Tree, parts []string) (bool, error) {
 			continue
 		}
 		if len(rest) == 0 {
+			return true, nil
+		}
+		// A gitlink where a directory is expected: the whole subtree is a
+		// submodule's content. tree.Tree would report ErrDirectoryNotFound
+		// (the commit object lives in the submodule's store) and the
+		// decoy-sibling `continue` below would read that as "not tracked".
+		if entry.Mode == filemode.Submodule {
 			return true, nil
 		}
 		sub, err := tree.Tree(entry.Name)

@@ -72,6 +72,7 @@ func ReadRepoActivation(ctx context.Context, worktreeRoot string) (RepoActivatio
 		switch {
 		case enabled != nil:
 			activation.Enabled = *enabled
+			activation.LocalOverride = !isProject
 		case isProject:
 			activation.Enabled = true // main's default: a project file without the key is enabled
 		}

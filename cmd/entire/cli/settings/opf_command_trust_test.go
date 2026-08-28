@@ -12,6 +12,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 )
 
@@ -588,4 +589,65 @@ func TestOPFCommandTrust_SymlinkedEntireDirIsIgnored(t *testing.T) {
 	local := filepath.Join(root, EntireSettingsLocalFile)
 	assert.Empty(t, loadedOPF(t, project, local).Command,
 		"a command reached through a symlinked .entire is repository content, not the developer's")
+}
+
+// A submodule mounted at `.entire` is a real directory — the symlink probe
+// passes — whose contents the superproject records only as a gitlink named
+// `.entire`: the local file's own path appears in neither the index nor HEAD,
+// and go-git reports the gitlink's tree as ErrDirectoryNotFound. It is
+// repository content all the same: `git clone --recurse-submodules` delivers
+// the settings file and the binary it points at together.
+func TestOPFCommandTrust_SubmoduleAtEntireDirIsIgnored(t *testing.T) {
+	t.Parallel()
+	payload := t.TempDir()
+	testutil.InitRepo(t, payload)
+	writeSettingsFile(t, filepath.Join(payload, "settings.json"), opfSettings(""))
+	writeSettingsFile(t, filepath.Join(payload, "settings.local.json"), localOPFSettings(attackerCommand))
+	testutil.RunGit(t, payload, "add", "-A")
+	testutil.RunGit(t, payload, "commit", "-m", "payload")
+
+	root := t.TempDir()
+	testutil.InitRepo(t, root)
+	testutil.RunGit(t, root, "-c", "protocol.file.allow=always", "submodule", "add", payload, ".entire")
+	testutil.RunGit(t, root, "commit", "-m", "ship .entire as a submodule")
+	require.FileExists(t, filepath.Join(root, EntireSettingsLocalFile), "the clone materialized the payload")
+
+	project := filepath.Join(root, EntireSettingsFile)
+	local := filepath.Join(root, EntireSettingsLocalFile)
+	assert.Empty(t, loadedOPF(t, project, local).Command,
+		"a command reached through a submodule at .entire is repository content, not the developer's")
+
+	// The HEAD-side check must hold on its own too (the index and the
+	// on-disk .entire/.git are the other two tells).
+	repo, err := gitrepo.OpenPath(root)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = repo.Close() })
+	head, err := repo.Head()
+	require.NoError(t, err)
+	commit, err := repo.CommitObject(head.Hash())
+	require.NoError(t, err)
+	tree, err := commit.Tree()
+	require.NoError(t, err)
+	versioned, err := treeHasPathFold(tree, strings.Split(EntireSettingsLocalFile, "/"))
+	require.NoError(t, err)
+	assert.True(t, versioned, "a gitlink at .entire in HEAD is versioned content")
+}
+
+// The binary's location is a gate of its own: an executable inside the
+// worktree is deliverable through the repository whatever made the settings
+// file look locally owned, so it is never run — even from a genuinely
+// untracked local file. exec.ErrDot does not help here (a command containing a
+// separator never consults $PATH).
+func TestOPFCommandTrust_CommandInsideWorktreeIsRejected(t *testing.T) {
+	t.Parallel()
+	root, project, local := newOPFRepo(t)
+	writeSettingsFile(t, project, opfSettings(""))
+	for _, cmd := range []string{"./.entire/opf", ".entire/opf", "tools/opf", filepath.ToSlash(filepath.Join(root, "tools", "opf"))} {
+		writeSettingsFile(t, local, localOPFSettings(cmd))
+		assert.Empty(t, loadedOPF(t, project, local).Command, "command %q resolves inside the worktree", cmd)
+	}
+	writeSettingsFile(t, local, localOPFSettings(trustedCommand))
+	assert.Equal(t, trustedCommand, loadedOPF(t, project, local).Command, "an absolute path outside the repo is still honored")
+	writeSettingsFile(t, local, localOPFSettings("opf-custom"))
+	assert.Equal(t, "opf-custom", loadedOPF(t, project, local).Command, "a bare $PATH name is still honored")
 }

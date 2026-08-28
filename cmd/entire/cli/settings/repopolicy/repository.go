@@ -121,65 +121,65 @@ func ClassifyGlobalConfig(ctx context.Context, config *GlobalConfig, resolve Rep
 	}
 	policy := policyForRepository(repository)
 
-	excluded, err := MatchesExcludePath(ctx, config.ExcludePaths, repository.WorktreeRoot)
-	if err != nil {
+	excluded, err := ExcludedByGlobalConfig(ctx, config, repository)
+	if err != nil || excluded {
 		policy.ActivationSource = ActivationInactive
 		policy.InactiveReason = InactiveReasonGlobalExcluded
 		return policy, err
-	}
-	if excluded {
-		policy.ActivationSource = ActivationInactive
-		policy.InactiveReason = InactiveReasonGlobalExcluded
-		return policy, nil
-	}
-	excluded, err = MatchesExcludePathExact(ctx, config.ExcludePathsExact, repository.WorktreeRoot)
-	if err != nil {
-		policy.ActivationSource = ActivationInactive
-		policy.InactiveReason = InactiveReasonGlobalExcluded
-		return policy, err
-	}
-	if excluded {
-		policy.ActivationSource = ActivationInactive
-		policy.InactiveReason = InactiveReasonGlobalExcluded
-		return policy, nil
-	}
-	if len(config.ExcludeOrigins) > 0 {
-		origins, fetchFound, lookupErr := gitremote.GetRemoteURLsInDirIfSet(ctx, repository.WorktreeRoot, "origin")
-		if lookupErr != nil {
-			policy.ActivationSource = ActivationInactive
-			policy.InactiveReason = InactiveReasonGlobalExcluded
-			return policy, fmt.Errorf("reading origin remote: %w", lookupErr)
-		}
-		pushOrigins, pushFound, lookupErr := gitremote.GetRemotePushURLsInDirIfSet(ctx, repository.WorktreeRoot, "origin")
-		if lookupErr != nil {
-			policy.ActivationSource = ActivationInactive
-			policy.InactiveReason = InactiveReasonGlobalExcluded
-			return policy, fmt.Errorf("reading origin pushurl: %w", lookupErr)
-		}
-		origins = append(origins, pushOrigins...)
-		if fetchFound || pushFound {
-			for _, origin := range origins {
-				normalized := NormalizeOrigin(origin)
-				if normalized == "" {
-					policy.ActivationSource = ActivationInactive
-					policy.InactiveReason = InactiveReasonGlobalExcluded
-					return policy, errors.New("origin remote cannot be normalized")
-				}
-				matched, matchErr := MatchesExcludeOrigin(ctx, config.ExcludeOrigins, normalized)
-				if matchErr != nil {
-					policy.ActivationSource = ActivationInactive
-					policy.InactiveReason = InactiveReasonGlobalExcluded
-					return policy, matchErr
-				}
-				if matched {
-					policy.ActivationSource = ActivationInactive
-					policy.InactiveReason = InactiveReasonGlobalExcluded
-					return policy, nil
-				}
-			}
-		}
 	}
 	policy.Active = true
 	policy.InactiveReason = InactiveReasonNone
 	return policy, nil
+}
+
+// ExcludedByGlobalConfig evaluates the user's exclude lists against one
+// repository: exclude_paths (glob), exclude_paths_exact, and exclude_origins
+// (against every origin URL, normalized). An unusable pattern or an origin
+// that cannot be normalized is an error — callers fail closed, treating the
+// repo as excluded. This is the user's explicit "never here", so it is
+// consulted for BOTH activation sources once the tier is on: the global tier
+// (ClassifyGlobalConfig) and a repo activated by its own committed
+// settings.json (ClassifyRepoPolicyAt) — repository content must not outrank
+// the user's machine-local exclusions.
+func ExcludedByGlobalConfig(ctx context.Context, config *GlobalConfig, repository Repository) (bool, error) {
+	if config == nil {
+		return false, nil
+	}
+	if problems := validateGlobalExclusions(config); len(problems) > 0 {
+		return true, errors.New(strings.Join(problems, "; "))
+	}
+	excluded, err := MatchesExcludePath(ctx, config.ExcludePaths, repository.WorktreeRoot)
+	if err != nil || excluded {
+		return true, err
+	}
+	excluded, err = MatchesExcludePathExact(ctx, config.ExcludePathsExact, repository.WorktreeRoot)
+	if err != nil || excluded {
+		return true, err
+	}
+	if len(config.ExcludeOrigins) == 0 {
+		return false, nil
+	}
+	origins, fetchFound, lookupErr := gitremote.GetRemoteURLsInDirIfSet(ctx, repository.WorktreeRoot, "origin")
+	if lookupErr != nil {
+		return true, fmt.Errorf("reading origin remote: %w", lookupErr)
+	}
+	pushOrigins, pushFound, lookupErr := gitremote.GetRemotePushURLsInDirIfSet(ctx, repository.WorktreeRoot, "origin")
+	if lookupErr != nil {
+		return true, fmt.Errorf("reading origin pushurl: %w", lookupErr)
+	}
+	origins = append(origins, pushOrigins...)
+	if !fetchFound && !pushFound {
+		return false, nil
+	}
+	for _, origin := range origins {
+		normalized := NormalizeOrigin(origin)
+		if normalized == "" {
+			return true, errors.New("origin remote cannot be normalized")
+		}
+		matched, matchErr := MatchesExcludeOrigin(ctx, config.ExcludeOrigins, normalized)
+		if matchErr != nil || matched {
+			return true, matchErr
+		}
+	}
+	return false, nil
 }

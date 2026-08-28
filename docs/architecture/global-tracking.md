@@ -48,7 +48,7 @@ repository's own settings files first and the user file second
 
 | Repo settings | User `global.enabled` | Result |
 | --- | --- | --- |
-| project `settings.json` (default enabled) or `settings.local.json` with an explicit `enabled` key | any | **Local** activation if enabled; an explicit `enabled: false` is a veto that also blocks the tier |
+| project `settings.json` (default enabled) or `settings.local.json` with an explicit `enabled` key | any | **Local** activation if enabled; an explicit `enabled: false` is a veto that also blocks the tier. While `global.enabled` is `true`, the user's exclude lists outrank a committed `settings.json` (it is repository content and arrives by cloning) — only an untracked `settings.local.json` with `enabled: true`, the developer's own action on this clone, still activates an excluded repo |
 | none | `true`, repo not excluded | **Global** activation |
 | none | `false`, absent, or repo excluded | inactive |
 

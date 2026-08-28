@@ -174,6 +174,8 @@ Entire therefore honors `command` only when it is genuinely developer-owned:
 
 - it must come from `.entire/settings.local.json`, not `.entire/settings.json`
 - that file must be **untracked** — absent from both the git index and `HEAD`
+- that file must not sit inside a **submodule or nested repository** mounted at `.entire` (an index/`HEAD` entry named `.entire`, or an `.entire/.git` on disk) — `git clone --recurse-submodules` delivers such a file exactly like a committed one
+- the command must **not resolve inside the repository worktree** (no `./…`, no absolute path under the repo root): an executable that ships with the repo is what this rule exists to keep out, so install the binary elsewhere or use a bare `$PATH` name
 
 The second check matters because the filename alone proves nothing:
 `.gitignore` does not apply to a path that is already tracked, so

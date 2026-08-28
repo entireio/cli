@@ -12,7 +12,12 @@ func ClassifyRepoPolicy(ctx context.Context) (RepoPolicy, error) {
 //
 //  1. The repository's own settings files (repo-level activation). A
 //     configured repo is active iff enabled — an explicit enabled:false is a
-//     veto that also blocks the global tier.
+//     veto that also blocks the global tier. While the user tier is on, the
+//     user's exclude lists outrank a committed settings.json: that file is
+//     repository content and arrives by cloning, so a clone must not be able
+//     to activate capture in a folder the user excluded. Only an untracked
+//     settings.local.json with an explicit enabled key — the developer's own
+//     action on this clone — keeps activating an excluded repo.
 //  2. Otherwise the user-global tier: enabled, valid, and not excluding this
 //     repo. Any error there fails closed (inactive + the error).
 //
@@ -48,6 +53,16 @@ func ClassifyRepoPolicyAt(ctx context.Context, dir string) (RepoPolicy, error) {
 			// Capture stays on; egress fails closed until the file is fixed.
 			policy.Trust = TrustDecision{Source: TrustSourceNone, Reason: TrustReasonSettings}
 			return policy, nil //nolint:nilerr // deliberate: repo-level activation survives an unreadable user settings file; only egress is held
+		}
+		if userSettings.GlobalEnabled() && !activation.LocalOverride {
+			excluded, exclErr := ExcludedByGlobalConfig(ctx, userSettings.Global, repository)
+			if exclErr != nil || excluded {
+				policy.Active = false
+				policy.ActivationSource = ActivationInactive
+				policy.InactiveReason = InactiveReasonGlobalExcluded
+				policy.Trust = DecideEgress(ctx, policy, userSettings.Global, repository)
+				return policy, exclErr
+			}
 		}
 	case activation.Configured:
 		policy.InactiveReason = InactiveReasonRepoDisabled
