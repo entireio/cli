@@ -12,32 +12,36 @@ import (
 // "k" tier at 1,000 and an "M" tier at 1,000,000. Values below 1,000 render
 // as-is; values at or above 1,000 render with one decimal place, trimming a
 // trailing ".0" for clean display (e.g., 1000 → "1k" not "1.0k",
-// 1_000_000 → "1M" not "1.0M").
+// 1_000_000 → "1M" not "1.0M"). The tier is chosen AFTER rounding to one
+// decimal place, so a value that rounds up to the next tier (e.g. 999_950,
+// which rounds to "1000.0k") renders in that tier instead ("1M") rather than
+// as "1000k".
 func FormatTokenCount(n int) string {
-	switch {
-	case n < 1000:
+	if n < 1000 {
 		return strconv.Itoa(n)
-	case n < 1_000_000:
-		return trimTrailingZero(float64(n)/1000.0) + "k"
-	default:
-		return trimTrailingZero(float64(n)/1_000_000.0) + "M"
 	}
+
+	v := float64(n) / 1000
+	if rounded := math.Round(v*10) / 10; rounded >= 1000 {
+		return formatOneDecimal(v/1000) + "M"
+	}
+	return formatOneDecimal(v) + "k"
 }
 
-// trimTrailingZero formats f with one decimal place, stripping a trailing
+// formatOneDecimal formats f with one decimal place, stripping a trailing
 // ".0" (e.g., 1.0 → "1", 3.7 → "3.7").
-func trimTrailingZero(f float64) string {
+func formatOneDecimal(f float64) string {
 	s := fmt.Sprintf("%.1f", f)
 	return strings.TrimSuffix(s, ".0")
 }
 
 // FormatPercent formats a share (0..1) as an integer percentage for display.
-// A zero share renders as "0%"; a nonzero share below 0.5% renders as "<1%"
-// rather than rounding down to "0%"; all other values round to the nearest
-// whole percent.
+// A zero or negative share renders as "0%"; a positive share below 0.5%
+// renders as "<1%" rather than rounding down to "0%"; all other values round
+// to the nearest whole percent.
 func FormatPercent(share float64) string {
 	switch {
-	case share == 0:
+	case share <= 0:
 		return "0%"
 	case share < 0.005:
 		return "<1%"
@@ -49,8 +53,13 @@ func FormatPercent(share float64) string {
 // FormatDuration formats a duration for display at a granularity that grows
 // coarser as the duration grows: seconds under a minute ("42s"), whole
 // minutes under an hour ("6m"), hours and zero-padded minutes under a day
-// ("1h 05m"), and days and hours beyond that ("2d 3h").
+// ("1h 05m"), and days and hours beyond that ("2d 3h"). A negative duration
+// is clamped to zero and renders as "0s".
 func FormatDuration(d time.Duration) string {
+	if d < 0 {
+		d = 0
+	}
+
 	totalSeconds := int(d.Seconds())
 
 	if totalSeconds < 60 {

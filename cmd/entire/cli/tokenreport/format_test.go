@@ -22,6 +22,9 @@ func TestFormatTokenCount(t *testing.T) {
 		{3_700_000, "3.7M"},
 		{4_063_500, "4.1M"},
 		{1_850_365, "1.9M"},
+		{999_950, "1M"},
+		{999_999, "1M"},
+		{999_999_999, "1000M"}, // top of the M tier; no B tier yet
 	}
 	for _, c := range cases {
 		if got := FormatTokenCount(c.in); got != c.want {
@@ -43,6 +46,7 @@ func TestFormatPercent(t *testing.T) {
 		{0.005, "1%"},
 		{0.369, "37%"},
 		{1, "100%"},
+		{-0.3, "0%"},
 	}
 	for _, c := range cases {
 		if got := FormatPercent(c.in); got != c.want {
@@ -65,6 +69,9 @@ func TestFormatDuration(t *testing.T) {
 		{9*time.Hour + 42*time.Minute, "9h 42m"},
 		{51 * time.Hour, "2d 3h"},
 		{0, "0s"},
+		{-2 * time.Hour, "0s"},
+		{24 * time.Hour, "1d 0h"},
+		{500 * time.Millisecond, "0s"},
 	}
 	for _, c := range cases {
 		if got := FormatDuration(c.in); got != c.want {
