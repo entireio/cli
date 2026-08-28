@@ -194,6 +194,19 @@ origin that cannot be normalized, a held repo, and a globally tracked repo
 whose git hooks are absent (drift, deliberate `core.hooksPath` skip, or an
 unresolvable hooks dir).
 
+## Asking about another repository
+
+A hook runs in one worktree, but session binding (trail 1018) has to ask
+whether a repository the agent merely *touched* is one Entire captures. That
+is `settings.IsActiveAtRoot(ctx, root)` → `repopolicy.ClassifyActivationAt`:
+the same precedence as above (repo settings, then the tier with its exclusions
+and vetoes) for an explicit root, with **no egress decision** — the checkpoint
+sync remote election is scoped to the current worktree, so deciding trust for
+another root would read the wrong repository's remotes. File presence
+(`IsSetUpAtRoot`-style checks) is the wrong question once the tier is on: a
+globally tracked repo has no settings files, and a check like that silently
+excludes every such repo from cross-repo attribution.
+
 Key files: `settings/repopolicy/{types,policy,activation,repository,trust,user_settings}.go`,
 `settings/{global,trust}.go`, `paths/invisible.go`, `hook_policy.go`,
 `strategy/global_setup.go`, `strategy/trust_prompt.go`,

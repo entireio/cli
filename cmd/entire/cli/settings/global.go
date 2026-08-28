@@ -36,6 +36,19 @@ func installLocalSettingsProbe() struct{} {
 	return struct{}{}
 }
 
+// IsActiveAtRoot reports whether Entire captures sessions in the repository
+// at root — by its own settings files or by the user-global tier, exclusions
+// and vetoes honored — for callers that reason about a FOREIGN repo from a
+// process running elsewhere (session binding adopting a session into a repo
+// the agent touched). Once the tier is on, file presence (IsSetUpAny-style
+// checks) is the wrong question: a globally tracked repo has no settings
+// files at all. Activation only — no egress decision, which is cwd-scoped and
+// would read the wrong repo's election. Errors fail closed.
+func IsActiveAtRoot(ctx context.Context, root string) bool {
+	policy, err := repopolicy.ClassifyActivationAt(ctx, root)
+	return err == nil && policy.Active
+}
+
 // UserSettingsPath returns the user-global settings path.
 func UserSettingsPath() string {
 	return repopolicy.UserSettingsPath()

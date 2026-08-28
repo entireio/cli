@@ -23,9 +23,48 @@ func ClassifyRepoPolicy(ctx context.Context) (RepoPolicy, error) {
 //
 // Trust (checkpoint egress) is decided last from the same inputs.
 func ClassifyRepoPolicyAt(ctx context.Context, dir string) (RepoPolicy, error) {
+	policy, inputs, err := classifyActivationAt(ctx, dir)
+	if err != nil || inputs.skipEgress {
+		return policy, err
+	}
+	if inputs.settingsErr != nil {
+		// Capture stays on; egress fails closed until the file is fixed.
+		policy.Trust = TrustDecision{Source: TrustSourceNone, Reason: TrustReasonSettings}
+		return policy, nil //nolint:nilerr // deliberate: repo-level activation survives an unreadable user settings file; only egress is held
+	}
+	policy.Trust = DecideEgress(ctx, policy, inputs.global, inputs.repository)
+	return policy, nil
+}
+
+// ClassifyActivationAt answers only "does Entire capture sessions in the
+// worktree at dir?" — the repository's own settings first, then the user tier
+// with its exclusions — and leaves Trust at its zero value. It exists for
+// callers that reason about a FOREIGN repository from a process running
+// elsewhere (session binding deciding whether to adopt a session into a repo
+// the agent touched). The egress decision resolves the checkpoint sync remote,
+// and that election is scoped to the current worktree, so computing it for
+// another root would read the wrong repository's remotes and settings.
+func ClassifyActivationAt(ctx context.Context, dir string) (RepoPolicy, error) {
+	policy, _, err := classifyActivationAt(ctx, dir)
+	return policy, err
+}
+
+// activationInputs carries what the egress decision needs from activation.
+type activationInputs struct {
+	repository Repository
+	global     *GlobalConfig
+	// settingsErr is set when repo-level activation holds but the user
+	// settings file is unreadable: capture stays on, egress is held.
+	settingsErr error
+	// skipEgress marks a repo-level veto (enabled:false), which returns
+	// before any egress decision, as it always has.
+	skipEgress bool
+}
+
+func classifyActivationAt(ctx context.Context, dir string) (RepoPolicy, activationInputs, error) {
 	repository, err := ResolveRepositoryAt(ctx, dir)
 	if err != nil {
-		return inactiveGlobalPolicy(InactiveReasonGlobalOff), err
+		return inactiveGlobalPolicy(InactiveReasonGlobalOff), activationInputs{}, err
 	}
 	policy := RepoPolicy{
 		ActivationSource: ActivationInactive,
@@ -34,6 +73,7 @@ func ClassifyRepoPolicyAt(ctx context.Context, dir string) (RepoPolicy, error) {
 		GitCommonDir:     repository.GitCommonDir,
 		WorktreeKey:      repository.WorktreeKey,
 	}
+	inputs := activationInputs{repository: repository}
 
 	// Repo-level settings first: a repo the user enabled here must keep
 	// capturing even when the user-global file is unreadable (main never
@@ -41,18 +81,20 @@ func ClassifyRepoPolicyAt(ctx context.Context, dir string) (RepoPolicy, error) {
 	activation, err := ReadRepoActivation(ctx, repository.WorktreeRoot)
 	if err != nil {
 		policy.InactiveReason = InactiveReasonRepoDisabled
-		return policy, err
+		return policy, inputs, err
 	}
 	userSettings, settingsErr := LoadUserSettings(ctx)
+	if settingsErr == nil {
+		inputs.global = userSettings.Global
+	}
 	switch {
 	case activation.Configured && activation.Enabled:
 		policy.Active = true
 		policy.ActivationSource = ActivationLocal
 		policy.InactiveReason = InactiveReasonNone
 		if settingsErr != nil {
-			// Capture stays on; egress fails closed until the file is fixed.
-			policy.Trust = TrustDecision{Source: TrustSourceNone, Reason: TrustReasonSettings}
-			return policy, nil //nolint:nilerr // deliberate: repo-level activation survives an unreadable user settings file; only egress is held
+			inputs.settingsErr = settingsErr
+			return policy, inputs, nil //nolint:nilerr // deliberate: repo-level activation survives an unreadable user settings file; only egress is held
 		}
 		if userSettings.GlobalEnabled() && !activation.LocalOverride {
 			excluded, exclErr := ExcludedByGlobalConfig(ctx, userSettings.Global, repository)
@@ -60,16 +102,16 @@ func ClassifyRepoPolicyAt(ctx context.Context, dir string) (RepoPolicy, error) {
 				policy.Active = false
 				policy.ActivationSource = ActivationInactive
 				policy.InactiveReason = InactiveReasonGlobalExcluded
-				policy.Trust = DecideEgress(ctx, policy, userSettings.Global, repository)
-				return policy, exclErr
+				return policy, inputs, exclErr
 			}
 		}
 	case activation.Configured:
 		policy.InactiveReason = InactiveReasonRepoDisabled
-		return policy, nil
+		inputs.skipEgress = true
+		return policy, inputs, nil
 	default:
 		if settingsErr != nil {
-			return policy, settingsErr
+			return policy, inputs, settingsErr
 		}
 		// ClassifyGlobalConfig's inactive returns carry an empty identity, so
 		// copy only the activation fields; identity always comes from
@@ -81,11 +123,10 @@ func ClassifyRepoPolicyAt(ctx context.Context, dir string) (RepoPolicy, error) {
 		policy.ActivationSource = global.ActivationSource
 		policy.InactiveReason = global.InactiveReason
 		if classifyErr != nil {
-			return policy, classifyErr
+			return policy, inputs, classifyErr
 		}
 	}
-	policy.Trust = DecideEgress(ctx, policy, userSettings.Global, repository)
-	return policy, nil
+	return policy, inputs, nil
 }
 
 type repoPolicyContextKey struct{}
