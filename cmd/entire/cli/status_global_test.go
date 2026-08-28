@@ -180,6 +180,11 @@ func TestStatus_GloballyTrackedRepoWithoutRepoSetup(t *testing.T) {
 		if !strings.Contains(raw, `"activation_source":"global"`) {
 			t.Errorf("want activation_source=global:\n%s", raw)
 		}
+		// Consent is keyed on the elected sync remote; status names it so the
+		// user sees where a "trust" answer would send checkpoints.
+		if !strings.Contains(raw, `"sync_remote":"origin"`) || !strings.Contains(out, "for origin") {
+			t.Errorf("want the sync remote named in text and JSON:\n%s\n%s", out, raw)
+		}
 	})
 
 	t.Run("excluded repo stays not set up", func(t *testing.T) {

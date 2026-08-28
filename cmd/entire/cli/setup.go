@@ -1500,6 +1500,10 @@ func recordEnableTrust(ctx context.Context, w io.Writer) {
 		fmt.Fprintf(w, "Warning: trust for %s was written to %s, but checkpoint sync is still held — check that file's trust entries.\n", id.DisplayScope(), settings.UserSettingsPath())
 		return
 	}
+	if id.RemoteName != "" {
+		fmt.Fprintf(w, "✓ Trusted %s for checkpoint sync to %s (global tracking is on)\n", id.DisplayScope(), id.RemoteName)
+		return
+	}
 	fmt.Fprintf(w, "✓ Trusted %s for checkpoint sync (global tracking is on)\n", id.DisplayScope())
 }
 

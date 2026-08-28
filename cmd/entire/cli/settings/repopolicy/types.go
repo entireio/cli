@@ -34,16 +34,24 @@ const (
 	TrustReasonSettings      TrustReason = "settings_error"
 )
 
-// TrustIdentity is the exclusive origin-or-path key used for egress consent.
-// OriginKeys is set when an origin remote exists and EVERY configured fetch
-// and push URL normalizes to host/owner/repo (one key per URL; consent needs
-// all of them). Path — the worktree root — is the key when there is no origin
-// or when ANY origin URL cannot be normalized (a bare local path, file://):
+// TrustIdentity is the exclusive remote-or-path key used for egress consent.
+// OriginKeys is set when the checkpoint sync remote (ResolveSyncRemote — the
+// elected remote, historically always origin) exists and EVERY configured
+// fetch and push URL normalizes to host/owner/repo (one key per URL; consent
+// needs all of them). Path — the worktree root — is the key when there is no
+// remote or when ANY URL cannot be normalized (a bare local path, file://):
 // the flip is whole, never a partial key set, and a repo keyed by path is not
-// covered by a trusted origin or vice versa.
+// covered by a trusted origin or vice versa. Because the key follows the
+// election, a captured re-election to another remote changes the key and
+// re-asks: new destination, new consent.
+//
+// RemoteName and Dedicated describe the destination for display only; they
+// take no part in matching.
 type TrustIdentity struct {
 	OriginKeys []string `json:"origin_keys,omitempty"`
 	Path       string   `json:"path,omitempty"`
+	RemoteName string   `json:"remote,omitempty"`
+	Dedicated  bool     `json:"dedicated,omitempty"`
 }
 
 // OriginKeyed reports whether this identity is remote-origin based.
@@ -166,9 +174,12 @@ type GlobalConfig struct {
 	// fail-closed rather than misreading recorded consent.
 	TrustAll bool `json:"trust_all,omitempty"`
 
-	// TrustedOrigins are exact normalized origin keys (host/owner/repo, as
-	// RepoTrustIdentity derives them from fetch AND push URLs) — never globs.
-	// A multi-URL origin syncs only when EVERY configured URL's key is listed.
+	// TrustedOrigins are exact normalized keys (host/owner/repo) of the
+	// checkpoint sync remote — the elected remote checkpoints actually go to,
+	// as RepoTrustIdentity derives them from its fetch AND push URLs — never
+	// globs. The field keeps its historical name: before the sync-remote
+	// election that remote was always origin. A multi-URL remote syncs only
+	// when EVERY configured URL's key is listed.
 	TrustedOrigins []string `json:"trusted_origins,omitempty"`
 
 	// TrustedPaths are exact symlink-resolved worktree roots — never globs,

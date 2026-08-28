@@ -44,7 +44,7 @@ func TestRunTrust_RepoEnabledWithGlobalOn(t *testing.T) {
 	writeUserSettings(t, `{"global":{"enabled":true}}`)
 	cmd, out, _ := newTrustTestCmd()
 
-	if err := runTrust(cmd, false); err != nil {
+	if err := runTrust(cmd, false, ""); err != nil {
 		t.Fatalf("runTrust: %v", err)
 	}
 	if !strings.Contains(out.String(), "✓ Trusted github.com/acme/widgets") {
@@ -59,7 +59,7 @@ func TestRunTrust_RepoEnabledWithGlobalOn(t *testing.T) {
 	}
 
 	out.Reset()
-	if err := runTrust(cmd, true); err != nil {
+	if err := runTrust(cmd, true, ""); err != nil {
 		t.Fatalf("runTrust --revoke: %v", err)
 	}
 	if !strings.Contains(out.String(), "Revoked trust for github.com/acme/widgets") {
@@ -87,7 +87,7 @@ func TestRunTrust_RefusesWhenGlobalOff(t *testing.T) {
 	}
 	cmd, _, errOut := newTrustTestCmd()
 
-	err = runTrust(cmd, false)
+	err = runTrust(cmd, false, "")
 	var silent *SilentError
 	if !errors.As(err, &silent) {
 		t.Fatalf("runTrust error = %v, want SilentError", err)
@@ -101,5 +101,38 @@ func TestRunTrust_RefusesWhenGlobalOff(t *testing.T) {
 	}
 	if !bytes.Equal(before, after) {
 		t.Fatalf("user settings changed by a refused trust:\nbefore: %s\nafter:  %s", before, after)
+	}
+}
+
+// TestRunTrust_RemoteFlag: a held push to a remote that is about to be
+// captured names `entire trust --remote <name>`; the flag records consent for
+// that remote's key rather than the currently elected one.
+func TestRunTrust_RemoteFlag(t *testing.T) {
+	repoEnabledWithOrigin(t)
+	dir, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	testutil.AddRemote(t, dir, "fork", "https://github.com/me/widgets.git")
+	writeUserSettings(t, `{"global":{"enabled":true}}`)
+	cmd, out, _ := newTrustTestCmd()
+
+	if err := runTrust(cmd, false, "fork"); err != nil {
+		t.Fatalf("runTrust --remote fork: %v", err)
+	}
+	if !strings.Contains(out.String(), "✓ Trusted github.com/me/widgets") || !strings.Contains(out.String(), "checkpoints sync to fork") {
+		t.Fatalf("grant output = %q", out.String())
+	}
+	us, err := settings.LoadUserSettings(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(us.Global.TrustedOrigins, "github.com/me/widgets") || slices.Contains(us.Global.TrustedOrigins, "github.com/acme/widgets") {
+		t.Fatalf("trusted_origins = %v, want only the fork's key", us.Global.TrustedOrigins)
+	}
+
+	cmd, _, _ = newTrustTestCmd()
+	if err := runTrust(cmd, false, "nope"); err == nil || !strings.Contains(err.Error(), "not a configured git remote") {
+		t.Fatalf("want a clear error for an unknown remote, got %v", err)
 	}
 }

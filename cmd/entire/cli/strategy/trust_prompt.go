@@ -83,9 +83,19 @@ func applyTrustChoice(ctx context.Context, choice trustChoice, errOut io.Writer)
 func askTrustPrompt(ctx context.Context) (trustChoice, error) {
 	// An identity error needs no handling here: TrustCurrentRepo re-derives
 	// it and its failure is warned-and-held by applyTrustChoice.
+	// Consent names the destination — the elected checkpoint sync remote this
+	// push carries checkpoints to, which need not be origin — so the user sees
+	// where their transcripts will land before answering.
 	yesLabel := "Yes — trust this repo (this folder only)"
-	if id, err := settings.RepoTrustIdentity(ctx); err == nil && id.OriginKeyed() {
-		yesLabel = fmt.Sprintf("Yes — trust this repo (all clones of %s)", id.DisplayScope())
+	if id, err := settings.RepoTrustIdentity(ctx); err == nil {
+		switch {
+		case id.OriginKeyed() && id.RemoteName != "":
+			yesLabel = fmt.Sprintf("Yes — sync this repo's checkpoints to %s (%s; all clones on this machine)", id.RemoteName, id.DisplayScope())
+		case id.OriginKeyed():
+			yesLabel = fmt.Sprintf("Yes — trust this repo (all clones of %s)", id.DisplayScope())
+		case id.RemoteName != "":
+			yesLabel = fmt.Sprintf("Yes — sync this repo's checkpoints to %s (this folder only)", id.RemoteName)
+		}
 	}
 	// Start unset so accessible mode cannot turn an empty/default submission
 	// into consent. Only one of the explicit option values grants anything.

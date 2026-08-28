@@ -1,6 +1,8 @@
 package repopolicy
 
 import (
+	"context"
+	"errors"
 	"path/filepath"
 	"testing"
 )
@@ -161,5 +163,105 @@ func TestReadRepoActivation(t *testing.T) {
 				t.Fatalf("ReadRepoActivation = %+v, want %+v", got, tc.want)
 			}
 		})
+	}
+}
+
+// swapSyncRemoteResolver installs a fake election for the test and restores
+// the default afterwards. Not for parallel tests (package-level seam).
+func swapSyncRemoteResolver(t *testing.T, fn SyncRemoteResolver) {
+	t.Helper()
+	previous := ResolveSyncRemote
+	ResolveSyncRemote = fn
+	t.Cleanup(func() { ResolveSyncRemote = previous })
+}
+
+// Consent is keyed on the remote checkpoints actually go to. With the sync
+// remote elected away from origin (a fork, checkpoint_push_remote, a captured
+// push), trusting origin's key must NOT open egress, and trusting the elected
+// remote's key must.
+func TestEgressDecision_KeysOnElectedSyncRemote(t *testing.T) {
+	root, _ := newPolicyRepo(t)
+	runPolicyGit(t, root, "remote", "add", "origin", "https://github.com/acme/widgets.git")
+	runPolicyGit(t, root, "remote", "add", "fork", "https://github.com/me/widgets.git")
+	swapSyncRemoteResolver(t, func(ctx context.Context, repository Repository) (SyncRemote, error) {
+		return RemoteURLsInDir(ctx, repository.WorktreeRoot, "fork")
+	})
+
+	setPolicyGlobal(t, `{"global":{"enabled":true,"trusted_origins":["github.com/acme/widgets"]}}`)
+	byOrigin := policyAt(t, root)
+	if byOrigin.Trust.Allowed || byOrigin.Trust.Reason != TrustReasonUntrusted {
+		t.Fatalf("trust = %+v, want held: origin's key does not cover the fork checkpoints go to", byOrigin.Trust)
+	}
+	if got := byOrigin.Trust.Identity; got.RemoteName != "fork" || len(got.OriginKeys) != 1 || got.OriginKeys[0] != "github.com/me/widgets" {
+		t.Fatalf("identity = %+v, want keyed on fork's URL", got)
+	}
+
+	setPolicyGlobal(t, `{"global":{"enabled":true,"trusted_origins":["github.com/me/widgets"]}}`)
+	if byFork := policyAt(t, root); !byFork.Trust.Allowed || byFork.Trust.Source != TrustSourceRepo {
+		t.Fatalf("trust = %+v, want trusted via the elected remote's key", byFork.Trust)
+	}
+}
+
+// A re-election changes the key, so consent recorded for the old destination
+// stops covering the new one and the next push re-asks.
+func TestEgressDecision_ReelectionReasksConsent(t *testing.T) {
+	root, _ := newPolicyRepo(t)
+	runPolicyGit(t, root, "remote", "add", "origin", "https://github.com/acme/widgets.git")
+	runPolicyGit(t, root, "remote", "add", "fork", "https://github.com/me/widgets.git")
+	elected := "origin"
+	swapSyncRemoteResolver(t, func(ctx context.Context, repository Repository) (SyncRemote, error) {
+		return RemoteURLsInDir(ctx, repository.WorktreeRoot, elected)
+	})
+	setPolicyGlobal(t, `{"global":{"enabled":true,"trusted_origins":["github.com/acme/widgets"]}}`)
+	if before := policyAt(t, root); !before.Trust.Allowed {
+		t.Fatalf("trust = %+v, want trusted while origin is elected", before.Trust)
+	}
+	elected = "fork"
+	if after := policyAt(t, root); after.Trust.Allowed || after.Trust.Reason != TrustReasonUntrusted {
+		t.Fatalf("trust = %+v, want held after the election moved to fork", after.Trust)
+	}
+}
+
+// An election failure (unreadable settings, checkpoint_push_remote naming a
+// missing remote) disables sync; the gate fails closed with it — except under
+// trust_all, which never depended on an identity.
+func TestEgressDecision_ElectionErrorHoldsUnlessTrustAll(t *testing.T) {
+	root, _ := newPolicyRepo(t)
+	runPolicyGit(t, root, "remote", "add", "origin", "https://github.com/acme/widgets.git")
+	swapSyncRemoteResolver(t, func(context.Context, Repository) (SyncRemote, error) {
+		return SyncRemote{}, errors.New("checkpoint_push_remote \"gone\" is not a configured git remote")
+	})
+
+	setPolicyGlobal(t, `{"global":{"enabled":true,"trusted_origins":["github.com/acme/widgets"]}}`)
+	if held := policyAt(t, root); held.Trust.Allowed || held.Trust.Reason != TrustReasonInvalidOrigin {
+		t.Fatalf("trust = %+v, want invalid_origin hold on an election error", held.Trust)
+	}
+	setPolicyGlobal(t, `{"global":{"enabled":true,"trust_all":true}}`)
+	if all := policyAt(t, root); !all.Trust.Allowed || all.Trust.Source != TrustSourceAll {
+		t.Fatalf("trust = %+v, want trust_all to allow regardless of the election", all.Trust)
+	}
+}
+
+// No remote at all: path identity, and the dedicated-store flag is carried
+// for display when the resolver reports one.
+func TestResolveTrustIdentity_NoRemoteIsPathKeyed(t *testing.T) {
+	_, repository := newPolicyRepo(t)
+	swapSyncRemoteResolver(t, func(context.Context, Repository) (SyncRemote, error) { return SyncRemote{}, nil })
+	id, err := ResolveTrustIdentity(context.Background(), repository)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if id.OriginKeyed() || id.Path != repository.WorktreeRoot || id.RemoteName != "" {
+		t.Fatalf("identity = %+v, want path-keyed with no remote name", id)
+	}
+	swapSyncRemoteResolver(t, func(context.Context, Repository) (SyncRemote, error) {
+		return SyncRemote{Name: "origin", URLs: []string{"https://github.com/acme/checkpoints.git"}, Dedicated: true}, nil
+	})
+	id, err = ResolveTrustIdentity(context.Background(), repository)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !id.Dedicated || !id.OriginKeyed() || id.OriginKeys[0] != "github.com/acme/checkpoints" {
+		t.Fatalf("identity = %+v, want the dedicated store's key", id)
 	}
 }

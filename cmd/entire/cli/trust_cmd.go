@@ -5,42 +5,64 @@ import (
 	"fmt"
 	"io"
 
+	"github.com/entireio/cli/cmd/entire/cli/gitremote"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
+	"github.com/entireio/cli/cmd/entire/cli/strategy"
 
 	"github.com/spf13/cobra"
 )
 
 func newTrustCmd() *cobra.Command {
 	var revoke bool
+	var remote string
 	cmd := &cobra.Command{
 		Use:   "trust",
 		Short: "Allow this repo's checkpoints to sync while global tracking is on",
 		Long: `Grant egress consent for the current repository: its checkpoints start
 syncing to the checkpoint sync remote on your next 'git push'.
-Repos with an origin remote are trusted by origin (covers every clone of the
-project on this machine); repos without a usable origin are trusted by folder.
+Consent is keyed on that remote — the one checkpoints actually go to (see
+'entire status') — so it covers every clone on this machine that syncs to the
+same place; a remote whose URL is a bare path is trusted by folder instead.
 
 While global tracking is on, every tracked repo needs this consent before its
 checkpoints leave the machine. 'entire enable' records it automatically, so
 this command is for repos that are tracked globally or that were enabled
-before global tracking was turned on.`,
+before global tracking was turned on.
+
+--remote names a different git remote to trust — use it when a held push told
+you so: the first push to a fork elects that fork as the sync remote only once
+checkpoints land there, so consent for it has to be recorded by name.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			return runTrust(cmd, revoke)
+			return runTrust(cmd, revoke, remote)
 		},
 	}
 	cmd.Flags().BoolVar(&revoke, "revoke", false, "Withdraw trust; checkpoint sync is held again (not retroactive)")
+	cmd.Flags().StringVar(&remote, "remote", "", "Git remote to record consent for, instead of the currently elected checkpoint sync remote")
 	return cmd
 }
 
-func runTrust(cmd *cobra.Command, revoke bool) error {
+func runTrust(cmd *cobra.Command, revoke bool, remote string) error {
 	ctx := cmd.Context()
 	out := cmd.OutOrStdout()
-	if _, err := paths.WorktreeRoot(ctx); err != nil {
+	root, err := paths.WorktreeRoot(ctx)
+	if err != nil {
 		cmd.SilenceUsage = true
 		fmt.Fprintln(cmd.ErrOrStderr(), "Not a git repository. Run 'entire trust' from within a git repository.")
 		return NewSilentError(errors.New("not a git repository"))
+	}
+	if remote != "" {
+		_, fetchFound, fetchErr := gitremote.GetRemoteURLsInDirIfSet(ctx, root, remote)
+		_, pushFound, pushErr := gitremote.GetRemotePushURLsInDirIfSet(ctx, root, remote)
+		if fetchErr != nil || pushErr != nil {
+			return fmt.Errorf("reading remote %q: %w", remote, errors.Join(fetchErr, pushErr))
+		}
+		if !fetchFound && !pushFound {
+			return fmt.Errorf("--remote %q is not a configured git remote (see `git remote -v`)", remote)
+		}
+		ctx = strategy.WithSyncRemoteOverride(ctx, remote)
+		cmd.SetContext(ctx)
 	}
 	if revoke {
 		// Not guarded by the inactive-tier refusal: revoking in an inactive
@@ -68,6 +90,9 @@ func runTrust(cmd *cobra.Command, revoke bool) error {
 	scopeNote := "this folder only"
 	if id.OriginKeyed() {
 		scopeNote = "all clones on this machine"
+	}
+	if id.RemoteName != "" {
+		scopeNote += "; checkpoints sync to " + id.RemoteName
 	}
 	fmt.Fprintf(out, "✓ Trusted %s (%s)\n", id.DisplayScope(), scopeNote)
 	// Best-effort: a count failure only omits the line.

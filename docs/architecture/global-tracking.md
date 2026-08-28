@@ -120,21 +120,40 @@ predicate for whether checkpoint data may leave the machine:
 
 - Tier off or unconfigured → an active repo syncs as on main.
 - Tier on → **every** active repo, repo-enabled or globally tracked, needs
-  `trust_all`, every configured origin URL's normalized key in
-  `trusted_origins`, or its canonical path in `trusted_paths`. The path key
-  applies when there is no origin **or** when any origin URL does not reduce
-  to `host/owner/repo` (a bare local path, `file://`): the identity flips to
-  the path as a whole — partial origin keys would fail open on a multi-URL
+  `trust_all`, every URL of the **elected checkpoint sync remote** normalized
+  to a key in `trusted_origins`, or its canonical path in `trusted_paths`.
+  Consent is keyed on where checkpoints actually go, not on `origin`: since
+  the sync-remote election (`checkpoint_push_remote` → captured election →
+  `origin` → sole → first remote), `origin` may be an unpushable base repo or
+  a local mirror while checkpoints go to a fork, so `repopolicy.ResolveSyncRemote`
+  — installed by `strategy/trust_sync_remote.go` at init, the same seam as
+  `LocalSettingsTrusted`; the leaf's default is `origin` — supplies the
+  remote whose fetch+push URLs become the keys (the dedicated
+  `checkpoint_remote` store's derived URL in that mode). A pre-push that is
+  about to *capture* a new remote re-derives the policy with that remote
+  pending, so the electing push asks about the destination it is opening; a
+  later re-election changes the key and re-asks (new destination, new
+  consent). Because the election is persisted only once checkpoints land on
+  the captured remote, a *non-interactive* push that is about to capture a
+  new remote holds with a message naming `entire trust --remote <name>` —
+  plain `entire trust` would record consent for the still-elected remote and
+  the next push would hold again. `trusted_origins` keeps its historical name. The path key applies
+  when there is no remote **or** when any of the remote's URLs does not
+  reduce to `host/owner/repo` (a bare local path, `file://`): the identity
+  flips to the path as a whole — partial keys would fail open on a multi-URL
   push — so such a repo can still be trusted, as "this folder only".
   `trust_all` is checked before any identity is resolved: consent for every
-  repo must not depend on being able to name this one. Errors reading the
-  origin config fail closed.
+  repo must not depend on being able to name this one. An election error
+  (unreadable settings, `checkpoint_push_remote` naming a missing remote)
+  disables sync and the gate fails closed with it. The prompt, `entire trust`,
+  `enable`, and `status` name the remote (`status --json`:
+  `global_tracking.sync_remote`).
 
 Consent is recorded three ways, all into the same file: `entire enable`
 records it for the repo being enabled; the pre-push prompt offers **Yes**
 (this repo / all clones of its origin), **Not now** (re-ask next push), and
 **Always** (`trust_all`) — through the terminal, never Git's stdin, and never
-implicitly in accessible mode; `entire trust [--revoke]` grants or withdraws
+implicitly in accessible mode; `entire trust [--revoke] [--remote <name>]` grants or withdraws
 it. Revoke removes the repo's current origin keys and its current path; an
 entry from a *previous* origin URL is not recognized and stays. A hold never
 blocks the user's own push: the branch lands, checkpoint data stays local (the

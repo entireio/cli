@@ -5,47 +5,40 @@ import (
 	"fmt"
 	"slices"
 	"strings"
-
-	"github.com/entireio/cli/cmd/entire/cli/gitremote"
 )
 
-// ResolveTrustIdentity derives an exclusive origin or path identity: origin
-// keys when every configured origin URL normalizes, the worktree path when
-// origin is absent or any URL cannot be normalized (see TrustIdentity). Only a
-// failure to read the origin config is an error.
+// ResolveTrustIdentity derives the exclusive consent identity for a
+// repository: keys for the checkpoint sync remote (see ResolveSyncRemote) when
+// EVERY configured URL of that remote normalizes to host/owner/repo, else the
+// worktree path — when no remote is configured, or when any URL cannot be
+// normalized (a bare local path, file://). The flip to path is whole, never a
+// partial key set: a multi-URL remote delivers to every URL, so partial keys
+// would fail open, while a hard error would leave the repo with no way to be
+// trusted at all. Only a failure to read the remote configuration (or to
+// elect the sync remote) is an error.
 func ResolveTrustIdentity(ctx context.Context, repository Repository) (TrustIdentity, error) {
-	urls, fetchFound, err := gitremote.GetRemoteURLsInDirIfSet(ctx, repository.WorktreeRoot, "origin")
+	sync, err := ResolveSyncRemote(ctx, repository)
 	if err != nil {
-		return TrustIdentity{}, fmt.Errorf("reading origin remote: %w", err)
+		return TrustIdentity{}, fmt.Errorf("resolving checkpoint sync remote: %w", err)
 	}
-	pushURLs, pushFound, err := gitremote.GetRemotePushURLsInDirIfSet(ctx, repository.WorktreeRoot, "origin")
-	if err != nil {
-		return TrustIdentity{}, fmt.Errorf("reading origin pushurl: %w", err)
-	}
-	urls = append(urls, pushURLs...)
-	if fetchFound || pushFound {
-		keys := make([]string, 0, len(urls))
-		for _, raw := range urls {
-			key := NormalizeOrigin(raw)
-			if key == "" {
-				// A bare local path, file://, or any other URL that does not
-				// reduce to host/owner/repo. The whole identity flips to the
-				// path key rather than dropping this URL from the key set: a
-				// multi-URL push delivers to every URL, so partial origin keys
-				// would fail open — while a hard error would leave the repo
-				// with no way to be trusted at all.
-				keys = nil
-				break
-			}
-			if !slices.Contains(keys, key) {
-				keys = append(keys, key)
-			}
+	identity := TrustIdentity{RemoteName: sync.Name, Dedicated: sync.Dedicated}
+	keys := make([]string, 0, len(sync.URLs))
+	for _, raw := range sync.URLs {
+		key := NormalizeOrigin(raw)
+		if key == "" {
+			keys = nil
+			break
 		}
-		if len(keys) > 0 {
-			return TrustIdentity{OriginKeys: keys}, nil
+		if !slices.Contains(keys, key) {
+			keys = append(keys, key)
 		}
 	}
-	return TrustIdentity{Path: repository.WorktreeRoot}, nil
+	if len(keys) > 0 {
+		identity.OriginKeys = keys
+		return identity, nil
+	}
+	identity.Path = repository.WorktreeRoot
+	return identity, nil
 }
 
 // DecideEgress computes the checkpoint-egress decision.

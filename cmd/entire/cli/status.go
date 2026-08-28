@@ -167,6 +167,9 @@ type globalTrackingInfo struct {
 	TrustSource settings.TrustSource
 	// HeldCheckpoints counts checkpoints held locally (untrusted state only).
 	HeldCheckpoints int
+	// SyncRemote names the elected checkpoint sync remote the trust decision
+	// is keyed on ("" when none is configured or the tier is off).
+	SyncRemote string
 }
 
 // trackedHere reports that the user-global tier is capturing sessions in
@@ -229,6 +232,7 @@ func computeGlobalTrackingInfo(ctx context.Context) globalTrackingInfo {
 			info.InactiveReason = policy.InactiveReason
 			info.ActivationSource = policy.ActivationSource
 			info.TrustState, info.TrustSource = computeRepoTrustState(policy)
+			info.SyncRemote = policy.Trust.Identity.RemoteName
 		}
 		if info.TrustState == trustStateUntrusted {
 			info.HeldCheckpoints = heldCheckpointCount(ctx)
@@ -308,6 +312,9 @@ func writeGlobalTrustLine(w io.Writer, sty statusStyles, info globalTrackingInfo
 	switch info.TrustState {
 	case trustStateUntrusted:
 		line := "  sync held — repo not trusted · run `entire trust`"
+		if info.SyncRemote != "" {
+			line = "  sync held — repo not trusted for " + info.SyncRemote + " · run `entire trust`"
+		}
 		if info.HeldCheckpoints > 0 {
 			line += fmt.Sprintf(" (%d held)", info.HeldCheckpoints)
 		}
@@ -317,7 +324,11 @@ func writeGlobalTrustLine(w io.Writer, sty statusStyles, info globalTrackingInfo
 		if info.TrustSource == settings.TrustSourceAll {
 			label = "trust_all"
 		}
-		fmt.Fprintln(w, sty.render(sty.dim, "  checkpoint sync: trusted ("+label+")"))
+		line := "  checkpoint sync: trusted (" + label + ")"
+		if info.SyncRemote != "" {
+			line += " → " + info.SyncRemote
+		}
+		fmt.Fprintln(w, sty.render(sty.dim, line))
 	}
 }
 
@@ -1076,6 +1087,9 @@ type globalTrackingJSON struct {
 	TrustState      string `json:"trust_state,omitempty"`
 	TrustSource     string `json:"trust_source,omitempty"`
 	HeldCheckpoints int    `json:"held_checkpoints,omitempty"`
+	// SyncRemote is the elected checkpoint sync remote the trust state is
+	// keyed on — where this repo's checkpoints leave the machine.
+	SyncRemote string `json:"sync_remote,omitempty"`
 	// PolicyError is set when this repo could not be classified; active_here
 	// and inactive_reason are then omitted rather than reported as false.
 	PolicyError string `json:"policy_error,omitempty"`
@@ -1122,6 +1136,7 @@ func runStatusJSON(ctx context.Context, w io.Writer) error {
 			SettingsPath:     info.SettingsPath,
 			ActivationSource: string(info.ActivationSource),
 			HeldCheckpoints:  info.HeldCheckpoints,
+			SyncRemote:       info.SyncRemote,
 		}
 		switch {
 		case info.InRepo && info.PolicyError != "":
