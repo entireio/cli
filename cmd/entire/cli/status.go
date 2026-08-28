@@ -114,6 +114,17 @@ func runStatus(ctx context.Context, w io.Writer, detailed, jsonOutput bool) erro
 		return nil
 	}
 
+	// Repo-level setup exists. If the user's exclude lists carve this repo
+	// out anyway, say so instead of "● Enabled": the hooks are inactive here
+	// and nothing syncs, whatever the committed settings file says.
+	info := computeGlobalTrackingInfo(ctx)
+	if info.excludedHere() {
+		fmt.Fprintln(w, formatExcludedStatusShort(ctx, sty, info))
+		renderGlobalTrackingLine(w, sty, info)
+		writeAgentHelpHint(w, sty)
+		return nil
+	}
+
 	if detailed {
 		return runStatusDetailed(ctx, w, sty, settingsPath, localSettingsPath, projectExists, localExists)
 	}
@@ -125,7 +136,7 @@ func runStatus(ctx context.Context, w io.Writer, detailed, jsonOutput bool) erro
 	}
 
 	fmt.Fprintln(w, formatSettingsStatusShort(ctx, s, sty))
-	writeGlobalTrackingLine(ctx, w, sty)
+	renderGlobalTrackingLine(w, sty, info)
 	if s.Enabled {
 		writeActiveSessions(ctx, w, sty)
 	}
@@ -179,6 +190,18 @@ type globalTrackingInfo struct {
 func (info globalTrackingInfo) trackedHere() bool {
 	return info.Configured && info.SettingsError == "" && info.Enabled &&
 		info.InRepo && info.PolicyError == "" && info.ActiveHere
+}
+
+// excludedHere reports that the tier is on and the hook gate carves this
+// worktree out by the user's exclude lists. For a repo WITH repo-level setup
+// that is the one state where the raw settings file ("enabled") and the
+// policy ("inactive") disagree, and status must side with the policy — the
+// header, the sync lines, and --json's `enabled` all describe what the hooks
+// will actually do.
+func (info globalTrackingInfo) excludedHere() bool {
+	return info.Configured && info.SettingsError == "" && info.Enabled &&
+		info.InRepo && info.PolicyError == "" && !info.ActiveHere &&
+		info.InactiveReason == settings.InactiveReasonGlobalExcluded
 }
 
 // Trust-state identifiers, shared between the human line and the JSON field so
@@ -433,6 +456,20 @@ func formatGloballyTrackedStatusShort(ctx context.Context, sty statusStyles) str
 	b.WriteString(" ")
 	b.WriteString(sty.render(sty.bold, "Tracked globally"))
 	writeBranchSegment(ctx, &b, sty)
+	return b.String()
+}
+
+// formatExcludedStatusShort is the header for a repo whose repo-level setup
+// says enabled while the user's exclude lists keep it inactive on this
+// machine: "○ Excluded on this machine · branch main", plus the reason.
+func formatExcludedStatusShort(ctx context.Context, sty statusStyles, info globalTrackingInfo) string {
+	var b strings.Builder
+	b.WriteString(sty.render(sty.red, "○"))
+	b.WriteString(" ")
+	b.WriteString(sty.render(sty.bold, "Excluded on this machine"))
+	writeBranchSegment(ctx, &b, sty)
+	b.WriteString("\n")
+	b.WriteString(sty.render(sty.dim, "  Repo-level setup would enable Entire here, but this repo matches an exclude list in "+info.SettingsPath))
 	return b.String()
 }
 
@@ -1201,8 +1238,10 @@ func runStatusJSON(ctx context.Context, w io.Writer) error {
 		return writeJSON(statusJSON{Error: fmt.Sprintf("failed to load settings: %v", err)})
 	}
 
+	// `enabled` describes what the hooks will do here, so a repo the user's
+	// exclude lists carve out reads as disabled even with repo-level setup.
 	result := statusJSON{
-		Enabled:        s.Enabled,
+		Enabled:        s.Enabled && !info.excludedHere(),
 		Agents:         []string{},
 		ActiveSessions: []sessionBriefJSON{},
 		AgentHelp:      agentHelpCommand,

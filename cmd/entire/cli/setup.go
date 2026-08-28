@@ -1384,6 +1384,7 @@ func runEnableInteractive(ctx context.Context, w io.Writer, agents []agent.Agent
 		return fmt.Errorf("failed to save settings: %w", err)
 	}
 	recordEnableTrust(ctx, w)
+	noteExcludedAfterEnable(ctx, w)
 
 	// Explicit, user-initiated setup: allow EnsurePrimaryRef to fetch a
 	// missing primary metadata ref from a configured checkpoint_remote
@@ -1471,6 +1472,7 @@ func runEnable(ctx context.Context, w io.Writer, useProjectSettings bool) error 
 		return err
 	}
 	recordEnableTrust(ctx, w)
+	noteExcludedAfterEnable(ctx, w)
 
 	fmt.Fprintln(w, "Entire is now enabled.")
 	printEnabledStatus(ctx, w)
@@ -1483,6 +1485,19 @@ func runEnable(ctx context.Context, w io.Writer, useProjectSettings bool) error 
 // checkpoints leave the machine, and running `entire enable` here IS that
 // consent. Silent when egress is already allowed (trust_all or an existing
 // entry). Best-effort — enable never fails because of it.
+// noteExcludedAfterEnable tells the user when the repo they just enabled is
+// carved out by their own exclude lists: the (committed) settings.json is
+// repository content and does not outrank them, so Entire stays inactive here
+// until the entry goes — or this clone's own settings.local.json says enabled.
+func noteExcludedAfterEnable(ctx context.Context, w io.Writer) {
+	active, reason := settings.IsActiveForRepoWithReason(ctx)
+	if active || reason != settings.InactiveReasonGlobalExcluded {
+		return
+	}
+	fmt.Fprintf(w, "Note: this repo matches an exclude list in %s, so global tracking keeps it inactive here despite the repo-level setup. Remove that entry, or run `entire enable --local` so this clone's own settings.local.json enables it.\n",
+		settings.UserSettingsPath())
+}
+
 func recordEnableTrust(ctx context.Context, w io.Writer) {
 	us, err := settings.LoadUserSettings(ctx)
 	if err != nil || !us.GlobalEnabled() {
@@ -2028,6 +2043,7 @@ func setupAgentHooksNonInteractive(ctx context.Context, w io.Writer, ag agent.Ag
 		return fmt.Errorf("failed to save settings: %w", err)
 	}
 	recordEnableTrust(ctx, w)
+	noteExcludedAfterEnable(ctx, w)
 
 	// Hook installation decisions need the merged view across both settings
 	// files, not just the single scope we wrote to above: absolute_git_hook_path

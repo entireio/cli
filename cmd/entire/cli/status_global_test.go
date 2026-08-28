@@ -206,3 +206,54 @@ func TestStatus_GloballyTrackedRepoWithoutRepoSetup(t *testing.T) {
 		}
 	})
 }
+
+// TestStatus_ExcludedRepoWithRepoSetup: the classifier says inactive (the
+// user's exclude list outranks the committed settings.json), so status must
+// not read "● Enabled" off the raw file — header, sync lines and --json
+// `enabled` all describe what the hooks will do here. `entire enable` in such
+// a folder says why it stays inactive.
+func TestStatus_ExcludedRepoWithRepoSetup(t *testing.T) {
+	isolatedUserHome(t)
+	pretendAgentBinaries(t)
+	dir := setupTestDir(t)
+	testutil.InitRepo(t, dir)
+	testutil.AddRemote(t, dir, "origin", "https://github.com/acme/widgets.git")
+	writeSettings(t, `{"enabled": true}`)
+	resolved, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeUserSettings(t, `{"global":{"enabled":true,"exclude_paths":["`+filepath.ToSlash(resolved)+`"]}}`)
+
+	var out bytes.Buffer
+	if err := runStatus(context.Background(), &out, false, false); err != nil {
+		t.Fatalf("runStatus: %v", err)
+	}
+	text := out.String()
+	if !strings.Contains(text, "Excluded on this machine") || strings.Contains(text, "● Enabled") || strings.Contains(text, "Checkpoints sync to") {
+		t.Errorf("status must side with the policy for an excluded repo:\n%s", text)
+	}
+	if !strings.Contains(text, "this repo is excluded") {
+		t.Errorf("want the exclusion reason on the global line:\n%s", text)
+	}
+
+	out.Reset()
+	if err := runStatus(context.Background(), &out, false, true); err != nil {
+		t.Fatalf("runStatus --json: %v", err)
+	}
+	var result statusJSON
+	if err := json.Unmarshal(out.Bytes(), &result); err != nil {
+		t.Fatal(err)
+	}
+	if result.Enabled || !strings.Contains(out.String(), `"inactive_reason":"repo_excluded"`) {
+		t.Errorf("want enabled=false with inactive_reason=repo_excluded:\n%s", out.String())
+	}
+
+	out.Reset()
+	if err := runEnable(context.Background(), &out, true); err != nil {
+		t.Fatalf("runEnable: %v", err)
+	}
+	if !strings.Contains(out.String(), "matches an exclude list") || !strings.Contains(out.String(), "entire enable --local") {
+		t.Errorf("enable in an excluded folder must say why it stays inactive:\n%s", out.String())
+	}
+}

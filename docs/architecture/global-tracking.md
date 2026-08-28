@@ -177,7 +177,13 @@ no repo-level settings that the tier captures renders as enabled — header
 `error` — never as `○ not set up (run entire enable)`, which would tell the
 user to do the one thing the tier makes unnecessary and would read to an
 agent as Entire being off while its session is captured. An excluded or
-unclassifiable repo, or a tier that is off, keeps the not-set-up shape.
+unclassifiable repo, or a tier that is off, keeps the not-set-up shape. A repo
+that *has* repo-level setup but is carved out by the user's exclude lists
+renders `○ Excluded on this machine` (and `--json` `enabled: false`,
+`inactive_reason: "repo_excluded"`) rather than `● Enabled` — status sides with
+the classifier, not the raw file — and `entire enable` in such a folder says
+why it stays inactive and points at `entire enable --local` for a per-clone
+override.
 `held_checkpoints` (and the enabled repo's unpushed count) count checkpoint
 commits only: the orphan `Initialize metadata ref` commit that seeds
 `entire/checkpoints/v1` is excluded, so a fresh repo does not read "1 held"
