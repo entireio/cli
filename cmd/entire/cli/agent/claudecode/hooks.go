@@ -11,7 +11,6 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
-	"github.com/entireio/cli/cmd/entire/cli/paths"
 )
 
 // Ensure ClaudeCodeAgent implements HookSupport
@@ -63,11 +62,7 @@ const metadataDenyRule = "Read(./.entire/metadata/**)"
 //
 // Split into per-phase helpers below; see each helper's doc.
 func (c *ClaudeCodeAgent) InstallHooks(ctx context.Context, force bool) (int, error) {
-	repoRoot, err := resolveInstallRepoRoot(ctx)
-	if err != nil {
-		return 0, err
-	}
-	settingsPath := filepath.Join(repoRoot, ".claude", ClaudeSettingsFileName)
+	settingsPath := claudeSettingsPath(ctx)
 
 	rawSettings, rawHooks, rawPermissions, err := loadRawClaudeSettingsForInstall(settingsPath)
 	if err != nil {
@@ -96,22 +91,6 @@ func (c *ClaudeCodeAgent) InstallHooks(ctx context.Context, force bool) (int, er
 	}
 
 	return count, nil
-}
-
-// resolveInstallRepoRoot locates the repo root InstallHooks writes under,
-// falling back to CWD when not in a git repo (e.g. during tests).
-func resolveInstallRepoRoot(ctx context.Context) (string, error) {
-	// Use repo root instead of CWD to find .claude directory
-	// This ensures hooks are installed correctly when run from a subdirectory
-	repoRoot, err := paths.WorktreeRoot(ctx)
-	if err == nil {
-		return repoRoot, nil
-	}
-	repoRoot, err = os.Getwd() //nolint:forbidigo // Intentional fallback when WorktreeRoot() fails (tests run outside git repos)
-	if err != nil {
-		return "", fmt.Errorf("failed to get current directory: %w", err)
-	}
-	return repoRoot, nil
 }
 
 // loadRawClaudeSettingsForInstall reads settingsPath (if present) and returns
@@ -430,12 +409,7 @@ func removeEntireArtifacts(data []byte) ([]byte, bool, error) {
 // loadClaudeSettings reads and parses .claude/settings.json from the repo root.
 // Returns ok=false when the file is missing or unparseable.
 func loadClaudeSettings(ctx context.Context) (ClaudeSettings, bool) {
-	// Use repo root to find .claude directory when run from a subdirectory
-	repoRoot, err := paths.WorktreeRoot(ctx)
-	if err != nil {
-		repoRoot = "." // Fallback to CWD if not in a git repo
-	}
-	settingsPath := filepath.Join(repoRoot, ".claude", ClaudeSettingsFileName)
+	settingsPath := claudeSettingsPath(ctx)
 	data, err := os.ReadFile(settingsPath) //nolint:gosec // path is constructed from repo root + fixed path
 	if err != nil {
 		return ClaudeSettings{}, false

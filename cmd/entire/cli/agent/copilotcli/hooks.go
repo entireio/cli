@@ -10,7 +10,6 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
-	"github.com/entireio/cli/cmd/entire/cli/paths"
 )
 
 // HooksFileName is the hooks file managed by Entire for Copilot CLI.
@@ -36,12 +35,7 @@ var hookConfigKey = map[string]string{
 // Returns the number of hooks installed.
 // Unknown top-level fields and hook types are preserved on round-trip.
 func (c *CopilotCLIAgent) InstallHooks(ctx context.Context, force bool) (int, error) {
-	worktreeRoot, err := paths.WorktreeRoot(ctx)
-	if err != nil {
-		worktreeRoot = "."
-	}
-
-	hooksPath := filepath.Join(worktreeRoot, hooksDir, HooksFileName)
+	hooksPath := copilotHooksPath(ctx)
 
 	// Use raw maps to preserve unknown fields on round-trip
 	var rawFile map[string]json.RawMessage

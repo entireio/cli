@@ -10,7 +10,6 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
-	"github.com/entireio/cli/cmd/entire/cli/paths"
 )
 
 // Ensure FactoryAIDroidAgent implements HookSupport
@@ -42,18 +41,7 @@ const metadataDenyRule = "Read(./.entire/metadata/**)"
 //
 //nolint:maintidx // Hook installation is intentionally centralized here; splitting it further would add churn for a config-assembly path.
 func (f *FactoryAIDroidAgent) InstallHooks(ctx context.Context, force bool) (int, error) {
-	// Use repo root instead of CWD to find .factory directory
-	// This ensures hooks are installed correctly when run from a subdirectory
-	repoRoot, err := paths.WorktreeRoot(ctx)
-	if err != nil {
-		// Fallback to CWD if not in a git repo (e.g., during tests)
-		repoRoot, err = os.Getwd() //nolint:forbidigo // Intentional fallback when WorktreeRoot() fails (tests run outside git repos)
-		if err != nil {
-			return 0, fmt.Errorf("failed to get current directory: %w", err)
-		}
-	}
-
-	settingsPath := filepath.Join(repoRoot, ".factory", FactorySettingsFileName)
+	settingsPath := factorySettingsPath(ctx)
 
 	// Read existing settings if they exist
 	var rawSettings map[string]json.RawMessage

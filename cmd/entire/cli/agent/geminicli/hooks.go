@@ -13,7 +13,6 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
-	"github.com/entireio/cli/cmd/entire/cli/paths"
 )
 
 // Ensure GeminiCLIAgent implements HookSupport
@@ -41,18 +40,7 @@ const GeminiSettingsFileName = "settings.json"
 // If force is true, removes existing Entire hooks before installing.
 // Returns the number of hooks installed.
 func (g *GeminiCLIAgent) InstallHooks(ctx context.Context, force bool) (int, error) {
-	// Use repo root instead of CWD to find .gemini directory
-	// This ensures hooks are installed correctly when run from a subdirectory
-	repoRoot, err := paths.WorktreeRoot(ctx)
-	if err != nil {
-		// Fallback to CWD if not in a git repo (e.g., during tests)
-		repoRoot, err = os.Getwd() //nolint:forbidigo // Intentional fallback when WorktreeRoot() fails (tests run outside git repos)
-		if err != nil {
-			return 0, fmt.Errorf("failed to get current directory: %w", err)
-		}
-	}
-
-	settingsPath := filepath.Join(repoRoot, ".gemini", GeminiSettingsFileName)
+	settingsPath := geminiSettingsPath(ctx)
 
 	// Read existing settings if they exist
 	var rawSettings map[string]json.RawMessage
