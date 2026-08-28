@@ -125,6 +125,15 @@ func (m *mockBuiltinPromptAgent) ExtractPrompts(string, int) ([]string, error) {
 	return []string{"test prompt"}, nil
 }
 
+// mockBuiltinTokenAttributorAgent is a built-in agent that implements TokenAttributor but NOT CapabilityDeclarer.
+type mockBuiltinTokenAttributorAgent struct {
+	mockBaseAgent
+}
+
+func (m *mockBuiltinTokenAttributorAgent) AttributeTokens([]byte, int, string) (*types.Attribution, error) {
+	return &types.Attribution{}, nil
+}
+
 // --- Tests ---
 
 func TestAsHookSupport(t *testing.T) {
@@ -253,6 +262,32 @@ func TestAsTokenCalculator(t *testing.T) {
 		_, ok := AsTokenCalculator(ag)
 		if ok {
 			t.Error("expected false")
+		}
+	})
+}
+
+func TestAsTokenAttributor(t *testing.T) {
+	t.Parallel()
+
+	// AsTokenAttributor is an ungated, built-in-only helper (no DeclaredCaps
+	// field): implementing the interface is sufficient.
+	t.Run("not implemented", func(t *testing.T) {
+		t.Parallel()
+		_, ok := AsTokenAttributor(&mockBaseAgent{})
+		if ok {
+			t.Error("expected false")
+		}
+	})
+
+	t.Run("implemented", func(t *testing.T) {
+		t.Parallel()
+		ag := &mockBuiltinTokenAttributorAgent{}
+		ta, ok := AsTokenAttributor(ag)
+		if !ok || ta == nil {
+			t.Error("expected true")
+		}
+		if ta != TokenAttributor(ag) {
+			t.Error("expected returned value to be the same agent")
 		}
 	})
 }

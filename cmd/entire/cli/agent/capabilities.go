@@ -18,9 +18,9 @@ type CapabilityDeclarer interface {
 //
 // Not every optional interface appears here: built-in-only capabilities that
 // have no external-protocol equivalent (SessionBaseDirProvider, ModelExtractor,
-// SkillEventExtractor, TranscriptSanitizer, TranscriptFetcher) are intentionally
-// excluded — their As* helpers resolve by type assertion alone (see
-// builtinCapability), with no DeclaredCaps gate.
+// SkillEventExtractor, TranscriptSanitizer, TranscriptFetcher, TokenAttributor)
+// are intentionally excluded — their As* helpers resolve by type assertion
+// alone (see builtinCapability), with no DeclaredCaps gate.
 type DeclaredCaps struct {
 	Hooks                  bool `json:"hooks"`
 	TranscriptAnalyzer     bool `json:"transcript_analyzer"`
@@ -234,6 +234,19 @@ func AsSkillEventExtractor(ag Agent) (SkillEventExtractor, bool) {
 // agent's parse-hook does not convey.
 func AsToolInvocationScanner(ag Agent) (ToolInvocationScanner, bool) {
 	return builtinCapability[ToolInvocationScanner](ag)
+}
+
+// AsTokenAttributor returns the agent as TokenAttributor if it implements the
+// interface. Built-in only, with no DeclaredCaps gate: per-API-call
+// attribution needs intimate knowledge of that agent's transcript shape (how
+// usage, tool calls, and tool results line up within one API call), which an
+// external agent's parse-hook does not convey — there is no protocol field an
+// external agent could set to earn this honestly. External agents therefore
+// always get the safe "cannot attribute" default in reports, the same way an
+// agent with no ToolInvocationScanner reports "cannot tell" rather than a
+// fabricated zero.
+func AsTokenAttributor(ag Agent) (TokenAttributor, bool) {
+	return builtinCapability[TokenAttributor](ag)
 }
 
 // AsSessionEndBudgeter returns the agent as SessionEndBudgeter if it implements
