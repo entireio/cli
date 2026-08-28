@@ -469,6 +469,7 @@ if settings.IsSummarizeEnabled() {
 
 **Do NOT:**
 
+- Decide whether Entire is *active* in a repo from settings-file presence (`IsSetUp*`). Activation is derived by `repopolicy.ClassifyRepoPolicy` — a globally tracked repo has **no** settings files, an excluded or vetoed repo may have one — so use `settings.IsActiveForRepo(WithReason)` for the current repo and `settings.IsActiveAtRoot` for another root. A `forbidigo` rule rejects `settings.IsSetUpAndEnabled` / `IsSetUpAtRoot` callers. `IsSetUpAny`/`RepoActivationConfigured` remain for *setup routing* (does repo-level config exist?), never for capture gates.
 - Read `.entire/settings.json` or `.entire/settings.local.json` directly with `os.ReadFile`
 - Duplicate settings parsing logic in other packages
 - Create new settings helpers without adding them to the `settings` package
