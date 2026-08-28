@@ -577,7 +577,26 @@ type CheckpointSummary struct {
 	// agent history (a session with Kind == "imported"): read-only and
 	// commit-less.
 	Imported bool `json:"imported,omitempty"`
+
+	// TokenUsageVersion states how every session's token_usage in this
+	// checkpoint was scoped and what it carries. TokenUsageVersionDelta means:
+	// a per-checkpoint delta (tokens since the previous checkpoint of that
+	// session, scoped by SessionState.TokenTranscriptStart — never the
+	// session's running total), with the subset fields thinking_tokens and
+	// cache_creation_1h_tokens populated where the agent records them.
+	//
+	// Absent (0) marks a legacy checkpoint: its token_usage may be either a
+	// delta or, on a non-first checkpoint whose checkpoint_transcript_start is
+	// 0/absent, the session's cumulative total. Readers summing across legacy
+	// checkpoints must dedupe per session (keep the latest cumulative snapshot,
+	// add only later deltas), must not read missing subset fields as zero, and
+	// must not key on cli_version, which is "dev" on most rows.
+	TokenUsageVersion int `json:"token_usage_version,omitempty"`
 }
+
+// TokenUsageVersionDelta is the TokenUsageVersion written since token scope was
+// split from transcript scope and the subset fields were added (v0.11).
+const TokenUsageVersionDelta = 2
 
 // SessionMetrics contains hook-provided session metrics from agents that report
 // them via lifecycle hooks (e.g., Cursor). These supplement transcript-derived

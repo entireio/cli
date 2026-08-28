@@ -311,10 +311,15 @@ func (c *CodexAgent) CalculateTokenUsage(transcriptData []byte, fromOffset int) 
 	inputTokens := lastUsage.InputTokens
 	cacheReadTokens := lastUsage.CachedInputTokens
 	outputTokens := lastUsage.OutputTokens
+	reasoningTokens := lastUsage.ReasoningOutputTokens // ⊂ output_tokens
 	if baselineUsage != nil {
 		inputTokens -= baselineUsage.InputTokens
 		cacheReadTokens -= baselineUsage.CachedInputTokens
 		outputTokens -= baselineUsage.OutputTokens
+		reasoningTokens -= baselineUsage.ReasoningOutputTokens
+	}
+	if reasoningTokens < 0 {
+		reasoningTokens = 0
 	}
 
 	freshInputTokens := inputTokens - cacheReadTokens
@@ -326,6 +331,7 @@ func (c *CodexAgent) CalculateTokenUsage(transcriptData []byte, fromOffset int) 
 		InputTokens:     freshInputTokens,
 		CacheReadTokens: cacheReadTokens,
 		OutputTokens:    outputTokens,
+		ThinkingTokens:  reasoningTokens,
 		APICallCount:    apiCalls,
 	}, nil
 }

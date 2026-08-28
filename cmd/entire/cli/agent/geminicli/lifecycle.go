@@ -145,6 +145,7 @@ func (g *GeminiCLIAgent) CalculateTokenUsage(transcriptData []byte, fromOffset i
 		usage.APICallCount++
 		usage.InputTokens += msg.Tokens.Input - msg.Tokens.Cached + msg.Tokens.Tool
 		usage.OutputTokens += msg.Tokens.Output + msg.Tokens.Thoughts
+		usage.ThinkingTokens += msg.Tokens.Thoughts
 		usage.CacheReadTokens += msg.Tokens.Cached
 	}
 

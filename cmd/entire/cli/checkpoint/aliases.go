@@ -77,3 +77,7 @@ func ReadRawSessionLogForCheckpoint(ctx context.Context, reader interface {
 }, checkpointID id.CheckpointID) ([]byte, string, error) {
 	return apicheckpoint.ReadRawSessionLogForCheckpoint(ctx, reader, checkpointID) //nolint:wrapcheck // thin re-export of the api/checkpoint helper
 }
+
+// TokenUsageVersionDelta re-exports the root metadata token_usage_version value
+// written by this CLI; see api/checkpoint.CheckpointSummary.TokenUsageVersion.
+const TokenUsageVersionDelta = apicheckpoint.TokenUsageVersionDelta

@@ -667,3 +667,15 @@ func TestCalculateTokenUsage_GeminiIdentities(t *testing.T) {
 		t.Errorf("sum of classes = %d, want Gemini total 140", sum)
 	}
 }
+
+func TestCalculateTokenUsage_ThoughtsRecordedAsThinking(t *testing.T) {
+	t.Parallel()
+	data := []byte(`{"messages": [{"id": "2", "type": "gemini", "content": "hi", "tokens": {"input": 100, "output": 20, "cached": 60, "thoughts": 15, "tool": 5, "total": 140}}]}`)
+	usage, err := (&GeminiCLIAgent{}).CalculateTokenUsage(data, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if usage.ThinkingTokens != 15 || usage.OutputTokens != 35 {
+		t.Errorf("thinking %d output %d, want 15 / 35", usage.ThinkingTokens, usage.OutputTokens)
+	}
+}

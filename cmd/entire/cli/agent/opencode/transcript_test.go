@@ -968,3 +968,16 @@ func TestCalculateTokenUsage_ReasoningIncludedInOutput(t *testing.T) {
 		t.Errorf("sum of classes = %d, want OpenCode total 700", sum)
 	}
 }
+
+func TestCalculateTokenUsage_ReasoningRecordedAsThinking(t *testing.T) {
+	t.Parallel()
+	usage, err := (&OpenCodeAgent{}).CalculateTokenUsage(openCodeExportWithTokens(
+		`{"input": 500, "output": 100, "reasoning": 300, "cache": {"read": 80, "write": 20}, "total": 1000}`), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	require.NotNil(t, usage)
+	if usage.ThinkingTokens != 300 || usage.OutputTokens != 400 {
+		t.Errorf("thinking %d output %d, want 300 / 400", usage.ThinkingTokens, usage.OutputTokens)
+	}
+}

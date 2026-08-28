@@ -73,3 +73,51 @@ func TestAddTokenUsage_KeepsRealDepthIntact(t *testing.T) {
 		t.Error("must not synthesize a nested level that the inputs did not have")
 	}
 }
+
+// ThinkingTokens and CacheCreation1hTokens are subsets of OutputTokens and
+// CacheCreationTokens; they are still added (and subtracted) at every nesting
+// level, otherwise the root CheckpointSummary sum silently drops them — the same
+// way SubagentTokens once went missing from a field-by-field copy.
+func TestAddTokenUsage_SumsSubsetFieldsAtEveryDepth(t *testing.T) {
+	t.Parallel()
+
+	a := &TokenUsage{OutputTokens: 100, ThinkingTokens: 40, CacheCreationTokens: 50, CacheCreation1hTokens: 50,
+		SubagentTokens: &TokenUsage{OutputTokens: 10, ThinkingTokens: 4, CacheCreationTokens: 5, CacheCreation1hTokens: 5}}
+	b := &TokenUsage{OutputTokens: 200, ThinkingTokens: 60, CacheCreationTokens: 30, CacheCreation1hTokens: 0,
+		SubagentTokens: &TokenUsage{OutputTokens: 20, ThinkingTokens: 6, CacheCreationTokens: 3, CacheCreation1hTokens: 3}}
+	got := AddTokenUsage(a, b)
+	if got.ThinkingTokens != 100 || got.CacheCreation1hTokens != 50 {
+		t.Errorf("top-level subsets = thinking %d (want 100), 1h %d (want 50)", got.ThinkingTokens, got.CacheCreation1hTokens)
+	}
+	if got.SubagentTokens == nil || got.SubagentTokens.ThinkingTokens != 10 || got.SubagentTokens.CacheCreation1hTokens != 8 {
+		t.Errorf("subagent subsets = %+v, want thinking 10, 1h 8", got.SubagentTokens)
+	}
+
+	diff := SubtractTokenUsage(got, a)
+	if diff.ThinkingTokens != 60 || diff.CacheCreation1hTokens != 0 || diff.SubagentTokens.ThinkingTokens != 6 {
+		t.Errorf("SubtractTokenUsage subsets = %+v / %+v", diff, diff.SubagentTokens)
+	}
+}
+
+// Model on a subagent entry lets cost be weighted per model. Sums of entries on
+// the same model keep it; sums across different models clear it (mixed), and a
+// side with no model never overrides one that has it.
+func TestAddTokenUsage_ModelKeptWhenSameClearedWhenMixed(t *testing.T) {
+	t.Parallel()
+
+	same := AddTokenUsage(&TokenUsage{OutputTokens: 1, Model: "claude-haiku-4-5"}, &TokenUsage{OutputTokens: 2, Model: "claude-haiku-4-5"})
+	if same.Model != "claude-haiku-4-5" {
+		t.Errorf("same model should be kept, got %q", same.Model)
+	}
+	mixed := AddTokenUsage(&TokenUsage{OutputTokens: 1, Model: "claude-haiku-4-5"}, &TokenUsage{OutputTokens: 2, Model: "claude-fable-5"})
+	if mixed.Model != "" {
+		t.Errorf("mixed models should clear Model, got %q", mixed.Model)
+	}
+	oneSided := AddTokenUsage(&TokenUsage{OutputTokens: 1, Model: "claude-haiku-4-5"}, &TokenUsage{OutputTokens: 2})
+	if oneSided.Model != "claude-haiku-4-5" {
+		t.Errorf("a side without a model must not clear the other's, got %q", oneSided.Model)
+	}
+	if got := AddTokenUsage(nil, &TokenUsage{Model: "m"}); got.Model != "m" {
+		t.Errorf("copy of one operand must keep Model, got %q", got.Model)
+	}
+}

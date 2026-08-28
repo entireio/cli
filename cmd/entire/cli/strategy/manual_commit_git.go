@@ -447,21 +447,26 @@ func accumulateTokenUsage(existing, incoming *agent.TokenUsage) *agent.TokenUsag
 	if existing == nil {
 		// Return a copy to avoid sharing the pointer
 		return &agent.TokenUsage{
-			InputTokens:         incoming.InputTokens,
-			CacheCreationTokens: incoming.CacheCreationTokens,
-			CacheReadTokens:     incoming.CacheReadTokens,
-			OutputTokens:        incoming.OutputTokens,
-			APICallCount:        incoming.APICallCount,
-			SubagentTokens:      incoming.SubagentTokens,
+			InputTokens:           incoming.InputTokens,
+			CacheCreationTokens:   incoming.CacheCreationTokens,
+			CacheReadTokens:       incoming.CacheReadTokens,
+			OutputTokens:          incoming.OutputTokens,
+			APICallCount:          incoming.APICallCount,
+			ThinkingTokens:        incoming.ThinkingTokens,
+			CacheCreation1hTokens: incoming.CacheCreation1hTokens,
+			Model:                 incoming.Model,
+			SubagentTokens:        incoming.SubagentTokens,
 		}
 	}
 
-	// Accumulate values
+	// Accumulate values (the subset fields too — see types.TokenUsage)
 	existing.InputTokens += incoming.InputTokens
 	existing.CacheCreationTokens += incoming.CacheCreationTokens
 	existing.CacheReadTokens += incoming.CacheReadTokens
 	existing.OutputTokens += incoming.OutputTokens
 	existing.APICallCount += incoming.APICallCount
+	existing.ThinkingTokens += incoming.ThinkingTokens
+	existing.CacheCreation1hTokens += incoming.CacheCreation1hTokens
 
 	// Replace (not add) subagent tokens: incoming.SubagentTokens is already
 	// the cumulative total as of this step, so the latest snapshot supersedes

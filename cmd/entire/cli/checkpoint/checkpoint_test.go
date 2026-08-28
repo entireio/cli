@@ -5611,3 +5611,38 @@ func TestWriteCommitted_CodexSanitizesTranscriptFromPath(t *testing.T) {
 	require.Len(t, strings.Split(strings.TrimRight(got, "\n"), "\n"), 3,
 		"stored transcript must stay line-aligned with the rollout")
 }
+
+// Every checkpoint written by this CLI stamps token_usage_version so readers
+// can tell a delta-scoped row (safe to sum, subset fields present where the
+// agent records them) from a legacy row that may hold a session-cumulative
+// total. Absence is the legacy signal, so the field must never default on read.
+func TestGitStore_Write_StampsTokenUsageVersion(t *testing.T) {
+	t.Parallel()
+	repo, _ := setupBranchTestRepo(t)
+	store := NewGitStore(repo, DefaultV1Refs())
+	checkpointID := id.MustCheckpointID("70c3a0a1b2c3")
+
+	err := store.Write(context.Background(), Session{
+		CheckpointID: checkpointID, SessionID: "session-one", Strategy: "manual-commit",
+		Transcript: redact.AlreadyRedacted([]byte(`{"message": "x"}`)), Prompts: []string{"p"},
+		FilesTouched: []string{"f.go"}, CheckpointsCount: 1, AuthorName: "T", AuthorEmail: "t@example.com",
+	})
+	if err != nil {
+		t.Fatalf("Write() error = %v", err)
+	}
+	summary, err := store.Read(context.Background(), checkpointID)
+	if err != nil {
+		t.Fatalf("Read() error = %v", err)
+	}
+	if summary.TokenUsageVersion != TokenUsageVersionDelta {
+		t.Errorf("TokenUsageVersion = %d, want %d", summary.TokenUsageVersion, TokenUsageVersionDelta)
+	}
+
+	var legacy CheckpointSummary
+	if err := json.Unmarshal([]byte(`{"checkpoint_id":"70c3a0a1b2c3","strategy":"manual-commit","checkpoints_count":1,"files_touched":[],"sessions":[]}`), &legacy); err != nil {
+		t.Fatal(err)
+	}
+	if legacy.TokenUsageVersion != 0 {
+		t.Errorf("a legacy summary without the field must read as 0 (unknown scope), got %d", legacy.TokenUsageVersion)
+	}
+}

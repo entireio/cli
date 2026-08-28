@@ -819,6 +819,7 @@ func (s *treeWriter) writeCheckpointSummary(opts WriteOptions, basePath string, 
 		HasReview:           hasReview,
 		HasInvestigation:    hasInvestigation,
 		Imported:            imported,
+		TokenUsageVersion:   TokenUsageVersionDelta,
 	}
 
 	metadataJSON, err := jsonutil.MarshalIndentWithNewline(summary, "", "  ")

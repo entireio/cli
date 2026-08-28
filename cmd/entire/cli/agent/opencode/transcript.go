@@ -302,6 +302,7 @@ func (a *OpenCodeAgent) CalculateTokenUsage(transcriptData []byte, fromOffset in
 		}
 		usage.InputTokens += msg.Info.Tokens.Input
 		usage.OutputTokens += msg.Info.Tokens.BilledOutput()
+		usage.ThinkingTokens += msg.Info.Tokens.Reasoning
 		usage.CacheReadTokens += msg.Info.Tokens.Cache.Read
 		usage.CacheCreationTokens += msg.Info.Tokens.Cache.Write
 		usage.APICallCount++

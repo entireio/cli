@@ -564,3 +564,19 @@ func readCommittedSummary(t *testing.T, repo *git.Repository, checkpointID id.Ch
 	require.NotNil(t, summary)
 	return summary
 }
+
+// accumulateTokenUsage is a field-by-field copy/sum; it must carry the subset
+// fields (ThinkingTokens, CacheCreation1hTokens) or SaveStep's per-window
+// accumulator silently drops them from every checkpoint.
+func TestAccumulateTokenUsage_CarriesSubsetFields(t *testing.T) {
+	t.Parallel()
+
+	first := accumulateTokenUsage(nil, &agent.TokenUsage{OutputTokens: 10, ThinkingTokens: 4, CacheCreationTokens: 20, CacheCreation1hTokens: 20})
+	if first.ThinkingTokens != 4 || first.CacheCreation1hTokens != 20 {
+		t.Fatalf("copy dropped subset fields: %+v", first)
+	}
+	second := accumulateTokenUsage(first, &agent.TokenUsage{OutputTokens: 5, ThinkingTokens: 1, CacheCreationTokens: 8, CacheCreation1hTokens: 0})
+	if second.ThinkingTokens != 5 || second.CacheCreation1hTokens != 20 || second.OutputTokens != 15 || second.CacheCreationTokens != 28 {
+		t.Fatalf("sum dropped subset fields: %+v", second)
+	}
+}

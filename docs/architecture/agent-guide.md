@@ -515,6 +515,12 @@ before:
 When adding an agent, write the test first: build one message from a real transcript and assert
 that the four classes sum to the provider's own total.
 
+Two **subset** fields ride alongside the classes and must be read verbatim from the agent's own
+usage fields, never estimated: `ThinkingTokens` (⊂ output — reasoning/thinking/thoughts) and
+`CacheCreation1hTokens` (⊂ cache write — Anthropic 1-hour TTL). Leave them 0 when the agent does
+not record them; readers show "not recorded". Set `Model` only on subagent usage
+(`CalculateTokenUsageFromFile` in Claude Code does this) so cost can be weighted per model.
+
 ### `SubagentAwareExtractor`
 
 **What it enables:** Includes files modified by spawned subagents in the checkpoint file list and aggregates subagent token usage.
