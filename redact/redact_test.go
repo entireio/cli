@@ -211,10 +211,13 @@ func TestCollectJSONLReplacements_Succeeds(t *testing.T) {
 }
 
 func TestShouldSkipJSONLField(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		key  string
 		want bool
 	}{
+		// Opaque provider reasoning payloads should be skipped.
+		{"encrypted_content", true},
 		// Fields ending in "id" should be skipped.
 		{"id", true},
 		{"session_id", true},
@@ -255,6 +258,7 @@ func TestShouldSkipJSONLField(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.key, func(t *testing.T) {
+			t.Parallel()
 			got := shouldSkipJSONLField(tt.key)
 			if got != tt.want {
 				t.Errorf("shouldSkipJSONLField(%q) = %v, want %v", tt.key, got, tt.want)
