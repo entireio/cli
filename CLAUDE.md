@@ -708,7 +708,7 @@ Don't use `fmt.Print*` for operational messages (checkpoint saves, hook invocati
 
 ### The Root Anchors
 
-Entire does filesystem I/O in six trees, and each has one package that owns a
+Entire does filesystem I/O in seven trees, and each has one package that owns a
 shared `*os.Root` over it. **Never assemble a path into one of these and hand it
 to `os.ReadFile`/`os.WriteFile`/`os.MkdirAll`/`os.ReadDir`/`filepath.Walk`.**
 
@@ -717,9 +717,46 @@ to `os.ReadFile`/`os.WriteFile`/`os.MkdirAll`/`os.ReadDir`/`filepath.Walk`.**
 | `.entire` | `entiredir` | worktree root (`paths.WorktreeRoot`), cwd only when there is provably no repo |
 | git common dir | `gitdir` | `git rev-parse --git-common-dir`, absolutized |
 | the working tree | `worktreedir` | worktree root |
+| an agent's hook config | `agent.HookConfigFile` | worktree root (`.claude/`, `.cursor/`, `.gemini/`, `.github/hooks/`, `.factory/`, `.codex/`, `.opencode/plugin/`) |
 | an agent's session store | `agent.SessionStore` | the agent's own `GetSessionDir` |
 | per-user config / cache | `userdirs.ConfigRoot` / `CacheRoot` | `$ENTIRE_CONFIG_DIR` else `~/.config/entire`; `$XDG_CACHE_HOME/entire` else `~/.cache/entire` |
 | managed plugin tree | `pluginRoot` (`plugin_store.go`) | `pluginParentDir()` — `$ENTIRE_PLUGIN_DIR`, `%LOCALAPPDATA%`, or `$XDG_DATA_HOME` |
+
+**An `os.Root`'s base directory must always be a trusted path — one a resolver
+produced — never `filepath.Dir` of the file being opened, and never a path that
+arrived as data.** This is the rule the table above encodes, and it is the one
+that is easy to get wrong because the wrong version *looks* like the fix:
+
+```go
+// WRONG — the root contains exactly the one name it was handed
+root, _ := osroot.Shared(filepath.Dir(target))
+data, _ := osroot.ReadFile(root, filepath.Base(target))
+
+// RIGHT — the base is what a resolver answered; the rest is a name inside it
+root, _ := worktreedir.OpenAt(worktreeRoot)
+name, _ := worktreedir.Name(worktreeRoot, target)
+data, _ := osroot.ReadFile(root, name)
+```
+
+Anchoring on the target's own parent puts every component the caller resolved
+*above* the root, so containment covers only the final component and enforces
+nothing the `filepath.Join` had not already decided. A symlink at `.claude`, at
+`.entire`, or at `entire-investigations` is resolved before the root exists.
+Anchoring one level up makes those components **names inside** the root, which is
+what `os.Root` and `osroot.MkdirAllNoSymlink` can actually refuse. The same
+reasoning kills a containment *check* built on a derived base:
+`settings.clonePreferencesRoot` used to compute its common dir as
+`filepath.Dir(filepath.Dir(abs))` and hand both to `gitdir.OpenPathIn`, so the
+relative path was correct by construction and the check could never fire.
+
+`TestRootBasesAreTrusted` (`osroot/rootbase_guard_test.go`) enforces this: a file
+that opens a root without being in `allowedRootBases` fails the build, and an
+entry whose file no longer opens one fails too, so the allowlist cannot outlive
+its reasons. **Prefer an existing anchor over a new root** — that is what the
+anchors are for. Two entries are genuine exceptions, both on a path the *caller*
+named, where the file's parent IS the caller's choice and no other base exists:
+`tokenstore` (`$ENTIRE_TOKEN_STORE_PATH`) and `settings.readConfinedOutsideEntire`'s
+explicit-path fallback. Each says so at the call site.
 
 All of them memoize through **one** registry, `osroot.Shared(dir)` — a directory
 is opened at most once per process. `osroot.ResetShared` clears every anchor;
@@ -768,6 +805,15 @@ comments at each site say which case applies:
   cause. `entire doctor` reports what is already there
   (`checkEntireDirSymlinks`). `.entire` **itself** is reported but not refused —
   `os.OpenRoot` follows a symlinked root, so an existing setup keeps working.
+  The agent hook-config directories get the same treatment via
+  `agent.HookConfigFile`: a symlinked `.claude` / `.cursor` / `.gemini` /
+  `.codex` is refused at the create, because a working tree arrives by clone and
+  `entire enable` must not create directories and write JSON through a link the
+  repository supplied. The config FILE may still be a symlink — pointing
+  `.claude/settings.json` at a dotfile repo is a real setup — with one behaviour
+  change worth knowing: an **absolute** link there no longer resolves, since
+  `os.Root` refuses absolute symlinks unconditionally. A relative one inside the
+  worktree still works.
 - **Call `Reset()` before deleting a rooted directory** (see
   `removeEntireDirectory`). A root that outlives its directory is a handle to an
   unlinked inode: writes succeed and land nowhere.
@@ -810,6 +856,19 @@ comments at each site say which case applies:
   already resolved through one (`ResolveTranscriptPath`, `resolveTranscriptPath`).
   Containment is applied at resolution. Rooting them properly needs `RepoPath` on
   `HookInput`, which is part of the external-plugin protocol.
+
+  **This is the one place the rooting is knowingly asymmetric, and it is the
+  largest gap left**, so do not read it as settled. The WRITE half is contained
+  — every agent's `WriteSession` goes through `agent.WriteSessionFile` and
+  `SessionStore`, which rejects a `SessionRef` outside the agent's session
+  directory — while the eight `os.ReadFile(sessionRef)` reads are not, and the
+  read is what pulls transcript content into checkpoints. Closing it is a
+  protocol change rather than a refactor, which is why it is scoped separately;
+  the shape it wants is `HookInput.RepoPath` plus the same
+  `sessionStoreForWrite` resolution the write half already uses. Do not "fix"
+  it by anchoring a root on `filepath.Dir(sessionRef)` — that is the derived
+  base the rule above refuses, and it would contain nothing while looking like
+  it did.
 - **Global/system git config** — see the config-loader bullet above; that is the
   one place rooting is actively wrong.
 - **A directory the caller is about to create, replace, or delete** — creating,
