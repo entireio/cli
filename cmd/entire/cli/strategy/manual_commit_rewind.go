@@ -20,6 +20,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/textutil"
 	"github.com/entireio/cli/cmd/entire/cli/trailers"
 	"github.com/entireio/cli/cmd/entire/cli/validation"
+	"github.com/entireio/cli/cmd/entire/cli/worktreedir"
 
 	"github.com/go-git/go-git/v6"
 	"github.com/go-git/go-git/v6/plumbing"
@@ -391,20 +392,24 @@ func (s *ManualCommitStrategy) Rewind(ctx context.Context, w, errW io.Writer, po
 		return nil
 	})
 
-	// Get repository root to walk from there
+	// The worktree root, and no fallback to ".". Restoring a checkpoint's tree
+	// into whatever directory the process happens to be sitting in is worse than
+	// not restoring at all, and a root is only as trustworthy as the base it is
+	// opened on — a relative base names a different directory as the process
+	// moves, which is the whole failure mode these anchors remove.
 	repoRoot, err := paths.WorktreeRoot(ctx)
 	if err != nil {
-		repoRoot = "." // Fallback to current directory
+		return fmt.Errorf("resolve worktree root: %w", err)
 	}
 
-	// Open os.Root at repo root for traversal-resistant file operations.
-	// Defense-in-depth: paths come from git tree objects (trusted) but we
-	// still scope operations to prevent any escape from the repo root.
-	repoRootHandle, err := os.OpenRoot(repoRoot)
+	// Through worktreedir rather than a private os.OpenRoot, so this shares the
+	// one handle per worktree with every other reader and writer. The names
+	// written below come from checkpoint TREE ENTRIES, which may have been
+	// fetched from a remote.
+	repoRootHandle, err := worktreedir.OpenAt(repoRoot)
 	if err != nil {
 		return fmt.Errorf("failed to open repo root: %w", err)
 	}
-	defer repoRootHandle.Close()
 
 	// Find and delete untracked files that aren't in the checkpoint.
 	// Uses git ls-files to only consider non-ignored files, avoiding walks through
@@ -454,9 +459,15 @@ func (s *ManualCommitStrategy) Rewind(ctx context.Context, w, errW io.Writer, po
 		// Ensure parent directories exist via os.Root so a crafted tree entry
 		// name (e.g. containing "..") from an untrusted checkpoint cannot create
 		// directories outside the repo. f.Name uses forward slashes (git tree).
+		//
+		// NoSymlink because this is the strongest case for it in the codebase:
+		// the entries come from a checkpoint that may have been fetched from a
+		// remote, and os.Root follows a symlink that stays INSIDE the root
+		// silently — so a tree carrying both a symlinked directory and a file
+		// under it would otherwise write through the link.
 		dir := path.Dir(f.Name)
 		if dir != "." {
-			if err := osroot.MkdirAll(repoRootHandle, dir, 0o755); err != nil {
+			if err := osroot.MkdirAllNoSymlink(repoRootHandle, dir, 0o755); err != nil {
 				return fmt.Errorf("failed to create directory %s: %w", dir, err)
 			}
 		}

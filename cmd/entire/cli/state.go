@@ -369,10 +369,11 @@ func filterToUncommittedFiles(ctx context.Context, files []string, repoRoot stri
 			continue
 		}
 
-		// File is in HEAD — compare content with working tree
-		absPath := filepath.Join(repoRoot, relPath)
-		workingContent, err := os.ReadFile(absPath) //nolint:gosec // path from controlled source
-		if err != nil {
+		// File is in HEAD — compare content with working tree, through the
+		// worktree's shared root. relPath comes from git, so it is already the
+		// coordinate the root reads in.
+		workingContent, ok := readWorktreeFileSafely(repoRoot, relPath)
+		if !ok {
 			// Can't read working tree file (deleted?) — keep it
 			result = append(result, relPath)
 			continue

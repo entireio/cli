@@ -2713,10 +2713,13 @@ func (s *ManualCommitStrategy) calculatePromptAttributionAtStart(
 			continue
 		}
 
-		// Always read from worktree to match checkpoint behavior
-		fullPath := filepath.Join(worktreeRoot, filePath)
+		// Always read from worktree to match checkpoint behavior, and through the
+		// worktree's shared root: filePath comes straight out of git status, so
+		// it is already the coordinate the root reads in. Joining it onto
+		// worktreeRoot and reading the result is what put a name Entire did not
+		// choose in front of an unconfined open, on the hook path.
 		var content string
-		if data, err := os.ReadFile(fullPath); err == nil { //nolint:gosec // filePath is from git worktree status
+		if data, err := readWorktreeFile(worktreeRoot, filePath); err == nil {
 			// Use git's binary detection algorithm (matches getFileContent behavior).
 			// Binary files are excluded from line-based attribution calculations.
 			isBinary, binErr := binary.IsBinary(bytes.NewReader(data))

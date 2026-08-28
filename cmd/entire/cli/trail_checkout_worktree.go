@@ -10,6 +10,7 @@ import (
 	"io/fs"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"strings"
 	"time"
@@ -20,6 +21,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/interactive"
 	"github.com/entireio/cli/cmd/entire/cli/osroot"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
+	"github.com/entireio/cli/cmd/entire/cli/worktreedir"
 )
 
 const (
@@ -102,7 +104,7 @@ func ensureTrailWorktreeIgnoreRule(ctx context.Context, w io.Writer, root string
 		return fmt.Errorf("failed to check ignore status of %s: %w", trailWorktreesRelDir, err)
 	}
 
-	appended, err := appendIgnoreRule(filepath.Join(root, ".gitignore"))
+	appended, err := appendIgnoreRule(root)
 	if err != nil {
 		return err
 	}
@@ -112,14 +114,22 @@ func ensureTrailWorktreeIgnoreRule(ctx context.Context, w io.Writer, root string
 	return nil
 }
 
-func appendIgnoreRule(path string) (bool, error) {
+func appendIgnoreRule(worktreeRoot string) (bool, error) {
 	const rule = trailWorktreesRelDir + "/"
-	content, err := os.ReadFile(path) //nolint:gosec // path derived from repo root / git common dir
+	const name = ".gitignore"
+	// Through the worktree's root: .gitignore is a working-tree file, and the
+	// tree arrives by clone. "derived from repo root" describes where the path
+	// was built, not where it resolves.
+	wt, err := worktreedir.OpenAt(worktreeRoot)
+	if err != nil {
+		return false, fmt.Errorf("failed to open worktree root: %w", err)
+	}
+	content, err := osroot.ReadFile(wt, name)
 	if errors.Is(err, os.ErrNotExist) {
 		return false, nil
 	}
 	if err != nil {
-		return false, fmt.Errorf("failed to read %s: %w", path, err)
+		return false, fmt.Errorf("failed to read %s: %w", name, err)
 	}
 	for line := range strings.SplitSeq(string(content), "\n") {
 		if strings.TrimSpace(line) == rule {
@@ -131,8 +141,8 @@ func appendIgnoreRule(path string) (bool, error) {
 		prefix = "\n"
 	}
 	updated := string(content) + prefix + rule + "\n"
-	if err := os.WriteFile(path, []byte(updated), 0o600); err != nil { //nolint:gosec // path derived from repo root / git common dir
-		return false, fmt.Errorf("failed to update %s: %w", path, err)
+	if err := osroot.WriteFile(wt, name, []byte(updated), 0o600); err != nil {
+		return false, fmt.Errorf("failed to update %s: %w", name, err)
 	}
 	return true, nil
 }
@@ -161,13 +171,20 @@ func copyWorktreeIncludeFiles(ctx context.Context, errW io.Writer, root, dest st
 	// dest is a fresh checkout of the trail branch, whose content the invoking
 	// user did not author. os.Root confines writes to dest even if the branch
 	// contains a tracked symlinked directory pointing outside it.
-	destRoot, err := os.OpenRoot(dest)
+	//
+	// The SOURCE gets a root too. rel comes from `git ls-files --ignored`, so it
+	// is a name the checkout chose rather than one Entire did, and it is read
+	// with the same argument that justifies confining the write.
+	srcRoot, err := worktreedir.OpenAt(root)
+	if err != nil {
+		return fmt.Errorf("failed to open source worktree root: %w", err)
+	}
+	destRoot, err := worktreedir.OpenAt(dest)
 	if err != nil {
 		return fmt.Errorf("failed to open worktree root: %w", err)
 	}
-	defer destRoot.Close()
 	for _, rel := range matches {
-		if err := copyIncludedFile(filepath.Join(root, rel), destRoot, rel); err != nil {
+		if err := copyIncludedFile(srcRoot, destRoot, rel); err != nil {
 			fmt.Fprintf(errW, "warning: skipped %s: %v\n", filepath.ToSlash(rel), err)
 		}
 	}
@@ -178,7 +195,11 @@ func copyWorktreeIncludeFiles(ctx context.Context, errW io.Writer, root, dest st
 // file means nothing gets copied. Lines are gitignore-style patterns; blank
 // lines and #-comments are skipped.
 func loadWorktreeIncludePatterns(root string) ([]string, error) {
-	data, err := os.ReadFile(filepath.Join(root, worktreeIncludeFile)) //nolint:gosec // path derived from repo root
+	wt, err := worktreedir.OpenAt(root)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open worktree root: %w", err)
+	}
+	data, err := osroot.ReadFile(wt, worktreeIncludeFile)
 	if errors.Is(err, fs.ErrNotExist) {
 		return nil, nil
 	}
@@ -249,18 +270,19 @@ func cleanRelativeIncludeFile(rel string) (string, bool) {
 	return clean, true
 }
 
-// copyIncludedFile copies src into destRoot at rel. destRoot confines all
-// writes to the worktree root, so a tracked symlinked directory in the
-// branch cannot redirect the copy outside the worktree.
-func copyIncludedFile(src string, destRoot *os.Root, rel string) error {
-	srcInfo, err := os.Lstat(src)
+// copyIncludedFile copies rel from srcRoot into destRoot. Both roots confine
+// their side to a worktree, so neither a tracked symlinked directory in the
+// branch nor one in the source checkout can redirect the copy outside it.
+func copyIncludedFile(srcRoot, destRoot *os.Root, rel string) error {
+	name := filepath.ToSlash(rel)
+	srcInfo, err := srcRoot.Lstat(name)
 	if err != nil {
 		return err //nolint:wrapcheck // lstat error is sufficient for caller context
 	}
 	if !srcInfo.Mode().IsRegular() {
 		return errors.New("source is not a regular file")
 	}
-	in, err := os.Open(src) //nolint:gosec // src derived from repo root + .worktreeinclude
+	in, err := srcRoot.Open(name)
 	if err != nil {
 		return err //nolint:wrapcheck // open error is sufficient for caller context
 	}
@@ -272,10 +294,14 @@ func copyIncludedFile(src string, destRoot *os.Root, rel string) error {
 	if !openedInfo.Mode().IsRegular() || !os.SameFile(srcInfo, openedInfo) {
 		return errors.New("source changed while opening")
 	}
-	if err := osroot.MkdirAll(destRoot, filepath.Dir(rel), 0o750); err != nil {
-		return err //nolint:wrapcheck // mkdir error is sufficient for caller context
+	// NoSymlink: dest is a checkout of a branch the invoking user did not
+	// author, and os.Root follows a symlink that stays INSIDE the root.
+	if dir := path.Dir(name); dir != "." {
+		if err := osroot.MkdirAllNoSymlink(destRoot, dir, 0o750); err != nil {
+			return err //nolint:wrapcheck // mkdir error is sufficient for caller context
+		}
 	}
-	out, err := destRoot.OpenFile(rel, os.O_WRONLY|os.O_CREATE|os.O_EXCL, srcInfo.Mode().Perm())
+	out, err := destRoot.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_EXCL, srcInfo.Mode().Perm())
 	if err != nil {
 		return err //nolint:wrapcheck // openfile error is sufficient for caller context
 	}
@@ -283,7 +309,7 @@ func copyIncludedFile(src string, destRoot *os.Root, rel string) error {
 	defer func() {
 		if !copied {
 			_ = out.Close()
-			_ = osroot.Remove(destRoot, rel) //nolint:errcheck // best-effort cleanup after a failed copy
+			_ = osroot.Remove(destRoot, name) //nolint:errcheck // best-effort cleanup after a failed copy
 		}
 	}()
 	if _, err := io.Copy(out, in); err != nil {
@@ -292,7 +318,7 @@ func copyIncludedFile(src string, destRoot *os.Root, rel string) error {
 	if err := out.Close(); err != nil {
 		return err //nolint:wrapcheck // close error is sufficient for caller context
 	}
-	if err := destRoot.Chmod(rel, srcInfo.Mode().Perm()); err != nil {
+	if err := destRoot.Chmod(name, srcInfo.Mode().Perm()); err != nil {
 		return err //nolint:wrapcheck // chmod error is sufficient for caller context
 	}
 	copied = true

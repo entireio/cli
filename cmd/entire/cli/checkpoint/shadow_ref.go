@@ -7,7 +7,6 @@ import (
 	"math/rand/v2"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"strings"
 	"time"
 
@@ -168,5 +167,14 @@ func tryDeleteLooseObject(commonDir string, hash plumbing.Hash) {
 	if len(h) < 3 {
 		return
 	}
-	_ = os.Remove(filepath.Join(commonDir, "objects", h[:2], h[2:]))
+	// Through the common dir's root like everything else in this file: a delete
+	// is the operation least worth leaving on a joined path, and the shadow
+	// flock beside it already resolves its name inside this same root. The hash
+	// is hex, so nothing here can traverse today; the root is what keeps that
+	// true without depending on it.
+	root, err := gitdir.OpenAt(commonDir)
+	if err != nil {
+		return
+	}
+	_ = osroot.Remove(root, "objects/"+h[:2]+"/"+h[2:]) //nolint:errcheck // best-effort; see doc comment
 }

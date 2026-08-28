@@ -31,11 +31,12 @@ var loosePermsWarnW io.Writer = os.Stderr
 // fileStore persists credentials as a JSON file on disk.
 // The file format is: { "service": { "user": "password" } }
 type fileStore struct {
-	// path is the absolute token file, kept for the warning messages that name
-	// it. Every read and write goes through a root over its directory instead:
-	// this file holds bearer tokens, and a root is what keeps a symlink swapped
-	// in between resolution and open from redirecting the write somewhere else
-	// in the user's home.
+	// path is the absolute token file, named by the caller (see dir for why
+	// that matters). It is kept for the warning messages that name it and for
+	// the flock; every read and write goes through a root over its directory
+	// instead, because this file holds bearer tokens and a root is what keeps a
+	// symlink swapped in between resolution and open from redirecting the write
+	// somewhere else in the user's home.
 	path string
 	// ownsDir reports whether filepath.Dir(path) is a directory Entire
 	// chose — the per-user config dir it shares with contexts.json — as
@@ -57,6 +58,21 @@ type fileStore struct {
 
 // dir returns the root over the token file's directory and the file's name
 // inside it, creating the directory. 0o700 because it holds bearer tokens.
+//
+// This is the one anchor in the codebase deliberately taken from
+// filepath.Dir of its own target, and the reason is that there is no other
+// candidate: f.path is a path the CALLER named — $ENTIRE_TOKEN_STORE_PATH, or
+// the file a test passes to UseFileBackendForTesting — so its directory is the
+// caller's choice too, and there is no separate trusted base to anchor on. Every
+// other root in Entire is anchored on a directory a resolver produced
+// (worktreedir, gitdir, entiredir, userdirs), and anchoring those on Dir of the
+// target would put the components the resolver produced ABOVE the root, where
+// containment reaches nothing. That is not the situation here.
+//
+// What the root still buys, given a single-component name, is that an ESCAPING
+// symlink at the token file is refused rather than followed, and that the write
+// cannot be redirected between resolution and open. Both matter for a file
+// holding bearer tokens.
 //
 // The directory is created from the outside because it is the root itself; the
 // lock file below is likewise path-based, since gofrs/flock takes a path and its

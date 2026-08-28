@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"runtime"
 	"strings"
 	"sync/atomic"
@@ -72,14 +71,21 @@ const noopScript = `exit 0`
 // returns its absolute path along with the state-store directory. The
 // store directory is empty; the loop will create the per-run subdir on
 // first Save.
-func makeLoopFiles(t *testing.T) (findings, storeDir string) {
+// makeLoopFiles seeds runID's findings document inside a fresh store and
+// returns its absolute path alongside the store directory.
+//
+// The document lives in the store's own layout rather than in an unrelated temp
+// dir because the loop fingerprints it through the store, by run id. The
+// absolute path is still returned: it is what LoopInput.FindingsDoc carries and
+// what the spawned agent is told to edit.
+func makeLoopFiles(t *testing.T, runID string) (findings, storeDir string) {
 	t.Helper()
-	dir := t.TempDir()
-	findings = filepath.Join(dir, "findings.md")
-	if err := os.WriteFile(findings, []byte("# Findings\n"), 0o600); err != nil {
+	storeDir = t.TempDir()
+	store := NewStateStoreWithDir(storeDir)
+	if err := store.WriteFindings(runID, []byte("# Findings\n")); err != nil {
 		t.Fatalf("write findings: %v", err)
 	}
-	return findings, t.TempDir()
+	return store.FindingsPath(runID), storeDir
 }
 
 // writePendingTurn rewrites the state.json file at path so its PendingTurn
@@ -161,7 +167,7 @@ func TestRunInvestigateLoop_QuorumReachedFirstRound(t *testing.T) {
 	t.Parallel()
 	skipOnWindows(t)
 
-	findings, storeDir := makeLoopFiles(t)
+	findings, storeDir := makeLoopFiles(t, "111111111111")
 	store := NewStateStoreWithDir(storeDir)
 
 	in := LoopInput{
@@ -213,7 +219,7 @@ func TestRunInvestigateLoop_QuorumDefault(t *testing.T) {
 	t.Parallel()
 	skipOnWindows(t)
 
-	findings, storeDir := makeLoopFiles(t)
+	findings, storeDir := makeLoopFiles(t, "222222222222")
 	in := LoopInput{
 		RunID:       "222222222222",
 		Topic:       "test",
@@ -246,7 +252,7 @@ func TestRunInvestigateLoop_Stalled(t *testing.T) {
 	t.Parallel()
 	skipOnWindows(t)
 
-	findings, storeDir := makeLoopFiles(t)
+	findings, storeDir := makeLoopFiles(t, "333333333333")
 	in := LoopInput{
 		RunID:       "333333333333",
 		Topic:       "test",
@@ -282,7 +288,7 @@ func TestRunInvestigateLoop_PausedOnTwoFailures(t *testing.T) {
 	t.Parallel()
 	skipOnWindows(t)
 
-	findings, storeDir := makeLoopFiles(t)
+	findings, storeDir := makeLoopFiles(t, "444444444444")
 	in := LoopInput{
 		RunID:       "444444444444",
 		Topic:       "test",
@@ -331,7 +337,7 @@ func TestRunInvestigateLoop_UnknownStanceWhenPendingTurnMissing(t *testing.T) {
 	t.Parallel()
 	skipOnWindows(t)
 
-	findings, storeDir := makeLoopFiles(t)
+	findings, storeDir := makeLoopFiles(t, "555555555555")
 	in := LoopInput{
 		RunID:       "555555555555",
 		Topic:       "test",
@@ -374,7 +380,7 @@ func TestRunInvestigateLoop_MissingPendingTurnPausesAfterTwo(t *testing.T) {
 	t.Parallel()
 	skipOnWindows(t)
 
-	findings, storeDir := makeLoopFiles(t)
+	findings, storeDir := makeLoopFiles(t, "777777777777")
 	in := LoopInput{
 		RunID:       "777777777777",
 		Topic:       "test",
@@ -407,7 +413,7 @@ func TestRunInvestigateLoop_PersistsStateEachTurn(t *testing.T) {
 	t.Parallel()
 	skipOnWindows(t)
 
-	findings, storeDir := makeLoopFiles(t)
+	findings, storeDir := makeLoopFiles(t, "666666666666")
 	in := LoopInput{
 		RunID:       "666666666666",
 		Topic:       "test",
@@ -468,7 +474,7 @@ func TestRunInvestigateLoop_Resume(t *testing.T) {
 	t.Parallel()
 	skipOnWindows(t)
 
-	findings, storeDir := makeLoopFiles(t)
+	findings, storeDir := makeLoopFiles(t, "777777777777")
 	store := NewStateStoreWithDir(storeDir)
 
 	// Pre-existing state: agent[0] has already gone in turn 1 and approved.
@@ -536,7 +542,7 @@ func TestRunInvestigateLoop_PlanChangedFlag(t *testing.T) {
 	t.Parallel()
 	skipOnWindows(t)
 
-	findings, storeDir := makeLoopFiles(t)
+	findings, storeDir := makeLoopFiles(t, "888888888888")
 	in := LoopInput{
 		RunID:       "888888888888",
 		Topic:       "test",
@@ -588,7 +594,7 @@ func TestRunInvestigateLoop_CancelledContext(t *testing.T) {
 	t.Parallel()
 	skipOnWindows(t)
 
-	findings, storeDir := makeLoopFiles(t)
+	findings, storeDir := makeLoopFiles(t, "999999999999")
 	in := LoopInput{
 		RunID:       "999999999999",
 		Topic:       "test",
@@ -668,7 +674,7 @@ func TestRunInvestigateLoop_InvalidStanceRecordedAsUnknown(t *testing.T) {
 	t.Parallel()
 	skipOnWindows(t)
 
-	findings, storeDir := makeLoopFiles(t)
+	findings, storeDir := makeLoopFiles(t, "aaaaaaaaaaaa")
 	in := LoopInput{
 		RunID:       "aaaaaaaaaaaa",
 		Topic:       "test",

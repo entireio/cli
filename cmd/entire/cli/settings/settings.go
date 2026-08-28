@@ -914,9 +914,16 @@ func readConfined(filePath string) ([]byte, error) {
 
 // readConfinedOutsideEntire reads the clone-preferences file, which lives in the
 // git common dir rather than under .entire, through that directory's shared
-// root. A path this cannot place under a common dir falls back to a root
-// anchored at the file's own parent, which is what the explicit-path test
-// callers pass.
+// root.
+//
+// The fallback anchors on the file's own parent, and that is the one shape this
+// codebase otherwise refuses — see the "an os.Root's base must be a trusted
+// path" rule. It is allowed here for the same reason tokenstore's is: the paths
+// that reach it are ones the CALLER named (the explicit-path settings tests, and
+// LoadFromFile's callers), so their parent directory is the caller's choice too
+// and there is no separate trusted base to prefer. It never applies to a path
+// Entire derived — those are placed under a common dir by clonePreferencesRoot
+// above, or under .entire by readConfined's other branch.
 func readConfinedOutsideEntire(filePath string) ([]byte, error) {
 	if root, name, err := clonePreferencesRoot(filePath); err == nil {
 		return readConfinedIn(root, name, filePath)
@@ -993,16 +1000,18 @@ func validateOpenedFile(root *os.Root, name, filePath string, f *os.File) error 
 }
 
 // writeConfinedAtomic is readConfined's write half: an atomic write through the
-// shared .entire root, falling back to a plain atomic write for the clone
-// preferences file in .git. It creates the parent directory, which for a
-// .entire path means the root itself.
+// shared .entire root, or through the git common dir's root for the clone
+// preferences file. It creates the parent directory, which for a .entire path
+// means the root itself.
+//
+// The non-.entire branch used to be a plain os.MkdirAll plus an unrooted atomic
+// write, which made the two halves asymmetric for no reason: readConfined
+// already resolved that same file through clonePreferencesRoot. A write is the
+// half that matters more, so it gets the same root.
 func writeConfinedAtomic(filePath string, data []byte, perm fs.FileMode) error {
 	// Same branch-on-location rule as readConfined.
 	if _, _, underEntire := entiredir.Split(filePath); !underEntire {
-		if mkErr := os.MkdirAll(filepath.Dir(filePath), 0o750); mkErr != nil {
-			return fmt.Errorf("creating settings directory: %w", mkErr)
-		}
-		return jsonutil.WriteFileAtomic(filePath, data, perm) //nolint:wrapcheck // caller names the file being written
+		return writeClonePreferencesAtomic(filePath, data, perm)
 	}
 
 	// Same relative-path handling as readConfined.
@@ -1014,6 +1023,29 @@ func writeConfinedAtomic(filePath string, data []byte, perm fs.FileMode) error {
 	root, name, err := entiredir.OpenPath(filePath)
 	if err != nil {
 		return fmt.Errorf("creating settings directory: %w", err)
+	}
+	if dir := path.Dir(name); dir != "." {
+		if err := osroot.MkdirAllNoSymlink(root, dir, 0o750); err != nil {
+			return fmt.Errorf("creating settings directory: %w", err)
+		}
+	}
+	return jsonutil.WriteFileAtomicIn(root, name, data, perm) //nolint:wrapcheck // caller names the file being written
+}
+
+// writeClonePreferencesAtomic writes a file that lives in the git common dir
+// rather than under .entire, through that directory's root.
+//
+// A path clonePreferencesRoot cannot place inside a common dir keeps the plain
+// unrooted write: the callers that reach it name a file directly (explicit-path
+// tests, and `entire disable` in a directory with no repository), and there is
+// no boundary to enforce for a path the caller chose itself.
+func writeClonePreferencesAtomic(filePath string, data []byte, perm fs.FileMode) error {
+	root, name, err := clonePreferencesRoot(filePath)
+	if err != nil {
+		if mkErr := os.MkdirAll(filepath.Dir(filePath), 0o750); mkErr != nil {
+			return fmt.Errorf("creating settings directory: %w", mkErr)
+		}
+		return jsonutil.WriteFileAtomic(filePath, data, perm) //nolint:wrapcheck // caller names the file being written
 	}
 	if dir := path.Dir(name); dir != "." {
 		if err := osroot.MkdirAllNoSymlink(root, dir, 0o750); err != nil {
@@ -1099,16 +1131,7 @@ func saveClonePreferencesToFile(prefs *ClonePreferences, filePath string) error 
 		return fmt.Errorf("marshaling preferences: %w", err)
 	}
 
-	root, name, err := clonePreferencesRoot(filePath)
-	if err != nil {
-		return err
-	}
-	if dir := path.Dir(name); dir != "." {
-		if err := osroot.MkdirAllNoSymlink(root, dir, 0o750); err != nil {
-			return fmt.Errorf("creating preferences directory: %w", err)
-		}
-	}
-	if err := jsonutil.WriteFileAtomicIn(root, name, data, 0o644); err != nil {
+	if err := writeClonePreferencesAtomic(filePath, data, 0o644); err != nil {
 		return fmt.Errorf("writing preferences file: %w", err)
 	}
 	return nil
@@ -1166,16 +1189,30 @@ func modifyClonePreferencesFile(filePath string, fn func(*ClonePreferences) erro
 	return saveClonePreferencesToFile(prefs, filePath)
 }
 
-// clonePreferencesRoot resolves filePath — always <git-common-dir>/entire/... —
-// into the shared root for that common dir plus the file's name inside it.
-// The common dir is the path's own grandparent, so this needs no ctx and works
-// for the explicit-path callers as well as the ctx-resolved ones.
+// clonePreferencesRoot returns the git common dir's root and the preferences
+// file's name inside it.
+//
+// The common dir is recovered by removing ClonePreferencesFile from the end of
+// filePath, not by walking up a fixed number of parents. Both produce the same
+// string today; the difference is what happens when they are wrong. The old
+// filepath.Dir(filepath.Dir(abs)) form silently anchored one directory too high
+// or too low the moment ClonePreferencesFile gained or lost a component, and it
+// made gitdir.OpenPathIn's containment check vacuous — the base was derived from
+// the very path being checked against it, so `rel` was "entire/preferences.json"
+// by construction and the check could never fire. Trimming a compile-time
+// constant is a shape assertion instead: a path that is not
+// <git-common-dir>/entire/preferences.json is refused rather than opened
+// somewhere else.
 func clonePreferencesRoot(filePath string) (*os.Root, string, error) {
 	abs, err := filepath.Abs(filePath)
 	if err != nil {
 		return nil, "", fmt.Errorf("resolve preferences path: %w", err)
 	}
-	commonDir := filepath.Dir(filepath.Dir(abs))
+	suffix := string(filepath.Separator) + filepath.FromSlash(ClonePreferencesFile)
+	commonDir, ok := strings.CutSuffix(abs, suffix)
+	if !ok || commonDir == "" {
+		return nil, "", fmt.Errorf("%q is not a %s inside a git common dir", filePath, ClonePreferencesFile)
+	}
 	root, name, err := gitdir.OpenPathIn(commonDir, abs)
 	if err != nil {
 		return nil, "", fmt.Errorf("open git common dir: %w", err)

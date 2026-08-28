@@ -371,7 +371,7 @@ func (s *LocalManifestStore) Latest(ctx context.Context) (LocalManifest, bool, e
 	if latest == "" {
 		return LocalManifest{}, false, nil
 	}
-	b, err := os.ReadFile(filepath.Join(s.dir, latest)) //nolint:gosec // name from os.ReadDir(s.dir)
+	b, err := osroot.ReadFile(root, s.name(latest))
 	if err != nil {
 		return LocalManifest{}, false, fmt.Errorf("read manifest %s: %w", latest, err)
 	}
@@ -390,6 +390,30 @@ func (s *LocalManifestStore) Latest(ctx context.Context) (LocalManifest, bool, e
 func manifestFilename(m LocalManifest) string {
 	stamp := m.StartedAt.UTC().Format("20060102T150405")
 	return stamp + "-" + m.RunID + ".json"
+}
+
+// Remove deletes m's manifest file through the store's root.
+//
+// The filename is derived from m.StartedAt and m.RunID, and m was decoded from
+// a file on disk, so resolving it as a name inside the root rather than joining
+// it into an absolute path is what keeps a planted manifest from choosing what
+// gets deleted. List already drops manifests whose RunID fails validateRunID;
+// this is the layer underneath that.
+//
+// A manifest that is not there is not an error: clean converges when run
+// against a partially removed state.
+func (s *LocalManifestStore) Remove(m LocalManifest) error {
+	root, err := s.root()
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return fmt.Errorf("open investigations store: %w", err)
+	}
+	if err := osroot.Remove(root, s.name(manifestFilename(m))); err != nil {
+		return fmt.Errorf("remove manifest: %w", err)
+	}
+	return nil
 }
 
 // PathFor returns the on-disk path of the manifest file for m. The path

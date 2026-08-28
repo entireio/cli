@@ -185,10 +185,17 @@ func CommonDirForWorktree(ctx context.Context, worktreeRoot string) (string, err
 // inside it, so a consumer holding an absolute path it was handed earlier can
 // still read through the one root rather than through the path.
 //
-// It refuses a path that is not under commonDir instead of silently reading it:
-// the callers here (investigation findings docs, run state) receive paths from a
-// manifest on disk, and a manifest naming something outside the clone is exactly
-// what should not be followed.
+// It refuses a path that is not under commonDir instead of silently reading it.
+// That refusal is only worth anything when commonDir is resolved INDEPENDENTLY
+// of absPath: a caller that derives the base by walking up from the target makes
+// the check vacuous, because the relative path is then correct by construction.
+// settings.clonePreferencesRoot is the one caller, and it recovers the common
+// dir by removing a compile-time constant suffix, which fails loudly on a path
+// of the wrong shape rather than anchoring somewhere else.
+//
+// (The investigation stores used to be described here as callers. They are not:
+// they hold a commonDir of their own and resolve run ids as names inside it,
+// which is the stronger form — see investigate.StateStore.)
 func OpenPathIn(commonDir, absPath string) (root *os.Root, name string, err error) {
 	base, err := filepath.Abs(commonDir)
 	if err != nil {

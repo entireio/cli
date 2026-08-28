@@ -210,18 +210,35 @@ func WriteSessionFile(ag SessionLocator, s *AgentSession, data []byte, perm os.F
 	return nil
 }
 
-// sessionStoreForWrite resolves the store a session write lands in, preferring
-// the agent's session directory for s.RepoPath and falling back to SessionRef's
-// own directory. The fallback also covers the case where RepoPath is set but the
-// SessionRef lies outside that store — some agents resolve a restored session to
-// a sibling directory (see RestoredSessionPathResolver).
+// sessionStoreForWrite resolves the store a session write lands in.
+//
+// With a RepoPath, that is the agent's session directory for it, and a
+// SessionRef outside that directory is an ERROR rather than a reason to anchor
+// somewhere else. It used to fall through to SessionRef's own parent, which made
+// the containment check its own off switch: the one input that fails it was the
+// one input that disabled it. The comment justifying that said some agents
+// resolve a restored session to a sibling directory — they do not.
+// RestoredSessionPathResolver's only implementation (Codex) returns
+// <sessionDir>/YYYY/MM/DD/rollout-*.jsonl, which nests INSIDE the store, so the
+// branch was unreachable as well as unsound.
+//
+// Without a RepoPath the SessionRef's own directory is the only candidate there
+// is. That anchor contains nothing by itself, and it is kept because the
+// alternative is refusing to write at all; what makes it acceptable is that
+// SessionRef there came from Entire's own resolution rather than from an agent
+// payload.
 func sessionStoreForWrite(ag SessionLocator, s *AgentSession) (*SessionStore, error) {
-	if s.RepoPath != "" {
-		if store, err := OpenSessionStore(ag, s.RepoPath); err == nil {
-			if _, nameErr := store.Name(s.SessionRef); nameErr == nil {
-				return store, nil
-			}
-		}
+	if s.RepoPath == "" {
+		return OpenSessionStoreAt(ag, filepath.Dir(s.SessionRef))
 	}
-	return OpenSessionStoreAt(ag, filepath.Dir(s.SessionRef))
+
+	store, err := OpenSessionStore(ag, s.RepoPath)
+	if err != nil {
+		return nil, err
+	}
+	if _, nameErr := store.Name(s.SessionRef); nameErr != nil {
+		return nil, fmt.Errorf("%w: %s is not inside %s's session directory %s",
+			ErrOutsideSessionStore, s.SessionRef, ag.Name(), store.Dir())
+	}
+	return store, nil
 }

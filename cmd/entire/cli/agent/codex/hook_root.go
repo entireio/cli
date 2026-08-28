@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 )
@@ -205,6 +206,19 @@ type WorktreeHooksPath struct {
 // Path returns the current checkout's hooks file path.
 func (p WorktreeHooksPath) Path() string {
 	return p.path
+}
+
+// hookConfig returns the same file as a handle anchored on the WORKTREE ROOT,
+// not on `.codex`.
+//
+// The distinction is the point. Reads here already used an os.Root, but opened
+// it at filepath.Dir of the target — which puts `.codex` above the root, so a
+// checked-in symlink there was resolved before containment began and the root
+// only ever contained the final "hooks.json". Anchoring one level up makes
+// `.codex` a NAME inside the worktree, which is what MkdirAllNoSymlink can
+// refuse. It also covers the writes, which had no root at all.
+func (p WorktreeHooksPath) hookConfig() (*agent.HookConfigFile, error) {
+	return agent.OpenHookConfig(p.worktreeRoot, ".codex/"+HooksFileName) //nolint:wrapcheck // agent.HookConfigFile already names the file in its error
 }
 
 // ResolveWorktreeHooksPath resolves the hooks file owned by the current

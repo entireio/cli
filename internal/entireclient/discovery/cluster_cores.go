@@ -1,7 +1,6 @@
 package discovery
 
 import (
-	"path/filepath"
 	"time"
 )
 
@@ -79,7 +78,7 @@ type CoresEntry struct {
 // yields an empty cache. Unlocked read; use ModifyClusterCores for a
 // read-modify-write sequence.
 func LoadClusterCores(cacheDir string) (ClusterCoresCache, error) {
-	return readClusterCoresNoLock(filepath.Join(cacheDir, clusterCoresFileName))
+	return readClusterCoresNoLock(cacheFile{dir: cacheDir, name: clusterCoresFileName})
 }
 
 // ModifyClusterCores atomically applies fn to the cluster→cores cache under a
@@ -88,14 +87,14 @@ func ModifyClusterCores(cacheDir string, fn func(ClusterCoresCache) error) error
 	return modifyCacheFile(cacheDir, clusterCoresFileName, readClusterCoresNoLock, writeClusterCoresNoLock, fn)
 }
 
-func readClusterCoresNoLock(path string) (ClusterCoresCache, error) {
+func readClusterCoresNoLock(f cacheFile) (ClusterCoresCache, error) {
 	cache := make(ClusterCoresCache)
-	err := loadCacheFile(path, &cache, func() ClusterCoresCache { return make(ClusterCoresCache) })
+	err := loadCacheFile(f, &cache, func() ClusterCoresCache { return make(ClusterCoresCache) })
 	return cache, err
 }
 
-func writeClusterCoresNoLock(path string, cache ClusterCoresCache) error {
-	return writeCacheFile(path, cache)
+func writeClusterCoresNoLock(f cacheFile, cache ClusterCoresCache) error {
+	return writeCacheFile(f, cache)
 }
 
 // LoadAPICores / ModifyAPICores are the data-API siblings of
@@ -108,7 +107,7 @@ func writeClusterCoresNoLock(path string, cache ClusterCoresCache) error {
 // LoadAPICores reads the api-host→trusted-issuer-URLs cache. Unlocked read; use
 // ModifyAPICores for a read-modify-write sequence.
 func LoadAPICores(cacheDir string) (ClusterCoresCache, error) {
-	return readClusterCoresNoLock(filepath.Join(cacheDir, apiDiscoveryFileName))
+	return readClusterCoresNoLock(cacheFile{dir: cacheDir, name: apiDiscoveryFileName})
 }
 
 // ModifyAPICores atomically applies fn to the api-host→trusted-issuer-URLs

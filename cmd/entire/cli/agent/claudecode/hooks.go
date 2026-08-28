@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
 	"slices"
 	"strings"
 
@@ -65,13 +64,12 @@ const metadataDenyRule = "Read(./.entire/metadata/**)"
 //
 // Split into per-phase helpers below; see each helper's doc.
 func (c *ClaudeCodeAgent) InstallHooks(ctx context.Context, force bool) (int, error) {
-	repoRoot, err := resolveInstallRepoRoot(ctx)
+	cfg, err := claudeHookConfig(ctx)
 	if err != nil {
 		return 0, err
 	}
-	settingsPath := filepath.Join(repoRoot, ".claude", ClaudeSettingsFileName)
 
-	rawSettings, rawHooks, rawPermissions, err := loadRawClaudeSettingsForInstall(settingsPath)
+	rawSettings, rawHooks, rawPermissions, err := loadRawClaudeSettingsForInstall(cfg)
 	if err != nil {
 		return 0, err
 	}
@@ -90,11 +88,24 @@ func (c *ClaudeCodeAgent) InstallHooks(ctx context.Context, force bool) (int, er
 		return 0, nil // All hooks and permissions already installed
 	}
 
-	if err := writeClaudeSettingsFile(settingsPath, rawSettings, rawHooks, rawPermissions); err != nil {
+	if err := writeClaudeSettingsFile(cfg, rawSettings, rawHooks, rawPermissions); err != nil {
 		return 0, err
 	}
 
 	return count, nil
+}
+
+// claudeHookConfig returns .claude/settings.json for the current worktree,
+// opened through the worktree's root. Every read, write and removal of that
+// file goes through it: the path lives in the working tree, which arrives by
+// clone, so a checked-in symlink at `.claude` must not be a directory Entire
+// creates and writes through.
+func claudeHookConfig(ctx context.Context) (*agent.HookConfigFile, error) {
+	repoRoot, err := resolveInstallRepoRoot(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return agent.OpenHookConfig(repoRoot, ".claude/"+ClaudeSettingsFileName) //nolint:wrapcheck // agent.HookConfigFile already names the file in its error
 }
 
 // resolveInstallRepoRoot locates the repo root InstallHooks writes under,
@@ -113,12 +124,12 @@ func resolveInstallRepoRoot(ctx context.Context) (string, error) {
 	return repoRoot, nil
 }
 
-// loadRawClaudeSettingsForInstall reads settingsPath (if present) and returns
+// loadRawClaudeSettingsForInstall reads cfg (if present) and returns
 // its top-level fields as raw JSON maps, ready for InstallHooks to mutate.
 // rawHooks and rawPermissions are always non-nil (empty maps when absent) so
 // callers never need a nil check before indexing them.
-func loadRawClaudeSettingsForInstall(settingsPath string) (rawSettings, rawHooks, rawPermissions map[string]json.RawMessage, err error) {
-	existingData, readErr := os.ReadFile(settingsPath) //nolint:gosec // path is constructed from repo root + settings file name
+func loadRawClaudeSettingsForInstall(cfg *agent.HookConfigFile) (rawSettings, rawHooks, rawPermissions map[string]json.RawMessage, err error) {
+	existingData, readErr := cfg.Read()
 	if readErr == nil {
 		if err := json.Unmarshal(existingData, &rawSettings); err != nil {
 			return nil, nil, nil, fmt.Errorf("failed to parse existing settings.json: %w", err)
@@ -266,9 +277,9 @@ func applyMetadataDenyRule(rawPermissions map[string]json.RawMessage) (bool, err
 }
 
 // writeClaudeSettingsFile marshals rawHooks and rawPermissions into
-// rawSettings and writes the result to settingsPath, creating the parent
-// .claude directory if needed.
-func writeClaudeSettingsFile(settingsPath string, rawSettings, rawHooks, rawPermissions map[string]json.RawMessage) error {
+// rawSettings and writes the result through cfg, creating the parent .claude
+// directory if needed.
+func writeClaudeSettingsFile(cfg *agent.HookConfigFile, rawSettings, rawHooks, rawPermissions map[string]json.RawMessage) error {
 	hooksJSON, err := jsonutil.MarshalWithNoHTMLEscape(rawHooks)
 	if err != nil {
 		return fmt.Errorf("failed to marshal hooks: %w", err)
@@ -281,20 +292,14 @@ func writeClaudeSettingsFile(settingsPath string, rawSettings, rawHooks, rawPerm
 	}
 	rawSettings["permissions"] = permJSON
 
-	if err := os.MkdirAll(filepath.Dir(settingsPath), 0o750); err != nil {
-		return fmt.Errorf("failed to create .claude directory: %w", err)
-	}
-
 	output, err := jsonutil.MarshalIndentWithNewline(rawSettings, "", "  ")
 	if err != nil {
 		return fmt.Errorf("failed to marshal settings: %w", err)
 	}
 
-	if err := os.WriteFile(settingsPath, output, 0o600); err != nil {
-		return fmt.Errorf("failed to write settings.json: %w", err)
-	}
-
-	return nil
+	// Write creates .claude with MkdirAllNoSymlink, so a checked-in symlink
+	// there is refused by name rather than followed.
+	return cfg.Write(output, 0o600) //nolint:wrapcheck // agent.HookConfigFile already names the file in its error
 }
 
 // parseHookType parses a specific hook type from rawHooks into the target slice.
@@ -322,13 +327,11 @@ func marshalHookType(rawHooks map[string]json.RawMessage, hookType string, match
 
 // UninstallHooks removes Entire hooks from Claude Code settings.
 func (c *ClaudeCodeAgent) UninstallHooks(ctx context.Context) error {
-	// Use repo root to find .claude directory when run from a subdirectory
-	repoRoot, err := paths.WorktreeRoot(ctx)
+	cfg, err := claudeHookConfig(ctx)
 	if err != nil {
-		repoRoot = "." // Fallback to CWD if not in a git repo
+		return err
 	}
-	settingsPath := filepath.Join(repoRoot, ".claude", ClaudeSettingsFileName)
-	data, err := os.ReadFile(settingsPath) //nolint:gosec // path is constructed from repo root + fixed path
+	data, err := cfg.Read()
 	if err != nil {
 		// Same split AreHooksInstalled makes: an absent file is an answer, an
 		// unreadable one is not. Collapsing both to "nothing to uninstall" leaves
@@ -337,7 +340,7 @@ func (c *ClaudeCodeAgent) UninstallHooks(ctx context.Context) error {
 		if errors.Is(err, os.ErrNotExist) {
 			return nil
 		}
-		return fmt.Errorf("read %s: %w", settingsPath, err)
+		return fmt.Errorf("read %s: %w", cfg.Path(), err)
 	}
 
 	var rawSettings map[string]json.RawMessage
@@ -443,10 +446,7 @@ func (c *ClaudeCodeAgent) UninstallHooks(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("failed to marshal settings: %w", err)
 	}
-	if err := os.WriteFile(settingsPath, output, 0o600); err != nil {
-		return fmt.Errorf("failed to write settings.json: %w", err)
-	}
-	return nil
+	return cfg.Write(output, 0o600) //nolint:wrapcheck // agent.HookConfigFile already names the file in its error
 }
 
 // loadClaudeSettings reads and parses .claude/settings.json from the repo root.
@@ -454,27 +454,25 @@ func (c *ClaudeCodeAgent) UninstallHooks(ctx context.Context) error {
 // "nothing configured". An unreadable or malformed file returns an error: the
 // answer could not be read, which is a different thing.
 func loadClaudeSettings(ctx context.Context) (ClaudeSettings, error) {
-	// Use repo root to find .claude directory when run from a subdirectory
-	repoRoot, err := paths.WorktreeRoot(ctx)
+	cfg, err := claudeHookConfig(ctx)
 	if err != nil {
-		repoRoot = "." // Fallback to CWD if not in a git repo
+		return ClaudeSettings{}, err
 	}
-	settingsPath := filepath.Join(repoRoot, ".claude", ClaudeSettingsFileName)
-	data, err := os.ReadFile(settingsPath) //nolint:gosec // path is constructed from repo root + fixed path
+	data, err := cfg.Read()
 	// No settings file means no hooks, which is an answer; anything else means we
 	// could not read the answer.
 	if errors.Is(err, os.ErrNotExist) {
 		return ClaudeSettings{}, nil
 	}
 	if err != nil {
-		logging.Warn(ctx, "claude-code: failed to read settings file", "path", settingsPath, "err", err)
-		return ClaudeSettings{}, fmt.Errorf("read %s: %w", settingsPath, err)
+		logging.Warn(ctx, "claude-code: failed to read settings file", "path", cfg.Path(), "err", err)
+		return ClaudeSettings{}, fmt.Errorf("read %s: %w", cfg.Path(), err)
 	}
 
 	var settings ClaudeSettings
 	if err := json.Unmarshal(data, &settings); err != nil {
-		logging.Warn(ctx, "claude-code: failed to parse settings file", "path", settingsPath, "err", err)
-		return ClaudeSettings{}, fmt.Errorf("parse %s: %w", settingsPath, err)
+		logging.Warn(ctx, "claude-code: failed to parse settings file", "path", cfg.Path(), "err", err)
+		return ClaudeSettings{}, fmt.Errorf("parse %s: %w", cfg.Path(), err)
 	}
 	return settings, nil
 }

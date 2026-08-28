@@ -62,14 +62,21 @@ type File struct {
 	Contexts []*Context `json:"contexts,omitempty"`
 }
 
+// contextsFileName is the contexts file's name inside the config directory.
+// It is the only name configRoot ever resolves.
+const contextsFileName = "contexts.json"
+
 // FilePath returns $configDir/contexts.json after ensuring the directory
 // exists and is private to its owner — 0700, or stricter if the user already
 // made it so; see userdirs.EnsurePrivateDir.
+//
+// The path is for messages and for the flock, which takes one. Reads and writes
+// go through configRoot.
 func FilePath(configDir string) (string, error) {
 	if err := userdirs.EnsurePrivateDir(configDir); err != nil {
 		return "", fmt.Errorf("create config dir: %w", err)
 	}
-	return filepath.Join(configDir, "contexts.json"), nil
+	return filepath.Join(configDir, contextsFileName), nil
 }
 
 // Load reads contexts.json under configDir, returning an empty *File
@@ -85,7 +92,7 @@ func Load(configDir string) (*File, error) {
 		return nil, err
 	}
 	defer unlock()
-	return readNoLock(path)
+	return readNoLock(configDir)
 }
 
 // Save writes f to contexts.json atomically (temp+rename) under an
@@ -100,7 +107,7 @@ func Save(configDir string, f *File) error {
 		return err
 	}
 	defer unlock()
-	return writeNoLock(path, f)
+	return writeNoLock(configDir, f)
 }
 
 // ContextsForIssuer returns every context whose CoreURL matches issuer
@@ -200,7 +207,7 @@ func Modify(configDir string, fn func(*File) (changed bool, err error)) error {
 	}
 	defer unlock()
 
-	f, err := readNoLock(path)
+	f, err := readNoLock(configDir)
 	if err != nil {
 		return err
 	}
@@ -211,7 +218,7 @@ func Modify(configDir string, fn func(*File) (changed bool, err error)) error {
 	if !changed {
 		return nil
 	}
-	return writeNoLock(path, f)
+	return writeNoLock(configDir, f)
 }
 
 func lockFile(path string) (func(), error) {
@@ -233,24 +240,28 @@ func lockFile(path string) (func(), error) {
 	}, nil
 }
 
-// configRoot returns the root over the directory holding path, and path's name
-// inside it. Anchored on the file's own directory rather than on
-// userdirs.Config() so the explicit-configDir callers (tests, and the
-// ENTIRE_CONFIG_DIR override) go through the same code path.
-func configRoot(path string) (*os.Root, string, error) {
-	abs, err := filepath.Abs(path)
+// configRoot returns the root over configDir and the contexts file's name
+// inside it.
+//
+// It takes the DIRECTORY, not the file. Anchoring on filepath.Dir of the target
+// looks equivalent — the paths are the same string — but it is not: it puts
+// every component the caller resolved above the root, so the root contains
+// exactly one fixed name and enforces nothing. The directory is what the caller
+// actually chose (userdirs.Config(), or $ENTIRE_CONFIG_DIR), so that is the base.
+func configRoot(configDir string) (*os.Root, string, error) {
+	abs, err := filepath.Abs(configDir)
 	if err != nil {
-		return nil, "", fmt.Errorf("resolve contexts path: %w", err)
+		return nil, "", fmt.Errorf("resolve config dir: %w", err)
 	}
-	root, err := osroot.Shared(filepath.Dir(abs))
+	root, err := osroot.Shared(abs)
 	if err != nil {
 		return nil, "", fmt.Errorf("open config dir: %w", err)
 	}
-	return root, filepath.Base(abs), nil
+	return root, contextsFileName, nil
 }
 
-func readNoLock(path string) (*File, error) {
-	root, name, err := configRoot(path)
+func readNoLock(configDir string) (*File, error) {
+	root, name, err := configRoot(configDir)
 	if err != nil {
 		return nil, err
 	}
@@ -271,12 +282,12 @@ func readNoLock(path string) (*File, error) {
 	return &f, nil
 }
 
-func writeNoLock(path string, f *File) error {
+func writeNoLock(configDir string, f *File) error {
 	data, err := json.MarshalIndent(f, "", "  ")
 	if err != nil {
 		return fmt.Errorf("marshal contexts: %w", err)
 	}
-	root, name, err := configRoot(path)
+	root, name, err := configRoot(configDir)
 	if err != nil {
 		return err
 	}

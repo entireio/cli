@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
 	"slices"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
@@ -38,24 +37,35 @@ const FactorySettingsFileName = "settings.json"
 // metadataDenyRule blocks Factory Droid from reading Entire session metadata
 const metadataDenyRule = "Read(./.entire/metadata/**)"
 
+// factoryHookConfig returns .factory/settings.json for the current worktree,
+// opened through the worktree's root. That directory lives in the working tree,
+// which arrives by clone, so a checked-in symlink at `.factory` must not be
+// something Entire creates directories under and writes through. See
+// agent.HookConfigFile.
+func factoryHookConfig(ctx context.Context) (*agent.HookConfigFile, error) {
+	// Repo root rather than CWD, so hooks land correctly when run from a
+	// subdirectory.
+	repoRoot, err := paths.WorktreeRoot(ctx)
+	if err != nil {
+		// Not a repository (tests, and `enable` before `git init`): the process
+		// directory is the only candidate, and it is one the caller chose rather
+		// than one derived from anything read off disk.
+		repoRoot, err = os.Getwd() //nolint:forbidigo // Intentional fallback when WorktreeRoot() fails
+		if err != nil {
+			return nil, fmt.Errorf("failed to get current directory: %w", err)
+		}
+	}
+	return agent.OpenHookConfig(repoRoot, ".factory/"+FactorySettingsFileName) //nolint:wrapcheck // agent.HookConfigFile already names the file in its error
+}
+
 // InstallHooks installs Factory AI Droid hooks in .factory/settings.json.
 // If force is true, removes existing Entire hooks before installing.
 // Returns the number of hooks installed.
-//
-//nolint:maintidx // Hook installation is intentionally centralized here; splitting it further would add churn for a config-assembly path.
 func (f *FactoryAIDroidAgent) InstallHooks(ctx context.Context, force bool) (int, error) {
-	// Use repo root instead of CWD to find .factory directory
-	// This ensures hooks are installed correctly when run from a subdirectory
-	repoRoot, err := paths.WorktreeRoot(ctx)
+	cfg, err := factoryHookConfig(ctx)
 	if err != nil {
-		// Fallback to CWD if not in a git repo (e.g., during tests)
-		repoRoot, err = os.Getwd() //nolint:forbidigo // Intentional fallback when WorktreeRoot() fails (tests run outside git repos)
-		if err != nil {
-			return 0, fmt.Errorf("failed to get current directory: %w", err)
-		}
+		return 0, err
 	}
-
-	settingsPath := filepath.Join(repoRoot, ".factory", FactorySettingsFileName)
 
 	// Read existing settings if they exist
 	var rawSettings map[string]json.RawMessage
@@ -66,7 +76,7 @@ func (f *FactoryAIDroidAgent) InstallHooks(ctx context.Context, force bool) (int
 	// rawPermissions preserves unknown permission fields (e.g., "ask")
 	var rawPermissions map[string]json.RawMessage
 
-	existingData, readErr := os.ReadFile(settingsPath) //nolint:gosec // path is constructed from cwd + fixed path
+	existingData, readErr := cfg.Read()
 	if readErr == nil {
 		if err := json.Unmarshal(existingData, &rawSettings); err != nil {
 			return 0, fmt.Errorf("failed to parse existing settings.json: %w", err)
@@ -230,17 +240,14 @@ func (f *FactoryAIDroidAgent) InstallHooks(ctx context.Context, force bool) (int
 	rawSettings["permissions"] = permJSON
 
 	// Write back to file
-	if err := os.MkdirAll(filepath.Dir(settingsPath), 0o750); err != nil {
-		return 0, fmt.Errorf("failed to create .factory directory: %w", err)
-	}
-
 	output, err := jsonutil.MarshalIndentWithNewline(rawSettings, "", "  ")
 	if err != nil {
 		return 0, fmt.Errorf("failed to marshal settings: %w", err)
 	}
 
-	if err := os.WriteFile(settingsPath, output, 0o600); err != nil {
-		return 0, fmt.Errorf("failed to write settings.json: %w", err)
+	// Write creates .factory with MkdirAllNoSymlink.
+	if err := cfg.Write(output, 0o600); err != nil {
+		return 0, err //nolint:wrapcheck // agent.HookConfigFile already names the file in its error
 	}
 
 	return count, nil
@@ -271,20 +278,18 @@ func marshalHookType(rawHooks map[string]json.RawMessage, hookType string, match
 
 // UninstallHooks removes Entire hooks from Factory AI Droid settings.
 func (f *FactoryAIDroidAgent) UninstallHooks(ctx context.Context) error {
-	// Use repo root to find .factory directory when run from a subdirectory
-	repoRoot, err := paths.WorktreeRoot(ctx)
+	cfg, err := factoryHookConfig(ctx)
 	if err != nil {
-		repoRoot = "." // Fallback to CWD if not in a git repo
+		return err
 	}
-	settingsPath := filepath.Join(repoRoot, ".factory", FactorySettingsFileName)
-	data, err := os.ReadFile(settingsPath) //nolint:gosec // path is constructed from repo root + fixed path
+	data, err := cfg.Read()
 	if err != nil {
 		// An absent file means nothing to uninstall; an unreadable one does not.
 		// Collapsing both leaves hooks on disk while reporting success.
 		if errors.Is(err, os.ErrNotExist) {
 			return nil
 		}
-		return fmt.Errorf("read %s: %w", settingsPath, err)
+		return fmt.Errorf("read %s: %w", cfg.Path(), err)
 	}
 
 	var rawSettings map[string]json.RawMessage
@@ -390,8 +395,8 @@ func (f *FactoryAIDroidAgent) UninstallHooks(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("failed to marshal settings: %w", err)
 	}
-	if err := os.WriteFile(settingsPath, output, 0o600); err != nil {
-		return fmt.Errorf("failed to write settings.json: %w", err)
+	if err := cfg.Write(output, 0o600); err != nil {
+		return err //nolint:wrapcheck // agent.HookConfigFile already names the file in its error
 	}
 	return nil
 }
@@ -404,24 +409,22 @@ func (f *FactoryAIDroidAgent) UninstallHooks(ctx context.Context) error {
 // "we could not tell" and "there are none" are different things to a caller
 // deciding whether hooks can be left alone.
 func (f *FactoryAIDroidAgent) AreHooksInstalled(ctx context.Context) (bool, error) {
-	// Use repo root to find .factory directory when run from a subdirectory
-	repoRoot, err := paths.WorktreeRoot(ctx)
+	cfg, err := factoryHookConfig(ctx)
 	if err != nil {
-		repoRoot = "." // Fallback to CWD if not in a git repo
+		return false, err
 	}
-	settingsPath := filepath.Join(repoRoot, ".factory", FactorySettingsFileName)
-	data, err := os.ReadFile(settingsPath) //nolint:gosec // path is constructed from repo root + fixed path
+	data, err := cfg.Read()
 	if errors.Is(err, os.ErrNotExist) {
 		return false, nil
 	}
 	if err != nil {
-		logging.Warn(ctx, "factoryai-droid: failed to read settings file", "path", settingsPath, "err", err)
-		return false, fmt.Errorf("read %s: %w", settingsPath, err)
+		logging.Warn(ctx, "factoryai-droid: failed to read settings file", "path", cfg.Path(), "err", err)
+		return false, fmt.Errorf("read %s: %w", cfg.Path(), err)
 	}
 
 	var settings FactorySettings
 	if err := json.Unmarshal(data, &settings); err != nil {
-		logging.Warn(ctx, "factoryai-droid: failed to parse settings file", "path", settingsPath, "err", err)
+		logging.Warn(ctx, "factoryai-droid: failed to parse settings file", "path", cfg.Path(), "err", err)
 		return false, fmt.Errorf("parse hook config: %w", err)
 	}
 

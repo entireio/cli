@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
+	"github.com/entireio/cli/cmd/entire/cli/osroot"
 	"github.com/entireio/cli/cmd/entire/cli/versioninfo"
 )
 
@@ -408,6 +409,11 @@ func httpGetSmall(ctx context.Context, rawURL string) ([]byte, error) {
 // command errors to stderr and a download failure is an ordinary event
 // (network hiccup, 5xx, checksum mismatch), not an exceptional one.
 func fetchAndVerify(ctx context.Context, rawURL, asset, wantDigest, stagingDir string) (*fetchedAsset, error) {
+	stagingRoot, err := osroot.Shared(stagingDir)
+	if err != nil {
+		return nil, fmt.Errorf("open staging dir: %w", err)
+	}
+
 	// The asset name is normally one of our own candidates, but the
 	// single-URL download_url template path derives it from the URL and a
 	// future caller could pass a name straight from a remote manifest.
@@ -438,29 +444,34 @@ func fetchAndVerify(ctx context.Context, rawURL, asset, wantDigest, stagingDir s
 		return nil, fmt.Errorf("download %s: %s", redactURL(rawURL), resp.Status)
 	}
 
-	dest := filepath.Join(stagingDir, asset)
-	out, err := os.Create(dest) //nolint:gosec // dest is inside the caller-owned staging dir; asset name came from our candidate list or checksum manifest
+	// Through the staging root, with the asset as a name inside it. asset comes
+	// from assetCandidates today — selectAssetFromChecksums uses the downloaded
+	// manifest only as a membership test, so a remote name never reaches here —
+	// and assetNameFromURL runs path.Base. The root is what keeps that true if
+	// either of those ever starts trusting the manifest's spelling.
+	out, err := stagingRoot.Create(asset)
 	if err != nil {
 		return nil, fmt.Errorf("create staging file: %w", err)
 	}
+	dest := filepath.Join(stagingDir, asset)
 	h := sha256.New()
 	n, err := io.Copy(io.MultiWriter(out, h), io.LimitReader(resp.Body, maxPluginAssetSize+1))
 	closeErr := out.Close()
 	if err != nil {
-		_ = os.Remove(dest)
+		_ = osroot.Remove(stagingRoot, asset) //nolint:errcheck // best-effort cleanup of a staging file we are already abandoning
 		return nil, fmt.Errorf("download %s: %w", redactURL(rawURL), err)
 	}
 	if closeErr != nil {
-		_ = os.Remove(dest)
+		_ = osroot.Remove(stagingRoot, asset) //nolint:errcheck // best-effort cleanup of a staging file we are already abandoning
 		return nil, fmt.Errorf("write staging file: %w", closeErr)
 	}
 	if n > maxPluginAssetSize {
-		_ = os.Remove(dest)
+		_ = osroot.Remove(stagingRoot, asset) //nolint:errcheck // best-effort cleanup of a staging file we are already abandoning
 		return nil, fmt.Errorf("download %s: exceeds %d byte limit", redactURL(rawURL), int64(maxPluginAssetSize))
 	}
 	got := hex.EncodeToString(h.Sum(nil))
 	if wantDigest != "" && !strings.EqualFold(got, wantDigest) {
-		_ = os.Remove(dest)
+		_ = osroot.Remove(stagingRoot, asset) //nolint:errcheck // best-effort cleanup of a staging file we are already abandoning
 		return nil, fmt.Errorf("checksum mismatch for %s: got %s, want %s", asset, got, wantDigest)
 	}
 	return &fetchedAsset{Path: dest, Asset: asset, SHA256: got, Verified: wantDigest != ""}, nil

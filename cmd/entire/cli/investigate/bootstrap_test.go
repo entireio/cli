@@ -18,11 +18,8 @@ func TestBootstrap_SeedDocEmbedsQuestionBody(t *testing.T) {
 		t.Fatalf("write seed: %v", err)
 	}
 
-	findings := filepath.Join(dir, "out", "findings.md")
-
 	res, err := Bootstrap(context.Background(), BootstrapInput{
-		SeedDoc:     seedPath,
-		FindingsDoc: findings,
+		SeedDoc: seedPath,
 	})
 	if err != nil {
 		t.Fatalf("Bootstrap: %v", err)
@@ -31,11 +28,7 @@ func TestBootstrap_SeedDocEmbedsQuestionBody(t *testing.T) {
 		t.Errorf("Topic = %q, want derived from filename", res.Topic)
 	}
 
-	gotFindings, err := os.ReadFile(findings)
-	if err != nil {
-		t.Fatalf("read findings: %v", err)
-	}
-	got := string(gotFindings)
+	got := string(res.Body)
 	for _, want := range []string{
 		"# Investigation: seed",
 		"## TLDR",
@@ -68,11 +61,8 @@ func TestBootstrap_SeedDocDerivesTopicFromInvestigationHeading(t *testing.T) {
 		t.Fatalf("write seed: %v", err)
 	}
 
-	findings := filepath.Join(dir, "out", "findings.md")
-
 	res, err := Bootstrap(context.Background(), BootstrapInput{
-		SeedDoc:     seedPath,
-		FindingsDoc: findings,
+		SeedDoc: seedPath,
 	})
 	if err != nil {
 		t.Fatalf("Bootstrap: %v", err)
@@ -81,11 +71,7 @@ func TestBootstrap_SeedDocDerivesTopicFromInvestigationHeading(t *testing.T) {
 		t.Errorf("Topic = %q, want derived from '# Investigation:' heading", res.Topic)
 	}
 
-	gotFindings, err := os.ReadFile(findings)
-	if err != nil {
-		t.Fatalf("read findings: %v", err)
-	}
-	got := string(gotFindings)
+	got := string(res.Body)
 	if !strings.Contains(got, "# Investigation: Why does checkout retry forever?") {
 		t.Errorf("findings missing scaffold title with derived topic\nGOT:\n%s", got)
 	}
@@ -97,12 +83,8 @@ func TestBootstrap_SeedDocDerivesTopicFromInvestigationHeading(t *testing.T) {
 func TestBootstrap_TopicScaffold(t *testing.T) {
 	t.Parallel()
 
-	dir := t.TempDir()
-	findings := filepath.Join(dir, "findings.md")
-
 	res, err := Bootstrap(context.Background(), BootstrapInput{
-		Topic:       "Why is checkout flaky?",
-		FindingsDoc: findings,
+		Topic: "Why is checkout flaky?",
 	})
 	if err != nil {
 		t.Fatalf("Bootstrap: %v", err)
@@ -111,10 +93,7 @@ func TestBootstrap_TopicScaffold(t *testing.T) {
 		t.Errorf("Topic = %q, want %q", res.Topic, "Why is checkout flaky?")
 	}
 
-	body, err := os.ReadFile(findings)
-	if err != nil {
-		t.Fatalf("read findings: %v", err)
-	}
+	body := res.Body
 	got := string(body)
 	for _, want := range []string{
 		"# Investigation: Why is checkout flaky?",
@@ -137,14 +116,10 @@ func TestBootstrap_TopicScaffold(t *testing.T) {
 func TestBootstrap_IssueLinkSeedEmbedsQuestionBody(t *testing.T) {
 	t.Parallel()
 
-	dir := t.TempDir()
-	findings := filepath.Join(dir, "findings.md")
-
 	seedBytes := []byte("**Source:** https://github.com/o/r/issues/42\n\nIssue body: checkout times out under load.\n")
 	res, err := Bootstrap(context.Background(), BootstrapInput{
 		IssueLinkSeed:  seedBytes,
 		IssueLinkTopic: "checkout times out",
-		FindingsDoc:    findings,
 	})
 	if err != nil {
 		t.Fatalf("Bootstrap: %v", err)
@@ -153,10 +128,7 @@ func TestBootstrap_IssueLinkSeedEmbedsQuestionBody(t *testing.T) {
 		t.Errorf("Topic = %q, want from IssueLinkTopic", res.Topic)
 	}
 
-	body, err := os.ReadFile(findings)
-	if err != nil {
-		t.Fatalf("read findings: %v", err)
-	}
+	body := res.Body
 	got := string(body)
 	for _, want := range []string{
 		"# Investigation: checkout times out",
@@ -184,21 +156,14 @@ func TestBootstrap_IssueLinkSeedEmbedsQuestionBody(t *testing.T) {
 func TestBootstrap_TopicOnlyUsesTopicAsQuestion(t *testing.T) {
 	t.Parallel()
 
-	dir := t.TempDir()
-	findings := filepath.Join(dir, "findings.md")
-
-	_, err := Bootstrap(context.Background(), BootstrapInput{
-		Topic:       "Why is checkout flaky?",
-		FindingsDoc: findings,
+	res, err := Bootstrap(context.Background(), BootstrapInput{
+		Topic: "Why is checkout flaky?",
 	})
 	if err != nil {
 		t.Fatalf("Bootstrap: %v", err)
 	}
 
-	body, err := os.ReadFile(findings)
-	if err != nil {
-		t.Fatalf("read findings: %v", err)
-	}
+	body := res.Body
 	got := string(body)
 
 	// The topic appears under `## Question` (between Question and the next
@@ -239,10 +204,7 @@ func TestRenderInvestigationScaffold_TrimsQuestionBodyTrailingWhitespace(t *test
 
 func TestBootstrap_RequiresOneInput(t *testing.T) {
 	t.Parallel()
-	dir := t.TempDir()
-	_, err := Bootstrap(context.Background(), BootstrapInput{
-		FindingsDoc: filepath.Join(dir, "f.md"),
-	})
+	_, err := Bootstrap(context.Background(), BootstrapInput{})
 	if err == nil {
 		t.Fatalf("expected error when no input variant provided")
 	}

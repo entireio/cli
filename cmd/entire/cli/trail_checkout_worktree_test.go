@@ -62,12 +62,13 @@ func TestSanitizeTrailWorktreeName(t *testing.T) {
 func TestAppendIgnoreRule(t *testing.T) {
 	t.Parallel()
 
-	path := filepath.Join(t.TempDir(), "gitignore")
+	worktree := t.TempDir()
+	path := filepath.Join(worktree, ".gitignore")
 	if err := os.WriteFile(path, nil, 0o600); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
 	for i := range 2 {
-		appended, err := appendIgnoreRule(path)
+		appended, err := appendIgnoreRule(worktree)
 		if err != nil {
 			t.Fatalf("appendIgnoreRule: %v", err)
 		}
@@ -91,11 +92,12 @@ func TestAppendIgnoreRule(t *testing.T) {
 func TestAppendIgnoreRule_AddsNewlineBeforeRule(t *testing.T) {
 	t.Parallel()
 
-	path := filepath.Join(t.TempDir(), "gitignore")
+	worktree := t.TempDir()
+	path := filepath.Join(worktree, ".gitignore")
 	if err := os.WriteFile(path, []byte("node_modules"), 0o600); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
-	appended, err := appendIgnoreRule(path)
+	appended, err := appendIgnoreRule(worktree)
 	if err != nil {
 		t.Fatalf("appendIgnoreRule: %v", err)
 	}
@@ -114,15 +116,15 @@ func TestAppendIgnoreRule_AddsNewlineBeforeRule(t *testing.T) {
 func TestAppendIgnoreRule_MissingFileNoop(t *testing.T) {
 	t.Parallel()
 
-	path := filepath.Join(t.TempDir(), "gitignore")
-	appended, err := appendIgnoreRule(path)
+	worktree := t.TempDir()
+	appended, err := appendIgnoreRule(worktree)
 	if err != nil {
 		t.Fatalf("appendIgnoreRule: %v", err)
 	}
 	if appended {
 		t.Fatal("appendIgnoreRule appended = true, want false")
 	}
-	if _, err := os.Stat(path); !os.IsNotExist(err) {
+	if _, err := os.Stat(filepath.Join(worktree, ".gitignore")); !os.IsNotExist(err) {
 		t.Fatalf("gitignore stat = %v, want not exist", err)
 	}
 }

@@ -28,6 +28,10 @@ const InvestigationsDirName = "entire-investigations"
 // run directory.
 const stateFileName = "state.json"
 
+// FindingsFileName is the on-disk name for the per-run findings document
+// inside the run directory.
+const FindingsFileName = "findings.md"
+
 // runIDPattern is the validation regex for investigation run IDs: exactly
 // 12 lowercase hex characters. Shares the checkpoint-id format via
 // id.Pattern.
@@ -209,6 +213,108 @@ func (s *StateStore) Load(ctx context.Context, runID string) (*RunState, error) 
 		return nil, fmt.Errorf("unmarshal run state: %w", err)
 	}
 	return &st, nil
+}
+
+// FindingsPath returns the absolute path of runID's findings document.
+// Absolute for the same reason RunStatePath is: the investigating agent writes
+// it, and the manifest records where it was.
+func (s *StateStore) FindingsPath(runID string) string {
+	return filepath.Join(s.RunDir(runID), FindingsFileName)
+}
+
+// ReadFindings reads runID's findings document through the store's root.
+// A missing document is (nil, false, nil).
+func (s *StateStore) ReadFindings(runID string) ([]byte, bool, error) {
+	if err := validateRunID(runID); err != nil {
+		return nil, false, fmt.Errorf("invalid run ID: %w", err)
+	}
+	root, err := s.root()
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, false, nil
+		}
+		return nil, false, fmt.Errorf("open investigation store: %w", err)
+	}
+	data, err := osroot.ReadFile(root, s.name(runID, FindingsFileName))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, false, nil
+		}
+		return nil, false, fmt.Errorf("read findings: %w", err)
+	}
+	return data, true, nil
+}
+
+// WriteFindings writes runID's findings document through the store's root,
+// creating the per-run directory. MkdirAllNoSymlink rather than MkdirAll: a
+// symlinked component under entire-investigations is a directory Entire did not
+// create and cannot vouch for, and this is the write that establishes the run.
+func (s *StateStore) WriteFindings(runID string, body []byte) error {
+	if err := validateRunID(runID); err != nil {
+		return fmt.Errorf("invalid run ID: %w", err)
+	}
+	root, err := s.root()
+	if err != nil {
+		return fmt.Errorf("open investigation store: %w", err)
+	}
+	if err := osroot.MkdirAllNoSymlink(root, s.name(runID), 0o750); err != nil {
+		return fmt.Errorf("create investigation run directory: %w", err)
+	}
+	if err := osroot.WriteFile(root, s.name(runID, FindingsFileName), body, 0o600); err != nil {
+		return fmt.Errorf("write findings doc: %w", err)
+	}
+	return nil
+}
+
+// ReadRunFindings reads runID's findings document through store.
+//
+// It exists for the two renderers that hold a LocalManifest and used to read
+// m.FindingsDoc directly. That field is an absolute path decoded from a JSON
+// file on disk, so following it means a manifest gets to choose which file is
+// read and printed. The run id is the part of the manifest that is validated,
+// and resolving it as a name inside the store keeps the read in the tree the
+// store owns.
+//
+// Everything is soft: a nil store, an invalid id, a missing run, a missing
+// document, and an unreadable one all yield "". The callers print a shorter
+// block, and an empty document is indistinguishable from an absent one because
+// neither has anything to render.
+func ReadRunFindings(store *StateStore, runID string) string {
+	if store == nil || !IsValidRunID(runID) {
+		return ""
+	}
+	data, found, err := store.ReadFindings(runID)
+	if err != nil || !found {
+		return ""
+	}
+	return string(data)
+}
+
+// RemoveRun deletes runID's per-run directory and everything in it.
+//
+// This is the operation RunDir's doc comment warns about — the one an
+// unvalidated id would turn into a path-traversal sink. It resolves runID as a
+// NAME inside the store's root rather than joining it into an absolute path, so
+// the containment is the kernel's rather than a precondition each caller has to
+// keep honouring. validateRunID stays as the layer above it.
+//
+// A store or run directory that is not there is not an error: clean converges
+// when run against a partially removed state.
+func (s *StateStore) RemoveRun(runID string) error {
+	if err := validateRunID(runID); err != nil {
+		return fmt.Errorf("invalid run ID: %w", err)
+	}
+	root, err := s.root()
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("open investigation store: %w", err)
+	}
+	if err := root.RemoveAll(s.name(runID)); err != nil {
+		return fmt.Errorf("remove run directory: %w", err)
+	}
+	return nil
 }
 
 // RunStatePath returns the absolute path of runID's state file. Absolute on
