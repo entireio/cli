@@ -1,6 +1,7 @@
 package agent_test
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -24,11 +25,9 @@ func (s *storeStubAgent) Type() types.AgentType                    { return "stu
 func (s *storeStubAgent) GetSessionDir(string) (string, error)     { return s.dir, nil }
 func (s *storeStubAgent) ResolveSessionFile(dir, id string) string { return s.resolve(dir, id) }
 
-// newStore builds a store over a fresh temp directory. No reset in cleanup: the
-// root registry is process-wide and shared with every other anchor, so closing
-// it would pull handles out from under the parallel tests here. Each test keys a
-// distinct directory, and a few directory handles for the life of a test binary
-// cost nothing.
+// newStore builds a store over a fresh temp directory. Nothing to clean up: a
+// store opens its root per operation and closes it again, so it holds no handle
+// between calls.
 func newStore(t *testing.T, resolve func(dir, id string) string) (*agent.SessionStore, string) {
 	t.Helper()
 	dir := t.TempDir()
@@ -131,4 +130,46 @@ func TestWriteSessionFile_RequiresASessionRef(t *testing.T) {
 	ag := &storeStubAgent{dir: t.TempDir(), resolve: joinResolve}
 	require.Error(t, agent.WriteSessionFile(ag, &agent.AgentSession{SessionID: "x"}, nil, 0o600))
 	require.Error(t, agent.WriteSessionFile(ag, nil, nil, 0o600))
+}
+
+// TestSessionStore_ProbingManyDirectoriesRetainsNoDescriptors pins the reason
+// openRoot does not go through osroot.Shared.
+//
+// searchTranscriptInProjectDirs opens a store for every candidate directory it
+// walks under an agent's session base dir. When those roots were memoized, each
+// probe retained a directory fd for the life of the process — one per candidate,
+// measured — so a few hundred project directories reached RLIMIT_NOFILE, and
+// because the registry is shared, os.OpenRoot then failed for .entire and the
+// git common dir too.
+func TestSessionStore_ProbingManyDirectoriesRetainsNoDescriptors(t *testing.T) {
+	t.Parallel()
+
+	countFDs := func() int {
+		entries, err := os.ReadDir("/proc/self/fd")
+		if err != nil {
+			t.Skipf("no /proc/self/fd on this platform: %v", err)
+		}
+		return len(entries)
+	}
+
+	base := t.TempDir()
+	const candidates = 128
+	dirs := make([]string, candidates)
+	for i := range candidates {
+		dirs[i] = filepath.Join(base, fmt.Sprintf("project-%03d", i))
+		require.NoError(t, os.MkdirAll(dirs[i], 0o750))
+	}
+
+	before := countFDs()
+	for _, dir := range dirs {
+		store, err := agent.OpenSessionStoreAt(&storeStubAgent{dir: dir, resolve: joinResolve}, dir)
+		require.NoError(t, err)
+		name, _, err := store.SessionFile("session-id")
+		require.NoError(t, err)
+		store.Exists(name) // absent in every candidate, as in a real miss
+	}
+	// Some slack for anything the runtime opens concurrently; the regression
+	// this guards produced exactly `candidates` extra descriptors.
+	require.Less(t, countFDs()-before, 16,
+		"probing %d candidate directories must not retain a descriptor per directory", candidates)
 }

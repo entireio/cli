@@ -40,6 +40,101 @@ func ReadFile(root *os.Root, name string) ([]byte, error) {
 	return data, nil
 }
 
+// ReadFileNoFollow reads name while refusing a symbolic link at the leaf.
+// os.Root already prevents a link from escaping root, but follows links whose
+// targets remain inside it. Entire-owned trees require the stronger property:
+// a name must identify the file stored at that name, not another file in the
+// same tree.
+func ReadFileNoFollow(root *os.Root, name string) ([]byte, error) {
+	f, err := OpenNoFollow(root, name)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+
+	data, err := io.ReadAll(f)
+	if err != nil {
+		return nil, err //nolint:wrapcheck // preserve original error
+	}
+	return data, nil
+}
+
+// OpenNoFollow opens an existing file and verifies that the directory entry is
+// a non-symlink referring to the opened object. The second check closes the
+// Lstat/Open race; once verified, later replacements cannot redirect the open
+// descriptor.
+func OpenNoFollow(root *os.Root, name string) (*os.File, error) {
+	before, err := root.Lstat(name)
+	if err != nil {
+		return nil, err //nolint:wrapcheck // preserve original error classification
+	}
+	if before.Mode()&os.ModeSymlink != 0 {
+		return nil, fmt.Errorf("%s: %w", name, ErrSymlinkedPath)
+	}
+
+	f, err := root.Open(name)
+	if err != nil {
+		return nil, err //nolint:wrapcheck // preserve original error classification
+	}
+	if err := validateOpenedFile(root, name, f); err != nil {
+		_ = f.Close()
+		return nil, err
+	}
+	return f, nil
+}
+
+// OpenFileNoFollow opens or creates a file without following a leaf symlink.
+// It is intended for append-style writers: O_TRUNC is rejected because
+// truncating Entire-owned writes should use an atomic temp-file-and-rename
+// operation instead. Unix builds add O_NOFOLLOW to close the write-before-
+// validation race; other platforms still reject pre-existing links and verify
+// the opened object before returning it.
+func OpenFileNoFollow(root *os.Root, name string, flag int, perm os.FileMode) (*os.File, error) {
+	if flag&os.O_TRUNC != 0 {
+		return nil, errors.New("osroot: OpenFileNoFollow does not permit O_TRUNC")
+	}
+	if before, err := root.Lstat(name); err == nil {
+		if before.Mode()&os.ModeSymlink != 0 {
+			return nil, fmt.Errorf("%s: %w", name, ErrSymlinkedPath)
+		}
+	} else if !os.IsNotExist(err) {
+		return nil, err //nolint:wrapcheck // preserve original error classification
+	}
+
+	f, err := root.OpenFile(name, flag|noFollowOpenFlag, perm)
+	if err != nil {
+		// Preserve the package sentinel when a link appeared after the first
+		// Lstat and O_NOFOLLOW rejected it.
+		if info, lstatErr := root.Lstat(name); lstatErr == nil && info.Mode()&os.ModeSymlink != 0 {
+			return nil, fmt.Errorf("%s: %w", name, ErrSymlinkedPath)
+		}
+		return nil, err //nolint:wrapcheck // preserve original error classification
+	}
+	if err := validateOpenedFile(root, name, f); err != nil {
+		_ = f.Close()
+		return nil, err
+	}
+	return f, nil
+}
+
+func validateOpenedFile(root *os.Root, name string, f *os.File) error {
+	pathInfo, err := root.Lstat(name)
+	if err != nil {
+		return err //nolint:wrapcheck // preserve original error classification
+	}
+	if pathInfo.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("%s: %w", name, ErrSymlinkedPath)
+	}
+	openedInfo, err := f.Stat()
+	if err != nil {
+		return err //nolint:wrapcheck // preserve original error classification
+	}
+	if !os.SameFile(pathInfo, openedInfo) {
+		return fmt.Errorf("%s changed while it was being opened", name)
+	}
+	return nil
+}
+
 // WriteFile writes data to the named file relative to root using os.Root
 // for traversal-resistant access. Creates the file if it doesn't exist,
 // truncates it if it does. The kernel enforces that the write cannot escape
@@ -138,12 +233,86 @@ func MkdirAllNoSymlink(root *os.Root, name string, perm os.FileMode) error {
 	return root.MkdirAll(name, perm) //nolint:wrapcheck // preserve original error for errors.Is/os.IsNotExist
 }
 
+// ErrWalkRootNotDirectory reports a walk root that exists but is not a
+// directory. It is deliberately NOT ErrSymlinkedPath: "replace this link" and
+// "this is a regular file" are different remedies, and conflating them is how a
+// user gets told to fix the wrong thing.
+var ErrWalkRootNotDirectory = errors.New("path is not a directory")
+
+// lstatWalkRoot is the check fs.WalkDir does not do for itself.
+//
+// fs.WalkDir obtains the DirEntry for its ROOT from fs.Stat, which follows a
+// symlink; only the entries below it come from ReadDir, which does not. So a
+// callback that inspects d.Type() for ModeSymlink — every one in this codebase
+// does — is dead code for the walk root, and a symlinked root is silently
+// descended into and reported as a real directory. filepath.Walk did lstat its
+// root, so this was lost in the move to os.Root, not absent from the start.
+//
+// Verified against go1.26: with meta/sess -> ../real, fs.WalkDir yields
+// meta/sess (isdir=true) then meta/sess/secret.txt, while filepath.Walk yielded
+// only the link.
+func lstatWalkRoot(root *os.Root, dir string) error {
+	info, err := root.Lstat(dir)
+	if err != nil {
+		return err //nolint:wrapcheck // preserve os.IsNotExist for the caller
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("%s: %w", dir, ErrSymlinkedPath)
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("%s: %w", dir, ErrWalkRootNotDirectory)
+	}
+	return nil
+}
+
+// WalkDirNoSymlinks walks dir within root, refusing a symlink anywhere it goes:
+// at the walk root, and at every entry beneath it.
+//
+// Refusing rather than skipping is the point. These walks copy an
+// Entire-owned tree into a checkpoint, or read the rules that decide what gets
+// redacted out of one, and Entire never puts a symlink in either. So a link
+// there was planted, arrived with a checkout, or is a genuine mistake — and the
+// two quiet answers are both wrong. Following it stores some other tree's
+// contents under Entire's names; skipping it drops the session's content out of
+// the checkpoint with nobody told. The caller stops and says which path.
+//
+// A missing dir is reported unwrapped, so callers can keep classifying it with
+// os.IsNotExist.
+func WalkDirNoSymlinks(root *os.Root, dir string, fn fs.WalkDirFunc) error {
+	if err := lstatWalkRoot(root, dir); err != nil {
+		return err
+	}
+	return fs.WalkDir(root.FS(), dir, func(name string, d fs.DirEntry, err error) error { //nolint:wrapcheck // the callback's errors are the caller's own
+		if err == nil && d.Type()&fs.ModeSymlink != 0 {
+			return fmt.Errorf("%s: %w", name, ErrSymlinkedPath)
+		}
+		return fn(name, d, err)
+	})
+}
+
 // SymlinkPaths walks dir within root and returns the names of every symlink it
 // finds, in the root's coordinates. It never follows one, so a symlinked
 // directory is reported and not descended into.
 //
+// This is doctor's reporter, so unlike WalkDirNoSymlinks it does not stop at
+// the first one — the whole point is to list them. It does share the walk-root
+// blindness fix: a symlinked dir is reported as itself rather than followed and
+// its target's contents enumerated as if they were Entire's.
+//
 // A missing dir yields no names and no error: nothing there is nothing wrong.
 func SymlinkPaths(root *os.Root, dir string) ([]string, error) {
+	switch err := lstatWalkRoot(root, dir); {
+	case err == nil:
+	case os.IsNotExist(err):
+		return nil, nil
+	case errors.Is(err, ErrSymlinkedPath):
+		return []string{dir}, nil
+	case errors.Is(err, ErrWalkRootNotDirectory):
+		return nil, nil // not a directory, so nothing below it to report
+	default:
+		return nil, err
+	}
+
 	var found []string
 	err := fs.WalkDir(root.FS(), dir, func(name string, d fs.DirEntry, err error) error {
 		if err != nil {
@@ -215,6 +384,99 @@ func Shared(dir string) (*os.Root, error) {
 		}
 		return nil, fmt.Errorf("open %s: %w", cleaned, err)
 	}
+	sharedRoots[cleaned] = root
+	return root, nil
+}
+
+// OpenChild opens a root for the directory name inside parent, WITHOUT
+// memoizing it: the caller owns the returned root and must Close it.
+//
+// It is SharedChild's short-lived counterpart, and it exists so that opening a
+// subdirectory of an anchor is never a bare parent.OpenRoot(name). os.Root
+// refuses a symlink that escapes parent but follows one pointing elsewhere
+// INSIDE it, so a bare OpenRoot silently accepts a redirected
+// .git/entire-sessions. The Lstat before and the SameFile after are the same
+// pair SharedChild uses, and they close the Lstat/OpenRoot race: once the
+// identity is confirmed, a later replacement cannot redirect the handle.
+//
+// A missing directory is returned unwrapped so callers can classify it with
+// os.IsNotExist.
+func OpenChild(parent *os.Root, name string) (*os.Root, error) {
+	if parent == nil {
+		return nil, errors.New("osroot: parent root is required")
+	}
+	before, err := parent.Lstat(name)
+	if err != nil {
+		return nil, err //nolint:wrapcheck // preserve original error classification
+	}
+	if before.Mode()&os.ModeSymlink != 0 || !before.IsDir() {
+		return nil, fmt.Errorf("%s: %w", name, ErrSymlinkedPath)
+	}
+
+	root, err := parent.OpenRoot(name)
+	if err != nil {
+		return nil, err //nolint:wrapcheck // preserve original error classification
+	}
+	if err := validateOpenedRoot(parent, name, root); err != nil {
+		_ = root.Close()
+		return nil, err
+	}
+	return root, nil
+}
+
+// validateOpenedRoot confirms that name still names a real directory and that
+// it is the object the opened root holds.
+func validateOpenedRoot(parent *os.Root, name string, root *os.Root) error {
+	pathInfo, err := parent.Lstat(name)
+	if err != nil {
+		return err //nolint:wrapcheck // preserve original error classification
+	}
+	openedInfo, err := root.Stat(".")
+	if err != nil {
+		return err //nolint:wrapcheck // preserve original error classification
+	}
+	if pathInfo.Mode()&os.ModeSymlink != 0 || !pathInfo.IsDir() || !os.SameFile(pathInfo, openedInfo) {
+		return fmt.Errorf("%s changed while it was being opened: %w", name, ErrSymlinkedPath)
+	}
+	return nil
+}
+
+// SharedChild returns a shared root for name beneath parent. Unlike opening the
+// assembled absolute path, this keeps name inside an already-trusted root and
+// refuses a symlink at the child boundary. The post-open identity check closes
+// the Lstat/OpenRoot race.
+func SharedChild(parent *os.Root, dir, name string) (*os.Root, error) {
+	if parent == nil {
+		return nil, errors.New("osroot: parent root is required")
+	}
+	if !filepath.IsAbs(dir) {
+		return nil, fmt.Errorf("osroot: %q is not absolute", dir)
+	}
+	cleaned := filepath.Clean(dir)
+
+	sharedMu.Lock()
+	defer sharedMu.Unlock()
+	if root, ok := sharedRoots[cleaned]; ok {
+		return root, nil
+	}
+
+	before, err := parent.Lstat(name)
+	if err != nil {
+		return nil, err //nolint:wrapcheck // preserve original error classification
+	}
+	if before.Mode()&os.ModeSymlink != 0 || !before.IsDir() {
+		return nil, fmt.Errorf("%s: %w", name, ErrSymlinkedPath)
+	}
+
+	root, err := parent.OpenRoot(name)
+	if err != nil {
+		return nil, err //nolint:wrapcheck // preserve original error classification
+	}
+	if err := validateOpenedRoot(parent, name, root); err != nil {
+		_ = root.Close()
+		return nil, err
+	}
+
 	sharedRoots[cleaned] = root
 	return root, nil
 }

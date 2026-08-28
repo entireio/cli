@@ -35,6 +35,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
 	"github.com/entireio/cli/cmd/entire/cli/osroot"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 )
@@ -42,6 +43,18 @@ import (
 // dirPerm is the mode .entire is created with. It matches the mode the
 // directory already had when each consumer created its own subdirectory.
 const dirPerm = 0o750
+
+// ReadFile reads an Entire-owned file without following a symlink at the leaf.
+func ReadFile(root *os.Root, name string) ([]byte, error) {
+	return osroot.ReadFileNoFollow(root, name) //nolint:wrapcheck // preserve os error classification
+}
+
+// WriteFile atomically replaces an Entire-owned file. Renaming a newly-created
+// temporary file over name replaces a planted leaf symlink rather than opening
+// and truncating its target.
+func WriteFile(root *os.Root, name string, data []byte, perm os.FileMode) error {
+	return jsonutil.WriteFileAtomicIn(root, name, data, perm) //nolint:wrapcheck // caller supplies path context
+}
 
 // Open returns the shared *os.Root for the current worktree's .entire
 // directory, creating the directory if it does not exist. Use it from write
@@ -205,12 +218,18 @@ func open(worktreeRoot string, create bool) (*os.Root, error) {
 // entry point funnels here so the create/no-create split stays in a single
 // branch; osroot.Shared owns the open-at-most-once part.
 func openDir(dir string, create bool) (*os.Root, error) {
+	parentDir := filepath.Dir(dir)
+	name := filepath.Base(dir)
+	parent, err := osroot.Shared(parentDir)
+	if err != nil {
+		return nil, err //nolint:wrapcheck // Shared names the directory, and returns a missing one unwrapped for errors.Is
+	}
 	if create {
-		if err := os.MkdirAll(dir, dirPerm); err != nil {
+		if err := osroot.MkdirAllNoSymlink(parent, name, dirPerm); err != nil {
 			return nil, fmt.Errorf("create %s: %w", dir, err)
 		}
 	}
-	return osroot.Shared(dir) //nolint:wrapcheck // Shared names the directory, and returns a missing one unwrapped for errors.Is
+	return osroot.SharedChild(parent, dir, name) //nolint:wrapcheck // preserves missing-path classification
 }
 
 // OpenPath returns the shared root for the .entire directory containing p,

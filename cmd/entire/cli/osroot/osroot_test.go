@@ -1,6 +1,7 @@
 package osroot_test
 
 import (
+	"io/fs"
 	"os"
 	"path/filepath"
 	"testing"
@@ -50,6 +51,42 @@ func TestReadFile_TraversalBlocked(t *testing.T) {
 
 	_, err = osroot.ReadFile(root, "../secret.txt")
 	assert.Error(t, err)
+}
+
+func TestReadFileNoFollow_RejectsLeafSymlink(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "target.txt"), []byte("secret"), 0o600))
+	if err := os.Symlink("target.txt", filepath.Join(dir, "link.txt")); err != nil {
+		t.Skipf("symlink not supported: %v", err)
+	}
+	root, err := os.OpenRoot(dir)
+	require.NoError(t, err)
+	defer root.Close()
+
+	_, err = osroot.ReadFileNoFollow(root, "link.txt")
+	require.ErrorIs(t, err, osroot.ErrSymlinkedPath)
+}
+
+func TestOpenFileNoFollow_RejectsLeafSymlink(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	target := filepath.Join(dir, "target.txt")
+	require.NoError(t, os.WriteFile(target, []byte("original"), 0o600))
+	if err := os.Symlink("target.txt", filepath.Join(dir, "link.txt")); err != nil {
+		t.Skipf("symlink not supported: %v", err)
+	}
+	root, err := os.OpenRoot(dir)
+	require.NoError(t, err)
+	defer root.Close()
+
+	_, err = osroot.OpenFileNoFollow(root, "link.txt", os.O_WRONLY|os.O_APPEND, 0o600)
+	require.ErrorIs(t, err, osroot.ErrSymlinkedPath)
+	got, err := os.ReadFile(target)
+	require.NoError(t, err)
+	require.Equal(t, "original", string(got))
 }
 
 func TestMkdirAll(t *testing.T) {
@@ -430,4 +467,146 @@ func TestSymlinkPaths_CleanTreeAndMissingDir(t *testing.T) {
 	got, err = osroot.SymlinkPaths(root, "absent")
 	require.NoError(t, err, "nothing there is nothing wrong")
 	assert.Empty(t, got)
+}
+
+func TestOpenChild_RejectsSymlinkedDirectoryInsideRoot(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, "elsewhere"), 0o750))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "elsewhere", "state.json"), []byte("other repo"), 0o600))
+	// A link that stays INSIDE the root: os.Root follows this one, which is
+	// exactly why OpenChild exists.
+	if err := os.Symlink("elsewhere", filepath.Join(dir, "entire-sessions")); err != nil {
+		t.Skipf("symlink not supported: %v", err)
+	}
+	root, err := os.OpenRoot(dir)
+	require.NoError(t, err)
+	defer root.Close()
+
+	_, err = osroot.OpenChild(root, "entire-sessions")
+	require.ErrorIs(t, err, osroot.ErrSymlinkedPath)
+}
+
+func TestOpenChild_OpensRealDirectoryAndIsNotShared(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, "entire-sessions"), 0o750))
+	root, err := os.OpenRoot(dir)
+	require.NoError(t, err)
+	defer root.Close()
+
+	child, err := osroot.OpenChild(root, "entire-sessions")
+	require.NoError(t, err)
+	require.NoError(t, osroot.WriteFile(child, "s.json", []byte("ok"), 0o600))
+	// Owned by the caller, unlike SharedChild: closing it must be safe, and a
+	// second call must hand back an independent handle.
+	require.NoError(t, child.Close())
+
+	again, err := osroot.OpenChild(root, "entire-sessions")
+	require.NoError(t, err)
+	defer again.Close()
+	got, err := osroot.ReadFile(again, "s.json")
+	require.NoError(t, err)
+	require.Equal(t, "ok", string(got))
+}
+
+func TestOpenChild_MissingDirectoryIsClassifiable(t *testing.T) {
+	t.Parallel()
+
+	root, err := os.OpenRoot(t.TempDir())
+	require.NoError(t, err)
+	defer root.Close()
+
+	_, err = osroot.OpenChild(root, "entire-sessions")
+	require.True(t, os.IsNotExist(err), "want a not-exist error, got %v", err)
+}
+
+// fs.WalkDir takes its walk ROOT's DirEntry from fs.Stat, which follows a
+// symlink; only entries beneath it come from ReadDir, which does not. Every
+// callback in this codebase inspected d.Type() for ModeSymlink and so covered
+// the entries but never the root. filepath.Walk, which these walks were
+// converted from, did lstat its root.
+func TestWalkDirNoSymlinks_RefusesSymlinkedWalkRoot(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, "real"), 0o750))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "real", "secret.txt"), []byte("leak"), 0o600))
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, "meta"), 0o750))
+	if err := os.Symlink("../real", filepath.Join(dir, "meta", "sess")); err != nil {
+		t.Skipf("symlink not supported: %v", err)
+	}
+	root, err := os.OpenRoot(dir)
+	require.NoError(t, err)
+	defer root.Close()
+
+	// Plain fs.WalkDir descends into it. This is the behaviour being guarded
+	// against, asserted so the test fails loudly if the stdlib ever changes.
+	var followed []string
+	require.NoError(t, fs.WalkDir(root.FS(), "meta/sess", func(name string, _ fs.DirEntry, err error) error {
+		if err == nil {
+			followed = append(followed, name)
+		}
+		return err
+	}))
+	require.Contains(t, followed, "meta/sess/secret.txt", "fs.WalkDir no longer follows a symlinked walk root; simplify accordingly")
+
+	var visited []string
+	err = osroot.WalkDirNoSymlinks(root, "meta/sess", func(name string, _ fs.DirEntry, err error) error {
+		visited = append(visited, name)
+		return err
+	})
+	require.ErrorIs(t, err, osroot.ErrSymlinkedPath)
+	require.Empty(t, visited, "the callback must not run at all for a symlinked walk root")
+}
+
+func TestWalkDirNoSymlinks_RefusesSymlinkedEntry(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, "meta"), 0o750))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "outside.txt"), []byte("leak"), 0o600))
+	if err := os.Symlink("../outside.txt", filepath.Join(dir, "meta", "link.txt")); err != nil {
+		t.Skipf("symlink not supported: %v", err)
+	}
+	root, err := os.OpenRoot(dir)
+	require.NoError(t, err)
+	defer root.Close()
+
+	err = osroot.WalkDirNoSymlinks(root, "meta", func(_ string, _ fs.DirEntry, err error) error { return err })
+	require.ErrorIs(t, err, osroot.ErrSymlinkedPath)
+}
+
+func TestWalkDirNoSymlinks_NonDirectoryRootIsNotReportedAsASymlink(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "meta"), []byte("regular file"), 0o600))
+	root, err := os.OpenRoot(dir)
+	require.NoError(t, err)
+	defer root.Close()
+
+	err = osroot.WalkDirNoSymlinks(root, "meta", func(_ string, _ fs.DirEntry, err error) error { return err })
+	require.ErrorIs(t, err, osroot.ErrWalkRootNotDirectory)
+	require.NotErrorIs(t, err, osroot.ErrSymlinkedPath, "'replace this link' and 'this is a file' are different remedies")
+}
+
+func TestSymlinkPaths_ReportsASymlinkedWalkRootRatherThanDescending(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, "real"), 0o750))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "real", "a.txt"), []byte("x"), 0o600))
+	if err := os.Symlink("real", filepath.Join(dir, "logs")); err != nil {
+		t.Skipf("symlink not supported: %v", err)
+	}
+	root, err := os.OpenRoot(dir)
+	require.NoError(t, err)
+	defer root.Close()
+
+	found, err := osroot.SymlinkPaths(root, "logs")
+	require.NoError(t, err)
+	require.Equal(t, []string{"logs"}, found)
 }

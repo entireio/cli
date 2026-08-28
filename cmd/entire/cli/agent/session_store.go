@@ -48,8 +48,8 @@ var ErrOutsideSessionStore = errors.New("path is outside the agent's session dir
 // The directory need NOT exist yet: resolving a session file is path arithmetic
 // plus a containment check, and callers legitimately ask where a transcript
 // *would* live before anything has created the directory. Only the I/O methods
-// need the directory, and they open the root at that point — memoized per
-// directory via osroot.Shared, so every call site in one repo shares a handle.
+// need the directory, and they open a root at that point and close it again —
+// see openRoot for why a store is not one of the memoized anchors.
 func OpenSessionStore(ag SessionLocator, repoPath string) (*SessionStore, error) {
 	if ag == nil {
 		return nil, errors.New("agent is required to open a session store")
@@ -81,21 +81,36 @@ func OpenSessionStoreAt(ag SessionLocator, dir string) (*SessionStore, error) {
 // invitation to do I/O on the result.
 func (s *SessionStore) Dir() string { return s.dir }
 
-// Root returns the store's shared *os.Root, opening it on first use. Owned by
-// the registry: do not close. A directory that does not exist is reported
-// unwrapped so callers can classify it with os.IsNotExist.
-func (s *SessionStore) Root() (*os.Root, error) {
-	return osroot.Shared(s.dir) //nolint:wrapcheck // see doc comment
+// openRoot returns an *os.Root over the store directory. The CALLER closes it.
+//
+// Deliberately not osroot.Shared. That registry is for the handful of long-lived
+// anchors a process holds — .entire, the git common dir, the worktree — and it
+// never evicts, by design. A session store is not one of them: transcript
+// fallback search (searchTranscriptInProjectDirs) opens a store for EVERY
+// candidate directory it walks under ~/.claude/projects, and memoizing those
+// retained one directory fd per candidate for the life of the process. Measured
+// at exactly one fd per directory probed, against zero for the os.Stat this
+// replaced; a few hundred project directories is enough to reach the usual 1024
+// RLIMIT_NOFILE, at which point os.OpenRoot starts failing for every OTHER
+// anchor too, since they all come from the same registry.
+//
+// The cost of not sharing is one openat per store operation, against reading a
+// transcript that is routinely megabytes.
+//
+// A directory that does not exist is reported unwrapped so callers can classify
+// it with os.IsNotExist.
+func (s *SessionStore) openRoot() (*os.Root, error) {
+	return os.OpenRoot(s.dir) //nolint:wrapcheck // see doc comment
 }
 
-// rootForWrite is Root with the store directory created first. The directory is
-// the root itself, so it cannot be created through it — this is the one place
-// that reaches it from the outside.
-func (s *SessionStore) rootForWrite() (*os.Root, error) {
+// openRootForWrite is openRoot with the store directory created first. The
+// directory is the root itself, so it cannot be created through it — this is the
+// one place that reaches it from the outside. The caller closes the result.
+func (s *SessionStore) openRootForWrite() (*os.Root, error) {
 	if err := os.MkdirAll(s.dir, 0o750); err != nil {
 		return nil, fmt.Errorf("create session directory: %w", err)
 	}
-	return s.Root()
+	return s.openRoot()
 }
 
 // SessionFile resolves agentSessionID to a name inside the store, and to the
@@ -138,10 +153,11 @@ func (s *SessionStore) Name(p string) (string, error) {
 
 // ReadFile reads name from the store.
 func (s *SessionStore) ReadFile(name string) ([]byte, error) {
-	root, err := s.Root()
+	root, err := s.openRoot()
 	if err != nil {
 		return nil, err
 	}
+	defer root.Close()
 	return osroot.ReadFile(root, name) //nolint:wrapcheck // preserved for os.IsNotExist at call sites
 }
 
@@ -149,10 +165,11 @@ func (s *SessionStore) ReadFile(name string) ([]byte, error) {
 // layouts nest (Gemini keys by project hash, Pi by encoded repo path), so the
 // parents are made here rather than at each call site.
 func (s *SessionStore) WriteFile(name string, data []byte, perm os.FileMode) error {
-	root, err := s.rootForWrite()
+	root, err := s.openRootForWrite()
 	if err != nil {
 		return err
 	}
+	defer root.Close()
 	if dir := filepath.ToSlash(filepath.Dir(filepath.FromSlash(name))); dir != "." {
 		if err := osroot.MkdirAllNoSymlink(root, dir, 0o750); err != nil {
 			return fmt.Errorf("create session directory: %w", err)
@@ -165,10 +182,11 @@ func (s *SessionStore) WriteFile(name string, data []byte, perm os.FileMode) err
 // dangling symlink is still a file that exists and must not be overwritten
 // silently (see the rewind restore path, which distinguishes the two).
 func (s *SessionStore) Exists(name string) bool {
-	root, err := s.Root()
+	root, err := s.openRoot()
 	if err != nil {
 		return false
 	}
+	defer root.Close()
 	_, err = root.Lstat(name)
 	return err == nil
 }

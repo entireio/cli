@@ -9,7 +9,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"io/fs"
 	"log/slog"
 	"os"
@@ -565,7 +564,10 @@ func Load(ctx context.Context) (*EntireSettings, error) {
 		return loadForWorktreeRoot(ctx, worktreeRoot)
 	}
 
-	settingsFileAbs, localSettingsFileAbs := settingsAbsPaths(ctx)
+	settingsFileAbs, localSettingsFileAbs, err := settingsAbsPaths(ctx)
+	if err != nil {
+		return nil, err
+	}
 	preferencesFileAbs := ""
 	if path, prefErr := ClonePreferencesPath(ctx); prefErr == nil {
 		preferencesFileAbs = path
@@ -582,23 +584,24 @@ func Load(ctx context.Context) (*EntireSettings, error) {
 	return loadMergedSettings(ctx, settingsFileAbs, preferencesFileAbs, localSettingsFileAbs)
 }
 
-// settingsAbsPaths resolves the base and local settings file paths relative to
-// the current working directory, falling back to the relative path when
-// absolute resolution fails.
-func settingsAbsPaths(ctx context.Context) (base, local string) {
+// settingsAbsPaths resolves the base and local settings file paths against the
+// repository anchor. Resolution failures are returned rather than converted to
+// cwd-relative paths: doing the latter can select a different .entire from a
+// subdirectory precisely when Git could not establish which repository owns it.
+func settingsAbsPaths(ctx context.Context) (base, local string, err error) {
 	// entiredir.PathTo, not paths.AbsPath: both files live under .entire, and
 	// entiredir owns the one anchor for that directory. AbsPath's failure mode
 	// here was a relative path that then resolved against the process's own
 	// directory, which is the thing the anchor exists to prevent.
-	base, err := entiredir.PathTo(ctx, EntireSettingsFile)
+	base, err = entiredir.PathTo(ctx, EntireSettingsFile)
 	if err != nil {
-		base = EntireSettingsFile // Fallback to relative
+		return "", "", fmt.Errorf("resolve project settings path: %w", err)
 	}
 	local, err = entiredir.PathTo(ctx, EntireSettingsLocalFile)
 	if err != nil {
-		local = EntireSettingsLocalFile // Fallback to relative
+		return "", "", fmt.Errorf("resolve local settings path: %w", err)
 	}
-	return base, local
+	return base, local, nil
 }
 
 // worktreeSettingsPaths resolves the base and local settings file paths under
@@ -736,7 +739,7 @@ func LoadLocalRaw(ctx context.Context) (path string, raw map[string]json.RawMess
 func LoadLocalBytes(ctx context.Context) ([]byte, error) {
 	filePath, err := entiredir.PathTo(ctx, EntireSettingsLocalFile)
 	if err != nil {
-		filePath = EntireSettingsLocalFile
+		return nil, fmt.Errorf("resolve local settings path: %w", err)
 	}
 	data, err := readConfined(filePath)
 	if err != nil {
@@ -754,7 +757,7 @@ func LoadLocalBytes(ctx context.Context) ([]byte, error) {
 func loadRaw(ctx context.Context, file, label string) (path string, raw map[string]json.RawMessage, exists bool, err error) {
 	path, err = entiredir.PathTo(ctx, file)
 	if err != nil {
-		path = file
+		return "", nil, false, fmt.Errorf("resolve %s settings path: %w", label, err)
 	}
 	data, readErr := readConfined(path)
 	if readErr != nil {
@@ -949,54 +952,15 @@ func readConfinedOutsideEntire(filePath string) ([]byte, error) {
 // filePath is carried alongside name only for the error text: name is relative
 // to a root the caller cannot see, and the user needs the path they can act on.
 func readConfinedIn(root *os.Root, name, filePath string) ([]byte, error) {
-	info, err := root.Lstat(name)
+	data, err := osroot.ReadFileNoFollow(root, name)
 	if err != nil {
-		return nil, fmt.Errorf("inspect settings file: %w", err)
-	}
-	if info.Mode()&fs.ModeSymlink != 0 {
-		//nolint:wrapcheck // sentinel surfaces verbatim for the caller's errors.Is; callers add the reading-context prefix
-		return nil, paths.SymlinkedEntryError(filePath)
-	}
-
-	f, err := root.Open(name)
-	if err != nil {
-		return nil, fmt.Errorf("open settings file: %w", err)
-	}
-	defer f.Close()
-
-	if err := validateOpenedFile(root, name, filePath, f); err != nil {
-		return nil, err
-	}
-
-	data, err := io.ReadAll(f)
-	if err != nil {
-		return nil, fmt.Errorf("read settings file: %w", err)
+		if errors.Is(err, osroot.ErrSymlinkedPath) {
+			//nolint:wrapcheck // sentinel surfaces verbatim for the caller's errors.Is; callers add the reading-context prefix
+			return nil, paths.SymlinkedEntryError(filePath)
+		}
+		return nil, fmt.Errorf("read settings file %s: %w", filePath, err)
 	}
 	return data, nil
-}
-
-// validateOpenedFile closes the Lstat/Open race in readConfined. The path must
-// still be a non-symlink and must identify the object held by f. A replacement
-// after this check cannot redirect the read, because f is already bound to the
-// validated object.
-func validateOpenedFile(root *os.Root, name, filePath string, f *os.File) error {
-	pathInfo, err := root.Lstat(name)
-	if err != nil {
-		return fmt.Errorf("reinspect settings file: %w", err)
-	}
-	if pathInfo.Mode()&fs.ModeSymlink != 0 {
-		//nolint:wrapcheck // sentinel surfaces verbatim for the caller's errors.Is; callers add the reading-context prefix
-		return paths.SymlinkedEntryError(filePath)
-	}
-
-	openedInfo, err := f.Stat()
-	if err != nil {
-		return fmt.Errorf("inspect opened settings file: %w", err)
-	}
-	if !os.SameFile(pathInfo, openedInfo) {
-		return fmt.Errorf("settings file changed while it was being opened: %s", filePath)
-	}
-	return nil
 }
 
 // writeConfinedAtomic is readConfined's write half: an atomic write through the
@@ -1994,7 +1958,7 @@ func saveToFile(ctx context.Context, settings *EntireSettings, filePath string) 
 	// Get absolute path for the file
 	filePathAbs, err := entiredir.PathTo(ctx, filePath)
 	if err != nil {
-		filePathAbs = filePath // Fallback to relative
+		return fmt.Errorf("resolving settings path: %w", err)
 	}
 
 	data, err := jsonutil.MarshalIndentWithNewline(settings, "", "  ")

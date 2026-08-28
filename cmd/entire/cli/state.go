@@ -154,7 +154,7 @@ func CapturePrePromptState(ctx context.Context, ag agent.Agent, sessionID, sessi
 		return fmt.Errorf("failed to marshal state: %w", err)
 	}
 
-	if err := osroot.WriteFile(root, tmpFile("pre-prompt-%s.json", sessionID), data, 0o600); err != nil {
+	if err := entiredir.WriteFile(root, tmpFile("pre-prompt-%s.json", sessionID), data, 0o600); err != nil {
 		return fmt.Errorf("failed to write state file: %w", err)
 	}
 
@@ -180,7 +180,7 @@ func LoadPrePromptState(ctx context.Context, sessionID string) (*PrePromptState,
 		return nil, fmt.Errorf("failed to open %s: %w", paths.EntireDir, err)
 	}
 
-	data, err := osroot.ReadFile(root, tmpFile("pre-prompt-%s.json", sessionID))
+	data, err := entiredir.ReadFile(root, tmpFile("pre-prompt-%s.json", sessionID))
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, nil //nolint:nilnil // already present in codebase
@@ -579,7 +579,7 @@ func CapturePreTaskState(ctx context.Context, toolUseID string) error {
 		return fmt.Errorf("failed to marshal state: %w", err)
 	}
 
-	if err := osroot.WriteFile(root, tmpFile("pre-task-%s.json", toolUseID), data, 0o600); err != nil {
+	if err := entiredir.WriteFile(root, tmpFile("pre-task-%s.json", toolUseID), data, 0o600); err != nil {
 		return fmt.Errorf("failed to write state file: %w", err)
 	}
 
@@ -603,7 +603,7 @@ func LoadPreTaskState(ctx context.Context, toolUseID string) (*PreTaskState, err
 		return nil, fmt.Errorf("failed to open %s: %w", paths.EntireDir, err)
 	}
 
-	data, err := osroot.ReadFile(root, tmpFile("pre-task-%s.json", toolUseID))
+	data, err := entiredir.ReadFile(root, tmpFile("pre-task-%s.json", toolUseID))
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, nil //nolint:nilnil // already present in codebase

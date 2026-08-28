@@ -17,6 +17,7 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/entiredir"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
+	"github.com/entireio/cli/cmd/entire/cli/osroot"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/cmd/entire/cli/versioninfo"
@@ -187,12 +188,22 @@ func versionInfoString() string {
 }
 
 func addDirToZip(zw *zip.Writer, root *os.Root, srcDir, archivePrefix string, raw bool) error {
-	info, err := root.Stat(srcDir)
+	// Lstat, not Stat. Stat follows a symlink, and so does fs.WalkDir on its
+	// own walk root, so a symlinked .entire/logs used to be bundled as whatever
+	// it pointed at — presented to whoever reads the bundle as this repo's logs.
+	info, err := root.Lstat(srcDir)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
 			return nil
 		}
 		return fmt.Errorf("stat %s: %w", srcDir, err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		// Doctor is the command a user runs when the repo is already broken, so
+		// this records the finding instead of failing the bundle the way the
+		// checkpoint walks do. addFileToZip takes the same line.
+		return addStringToZip(zw, zipEntryName(archivePrefix, "SYMLINK.txt"),
+			fmt.Sprintf("[skipped: %s is a symlink, not a directory; its target was not bundled]\n", srcDir), raw)
 	}
 	if !info.IsDir() {
 		return nil
@@ -228,7 +239,7 @@ func zipEntryName(parts ...string) string {
 }
 
 func addFileToZip(zw *zip.Writer, root *os.Root, src, archivePath string, raw bool) error {
-	f, err := root.Open(src)
+	f, err := osroot.OpenNoFollow(root, src)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
 			return nil

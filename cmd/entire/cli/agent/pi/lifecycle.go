@@ -329,7 +329,7 @@ func cacheSessionID(ctx context.Context, id string) {
 		return
 	}
 
-	if err := osroot.WriteFile(root, sessionCacheDir+"/"+activeSessionFile, []byte(id), 0o600); err != nil {
+	if err := entiredir.WriteFile(root, sessionCacheDir+"/"+activeSessionFile, []byte(id), 0o600); err != nil {
 		logging.Debug(ctx, "pi: cache session id write", slog.String("err", err.Error()))
 	}
 }
@@ -338,8 +338,7 @@ func extractModelFromPiSessionFile(path string) string {
 	if path == "" {
 		return ""
 	}
-	//nolint:gosec // path comes from Pi's hook payload or our captured transcript path
-	data, err := os.ReadFile(path)
+	data, err := agent.ReadTranscriptFile(path)
 	if err != nil {
 		return ""
 	}
@@ -355,7 +354,7 @@ func readCachedSessionID(ctx context.Context) string {
 	if !ok {
 		return ""
 	}
-	data, err := osroot.ReadFile(root, sessionCacheDir+"/"+activeSessionFile)
+	data, err := entiredir.ReadFile(root, sessionCacheDir+"/"+activeSessionFile)
 	if err != nil {
 		return ""
 	}
@@ -404,7 +403,7 @@ func captureTranscript(ctx context.Context, sessionID, piSessionFile string) str
 			slog.String("src", piSessionFile), slog.String("err", err.Error()))
 		return ""
 	}
-	if err := osroot.WriteFile(root, name, data, 0o600); err != nil {
+	if err := entiredir.WriteFile(root, name, data, 0o600); err != nil {
 		logging.Warn(ctx, "pi: capture transcript write failed",
 			slog.String("dst", name), slog.String("err", err.Error()))
 		return ""

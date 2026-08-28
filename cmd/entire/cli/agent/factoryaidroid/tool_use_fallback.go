@@ -122,7 +122,7 @@ func fallbackToolUseStateFile(ctx context.Context, sessionID string) (*os.Root, 
 }
 
 func loadFallbackToolUseState(root *os.Root, name string) (*fallbackToolUseState, error) {
-	data, err := osroot.ReadFile(root, name)
+	data, err := entiredir.ReadFile(root, name)
 	if err != nil {
 		return nil, fmt.Errorf("read fallback tool_use_id state: %w", err)
 	}
@@ -146,7 +146,7 @@ func saveFallbackToolUseState(root *os.Root, name string, state *fallbackToolUse
 	if err != nil {
 		return fmt.Errorf("marshal fallback tool_use_id state: %w", err)
 	}
-	if err := osroot.WriteFile(root, name, data, 0o600); err != nil {
+	if err := entiredir.WriteFile(root, name, data, 0o600); err != nil {
 		return fmt.Errorf("write fallback tool_use_id state: %w", err)
 	}
 	return nil

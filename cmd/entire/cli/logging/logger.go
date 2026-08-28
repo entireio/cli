@@ -118,7 +118,7 @@ func (l *Logger) open() error {
 		l.openErr = fmt.Errorf("create log directory: %w", err)
 		return l.openErr
 	}
-	f, err := root.OpenFile(l.dir+"/"+LogFileName, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+	f, err := osroot.OpenFileNoFollow(root, l.dir+"/"+LogFileName, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
 	if err != nil {
 		l.openErr = fmt.Errorf("open log file: %w", err)
 		return l.openErr

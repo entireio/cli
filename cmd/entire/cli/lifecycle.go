@@ -598,14 +598,14 @@ func handleLifecycleTurnStart(ctx context.Context, ag agent.Agent, event *agent.
 		if root, rootErr := entiredir.Open(ctx); rootErr == nil {
 			if mkErr := osroot.MkdirAllNoSymlink(root, sessionName, 0o750); mkErr == nil {
 				promptName := sessionName + "/" + paths.PromptFileName
-				existing, readErr := osroot.ReadFile(root, promptName)
+				existing, readErr := entiredir.ReadFile(root, promptName)
 				var content string
 				if readErr == nil && len(existing) > 0 {
 					content = string(existing) + "\n\n---\n\n" + event.Prompt
 				} else {
 					content = event.Prompt
 				}
-				if writeErr := osroot.WriteFile(root, promptName, []byte(content), 0o600); writeErr != nil {
+				if writeErr := entiredir.WriteFile(root, promptName, []byte(content), 0o600); writeErr != nil {
 					logging.Warn(logCtx, "failed to write prompt.txt",
 						slog.String("error", writeErr.Error()))
 				}
@@ -777,7 +777,7 @@ func handleLifecycleTurnEnd(ctx context.Context, ag agent.Agent, event *agent.Ev
 	// The agent's own rollout is untouched.
 	storedTranscript := agent.SanitizeTranscriptForStorage(ag, transcriptData)
 	logFile := sessionName + "/" + paths.TranscriptFileName
-	if err := osroot.WriteFile(entireRoot, logFile, storedTranscript, 0o600); err != nil {
+	if err := entiredir.WriteFile(entireRoot, logFile, storedTranscript, 0o600); err != nil {
 		copySpan.RecordError(err)
 		copySpan.End()
 		return fmt.Errorf("failed to write transcript: %w", err)
@@ -806,7 +806,7 @@ func handleLifecycleTurnEnd(ctx context.Context, ag agent.Agent, event *agent.Ev
 	// update session state after SaveStep (which may reinitialize state).
 	var backfilledPrompt string
 	promptName := sessionName + "/" + paths.PromptFileName
-	existingPrompt, readPromptErr := osroot.ReadFile(entireRoot, promptName)
+	existingPrompt, readPromptErr := entiredir.ReadFile(entireRoot, promptName)
 	if readPromptErr != nil && !errors.Is(readPromptErr, fs.ErrNotExist) {
 		logging.Warn(logCtx, "failed to read prompt.txt, skipping backfill",
 			slog.String("error", readPromptErr.Error()))
@@ -818,7 +818,7 @@ func handleLifecycleTurnEnd(ctx context.Context, ag agent.Agent, event *agent.Ev
 					slog.String("error", extractErr.Error()))
 			} else if len(prompts) > 0 {
 				content := strings.Join(prompts, "\n\n---\n\n")
-				if writeErr := osroot.WriteFile(entireRoot, promptName, []byte(content), 0o600); writeErr != nil {
+				if writeErr := entiredir.WriteFile(entireRoot, promptName, []byte(content), 0o600); writeErr != nil {
 					logging.Warn(logCtx, "failed to backfill prompt.txt from transcript",
 						slog.String("error", writeErr.Error()))
 				} else {

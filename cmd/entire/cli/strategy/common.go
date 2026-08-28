@@ -598,7 +598,7 @@ func maybeWarnNarrowedScanners(ctx context.Context, s *settings.EntireSettings) 
 	// Read without creating: a repo that has never made .entire has no marker,
 	// and the warning below is what earns the directory.
 	if root, rerr := entiredir.OpenForRead(ctx); rerr == nil {
-		if prev, prerr := osroot.ReadFile(root, markerName); prerr == nil && string(prev) == marker {
+		if prev, prerr := entiredir.ReadFile(root, markerName); prerr == nil && string(prev) == marker {
 			return
 		}
 	}
@@ -616,7 +616,7 @@ func maybeWarnNarrowedScanners(ctx context.Context, s *settings.EntireSettings) 
 	//nolint:errcheck // best-effort marker; failure degrades to warning every run
 	_ = osroot.MkdirAllNoSymlink(root, path.Dir(markerName), 0o750)
 	//nolint:errcheck // best-effort non-sensitive marker file
-	_ = osroot.WriteFile(root, markerName, []byte(marker), 0o640)
+	_ = entiredir.WriteFile(root, markerName, []byte(marker), 0o640)
 }
 
 // resolveAgentType picks the best agent type from the context and existing state.
@@ -1413,7 +1413,7 @@ func EnsureEntireGitignore(ctx context.Context) error {
 
 	// Read existing content
 	var content string
-	if data, rerr := osroot.ReadFile(root, gitignoreName); rerr == nil {
+	if data, rerr := entiredir.ReadFile(root, gitignoreName); rerr == nil {
 		content = string(data)
 	}
 
@@ -1446,7 +1446,7 @@ func EnsureEntireGitignore(ctx context.Context) error {
 	}
 	content += sb.String()
 
-	if err := osroot.WriteFile(root, gitignoreName, []byte(content), 0o644); err != nil {
+	if err := entiredir.WriteFile(root, gitignoreName, []byte(content), 0o644); err != nil {
 		return fmt.Errorf("failed to write gitignore: %w", err)
 	}
 	return nil

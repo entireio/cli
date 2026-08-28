@@ -6,10 +6,16 @@ import (
 	"testing"
 )
 
-// rootOpeners are the two ways a *os.Root comes into existence in this
-// codebase. os.OpenRoot is Go's; osroot.Shared is the memoizing registry every
-// long-lived anchor goes through.
-var rootOpeners = []string{"os.OpenRoot(", "osroot.Shared("}
+// rootOpeners cover both package-level os.OpenRoot and Root.OpenRoot, plus the
+// memoizing registry used by long-lived anchors. The leading dot deliberately
+// matches both os.OpenRoot and parent.OpenRoot.
+//
+// osroot.SharedChild and osroot.OpenChild are deliberately absent. Both take an
+// already-open *os.Root as their base, so their base is trusted by construction:
+// it can only have come from a file this list already vets. Adding them would
+// flag every caller of the very helpers that exist so a call site does not have
+// to choose a base at all.
+var rootOpeners = []string{".OpenRoot(", "osroot.Shared("}
 
 // allowedRootBases lists every non-test file permitted to open a root, with the
 // reason its base is a trusted path.
@@ -30,14 +36,14 @@ var allowedRootBases = map[string]string{
 	// The anchors themselves. Each opens exactly one directory, resolved
 	// independently of anything it is later asked to read.
 	"cmd/entire/cli/osroot/osroot.go":            "the registry",
-	"cmd/entire/cli/entiredir/entiredir.go":      "worktree root + .entire",
+	"cmd/entire/cli/entiredir/entiredir.go":      "worktree root, then .entire as a checked child",
 	"cmd/entire/cli/gitdir/gitdir.go":            "git rev-parse --git-common-dir",
 	"cmd/entire/cli/worktreedir/worktreedir.go":  "paths.WorktreeRoot",
 	"internal/entireclient/userdirs/userdirs.go": "$ENTIRE_CONFIG_DIR / $XDG_CACHE_HOME",
 
 	// Trees with their own resolver, anchored at the boundary between what
 	// Entire owns and what it does not.
-	"cmd/entire/cli/agent/session_store.go":      "the agent's own GetSessionDir",
+	"cmd/entire/cli/agent/session_store.go":      "the agent's own GetSessionDir (opened per operation, not memoized)",
 	"cmd/entire/cli/plugin_store.go":             "pluginParentDir()",
 	"cmd/entire/cli/plugin_index.go":             "the per-index cache dir, opened at the clone it contains",
 	"cmd/entire/cli/plugin_install_remote.go":    "a staging dir this process just created",
@@ -72,7 +78,7 @@ func TestRootBasesAreTrusted(t *testing.T) {
 
 	var checked int
 	for _, opener := range rootOpeners {
-		grep := exec.Command("git", "grep", "-n", "--fixed-strings", "--", opener, "--", "cmd", "internal") //nolint:noctx // guard test, no cancellation needed
+		grep := exec.Command("git", "grep", "-n", "--fixed-strings", "--", opener, "--", ":(glob)**/*.go") //nolint:noctx // guard test, no cancellation needed
 		grep.Dir = strings.TrimSpace(string(repoRoot))
 		out, grepErr := grep.Output()
 		if grepErr != nil {

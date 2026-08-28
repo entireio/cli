@@ -9,6 +9,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"strings"
 )
 
 // WriteFileAtomic writes data to filePath atomically by writing to a temp file
@@ -126,6 +127,53 @@ func WriteFileAtomicIn(root *os.Root, name string, data []byte, perm fs.FileMode
 // tempNameAttempts bounds the O_EXCL retry loop in createTempIn.
 const tempNameAttempts = 100
 
+// tempSuffix ends every name CreateTempIn hands out.
+const tempSuffix = ".tmp"
+
+// tempRandomHexLen is the length of the random component CreateTempIn inserts,
+// in hex characters: 8 bytes, so 16.
+const tempRandomHexLen = 16
+
+// IsTempName reports whether name was produced by CreateTempIn.
+//
+// It exists because an atomic write leaves its temp file in the SAME directory
+// as its target, and one of those directories — .entire/metadata/<session> — is
+// walked wholesale into every checkpoint tree. A hook killed between
+// CreateTempIn and Rename (an agent's hook timeout, Codex's session-end process
+// tree kill, a crash) leaves the temp behind, and without this the walk redacts
+// it, commits it, and pushes it on every checkpoint from then on.
+//
+// The match is the whole shape CreateTempIn produces — "<base>.<16 hex>.tmp" —
+// not a bare ".tmp" suffix, so a file a user or an agent legitimately named
+// something.tmp is still captured.
+func IsTempName(name string) bool {
+	base := path.Base(name)
+	rest, ok := strings.CutSuffix(base, tempSuffix)
+	if !ok {
+		return false
+	}
+	dot := strings.LastIndexByte(rest, '.')
+	if dot < 0 {
+		return false
+	}
+	hexPart := rest[dot+1:]
+	if len(hexPart) != tempRandomHexLen {
+		return false
+	}
+	for i := range len(hexPart) {
+		if !isHexDigit(hexPart[i]) {
+			return false
+		}
+	}
+	// A temp name is always "<something>.<hex>.tmp": CreateTempIn appends to a
+	// base it was given, so an empty base means this is not one of ours.
+	return dot > 0
+}
+
+func isHexDigit(c byte) bool {
+	return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')
+}
+
 // CreateTempIn creates a uniquely named, exclusively created temp file next to
 // name inside root, and returns it with its root-relative name. It is the
 // os.Root counterpart to os.CreateTemp, which has no Root form.
@@ -140,7 +188,7 @@ func CreateTempIn(root *os.Root, name string) (*os.File, string, error) {
 		if _, err := rand.Read(buf[:]); err != nil {
 			return nil, "", fmt.Errorf("read random suffix: %w", err)
 		}
-		candidate := dir + base + "." + hex.EncodeToString(buf[:]) + ".tmp"
+		candidate := dir + base + "." + hex.EncodeToString(buf[:]) + tempSuffix
 		f, err := root.OpenFile(candidate, os.O_RDWR|os.O_CREATE|os.O_EXCL, 0o600)
 		if err == nil {
 			return f, candidate, nil

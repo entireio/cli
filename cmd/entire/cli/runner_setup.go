@@ -13,7 +13,6 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/entiredir"
 	"github.com/entireio/cli/cmd/entire/cli/interactive"
-	"github.com/entireio/cli/cmd/entire/cli/osroot"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 
 	"github.com/spf13/cobra"
@@ -244,7 +243,7 @@ func applyTuneWithAgent(ctx context.Context, w, errW io.Writer, repoRoot string,
 		if bytes.Equal(newRaw, r.Raw) {
 			continue // model returned the current template verbatim — benign no-op
 		}
-		if err := osroot.WriteFile(root, r.Name, newRaw, 0o644); err != nil {
+		if err := entiredir.WriteFile(root, r.Name, newRaw, 0o644); err != nil {
 			return fmt.Errorf("writing %s: %w", r.Path, err)
 		}
 		fmt.Fprintf(w, "updated %s\n", filepath.Base(r.Path))

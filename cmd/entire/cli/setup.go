@@ -29,6 +29,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
 	"github.com/entireio/cli/cmd/entire/cli/uiform"
 	"github.com/entireio/cli/cmd/entire/cli/vercelconfig"
+	"github.com/entireio/cli/cmd/entire/cli/worktreedir"
 
 	"charm.land/huh/v2"
 	"github.com/spf13/cobra"
@@ -2108,24 +2109,17 @@ func determineSettingsTarget(ctx context.Context, useLocal, useProject bool) (bo
 // setupEntireDirectory creates the .entire directory and gitignore.
 // Returns true if the directory was created, false if it already existed.
 func setupEntireDirectory(ctx context.Context) (bool, error) { //nolint:unparam // already present in codebase
-	// Get absolute path for the .entire directory
-	entireDirAbs, err := entiredir.Path(ctx)
-	if err != nil {
-		entireDirAbs = paths.EntireDir // Fallback to relative
+	// Determine whether creation is needed without creating on the read path.
+	_, readErr := entiredir.OpenForRead(ctx)
+	created := errors.Is(readErr, fs.ErrNotExist)
+	if readErr != nil && !created {
+		return false, fmt.Errorf("failed to inspect .entire directory: %w", readErr)
 	}
 
-	// Check if directory already exists. This and the MkdirAll below act on the
-	// .entire directory itself, which is the one thing entiredir's root cannot
-	// do for us — a root is a handle to that directory, so it can neither create
-	// nor stat it from the outside.
-	created := false
-	if _, err := os.Lstat(entireDirAbs); errors.Is(err, fs.ErrNotExist) {
-		created = true
-	}
-
-	// Create .entire directory
-	//nolint:gosec // G301: Project directory needs standard permissions for git
-	if err := os.MkdirAll(entireDirAbs, 0o755); err != nil {
+	// Open performs creation through the worktree root, so .entire itself is a
+	// checked child of the trusted anchor rather than an absolute path followed
+	// before os.Root takes effect.
+	if _, err := entiredir.Open(ctx); err != nil {
 		return false, fmt.Errorf("failed to create .entire directory: %w", err)
 	}
 
@@ -2889,15 +2883,37 @@ func removeAllSessionStates(ctx context.Context) (int, error) {
 // wrapped: the caller's warning line already leads with "failed to remove
 // .entire directory", and os.RemoveAll errors carry the op and path.
 func removeEntireDirectory(ctx context.Context) error {
-	entireDirAbs, err := entiredir.Path(ctx)
-	if err != nil {
-		entireDirAbs = paths.EntireDir
+	worktreeRoot, err := paths.WorktreeRoot(ctx)
+	switch {
+	case err == nil:
+	case errors.Is(err, paths.ErrNotARepository):
+		// Uninstall is also supported in an uninitialized directory. Anchor that
+		// case to the absolute cwd once; never hand a relative .entire path to an
+		// os operation, where a later chdir could retarget it.
+		//
+		// The gate is the sentinel, exactly as entiredir.anchor gates its own
+		// fallback, and NOT any WorktreeRoot failure. ErrNotARepository means git
+		// ran and said there is no repository here. Everything else — git off
+		// $PATH, dubious ownership, a cancelled context — means "we could not
+		// find out", and this is the one caller where answering that with a
+		// guess deletes the user's data in whatever directory the process
+		// happens to be sitting in.
+		worktreeRoot, err = os.Getwd() //nolint:forbidigo // no repository here; see above
+		if err != nil {
+			return fmt.Errorf("resolve current directory: %w", err)
+		}
+	default:
+		return fmt.Errorf("resolve %s location: %w", paths.EntireDir, err)
 	}
 	// Drop any cached root before unlinking the directory it refers to. A root
 	// that outlives its directory still accepts writes, and they land on an
 	// unlinked inode nobody will ever read.
 	entiredir.Reset()
-	return os.RemoveAll(entireDirAbs) //nolint:wrapcheck // caller's warning line already names the step; the os error carries op and path
+	root, err := worktreedir.OpenAt(worktreeRoot)
+	if err != nil {
+		return err //nolint:wrapcheck // OpenAt names the directory it could not open
+	}
+	return root.RemoveAll(paths.EntireDir) //nolint:wrapcheck // caller names the directory; os error carries operation
 }
 
 // removeAllShadowBranches removes all shadow branches.

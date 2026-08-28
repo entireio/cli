@@ -168,8 +168,15 @@ func installRepoAtTag(ctx context.Context, repoURL, expectedName, tag string, op
 	if err != nil {
 		return nil, fmt.Errorf("create staging dir: %w", err)
 	}
-	// Best-effort cleanup of our own temp dir.
-	defer func() { _ = os.RemoveAll(staging) }()
+	// Best-effort cleanup of our own temp dir. Forget before RemoveAll: the
+	// staging root below is memoized under this path, and a cached root that
+	// outlives its directory is a handle to an unlinked inode — one leaked fd
+	// and one dead registry entry per plugin installed, N per `plugin upgrade`.
+	// plugin_fetch.go opens the same directory, so this one Forget covers both.
+	defer func() {
+		osroot.Forget(staging)
+		_ = os.RemoveAll(staging)
+	}()
 	// The staging directory gets a root too. It holds a downloaded archive and
 	// whatever the extractor pulls out of it, and it is the one place a future
 	// change that honours archive entry names would write.

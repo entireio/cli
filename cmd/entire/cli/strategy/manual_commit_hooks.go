@@ -2098,7 +2098,7 @@ func (s *ManualCommitStrategy) extractModifiedFilesFromLiveTranscript(ctx contex
 	// AND subagent transcripts in a single pass, avoiding redundant parsing.
 	if state.AgentType == agent.AgentTypeClaudeCode {
 		subagentsDir := paths.SubagentsDir(filepath.Dir(state.TranscriptPath), state.SessionID)
-		transcriptData, readErr := os.ReadFile(state.TranscriptPath)
+		transcriptData, readErr := agent.ReadTranscriptFile(state.TranscriptPath)
 		if readErr != nil {
 			logging.Debug(logCtx, "extractModifiedFilesFromLiveTranscript: failed to read transcript",
 				slog.String("session_id", state.SessionID),
@@ -3032,7 +3032,7 @@ func (s *ManualCommitStrategy) finalizeAllTurnCheckpoints(ctx context.Context, s
 		return 1 // Count as error - all checkpoints will be skipped
 	}
 
-	fullTranscript, err := os.ReadFile(transcriptPath) //nolint:gosec // path validated by resolveTranscriptPath
+	fullTranscript, err := agent.ReadTranscriptFile(transcriptPath)
 	if err != nil || len(fullTranscript) == 0 {
 		msg := "finalize: empty transcript, skipping"
 		if err != nil {

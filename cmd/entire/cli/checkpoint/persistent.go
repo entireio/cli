@@ -1017,7 +1017,7 @@ func (s *treeWriter) writeTranscript(ctx context.Context, opts WriteOptions, ses
 	// so we redact it here. The in-memory path (opts.Transcript) is already
 	// pre-redacted by the caller — enforced by the RedactedBytes type.
 	if len(transcriptBytes) == 0 && opts.TranscriptPath != "" {
-		rawData, readErr := os.ReadFile(opts.TranscriptPath)
+		rawData, readErr := agent.ReadTranscriptFile(opts.TranscriptPath)
 		if readErr != nil {
 			// Non-fatal: transcript may not exist yet
 			rawData = nil
@@ -2463,20 +2463,21 @@ func (s *treeWriter) copyEntireMetadataDir(ctx context.Context, metadataDir, ses
 // path. Used to include additional metadata files like task checkpoints,
 // subagent transcripts, etc.
 func (s *treeWriter) copyMetadataDir(ctx context.Context, root *os.Root, dirName, sessionDir string, entries map[string]object.TreeEntry) error {
-	err := fs.WalkDir(root.FS(), dirName, func(name string, d fs.DirEntry, err error) error {
+	// WalkDirNoSymlinks refuses a symlink at the walk root as well as beneath
+	// it; see addDirectoryToChanges in ephemeral.go for why the callback guard
+	// this replaces never covered dirName itself.
+	err := osroot.WalkDirNoSymlinks(root, dirName, func(name string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
 
-		// Skip symlinks so a link inside .entire is not stored as its target's
-		// contents; the root already refuses to follow one out of .entire. See
-		// addDirectoryToChanges in ephemeral.go for why plain nil is the whole
-		// skip and fs.SkipDir would be wrong here.
-		if d.Type()&fs.ModeSymlink != 0 {
+		if d.IsDir() {
 			return nil
 		}
 
-		if d.IsDir() {
+		// Skip an interrupted atomic write's residue, for the reasons
+		// addDirectoryToChanges in ephemeral.go gives.
+		if jsonutil.IsTempName(d.Name()) {
 			return nil
 		}
 
@@ -2541,7 +2542,7 @@ func createRedactedBlobFromFile(ctx context.Context, repo *git.Repository, cache
 		mode = filemode.Executable
 	}
 
-	content, err := osroot.ReadFile(root, name)
+	content, err := entiredir.ReadFile(root, name)
 	if err != nil {
 		return plumbing.ZeroHash, 0, fmt.Errorf("failed to read file: %w", err)
 	}

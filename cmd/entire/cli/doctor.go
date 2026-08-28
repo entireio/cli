@@ -683,11 +683,12 @@ const symlinkReportLimit = 10
 // deciding what to do with whatever the link pointed at — not something doctor
 // can take on the user's behalf.
 //
-// .entire itself is reported but NOT refused: os.OpenRoot follows a symlinked
-// root, so a repo already set up that way keeps working, and breaking it to
-// enforce a rule the user never agreed to would be worse than telling them where
-// their data actually lands. The subdirectories are refused because nothing was
-// relying on them.
+// .entire itself used to be reported but not refused, on the grounds that
+// os.OpenRoot follows a symlinked root so an existing setup kept working. It no
+// longer does: entiredir opens .entire as a checked child of the worktree root
+// (osroot.SharedChild), which refuses a link. Doctor is exempt from the pre-run
+// guard precisely so it still runs and can say so, and it must not tell the user
+// their setup is fine when every other command will now stop.
 func checkEntireDirSymlinks(cmd *cobra.Command) {
 	ctx := cmd.Context()
 	w := cmd.OutOrStdout()
@@ -696,9 +697,10 @@ func checkEntireDirSymlinks(cmd *cobra.Command) {
 		if info, lerr := os.Lstat(dir); lerr == nil && info.Mode()&os.ModeSymlink != 0 {
 			fmt.Fprintf(w, "%s: SYMLINK\n", paths.EntireDir)
 			fmt.Fprintf(w, "  %s -> %s\n", dir, readlinkOrUnknown(dir))
-			fmt.Fprintln(w, "  Entire follows this, so checkpoints and settings live at the target, not")
-			fmt.Fprintln(w, "  in this repository. Intentional setups keep working; if this was not")
-			fmt.Fprintln(w, "  intentional, replace the link with a real directory.")
+			fmt.Fprintln(w, "  Entire refuses to read or write through this link, so every command")
+			fmt.Fprintln(w, "  other than doctor will stop until it is replaced with a real directory.")
+			fmt.Fprintln(w, "  Move the target's contents into place:")
+			fmt.Fprintf(w, "    rm %s && mv %s %s\n", dir, readlinkOrUnknown(dir), dir)
 		}
 	}
 

@@ -1086,7 +1086,7 @@ func sessionLogExists(ag agent.Agent, repoRoot, sessionLogPath string) bool {
 }
 
 func unavailableSessionLogResult(w io.Writer, ag agent.Agent, restored strategy.RestoredSession, sessionLogPath string, force bool) (strategy.RestoredSession, bool, error) {
-	if _, statErr := os.Stat(sessionLogPath); statErr == nil {
+	if _, statErr := agent.StatTranscriptFile(sessionLogPath); statErr == nil {
 		if force {
 			fmt.Fprintf(w, "Checkpoint session log for '%s' not available; keeping existing local session log.\n", restored.SessionID)
 		} else {

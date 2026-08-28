@@ -60,7 +60,7 @@ func (a *OpenCodeAgent) DetectPresence(ctx context.Context) (bool, error) {
 // ReadTranscript reads the transcript for a session.
 // The sessionRef is expected to be a path to the export JSON file.
 func (a *OpenCodeAgent) ReadTranscript(sessionRef string) ([]byte, error) {
-	data, err := os.ReadFile(sessionRef) //nolint:gosec // Path from agent hook
+	data, err := agent.ReadTranscriptFile(sessionRef)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read opencode transcript: %w", err)
 	}
@@ -188,7 +188,7 @@ func (a *OpenCodeAgent) ReadSession(input *agent.HookInput) (*agent.AgentSession
 	if input.SessionRef == "" {
 		return nil, errors.New("no session ref provided")
 	}
-	data, err := os.ReadFile(input.SessionRef)
+	data, err := agent.ReadTranscriptFile(input.SessionRef)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read session: %w", err)
 	}

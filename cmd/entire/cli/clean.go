@@ -13,6 +13,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/entiredir"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
+	"github.com/entireio/cli/cmd/entire/cli/osroot"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
@@ -424,7 +425,10 @@ func listAllTempFiles(ctx context.Context) ([]string, error) {
 	}
 
 	var files []string
-	err = fs.WalkDir(root.FS(), entireTmpName, func(_ string, d fs.DirEntry, err error) error {
+	// A symlinked .entire/tmp (or a link inside it) would make the deletion
+	// that follows this listing land somewhere Entire does not own, so refuse
+	// rather than enumerate.
+	err = osroot.WalkDirNoSymlinks(root, entireTmpName, func(_ string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}

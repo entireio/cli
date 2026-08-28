@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/entireio/cli/cmd/entire/cli/entiredir"
+	"github.com/entireio/cli/cmd/entire/cli/osroot"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 	"github.com/stretchr/testify/require"
@@ -99,6 +100,50 @@ func TestRoot_RefusesToFollowSymlinkOutOfEntire(t *testing.T) {
 
 	_, err = root.Open("link.txt")
 	require.Error(t, err, "a symlink escaping .entire must not resolve")
+}
+
+func TestOpenAt_RejectsSymlinkedEntireDirectory(t *testing.T) {
+	t.Parallel()
+
+	worktree := t.TempDir()
+	outside := t.TempDir()
+	if err := os.Symlink(outside, filepath.Join(worktree, paths.EntireDir)); err != nil {
+		t.Skipf("symlink not supported: %v", err)
+	}
+
+	_, err := entiredir.OpenAt(worktree)
+	require.ErrorIs(t, err, osroot.ErrSymlinkedPath)
+
+	entries, err := os.ReadDir(outside)
+	require.NoError(t, err)
+	require.Empty(t, entries, "opening .entire must not create files through its symlink")
+}
+
+func TestWriteFile_ReplacesLeafSymlinkWithoutFollowingIt(t *testing.T) {
+	t.Parallel()
+
+	worktree := t.TempDir()
+	root, err := entiredir.OpenAt(worktree)
+	require.NoError(t, err)
+
+	protected := filepath.Join(worktree, paths.EntireDir, "settings.local.json")
+	require.NoError(t, os.WriteFile(protected, []byte("protected"), 0o600))
+	link := filepath.Join(worktree, paths.EntireDir, "marker")
+	if err := os.Symlink("settings.local.json", link); err != nil {
+		t.Skipf("symlink not supported: %v", err)
+	}
+
+	require.NoError(t, entiredir.WriteFile(root, "marker", []byte("marker"), 0o600))
+
+	got, err := os.ReadFile(protected)
+	require.NoError(t, err)
+	require.Equal(t, "protected", string(got))
+	info, err := os.Lstat(link)
+	require.NoError(t, err)
+	require.Zero(t, info.Mode()&os.ModeSymlink)
+	got, err = os.ReadFile(link)
+	require.NoError(t, err)
+	require.Equal(t, "marker", string(got))
 }
 
 // No t.Parallel: Reset clears the cache every other test in this package

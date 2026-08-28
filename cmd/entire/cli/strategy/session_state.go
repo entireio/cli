@@ -93,7 +93,7 @@ func openSessionStateRoot(ctx context.Context) (*os.Root, error) {
 	if err := osroot.MkdirAllNoSymlink(commonRoot, session.SessionStateDirName, 0o750); err != nil {
 		return nil, fmt.Errorf("failed to create session state directory: %w", err)
 	}
-	root, err := commonRoot.OpenRoot(session.SessionStateDirName)
+	root, err := osroot.OpenChild(commonRoot, session.SessionStateDirName)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open session state directory: %w", err)
 	}
@@ -103,6 +103,12 @@ func openSessionStateRoot(ctx context.Context) (*os.Root, error) {
 // openSessionStateRootForRead returns an os.Root scoped to the session state
 // directory without creating it. Returns (nil, nil) when the directory does not
 // exist, so read paths can treat a missing directory as "no hint".
+//
+// osroot.OpenChild, not commonRoot.OpenRoot: the write path above is protected
+// because MkdirAllNoSymlink refuses a symlinked entire-sessions before this
+// runs, but nothing precedes the read path. os.Root follows a symlink that stays
+// INSIDE the common dir, so a bare OpenRoot would read another directory's
+// session state as this repo's.
 func openSessionStateRootForRead(ctx context.Context) (*os.Root, error) {
 	commonRoot, err := gitdir.Open(ctx)
 	if os.IsNotExist(err) {
@@ -111,7 +117,7 @@ func openSessionStateRootForRead(ctx context.Context) (*os.Root, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to open git common dir: %w", err)
 	}
-	root, err := commonRoot.OpenRoot(session.SessionStateDirName)
+	root, err := osroot.OpenChild(commonRoot, session.SessionStateDirName)
 	if os.IsNotExist(err) {
 		return nil, nil //nolint:nilnil // missing dir = no hint; callers handle nil root
 	}

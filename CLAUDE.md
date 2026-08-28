@@ -768,6 +768,33 @@ unlinked inode). There were three copies of that map before; do not add another.
 Pair the roots with `osroot` (`ReadFile`, `WriteFile`, `MkdirAllNoSymlink`,
 `Remove`, `ReadDir`) and `jsonutil.WriteFileAtomicIn` / `CreateTempIn`.
 
+**A subdirectory of an anchor is opened with `osroot.SharedChild` (memoized,
+registry-owned) or `osroot.OpenChild` (short-lived, caller closes), never a bare
+`parent.OpenRoot(name)`.** `os.Root` refuses a symlink that escapes the parent
+but follows one pointing elsewhere *inside* it, so the bare call silently
+accepts a redirected `.git/entire-sessions` or `.entire`. Both helpers `Lstat`
+before and `SameFile` after, which also closes the Lstat/OpenRoot race. Neither
+appears in `rootOpeners`, deliberately: their base is an already-open root, so
+it is trusted by construction and flagging their callers would defeat the point
+of having them.
+
+**An atomic write leaves its temp file in the same directory as its target, and
+one of those directories is walked wholesale into every checkpoint tree.**
+`jsonutil.CreateTempIn` writes `<base>.<16 hex>.tmp` beside the file it is
+replacing; `.entire/metadata/<session>` holds `full.jsonl` and is copied into
+the tree by `addDirectoryToChanges` (ephemeral) and `copyMetadataDir`
+(persistent). A hook killed between the create and the rename — an agent hook
+timeout, Codex's session-end process-tree kill, a crash — leaves the temp
+behind, and without a filter it is redacted, committed, and pushed on every
+later checkpoint. Both walks therefore skip `jsonutil.IsTempName`. Keep that
+predicate matching `CreateTempIn`'s output exactly
+(`TestIsTempName_MatchesWhatCreateTempInProduces` pins it): a naming change that
+outruns it turns both filters into no-ops silently. `agent.ParseChunkIndex` is
+the second half of the same defence — it requires the suffix to be *entirely*
+digits, because `fmt.Sscanf("%03d")` stopped at the first non-digit and so read
+`full.jsonl.123abc….tmp` back as chunk 123 and reassembled it into the
+transcript.
+
 **The test is "is there a containment boundary?", not "is traversal reachable
 today?"** A root is cheap and it is what keeps a *future* change safe: the names
 under several of these directories are fixed constants right now, and that is not
@@ -803,8 +830,15 @@ comments at each site say which case applies:
   symlink that *escapes* a root but follows one pointing elsewhere *inside* it,
   and an escaping one otherwise fails later with an opaque errno far from the
   cause. `entire doctor` reports what is already there
-  (`checkEntireDirSymlinks`). `.entire` **itself** is reported but not refused —
-  `os.OpenRoot` follows a symlinked root, so an existing setup keeps working.
+  (`checkEntireDirSymlinks`). `.entire` **itself is refused too**: `entiredir`
+  opens it as a checked child of the worktree root (`osroot.SharedChild`), which
+  `Lstat`s before and `SameFile`s after. An earlier revision allowed it on the
+  grounds that `os.OpenRoot` follows a symlinked root and an existing setup
+  should keep working; that was reversed, because `.entire` holds the redaction
+  settings deciding what may be committed, and "we follow it, so your data lands
+  somewhere else" is not a property to grandfather. `doctor` is exempt from the
+  pre-run guard so it still runs on such a repo, and its message says the repo is
+  stopped rather than that the setup is fine.
   The agent hook-config directories get the same treatment via
   `agent.HookConfigFile`: a symlinked `.claude` / `.cursor` / `.gemini` /
   `.codex` is refused at the create, because a working tree arrives by clone and

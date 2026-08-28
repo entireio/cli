@@ -15,7 +15,6 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/entiredir"
 	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
-	"github.com/entireio/cli/cmd/entire/cli/osroot"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
@@ -244,7 +243,7 @@ func formatReviewSessionLine(worktreeRoot string, st *session.State) string {
 	if err != nil {
 		return ""
 	}
-	raw, err := osroot.ReadFile(root, sessionMetadataName(st.SessionID)+"/"+paths.PromptFileName)
+	raw, err := entiredir.ReadFile(root, sessionMetadataName(st.SessionID)+"/"+paths.PromptFileName)
 	if err != nil {
 		return ""
 	}

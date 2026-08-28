@@ -34,7 +34,7 @@ func resolveTranscriptPath(state *SessionState) (string, error) {
 	}
 
 	// Fast path: file exists at the stored location.
-	if _, err := os.Stat(state.TranscriptPath); err == nil {
+	if _, err := agent.StatTranscriptFile(state.TranscriptPath); err == nil {
 		return state.TranscriptPath, nil
 	} else if !errors.Is(err, os.ErrNotExist) {
 		// Non-ENOENT error (permission denied, etc.) — return as-is.

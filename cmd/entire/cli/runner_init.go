@@ -55,7 +55,7 @@ func ensureRunnersPresent(w, errW io.Writer, repoRoot string, assumeYes bool) (c
 	}
 	for _, f := range defaults {
 		dest := filepath.Join(dir, f.Name)
-		if err := osroot.WriteFile(root, runnersName+"/"+f.Name, f.Data, 0o644); err != nil {
+		if err := entiredir.WriteFile(root, runnersName+"/"+f.Name, f.Data, 0o644); err != nil {
 			return nil, fmt.Errorf("writing %s: %w", dest, err)
 		}
 		fmt.Fprintf(w, "created %s\n", filepath.Join(paths.EntireDir, runnersName, f.Name))

@@ -82,8 +82,16 @@ type Stores struct {
 // like settings.Load: from the context's worktree root if set, else relative to
 // the current working directory — not from repo. Callers opening a repository
 // that is not the cwd should wrap ctx with that worktree root (as dispatch does).
-// Resolution is fail-soft: a missing or unreadable settings file yields the
+// Resolution is fail-soft about settings CONTENT: a missing settings file, a
+// whole-file JSON syntax error, or unrelated invalid fields all yield the
 // default git-branch backend with no mirrors, preserving default behavior.
+//
+// It is not fail-soft about which repository this is. A worktree root that will
+// not resolve is returned as an error rather than defaulted, because the backend
+// choice would then be made for a repo we could not identify — and the settings
+// file that names it is the one we failed to find. That failure is unreachable
+// from a command in practice: the root pre-run refuses to run at all when the
+// worktree root does not resolve. LoadCheckpointsConfig draws the same line.
 func Open(ctx context.Context, repo *git.Repository, opts OpenOptions) (*Stores, error) {
 	refs := resolveOpenRefs(ctx, opts)
 	env := OpenEnv{Repo: repo, BlobFetcher: opts.BlobFetcher, RefFetcher: opts.RefFetcher, RemoteRefLister: opts.RemoteRefLister, MetadataBranchFetcher: opts.MetadataBranchFetcher, Refs: refs, ReadRemotes: opts.ReadRemotes}

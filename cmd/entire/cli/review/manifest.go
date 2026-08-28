@@ -430,7 +430,7 @@ func reviewTokenUsageForSession(ctx context.Context, st *session.State, lookup a
 			slog.String("error", err.Error()))
 		return nil
 	}
-	transcript, err := os.ReadFile(st.TranscriptPath)
+	transcript, err := agent.ReadTranscriptFile(st.TranscriptPath)
 	if err != nil {
 		logging.Debug(ctx, "review token usage: transcript read failed",
 			slog.String("session_id", st.SessionID),

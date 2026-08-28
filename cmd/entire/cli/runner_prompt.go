@@ -57,7 +57,7 @@ func loadTuneRunners(repoRoot, filter string) ([]tuneRunner, error) {
 		}
 		name := runnersName + "/" + e.Name()
 		path := filepath.Join(dir, e.Name())
-		raw, err := osroot.ReadFile(root, name)
+		raw, err := entiredir.ReadFile(root, name)
 		if err != nil {
 			return nil, fmt.Errorf("reading %s: %w", path, err)
 		}

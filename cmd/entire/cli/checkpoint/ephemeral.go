@@ -414,7 +414,7 @@ func (s *ephemeralStore) addTaskMetadataToTree(ctx context.Context, baseTreeHash
 
 		// Add session transcript (with chunking support for large transcripts)
 		if opts.TranscriptPath != "" {
-			if transcriptContent, readErr := os.ReadFile(opts.TranscriptPath); readErr == nil {
+			if transcriptContent, readErr := agent.ReadTranscriptFile(opts.TranscriptPath); readErr == nil {
 				agentType := agent.DetectAgentTypeFromContent(transcriptContent)
 
 				// Chunk if necessary
@@ -447,7 +447,7 @@ func (s *ephemeralStore) addTaskMetadataToTree(ctx context.Context, baseTreeHash
 
 		// Add subagent transcript if available
 		if opts.SubagentTranscriptPath != "" && opts.AgentID != "" {
-			agentContent, readErr := os.ReadFile(opts.SubagentTranscriptPath)
+			agentContent, readErr := agent.ReadTranscriptFile(opts.SubagentTranscriptPath)
 			agentContent, tooLarge := prepareSubagentTranscript(ctx, opts.Agent, opts.SubagentTranscriptPath, agentContent)
 			if readErr == nil && !tooLarge {
 				// Try JSONL-aware redaction first; fall back to plain string redaction
@@ -937,7 +937,16 @@ func createBlobFromFile(repo *git.Repository, root *os.Root, name string) (plumb
 		}
 		content = []byte(target)
 	} else {
-		content, err = osroot.ReadFile(root, name)
+		// osroot, not entiredir: root here is the WORKTREE root, and entiredir
+		// owns .entire. Reading a user's working file through the .entire
+		// helper binds it to that directory's policy, so a later change there
+		// would silently change how the user's own files are checkpointed.
+		//
+		// NoFollow is still the right variant. The symlink case is handled
+		// above from the Lstat, so reaching this branch on a link means the
+		// entry changed underneath us, and following it would store some other
+		// file's contents under this name.
+		content, err = osroot.ReadFileNoFollow(root, name)
 		if err != nil {
 			return plumbing.ZeroHash, 0, fmt.Errorf("failed to read file: %w", err)
 		}
@@ -1002,27 +1011,31 @@ func addMetadataDirToChanges(ctx context.Context, repo *git.Repository, cache *r
 // for each file. dirPathRel is the git tree-relative path the directory lands at.
 func addDirectoryToChanges(ctx context.Context, repo *git.Repository, cache *redactCache, root *os.Root, dirName, dirPathRel string) ([]TreeChange, error) {
 	var changes []TreeChange
-	err := fs.WalkDir(root.FS(), dirName, func(name string, d fs.DirEntry, err error) error {
+	// WalkDirNoSymlinks, not fs.WalkDir: it refuses a symlink at the walk root
+	// as well as beneath it. fs.WalkDir stats its root (following a link) and
+	// only lstats what is below, so the symlink guard this callback used to
+	// carry never applied to dirName itself — a symlinked
+	// .entire/metadata/<session> was descended into and its target's contents
+	// redacted, committed, and pushed. Refusing beats the old skip for the
+	// entries too: silently dropping them writes a checkpoint that is missing
+	// session content with nobody told.
+	err := osroot.WalkDirNoSymlinks(root, dirName, func(name string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
 
-		// Skip symlinks to prevent capturing whatever they point at. The root
-		// already refuses to follow one out of .entire, but a symlink that stays
-		// inside it would still be stored as its target's contents.
-		//
-		// d.Type() comes from the directory listing rather than a stat, so it
-		// reports the entry itself — the reason filepath.Walk needed a separate
-		// os.Lstat here. That also means fs.DirEntry.IsDir() is false for a
-		// symlink to a directory, so WalkDir never descends into one and plain
-		// nil is the whole skip. Returning fs.SkipDir instead would be wrong:
-		// from a non-directory entry it skips the rest of the CONTAINING
-		// directory, silently dropping the files after it.
-		if d.Type()&fs.ModeSymlink != 0 {
+		if d.IsDir() {
 			return nil
 		}
 
-		if d.IsDir() {
+		// Skip the residue of an interrupted atomic write. jsonutil.CreateTempIn
+		// places its temp file beside its target, and this directory is walked
+		// wholesale into the checkpoint tree, so an orphan left by a hook that
+		// was killed mid-write would otherwise be redacted, committed, and
+		// pushed on every checkpoint from then on. Worse, a name like
+		// "full.jsonl.<hex>.tmp" is read back as a transcript CHUNK by
+		// readTranscriptFromTree whenever the hex happens to start with a digit.
+		if jsonutil.IsTempName(d.Name()) {
 			return nil
 		}
 

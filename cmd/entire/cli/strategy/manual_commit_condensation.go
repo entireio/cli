@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"os"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -450,7 +449,7 @@ func (s *ManualCommitStrategy) materializeTaskRecords(
 func readFirstTranscript(candidates []string) ([]byte, string, error) {
 	var lastErr error
 	for _, path := range candidates {
-		data, err := os.ReadFile(path) //nolint:gosec // path is agent-declared or resolved from session state, not user input
+		data, err := agent.ReadTranscriptFile(path)
 		if err == nil {
 			return data, path, nil
 		}
@@ -1421,7 +1420,7 @@ func (s *ManualCommitStrategy) extractSessionData(ctx context.Context, repo *git
 		if isActive {
 			prepareTranscriptIfNeeded(ctx, ag, liveTranscriptPath)
 		}
-		if liveData, readErr := os.ReadFile(liveTranscriptPath); readErr == nil && len(liveData) > 0 { //nolint:gosec // path from session state
+		if liveData, readErr := agent.ReadTranscriptFile(liveTranscriptPath); readErr == nil && len(liveData) > 0 {
 			fullTranscript = string(liveData)
 		}
 	}
@@ -1489,7 +1488,7 @@ func (s *ManualCommitStrategy) extractSessionDataFromLiveTranscript(ctx context.
 		return nil, resolveErr
 	}
 
-	liveData, err := os.ReadFile(transcriptPath) //nolint:gosec // path validated by resolveTranscriptPath
+	liveData, err := agent.ReadTranscriptFile(transcriptPath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read live transcript: %w", err)
 	}
@@ -1587,7 +1586,7 @@ func readPromptsFromFilesystem(ctx context.Context, sessionID string) []string {
 	if err != nil {
 		return nil
 	}
-	data, err := osroot.ReadFile(root, sessionPromptName(sessionID))
+	data, err := entiredir.ReadFile(root, sessionPromptName(sessionID))
 	if err != nil || len(data) == 0 {
 		return nil
 	}

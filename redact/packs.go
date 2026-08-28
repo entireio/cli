@@ -194,6 +194,27 @@ func validateIdentifier(field, value, sourcePath string) error {
 // "user owns repo," so these are runaway-input guards, not security limits.
 func LoadPacks(fsys fs.FS, dir string, logger *slog.Logger) ([]*Pack, error) {
 	logger = loggerOrDefault(logger)
+
+	// fs.WalkDir takes its ROOT's DirEntry from fs.Stat, which follows a
+	// symlink; only entries beneath it come from ReadDir, which does not. So
+	// the ModeSymlink guard below never applied to dir itself, and a
+	// .entire/redactors pointing elsewhere silently supplied the rules that
+	// decide what gets scrubbed out of a checkpoint. Lstat it first.
+	//
+	// The assertion is how this stays a pure fs.FS consumer with no dependency
+	// on the CLI: os.Root.FS() implements fs.ReadLinkFS, so the caller that
+	// hands us a confined tree gets the check, and a plain fs.FS that cannot
+	// express symlinks at all is unaffected.
+	if linkFS, ok := fsys.(fs.ReadLinkFS); ok {
+		info, err := linkFS.Lstat(dir)
+		switch {
+		case err != nil && !errors.Is(err, fs.ErrNotExist):
+			return nil, fmt.Errorf("read redactors dir %s: %w", dir, err)
+		case err == nil && info.Mode()&fs.ModeSymlink != 0:
+			return nil, fmt.Errorf("redactors path %s is a symlink", dir)
+		}
+	}
+
 	var packs []*Pack
 	walkErr := fs.WalkDir(fsys, dir, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
@@ -212,6 +233,12 @@ func LoadPacks(fsys fs.FS, dir string, logger *slog.Logger) ([]*Pack, error) {
 		if path == dir && !d.IsDir() {
 			return fmt.Errorf("redactors path %s is not a directory", dir)
 		}
+		// A symlinked pack FILE stays a skip, unlike the walk root above.
+		// .entire/redactors is not gitignored, so a link here can arrive with a
+		// checkout — and skipping already denies it any effect on redaction,
+		// exactly as failing would, without letting one file in a pull request
+		// make every command error. Redirecting the DIRECTORY is the different
+		// case: that substitutes the whole rule set, so it is refused.
 		if d.Type()&fs.ModeSymlink != 0 {
 			logger.Warn("skipping symlinked redactor pack path",
 				componentAttr,

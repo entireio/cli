@@ -14,6 +14,7 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
+	"github.com/entireio/cli/cmd/entire/cli/settings"
 )
 
 // setupDiscoveryDir creates a temp directory containing a mock entire-agent-<name> binary.
@@ -48,22 +49,40 @@ func makeInfoJSON(name string) string {
 // NOTE: Tests in this file modify process-global state (os.Setenv, os.Chdir, agent registry)
 // and therefore cannot use t.Parallel().
 
-// enableExternalAgents creates a temp repo with external_agents enabled in settings
-// and chdir's into it so that settings.Load can find the config.
-func enableExternalAgents(t *testing.T) {
+// externalAgentsRepo writes .entire/settings.json with the given external_agents
+// value and returns a context that names the directory as the worktree root.
+//
+// The context is what makes this deterministic. settings.Load short-circuits on
+// a worktree root carried in the context and never consults entiredir's anchor,
+// which resolves through `git rev-parse` — and every test here sets PATH to just
+// its own mock-binary directory, so git is not on it. The previous version
+// mkdir'd an empty .git and relied on Load falling back to a cwd-relative
+// ".entire/settings.json" when the anchor failed. That fallback is gone
+// (resolving a repository is fail-closed now), and it was papering over a repo
+// the test never actually created.
+//
+// Production is unaffected by the difference: every DiscoverAndRegister call
+// site sits inside a command's RunE, downstream of the root pre-run, which
+// already refuses to run when the worktree root will not resolve.
+func externalAgentsRepo(t *testing.T, enabled bool) context.Context {
 	t.Helper()
 	tmpDir := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(tmpDir, ".git"), 0o755); err != nil {
-		t.Fatalf("create .git: %v", err)
-	}
 	entireDir := filepath.Join(tmpDir, ".entire")
 	if err := os.MkdirAll(entireDir, 0o755); err != nil {
 		t.Fatalf("create .entire: %v", err)
 	}
-	if err := os.WriteFile(filepath.Join(entireDir, "settings.json"), []byte(`{"enabled":true,"external_agents":true}`), 0o644); err != nil {
+	body := fmt.Sprintf(`{"enabled":true,"external_agents":%t}`, enabled)
+	if err := os.WriteFile(filepath.Join(entireDir, "settings.json"), []byte(body), 0o644); err != nil {
 		t.Fatalf("write settings: %v", err)
 	}
 	t.Chdir(tmpDir)
+	return settings.WithWorktreeRoot(context.Background(), tmpDir)
+}
+
+// enableExternalAgents is externalAgentsRepo with the setting on.
+func enableExternalAgents(t *testing.T) context.Context {
+	t.Helper()
+	return externalAgentsRepo(t, true)
 }
 
 func TestDiscoverAndRegister_FindsAgent(t *testing.T) {
@@ -71,13 +90,13 @@ func TestDiscoverAndRegister_FindsAgent(t *testing.T) {
 		t.Skip("sh not available")
 	}
 
-	enableExternalAgents(t)
+	ctx := enableExternalAgents(t)
 
 	name := "disc-find"
 	dir := setupDiscoveryDir(t, name, makeInfoJSON(name))
 	t.Setenv("PATH", dir)
 
-	DiscoverAndRegister(context.Background())
+	DiscoverAndRegister(ctx)
 
 	ag, err := agent.Get(types.AgentName(name))
 	if err != nil {
@@ -93,14 +112,14 @@ func TestDiscoverAndRegister_Deduplication(t *testing.T) {
 		t.Skip("sh not available")
 	}
 
-	enableExternalAgents(t)
+	ctx := enableExternalAgents(t)
 
 	name := "disc-dedup"
 	dir1 := setupDiscoveryDir(t, name, makeInfoJSON(name))
 	dir2 := setupDiscoveryDir(t, name, makeInfoJSON(name))
 	t.Setenv("PATH", dir1+string(os.PathListSeparator)+dir2)
 
-	DiscoverAndRegister(context.Background())
+	DiscoverAndRegister(ctx)
 
 	// Verify the agent is registered (just once — no panic or error from double registration).
 	ag, err := agent.Get(types.AgentName(name))
@@ -117,7 +136,7 @@ func TestDiscoverAndRegister_SkipsNameConflict(t *testing.T) {
 		t.Skip("sh not available")
 	}
 
-	enableExternalAgents(t)
+	ctx := enableExternalAgents(t)
 
 	name := "disc-conflict"
 	// Pre-register an agent with the same name.
@@ -139,7 +158,7 @@ func TestDiscoverAndRegister_SkipsNameConflict(t *testing.T) {
 	dir := setupDiscoveryDir(t, name, conflictJSON)
 	t.Setenv("PATH", dir)
 
-	DiscoverAndRegister(context.Background())
+	DiscoverAndRegister(ctx)
 
 	// The pre-registered placeholder should still be there (returns nil).
 	ag, err := agent.Get(types.AgentName(name))
@@ -157,7 +176,7 @@ func TestDiscoverAndRegister_SkipsNonExecutable(t *testing.T) {
 		t.Skip("sh not available")
 	}
 
-	enableExternalAgents(t)
+	ctx := enableExternalAgents(t)
 
 	name := "disc-noexec"
 	dir := t.TempDir()
@@ -170,7 +189,7 @@ func TestDiscoverAndRegister_SkipsNonExecutable(t *testing.T) {
 	}
 	t.Setenv("PATH", dir)
 
-	DiscoverAndRegister(context.Background())
+	DiscoverAndRegister(ctx)
 
 	_, err := agent.Get(types.AgentName(name))
 	if err == nil {
@@ -179,7 +198,7 @@ func TestDiscoverAndRegister_SkipsNonExecutable(t *testing.T) {
 }
 
 func TestDiscoverAndRegister_SkipsDirectory(t *testing.T) {
-	enableExternalAgents(t)
+	ctx := enableExternalAgents(t)
 
 	name := "disc-dir"
 	dir := t.TempDir()
@@ -190,7 +209,7 @@ func TestDiscoverAndRegister_SkipsDirectory(t *testing.T) {
 	}
 	t.Setenv("PATH", dir)
 
-	DiscoverAndRegister(context.Background())
+	DiscoverAndRegister(ctx)
 
 	_, err := agent.Get(types.AgentName(name))
 	if err == nil {
@@ -203,25 +222,17 @@ func TestDiscoverAndRegister_SkipsWhenDisabled(t *testing.T) {
 		t.Skip("sh not available")
 	}
 
-	// Set up a repo WITHOUT external_agents enabled (default false)
-	tmpDir := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(tmpDir, ".git"), 0o755); err != nil {
-		t.Fatalf("create .git: %v", err)
-	}
-	entireDir := filepath.Join(tmpDir, ".entire")
-	if err := os.MkdirAll(entireDir, 0o755); err != nil {
-		t.Fatalf("create .entire: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(entireDir, "settings.json"), []byte(`{"enabled":true}`), 0o644); err != nil {
-		t.Fatalf("write settings: %v", err)
-	}
-	t.Chdir(tmpDir)
+	// A repo whose settings are readable and say external_agents is off. The
+	// distinction matters: when settings could not be loaded at all this test
+	// also passed, because the disabled path and the unreadable path both end
+	// at IsExternalAgentsEnabled returning false.
+	ctx := externalAgentsRepo(t, false)
 
 	name := "disc-disabled"
 	dir := setupDiscoveryDir(t, name, makeInfoJSON(name))
 	t.Setenv("PATH", dir)
 
-	DiscoverAndRegister(context.Background())
+	DiscoverAndRegister(ctx)
 
 	// Agent should NOT be registered because external_agents is false
 	_, err := agent.Get(types.AgentName(name))
@@ -231,11 +242,11 @@ func TestDiscoverAndRegister_SkipsWhenDisabled(t *testing.T) {
 }
 
 func TestDiscoverAndRegister_EmptyPATH(t *testing.T) {
-	enableExternalAgents(t)
+	ctx := enableExternalAgents(t)
 	t.Setenv("PATH", "")
 
 	// Should return without error or panic.
-	DiscoverAndRegister(context.Background())
+	DiscoverAndRegister(ctx)
 }
 
 func TestDiscoverAndRegister_UnreadableDir(t *testing.T) {
@@ -243,7 +254,7 @@ func TestDiscoverAndRegister_UnreadableDir(t *testing.T) {
 		t.Skip("sh not available")
 	}
 
-	enableExternalAgents(t)
+	ctx := enableExternalAgents(t)
 
 	name := "disc-unread"
 	goodDir := setupDiscoveryDir(t, name, makeInfoJSON(name))
@@ -251,7 +262,7 @@ func TestDiscoverAndRegister_UnreadableDir(t *testing.T) {
 	// Include a non-existent directory in PATH — it should be silently skipped.
 	t.Setenv("PATH", "/nonexistent/path"+string(os.PathListSeparator)+goodDir)
 
-	DiscoverAndRegister(context.Background())
+	DiscoverAndRegister(ctx)
 
 	_, err := agent.Get(types.AgentName(name))
 	if err != nil {
@@ -503,13 +514,13 @@ func TestIsExternal_WrappedAgent(t *testing.T) {
 		t.Skip("sh not available")
 	}
 
-	enableExternalAgents(t)
+	ctx := enableExternalAgents(t)
 
 	name := "disc-isext"
 	dir := setupDiscoveryDir(t, name, makeInfoJSON(name))
 	t.Setenv("PATH", dir)
 
-	DiscoverAndRegister(context.Background())
+	DiscoverAndRegister(ctx)
 
 	ag, err := agent.Get(types.AgentName(name))
 	if err != nil {
@@ -567,7 +578,7 @@ func TestDiscoverAndRegister_SkipsInfoFailure(t *testing.T) {
 		t.Skip("sh not available")
 	}
 
-	enableExternalAgents(t)
+	ctx := enableExternalAgents(t)
 
 	name := "disc-badjson"
 	dir := t.TempDir()
@@ -580,7 +591,7 @@ func TestDiscoverAndRegister_SkipsInfoFailure(t *testing.T) {
 	}
 	t.Setenv("PATH", dir)
 
-	DiscoverAndRegister(context.Background())
+	DiscoverAndRegister(ctx)
 
 	_, err := agent.Get(types.AgentName(name))
 	if err == nil {
@@ -596,7 +607,7 @@ func TestDiscoverAndRegister_RegistersBatOnWindows(t *testing.T) {
 		t.Skip("this test only applies on Windows")
 	}
 
-	enableExternalAgents(t)
+	ctx := enableExternalAgents(t)
 
 	name := "disc-bat"
 	infoJSON := `{"protocol_version":1,"name":"` + name + `","type":"` + name + ` Agent","description":"Agent ` + name + `","is_preview":false,"protected_dirs":[],"hook_names":[],"capabilities":{}}`
@@ -609,7 +620,7 @@ func TestDiscoverAndRegister_RegistersBatOnWindows(t *testing.T) {
 	}
 	t.Setenv("PATH", dir)
 
-	DiscoverAndRegister(context.Background())
+	DiscoverAndRegister(ctx)
 
 	ag, err := agent.Get(types.AgentName(name))
 	if err != nil {

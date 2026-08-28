@@ -147,7 +147,7 @@ func (a *OpenCodeAgent) ParseHookEvent(ctx context.Context, hookName string, std
 // This method always refreshes the transcript to ensure the latest agent activity is captured.
 func (a *OpenCodeAgent) PrepareTranscript(ctx context.Context, sessionRef string) error {
 	// Validate the session ref path
-	if _, err := os.Stat(sessionRef); err != nil && !os.IsNotExist(err) {
+	if _, err := agent.StatTranscriptFile(sessionRef); err != nil && !os.IsNotExist(err) {
 		// Permission denied, broken symlink, or other non-recoverable errors
 		return fmt.Errorf("failed to stat OpenCode transcript path %s: %w", sessionRef, err)
 	}
@@ -267,7 +267,7 @@ func (a *OpenCodeAgent) fetchAndCacheExport(ctx context.Context, sessionID strin
 		return "", err
 	}
 
-	data, err := osroot.ReadFile(root, staged)
+	data, err := entiredir.ReadFile(root, staged)
 	if err != nil {
 		return "", fmt.Errorf("failed to read export file: %w", err)
 	}

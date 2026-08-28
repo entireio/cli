@@ -173,7 +173,7 @@ func readCapped(repoRoot, name string, maxLen int) (string, bool) {
 	if err != nil {
 		return "", false
 	}
-	data, err := osroot.ReadFile(root, name)
+	data, err := osroot.ReadFileNoFollow(root, name)
 	if err != nil {
 		return "", false
 	}
