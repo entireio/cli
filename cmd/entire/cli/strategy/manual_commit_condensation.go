@@ -20,7 +20,9 @@ import (
 	cpkg "github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
 	"github.com/entireio/cli/cmd/entire/cli/checkpointpolicy"
+	"github.com/entireio/cli/cmd/entire/cli/entiredir"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
+	"github.com/entireio/cli/cmd/entire/cli/osroot"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
@@ -1581,28 +1583,30 @@ func splitPromptContent(content string) []string {
 // This file is written at turn start and updated at each SaveStep, providing prompt data
 // even for mid-turn commits where the shadow branch may not have been updated.
 func readPromptsFromFilesystem(ctx context.Context, sessionID string) []string {
-	sessionDir := paths.SessionMetadataDirFromSessionID(sessionID)
-	sessionDirAbs, err := paths.AbsPath(ctx, sessionDir)
+	root, err := entiredir.OpenForRead(ctx)
 	if err != nil {
 		return nil
 	}
-	data, err := os.ReadFile(filepath.Join(sessionDirAbs, paths.PromptFileName)) //nolint:gosec // path from session ID
+	data, err := osroot.ReadFile(root, sessionPromptName(sessionID))
 	if err != nil || len(data) == 0 {
 		return nil
 	}
 	return splitPromptContent(string(data))
 }
 
+// sessionPromptName is a session's prompt.txt relative to the .entire root.
+func sessionPromptName(sessionID string) string {
+	return entiredir.MustName(paths.SessionMetadataDirFromSessionID(sessionID)) + "/" + paths.PromptFileName
+}
+
 // clearFilesystemPrompt removes the filesystem prompt.txt for a session.
 // Called after condensation so subsequent checkpoints start fresh.
 func clearFilesystemPrompt(ctx context.Context, sessionID string) {
-	sessionDir := paths.SessionMetadataDirFromSessionID(sessionID)
-	sessionDirAbs, err := paths.AbsPath(ctx, sessionDir)
+	root, err := entiredir.OpenForRead(ctx)
 	if err != nil {
 		return
 	}
-	promptPath := filepath.Join(sessionDirAbs, paths.PromptFileName)
-	_ = os.Remove(promptPath)
+	_ = osroot.Remove(root, sessionPromptName(sessionID)) //nolint:errcheck // best-effort; a leftover prompt.txt is overwritten next turn
 }
 
 func ensureCondensationAttemptID(ctx context.Context, state *SessionState) (id.CheckpointID, bool, error) {

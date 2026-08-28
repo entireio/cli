@@ -7,15 +7,16 @@ import (
 	"io"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/api"
+	"github.com/entireio/cli/cmd/entire/cli/osroot"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
 	"github.com/entireio/cli/cmd/entire/cli/stringutil"
+	"github.com/entireio/cli/cmd/entire/cli/worktreedir"
 )
 
 const (
@@ -106,7 +107,7 @@ func skip(reason string) string { return "_skipped: " + reason + "_\n" }
 func gatherRepoStatics(repoRoot string) string {
 	var b strings.Builder
 
-	if mod, ok := readCapped(filepath.Join(repoRoot, "go.mod"), 400); ok {
+	if mod, ok := readCapped(repoRoot, "go.mod", 400); ok {
 		for _, line := range strings.Split(mod, "\n") {
 			line = strings.TrimSpace(line)
 			if strings.HasPrefix(line, "module ") || strings.HasPrefix(line, "go ") {
@@ -115,7 +116,7 @@ func gatherRepoStatics(repoRoot string) string {
 		}
 	}
 
-	if entries, err := os.ReadDir(repoRoot); err == nil {
+	if entries, err := listWorktreeTopLevel(repoRoot); err == nil {
 		var dirs []string
 		for _, e := range entries {
 			if e.IsDir() && !strings.HasPrefix(e.Name(), ".") {
@@ -136,7 +137,7 @@ func gatherRepoStatics(repoRoot string) string {
 		{"AGENTS.md", tuneDocCap},
 		{"README.md", tuneReadmeCap},
 	} {
-		text, ok := readCapped(filepath.Join(repoRoot, doc.name), doc.cap)
+		text, ok := readCapped(repoRoot, doc.name, doc.cap)
 		if !ok || strings.TrimSpace(text) == "" {
 			continue
 		}
@@ -151,10 +152,28 @@ func gatherRepoStatics(repoRoot string) string {
 	return b.String()
 }
 
-// readCapped reads a file and truncates it to maxLen characters, appending a
-// truncation marker when cut. Returns ok=false when the file can't be read.
-func readCapped(path string, maxLen int) (string, bool) {
-	data, err := os.ReadFile(path) //nolint:gosec // caller passes repo-root-relative paths
+// listWorktreeTopLevel lists the worktree root's entries through its shared root.
+func listWorktreeTopLevel(repoRoot string) ([]os.DirEntry, error) {
+	root, err := worktreedir.OpenAt(repoRoot)
+	if err != nil {
+		return nil, fmt.Errorf("open worktree root: %w", err)
+	}
+	entries, err := osroot.ReadDir(root, ".")
+	if err != nil {
+		return nil, fmt.Errorf("read worktree root: %w", err)
+	}
+	return entries, nil
+}
+
+// readCapped reads name from the worktree at repoRoot and truncates it to maxLen
+// characters, appending a truncation marker when cut. Returns ok=false when the
+// file can't be read.
+func readCapped(repoRoot, name string, maxLen int) (string, bool) {
+	root, err := worktreedir.OpenAt(repoRoot)
+	if err != nil {
+		return "", false
+	}
+	data, err := osroot.ReadFile(root, name)
 	if err != nil {
 		return "", false
 	}

@@ -7,7 +7,6 @@ import (
 	"io"
 	"os"
 	"path"
-	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -747,7 +746,16 @@ func (s *ManualCommitStrategy) RestoreLogsOnly(ctx context.Context, w, errW io.W
 			fmt.Fprintf(errW, "  Warning: failed to get session dir for session %d: %v\n", i, dirErr)
 			continue
 		}
-		sessionFile := sessionAgent.ResolveSessionFile(sessionAgentDir, sessionID)
+		restoreStore, storeErr := agent.OpenSessionStoreAt(sessionAgent, sessionAgentDir)
+		if storeErr != nil {
+			fmt.Fprintf(errW, "  Warning: failed to open session store for session %d: %v\n", i, storeErr)
+			continue
+		}
+		_, sessionFile, resolveErr := restoreStore.SessionFile(sessionID)
+		if resolveErr != nil {
+			fmt.Fprintf(errW, "  Warning: session %d (%s) resolves outside its session directory, skipping\n", i, sessionID)
+			continue
+		}
 		if resolver, ok := sessionAgent.(agent.RestoredSessionPathResolver); ok {
 			resolvedFile, resolveErr := resolver.ResolveRestoredSessionFile(sessionAgentDir, sessionID, content.Transcript)
 			if resolveErr != nil {
@@ -793,12 +801,10 @@ func (s *ManualCommitStrategy) RestoreLogsOnly(ctx context.Context, w, errW io.W
 			fmt.Fprintf(w, "Writing transcript to: %s\n", sessionFile)
 		}
 
-		// Ensure parent directory exists (session file may be in a different dir than sessionAgentDir)
-		if mkdirErr := os.MkdirAll(filepath.Dir(sessionFile), 0o750); mkdirErr != nil {
-			fmt.Fprintf(errW, "    Warning: failed to create directory: %v\n", mkdirErr)
-			continue
-		}
-
+		// No MkdirAll here: WriteSession routes through agent.WriteSessionFile,
+		// which creates the parent as part of the write. That matters because a
+		// RestoredSessionPathResolver may have moved sessionFile to a sibling
+		// directory that does not exist yet.
 		agentSession := &agent.AgentSession{
 			SessionID:  sessionID,
 			AgentName:  sessionAgent.Name(),
@@ -982,7 +988,14 @@ func (s *ManualCommitStrategy) classifySessionsForRestore(ctx context.Context, r
 		if dirErr != nil {
 			continue
 		}
-		localPath := sessionAgent.ResolveSessionFile(sessionAgentDir, sessionID)
+		store, storeErr := agent.OpenSessionStoreAt(sessionAgent, sessionAgentDir)
+		if storeErr != nil {
+			continue
+		}
+		localName, localPath, resolveErr := store.SessionFile(sessionID)
+		if resolveErr != nil {
+			continue
+		}
 
 		localTime := paths.GetLastTimestampFromFile(localPath)
 		checkpointTime := paths.GetLastTimestampFromBytes(content.Transcript)
@@ -990,10 +1003,8 @@ func (s *ManualCommitStrategy) classifySessionsForRestore(ctx context.Context, r
 		// ClassifyTimestamps reports StatusNew when the local file has no parseable
 		// timestamp — but a present-but-untimestamped log still exists and must not
 		// be silently overwritten. Only a truly-absent file counts as new.
-		if status == StatusNew {
-			if _, statErr := os.Stat(localPath); statErr == nil {
-				status = StatusUnchanged
-			}
+		if status == StatusNew && store.Exists(localName) {
+			status = StatusUnchanged
 		}
 
 		sessions = append(sessions, SessionRestoreInfo{

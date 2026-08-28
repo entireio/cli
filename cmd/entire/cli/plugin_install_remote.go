@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/entireio/cli/cmd/entire/cli/osroot"
 	"golang.org/x/mod/semver"
 )
 
@@ -167,7 +168,15 @@ func installRepoAtTag(ctx context.Context, repoURL, expectedName, tag string, op
 	if err != nil {
 		return nil, fmt.Errorf("create staging dir: %w", err)
 	}
-	defer os.RemoveAll(staging)
+	// Best-effort cleanup of our own temp dir.
+	defer func() { _ = os.RemoveAll(staging) }()
+	// The staging directory gets a root too. It holds a downloaded archive and
+	// whatever the extractor pulls out of it, and it is the one place a future
+	// change that honours archive entry names would write.
+	stagingRoot, err := osroot.Shared(staging)
+	if err != nil {
+		return nil, fmt.Errorf("open staging dir: %w", err)
+	}
 
 	asset, err := downloadPluginAsset(ctx, meta, repoURL, name, tag, staging, opts.AllowUnverified)
 	if err != nil {
@@ -175,8 +184,8 @@ func installRepoAtTag(ctx context.Context, repoURL, expectedName, tag string, op
 	}
 
 	binBase := pluginBinaryName(name)
-	stagedBin := filepath.Join(staging, "extracted-"+binBase)
-	if err := extractPluginBinary(asset.Path, name, stagedBin); err != nil {
+	stagedName := "extracted-" + binBase
+	if err := extractPluginBinary(asset.Path, name, stagingRoot, stagedName); err != nil {
 		return nil, err
 	}
 
@@ -184,9 +193,18 @@ func installRepoAtTag(ctx context.Context, repoURL, expectedName, tag string, op
 	if err != nil {
 		return nil, err
 	}
-	sweepOldBinaries(pkgDir)
+	pkgName, err := pluginPkgName(name)
+	if err != nil {
+		return nil, err
+	}
+	pluginTreeRoot, err := pluginRoot(true)
+	if err != nil {
+		return nil, err
+	}
+	sweepOldBinaries(pluginTreeRoot, pkgName)
+	pkgBinName := pkgName + "/" + binBase
 	pkgBin := filepath.Join(pkgDir, binBase)
-	if err := replaceBinary(stagedBin, pkgBin); err != nil {
+	if err := replaceBinary(stagingRoot, stagedName, pluginTreeRoot, pkgBinName); err != nil {
 		return nil, fmt.Errorf("place plugin binary: %w", err)
 	}
 
@@ -297,51 +315,61 @@ func UpgradeInstalledPlugin(ctx context.Context, name string) (*UpgradeOutcome, 
 // move the old binary aside to a .old-<rand> file and retry; leftovers are
 // swept on the next install. os.Rename fails across filesystems (staging is
 // in the system temp dir), so a copy fallback covers that case.
-func replaceBinary(src, dest string) error {
+// srcName is a name inside srcRoot (the staging dir); destName a name inside
+// destRoot (the managed tree). The two are separate roots because staging is in
+// the system temp dir, which is also why the cross-device copy fallback exists.
+func replaceBinary(srcRoot *os.Root, srcName string, destRoot *os.Root, destName string) error {
+	// os.Rename across two roots has no root-scoped form, so the cross-root move
+	// uses absolute paths built from each root's own name. Both halves are still
+	// resolved through their roots for every other operation, and the copy
+	// fallback below — the path that actually runs whenever /tmp is a different
+	// filesystem — is fully rooted on both sides.
+	src := filepath.Join(srcRoot.Name(), filepath.FromSlash(srcName))
+	dest := filepath.Join(destRoot.Name(), filepath.FromSlash(destName))
 	err := os.Rename(src, dest)
 	if err == nil {
 		return nil
 	}
 	if runtime.GOOS == windowsGOOS {
-		if asideErr := os.Rename(dest, oldBinaryAsidePath(dest)); asideErr == nil {
+		if asideErr := destRoot.Rename(destName, oldBinaryAsideName(destName)); asideErr == nil {
 			if err = os.Rename(src, dest); err == nil {
 				return nil
 			}
 		}
 	}
 	// Cross-device rename: copy + fsync-free write, then remove src.
-	in, openErr := os.Open(src) //nolint:gosec // staging file we created
+	in, openErr := srcRoot.Open(srcName)
 	if openErr != nil {
 		return errors.Join(err, openErr)
 	}
 	defer in.Close()
-	if writeErr := writeExecutable(in, dest); writeErr != nil {
+	if writeErr := writeExecutable(destRoot, destName, in); writeErr != nil {
 		return errors.Join(err, writeErr)
 	}
-	_ = os.Remove(src)
+	_ = srcRoot.Remove(srcName) //nolint:errcheck // best-effort cleanup of our own staging file
 	return nil
 }
 
-// oldBinaryAsidePath returns a unique .old- sibling path for the
-// rename-aside trick. Random suffix so concurrent upgrades can't collide.
-func oldBinaryAsidePath(dest string) string {
+// oldBinaryAsideName returns a unique .old- sibling name for the rename-aside
+// trick. Random suffix so concurrent upgrades can't collide.
+func oldBinaryAsideName(destName string) string {
 	var b [4]byte
 	if _, err := rand.Read(b[:]); err != nil {
-		return dest + ".old-fallback"
+		return destName + ".old-fallback"
 	}
-	return dest + ".old-" + hex.EncodeToString(b[:])
+	return destName + ".old-" + hex.EncodeToString(b[:])
 }
 
 // sweepOldBinaries best-effort removes .old-* leftovers from the Windows
 // rename-aside fallback. Failures are ignored — the files are inert.
-func sweepOldBinaries(pkgDir string) {
-	entries, err := os.ReadDir(pkgDir)
+func sweepOldBinaries(root *os.Root, pkgName string) {
+	entries, err := osroot.ReadDir(root, pkgName)
 	if err != nil {
 		return
 	}
 	for _, e := range entries {
 		if strings.Contains(e.Name(), ".old-") {
-			_ = os.Remove(filepath.Join(pkgDir, e.Name()))
+			_ = root.Remove(pkgName + "/" + e.Name()) //nolint:errcheck // inert leftovers; swept again next install
 		}
 	}
 }

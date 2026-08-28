@@ -454,17 +454,13 @@ func runEdit(ctx context.Context, cmd *cobra.Command, deps Deps) error {
 // reading the local file first, mutating, and writing it back. The
 // committed .entire/settings.json is never touched.
 func saveInvestigateConfig(ctx context.Context, cfg *settings.InvestigateConfig) error {
-	localPath, err := paths.AbsPath(ctx, settings.EntireSettingsLocalFile)
-	if err != nil {
-		localPath = settings.EntireSettingsLocalFile
-	}
-
 	local := &settings.EntireSettings{}
-	data, readErr := os.ReadFile(localPath) //nolint:gosec // path is from AbsPath
-	if readErr != nil && !os.IsNotExist(readErr) {
+	data, readErr := settings.LoadLocalBytes(ctx)
+	if readErr != nil {
 		return fmt.Errorf("read local settings: %w", readErr)
 	}
 	if len(data) > 0 {
+		var err error
 		local, err = settings.LoadFromBytes(data)
 		if err != nil {
 			return fmt.Errorf("parse local settings: %w", err)

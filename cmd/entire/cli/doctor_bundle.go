@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path"
@@ -14,8 +15,10 @@ import (
 	"strings"
 	"time"
 
+	"github.com/entireio/cli/cmd/entire/cli/entiredir"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
+	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/cmd/entire/cli/versioninfo"
 	"github.com/entireio/cli/redact"
 	"github.com/spf13/cobra"
@@ -102,15 +105,26 @@ func writeDoctorBundle(ctx context.Context, repoRoot, outPath string, raw bool) 
 		}
 	}()
 
-	logsDir := filepath.Join(repoRoot, logging.LogsDir)
-	if err := addDirToZip(zw, logsDir, "logs", raw); err != nil {
-		return err
+	// Everything the bundle collects from .entire is read through the shared
+	// root, so a symlink under .entire cannot pull an arbitrary file into a
+	// bundle the user is about to send somewhere. A repo with no .entire
+	// contributes no log or settings entries and is not an error.
+	entireRoot, err := entiredir.OpenAtForRead(repoRoot)
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+		entireRoot = nil
+	case err != nil:
+		return fmt.Errorf("open %s: %w", paths.EntireDir, err)
 	}
-
-	for _, name := range []string{"settings.json", "settings.local.json"} {
-		src := filepath.Join(repoRoot, ".entire", name)
-		if err := addFileToZip(zw, src, path.Join("settings", name), raw); err != nil {
+	if entireRoot != nil {
+		if err := addDirToZip(zw, entireRoot, logging.LogsName, "logs", raw); err != nil {
 			return err
+		}
+
+		for _, name := range []string{settings.SettingsName, settings.SettingsLocalName} {
+			if err := addFileToZip(zw, entireRoot, name, path.Join("settings", name), raw); err != nil {
+				return err
+			}
 		}
 	}
 
@@ -172,10 +186,10 @@ func versionInfoString() string {
 	return sb.String()
 }
 
-func addDirToZip(zw *zip.Writer, srcDir, archivePrefix string, raw bool) error {
-	info, err := os.Stat(srcDir)
+func addDirToZip(zw *zip.Writer, root *os.Root, srcDir, archivePrefix string, raw bool) error {
+	info, err := root.Stat(srcDir)
 	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
+		if errors.Is(err, fs.ErrNotExist) {
 			return nil
 		}
 		return fmt.Errorf("stat %s: %w", srcDir, err)
@@ -183,18 +197,18 @@ func addDirToZip(zw *zip.Writer, srcDir, archivePrefix string, raw bool) error {
 	if !info.IsDir() {
 		return nil
 	}
-	walkErr := filepath.Walk(srcDir, func(path string, fi os.FileInfo, werr error) error {
+	walkErr := fs.WalkDir(root.FS(), srcDir, func(name string, d fs.DirEntry, werr error) error {
 		if werr != nil {
 			return werr
 		}
-		if fi.IsDir() {
+		if d.IsDir() {
 			return nil
 		}
-		rel, err := filepath.Rel(srcDir, path)
+		rel, err := filepath.Rel(srcDir, name)
 		if err != nil {
 			return fmt.Errorf("rel: %w", err)
 		}
-		return addFileToZip(zw, path, zipEntryName(archivePrefix, rel), raw)
+		return addFileToZip(zw, root, name, zipEntryName(archivePrefix, rel), raw)
 	})
 	if walkErr != nil {
 		return fmt.Errorf("walk %s: %w", srcDir, walkErr)
@@ -213,13 +227,19 @@ func zipEntryName(parts ...string) string {
 	return path.Join(cleanParts...)
 }
 
-func addFileToZip(zw *zip.Writer, src, archivePath string, raw bool) error {
-	f, err := os.Open(src) //nolint:gosec // path comes from repo-internal walk
+func addFileToZip(zw *zip.Writer, root *os.Root, src, archivePath string, raw bool) error {
+	f, err := root.Open(src)
 	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
+		if errors.Is(err, fs.ErrNotExist) {
 			return nil
 		}
-		return fmt.Errorf("open %s: %w", src, err)
+		// A bundle that aborts is worse than a bundle with a gap: this is the
+		// command a user runs when something is already wrong. The most likely
+		// cause here is a symlink under .entire pointing outside it, which the
+		// root refuses to follow — before that refusal existed the target was
+		// silently bundled instead, so record the reason rather than either
+		// including it or failing.
+		return addStringToZip(zw, archivePath, fmt.Sprintf("[error: open %s: %v]\n", src, err), raw)
 	}
 	defer f.Close()
 

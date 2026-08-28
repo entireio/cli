@@ -1,9 +1,13 @@
 package jsonutil
 
 import (
+	"crypto/rand"
+	"encoding/hex"
+	"errors"
 	"fmt"
 	"io/fs"
 	"os"
+	"path"
 	"path/filepath"
 )
 
@@ -69,4 +73,81 @@ func WriteFileAtomic(filePath string, data []byte, perm fs.FileMode) error {
 		_ = d.Close()
 	}
 	return nil
+}
+
+// WriteFileAtomicIn is WriteFileAtomic confined to root: name is resolved
+// relative to root by the kernel, so neither the temp file nor the rename
+// target can escape it. It is the form every .entire writer uses, because the
+// names under .entire are built from agent-supplied session and tool-use IDs.
+//
+// The durability sequence is identical to WriteFileAtomic — write, fsync,
+// close, chmod, rename, best-effort parent-directory fsync — and the same
+// reasoning applies to each step. The only difference is that os.Root has no
+// CreateTemp, so the unique temp name is drawn here and created with O_EXCL:
+// a collision retries rather than clobbering a concurrent writer's temp file.
+func WriteFileAtomicIn(root *os.Root, name string, data []byte, perm fs.FileMode) error {
+	dir := path.Dir(name)
+	tmp, tmpName, err := CreateTempIn(root, name)
+	if err != nil {
+		return fmt.Errorf("create temp for %s: %w", name, err)
+	}
+	removeTmp := true
+	defer func() {
+		if removeTmp {
+			_ = root.Remove(tmpName) //nolint:errcheck // best-effort cleanup of a temp file the rename did not consume
+		}
+	}()
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("write temp for %s: %w", name, err)
+	}
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("sync temp for %s: %w", name, err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("close temp for %s: %w", name, err)
+	}
+	if err := root.Chmod(tmpName, perm); err != nil {
+		return fmt.Errorf("chmod temp for %s: %w", name, err)
+	}
+	if err := root.Rename(tmpName, name); err != nil {
+		return fmt.Errorf("rename temp to %s: %w", name, err)
+	}
+	removeTmp = false
+	// Best-effort, for the reasons WriteFileAtomic gives.
+	if d, err := root.Open(dir); err == nil {
+		_ = d.Sync() //nolint:errcheck // best-effort directory fsync; failure does not roll back the rename
+		_ = d.Close()
+	}
+	return nil
+}
+
+// tempNameAttempts bounds the O_EXCL retry loop in createTempIn.
+const tempNameAttempts = 100
+
+// CreateTempIn creates a uniquely named, exclusively created temp file next to
+// name inside root, and returns it with its root-relative name. It is the
+// os.Root counterpart to os.CreateTemp, which has no Root form.
+//
+// O_EXCL rather than a fixed "<name>.tmp": concurrent hook processes write the
+// same session and checkpoint files, and a shared temp path corrupts whichever
+// write lands second.
+func CreateTempIn(root *os.Root, name string) (*os.File, string, error) {
+	dir, base := path.Split(name)
+	var buf [8]byte
+	for range tempNameAttempts {
+		if _, err := rand.Read(buf[:]); err != nil {
+			return nil, "", fmt.Errorf("read random suffix: %w", err)
+		}
+		candidate := dir + base + "." + hex.EncodeToString(buf[:]) + ".tmp"
+		f, err := root.OpenFile(candidate, os.O_RDWR|os.O_CREATE|os.O_EXCL, 0o600)
+		if err == nil {
+			return f, candidate, nil
+		}
+		if !errors.Is(err, fs.ErrExist) {
+			return nil, "", err //nolint:wrapcheck // caller names the file; the os error carries op and path
+		}
+	}
+	return nil, "", fmt.Errorf("exhausted %d temp name attempts for %s", tempNameAttempts, name)
 }

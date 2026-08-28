@@ -234,3 +234,200 @@ func TestSymlinkTraversal_WriteBlocked(t *testing.T) {
 	_, err = os.Stat(filepath.Join(outsideDir, "evil.txt"))
 	require.ErrorIs(t, err, os.ErrNotExist, "file should not be created outside root")
 }
+
+func TestReadDir_ListsSortedEntries(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "tmp", "nested"), 0o750); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	for _, name := range []string{"c.json", "a.json", "b.json"} {
+		if err := os.WriteFile(filepath.Join(dir, "tmp", name), []byte("{}"), 0o600); err != nil {
+			t.Fatalf("write %s: %v", name, err)
+		}
+	}
+
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		t.Fatalf("os.OpenRoot: %v", err)
+	}
+	defer root.Close()
+
+	entries, err := osroot.ReadDir(root, "tmp")
+	if err != nil {
+		t.Fatalf("ReadDir: %v", err)
+	}
+
+	var got []string
+	for _, e := range entries {
+		got = append(got, e.Name())
+	}
+	want := []string{"a.json", "b.json", "c.json", "nested"}
+	if len(got) != len(want) {
+		t.Fatalf("entries = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("entries = %v, want %v", got, want)
+		}
+	}
+}
+
+func TestReadDir_MissingDirIsNotExist(t *testing.T) {
+	t.Parallel()
+
+	root, err := os.OpenRoot(t.TempDir())
+	if err != nil {
+		t.Fatalf("os.OpenRoot: %v", err)
+	}
+	defer root.Close()
+
+	if _, err := osroot.ReadDir(root, "tmp"); !os.IsNotExist(err) {
+		t.Errorf("ReadDir on a missing directory = %v, want a not-exist error", err)
+	}
+}
+
+func TestReadDir_RejectsEscapingName(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "inner"), 0o750); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	root, err := os.OpenRoot(filepath.Join(dir, "inner"))
+	if err != nil {
+		t.Fatalf("os.OpenRoot: %v", err)
+	}
+	defer root.Close()
+
+	if _, err := osroot.ReadDir(root, ".."); err == nil {
+		t.Error("expected an escaping name to be rejected")
+	}
+}
+
+func TestMkdirAllNoSymlink_CreatesNestedDirs(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	root, err := os.OpenRoot(dir)
+	require.NoError(t, err)
+	defer root.Close()
+
+	require.NoError(t, osroot.MkdirAllNoSymlink(root, "metadata/session-1/tasks", 0o750))
+
+	info, err := os.Stat(filepath.Join(dir, "metadata", "session-1", "tasks"))
+	require.NoError(t, err)
+	assert.True(t, info.IsDir())
+}
+
+func TestMkdirAllNoSymlink_IsIdempotent(t *testing.T) {
+	t.Parallel()
+
+	root, err := os.OpenRoot(t.TempDir())
+	require.NoError(t, err)
+	defer root.Close()
+
+	require.NoError(t, osroot.MkdirAllNoSymlink(root, "tmp", 0o750))
+	require.NoError(t, osroot.MkdirAllNoSymlink(root, "tmp", 0o750))
+}
+
+// The point of the function: a symlink already sitting at the path is refused by
+// name rather than silently written through.
+func TestMkdirAllNoSymlink_RejectsSymlinkedLeaf(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	elsewhere := t.TempDir()
+	if err := os.Symlink(elsewhere, filepath.Join(dir, "logs")); err != nil {
+		t.Skipf("symlink not supported: %v", err)
+	}
+	root, err := os.OpenRoot(dir)
+	require.NoError(t, err)
+	defer root.Close()
+
+	err = osroot.MkdirAllNoSymlink(root, "logs", 0o750)
+	require.ErrorIs(t, err, osroot.ErrSymlinkedPath)
+	assert.Contains(t, err.Error(), "logs")
+}
+
+// A symlinked ancestor is the more dangerous case: without the check, every file
+// written under it lands somewhere the caller never named.
+func TestMkdirAllNoSymlink_RejectsSymlinkedParent(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	elsewhere := t.TempDir()
+	if err := os.Symlink(elsewhere, filepath.Join(dir, "metadata")); err != nil {
+		t.Skipf("symlink not supported: %v", err)
+	}
+	root, err := os.OpenRoot(dir)
+	require.NoError(t, err)
+	defer root.Close()
+
+	err = osroot.MkdirAllNoSymlink(root, "metadata/session-1", 0o750)
+	require.ErrorIs(t, err, osroot.ErrSymlinkedPath)
+
+	// Nothing was created at the target: the refusal happens before any Mkdir.
+	entries, readErr := os.ReadDir(elsewhere)
+	require.NoError(t, readErr)
+	assert.Empty(t, entries, "a refused create must not have written through the link")
+}
+
+// A symlink that stays inside the root is refused too. os.Root would follow it
+// happily, so the kernel's containment is not the property being tested here.
+func TestMkdirAllNoSymlink_RejectsSymlinkThatStaysInsideRoot(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, "real"), 0o750))
+	if err := os.Symlink(filepath.Join(dir, "real"), filepath.Join(dir, "tmp")); err != nil {
+		t.Skipf("symlink not supported: %v", err)
+	}
+	root, err := os.OpenRoot(dir)
+	require.NoError(t, err)
+	defer root.Close()
+
+	require.ErrorIs(t, osroot.MkdirAllNoSymlink(root, "tmp", 0o750), osroot.ErrSymlinkedPath)
+}
+
+func TestSymlinkPaths_FindsNestedSymlinksWithoutFollowing(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	elsewhere := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(elsewhere, "secret.txt"), []byte("x"), 0o600))
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, "metadata", "s1"), 0o750))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "settings.json"), []byte("{}"), 0o600))
+	if err := os.Symlink(elsewhere, filepath.Join(dir, "logs")); err != nil {
+		t.Skipf("symlink not supported: %v", err)
+	}
+	require.NoError(t, os.Symlink(elsewhere, filepath.Join(dir, "metadata", "s1", "assets")))
+
+	root, err := os.OpenRoot(dir)
+	require.NoError(t, err)
+	defer root.Close()
+
+	got, err := osroot.SymlinkPaths(root, ".")
+	require.NoError(t, err)
+	assert.ElementsMatch(t, []string{"logs", "metadata/s1/assets"}, got,
+		"both the top-level and the nested symlink are reported, and neither is descended into")
+}
+
+func TestSymlinkPaths_CleanTreeAndMissingDir(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, "logs"), 0o750))
+	root, err := os.OpenRoot(dir)
+	require.NoError(t, err)
+	defer root.Close()
+
+	got, err := osroot.SymlinkPaths(root, ".")
+	require.NoError(t, err)
+	assert.Empty(t, got)
+
+	got, err = osroot.SymlinkPaths(root, "absent")
+	require.NoError(t, err, "nothing there is nothing wrong")
+	assert.Empty(t, got)
+}

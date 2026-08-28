@@ -16,7 +16,9 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent/claudecode"
 	"github.com/entireio/cli/cmd/entire/cli/agent/codex"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
+	"github.com/entireio/cli/cmd/entire/cli/entiredir"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
+	"github.com/entireio/cli/cmd/entire/cli/osroot"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
@@ -693,6 +695,104 @@ func TestCheckLogSink_SilentWhenWritableOrAbsent(t *testing.T) {
 		assert.Empty(t, stdout.String(),
 			"a repo where Entire was never set up has no logger and nothing to report")
 	})
+}
+
+// A symlinked directory under .entire stops that whole subtree being written —
+// no session metadata, or no logs to explain why — and nothing else in the CLI
+// says so, because the refusal happens inside a hook whose output nobody reads.
+func TestCheckEntireDirSymlinks_ReportsSymlinkedSubdirectory(t *testing.T) {
+	dir := setupGitRepoForPhaseTest(t)
+	t.Chdir(dir)
+	paths.ClearWorktreeRootCache()
+	t.Cleanup(paths.ClearWorktreeRootCache)
+	t.Cleanup(entiredir.Reset)
+
+	entireDir := filepath.Join(dir, paths.EntireDir)
+	require.NoError(t, os.MkdirAll(entireDir, 0o750))
+	elsewhere := t.TempDir()
+	if err := os.Symlink(elsewhere, filepath.Join(entireDir, "logs")); err != nil {
+		t.Skipf("symlink not supported: %v", err)
+	}
+
+	cmd, stdout := newTestCmd(t)
+	checkEntireDirSymlinks(cmd)
+
+	output := stdout.String()
+	assert.Contains(t, output, "SYMLINKS PRESENT")
+	assert.Contains(t, output, ".entire/logs", "the report must name the path to fix")
+	assert.Contains(t, output, elsewhere, "and where it currently points")
+}
+
+// Nested links matter as much as top-level ones: a symlinked session directory
+// silently diverts one session's metadata while every other session looks fine.
+func TestCheckEntireDirSymlinks_ReportsNestedSymlink(t *testing.T) {
+	dir := setupGitRepoForPhaseTest(t)
+	t.Chdir(dir)
+	paths.ClearWorktreeRootCache()
+	t.Cleanup(paths.ClearWorktreeRootCache)
+	t.Cleanup(entiredir.Reset)
+
+	sessionDir := filepath.Join(dir, paths.EntireMetadataDir, "2026-01-01-abc")
+	require.NoError(t, os.MkdirAll(sessionDir, 0o750))
+	if err := os.Symlink(t.TempDir(), filepath.Join(sessionDir, "assets")); err != nil {
+		t.Skipf("symlink not supported: %v", err)
+	}
+
+	cmd, stdout := newTestCmd(t)
+	checkEntireDirSymlinks(cmd)
+
+	assert.Contains(t, stdout.String(), "metadata/2026-01-01-abc/assets")
+}
+
+// Silent on the happy path and on a repo that never created .entire, or the
+// check trains users to skip doctor's output.
+func TestCheckEntireDirSymlinks_SilentWhenClean(t *testing.T) {
+	dir := setupGitRepoForPhaseTest(t)
+	t.Chdir(dir)
+	paths.ClearWorktreeRootCache()
+	t.Cleanup(paths.ClearWorktreeRootCache)
+	t.Cleanup(entiredir.Reset)
+
+	t.Run("no .entire at all", func(t *testing.T) {
+		cmd, stdout := newTestCmd(t)
+		checkEntireDirSymlinks(cmd)
+		assert.Empty(t, stdout.String())
+	})
+
+	t.Run("real directories only", func(t *testing.T) {
+		require.NoError(t, os.MkdirAll(filepath.Join(dir, paths.EntireTmpDir), 0o750))
+		require.NoError(t, os.MkdirAll(filepath.Join(dir, paths.EntireMetadataDir), 0o750))
+		require.NoError(t, os.WriteFile(filepath.Join(dir, paths.EntireDir, "settings.json"), []byte("{}"), 0o600))
+
+		cmd, stdout := newTestCmd(t)
+		checkEntireDirSymlinks(cmd)
+		assert.Empty(t, stdout.String())
+	})
+}
+
+// The capture path must actually refuse, not just be reported on: a symlinked
+// .entire/tmp means the pre-prompt state write fails loudly instead of landing
+// outside the repository.
+func TestCapturePrePromptState_RefusesSymlinkedTmpDir(t *testing.T) {
+	dir := setupGitRepoForPhaseTest(t)
+	t.Chdir(dir)
+	paths.ClearWorktreeRootCache()
+	t.Cleanup(paths.ClearWorktreeRootCache)
+	t.Cleanup(entiredir.Reset)
+
+	entireDir := filepath.Join(dir, paths.EntireDir)
+	require.NoError(t, os.MkdirAll(entireDir, 0o750))
+	elsewhere := t.TempDir()
+	if err := os.Symlink(elsewhere, filepath.Join(entireDir, "tmp")); err != nil {
+		t.Skipf("symlink not supported: %v", err)
+	}
+
+	err := CapturePrePromptState(context.Background(), nil, "2026-01-01-sess", "")
+	require.ErrorIs(t, err, osroot.ErrSymlinkedPath)
+
+	entries, readErr := os.ReadDir(elsewhere)
+	require.NoError(t, readErr)
+	assert.Empty(t, entries, "nothing may be written through the link")
 }
 
 // TestCheckCodexHookTrust_SilentWhenCodexNotInstalled — `entire doctor`

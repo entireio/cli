@@ -658,15 +658,14 @@ func seedSessionWithShadowBranch(t *testing.T, s *ManualCommitStrategy, dir, ses
 	paths.ClearWorktreeRootCache()
 
 	if err := s.SaveStep(ctx, StepContext{
-		SessionID:      sessionID,
-		ModifiedFiles:  modifiedFiles,
-		NewFiles:       []string{},
-		DeletedFiles:   []string{},
-		MetadataDir:    metadataDir,
-		MetadataDirAbs: metadataDirAbs,
-		CommitMessage:  "Checkpoint 1",
-		AuthorName:     "Perf",
-		AuthorEmail:    "perf@test.com",
+		SessionID:     sessionID,
+		ModifiedFiles: modifiedFiles,
+		NewFiles:      []string{},
+		DeletedFiles:  []string{},
+		MetadataDir:   metadataDir,
+		CommitMessage: "Checkpoint 1",
+		AuthorName:    "Perf",
+		AuthorEmail:   "perf@test.com",
 	}); err != nil {
 		t.Fatalf("SaveStep %s: %v", sessionID, err)
 	}

@@ -24,6 +24,8 @@ import (
 	"slices"
 	"time"
 
+	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
+	"github.com/entireio/cli/cmd/entire/cli/osroot"
 	"github.com/gofrs/flock"
 
 	"github.com/entireio/cli/internal/entireclient/userdirs"
@@ -231,10 +233,28 @@ func lockFile(path string) (func(), error) {
 	}, nil
 }
 
+// configRoot returns the root over the directory holding path, and path's name
+// inside it. Anchored on the file's own directory rather than on
+// userdirs.Config() so the explicit-configDir callers (tests, and the
+// ENTIRE_CONFIG_DIR override) go through the same code path.
+func configRoot(path string) (*os.Root, string, error) {
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return nil, "", fmt.Errorf("resolve contexts path: %w", err)
+	}
+	root, err := osroot.Shared(filepath.Dir(abs))
+	if err != nil {
+		return nil, "", fmt.Errorf("open config dir: %w", err)
+	}
+	return root, filepath.Base(abs), nil
+}
+
 func readNoLock(path string) (*File, error) {
-	// #nosec G304 -- path comes from ENTIRE_CONFIG_DIR or the user's home,
-	// the same trust boundary credentials.go runs under.
-	data, err := os.ReadFile(path)
+	root, name, err := configRoot(path)
+	if err != nil {
+		return nil, err
+	}
+	data, err := osroot.ReadFile(root, name)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return &File{}, nil
@@ -256,15 +276,18 @@ func writeNoLock(path string, f *File) error {
 	if err != nil {
 		return fmt.Errorf("marshal contexts: %w", err)
 	}
-	tmp, err := os.CreateTemp(filepath.Dir(path), ".contexts.json.tmp.*")
+	root, name, err := configRoot(path)
+	if err != nil {
+		return err
+	}
+	tmp, tmpName, err := jsonutil.CreateTempIn(root, name)
 	if err != nil {
 		return fmt.Errorf("create temp contexts file: %w", err)
 	}
-	tmpPath := tmp.Name()
 	cleanup := func() {
 		if tmp != nil {
 			_ = tmp.Close()
-			_ = os.Remove(tmpPath)
+			_ = root.Remove(tmpName) //nolint:errcheck // best-effort cleanup; a successful rename already consumed it
 		}
 	}
 	defer cleanup()
@@ -277,10 +300,10 @@ func writeNoLock(path string, f *File) error {
 	if err := tmp.Close(); err != nil {
 		return fmt.Errorf("close temp contexts file: %w", err)
 	}
-	if err := os.Chmod(tmpPath, 0600); err != nil {
+	if err := root.Chmod(tmpName, 0600); err != nil {
 		return fmt.Errorf("chmod temp contexts file: %w", err)
 	}
-	if err := os.Rename(tmpPath, path); err != nil {
+	if err := root.Rename(tmpName, name); err != nil {
 		return fmt.Errorf("rename temp contexts file: %w", err)
 	}
 	tmp = nil

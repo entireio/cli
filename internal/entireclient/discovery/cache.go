@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/entireio/cli/cmd/entire/cli/osroot"
 	"github.com/gofrs/flock"
 )
 
@@ -141,10 +142,44 @@ func writeCacheFile[T any](path string, v T) error {
 	return writeCacheBytesAtomic(path, data)
 }
 
+// cacheRoot returns the root over the directory holding path, and path's name
+// inside it. Anchored on the file's own directory so the explicit-cacheDir
+// callers (tests, XDG_CACHE_HOME) take the same code path as the default.
+//
+// Cache file names are fixed today (nodes.json, cluster_cores.json,
+// api_discovery.json), but the entries inside them are keyed by cluster slug and
+// jurisdiction — the kind of value that becomes a filename the moment someone
+// shards the cache per cluster. The root means that change cannot reach outside
+// the cache directory.
+func cacheRoot(path string) (*os.Root, string, error) {
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return nil, "", fmt.Errorf("resolve cache path: %w", err)
+	}
+	root, err := osroot.Shared(filepath.Dir(abs))
+	if err != nil {
+		if os.IsNotExist(err) {
+			// Unwrapped so readCacheBytes can classify a cold cache.
+			return nil, "", err //nolint:wrapcheck // see comment
+		}
+		return nil, "", fmt.Errorf("open cache dir: %w", err)
+	}
+	return root, filepath.Base(abs), nil
+}
+
 // readCacheBytes returns the file contents and whether the file exists. A
 // missing file is (nil, false, nil); other read errors propagate.
 func readCacheBytes(path string) ([]byte, bool, error) {
-	data, err := os.ReadFile(path) // #nosec G304
+	root, name, err := cacheRoot(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			// No cache directory means no cache, the same as no file. Callers
+			// treat both as a cold cache and refetch.
+			return nil, false, nil
+		}
+		return nil, false, err
+	}
+	data, err := osroot.ReadFile(root, name)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, false, nil
@@ -157,12 +192,16 @@ func readCacheBytes(path string) ([]byte, bool, error) {
 // writeCacheBytesAtomic writes data via a tmp file + rename so a reader never
 // observes a half-written cache.
 func writeCacheBytesAtomic(path string, data []byte) error {
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0600); err != nil {
+	root, name, err := cacheRoot(path)
+	if err != nil {
+		return err
+	}
+	tmp := name + ".tmp"
+	if err := osroot.WriteFile(root, tmp, data, 0600); err != nil {
 		return fmt.Errorf("write cache tmp: %w", err)
 	}
-	if err := os.Rename(tmp, path); err != nil {
-		os.Remove(tmp) //nolint:gosec // cleanup best-effort
+	if err := root.Rename(tmp, name); err != nil {
+		_ = root.Remove(tmp) //nolint:errcheck // cleanup best-effort
 		return fmt.Errorf("rename cache: %w", err)
 	}
 	return nil

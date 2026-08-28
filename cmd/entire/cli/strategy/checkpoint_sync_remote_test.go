@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/entireio/cli/cmd/entire/cli/osroot"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 
@@ -588,9 +589,9 @@ func TestResolveCheckpointSyncRemote_CapturedTier(t *testing.T) {
 	t.Run("corrupt capture state falls through to origin", func(t *testing.T) {
 		dir := newCaptureTestRepo(t)
 		t.Chdir(dir)
-		path, err := capturedSyncRemotesPath(ctx)
+		root, err := capturedSyncRemotesRoot(ctx)
 		require.NoError(t, err)
-		require.NoError(t, os.WriteFile(path, []byte("{not json"), 0o600))
+		require.NoError(t, osroot.WriteFile(root, capturedSyncRemotesFileName, []byte("{not json"), 0o600))
 
 		got, resolveErr := ResolveCheckpointSyncRemote(ctx)
 		require.NoError(t, resolveErr)

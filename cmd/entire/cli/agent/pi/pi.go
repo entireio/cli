@@ -262,11 +262,8 @@ func (a *PiAgent) WriteSession(_ context.Context, session *agent.AgentSession) e
 	if len(session.NativeData) == 0 {
 		return errors.New("session has empty NativeData")
 	}
-	if err := os.MkdirAll(filepath.Dir(session.SessionRef), 0o750); err != nil {
-		return fmt.Errorf("create pi session dir: %w", err)
-	}
-
-	if err := os.WriteFile(session.SessionRef, session.NativeData, 0o600); err != nil {
+	// WriteSessionFile creates the parent directory as part of the write.
+	if err := agent.WriteSessionFile(a, session, session.NativeData, 0o600); err != nil {
 		return fmt.Errorf("write pi session file: %w", err)
 	}
 	return nil

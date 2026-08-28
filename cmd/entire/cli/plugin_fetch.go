@@ -21,6 +21,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
 	"github.com/entireio/cli/cmd/entire/cli/versioninfo"
 )
 
@@ -469,21 +470,21 @@ func fetchAndVerify(ctx context.Context, rawURL, asset, wantDigest, stagingDir s
 // asset and writes it to destPath (mode 0755 on Unix). Raw binaries are
 // copied; .tar.gz/.tgz and .zip archives are searched for an entry whose
 // basename matches entire-<name>[.exe], wherever it sits in the archive.
-func extractPluginBinary(assetPath, name, destPath string) error {
+func extractPluginBinary(assetPath, name string, destRoot *os.Root, destName string) error {
 	binName := pluginBinaryPrefix + name
 	lower := strings.ToLower(assetPath)
 	switch {
 	case strings.HasSuffix(lower, ".tar.gz") || strings.HasSuffix(lower, ".tgz"):
-		return extractFromTarGz(assetPath, binName, destPath)
+		return extractFromTarGz(assetPath, binName, destRoot, destName)
 	case strings.HasSuffix(lower, ".zip"):
-		return extractFromZip(assetPath, binName, destPath)
+		return extractFromZip(assetPath, binName, destRoot, destName)
 	default:
 		src, err := os.Open(assetPath) //nolint:gosec // staging-dir file we just wrote
 		if err != nil {
 			return fmt.Errorf("open asset: %w", err)
 		}
 		defer src.Close()
-		return writeExecutable(src, destPath)
+		return writeExecutable(destRoot, destName, src)
 	}
 }
 
@@ -616,7 +617,7 @@ func selectTarEntry(archivePath, binName string) (string, error) {
 	return p.best, nil
 }
 
-func extractFromTarGz(archivePath, binName, destPath string) error {
+func extractFromTarGz(archivePath, binName string, destRoot *os.Root, destName string) error {
 	// Two passes: a tar stream cannot seek backwards, so choosing among
 	// candidates means selecting first and extracting second. The cost is one
 	// extra inflation of an archive already capped at maxPluginAssetSize —
@@ -635,7 +636,7 @@ func extractFromTarGz(archivePath, binName, destPath string) error {
 			return false, nil
 		}
 		found = true
-		return true, writeExecutable(r, destPath)
+		return true, writeExecutable(destRoot, destName, r)
 	}); err != nil {
 		return err
 	}
@@ -645,7 +646,7 @@ func extractFromTarGz(archivePath, binName, destPath string) error {
 	return nil
 }
 
-func extractFromZip(archivePath, binName, destPath string) error {
+func extractFromZip(archivePath, binName string, destRoot *os.Root, destName string) error {
 	zr, err := zip.OpenReader(archivePath)
 	if err != nil {
 		return fmt.Errorf("open zip: %w", err)
@@ -674,7 +675,7 @@ func extractFromZip(archivePath, binName, destPath string) error {
 		return fmt.Errorf("open zip entry: %w", err)
 	}
 	defer rc.Close()
-	return writeExecutable(rc, destPath)
+	return writeExecutable(destRoot, destName, rc)
 }
 
 // fileSHA256 returns the hex SHA-256 of the file at path. Used to record the
@@ -696,8 +697,8 @@ func fileSHA256(path string) (string, error) {
 // maxPluginAssetSize. Explicit chmod (not inherited archive mode) because
 // zip-built and raw-binary releases routinely lose the bit — the #1
 // "downloaded plugin doesn't run" failure.
-func writeExecutable(r io.Reader, destPath string) error {
-	return writeExecutableLimited(r, destPath, maxPluginAssetSize)
+func writeExecutable(root *os.Root, destName string, r io.Reader) error {
+	return writeExecutableLimited(root, destName, r, maxPluginAssetSize)
 }
 
 // writeExecutableLimited is writeExecutable with an explicit cap, so the
@@ -710,25 +711,27 @@ func writeExecutable(r io.Reader, destPath string) error {
 // since binary_sha256 landed — the digest is computed from the truncated bytes,
 // so `plugin doctor` would confirm the corrupt binary as intact. Reading one
 // byte past the cap makes the overflow detectable, mirroring fetchAndVerify.
-func writeExecutableLimited(r io.Reader, destPath string, limit int64) error {
+func writeExecutableLimited(root *os.Root, destName string, r io.Reader, limit int64) error {
 	// Write to a sibling temp file and rename into place. Two reasons, both
 	// load-bearing:
 	//
-	//  - O_CREATE without O_EXCL follows a symlink at destPath, so a symlink
+	//  - O_CREATE without O_EXCL follows a symlink at destName, so a symlink
 	//    planted at pkg/<name>/entire-<name> by an earlier malicious plugin
 	//    would redirect this write anywhere the user can write (~/.zshrc, a git
 	//    hook). Creating a fresh temp name and renaming cannot follow anything.
+	//    The root is the second, structural half of that: destName resolves
+	//    inside the managed tree, so even a rename target that escaped the
+	//    naming rules cannot land outside it.
 	//  - Opening destPath with O_TRUNC destroys the working binary before the
 	//    new bytes are known-good, so an interrupted or failed copy left the
 	//    plugin broken. This path is the *normal* one whenever staging and the
 	//    managed dir are on different filesystems (a tmpfs /tmp), not an edge
 	//    case.
-	tmp, err := os.CreateTemp(filepath.Dir(destPath), ".tmp-"+filepath.Base(destPath)+"-*")
+	tmp, tmpName, err := jsonutil.CreateTempIn(root, destName)
 	if err != nil {
 		return fmt.Errorf("create staging binary: %w", err)
 	}
-	tmpName := tmp.Name()
-	defer func() { _ = os.Remove(tmpName) }() // no-op once the rename succeeds
+	defer func() { _ = root.Remove(tmpName) }() //nolint:errcheck // no-op once the rename succeeds
 
 	n, err := io.Copy(tmp, io.LimitReader(r, limit+1))
 	if err != nil {
@@ -741,11 +744,11 @@ func writeExecutableLimited(r io.Reader, destPath string, limit int64) error {
 	if n > limit {
 		return fmt.Errorf("plugin binary exceeds the %d byte limit", limit)
 	}
-	// CreateTemp makes 0600; the dispatcher needs it executable.
-	if err := os.Chmod(tmpName, 0o755); err != nil { //nolint:gosec // a plugin binary must be executable
+	// CreateTempIn makes 0600; the dispatcher needs it executable.
+	if err := root.Chmod(tmpName, 0o755); err != nil {
 		return fmt.Errorf("set executable bit: %w", err)
 	}
-	if err := os.Rename(tmpName, destPath); err != nil {
+	if err := root.Rename(tmpName, destName); err != nil {
 		return fmt.Errorf("place binary: %w", err)
 	}
 	return nil

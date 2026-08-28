@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -17,6 +18,8 @@ import (
 	codexagent "github.com/entireio/cli/cmd/entire/cli/agent/codex"
 	"github.com/entireio/cli/cmd/entire/cli/agent/external"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
+	"github.com/entireio/cli/cmd/entire/cli/entiredir"
+	"github.com/entireio/cli/cmd/entire/cli/gitdir"
 	"github.com/entireio/cli/cmd/entire/cli/gitremote"
 	"github.com/entireio/cli/cmd/entire/cli/interactive"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
@@ -343,17 +346,11 @@ func settingsTargetFile(ctx context.Context, useLocal, useProject bool) (string,
 
 	// No explicit flag — write to whichever file exists.
 	// Check project file first, then local.
-	projectAbs, err := paths.AbsPath(ctx, settings.EntireSettingsFile)
-	if err == nil {
-		if _, statErr := os.Lstat(projectAbs); statErr == nil {
-			return settings.EntireSettingsFile, configDisplayProject
-		}
+	if settings.IsSetUp(ctx) {
+		return settings.EntireSettingsFile, configDisplayProject
 	}
-	localAbs, err := paths.AbsPath(ctx, settings.EntireSettingsLocalFile)
-	if err == nil {
-		if _, statErr := os.Lstat(localAbs); statErr == nil {
-			return settings.EntireSettingsLocalFile, configDisplayLocal
-		}
+	if settings.IsSetUpLocal(ctx) {
+		return settings.EntireSettingsLocalFile, configDisplayLocal
 	}
 
 	// Neither exists — default to project
@@ -1296,11 +1293,7 @@ func runEnableInteractive(ctx context.Context, w io.Writer, agents []agent.Agent
 
 	// Determine which settings file to write to
 	// First run always creates settings.json (no prompt)
-	entireDirAbs, err := paths.AbsPath(ctx, paths.EntireDir)
-	if err != nil {
-		entireDirAbs = paths.EntireDir // Fallback to relative
-	}
-	shouldUseLocal, showNotification := determineSettingsTarget(entireDirAbs, opts.UseLocalSettings, opts.UseProjectSettings)
+	shouldUseLocal, showNotification := determineSettingsTarget(ctx, opts.UseLocalSettings, opts.UseProjectSettings)
 
 	if showNotification {
 		fmt.Fprintln(w, "Info: Project settings exist. Saving to settings.local.json instead.")
@@ -1572,12 +1565,7 @@ func saveEnabledState(ctx context.Context, s *EntireSettings, useProjectSettings
 
 // localExists checks if settings.local.json exists.
 func localExists(ctx context.Context) bool {
-	localFile := settings.EntireSettingsLocalFile
-	if abs, err := paths.AbsPath(ctx, localFile); err == nil {
-		localFile = abs
-	}
-	_, err := os.Lstat(localFile)
-	return err == nil
+	return settings.IsSetUpLocal(ctx)
 }
 
 // runRemoveAgent removes hooks for a specific agent.
@@ -2096,7 +2084,7 @@ func validateSetupFlags(useLocal, useProject bool) error {
 // - Whether settings.json already exists
 // - The --local and --project flags
 // Returns (useLocal, showNotification).
-func determineSettingsTarget(entireDir string, useLocal, useProject bool) (bool, bool) {
+func determineSettingsTarget(ctx context.Context, useLocal, useProject bool) (bool, bool) {
 	// Explicit --local flag always uses local settings
 	if useLocal {
 		return true, false
@@ -2108,8 +2096,7 @@ func determineSettingsTarget(entireDir string, useLocal, useProject bool) (bool,
 	}
 
 	// No flags specified - check if settings file exists
-	settingsPath := filepath.Join(entireDir, paths.SettingsFileName)
-	if _, err := os.Lstat(settingsPath); err == nil {
+	if settings.IsSetUp(ctx) {
 		// Settings file exists - auto-redirect to local with notification
 		return true, true
 	}
@@ -2122,14 +2109,17 @@ func determineSettingsTarget(entireDir string, useLocal, useProject bool) (bool,
 // Returns true if the directory was created, false if it already existed.
 func setupEntireDirectory(ctx context.Context) (bool, error) { //nolint:unparam // already present in codebase
 	// Get absolute path for the .entire directory
-	entireDirAbs, err := paths.AbsPath(ctx, paths.EntireDir)
+	entireDirAbs, err := entiredir.Path(ctx)
 	if err != nil {
 		entireDirAbs = paths.EntireDir // Fallback to relative
 	}
 
-	// Check if directory already exists
+	// Check if directory already exists. This and the MkdirAll below act on the
+	// .entire directory itself, which is the one thing entiredir's root cannot
+	// do for us — a root is a handle to that directory, so it can neither create
+	// nor stat it from the outside.
 	created := false
-	if _, err := os.Lstat(entireDirAbs); os.IsNotExist(err) {
+	if _, err := os.Lstat(entireDirAbs); errors.Is(err, fs.ErrNotExist) {
 		created = true
 	}
 
@@ -2682,11 +2672,7 @@ func countShadowBranches(ctx context.Context) int {
 
 // checkEntireDirExists checks if the .entire directory exists.
 func checkEntireDirExists(ctx context.Context) bool {
-	entireDirAbs, err := paths.AbsPath(ctx, paths.EntireDir)
-	if err != nil {
-		entireDirAbs = paths.EntireDir
-	}
-	_, err = os.Lstat(entireDirAbs)
+	_, err := entiredir.OpenForRead(ctx)
 	return err == nil
 }
 
@@ -2892,8 +2878,8 @@ func removeAllSessionStates(ctx context.Context) (int, error) {
 	// state directory rather than inside it (see strategy.stateLockPath) so
 	// session-listing code doesn't have to filter them out. Best-effort:
 	// failing here doesn't undo the state-file removal.
-	if commonDir, cdErr := strategy.GetGitCommonDir(ctx); cdErr == nil {
-		_ = os.RemoveAll(filepath.Join(commonDir, "entire-session-locks"))
+	if root, rootErr := gitdir.Open(ctx); rootErr == nil {
+		_ = root.RemoveAll(strategy.SessionLockDirName) //nolint:errcheck // best-effort sweep; see the comment above
 	}
 
 	return count, nil
@@ -2903,10 +2889,14 @@ func removeAllSessionStates(ctx context.Context) (int, error) {
 // wrapped: the caller's warning line already leads with "failed to remove
 // .entire directory", and os.RemoveAll errors carry the op and path.
 func removeEntireDirectory(ctx context.Context) error {
-	entireDirAbs, err := paths.AbsPath(ctx, paths.EntireDir)
+	entireDirAbs, err := entiredir.Path(ctx)
 	if err != nil {
 		entireDirAbs = paths.EntireDir
 	}
+	// Drop any cached root before unlinking the directory it refers to. A root
+	// that outlives its directory still accepts writes, and they land on an
+	// unlinked inode nobody will ever read.
+	entiredir.Reset()
 	return os.RemoveAll(entireDirAbs) //nolint:wrapcheck // caller's warning line already names the step; the os error carries op and path
 }
 

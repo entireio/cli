@@ -12,7 +12,9 @@ import (
 	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
+	"github.com/entireio/cli/cmd/entire/cli/entiredir"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
+	"github.com/entireio/cli/cmd/entire/cli/osroot"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/validation"
 )
@@ -276,30 +278,58 @@ const piHookCacheSubdir = "pi"
 // firing; the framework records the cached path as SessionRef in
 // checkpoint metadata, so subsequent operations on hooked sessions go
 // through the recorded path rather than re-resolving via GetSessionDir.
-func resolveSessionDir(ctx context.Context) string {
+func resolveSessionDir(ctx context.Context) (worktreeRoot string, ok bool) {
 	root, err := paths.WorktreeRoot(ctx)
 	if err != nil {
 		//nolint:forbidigo // fallback when no git repo (tests run outside repos)
 		wd, wdErr := os.Getwd()
 		if wdErr != nil {
-			return filepath.Join(paths.EntireTmpDir, piHookCacheSubdir)
+			return "", false
 		}
 		root = wd
 	}
-	return filepath.Join(root, paths.EntireTmpDir, piHookCacheSubdir)
+	return root, true
+}
+
+// sessionCacheDir is .entire/tmp/pi relative to the .entire root.
+var sessionCacheDir = entiredir.MustName(paths.EntireTmpDir) + "/" + piHookCacheSubdir
+
+// openSessionCache returns the shared .entire root for the repo this hook is
+// running in, with the pi/ cache directory created under it when create is set.
+// A repo that cannot be resolved yields ok=false and every caller degrades: the
+// cache is an optimization, never the only copy of anything.
+func openSessionCache(ctx context.Context, create bool) (root *os.Root, ok bool) {
+	worktreeRoot, ok := resolveSessionDir(ctx)
+	if !ok {
+		return nil, false
+	}
+	open := entiredir.OpenAtForRead
+	if create {
+		open = entiredir.OpenAt
+	}
+	root, err := open(worktreeRoot)
+	if err != nil {
+		return nil, false
+	}
+	if create {
+		if err := osroot.MkdirAllNoSymlink(root, sessionCacheDir, 0o750); err != nil {
+			logging.Debug(ctx, "pi: session cache mkdir", slog.String("err", err.Error()))
+			return nil, false
+		}
+	}
+	return root, true
 }
 
 func cacheSessionID(ctx context.Context, id string) {
 	if id == "" {
 		return
 	}
-	dir := resolveSessionDir(ctx)
-	if err := os.MkdirAll(dir, 0o750); err != nil {
-		logging.Debug(ctx, "pi: cache session id mkdir", slog.String("err", err.Error()))
+	root, ok := openSessionCache(ctx, true)
+	if !ok {
 		return
 	}
 
-	if err := os.WriteFile(filepath.Join(dir, activeSessionFile), []byte(id), 0o600); err != nil {
+	if err := osroot.WriteFile(root, sessionCacheDir+"/"+activeSessionFile, []byte(id), 0o600); err != nil {
 		logging.Debug(ctx, "pi: cache session id write", slog.String("err", err.Error()))
 	}
 }
@@ -321,9 +351,11 @@ func extractModelFromPiSessionFile(path string) string {
 }
 
 func readCachedSessionID(ctx context.Context) string {
-	dir := resolveSessionDir(ctx)
-	//nolint:gosec // path constructed from validated repo root
-	data, err := os.ReadFile(filepath.Join(dir, activeSessionFile))
+	root, ok := openSessionCache(ctx, false)
+	if !ok {
+		return ""
+	}
+	data, err := osroot.ReadFile(root, sessionCacheDir+"/"+activeSessionFile)
 	if err != nil {
 		return ""
 	}
@@ -331,8 +363,11 @@ func readCachedSessionID(ctx context.Context) string {
 }
 
 func clearCachedSessionID(ctx context.Context) {
-	dir := resolveSessionDir(ctx)
-	_ = os.Remove(filepath.Join(dir, activeSessionFile))
+	root, ok := openSessionCache(ctx, false)
+	if !ok {
+		return
+	}
+	_ = osroot.Remove(root, sessionCacheDir+"/"+activeSessionFile) //nolint:errcheck // best-effort cache clear; a stale id is re-resolved next hook
 }
 
 // captureTranscript copies the Pi JSONL session file to
@@ -353,13 +388,15 @@ func captureTranscript(ctx context.Context, sessionID, piSessionFile string) str
 			slog.String("session_id", sessionID), slog.String("err", err.Error()))
 		return ""
 	}
-	dir := resolveSessionDir(ctx)
-	if err := os.MkdirAll(dir, 0o750); err != nil {
-		logging.Warn(ctx, "pi: capture transcript mkdir failed",
-			slog.String("dir", dir), slog.String("err", err.Error()))
+	worktreeRoot, ok := resolveSessionDir(ctx)
+	if !ok {
 		return ""
 	}
-	dst := filepath.Join(dir, sessionID+".json")
+	root, ok := openSessionCache(ctx, true)
+	if !ok {
+		return ""
+	}
+	name := sessionCacheDir + "/" + sessionID + ".json"
 	//nolint:gosec // G703: piSessionFile from trusted Pi extension stdin payload
 	data, err := os.ReadFile(piSessionFile)
 	if err != nil {
@@ -367,13 +404,15 @@ func captureTranscript(ctx context.Context, sessionID, piSessionFile string) str
 			slog.String("src", piSessionFile), slog.String("err", err.Error()))
 		return ""
 	}
-	//nolint:gosec // G703: dst is sessionID (validated above) under .entire/tmp/pi
-	if err := os.WriteFile(dst, data, 0o600); err != nil {
+	if err := osroot.WriteFile(root, name, data, 0o600); err != nil {
 		logging.Warn(ctx, "pi: capture transcript write failed",
-			slog.String("dst", dst), slog.String("err", err.Error()))
+			slog.String("dst", name), slog.String("err", err.Error()))
 		return ""
 	}
-	return dst
+	// Absolute on purpose: the framework records this as the session's
+	// SessionRef, which travels into checkpoint metadata and back out to
+	// callers that resolve it from anywhere in the repo.
+	return filepath.Join(worktreeRoot, paths.EntireDir, filepath.FromSlash(name))
 }
 
 // extractSessionIDFromPath extracts the UUID from a Pi session filename.

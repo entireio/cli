@@ -6,12 +6,15 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path"
 	"path/filepath"
 	"regexp"
 	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
+	"github.com/entireio/cli/cmd/entire/cli/gitdir"
 	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
+	"github.com/entireio/cli/cmd/entire/cli/osroot"
 	"github.com/entireio/cli/cmd/entire/cli/provenance"
 	"github.com/entireio/cli/cmd/entire/cli/session"
 )
@@ -89,7 +92,12 @@ type TurnStance struct {
 // sub-directory per run (named after the run ID), holding findings.md and
 // state.json.
 type StateStore struct {
-	dir string
+	// dir is the absolute store directory. It is kept because RunDir hands
+	// absolute paths to callers (the findings doc travels through manifests and
+	// into agent prompts); all I/O here is a name inside root.
+	dir     string
+	parent  string
+	dirName string
 }
 
 // NewStateStore creates a StateStore rooted at
@@ -101,14 +109,34 @@ func NewStateStore(ctx context.Context) (*StateStore, error) {
 		return nil, fmt.Errorf("get git common dir: %w", err)
 	}
 	return &StateStore{
-		dir: filepath.Join(commonDir, InvestigationsDirName),
+		dir:     filepath.Join(commonDir, InvestigationsDirName),
+		parent:  commonDir,
+		dirName: InvestigationsDirName,
 	}, nil
 }
 
 // NewStateStoreWithDir creates a StateStore rooted at dir. Useful for tests
 // that don't want to depend on a real git repository.
 func NewStateStoreWithDir(dir string) *StateStore {
-	return &StateStore{dir: dir}
+	return &StateStore{
+		dir:     dir,
+		parent:  filepath.Dir(dir),
+		dirName: filepath.Base(dir),
+	}
+}
+
+// root returns the shared *os.Root over the directory this store's run
+// directories sit inside — the git common dir in production, a temp stand-in
+// under test. Run IDs are validated before reaching a path, but resolving them
+// as names inside the root is what keeps that a defence rather than the only
+// defence: RunDir feeds os.RemoveAll.
+func (s *StateStore) root() (*os.Root, error) {
+	return gitdir.OpenAt(s.parent) //nolint:wrapcheck // gitdir names the directory and returns a missing one unwrapped for os.IsNotExist
+}
+
+// name renders a path under the store as a name relative to root.
+func (s *StateStore) name(parts ...string) string {
+	return s.dirName + "/" + path.Join(parts...)
 }
 
 // RunDir returns the absolute path of the per-run directory for runID,
@@ -133,8 +161,11 @@ func (s *StateStore) Save(ctx context.Context, st *RunState) error {
 		return fmt.Errorf("invalid run ID: %w", err)
 	}
 
-	runDir := s.RunDir(st.RunID)
-	if err := os.MkdirAll(runDir, 0o750); err != nil {
+	root, err := s.root()
+	if err != nil {
+		return fmt.Errorf("open investigation store: %w", err)
+	}
+	if err := osroot.MkdirAllNoSymlink(root, s.name(st.RunID), 0o750); err != nil {
 		return fmt.Errorf("create investigation run directory: %w", err)
 	}
 
@@ -143,8 +174,7 @@ func (s *StateStore) Save(ctx context.Context, st *RunState) error {
 		return fmt.Errorf("marshal run state: %w", err)
 	}
 
-	finalPath := s.runStatePath(st.RunID)
-	if err := jsonutil.WriteFileAtomic(finalPath, data, 0o600); err != nil {
+	if err := jsonutil.WriteFileAtomicIn(root, s.runStateName(st.RunID), data, 0o600); err != nil {
 		return fmt.Errorf("write run state: %w", err)
 	}
 	return nil
@@ -159,7 +189,14 @@ func (s *StateStore) Load(ctx context.Context, runID string) (*RunState, error) 
 		return nil, fmt.Errorf("invalid run ID: %w", err)
 	}
 
-	data, err := os.ReadFile(s.runStatePath(runID))
+	root, err := s.root()
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil //nolint:nilnil // no store => no such run
+		}
+		return nil, fmt.Errorf("open investigation store: %w", err)
+	}
+	data, err := osroot.ReadFile(root, s.runStateName(runID))
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, nil //nolint:nilnil // nil,nil indicates run not found
@@ -174,9 +211,16 @@ func (s *StateStore) Load(ctx context.Context, runID string) (*RunState, error) 
 	return &st, nil
 }
 
-// runStatePath returns the on-disk path for runID's state file.
-func (s *StateStore) runStatePath(runID string) string {
+// RunStatePath returns the absolute path of runID's state file. Absolute on
+// purpose: it is handed to the investigating agent, which is a separate process.
+// Entire's own reads and writes of the same file go through the root.
+func (s *StateStore) RunStatePath(runID string) string {
 	return filepath.Join(s.RunDir(runID), stateFileName)
+}
+
+// runStateName returns runID's state file as a name relative to root.
+func (s *StateStore) runStateName(runID string) string {
+	return s.name(runID, stateFileName)
 }
 
 // validateRunID enforces that runID is exactly 12 lowercase hex characters.

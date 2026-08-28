@@ -176,8 +176,8 @@ func (c *CodexAgent) WriteSession(_ context.Context, session *agent.AgentSession
 	}
 
 	dataToWrite := SanitizePortableTranscript(session.NativeData)
-	if err := os.WriteFile(session.SessionRef, dataToWrite, 0o600); err != nil {
-		return fmt.Errorf("failed to write transcript: %w", err)
+	if err := agent.WriteSessionFile(c, session, dataToWrite, 0o600); err != nil {
+		return fmt.Errorf("write transcript: %w", err)
 	}
 
 	return nil

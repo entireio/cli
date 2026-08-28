@@ -22,10 +22,12 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
 	"github.com/entireio/cli/cmd/entire/cli/checkpointpolicy"
+	"github.com/entireio/cli/cmd/entire/cli/gitdir"
 	"github.com/entireio/cli/cmd/entire/cli/gitops"
 	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/entireio/cli/cmd/entire/cli/interactive"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
+	"github.com/entireio/cli/cmd/entire/cli/osroot"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/proclive"
 	"github.com/entireio/cli/cmd/entire/cli/session"
@@ -117,40 +119,18 @@ func askConfirmTTY(header string, details []string, prompt string, defaultYes bo
 // fields. This avoids writing unintended defaults (e.g., enabled: true) when the
 // local settings file doesn't exist yet.
 func saveCommitLinkingAlways(ctx context.Context) error {
-	localPath, err := paths.AbsPath(ctx, settings.EntireSettingsLocalFile)
+	// Read-modify-write through the settings package: it owns the confined read
+	// and the atomic write, and the raw map preserves every field this hook has
+	// no opinion about.
+	localPath, raw, _, err := settings.LoadLocalRaw(ctx)
 	if err != nil {
-		return fmt.Errorf("resolving local settings path: %w", err)
-	}
-
-	// Read existing file as raw JSON map to preserve all existing fields.
-	// If the file doesn't exist, start with an empty map so we only write commit_linking.
-	var raw map[string]json.RawMessage
-	data, readErr := os.ReadFile(localPath) //nolint:gosec // path is from AbsPath
-	if readErr == nil {
-		if err := json.Unmarshal(data, &raw); err != nil {
-			return fmt.Errorf("parsing local settings: %w", err)
-		}
-	} else if !os.IsNotExist(readErr) {
-		return fmt.Errorf("reading local settings: %w", readErr)
-	}
-	if raw == nil {
-		raw = make(map[string]json.RawMessage)
+		return err //nolint:wrapcheck // LoadLocalRaw already names the file and the failure
 	}
 
 	raw["commit_linking"] = json.RawMessage(`"` + settings.CommitLinkingAlways + `"`)
 
-	out, err := json.MarshalIndent(raw, "", "  ")
-	if err != nil {
-		return fmt.Errorf("marshaling local settings: %w", err)
-	}
-	out = append(out, '\n')
-
-	if err := os.MkdirAll(filepath.Dir(localPath), 0o750); err != nil {
-		return fmt.Errorf("creating settings directory: %w", err)
-	}
-	//nolint:gosec // G306: settings file is config, not secrets; 0o644 is appropriate
-	if err := os.WriteFile(localPath, out, 0o644); err != nil {
-		return fmt.Errorf("writing local settings: %w", err)
+	if err := settings.SaveLocalRaw(localPath, raw); err != nil {
+		return err //nolint:wrapcheck // SaveLocalRaw already names the file and the failure
 	}
 	return nil
 }
@@ -322,20 +302,18 @@ func isGitSequenceOperation(ctx context.Context) bool {
 		return false // Can't determine, assume not in sequence operation
 	}
 
-	// Check for rebase state directories
-	if _, err := os.Lstat(filepath.Join(gitDir, "rebase-merge")); err == nil {
-		return true
-	}
-	if _, err := os.Lstat(filepath.Join(gitDir, "rebase-apply")); err == nil {
-		return true
+	// These markers live in the PER-WORKTREE git dir, not the common dir, which
+	// is why this opens gitDir rather than using gitdir.Open.
+	root, err := gitdir.OpenAt(gitDir)
+	if err != nil {
+		return false // Can't determine, assume not in sequence operation
 	}
 
-	// Check for cherry-pick and revert state files
-	if _, err := os.Lstat(filepath.Join(gitDir, "CHERRY_PICK_HEAD")); err == nil {
-		return true
-	}
-	if _, err := os.Lstat(filepath.Join(gitDir, "REVERT_HEAD")); err == nil {
-		return true
+	// Check for rebase state directories, then cherry-pick and revert state files.
+	for _, marker := range []string{"rebase-merge", "rebase-apply", "CHERRY_PICK_HEAD", "REVERT_HEAD"} {
+		if _, err := root.Lstat(marker); err == nil {
+			return true
+		}
 	}
 
 	return false
@@ -848,21 +826,20 @@ func warnStaleEndedSessions(ctx context.Context, count int) {
 }
 
 func warnStaleEndedSessionsTo(ctx context.Context, count int, w io.Writer) {
-	commonDir, err := GetGitCommonDir(ctx)
+	root, err := gitdir.Open(ctx)
 	if err != nil {
 		return // fail-open
 	}
-	warnDir := filepath.Join(commonDir, session.SessionStateDirName)
-	warnFile := filepath.Join(warnDir, staleEndedSessionWarnFile)
-	if info, statErr := os.Lstat(warnFile); statErr == nil {
+	warnFile := session.SessionStateDirName + "/" + staleEndedSessionWarnFile
+	if info, statErr := root.Lstat(warnFile); statErr == nil {
 		if time.Since(info.ModTime()) < staleEndedSessionWarnInterval {
 			return // rate-limited
 		}
 	}
-	//nolint:errcheck,gosec // G104: Best-effort warning — fail-open if file ops fail
-	os.MkdirAll(warnDir, 0o750)
-	//nolint:errcheck,gosec // G104: Best-effort sentinel file write
-	os.WriteFile(warnFile, []byte{}, 0o644)
+	//nolint:errcheck // Best-effort warning — fail-open if file ops fail
+	_ = osroot.MkdirAllNoSymlink(root, session.SessionStateDirName, 0o750)
+	//nolint:errcheck // Best-effort sentinel file write
+	_ = osroot.WriteFile(root, warnFile, []byte{}, 0o644)
 	fmt.Fprintf(w,
 		"\nentire: %d ended session(s) are accumulating and slowing down commits.\n"+
 			"Run 'entire doctor' to condense them and restore commit performance.\n\n",
@@ -3302,7 +3279,6 @@ func (s *ManualCommitStrategy) carryForwardToNewShadowBranch(
 		WorktreeID:        state.WorktreeID,
 		ModifiedFiles:     remainingFiles,
 		MetadataDir:       "",
-		MetadataDirAbs:    "",
 		CommitMessage:     "carry forward: uncommitted session files",
 		IsFirstCheckpoint: false,
 	})

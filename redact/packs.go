@@ -8,8 +8,7 @@ import (
 	"io"
 	"io/fs"
 	"log/slog"
-	"os"
-	"path/filepath"
+	gopath "path"
 	"regexp"
 	"strings"
 
@@ -86,7 +85,7 @@ type Sample struct {
 // does not sanitize sourcePath beyond reading its extension.
 func ParsePack(data []byte, sourcePath string) (*Pack, error) {
 	var pack Pack
-	switch strings.ToLower(filepath.Ext(sourcePath)) {
+	switch strings.ToLower(gopath.Ext(sourcePath)) {
 	case ".json":
 		decoder := json.NewDecoder(bytes.NewReader(data))
 		decoder.DisallowUnknownFields()
@@ -137,7 +136,7 @@ func validatePack(p *Pack) error {
 	}
 
 	// Name must match filename stem so log lines and discovery stay consistent.
-	stem := strings.TrimSuffix(filepath.Base(p.sourcePath), filepath.Ext(p.sourcePath))
+	stem := strings.TrimSuffix(gopath.Base(p.sourcePath), gopath.Ext(p.sourcePath))
 	if stem != p.Name {
 		return fmt.Errorf("%s: pack name %q does not match filename stem %q", p.sourcePath, p.Name, stem)
 	}
@@ -175,8 +174,8 @@ func validateIdentifier(field, value, sourcePath string) error {
 	return nil
 }
 
-// LoadPacks discovers and parses all rule packs in dir, including any
-// subdirectories (so the conventional .entire/redactors/local/ path for
+// LoadPacks discovers and parses all rule packs in dir within fsys, including
+// any subdirectories (so the conventional .entire/redactors/local/ path for
 // personal/uncommitted rules is picked up automatically). Files with the
 // extensions .yaml, .yml, and .json are considered packs; other files are
 // ignored. A missing directory is treated as "no packs configured" and
@@ -184,16 +183,22 @@ func validateIdentifier(field, value, sourcePath string) error {
 // slog.Default()) and the file is skipped — never fatal — so one bad file
 // does not silence the rest.
 //
+// Taking an fs.FS rather than a directory path is what lets the CLI hand this
+// the .entire root's FS, so pack discovery is confined to .entire like every
+// other read there, while this package keeps no dependency on the CLI. Names
+// in warnings and in a pack's SourcePath are therefore relative to fsys
+// (redactors/local/foo.yaml), not absolute.
+//
 // Soft caps: files larger than maxPackFileBytes are skipped with a warning,
 // and discovery stops after maxPackFiles parsed packs. The trust boundary is
 // "user owns repo," so these are runaway-input guards, not security limits.
-func LoadPacks(dir string, logger *slog.Logger) ([]*Pack, error) {
+func LoadPacks(fsys fs.FS, dir string, logger *slog.Logger) ([]*Pack, error) {
 	logger = loggerOrDefault(logger)
 	var packs []*Pack
-	walkErr := filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
+	walkErr := fs.WalkDir(fsys, dir, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			if path == dir {
-				if os.IsNotExist(err) {
+				if errors.Is(err, fs.ErrNotExist) {
 					return nil
 				}
 				return fmt.Errorf("read redactors dir %s: %w", dir, err)
@@ -216,7 +221,7 @@ func LoadPacks(dir string, logger *slog.Logger) ([]*Pack, error) {
 		if d.IsDir() {
 			return nil
 		}
-		switch strings.ToLower(filepath.Ext(d.Name())) {
+		switch strings.ToLower(gopath.Ext(d.Name())) {
 		case ".yaml", ".yml", ".json":
 		default:
 			return nil
@@ -227,7 +232,7 @@ func LoadPacks(dir string, logger *slog.Logger) ([]*Pack, error) {
 				componentAttr,
 				slog.String("path", path),
 				slog.Int("max_files", maxPackFiles))
-			return filepath.SkipAll
+			return fs.SkipAll
 		}
 
 		info, statErr := d.Info()
@@ -247,7 +252,7 @@ func LoadPacks(dir string, logger *slog.Logger) ([]*Pack, error) {
 			return nil
 		}
 
-		data, err := os.ReadFile(path) //nolint:gosec // path comes from WalkDir under a configured dir
+		data, err := fs.ReadFile(fsys, path)
 		if err != nil {
 			logger.Warn("skipping unreadable redactor pack",
 				componentAttr,

@@ -7,12 +7,13 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"strings"
 
+	"github.com/entireio/cli/cmd/entire/cli/gitdir"
 	"github.com/entireio/cli/cmd/entire/cli/internal/flock"
 	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
+	"github.com/entireio/cli/cmd/entire/cli/osroot"
 )
 
 // capturedSyncRemotesFileName is the per-clone captured-election state, stored
@@ -34,20 +35,12 @@ type capturedSyncRemotesFile struct {
 	Remotes []string `json:"remotes"`
 }
 
-func capturedSyncRemotesPath(ctx context.Context) (string, error) {
-	commonDir, err := GetGitCommonDir(ctx)
-	if err != nil {
-		return "", err
-	}
-	return filepath.Join(commonDir, capturedSyncRemotesFileName), nil
-}
-
-func capturedSyncRemotesLockPath(ctx context.Context) (string, error) {
-	commonDir, err := GetGitCommonDir(ctx)
-	if err != nil {
-		return "", err
-	}
-	return filepath.Join(commonDir, capturedSyncRemotesLockName), nil
+// capturedSyncRemotesRoot returns the shared *os.Root over the git common dir,
+// where both the captured election and its lock live. Both are fixed names, so
+// the root buys uniformity here rather than protection from a crafted name —
+// which is the point: one way to reach .git means no call site to audit.
+func capturedSyncRemotesRoot(ctx context.Context) (*os.Root, error) {
+	return gitdir.Open(ctx) //nolint:wrapcheck // gitdir already names the directory and the failure
 }
 
 // loadCapturedSyncRemotes reads the captured election. Fail-soft: a missing,
@@ -55,11 +48,11 @@ func capturedSyncRemotesLockPath(ctx context.Context) (string, error) {
 // automatic state, so unlike the explicit checkpoint_push_remote setting it
 // must never fail sync closed.
 func loadCapturedSyncRemotes(ctx context.Context) []string {
-	path, err := capturedSyncRemotesPath(ctx)
+	root, err := capturedSyncRemotesRoot(ctx)
 	if err != nil {
 		return nil
 	}
-	data, err := os.ReadFile(path) //nolint:gosec // G304: path is the git common dir resolved from the repo itself, not user input.
+	data, err := osroot.ReadFile(root, capturedSyncRemotesFileName)
 	if err != nil {
 		return nil
 	}
@@ -78,7 +71,7 @@ func loadCapturedSyncRemotes(ctx context.Context) []string {
 // list-shaped, so lifting the cap in phase 2 needs a new writer rather than a
 // migration.
 func saveCapturedSyncRemote(ctx context.Context, name string) error {
-	path, err := capturedSyncRemotesPath(ctx)
+	root, err := capturedSyncRemotesRoot(ctx)
 	if err != nil {
 		return err
 	}
@@ -86,7 +79,7 @@ func saveCapturedSyncRemote(ctx context.Context, name string) error {
 	if err != nil {
 		return fmt.Errorf("encode captured sync remotes: %w", err)
 	}
-	if err := jsonutil.WriteFileAtomic(path, data, 0o600); err != nil {
+	if err := jsonutil.WriteFileAtomicIn(root, capturedSyncRemotesFileName, data, 0o600); err != nil {
 		return fmt.Errorf("write captured sync remotes: %w", err)
 	}
 	return nil
@@ -112,13 +105,13 @@ func pendingCaptureCheckpointSyncRemote(ctx context.Context, pushRemote string) 
 	if !isConfiguredRemote(ctx, pushRemote) {
 		return false
 	}
-	lockPath, err := capturedSyncRemotesLockPath(ctx)
+	root, err := capturedSyncRemotesRoot(ctx)
 	if err != nil {
 		logging.Debug(ctx, "capture skipped: cannot resolve lock path",
 			slog.String("error", err.Error()))
 		return false
 	}
-	release, err := flock.Acquire(lockPath)
+	release, err := flock.AcquireIn(root, capturedSyncRemotesLockName)
 	if err != nil {
 		logging.Debug(ctx, "capture skipped: cannot acquire lock",
 			slog.String("error", err.Error()))
@@ -181,11 +174,11 @@ func captureEligible(ctx context.Context, pushRemote string) (previouslyElected 
 // the network push sat in between, and another worktree's hook may have captured
 // meanwhile.
 func commitCapturedSyncRemote(ctx context.Context, pushRemote string) {
-	lockPath, err := capturedSyncRemotesLockPath(ctx)
+	root, err := capturedSyncRemotesRoot(ctx)
 	if err != nil {
 		return
 	}
-	release, err := flock.Acquire(lockPath)
+	release, err := flock.AcquireIn(root, capturedSyncRemotesLockName)
 	if err != nil {
 		return
 	}

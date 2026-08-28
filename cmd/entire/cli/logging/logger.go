@@ -12,24 +12,44 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
-	"path/filepath"
 	"strings"
 	"sync"
+
+	"github.com/entireio/cli/cmd/entire/cli/osroot"
 )
 
 // LogLevelEnvVar is the environment variable that controls log level.
 const LogLevelEnvVar = "ENTIRE_LOG_LEVEL"
 
 // LogsDir is the directory where log files are stored (relative to repo root).
+// It is the spelling for messages, git paths, and doctor output; the writer
+// below addresses the same directory as LogsName inside the .entire root.
 const LogsDir = ".entire/logs"
 
-const logFileName = "entire.log"
+// LogsName is LogsDir relative to the .entire root, which is the coordinate
+// Config.Root resolves names in.
+const LogsName = "logs"
+
+// LogFileName is the log file's basename, and LogName addresses it from the
+// .entire root — the pair readers (doctor logs, trace) use so they open the same
+// file this package writes without re-joining LogsDir themselves.
+const (
+	LogFileName = "entire.log"
+	LogName     = LogsName + "/" + LogFileName
+)
 
 const writeBufferSize = 8192
 
 type Config struct {
-	// Dir is created if absent. Required rather than defaulted: only the caller
-	// knows whether writing here is allowed.
+	// Root resolves the directory tree Dir lives in, and is called on the first
+	// line actually written — never by New. A function rather than an *os.Root
+	// because the caller's root is .entire, which must not be created just
+	// because a command started: a command that logs nothing must leave an
+	// untouched repo untouched. Required rather than defaulted: only the caller
+	// knows whether writing there is allowed.
+	Root func() (*os.Root, error)
+
+	// Dir is the log directory's name within Root, created if absent.
 	Dir string
 
 	// Level is the minimum level to emit; the zero value is slog.LevelInfo.
@@ -48,6 +68,7 @@ type Logger struct {
 	slog *slog.Logger
 
 	mu      sync.Mutex
+	root    func() (*os.Root, error)
 	dir     string
 	buf     *bufio.Writer
 	file    *os.File
@@ -67,11 +88,14 @@ type Logger struct {
 // how `entire doctor` reports a log sink that is silently swallowing every
 // diagnostic.
 func New(cfg Config) (*Logger, error) {
+	if cfg.Root == nil {
+		return nil, errors.New("logging: Config.Root is required")
+	}
 	if cfg.Dir == "" {
 		return nil, errors.New("logging: Config.Dir is required")
 	}
 
-	l := &Logger{dir: cfg.Dir}
+	l := &Logger{root: cfg.Root, dir: cfg.Dir}
 	l.slog = slog.New(slog.NewJSONHandler(logWriter{l}, &slog.HandlerOptions{Level: cfg.Level}))
 	return l, nil
 }
@@ -82,12 +106,19 @@ func (l *Logger) open() error {
 	if l.openErr != nil {
 		return l.openErr
 	}
-	if err := os.MkdirAll(l.dir, 0o750); err != nil {
+	root, err := l.root()
+	if err != nil {
+		l.openErr = fmt.Errorf("open log root: %w", err)
+		return l.openErr
+	}
+	// NoSymlink: a symlinked log directory is a directory Entire did not create
+	// and cannot vouch for, and doctor reports it by name. Failing here is what
+	// makes EnsureOpen able to say so.
+	if err := osroot.MkdirAllNoSymlink(root, l.dir, 0o750); err != nil {
 		l.openErr = fmt.Errorf("create log directory: %w", err)
 		return l.openErr
 	}
-	path := filepath.Join(l.dir, logFileName)
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600) //nolint:gosec // fixed filename under a caller-vetted directory
+	f, err := root.OpenFile(l.dir+"/"+LogFileName, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
 	if err != nil {
 		l.openErr = fmt.Errorf("open log file: %w", err)
 		return l.openErr

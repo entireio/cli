@@ -11,6 +11,7 @@ import (
 
 	"charm.land/huh/v2"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
+	"github.com/entireio/cli/cmd/entire/cli/entiredir"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
@@ -414,21 +415,16 @@ func cleanupItemIDs(items []strategy.CleanupItem) []string {
 // listAllTempFiles returns all files in .entire/tmp/ without filtering.
 // Used by --all since those sessions are being deleted anyway.
 func listAllTempFiles(ctx context.Context) ([]string, error) {
-	absDir, err := paths.AbsPath(ctx, paths.EntireTmpDir)
+	root, err := entiredir.OpenForRead(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("failed to resolve temp dir: %w", err)
-	}
-	root, err := os.OpenRoot(absDir)
-	if err != nil {
-		if os.IsNotExist(err) {
+		if errors.Is(err, fs.ErrNotExist) {
 			return nil, nil
 		}
-		return nil, fmt.Errorf("failed to open root: %w", err)
+		return nil, fmt.Errorf("failed to open temp dir: %w", err)
 	}
-	defer root.Close()
 
 	var files []string
-	err = fs.WalkDir(root.FS(), ".", func(_ string, d fs.DirEntry, err error) error {
+	err = fs.WalkDir(root.FS(), entireTmpName, func(_ string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
@@ -438,7 +434,7 @@ func listAllTempFiles(ctx context.Context) ([]string, error) {
 		files = append(files, d.Name())
 		return nil
 	})
-	if os.IsNotExist(err) {
+	if errors.Is(err, fs.ErrNotExist) {
 		return nil, nil
 	}
 	if err != nil {
@@ -457,24 +453,16 @@ type TempFileDeleteError struct {
 // Uses os.Root to ensure deletions are confined to the temp directory.
 // Returns successfully deleted files and any failures with their error reasons.
 func deleteTempFiles(ctx context.Context, files []string) (deleted []string, failed []TempFileDeleteError) {
-	absDir, err := paths.AbsPath(ctx, paths.EntireTmpDir)
+	root, err := entiredir.OpenForRead(ctx)
 	if err != nil {
 		for _, file := range files {
 			failed = append(failed, TempFileDeleteError{File: file, Err: err})
 		}
 		return nil, failed
 	}
-	root, err := os.OpenRoot(absDir)
-	if err != nil {
-		for _, file := range files {
-			failed = append(failed, TempFileDeleteError{File: file, Err: err})
-		}
-		return nil, failed
-	}
-	defer root.Close()
 
 	for _, file := range files {
-		err := root.Remove(file)
+		err := root.Remove(entireTmpName + "/" + file)
 		switch {
 		case err == nil:
 			deleted = append(deleted, file)

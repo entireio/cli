@@ -5,9 +5,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -20,12 +22,15 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/remote"
+	"github.com/entireio/cli/cmd/entire/cli/entiredir"
 	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/entireio/cli/cmd/entire/cli/interactive"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
+	"github.com/entireio/cli/cmd/entire/cli/osroot"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/cmd/entire/cli/vercelconfig"
+	"github.com/entireio/cli/cmd/entire/cli/worktreedir"
 	"github.com/entireio/cli/redact"
 
 	"github.com/go-git/go-git/v6"
@@ -502,14 +507,14 @@ func EnsureRedactionConfigured(ctx context.Context) error {
 		if s.Redaction != nil {
 			inline = s.Redaction.CustomRedactions
 		}
-		packsRelPath := filepath.Join(paths.EntireDir, redact.RedactorsDirName)
-		packsDir, perr := paths.AbsPath(ctx, packsRelPath)
-		if perr != nil {
+		var packs []*redact.Pack
+		var lerr error
+		if root, rerr := entiredir.OpenForRead(ctx); rerr == nil {
+			packs, lerr = redact.LoadPacks(root.FS(), redact.RedactorsDirName, logger)
+		} else if !errors.Is(rerr, fs.ErrNotExist) {
 			logCtx := logging.WithComponent(ctx, "redaction")
-			logging.Warn(logCtx, "failed to resolve redactors path", slog.String("error", perr.Error()))
-			packsDir = packsRelPath
+			logging.Warn(logCtx, "failed to open .entire for redactor packs", slog.String("error", rerr.Error()))
 		}
-		packs, lerr := redact.LoadPacks(packsDir, logger)
 		if lerr != nil {
 			warnUser(ctx, "redaction",
 				"failed to load redactor packs",
@@ -589,13 +594,13 @@ func maybeWarnNarrowedScanners(ctx context.Context, s *settings.EntireSettings) 
 		return
 	}
 	const marker = "betterleaks=false goredact=true\n"
-	markerRel := filepath.Join(paths.EntireDir, "tmp", "scanner-notice")
-	markerAbs, err := paths.AbsPath(ctx, markerRel)
-	if err != nil {
-		markerAbs = markerRel
-	}
-	if prev, rerr := os.ReadFile(markerAbs); rerr == nil && string(prev) == marker { //nolint:gosec // path is from AbsPath or constant
-		return
+	markerName := entiredir.MustName(paths.EntireTmpDir) + "/scanner-notice"
+	// Read without creating: a repo that has never made .entire has no marker,
+	// and the warning below is what earns the directory.
+	if root, rerr := entiredir.OpenForRead(ctx); rerr == nil {
+		if prev, prerr := osroot.ReadFile(root, markerName); prerr == nil && string(prev) == marker {
+			return
+		}
 	}
 	// warnUser always logs but prints only on a TTY: if the first fire is in a
 	// non-TTY hook the notice is log-only and the marker still suppresses later
@@ -604,8 +609,14 @@ func maybeWarnNarrowedScanners(ctx context.Context, s *settings.EntireSettings) 
 		"betterleaks scanning disabled; checkpoint redaction narrowed to the remaining layers plus goredact",
 		"betterleaks scanning is disabled in .entire/settings.json; checkpoint redaction relies on the remaining layers plus goredact.",
 	)
-	_ = os.MkdirAll(filepath.Dir(markerAbs), 0o750)    //nolint:errcheck // best-effort marker; failure degrades to warning every run
-	_ = os.WriteFile(markerAbs, []byte(marker), 0o640) //nolint:errcheck,gosec // best-effort non-sensitive marker file
+	root, err := entiredir.Open(ctx)
+	if err != nil {
+		return
+	}
+	//nolint:errcheck // best-effort marker; failure degrades to warning every run
+	_ = osroot.MkdirAllNoSymlink(root, path.Dir(markerName), 0o750)
+	//nolint:errcheck // best-effort non-sensitive marker file
+	_ = osroot.WriteFile(root, markerName, []byte(marker), 0o640)
 }
 
 // resolveAgentType picks the best agent type from the context and existing state.
@@ -1392,15 +1403,17 @@ func GetGitCommonDir(ctx context.Context) (string, error) {
 // EnsureEntireGitignore ensures all required entries are in .entire/.gitignore
 // Works correctly from any subdirectory within the repository.
 func EnsureEntireGitignore(ctx context.Context) error {
-	// Get absolute path for the gitignore file
-	gitignoreAbs, err := paths.AbsPath(ctx, entireGitignore)
+	// Open (creating if needed) the shared .entire root; the gitignore lives at
+	// its top level, so the root is also the directory this would have created.
+	root, err := entiredir.Open(ctx)
 	if err != nil {
-		gitignoreAbs = entireGitignore // Fallback to relative
+		return fmt.Errorf("failed to create .entire directory: %w", err)
 	}
+	gitignoreName := entiredir.MustName(entireGitignore)
 
 	// Read existing content
 	var content string
-	if data, err := os.ReadFile(gitignoreAbs); err == nil { //nolint:gosec // path is from AbsPath or constant
+	if data, rerr := osroot.ReadFile(root, gitignoreName); rerr == nil {
 		content = string(data)
 	}
 
@@ -1426,11 +1439,6 @@ func EnsureEntireGitignore(ctx context.Context) error {
 		return nil
 	}
 
-	// Ensure .entire directory exists
-	if err := os.MkdirAll(filepath.Dir(gitignoreAbs), 0o750); err != nil {
-		return fmt.Errorf("failed to create .entire directory: %w", err)
-	}
-
 	// Append missing entries to gitignore
 	var sb strings.Builder
 	for _, entry := range toAdd {
@@ -1438,10 +1446,31 @@ func EnsureEntireGitignore(ctx context.Context) error {
 	}
 	content += sb.String()
 
-	if err := os.WriteFile(gitignoreAbs, []byte(content), 0o644); err != nil { //nolint:gosec // path is from AbsPath or constant
+	if err := osroot.WriteFile(root, gitignoreName, []byte(content), 0o644); err != nil {
 		return fmt.Errorf("failed to write gitignore: %w", err)
 	}
 	return nil
+}
+
+// readWorktreeFile reads a repo-relative file through the worktree's shared
+// root. The names come from git status, so they are already the coordinate the
+// root reads in — joining them onto repoRoot and reading the result was the
+// thing that made "which directory is this relative to?" a per-call-site
+// question.
+func readWorktreeFile(repoRoot, file string) ([]byte, error) {
+	root, err := worktreedir.OpenAt(repoRoot)
+	if err != nil {
+		return nil, fmt.Errorf("open worktree root: %w", err)
+	}
+	name, err := worktreedir.Name(repoRoot, file)
+	if err != nil {
+		return nil, fmt.Errorf("resolve %s in worktree: %w", file, err)
+	}
+	content, err := osroot.ReadFile(root, name)
+	if err != nil {
+		return nil, fmt.Errorf("read %s: %w", file, err)
+	}
+	return content, nil
 }
 
 // checkCanRewindWithWarning checks working directory and returns a warning with diff stats.
@@ -1512,8 +1541,7 @@ func checkCanRewindWithWarning(ctx context.Context) (bool, string, error) {
 		case st.Staging == git.Added || st.Worktree == git.Added:
 			change.status = "added"
 			// New file - count all lines as added
-			absPath := filepath.Join(repoRoot, file)
-			if content, err := os.ReadFile(absPath); err == nil { //nolint:gosec // absPath is repo root + relative path from git status
+			if content, err := readWorktreeFile(repoRoot, file); err == nil {
 				change.added = countLines(content)
 			}
 		case st.Staging == git.Deleted || st.Worktree == git.Deleted:
@@ -1533,8 +1561,7 @@ func checkCanRewindWithWarning(ctx context.Context) (bool, string, error) {
 					headContent = []byte(content)
 				}
 			}
-			absPath := filepath.Join(repoRoot, file)
-			if content, err := os.ReadFile(absPath); err == nil { //nolint:gosec // absPath is repo root + relative path from git status
+			if content, err := readWorktreeFile(repoRoot, file); err == nil {
 				workContent = content
 			}
 			if headContent != nil && workContent != nil {

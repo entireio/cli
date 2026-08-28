@@ -47,6 +47,8 @@ func TestAgentPackages_NoForbiddenImports(t *testing.T) {
 		repoPrefix + "gitrepo",    // repository layout utilities
 		repoPrefix + "logging",    // logging utilities
 		repoPrefix + "paths",      // path utilities
+		repoPrefix + "entiredir",  // the shared .entire root; the only sanctioned way to read or write there
+		repoPrefix + "osroot",     // traversal-resistant os.Root helpers, used with the above
 		repoPrefix + "jsonutil",   // JSON utilities
 		repoPrefix + "textutil",   // text utilities
 		repoPrefix + "transcript", // transcript utilities

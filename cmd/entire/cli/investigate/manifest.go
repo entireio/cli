@@ -11,7 +11,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/entireio/cli/cmd/entire/cli/gitdir"
 	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
+	"github.com/entireio/cli/cmd/entire/cli/osroot"
 	"github.com/entireio/cli/cmd/entire/cli/session"
 )
 
@@ -84,7 +86,11 @@ type LocalManifest struct {
 // LocalManifestStore wraps the directory that holds persisted LocalManifest
 // JSON files for one repository.
 type LocalManifestStore struct {
-	dir string
+	// dir is the absolute manifests directory, kept for messages. All I/O is a
+	// name inside root.
+	dir     string
+	parent  string
+	dirName string
 }
 
 // NewLocalManifestStore creates a LocalManifestStore rooted at
@@ -96,14 +102,30 @@ func NewLocalManifestStore(ctx context.Context) (*LocalManifestStore, error) {
 		return nil, fmt.Errorf("get git common dir: %w", err)
 	}
 	return &LocalManifestStore{
-		dir: filepath.Join(commonDir, InvestigationsDirName, manifestsSubdirName),
+		dir:     filepath.Join(commonDir, InvestigationsDirName, manifestsSubdirName),
+		parent:  commonDir,
+		dirName: InvestigationsDirName + "/" + manifestsSubdirName,
 	}, nil
 }
 
 // NewLocalManifestStoreWithDir creates a LocalManifestStore rooted at dir.
 // Useful for tests that do not want to depend on a real git repository.
 func NewLocalManifestStoreWithDir(dir string) *LocalManifestStore {
-	return &LocalManifestStore{dir: dir}
+	return &LocalManifestStore{
+		dir:     dir,
+		parent:  filepath.Dir(dir),
+		dirName: filepath.Base(dir),
+	}
+}
+
+// root returns the shared *os.Root over the directory the manifests sit inside.
+func (s *LocalManifestStore) root() (*os.Root, error) {
+	return gitdir.OpenAt(s.parent) //nolint:wrapcheck // gitdir names the directory and returns a missing one unwrapped for os.IsNotExist
+}
+
+// name renders a manifest file as a name relative to root.
+func (s *LocalManifestStore) name(file string) string {
+	return s.dirName + "/" + file
 }
 
 // Write persists m to the manifests directory using a deterministic filename
@@ -120,7 +142,11 @@ func (s *LocalManifestStore) Write(ctx context.Context, m LocalManifest) error {
 		return errors.New("manifest StartedAt is required")
 	}
 
-	if err := os.MkdirAll(s.dir, 0o750); err != nil {
+	root, err := s.root()
+	if err != nil {
+		return fmt.Errorf("open investigations store: %w", err)
+	}
+	if err := osroot.MkdirAllNoSymlink(root, s.dirName, 0o750); err != nil {
 		return fmt.Errorf("create investigations manifests dir: %w", err)
 	}
 
@@ -129,11 +155,10 @@ func (s *LocalManifestStore) Write(ctx context.Context, m LocalManifest) error {
 		return fmt.Errorf("marshal manifest: %w", err)
 	}
 
-	finalPath := filepath.Join(s.dir, manifestFilename(m))
 	// 0o600: manifests embed the user-supplied investigation prompt and
 	// (on terminal outcomes) the final findings body. Matches the mode
 	// state.go uses for state.json.
-	if err := jsonutil.WriteFileAtomic(finalPath, data, 0o600); err != nil {
+	if err := jsonutil.WriteFileAtomicIn(root, s.name(manifestFilename(m)), data, 0o600); err != nil {
 		return fmt.Errorf("write manifest: %w", err)
 	}
 	return nil
@@ -146,7 +171,14 @@ func (s *LocalManifestStore) Write(ctx context.Context, m LocalManifest) error {
 func (s *LocalManifestStore) List(ctx context.Context) ([]LocalManifest, error) {
 	_ = ctx // Reserved for future use.
 
-	entries, err := os.ReadDir(s.dir)
+	root, err := s.root()
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("open investigations store: %w", err)
+	}
+	entries, err := osroot.ReadDir(root, s.dirName)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return nil, nil
@@ -163,7 +195,7 @@ func (s *LocalManifestStore) List(ctx context.Context) ([]LocalManifest, error) 
 		if !strings.HasSuffix(name, ".json") || strings.HasSuffix(name, ".tmp") {
 			continue
 		}
-		b, readErr := os.ReadFile(filepath.Join(s.dir, name)) //nolint:gosec // names from os.ReadDir(s.dir)
+		b, readErr := osroot.ReadFile(root, s.name(name))
 		if readErr != nil {
 			return nil, fmt.Errorf("read manifest %s: %w", name, readErr)
 		}
@@ -200,23 +232,45 @@ func (s *LocalManifestStore) FindByRunID(ctx context.Context, runID string) (Loc
 	if err := validateRunID(runID); err != nil {
 		return LocalManifest{}, false, fmt.Errorf("invalid run ID: %w", err)
 	}
-	matches, err := filepath.Glob(filepath.Join(s.dir, "*-"+runID+".json"))
-	if err != nil {
-		return LocalManifest{}, false, fmt.Errorf("glob manifest %s: %w", runID, err)
-	}
-	if len(matches) == 0 {
-		return LocalManifest{}, false, nil
-	}
-	b, err := os.ReadFile(matches[0])
+	root, err := s.root()
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return LocalManifest{}, false, nil
 		}
-		return LocalManifest{}, false, fmt.Errorf("read manifest %s: %w", filepath.Base(matches[0]), err)
+		return LocalManifest{}, false, fmt.Errorf("open investigations store: %w", err)
+	}
+	// A directory scan with a literal suffix match rather than filepath.Glob:
+	// os.Root has no glob, and a literal match is the safer primitive anyway —
+	// runID is validated above, but a pattern would let metacharacters in a
+	// future caller's id match unrelated manifests.
+	entries, err := osroot.ReadDir(root, s.dirName)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return LocalManifest{}, false, nil
+		}
+		return LocalManifest{}, false, fmt.Errorf("read investigations manifests dir: %w", err)
+	}
+	suffix := "-" + runID + ".json"
+	match := ""
+	for _, e := range entries {
+		if !e.IsDir() && strings.HasSuffix(e.Name(), suffix) {
+			match = e.Name()
+			break
+		}
+	}
+	if match == "" {
+		return LocalManifest{}, false, nil
+	}
+	b, err := osroot.ReadFile(root, s.name(match))
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return LocalManifest{}, false, nil
+		}
+		return LocalManifest{}, false, fmt.Errorf("read manifest %s: %w", match, err)
 	}
 	var m LocalManifest
 	if err := json.Unmarshal(b, &m); err != nil {
-		return LocalManifest{}, false, fmt.Errorf("decode manifest %s: %w", filepath.Base(matches[0]), err)
+		return LocalManifest{}, false, fmt.Errorf("decode manifest %s: %w", match, err)
 	}
 	return m, true, nil
 }
@@ -287,7 +341,14 @@ func ambiguousRunIDError(candidates []LocalManifest, runID string) error {
 // the zero value. Avoids reading every manifest just to pick the newest one.
 func (s *LocalManifestStore) Latest(ctx context.Context) (LocalManifest, bool, error) {
 	_ = ctx
-	entries, err := os.ReadDir(s.dir)
+	root, err := s.root()
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return LocalManifest{}, false, nil
+		}
+		return LocalManifest{}, false, fmt.Errorf("open investigations store: %w", err)
+	}
+	entries, err := osroot.ReadDir(root, s.dirName)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return LocalManifest{}, false, nil

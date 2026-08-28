@@ -7,9 +7,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
-	"path/filepath"
 
+	"github.com/entireio/cli/cmd/entire/cli/entiredir"
+	"github.com/entireio/cli/cmd/entire/cli/osroot"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 )
 
@@ -29,14 +31,14 @@ func registerFallbackToolUseID(
 	sessionID, toolName string,
 	toolInput json.RawMessage,
 ) (string, error) {
-	statePath, err := fallbackToolUseStatePath(ctx, sessionID)
+	root, name, err := fallbackToolUseStateFile(ctx, sessionID)
 	if err != nil {
 		return "", err
 	}
 
-	state, err := loadFallbackToolUseState(statePath)
+	state, err := loadFallbackToolUseState(root, name)
 	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
+		if errors.Is(err, fs.ErrNotExist) {
 			state = &fallbackToolUseState{}
 		} else {
 			return "", err
@@ -52,7 +54,7 @@ func registerFallbackToolUseID(
 		Fingerprint: fallbackToolFingerprint(toolName, toolInput),
 		ToolUseID:   toolUseID,
 	})
-	if err := saveFallbackToolUseState(statePath, state); err != nil {
+	if err := saveFallbackToolUseState(root, name, state); err != nil {
 		return "", err
 	}
 
@@ -64,14 +66,14 @@ func resolveFallbackToolUseID(
 	sessionID, toolName string,
 	toolInput json.RawMessage,
 ) (string, error) {
-	statePath, err := fallbackToolUseStatePath(ctx, sessionID)
+	root, name, err := fallbackToolUseStateFile(ctx, sessionID)
 	if err != nil {
 		return "", err
 	}
 
-	state, err := loadFallbackToolUseState(statePath)
+	state, err := loadFallbackToolUseState(root, name)
 	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
+		if errors.Is(err, fs.ErrNotExist) {
 			return fallbackToolUseID(sessionID, toolName, toolInput), nil
 		}
 		return "", err
@@ -85,7 +87,7 @@ func resolveFallbackToolUseID(
 
 		toolUseID := state.Entries[i].ToolUseID
 		state.Entries = append(state.Entries[:i], state.Entries[i+1:]...)
-		if err := saveFallbackToolUseState(statePath, state); err != nil {
+		if err := saveFallbackToolUseState(root, name, state); err != nil {
 			return "", err
 		}
 		return toolUseID, nil
@@ -102,21 +104,25 @@ func newFallbackToolUseID() (string, error) {
 	return "factorytask_" + hex.EncodeToString(suffix[:]), nil
 }
 
-func fallbackToolUseStatePath(ctx context.Context, sessionID string) (string, error) {
-	tmpDir, err := paths.AbsPath(ctx, paths.EntireTmpDir)
+// fallbackToolUseStateFile returns the shared .entire root and the state file's
+// name within it. The name is derived from a hash of the session ID rather than
+// the ID itself, but it still goes through the root: every other .entire access
+// does, and a name that never escapes is one less thing to re-argue here.
+func fallbackToolUseStateFile(ctx context.Context, sessionID string) (*os.Root, string, error) {
+	root, err := entiredir.Open(ctx)
 	if err != nil {
-		return "", fmt.Errorf("resolve fallback tool_use_id tmp dir: %w", err)
+		return nil, "", fmt.Errorf("resolve fallback tool_use_id tmp dir: %w", err)
 	}
-	if err := os.MkdirAll(tmpDir, 0o750); err != nil {
-		return "", fmt.Errorf("create fallback tool_use_id tmp dir: %w", err)
+	if err := osroot.MkdirAllNoSymlink(root, entireTmpName, 0o750); err != nil {
+		return nil, "", fmt.Errorf("create fallback tool_use_id tmp dir: %w", err)
 	}
 
 	sessionHash := fallbackToolUseID(sessionID, "", nil)
-	return filepath.Join(tmpDir, fallbackToolUseStatePrefix+sessionHash+".json"), nil
+	return root, entireTmpName + "/" + fallbackToolUseStatePrefix + sessionHash + ".json", nil
 }
 
-func loadFallbackToolUseState(path string) (*fallbackToolUseState, error) {
-	data, err := os.ReadFile(filepath.Clean(path))
+func loadFallbackToolUseState(root *os.Root, name string) (*fallbackToolUseState, error) {
+	data, err := osroot.ReadFile(root, name)
 	if err != nil {
 		return nil, fmt.Errorf("read fallback tool_use_id state: %w", err)
 	}
@@ -128,9 +134,9 @@ func loadFallbackToolUseState(path string) (*fallbackToolUseState, error) {
 	return &state, nil
 }
 
-func saveFallbackToolUseState(path string, state *fallbackToolUseState) error {
+func saveFallbackToolUseState(root *os.Root, name string, state *fallbackToolUseState) error {
 	if len(state.Entries) == 0 {
-		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		if err := root.Remove(name); err != nil && !errors.Is(err, fs.ErrNotExist) {
 			return fmt.Errorf("remove empty fallback tool_use_id state: %w", err)
 		}
 		return nil
@@ -140,8 +146,11 @@ func saveFallbackToolUseState(path string, state *fallbackToolUseState) error {
 	if err != nil {
 		return fmt.Errorf("marshal fallback tool_use_id state: %w", err)
 	}
-	if err := os.WriteFile(path, data, 0o600); err != nil {
+	if err := osroot.WriteFile(root, name, data, 0o600); err != nil {
 		return fmt.Errorf("write fallback tool_use_id state: %w", err)
 	}
 	return nil
 }
+
+// entireTmpName is .entire/tmp relative to the .entire root.
+var entireTmpName = entiredir.MustName(paths.EntireTmpDir)

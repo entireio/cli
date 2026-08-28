@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
+	"github.com/entireio/cli/cmd/entire/cli/osroot"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 
 	"github.com/go-git/go-git/v6"
@@ -49,7 +50,7 @@ func writeCacheEntry(t *testing.T, cache *redactCache, treePath string, entry re
 	t.Helper()
 	data, err := json.Marshal(entry)
 	require.NoError(t, err)
-	require.NoError(t, os.WriteFile(cache.path(treePath), data, 0o600))
+	require.NoError(t, osroot.WriteFile(cache.root, cache.entryName(treePath), data, 0o600))
 }
 
 func newTestRepoForCache(t *testing.T) (*git.Repository, string) {
@@ -70,7 +71,10 @@ func writeAndRedact(t *testing.T, repo *git.Repository, cache *redactCache, dir,
 	t.Helper()
 	path := filepath.Join(dir, name)
 	require.NoError(t, os.WriteFile(path, []byte(content), 0o600))
-	hash, _, err := createRedactedBlobFromFile(context.Background(), repo, cache, path, name)
+	root, err := os.OpenRoot(dir)
+	require.NoError(t, err)
+	defer root.Close()
+	hash, _, err := createRedactedBlobFromFile(context.Background(), repo, cache, root, name, name)
 	require.NoError(t, err)
 	got, err := readBlobBytes(repo, hash, 0)
 	require.NoError(t, err)
@@ -241,7 +245,7 @@ func TestRedactCache_IgnoresCorruptEntry(t *testing.T) {
 	content := padPastCacheThreshold(t, transcriptLines(0, 100))
 	writeAndRedact(t, repo, cache, dir, "full.jsonl", content)
 
-	require.NoError(t, os.WriteFile(cache.path("full.jsonl"), []byte("{not json"), 0o600))
+	require.NoError(t, osroot.WriteFile(cache.root, cache.entryName("full.jsonl"), []byte("{not json"), 0o600))
 	require.Nil(t, cache.load("full.jsonl"))
 
 	content += transcriptLines(700, 10)

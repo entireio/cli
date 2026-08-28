@@ -12,8 +12,10 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/entireio/cli/cmd/entire/cli/gitdir"
 	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
+	"github.com/entireio/cli/cmd/entire/cli/osroot"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/versioninfo"
 	"github.com/entireio/cli/redact"
@@ -111,7 +113,13 @@ type redactPrefixEntry struct {
 // the git common dir. A nil *redactCache disables incremental reuse, which is
 // what every caller that cannot resolve the git dir gets.
 type redactCache struct {
-	dir string
+	// dir is the absolute cache directory, kept for messages. All I/O is a name
+	// inside root, the shared *os.Root over the git common dir: entry names are
+	// hashes of tree paths, which are safe by construction, but going through
+	// the root means that stays true without anyone re-deriving the argument.
+	dir  string
+	root *os.Root
+	name string
 }
 
 // newRedactCache returns a cache rooted at gitCommonDir, or nil when the
@@ -120,11 +128,18 @@ func newRedactCache(gitCommonDir string) *redactCache {
 	if gitCommonDir == "" {
 		return nil
 	}
-	dir := filepath.Join(gitCommonDir, RedactCacheDirName)
-	if err := os.MkdirAll(dir, 0o700); err != nil {
+	root, err := gitdir.OpenAt(gitCommonDir)
+	if err != nil {
 		return nil
 	}
-	return &redactCache{dir: dir}
+	if err := osroot.MkdirAllNoSymlink(root, RedactCacheDirName, 0o700); err != nil {
+		return nil
+	}
+	return &redactCache{
+		dir:  filepath.Join(gitCommonDir, RedactCacheDirName),
+		root: root,
+		name: RedactCacheDirName,
+	}
 }
 
 // repoRedactCache resolves the prefix cache for repo, or nil when the git common
@@ -149,13 +164,14 @@ func redactionFingerprint() string {
 	return versioninfo.Version + ":" + versioninfo.Commit + ":" + redact.ConfigFingerprint()
 }
 
-func (c *redactCache) path(treePath string) string {
+// entryName renders a tree path's cache entry as a name relative to c.root.
+func (c *redactCache) entryName(treePath string) string {
 	sum := sha256.Sum256([]byte(treePath))
-	return filepath.Join(c.dir, hex.EncodeToString(sum[:])+".json")
+	return c.name + "/" + hex.EncodeToString(sum[:]) + ".json"
 }
 
 func (c *redactCache) load(treePath string) *redactPrefixEntry {
-	data, err := os.ReadFile(c.path(treePath))
+	data, err := osroot.ReadFile(c.root, c.entryName(treePath))
 	if err != nil {
 		return nil
 	}
@@ -194,7 +210,7 @@ func (c *redactCache) storePrefixBytes(ctx context.Context, treePath, sourceHash
 		return
 	}
 	name := prefixFileName(treePath)
-	if err := jsonutil.WriteFileAtomic(filepath.Join(c.dir, name), redacted, 0o600); err != nil {
+	if err := jsonutil.WriteFileAtomicIn(c.root, c.name+"/"+name, redacted, 0o600); err != nil {
 		logging.Debug(logging.WithComponent(ctx, "redaction"),
 			"failed to store redaction prefix bytes", slog.String("error", err.Error()))
 		return
@@ -218,7 +234,7 @@ func (c *redactCache) writeEntry(ctx context.Context, treePath string, entry red
 	if err != nil {
 		return
 	}
-	if err := jsonutil.WriteFileAtomic(c.path(treePath), data, 0o600); err != nil {
+	if err := jsonutil.WriteFileAtomicIn(c.root, c.entryName(treePath), data, 0o600); err != nil {
 		logging.Debug(logging.WithComponent(ctx, "redaction"),
 			"failed to store redaction prefix cache", slog.String("error", err.Error()))
 	}
@@ -242,7 +258,7 @@ func prefixFileName(treePath string) string {
 // error instead of a bad cache entry.
 func (c *redactCache) readPrefix(repo *git.Repository, entry *redactPrefixEntry, sizeHint int) ([]byte, error) {
 	if entry.RedactedFile != "" {
-		return readFileBytes(filepath.Join(c.dir, entry.RedactedFile), sizeHint)
+		return readFileBytes(c.root, c.name+"/"+entry.RedactedFile, sizeHint)
 	}
 	if entry.RedactedBlob == "" {
 		return nil, errors.New("cache entry names neither a prefix file nor a blob")
@@ -430,9 +446,9 @@ func readBlobBytes(repo *git.Repository, hash plumbing.Hash, sizeHint int) ([]by
 	return out, nil
 }
 
-// readFileBytes is readBlobBytes for a file-backed prefix.
-func readFileBytes(path string, sizeHint int) ([]byte, error) {
-	f, err := os.Open(path) //nolint:gosec // path is derived from a hash of a tree path inside our own cache dir
+// readFileBytes is readBlobBytes for a file-backed prefix, named inside root.
+func readFileBytes(root *os.Root, path string, sizeHint int) ([]byte, error) {
+	f, err := root.Open(path)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open prefix %s: %w", path, err)
 	}

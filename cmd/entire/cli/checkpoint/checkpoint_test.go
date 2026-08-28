@@ -86,7 +86,7 @@ func TestCopyMetadataDir_SkipsSymlinks(t *testing.T) {
 	store := NewGitStore(repo, DefaultV1Refs())
 	entries := make(map[string]object.TreeEntry)
 
-	err = store.copyMetadataDir(context.Background(), metadataDir, "checkpoint/", entries)
+	err = store.copyMetadataDir(context.Background(), mustWalkRoot(t, metadataDir), "metadata", "checkpoint/", entries)
 	if err != nil {
 		t.Fatalf("copyMetadataDir failed: %v", err)
 	}
@@ -480,7 +480,6 @@ func TestWriteTemporary_Deduplication(t *testing.T) {
 		BaseCommit:        baseCommit,
 		ModifiedFiles:     []string{"test.go"},
 		MetadataDir:       ".entire/metadata/test-session",
-		MetadataDirAbs:    metadataDir,
 		CommitMessage:     "Checkpoint 1",
 		AuthorName:        "Test",
 		AuthorEmail:       "test@test.com",
@@ -502,7 +501,6 @@ func TestWriteTemporary_Deduplication(t *testing.T) {
 		BaseCommit:        baseCommit,
 		ModifiedFiles:     []string{"test.go"},
 		MetadataDir:       ".entire/metadata/test-session",
-		MetadataDirAbs:    metadataDir,
 		CommitMessage:     "Checkpoint 2",
 		AuthorName:        "Test",
 		AuthorEmail:       "test@test.com",
@@ -529,7 +527,6 @@ func TestWriteTemporary_Deduplication(t *testing.T) {
 		BaseCommit:        baseCommit,
 		ModifiedFiles:     []string{"test.go"},
 		MetadataDir:       ".entire/metadata/test-session",
-		MetadataDirAbs:    metadataDir,
 		CommitMessage:     "Checkpoint 3",
 		AuthorName:        "Test",
 		AuthorEmail:       "test@test.com",
@@ -2172,7 +2169,6 @@ func TestWriteTemporary_FirstCheckpoint_CapturesModifiedTrackedFiles(t *testing.
 		BaseCommit:        baseCommit,
 		ModifiedFiles:     []string{}, // Agent hasn't modified anything
 		MetadataDir:       ".entire/metadata/test-session",
-		MetadataDirAbs:    metadataDir,
 		CommitMessage:     "First checkpoint",
 		AuthorName:        "Test",
 		AuthorEmail:       "test@test.com",
@@ -2296,14 +2292,13 @@ func TestWriteTemporary_PathNormalizationAndSkipping(t *testing.T) {
 
 			store := newEphemeralStore(repo, DefaultV1Refs())
 			result, err := store.Write(context.Background(), Step{
-				SessionID:      "test-session",
-				BaseCommit:     initialCommit.String(),
-				ModifiedFiles:  tt.modifiedFiles(tempDir, mainFile),
-				MetadataDir:    ".entire/metadata/test-session",
-				MetadataDirAbs: metadataDir,
-				CommitMessage:  "Checkpoint with path normalization",
-				AuthorName:     "Test",
-				AuthorEmail:    "test@test.com",
+				SessionID:     "test-session",
+				BaseCommit:    initialCommit.String(),
+				ModifiedFiles: tt.modifiedFiles(tempDir, mainFile),
+				MetadataDir:   ".entire/metadata/test-session",
+				CommitMessage: "Checkpoint with path normalization",
+				AuthorName:    "Test",
+				AuthorEmail:   "test@test.com",
 			})
 			if err != nil {
 				t.Fatalf("WriteTemporary() error = %v", err)
@@ -2403,7 +2398,6 @@ func TestWriteTemporary_FirstCheckpoint_CapturesUntrackedFiles(t *testing.T) {
 		ModifiedFiles:     []string{},
 		NewFiles:          []string{}, // NewFiles might be empty if this is truly "at session start"
 		MetadataDir:       ".entire/metadata/test-session",
-		MetadataDirAbs:    metadataDir,
 		CommitMessage:     "First checkpoint",
 		AuthorName:        "Test",
 		AuthorEmail:       "test@test.com",
@@ -2518,7 +2512,6 @@ func TestWriteTemporary_PreservesSymlinkWithoutReadingTarget(t *testing.T) {
 				BaseCommit:        initialCommit.String(),
 				NewFiles:          newFiles,
 				MetadataDir:       ".entire/metadata/test-session",
-				MetadataDirAbs:    metadataDir,
 				CommitMessage:     "Checkpoint symlink",
 				AuthorName:        "Test",
 				AuthorEmail:       "test@test.com",
@@ -2635,7 +2628,6 @@ func TestWriteTemporary_FirstCheckpoint_ExcludesGitIgnoredFiles(t *testing.T) {
 		BaseCommit:        baseCommit,
 		ModifiedFiles:     []string{},
 		MetadataDir:       ".entire/metadata/test-session",
-		MetadataDirAbs:    metadataDir,
 		CommitMessage:     "First checkpoint",
 		AuthorName:        "Test",
 		AuthorEmail:       "test@test.com",
@@ -2736,7 +2728,6 @@ func TestWriteTemporary_SubsequentCheckpoint_ExcludesGitIgnoredModifiedFiles(t *
 		BaseCommit:        baseCommit,
 		ModifiedFiles:     []string{},
 		MetadataDir:       ".entire/metadata/test-session",
-		MetadataDirAbs:    metadataDir,
 		CommitMessage:     "First checkpoint",
 		AuthorName:        "Test",
 		AuthorEmail:       "test@test.com",
@@ -2757,7 +2748,6 @@ func TestWriteTemporary_SubsequentCheckpoint_ExcludesGitIgnoredModifiedFiles(t *
 		NewFiles:          []string{},
 		DeletedFiles:      []string{},
 		MetadataDir:       ".entire/metadata/test-session",
-		MetadataDirAbs:    metadataDir,
 		CommitMessage:     "Second checkpoint",
 		AuthorName:        "Test",
 		AuthorEmail:       "test@test.com",
@@ -2856,7 +2846,6 @@ func TestWriteTemporary_SubsequentCheckpoint_ExcludesGitIgnoredNewFiles(t *testi
 		SessionID:         "test-session",
 		BaseCommit:        baseCommit,
 		MetadataDir:       ".entire/metadata/test-session",
-		MetadataDirAbs:    metadataDir,
 		CommitMessage:     "First checkpoint",
 		AuthorName:        "Test",
 		AuthorEmail:       "test@test.com",
@@ -2875,7 +2864,6 @@ func TestWriteTemporary_SubsequentCheckpoint_ExcludesGitIgnoredNewFiles(t *testi
 		NewFiles:          []string{"config.go", ".env"}, // Agent created both
 		DeletedFiles:      []string{},
 		MetadataDir:       ".entire/metadata/test-session",
-		MetadataDirAbs:    metadataDir,
 		CommitMessage:     "Second checkpoint",
 		AuthorName:        "Test",
 		AuthorEmail:       "test@test.com",
@@ -2967,7 +2955,6 @@ func TestWriteTemporary_SubsequentCheckpoint_ExcludesNestedGitIgnoredFiles(t *te
 		SessionID:         "test-session",
 		BaseCommit:        baseCommit,
 		MetadataDir:       ".entire/metadata/test-session",
-		MetadataDirAbs:    metadataDir,
 		CommitMessage:     "First checkpoint",
 		AuthorName:        "Test",
 		AuthorEmail:       "test@test.com",
@@ -2986,7 +2973,6 @@ func TestWriteTemporary_SubsequentCheckpoint_ExcludesNestedGitIgnoredFiles(t *te
 		NewFiles:          []string{},
 		DeletedFiles:      []string{},
 		MetadataDir:       ".entire/metadata/test-session",
-		MetadataDirAbs:    metadataDir,
 		CommitMessage:     "Second checkpoint",
 		AuthorName:        "Test",
 		AuthorEmail:       "test@test.com",
@@ -3091,7 +3077,6 @@ func TestWriteTemporary_FirstCheckpoint_UserAndAgentChanges(t *testing.T) {
 		BaseCommit:        baseCommit,
 		ModifiedFiles:     []string{"main.go"}, // Only agent-modified file in list
 		MetadataDir:       ".entire/metadata/test-session",
-		MetadataDirAbs:    metadataDir,
 		CommitMessage:     "First checkpoint",
 		AuthorName:        "Test",
 		AuthorEmail:       "test@test.com",
@@ -3207,7 +3192,6 @@ func TestWriteTemporary_FirstCheckpoint_CapturesUserDeletedFiles(t *testing.T) {
 		ModifiedFiles:     []string{},
 		DeletedFiles:      []string{}, // No agent deletions
 		MetadataDir:       ".entire/metadata/test-session",
-		MetadataDirAbs:    metadataDir,
 		CommitMessage:     "First checkpoint",
 		AuthorName:        "Test",
 		AuthorEmail:       "test@test.com",
@@ -3306,7 +3290,6 @@ func TestWriteTemporary_FirstCheckpoint_CapturesRenamedFiles(t *testing.T) {
 		ModifiedFiles:     []string{},
 		DeletedFiles:      []string{},
 		MetadataDir:       ".entire/metadata/test-session",
-		MetadataDirAbs:    metadataDir,
 		CommitMessage:     "First checkpoint",
 		AuthorName:        "Test",
 		AuthorEmail:       "test@test.com",
@@ -3403,7 +3386,6 @@ func TestWriteTemporary_FirstCheckpoint_FilenamesWithSpaces(t *testing.T) {
 		ModifiedFiles:     []string{},
 		DeletedFiles:      []string{},
 		MetadataDir:       ".entire/metadata/test-session",
-		MetadataDirAbs:    metadataDir,
 		CommitMessage:     "First checkpoint",
 		AuthorName:        "Test",
 		AuthorEmail:       "test@test.com",
@@ -3911,7 +3893,7 @@ func TestCopyMetadataDir_RedactsSecrets(t *testing.T) {
 	store := NewGitStore(repo, DefaultV1Refs())
 	entries := make(map[string]object.TreeEntry)
 
-	if err := store.copyMetadataDir(context.Background(), metadataDir, "cp/", entries); err != nil {
+	if err := store.copyMetadataDir(context.Background(), mustWalkRoot(t, metadataDir), "metadata", "cp/", entries); err != nil {
 		t.Fatalf("copyMetadataDir() error = %v", err)
 	}
 
@@ -4889,7 +4871,7 @@ func TestAddDirectoryToChanges_PathTraversal(t *testing.T) {
 		t.Fatalf("failed to write file: %v", err)
 	}
 
-	changes, err := addDirectoryToChanges(context.Background(), repo, nil, metadataDir, ".entire/metadata/session")
+	changes, err := addDirectoryToChanges(context.Background(), repo, nil, mustWalkRoot(t, metadataDir), "metadata", ".entire/metadata/session")
 	if err != nil {
 		t.Fatalf("addDirectoryToChanges failed: %v", err)
 	}
@@ -4920,7 +4902,7 @@ func TestMetadataDirectoryWalkersAllowDotDotPrefixedNames(t *testing.T) {
 
 	expectedPath := filepath.ToSlash(filepath.Join("checkpoint", "..generated", "schema.json"))
 
-	changes, err := addDirectoryToChanges(context.Background(), repo, nil, metadataDir, "checkpoint")
+	changes, err := addDirectoryToChanges(context.Background(), repo, nil, mustWalkRoot(t, metadataDir), "metadata", "checkpoint")
 	if err != nil {
 		t.Fatalf("addDirectoryToChanges failed: %v", err)
 	}
@@ -4930,7 +4912,7 @@ func TestMetadataDirectoryWalkersAllowDotDotPrefixedNames(t *testing.T) {
 
 	committedEntries := make(map[string]object.TreeEntry)
 	store := NewGitStore(repo, DefaultV1Refs())
-	if err := store.copyMetadataDir(context.Background(), metadataDir, "checkpoint/", committedEntries); err != nil {
+	if err := store.copyMetadataDir(context.Background(), mustWalkRoot(t, metadataDir), "metadata", "checkpoint/", committedEntries); err != nil {
 		t.Fatalf("copyMetadataDir failed: %v", err)
 	}
 	if _, ok := committedEntries[expectedPath]; !ok {
@@ -4972,7 +4954,7 @@ func TestAddDirectoryToChanges_SkipsSymlinks(t *testing.T) {
 		t.Fatalf("failed to create symlink: %v", err)
 	}
 
-	changes, err := addDirectoryToChanges(context.Background(), repo, nil, metadataDir, "checkpoint/")
+	changes, err := addDirectoryToChanges(context.Background(), repo, nil, mustWalkRoot(t, metadataDir), "metadata", "checkpoint/")
 	if err != nil {
 		t.Fatalf("addDirectoryToChanges failed: %v", err)
 	}
@@ -5032,7 +5014,7 @@ func TestAddDirectoryToChanges_SkipsSymlinkedDirectories(t *testing.T) {
 		t.Fatalf("failed to create directory symlink: %v", err)
 	}
 
-	changes, err := addDirectoryToChanges(context.Background(), repo, nil, metadataDir, "checkpoint/")
+	changes, err := addDirectoryToChanges(context.Background(), repo, nil, mustWalkRoot(t, metadataDir), "metadata", "checkpoint/")
 	if err != nil {
 		t.Fatalf("addDirectoryToChanges failed: %v", err)
 	}
@@ -5715,4 +5697,17 @@ func TestWriteCommitted_CodexSanitizesTranscriptFromPath(t *testing.T) {
 	require.Contains(t, got, "hello", "conversation content was lost")
 	require.Len(t, strings.Split(strings.TrimRight(got, "\n"), "\n"), 3,
 		"stored transcript must stay line-aligned with the rollout")
+}
+
+// mustWalkRoot opens metadataDir's parent as an os.Root, standing in for the
+// shared .entire root the production walkers are handed. The directory's own
+// name is passed alongside it, exactly as entiredir.Name would produce.
+func mustWalkRoot(t *testing.T, metadataDir string) *os.Root {
+	t.Helper()
+	root, err := os.OpenRoot(filepath.Dir(metadataDir))
+	if err != nil {
+		t.Fatalf("os.OpenRoot(%s): %v", filepath.Dir(metadataDir), err)
+	}
+	t.Cleanup(func() { _ = root.Close() })
+	return root
 }

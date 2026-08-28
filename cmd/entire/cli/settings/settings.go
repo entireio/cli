@@ -14,13 +14,17 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"strings"
 	"time"
 
+	"github.com/entireio/cli/cmd/entire/cli/entiredir"
+	"github.com/entireio/cli/cmd/entire/cli/gitdir"
 	"github.com/entireio/cli/cmd/entire/cli/internal/flock"
 	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
+	"github.com/entireio/cli/cmd/entire/cli/osroot"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/redact"
@@ -31,6 +35,13 @@ const (
 	EntireSettingsFile = ".entire/settings.json"
 	// EntireSettingsLocalFile is the path to the local settings override file (not committed)
 	EntireSettingsLocalFile = ".entire/settings.local.json"
+
+	// SettingsName and SettingsLocalName name the same two files relative to
+	// the .entire root, which is the coordinate every read and write of them
+	// uses. The repo-relative spellings above stay for display, git paths, and
+	// tracked-file checks.
+	SettingsName      = "settings.json"
+	SettingsLocalName = "settings.local.json"
 	// ClonePreferencesFile is the path inside the git common dir for clone-local preferences.
 	ClonePreferencesFile = "entire/preferences.json"
 )
@@ -575,11 +586,15 @@ func Load(ctx context.Context) (*EntireSettings, error) {
 // the current working directory, falling back to the relative path when
 // absolute resolution fails.
 func settingsAbsPaths(ctx context.Context) (base, local string) {
-	base, err := paths.AbsPath(ctx, EntireSettingsFile)
+	// entiredir.PathTo, not paths.AbsPath: both files live under .entire, and
+	// entiredir owns the one anchor for that directory. AbsPath's failure mode
+	// here was a relative path that then resolved against the process's own
+	// directory, which is the thing the anchor exists to prevent.
+	base, err := entiredir.PathTo(ctx, EntireSettingsFile)
 	if err != nil {
 		base = EntireSettingsFile // Fallback to relative
 	}
-	local, err = paths.AbsPath(ctx, EntireSettingsLocalFile)
+	local, err = entiredir.PathTo(ctx, EntireSettingsLocalFile)
 	if err != nil {
 		local = EntireSettingsLocalFile // Fallback to relative
 	}
@@ -713,11 +728,31 @@ func LoadLocalRaw(ctx context.Context) (path string, raw map[string]json.RawMess
 	return loadRaw(ctx, EntireSettingsLocalFile, "local")
 }
 
+// LoadLocalBytes reads .entire/settings.local.json's raw bytes through the
+// shared .entire root, returning nil when the file does not exist. It exists so
+// callers that decode the local layer themselves (they need LoadFromBytes'
+// no-defaults semantics, not loadFromFile's Enabled: true) still read the file
+// through this package rather than reaching for os.ReadFile on a joined path.
+func LoadLocalBytes(ctx context.Context) ([]byte, error) {
+	filePath, err := entiredir.PathTo(ctx, EntireSettingsLocalFile)
+	if err != nil {
+		filePath = EntireSettingsLocalFile
+	}
+	data, err := readConfined(filePath)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("reading local settings: %w", err)
+	}
+	return data, nil
+}
+
 // loadRaw reads a settings file as a generic JSON object. label ("project" or
 // "local") only differentiates error wording so failures name the file
 // actually being read.
 func loadRaw(ctx context.Context, file, label string) (path string, raw map[string]json.RawMessage, exists bool, err error) {
-	path, err = paths.AbsPath(ctx, file)
+	path, err = entiredir.PathTo(ctx, file)
 	if err != nil {
 		path = file
 	}
@@ -756,19 +791,15 @@ func SaveLocalRaw(path string, raw map[string]json.RawMessage) error {
 
 // saveRaw writes a generic JSON settings object atomically (temp file +
 // rename). label matches loadRaw's error-wording convention.
-func saveRaw(path, label string, raw map[string]json.RawMessage) error {
+func saveRaw(filePath, label string, raw map[string]json.RawMessage) error {
 	data, err := jsonutil.MarshalIndentWithNewline(raw, "", "  ")
 	if err != nil {
 		return fmt.Errorf("marshal %s settings: %w", label, err)
 	}
-	// Ensure the parent directory exists, mirroring the struct save path
-	// (saveToFile). Without this, the raw save path fails in a repo that has
-	// never created .entire/ — e.g. a bare `entire disable` in a fresh repo,
-	// which resolves to a raw flip before any directory is created.
-	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
-		return fmt.Errorf("creating %s settings directory: %w", label, err)
-	}
-	if err := jsonutil.WriteFileAtomic(path, data, 0o644); err != nil {
+	// writeConfinedAtomic creates the parent directory, which matters in a repo
+	// that has never created .entire/ — e.g. a bare `entire disable` in a fresh
+	// repo, which resolves to a raw flip before any directory exists.
+	if err := writeConfinedAtomic(filePath, data, 0o644); err != nil {
 		return fmt.Errorf("writing %s settings: %w", label, err)
 	}
 	return nil
@@ -818,18 +849,25 @@ func LoadFromBytes(data []byte) (*EntireSettings, error) {
 	return s, nil
 }
 
-// readConfined reads filePath through an os.Root anchored at its parent
-// directory, refusing outright to read it if it is a symbolic link.
+// readConfined reads filePath through an os.Root, refusing outright to read it
+// if it is a symbolic link.
 //
-// The root confines the open to that directory, so the read cannot be
-// redirected outside it by a swapped or symlinked path between resolution and
-// open (TOCTOU) — unlike a bare os.ReadFile of an absolute path. Callers must
+// The root confines the open to its directory, so the read cannot be redirected
+// outside it by a swapped or symlinked path between resolution and open
+// (TOCTOU) — unlike a bare os.ReadFile of an absolute path. Callers must
 // classify "missing" with errors.Is(err, fs.ErrNotExist) rather than
 // os.IsNotExist, since the returned errors are wrapped.
 //
-// Confinement alone is NOT the invariant, which is why the Lstat is here as
-// well. Entire's config files are never read through a link, wherever it points,
-// and os.Root leaves two gaps against that:
+// WHICH root is chosen by where the path is, not by whether an open succeeded:
+// a path under .entire is read through the shared root every other .entire
+// consumer uses, and a permission failure there must surface rather than
+// silently retry through a second root. The other branch is not a weaker path
+// but a different directory — this same function also reads clone preferences
+// out of the git common dir, which .entire has no claim on.
+//
+// Confinement alone is NOT the invariant, which is why readConfinedIn also
+// Lstats. Entire's config files are never read through a link, wherever it
+// points, and os.Root leaves two gaps against that:
 //
 //   - A RELATIVE link whose target stays inside the directory is followed
 //     without complaint. `.entire/settings.local.json -> planted.json` is the
@@ -844,26 +882,67 @@ func LoadFromBytes(data []byte) (*EntireSettings, error) {
 // but as "path escapes from parent", which describes neither the cause nor the
 // fix. All four now give the same verdict and the same remedy.
 //
-// Lstat and Open are separate operations, so checking only before the open
-// leaves a race: the entry can become an in-root symlink between them and
-// os.Root will follow it. After opening, validate that the path is still a real
-// file and names the same object as the open descriptor. Once that succeeds,
-// later path swaps do not matter because the read uses the already-open file.
-//
 // This overlaps paths.ValidateEntireDirAt, which rejects a symlinked entry in
 // `.entire` before a command runs at all. The duplication is deliberate: that
 // guard hangs off the root pre-run and cli.LoadEntireSettings, while eighteen
 // files call settings.Load directly — the strategy hook paths among them — and
 // this is the read those callers have in common.
 func readConfined(filePath string) ([]byte, error) {
+	// Branch on WHERE the path is, not on whether the open succeeded: a
+	// permission failure inside .entire must surface, not silently retry
+	// through a second root.
+	if _, _, underEntire := entiredir.Split(filePath); !underEntire {
+		return readConfinedOutsideEntire(filePath)
+	}
+
+	// A relative path is resolved against the process's directory, which is what
+	// "relative" means and what LoadFromFile's callers pass deliberately. The
+	// anchor rule entiredir enforces is about code that DERIVES a .entire path
+	// (see settingsAbsPaths, which now goes through entiredir.PathTo); it is not
+	// a reason to refuse a path a caller handed us.
+	filePath, err := filepath.Abs(filePath)
+	if err != nil {
+		return nil, fmt.Errorf("resolve settings path: %w", err)
+	}
+
+	root, name, err := entiredir.OpenPathForRead(filePath)
+	if err != nil {
+		return nil, fmt.Errorf("open settings dir: %w", err)
+	}
+	return readConfinedIn(root, name, filePath)
+}
+
+// readConfinedOutsideEntire reads the clone-preferences file, which lives in the
+// git common dir rather than under .entire, through that directory's shared
+// root. A path this cannot place under a common dir falls back to a root
+// anchored at the file's own parent, which is what the explicit-path test
+// callers pass.
+func readConfinedOutsideEntire(filePath string) ([]byte, error) {
+	if root, name, err := clonePreferencesRoot(filePath); err == nil {
+		return readConfinedIn(root, name, filePath)
+	}
+
 	root, err := os.OpenRoot(filepath.Dir(filePath))
 	if err != nil {
 		return nil, fmt.Errorf("open settings dir: %w", err)
 	}
 	defer root.Close()
 
-	base := filepath.Base(filePath)
-	info, err := root.Lstat(base)
+	return readConfinedIn(root, filepath.Base(filePath), filePath)
+}
+
+// readConfinedIn is the one read every readConfined branch performs: refuse a
+// symlink, open, re-validate against the race, then read.
+//
+// It exists so the refusal cannot be true of one branch and not another. It was
+// briefly true of only one: the .entire branch read straight through
+// osroot.ReadFile, which follows an in-root symlink silently — precisely the
+// `.entire/settings.local.json -> planted.json` case the check exists for.
+//
+// filePath is carried alongside name only for the error text: name is relative
+// to a root the caller cannot see, and the user needs the path they can act on.
+func readConfinedIn(root *os.Root, name, filePath string) ([]byte, error) {
+	info, err := root.Lstat(name)
 	if err != nil {
 		return nil, fmt.Errorf("inspect settings file: %w", err)
 	}
@@ -872,13 +951,13 @@ func readConfined(filePath string) ([]byte, error) {
 		return nil, paths.SymlinkedEntryError(filePath)
 	}
 
-	f, err := root.Open(base)
+	f, err := root.Open(name)
 	if err != nil {
 		return nil, fmt.Errorf("open settings file: %w", err)
 	}
 	defer f.Close()
 
-	if err := validateOpenedFile(root, base, filePath, f); err != nil {
+	if err := validateOpenedFile(root, name, filePath, f); err != nil {
 		return nil, err
 	}
 
@@ -893,8 +972,8 @@ func readConfined(filePath string) ([]byte, error) {
 // still be a non-symlink and must identify the object held by f. A replacement
 // after this check cannot redirect the read, because f is already bound to the
 // validated object.
-func validateOpenedFile(root *os.Root, base, filePath string, f *os.File) error {
-	pathInfo, err := root.Lstat(base)
+func validateOpenedFile(root *os.Root, name, filePath string, f *os.File) error {
+	pathInfo, err := root.Lstat(name)
 	if err != nil {
 		return fmt.Errorf("reinspect settings file: %w", err)
 	}
@@ -911,6 +990,37 @@ func validateOpenedFile(root *os.Root, base, filePath string, f *os.File) error 
 		return fmt.Errorf("settings file changed while it was being opened: %s", filePath)
 	}
 	return nil
+}
+
+// writeConfinedAtomic is readConfined's write half: an atomic write through the
+// shared .entire root, falling back to a plain atomic write for the clone
+// preferences file in .git. It creates the parent directory, which for a
+// .entire path means the root itself.
+func writeConfinedAtomic(filePath string, data []byte, perm fs.FileMode) error {
+	// Same branch-on-location rule as readConfined.
+	if _, _, underEntire := entiredir.Split(filePath); !underEntire {
+		if mkErr := os.MkdirAll(filepath.Dir(filePath), 0o750); mkErr != nil {
+			return fmt.Errorf("creating settings directory: %w", mkErr)
+		}
+		return jsonutil.WriteFileAtomic(filePath, data, perm) //nolint:wrapcheck // caller names the file being written
+	}
+
+	// Same relative-path handling as readConfined.
+	filePath, err := filepath.Abs(filePath)
+	if err != nil {
+		return fmt.Errorf("resolve settings path: %w", err)
+	}
+
+	root, name, err := entiredir.OpenPath(filePath)
+	if err != nil {
+		return fmt.Errorf("creating settings directory: %w", err)
+	}
+	if dir := path.Dir(name); dir != "." {
+		if err := osroot.MkdirAllNoSymlink(root, dir, 0o750); err != nil {
+			return fmt.Errorf("creating settings directory: %w", err)
+		}
+	}
+	return jsonutil.WriteFileAtomicIn(root, name, data, perm) //nolint:wrapcheck // caller names the file being written
 }
 
 // loadFromFile loads settings from a specific file path.
@@ -984,17 +1094,21 @@ func saveClonePreferencesToFile(prefs *ClonePreferences, filePath string) error 
 	if prefs == nil {
 		prefs = &ClonePreferences{}
 	}
-	dir := filepath.Dir(filePath)
-	if err := os.MkdirAll(dir, 0o750); err != nil {
-		return fmt.Errorf("creating preferences directory: %w", err)
-	}
-
 	data, err := jsonutil.MarshalIndentWithNewline(prefs, "", "  ")
 	if err != nil {
 		return fmt.Errorf("marshaling preferences: %w", err)
 	}
 
-	if err := jsonutil.WriteFileAtomic(filePath, data, 0o644); err != nil {
+	root, name, err := clonePreferencesRoot(filePath)
+	if err != nil {
+		return err
+	}
+	if dir := path.Dir(name); dir != "." {
+		if err := osroot.MkdirAllNoSymlink(root, dir, 0o750); err != nil {
+			return fmt.Errorf("creating preferences directory: %w", err)
+		}
+	}
+	if err := jsonutil.WriteFileAtomicIn(root, name, data, 0o644); err != nil {
 		return fmt.Errorf("writing preferences file: %w", err)
 	}
 	return nil
@@ -1024,10 +1138,19 @@ func mergeReviewProfiles(base, src map[string]ReviewProfileConfig) map[string]Re
 }
 
 func modifyClonePreferencesFile(filePath string, fn func(*ClonePreferences) error) error {
-	if err := os.MkdirAll(filepath.Dir(filePath), 0o750); err != nil {
-		return fmt.Errorf("creating preferences directory: %w", err)
+	// Clone preferences live in the git common dir, not under .entire, so the
+	// directory and lock go through gitdir's root for that clone. Resolving from
+	// the file's own path keeps the ClonePreferencesPath API unchanged.
+	root, name, err := clonePreferencesRoot(filePath)
+	if err != nil {
+		return err
 	}
-	release, err := flock.Acquire(filePath + ".lock")
+	if dir := path.Dir(name); dir != "." {
+		if err := osroot.MkdirAllNoSymlink(root, dir, 0o750); err != nil {
+			return fmt.Errorf("creating preferences directory: %w", err)
+		}
+	}
+	release, err := flock.AcquireIn(root, name+".lock")
 	if err != nil {
 		return fmt.Errorf("lock preferences file: %w", err)
 	}
@@ -1041,6 +1164,23 @@ func modifyClonePreferencesFile(filePath string, fn func(*ClonePreferences) erro
 		return err
 	}
 	return saveClonePreferencesToFile(prefs, filePath)
+}
+
+// clonePreferencesRoot resolves filePath — always <git-common-dir>/entire/... —
+// into the shared root for that common dir plus the file's name inside it.
+// The common dir is the path's own grandparent, so this needs no ctx and works
+// for the explicit-path callers as well as the ctx-resolved ones.
+func clonePreferencesRoot(filePath string) (*os.Root, string, error) {
+	abs, err := filepath.Abs(filePath)
+	if err != nil {
+		return nil, "", fmt.Errorf("resolve preferences path: %w", err)
+	}
+	commonDir := filepath.Dir(filepath.Dir(abs))
+	root, name, err := gitdir.OpenPathIn(commonDir, abs)
+	if err != nil {
+		return nil, "", fmt.Errorf("open git common dir: %w", err)
+	}
+	return root, name, nil
 }
 
 func applyClonePreferences(settings *EntireSettings, prefs *ClonePreferences) {
@@ -1492,26 +1632,66 @@ func mergeStringMap(dst *map[string]string, raw json.RawMessage, field string) e
 // This checks if .entire/settings.json exists.
 // Use this to avoid creating files/directories in repos where Entire was never enabled.
 func IsSetUp(ctx context.Context) bool {
-	settingsFileAbs, err := paths.AbsPath(ctx, EntireSettingsFile)
+	return entireFileExists(ctx, SettingsName)
+}
+
+// FilesPresent reports whether each settings file exists, keeping an access
+// failure distinct from absence. IsSetUp and IsSetUpLocal collapse both into
+// false, which is right for a gate but wrong for `entire status`, whose whole
+// job is to say why it cannot see something.
+func FilesPresent(ctx context.Context) (project, local bool, err error) {
+	root, err := entiredir.OpenForRead(ctx)
 	if err != nil {
-		return false
+		if errors.Is(err, fs.ErrNotExist) {
+			return false, false, nil
+		}
+		return false, false, fmt.Errorf("cannot access %s: %w", paths.EntireDir, err)
 	}
-	_, err = os.Lstat(settingsFileAbs)
-	return err == nil
+	project, err = fileExists(root, SettingsName)
+	if err != nil {
+		return false, false, fmt.Errorf("cannot access project settings file: %w", err)
+	}
+	local, err = fileExists(root, SettingsLocalName)
+	if err != nil {
+		return false, false, fmt.Errorf("cannot access local settings file: %w", err)
+	}
+	return project, local, nil
+}
+
+func fileExists(root *os.Root, name string) (bool, error) {
+	if _, err := root.Lstat(name); err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return false, nil
+		}
+		return false, err //nolint:wrapcheck // caller names the file
+	}
+	return true, nil
+}
+
+// IsSetUpLocal returns true if .entire/settings.local.json exists. Callers that
+// pick a write target need the two scopes separately, which IsSetUpAny folds
+// together.
+func IsSetUpLocal(ctx context.Context) bool {
+	return entireFileExists(ctx, SettingsLocalName)
 }
 
 // IsSetUpAny returns true if Entire has been set up in the current repository,
 // checking both .entire/settings.json and .entire/settings.local.json.
 // Use this to detect any prior setup, even if only local settings exist.
 func IsSetUpAny(ctx context.Context) bool {
-	if IsSetUp(ctx) {
-		return true
-	}
-	localFileAbs, err := paths.AbsPath(ctx, EntireSettingsLocalFile)
+	return IsSetUp(ctx) || IsSetUpLocal(ctx)
+}
+
+// entireFileExists reports whether name exists directly under .entire. Lstat,
+// not Stat: a settings file that is a dangling symlink still counts as "set up"
+// here, exactly as it did before, and the root refuses to follow one out of
+// .entire regardless.
+func entireFileExists(ctx context.Context, name string) bool {
+	root, err := entiredir.OpenForRead(ctx)
 	if err != nil {
 		return false
 	}
-	_, err = os.Lstat(localFileAbs)
+	_, err = root.Lstat(name)
 	return err == nil
 }
 
@@ -1775,15 +1955,9 @@ func SaveLocal(ctx context.Context, settings *EntireSettings) error {
 // saveToFile saves settings to the specified file path.
 func saveToFile(ctx context.Context, settings *EntireSettings, filePath string) error {
 	// Get absolute path for the file
-	filePathAbs, err := paths.AbsPath(ctx, filePath)
+	filePathAbs, err := entiredir.PathTo(ctx, filePath)
 	if err != nil {
 		filePathAbs = filePath // Fallback to relative
-	}
-
-	// Ensure directory exists
-	dir := filepath.Dir(filePathAbs)
-	if err := os.MkdirAll(dir, 0o750); err != nil {
-		return fmt.Errorf("creating settings directory: %w", err)
 	}
 
 	data, err := jsonutil.MarshalIndentWithNewline(settings, "", "  ")
@@ -1791,7 +1965,7 @@ func saveToFile(ctx context.Context, settings *EntireSettings, filePath string) 
 		return fmt.Errorf("marshaling settings: %w", err)
 	}
 
-	if err := jsonutil.WriteFileAtomic(filePathAbs, data, 0o644); err != nil {
+	if err := writeConfinedAtomic(filePathAbs, data, 0o644); err != nil {
 		return fmt.Errorf("writing settings file: %w", err)
 	}
 	return nil

@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/entireio/cli/cmd/entire/cli/entiredir"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
@@ -350,7 +351,7 @@ func TestManualCommitStrategy_FindSessionsForWorktree_WarnsOnAmbiguousSiblingSes
 
 	t.Chdir(commitWorktree)
 	clearSessionMatchCaches()
-	initialized, logErr := logging.New(logging.Config{Dir: filepath.Join(commitWorktree, logging.LogsDir)})
+	initialized, logErr := logging.New(logging.Config{Root: entiredir.OpenerAt(commitWorktree), Dir: logging.LogsName})
 	require.NoError(t, logErr)
 	require.NotNil(t, initialized)
 	ctx = logging.WithLogger(ctx, initialized)

@@ -4,11 +4,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"os"
 	"path/filepath"
 	"strings"
 
+	"github.com/entireio/cli/cmd/entire/cli/entiredir"
 	"github.com/entireio/cli/cmd/entire/cli/interactive"
+	"github.com/entireio/cli/cmd/entire/cli/osroot"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/runnerdefaults"
 
@@ -23,8 +24,7 @@ import (
 // (interactive prompt, or the --yes flag for non-interactive runs).
 func ensureRunnersPresent(w, errW io.Writer, repoRoot string, assumeYes bool) (created []string, err error) {
 	dir := runnersDir(repoRoot)
-	existing, _ := filepath.Glob(filepath.Join(dir, "*.json")) //nolint:errcheck // bad pattern only; treated as "none found"
-	if len(existing) > 0 {
+	if runnerConfigsExist(repoRoot) {
 		return nil, nil
 	}
 
@@ -46,19 +46,43 @@ func ensureRunnersPresent(w, errW io.Writer, repoRoot string, assumeYes bool) (c
 		}
 	}
 
-	if err := os.MkdirAll(dir, 0o755); err != nil { //nolint:gosec // config dir, conventional perms
+	root, err := entiredir.OpenAt(repoRoot)
+	if err != nil {
+		return nil, fmt.Errorf("creating %s: %w", dir, err)
+	}
+	if err := osroot.MkdirAllNoSymlink(root, runnersName, 0o755); err != nil {
 		return nil, fmt.Errorf("creating %s: %w", dir, err)
 	}
 	for _, f := range defaults {
 		dest := filepath.Join(dir, f.Name)
-		if err := os.WriteFile(dest, f.Data, 0o644); err != nil { //nolint:gosec // runner configs are repo-committed, world-readable config
+		if err := osroot.WriteFile(root, runnersName+"/"+f.Name, f.Data, 0o644); err != nil {
 			return nil, fmt.Errorf("writing %s: %w", dest, err)
 		}
-		fmt.Fprintf(w, "created %s\n", filepath.Join(paths.EntireDir, "runners", f.Name))
+		fmt.Fprintf(w, "created %s\n", filepath.Join(paths.EntireDir, runnersName, f.Name))
 		created = append(created, strings.TrimSuffix(f.Name, ".json"))
 	}
 	fmt.Fprintf(errW, "Created %d default runner(s); tailoring them to this repo…\n", len(defaults))
 	return created, nil
+}
+
+// runnerConfigsExist reports whether the repo already has runner configs. It
+// reads through the shared .entire root like every other .entire access; a
+// missing root or directory simply means none.
+func runnerConfigsExist(repoRoot string) bool {
+	root, err := entiredir.OpenAtForRead(repoRoot)
+	if err != nil {
+		return false
+	}
+	entries, err := osroot.ReadDir(root, runnersName)
+	if err != nil {
+		return false
+	}
+	for _, e := range entries {
+		if !e.IsDir() && strings.HasSuffix(e.Name(), ".json") {
+			return true
+		}
+	}
+	return false
 }
 
 func confirmCreateRunners(n int) (bool, error) {

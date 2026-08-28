@@ -7,7 +7,6 @@ import (
 	"io"
 	"log/slog"
 	"os"
-	"path/filepath"
 	"sort"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
@@ -924,7 +923,9 @@ func restoreResumeSessions(ctx context.Context, w, errW io.Writer, metadata *str
 		return nil, fmt.Errorf("failed to determine session directory: %w", err)
 	}
 
-	// Create directory if it doesn't exist
+	// Create the agent's session directory. This is the one place it is created
+	// from the outside — agent.OpenSessionStore requires it to exist, because a
+	// store for a directory that is not there has nothing to resolve.
 	if err := os.MkdirAll(sessionDir, 0o700); err != nil {
 		return nil, fmt.Errorf("failed to create session directory: %w", err)
 	}
@@ -1031,17 +1032,13 @@ func restoreSingleSession(ctx context.Context, w io.Writer, ag agent.Agent, sess
 	// By default, never overwrite a session log that already exists locally: the
 	// on-disk transcript is the live session the user is resuming, so we keep it
 	// and just print the resume command. --force overwrites it from the checkpoint.
-	if !force {
-		if _, statErr := os.Stat(sessionLogPath); statErr == nil {
-			fmt.Fprintf(w, "Keeping existing local session log for '%s' (use --force to overwrite from checkpoint).\n", sessionID)
-			return restored, true, nil
-		}
+	if !force && sessionLogExists(ag, repoRoot, sessionLogPath) {
+		fmt.Fprintf(w, "Keeping existing local session log for '%s' (use --force to overwrite from checkpoint).\n", sessionID)
+		return restored, true, nil
 	}
 
-	// Ensure parent directory exists
-	if err := os.MkdirAll(filepath.Dir(sessionLogPath), 0o750); err != nil {
-		return strategy.RestoredSession{}, false, fmt.Errorf("failed to create session directory: %w", err)
-	}
+	// No MkdirAll here: WriteSession routes through agent.WriteSessionFile,
+	// which creates the parent as part of the write.
 
 	agentSession := &agent.AgentSession{
 		SessionID:  sessionID,
@@ -1070,6 +1067,22 @@ func restoreSingleSession(ctx context.Context, w io.Writer, ag agent.Agent, sess
 	fmt.Fprintf(w, "  Session: %s\n", sessionID)
 
 	return restored, true, nil
+}
+
+// sessionLogExists reports whether a session log is already on disk, checked
+// through the agent's own session store rather than by statting the path. Lstat,
+// not Stat: a present-but-dangling log still exists and must not be silently
+// overwritten, which is the same distinction the rewind path draws.
+func sessionLogExists(ag agent.Agent, repoRoot, sessionLogPath string) bool {
+	store, err := agent.OpenSessionStore(ag, repoRoot)
+	if err != nil {
+		return false
+	}
+	name, err := store.Name(sessionLogPath)
+	if err != nil {
+		return false
+	}
+	return store.Exists(name)
 }
 
 func unavailableSessionLogResult(w io.Writer, ag agent.Agent, restored strategy.RestoredSession, sessionLogPath string, force bool) (strategy.RestoredSession, bool, error) {

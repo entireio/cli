@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
+	"path"
 	"path/filepath"
 	"time"
 
@@ -12,8 +14,11 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/codex"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
+	"github.com/entireio/cli/cmd/entire/cli/entiredir"
 	"github.com/entireio/cli/cmd/entire/cli/interactive"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
+	"github.com/entireio/cli/cmd/entire/cli/osroot"
+	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
@@ -134,6 +139,10 @@ func runSessionsFix(cmd *cobra.Command, force bool) error {
 		fmt.Fprintf(cmd.ErrOrStderr(), "Error: git hook check failed: %v\n", hooksErr)
 		finalErr = NewSilentError(fmt.Errorf("git hook check failed: %w", hooksErr))
 	}
+
+	// Before checkLogSink, because a symlinked .entire/logs is one of the reasons
+	// that check fires and this one names the cause.
+	checkEntireDirSymlinks(cmd)
 
 	// Before the remaining checks, because it is the channel they and every
 	// other command write their diagnostics to: if this is broken, an empty
@@ -654,6 +663,91 @@ func checkGitHooks(cmd *cobra.Command, force bool) error {
 	}
 	fmt.Fprintln(w, "  ✓ Fixed: git hooks reinstalled")
 	return nil
+}
+
+// symlinkReportLimit bounds the list checkEntireDirSymlinks prints. A repo with
+// more than a handful has one systematic cause, and the fix is the same for all
+// of them; the count tells the user there are more.
+const symlinkReportLimit = 10
+
+// checkEntireDirSymlinks reports symlinks inside .entire.
+//
+// Entire refuses to create or write through a symlinked directory there
+// (osroot.MkdirAllNoSymlink), so unlike most misconfigurations this one does not
+// degrade quietly in one place — it stops that whole subtree being written. A
+// symlinked .entire/metadata means no session metadata is captured, and a
+// symlinked .entire/logs means the very diagnostics that would explain it are
+// dropped, which is why this runs before checkLogSink.
+//
+// Read-only. The fix is to replace the link with a real directory, which means
+// deciding what to do with whatever the link pointed at — not something doctor
+// can take on the user's behalf.
+//
+// .entire itself is reported but NOT refused: os.OpenRoot follows a symlinked
+// root, so a repo already set up that way keeps working, and breaking it to
+// enforce a rule the user never agreed to would be worse than telling them where
+// their data actually lands. The subdirectories are refused because nothing was
+// relying on them.
+func checkEntireDirSymlinks(cmd *cobra.Command) {
+	ctx := cmd.Context()
+	w := cmd.OutOrStdout()
+
+	if dir, err := entiredir.Path(ctx); err == nil {
+		if info, lerr := os.Lstat(dir); lerr == nil && info.Mode()&os.ModeSymlink != 0 {
+			fmt.Fprintf(w, "%s: SYMLINK\n", paths.EntireDir)
+			fmt.Fprintf(w, "  %s -> %s\n", dir, readlinkOrUnknown(dir))
+			fmt.Fprintln(w, "  Entire follows this, so checkpoints and settings live at the target, not")
+			fmt.Fprintln(w, "  in this repository. Intentional setups keep working; if this was not")
+			fmt.Fprintln(w, "  intentional, replace the link with a real directory.")
+		}
+	}
+
+	root, err := entiredir.OpenForRead(ctx)
+	if err != nil {
+		return // no .entire, or no repository: nothing to check
+	}
+
+	links, err := osroot.SymlinkPaths(root, ".")
+	if err != nil {
+		fmt.Fprintf(w, "%s contents: NOT READABLE\n", paths.EntireDir)
+		fmt.Fprintf(w, "  %v\n", err)
+		return
+	}
+	if len(links) == 0 {
+		return
+	}
+
+	fmt.Fprintf(w, "%s contents: SYMLINKS PRESENT\n", paths.EntireDir)
+	for i, name := range links {
+		if i == symlinkReportLimit {
+			fmt.Fprintf(w, "  ... and %d more\n", len(links)-symlinkReportLimit)
+			break
+		}
+		fmt.Fprintf(w, "  %s -> %s\n", path.Join(paths.EntireDir, name), readlinkOrUnknownIn(root, name))
+	}
+	fmt.Fprintln(w, "  Entire will not create or write through a symlinked directory here, so")
+	fmt.Fprintln(w, "  anything that belongs under one of these paths is not being captured.")
+	fmt.Fprintln(w, "  Fix: replace each path above with a real directory. If it is tracked in git,")
+	fmt.Fprintln(w, "  `git rm --cached` it first, and add it to .gitignore so it does not come back.")
+}
+
+// readlinkOrUnknown renders a symlink's target for a diagnostic, never failing:
+// an unreadable link is still worth naming.
+func readlinkOrUnknown(name string) string {
+	target, err := os.Readlink(name)
+	if err != nil {
+		return "(unreadable)"
+	}
+	return target
+}
+
+// readlinkOrUnknownIn is readlinkOrUnknown for a name inside root.
+func readlinkOrUnknownIn(root *os.Root, name string) string {
+	target, err := root.Readlink(name)
+	if err != nil {
+		return "(unreadable)"
+	}
+	return target
 }
 
 // checkLogSink reports a .entire/logs Entire cannot write to.

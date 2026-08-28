@@ -32,21 +32,25 @@ func (e *openCodeExportError) Unwrap() error { return e.cause }
 // runOpenCodeExportToFile runs `opencode export <sessionID>` and redirects stdout
 // to outputPath. This avoids pipe/stdout capture truncation bugs in some opencode versions.
 //
-// outputPath must be a staging path, never a live transcript: `opencode export`
-// can fail after writing a partial payload, and can exit 0 having written nothing
-// at all. Callers own the validate-then-install step — see fetchAndCacheExport,
-// which is the only caller and stages under .entire/tmp.
+// outputName is relative to root, the shared .entire root, and must be a staging
+// name, never a live transcript: `opencode export` can fail after writing a
+// partial payload, and can exit 0 having written nothing at all. Callers own the
+// validate-then-install step — see fetchAndCacheExport, which is the only caller
+// and stages under .entire/tmp.
+//
+// opencode never sees the name: it inherits the already-opened file as stdout, so
+// the root's containment covers the whole write even though the payload is
+// produced by another process.
 //
 // The fsync before close is what makes the caller's rename durable: without it
 // some filesystems can surface the rename as complete while the file is still
 // empty after a hard crash, which would destroy the transcript the staging exists
 // to protect. Same reasoning as jsonutil.WriteFileAtomic.
-func runOpenCodeExportToFile(ctx context.Context, sessionID, outputPath string) (retErr error) {
+func runOpenCodeExportToFile(ctx context.Context, root *os.Root, sessionID, outputName string) (retErr error) {
 	ctx, cancel := context.WithTimeout(ctx, openCodeCommandTimeout)
 	defer cancel()
 
-	//nolint:gosec // outputPath is a staging path the caller derives from .entire/tmp plus a validated session ID
-	file, err := os.OpenFile(outputPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+	file, err := root.OpenFile(outputName, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
 	if err != nil {
 		return fmt.Errorf("failed to create export file: %w", err)
 	}

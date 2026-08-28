@@ -180,7 +180,7 @@ func RunInvestigateLoop(ctx context.Context, in LoopInput, deps LoopDeps) (LoopR
 		now:         now,
 		quorum:      quorum,
 		maxPerAgent: maxTurnsPerAgent,
-		stateDoc:    deps.States.runStatePath(in.RunID),
+		stateDoc:    deps.States.RunStatePath(in.RunID),
 	}
 	consecutiveFails := 0
 	var lastErr error
