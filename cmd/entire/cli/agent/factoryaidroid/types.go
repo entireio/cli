@@ -41,11 +41,18 @@ type sessionInfoRaw struct {
 }
 
 // userPromptSubmitRaw is the JSON structure from UserPromptSubmit hooks.
+//
+// The handler that parses this also serves native SessionStart (see
+// InstallHooks), so two fields exist to tell the two payloads apart: Prompt is a
+// pointer because only UserPromptSubmit carries the key at all, and Source is
+// Factory's SessionStart-only field (startup/resume/clear/compact). Either one
+// identifies a SessionStart payload on its own.
 type userPromptSubmitRaw struct {
-	SessionID      string `json:"session_id"`
-	TranscriptPath string `json:"transcript_path"`
-	Prompt         string `json:"prompt"`
-	Model          string `json:"model"`
+	SessionID      string  `json:"session_id"`
+	TranscriptPath string  `json:"transcript_path"`
+	Prompt         *string `json:"prompt"`
+	Model          string  `json:"model"`
+	Source         string  `json:"source"`
 }
 
 // stopRaw is the JSON structure from Stop hooks.

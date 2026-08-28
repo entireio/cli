@@ -28,6 +28,24 @@ func TestPrepareSubagentTranscript_SanitizesCodexRollout(t *testing.T) {
 	require.Contains(t, string(got), "session_meta", "the rest of the rollout must survive")
 }
 
+// TestPrepareSubagentTranscript_StripsInjectedContext holds the storage-privacy
+// invariant on the subagent path: a subagent inherits the parent turn's injected
+// cross-repository evidence, and its transcript is stored the same way, so the
+// packet has to be scrubbed here too — for every agent, not just Codex.
+func TestPrepareSubagentTranscript_StripsInjectedContext(t *testing.T) {
+	t.Parallel()
+
+	transcript := `{"type":"user","message":{"role":"user","content":"ship it <entire-context>Summary: PRIVATE EVIDENCE</entire-context>"}}` + "\n" +
+		`{"type":"assistant","message":{"role":"assistant","content":"KEEP ME"}}` + "\n"
+
+	got, tooLarge := prepareSubagentTranscript(context.Background(), agent.AgentTypeClaudeCode, "/x/agent-a1.jsonl", []byte(transcript))
+
+	require.False(t, tooLarge)
+	require.NotContains(t, string(got), "PRIVATE EVIDENCE")
+	require.NotContains(t, string(got), "entire-context")
+	require.Contains(t, string(got), "KEEP ME", "an unrelated record was dropped")
+}
+
 // TestPrepareSubagentTranscript_SkipsOversizeTranscript covers the size guard. Unlike
 // the session transcript this blob is neither chunked nor capped, and redaction runs
 // at roughly 220ms/MB, so without a guard an oversized rollout parks the

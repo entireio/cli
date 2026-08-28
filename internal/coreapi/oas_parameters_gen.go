@@ -69,6 +69,11 @@ type GetOrgParams struct {
 	OrgId string
 }
 
+// GetOrgContextSharingPolicyParams is parameters of getOrgContextSharingPolicy operation.
+type GetOrgContextSharingPolicyParams struct {
+	OrgId string
+}
+
 // GetPermissionsParams is parameters of getPermissions operation.
 type GetPermissionsParams struct {
 	ResourceType string
@@ -296,6 +301,11 @@ type LookupResourcesParams struct {
 type PatchRepoCIWebhookParams struct {
 	RepoId string
 	ID     string
+}
+
+// PutOrgContextSharingPolicyParams is parameters of putOrgContextSharingPolicy operation.
+type PutOrgContextSharingPolicyParams struct {
+	OrgId string
 }
 
 // RemoveOrgMemberParams is parameters of removeOrgMember operation.

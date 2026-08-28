@@ -113,6 +113,12 @@ func DispatchLifecycleEvent(ctx context.Context, ag agent.Agent, event *agent.Ev
 		return handleLifecycleModelUpdate(ctx, ag, event)
 	case agent.ToolUse:
 		return handleLifecycleToolUse(ctx, ag, event)
+	case agent.ContextRequest:
+		// ContextRequest is deliberately injection-only. In particular, Copilot's
+		// userPromptTransformed follows userPromptSubmitted and must not initialize
+		// the turn or advance lifecycle state a second time.
+		emitContextInjection(ctx, ag, event)
+		return nil
 	default:
 		return fmt.Errorf("unknown lifecycle event type: %d", event.Type)
 	}
@@ -203,8 +209,8 @@ func handleLifecycleSessionStart(ctx context.Context, ag agent.Agent, event *age
 	// winner can't consume the user's only banner.
 	_, hookResponseSpan := perf.Start(ctx, "write_hook_response")
 	// Apply any agent-supplied ResponseMessage override, then append the
-	// agent-help banner pointer so it survives the override — banner-only agents
-	// (Factory Droid) have no other in-session channel for it.
+	// agent-help banner pointer so it survives the override. Factory Droid keeps
+	// this as its user-visible hint; model-facing injection is a separate channel.
 	message = finalizeSessionStartBanner(message, event.ResponseMessage, ag.Name())
 	if writer, ok := agent.AsHookResponseWriter(ag); ok {
 		bannerFirst, bErr := strategy.ClaimSessionStartBanner(ctx, event.SessionID)
@@ -263,6 +269,12 @@ func handleLifecycleSessionStart(ctx context.Context, ag agent.Agent, event *age
 	// budget is untouched; see runSessionSweep for the safety contract.
 	maybeSpawnSessionSweep(ctx)
 
+	// Local live context registration is consent-gated by Core scope and can
+	// require network round-trips, so it runs in a detached subprocess (see
+	// spawnDetachedLocalContextRegistration) to keep SessionStart within the
+	// hook timeout budget. Best-effort throughout.
+	spawnDetachedLocalContextRegistration(ctx, ag, event)
+
 	return nil
 }
 
@@ -281,12 +293,11 @@ func sessionStartMessage(agentName types.AgentName, emptyRepo bool) string {
 }
 
 // agentHelpBannerSuffix returns the SessionStart banner suffix that points an
-// agent at `entire agent-help`. It targets Factory AI Droid, which is banner-only
-// — no model-context injection and no agent-help skill file — so the SessionStart
-// banner is its sole in-session channel for the pointer. Every other agent gets
-// the pointer via context injection (Claude/Codex/Gemini/OpenCode/Pi), a skill
-// file (Claude/Codex/Gemini), or the passive `entire status` surface
-// (Cursor/Copilot), so this returns "" for them to avoid a duplicate pointer.
+// agent at `entire agent-help`. Factory AI Droid has no agent-help skill file or
+// passive status surface, so it keeps this user-visible SessionStart hint even
+// though its prompt hook can now also inject model-facing context. Every other
+// agent gets the pointer via context injection, a skill file, or the passive
+// `entire status` surface, so this returns "" for them.
 func agentHelpBannerSuffix(agentName types.AgentName) string {
 	if agentName == agent.AgentNameFactoryAIDroid {
 		return fmt.Sprintf("\n  Run `%s` to see entire's commands and flags.", agentHelpCommand)
@@ -459,23 +470,77 @@ func entireTrailContextInjection(scope trailEnablementScope) string {
 	return b.String()
 }
 
-// emitContextInjection writes ag's native context-injection payload to stdout
-// when ag injects at event.Type, trails are enabled for the repo on the API,
-// and this session has not been injected yet. Best-effort: an injection failure
-// never fails the hook.
+// emitContextInjection writes one native payload containing the independent
+// legacy trail pointer and cross-repository evidence packets. Combining them is
+// important: native hook transports expect one JSON response, not two adjacent
+// objects. Best-effort: an injection failure never fails the hook.
 func emitContextInjection(ctx context.Context, ag agent.Agent, event *agent.Event) {
 	injector, ok := agent.AsContextInjector(ag)
 	if !ok || injector.InjectionEvent() != event.Type || event.SessionID == "" {
 		return
 	}
 	logCtx := logging.WithAgent(logging.WithComponent(ctx, "lifecycle"), ag.Name())
+	var injectionTexts []string
+	var finalizeInjections []func() error
+	var abortInjections []func()
+	if trail, finalize := legacyTrailContextInjection(ctx, ag, event); trail != "" {
+		injectionTexts = append(injectionTexts, trail)
+		if finalize != nil {
+			finalizeInjections = append(finalizeInjections, finalize)
+		}
+	}
+	if crossRepo, finalize, abort := buildCrossRepoContextInjection(ctx, ag, event); crossRepo != "" {
+		injectionTexts = append(injectionTexts, crossRepo)
+		if finalize != nil {
+			finalizeInjections = append(finalizeInjections, finalize)
+		}
+		if abort != nil {
+			abortInjections = append(abortInjections, abort)
+		}
+	}
+	if len(injectionTexts) == 0 {
+		return
+	}
+	payload, err := injector.RenderContextInjection(agent.ContextInjection{
+		Text:       strings.Join(injectionTexts, "\n\n"),
+		BaseText:   event.TransformedPrompt,
+		NativeHook: event.NativeHook,
+	})
+	if err != nil {
+		logging.Warn(logCtx, "failed to render context injection", slog.String("error", err.Error()))
+		for _, abort := range abortInjections {
+			abort()
+		}
+		return
+	}
+	if len(payload) == 0 {
+		for _, abort := range abortInjections {
+			abort()
+		}
+		return
+	}
+	if _, err := os.Stdout.Write(payload); err != nil {
+		logging.Warn(logCtx, "failed to write context injection", slog.String("error", err.Error()))
+		for _, abort := range abortInjections {
+			abort()
+		}
+		return
+	}
+	for _, finalize := range finalizeInjections {
+		if err := finalize(); err != nil {
+			logging.Debug(logCtx, "failed to record context injection delivery", slog.String("error", err.Error()))
+		}
+	}
+}
 
+func legacyTrailContextInjection(ctx context.Context, ag agent.Agent, event *agent.Event) (string, func() error) {
+	logCtx := logging.WithAgent(logging.WithComponent(ctx, "lifecycle"), ag.Name())
 	// Unknown cache leaves the session retryable.
 	scope, scopeOK, scopeErr := loadTrailEnablementScopeHint(ctx, event.SessionID)
 	if scopeErr != nil {
 		logging.Warn(logCtx, "failed to load trails scope hint",
 			slog.String("error", scopeErr.Error()))
-		return
+		return "", nil
 	}
 	decision := trailEnablementCacheUnknown
 	mutated := false
@@ -496,36 +561,33 @@ func emitContextInjection(ctx context.Context, ag agent.Agent, event *agent.Even
 		if decision == trailEnablementCacheUnknown {
 			return strategy.ErrMutationSkip
 		}
-		state.ContextInjectionDecided = true
+		// Disabled is a final no-injection decision; enabled waits until stdout
+		// delivery succeeds so a render/write failure can retry next turn.
+		if decision == trailEnablementCacheDisabled {
+			state.ContextInjectionDecided = true
+		}
 		mutated = true
 		return nil
 	})
 	if mutErr != nil && !errors.Is(mutErr, strategy.ErrStateNotFound) {
 		logging.Warn(logCtx, "failed to record context injection decision",
 			slog.String("error", mutErr.Error()))
-		return
+		return "", nil
 	}
 	// Only proceed after the state mutation was persisted. If saving the updated
 	// state failed, mutErr was non-nil above and we returned without injecting,
 	// leaving a later turn free to retry safely.
 	won := mutErr == nil && mutated
 	if !won || decision != trailEnablementCacheEnabled {
-		return
+		return "", nil
 	}
-
-	payload, err := injector.RenderContextInjection(agent.ContextInjection{Text: entireTrailContextInjection(scope)})
-	if err != nil {
-		logging.Warn(logCtx, "failed to render context injection",
-			slog.String("error", err.Error()))
-		return
+	finalize := func() error {
+		return strategy.MutateSessionState(ctx, event.SessionID, func(state *strategy.SessionState) error {
+			state.ContextInjectionDecided = true
+			return nil
+		})
 	}
-	if len(payload) == 0 {
-		return
-	}
-	if _, err := os.Stdout.Write(payload); err != nil {
-		logging.Warn(logCtx, "failed to write context injection",
-			slog.String("error", err.Error()))
-	}
+	return entireTrailContextInjection(scope), finalize
 }
 
 // turnStartSessionLockWait bounds how long the TurnStart hook waits for the

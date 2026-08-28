@@ -291,6 +291,11 @@ type State struct {
 	// Review/investigate sessions leave this false because they skip injection.
 	ContextInjectionDecided bool `json:"context_injection_decided,omitempty"`
 
+	// CrossRepoContextState is independent from ContextInjectionDecided: the
+	// latter owns the legacy once-per-session trail pointer, while this state
+	// owns topic-aware cross-repository evidence cadence.
+	CrossRepoContext CrossRepoContextState `json:"cross_repo_context,omitempty"`
+
 	// AgentType identifies the agent that created this session (e.g., "Claude Code", "Gemini CLI", "Cursor")
 	AgentType types.AgentType `json:"agent_type,omitempty"`
 
@@ -577,6 +582,17 @@ func (s *State) LiveTaskRecords() []TaskRecord {
 		}
 	}
 	return live
+}
+
+// CrossRepoContextState stores only hashes, timestamps, counters, and stable
+// evidence IDs. Prompt and evidence text never enter session state.
+type CrossRepoContextState struct {
+	LastPromptTokenHashes []string  `json:"last_prompt_token_hashes,omitempty"`
+	LastSuccessfulAt      time.Time `json:"last_successful_at,omitempty"`
+	PendingUntil          time.Time `json:"pending_until,omitempty"`
+	FailureBackoffUntil   time.Time `json:"failure_backoff_until,omitempty"`
+	PacketCount           int       `json:"packet_count,omitempty"`
+	EvidenceIDs           []string  `json:"evidence_ids,omitempty"`
 }
 
 // PromptAttribution captures line-level attribution data at the start of each prompt.

@@ -989,14 +989,21 @@ func (s *treeWriter) readSummaryFromBlob(hash plumbing.Hash) (*CheckpointSummary
 // only succeeds when something else in the binary happens to import agent/codex, and
 // when it doesn't, sanitization silently degrades to a no-op — reintroducing the bug
 // this guards against with no signal. A compile-time dependency cannot fail that way.
+//
+// Injected context is stripped for EVERY agent type, not just the one with
+// non-portable state: this and agent.SanitizeTranscriptForStorage are the two
+// entry points to the same storage-privacy invariant, and the paths that reach
+// this one (`entire import`, the raw TranscriptPath fallback, compact
+// regeneration, subagent transcripts) leaked cross-repository evidence into
+// checkpoints while only the Agent-based entry point scrubbed it.
 func SanitizeTranscriptForAgentType(agentType types.AgentType, data []byte) []byte {
 	if len(data) == 0 {
 		return data
 	}
 	if agentType == agent.AgentTypeCodex {
-		return codex.SanitizePortableTranscript(data)
+		data = codex.SanitizePortableTranscript(data)
 	}
-	return data
+	return agent.StripInjectedContext(data)
 }
 
 // writeTranscript writes the transcript, compact transcript, and content hash

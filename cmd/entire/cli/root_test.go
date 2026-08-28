@@ -290,6 +290,7 @@ func TestRoot_VisibleCommandsAreGrouped(t *testing.T) {
 		"clean":      groupSetup,
 		"session":    groupSessions,
 		"checkpoint": groupSessions,
+		"context":    groupSessions,
 		"search":     groupSessions,
 		"recap":      groupSessions,
 		"activity":   groupSessions,

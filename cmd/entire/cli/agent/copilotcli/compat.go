@@ -47,16 +47,17 @@ var vsCodeEventToHookNames = map[string][]string{
 }
 
 type hookEnvelope struct {
-	Host           HookHost
-	SessionID      string
-	Prompt         string
-	TranscriptPath string
-	HookEventName  string
-	Source         string
-	InitialPrompt  string
-	StopReason     string
-	Reason         string
-	Timestamp      time.Time
+	Host              HookHost
+	SessionID         string
+	Prompt            string
+	TransformedPrompt string
+	TranscriptPath    string
+	HookEventName     string
+	Source            string
+	InitialPrompt     string
+	StopReason        string
+	Reason            string
+	Timestamp         time.Time
 }
 
 func parseHookEnvelope(data []byte) (*hookEnvelope, error) {
@@ -70,15 +71,16 @@ func parseHookEnvelope(data []byte) (*hookEnvelope, error) {
 	}
 
 	env := &hookEnvelope{
-		Host:           detectHookHost(raw),
-		SessionID:      firstString(raw, "sessionId", "session_id"),
-		Prompt:         firstString(raw, "prompt"),
-		TranscriptPath: firstString(raw, "transcriptPath", "transcript_path"),
-		HookEventName:  firstString(raw, "hookEventName"),
-		Source:         firstString(raw, "source"),
-		InitialPrompt:  firstString(raw, "initialPrompt"),
-		StopReason:     firstString(raw, "stopReason"),
-		Reason:         firstString(raw, "reason"),
+		Host:              detectHookHost(raw),
+		SessionID:         firstString(raw, "sessionId", "session_id"),
+		Prompt:            firstString(raw, "prompt"),
+		TransformedPrompt: firstString(raw, "transformedPrompt"),
+		TranscriptPath:    firstString(raw, "transcriptPath", "transcript_path"),
+		HookEventName:     firstString(raw, "hookEventName"),
+		Source:            firstString(raw, "source"),
+		InitialPrompt:     firstString(raw, "initialPrompt"),
+		StopReason:        firstString(raw, "stopReason"),
+		Reason:            firstString(raw, "reason"),
 	}
 
 	ts, err := ParseTimestamp(raw["timestamp"])

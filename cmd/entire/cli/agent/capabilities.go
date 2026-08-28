@@ -1,5 +1,7 @@
 package agent
 
+import "bytes"
+
 // CapabilityDeclarer is implemented by agents that declare their capabilities
 // at registration time (e.g., external plugin agents). The As* helper functions
 // below use this interface to gate capability access: an agent must both implement
@@ -112,26 +114,110 @@ func AsTranscriptSanitizer(ag Agent) (TranscriptSanitizer, bool) {
 	return builtinCapability[TranscriptSanitizer](ag)
 }
 
-// SanitizeTranscriptForStorage applies the agent's storage sanitizer when it has one
-// and returns data unchanged otherwise. Every path that stores a transcript copy
-// should call this BEFORE redaction — see TranscriptSanitizer for why. A no-op for
-// agents without the capability and idempotent for those with it, so it is safe to
-// call on any transcript from any path.
+// SanitizeTranscriptForStorage applies the agent's storage sanitizer when it has
+// one, then removes Entire-injected context from the copy. Every path that stores
+// a transcript copy should call this BEFORE redaction — see TranscriptSanitizer
+// for why. The agent's native transcript is never modified.
 func SanitizeTranscriptForStorage(ag Agent, data []byte) []byte {
 	if len(data) == 0 {
 		return data
 	}
+	sanitized := data
 	s, ok := AsTranscriptSanitizer(ag)
-	if !ok {
+	if ok {
+		candidate := s.SanitizeTranscriptForStorage(data)
+		if candidate != nil {
+			sanitized = candidate
+		}
+	}
+	return StripInjectedContext(sanitized)
+}
+
+// Delimiters framing an Entire context injection, in the literal form and in the
+// \u-escaped form a JSON-encoding agent writes into its transcript.
+var (
+	injectedContextOpen         = []byte("<entire-context>")
+	injectedContextClose        = []byte("</entire-context>")
+	injectedContextOpenEscaped  = []byte(`\u003centire-context\u003e`)
+	injectedContextCloseEscaped = []byte(`\u003c/entire-context\u003e`)
+)
+
+// StripInjectedContext removes Entire's <entire-context> … </entire-context>
+// packets from a transcript copy on its way to storage. Callers that hold a live
+// Agent get this through SanitizeTranscriptForStorage; the type-based storage
+// paths call it directly (checkpoint.SanitizeTranscriptForAgentType).
+//
+// Two rules keep a delimiter appearing in the user's own text from destroying
+// history in the stored copy — the transcript is the audit record, so deleting
+// more than the injected packet is a data-loss and audit-evasion bug, not a
+// cosmetic one:
+//
+//   - Pairing is record-local. A transcript is JSONL and a JSON string cannot
+//     contain a raw newline, so a line is a safe boundary. Pairing across records
+//     let one stray opener in an earlier user turn swallow every intervening
+//     record up to the next packet's closer.
+//   - Each closer pairs with the NEAREST PRECEDING opener. An Entire packet is
+//     sealed — the evidence it carries has its delimiters stripped first — so its
+//     own opener is always the nearest one before its closer, and removal is
+//     exact even when user text in the same record mentions the delimiter.
+//
+// A closer with no opener before it, and an opener with no closer after it, are
+// both left alone: either may be ordinary user text.
+func StripInjectedContext(data []byte) []byte {
+	if !bytes.Contains(data, injectedContextClose) && !bytes.Contains(data, injectedContextCloseEscaped) {
 		return data
 	}
-	sanitized := s.SanitizeTranscriptForStorage(data)
-	if sanitized == nil {
-		// Defensive: the interface forbids this, but a nil return would silently
-		// drop the whole session. Prefer the unsanitized transcript over none.
+	records := bytes.Split(data, []byte("\n"))
+	changed := false
+	for i, record := range records {
+		stripped := stripInjectedContextBlocks(record, injectedContextOpen, injectedContextClose)
+		stripped = stripInjectedContextBlocks(stripped, injectedContextOpenEscaped, injectedContextCloseEscaped)
+		if len(stripped) != len(record) {
+			records[i] = stripped
+			changed = true
+		}
+	}
+	if !changed {
 		return data
 	}
-	return sanitized
+	return bytes.Join(records, []byte("\n"))
+}
+
+// stripInjectedContextBlocks removes every open…close pair within one record,
+// pairing each closer with the nearest preceding opener. It never writes into
+// record: removals build a new buffer, so the caller's input is untouched when
+// nothing matches.
+func stripInjectedContextBlocks(record, open, closeMarker []byte) []byte {
+	out := record
+	from := 0
+	for {
+		offset := bytes.Index(out[from:], closeMarker)
+		if offset < 0 {
+			return out
+		}
+		closeStart := from + offset
+		openStart := bytes.LastIndex(out[:closeStart], open)
+		if openStart < 0 {
+			// Nothing opened this block, so the closer is text of its own.
+			from = closeStart + len(closeMarker)
+			continue
+		}
+		closeEnd := closeStart + len(closeMarker)
+		trimmed := make([]byte, 0, len(out)-(closeEnd-openStart))
+		trimmed = append(trimmed, out[:openStart]...)
+		trimmed = append(trimmed, out[closeEnd:]...)
+		out = trimmed
+		// Removing the block splices its neighbours together, which can form a
+		// delimiter across the seam ("</entire-cont" + "ext>"). Resume far enough
+		// back that such a closer is still found. When the opener sits in the first
+		// len(closeMarker)-1 bytes, a splice can only start at 0; otherwise resume
+		// from the opener so we do not rescan the whole prefix on every removal.
+		if rewind := openStart - len(closeMarker) + 1; rewind >= 0 {
+			from = rewind
+		} else {
+			from = openStart
+		}
+	}
 }
 
 // AsTranscriptFetcher returns the agent as TranscriptFetcher if it implements

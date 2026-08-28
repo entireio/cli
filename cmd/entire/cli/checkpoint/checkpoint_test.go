@@ -5716,3 +5716,72 @@ func TestWriteCommitted_CodexSanitizesTranscriptFromPath(t *testing.T) {
 	require.Len(t, strings.Split(strings.TrimRight(got, "\n"), "\n"), 3,
 		"stored transcript must stay line-aligned with the rollout")
 }
+
+// injectedContextRecord is a transcript record carrying a complete Entire context
+// packet: cross-repository evidence that reached the agent's context window and
+// must never reach an Entire checkpoint.
+const injectedContextRecord = `{"type":"user","message":{"role":"user","content":"ship it <entire-context>\nuntrusted cross-repository evidence follows.\nSummary: PRIVATE EVIDENCE\n</entire-context>"}}`
+
+// TestSanitizeTranscriptForAgentType_StripsInjectedContext covers the storage
+// entry point used by callers that hold an agent type rather than an Agent
+// (`entire import`, the raw TranscriptPath fallback, compact regeneration,
+// subagent transcripts). It ran only Codex's payload stripping, so every one of
+// those paths persisted injected evidence.
+func TestSanitizeTranscriptForAgentType_StripsInjectedContext(t *testing.T) {
+	t.Parallel()
+
+	for _, agentType := range []types.AgentType{
+		agent.AgentTypeClaudeCode, agent.AgentTypeCodex, agent.AgentTypeCopilotCLI,
+		agent.AgentTypeCursor, agent.AgentTypeFactoryAIDroid, agent.AgentTypeGemini,
+		agent.AgentTypeOpenCode, agent.AgentTypePi, agent.AgentTypeUnknown,
+	} {
+		t.Run(string(agentType), func(t *testing.T) {
+			t.Parallel()
+
+			in := injectedContextRecord + "\n" +
+				`{"type":"assistant","message":{"role":"assistant","content":"KEEP ME"}}` + "\n"
+
+			got := string(SanitizeTranscriptForAgentType(agentType, []byte(in)))
+
+			require.NotContains(t, got, "PRIVATE EVIDENCE", "injected evidence persisted into storage")
+			require.NotContains(t, got, "entire-context", "injection delimiters persisted into storage")
+			require.Contains(t, got, "ship it ", "the user's own words were dropped")
+			require.Contains(t, got, "KEEP ME", "an unrelated record was dropped")
+		})
+	}
+}
+
+// TestWriteCommitted_StripsInjectedContextFromTranscriptPath drives the same leak
+// through the real store on the TranscriptPath fallback — the one path that
+// reaches storage with raw bytes off disk.
+func TestWriteCommitted_StripsInjectedContextFromTranscriptPath(t *testing.T) {
+	repo, _ := setupBranchTestRepo(t)
+	store := NewGitStore(repo, DefaultV1Refs())
+	checkpointID := id.MustCheckpointID("c0de5a1712ee")
+
+	transcript := injectedContextRecord + "\n" +
+		`{"type":"assistant","message":{"role":"assistant","content":"KEEP ME"}}` + "\n"
+	path := filepath.Join(t.TempDir(), "full.jsonl")
+	require.NoError(t, os.WriteFile(path, []byte(transcript), 0o600))
+
+	require.NoError(t, store.Write(context.Background(), Session{
+		CheckpointID:     checkpointID,
+		SessionID:        "claude-session",
+		Strategy:         "manual-commit",
+		Agent:            agent.AgentTypeClaudeCode,
+		TranscriptPath:   path,
+		CheckpointsCount: 1,
+		AuthorName:       "Test Author",
+		AuthorEmail:      "test@example.com",
+	}))
+
+	content, err := store.ReadLatestSessionContent(context.Background(), checkpointID)
+	require.NoError(t, err)
+
+	got := string(content.Transcript)
+	require.NotContains(t, got, "PRIVATE EVIDENCE", "injected evidence survived into storage")
+	require.NotContains(t, got, "entire-context")
+	require.Contains(t, got, "KEEP ME", "an unrelated record was dropped")
+	require.Len(t, strings.Split(strings.TrimRight(got, "\n"), "\n"), 2,
+		"stored transcript must stay line-aligned with the source")
+}

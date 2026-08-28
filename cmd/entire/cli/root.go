@@ -157,6 +157,7 @@ func NewRootCmd() *cobra.Command {
 	experimental.Register(cmd, newTokensGroupCmd())                 // 'tokens' (experimental)
 	cmd.AddCommand(inGroup(newAgentGroupCmd(), groupSetup))         // 'agent'
 	cmd.AddCommand(inGroup(newAuthCmd(), groupAccount))             // 'auth'
+	cmd.AddCommand(inGroup(newContextCmd(), groupSessions))         // 'context' — authorized cross-repo context
 	cmd.AddCommand(inGroup(newDoctorCmd(), groupSetup))             // 'doctor' (group: trace/logs/bundle)
 	cmd.AddCommand(newLabsCmd())                                    // 'labs' (experimental workflow discovery)
 	cmd.AddCommand(inGroup(newPluginGroupCmd(), groupSetup))        // 'plugin' (managed install/list/remove)
@@ -196,6 +197,7 @@ func NewRootCmd() *cobra.Command {
 	cmd.AddCommand(newSendAnalyticsCmd())
 	cmd.AddCommand(newCurlBashPostInstallCmd())
 	cmd.AddCommand(newRefreshTrailEnablementCmd())
+	cmd.AddCommand(newRegisterLocalContextCmd())
 	cmd.AddCommand(newSweepSessionsCmd())
 
 	// Experimental command (developer-only visibility; setup/tune runners).

@@ -9,11 +9,10 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent/vogon"
 )
 
-// Factory AI Droid is banner-only (no context injection, no agent-help skill
-// file), so it is the one built-in agent that gets the agent-help pointer
-// appended to its SessionStart banner. Every other agent already receives the
-// pointer via context injection or a skill file, or relies on the passive
-// `entire status` surface, so none of them get a duplicate banner pointer.
+// Factory AI Droid has no agent-help skill file or passive status surface, so it
+// keeps a user-visible agent-help pointer in its SessionStart banner. Its
+// model-facing prompt injection is a separate channel. Every other agent gets
+// the pointer through injection, a skill file, or the passive status surface.
 func TestAgentHelpBannerSuffix(t *testing.T) {
 	t.Parallel()
 
@@ -40,7 +39,7 @@ func TestAgentHelpBannerSuffix(t *testing.T) {
 
 // The agent-help pointer must survive an agent-supplied ResponseMessage override:
 // the override replaces the assembled message wholesale, so the pointer has to be
-// appended after it, not before (else Factory Droid loses its only in-session
+// appended after it, not before (else Factory Droid loses its user-visible
 // pointer the moment an agent sets a custom banner).
 func TestFinalizeSessionStartBanner(t *testing.T) {
 	t.Parallel()

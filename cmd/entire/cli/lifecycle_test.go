@@ -1594,6 +1594,17 @@ func (m *mockContextInjectorAgent) RenderContextInjection(agent.ContextInjection
 	return nil, nil
 }
 
+type deliveringContextInjectorAgent struct {
+	mockContextInjectorAgent
+}
+
+func (d *deliveringContextInjectorAgent) RenderContextInjection(in agent.ContextInjection) ([]byte, error) {
+	if in.Text == "" {
+		return nil, errors.New("empty context injection")
+	}
+	return []byte(in.Text), nil
+}
+
 func addGitHubOriginForLifecycleTest(t *testing.T, repoDir string) {
 	t.Helper()
 	cmd := exec.CommandContext(context.Background(), "git", "remote", "add", "origin", "git@github.com:acme/repo.git")
@@ -1639,7 +1650,7 @@ func TestHandleLifecycleTurnStart_ContextInjectionFreshTrueMarksDecided(t *testi
 	session.ClearGitCommonDirCache()
 	require.NoError(t, saveTrailsEnabledForRepo(context.Background(), true))
 
-	ag := &mockContextInjectorAgent{mockLifecycleAgent: *newMockAgent()}
+	ag := &deliveringContextInjectorAgent{mockContextInjectorAgent: mockContextInjectorAgent{mockLifecycleAgent: *newMockAgent()}}
 	sessionID := "test-trail-inject-true"
 	scope, err := currentTrailEnablementScope(context.Background())
 	require.NoError(t, err)
@@ -1651,7 +1662,39 @@ func TestHandleLifecycleTurnStart_ContextInjectionFreshTrueMarksDecided(t *testi
 	state, err := strategy.LoadSessionState(context.Background(), sessionID)
 	require.NoError(t, err)
 	require.NotNil(t, state)
-	require.True(t, state.ContextInjectionDecided, "fresh true cache should make a final injection decision")
+	require.True(t, state.ContextInjectionDecided, "fresh true cache should mark decided only after successful delivery")
+}
+
+func TestEmitContextInjection_TrailDeliveryFailureDoesNotMarkDecided(t *testing.T) {
+	tmpDir := t.TempDir()
+	testutil.InitRepo(t, tmpDir)
+	testutil.WriteFile(t, tmpDir, "init.txt", "init")
+	testutil.GitAdd(t, tmpDir, "init.txt")
+	testutil.GitCommit(t, tmpDir, "init")
+	addGitHubOriginForLifecycleTest(t, tmpDir)
+	t.Chdir(tmpDir)
+	paths.ClearWorktreeRootCache()
+	session.ClearGitCommonDirCache()
+	require.NoError(t, saveTrailsEnabledForRepo(context.Background(), true))
+
+	ag := &mockContextInjectorAgent{mockLifecycleAgent: *newMockAgent()}
+	sessionID := "test-trail-inject-render-fail"
+	scope, err := currentTrailEnablementScope(context.Background())
+	require.NoError(t, err)
+	require.NoError(t, saveTrailEnablementScopeHint(context.Background(), sessionID, scope))
+	require.NoError(t, strategy.SaveSessionState(context.Background(), &strategy.SessionState{
+		SessionID: sessionID,
+		StartedAt: time.Now(),
+	}))
+
+	emitContextInjection(context.Background(), ag, &agent.Event{
+		Type: agent.TurnStart, SessionID: sessionID, Prompt: "hello", Timestamp: time.Now(),
+	})
+
+	state, err := strategy.LoadSessionState(context.Background(), sessionID)
+	require.NoError(t, err)
+	require.NotNil(t, state)
+	require.False(t, state.ContextInjectionDecided, "render/write failure must leave trail injection retryable")
 }
 
 func TestHandleLifecycleTurnStart_RecordsGenericSkillSlashEvent(t *testing.T) {
@@ -2694,6 +2737,70 @@ func TestHandleLifecycleSessionStart_NoSynchronousNetworkForTrailEnablement(t *t
 	}
 	if elapsed > time.Second {
 		t.Fatalf("handleLifecycleSessionStart took %v; trails-enablement refresh must be detached, not synchronous", elapsed)
+	}
+}
+
+// TestHandleLifecycleSessionStart_NoSynchronousNetworkForLocalContextRegistration
+// guards against SessionStart hooks stalling agent startup: local-live context
+// registration must be handed off to a detached subprocess, never performed inline
+// on the SessionStart hook path.
+func TestHandleLifecycleSessionStart_NoSynchronousNetworkForLocalContextRegistration(t *testing.T) {
+	setupStopTestRepo(t)
+	runGitInDir(t, ".", "remote", "add", "origin", "https://github.com/entirehq/example.git")
+
+	var dialed int32
+	var lc net.ListenConfig
+	ln, err := lc.Listen(context.Background(), "tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	defer ln.Close()
+	go func() {
+		for {
+			conn, acceptErr := ln.Accept()
+			if acceptErr != nil {
+				return
+			}
+			atomic.AddInt32(&dialed, 1)
+			_ = conn
+		}
+	}()
+	t.Setenv("ENTIRE_API_BASE_URL", "https://"+ln.Addr().String())
+
+	var spawnCount int32
+	prevSpawn := localContextRegisterSpawn
+	localContextRegisterSpawn = func(worktreeRoot, agentName, sessionID, _ string) {
+		atomic.AddInt32(&spawnCount, 1)
+		if worktreeRoot == "" {
+			t.Error("expected non-empty worktree root passed to local context register spawn")
+		}
+		if agentName == "" {
+			t.Error("expected non-empty agent name passed to local context register spawn")
+		}
+		if sessionID == "" {
+			t.Error("expected non-empty session id passed to local context register spawn")
+		}
+	}
+	t.Cleanup(func() { localContextRegisterSpawn = prevSpawn })
+
+	ag := newMockHookResponseAgent()
+	event := &agent.Event{
+		Type:      agent.SessionStart,
+		SessionID: "test-no-sync-local-context-register",
+		Timestamp: time.Now(),
+	}
+
+	start := time.Now()
+	err = handleLifecycleSessionStart(context.Background(), ag, event)
+	elapsed := time.Since(start)
+
+	require.NoError(t, err)
+	if got := atomic.LoadInt32(&spawnCount); got != 1 {
+		t.Fatalf("expected exactly one detached local context registration spawn, got %d", got)
+	}
+	if got := atomic.LoadInt32(&dialed); got != 0 {
+		t.Fatalf("SessionStart dialed the context registration API synchronously; registration must run out of process")
+	}
+	if elapsed > time.Second {
+		t.Fatalf("handleLifecycleSessionStart took %v; local context registration must be detached, not synchronous", elapsed)
 	}
 }
 

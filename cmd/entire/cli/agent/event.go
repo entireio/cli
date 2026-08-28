@@ -50,6 +50,11 @@ const (
 	// commit mid-turn (before TurnEnd fires) have no per-tool file accounting,
 	// and the carry-forward path falls back to whole-transcript extraction.
 	ToolUse
+
+	// ContextRequest asks the lifecycle dispatcher to produce model-facing
+	// context without re-running turn initialization. Copilot CLI uses this for
+	// userPromptTransformed, which fires after userPromptSubmitted.
+	ContextRequest
 )
 
 // String returns a human-readable name for the event type.
@@ -73,6 +78,8 @@ func (e EventType) String() string {
 		return "ModelUpdate"
 	case ToolUse:
 		return "ToolUse"
+	case ContextRequest:
+		return "ContextRequest"
 	default:
 		return "Unknown"
 	}
@@ -96,6 +103,11 @@ type Event struct {
 
 	// Prompt is the user's prompt text (populated on TurnStart events).
 	Prompt string
+
+	// TransformedPrompt is the complete model-facing prompt supplied by a
+	// mutation-style hook. Renderers that replace rather than append hook output
+	// must preserve this text when adding context.
+	TransformedPrompt string
 
 	// Model is the LLM model identifier (e.g., "claude-sonnet-4-20250514").
 	// Populated on SessionStart (Claude Code), ModelUpdate (Gemini CLI BeforeModel),
@@ -182,6 +194,15 @@ type Event struct {
 	// Metadata holds agent-specific state that the framework stores and makes available
 	// on subsequent events. Examples: Pi's activeLeafId, Cursor's is_background_agent.
 	Metadata map[string]string
+
+	// NativeHook is the agent's own name for the hook that produced this event,
+	// in the agent's own vocabulary. Normalizing to Type is the point of this
+	// struct, so this stays empty for almost every agent; set it only when one
+	// Entire hook verb is installed under several native hooks (Factory AI Droid
+	// runs user-prompt-submit under native SessionStart too, so TurnStart fires in
+	// droid exec mode) AND the agent's response schema differs between them. It
+	// reaches the renderer through ContextInjection.NativeHook.
+	NativeHook string
 }
 
 // ReadAndParseHookInput decodes a single JSON hook payload from stdin into the

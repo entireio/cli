@@ -40,6 +40,32 @@ func TestParseHookEvent_UserPromptSubmitted(t *testing.T) {
 	}
 }
 
+func TestParseHookEvent_UserPromptTransformed(t *testing.T) {
+	t.Parallel()
+
+	ag := &CopilotCLIAgent{}
+	input := `{"timestamp":1771480081361,"cwd":"/path/to/repo","sessionId":"` + testSessionID + `","prompt":"fix the auth bug","transformedPrompt":"model-facing auth prompt"}`
+
+	event, err := ag.ParseHookEvent(context.Background(), HookNameUserPromptTransformed, strings.NewReader(input))
+	require.NoError(t, err)
+	require.NotNil(t, event)
+	require.Equal(t, agent.ContextRequest, event.Type)
+	require.Equal(t, testSessionID, event.SessionID)
+	require.Equal(t, "fix the auth bug", event.Prompt)
+	require.Equal(t, "model-facing auth prompt", event.TransformedPrompt)
+}
+
+func TestCopilotCLIAgent_ContextInjector(t *testing.T) {
+	t.Parallel()
+
+	ag := &CopilotCLIAgent{}
+	require.Equal(t, agent.ContextRequest, ag.InjectionEvent())
+
+	out, err := ag.RenderContextInjection(agent.ContextInjection{Text: "cross-repo evidence", BaseText: "model-facing prompt"})
+	require.NoError(t, err)
+	require.JSONEq(t, `{"modifiedTransformedPrompt":"model-facing prompt\n\ncross-repo evidence"}`, string(out))
+}
+
 func TestParseHookEvent_UserPromptSubmitted_TranscriptRef(t *testing.T) {
 	ag := &CopilotCLIAgent{}
 	t.Setenv("ENTIRE_TEST_COPILOT_SESSION_DIR", "/test/sessions")
@@ -555,19 +581,20 @@ func TestHookNames_ReturnsAllHooks(t *testing.T) {
 	ag := &CopilotCLIAgent{}
 	names := ag.HookNames()
 
-	if len(names) != 8 {
-		t.Errorf("HookNames() returned %d hooks, want 8", len(names))
+	if len(names) != 9 {
+		t.Errorf("HookNames() returned %d hooks, want 9", len(names))
 	}
 
 	expected := map[string]bool{
-		HookNameUserPromptSubmitted: false,
-		HookNameSessionStart:        false,
-		HookNameAgentStop:           false,
-		HookNameSessionEnd:          false,
-		HookNameSubagentStop:        false,
-		HookNamePreToolUse:          false,
-		HookNamePostToolUse:         false,
-		HookNameErrorOccurred:       false,
+		HookNameUserPromptSubmitted:   false,
+		HookNameUserPromptTransformed: false,
+		HookNameSessionStart:          false,
+		HookNameAgentStop:             false,
+		HookNameSessionEnd:            false,
+		HookNameSubagentStop:          false,
+		HookNamePreToolUse:            false,
+		HookNamePostToolUse:           false,
+		HookNameErrorOccurred:         false,
 	}
 
 	for _, name := range names {

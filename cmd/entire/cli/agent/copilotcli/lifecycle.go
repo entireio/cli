@@ -2,6 +2,7 @@ package copilotcli
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"strings"
@@ -22,19 +23,23 @@ func isSubagentSessionID(sessionID string) bool {
 	return strings.HasPrefix(sessionID, subagentSessionIDPrefix)
 }
 
-// Ensure CopilotCLIAgent implements HookSupport at compile time.
-var _ agent.HookSupport = (*CopilotCLIAgent)(nil)
+// Compile-time interface assertions.
+var (
+	_ agent.HookSupport     = (*CopilotCLIAgent)(nil)
+	_ agent.ContextInjector = (*CopilotCLIAgent)(nil)
+)
 
 // Copilot CLI hook names - these become subcommands under `entire hooks copilot-cli`
 const (
-	HookNameUserPromptSubmitted = "user-prompt-submitted"
-	HookNameSessionStart        = "session-start"
-	HookNameAgentStop           = "agent-stop"
-	HookNameSessionEnd          = "session-end"
-	HookNameSubagentStop        = "subagent-stop"
-	HookNamePreToolUse          = "pre-tool-use"
-	HookNamePostToolUse         = "post-tool-use"
-	HookNameErrorOccurred       = "error-occurred"
+	HookNameUserPromptSubmitted   = "user-prompt-submitted"
+	HookNameUserPromptTransformed = "user-prompt-transformed"
+	HookNameSessionStart          = "session-start"
+	HookNameAgentStop             = "agent-stop"
+	HookNameSessionEnd            = "session-end"
+	HookNameSubagentStop          = "subagent-stop"
+	HookNamePreToolUse            = "pre-tool-use"
+	HookNamePostToolUse           = "post-tool-use"
+	HookNameErrorOccurred         = "error-occurred"
 )
 
 // HookNames returns all hook verbs Copilot CLI supports.
@@ -42,6 +47,7 @@ const (
 func (c *CopilotCLIAgent) HookNames() []string {
 	return []string{
 		HookNameUserPromptSubmitted,
+		HookNameUserPromptTransformed,
 		HookNameSessionStart,
 		HookNameAgentStop,
 		HookNameSessionEnd,
@@ -98,6 +104,8 @@ func (c *CopilotCLIAgent) ParseHookEvent(ctx context.Context, hookName string, s
 	switch hookName {
 	case HookNameUserPromptSubmitted:
 		return c.buildUserPromptSubmitted(ctx, env), nil
+	case HookNameUserPromptTransformed:
+		return c.buildUserPromptTransformed(ctx, env), nil
 	case HookNameSessionStart:
 		return c.buildSessionStart(env), nil
 	case HookNameAgentStop:
@@ -110,6 +118,26 @@ func (c *CopilotCLIAgent) ParseHookEvent(ctx context.Context, hookName string, s
 		logging.Debug(ctx, "copilot-cli: ignoring unknown hook", "hook", hookName)
 		return nil, nil //nolint:nilnil // Unknown hooks have no lifecycle action
 	}
+}
+
+// InjectionEvent uses Copilot CLI's mutation-only userPromptTransformed hook.
+// This is separate from TurnStart so lifecycle initialization is not repeated.
+func (c *CopilotCLIAgent) InjectionEvent() agent.EventType { return agent.ContextRequest }
+
+// RenderContextInjection preserves Copilot's complete transformed prompt and
+// appends Entire's model-facing context before returning the replacement.
+func (c *CopilotCLIAgent) RenderContextInjection(inj agent.ContextInjection) ([]byte, error) {
+	if strings.TrimSpace(inj.Text) == "" || inj.BaseText == "" {
+		return nil, nil
+	}
+	payload := struct {
+		ModifiedTransformedPrompt string `json:"modifiedTransformedPrompt"`
+	}{ModifiedTransformedPrompt: inj.BaseText + "\n\n" + inj.Text}
+	out, err := json.Marshal(payload)
+	if err != nil {
+		return nil, fmt.Errorf("marshal userPromptTransformed output: %w", err)
+	}
+	return append(out, '\n'), nil
 }
 
 // --- Internal event builders (envelope already parsed) ---
@@ -126,6 +154,21 @@ func (c *CopilotCLIAgent) buildUserPromptSubmitted(ctx context.Context, env *hoo
 		SessionRef: transcriptRef,
 		Prompt:     env.Prompt,
 		Timestamp:  env.Timestamp,
+	}
+}
+
+func (c *CopilotCLIAgent) buildUserPromptTransformed(ctx context.Context, env *hookEnvelope) *agent.Event {
+	transcriptRef := env.TranscriptPath
+	if transcriptRef == "" {
+		transcriptRef = c.resolveTranscriptRef(ctx, env.SessionID)
+	}
+	return &agent.Event{
+		Type:              agent.ContextRequest,
+		SessionID:         env.SessionID,
+		SessionRef:        transcriptRef,
+		Prompt:            env.Prompt,
+		TransformedPrompt: env.TransformedPrompt,
+		Timestamp:         env.Timestamp,
 	}
 }
 
