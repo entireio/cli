@@ -167,6 +167,265 @@ func TestValidateEntireDirAt_MessageNamesPathAndType(t *testing.T) {
 	}
 }
 
+// makeEntireDir creates a real `.entire` under root and returns its path, so
+// the entry-level tests below start from a directory that already satisfies the
+// first phase of the check.
+func makeEntireDir(t *testing.T, root string) string {
+	t.Helper()
+	entire := filepath.Join(root, EntireDir)
+	if err := os.Mkdir(entire, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	return entire
+}
+
+// The entries directly under `.entire` are Entire's too, so a symlink among
+// them is the same problem one level down: the far end is outside Entire's
+// control, and for the settings files it decides what gets redacted before it
+// is committed.
+//
+// The check is deliberately shallow, which the last case pins down.
+func TestValidateEntireDirAt_SymlinkedEntries(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		setup   func(t *testing.T, root, entire string)
+		wantErr bool
+	}{
+		{
+			name:  "empty directory is fine",
+			setup: func(*testing.T, string, string) {},
+		},
+		{
+			name: "real subdirectories and settings files are fine",
+			setup: func(t *testing.T, _, entire string) {
+				t.Helper()
+				for _, sub := range []string{"logs", "metadata", "tmp"} {
+					if err := os.Mkdir(filepath.Join(entire, sub), 0o750); err != nil {
+						t.Fatal(err)
+					}
+				}
+				for _, file := range []string{"settings.json", "settings.local.json"} {
+					if err := os.WriteFile(filepath.Join(entire, file), []byte("{}"), 0o600); err != nil {
+						t.Fatal(err)
+					}
+				}
+			},
+		},
+		{
+			name: "symlinked settings.json is rejected",
+			setup: func(t *testing.T, root, entire string) {
+				t.Helper()
+				target := filepath.Join(root, "elsewhere.json")
+				if err := os.WriteFile(target, []byte("{}"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				symlinkOrSkip(t, target, filepath.Join(entire, "settings.json"))
+			},
+			wantErr: true,
+		},
+		{
+			name: "symlinked settings.local.json is rejected",
+			setup: func(t *testing.T, root, entire string) {
+				t.Helper()
+				target := filepath.Join(root, "elsewhere.json")
+				if err := os.WriteFile(target, []byte("{}"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				symlinkOrSkip(t, target, filepath.Join(entire, "settings.local.json"))
+			},
+			wantErr: true,
+		},
+		{
+			name: "symlinked subdirectory is rejected",
+			setup: func(t *testing.T, root, entire string) {
+				t.Helper()
+				target := filepath.Join(root, "elsewhere")
+				if err := os.Mkdir(target, 0o750); err != nil {
+					t.Fatal(err)
+				}
+				symlinkOrSkip(t, target, filepath.Join(entire, "metadata"))
+			},
+			wantErr: true,
+		},
+		{
+			// os.OpenRoot confinement, which the settings loader already
+			// applies, follows a symlink whose target stays inside the root.
+			// Staying inside is not the invariant: the entry is still not the
+			// file Entire owns.
+			name: "symlink whose target is inside .entire is rejected",
+			setup: func(t *testing.T, _, entire string) {
+				t.Helper()
+				target := filepath.Join(entire, "planted.json")
+				if err := os.WriteFile(target, []byte("{}"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				symlinkOrSkip(t, target, filepath.Join(entire, "settings.local.json"))
+			},
+			wantErr: true,
+		},
+		{
+			name: "dangling symlink is rejected",
+			setup: func(t *testing.T, root, entire string) {
+				t.Helper()
+				symlinkOrSkip(t, filepath.Join(root, "missing"), filepath.Join(entire, "settings.json"))
+			},
+			wantErr: true,
+		},
+		{
+			// The scan stops at `.entire`'s own entries. Deeper paths are
+			// walked by the checkpoint writer, which skips symlinks itself, and
+			// scanning them here would mean walking every session's transcripts
+			// on every command.
+			name: "a symlink one level deeper is not this check's business",
+			setup: func(t *testing.T, root, entire string) {
+				t.Helper()
+				metadata := filepath.Join(entire, "metadata")
+				if err := os.Mkdir(metadata, 0o750); err != nil {
+					t.Fatal(err)
+				}
+				symlinkOrSkip(t, root, filepath.Join(metadata, "session"))
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			root := t.TempDir()
+			entire := makeEntireDir(t, root)
+			tt.setup(t, root, entire)
+
+			err := ValidateEntireDirAt(root)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatal("ValidateEntireDirAt returned nil, want error")
+				}
+				if !errors.Is(err, ErrEntireDirUnsupportedEntry) {
+					t.Errorf("error does not wrap ErrEntireDirUnsupportedEntry: %v", err)
+				}
+				if errors.Is(err, ErrEntireDirNotDirectory) {
+					t.Errorf("a symlinked entry must not read as `.entire` being the wrong type: %v", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("ValidateEntireDirAt: %v", err)
+			}
+		})
+	}
+}
+
+// The user acts on the message, and acting means finding the link and deciding
+// what to do with what is on the far end. Both halves have to be in it.
+func TestValidateEntireDirAt_SymlinkedEntryMessageNamesEntryAndTarget(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	entire := makeEntireDir(t, root)
+	target := filepath.Join(root, "elsewhere.json")
+	if err := os.WriteFile(target, []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	entry := filepath.Join(entire, "settings.local.json")
+	symlinkOrSkip(t, target, entry)
+
+	err := ValidateEntireDirAt(root)
+	if err == nil {
+		t.Fatal("ValidateEntireDirAt returned nil, want error")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, entry) {
+		t.Errorf("message %q does not name the entry %q", msg, entry)
+	}
+	if !strings.Contains(msg, target) {
+		t.Errorf("message %q does not name the link target %q", msg, target)
+	}
+	if !strings.Contains(msg, "symbolic link") {
+		t.Errorf("message %q does not say what was found", msg)
+	}
+}
+
+// A repo with several planted links should not cost the user one round trip per
+// link, so the message names one and counts the rest. The named one is the
+// first in os.ReadDir's sorted order, which keeps the message deterministic.
+func TestValidateEntireDirAt_SymlinkedEntriesCountTheRest(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	entire := makeEntireDir(t, root)
+	for _, name := range []string{"logs", "metadata", "settings.json"} {
+		symlinkOrSkip(t, root, filepath.Join(entire, name))
+	}
+
+	err := ValidateEntireDirAt(root)
+	if err == nil {
+		t.Fatal("ValidateEntireDirAt returned nil, want error")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, filepath.Join(entire, "logs")) {
+		t.Errorf("message %q does not name the first entry in sorted order", msg)
+	}
+	if !strings.Contains(msg, "2 other entries") {
+		t.Errorf("message %q does not count the remaining entries", msg)
+	}
+}
+
+// A single extra link reads as "1 other entry", not "1 other entries".
+func TestValidateEntireDirAt_SymlinkedEntriesCountIsSingular(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	entire := makeEntireDir(t, root)
+	for _, name := range []string{"logs", "metadata"} {
+		symlinkOrSkip(t, root, filepath.Join(entire, name))
+	}
+
+	err := ValidateEntireDirAt(root)
+	if err == nil {
+		t.Fatal("ValidateEntireDirAt returned nil, want error")
+	}
+	if msg := err.Error(); !strings.Contains(msg, "1 other entry") {
+		t.Errorf("message %q does not count the remaining entry in the singular", msg)
+	}
+}
+
+// `.entire` is a real directory but its contents cannot be listed. That is not
+// evidence the entries are clean, and the remedy is the filesystem's, so it
+// joins the existing unreadable condition rather than becoming a fourth one.
+func TestValidateEntireDirAt_UnlistableDirectoryIsUnreadable(t *testing.T) {
+	t.Parallel()
+	if runtime.GOOS == osWindows {
+		t.Skip("directory permission bits do not gate readdir on Windows")
+	}
+	if os.Geteuid() == 0 {
+		t.Skip("root bypasses directory permission bits")
+	}
+
+	root := t.TempDir()
+	entire := makeEntireDir(t, root)
+	if err := os.Chmod(entire, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := os.Chmod(entire, 0o750); err != nil {
+			t.Logf("restore permissions on %s: %v", entire, err)
+		}
+	})
+
+	err := ValidateEntireDirAt(root)
+	if !errors.Is(err, ErrEntireDirUnreadable) {
+		t.Fatalf("want ErrEntireDirUnreadable, got %v", err)
+	}
+	if errors.Is(err, ErrEntireDirNotDirectory) || errors.Is(err, ErrEntireDirUnsupportedEntry) {
+		t.Errorf("a listing failure must not read as a verdict about the contents: %v", err)
+	}
+	if !errors.Is(err, fs.ErrPermission) {
+		t.Errorf("the underlying cause was dropped: %v", err)
+	}
+}
+
 // Outside a git repository there is no worktree root, so there is no `.entire`
 // to validate and the check is skipped. Commands that need a repository report
 // its absence themselves, with a message about the repository rather than one
@@ -405,6 +664,24 @@ func TestEntireDirErrorsAreDistinguishable(t *testing.T) {
 		}
 		if !errors.Is(err, fs.ErrPermission) {
 			t.Errorf("the underlying cause was dropped: %v", err)
+		}
+	})
+
+	t.Run("symlinked entry", func(t *testing.T) {
+		t.Parallel()
+		root := t.TempDir()
+		entire := makeEntireDir(t, root)
+		symlinkOrSkip(t, root, filepath.Join(entire, "metadata"))
+
+		err := ValidateEntireDirAt(root)
+		if !errors.Is(err, ErrEntireDirUnsupportedEntry) {
+			t.Fatalf("want ErrEntireDirUnsupportedEntry, got %v", err)
+		}
+		if errors.Is(err, ErrEntireDirNotDirectory) {
+			t.Errorf("a symlinked entry must not read as `.entire` being the wrong type: %v", err)
+		}
+		if errors.Is(err, ErrEntireDirUnreadable) {
+			t.Errorf("a symlinked entry must not read as unreadable: %v", err)
 		}
 	})
 }

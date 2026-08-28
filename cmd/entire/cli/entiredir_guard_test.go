@@ -457,6 +457,10 @@ func TestEntireDirRemedyMatchesTheCondition(t *testing.T) {
 	t.Parallel()
 
 	wrongType := fmt.Errorf("/repo/.entire is a symbolic link, %w", paths.ErrEntireDirNotDirectory)
+	symlinkedEntry := fmt.Errorf("/repo/.entire/settings.local.json is a symbolic link to /elsewhere.json, %w",
+		paths.ErrEntireDirUnsupportedEntry)
+	pipedEntry := fmt.Errorf("/repo/.entire/settings.json is a named pipe, %w",
+		paths.ErrEntireDirUnsupportedEntry)
 	unreadable := fmt.Errorf("/repo/.entire %w: %w", paths.ErrEntireDirUnreadable, fs.ErrPermission)
 	unresolved := fmt.Errorf("%w, so .entire cannot be verified: %w",
 		paths.ErrRepositoryUnresolved, errors.New("fatal: detected dubious ownership"))
@@ -472,7 +476,24 @@ func TestEntireDirRemedyMatchesTheCondition(t *testing.T) {
 			name:    "wrong file type points at the path",
 			err:     wrongType,
 			want:    []string{"replace it with a real directory"},
-			exclude: []string{"safe.directory", "PATH", "permissions"},
+			exclude: []string{"safe.directory", "PATH", "permissions", "real file or directory"},
+		},
+		{
+			// Shares the wrong-type row's shape but not its sentence:
+			// settings.local.json is not required to be a directory, so being
+			// told it is not one names the wrong problem.
+			name:    "symlinked entry points at the entry",
+			err:     symlinkedEntry,
+			want:    []string{"replace it with a real file or directory"},
+			exclude: []string{"safe.directory", "PATH", "ownership", "replace it with a real directory"},
+		},
+		{
+			// An entry can be unsupported without being a link, and the remedy
+			// is the same one. The wording must not assume a far end to inspect.
+			name:    "unsupported entry that is not a link shares the remedy",
+			err:     pipedEntry,
+			want:    []string{"replace it with a real file or directory"},
+			exclude: []string{"safe.directory", "PATH", "ownership", "replace it with a real directory"},
 		},
 		{
 			name:    "unreadable points at the filesystem",
@@ -484,14 +505,17 @@ func TestEntireDirRemedyMatchesTheCondition(t *testing.T) {
 			name:    "unresolved repository points at git",
 			err:     unresolved,
 			want:    []string{"safe.directory"},
-			exclude: []string{"replace it with a real directory"},
+			exclude: []string{"replace it with a real directory", "real file or directory"},
 		},
 		{
 			name: "unclassified invents no remedy",
 			err:  unknown,
 			// No remedy can be right for an error nobody classified, and a
 			// wrong one costs more than none.
-			exclude: []string{"safe.directory", "replace it with a real directory", "ownership"},
+			exclude: []string{
+				"safe.directory", "replace it with a real directory",
+				"real file or directory", "ownership",
+			},
 		},
 	}
 
@@ -525,5 +549,210 @@ func TestEntireDirRemedyMatchesTheCondition(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// symlinkEntireDirEntry builds a repo whose `.entire` is a real directory
+// holding one symlinked entry, points the process at it, and returns the
+// symlink's target. Named entries are the ones Entire actually reads and
+// writes, so callers pass the one whose redirection they care about.
+//
+// Not parallel: t.Chdir is process-global, and the CWD is what the
+// worktree-root resolution reads.
+func newRepoWithSymlinkedEntireDirEntry(t *testing.T, entry string) (target string) {
+	t.Helper()
+
+	repoDir := t.TempDir()
+	testutil.InitRepo(t, repoDir)
+
+	entireDir := filepath.Join(repoDir, paths.EntireDir)
+	if err := os.Mkdir(entireDir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	target = filepath.Join(t.TempDir(), "elsewhere")
+	if err := os.Mkdir(target, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, filepath.Join(entireDir, entry)); err != nil {
+		t.Skipf("cannot create symlink: %v", err)
+	}
+
+	t.Chdir(repoDir)
+	paths.ClearWorktreeRootCache()
+	t.Cleanup(paths.ClearWorktreeRootCache)
+
+	return target
+}
+
+// A real `.entire` holding a redirected entry is the case a check that stopped
+// at `.entire` itself waves through, which is the whole reason the scan goes one
+// level down.
+func TestCheckEntireDirBeforeRun_SymlinkedEntryFailsGuardedCommand(t *testing.T) {
+	for _, entry := range []string{
+		"settings.json",
+		"settings.local.json",
+		"metadata",
+		"logs",
+		"tmp",
+	} {
+		t.Run(entry, func(t *testing.T) {
+			newRepoWithSymlinkedEntireDirEntry(t, entry)
+
+			var stderr bytes.Buffer
+			cmd := &cobra.Command{Use: "status"}
+			cmd.SetContext(context.Background())
+			cmd.SetErr(&stderr)
+
+			safe, err := checkEntireDirBeforeRun(cmd)
+			if err == nil {
+				t.Fatalf("checkEntireDirBeforeRun accepted a symlinked %s", entry)
+			}
+			if safe {
+				t.Error("checkEntireDirBeforeRun reported the path safe")
+			}
+			if !errors.Is(err, paths.ErrEntireDirUnsupportedEntry) {
+				t.Errorf("error does not wrap ErrEntireDirUnsupportedEntry: %v", err)
+			}
+			if report := stderr.String(); !strings.Contains(report, entry) {
+				t.Errorf("stderr does not name the offending entry:\n%s", report)
+			}
+		})
+	}
+}
+
+// The settings files are the ones with teeth: settings.local.json names the
+// command Entire executes at pre-push, and both decide what is redacted before
+// it is committed. os.OpenRoot, which the loader already opens them through,
+// refuses only a link that leaves `.entire` — so the in-directory case below is
+// the one it lets past.
+func TestLoadEntireSettings_RefusesSymlinkedSettingsFile(t *testing.T) {
+	for _, entry := range []string{"settings.json", "settings.local.json"} {
+		t.Run(entry, func(t *testing.T) {
+			newRepoWithSymlinkedEntireDirEntry(t, entry)
+
+			_, err := LoadEntireSettings(context.Background())
+			if err == nil {
+				t.Fatalf("LoadEntireSettings read settings through a symlinked %s", entry)
+			}
+			if !errors.Is(err, paths.ErrEntireDirUnsupportedEntry) {
+				t.Errorf("error does not wrap ErrEntireDirUnsupportedEntry: %v", err)
+			}
+		})
+	}
+}
+
+// Staying inside `.entire` is not the invariant. This is the case os.OpenRoot
+// confinement follows without complaint, so it needs its own coverage rather
+// than sharing the escaping-link cases above.
+func TestLoadEntireSettings_RefusesSettingsSymlinkedWithinEntireDir(t *testing.T) {
+	repoDir := t.TempDir()
+	testutil.InitRepo(t, repoDir)
+
+	entireDir := filepath.Join(repoDir, paths.EntireDir)
+	if err := os.Mkdir(entireDir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	planted := filepath.Join(entireDir, "planted.json")
+	if err := os.WriteFile(planted, []byte(`{"enabled":false}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(planted, filepath.Join(entireDir, "settings.local.json")); err != nil {
+		t.Skipf("cannot create symlink: %v", err)
+	}
+
+	t.Chdir(repoDir)
+	paths.ClearWorktreeRootCache()
+	t.Cleanup(paths.ClearWorktreeRootCache)
+
+	_, err := LoadEntireSettings(context.Background())
+	if err == nil {
+		t.Fatal("LoadEntireSettings read settings through a link pointing inside .entire")
+	}
+	if !errors.Is(err, paths.ErrEntireDirUnsupportedEntry) {
+		t.Errorf("error does not wrap ErrEntireDirUnsupportedEntry: %v", err)
+	}
+}
+
+// A symlinked .entire/logs is the log sink itself being redirected, so the
+// refusal has to happen before anything is written — the target must come out
+// of this untouched.
+func TestNewLogger_RefusesSymlinkedLogsDir(t *testing.T) {
+	target := newRepoWithSymlinkedEntireDirEntry(t, "logs")
+
+	if _, err := newLogger(context.Background()); err == nil {
+		t.Fatal("newLogger built a logger through a symlinked .entire/logs")
+	}
+
+	entries, err := os.ReadDir(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Errorf("newLogger created %d entries in the symlink target", len(entries))
+	}
+}
+
+func TestDoctor_ReportsSymlinkedEntireDirEntry(t *testing.T) {
+	newRepoWithSymlinkedEntireDirEntry(t, "settings.local.json")
+
+	for _, args := range [][]string{{"doctor"}, {"doctor", "logs"}, {"doctor", "bundle"}} {
+		name := strings.Join(args, " ")
+		t.Run(name, func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			root := NewRootCmd()
+			root.SetOut(&stdout)
+			root.SetErr(&stderr)
+			root.SetArgs(args)
+
+			err := root.ExecuteContext(context.Background())
+			if err == nil {
+				t.Fatalf("`entire %s` succeeded on a repo with a symlinked .entire entry", name)
+			}
+			if !errors.Is(err, paths.ErrEntireDirUnsupportedEntry) {
+				t.Fatalf("error does not wrap ErrEntireDirUnsupportedEntry: %v", err)
+			}
+
+			report := stdout.String() + stderr.String()
+			for _, want := range []string{"symbolic link", "settings.local.json"} {
+				if !strings.Contains(report, want) {
+					t.Errorf("report is missing %q:\n%s", want, report)
+				}
+			}
+		})
+	}
+}
+
+// Everything Entire itself puts under `.entire` is a real file or directory, so
+// a populated repo has to pass. Without this, the scan is one stray symlink in
+// our own layout away from failing every command in every repo.
+func TestCheckEntireDirBeforeRun_PopulatedEntireDirIsSafe(t *testing.T) {
+	repoDir := t.TempDir()
+	testutil.InitRepo(t, repoDir)
+
+	entireDir := filepath.Join(repoDir, paths.EntireDir)
+	for _, sub := range []string{"", "logs", "metadata", "tmp", "runners", "redactors"} {
+		if err := os.Mkdir(filepath.Join(entireDir, sub), 0o750); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, file := range []string{".gitignore", "settings.json", "settings.local.json"} {
+		if err := os.WriteFile(filepath.Join(entireDir, file), []byte("{}"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	t.Chdir(repoDir)
+	paths.ClearWorktreeRootCache()
+	t.Cleanup(paths.ClearWorktreeRootCache)
+
+	cmd := &cobra.Command{Use: "status"}
+	cmd.SetContext(context.Background())
+
+	safe, err := checkEntireDirBeforeRun(cmd)
+	if err != nil {
+		t.Fatalf("checkEntireDirBeforeRun on a populated .entire: %v", err)
+	}
+	if !safe {
+		t.Error("a populated .entire directory was not reported safe")
 	}
 }

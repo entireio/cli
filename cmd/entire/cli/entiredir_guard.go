@@ -79,7 +79,7 @@ func checkEntireDirBeforeRun(cmd *cobra.Command) (safe bool, err error) {
 // replaced a directory Entire owns, or the path cannot be inspected, or git
 // cannot say which repository this is.
 //
-// Those are three separate remedies, matched positively. Printing the wrong one
+// Those are four separate remedies, matched positively. Printing the wrong one
 // is worse than printing none — a filesystem EACCES sent through the git branch
 // tells the user to check safe.directory right after a line that already said
 // "permission denied" — so an error matching none of them gets no remedy at all.
@@ -95,6 +95,18 @@ func writeEntireDirRemedy(w io.Writer, err error) {
 		fmt.Fprintf(w, "\n")
 		fmt.Fprintf(w, "Fix: inspect the path, then either replace it with a real directory or remove\n")
 		fmt.Fprintf(w, "it and run `entire enable` again.\n")
+
+	case errors.Is(err, paths.ErrEntireDirUnsupportedEntry):
+		fmt.Fprintf(w, "Everything directly under %s belongs to Entire, and Entire only ever puts\n", paths.EntireDir)
+		fmt.Fprintf(w, "real files and directories there. A symbolic link puts the far end outside\n")
+		fmt.Fprintf(w, "its control: a redirected settings file names the command Entire runs\n")
+		fmt.Fprintf(w, "before a push and decides what may be committed, and a redirected\n")
+		fmt.Fprintf(w, "subdirectory sends session transcripts somewhere else. A pipe, socket, or\n")
+		fmt.Fprintf(w, "device in their place stalls or breaks the read instead.\n")
+		fmt.Fprintf(w, "\n")
+		fmt.Fprintf(w, "Fix: replace it with a real file or directory, after inspecting what is\n")
+		fmt.Fprintf(w, "there and, for a link, where it points. Redirecting %s/logs or\n", paths.EntireDir)
+		fmt.Fprintf(w, "%s/tmp elsewhere this way is not supported.\n", paths.EntireDir)
 
 	case errors.Is(err, paths.ErrEntireDirUnreadable):
 		fmt.Fprintf(w, "Nothing is known about what is at that path — the check itself failed, so\n")
@@ -142,7 +154,7 @@ func reportBrokenEntireDir(cmd *cobra.Command) error {
 	return NewSilentError(err)
 }
 
-// writeEntireDirDiagnosis is doctor's rendering of the same three conditions
+// writeEntireDirDiagnosis is doctor's rendering of the same four conditions
 // writeEntireDirRemedy covers. It is separate because doctor's report has its
 // own shape (a labelled heading and indented detail, matching the other
 // checks), and it takes the error as a parameter so each branch is reachable in
@@ -150,7 +162,10 @@ func reportBrokenEntireDir(cmd *cobra.Command) error {
 //
 // The heading distinguishes the conditions too: calling `.entire` BROKEN when
 // the only thing established is that git would not answer states something we
-// do not know.
+// do not know. A wrong file type and an unsupported entry share the BROKEN
+// heading because they are one condition to the reader — something has replaced
+// a path Entire owns — and differ only in which path and what to replace it
+// with.
 func writeEntireDirDiagnosis(w io.Writer, err error) {
 	switch {
 	case errors.Is(err, paths.ErrEntireDirNotDirectory):
@@ -162,6 +177,19 @@ func writeEntireDirDiagnosis(w io.Writer, err error) {
 		fmt.Fprintf(w, "  remove it and run `entire enable` again.\n")
 		fmt.Fprintf(w, "  Not auto-fixed: what is there may be someone's data, and deleting it is\n")
 		fmt.Fprintf(w, "  not a call doctor should make on your behalf.\n")
+
+	case errors.Is(err, paths.ErrEntireDirUnsupportedEntry):
+		fmt.Fprintf(w, "%s: BROKEN\n", paths.EntireDir)
+		fmt.Fprintf(w, "  %v\n", err)
+		fmt.Fprintf(w, "  Everything directly under %s belongs to Entire, and Entire only ever\n", paths.EntireDir)
+		fmt.Fprintf(w, "  puts real files and directories there. Entire has refused to read or\n")
+		fmt.Fprintf(w, "  write through it, so every other command in this repository is stopped\n")
+		fmt.Fprintf(w, "  and no session data is being captured.\n")
+		fmt.Fprintf(w, "  Fix: replace it with a real file or directory, after inspecting what is\n")
+		fmt.Fprintf(w, "  there and, for a link, where it points.\n")
+		fmt.Fprintf(w, "  Not auto-fixed: what is there, or on the far end of a link, may be\n")
+		fmt.Fprintf(w, "  someone's data, and deleting it is not a call doctor should make on\n")
+		fmt.Fprintf(w, "  your behalf.\n")
 
 	case errors.Is(err, paths.ErrEntireDirUnreadable):
 		fmt.Fprintf(w, "%s: UNREADABLE\n", paths.EntireDir)

@@ -181,3 +181,133 @@ func dirEntryNames(t *testing.T, dir string) []string {
 	}
 	return names
 }
+
+// symlinkEntireDirEntry leaves `.entire` a real directory and replaces one
+// entry inside it with a symlink, creating the directory if the repo has none
+// yet. Returns the directory the symlink points at.
+//
+// This is the shape a check that stopped at `.entire` itself waves through, and
+// the one a pull request can deliver: git records symlinks, so the entry arrives
+// by checkout in every clone.
+func symlinkEntireDirEntry(t *testing.T, repoDir, entry string) string {
+	t.Helper()
+	if runtime.GOOS == windowsGOOS {
+		t.Skip("symlink harness only runs on Unix")
+	}
+
+	entireDir := filepath.Join(repoDir, paths.EntireDir)
+	if err := os.MkdirAll(entireDir, 0o750); err != nil {
+		t.Fatalf("create %s: %v", entireDir, err)
+	}
+	link := filepath.Join(entireDir, entry)
+	if err := os.RemoveAll(link); err != nil {
+		t.Fatalf("clear %s: %v", link, err)
+	}
+	target := filepath.Join(t.TempDir(), "entry-elsewhere")
+	if err := os.Mkdir(target, 0o750); err != nil {
+		t.Fatalf("create %s: %v", target, err)
+	}
+	if err := os.Symlink(target, link); err != nil {
+		t.Skipf("cannot create symlink: %v", err)
+	}
+	return target
+}
+
+func TestEntireDirSymlinkedEntry_GuardedCommandsStop(t *testing.T) {
+	t.Parallel()
+
+	// One per entry Entire actually reads or writes: the two settings files,
+	// the transcript store, the log sink, and the scratch directory.
+	for _, entry := range []string{
+		"settings.json",
+		"settings.local.json",
+		"metadata",
+		"logs",
+		"tmp",
+	} {
+		t.Run(entry, func(t *testing.T) {
+			t.Parallel()
+			env := NewRepoWithCommit(t)
+			symlinkEntireDirEntry(t, env.RepoDir, entry)
+
+			exitCode, output := runEntireInRepo(t, env.RepoDir, "status")
+			if exitCode == 0 {
+				t.Fatalf("`entire status` exited 0 with a symlinked %s:\n%s", entry, output)
+			}
+			if !strings.Contains(output, "symbolic link") {
+				t.Errorf("output does not say what was found:\n%s", output)
+			}
+			if !strings.Contains(output, entry) {
+				t.Errorf("output does not name the offending entry %q:\n%s", entry, output)
+			}
+		})
+	}
+}
+
+// The point of the settings half of the guard: a redirected settings file must
+// not be honoured. The planted file would turn Entire off, which is a visible,
+// silent-looking outcome — so a run that prints "disabled" instead of failing is
+// the exact regression this pins.
+func TestEntireDirSymlinkedEntry_RedirectedSettingsAreNotHonoured(t *testing.T) {
+	t.Parallel()
+	env := NewRepoWithCommit(t)
+
+	if runtime.GOOS == windowsGOOS {
+		t.Skip("symlink harness only runs on Unix")
+	}
+	entireDir := filepath.Join(env.RepoDir, paths.EntireDir)
+	if err := os.MkdirAll(entireDir, 0o750); err != nil {
+		t.Fatalf("create %s: %v", entireDir, err)
+	}
+	planted := filepath.Join(t.TempDir(), "planted.json")
+	if err := os.WriteFile(planted, []byte(`{"enabled":false}`), 0o600); err != nil {
+		t.Fatalf("write %s: %v", planted, err)
+	}
+	if err := os.Symlink(planted, filepath.Join(entireDir, "settings.local.json")); err != nil {
+		t.Skipf("cannot create symlink: %v", err)
+	}
+
+	exitCode, output := runEntireInRepo(t, env.RepoDir, "status")
+	if exitCode == 0 {
+		t.Fatalf("`entire status` exited 0 with a redirected settings.local.json:\n%s", output)
+	}
+	if !strings.Contains(output, "symbolic link") {
+		t.Errorf("output does not say what was found:\n%s", output)
+	}
+}
+
+func TestEntireDirSymlinkedEntry_DoctorReportsIt(t *testing.T) {
+	t.Parallel()
+	env := NewRepoWithCommit(t)
+	symlinkEntireDirEntry(t, env.RepoDir, "settings.local.json")
+
+	exitCode, output := runEntireInRepo(t, env.RepoDir, "doctor")
+	if exitCode == 0 {
+		t.Fatalf("`entire doctor` exited 0 on a repo with a symlinked entry:\n%s", output)
+	}
+	if !strings.Contains(output, "BROKEN") {
+		t.Errorf("doctor did not report the problem:\n%s", output)
+	}
+	if !strings.Contains(output, "real file or directory") {
+		t.Errorf("doctor did not name the remedy:\n%s", output)
+	}
+	if !strings.Contains(output, "settings.local.json") {
+		t.Errorf("doctor did not name the offending entry:\n%s", output)
+	}
+}
+
+// A symlinked .entire/logs is the log sink redirected, so the refusal has to
+// land before anything is written there.
+func TestEntireDirSymlinkedEntry_NothingIsWrittenThroughIt(t *testing.T) {
+	t.Parallel()
+	env := NewRepoWithCommit(t)
+	target := symlinkEntireDirEntry(t, env.RepoDir, "logs")
+
+	for _, args := range [][]string{{"status"}, {"version"}, {"doctor"}, {"session", "list"}} {
+		runEntireInRepo(t, env.RepoDir, args...)
+	}
+
+	if names := dirEntryNames(t, target); len(names) != 0 {
+		t.Errorf("entries were created through the symlinked .entire/logs: %v", names)
+	}
+}
