@@ -1,7 +1,9 @@
 package tokenreport
 
 import (
-	"sort"
+	"maps"
+	"slices"
+	"strings"
 	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
@@ -16,9 +18,9 @@ type CheckpointRow struct {
 	CheckpointID string
 	// SessionID identifies the session this row's token usage belongs to.
 	SessionID string
-	// Version is the checkpoint's root token_usage_version. Checkpoints
-	// written by newer CLIs stamp 2; legacy checkpoints have no version,
-	// which decodes as 0.
+	// Version is the checkpoint's root token_usage_version. Any value below
+	// 2 takes the legacy rule (absent decodes as 0; 1 was never written).
+	// Checkpoints written by newer CLIs stamp 2.
 	Version int
 	// CheckpointTranscriptStart is the session metadata's
 	// checkpoint_transcript_start field: the transcript line offset this
@@ -39,7 +41,7 @@ type Scope int
 const (
 	// ScopeDelta means Usage covers only this checkpoint.
 	ScopeDelta Scope = iota
-	// ScopeLegacyFromStart means this is a legacy row (no token_usage_version)
+	// ScopeLegacyFromStart means this is a legacy row (Version below 2)
 	// whose CheckpointTranscriptStart is 0. Usage may be a delta, or it may be
 	// the session's running total up to this checkpoint (a historical bug).
 	// There is no per-row "first checkpoint" signal to disambiguate the two
@@ -52,10 +54,10 @@ const (
 //
 // Checkpoint metadata carries no per-row "first checkpoint" signal — the
 // metadata's checkpoints_count is a prompt count, not a row ordinal — so a
-// legacy row (Version 0) at transcript offset 0 is classified as
-// ScopeLegacyFromStart rather than resolved to a definite delta or total:
-// it may be either. A legacy row at a nonzero offset, or any row stamped
-// with Version >= 2, is always a delta.
+// row with Version below 2 (absent decodes as 0; 1 was never written) at
+// transcript offset 0 is classified as ScopeLegacyFromStart rather than
+// resolved to a definite delta or total: it may be either. A legacy row at a
+// nonzero offset, or any row stamped with Version >= 2, is always a delta.
 func ClassifyScope(r CheckpointRow) Scope {
 	switch {
 	case r.Version >= 2:
@@ -68,47 +70,51 @@ func ClassifyScope(r CheckpointRow) Scope {
 }
 
 // DedupeLegacyCheckpoints groups rows by SessionID and, within each session,
-// resolves the ScopeLegacyFromStart ambiguity: sorted by CreatedAt (stable),
-// the latest ScopeLegacyFromStart row is kept along with every ScopeDelta row
-// created after it, on the assumption that the latest legacy-from-start row
-// is the session's running total and therefore already contains every row
-// before it. Rows before that latest legacy-from-start row are dropped as
-// redundant. ScopeDelta rows are never collapsed. A session with a single
-// ScopeLegacyFromStart row and nothing else keeps that row.
+// resolves the ScopeLegacyFromStart ambiguity: sorted by CreatedAt (ties
+// broken by CheckpointID for determinism only, not as a time-ordering
+// fallback), the latest ScopeLegacyFromStart row is treated as an anchor —
+// on the assumption that it is the session's running total and therefore
+// already contains every row before it. Every row before the anchor is
+// dropped regardless of its own Scope — a delta written before the running
+// total is already contained in it. Rows after the anchor are kept as-is. In
+// practice a session's Version >= 2 rows always post-date its legacy rows,
+// so they are never collapsed. A session with a single ScopeLegacyFromStart
+// row and nothing else keeps that row. A session with no ScopeLegacyFromStart
+// row at all (e.g. every row is Version >= 2) keeps every row.
 //
-// Returned rows are ordered deterministically by SessionID, then CreatedAt.
+// Returned rows are ordered deterministically by SessionID, then CreatedAt,
+// then CheckpointID.
+//
+// Precondition: CreatedAt must be set on every row; a zero CreatedAt sorts
+// first and is treated as the oldest row in its session (the metadata loader
+// that populates CheckpointRow is responsible for guaranteeing this).
+//
 // The input slice is not mutated.
 func DedupeLegacyCheckpoints(rows []CheckpointRow) (kept []CheckpointRow, collapsed int) {
 	bySession := make(map[string][]CheckpointRow)
-	var sessionOrder []string
 	for _, r := range rows {
-		if _, ok := bySession[r.SessionID]; !ok {
-			sessionOrder = append(sessionOrder, r.SessionID)
-		}
 		bySession[r.SessionID] = append(bySession[r.SessionID], r)
 	}
-	sort.Strings(sessionOrder)
 
-	for _, sessionID := range sessionOrder {
+	for _, sessionID := range slices.Sorted(maps.Keys(bySession)) {
 		group := bySession[sessionID]
-		sort.SliceStable(group, func(i, j int) bool {
-			return group[i].CreatedAt.Before(group[j].CreatedAt)
+		slices.SortStableFunc(group, func(a, b CheckpointRow) int {
+			if c := a.CreatedAt.Compare(b.CreatedAt); c != 0 {
+				return c
+			}
+			return strings.Compare(a.CheckpointID, b.CheckpointID)
 		})
 
-		latestLegacyFromStart := -1
+		latest := -1
 		for i, r := range group {
 			if ClassifyScope(r) == ScopeLegacyFromStart {
-				latestLegacyFromStart = i
+				latest = i
 			}
 		}
 
-		for i, r := range group {
-			if i < latestLegacyFromStart {
-				collapsed++
-				continue
-			}
-			kept = append(kept, r)
-		}
+		anchor := max(latest, 0)
+		collapsed += anchor
+		kept = append(kept, group[anchor:]...)
 	}
 
 	return kept, collapsed

@@ -1,6 +1,7 @@
 package tokenreport
 
 import (
+	"slices"
 	"testing"
 	"time"
 
@@ -42,17 +43,25 @@ func ids(rows []CheckpointRow) []string {
 
 func TestClassifyScope(t *testing.T) {
 	t.Parallel()
-	if ClassifyScope(CheckpointRow{Version: 2}) != ScopeDelta {
-		t.Error("v2 is delta")
+	tests := []struct {
+		name string
+		row  CheckpointRow
+		want Scope
+	}{
+		{"v2 is delta", CheckpointRow{Version: 2}, ScopeDelta},
+		{"legacy at offset 0 may be the session's running total", CheckpointRow{Version: 0, CheckpointTranscriptStart: 0}, ScopeLegacyFromStart},
+		{"legacy with an offset is a delta", CheckpointRow{Version: 0, CheckpointTranscriptStart: 4120}, ScopeDelta},
+		{"v2 at offset 0 (post carry-forward) is still a delta", CheckpointRow{Version: 2, CheckpointTranscriptStart: 0}, ScopeDelta},
+		{"version 1 (never written) still takes the legacy rule", CheckpointRow{Version: 1, CheckpointTranscriptStart: 0}, ScopeLegacyFromStart},
+		{"negative version takes the legacy rule", CheckpointRow{Version: -1, CheckpointTranscriptStart: 0}, ScopeLegacyFromStart},
 	}
-	if ClassifyScope(CheckpointRow{Version: 0, CheckpointTranscriptStart: 0}) != ScopeLegacyFromStart {
-		t.Error("legacy at offset 0 may be the session's running total")
-	}
-	if ClassifyScope(CheckpointRow{Version: 0, CheckpointTranscriptStart: 4120}) != ScopeDelta {
-		t.Error("legacy with an offset is a delta")
-	}
-	if ClassifyScope(CheckpointRow{Version: 2, CheckpointTranscriptStart: 0}) != ScopeDelta {
-		t.Error("v2 at offset 0 (post carry-forward) is still a delta")
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := ClassifyScope(tt.row); got != tt.want {
+				t.Errorf("ClassifyScope(%+v) = %v, want %v", tt.row, got, tt.want)
+			}
+		})
 	}
 }
 
@@ -73,6 +82,24 @@ func TestDedupeLegacyCheckpoints_GroundingExample(t *testing.T) {
 	}
 	if len(kept) != 2 || kept[0].CheckpointID != "B" || kept[1].CheckpointID != "C" {
 		t.Errorf("kept %+v", ids(kept))
+	}
+}
+
+func TestDedupe_InputOrderDoesNotMatter(t *testing.T) {
+	t.Parallel()
+	// Same rows as the grounding example, fed in reverse (C, B, A) order.
+	// Result must not depend on input order — this pins the internal sort.
+	rows := []CheckpointRow{
+		{CheckpointID: "C", SessionID: "s", CheckpointTranscriptStart: 4120, Usage: mtok(0.8), CreatedAt: at(3)},
+		{CheckpointID: "B", SessionID: "s", CheckpointTranscriptStart: 0, Usage: mtok(5.5), CreatedAt: at(2)},
+		{CheckpointID: "A", SessionID: "s", CheckpointTranscriptStart: 0, Usage: mtok(2.0), CreatedAt: at(1)},
+	}
+	kept, collapsed := DedupeLegacyCheckpoints(rows)
+	if collapsed != 1 {
+		t.Errorf("collapsed %d, want 1", collapsed)
+	}
+	if got := ids(kept); !slices.Equal(got, []string{"B", "C"}) {
+		t.Errorf("kept %v, want [B C]", got)
 	}
 }
 
@@ -177,13 +204,36 @@ func TestDedupe_DeterministicOutputOrder(t *testing.T) {
 	kept1, _ := DedupeLegacyCheckpoints(rows)
 	kept2, _ := DedupeLegacyCheckpoints(rows)
 
-	if len(kept1) != len(kept2) {
-		t.Fatalf("nondeterministic length: %d vs %d", len(kept1), len(kept2))
+	// Order is SessionID ("s1" < "s2") then CreatedAt within each session.
+	want := []string{"B1", "B2"}
+	if got := ids(kept1); !slices.Equal(got, want) {
+		t.Errorf("kept1 = %v, want %v", got, want)
 	}
-	for i := range kept1 {
-		if kept1[i].CheckpointID != kept2[i].CheckpointID {
-			t.Errorf("nondeterministic order at index %d: %q vs %q", i, kept1[i].CheckpointID, kept2[i].CheckpointID)
-		}
+	if got := ids(kept2); !slices.Equal(got, want) {
+		t.Errorf("kept2 = %v, want %v", got, want)
+	}
+}
+
+func TestDedupe_EmptyInput(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		rows []CheckpointRow
+	}{
+		{"nil", nil},
+		{"empty", []CheckpointRow{}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			kept, collapsed := DedupeLegacyCheckpoints(tc.rows)
+			if len(kept) != 0 {
+				t.Errorf("kept %+v, want empty", kept)
+			}
+			if collapsed != 0 {
+				t.Errorf("collapsed %d, want 0", collapsed)
+			}
+		})
 	}
 }
 
