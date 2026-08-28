@@ -857,6 +857,8 @@ func TestFormatTokenCount(t *testing.T) {
 		{4800, "4.8k"},
 		{14300, "14.3k"},
 		{100000, "100k"},
+		{1_000_000, "1M"},
+		{3_700_000, "3.7M"},
 	}
 
 	for _, tt := range tests {
