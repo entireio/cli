@@ -91,6 +91,17 @@ func gateCheckpointEgress(ctx context.Context, pendingCapture string) (context.C
 	}
 	ctx = repopolicy.WithRepoPolicy(ctx, policy)
 	if !settings.CheckpointEgressAllowed(ctx) {
+		// The write succeeded but the fresh classification still holds —
+		// e.g. the consent key the prompt recorded is not the one the
+		// election now resolves to. Log what the gate saw so the mismatch
+		// is diagnosable from .entire/logs rather than only the warning.
+		logging.Warn(ctx, "trust saved but checkpoint egress still held after reclassification",
+			slog.Bool("active", policy.Active),
+			slog.String("trust_reason", string(policy.Trust.Reason)),
+			slog.String("trust_source", string(policy.Trust.Source)),
+			slog.String("sync_remote", policy.Trust.Identity.RemoteName),
+			slog.Any("origin_keys", policy.Trust.Identity.OriginKeys),
+			slog.String("path_key", policy.Trust.Identity.Path))
 		fmt.Fprintln(stderrWriter, "Warning: trust was saved but the gate still holds; checkpoint sync skipped for this push.")
 		return ctx, false
 	}
@@ -103,20 +114,23 @@ func gateCheckpointEgress(ctx context.Context, pendingCapture string) (context.C
 // not the remote the hook-start snapshot was keyed on (resolveTrustSyncRemote
 // honors the pending election). Returns false — after one stderr line — when
 // the policy cannot be derived: never let the old destination's consent cover a
-// new one. A no-capture push returns ctx unchanged.
+// new one. On that failure the ORIGINAL ctx is handed back, still carrying the
+// hook-start snapshot, and the caller stops the checkpoint push outright — no
+// code path consults that snapshot for the pending remote. A no-capture push
+// returns ctx unchanged.
 func policyForPendingCapture(ctx context.Context, pendingCapture string) (context.Context, bool) {
 	if pendingCapture == "" {
 		return ctx, true
 	}
-	ctx = withPendingSyncRemote(ctx, pendingCapture)
-	policy, err := repopolicy.ClassifyRepoPolicy(ctx)
+	pendingCtx := withPendingSyncRemote(ctx, pendingCapture)
+	policy, err := repopolicy.ClassifyRepoPolicy(pendingCtx)
 	if err != nil {
 		logging.Warn(ctx, "could not classify repository for the pending checkpoint sync remote; holding checkpoint sync",
 			slog.String("remote", pendingCapture), slog.String("error", err.Error()))
-		fmt.Fprintf(stderrWriter, "Entire: checkpoint sync held — could not verify trust for %s; run `entire trust` after this push.\n", pendingCapture)
+		fmt.Fprintf(stderrWriter, "Entire: checkpoint sync held — could not verify trust for %s; run `entire trust --remote %s` after this push.\n", pendingCapture, pendingCapture)
 		return ctx, false
 	}
-	return repopolicy.WithRepoPolicy(ctx, policy), true
+	return repopolicy.WithRepoPolicy(pendingCtx, policy), true
 }
 
 func (s *ManualCommitStrategy) prePush(ctx context.Context, remote string, protectFirstUserBranch bool) error {
