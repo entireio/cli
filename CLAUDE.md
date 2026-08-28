@@ -939,7 +939,22 @@ Routing every open through `gitrepo` guarantees two behaviours no ad-hoc
 
 If a code path opens a repo with a bare go-git call, it silently breaks on
 reftable and sha256 repositories. Reviewers should flag any new
-`git.PlainOpen*`/`git.Open` outside `gitrepo`. Key files: `gitrepo/repository.go`
+`git.PlainOpen*`/`git.Open` outside `gitrepo`.
+
+**`OpenCurrent` fails rather than opening the current directory.** It used to
+fall back to `OpenPath(".")` when `paths.WorktreeRoot` could not resolve, and
+"." is a *different repository* whenever git and the process's directory
+disagree — which is precisely what the cases that break the resolution look
+like. Git exports `GIT_DIR`/`GIT_WORK_TREE` to the hooks it runs and
+`WorktreeRoot` honours them, while `OpenPath(".")` cannot see them, so a hook
+running for repo A opened repo B; and go-git applies neither git's
+`safe.directory` ownership check nor its `.git` parse, so the fallback opened
+repositories the user's own git refuses. Use `gitrepo.OpenCurrentOrCwd` only for
+`WarnCheckpointPolicyIfNeeded`, whose three properties do not generalise: it is
+dispatched from `main.go` after cobra, so it is the one repository open with no
+pre-run guard ahead of it; it only reads a policy ref; and it discards every
+error. Anything that writes must stop instead — that is what "we could not
+find out which repository this is" means. Key files: `gitrepo/repository.go`
 (open entry points) and `gitrepo/reftable.go` (`reftableStorer`).
 
 #### Reading Worktree Status - Always Use `gitrepo.Status`
