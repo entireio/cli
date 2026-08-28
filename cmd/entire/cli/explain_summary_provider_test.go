@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
+	"github.com/entireio/cli/cmd/entire/cli/agent/orcarouter"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/cmd/entire/cli/summarize"
@@ -53,6 +54,31 @@ func TestSummaryProviderRows_NilProviderReturnsNil(t *testing.T) {
 	if rows := summaryProviderRows(nil); rows != nil {
 		t.Errorf("expected nil for nil provider, got %+v", rows)
 	}
+}
+
+func TestIsSummaryProviderAvailable_OrcaRouterGatedOnAPIKey(t *testing.T) {
+	// Cannot use t.Parallel(): mutates process environment.
+	ag, err := agent.Get(orcarouter.AgentNameOrcaRouter)
+	if err != nil {
+		t.Fatalf("agent.Get(orcarouter): %v", err)
+	}
+	if _, ok := agent.AsTextGenerator(ag); !ok {
+		t.Fatal("orcarouter agent must implement TextGenerator")
+	}
+
+	t.Run("unset key is unavailable", func(t *testing.T) {
+		t.Setenv(orcarouter.EnvAPIKey, "")
+		if isSummaryProviderAvailable(orcarouter.AgentNameOrcaRouter, ag) {
+			t.Error("isSummaryProviderAvailable(orcarouter) = true with no ORCAROUTER_API_KEY, want false")
+		}
+	})
+
+	t.Run("set key is available", func(t *testing.T) {
+		t.Setenv(orcarouter.EnvAPIKey, "sk-orca-test")
+		if !isSummaryProviderAvailable(orcarouter.AgentNameOrcaRouter, ag) {
+			t.Error("isSummaryProviderAvailable(orcarouter) = false with ORCAROUTER_API_KEY set, want true")
+		}
+	})
 }
 
 type stubTextAgent struct {
