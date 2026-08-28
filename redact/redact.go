@@ -1020,9 +1020,14 @@ func collectJSONLReplacements(v any, redactor func(string) string) []jsonReplace
 }
 
 // shouldSkipJSONLField returns true if a JSON key should be excluded from scanning/redaction.
-// Skips signature fields (any key ending in "signature"), ID fields (ending in "id"/"ids"),
-// and common path/directory fields.
+// Skips Grok's opaque reasoning payload, signature fields (any key ending in "signature"),
+// ID fields (ending in "id"/"ids"), and common path/directory fields.
 func shouldSkipJSONLField(key string) bool {
+	// Grok requires this opaque reasoning attestation byte-for-byte when replaying a session.
+	if key == "encrypted_content" {
+		return true
+	}
+
 	lower := strings.ToLower(key)
 
 	// Skip signature fields: cryptographic attestations, not secrets. Covers

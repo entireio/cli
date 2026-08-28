@@ -31,8 +31,8 @@ func buildJSONLFixture(t *testing.T, targetBytes int) string {
 			line, err = json.Marshal(map[string]any{
 				"type": "response_item",
 				"payload": map[string]any{
-					"type":              "reasoning",
-					"encrypted_content": base64.StdEncoding.EncodeToString(blob),
+					"type":    "reasoning",
+					"content": base64.StdEncoding.EncodeToString(blob),
 				},
 			})
 		case 1:

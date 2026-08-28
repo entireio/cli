@@ -312,6 +312,28 @@ func TestJSONLContent_PreservesThinkingSignature(t *testing.T) {
 	}
 }
 
+func TestJSONLContent_PreservesGrokEncryptedReasoningPayload(t *testing.T) {
+	t.Parallel()
+	const opaqueReasoning = "8k0KExCUBzdOBM4cHXfgVQFwExIWdb6DC4qJyl1/I5E9cLXoEZ7MtARRP9vN"
+	grokLine := `{"type":"reasoning","id":"r1","model_id":"grok-4.6","summary":[{"type":"summary_text","text":"Inspect the repository."}],"encrypted_content":"` + opaqueReasoning + `","status":"completed"}`
+	ordinaryContentLine := `{"type":"message","content":"` + opaqueReasoning + `"}`
+
+	result, err := JSONLContent(grokLine + "\n" + ordinaryContentLine)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	lines := strings.Split(result, "\n")
+	if len(lines) != 2 {
+		t.Fatalf("expected two JSONL records, got: %s", result)
+	}
+	if lines[0] != grokLine {
+		t.Fatalf("expected Grok reasoning payload to be preserved verbatim, got: %s", lines[0])
+	}
+	if strings.Contains(lines[1], opaqueReasoning) || !strings.Contains(lines[1], RedactedPlaceholder) {
+		t.Fatalf("expected ordinary high-entropy content to be redacted, got: %s", lines[1])
+	}
+}
+
 func TestString_PatternDetection(t *testing.T) {
 	// These secrets have entropy below 4.5 so entropy-only detection misses them.
 	// Betterleaks pattern matching should catch them.
