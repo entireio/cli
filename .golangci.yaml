@@ -120,7 +120,7 @@ linters:
           msg: "cobra's Print* writes to OutOrStderr (stderr in production); use fmt.Fprint*(cmd.OutOrStdout(), ...)"
           pkg: 'github\.com/spf13/cobra'
         - pattern: '^settings\.(IsSetUpAndEnabled|IsSetUpAtRoot)$'
-          msg: "activation is derived by the policy classifier, never by settings-file presence (a globally tracked repo has none): use settings.IsActiveForRepo(WithReason) for the current repo or settings.IsActiveAtRoot for another root"
+          msg: "a repo is active when its own settings enable it OR global tracking covers it; this checks only the first half. Use settings.IsActiveForRepo(WithReason) (current repo) or settings.IsActiveAtRoot (another root), which compute that OR with the veto, tracked-local-file and exclusion rules"
           pkg: 'github\.com/entireio/cli/cmd/entire/cli/settings$'
     govet:
       enable-all: true

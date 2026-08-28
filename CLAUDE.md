@@ -469,7 +469,7 @@ if settings.IsSummarizeEnabled() {
 
 **Do NOT:**
 
-- Decide whether Entire is *active* in a repo from settings-file presence (`IsSetUp*`). Activation is derived by `repopolicy.ClassifyRepoPolicy` — a globally tracked repo has **no** settings files, an excluded or vetoed repo may have one — so use `settings.IsActiveForRepo(WithReason)` for the current repo and `settings.IsActiveAtRoot` for another root. A `forbidigo` rule rejects `settings.IsSetUpAndEnabled` / `IsSetUpAtRoot` callers. `IsSetUpAny`/`RepoActivationConfigured` remain for *setup routing* (does repo-level config exist?), never for capture gates.
+- Decide whether Entire is *active* in a repo from settings-file presence alone (`IsSetUp*`). The full question is **"the repo's own settings enable it OR global tracking covers it"**, each half with a qualifier: a file saying `enabled: false` is a veto, a `settings.local.json` counts only when it is the developer's own untracked file, and the global tier counts only when the repo is not excluded. `repopolicy.ClassifyRepoPolicy` computes exactly that; use `settings.IsActiveForRepo(WithReason)` for the current repo and `settings.IsActiveAtRoot` for another root instead of hand-rolling the OR. A `forbidigo` rule rejects `settings.IsSetUpAndEnabled` / `IsSetUpAtRoot` callers with that message. `IsSetUpAny`/`RepoActivationConfigured` remain for *setup routing* (does repo-level config exist?), never for capture gates.
 - Read `.entire/settings.json` or `.entire/settings.local.json` directly with `os.ReadFile`
 - Duplicate settings parsing logic in other packages
 - Create new settings helpers without adding them to the `settings` package

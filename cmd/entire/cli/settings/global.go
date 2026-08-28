@@ -37,13 +37,20 @@ func installLocalSettingsProbe() struct{} {
 }
 
 // IsActiveAtRoot reports whether Entire captures sessions in the repository
-// at root — by its own settings files or by the user-global tier, exclusions
-// and vetoes honored — for callers that reason about a FOREIGN repo from a
-// process running elsewhere (session binding adopting a session into a repo
-// the agent touched). Once the tier is on, file presence (IsSetUpAny-style
-// checks) is the wrong question: a globally tracked repo has no settings
-// files at all. Activation only — no egress decision, which is cwd-scoped and
-// would read the wrong repo's election. Errors fail closed.
+// at root. It is the full form of "is this repo enabled?":
+//
+//	(the repo's own settings enable it)  OR  (global tracking covers it)
+//
+// with the qualifiers each half needs — a settings file that says
+// enabled:false is a veto, a settings.local.json only counts when it is this
+// developer's own untracked file, and the global tier only counts when the
+// repo is not carved out by the user's exclude lists. A bare "does a settings
+// file exist" check is the first half without its qualifiers and misses the
+// second entirely (a globally tracked repo has no settings files), which is
+// why callers that reason about a FOREIGN repo from a process running
+// elsewhere (session binding adopting a session into a repo the agent
+// touched) must use this. Activation only — no egress decision, which is
+// cwd-scoped and would read the wrong repo's election. Errors fail closed.
 func IsActiveAtRoot(ctx context.Context, root string) bool {
 	policy, err := repopolicy.ClassifyActivationAt(ctx, root)
 	return err == nil && policy.Active
