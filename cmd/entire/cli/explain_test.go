@@ -18,6 +18,7 @@ import (
 	"charm.land/lipgloss/v2"
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/claudecode"
+	agenttestutil "github.com/entireio/cli/cmd/entire/cli/agent/testutil"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
@@ -994,7 +995,7 @@ case "$1" in
     ;;
 esac
 `
-	require.NoError(t, os.WriteFile(filepath.Join(externalDir, "entire-agent-"+name), []byte(script), 0o755))
+	agenttestutil.WriteExternalAgentBinary(t, externalDir, name, script)
 	t.Setenv("PATH", externalDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
 	got := maybeCompactExternalTranscript(ctx, []byte("not-json"), kind)
@@ -2258,7 +2259,7 @@ case "$1" in
 esac
 `
 	externalDir := t.TempDir()
-	require.NoError(t, os.WriteFile(filepath.Join(externalDir, "entire-agent-"+opts.name), []byte(script), 0o755))
+	agenttestutil.WriteExternalAgentBinary(t, externalDir, opts.name, script)
 	t.Setenv("PATH", externalDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 }
 

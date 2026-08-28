@@ -7,6 +7,7 @@ import (
 	"io"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
+	"github.com/entireio/cli/cmd/entire/cli/agent/external"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
@@ -66,6 +67,12 @@ func newAgentListCmd() *cobra.Command {
 }
 
 func runAgentList(ctx context.Context, w io.Writer) error {
+	// Discover external plugins so they appear here at all. Always, not the
+	// gated variant: a listing command should show what is actually on $PATH
+	// regardless of the external_agents setting, the same reasoning runSetupFlow
+	// uses.
+	external.DiscoverAndRegisterAlways(ctx)
+
 	installed := GetAgentsWithHooksInstalled(ctx)
 	installedSet := make(map[types.AgentName]struct{}, len(installed))
 	for _, name := range installed {
@@ -85,7 +92,22 @@ func runAgentList(ctx context.Context, w io.Writer) error {
 	if len(installed) == 0 {
 		fmt.Fprintln(w, "\nNo agents installed. Use 'entire agent add <name>' to install hooks.")
 	}
+	printBrokenExternalAgents(w)
 	return nil
+}
+
+// printBrokenExternalAgents lists external agent binaries found on $PATH that
+// could not be loaded, so an installed-but-unusable plugin is visible instead of
+// looking like it was never installed.
+func printBrokenExternalAgents(w io.Writer) {
+	failures := agent.ExternalFailures()
+	if len(failures) == 0 {
+		return
+	}
+	fmt.Fprintln(w, "\nBroken external agents:")
+	for _, f := range failures {
+		fmt.Fprintf(w, "  ✗ %s  (%s): %v\n", f.Name, f.Binary, f.Err)
+	}
 }
 
 func newAgentAddCmd() *cobra.Command {
@@ -104,10 +126,12 @@ Examples:
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			name := args[0]
+			if err := external.DiscoverAndRegisterNamedAlways(cmd.Context(), types.AgentName(name)); err != nil {
+				return printAgentLookupError(cmd.OutOrStdout(), name, err)
+			}
 			ag, err := agent.Get(types.AgentName(name))
 			if err != nil {
-				printWrongAgentError(cmd.OutOrStdout(), name)
-				return NewSilentError(errors.New("wrong agent name"))
+				return printAgentLookupError(cmd.OutOrStdout(), name, err)
 			}
 			opts := EnableOptions{
 				ForceHooks:     forceHooks,

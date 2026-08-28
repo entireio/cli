@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
+	agenttestutil "github.com/entireio/cli/cmd/entire/cli/agent/testutil"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
@@ -144,7 +145,6 @@ func TestHooksGitCmd_DiscoverExternalAgents_WhenEnabled(t *testing.T) {
 	// Use a unique name to avoid conflicts with agents registered by other tests.
 	agentName := types.AgentName("hooktest-discovery-agent")
 	binDir := t.TempDir()
-	binPath := filepath.Join(binDir, "entire-agent-"+string(agentName))
 	infoJSON := `{
   "protocol_version": 1,
   "name": "` + string(agentName) + `",
@@ -156,9 +156,7 @@ func TestHooksGitCmd_DiscoverExternalAgents_WhenEnabled(t *testing.T) {
   "capabilities": {}
 }`
 	script := "#!/bin/sh\nif [ \"$1\" = \"info\" ]; then\n  echo '" + infoJSON + "'\nfi\n"
-	if err := os.WriteFile(binPath, []byte(script), 0o755); err != nil {
-		t.Fatalf("failed to write mock agent binary: %v", err)
-	}
+	agenttestutil.WriteExternalAgentBinary(t, binDir, string(agentName), script)
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
 	// Execute the git hook command (post-commit) so PersistentPreRunE runs

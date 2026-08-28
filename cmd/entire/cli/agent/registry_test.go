@@ -2,8 +2,10 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"os/exec"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 
@@ -12,13 +14,13 @@ import (
 
 func TestRegistryOperations(t *testing.T) {
 	// Save original registry state and restore after test
-	originalRegistry := make(map[types.AgentName]Factory)
+	originalRegistry := make(map[types.AgentName]entry)
 	registryMu.Lock()
 	for k, v := range registry {
 		originalRegistry[k] = v
 	}
 	// Clear registry for testing
-	registry = make(map[types.AgentName]Factory)
+	registry = make(map[types.AgentName]entry)
 	registryMu.Unlock()
 
 	defer func() {
@@ -49,12 +51,15 @@ func TestRegistryOperations(t *testing.T) {
 		if !strings.Contains(err.Error(), "unknown agent") {
 			t.Errorf("expected 'unknown agent' in error, got: %v", err)
 		}
+		if !errors.Is(err, ErrUnknownAgent) {
+			t.Errorf("Get() error = %v, want ErrUnknownAgent", err)
+		}
 	})
 
 	t.Run("List returns registered agents", func(t *testing.T) {
 		// Clear and register fresh
 		registryMu.Lock()
-		registry = make(map[types.AgentName]Factory)
+		registry = make(map[types.AgentName]entry)
 		registryMu.Unlock()
 
 		Register(types.AgentName("agent-b"), func() Agent { return &mockAgent{} })
@@ -85,12 +90,12 @@ func (s *sessionDirAgent) Type() types.AgentType                  { return s.age
 func (s *sessionDirAgent) GetSessionDir(_ string) (string, error) { return s.sessionDir, nil }
 
 func TestAgentForTranscriptPath(t *testing.T) {
-	originalRegistry := make(map[types.AgentName]Factory)
+	originalRegistry := make(map[types.AgentName]entry)
 	registryMu.Lock()
 	for k, v := range registry {
 		originalRegistry[k] = v
 	}
-	registry = make(map[types.AgentName]Factory)
+	registry = make(map[types.AgentName]entry)
 	registryMu.Unlock()
 	t.Cleanup(func() {
 		registryMu.Lock()
@@ -220,12 +225,12 @@ func TestDefaultAgentName(t *testing.T) {
 func TestDefault(t *testing.T) {
 	// Default() returns nil if default agent is not registered
 	// This test verifies the function doesn't panic
-	originalRegistry := make(map[types.AgentName]Factory)
+	originalRegistry := make(map[types.AgentName]entry)
 	registryMu.Lock()
 	for k, v := range registry {
 		originalRegistry[k] = v
 	}
-	registry = make(map[types.AgentName]Factory)
+	registry = make(map[types.AgentName]entry)
 	registryMu.Unlock()
 
 	defer func() {
@@ -252,12 +257,12 @@ func TestDefault(t *testing.T) {
 
 func TestAllProtectedDirs(t *testing.T) {
 	// Save original registry state
-	originalRegistry := make(map[types.AgentName]Factory)
+	originalRegistry := make(map[types.AgentName]entry)
 	registryMu.Lock()
 	for k, v := range registry {
 		originalRegistry[k] = v
 	}
-	registry = make(map[types.AgentName]Factory)
+	registry = make(map[types.AgentName]entry)
 	registryMu.Unlock()
 
 	defer func() {
@@ -275,7 +280,7 @@ func TestAllProtectedDirs(t *testing.T) {
 
 	t.Run("collects dirs from registered agents", func(t *testing.T) {
 		registryMu.Lock()
-		registry = make(map[types.AgentName]Factory)
+		registry = make(map[types.AgentName]entry)
 		registryMu.Unlock()
 
 		Register(types.AgentName("agent-a"), func() Agent {
@@ -300,7 +305,7 @@ func TestAllProtectedDirs(t *testing.T) {
 
 	t.Run("deduplicates across agents", func(t *testing.T) {
 		registryMu.Lock()
-		registry = make(map[types.AgentName]Factory)
+		registry = make(map[types.AgentName]entry)
 		registryMu.Unlock()
 
 		Register(types.AgentName("agent-x"), func() Agent {
@@ -319,12 +324,12 @@ func TestAllProtectedDirs(t *testing.T) {
 
 func TestAllProtectedFiles(t *testing.T) {
 	// Save original registry state
-	originalRegistry := make(map[types.AgentName]Factory)
+	originalRegistry := make(map[types.AgentName]entry)
 	registryMu.Lock()
 	for k, v := range registry {
 		originalRegistry[k] = v
 	}
-	registry = make(map[types.AgentName]Factory)
+	registry = make(map[types.AgentName]entry)
 	registryMu.Unlock()
 
 	defer func() {
@@ -342,7 +347,7 @@ func TestAllProtectedFiles(t *testing.T) {
 
 	t.Run("collects files from registered agents", func(t *testing.T) {
 		registryMu.Lock()
-		registry = make(map[types.AgentName]Factory)
+		registry = make(map[types.AgentName]entry)
 		registryMu.Unlock()
 
 		Register(types.AgentName("agent-no-files"), func() Agent {
@@ -369,7 +374,7 @@ func TestAllProtectedFiles(t *testing.T) {
 
 	t.Run("deduplicates across agents", func(t *testing.T) {
 		registryMu.Lock()
-		registry = make(map[types.AgentName]Factory)
+		registry = make(map[types.AgentName]entry)
 		registryMu.Unlock()
 
 		Register(types.AgentName("agent-x"), func() Agent {
@@ -436,4 +441,151 @@ type mockLauncherAgent struct {
 //nolint:unparam // error is always nil in this mock; satisfies the Launcher interface.
 func (m *mockLauncherAgent) LaunchCmd(ctx context.Context, _ string) (*exec.Cmd, error) {
 	return exec.CommandContext(ctx, "true"), nil
+}
+
+// snapshotRegistry replaces the registry with an empty one for the duration of
+// the test and restores it afterwards.
+func snapshotRegistry(t *testing.T) {
+	t.Helper()
+	registryMu.Lock()
+	original := make(map[types.AgentName]entry, len(registry))
+	for k, v := range registry {
+		original[k] = v
+	}
+	registry = make(map[types.AgentName]entry)
+	registryMu.Unlock()
+
+	t.Cleanup(func() {
+		registryMu.Lock()
+		registry = original
+		registryMu.Unlock()
+	})
+}
+
+func TestGet_FailedExternalReturnsItsLoadError(t *testing.T) {
+	snapshotRegistry(t)
+
+	loadErr := errors.New("info: invalid JSON: unexpected end of input")
+	RegisterExternalFailure("broken-ext", "/usr/local/bin/entire-agent-broken-ext", loadErr)
+
+	_, err := Get("broken-ext")
+	if !errors.Is(err, loadErr) {
+		t.Fatalf("Get() error = %v, want the recorded load error", err)
+	}
+	if !strings.Contains(err.Error(), "/usr/local/bin/entire-agent-broken-ext") {
+		t.Errorf("Get() error = %q, want the binary path so the user can find it", err)
+	}
+}
+
+func TestListAndStringList_ExcludeFailedExternals(t *testing.T) {
+	snapshotRegistry(t)
+
+	Register("built-in", func() Agent { return &protectedDirAgent{} })
+	RegisterExternal("ready-ext", "/bin/entire-agent-ready-ext", func() Agent { return &protectedDirAgent{} })
+	RegisterExternalFailure("broken-ext", "/bin/entire-agent-broken-ext", errors.New("boom"))
+
+	want := []types.AgentName{"built-in", "ready-ext"}
+	if got := List(); !slices.Equal(got, want) {
+		t.Errorf("List() = %v, want %v", got, want)
+	}
+	if got := StringList(); !slices.Equal(got, []string{"built-in", "ready-ext"}) {
+		t.Errorf("StringList() = %v, want built-in and ready-ext", got)
+	}
+}
+
+func TestExternalFailures_SortedSnapshot(t *testing.T) {
+	snapshotRegistry(t)
+
+	RegisterExternalFailure("zed", "/bin/entire-agent-zed", errors.New("zed failed"))
+	RegisterExternalFailure("abe", "/bin/entire-agent-abe", errors.New("abe failed"))
+	RegisterExternal("ready", "/bin/entire-agent-ready", func() Agent { return &protectedDirAgent{} })
+
+	failures := ExternalFailures()
+	if len(failures) != 2 {
+		t.Fatalf("ExternalFailures() returned %d entries, want 2", len(failures))
+	}
+	if failures[0].Name != "abe" || failures[1].Name != "zed" {
+		t.Errorf("ExternalFailures() = %v, want sorted by name", failures)
+	}
+	if failures[0].Binary != "/bin/entire-agent-abe" {
+		t.Errorf("ExternalFailures()[0].Binary = %q, want the discovered path", failures[0].Binary)
+	}
+}
+
+func TestExternalFailureFor(t *testing.T) {
+	snapshotRegistry(t)
+
+	loadErr := errors.New("boom")
+	RegisterExternalFailure("broken", "/bin/entire-agent-broken", loadErr)
+
+	failure, ok := ExternalFailureFor("broken")
+	if !ok {
+		t.Fatal("ExternalFailureFor() ok = false, want true")
+	}
+	if failure.Binary != "/bin/entire-agent-broken" || !errors.Is(failure.Err, loadErr) {
+		t.Errorf("ExternalFailureFor() = %+v, want recorded path and error", failure)
+	}
+	if _, ok := ExternalFailureFor("missing"); ok {
+		t.Error("ExternalFailureFor(missing) ok = true, want false")
+	}
+}
+
+func TestProbedExternalBinaries_CoversReadyAndFailed(t *testing.T) {
+	snapshotRegistry(t)
+
+	Register("built-in", func() Agent { return &protectedDirAgent{} })
+	RegisterExternal("ready", "/bin/entire-agent-ready", func() Agent { return &protectedDirAgent{} })
+	RegisterExternalFailure("broken", "/bin/entire-agent-broken", errors.New("boom"))
+
+	probed := ProbedExternalBinaries()
+	for _, want := range []string{"/bin/entire-agent-ready", "/bin/entire-agent-broken"} {
+		if _, ok := probed[want]; !ok {
+			t.Errorf("ProbedExternalBinaries() missing %q", want)
+		}
+	}
+	if len(probed) != 2 {
+		t.Errorf("ProbedExternalBinaries() = %v, want only external binaries", probed)
+	}
+}
+
+func TestResetExternalsForTesting_KeepsBuiltIns(t *testing.T) {
+	snapshotRegistry(t)
+
+	Register("built-in", func() Agent { return &protectedDirAgent{} })
+	RegisterExternal("ready", "/bin/entire-agent-ready", func() Agent { return &protectedDirAgent{} })
+	RegisterExternalFailure("broken", "/bin/entire-agent-broken", errors.New("boom"))
+
+	ResetExternalsForTesting()
+
+	if got := List(); !slices.Equal(got, []types.AgentName{"built-in"}) {
+		t.Errorf("List() after reset = %v, want only the built-in", got)
+	}
+	if got := ExternalFailures(); len(got) != 0 {
+		t.Errorf("ExternalFailures() after reset = %v, want none", got)
+	}
+	if got := ProbedExternalBinaries(); len(got) != 0 {
+		t.Errorf("ProbedExternalBinaries() after reset = %v, want none", got)
+	}
+}
+
+func TestFailedExternalDoesNotBreakRegistryWalks(t *testing.T) {
+	snapshotRegistry(t)
+
+	RegisterExternalFailure("broken", "/bin/entire-agent-broken", errors.New("boom"))
+	Register("built-in", func() Agent { return &protectedDirAgent{dirs: []string{".built-in"}} })
+
+	// A failed entry has no factory. Every registry walk must skip it rather
+	// than call through a nil factory.
+	if _, err := GetByAgentType("nope"); err == nil {
+		t.Error("GetByAgentType() error = nil, want unknown agent type")
+	}
+	if got := DetectAll(context.Background()); len(got) != 0 {
+		t.Errorf("DetectAll() = %v, want none detected", got)
+	}
+	if got := AllProtectedDirs(); !slices.Equal(got, []string{".built-in"}) {
+		t.Errorf("AllProtectedDirs() = %v, want the built-in's dirs", got)
+	}
+	if got := AllProtectedFiles(); len(got) != 0 {
+		t.Errorf("AllProtectedFiles() = %v, want none", got)
+	}
 }

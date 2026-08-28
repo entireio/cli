@@ -8,9 +8,12 @@ The Entire CLI supports external agent plugins — standalone binaries that impl
 
 The CLI discovers external agents by scanning `$PATH` for executables matching the pattern `entire-agent-<name>`. For example, `entire-agent-cursor` would register as the "cursor" agent.
 
-- Binaries whose `<name>` conflicts with an already-registered built-in agent are skipped.
-- Discovery runs once during CLI initialization (before building the hooks command tree).
 - The binary must be executable and respond to the `info` subcommand.
+- Discovery runs lazily, per command, not once at startup. Most commands gate it on the `external_agents` setting; setup flows and `entire agent list` always run it.
+- Every candidate binary is asked for its `info` concurrently, each under its own short budget, so one slow plugin cannot delay or crowd out the others.
+- Binaries whose `<name>` conflicts with an already-registered agent are skipped **without being executed**, and the attempt is logged as a warning. A built-in always wins: discovery also runs inside the git and agent hook trees, so allowing an override would let a binary dropped anywhere on `$PATH` take over transcript reads and checkpoint writes.
+- When two directories offer the same agent, the earlier `$PATH` entry wins. On Windows this is decided on the derived agent name, so `entire-agent-foo.exe` and `entire-agent-foo.com` cannot both claim `foo`.
+- A binary is asked for `info` at most once per CLI process, whether it loaded or not.
 
 ## Environment
 
@@ -20,6 +23,7 @@ Every subcommand invocation sets:
 |---|---|
 | `ENTIRE_REPO_ROOT` | Absolute path to the git repository root |
 | `ENTIRE_PROTOCOL_VERSION` | Protocol version (`1`) |
+| `ENTIRE_CLI_VERSION` | Version of the `entire` CLI making the call |
 
 The working directory is set to the repository root.
 
@@ -553,8 +557,9 @@ Returned by `parse-hook`. Represents a normalized lifecycle event.
 - Any non-zero exit code indicates an error.
 - Error messages should be written to stderr.
 - The CLI captures stderr and wraps it in a Go error.
-- If the binary is not found in PATH, the agent is simply not registered.
-- If `info` fails or returns invalid JSON, the binary is skipped during discovery.
+- If the binary is not found in PATH, the agent is simply not registered. A missing binary is not an error.
+- If `info` fails, returns invalid JSON, exceeds its budget, or reports a mismatched protocol version, the binary is recorded as a **broken external agent**: it is not usable, `entire agent list` names it with the reason, and resolving it by name reports that reason instead of "unknown agent". The same applies to a match that turns out to be a directory or to lack the executable bit.
+- A binary whose `info` reports a `name` different from its file name still works. The registry key always comes from the file name, and a warning records the discrepancy.
 
 ## Versioning
 

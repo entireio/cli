@@ -204,12 +204,12 @@ re-runs the command.
 
 ## Decisions
 
-### 1. `infoTimeout = 300 * time.Millisecond`, provisional
+### 1. `infoTimeout = 10 * time.Second`
 
 One named constant for both entry points, replacing the 10s aggregate budget.
-The requester owns this number and intends to tune it — see
-[the budget warning](#-the-300ms-budget-is-measured-to-be-too-small) before
-writing tests.
+The value covers cold starts on a saturated machine while keeping the existing
+worst-case wait. Probes run concurrently, so several stalled plugins cost
+roughly one 10s budget rather than one budget each.
 
 ### 2. A built-in always wins a name collision
 
@@ -249,17 +249,17 @@ the binary itself, so the hook command it writes is the plugin's own
 responsibility. Making it an error would break any out-of-tree plugin that
 already has one.
 
-### 5. `DiscoverAndRegisterNamedAlways` drops from 10s to 300ms
+### 5. `DiscoverAndRegisterNamedAlways` uses the same 10s budget
 
-Confirmed. It shares the budget with the scan path. Its only production caller
-is the `--summarize-provider` / dispatch override, and that is still just an
-`info` call.
+It shares the budget with the scan path. The `--summarize-provider` override and
+the explicit `agent add` / `agent remove` paths use it so they probe only the
+named plugin and can report its stored load error.
 
-## ⚠ The 300ms budget is measured to be too small
+## Why the budget is 10s
 
-The requester owns this number and intends to tune it, so it is **not** a
-blocker. But it was measured, and at 300ms the design does not work on a cold
-binary. Do not rediscover this from failing tests.
+The provisional 300ms budget did not work for a cold binary. The implementation
+keeps the previous 10s aggregate allowance, but applies it per binary in
+parallel, based on these measurements.
 
 Measured on macOS (Apple silicon), forking a freshly written shell script:
 
@@ -269,23 +269,20 @@ Measured on macOS (Apple silicon), forking a freshly written shell script:
 | Each further *newly written* file, same process | 140–170ms |
 | Re-exec of a file already run once | 7–12ms |
 | `paths.WorktreeRoot` shelling out to git, *inside* the budget | ~13ms |
+| Five freshly written files exec'd **concurrently** | >1000ms each |
 
-The cost is dominated by **first exec of a given binary**, not process warm-up:
-on macOS a newly installed binary pays code-signing / Gatekeeper validation and
-cold page-in on its first run. Consequences:
+Cold starts contend with each other, so concurrent first runs can take longer
+than the sequential measurements suggest. A healthy mock breached a 1s budget
+while four neighbours were starting cold. Under the full race suite, healthy
+fixtures also exceeded 5s. The 10s default leaves room for that case without
+making tests or users warm a binary before discovery.
 
-- A user who has just installed a plugin gets a failure entry with
-  `ErrInfoTimeout` on the very first `entire` command, and a working plugin from
-  then on. That is the worst possible first impression, and it is intermittent.
-- A real plugin is a compiled binary or, worse, a Node/Python wrapper — both
-  strictly slower to start than the `sh` script measured above.
-- **Every test that writes a mock agent into a fresh `t.TempDir()` hits the cold
-  path.** At 300ms essentially every discovery test that execs a mock fails.
-  This is not a test bug; do not "fix" it by loosening assertions. Make
-  `infoTimeout` a package `var` and have those tests raise it (~2s), keeping the
-  shipped default at 300ms for the requester to tune.
-- `Agent.run` additionally calls `paths.WorktreeRoot(ctx)`, which can shell out
-  to git (~13ms) *inside* the budget, before the plugin is even executed.
+The first execution of a newly installed binary pays code-signing validation
+and cold page-in on macOS. Compiled plugins and Node or Python wrappers may take
+longer than the shell fixture measured above. `Agent.run` also calls
+`paths.WorktreeRoot(ctx)` inside the budget. Tests therefore execute fresh
+binaries without a hidden warm-up; timeout-specific tests override
+`infoTimeout` with a smaller value.
 
 Whatever value is chosen, `ErrInfoTimeout` must stay distinguishable from a
 genuine load failure.
@@ -299,8 +296,9 @@ constraint and its existing comment. Reuse the existing `setupDiscoveryDir`,
 
 Two constraints that will otherwise waste a debugging cycle:
 
-- **Every mock agent written into a fresh `t.TempDir()` is a cold exec** —
-  140–400ms on macOS. Raise `infoTimeout` in any test that execs one.
+- **Every mock agent written into a fresh `t.TempDir()` is a cold exec.** Do not
+  warm it in a shared fixture helper. Timeout-specific tests can override
+  `infoTimeout`; other tests should exercise the same cold path users get.
 - **Reset external registry entries between tests** via
   `ResetExternalsForTesting` in `t.Cleanup`. Without it, discovery results leak
   across tests and the memoization skip makes failures depend on test order.
@@ -394,12 +392,14 @@ naming the shadowing binary.
   `resume.go:66`, `checkpoint_resume.go:62`, `attach.go:116`,
   `explain.go:1118`, `review/cmd.go:193`, `trail_resume_cmd.go:165`,
   `strategy/manual_commit_condensation.go:40`
-- `DiscoverAndRegisterNamedAlways` — `explain_summary_provider.go:31`
+- `DiscoverAndRegisterNamedAlways` — `explain_summary_provider.go:31`,
+  `agent_group.go`, `setup.go` (`agent add` / `agent remove`)
 
 The gated path running in hooks is why
 [decision 2](#2-a-built-in-always-wins-a-name-collision) went the way it did.
-Signatures do not change, so no call site needs editing —
-`runAgentList` gains a call it did not have.
+The discovery signatures stay unchanged. `runAgentList`, `agent add`, and
+`agent remove` gain calls so their user-facing output includes external agents
+and their load failures.
 
 ## Documentation
 
@@ -414,8 +414,7 @@ Signatures do not change, so no call site needs editing —
 
 ## Out of scope
 
-- Retuning `infoTimeout`. The requester owns it; the measured table above is the
-  input.
+- Further tuning of `infoTimeout` beyond the measured 10s default.
 - Turning an `info.name` / binary-suffix mismatch into a hard error.
 - Surfacing broken externals in `entire status` and its `--json` output.
 - Pruning the redundant `DiscoverAndRegisterAlways` call sites in `setup.go`.

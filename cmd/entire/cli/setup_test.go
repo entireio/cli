@@ -17,6 +17,7 @@ import (
 	_ "github.com/entireio/cli/cmd/entire/cli/agent/claudecode"
 	"github.com/entireio/cli/cmd/entire/cli/agent/external"
 	_ "github.com/entireio/cli/cmd/entire/cli/agent/geminicli"
+	agenttestutil "github.com/entireio/cli/cmd/entire/cli/agent/testutil"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/gitremote"
@@ -161,9 +162,7 @@ case "$1" in
 esac
 `
 
-	if err := os.WriteFile(filepath.Join(dir, "entire-agent-"+name), []byte(script), 0o755); err != nil {
-		t.Fatalf("Failed to write external agent binary: %v", err)
-	}
+	agenttestutil.WriteExternalAgentBinary(t, dir, name, script)
 }
 
 func writeExternalSummaryAgentBinary(t *testing.T, dir, name string) {
@@ -189,9 +188,7 @@ case "$1" in
 esac
 `
 
-	if err := os.WriteFile(filepath.Join(dir, "entire-agent-"+name), []byte(script), 0o755); err != nil {
-		t.Fatalf("Failed to write external summary agent binary: %v", err)
-	}
+	agenttestutil.WriteExternalAgentBinary(t, dir, name, script)
 }
 
 func TestRunEnable(t *testing.T) {
