@@ -110,13 +110,52 @@ func runCheckpointTokensCmd(ctx context.Context, t *testing.T, args ...string) s
 	return stdout.String()
 }
 
+// assertContainsAll asserts each check is a substring of out, before or
+// after unwrapping the Notes section's hanging-indent continuation lines.
 func assertContainsAll(t *testing.T, out string, checks ...string) {
 	t.Helper()
+	unwrapped := unwrapNotes(out)
 	for _, check := range checks {
-		if !strings.Contains(out, check) {
+		if !strings.Contains(out, check) && !strings.Contains(unwrapped, check) {
 			t.Errorf("expected %q in output, got:\n%s", check, out)
 		}
 	}
+}
+
+// unwrapNotes joins wrapped continuation lines (four-space indent, not a
+// table sub-row) back onto the line before them.
+func unwrapNotes(out string) string {
+	lines := strings.Split(out, "\n")
+	var b strings.Builder
+	for i, line := range lines {
+		if i > 0 && strings.HasPrefix(line, "    ") && !strings.HasPrefix(line, "      ") && strings.HasPrefix(strings.TrimSpace(lines[i-1]), "- ") {
+			b.WriteString(" " + strings.TrimSpace(line))
+			continue
+		}
+		if i > 0 {
+			b.WriteString("\n")
+		}
+		b.WriteString(line)
+	}
+	return b.String()
+}
+
+// assertLineContainsAll asserts the first line of out containing anchor also
+// contains every check.
+func assertLineContainsAll(t *testing.T, out, anchor string, checks ...string) {
+	t.Helper()
+	for _, line := range strings.Split(out, "\n") {
+		if !strings.Contains(line, anchor) {
+			continue
+		}
+		for _, check := range checks {
+			if !strings.Contains(line, check) {
+				t.Errorf("expected %q on the %q line, got %q", check, anchor, line)
+			}
+		}
+		return
+	}
+	t.Errorf("no line contains %q in:\n%s", anchor, out)
 }
 
 func TestCheckpointTokensCmd_TextOutputIsBreakdownFirst(t *testing.T) {
@@ -140,7 +179,6 @@ func TestCheckpointTokensCmd_TextOutputIsBreakdownFirst(t *testing.T) {
 		"est. cost share",
 		"Subagent: Explore",
 		"Explore (haiku)",
-		"1 call",
 		"Context replay (cache read)",
 		"Prompt & system context",
 		"Bash · during systematic-debugging",
@@ -181,7 +219,20 @@ func TestCheckpointTokensCmd_TextOutputIsBreakdownFirst(t *testing.T) {
 	if whereIdx >= usageIdx || usageIdx >= recIdx || recIdx >= notesIdx {
 		t.Fatalf("sections out of order (where=%d usage=%d rec=%d notes=%d):\n%s", whereIdx, usageIdx, recIdx, notesIdx, out)
 	}
+	assertLineContainsAll(t, out, "Explore (haiku)", "1 call ", " 40 ")
 	assertRecommendationFiguresVisible(t, out)
+}
+
+func TestCheckpointTokensCmd_JSONAndAgentBriefAreMutuallyExclusive(t *testing.T) {
+	t.Parallel()
+
+	cmd := newCheckpointGroupCmd()
+	cmd.SetArgs([]string{"tokens", "abc123", "--json", "--agent-brief"})
+
+	err := cmd.ExecuteContext(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "mutually exclusive") {
+		t.Fatalf("expected a mutually exclusive error for --json with --agent-brief, got: %v", err)
+	}
 }
 
 func TestCheckpointTokensCmd_JSONOutputShape(t *testing.T) {
@@ -351,12 +402,12 @@ func TestCheckpointTokensCmd_CompareIncludesCostShares(t *testing.T) {
 	assertContainsAll(t, out,
 		"Comparison",
 		"Baseline: aaa111bbb222",
-		"Total tokens: down 50.5% (1M -> 500k)",
-		"Input: down 25% (200k -> 150k)",
-		"Cache/context replay: down 60% (750k -> 300k)",
-		"Cache write: down 50% (50k -> 25k)",
-		"Output: up 150% (10k -> 25k)",
-		"API calls: down 60% (10 -> 4)",
+		"Total tokens: down 50.5% (1M → 500k)",
+		"Input: down 25% (200k → 150k)",
+		"Cache/context replay: down 60% (750k → 300k)",
+		"Cache write: down 50% (50k → 25k)",
+		"Output: up 150% (10k → 25k)",
+		"API calls: down 60% (10 → 4)",
 		"Cost share, output:",
 		"Qualification",
 		"Observed total token use decreased for this checkpoint comparison.",

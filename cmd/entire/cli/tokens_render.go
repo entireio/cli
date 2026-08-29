@@ -24,12 +24,17 @@ type tokenReportView struct {
 	// Report carries Agent, Profile, Model, Effort, Usage, Cost, Attributed,
 	// Duration and Calls in exactly the values tokenreport.Recommend read, so
 	// every figure a recommendation quotes is printed from the same value.
+	// Report.Calls is the parent session's API calls with recorded usage —
+	// subagent calls excluded on every source path — while
+	// Report.Usage.APICallCount includes subagents.
 	Report tokenreport.Report
 	// HasUsage is false when nothing recorded any usage: no attributed call,
 	// no committed token_usage. The usage table then prints "not recorded".
 	HasUsage bool
 	// EffortCalls is how many calls carried Report.Effort; 0 when no call
-	// recorded an effort.
+	// recorded an effort. Unlike Report.Calls it counts calls whose usage
+	// was not recorded, so the header can read "3 API calls … Effort: high
+	// (4 calls)".
 	EffortCalls int
 	// Subagent is the subagent part of Report.Usage, flattened; zero when no
 	// subagent usage is known.
@@ -290,9 +295,13 @@ type tokenTableLine struct {
 	note   string
 }
 
-// writeTokenTable prints a two-column-plus-share table: the header, a dim
-// rule, then each line with the label left-aligned, calls and tokens
-// right-aligned and the share right-aligned under the share header.
+// writeTokenTable prints a table of label, calls, tokens and share cells: a
+// header row built from the same cells as the data rows (the title over the
+// label cell, an empty calls cell, "tokens" right-aligned over the tokens
+// cell, then the share header), a dim rule as wide as the header, then each
+// line with the label left-aligned, calls and tokens right-aligned, the
+// share right-aligned in a 4-rune cell at the start of the share header, and
+// the note after it.
 func writeTokenTable(w io.Writer, title string, lines []tokenTableLine) {
 	labelWidth := utf8.RuneCountInString(title)
 	callsWidth, tokensWidth := 0, len("tokens")
@@ -302,9 +311,10 @@ func writeTokenTable(w io.Writer, title string, lines []tokenTableLine) {
 		tokensWidth = max(tokensWidth, len(l.tokens))
 	}
 	sty := newStatusStyles(w)
+	header := tokenPadRight(title, labelWidth) + "  " + tokenPadLeft("", callsWidth) + "  " + tokenPadLeft("tokens", tokensWidth) + "  " + tokenTableShareHeader
 	fmt.Fprintln(w)
-	fmt.Fprintf(w, "%s  %s  %s\n", tokenPadRight(title, labelWidth+callsWidth), tokenPadLeft("tokens", tokensWidth), tokenTableShareHeader)
-	fmt.Fprintln(w, sty.render(sty.dim, strings.Repeat("─", labelWidth+callsWidth+tokensWidth+len(tokenTableShareHeader)+4)))
+	fmt.Fprintln(w, header)
+	fmt.Fprintln(w, sty.render(sty.dim, strings.Repeat("─", utf8.RuneCountInString(header))))
 	for _, l := range lines {
 		label := strings.Repeat(" ", l.indent) + l.label
 		line := tokenPadRight(label, labelWidth) + "  " + tokenPadLeft(l.calls, callsWidth) + "  " + tokenPadLeft(l.tokens, tokensWidth) + "  " + tokenPadLeft(l.share, 4)
@@ -315,7 +325,7 @@ func writeTokenTable(w io.Writer, title string, lines []tokenTableLine) {
 	}
 }
 
-// padRight pads s with spaces to width runes.
+// tokenPadRight pads s with spaces to width runes.
 func tokenPadRight(s string, width int) string {
 	if n := utf8.RuneCountInString(s); n < width {
 		return s + strings.Repeat(" ", width-n)
@@ -323,7 +333,7 @@ func tokenPadRight(s string, width int) string {
 	return s
 }
 
-// padLeft left-pads s with spaces to width runes.
+// tokenPadLeft left-pads s with spaces to width runes.
 func tokenPadLeft(s string, width int) string {
 	if n := utf8.RuneCountInString(s); n < width {
 		return strings.Repeat(" ", width-n) + s
@@ -347,7 +357,7 @@ func writeTokenWhereItWent(w io.Writer, v *tokenReportView) {
 			lines = append(lines, tokenTableLine{
 				indent: 4,
 				label:  stringutil.TruncateRunes(d.Detail, tokenDetailMaxRunes, "…"),
-				calls:  formatCallCount(d.Calls),
+				calls:  detailCallCount(d.Calls),
 				tokens: tokenreport.FormatTokenCount(d.Tokens),
 				share:  tokenShare(d.CostShare, priced),
 			})
@@ -360,6 +370,25 @@ func writeTokenWhereItWent(w io.Writer, v *tokenReportView) {
 	if omitted > 0 {
 		fmt.Fprintf(w, "  (%d smaller item%s omitted)\n", omitted, tokenPluralSuffix(omitted))
 	}
+}
+
+// detailCallCount renders a detail's call count, or "" when the detail's
+// calls all happened outside the window (Detail.Calls is 0).
+func detailCallCount(n int) string {
+	if n == 0 {
+		return ""
+	}
+	return formatCallCount(n)
+}
+
+// tokenRatioNote renders a price ratio as "(1.25×)" for the usage table's
+// note column; "" when the ratios are unknown or the ratio is 0 (a provider
+// that does not charge for the class).
+func tokenRatioNote(r float64, have bool) string {
+	if !have || r == 0 {
+		return ""
+	}
+	return "(" + strconv.FormatFloat(r, 'f', -1, 64) + "×)"
 }
 
 // renderedContributor is one contributor chosen for printing with the
@@ -488,19 +517,13 @@ func writeTokenUsageTable(w io.Writer, v *tokenReportView) {
 	cs := &v.Report.Cost
 	priced := cs.Units > 0
 	weights, haveWeights := tokenCostWeights(v)
-	ratio := func(r float64) string {
-		if !haveWeights {
-			return ""
-		}
-		return "(" + strconv.FormatFloat(r, 'f', -1, 64) + "×)"
-	}
 	lines := []tokenTableLine{
 		{indent: 2, label: "Input (fresh)", tokens: tokenreport.FormatTokenCount(u.InputTokens), share: tokenShare(cs.Input, priced)},
 	}
 	lines = append(lines, cacheWriteLines(v, weights, haveWeights)...)
 	lines = append(lines,
-		tokenTableLine{indent: 2, label: "Cache read", tokens: tokenreport.FormatTokenCount(u.CacheReadTokens), share: tokenShare(cs.CacheRead, priced), note: ratio(weights.CacheRead)},
-		tokenTableLine{indent: 2, label: "Output", tokens: tokenreport.FormatTokenCount(u.OutputTokens), share: tokenShare(cs.Output, priced), note: ratio(weights.Output)},
+		tokenTableLine{indent: 2, label: "Cache read", tokens: tokenreport.FormatTokenCount(u.CacheReadTokens), share: tokenShare(cs.CacheRead, priced), note: tokenRatioNote(weights.CacheRead, haveWeights)},
+		tokenTableLine{indent: 2, label: "Output", tokens: tokenreport.FormatTokenCount(u.OutputTokens), share: tokenShare(cs.Output, priced), note: tokenRatioNote(weights.Output, haveWeights)},
 		thinkingLine(v),
 		tokenTableLine{indent: 2, label: "Total", tokens: tokenreport.FormatTokenCount(tokenVolume(u))},
 	)
@@ -521,12 +544,7 @@ func cacheWriteLines(v *tokenReportView, weights tokenreport.Weights, haveWeight
 	cs := &v.Report.Cost
 	priced := cs.Units > 0 && !cs.CacheWriteUnpriced
 	line := tokenTableLine{indent: 2, label: tokenLabelCacheWrite, tokens: tokenreport.FormatTokenCount(u.CacheCreationTokens), share: tokenShare(cs.CacheWrite, priced)}
-	ratio := func(r float64) string {
-		if !haveWeights || r == 0 {
-			return ""
-		}
-		return "(" + strconv.FormatFloat(r, 'f', -1, 64) + "×)"
-	}
+	ratio := func(r float64) string { return tokenRatioNote(r, haveWeights) }
 	switch {
 	case u.CacheCreationTokens == 0:
 		return []tokenTableLine{line}
@@ -551,7 +569,7 @@ func cacheWriteLines(v *tokenReportView, weights tokenreport.Weights, haveWeight
 }
 
 // thinkingLine renders "of which thinking" with the thinking share of cost
-// and of output; a legacy checkpoint whose committed usage has no thinking
+// and of output (both omitted when the count is 0); a legacy checkpoint whose committed usage has no thinking
 // count prints the stored transcript's figure with a "(from stored
 // transcript)" marker instead; "not recorded" when the agent does not record
 // thinking.
@@ -568,6 +586,9 @@ func thinkingLine(v *tokenReportView) tokenTableLine {
 		return line
 	}
 	line.tokens = tokenreport.FormatTokenCount(u.ThinkingTokens)
+	if u.ThinkingTokens == 0 {
+		return line
+	}
 	line.share = tokenShare(v.Report.Cost.Thinking, v.Report.Cost.Units > 0)
 	if u.OutputTokens > 0 {
 		line.note = tokenreport.FormatPercent(float64(u.ThinkingTokens)/float64(u.OutputTokens)) + " of output"
@@ -594,7 +615,8 @@ func writeTokenRecommendationSentences(w io.Writer, recs []tokenreport.Recommend
 	}
 }
 
-// writeTokenNotes prints the Notes section; nothing when there are none.
+// writeTokenNotes prints the Notes section, each note wrapped at the
+// recommendation width with a hanging indent; nothing when there are none.
 func writeTokenNotes(w io.Writer, notes []string) {
 	if len(notes) == 0 {
 		return
@@ -602,7 +624,13 @@ func writeTokenNotes(w io.Writer, notes []string) {
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "Notes")
 	for _, n := range notes {
-		fmt.Fprintf(w, "  - %s\n", n)
+		for i, line := range strings.Split(wrapText(n, tokenRecommendationWrap-4), "\n") {
+			if i == 0 {
+				fmt.Fprintln(w, "  - "+line)
+			} else {
+				fmt.Fprintln(w, "    "+line)
+			}
+		}
 	}
 }
 
@@ -637,6 +665,9 @@ func tokenPricingNotes(v *tokenReportView) []string {
 		}
 	}
 	unpriced := v.Report.Attributed.Unpriced
+	if cs.Units == 0 && v.Report.Model == "" {
+		notes = append(notes, "model not recorded; cost shares not estimated")
+	}
 	if cs.Units == 0 && v.Report.Model != "" {
 		if _, _, ok := tokenreport.WeightsFor(v.Report.Model); !ok && !slices.Contains(unpriced, v.Report.Model) {
 			unpriced = append(append([]string(nil), unpriced...), v.Report.Model)
@@ -683,16 +714,17 @@ func tokenProviderName(p tokenreport.Provider) string {
 
 // tokenProfileNote is the caveat for an agent whose transcript records only
 // session totals: the breakdown is not available and, for an agent with no
-// verified profile, not verified either. "" for agents with a breakdown.
+// verified profile, not verified either; a report with no agent at all says
+// so. "" for agents with a breakdown.
 func tokenProfileNote(v *tokenReportView) string {
+	if v.Report.Agent == "" {
+		return "agent not recorded; totals shown, breakdown unavailable."
+	}
 	p := v.Report.Profile
 	if !p.TotalsOnly {
 		return ""
 	}
 	agentName := string(v.Report.Agent)
-	if agentName == "" {
-		agentName = unknownPlaceholder
-	}
 	if p.Verified {
 		return agentName + " records session totals only; the per-call breakdown is not verified for this agent."
 	}

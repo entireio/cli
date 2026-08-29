@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
@@ -181,6 +182,69 @@ func TestWriteTokenReportBody_UsageTable(t *testing.T) {
 	// Total is Σ of the four classes: 6.5k + 332.9k + 3.7M + 115.1k = 4,154,500.
 	if got := tokenVolume(&v.Report.Usage); got != 4_154_500 {
 		t.Errorf("volume = %d", got)
+	}
+	// The "tokens" header ends in the same column as the values under it.
+	headerEnd, valueEnd := -1, -1
+	for _, line := range strings.Split(out, "\n") {
+		if strings.HasPrefix(line, "Usage") {
+			headerEnd = utf8.RuneCountInString(line[:strings.Index(line, "tokens")+len("tokens")])
+		}
+		if strings.Contains(line, "Input (fresh)") {
+			valueEnd = utf8.RuneCountInString(line[:strings.Index(line, "6.5k")+len("6.5k")])
+		}
+	}
+	if headerEnd < 0 || headerEnd != valueEnd {
+		t.Errorf("tokens header ends at column %d, values at %d:\n%s", headerEnd, valueEnd, out)
+	}
+}
+
+func TestThinkingLineOmitsShareWhenZero(t *testing.T) {
+	t.Parallel()
+
+	v := claudeView(wideAttributed())
+	v.Report.Usage.ThinkingTokens = 0
+	line := thinkingLine(&v)
+	if line.tokens != "0" || line.share != "" || line.note != "" {
+		t.Errorf("zero thinking line = %+v, want tokens 0 with no share or note", line)
+	}
+}
+
+func TestWriteTokenNotesWrapsWithHangingIndent(t *testing.T) {
+	t.Parallel()
+
+	var b strings.Builder
+	writeTokenNotes(&b, []string{strings.Repeat("note ", 30), "short"})
+	lines := strings.Split(strings.TrimRight(b.String(), "\n"), "\n")
+	if lines[0] != "" || lines[1] != "Notes" || !strings.HasPrefix(lines[2], "  - note") || !strings.HasPrefix(lines[3], "    note") {
+		t.Errorf("unexpected notes layout:\n%s", b.String())
+	}
+	for _, line := range lines {
+		if len(line) > tokenRecommendationWrap {
+			t.Errorf("line longer than %d: %q", tokenRecommendationWrap, line)
+		}
+	}
+	if lines[len(lines)-1] != "  - short" {
+		t.Errorf("last line = %q", lines[len(lines)-1])
+	}
+}
+
+func TestTokenReportNotes_UnrecordedModelAndAgent(t *testing.T) {
+	t.Parallel()
+
+	v := tokenReportView{Report: tokenreport.Report{Usage: types.TokenUsage{InputTokens: 10, APICallCount: 1}}, HasUsage: true}
+	v.Report.Profile = tokenreport.ProfileFor(v.Report.Agent)
+	notes := strings.Join(tokenReportNotes(&v), "\n")
+	assertContainsAll(t, notes, "model not recorded; cost shares not estimated", "agent not recorded; totals shown, breakdown unavailable.")
+}
+
+func TestDetailCallCount(t *testing.T) {
+	t.Parallel()
+
+	if got := detailCallCount(0); got != "" {
+		t.Errorf("detailCallCount(0) = %q, want empty", got)
+	}
+	if got := detailCallCount(1); got != "1 call" {
+		t.Errorf("detailCallCount(1) = %q", got)
 	}
 }
 

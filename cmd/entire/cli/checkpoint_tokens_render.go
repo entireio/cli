@@ -112,21 +112,21 @@ func writeCheckpointCostShareComparison(w io.Writer, d *checkpointTokensCostShar
 	fmt.Fprintf(w, "Cost share, output: %s\n", formatCheckpointShareDelta(d.Output))
 }
 
-// formatCheckpointShareDelta renders "up 12 points (36% -> 48%)" or
-// "unchanged (23% -> 23%)".
+// formatCheckpointShareDelta renders "up 12 points (36% → 48%)" or
+// "unchanged (23% → 23%)".
 func formatCheckpointShareDelta(delta *checkpointTokensShareDelta) string {
 	if delta == nil {
 		return "unavailable"
 	}
 	from, to := tokenreport.FormatPercent(delta.Baseline), tokenreport.FormatPercent(delta.Current)
 	if delta.Direction == checkpointDeltaDirectionUnchanged {
-		return fmt.Sprintf("unchanged (%s -> %s)", from, to)
+		return fmt.Sprintf("unchanged (%s → %s)", from, to)
 	}
-	return fmt.Sprintf("%s %d points (%s -> %s)", delta.Direction, absInt(sharePoints(delta.Change)), from, to)
+	return fmt.Sprintf("%s %d points (%s → %s)", delta.Direction, absInt(sharePoints(delta.Change)), from, to)
 }
 
-// formatCheckpointMetricDelta renders "down 50.5% (1M -> 500k)", "up (0 ->
-// 3)" when the baseline was zero, or "unchanged (200 -> 200)".
+// formatCheckpointMetricDelta renders "down 50.5% (1M → 500k)", "up (0 → 3)"
+// when the baseline was zero, or "unchanged (200 → 200)".
 func formatCheckpointMetricDelta(delta *checkpointTokensMetricDelta, formatValue func(int) string) string {
 	if delta == nil {
 		return "unavailable"
@@ -134,12 +134,12 @@ func formatCheckpointMetricDelta(delta *checkpointTokensMetricDelta, formatValue
 	from := formatValue(delta.Baseline)
 	to := formatValue(delta.Current)
 	if delta.Direction == checkpointDeltaDirectionUnchanged {
-		return fmt.Sprintf("unchanged (%s -> %s)", from, to)
+		return fmt.Sprintf("unchanged (%s → %s)", from, to)
 	}
 	if delta.ChangePercent == nil {
-		return fmt.Sprintf("%s (%s -> %s)", delta.Direction, from, to)
+		return fmt.Sprintf("%s (%s → %s)", delta.Direction, from, to)
 	}
-	return fmt.Sprintf("%s %s (%s -> %s)", delta.Direction, formatPercent(absFloat(*delta.ChangePercent)), from, to)
+	return fmt.Sprintf("%s %s (%s → %s)", delta.Direction, formatPercent(absFloat(*delta.ChangePercent)), from, to)
 }
 
 // absFloat is |value|.

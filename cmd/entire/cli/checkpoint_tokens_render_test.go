@@ -101,12 +101,12 @@ func TestWriteCheckpointTokenComparison_PrintsCostShareLines(t *testing.T) {
 	var b strings.Builder
 	writeCheckpointTokenComparison(&b, comparison)
 	assertContainsAll(t, b.String(),
-		"Total tokens: unchanged (200 -> 200)",
+		"Total tokens: unchanged (200 → 200)",
 		"Cache/context replay: unavailable",
-		"API calls: up (0 -> 3)",
-		"Cost share, input: down 20 points (50% -> 30%)",
-		"Cost share, cache write: unchanged (0% -> 0%)",
-		"Cost share, output: up 20 points (50% -> 70%)",
+		"API calls: up (0 → 3)",
+		"Cost share, input: down 20 points (50% → 30%)",
+		"Cost share, cache write: unchanged (0% → 0%)",
+		"Cost share, output: up 20 points (50% → 70%)",
 		"Quality still depends on the task outcome",
 	)
 }

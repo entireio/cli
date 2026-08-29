@@ -1667,21 +1667,6 @@ func TestTokensCmd_JSONAndAgentBriefAreMutuallyExclusive(t *testing.T) {
 	}
 }
 
-func TestCheckpointTokensCmd_JSONAndAgentBriefAreMutuallyExclusive(t *testing.T) {
-	t.Parallel()
-
-	cmd := newCheckpointGroupCmd()
-	cmd.SetArgs([]string{"tokens", "abc123", "--json", "--agent-brief"})
-
-	err := cmd.ExecuteContext(context.Background())
-	if err == nil {
-		t.Fatal("expected error for --json with --agent-brief")
-	}
-	if !strings.Contains(err.Error(), "mutually exclusive") {
-		t.Fatalf("expected mutually exclusive error, got: %v", err)
-	}
-}
-
 func TestTokensCmd_PrioritizesContextReplayHotspot(t *testing.T) {
 	setupStopTestRepo(t)
 

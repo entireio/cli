@@ -166,6 +166,9 @@ func TestBuildCheckpointTokensReport_TaskRecordsAcrossSessions(t *testing.T) {
 		"Subagent: Reviewer",
 		"Breakdown merged across 2 sessions; sub-row call and token counts are lower bounds.",
 	)
+	if report.view.Report.Sessions != 2 {
+		t.Errorf("Report.Sessions = %d, want 2 attributed sessions", report.view.Report.Sessions)
+	}
 	if report.Tokens == nil || report.Tokens.SubagentTotal != 1300 {
 		t.Errorf("subagent_total = %+v, want 1300 (both records counted once)", report.Tokens)
 	}

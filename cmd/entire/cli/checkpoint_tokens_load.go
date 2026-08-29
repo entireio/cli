@@ -173,7 +173,11 @@ type sessionTokenAnalysis struct {
 	attributed tokenreport.Attributed
 	costParts  []tokenreport.CostShares
 	duration   time.Duration
-	// calls is Σ APICallCount over the attributed calls.
+	// calls is the parent session's API calls with recorded usage: Σ
+	// APICallCount over the attributed calls, or the committed count minus
+	// the subagent count on the metadata path. Subagent calls are never
+	// included, so the long_session replay gate sees the same figure on
+	// every path.
 	calls             int
 	unknownUsageCalls int
 	efforts           map[string]int
@@ -194,6 +198,19 @@ type sessionTokenAnalysis struct {
 // attribution per session (best-effort), task records matched to their
 // spawning calls, totals, cost shares, merged contributors, recommendations
 // and notes.
+//
+// Totals come from the first rung of this ladder that applies, per session;
+// Source is "transcript" only when every session stopped at rung 1:
+//
+//  1. attributed version-2 session → totals recomputed per call plus its
+//     subagent records (finishSessionTokenAnalysis);
+//  2. attributed legacy session → committed token_usage for the totals, the
+//     whole stored transcript for the breakdown (finishLegacyFromTranscript);
+//  3. not attributed (no attributor, unreadable transcript, parse error, no
+//     API calls in the window) → committed token_usage (finishFromMetadata);
+//  4. a session's metadata unreadable → the root summary's aggregate stands
+//     in for every session's totals (applyRootSummaryFallback);
+//  5. nothing recorded anywhere → "not recorded".
 func buildCheckpointTokensReport(ctx context.Context, in checkpointTokenInputs) checkpointTokensReport {
 	report := checkpointTokensReport{CheckpointID: in.checkpointID.String(), Source: checkpointTokensSourceCommitted}
 	metas := make([]*checkpoint.Metadata, 0, len(in.sessions))
@@ -255,6 +272,7 @@ func applyRootSummaryFallback(view *tokenReportView, in checkpointTokenInputs) b
 	if sub := flattenTokenUsage(in.summary.TokenUsage.SubagentTokens); sub != nil {
 		sub.Model = ""
 		view.Subagent = *sub
+		view.Report.Calls = max(flat.APICallCount-sub.APICallCount, 0)
 	}
 	view.Report.Cost = tokenreport.CostShares{}
 	if w, _, ok := tokenreport.WeightsFor(view.Report.Model); ok {
@@ -408,6 +426,7 @@ func attributeCheckpointTokenSession(ctx context.Context, cpID id.CheckpointID, 
 		return a
 	}
 	if attribution == nil || len(attribution.Calls) == 0 {
+		a.notes = append(a.notes, label+": no API calls in the token window; totals from committed metadata")
 		return a
 	}
 	applySkillEventAnchors(attribution, meta.SkillEvents)
@@ -632,6 +651,9 @@ func (a *sessionTokenAnalysis) finishFromMetadata() {
 	a.usage = flat
 	a.subagent = flattenTokenUsage(a.meta.TokenUsage.SubagentTokens)
 	a.calls = flat.APICallCount
+	if a.subagent != nil {
+		a.calls = max(flat.APICallCount-a.subagent.APICallCount, 0)
+	}
 	if a.meta.Model != "" {
 		a.models[a.meta.Model] += max(flat.APICallCount, 1)
 		if w, _, ok := tokenreport.WeightsFor(a.meta.Model); ok {
@@ -685,8 +707,9 @@ func metadataDuration(meta *checkpoint.Metadata) time.Duration {
 }
 
 // assembleTokenReportView merges the per-session analyses into the view the
-// renderer prints: summed usage, merged contributors, cost shares summed by
-// units, the modal model and effort, summed duration and calls.
+// renderer prints: summed usage, merged contributors (Report.Sessions counts
+// the attributed sessions merged), cost shares summed by units, the modal
+// model and effort, summed duration and calls.
 func assembleTokenReportView(analyses []sessionTokenAnalysis, metas []*checkpoint.Metadata) tokenReportView {
 	var view tokenReportView
 	var usage, subagent *types.TokenUsage
@@ -726,6 +749,7 @@ func assembleTokenReportView(analyses []sessionTokenAnalysis, metas []*checkpoin
 		subagent.SubagentTokens = nil
 		view.Subagent = *subagent
 	}
+	view.Report.Sessions = len(perSession)
 	if len(perSession) == 1 {
 		view.Report.Attributed = perSession[0]
 	} else if len(perSession) > 1 {
