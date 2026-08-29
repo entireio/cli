@@ -355,6 +355,7 @@ func attributeCheckpointTokenSession(ctx context.Context, cpID id.CheckpointID, 
 			logging.Warn(ctx, "checkpoint tokens: session transcript unreadable",
 				slog.String("checkpoint_id", cpID.String()),
 				slog.Int("session_index", s.index),
+				slog.String("agent", string(meta.Agent)),
 				slog.String("reason", transcriptUnavailableReason(s.transcriptErr)))
 		}
 		return a

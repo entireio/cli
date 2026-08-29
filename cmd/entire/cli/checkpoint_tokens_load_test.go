@@ -349,7 +349,7 @@ func TestBuildCheckpointTokensReport_UnreadableTranscriptWarnIsClassified(t *tes
 			}
 
 			logged := readLogDir(t, logDir)
-			assertContainsAll(t, logged, "checkpoint tokens: session transcript unreadable", `"checkpoint_id":"`, `"session_index":0`, `"reason":"`+tc.reason+`"`)
+			assertContainsAll(t, logged, "checkpoint tokens: session transcript unreadable", `"checkpoint_id":"`, `"session_index":0`, `"agent":"Claude Code"`, `"reason":"`+tc.reason+`"`)
 			for _, absent := range []string{`"error"`, "boom", "secret-repo"} {
 				if strings.Contains(logged, absent) {
 					t.Errorf("the log must not carry %q:\n%s", absent, logged)

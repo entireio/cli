@@ -14,6 +14,12 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/tokenreport"
 )
 
+// Agent-neutral loader core shared by `checkpoint tokens` and `session
+// tokens`: attribution finishing, report view assembly, and the
+// transcript-warn classifier. Checkpoint-only code (task records, legacy
+// transcripts, root-summary fallback) stays in checkpoint_tokens_load.go;
+// the live-session path is session_tokens.go.
+
 // tokenSourceTranscript is the Source value a token report carries when its
 // totals were recomputed from a transcript (a checkpoint's stored full.jsonl
 // or a live session's transcript file) rather than read from recorded totals.
@@ -221,9 +227,10 @@ func attributionDuration(attr *types.Attribution, meta *checkpoint.Metadata) tim
 	return metadataDuration(meta)
 }
 
-// finishFromMetadata fills a session's totals from its committed
-// token_usage, which already includes any subagent usage. The duration is
-// the hook-reported one unless the transcript already supplied it.
+// finishFromMetadata fills a session's totals from its recorded token_usage
+// (committed metadata, or session state on the live path), which already
+// includes any subagent usage. The duration is the hook-reported one unless
+// the transcript already supplied it.
 func (a *sessionTokenAnalysis) finishFromMetadata() {
 	if a.duration == 0 {
 		a.duration = metadataDuration(a.meta)
@@ -345,7 +352,7 @@ func assembleTokenReportView(analyses []sessionTokenAnalysis, metas []*checkpoin
 }
 
 // reportAgent is the agent whose gates and profile the report uses: the one
-// agent of a single-agent checkpoint, else the agent of the most sessions
+// agent of a single-agent report, else the agent of the most sessions
 // (ties: first seen).
 func reportAgent(metas []*checkpoint.Metadata) types.AgentType {
 	counts := make(map[string]int)
