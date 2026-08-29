@@ -270,7 +270,7 @@ func unregisterLiveSession(ctx context.Context, sessionID, commonDir, worktreePa
 				// A target may become ended/condensed during strategy.PostCommit before
 				// the deferred source retire runs; its StateStore.Save must not erase that
 				// token out from under finalization.
-				if normalizeCommonDir(existing.CommonDir) != normalizeCommonDir(commonDir) {
+				if !sameCommonDir(existing.CommonDir, commonDir) {
 					return nil
 				}
 				if worktreePath != "" && existing.WorktreePath != "" &&
@@ -284,8 +284,10 @@ func unregisterLiveSession(ctx context.Context, sessionID, commonDir, worktreePa
 	})
 }
 
-// normalizeCommonDir makes a git common dir absolute and clean so entries and
-// callers compare on the same canonical form regardless of the reader's CWD.
+// normalizeCommonDir makes a git common dir absolute and clean for storage, so
+// a relative value like ".git" cannot resolve against the reader's CWD. It is
+// the on-disk form only; equality is decided by sameCommonDir, which also
+// resolves symlinks.
 func normalizeCommonDir(commonDir string) string {
 	commonDir = strings.TrimSpace(commonDir)
 	if abs, err := filepath.Abs(commonDir); err == nil {
@@ -615,13 +617,13 @@ func sameAdoptClaimOwner(a, b *AdoptClaim) bool {
 	if a == nil || b == nil {
 		return false
 	}
-	return normalizeCommonDir(a.ByCommonDir) == normalizeCommonDir(b.ByCommonDir) &&
-		normalizeRegistryPath(a.ByWorktreePath) == normalizeRegistryPath(b.ByWorktreePath) &&
+	return sameCommonDir(a.ByCommonDir, b.ByCommonDir) &&
+		sameRegistryPath(a.ByWorktreePath, b.ByWorktreePath) &&
 		a.ByWorktreeID == b.ByWorktreeID && a.AttemptID == b.AttemptID
 }
 
 func claimMatchesExpected(actual, expected *AdoptClaim) bool {
-	if actual == nil || expected == nil || normalizeCommonDir(actual.ByCommonDir) != normalizeCommonDir(expected.ByCommonDir) {
+	if actual == nil || expected == nil || !sameCommonDir(actual.ByCommonDir, expected.ByCommonDir) {
 		return false
 	}
 	if expected.ByWorktreePath != "" && !sameRegistryPath(actual.ByWorktreePath, expected.ByWorktreePath) {
@@ -633,6 +635,9 @@ func claimMatchesExpected(actual, expected *AdoptClaim) bool {
 	return expected.AttemptID == "" || actual.AttemptID == expected.AttemptID
 }
 
+// normalizeRegistryPath makes a path absolute and clean for storage. Like
+// normalizeCommonDir it is the on-disk form only; comparisons go through
+// sameRegistryPath.
 func normalizeRegistryPath(path string) string {
 	path = strings.TrimSpace(path)
 	if path == "" {
@@ -644,8 +649,34 @@ func normalizeRegistryPath(path string) string {
 	return filepath.Clean(path)
 }
 
+// canonicalRegistryPath is the comparison form for registry paths: absolute,
+// clean, and symlink-resolved. It mirrors canonicalAdoptPath in the cli
+// package so a path compared here and downstream in sameAdoptStore /
+// sameAdoptPath reaches the same verdict. Without the symlink step the two
+// disagree whenever a common dir or worktree is reached through a link — the
+// default on macOS, where /tmp is a symlink to /private/tmp — and the registry
+// then fails to unregister an entry, refuses to release an adoption claim it
+// owns, or rejects the claim holder's own renewal.
+//
+// EvalSymlinks needs the path to exist; a common dir or worktree that has been
+// removed falls back to the absolute, clean form rather than failing.
+func canonicalRegistryPath(path string) string {
+	path = normalizeRegistryPath(path)
+	if path == "" {
+		return ""
+	}
+	if resolved, err := filepath.EvalSymlinks(path); err == nil {
+		return resolved
+	}
+	return path
+}
+
+func sameCommonDir(a, b string) bool {
+	return canonicalRegistryPath(a) == canonicalRegistryPath(b)
+}
+
 func sameRegistryPath(a, b string) bool {
-	return normalizeRegistryPath(a) == normalizeRegistryPath(b)
+	return canonicalRegistryPath(a) == canonicalRegistryPath(b)
 }
 
 func cloneTime(t *time.Time) *time.Time {
