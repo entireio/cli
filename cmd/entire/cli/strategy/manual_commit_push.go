@@ -108,8 +108,11 @@ func gateCheckpointEgress(ctx context.Context, remote, pendingCapture string) (c
 		fmt.Fprintln(stderrWriter, "Warning: trust was saved but repository policy could not be refreshed; checkpoint sync skipped for this push (details in .entire/logs; the next push retries).")
 		return ctx, false
 	}
-	ctx = repopolicy.WithRepoPolicy(ctx, policy)
-	if !settings.CheckpointEgressAllowed(ctx) {
+	// Every hold returns the caller's ORIGINAL ctx: the fresh policy is handed
+	// back only with an open gate, so no hold can leave a context on which
+	// CheckpointEgressAllowed answers differently from the decision made here.
+	freshCtx := repopolicy.WithRepoPolicy(ctx, policy)
+	if !settings.CheckpointEgressAllowed(freshCtx) {
 		// The write succeeded but the fresh classification still holds —
 		// e.g. the consent key the prompt recorded is not the one the
 		// election now resolves to. Log what the gate saw so the mismatch
@@ -124,7 +127,7 @@ func gateCheckpointEgress(ctx context.Context, remote, pendingCapture string) (c
 		fmt.Fprintln(stderrWriter, "Warning: trust was saved but the gate still holds; checkpoint sync skipped for this push.")
 		return ctx, false
 	}
-	return ctx, true
+	return freshCtx, true
 }
 
 // policyForPendingCapture re-derives the repository policy when this push is

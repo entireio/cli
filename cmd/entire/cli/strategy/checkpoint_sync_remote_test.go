@@ -949,3 +949,35 @@ func TestPrePush_TrustedRepoNeverConsultsResolver(t *testing.T) {
 	// Nothing pending now: still no prompt, still no error.
 	require.NoError(t, NewManualCommitStrategy().PrePush(context.Background(), "sync"))
 }
+
+// A "granted" answer whose trust write did not actually take (nothing recorded,
+// or recorded under a key the election does not resolve to) must still hold:
+// the gate re-derives the decision from a fresh classification and never
+// hands a fresh-policy context to the caller on a hold.
+// Not parallel: uses t.Chdir()
+func TestPrePush_GrantWithoutRecordedTrustStillHolds(t *testing.T) {
+	testutil.IsolateGitConfigEnv(t)
+	workDir, bareDir, refs := setupRepoWithCheckpointRefs(t)
+	testutil.AddRemote(t, workDir, "sync", bareDir)
+	t.Chdir(workDir)
+	t.Setenv(settings.EnvCheckpointsPrimary, checkpoint.BackendTypeGitRefs)
+	enrollRepoGlobally(t, `{"global":{"enabled":true}}`)
+	oldResolve := resolveTrustDecisionFn
+	resolveTrustDecisionFn = func(context.Context, io.Writer) (TrustDecision, error) {
+		return TrustGranted, nil // claims a grant, records nothing
+	}
+	t.Cleanup(func() { resolveTrustDecisionFn = oldResolve })
+
+	repo, err := git.PlainOpen(workDir)
+	require.NoError(t, err)
+	queue := enqueueRefs(t, repo, refs)
+	stderr := captureStderrWriter(t)
+
+	require.NoError(t, NewManualCommitStrategy().PrePush(context.Background(), "sync"))
+
+	assert.Contains(t, stderr.String(), "the gate still holds")
+	assert.NotContains(t, lsRemoteOutput(t, bareDir), refs[0].String(), "an unrecorded grant must not release checkpoints")
+	remaining, err := queue.Drain()
+	require.NoError(t, err)
+	assert.ElementsMatch(t, refs, remaining, "held refs stay queued")
+}

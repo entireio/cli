@@ -272,3 +272,35 @@ func TestWriteFileAtomicFollowingSymlinks_CycleFails(t *testing.T) {
 		t.Fatalf("the link must survive a refused write (err=%v)", err)
 	}
 }
+
+// A cycle spelled two ways — relative targets through sibling directories,
+// and the same link reached through a linked directory — must be reported as
+// a cycle, not run into the hop cap: the detector keys on the canonical form.
+func TestResolveWriteTarget_CycleThroughDifferentSpellingsIsACycle(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	for _, sub := range []string{"a", "b"} {
+		if err := os.MkdirAll(filepath.Join(dir, sub), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Symlink(filepath.Join("..", "b", "link"), filepath.Join(dir, "a", "link")); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	if err := os.Symlink(filepath.Join("..", "a", "link"), filepath.Join(dir, "b", "link")); err != nil {
+		t.Fatal(err)
+	}
+	_, err := resolveWriteTarget(filepath.Join(dir, "a", "link"))
+	if err == nil || !strings.Contains(err.Error(), "symlink cycle") {
+		t.Fatalf("err = %v, want a symlink cycle error", err)
+	}
+
+	// The same cycle entered through a directory symlink.
+	if err := os.Symlink(filepath.Join(dir, "a"), filepath.Join(dir, "via")); err != nil {
+		t.Fatal(err)
+	}
+	_, err = resolveWriteTarget(filepath.Join(dir, "via", "link"))
+	if err == nil || !strings.Contains(err.Error(), "symlink cycle") {
+		t.Fatalf("err = %v, want a symlink cycle error through the linked directory", err)
+	}
+}
