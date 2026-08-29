@@ -2,7 +2,6 @@ package tokenreport
 
 import (
 	"cmp"
-	"fmt"
 	"slices"
 	"strconv"
 	"time"
@@ -39,10 +38,14 @@ const (
 	CauseRepeatedSkill Cause = "repeated_skill"
 )
 
-// RecommendationKindSession is the Recommendation.Kind of every
-// recommendation this package produces in B1: an observation about the one
-// session or checkpoint in the report. Plan B2 adds the "pattern" kind.
-const RecommendationKindSession = "session"
+// RecommendationKind says what a Recommendation is about: the one session or
+// checkpoint in the report, or (Plan B2) a pattern across sessions.
+type RecommendationKind string
+
+// RecommendationKindSession is the Kind of every recommendation this package
+// produces in B1: an observation about the one session or checkpoint in the
+// report. Plan B2 adds the "pattern" kind.
+const RecommendationKindSession RecommendationKind = "session"
 
 // maxRecommendations caps how many recommendations Recommend returns.
 const maxRecommendations = 2
@@ -70,7 +73,7 @@ type Citation struct {
 // functions, so a reader can find each number in a row above.
 type Recommendation struct {
 	// Kind is RecommendationKindSession in B1.
-	Kind string `json:"kind"`
+	Kind RecommendationKind `json:"kind"`
 	// Text is the sentence(s). Names (model, command, skill, effort value)
 	// are set in backticks; numbers are printed as digits, never spelled out.
 	Text string `json:"text"`
@@ -156,6 +159,11 @@ const (
 	repeatedSkillMinLoads         = 2
 )
 
+// replayClauseShare is the cache-read share of cost from which the
+// long_session duration arm mentions context replay even when cache read is
+// not the largest cost class: at half the cost, replay is the story.
+const replayClauseShare = 0.5
+
 // GatesFor returns the calibrated Gates for agent. Only two thresholds vary
 // by agent: LongSessionDuration (8h for Claude Code, 4h otherwise) and
 // CacheMissShare (45% Codex, 40% OpenCode, 70% Gemini CLI, 45% otherwise).
@@ -195,9 +203,10 @@ type Report struct {
 	// Profile is ProfileFor(Agent), or a caller-adjusted profile. Only
 	// RecordsEffort, EffortSettingVerified and Levers are read here.
 	Profile AgentProfile
-	// Model is the session's (parent) model, "" when unrecorded. A
-	// KindSubagent row whose Model equals it, or is empty, counts as running
-	// on the session's model.
+	// Model is the session's (parent) model: the modal CallUsage.Model, or
+	// the checkpoint's recorded model; the caller computes it. "" when
+	// unrecorded. A KindSubagent row whose Model equals it, or is empty,
+	// counts as running on the session's model.
 	Model string
 	// Effort is the dominant effort value seen across the report's calls —
 	// the CallUsage.Effort carried by the most calls, "" when no call records
@@ -305,33 +314,26 @@ func (r *Report) rowsPriced() bool {
 	return r.Attributed.PricedUnits > 0
 }
 
-// ofCost renders a share as "23% of cost", or "" when the share is not
-// priced so callers can drop the clause.
-func ofCost(priced bool, share float64) string {
-	if !priced {
+// shareClause renders a class share as ", 23% of cost" for appending to a
+// figure, or "" when the report's cost is not priced.
+func shareClause(r *Report, share float64) string {
+	if !r.costPriced() {
 		return ""
 	}
-	return FormatPercent(share) + " of cost"
-}
-
-// withOfCost appends ", 23% of cost" to figures when the fragment is
-// non-empty: "140.2k tokens, 27% of cost".
-func withOfCost(figures, ofCostFragment string) string {
-	if ofCostFragment == "" {
-		return figures
-	}
-	return figures + ", " + ofCostFragment
+	return ", " + FormatPercent(share) + " of cost"
 }
 
 // selfDetail returns the Detail of c named after the row itself, or nil. A
-// skill or subagent ref always carries its own name as Detail (see
-// Attribute), so a KindSkill/KindSubagent row has one such detail and its
-// Calls is the number of loads/runs — the figure the renderer prints as that
-// detail's call count, which is why a sentence quoting it cites the detail.
-// Usage.APICallCount is not used for this: it is the row's share of the
-// emitting calls' API-call counts, split across every ref a call emitted,
-// so it undercounts a Skill call emitted alongside other tools. A row with
-// no such detail (an attributor that stamps no Detail) has no run count.
+// skill ref carries its own name as Detail; a subagent ref does too unless
+// the call requested a model, in which case Detail is "<type> (<model>)" and
+// the row has no self detail (its run count is then omitted rather than
+// summed from prefix matches, which would not be a rendered figure). The
+// self detail's Calls is the number of loads/runs — the figure the renderer
+// prints as that detail's call count, which is why a sentence quoting it
+// cites the detail. Usage.APICallCount is not used for this: it is the
+// row's share of the emitting calls' API-call counts, split across every
+// ref a call emitted, so it undercounts a Skill call emitted alongside other
+// tools.
 func selfDetail(c *Contributor) *Detail {
 	for i := range c.Details {
 		if c.Details[i].Detail == c.Label {
@@ -341,10 +343,19 @@ func selfDetail(c *Contributor) *Detail {
 	return nil
 }
 
-// rowFigures renders a row's tokens and share, "140.2k tokens, 27% of cost"
-// or "140.2k tokens" when unpriced.
-func rowFigures(r *Report, c *Contributor) string {
-	return withOfCost(FormatTokenCount(volume(&c.Usage))+" tokens", ofCost(r.rowsPriced(), c.CostShare))
+// rowFigures renders a row's tokens and share: "140.2k tokens, 27% of cost"
+// with ofCost, "140.2k tokens, 27%" without (for a sentence that already
+// opened with "of the cost"), "140.2k tokens" when unpriced.
+func rowFigures(r *Report, c *Contributor, ofCost bool) string {
+	s := FormatTokenCount(volume(&c.Usage)) + " tokens"
+	if !r.rowsPriced() {
+		return s
+	}
+	s += ", " + FormatPercent(c.CostShare)
+	if ofCost {
+		s += " of cost"
+	}
+	return s
 }
 
 // detailFigures renders a detail's calls, tokens and share: "9 calls,
@@ -377,11 +388,22 @@ func largestRow(rows []Contributor, keep func(*Contributor) bool, key func(*Cont
 // rowShare is a largestRow key: the row's cost share.
 func rowShare(c *Contributor) float64 { return c.CostShare }
 
+// subagentSubject names a subagent row's type as a plural subject: "Explore
+// subagents", or "Unlabelled subagents" for LabelUnknownSubagent.
+func subagentSubject(label string) string {
+	if label == LabelUnknownSubagent {
+		return "Unlabelled subagents"
+	}
+	return label + " subagents"
+}
+
 // recommendLongSession fires when the duration arm or the cache-read arm of
-// Gates trips. The duration arm reads Report.Duration; the cache-read arm
-// needs priced cost, a cache-read share ≥ LongSessionCacheReadShare and
-// ≥ LongSessionMinCalls calls. Quotes class-level figures only (no
-// citation). Addressed share: Cost.CacheRead.
+// Gates trips. The duration arm reads Report.Duration and mentions context
+// replay only when cache read is the largest cost class or at least
+// replayClauseShare of cost; the cache-read arm needs priced cost, a
+// cache-read share ≥ LongSessionCacheReadShare and ≥ LongSessionMinCalls
+// calls. Quotes class-level figures only (no citation). Addressed share:
+// Cost.CacheRead.
 func recommendLongSession(r *Report, g Gates) (Recommendation, float64, bool) {
 	byDuration := g.LongSessionDuration > 0 && r.Duration >= g.LongSessionDuration
 	byReplay := r.costPriced() && r.Cost.CacheRead >= g.LongSessionCacheReadShare && r.calls() >= g.LongSessionMinCalls
@@ -391,13 +413,11 @@ func recommendLongSession(r *Report, g Gates) (Recommendation, float64, bool) {
 	var text string
 	if byDuration {
 		text = "This session ran " + FormatDuration(r.Duration)
-		if r.Usage.CacheReadTokens > 0 {
-			text += "; re-reading its own context on every call took " + FormatTokenCount(r.Usage.CacheReadTokens) + " cache-read tokens"
-			if share := ofCost(r.costPriced(), r.Cost.CacheRead); share != "" {
-				text += " (" + share + ")"
-			}
+		if r.Usage.CacheReadTokens > 0 && r.costPriced() && (cacheReadLargest(&r.Cost) || r.Cost.CacheRead >= replayClauseShare) {
+			text += "; re-reading its own context on every call took " + FormatTokenCount(r.Usage.CacheReadTokens) +
+				" cache-read tokens" + shareClause(r, r.Cost.CacheRead)
 		}
-		text += ". Work this long is cheaper as several shorter sessions."
+		text += ". Splitting work this long into several shorter sessions would have cost less."
 	} else {
 		text = "Most of this session's cost (" + FormatPercent(r.Cost.CacheRead) + ") was re-reading its own context: " +
 			strconv.Itoa(r.calls()) + " calls replayed " + FormatTokenCount(r.Usage.CacheReadTokens) +
@@ -406,12 +426,19 @@ func recommendLongSession(r *Report, g Gates) (Recommendation, float64, bool) {
 	return sessionRecommendation(CauseLongSession, text), r.Cost.CacheRead, true
 }
 
+// cacheReadLargest reports whether cache read is strictly the largest of the
+// four cost classes.
+func cacheReadLargest(cs *CostShares) bool {
+	return cs.CacheRead > cs.Input && cs.CacheRead > cs.CacheWrite && cs.CacheRead > cs.Output
+}
+
 // recommendContextGrowth fires when cache write is strictly the largest cost
 // class and the largest row that can carry cache writes (tool, skill,
 // subagent, prompt — text and replay rows carry only output and cache reads)
-// has a share ≥ ContextGrowthRowShare. The sentence names Details[0] when
-// the row has one; the row (and that detail) are cited. Addressed share:
-// that row's.
+// has a share ≥ ContextGrowthRowShare. A tool row's sentence names its
+// Details[0] when it has one; a skill or subagent row's folds in its
+// selfDetail run count. The row (and the detail used) are cited. Addressed
+// share: that row's.
 func recommendContextGrowth(r *Report, g Gates) (Recommendation, float64, bool) {
 	if !r.costPriced() || !cacheWriteLargest(&r.Cost) {
 		return Recommendation{}, 0, false
@@ -420,13 +447,8 @@ func recommendContextGrowth(r *Report, g Gates) (Recommendation, float64, bool) 
 	if row == nil || row.CostShare < g.ContextGrowthRowShare {
 		return Recommendation{}, 0, false
 	}
-	text := FormatPercent(row.CostShare) + " of the cost was " + contextGrowthSubject(row)
-	var d *Detail
-	if len(row.Details) > 0 {
-		d = &row.Details[0]
-		text += ", mostly `" + d.Detail + "` (" + detailFigures(r, d) + ")"
-	}
-	text += ". " + contextGrowthAdvice(row.Kind)
+	subject, d := contextGrowthSubject(r, row)
+	text := FormatPercent(row.CostShare) + " of the cost was " + subject + ". " + contextGrowthAdvice(row.Kind)
 	return sessionRecommendation(CauseContextGrowth, text, cite(row, d)), row.CostShare, true
 }
 
@@ -448,28 +470,47 @@ func carriesCacheWrites(c *Contributor) bool {
 	return false
 }
 
-// contextGrowthSubject names what a row's cache writes were, by kind:
-// "Bash output (during systematic-debugging) read back into context".
-func contextGrowthSubject(c *Contributor) string {
+// contextGrowthSubject names what a row's cache writes were, by kind, with
+// the row's figures, and returns the detail it quoted (nil when none):
+//
+//	tool     "Bash output (during systematic-debugging) read back into context,
+//	          led by `go test ./cmd/entire/...` (9 calls, 140.2k tokens, 17%)"
+//	skill    "loading the `artifact-design` skill into context 3 times (41.3k tokens, 25%)"
+//	subagent "Explore subagents (5 runs, 4.7M tokens, 25%) writing results into context"
+//	prompt   "prompt and system context written into the cache"
+func contextGrowthSubject(r *Report, c *Contributor) (string, *Detail) {
 	switch c.Kind {
 	case KindTool:
-		label := c.Label
+		s := c.Label + " output"
 		if c.Skill != "" {
-			label += " output (during " + c.Skill + ")"
-		} else {
-			label += " output"
+			s += " (during " + c.Skill + ")"
 		}
-		return label + " read back into context"
+		s += " read back into context"
+		if len(c.Details) == 0 {
+			return s, nil
+		}
+		d := &c.Details[0]
+		return s + ", led by `" + d.Detail + "` (" + detailFigures(r, d) + ")", d
 	case KindSkill:
-		return "loading the `" + c.Label + "` skill into context"
+		s := "loading the `" + c.Label + "` skill into context"
+		d := selfDetail(c)
+		if d != nil {
+			s += " " + strconv.Itoa(d.Calls) + " times"
+		}
+		return s + " (" + rowFigures(r, c, false) + ")", d
 	case KindSubagent:
-		return c.Label + " subagent work written into context"
+		figures := rowFigures(r, c, false)
+		d := selfDetail(c)
+		if d != nil {
+			figures = strconv.Itoa(d.Calls) + " runs, " + figures
+		}
+		return subagentSubject(c.Label) + " (" + figures + ") writing results into context", d
 	case KindPrompt:
-		return "prompt and system context written into the cache"
+		return "prompt and system context written into the cache", nil
 	case KindText, KindReplay:
-		return ""
+		return "", nil
 	}
-	return ""
+	return "", nil
 }
 
 // contextGrowthAdvice is the closing sentence for a context_growth row of
@@ -503,11 +544,7 @@ func recommendSubagentModel(r *Report, g Gates) (Recommendation, float64, bool) 
 	if row == nil || row.CostShare <= 0 || row.CostShare < g.SubagentModelShare {
 		return Recommendation{}, 0, false
 	}
-	subject := row.Label + " subagents"
-	if row.Label == LabelUnknownSubagent {
-		subject = "Unlabelled subagents"
-	}
-	text := subject + " ran"
+	text := subagentSubject(row.Label) + " ran"
 	d := selfDetail(row)
 	if d != nil && d.Calls > 0 {
 		text += " " + strconv.Itoa(d.Calls) + " times"
@@ -519,7 +556,7 @@ func recommendSubagentModel(r *Report, g Gates) (Recommendation, float64, bool) 
 	} else {
 		text += " on the session's own model"
 	}
-	text += " (" + rowFigures(r, row) + "); delegated work like this often runs well on a smaller model."
+	text += " (" + rowFigures(r, row, true) + "); delegated work like this often runs well on a smaller model."
 	return sessionRecommendation(CauseSubagentModel, text, cite(row, d)), row.CostShare, true
 }
 
@@ -529,7 +566,7 @@ func recommendSubagentModel(r *Report, g Gates) (Recommendation, float64, bool) 
 // cost share when priced, and the effort value when known — class-level
 // figures only, so nothing is cited. It names a setting only when
 // Profile.EffortSettingVerified and Profile.Levers has one (Levers[0]);
-// otherwise it stops at "a lower effort setting". Addressed share:
+// otherwise it says "a lower effort setting". Addressed share:
 // Cost.Thinking (0 when volume-only, so it ranks last).
 func recommendThinking(r *Report, g Gates) (Recommendation, float64, bool) {
 	out, thinking := r.Usage.OutputTokens, r.Usage.ThinkingTokens
@@ -540,15 +577,15 @@ func recommendThinking(r *Report, g Gates) (Recommendation, float64, bool) {
 	if ratio < g.ThinkingShare {
 		return Recommendation{}, 0, false
 	}
-	counts := FormatTokenCount(thinking) + " of " + FormatTokenCount(out)
-	text := "Thinking took " + FormatPercent(ratio) + " of output tokens (" + withOfCost(counts, ofCost(r.costPriced(), r.Cost.Thinking)) + ")"
+	text := "Thinking took " + FormatPercent(ratio) + " of output tokens (" + FormatTokenCount(thinking) + " of " +
+		FormatTokenCount(out) + shareClause(r, r.Cost.Thinking) + ")"
 	if r.Effort != "" {
 		text += " at effort `" + r.Effort + "`"
 	}
 	if r.Profile.EffortSettingVerified && len(r.Profile.Levers) > 0 {
-		text += "; lowering `" + r.Profile.Levers[0] + "` is usually enough for most work."
+		text += "; lowering `" + r.Profile.Levers[0] + "` is enough for most work."
 	} else {
-		text += "; a lower effort setting is usually enough for most work."
+		text += "; a lower effort setting is enough for most work."
 	}
 	return sessionRecommendation(CauseThinking, text), r.Cost.Thinking, true
 }
@@ -557,28 +594,31 @@ func recommendThinking(r *Report, g Gates) (Recommendation, float64, bool) {
 // fresh input is avoidable (cacheMissEligible) and Cost.Input ≥
 // CacheMissShare. It names the KindTool row with the most fresh input tokens
 // when there is one, and that row's Details[0] when it has one, citing what
-// it names. Addressed share: Cost.Input.
+// it names. The advice is prefix-caching advice: OpenAI and Google both
+// serve a request from the cache only up to the first byte that differs
+// from an earlier request, so a stable system prompt and tool set keep the
+// cached prefix long. Addressed share: Cost.Input.
 func recommendCacheMiss(r *Report, g Gates) (Recommendation, float64, bool) {
 	if !r.costPriced() || !cacheMissEligible(r.Cost.Provider) || r.Cost.Input < g.CacheMissShare {
 		return Recommendation{}, 0, false
 	}
-	text := FormatPercent(r.Cost.Input) + " of the cost was uncached input"
+	const advice = " Keeping the same system prompt and tool set across calls lets more of each request come from the cache."
+	text := FormatPercent(r.Cost.Input) + " of the cost was uncached input — context that arrived fresh on each call instead of from the cache."
 	isTool := func(c *Contributor) bool { return c.Kind == KindTool && c.Usage.InputTokens > 0 }
 	freshInput := func(c *Contributor) float64 { return float64(c.Usage.InputTokens) }
 	row := largestRow(r.Attributed.Contributors, isTool, freshInput)
 	if row == nil {
-		text += " — context that arrived fresh on each call instead of from the cache."
-		return sessionRecommendation(CauseCacheMiss, text), r.Cost.Input, true
+		return sessionRecommendation(CauseCacheMiss, text+advice), r.Cost.Input, true
 	}
-	text += " — tool output that arrived fresh on each call — mostly " + row.Label + " results"
+	text += " The largest tool source was " + row.Label
 	var d *Detail
 	if len(row.Details) > 0 {
 		d = &row.Details[0]
 		text += ", led by `" + d.Detail + "` (" + detailFigures(r, d) + ")."
 	} else {
-		text += " (" + rowFigures(r, row) + ")."
+		text += " (" + rowFigures(r, row, false) + ")."
 	}
-	return sessionRecommendation(CauseCacheMiss, text, cite(row, d)), r.Cost.Input, true
+	return sessionRecommendation(CauseCacheMiss, text+advice, cite(row, d)), r.Cost.Input, true
 }
 
 // cacheMissEligible reports whether cache_miss can fire for a report priced
@@ -619,6 +659,6 @@ func recommendRepeatedSkill(r *Report, g Gates) (Recommendation, float64, bool) 
 	if row == nil || loads.Calls < g.RepeatedSkillMinLoads {
 		return Recommendation{}, 0, false
 	}
-	text := fmt.Sprintf("`%s` was loaded %d times (%s); once per session is enough.", row.Label, loads.Calls, rowFigures(r, row))
+	text := "`" + row.Label + "` was loaded " + strconv.Itoa(loads.Calls) + " times (" + rowFigures(r, row, true) + "); once per session is enough."
 	return sessionRecommendation(CauseRepeatedSkill, text, cite(row, loads)), row.CostShare, true
 }

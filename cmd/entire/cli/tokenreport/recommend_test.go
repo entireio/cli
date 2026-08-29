@@ -16,20 +16,22 @@ import (
 // row labels (tool names, subagent types), so the visibility test can tell a
 // name's digits ("claude-fable-5") from a figure.
 const (
-	testModel      = "claude-fable-5"
-	testOtherModel = "claude-haiku-4-5"
-	testTool       = "Bash"
-	testCommand    = "go test ./cmd/entire/..."
-	testSkill      = "artifact-design"
-	testSubagent   = "Explore"
-	testDigitLabel = "gpt5-reviewer"
-	testEffort     = "high"
-	testLever      = "model_reasoning_effort"
-	testUnits      = 1000.0
-	unknownAgent   = types.AgentType("Some New Agent")
-
-	phraseOfCost = "of cost"
-	phraseMostly = "mostly"
+	testModel       = "claude-fable-5"
+	testOtherModel  = "claude-haiku-4-5"
+	testTool        = "Bash"
+	testCommand     = "go test ./cmd/entire/..."
+	testSkill       = "artifact-design"
+	testOtherSkill  = "systematic-debugging"
+	testSubagent    = "Explore"
+	testDigitLabel  = "gpt5-reviewer"
+	testEffort      = "high"
+	testLever       = "model_reasoning_effort"
+	testUnits       = 1000.0
+	unknownAgent    = types.AgentType("Some New Agent")
+	phraseOfCost    = "of cost"
+	phraseLedBy     = "led by"
+	phraseCacheRead = "cache-read"
+	phraseTimes     = " times"
 )
 
 // shares builds a priced CostShares for provider p.
@@ -62,6 +64,10 @@ func textRow(share float64) Contributor {
 	return Contributor{Kind: KindText, Label: LabelAssistantText, Usage: types.TokenUsage{OutputTokens: 100_000, APICallCount: 30}, CostShare: share, Source: SourceTranscript}
 }
 
+func promptRow(share float64) Contributor {
+	return Contributor{Kind: KindPrompt, Label: LabelPromptContext, Usage: types.TokenUsage{InputTokens: 2_000, CacheCreationTokens: 38_300}, CostShare: share, Source: SourceTranscript}
+}
+
 // subagentRow is an Explore subagent row that ran `runs` times on model.
 func subagentRow(model string, share float64, runs int) Contributor {
 	return labelledSubagentRow(testSubagent, model, share, runs)
@@ -79,15 +85,19 @@ func labelledSubagentRow(label, model string, share float64, runs int) Contribut
 	}
 }
 
-// skillRow is a skill's own load row, loaded `loads` times.
+// skillRow is the artifact-design skill's own load row, loaded `loads` times.
 func skillRow(share float64, loads int) Contributor {
+	return labelledSkillRow(testSkill, share, loads)
+}
+
+func labelledSkillRow(label string, share float64, loads int) Contributor {
 	return Contributor{
 		Kind:      KindSkill,
-		Label:     testSkill,
+		Label:     label,
 		Usage:     types.TokenUsage{InputTokens: 200, CacheCreationTokens: 41_000, OutputTokens: 100, APICallCount: loads},
 		CostShare: share,
 		Source:    SourceTranscript,
-		Details:   []Detail{detail(testSkill, loads, 41_300, share)},
+		Details:   []Detail{detail(label, loads, 41_300, share)},
 	}
 }
 
@@ -135,6 +145,16 @@ func longSessionByDuration() Report {
 	return r
 }
 
+// longSessionNoCacheReadReport is the duration arm on an agent that records
+// no cache reads.
+func longSessionNoCacheReadReport() Report {
+	r := longSessionByDuration()
+	r.Usage.CacheReadTokens = 0
+	r.Cost = shares(ProviderAnthropic, 0.52, 0.30, 0, 0.18, 0.03)
+	r.Attributed.Contributors = []Contributor{toolRow(0.52, detail(testCommand, 9, 140_200, 0.40)), textRow(0.18)}
+	return r
+}
+
 func longSessionByReplay() Report {
 	r := quietReport()
 	g := GatesFor(agentClaudeCode)
@@ -145,10 +165,15 @@ func longSessionByReplay() Report {
 	return r
 }
 
+// contextGrowthCost makes cache write the largest class.
+func contextGrowthCost() CostShares {
+	return shares(ProviderAnthropic, 0.05, 0.45, 0.35, 0.15, 0.03)
+}
+
 func contextGrowthReport(withDetail bool) Report {
 	r := quietReport()
 	g := GatesFor(agentClaudeCode)
-	r.Cost = shares(ProviderAnthropic, 0.05, 0.45, 0.35, 0.15, 0.03)
+	r.Cost = contextGrowthCost()
 	var details []Detail
 	if withDetail {
 		details = []Detail{detail(testCommand, 9, 140_200, 0.22)}
@@ -157,10 +182,53 @@ func contextGrowthReport(withDetail bool) Report {
 	return r
 }
 
+func contextGrowthSkillReport() Report {
+	r := quietReport()
+	r.Cost = contextGrowthCost()
+	r.Attributed.Contributors = []Contributor{replayRow(0.35), skillRow(GatesFor(agentClaudeCode).ContextGrowthRowShare, 3), textRow(0.15)}
+	return r
+}
+
+// contextGrowthSubagentReport's subagent ran on another model so
+// subagent_model stays quiet.
+func contextGrowthSubagentReport() Report {
+	r := quietReport()
+	r.Cost = contextGrowthCost()
+	r.Attributed.Contributors = []Contributor{replayRow(0.35), subagentRow(testOtherModel, GatesFor(agentClaudeCode).ContextGrowthRowShare, 5), textRow(0.15)}
+	return r
+}
+
+func contextGrowthPromptReport() Report {
+	r := quietReport()
+	r.Cost = contextGrowthCost()
+	r.Attributed.Contributors = []Contributor{replayRow(0.35), promptRow(GatesFor(agentClaudeCode).ContextGrowthRowShare), textRow(0.15)}
+	return r
+}
+
 func subagentModelReport(model string, share float64) Report {
 	r := quietReport()
 	r.Cost = shares(ProviderAnthropic, 0.02, 0.30, 0.45, 0.23, 0.03)
 	r.Attributed.Contributors = []Contributor{replayRow(0.45), subagentRow(model, share, 5), toolRow(0.20), textRow(0.15)}
+	return r
+}
+
+func subagentModelNoRunCountReport() Report {
+	r := subagentModelReport(testModel, 0.30)
+	r.Attributed.Contributors[1].Details = nil
+	return r
+}
+
+// subagentModelModelDetailReport's subagent ref requested a model, so its
+// only detail is "Explore (<model>)" and the row has no self detail.
+func subagentModelModelDetailReport() Report {
+	r := subagentModelReport(testModel, 0.30)
+	r.Attributed.Contributors[1].Details = []Detail{detail(testSubagent+" ("+testModel+")", 5, 4_700_000, 0.30)}
+	return r
+}
+
+func subagentModelDigitLabelReport() Report {
+	r := subagentModelReport(testModel, 0.30)
+	r.Attributed.Contributors[1] = labelledSubagentRow(testDigitLabel, testModel, 0.30, 5)
 	return r
 }
 
@@ -184,9 +252,29 @@ func cacheMissReport(agent types.AgentType, p Provider, inputShare float64) Repo
 	return r
 }
 
+func cacheMissNoDetailReport() Report {
+	r := cacheMissReport(agentCodex, ProviderOpenAI, 0.50)
+	r.Attributed.Contributors[0].Details = nil
+	return r
+}
+
+func cacheMissNoToolRowReport() Report {
+	r := cacheMissReport(agentCodex, ProviderOpenAI, 0.50)
+	r.Attributed.Contributors = []Contributor{replayRow(0.15), textRow(0.13)}
+	return r
+}
+
 func repeatedSkillReport(loads int) Report {
 	r := quietReport()
 	r.Attributed.Contributors = append(r.Attributed.Contributors, skillRow(0.04, loads))
+	return r
+}
+
+// twoSkillsReport has artifact-design loaded twice at a higher share and
+// systematic-debugging loaded 3 times at a lower one.
+func twoSkillsReport() Report {
+	r := repeatedSkillReport(2)
+	r.Attributed.Contributors = append(r.Attributed.Contributors, labelledSkillRow(testOtherSkill, 0.02, 3))
 	return r
 }
 
@@ -253,6 +341,17 @@ func mustFireOnly(t *testing.T, recs []Recommendation, want Cause) Recommendatio
 	return rec
 }
 
+// mustFire returns the recommendation for cause among recs, failing when
+// none fired for it.
+func mustFire(t *testing.T, recs []Recommendation, cause Cause) Recommendation {
+	t.Helper()
+	i := slices.IndexFunc(recs, func(rec Recommendation) bool { return rec.Cause == cause })
+	if i < 0 {
+		t.Fatalf("got causes %v, want %s among them", causes(recs), cause)
+	}
+	return recs[i]
+}
+
 func mustFireNothing(t *testing.T, recs []Recommendation) {
 	t.Helper()
 	if len(recs) != 0 {
@@ -290,14 +389,34 @@ func TestRecommend_QuietReportFiresNothing(t *testing.T) {
 func TestRecommend_LongSession(t *testing.T) {
 	t.Parallel()
 
-	t.Run("claude duration at 8h fires", func(t *testing.T) {
+	t.Run("claude duration at 8h fires with the replay clause at half the cost", func(t *testing.T) {
 		t.Parallel()
 		r := longSessionByDuration()
 		rec := mustFireOnly(t, Recommend(r), CauseLongSession)
-		mustContain(t, rec.Text, FormatDuration(r.Duration))
-		mustContain(t, rec.Text, FormatTokenCount(r.Usage.CacheReadTokens))
-		mustContain(t, rec.Text, FormatPercent(r.Cost.CacheRead)+" "+phraseOfCost)
+		mustContain(t, rec.Text, "This session ran "+FormatDuration(r.Duration)+"; re-reading its own context on every call took "+FormatTokenCount(r.Usage.CacheReadTokens)+" "+phraseCacheRead+" tokens, "+FormatPercent(r.Cost.CacheRead)+" "+phraseOfCost+". Splitting work this long into several shorter sessions would have cost less.")
 		mustCite(t, rec)
+	})
+	t.Run("replay clause omitted when cache read is neither largest nor half", func(t *testing.T) {
+		t.Parallel()
+		r := longSessionByDuration()
+		r.Cost = shares(ProviderAnthropic, 0.05, 0.45, 0.30, 0.20, 0.03)
+		rec := mustFireOnly(t, Recommend(r), CauseLongSession)
+		mustContain(t, rec.Text, "This session ran "+FormatDuration(r.Duration)+". Splitting work")
+		mustNotContain(t, rec.Text, phraseCacheRead)
+	})
+	t.Run("replay clause present when cache read is largest below half", func(t *testing.T) {
+		t.Parallel()
+		r := longSessionByDuration()
+		r.Cost = shares(ProviderAnthropic, 0.05, 0.30, 0.40, 0.25, 0.03)
+		rec := mustFireOnly(t, Recommend(r), CauseLongSession)
+		mustContain(t, rec.Text, phraseCacheRead+" tokens, 40% "+phraseOfCost)
+	})
+	t.Run("duration arm without cache reads stops after the duration", func(t *testing.T) {
+		t.Parallel()
+		r := longSessionNoCacheReadReport()
+		rec := mustFireOnly(t, Recommend(r), CauseLongSession)
+		mustNotContain(t, rec.Text, phraseCacheRead)
+		mustContain(t, rec.Text, FormatDuration(r.Duration)+". Splitting work")
 	})
 	t.Run("claude duration one minute short misses", func(t *testing.T) {
 		t.Parallel()
@@ -321,8 +440,7 @@ func TestRecommend_LongSession(t *testing.T) {
 		t.Parallel()
 		r := longSessionByReplay()
 		rec := mustFireOnly(t, Recommend(r), CauseLongSession)
-		mustContain(t, rec.Text, FormatPercent(r.Cost.CacheRead))
-		mustContain(t, rec.Text, strconv.Itoa(r.Calls)+" calls")
+		mustContain(t, rec.Text, "Most of this session's cost ("+FormatPercent(r.Cost.CacheRead)+") was re-reading its own context: "+strconv.Itoa(r.Calls)+" calls replayed")
 		mustNotContain(t, rec.Text, FormatDuration(r.Duration))
 	})
 	t.Run("cache-read arm misses at 69%", func(t *testing.T) {
@@ -349,20 +467,49 @@ func TestRecommend_LongSession(t *testing.T) {
 func TestRecommend_ContextGrowth(t *testing.T) {
 	t.Parallel()
 
-	t.Run("cache write largest and row at 25% fires naming and citing the detail", func(t *testing.T) {
+	t.Run("tool row at 25% fires naming and citing the detail", func(t *testing.T) {
 		t.Parallel()
 		r := contextGrowthReport(true)
 		rec := mustFireOnly(t, Recommend(r), CauseContextGrowth)
 		row := r.Attributed.Contributors[1]
-		mustContain(t, rec.Text, FormatPercent(row.CostShare)+" of the cost was "+testTool+" output")
-		mustContain(t, rec.Text, phraseMostly+" `"+testCommand+"` (9 calls, "+FormatTokenCount(row.Details[0].Tokens)+" tokens, "+FormatPercent(row.Details[0].CostShare)+")")
+		mustContain(t, rec.Text, FormatPercent(row.CostShare)+" of the cost was "+testTool+" output read back into context, "+phraseLedBy+" `"+testCommand+"` (9 calls, "+FormatTokenCount(row.Details[0].Tokens)+" tokens, "+FormatPercent(row.Details[0].CostShare)+"). Narrower commands or trimmed output would have avoided most of it.")
+		mustNotContain(t, rec.Text, phraseOfCost)
 		mustCite(t, rec, Citation{Kind: KindTool, Label: testTool, Detail: testCommand})
 	})
-	t.Run("row without details stops at the tool and cites only the row", func(t *testing.T) {
+	t.Run("tool row without details stops at the tool and cites only the row", func(t *testing.T) {
 		t.Parallel()
 		rec := mustFireOnly(t, Recommend(contextGrowthReport(false)), CauseContextGrowth)
-		mustNotContain(t, rec.Text, phraseMostly)
+		mustContain(t, rec.Text, testTool+" output read back into context. Narrower")
+		mustNotContain(t, rec.Text, phraseLedBy)
 		mustCite(t, rec, Citation{Kind: KindTool, Label: testTool})
+	})
+	t.Run("skill row folds the load count into the subject", func(t *testing.T) {
+		t.Parallel()
+		// The same row also fires repeated_skill; check the context_growth one.
+		rec := mustFire(t, Recommend(contextGrowthSkillReport()), CauseContextGrowth)
+		mustContain(t, rec.Text, "25% of the cost was loading the `"+testSkill+"` skill into context 3 times (41.3k tokens, 25%). A slimmer skill would have avoided most of it.")
+		mustCite(t, rec, Citation{Kind: KindSkill, Label: testSkill, Detail: testSkill})
+	})
+	t.Run("subagent row folds the run count into the subject", func(t *testing.T) {
+		t.Parallel()
+		rec := mustFireOnly(t, Recommend(contextGrowthSubagentReport()), CauseContextGrowth)
+		mustContain(t, rec.Text, "25% of the cost was "+testSubagent+" subagents (5 runs, 4.7M tokens, 25%) writing results into context. Shorter subagent briefs and results would have avoided most of it.")
+		mustCite(t, rec, Citation{Kind: KindSubagent, Label: testSubagent, Detail: testSubagent})
+	})
+	t.Run("unlabelled subagent row without self detail", func(t *testing.T) {
+		t.Parallel()
+		r := contextGrowthSubagentReport()
+		r.Attributed.Contributors[1].Label = LabelUnknownSubagent
+		rec := mustFireOnly(t, Recommend(r), CauseContextGrowth)
+		mustContain(t, rec.Text, "was Unlabelled subagents (4.7M tokens, 25%) writing")
+		mustNotContain(t, rec.Text, LabelUnknownSubagent)
+		mustCite(t, rec, Citation{Kind: KindSubagent, Label: LabelUnknownSubagent})
+	})
+	t.Run("prompt row stops at the cause", func(t *testing.T) {
+		t.Parallel()
+		rec := mustFireOnly(t, Recommend(contextGrowthPromptReport()), CauseContextGrowth)
+		mustContain(t, rec.Text, "25% of the cost was prompt and system context written into the cache. Shorter prompts and less injected context would have avoided most of it.")
+		mustCite(t, rec, Citation{Kind: KindPrompt, Label: LabelPromptContext})
 	})
 	t.Run("row at 24% misses", func(t *testing.T) {
 		t.Parallel()
@@ -393,10 +540,10 @@ func TestRecommend_ContextGrowth(t *testing.T) {
 	t.Run("skill annotation on the tool row is named and cited", func(t *testing.T) {
 		t.Parallel()
 		r := contextGrowthReport(false)
-		r.Attributed.Contributors[1].Skill = "systematic-debugging"
+		r.Attributed.Contributors[1].Skill = testOtherSkill
 		rec := mustFireOnly(t, Recommend(r), CauseContextGrowth)
-		mustContain(t, rec.Text, testTool+" output (during systematic-debugging)")
-		mustCite(t, rec, Citation{Kind: KindTool, Label: testTool, Skill: "systematic-debugging"})
+		mustContain(t, rec.Text, testTool+" output (during "+testOtherSkill+") read back")
+		mustCite(t, rec, Citation{Kind: KindTool, Label: testTool, Skill: testOtherSkill})
 	})
 }
 
@@ -408,8 +555,7 @@ func TestRecommend_SubagentModel(t *testing.T) {
 		t.Parallel()
 		r := subagentModelReport(testModel, g.SubagentModelShare)
 		rec := mustFireOnly(t, Recommend(r), CauseSubagentModel)
-		mustContain(t, rec.Text, testSubagent+" subagents ran 5 times on `"+testModel+"`")
-		mustContain(t, rec.Text, FormatPercent(g.SubagentModelShare)+" "+phraseOfCost)
+		mustContain(t, rec.Text, testSubagent+" subagents ran 5 times on `"+testModel+"` (4.7M tokens, "+FormatPercent(g.SubagentModelShare)+" "+phraseOfCost+"); delegated work like this often runs well on a smaller model.")
 		mustCite(t, rec, Citation{Kind: KindSubagent, Label: testSubagent, Detail: testSubagent})
 	})
 	t.Run("row at 14% misses", func(t *testing.T) {
@@ -434,12 +580,26 @@ func TestRecommend_SubagentModel(t *testing.T) {
 	})
 	t.Run("unknown run count is omitted and only the row is cited", func(t *testing.T) {
 		t.Parallel()
-		r := subagentModelReport(testModel, 0.30)
-		r.Attributed.Contributors[1].Details = nil
-		rec := mustFireOnly(t, Recommend(r), CauseSubagentModel)
+		rec := mustFireOnly(t, Recommend(subagentModelNoRunCountReport()), CauseSubagentModel)
 		mustContain(t, rec.Text, testSubagent+" subagents ran on `"+testModel+"`")
-		mustNotContain(t, rec.Text, " times")
+		mustNotContain(t, rec.Text, phraseTimes)
 		mustCite(t, rec, Citation{Kind: KindSubagent, Label: testSubagent})
+	})
+	t.Run("a model-qualified detail is not a self detail", func(t *testing.T) {
+		t.Parallel()
+		rec := mustFireOnly(t, Recommend(subagentModelModelDetailReport()), CauseSubagentModel)
+		mustContain(t, rec.Text, testSubagent+" subagents ran on `"+testModel+"`")
+		mustNotContain(t, rec.Text, phraseTimes)
+		mustCite(t, rec, Citation{Kind: KindSubagent, Label: testSubagent})
+	})
+	t.Run("unlabelled subagents", func(t *testing.T) {
+		t.Parallel()
+		r := subagentModelReport(testModel, 0.30)
+		r.Attributed.Contributors[1].Label = LabelUnknownSubagent
+		r.Attributed.Contributors[1].Details[0].Detail = LabelUnknownSubagent
+		rec := mustFireOnly(t, Recommend(r), CauseSubagentModel)
+		mustContain(t, rec.Text, "Unlabelled subagents ran 5 times")
+		mustNotContain(t, rec.Text, LabelUnknownSubagent)
 	})
 }
 
@@ -450,8 +610,7 @@ func TestRecommend_Thinking(t *testing.T) {
 		t.Parallel()
 		r := thinkingReport(false)
 		rec := mustFireOnly(t, Recommend(r), CauseThinking)
-		mustContain(t, rec.Text, "Thinking took 50% of output tokens ("+FormatTokenCount(r.Usage.ThinkingTokens)+" of "+FormatTokenCount(r.Usage.OutputTokens)+", "+FormatPercent(r.Cost.Thinking)+" "+phraseOfCost+")")
-		mustContain(t, rec.Text, "at effort `"+testEffort+"`")
+		mustContain(t, rec.Text, "Thinking took 50% of output tokens ("+FormatTokenCount(r.Usage.ThinkingTokens)+" of "+FormatTokenCount(r.Usage.OutputTokens)+", "+FormatPercent(r.Cost.Thinking)+" "+phraseOfCost+") at effort `"+testEffort+"`; a lower effort setting is enough for most work.")
 		mustCite(t, rec)
 	})
 	t.Run("49% misses", func(t *testing.T) {
@@ -475,14 +634,15 @@ func TestRecommend_Thinking(t *testing.T) {
 	t.Run("verified setting name is printed", func(t *testing.T) {
 		t.Parallel()
 		rec := mustFireOnly(t, Recommend(thinkingReport(true)), CauseThinking)
-		mustContain(t, rec.Text, "lowering `"+testLever+"`")
+		mustContain(t, rec.Text, "; lowering `"+testLever+"` is enough for most work.")
 	})
-	t.Run("verified without a lever stops at the cause", func(t *testing.T) {
+	t.Run("verified without a lever falls back to the generic setting", func(t *testing.T) {
 		t.Parallel()
 		r := thinkingReport(true)
 		r.Profile.Levers = nil
 		rec := mustFireOnly(t, Recommend(r), CauseThinking)
 		mustNotContain(t, rec.Text, testLever)
+		mustContain(t, rec.Text, "a lower effort setting")
 	})
 	t.Run("unknown effort value is omitted", func(t *testing.T) {
 		t.Parallel()
@@ -495,6 +655,7 @@ func TestRecommend_Thinking(t *testing.T) {
 
 func TestRecommend_CacheMiss(t *testing.T) {
 	t.Parallel()
+	const advice = "Keeping the same system prompt and tool set across calls lets more of each request come from the cache."
 
 	cases := []struct {
 		name  string
@@ -511,8 +672,7 @@ func TestRecommend_CacheMiss(t *testing.T) {
 			g := GatesFor(tc.agent)
 			r := cacheMissReport(tc.agent, tc.p, g.CacheMissShare)
 			rec := mustFireOnly(t, Recommend(r), CauseCacheMiss)
-			mustContain(t, rec.Text, FormatPercent(g.CacheMissShare)+" of the cost was uncached input")
-			mustContain(t, rec.Text, phraseMostly+" "+testTool+" results, led by `"+testCommand+"` (12 calls, 1.2M tokens, 31%)")
+			mustContain(t, rec.Text, FormatPercent(g.CacheMissShare)+" of the cost was uncached input — context that arrived fresh on each call instead of from the cache. The largest tool source was "+testTool+", "+phraseLedBy+" `"+testCommand+"` (12 calls, 1.2M tokens, 31%). "+advice)
 			mustCite(t, rec, Citation{Kind: KindTool, Label: testTool, Detail: testCommand})
 		})
 		t.Run(tc.name+" one point short misses", func(t *testing.T) {
@@ -539,19 +699,16 @@ func TestRecommend_CacheMiss(t *testing.T) {
 	})
 	t.Run("without a tool row the sentence stops at the cause and cites nothing", func(t *testing.T) {
 		t.Parallel()
-		r := cacheMissReport(agentCodex, ProviderOpenAI, 0.50)
-		r.Attributed.Contributors = []Contributor{replayRow(0.15), textRow(0.13)}
-		rec := mustFireOnly(t, Recommend(r), CauseCacheMiss)
-		mustNotContain(t, rec.Text, phraseMostly)
-		mustContain(t, rec.Text, "instead of from the cache.")
+		rec := mustFireOnly(t, Recommend(cacheMissNoToolRowReport()), CauseCacheMiss)
+		mustContain(t, rec.Text, "instead of from the cache. "+advice)
+		mustNotContain(t, rec.Text, "largest tool source")
 		mustCite(t, rec)
 	})
 	t.Run("tool row without details quotes and cites the row", func(t *testing.T) {
 		t.Parallel()
-		r := cacheMissReport(agentCodex, ProviderOpenAI, 0.50)
-		r.Attributed.Contributors[0].Details = nil
-		rec := mustFireOnly(t, Recommend(r), CauseCacheMiss)
-		mustContain(t, rec.Text, phraseMostly+" "+testTool+" results (164.6k tokens, 31% "+phraseOfCost+")")
+		rec := mustFireOnly(t, Recommend(cacheMissNoDetailReport()), CauseCacheMiss)
+		mustContain(t, rec.Text, "The largest tool source was "+testTool+" (164.6k tokens, 31%). "+advice)
+		mustNotContain(t, rec.Text, phraseOfCost)
 		mustCite(t, rec, Citation{Kind: KindTool, Label: testTool})
 	})
 }
@@ -564,12 +721,18 @@ func TestRecommend_RepeatedSkill(t *testing.T) {
 		t.Parallel()
 		r := repeatedSkillReport(g.RepeatedSkillMinLoads)
 		rec := mustFireOnly(t, Recommend(r), CauseRepeatedSkill)
-		mustContain(t, rec.Text, "`"+testSkill+"` was loaded "+strconv.Itoa(g.RepeatedSkillMinLoads)+" times (41.3k tokens, 4% "+phraseOfCost+")")
+		mustContain(t, rec.Text, "`"+testSkill+"` was loaded "+strconv.Itoa(g.RepeatedSkillMinLoads)+" times (41.3k tokens, 4% "+phraseOfCost+"); once per session is enough.")
 		mustCite(t, rec, Citation{Kind: KindSkill, Label: testSkill, Detail: testSkill})
 	})
 	t.Run("one load misses", func(t *testing.T) {
 		t.Parallel()
 		mustFireNothing(t, Recommend(repeatedSkillReport(g.RepeatedSkillMinLoads-1)))
+	})
+	t.Run("the most-loaded skill wins over the more expensive one", func(t *testing.T) {
+		t.Parallel()
+		rec := mustFireOnly(t, Recommend(twoSkillsReport()), CauseRepeatedSkill)
+		mustContain(t, rec.Text, "`"+testOtherSkill+"` was loaded 3 times")
+		mustCite(t, rec, Citation{Kind: KindSkill, Label: testOtherSkill, Detail: testOtherSkill})
 	})
 	t.Run("loads are counted from the skill's own detail, not APICallCount", func(t *testing.T) {
 		t.Parallel()
@@ -673,9 +836,10 @@ func citesDetail(cited []Citation, c *Contributor, d *Detail) bool {
 // renderedFigures is the set of figures the renderer prints from r given the
 // recommendations' citations, in the renderer's own formatting: every usage
 // class, every cost class share, the thinking share of output, the
-// duration, the call counts; the tokens and share of every row ranked below
-// MaxRenderedRows or cited; the calls, tokens and share of every detail
-// under a row ranked below MaxRenderedDetails or cited by name.
+// duration, the call counts; the tokens and share of every row ranked
+// within the top MaxRenderedRows or cited; the calls, tokens and share of
+// every detail under a row ranked within the top MaxRenderedDetails or
+// cited by name.
 func renderedFigures(r *Report, cited []Citation) map[string]bool {
 	set := map[string]bool{}
 	u := &r.Usage
@@ -736,39 +900,29 @@ func TestRecommend_EveryFigureIsRendered(t *testing.T) {
 	t.Parallel()
 
 	fixtures := map[string]Report{
-		"long_session by duration":      longSessionByDuration(),
-		"long_session by replay":        longSessionByReplay(),
-		"context_growth with detail":    contextGrowthReport(true),
-		"context_growth without detail": contextGrowthReport(false),
-		"subagent_model":                subagentModelReport(testModel, 0.21),
-		"subagent_model empty model":    subagentModelReport("", 0.21),
-		"thinking":                      thinkingReport(true),
-		"cache_miss codex":              cacheMissReport(agentCodex, ProviderOpenAI, 0.49),
-		"cache_miss gemini":             cacheMissReport(agentGemini, ProviderGoogle, 0.72),
-		"repeated_skill":                repeatedSkillReport(3),
-		"repeated_skill deep-ranked":    deepSkillReport(),
-		"cap and order":                 capReport(),
-		"volume only":                   volumeOnlyReport(),
-		"cache_miss tool row no details": func() Report {
-			r := cacheMissReport(agentCodex, ProviderOpenAI, 0.50)
-			r.Attributed.Contributors[0].Details = nil
-			return r
-		}(),
-		"cache_miss without tool row": func() Report {
-			r := cacheMissReport(agentCodex, ProviderOpenAI, 0.50)
-			r.Attributed.Contributors = nil
-			return r
-		}(),
-		"subagent_model without run count": func() Report {
-			r := subagentModelReport(testModel, 0.30)
-			r.Attributed.Contributors[1].Details = nil
-			return r
-		}(),
-		"subagent_model label with a digit": func() Report {
-			r := subagentModelReport(testModel, 0.30)
-			r.Attributed.Contributors[1] = labelledSubagentRow(testDigitLabel, testModel, 0.30, 5)
-			return r
-		}(),
+		"long_session by duration":          longSessionByDuration(),
+		"long_session without cache reads":  longSessionNoCacheReadReport(),
+		"long_session by replay":            longSessionByReplay(),
+		"context_growth with detail":        contextGrowthReport(true),
+		"context_growth without detail":     contextGrowthReport(false),
+		"context_growth skill row":          contextGrowthSkillReport(),
+		"context_growth subagent row":       contextGrowthSubagentReport(),
+		"context_growth prompt row":         contextGrowthPromptReport(),
+		"subagent_model":                    subagentModelReport(testModel, 0.21),
+		"subagent_model empty model":        subagentModelReport("", 0.21),
+		"subagent_model without run count":  subagentModelNoRunCountReport(),
+		"subagent_model model detail":       subagentModelModelDetailReport(),
+		"subagent_model label with a digit": subagentModelDigitLabelReport(),
+		"thinking":                          thinkingReport(true),
+		"cache_miss codex":                  cacheMissReport(agentCodex, ProviderOpenAI, 0.49),
+		"cache_miss gemini":                 cacheMissReport(agentGemini, ProviderGoogle, 0.72),
+		"cache_miss tool row no details":    cacheMissNoDetailReport(),
+		"cache_miss without tool row":       cacheMissNoToolRowReport(),
+		"repeated_skill":                    repeatedSkillReport(3),
+		"repeated_skill two skills":         twoSkillsReport(),
+		"repeated_skill deep-ranked":        deepSkillReport(),
+		"cap and order":                     capReport(),
+		"volume only":                       volumeOnlyReport(),
 	}
 	for name, r := range fixtures {
 		t.Run(name, func(t *testing.T) {
