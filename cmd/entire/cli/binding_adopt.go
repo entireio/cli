@@ -184,11 +184,16 @@ func buildReplicatedSessionState(ctx context.Context, source *session.State, rec
 		worktreeID:   worktreeID,
 		branch:       strategy.GetCurrentBranchName(repo),
 		filesTouched: append([]string(nil), evidenceFiles...),
+		// The untracked baseline is rewind's preserve-list; the replay
+		// narrows new files by transcript evidence and prunes created ones
+		// from it itself, so it is seeded whole — evidence cannot tell "the
+		// agent created this" from "the agent edited the user's untracked
+		// file", and dropping the latter would let a later rewind delete it.
+		untrackedFiles: baseline.untracked,
 		// Adoption runs from the turn that produced the evidence, so the
-		// target's tree already holds that turn's agent work; the evidenced
-		// paths are by definition this turn's and must not seed a baseline
-		// the replay of this same turn would subtract them against.
-		untrackedFiles:      excludeFiles(baseline.untracked, evidenceFiles),
+		// target's tree already holds that turn's tracked agent work; the
+		// evidenced paths are this turn's and must not seed the tracked
+		// baselines the replay of this same turn subtracts against.
 		dirtyTrackedFiles:   excludeFiles(baseline.dirtyTracked, evidenceFiles),
 		deletedTrackedFiles: excludeFiles(baseline.deletedTracked, evidenceFiles),
 		now:                 now,

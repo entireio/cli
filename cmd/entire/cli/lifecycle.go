@@ -1059,13 +1059,18 @@ func handleLifecycleTurnEnd(ctx context.Context, ag agent.Agent, event *agent.Ev
 		// content would never be written to the shadow tree. It also means a
 		// turn whose SaveStep is skipped or fails re-credits the same files
 		// next turn instead of losing them. The cost — a touched file that
-		// nobody changes again is re-listed next turn — is the launching
-		// repo's normal behavior (it subtracts no dirty baseline at all).
+		// nobody changes again is re-listed on every later replayed turn
+		// while it stays dirty — is the launching repo's normal behavior (it
+		// subtracts no dirty baseline at all). Sorted: git status is a map,
+		// so the unchanged-set check and the persisted JSON need a canonical
+		// order (targetWorktreeBaseline sorts its seeds the same way).
 		var nextDirty, nextDeleted []string
 		if changes != nil {
 			credited := slices.Concat(relModifiedFiles, relDeletedFiles, relNewFiles)
 			nextDirty = excludeFiles(FilterAndNormalizePaths(changes.Modified, repoRoot), credited)
 			nextDeleted = excludeFiles(FilterAndNormalizePaths(changes.Deleted, repoRoot), credited)
+			slices.Sort(nextDirty)
+			slices.Sort(nextDeleted)
 		}
 		mutErr := strategy.MutateSessionState(ctx, sessionID, func(state *strategy.SessionState) error {
 			untracked := slices.DeleteFunc(slices.Clone(state.UntrackedFilesAtStart), func(file string) bool {
@@ -1089,7 +1094,7 @@ func handleLifecycleTurnEnd(ctx context.Context, ag agent.Agent, event *agent.Ev
 			state.DeletedTrackedFilesAtStart = append([]string(nil), nextDeleted...)
 			return nil
 		})
-		if mutErr != nil && !errors.Is(mutErr, strategy.ErrStateNotFound) && !errors.Is(mutErr, strategy.ErrMutationSkip) {
+		if mutErr != nil && !errors.Is(mutErr, strategy.ErrStateNotFound) {
 			logging.Warn(logCtx, "failed to refresh replayed turn baselines",
 				slog.String("error", mutErr.Error()))
 		}

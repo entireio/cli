@@ -151,8 +151,8 @@ func TestRecordForeignEvidence_ReplicatesStateWithoutRetiringSource(t *testing.T
 	if !slices.Contains(target.UntrackedFilesAtStart, "preexisting.tmp") {
 		t.Errorf("pre-existing untracked baseline = %v, want preexisting.tmp preserved", target.UntrackedFilesAtStart)
 	}
-	if slices.Contains(target.UntrackedFilesAtStart, "agent.go") {
-		t.Errorf("the adopting turn's own evidence must not seed the baseline: %v", target.UntrackedFilesAtStart)
+	if !slices.Contains(target.UntrackedFilesAtStart, "agent.go") {
+		t.Errorf("the untracked baseline is rewind's preserve-list and is seeded whole; the replay prunes created files itself: %v", target.UntrackedFilesAtStart)
 	}
 	if target.Phase != session.PhaseActive || target.AdoptedIntoWorktreePath != "" {
 		t.Errorf("replicated state must be active and additive, got phase=%s tombstone=%q", target.Phase, target.AdoptedIntoWorktreePath)
@@ -725,7 +725,8 @@ func TestRecordForeignEvidence_GloballyTrackedRepoIsAdopted(t *testing.T) {
 			}
 			sessionID := fmt.Sprintf("sess-%d", i+10)
 			bindingSourceState(ctx, t, rootA, sessionID)
-			recordForeignEvidence(ctx, sessionID, bindingTestMeta(rootA), rootA, []string{filepath.Join(rootB, "agent.go")})
+			testutil.WriteFile(t, rootB, "tracked.txt", "edited by the agent this turn\n")
+			recordForeignEvidence(ctx, sessionID, bindingTestMeta(rootA), rootA, []string{filepath.Join(rootB, "agent.go"), filepath.Join(rootB, "tracked.txt")})
 
 			rec, err := binding.LoadRecord(ctx, sessionID)
 			if err != nil || rec == nil || len(rec.BoundRepos) != 1 {
@@ -742,6 +743,11 @@ func TestRecordForeignEvidence_GloballyTrackedRepoIsAdopted(t *testing.T) {
 				}
 				if target.WorktreePath != rootB || target.BaseCommit != testutil.GetHeadHash(t, rootB) {
 					t.Fatalf("replica must carry the target's identity: %+v", target)
+				}
+				// tracked.txt is dirty in the target and evidenced by this
+				// turn: it is the agent's work, not a baseline to subtract.
+				if slices.Contains(target.DirtyTrackedFilesAtStart, "tracked.txt") {
+					t.Fatalf("the adopting turn's own tracked evidence must not seed the dirty baseline: %v", target.DirtyTrackedFilesAtStart)
 				}
 			} else if br.AdoptedAt != nil || target != nil {
 				t.Fatalf("inactive repo must not be adopted: marker=%v state=%+v", br.AdoptedAt, target)
