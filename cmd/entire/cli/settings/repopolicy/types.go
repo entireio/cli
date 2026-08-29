@@ -4,6 +4,7 @@ package repopolicy
 
 import (
 	"encoding/json"
+	"fmt"
 	"path/filepath"
 )
 
@@ -196,22 +197,96 @@ type GlobalConfig struct {
 	TrustedPaths []string `json:"trusted_paths,omitempty"`
 }
 
+// OPF prompt_default values. Defined here, beside the user-file schema that
+// validates them, and re-exported by the settings package.
+const (
+	OPFPromptAsk    = "ask"
+	OPFPromptNever  = "never"
+	OPFPromptAlways = "always"
+)
+
+// UserRedactionConfig is the "redaction" block of the user-global settings
+// file: how redaction runs on THIS machine. What gets redacted — OPF
+// `enabled` and `categories`, the scanner engines, PII — is team policy and
+// stays in the repository's .entire/settings.json; those keys are unknown
+// here and fail the load closed.
+type UserRedactionConfig struct {
+	OpenAIPrivacyFilter *UserOPFConfig `json:"openai_privacy_filter,omitempty"`
+}
+
+// UserOPFConfig holds the machine-local half of the OpenAI Privacy Filter
+// configuration.
+//
+// Command is the reason this block exists: it becomes argv[0] of an exec at
+// pre-push, and this file is the only root that is the developer's by
+// construction — no repository can deliver content here — so it is the only
+// place the command is honored without an ownership probe (see
+// settings.enforceOPFCommandTrust). TimeoutSeconds and PromptDefault are
+// ordinary configuration that layers between the project file and the
+// per-worktree local file; their zero values ("" and 0) mean "not set here",
+// the same as omitting the key — 0 is not a way to reset the timeout.
+type UserOPFConfig struct {
+	Command        string `json:"command,omitempty"`
+	TimeoutSeconds int    `json:"timeout_seconds,omitempty"`
+	PromptDefault  string `json:"prompt_default,omitempty"`
+}
+
+func (c *UserRedactionConfig) validate() error {
+	opf := c.OpenAIPrivacyFilter
+	if opf == nil {
+		return nil
+	}
+	return ValidateOPFRunSettings(opf.TimeoutSeconds, opf.PromptDefault)
+}
+
+// ValidateOPFRunSettings checks the OPF keys that may appear in any settings
+// tier (timeout_seconds, prompt_default). It lives here, in the leaf package,
+// so the user-file decoder and settings.validateOPFSettings enforce one
+// policy with one set of messages.
+func ValidateOPFRunSettings(timeoutSeconds int, promptDefault string) error {
+	if timeoutSeconds < 0 {
+		return fmt.Errorf("openai_privacy_filter.timeout_seconds must be greater than or equal to 0 (got %d)", timeoutSeconds)
+	}
+	switch promptDefault {
+	case "", OPFPromptAsk, OPFPromptNever, OPFPromptAlways:
+	default:
+		return fmt.Errorf("openai_privacy_filter.prompt_default must be one of %q, %q, %q (got %q)",
+			OPFPromptAsk, OPFPromptNever, OPFPromptAlways, promptDefault)
+	}
+	return nil
+}
+
 // UserSettings is the root of the user-global settings file. A nil Global
 // distinguishes an unconfigured tier from a configured but disabled tier.
 //
-// Strictness is per block, not per file (see UnmarshalJSON): the `global`
-// block rejects unknown keys — fail closed, so an older binary never
-// misreads recorded consent it does not understand — while unknown top-level
-// blocks are tolerated and round-tripped untouched, so a newer entire can add
-// a block without switching the tier off for every older binary that shares
-// the machine. New features therefore add top-level blocks, not keys inside
-// `global`.
+// Strictness is per block, not per file (see UnmarshalJSON): every block this
+// binary knows (`global`, `redaction`) rejects unknown keys — fail closed, so
+// an older binary never misreads recorded consent or an executable name it
+// does not understand — while unknown top-level blocks are tolerated and
+// round-tripped untouched, so a newer entire can add a block without
+// switching the tier off for every older binary that shares the machine. New
+// features therefore add top-level blocks, not keys inside existing ones.
+//
+// MarshalJSON is a value receiver on purpose while UnmarshalJSON is a pointer
+// receiver: json.Marshal uses the method set of the value it is handed, so a
+// pointer-only marshaler would silently drop the preserved unknown blocks for
+// any caller that passes the struct by value.
 type UserSettings struct {
-	Global *GlobalConfig `json:"global,omitempty"`
+	Global    *GlobalConfig        `json:"global,omitempty"`
+	Redaction *UserRedactionConfig `json:"redaction,omitempty"`
 	// extra holds top-level blocks this binary does not know, preserved
-	// byte-for-byte across read-modify-write so a newer binary's settings
-	// survive an older one's `entire trust`.
+	// across read-modify-write so a newer binary's settings survive an older
+	// one's `entire trust`.
 	extra map[string]json.RawMessage
+}
+
+// OPFConfig returns the machine-local OPF configuration, or nil when the
+// redaction block or its openai_privacy_filter entry is absent.
+func (us *UserSettings) OPFConfig() *UserOPFConfig {
+	if us == nil || us.Redaction == nil {
+		return nil
+	}
+	return us.Redaction.OpenAIPrivacyFilter
 }
 
 // GlobalConfigured reports whether the global tier has been configured.

@@ -322,10 +322,13 @@ type OPFSettings struct {
 	Categories map[string]bool `json:"categories,omitempty"`
 
 	// Command is executed, so Load() honors it only when it is
-	// developer-owned — set in an untracked .entire/settings.local.json — and
-	// resets it to "" otherwise. See enforceOPFCommandTrust. Readers that
-	// obtain settings by any route other than Load() (LoadFromFile,
-	// LoadFromBytes) get the ungated value and must not pass it to exec.
+	// developer-owned: from the user settings file
+	// (~/.config/entire/settings.json, outside every repository) without
+	// further checks, or — deprecated — from an untracked
+	// .entire/settings.local.json after an ownership probe. It resets to ""
+	// otherwise. See enforceOPFCommandTrust. Readers that obtain settings by
+	// any route other than Load() (LoadFromFile, LoadFromBytes) get the
+	// ungated value and must not pass it to exec.
 	Command        string `json:"command,omitempty"`
 	TimeoutSeconds int    `json:"timeout_seconds,omitempty"`
 
@@ -335,6 +338,11 @@ type OPFSettings struct {
 	// the user had unset it. See enforceOPFCommandTrust.
 	rejectedCommand string
 	rejectionReason string
+
+	// commandSource records which file an honored Command came from
+	// (OPFCommandSourceUser or OPFCommandSourceLocal), so the consumer can
+	// point a developer still on the deprecated local file at the new home.
+	commandSource string
 
 	// PromptDefault controls whether the pre-push hook asks the user
 	// before running OPF. "" (default) and "ask" both surface the
@@ -355,11 +363,30 @@ func (o *OPFSettings) CommandRejection() (command, reason string, rejected bool)
 	return o.rejectedCommand, o.rejectionReason, true
 }
 
+// Where an honored OPF Command came from. Empty when no command is set.
+const (
+	// OPFCommandSourceUser: ~/.config/entire/settings.json — the supported
+	// location.
+	OPFCommandSourceUser = "user"
+	// OPFCommandSourceLocal: .entire/settings.local.json — deprecated;
+	// still honored after the ownership probe for one release.
+	OPFCommandSourceLocal = "local"
+)
+
+// CommandSource reports which file the effective Command was read from, or
+// "" when no command is set.
+func (o *OPFSettings) CommandSource() string {
+	if o == nil || o.Command == "" {
+		return ""
+	}
+	return o.commandSource
+}
+
 // Valid PromptDefault values. Empty == OPFPromptAsk.
 const (
-	OPFPromptAsk    = "ask"
-	OPFPromptNever  = "never"
-	OPFPromptAlways = "always"
+	OPFPromptAsk    = repopolicy.OPFPromptAsk
+	OPFPromptNever  = repopolicy.OPFPromptNever
+	OPFPromptAlways = repopolicy.OPFPromptAlways
 )
 
 // GetCommitLinking returns the effective commit linking mode.
@@ -634,6 +661,13 @@ func loadMergedSettings(ctx context.Context, settingsFileAbs, preferencesFileAbs
 		applyClonePreferences(settings, preferences)
 	}
 
+	// The user tier (~/.config/entire/settings.json) sits between the project
+	// file and the per-worktree local file. Both of its contributions are
+	// applied after the local merge below — the ordinary keys because the
+	// local file may be what creates the OPF block, the command because it
+	// wins over the local file outright.
+	userOPF := loadUserOPFOverlay(ctx)
+
 	// Apply local overrides if they exist — but only from a file that is
 	// genuinely local. See localLayerTrackedReason.
 	localData, err := readConfined(localSettingsFileAbs)
@@ -653,9 +687,14 @@ func loadMergedSettings(ctx context.Context, settingsFileAbs, preferencesFileAbs
 		return nil, fmt.Errorf("merging local settings: %w", err)
 	}
 
-	// openai_privacy_filter.command is executed, so it is honored only from a
-	// local file positively verified as this developer's own.
-	enforceOPFCommandTrust(ctx, settings, localSettingsFileAbs, localData)
+	// User-file timeout_seconds/prompt_default: above the project file, below
+	// whatever the local file set explicitly.
+	applyUserOPFPreferences(settings, userOPF, localData)
+
+	// openai_privacy_filter.command is executed, so it is honored only from
+	// the user's own settings file, or (deprecated) from a local file
+	// positively verified as this developer's own.
+	enforceOPFCommandTrust(ctx, settings, localSettingsFileAbs, localData, userOPF)
 
 	// Re-validate after merge. Individual files are validated by loadFromFile,
 	// but mergeJSON patches fields independently and can produce combinations
@@ -670,6 +709,46 @@ func loadMergedSettings(ctx context.Context, settingsFileAbs, preferencesFileAbs
 	}
 
 	return settings, nil
+}
+
+// loadUserOPFOverlay reads the machine-local OPF block from the user settings
+// file. An unreadable or invalid user file yields nil: that file's own
+// consumers (the global tier) already fail closed on it and `entire doctor`
+// reports it, and a repo the user enabled here must keep loading its settings
+// regardless — the same rule repopolicy.ClassifyRepoPolicyAt applies.
+func loadUserOPFOverlay(ctx context.Context) *repopolicy.UserOPFConfig {
+	userSettings, err := repopolicy.LoadUserSettings(ctx)
+	if err != nil {
+		logging.Debug(ctx, "user settings unreadable; skipping OPF overlay",
+			slog.String("error", err.Error()))
+		return nil
+	}
+	return userSettings.OPFConfig()
+}
+
+// applyUserOPFPreferences layers the user file's ordinary OPF keys
+// (timeout_seconds, prompt_default) onto an OPF block the repository
+// configured — in either of its files, which is why this runs after the local
+// merge: a developer enabling OPF only for themselves creates the block from
+// .entire/settings.local.json alone. Precedence is project < user < local, so
+// a key the local file set explicitly (localData) is left alone; the prompt's
+// "Always" writes prompt_default there and must keep winning.
+//
+// It never creates the block: the user file says how OPF runs on this
+// machine, not whether it runs — that is the team's call. The command is
+// deliberately not applied here; enforceOPFCommandTrust decides it, and there
+// the user file wins.
+func applyUserOPFPreferences(settings *EntireSettings, userOPF *repopolicy.UserOPFConfig, localData []byte) {
+	if userOPF == nil || settings == nil || settings.Redaction == nil || settings.Redaction.OpenAIPrivacyFilter == nil {
+		return
+	}
+	opf := settings.Redaction.OpenAIPrivacyFilter
+	if userOPF.TimeoutSeconds > 0 && !localSetsOPFKey(localData, "timeout_seconds") {
+		opf.TimeoutSeconds = userOPF.TimeoutSeconds
+	}
+	if userOPF.PromptDefault != "" && !localSetsOPFKey(localData, "prompt_default") {
+		opf.PromptDefault = userOPF.PromptDefault
+	}
 }
 
 // LoadFromFile loads settings from a specific file path without merging local overrides.
@@ -1322,17 +1401,7 @@ func validateOPFSettings(opf *OPFSettings) error {
 			return fmt.Errorf("openai_privacy_filter.categories has unknown key %q (see docs/security-and-privacy.md for the supported set)", name)
 		}
 	}
-	if opf.TimeoutSeconds < 0 {
-		return fmt.Errorf("openai_privacy_filter.timeout_seconds must be greater than or equal to 0 (got %d)", opf.TimeoutSeconds)
-	}
-	switch opf.PromptDefault {
-	case "", OPFPromptAsk, OPFPromptNever, OPFPromptAlways:
-		// ok
-	default:
-		return fmt.Errorf("openai_privacy_filter.prompt_default must be one of %q, %q, %q (got %q)",
-			OPFPromptAsk, OPFPromptNever, OPFPromptAlways, opf.PromptDefault)
-	}
-	return nil
+	return repopolicy.ValidateOPFRunSettings(opf.TimeoutSeconds, opf.PromptDefault) //nolint:wrapcheck // shared validator; its messages already name the field
 }
 
 // mergeOPFSettings merges OPF overrides into existing OPFSettings. Only

@@ -60,7 +60,7 @@ func WriteFileAtomic(filePath string, data []byte, perm fs.FileMode) error {
 	if err := tmp.Close(); err != nil {
 		return fmt.Errorf("close temp for %s: %w", filePath, err)
 	}
-	if err := os.Rename(tmpName, filePath); err != nil {
+	if err := renameFile(tmpName, filePath); err != nil {
 		return fmt.Errorf("rename temp to %s: %w", filePath, err)
 	}
 	removeTmp = false

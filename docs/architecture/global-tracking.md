@@ -11,13 +11,14 @@ in global mode are runtime data and one stamp.
 ## The settings file
 
 `~/.config/entire/settings.json` (or `$ENTIRE_CONFIG_DIR/settings.json`) is
-decoded with **per-block strictness**: the `global` block rejects unknown keys
-— an unknown key inside it, or malformed JSON, turns the tier off machine-wide
-(fail closed; an older binary must never misread recorded consent) and
-`entire doctor` says so — while unknown **top-level** blocks are ignored and
-preserved byte-for-byte across writes, so a newer `entire` on the same machine
-can add a block without switching the tier off for older binaries. New
-features add top-level blocks, not keys inside `global`.
+decoded with **per-block strictness**: each block this binary knows (`global`,
+`redaction`) rejects unknown keys — an unknown key inside one, or malformed
+JSON, turns the tier off machine-wide (fail closed; an older binary must never
+misread recorded consent or an executable name) and `entire doctor` says so —
+while unknown **top-level** blocks are ignored and preserved across writes, so
+a newer `entire` on the same machine can add a block without switching the
+tier off for older binaries. New features add top-level blocks, not keys
+inside existing ones (`repopolicy.userSettingsBlocks` is the registry).
 
 ```json
 {
@@ -29,6 +30,13 @@ features add top-level blocks, not keys inside `global`.
     "trust_all": false,
     "trusted_origins": ["github.com/acme/widgets"],
     "trusted_paths": ["/Users/me/code/notes"]
+  },
+  "redaction": {
+    "openai_privacy_filter": {
+      "command": "/opt/opf/bin/opf",
+      "timeout_seconds": 120,
+      "prompt_default": "ask"
+    }
   }
 }
 ```
@@ -44,6 +52,13 @@ features add top-level blocks, not keys inside `global`.
   (fail closed).
 - `trust_all`, `trusted_origins`, `trusted_paths` — checkpoint-egress consent
   (below). `entire trust` writes these; users may edit them by hand.
+- `redaction.openai_privacy_filter` — how the OpenAI Privacy Filter runs on
+  *this machine*: `command` (the executable; honored from here with no
+  ownership probe, because no repository can deliver content into this file),
+  `timeout_seconds`, `prompt_default`. Whether OPF runs and what it redacts
+  (`enabled`, `categories`) is team policy and stays in the repository's
+  `.entire/settings.json`; those keys are unknown here and fail closed. See
+  [Security & Privacy](../security-and-privacy.md#why-command-is-user-only).
 
 ## Activation (derived, never recorded)
 
