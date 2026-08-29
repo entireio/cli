@@ -6,7 +6,8 @@ tokens went (tools, skills, subagents, context replay, assistant text), what
 each part cost relative to the rest, and at most two sentences of advice. This
 page is the contract the web mirrors and the reference a new agent
 implementer works from. The code is authoritative; every rule below names the
-function that owns it.
+function that owns it, and the longer rule sets are summarised here and
+specified in full in that function's doc comment.
 
 Packages:
 
@@ -23,31 +24,53 @@ Packages:
   drill-down rules live.
 - `cmd/entire/cli/session_tokens.go`, `checkpoint_tokens*.go`,
   `tokens_profile.go`, `tokens_load.go`, `tokens_render.go` — the commands:
-  load → `tokenreport` → render, sharing one set of writers so both
-  single-report commands print the same shapes from the same values.
+  load → `tokenreport` → render, sharing one loader core and one set of
+  writers so both single-report commands print the same shapes from the same
+  values.
 
 ## 1. The three commands
 
-| command | scope | totals | breakdown transcript | subagent records | `source` in JSON |
-|---|---|---|---|---|---|
-| `entire session tokens [id] [--current]` | one live (or ended) session | recomputed from the live transcript: Σ attributed calls + Σ subagent transcripts; falls back to the state's running `token_usage` | `strategy.ResolveTranscriptPath(state)`, whole file, start line 0 | `AttributeTokens(…, subagentsDir = paths.SubagentsDir(dir(transcript), sessionID))` — `agent-<id>.jsonl` | `"transcript"` or `"session_state"` |
-| `entire checkpoint tokens <id> [--compare <id>]` | one committed checkpoint (all its sessions) | recomputed per session from the stored `full.jsonl` sliced at that session's `token_transcript_start`; falls back to committed `token_usage` | `store.ReadSessionContent(ctx, id, i).Transcript` (the raw `full.jsonl`, never the compact `transcript.jsonl`) | `store.ReadTaskRecords(ctx, id)` — `tasks/<tool-use-id>/task.json`, matched to the spawning call by `ToolUseID` | `"transcript"` or `"committed_checkpoint"` |
-| `entire tokens profile [--limit N \| --all]` | the latest 50 committed checkpoints by default, grouped by agent | committed metadata only (root summary + per-session `metadata.json`), legacy rows deduped per session | none — no transcript is read, so no attribution and no recommendations | none | `"committed_checkpoints"` |
-| `entire tokens` (bare) | = `entire session tokens --current`; prints a one-line hint and exits 0 when the worktree has no session | | | | |
+**`entire session tokens [id] [--current] [--json | --agent-brief]`** — one
+live or ended session.
 
-`session tokens` and `checkpoint tokens` take `--json` or `--agent-brief`
-(mutually exclusive). `tokens profile` takes `--json`. All three are plain
-text, no pager, no prompts; the `tokens` group is experimental (visible in
-developer/nightly builds, hidden in stable, always runnable) and advertised by
-`entire labs`, which also lists `session tokens` and `checkpoint tokens`.
+- Totals are recomputed from the live transcript (`strategy.ResolveTranscriptPath`,
+  whole file, start line 0): Σ attributed calls + Σ subagent transcripts read
+  from `paths.SubagentsDir(dir(transcript), sessionID)` (`agent-<id>.jsonl`).
+  When the transcript cannot be attributed the totals fall back to the state's
+  running `token_usage` and a note says why.
+- `source` is `"transcript"` or `"session_state"`.
 
-Both single-report commands share one per-session analysis
-(`attributeCheckpointTokenSession` / `attributeSessionTokens` →
-`finishSessionTokenAnalysis` → `assembleTokenReportView`), so a session's live
-report and its later checkpoint report compute every figure the same way; the
-live report feeds the session state to it in checkpoint-metadata shape
-(`sessionTokensMetadata`). Nothing in either fails the command: every problem
-becomes a Notes line and the totals fall back a rung (§9).
+**`entire checkpoint tokens <id> [--compare <id>] [--json | --agent-brief]`** —
+one committed checkpoint, all its sessions.
+
+- Totals are recomputed per session from the stored raw `full.jsonl`
+  (`store.ReadSessionContent(ctx, id, i).Transcript` — never the compact
+  `transcript.jsonl`, which drops cache classes, thinking and the per-call
+  model) sliced at that session's `token_transcript_start`; subagent rows come
+  from `store.ReadTaskRecords(ctx, id)` (`tasks/<tool-use-id>/task.json`)
+  joined to the spawning call by `ToolUseID`. Fallbacks in §9.
+- `source` is `"transcript"` or `"committed_checkpoint"`.
+
+**`entire tokens profile [--limit N | --all] [--json]`** — the latest 50
+committed checkpoints by default, grouped by agent.
+
+- Reads committed metadata only (root summary + per-session `metadata.json`),
+  dedupes legacy running-total rows per session, reads no transcript — so it
+  has no attribution and no recommendations, and says so.
+- `source` is `"committed_checkpoints"`.
+
+**`entire tokens`** (bare) runs `session tokens --current`; with no session in
+the worktree it prints a one-line hint and exits 0.
+
+The `tokens` group is experimental (visible in developer/nightly builds,
+hidden in stable, always runnable); `entire labs` advertises `tokens`, `tokens
+profile`, `session tokens` and `checkpoint tokens`. Both single-report
+commands share one per-session analysis (`attributeCheckpointTokenSession` /
+`attributeSessionTokens` → `finishSessionTokenAnalysis` →
+`assembleTokenReportView`), so a session's live report and its later
+checkpoint report compute every figure the same way; the live report feeds the
+session state to it in checkpoint-metadata shape (`sessionTokensMetadata`).
+Nothing in either fails the command: every problem becomes a Notes line.
 
 ## 2. Data model
 
@@ -82,41 +105,30 @@ type TokenUsage struct {
 
 ### 2.2 Checkpoint scope: `token_usage_version` and `token_transcript_start`
 
-The root `metadata.json` of a checkpoint written since v0.11 stamps
-`token_usage_version: 2` (`checkpoint.TokenUsageVersionDelta`): every session's
-`token_usage` is a per-checkpoint delta, and each session's `metadata.json`
-carries `token_transcript_start`, the `full.jsonl` line (or message index —
-§4.2) where that delta begins. `checkpoint tokens` slices the stored
-transcript **at `token_transcript_start`, never at
-`checkpoint_transcript_start`**: a carry-forward resets the transcript offset
-to 0 for a self-contained transcript but not the token window, so slicing at
-the transcript offset would re-create the cumulative-total bug the version
-stamp exists to mark. See `docs/architecture/sessions-and-checkpoints.md`,
-"`token_usage` contract", for the write side.
+The root `metadata.json` of a checkpoint written by this CLI from v0.11 (the
+release that ships this work) stamps `token_usage_version: 2`
+(`checkpoint.TokenUsageVersionDelta`): every session's `token_usage` is a
+per-checkpoint delta, and each session's `metadata.json` carries
+`token_transcript_start`, the `full.jsonl` line (or message index — §4.2)
+where that delta begins. `checkpoint tokens` slices the stored transcript **at
+`token_transcript_start`, never at `checkpoint_transcript_start`**: a
+carry-forward resets the transcript offset to 0 for a self-contained
+transcript but not the token window, so slicing at the transcript offset
+would re-create the cumulative-total bug the version stamp exists to mark. See
+`docs/architecture/sessions-and-checkpoints.md`, "`token_usage` contract",
+for the write side.
 
 **Legacy rows** are any checkpoint whose root `token_usage_version` is below 2
-(absent decodes as 0; 1 was never written). `tokenreport.ClassifyScope` gives
-each (checkpoint, session) row a scope:
-
-- `Version >= 2` → `ScopeDelta`.
-- legacy with `checkpoint_transcript_start == 0` → `ScopeLegacyFromStart`: the
-  usage may be a delta or the session's running total up to that checkpoint.
-  There is no per-row "first checkpoint" signal (`checkpoints_count` is a
-  prompt count), so the ambiguity is resolved by order, not per row.
-- legacy at a non-zero offset → `ScopeDelta`.
-
-`tokenreport.DedupeLegacyCheckpoints(rows)` groups by `SessionID`, sorts by
-`CreatedAt` (ties by `CheckpointID`, for determinism only), treats the
-**latest** `ScopeLegacyFromStart` row of each session as an anchor that
-already contains everything before it, drops every row before the anchor
-whatever its own scope, and keeps the anchor and every later row. A session
-with no such row keeps every row. It returns the kept rows (ordered by
-`SessionID`, `CreatedAt`, `CheckpointID`) and the number collapsed. The
-precondition is a set `CreatedAt` on every row: the profile skips (and logs)
-rows with neither a listing nor a metadata `created_at` rather than let a zero
-time sort first. Only `tokens profile` dedupes; a single legacy checkpoint is
-shown as-is with the header line *"Token scope: legacy — may be the session's
-running total (written before v0.11)"* and `legacy.cumulative: true` in JSON.
+(absent decodes as 0; 1 was never written). A legacy row at
+`checkpoint_transcript_start == 0` may be a delta or the session's running
+total (`tokenreport.ClassifyScope` → `ScopeLegacyFromStart`); there is no
+per-row signal to tell which, so `tokenreport.DedupeLegacyCheckpoints`
+resolves it by order within each session — the latest such row is the anchor,
+everything before it is dropped, everything after it is kept. The exact rule,
+its ordering and its `CreatedAt` precondition are specified on that function.
+Only `tokens profile` dedupes; a single legacy checkpoint is shown as-is with
+the header line *"Token scope: legacy — may be the session's running total
+(written before v0.11)"* and `legacy.cumulative: true` in JSON.
 
 ### 2.3 Attribution value types (`agent/types/token_attribution.go`)
 
@@ -267,22 +279,27 @@ structurally record which tool calls each call emitted and consumed, **must
 not** implement it. `agent.AsTokenAttributor(ag)` is built-in-only with no
 `DeclaredCaps` gate (an external agent's parse-hook cannot convey transcript
 shape), and callers treat "no attributor" as **cannot attribute**, never as
-"attributed zero": the report falls back to the session total and says so
-(`resolveTokenAttributor` supplies the exact Notes wording — *"per-call
-attribution is not available for <Agent>"*, or nothing when the agent's
-profile is totals-only and the profile note already says so).
+"attributed zero": the report falls back to the session total and
+`resolveTokenAttributor` supplies the Notes wording — *"no agent recorded"*
+when the session has no agent, *"agent "X" is not known to this CLI"* when
+the registry has none, *"per-call attribution is not available for X"* when
+the agent exists but does not attribute, and no note at all when the agent's
+profile is totals-only (the profile note already says so).
 
-Two properties every implementation carries, and tests
-(`TestAttributeTokens_CallsIndependentOfStartLine` in each agent package)
-enforce:
+Two properties every implementation carries:
 
-- **Window independence.** `Consumed` and labels are collected from the FULL
-  transcript, so a call's `Consumed` (and `Emitted`) is identical whatever
-  `startLine` admits it, and consecutive slices charge each result exactly
-  once. The set of calls returned for `startLine = n` is exactly the offset-0
-  calls with `Line >= n`, field for field.
-- **Additivity.** Σ `Calls[].Usage` reproduces the agent's `CalculateTokenUsage`
-  for the same start.
+- **Window independence** — tested by
+  `TestAttributeTokens_CallsIndependentOfStartLine` in every agent package.
+  `Consumed` and labels are collected from the FULL transcript, so a call's
+  `Consumed` (and `Emitted`) is identical whatever `startLine` admits it, and
+  consecutive slices charge each result exactly once. The set of calls
+  returned for `startLine = n` is exactly the offset-0 calls with `Line >= n`,
+  field for field.
+- **Additivity** — Σ `Calls[].Usage` reproduces the agent's
+  `CalculateTokenUsage` for the same start. Tested as
+  `TestAttributeTokens_SumsMatchCalculateTokenUsage` in the Gemini CLI,
+  OpenCode and Pi packages; Claude Code and Codex state it in their doc
+  comments but do not yet carry that test (follow-up).
 
 ### 4.2 Per-agent call units
 
@@ -295,73 +312,56 @@ enforce:
 | Pi | assistant message entry on the active branch (`pijsonl.ForEachActiveEntry`), off-branch entries contribute nothing | physical line as `pijsonl.SkipLines` counts | every active-branch `toolResult` after the previous assistant message and before this one | `len()` of the raw JSON of `message.content` | `message.model` (bare); effort = the `thinking_level_change` level in force, verbatim (`"high"`, …); no thinking-token count; `cacheWrite1h` recorded | none | Σ `usage.cost.total` |
 | Cursor, Copilot CLI, Factory AI Droid | no attributor — totals only (§6) | | | | | | |
 
-In every agent the tool-use id → ref label map is built from EVERY row, so a
-result whose call precedes `startLine` is still labelled; a result whose call
-is in no row at all keeps a ref with only `ID` set (its bytes did enter the
-context) and lands on the *Earlier tool results* row. `Start`/`End` are the
-earliest/latest parsable timestamps of in-slice rows of any type.
+Labelling differs by transcript shape. Claude Code, Codex and Pi keep tool
+results in rows separate from the calls that emitted them, so each builds a
+tool-use-id → ref map from EVERY row: a result whose call precedes `startLine`
+is still labelled, and a result whose call is in no row at all keeps a ref
+with only `ID` set (its bytes did enter the context) and lands on the
+*Earlier tool results* row. OpenCode and Gemini CLI store a result on the very
+part or `toolCall` that emitted it, so there is no map and no ID-only ref can
+arise. `Start`/`End` are the earliest/latest parsable timestamps of in-slice
+rows of any type.
+
+**Call counts can differ from the committed `api_call_count` on Claude Code.**
+Condensation's `CalculateTokenUsage` (`claudecode/transcript.go`,
+`len(usageByMessageID)`) counts every assistant message with a `message.id`,
+including one with no `usage` object (a skill-load row, for example), whereas
+the report counts only calls with recorded usage: a `UsageUnknown` call
+contributes 0 to `tokens.api_calls` and is listed in Notes as *"N calls with
+no usage recorded"*. The two therefore differ by the number of no-usage
+messages; the four classes, thinking and 1h counts agree. Pi, OpenCode and
+Gemini CLI agree on calls as well. `effort.calls` is a third count: the calls
+that carried the dominant effort value, usage recorded or not.
 
 ### 4.3 The rules (`tokenreport.Attribute`)
 
 `Attribute(a *types.Attribution, w *Weights) Attributed` turns one slice into
-the contributor table. Every one of `TokenUsage`'s seven numeric fields is
-**conserved**: Σ over the returned contributors equals Σ over `a.Calls[].Usage`
-plus Σ over `a.Subagents[].Usage` (tested). Per call, in order:
+the contributor table; its doc comment is the specification. In short: a
+call's **output**, thinking and call count go to the refs it **emitted**,
+split equally (largest-remainder), or to *Assistant text* when it emitted
+nothing; its **fresh input and cache writes** go to the results it
+**consumed**, proportionally to `Bytes`, or to *Prompt & system context* when
+it consumed nothing (the next call pays for a tool's result); its **cache
+reads** go to *Context replay*. A ref lands on `skill/<name>`,
+`subagent/<type>`, `tool/<Tool>` or *Earlier tool results* (unresolved ref);
+tool and text rows carry the call's `ActiveSkill` as `Skill`, which is part of
+the row's identity (`Bash` during `systematic-debugging` is not plain
+`Bash`). Subagent records are absorbed into the spawning ref's row (orphans
+become `source: "task_record"` rows), same `Kind+Label+Skill` rows merge via
+`types.AddTokenUsage`, and each piece is priced with
+`ComputeCostSharesKnownTTL` at the call's long-context tier (records at the
+base tier). Every one of `TokenUsage`'s seven numeric fields is **conserved**:
+Σ over the contributors equals Σ `a.Calls[].Usage` + Σ `a.Subagents[].Usage`
+(tested).
 
-1. **Output.** `OutputTokens`, `ThinkingTokens` and `APICallCount` go to the
-   refs the call **emitted**, split equally with the largest-remainder
-   (Hamilton) method (`LargestRemainder`; ties to the earlier ref). Thinking
-   and the non-thinking remainder are apportioned separately and re-added so
-   each row's thinking stays ≤ its output. A call that emitted nothing puts
-   them on **Assistant text**.
-2. **Fresh input and cache writes.** `InputTokens`, `CacheCreationTokens` and
-   `CacheCreation1hTokens` go to the results the call **consumed** — the next
-   call pays for a tool's result — proportionally to `Bytes` (equally when
-   every `Bytes` is 0), the 1h and 5m writes apportioned separately. A call
-   that consumed nothing (the first call; any later call that opens a new user
-   turn) puts them on **Prompt & system context**.
-3. **Cache reads.** Every call's `CacheReadTokens` go to **Context replay**.
-4. **Targets** (`keyFor`). A ref with an empty `Tool` (its `tool_use` could not
-   be resolved — it predates the transcript or was compacted away) →
-   `tool`/*Earlier tool results*; with `SkillName` → `skill`/`<name>`; with
-   `SubagentType` → `subagent`/`<type>` (never keyed on the tool's name —
-   `Agent` and the legacy `Task` both land here); otherwise `tool`/`<Tool>`.
-   Named-tool and text rows carry the attributing call's `ActiveSkill` as
-   `Skill`, and **it is part of the row's identity**: `Bash` during
-   `systematic-debugging` is a different row from plain `Bash`. Skill,
-   subagent, replay, prompt and earlier-results rows are never annotated.
-5. **Subagents absorb records.** A `SubagentRecord` whose `ToolUseID` matches a
-   subagent ref seen in the window (emitted, or consumed from before it) adds
-   its whole `Usage` — cache reads included; they are the subagent's own
-   replay — to that ref's row, whose `Model` follows the record precedence
-   (§2.3). Any other record becomes its own `subagent` row labelled
-   `record.SubagentType` (or `(unknown)`) with `source: "task_record"`; a row
-   that also received transcript tokens keeps `source: "transcript"`. Records
-   are absorbed even with nil `Usage`, so a spawned subagent with no usage yet
-   shows with 0. Several records sharing one `ToolUseID` are all absorbed; the
-   first decides the model.
-6. **Rows.** Same `Kind+Label+Skill` merge via `types.AddTokenUsage`, whose
-   model rule gives `Model` (kept when equal, `""` when mixed). A ref-driven
-   row (tool, skill, subagent) exists even at zero tokens — a `UsageUnknown`
-   call's tools still show, with the note `(usage not recorded)` — while a
-   synthetic row (text, replay, prompt) is created only when something
-   non-zero lands on it.
-7. **Cost.** With `w == nil` each call is priced with
-   `WeightsForCall(call.Model, input + cacheRead + cacheWrite)` when the model
-   is known (unknown → volume only, name to `Unpriced`); a subagent record is
-   priced at the base tier. With `w != nil` everything is priced with `w`.
-   Every piece is priced with `ComputeCostSharesKnownTTL` — calls and records
-   both come from agent-written blocks. `Attributed.PricedUnits` is the sum
-   over every priced piece and is the denominator of every `CostShare`.
-
-A nil `Attribution`, or one with no `Calls`, yields an empty `Attributed` even
-when `Subagents` is non-empty.
-
-**Skill labels have three sources**, in order: the harness stamp on the call
-(`ActiveSkill`); the checkpoint's or state's persisted `skill_events` anchors
-(`applySkillEventAnchors` names a ref whose id matches an event's
-`transcript_anchor.tool_use_id` and fills an empty `Detail` with the skill
-name); and the agent's own skill tool call (`SkillName` from the attributor).
+**Skill labels have two independent axes.** Which row a skill *load* lands on
+is decided by the ref's `SkillName`: the attributor sets it from the agent's
+own skill tool call, and `applySkillEventAnchors` (checkpoint `skill_events`
+/ session-state anchors) fills it only for refs whose `SkillName` is still
+empty, so the attributor wins. Which skill a *tool call or text* happened
+during is the call's harness-stamped `ActiveSkill` (Claude Code
+`attributionSkill`), which annotates tool and text rows as `Skill` and never
+moves tokens between rows.
 
 **Ordering.** `Contributors` is sorted by `CostShare` desc, then volume desc,
 then `Label`, `Kind`, `Skill` asc. Each row keeps its top 3 `Details` by
@@ -409,9 +409,11 @@ detail's `Calls`, not from `APICallCount`.
 
 `ToolDetail(tool, in ToolInput) string` is the one place the drill-down rules
 live; every attributor calls it with the agent-native tool name, matched
-case-insensitively. The raw command is never returned — commands are user
-content and are not stored; the detail is derived and only ever **printed**,
-never persisted (§10).
+case-insensitively. **The raw command is never returned** — commands are user
+content and are not stored — and the detail is derived on read and only ever
+printed, never persisted (no checkpoint, session-state or telemetry field
+carries one; the committed `task.json` and compaction's `RawToolDetail` are
+separate, pre-existing contracts).
 
 - **Shell tools** (`Bash`, `shell`, `exec`, `exec_command`, `run_terminal_cmd`,
   `run_shell_command`, `terminal`, `execute`): the head of the LAST command in
@@ -456,8 +458,6 @@ The helpers an attributor builds the input with: `transcript.ToolInputFromJSON`
 (best-effort decode of a raw `tool_use` input; folds key case) and
 `transcript.ToolInputFromMap` / `transcript.StringArg` (exact-key reads of an
 already-decoded map — OpenCode's `state.input`, Gemini's `toolCalls[].args`).
-`RawToolDetail` is compaction's stored-data contract and is deliberately not
-reused here.
 
 A subagent row's self-named detail (`Detail == Label`) exists only when the
 call requested no model; when it did, the detail is `<type> (<model>)` and the
@@ -552,12 +552,12 @@ subagent calls excluded; 0 falls back to `Usage.APICallCount`), `Sessions`
 
 ### 7.3 Causes and gates
 
-Gate values (`GatesFor(agent)`) were calibrated on real transcripts —
-grounding spec §7, re-run **2026-08-28** on 150 Claude Code, 150 Codex, 113
-OpenCode, 6 Gemini CLI and 179 Pi sessions — so each cause fires on a clear
-minority (≤ ~35%) of that agent's sessions. Only two thresholds vary by agent:
-`LongSessionDuration` and `CacheMissShare`. Every other agent (Codex, Pi,
-Cursor, Copilot CLI, Factory AI Droid, unknown) takes the defaults.
+Gate values come from `GatesFor(agent)`; the comment on that table in
+`recommend.go` records how they were calibrated (each cause fires on a clear
+minority of that agent's real sessions) and the date. Only two thresholds vary
+by agent: `LongSessionDuration` and `CacheMissShare`. Every other agent
+(Codex, Pi, Cursor, Copilot CLI, Factory AI Droid, unknown) takes the
+defaults.
 
 | cause | fires when | quotes / cites | addressed share (for ranking) |
 |---|---|---|---|
@@ -565,7 +565,7 @@ Cursor, Copilot CLI, Factory AI Droid, unknown) takes the defaults.
 | `context_growth` | priced, cache write is **strictly** the largest cost class, and the largest row that can carry cache writes (tool, skill, subagent, prompt — not text or replay) has share ≥ **25%** | the row; a tool row names its `Details[0]` (cited); a skill or subagent row folds in its self-detail's load/run count (cited). Advice by kind: narrower commands / a slimmer skill / shorter subagent briefs and results / shorter prompts | that row's share |
 | `subagent_model` | the largest `subagent` row on the session's model (row `Model` == `Report.Model`, or empty) has share ≥ **15%** | the row; the run count from its self detail when present (cited) | that row's share |
 | `thinking` | `Profile.RecordsEffort` and thinking ≥ **50%** of output tokens | class figures only: share of output, the two counts, the cost share when priced, the effort value when known; names a setting only when `EffortSettingVerified` (never, in B1) | `Cost.Thinking` (0 when volume-only, so it ranks last) |
-| `cache_miss` | priced on **OpenAI or Google** (`cacheMissEligible`; Anthropic-priced reports run ≈0% fresh input, so a high share there is an artefact, and a mixed/unknown provider is ineligible) and fresh input ≥ **45%** (Codex, default) / **40%** (OpenCode) / **70%** (Gemini CLI, n=6 provisional) of cost | the tool row with the most fresh-input tokens and its `Details[0]` when present (cited); prefix-caching advice | `Cost.Input` |
+| `cache_miss` | priced on **OpenAI or Google** (`cacheMissEligible`; Anthropic-priced reports run ≈0% fresh input, so a high share there is an artefact, and a mixed/unknown provider is ineligible) and fresh input ≥ **45%** (Codex, default) / **40%** (OpenCode) / **70%** (Gemini CLI) of cost | the tool row with the most fresh-input tokens and its `Details[0]` when present (cited); prefix-caching advice | `Cost.Input` |
 | `repeated_skill` | a `skill` row's self detail counts ≥ `max(Sessions,1) + 2 − 1` loads — two in one session, three across two merged sessions (one load per session is expected); most-loaded row wins, ties to the higher share | the row and its self detail (cited); "across N sessions" when merged | that row's share |
 
 Ranking: each cause is evaluated once; a `repeated_skill` that cites the same
@@ -574,18 +574,43 @@ rest are sorted by addressed share descending (ties keep the table order
 above) and the top two are returned. No class-share gate fires when
 `Cost.Units == 0`, and no row-share gate when `Attributed.PricedUnits == 0`.
 
-The B1 sentences, verbatim shapes:
+**Sentences produced by the test fixtures (`recommend_test.go`)** — the exact
+strings the tests assert, labelled with the fixture that produces each:
 
-- `This session ran 2d 0h; re-reading its own context on every call took 176.4M cache-read tokens, 85% of cost. Splitting work this long into several shorter sessions would have cost less.`
-- `Most of this session's cost (72%) was re-reading its own context: 43 calls replayed 3.7M cache-read tokens. Shorter sessions replay less context on each call.`
-- `32% of the cost was Bash output (during systematic-debugging) read back into context, led by `go test ./cmd/entire/...` (9 calls, 140.2k tokens, 17%). Narrower commands or trimmed output would have avoided most of it.`
-- `Explore subagents ran 5 times on `claude-fable-5` (4.7M tokens, 21% of cost); delegated work like this often runs well on a smaller model.`
-- `Thinking took 57% of output tokens (65.3k of 115.1k, 9% of cost) at effort `high`; a lower effort setting is enough for most work.`
-- `49% of the cost was uncached input — context that arrived fresh on each call instead of from the cache — with exec_command the largest tool source, led by `go test ./...` (12 calls, 210k tokens, 31%). Tool output is always fresh the first time it is read, but keeping the same system prompt and tool set across calls lets the rest of each request come from the cache.`
-- `` `artifact-design` was loaded 3 times (41.3k tokens, 6% of cost); once per session is enough.``
+- `longSessionByReplay`: Most of this session's cost (70%) was re-reading its
+  own context: 20 calls replayed 3.7M cache-read tokens. Shorter sessions
+  replay less context on each call.
+- `contextGrowthReport(true)`: 25% of the cost was Bash output read back into
+  context, led by `go test ./cmd/entire/...` (9 calls, 140.2k tokens, 22%).
+  Narrower commands or trimmed output would have avoided most of it.
+- `contextGrowthSkillReport`: 25% of the cost was loading the
+  `artifact-design` skill into context 3 times (41.3k tokens). A slimmer skill
+  would have avoided most of it.
+- `contextGrowthSubagentReport`: 25% of the cost was Explore subagents (5
+  runs, 4.7M tokens) writing results into context. Shorter subagent briefs and
+  results would have avoided most of it.
+- `subagentModelReport(testModel, 0.15)`: Explore subagents ran 5 times on
+  `claude-fable-5` (4.7M tokens, 15% of cost); delegated work like this often
+  runs well on a smaller model.
+- `thinkingReport(false)`: Thinking took 50% of output tokens (50k of 100k,
+  10% of cost) at effort `high`; a lower effort setting is enough for most
+  work.
+- `cacheMissReport(agentCodex, ProviderOpenAI, 0.45)`: 45% of the cost was
+  uncached input — context that arrived fresh on each call instead of from
+  the cache — with Bash the largest tool source, led by
+  `go test ./cmd/entire/...` (12 calls, 1.2M tokens, 31%). Tool output is
+  always fresh the first time it is read, but keeping the same system prompt
+  and tool set across calls lets the rest of each request come from the
+  cache.
+- `repeatedSkillReport(2)`: `artifact-design` was loaded 2 times (41.3k
+  tokens, 4% of cost); once per session is enough.
+- `multiSessionSkillReport`: `artifact-design` was loaded 3 times across 2
+  sessions (41.3k tokens, 4% of cost); once per session is enough.
 
-(The first is a real report; the others show the templates with placeholder
-figures.)
+The duration arm of `long_session` on a real checkpoint reads: *This session
+ran 2d 0h; re-reading its own context on every call took 176.4M cache-read
+tokens, 85% of cost. Splitting work this long into several shorter sessions
+would have cost less.* (§10.1).
 
 ## 8. Rendering rules (`tokens_render.go`)
 
@@ -615,16 +640,18 @@ when the row carries a `Skill`. A ref-driven row with nothing attributed
 carries `(usage not recorded)`. Details are indented under the row,
 truncated to 40 runes with `…`, with `N calls` (blank when the detail's calls
 all happened before the window) and their own share. Shares print `—` when
-`PricedUnits == 0`.
+`PricedUnits == 0`. The `--json` `contributors` array is **not** cut this way:
+it carries every contributor with its top-3 details (§4.3).
 
 **Usage**: `Input (fresh)`, the cache-write row, `Cache read`, `Output`,
 `of which thinking`, `Total`, `of which subagents` (when non-zero). The
 cache-write row reads `Cache write, 1-hour` when every write carried the
 1-hour TTL, `Cache write, 5-minute` when the agent records TTLs and none did,
 plain `Cache write` with an `of which 1-hour` sub-row when mixed; its share is
-`—` when `Cost.CacheWriteUnpriced`. Each priced class shows its ratio as a
-note (`(0.1×)`, `(5×)`; none for a zero ratio). The thinking row shows its
-cost share and `N% of output`, `not recorded` for an agent that does not
+`—` when `Cost.CacheWriteUnpriced`. The cache-write, cache-read and output
+rows show their ratio as a note (`(1.25×)`, `(0.1×)`, `(5×)`; none for a zero
+ratio); the input row, being the 1× base, carries none. The thinking row shows
+its cost share and `N% of output`, `not recorded` for an agent that does not
 record it, or the stored transcript's figure with `(from stored transcript)`
 on a legacy checkpoint whose committed usage lacks it — that figure is never
 added to the total. Every value comes from `Report.Usage` / `Report.Cost`, the
@@ -717,11 +744,11 @@ single-report commands emit the same shapes:
 
 | key | shape | when present |
 |---|---|---|
-| `tokens` | `{total, input, cache_read, cache_write, output, api_calls, subagent_total?, thinking_tokens?, cache_creation_1h_tokens?}` — `api_calls` includes subagent calls | any usage recorded |
+| `tokens` | `{total, input, cache_read, cache_write, output, api_calls, subagent_total?, thinking_tokens?, cache_creation_1h_tokens?}` — `api_calls` includes subagent calls. `subagent_total` is the four-class volume of the **subagent records** (`tasks/*/task.json` or `agent-<id>.jsonl`, `a.subagent` in `tokens_load.go`), not of the `kind: "subagent"` contributor rows: a subagent row also absorbs the parent's own spawn tool-call tokens, which appear as that row's `details[]` (e.g. `Explore (haiku)`) and belong to the parent. The identity that holds, when no row's details were truncated, is `subagent_total == Σ(subagent rows' four classes) − Σ(their details[].tokens)`; `Σ contributors == tokens.*` holds regardless. | any usage recorded |
 | `cost` | `{provider?, family?, weights?: Weights, shares: CostShares}` — `weights` only when one family priced everything and it is the report model's | `shares.units > 0` |
-| `effort` | `{value, calls}` — `calls` counts every call carrying the value, usage recorded or not | profile records effort and a call carried one |
+| `effort` | `{value, calls}` — `calls` counts every call carrying the value, usage recorded or not (so it can exceed `tokens.api_calls`) | profile records effort and a call carried one |
 | `context` | `{tokens, window_size, percent}` — hook-reported context pressure | both figures known (single-session checkpoints and live sessions) |
-| `contributors` | `[]Contributor` (§4.4), always present — `[]` when not attributed | always |
+| `contributors` | `[]Contributor` (§4.4) — **every** contributor, each with its top-3 details, in table order; always present, `[]` when not attributed | always |
 | `recommendations` | `[]{kind, text, cause, cited?, memory?, seen?, of?, id, message}` — `id` = `cause` and `message` = `text` keep the previous schema's keys | any fired |
 | `agent_reported_cost` | number (dollars) | > 0 |
 | `duration_seconds` | whole seconds | > 0 |
@@ -731,7 +758,7 @@ single-report commands emit the same shapes:
 ### 10.1 `entire checkpoint tokens <id> --json`
 
 ```
-checkpoint_id, session_count, session_id?, agent?, agents[], model?, models[],
+checkpoint_id, session_count, session_id?, agent?, agents?[], model?, models?[],
 branch?, source, duration_seconds?, effort?, tokens?, context?, cost?,
 contributors, recommendations?, agent_reported_cost?,
 legacy?: {cumulative, thinking_recorded, cache_ttl_recorded,
@@ -739,11 +766,13 @@ legacy?: {cumulative, thinking_recorded, cache_ttl_recorded,
 comparison?, limitations?
 ```
 
-`agent`/`model`/`session_id` are set for a single-session checkpoint; `agents`
-and `models` list distinct values in order of first appearance (a session
-without an agent is `(unknown)`), plus the attributed modal model. A real
-legacy checkpoint from this repository (contributors after the first three
-elided):
+`agent`/`model`/`session_id` are set for a single-session checkpoint. `agents`
+and `models` are `omitempty` lists of distinct values in order of first
+appearance (a session without an agent is `(unknown)`; `models` is absent when
+no session recorded a model), `models` also carrying the attributed modal
+model. The shared keys look exactly as in the session example below; what is
+checkpoint-specific is shown here from a real legacy checkpoint of this
+repository:
 
 ```json
 {
@@ -757,40 +786,17 @@ elided):
   "branch": "feat/global-trust",
   "source": "committed_checkpoint",
   "duration_seconds": 173038,
-  "effort": {"value": "high", "calls": 418},
   "tokens": {
     "total": 189953198, "input": 91155, "cache_read": 176383662,
     "cache_write": 12850967, "output": 627414, "api_calls": 403
   },
   "cost": {
     "provider": "anthropic", "family": "anthropic",
-    "weights": {"provider": "anthropic", "family": "anthropic", "input": 1,
-                "cache_write_5m": 1.25, "cache_write_1h": 2, "cache_read": 0.1, "output": 5},
     "shares": {"provider": "anthropic", "family": "anthropic",
                "input": 0.004368466278286988, "cache_write": 0,
                "cache_read": 0.8452921721109866, "output": 0.15033936161072634,
                "thinking": 0, "units": 20866591.2, "cache_write_unpriced": true}
   },
-  "contributors": [
-    {"kind": "replay", "label": "Context replay", "model": "claude-fable-5",
-     "usage": {"input_tokens": 0, "cache_creation_tokens": 0, "cache_read_tokens": 182199896,
-               "output_tokens": 0, "api_call_count": 0},
-     "cost_share": 0.4592136319706136, "source": "transcript"},
-    {"kind": "tool", "label": "Bash", "model": "claude-fable-5",
-     "usage": {"input_tokens": 89079, "cache_creation_tokens": 5898875, "cache_read_tokens": 0,
-               "output_tokens": 523902, "api_call_count": 317,
-               "thinking_tokens": 177225, "cache_creation_1h_tokens": 510259},
-     "cost_share": 0.26375504491483004, "source": "transcript",
-     "details": [
-       {"detail": "fi", "calls": 4, "tokens": 1588683, "cost_share": 0.05062184813663697},
-       {"detail": "grep", "calls": 31, "tokens": 1319571, "cost_share": 0.0438019484221212},
-       {"detail": "echo", "calls": 25, "tokens": 777501, "cost_share": 0.027124696081274914}
-     ]},
-    {"kind": "prompt", "label": "Prompt & system context", "model": "claude-fable-5",
-     "usage": {"input_tokens": 146, "cache_creation_tokens": 6009341, "cache_read_tokens": 0,
-               "output_tokens": 0, "api_call_count": 0, "cache_creation_1h_tokens": 977930},
-     "cost_share": 0.20781242753700205, "source": "transcript"}
-  ],
   "recommendations": [
     {"kind": "session",
      "text": "This session ran 2d 0h; re-reading its own context on every call took 176.4M cache-read tokens, 85% of cost. Splitting work this long into several shorter sessions would have cost less.",
@@ -807,11 +813,11 @@ elided):
 }
 ```
 
-Note how the legacy rungs show: `tokens` is the committed total (its
-`cache_write` has no TTL, so `shares.cache_write` is 0 and
-`cache_write_unpriced` is true), while the breakdown was attributed from the
-whole stored transcript and its `Context replay` row (182.2M) exceeds the
-committed `cache_read` (176.4M); `legacy.*_from_transcript` carry the subset
+(`effort`, `cost.weights` and the 31 `contributors` are elided; they have the
+shapes shown in §10.2.) Note how the legacy rungs show: `tokens` is the
+committed total — its `cache_write` has no TTL, so `shares.cache_write` is 0
+and `cache_write_unpriced` is true — while the breakdown was attributed from
+the whole stored transcript, and `legacy.*_from_transcript` carry the subset
 figures the committed usage lacks.
 
 **`--compare <baseline>`** adds `comparison`:
@@ -1024,16 +1030,17 @@ needs, drill-down included).
 
 ## 12. Privacy rules
 
-- A `Detail` is derived from the tool input by `ToolDetail` (§5), which never
-  returns the raw command and drops every word that could carry a secret. It
-  is computed on read and **printed**, never persisted: no checkpoint,
-  session-state or telemetry field carries a detail. The committed
-  `task.json` and the compact transcript's stored detail (`RawToolDetail`)
-  are separate, pre-existing contracts.
-- Reports never log a transcript path. `session tokens` logs only a
-  classification (`not_found` / `unreadable`) when the transcript cannot be
-  read, because the error text names the path (user content) and the log
-  sinks to a file. Notes lines name no paths either.
+- Details are derived, printed and never persisted, and never contain the raw
+  command or any word that could carry a secret — the rules and their
+  rationale are in §5.
+- **The token reports take a stricter stance than the logging baseline.**
+  `docs/architecture/logging.md` lists `transcript_path` among the fields that
+  are safe to log; these commands treat transcript and file paths as user
+  content and never log them. `session tokens` logs only a classification
+  (`not_found` / `unreadable`) when the transcript cannot be read, because the
+  error text names the path and the log sinks to a file; `checkpoint tokens`
+  logs checkpoint IDs, session indices and agent names only. Notes lines name
+  no paths either.
 - Model ids, tool names, skill names and subagent types are printed as the
   agent recorded them; a delegation's objective, a search query, a file's
   contents and a command's arguments are never read into the report.

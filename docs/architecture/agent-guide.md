@@ -512,7 +512,7 @@ before:
   subset of `output_tokens`. `token_count` events carry CUMULATIVE totals and repeat (the same
   total is often written twice — after the response and at turn end): take deltas between
   **distinct** cumulative totals, never a sum of `last_token_usage`, and count one API call per
-  distinct total (a duplicate is not a call — counting it inflated `api_call_count`).
+  distinct total (a duplicate is not a call — counting every event had roughly doubled `api_call_count`).
   `cache_write_input_tokens` is parsed into `CacheCreationTokens`: the gpt-5.6 family charges for
   cache writes.
 - **Claude Code**: thinking is inside `output_tokens`; `cache_creation` splits into 5-minute and

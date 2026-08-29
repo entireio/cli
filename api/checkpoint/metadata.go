@@ -493,7 +493,7 @@ type Metadata struct {
 	// Turn count and context figures come only from agents whose hooks report
 	// them (e.g., Cursor); duration_ms is hook-reported or, when the agent
 	// reports none, derived at condensation from the session state, so it is
-	// present on most checkpoints written since v0.11.
+	// present on most checkpoints written from v0.11 onward.
 	SessionMetrics *SessionMetrics `json:"session_metrics,omitempty"`
 
 	// AI-generated summary of the checkpoint
