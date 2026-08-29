@@ -1,0 +1,174 @@
+{
+  "sessionId": "attr-session-1",
+  "projectHash": "deadbeef",
+  "startTime": "2026-03-18T21:05:13.000Z",
+  "lastUpdated": "2026-03-18T21:08:30.000Z",
+  "messages": [
+    {
+      "id": "msg-user-0",
+      "timestamp": "2026-03-18T21:05:13.497Z",
+      "type": "user",
+      "content": [
+        {
+          "text": "Run the tests and read src/a.go"
+        }
+      ]
+    },
+    {
+      "id": "msg-gemini-1",
+      "timestamp": "2026-03-18T21:05:20.932Z",
+      "type": "gemini",
+      "content": "Running the tests and reading the file.",
+      "thoughts": [
+        {
+          "subject": "Plan",
+          "description": "Run tests, then read the file.",
+          "timestamp": "2026-03-18T21:05:19.000Z"
+        }
+      ],
+      "tokens": {
+        "input": 1200,
+        "output": 40,
+        "cached": 800,
+        "thoughts": 60,
+        "tool": 100,
+        "total": 1400
+      },
+      "model": "gemini-2.5-pro",
+      "toolCalls": [
+        {
+          "id": "run_shell_command-1773867920932-1",
+          "name": "run_shell_command",
+          "args": {
+            "command": "go test ./... -run TestX",
+            "description": "Run the TestX tests."
+          },
+          "result": [
+            {
+              "functionResponse": {
+                "id": "run_shell_command-1773867920932-1",
+                "name": "run_shell_command",
+                "response": {
+                  "output": "ok\tgithub.com/x/src\t0.012s"
+                }
+              }
+            }
+          ],
+          "resultDisplay": "ok\tgithub.com/x/src\t0.012s",
+          "status": "success",
+          "timestamp": "2026-03-18T21:05:25.000Z",
+          "displayName": "Shell",
+          "description": "This tool executes a given shell command as `bash -c <command>`.",
+          "renderOutputAsMarkdown": true
+        },
+        {
+          "id": "read_file-1773867920932-2",
+          "name": "read_file",
+          "args": {
+            "absolute_path": "src/a.go"
+          },
+          "result": [
+            {
+              "functionResponse": {
+                "id": "read_file-1773867920932-2",
+                "name": "read_file",
+                "response": {
+                  "output": "package src\n"
+                }
+              }
+            }
+          ],
+          "resultDisplay": "package src\n",
+          "status": "success",
+          "timestamp": "2026-03-18T21:05:26.000Z",
+          "displayName": "ReadFile",
+          "description": "Reads and returns the content of a specified file.",
+          "renderOutputAsMarkdown": true
+        }
+      ]
+    },
+    {
+      "id": "msg-info-2",
+      "timestamp": "2026-03-18T21:05:30.000Z",
+      "type": "info",
+      "content": "Model switched to gemini-2.5-pro."
+    },
+    {
+      "id": "msg-gemini-3",
+      "timestamp": "2026-03-18T21:05:47.368Z",
+      "type": "gemini",
+      "content": "The tests pass and src/a.go declares package src.",
+      "thoughts": [],
+      "tokens": {
+        "input": 1500,
+        "output": 80,
+        "cached": 1400,
+        "thoughts": 20,
+        "tool": 0,
+        "total": 1600
+      },
+      "model": "gemini-2.5-pro"
+    },
+    {
+      "id": "msg-user-4",
+      "timestamp": "2026-03-18T21:06:01.000Z",
+      "type": "user",
+      "content": [
+        {
+          "text": "Now find all Go files."
+        }
+      ]
+    },
+    {
+      "id": "msg-gemini-5",
+      "timestamp": "2026-03-18T21:06:01.208Z",
+      "type": "gemini",
+      "content": "",
+      "thoughts": [],
+      "model": "gemini-2.5-pro",
+      "toolCalls": [
+        {
+          "id": "glob-1773867961208-3",
+          "name": "glob",
+          "args": {
+            "pattern": "**/*.go",
+            "path": "src"
+          },
+          "result": [
+            {
+              "functionResponse": {
+                "id": "glob-1773867961208-3",
+                "name": "glob",
+                "response": {
+                  "output": "Found 1 file(s) matching \"**/*.go\":\nsrc/a.go"
+                }
+              }
+            }
+          ],
+          "resultDisplay": "Found 1 matching file(s)",
+          "status": "success",
+          "timestamp": "2026-03-18T21:06:02.000Z",
+          "displayName": "FindFiles",
+          "description": "Efficiently finds files matching specific glob patterns.",
+          "renderOutputAsMarkdown": true
+        }
+      ]
+    },
+    {
+      "id": "msg-gemini-6",
+      "timestamp": "2026-03-18T21:08:23.669Z",
+      "type": "gemini",
+      "content": "There is one Go file: src/a.go.",
+      "thoughts": [],
+      "tokens": {
+        "input": 2000,
+        "output": 30,
+        "cached": 0,
+        "thoughts": 0,
+        "tool": 50,
+        "total": 2080
+      },
+      "model": "gemini-2.5-flash"
+    }
+  ]
+}
