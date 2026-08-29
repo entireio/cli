@@ -33,10 +33,10 @@ func (s *timeSpan) note(at time.Time) {
 	}
 }
 
-// attributionWalk is the single pass over the whole active branch. Labels and
-// the thinking level in force come from every entry (the full transcript);
-// calls, consumed results, cost and the embedded timeSpan (Start/End) only
-// from entries at or after startLine.
+// attributionWalk is the single pass over the whole active branch. Labels,
+// the thinking level in force and the queue of tool results come from every
+// entry (the full transcript); calls, cost and the embedded timeSpan
+// (Start/End) only from entries at or after startLine.
 type attributionWalk struct {
 	timeSpan
 
@@ -49,8 +49,8 @@ type attributionWalk struct {
 	labels map[string]types.ToolUseRef
 
 	calls []types.CallUsage
-	// pending is the tool results seen since the last call in the slice;
-	// they become the next call's Consumed.
+	// pending is the tool results seen since the last assistant message, in
+	// or before the slice; they become the next call's Consumed.
 	pending []types.ToolResultRef
 	// cost is the sum of usage.cost.total over the calls in the slice.
 	cost float64
@@ -90,13 +90,16 @@ type attributionWalk struct {
 //     subagent, so SkillName/SubagentType/Model stay "". The labels map is
 //     built from EVERY assistant message, so a result whose toolCall precedes
 //     startLine is still labelled.
-//   - Consumed for a call is every toolResult message in the slice after the
-//     previous call and before this one, labelled through the map (a
-//     toolCallId found in no assistant message keeps a ref with only ID set —
-//     its bytes did enter the context). Bytes is len() of the raw JSON of
-//     message.content as written in the transcript. Results after the last
-//     call are attributed to nothing (the next slice's first call consumes
-//     them).
+//   - Consumed for a call is every active-branch toolResult message after
+//     the previous assistant message and before this one, wherever startLine
+//     falls — the results are collected from the FULL transcript, so a call's
+//     Consumed is the same in every slice that admits it and a result between
+//     a pre-slice toolCall and an in-slice call is charged, once, to that
+//     call. Each is labelled through the map (a toolCallId found in no
+//     assistant message keeps a ref with only ID set — its bytes did enter
+//     the context). Bytes is len() of the raw JSON of message.content as
+//     written in the transcript. Results after the last call are attributed
+//     to nothing.
 //   - Start/End are the earliest/latest parsable timestamps of in-slice
 //     active-branch entries of any type.
 //   - AgentReportedCost is the sum of usage.cost.total over the slice's
@@ -127,7 +130,7 @@ func (a *PiAgent) AttributeTokens(transcriptData []byte, startLine int, _ string
 }
 
 // visit dispatches one active-branch entry. Entries before startLine only
-// contribute labels and the thinking level.
+// contribute labels, the thinking level and the tool-result queue.
 func (w *attributionWalk) visit(line int, entry pijsonl.Entry) {
 	inSlice := line >= w.startLine
 	if inSlice {
@@ -141,7 +144,7 @@ func (w *attributionWalk) visit(line int, entry pijsonl.Entry) {
 		case pijsonl.RoleAssistant:
 			w.visitAssistant(line, inSlice, &entry)
 		case pijsonl.RoleToolResult:
-			w.visitToolResult(inSlice, &entry.Message)
+			w.visitToolResult(&entry.Message)
 		}
 	}
 }
@@ -160,10 +163,13 @@ func parseEntryTimestamp(ts string) time.Time {
 	return at
 }
 
-// visitAssistant registers the message's toolCall labels and, inside the
-// slice, appends its call, handing it the pending tool results.
+// visitAssistant registers the message's toolCall labels and takes the
+// pending tool results; inside the slice it also appends the call they were
+// consumed by.
 func (w *attributionWalk) visitAssistant(line int, inSlice bool, entry *pijsonl.Entry) {
 	emitted := w.registerEmits(entry.Message.Content)
+	consumed := w.pending
+	w.pending = nil
 	if !inSlice {
 		return
 	}
@@ -174,7 +180,7 @@ func (w *attributionWalk) visitAssistant(line int, inSlice bool, entry *pijsonl.
 		At:           parseEntryTimestamp(entry.Timestamp),
 		Line:         line,
 		Emitted:      emitted,
-		Consumed:     w.pending,
+		Consumed:     consumed,
 	}
 	if u := entry.Message.Usage; u != nil {
 		call.Usage = types.TokenUsage{
@@ -188,7 +194,6 @@ func (w *attributionWalk) visitAssistant(line int, inSlice bool, entry *pijsonl.
 		w.cost += u.Cost.Total
 	}
 	w.calls = append(w.calls, call)
-	w.pending = nil
 }
 
 // registerEmits builds the ToolUseRef for each toolCall content item, records
@@ -228,11 +233,9 @@ func toolUseRefFrom(item pijsonl.ContentItem) types.ToolUseRef {
 	}
 }
 
-// visitToolResult queues an in-slice tool result for the next call.
-func (w *attributionWalk) visitToolResult(inSlice bool, msg *pijsonl.Message) {
-	if !inSlice {
-		return
-	}
+// visitToolResult queues a tool result for the next assistant message,
+// whatever line it is on (see AttributeTokens: Consumed is slice-independent).
+func (w *attributionWalk) visitToolResult(msg *pijsonl.Message) {
 	ref, ok := w.labels[msg.ToolCallID]
 	if !ok {
 		ref = types.ToolUseRef{ID: msg.ToolCallID}

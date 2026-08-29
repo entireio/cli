@@ -4,9 +4,11 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 	"time"
 
+	"github.com/entireio/cli/cmd/entire/cli/agent/pi/pijsonl"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 )
 
@@ -17,20 +19,23 @@ import (
 // usage with a cost block, message.provider beside message.model,
 // thinking_level_change entries carrying thinkingLevel).
 const (
-	fixtureLineHeader     = 0
-	fixtureLineUser1      = 1
-	fixtureLineThinkHigh  = 2  // thinking_level_change → high
-	fixtureLineCall3      = 3  // claude-sonnet-4-5; bash + read toolCalls; cacheWrite + 1h + cost
-	fixtureLineResultTC1  = 4  // toolResult tc1, 5000 raw content bytes
-	fixtureLineResultTC2  = 5  // toolResult tc2, 300 raw content bytes
-	fixtureLineCall6      = 6  // text only, cost 0.002
-	fixtureLineMalformed  = 7  // truncated JSON: skipped, still counted
-	fixtureLineThinkLow   = 8  // thinking_level_change → low
-	fixtureLineCall9      = 9  // gpt-5.5, no usage block; bash toolCall tc3
-	fixtureLineResultTC3  = 10 // toolResult tc3, 41 raw content bytes
-	fixtureLineCall11     = 11 // gpt-5.5, cost 0.01
-	fixtureLineAbandoned  = 12 // assistant forked off m4: off the active branch
-	fixtureLineUser13     = 13 // user continued from m8: the leaf
+	fixtureLineHeader    = 0
+	fixtureLineUser1     = 1
+	fixtureLineThinkHigh = 2  // thinking_level_change → high
+	fixtureLineCall3     = 3  // claude-sonnet-4-5; bash + read toolCalls; cacheWrite + 1h + cost
+	fixtureLineResultTC1 = 4  // toolResult tc1, 5000 raw content bytes
+	fixtureLineResultTC2 = 5  // toolResult tc2, 300 raw content bytes
+	fixtureLineCall6     = 6  // text only, cost 0.002
+	fixtureLineMalformed = 7  // truncated JSON: skipped, still counted
+	fixtureLineThinkLow  = 8  // thinking_level_change → low
+	fixtureLineCall9     = 9  // gpt-5.5, no usage block; bash toolCall tc3
+	fixtureLineResultTC3 = 10 // toolResult tc3, 41 raw content bytes
+	fixtureLineCall11    = 11 // gpt-5.5, cost 0.01
+	fixtureLineAbandoned = 12 // assistant forked off m4: off the active branch
+	// fixtureLineUser13 is the user continuing from m8: the leaf. It keeps m9
+	// from being the last message entry and thus the leaf — without it the
+	// abandoned fork would become the active branch.
+	fixtureLineUser13     = 13
 	fixtureLineCount      = 14
 	fixtureCallCount      = 4
 	fixtureSliceCallCount = 3 // calls from fixtureLineResultTC1 onward
@@ -116,7 +121,7 @@ func assertClose(t *testing.T, name string, got, want float64) {
 func TestAttributionFixtureLayout(t *testing.T) {
 	t.Parallel()
 	data := readAttributionFixture(t)
-	if n := countFixtureLines(data); n != fixtureLineCount {
+	if n := pijsonl.CountLines(data); n != fixtureLineCount {
 		t.Fatalf("fixture has %d lines, want %d — the line constants are stale", n, fixtureLineCount)
 	}
 	got := attributeFixture(t, 0)
@@ -128,19 +133,6 @@ func TestAttributionFixtureLayout(t *testing.T) {
 		lines = append(lines, c.Line)
 	}
 	assertSame(t, "Line", lines, []int{fixtureLineCall3, fixtureLineCall6, fixtureLineCall9, fixtureLineCall11})
-}
-
-func countFixtureLines(data []byte) int {
-	n := 0
-	for _, b := range data {
-		if b == '\n' {
-			n++
-		}
-	}
-	if len(data) > 0 && data[len(data)-1] != '\n' {
-		n++
-	}
-	return n
 }
 
 func TestAttributeTokens_CallFields(t *testing.T) {
@@ -238,7 +230,7 @@ func TestAttributeTokens_AbandonedBranchIgnored(t *testing.T) {
 func TestAttributeTokens_SumsMatchCalculateTokenUsage(t *testing.T) {
 	t.Parallel()
 	data := readAttributionFixture(t)
-	for _, startLine := range []int{fixtureLineHeader, fixtureLineResultTC1, fixtureLineCall9} {
+	for _, startLine := range []int{fixtureLineHeader, fixtureLineResultTC1, fixtureLineThinkLow, fixtureLineCall9} {
 		want, err := (&PiAgent{}).CalculateTokenUsage(data, startLine)
 		if err != nil {
 			t.Fatalf("CalculateTokenUsage(%d): %v", startLine, err)
@@ -285,6 +277,49 @@ func TestAttributeTokens_StartLineSlice(t *testing.T) {
 		t.Errorf("Start = %v, want slice start %v", got.Start, fixtureTime(fixtureLineResultTC1))
 	}
 	assertClose(t, "AgentReportedCost", got.AgentReportedCost, fixtureCost6+fixtureCost11)
+}
+
+// TestAttributeTokens_CallsIndependentOfStartLine pins window independence:
+// a call is the same whole struct whatever startLine admits it — Line, usage,
+// Effort, Emitted and, in particular, Consumed — so consecutive slices charge
+// each result exactly once and never shift it to a different call.
+func TestAttributeTokens_CallsIndependentOfStartLine(t *testing.T) {
+	t.Parallel()
+
+	data := readAttributionFixture(t)
+	full := attributeFixture(t, 0)
+	byLine := make(map[int]types.CallUsage, len(full.Calls))
+	for _, call := range full.Calls {
+		byLine[call.Line] = call
+	}
+	for start := 1; start < fixtureLineCount; start++ {
+		got, err := (&PiAgent{}).AttributeTokens(data, start, "")
+		if err != nil {
+			t.Fatalf("AttributeTokens(startLine=%d): %v", start, err)
+		}
+		wantCount := 0
+		for line := range byLine {
+			if line >= start {
+				wantCount++
+			}
+		}
+		if len(got.Calls) != wantCount {
+			t.Errorf("startLine %d: got %d calls, want the %d offset-0 calls at Line >= %d", start, len(got.Calls), wantCount, start)
+		}
+		for _, call := range got.Calls {
+			if call.Line < start {
+				t.Errorf("startLine %d: call at Line %d precedes the slice", start, call.Line)
+			}
+			want, ok := byLine[call.Line]
+			if !ok {
+				t.Errorf("startLine %d: call at Line %d is not a call from 0", start, call.Line)
+				continue
+			}
+			if !reflect.DeepEqual(call, want) {
+				t.Errorf("startLine %d: call at Line %d = %+v, want the same call from 0: %+v", start, call.Line, call, want)
+			}
+		}
+	}
 }
 
 func TestAttributeTokens_StartLineAfterLastCall(t *testing.T) {
@@ -338,9 +373,11 @@ func TestAttributeTokens_UnlabelledResultKeepsID(t *testing.T) {
 	t.Parallel()
 	// A toolResult whose toolCall appears nowhere (flat transcript, no tree)
 	// still counts its bytes against the next call, with only the id known.
+	// The result after the last call (m3) is consumed by nothing.
 	data := []byte(`{"type":"session","id":"s"}
 {"type":"message","id":"m1","timestamp":"2026-08-01T00:00:01Z","message":{"role":"toolResult","toolCallId":"orphan","toolName":"bash","content":"12345"}}
 {"type":"message","id":"m2","timestamp":"2026-08-01T00:00:02Z","message":{"role":"assistant","model":"gpt-5.5","content":"ok","usage":{"input":1,"output":1,"cacheRead":0,"cacheWrite":0}}}
+{"type":"message","id":"m3","timestamp":"2026-08-01T00:00:03Z","message":{"role":"toolResult","toolCallId":"trailing","toolName":"bash","content":"after the last call"}}
 `)
 	got, err := (&PiAgent{}).AttributeTokens(data, 0, "")
 	if err != nil {
@@ -350,7 +387,7 @@ func TestAttributeTokens_UnlabelledResultKeepsID(t *testing.T) {
 		t.Fatalf("got %d calls, want 1", len(got.Calls))
 	}
 	want := []types.ToolResultRef{{ToolUse: types.ToolUseRef{ID: "orphan"}, Bytes: len(`"12345"`)}}
-	assertSame(t, "Consumed", got.Calls[0].Consumed, want)
+	assertSame(t, "Consumed (trailing result attributed to nothing)", got.Calls[0].Consumed, want)
 	if got.Calls[0].Effort != "" {
 		t.Errorf("Effort = %q, want empty before any thinking_level_change", got.Calls[0].Effort)
 	}

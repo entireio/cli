@@ -91,15 +91,17 @@ type Entry struct {
 
 // Message is the inner Pi `message` object on entries with type=="message".
 type Message struct {
-	Role       string          `json:"role"`
-	Content    json.RawMessage `json:"content"`
-	Usage      *Usage          `json:"usage,omitempty"`
-	Model      string          `json:"model,omitempty"`
-	Provider   string          `json:"provider,omitempty"`
-	StopReason string          `json:"stopReason,omitempty"`
-	ToolCallID string          `json:"toolCallId,omitempty"`
-	ToolName   string          `json:"toolName,omitempty"`
-	IsError    bool            `json:"isError,omitempty"`
+	Role    string          `json:"role"`
+	Content json.RawMessage `json:"content"`
+	Usage   *Usage          `json:"usage,omitempty"`
+	Model   string          `json:"model,omitempty"`
+	// Provider is the pi-ai provider id, e.g. "anthropic"; decoded for
+	// completeness, not reported (Model is the bare id).
+	Provider   string `json:"provider,omitempty"`
+	StopReason string `json:"stopReason,omitempty"`
+	ToolCallID string `json:"toolCallId,omitempty"`
+	ToolName   string `json:"toolName,omitempty"`
+	IsError    bool   `json:"isError,omitempty"`
 }
 
 // Usage mirrors pi-ai's Usage struct: the token counts plus the cost block
