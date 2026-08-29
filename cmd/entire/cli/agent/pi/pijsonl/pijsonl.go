@@ -16,6 +16,11 @@ import (
 // EntryTypeMessage is the JSONL `type` value for conversational entries.
 const EntryTypeMessage = "message"
 
+// EntryTypeThinkingLevelChange is the JSONL `type` value for the entry Pi
+// writes when the user changes the thinking level; the new level is on
+// Entry.ThinkingLevel and applies to every later assistant message.
+const EntryTypeThinkingLevelChange = "thinking_level_change"
+
 // Role values present on Message.Role.
 const (
 	RoleUser       = "user"
@@ -23,8 +28,11 @@ const (
 	RoleToolResult = "toolResult"
 )
 
-// ContentTypeText is the content-block `type` value for text blocks.
-const ContentTypeText = "text"
+// Content-block `type` values on ContentItem.Type.
+const (
+	ContentTypeText     = "text"
+	ContentTypeToolCall = "toolCall"
+)
 
 // MaxScannerLine is the maximum size of a single JSONL line we will parse.
 // Pi tool calls can embed full file contents in arguments — 10 MB matches
@@ -75,6 +83,10 @@ type Entry struct {
 	ID        string  `json:"id"`
 	Timestamp string  `json:"timestamp"`
 	Message   Message `json:"message"`
+	// ThinkingLevel is set on EntryTypeThinkingLevelChange entries only: the
+	// level Pi runs at from here on ("off", "minimal", "low", "medium",
+	// "high", "xhigh"), verbatim.
+	ThinkingLevel string `json:"thinkingLevel,omitempty"`
 }
 
 // Message is the inner Pi `message` object on entries with type=="message".
@@ -83,20 +95,29 @@ type Message struct {
 	Content    json.RawMessage `json:"content"`
 	Usage      *Usage          `json:"usage,omitempty"`
 	Model      string          `json:"model,omitempty"`
+	Provider   string          `json:"provider,omitempty"`
 	StopReason string          `json:"stopReason,omitempty"`
 	ToolCallID string          `json:"toolCallId,omitempty"`
 	ToolName   string          `json:"toolName,omitempty"`
 	IsError    bool            `json:"isError,omitempty"`
 }
 
-// Usage mirrors pi-ai's Usage struct (token-count fields only).
+// Usage mirrors pi-ai's Usage struct: the token counts plus the cost block
+// Pi computes from its model registry (totalTokens is derived and not kept).
 type Usage struct {
 	Input      int `json:"input"`
 	Output     int `json:"output"`
 	CacheRead  int `json:"cacheRead"`
 	CacheWrite int `json:"cacheWrite"`
 	// CacheWrite1h is the 1-hour-TTL part of CacheWrite (Anthropic providers only).
-	CacheWrite1h int `json:"cacheWrite1h"`
+	CacheWrite1h int       `json:"cacheWrite1h"`
+	Cost         UsageCost `json:"cost"`
+}
+
+// UsageCost is pi-ai's Usage.cost block, reduced to the total dollar figure.
+// The per-kind breakdown (input, output, cacheRead, cacheWrite) is not kept.
+type UsageCost struct {
+	Total float64 `json:"total"`
 }
 
 // ContentItem is one element of a Pi message's content array.
@@ -109,14 +130,32 @@ type ContentItem struct {
 }
 
 // ForEachActiveMessage invokes fn for every message entry on the active
-// conversation branch, starting at line fromOffset.
+// conversation branch, starting at line fromOffset. It is ForEachActiveEntry
+// filtered to entries with type=="message"; callers apply their own role
+// filter inside fn.
+func ForEachActiveMessage(data []byte, fromOffset int, fn func(Entry)) error {
+	return ForEachActiveEntry(data, fromOffset, func(_ int, entry Entry) {
+		if entry.Type == EntryTypeMessage {
+			fn(entry)
+		}
+	})
+}
+
+// ForEachActiveEntry invokes fn for every entry of any type on the active
+// conversation branch, starting at line fromOffset, with the entry's 0-based
+// physical line index in data.
 //
 // It owns the parsing skeleton shared by all Pi transcript analysis: active-
-// branch resolution runs on the FULL data (so parentId chains stay intact) while
-// iteration starts at fromOffset, lines that fail to unmarshal or are off the
-// active branch are skipped, and only entries with type=="message" reach fn.
-// Callers apply their own role filter inside fn. Empty data is a no-op.
-func ForEachActiveMessage(data []byte, fromOffset int, fn func(Entry)) error {
+// branch resolution runs on the FULL data (so parentId chains stay intact)
+// while iteration starts at fromOffset; lines that fail to unmarshal or are
+// off the active branch are skipped. When the transcript has a tree (see
+// ResolveActiveBranch) the session header is off the branch — its id is never
+// a parentId — and so is skipped too; in a flat transcript every entry passes.
+//
+// The line index counts lines exactly as SkipLines does: every '\n'
+// terminates a line, blank and malformed lines count, and the empty tail after
+// a trailing '\n' is not a line. Empty data is a no-op.
+func ForEachActiveEntry(data []byte, fromOffset int, fn func(line int, entry Entry)) error {
 	if len(data) == 0 {
 		return nil
 	}
@@ -125,18 +164,15 @@ func ForEachActiveMessage(data []byte, fromOffset int, fn func(Entry)) error {
 	content := SkipLines(data, fromOffset)
 
 	scanner := NewScanner(content)
-	for scanner.Scan() {
+	for line := max(fromOffset, 0); scanner.Scan(); line++ {
 		var entry Entry
 		if err := json.Unmarshal(scanner.Bytes(), &entry); err != nil {
-			continue
-		}
-		if entry.Type != EntryTypeMessage {
 			continue
 		}
 		if active != nil && !active[entry.ID] {
 			continue
 		}
-		fn(entry)
+		fn(line, entry)
 	}
 	if err := scanner.Err(); err != nil {
 		return fmt.Errorf("scan transcript: %w", err)

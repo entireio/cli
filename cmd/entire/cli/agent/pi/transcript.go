@@ -104,7 +104,7 @@ func (a *PiAgent) ExtractModifiedFilesFromOffset(path string, startOffset int) (
 			return
 		}
 		for _, item := range items {
-			if item.Type != "toolCall" {
+			if item.Type != pijsonl.ContentTypeToolCall {
 				continue
 			}
 			if item.Name != "write" && item.Name != "edit" {
