@@ -274,15 +274,24 @@ func formatCallCount(n int) string {
 }
 
 // writeTokenReportBody prints the shared body: the breakdown (when
-// attributed), the usage table, the recommendations and the notes. The
-// caller prints the header first.
+// attributed), the usage table with the agent-reported cost under it, the
+// recommendations and the notes. The caller prints the header first.
 func writeTokenReportBody(w io.Writer, v *tokenReportView) {
 	if v.Attributed {
 		writeTokenWhereItWent(w, v)
 	}
 	writeTokenUsageTable(w, v)
+	writeTokenAgentReportedCost(w, v)
 	writeTokenRecommendationSentences(w, v.Recommendations)
 	writeTokenNotes(w, tokenReportNotes(v))
+}
+
+// writeTokenAgentReportedCost prints the provider-computed dollar cost the
+// agent recorded, under the usage table; nothing when none was recorded.
+func writeTokenAgentReportedCost(w io.Writer, v *tokenReportView) {
+	if v.AgentReportedCost > 0 {
+		fmt.Fprintf(w, "  Agent-reported cost $%s\n", strconv.FormatFloat(v.AgentReportedCost, 'f', 2, 64))
+	}
 }
 
 // tokenTableLine is one printed line of the breakdown or usage table.

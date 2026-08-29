@@ -8,7 +8,6 @@ import (
 	"slices"
 	"time"
 
-	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
@@ -21,7 +20,7 @@ import (
 const (
 	// checkpointTokensSourceTranscript means every session's totals were
 	// recomputed from its stored transcript.
-	checkpointTokensSourceTranscript = "transcript"
+	checkpointTokensSourceTranscript = tokenSourceTranscript
 	// checkpointTokensSourceCommitted means at least one session's totals
 	// came from its committed token_usage metadata.
 	checkpointTokensSourceCommitted = "committed_checkpoint"
@@ -385,19 +384,10 @@ func attributeCheckpointTokenSession(ctx context.Context, cpID id.CheckpointID, 
 		return a
 	}
 	label := fmt.Sprintf("session %d", s.index+1)
-	if meta.Agent == "" {
-		a.notes = append(a.notes, label+": no agent recorded; totals from committed metadata")
-		return a
-	}
-	ag, err := agent.GetByAgentType(meta.Agent)
-	if err != nil {
-		a.notes = append(a.notes, fmt.Sprintf("%s: agent %q is not known to this CLI; totals from committed metadata", label, meta.Agent))
-		return a
-	}
-	attributor, ok := agent.AsTokenAttributor(ag)
+	attributor, reason, ok := resolveTokenAttributor(meta.Agent)
 	if !ok {
-		if !tokenreport.ProfileFor(meta.Agent).TotalsOnly {
-			a.notes = append(a.notes, fmt.Sprintf("%s: per-call attribution is not available for %s; totals from committed metadata", label, meta.Agent))
+		if reason != "" {
+			a.notes = append(a.notes, label+": "+reason+"; totals from committed metadata")
 		}
 		return a
 	}
@@ -886,17 +876,14 @@ func countTokenSources(analyses []sessionTokenAnalysis) (recomputed, fallback in
 
 // unmatchedSubagentNote words the "subagent tokens not included" note for
 // the agent: Codex and OpenCode run subagents as separate sessions with no
-// task record; other agents may simply lack the record on this backend.
+// task record (separateSessionSubagentNote); other agents may simply lack
+// the record on this backend.
 func unmatchedSubagentNote(agentType types.AgentType, n int) string {
-	switch agentType {
-	case agent.AgentTypeCodex:
-		return "Codex subagent tokens are not included (their rollouts are separate sessions)."
-	case agent.AgentTypeOpenCode:
-		return "OpenCode subagent tokens are not included (task sessions are separate sessions)."
-	default:
-		return fmt.Sprintf("%d subagent call%s %s no committed task record; that usage is not included (this backend may not store task records).",
-			n, tokenPluralSuffix(n), pluralHaveHas(n))
+	if note := separateSessionSubagentNote(agentType); note != "" {
+		return note
 	}
+	return fmt.Sprintf("%d subagent call%s %s no committed task record; that usage is not included (this backend may not store task records).",
+		n, tokenPluralSuffix(n), pluralHaveHas(n))
 }
 
 // pluralHaveHas picks "has"/"have" for n.

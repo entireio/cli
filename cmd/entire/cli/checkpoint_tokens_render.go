@@ -26,9 +26,7 @@ func writeCheckpointTokensText(w io.Writer, report *checkpointTokensReport) {
 		writeTokenWhereItWent(w, v)
 	}
 	writeTokenUsageTable(w, v)
-	if v.AgentReportedCost > 0 {
-		fmt.Fprintf(w, "  Agent-reported cost $%s\n", strconv.FormatFloat(v.AgentReportedCost, 'f', 2, 64))
-	}
+	writeTokenAgentReportedCost(w, v)
 	writeCheckpointTokenComparison(w, report.Comparison)
 	writeTokenRecommendationSentences(w, v.Recommendations)
 	writeTokenNotes(w, report.Limitations)

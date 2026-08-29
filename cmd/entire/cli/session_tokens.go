@@ -5,77 +5,87 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"math/bits"
+	"os"
+	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
+	"github.com/entireio/cli/cmd/entire/cli/agent/types"
+	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
+	"github.com/entireio/cli/cmd/entire/cli/logging"
+	"github.com/entireio/cli/cmd/entire/cli/paths"
+	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
+	"github.com/entireio/cli/cmd/entire/cli/tokenreport"
 	"github.com/spf13/cobra"
 )
 
+// sessionTokensSourceState is the Source of a session token report whose
+// totals came from the session state's running token_usage rather than the
+// live transcript.
+const sessionTokensSourceState = "session_state"
+
+// sessionTokensStateFallback is the tail of every Notes line that explains
+// why the totals came from session state.
+const sessionTokensStateFallback = "; totals from session state" //nolint:gosec // G101: a Notes suffix, not a credential
+
+// sessionTokensReport is the `session tokens` report: the session's identity
+// and status, the shared token-report fields derived from view, and the
+// context pressure the agent's hooks last reported. It is the --json
+// document.
 type sessionTokensReport struct {
-	SessionID       string                        `json:"session_id"`
-	Agent           string                        `json:"agent"`
-	Model           string                        `json:"model,omitempty"`
-	Status          string                        `json:"status"`
-	Source          string                        `json:"source"`
-	Tokens          *sessionTokensUsage           `json:"tokens,omitempty"`
-	Context         *sessionTokensContext         `json:"context,omitempty"`
-	Contributors    []sessionTokensContributor    `json:"contributors,omitempty"`
-	Recommendations []sessionTokensRecommendation `json:"recommendations,omitempty"`
-	Limitations     []string                      `json:"limitations,omitempty"`
+	SessionID string `json:"session_id"`
+	Agent     string `json:"agent"`
+	// Model is the modal model of the attributed calls, else the state's
+	// model name.
+	Model  string `json:"model,omitempty"`
+	Status string `json:"status"`
+	// Source is tokenSourceTranscript when the totals were recomputed from
+	// the live transcript, else sessionTokensSourceState.
+	Source          string           `json:"source"`
+	DurationSeconds int              `json:"duration_seconds,omitempty"`
+	Effort          *tokenEffortJSON `json:"effort,omitempty"`
+	Tokens          *tokenUsageJSON  `json:"tokens,omitempty"`
+	// Context is the session's current context pressure as the agent's
+	// hooks last reported it.
+	Context           *sessionTokensContext     `json:"context,omitempty"`
+	Cost              *tokenCostJSON            `json:"cost,omitempty"`
+	Contributors      []tokenreport.Contributor `json:"contributors"`
+	Recommendations   []tokenRecommendationJSON `json:"recommendations,omitempty"`
+	AgentReportedCost float64                   `json:"agent_reported_cost,omitempty"`
+	Limitations       []string                  `json:"limitations,omitempty"`
+
+	// view is what the text writers render; the JSON fields above are
+	// derived from it by applyView.
+	view tokenReportView
 }
 
-type sessionTokensUsage struct {
-	Total         int `json:"total"`
-	Input         int `json:"input"`
-	CacheRead     int `json:"cache_read"`
-	CacheWrite    int `json:"cache_write"`
-	Output        int `json:"output"`
-	APICalls      int `json:"api_calls"`
-	SubagentTotal int `json:"subagent_total,omitempty"`
+// applyView stores the view and derives the shared JSON fields from it.
+func (r *sessionTokensReport) applyView(v tokenReportView) {
+	r.view = v
+	r.DurationSeconds = tokenDurationSeconds(v.Report.Duration)
+	r.Effort = tokenEffortJSONFor(&v)
+	r.Tokens = tokenUsageJSONFor(&v)
+	r.Cost = tokenCostJSONFor(&v)
+	r.Contributors = v.Report.Attributed.Contributors
+	if r.Contributors == nil {
+		r.Contributors = []tokenreport.Contributor{}
+	}
+	r.Recommendations = tokenRecommendationsJSONFor(v.Recommendations)
+	r.AgentReportedCost = v.AgentReportedCost
+	r.Limitations = tokenReportNotes(&v)
 }
 
+// sessionTokensContext is the `context` object of the session and
+// checkpoint token reports: the agent-reported context window fill.
 type sessionTokensContext struct {
 	Tokens     int `json:"tokens"`
 	WindowSize int `json:"window_size"`
 	Percent    int `json:"percent"`
 }
-
-type sessionTokensContributor struct {
-	Kind       string   `json:"kind"`
-	Label      string   `json:"label"`
-	Tokens     int      `json:"tokens,omitempty"`
-	Percent    int      `json:"percent,omitempty"`
-	Confidence string   `json:"confidence"`
-	Signals    []string `json:"signals,omitempty"`
-}
-
-type sessionTokensRecommendation struct {
-	ID       string   `json:"id"`
-	Severity string   `json:"severity"`
-	Message  string   `json:"message"`
-	Signals  []string `json:"signals,omitempty"`
-}
-
-type tokenRecommendationSignals struct {
-	Tokens          *sessionTokensUsage
-	Context         *sessionTokensContext
-	TurnCount       int
-	CheckpointCount int
-}
-
-// Recommendation thresholds are coarse diagnostics for clear token hotspots, not a cost model or quality verdict.
-const (
-	recommendationHighCacheReadPercent     = 80
-	recommendationHighAPICalls             = 20
-	recommendationSubagentShareDenominator = 10
-	recommendationHighContextPercent       = 80
-	recommendationLongSessionTurns         = 10
-	recommendationLongSessionCheckpoints   = 5
-)
-
-const agentBriefCostProxyBatchAction = "Use at most 3 batched reads before answering. Continue only if a named file or test can change the verdict; otherwise answer now. Avoid broad grep, broad diffs, broad tests, and repeated token diagnostics; keep the answer tight."
 
 func newTokensCmd() *cobra.Command {
 	var jsonFlag bool
@@ -85,12 +95,16 @@ func newTokensCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "tokens [session-id]",
 		Short: "Show token usage and optimization recommendations for a session",
-		Long: `Show token usage and optimization recommendations for a session.
+		Long: `Show where a session's tokens went, with cost shares and recommendations.
 
 When no session ID is provided, Entire reports on the most recently active
 session, preferring the current worktree and falling back to the newest session
-if no state matches this worktree. The report uses token and context data Entire
-already captured for the session.
+if no state matches this worktree.
+
+The report recomputes the session's usage so far from its live transcript and
+attributes it to the tools, skills and subagents that caused it; cost shares
+use the provider's list-price ratios. When the transcript cannot be read the
+totals fall back to the usage Entire recorded for the session.
 
 Use --agent-brief when an agent needs compact guidance for the next step, for
 example: "Use Entire token tracking to check how this session is doing and
@@ -142,15 +156,15 @@ func runSessionTokens(ctx context.Context, cmd *cobra.Command, sessionID string,
 		return NewSilentError(fmt.Errorf("session not found: %s", sessionID))
 	}
 
-	report := buildSessionTokensReport(state, sessionPhaseLabel(state))
+	report := buildSessionTokensReport(ctx, state, sessionPhaseLabel(state))
 	if jsonOutput {
 		return printJSON(cmd.OutOrStdout(), report)
 	}
 	if agentBrief {
-		writeSessionTokensAgentBrief(cmd.OutOrStdout(), report)
+		writeTokenAgentBrief(cmd.OutOrStdout(), "Session token brief", "Session", report.SessionID, &report.view)
 		return nil
 	}
-	writeSessionTokensText(cmd.OutOrStdout(), report)
+	writeSessionTokensText(cmd.OutOrStdout(), &report)
 	return nil
 }
 
@@ -168,98 +182,153 @@ func tokenCommandError(err error) error {
 	return err
 }
 
-func buildSessionTokensReport(state *strategy.SessionState, status string) sessionTokensReport {
-	agentLabel := string(state.AgentType)
-	if agentLabel == "" {
-		agentLabel = unknownPlaceholder
+// buildSessionTokensReport builds the report for one session from its state.
+// The totals are recomputed from the live transcript — Σ attributed calls plus
+// Σ subagent transcripts — when the agent implements TokenAttributor and the
+// transcript is readable (Source "transcript"); otherwise they are the
+// state's running token_usage (Source "session_state") and a Notes line says
+// why. The per-session analysis and the view assembly are the ones
+// `checkpoint tokens` uses, fed the state in checkpoint-metadata shape
+// (sessionTokensMetadata), so both commands compute every figure the same
+// way. Nothing here fails the command: every problem becomes a note.
+func buildSessionTokensReport(ctx context.Context, state *strategy.SessionState, status string) sessionTokensReport {
+	report := sessionTokensReport{SessionID: state.SessionID, Agent: string(state.AgentType), Status: status, Source: sessionTokensSourceState}
+	if report.Agent == "" {
+		report.Agent = unknownPlaceholder
 	}
+	report.Context = buildSessionTokensContext(state.ContextTokens, state.ContextWindowSize)
 
-	report := sessionTokensReport{
-		SessionID: state.SessionID,
-		Agent:     agentLabel,
-		Model:     state.ModelName,
-		Status:    status,
-		Source:    "session_state",
+	meta := sessionTokensMetadata(state)
+	analysis := attributeSessionTokens(ctx, state, meta)
+	finishSessionTokenAnalysis(&analysis)
+	view := assembleTokenReportView([]sessionTokenAnalysis{analysis}, []*checkpoint.Metadata{meta})
+	if view.Report.Model == "" {
+		view.Report.Model = state.ModelName
 	}
-
-	if tokens := buildSessionTokensUsage(state.TokenUsage); tokens != nil {
-		report.Tokens = tokens
-		if tokens.SubagentTotal > 0 {
-			report.Contributors = append(report.Contributors, sessionTokensContributor{
-				Kind:       "subagents",
-				Label:      "Subagents",
-				Tokens:     tokens.SubagentTotal,
-				Confidence: "reported",
-				Signals:    []string{"subagent_tokens"},
-			})
-		}
-	} else {
-		report.Limitations = append(report.Limitations, "No token usage recorded for this session.")
-		report.Recommendations = append(report.Recommendations, sessionTokensRecommendation{
-			ID:       "no-token-data",
-			Severity: "low",
-			Message:  "Token usage is unavailable for this session; the agent may not expose token data yet, or no checkpoint has captured it.",
-			Signals:  []string{"missing_token_usage"},
-		})
+	view.Limitations = append(view.Limitations, analysis.notes...)
+	if analysis.unmatchedSubagentRefs > 0 {
+		view.Limitations = append(view.Limitations, sessionUnmatchedSubagentNote(state.AgentType, analysis.unmatchedSubagentRefs))
 	}
-
-	if contextInfo := buildSessionTokensContext(state.ContextTokens, state.ContextWindowSize); contextInfo != nil {
-		report.Context = contextInfo
-		report.Contributors = append(report.Contributors, sessionTokensContributor{
-			Kind:       "context_pressure",
-			Label:      "Context pressure",
-			Percent:    contextInfo.Percent,
-			Confidence: "reported",
-			Signals:    []string{"context_tokens"},
-		})
+	if view.HasUsage {
+		view.Recommendations = tokenreport.Recommend(view.Report)
 	}
-
-	if labels := skillEventLabels(state.SkillEvents); len(labels) > 0 {
-		report.Contributors = append(report.Contributors, sessionTokensContributor{
-			Kind:       "skills",
-			Label:      "Skills/slash commands: " + strings.Join(labels, ", "),
-			Confidence: "reported",
-			Signals:    []string{"skill_events"},
-		})
+	if analysis.recomputed {
+		report.Source = tokenSourceTranscript
 	}
-
-	report.Recommendations = append(report.Recommendations, recommendationRules(tokenRecommendationSignals{
-		Tokens:          report.Tokens,
-		Context:         report.Context,
-		TurnCount:       state.SessionTurnCount,
-		CheckpointCount: state.StepCount,
-	})...)
+	report.Model = view.Report.Model
+	report.applyView(view)
 	return report
 }
 
-func buildSessionTokensUsage(usage *agent.TokenUsage) *sessionTokensUsage {
-	if usage == nil {
-		return nil
-	}
-	total := totalTokens(usage)
-	if total == 0 && usage.APICallCount == 0 {
-		return nil
-	}
-	return &sessionTokensUsage{
-		Total:         total,
-		Input:         usage.InputTokens,
-		CacheRead:     usage.CacheReadTokens,
-		CacheWrite:    usage.CacheCreationTokens,
-		Output:        usage.OutputTokens,
-		APICalls:      usage.APICallCount,
-		SubagentTotal: totalTokens(usage.SubagentTokens),
+// sessionTokensMetadata is the live session's state in the shape the shared
+// per-session analysis reads — the same fields a checkpoint's metadata
+// carries for a session: agent, model, running token_usage, skill events and
+// the session metrics. It is built for the analysis only and never written.
+func sessionTokensMetadata(state *strategy.SessionState) *checkpoint.Metadata {
+	return &checkpoint.Metadata{
+		SessionID:   state.SessionID,
+		Agent:       state.AgentType,
+		Model:       state.ModelName,
+		TokenUsage:  state.TokenUsage,
+		SkillEvents: state.SkillEvents,
+		SessionMetrics: &checkpoint.SessionMetrics{
+			DurationMs:        sessionStateDuration(state).Milliseconds(),
+			TurnCount:         state.SessionTurnCount,
+			ContextTokens:     state.ContextTokens,
+			ContextWindowSize: state.ContextWindowSize,
+		},
 	}
 }
 
-func topLevelSessionTokenTotal(tokens *sessionTokensUsage) int {
-	if tokens == nil {
+// sessionStateDuration is the session's duration as its state knows it: the
+// agent's hook-reported duration when present, else the span from StartedAt
+// to the last interaction (or to EndedAt for an ended session). 0 when
+// neither is known or the span is negative (clock skew), which the header
+// prints as "not recorded".
+func sessionStateDuration(state *strategy.SessionState) time.Duration {
+	if state.SessionDurationMs > 0 {
+		return time.Duration(state.SessionDurationMs) * time.Millisecond
+	}
+	end := state.LastInteractionTime
+	if end == nil {
+		end = state.EndedAt
+	}
+	if end == nil || state.StartedAt.IsZero() {
 		return 0
 	}
-	total := saturatingIntAdd(tokens.Input, tokens.CacheWrite)
-	total = saturatingIntAdd(total, tokens.CacheRead)
-	return saturatingIntAdd(total, tokens.Output)
+	return max(end.Sub(state.StartedAt), 0)
 }
 
+// attributeSessionTokens runs the agent's TokenAttributor over the whole
+// live transcript (strategy.ResolveTranscriptPath, start line 0), reading
+// subagent transcripts from the session's subagents directory, and labels
+// skill loads from the state's skill events. Any reason attribution cannot
+// run becomes a note; the analysis then falls back to the state's
+// token_usage in finishSessionTokenAnalysis.
+func attributeSessionTokens(ctx context.Context, state *strategy.SessionState, meta *checkpoint.Metadata) sessionTokenAnalysis {
+	a := sessionTokenAnalysis{meta: meta, efforts: make(map[string]int), models: make(map[string]int)}
+	attributor, reason, ok := resolveTokenAttributor(state.AgentType)
+	if !ok {
+		if reason != "" {
+			a.notes = append(a.notes, reason+sessionTokensStateFallback)
+		}
+		return a
+	}
+	data, transcriptPath, err := readSessionTranscript(state)
+	if err != nil {
+		a.notes = append(a.notes, "transcript unavailable"+sessionTokensStateFallback)
+		logging.Warn(ctx, "session tokens: transcript unreadable",
+			slog.String("session_id", state.SessionID),
+			slog.String("error", err.Error()))
+		return a
+	}
+	subagentsDir := paths.SubagentsDir(filepath.Dir(transcriptPath), state.SessionID)
+	attribution, err := attributor.AttributeTokens(data, 0, subagentsDir)
+	if err != nil {
+		a.notes = append(a.notes, "transcript could not be attributed"+sessionTokensStateFallback)
+		logging.Warn(ctx, "session tokens: attribution failed",
+			slog.String("session_id", state.SessionID),
+			slog.String("agent", string(state.AgentType)),
+			slog.String("error", err.Error()))
+		return a
+	}
+	if attribution == nil || len(attribution.Calls) == 0 {
+		a.notes = append(a.notes, "no API calls in the transcript yet"+sessionTokensStateFallback)
+		return a
+	}
+	applySkillEventAnchors(attribution, state.SkillEvents)
+	a.attribution = attribution
+	return a
+}
+
+// readSessionTranscript resolves the session's live transcript path (the
+// agent may have relocated the file mid-session) and reads the whole file.
+func readSessionTranscript(state *strategy.SessionState) ([]byte, string, error) {
+	transcriptPath, err := strategy.ResolveTranscriptPath(state)
+	if err != nil {
+		return nil, "", fmt.Errorf("resolve transcript path: %w", err)
+	}
+	data, err := os.ReadFile(transcriptPath) //nolint:gosec // G304: the path is the one Entire's hooks recorded for this session.
+	if err != nil {
+		return nil, "", fmt.Errorf("read transcript: %w", err)
+	}
+	return data, transcriptPath, nil
+}
+
+// sessionUnmatchedSubagentNote words the "subagent tokens not included" note
+// for a live session: Codex and OpenCode run subagents as separate sessions
+// (separateSessionSubagentNote); for other agents the subagent's transcript
+// is not in the subagents directory — it may not have been written yet.
+func sessionUnmatchedSubagentNote(agentType types.AgentType, n int) string {
+	if note := separateSessionSubagentNote(agentType); note != "" {
+		return note
+	}
+	return fmt.Sprintf("%d subagent call%s %s no transcript in the subagents directory; that usage is not included.",
+		n, tokenPluralSuffix(n), pluralHaveHas(n))
+}
+
+// buildSessionTokensContext builds the context-pressure object; nil when
+// either figure is unknown.
 func buildSessionTokensContext(tokens, windowSize int) *sessionTokensContext {
 	if tokens <= 0 || windowSize <= 0 {
 		return nil
@@ -271,6 +340,8 @@ func buildSessionTokensContext(tokens, windowSize int) *sessionTokensContext {
 	}
 }
 
+// roundedPercent is value/total as a whole percentage, rounded half up and
+// clamped to 100, without overflowing on large counts.
 func roundedPercent(value, total int) int {
 	if total <= 0 {
 		return 0
@@ -295,197 +366,44 @@ func roundedPercent(value, total int) int {
 	return int(quotient)
 }
 
-func recommendationRules(signals tokenRecommendationSignals) []sessionTokensRecommendation {
-	var recs []sessionTokensRecommendation
-
-	cacheReadHotspot := false
-	if signals.Tokens != nil && signals.Tokens.CacheRead > 0 {
-		cacheReadPercent := tokenPercent(signals.Tokens.CacheRead, topLevelSessionTokenTotal(signals.Tokens))
-		if cacheReadPercent >= recommendationHighCacheReadPercent {
-			cacheReadHotspot = true
-			recs = append(recs, sessionTokensRecommendation{
-				ID:       "context-replay-hotspot",
-				Severity: "high",
-				Message: fmt.Sprintf(
-					"Cache/context replay is %s of token volume; reduce unnecessary follow-up calls in this large-context session.",
-					formatPercent(cacheReadPercent),
-				),
-				Signals: []string{"cache_read_tokens"},
-			})
-		}
-	}
-	if signals.Tokens != nil && signals.Tokens.APICalls >= recommendationHighAPICalls {
-		message := fmt.Sprintf("API call count is high for one session: %d calls. Batch the next diagnosis and reduce iterative calls.", signals.Tokens.APICalls)
-		if cacheReadHotspot {
-			message = fmt.Sprintf("Large context was replayed across %d API calls; batch the next diagnosis and reduce iterative tool calls.", signals.Tokens.APICalls)
-		}
-		recs = append(recs, sessionTokensRecommendation{
-			ID:       "api-call-amplification",
-			Severity: "medium",
-			Message:  message,
-			Signals:  []string{"api_call_count"},
-		})
-	}
-	if signals.Tokens != nil && tokenShareAtLeastOneTenth(signals.Tokens.SubagentTotal, signals.Tokens.Total) {
-		recs = append(recs, sessionTokensRecommendation{
-			ID:       "subagent-heavy",
-			Severity: "medium",
-			Message:  "Scope subagent tasks tightly; give each subagent a narrow objective and expected output.",
-			Signals:  []string{"subagent_tokens"},
-		})
-	}
-	if signals.Tokens != nil && signals.Tokens.Total > 0 &&
-		tokenClassPressure(signals.Tokens.CacheWrite, signals.Tokens.Total, 5000, 10, 50_000) {
-		recs = append(recs, sessionTokensRecommendation{
-			ID:       "cache-write-pressure",
-			Severity: "medium",
-			Message:  "Cache write is elevated; avoid broad new context and narrow the next read before continuing.",
-			Signals:  []string{"cache_write_tokens"},
-		})
-	}
-	if signals.Tokens != nil && signals.Tokens.Total > 0 &&
-		tokenClassPressure(signals.Tokens.Output, signals.Tokens.Total, 3000, 2, 10_000) {
-		recs = append(recs, sessionTokensRecommendation{
-			ID:       "output-pressure",
-			Severity: "medium",
-			Message:  "Output tokens are elevated; keep the next answer tight and avoid restating evidence.",
-			Signals:  []string{"output_tokens"},
-		})
-	}
-	if signals.Context != nil && signals.Context.Percent >= recommendationHighContextPercent {
-		recs = append(recs, sessionTokensRecommendation{
-			ID:       "high-context-pressure",
-			Severity: "medium",
-			Message:  fmt.Sprintf("Context pressure is %d%% of the window; preserve only relevant context before continuing.", signals.Context.Percent),
-			Signals:  []string{"context_tokens"},
-		})
-	}
-	if cacheReadHotspot && signals.Tokens != nil && signals.Tokens.APICalls >= recommendationHighAPICalls {
-		recs = append(recs, sessionTokensRecommendation{
-			ID:       "summarize-before-boundary",
-			Severity: "low",
-			Message:  "Compact or restart after summarizing this investigation; do not discard useful findings just because cache read is high.",
-			Signals:  []string{"cache_read_tokens", "api_call_count"},
-		})
-	}
-	if signals.TurnCount >= recommendationLongSessionTurns || signals.CheckpointCount >= recommendationLongSessionCheckpoints {
-		recs = append(recs, sessionTokensRecommendation{
-			ID:       "long-session",
-			Severity: "low",
-			Message:  "Compact or restart after summarizing the useful findings if older context is no longer needed.",
-			Signals:  []string{"turn_count", "checkpoint_count"},
-		})
-	}
-
-	return recs
-}
-
-func tokenShareAtLeastOneTenth(part, total int) bool {
-	if part <= 0 || total <= 0 {
-		return false
-	}
-	return part >= (total-1)/recommendationSubagentShareDenominator+1
-}
-
-func tokenClassPressure(value, total, minTokens int, minPercent float64, highTokens int) bool {
-	if value <= 0 || total <= 0 {
-		return false
-	}
-	if value >= highTokens {
-		return true
-	}
-	return value >= minTokens && tokenPercent(value, total) >= minPercent
-}
-
-func tokenPercent(value, total int) float64 {
-	if total <= 0 {
-		return 0
-	}
-	return float64(value) * 100 / float64(total)
-}
-
-func formatPercent(percent float64) string {
-	formatted := fmt.Sprintf("%.1f", percent)
-	formatted = strings.TrimSuffix(formatted, ".0")
-	return formatted + "%"
-}
-
-func skillEventLabels(events []agent.SkillEvent) []string {
-	seen := make(map[string]struct{}, len(events))
-	labels := make([]string, 0, len(events))
-	for _, event := range events {
-		label := event.Collapse.Label
-		if label == "" && event.Native != nil {
-			label = event.Native["command"]
-		}
-		if label == "" {
-			label = event.Skill.Name
-		}
-		if label == "" {
-			continue
-		}
-		if _, ok := seen[label]; ok {
-			continue
-		}
-		seen[label] = struct{}{}
-		labels = append(labels, label)
-	}
-	return labels
-}
-
-func writeSessionTokensText(w io.Writer, report sessionTokensReport) {
+// writeSessionTokensText prints the breakdown-first report: the session
+// header, then the shared body (Where it went, Usage, Recommendations,
+// Notes). The recommendation sentences are tokenreport.Recommend's, unchanged:
+// only the header's "Duration so far" marks the session as still running.
+func writeSessionTokensText(w io.Writer, report *sessionTokensReport) {
 	fmt.Fprintln(w, "Session tokens")
 	fmt.Fprintln(w)
-	fmt.Fprintf(w, "Session: %s\n", report.SessionID)
-	fmt.Fprintf(w, "Agent:   %s\n", report.Agent)
+	writeSessionTokensHeader(w, report)
+	writeTokenReportBody(w, &report.view)
+}
+
+// writeSessionTokensHeader prints the identity lines: session, agent and
+// model on one line; the status; the duration so far ("Duration" once the
+// session has ended) with calls, volume and effort; and the context fill
+// when the agent's hooks reported it.
+func writeSessionTokensHeader(w io.Writer, report *sessionTokensReport) {
+	v := &report.view
+	first := []string{"Session: " + report.SessionID, "Agent: " + report.Agent}
 	if report.Model != "" {
-		fmt.Fprintf(w, "Model:   %s\n", report.Model)
+		first = append(first, "Model: "+report.Model)
 	}
+	fmt.Fprintln(w, strings.Join(first, "      "))
 	fmt.Fprintf(w, "Status:  %s\n", report.Status)
-
-	writeTokenUsageSection(w, report.Tokens)
-	if len(report.Recommendations) > 0 {
-		writeTokenRecommendations(w, report.Recommendations)
+	label := "Duration so far: "
+	if report.Status == string(session.PhaseEnded) {
+		label = "Duration: "
 	}
-
-	writeTokenContributors(w, report.Contributors, report.Context)
-	writeTokenLimitations(w, report.Limitations)
-}
-
-func writeSessionTokensAgentBrief(w io.Writer, report sessionTokensReport) {
-	fmt.Fprintln(w, "Session token brief")
-	fmt.Fprintf(w, "Session: %s\n", report.SessionID)
-	fmt.Fprintln(w)
-	fmt.Fprintln(w, agentBriefUsageLine(report.Tokens))
-	fmt.Fprintln(w)
-	fmt.Fprintln(w, "Next best action:")
-	fmt.Fprintln(w, agentBriefNextAction(report))
-
-	signals := agentBriefSignals(report)
-	if len(signals) > 0 {
-		fmt.Fprintln(w)
-		fmt.Fprintln(w, "Signals:")
-		for _, signal := range signals {
-			fmt.Fprintf(w, "- %s\n", signal)
-		}
+	duration := label + tokenDurationLine(v)
+	if effort := tokenEffortHeader(v); effort != "" {
+		duration += "      " + effort
+	}
+	fmt.Fprintln(w, duration)
+	if c := report.Context; c != nil {
+		fmt.Fprintf(w, "Context: %d%% full (%s of %s)\n", c.Percent, tokenreport.FormatTokenCount(c.Tokens), tokenreport.FormatTokenCount(c.WindowSize))
 	}
 }
 
-func agentBriefUsageLine(tokens *sessionTokensUsage) string {
-	if tokens == nil {
-		return "Token usage: unavailable."
-	}
-	if tokens.CacheRead > 0 {
-		return fmt.Sprintf(
-			"Token usage: %s total; %s cache/context replay; %s.",
-			formatTokenCount(tokens.Total),
-			formatPercent(tokenPercent(tokens.CacheRead, topLevelSessionTokenTotal(tokens))),
-			formatAPICalls(tokens.APICalls),
-		)
-	}
-	return fmt.Sprintf("Token usage: %s total; %s.", formatTokenCount(tokens.Total), formatAPICalls(tokens.APICalls))
-}
-
+// formatAPICalls renders "1 API call" / "N API calls".
 func formatAPICalls(count int) string {
 	if count == 1 {
 		return "1 API call"
@@ -493,85 +411,46 @@ func formatAPICalls(count int) string {
 	return fmt.Sprintf("%d API calls", count)
 }
 
-func agentBriefNextAction(report sessionTokensReport) string {
-	if hasTokenRecommendation(report, "no-token-data") {
-		return "Token usage is not available yet. Use this as a context check, not a spend diagnosis; continue after the next checkpoint captures usage."
-	}
-	if action, ok := agentBriefOptimizationAction(report); ok {
-		return action
-	}
-	return "Continue normally; no high-signal token optimization is available from this session yet."
+// formatPercent renders a percentage with at most one decimal ("97.4%",
+// "80%").
+func formatPercent(percent float64) string {
+	formatted := fmt.Sprintf("%.1f", percent)
+	formatted = strings.TrimSuffix(formatted, ".0")
+	return formatted + "%"
 }
 
-func agentBriefOptimizationAction(report sessionTokensReport) (string, bool) {
-	switch {
-	case (hasTokenRecommendation(report, "cache-write-pressure") || hasTokenRecommendation(report, "output-pressure")) &&
-		(hasTokenRecommendation(report, "context-replay-hotspot") || hasTokenRecommendation(report, "api-call-amplification")):
-		return agentBriefCostProxyBatchAction, true
-	case hasTokenRecommendation(report, "cache-write-pressure") && hasTokenRecommendation(report, "output-pressure"):
-		return agentBriefCostProxyBatchAction, true
-	case hasTokenRecommendation(report, "cache-write-pressure"):
-		return "Use at most 3 batched reads and avoid broad new context until you have one narrowed hypothesis.", true
-	case hasTokenRecommendation(report, "output-pressure"):
-		return "Keep the next answer tight; cite only necessary evidence and avoid restating prior context.", true
-	case hasTokenRecommendation(report, "context-replay-hotspot") && hasTokenRecommendation(report, "api-call-amplification"):
-		return agentBriefCostProxyBatchAction, true
-	case hasTokenRecommendation(report, "api-call-amplification"):
-		return agentBriefCostProxyBatchAction, true
-	case hasTokenRecommendation(report, "context-replay-hotspot"):
-		return "Use at most 2 focused reads only if a named file or test can change the answer; otherwise answer now. Avoid broad grep, broad diffs, and broad tests.", true
-	case hasTokenRecommendation(report, "subagent-heavy"):
-		return "Do not launch broad subagents. Use one narrowly scoped check with a concrete expected output.", true
-	case hasTokenRecommendation(report, "high-context-pressure"):
-		return "Preserve useful findings, then answer with at most 2 focused reads if more evidence is required.", true
-	case hasTokenRecommendation(report, "long-session"):
-		return "Summarize useful findings and stop unless one focused read can change the answer.", true
-	default:
-		return "", false
-	}
+// --- Helpers kept for `tokens profile` until Task 18 rebuilds it on the
+// shared renderer. Nothing in this file uses them.
+
+// sessionTokensUsage is the previous schema's `tokens` object, still emitted
+// by `tokens profile`.
+type sessionTokensUsage struct {
+	Total         int `json:"total"`
+	Input         int `json:"input"`
+	CacheRead     int `json:"cache_read"`
+	CacheWrite    int `json:"cache_write"`
+	Output        int `json:"output"`
+	APICalls      int `json:"api_calls"`
+	SubagentTotal int `json:"subagent_total,omitempty"`
 }
 
-func agentBriefSignals(report sessionTokensReport) []string {
-	var signals []string
-	if hasTokenRecommendation(report, "context-replay-hotspot") {
-		signals = append(signals, "Cache/context replay dominates token volume.")
-	}
-	if hasTokenRecommendation(report, "api-call-amplification") {
-		signals = append(signals, "API call count is high for one session.")
-	}
-	if hasTokenRecommendation(report, "cache-write-pressure") {
-		signals = append(signals, "Cache write/new context pressure is elevated.")
-	}
-	if hasTokenRecommendation(report, "output-pressure") {
-		signals = append(signals, "Output pressure is elevated.")
-	}
-	if hasTokenRecommendation(report, "subagent-heavy") {
-		signals = append(signals, "Subagent usage is a meaningful part of total tokens.")
-	}
-	if hasTokenRecommendation(report, "high-context-pressure") {
-		signals = append(signals, "Context pressure is high.")
-	}
-	if hasTokenRecommendation(report, "long-session") {
-		signals = append(signals, "Session has crossed a long-session or checkpoint boundary.")
-	}
-	if hasTokenRecommendation(report, "no-token-data") {
-		signals = append([]string{"Token usage is unavailable for this session."}, signals...)
-	}
-	if len(signals) == 0 && report.Tokens != nil {
-		signals = append(signals, "No high-signal token risk detected from captured usage.")
-	}
-	return signals
+// sessionTokensRecommendation is the previous schema's `recommendations`
+// element, still emitted by `tokens profile`.
+type sessionTokensRecommendation struct {
+	ID       string   `json:"id"`
+	Severity string   `json:"severity"`
+	Message  string   `json:"message"`
+	Signals  []string `json:"signals,omitempty"`
 }
 
-func hasTokenRecommendation(report sessionTokensReport, id string) bool {
-	for _, rec := range report.Recommendations {
-		if rec.ID == id {
-			return true
-		}
-	}
-	return false
-}
+// Thresholds `tokens profile` still gates its signals on.
+const (
+	recommendationHighCacheReadPercent     = 80
+	recommendationSubagentShareDenominator = 10
+)
 
+// writeTokenRecommendations prints the previous schema's Recommendations
+// section: one bullet per message.
 func writeTokenRecommendations(w io.Writer, recs []sessionTokensRecommendation) {
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "Recommendations")
@@ -580,10 +459,57 @@ func writeTokenRecommendations(w io.Writer, recs []sessionTokensRecommendation) 
 	}
 }
 
-func writeTokenUsageSection(w io.Writer, tokens *sessionTokensUsage) {
-	writeTokenUsageSectionWithTitle(w, "Token usage", tokens)
+// buildSessionTokensUsage converts a recorded usage to the previous schema's
+// `tokens` object; nil when nothing was recorded.
+func buildSessionTokensUsage(usage *agent.TokenUsage) *sessionTokensUsage {
+	if usage == nil {
+		return nil
+	}
+	total := totalTokens(usage)
+	if total == 0 && usage.APICallCount == 0 {
+		return nil
+	}
+	return &sessionTokensUsage{
+		Total:         total,
+		Input:         usage.InputTokens,
+		CacheRead:     usage.CacheReadTokens,
+		CacheWrite:    usage.CacheCreationTokens,
+		Output:        usage.OutputTokens,
+		APICalls:      usage.APICallCount,
+		SubagentTotal: totalTokens(usage.SubagentTokens),
+	}
 }
 
+// topLevelSessionTokenTotal is the four classes summed without the subagent
+// part, saturating on overflow.
+func topLevelSessionTokenTotal(tokens *sessionTokensUsage) int {
+	if tokens == nil {
+		return 0
+	}
+	total := saturatingIntAdd(tokens.Input, tokens.CacheWrite)
+	total = saturatingIntAdd(total, tokens.CacheRead)
+	return saturatingIntAdd(total, tokens.Output)
+}
+
+// tokenShareAtLeastOneTenth reports whether part is at least a tenth of
+// total, without overflowing on large counts.
+func tokenShareAtLeastOneTenth(part, total int) bool {
+	if part <= 0 || total <= 0 {
+		return false
+	}
+	return part >= (total-1)/recommendationSubagentShareDenominator+1
+}
+
+// tokenPercent is value/total as a percentage; 0 for a non-positive total.
+func tokenPercent(value, total int) float64 {
+	if total <= 0 {
+		return 0
+	}
+	return float64(value) * 100 / float64(total)
+}
+
+// writeTokenUsageSectionWithTitle prints the previous schema's usage
+// section: the total and the five figures on one line.
 func writeTokenUsageSectionWithTitle(w io.Writer, title string, tokens *sessionTokensUsage) {
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, title)
@@ -602,25 +528,7 @@ func writeTokenUsageSectionWithTitle(w io.Writer, title string, tokens *sessionT
 	}
 }
 
-func writeTokenContributors(w io.Writer, contributors []sessionTokensContributor, contextInfo *sessionTokensContext) {
-	if len(contributors) > 0 {
-		fmt.Fprintln(w)
-		fmt.Fprintln(w, "Likely contributors")
-		for _, contributor := range contributors {
-			switch contributor.Kind {
-			case "subagents":
-				fmt.Fprintf(w, "- %s: %s tokens\n", contributor.Label, formatTokenCount(contributor.Tokens))
-			case "context_pressure":
-				if contextInfo != nil {
-					fmt.Fprintf(w, "- %s: %d%% of %s tokens\n", contributor.Label, contextInfo.Percent, formatTokenCount(contextInfo.WindowSize))
-				}
-			default:
-				fmt.Fprintf(w, "- %s\n", contributor.Label)
-			}
-		}
-	}
-}
-
+// writeTokenLimitations prints the previous schema's Limitations section.
 func writeTokenLimitations(w io.Writer, limitations []string) {
 	if len(limitations) > 0 {
 		fmt.Fprintln(w)
