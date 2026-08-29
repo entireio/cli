@@ -124,8 +124,9 @@ func executeAgentHook(cmd *cobra.Command, agentName types.AgentName, hookName st
 	// dispatch cost instead of exiting fast (#524).
 	// settings.IsActiveForRepo(WithReason) is the same fail-closed gate the
 	// git hooks use (see PersistentPreRun in hooks_git_cmd.go). It extends
-	// IsSetUpAndEnabled with the user-global tier: repos with no repo-level
-	// setup proceed when global mode is on and the repo is not excluded.
+	// main's repo-level gate with the user-global tier: repos with no
+	// repo-level setup proceed when global mode is on and the repo is not
+	// excluded.
 	if !policy.Active {
 		warnInactiveOnSessionStart(ctx, cmd.ErrOrStderr(), agentName, hookName, inactiveSessionStartNotice(policy.InactiveReason))
 		return nil

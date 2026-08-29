@@ -23,15 +23,26 @@ const (
 )
 
 // The leaf cannot import this package (cycle through paths), so it takes the
-// tracked-file probe by injection at package initialization: a local settings
-// file counts for activation only when it is provably this developer's — not
-// in the git index and not reached through a symlink
-// (probeLocalSettingsIsVersioned checks both; memoized per process).
+// tracked-file probe by injection at package initialization. The three-state
+// answer is passed through as-is: a proven-tracked file is ignored, a verified
+// own file (not in the git index, not reached through a symlink —
+// probeLocalSettingsIsVersioned checks both; memoized per process) may
+// override the user's exclusions, and an unverifiable one keeps its settings
+// but may not — the same asymmetry the merged loader applies to the OPF
+// command (see localTrust).
 var _ = installLocalSettingsProbe()
 
 func installLocalSettingsProbe() struct{} {
-	repopolicy.LocalSettingsTrusted = func(ctx context.Context, path string) bool {
-		return classifyLocalSettings(ctx, path) != localTracked
+	repopolicy.ClassifyLocalSettings = func(ctx context.Context, path string) repopolicy.LocalSettingsVerdict {
+		switch classifyLocalSettings(ctx, path) {
+		case localTracked:
+			return repopolicy.LocalSettingsTracked
+		case localOwn:
+			return repopolicy.LocalSettingsOwn
+		case localUnverifiable:
+			return repopolicy.LocalSettingsUnverifiable
+		}
+		return repopolicy.LocalSettingsUnverifiable
 	}
 	return struct{}{}
 }
@@ -61,7 +72,9 @@ func UserSettingsPath() string {
 	return repopolicy.UserSettingsPath()
 }
 
-// LoadUserSettings strictly loads the user-global settings file.
+// LoadUserSettings loads the user-global settings file (per-block strictness:
+// the global block rejects unknown keys, unknown top-level blocks are kept —
+// see repopolicy.UserSettings).
 func LoadUserSettings(ctx context.Context) (*UserSettings, error) {
 	return repopolicy.LoadUserSettings(ctx) //nolint:wrapcheck // compatibility facade preserves the public error contract
 }

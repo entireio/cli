@@ -129,7 +129,20 @@ func commandInsideWorktree(command, worktreeRoot string) bool {
 	}
 	target = canonicalizeBestEffort(target)
 	root := canonicalizeBestEffort(worktreeRoot)
-	return gitpath.Equivalent(target, root) || strings.HasPrefix(target, root+string(filepath.Separator))
+	return gitpath.Equivalent(target, root) || pathUnderRoot(target, root)
+}
+
+// pathUnderRoot reports whether target lies strictly inside root, comparing
+// the root-length prefix with the same filesystem equivalence (case folding on
+// case-insensitive platforms) the exact-root match uses. A byte-wise prefix
+// check would let `/Repo/tool` escape the containment gate for a worktree at
+// `/repo` on macOS or Windows.
+func pathUnderRoot(target, root string) bool {
+	root = strings.TrimRight(root, string(filepath.Separator))
+	if len(target) <= len(root) || !os.IsPathSeparator(target[len(root)]) {
+		return false
+	}
+	return gitpath.Equivalent(target[:len(root)], root)
 }
 
 // canonicalizeBestEffort resolves symlinks in the deepest existing ancestor of

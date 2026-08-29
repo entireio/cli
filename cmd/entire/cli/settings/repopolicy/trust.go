@@ -61,14 +61,15 @@ func DecideEgress(ctx context.Context, policy RepoPolicy, global *GlobalConfig, 
 	// trust_all is consent for every repo on the machine, whatever its remote
 	// looks like — it must not depend on resolving an identity. The identity
 	// is still attached when it resolves (status names the scope), but a
-	// failure to read the origin config never turns "Always" into a hold.
+	// failure to read the remote config or elect the sync remote never turns
+	// "Always" into a hold.
 	if global.TrustAll {
 		identity, _ := ResolveTrustIdentity(ctx, repository) //nolint:errcheck // display-only under trust_all; see above
 		return TrustDecision{Allowed: true, Source: TrustSourceAll, Reason: TrustReasonNone, Identity: identity}
 	}
 	identity, err := ResolveTrustIdentity(ctx, repository)
 	if err != nil {
-		return TrustDecision{Source: TrustSourceNone, Reason: TrustReasonInvalidOrigin}
+		return TrustDecision{Source: TrustSourceNone, Reason: TrustReasonIdentityUnresolved}
 	}
 	decision := TrustDecision{Source: TrustSourceNone, Reason: TrustReasonUntrusted, Identity: identity}
 	if identityTrusted(ctx, global, identity) {

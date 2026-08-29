@@ -13,7 +13,7 @@ import (
 // remote is elected here in strategy (ResolveCheckpointSyncRemote:
 // checkpoint_push_remote → captured election → origin → sole → first), which
 // the repopolicy leaf cannot import, so the resolver is installed at package
-// initialization — the same seam settings uses for LocalSettingsTrusted.
+// initialization — the same seam settings uses for ClassifyLocalSettings.
 // Every binary that links strategy (the CLI and its hooks) gets the election;
 // anything that does not keeps repopolicy's origin default.
 var _ = installTrustSyncRemoteResolver()
@@ -57,7 +57,7 @@ func pendingSyncRemoteFromContext(ctx context.Context) string {
 // is measured against the remote the user just trusted, not the election.
 func ResolveCheckpointSyncRemoteForTrust(ctx context.Context) (CheckpointSyncRemote, error) {
 	if name := pendingSyncRemoteFromContext(ctx); name != "" {
-		return CheckpointSyncRemote{Name: name, Source: SyncRemoteSourceConfig}, nil
+		return CheckpointSyncRemote{Name: name, Source: SyncRemoteSourceOverride}, nil
 	}
 	return ResolveCheckpointSyncRemote(ctx)
 }

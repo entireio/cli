@@ -7,7 +7,10 @@ import (
 	"testing"
 )
 
-func TestEgressDecision_RequiresEveryFetchAndPushURL(t *testing.T) {
+// Consent keys follow git's delivery rule: a configured pushurl REPLACES the
+// fetch URL for pushes, so trusting the fetch URL says nothing about where
+// checkpoints go; without a pushurl every fetch URL is a delivery target.
+func TestEgressDecision_KeysOnPushURLsWhenConfigured(t *testing.T) {
 	root, _ := newPolicyRepo(t)
 	runPolicyGit(t, root, "remote", "add", "origin", "https://github.com/acme/widgets.git")
 	runPolicyGit(t, root, "remote", "set-url", "--add", "origin", "https://gitlab.com/acme/widgets.git")
@@ -16,10 +19,30 @@ func TestEgressDecision_RequiresEveryFetchAndPushURL(t *testing.T) {
 
 	policy := policyAt(t, root)
 	if policy.Trust.Allowed || policy.Trust.Reason != TrustReasonUntrusted {
-		t.Fatalf("trust = %+v, want held until every fetch and push URL is trusted", policy.Trust)
+		t.Fatalf("trust = %+v, want held: the fetch URLs are trusted but pushes go to the pushurl", policy.Trust)
 	}
-	if len(policy.Trust.Identity.OriginKeys) != 3 {
-		t.Fatalf("origin keys = %q, want all three configured identities", policy.Trust.Identity.OriginKeys)
+	if got := policy.Trust.Identity.OriginKeys; len(got) != 1 || got[0] != "codeberg.org/acme/widgets" {
+		t.Fatalf("origin keys = %q, want only the pushurl identity", got)
+	}
+
+	setPolicyGlobal(t, `{"global":{"enabled":true,"trusted_origins":["codeberg.org/acme/widgets"]}}`)
+	if policy := policyAt(t, root); !policy.Trust.Allowed {
+		t.Fatalf("trust = %+v, want allowed once the pushurl is trusted", policy.Trust)
+	}
+}
+
+func TestEgressDecision_RequiresEveryFetchURLWithoutPushURL(t *testing.T) {
+	root, _ := newPolicyRepo(t)
+	runPolicyGit(t, root, "remote", "add", "origin", "https://github.com/acme/widgets.git")
+	runPolicyGit(t, root, "remote", "set-url", "--add", "origin", "https://gitlab.com/acme/widgets.git")
+	setPolicyGlobal(t, `{"global":{"enabled":true,"trusted_origins":["github.com/acme/widgets"]}}`)
+
+	policy := policyAt(t, root)
+	if policy.Trust.Allowed || policy.Trust.Reason != TrustReasonUntrusted {
+		t.Fatalf("trust = %+v, want held until every fetch URL is trusted", policy.Trust)
+	}
+	if len(policy.Trust.Identity.OriginKeys) != 2 {
+		t.Fatalf("origin keys = %q, want both fetch URLs", policy.Trust.Identity.OriginKeys)
 	}
 }
 
@@ -233,8 +256,8 @@ func TestEgressDecision_ElectionErrorHoldsUnlessTrustAll(t *testing.T) {
 	})
 
 	setPolicyGlobal(t, `{"global":{"enabled":true,"trusted_origins":["github.com/acme/widgets"]}}`)
-	if held := policyAt(t, root); held.Trust.Allowed || held.Trust.Reason != TrustReasonInvalidOrigin {
-		t.Fatalf("trust = %+v, want invalid_origin hold on an election error", held.Trust)
+	if held := policyAt(t, root); held.Trust.Allowed || held.Trust.Reason != TrustReasonIdentityUnresolved {
+		t.Fatalf("trust = %+v, want identity_unresolved hold on an election error", held.Trust)
 	}
 	setPolicyGlobal(t, `{"global":{"enabled":true,"trust_all":true}}`)
 	if all := policyAt(t, root); !all.Trust.Allowed || all.Trust.Source != TrustSourceAll {

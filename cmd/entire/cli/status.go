@@ -176,6 +176,10 @@ type globalTrackingInfo struct {
 	// (trustStateTrusted/Untrusted/NotApplicable), "" outside a repository.
 	TrustState  string
 	TrustSource settings.TrustSource
+	// TrustReason explains an untrusted state ("untrusted" — no grant;
+	// "identity_unresolved" — the consent key could not be derived, so only
+	// trust_all can clear it; "settings_error"); "" otherwise.
+	TrustReason string
 	// HeldCheckpoints counts checkpoints held locally (untrusted state only).
 	HeldCheckpoints int
 	// SyncRemote names the elected checkpoint sync remote the trust decision
@@ -255,6 +259,9 @@ func computeGlobalTrackingInfo(ctx context.Context) globalTrackingInfo {
 			info.InactiveReason = policy.InactiveReason
 			info.ActivationSource = policy.ActivationSource
 			info.TrustState, info.TrustSource = computeRepoTrustState(policy)
+			if info.TrustState == trustStateUntrusted {
+				info.TrustReason = string(policy.Trust.Reason)
+			}
 			info.SyncRemote = policy.Trust.Identity.RemoteName
 		}
 		if info.TrustState == trustStateUntrusted {
@@ -280,11 +287,23 @@ func computeRepoTrustState(policy repopolicy.RepoPolicy) (string, settings.Trust
 
 // heldCheckpointCount counts checkpoints held locally against the elected
 // checkpoint sync remote, shared by status, doctor, and `entire trust`.
-// Best-effort: any failure reads as 0.
+// Best-effort: any failure reads as 0. In dedicated checkpoint_remote mode the
+// git-branch comparison is against a remote-tracking ref no push to a raw URL
+// ever updates and would read "all held" forever, so — as in
+// computeCheckpointSyncInfo — the count is reported only on the refs backend,
+// where the local push queue is exact.
 func heldCheckpointCount(ctx context.Context) int {
 	elected, err := strategy.ResolveCheckpointSyncRemoteForTrust(ctx)
 	if err != nil || elected.Name == "" {
 		return 0
+	}
+	if s, loadErr := settings.Load(ctx); loadErr == nil && s.GetCheckpointRemote() != nil {
+		if _, enabled, purlErr := checkpointremote.PushURL(ctx, elected.Name); purlErr == nil && enabled {
+			if cpCfg, cfgErr := settings.LoadCheckpointsConfig(ctx); cfgErr == nil && checkpoint.PrimaryIsRefs(cpCfg) {
+				return countUnpushedCheckpointsForStatus(ctx, "")
+			}
+			return 0
+		}
 	}
 	return countUnpushedCheckpointsForStatus(ctx, elected.Name)
 }
@@ -1121,8 +1140,12 @@ type globalTrackingJSON struct {
 	InactiveReason string `json:"inactive_reason,omitempty"`
 	// TrustState is "trusted"|"untrusted"|"not_applicable"; TrustSource is
 	// "trust_all"|"repo"|"none". Both omitted outside a repository.
-	TrustState      string `json:"trust_state,omitempty"`
-	TrustSource     string `json:"trust_source,omitempty"`
+	TrustState  string `json:"trust_state,omitempty"`
+	TrustSource string `json:"trust_source,omitempty"`
+	// TrustReason distinguishes the untrusted states: "untrusted" (no grant
+	// yet — `entire trust` fixes it), "identity_unresolved" (the consent key
+	// could not be derived; only trust_all clears it), "settings_error".
+	TrustReason     string `json:"trust_reason,omitempty"`
 	HeldCheckpoints int    `json:"held_checkpoints,omitempty"`
 	// SyncRemote is the elected checkpoint sync remote the trust state is
 	// keyed on — where this repo's checkpoints leave the machine.
@@ -1189,6 +1212,7 @@ func runStatusJSON(ctx context.Context, w io.Writer) error {
 		if info.TrustState != "" {
 			gt.TrustState = info.TrustState
 			gt.TrustSource = string(info.TrustSource)
+			gt.TrustReason = info.TrustReason
 		}
 	}
 	writeJSON := func(v statusJSON) error {

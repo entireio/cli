@@ -109,3 +109,87 @@ func TestUserHooks_Gemini_Lifecycle(t *testing.T) {
 		t.Fatalf("uninstall did not preserve only user hooks: %s", raw["hooks"])
 	}
 }
+
+// An exact duplicate of a current Entire entry would fire the hook twice per
+// event, machine-wide. It must not read as "already installed"; the install
+// must collapse it to one entry and report a repair.
+func TestUserHooks_Gemini_RepairsDuplicateEntry(t *testing.T) {
+	path := geminiUserSettings(t)
+	agent := &GeminiCLIAgent{}
+	if _, err := agent.InstallUserHooks(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		t.Fatal(err)
+	}
+	var hooks map[string][]GeminiHookMatcher
+	if err := json.Unmarshal(raw["hooks"], &hooks); err != nil {
+		t.Fatal(err)
+	}
+	hooks["SessionStart"] = append(hooks["SessionStart"], hooks["SessionStart"]...)
+	hooksJSON, err := json.Marshal(hooks)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw["hooks"] = hooksJSON
+	out, err := json.Marshal(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, out, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := agent.InstallUserHooks(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.Repaired {
+		t.Fatalf("duplicate entry must be repaired, got %+v", result)
+	}
+	if got := strings.Count(string(geminiRawSettings(t, path)["hooks"]), "entire-session-start"); got != 1 {
+		t.Fatalf("session-start entries after repair = %d, want 1", got)
+	}
+}
+
+// Install sets hooksConfig.enabled so Gemini runs our hooks; when uninstall
+// leaves no hooks at all it takes that back, but a remaining user hook keeps
+// it, since removing it would silently switch theirs off.
+func TestUserHooks_Gemini_UninstallDropsHooksConfigOnlyWhenNoHooksRemain(t *testing.T) {
+	path := geminiUserSettings(t)
+	agent := &GeminiCLIAgent{}
+	if _, err := agent.InstallUserHooks(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := agent.UninstallUserHooks(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	raw := geminiRawSettings(t, path)
+	if _, ok := raw["hooksConfig"]; ok {
+		t.Fatalf("hooksConfig must be removed with the last hook: %s", raw["hooksConfig"])
+	}
+
+	initial := `{"hooksConfig":{"enabled":true,"timeout":5},"hooks":{"SessionStart":[{"hooks":[{"name":"mine","type":"command","command":"my-own"}]}]}}`
+	if err := os.WriteFile(path, []byte(initial), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := agent.InstallUserHooks(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := agent.UninstallUserHooks(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	raw = geminiRawSettings(t, path)
+	var hooksConfig map[string]any
+	if err := json.Unmarshal(raw["hooksConfig"], &hooksConfig); err != nil {
+		t.Fatal(err)
+	}
+	if hooksConfig["enabled"] != true || hooksConfig["timeout"] != float64(5) {
+		t.Fatalf("a remaining user hook must keep hooksConfig intact: %s", raw["hooksConfig"])
+	}
+}

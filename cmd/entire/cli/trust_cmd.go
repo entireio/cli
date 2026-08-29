@@ -126,18 +126,31 @@ func refuseTrustWhenInactive(cmd *cobra.Command) error {
 		fmt.Fprintf(errW, "Enable global tracking in %s, then re-run 'entire trust'.\n", settings.UserSettingsPath())
 		return NewSilentError(errors.New("global tracking is off"))
 	}
-	if active, reason := settings.IsActiveForRepoWithReason(ctx); !active {
-		cmd.SilenceUsage = true
-		if reason == settings.InactiveReasonGlobalExcluded {
-			fmt.Fprintln(errW, "Not recording trust: this repo is excluded in your settings, so Entire is not capturing it.")
-			fmt.Fprintf(errW, "Remove the exclude from %s first if you want it tracked and synced.\n", settings.UserSettingsPath())
-			return NewSilentError(errors.New("repo is excluded from global tracking"))
-		}
+	active, reason := settings.IsActiveForRepoWithReason(ctx)
+	if active {
+		return nil
+	}
+	cmd.SilenceUsage = true
+	switch reason {
+	case settings.InactiveReasonGlobalExcluded:
+		fmt.Fprintln(errW, "Not recording trust: this repo is excluded in your settings, so Entire is not capturing it.")
+		fmt.Fprintf(errW, "Remove the exclude from %s first if you want it tracked and synced.\n", settings.UserSettingsPath())
+		return NewSilentError(errors.New("repo is excluded from global tracking"))
+	case settings.InactiveReasonRepoDisabled:
+		fmt.Fprintln(errW, "Not recording trust: this repo's own .entire settings set enabled: false, so Entire is not capturing it.")
+		fmt.Fprintln(errW, "Run 'entire enable' here first if you want it tracked and synced.")
+		return NewSilentError(errors.New("repo is disabled by its own settings"))
+	case settings.InactiveReasonGlobalOff:
 		fmt.Fprintln(errW, "Not recording trust: global tracking is off, so Entire is not capturing this repo.")
 		fmt.Fprintf(errW, "Enable global tracking in %s, then re-run 'entire trust'.\n", settings.UserSettingsPath())
 		return NewSilentError(errors.New("global tracking is off"))
+	default:
+		// The tier is on and the repo is neither excluded nor vetoed, yet the
+		// classification says inactive: it failed. Don't misreport that as a
+		// configuration choice.
+		fmt.Fprintln(errW, "Not recording trust: Entire could not determine whether it is capturing this repo (see `entire status`).")
+		return NewSilentError(errors.New("repository policy could not be classified"))
 	}
-	return nil
 }
 
 // unconfiguredTrustTierError is the shared friendly rendering for

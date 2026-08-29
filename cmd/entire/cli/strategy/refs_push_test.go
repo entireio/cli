@@ -387,5 +387,7 @@ func TestPushQueuedCheckpointRefs_ConsentFollowsPushTarget(t *testing.T) {
 	require.NoError(t, err)
 	assert.False(t, pushDisabled)
 	assert.Equal(t, len(refs), pushed, "trusting the push target releases the refs")
-	_ = queue
+	remaining, err = queue.Drain()
+	require.NoError(t, err)
+	assert.Empty(t, remaining, "a delivered push leaves nothing queued")
 }

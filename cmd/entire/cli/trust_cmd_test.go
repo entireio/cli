@@ -136,3 +136,29 @@ func TestRunTrust_RemoteFlag(t *testing.T) {
 		t.Fatalf("want a clear error for an unknown remote, got %v", err)
 	}
 }
+
+// TestRunTrust_RefusesWhenRepoDisabled: a repo whose own settings.local.json
+// says enabled:false is vetoed, not "global tracking is off" — the refusal
+// must name the actual reason and its fix.
+func TestRunTrust_RefusesWhenRepoDisabled(t *testing.T) {
+	repoEnabledWithOrigin(t)
+	writeLocalSettings(t, `{"enabled": false}`)
+	writeUserSettings(t, `{"global":{"enabled":true}}`)
+	cmd, _, errOut := newTrustTestCmd()
+
+	err := runTrust(cmd, false, "")
+	var silent *SilentError
+	if !errors.As(err, &silent) {
+		t.Fatalf("runTrust error = %v, want SilentError", err)
+	}
+	if !strings.Contains(errOut.String(), "enabled: false") || strings.Contains(errOut.String(), "global tracking is off") {
+		t.Fatalf("stderr = %q, want the repo-disabled refusal", errOut.String())
+	}
+	us, err := settings.LoadUserSettings(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(us.Global.TrustedOrigins) != 0 {
+		t.Fatalf("refused trust must not write: %v", us.Global.TrustedOrigins)
+	}
+}

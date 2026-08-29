@@ -30,11 +30,14 @@ const (
 type TrustReason string
 
 const (
-	TrustReasonNone          TrustReason = ""
-	TrustReasonInactive      TrustReason = "inactive"
-	TrustReasonUntrusted     TrustReason = "untrusted"
-	TrustReasonInvalidOrigin TrustReason = "invalid_origin"
-	TrustReasonSettings      TrustReason = "settings_error"
+	TrustReasonNone      TrustReason = ""
+	TrustReasonInactive  TrustReason = "inactive"
+	TrustReasonUntrusted TrustReason = "untrusted"
+	// TrustReasonIdentityUnresolved: the consent identity could not be derived
+	// (unreadable remote config, or a sync-remote election error), so a
+	// per-repo grant cannot be matched; only trust_all clears it.
+	TrustReasonIdentityUnresolved TrustReason = "identity_unresolved"
+	TrustReasonSettings           TrustReason = "settings_error"
 )
 
 // TrustIdentity is the exclusive remote-or-path key used for egress consent.
@@ -121,10 +124,13 @@ func (p RepoPolicy) RuntimeRoot() string {
 type RepoActivation struct {
 	Configured bool
 	Enabled    bool
-	// LocalOverride reports that the effective "enabled" came from a trusted
-	// (untracked, this developer's own) settings.local.json — the one
-	// repo-level input that is unambiguously the user's action on this clone
-	// rather than repository content that arrived by cloning.
+	// LocalOverride reports that the effective "enabled" came from a
+	// settings.local.json VERIFIED to be this developer's own (untracked, not
+	// a symlink) — the one repo-level input that is unambiguously the user's
+	// action on this clone rather than repository content that arrived by
+	// cloning. It is the only thing that lets a repo through the user's
+	// exclude lists, so an unverifiable local file (repository unreadable)
+	// still contributes its "enabled" value but never sets this.
 	LocalOverride bool
 }
 
