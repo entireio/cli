@@ -22,6 +22,7 @@ func TestToolDetail(t *testing.T) {
 		{name: "bash plain command", tool: toolBash, in: ToolInput{Command: "ls"}, want: "ls"},
 		{name: "bash flags dropped", tool: toolBash, in: ToolInput{Command: "git log -p -3"}, want: "git log"},
 		{name: "bash long flag with value dropped", tool: toolBash, in: ToolInput{Command: "git log --since=yesterday --oneline"}, want: "git log"},
+		// Known properties, pinned so a change is deliberate; not the ideal output.
 		{name: "bash flag dropped but its separate value is kept, plain third word dropped", tool: toolBash, in: ToolInput{Command: "docker -H host ps -a"}, want: "docker host"},
 		{
 			name: "bash cd prefix and env assignment stripped",
@@ -56,6 +57,12 @@ func TestToolDetail(t *testing.T) {
 		{name: "bash subshell grouping stripped", tool: toolBash, in: ToolInput{Command: "(cd x && make all)"}, want: "make all"},
 		{name: "bash brace group stripped", tool: toolBash, in: ToolInput{Command: "{ a; b two; }"}, want: "b two"},
 		{name: "bash substitution is an expansion and dropped", tool: toolBash, in: ToolInput{Command: "echo $(date)"}, want: "echo"},
+		// Known properties, pinned so a change is deliberate; not the ideal output.
+		{name: "bash multi-word substitution tail is kept", tool: toolBash, in: ToolInput{Command: "echo $(cat ~/.secret) more"}, want: "echo ~/.secret"},
+		{name: "bash export assignment value dropped", tool: toolBash, in: ToolInput{Command: "export API_KEY=abc"}, want: "export"},
+		{name: "bash env assignment operand dropped", tool: toolBash, in: ToolInput{Command: "env FOO=bar go test ./..."}, want: "env go"},
+		{name: "bash assignment after wrapper dropped", tool: toolBash, in: ToolInput{Command: "sudo FOO=bar make install"}, want: "sudo make"},
+		{name: "bash dash heredoc with space reduces to the command", tool: toolBash, in: ToolInput{Command: "cat <<- EOF\n\tbody\n\tEOF"}, want: "cat"},
 		{name: "bash url with credentials dropped", tool: toolBash, in: ToolInput{Command: "curl https://user:pass@example.com/x"}, want: "curl"},
 		{name: "bash plain url dropped", tool: toolBash, in: ToolInput{Command: "curl -s https://example.com/api?token=abc"}, want: "curl"},
 		{name: "bash variable expansion dropped", tool: toolBash, in: ToolInput{Command: "echo $TOKEN"}, want: "echo"},

@@ -53,9 +53,10 @@ type ContentBlock struct {
 // OpenCode and Pi (path) use for the same thing. Decode a tool_use input into
 // it best-effort — a non-string value under one of these keys is skipped by
 // encoding/json rather than aborting the decode, so the remaining fields still
-// populate. Note encoding/json matches keys case-insensitively, so this type
-// is NOT suitable where the exact key spelling matters; compaction uses
-// RawToolDetail for that reason.
+// populate (Unmarshal still reports an UnmarshalTypeError; callers wanting the
+// partial decode must tolerate it). Note encoding/json matches keys
+// case-insensitively, so this type is NOT suitable where the exact key
+// spelling matters; compaction uses RawToolDetail for that reason.
 type ToolInput struct {
 	FilePath     string `json:"file_path,omitempty"`
 	NotebookPath string `json:"notebook_path,omitempty"`

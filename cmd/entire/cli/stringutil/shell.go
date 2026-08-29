@@ -20,9 +20,6 @@ import "strings"
 // arguments and heredoc data from being read as commands. Where it errs, it
 // errs toward blanking too much. Heredoc openers are copied through
 // unblanked; only the body lines that follow are replaced.
-//
-// Callers: the strategy package's `entire search` command matcher, and
-// transcript.ToolDetail's shell-command reduction.
 func SanitizeShellCommand(cmd string) string {
 	var b strings.Builder
 	b.Grow(len(cmd))
@@ -128,8 +125,8 @@ func parseHeredocStart(cmd string, i int) (delim string, next int, ok bool) {
 	return delim, j, true
 }
 
-// isShellWordByte reports whether c can start a heredoc delimiter word: an
-// ASCII letter or underscore.
+// isShellWordByte reports whether c is an ASCII letter or underscore — the
+// bytes allowed in a heredoc delimiter, with digits permitted after the first.
 func isShellWordByte(c byte) bool {
 	return c == '_' || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
 }

@@ -13,13 +13,14 @@ import (
 // `npm run`). A third word survives only when isPathLikeWord accepts it.
 const shellHeadWords = 2
 
-// envAssignmentPattern matches a leading `VAR=value` word, the same shape
-// strategy's entireSearchCommandPattern tolerates before a command.
+// envAssignmentPattern matches a `VAR=value` word: a leading environment
+// assignment, or an `export` / `env` operand.
 var envAssignmentPattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*=`)
 
 // bareRedirectPattern matches a redirection operator standing alone as a word
-// (`>`, `>>`, `2>`, `<`, `<<<`, `&>`, `>&`), whose target is the NEXT word.
-var bareRedirectPattern = regexp.MustCompile(`^&?\d*[<>]{1,3}&?$`)
+// (`>`, `>>`, `2>`, `<`, `<<<`, `<<-`, `&>`, `>&`), whose target — or heredoc
+// delimiter — is the NEXT word.
+var bareRedirectPattern = regexp.MustCompile(`^&?\d*[<>]{1,3}-?&?$`)
 
 // ToolDetail reduces a tool_use block to the short drill-down string token
 // attribution shows beneath the tool's row. It is the ONE place those rules
@@ -28,12 +29,14 @@ var bareRedirectPattern = regexp.MustCompile(`^&?\d*[<>]{1,3}&?$`)
 //
 //   - shell tools (Bash, shell, exec, exec_command, run_terminal_cmd,
 //     run_shell_command, terminal, execute): the head of the LAST command in
-//     the pipeline — sanitized with stringutil.SanitizeShellCommand, split on
-//     `;`, `&&`, `||`, `|` and newline, leading `VAR=x` assignments,
-//     `-flag` words and redirections dropped, then the first two words plus
-//     a third ONLY when it is path-like (isPathLikeWord: contains `/`,
-//     starts with `.`, or contains `*`) — command, subcommand, and the
-//     path or glob it targets. `go test ./cmd/entire/... -run TestX` →
+//     the pipeline — sanitized with stringutil.SanitizeShellCommand (quoted
+//     spans become NUL and are dropped as words), split on `;`, `&&`, `||`,
+//     `|` and newline, `(`/`{`/`)`/`}` grouping punctuation trimmed,
+//     `VAR=x` assignments, `-flag` words and redirections dropped, then the
+//     first two words plus a third ONLY when it is path-like
+//     (isPathLikeWord: contains `/`, starts with `.`, or contains `*`) —
+//     command, subcommand, and the path or glob it targets.
+//     `go test ./cmd/entire/... -run TestX` →
 //     `go test ./cmd/entire/...`; `git log -p -3` → `git log`;
 //     `npm run build` → `npm run`. Words that can carry secrets are never
 //     kept (isSensitiveWord: contain `://` or `@`, or start with `$`), so
@@ -90,8 +93,10 @@ func shellCommandHead(cmd string) string {
 			skipNext = true
 		case strings.ContainsAny(tok, "<>"):
 			// Redirection with its target attached (`2>&1`, `>out`, `<<EOF`).
-		case len(words) == 0 && envAssignmentPattern.MatchString(tok):
-			// Leading environment assignment.
+		case envAssignmentPattern.MatchString(tok):
+			// Environment assignment — leading `VAR=x`, or `export`/`env`
+			// operands, whose values are as sensitive as the command's
+			// arguments are not.
 		case strings.HasPrefix(tok, "-"):
 			// Flag.
 		case len(words) == shellHeadWords:
@@ -157,8 +162,10 @@ func lastCommandSegment(s string) string {
 }
 
 // trimGrouping strips subshell and brace-group punctuation from a word —
-// `(cd` → `cd`, `make)` → `make`, `}` → “ — leaving `$(...)` substitutions
-// alone so they are not turned into an unbalanced fragment.
+// `(cd` → `cd`, `make)` → `make`, `}` → "" — leaving the token containing
+// `$(` alone so it is not turned into an unbalanced fragment. The tail tokens
+// of a multi-word substitution (`$(cat x)` → `x)`) are trimmed and kept like
+// any other word.
 func trimGrouping(tok string) string {
 	if strings.Contains(tok, "$(") {
 		return tok
