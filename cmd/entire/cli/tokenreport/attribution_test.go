@@ -9,6 +9,9 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 )
 
+// modelSonnet is the priced Anthropic model the fixtures default to.
+const modelSonnet = "claude-sonnet-4-5"
+
 // findContributor returns the contributor with the given key, failing the
 // test when it is absent.
 func findContributor(t *testing.T, got Attributed, kind ContributorKind, label, skill string) Contributor {
@@ -57,7 +60,7 @@ func TestAttributeOutputEqualSplitAcrossEmittedTools(t *testing.T) {
 	t.Parallel()
 
 	a := &types.Attribution{Calls: []types.CallUsage{{
-		Model:   "claude-sonnet-4-5",
+		Model:   modelSonnet,
 		Usage:   types.TokenUsage{OutputTokens: 10, ThinkingTokens: 4, APICallCount: 1},
 		Emitted: []types.ToolUseRef{ref("t1", "Bash", "go test"), ref("t2", "Read", "a.go"), ref("t3", "Grep", "")},
 	}}}
@@ -78,7 +81,7 @@ func TestAttributeOutputEqualSplitAcrossEmittedTools(t *testing.T) {
 		t.Errorf("call count split = %d/%d/%d, want 1/0/0", bash.Usage.APICallCount, read.Usage.APICallCount, grep.Usage.APICallCount)
 	}
 	for _, c := range []Contributor{bash, read, grep} {
-		if c.Model != "claude-sonnet-4-5" || c.Source != SourceTranscript {
+		if c.Model != modelSonnet || c.Source != SourceTranscript {
 			t.Errorf("%s: model=%q source=%q", c.Label, c.Model, c.Source)
 		}
 	}
@@ -321,13 +324,13 @@ func TestAttributeOrphanSubagentRecord(t *testing.T) {
 	a := &types.Attribution{
 		Calls: []types.CallUsage{{Usage: types.TokenUsage{OutputTokens: 1, APICallCount: 1}}},
 		Subagents: []types.SubagentRecord{
-			{ToolUseID: "before-window", SubagentType: "Plan", Model: "claude-sonnet-4-5", Usage: &types.TokenUsage{InputTokens: 10, CacheReadTokens: 20, OutputTokens: 5, APICallCount: 2}},
+			{ToolUseID: "before-window", SubagentType: "Plan", Model: modelSonnet, Usage: &types.TokenUsage{InputTokens: 10, CacheReadTokens: 20, OutputTokens: 5, APICallCount: 2}},
 			{ToolUseID: "no-usage-yet", SubagentType: "Explore"},
 		},
 	}
 	got := Attribute(a, nil)
 	plan := findContributor(t, got, KindSubagent, "Plan", "")
-	if plan.Source != SourceTaskRecord || plan.Model != "claude-sonnet-4-5" {
+	if plan.Source != SourceTaskRecord || plan.Model != modelSonnet {
 		t.Errorf("orphan = source %q model %q", plan.Source, plan.Model)
 	}
 	if plan.Usage != (types.TokenUsage{InputTokens: 10, CacheReadTokens: 20, OutputTokens: 5, APICallCount: 2}) {
@@ -357,9 +360,9 @@ func TestAttributeMergesSameKeyAndSorts(t *testing.T) {
 	t.Parallel()
 
 	a := &types.Attribution{Calls: []types.CallUsage{
-		{Model: "claude-sonnet-4-5", Usage: types.TokenUsage{OutputTokens: 10, APICallCount: 1}, Emitted: []types.ToolUseRef{ref("t1", "Bash", "go test")}},
-		{Model: "claude-sonnet-4-5", Usage: types.TokenUsage{OutputTokens: 4, APICallCount: 1}, Emitted: []types.ToolUseRef{ref("t2", "Bash", "git log"), ref("t3", "Read", "b.go")}},
-		{Model: "claude-sonnet-4-5", Usage: types.TokenUsage{CacheReadTokens: 1000, OutputTokens: 1, APICallCount: 1}},
+		{Model: modelSonnet, Usage: types.TokenUsage{OutputTokens: 10, APICallCount: 1}, Emitted: []types.ToolUseRef{ref("t1", "Bash", "go test")}},
+		{Model: modelSonnet, Usage: types.TokenUsage{OutputTokens: 4, APICallCount: 1}, Emitted: []types.ToolUseRef{ref("t2", "Bash", "git log"), ref("t3", "Read", "b.go")}},
+		{Model: modelSonnet, Usage: types.TokenUsage{CacheReadTokens: 1000, OutputTokens: 1, APICallCount: 1}},
 	}}
 	got := Attribute(a, nil)
 
@@ -414,7 +417,7 @@ func TestAttributeDetailsTopThree(t *testing.T) {
 
 	a := &types.Attribution{Calls: []types.CallUsage{
 		{
-			Model: "claude-sonnet-4-5",
+			Model: modelSonnet,
 			Usage: types.TokenUsage{OutputTokens: 100, APICallCount: 1},
 			Emitted: []types.ToolUseRef{
 				ref("t1", "Bash", "go test"), ref("t2", "Bash", "go test"), ref("t3", "Bash", "go test"), ref("t4", "Bash", "go test"),
@@ -424,7 +427,7 @@ func TestAttributeDetailsTopThree(t *testing.T) {
 			},
 		},
 		{
-			Model:    "claude-sonnet-4-5",
+			Model:    modelSonnet,
 			Usage:    types.TokenUsage{InputTokens: 1000, APICallCount: 1},
 			Consumed: []types.ToolResultRef{{ToolUse: ref("t1", "Bash", "go test"), Bytes: 10}, {ToolUse: ref("old", "Bash", "cat"), Bytes: 10}},
 		},
@@ -543,8 +546,8 @@ func TestMergeContributors(t *testing.T) {
 	t.Parallel()
 
 	s1 := Attribute(&types.Attribution{Calls: []types.CallUsage{
-		{Model: "claude-sonnet-4-5", Usage: types.TokenUsage{OutputTokens: 10, APICallCount: 1}, Emitted: []types.ToolUseRef{ref("t1", "Bash", "go test")}},
-		{Model: "claude-sonnet-4-5", Usage: types.TokenUsage{CacheReadTokens: 100, OutputTokens: 2, APICallCount: 1}},
+		{Model: modelSonnet, Usage: types.TokenUsage{OutputTokens: 10, APICallCount: 1}, Emitted: []types.ToolUseRef{ref("t1", "Bash", "go test")}},
+		{Model: modelSonnet, Usage: types.TokenUsage{CacheReadTokens: 100, OutputTokens: 2, APICallCount: 1}},
 	}}, nil)
 	s2 := Attribute(&types.Attribution{Calls: []types.CallUsage{
 		{Model: "mystery", Usage: types.TokenUsage{OutputTokens: 30, APICallCount: 1}, Emitted: []types.ToolUseRef{ref("t1", "Bash", "git log"), ref("t2", "Bash", "go test")}},
@@ -562,7 +565,7 @@ func TestMergeContributors(t *testing.T) {
 		t.Errorf("merged Bash = %+v", bash.Usage)
 	}
 	if bash.Model != "" {
-		t.Errorf("merged Bash model = %q, want cleared (sonnet + unrecorded-priced mystery)", bash.Model)
+		t.Errorf("merged Bash model = %q, want cleared (sonnet + recorded-but-unpriced mystery)", bash.Model)
 	}
 	assertClose(t, bash.CostShare, 50.0/90)
 	wantDetails := []Detail{{Detail: "go test", Calls: 2, Tokens: 25, CostShare: 50.0 / 90}, {Detail: "git log", Calls: 1, Tokens: 15}}
@@ -582,6 +585,113 @@ func TestMergeContributors(t *testing.T) {
 	assertClose(t, total, 1)
 	if len(MergeContributors(nil).Contributors) != 0 {
 		t.Error("merging nothing should yield no contributors")
+	}
+}
+
+func TestAttributeOrphanRecordWithoutTypeIsUnknown(t *testing.T) {
+	t.Parallel()
+
+	a := &types.Attribution{
+		Calls:     []types.CallUsage{{Usage: types.TokenUsage{OutputTokens: 1, APICallCount: 1}}},
+		Subagents: []types.SubagentRecord{{ToolUseID: "gone", Usage: &types.TokenUsage{OutputTokens: 5, APICallCount: 1}}},
+	}
+	got := findContributor(t, Attribute(a, nil), KindSubagent, LabelUnknownSubagent, "")
+	if got.Source != SourceTaskRecord || got.Usage.OutputTokens != 5 {
+		t.Errorf("unknown-type orphan = %+v", got)
+	}
+}
+
+func TestAttributeSubagentRecordPricedAtBaseTier(t *testing.T) {
+	t.Parallel()
+
+	big := types.TokenUsage{InputTokens: 300_000, OutputTokens: 1000, APICallCount: 1}
+	base := ComputeCostShares(&big, WeightsForCall("gpt-5.5", 0)).Units
+	tiered := ComputeCostShares(&big, WeightsForCall("gpt-5.5", 300_000)).Units
+	if tiered <= base {
+		t.Fatalf("test premise: tiered %v should exceed base %v", tiered, base)
+	}
+
+	// The same 300K input as one CALL is tiered...
+	call := Attribute(&types.Attribution{Calls: []types.CallUsage{{Model: "gpt-5.5", Usage: big}}}, nil)
+	assertCloseRel(t, call.PricedUnits, tiered)
+
+	// ...but as a subagent RECORD (a session aggregate) it is priced at base.
+	agentRef := types.ToolUseRef{ID: "a1", Tool: "Agent", SubagentType: "Explore"}
+	rec := Attribute(&types.Attribution{
+		Calls:     []types.CallUsage{{UsageUnknown: true, Emitted: []types.ToolUseRef{agentRef}}},
+		Subagents: []types.SubagentRecord{{ToolUseID: "a1", SubagentType: "Explore", Model: "gpt-5.5", Usage: &big}},
+	}, nil)
+	assertCloseRel(t, rec.PricedUnits, base)
+	if len(rec.Unpriced) != 0 {
+		t.Errorf("unpriced = %v: a UsageUnknown call on an unrecorded model has nothing to report", rec.Unpriced)
+	}
+}
+
+func TestAttributePreWindowResultCountedOnce(t *testing.T) {
+	t.Parallel()
+
+	old := ref("old", "Bash", "cat")
+	a := &types.Attribution{Calls: []types.CallUsage{
+		{Usage: types.TokenUsage{InputTokens: 10, APICallCount: 1}, Consumed: []types.ToolResultRef{{ToolUse: old, Bytes: 5}}},
+		{Usage: types.TokenUsage{InputTokens: 20, APICallCount: 1}, Consumed: []types.ToolResultRef{{ToolUse: old, Bytes: 5}}},
+	}}
+	bash := findContributor(t, Attribute(a, nil), KindTool, "Bash", "")
+	if len(bash.Details) != 1 || bash.Details[0].Calls != 1 || bash.Details[0].Tokens != 30 {
+		t.Errorf("details = %+v, want cat: 1 call, 30 tokens", bash.Details)
+	}
+}
+
+func TestAttributeDuplicateRecordsForOneToolUse(t *testing.T) {
+	t.Parallel()
+
+	agentRef := types.ToolUseRef{ID: "a1", Tool: "Agent", SubagentType: "Explore", Model: "haiku"}
+	a := &types.Attribution{
+		Calls: []types.CallUsage{{Model: "claude-opus-4-1", Usage: types.TokenUsage{OutputTokens: 2, APICallCount: 1}, Emitted: []types.ToolUseRef{agentRef}}},
+		Subagents: []types.SubagentRecord{
+			{ToolUseID: "a1", SubagentType: "Explore", Model: modelSonnet, Usage: &types.TokenUsage{OutputTokens: 10, APICallCount: 1}},
+			{ToolUseID: "a1", SubagentType: "Explore", Model: "claude-opus-4-1", Usage: &types.TokenUsage{OutputTokens: 20, APICallCount: 2}},
+		},
+	}
+	got := Attribute(a, nil)
+	sub := findContributor(t, got, KindSubagent, "Explore", "")
+	if sub.Usage.OutputTokens != 32 || sub.Usage.APICallCount != 4 {
+		t.Errorf("usage = %+v, want both records absorbed (2+10+20 output, 1+1+2 calls)", sub.Usage)
+	}
+	if sub.Model != modelSonnet {
+		t.Errorf("model = %q, want the first record's", sub.Model)
+	}
+	if n := len(got.Contributors); n != 1 {
+		t.Errorf("%d contributors, want 1", n)
+	}
+}
+
+func TestMergeContributorsSourcePrecedence(t *testing.T) {
+	t.Parallel()
+
+	orphan := Attributed{Contributors: []Contributor{{Kind: KindSubagent, Label: "Explore", Source: SourceTaskRecord, Usage: types.TokenUsage{OutputTokens: 1}}}}
+	live := Attributed{Contributors: []Contributor{{Kind: KindSubagent, Label: "Explore", Source: SourceTranscript, Usage: types.TokenUsage{OutputTokens: 2}}}}
+	for name, in := range map[string][]Attributed{"orphan first": {orphan, live}, "live first": {live, orphan}} {
+		got := findContributor(t, MergeContributors(in), KindSubagent, "Explore", "")
+		if got.Source != SourceTranscript || got.Usage.OutputTokens != 3 {
+			t.Errorf("%s: %+v, want transcript source and 3 output", name, got)
+		}
+	}
+	only := findContributor(t, MergeContributors([]Attributed{orphan, orphan}), KindSubagent, "Explore", "")
+	if only.Source != SourceTaskRecord {
+		t.Errorf("task_record-only merge = %q", only.Source)
+	}
+}
+
+func TestSplitWithSubsetCorruptFallback(t *testing.T) {
+	t.Parallel()
+
+	wholes, subsets := splitWithSubset([]int{1, 1}, 2, 3, 5)
+	if !reflect.DeepEqual(wholes, []int{2, 1}) || !reflect.DeepEqual(subsets, []int{3, 2}) {
+		t.Errorf("wholes %v subsets %v, want [2 1] / [3 2]", wholes, subsets)
+	}
+	wholes, subsets = splitWithSubset([]int{1, 1, 1}, 3, 10, 4)
+	if !reflect.DeepEqual(wholes, []int{4, 3, 3}) || !reflect.DeepEqual(subsets, []int{2, 1, 1}) {
+		t.Errorf("well-formed: wholes %v subsets %v, want [4 3 3] / [2 1 1]", wholes, subsets)
 	}
 }
 
@@ -695,8 +805,21 @@ func randomRecord(r *rand.Rand, id string, models []string) types.SubagentRecord
 			InputTokens: r.IntN(5000), CacheCreationTokens: r.IntN(1000), CacheReadTokens: r.IntN(90000),
 			OutputTokens: r.IntN(3000), APICallCount: 1 + r.IntN(20), Model: models[r.IntN(len(models))],
 		}
+		if r.IntN(3) == 0 {
+			// A nested chain must be flattened away, never carried into a row.
+			rec.Usage.SubagentTokens = &types.TokenUsage{InputTokens: 1 + r.IntN(100), OutputTokens: 1 + r.IntN(100), APICallCount: 1}
+		}
 	}
 	return rec
+}
+
+// sameCounts compares the seven numeric fields of two usages, ignoring Model
+// and any nested SubagentTokens.
+func sameCounts(a, b *types.TokenUsage) bool {
+	return a.InputTokens == b.InputTokens && a.CacheCreationTokens == b.CacheCreationTokens &&
+		a.CacheReadTokens == b.CacheReadTokens && a.OutputTokens == b.OutputTokens &&
+		a.APICallCount == b.APICallCount && a.ThinkingTokens == b.ThinkingTokens &&
+		a.CacheCreation1hTokens == b.CacheCreation1hTokens
 }
 
 func TestAttributeConservesEveryClass(t *testing.T) {
@@ -712,7 +835,6 @@ func TestAttributeConservesEveryClass(t *testing.T) {
 		for _, s := range a.Subagents {
 			want = types.AddTokenUsage(want, s.Usage)
 		}
-		want.Model = ""
 
 		got := Attribute(a, nil)
 		var sum *types.TokenUsage
@@ -732,14 +854,14 @@ func TestAttributeConservesEveryClass(t *testing.T) {
 			if c.Usage.ThinkingTokens > c.Usage.OutputTokens || c.Usage.CacheCreation1hTokens > c.Usage.CacheCreationTokens {
 				t.Errorf("iter %d: %s/%q subset exceeds its class: %+v", iter, c.Kind, c.Label, c.Usage)
 			}
+			if c.Usage.SubagentTokens != nil || c.Usage.Model != "" {
+				t.Errorf("iter %d: %s/%q usage not flat: model %q nested %+v", iter, c.Kind, c.Label, c.Usage.Model, c.Usage.SubagentTokens)
+			}
 		}
 		if sum == nil {
 			sum = &types.TokenUsage{}
 		}
-		sum.Model = ""
-		sum.SubagentTokens = nil
-		want.SubagentTokens = nil
-		if *sum != *want {
+		if !sameCounts(sum, want) {
 			t.Errorf("iter %d: Σ contributors %+v != Σ calls+subagents %+v", iter, *sum, *want)
 		}
 		var shares float64

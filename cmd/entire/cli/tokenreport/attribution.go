@@ -48,18 +48,27 @@ const (
 	// LabelPromptContext is the KindPrompt row.
 	LabelPromptContext = "Prompt & system context"
 	// LabelEarlierResults is the KindTool row for tool results whose
-	// tool_use precedes the transcript window and so has no tool name.
+	// tool_use could not be resolved from the transcript (it predates the
+	// transcript or was compacted away) and so has no tool name. A result
+	// whose tool_use precedes the window but is still in the transcript is
+	// resolved by the producer and lands on the named tool's row.
 	LabelEarlierResults = "Earlier tool results"
+	// LabelUnknownSubagent is the KindSubagent Label for an orphan record
+	// with an empty SubagentType.
+	LabelUnknownSubagent = "(unknown)"
 )
+
+// ContributorSource says where a Contributor's tokens were read from.
+type ContributorSource string
 
 // Contributor sources.
 const (
 	// SourceTranscript marks a row that has at least one token, or one call,
 	// attributed from the transcript's own calls.
-	SourceTranscript = "transcript"
+	SourceTranscript ContributorSource = "transcript"
 	// SourceTaskRecord marks a row built solely from subagent records whose
 	// spawning tool_use is not in the window (an orphan task record).
-	SourceTaskRecord = "task_record"
+	SourceTaskRecord ContributorSource = "task_record"
 )
 
 // maxDetails is how many drill-down rows a Contributor keeps.
@@ -102,15 +111,16 @@ type Contributor struct {
 	// its Usage.Model, then the requested alias on the emitting ref); "" when
 	// the row merges different models or none was recorded.
 	Model string `json:"model,omitempty"`
-	// Usage is the tokens attributed to this row. Its Model field is always
-	// empty (see Model); APICallCount is the calls attributed here (a call's
-	// count rides with its output).
+	// Usage is the tokens attributed to this row. Its Model is always empty
+	// (see Model) and its SubagentTokens always nil — a subagent record's
+	// usage is folded into the row's own fields, never nested; APICallCount
+	// is the calls attributed here (a call's count rides with its output).
 	Usage types.TokenUsage `json:"usage"`
 	// CostShare is this row's cost units over Attributed.PricedUnits; 0 when
 	// nothing is priced or the row's calls were all on unpriced models.
 	CostShare float64 `json:"cost_share"`
 	// Source is SourceTranscript or SourceTaskRecord.
-	Source string `json:"source"`
+	Source ContributorSource `json:"source"`
 	// Details are the top maxDetails drill-down rows by Tokens (ties: more
 	// Calls, then Detail ascending); nil when no ref carried a Detail.
 	Details []Detail `json:"details,omitempty"`
@@ -152,21 +162,24 @@ type Attributed struct {
 //   - Cache reads. CacheReadTokens of every call go to LabelContextReplay.
 //   - Targets. A ref with SkillName → KindSkill/<name>; with SubagentType →
 //     KindSubagent/<type> (never keyed on the tool's name — "Agent" and the
-//     legacy "Task" both land here); with an empty Tool (its tool_use
-//     precedes the window) → KindTool/LabelEarlierResults; otherwise
+//     legacy "Task" both land here); with an empty Tool (its tool_use could
+//     not be resolved from the transcript — it predates the transcript or
+//     was compacted away) → KindTool/LabelEarlierResults; otherwise
 //     KindTool/<Tool>. KindTool (named tools only) and KindText rows carry
 //     the attributing call's ActiveSkill as Skill, so a tool run during a
 //     skill is its own row; skill, subagent, replay, prompt and
 //     earlier-results rows are never annotated.
 //   - Subagents. A record whose ToolUseID matches a subagent ref (one with
-//     SubagentType) emitted in the window adds its whole Usage — cache reads
-//     included, they are the subagent's own replay — to that ref's
-//     KindSubagent row, whose Model is record.Model, else
+//     SubagentType) seen in the window (emitted, or consumed) adds its whole
+//     Usage — cache reads included, they are the subagent's own replay — to
+//     that ref's KindSubagent row, whose Model is record.Model, else
 //     record.Usage.Model, else the ref's requested alias. Any other record
-//     is its own KindSubagent row labelled record.SubagentType with Source
+//     is its own KindSubagent row labelled record.SubagentType (or
+//     LabelUnknownSubagent when that is empty) with Source
 //     SourceTaskRecord; a row that also received transcript tokens keeps
 //     SourceTranscript. Records are absorbed even when Usage is nil, so a
-//     spawned subagent with no usage yet still shows with 0.
+//     spawned subagent with no usage yet still shows with 0. Several records
+//     sharing one ToolUseID are all absorbed; the first decides the model.
 //   - Rows. Same Kind+Label+Skill merge with types.AddTokenUsage, whose
 //     model rule gives Model (kept when equal, "" when mixed). A ref-driven
 //     row (tool, skill, subagent) exists even when its tokens are zero — a
@@ -176,7 +189,10 @@ type Attributed struct {
 //   - Cost. With w nil, each call is priced with WeightsForCall(call.Model,
 //     input+cacheRead+cacheWrite) when WeightsFor knows the model; an
 //     unknown model's calls contribute volume only and the name goes to
-//     Unpriced. With w non-nil every call and record is priced with w. Each
+//     Unpriced (once it has any usage to report). A subagent record is
+//     priced at the base tier (WeightsFor) — it is a session aggregate, and
+//     tiers are per call. With w non-nil every call and record is priced
+//     with w. Each
 //     attributed piece is priced separately with ComputeCostShares, so a
 //     call that mixes 5m and 1h cache writes under a Family that prices them
 //     differently may leave a piece's writes unpriced (CacheWriteUnpriced);
@@ -298,13 +314,13 @@ type detailAcc struct {
 type contribAcc struct {
 	usage   *types.TokenUsage
 	units   float64
-	source  string
+	source  ContributorSource
 	details map[string]*detailAcc
 }
 
 // absorb adds u (whose Model field takes part in the merge), its cost units,
 // and source to the row.
-func (r *contribAcc) absorb(u *types.TokenUsage, units float64, source string) {
+func (r *contribAcc) absorb(u *types.TokenUsage, units float64, source ContributorSource) {
 	r.usage = types.AddTokenUsage(r.usage, u)
 	r.units += units
 	if r.source == "" || source == SourceTranscript {
@@ -392,6 +408,7 @@ func (acc *accumulator) result() Attributed {
 			c.Usage = *r.usage
 			c.Model = c.Usage.Model
 			c.Usage.Model = ""
+			c.Usage.SubagentTokens = nil
 		}
 		c.Details = r.topDetails(acc.pricedUnits)
 		out.Contributors = append(out.Contributors, c)
@@ -452,10 +469,14 @@ func isSynthetic(kind ContributorKind) bool {
 
 // piece is one slice of a call's usage headed for one row.
 type piece struct {
-	key    contribKey
-	usage  types.TokenUsage
+	key   contribKey
+	usage types.TokenUsage
+	// detail is the ref's Detail this slice is credited to; "" for no
+	// drill-down (synthetic rows, refs without a Detail).
 	detail string
-	calls  int
+	// calls is how many tool calls this slice represents for Detail.Calls:
+	// 1 for an emitted ref or a consumed ref first sighted here, else 0.
+	calls int
 }
 
 // attributor walks one Attribution's calls into an accumulator.
@@ -465,14 +486,14 @@ type attributor struct {
 	// records indexes a.Subagents by ToolUseID (first record wins) so a
 	// subagent ref's row can carry the record's model from its first piece.
 	records map[string]*types.SubagentRecord
-	// emitted maps every in-window emitted tool_use id to its ref; it labels
-	// matching subagent records and tells a consumed ref's call apart from
-	// one made before the window.
-	emitted map[string]types.ToolUseRef
+	// seen maps every tool_use id sighted in the window — emitted, or
+	// consumed from before it — to its ref; it labels matching subagent
+	// records and tells a consumed ref's first sighting from a repeat.
+	seen map[string]types.ToolUseRef
 }
 
 func newAttributor(acc *accumulator, w *Weights, records []types.SubagentRecord) *attributor {
-	at := &attributor{acc: acc, override: w, records: make(map[string]*types.SubagentRecord), emitted: make(map[string]types.ToolUseRef)}
+	at := &attributor{acc: acc, override: w, records: make(map[string]*types.SubagentRecord), seen: make(map[string]types.ToolUseRef)}
 	for i := range records {
 		if _, seen := at.records[records[i].ToolUseID]; !seen {
 			at.records[records[i].ToolUseID] = &records[i]
@@ -481,22 +502,50 @@ func newAttributor(acc *accumulator, w *Weights, records []types.SubagentRecord)
 	return at
 }
 
-// weightsFor returns the price ratios for a call or record on model with
-// usage u, and whether it is priced; an unpriced model is noted.
-func (at *attributor) weightsFor(model string, u *types.TokenUsage) (Weights, bool) {
+// callWeights returns the price ratios for one call — the override, else
+// the model's ratios at the long-context tier this call's total input puts
+// it in — and whether it is priced.
+func (at *attributor) callWeights(call *types.CallUsage) (Weights, bool) {
 	if at.override != nil {
 		return *at.override, true
 	}
-	if _, _, ok := WeightsFor(model); !ok {
-		at.acc.noteUnpriced(model)
+	if !at.priceable(call.Model, &call.Usage) {
 		return Weights{}, false
 	}
-	return WeightsForCall(model, u.InputTokens+u.CacheReadTokens+u.CacheCreationTokens), true
+	u := &call.Usage
+	return WeightsForCall(call.Model, u.InputTokens+u.CacheReadTokens+u.CacheCreationTokens), true
+}
+
+// recordWeights returns the price ratios for a subagent record — the
+// override, else the model's base-tier ratios: the record's usage is a
+// session aggregate and long-context tiers are decidable only per call —
+// and whether it is priced.
+func (at *attributor) recordWeights(model string, u *types.TokenUsage) (Weights, bool) {
+	if at.override != nil {
+		return *at.override, true
+	}
+	if !at.priceable(model, u) {
+		return Weights{}, false
+	}
+	w, _, _ := WeightsFor(model)
+	return w, true
+}
+
+// priceable reports whether model has price ratios; when it does not and u
+// carries any usage, the model is noted as unpriced.
+func (at *attributor) priceable(model string, u *types.TokenUsage) bool {
+	if _, _, ok := WeightsFor(model); ok {
+		return true
+	}
+	if !isZero(u) {
+		at.acc.noteUnpriced(model)
+	}
+	return false
 }
 
 // attributeCall splits one call into pieces and adds each to its row.
 func (at *attributor) attributeCall(call *types.CallUsage) {
-	w, priced := at.weightsFor(call.Model, &call.Usage)
+	w, priced := at.callWeights(call)
 	pieces := at.outputPieces(call)
 	pieces = append(pieces, at.inputPieces(call)...)
 	pieces = append(pieces, piece{
@@ -510,7 +559,7 @@ func (at *attributor) attributeCall(call *types.CallUsage) {
 
 // add prices one piece and folds it into its row. A synthetic row is not
 // created for an all-zero piece; a ref-driven row is.
-func (at *attributor) add(p *piece, w Weights, priced bool, source string) {
+func (at *attributor) add(p *piece, w Weights, priced bool, source ContributorSource) {
 	if isSynthetic(p.key.kind) && isZero(&p.usage) {
 		return
 	}
@@ -544,7 +593,7 @@ func (at *attributor) outputPieces(call *types.CallUsage) []piece {
 	pieces := make([]piece, 0, n)
 	for i, ref := range call.Emitted {
 		if ref.ID != "" {
-			at.emitted[ref.ID] = ref
+			at.seen[ref.ID] = ref
 		}
 		pieces = append(pieces, piece{
 			key:    keyFor(&ref, call.ActiveSkill),
@@ -573,10 +622,10 @@ func (at *attributor) inputPieces(call *types.CallUsage) []piece {
 	for i, res := range call.Consumed {
 		ref := res.ToolUse
 		calls := 0
-		if _, seen := at.emitted[ref.ID]; ref.ID != "" && !seen {
-			// Emitted before the window: this is the only sighting of the call.
+		if _, sighted := at.seen[ref.ID]; ref.ID != "" && !sighted {
+			// Emitted before the window: this is the first sighting of the call.
 			calls = 1
-			at.emitted[ref.ID] = ref
+			at.seen[ref.ID] = ref
 		}
 		pieces = append(pieces, piece{
 			key:    keyFor(&ref, call.ActiveSkill),
@@ -643,27 +692,27 @@ func subagentModel(rec *types.SubagentRecord, refModel string) string {
 	return refModel
 }
 
-// absorbSubagents adds each record's usage to its subagent row: the emitting
-// ref's row when the spawning tool_use is in the window, else an orphan row
-// with Source SourceTaskRecord.
+// absorbSubagents adds each record's usage to its subagent row: the spawning
+// ref's row when that ref was seen in the window, else an orphan row with
+// Source SourceTaskRecord. The model comes from the first record with the
+// same ToolUseID (see newAttributor), so duplicates never mix the row's Model.
 func (at *attributor) absorbSubagents(records []types.SubagentRecord) {
 	for i := range records {
 		rec := &records[i]
-		ref, inWindow := at.emitted[rec.ToolUseID]
+		ref, inWindow := at.seen[rec.ToolUseID]
 		var key contribKey
-		source := SourceTaskRecord
+		var source ContributorSource
 		if inWindow && ref.SubagentType != "" {
-			key = keyFor(&ref, "")
-			source = SourceTranscript
+			key, source = keyFor(&ref, ""), SourceTranscript
 		} else {
-			key = contribKey{kind: KindSubagent, label: rec.SubagentType}
+			key, source = contribKey{kind: KindSubagent, label: cmp.Or(rec.SubagentType, LabelUnknownSubagent)}, SourceTaskRecord
 		}
 		var usage types.TokenUsage
 		if rec.Usage != nil {
 			usage = *rec.Usage
 		}
-		usage.Model = subagentModel(rec, ref.Model)
-		w, priced := at.weightsFor(usage.Model, &usage)
+		usage.Model = subagentModel(at.records[rec.ToolUseID], ref.Model)
+		w, priced := at.recordWeights(usage.Model, &usage)
 		at.add(&piece{key: key, usage: usage}, w, priced, source)
 	}
 }
