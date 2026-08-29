@@ -57,6 +57,33 @@ func TestStore_ReadUnknownCheckpoint(t *testing.T) {
 	require.ErrorIs(t, err, cp.ErrCheckpointNotFound)
 }
 
+func TestStore_ReadTaskRecords(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+
+	t.Run("unknown checkpoint is ErrCheckpointNotFound", func(t *testing.T) {
+		t.Parallel()
+		store := New(t.TempDir())
+
+		_, err := store.ReadTaskRecords(ctx, id.MustCheckpointID("ffffffffffff"))
+		require.ErrorIs(t, err, cp.ErrCheckpointNotFound)
+	})
+
+	t.Run("existing checkpoint has no records", func(t *testing.T) {
+		t.Parallel()
+		store := New(t.TempDir())
+		cid := id.MustCheckpointID("a1b2c3d4e5f6")
+		require.NoError(t, store.Write(ctx, cp.Session{
+			CheckpointID: cid, SessionID: "sess-1", Strategy: "manual-commit",
+			Transcript: redact.AlreadyRedacted([]byte("transcript-1")),
+		}))
+
+		records, err := store.ReadTaskRecords(ctx, cid)
+		require.NoError(t, err)
+		assert.Nil(t, records, "fsstore does not persist task records")
+	})
+}
+
 func TestStore_BackfillTranscriptReplacesWithoutClobbering(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()

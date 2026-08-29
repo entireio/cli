@@ -24,7 +24,10 @@ type SessionReader interface {
 	// ReadTaskRecords reads the subagent task records committed under the
 	// checkpoint's tasks/ tree. A checkpoint with no tasks/ tree yields
 	// (nil, nil); a missing checkpoint yields an error wrapping
-	// ErrCheckpointNotFound. A task.json that cannot be parsed is skipped.
+	// ErrCheckpointNotFound. A tasks/ subdir whose task.json is missing or
+	// unparseable is skipped (logged, never fatal); an IO failure reading an
+	// existing task.json is returned. Records come back in tree (name) order,
+	// i.e. sorted by ToolUseID — callers wanting chronology sort by StartedAt.
 	ReadTaskRecords(ctx context.Context, checkpointID id.CheckpointID) ([]StoredTaskRecord, error)
 }
 

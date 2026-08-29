@@ -112,7 +112,7 @@ func assertTaskRecordFixtures(t *testing.T, got []StoredTaskRecord) {
 	require.True(t, ok, "toolu_plan record missing")
 	assert.Equal(t, "Plan", plan.SubagentType)
 	require.NotNil(t, plan.TokenUsage)
-	assert.Equal(t, 40, plan.TokenUsage.InputTokens)
+	assert.Equal(t, types.TokenUsage{InputTokens: 40, OutputTokens: 7, APICallCount: 1}, *plan.TokenUsage)
 	assert.True(t, plan.StartedAt.Equal(taskRecordStarted.Add(30*time.Second)), "StartedAt = %v", plan.StartedAt)
 	assert.True(t, plan.CompletedAt.IsZero(), "in-flight task must read back with a zero CompletedAt, got %v", plan.CompletedAt)
 }

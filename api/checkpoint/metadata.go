@@ -78,9 +78,10 @@ type TaskPayload struct {
 // StoredTaskRecord is one subagent task record read back from a committed
 // checkpoint's tasks/<tool-use-id>/task.json — the read-side counterpart of
 // TaskPayload, narrowed to the labelling and accounting fields a report
-// consumes. The transcript and file list stay in the checkpoint tree. It is
-// named "Stored" to keep it apart from the live session.TaskRecord that
-// condensation turns into a TaskPayload.
+// consumes: Files and TranscriptUnavailableReason are dropped, and the
+// transcript lives beside task.json as agent-<id>.jsonl. It is named "Stored"
+// to keep it apart from the live session.TaskRecord that condensation turns
+// into a TaskPayload.
 type StoredTaskRecord struct {
 	// ToolUseID is the Task tool invocation's tool_use_id (the tasks/ subdir).
 	ToolUseID string `json:"tool_use_id"`
