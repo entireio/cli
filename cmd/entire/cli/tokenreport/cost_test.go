@@ -195,6 +195,46 @@ func TestComputeCostShares_LegacyAnthropicCacheWriteUnpriced(t *testing.T) {
 	assertClose(t, cs.Output, 1)
 }
 
+func TestComputeCostSharesKnownTTL_ZeroOneHourMeansAllFiveMinute(t *testing.T) {
+	t.Parallel()
+
+	u := &types.TokenUsage{CacheCreationTokens: 1000, OutputTokens: 100} // per-call block: 1h really is 0
+	w, _, _ := WeightsFor("claude-sonnet-5")
+	legacy := ComputeCostShares(u, w)
+	known := ComputeCostSharesKnownTTL(u, w)
+	if !legacy.CacheWriteUnpriced {
+		t.Errorf("metadata variant must stay unpriced: %+v", legacy)
+	}
+	if known.CacheWriteUnpriced {
+		t.Errorf("known-TTL variant must never be unpriced: %+v", known)
+	}
+	// 1000 writes at the 5m rate 1.25× + 100 output at 5×.
+	assertCloseRel(t, known.Units, 1250+500)
+	assertClose(t, known.CacheWrite, 1250.0/1750)
+	assertClose(t, known.Output, 500.0/1750)
+}
+
+func TestComputeCostSharesKnownTTL_AgreesWhenTTLIsRecordedOrSinglePriced(t *testing.T) {
+	t.Parallel()
+
+	cases := map[string]struct {
+		u     *types.TokenUsage
+		model string
+	}{
+		"anthropic all 1h":  {&types.TokenUsage{CacheCreationTokens: 1000, CacheCreation1hTokens: 1000, OutputTokens: 100}, "claude-sonnet-5"},
+		"anthropic mixed":   {&types.TokenUsage{CacheCreationTokens: 1000, CacheCreation1hTokens: 400, OutputTokens: 100}, "claude-sonnet-5"},
+		"openai single TTL": {&types.TokenUsage{CacheCreationTokens: 1000, OutputTokens: 100}, "gpt-5.6-sol"},
+		"gemini no charge":  {&types.TokenUsage{CacheCreationTokens: 1000, OutputTokens: 100}, "gemini-2.5-pro"},
+		"nil":               {nil, "claude-sonnet-5"},
+	}
+	for name, tc := range cases {
+		w, _, _ := WeightsFor(tc.model)
+		if got, want := ComputeCostSharesKnownTTL(tc.u, w), ComputeCostShares(tc.u, w); got != want {
+			t.Errorf("%s: known %+v != metadata %+v", name, got, want)
+		}
+	}
+}
+
 func TestComputeCostShares_SingleTTLFamilyNeverUnpriced(t *testing.T) {
 	t.Parallel()
 

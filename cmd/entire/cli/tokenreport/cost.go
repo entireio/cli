@@ -259,16 +259,39 @@ type CostShares struct {
 	CacheWriteUnpriced bool `json:"cache_write_unpriced"`
 }
 
-// ComputeCostShares weights u by w and returns the resulting shares. A nil u
-// counts as zero usage. Cache-write units are
+// ComputeCostShares weights u by w and returns the resulting shares for a
+// usage whose cache-write TTL may be UNKNOWN: summed metadata rows
+// (CheckpointSummary / session metadata.json), where CacheCreation1hTokens
+// was only recorded from PR #2155 on and, under omitempty, an absent field
+// reads as 0. A nil u counts as zero usage. Cache-write units are
 // CacheCreation1hTokens×CacheWrite1h + (CacheCreationTokens−CacheCreation1hTokens)×CacheWrite5m,
 // except when w prices the two TTLs differently, cache writes were recorded,
 // and the 1h split is 0: then the TTL is unknown, the cache-write row is
 // marked CacheWriteUnpriced and contributes 0 to Units (never blended — real
 // sessions are all-1h or all-5m). Thinking is ThinkingTokens×Output÷Units;
 // thinking is inside OutputTokens so it is not added to Units. When Units is
-// 0 every share is 0.
+// 0 every share is 0. For usage read from an agent's own per-call usage
+// block use ComputeCostSharesKnownTTL.
 func ComputeCostShares(u *types.TokenUsage, w Weights) CostShares {
+	return computeCostShares(u, w, false)
+}
+
+// ComputeCostSharesKnownTTL is ComputeCostShares for a usage whose cache-write
+// TTL is KNOWN: it came from an agent-written per-call usage block (the
+// TokenAttributor implementations, and subagent records built from a
+// subagent's own transcript), so CacheCreation1hTokens is taken at face
+// value — 0 means every write was a 5-minute write — and CacheWriteUnpriced
+// is never set. Everything else is identical to ComputeCostShares; for a
+// Family that prices both TTLs the same, or a usage with a non-zero 1h
+// split, the two return the same result.
+func ComputeCostSharesKnownTTL(u *types.TokenUsage, w Weights) CostShares {
+	return computeCostShares(u, w, true)
+}
+
+// computeCostShares is the shared core of the two exported variants; ttlKnown
+// selects whether a 0 CacheCreation1hTokens beside recorded cache writes means
+// "all 5m" (true) or "not recorded" (false).
+func computeCostShares(u *types.TokenUsage, w Weights, ttlKnown bool) CostShares {
 	cs := CostShares{Provider: w.Provider, Family: w.Family}
 	if u == nil {
 		return cs
@@ -281,7 +304,7 @@ func ComputeCostShares(u *types.TokenUsage, w Weights) CostShares {
 
 	var cacheWriteUnits float64
 	switch {
-	case u.CacheCreationTokens > 0 && u.CacheCreation1hTokens == 0 && w.CacheWrite1h != w.CacheWrite5m:
+	case !ttlKnown && u.CacheCreationTokens > 0 && u.CacheCreation1hTokens == 0 && w.CacheWrite1h != w.CacheWrite5m:
 		cs.CacheWriteUnpriced = true
 	default:
 		// The 1h count is a subset of the total; the 5m remainder is clamped

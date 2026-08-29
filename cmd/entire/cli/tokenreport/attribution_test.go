@@ -484,6 +484,26 @@ func TestAttributeCostSharesAcrossModels(t *testing.T) {
 	}
 }
 
+func TestAttributeZeroOneHourCacheWritesPricedAsFiveMinute(t *testing.T) {
+	t.Parallel()
+
+	// A per-call usage block with 1h == 0 is all-5m, not "TTL unknown".
+	u := types.TokenUsage{CacheCreationTokens: 1000, OutputTokens: 100, APICallCount: 1}
+	got := Attribute(&types.Attribution{Calls: []types.CallUsage{{Model: modelSonnet, Usage: u}}}, nil)
+	w, _, _ := WeightsFor(modelSonnet)
+	assertCloseRel(t, got.PricedUnits, 1000*w.CacheWrite5m+100*w.Output)
+	prompt := findContributor(t, got, KindPrompt, LabelPromptContext, "")
+	assertClose(t, prompt.CostShare, 1250.0/1750)
+	// A subagent record's usage comes from its own transcript's usage blocks
+	// and is priced the same way.
+	agentRef := types.ToolUseRef{ID: "a1", Tool: "Agent", SubagentType: "Explore"}
+	rec := Attribute(&types.Attribution{
+		Calls:     []types.CallUsage{{UsageUnknown: true, Emitted: []types.ToolUseRef{agentRef}}},
+		Subagents: []types.SubagentRecord{{ToolUseID: "a1", SubagentType: "Explore", Model: modelSonnet, Usage: &u}},
+	}, nil)
+	assertCloseRel(t, rec.PricedUnits, 1750)
+}
+
 func TestAttributeUnknownModelContributesVolumeOnly(t *testing.T) {
 	t.Parallel()
 

@@ -208,11 +208,10 @@ type Attributed struct {
 //     Unpriced (once it has any usage to report). A subagent record is
 //     priced at the base tier (WeightsFor) — it is a session aggregate, and
 //     tiers are per call. With w non-nil every call and record is priced
-//     with w. Each
-//     attributed piece is priced separately with ComputeCostShares, so a
-//     call that mixes 5m and 1h cache writes under a Family that prices them
-//     differently may leave a piece's writes unpriced (CacheWriteUnpriced);
-//     real sessions are all-1h or all-5m and are priced exactly.
+//     with w. Every piece is priced with ComputeCostSharesKnownTTL: calls
+//     and records both come from agent-written usage blocks, so a 0
+//     CacheCreation1hTokens means all-5-minute writes, priced at
+//     CacheWrite5m — never CacheWriteUnpriced.
 //
 // A nil a, or one with no Calls, yields an empty Attributed even when
 // Subagents is non-empty.
@@ -581,7 +580,7 @@ func (at *attributor) add(p *piece, w Weights, priced bool, source ContributorSo
 	}
 	var units float64
 	if priced {
-		units = ComputeCostShares(&p.usage, w).Units
+		units = ComputeCostSharesKnownTTL(&p.usage, w).Units
 		at.acc.pricedUnits += units
 	}
 	row := at.acc.row(p.key)
