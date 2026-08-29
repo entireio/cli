@@ -144,6 +144,10 @@ func (s *stubCrossRepoReader) ReadSessionMetadataAndPrompts(ctx context.Context,
 	return meta, "do the foreign thing", nil
 }
 
+func (s *stubCrossRepoReader) ReadTaskRecords(context.Context, id.CheckpointID) ([]checkpoint.StoredTaskRecord, error) {
+	return nil, nil
+}
+
 func (s *stubCrossRepoReader) ReadSessionContent(ctx context.Context, cid id.CheckpointID, idx int) (*checkpoint.SessionContent, error) {
 	meta, prompts, err := s.ReadSessionMetadataAndPrompts(ctx, cid, idx)
 	if err != nil {

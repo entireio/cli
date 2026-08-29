@@ -75,6 +75,30 @@ type TaskPayload struct {
 	TranscriptUnavailableReason string
 }
 
+// StoredTaskRecord is one subagent task record read back from a committed
+// checkpoint's tasks/<tool-use-id>/task.json — the read-side counterpart of
+// TaskPayload, narrowed to the labelling and accounting fields a report
+// consumes. The transcript and file list stay in the checkpoint tree. It is
+// named "Stored" to keep it apart from the live session.TaskRecord that
+// condensation turns into a TaskPayload.
+type StoredTaskRecord struct {
+	// ToolUseID is the Task tool invocation's tool_use_id (the tasks/ subdir).
+	ToolUseID string `json:"tool_use_id"`
+	// AgentID is the subagent identifier.
+	AgentID string `json:"agent_id,omitempty"`
+	// SubagentType is the agent's declared subagent type (e.g. "Explore").
+	SubagentType string `json:"subagent_type,omitempty"`
+	// TaskDescription is the redacted free-text description as written.
+	TaskDescription string `json:"task_description,omitempty"`
+	// TokenUsage is the subagent's token usage; nil when it was unknown at write.
+	TokenUsage *types.TokenUsage `json:"token_usage,omitempty"`
+	// StartedAt is when the subagent launch was observed.
+	StartedAt time.Time `json:"started_at,omitzero"`
+	// CompletedAt is when the task completed. Zero means the task was still in
+	// flight when the checkpoint was materialized (see TaskPayload.CompletedAt).
+	CompletedAt time.Time `json:"completed_at,omitzero"`
+}
+
 // WriteOptions contains options for writing a persistent checkpoint.
 type WriteOptions struct {
 	// CheckpointID is the stable 12-hex-char identifier

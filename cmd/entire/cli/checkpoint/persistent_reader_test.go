@@ -110,3 +110,7 @@ func (s *committedReaderStub) ReadSessionPrompts(context.Context, id.CheckpointI
 func (s *committedReaderStub) ReadSessionMetadataAndPrompts(context.Context, id.CheckpointID, int) (*Metadata, string, error) {
 	return nil, "", ErrCheckpointNotFound
 }
+
+func (s *committedReaderStub) ReadTaskRecords(context.Context, id.CheckpointID) ([]StoredTaskRecord, error) {
+	return nil, ErrCheckpointNotFound
+}

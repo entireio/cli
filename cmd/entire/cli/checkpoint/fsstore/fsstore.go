@@ -293,6 +293,22 @@ func (s *Store) ReadSessionMetadataAndPrompts(_ context.Context, checkpointID id
 	return &meta, session.Prompts, nil
 }
 
+// ReadTaskRecords reports no task records: the fs store does not persist
+// WriteOptions.Tasks. It still honors the contract's absent signal so a caller
+// can tell "no subagent work" from "no such checkpoint".
+func (s *Store) ReadTaskRecords(_ context.Context, checkpointID id.CheckpointID) ([]cp.StoredTaskRecord, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	sc, err := s.load(checkpointID)
+	if err != nil {
+		return nil, err
+	}
+	if sc == nil {
+		return nil, cp.ErrCheckpointNotFound
+	}
+	return nil, nil
+}
+
 func (s *Store) sessionAt(checkpointID id.CheckpointID, sessionIndex int) (*storedSession, error) {
 	sc, err := s.load(checkpointID)
 	if err != nil {

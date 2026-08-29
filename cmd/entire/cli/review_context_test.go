@@ -544,6 +544,13 @@ func (r *countingReviewContextReader) ReadSessionMetadataAndPrompts(
 	return &r.metadata, r.prompts, r.promptErr
 }
 
+func (r *countingReviewContextReader) ReadTaskRecords(
+	context.Context,
+	checkpointid.CheckpointID,
+) ([]checkpoint.StoredTaskRecord, error) {
+	return nil, nil
+}
+
 // TestReviewSessionContext_IncludesActiveSessionWithLatestPrompt verifies
 // that an active session whose worktree + base commit match the current
 // review context produces a "prompt:" entry in the in-progress section,

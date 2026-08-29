@@ -44,6 +44,9 @@ func (f *fakePrimary) ReadSessionPrompts(context.Context, id.CheckpointID, int) 
 func (f *fakePrimary) ReadSessionMetadataAndPrompts(context.Context, id.CheckpointID, int) (*Metadata, string, error) {
 	return &Metadata{}, "", nil
 }
+func (f *fakePrimary) ReadTaskRecords(context.Context, id.CheckpointID) ([]StoredTaskRecord, error) {
+	return nil, nil
+}
 
 func (f *fakePrimary) Write(_ context.Context, req WriteRequest) error {
 	if f.writeErr != nil {

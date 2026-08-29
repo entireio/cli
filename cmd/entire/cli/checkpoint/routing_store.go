@@ -154,6 +154,15 @@ func (s *kindRoutingStore) ReadSessionContent(ctx context.Context, checkpointID 
 	)
 }
 
+func (s *kindRoutingStore) ReadTaskRecords(ctx context.Context, checkpointID id.CheckpointID) ([]StoredTaskRecord, error) {
+	return firstResolved(s.readOrder(checkpointID),
+		func(st PersistentStore) ([]StoredTaskRecord, error) {
+			return st.ReadTaskRecords(ctx, checkpointID)
+		},
+		sessionNotFound[[]StoredTaskRecord],
+	)
+}
+
 func (s *kindRoutingStore) ReadSessionMetadata(ctx context.Context, checkpointID id.CheckpointID, sessionIndex int) (*Metadata, error) {
 	return firstResolved(s.readOrder(checkpointID),
 		func(st PersistentStore) (*Metadata, error) {

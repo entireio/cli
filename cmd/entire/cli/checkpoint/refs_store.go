@@ -497,6 +497,14 @@ func (s *gitRefsStore) ReadSessionContent(ctx context.Context, checkpointID id.C
 	return readSessionContentFromTree(ctx, sessionTree)
 }
 
+func (s *gitRefsStore) ReadTaskRecords(ctx context.Context, checkpointID id.CheckpointID) ([]StoredTaskRecord, error) {
+	checkpointTree, err := s.checkpointTree(ctx, checkpointID)
+	if err != nil {
+		return nil, err
+	}
+	return readTaskRecordsFromCheckpointTree(ctx, checkpointTree)
+}
+
 // List enumerates local checkpoint refs and reads each root summary, sorted most
 // recent first.
 //

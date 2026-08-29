@@ -285,6 +285,13 @@ func (r *apiCheckpointReader) ReadSessionContent(ctx context.Context, checkpoint
 	}, nil
 }
 
+// ReadTaskRecords reports no task records: the API exposes no per-subagent
+// task record endpoint, so a checkpoint read this way has no attributable
+// subagent work.
+func (r *apiCheckpointReader) ReadTaskRecords(context.Context, id.CheckpointID) ([]checkpoint.StoredTaskRecord, error) {
+	return nil, nil
+}
+
 // readRawTranscript streams one session's stored transcript bytes.
 func (r *apiCheckpointReader) readRawTranscript(ctx context.Context, checkpointID id.CheckpointID, sessionIndex int) ([]byte, error) {
 	path := fmt.Sprintf("/api/v1/repos/%s/checkpoints/%s/transcript/raw?%s",

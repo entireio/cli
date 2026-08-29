@@ -667,6 +667,10 @@ func (s *stubCommittedReader) ReadSessionMetadataAndPrompts(_ context.Context, _
 	return nil, "", errors.New("stub: ReadSessionMetadataAndPrompts not configured")
 }
 
+func (s *stubCommittedReader) ReadTaskRecords(context.Context, id.CheckpointID) ([]checkpoint.StoredTaskRecord, error) {
+	return nil, nil
+}
+
 func (s *stubCommittedReader) ReadSessionContent(_ context.Context, _ id.CheckpointID, idx int) (*checkpoint.SessionContent, error) {
 	if c, ok := s.contents[idx]; ok && c != nil {
 		return c, nil

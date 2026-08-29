@@ -496,7 +496,7 @@ func (s *treeWriter) writeTaskRecordEntries(opts WriteOptions, basePath string, 
 // writeTaskRecordEntry writes one TaskPayload's agent-<agent-id>.jsonl (when
 // its transcript is available) and task.json into entries.
 func (s *treeWriter) writeTaskRecordEntry(task TaskPayload, basePath string, entries map[string]object.TreeEntry) error {
-	taskDir := checkpointSubtreePath(basePath, "tasks", task.ToolUseID)
+	taskDir := checkpointSubtreePath(basePath, taskRecordsDirName, task.ToolUseID)
 
 	if task.Transcript.Len() > 0 {
 		agentBlobHash, err := CreateBlobFromContent(s.repo, task.Transcript.Bytes())
@@ -534,7 +534,7 @@ func (s *treeWriter) writeTaskRecordEntry(task TaskPayload, basePath string, ent
 	if err != nil {
 		return fmt.Errorf("failed to create task metadata blob: %w", err)
 	}
-	taskFile := checkpointSubtreePath(taskDir, "task.json")
+	taskFile := checkpointSubtreePath(taskDir, taskRecordFileName)
 	entries[taskFile] = object.TreeEntry{
 		Name: taskFile,
 		Mode: filemode.Regular,
@@ -1331,6 +1331,74 @@ type taskRecordMetadata struct {
 	TranscriptUnavailableReason string    `json:"transcript_unavailable_reason,omitempty"`
 }
 
+const (
+	// taskRecordsDirName is the checkpoint-root directory holding one subdir
+	// per subagent task record.
+	taskRecordsDirName = "tasks"
+	// taskRecordFileName is the per-task metadata file inside each subdir.
+	taskRecordFileName = "task.json"
+)
+
+// toStoredTaskRecord narrows the on-disk record to its read-side shape. A zero
+// CompletedAt (absent from the JSON) passes through as zero: the task was in
+// flight when the checkpoint was materialized.
+func (m taskRecordMetadata) toStoredTaskRecord() StoredTaskRecord {
+	return StoredTaskRecord{
+		ToolUseID:       m.ToolUseID,
+		AgentID:         m.AgentID,
+		SubagentType:    m.SubagentType,
+		TaskDescription: m.TaskDescription,
+		TokenUsage:      m.TokenUsage,
+		StartedAt:       m.StartedAt,
+		CompletedAt:     m.CompletedAt,
+	}
+}
+
+// readTaskRecordsFromCheckpointTree reads every tasks/<tool-use-id>/task.json
+// under a checkpoint tree. Shared by the git-branch and git-refs stores, which
+// differ only in how they navigate to the checkpoint tree. A checkpoint with no
+// tasks/ tree yields (nil, nil). RawEntries lists direct entries only, so the
+// tasks/ subtree is descended explicitly. A subdir whose task.json is missing
+// or unparseable is skipped with a warning naming the tool-use ID (never the
+// contents) so one bad record does not hide its siblings; a blob that exists
+// but cannot be read is an IO failure and is surfaced.
+func readTaskRecordsFromCheckpointTree(ctx context.Context, checkpointTree *FetchingTree) ([]StoredTaskRecord, error) {
+	tasksTree, err := checkpointTree.Tree(taskRecordsDirName)
+	if err != nil {
+		if errors.Is(err, object.ErrDirectoryNotFound) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("failed to read %s tree: %w", taskRecordsDirName, err)
+	}
+
+	var records []StoredTaskRecord
+	for _, entry := range tasksTree.RawEntries() {
+		if entry.Mode != filemode.Dir {
+			continue
+		}
+		file, fileErr := tasksTree.File(path.Join(entry.Name, taskRecordFileName))
+		if fileErr != nil {
+			logging.Warn(ctx, "checkpoint task record has no readable task.json; skipping",
+				slog.String("tool_use_id", entry.Name),
+				slog.String("error", fileErr.Error()))
+			continue
+		}
+		content, contentErr := file.Contents()
+		if contentErr != nil {
+			return nil, fmt.Errorf("failed to read task.json for %s: %w", entry.Name, contentErr)
+		}
+		var meta taskRecordMetadata
+		if jsonErr := json.Unmarshal([]byte(content), &meta); jsonErr != nil {
+			logging.Warn(ctx, "checkpoint task record has malformed task.json; skipping",
+				slog.String("tool_use_id", entry.Name),
+				slog.String("error", jsonErr.Error()))
+			continue
+		}
+		records = append(records, meta.toStoredTaskRecord())
+	}
+	return records, nil
+}
+
 // Read reads a committed checkpoint's summary by ID from the entire/checkpoints/v1 branch.
 // Returns only the CheckpointSummary (paths + aggregated stats), not actual content.
 // Use ReadSessionContent to read actual transcript/prompts/context.
@@ -1494,6 +1562,20 @@ func (s *GitStore) ReadSessionContent(ctx context.Context, checkpointID id.Check
 		return nil, err
 	}
 	return readSessionContentFromTree(ctx, sessionTree)
+}
+
+// ReadTaskRecords reads the subagent task records committed under the
+// checkpoint's tasks/ tree. Returns ErrCheckpointNotFound if the checkpoint
+// doesn't exist and (nil, nil) if it exists but recorded no subagent tasks.
+func (s *GitStore) ReadTaskRecords(ctx context.Context, checkpointID id.CheckpointID) ([]StoredTaskRecord, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err //nolint:wrapcheck // Propagating context cancellation
+	}
+	checkpointTree, err := s.getCheckpointFetchingTree(ctx, checkpointID)
+	if err != nil {
+		return nil, ErrCheckpointNotFound
+	}
+	return readTaskRecordsFromCheckpointTree(ctx, checkpointTree)
 }
 
 func readSessionContentFromTree(ctx context.Context, sessionTree *FetchingTree) (*SessionContent, error) {

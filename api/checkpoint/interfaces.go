@@ -21,6 +21,11 @@ type SessionReader interface {
 	ReadSessionMetadata(ctx context.Context, checkpointID id.CheckpointID, sessionIndex int) (*Metadata, error)
 	ReadSessionPrompts(ctx context.Context, checkpointID id.CheckpointID, sessionIndex int) (string, error)
 	ReadSessionMetadataAndPrompts(ctx context.Context, checkpointID id.CheckpointID, sessionIndex int) (*Metadata, string, error)
+	// ReadTaskRecords reads the subagent task records committed under the
+	// checkpoint's tasks/ tree. A checkpoint with no tasks/ tree yields
+	// (nil, nil); a missing checkpoint yields an error wrapping
+	// ErrCheckpointNotFound. A task.json that cannot be parsed is skipped.
+	ReadTaskRecords(ctx context.Context, checkpointID id.CheckpointID) ([]StoredTaskRecord, error)
 }
 
 // PersistentStore provides the production persistent checkpoint storage surface:

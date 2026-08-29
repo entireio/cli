@@ -24,6 +24,7 @@ type (
 	SessionFilePaths = apicheckpoint.SessionFilePaths
 	TranscriptAsset  = apicheckpoint.TranscriptAsset
 	TaskPayload      = apicheckpoint.TaskPayload
+	StoredTaskRecord = apicheckpoint.StoredTaskRecord
 	SessionMetrics   = apicheckpoint.SessionMetrics
 	Summary          = apicheckpoint.Summary
 	LearningsSummary = apicheckpoint.LearningsSummary
