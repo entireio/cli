@@ -213,7 +213,9 @@ type WriteOptions struct {
 	// SkillEvents records explicit native skill signals observed in this session.
 	SkillEvents []types.SkillEvent
 
-	// SessionMetrics contains hook-provided session metrics (duration, turns, context usage)
+	// SessionMetrics contains session metrics (duration, turns, context usage):
+	// hook-reported where the agent provides them, the duration derived at
+	// condensation otherwise.
 	SessionMetrics *SessionMetrics
 
 	// Attribution is line-level attribution calculated at commit time
@@ -487,8 +489,11 @@ type Metadata struct {
 	SkillEventsVersion int                `json:"skill_events_version,omitempty"`
 	SkillEvents        []types.SkillEvent `json:"skill_events,omitempty"`
 
-	// SessionMetrics contains hook-provided session metrics (duration, turns, context usage).
-	// Populated for agents that provide these metrics via hooks (e.g., Cursor).
+	// SessionMetrics contains session metrics (duration, turns, context usage).
+	// Turn count and context figures come only from agents whose hooks report
+	// them (e.g., Cursor); duration_ms is hook-reported or, when the agent
+	// reports none, derived at condensation from the session state, so it is
+	// present on most checkpoints written since v0.11.
 	SessionMetrics *SessionMetrics `json:"session_metrics,omitempty"`
 
 	// AI-generated summary of the checkpoint
@@ -637,10 +642,15 @@ type CheckpointSummary struct {
 // split from transcript scope and the subset fields were added (v0.11).
 const TokenUsageVersionDelta = 2
 
-// SessionMetrics contains hook-provided session metrics from agents that report
-// them via lifecycle hooks (e.g., Cursor). These supplement transcript-derived
+// SessionMetrics contains session metrics that are hook-reported by agents
+// whose lifecycle hooks carry them (e.g., Cursor) or, for DurationMs, derived
+// by condensation from the session state. They supplement transcript-derived
 // metrics for agents whose transcripts lack usage/timing data.
 type SessionMetrics struct {
+	// DurationMs is the session's wall-clock duration: hook-reported (Cursor)
+	// or, when the agent reports none, derived by condensation from the
+	// session's StartedAt/LastInteractionTime (strategy.buildSessionMetrics).
+	// A negative difference is clamped to 0, and 0 means "not recorded".
 	DurationMs        int64 `json:"duration_ms,omitempty"`
 	TurnCount         int   `json:"turn_count,omitempty"`
 	ContextTokens     int   `json:"context_tokens,omitempty"`

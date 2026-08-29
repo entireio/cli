@@ -49,6 +49,7 @@ Every agent must implement all 19 methods on the `Agent` interface:
 | `TranscriptAnalyzer` | `GetTranscriptPosition`, `ExtractModifiedFilesFromOffset` | You want richer checkpoints with transcript-derived file lists |
 | `TranscriptPreparer` | `PrepareTranscript` | Agent writes transcripts asynchronously and needs a flush/sync step |
 | `TokenCalculator` | `CalculateTokenUsage` | Agent's transcript contains token usage data |
+| `TokenAttributor` | `AttributeTokens` | Agent's transcript records usage **per API call** and the tool calls each call emitted/consumed, so `session tokens` / `checkpoint tokens` can say where the tokens went. Built-in only; an agent that records only session totals must not implement it. |
 | `SubagentAwareExtractor` | `ExtractAllModifiedFiles`, `CalculateTotalTokenUsage` | Agent spawns subagents (like Claude Code's Task tool) |
 | `SubagentSessionResolver` | `ResolveSubagentSession` | Agent runs subagents as **detached sessions of their own** rather than as a blocking tool call (Factory AI Droid's Workers) |
 | `HookResponseWriter` | `WriteHookResponse` | Agent can display messages from hook responses (e.g., session start banner). Claude Code uses JSON `systemMessage` on stdout; Factory AI Droid uses plain text on stdout. |
@@ -365,6 +366,7 @@ In `lifecycle.go` (or whichever file implements the optional interfaces), add co
 var (
     _ agent.TranscriptAnalyzer = (*YourAgent)(nil)
     _ agent.TokenCalculator    = (*YourAgent)(nil)
+    _ agent.TokenAttributor    = (*YourAgent)(nil) // in token_attribution.go, if implemented
     // Add one line per optional interface you implement
 )
 ```
@@ -507,8 +509,12 @@ before:
   per-message `total` identity says which (`Tokens.BilledOutput`). Ignoring it dropped the
   reasoning tokens.
 - **Codex**: `cached_input_tokens` is a subset of `input_tokens`; `reasoning_output_tokens` is a
-  subset of `output_tokens`. `token_count` events repeat; take deltas between distinct
-  cumulative totals, never a sum of `last_token_usage`.
+  subset of `output_tokens`. `token_count` events carry CUMULATIVE totals and repeat (the same
+  total is often written twice — after the response and at turn end): take deltas between
+  **distinct** cumulative totals, never a sum of `last_token_usage`, and count one API call per
+  distinct total (a duplicate is not a call — counting it inflated `api_call_count`).
+  `cache_write_input_tokens` is parsed into `CacheCreationTokens`: the gpt-5.6 family charges for
+  cache writes.
 - **Claude Code**: thinking is inside `output_tokens`; `cache_creation` splits into 5-minute and
   1-hour writes, which are priced differently.
 
@@ -520,6 +526,72 @@ usage fields, never estimated: `ThinkingTokens` (⊂ output — reasoning/thinki
 `CacheCreation1hTokens` (⊂ cache write — Anthropic 1-hour TTL). Leave them 0 when the agent does
 not record them; readers show "not recorded". Set `Model` only on subagent usage
 (`CalculateTokenUsageFromFile` in Claude Code does this) so cost can be weighted per model.
+
+### `TokenAttributor`
+
+**What it enables:** The breakdown-first token reports (`entire session tokens`, `entire checkpoint
+tokens`): tokens attributed to the tool, skill or subagent that caused them, with per-call model,
+effort and drill-down details, and the recommendations built on that breakdown. See
+[Token Reports](token-reports.md) for the rules the returned data feeds.
+
+**Without it:** Reports fall back to the session-wide total from `TokenCalculator` / committed
+metadata and say so ("per-call attribution is not available for <Agent>", or the profile's
+totals-only note). Callers treat "no attributor" as **cannot attribute**, never as "attributed
+zero" — the same distinction `ToolInvocationScanner` draws between "found nothing" and "cannot
+look".
+
+**Implement when:** Your agent's transcript records usage at the granularity of an individual API
+call AND structurally records which tool calls each API call emitted and which tool results it
+consumed (Claude Code's `message.id` rows with `tool_use`/`tool_result` blocks; Codex's
+`token_count` totals bracketing `function_call`/`function_call_output` rows; OpenCode's and
+Gemini's per-message tool parts; Pi's `toolCall`/`toolResult` entries). An agent that records only
+session or per-turn totals (Cursor, Copilot CLI, Factory AI Droid) must NOT implement it: not
+implementing it is the honest answer. The capability is resolved with `agent.AsTokenAttributor`,
+which is built-in only and has no `DeclaredCaps` gate — an external agent's parse-hook cannot
+convey transcript shape.
+
+**Method:**
+- `AttributeTokens(transcript []byte, startLine int, subagentsDir string) (*types.Attribution, error)` —
+  one `types.CallUsage` per API call from `startLine` onward (the same unit as
+  `CalculateTokenUsage`'s offset: a line for JSONL agents, a message index for JSON-document
+  agents), in transcript order, plus `types.SubagentRecord`s from `subagentsDir` when it is
+  non-empty (live sessions; committed checkpoints pass `""` and supply records from
+  `tasks/<tool-use-id>/task.json`). Error contract as `CalculateTokenUsage`: an error only when
+  the transcript as a whole cannot be parsed (a JSON-document format); malformed lines are
+  skipped, never fatal; an empty or all-garbage transcript is an empty `Attribution`, never nil.
+
+**What each `CallUsage` must carry, and the two invariants:**
+- `Usage` is this call only, with `ThinkingTokens` / `CacheCreation1hTokens` filled where the agent
+  records them; `UsageUnknown` when the agent recorded no usage for the call (it still counts, and
+  its `Emitted` refs still label the next call's `Consumed`). Σ `Calls[].Usage` must reproduce
+  `CalculateTokenUsage` for the same start — use the same arithmetic.
+- `Emitted`: the tool calls this call made, as `types.ToolUseRef{ID, Tool, Detail, SkillName,
+  SubagentType, Model}`. `Detail` comes from `transcript.ToolDetail(tool, in)` — the ONE place the
+  drill-down rules (command head, file path, URL host, skill name, subagent type) and the privacy
+  drops live; never store the raw command. Build `in` with `transcript.ToolInputFromJSON` (a raw
+  `tool_use` input) or `transcript.ToolInputFromMap` / `transcript.StringArg` (an already-decoded
+  map such as OpenCode's `state.input` or Gemini's `toolCalls[].args`). Fill `SkillName` for a
+  skill load and `SubagentType` (plus the requested `Model`, if the agent records one) for a spawn,
+  reading agent-specific keys yourself (`agent_type`, `agent_name`, `name`).
+- `Consumed`: the tool results that were NEW input to this call, as `types.ToolResultRef{ToolUse,
+  Bytes}`, **collected from the FULL transcript** with a label map built from EVERY row, so a
+  result whose call precedes `startLine` is still labelled and a call's `Consumed` is identical
+  whatever `startLine` admits it — consecutive slices then charge each result exactly once. A
+  result whose call is in no row keeps a ref with only `ID` set (its bytes did enter the context).
+  `Bytes` is the result's size as written; it drives byte-proportional attribution of fresh input.
+- `Model` (the bare id — `"gpt-5.5"`, never `"openai/gpt-5.5"` — so `tokenreport.WeightsFor` can
+  price it), `Effort` where recorded, `At`, `Line`, `ActiveSkill` where the harness stamps one.
+- `Attribution.Start`/`End`: embed `types.TimeSpan` and `Note(types.ParseTimestamp(ts))` every
+  in-slice row's timestamp; `AgentReportedCost` only when the agent writes a dollar figure.
+
+**Every attributor carries the window-independence test**
+(`TestAttributeTokens_CallsIndependentOfStartLine`): attribute from 0, then for every `startLine`
+up to the fixture's last row assert the result is exactly the offset-0 calls with `Line >= startLine`,
+field for field — same `Usage`, same `Emitted`, same `Consumed`. Write the `AttributeTokens` doc
+comment as "Mechanics, as coded" (call unit, line coordinate, consumed rule, `Bytes` rule, model
+and effort sources, subagent handling, error contract), as the five existing implementations do.
+Add the agent's row to `tokenreport.agentProfiles` (what it records) and, if its thresholds
+differ, to `tokenreport.GatesFor`.
 
 ### `SubagentAwareExtractor`
 
