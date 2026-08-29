@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -300,8 +301,10 @@ func TestAttributeTokens_StartLineOnResultRow(t *testing.T) {
 	}
 }
 
-// TestAttributeTokens_SliceKeepsFullTranscriptLabels pins the label-map rule:
-// calls before startLine are not emitted, but a result inside the slice that
+// TestAttributeTokens_SliceKeepsFullTranscriptLabels pins the full-transcript
+// rules across a startLine: calls before startLine are not emitted, but the
+// pre-slice results m2 read are still m2's Consumed (it is the call that read
+// them, and no other slice charges them), and a result inside the slice that
 // refers to a pre-slice tool_use is still labelled.
 func TestAttributeTokens_SliceKeepsFullTranscriptLabels(t *testing.T) {
 	t.Parallel()
@@ -313,10 +316,20 @@ func TestAttributeTokens_SliceKeepsFullTranscriptLabels(t *testing.T) {
 	if got.Calls[0].Line != fixtureLineM2 {
 		t.Errorf("Calls[0].Line = %d, want %d (Line stays in startLine's coordinate)", got.Calls[0].Line, fixtureLineM2)
 	}
-	// The results at line 3 precede the slice and were consumed by m2 before
-	// the slice began: they must not be re-attributed.
-	if len(got.Calls[0].Consumed) != 0 {
-		t.Errorf("Calls[0].Consumed = %+v, want none (results before startLine are not new input in the slice)", got.Calls[0].Consumed)
+	// The results at line 3 precede the slice but were read by m2, the first
+	// call in it: they are m2's Consumed here exactly as from line 0 — a slice
+	// boundary never loses a result (see CallsIndependentOfStartLine).
+	wantConsumed := []types.ToolResultRef{
+		{ToolUse: types.ToolUseRef{ID: "toolu_b1", Tool: "Bash", Detail: "go test ./cmd/entire/..."}, Bytes: 12000},
+		{ToolUse: types.ToolUseRef{ID: "toolu_b2", Tool: "Bash", Detail: "git log"}, Bytes: 300},
+	}
+	if len(got.Calls[0].Consumed) != len(wantConsumed) {
+		t.Fatalf("Calls[0].Consumed = %+v, want %+v (pre-slice results m2 read are still charged to m2)", got.Calls[0].Consumed, wantConsumed)
+	}
+	for i, want := range wantConsumed {
+		if got.Calls[0].Consumed[i] != want {
+			t.Errorf("Calls[0].Consumed[%d] = %+v, want %+v", i, got.Calls[0].Consumed[i], want)
+		}
 	}
 	m3 := got.Calls[1]
 	if len(m3.Consumed) != 1 {
@@ -451,6 +464,51 @@ func TestAttributeTokens_ResultsAfterLastCallAreNotConsumed(t *testing.T) {
 		for _, ref := range call.Consumed {
 			if ref.ToolUse.ID == "toolu_s1" {
 				t.Errorf("Calls[%d] consumed the trailing Skill result; no call follows it", i)
+			}
+		}
+	}
+}
+
+// TestAttributeTokens_CallsIndependentOfStartLine pins window independence:
+// a call is the same whole struct whatever startLine admits it — Line, usage,
+// Effort, Emitted and, in particular, Consumed — so consecutive slices charge
+// each result exactly once and never shift it to a different call; and a
+// slice holds exactly the offset-0 calls at or after it (a streamed message
+// whose first row precedes startLine is not a call in the slice).
+func TestAttributeTokens_CallsIndependentOfStartLine(t *testing.T) {
+	t.Parallel()
+
+	data := readAttributionFixture(t)
+	full := attributeFixture(t, 0, "")
+	byLine := make(map[int]types.CallUsage, len(full.Calls))
+	for _, call := range full.Calls {
+		byLine[call.Line] = call
+	}
+	for start := 1; start <= fixtureLineM4Result; start++ {
+		got, err := (&ClaudeCodeAgent{}).AttributeTokens(data, start, "")
+		if err != nil {
+			t.Fatalf("AttributeTokens(startLine=%d): %v", start, err)
+		}
+		wantCount := 0
+		for line := range byLine {
+			if line >= start {
+				wantCount++
+			}
+		}
+		if len(got.Calls) != wantCount {
+			t.Errorf("startLine %d: got %d calls, want the %d offset-0 calls at Line >= %d", start, len(got.Calls), wantCount, start)
+		}
+		for _, call := range got.Calls {
+			if call.Line < start {
+				t.Errorf("startLine %d: call at Line %d precedes the slice", start, call.Line)
+			}
+			want, ok := byLine[call.Line]
+			if !ok {
+				t.Errorf("startLine %d: call at Line %d is not a call from 0", start, call.Line)
+				continue
+			}
+			if !reflect.DeepEqual(call, want) {
+				t.Errorf("startLine %d: call at Line %d = %+v, want the same call from 0: %+v", start, call.Line, call, want)
 			}
 		}
 	}

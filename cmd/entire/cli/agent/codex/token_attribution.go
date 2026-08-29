@@ -74,9 +74,10 @@ func (s *timeSpan) note(at time.Time) {
 	}
 }
 
-// attributionWalk is the single pass over the whole rollout. Labels and the
-// model/effort state come from every row; calls, pending emits/outputs and the
-// embedded timeSpan (Start/End) only from rows at or after startLine.
+// attributionWalk is the single pass over the whole rollout. Labels, the
+// model/effort state and the pending emits/outputs come from every row (the
+// full transcript); calls and the embedded timeSpan (Start/End) only from rows
+// at or after startLine.
 type attributionWalk struct {
 	timeSpan
 
@@ -89,7 +90,9 @@ type attributionWalk struct {
 	// before the first in-slice call, then the previous call's total.
 	prevTotal *tokenUsageData
 	// pendingEmitted / pendingConsumed are the tool calls and tool outputs seen
-	// since prevTotal; they belong to the call the next distinct total closes.
+	// since prevTotal, in or before the slice; they belong to the call the
+	// next distinct total closes and are dropped when that total precedes
+	// startLine.
 	pendingEmitted  []types.ToolUseRef
 	pendingConsumed []types.ToolResultRef
 
@@ -131,15 +134,18 @@ type attributionWalk struct {
 //     is the bare id ("gpt-5.5"), never prefixed with session_meta's
 //     model_provider, so pricing can look it up. ActiveSkill stays "": Codex
 //     stamps no skill on its rows.
-//   - Emitted is every function_call / custom_tool_call row in the slice
-//     since the previous distinct total; Consumed is every function_call_output
-//     / custom_tool_call_output row in the slice since the previous distinct
-//     total. In a real rollout the token_count for a response follows the
-//     calls it emitted and precedes their outputs, so those outputs fall to
-//     the NEXT call — the one that actually read them; an output that lands
-//     before its own response's token_count is attributed the same way, to
-//     the call at the later total. Rows after the last total are attributed
-//     to nothing (the next slice's first call consumes them).
+//   - Emitted is every function_call / custom_tool_call row since the
+//     previous distinct total; Consumed is every function_call_output /
+//     custom_tool_call_output row since the previous distinct total — both
+//     wherever startLine falls: the rows are collected from the FULL
+//     transcript, so a call's Emitted and Consumed are the same in every slice
+//     that admits it and a row between a pre-slice total and an in-slice total
+//     is charged, once, to the in-slice call. In a real rollout the
+//     token_count for a response follows the calls it emitted and precedes
+//     their outputs, so those outputs fall to the NEXT call — the one that
+//     actually read them; an output that lands before its own response's
+//     token_count is attributed the same way, to the call at the later total.
+//     Rows after the last total are attributed to nothing.
 //   - ToolUseRef: ID is call_id, Tool the tool name, Detail is
 //     transcript.ToolDetail on a transcript.ToolInput built from the
 //     arguments: Command from `cmd`, or from a `command` argv array joined
@@ -189,7 +195,8 @@ func (c *CodexAgent) AttributeTokens(transcriptData []byte, startLine int, _ str
 }
 
 // visitRow decodes one row and dispatches on its envelope type. Rows before
-// startLine only contribute labels, model/effort state and the baseline total.
+// startLine only contribute labels, model/effort state, the baseline total and
+// the pending emits/outputs.
 func (w *attributionWalk) visitRow(line int, raw []byte) {
 	var row rolloutLine
 	if json.Unmarshal(raw, &row) != nil {
@@ -203,7 +210,7 @@ func (w *attributionWalk) visitRow(line int, raw []byte) {
 	case rolloutLineTypeTurnContext:
 		w.visitTurnContext(row.Payload)
 	case rolloutLineTypeResponseItem:
-		w.visitResponseItem(inSlice, row.Payload)
+		w.visitResponseItem(row.Payload)
 	case rolloutLineTypeEventMsg:
 		if total := lineTokenCountTotal(&row); total != nil {
 			w.visitTotal(line, inSlice, row.Timestamp, total)
@@ -239,10 +246,11 @@ func (w *attributionWalk) visitTurnContext(payload json.RawMessage) {
 	}
 }
 
-// visitResponseItem registers tool-call labels (every row) and, inside the
-// slice, queues tool calls as pending emits and tool outputs as pending
-// consumed results for the next distinct total.
-func (w *attributionWalk) visitResponseItem(inSlice bool, payload json.RawMessage) {
+// visitResponseItem registers tool-call labels and queues tool calls as
+// pending emits and tool outputs as pending consumed results for the next
+// distinct total, whatever line the row is on (see AttributeTokens: Emitted
+// and Consumed are slice-independent).
+func (w *attributionWalk) visitResponseItem(payload json.RawMessage) {
 	var item responseItemPayload
 	if json.Unmarshal(payload, &item) != nil {
 		return
@@ -253,13 +261,8 @@ func (w *attributionWalk) visitResponseItem(inSlice bool, payload json.RawMessag
 		if _, seen := w.labels[ref.ID]; !seen {
 			w.labels[ref.ID] = ref
 		}
-		if inSlice {
-			w.pendingEmitted = append(w.pendingEmitted, ref)
-		}
+		w.pendingEmitted = append(w.pendingEmitted, ref)
 	case responseItemFunctionCallOutput, responseItemCustomToolCallOutput:
-		if !inSlice {
-			return
-		}
 		ref, ok := w.labels[item.CallID]
 		if !ok {
 			ref = types.ToolUseRef{ID: item.CallID}
@@ -269,8 +272,9 @@ func (w *attributionWalk) visitResponseItem(inSlice bool, payload json.RawMessag
 }
 
 // visitTotal handles one token_count total: a duplicate of the previous
-// distinct total is ignored; before the slice it only moves the baseline;
-// inside the slice it closes a call with the pending emits and outputs.
+// distinct total is ignored. Every distinct total takes the pending emits and
+// outputs and becomes the baseline; inside the slice it also closes the call
+// they belong to, before the slice they are dropped with it.
 func (w *attributionWalk) visitTotal(line int, inSlice bool, timestamp string, total *tokenUsageData) {
 	if w.prevTotal != nil && *total == *w.prevTotal {
 		return
@@ -285,8 +289,8 @@ func (w *attributionWalk) visitTotal(line int, inSlice bool, timestamp string, t
 			Emitted:  w.pendingEmitted,
 			Consumed: w.pendingConsumed,
 		})
-		w.pendingEmitted, w.pendingConsumed = nil, nil
 	}
+	w.pendingEmitted, w.pendingConsumed = nil, nil
 	w.prevTotal = total
 }
 

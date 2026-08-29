@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 	"time"
 
@@ -268,9 +269,11 @@ func TestAttributeTokens_StartLineBaseline(t *testing.T) {
 	}
 }
 
-// TestAttributeTokens_LabelsResolveAcrossStartLine pins that an output inside
-// the slice whose function_call precedes startLine is still labelled: the
-// label map is built from the full transcript.
+// TestAttributeTokens_LabelsResolveAcrossStartLine pins the full-transcript
+// rules across a startLine that falls between a function_call and the total
+// that closes it: the call at that total still emitted the pre-slice
+// function_call (Emitted is a property of the call, not of the window) and
+// its output, inside the slice, is labelled through the pre-slice call.
 func TestAttributeTokens_LabelsResolveAcrossStartLine(t *testing.T) {
 	t.Parallel()
 
@@ -282,9 +285,7 @@ func TestAttributeTokens_LabelsResolveAcrossStartLine(t *testing.T) {
 	if c1.Usage != fixtureCall1Usage {
 		t.Errorf("call1.Usage = %+v, want %+v (no baseline)", c1.Usage, fixtureCall1Usage)
 	}
-	if len(c1.Emitted) != 0 {
-		t.Errorf("call1.Emitted = %+v, want none (c1's function_call precedes startLine)", c1.Emitted)
-	}
+	assertSame(t, "call1.Emitted", c1.Emitted, []types.ToolUseRef{fixtureC1Ref})
 	assertSame(t, "call1.Consumed", c1.Consumed, []types.ToolResultRef{{ToolUse: fixtureC1Ref, Bytes: 5000}})
 }
 
@@ -389,5 +390,50 @@ func TestCalculateTokenUsage_CountsDistinctTotals(t *testing.T) {
 	}
 	if usage != nil {
 		t.Errorf("CalculateTokenUsage(after T3) = %+v, want nil (the only row is a duplicate of the baseline)", *usage)
+	}
+}
+
+// TestAttributeTokens_CallsIndependentOfStartLine pins window independence:
+// a call is the same whole struct whatever startLine admits it — Line, usage,
+// Model/Effort, Emitted and Consumed — so consecutive slices charge each tool
+// call and each output exactly once and never shift it to a different call;
+// and a slice holds exactly the offset-0 calls at or after it (a duplicate of
+// the baseline inside the slice is still not a call).
+func TestAttributeTokens_CallsIndependentOfStartLine(t *testing.T) {
+	t.Parallel()
+
+	data := readAttributionFixture(t)
+	full := attributeFixture(t, 0, "")
+	byLine := make(map[int]types.CallUsage, len(full.Calls))
+	for _, call := range full.Calls {
+		byLine[call.Line] = call
+	}
+	for start := 1; start < fixtureLineCount; start++ {
+		got, err := (&CodexAgent{}).AttributeTokens(data, start, "")
+		if err != nil {
+			t.Fatalf("AttributeTokens(startLine=%d): %v", start, err)
+		}
+		wantCount := 0
+		for line := range byLine {
+			if line >= start {
+				wantCount++
+			}
+		}
+		if len(got.Calls) != wantCount {
+			t.Errorf("startLine %d: got %d calls, want the %d offset-0 calls at Line >= %d", start, len(got.Calls), wantCount, start)
+		}
+		for _, call := range got.Calls {
+			if call.Line < start {
+				t.Errorf("startLine %d: call at Line %d precedes the slice", start, call.Line)
+			}
+			want, ok := byLine[call.Line]
+			if !ok {
+				t.Errorf("startLine %d: call at Line %d is not a call from 0", start, call.Line)
+				continue
+			}
+			if !reflect.DeepEqual(call, want) {
+				t.Errorf("startLine %d: call at Line %d = %+v, want the same call from 0: %+v", start, call.Line, call, want)
+			}
+		}
 	}
 }

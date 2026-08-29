@@ -89,10 +89,10 @@ func (s *timeSpan) note(at time.Time) {
 	}
 }
 
-// attributionWalk is the single pass over the whole transcript. Labels and
-// spawned agents come from every row (the full transcript); calls, consumed
-// results and the embedded timeSpan (Start/End) only from rows at or after
-// startLine.
+// attributionWalk is the single pass over the whole transcript. Labels,
+// spawned agents and the queue of tool results come from every row (the full
+// transcript); calls and the embedded timeSpan (Start/End) only from rows at
+// or after startLine.
 type attributionWalk struct {
 	timeSpan
 
@@ -106,12 +106,17 @@ type attributionWalk struct {
 	spawnIdx map[string]int // agentID → index into spawned
 
 	calls []types.CallUsage
-	// callIdx maps message.id → index into calls, for streamed rows.
+	// callIdx maps every message.id seen → its index into calls, or
+	// callNotInSlice for a message whose first row precedes startLine, so a
+	// later streamed row of it neither opens a call nor drains pending again.
 	callIdx map[string]int
-	// pending is the tool results seen since the current last call started;
-	// they become the next new call's Consumed.
+	// pending is the tool results seen since the last message's first row,
+	// in or before the slice; they become the next message's Consumed.
 	pending []types.ToolResultRef
 }
+
+// callNotInSlice is the callIdx value for a message seen before startLine.
+const callNotInSlice = -1
 
 // AttributeTokens implements agent.TokenAttributor for Claude Code: one
 // types.CallUsage per assistant message (message.id) from startLine onward.
@@ -123,20 +128,25 @@ type attributionWalk struct {
 //     count, so startLine and CallUsage.Line stay in TokenTranscriptStart's
 //     coordinate. Malformed lines are skipped; they are never an error.
 //   - Rows sharing message.id are one call: Line/At/Model/Effort/ActiveSkill
-//     from the first row in the slice carrying that message.id, Usage from the row with the highest output_tokens
-//     (every field from that row, APICallCount 1), Emitted the union of
-//     tool_use blocks in row order, deduplicated by tool_use id. A message
-//     none of whose rows record usage has UsageUnknown set and a zero Usage.
+//     from the message's first row, Usage from the row with the highest
+//     output_tokens (every field from that row, APICallCount 1), Emitted the
+//     union of tool_use blocks in row order, deduplicated by tool_use id. A
+//     message none of whose rows record usage has UsageUnknown set and a zero
+//     Usage. A message is in the slice when its FIRST row is: one whose first
+//     row precedes startLine is not a call, whatever rows of it follow.
 //   - ToolUseRef.Detail is transcript.ToolDetail on the decoded input;
 //     SkillName is input.skill for Skill; SubagentType/Model are
 //     input.subagent_type/input.model for Agent (and the legacy Task name);
 //     tool names are matched case-insensitively.
-//   - Consumed for a call is every tool_result block in user rows at or after
-//     startLine, after the previous call's first row and before this call's
-//     first row; results after the last call are attributed to nothing (the
-//     next slice's first call consumes them). Each is labelled through a map
-//     built from EVERY assistant row, so a result whose tool_use precedes
-//     startLine is still labelled. Bytes is len() of the raw JSON of the
+//   - Consumed for a call is every tool_result block in user rows after the
+//     previous message's first row and before this call's first row, wherever
+//     startLine falls — the results are collected from the FULL transcript,
+//     so a call's Consumed is the same in every slice that admits it and a
+//     result between a pre-slice tool_use and an in-slice call is charged,
+//     once, to that call. Results after the last message are attributed to
+//     nothing. Each is labelled through a map built from EVERY assistant row,
+//     so a result whose tool_use precedes startLine is still labelled. Bytes
+//     is len() of the raw JSON of the
 //     block's `content` field as written in the transcript — quotes, escapes
 //     and array brackets included; 0 when absent. A tool_use_id found in no
 //     assistant row keeps the ref with only ToolUse.ID set (its bytes did
@@ -207,7 +217,8 @@ func forEachLine(data []byte, visit func(line int, raw []byte)) {
 }
 
 // visitRow decodes one row and dispatches on its envelope type. Rows before
-// startLine only contribute labels and spawned-agent ids.
+// startLine only contribute labels, spawned-agent ids and the tool-result
+// queue.
 func (w *attributionWalk) visitRow(line int, raw []byte) {
 	var row attributionRow
 	if err := json.Unmarshal(raw, &row); err != nil {
@@ -228,7 +239,7 @@ func (w *attributionWalk) visitRow(line int, raw []byte) {
 	case envelopeTypeAssistant:
 		w.visitAssistant(line, inSlice, &row, &msg)
 	case transcript.TypeUser:
-		w.visitUser(inSlice, &msg)
+		w.visitUser(&msg)
 	}
 }
 
@@ -245,29 +256,38 @@ func parseRowTimestamp(ts string) time.Time {
 	return at
 }
 
-// visitAssistant registers the row's tool_use labels and, inside the slice,
-// folds the row into its call (creating it on the message's first row). A row
-// without message.id cannot be grouped and is not a call — the same rule
-// CalculateTokenUsage applies — but its labels still count.
+// visitAssistant registers the row's tool_use labels and folds the row into
+// its message's call. The message's FIRST row takes the pending tool results
+// whether or not it is in the slice (see AttributeTokens: Consumed is
+// slice-independent) and, inside the slice, opens the call they were consumed
+// by. A row without message.id cannot be grouped and is not a call — the same
+// rule CalculateTokenUsage applies — but its labels still count.
 func (w *attributionWalk) visitAssistant(line int, inSlice bool, row *attributionRow, msg *attributionMessage) {
 	emitted := w.registerEmits(msg.blocks())
-	if msg.ID == "" || !inSlice {
+	if msg.ID == "" {
 		return
 	}
-	idx, exists := w.callIdx[msg.ID]
-	if !exists {
-		idx = len(w.calls)
-		w.callIdx[msg.ID] = idx
-		w.calls = append(w.calls, types.CallUsage{
-			UsageUnknown: true,
-			Model:        msg.Model,
-			Effort:       row.Effort,
-			At:           parseRowTimestamp(row.Timestamp),
-			Line:         line,
-			ActiveSkill:  row.AttributionSkill,
-			Consumed:     w.pending,
-		})
+	idx, seen := w.callIdx[msg.ID]
+	if !seen {
+		consumed := w.pending
 		w.pending = nil
+		idx = callNotInSlice
+		if inSlice {
+			idx = len(w.calls)
+			w.calls = append(w.calls, types.CallUsage{
+				UsageUnknown: true,
+				Model:        msg.Model,
+				Effort:       row.Effort,
+				At:           parseRowTimestamp(row.Timestamp),
+				Line:         line,
+				ActiveSkill:  row.AttributionSkill,
+				Consumed:     consumed,
+			})
+		}
+		w.callIdx[msg.ID] = idx
+	}
+	if idx == callNotInSlice {
+		return
 	}
 	call := &w.calls[idx]
 	call.Emitted = appendNewEmits(call.Emitted, emitted)
@@ -355,18 +375,16 @@ func callUsageFrom(u *messageUsage) types.TokenUsage {
 	}
 }
 
-// visitUser records spawned-agent ids from Agent results (full transcript)
-// and, inside the slice, queues each tool_result for the next call.
-func (w *attributionWalk) visitUser(inSlice bool, msg *attributionMessage) {
+// visitUser records spawned-agent ids from Agent results and queues each
+// tool_result for the next message, whatever line the row is on (see
+// AttributeTokens: Consumed is slice-independent).
+func (w *attributionWalk) visitUser(msg *attributionMessage) {
 	for _, b := range msg.blocks() {
 		if b.Type != contentTypeToolResult {
 			continue
 		}
 		if agentID := agentIDFromToolResult(b.Content); agentID != "" {
 			w.noteSpawn(agentID, b.ToolUseID)
-		}
-		if !inSlice {
-			continue
 		}
 		ref, ok := w.labels[b.ToolUseID]
 		if !ok {

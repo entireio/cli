@@ -63,7 +63,9 @@ type CallUsage struct {
 	// Emitted is the tool calls this call made.
 	Emitted []ToolUseRef
 	// Consumed is the tool results that were NEW input to this call, i.e.
-	// emitted by an earlier call.
+	// emitted by an earlier call. Collected from the FULL transcript: a call's
+	// Consumed is the same whatever startLine admits it, so consecutive slices
+	// charge each result exactly once.
 	Consumed []ToolResultRef
 }
 
