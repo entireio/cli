@@ -114,7 +114,7 @@ func writeDoctorBundle(ctx context.Context, repoRoot, outPath string, raw bool) 
 		}
 	}
 
-	if err := addCommandOutput(ctx, zw, "git-status.txt", repoRoot, raw, "git", "status", "--short", "--branch"); err != nil {
+	if err := addCommandOutput(ctx, zw, "git-status.txt", repoRoot, raw, "git", "--no-optional-locks", "status", "--short", "--branch"); err != nil {
 		return err
 	}
 	if err := addCommandOutput(ctx, zw, "git-log.txt", repoRoot, raw, "git", "log", "-n", "50", "--oneline"); err != nil {

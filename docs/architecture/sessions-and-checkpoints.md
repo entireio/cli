@@ -521,7 +521,7 @@ Metadata only, sharded by checkpoint ID. Supports **multiple sessions per checkp
 ├── 2/                   # Third session...
 └── tasks/<tool-use-id>/ # Subagent task records, materialized at condensation
     ├── agent-<agent-id>.jsonl # Subagent transcript, sanitized + redacted (omitted when unavailable)
-    └── task.json        # Record metadata (files, tokens, timings, unavailable reason)
+    └── task.json        # Record metadata (files, tokens, timings, unavailable reason); description redacted at write
 ```
 
 **Compact transcript (`transcript.jsonl`):** generated best-effort from

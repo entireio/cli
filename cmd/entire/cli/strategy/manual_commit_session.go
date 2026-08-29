@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -14,6 +13,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
+	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
@@ -440,7 +440,7 @@ func gitCommonDirForWorktree(ctx context.Context, worktreePath string) (string, 
 	}
 
 	cmd := exec.CommandContext(ctx, "git", "-C", worktreePath, "rev-parse", "--git-common-dir")
-	cmd.Env = gitEnvWithoutRepoOverrides()
+	cmd.Env = gitrepo.EnvWithoutRepoOverrides()
 	output, err := cmd.Output()
 	if err != nil {
 		return "", fmt.Errorf("failed to get git common dir for %s: %w", worktreePath, err)
@@ -458,25 +458,6 @@ func gitCommonDirForWorktree(ctx context.Context, worktreePath string) (string, 
 		commonDir = resolved
 	}
 	return commonDir, nil
-}
-
-// gitEnvWithoutRepoOverrides returns the current environment minus git's
-// repo-selector variables. Git hooks run with GIT_DIR (and sometimes
-// GIT_WORK_TREE / GIT_INDEX_FILE) exported for the hook's own repo; inheriting
-// them would make `git -C <other-worktree>` resolve against the hook's repo
-// instead of the requested path.
-func gitEnvWithoutRepoOverrides() []string {
-	env := os.Environ()
-	filtered := make([]string, 0, len(env))
-	for _, kv := range env {
-		if strings.HasPrefix(kv, "GIT_DIR=") ||
-			strings.HasPrefix(kv, "GIT_WORK_TREE=") ||
-			strings.HasPrefix(kv, "GIT_INDEX_FILE=") {
-			continue
-		}
-		filtered = append(filtered, kv)
-	}
-	return filtered
 }
 
 func isNestedWorktreeOfRecordedRepo(recordedWorktreePath, commitWorktreePath string) bool {

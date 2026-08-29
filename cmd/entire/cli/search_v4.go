@@ -38,11 +38,23 @@ func newSemanticSearcher(insecureHTTP bool) semanticSearcher {
 	return s.search
 }
 
+// hintError swaps in a friendlier user-facing message while keeping the
+// underlying typed errors matchable with errors.Is/As — search outcome
+// telemetry classifies failures from the error chain (ENT-1938), so a hint
+// must never truncate it.
+type hintError struct {
+	msg  string
+	errs []error
+}
+
+func (e *hintError) Error() string   { return e.msg }
+func (e *hintError) Unwrap() []error { return e.errs }
+
 // loginHintErr maps auth.ErrNotLoggedIn to the standard login hint; other
 // errors pass through unchanged.
 func loginHintErr(err error) error {
 	if errors.Is(err, auth.ErrNotLoggedIn) {
-		return errors.New("not authenticated. Run 'entire login' to authenticate")
+		return &hintError{msg: "not authenticated. Run 'entire login' to authenticate", errs: []error{err}}
 	}
 	return err
 }
@@ -373,11 +385,13 @@ type semanticCellPage struct {
 // mid-onboarding). Neither is worth warning the user about on every search.
 func classifySemanticCells(ctx context.Context, results []cellCallResult[*search.Response]) (pages []semanticCellPage, failed []string, lastErr error) {
 	var skipped, unmatched []string
+	var skipErrs []error
 	var unmatchedErr error
 	for _, r := range results {
 		switch {
 		case errors.Is(r.err, search.ErrCellUnavailable), errors.Is(r.err, auth.ErrNoCellForJurisdiction):
 			skipped = append(skipped, r.group.label())
+			skipErrs = append(skipErrs, r.err)
 		case errors.Is(r.err, search.ErrRepoFilterUnmatched):
 			// The cell answered; the repo filter just matched nothing there.
 			// Quiet like a skip when another cell has results, but if NO cell
@@ -406,7 +420,13 @@ func classifySemanticCells(ctx context.Context, results []cellCallResult[*search
 			// its region serves semantic search.
 			lastErr = errNoRepoAvailable
 		case len(skipped) > 0:
-			lastErr = errNoRegionAvailable
+			// Same message as the bare sentinel, but keep every per-cell skip
+			// cause in the chain: the two "region" variants (gateway without
+			// query-serve vs. client-side jurisdiction skip) are different
+			// failures and telemetry classifies them from the typed causes.
+			// All causes — not just the last — so a mixed-cause fan-out
+			// classifies by the classifier's precedence, not cell order.
+			lastErr = &hintError{msg: errNoRegionAvailable.Error(), errs: skipErrs}
 		}
 	}
 	return pages, failed, lastErr

@@ -9,6 +9,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/entireio/cli/cmd/entire/cli/execx"
 )
 
 const windowsOS = "windows"
@@ -160,6 +162,42 @@ func TestRunIsolatedTextGeneratorCLI_DeadlineCarriesPartialOutput(t *testing.T) 
 	}
 	if stdoutBytes == 0 {
 		t.Fatal("stdoutBytes = 0, want the partial stdout to be counted")
+	}
+}
+
+// Reproduces the `entire review` judge hang: the provider CLI backgrounds a
+// grandchild that inherits stdout and outlives it, so killing only the direct
+// child leaves the output pipe open and cmd.Run blocks past the deadline. The
+// call must return once the deadline fires instead of hanging forever.
+func TestRunIsolatedTextGeneratorCLI_ReturnsOnDeadlineWithPipeHoldingGrandchild(t *testing.T) {
+	t.Parallel()
+
+	if runtime.GOOS == windowsOS {
+		t.Skip("uses POSIX shell command")
+	}
+
+	runner := func(ctx context.Context, _ string, _ ...string) *exec.Cmd {
+		// `sleep 60 &` backgrounds a grandchild holding stdout; `wait` keeps the
+		// shell alive so only a group-wide kill (or the WaitDelay backstop) ends both.
+		return exec.CommandContext(ctx, "/bin/sh", "-c", "sleep 60 & echo ready; wait")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+
+	done := make(chan error, 1)
+	go func() {
+		_, _, _, err := RunIsolatedTextGeneratorCLI(ctx, runner, "test", "test", nil, "")
+		done <- err
+	}()
+
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("expected context.DeadlineExceeded, got %v", err)
+		}
+	case <-time.After(execx.KillWaitDelay + 5*time.Second):
+		t.Fatal("RunIsolatedTextGeneratorCLI hung past the deadline: a grandchild held the output pipe open")
 	}
 }
 

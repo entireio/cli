@@ -307,7 +307,7 @@ func TestDoInitialCommit_EmptyFolder(t *testing.T) {
 	dir := t.TempDir()
 	r := newFakeRunner()
 	r.set("git", []string{"add", "-A"}, "", nil)
-	r.set("git", []string{"status", "--porcelain"}, "", nil)
+	r.set("git", []string{"--no-optional-locks", "status", "--porcelain"}, "", nil)
 
 	committed, err := doInitialCommit(context.Background(), r, dir, "msg")
 	if err != nil {
@@ -323,7 +323,7 @@ func TestDoInitialCommit_WithFiles(t *testing.T) {
 	dir := t.TempDir()
 	r := newFakeRunner()
 	r.set("git", []string{"add", "-A"}, "", nil)
-	r.set("git", []string{"status", "--porcelain"}, " M README.md\n", nil)
+	r.set("git", []string{"--no-optional-locks", "status", "--porcelain"}, " M README.md\n", nil)
 	r.set("git", []string{"-c", "commit.gpgsign=false", "commit", "-m", "msg"}, "", nil)
 
 	committed, err := doInitialCommit(context.Background(), r, dir, "msg")
@@ -359,7 +359,7 @@ func TestRunGitHubBootstrap_NoGitHubFlow(t *testing.T) {
 	r.setIdentityConfigured()
 	r.set("git", []string{"init"}, "", nil)
 	r.set("git", []string{"add", "-A"}, "", nil)
-	r.set("git", []string{"status", "--porcelain"}, " M file\n", nil)
+	r.set("git", []string{"--no-optional-locks", "status", "--porcelain"}, " M file\n", nil)
 	r.set("git", []string{"-c", "commit.gpgsign=false", "commit", "-m", "First!"}, "", nil)
 
 	opts := GitHubBootstrapOptions{
@@ -393,7 +393,7 @@ func TestRunGitHubBootstrap_GhMissingFallsBackToLocal(t *testing.T) {
 	r.set("gh", []string{"--version"}, "", errors.New("not found"))
 	r.set("git", []string{"init"}, "", nil)
 	r.set("git", []string{"add", "-A"}, "", nil)
-	r.set("git", []string{"status", "--porcelain"}, "", nil)
+	r.set("git", []string{"--no-optional-locks", "status", "--porcelain"}, "", nil)
 
 	// A repo flag is an explicit GitHub request, so gh is probed; since it's
 	// missing we warn and fall back to local-only.
@@ -422,7 +422,7 @@ func TestRunGitHubBootstrap_FullNonInteractive(t *testing.T) {
 	r.set("gh", []string{"repo", "view", "octocat/my-new", "--json", "name"}, "", errors.New("not found"))
 	r.set("git", []string{"init"}, "", nil)
 	r.set("git", []string{"add", "-A"}, "", nil)
-	r.set("git", []string{"status", "--porcelain"}, " M f\n", nil)
+	r.set("git", []string{"--no-optional-locks", "status", "--porcelain"}, " M f\n", nil)
 	r.set("git", []string{"-c", "commit.gpgsign=false", "commit", "-m", "Seed"}, "", nil)
 	r.set("gh", []string{
 		"repo", "create", "octocat/my-new",
@@ -646,7 +646,7 @@ func TestRunGitHubBootstrap_RepoFlagsCreateButDoNotPush(t *testing.T) {
 	r.set("gh", []string{"repo", "view", "octocat/create-only", "--json", "name"}, "", errors.New("not found"))
 	r.set("git", []string{"init"}, "", nil)
 	r.set("git", []string{"add", "-A"}, "", nil)
-	r.set("git", []string{"status", "--porcelain"}, " M f\n", nil)
+	r.set("git", []string{"--no-optional-locks", "status", "--porcelain"}, " M f\n", nil)
 	r.set("git", []string{"-c", "commit.gpgsign=false", "commit", "-m", "Seed"}, "", nil)
 	r.set("gh", []string{
 		"repo", "create", "octocat/create-only",
@@ -695,7 +695,7 @@ func TestRunGitHubBootstrap_InitBeforeFinalize(t *testing.T) {
 	r.set("gh", []string{"repo", "view", "octocat/phased", "--json", "name"}, "", errors.New("not found"))
 	r.set("git", []string{"init"}, "", nil)
 	r.set("git", []string{"add", "-A"}, "", nil)
-	r.set("git", []string{"status", "--porcelain"}, " A .entire/settings.json\n", nil)
+	r.set("git", []string{"--no-optional-locks", "status", "--porcelain"}, " A .entire/settings.json\n", nil)
 	r.set("git", []string{"-c", "commit.gpgsign=false", "commit", "-m", "First"}, "", nil)
 	r.set("gh", []string{
 		"repo", "create", "octocat/phased",
@@ -723,7 +723,7 @@ func TestRunGitHubBootstrap_InitBeforeFinalize(t *testing.T) {
 	}
 	forbidden := [][]string{
 		{"add", "-A"},
-		{"status", "--porcelain"},
+		{"--no-optional-locks", "status", "--porcelain"},
 		{"-c", "commit.gpgsign=false", "commit", "-m", "First"},
 	}
 	for _, args := range forbidden {
@@ -1336,7 +1336,7 @@ func TestRunGitHubBootstrapFinalize_HonorsPushFalse(t *testing.T) {
 
 	r := newFakeRunner()
 	r.set("git", []string{"add", "-A"}, "", nil)
-	r.set("git", []string{"status", "--porcelain"}, " M f\n", nil)
+	r.set("git", []string{"--no-optional-locks", "status", "--porcelain"}, " M f\n", nil)
 	r.set("git", []string{"-c", "commit.gpgsign=false", "commit", "-m", "Seed"}, "", nil)
 	r.set("gh", []string{
 		"repo", "create", "octocat/no-push",
@@ -1399,7 +1399,7 @@ func TestRunGitHubBootstrap_YesAcceptsAllDefaults(t *testing.T) {
 	r.set("gh", []string{"api", "user/orgs", "--jq", ".[].login"}, "myorg\n", nil)
 	r.set("git", []string{"init"}, "", nil)
 	r.set("git", []string{"add", "-A"}, "", nil)
-	r.set("git", []string{"status", "--porcelain"}, " M f\n", nil)
+	r.set("git", []string{"--no-optional-locks", "status", "--porcelain"}, " M f\n", nil)
 	r.set("git", []string{"-c", "commit.gpgsign=false", "commit", "-m", defaultInitialCommitMessage}, "", nil)
 
 	// Expect repo created under the user's account (not org), private
@@ -1510,7 +1510,7 @@ func TestRunGitHubBootstrap_YesWithNoGitHub(t *testing.T) {
 	r.setIdentityConfigured()
 	r.set("git", []string{"init"}, "", nil)
 	r.set("git", []string{"add", "-A"}, "", nil)
-	r.set("git", []string{"status", "--porcelain"}, " M f\n", nil)
+	r.set("git", []string{"--no-optional-locks", "status", "--porcelain"}, " M f\n", nil)
 	r.set("git", []string{"-c", "commit.gpgsign=false", "commit", "-m", defaultInitialCommitMessage}, "", nil)
 
 	opts := GitHubBootstrapOptions{Yes: true, NoGitHub: true}

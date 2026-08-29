@@ -3,6 +3,7 @@ package claudecode
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -11,6 +12,7 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
+	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 )
 
@@ -328,7 +330,14 @@ func (c *ClaudeCodeAgent) UninstallHooks(ctx context.Context) error {
 	settingsPath := filepath.Join(repoRoot, ".claude", ClaudeSettingsFileName)
 	data, err := os.ReadFile(settingsPath) //nolint:gosec // path is constructed from repo root + fixed path
 	if err != nil {
-		return nil //nolint:nilerr // No settings file means nothing to uninstall
+		// Same split AreHooksInstalled makes: an absent file is an answer, an
+		// unreadable one is not. Collapsing both to "nothing to uninstall" leaves
+		// the hooks on disk and reports success, which is what uninstall is
+		// supposed to stop doing.
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return fmt.Errorf("read %s: %w", settingsPath, err)
 	}
 
 	var rawSettings map[string]json.RawMessage
@@ -441,8 +450,10 @@ func (c *ClaudeCodeAgent) UninstallHooks(ctx context.Context) error {
 }
 
 // loadClaudeSettings reads and parses .claude/settings.json from the repo root.
-// Returns ok=false when the file is missing or unparseable.
-func loadClaudeSettings(ctx context.Context) (ClaudeSettings, bool) {
+// A missing file returns the zero settings and no error — that is the answer
+// "nothing configured". An unreadable or malformed file returns an error: the
+// answer could not be read, which is a different thing.
+func loadClaudeSettings(ctx context.Context) (ClaudeSettings, error) {
 	// Use repo root to find .claude directory when run from a subdirectory
 	repoRoot, err := paths.WorktreeRoot(ctx)
 	if err != nil {
@@ -450,25 +461,36 @@ func loadClaudeSettings(ctx context.Context) (ClaudeSettings, bool) {
 	}
 	settingsPath := filepath.Join(repoRoot, ".claude", ClaudeSettingsFileName)
 	data, err := os.ReadFile(settingsPath) //nolint:gosec // path is constructed from repo root + fixed path
+	// No settings file means no hooks, which is an answer; anything else means we
+	// could not read the answer.
+	if errors.Is(err, os.ErrNotExist) {
+		return ClaudeSettings{}, nil
+	}
 	if err != nil {
-		return ClaudeSettings{}, false
+		logging.Warn(ctx, "claude-code: failed to read settings file", "path", settingsPath, "err", err)
+		return ClaudeSettings{}, fmt.Errorf("read %s: %w", settingsPath, err)
 	}
 
 	var settings ClaudeSettings
 	if err := json.Unmarshal(data, &settings); err != nil {
-		return ClaudeSettings{}, false
+		logging.Warn(ctx, "claude-code: failed to parse settings file", "path", settingsPath, "err", err)
+		return ClaudeSettings{}, fmt.Errorf("parse %s: %w", settingsPath, err)
 	}
-	return settings, true
+	return settings, nil
 }
 
 // AreHooksInstalled checks if Entire hooks are installed.
-func (c *ClaudeCodeAgent) AreHooksInstalled(ctx context.Context) bool {
-	settings, ok := loadClaudeSettings(ctx)
-	if !ok {
-		return false
+//
+// A missing settings file is an answer — no hooks — while an unreadable or
+// malformed one is an error: "we could not tell" and "there are none" are
+// different things to a caller deciding whether hooks can be left alone.
+func (c *ClaudeCodeAgent) AreHooksInstalled(ctx context.Context) (bool, error) {
+	settings, err := loadClaudeSettings(ctx)
+	if err != nil {
+		return false, err
 	}
 	// Check for at least one of our hooks (new, wrapped, or legacy format)
-	return hasEntireHook(settings.Hooks.Stop)
+	return hasEntireHook(settings.Hooks.Stop), nil
 }
 
 // HookConfigState describes how Entire's Claude Code hooks compare to what
@@ -504,8 +526,14 @@ func (c *ClaudeCodeAgent) CheckHookConfig(ctx context.Context) agent.HookConfigS
 // positive spec: Entire is installed (Stop hook present) yet one of the current
 // tool-use matchers does not carry its Entire hook.
 func CheckHookConfig(ctx context.Context) HookConfigState {
-	settings, ok := loadClaudeSettings(ctx)
-	if !ok || !hasEntireHook(settings.Hooks.Stop) {
+	settings, err := loadClaudeSettings(ctx)
+	// An unreadable or malformed settings file collapses to HooksAbsent
+	// deliberately. This is a coarse three-state diagnostic for `entire status`
+	// and `entire doctor`, and no caller here acts on "could not tell" —
+	// AreHooksInstalled is the API that propagates that distinction to callers
+	// which must (e.g. uninstall deciding whether hooks can be left alone).
+	// loadClaudeSettings has already logged the failure.
+	if err != nil || !hasEntireHook(settings.Hooks.Stop) {
 		return HooksAbsent
 	}
 	subagentTools := splitMatcherTools(subagentToolMatcher)

@@ -15,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	checkpointremote "github.com/entireio/cli/cmd/entire/cli/checkpoint/remote"
 	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
@@ -207,10 +208,18 @@ func formatSettingsStatusShort(ctx context.Context, s *EntireSettings, sty statu
 		}
 
 		// Warn when installed hooks are out of date (read-only; fix is manual).
-		for _, displayName := range OutdatedHookAgentDisplayNames(ctx) {
+		for _, name := range OutdatedHookAgents(ctx) {
+			ag, err := agent.Get(name)
+			if err != nil {
+				continue
+			}
 			b.WriteString("\n")
-			b.WriteString(sty.render(sty.yellow, "  ! "+displayName+" hooks out of date"))
+			b.WriteString(sty.render(sty.yellow, "  ! "+string(ag.Type())+" hooks out of date"))
 			b.WriteString(sty.render(sty.dim, " · run 'entire enable --force'"))
+		}
+		if warning := codexStatusWarning(inspectCodexHookIssue(ctx)); warning != "" {
+			b.WriteString("\n")
+			b.WriteString(sty.render(sty.yellow, "  ! "+warning))
 		}
 	}
 
@@ -791,6 +800,9 @@ type statusJSON struct {
 	// HooksOutdated lists agents whose installed hook config is out of date and
 	// should be refreshed with `entire enable --force`.
 	HooksOutdated []string `json:"hooks_outdated,omitempty"`
+	// CodexHooks reports effective discovery/trust warnings separately from
+	// current-checkout installation and freshness semantics.
+	CodexHooks *codexHooksStatusJSON `json:"codex_hooks,omitempty"`
 	// CheckpointSyncRemote is the elected checkpoint sync remote name, or the
 	// org/repo slug in dedicated checkpoint_remote mode. Deliberately not named
 	// checkpoint_remote, which is the existing GitHub-coupled setting.
@@ -801,6 +813,31 @@ type statusJSON struct {
 	// SecretScanners lists the enabled engines when non-default; omitted when default.
 	SecretScanners []string `json:"secret_scanners,omitempty"`
 	Error          string   `json:"error,omitempty"`
+}
+
+type codexHooksStatusJSON struct {
+	State            string   `json:"state"`
+	WorktreePath     string   `json:"worktree_path,omitempty"`
+	DiscoveredPath   string   `json:"discovered_path,omitempty"`
+	ProjectLayerPath string   `json:"project_layer_path,omitempty"`
+	Error            string   `json:"error,omitempty"`
+	MissingHooks     []string `json:"missing_hooks,omitempty"`
+	MissingApprovals []string `json:"missing_approvals,omitempty"`
+}
+
+func codexHooksStatusFromIssue(issue *codexHookIssue) *codexHooksStatusJSON {
+	if issue == nil {
+		return nil
+	}
+	return &codexHooksStatusJSON{
+		State:            issue.State,
+		WorktreePath:     issue.WorktreePath,
+		DiscoveredPath:   issue.DiscoveredPath,
+		ProjectLayerPath: issue.ProjectLayerPath,
+		Error:            issue.Error,
+		MissingHooks:     issue.MissingHooks,
+		MissingApprovals: issue.MissingApprovals,
+	}
 }
 
 type sessionBriefJSON struct {
@@ -865,6 +902,7 @@ func runStatusJSON(ctx context.Context, w io.Writer) error {
 		for _, name := range OutdatedHookAgents(ctx) {
 			result.HooksOutdated = append(result.HooksOutdated, string(name))
 		}
+		result.CodexHooks = codexHooksStatusFromIssue(inspectCodexHookIssue(ctx))
 
 		// Same computation as the text path (writeCheckpointSyncLines);
 		// empty fields drop out via omitempty when nothing resolved.

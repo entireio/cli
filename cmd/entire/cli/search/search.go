@@ -42,6 +42,28 @@ var ErrCellUnavailable = errors.New("semantic search is not available in this ce
 // don't misreport a repo-level miss as a region without query-serve.
 var ErrRepoFilterUnmatched = errors.New("no requested repo was found in this cell")
 
+// HTTPStatusError reports a non-OK search-service response. It preserves the
+// long-standing message wording (asserted by callers and tests) while exposing
+// the status code so outcome telemetry can classify server errors from the
+// type rather than the message text (ENT-1938).
+type HTTPStatusError struct {
+	StatusCode int
+	Message    string
+}
+
+func (e *HTTPStatusError) Error() string { return e.Message }
+
+// MalformedResponseError reports a 200 whose body was not a usable search
+// response: undecodable JSON, or a decoded body carrying an application-level
+// error field. Typed for the same reason as HTTPStatusError — the service
+// answered unusably, which outcome telemetry counts as a server failure, not
+// an unclassified one. Message wording is preserved verbatim.
+type MalformedResponseError struct {
+	Message string
+}
+
+func (e *MalformedResponseError) Error() string { return e.Message }
+
 // WildcardQuery is the query string used when only filters are provided (no search terms).
 const WildcardQuery = "*"
 
@@ -798,18 +820,18 @@ func parseSearchResponse(statusCode int, body []byte) (*Response, error) {
 			Error string `json:"error"`
 		}
 		if json.Unmarshal(body, &errResp) == nil && errResp.Error != "" {
-			return nil, fmt.Errorf("search service error (%d): %s", statusCode, errResp.Error)
+			return nil, &HTTPStatusError{StatusCode: statusCode, Message: fmt.Sprintf("search service error (%d): %s", statusCode, errResp.Error)}
 		}
-		return nil, fmt.Errorf("search service returned %d: %s", statusCode, string(body))
+		return nil, &HTTPStatusError{StatusCode: statusCode, Message: fmt.Sprintf("search service returned %d: %s", statusCode, string(body))}
 	}
 
 	var result Response
 	if err := json.Unmarshal(body, &result); err != nil {
-		return nil, fmt.Errorf("unexpected response from search service: %s", string(body))
+		return nil, &MalformedResponseError{Message: "unexpected response from search service: " + string(body)}
 	}
 
 	if result.Error != "" {
-		return nil, fmt.Errorf("search service error: %s", result.Error)
+		return nil, &MalformedResponseError{Message: "search service error: " + result.Error}
 	}
 
 	return &result, nil

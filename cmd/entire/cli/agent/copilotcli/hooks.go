@@ -233,25 +233,31 @@ func (c *CopilotCLIAgent) UninstallHooks(ctx context.Context) error {
 	return nil
 }
 
-// AreHooksInstalled checks if Entire hooks are installed in the Copilot CLI config.
-func (c *CopilotCLIAgent) AreHooksInstalled(ctx context.Context) bool {
+// AreHooksInstalled checks if Entire hooks are installed in the Copilot CLI
+// config.
+//
+// A missing config file is an answer — no hooks — while an unreadable or
+// malformed one is an error: "we could not tell" and "there are none" are
+// different things to a caller deciding whether hooks can be left alone.
+func (c *CopilotCLIAgent) AreHooksInstalled(ctx context.Context) (bool, error) {
 	worktreeRoot, err := paths.WorktreeRoot(ctx)
 	if err != nil {
 		worktreeRoot = "."
 	}
 	hooksPath := filepath.Join(worktreeRoot, hooksDir, HooksFileName)
 	data, err := os.ReadFile(hooksPath) //nolint:gosec // path is constructed from repo root + fixed path
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
 	if err != nil {
-		if !errors.Is(err, os.ErrNotExist) {
-			logging.Warn(ctx, "copilot-cli: failed to read hooks file", "path", hooksPath, "err", err)
-		}
-		return false
+		logging.Warn(ctx, "copilot-cli: failed to read hooks file", "path", hooksPath, "err", err)
+		return false, fmt.Errorf("read %s: %w", hooksPath, err)
 	}
 
 	var hooksFile CopilotHooksFile
 	if err := json.Unmarshal(data, &hooksFile); err != nil {
 		logging.Warn(ctx, "copilot-cli: failed to parse hooks file", "path", hooksPath, "err", err)
-		return false
+		return false, fmt.Errorf("parse %s: %w", hooksPath, err)
 	}
 
 	return hasEntireHook(hooksFile.Hooks.UserPromptSubmitted) ||
@@ -261,7 +267,7 @@ func (c *CopilotCLIAgent) AreHooksInstalled(ctx context.Context) bool {
 		hasEntireHook(hooksFile.Hooks.SubagentStop) ||
 		hasEntireHook(hooksFile.Hooks.PreToolUse) ||
 		hasEntireHook(hooksFile.Hooks.PostToolUse) ||
-		hasEntireHook(hooksFile.Hooks.ErrorOccurred)
+		hasEntireHook(hooksFile.Hooks.ErrorOccurred), nil
 }
 
 // GetSupportedHooks returns the normalized lifecycle events this agent supports.

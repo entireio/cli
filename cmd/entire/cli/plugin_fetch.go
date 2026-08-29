@@ -20,6 +20,8 @@ import (
 	"slices"
 	"strings"
 	"time"
+
+	"github.com/entireio/cli/cmd/entire/cli/versioninfo"
 )
 
 // Release-asset download. The one irreducibly forge-specific piece of the
@@ -93,7 +95,8 @@ const maxAssetRedirects = 10
 // https:// entry point could deliver both the asset and its checksums.txt over
 // plaintext — exactly the outcome requireSecureAssetURL exists to prevent.
 var pluginHTTPClient = &http.Client{
-	Timeout: 5 * time.Minute,
+	Timeout:   5 * time.Minute,
+	Transport: versioninfo.WrapTransport(nil),
 	CheckRedirect: func(req *http.Request, via []*http.Request) error {
 		if len(via) >= maxAssetRedirects {
 			return fmt.Errorf("stopped after %d redirects", maxAssetRedirects)

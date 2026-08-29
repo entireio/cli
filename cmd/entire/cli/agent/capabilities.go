@@ -75,6 +75,12 @@ func AsHookFreshness(ag Agent) (HookFreshness, bool) {
 	return builtinCapability[HookFreshness](ag)
 }
 
+// AsEffectiveHookDiagnostics returns the agent as EffectiveHookDiagnostics if
+// it owns diagnostics for its effective hook configuration.
+func AsEffectiveHookDiagnostics(ag Agent) (EffectiveHookDiagnostics, bool) {
+	return builtinCapability[EffectiveHookDiagnostics](ag)
+}
+
 // AsTranscriptAnalyzer returns the agent as TranscriptAnalyzer if it both
 // implements the interface and (for CapabilityDeclarer agents) has declared the capability.
 func AsTranscriptAnalyzer(ag Agent) (TranscriptAnalyzer, bool) {

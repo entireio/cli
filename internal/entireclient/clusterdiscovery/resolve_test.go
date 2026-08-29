@@ -11,6 +11,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/entireio/cli/cmd/entire/cli/api"
 	"github.com/entireio/cli/internal/entireclient/contexts"
 	"github.com/entireio/cli/internal/entireclient/discovery"
 )
@@ -142,6 +143,89 @@ func TestResolve_ActiveContextIneligibleAndNothingElseFits(t *testing.T) {
 	assert.NotContains(t, err.Error(), "entire auth use")
 }
 
+// loginURLCoresHandler serves a discovery document that advertises a login
+// server alongside the trusted issuers, the shape every cluster serves once
+// it is running a build that carries ENTIRE_CORE_AUTH_BASE_URL through.
+func loginURLCoresHandler(t *testing.T, calls *int32, loginURL string, coreURLs ...string) http.HandlerFunc {
+	t.Helper()
+	body, err := json.Marshal(Response{
+		CoreURLs:             coreURLs,
+		JurisdictionAudience: "https://eu.entire.io",
+		LoginURL:             loginURL,
+	})
+	require.NoError(t, err)
+	return func(w http.ResponseWriter, r *http.Request) {
+		if calls != nil {
+			atomic.AddInt32(calls, 1)
+		}
+		assert.Equal(t, Path, r.URL.Path)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write(body) //nolint:errcheck // test
+	}
+}
+
+// TestResolve_AdvertisedLoginURLIsTheWholeRemedy: when the cluster names a
+// login server, the hint is one command against one host — the apex router
+// dispatches to whichever regional core owns the account, so listing the
+// issuers next to it would be noise the user has to triage.
+func TestResolve_AdvertisedLoginURLIsTheWholeRemedy(t *testing.T) {
+	t.Parallel()
+	srv := httptest.NewServer(loginURLCoresHandler(t, nil, "https://auth.entire.io",
+		"https://eu.auth.entire.io", "https://us.auth.entire.io"))
+	defer srv.Close()
+
+	_, err := ResolveContextForCluster(t.Context(), t.TempDir(), t.TempDir(), "aws-eu-central-1.entire.io", hostPinningClient(t, srv), t.Logf)
+	require.Error(t, err)
+	require.ErrorIs(t, err, ErrNoAuthContext)
+	assert.Contains(t, err.Error(), "no auth context for cluster aws-eu-central-1.entire.io")
+	assert.Contains(t, err.Error(), "Log in with `entire login`,")
+	assert.NotContains(t, err.Error(), "--server")
+	assert.NotContains(t, err.Error(), "It trusts these login servers")
+	assert.NotContains(t, err.Error(), "https://eu.auth.entire.io")
+}
+
+// TestRenderLoginInstruction covers the three remedies a resource can produce.
+func TestRenderLoginInstruction(t *testing.T) {
+	t.Parallel()
+
+	t.Run("a non-default login server is named, padding folded", func(t *testing.T) {
+		t.Parallel()
+		got := renderLoginInstruction(loginTargets{
+			coreURLs: []string{"https://eu.auth.partial.to"},
+			loginURL: " https://auth.partial.to/ ",
+		})
+		assert.Equal(t, "Log in with `entire login --server https://auth.partial.to`, then re-run your command.", got)
+	})
+
+	t.Run("the default login server needs no flag", func(t *testing.T) {
+		t.Parallel()
+		for _, advertised := range []string{api.DefaultAuthBaseURL, " " + api.DefaultAuthBaseURL + "/ "} {
+			got := renderLoginInstruction(loginTargets{
+				coreURLs: []string{"https://us.auth.entire.io"},
+				loginURL: advertised,
+			})
+			assert.Equal(t, "Log in with `entire login`, then re-run your command.", got,
+				"advertised as %q", advertised)
+			assert.NotContains(t, got, "--server")
+		}
+	})
+
+	t.Run("falls back to the trusted issuers", func(t *testing.T) {
+		t.Parallel()
+		got := renderLoginInstruction(loginTargets{
+			coreURLs: []string{"https://eu.auth.entire.io/", "https://eu.auth.entire.io"},
+		})
+		assert.Contains(t, got, "It trusts these login servers: https://eu.auth.entire.io\n")
+		assert.Contains(t, got, "entire login --server <url>")
+	})
+
+	t.Run("nothing advertised", func(t *testing.T) {
+		t.Parallel()
+		assert.Equal(t, "Log in with `entire login`, then re-run your command.",
+			renderLoginInstruction(loginTargets{}))
+	})
+}
+
 // TestResolve_NoActiveContextReturnsLoginHint: genuinely logged out (no
 // current_context) — the plain login hint, still naming the cluster's servers.
 func TestResolve_NoActiveContextReturnsLoginHint(t *testing.T) {
@@ -197,7 +281,7 @@ func TestResolve_ContextWithoutCoreURLIsNeverEligible(t *testing.T) {
 		CurrentContext: "blank",
 		Contexts:       []*contexts.Context{{Name: "blank", Handle: "paul", KeychainService: "kc:blank"}},
 	}
-	_, err := requireActiveContext(f, "cluster c.entire.io", []string{""}, t.Logf)
+	_, err := requireActiveContext(f, "cluster c.entire.io", loginTargets{coreURLs: []string{""}}, t.Logf)
 	require.Error(t, err)
 	assert.NotContains(t, err.Error(), "These saved logins can authenticate it",
 		"a context rejected by the accept check must not be offered as a candidate")
@@ -213,7 +297,7 @@ func TestResolve_EligibilityIgnoresWhitespaceAndTrailingSlash(t *testing.T) {
 		CurrentContext: "eu",
 		Contexts:       []*contexts.Context{{Name: "eu", CoreURL: "https://eu.auth.entire.io", Handle: "paul", KeychainService: "kc:eu"}},
 	}
-	c, err := requireActiveContext(f, "cluster c.entire.io", []string{" https://eu.auth.entire.io/ "}, t.Logf)
+	c, err := requireActiveContext(f, "cluster c.entire.io", loginTargets{coreURLs: []string{" https://eu.auth.entire.io/ "}}, t.Logf)
 	require.NoError(t, err)
 	assert.Equal(t, "eu", c.Name)
 }
@@ -408,17 +492,68 @@ func TestResolve_AudienceAgnosticCallersSkipPreAudienceRefetch(t *testing.T) {
 			{Name: "prod-eu", CoreURL: "https://eu.auth.entire.io", Handle: "paul", KeychainService: "kc:prod"},
 		},
 	}))
+	// SetEntry stamps the current schema version, so the only thing this
+	// entry is missing is the audience — which is what the test is about.
 	require.NoError(t, discovery.ModifyClusterCores(cacheDir, func(c discovery.ClusterCoresCache) error {
-		c["aws-eu-central-1.entire.io"] = &discovery.CoresEntry{
-			CoreURLs:  []string{"https://eu.auth.entire.io"},
-			FetchedAt: time.Now(),
-		}
+		c.SetEntry("aws-eu-central-1.entire.io", discovery.CoresEntry{
+			CoreURLs: []string{"https://eu.auth.entire.io"},
+		})
 		return nil
 	}))
 
 	_, err := ResolveContextForCluster(t.Context(), configDir, cacheDir, "aws-eu-central-1.entire.io", hostPinningClient(t, srv), t.Logf)
 	require.NoError(t, err)
 	assert.Equal(t, int32(0), atomic.LoadInt32(&calls), "cores-only caller must be served from the fresh cache")
+}
+
+// TestResolve_OlderSchemaCacheRefetched: a fresh entry written before the
+// client knew about login_url is re-fetched immediately rather than pinning
+// the user to the old multi-server hint for a full TTL — a warm cache is
+// exactly what the people this change helps already have. The rewritten entry
+// is current, so the next call is served from cache even though this cluster
+// advertises no login server.
+func TestResolve_OlderSchemaCacheRefetched(t *testing.T) {
+	t.Parallel()
+	var calls int32
+	srv := httptest.NewServer(loginURLCoresHandler(t, &calls, "https://auth.partial.to", "https://eu.auth.entire.io"))
+	defer srv.Close()
+
+	// No saved logins, so resolution ends in the login hint — the message the
+	// re-fetch is supposed to improve.
+	configDir := t.TempDir()
+	cacheDir := t.TempDir()
+	// Seed a FRESH pre-versioning entry: audience present (so the audience
+	// rule can't be what forces the re-fetch), no login server, no version.
+	require.NoError(t, discovery.ModifyClusterCores(cacheDir, func(c discovery.ClusterCoresCache) error {
+		c["aws-eu-central-1.entire.io"] = &discovery.CoresEntry{
+			CoreURLs:             []string{"https://eu.auth.entire.io"},
+			JurisdictionAudience: "https://eu.entire.io",
+			FetchedAt:            time.Now(),
+		}
+		return nil
+	}))
+
+	_, err := ResolveContextForCluster(t.Context(), configDir, cacheDir, "aws-eu-central-1.entire.io", hostPinningClient(t, srv), t.Logf)
+	require.ErrorIs(t, err, ErrNoAuthContext)
+	assert.Equal(t, int32(1), atomic.LoadInt32(&calls), "pre-versioning entry must trigger a live re-fetch")
+	// The whole point: the freshly discovered login server reaches the hint.
+	assert.Contains(t, err.Error(), "entire login --server https://auth.partial.to")
+
+	_, err = ResolveContextForCluster(t.Context(), configDir, cacheDir, "aws-eu-central-1.entire.io", hostPinningClient(t, srv), t.Logf)
+	require.Error(t, err)
+	assert.Equal(t, int32(1), atomic.LoadInt32(&calls), "the rewritten entry is current and must not re-fetch again")
+	// Served from cache, and the hint is unchanged — the login server survives
+	// the round-trip through cluster_cores.json rather than living only in the
+	// response that fetched it.
+	assert.Contains(t, err.Error(), "entire login --server https://auth.partial.to")
+
+	cache, cacheErr := discovery.LoadClusterCores(cacheDir)
+	require.NoError(t, cacheErr)
+	cached, fresh, ok := cache.GetEntry("aws-eu-central-1.entire.io")
+	require.True(t, ok)
+	assert.True(t, fresh)
+	assert.Equal(t, "https://auth.partial.to", cached.LoginURL)
+	assert.Equal(t, discovery.CoresSchemaVersion, cached.SchemaVersion)
 }
 
 // TestResolve_Unreachable: transport failure with no cached cores surfaces
@@ -563,12 +698,12 @@ func TestResolve_NilStoredContextDoesNotPanic(t *testing.T) {
 	}
 
 	// Empty coreURLs is the case the old loop shape never dereferenced at all.
-	_, err := requireActiveContext(f, "cluster c.entire.io", nil, t.Logf)
+	_, err := requireActiveContext(f, "cluster c.entire.io", loginTargets{}, t.Logf)
 	require.Error(t, err)
 
 	// And with a matching core, the nil entry must be skipped while the real one
 	// is still offered.
-	_, err = requireActiveContext(f, "cluster c.entire.io", []string{"https://eu.auth.entire.io"}, t.Logf)
+	_, err = requireActiveContext(f, "cluster c.entire.io", loginTargets{coreURLs: []string{"https://eu.auth.entire.io"}}, t.Logf)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "prod-eu", "the valid entry is still a candidate")
 }
@@ -584,7 +719,7 @@ func TestResolve_NilStoredContextIsSelectable(t *testing.T) {
 			{Name: "prod-eu", CoreURL: "https://eu.auth.entire.io", Handle: "paul", KeychainService: "kc:prod"},
 		},
 	}
-	c, err := requireActiveContext(f, "cluster c.entire.io", []string{"https://eu.auth.entire.io"}, t.Logf)
+	c, err := requireActiveContext(f, "cluster c.entire.io", loginTargets{coreURLs: []string{"https://eu.auth.entire.io"}}, t.Logf)
 	require.NoError(t, err)
 	assert.Equal(t, "prod-eu", c.Name)
 }

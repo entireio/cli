@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/api"
+	"github.com/entireio/cli/cmd/entire/cli/versioninfo"
 	"github.com/entireio/cli/internal/entireclient/clusterdiscovery"
 	"github.com/entireio/cli/internal/entireclient/contexts"
 	"github.com/entireio/cli/internal/entireclient/httputil"
@@ -350,13 +351,13 @@ func resolveEnvTokenCellSubject(raw string, insecureHTTP bool) (cellSubject, err
 func cellExchangeHTTPClient(origin string) *http.Client {
 	switch {
 	case cellExchangeTransportForTest != nil:
-		return &http.Client{Timeout: cellDataAPITimeout, Transport: cellExchangeTransportForTest}
+		return &http.Client{Timeout: cellDataAPITimeout, Transport: versioninfo.WrapTransport(cellExchangeTransportForTest)}
 	case shouldUsePlainHTTPDiscovery(origin):
 		c := dataAPIDiscoveryClient(origin)
 		c.Timeout = cellDataAPITimeout
 		return c
 	default:
-		return &http.Client{Timeout: cellDataAPITimeout}
+		return &http.Client{Timeout: cellDataAPITimeout, Transport: versioninfo.WrapTransport(nil)}
 	}
 }
 

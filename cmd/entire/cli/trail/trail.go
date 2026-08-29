@@ -132,24 +132,25 @@ type Author struct {
 
 // Metadata represents the metadata for a trail, matching the web PR format.
 type Metadata struct {
-	Number    int        `json:"number,omitempty"`
-	TrailID   ID         `json:"trail_id"`
-	URL       string     `json:"url,omitempty"`
-	Branch    string     `json:"branch"`
-	Base      string     `json:"base"`
-	Title     string     `json:"title"`
-	Body      string     `json:"body"`
-	Status    Status     `json:"status"`
-	Phase     string     `json:"phase,omitempty"`
-	Author    *Author    `json:"author"`
-	Assignees []string   `json:"assignees"`
-	Labels    []string   `json:"labels"`
-	Type      Type       `json:"type,omitempty"`
-	Priority  Priority   `json:"priority,omitempty"`
-	Reviewers []Reviewer `json:"reviewers,omitempty"`
-	CreatedAt time.Time  `json:"created_at"`
-	UpdatedAt time.Time  `json:"updated_at"`
-	MergedAt  *time.Time `json:"merged_at"`
+	Number         int        `json:"number,omitempty"`
+	TrailID        ID         `json:"trail_id"`
+	URL            string     `json:"url,omitempty"`
+	Branch         string     `json:"branch"`
+	OriginalBranch string     `json:"original_branch"`
+	Base           string     `json:"base"`
+	Title          string     `json:"title"`
+	Body           string     `json:"body"`
+	Status         Status     `json:"status"`
+	Phase          string     `json:"phase,omitempty"`
+	Author         *Author    `json:"author"`
+	Assignees      []string   `json:"assignees"`
+	Labels         []string   `json:"labels"`
+	Type           Type       `json:"type,omitempty"`
+	Priority       Priority   `json:"priority,omitempty"`
+	Reviewers      []Reviewer `json:"reviewers,omitempty"`
+	CreatedAt      time.Time  `json:"created_at"`
+	UpdatedAt      time.Time  `json:"updated_at"`
+	MergedAt       *time.Time `json:"merged_at"`
 }
 
 // AuthorLogin returns the trail author's login, or an empty string if the

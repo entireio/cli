@@ -5,10 +5,13 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -18,6 +21,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent/external"
 	_ "github.com/entireio/cli/cmd/entire/cli/agent/geminicli"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
+	"github.com/entireio/cli/cmd/entire/cli/agent/vogon"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/gitremote"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
@@ -133,8 +137,27 @@ func copyExecutable(src, dst string) error {
 
 func writeExternalAgentBinary(t *testing.T, dir, name string) {
 	t.Helper()
+	writeExternalAgentBinaryEx(t, dir, name, false)
+}
 
+// writeExternalAgentBinaryEx writes a mock external-agent binary whose
+// are-hooks-installed subcommand reports hooksInstalled, so callers can
+// simulate both installed and available (uninstalled) external plugins.
+func writeExternalAgentBinaryEx(t *testing.T, dir, name string, hooksInstalled bool) {
+	t.Helper()
+	// Whatever this mock is written for, discovering it registers it into the
+	// process-global registry, which outlives the TempDir holding the binary.
+	// Restore the registry so later tests walking agent.List() do not exec a
+	// path that no longer exists.
+	t.Cleanup(agent.SnapshotRegistryForTesting())
+
+	installed := strconv.FormatBool(hooksInstalled)
+
+	// When ENTIRE_TEST_EXEC_LOG is set, record every invocation's subcommand so a
+	// test can assert which subcommands the CLI actually invoked. Unset in other
+	// tests, so they are undisturbed.
 	script := `#!/bin/sh
+[ -n "$ENTIRE_TEST_EXEC_LOG" ] && echo "$1" >> "$ENTIRE_TEST_EXEC_LOG"
 case "$1" in
   info)
     echo '{"protocol_version":1,"name":"` + name + `","type":"` + name + ` Agent","description":"External test agent","is_preview":false,"protected_dirs":[],"hook_names":["stop"],"capabilities":{"hooks":true}}'
@@ -150,10 +173,22 @@ case "$1" in
     echo '{"hooks_installed": 1}'
     ;;
   uninstall-hooks)
+    # ENTIRE_TEST_FAIL_UNINSTALL_HOOKS simulates a plugin that cannot remove its
+    # own hooks, so a test can drive the CLI's leftover-hooks recovery path.
+    if [ -n "$ENTIRE_TEST_FAIL_UNINSTALL_HOOKS" ]; then
+      echo "mock uninstall-hooks failure" >&2
+      exit 1
+    fi
     exit 0
     ;;
   are-hooks-installed)
-    echo '{"installed": false}'
+    # ENTIRE_TEST_PROBE drives the two ways a plugin can fail to answer, so a test
+    # can tell "no hooks" apart from "could not say".
+    case "$ENTIRE_TEST_PROBE" in
+      fail)    echo "mock probe failure" >&2; exit 1 ;;
+      garbage) echo 'not json' ;;
+      *)       echo '{"installed": ` + installed + `}' ;;
+    esac
     ;;
   *)
     echo '{}'
@@ -168,6 +203,7 @@ esac
 
 func writeExternalSummaryAgentBinary(t *testing.T, dir, name string) {
 	t.Helper()
+	t.Cleanup(agent.SnapshotRegistryForTesting())
 
 	script := `#!/bin/sh
 case "$1" in
@@ -678,6 +714,73 @@ func TestSetupAgentHooksNonInteractive_RefusesToClobberUnparseableSettings(t *te
 	}
 }
 
+func TestSetupAgentHooksNonInteractive_InstallsCodexWhenDiscoveryIsUnresolved(t *testing.T) {
+	ag, linkedRoot := setupCodexAgentWithUnresolvedDiscovery(t)
+
+	var output bytes.Buffer
+	if err := setupAgentHooksNonInteractive(t.Context(), &output, ag, EnableOptions{}); err != nil {
+		t.Fatalf("enable Codex with unresolved discovery: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(linkedRoot, ".codex", "hooks.json")); err != nil {
+		t.Fatalf("current-worktree hooks were not installed: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(linkedRoot, ".entire")); err != nil {
+		t.Fatalf("enable did not write project state: %v", err)
+	}
+}
+
+func TestRunEnableInteractive_InstallsCodexWhenDiscoveryIsUnresolved(t *testing.T) {
+	ag, linkedRoot := setupCodexAgentWithUnresolvedDiscovery(t)
+
+	var output bytes.Buffer
+	if err := runEnableInteractive(t.Context(), &output, []agent.Agent{ag}, EnableOptions{Yes: true, Telemetry: true}); err != nil {
+		t.Fatalf("interactive enable Codex with unresolved discovery: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(linkedRoot, ".codex", "hooks.json")); err != nil {
+		t.Fatalf("current-worktree hooks were not installed: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(linkedRoot, ".entire")); err != nil {
+		t.Fatalf("enable did not write project state: %v", err)
+	}
+}
+
+func setupCodexAgentWithUnresolvedDiscovery(t *testing.T) (agent.Agent, string) {
+	t.Helper()
+	tmp := setupTestDir(t)
+	primaryRoot := filepath.Join(tmp, "primary")
+	linkedRoot := filepath.Join(tmp, "linked")
+	runGit := func(dir string, args ...string) {
+		t.Helper()
+		cmd := exec.CommandContext(t.Context(), "git", args...)
+		cmd.Dir = dir
+		cmd.Env = testutil.GitIsolatedEnv()
+		output, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("git %v: %v: %s", args, err, output)
+		}
+	}
+	testutil.InitRepo(t, primaryRoot)
+	testutil.WriteFile(t, primaryRoot, "README.md", "initial\n")
+	testutil.GitAdd(t, primaryRoot, "README.md")
+	testutil.GitCommit(t, primaryRoot, "initial")
+	runGit(primaryRoot, "worktree", "add", "-b", "feature", linkedRoot)
+	t.Chdir(linkedRoot)
+	paths.ClearWorktreeRootCache()
+	session.ClearGitCommonDirCache()
+	// Codex discovery refuses a project layer that is also CODEX_HOME, while
+	// current-worktree installation remains independently valid.
+	if err := os.MkdirAll(filepath.Join(primaryRoot, ".codex"), 0o750); err != nil {
+		t.Fatalf("create colliding CODEX_HOME: %v", err)
+	}
+	t.Setenv("CODEX_HOME", filepath.Join(primaryRoot, ".codex"))
+
+	ag, err := agent.Get(agent.AgentNameCodex)
+	if err != nil {
+		t.Fatalf("get Codex agent: %v", err)
+	}
+	return ag, linkedRoot
+}
+
 func TestRunDisable(t *testing.T) {
 	setupTestDir(t)
 	writeSettings(t, testSettingsEnabled)
@@ -1186,7 +1289,7 @@ func TestRunUninstall_Force_RemovesEntireDirectory(t *testing.T) {
 	}
 
 	output := stdout.String()
-	if !strings.Contains(output, "uninstalled successfully") {
+	if !strings.Contains(output, "has been removed from this repository") {
 		t.Errorf("Expected success message, got: %s", output)
 	}
 }
@@ -1221,6 +1324,785 @@ func TestRunUninstall_Force_RemovesGitHooks(t *testing.T) {
 	output := stdout.String()
 	if !strings.Contains(output, "Removed git hooks") {
 		t.Errorf("Expected output to mention removed git hooks, got: %s", output)
+	}
+}
+
+// installExternalAgentPluginForUninstall prepares a repo whose $PATH carries a
+// mock external agent plugin reporting its hooks as installed, with
+// external_agents enabled — the state `entire agent add <plugin>` leaves behind,
+// and the only state in which uninstall has an external agent to deal with.
+//
+// setupTestRepo scrubs $PATH down to git and sh, so a real entire-agent-* binary
+// on the developer's machine cannot leak in.
+func installExternalAgentPluginForUninstall(t *testing.T, agentName string, hooksInstalled bool) {
+	t.Helper()
+
+	// The mock is a #!/bin/sh script.
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("sh not available")
+	}
+
+	setupTestRepo(t)
+	writeSettings(t, `{"enabled":true,"external_agents":true}`)
+
+	externalDir := t.TempDir()
+	writeExternalAgentBinaryEx(t, externalDir, agentName, hooksInstalled)
+	t.Setenv("PATH", externalDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+}
+
+// TestRunUninstall_RemovesExternalAgentHooks pins that `entire disable
+// --uninstall` actually uninstalls an external agent's hooks. The uninstall
+// path reaches the plugin only through the registry, so without discovery the
+// plugin is invisible: its UninstallHooks is never called and its hooks survive
+// an uninstall that reports success.
+func TestRunUninstall_RemovesExternalAgentHooks(t *testing.T) {
+	// Cannot use t.Parallel: mutates $PATH, cwd, and the agent registry.
+	const agentName = "ext-uninstall-test"
+	installExternalAgentPluginForUninstall(t, agentName, true)
+
+	execLog := filepath.Join(t.TempDir(), "exec.log")
+	t.Setenv("ENTIRE_TEST_EXEC_LOG", execLog)
+
+	var stdout, stderr bytes.Buffer
+	if err := runUninstall(context.Background(), &stdout, &stderr, true); err != nil {
+		t.Fatalf("runUninstall() error = %v\nstderr: %s", err, stderr.String())
+	}
+
+	data, err := os.ReadFile(execLog)
+	if err != nil {
+		t.Fatalf("reading exec log: %v (uninstall never executed the plugin)", err)
+	}
+	if !strings.Contains(string(data), "uninstall-hooks") {
+		t.Errorf("uninstall must invoke the external plugin's uninstall-hooks, exec log:\n%s\nstdout:\n%s", data, stdout.String())
+	}
+	// Every are-hooks-installed is a subprocess. One uninstall needs one answer:
+	// the confirmation summary's detection is reused for the removal decision.
+	if got := strings.Count(string(data), "are-hooks-installed"); got != 1 {
+		t.Errorf("plugin queried for installed hooks %d times, want 1, exec log:\n%s", got, data)
+	}
+}
+
+// TestRunUninstall_SummaryNamesExternalAgent pins the other half: the
+// confirmation summary must name the external agent whose hooks are about to be
+// removed, or the user approves an uninstall whose scope they cannot see.
+func TestRunUninstall_SummaryNamesExternalAgent(t *testing.T) {
+	// Cannot use t.Parallel: mutates $PATH, cwd, and the agent registry.
+	const agentName = "ext-uninstall-summary-test"
+	installExternalAgentPluginForUninstall(t, agentName, true)
+
+	// force=false prints the summary, then stops at the no-terminal guard: a
+	// `go test` run never counts as interactive. Asserting that specific stop
+	// keeps the test from passing on an early return that never reached the
+	// summary at all.
+	var stdout, stderr bytes.Buffer
+	err := runUninstall(context.Background(), &stdout, &stderr, false)
+	if err == nil {
+		t.Fatalf("expected the no-terminal confirmation guard to stop the uninstall, stdout:\n%s", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "Re-run with --force") {
+		t.Errorf("expected the guard to point at --force, stderr:\n%s", stderr.String())
+	}
+
+	out := stdout.String()
+	if !strings.Contains(out, "agent hooks") {
+		t.Fatalf("expected the summary to list agent hooks, got:\n%s", out)
+	}
+	if !strings.Contains(out, agentName) {
+		t.Errorf("summary must name the external agent %q whose hooks will be removed, got:\n%s", agentName, out)
+	}
+}
+
+// TestRunUninstall_SkipsUnenabledExternalAgent pins that uninstall leaves a
+// plugin alone when it reports no hooks installed. Discovery registers every
+// entire-agent-* binary on $PATH, not just the one `entire agent add` chose, so
+// calling the mutating uninstall-hooks on all of them runs a write command
+// against plugins the user never enabled.
+func TestRunUninstall_SkipsUnenabledExternalAgent(t *testing.T) {
+	// Cannot use t.Parallel: mutates $PATH, cwd, and the agent registry.
+	const agentName = "ext-uninstall-unenabled-test"
+	installExternalAgentPluginForUninstall(t, agentName, false)
+
+	execLog := filepath.Join(t.TempDir(), "exec.log")
+	t.Setenv("ENTIRE_TEST_EXEC_LOG", execLog)
+
+	var stdout, stderr bytes.Buffer
+	if err := runUninstall(context.Background(), &stdout, &stderr, true); err != nil {
+		t.Fatalf("runUninstall() error = %v\nstderr: %s", err, stderr.String())
+	}
+
+	// A missing log is a pass: it means the plugin was never executed at all.
+	data, err := os.ReadFile(execLog)
+	if err != nil {
+		return
+	}
+	if strings.Contains(string(data), "uninstall-hooks") {
+		t.Errorf("uninstall must not invoke uninstall-hooks on a plugin reporting no hooks installed, exec log:\n%s", data)
+	}
+}
+
+// TestRunUninstall_ReportsUnremovedExternalAgentHooks pins the failure path
+// for a plugin whose uninstall-hooks fails: the run exits non-zero with a
+// did-not-complete verdict, and the hooks left behind are named with both
+// remedies — re-running the uninstall (discovery is ungated, so a re-run
+// reaches the plugin again) and the run-by-hand plugin command, since the
+// plugin binary itself may be what is broken.
+func TestRunUninstall_ReportsUnremovedExternalAgentHooks(t *testing.T) {
+	// Cannot use t.Parallel: mutates $PATH, cwd, and the agent registry.
+	const agentName = "ext-uninstall-failure-test"
+	installExternalAgentPluginForUninstall(t, agentName, true)
+	t.Setenv("ENTIRE_TEST_FAIL_UNINSTALL_HOOKS", "1")
+
+	var stdout, stderr bytes.Buffer
+	err := runUninstall(context.Background(), &stdout, &stderr, true)
+	if err == nil {
+		t.Fatalf("a plugin failure must fail the uninstall, stdout:\n%s", stdout.String())
+	}
+	var silent *SilentError
+	if !errors.As(err, &silent) {
+		t.Errorf("expected a SilentError (warnings are already printed), got %T: %v", err, err)
+	}
+
+	assertLeftoverPluginReported(t, stderr.String(), agentName, "hooks are still installed")
+	if !strings.Contains(stderr.String(), "entire disable --uninstall") {
+		t.Errorf("stderr must also point at re-running the uninstall, got:\n%s", stderr.String())
+	}
+
+	out := stdout.String()
+	if strings.Contains(out, "has been removed from this repository") {
+		t.Errorf("uninstall must not report success when a plugin's hooks were not removed, stdout:\n%s", out)
+	}
+	if !strings.Contains(out, "did not complete") {
+		t.Errorf("the closing line must say the uninstall did not complete, stdout:\n%s", out)
+	}
+}
+
+// TestRunUninstall_EntireDirRemovalFailureFailsTheCommand pins the exit-code
+// policy on Entire's own removal steps: a failure in one of them — here
+// .entire/ — fails the command. The directory is made unremovable by denying
+// writes on a subdirectory, so os.RemoveAll cannot unlink its child.
+func TestRunUninstall_EntireDirRemovalFailureFailsTheCommand(t *testing.T) {
+	// Cannot use t.Parallel: mutates cwd.
+	if runtime.GOOS == windowsGOOS {
+		t.Skip("permission-based removal failure is not portable to Windows")
+	}
+	if os.Getuid() == 0 {
+		t.Skip("root bypasses permission checks")
+	}
+
+	setupTestRepo(t)
+	writeSettings(t, `{"enabled":true}`)
+	locked := filepath.Join(paths.EntireDir, "locked")
+	if err := os.MkdirAll(locked, 0o755); err != nil {
+		t.Fatalf("MkdirAll() error = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(locked, "f"), []byte("x"), 0o600); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+	if err := os.Chmod(locked, 0o555); err != nil {
+		t.Fatalf("Chmod() error = %v", err)
+	}
+	// Restore before t.TempDir's own cleanup, which fails the test if it cannot
+	// delete the tree.
+	t.Cleanup(func() {
+		if err := os.Chmod(locked, 0o755); err != nil {
+			t.Logf("restoring permissions: %v", err)
+		}
+	})
+
+	var stdout, stderr bytes.Buffer
+	err := runUninstall(context.Background(), &stdout, &stderr, true)
+	if err == nil {
+		t.Fatalf("a failed .entire removal must fail the uninstall, stdout:\n%s", stdout.String())
+	}
+	var silent *SilentError
+	if !errors.As(err, &silent) {
+		t.Errorf("expected a SilentError (the message is already printed), got %T: %v", err, err)
+	}
+
+	if !strings.Contains(stderr.String(), "failed to remove .entire directory") {
+		t.Errorf("the failure must be warned about on stderr, got:\n%s", stderr.String())
+	}
+	out := stdout.String()
+	if strings.Contains(out, "has been removed from this repository") {
+		t.Errorf("uninstall must not report success when its own step failed, stdout:\n%s", out)
+	}
+	if !strings.Contains(out, "did not complete") {
+		t.Errorf("the closing line must say the uninstall did not complete, stdout:\n%s", out)
+	}
+}
+
+// TestRunUninstall_HalfUninstallRecoversOnRerun pins that a half-completed
+// uninstall converges to a clean one. Three steps fail on the first run —
+// agent hooks (unreadable config), git hooks and .entire/ (write-denied
+// directories) — each printing its own warning while the others still do
+// their work. Once the causes are fixed, a re-run removes exactly what
+// survived and reports success.
+func TestRunUninstall_HalfUninstallRecoversOnRerun(t *testing.T) {
+	// Cannot use t.Parallel: mutates cwd and file permissions.
+	if runtime.GOOS == windowsGOOS {
+		t.Skip("permission-based failures are not portable to Windows")
+	}
+	if os.Getuid() == 0 {
+		t.Skip("root bypasses permission checks")
+	}
+
+	setupTestRepo(t)
+	writeSettings(t, testSettingsEnabled)
+
+	// Real Claude Code hooks, made unreadable so the sweep cannot check them.
+	claudeSettings := filepath.Join(".claude", "settings.json")
+	if err := os.MkdirAll(".claude", 0o755); err != nil {
+		t.Fatalf("MkdirAll() error = %v", err)
+	}
+	hookJSON := `{"hooks":{"Stop":[{"matcher":"","hooks":[{"type":"command","command":"entire hooks claude-code stop"}]}]}}`
+	if err := os.WriteFile(claudeSettings, []byte(hookJSON), 0o600); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+	if err := os.Chmod(claudeSettings, 0o000); err != nil {
+		t.Fatalf("Chmod() error = %v", err)
+	}
+
+	// Real git hooks, in a directory that denies their removal.
+	if _, err := strategy.InstallGitHook(context.Background(), true, false); err != nil {
+		t.Fatalf("InstallGitHook() error = %v", err)
+	}
+	hooksDir := filepath.Join(".git", "hooks")
+	if err := os.Chmod(hooksDir, 0o555); err != nil {
+		t.Fatalf("Chmod() error = %v", err)
+	}
+
+	// .entire/ with a write-denied subdirectory so RemoveAll cannot clear it.
+	locked := filepath.Join(paths.EntireDir, "locked")
+	if err := os.MkdirAll(locked, 0o755); err != nil {
+		t.Fatalf("MkdirAll() error = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(locked, "f"), []byte("x"), 0o600); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+	if err := os.Chmod(locked, 0o555); err != nil {
+		t.Fatalf("Chmod() error = %v", err)
+	}
+
+	// Safety net for early t.Fatal: t.TempDir's cleanup fails the test if it
+	// cannot delete the tree.
+	t.Cleanup(func() {
+		for path, mode := range map[string]os.FileMode{claudeSettings: 0o600, hooksDir: 0o755, locked: 0o755} {
+			// A path the re-run already removed is the expected end state.
+			if err := os.Chmod(path, mode); err != nil && !errors.Is(err, os.ErrNotExist) {
+				t.Logf("restoring permissions on %s: %v", path, err)
+			}
+		}
+	})
+
+	var stdout, stderr bytes.Buffer
+	err := runUninstall(context.Background(), &stdout, &stderr, true)
+	if err == nil {
+		t.Fatalf("first run must fail while three steps cannot finish, stdout:\n%s", stdout.String())
+	}
+	errOut := stderr.String()
+	for _, want := range []string{
+		"could not check whether Claude Code hooks are installed",
+		"failed to remove git hooks",
+		"failed to remove .entire directory",
+	} {
+		if !strings.Contains(errOut, want) {
+			t.Errorf("first run must warn %q, stderr:\n%s", want, errOut)
+		}
+	}
+	if !strings.Contains(stdout.String(), "did not complete") {
+		t.Errorf("first run must close with did-not-complete, stdout:\n%s", stdout.String())
+	}
+
+	// Fix all three causes; the re-run should finish the job.
+	for path, mode := range map[string]os.FileMode{claudeSettings: 0o600, hooksDir: 0o755, locked: 0o755} {
+		if err := os.Chmod(path, mode); err != nil {
+			t.Fatalf("Chmod(%s) error = %v", path, err)
+		}
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	if err := runUninstall(context.Background(), &stdout, &stderr, true); err != nil {
+		t.Fatalf("re-run error = %v\nstderr: %s", err, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "has been removed from this repository") {
+		t.Errorf("re-run must complete the uninstall, stdout:\n%s", stdout.String())
+	}
+
+	// Nothing of Entire's survives.
+	data, err := os.ReadFile(claudeSettings)
+	if err != nil {
+		t.Fatalf("reading claude settings: %v", err)
+	}
+	if strings.Contains(string(data), "entire hooks") {
+		t.Errorf("claude settings must no longer carry Entire hooks, got:\n%s", data)
+	}
+	if strategy.IsGitHookInstalled(context.Background()) {
+		t.Error("git hooks must be removed by the re-run")
+	}
+	if checkEntireDirExists(context.Background()) {
+		t.Error(".entire/ must be removed by the re-run")
+	}
+}
+
+// TestRunUninstall_RerunAfterPluginFailureFinishesTheJob pins that the
+// uninstall is re-runnable after a plugin failure. The first run deletes
+// .entire/ — and with it the external_agents setting that normally gates
+// discovery — so only uninstall's ungated discovery lets the re-run still see
+// the plugin, retry its uninstall-hooks, and finish the job.
+func TestRunUninstall_RerunAfterPluginFailureFinishesTheJob(t *testing.T) {
+	// Cannot use t.Parallel: mutates $PATH, cwd, and the agent registry.
+	const agentName = "ext-uninstall-rerun-test"
+	installExternalAgentPluginForUninstall(t, agentName, true)
+	t.Setenv("ENTIRE_TEST_FAIL_UNINSTALL_HOOKS", "1")
+
+	var stdout, stderr bytes.Buffer
+	if err := runUninstall(context.Background(), &stdout, &stderr, true); err == nil {
+		t.Fatalf("first run: a plugin failure must fail the uninstall, stdout:\n%s", stdout.String())
+	}
+	if checkEntireDirExists(context.Background()) {
+		t.Fatal("the .entire/ step is isolated from the plugin failure and must still remove the directory")
+	}
+
+	t.Setenv("ENTIRE_TEST_FAIL_UNINSTALL_HOOKS", "")
+	stdout.Reset()
+	stderr.Reset()
+	if err := runUninstall(context.Background(), &stdout, &stderr, true); err != nil {
+		t.Fatalf("re-run error = %v\nstderr: %s", err, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "has been removed from this repository") {
+		t.Errorf("re-run must reach the plugin without the external_agents gate and complete the uninstall, stdout:\n%s", stdout.String())
+	}
+}
+
+// TestRunUninstall_UncheckableExternalAgentReported pins the plugin that cannot
+// say whether its hooks are installed. Its hooks are not removed — asking a
+// plugin that cannot answer to mutate state is not ours to do — so the run must
+// say so, name the plugin, and hand over a command the user can run. .entire/ is
+// about to go, and with it the setting that makes the plugin discoverable, so
+// this run is the only place that can be said. An unknown state is a problem
+// too: the run must not report success while a plugin's hooks are in doubt,
+// so it exits non-zero.
+func TestRunUninstall_UncheckableExternalAgentReported(t *testing.T) {
+	// Cannot use t.Parallel: mutates $PATH, cwd, and the agent registry.
+	const agentName = "ext-uninstall-unprobeable-test"
+	installExternalAgentPluginForUninstall(t, agentName, true)
+	t.Setenv("ENTIRE_TEST_PROBE", "fail")
+
+	execLog := filepath.Join(t.TempDir(), "exec.log")
+	t.Setenv("ENTIRE_TEST_EXEC_LOG", execLog)
+
+	var stdout, stderr bytes.Buffer
+	err := runUninstall(context.Background(), &stdout, &stderr, true)
+	if err == nil {
+		t.Fatalf("an unprobeable plugin must fail the uninstall, stdout:\n%s", stdout.String())
+	}
+	var silent *SilentError
+	if !errors.As(err, &silent) {
+		t.Errorf("expected a SilentError, got %T: %v", err, err)
+	}
+	if !strings.Contains(stdout.String(), "did not complete") {
+		t.Errorf("the closing line must say the uninstall did not complete, stdout:\n%s", stdout.String())
+	}
+
+	errOut := stderr.String()
+	if !strings.Contains(errOut, "could not check whether") {
+		t.Errorf("stderr must say the plugin could not be checked, got:\n%s", errOut)
+	}
+	if !strings.Contains(errOut, "mock probe failure") {
+		t.Errorf("stderr must carry the probe's own error, got:\n%s", errOut)
+	}
+	assertLeftoverPluginReported(t, errOut, agentName, "hooks may still be installed")
+
+	data, err := os.ReadFile(execLog)
+	if err != nil {
+		t.Fatalf("reading exec log: %v", err)
+	}
+	if strings.Contains(string(data), "uninstall-hooks") {
+		t.Errorf("a plugin that could not be asked must not be told to uninstall, exec log:\n%s", data)
+	}
+	// Still one question per uninstall, even when the answer never arrives.
+	if got := strings.Count(string(data), "are-hooks-installed"); got != 1 {
+		t.Errorf("plugin queried for installed hooks %d times, want 1, exec log:\n%s", got, data)
+	}
+}
+
+// TestRunUninstall_UncheckableExternalAgentGarbageJSON pins that a plugin
+// printing junk is classified the same as one that crashes. Both mean we do not
+// know, and only a clean answer means there is nothing to remove.
+func TestRunUninstall_UncheckableExternalAgentGarbageJSON(t *testing.T) {
+	// Cannot use t.Parallel: mutates $PATH, cwd, and the agent registry.
+	const agentName = "ext-uninstall-garbage-probe-test"
+	installExternalAgentPluginForUninstall(t, agentName, true)
+	t.Setenv("ENTIRE_TEST_PROBE", "garbage")
+
+	var stdout, stderr bytes.Buffer
+	if err := runUninstall(context.Background(), &stdout, &stderr, true); err == nil {
+		t.Fatalf("a plugin printing junk must fail the uninstall like one that crashes, stdout:\n%s", stdout.String())
+	}
+
+	if !strings.Contains(stderr.String(), "could not check whether") {
+		t.Errorf("malformed JSON must be reported as unchecked, not treated as no hooks, stderr:\n%s", stderr.String())
+	}
+}
+
+// TestRunUninstall_SummaryNamesUncheckableExternalAgent pins that the user
+// approving the uninstall is told the plugin's state is unknown, on its own line:
+// listing it as having hooks installed would assert the thing we could not find
+// out, and omitting it hides part of the scope they are approving.
+func TestRunUninstall_SummaryNamesUncheckableExternalAgent(t *testing.T) {
+	// Cannot use t.Parallel: mutates $PATH, cwd, and the agent registry.
+	const agentName = "ext-uninstall-unprobeable-summary-test"
+	installExternalAgentPluginForUninstall(t, agentName, true)
+	t.Setenv("ENTIRE_TEST_PROBE", "fail")
+
+	var stdout, stderr bytes.Buffer
+	if err := runUninstall(context.Background(), &stdout, &stderr, false); err == nil {
+		t.Fatalf("expected the no-terminal confirmation guard to stop the uninstall, stdout:\n%s", stdout.String())
+	}
+
+	out := stdout.String()
+	if !strings.Contains(out, "could not be checked") {
+		t.Fatalf("summary must list the plugin as unchecked, got:\n%s", out)
+	}
+	if !strings.Contains(out, agentName) {
+		t.Errorf("summary must name the plugin %q, got:\n%s", agentName, out)
+	}
+	for _, line := range strings.Split(out, "\n") {
+		if strings.Contains(line, "agent hooks") && strings.Contains(line, agentName) {
+			t.Errorf("an unchecked plugin must not be listed as having hooks installed, got:\n%s", out)
+		}
+	}
+}
+
+// TestGetAgentHookState_CancelledContextIsNotAPluginFault pins that our own
+// cancellation is not reported as a plugin that could not answer. Every plugin on
+// $PATH answers over a subprocess, so one Ctrl-C would otherwise diagnose all of
+// them at once. Driven at the sweep rather than through runUninstall, which bails
+// on a dead context long before it classifies anything.
+func TestGetAgentHookState_CancelledContextIsNotAPluginFault(t *testing.T) {
+	// Cannot use t.Parallel: mutates $PATH, cwd, and the agent registry.
+	const agentName = "ext-hook-state-cancelled-test"
+	installExternalAgentPluginForUninstall(t, agentName, true)
+	external.DiscoverAndRegister(context.Background())
+
+	// Registered under a live context, probed under a dead one: the probe fails
+	// for a reason that has nothing to do with the plugin.
+	live := getAgentHookState(context.Background())
+	if len(live.installed) == 0 {
+		t.Fatalf("plugin was not registered, so the cancelled case below would prove nothing")
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	state := getAgentHookState(ctx)
+	if len(state.unchecked) != 0 {
+		t.Errorf("cancellation must not be charged to the plugin, got unchecked = %v", state.uncheckedNames())
+	}
+}
+
+// TestPluginUninstallCommand_PerOS pins the recovery command's shape on both
+// shell families. It is printed when it is the user's last chance to remove a
+// plugin's hooks, so it must run in the shell they actually have: the POSIX
+// `cd x && VAR=y bin` form is a syntax error in PowerShell, and would hand a
+// Windows user a command that cannot run.
+func TestPluginUninstallCommand_PerOS(t *testing.T) {
+	t.Parallel()
+
+	const name = types.AgentName("ext-cmd-test")
+
+	posix := pluginUninstallCommandFor("linux", "/My Repo/it's here", name)
+	wantPosix := `cd '/My Repo/it'\''s here' && ENTIRE_REPO_ROOT='/My Repo/it'\''s here' ` +
+		fmt.Sprintf("ENTIRE_PROTOCOL_VERSION=%d entire-agent-%s uninstall-hooks", external.ProtocolVersion, name)
+	if posix != wantPosix {
+		t.Errorf("posix command =\n%s\nwant\n%s", posix, wantPosix)
+	}
+
+	win := pluginUninstallCommandFor("windows", `C:\My Repo\it's here`, name)
+	wantWin := `cd 'C:\My Repo\it''s here'; $env:ENTIRE_REPO_ROOT = 'C:\My Repo\it''s here'; ` +
+		fmt.Sprintf("$env:ENTIRE_PROTOCOL_VERSION = '%d'; entire-agent-%s uninstall-hooks", external.ProtocolVersion, name)
+	if win != wantWin {
+		t.Errorf("windows command =\n%s\nwant\n%s", win, wantWin)
+	}
+}
+
+// assertLeftoverPluginReported checks the shape every leftover-hooks report
+// shares on stderr: the plugin named, what state its hooks are in, and a
+// runnable recovery command. The closing stdout verdict is each caller's own
+// assertion.
+func assertLeftoverPluginReported(t *testing.T, stderr, agentName, lead string) {
+	t.Helper()
+
+	if !strings.Contains(stderr, agentName) {
+		t.Errorf("stderr must name the plugin whose hooks may survive, got:\n%s", stderr)
+	}
+	if !strings.Contains(stderr, lead) {
+		t.Errorf("stderr must say %q, got:\n%s", lead, stderr)
+	}
+	if !strings.Contains(stderr, "entire-agent-"+agentName+" uninstall-hooks") {
+		t.Errorf("stderr must say how to remove the hooks, got:\n%s", stderr)
+	}
+	// The protocol guarantees every subcommand these, so a bare invocation is a
+	// command a conforming plugin may reject — useless as the user's last resort.
+	for _, want := range []string{"ENTIRE_REPO_ROOT=", "ENTIRE_PROTOCOL_VERSION="} {
+		if !strings.Contains(stderr, want) {
+			t.Errorf("recovery command must carry %s, got:\n%s", want, stderr)
+		}
+	}
+}
+
+// fakeBuiltinHookAgent is a built-in (non-external) hook-supporting agent whose
+// UninstallHooks is observable. It embeds vogon so the Agent surface stays
+// whatever the interface requires, and overrides only what these tests turn on.
+type fakeBuiltinHookAgent struct {
+	*vogon.Agent
+
+	name           types.AgentName
+	installed      bool
+	uninstallCalls *int
+	uninstallErr   error
+	checkErr       error
+}
+
+func (f *fakeBuiltinHookAgent) Name() types.AgentName { return f.name }
+func (f *fakeBuiltinHookAgent) Type() types.AgentType { return types.AgentType(f.name) }
+
+// AreHooksInstalled reports the configured answer: installed for tests about a
+// detected built-in whose removal then fails, checkErr for tests about a
+// built-in that could not read its own config, and a plain false for tests
+// about a built-in the installed-hooks sweep did not pick up.
+func (f *fakeBuiltinHookAgent) AreHooksInstalled(context.Context) (bool, error) {
+	return f.installed, f.checkErr
+}
+
+func (f *fakeBuiltinHookAgent) UninstallHooks(context.Context) error {
+	*f.uninstallCalls++
+	return f.uninstallErr
+}
+
+// registerFakeBuiltinHookAgent registers a built-in hook-supporting agent whose
+// hooks report as not installed, and returns its UninstallHooks call count.
+func registerFakeBuiltinHookAgent(t *testing.T, name types.AgentName, uninstallErr error) *int {
+	t.Helper()
+	return registerFakeBuiltinHookAgentEx(t, name, false, uninstallErr, nil)
+}
+
+func registerFakeBuiltinHookAgentEx(t *testing.T, name types.AgentName, installed bool, uninstallErr, checkErr error) *int {
+	t.Helper()
+
+	setupTestRepo(t)
+	writeSettings(t, `{"enabled":true}`)
+	t.Cleanup(agent.SnapshotRegistryForTesting())
+
+	calls := 0
+	agent.Register(name, func() agent.Agent {
+		return &fakeBuiltinHookAgent{
+			Agent:          &vogon.Agent{},
+			name:           name,
+			installed:      installed,
+			uninstallCalls: &calls,
+			uninstallErr:   uninstallErr,
+			checkErr:       checkErr,
+		}
+	})
+	return &calls
+}
+
+// TestRunUninstall_BuiltinNotDetectedIsLeftAlone pins that uninstall acts on
+// exactly the sweep's answer: an agent that cleanly reported no hooks is in
+// neither the installed nor the unchecked set, so its UninstallHooks is never
+// called — the removal worklist is what the confirmation summary showed, not
+// the whole registry.
+func TestRunUninstall_BuiltinNotDetectedIsLeftAlone(t *testing.T) {
+	// Cannot use t.Parallel: mutates cwd and the agent registry.
+	calls := registerFakeBuiltinHookAgent(t, "fake-builtin-undetected", nil)
+
+	var stdout, stderr bytes.Buffer
+	if err := runUninstall(context.Background(), &stdout, &stderr, true); err != nil {
+		t.Fatalf("runUninstall() error = %v\nstderr: %s", err, stderr.String())
+	}
+
+	if *calls != 0 {
+		t.Errorf("a built-in that cleanly reported no hooks must not have UninstallHooks called, stdout:\n%s", stdout.String())
+	}
+}
+
+// TestRunUninstall_BuiltinHookFailureFailsTheCommand pins that a built-in whose
+// removal failed fails the uninstall. A built-in is Entire's own code: its
+// removal failing means the uninstall did not do its job, and a success
+// verdict would assert the opposite of the warning just printed.
+func TestRunUninstall_BuiltinHookFailureFailsTheCommand(t *testing.T) {
+	// Cannot use t.Parallel: mutates cwd and the agent registry.
+	const agentName types.AgentName = "fake-builtin-failing"
+	registerFakeBuiltinHookAgentEx(t, agentName, true, errors.New("mock builtin uninstall failure"), nil)
+
+	var stdout, stderr bytes.Buffer
+	err := runUninstall(context.Background(), &stdout, &stderr, true)
+	if err == nil {
+		t.Fatalf("a built-in hook removal failure must fail the uninstall, stdout:\n%s", stdout.String())
+	}
+	var silent *SilentError
+	if !errors.As(err, &silent) {
+		t.Errorf("expected a SilentError (the message is already printed), got %T: %v", err, err)
+	}
+
+	errOut := stderr.String()
+	if !strings.Contains(errOut, "failed to remove agent hooks") || !strings.Contains(errOut, string(agentName)) {
+		t.Errorf("the failure must be warned about on stderr, naming the agent, got:\n%s", errOut)
+	}
+
+	out := stdout.String()
+	if strings.Contains(out, "has been removed from this repository") {
+		t.Errorf("uninstall must not report success when a built-in's hooks were not removed, stdout:\n%s", out)
+	}
+	if !strings.Contains(out, "did not complete") {
+		t.Errorf("the closing line must say the uninstall did not complete, stdout:\n%s", out)
+	}
+}
+
+// TestRunUninstall_UncheckableBuiltinFailsTheCommand pins the built-in that
+// could not read its own config, e.g. a malformed or unreadable hooks.json.
+// The reason is reported, no removal is attempted (an unverifiable check means
+// the removal would read the same broken file), and no plugin command is
+// offered — but the command must not report success, and the exit code has to
+// say so.
+func TestRunUninstall_UncheckableBuiltinFailsTheCommand(t *testing.T) {
+	// Cannot use t.Parallel: mutates cwd and the agent registry.
+	const agentName types.AgentName = "fake-builtin-unreadable"
+	calls := registerFakeBuiltinHookAgentEx(t, agentName, false, nil, errors.New("parse hooks.json: unexpected end of input"))
+
+	var stdout, stderr bytes.Buffer
+	err := runUninstall(context.Background(), &stdout, &stderr, true)
+	if err == nil {
+		t.Fatalf("an unchecked built-in must fail the uninstall, stdout:\n%s", stdout.String())
+	}
+	var silent *SilentError
+	if !errors.As(err, &silent) {
+		t.Errorf("expected a SilentError (the message is already printed), got %T: %v", err, err)
+	}
+
+	errOut := stderr.String()
+	if !strings.Contains(errOut, "could not check whether") || !strings.Contains(errOut, "parse hooks.json") {
+		t.Errorf("the reason must be reported, stderr:\n%s", errOut)
+	}
+	if strings.Contains(errOut, "entire-agent-"+string(agentName)) {
+		t.Errorf("a built-in must not be handed a plugin command, stderr:\n%s", errOut)
+	}
+	if !strings.Contains(errOut, "may or may not remain") || !strings.Contains(errOut, string(agentName)) {
+		t.Errorf("the warning must name the unverified agent, stderr:\n%s", errOut)
+	}
+	if *calls != 0 {
+		t.Error("a built-in whose check failed must not be asked to uninstall")
+	}
+
+	out := stdout.String()
+	if strings.Contains(out, "has been removed from this repository") {
+		t.Errorf("uninstall must not report success while a built-in's hooks are unverified, stdout:\n%s", out)
+	}
+	if !strings.Contains(out, "did not complete") {
+		t.Errorf("the closing line must say the uninstall did not complete, stdout:\n%s", out)
+	}
+}
+
+// TestRunUninstall_UncheckedBuiltinAloneIsNotNotInstalled pins the second run
+// of the unreadable-config repro: everything else already removed, the only
+// trace left is a built-in whose config cannot be read. "Not installed" would
+// assert the one thing the failed check makes unknowable, and would return
+// before the warning that surfaces the reason.
+func TestRunUninstall_UncheckedBuiltinAloneIsNotNotInstalled(t *testing.T) {
+	// Cannot use t.Parallel: mutates cwd and the agent registry.
+	const agentName types.AgentName = "fake-builtin-unreadable-only"
+	registerFakeBuiltinHookAgentEx(t, agentName, false, nil, errors.New("read settings.json: permission denied"))
+	// The helper writes .entire/settings.json; remove it so the unchecked
+	// built-in is the only thing left, as after a first partial uninstall.
+	if err := os.RemoveAll(paths.EntireDir); err != nil {
+		t.Fatalf("removing .entire: %v", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	err := runUninstall(context.Background(), &stdout, &stderr, true)
+	if err == nil {
+		t.Fatalf("an unchecked built-in as the only leftover must fail the uninstall, stdout:\n%s", stdout.String())
+	}
+
+	out := stdout.String()
+	if strings.Contains(out, "not installed in this repository") {
+		t.Errorf("must not claim Entire is not installed when a built-in could not be checked, stdout:\n%s", out)
+	}
+	if !strings.Contains(stderr.String(), "permission denied") {
+		t.Errorf("the unreadable-config reason must reach the user, stderr:\n%s", stderr.String())
+	}
+}
+
+// cancellingHookAgent is a built-in whose UninstallHooks cancels the run's
+// context before returning, simulating Ctrl-C arriving mid-removal.
+type cancellingHookAgent struct {
+	*fakeBuiltinHookAgent
+
+	cancel context.CancelFunc
+}
+
+func (c *cancellingHookAgent) UninstallHooks(ctx context.Context) error {
+	*c.uninstallCalls++
+	c.cancel()
+	return ctx.Err()
+}
+
+// TestRunUninstall_CancellationIsNotAnAgentFault pins that a ctx cancelled
+// mid-removal (Ctrl-C) is reported as an interruption, not charged to the
+// agent whose removal it killed: no failure warning naming the agent, no
+// recovery command asserting its hooks are still installed — just the
+// interruption notice and a did-not-complete verdict, since a re-run finishes
+// the job.
+func TestRunUninstall_CancellationIsNotAnAgentFault(t *testing.T) {
+	// Cannot use t.Parallel: mutates cwd and the agent registry.
+	const agentName types.AgentName = "fake-builtin-cancelling"
+	setupTestRepo(t)
+	writeSettings(t, `{"enabled":true}`)
+	t.Cleanup(agent.SnapshotRegistryForTesting())
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	calls := 0
+	agent.Register(agentName, func() agent.Agent {
+		return &cancellingHookAgent{
+			fakeBuiltinHookAgent: &fakeBuiltinHookAgent{
+				Agent:          &vogon.Agent{},
+				name:           agentName,
+				installed:      true,
+				uninstallCalls: &calls,
+			},
+			cancel: cancel,
+		}
+	})
+
+	var stdout, stderr bytes.Buffer
+	err := runUninstall(ctx, &stdout, &stderr, true)
+	if err == nil {
+		t.Fatalf("an interrupted uninstall must not report success, stdout:\n%s", stdout.String())
+	}
+	if calls != 1 {
+		t.Errorf("UninstallHooks calls = %d, want 1", calls)
+	}
+
+	errOut := stderr.String()
+	if !strings.Contains(errOut, "interrupted while removing agent hooks") {
+		t.Errorf("stderr must report the interruption, got:\n%s", errOut)
+	}
+	if strings.Contains(errOut, "failed to remove agent hooks") {
+		t.Errorf("cancellation must not be reported as an agent failure, stderr:\n%s", errOut)
+	}
+	if strings.Contains(errOut, "uninstall-hooks") {
+		t.Errorf("cancellation must not print a plugin recovery command, stderr:\n%s", errOut)
+	}
+
+	out := stdout.String()
+	if strings.Contains(out, "has been removed from this repository") {
+		t.Errorf("an interrupted uninstall must not close with the success verdict, stdout:\n%s", out)
+	}
+	if !strings.Contains(out, "did not complete") {
+		t.Errorf("the closing line must say the uninstall did not complete, stdout:\n%s", out)
 	}
 }
 
@@ -2244,7 +3126,8 @@ func checkClaudeCodeHooksInstalled() bool {
 	if !ok {
 		return false
 	}
-	return hookAgent.AreHooksInstalled(context.Background())
+	installed, err := hookAgent.AreHooksInstalled(context.Background())
+	return err == nil && installed
 }
 
 // checkGeminiCLIHooksInstalled checks if Gemini CLI hooks are installed.
@@ -2257,7 +3140,8 @@ func checkGeminiCLIHooksInstalled() bool {
 	if !ok {
 		return false
 	}
-	return hookAgent.AreHooksInstalled(context.Background())
+	installed, err := hookAgent.AreHooksInstalled(context.Background())
+	return err == nil && installed
 }
 
 func TestUninstallDeselectedAgentHooks(t *testing.T) {
@@ -2287,6 +3171,248 @@ func TestUninstallDeselectedAgentHooks(t *testing.T) {
 	output := buf.String()
 	if !strings.Contains(output, "Removed") {
 		t.Errorf("Expected output to mention removal, got: %s", output)
+	}
+}
+
+func TestRunUninstall_CodexLinkedWorktreeDoesNotRemovePrimaryHooks(t *testing.T) {
+	setupCodexRepositoryWithLinkedWorktree(t)
+	repoRoot, err := paths.WorktreeRoot(t.Context())
+	if err != nil {
+		t.Fatalf("resolve primary worktree: %v", err)
+	}
+	linkedRoot := filepath.Join(filepath.Dir(repoRoot), "linked")
+	if err := os.RemoveAll(filepath.Join(linkedRoot, ".codex")); err != nil {
+		t.Fatalf("remove linked Codex project layer: %v", err)
+	}
+	t.Chdir(linkedRoot)
+	paths.ClearWorktreeRootCache()
+	session.ClearGitCommonDirCache()
+
+	ag, err := agent.Get(agent.AgentNameCodex)
+	if err != nil {
+		t.Fatalf("get Codex agent: %v", err)
+	}
+	hookAgent, ok := agent.AsHookSupport(ag)
+	if !ok {
+		t.Fatal("Codex agent does not support hooks")
+	}
+	installed, err := hookAgent.AreHooksInstalled(t.Context())
+	if err != nil {
+		t.Fatalf("check Codex hooks: %v", err)
+	}
+	if installed {
+		t.Fatal("Codex hooks must be inactive without the linked checkout's .codex project layer")
+	}
+	freshness, ok := ag.(agent.HookFreshness)
+	if !ok || freshness.CheckHookConfig(t.Context()) != agent.HooksAbsent {
+		t.Fatal("primary-checkout Codex hooks must not count as local removable configuration")
+	}
+
+	var stdout, stderr bytes.Buffer
+	if err := runUninstall(t.Context(), &stdout, &stderr, true); err != nil {
+		t.Fatalf("uninstall Entire: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(repoRoot, ".codex", "hooks.json")); err != nil {
+		t.Fatalf("primary-checkout Codex hooks changed after uninstall from linked worktree: %v", err)
+	}
+	if strings.Contains(stdout.String(), "Removed Codex hooks") {
+		t.Fatalf("uninstall reported removing non-local Codex hooks: %s", stdout.String())
+	}
+}
+
+func TestUninstallDeselectedAgentHooks_CodexIgnoresPrimaryOnlyHooks(t *testing.T) {
+	setupCodexRepositoryWithLinkedWorktree(t)
+	repoRoot, err := paths.WorktreeRoot(t.Context())
+	if err != nil {
+		t.Fatalf("resolve primary worktree: %v", err)
+	}
+	linkedRoot := filepath.Join(filepath.Dir(repoRoot), "linked")
+	if err := os.RemoveAll(filepath.Join(linkedRoot, ".codex")); err != nil {
+		t.Fatalf("remove linked Codex project layer: %v", err)
+	}
+	t.Chdir(linkedRoot)
+	paths.ClearWorktreeRootCache()
+	session.ClearGitCommonDirCache()
+
+	ag, err := agent.Get(agent.AgentNameCodex)
+	if err != nil {
+		t.Fatalf("get Codex agent: %v", err)
+	}
+	hookAgent, ok := agent.AsHookSupport(ag)
+	if !ok {
+		t.Fatal("Codex agent does not support hooks")
+	}
+	installed, err := hookAgent.AreHooksInstalled(t.Context())
+	if err != nil {
+		t.Fatalf("check Codex hooks: %v", err)
+	}
+	if installed {
+		t.Fatal("Codex hooks must be inactive without the linked checkout's .codex project layer")
+	}
+	freshness, ok := ag.(agent.HookFreshness)
+	if !ok || freshness.CheckHookConfig(t.Context()) != agent.HooksAbsent {
+		t.Fatal("primary-checkout Codex hooks must not count as local removable configuration")
+	}
+
+	var output bytes.Buffer
+	if err := uninstallDeselectedAgentHooks(t.Context(), &output, nil); err != nil {
+		t.Fatalf("uninstallDeselectedAgentHooks() error = %v", err)
+	}
+
+	if _, err := os.Stat(filepath.Join(repoRoot, ".codex", "hooks.json")); err != nil {
+		t.Fatalf("primary-checkout Codex hooks changed after deselection from linked worktree: %v", err)
+	}
+	if strings.Contains(output.String(), "Removed Codex hooks") {
+		t.Fatalf("deselection reported removing non-local Codex hooks: %s", output.String())
+	}
+}
+
+func TestUninstallDeselectedAgentHooks_CodexLinkedWorktreeOwnership(t *testing.T) {
+	t.Parallel()
+	assertCodexLinkedWorktreeCleanupOwnership(t, "deselect", "deselection")
+}
+
+func TestRemoveAgentHooks_CodexLinkedWorktreeOwnership(t *testing.T) {
+	t.Parallel()
+	assertCodexLinkedWorktreeCleanupOwnership(t, "clean", "clean")
+}
+
+func assertCodexLinkedWorktreeCleanupOwnership(t *testing.T, action, description string) {
+	t.Helper()
+	repoRoot, linkedRoot := setupCodexOwnershipWorktrees(t)
+	primaryPath := filepath.Join(repoRoot, ".codex", "hooks.json")
+	linkedPath := filepath.Join(linkedRoot, ".codex", "hooks.json")
+	primaryBefore := readSetupTestFile(t, primaryPath)
+
+	runSetupCodexOwnershipHelper(t, linkedRoot, action)
+
+	if got := readSetupTestFile(t, primaryPath); got != primaryBefore {
+		t.Fatalf("primary hooks changed after linked-worktree %s\nwant: %s\n got: %s", description, primaryBefore, got)
+	}
+	if data := readSetupTestFile(t, linkedPath); strings.Contains(data, "entire hooks codex") {
+		t.Fatalf("linked-worktree Entire hooks still exist after %s: %s", description, data)
+	}
+}
+
+func TestSetupCodexLinkedWorktreeOwnershipHelper(t *testing.T) {
+	t.Parallel()
+	action := os.Getenv("ENTIRE_SETUP_CODEX_OWNERSHIP_HELPER")
+	if action == "" {
+		t.Skip("subprocess helper")
+	}
+	var output bytes.Buffer
+	switch action {
+	case "deselect":
+		if err := uninstallDeselectedAgentHooks(t.Context(), &output, nil); err != nil {
+			t.Fatal(err)
+		}
+	case "clean":
+		// uninstallAgentHooks is what `entire disable --uninstall` runs; it
+		// replaced removeAgentHooks, so the ownership guarantee is asserted
+		// against the function that actually removes hooks today.
+		repoRoot, err := paths.WorktreeRoot(t.Context())
+		if err != nil {
+			t.Fatal(err)
+		}
+		p := newUninstallPrinter(&output, &output)
+		if !uninstallAgentHooks(t.Context(), p, repoRoot, getAgentHookState(t.Context())) {
+			t.Fatalf("uninstall agent hooks reported failure: %s", output.String())
+		}
+	default:
+		t.Fatalf("unknown ownership helper action %q", action)
+	}
+}
+
+func setupCodexOwnershipWorktrees(t *testing.T) (repoRoot, linkedRoot string) {
+	t.Helper()
+	tmp := t.TempDir()
+	repoRoot = filepath.Join(tmp, "repo")
+	linkedRoot = filepath.Join(tmp, "linked")
+	testutil.InitRepo(t, repoRoot)
+	testutil.WriteFile(t, repoRoot, "README.md", "initial\n")
+	testutil.GitAdd(t, repoRoot, "README.md")
+	testutil.GitCommit(t, repoRoot, "initial")
+	cmd := exec.CommandContext(t.Context(), "git", "-C", repoRoot, "worktree", "add", "-b", "feature", linkedRoot)
+	cmd.Env = testutil.GitIsolatedEnv()
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("create linked worktree: %v: %s", err, output)
+	}
+	for _, root := range []string{repoRoot, linkedRoot} {
+		hooksPath := filepath.Join(root, ".codex", "hooks.json")
+		if err := os.MkdirAll(filepath.Dir(hooksPath), 0o750); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(hooksPath, []byte(canonicalCodexHooksJSON()), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return repoRoot, linkedRoot
+}
+
+func runSetupCodexOwnershipHelper(t *testing.T, dir, action string) {
+	t.Helper()
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.CommandContext(t.Context(), executable, "-test.run=^TestSetupCodexLinkedWorktreeOwnershipHelper$", "-test.count=1")
+	cmd.Dir = dir
+	cmd.Env = append(os.Environ(),
+		"ENTIRE_SETUP_CODEX_OWNERSHIP_HELPER="+action,
+		"ENTIRE_TEST_TTY=0",
+		"CODEX_HOME="+filepath.Join(t.TempDir(), "codex-home"),
+	)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("run ownership helper: %v: %s", err, output)
+	}
+}
+
+func readSetupTestFile(t *testing.T, path string) string {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(data)
+}
+
+func setupCodexRepositoryWithLinkedWorktree(t *testing.T) {
+	t.Helper()
+	tmp := setupTestDir(t)
+	repoRoot := filepath.Join(tmp, "repo")
+	linkedRoot := filepath.Join(tmp, "linked")
+	testutil.InitRepo(t, repoRoot)
+	testutil.WriteFile(t, repoRoot, "README.md", "initial\n")
+	testutil.GitAdd(t, repoRoot, "README.md")
+	testutil.GitCommit(t, repoRoot, "initial")
+
+	cmd := exec.CommandContext(t.Context(), "git", "-C", repoRoot, "worktree", "add", "-b", "feature", linkedRoot)
+	cmd.Env = testutil.GitIsolatedEnv()
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("create linked worktree: %v: %s", err, output)
+	}
+	if err := os.MkdirAll(filepath.Join(linkedRoot, ".codex"), 0o750); err != nil {
+		t.Fatalf("create linked Codex project layer: %v", err)
+	}
+
+	t.Chdir(repoRoot)
+	paths.ClearWorktreeRootCache()
+	session.ClearGitCommonDirCache()
+	t.Setenv("CODEX_HOME", filepath.Join(tmp, "codex-home"))
+
+	ag, err := agent.Get(agent.AgentNameCodex)
+	if err != nil {
+		t.Fatalf("get Codex agent: %v", err)
+	}
+	hookAgent, ok := agent.AsHookSupport(ag)
+	if !ok {
+		t.Fatal("Codex agent does not support hooks")
+	}
+	if _, err := hookAgent.InstallHooks(context.Background(), false); err != nil {
+		t.Fatalf("install Codex hooks: %v", err)
 	}
 }
 
@@ -2429,6 +3555,82 @@ func TestManageAgents_DeselectAll_RemovesAllAndShowsGuidance(t *testing.T) {
 
 	if checkClaudeCodeHooksInstalled() {
 		t.Error("Expected Claude Code hooks to be uninstalled after deselecting all")
+	}
+}
+
+func TestManageAgents_DeselectIgnoresPrimaryOnlyCodexHooks(t *testing.T) {
+	setupCodexRepositoryWithLinkedWorktree(t)
+	repoRoot, err := paths.WorktreeRoot(t.Context())
+	if err != nil {
+		t.Fatalf("resolve primary worktree: %v", err)
+	}
+	linkedRoot := filepath.Join(filepath.Dir(repoRoot), "linked")
+	if err := os.RemoveAll(filepath.Join(linkedRoot, ".codex")); err != nil {
+		t.Fatalf("remove linked Codex project layer: %v", err)
+	}
+	t.Chdir(linkedRoot)
+	paths.ClearWorktreeRootCache()
+	session.ClearGitCommonDirCache()
+
+	ag, err := agent.Get(agent.AgentNameCodex)
+	if err != nil {
+		t.Fatalf("get Codex agent: %v", err)
+	}
+	hookAgent, ok := agent.AsHookSupport(ag)
+	if !ok {
+		t.Fatal("Codex agent does not support hooks")
+	}
+	installed, err := hookAgent.AreHooksInstalled(t.Context())
+	if err != nil {
+		t.Fatalf("check Codex hooks: %v", err)
+	}
+	if installed {
+		t.Fatal("Codex hooks must be inactive without the linked checkout's .codex project layer")
+	}
+	freshness, ok := ag.(agent.HookFreshness)
+	if !ok || freshness.CheckHookConfig(t.Context()) != agent.HooksAbsent {
+		t.Fatal("primary-checkout Codex hooks must not count as local removable configuration")
+	}
+
+	var output bytes.Buffer
+	selectNone := func(_ []string) ([]string, error) { return nil, nil }
+	if err := runManageAgents(t.Context(), &output, EnableOptions{}, selectNone); err != nil {
+		t.Fatalf("runManageAgents() error = %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(repoRoot, ".codex", "hooks.json")); err != nil {
+		t.Fatalf("primary-checkout Codex hooks changed after deselection: %v", err)
+	}
+	if strings.Contains(output.String(), "Removed Codex hooks") {
+		t.Fatalf("deselection reported removing non-local Codex hooks: %s", output.String())
+	}
+}
+
+func TestManageAgents_DoesNotRemoveInvalidCodexFile(t *testing.T) {
+	setupCodexRepositoryWithLinkedWorktree(t)
+	repoRoot, err := paths.WorktreeRoot(t.Context())
+	if err != nil {
+		t.Fatalf("resolve primary worktree: %v", err)
+	}
+	hooksPath := filepath.Join(repoRoot, ".codex", "hooks.json")
+	const malformed = `{not-json`
+	if err := os.WriteFile(hooksPath, []byte(malformed), 0o600); err != nil {
+		t.Fatalf("write malformed Codex hooks: %v", err)
+	}
+
+	var output bytes.Buffer
+	selectNone := func(_ []string) ([]string, error) { return nil, nil }
+	if err := runManageAgents(t.Context(), &output, EnableOptions{}, selectNone); err != nil {
+		t.Fatalf("runManageAgents() error = %v", err)
+	}
+	data, err := os.ReadFile(hooksPath)
+	if err != nil {
+		t.Fatalf("read malformed Codex hooks: %v", err)
+	}
+	if string(data) != malformed {
+		t.Fatalf("invalid Codex file was changed: %q", data)
+	}
+	if strings.Contains(output.String(), "Removed Codex") {
+		t.Fatalf("invalid Codex file was offered for removal: %s", output.String())
 	}
 }
 
@@ -3885,4 +5087,24 @@ func TestRunEnableInteractive_FirstRunDefaultsToGitRefs(t *testing.T) {
 			t.Errorf("Checkpoints = %+v, want none added on a pre-existing setup", cfg)
 		}
 	})
+}
+
+// TestPluginUninstallCommand_QuotesRepoRoot pins that the recovery command
+// survives an ordinary repo path. A space is the common case; the metacharacters
+// matter because this line is meant to be pasted into a shell, where an
+// unquoted path silently runs `cd` against the wrong argument.
+func TestPluginUninstallCommand_QuotesRepoRoot(t *testing.T) {
+	t.Parallel()
+
+	got := pluginUninstallCommand("/Users/me/My Repo", "flaky")
+	if !strings.Contains(got, "cd '/Users/me/My Repo'") {
+		t.Errorf("repo root must be quoted for the shell, got:\n%s", got)
+	}
+	if !strings.Contains(got, "ENTIRE_REPO_ROOT='/Users/me/My Repo'") {
+		t.Errorf("env value must be quoted too, got:\n%s", got)
+	}
+	// A single quote in a path terminates the quoting unless escaped.
+	if got := pluginUninstallCommand("/tmp/it's", "flaky"); !strings.Contains(got, `'/tmp/it'\''s'`) {
+		t.Errorf("a single quote in the path must be escaped, got:\n%s", got)
+	}
 }

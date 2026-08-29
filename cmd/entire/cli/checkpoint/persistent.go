@@ -475,7 +475,9 @@ func (s *treeWriter) applyTranscriptBackfill(ctx context.Context, opts UpdateOpt
 // producer ever set (#2058's "dead writer": the whole path was unreachable).
 // Transcript content is expected pre-redacted by the caller (the condensation
 // materializer runs the same sanitize -> externalize -> redact pipeline the
-// session transcript gets); this writer does no redaction of its own.
+// session transcript gets), so this writer does not redact it again. The one
+// thing it does redact is task.json's free-text task_description, which the
+// record carries verbatim — see writeTaskRecordEntry.
 func (s *treeWriter) writeTaskRecordEntries(opts WriteOptions, basePath string, entries map[string]object.TreeEntry) error {
 	for _, task := range opts.Tasks {
 		if err := validation.ValidateToolUseID(task.ToolUseID); err != nil {
@@ -509,11 +511,15 @@ func (s *treeWriter) writeTaskRecordEntry(task TaskPayload, basePath string, ent
 		}
 	}
 
+	// The description is the agent's free text for the Task call (it can carry
+	// whatever the prompt carried), and task.json is pushed with the checkpoint,
+	// so it goes through the same redactor as the summary fields — see
+	// RedactSummary. The transcript beside it arrives pre-redacted.
 	metadata := taskRecordMetadata{
 		ToolUseID:                   task.ToolUseID,
 		AgentID:                     task.AgentID,
 		SubagentType:                task.SubagentType,
-		TaskDescription:             task.TaskDescription,
+		TaskDescription:             redact.String(task.TaskDescription),
 		Files:                       task.Files,
 		TokenUsage:                  task.TokenUsage,
 		StartedAt:                   task.StartedAt,
