@@ -45,13 +45,22 @@ type ExportMessage struct {
 }
 
 // MessageInfo contains message metadata.
+//
+// ModelID and ProviderID are top-level keys of an ASSISTANT message's info
+// (e.g. "claude-opus-4-6" / "anthropic"), confirmed against `opencode export`
+// output and the OpenCode 1.3 message store (2026-08-28). A user message
+// records its model differently — nested as info.model{providerID,modelID} —
+// and that shape is not decoded here. Cost is OpenCode's own dollar figure
+// for the message, 0 when the provider reports none.
 type MessageInfo struct {
-	ID        string  `json:"id"`
-	SessionID string  `json:"sessionID,omitempty"`
-	Role      string  `json:"role"` // "user" or "assistant"
-	Time      Time    `json:"time"`
-	Tokens    *Tokens `json:"tokens,omitempty"`
-	Cost      float64 `json:"cost,omitempty"`
+	ID         string  `json:"id"`
+	SessionID  string  `json:"sessionID,omitempty"`
+	Role       string  `json:"role"` // "user" or "assistant"
+	Time       Time    `json:"time"`
+	Tokens     *Tokens `json:"tokens,omitempty"`
+	Cost       float64 `json:"cost,omitempty"`
+	ModelID    string  `json:"modelID,omitempty"`
+	ProviderID string  `json:"providerID,omitempty"`
 }
 
 // Message role constants.
@@ -60,7 +69,9 @@ const (
 	roleUser      = "user"
 )
 
-// Time holds message timestamps.
+// Time holds message timestamps as Unix epoch MILLISECONDS (e.g.
+// 1773867525015), the unit OpenCode writes and transcript/compact converts
+// with time.UnixMilli. Completed is 0 while a message is in flight.
 type Time struct {
 	Created   int64 `json:"created"`
 	Completed int64 `json:"completed,omitempty"`
@@ -116,8 +127,22 @@ type ToolState struct {
 }
 
 // ToolStateMetadata holds metadata from tool execution results.
+//
+// SessionID and Model are written by the task tool (OpenCode 1.3 message
+// store, 2026-08-28): SessionID is the child session the subagent ran in —
+// a separate session, never part of this export — and Model is the model
+// that child actually used. Both are absent on every other tool.
 type ToolStateMetadata struct {
-	Files []ToolFileInfo `json:"files,omitempty"`
+	Files     []ToolFileInfo `json:"files,omitempty"`
+	SessionID string         `json:"sessionId,omitempty"`
+	Model     *ModelRef      `json:"model,omitempty"`
+}
+
+// ModelRef is OpenCode's provider/model pair as nested under a task tool's
+// state.metadata.model and a user message's info.model.
+type ModelRef struct {
+	ModelID    string `json:"modelID,omitempty"`
+	ProviderID string `json:"providerID,omitempty"`
 }
 
 // ToolFileInfo represents a file affected by a tool operation.

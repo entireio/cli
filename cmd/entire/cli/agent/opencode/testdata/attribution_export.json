@@ -1,0 +1,298 @@
+{
+ "info": {
+  "id": "ses_attr",
+  "title": "attribution fixture",
+  "version": "1.3.13",
+  "time": {
+   "created": 1773867525000,
+   "updated": 1773867586000
+  }
+ },
+ "messages": [
+  {
+   "info": {
+    "id": "msg_00",
+    "sessionID": "ses_attr",
+    "role": "user",
+    "time": {
+     "created": 1773867525015
+    }
+   },
+   "parts": [
+    {
+     "id": "prt_00a",
+     "sessionID": "ses_attr",
+     "messageID": "msg_00",
+     "type": "text",
+     "text": "Run the tests and tell me what fails."
+    }
+   ]
+  },
+  {
+   "info": {
+    "id": "msg_01",
+    "sessionID": "ses_attr",
+    "role": "assistant",
+    "time": {
+     "created": 1773867525023,
+     "completed": 1773867534500
+    },
+    "parentID": "msg_00",
+    "modelID": "claude-sonnet-4-5",
+    "providerID": "anthropic",
+    "mode": "build",
+    "agent": "build",
+    "cost": 0.0123,
+    "tokens": {
+     "total": 6400,
+     "input": 1200,
+     "output": 300,
+     "reasoning": 100,
+     "cache": {
+      "read": 4000,
+      "write": 800
+     }
+    }
+   },
+   "parts": [
+    {
+     "id": "prt_01a",
+     "sessionID": "ses_attr",
+     "messageID": "msg_01",
+     "type": "step-start"
+    },
+    {
+     "id": "prt_01b",
+     "sessionID": "ses_attr",
+     "messageID": "msg_01",
+     "type": "text",
+     "text": "Running the suite."
+    },
+    {
+     "id": "prt_01c",
+     "sessionID": "ses_attr",
+     "messageID": "msg_01",
+     "type": "tool",
+     "callID": "call_bash_1",
+     "tool": "bash",
+     "state": {
+      "status": "completed",
+      "input": {
+       "command": "go test ./... -run TestX",
+       "description": "Run tests"
+      },
+      "output": "ok PASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPASS\nPA"
+     }
+    },
+    {
+     "id": "prt_01d",
+     "sessionID": "ses_attr",
+     "messageID": "msg_01",
+     "type": "tool",
+     "callID": "call_read_1",
+     "tool": "read",
+     "state": {
+      "status": "completed",
+      "input": {
+       "filePath": "src/a.go"
+      },
+      "output": "package a\npackage a\npackage a\npackage a\npackage a\npackage a\npackage a\npackage a\npackage a\npackage a\npackage a\npackage a\npackage a\npackage a\npackage a\npackage a\npackage a\npackage a\npackage a\npackage a\npackage a\npackage a\npackage a\npackage a\npackage a\npackage a\npackage a\npackage a\npackage a\npackage a\n"
+     }
+    },
+    {
+     "id": "prt_01e",
+     "sessionID": "ses_attr",
+     "messageID": "msg_01",
+     "type": "step-finish",
+     "reason": "tool-calls",
+     "cost": 0.0123,
+     "tokens": {
+      "total": 6400,
+      "input": 1200,
+      "output": 300,
+      "reasoning": 100,
+      "cache": {
+       "read": 4000,
+       "write": 800
+      }
+     }
+    }
+   ]
+  },
+  {
+   "info": {
+    "id": "msg_02",
+    "sessionID": "ses_attr",
+    "role": "user",
+    "time": {
+     "created": 1773867545000
+    }
+   },
+   "parts": [
+    {
+     "id": "prt_02a",
+     "sessionID": "ses_attr",
+     "messageID": "msg_02",
+     "type": "text",
+     "text": "Have a subagent look around."
+    }
+   ]
+  },
+  {
+   "info": {
+    "id": "msg_03",
+    "sessionID": "ses_attr",
+    "role": "assistant",
+    "time": {
+     "created": 1773867545010,
+     "completed": 1773867570000
+    },
+    "parentID": "msg_00",
+    "modelID": "claude-sonnet-4-5",
+    "providerID": "anthropic",
+    "mode": "build",
+    "agent": "build",
+    "cost": 0.0045,
+    "tokens": {
+     "total": 6300,
+     "input": 50,
+     "output": 250,
+     "reasoning": 80,
+     "cache": {
+      "read": 6000,
+      "write": 0
+     }
+    }
+   },
+   "parts": [
+    {
+     "id": "prt_03a",
+     "sessionID": "ses_attr",
+     "messageID": "msg_03",
+     "type": "reasoning",
+     "text": "Thinking about which agent to use."
+    },
+    {
+     "id": "prt_03b",
+     "sessionID": "ses_attr",
+     "messageID": "msg_03",
+     "type": "tool",
+     "callID": "call_task_1",
+     "tool": "task",
+     "state": {
+      "status": "completed",
+      "input": {
+       "subagent_type": "explore",
+       "description": "Survey the tree",
+       "prompt": "Look around and report."
+      },
+      "output": "Explored the tree; summary follows here.",
+      "metadata": {
+       "sessionId": "ses_child_1",
+       "model": {
+        "modelID": "claude-haiku-4-5",
+        "providerID": "anthropic"
+       },
+       "truncated": false
+      }
+     }
+    },
+    {
+     "id": "prt_03c",
+     "sessionID": "ses_attr",
+     "messageID": "msg_03",
+     "type": "text",
+     "text": "Dispatched."
+    }
+   ]
+  },
+  {
+   "info": {
+    "id": "msg_04",
+    "sessionID": "ses_attr",
+    "role": "assistant",
+    "time": {
+     "created": 1773867570010,
+     "completed": 1773867571000
+    },
+    "parentID": "msg_00",
+    "modelID": "claude-sonnet-4-5",
+    "providerID": "anthropic",
+    "mode": "build",
+    "agent": "build"
+   },
+   "parts": [
+    {
+     "id": "prt_04a",
+     "sessionID": "ses_attr",
+     "messageID": "msg_04",
+     "type": "tool",
+     "callID": "call_skill_1",
+     "tool": "skill",
+     "state": {
+      "status": "completed",
+      "input": {
+       "name": "artifact-design"
+      },
+      "output": "# artifact-design\n# artifact-design\n# artifact-design\n# artifact-design\n# artifact-design\n# artifact-design\n# artifact-d"
+     }
+    }
+   ]
+  },
+  {
+   "info": {
+    "id": "msg_05",
+    "sessionID": "ses_attr",
+    "role": "user",
+    "time": {
+     "created": 1773867585000
+    }
+   },
+   "parts": [
+    {
+     "id": "prt_05a",
+     "sessionID": "ses_attr",
+     "messageID": "msg_05",
+     "type": "text",
+     "text": "Thanks, wrap up."
+    }
+   ]
+  },
+  {
+   "info": {
+    "id": "msg_06",
+    "sessionID": "ses_attr",
+    "role": "assistant",
+    "time": {
+     "created": 1773867585005,
+     "completed": 1773867586000
+    },
+    "parentID": "msg_00",
+    "modelID": "claude-sonnet-4-5",
+    "providerID": "anthropic",
+    "mode": "build",
+    "agent": "build",
+    "cost": 0.0021,
+    "tokens": {
+     "total": 7230,
+     "input": 10,
+     "output": 120,
+     "reasoning": 0,
+     "cache": {
+      "read": 7000,
+      "write": 100
+     }
+    }
+   },
+   "parts": [
+    {
+     "id": "prt_06a",
+     "sessionID": "ses_attr",
+     "messageID": "msg_06",
+     "type": "text",
+     "text": "Done."
+    }
+   ]
+  }
+ ]
+}
