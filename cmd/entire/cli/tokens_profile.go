@@ -147,8 +147,8 @@ const tokensBareNoSessionHint = "no active session — try 'entire checkpoint to
 
 // newTokensGroupCmd is the `tokens` group. Bare `entire tokens` reports on
 // the current worktree's most recent session, exactly as
-// `entire session tokens --current` does; the subcommands cover checkpoint
-// history.
+// `entire session tokens --current` does (differing only in the no-session
+// hint); the subcommands cover checkpoint history.
 func newTokensGroupCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:    "tokens",
@@ -157,16 +157,16 @@ func newTokensGroupCmd() *cobra.Command {
 		Long: `Analyze token usage across sessions and checkpoints.
 
 Run without a subcommand to report on the current worktree's most recent
-session, as 'entire session tokens --current' does. Without an active session
-it prints a one-line hint and exits 0.
+session, as 'entire session tokens --current' does. When no session belongs to
+this worktree it prints a one-line hint and exits 0.
 
 Commands:
   profile  Aggregate token usage across committed checkpoints
 
 Examples:
-  entire tokens                current session's token report
-  entire tokens profile
-  entire tokens profile --json`,
+  entire tokens                 current session's token report
+  entire tokens profile         per-agent profile over committed checkpoints
+  entire tokens profile --json  the profile as JSON`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			ctx := cmd.Context()

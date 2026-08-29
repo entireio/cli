@@ -33,7 +33,7 @@ var experimentalCommands = []experimentalCommandInfo{
 	{
 		CommandPath: []string{"tokens"},
 		Invocation:  "entire tokens",
-		Summary:     "Analyze experimental token usage diagnostics",
+		Summary:     "Report on the current session's tokens; subcommands cover checkpoint history",
 	},
 	{
 		CommandPath: []string{"tokens", "profile"},
@@ -48,7 +48,7 @@ var experimentalCommands = []experimentalCommandInfo{
 	{
 		CommandPath: []string{"checkpoint", "tokens"},
 		Invocation:  "entire checkpoint tokens <id>",
-		Summary:     "Show where a committed checkpoint's tokens went, with estimated cost shares",
+		Summary:     "Show where a committed checkpoint's tokens went, with cost shares and recommendations",
 	},
 	{
 		CommandPath: []string{"blame"},

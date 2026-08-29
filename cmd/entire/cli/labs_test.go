@@ -34,7 +34,7 @@ func TestLabsCmd_PrintsExperimentalCommandList(t *testing.T) {
 		"entire session tokens",
 		"entire session tokens --help",
 		"entire checkpoint tokens <id>",
-		"Show where a committed checkpoint's tokens went, with estimated cost shares",
+		"Show where a committed checkpoint's tokens went, with cost shares and recommendations",
 		"entire checkpoint tokens --help",
 	} {
 		if !strings.Contains(got, want) {

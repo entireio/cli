@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"strings"
 	"testing"
 	"time"
@@ -612,6 +613,35 @@ func TestTokensGroupCmd_BareRunsCurrentSessionReport(t *testing.T) {
 	}
 	if strings.Contains(stdout.String(), "Commands:") {
 		t.Errorf("bare entire tokens printed help instead of the report:\n%s", stdout.String())
+	}
+
+	// Parity: the bare command is `session tokens --current`, byte for byte.
+	current := newTokensCmd()
+	var currentOut bytes.Buffer
+	current.SetOut(&currentOut)
+	current.SetArgs([]string{"--current"})
+	if err := current.ExecuteContext(ctx); err != nil {
+		t.Fatalf("session tokens --current: %v", err)
+	}
+	if stdout.String() != currentOut.String() {
+		t.Errorf("bare entire tokens differs from session tokens --current:\n--- bare\n%s\n--- --current\n%s", stdout.String(), currentOut.String())
+	}
+}
+
+// The group command takes no flags and no arguments of its own: the report's
+// flags live on `session tokens`, and a stray word must not silently run the
+// bare report.
+func TestTokensGroupCmd_BareRejectsArgsAndFlags(t *testing.T) {
+	t.Parallel()
+
+	for _, args := range [][]string{{"bogus"}, {"--json"}, {"--agent-brief"}} {
+		cmd := newTokensGroupCmd()
+		cmd.SetOut(io.Discard)
+		cmd.SetErr(io.Discard)
+		cmd.SetArgs(args)
+		if err := cmd.ExecuteContext(context.Background()); err == nil {
+			t.Errorf("entire tokens %v should error", args)
+		}
 	}
 }
 

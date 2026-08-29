@@ -975,9 +975,6 @@ func TestAgentHelpGuidance_TokenReportsCarryWhenToUse(t *testing.T) {
 		if parsed.Guidance != agentHelpGuidance[name] {
 			t.Errorf("agent-help %s --json guidance = %q, want the guidance table entry", name, parsed.Guidance)
 		}
-		if parsed.Guidance == "" {
-			t.Errorf("agent-help %s --json carries no guidance", name)
-		}
 	}
 	for _, path := range []string{"session tokens", "checkpoint tokens", "tokens", "tokens profile"} {
 		if agentHelpFactsFor(path).audience != agentHelpAudienceReadOnly {

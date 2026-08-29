@@ -199,8 +199,8 @@ var agentHelpGuidance = map[string]string{
 		"`entire agent-help` first; there is probably a command for it. When you do\n" +
 		"need it, use this rather than hand-rolling curl — it attaches the right\n" +
 		"bearer and dials the right host for you.",
-	"session tokens": "Run `entire session tokens --agent-brief` when the user asks what this\n" +
-		"session cost or where its tokens went, and after a long session (several\n" +
+	"session tokens": "Run `entire session tokens --agent-brief` when the user asks how much this\n" +
+		"session has used, or where its tokens went, and after a long session (several\n" +
 		"hours or hundreds of API calls) before suggesting how to work differently.\n" +
 		"The brief's `Next best action` is written to be relayed to the user in\n" +
 		"plain language. Read-only: it never changes repo or session state. Do not\n" +
@@ -215,8 +215,9 @@ var agentHelpGuidance = map[string]string{
 		"many sessions rather than one — which agent spends most, what a typical\n" +
 		"checkpoint costs, which checkpoints are worth opening. It reads committed\n" +
 		"checkpoint metadata only (no transcripts), so it is cheap and read-only,\n" +
-		"and in this version it prints no recommendations: for a why and a next\n" +
-		"step, open one of the checkpoints it names with `entire checkpoint tokens`.",
+		"and in this version it prints no recommendations. For the why and a next\n" +
+		"step, open one of the checkpoints it names with\n" +
+		"`entire checkpoint tokens <id> --agent-brief`.",
 }
 
 // agentHelpFactsFor classifies one command path, defaulting the unclassified
