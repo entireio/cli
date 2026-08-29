@@ -8,8 +8,10 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/binding"
 	"github.com/entireio/cli/cmd/entire/cli/execx"
@@ -19,6 +21,17 @@ import (
 const (
 	bindingReplayEnv        = "ENTIRE_BINDING_REPLAY"
 	bindingReplayPrimaryEnv = "ENTIRE_BINDING_PRIMARY"
+
+	// bindingReplayTimeout bounds one replayed hook child. The parent hook is
+	// itself running under the agent's Stop deadline (commonly 60s; Codex kills
+	// at 3s and the replay is skipped there by the budgeter), so an unbounded
+	// wait on a child stuck in a git walk or a lock would carry the whole hook
+	// past that deadline. Replays run in parallel, so the wall-clock cost is
+	// one timeout, not one per target.
+	bindingReplayTimeout = 30 * time.Second
+	// bindingReplayStderrCap bounds how much of a failed child's stderr is
+	// kept for the log line.
+	bindingReplayStderrCap = 4 << 10
 )
 
 type bindingTurnCollectorKey struct{}
@@ -124,7 +137,10 @@ func replayBindingTurn(ctx context.Context, collector *bindingTurnCollector, age
 			defer wg.Done()
 			isPrimary := target.Repo.CommonDir == primary
 			if err := runBindingReplayHook(ctx, target.Repo.WorktreeRoot, agentName, hookName, payload, isPrimary); err != nil {
-				logging.Debug(logCtx, "per-repo turn-end replay failed",
+				// Warn, not Debug: a failed replay is a turn the target repo
+				// silently missed a checkpoint for, and the launching repo's
+				// log is the only place it can be seen.
+				logging.Warn(logCtx, "per-repo turn-end replay failed; target repo missed this turn's checkpoint",
 					slog.String("repo", target.Repo.WorktreeRoot),
 					slog.Bool("primary", isPrimary),
 					slog.String("error", err.Error()))
@@ -142,22 +158,65 @@ func executeBindingReplayHook(ctx context.Context, targetRoot, agentName, hookNa
 	if err != nil {
 		return fmt.Errorf("resolve Entire executable: %w", err)
 	}
-	cmd := execx.NonInteractive(ctx, executable, "hooks", agentName, hookName)
+	runCtx, cancel := context.WithTimeout(ctx, bindingReplayTimeout)
+	defer cancel()
+	cmd := execx.NonInteractive(runCtx, executable, "hooks", agentName, hookName)
 	cmd.Dir = targetRoot
 	cmd.Stdin = bytes.NewReader(payload)
 	cmd.Stdout = io.Discard
-	cmd.Stderr = io.Discard
+	stderr := &cappedBuffer{limit: bindingReplayStderrCap}
+	cmd.Stderr = stderr
+	cmd.WaitDelay = 2 * time.Second
 	primaryValue := "0"
 	if primary {
 		primaryValue = "1"
 	}
 	cmd.Env = append(os.Environ(), bindingReplayEnv+"=1", bindingReplayPrimaryEnv+"="+primaryValue)
 	if err := cmd.Run(); err != nil {
+		if runCtx.Err() != nil {
+			return fmt.Errorf("run replayed hook: timed out after %s", bindingReplayTimeout)
+		}
+		if msg := strings.TrimSpace(stderr.String()); msg != "" {
+			return fmt.Errorf("run replayed hook: %w: %s", err, msg)
+		}
 		return fmt.Errorf("run replayed hook: %w", err)
 	}
 	return nil
 }
 
+// cappedBuffer keeps the first limit bytes written and drops the rest.
+type cappedBuffer struct {
+	buf   bytes.Buffer
+	limit int
+}
+
+func (b *cappedBuffer) Write(p []byte) (int, error) {
+	n := len(p)
+	if room := b.limit - b.buf.Len(); room > 0 {
+		if len(p) > room {
+			p = p[:room]
+		}
+		b.buf.Write(p)
+	}
+	return n, nil
+}
+
+func (b *cappedBuffer) String() string { return b.buf.String() }
+
+// bindingTurnKeepsTokenUsage decides whether this repo's checkpoint for the
+// turn carries the turn's tokens. One turn's tokens exist once; when the turn
+// touched several repos exactly one of them — the token-primary repo, the one
+// with the latest evidence — puts them on its checkpoint, so a cross-repo
+// session is never double-counted in checkpoint token reports.
+//
+// In a replay child the parent decided: the primary flag on the environment
+// is the whole answer. In the launching process, "no primary selected" is the
+// ordinary single-repo turn (the collector saw no successful replica) and the
+// launching repo keeps its tokens; only a primary that names ANOTHER repo
+// moves them there. This affects the checkpoint delta alone — see
+// strategy.StepContext.TokensAttributedElsewhere — the session-wide total in
+// every repo's state keeps accumulating, since the transcript is shared and
+// `entire status` reports it per repo.
 func bindingTurnKeepsTokenUsage(ctx context.Context, currentCommonDir string) bool {
 	if os.Getenv(bindingReplayEnv) == "1" {
 		return os.Getenv(bindingReplayPrimaryEnv) == "1"

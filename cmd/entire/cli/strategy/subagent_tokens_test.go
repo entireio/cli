@@ -564,3 +564,48 @@ func readCommittedSummary(t *testing.T, repo *git.Repository, checkpointID id.Ch
 	require.NotNil(t, summary)
 	return summary
 }
+
+// A cross-repo turn puts its tokens on ONE repo's checkpoint. The other repo
+// still folds them into its session-wide total (the transcript is shared and
+// `entire status` reports the total per repo) — only its checkpoint delta
+// skips them, so checkpoint token reports never count the turn twice.
+func TestSaveStep_TokensAttributedElsewhereKeepSessionTotal(t *testing.T) {
+	dir := t.TempDir()
+	testutil.InitRepo(t, dir)
+	testutil.WriteFile(t, dir, "test.txt", "v1")
+	testutil.GitAdd(t, dir, "test.txt")
+	testutil.GitCommit(t, dir, "initial")
+	t.Chdir(dir)
+	ctx := context.Background()
+	s := &ManualCommitStrategy{}
+	sessionID := "2026-08-28-tokens-elsewhere"
+	metadataDir := ".entire/metadata/" + sessionID
+	metadataDirAbs := filepath.Join(dir, metadataDir)
+	require.NoError(t, os.MkdirAll(metadataDirAbs, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(metadataDirAbs, paths.TranscriptFileName), []byte(`{"type":"human","message":{"content":"test"}}`+"\n"), 0o644))
+
+	step := func(content string, elsewhere bool) {
+		require.NoError(t, os.WriteFile(filepath.Join(dir, "test.txt"), []byte(content), 0o644))
+		require.NoError(t, s.SaveStep(ctx, StepContext{
+			SessionID:                 sessionID,
+			MetadataDir:               metadataDir,
+			MetadataDirAbs:            metadataDirAbs,
+			ModifiedFiles:             []string{"test.txt"},
+			CommitMessage:             "step",
+			AuthorName:                "Test",
+			AuthorEmail:               "test@test.com",
+			AgentType:                 agent.AgentTypeClaudeCode,
+			TokenUsage:                &agent.TokenUsage{InputTokens: 100, OutputTokens: 50, APICallCount: 1},
+			TokensAttributedElsewhere: elsewhere,
+		}))
+	}
+	step("v2", false)
+	step("v3", true)
+
+	state, err := s.loadSessionState(ctx, sessionID)
+	require.NoError(t, err)
+	require.NotNil(t, state.TokenUsage)
+	require.Equal(t, 200, state.TokenUsage.InputTokens, "session total counts every turn")
+	require.NotNil(t, state.CheckpointTokenUsage)
+	require.Equal(t, 100, state.CheckpointTokenUsage.InputTokens, "checkpoint delta skips the turn attributed to another repo")
+}

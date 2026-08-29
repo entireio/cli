@@ -163,6 +163,13 @@ type StepContext struct {
 
 	// TokenUsage contains the token usage for this checkpoint
 	TokenUsage *agent.TokenUsage
+	// TokensAttributedElsewhere reports that this turn's tokens belong on
+	// another repository's checkpoint (a cross-repo session's token-primary
+	// repo). TokenUsage then still accumulates into the session-wide total —
+	// the transcript is shared, so the spend is real for this repo's session
+	// too — but not into the pending checkpoint's delta, so checkpoint token
+	// reports never count one turn twice.
+	TokensAttributedElsewhere bool
 }
 
 // TaskStepContext contains all information needed for saving a task step checkpoint.

@@ -114,10 +114,14 @@ func executeAgentHook(cmd *cobra.Command, agentName types.AgentName, hookName st
 		}
 		// No repo at cwd: capture is impossible, but the session's evidence
 		// may name repos elsewhere (parent-dir launches, #1098). Record it
-		// best-effort and still exit 0 so the agent is never blocked.
-		event := recordNoRepoEvidence(cmd.Context(), agentName, hookName, bytes.NewReader(payload))
+		// best-effort and still exit 0 so the agent is never blocked. There
+		// is no repository to log into, and the default slog handler writes
+		// to stderr — the agent's stderr — so every Info/Warn this path (and
+		// the strategy code it calls into) emits is discarded.
+		noRepoCtx := logging.WithLogger(cmd.Context(), logging.Discard())
+		event := recordNoRepoEvidence(noRepoCtx, agentName, hookName, bytes.NewReader(payload))
 		if event != nil && event.Type == agent.TurnEnd {
-			replayBindingTurn(cmd.Context(), collector, string(agentName), hookName, payload)
+			replayBindingTurn(noRepoCtx, collector, string(agentName), hookName, payload)
 		}
 		return nil
 	}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -13,6 +14,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/binding"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
 	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
+	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
@@ -42,13 +44,6 @@ func ensureSessionReplicated(ctx context.Context, sessionID string, meta binding
 	if rec == nil {
 		return false, errors.New("session binding record not found")
 	}
-	markedAdopted := false
-	for _, br := range rec.BoundRepos {
-		if br.CommonDir == ev.Repo.CommonDir && br.AdoptedAt != nil {
-			markedAdopted = true
-			break
-		}
-	}
 
 	if sameAdoptPath(currentWorktreeRoot, ev.Repo.WorktreeRoot) {
 		return false, nil
@@ -59,16 +54,20 @@ func ensureSessionReplicated(ctx context.Context, sessionID string, meta binding
 	if !ok || !sameAdoptStore(resolved.CommonDir, ev.Repo.CommonDir) {
 		return false, errors.New("target repo identity changed before adoption")
 	}
-	targetStore := session.NewStateStoreWithDir(filepath.Join(ev.Repo.CommonDir, session.SessionStateDirName))
-	if markedAdopted {
-		existing, loadErr := targetStore.Load(ctx, sessionID)
-		if loadErr != nil {
-			return false, fmt.Errorf("verify adopted target session state: %w", loadErr)
-		}
-		if existing != nil {
-			return true, nil
+	// A linked worktree of the SAME clone is not a target: session state lives
+	// in the git common dir, shared by every worktree of a clone, so the
+	// "target store" here would be the source's own store — the fast path
+	// below would read the source state as an existing replica and the replay
+	// child would then run the launching session's hooks in a worktree it does
+	// not belong to. The commit-linking path already handles multi-worktree
+	// sessions (identity-first linking); evidence for the sibling is still
+	// recorded, it just never adopts.
+	if currentWorktreeRoot != "" {
+		if current, ok := binding.ResolveRepoForPath(ctx, filepath.Join(currentWorktreeRoot, ".git")); ok && sameAdoptStore(current.CommonDir, ev.Repo.CommonDir) {
+			return false, nil
 		}
 	}
+	targetStore := session.NewStateStoreWithDir(filepath.Join(ev.Repo.CommonDir, session.SessionStateDirName))
 
 	var source *session.State
 	if currentWorktreeRoot != "" {
@@ -78,21 +77,31 @@ func ensureSessionReplicated(ctx context.Context, sessionID string, meta binding
 		}
 	}
 
+	// The adopted marker in the record is a hint, never the authority: the
+	// existence check runs under the target's session-state lock, both for a
+	// marked and an unmarked repo, so a replica removed between an unlocked
+	// check and the write (cleanup, stale-state collection) is rebuilt rather
+	// than assumed present. The lock timeout bounds the ACQUIRE only; the
+	// state build gets a context that cannot expire — it reads git status
+	// through StatusWithBudget, whose breach latch is process-wide, and a 2s
+	// lock deadline must not put the launching repo's own capture into
+	// degraded mode for the rest of this hook.
 	lockCtx, cancel := context.WithTimeout(ctx, bindingAdoptLockTimeout)
 	defer cancel()
+	buildCtx := context.WithoutCancel(ctx)
 	err = strategy.WithSessionStateLocks(lockCtx, sessionID, []string{ev.Repo.CommonDir}, func() error {
-		existing, loadErr := targetStore.Load(lockCtx, sessionID)
+		existing, loadErr := targetStore.Load(buildCtx, sessionID)
 		if loadErr != nil {
 			return fmt.Errorf("load target session state: %w", loadErr)
 		}
 		if existing != nil {
 			return nil
 		}
-		state, buildErr := buildReplicatedSessionState(lockCtx, source, rec, meta, ev.Repo, ev.Files)
+		state, buildErr := buildReplicatedSessionState(buildCtx, source, rec, meta, ev.Repo, ev.Files)
 		if buildErr != nil {
 			return buildErr
 		}
-		if saveErr := targetStore.Save(lockCtx, state); saveErr != nil {
+		if saveErr := targetStore.Save(buildCtx, state); saveErr != nil {
 			return fmt.Errorf("save target session state: %w", saveErr)
 		}
 		return nil
@@ -100,8 +109,17 @@ func ensureSessionReplicated(ctx context.Context, sessionID string, meta binding
 	if err != nil {
 		return false, fmt.Errorf("replicate target session state: %w", err)
 	}
+	// The replica exists durably at this point, which is what the caller's
+	// "replicated" answer (and the replay it gates) stands for. The marker is
+	// bookkeeping: a failure to write it — the record was rewritten by a
+	// concurrent evidence write, the lock timed out — must not withhold the
+	// replay, or this turn's checkpoint in the target is lost while the state
+	// says the session is active there.
 	if err := binding.MarkRepoAdopted(ctx, sessionID, ev.Repo.CommonDir); err != nil {
-		return false, fmt.Errorf("mark target repo adopted: %w", err)
+		logging.Warn(logging.WithComponent(ctx, "binding"), "target session state replicated but the adopted marker was not recorded",
+			slog.String("session_id", sessionID),
+			slog.String("repo", ev.Repo.WorktreeRoot),
+			slog.String("error", err.Error()))
 	}
 	return true, nil
 }
@@ -168,9 +186,15 @@ func buildReplicatedSessionState(ctx context.Context, source *session.State, rec
 	return &replicated, nil
 }
 
+// targetUntrackedFiles seeds the replica's untracked baseline. It is
+// best-effort: without it, files that already existed untracked in the target
+// would be attributed to the session as new, so a failure is worth a log line
+// even though adoption proceeds.
 func targetUntrackedFiles(ctx context.Context, repo *git.Repository) []string {
 	status, err := gitrepo.StatusWithBudget(ctx, repo)
 	if err != nil {
+		logging.Warn(logging.WithComponent(ctx, "binding"), "adopted target's untracked baseline unavailable; pre-existing untracked files may be attributed to the session",
+			slog.String("error", err.Error()))
 		return nil
 	}
 	var untracked []string

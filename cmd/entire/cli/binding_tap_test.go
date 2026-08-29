@@ -56,7 +56,11 @@ func TestRecordForeignEvidence_EnabledForeignRepoRecorded(t *testing.T) {
 	ctx := context.Background()
 	rootA := newBindingRepo(t)
 	rootB := newBindingRepo(t)
+	commitInitial(t, rootB) // an unborn HEAD cannot be adopted into
 	enableEntireAt(t, rootB)
+	commitInitial(t, rootA)
+	bindingSourceState(ctx, t, rootA, "sess-1")
+	t.Chdir(rootA)
 
 	recordForeignEvidence(ctx, "sess-1", bindingTestMeta(rootA), rootA,
 		[]string{filepath.Join(rootB, "pkg", "f.go")})
@@ -80,6 +84,9 @@ func TestRecordForeignEvidence_EnabledForeignRepoRecorded(t *testing.T) {
 	}
 	if rec.AgentType != testAgentName || rec.LaunchRoot != rootA {
 		t.Errorf("session meta not stored: %+v", rec)
+	}
+	if br.AdoptedAt == nil || loadTargetState(ctx, t, rootB, "sess-1") == nil {
+		t.Fatalf("an enabled foreign repo must be adopted, not just recorded: %+v", br)
 	}
 }
 
@@ -630,5 +637,176 @@ func TestFilterAndNormalizePathsCollectingForeign(t *testing.T) {
 		if orig[i] != kept[i] {
 			t.Errorf("original[%d] = %q, sibling = %q", i, orig[i], kept[i])
 		}
+	}
+}
+
+// bindingSourceState saves a minimal live source state for sessionID in rootA
+// (which must already have a commit) so adoption has something to replicate
+// from, and returns it.
+func bindingSourceState(ctx context.Context, t *testing.T, rootA, sessionID string) *session.State {
+	t.Helper()
+	started := time.Now().Add(-time.Hour)
+	source := &session.State{
+		SessionID:             sessionID,
+		BaseCommit:            testutil.GetHeadHash(t, rootA),
+		AttributionBaseCommit: testutil.GetHeadHash(t, rootA),
+		WorktreePath:          rootA,
+		StartedAt:             started,
+		Phase:                 session.PhaseActive,
+		AgentType:             types.AgentType("Claude Code"),
+		TranscriptPath:        "/tmp/shared.jsonl",
+	}
+	store := session.NewStateStoreWithDir(filepath.Join(rootA, ".git", session.SessionStateDirName))
+	if err := store.Save(ctx, source); err != nil {
+		t.Fatal(err)
+	}
+	return source
+}
+
+func commitInitial(t *testing.T, root string) {
+	t.Helper()
+	testutil.WriteFile(t, root, "tracked.txt", "base\n")
+	testutil.GitAdd(t, root, "tracked.txt")
+	testutil.GitCommit(t, root, "initial")
+}
+
+func loadTargetState(ctx context.Context, t *testing.T, root, sessionID string) *session.State {
+	t.Helper()
+	state, err := session.NewStateStoreWithDir(filepath.Join(root, ".git", session.SessionStateDirName)).Load(ctx, sessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return state
+}
+
+// A repo with no .entire setup at all is still an adoption target once the
+// user's global tier covers it — "enable once, never again" holds across
+// repos a session touches. The converse cases (excluded, vetoed) must record
+// evidence and nothing else.
+func TestRecordForeignEvidence_GloballyTrackedRepoIsAdopted(t *testing.T) {
+	cfg := t.TempDir()
+	t.Setenv("ENTIRE_CONFIG_DIR", cfg)
+	ctx := context.Background()
+	rootA := newBindingRepo(t)
+	rootB := newBindingRepo(t) // never enabled: no .entire anywhere
+	commitInitial(t, rootB)
+	commitInitial(t, rootA)
+	t.Chdir(rootA)
+
+	cases := []struct {
+		name         string
+		userSettings string
+		repoSetup    func()
+		wantEnabled  bool
+	}{
+		{name: "tier on", userSettings: `{"global":{"enabled":true}}`, wantEnabled: true},
+		{name: "tier off", userSettings: `{"global":{"enabled":false}}`, wantEnabled: false},
+		{name: "excluded", userSettings: `{"global":{"enabled":true,"exclude_paths":["` + filepath.ToSlash(rootB) + `"]}}`, wantEnabled: false},
+		{name: "vetoed by its own settings", userSettings: `{"global":{"enabled":true}}`, repoSetup: func() {
+			if err := os.MkdirAll(filepath.Join(rootB, ".entire"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(rootB, ".entire", "settings.json"), []byte(`{"enabled":false}`), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}, wantEnabled: false},
+	}
+	for i, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := os.WriteFile(filepath.Join(cfg, "settings.json"), []byte(tc.userSettings), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if tc.repoSetup != nil {
+				tc.repoSetup()
+			}
+			sessionID := fmt.Sprintf("sess-%d", i+10)
+			bindingSourceState(ctx, t, rootA, sessionID)
+			recordForeignEvidence(ctx, sessionID, bindingTestMeta(rootA), rootA, []string{filepath.Join(rootB, "agent.go")})
+
+			rec, err := binding.LoadRecord(ctx, sessionID)
+			if err != nil || rec == nil || len(rec.BoundRepos) != 1 {
+				t.Fatalf("evidence must be recorded either way: rec=%+v err=%v", rec, err)
+			}
+			br := rec.BoundRepos[0]
+			if br.Enabled != tc.wantEnabled {
+				t.Fatalf("Enabled = %v, want %v", br.Enabled, tc.wantEnabled)
+			}
+			target := loadTargetState(ctx, t, rootB, sessionID)
+			if tc.wantEnabled {
+				if br.AdoptedAt == nil || target == nil {
+					t.Fatalf("globally tracked repo must be adopted: marker=%v state=%+v", br.AdoptedAt, target)
+				}
+				if target.WorktreePath != rootB || target.BaseCommit != testutil.GetHeadHash(t, rootB) {
+					t.Fatalf("replica must carry the target's identity: %+v", target)
+				}
+			} else if br.AdoptedAt != nil || target != nil {
+				t.Fatalf("inactive repo must not be adopted: marker=%v state=%+v", br.AdoptedAt, target)
+			}
+		})
+	}
+}
+
+// Session state lives in the git common dir, shared by every worktree of a
+// clone, so a linked worktree of the launching clone is not an adoption
+// target: replicating "into" it would read the source's own state as the
+// replica and replay the session's hooks in a worktree it does not belong to.
+func TestRecordForeignEvidence_SiblingWorktreeIsNotAdopted(t *testing.T) {
+	t.Setenv("ENTIRE_CONFIG_DIR", t.TempDir())
+	ctx := context.Background()
+	rootA := newBindingRepo(t)
+	commitInitial(t, rootA)
+	source := bindingSourceState(ctx, t, rootA, "sess-1")
+	sibling := filepath.Join(t.TempDir(), "wt")
+	testutil.RunGit(t, rootA, "worktree", "add", "-b", "sibling", sibling)
+	if resolved, err := filepath.EvalSymlinks(sibling); err == nil {
+		sibling = resolved
+	}
+	enableEntireAt(t, sibling)
+	t.Chdir(rootA)
+
+	recordForeignEvidence(ctx, "sess-1", bindingTestMeta(rootA), rootA, []string{filepath.Join(sibling, "agent.go")})
+
+	rec, err := binding.LoadRecord(ctx, "sess-1")
+	if err != nil || rec == nil || len(rec.BoundRepos) != 1 {
+		t.Fatalf("sibling evidence is still recorded: rec=%+v err=%v", rec, err)
+	}
+	if rec.BoundRepos[0].AdoptedAt != nil {
+		t.Fatalf("a sibling worktree must never be marked adopted: %+v", rec.BoundRepos[0])
+	}
+	still := loadTargetState(ctx, t, rootA, "sess-1")
+	if still == nil || still.WorktreePath != source.WorktreePath || still.StepCount != source.StepCount {
+		t.Fatalf("shared state must be untouched: %+v", still)
+	}
+}
+
+// The adopted marker is bookkeeping. Once the replica exists durably, a marker
+// write that fails (here: the record never listed the target, as a concurrent
+// evidence rewrite can leave it) must not withhold the "replicated" answer the
+// replay is gated on.
+func TestEnsureSessionReplicated_MarkerFailureStillReportsReplicated(t *testing.T) {
+	t.Setenv("ENTIRE_CONFIG_DIR", t.TempDir())
+	ctx := context.Background()
+	rootOther := newBindingRepo(t)
+	rootB := newBindingRepo(t)
+	commitInitial(t, rootB)
+	enableEntireAt(t, rootB)
+	otherID, ok := binding.ResolveRepoForPath(ctx, filepath.Join(rootOther, ".git"))
+	if !ok {
+		t.Fatal("resolve other repo")
+	}
+	if err := binding.RecordBinding(ctx, "sess-1", bindingTestMeta(""), binding.Evidence{Repo: otherID, Enabled: false}); err != nil {
+		t.Fatal(err)
+	}
+	targetID, ok := binding.ResolveRepoForPath(ctx, filepath.Join(rootB, ".git"))
+	if !ok {
+		t.Fatal("resolve target repo")
+	}
+
+	replicated, err := ensureSessionReplicated(ctx, "sess-1", bindingTestMeta(""), "", binding.Evidence{Repo: targetID, Enabled: true, Files: []string{"agent.go"}})
+	if err != nil || !replicated {
+		t.Fatalf("replicated = %v, err = %v; want true with the marker failure logged", replicated, err)
+	}
+	if loadTargetState(ctx, t, rootB, "sess-1") == nil {
+		t.Fatal("target state must exist")
 	}
 }

@@ -33,9 +33,11 @@ import (
 // but no agent exposes it pre-parse, and the saving would be negligible since
 // the high-frequency verbs are evidence-bearing and must parse anyway.
 //
-// logging.Init never ran here (initHookLogging no-ops outside a repo), so only
-// logging.Debug may be used: pre-Init it is a silent no-op, while
-// Info/Warn/Error would leak raw slog text onto the agent's stderr.
+// logging.Init never ran here (initHookLogging no-ops outside a repo). The
+// caller attaches logging.Discard() to ctx so that Info/Warn lines from the
+// shared code below (adoption, session-state locks) cannot fall through to
+// slog's default stderr handler — the agent's stderr. Nothing on this path is
+// diagnosable from a log; that is the accepted cost of a repo-less cwd.
 func recordNoRepoEvidence(ctx context.Context, agentName types.AgentName, hookName string, stdin io.Reader) (result *agent.Event) {
 	logCtx := logging.WithComponent(ctx, "binding")
 	defer func() {

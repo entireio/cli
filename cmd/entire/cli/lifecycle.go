@@ -1010,6 +1010,15 @@ func handleLifecycleTurnEnd(ctx context.Context, ag agent.Agent, event *agent.Ev
 			LaunchRoot:     repoRoot,
 		}, repoRoot, foreignModifiedFiles, relModifiedFiles)
 	}
+	// A replay child without a pre-prompt baseline sees the target repo's
+	// whole working tree as "changed": the user's own uncommitted edits and
+	// deletions there predate the session. With no baseline to subtract, the
+	// only files this turn can be credited with are the ones the transcript
+	// names, so the git-status fallback (which exists to catch what transcript
+	// parsing missed) is withheld and New/Deleted are narrowed to evidenced
+	// paths, mirroring the untracked-file rule below.
+	replayWithoutBaseline := bindingReplayActive() && preState == nil
+	transcriptEvidenced := relModifiedFiles
 	var relNewFiles, relDeletedFiles []string
 	if changes != nil {
 		relNewFiles = FilterAndNormalizePaths(changes.New, repoRoot)
@@ -1019,10 +1028,13 @@ func handleLifecycleTurnEnd(ctx context.Context, ag agent.Agent, event *agent.Ev
 		// Transcript parsing is the primary source for modified files, but it can miss
 		// files if the agent uses an unrecognized tool or the transcript format changes.
 		// Git status catches any tracked file with working-tree changes.
-		relModifiedFiles = mergeUnique(relModifiedFiles, FilterAndNormalizePaths(changes.Modified, repoRoot))
+		if !replayWithoutBaseline {
+			relModifiedFiles = mergeUnique(relModifiedFiles, FilterAndNormalizePaths(changes.Modified, repoRoot))
+		}
 	}
-	if bindingReplayActive() && preState == nil {
-		relNewFiles = filterBindingReplayNewFiles(relNewFiles, relModifiedFiles)
+	if replayWithoutBaseline {
+		relNewFiles = filterBindingReplayNewFiles(relNewFiles, transcriptEvidenced)
+		relDeletedFiles = filterBindingReplayNewFiles(relDeletedFiles, transcriptEvidenced)
 		if len(relNewFiles) > 0 {
 			newSet := make(map[string]struct{}, len(relNewFiles))
 			for _, file := range relNewFiles {
@@ -1117,26 +1129,29 @@ func handleLifecycleTurnEnd(ctx context.Context, ag agent.Agent, event *agent.Ev
 	if tokenUsage == nil {
 		tokenUsage = agent.CalculateTokenUsage(ctx, ag, transcriptData, transcriptLinesAtStart, subagentsDir)
 	}
-	if !bindingTurnKeepsTokenUsage(ctx, currentCommonDir) {
-		tokenUsage = nil
-	}
+	// A turn that touched several repos puts its tokens on ONE repo's
+	// checkpoint (the token-primary); the others still fold them into the
+	// session-wide total their `entire status` reports, since the transcript
+	// — and therefore the spend — is shared.
+	tokensAttributedElsewhere := !bindingTurnKeepsTokenUsage(ctx, currentCommonDir)
 
 	// Build fully-populated step context and delegate to strategy
 	stepCtx := strategy.StepContext{
-		SessionID:                sessionID,
-		ModifiedFiles:            relModifiedFiles,
-		NewFiles:                 relNewFiles,
-		DeletedFiles:             relDeletedFiles,
-		MetadataDir:              sessionDir,
-		MetadataDirAbs:           sessionDirAbs,
-		CommitMessage:            commitMessage,
-		TranscriptPath:           transcriptRef,
-		AuthorName:               author.Name,
-		AuthorEmail:              author.Email,
-		AgentType:                agentType,
-		StepTranscriptIdentifier: transcriptIdentifierAtStart,
-		StepTranscriptStart:      transcriptLinesAtStart,
-		TokenUsage:               tokenUsage,
+		TokensAttributedElsewhere: tokensAttributedElsewhere,
+		SessionID:                 sessionID,
+		ModifiedFiles:             relModifiedFiles,
+		NewFiles:                  relNewFiles,
+		DeletedFiles:              relDeletedFiles,
+		MetadataDir:               sessionDir,
+		MetadataDirAbs:            sessionDirAbs,
+		CommitMessage:             commitMessage,
+		TranscriptPath:            transcriptRef,
+		AuthorName:                author.Name,
+		AuthorEmail:               author.Email,
+		AgentType:                 agentType,
+		StepTranscriptIdentifier:  transcriptIdentifierAtStart,
+		StepTranscriptStart:       transcriptLinesAtStart,
+		TokenUsage:                tokenUsage,
 	}
 
 	// finishTurn is the shared turn-end tail, run whether the save succeeded
