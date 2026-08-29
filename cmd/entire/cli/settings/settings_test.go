@@ -1581,48 +1581,66 @@ func TestGetCheckpointPushRemote(t *testing.T) {
 	}
 }
 
-func TestIsSetUpAtRoot(t *testing.T) {
-	t.Parallel()
-
-	t.Run("root with settings.json", func(t *testing.T) {
-		t.Parallel()
+// IsActiveAtRoot is the foreign-repo activation question session binding asks:
+// repo-level settings enable it OR the global tier covers it, honoring
+// exclusions, vetoes, and the tracked-local-file rule. Not parallel: env.
+func TestIsActiveAtRoot(t *testing.T) {
+	ctx := t.Context()
+	configDir := t.TempDir()
+	t.Setenv("ENTIRE_CONFIG_DIR", configDir)
+	userSettings := func(body string) {
+		if err := os.WriteFile(filepath.Join(configDir, UserSettingsFileName), []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	newRepo := func() string {
 		root := t.TempDir()
-		if err := os.MkdirAll(filepath.Join(root, ".entire"), 0o755); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(filepath.Join(root, EntireSettingsFile), []byte(`{"enabled":true}`), 0o600); err != nil {
-			t.Fatal(err)
-		}
-		if !IsSetUpAtRoot(root) {
-			t.Error("root with settings.json must be set up")
-		}
-	})
+		testutil.InitRepo(t, root)
+		return root
+	}
 
-	t.Run("root with only settings.local.json", func(t *testing.T) {
-		t.Parallel()
-		root := t.TempDir()
-		if err := os.MkdirAll(filepath.Join(root, ".entire"), 0o755); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(filepath.Join(root, EntireSettingsLocalFile), []byte(`{"enabled":true}`), 0o600); err != nil {
-			t.Fatal(err)
-		}
-		if !IsSetUpAtRoot(root) {
-			t.Error("root with only settings.local.json must be set up")
-		}
-	})
+	userSettings(`{}`)
+	enabled := newRepo()
+	if err := os.MkdirAll(filepath.Join(enabled, ".entire"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(enabled, EntireSettingsFile), []byte(`{"enabled":true}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if !IsActiveAtRoot(ctx, enabled) {
+		t.Error("repo-enabled root must be active")
+	}
+	localOnly := newRepo()
+	if err := os.MkdirAll(filepath.Join(localOnly, ".entire"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(localOnly, EntireSettingsLocalFile), []byte(`{"enabled":true}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if !IsActiveAtRoot(ctx, localOnly) {
+		t.Error("root enabled only by an untracked settings.local.json must be active")
+	}
+	bare := newRepo()
+	if IsActiveAtRoot(ctx, bare) {
+		t.Error("bare repo with the tier off must not be active")
+	}
+	if IsActiveAtRoot(ctx, filepath.Join(t.TempDir(), "does-not-exist")) {
+		t.Error("nonexistent root must not be active")
+	}
 
-	t.Run("bare root", func(t *testing.T) {
-		t.Parallel()
-		if IsSetUpAtRoot(t.TempDir()) {
-			t.Error("bare root must not be set up")
-		}
-	})
-
-	t.Run("nonexistent root", func(t *testing.T) {
-		t.Parallel()
-		if IsSetUpAtRoot(filepath.Join(t.TempDir(), "does-not-exist")) {
-			t.Error("nonexistent root must not be set up")
-		}
-	})
+	userSettings(`{"global":{"enabled":true}}`)
+	if !IsActiveAtRoot(ctx, bare) {
+		t.Error("bare repo must be active once global tracking covers it — the case a file-presence check misses")
+	}
+	resolved, err := filepath.EvalSymlinks(bare)
+	if err != nil {
+		t.Fatal(err)
+	}
+	userSettings(`{"global":{"enabled":true,"exclude_paths":["` + filepath.ToSlash(resolved) + `"]}}`)
+	if IsActiveAtRoot(ctx, bare) {
+		t.Error("an excluded repo must not be active even with the tier on")
+	}
+	if !IsActiveAtRoot(ctx, enabled) {
+		t.Error("a repo-enabled root elsewhere is unaffected by another root's exclusion")
+	}
 }

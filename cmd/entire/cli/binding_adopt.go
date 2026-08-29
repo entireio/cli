@@ -32,7 +32,7 @@ func ensureSessionReplicated(ctx context.Context, sessionID string, meta binding
 	}
 	// Enabled is evidence-time data. Re-check immediately before the repo write
 	// so a concurrent explicit disable remains an absolute veto.
-	if !settings.IsSetUpAtRoot(ev.Repo.WorktreeRoot) {
+	if !settings.IsActiveAtRoot(ctx, ev.Repo.WorktreeRoot) {
 		return false, nil
 	}
 	rec, err := binding.LoadRecord(ctx, sessionID)
