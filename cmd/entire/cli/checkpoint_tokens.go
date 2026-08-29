@@ -199,8 +199,8 @@ func runCheckpointTokens(ctx context.Context, cmd *cobra.Command, checkpointIDPr
 }
 
 // saturatingIntAdd returns a+b pinned at math.MaxInt / math.MinInt. It mirrors
-// the unexported types.saturatingAdd; kept for totalTokens and
-// topLevelSessionTokenTotal until the two are consolidated.
+// the unexported types.saturatingAdd; kept for totalTokens until the two are
+// consolidated.
 func saturatingIntAdd(a, b int) int {
 	if b > 0 && a > math.MaxInt-b {
 		return math.MaxInt

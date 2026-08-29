@@ -190,24 +190,6 @@ func TestCollectTraceEntries_SlowFilterAppliesBeforeTruncation(t *testing.T) {
 	}
 }
 
-// TestPercentileMs_NearestRank guards the round-numbered cases, where truncating
-// the rank overshoots by a full sample and makes P90 a duplicate of MAX.
-func TestPercentileMs_NearestRank(t *testing.T) {
-	t.Parallel()
-
-	ten := []int64{1, 2, 3, 4, 5, 6, 7, 8, 9, 10}
-
-	require.Equal(t, int64(9), percentileMs(ten, 90), "p90 of 10 samples is the 9th, not the max")
-	require.Equal(t, int64(5), percentileMs(ten, 50), "p50 of 10 samples is the 5th")
-	require.Equal(t, int64(10), percentileMs(ten, 100))
-	require.Equal(t, int64(1), percentileMs(ten, 1), "a percentile below one rank still lands on the first sample")
-
-	require.Equal(t, int64(7), percentileMs([]int64{7}, 50), "p50 of one sample is that sample")
-	require.Equal(t, int64(7), percentileMs([]int64{7}, 90))
-	require.Equal(t, int64(1), percentileMs([]int64{1, 2}, 50), "p50 of an even count takes the lower median")
-	require.Equal(t, int64(0), percentileMs(nil, 50))
-}
-
 // TestRenderTraceJSON_OmitsUnsetTime keeps the JSON honest: the parser tolerates
 // a missing time key, and a consumer should see its absence rather than a
 // year-1 timestamp that was never recorded.

@@ -957,29 +957,3 @@ func tokenPluralSuffix(count int) string {
 	}
 	return "s"
 }
-
-// aggregateCheckpointTokenUsage sums the sessions' committed token_usage.
-func aggregateCheckpointTokenUsage(metas []*checkpoint.Metadata) *types.TokenUsage {
-	var total *types.TokenUsage
-	for _, meta := range metas {
-		if meta == nil {
-			continue
-		}
-		total = types.AddTokenUsage(total, meta.TokenUsage)
-	}
-	return total
-}
-
-// checkpointTokenUsage is a checkpoint's committed token usage: the sum of
-// its readable sessions, or the root summary's aggregate when a session's
-// metadata could not be read (the root was aggregated at write time).
-func checkpointTokenUsage(summary *checkpoint.CheckpointSummary, metas []*checkpoint.Metadata, metadataReadWarning bool) *types.TokenUsage {
-	sessionUsage := aggregateCheckpointTokenUsage(metas)
-	if !metadataReadWarning && sessionUsage != nil {
-		return sessionUsage
-	}
-	if summary != nil && summary.TokenUsage != nil {
-		return summary.TokenUsage
-	}
-	return sessionUsage
-}

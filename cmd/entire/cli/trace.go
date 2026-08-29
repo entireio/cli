@@ -458,8 +458,8 @@ func summarizeTraces(entries []traceEntry) traceSummary {
 			Op:       op,
 			Count:    len(group),
 			Slow:     slow,
-			P50Ms:    percentileMs(durations, 50),
-			P90Ms:    percentileMs(durations, 90),
+			P50Ms:    percentile(durations, 50),
+			P90Ms:    percentile(durations, 90),
 			MaxMs:    durations[len(durations)-1],
 			Dominant: heaviestStep(perOpSteps),
 		})
@@ -485,26 +485,6 @@ func summarizeTraces(entries []traceEntry) traceSummary {
 	})
 
 	return summary
-}
-
-// percentileMs returns the p-th percentile of a sorted slice using nearest-rank,
-// so p50 of one sample is that sample rather than an interpolation.
-//
-// The rank is ceil(p/100 * n), converted to a 0-based index. Truncating instead
-// of rounding up overshoots by one whole sample whenever p*n divides evenly,
-// which is exactly the round-numbered case: p90 of 10 samples would report the
-// maximum, making the P90 and MAX columns duplicates of each other.
-func percentileMs(sorted []int64, p int) int64 {
-	if len(sorted) == 0 {
-		return 0
-	}
-	n := len(sorted)
-	rank := (p*n + 99) / 100 // ceil(p*n/100)
-	idx := max(rank-1, 0)
-	if idx >= n {
-		idx = n - 1
-	}
-	return sorted[idx]
 }
 
 // heaviestStep returns the step accounting for the most time, breaking ties by
