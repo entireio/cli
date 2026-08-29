@@ -42,6 +42,12 @@ type bindingTurnCollectorKey struct{}
 // additive state replication succeeded, ordered by their most recent evidence
 // in this TurnEnd payload. That makes its last entry the token-primary repo and
 // every entry a safe replay target.
+//
+// Every method is nil-safe: bindingTurnCollectorFromContext returns nil when
+// the hook entry point did not install a collector (tests, non-hook callers of
+// the lifecycle handlers), and a nil collector behaves as an empty one —
+// nothing recorded, no primary, no replay targets. Callers therefore never
+// guard for nil; TestSelectBindingTurnPrimary_NilCollectorIsSafe pins this.
 type bindingTurnCollector struct {
 	mu      sync.Mutex
 	repos   map[string]binding.Evidence
