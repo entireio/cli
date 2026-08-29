@@ -212,13 +212,15 @@ func TestAttributeTokens_ConsumedResultsResolveToEmitters(t *testing.T) {
 	}
 }
 
-func TestAttributeTokens_TaskAndSkillEmits(t *testing.T) {
+// TestAttributeTokens_AgentAndSkillEmits pins the subagent tool name: Claude
+// Code's tool is "Agent" (hooks.go), which is what the fixture uses.
+func TestAttributeTokens_AgentAndSkillEmits(t *testing.T) {
 	t.Parallel()
 
 	got := attributeFixture(t, 0, "")
 	m3, m4 := got.Calls[2], got.Calls[3]
 
-	wantTask := types.ToolUseRef{ID: "toolu_t1", Tool: "Task", Detail: "Explore (haiku)", SubagentType: "Explore", Model: "haiku"}
+	wantTask := types.ToolUseRef{ID: "toolu_t1", Tool: "Agent", Detail: "Explore (haiku)", SubagentType: "Explore", Model: "haiku"}
 	if len(m3.Emitted) != 1 || m3.Emitted[0] != wantTask {
 		t.Errorf("m3.Emitted = %+v, want [%+v]", m3.Emitted, wantTask)
 	}
@@ -240,9 +242,56 @@ func TestAttributeTokens_TaskAndSkillEmits(t *testing.T) {
 	if m4.Usage != (types.TokenUsage{}) {
 		t.Errorf("m4.Usage = %+v, want zero when unknown", m4.Usage)
 	}
-	// The Task result (line 8) is consumed by m4, labelled with the Task emit.
+	// The Agent result (line 8) is consumed by m4, labelled with the Agent emit.
 	if len(m4.Consumed) != 1 || m4.Consumed[0].ToolUse != wantTask {
-		t.Errorf("m4.Consumed = %+v, want the Task result labelled %+v", m4.Consumed, wantTask)
+		t.Errorf("m4.Consumed = %+v, want the Agent result labelled %+v", m4.Consumed, wantTask)
+	}
+}
+
+// TestAttributeTokens_LegacyTaskNameAndDedupedEmits pins two rules on one
+// inline transcript: the older "Task" tool name (and any casing) still fills
+// SubagentType/Model, and a tool_use block repeated across streamed rows of
+// one message is emitted once.
+func TestAttributeTokens_LegacyTaskNameAndDedupedEmits(t *testing.T) {
+	t.Parallel()
+
+	data := `{"type":"assistant","uuid":"a1","timestamp":"2026-08-27T11:00:00Z","message":{"id":"msg_1","model":"claude-fable-5","content":[{"type":"tool_use","id":"toolu_t","name":"Task","input":{"subagent_type":"Explore","model":"haiku"}}],"usage":{"input_tokens":1,"output_tokens":2}}}
+{"type":"assistant","uuid":"a2","timestamp":"2026-08-27T11:00:01Z","message":{"id":"msg_1","model":"claude-fable-5","content":[{"type":"tool_use","id":"toolu_t","name":"Task","input":{"subagent_type":"Explore","model":"haiku"}},{"type":"tool_use","id":"toolu_k","name":"skill","input":{"skill":"design"}}],"usage":{"input_tokens":1,"output_tokens":9}}}
+`
+	got, err := (&ClaudeCodeAgent{}).AttributeTokens([]byte(data), 0, "")
+	if err != nil || len(got.Calls) != 1 {
+		t.Fatalf("got %+v, %v; want one call", got, err)
+	}
+	want := []types.ToolUseRef{
+		{ID: "toolu_t", Tool: "Task", Detail: "Explore (haiku)", SubagentType: "Explore", Model: "haiku"},
+		{ID: "toolu_k", Tool: "skill", Detail: "design", SkillName: "design"},
+	}
+	if len(got.Calls[0].Emitted) != len(want) {
+		t.Fatalf("Emitted = %+v, want %+v (repeated block emitted once)", got.Calls[0].Emitted, want)
+	}
+	for i := range want {
+		if got.Calls[0].Emitted[i] != want[i] {
+			t.Errorf("Emitted[%d] = %+v, want %+v", i, got.Calls[0].Emitted[i], want[i])
+		}
+	}
+}
+
+// TestAttributeTokens_StartLineOnResultRow pins a slice that opens on a user
+// row: its results are new input to the first call in the slice, and Start is
+// that row's timestamp.
+func TestAttributeTokens_StartLineOnResultRow(t *testing.T) {
+	t.Parallel()
+
+	got := attributeFixture(t, fixtureLineLateRef, "")
+	if len(got.Calls) != 2 || got.Calls[0].Line != fixtureLineM3 {
+		t.Fatalf("calls from line %d = %+v, want m3 (line %d) then m4", fixtureLineLateRef, got.Calls, fixtureLineM3)
+	}
+	want := types.ToolResultRef{ToolUse: types.ToolUseRef{ID: "toolu_b1", Tool: "Bash", Detail: "go test ./cmd/entire/..."}, Bytes: 16}
+	if len(got.Calls[0].Consumed) != 1 || got.Calls[0].Consumed[0] != want {
+		t.Errorf("Calls[0].Consumed = %+v, want [%+v]", got.Calls[0].Consumed, want)
+	}
+	if wantStart := fixtureTime(t, fixtureLineLateRef); !got.Start.Equal(wantStart) {
+		t.Errorf("Start = %v, want %v", got.Start, wantStart)
 	}
 }
 
@@ -320,7 +369,7 @@ func TestAttributeTokens_SubagentRecords(t *testing.T) {
 	}
 
 	// The record is discovered from the full transcript even when the slice
-	// starts after the Task call.
+	// starts after the Agent call.
 	sliced := attributeFixture(t, fixtureLineM4, dir)
 	if len(sliced.Subagents) != 1 || sliced.Subagents[0].ToolUseID != "toolu_t1" {
 		t.Errorf("sliced Subagents = %+v, want the same record from the full transcript", sliced.Subagents)

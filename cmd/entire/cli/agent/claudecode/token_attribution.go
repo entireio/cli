@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
@@ -20,10 +21,14 @@ var _ agent.TokenAttributor = (*ClaudeCodeAgent)(nil)
 // user row (the assistant-side counterpart is transcript.ContentTypeToolUse).
 const contentTypeToolResult = "tool_result"
 
-// Tool names whose tool_use input carries an attribution-specific field.
+// Lower-cased tool names whose tool_use input carries an attribution-specific
+// field, matched case-insensitively like transcript.ToolDetail. Claude Code's
+// subagent tool is "Agent" (see hooks.go: it never shipped one named "Task");
+// "task" is kept for transcripts and forks that use the older name.
 const (
-	toolNameSkill = "Skill"
-	toolNameTask  = "Task"
+	toolNameSkill       = "skill"
+	toolNameAgent       = "agent"
+	toolNameAgentLegacy = "task"
 )
 
 // attributionRow is the row-level envelope of a Claude Code JSONL transcript
@@ -74,8 +79,8 @@ func (m *attributionMessage) blocks() []contentBlockRaw {
 	return out
 }
 
-// spawnedAgent is a subagent id seen in a Task tool_result, with the tool_use
-// that spawned it, in transcript order.
+// spawnedAgent is a subagent id seen in an Agent (formerly Task) tool_result,
+// with the tool_use that spawned it, in transcript order.
 type spawnedAgent struct {
 	agentID   string
 	toolUseID string
@@ -116,11 +121,12 @@ type attributionWalk struct {
 //   - Rows sharing message.id are one call: Line/At/Model/Effort/ActiveSkill
 //     from the first row, Usage from the row with the highest output_tokens
 //     (every field from that row, APICallCount 1), Emitted the union of
-//     tool_use blocks in row order. A message none of whose rows record usage
-//     has UsageUnknown set and a zero Usage.
+//     tool_use blocks in row order, deduplicated by tool_use id. A message
+//     none of whose rows record usage has UsageUnknown set and a zero Usage.
 //   - ToolUseRef.Detail is transcript.ToolDetail on the decoded input;
 //     SkillName is input.skill for Skill; SubagentType/Model are
-//     input.subagent_type/input.model for Task.
+//     input.subagent_type/input.model for Agent (and the legacy Task name);
+//     tool names are matched case-insensitively.
 //   - Consumed for a call is every tool_result block in user rows at or after
 //     startLine, after the previous call's first row and before this call's
 //     first row; results after the last call are attributed to nothing (the
@@ -133,8 +139,8 @@ type attributionWalk struct {
 //     enter the context) rather than dropping it.
 //   - Start/End are the earliest/latest parsable row timestamps in the slice,
 //     whatever the row's type.
-//   - Subagents (subagentsDir != "" only): every agentId in a Task tool_result
-//     anywhere in the full transcript (same rule as ExtractSpawnedAgentIDs)
+//   - Subagents (subagentsDir != "" only): every agentId in an Agent (formerly
+//     Task) tool_result anywhere in the full transcript (same rule as ExtractSpawnedAgentIDs)
 //     is read from subagentsDir/agent-<id>.jsonl; a missing or unreadable file
 //     is skipped silently, as CalculateTotalTokenUsage does. SubagentType is
 //     the spawning ToolUseRef's; Model is the transcript's own model
@@ -274,11 +280,29 @@ func (w *attributionWalk) visitAssistant(line int, inSlice bool, row *attributio
 		w.pending = nil
 	}
 	call := &w.calls[idx]
-	call.Emitted = append(call.Emitted, emitted...)
+	call.Emitted = appendNewEmits(call.Emitted, emitted)
 	if msg.Usage != nil && (call.UsageUnknown || msg.Usage.OutputTokens > call.Usage.OutputTokens) {
 		call.Usage = callUsageFrom(msg.Usage)
 		call.UsageUnknown = false
 	}
+}
+
+// appendNewEmits appends the refs of emitted whose id is not already in have —
+// a block repeated across streamed rows of one message counts once.
+func appendNewEmits(have, emitted []types.ToolUseRef) []types.ToolUseRef {
+	for _, ref := range emitted {
+		dup := false
+		for _, h := range have {
+			if h.ID == ref.ID {
+				dup = true
+				break
+			}
+		}
+		if !dup {
+			have = append(have, ref)
+		}
+	}
+	return have
 }
 
 // registerEmits builds the ToolUseRef for each tool_use block, records it in
@@ -308,10 +332,10 @@ func toolUseRefFrom(b contentBlockRaw) types.ToolUseRef {
 		Tool:   b.Name,
 		Detail: transcript.ToolDetail(b.Name, in),
 	}
-	switch b.Name {
+	switch strings.ToLower(b.Name) {
 	case toolNameSkill:
 		ref.SkillName = in.Skill
-	case toolNameTask:
+	case toolNameAgent, toolNameAgentLegacy:
 		ref.SubagentType = in.SubagentType
 		ref.Model = in.Model
 	}
@@ -346,7 +370,7 @@ func callUsageFrom(u *messageUsage) types.TokenUsage {
 	}
 }
 
-// visitUser records spawned-agent ids from Task results (full transcript)
+// visitUser records spawned-agent ids from Agent results (full transcript)
 // and, inside the slice, queues each tool_result for the next call.
 func (w *attributionWalk) visitUser(inSlice bool, msg *attributionMessage) {
 	for _, b := range msg.blocks() {

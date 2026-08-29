@@ -229,8 +229,9 @@ func CalculateTokenUsageFromFile(path string, startLine int) (*agent.TokenUsage,
 	return usage, nil
 }
 
-// ExtractSpawnedAgentIDs extracts agent IDs from Task tool results in a transcript.
-// When a Task tool completes, the tool_result contains "agentId: <id>" in its content.
+// ExtractSpawnedAgentIDs extracts agent IDs from Agent (formerly Task) tool results
+// in a transcript. When the subagent tool completes, the tool_result contains
+// "agentId: <id>" in its content.
 // Returns a map of agentID -> toolUseID for all spawned agents.
 func ExtractSpawnedAgentIDs(transcript []TranscriptLine) map[string]string {
 	agentIDs := make(map[string]string)
@@ -266,8 +267,8 @@ func ExtractSpawnedAgentIDs(transcript []TranscriptLine) map[string]string {
 	return agentIDs
 }
 
-// agentIDFromToolResult returns the "agentId: <id>" recorded in a Task
-// tool_result's raw content — a plain string or an array of text blocks — or
+// agentIDFromToolResult returns the "agentId: <id>" recorded in an Agent
+// (formerly Task) tool_result's raw content — a plain string or an array of text blocks — or
 // "" when there is none. Any ID that isn't path-safe is dropped: callers
 // build agent-<id>.jsonl from it and read that file, so this is the choke
 // point that keeps the path inside subagentsDir, independent of
@@ -486,7 +487,7 @@ func (c *ClaudeCodeAgent) CalculateTotalTokenUsage(transcriptData []byte, startL
 }
 
 // ExtractAllModifiedFiles extracts files modified by both the main agent and
-// any subagents spawned via the Task tool. It parses the main transcript bytes from
+// any subagents spawned via the Agent tool. It parses the main transcript bytes from
 // startLine, collects modified files from the main agent, then reads each
 // subagent's transcript from subagentsDir to collect their modified files too.
 // The result is a deduplicated list of all modified file paths.
