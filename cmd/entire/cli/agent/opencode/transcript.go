@@ -118,7 +118,7 @@ func modifiedFilesFromMessages(msgs []ExportMessage, startOffset int) []string {
 			continue
 		}
 		for _, part := range msg.Parts {
-			if part.Type != "tool" || part.State == nil {
+			if part.Type != partTypeTool || part.State == nil {
 				continue
 			}
 			if !slices.Contains(FileModificationTools, part.Tool) {
@@ -186,7 +186,7 @@ func extractFilePaths(state *ToolState) []string {
 func ExtractTextFromParts(parts []Part) string {
 	var texts []string
 	for _, part := range parts {
-		if part.Type == "text" && part.Text != "" {
+		if part.Type == partTypeText && part.Text != "" {
 			texts = append(texts, part.Text)
 		}
 	}

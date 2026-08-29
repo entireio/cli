@@ -14,12 +14,10 @@ import (
 
 var _ agent.TokenAttributor = (*OpenCodeAgent)(nil)
 
-// Part type and tool names attribution dispatches on. OpenCode's tool ids are
-// lower-case (Tool.define("task"), Tool.define("skill") in the 1.3.13 bundle);
-// they are matched case-insensitively anyway, like transcript.ToolDetail.
+// Tool names attribution dispatches on. OpenCode's tool ids are lower-case
+// (Tool.define("task"), Tool.define("skill") in the 1.3.13 bundle); they are
+// matched case-insensitively anyway, like transcript.ToolDetail.
 const (
-	partTypeTool = "tool"
-
 	toolNameSkill = "skill"
 	toolNameTask  = "task"
 
@@ -93,9 +91,9 @@ type attributionWalk struct {
 //     the skill tool. For the task tool SubagentType is input.subagent_type
 //     and Model is input.model when present — OpenCode's task schema has no
 //     such key, so in practice Model is the model the child session actually
-//     ran on, state.metadata.model.modelID; Detail stays the bare subagent
-//     type either way. A part with no state keeps ID and Tool with an empty
-//     Detail.
+//     ran on, state.metadata.model.modelID. Detail is ToolDetail on the input
+//     alone, so the metadata model never appears in it. A part with no state
+//     keeps ID and Tool with an empty Detail.
 //   - Consumed: OpenCode stores a tool's result on the SAME part that
 //     emitted it (state.output); there is no result message. The result
 //     enters the model's context on the NEXT request, so the tool parts of
@@ -146,19 +144,20 @@ func (a *OpenCodeAgent) AttributeTokens(transcriptData []byte, startLine int, _ 
 // folds an assistant message into a call (see visitAssistant).
 func (w *attributionWalk) visitMessage(index int, msg *ExportMessage) {
 	inSlice := index >= w.startLine
+	created := epochMillis(msg.Info.Time.Created)
 	if inSlice {
-		w.note(epochMillis(msg.Info.Time.Created))
+		w.note(created)
 		w.note(epochMillis(msg.Info.Time.Completed))
 	}
 	if msg.Info.Role == roleAssistant {
-		w.visitAssistant(index, inSlice, msg)
+		w.visitAssistant(index, inSlice, created, msg)
 	}
 }
 
 // visitAssistant appends the call, inside the slice, with the previous
 // assistant message's results as Consumed. The message's own results become
 // pending for the next assistant message whether or not it is in the slice.
-func (w *attributionWalk) visitAssistant(index int, inSlice bool, msg *ExportMessage) {
+func (w *attributionWalk) visitAssistant(index int, inSlice bool, created time.Time, msg *ExportMessage) {
 	var emitted []types.ToolUseRef
 	var results []types.ToolResultRef
 	for i := range msg.Parts {
@@ -174,7 +173,7 @@ func (w *attributionWalk) visitAssistant(index int, inSlice bool, msg *ExportMes
 		call := types.CallUsage{
 			UsageUnknown: msg.Info.Tokens == nil,
 			Model:        msg.Info.ModelID,
-			At:           epochMillis(msg.Info.Time.Created),
+			At:           created,
 			Line:         index,
 			Emitted:      emitted,
 			Consumed:     w.pending,

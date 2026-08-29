@@ -4,6 +4,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 	"time"
 
@@ -90,19 +91,9 @@ func fixtureTime(ms int64) time.Time {
 	return time.UnixMilli(ms).UTC()
 }
 
-func assertRefs(t *testing.T, name string, got, want []types.ToolUseRef) {
-	t.Helper()
-	if len(got) != len(want) {
-		t.Fatalf("%s = %+v, want %+v", name, got, want)
-	}
-	for i := range want {
-		if got[i] != want[i] {
-			t.Errorf("%s[%d] = %+v, want %+v", name, i, got[i], want[i])
-		}
-	}
-}
-
-func assertConsumed(t *testing.T, name string, got, want []types.ToolResultRef) {
+// assertSame fails when got and want differ in length or in any element,
+// naming the first differing index.
+func assertSame[T comparable](t *testing.T, name string, got, want []T) {
 	t.Helper()
 	if len(got) != len(want) {
 		t.Fatalf("%s = %+v, want %+v", name, got, want)
@@ -235,9 +226,9 @@ func TestAttributeTokens_EmittedRefs(t *testing.T) {
 	if len(got.Calls) != 4 {
 		t.Fatalf("got %d calls, want 4", len(got.Calls))
 	}
-	assertRefs(t, "Calls[0].Emitted", got.Calls[0].Emitted, []types.ToolUseRef{fixtureBashRef, fixtureReadRef})
-	assertRefs(t, "Calls[1].Emitted", got.Calls[1].Emitted, []types.ToolUseRef{fixtureTaskRef})
-	assertRefs(t, "Calls[2].Emitted", got.Calls[2].Emitted, []types.ToolUseRef{fixtureSkillRef})
+	assertSame(t, "Calls[0].Emitted", got.Calls[0].Emitted, []types.ToolUseRef{fixtureBashRef, fixtureReadRef})
+	assertSame(t, "Calls[1].Emitted", got.Calls[1].Emitted, []types.ToolUseRef{fixtureTaskRef})
+	assertSame(t, "Calls[2].Emitted", got.Calls[2].Emitted, []types.ToolUseRef{fixtureSkillRef})
 	if len(got.Calls[3].Emitted) != 0 {
 		t.Errorf("Calls[3].Emitted = %+v, want none (text only)", got.Calls[3].Emitted)
 	}
@@ -256,9 +247,9 @@ func TestAttributeTokens_ResultsConsumedByNextCall(t *testing.T) {
 	if len(got.Calls[0].Consumed) != 0 {
 		t.Errorf("Calls[0].Consumed = %+v, want none (nothing precedes it)", got.Calls[0].Consumed)
 	}
-	assertConsumed(t, "Calls[1].Consumed", got.Calls[1].Consumed, fixtureMsg1Results)
-	assertConsumed(t, "Calls[2].Consumed", got.Calls[2].Consumed, fixtureMsg3Results)
-	assertConsumed(t, "Calls[3].Consumed", got.Calls[3].Consumed, fixtureMsg4Results)
+	assertSame(t, "Calls[1].Consumed", got.Calls[1].Consumed, fixtureMsg1Results)
+	assertSame(t, "Calls[2].Consumed", got.Calls[2].Consumed, fixtureMsg3Results)
+	assertSame(t, "Calls[3].Consumed", got.Calls[3].Consumed, fixtureMsg4Results)
 }
 
 func TestAttributeTokens_StartLineIsMessageIndex(t *testing.T) {
@@ -273,7 +264,7 @@ func TestAttributeTokens_StartLineIsMessageIndex(t *testing.T) {
 	}
 	// The pre-slice message's results are still charged to the first call
 	// that read them, fully labelled.
-	assertConsumed(t, "Calls[0].Consumed", got.Calls[0].Consumed, fixtureMsg1Results)
+	assertSame(t, "Calls[0].Consumed", got.Calls[0].Consumed, fixtureMsg1Results)
 	if !got.Start.Equal(fixtureTime(fixtureAssistant3Created)) {
 		t.Errorf("Start = %v, want message %d's created time", got.Start, fixtureMsgAssistant3)
 	}
@@ -282,6 +273,40 @@ func TestAttributeTokens_StartLineIsMessageIndex(t *testing.T) {
 	}
 	if math.Abs(got.AgentReportedCost-(0.0045+0.0021)) > 1e-9 {
 		t.Errorf("AgentReportedCost = %v, want the slice's cost only", got.AgentReportedCost)
+	}
+}
+
+// TestAttributeTokens_CallsIndependentOfStartLine pins window independence:
+// a call is the same whole struct whatever startLine admits it — Line, usage,
+// Emitted and, in particular, Consumed — so consecutive slices charge each
+// result exactly once and never shift it to a different call.
+func TestAttributeTokens_CallsIndependentOfStartLine(t *testing.T) {
+	t.Parallel()
+
+	data := readAttributionFixture(t)
+	full := attributeFixture(t, 0)
+	byLine := make(map[int]types.CallUsage, len(full.Calls))
+	for _, call := range full.Calls {
+		byLine[call.Line] = call
+	}
+	for start := 1; start < fixtureMsgCount; start++ {
+		got, err := (&OpenCodeAgent{}).AttributeTokens(data, start, "")
+		if err != nil {
+			t.Fatalf("AttributeTokens(startLine=%d): %v", start, err)
+		}
+		for _, call := range got.Calls {
+			if call.Line < start {
+				t.Errorf("startLine %d: call at Line %d precedes the slice", start, call.Line)
+			}
+			want, ok := byLine[call.Line]
+			if !ok {
+				t.Errorf("startLine %d: call at Line %d is not a call from 0", start, call.Line)
+				continue
+			}
+			if !reflect.DeepEqual(call, want) {
+				t.Errorf("startLine %d: call at Line %d = %+v, want the same call from 0: %+v", start, call.Line, call, want)
+			}
+		}
 	}
 }
 
@@ -351,6 +376,6 @@ func TestAttributeTokens_ToolPartWithoutState(t *testing.T) {
 	if len(got.Calls) != 2 {
 		t.Fatalf("got %d calls, want 2", len(got.Calls))
 	}
-	assertRefs(t, "Calls[0].Emitted", got.Calls[0].Emitted, []types.ToolUseRef{want})
-	assertConsumed(t, "Calls[1].Consumed", got.Calls[1].Consumed, []types.ToolResultRef{{ToolUse: want}})
+	assertSame(t, "Calls[0].Emitted", got.Calls[0].Emitted, []types.ToolUseRef{want})
+	assertSame(t, "Calls[1].Consumed", got.Calls[1].Consumed, []types.ToolResultRef{{ToolUse: want}})
 }

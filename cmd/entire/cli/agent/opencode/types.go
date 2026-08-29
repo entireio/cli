@@ -69,6 +69,13 @@ const (
 	roleUser      = "user"
 )
 
+// Part type constants (Part.Type). OpenCode also writes "step-start",
+// "step-finish", "reasoning" and "patch" parts, which nothing here reads.
+const (
+	partTypeText = "text"
+	partTypeTool = "tool"
+)
+
 // Time holds message timestamps as Unix epoch MILLISECONDS (e.g.
 // 1773867525015), the unit OpenCode writes and transcript/compact converts
 // with time.UnixMilli. Completed is 0 while a message is in flight.
@@ -134,7 +141,7 @@ type ToolState struct {
 // that child actually used. Both are absent on every other tool.
 type ToolStateMetadata struct {
 	Files     []ToolFileInfo `json:"files,omitempty"`
-	SessionID string         `json:"sessionId,omitempty"`
+	SessionID string         `json:"sessionId,omitempty"` // sic: the task tool writes camel-case sessionId, unlike message/part sessionID
 	Model     *ModelRef      `json:"model,omitempty"`
 }
 
