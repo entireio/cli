@@ -24,6 +24,9 @@ type TokenAttributor interface {
 	// CalculateTokenUsage offset) onward, in transcript order, plus
 	// SubagentRecords when subagentsDir != "" (live sessions). Committed
 	// checkpoints pass "" and supply subagent records from task records
-	// instead. Malformed lines are skipped, never fatal.
+	// instead. Error contract matches CalculateTokenUsage: an error is
+	// returned only when the transcript as a whole cannot be parsed (a
+	// JSON-document format); individual malformed lines are skipped, never
+	// fatal.
 	AttributeTokens(transcript []byte, startLine int, subagentsDir string) (*types.Attribution, error)
 }

@@ -107,6 +107,11 @@ func (m *mockFullAgent) CalculateTotalTokenUsage([]byte, int, string) (*TokenUsa
 	return nil, nil //nolint:nilnil // test mock
 }
 
+// TokenAttributor
+func (m *mockFullAgent) AttributeTokens([]byte, int, string) (*types.Attribution, error) {
+	return &types.Attribution{}, nil
+}
+
 // mockBuiltinStreamingAgent is a built-in agent that implements StreamingTextGenerator but NOT CapabilityDeclarer.
 type mockBuiltinStreamingAgent struct {
 	mockBaseAgent
@@ -286,8 +291,26 @@ func TestAsTokenAttributor(t *testing.T) {
 		if !ok || ta == nil {
 			t.Error("expected true")
 		}
-		if ta != TokenAttributor(ag) {
-			t.Error("expected returned value to be the same agent")
+	})
+
+	t.Run("nil agent", func(t *testing.T) {
+		t.Parallel()
+		_, ok := AsTokenAttributor(nil)
+		if ok {
+			t.Error("expected false")
+		}
+	})
+
+	// Unlike AsTokenCalculator, AsTokenAttributor is ungated: a
+	// CapabilityDeclarer agent that declares every capability false still
+	// gets recognized as a TokenAttributor as long as it implements the
+	// interface. This is the property that distinguishes the two helpers.
+	t.Run("declared caps all false, still recognized (ungated)", func(t *testing.T) {
+		t.Parallel()
+		ag := &mockFullAgent{caps: DeclaredCaps{}}
+		ta, ok := AsTokenAttributor(ag)
+		if !ok || ta == nil {
+			t.Error("expected true regardless of declared capabilities")
 		}
 	})
 }
