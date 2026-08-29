@@ -1,5 +1,7 @@
 package types
 
+import "math"
+
 // TokenUsage represents aggregated token usage for a checkpoint.
 // This is agent-agnostic and can be populated by any agent that tracks token usage.
 type TokenUsage struct {
@@ -53,7 +55,12 @@ const MaxSubagentDepth = 16
 // AddTokenUsage returns the sum of a and b, recursing into subagent usage.
 // Either operand may be nil (treated as zero); the result is nil only when both
 // are. Neither input is mutated. Subagent chains deeper than MaxSubagentDepth are
-// truncated.
+// truncated. Every field is summed with saturatingAdd, so a corrupt or hostile
+// metadata blob near math.MaxInt pins at the limit instead of wrapping negative.
+//
+// This is the only token-summing primitive: callers that need a flat total
+// build on it rather than re-listing the fields, so a field added here is
+// carried everywhere.
 func AddTokenUsage(a, b *TokenUsage) *TokenUsage {
 	return addTokenUsageAtDepth(a, b, 0)
 }
@@ -76,13 +83,13 @@ func addTokenUsageAtDepth(a, b *TokenUsage, depth int) *TokenUsage {
 		aSub = a.SubagentTokens
 	}
 	if b != nil {
-		sum.InputTokens += b.InputTokens
-		sum.CacheCreationTokens += b.CacheCreationTokens
-		sum.CacheReadTokens += b.CacheReadTokens
-		sum.OutputTokens += b.OutputTokens
-		sum.APICallCount += b.APICallCount
-		sum.ThinkingTokens += b.ThinkingTokens
-		sum.CacheCreation1hTokens += b.CacheCreation1hTokens
+		sum.InputTokens = saturatingAdd(sum.InputTokens, b.InputTokens)
+		sum.CacheCreationTokens = saturatingAdd(sum.CacheCreationTokens, b.CacheCreationTokens)
+		sum.CacheReadTokens = saturatingAdd(sum.CacheReadTokens, b.CacheReadTokens)
+		sum.OutputTokens = saturatingAdd(sum.OutputTokens, b.OutputTokens)
+		sum.APICallCount = saturatingAdd(sum.APICallCount, b.APICallCount)
+		sum.ThinkingTokens = saturatingAdd(sum.ThinkingTokens, b.ThinkingTokens)
+		sum.CacheCreation1hTokens = saturatingAdd(sum.CacheCreation1hTokens, b.CacheCreation1hTokens)
 		sum.Model = mergeModel(sum.Model, b.Model)
 		bSub = b.SubagentTokens
 	}
@@ -117,6 +124,19 @@ func SubtractTokenUsage(a, b *TokenUsage) *TokenUsage {
 	}
 	diff.SubagentTokens = SubtractTokenUsage(a.SubagentTokens, b.SubagentTokens)
 	return diff
+}
+
+// saturatingAdd returns a+b pinned at math.MaxInt / math.MinInt instead of
+// wrapping. Token counts come from metadata blobs anyone with push access can
+// author, so an overflow must not turn a huge total into a negative one.
+func saturatingAdd(a, b int) int {
+	if b > 0 && a > math.MaxInt-b {
+		return math.MaxInt
+	}
+	if b < 0 && a < math.MinInt-b {
+		return math.MinInt
+	}
+	return a + b
 }
 
 // clampSubtract returns a-b, floored at zero so a stale or racy baseline

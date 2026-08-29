@@ -1,6 +1,9 @@
 package types
 
-import "testing"
+import (
+	"math"
+	"testing"
+)
 
 func TestAddTokenUsage(t *testing.T) {
 	t.Parallel()
@@ -119,5 +122,72 @@ func TestAddTokenUsage_ModelKeptWhenSameClearedWhenMixed(t *testing.T) {
 	}
 	if got := AddTokenUsage(nil, &TokenUsage{Model: "m"}); got.Model != "m" {
 		t.Errorf("copy of one operand must keep Model, got %q", got.Model)
+	}
+}
+
+func TestSaturatingAdd(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct{ a, b, want int }{
+		{1, 2, 3},
+		{math.MaxInt, 1, math.MaxInt},
+		{1, math.MaxInt, math.MaxInt},
+		{math.MaxInt, math.MaxInt, math.MaxInt},
+		{math.MinInt, -1, math.MinInt},
+		{-1, math.MinInt, math.MinInt},
+		{math.MaxInt, -1, math.MaxInt - 1},
+		{0, 0, 0},
+	}
+	for _, tc := range cases {
+		if got := saturatingAdd(tc.a, tc.b); got != tc.want {
+			t.Errorf("saturatingAdd(%d, %d) = %d, want %d", tc.a, tc.b, got, tc.want)
+		}
+	}
+}
+
+// TestAddTokenUsage_SaturatesOverflow pins that a hostile or corrupt metadata
+// blob near math.MaxInt saturates instead of wrapping negative, on every field
+// and at every nesting level.
+func TestAddTokenUsage_SaturatesOverflow(t *testing.T) {
+	t.Parallel()
+
+	full := func() *TokenUsage {
+		return &TokenUsage{
+			InputTokens:           math.MaxInt,
+			CacheCreationTokens:   math.MaxInt,
+			CacheReadTokens:       math.MaxInt,
+			OutputTokens:          math.MaxInt,
+			APICallCount:          math.MaxInt,
+			ThinkingTokens:        math.MaxInt,
+			CacheCreation1hTokens: math.MaxInt,
+		}
+	}
+	a := full()
+	a.SubagentTokens = full()
+	b := &TokenUsage{
+		InputTokens:           1,
+		CacheCreationTokens:   1,
+		CacheReadTokens:       1,
+		OutputTokens:          1,
+		APICallCount:          1,
+		ThinkingTokens:        1,
+		CacheCreation1hTokens: 1,
+		SubagentTokens:        &TokenUsage{InputTokens: 1, ThinkingTokens: 1},
+	}
+
+	got := AddTokenUsage(a, b)
+	for _, level := range []*TokenUsage{got, got.SubagentTokens} {
+		if level == nil {
+			t.Fatal("nested level dropped")
+		}
+		if level.InputTokens != math.MaxInt ||
+			level.CacheCreationTokens != math.MaxInt ||
+			level.CacheReadTokens != math.MaxInt ||
+			level.OutputTokens != math.MaxInt ||
+			level.APICallCount != math.MaxInt ||
+			level.ThinkingTokens != math.MaxInt ||
+			level.CacheCreation1hTokens != math.MaxInt {
+			t.Errorf("expected every field saturated at math.MaxInt, got %+v", level)
+		}
 	}
 }

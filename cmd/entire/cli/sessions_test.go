@@ -2277,45 +2277,6 @@ func TestCheckpointTokensReport_UsesRootSummaryWhenSessionMetadataIncomplete(t *
 	}
 }
 
-func TestAddCheckpointTokenUsageSaturatesOverflow(t *testing.T) {
-	t.Parallel()
-
-	maxInt := int(^uint(0) >> 1)
-	usage := addCheckpointTokenUsage(
-		&agent.TokenUsage{
-			InputTokens:         maxInt,
-			CacheCreationTokens: maxInt,
-			CacheReadTokens:     maxInt,
-			OutputTokens:        maxInt,
-			APICallCount:        maxInt,
-			SubagentTokens: &agent.TokenUsage{
-				InputTokens: maxInt,
-			},
-		},
-		&agent.TokenUsage{
-			InputTokens:         1,
-			CacheCreationTokens: 1,
-			CacheReadTokens:     1,
-			OutputTokens:        1,
-			APICallCount:        1,
-			SubagentTokens: &agent.TokenUsage{
-				InputTokens: 1,
-			},
-		},
-	)
-
-	if usage.InputTokens != maxInt ||
-		usage.CacheCreationTokens != maxInt ||
-		usage.CacheReadTokens != maxInt ||
-		usage.OutputTokens != maxInt ||
-		usage.APICallCount != maxInt {
-		t.Fatalf("expected saturated top-level usage, got %+v", usage)
-	}
-	if usage.SubagentTokens == nil || usage.SubagentTokens.InputTokens != maxInt {
-		t.Fatalf("expected saturated subagent usage, got %+v", usage.SubagentTokens)
-	}
-}
-
 func TestCheckpointTokensReport_UsesRootSummaryWhenNoSessionMetadataReadable(t *testing.T) {
 	t.Parallel()
 

@@ -7,6 +7,7 @@ import (
 	"io"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
+	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
@@ -177,7 +178,7 @@ func buildTokensProfileReport(ctx context.Context, store checkpoint.PersistentSt
 		}
 
 		report.CheckpointsWithTokenData++
-		aggregate = addCheckpointTokenUsage(aggregate, usage)
+		aggregate = types.AddTokenUsage(aggregate, usage)
 		addTokensProfileTokenSignals(signals, info.CheckpointID, tokens, report.CheckpointsAnalyzed)
 	}
 

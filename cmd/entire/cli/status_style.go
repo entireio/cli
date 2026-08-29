@@ -100,16 +100,18 @@ func formatTokenCount(n int) string {
 	return tokenreport.FormatTokenCount(n)
 }
 
-// totalTokens recursively sums all token fields including subagent tokens.
+// totalTokens sums the four token classes (input, output, cache creation, cache
+// read) across a usage and its subagent chain via flattenTokenUsage. It excludes
+// ThinkingTokens and CacheCreation1hTokens (subsets of output / cache creation,
+// already counted) and APICallCount (not tokens). Saturates instead of wrapping.
 func totalTokens(tu *agent.TokenUsage) int {
-	if tu == nil {
+	flat := flattenTokenUsage(tu)
+	if flat == nil {
 		return 0
 	}
-	total := saturatingIntAdd(tu.InputTokens, tu.CacheCreationTokens)
-	total = saturatingIntAdd(total, tu.CacheReadTokens)
-	total = saturatingIntAdd(total, tu.OutputTokens)
-	total = saturatingIntAdd(total, totalTokens(tu.SubagentTokens))
-	return total
+	total := saturatingIntAdd(flat.InputTokens, flat.CacheCreationTokens)
+	total = saturatingIntAdd(total, flat.CacheReadTokens)
+	return saturatingIntAdd(total, flat.OutputTokens)
 }
 
 // explainRow is one entry in a metadata block: dim label + plain value.

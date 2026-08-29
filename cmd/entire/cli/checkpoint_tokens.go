@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
+	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
 	"github.com/spf13/cobra"
@@ -341,7 +342,7 @@ func aggregateCheckpointTokenUsage(metas []*checkpoint.Metadata) *agent.TokenUsa
 		if meta == nil {
 			continue
 		}
-		total = addCheckpointTokenUsage(total, meta.TokenUsage)
+		total = types.AddTokenUsage(total, meta.TokenUsage)
 	}
 	return total
 }
@@ -357,29 +358,6 @@ func checkpointTokenUsage(summary *checkpoint.CheckpointSummary, metas []*checkp
 	return sessionUsage
 }
 
-func addCheckpointTokenUsage(a, b *agent.TokenUsage) *agent.TokenUsage {
-	if a == nil && b == nil {
-		return nil
-	}
-	result := &agent.TokenUsage{}
-	if a != nil {
-		result.InputTokens = a.InputTokens
-		result.CacheCreationTokens = a.CacheCreationTokens
-		result.CacheReadTokens = a.CacheReadTokens
-		result.OutputTokens = a.OutputTokens
-		result.APICallCount = a.APICallCount
-	}
-	if b != nil {
-		result.InputTokens = saturatingIntAdd(result.InputTokens, b.InputTokens)
-		result.CacheCreationTokens = saturatingIntAdd(result.CacheCreationTokens, b.CacheCreationTokens)
-		result.CacheReadTokens = saturatingIntAdd(result.CacheReadTokens, b.CacheReadTokens)
-		result.OutputTokens = saturatingIntAdd(result.OutputTokens, b.OutputTokens)
-		result.APICallCount = saturatingIntAdd(result.APICallCount, b.APICallCount)
-	}
-	result.SubagentTokens = addCheckpointTokenUsage(tokenUsageSubagents(a), tokenUsageSubagents(b))
-	return result
-}
-
 func saturatingIntAdd(a, b int) int {
 	maxValue := int(^uint(0) >> 1)
 	minValue := -maxValue - 1
@@ -390,13 +368,6 @@ func saturatingIntAdd(a, b int) int {
 		return minValue
 	}
 	return a + b
-}
-
-func tokenUsageSubagents(usage *agent.TokenUsage) *agent.TokenUsage {
-	if usage == nil {
-		return nil
-	}
-	return usage.SubagentTokens
 }
 
 func tokenPluralSuffix(count int) string {
