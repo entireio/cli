@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"github.com/entireio/cli/cmd/entire/cli/gitremote"
@@ -171,27 +172,49 @@ func ExcludedByGlobalConfig(ctx context.Context, config *GlobalConfig, repositor
 	if len(config.ExcludeOrigins) == 0 {
 		return false, nil
 	}
-	origins, fetchFound, lookupErr := gitremote.GetRemoteURLsInDirIfSet(ctx, repository.WorktreeRoot, "origin")
+	keys, present, lookupErr := OriginKeysAt(ctx, repository.WorktreeRoot)
 	if lookupErr != nil {
-		return true, fmt.Errorf("reading origin remote: %w", lookupErr)
+		return true, lookupErr
 	}
-	pushOrigins, pushFound, lookupErr := gitremote.GetRemotePushURLsInDirIfSet(ctx, repository.WorktreeRoot, "origin")
-	if lookupErr != nil {
-		return true, fmt.Errorf("reading origin pushurl: %w", lookupErr)
-	}
-	origins = append(origins, pushOrigins...)
-	if !fetchFound && !pushFound {
+	if !present {
 		return false, nil
 	}
-	for _, origin := range origins {
-		normalized := NormalizeOrigin(origin)
-		if normalized == "" {
-			return true, errors.New("origin remote cannot be normalized")
-		}
+	for _, normalized := range keys {
 		matched, matchErr := MatchesExcludeOrigin(ctx, config.ExcludeOrigins, normalized)
 		if matchErr != nil || matched {
 			return true, matchErr
 		}
 	}
 	return false, nil
+}
+
+// OriginKeysAt returns the normalized host/owner/repo keys of the worktree's
+// origin remote — every fetch and push URL, deduplicated, in config order.
+// present is false when no origin is configured. An origin that is present
+// but carries a URL that cannot be normalized (a bare filesystem path, a
+// file:// URL) is an error rather than a partial key set, so callers that gate
+// on origin fail closed. This is the one rule behind exclude_origins,
+// trusted_origins, and the user file's per-repository preferences.
+func OriginKeysAt(ctx context.Context, worktreeRoot string) (keys []string, present bool, err error) {
+	origins, fetchFound, err := gitremote.GetRemoteURLsInDirIfSet(ctx, worktreeRoot, "origin")
+	if err != nil {
+		return nil, false, fmt.Errorf("reading origin remote: %w", err)
+	}
+	pushOrigins, pushFound, err := gitremote.GetRemotePushURLsInDirIfSet(ctx, worktreeRoot, "origin")
+	if err != nil {
+		return nil, false, fmt.Errorf("reading origin pushurl: %w", err)
+	}
+	if !fetchFound && !pushFound {
+		return nil, false, nil
+	}
+	for _, origin := range append(origins, pushOrigins...) {
+		normalized := NormalizeOrigin(origin)
+		if normalized == "" {
+			return nil, true, errors.New("origin remote cannot be normalized")
+		}
+		if !slices.Contains(keys, normalized) {
+			keys = append(keys, normalized)
+		}
+	}
+	return keys, true, nil
 }

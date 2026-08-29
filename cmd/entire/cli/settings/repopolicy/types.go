@@ -274,10 +274,22 @@ func ValidateOPFRunSettings(timeoutSeconds int, promptDefault string) error {
 type UserSettings struct {
 	Global    *GlobalConfig        `json:"global,omitempty"`
 	Redaction *UserRedactionConfig `json:"redaction,omitempty"`
-	// extra holds top-level blocks this binary does not know, preserved
-	// across read-modify-write so a newer binary's settings survive an older
-	// one's `entire trust`.
+	// extra holds every top-level block this leaf does not decode: the
+	// preference blocks the settings package owns (`preferences`, `repos` —
+	// their types live there; read them with Block) and any block a newer
+	// binary wrote. All are preserved across read-modify-write so a newer
+	// binary's settings survive an older one's `entire trust`.
 	extra map[string]json.RawMessage
+}
+
+// Block returns a top-level block this leaf does not decode, as raw JSON.
+// The settings package reads its `preferences` and `repos` blocks this way.
+func (us *UserSettings) Block(key string) (json.RawMessage, bool) {
+	if us == nil {
+		return nil, false
+	}
+	raw, ok := us.extra[key]
+	return raw, ok
 }
 
 // OPFConfig returns the machine-local OPF configuration, or nil when the

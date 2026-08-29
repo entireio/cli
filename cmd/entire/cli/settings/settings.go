@@ -69,6 +69,11 @@ const (
 
 // EntireSettings represents the .entire/settings.json configuration
 type EntireSettings struct {
+	// userLayerRejections records user-settings-file blocks or repos entries
+	// that were dropped (unknown key, malformed), one line each. See
+	// UserLayerRejections.
+	userLayerRejections []string
+
 	// localLayerRejection records why .entire/settings.local.json was ignored.
 	// Unexported so it never serializes. Surfaced via LocalLayerRejection.
 	localLayerRejection string
@@ -515,6 +520,18 @@ func (c *InvestigateConfig) IsZero() bool {
 	return len(c.Agents) == 0 && c.MaxTurns == 0 && c.Quorum == 0 && c.AlwaysPrompt == ""
 }
 
+// UserLayerRejections reports the user-settings-file preference blocks (or
+// repos entries) that Load dropped, one human-readable line each, or nil.
+// The security-bearing blocks (`global`, `redaction`) are not reported here:
+// a failure in those fails the whole user file, which the global tier and
+// `entire doctor` already surface.
+func (s *EntireSettings) UserLayerRejections() []string {
+	if s == nil {
+		return nil
+	}
+	return s.userLayerRejections
+}
+
 // LocalLayerRejection reports why .entire/settings.local.json was ignored, or
 // "" when it was applied (or absent). A tracked local file is not local: it
 // arrives by cloning, so honoring it would let one developer's overrides —
@@ -662,11 +679,19 @@ func loadMergedSettings(ctx context.Context, settingsFileAbs, preferencesFileAbs
 	}
 
 	// The user tier (~/.config/entire/settings.json) sits between the project
-	// file and the per-worktree local file. Both of its contributions are
-	// applied after the local merge below — the ordinary keys because the
-	// local file may be what creates the OPF block, the command because it
-	// wins over the local file outright.
-	userOPF := loadUserOPFOverlay(ctx)
+	// file and the per-worktree local file: machine-wide preferences, then
+	// this repository's entry. Its OPF contribution is applied after the local
+	// merge below — the ordinary keys because the local file may be what
+	// creates the OPF block, the command because it wins over the local file
+	// outright.
+	worktreeRoot := filepath.Dir(filepath.Dir(settingsFileAbs))
+	overlay := loadUserOverlay(ctx)
+	applyUserPreferences(settings, overlay.preferences)
+	for _, prefs := range overlay.repoPreferences(ctx, worktreeRoot) {
+		applyUserPreferences(settings, prefs)
+	}
+	settings.userLayerRejections = overlay.rejections
+	userOPF := overlay.opf
 
 	// Apply local overrides if they exist — but only from a file that is
 	// genuinely local. See localLayerTrackedReason.
@@ -709,21 +734,6 @@ func loadMergedSettings(ctx context.Context, settingsFileAbs, preferencesFileAbs
 	}
 
 	return settings, nil
-}
-
-// loadUserOPFOverlay reads the machine-local OPF block from the user settings
-// file. An unreadable or invalid user file yields nil: that file's own
-// consumers (the global tier) already fail closed on it and `entire doctor`
-// reports it, and a repo the user enabled here must keep loading its settings
-// regardless — the same rule repopolicy.ClassifyRepoPolicyAt applies.
-func loadUserOPFOverlay(ctx context.Context) *repopolicy.UserOPFConfig {
-	userSettings, err := repopolicy.LoadUserSettings(ctx)
-	if err != nil {
-		logging.Debug(ctx, "user settings unreadable; skipping OPF overlay",
-			slog.String("error", err.Error()))
-		return nil
-	}
-	return userSettings.OPFConfig()
 }
 
 // applyUserOPFPreferences layers the user file's ordinary OPF keys
