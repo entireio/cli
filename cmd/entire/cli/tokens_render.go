@@ -57,8 +57,9 @@ type tokenReportView struct {
 	// "(from stored transcript)" marker and never added into the totals.
 	FromTranscript *tokenTranscriptSubsets
 	// Limitations are the caller's Notes lines: attribution failures,
-	// unreadable metadata, unmatched subagent records. tokenReportNotes adds
-	// the pricing and profile notes derived from Report.
+	// unreadable metadata, unmatched subagent records. tokenReportNotes
+	// prints them first, then the pricing and profile notes derived from
+	// Report.
 	Limitations []string
 }
 
@@ -665,11 +666,15 @@ func writeTokenNotes(w io.Writer, notes []string) {
 }
 
 // tokenReportNotes is the full Notes list for a view (also the JSON
-// `limitations`): the price-ratio note, one line per unpriced model, the
-// unknown-TTL line, the agent's totals-only caveat, the calls-without-usage
-// count, then the caller's Limitations in order.
+// `limitations`). The caller's Limitations come first, in order: they say
+// why the totals are what they are ("transcript unavailable; totals from
+// session state", "no API calls in the token window", the root-summary
+// fallback, an unknown agent), which a reader needs before the notes about
+// how those totals were priced. Then the price-ratio note, one line per
+// unpriced model, the unknown-TTL line, the agent's totals-only caveat, and
+// the calls-without-usage count.
 func tokenReportNotes(v *tokenReportView) []string {
-	var notes []string
+	notes := append([]string(nil), v.Limitations...)
 	if v.HasUsage {
 		notes = append(notes, tokenPricingNotes(v)...)
 		if profileNote := tokenProfileNote(v); profileNote != "" {
@@ -679,7 +684,7 @@ func tokenReportNotes(v *tokenReportView) []string {
 	if v.UnknownUsageCalls > 0 {
 		notes = append(notes, formatCallCount(v.UnknownUsageCalls)+" with no usage recorded")
 	}
-	return append(notes, v.Limitations...)
+	return notes
 }
 
 // tokenPricingNotes explains how the shares were priced: the ratio table

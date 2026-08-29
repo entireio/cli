@@ -341,13 +341,21 @@ func TestTokenReportNotes_ProfileAndMixedFamilies(t *testing.T) {
 	v.Report.Agent = agent.AgentTypeFactoryAIDroid
 	v.Report.Profile = tokenreport.ProfileFor(agent.AgentTypeFactoryAIDroid)
 	v.Limitations = []string{"custom note"}
-	notes := strings.Join(tokenReportNotes(&v), "\n")
-	assertContainsAll(t, notes, "no verified capability profile for Factory AI Droid; totals shown, breakdown not verified.", "custom note")
+	notes := tokenReportNotes(&v)
+	assertContainsAll(t, strings.Join(notes, "\n"), "no verified capability profile for Factory AI Droid; totals shown, breakdown not verified.", "custom note")
+	// The caller's Limitations explain the totals and so come first; the
+	// pricing note and the profile caveat follow in that order.
+	if len(notes) < 3 || notes[0] != "custom note" || !strings.HasPrefix(notes[1], "Cost shares use Anthropic list-price ratios") || !strings.HasPrefix(notes[2], "no verified capability profile") {
+		t.Errorf("notes order = %q, want limitations, pricing, profile", notes)
+	}
+
+	if got := tokenReportNotes(&tokenReportView{}); got != nil {
+		t.Errorf("a view with nothing to say has nil notes, got %q", got)
+	}
 
 	mixed := claudeView(wideAttributed())
 	mixed.Report.Cost.Family = ""
-	notes = strings.Join(tokenReportNotes(&mixed), "\n")
-	assertContainsAll(t, notes, "Cost shares mix list-price ratios from more than one model family")
+	assertContainsAll(t, strings.Join(tokenReportNotes(&mixed), "\n"), "Cost shares mix list-price ratios from more than one model family")
 }
 
 func TestContributorLabel(t *testing.T) {
