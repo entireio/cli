@@ -62,7 +62,7 @@ type TrailBodyDocument struct {
 func (r *TrailResource) ToMetadata() *trail.Metadata {
 	m := &trail.Metadata{
 		Number: r.Number, TrailID: trail.ID(r.ID), URL: r.URL,
-		Branch: r.Branch, Base: r.Base, Title: r.Title, Body: r.Body,
+		Branch: r.Branch, OriginalBranch: r.OriginalBranch, Base: r.Base, Title: r.Title, Body: r.Body,
 		Status: trail.Status(r.Status), Phase: r.Phase, Author: r.Author,
 		Assignees: r.Assignees, Labels: r.Labels, Type: trail.Type(r.Type),
 		Priority: trail.Priority(r.Priority), Reviewers: r.Reviewers,

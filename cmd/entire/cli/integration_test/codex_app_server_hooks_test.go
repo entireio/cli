@@ -82,6 +82,9 @@ func TestCodexAppServerHooksList_BareWorktreeUsesLayoutRoot(t *testing.T) {
 
 	codexPath := requireCodexAppServer(t)
 	tmp := t.TempDir()
+	if resolved, err := filepath.EvalSymlinks(tmp); err == nil {
+		tmp = resolved
+	}
 	seedRoot := filepath.Join(tmp, "seed")
 	layoutRoot := filepath.Join(tmp, "layout")
 	bareRoot := filepath.Join(layoutRoot, ".bare")

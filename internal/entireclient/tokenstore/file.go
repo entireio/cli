@@ -13,6 +13,8 @@ import (
 	"time"
 
 	"github.com/gofrs/flock"
+
+	"github.com/entireio/cli/internal/entireclient/userdirs"
 )
 
 // goosWindows is runtime.GOOS on Windows, where unix permission bits don't
@@ -28,7 +30,15 @@ var loosePermsWarnW io.Writer = os.Stderr
 // The file format is: { "service": { "user": "password" } }
 type fileStore struct {
 	path string
-	mu   sync.Mutex
+	// ownsDir reports whether filepath.Dir(path) is a directory Entire
+	// chose — the per-user config dir it shares with contexts.json — as
+	// opposed to one the user named through PathEnvVar. Only the former is
+	// tightened to a private mode. A user-supplied path can be a CI secret
+	// mount, a read-only volume, a shared secrets directory, or $HOME
+	// itself: chmod-ing it is a side effect nobody asked for when it works,
+	// and takes down every Get/Set/Delete when it doesn't.
+	ownsDir bool
+	mu      sync.Mutex
 	// warnedLoosePerms dedupes the loose-permissions warning to once per
 	// store instance — effectively once per CLI invocation, since
 	// currentBackend caches a single fileStore for the process. Like the
@@ -41,8 +51,8 @@ type fileStore struct {
 // withFileLock runs fn while holding an exclusive flock on f.path + ".lock".
 // The lock coordinates across processes; the in-process mu handles goroutines.
 func (f *fileStore) withFileLock(fn func() error) error {
-	if err := os.MkdirAll(filepath.Dir(f.path), 0700); err != nil {
-		return fmt.Errorf("creating token store directory: %w", err)
+	if err := f.ensureDir(); err != nil {
+		return err
 	}
 
 	fl := flock.New(f.path + ".lock")
@@ -63,6 +73,25 @@ func (f *fileStore) withFileLock(fn func() error) error {
 	}()
 
 	return fn()
+}
+
+// ensureDir makes sure the store file's directory exists. Creating it is
+// mandatory — there is nowhere to write otherwise — but re-moding an existing
+// one happens only for a directory Entire owns; see fileStore.ownsDir. A
+// directory created here is private either way, since it is new and nothing
+// else was using it.
+func (f *fileStore) ensureDir() error {
+	dir := filepath.Dir(f.path)
+	if f.ownsDir {
+		if err := userdirs.EnsurePrivateDir(dir); err != nil {
+			return fmt.Errorf("creating token store directory: %w", err)
+		}
+		return nil
+	}
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return fmt.Errorf("creating token store directory: %w", err)
+	}
+	return nil
 }
 
 func (f *fileStore) load() (map[string]map[string]string, error) {

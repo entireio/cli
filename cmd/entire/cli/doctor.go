@@ -69,6 +69,13 @@ be condensed will be discarded.
 
 Without a terminal to prompt on (agents, CI), doctor reports each issue and
 points at --force instead of prompting.`,
+		// On the group, not on doctor's own PreRunE, so it also covers
+		// `doctor logs` and `doctor bundle`, which read .entire/logs. Runs
+		// before the PreRunE below, which loads redaction settings from
+		// .entire/settings.json — itself a read through the path in question.
+		PersistentPreRunE: func(cmd *cobra.Command, _ []string) error {
+			return reportBrokenEntireDir(cmd)
+		},
 		PreRunE: func(cmd *cobra.Command, _ []string) error {
 			// Cobra runs the persistent pre-runs before a command's own PreRunE,
 			// so the root hook has already put an initialized logger in this

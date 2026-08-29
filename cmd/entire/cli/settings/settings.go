@@ -819,12 +819,42 @@ func LoadFromBytes(data []byte) (*EntireSettings, error) {
 }
 
 // readConfined reads filePath through an os.Root anchored at its parent
-// directory. The root confines the open to that directory, so the read cannot
-// be redirected outside it by a swapped or symlinked path between resolution and
-// open (TOCTOU) — unlike a bare os.ReadFile of an absolute path. A symlink that
-// escapes the directory surfaces as a non-ENOENT error. Callers must classify
-// "missing" with errors.Is(err, fs.ErrNotExist) rather than os.IsNotExist,
-// since the returned errors are wrapped.
+// directory, refusing outright to read it if it is a symbolic link.
+//
+// The root confines the open to that directory, so the read cannot be
+// redirected outside it by a swapped or symlinked path between resolution and
+// open (TOCTOU) — unlike a bare os.ReadFile of an absolute path. Callers must
+// classify "missing" with errors.Is(err, fs.ErrNotExist) rather than
+// os.IsNotExist, since the returned errors are wrapped.
+//
+// Confinement alone is NOT the invariant, which is why the Lstat is here as
+// well. Entire's config files are never read through a link, wherever it points,
+// and os.Root leaves two gaps against that:
+//
+//   - A RELATIVE link whose target stays inside the directory is followed
+//     without complaint. `.entire/settings.local.json -> planted.json` is the
+//     case that matters: that file names the command Entire executes at
+//     pre-push, so following it hands the far end a say in what runs.
+//   - A DANGLING link surfaces as ENOENT, which every caller here reads as
+//     "absent" and answers with default settings. A planted
+//     `.entire/settings.json -> missing.json` therefore made Entire silently
+//     ignore the project's settings rather than fail.
+//
+// An absolute target, and a relative one that escapes, were already refused —
+// but as "path escapes from parent", which describes neither the cause nor the
+// fix. All four now give the same verdict and the same remedy.
+//
+// Lstat and Open are separate operations, so checking only before the open
+// leaves a race: the entry can become an in-root symlink between them and
+// os.Root will follow it. After opening, validate that the path is still a real
+// file and names the same object as the open descriptor. Once that succeeds,
+// later path swaps do not matter because the read uses the already-open file.
+//
+// This overlaps paths.ValidateEntireDirAt, which rejects a symlinked entry in
+// `.entire` before a command runs at all. The duplication is deliberate: that
+// guard hangs off the root pre-run and cli.LoadEntireSettings, while eighteen
+// files call settings.Load directly — the strategy hook paths among them — and
+// this is the read those callers have in common.
 func readConfined(filePath string) ([]byte, error) {
 	root, err := os.OpenRoot(filepath.Dir(filePath))
 	if err != nil {
@@ -832,17 +862,55 @@ func readConfined(filePath string) ([]byte, error) {
 	}
 	defer root.Close()
 
-	f, err := root.Open(filepath.Base(filePath))
+	base := filepath.Base(filePath)
+	info, err := root.Lstat(base)
+	if err != nil {
+		return nil, fmt.Errorf("inspect settings file: %w", err)
+	}
+	if info.Mode()&fs.ModeSymlink != 0 {
+		//nolint:wrapcheck // sentinel surfaces verbatim for the caller's errors.Is; callers add the reading-context prefix
+		return nil, paths.SymlinkedEntryError(filePath)
+	}
+
+	f, err := root.Open(base)
 	if err != nil {
 		return nil, fmt.Errorf("open settings file: %w", err)
 	}
 	defer f.Close()
+
+	if err := validateOpenedFile(root, base, filePath, f); err != nil {
+		return nil, err
+	}
 
 	data, err := io.ReadAll(f)
 	if err != nil {
 		return nil, fmt.Errorf("read settings file: %w", err)
 	}
 	return data, nil
+}
+
+// validateOpenedFile closes the Lstat/Open race in readConfined. The path must
+// still be a non-symlink and must identify the object held by f. A replacement
+// after this check cannot redirect the read, because f is already bound to the
+// validated object.
+func validateOpenedFile(root *os.Root, base, filePath string, f *os.File) error {
+	pathInfo, err := root.Lstat(base)
+	if err != nil {
+		return fmt.Errorf("reinspect settings file: %w", err)
+	}
+	if pathInfo.Mode()&fs.ModeSymlink != 0 {
+		//nolint:wrapcheck // sentinel surfaces verbatim for the caller's errors.Is; callers add the reading-context prefix
+		return paths.SymlinkedEntryError(filePath)
+	}
+
+	openedInfo, err := f.Stat()
+	if err != nil {
+		return fmt.Errorf("inspect opened settings file: %w", err)
+	}
+	if !os.SameFile(pathInfo, openedInfo) {
+		return fmt.Errorf("settings file changed while it was being opened: %s", filePath)
+	}
+	return nil
 }
 
 // loadFromFile loads settings from a specific file path.
