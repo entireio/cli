@@ -2,6 +2,7 @@ package tokenreport
 
 import (
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -11,8 +12,9 @@ import (
 )
 
 // Fixture vocabulary. Names that appear in sentences are set in backticks by
-// the implementation so the visibility test can tell a name's digits
-// ("claude-fable-5") from a figure.
+// the implementation (model, command, skill, effort, setting) or are cited
+// row labels (tool names, subagent types), so the visibility test can tell a
+// name's digits ("claude-fable-5") from a figure.
 const (
 	testModel      = "claude-fable-5"
 	testOtherModel = "claude-haiku-4-5"
@@ -20,6 +22,7 @@ const (
 	testCommand    = "go test ./cmd/entire/..."
 	testSkill      = "artifact-design"
 	testSubagent   = "Explore"
+	testDigitLabel = "gpt5-reviewer"
 	testEffort     = "high"
 	testLever      = "model_reasoning_effort"
 	testUnits      = 1000.0
@@ -59,16 +62,20 @@ func textRow(share float64) Contributor {
 	return Contributor{Kind: KindText, Label: LabelAssistantText, Usage: types.TokenUsage{OutputTokens: 100_000, APICallCount: 30}, CostShare: share, Source: SourceTranscript}
 }
 
-// subagentRow is a subagent row that ran `runs` times on model.
+// subagentRow is an Explore subagent row that ran `runs` times on model.
 func subagentRow(model string, share float64, runs int) Contributor {
+	return labelledSubagentRow(testSubagent, model, share, runs)
+}
+
+func labelledSubagentRow(label, model string, share float64, runs int) Contributor {
 	return Contributor{
 		Kind:      KindSubagent,
-		Label:     testSubagent,
+		Label:     label,
 		Model:     model,
 		Usage:     types.TokenUsage{InputTokens: 50_000, CacheReadTokens: 4_500_000, OutputTokens: 150_000, APICallCount: 60},
 		CostShare: share,
 		Source:    SourceTranscript,
-		Details:   []Detail{detail(testSubagent, runs, 4_700_000, share)},
+		Details:   []Detail{detail(label, runs, 4_700_000, share)},
 	}
 }
 
@@ -183,6 +190,23 @@ func repeatedSkillReport(loads int) Report {
 	return r
 }
 
+// deepSkillReport ranks the skill row 9th (index 8): replay, seven bigger
+// tool rows, then the skill loaded 3 times at a share below 0.5%. Only
+// repeated_skill fires, and its figures are visible only because the row is
+// cited.
+func deepSkillReport() Report {
+	r := quietReport()
+	rows := []Contributor{replayRow(0.50)}
+	for i := range 7 {
+		row := toolRow(0.07)
+		row.Label = "Tool" + string(rune('A'+i))
+		rows = append(rows, row)
+	}
+	rows = append(rows, skillRow(0.003, 3))
+	r.Attributed.Contributors = rows
+	return r
+}
+
 // capReport fires four causes: context_growth (row 40%), long_session (cache
 // read 30%, 9h), subagent_model (20%), repeated_skill (5%).
 func capReport() Report {
@@ -250,6 +274,13 @@ func mustNotContain(t *testing.T, text, unwanted string) {
 	}
 }
 
+func mustCite(t *testing.T, rec Recommendation, want ...Citation) {
+	t.Helper()
+	if !slices.Equal(rec.Cited, want) {
+		t.Fatalf("%s cited %+v, want %+v", rec.Cause, rec.Cited, want)
+	}
+}
+
 func TestRecommend_QuietReportFiresNothing(t *testing.T) {
 	t.Parallel()
 	mustFireNothing(t, Recommend(quietReport()))
@@ -266,6 +297,7 @@ func TestRecommend_LongSession(t *testing.T) {
 		mustContain(t, rec.Text, FormatDuration(r.Duration))
 		mustContain(t, rec.Text, FormatTokenCount(r.Usage.CacheReadTokens))
 		mustContain(t, rec.Text, FormatPercent(r.Cost.CacheRead)+" "+phraseOfCost)
+		mustCite(t, rec)
 	})
 	t.Run("claude duration one minute short misses", func(t *testing.T) {
 		t.Parallel()
@@ -317,18 +349,20 @@ func TestRecommend_LongSession(t *testing.T) {
 func TestRecommend_ContextGrowth(t *testing.T) {
 	t.Parallel()
 
-	t.Run("cache write largest and row at 25% fires naming the detail", func(t *testing.T) {
+	t.Run("cache write largest and row at 25% fires naming and citing the detail", func(t *testing.T) {
 		t.Parallel()
 		r := contextGrowthReport(true)
 		rec := mustFireOnly(t, Recommend(r), CauseContextGrowth)
 		row := r.Attributed.Contributors[1]
 		mustContain(t, rec.Text, FormatPercent(row.CostShare)+" of the cost was "+testTool+" output")
 		mustContain(t, rec.Text, phraseMostly+" `"+testCommand+"` (9 calls, "+FormatTokenCount(row.Details[0].Tokens)+" tokens, "+FormatPercent(row.Details[0].CostShare)+")")
+		mustCite(t, rec, Citation{Kind: KindTool, Label: testTool, Detail: testCommand})
 	})
-	t.Run("row without details stops at the tool", func(t *testing.T) {
+	t.Run("row without details stops at the tool and cites only the row", func(t *testing.T) {
 		t.Parallel()
 		rec := mustFireOnly(t, Recommend(contextGrowthReport(false)), CauseContextGrowth)
 		mustNotContain(t, rec.Text, phraseMostly)
+		mustCite(t, rec, Citation{Kind: KindTool, Label: testTool})
 	})
 	t.Run("row at 24% misses", func(t *testing.T) {
 		t.Parallel()
@@ -356,12 +390,13 @@ func TestRecommend_ContextGrowth(t *testing.T) {
 		// Replay row keeps 35%: above the row gate, but it carries no cache writes.
 		mustFireNothing(t, Recommend(r))
 	})
-	t.Run("skill annotation on the tool row is named", func(t *testing.T) {
+	t.Run("skill annotation on the tool row is named and cited", func(t *testing.T) {
 		t.Parallel()
 		r := contextGrowthReport(false)
 		r.Attributed.Contributors[1].Skill = "systematic-debugging"
 		rec := mustFireOnly(t, Recommend(r), CauseContextGrowth)
 		mustContain(t, rec.Text, testTool+" output (during systematic-debugging)")
+		mustCite(t, rec, Citation{Kind: KindTool, Label: testTool, Skill: "systematic-debugging"})
 	})
 }
 
@@ -369,12 +404,13 @@ func TestRecommend_SubagentModel(t *testing.T) {
 	t.Parallel()
 	g := GatesFor(agentClaudeCode)
 
-	t.Run("row at 15% on the parent model fires", func(t *testing.T) {
+	t.Run("row at 15% on the parent model fires citing the run-count detail", func(t *testing.T) {
 		t.Parallel()
 		r := subagentModelReport(testModel, g.SubagentModelShare)
 		rec := mustFireOnly(t, Recommend(r), CauseSubagentModel)
 		mustContain(t, rec.Text, testSubagent+" subagents ran 5 times on `"+testModel+"`")
 		mustContain(t, rec.Text, FormatPercent(g.SubagentModelShare)+" "+phraseOfCost)
+		mustCite(t, rec, Citation{Kind: KindSubagent, Label: testSubagent, Detail: testSubagent})
 	})
 	t.Run("row at 14% misses", func(t *testing.T) {
 		t.Parallel()
@@ -389,13 +425,21 @@ func TestRecommend_SubagentModel(t *testing.T) {
 		rec := mustFireOnly(t, Recommend(subagentModelReport("", g.SubagentModelShare)), CauseSubagentModel)
 		mustContain(t, rec.Text, "on `"+testModel+"`")
 	})
-	t.Run("unknown run count is omitted", func(t *testing.T) {
+	t.Run("both models empty names the session's own model", func(t *testing.T) {
+		t.Parallel()
+		r := subagentModelReport("", g.SubagentModelShare)
+		r.Model = ""
+		rec := mustFireOnly(t, Recommend(r), CauseSubagentModel)
+		mustContain(t, rec.Text, "ran 5 times on the session's own model")
+	})
+	t.Run("unknown run count is omitted and only the row is cited", func(t *testing.T) {
 		t.Parallel()
 		r := subagentModelReport(testModel, 0.30)
 		r.Attributed.Contributors[1].Details = nil
 		rec := mustFireOnly(t, Recommend(r), CauseSubagentModel)
 		mustContain(t, rec.Text, testSubagent+" subagents ran on `"+testModel+"`")
 		mustNotContain(t, rec.Text, " times")
+		mustCite(t, rec, Citation{Kind: KindSubagent, Label: testSubagent})
 	})
 }
 
@@ -408,6 +452,7 @@ func TestRecommend_Thinking(t *testing.T) {
 		rec := mustFireOnly(t, Recommend(r), CauseThinking)
 		mustContain(t, rec.Text, "Thinking took 50% of output tokens ("+FormatTokenCount(r.Usage.ThinkingTokens)+" of "+FormatTokenCount(r.Usage.OutputTokens)+", "+FormatPercent(r.Cost.Thinking)+" "+phraseOfCost+")")
 		mustContain(t, rec.Text, "at effort `"+testEffort+"`")
+		mustCite(t, rec)
 	})
 	t.Run("49% misses", func(t *testing.T) {
 		t.Parallel()
@@ -468,6 +513,7 @@ func TestRecommend_CacheMiss(t *testing.T) {
 			rec := mustFireOnly(t, Recommend(r), CauseCacheMiss)
 			mustContain(t, rec.Text, FormatPercent(g.CacheMissShare)+" of the cost was uncached input")
 			mustContain(t, rec.Text, phraseMostly+" "+testTool+" results, led by `"+testCommand+"` (12 calls, 1.2M tokens, 31%)")
+			mustCite(t, rec, Citation{Kind: KindTool, Label: testTool, Detail: testCommand})
 		})
 		t.Run(tc.name+" one point short misses", func(t *testing.T) {
 			t.Parallel()
@@ -491,20 +537,22 @@ func TestRecommend_CacheMiss(t *testing.T) {
 		t.Parallel()
 		mustFireNothing(t, Recommend(cacheMissReport(agentCodex, "", 0.60)))
 	})
-	t.Run("without a tool row the sentence stops at the cause", func(t *testing.T) {
+	t.Run("without a tool row the sentence stops at the cause and cites nothing", func(t *testing.T) {
 		t.Parallel()
 		r := cacheMissReport(agentCodex, ProviderOpenAI, 0.50)
 		r.Attributed.Contributors = []Contributor{replayRow(0.15), textRow(0.13)}
 		rec := mustFireOnly(t, Recommend(r), CauseCacheMiss)
 		mustNotContain(t, rec.Text, phraseMostly)
 		mustContain(t, rec.Text, "instead of from the cache.")
+		mustCite(t, rec)
 	})
-	t.Run("tool row without details quotes the row", func(t *testing.T) {
+	t.Run("tool row without details quotes and cites the row", func(t *testing.T) {
 		t.Parallel()
 		r := cacheMissReport(agentCodex, ProviderOpenAI, 0.50)
 		r.Attributed.Contributors[0].Details = nil
 		rec := mustFireOnly(t, Recommend(r), CauseCacheMiss)
 		mustContain(t, rec.Text, phraseMostly+" "+testTool+" results (164.6k tokens, 31% "+phraseOfCost+")")
+		mustCite(t, rec, Citation{Kind: KindTool, Label: testTool})
 	})
 }
 
@@ -512,21 +560,34 @@ func TestRecommend_RepeatedSkill(t *testing.T) {
 	t.Parallel()
 	g := GatesFor(agentClaudeCode)
 
-	t.Run("two loads fires", func(t *testing.T) {
+	t.Run("two loads fires citing the load-count detail", func(t *testing.T) {
 		t.Parallel()
 		r := repeatedSkillReport(g.RepeatedSkillMinLoads)
 		rec := mustFireOnly(t, Recommend(r), CauseRepeatedSkill)
 		mustContain(t, rec.Text, "`"+testSkill+"` was loaded "+strconv.Itoa(g.RepeatedSkillMinLoads)+" times (41.3k tokens, 4% "+phraseOfCost+")")
+		mustCite(t, rec, Citation{Kind: KindSkill, Label: testSkill, Detail: testSkill})
 	})
 	t.Run("one load misses", func(t *testing.T) {
 		t.Parallel()
 		mustFireNothing(t, Recommend(repeatedSkillReport(g.RepeatedSkillMinLoads-1)))
 	})
-	t.Run("loads are counted from details, not APICallCount", func(t *testing.T) {
+	t.Run("loads are counted from the skill's own detail, not APICallCount", func(t *testing.T) {
 		t.Parallel()
 		r := repeatedSkillReport(1)
 		r.Attributed.Contributors[3].Usage.APICallCount = 5
 		mustFireNothing(t, Recommend(r))
+	})
+	t.Run("a skill row without its own detail cannot fire", func(t *testing.T) {
+		t.Parallel()
+		r := repeatedSkillReport(3)
+		r.Attributed.Contributors[3].Details = nil
+		mustFireNothing(t, Recommend(r))
+	})
+	t.Run("a deep-ranked skill row fires with a <1% share", func(t *testing.T) {
+		t.Parallel()
+		rec := mustFireOnly(t, Recommend(deepSkillReport()), CauseRepeatedSkill)
+		mustContain(t, rec.Text, "(41.3k tokens, <1% "+phraseOfCost+")")
+		mustCite(t, rec, Citation{Kind: KindSkill, Label: testSkill, Detail: testSkill})
 	})
 }
 
@@ -535,7 +596,7 @@ func TestRecommend_CapAndOrder(t *testing.T) {
 	recs := Recommend(capReport())
 	got := causes(recs)
 	want := []Cause{CauseContextGrowth, CauseLongSession}
-	if len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
+	if !slices.Equal(got, want) {
 		t.Fatalf("causes = %v, want %v", got, want)
 	}
 }
@@ -549,7 +610,7 @@ func TestRecommend_VolumeOnly(t *testing.T) {
 		r.Usage.ThinkingTokens = 20_000
 		recs := Recommend(r)
 		got := causes(recs)
-		if len(got) != 2 || got[0] != CauseLongSession || got[1] != CauseRepeatedSkill {
+		if !slices.Equal(got, []Cause{CauseLongSession, CauseRepeatedSkill}) {
 			t.Fatalf("causes = %v, want [long_session repeated_skill]", got)
 		}
 		for _, rec := range recs {
@@ -567,19 +628,26 @@ func TestRecommend_VolumeOnly(t *testing.T) {
 	})
 }
 
-// figureExtractor pulls every number-looking token out of a sentence.
+// Figure extraction for the visibility test.
 var (
 	durationTokens = regexp.MustCompile(`\d+d \d+h|\d+h \d+m|\d+m\b|\d+s\b`)
-	numericTokens  = regexp.MustCompile(`\d[\d.,]*[kM%]?`)
+	numericTokens  = regexp.MustCompile(`<1%|\d[\d.,]*[kM%]?`)
 	backtickSpans  = regexp.MustCompile("`[^`]*`")
 )
 
 // extractFigures returns the numeric tokens in text: FormatDuration forms
-// first, then FormatTokenCount/FormatPercent/plain-integer forms. Backticked
-// spans are names (model, command, skill, effort, setting), not figures, and
-// are skipped.
-func extractFigures(text string) []string {
+// first, then FormatPercent's "<1%", FormatTokenCount and plain-integer
+// forms. Backticked spans (model, command, skill, effort, setting) and the
+// labels and skills of cited rows (tool names, subagent types) are names, not
+// figures, and are skipped.
+func extractFigures(text string, cited []Citation) []string {
 	text = backtickSpans.ReplaceAllString(text, " ")
+	for _, c := range cited {
+		text = strings.ReplaceAll(text, c.Label, " ")
+		if c.Skill != "" {
+			text = strings.ReplaceAll(text, c.Skill, " ")
+		}
+	}
 	figures := durationTokens.FindAllString(text, -1)
 	text = durationTokens.ReplaceAllString(text, " ")
 	for _, tok := range numericTokens.FindAllString(text, -1) {
@@ -588,12 +656,27 @@ func extractFigures(text string) []string {
 	return figures
 }
 
-// renderedFigures is the set of figures the renderer prints from r, in the
-// renderer's own formatting: every usage class, every cost class share, the
-// thinking share of output, the duration, the call counts, and every
-// contributor row's tokens and share, every detail's calls, tokens and share,
-// and each row's total detail calls (a skill or subagent row has one detail).
-func renderedFigures(r *Report) map[string]bool {
+// citesRow reports whether cited names row c (by Kind, Label, Skill).
+func citesRow(cited []Citation, c *Contributor) bool {
+	return slices.ContainsFunc(cited, func(ct Citation) bool {
+		return ct.Kind == c.Kind && ct.Label == c.Label && ct.Skill == c.Skill
+	})
+}
+
+// citesDetail reports whether cited names detail d of row c.
+func citesDetail(cited []Citation, c *Contributor, d *Detail) bool {
+	return slices.ContainsFunc(cited, func(ct Citation) bool {
+		return ct.Kind == c.Kind && ct.Label == c.Label && ct.Skill == c.Skill && ct.Detail == d.Detail
+	})
+}
+
+// renderedFigures is the set of figures the renderer prints from r given the
+// recommendations' citations, in the renderer's own formatting: every usage
+// class, every cost class share, the thinking share of output, the
+// duration, the call counts; the tokens and share of every row ranked below
+// MaxRenderedRows or cited; the calls, tokens and share of every detail
+// under a row ranked below MaxRenderedDetails or cited by name.
+func renderedFigures(r *Report, cited []Citation) map[string]bool {
 	set := map[string]bool{}
 	u := &r.Usage
 	for _, n := range []int{u.InputTokens, u.CacheCreationTokens, u.CacheReadTokens, u.OutputTokens, u.ThinkingTokens, u.CacheCreation1hTokens} {
@@ -610,16 +693,43 @@ func renderedFigures(r *Report) map[string]bool {
 	set[strconv.Itoa(u.APICallCount)] = true
 	for i := range r.Attributed.Contributors {
 		c := &r.Attributed.Contributors[i]
-		set[FormatTokenCount(volume(&c.Usage))] = true
-		set[FormatPercent(c.CostShare)] = true
-		set[strconv.Itoa(rowCalls(c))] = true
-		for _, d := range c.Details {
-			set[strconv.Itoa(d.Calls)] = true
-			set[FormatTokenCount(d.Tokens)] = true
-			set[FormatPercent(d.CostShare)] = true
+		if i < MaxRenderedRows || citesRow(cited, c) {
+			set[FormatTokenCount(volume(&c.Usage))] = true
+			set[FormatPercent(c.CostShare)] = true
+		}
+		for j := range c.Details {
+			d := &c.Details[j]
+			if i < MaxRenderedDetails || citesDetail(cited, c, d) {
+				set[strconv.Itoa(d.Calls)] = true
+				set[FormatTokenCount(d.Tokens)] = true
+				set[FormatPercent(d.CostShare)] = true
+			}
 		}
 	}
 	return set
+}
+
+// unrenderedFigures returns the figures of recs' Text that renderedFigures
+// does not contain.
+func unrenderedFigures(r *Report, recs []Recommendation, cited []Citation) []string {
+	rendered := renderedFigures(r, cited)
+	var missing []string
+	for _, rec := range recs {
+		for _, f := range extractFigures(rec.Text, rec.Cited) {
+			if !rendered[f] {
+				missing = append(missing, f)
+			}
+		}
+	}
+	return missing
+}
+
+func allCited(recs []Recommendation) []Citation {
+	var out []Citation
+	for _, rec := range recs {
+		out = append(out, rec.Cited...)
+	}
+	return out
 }
 
 func TestRecommend_EveryFigureIsRendered(t *testing.T) {
@@ -636,6 +746,7 @@ func TestRecommend_EveryFigureIsRendered(t *testing.T) {
 		"cache_miss codex":              cacheMissReport(agentCodex, ProviderOpenAI, 0.49),
 		"cache_miss gemini":             cacheMissReport(agentGemini, ProviderGoogle, 0.72),
 		"repeated_skill":                repeatedSkillReport(3),
+		"repeated_skill deep-ranked":    deepSkillReport(),
 		"cap and order":                 capReport(),
 		"volume only":                   volumeOnlyReport(),
 		"cache_miss tool row no details": func() Report {
@@ -653,6 +764,11 @@ func TestRecommend_EveryFigureIsRendered(t *testing.T) {
 			r.Attributed.Contributors[1].Details = nil
 			return r
 		}(),
+		"subagent_model label with a digit": func() Report {
+			r := subagentModelReport(testModel, 0.30)
+			r.Attributed.Contributors[1] = labelledSubagentRow(testDigitLabel, testModel, 0.30, 5)
+			return r
+		}(),
 	}
 	for name, r := range fixtures {
 		t.Run(name, func(t *testing.T) {
@@ -661,27 +777,46 @@ func TestRecommend_EveryFigureIsRendered(t *testing.T) {
 			if len(recs) == 0 {
 				t.Fatal("fixture fired nothing")
 			}
-			rendered := renderedFigures(&r)
 			for _, rec := range recs {
-				figures := extractFigures(rec.Text)
-				if len(figures) == 0 {
+				if len(extractFigures(rec.Text, rec.Cited)) == 0 {
 					t.Fatalf("%s: no figures found in %q", rec.Cause, rec.Text)
 				}
-				for _, f := range figures {
-					if !rendered[f] {
-						t.Errorf("%s quotes %q, which no row renders: %q", rec.Cause, f, rec.Text)
-					}
-				}
+			}
+			if missing := unrenderedFigures(&r, recs, allCited(recs)); len(missing) > 0 {
+				t.Errorf("recommendations quote %v, which no rendered row carries: %+v", missing, recs)
 			}
 		})
 	}
 }
 
+// TestRecommend_DeepRowVisibleOnlyByCitation pins the contract: a skill row
+// ranked below MaxRenderedRows is visible only because the recommendation
+// cites it — without the citation its figures are not rendered.
+func TestRecommend_DeepRowVisibleOnlyByCitation(t *testing.T) {
+	t.Parallel()
+	r := deepSkillReport()
+	recs := Recommend(r)
+	rec := mustFireOnly(t, recs, CauseRepeatedSkill)
+	if idx := slices.IndexFunc(r.Attributed.Contributors, func(c Contributor) bool { return c.Kind == KindSkill }); idx < MaxRenderedRows {
+		t.Fatalf("fixture ranks the skill row at %d, want ≥ %d", idx, MaxRenderedRows)
+	}
+	mustCite(t, rec, Citation{Kind: KindSkill, Label: testSkill, Detail: testSkill})
+	if missing := unrenderedFigures(&r, recs, rec.Cited); len(missing) > 0 {
+		t.Fatalf("with the citation, %v are unrendered", missing)
+	}
+	missing := unrenderedFigures(&r, recs, nil)
+	want := []string{"3", "41.3k", "<1%"}
+	if !slices.Equal(missing, want) {
+		t.Fatalf("without the citation, unrendered = %v, want %v", missing, want)
+	}
+}
+
 func TestExtractFigures(t *testing.T) {
 	t.Parallel()
-	got := extractFigures("This session ran 9h 42m over 43 calls; `claude-fable-5` read 3.7M tokens (23% of cost), 1d 2h, 6m, 42s, 5.")
-	want := []string{"9h 42m", "1d 2h", "6m", "42s", "43", "3.7M", "23%", "5"}
-	if strings.Join(got, "|") != strings.Join(want, "|") {
+	cited := []Citation{{Kind: KindSubagent, Label: testDigitLabel}}
+	got := extractFigures("This session ran 9h 42m over 43 calls; gpt5-reviewer subagents on `claude-fable-5` read 3.7M tokens (23% of cost, <1% here), 1d 2h, 6m, 42s, 5.", cited)
+	want := []string{"9h 42m", "1d 2h", "6m", "42s", "43", "3.7M", "23%", "<1%", "5"}
+	if !slices.Equal(got, want) {
 		t.Fatalf("extractFigures = %v, want %v", got, want)
 	}
 }

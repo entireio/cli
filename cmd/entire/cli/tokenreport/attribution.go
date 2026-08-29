@@ -58,6 +58,22 @@ const (
 	LabelUnknownSubagent = "(unknown)"
 )
 
+// Renderer cutoffs for the contributor table. They live here, next to the
+// table's types, so the renderer and the recommendations agree on what is
+// visible: a Recommendation may quote a figure from any row or detail, and
+// cites the rows it quotes (Recommendation.Cited) so the renderer prints
+// them even below these cutoffs.
+const (
+	// MaxRenderedRows is how many Contributors the renderer prints, in
+	// Attributed.Contributors order, before "(N smaller items omitted)".
+	// Rows cited by a Recommendation are printed regardless of rank.
+	MaxRenderedRows = 6
+	// MaxRenderedDetails is how many of the top rows get their Details
+	// printed beneath them. A detail cited by a Recommendation is printed
+	// regardless of its row's rank.
+	MaxRenderedDetails = 3
+)
+
 // ContributorSource says where a Contributor's tokens were read from.
 type ContributorSource string
 
