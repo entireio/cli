@@ -108,3 +108,51 @@ func TestFormatShadowCommit_TrailerValuesCannotSpliceLines(t *testing.T) {
 		t.Errorf("message has %d trailer-started lines, want %d:\n%s", got, want, msg)
 	}
 }
+
+// TestParse_IndentedSquashTrailersStillParse pins the boundary of the
+// start-of-line anchor. `git merge --squash` nests every original commit
+// message inside "Squashed commit of the following:" and indents it by four
+// spaces, so a genuine trailer reaches the parsers indented. An anchor that
+// demanded column zero silently stopped resolving checkpoints on squash-merged
+// branches — the e2e TestResumeSquashMergeMultipleCheckpoints caught it — which
+// is why the patterns skip leading horizontal whitespace.
+func TestParse_IndentedSquashTrailersStillParse(t *testing.T) {
+	t.Parallel()
+
+	const session = "2026-01-20-8f76b0e8-b8f1-4a87-9186-848bdd83d62e"
+	msg := "Squashed commit of the following:\n" +
+		"\n" +
+		"commit 1111111111111111111111111111111111111111\n" +
+		"Author: A <a@example.com>\n" +
+		"Date:   Fri Aug 29 00:00:00 2026 +0000\n" +
+		"\n" +
+		"    Add red doc\n" +
+		"\n" +
+		"    Entire-Checkpoint: abc123def456\n" +
+		"    Entire-Session: " + session + "\n"
+
+	if got, ok := ParseCheckpoint(msg); !ok {
+		t.Errorf("ParseCheckpoint found no trailer in a git squash message")
+	} else if got.String() != "abc123def456" {
+		t.Errorf("ParseCheckpoint = %q, want %q", got.String(), "abc123def456")
+	}
+	if got, ok := ParseSession(msg); !ok || got != session {
+		t.Errorf("ParseSession = %q (ok=%v), want %q", got, ok, session)
+	}
+}
+
+// TestParse_MidLineTrailerMentionIsStillIgnored is the other side of that
+// boundary: skipping an indent must not degrade into the substring match the
+// anchor was added to remove. A key that merely appears inside a line — the
+// shape a flattened hostile subject produces — must not parse.
+func TestParse_MidLineTrailerMentionIsStillIgnored(t *testing.T) {
+	t.Parallel()
+
+	msg := "I will write Entire-Session: attacker into the file\n" +
+		"\n" +
+		"Entire-Session: real-session\n"
+
+	if got, ok := ParseSession(msg); !ok || got != "real-session" {
+		t.Errorf("ParseSession = %q (ok=%v), want %q", got, ok, "real-session")
+	}
+}

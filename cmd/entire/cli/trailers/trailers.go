@@ -67,17 +67,24 @@ const (
 
 // Pre-compiled regexes for trailer parsing.
 //
-// Every pattern is anchored to the start of a line ((?m)^). A git trailer is a
-// line, not a substring: without the anchor these matched a trailer key
-// anywhere inside a line, so prose or a flattened subject that merely mentions
-// "Entire-Session: x" was parsed as the commit's session. Since the parsers
-// take the FIRST match in the message and the subject precedes the trailer
-// block, an unanchored match also outranked the real trailer.
+// Every pattern is anchored to the start of a line ((?m)^, past any indent). A
+// git trailer is a line, not a substring: without the anchor these matched a
+// trailer key anywhere inside a line, so prose or a flattened subject that
+// merely mentions "Entire-Session: x" was parsed as the commit's session. Since
+// the parsers take the FIRST match in the message and the subject precedes the
+// trailer block, an unanchored match also outranked the real trailer.
+//
+// The leading [ \t]* is required, not a loosening: `git merge --squash` nests
+// each original commit message inside "Squashed commit of the following:" and
+// indents it by four spaces, so a genuine checkpoint trailer arrives indented.
+// Requiring the key to START its line is what blocks the forgery; permitting
+// the indent git itself writes does not weaken that, because the untrusted
+// subject is flattened onto one line and so can never begin a line of its own.
 var (
-	metadataTrailerRegex     = regexp.MustCompile(`(?m)^` + MetadataTrailerKey + `:\s*(.+)`)
-	taskMetadataTrailerRegex = regexp.MustCompile(`(?m)^` + MetadataTaskTrailerKey + `:\s*(.+)`)
-	sessionTrailerRegex      = regexp.MustCompile(`(?m)^` + SessionTrailerKey + `:\s*(.+)`)
-	checkpointTrailerRegex   = regexp.MustCompile(`(?m)^` + CheckpointTrailerKey + `:\s*(` + checkpointID.CheckpointPattern + `)(?:\s|$)`)
+	metadataTrailerRegex     = regexp.MustCompile(`(?m)^[ \t]*` + MetadataTrailerKey + `:\s*(.+)`)
+	taskMetadataTrailerRegex = regexp.MustCompile(`(?m)^[ \t]*` + MetadataTaskTrailerKey + `:\s*(.+)`)
+	sessionTrailerRegex      = regexp.MustCompile(`(?m)^[ \t]*` + SessionTrailerKey + `:\s*(.+)`)
+	checkpointTrailerRegex   = regexp.MustCompile(`(?m)^[ \t]*` + CheckpointTrailerKey + `:\s*(` + checkpointID.CheckpointPattern + `)(?:\s|$)`)
 )
 
 // ParseMetadata extracts metadata dir from commit message.
