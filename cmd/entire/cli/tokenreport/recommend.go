@@ -5,6 +5,8 @@ import (
 	"slices"
 	"strconv"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 )
@@ -241,8 +243,10 @@ type Report struct {
 // repeated_skill), and the top two are returned. The addressed share is: the
 // cache-read share (long_session), the qualifying row's share
 // (context_growth, subagent_model, repeated_skill), Cost.Thinking (thinking)
-// and Cost.Input (cache_miss). When nothing fires the result is nil — there
-// is no "looks fine" recommendation.
+// and Cost.Input (cache_miss). A repeated_skill that cites the skill row a
+// fired context_growth already cites is dropped first (see dropOverlapping).
+// When nothing fires the result is nil — there is no "looks fine"
+// recommendation.
 func Recommend(r Report) []Recommendation {
 	return RecommendWithGates(r, GatesFor(r.Agent))
 }
@@ -264,6 +268,7 @@ func RecommendWithGates(r Report, g Gates) []Recommendation {
 			fired = append(fired, candidate{rec: rec, share: share, order: order})
 		}
 	}
+	fired = dropOverlapping(fired)
 	slices.SortStableFunc(fired, func(a, b candidate) int {
 		if c := cmp.Compare(b.share, a.share); c != 0 {
 			return c
@@ -275,6 +280,30 @@ func RecommendWithGates(r Report, g Gates) []Recommendation {
 		out = append(out, fired[i].rec)
 	}
 	return out
+}
+
+// dropOverlapping removes a repeated_skill candidate that cites the same
+// skill row a context_growth candidate cites: both would say an overlapping
+// thing about one row, and the context_growth sentence already carries the
+// load count.
+func dropOverlapping(fired []candidate) []candidate {
+	var growthRows []Citation
+	for _, c := range fired {
+		if c.rec.Cause == CauseContextGrowth {
+			growthRows = append(growthRows, c.rec.Cited...)
+		}
+	}
+	return slices.DeleteFunc(fired, func(c candidate) bool {
+		return c.rec.Cause == CauseRepeatedSkill && slices.ContainsFunc(c.rec.Cited, func(ct Citation) bool {
+			return slices.ContainsFunc(growthRows, func(g Citation) bool { return sameRow(g, ct) })
+		})
+	})
+}
+
+// sameRow reports whether two citations name the same contributor row
+// (Kind, Label, Skill), regardless of Detail.
+func sameRow(a, b Citation) bool {
+	return a.Kind == b.Kind && a.Label == b.Label && a.Skill == b.Skill
 }
 
 // candidate is a fired recommendation with the share it addresses and its
@@ -388,13 +417,23 @@ func largestRow(rows []Contributor, keep func(*Contributor) bool, key func(*Cont
 // rowShare is a largestRow key: the row's cost share.
 func rowShare(c *Contributor) float64 { return c.CostShare }
 
-// subagentSubject names a subagent row's type as a plural subject: "Explore
-// subagents", or "Unlabelled subagents" for LabelUnknownSubagent.
+// subagentSubject names a subagent row's type as a plural mid-sentence
+// subject: "Explore subagents", or "unlabelled subagents" for
+// LabelUnknownSubagent. Use upperFirst when it opens a sentence.
 func subagentSubject(label string) string {
 	if label == LabelUnknownSubagent {
-		return "Unlabelled subagents"
+		return "unlabelled subagents"
 	}
 	return label + " subagents"
+}
+
+// upperFirst capitalises the first rune of s.
+func upperFirst(s string) string {
+	r, size := utf8.DecodeRuneInString(s)
+	if r == utf8.RuneError {
+		return s
+	}
+	return string(unicode.ToUpper(r)) + s[size:]
 }
 
 // recommendLongSession fires when the duration arm or the cache-read arm of
@@ -475,8 +514,12 @@ func carriesCacheWrites(c *Contributor) bool {
 //
 //	tool     "Bash output (during systematic-debugging) read back into context,
 //	          led by `go test ./cmd/entire/...` (9 calls, 140.2k tokens, 17%)"
-//	skill    "loading the `artifact-design` skill into context 3 times (41.3k tokens, 25%)"
-//	subagent "Explore subagents (5 runs, 4.7M tokens, 25%) writing results into context"
+//	skill    "loading the `artifact-design` skill into context 3 times (41.3k tokens)"
+//	subagent "Explore subagents (5 runs, 4.7M tokens) writing results into context"
+//
+// The skill and subagent forms quote tokens only: the row's share is already
+// the sentence's opening figure.
+//
 //	prompt   "prompt and system context written into the cache"
 func contextGrowthSubject(r *Report, c *Contributor) (string, *Detail) {
 	switch c.Kind {
@@ -497,9 +540,9 @@ func contextGrowthSubject(r *Report, c *Contributor) (string, *Detail) {
 		if d != nil {
 			s += " " + strconv.Itoa(d.Calls) + " times"
 		}
-		return s + " (" + rowFigures(r, c, false) + ")", d
+		return s + " (" + FormatTokenCount(volume(&c.Usage)) + " tokens)", d
 	case KindSubagent:
-		figures := rowFigures(r, c, false)
+		figures := FormatTokenCount(volume(&c.Usage)) + " tokens"
 		d := selfDetail(c)
 		if d != nil {
 			figures = strconv.Itoa(d.Calls) + " runs, " + figures
@@ -544,7 +587,7 @@ func recommendSubagentModel(r *Report, g Gates) (Recommendation, float64, bool) 
 	if row == nil || row.CostShare <= 0 || row.CostShare < g.SubagentModelShare {
 		return Recommendation{}, 0, false
 	}
-	text := subagentSubject(row.Label) + " ran"
+	text := upperFirst(subagentSubject(row.Label)) + " ran"
 	d := selfDetail(row)
 	if d != nil && d.Calls > 0 {
 		text += " " + strconv.Itoa(d.Calls) + " times"
@@ -602,15 +645,18 @@ func recommendCacheMiss(r *Report, g Gates) (Recommendation, float64, bool) {
 	if !r.costPriced() || !cacheMissEligible(r.Cost.Provider) || r.Cost.Input < g.CacheMissShare {
 		return Recommendation{}, 0, false
 	}
-	const advice = " Keeping the same system prompt and tool set across calls lets more of each request come from the cache."
-	text := FormatPercent(r.Cost.Input) + " of the cost was uncached input — context that arrived fresh on each call instead of from the cache."
+	const (
+		advice     = " Keeping the same system prompt and tool set across calls lets more of each request come from the cache."
+		toolAdvice = " Tool output is always fresh the first time it is read, but keeping the same system prompt and tool set across calls lets the rest of each request come from the cache."
+	)
+	text := FormatPercent(r.Cost.Input) + " of the cost was uncached input — context that arrived fresh on each call instead of from the cache"
 	isTool := func(c *Contributor) bool { return c.Kind == KindTool && c.Usage.InputTokens > 0 }
 	freshInput := func(c *Contributor) float64 { return float64(c.Usage.InputTokens) }
 	row := largestRow(r.Attributed.Contributors, isTool, freshInput)
 	if row == nil {
-		return sessionRecommendation(CauseCacheMiss, text+advice), r.Cost.Input, true
+		return sessionRecommendation(CauseCacheMiss, text+"."+advice), r.Cost.Input, true
 	}
-	text += " The largest tool source was " + row.Label
+	text += " — with " + row.Label + " the largest tool source"
 	var d *Detail
 	if len(row.Details) > 0 {
 		d = &row.Details[0]
@@ -618,7 +664,7 @@ func recommendCacheMiss(r *Report, g Gates) (Recommendation, float64, bool) {
 	} else {
 		text += " (" + rowFigures(r, row, false) + ")."
 	}
-	return sessionRecommendation(CauseCacheMiss, text+advice, cite(row, d)), r.Cost.Input, true
+	return sessionRecommendation(CauseCacheMiss, text+toolAdvice, cite(row, d)), r.Cost.Input, true
 }
 
 // cacheMissEligible reports whether cache_miss can fire for a report priced

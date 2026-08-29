@@ -341,17 +341,6 @@ func mustFireOnly(t *testing.T, recs []Recommendation, want Cause) Recommendatio
 	return rec
 }
 
-// mustFire returns the recommendation for cause among recs, failing when
-// none fired for it.
-func mustFire(t *testing.T, recs []Recommendation, cause Cause) Recommendation {
-	t.Helper()
-	i := slices.IndexFunc(recs, func(rec Recommendation) bool { return rec.Cause == cause })
-	if i < 0 {
-		t.Fatalf("got causes %v, want %s among them", causes(recs), cause)
-	}
-	return recs[i]
-}
-
 func mustFireNothing(t *testing.T, recs []Recommendation) {
 	t.Helper()
 	if len(recs) != 0 {
@@ -483,17 +472,24 @@ func TestRecommend_ContextGrowth(t *testing.T) {
 		mustNotContain(t, rec.Text, phraseLedBy)
 		mustCite(t, rec, Citation{Kind: KindTool, Label: testTool})
 	})
-	t.Run("skill row folds the load count into the subject", func(t *testing.T) {
+	t.Run("skill row folds the load count into the subject and suppresses repeated_skill on that row", func(t *testing.T) {
 		t.Parallel()
-		// The same row also fires repeated_skill; check the context_growth one.
-		rec := mustFire(t, Recommend(contextGrowthSkillReport()), CauseContextGrowth)
-		mustContain(t, rec.Text, "25% of the cost was loading the `"+testSkill+"` skill into context 3 times (41.3k tokens, 25%). A slimmer skill would have avoided most of it.")
+		rec := mustFireOnly(t, Recommend(contextGrowthSkillReport()), CauseContextGrowth)
+		mustContain(t, rec.Text, "25% of the cost was loading the `"+testSkill+"` skill into context 3 times (41.3k tokens). A slimmer skill would have avoided most of it.")
 		mustCite(t, rec, Citation{Kind: KindSkill, Label: testSkill, Detail: testSkill})
+	})
+	t.Run("repeated_skill still fires when context_growth is on another row", func(t *testing.T) {
+		t.Parallel()
+		r := contextGrowthReport(true)
+		r.Attributed.Contributors = append(r.Attributed.Contributors, skillRow(0.04, 3))
+		if got := causes(Recommend(r)); !slices.Equal(got, []Cause{CauseContextGrowth, CauseRepeatedSkill}) {
+			t.Fatalf("causes = %v, want [context_growth repeated_skill]", got)
+		}
 	})
 	t.Run("subagent row folds the run count into the subject", func(t *testing.T) {
 		t.Parallel()
 		rec := mustFireOnly(t, Recommend(contextGrowthSubagentReport()), CauseContextGrowth)
-		mustContain(t, rec.Text, "25% of the cost was "+testSubagent+" subagents (5 runs, 4.7M tokens, 25%) writing results into context. Shorter subagent briefs and results would have avoided most of it.")
+		mustContain(t, rec.Text, "25% of the cost was "+testSubagent+" subagents (5 runs, 4.7M tokens) writing results into context. Shorter subagent briefs and results would have avoided most of it.")
 		mustCite(t, rec, Citation{Kind: KindSubagent, Label: testSubagent, Detail: testSubagent})
 	})
 	t.Run("unlabelled subagent row without self detail", func(t *testing.T) {
@@ -501,7 +497,7 @@ func TestRecommend_ContextGrowth(t *testing.T) {
 		r := contextGrowthSubagentReport()
 		r.Attributed.Contributors[1].Label = LabelUnknownSubagent
 		rec := mustFireOnly(t, Recommend(r), CauseContextGrowth)
-		mustContain(t, rec.Text, "was Unlabelled subagents (4.7M tokens, 25%) writing")
+		mustContain(t, rec.Text, "was unlabelled subagents (4.7M tokens) writing")
 		mustNotContain(t, rec.Text, LabelUnknownSubagent)
 		mustCite(t, rec, Citation{Kind: KindSubagent, Label: LabelUnknownSubagent})
 	})
@@ -655,7 +651,10 @@ func TestRecommend_Thinking(t *testing.T) {
 
 func TestRecommend_CacheMiss(t *testing.T) {
 	t.Parallel()
-	const advice = "Keeping the same system prompt and tool set across calls lets more of each request come from the cache."
+	const (
+		advice     = "Keeping the same system prompt and tool set across calls lets more of each request come from the cache."
+		toolAdvice = "Tool output is always fresh the first time it is read, but keeping the same system prompt and tool set across calls lets the rest of each request come from the cache."
+	)
 
 	cases := []struct {
 		name  string
@@ -672,7 +671,7 @@ func TestRecommend_CacheMiss(t *testing.T) {
 			g := GatesFor(tc.agent)
 			r := cacheMissReport(tc.agent, tc.p, g.CacheMissShare)
 			rec := mustFireOnly(t, Recommend(r), CauseCacheMiss)
-			mustContain(t, rec.Text, FormatPercent(g.CacheMissShare)+" of the cost was uncached input — context that arrived fresh on each call instead of from the cache. The largest tool source was "+testTool+", "+phraseLedBy+" `"+testCommand+"` (12 calls, 1.2M tokens, 31%). "+advice)
+			mustContain(t, rec.Text, FormatPercent(g.CacheMissShare)+" of the cost was uncached input — context that arrived fresh on each call instead of from the cache — with "+testTool+" the largest tool source, "+phraseLedBy+" `"+testCommand+"` (12 calls, 1.2M tokens, 31%). "+toolAdvice)
 			mustCite(t, rec, Citation{Kind: KindTool, Label: testTool, Detail: testCommand})
 		})
 		t.Run(tc.name+" one point short misses", func(t *testing.T) {
@@ -707,7 +706,7 @@ func TestRecommend_CacheMiss(t *testing.T) {
 	t.Run("tool row without details quotes and cites the row", func(t *testing.T) {
 		t.Parallel()
 		rec := mustFireOnly(t, Recommend(cacheMissNoDetailReport()), CauseCacheMiss)
-		mustContain(t, rec.Text, "The largest tool source was "+testTool+" (164.6k tokens, 31%). "+advice)
+		mustContain(t, rec.Text, " — with "+testTool+" the largest tool source (164.6k tokens, 31%). "+toolAdvice)
 		mustNotContain(t, rec.Text, phraseOfCost)
 		mustCite(t, rec, Citation{Kind: KindTool, Label: testTool})
 	})
