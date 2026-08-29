@@ -350,10 +350,12 @@ func attributeCheckpointTokenSession(ctx context.Context, cpID id.CheckpointID, 
 	if s.transcript == nil {
 		a.notes = append(a.notes, label+": stored transcript unavailable; totals from committed metadata")
 		if s.transcriptErr != nil {
+			// Same shape as `session tokens`' warn: the reason class, not
+			// the error text (transcriptUnavailableReason).
 			logging.Warn(ctx, "checkpoint tokens: session transcript unreadable",
 				slog.String("checkpoint_id", cpID.String()),
 				slog.Int("session_index", s.index),
-				slog.String("error", s.transcriptErr.Error()))
+				slog.String("reason", transcriptUnavailableReason(s.transcriptErr)))
 		}
 		return a
 	}

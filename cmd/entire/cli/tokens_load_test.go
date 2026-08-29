@@ -1,6 +1,9 @@
 package cli
 
 import (
+	"errors"
+	"fmt"
+	"io/fs"
 	"strings"
 	"testing"
 
@@ -93,5 +96,26 @@ func TestCountUnmatchedSubagentRefsIncludesConsumedOnlyRefs(t *testing.T) {
 	attribution.Subagents = []types.SubagentRecord{{ToolUseID: "toolu_before", SubagentType: "Explore"}}
 	if got := countUnmatchedSubagentRefs(attribution); got != 1 {
 		t.Errorf("unmatched after recording the consumed-only ref = %d, want 1", got)
+	}
+}
+
+func TestTranscriptUnavailableReason(t *testing.T) {
+	t.Parallel()
+
+	cases := map[string]struct {
+		err  error
+		want string
+	}{
+		"wrapped not-exist":  {fmt.Errorf("resolve transcript path: %w", fs.ErrNotExist), "not_found"},
+		"path error":         {fmt.Errorf("read transcript: %w", &fs.PathError{Op: "open", Path: "/x", Err: fs.ErrNotExist}), "not_found"},
+		"other error":        {errors.New("permission denied"), "unreadable"},
+		"wrapped permission": {fmt.Errorf("read transcript: %w", fs.ErrPermission), "unreadable"},
+		"checkpoint gone":    {fmt.Errorf("read session: %w", checkpoint.ErrCheckpointNotFound), "not_found"},
+		"no transcript":      {checkpoint.ErrNoTranscript, "unreadable"},
+	}
+	for name, tc := range cases {
+		if got := transcriptUnavailableReason(tc.err); got != tc.want {
+			t.Errorf("%s: transcriptUnavailableReason = %q, want %q", name, got, tc.want)
+		}
 	}
 }

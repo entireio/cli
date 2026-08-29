@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io/fs"
 	"strings"
 	"testing"
 	"time"
@@ -12,6 +14,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
+	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/tokenreport"
 )
 
@@ -287,6 +290,72 @@ func TestBuildCheckpointTokensReport_UnreadableTranscriptIsANote(t *testing.T) {
 	}
 	if report.Tokens == nil || report.Tokens.Total != 15 {
 		t.Errorf("tokens = %+v", report.Tokens)
+	}
+}
+
+// contentErrTokenReader reads metadata from its stub sessions but fails
+// every transcript read with contentErr.
+type contentErrTokenReader struct {
+	stubCommittedReader
+
+	contentErr error
+}
+
+func (r *contentErrTokenReader) ReadSessionContent(context.Context, id.CheckpointID, int) (*checkpoint.SessionContent, error) {
+	return nil, r.contentErr
+}
+
+// TestBuildCheckpointTokensReport_UnreadableTranscriptWarnIsClassified pins
+// the warn shape shared with `session tokens`: a transcript the store cannot
+// read is logged with a reason class and never the error text.
+func TestBuildCheckpointTokensReport_UnreadableTranscriptWarnIsClassified(t *testing.T) {
+	t.Parallel()
+
+	cases := map[string]struct {
+		err    error
+		reason string
+	}{
+		"store error":  {errors.New("read blob secret-repo/full.jsonl: boom"), "unreadable"},
+		"missing blob": {fmt.Errorf("read blob: %w", fs.ErrNotExist), "not_found"},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			logDir := t.TempDir()
+			l, err := logging.New(logging.Config{Dir: logDir})
+			if err != nil {
+				t.Fatalf("logging.New() error = %v", err)
+			}
+			ctx := logging.WithLogger(context.Background(), l)
+			meta := checkpoint.Metadata{SessionID: "warn", Agent: agent.AgentTypeClaudeCode, TokenUsage: &types.TokenUsage{InputTokens: 10, APICallCount: 1}}
+			reader := &contentErrTokenReader{
+				stubCommittedReader: stubCommittedReader{
+					summary:  tokenTestSummary(1, checkpoint.TokenUsageVersionDelta),
+					contents: map[int]*checkpoint.SessionContent{0: tokenTestSession(meta, nil)},
+				},
+				contentErr: tc.err,
+			}
+			inputs, err := loadCheckpointTokenInputs(ctx, reader, id.MustCheckpointID("abc123abc123"), reader.summary)
+			if err != nil {
+				t.Fatalf("loadCheckpointTokenInputs: %v", err)
+			}
+			report := buildCheckpointTokensReport(ctx, inputs)
+			if err := l.Close(); err != nil {
+				t.Fatalf("Close() error = %v", err)
+			}
+			if !strings.Contains(strings.Join(report.Limitations, "\n"), "session 1: stored transcript unavailable; totals from committed metadata") {
+				t.Errorf("limitations = %+v", report.Limitations)
+			}
+
+			logged := readLogDir(t, logDir)
+			assertContainsAll(t, logged, "checkpoint tokens: session transcript unreadable", `"checkpoint_id":"`, `"session_index":0`, `"reason":"`+tc.reason+`"`)
+			for _, absent := range []string{`"error"`, "boom", "secret-repo"} {
+				if strings.Contains(logged, absent) {
+					t.Errorf("the log must not carry %q:\n%s", absent, logged)
+				}
+			}
+		})
 	}
 }
 

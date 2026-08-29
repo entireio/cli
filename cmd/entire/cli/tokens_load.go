@@ -1,7 +1,9 @@
 package cli
 
 import (
+	"errors"
 	"fmt"
+	"io/fs"
 	"maps"
 	"slices"
 	"time"
@@ -39,6 +41,20 @@ func resolveTokenAttributor(agentType types.AgentType) (agent.TokenAttributor, s
 		return nil, fmt.Sprintf("per-call attribution is not available for %s", agentType), false
 	}
 	return attributor, "", true
+}
+
+// transcriptUnavailableReason classifies a transcript read error for the
+// "transcript unreadable" warn both token commands log: "not_found" when the
+// transcript does not exist (a live transcript file that is gone, or a
+// checkpoint the store has no record of), else "unreadable". A live
+// transcript's error names its path (user content), while a store error
+// does not; logging only the class keeps the two commands' logs uniform and
+// path-free either way.
+func transcriptUnavailableReason(err error) string {
+	if errors.Is(err, fs.ErrNotExist) || errors.Is(err, checkpoint.ErrCheckpointNotFound) {
+		return "not_found"
+	}
+	return "unreadable"
 }
 
 // separateSessionSubagentNote is the "subagent tokens are not included" note

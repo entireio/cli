@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"io/fs"
 	"log/slog"
 	"math/bits"
 	"os"
@@ -308,16 +307,6 @@ func attributeSessionTokens(ctx context.Context, state *strategy.SessionState, m
 	applySkillEventAnchors(attribution, state.SkillEvents)
 	a.attribution = attribution
 	return a
-}
-
-// transcriptUnavailableReason classifies a readSessionTranscript error for
-// the log: "not_found" when the file does not exist, else "unreadable".
-// Neither carries the path.
-func transcriptUnavailableReason(err error) string {
-	if errors.Is(err, fs.ErrNotExist) {
-		return "not_found"
-	}
-	return "unreadable"
 }
 
 // readSessionTranscript resolves the session's live transcript path (the

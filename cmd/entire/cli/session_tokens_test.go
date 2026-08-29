@@ -4,9 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
-	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -328,25 +326,6 @@ func TestSessionTokens_UnreadableTranscriptWarnOmitsPath(t *testing.T) {
 	for _, absent := range []string{transcriptPath, "secret-project-name", `"error"`} {
 		if strings.Contains(logged, absent) {
 			t.Errorf("the log must not carry %q:\n%s", absent, logged)
-		}
-	}
-}
-
-func TestTranscriptUnavailableReason(t *testing.T) {
-	t.Parallel()
-
-	cases := map[string]struct {
-		err  error
-		want string
-	}{
-		"wrapped not-exist":  {fmt.Errorf("resolve transcript path: %w", fs.ErrNotExist), "not_found"},
-		"path error":         {fmt.Errorf("read transcript: %w", &fs.PathError{Op: "open", Path: "/x", Err: fs.ErrNotExist}), "not_found"},
-		"other error":        {errors.New("permission denied"), "unreadable"},
-		"wrapped permission": {fmt.Errorf("read transcript: %w", fs.ErrPermission), "unreadable"},
-	}
-	for name, tc := range cases {
-		if got := transcriptUnavailableReason(tc.err); got != tc.want {
-			t.Errorf("%s: transcriptUnavailableReason = %q, want %q", name, got, tc.want)
 		}
 	}
 }
