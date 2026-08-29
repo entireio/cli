@@ -224,3 +224,80 @@ func TestCappedBuffer_KeepsPrefixAndReportsFullWrite(t *testing.T) {
 		t.Fatalf("kept %q, want the first 5 bytes", b.String())
 	}
 }
+
+// A replayed turn-end has no pre-prompt baseline, so it subtracts the dirty
+// tracked paths snapshotted at adoption: the user's pending edit stays out of
+// the checkpoint, the agent's deletion — which no transcript ever names, so
+// evidence-narrowing would drop it — stays in.
+func TestReplayedTurnEnd_UsesReplicaDirtyBaselineForTrackedChanges(t *testing.T) {
+	t.Setenv(bindingReplayEnv, "1")
+	t.Setenv(bindingReplayPrimaryEnv, "1")
+	t.Setenv("ENTIRE_CONFIG_DIR", t.TempDir())
+
+	root := newBindingRepo(t)
+	testutil.WriteFile(t, root, "user-edit.txt", "base\n")
+	testutil.WriteFile(t, root, "gone.txt", "base\n")
+	testutil.WriteFile(t, root, "agent-edit.txt", "base\n")
+	testutil.GitAdd(t, root, "user-edit.txt", "gone.txt", "agent-edit.txt")
+	testutil.GitCommit(t, root, "initial")
+	testutil.WriteFile(t, root, "user-edit.txt", "the user's own pending change\n") // predates the session
+	// The agent's turn: edits one tracked file, deletes another.
+	testutil.WriteFile(t, root, "agent-edit.txt", "changed by the agent\n")
+	if err := os.Remove(filepath.Join(root, "gone.txt")); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(root)
+	paths.ClearWorktreeRootCache()
+
+	transcriptPath := filepath.Join(root, "transcript.jsonl")
+	transcriptData := []byte(`{"type":"user","message":"edit agent-edit.txt"}` + "\n")
+	if err := os.WriteFile(transcriptPath, transcriptData, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	sessionID := "binding-replay-dirty-baseline"
+	now := time.Now()
+	state := &session.State{
+		SessionID:                sessionID,
+		BaseCommit:               testutil.GetHeadHash(t, root),
+		AttributionBaseCommit:    testutil.GetHeadHash(t, root),
+		WorktreePath:             root,
+		StartedAt:                now.Add(-time.Minute),
+		LastInteractionTime:      &now,
+		Phase:                    session.PhaseActive,
+		AgentType:                types.AgentType("Mock Analyzer Agent"),
+		TranscriptPath:           transcriptPath,
+		FilesTouched:             []string{"agent-edit.txt"},
+		DirtyTrackedFilesAtStart: []string{"user-edit.txt"},
+	}
+	store := session.NewStateStoreWithDir(filepath.Join(root, ".git", session.SessionStateDirName))
+	if err := store.Save(context.Background(), state); err != nil {
+		t.Fatal(err)
+	}
+
+	ag := &mockAnalyzerAgent{
+		mockLifecycleAgent: &mockLifecycleAgent{
+			name:           "mock-analyzer",
+			agentType:      "Mock Analyzer Agent",
+			transcriptData: transcriptData,
+		},
+		analyzerFiles: []string{filepath.Join(root, "agent-edit.txt")},
+	}
+	event := &agent.Event{Type: agent.TurnEnd, SessionID: sessionID, SessionRef: transcriptPath, Timestamp: now}
+	if err := handleLifecycleTurnEnd(context.Background(), ag, event); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := strategy.LoadSessionState(context.Background(), sessionID)
+	if err != nil || got == nil || got.StepCount != 1 {
+		t.Fatalf("replayed state = %+v (err %v), want one checkpointed step", got, err)
+	}
+	if !slices.Contains(got.FilesTouched, "gone.txt") {
+		t.Errorf("the agent's deletion must be credited to the turn: %v", got.FilesTouched)
+	}
+	if !slices.Contains(got.FilesTouched, "agent-edit.txt") {
+		t.Errorf("the agent's tracked edit must be credited: %v", got.FilesTouched)
+	}
+	if slices.Contains(got.FilesTouched, "user-edit.txt") {
+		t.Errorf("the user's pending edit predates the session and must not be attributed: %v", got.FilesTouched)
+	}
+}

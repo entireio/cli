@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -16,6 +17,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/binding"
 	"github.com/entireio/cli/cmd/entire/cli/execx"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
+	"github.com/entireio/cli/cmd/entire/cli/strategy"
 )
 
 const (
@@ -173,8 +175,11 @@ func executeBindingReplayHook(ctx context.Context, targetRoot, agentName, hookNa
 	}
 	cmd.Env = append(os.Environ(), bindingReplayEnv+"=1", bindingReplayPrimaryEnv+"="+primaryValue)
 	if err := cmd.Run(); err != nil {
-		if runCtx.Err() != nil {
+		if errors.Is(runCtx.Err(), context.DeadlineExceeded) && ctx.Err() == nil {
 			return fmt.Errorf("run replayed hook: timed out after %s", bindingReplayTimeout)
+		}
+		if ctx.Err() != nil {
+			return fmt.Errorf("run replayed hook: cancelled: %w", ctx.Err())
 		}
 		if msg := strings.TrimSpace(stderr.String()); msg != "" {
 			return fmt.Errorf("run replayed hook: %w: %s", err, msg)
@@ -228,6 +233,36 @@ func bindingTurnKeepsTokenUsage(ctx context.Context, currentCommonDir string) bo
 
 func bindingReplayActive() bool {
 	return os.Getenv(bindingReplayEnv) == "1"
+}
+
+// replicaDirtyTrackedBaseline returns the tracked paths that were already
+// dirty in this worktree when the bound session was replicated here (see
+// State.DirtyTrackedFilesAtStart); empty when the state is missing or the
+// session was launched here.
+func replicaDirtyTrackedBaseline(ctx context.Context, sessionID string) []string {
+	state, err := strategy.LoadSessionState(ctx, sessionID)
+	if err != nil || state == nil {
+		return nil
+	}
+	return state.DirtyTrackedFilesAtStart
+}
+
+// excludeFiles returns files without any entry of exclude, preserving order.
+func excludeFiles(files, exclude []string) []string {
+	if len(exclude) == 0 || len(files) == 0 {
+		return files
+	}
+	drop := make(map[string]struct{}, len(exclude))
+	for _, f := range exclude {
+		drop[f] = struct{}{}
+	}
+	out := make([]string, 0, len(files))
+	for _, f := range files {
+		if _, dropped := drop[f]; !dropped {
+			out = append(out, f)
+		}
+	}
+	return out
 }
 
 func filterBindingReplayNewFiles(newFiles, transcriptFiles []string) []string {

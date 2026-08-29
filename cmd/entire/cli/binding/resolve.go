@@ -171,11 +171,12 @@ func runRevParse(ctx context.Context, dir string, absoluteFlag bool) (RepoIdenti
 		root = canonicalize(root)
 		commonDir = canonicalize(commonDir)
 	}
-	root = filepath.Clean(root)
-	commonDir = filepath.Clean(commonDir)
 	if root == "" || commonDir == "" {
 		return RepoIdentity{}, false
 	}
+	// Clean AFTER the emptiness guard: Clean("") is ".", which would pass it.
+	root = filepath.Clean(root)
+	commonDir = filepath.Clean(commonDir)
 	return RepoIdentity{WorktreeRoot: root, CommonDir: commonDir}, true
 }
 

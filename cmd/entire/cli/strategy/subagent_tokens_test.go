@@ -584,28 +584,38 @@ func TestSaveStep_TokensAttributedElsewhereKeepSessionTotal(t *testing.T) {
 	require.NoError(t, os.MkdirAll(metadataDirAbs, 0o755))
 	require.NoError(t, os.WriteFile(filepath.Join(metadataDirAbs, paths.TranscriptFileName), []byte(`{"type":"human","message":{"content":"test"}}`+"\n"), 0o644))
 
-	step := func(content string, elsewhere bool) {
+	// SubagentTokens is a cumulative-since-session-start snapshot, so each
+	// step carries the running total as CalculateTotalTokenUsage would.
+	step := func(content string, elsewhere bool, subagentCumulative int) {
 		require.NoError(t, os.WriteFile(filepath.Join(dir, "test.txt"), []byte(content), 0o644))
 		require.NoError(t, s.SaveStep(ctx, StepContext{
-			SessionID:                 sessionID,
-			MetadataDir:               metadataDir,
-			MetadataDirAbs:            metadataDirAbs,
-			ModifiedFiles:             []string{"test.txt"},
-			CommitMessage:             "step",
-			AuthorName:                "Test",
-			AuthorEmail:               "test@test.com",
-			AgentType:                 agent.AgentTypeClaudeCode,
-			TokenUsage:                &agent.TokenUsage{InputTokens: 100, OutputTokens: 50, APICallCount: 1},
+			SessionID:      sessionID,
+			MetadataDir:    metadataDir,
+			MetadataDirAbs: metadataDirAbs,
+			ModifiedFiles:  []string{"test.txt"},
+			CommitMessage:  "step",
+			AuthorName:     "Test",
+			AuthorEmail:    "test@test.com",
+			AgentType:      agent.AgentTypeClaudeCode,
+			TokenUsage: &agent.TokenUsage{
+				InputTokens: 100, OutputTokens: 50, APICallCount: 1,
+				SubagentTokens: &agent.TokenUsage{InputTokens: subagentCumulative, APICallCount: 1},
+			},
 			TokensAttributedElsewhere: elsewhere,
 		}))
 	}
-	step("v2", false)
-	step("v3", true)
+	step("v2", false, 500) // primary: 500 subagent tokens so far
+	step("v3", true, 800)  // attributed elsewhere: 300 more subagent tokens spent
+	step("v4", false, 900) // primary again: 100 more
 
 	state, err := s.loadSessionState(ctx, sessionID)
 	require.NoError(t, err)
 	require.NotNil(t, state.TokenUsage)
-	require.Equal(t, 200, state.TokenUsage.InputTokens, "session total counts every turn")
+	require.Equal(t, 300, state.TokenUsage.InputTokens, "session total counts every turn")
+	require.Equal(t, 900, state.TokenUsage.SubagentTokens.InputTokens, "session-wide subagent total is the latest cumulative")
 	require.NotNil(t, state.CheckpointTokenUsage)
-	require.Equal(t, 100, state.CheckpointTokenUsage.InputTokens, "checkpoint delta skips the turn attributed to another repo")
+	require.Equal(t, 200, state.CheckpointTokenUsage.InputTokens, "checkpoint delta skips the turn attributed to another repo")
+	require.NotNil(t, state.CheckpointTokenUsage.SubagentTokens)
+	require.Equal(t, 600, state.CheckpointTokenUsage.SubagentTokens.InputTokens,
+		"the 300 subagent tokens spent on the attributed-elsewhere turn must not land in this repo's checkpoint, before or after it")
 }

@@ -472,7 +472,10 @@ type sessionTargetSnapshot struct {
 	branch         string
 	filesTouched   []string
 	untrackedFiles []string
-	now            time.Time
+	// dirtyTrackedFiles: tracked paths already modified/deleted/staged in the
+	// target when the state is created there (see State.DirtyTrackedFilesAtStart).
+	dirtyTrackedFiles []string
+	now               time.Time
 }
 
 // resetSessionStateForTarget applies the target-local half of adoption. The
@@ -516,6 +519,7 @@ func resetSessionStateForTarget(state *session.State, target sessionTargetSnapsh
 
 	state.FullyCondensed = false
 	state.UntrackedFilesAtStart = target.untrackedFiles
+	state.DirtyTrackedFilesAtStart = target.dirtyTrackedFiles
 	state.PromptAttributions = nil
 	state.PendingPromptAttribution = nil
 	state.PromptWindowBase = state.SessionTurnCount
