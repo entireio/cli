@@ -175,6 +175,55 @@
           "displayName": "ReadFile",
           "description": "Reads and returns the content of a specified file.",
           "renderOutputAsMarkdown": true
+        },
+        {
+          "id": "activate_skill-1773867961208-5",
+          "name": "activate_skill",
+          "args": {
+            "name": "artifact-design"
+          },
+          "result": [
+            {
+              "functionResponse": {
+                "id": "activate_skill-1773867961208-5",
+                "name": "activate_skill",
+                "response": {
+                  "output": "Skill artifact-design activated."
+                }
+              }
+            }
+          ],
+          "resultDisplay": "Skill artifact-design activated.",
+          "status": "success",
+          "timestamp": "2026-03-18T21:06:04.000Z",
+          "displayName": "ActivateSkill",
+          "description": "Activates a skill by name.",
+          "renderOutputAsMarkdown": true
+        },
+        {
+          "id": "delegate_to_agent-1773867961208-6",
+          "name": "delegate_to_agent",
+          "args": {
+            "agent_name": "codebase_investigator",
+            "objective": "Find where the synthetic helper is defined."
+          },
+          "result": [
+            {
+              "functionResponse": {
+                "id": "delegate_to_agent-1773867961208-6",
+                "name": "delegate_to_agent",
+                "response": {
+                  "output": "Delegated to codebase_investigator."
+                }
+              }
+            }
+          ],
+          "resultDisplay": "Delegated to codebase_investigator.",
+          "status": "success",
+          "timestamp": "2026-03-18T21:06:05.000Z",
+          "displayName": "DelegateToAgent",
+          "description": "Delegates an objective to a named subagent.",
+          "renderOutputAsMarkdown": true
         }
       ]
     },

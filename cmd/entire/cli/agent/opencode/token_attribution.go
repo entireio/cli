@@ -2,7 +2,6 @@ package opencode
 
 import (
 	"cmp"
-	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
@@ -27,30 +26,12 @@ const (
 	skillInputName = "name"
 )
 
-// timeSpan is the earliest and latest timestamp noted so far; zero until the
-// first note.
-type timeSpan struct {
-	start, end time.Time
-}
-
-// note widens the span to include at; a zero at is ignored.
-func (s *timeSpan) note(at time.Time) {
-	if at.IsZero() {
-		return
-	}
-	if s.start.IsZero() || at.Before(s.start) {
-		s.start = at
-	}
-	if s.end.IsZero() || at.After(s.end) {
-		s.end = at
-	}
-}
-
 // attributionWalk is the single pass over every message of the export.
 // Pending results come from every assistant message; calls, cost and the
-// embedded timeSpan (Start/End) only from messages at or after startLine.
+// embedded types.TimeSpan (Start/End) only from messages at or after
+// startLine.
 type attributionWalk struct {
-	timeSpan
+	types.TimeSpan
 
 	startLine int
 	// pending is the tool results of the previous assistant message, whatever
@@ -85,9 +66,10 @@ type attributionWalk struct {
 //   - At is info.time.created, an epoch-millisecond value (zero when 0).
 //   - Emitted is the message's parts of type "tool", in part order:
 //     ID is callID (falling back to the part id), Tool the tool name, Detail
-//     transcript.ToolDetail on the state.input map decoded into
-//     transcript.ToolInput (OpenCode's `filePath`/`path`/`command`/`url`/
-//     `subagent_type` keys are all known to it). SkillName is input.name for
+//     transcript.ToolDetail on the state.input map read into
+//     transcript.ToolInput by transcript.ToolInputFromMap (OpenCode's
+//     `filePath`/`path`/`command`/`url`/`subagent_type` keys are all known to
+//     it). SkillName is input.name for
 //     the skill tool. For the task tool SubagentType is input.subagent_type
 //     and Model is input.model when present — OpenCode's task schema has no
 //     such key, so in practice Model is the model the child session actually
@@ -135,7 +117,7 @@ func (a *OpenCodeAgent) AttributeTokens(transcriptData []byte, startLine int, _ 
 		w.visitMessage(i, &session.Messages[i])
 	}
 	out.Calls = w.calls
-	out.Start, out.End = w.start, w.end
+	out.Start, out.End = w.Start, w.End
 	out.AgentReportedCost = w.cost
 	return out, nil
 }
@@ -146,8 +128,8 @@ func (w *attributionWalk) visitMessage(index int, msg *ExportMessage) {
 	inSlice := index >= w.startLine
 	created := epochMillis(msg.Info.Time.Created)
 	if inSlice {
-		w.note(created)
-		w.note(epochMillis(msg.Info.Time.Completed))
+		w.Note(created)
+		w.Note(epochMillis(msg.Info.Time.Completed))
 	}
 	if msg.Info.Role == roleAssistant {
 		w.visitAssistant(index, inSlice, created, msg)
@@ -224,7 +206,7 @@ func toolUseRefFrom(part *Part) types.ToolUseRef {
 	if part.State == nil {
 		return ref
 	}
-	in := decodeToolInput(part.State.Input)
+	in := transcript.ToolInputFromMap(part.State.Input)
 	switch strings.ToLower(part.Tool) {
 	case toolNameSkill:
 		if name, ok := part.State.Input[skillInputName].(string); ok {
@@ -240,21 +222,4 @@ func toolUseRefFrom(part *Part) types.ToolUseRef {
 	}
 	ref.Detail = transcript.ToolDetail(part.Tool, in)
 	return ref
-}
-
-// decodeToolInput maps a part's state.input onto transcript.ToolInput by way
-// of JSON, best-effort: a non-string value under a known key leaves that
-// field empty while the others still populate, so the partial result is
-// returned either way and the errors carry nothing.
-func decodeToolInput(input map[string]any) transcript.ToolInput {
-	var in transcript.ToolInput
-	if len(input) == 0 {
-		return in
-	}
-	raw, err := json.Marshal(input)
-	if err != nil {
-		return in
-	}
-	_ = json.Unmarshal(raw, &in) //nolint:errcheck // best-effort partial decode, see doc
-	return in
 }

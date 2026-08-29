@@ -50,13 +50,12 @@ type ContentBlock struct {
 //
 // It is a union of the input keys the supported agents emit: Claude Code's
 // snake_case names plus the camelCase / short variants Cursor (filePath),
-// OpenCode and Pi (path) use for the same thing. Decode a tool_use input into
-// it best-effort — a non-string value under one of these keys is skipped by
-// encoding/json rather than aborting the decode, so the remaining fields still
-// populate (Unmarshal still reports an UnmarshalTypeError; callers wanting the
-// partial decode must tolerate it). Note encoding/json matches keys
-// case-insensitively, so this type is NOT suitable where the exact key
-// spelling matters; compaction uses RawToolDetail for that reason.
+// OpenCode and Pi (path) use for the same thing. Build one from raw JSON with
+// ToolInputFromJSON or from an already-decoded map with ToolInputFromMap; both
+// are best-effort — a non-string value under one of these keys leaves that
+// field empty while the remaining fields still populate. Note encoding/json
+// matches keys case-insensitively, so this type is NOT suitable where the
+// exact key spelling matters; compaction uses RawToolDetail for that reason.
 type ToolInput struct {
 	FilePath     string `json:"file_path,omitempty"`
 	NotebookPath string `json:"notebook_path,omitempty"`
@@ -89,6 +88,49 @@ func (in ToolInput) AnyFilePath() string {
 		return in.FilePathCamel
 	default:
 		return in.Path
+	}
+}
+
+// ToolInputFromJSON decodes a tool_use input best-effort: a non-string value
+// under a known key makes encoding/json report an UnmarshalTypeError while the
+// remaining fields still populate, so the partial result is returned either
+// way and the error carries nothing (invalid JSON yields a zero ToolInput).
+// Keys fold case as encoding/json does — `Command` fills Command.
+func ToolInputFromJSON(raw json.RawMessage) ToolInput {
+	var in ToolInput
+	_ = json.Unmarshal(raw, &in) //nolint:errcheck // best-effort partial decode, see doc
+	return in
+}
+
+// ToolInputFromMap reads an already-decoded tool input (OpenCode's
+// state.input, Gemini's toolCalls[].args) into a ToolInput without
+// re-marshalling it: only the string values under ToolInput's own JSON keys
+// are picked — file_path, filePath, path, notebook_path, description,
+// command, pattern, skill, subagent_type, model, url, prompt. A non-string
+// value under one of them and every other key (a tool's `content`, however
+// large, included) are left alone. Keys are matched exactly, so unlike
+// ToolInputFromJSON `Command` does not fill Command. A nil map yields a zero
+// ToolInput.
+func ToolInputFromMap(m map[string]any) ToolInput {
+	str := func(key string) string {
+		if s, ok := m[key].(string); ok {
+			return s
+		}
+		return ""
+	}
+	return ToolInput{
+		FilePath:      str("file_path"),
+		NotebookPath:  str("notebook_path"),
+		Description:   str("description"),
+		Command:       str("command"),
+		Pattern:       str("pattern"),
+		FilePathCamel: str("filePath"),
+		Path:          str("path"),
+		Skill:         str("skill"),
+		SubagentType:  str("subagent_type"),
+		Model:         str("model"),
+		URL:           str("url"),
+		Prompt:        str("prompt"),
 	}
 }
 

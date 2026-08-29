@@ -70,31 +70,12 @@ type spawnedAgent struct {
 	toolUseID string
 }
 
-// timeSpan is the earliest and latest timestamp noted so far; zero until the
-// first note.
-type timeSpan struct {
-	start, end time.Time
-}
-
-// note widens the span to include at; a zero at is ignored.
-func (s *timeSpan) note(at time.Time) {
-	if at.IsZero() {
-		return
-	}
-	if s.start.IsZero() || at.Before(s.start) {
-		s.start = at
-	}
-	if s.end.IsZero() || at.After(s.end) {
-		s.end = at
-	}
-}
-
 // attributionWalk is the single pass over the whole transcript. Labels,
 // spawned agents and the queue of tool results come from every row (the full
-// transcript); calls and the embedded timeSpan (Start/End) only from rows at
-// or after startLine.
+// transcript); calls and the embedded types.TimeSpan (Start/End) only from
+// rows at or after startLine.
 type attributionWalk struct {
-	timeSpan
+	types.TimeSpan
 
 	startLine int
 	// labels maps tool_use id → the emitting ref, from every assistant row.
@@ -173,8 +154,8 @@ func (c *ClaudeCodeAgent) AttributeTokens(transcriptData []byte, startLine int, 
 	w.walk(transcriptData)
 	out := &types.Attribution{
 		Calls: w.calls,
-		Start: w.start,
-		End:   w.end,
+		Start: w.Start,
+		End:   w.End,
 	}
 	if subagentsDir != "" {
 		out.Subagents = w.subagentRecords(subagentsDir)
@@ -226,7 +207,7 @@ func (w *attributionWalk) visitRow(line int, raw []byte) {
 	}
 	inSlice := line >= w.startLine
 	if inSlice {
-		w.note(parseRowTimestamp(row.Timestamp))
+		w.Note(types.ParseTimestamp(row.Timestamp))
 	}
 	if len(row.Message) == 0 {
 		return
@@ -241,19 +222,6 @@ func (w *attributionWalk) visitRow(line int, raw []byte) {
 	case transcript.TypeUser:
 		w.visitUser(&msg)
 	}
-}
-
-// parseRowTimestamp parses a Claude Code row timestamp (RFC 3339, usually
-// with milliseconds); zero when absent or malformed.
-func parseRowTimestamp(ts string) time.Time {
-	if ts == "" {
-		return time.Time{}
-	}
-	at, err := time.Parse(time.RFC3339Nano, ts)
-	if err != nil {
-		return time.Time{}
-	}
-	return at
 }
 
 // visitAssistant registers the row's tool_use labels and folds the row into
@@ -278,7 +246,7 @@ func (w *attributionWalk) visitAssistant(line int, inSlice bool, row *attributio
 				UsageUnknown: true,
 				Model:        msg.Model,
 				Effort:       row.Effort,
-				At:           parseRowTimestamp(row.Timestamp),
+				At:           types.ParseTimestamp(row.Timestamp),
 				Line:         line,
 				ActiveSkill:  row.AttributionSkill,
 				Consumed:     consumed,
@@ -333,10 +301,11 @@ func (w *attributionWalk) registerEmits(blocks []contentBlockRaw) []types.ToolUs
 	return refs
 }
 
-// toolUseRefFrom reduces a tool_use block to its content-free ref. A failed
-// input decode still yields the id and tool name.
+// toolUseRefFrom reduces a tool_use block to its content-free ref. The input
+// is decoded best-effort (transcript.ToolInputFromJSON), so a failed decode
+// still yields the id, tool name and whatever detail was readable.
 func toolUseRefFrom(b contentBlockRaw) types.ToolUseRef {
-	in := decodeToolInput(b.Input)
+	in := transcript.ToolInputFromJSON(b.Input)
 	ref := types.ToolUseRef{
 		ID:     b.ID,
 		Tool:   b.Name,
@@ -350,16 +319,6 @@ func toolUseRefFrom(b contentBlockRaw) types.ToolUseRef {
 		ref.Model = in.Model
 	}
 	return ref
-}
-
-// decodeToolInput decodes a tool_use input best-effort: a non-string value
-// under a known key makes encoding/json report an UnmarshalTypeError while
-// the remaining fields still populate (see transcript.ToolInput), so the
-// partial result is returned either way and the error carries nothing.
-func decodeToolInput(raw json.RawMessage) toolInput {
-	var in toolInput
-	_ = json.Unmarshal(raw, &in) //nolint:errcheck // best-effort partial decode, see doc
-	return in
 }
 
 // callUsageFrom copies one row's usage into a per-call TokenUsage.
@@ -462,14 +421,14 @@ func readSubagentRecord(path, toolUseID string) (types.SubagentRecord, bool) {
 // rowTimestampBounds returns the earliest and latest parsable row timestamps
 // in a JSONL transcript; zero when none.
 func rowTimestampBounds(data []byte) (time.Time, time.Time) {
-	var span timeSpan
+	var span types.TimeSpan
 	forEachLine(data, func(_ int, raw []byte) {
 		var row struct {
 			Timestamp string `json:"timestamp"`
 		}
 		if err := json.Unmarshal(raw, &row); err == nil {
-			span.note(parseRowTimestamp(row.Timestamp))
+			span.Note(types.ParseTimestamp(row.Timestamp))
 		}
 	})
-	return span.start, span.end
+	return span.Start, span.End
 }

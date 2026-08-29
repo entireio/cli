@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"path/filepath"
 	"strings"
-	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
@@ -55,31 +54,12 @@ type functionCallArguments struct {
 	AgentType string          `json:"agent_type"`
 }
 
-// timeSpan is the earliest and latest timestamp noted so far; zero until the
-// first note.
-type timeSpan struct {
-	start, end time.Time
-}
-
-// note widens the span to include at; a zero at is ignored.
-func (s *timeSpan) note(at time.Time) {
-	if at.IsZero() {
-		return
-	}
-	if s.start.IsZero() || at.Before(s.start) {
-		s.start = at
-	}
-	if s.end.IsZero() || at.After(s.end) {
-		s.end = at
-	}
-}
-
 // attributionWalk is the single pass over the whole rollout. Labels, the
 // model/effort state and the pending emits/outputs come from every row (the
-// full transcript); calls and the embedded timeSpan (Start/End) only from rows
-// at or after startLine.
+// full transcript); calls and the embedded types.TimeSpan (Start/End) only
+// from rows at or after startLine.
 type attributionWalk struct {
-	timeSpan
+	types.TimeSpan
 
 	startLine int
 	// labels maps call_id → the emitting ref, from every tool-call row.
@@ -189,8 +169,8 @@ func (c *CodexAgent) AttributeTokens(transcriptData []byte, startLine int, _ str
 	}
 	return &types.Attribution{
 		Calls: w.calls,
-		Start: w.start,
-		End:   w.end,
+		Start: w.Start,
+		End:   w.End,
 	}, nil
 }
 
@@ -204,7 +184,7 @@ func (w *attributionWalk) visitRow(line int, raw []byte) {
 	}
 	inSlice := line >= w.startLine
 	if inSlice {
-		w.note(parseRolloutTimestamp(row.Timestamp))
+		w.Note(types.ParseTimestamp(row.Timestamp))
 	}
 	switch row.Type {
 	case rolloutLineTypeTurnContext:
@@ -216,19 +196,6 @@ func (w *attributionWalk) visitRow(line int, raw []byte) {
 			w.visitTotal(line, inSlice, row.Timestamp, total)
 		}
 	}
-}
-
-// parseRolloutTimestamp parses a rollout row timestamp (RFC 3339 with
-// milliseconds); zero when absent or malformed.
-func parseRolloutTimestamp(ts string) time.Time {
-	if ts == "" {
-		return time.Time{}
-	}
-	at, err := time.Parse(time.RFC3339Nano, ts)
-	if err != nil {
-		return time.Time{}
-	}
-	return at
 }
 
 // visitTurnContext updates the model/effort state from a turn_context row; a
@@ -284,7 +251,7 @@ func (w *attributionWalk) visitTotal(line int, inSlice bool, timestamp string, t
 			Usage:    tokenUsageDelta(total, w.prevTotal, 1),
 			Model:    w.model,
 			Effort:   w.effort,
-			At:       parseRolloutTimestamp(timestamp),
+			At:       types.ParseTimestamp(timestamp),
 			Line:     line,
 			Emitted:  w.pendingEmitted,
 			Consumed: w.pendingConsumed,

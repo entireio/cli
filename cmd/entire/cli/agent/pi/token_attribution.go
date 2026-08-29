@@ -3,7 +3,6 @@ package pi
 import (
 	"encoding/json"
 	"fmt"
-	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/pi/pijsonl"
@@ -13,32 +12,12 @@ import (
 
 var _ agent.TokenAttributor = (*PiAgent)(nil)
 
-// timeSpan is the earliest and latest timestamp noted so far; zero until the
-// first note. (Private copy of the Claude Code attributor's; Task 15a lifts
-// it into a shared package.)
-type timeSpan struct {
-	start, end time.Time
-}
-
-// note widens the span to include at; a zero at is ignored.
-func (s *timeSpan) note(at time.Time) {
-	if at.IsZero() {
-		return
-	}
-	if s.start.IsZero() || at.Before(s.start) {
-		s.start = at
-	}
-	if s.end.IsZero() || at.After(s.end) {
-		s.end = at
-	}
-}
-
 // attributionWalk is the single pass over the whole active branch. Labels,
 // the thinking level in force and the queue of tool results come from every
-// entry (the full transcript); calls, cost and the embedded timeSpan
+// entry (the full transcript); calls, cost and the embedded types.TimeSpan
 // (Start/End) only from entries at or after startLine.
 type attributionWalk struct {
-	timeSpan
+	types.TimeSpan
 
 	startLine int
 	// level is the thinking level in force: the thinkingLevel of the latest
@@ -123,8 +102,8 @@ func (a *PiAgent) AttributeTokens(transcriptData []byte, startLine int, _ string
 	}
 	return &types.Attribution{
 		Calls:             w.calls,
-		Start:             w.start,
-		End:               w.end,
+		Start:             w.Start,
+		End:               w.End,
 		AgentReportedCost: w.cost,
 	}, nil
 }
@@ -134,7 +113,7 @@ func (a *PiAgent) AttributeTokens(transcriptData []byte, startLine int, _ string
 func (w *attributionWalk) visit(line int, entry pijsonl.Entry) {
 	inSlice := line >= w.startLine
 	if inSlice {
-		w.note(parseEntryTimestamp(entry.Timestamp))
+		w.Note(types.ParseTimestamp(entry.Timestamp))
 	}
 	switch entry.Type {
 	case pijsonl.EntryTypeThinkingLevelChange:
@@ -147,20 +126,6 @@ func (w *attributionWalk) visit(line int, entry pijsonl.Entry) {
 			w.visitToolResult(&entry.Message)
 		}
 	}
-}
-
-// parseEntryTimestamp parses a Pi entry timestamp (ISO 8601 with
-// milliseconds, e.g. "2026-03-27T21:00:02.000Z"); zero when absent or
-// malformed.
-func parseEntryTimestamp(ts string) time.Time {
-	if ts == "" {
-		return time.Time{}
-	}
-	at, err := time.Parse(time.RFC3339Nano, ts)
-	if err != nil {
-		return time.Time{}
-	}
-	return at
 }
 
 // visitAssistant registers the message's toolCall labels and takes the
@@ -177,7 +142,7 @@ func (w *attributionWalk) visitAssistant(line int, inSlice bool, entry *pijsonl.
 		UsageUnknown: entry.Message.Usage == nil,
 		Model:        entry.Message.Model,
 		Effort:       w.level,
-		At:           parseEntryTimestamp(entry.Timestamp),
+		At:           types.ParseTimestamp(entry.Timestamp),
 		Line:         line,
 		Emitted:      emitted,
 		Consumed:     consumed,
@@ -219,13 +184,11 @@ func (w *attributionWalk) registerEmits(content json.RawMessage) []types.ToolUse
 }
 
 // toolUseRefFrom reduces a toolCall item to its content-free ref. The
-// arguments are decoded best-effort: a non-string value under a known key
-// makes encoding/json report an UnmarshalTypeError while the remaining fields
-// still populate, so a failed decode still yields the id, tool name and
-// whatever detail was readable.
+// arguments are decoded best-effort (transcript.ToolInputFromJSON), so a
+// failed decode still yields the id, tool name and whatever detail was
+// readable.
 func toolUseRefFrom(item pijsonl.ContentItem) types.ToolUseRef {
-	var in transcript.ToolInput
-	_ = json.Unmarshal(item.Arguments, &in) //nolint:errcheck // best-effort partial decode, see doc
+	in := transcript.ToolInputFromJSON(item.Arguments)
 	return types.ToolUseRef{
 		ID:     item.ID,
 		Tool:   item.Name,

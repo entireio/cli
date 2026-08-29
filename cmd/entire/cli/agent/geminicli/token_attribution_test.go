@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -23,7 +24,7 @@ const (
 	fixtureMsgInfo2   = 2 // info message: never a call
 	fixtureMsgGemini3 = 3 // text only
 	fixtureMsgUser4   = 4
-	fixtureMsgGemini5 = 5 // glob + a file_path-keyed read_file; no tokens block
+	fixtureMsgGemini5 = 5 // glob, a file_path-keyed read_file, activate_skill, delegate_to_agent; no tokens block
 	fixtureMsgGemini6 = 6 // text only, a different model
 	fixtureMsgCount   = 7
 )
@@ -48,6 +49,14 @@ const (
 	fixtureReadResult  = `[{"functionResponse":{"id":"read_file-1773867920932-2","name":"read_file","response":{"output":"package src\n"}}}]`
 	fixtureGlobResult  = `[{"functionResponse":{"id":"glob-1773867961208-3","name":"glob","response":{"output":"Found 1 file(s) matching \"**/*.go\":\nsrc/a.go"}}}]`
 	fixtureReadBResult = `[{"functionResponse":{"id":"read_file-1773867961208-4","name":"read_file","response":{"output":"package src // b\n"}}}]`
+	fixtureSkillResult = `[{"functionResponse":{"id":"activate_skill-1773867961208-5","name":"activate_skill","response":{"output":"Skill artifact-design activated."}}}]`
+	fixtureAgentResult = `[{"functionResponse":{"id":"delegate_to_agent-1773867961208-6","name":"delegate_to_agent","response":{"output":"Delegated to codebase_investigator."}}}]`
+
+	fixtureSkill        = "artifact-design"
+	fixtureSubagentType = "codebase_investigator"
+	// fixtureObjective is the delegation's `objective`: user content that must
+	// never appear in a ref.
+	fixtureObjective = "Find where the synthetic helper is defined."
 )
 
 // Per-call usage from the CalculateTokenUsage identities: input − cached +
@@ -63,6 +72,8 @@ var (
 	fixtureReadRef  = types.ToolUseRef{ID: "read_file-1773867920932-2", Tool: "read_file", Detail: "src/a.go"}
 	fixtureReadBRef = types.ToolUseRef{ID: "read_file-1773867961208-4", Tool: "read_file", Detail: "src/b.go"}
 	fixtureGlobRef  = types.ToolUseRef{ID: "glob-1773867961208-3", Tool: "glob"}
+	fixtureSkillRef = types.ToolUseRef{ID: "activate_skill-1773867961208-5", Tool: toolNameActivateSkill, Detail: fixtureSkill, SkillName: fixtureSkill}
+	fixtureAgentRef = types.ToolUseRef{ID: "delegate_to_agent-1773867961208-6", Tool: toolNameDelegateToAgent, Detail: fixtureSubagentType, SubagentType: fixtureSubagentType}
 
 	// Consumed by the gemini message AFTER the one that emitted them.
 	fixtureMsg1Results = []types.ToolResultRef{
@@ -72,6 +83,8 @@ var (
 	fixtureMsg5Results = []types.ToolResultRef{
 		{ToolUse: fixtureGlobRef, Bytes: len(fixtureGlobResult)},
 		{ToolUse: fixtureReadBRef, Bytes: len(fixtureReadBResult)},
+		{ToolUse: fixtureSkillRef, Bytes: len(fixtureSkillResult)},
+		{ToolUse: fixtureAgentRef, Bytes: len(fixtureAgentResult)},
 	}
 )
 
@@ -164,11 +177,14 @@ func TestAttributionFixtureLayout(t *testing.T) {
 	if _, ok := session.Messages[fixtureMsgGemini1].ToolCalls[1].Args[argAbsolutePath]; !ok {
 		t.Errorf("message %d read_file args = %v, want the older %q key so the fallback is exercised", fixtureMsgGemini1, session.Messages[fixtureMsgGemini1].ToolCalls[1].Args, argAbsolutePath)
 	}
-	if got := len(session.Messages[fixtureMsgGemini5].ToolCalls); got != 2 {
-		t.Fatalf("message %d has %d toolCalls, want 2", fixtureMsgGemini5, got)
+	if got := len(session.Messages[fixtureMsgGemini5].ToolCalls); got != 4 {
+		t.Fatalf("message %d has %d toolCalls, want 4", fixtureMsgGemini5, got)
 	}
 	if _, ok := session.Messages[fixtureMsgGemini5].ToolCalls[1].Args["file_path"]; !ok {
 		t.Errorf("message %d read_file args = %v, want the \"file_path\" key current Gemini CLI writes", fixtureMsgGemini5, session.Messages[fixtureMsgGemini5].ToolCalls[1].Args)
+	}
+	if got := session.Messages[fixtureMsgGemini5].ToolCalls[3].Args["objective"]; got != fixtureObjective {
+		t.Errorf("message %d delegate_to_agent objective = %v, want %q so the never-stored rule is exercised", fixtureMsgGemini5, got, fixtureObjective)
 	}
 }
 
@@ -281,8 +297,10 @@ func TestAttributeTokens_SumsMatchCalculateTokenUsage(t *testing.T) {
 
 // TestAttributeTokens_EmittedRefs: run_shell_command reduces to the command
 // head, read_file to its path under either the current `file_path` key or
-// the older `absolute_path` fallback, glob to "" (its pattern is user
-// content).
+// the `absolute_path` fallback, glob to "" (its pattern is user content),
+// activate_skill to its `name` as SkillName and Detail, delegate_to_agent to
+// its `agent_name` as SubagentType and Detail — with the delegation's
+// `objective` stored nowhere. Model stays "" throughout.
 func TestAttributeTokens_EmittedRefs(t *testing.T) {
 	t.Parallel()
 
@@ -294,14 +312,19 @@ func TestAttributeTokens_EmittedRefs(t *testing.T) {
 	if len(got.Calls[1].Emitted) != 0 {
 		t.Errorf("Calls[1].Emitted = %+v, want none (text only)", got.Calls[1].Emitted)
 	}
-	assertRefs(t, "Calls[2].Emitted", got.Calls[2].Emitted, []types.ToolUseRef{fixtureGlobRef, fixtureReadBRef})
+	assertRefs(t, "Calls[2].Emitted", got.Calls[2].Emitted, []types.ToolUseRef{fixtureGlobRef, fixtureReadBRef, fixtureSkillRef, fixtureAgentRef})
 	if len(got.Calls[3].Emitted) != 0 {
 		t.Errorf("Calls[3].Emitted = %+v, want none (text only)", got.Calls[3].Emitted)
 	}
 	for i, call := range got.Calls {
 		for j, ref := range call.Emitted {
-			if ref.SkillName != "" || ref.SubagentType != "" || ref.Model != "" {
-				t.Errorf("Calls[%d].Emitted[%d] = %+v, want no skill/subagent/model (activate_skill and delegate_to_agent are not labelled yet)", i, j, ref)
+			if ref.Model != "" {
+				t.Errorf("Calls[%d].Emitted[%d].Model = %q, want empty (Gemini records no per-delegation model)", i, j, ref.Model)
+			}
+			for _, field := range []string{ref.Detail, ref.SkillName, ref.SubagentType, ref.Model} {
+				if strings.Contains(field, fixtureObjective) {
+					t.Errorf("Calls[%d].Emitted[%d] = %+v carries the objective, which is user content", i, j, ref)
+				}
 			}
 		}
 	}
@@ -368,8 +391,8 @@ func TestAttributeTokens_StartEndSpanEveryMessageType(t *testing.T) {
 }
 
 // TestAttributeTokens_SubagentsDirIgnored: a subagentsDir changes nothing —
-// Gemini writes no child transcripts and delegate_to_agent is not yet
-// recognised.
+// delegate_to_agent is labelled on the emit, but Gemini writes no child
+// transcript there would be anything to read from.
 func TestAttributeTokens_SubagentsDirIgnored(t *testing.T) {
 	t.Parallel()
 

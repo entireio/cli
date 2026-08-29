@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
@@ -13,13 +14,26 @@ import (
 
 var _ agent.TokenAttributor = (*GeminiCLIAgent)(nil)
 
-// argAbsolutePath is the path key older Gemini CLI `read_file` calls used;
-// current versions write `file_path`, which transcript.ToolInput already
-// knows (a survey of 530 local sessions, 2026-08-28, found `file_path` on
-// 113/113 read_file calls and `absolute_path` on none). It is mapped onto
-// ToolInput.FilePath only when no known path key is set, and only here —
-// ToolDetail is not taught the spelling.
+// argAbsolutePath is a path key Gemini CLI's `read_file` schema has carried;
+// the sessions surveyed locally (530 sessions, 2026-08-28) wrote `file_path`
+// — which transcript.ToolInput already knows — on 113/113 read_file calls and
+// `absolute_path` on none, so this is a defensive fallback for other
+// versions, not an observed shape. It is mapped onto ToolInput.FilePath only
+// when no known path key is set, and only here — ToolDetail is not taught the
+// spelling.
 const argAbsolutePath = "absolute_path"
+
+// Gemini CLI tools whose args carry a label under a key transcript.ToolInput
+// does not know, so it is read from the args map directly: `activate_skill`
+// names its skill under `name`; `delegate_to_agent` names the subagent under
+// `agent_name` (its `objective` is user content and is never stored). Names
+// are matched case-insensitively, like transcript.ToolDetail.
+const (
+	toolNameActivateSkill   = "activate_skill"
+	toolNameDelegateToAgent = "delegate_to_agent"
+	argSkillName            = "name"
+	argAgentName            = "agent_name"
+)
 
 // attributionSession is the slice of a Gemini session file attribution
 // reads: the messages array with the per-message keys the exported
@@ -54,30 +68,11 @@ type attributionToolCall struct {
 	Result json.RawMessage `json:"result"`
 }
 
-// timeSpan is the earliest and latest timestamp noted so far; zero until the
-// first note.
-type timeSpan struct {
-	start, end time.Time
-}
-
-// note widens the span to include at; a zero at is ignored.
-func (s *timeSpan) note(at time.Time) {
-	if at.IsZero() {
-		return
-	}
-	if s.start.IsZero() || at.Before(s.start) {
-		s.start = at
-	}
-	if s.end.IsZero() || at.After(s.end) {
-		s.end = at
-	}
-}
-
 // attributionWalk is the single pass over every message of the session.
 // Pending results come from every gemini message; calls and the embedded
-// timeSpan (Start/End) only from messages at or after startLine.
+// types.TimeSpan (Start/End) only from messages at or after startLine.
 type attributionWalk struct {
-	timeSpan
+	types.TimeSpan
 
 	startLine int
 	// pending is the tool results of the previous gemini message, whatever
@@ -117,10 +112,12 @@ type attributionWalk struct {
 //     decoded into transcript.ToolInput (`command`, `file_path`, `path`,
 //     `pattern` are known to it). The `absolute_path` key older read_file
 //     calls used is mapped onto ToolInput.FilePath only when no known path
-//     key is set (see argAbsolutePath). SkillName, SubagentType and Model
-//     stay "": Gemini CLI's `activate_skill` and `delegate_to_agent` are not
-//     labelled yet (follow-up). Its web_fetch takes a `prompt` (URLs embedded
-//     in prose) rather than a `url`, so its Detail is "" like
+//     key is set (see argAbsolutePath). SkillName is args.name for
+//     `activate_skill` and SubagentType is args.agent_name for
+//     `delegate_to_agent`; each is also that call's Detail, and the
+//     delegation's `objective` is never stored. Model stays "": Gemini
+//     records no per-delegation model. Its web_fetch takes a `prompt` (URLs
+//     embedded in prose) rather than a `url`, so its Detail is "" like
 //     list_directory's.
 //   - Consumed: Gemini stores a tool's result on the SAME toolCall entry
 //     that emitted it (`result`, a functionResponse array); there is no
@@ -139,9 +136,9 @@ type attributionWalk struct {
 //     labelled, even when the emitting message precedes startLine.
 //   - Start/End are the earliest/latest parsable timestamps over messages in
 //     the slice, whatever their type — info messages included.
-//   - Subagents is always empty and subagentsDir is ignored: Gemini CLI
-//     writes no child transcripts, and `delegate_to_agent` is not yet
-//     recognised.
+//   - Subagents is always empty and subagentsDir is ignored: a
+//     `delegate_to_agent` call is labelled (above), but Gemini CLI writes no
+//     child transcript for it, so there is nothing to read.
 //   - AgentReportedCost stays 0: Gemini records no dollar cost.
 //
 // Error contract (agent.TokenAttributor): the session is one JSON document,
@@ -162,7 +159,7 @@ func (g *GeminiCLIAgent) AttributeTokens(transcriptData []byte, startLine int, _
 		w.visitMessage(i, &session.Messages[i])
 	}
 	out.Calls = w.calls
-	out.Start, out.End = w.start, w.end
+	out.Start, out.End = w.Start, w.End
 	return out, nil
 }
 
@@ -184,9 +181,9 @@ func parseAttributionSession(data []byte) (*attributionSession, error) {
 // messages contribute their timestamp only.
 func (w *attributionWalk) visitMessage(index int, msg *attributionMessage) {
 	inSlice := index >= w.startLine
-	at := parseMessageTimestamp(msg.Timestamp)
+	at := types.ParseTimestamp(msg.Timestamp)
 	if inSlice {
-		w.note(at)
+		w.Note(at)
 	}
 	if msg.Type == MessageTypeGemini {
 		w.visitGemini(index, inSlice, at, msg)
@@ -222,19 +219,6 @@ func (w *attributionWalk) visitGemini(index int, inSlice bool, at time.Time, msg
 	w.pending = results
 }
 
-// parseMessageTimestamp parses a message timestamp (RFC 3339 with
-// milliseconds); zero when absent or malformed.
-func parseMessageTimestamp(ts string) time.Time {
-	if ts == "" {
-		return time.Time{}
-	}
-	at, err := time.Parse(time.RFC3339Nano, ts)
-	if err != nil {
-		return time.Time{}
-	}
-	return at
-}
-
 // callUsageFrom converts one message's tokens block into a per-call
 // TokenUsage with the same identities CalculateTokenUsage accumulates.
 func callUsageFrom(t *geminiMessageTokens) types.TokenUsage {
@@ -266,32 +250,28 @@ func resultBytes(raw json.RawMessage) int {
 // toolUseRefFrom reduces a toolCall to its content-free ref; see the
 // AttributeTokens doc for the per-tool rules.
 func toolUseRefFrom(tc *attributionToolCall) types.ToolUseRef {
-	in := decodeToolInput(tc.Args)
+	in := transcript.ToolInputFromMap(tc.Args)
 	if in.AnyFilePath() == "" {
-		if p, ok := tc.Args[argAbsolutePath].(string); ok {
-			in.FilePath = p
-		}
+		in.FilePath = argString(tc.Args, argAbsolutePath)
 	}
-	return types.ToolUseRef{
-		ID:     tc.ID,
-		Tool:   tc.Name,
-		Detail: transcript.ToolDetail(tc.Name, in),
+	ref := types.ToolUseRef{ID: tc.ID, Tool: tc.Name}
+	switch strings.ToLower(tc.Name) {
+	case toolNameActivateSkill:
+		in.Skill = argString(tc.Args, argSkillName)
+		ref.SkillName = in.Skill
+	case toolNameDelegateToAgent:
+		in.SubagentType = argString(tc.Args, argAgentName)
+		ref.SubagentType = in.SubagentType
 	}
+	ref.Detail = transcript.ToolDetail(tc.Name, in)
+	return ref
 }
 
-// decodeToolInput maps a toolCall's args onto transcript.ToolInput by way of
-// JSON, best-effort: a non-string value under a known key leaves that field
-// empty while the others still populate, so the partial result is returned
-// either way and the errors carry nothing.
-func decodeToolInput(args map[string]any) transcript.ToolInput {
-	var in transcript.ToolInput
-	if len(args) == 0 {
-		return in
+// argString is the string under key in a toolCall's args; "" when the key is
+// absent or its value is not a string.
+func argString(args map[string]any, key string) string {
+	if s, ok := args[key].(string); ok {
+		return s
 	}
-	raw, err := json.Marshal(args)
-	if err != nil {
-		return in
-	}
-	_ = json.Unmarshal(raw, &in) //nolint:errcheck // best-effort partial decode, see doc
-	return in
+	return ""
 }

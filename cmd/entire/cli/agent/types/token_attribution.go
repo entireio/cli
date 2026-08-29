@@ -17,8 +17,10 @@ type ToolUseRef struct {
 	SkillName string
 	// SubagentType is set when Tool spawns a subagent.
 	SubagentType string
-	// Model is the model the subagent was asked to run on, when the emit
-	// carries it (e.g. Task input.model); "" otherwise.
+	// Model is the model recorded for the subagent by the spawning agent: the
+	// requested alias where the agent records a request (Claude Code
+	// `input.model`), the child's actual model where it records the result
+	// (OpenCode `state.metadata.model.modelID`); "" when neither is recorded.
 	Model string
 }
 
@@ -35,8 +37,8 @@ type ToolResultRef struct {
 // CallUsage is one API call's own usage and what it emitted/consumed.
 type CallUsage struct {
 	// Usage is this call only — no subagent tokens; the subset fields
-	// (thinking, 1-hour cache write) filled where the agent records them —
-	// added to TokenUsage by PR #2155.
+	// (ThinkingTokens, CacheCreation1hTokens) filled where the agent records
+	// them.
 	Usage TokenUsage
 	// UsageUnknown is true when the agent recorded no usage for this call
 	// (OpenCode/Pi assistant messages without a tokens block); Usage is then
@@ -52,9 +54,11 @@ type CallUsage struct {
 	Effort string
 	// At is the call timestamp; zero when unknown.
 	At time.Time
-	// Line is the position of the call's first row, in the same unit as
-	// AttributeTokens' startLine (line for JSONL agents, message index for
-	// Gemini/OpenCode); used for per-prompt grouping and to match
+	// Line is the position of the call's first row — or of the single row
+	// that records the call for agents whose usage arrives as one cumulative
+	// row (Codex: the `token_count` row, which closes the group) — in the
+	// same unit as AttributeTokens' startLine (line for JSONL agents, message
+	// index for Gemini/OpenCode); used for per-prompt grouping and to match
 	// skill_events transcript anchors.
 	Line int
 	// ActiveSkill is the harness-stamped skill active during this call
@@ -108,7 +112,8 @@ type Attribution struct {
 	Start time.Time
 	// End is the last timestamp seen in the slice (zero when none).
 	End time.Time
-	// AgentReportedCost is the provider-computed dollar cost summed over the
-	// slice; 0 = not recorded. Only Pi populates it today.
+	// AgentReportedCost is the agent-computed dollar cost summed over the
+	// slice's calls; 0 = not recorded. Pi and OpenCode populate it today
+	// (from `usage.cost.total` / `info.cost`).
 	AgentReportedCost float64
 }

@@ -13,9 +13,10 @@ import (
 // `npm run`). A third word survives only when isPathLikeWord accepts it.
 const shellHeadWords = 2
 
-// envAssignmentPattern matches a `VAR=value` word: a leading environment
-// assignment, or an `export` / `env` operand.
-var envAssignmentPattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*=`)
+// envAssignmentPattern matches a `KEY=value` word: a leading environment
+// assignment, an `export` / `env` operand, or a dotted config operand such as
+// git's `-c core.pager=cat` — none of which is the command or its target.
+var envAssignmentPattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_.]*=`)
 
 // bareRedirectPattern matches a redirection operator standing alone as a word
 // (`>`, `>>`, `2>`, `<`, `<<<`, `<<-`, `&>`, `>&`), whose target — or heredoc
@@ -32,7 +33,8 @@ var bareRedirectPattern = regexp.MustCompile(`^&?\d*[<>]{1,3}-?&?$`)
 //     the pipeline — sanitized with stringutil.SanitizeShellCommand (quoted
 //     spans become NUL and are dropped as words), split on `;`, `&&`, `||`,
 //     `|` and newline, `(`/`{`/`)`/`}` grouping punctuation trimmed,
-//     `VAR=x` assignments, `-flag` words and redirections dropped, then the
+//     `KEY=x` assignments (`core.pager=cat` included), `-flag` words and
+//     redirections dropped, then the
 //     first two words plus a third ONLY when it is path-like
 //     (isPathLikeWord: contains `/`, starts with `.`, or contains `*`) —
 //     command, subcommand, and the path or glob it targets.
@@ -47,9 +49,9 @@ var bareRedirectPattern = regexp.MustCompile(`^&?\d*[<>]{1,3}-?&?$`)
 //     write_file, edit_file, apply_patch): ToolInput.AnyFilePath, falling
 //     back to NotebookPath.
 //   - WebFetch / web_fetch / fetch: the URL's host, without port or path.
-//   - Skill: the skill name.
-//   - Task / Agent / spawn_agent: the subagent type, with the requested
-//     model appended as ` (model)` when present.
+//   - Skill / activate_skill: the skill name.
+//   - Task / Agent / spawn_agent / delegate_to_agent: the subagent type, with
+//     the requested model appended as ` (model)` when present.
 //   - WebSearch, Grep, Glob, LS, search, list_dir and any other tool: "" —
 //     the tool name is the whole label, and the query or pattern is user
 //     content.
@@ -64,9 +66,9 @@ func ToolDetail(tool string, in ToolInput) string {
 		return in.NotebookPath
 	case "webfetch", "web_fetch", "fetch":
 		return urlHost(in.URL)
-	case "skill":
+	case "skill", "activate_skill":
 		return in.Skill
-	case "task", "agent", "spawn_agent":
+	case "task", "agent", "spawn_agent", "delegate_to_agent":
 		return subagentDetail(in)
 	default:
 		return ""
@@ -94,9 +96,9 @@ func shellCommandHead(cmd string) string {
 		case strings.ContainsAny(tok, "<>"):
 			// Redirection with its target attached (`2>&1`, `>out`, `<<EOF`).
 		case envAssignmentPattern.MatchString(tok):
-			// Environment assignment — leading `VAR=x`, or `export`/`env`
-			// operands, whose values are as sensitive as the command's
-			// arguments are not.
+			// Assignment — leading `VAR=x`, `export`/`env` operands, or a
+			// dotted `-c key=value` config operand — whose values are as
+			// sensitive as the command's arguments are not.
 		case strings.HasPrefix(tok, "-"):
 			// Flag.
 		case len(words) == shellHeadWords:

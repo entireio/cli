@@ -1,6 +1,9 @@
 package transcript
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestToolDetail(t *testing.T) {
 	t.Parallel()
@@ -39,6 +42,7 @@ func TestToolDetail(t *testing.T) {
 		{name: "bash third word after flag kept when path-like", tool: toolBash, in: ToolInput{Command: "go vet -v ./..."}, want: "go vet ./..."},
 		{name: "bash env assignment with quoted value", tool: toolBash, in: ToolInput{Command: `FOO="a b" make check`}, want: "make check"},
 		{name: "bash several env assignments", tool: toolBash, in: ToolInput{Command: "A=1 B=2 cmd sub arg"}, want: "cmd sub"},
+		{name: "bash dotted config operand dropped", tool: toolBash, in: ToolInput{Command: "git -c core.pager=cat log"}, want: "git log"},
 		{name: "bash last pipeline stage wins", tool: toolBash, in: ToolInput{Command: "a | b -x c"}, want: "b c"},
 		{name: "bash semicolon", tool: toolBash, in: ToolInput{Command: "first one; second two three"}, want: "second two"},
 		{name: "bash or separator", tool: toolBash, in: ToolInput{Command: "test -f x || touch x"}, want: "touch x"},
@@ -126,6 +130,7 @@ func TestToolDetail(t *testing.T) {
 		{name: "skill", tool: "Skill", in: ToolInput{Skill: "commit"}, want: "commit"},
 		{name: "skill lowercase", tool: "skill", in: ToolInput{Skill: "commit"}, want: "commit"},
 		{name: "skill empty", tool: "Skill", in: ToolInput{}, want: ""},
+		{name: "activate_skill", tool: "activate_skill", in: ToolInput{Skill: "artifact-design"}, want: "artifact-design"},
 
 		// Task / Agent.
 		{name: "task without model", tool: toolTask, in: ToolInput{SubagentType: "general-purpose"}, want: "general-purpose"},
@@ -134,6 +139,7 @@ func TestToolDetail(t *testing.T) {
 		{name: "task empty", tool: toolTask, in: ToolInput{}, want: ""},
 		{name: "agent", tool: "Agent", in: ToolInput{SubagentType: "reviewer"}, want: "reviewer"},
 		{name: "spawn_agent", tool: "spawn_agent", in: ToolInput{SubagentType: "worker", Model: "sonnet"}, want: "worker (sonnet)"},
+		{name: "delegate_to_agent", tool: "delegate_to_agent", in: ToolInput{SubagentType: "codebase_investigator"}, want: "codebase_investigator"},
 
 		// Unknown.
 		{name: "unknown tool", tool: "TodoWrite", in: ToolInput{Description: "d", Command: "c", FilePath: "f"}, want: ""},
@@ -175,6 +181,71 @@ func TestToolInput_AnyFilePath(t *testing.T) {
 
 			if got := tt.in.AnyFilePath(); got != tt.want {
 				t.Errorf("AnyFilePath(%+v) = %q, want %q", tt.in, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestToolInputFromMap pins the exact-key, strings-only pick: every known key
+// lands in its field, a non-string under a known key and every unknown key
+// (a multi-megabyte `content` included) are ignored, and a nil map is fine.
+func TestToolInputFromMap(t *testing.T) {
+	t.Parallel()
+
+	full := map[string]any{
+		"file_path": "a", "filePath": "b", "path": "c", "notebook_path": "nb",
+		"description": "d", "command": "ls", "pattern": "*.go", "skill": "s",
+		"subagent_type": "Explore", "model": "haiku", "url": "https://x", "prompt": "p",
+	}
+	want := ToolInput{
+		FilePath: "a", FilePathCamel: "b", Path: "c", NotebookPath: "nb",
+		Description: "d", Command: "ls", Pattern: "*.go", Skill: "s",
+		SubagentType: "Explore", Model: "haiku", URL: "https://x", Prompt: "p",
+	}
+	if got := ToolInputFromMap(full); got != want {
+		t.Errorf("ToolInputFromMap(full) = %+v, want %+v", got, want)
+	}
+
+	mixed := map[string]any{
+		"command":    42,                         // non-string under a known key: ignored
+		"file_path":  "f",                        // the rest still populate
+		"Command":    "not matched: exact keys",  // case is not folded
+		"content":    strings.Repeat("x", 1<<20), // unknown key, never read
+		"old_string": map[string]any{"k": "v"},   // unknown key of another type
+	}
+	if got, want := ToolInputFromMap(mixed), (ToolInput{FilePath: "f"}); got != want {
+		t.Errorf("ToolInputFromMap(mixed) = %+v, want %+v", got, want)
+	}
+	if got := ToolInputFromMap(nil); got != (ToolInput{}) {
+		t.Errorf("ToolInputFromMap(nil) = %+v, want zero", got)
+	}
+}
+
+// TestToolInputFromJSON pins the best-effort decode: a non-string under a
+// known key leaves that field empty while the others populate, invalid JSON
+// yields a zero value, and encoding/json's case folding is inherited.
+func TestToolInputFromJSON(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		raw  string
+		want ToolInput
+	}{
+		{name: "known keys", raw: `{"command":"ls","file_path":"f","subagent_type":"Explore","model":"haiku"}`, want: ToolInput{Command: "ls", FilePath: "f", SubagentType: "Explore", Model: "haiku"}},
+		{name: "non-string under a known key is skipped, rest populate", raw: `{"command":42,"file_path":"f","pattern":"p"}`, want: ToolInput{FilePath: "f", Pattern: "p"}},
+		{name: "unknown keys ignored", raw: `{"content":"big","file_path":"f"}`, want: ToolInput{FilePath: "f"}},
+		{name: "case folded (encoding/json)", raw: `{"Command":"ls"}`, want: ToolInput{Command: "ls"}},
+		{name: "invalid json", raw: `{"command":`, want: ToolInput{}},
+		{name: "empty", raw: ``, want: ToolInput{}},
+		{name: "not an object", raw: `"ls"`, want: ToolInput{}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			if got := ToolInputFromJSON([]byte(tt.raw)); got != tt.want {
+				t.Errorf("ToolInputFromJSON(%s) = %+v, want %+v", tt.raw, got, tt.want)
 			}
 		})
 	}

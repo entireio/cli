@@ -352,9 +352,8 @@ func TestAttributeTokens_ToolRefShapes(t *testing.T) {
 		{ID: "s1", Tool: toolNameShell, Detail: "npm run"},
 		{ID: "s2", Tool: toolNameShell, Detail: "ls src/"},
 		// Not a shell wrapper, so not unwrapped: ToolDetail sees the joined
-		// argv (its own reduction keeps `core.pager=cat`, a `-c` operand the
-		// env-assignment rule does not match).
-		{ID: "s2b", Tool: toolNameShell, Detail: "git core.pager=cat"},
+		// argv and its assignment rule drops the `core.pager=cat` operand.
+		{ID: "s2b", Tool: toolNameShell, Detail: "git log"},
 		{ID: "s2c", Tool: toolNameShell},
 		{ID: "s3", Tool: fixtureToolExec},
 		{ID: "s4", Tool: "other_tool"},
