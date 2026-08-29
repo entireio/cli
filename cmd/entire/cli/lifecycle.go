@@ -1010,24 +1010,28 @@ func handleLifecycleTurnEnd(ctx context.Context, ag agent.Agent, event *agent.Ev
 			LaunchRoot:     repoRoot,
 		}, repoRoot, foreignModifiedFiles, relModifiedFiles)
 	}
-	// A replay child without a pre-prompt baseline sees the target repo's
-	// whole working tree as "changed": the user's own uncommitted edits and
-	// deletions there predate the session. The replica carries the baseline
-	// adoption snapshotted (DirtyTrackedFilesAtStart), so tracked changes are
-	// credited to the turn only when they are NOT in it — a deletion the agent
-	// made is kept (transcripts never name deletions, so evidence-narrowing
-	// would drop every deletion), the user's pending edit is not. New files
-	// follow the untracked rule below: only evidenced ones count.
+	// A replay child never gets a pre-prompt baseline (only TurnEnd is
+	// replayed), so it would see the target repo's whole working tree as
+	// "changed": the user's own uncommitted edits and deletions there are not
+	// the session's. The replica carries the tracked-dirty baseline as of the
+	// LAST replayed turn (seeded at adoption, rewritten below after every
+	// turn), so tracked changes are credited to this turn only when they are
+	// not in it — a deletion the agent made is kept (transcripts never name
+	// deletions, so evidence-narrowing would drop every deletion), the user's
+	// pending edit is not. Kinds are kept apart: a file dirty at the baseline
+	// and deleted since IS a deletion. New files follow the untracked rule
+	// below: only evidenced ones count.
 	replayWithoutBaseline := bindingReplayActive() && preState == nil
 	transcriptEvidenced := relModifiedFiles
 	var relNewFiles, relDeletedFiles []string
+	var statusModified []string
 	if changes != nil {
 		relNewFiles = FilterAndNormalizePaths(changes.New, repoRoot)
 		relDeletedFiles = FilterAndNormalizePaths(changes.Deleted, repoRoot)
-		statusModified := FilterAndNormalizePaths(changes.Modified, repoRoot)
+		statusModified = FilterAndNormalizePaths(changes.Modified, repoRoot)
 		if replayWithoutBaseline {
-			dirtyAtStart := replicaDirtyTrackedBaseline(ctx, sessionID)
-			relDeletedFiles = excludeFiles(relDeletedFiles, dirtyAtStart)
+			dirtyAtStart, deletedAtStart := replicaTrackedBaseline(ctx, sessionID)
+			relDeletedFiles = excludeFiles(relDeletedFiles, deletedAtStart)
 			statusModified = excludeFiles(statusModified, dirtyAtStart)
 		}
 
@@ -1039,22 +1043,34 @@ func handleLifecycleTurnEnd(ctx context.Context, ag agent.Agent, event *agent.Ev
 	}
 	if replayWithoutBaseline {
 		relNewFiles = filterBindingReplayNewFiles(relNewFiles, transcriptEvidenced)
-		if len(relNewFiles) > 0 {
-			newSet := make(map[string]struct{}, len(relNewFiles))
-			for _, file := range relNewFiles {
-				newSet[file] = struct{}{}
-			}
-			mutErr := strategy.MutateSessionState(ctx, sessionID, func(state *strategy.SessionState) error {
-				state.UntrackedFilesAtStart = slices.DeleteFunc(state.UntrackedFilesAtStart, func(file string) bool {
-					_, createdThisTurn := newSet[file]
-					return createdThisTurn
-				})
-				return nil
+		newSet := make(map[string]struct{}, len(relNewFiles))
+		for _, file := range relNewFiles {
+			newSet[file] = struct{}{}
+		}
+		// Rewrite the baselines to the tree as this turn leaves it: files
+		// created this turn leave the untracked baseline, and the tracked
+		// baselines become the full post-turn dirty/deleted sets — whatever
+		// the user changes in this repo between now and the next replayed
+		// turn is then the only thing outside them.
+		nextDirty, nextDeleted := statusModified, relDeletedFiles
+		if changes != nil {
+			nextDirty = FilterAndNormalizePaths(changes.Modified, repoRoot)
+			nextDeleted = FilterAndNormalizePaths(changes.Deleted, repoRoot)
+		}
+		mutErr := strategy.MutateSessionState(ctx, sessionID, func(state *strategy.SessionState) error {
+			state.UntrackedFilesAtStart = slices.DeleteFunc(state.UntrackedFilesAtStart, func(file string) bool {
+				_, createdThisTurn := newSet[file]
+				return createdThisTurn
 			})
-			if mutErr != nil && !errors.Is(mutErr, strategy.ErrStateNotFound) {
-				logging.Warn(logCtx, "failed to repair replayed untracked-file baseline",
-					slog.String("error", mutErr.Error()))
+			if changes != nil {
+				state.DirtyTrackedFilesAtStart = append([]string(nil), nextDirty...)
+				state.DeletedTrackedFilesAtStart = append([]string(nil), nextDeleted...)
 			}
+			return nil
+		})
+		if mutErr != nil && !errors.Is(mutErr, strategy.ErrStateNotFound) {
+			logging.Warn(logCtx, "failed to refresh replayed turn baselines",
+				slog.String("error", mutErr.Error()))
 		}
 	}
 

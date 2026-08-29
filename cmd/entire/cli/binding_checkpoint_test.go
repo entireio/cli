@@ -225,10 +225,12 @@ func TestCappedBuffer_KeepsPrefixAndReportsFullWrite(t *testing.T) {
 	}
 }
 
-// A replayed turn-end has no pre-prompt baseline, so it subtracts the dirty
-// tracked paths snapshotted at adoption: the user's pending edit stays out of
-// the checkpoint, the agent's deletion — which no transcript ever names, so
-// evidence-narrowing would drop it — stays in.
+// A replayed turn-end has no pre-prompt baseline, so it subtracts the tracked
+// baselines the replica carries: the user's pending edit stays out of the
+// checkpoint; the agent's deletion — which no transcript ever names, so
+// evidence-narrowing would drop it — stays in, even for a file that was
+// already dirty at the baseline; and the baselines are rewritten to the
+// post-turn tree so the next replayed turn measures against it.
 func TestReplayedTurnEnd_UsesReplicaDirtyBaselineForTrackedChanges(t *testing.T) {
 	t.Setenv(bindingReplayEnv, "1")
 	t.Setenv(bindingReplayPrimaryEnv, "1")
@@ -241,7 +243,8 @@ func TestReplayedTurnEnd_UsesReplicaDirtyBaselineForTrackedChanges(t *testing.T)
 	testutil.GitAdd(t, root, "user-edit.txt", "gone.txt", "agent-edit.txt")
 	testutil.GitCommit(t, root, "initial")
 	testutil.WriteFile(t, root, "user-edit.txt", "the user's own pending change\n") // predates the session
-	// The agent's turn: edits one tracked file, deletes another.
+	// The agent's turn: edits one tracked file, deletes another that the
+	// user had a pending edit on at the baseline.
 	testutil.WriteFile(t, root, "agent-edit.txt", "changed by the agent\n")
 	if err := os.Remove(filepath.Join(root, "gone.txt")); err != nil {
 		t.Fatal(err)
@@ -267,7 +270,7 @@ func TestReplayedTurnEnd_UsesReplicaDirtyBaselineForTrackedChanges(t *testing.T)
 		AgentType:                types.AgentType("Mock Analyzer Agent"),
 		TranscriptPath:           transcriptPath,
 		FilesTouched:             []string{"agent-edit.txt"},
-		DirtyTrackedFilesAtStart: []string{"user-edit.txt"},
+		DirtyTrackedFilesAtStart: []string{"user-edit.txt", "gone.txt"},
 	}
 	store := session.NewStateStoreWithDir(filepath.Join(root, ".git", session.SessionStateDirName))
 	if err := store.Save(context.Background(), state); err != nil {
@@ -299,6 +302,12 @@ func TestReplayedTurnEnd_UsesReplicaDirtyBaselineForTrackedChanges(t *testing.T)
 	}
 	if slices.Contains(got.FilesTouched, "user-edit.txt") {
 		t.Errorf("the user's pending edit predates the session and must not be attributed: %v", got.FilesTouched)
+	}
+	if !slices.Contains(got.DirtyTrackedFilesAtStart, "user-edit.txt") || !slices.Contains(got.DirtyTrackedFilesAtStart, "agent-edit.txt") {
+		t.Errorf("post-turn dirty baseline = %v, want every still-dirty tracked file", got.DirtyTrackedFilesAtStart)
+	}
+	if !slices.Equal(got.DeletedTrackedFilesAtStart, []string{"gone.txt"}) {
+		t.Errorf("post-turn deleted baseline = %v, want [gone.txt]", got.DeletedTrackedFilesAtStart)
 	}
 }
 

@@ -45,8 +45,11 @@ Rules that are load-bearing:
   the target's status walk uses `gitrepo.StatusWithIsolatedBudget` with a 5s
   budget: a slow foreign repo neither holds the target's lock for long nor
   arms the process-wide status latch that would degrade the launching repo's
-  own capture. That walk seeds two baselines — untracked files and already
-  dirty tracked paths (`DirtyTrackedFilesAtStart`).
+  own capture. That walk seeds the replica's baselines — untracked files,
+  already-dirty tracked paths and already-deleted tracked paths
+  (`DirtyTrackedFilesAtStart`, `DeletedTrackedFilesAtStart`). If the walk
+  fails, adoption is deferred to the next turn rather than persisting a
+  replica that would credit every pre-existing change to the session.
 - **A linked worktree of the launching clone is never a target.** Session
   state is shared across a clone's worktrees, so the "target store" would be
   the source's own; its evidence is recorded, nothing is replicated, and
@@ -66,11 +69,14 @@ checkpoint the target silently missed.
 
 Inside a replay child:
 
-- With no pre-prompt baseline in the target, tracked changes are credited to
-  the turn only when they are not in the replica's dirty-tracked baseline
-  (the user's pending edits stay out; the agent's edits and deletions — which
-  no transcript names — stay in), and new files only when the transcript
-  evidences them.
+- A replay child never has a pre-prompt baseline (only TurnEnd is replayed),
+  so tracked changes are credited to the turn only when they are not in the
+  replica's tracked baselines — the user's pending edits stay out; the
+  agent's edits and deletions, which no transcript names, stay in, including
+  a deletion of a file that was merely dirty before — and new files only when
+  the transcript evidences them. At the end of every replayed turn the
+  baselines are rewritten to the post-turn tree, so whatever the user changes
+  in that repo between turns is measured against the tree the last turn left.
 - **Tokens exist once per turn.** The token-primary repo (latest evidence)
   puts them on its checkpoint; every other repo still folds them into its
   session-wide total (`StepContext.TokensAttributedElsewhere` — the transcript

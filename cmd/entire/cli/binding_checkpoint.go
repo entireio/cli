@@ -181,10 +181,11 @@ func executeBindingReplayHook(ctx context.Context, targetRoot, agentName, hookNa
 	}
 	cmd.Env = append(os.Environ(), bindingReplayEnv+"=1", bindingReplayPrimaryEnv+"="+primaryValue)
 	if err := cmd.Run(); err != nil {
-		if errors.Is(runCtx.Err(), context.DeadlineExceeded) && ctx.Err() == nil {
+		exitedOnItsOwn := cmd.ProcessState != nil && cmd.ProcessState.Exited()
+		if !exitedOnItsOwn && errors.Is(runCtx.Err(), context.DeadlineExceeded) && ctx.Err() == nil {
 			return fmt.Errorf("run replayed hook: timed out after %s", bindingReplayTimeout)
 		}
-		if ctx.Err() != nil {
+		if !exitedOnItsOwn && ctx.Err() != nil {
 			return fmt.Errorf("run replayed hook: cancelled: %w", ctx.Err())
 		}
 		if msg := strings.TrimSpace(stderr.String()); msg != "" {
@@ -241,18 +242,18 @@ func bindingReplayActive() bool {
 	return os.Getenv(bindingReplayEnv) == "1"
 }
 
-// replicaDirtyTrackedBaseline returns the tracked paths that were already
-// dirty in this worktree when the bound session was replicated here (see
-// State.DirtyTrackedFilesAtStart); empty when the state is missing or the
-// session was launched here. The field was introduced together with adoption
-// itself — no released binary writes a replica without it — so an empty value
-// means nothing was dirty at adoption, not that the snapshot was skipped.
-func replicaDirtyTrackedBaseline(ctx context.Context, sessionID string) []string {
+// replicaTrackedBaseline returns the tracked paths that were already dirty
+// (modified/staged) and already deleted in this worktree as of the bound
+// session's last baseline here (see State.DirtyTrackedFilesAtStart); empty
+// when the state is missing or the session was launched here. A replica is
+// persisted only with a successful baseline walk (targetWorktreeBaseline), so
+// empty means nothing was dirty, not that the snapshot was skipped.
+func replicaTrackedBaseline(ctx context.Context, sessionID string) (dirty, deleted []string) {
 	state, err := strategy.LoadSessionState(ctx, sessionID)
 	if err != nil || state == nil {
-		return nil
+		return nil, nil
 	}
-	return state.DirtyTrackedFilesAtStart
+	return state.DirtyTrackedFilesAtStart, state.DeletedTrackedFilesAtStart
 }
 
 // excludeFiles returns files without any entry of exclude, preserving order.

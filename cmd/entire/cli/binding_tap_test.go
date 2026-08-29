@@ -12,6 +12,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/binding"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
+	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 	"github.com/entireio/cli/internal/entireclient/userdirs"
@@ -808,5 +809,46 @@ func TestEnsureSessionReplicated_MarkerFailureStillReportsReplicated(t *testing.
 	}
 	if loadTargetState(ctx, t, rootB, "sess-1") == nil {
 		t.Fatal("target state must exist")
+	}
+}
+
+// A replica persisted without its baselines would credit every pre-existing
+// untracked file and pending edit in the target to the session for the rest
+// of it, so a failed baseline walk must abort adoption (no state, no marker)
+// and leave it to the next turn's retry. The process-wide status latch is the
+// cheapest way to make the isolated walk fail.
+func TestEnsureSessionReplicated_FailedBaselineWalkDefersAdoption(t *testing.T) {
+	t.Setenv("ENTIRE_CONFIG_DIR", t.TempDir())
+	ctx := context.Background()
+	rootB := newBindingRepo(t)
+	commitInitial(t, rootB)
+	enableEntireAt(t, rootB)
+	targetID, ok := binding.ResolveRepoForPath(ctx, filepath.Join(rootB, ".git"))
+	if !ok {
+		t.Fatal("resolve target repo")
+	}
+	ev := binding.Evidence{Repo: targetID, Enabled: true, Files: []string{"agent.go"}}
+	if err := binding.RecordBinding(ctx, "sess-1", bindingTestMeta(""), ev); err != nil {
+		t.Fatal(err)
+	}
+	gitrepo.SetStatusBudgetBreachedForTesting(true)
+	t.Cleanup(func() { gitrepo.SetStatusBudgetBreachedForTesting(false) })
+
+	replicated, err := ensureSessionReplicated(ctx, "sess-1", bindingTestMeta(""), "", ev)
+	if err == nil || replicated {
+		t.Fatalf("replicated = %v, err = %v; want a deferred adoption", replicated, err)
+	}
+	if loadTargetState(ctx, t, rootB, "sess-1") != nil {
+		t.Fatal("no replica may be persisted without its baselines")
+	}
+	rec, err := binding.LoadRecord(ctx, "sess-1")
+	if err != nil || rec == nil || rec.BoundRepos[0].AdoptedAt != nil {
+		t.Fatalf("marker must stay unset: rec=%+v err=%v", rec, err)
+	}
+
+	gitrepo.SetStatusBudgetBreachedForTesting(false)
+	replicated, err = ensureSessionReplicated(ctx, "sess-1", bindingTestMeta(""), "", ev)
+	if err != nil || !replicated {
+		t.Fatalf("retry after the walk recovers must adopt: replicated=%v err=%v", replicated, err)
 	}
 }
