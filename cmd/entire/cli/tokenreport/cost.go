@@ -284,6 +284,8 @@ func ComputeCostShares(u *types.TokenUsage, w Weights) CostShares {
 	case u.CacheCreationTokens > 0 && u.CacheCreation1hTokens == 0 && w.CacheWrite1h != w.CacheWrite5m:
 		cs.CacheWriteUnpriced = true
 	default:
+		// The 1h count is a subset of the total; the 5m remainder is clamped
+		// at 0 should the 1h split exceed the total.
 		oneHour := u.CacheCreation1hTokens
 		fiveMin := max(u.CacheCreationTokens-oneHour, 0)
 		cacheWriteUnits = float64(oneHour)*w.CacheWrite1h + float64(fiveMin)*w.CacheWrite5m
@@ -291,6 +293,7 @@ func ComputeCostShares(u *types.TokenUsage, w Weights) CostShares {
 
 	cs.Units = inputUnits + cacheWriteUnits + cacheReadUnits + outputUnits
 	if cs.Units <= 0 {
+		cs.Units = 0
 		return cs
 	}
 	cs.Input = inputUnits / cs.Units
@@ -305,12 +308,15 @@ func ComputeCostShares(u *types.TokenUsage, w Weights) CostShares {
 // (share × Units) are summed and the shares re-derived from the summed Units,
 // so a mixed-model report is weighted by cost rather than by call count.
 // CacheWriteUnpriced is true if any part was unpriced. Provider and Family
-// are kept when every part agrees and cleared to "" otherwise. With no parts
-// or zero total Units every share is 0 (never NaN).
+// are kept when every part that names one agrees and cleared to "" otherwise;
+// a part with an empty Provider or Family (an unknown model, a bare zero
+// value) carries no information and does not vote, regardless of order. With
+// no parts or zero total Units every share is 0 (never NaN).
 func SumCostShares(parts ...CostShares) CostShares {
 	var sum CostShares
 	var input, cacheWrite, cacheRead, output, thinking float64
-	for i, p := range parts {
+	var providerDisagrees, familyDisagrees bool
+	for _, p := range parts {
 		input += p.Input * p.Units
 		cacheWrite += p.CacheWrite * p.Units
 		cacheRead += p.CacheRead * p.Units
@@ -318,16 +324,26 @@ func SumCostShares(parts ...CostShares) CostShares {
 		thinking += p.Thinking * p.Units
 		sum.Units += p.Units
 		sum.CacheWriteUnpriced = sum.CacheWriteUnpriced || p.CacheWriteUnpriced
-		if i == 0 {
-			sum.Provider, sum.Family = p.Provider, p.Family
-			continue
+		if p.Provider != "" {
+			if sum.Provider == "" {
+				sum.Provider = p.Provider
+			} else if p.Provider != sum.Provider {
+				providerDisagrees = true
+			}
 		}
-		if p.Provider != sum.Provider {
-			sum.Provider = ""
+		if p.Family != "" {
+			if sum.Family == "" {
+				sum.Family = p.Family
+			} else if p.Family != sum.Family {
+				familyDisagrees = true
+			}
 		}
-		if p.Family != sum.Family {
-			sum.Family = ""
-		}
+	}
+	if providerDisagrees {
+		sum.Provider = ""
+	}
+	if familyDisagrees {
+		sum.Family = ""
 	}
 	if sum.Units <= 0 {
 		sum.Units = 0
