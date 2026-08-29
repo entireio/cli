@@ -1047,28 +1047,49 @@ func handleLifecycleTurnEnd(ctx context.Context, ag agent.Agent, event *agent.Ev
 		for _, file := range relNewFiles {
 			newSet[file] = struct{}{}
 		}
-		// Rewrite the baselines to the tree as this turn leaves it: files
-		// created this turn leave the untracked baseline, and the tracked
-		// baselines become the full post-turn dirty/deleted sets — whatever
-		// the user changes in this repo between now and the next replayed
-		// turn is then the only thing outside them.
-		nextDirty, nextDeleted := statusModified, relDeletedFiles
+		// Rewrite the baselines to the tree as this turn leaves it, MINUS the
+		// paths this turn is credited with. Files created this turn leave the
+		// untracked baseline; the tracked baselines become the post-turn
+		// dirty/deleted sets without the credited files. Keeping a credited
+		// file out of the baseline is what lets a later change to it that no
+		// transcript names (a sed in Bash, a formatter) still reach the
+		// checkpoint through the git-status fallback — the baseline stores
+		// paths, so "still dirty from the user" and "dirty again from the
+		// agent" would otherwise be indistinguishable and the second edit's
+		// content would never be written to the shadow tree. It also means a
+		// turn whose SaveStep is skipped or fails re-credits the same files
+		// next turn instead of losing them. The cost — a touched file that
+		// nobody changes again is re-listed next turn — is the launching
+		// repo's normal behavior (it subtracts no dirty baseline at all).
+		var nextDirty, nextDeleted []string
 		if changes != nil {
-			nextDirty = FilterAndNormalizePaths(changes.Modified, repoRoot)
-			nextDeleted = FilterAndNormalizePaths(changes.Deleted, repoRoot)
+			credited := slices.Concat(relModifiedFiles, relDeletedFiles, relNewFiles)
+			nextDirty = excludeFiles(FilterAndNormalizePaths(changes.Modified, repoRoot), credited)
+			nextDeleted = excludeFiles(FilterAndNormalizePaths(changes.Deleted, repoRoot), credited)
 		}
 		mutErr := strategy.MutateSessionState(ctx, sessionID, func(state *strategy.SessionState) error {
-			state.UntrackedFilesAtStart = slices.DeleteFunc(state.UntrackedFilesAtStart, func(file string) bool {
+			untracked := slices.DeleteFunc(slices.Clone(state.UntrackedFilesAtStart), func(file string) bool {
 				_, createdThisTurn := newSet[file]
 				return createdThisTurn
 			})
-			if changes != nil {
-				state.DirtyTrackedFilesAtStart = append([]string(nil), nextDirty...)
-				state.DeletedTrackedFilesAtStart = append([]string(nil), nextDeleted...)
+			if changes == nil {
+				if len(untracked) == len(state.UntrackedFilesAtStart) {
+					return strategy.ErrMutationSkip
+				}
+				state.UntrackedFilesAtStart = untracked
+				return nil
 			}
+			if len(untracked) == len(state.UntrackedFilesAtStart) &&
+				slices.Equal(state.DirtyTrackedFilesAtStart, nextDirty) &&
+				slices.Equal(state.DeletedTrackedFilesAtStart, nextDeleted) {
+				return strategy.ErrMutationSkip
+			}
+			state.UntrackedFilesAtStart = untracked
+			state.DirtyTrackedFilesAtStart = append([]string(nil), nextDirty...)
+			state.DeletedTrackedFilesAtStart = append([]string(nil), nextDeleted...)
 			return nil
 		})
-		if mutErr != nil && !errors.Is(mutErr, strategy.ErrStateNotFound) {
+		if mutErr != nil && !errors.Is(mutErr, strategy.ErrStateNotFound) && !errors.Is(mutErr, strategy.ErrMutationSkip) {
 			logging.Warn(logCtx, "failed to refresh replayed turn baselines",
 				slog.String("error", mutErr.Error()))
 		}

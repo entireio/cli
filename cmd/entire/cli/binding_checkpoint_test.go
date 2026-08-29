@@ -303,11 +303,14 @@ func TestReplayedTurnEnd_UsesReplicaDirtyBaselineForTrackedChanges(t *testing.T)
 	if slices.Contains(got.FilesTouched, "user-edit.txt") {
 		t.Errorf("the user's pending edit predates the session and must not be attributed: %v", got.FilesTouched)
 	}
-	if !slices.Contains(got.DirtyTrackedFilesAtStart, "user-edit.txt") || !slices.Contains(got.DirtyTrackedFilesAtStart, "agent-edit.txt") {
-		t.Errorf("post-turn dirty baseline = %v, want every still-dirty tracked file", got.DirtyTrackedFilesAtStart)
+	// The next baseline is the post-turn tree minus what this turn was
+	// credited with: the user's edit stays baselined; the agent's edit and
+	// deletion do not, so a later unevidenced change to them is still caught.
+	if !slices.Equal(got.DirtyTrackedFilesAtStart, []string{"user-edit.txt"}) {
+		t.Errorf("post-turn dirty baseline = %v, want only the user's pending edit", got.DirtyTrackedFilesAtStart)
 	}
-	if !slices.Equal(got.DeletedTrackedFilesAtStart, []string{"gone.txt"}) {
-		t.Errorf("post-turn deleted baseline = %v, want [gone.txt]", got.DeletedTrackedFilesAtStart)
+	if len(got.DeletedTrackedFilesAtStart) != 0 {
+		t.Errorf("post-turn deleted baseline = %v, want the credited deletion left out", got.DeletedTrackedFilesAtStart)
 	}
 }
 
