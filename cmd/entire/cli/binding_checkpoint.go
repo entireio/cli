@@ -244,7 +244,9 @@ func bindingReplayActive() bool {
 // replicaDirtyTrackedBaseline returns the tracked paths that were already
 // dirty in this worktree when the bound session was replicated here (see
 // State.DirtyTrackedFilesAtStart); empty when the state is missing or the
-// session was launched here.
+// session was launched here. The field was introduced together with adoption
+// itself — no released binary writes a replica without it — so an empty value
+// means nothing was dirty at adoption, not that the snapshot was skipped.
 func replicaDirtyTrackedBaseline(ctx context.Context, sessionID string) []string {
 	state, err := strategy.LoadSessionState(ctx, sessionID)
 	if err != nil || state == nil {
@@ -289,6 +291,13 @@ func filterBindingReplayNewFiles(newFiles, transcriptFiles []string) []string {
 // transcript order. Relative paths belong to the current hook repo; absolute
 // paths are resolved so nested and sibling repos retain their own identity.
 func selectBindingTurnPrimary(ctx context.Context, collector *bindingTurnCollector, currentRoot string, modifiedFiles []string, currentChanged bool) string {
+	if collector == nil {
+		// No collector on the context (tests, non-hook callers): the methods
+		// are nil-safe, but an explicit empty collector makes that obvious at
+		// the call sites below and yields the same answer — no replay
+		// targets, so the current repo is primary when it changed.
+		collector = newBindingTurnCollector()
+	}
 	current, currentOK := binding.ResolveRepoForPath(ctx, filepath.Join(currentRoot, ".git"))
 	for i := len(modifiedFiles) - 1; i >= 0; i-- {
 		file := modifiedFiles[i]
