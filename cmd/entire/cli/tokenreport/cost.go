@@ -254,8 +254,9 @@ type CostShares struct {
 	Units float64 `json:"units"`
 	// CacheWriteUnpriced is true when cache-write tokens were present but
 	// could not be priced because the Weights charge different 5m and 1h
-	// rates and the usage did not record its 1h split (legacy Anthropic
-	// transcripts). Such tokens are excluded from Units rather than blended.
+	// rates and the usage did not record its 1h split (committed token_usage
+	// predating PR #2155; see ComputeCostShares). Such tokens are excluded
+	// from Units rather than blended.
 	CacheWriteUnpriced bool `json:"cache_write_unpriced"`
 }
 
