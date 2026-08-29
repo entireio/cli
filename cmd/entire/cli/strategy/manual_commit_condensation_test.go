@@ -1188,3 +1188,76 @@ func TestCheckpointStepCount(t *testing.T) {
 		})
 	}
 }
+
+// TestBuildSessionMetrics_DerivedDuration pins how condensation fills
+// SessionMetrics.DurationMs for agents whose hooks never report a duration:
+// it is derived from StartedAt and LastInteractionTime, but a hook-reported
+// SessionDurationMs (Cursor's stop hook) always wins.
+func TestBuildSessionMetrics_DerivedDuration(t *testing.T) {
+	t.Parallel()
+
+	startedAt := time.Date(2026, 8, 28, 10, 0, 0, 0, time.UTC)
+	lastInteraction := startedAt.Add(90 * time.Second)
+	beforeStart := startedAt.Add(-5 * time.Second)
+
+	tests := []struct {
+		name  string
+		state *SessionState
+		want  *checkpoint.SessionMetrics
+	}{
+		{
+			name: "only timestamps set derives duration",
+			state: &SessionState{
+				StartedAt:           startedAt,
+				LastInteractionTime: &lastInteraction,
+			},
+			want: &checkpoint.SessionMetrics{DurationMs: 90_000},
+		},
+		{
+			name: "hook-reported duration is not overridden by timestamps",
+			state: &SessionState{
+				SessionDurationMs:   12_345,
+				StartedAt:           startedAt,
+				LastInteractionTime: &lastInteraction,
+			},
+			want: &checkpoint.SessionMetrics{DurationMs: 12_345},
+		},
+		{
+			name: "nil LastInteractionTime with nothing else yields nil metrics",
+			state: &SessionState{
+				StartedAt: startedAt,
+			},
+			want: nil,
+		},
+		{
+			name: "nil LastInteractionTime leaves other hook metrics without a duration",
+			state: &SessionState{
+				StartedAt:        startedAt,
+				SessionTurnCount: 3,
+			},
+			want: &checkpoint.SessionMetrics{TurnCount: 3},
+		},
+		{
+			name: "zero StartedAt derives nothing",
+			state: &SessionState{
+				LastInteractionTime: &lastInteraction,
+			},
+			want: nil,
+		},
+		{
+			name: "last interaction before start clamps to zero",
+			state: &SessionState{
+				StartedAt:           startedAt,
+				LastInteractionTime: &beforeStart,
+				SessionTurnCount:    1,
+			},
+			want: &checkpoint.SessionMetrics{TurnCount: 1},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			assert.Equal(t, tt.want, buildSessionMetrics(tt.state))
+		})
+	}
+}

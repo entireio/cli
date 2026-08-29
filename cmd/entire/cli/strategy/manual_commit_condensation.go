@@ -1101,13 +1101,24 @@ func marshalPromptAttributionsIncludingPending(state *SessionState) json.RawMess
 }
 
 // buildSessionMetrics creates a SessionMetrics from session state if any metrics are available.
-// Returns nil if no hook-provided metrics exist (e.g., for agents that don't report them).
+// Returns nil if no metrics exist.
+//
+// DurationMs comes from the agent's hook-reported SessionDurationMs (Cursor's stop hook)
+// when present; that value is never overridden. Otherwise it is derived from the
+// session's own timestamps as LastInteractionTime - StartedAt, so agents that report
+// no duration still get one on every checkpoint condensed from a state that carries
+// both. A negative difference (clock skew) is clamped to 0, which counts as "not
+// recorded".
 func buildSessionMetrics(state *SessionState) *cpkg.SessionMetrics {
-	if state.SessionDurationMs == 0 && state.SessionTurnCount == 0 && state.ContextTokens == 0 && state.ContextWindowSize == 0 {
+	durationMs := state.SessionDurationMs
+	if durationMs == 0 && !state.StartedAt.IsZero() && state.LastInteractionTime != nil {
+		durationMs = max(state.LastInteractionTime.Sub(state.StartedAt).Milliseconds(), 0)
+	}
+	if durationMs == 0 && state.SessionTurnCount == 0 && state.ContextTokens == 0 && state.ContextWindowSize == 0 {
 		return nil
 	}
 	return &cpkg.SessionMetrics{
-		DurationMs:        state.SessionDurationMs,
+		DurationMs:        durationMs,
 		TurnCount:         state.SessionTurnCount,
 		ContextTokens:     state.ContextTokens,
 		ContextWindowSize: state.ContextWindowSize,
