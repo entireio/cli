@@ -209,3 +209,18 @@ func TestReplayedTurnEnd_CheckpointsOnlyEvidencedFiles(t *testing.T) {
 		t.Fatalf("replayed untracked baseline = %v, want only the pre-existing file", got.UntrackedFilesAtStart)
 	}
 }
+
+func TestCappedBuffer_KeepsPrefixAndReportsFullWrite(t *testing.T) {
+	t.Parallel()
+	b := &cappedBuffer{limit: 5}
+	n, err := b.Write([]byte("hello world"))
+	if err != nil || n != len("hello world") {
+		t.Fatalf("Write = %d, %v; must report the whole write consumed", n, err)
+	}
+	if _, err := b.Write([]byte("more")); err != nil {
+		t.Fatal(err)
+	}
+	if b.String() != "hello" {
+		t.Fatalf("kept %q, want the first 5 bytes", b.String())
+	}
+}

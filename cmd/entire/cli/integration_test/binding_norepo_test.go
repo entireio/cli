@@ -68,9 +68,14 @@ func claudeStopTranscriptLine(filePath string) string {
 func TestNoRepoStopHook_BindsForeignRepoFromTranscript(t *testing.T) {
 	t.Parallel()
 
-	// An enabled repo the transcript writes into.
+	// An enabled repo the transcript writes into. It needs a commit: adoption
+	// resolves the target's HEAD, and an unborn HEAD would make the positive
+	// case pass on evidence alone while adoption silently failed.
 	repoDir := t.TempDir()
 	testutil.InitRepo(t, repoDir)
+	testutil.WriteFile(t, repoDir, "README.md", "base\n")
+	testutil.GitAdd(t, repoDir, "README.md")
+	testutil.GitCommit(t, repoDir, "initial")
 	require.NoError(t, os.MkdirAll(filepath.Join(repoDir, ".entire"), 0o755))
 	require.NoError(t, os.WriteFile(filepath.Join(repoDir, ".entire", "settings.json"),
 		[]byte(`{"enabled":true}`), 0o600))
@@ -91,6 +96,9 @@ func TestNoRepoStopHook_BindsForeignRepoFromTranscript(t *testing.T) {
 	require.Equal(t, canonicalRepo, rec.BoundRepos[0].WorktreeRoot)
 	require.True(t, rec.BoundRepos[0].Enabled, "repo with .entire setup must record Enabled=true")
 	require.Equal(t, 1, rec.LastScannedTranscriptCursor, "cursor must equal the transcript line count")
+	require.NotNil(t, rec.BoundRepos[0].AdoptedAt, "an enabled target must be adopted from the real hook entry point")
+	_, err = os.Stat(filepath.Join(repoDir, ".git", "entire-sessions", sessionID+".json"))
+	require.NoError(t, err, "adoption must leave session state in the target repo")
 }
 
 // Negative — consistent with always-advance semantics: a repo-free transcript

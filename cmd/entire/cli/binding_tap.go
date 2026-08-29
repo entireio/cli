@@ -7,6 +7,7 @@ import (
 	"path"
 	"path/filepath"
 	"runtime/debug"
+	"slices"
 	"strings"
 
 	"github.com/entireio/cli/cmd/entire/cli/binding"
@@ -74,7 +75,9 @@ func recordForeignEvidence(ctx context.Context, sessionID string, meta binding.S
 	// paths simply join the same loop, so a pathological turn cannot fork more
 	// than maxForeignResolutionsPerTurn git processes in total.
 	if nested := nestedRepoEvidencePaths(currentWorktreeRoot, keptRelGroups); len(nested) > 0 {
-		foreignPaths = append(append(make([]string, 0, len(foreignPaths)+len(nested)), foreignPaths...), nested...)
+		// Copy rather than append in place: foreignPaths aliases the caller's
+		// slice and must not be extended under it.
+		foreignPaths = slices.Concat(foreignPaths, nested)
 	}
 	if len(foreignPaths) == 0 {
 		return
@@ -82,7 +85,7 @@ func recordForeignEvidence(ctx context.Context, sessionID string, meta binding.S
 
 	for _, ev := range resolveForeignRepos(ctx, sessionID, currentWorktreeRoot, foreignPaths) {
 		if err := binding.RecordBinding(ctx, sessionID, meta, ev); err != nil {
-			logging.Debug(logCtx, "failed to record session binding",
+			logging.Warn(logCtx, "failed to record session binding",
 				slog.String("session_id", sessionID),
 				slog.String("repo", ev.Repo.WorktreeRoot),
 				slog.String("error", err.Error()))
@@ -94,7 +97,10 @@ func recordForeignEvidence(ctx context.Context, sessionID string, meta binding.S
 			slog.Bool("enabled", ev.Enabled))
 		replicated, err := ensureSessionReplicated(ctx, sessionID, meta, currentWorktreeRoot, ev)
 		if err != nil {
-			logging.Debug(logCtx, "failed to replicate session into bound repo",
+			// Warn: the session touched an enabled repo that will now miss this
+			// turn's checkpoint, and the launching repo's log is where a user
+			// would look.
+			logging.Warn(logCtx, "failed to replicate session into bound repo",
 				slog.String("session_id", sessionID),
 				slog.String("repo", ev.Repo.WorktreeRoot),
 				slog.String("error", err.Error()))

@@ -171,6 +171,7 @@ func runRevParse(ctx context.Context, dir string, absoluteFlag bool) (RepoIdenti
 		root = canonicalize(root)
 		commonDir = canonicalize(commonDir)
 	}
+	root = filepath.Clean(root)
 	commonDir = filepath.Clean(commonDir)
 	if root == "" || commonDir == "" {
 		return RepoIdentity{}, false

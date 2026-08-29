@@ -123,7 +123,9 @@ func (s *ManualCommitStrategy) SaveStep(ctx context.Context, step StepContext) e
 		}
 		if step.TokenUsage != nil {
 			state.TokenUsage = accumulateTokenUsage(state.TokenUsage, step.TokenUsage)
-			state.CheckpointTokenUsage = accumulateTokenUsage(state.CheckpointTokenUsage, step.TokenUsage)
+			if !step.TokensAttributedElsewhere {
+				state.CheckpointTokenUsage = accumulateTokenUsage(state.CheckpointTokenUsage, step.TokenUsage)
+			}
 			// step.TokenUsage.SubagentTokens is a cumulative-since-session-start
 			// snapshot (agent IDs are discovered from the full transcript and each
 			// subagent's own transcript is re-read from its start on every call —
