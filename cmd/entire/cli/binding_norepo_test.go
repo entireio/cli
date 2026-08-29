@@ -4,11 +4,13 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"testing/iotest"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/claudecode"
@@ -518,5 +520,22 @@ func TestExecuteAgentHook_NonRepoCwdRecordsEvidence(t *testing.T) {
 	}
 	if replayRoot != rootB || !bytes.Equal(replayPayload, payload) || !replayPrimary {
 		t.Fatalf("turn-end replay = root %q primary %v payload %q; want root %q primary true original payload", replayRoot, replayPrimary, replayPayload, rootB)
+	}
+}
+
+// Outside a repository a hook must exit 0 whatever happens — including a
+// stdin read failure, which the in-repo path reports but which here would
+// only block the agent for a cwd Entire cannot capture anyway.
+func TestExecuteAgentHook_NonRepoCwdStdinErrorStillExitsZero(t *testing.T) {
+	t.Setenv("ENTIRE_CONFIG_DIR", t.TempDir())
+	t.Setenv(bindingReplayEnv, "")
+	chdirNonRepo(t)
+
+	cmd := newAgentHookVerbCmdWithLogging(agent.AgentNameClaudeCode, claudecode.HookNameStop)
+	cmd.SetIn(iotest.ErrReader(errors.New("broken pipe")))
+	cmd.SetOut(&bytes.Buffer{})
+	cmd.SetErr(&bytes.Buffer{})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("hook in non-repo cwd must exit 0 even when stdin cannot be read: %v", err)
 	}
 }

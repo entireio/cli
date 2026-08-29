@@ -92,10 +92,12 @@ func getHookType(hookName string) string {
 // built-in and external hook commands both pass true; tests may pass false
 // when session stamping is irrelevant.
 func executeAgentHook(cmd *cobra.Command, agentName types.AgentName, hookName string, stampSession bool) error {
-	payload, err := io.ReadAll(cmd.InOrStdin())
-	if err != nil {
-		return fmt.Errorf("failed to read hook event: %w", err)
-	}
+	// The payload is read once up front because both the no-repo evidence
+	// path and the in-repo dispatch consume it. A read failure is deferred:
+	// outside a repository the hook must exit 0 whatever happens (the
+	// invariant below), so it is surfaced only on the in-repo path, where
+	// the previous code reported it as well.
+	payload, readErr := io.ReadAll(cmd.InOrStdin())
 	collector := newBindingTurnCollector()
 	cmd.SetContext(withBindingTurnCollector(cmd.Context(), collector))
 
@@ -124,6 +126,9 @@ func executeAgentHook(cmd *cobra.Command, agentName types.AgentName, hookName st
 			replayBindingTurn(noRepoCtx, collector, string(agentName), hookName, payload)
 		}
 		return nil
+	}
+	if readErr != nil {
+		return fmt.Errorf("failed to read hook event: %w", readErr)
 	}
 	ctx, policy, policyErr := prepareHookPolicy(cmd.Context())
 	if policyErr != nil {
