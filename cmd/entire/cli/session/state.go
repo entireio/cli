@@ -1160,7 +1160,8 @@ func (s *StateStore) Clear(ctx context.Context, sessionID string) error {
 				registryOwner.WorktreePath = ""
 			}
 		}
-		root.Close()
+		// Read-only handle: nothing is buffered, so a close error has nothing to report.
+		_ = root.Close()
 	}
 	primaryFile := sessionID + ".json"
 	matches := matchSessionFiles(s.stateDir, sessionID)
