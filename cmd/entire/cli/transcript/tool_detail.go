@@ -8,8 +8,9 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/stringutil"
 )
 
-// shellHeadWords is how many command words ToolDetail keeps for a shell tool:
-// the program and its subcommand (`go test`, `git log`, `npm run`).
+// shellHeadWords is how many command words ToolDetail always keeps for a
+// shell tool: the program and its subcommand (`go test`, `git log`,
+// `npm run`). A third word survives only when isPathLikeWord accepts it.
 const shellHeadWords = 2
 
 // envAssignmentPattern matches a leading `VAR=value` word, the same shape
@@ -29,9 +30,13 @@ var bareRedirectPattern = regexp.MustCompile(`^&?\d*[<>]{1,3}&?$`)
 //     run_shell_command, terminal, execute): the head of the LAST command in
 //     the pipeline — sanitized with stringutil.SanitizeShellCommand, split on
 //     `;`, `&&`, `||`, `|` and newline, leading `VAR=x` assignments,
-//     `-flag` words and redirections dropped, then the first shellHeadWords
-//     words. `cd x && VAR=1 go test ./... -run X` → `go test`. The raw
-//     command is never returned: it is user content and is not stored.
+//     `-flag` words and redirections dropped, then the first two words plus
+//     a third ONLY when it is path-like (isPathLikeWord: contains `/`,
+//     starts with `.`, or contains `*`) — command, subcommand, and the
+//     path or glob it targets. `go test ./cmd/entire/... -run TestX` →
+//     `go test ./cmd/entire/...`; `git log -p -3` → `git log`;
+//     `npm run build` → `npm run`. The raw command is never returned: it is
+//     user content and is not stored.
 //   - file tools (Read, Edit, Write, MultiEdit, NotebookEdit, read_file,
 //     write_file, edit_file, apply_patch): ToolInput.AnyFilePath, falling
 //     back to NotebookPath.
@@ -66,7 +71,7 @@ func ToolDetail(tool string, in ToolInput) string {
 // steps. It returns "" for an empty or all-quoted command.
 func shellCommandHead(cmd string) string {
 	segment := lastCommandSegment(stringutil.SanitizeShellCommand(cmd))
-	words := make([]string, 0, shellHeadWords)
+	words := make([]string, 0, shellHeadWords+1)
 	skipNext := false
 	for _, tok := range strings.Fields(segment) {
 		tok = trimGrouping(strings.ReplaceAll(tok, "\x00", ""))
@@ -84,14 +89,26 @@ func shellCommandHead(cmd string) string {
 			// Leading environment assignment.
 		case strings.HasPrefix(tok, "-"):
 			// Flag.
+		case len(words) == shellHeadWords:
+			// The head is complete; a third word is kept only when it is
+			// the path or glob the command targets.
+			if isPathLikeWord(tok) {
+				words = append(words, tok)
+			}
+			return strings.Join(words, " ")
 		default:
 			words = append(words, tok)
-			if len(words) == shellHeadWords {
-				return strings.Join(words, " ")
-			}
 		}
 	}
 	return strings.Join(words, " ")
+}
+
+// isPathLikeWord reports whether a command word names a path or glob target
+// rather than a plain argument: it contains a `/`, starts with `.` (`./...`,
+// `.github`), or contains a `*`. `./cmd/entire/...` and `src/` qualify;
+// `build` and `host` do not.
+func isPathLikeWord(tok string) bool {
+	return strings.Contains(tok, "/") || strings.HasPrefix(tok, ".") || strings.Contains(tok, "*")
 }
 
 // lastCommandSegment returns the text after the last command separator
