@@ -139,7 +139,10 @@ func buildReplicatedSessionState(ctx context.Context, source *session.State, rec
 	if err != nil {
 		return nil, fmt.Errorf("resolve target worktree ID: %w", err)
 	}
-	untrackedFiles, dirtyTrackedFiles := targetWorktreeBaseline(ctx, repo)
+	baseline, err := targetWorktreeBaseline(ctx, repo)
+	if err != nil {
+		return nil, err
+	}
 
 	now := time.Now()
 	var replicated session.State
@@ -176,14 +179,15 @@ func buildReplicatedSessionState(ctx context.Context, source *session.State, rec
 	}
 
 	resetSessionStateForTarget(&replicated, sessionTargetSnapshot{
-		headHash:          head.Hash().String(),
-		worktreeRoot:      target.WorktreeRoot,
-		worktreeID:        worktreeID,
-		branch:            strategy.GetCurrentBranchName(repo),
-		filesTouched:      append([]string(nil), evidenceFiles...),
-		untrackedFiles:    untrackedFiles,
-		dirtyTrackedFiles: dirtyTrackedFiles,
-		now:               now,
+		headHash:            head.Hash().String(),
+		worktreeRoot:        target.WorktreeRoot,
+		worktreeID:          worktreeID,
+		branch:              strategy.GetCurrentBranchName(repo),
+		filesTouched:        append([]string(nil), evidenceFiles...),
+		untrackedFiles:      baseline.untracked,
+		dirtyTrackedFiles:   baseline.dirtyTracked,
+		deletedTrackedFiles: baseline.deletedTracked,
+		now:                 now,
 	}, true)
 	return &replicated, nil
 }
@@ -193,19 +197,27 @@ func buildReplicatedSessionState(ctx context.Context, source *session.State, rec
 // repo waits on, so it must stay far below StatusWalkBudget.
 const bindingAdoptStatusBudget = 5 * time.Second
 
-// targetWorktreeBaseline seeds the replica's two baselines from one status
-// walk: untracked files (so pre-existing untracked files are not attributed
-// as new) and tracked paths already modified/deleted/staged (so a replayed
+// worktreeBaseline is what a replayed turn-end in the target measures against.
+type worktreeBaseline struct {
+	untracked      []string
+	dirtyTracked   []string // modified or staged, still present
+	deletedTracked []string
+}
+
+// targetWorktreeBaseline seeds the replica's baselines from one status walk:
+// untracked files (so pre-existing untracked files are not attributed as new)
+// and tracked paths already modified/staged or deleted (so a replayed
 // turn-end, which has no pre-prompt baseline, does not attribute the user's
-// own pending edits or deletions to the session). Best-effort: a failure is
-// logged and adoption proceeds with empty baselines.
-func targetWorktreeBaseline(ctx context.Context, repo *git.Repository) (untracked, dirtyTracked []string) {
+// own pending edits or deletions to the session). A failed walk is an error:
+// persisting a replica with empty baselines would credit every pre-existing
+// change to the session for the rest of it, and adoption is retried on the
+// next turn anyway (the adopted marker is written only after success).
+func targetWorktreeBaseline(ctx context.Context, repo *git.Repository) (worktreeBaseline, error) {
 	status, err := gitrepo.StatusWithIsolatedBudget(ctx, repo, bindingAdoptStatusBudget)
 	if err != nil {
-		logging.Warn(logging.WithComponent(ctx, "binding"), "adopted target's worktree baseline unavailable; pre-existing untracked files and pending edits may be attributed to the session",
-			slog.String("error", err.Error()))
-		return nil, nil
+		return worktreeBaseline{}, fmt.Errorf("target worktree baseline unavailable; adoption deferred to the next turn: %w", err)
 	}
+	var b worktreeBaseline
 	for name, fileStatus := range status {
 		if name == ".entire" || strings.HasPrefix(name, ".entire/") {
 			continue
@@ -213,12 +225,15 @@ func targetWorktreeBaseline(ctx context.Context, repo *git.Repository) (untracke
 		slashed := filepath.ToSlash(name)
 		switch {
 		case fileStatus.Worktree == git.Untracked || fileStatus.Staging == git.Untracked:
-			untracked = append(untracked, slashed)
+			b.untracked = append(b.untracked, slashed)
+		case fileStatus.Worktree == git.Deleted || fileStatus.Staging == git.Deleted:
+			b.deletedTracked = append(b.deletedTracked, slashed)
 		case fileStatus.Worktree != git.Unmodified || fileStatus.Staging != git.Unmodified:
-			dirtyTracked = append(dirtyTracked, slashed)
+			b.dirtyTracked = append(b.dirtyTracked, slashed)
 		}
 	}
-	sort.Strings(untracked)
-	sort.Strings(dirtyTracked)
-	return untracked, dirtyTracked
+	sort.Strings(b.untracked)
+	sort.Strings(b.dirtyTracked)
+	sort.Strings(b.deletedTracked)
+	return b, nil
 }

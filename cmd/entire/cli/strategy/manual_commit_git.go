@@ -134,8 +134,16 @@ func (s *ManualCommitStrategy) SaveStep(ctx context.Context, step StepContext) e
 				// snapshot during this turn is folded into the baseline so the
 				// rescope below — run on a later primary turn in this window —
 				// cannot re-absorb it. The session-wide total above keeps it.
-				if grown := types.SubtractTokenUsage(state.TokenUsage.SubagentTokens, subagentBefore); grown != nil {
-					state.SubagentTokensBaseline = types.AddTokenUsage(state.SubagentTokensBaseline, grown)
+				// Only a step that carried a snapshot can have grown the
+				// cumulative; a nil snapshot leaves it unchanged and would only
+				// promote a nil baseline to a persisted zero struct. Growth
+				// first observed on an elsewhere turn (no earlier snapshot in
+				// this window) is folded in whole — inherent to snapshot
+				// accounting, not attributable per turn after the fact.
+				if step.TokenUsage.SubagentTokens != nil {
+					if grown := types.SubtractTokenUsage(state.TokenUsage.SubagentTokens, subagentBefore); grown != nil {
+						state.SubagentTokensBaseline = types.AddTokenUsage(state.SubagentTokensBaseline, grown)
+					}
 				}
 			} else {
 				state.CheckpointTokenUsage = accumulateTokenUsage(state.CheckpointTokenUsage, step.TokenUsage)
