@@ -131,7 +131,7 @@ func FindCheckpointUUID(lines []TranscriptLine, toolUseID string) (string, bool)
 		}
 
 		for _, block := range msg.Content {
-			if block.Type == "tool_result" && block.ToolUseID == toolUseID {
+			if block.Type == contentTypeToolResult && block.ToolUseID == toolUseID {
 				return line.UUID, true
 			}
 		}
@@ -240,13 +240,6 @@ func ExtractSpawnedAgentIDs(transcript []TranscriptLine) map[string]string {
 			continue
 		}
 
-		// Parse as array of content blocks (tool results)
-		var contentBlocks []struct {
-			Type      string          `json:"type"`
-			ToolUseID string          `json:"tool_use_id"`
-			Content   json.RawMessage `json:"content"`
-		}
-
 		var msg struct {
 			Content json.RawMessage `json:"content"`
 		}
@@ -254,50 +247,60 @@ func ExtractSpawnedAgentIDs(transcript []TranscriptLine) map[string]string {
 			continue
 		}
 
+		// Parse as array of content blocks (tool results)
+		var contentBlocks []contentBlockRaw
 		if err := json.Unmarshal(msg.Content, &contentBlocks); err != nil {
 			continue
 		}
 
 		for _, block := range contentBlocks {
-			if block.Type != "tool_result" {
+			if block.Type != contentTypeToolResult {
 				continue
 			}
-
-			// Content can be a string or array of text blocks
-			var textContent string
-
-			// Try as array of text blocks first
-			var textBlocks []struct {
-				Type string `json:"type"`
-				Text string `json:"text"`
-			}
-			if err := json.Unmarshal(block.Content, &textBlocks); err == nil {
-				var textContentSb361 strings.Builder
-				for _, tb := range textBlocks {
-					if tb.Type == "text" {
-						textContentSb361.WriteString(tb.Text + "\n")
-					}
-				}
-				textContent += textContentSb361.String()
-			} else {
-				// Try as plain string
-				var str string
-				if err := json.Unmarshal(block.Content, &str); err == nil {
-					textContent = str
-				}
-			}
-
-			// Look for agentId in the text. Drop any ID that isn't path-safe:
-			// callers build agent-<id>.jsonl from it and read that file, so this
-			// is the choke point that keeps the path inside subagentsDir,
-			// independent of extractAgentIDFromText's character handling.
-			if agentID := extractAgentIDFromText(textContent); agentID != "" && validation.ValidateAgentID(agentID) == nil {
+			if agentID := agentIDFromToolResult(block.Content); agentID != "" {
 				agentIDs[agentID] = block.ToolUseID
 			}
 		}
 	}
 
 	return agentIDs
+}
+
+// agentIDFromToolResult returns the "agentId: <id>" recorded in a Task
+// tool_result's raw content — a plain string or an array of text blocks — or
+// "" when there is none. Any ID that isn't path-safe is dropped: callers
+// build agent-<id>.jsonl from it and read that file, so this is the choke
+// point that keeps the path inside subagentsDir, independent of
+// extractAgentIDFromText's character handling.
+func agentIDFromToolResult(content json.RawMessage) string {
+	var textContent string
+
+	// Try as array of text blocks first
+	var textBlocks []struct {
+		Type string `json:"type"`
+		Text string `json:"text"`
+	}
+	if err := json.Unmarshal(content, &textBlocks); err == nil {
+		var sb strings.Builder
+		for _, tb := range textBlocks {
+			if tb.Type == "text" {
+				sb.WriteString(tb.Text + "\n")
+			}
+		}
+		textContent = sb.String()
+	} else {
+		// Try as plain string
+		var str string
+		if err := json.Unmarshal(content, &str); err == nil {
+			textContent = str
+		}
+	}
+
+	agentID := extractAgentIDFromText(textContent)
+	if agentID == "" || validation.ValidateAgentID(agentID) != nil {
+		return ""
+	}
+	return agentID
 }
 
 // extractAgentIDFromText extracts an agent ID from text containing "agentId: <id>".

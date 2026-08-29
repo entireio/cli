@@ -203,8 +203,10 @@ var FileModificationTools = []string{"Write", "StrReplace"}
 
 // toolInput is the subset of a Cursor tool_use input that carries the target file.
 //
-// Cursor keys it "path", where Claude Code uses "file_path" — which is why the
-// shared transcript.ToolInput type does not fit. Values observed are absolute.
+// Cursor keys it "path", where Claude Code uses "file_path". The shared
+// transcript.ToolInput decodes that key too (ToolInput.Path / AnyFilePath), so
+// this narrower struct is a local convenience rather than a necessity. Values
+// observed are absolute.
 type toolInput struct {
 	Path string `json:"path"`
 }
