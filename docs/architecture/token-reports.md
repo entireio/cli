@@ -744,7 +744,7 @@ single-report commands emit the same shapes:
 
 | key | shape | when present |
 |---|---|---|
-| `tokens` | `{total, input, cache_read, cache_write, output, api_calls, subagent_total?, thinking_tokens?, cache_creation_1h_tokens?}` — `api_calls` includes subagent calls. `subagent_total` is the four-class volume of the **subagent records** (`tasks/*/task.json` or `agent-<id>.jsonl`, `a.subagent` in `tokens_load.go`), not of the `kind: "subagent"` contributor rows: a subagent row also absorbs the parent's own spawn tool-call tokens, which appear as that row's `details[]` (e.g. `Explore (haiku)`) and belong to the parent. The identity that holds, when no row's details were truncated, is `subagent_total == Σ(subagent rows' four classes) − Σ(their details[].tokens)`; `Σ contributors == tokens.*` holds regardless. | any usage recorded |
+| `tokens` | `{total, input, cache_read, cache_write, output, api_calls, subagent_total?, thinking_tokens?, cache_creation_1h_tokens?}` — `api_calls` includes subagent calls. When `source` is `"transcript"`, `subagent_total` is the four-class volume of the **subagent records** (`tasks/*/task.json` or `agent-<id>.jsonl`, `a.subagent` in `tokens_load.go`), not of the `kind: "subagent"` contributor rows: a subagent row also absorbs the parent's own spawn tool-call tokens, which appear as that row's `details[]` (e.g. `Explore (haiku)`) and belong to the parent. Two identities then hold: `Σ contributors == tokens.*` for every class, and — when no row's details were truncated — `subagent_total == Σ(subagent rows' four classes) − Σ(their details[].tokens)`. Otherwise `tokens.*` and `contributors` come from different rungs (§9: a legacy breakdown covers the whole stored transcript while `tokens` is the committed delta; a fallback session's `subagent_total` is its committed `subagent_tokens` and it contributes no contributors) and neither identity is guaranteed. | any usage recorded |
 | `cost` | `{provider?, family?, weights?: Weights, shares: CostShares}` — `weights` only when one family priced everything and it is the report model's | `shares.units > 0` |
 | `effort` | `{value, calls}` — `calls` counts every call carrying the value, usage recorded or not (so it can exceed `tokens.api_calls`) | profile records effort and a call carried one |
 | `context` | `{tokens, window_size, percent}` — hook-reported context pressure | both figures known (single-session checkpoints and live sessions) |
@@ -833,7 +833,7 @@ cache_read_caveat?, qualification, limitations?
 ```
 
 `status` follows the total's direction; `qualification` is a fixed sentence
-per status, plus *"Cost mix: cache write 41% → 30% (down 11 points); …"* for
+per status, plus `Cost mix: <class> <a>% → <b>% (<down|up> <n> points); …` for
 every class that moved ≥ 5 points when both checkpoints priced. Comparing a
 checkpoint to itself is an error.
 
@@ -1044,6 +1044,7 @@ needs, drill-down included).
 - Model ids, tool names, skill names and subagent types are printed as the
   agent recorded them; a delegation's objective, a search query, a file's
   contents and a command's arguments are never read into the report.
-- `--json` carries exactly what the text report prints — the same
-  contributors, details and notes — so mirroring it exposes nothing the
-  terminal does not.
+- `--json` carries the same kinds of values the text report prints —
+  contributor rows, top-3 details, notes — so mirroring it exposes nothing
+  the terminal does not; the JSON `contributors` array is simply not cut to
+  the text's top-6 rows (§8).
