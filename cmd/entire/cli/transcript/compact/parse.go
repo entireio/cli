@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+
+	"github.com/entireio/cli/cmd/entire/cli/transcript"
 )
 
 type CondensedEntry struct {
@@ -90,17 +92,19 @@ func BuildCondensedEntries(content []byte) ([]CondensedEntry, error) {
 						continue
 					}
 
-					var input map[string]interface{}
+					// Best-effort decode: a non-string value under one key is
+					// skipped by encoding/json while the rest still populate,
+					// and a non-object input leaves the zero value — either
+					// way RawDetail yields what the old map-based lookup did.
+					var input transcript.ToolInput
 					if inputJSON, ok := block["input"]; ok && len(inputJSON) > 0 {
-						if err := json.Unmarshal(inputJSON, &input); err != nil {
-							input = nil
-						}
+						_ = json.Unmarshal(inputJSON, &input) //nolint:errcheck // best-effort, see above
 					}
 
 					entries = append(entries, CondensedEntry{
 						Type:       "tool",
 						ToolName:   toolName,
-						ToolDetail: extractToolDetail(input),
+						ToolDetail: input.RawDetail(),
 					})
 				}
 			}
@@ -112,13 +116,4 @@ func BuildCondensedEntries(content []byte) ([]CondensedEntry, error) {
 	}
 
 	return entries, nil
-}
-
-func extractToolDetail(input map[string]interface{}) string {
-	for _, key := range []string{"description", "command", "file_path", "filePath", "path", "pattern"} {
-		if v, ok := input[key].(string); ok && v != "" {
-			return v
-		}
-	}
-	return ""
 }
