@@ -540,6 +540,8 @@ func cloneAdoptSourceState(source *session.State) session.State {
 	adopted.ReviewSkills = slices.Clone(source.ReviewSkills)
 	adopted.TurnCheckpointIDs = slices.Clone(source.TurnCheckpointIDs)
 	adopted.UntrackedFilesAtStart = slices.Clone(source.UntrackedFilesAtStart)
+	adopted.DirtyTrackedFilesAtStart = slices.Clone(source.DirtyTrackedFilesAtStart)
+	adopted.DeletedTrackedFilesAtStart = slices.Clone(source.DeletedTrackedFilesAtStart)
 	adopted.FilesTouched = slices.Clone(source.FilesTouched)
 	adopted.TokenUsage = cloneTokenUsage(source.TokenUsage)
 	adopted.SkillEvents = cloneSkillEvents(source.SkillEvents)

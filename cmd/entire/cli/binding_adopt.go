@@ -179,14 +179,18 @@ func buildReplicatedSessionState(ctx context.Context, source *session.State, rec
 	}
 
 	resetSessionStateForTarget(&replicated, sessionTargetSnapshot{
-		headHash:            head.Hash().String(),
-		worktreeRoot:        target.WorktreeRoot,
-		worktreeID:          worktreeID,
-		branch:              strategy.GetCurrentBranchName(repo),
-		filesTouched:        append([]string(nil), evidenceFiles...),
-		untrackedFiles:      baseline.untracked,
-		dirtyTrackedFiles:   baseline.dirtyTracked,
-		deletedTrackedFiles: baseline.deletedTracked,
+		headHash:     head.Hash().String(),
+		worktreeRoot: target.WorktreeRoot,
+		worktreeID:   worktreeID,
+		branch:       strategy.GetCurrentBranchName(repo),
+		filesTouched: append([]string(nil), evidenceFiles...),
+		// Adoption runs from the turn that produced the evidence, so the
+		// target's tree already holds that turn's agent work; the evidenced
+		// paths are by definition this turn's and must not seed a baseline
+		// the replay of this same turn would subtract them against.
+		untrackedFiles:      excludeFiles(baseline.untracked, evidenceFiles),
+		dirtyTrackedFiles:   excludeFiles(baseline.dirtyTracked, evidenceFiles),
+		deletedTrackedFiles: excludeFiles(baseline.deletedTracked, evidenceFiles),
 		now:                 now,
 	}, true)
 	return &replicated, nil

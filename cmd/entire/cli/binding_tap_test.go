@@ -151,6 +151,9 @@ func TestRecordForeignEvidence_ReplicatesStateWithoutRetiringSource(t *testing.T
 	if !slices.Contains(target.UntrackedFilesAtStart, "preexisting.tmp") {
 		t.Errorf("pre-existing untracked baseline = %v, want preexisting.tmp preserved", target.UntrackedFilesAtStart)
 	}
+	if slices.Contains(target.UntrackedFilesAtStart, "agent.go") {
+		t.Errorf("the adopting turn's own evidence must not seed the baseline: %v", target.UntrackedFilesAtStart)
+	}
 	if target.Phase != session.PhaseActive || target.AdoptedIntoWorktreePath != "" {
 		t.Errorf("replicated state must be active and additive, got phase=%s tombstone=%q", target.Phase, target.AdoptedIntoWorktreePath)
 	}
@@ -842,7 +845,7 @@ func TestEnsureSessionReplicated_FailedBaselineWalkDefersAdoption(t *testing.T) 
 		t.Fatal("no replica may be persisted without its baselines")
 	}
 	rec, err := binding.LoadRecord(ctx, "sess-1")
-	if err != nil || rec == nil || rec.BoundRepos[0].AdoptedAt != nil {
+	if err != nil || rec == nil || len(rec.BoundRepos) != 1 || rec.BoundRepos[0].AdoptedAt != nil {
 		t.Fatalf("marker must stay unset: rec=%+v err=%v", rec, err)
 	}
 
