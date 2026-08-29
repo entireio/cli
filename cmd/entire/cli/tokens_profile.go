@@ -141,6 +141,14 @@ type tokensProfileStore interface {
 	ReadSessionMetadata(ctx context.Context, checkpointID id.CheckpointID, sessionIndex int) (*checkpoint.Metadata, error)
 }
 
+// tokensBareNoSessionHint is what bare `entire tokens` prints when the current
+// worktree has no session to report on: one line, exit 0, no picker.
+const tokensBareNoSessionHint = "no active session — try 'entire checkpoint tokens <id>' or 'entire tokens profile'" //nolint:gosec // G101: a hint line, not a credential
+
+// newTokensGroupCmd is the `tokens` group. Bare `entire tokens` reports on
+// the current worktree's most recent session, exactly as
+// `entire session tokens --current` does; the subcommands cover checkpoint
+// history.
 func newTokensGroupCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:    "tokens",
@@ -148,14 +156,26 @@ func newTokensGroupCmd() *cobra.Command {
 		Hidden: true,
 		Long: `Analyze token usage across sessions and checkpoints.
 
+Run without a subcommand to report on the current worktree's most recent
+session, as 'entire session tokens --current' does. Without an active session
+it prints a one-line hint and exits 0.
+
 Commands:
   profile  Aggregate token usage across committed checkpoints
 
 Examples:
+  entire tokens                current session's token report
   entire tokens profile
   entire tokens profile --json`,
+		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			return cmd.Help()
+			ctx := cmd.Context()
+			sessionID := strategy.FindMostRecentSessionInCurrentWorktree(ctx)
+			if sessionID == "" {
+				fmt.Fprintln(cmd.OutOrStdout(), tokensBareNoSessionHint)
+				return nil
+			}
+			return runSessionTokens(ctx, cmd, sessionID, true, false, false)
 		},
 	}
 

@@ -46,6 +46,11 @@ var experimentalCommands = []experimentalCommandInfo{
 		Summary:     "Show token usage and recommendations for a session",
 	},
 	{
+		CommandPath: []string{"checkpoint", "tokens"},
+		Invocation:  "entire checkpoint tokens <id>",
+		Summary:     "Show where a committed checkpoint's tokens went, with estimated cost shares",
+	},
+	{
 		CommandPath: []string{"blame"},
 		Invocation:  "entire blame",
 		Summary:     "Show which lines came from Entire checkpoints",
@@ -105,6 +110,7 @@ Try:
   entire tokens --help
   entire tokens profile --help
   entire session tokens --help
+  entire checkpoint tokens --help
   entire blame --help
   entire why --help
   entire experts --help

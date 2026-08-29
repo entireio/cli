@@ -111,11 +111,12 @@ var agentHelpClassification = map[string]agentHelpFacts{
 	"session current": {agentHelpAudienceReadOnly, false},
 	"session info":    {agentHelpAudienceReadOnly, false},
 	"session list":    {agentHelpAudienceReadOnly, false},
-	"session tokens":  {agentHelpAudienceReadOnly, false},
-	"session adopt":   {agentHelpAudienceTaskDriven, false},
-	"session attach":  {agentHelpAudienceTaskDriven, false},
-	"session resume":  {agentHelpAudienceTaskDriven, false}, // switches branch
-	"session stop":    {agentHelpAudienceTaskDriven, false},
+	// §8.7 (flip to listed once decided): read-only; the brief is how channel agents learn to run it.
+	"session tokens": {agentHelpAudienceReadOnly, false},
+	"session adopt":  {agentHelpAudienceTaskDriven, false},
+	"session attach": {agentHelpAudienceTaskDriven, false},
+	"session resume": {agentHelpAudienceTaskDriven, false}, // switches branch
+	"session stop":   {agentHelpAudienceTaskDriven, false},
 
 	// trail is the highest-traffic family by a wide margin, so its read-only
 	// subcommands must not disappear behind the group's write-capable label.
@@ -198,6 +199,24 @@ var agentHelpGuidance = map[string]string{
 		"`entire agent-help` first; there is probably a command for it. When you do\n" +
 		"need it, use this rather than hand-rolling curl — it attaches the right\n" +
 		"bearer and dials the right host for you.",
+	"session tokens": "Run `entire session tokens --agent-brief` when the user asks what this\n" +
+		"session cost or where its tokens went, and after a long session (several\n" +
+		"hours or hundreds of API calls) before suggesting how to work differently.\n" +
+		"The brief's `Next best action` is written to be relayed to the user in\n" +
+		"plain language. Read-only: it never changes repo or session state. Do not\n" +
+		"run it speculatively on every turn — it re-reads the whole transcript.",
+	"checkpoint tokens": "Run `entire checkpoint tokens <id> --agent-brief` when the user asks why a\n" +
+		"specific commit or checkpoint was expensive, or where its tokens went. The\n" +
+		"brief's `Next best action` is written to be relayed to the user in plain\n" +
+		"language. Read-only: it reads the checkpoint's stored transcripts and never\n" +
+		"changes repo state. For the session you are in now, use `entire session\n" +
+		"tokens --agent-brief` instead.",
+	"tokens profile": "Run `entire tokens profile` when the user asks about token habits across\n" +
+		"many sessions rather than one — which agent spends most, what a typical\n" +
+		"checkpoint costs, which checkpoints are worth opening. It reads committed\n" +
+		"checkpoint metadata only (no transcripts), so it is cheap and read-only,\n" +
+		"and in this version it prints no recommendations: for a why and a next\n" +
+		"step, open one of the checkpoints it names with `entire checkpoint tokens`.",
 }
 
 // agentHelpFactsFor classifies one command path, defaulting the unclassified

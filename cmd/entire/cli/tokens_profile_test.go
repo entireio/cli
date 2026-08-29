@@ -13,6 +13,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
+	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
 	"github.com/entireio/cli/redact"
 )
@@ -576,5 +577,63 @@ func writeProfileTokenCheckpoint(ctx context.Context, t *testing.T, store *check
 		TokenUsage:   usage,
 	}); err != nil {
 		t.Fatalf("WriteCommitted(%s) error = %v", checkpointID, err)
+	}
+}
+
+// Bare `entire tokens` is the current session's report, exactly as
+// `entire session tokens --current` renders it (spec §4.4). Chdir'd into a
+// fresh repo so the current-worktree filter has a defined answer.
+func TestTokensGroupCmd_BareRunsCurrentSessionReport(t *testing.T) {
+	setupStopTestRepo(t)
+	ctx := context.Background()
+	const sessionID = "bare-tokens-current"
+	state := liveSessionTokensState(sessionID, writeSessionTokensTranscript(t, sessionID, ""))
+	root, err := paths.WorktreeRoot(ctx)
+	if err != nil {
+		t.Fatalf("WorktreeRoot() error = %v", err)
+	}
+	state.WorktreePath = root
+	if err := strategy.SaveSessionState(ctx, state); err != nil {
+		t.Fatalf("SaveSessionState() error = %v", err)
+	}
+
+	cmd := newTokensGroupCmd()
+	var stdout, stderr bytes.Buffer
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&stderr)
+	cmd.SetArgs(nil)
+	if err := cmd.ExecuteContext(ctx); err != nil {
+		t.Fatalf("entire tokens: %v\n%s", err, stdout.String())
+	}
+
+	assertContainsAll(t, stdout.String(), "Session tokens", sessionID, "Where it went")
+	if stderr.Len() != 0 {
+		t.Errorf("unexpected stderr:\n%s", stderr.String())
+	}
+	if strings.Contains(stdout.String(), "Commands:") {
+		t.Errorf("bare entire tokens printed help instead of the report:\n%s", stdout.String())
+	}
+}
+
+// Without a session in the worktree the bare command prints the one-line hint
+// and exits 0 — plain text, no picker, nothing on stderr (spec §4.4).
+func TestTokensGroupCmd_BareWithoutSessionPrintsHint(t *testing.T) {
+	setupStopTestRepo(t)
+
+	cmd := newTokensGroupCmd()
+	var stdout, stderr bytes.Buffer
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&stderr)
+	cmd.SetArgs(nil)
+	if err := cmd.ExecuteContext(context.Background()); err != nil {
+		t.Fatalf("entire tokens without a session should exit 0, got: %v", err)
+	}
+
+	const want = "no active session — try 'entire checkpoint tokens <id>' or 'entire tokens profile'\n"
+	if stdout.String() != want {
+		t.Errorf("stdout = %q, want %q", stdout.String(), want)
+	}
+	if stderr.Len() != 0 {
+		t.Errorf("unexpected stderr:\n%s", stderr.String())
 	}
 }

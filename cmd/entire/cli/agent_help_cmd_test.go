@@ -917,3 +917,71 @@ func TestAgentHelpGuidance_NeverLeaksIntoCobraHelp(t *testing.T) {
 		}
 	}
 }
+
+// The token reports carry agent-only guidance on WHEN to run them — the brief
+// is how a channel agent learns to run `session tokens` without a skill — and
+// it must reach both the text drill-down and the --json consumer. The rows stay
+// unlisted (§8.7 is undecided), so this asserts on guidance only, not on
+// `listed`.
+func TestAgentHelpGuidance_TokenReportsCarryWhenToUse(t *testing.T) {
+	t.Parallel()
+
+	root := NewRootCmd()
+	cases := []struct {
+		path []string
+		want []string
+	}{
+		{[]string{"session", "tokens"}, []string{
+			"entire session tokens --agent-brief",
+			"after a long session",
+			"Next best action",
+			"run it speculatively on every turn",
+		}},
+		{[]string{"checkpoint", "tokens"}, []string{
+			"entire checkpoint tokens <id> --agent-brief",
+			"specific commit or checkpoint was expensive",
+		}},
+		{[]string{"tokens", "profile"}, []string{
+			"entire tokens profile",
+			"many sessions rather than one",
+			"no recommendations",
+		}},
+	}
+	for _, tc := range cases {
+		name := strings.Join(tc.path, " ")
+		text, err := runAgentHelp(root, tc.path, agentHelpTestRepo, false, true)
+		if err != nil {
+			t.Fatalf("agent-help %s: %v", name, err)
+		}
+		if !strings.Contains(text, "When to use this:") {
+			t.Errorf("agent-help %s lacks the guidance block:\n%s", name, text)
+		}
+		for _, want := range tc.want {
+			if !strings.Contains(text, want) {
+				t.Errorf("agent-help %s missing %q:\n%s", name, want, text)
+			}
+		}
+
+		jsonOut, err := runAgentHelp(root, tc.path, agentHelpTestRepo, true, true)
+		if err != nil {
+			t.Fatalf("agent-help %s --json: %v", name, err)
+		}
+		var parsed struct {
+			Guidance string `json:"guidance"`
+		}
+		if err := json.Unmarshal([]byte(jsonOut), &parsed); err != nil {
+			t.Fatalf("agent-help %s --json not valid JSON: %v\n%s", name, err, jsonOut)
+		}
+		if parsed.Guidance != agentHelpGuidance[name] {
+			t.Errorf("agent-help %s --json guidance = %q, want the guidance table entry", name, parsed.Guidance)
+		}
+		if parsed.Guidance == "" {
+			t.Errorf("agent-help %s --json carries no guidance", name)
+		}
+	}
+	for _, path := range []string{"session tokens", "checkpoint tokens", "tokens", "tokens profile"} {
+		if agentHelpFactsFor(path).audience != agentHelpAudienceReadOnly {
+			t.Errorf("%q must stay read-only; the guidance promises it never changes repo state", path)
+		}
+	}
+}

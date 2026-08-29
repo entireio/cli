@@ -33,6 +33,9 @@ func TestLabsCmd_PrintsExperimentalCommandList(t *testing.T) {
 		"entire tokens profile --help",
 		"entire session tokens",
 		"entire session tokens --help",
+		"entire checkpoint tokens <id>",
+		"Show where a committed checkpoint's tokens went, with estimated cost shares",
+		"entire checkpoint tokens --help",
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("entire labs output missing %q:\n%s", want, got)
