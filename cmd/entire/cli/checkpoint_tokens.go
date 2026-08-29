@@ -4,51 +4,81 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"math"
-	"strconv"
 	"strings"
 
-	"github.com/entireio/cli/cmd/entire/cli/agent"
-	"github.com/entireio/cli/cmd/entire/cli/agent/types"
-	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
-	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
+	"github.com/entireio/cli/cmd/entire/cli/tokenreport"
 	"github.com/spf13/cobra"
 )
 
+// checkpointTokensReport is the `checkpoint tokens` report: the checkpoint's
+// identity, the shared token-report fields derived from view, and the
+// optional --compare comparison. It is the --json document.
 type checkpointTokensReport struct {
-	CheckpointID    string                        `json:"checkpoint_id"`
-	SessionCount    int                           `json:"session_count"`
-	SessionID       string                        `json:"session_id,omitempty"`
-	Agent           string                        `json:"agent,omitempty"`
-	Agents          []string                      `json:"agents,omitempty"`
-	Model           string                        `json:"model,omitempty"`
-	Models          []string                      `json:"models,omitempty"`
-	Branch          string                        `json:"branch,omitempty"`
-	Source          string                        `json:"source"`
-	Tokens          *sessionTokensUsage           `json:"tokens,omitempty"`
-	Context         *sessionTokensContext         `json:"context,omitempty"`
-	Contributors    []sessionTokensContributor    `json:"contributors,omitempty"`
-	Recommendations []sessionTokensRecommendation `json:"recommendations,omitempty"`
-	Comparison      *checkpointTokensComparison   `json:"comparison,omitempty"`
-	Limitations     []string                      `json:"limitations,omitempty"`
+	CheckpointID string   `json:"checkpoint_id"`
+	SessionCount int      `json:"session_count"`
+	SessionID    string   `json:"session_id,omitempty"`
+	Agent        string   `json:"agent,omitempty"`
+	Agents       []string `json:"agents,omitempty"`
+	Model        string   `json:"model,omitempty"`
+	Models       []string `json:"models,omitempty"`
+	Branch       string   `json:"branch,omitempty"`
+	// Source is checkpointTokensSourceTranscript when every session's totals
+	// were recomputed from its transcript, else checkpointTokensSourceCommitted.
+	Source            string                      `json:"source"`
+	DurationSeconds   int                         `json:"duration_seconds,omitempty"`
+	Effort            *tokenEffortJSON            `json:"effort,omitempty"`
+	Tokens            *tokenUsageJSON             `json:"tokens,omitempty"`
+	Cost              *tokenCostJSON              `json:"cost,omitempty"`
+	Contributors      []tokenreport.Contributor   `json:"contributors"`
+	Recommendations   []tokenRecommendationJSON   `json:"recommendations,omitempty"`
+	AgentReportedCost float64                     `json:"agent_reported_cost,omitempty"`
+	Legacy            *tokenLegacyInfo            `json:"legacy,omitempty"`
+	Comparison        *checkpointTokensComparison `json:"comparison,omitempty"`
+	Limitations       []string                    `json:"limitations,omitempty"`
+
+	// view is what the text writers render; the JSON fields above are
+	// derived from it by applyView.
+	view tokenReportView
 }
 
+// applyView stores the view and derives the shared JSON fields from it.
+func (r *checkpointTokensReport) applyView(v tokenReportView) {
+	r.view = v
+	r.DurationSeconds = tokenDurationSeconds(v.Report.Duration)
+	r.Effort = tokenEffortJSONFor(&v)
+	r.Tokens = tokenUsageJSONFor(&v)
+	r.Cost = tokenCostJSONFor(&v)
+	r.Contributors = v.Report.Attributed.Contributors
+	if r.Contributors == nil {
+		r.Contributors = []tokenreport.Contributor{}
+	}
+	r.Recommendations = tokenRecommendationsJSONFor(v.Recommendations)
+	r.AgentReportedCost = v.AgentReportedCost
+	r.Legacy = v.Legacy
+	r.Limitations = tokenReportNotes(&v)
+}
+
+// checkpointTokensComparison is the --compare result: per-class token deltas
+// and, when both checkpoints were priced, per-class cost-share deltas.
 type checkpointTokensComparison struct {
-	BaselineCheckpointID string                       `json:"baseline_checkpoint_id"`
-	TargetCheckpointID   string                       `json:"target_checkpoint_id"`
-	Status               string                       `json:"status"`
-	Total                *checkpointTokensMetricDelta `json:"total,omitempty"`
-	Input                *checkpointTokensMetricDelta `json:"input,omitempty"`
-	CacheRead            *checkpointTokensMetricDelta `json:"cache_read,omitempty"`
-	CacheWrite           *checkpointTokensMetricDelta `json:"cache_write,omitempty"`
-	Output               *checkpointTokensMetricDelta `json:"output,omitempty"`
-	APICalls             *checkpointTokensMetricDelta `json:"api_calls,omitempty"`
-	CacheReadCaveat      string                       `json:"cache_read_caveat,omitempty"`
-	Qualification        string                       `json:"qualification"`
-	Limitations          []string                     `json:"limitations,omitempty"`
+	BaselineCheckpointID string                          `json:"baseline_checkpoint_id"`
+	TargetCheckpointID   string                          `json:"target_checkpoint_id"`
+	Status               string                          `json:"status"`
+	Total                *checkpointTokensMetricDelta    `json:"total,omitempty"`
+	Input                *checkpointTokensMetricDelta    `json:"input,omitempty"`
+	CacheRead            *checkpointTokensMetricDelta    `json:"cache_read,omitempty"`
+	CacheWrite           *checkpointTokensMetricDelta    `json:"cache_write,omitempty"`
+	Output               *checkpointTokensMetricDelta    `json:"output,omitempty"`
+	APICalls             *checkpointTokensMetricDelta    `json:"api_calls,omitempty"`
+	CostShare            *checkpointTokensCostShareDelta `json:"cost_share,omitempty"`
+	CacheReadCaveat      string                          `json:"cache_read_caveat,omitempty"`
+	Qualification        string                          `json:"qualification"`
+	Limitations          []string                        `json:"limitations,omitempty"`
 }
 
+// checkpointTokensMetricDelta is one token class's change between baseline
+// and current.
 type checkpointTokensMetricDelta struct {
 	Baseline      int      `json:"baseline"`
 	Current       int      `json:"current"`
@@ -57,6 +87,26 @@ type checkpointTokensMetricDelta struct {
 	Direction     string   `json:"direction"`
 }
 
+// checkpointTokensCostShareDelta holds the cost-share change of each class.
+type checkpointTokensCostShareDelta struct {
+	Input      *checkpointTokensShareDelta `json:"input"`
+	CacheWrite *checkpointTokensShareDelta `json:"cache_write"`
+	CacheRead  *checkpointTokensShareDelta `json:"cache_read"`
+	Output     *checkpointTokensShareDelta `json:"output"`
+}
+
+// checkpointTokensShareDelta is one class's cost share (0..1) in the baseline
+// and current checkpoint, the change in share, the relative change and its
+// direction (decided on whole share points).
+type checkpointTokensShareDelta struct {
+	Baseline      float64  `json:"baseline"`
+	Current       float64  `json:"current"`
+	Change        float64  `json:"change"`
+	ChangePercent *float64 `json:"change_percent,omitempty"`
+	Direction     string   `json:"direction"`
+}
+
+// Comparison statuses and delta directions.
 const (
 	checkpointComparisonStatusUnavailable       = "unavailable"
 	checkpointComparisonStatusObservedReduction = "observed_reduction"
@@ -68,6 +118,10 @@ const (
 	checkpointDeltaDirectionUnchanged = "unchanged"
 )
 
+// checkpointCostMixMinPoints is the cost-share move, in whole points, from
+// which a class is named in the comparison's cost-mix sentence.
+const checkpointCostMixMinPoints = 5
+
 func newCheckpointTokensCmd() *cobra.Command {
 	var jsonFlag bool
 	var compareFlag string
@@ -75,17 +129,21 @@ func newCheckpointTokensCmd() *cobra.Command {
 
 	cmd := &cobra.Command{
 		Use:   "tokens <checkpoint-id>",
-		Short: "Show token usage and optimization recommendations for a checkpoint",
-		Long: `Show token usage and optimization recommendations for a checkpoint.
+		Short: "Show where a checkpoint's tokens went, with cost shares and recommendations",
+		Long: `Show where a checkpoint's tokens went, with cost shares and recommendations.
 
-The report reads committed checkpoint metadata using the same checkpoint
-resolution path as 'entire checkpoint explain'. Checkpoint IDs may be abbreviated
-as long as the prefix is unambiguous; positional targets may also resolve from a
-commit ref with an Entire-Checkpoint trailer, and missing metadata may be fetched
-from the checkpoint remote.
+The report recomputes each session's usage from its stored transcript, sliced
+at the checkpoint's token window, and attributes it to the tools, skills and
+subagents that caused it; cost shares use the provider's list-price ratios.
+Checkpoints written before token scoping (v0.11) fall back to their committed
+token usage and are labelled. The checkpoint is resolved the same way as
+'entire checkpoint explain': IDs may be abbreviated as long as the prefix is
+unambiguous, positional targets may also resolve from a commit ref with an
+Entire-Checkpoint trailer, and missing metadata may be fetched from the
+checkpoint remote.
 
 Use --compare <checkpoint-id> to compare this checkpoint against a previous
-checkpoint and qualify observed token reduction or increase.`,
+checkpoint and qualify the observed token and cost-share change.`,
 		Example: "  entire checkpoint tokens a1b2\n  entire checkpoint tokens a1b2 --compare c3d4\n  entire checkpoint tokens a1b2 --json",
 		Args:    cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -123,240 +181,18 @@ func runCheckpointTokens(ctx context.Context, cmd *cobra.Command, checkpointIDPr
 			cmd.SilenceUsage = true
 			return fmt.Errorf("cannot compare checkpoint %s to itself", report.CheckpointID)
 		}
-		report.Comparison = buildCheckpointTokensComparison(report, baselineReport)
+		report.Comparison = buildCheckpointTokensComparison(&report, &baselineReport)
 	}
 
 	if jsonOutput {
 		return printJSON(cmd.OutOrStdout(), report)
 	}
 	if agentBrief {
-		writeCheckpointTokensAgentBrief(cmd.OutOrStdout(), report)
+		writeTokenAgentBrief(cmd.OutOrStdout(), "Checkpoint token brief", "Checkpoint", report.CheckpointID, &report.view)
 		return nil
 	}
-	writeCheckpointTokensText(cmd.OutOrStdout(), report)
+	writeCheckpointTokensText(cmd.OutOrStdout(), &report)
 	return nil
-}
-
-func loadCheckpointTokensReport(ctx context.Context, cmd *cobra.Command, checkpointIDPrefix string) (checkpointTokensReport, *explainCheckpointLookup, error) {
-	cpID, lookup, err := resolveExplainCheckpointID(ctx, cmd.ErrOrStderr(), explainExportOptions{target: checkpointIDPrefix})
-	if err != nil {
-		return checkpointTokensReport{}, lookup, err
-	}
-
-	summary, err := lookup.store.Read(ctx, cpID)
-	if err != nil {
-		return checkpointTokensReport{}, lookup, fmt.Errorf("failed to read checkpoint: %w", err)
-	}
-	if summary == nil || len(summary.Sessions) == 0 {
-		cmd.SilenceUsage = true
-		fmt.Fprintln(cmd.ErrOrStderr(), "Checkpoint not found.")
-		return checkpointTokensReport{}, lookup, NewSilentError(fmt.Errorf("%w: %s", checkpoint.ErrCheckpointNotFound, checkpointIDPrefix))
-	}
-
-	metas, metadataWarnings, err := readCheckpointTokenSessionMetadata(ctx, lookup.store, cpID, len(summary.Sessions))
-	if err != nil {
-		return checkpointTokensReport{}, lookup, err
-	}
-
-	return buildCheckpointTokensReport(cpID, summary, metas, metadataWarnings), lookup, nil
-}
-
-func readCheckpointTokenSessionMetadata(ctx context.Context, store reviewContextSessionMetadataReader, cpID id.CheckpointID, sessionCount int) ([]*checkpoint.Metadata, int, error) {
-	if ctxErr := ctx.Err(); ctxErr != nil {
-		return nil, 0, ctxErr //nolint:wrapcheck // Propagating context cancellation.
-	}
-	metas := make([]*checkpoint.Metadata, 0, sessionCount)
-	var warnings int
-	for i := range sessionCount {
-		if ctxErr := ctx.Err(); ctxErr != nil {
-			return nil, warnings, ctxErr //nolint:wrapcheck // Propagating context cancellation.
-		}
-		meta, err := store.ReadSessionMetadata(ctx, cpID, i)
-		if err != nil {
-			if ctxErr := ctx.Err(); ctxErr != nil {
-				return nil, warnings, ctxErr //nolint:wrapcheck // Propagating context cancellation.
-			}
-			warnings++
-			continue
-		}
-		metas = append(metas, meta)
-	}
-	return metas, warnings, nil
-}
-
-func buildCheckpointTokensReport(cpID id.CheckpointID, summary *checkpoint.CheckpointSummary, metas []*checkpoint.Metadata, metadataWarnings int) checkpointTokensReport {
-	report := checkpointTokensReport{
-		CheckpointID: cpID.String(),
-		Source:       "committed_checkpoint",
-	}
-	if summary != nil {
-		report.Branch = summary.Branch
-		report.SessionCount = len(summary.Sessions)
-	}
-	if report.SessionCount == 0 {
-		report.SessionCount = len(metas)
-	}
-	report.Agents = checkpointAgentLabels(metas)
-	report.Models = checkpointModelLabels(metas)
-
-	if report.SessionCount == 1 && len(metas) == 1 && metas[0] != nil {
-		meta := metas[0]
-		report.SessionID = meta.SessionID
-		if len(report.Agents) > 0 {
-			report.Agent = report.Agents[0]
-		}
-		if len(report.Models) > 0 {
-			report.Model = report.Models[0]
-		}
-		if report.Branch == "" {
-			report.Branch = meta.Branch
-		}
-	} else if len(metas) > 1 && report.Branch == "" {
-		report.Branch = firstCheckpointBranch(metas)
-	}
-
-	usage := checkpointTokenUsage(summary, metas, metadataWarnings > 0)
-	if tokens := buildSessionTokensUsage(usage); tokens != nil {
-		report.Tokens = tokens
-		if tokens.SubagentTotal > 0 {
-			report.Contributors = append(report.Contributors, sessionTokensContributor{
-				Kind:       "subagents",
-				Label:      "Subagents",
-				Tokens:     tokens.SubagentTotal,
-				Confidence: "reported",
-				Signals:    []string{"subagent_tokens"},
-			})
-		}
-	} else {
-		report.Limitations = append(report.Limitations, "No token usage recorded for this checkpoint.")
-		report.Recommendations = append(report.Recommendations, sessionTokensRecommendation{
-			ID:       "no-token-data",
-			Severity: "low",
-			Message:  "Token usage is unavailable for this checkpoint; the agent may not expose token data yet, or this checkpoint predates token tracking.",
-			Signals:  []string{"missing_token_usage"},
-		})
-	}
-	if metadataWarnings > 0 {
-		report.Limitations = append(report.Limitations, fmt.Sprintf(
-			"%d checkpoint session metadata file%s could not be read; used root token summary or readable session metadata where available.",
-			metadataWarnings,
-			tokenPluralSuffix(metadataWarnings),
-		))
-	}
-
-	var turnCount int
-	var skillEvents []agent.SkillEvent
-	if report.SessionCount == 1 && len(metas) == 1 && metas[0] != nil {
-		meta := metas[0]
-		if metrics := meta.SessionMetrics; metrics != nil {
-			turnCount = metrics.TurnCount
-			if contextInfo := buildSessionTokensContext(metrics.ContextTokens, metrics.ContextWindowSize); contextInfo != nil {
-				report.Context = contextInfo
-				report.Contributors = append(report.Contributors, sessionTokensContributor{
-					Kind:       "context_pressure",
-					Label:      "Context pressure",
-					Percent:    contextInfo.Percent,
-					Confidence: "reported",
-					Signals:    []string{"context_tokens"},
-				})
-			}
-		}
-		skillEvents = meta.SkillEvents
-	} else {
-		for _, meta := range metas {
-			if meta == nil {
-				continue
-			}
-			if metrics := meta.SessionMetrics; metrics != nil {
-				turnCount += metrics.TurnCount
-			}
-			skillEvents = append(skillEvents, meta.SkillEvents...)
-		}
-	}
-	if labels := skillEventLabels(skillEvents); len(labels) > 0 {
-		report.Contributors = append(report.Contributors, sessionTokensContributor{
-			Kind:       "skills",
-			Label:      "Skills/slash commands: " + strings.Join(labels, ", "),
-			Confidence: "reported",
-			Signals:    []string{"skill_events"},
-		})
-	}
-
-	var checkpointCount int
-	if summary != nil {
-		checkpointCount = summary.CheckpointsCount
-	}
-	report.Recommendations = append(report.Recommendations, recommendationRules(tokenRecommendationSignals{
-		Tokens:          report.Tokens,
-		Context:         report.Context,
-		TurnCount:       turnCount,
-		CheckpointCount: checkpointCount,
-	})...)
-	return report
-}
-
-func checkpointAgentLabels(metas []*checkpoint.Metadata) []string {
-	labels := make([]string, 0, len(metas))
-	seen := make(map[string]struct{}, len(metas))
-	for _, meta := range metas {
-		label := unknownPlaceholder
-		if meta != nil && meta.Agent != "" {
-			label = string(meta.Agent)
-		}
-		if _, ok := seen[label]; ok {
-			continue
-		}
-		seen[label] = struct{}{}
-		labels = append(labels, label)
-	}
-	return labels
-}
-
-func checkpointModelLabels(metas []*checkpoint.Metadata) []string {
-	labels := make([]string, 0, len(metas))
-	seen := make(map[string]struct{}, len(metas))
-	for _, meta := range metas {
-		if meta == nil || meta.Model == "" {
-			continue
-		}
-		if _, ok := seen[meta.Model]; ok {
-			continue
-		}
-		seen[meta.Model] = struct{}{}
-		labels = append(labels, meta.Model)
-	}
-	return labels
-}
-
-func firstCheckpointBranch(metas []*checkpoint.Metadata) string {
-	for _, meta := range metas {
-		if meta != nil && meta.Branch != "" {
-			return meta.Branch
-		}
-	}
-	return ""
-}
-
-func aggregateCheckpointTokenUsage(metas []*checkpoint.Metadata) *agent.TokenUsage {
-	var total *agent.TokenUsage
-	for _, meta := range metas {
-		if meta == nil {
-			continue
-		}
-		total = types.AddTokenUsage(total, meta.TokenUsage)
-	}
-	return total
-}
-
-func checkpointTokenUsage(summary *checkpoint.CheckpointSummary, metas []*checkpoint.Metadata, metadataReadWarning bool) *agent.TokenUsage {
-	sessionUsage := aggregateCheckpointTokenUsage(metas)
-	if !metadataReadWarning && sessionUsage != nil {
-		return sessionUsage
-	}
-	if summary != nil && summary.TokenUsage != nil {
-		return summary.TokenUsage
-	}
-	return sessionUsage
 }
 
 // saturatingIntAdd returns a+b pinned at math.MaxInt / math.MinInt. It mirrors
@@ -372,21 +208,17 @@ func saturatingIntAdd(a, b int) int {
 	return a + b
 }
 
-func tokenPluralSuffix(count int) string {
-	if count == 1 {
-		return ""
-	}
-	return "s"
-}
-
-func buildCheckpointTokensComparison(target, baseline checkpointTokensReport) *checkpointTokensComparison {
+// buildCheckpointTokensComparison compares target against baseline: token
+// deltas per class, the cost-share deltas when both were priced, and a
+// qualification that names how the cost mix moved.
+func buildCheckpointTokensComparison(target, baseline *checkpointTokensReport) *checkpointTokensComparison {
 	comparison := &checkpointTokensComparison{
 		BaselineCheckpointID: baseline.CheckpointID,
 		TargetCheckpointID:   target.CheckpointID,
 	}
 	if target.Tokens == nil || baseline.Tokens == nil {
 		comparison.Status = checkpointComparisonStatusUnavailable
-		comparison.Qualification = "Comparison unavailable because token usage is missing for one checkpoint."
+		comparison.Qualification = checkpointComparisonQualification(comparison.Status)
 		comparison.Limitations = append(comparison.Limitations, comparison.Qualification)
 		return comparison
 	}
@@ -400,37 +232,76 @@ func buildCheckpointTokensComparison(target, baseline checkpointTokensReport) *c
 	comparison.CacheReadCaveat = checkpointComparisonCacheReadCaveat(comparison.CacheRead)
 	comparison.Status = checkpointComparisonStatus(comparison.Total)
 	comparison.Qualification = checkpointComparisonQualification(comparison.Status)
-	if classes := checkpointCostProxyPressureIncreased(comparison); len(classes) > 0 {
-		comparison.Qualification += fmt.Sprintf(" Cost-proxy pressure increased for %s even though total tokens decreased.", formatTokenClassList(classes))
+	if target.Cost != nil && baseline.Cost != nil {
+		comparison.CostShare = buildCheckpointCostShareDelta(&baseline.Cost.Shares, &target.Cost.Shares)
+		if shift := checkpointCostMixShift(comparison.CostShare); shift != "" {
+			comparison.Qualification += " " + shift
+		}
+	} else {
+		comparison.Limitations = append(comparison.Limitations, "Cost shares are not compared: one checkpoint has no priced usage.")
 	}
 	return comparison
 }
 
-func checkpointCostProxyPressureIncreased(comparison *checkpointTokensComparison) []string {
-	if comparison == nil || comparison.Total == nil || comparison.Total.Change >= 0 {
-		return nil
+// buildCheckpointCostShareDelta computes each class's cost-share delta.
+func buildCheckpointCostShareDelta(baseline, current *tokenreport.CostShares) *checkpointTokensCostShareDelta {
+	return &checkpointTokensCostShareDelta{
+		Input:      buildCheckpointShareDelta(baseline.Input, current.Input),
+		CacheWrite: buildCheckpointShareDelta(baseline.CacheWrite, current.CacheWrite),
+		CacheRead:  buildCheckpointShareDelta(baseline.CacheRead, current.CacheRead),
+		Output:     buildCheckpointShareDelta(baseline.Output, current.Output),
 	}
-	var classes []string
-	if comparison.CacheWrite != nil && comparison.CacheWrite.Change > 0 {
-		classes = append(classes, "cache write")
-	}
-	if comparison.Output != nil && comparison.Output.Change > 0 {
-		classes = append(classes, "output")
-	}
-	return classes
 }
 
-func formatTokenClassList(classes []string) string {
-	switch len(classes) {
-	case 0:
-		return ""
-	case 1:
-		return classes[0]
-	case 2:
-		return classes[0] + " and " + classes[1]
-	default:
-		return strings.Join(classes[:len(classes)-1], ", ") + ", and " + classes[len(classes)-1]
+// buildCheckpointShareDelta computes one class's cost-share delta. Direction
+// is decided on whole share points so a sub-point drift reads as unchanged.
+func buildCheckpointShareDelta(baseline, current float64) *checkpointTokensShareDelta {
+	delta := &checkpointTokensShareDelta{Baseline: baseline, Current: current, Change: current - baseline}
+	delta.Direction = checkpointDeltaDirection(sharePoints(delta.Change))
+	if baseline > 0 {
+		percent := delta.Change / baseline * 100
+		delta.ChangePercent = &percent
 	}
+	return delta
+}
+
+// sharePoints rounds a share difference to whole percentage points.
+func sharePoints(change float64) int {
+	return int(math.Round(change * 100))
+}
+
+// checkpointCostMixShift names the classes whose cost share moved by at
+// least checkpointCostMixMinPoints, e.g. "Cost mix: cache write 41% → 30%
+// (down 11 points); output 36% → 48% (up 12 points)."; "" when none moved.
+func checkpointCostMixShift(d *checkpointTokensCostShareDelta) string {
+	classes := []struct {
+		name  string
+		delta *checkpointTokensShareDelta
+	}{
+		{"input", d.Input}, {"cache write", d.CacheWrite}, {"cache read", d.CacheRead}, {"output", d.Output},
+	}
+	var parts []string
+	for _, c := range classes {
+		points := sharePoints(c.delta.Change)
+		if absInt(points) < checkpointCostMixMinPoints {
+			continue
+		}
+		parts = append(parts, fmt.Sprintf("%s %s → %s (%s %d points)", c.name,
+			tokenreport.FormatPercent(c.delta.Baseline), tokenreport.FormatPercent(c.delta.Current),
+			c.delta.Direction, absInt(points)))
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return "Cost mix: " + strings.Join(parts, "; ") + "."
+}
+
+// absInt is |n|.
+func absInt(n int) int {
+	if n < 0 {
+		return -n
+	}
+	return n
 }
 
 func buildCheckpointMetricDelta(baseline, current int) *checkpointTokensMetricDelta {
@@ -448,30 +319,23 @@ func buildCheckpointMetricDelta(baseline, current int) *checkpointTokensMetricDe
 	return delta
 }
 
+// saturatingIntSub returns a-b pinned at math.MaxInt / math.MinInt.
 func saturatingIntSub(a, b int) int {
 	if b < 0 {
-		if b == minInt() {
+		if b == math.MinInt {
 			if a >= 0 {
-				return maxInt()
+				return math.MaxInt
 			}
 			return a - b
 		}
-		if a > maxInt()-(-b) {
-			return maxInt()
+		if a > math.MaxInt-(-b) {
+			return math.MaxInt
 		}
 	}
-	if b > 0 && a < minInt()+b {
-		return minInt()
+	if b > 0 && a < math.MinInt+b {
+		return math.MinInt
 	}
 	return a - b
-}
-
-func maxInt() int {
-	return int(^uint(0) >> 1)
-}
-
-func minInt() int {
-	return -maxInt() - 1
 }
 
 func checkpointDeltaDirection(change int) string {
@@ -517,130 +381,4 @@ func checkpointComparisonCacheReadCaveat(delta *checkpointTokensMetricDelta) str
 		return ""
 	}
 	return "Total tokens include cache/context replay; use the cache/context replay delta below before treating total direction as work saved or added."
-}
-
-func writeCheckpointTokensText(w io.Writer, report checkpointTokensReport) {
-	fmt.Fprintln(w, "Checkpoint tokens")
-	fmt.Fprintln(w)
-	fmt.Fprintf(w, "Checkpoint: %s\n", report.CheckpointID)
-	switch {
-	case report.SessionCount > 1:
-		fmt.Fprintf(w, "Sessions:   %d\n", report.SessionCount)
-		if len(report.Agents) > 0 {
-			fmt.Fprintf(w, "Agents:     %s\n", strings.Join(report.Agents, ", "))
-		}
-		if len(report.Models) > 0 {
-			fmt.Fprintf(w, "Models:     %s\n", strings.Join(report.Models, ", "))
-		}
-	case report.SessionID != "":
-		fmt.Fprintf(w, "Session:    %s\n", report.SessionID)
-		if report.Agent != "" {
-			fmt.Fprintf(w, "Agent:      %s\n", report.Agent)
-		}
-		if report.Model != "" {
-			fmt.Fprintf(w, "Model:      %s\n", report.Model)
-		}
-	case report.Agent != "":
-		fmt.Fprintf(w, "Agent:      %s\n", report.Agent)
-	}
-	if report.Branch != "" {
-		fmt.Fprintf(w, "Branch:     %s\n", report.Branch)
-	}
-
-	writeTokenUsageSection(w, report.Tokens)
-	writeCheckpointTokenComparison(w, report.Comparison)
-	if len(report.Recommendations) > 0 {
-		writeTokenRecommendations(w, report.Recommendations)
-	}
-	writeTokenContributors(w, report.Contributors, report.Context)
-	writeTokenLimitations(w, report.Limitations)
-}
-
-func writeCheckpointTokensAgentBrief(w io.Writer, report checkpointTokensReport) {
-	fmt.Fprintln(w, "Checkpoint token brief")
-	fmt.Fprintf(w, "Checkpoint: %s\n", report.CheckpointID)
-	fmt.Fprintln(w)
-	fmt.Fprintln(w, agentBriefUsageLine(report.Tokens))
-	fmt.Fprintln(w)
-	fmt.Fprintln(w, "Next best action:")
-	fmt.Fprintln(w, checkpointAgentBriefNextAction(report))
-
-	signals := agentBriefSignals(checkpointAgentBriefSessionReport(report))
-	if len(signals) > 0 {
-		fmt.Fprintln(w)
-		fmt.Fprintln(w, "Signals:")
-		for _, signal := range signals {
-			fmt.Fprintf(w, "- %s\n", signal)
-		}
-	}
-}
-
-func checkpointAgentBriefNextAction(report checkpointTokensReport) string {
-	sessionReport := checkpointAgentBriefSessionReport(report)
-	if hasTokenRecommendation(sessionReport, "no-token-data") {
-		return "Do not spend extra commands on token optimization for this checkpoint. Continue with the task and capture a newer checkpoint before rechecking tokens."
-	}
-	if action, ok := agentBriefOptimizationAction(sessionReport); ok {
-		return action
-	}
-	return "Continue normally; no high-signal token optimization is available from this checkpoint."
-}
-
-func checkpointAgentBriefSessionReport(report checkpointTokensReport) sessionTokensReport {
-	return sessionTokensReport{
-		Tokens:          report.Tokens,
-		Context:         report.Context,
-		Recommendations: report.Recommendations,
-		Limitations:     report.Limitations,
-	}
-}
-
-func writeCheckpointTokenComparison(w io.Writer, comparison *checkpointTokensComparison) {
-	if comparison == nil {
-		return
-	}
-
-	fmt.Fprintln(w)
-	fmt.Fprintln(w, "Comparison")
-	fmt.Fprintf(w, "Baseline: %s\n", comparison.BaselineCheckpointID)
-	if comparison.CacheReadCaveat != "" {
-		fmt.Fprintf(w, "Caveat: %s\n", comparison.CacheReadCaveat)
-	}
-	if comparison.Status != checkpointComparisonStatusUnavailable {
-		fmt.Fprintf(w, "Total tokens: %s\n", formatCheckpointMetricDelta(comparison.Total, formatTokenCount))
-		fmt.Fprintf(w, "Input: %s\n", formatCheckpointMetricDelta(comparison.Input, formatTokenCount))
-		fmt.Fprintf(w, "Cache/context replay: %s\n", formatCheckpointMetricDelta(comparison.CacheRead, formatTokenCount))
-		fmt.Fprintf(w, "Cache write: %s\n", formatCheckpointMetricDelta(comparison.CacheWrite, formatTokenCount))
-		fmt.Fprintf(w, "Output: %s\n", formatCheckpointMetricDelta(comparison.Output, formatTokenCount))
-		fmt.Fprintf(w, "API calls: %s\n", formatCheckpointMetricDelta(comparison.APICalls, formatPlainCount))
-	}
-	fmt.Fprintln(w)
-	fmt.Fprintln(w, "Qualification")
-	fmt.Fprintln(w, comparison.Qualification)
-}
-
-func formatCheckpointMetricDelta(delta *checkpointTokensMetricDelta, formatValue func(int) string) string {
-	if delta == nil {
-		return "unavailable"
-	}
-	from := formatValue(delta.Baseline)
-	to := formatValue(delta.Current)
-	if delta.Direction == checkpointDeltaDirectionUnchanged {
-		return fmt.Sprintf("unchanged (%s -> %s)", from, to)
-	}
-	if delta.ChangePercent == nil {
-		return fmt.Sprintf("%s (%s -> %s)", delta.Direction, from, to)
-	}
-	return fmt.Sprintf("%s %s (%s -> %s)", delta.Direction, formatPercent(absFloat(*delta.ChangePercent)), from, to)
-}
-
-func formatPlainCount(value int) string {
-	return strconv.Itoa(value)
-}
-
-func absFloat(value float64) float64 {
-	if value < 0 {
-		return -value
-	}
-	return value
 }
