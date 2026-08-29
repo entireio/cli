@@ -11,8 +11,13 @@ in global mode are runtime data and one stamp.
 ## The settings file
 
 `~/.config/entire/settings.json` (or `$ENTIRE_CONFIG_DIR/settings.json`) is
-strict-decoded; an unknown key or malformed JSON turns the tier off machine-wide
-(fail closed) and `entire doctor` says so.
+decoded with **per-block strictness**: the `global` block rejects unknown keys
+— an unknown key inside it, or malformed JSON, turns the tier off machine-wide
+(fail closed; an older binary must never misread recorded consent) and
+`entire doctor` says so — while unknown **top-level** blocks are ignored and
+preserved byte-for-byte across writes, so a newer `entire` on the same machine
+can add a block without switching the tier off for older binaries. New
+features add top-level blocks, not keys inside `global`.
 
 ```json
 {

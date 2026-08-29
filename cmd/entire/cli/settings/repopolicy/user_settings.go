@@ -42,9 +42,66 @@ func resolveUserSettingsPath() (string, error) {
 	return filepath.Join(configDir, UserSettingsFileName), nil
 }
 
-// LoadUserSettings strictly decodes user-global settings. A missing file is
-// an unconfigured tier; malformed or unknown input returns an error so callers
-// can fail closed.
+// userSettingsGlobalKey is the one block this binary interprets.
+const userSettingsGlobalKey = "global"
+
+// UnmarshalJSON decodes the user settings file with per-block strictness: the
+// `global` block is strict (an unknown key inside it is an error — an older
+// binary must fail closed rather than misread consent it does not understand),
+// while unknown top-level blocks are kept verbatim for round-tripping. See the
+// UserSettings type comment for why.
+func (us *UserSettings) UnmarshalJSON(data []byte) error {
+	var blocks map[string]json.RawMessage
+	if err := json.Unmarshal(data, &blocks); err != nil {
+		return fmt.Errorf("user settings: %w", err)
+	}
+	*us = UserSettings{}
+	for key, raw := range blocks {
+		if key != userSettingsGlobalKey {
+			if us.extra == nil {
+				us.extra = make(map[string]json.RawMessage, len(blocks))
+			}
+			us.extra[key] = raw
+			continue
+		}
+		if bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+			continue
+		}
+		decoder := json.NewDecoder(bytes.NewReader(raw))
+		decoder.DisallowUnknownFields()
+		var global GlobalConfig
+		if err := decoder.Decode(&global); err != nil {
+			return fmt.Errorf("%s: %w", userSettingsGlobalKey, err)
+		}
+		us.Global = &global
+	}
+	return nil
+}
+
+// MarshalJSON writes the known block plus every preserved unknown block.
+func (us *UserSettings) MarshalJSON() ([]byte, error) {
+	out := make(map[string]json.RawMessage, len(us.extra)+1)
+	for key, raw := range us.extra {
+		out[key] = raw
+	}
+	if us.Global != nil {
+		raw, err := json.Marshal(us.Global)
+		if err != nil {
+			return nil, fmt.Errorf("encoding %s block: %w", userSettingsGlobalKey, err)
+		}
+		out[userSettingsGlobalKey] = raw
+	}
+	data, err := json.Marshal(out)
+	if err != nil {
+		return nil, fmt.Errorf("encoding user settings: %w", err)
+	}
+	return data, nil
+}
+
+// LoadUserSettings decodes user-global settings with per-block strictness
+// (UnmarshalJSON). A missing file is an unconfigured tier; malformed JSON, or
+// an unknown key inside the `global` block, returns an error so callers can
+// fail closed.
 func LoadUserSettings(_ context.Context) (*UserSettings, error) {
 	path, err := resolveUserSettingsPath()
 	if err != nil {
@@ -58,7 +115,6 @@ func LoadUserSettings(_ context.Context) (*UserSettings, error) {
 		return nil, fmt.Errorf("reading user settings: %w", err)
 	}
 	decoder := json.NewDecoder(bytes.NewReader(data))
-	decoder.DisallowUnknownFields()
 	var settings UserSettings
 	if err := decoder.Decode(&settings); err != nil {
 		return nil, fmt.Errorf("parsing user settings: %w", err)

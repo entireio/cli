@@ -2,7 +2,10 @@
 // classify repository tracking policy.
 package repopolicy
 
-import "path/filepath"
+import (
+	"encoding/json"
+	"path/filepath"
+)
 
 // ActivationSource identifies the authority that activated tracking.
 type ActivationSource string
@@ -195,8 +198,20 @@ type GlobalConfig struct {
 
 // UserSettings is the root of the user-global settings file. A nil Global
 // distinguishes an unconfigured tier from a configured but disabled tier.
+//
+// Strictness is per block, not per file (see UnmarshalJSON): the `global`
+// block rejects unknown keys — fail closed, so an older binary never
+// misreads recorded consent it does not understand — while unknown top-level
+// blocks are tolerated and round-tripped untouched, so a newer entire can add
+// a block without switching the tier off for every older binary that shares
+// the machine. New features therefore add top-level blocks, not keys inside
+// `global`.
 type UserSettings struct {
 	Global *GlobalConfig `json:"global,omitempty"`
+	// extra holds top-level blocks this binary does not know, preserved
+	// byte-for-byte across read-modify-write so a newer binary's settings
+	// survive an older one's `entire trust`.
+	extra map[string]json.RawMessage
 }
 
 // GlobalConfigured reports whether the global tier has been configured.

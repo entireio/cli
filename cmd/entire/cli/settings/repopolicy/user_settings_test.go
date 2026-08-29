@@ -1,7 +1,9 @@
 package repopolicy
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
@@ -115,5 +117,54 @@ func TestModifyUserSettings_ConcurrentTrustWritesDoNotClobber(t *testing.T) {
 	}
 	if got := len(settings.Global.TrustedPaths); got != writes {
 		t.Fatalf("trusted paths = %d, want %d", got, writes)
+	}
+}
+
+// Strictness is per block: a top-level block this binary does not know is
+// tolerated (a newer entire on the same machine added it) and survives a
+// read-modify-write untouched, while an unknown key INSIDE `global` still
+// fails closed.
+func TestLoadUserSettings_UnknownTopLevelBlockIsToleratedAndPreserved(t *testing.T) {
+	setPolicyGlobal(t, `{"global":{"enabled":true},"future_feature":{"knob":1,"list":["a"]}}`)
+	settings, err := LoadUserSettings(t.Context())
+	if err != nil {
+		t.Fatalf("an unknown top-level block must not fail the load: %v", err)
+	}
+	if !settings.GlobalEnabled() {
+		t.Fatalf("settings = %+v, want the global block decoded", settings)
+	}
+
+	if err := ModifyUserSettings(t.Context(), func(us *UserSettings) error {
+		us.Global.TrustAll = true
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(UserSettingsPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var round map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &round); err != nil {
+		t.Fatal(err)
+	}
+	var compact bytes.Buffer
+	if err := json.Compact(&compact, round["future_feature"]); err != nil {
+		t.Fatal(err)
+	}
+	if compact.String() != `{"knob":1,"list":["a"]}` {
+		t.Fatalf("unknown block not preserved (re-indentation aside): %s", raw)
+	}
+	reloaded, err := LoadUserSettings(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reloaded.GlobalEnabled() || !reloaded.Global.TrustAll {
+		t.Fatalf("global block not rewritten: %s", raw)
+	}
+
+	setPolicyGlobal(t, `{"global":{"enabled":true,"future_key":true}}`)
+	if _, err := LoadUserSettings(t.Context()); err == nil {
+		t.Fatal("an unknown key inside the global block must still fail closed")
 	}
 }
