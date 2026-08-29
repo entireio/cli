@@ -33,7 +33,7 @@ type tokensProfileReport struct {
 	CheckpointsWithTokenData int                  `json:"checkpoints_with_token_data"`
 	Collapsed                int                  `json:"collapsed"`
 	ExcludedTestAgents       int                  `json:"excluded_test_agents"`
-	MetadataReadWarnings     int                  `json:"metadata_read_warnings,omitempty"`
+	MetadataReadWarnings     int                  `json:"metadata_read_warnings"`
 	Agents                   []tokensProfileAgent `json:"agents"`
 	TotalTokens              int                  `json:"total_tokens"`
 	Limitations              []string             `json:"limitations,omitempty"`
@@ -64,8 +64,9 @@ type tokensProfilePercentiles struct {
 	P90    int `json:"p90"`
 }
 
-// tokensProfileDuration is the per-session duration distribution in seconds;
-// RecordedOn counts the checkpoints whose sessions recorded a duration.
+// tokensProfileDuration is the per-checkpoint duration distribution in
+// seconds (a checkpoint's kept session durations summed); RecordedOn counts
+// the checkpoints with at least one recorded duration, with or without tokens.
 type tokensProfileDuration struct {
 	Median     int `json:"median"`
 	P90        int `json:"p90"`
@@ -123,6 +124,9 @@ const (
 	tokensProfileWorthCount  = 2
 	tokensProfileHeaderWrap  = 80
 	tokensProfileAgentLegacy = types.AgentType("Agent")
+	// tokensProfileWorthIndent aligns the later Worth opening entries and the
+	// hint under the first entry.
+	tokensProfileWorthIndent = "                  "
 )
 
 // tokensProfileExcludedAgents are the test-only agents never counted in a
@@ -324,6 +328,9 @@ func loadTokensProfileRows(ctx context.Context, store tokensProfileStore, infos 
 					return tokensProfileLoad{}, ctxErr //nolint:wrapcheck // Propagating context cancellation.
 				}
 				warned = true
+				logging.Warn(ctx, "tokens profile: session metadata unreadable; session not counted",
+					slog.String("checkpoint_id", info.CheckpointID.String()),
+					slog.Int("session_index", i))
 				continue
 			}
 			created := info.CreatedAt
@@ -530,6 +537,7 @@ func (t *tokensProfileTotals) add(o tokensProfileTotals) {
 // aggregates the block. Session IDs belong to one agent, so deduping per
 // agent group equals deduping the whole set.
 func buildTokensProfileAgent(name types.AgentType, rows []tokensProfileRow) (tokensProfileAgent, tokensProfileTotals) {
+	// A checkpoint stores each session once, so (CheckpointID, SessionID) is unique per row.
 	byKey := make(map[[2]string]tokensProfileRow, len(rows))
 	checkpointRows := make([]tokenreport.CheckpointRow, 0, len(rows))
 	for _, row := range rows {
@@ -573,13 +581,16 @@ func aggregateTokensProfileSamples(block *tokensProfileAgent, samples []*tokensP
 	var priced []tokenreport.CostShares
 	for _, s := range samples {
 		totals.tokens += s.volume
+		if s.durationMs > 0 {
+			durations = append(durations, int(s.durationMs/1000))
+		}
 		if !s.hasTokens() {
 			continue
 		}
 		block.WithTokens++
 		volumes = append(volumes, s.volume)
 		if s.durationMs > 0 {
-			durations = append(durations, int(s.durationMs/1000))
+			// Tokens per hour is over the with-tokens subset of the recorded durations.
 			perHour = append(perHour, int(int64(s.volume)*int64(time.Hour/time.Millisecond)/s.durationMs))
 		}
 		if s.thinkingRecorded {
@@ -591,6 +602,9 @@ func aggregateTokensProfileSamples(block *tokensProfileAgent, samples []*tokensP
 		}
 		totals.priced++
 		priced = append(priced, s.cost)
+		if s.cost.CacheWriteUnpriced {
+			totals.unknownTTL++
+		}
 		if class, _ := s.largestCostClass(); class != "" {
 			block.LargestCostClass[class]++
 		}
@@ -608,9 +622,6 @@ func aggregateTokensProfileSamples(block *tokensProfileAgent, samples []*tokensP
 	block.ThinkingShare = tokensProfileThinkingShare{Median: percentile(thinking, 50), RecordedOn: len(thinking)}
 	if len(priced) > 0 {
 		block.CostByClass = tokensProfileCostByClassFor(samples, priced)
-		if block.CostByClass.CacheWriteUnpriced {
-			totals.unknownTTL = tokensProfileUnknownTTLCount(samples)
-		}
 	}
 	block.WorthOpening = tokensProfileWorthOpeningFor(samples)
 	return totals
@@ -637,18 +648,6 @@ func tokensProfileCostByClassFor(samples []*tokensProfileSample, priced []tokenr
 		}
 	}
 	return cost
-}
-
-// tokensProfileUnknownTTLCount counts priced samples whose cache writes
-// could not be priced.
-func tokensProfileUnknownTTLCount(samples []*tokensProfileSample) int {
-	n := 0
-	for _, s := range samples {
-		if s.priced && s.cost.CacheWriteUnpriced {
-			n++
-		}
-	}
-	return n
 }
 
 // tokensProfileWorthOpeningFor picks the top tokensProfileWorthCount
@@ -686,7 +685,7 @@ func tokensProfileWorthOpeningFor(samples []*tokensProfileSample) []tokensProfil
 func tokensProfileLimitations(report tokensProfileReport, load tokensProfileLoad, totals tokensProfileTotals) []string {
 	var lines []string
 	if report.CheckpointsAvailable > report.CheckpointsAnalyzed {
-		lines = append(lines, fmt.Sprintf("Limited to latest %d of %d committed checkpoints; use --limit or --all to change scope.", report.CheckpointsAnalyzed, report.CheckpointsAvailable))
+		lines = append(lines, fmt.Sprintf("Limited to latest %s of %s committed checkpoints; use --limit or --all to change scope.", formatThousands(report.CheckpointsAnalyzed), formatThousands(report.CheckpointsAvailable)))
 	}
 	if report.CheckpointsAnalyzed == 0 {
 		lines = append(lines, "No committed checkpoints found.")
@@ -771,7 +770,8 @@ func formatThousands(n int) string {
 }
 
 // writeTokensProfileAgent prints one agent block: the title with its counts,
-// one line per metric and the Worth opening line with its hint.
+// one line per metric and the Worth opening entries (one per line, aligned
+// under the first) with the hint once.
 func writeTokensProfileAgent(w io.Writer, block tokensProfileAgent) {
 	fmt.Fprintln(w, tokensProfileAgentTitle(block))
 	line := func(label, value string) {
@@ -786,13 +786,15 @@ func writeTokensProfileAgent(w io.Writer, block tokensProfileAgent) {
 	if len(block.WorthOpening) == 0 {
 		return
 	}
-	entries := make([]string, 0, len(block.WorthOpening))
-	for _, item := range block.WorthOpening {
-		entries = append(entries, fmt.Sprintf("%s (%s, %s)", item.CheckpointID, tokenreport.FormatTokenCount(item.Tokens), item.Standout))
-	}
 	fmt.Fprintln(w)
-	fmt.Fprintf(w, "  Worth opening   %s\n", strings.Join(entries, "   "))
-	fmt.Fprintln(w, "                  → entire checkpoint tokens <id>")
+	for i, item := range block.WorthOpening {
+		lead := tokensProfileWorthIndent
+		if i == 0 {
+			lead = "  Worth opening   "
+		}
+		fmt.Fprintf(w, "%s%s (%s, %s)\n", lead, item.CheckpointID, tokenreport.FormatTokenCount(item.Tokens), item.Standout)
+	}
+	fmt.Fprintln(w, tokensProfileWorthIndent+"→ entire checkpoint tokens <id>")
 }
 
 // tokensProfileAgentTitle is "Agent · N checkpoints" with the with-tokens

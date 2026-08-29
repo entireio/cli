@@ -256,12 +256,11 @@ func TestWriteTokensProfileText_Layout(t *testing.T) {
 		"  cost by class (sum)        cache read 41% · output 31% · cache write 27% (1-hour on 1 of 2 recorded) · input <1%",
 		"  thinking share of output   median 20%   (recorded on 5 of 7)",
 		"  effort                     not recorded",
-		"  Worth opening   ccc000000002 (202k, cache read 67%)   ccc000000003 (11k, thinking 80%)",
-		"                  → entire checkpoint tokens <id>",
+		"  Worth opening   ccc000000002 (202k, cache read 67%)\n                  ccc000000003 (11k, thinking 80%)\n                  → entire checkpoint tokens <id>\n",
 		"Codex · 2 checkpoints",
 		"  duration / session         median  1h 00m   p90  1h 00m      tokens per hour  median 61k   (recorded on 1 of 2)",
 		"  tokens / checkpoint        median  4k    p90  61k",
-		"  Worth opening   ddd000000002 (4k, output 96%)   ddd000000001 (61k, input 43%)",
+		"  Worth opening   ddd000000002 (4k, output 96%)\n                  ddd000000001 (61k, input 43%)\n                  → entire checkpoint tokens <id>\n",
 		"Notes",
 		"  - Legacy checkpoints (no token_usage_version) were deduped per session; 2 legacy",
 		"  - 1 checkpoint has no recorded model and is counted by volume only.",
@@ -353,6 +352,77 @@ func TestBuildTokensProfileReport_ThinkingShareRule(t *testing.T) {
 	assertContainsAll(t, out, "  thinking share of output   median 0%   (recorded on 2 of 3)", "  thinking share of output   not recorded")
 }
 
+func TestBuildTokensProfileReport_AllCacheWritesUnknownTTL(t *testing.T) {
+	t.Parallel()
+
+	// The dominant real-data shape: Anthropic rows with cache writes and no
+	// 1h split, so no cache write can be priced.
+	f := newTokensProfileFixture()
+	for i, cpID := range []string{"cad000000001", "cad000000002"} {
+		f.add(cpID, checkpoint.TokenUsageVersionDelta, false, tokensProfileMeta(agent.AgentTypeClaudeCode, tokensProfileTestClaudeModel, "s"+string(rune('a'+i)),
+			&types.TokenUsage{InputTokens: 1_000, CacheCreationTokens: 50_000, CacheReadTokens: 200_000, OutputTokens: 2_000, APICallCount: 5}))
+	}
+	report, err := buildTokensProfileReport(context.Background(), f.store, f.infos, 50)
+	if err != nil {
+		t.Fatalf("buildTokensProfileReport: %v", err)
+	}
+	if len(report.Agents) != 1 || report.Agents[0].CostByClass == nil {
+		t.Fatalf("agents = %+v, want one priced Claude Code block", report.Agents)
+	}
+	cost := report.Agents[0].CostByClass
+	if cost.CacheWrite != 0 || !cost.CacheWriteUnpriced || cost.CacheWriteRecordedOn != 2 || cost.CacheWrite1hRecordedOn != 0 || cost.Priced != 2 {
+		t.Errorf("cost by class = %+v, want cache write 0, unpriced, recorded on 2 with no 1h split", cost)
+	}
+	assertContainsAll(t, renderTokensProfile(report),
+		"  cost by class (sum)        cache read 65% · output 32% · input 3% · cache write not priced (TTL not recorded)",
+		"  - Cache writes on 2 checkpoints have no recorded TTL and are not priced.",
+	)
+}
+
+func TestBuildTokensProfileReport_TwoSessionCheckpointAndDurationDenominator(t *testing.T) {
+	t.Parallel()
+
+	claude := func(sessionID string, usage *types.TokenUsage, d time.Duration) *checkpoint.Metadata {
+		return withDuration(tokensProfileMeta(agent.AgentTypeClaudeCode, tokensProfileTestClaudeModel, sessionID, usage), d)
+	}
+	f := newTokensProfileFixture()
+	f.add("dad000000001", checkpoint.TokenUsageVersionDelta, false, claude("one", &types.TokenUsage{InputTokens: 1_000}, time.Hour))
+	// Two readable sessions: one checkpoint, volume and duration summed.
+	f.add("dad000000002", checkpoint.TokenUsageVersionDelta, false,
+		claude("two-a", &types.TokenUsage{InputTokens: 2_000}, time.Hour),
+		claude("two-b", &types.TokenUsage{InputTokens: 3_000}, 2*time.Hour))
+	// A duration with no tokens still counts toward "recorded on".
+	f.add("dad000000003", checkpoint.TokenUsageVersionDelta, false, claude("three", nil, 30*time.Minute))
+
+	report, err := buildTokensProfileReport(context.Background(), f.store, f.infos, 50)
+	if err != nil {
+		t.Fatalf("buildTokensProfileReport: %v", err)
+	}
+	if len(report.Agents) != 1 {
+		t.Fatalf("agents = %+v, want one", report.Agents)
+	}
+	a := report.Agents[0]
+	if a.Checkpoints != 3 || a.WithTokens != 2 || report.TotalTokens != 6_000 {
+		t.Errorf("checkpoints=%d with_tokens=%d total=%d, want 3/2/6000", a.Checkpoints, a.WithTokens, report.TotalTokens)
+	}
+	if a.DurationSeconds.RecordedOn != 3 || a.DurationSeconds.Median != 3600 || a.DurationSeconds.P90 != 10_800 {
+		t.Errorf("duration = %+v, want recorded on 3, median 1h, p90 3h", a.DurationSeconds)
+	}
+	// Tokens per hour is over the with-tokens subset: 1000/1h and 5000/3h.
+	if a.TokensPerHourMedian != 1_000 {
+		t.Errorf("tokens/hour median = %d, want 1000", a.TokensPerHourMedian)
+	}
+	if len(a.WorthOpening) != 2 || a.WorthOpening[0].CheckpointID != "dad000000002" || a.WorthOpening[0].Tokens != 5_000 {
+		t.Errorf("worth opening = %+v, want the two-session checkpoint first with 5000 tokens", a.WorthOpening)
+	}
+	out := renderTokensProfile(report)
+	assertContainsAll(t, out,
+		"Claude Code · 3 checkpoints (2 with tokens)",
+		"  duration / session         median  1h 00m   p90  3h 00m      tokens per hour  median 1k\n",
+		"  tokens / checkpoint        median  1k    p90  5k   (recorded on 2 of 3)",
+	)
+}
+
 func TestBuildTokensProfileReport_ContextCancellation(t *testing.T) {
 	t.Parallel()
 
@@ -389,8 +459,7 @@ func TestTokensProfileCmd_TextAndJSONFromCommittedStore(t *testing.T) {
 		"(1-hour on 1 of 1 recorded)",
 		"  thinking share of output   median 0%   (recorded on 2 of 3)",
 		"  effort                     not recorded",
-		"  Worth opening   100aaa000002 (1.5k, input 74%)   100aaa000001 (1k, cache write 42%)",
-		"→ entire checkpoint tokens <id>",
+		"  Worth opening   100aaa000002 (1.5k, input 74%)\n                  100aaa000001 (1k, cache write 42%)\n                  → entire checkpoint tokens <id>\n",
 		"Recurring contributors are not computed for profiles",
 		"Total: 2.5k tokens (sum after collapsing overlaps).",
 	)
