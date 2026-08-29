@@ -243,9 +243,16 @@ func tokenCostWeights(v *tokenReportView) (tokenreport.Weights, bool) {
 // count and the total volume joined with " · ", each part saying "not
 // recorded" when it is.
 func tokenDurationLine(v *tokenReportView) string {
+	return tokenDurationLineWith(v, "")
+}
+
+// tokenDurationLineWith is tokenDurationLine with suffix appended to a
+// recorded duration (" so far" for a live session); an unrecorded duration
+// takes no suffix.
+func tokenDurationLineWith(v *tokenReportView, suffix string) string {
 	duration := tokenNotRecorded
 	if v.Report.Duration > 0 {
-		duration = tokenreport.FormatDuration(v.Report.Duration)
+		duration = tokenreport.FormatDuration(v.Report.Duration) + suffix
 	}
 	if !v.HasUsage {
 		return duration + " · token usage " + tokenNotRecorded
@@ -271,6 +278,20 @@ func formatCallCount(n int) string {
 		return "1 call"
 	}
 	return strconv.Itoa(n) + " calls"
+}
+
+// formatAPICalls renders "1 API call" / "N API calls".
+func formatAPICalls(count int) string {
+	if count == 1 {
+		return "1 API call"
+	}
+	return strconv.Itoa(count) + " API calls"
+}
+
+// formatPercent renders a percentage with at most one decimal ("97.4%",
+// "80%").
+func formatPercent(percent float64) string {
+	return strings.TrimSuffix(strconv.FormatFloat(percent, 'f', 1, 64), ".0") + "%"
 }
 
 // writeTokenReportBody prints the shared body: the breakdown (when

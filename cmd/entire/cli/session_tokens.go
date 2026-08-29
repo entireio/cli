@@ -18,7 +18,6 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
-	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
 	"github.com/entireio/cli/cmd/entire/cli/tokenreport"
 	"github.com/spf13/cobra"
@@ -52,13 +51,18 @@ type sessionTokensReport struct {
 	Tokens          *tokenUsageJSON  `json:"tokens,omitempty"`
 	// Context is the session's current context pressure as the agent's
 	// hooks last reported it.
-	Context           *sessionTokensContext     `json:"context,omitempty"`
-	Cost              *tokenCostJSON            `json:"cost,omitempty"`
+	Context *sessionTokensContext `json:"context,omitempty"`
+	Cost    *tokenCostJSON        `json:"cost,omitempty"`
+	// Contributors is always present — an empty array when the session was
+	// not attributed — so consumers can iterate without a nil check.
 	Contributors      []tokenreport.Contributor `json:"contributors"`
 	Recommendations   []tokenRecommendationJSON `json:"recommendations,omitempty"`
 	AgentReportedCost float64                   `json:"agent_reported_cost,omitempty"`
 	Limitations       []string                  `json:"limitations,omitempty"`
 
+	// ended is true once the session has ended; the header then prints
+	// "Duration:" without "so far".
+	ended bool
 	// view is what the text writers render; the JSON fields above are
 	// derived from it by applyView.
 	view tokenReportView
@@ -193,7 +197,7 @@ func tokenCommandError(err error) error {
 // (sessionTokensMetadata), so both commands compute every figure the same
 // way. Nothing here fails the command: every problem becomes a note.
 func buildSessionTokensReport(ctx context.Context, state *strategy.SessionState, status string) sessionTokensReport {
-	report := sessionTokensReport{SessionID: state.SessionID, Agent: string(state.AgentType), Status: status, Source: sessionTokensSourceState}
+	report := sessionTokensReport{SessionID: state.SessionID, Agent: string(state.AgentType), Status: status, Source: sessionTokensSourceState, ended: state.EndedAt != nil}
 	if report.Agent == "" {
 		report.Agent = unknownPlaceholder
 	}
@@ -222,30 +226,26 @@ func buildSessionTokensReport(ctx context.Context, state *strategy.SessionState,
 }
 
 // sessionTokensMetadata is the live session's state in the shape the shared
-// per-session analysis reads — the same fields a checkpoint's metadata
-// carries for a session: agent, model, running token_usage, skill events and
-// the session metrics. It is built for the analysis only and never written.
+// per-session analysis reads — the fields of a checkpoint's session metadata
+// the analysis uses: agent, model, running token_usage, skill events and the
+// hook-reported duration. It is built for the analysis only and never
+// written.
 func sessionTokensMetadata(state *strategy.SessionState) *checkpoint.Metadata {
 	return &checkpoint.Metadata{
-		SessionID:   state.SessionID,
-		Agent:       state.AgentType,
-		Model:       state.ModelName,
-		TokenUsage:  state.TokenUsage,
-		SkillEvents: state.SkillEvents,
-		SessionMetrics: &checkpoint.SessionMetrics{
-			DurationMs:        sessionStateDuration(state).Milliseconds(),
-			TurnCount:         state.SessionTurnCount,
-			ContextTokens:     state.ContextTokens,
-			ContextWindowSize: state.ContextWindowSize,
-		},
+		SessionID:      state.SessionID,
+		Agent:          state.AgentType,
+		Model:          state.ModelName,
+		TokenUsage:     state.TokenUsage,
+		SkillEvents:    state.SkillEvents,
+		SessionMetrics: &checkpoint.SessionMetrics{DurationMs: sessionStateDuration(state).Milliseconds()},
 	}
 }
 
 // sessionStateDuration is the session's duration as its state knows it: the
 // agent's hook-reported duration when present, else the span from StartedAt
-// to the last interaction (or to EndedAt for an ended session). 0 when
-// neither is known or the span is negative (clock skew), which the header
-// prints as "not recorded".
+// to the last interaction, or to EndedAt when no interaction time was
+// recorded. 0 when neither is known or the span is negative (clock skew),
+// which the header prints as "not recorded".
 func sessionStateDuration(state *strategy.SessionState) time.Duration {
 	if state.SessionDurationMs > 0 {
 		return time.Duration(state.SessionDurationMs) * time.Millisecond
@@ -265,7 +265,9 @@ func sessionStateDuration(state *strategy.SessionState) time.Duration {
 // subagent transcripts from the session's subagents directory, and labels
 // skill loads from the state's skill events. Any reason attribution cannot
 // run becomes a note; the analysis then falls back to the state's
-// token_usage in finishSessionTokenAnalysis.
+// token_usage in finishSessionTokenAnalysis. A state that never recorded a
+// transcript path is a normal state, noted without a warning; a path that
+// cannot be read is warned about.
 func attributeSessionTokens(ctx context.Context, state *strategy.SessionState, meta *checkpoint.Metadata) sessionTokenAnalysis {
 	a := sessionTokenAnalysis{meta: meta, efforts: make(map[string]int), models: make(map[string]int)}
 	attributor, reason, ok := resolveTokenAttributor(state.AgentType)
@@ -273,6 +275,10 @@ func attributeSessionTokens(ctx context.Context, state *strategy.SessionState, m
 		if reason != "" {
 			a.notes = append(a.notes, reason+sessionTokensStateFallback)
 		}
+		return a
+	}
+	if state.TranscriptPath == "" {
+		a.notes = append(a.notes, "no transcript recorded"+sessionTokensStateFallback)
 		return a
 	}
 	data, transcriptPath, err := readSessionTranscript(state)
@@ -383,7 +389,7 @@ func roundedPercent(value, total int) int {
 // writeSessionTokensText prints the breakdown-first report: the session
 // header, then the shared body (Where it went, Usage, Recommendations,
 // Notes). The recommendation sentences are tokenreport.Recommend's, unchanged:
-// only the header's "Duration so far" marks the session as still running.
+// only the header's "so far" marks the session as still running.
 func writeSessionTokensText(w io.Writer, report *sessionTokensReport) {
 	fmt.Fprintln(w, "Session tokens")
 	fmt.Fprintln(w)
@@ -391,46 +397,30 @@ func writeSessionTokensText(w io.Writer, report *sessionTokensReport) {
 	writeTokenReportBody(w, &report.view)
 }
 
-// writeSessionTokensHeader prints the identity lines: session, agent and
-// model on one line; the status; the duration so far ("Duration" once the
-// session has ended) with calls, volume and effort; and the context fill
-// when the agent's hooks reported it.
+// writeSessionTokensHeader prints the identity lines under uniform 10-column
+// labels: session, agent and model on one line; the status; the duration
+// ("10s so far" while the session is live) with calls, volume and effort;
+// and the context fill when the agent's hooks reported it.
 func writeSessionTokensHeader(w io.Writer, report *sessionTokensReport) {
 	v := &report.view
-	first := []string{"Session: " + report.SessionID, "Agent: " + report.Agent}
+	first := []string{"Session:  " + report.SessionID, "Agent: " + report.Agent}
 	if report.Model != "" {
 		first = append(first, "Model: "+report.Model)
 	}
 	fmt.Fprintln(w, strings.Join(first, "      "))
-	fmt.Fprintf(w, "Status:  %s\n", report.Status)
-	label := "Duration so far: "
-	if report.Status == string(session.PhaseEnded) {
-		label = "Duration: "
+	fmt.Fprintf(w, "Status:   %s\n", report.Status)
+	suffix := " so far"
+	if report.ended {
+		suffix = ""
 	}
-	duration := label + tokenDurationLine(v)
+	duration := "Duration: " + tokenDurationLineWith(v, suffix)
 	if effort := tokenEffortHeader(v); effort != "" {
 		duration += "      " + effort
 	}
 	fmt.Fprintln(w, duration)
 	if c := report.Context; c != nil {
-		fmt.Fprintf(w, "Context: %d%% full (%s of %s)\n", c.Percent, tokenreport.FormatTokenCount(c.Tokens), tokenreport.FormatTokenCount(c.WindowSize))
+		fmt.Fprintf(w, "Context:  %d%% full (%s of %s)\n", c.Percent, tokenreport.FormatTokenCount(c.Tokens), tokenreport.FormatTokenCount(c.WindowSize))
 	}
-}
-
-// formatAPICalls renders "1 API call" / "N API calls".
-func formatAPICalls(count int) string {
-	if count == 1 {
-		return "1 API call"
-	}
-	return fmt.Sprintf("%d API calls", count)
-}
-
-// formatPercent renders a percentage with at most one decimal ("97.4%",
-// "80%").
-func formatPercent(percent float64) string {
-	formatted := fmt.Sprintf("%.1f", percent)
-	formatted = strings.TrimSuffix(formatted, ".0")
-	return formatted + "%"
 }
 
 // --- Helpers kept for `tokens profile` until Task 18 rebuilds it on the

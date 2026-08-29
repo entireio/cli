@@ -1188,7 +1188,7 @@ func TestTokensCmd_DefaultsToCurrentSession(t *testing.T) {
 	}
 
 	out := stdout.String()
-	if !strings.Contains(out, "Session: test-tokens-current") {
+	if !strings.Contains(out, "Session:  test-tokens-current") {
 		t.Fatalf("expected current worktree session, got:\n%s", out)
 	}
 	if strings.Contains(out, "test-tokens-other") {
@@ -1217,7 +1217,7 @@ func TestTokensCmd_CurrentDoesNotFallbackToOtherWorktree(t *testing.T) {
 	if err := defaultCmd.ExecuteContext(ctx); err != nil {
 		t.Fatalf("expected default command to fall back, got: %v", err)
 	}
-	if !strings.Contains(defaultStdout.String(), "Session: test-tokens-other-only") {
+	if !strings.Contains(defaultStdout.String(), "Session:  test-tokens-other-only") {
 		t.Fatalf("expected default command to fall back to other worktree session, got:\n%s", defaultStdout.String())
 	}
 

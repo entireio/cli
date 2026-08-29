@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -76,6 +77,25 @@ func liveSessionTokensState(id, transcriptPath string) *strategy.SessionState {
 	return state
 }
 
+// readLogDir returns the concatenated contents of every file a file-backed
+// logger wrote under dir; "" when it wrote nothing.
+func readLogDir(t *testing.T, dir string) string {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("ReadDir(%s): %v", dir, err)
+	}
+	var b strings.Builder
+	for _, e := range entries {
+		data, err := os.ReadFile(filepath.Join(dir, e.Name()))
+		if err != nil {
+			t.Fatalf("read %s: %v", e.Name(), err)
+		}
+		b.Write(data)
+	}
+	return b.String()
+}
+
 // runSessionTokensCmd saves state and runs `session tokens <id> args...`,
 // returning stdout.
 func runSessionTokensCmd(ctx context.Context, t *testing.T, state *strategy.SessionState, args ...string) string {
@@ -102,8 +122,8 @@ func TestSessionTokens_TextRecomputesFromLiveTranscript(t *testing.T) {
 
 	assertContainsAll(t, out,
 		"Session tokens",
-		"Status:  active",
-		"Context: 85% full (8.5k of 10k)",
+		"Status:   active",
+		"Context:  85% full (8.5k of 10k)",
 		// Where it went: the subagent record (on the parent model) leads.
 		"Where it went",
 		"est. cost share",
@@ -130,8 +150,8 @@ func TestSessionTokens_TextRecomputesFromLiveTranscript(t *testing.T) {
 	)
 	// The modal call model replaces the stale state model in the header; the
 	// transcript's span replaces the state-derived duration.
-	assertLineContainsAll(t, out, "Session: live-tokens-text", "Agent: Claude Code", "Model: claude-fable-5")
-	assertLineContainsAll(t, out, "Duration so far:", "10s", "3 API calls", "4.9k tokens", "Effort: high (4 calls)")
+	assertLineContainsAll(t, out, "Session:  live-tokens-text", "Agent: Claude Code", "Model: claude-fable-5")
+	assertLineContainsAll(t, out, "Duration: 10s so far · 3 API calls · 4.9k tokens", "Effort: high (4 calls)")
 	for _, absent := range []string{"999.9k", testModelClaudeOpus, "6h 10m", "Likely contributors", "Limitations", "totals from session state", "Pattern:"} {
 		if strings.Contains(out, absent) {
 			t.Errorf("did not expect %q in output, got:\n%s", absent, out)
@@ -243,7 +263,7 @@ func TestSessionTokens_FallsBackToSessionStateWhenTranscriptUnreadable(t *testin
 	out := runSessionTokensCmd(ctx, t, state)
 
 	assertContainsAll(t, out,
-		"Status:  active",
+		"Status:   active",
 		"Usage",
 		"Input (fresh)",
 		"2k",
@@ -256,9 +276,9 @@ func TestSessionTokens_FallsBackToSessionStateWhenTranscriptUnreadable(t *testin
 		"transcript unavailable; totals from session state",
 		"cache-write TTL not recorded; not priced",
 	)
-	assertLineContainsAll(t, out, "Session: state-tokens", "Agent: Claude Code", "Model: claude-fable-5")
+	assertLineContainsAll(t, out, "Session:  state-tokens", "Agent: Claude Code", "Model: claude-fable-5")
 	// Duration is the state's span; calls exclude the subagent's two.
-	assertLineContainsAll(t, out, "Duration so far:", "6h 10m", "6 API calls", "13.6k tokens")
+	assertLineContainsAll(t, out, "Duration: 6h 10m so far · 6 API calls · 13.6k tokens")
 	if strings.Contains(out, "Where it went") {
 		t.Errorf("no breakdown without a transcript:\n%s", out)
 	}
@@ -303,42 +323,59 @@ func TestSessionTokens_UnreadableTranscriptWarnOmitsPath(t *testing.T) {
 	}
 	assertContainsAll(t, out, "transcript unavailable; totals from session state")
 
-	entries, err := os.ReadDir(logDir)
-	if err != nil || len(entries) == 0 {
-		t.Fatalf("no log file written (%v): %v", err, entries)
-	}
-	var logged strings.Builder
-	for _, e := range entries {
-		data, err := os.ReadFile(filepath.Join(logDir, e.Name()))
-		if err != nil {
-			t.Fatalf("read %s: %v", e.Name(), err)
-		}
-		logged.Write(data)
-	}
-	assertContainsAll(t, logged.String(), "session tokens: transcript unreadable", `"session_id":"warn-tokens"`, `"agent":"Claude Code"`, `"reason":"not_found"`)
+	logged := readLogDir(t, logDir)
+	assertContainsAll(t, logged, "session tokens: transcript unreadable", `"session_id":"warn-tokens"`, `"agent":"Claude Code"`, `"reason":"not_found"`)
 	for _, absent := range []string{transcriptPath, "secret-project-name", `"error"`} {
-		if strings.Contains(logged.String(), absent) {
-			t.Errorf("the log must not carry %q:\n%s", absent, logged.String())
+		if strings.Contains(logged, absent) {
+			t.Errorf("the log must not carry %q:\n%s", absent, logged)
 		}
 	}
-	if got := transcriptUnavailableReason(errors.New("permission denied")); got != "unreadable" {
-		t.Errorf("transcriptUnavailableReason(other) = %q, want unreadable", got)
+}
+
+func TestTranscriptUnavailableReason(t *testing.T) {
+	t.Parallel()
+
+	cases := map[string]struct {
+		err  error
+		want string
+	}{
+		"wrapped not-exist":  {fmt.Errorf("resolve transcript path: %w", fs.ErrNotExist), "not_found"},
+		"path error":         {fmt.Errorf("read transcript: %w", &fs.PathError{Op: "open", Path: "/x", Err: fs.ErrNotExist}), "not_found"},
+		"other error":        {errors.New("permission denied"), "unreadable"},
+		"wrapped permission": {fmt.Errorf("read transcript: %w", fs.ErrPermission), "unreadable"},
+	}
+	for name, tc := range cases {
+		if got := transcriptUnavailableReason(tc.err); got != tc.want {
+			t.Errorf("%s: transcriptUnavailableReason = %q, want %q", name, got, tc.want)
+		}
 	}
 }
 
 func TestSessionTokens_NothingRecorded(t *testing.T) {
 	setupStopTestRepo(t)
-	ctx := context.Background()
+	logDir := t.TempDir()
+	l, err := logging.New(logging.Config{Dir: logDir})
+	if err != nil {
+		t.Fatalf("logging.New() error = %v", err)
+	}
+	ctx := logging.WithLogger(context.Background(), l)
 	state := makeSessionState("empty-tokens", session.PhaseIdle)
 	state.AgentType = agent.AgentTypeGemini
 	state.ContextTokens = 9000
 	state.ContextWindowSize = 10000
 
 	out := runSessionTokensCmd(ctx, t, state)
-	assertContainsAll(t, out, "Status:  idle", "Context: 90% full (9k of 10k)", "Token usage: not recorded", "transcript unavailable; totals from session state")
-	assertLineContainsAll(t, out, "Duration so far:", "not recorded")
-	if strings.Contains(out, "Recommendations") || strings.Contains(out, "Where it went") {
-		t.Errorf("nothing to recommend or attribute without usage:\n%s", out)
+	assertContainsAll(t, out, "Status:   idle", "Context:  90% full (9k of 10k)", "Token usage: not recorded", "no transcript recorded; totals from session state")
+	assertLineContainsAll(t, out, "Duration: not recorded · token usage not recorded")
+	if strings.Contains(out, "Recommendations") || strings.Contains(out, "Where it went") || strings.Contains(out, "so far") {
+		t.Errorf("nothing to recommend or attribute without usage, and no duration to say 'so far' about:\n%s", out)
+	}
+	// A state that never recorded a transcript path is normal: no warn.
+	if err := l.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+	if logged := readLogDir(t, logDir); strings.Contains(logged, "session tokens:") {
+		t.Errorf("no warning is due for a session without a transcript path, got:\n%s", logged)
 	}
 
 	brief := runSessionTokensCmd(ctx, t, state, "--agent-brief")
@@ -375,21 +412,21 @@ func TestSessionTokens_UnknownAgentIsANote(t *testing.T) {
 func TestWriteSessionTokensHeader_EndedSessionDropsSoFar(t *testing.T) {
 	t.Parallel()
 
-	report := sessionTokensReport{SessionID: "done", Agent: testAgentClaude, Model: "claude-fable-5", Status: string(session.PhaseEnded)}
+	report := sessionTokensReport{SessionID: "done", Agent: testAgentClaude, Model: "claude-fable-5", Status: string(session.PhaseEnded), ended: true}
 	report.applyView(claudeView(wideAttributed()))
 	var b strings.Builder
 	writeSessionTokensHeader(&b, &report)
 	out := b.String()
-	assertContainsAll(t, out, "Session: done      Agent: Claude Code      Model: claude-fable-5\n", "Status:  ended\n", "Duration: 9h 42m · 43 API calls · 4.2M tokens      Effort: high (43 calls)\n")
+	assertContainsAll(t, out, "Session:  done      Agent: Claude Code      Model: claude-fable-5\n", "Status:   ended\n", "Duration: 9h 42m · 43 API calls · 4.2M tokens      Effort: high (43 calls)\n")
 	if strings.Contains(out, "so far") || strings.Contains(out, "Context:") {
 		t.Errorf("no 'so far' on an ended session and no Context line without one:\n%s", out)
 	}
 
-	report.Status = string(session.PhaseActive)
+	report.Status, report.ended = string(session.PhaseActive), false
 	report.Context = buildSessionTokensContext(6200, 10000)
 	b.Reset()
 	writeSessionTokensHeader(&b, &report)
-	assertContainsAll(t, b.String(), "Duration so far: 9h 42m", "Context: 62% full (6.2k of 10k)")
+	assertContainsAll(t, b.String(), "Duration: 9h 42m so far · 43 API calls", "Context:  62% full (6.2k of 10k)")
 }
 
 func TestSessionStateDuration(t *testing.T) {
