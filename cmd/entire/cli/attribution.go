@@ -21,6 +21,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
 	"github.com/entireio/cli/cmd/entire/cli/stringutil"
+	"github.com/entireio/cli/cmd/entire/cli/tokenreport"
 	"github.com/entireio/cli/cmd/entire/cli/trailers"
 
 	"github.com/go-git/go-git/v6"
@@ -865,50 +866,15 @@ func summarizeAttributionLines(lines []attributionLine) attributionSummary {
 	// equal thirds rendering as 33/33/33 = 99). Uncommitted shares the 100% but
 	// is shown only as a count, so when it is present the three visible
 	// percentages correctly total less than 100.
-	pct := largestRemainderPercent(
+	pct := tokenreport.LargestRemainder(
 		[]int{summary.AILines, summary.HumanLines, summary.MixedLines, summary.UncommittedLines},
 		summary.TotalLines,
+		100,
 	)
 	summary.AIPercentage = pct[0]
 	summary.HumanPercentage = pct[1]
 	summary.MixedPercentage = pct[2]
 	return summary
-}
-
-// largestRemainderPercent apportions integer percentages that sum to 100 across
-// counts whose own sum is total, using the largest-remainder (Hamilton) method.
-// It avoids the truncation drift where independently floored shares total 99.
-// Returns all-zero when total is non-positive.
-func largestRemainderPercent(counts []int, total int) []int {
-	pct := make([]int, len(counts))
-	if total <= 0 {
-		return pct
-	}
-	allocated := 0
-	order := make([]int, len(counts))
-	for i, c := range counts {
-		pct[i] = c * 100 / total
-		allocated += pct[i]
-		order[i] = i
-	}
-	leftover := 100 - allocated
-	if leftover <= 0 {
-		return pct
-	}
-	// Hand the leftover points to the largest fractional remainders, breaking
-	// ties by lower index for deterministic output.
-	remainder := func(i int) int { return (counts[i] * 100) % total }
-	sort.SliceStable(order, func(a, b int) bool {
-		ra, rb := remainder(order[a]), remainder(order[b])
-		if ra == rb {
-			return order[a] < order[b]
-		}
-		return ra > rb
-	})
-	for i := 0; i < leftover && i < len(order); i++ {
-		pct[order[i]]++
-	}
-	return pct
 }
 
 // attributionLineMarker returns a one-character flag for the blame tables:
