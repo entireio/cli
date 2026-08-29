@@ -3,6 +3,7 @@ package geminicli
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 	"time"
 
@@ -22,10 +23,14 @@ const (
 	fixtureMsgInfo2   = 2 // info message: never a call
 	fixtureMsgGemini3 = 3 // text only
 	fixtureMsgUser4   = 4
-	fixtureMsgGemini5 = 5 // glob; no tokens block
+	fixtureMsgGemini5 = 5 // glob + a file_path-keyed read_file; no tokens block
 	fixtureMsgGemini6 = 6 // text only, a different model
 	fixtureMsgCount   = 7
 )
+
+// messageTypeInfo is Gemini's system-notice message type ("Model switched to
+// …"); AttributeTokens never treats it as a call.
+const messageTypeInfo = "info"
 
 const (
 	fixtureModelPro   = "gemini-2.5-pro"
@@ -42,6 +47,7 @@ const (
 	fixtureShellResult = `[{"functionResponse":{"id":"run_shell_command-1773867920932-1","name":"run_shell_command","response":{"output":"ok\tgithub.com/x/src\t0.012s"}}}]`
 	fixtureReadResult  = `[{"functionResponse":{"id":"read_file-1773867920932-2","name":"read_file","response":{"output":"package src\n"}}}]`
 	fixtureGlobResult  = `[{"functionResponse":{"id":"glob-1773867961208-3","name":"glob","response":{"output":"Found 1 file(s) matching \"**/*.go\":\nsrc/a.go"}}}]`
+	fixtureReadBResult = `[{"functionResponse":{"id":"read_file-1773867961208-4","name":"read_file","response":{"output":"package src // b\n"}}}]`
 )
 
 // Per-call usage from the CalculateTokenUsage identities: input − cached +
@@ -52,7 +58,10 @@ var (
 	fixtureCall6Usage = types.TokenUsage{InputTokens: 2050, OutputTokens: 30, APICallCount: 1}
 
 	fixtureShellRef = types.ToolUseRef{ID: "run_shell_command-1773867920932-1", Tool: "run_shell_command", Detail: "go test ./..."}
+	// fixtureReadRef is the older `absolute_path` spelling (fallback);
+	// fixtureReadBRef the `file_path` key current Gemini CLI writes.
 	fixtureReadRef  = types.ToolUseRef{ID: "read_file-1773867920932-2", Tool: "read_file", Detail: "src/a.go"}
+	fixtureReadBRef = types.ToolUseRef{ID: "read_file-1773867961208-4", Tool: "read_file", Detail: "src/b.go"}
 	fixtureGlobRef  = types.ToolUseRef{ID: "glob-1773867961208-3", Tool: "glob"}
 
 	// Consumed by the gemini message AFTER the one that emitted them.
@@ -60,7 +69,10 @@ var (
 		{ToolUse: fixtureShellRef, Bytes: len(fixtureShellResult)},
 		{ToolUse: fixtureReadRef, Bytes: len(fixtureReadResult)},
 	}
-	fixtureMsg5Results = []types.ToolResultRef{{ToolUse: fixtureGlobRef, Bytes: len(fixtureGlobResult)}}
+	fixtureMsg5Results = []types.ToolResultRef{
+		{ToolUse: fixtureGlobRef, Bytes: len(fixtureGlobResult)},
+		{ToolUse: fixtureReadBRef, Bytes: len(fixtureReadBResult)},
+	}
 )
 
 func readAttributionFixture(t *testing.T) []byte {
@@ -150,7 +162,13 @@ func TestAttributionFixtureLayout(t *testing.T) {
 		t.Errorf("message %d has %d toolCalls, want 2", fixtureMsgGemini1, got)
 	}
 	if _, ok := session.Messages[fixtureMsgGemini1].ToolCalls[1].Args[argAbsolutePath]; !ok {
-		t.Errorf("message %d read_file args = %v, want the %q key Gemini's read_file uses", fixtureMsgGemini1, session.Messages[fixtureMsgGemini1].ToolCalls[1].Args, argAbsolutePath)
+		t.Errorf("message %d read_file args = %v, want the older %q key so the fallback is exercised", fixtureMsgGemini1, session.Messages[fixtureMsgGemini1].ToolCalls[1].Args, argAbsolutePath)
+	}
+	if got := len(session.Messages[fixtureMsgGemini5].ToolCalls); got != 2 {
+		t.Fatalf("message %d has %d toolCalls, want 2", fixtureMsgGemini5, got)
+	}
+	if _, ok := session.Messages[fixtureMsgGemini5].ToolCalls[1].Args["file_path"]; !ok {
+		t.Errorf("message %d read_file args = %v, want the \"file_path\" key current Gemini CLI writes", fixtureMsgGemini5, session.Messages[fixtureMsgGemini5].ToolCalls[1].Args)
 	}
 }
 
@@ -262,8 +280,9 @@ func TestAttributeTokens_SumsMatchCalculateTokenUsage(t *testing.T) {
 }
 
 // TestAttributeTokens_EmittedRefs: run_shell_command reduces to the command
-// head, read_file to the path under Gemini's `absolute_path` key, glob to ""
-// (its pattern is user content).
+// head, read_file to its path under either the current `file_path` key or
+// the older `absolute_path` fallback, glob to "" (its pattern is user
+// content).
 func TestAttributeTokens_EmittedRefs(t *testing.T) {
 	t.Parallel()
 
@@ -275,14 +294,14 @@ func TestAttributeTokens_EmittedRefs(t *testing.T) {
 	if len(got.Calls[1].Emitted) != 0 {
 		t.Errorf("Calls[1].Emitted = %+v, want none (text only)", got.Calls[1].Emitted)
 	}
-	assertRefs(t, "Calls[2].Emitted", got.Calls[2].Emitted, []types.ToolUseRef{fixtureGlobRef})
+	assertRefs(t, "Calls[2].Emitted", got.Calls[2].Emitted, []types.ToolUseRef{fixtureGlobRef, fixtureReadBRef})
 	if len(got.Calls[3].Emitted) != 0 {
 		t.Errorf("Calls[3].Emitted = %+v, want none (text only)", got.Calls[3].Emitted)
 	}
 	for i, call := range got.Calls {
 		for j, ref := range call.Emitted {
 			if ref.SkillName != "" || ref.SubagentType != "" || ref.Model != "" {
-				t.Errorf("Calls[%d].Emitted[%d] = %+v, want no skill/subagent/model (Gemini has no such tools)", i, j, ref)
+				t.Errorf("Calls[%d].Emitted[%d] = %+v, want no skill/subagent/model (activate_skill and delegate_to_agent are not labelled yet)", i, j, ref)
 			}
 		}
 	}
@@ -341,7 +360,7 @@ func TestAttributeTokens_StartEndSpanEveryMessageType(t *testing.T) {
 		t.Errorf("End = %v, want the last message's timestamp", got.End)
 	}
 	if len(got.Subagents) != 0 {
-		t.Errorf("Subagents = %+v, want none (Gemini has no subagents)", got.Subagents)
+		t.Errorf("Subagents = %+v, want none (Gemini writes no child transcripts)", got.Subagents)
 	}
 	if got.AgentReportedCost != 0 {
 		t.Errorf("AgentReportedCost = %v, want 0 (Gemini records no cost)", got.AgentReportedCost)
@@ -349,7 +368,8 @@ func TestAttributeTokens_StartEndSpanEveryMessageType(t *testing.T) {
 }
 
 // TestAttributeTokens_SubagentsDirIgnored: a subagentsDir changes nothing —
-// Gemini writes no subagent transcripts.
+// Gemini writes no child transcripts and delegate_to_agent is not yet
+// recognised.
 func TestAttributeTokens_SubagentsDirIgnored(t *testing.T) {
 	t.Parallel()
 
@@ -359,6 +379,50 @@ func TestAttributeTokens_SubagentsDirIgnored(t *testing.T) {
 	}
 	if len(got.Subagents) != 0 || len(got.Calls) != 4 {
 		t.Errorf("with subagentsDir: %d subagents, %d calls; want 0 and 4", len(got.Subagents), len(got.Calls))
+	}
+}
+
+// TestAttributeTokens_CallsIndependentOfStartLine: a call is the same whole
+// struct whatever startLine admits it — Line, usage, Emitted and, in
+// particular, Consumed — so consecutive slices charge each result exactly
+// once and never shift it to a different call; and a slice holds exactly the
+// offset-0 calls at or after it.
+func TestAttributeTokens_CallsIndependentOfStartLine(t *testing.T) {
+	t.Parallel()
+
+	data := readAttributionFixture(t)
+	full := attributeFixture(t, 0)
+	byLine := make(map[int]types.CallUsage, len(full.Calls))
+	for _, call := range full.Calls {
+		byLine[call.Line] = call
+	}
+	for start := 1; start < fixtureMsgCount; start++ {
+		got, err := (&GeminiCLIAgent{}).AttributeTokens(data, start, "")
+		if err != nil {
+			t.Fatalf("AttributeTokens(startLine=%d): %v", start, err)
+		}
+		wantCount := 0
+		for _, call := range full.Calls {
+			if call.Line >= start {
+				wantCount++
+			}
+		}
+		if len(got.Calls) != wantCount {
+			t.Errorf("startLine %d: got %d calls, want %d (the offset-0 calls with Line >= %d)", start, len(got.Calls), wantCount, start)
+		}
+		for _, call := range got.Calls {
+			if call.Line < start {
+				t.Errorf("startLine %d: call at Line %d precedes the slice", start, call.Line)
+			}
+			want, ok := byLine[call.Line]
+			if !ok {
+				t.Errorf("startLine %d: call at Line %d is not a call from 0", start, call.Line)
+				continue
+			}
+			if !reflect.DeepEqual(call, want) {
+				t.Errorf("startLine %d: call at Line %d = %+v, want the same call from 0: %+v", start, call.Line, call, want)
+			}
+		}
 	}
 }
 
@@ -394,9 +458,10 @@ func TestAttributeTokens_MalformedTranscriptIsError(t *testing.T) {
 	}
 }
 
-// TestAttributeTokens_ToolCallWithoutResult: a toolCall that never completed
-// keeps its id and name, and is a zero-byte result for the next call; a
-// missing or unparsable timestamp leaves At zero.
+// TestAttributeTokens_ToolCallWithoutResult pins the defensive path: every
+// real toolCall carries a result (cancelled and errored ones included), but
+// one without keeps its id and name and is a zero-byte result for the next
+// call; a missing or unparsable timestamp leaves At zero.
 func TestAttributeTokens_ToolCallWithoutResult(t *testing.T) {
 	t.Parallel()
 

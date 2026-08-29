@@ -151,6 +151,30 @@
           "displayName": "FindFiles",
           "description": "Efficiently finds files matching specific glob patterns.",
           "renderOutputAsMarkdown": true
+        },
+        {
+          "id": "read_file-1773867961208-4",
+          "name": "read_file",
+          "args": {
+            "file_path": "src/b.go"
+          },
+          "result": [
+            {
+              "functionResponse": {
+                "id": "read_file-1773867961208-4",
+                "name": "read_file",
+                "response": {
+                  "output": "package src // b\n"
+                }
+              }
+            }
+          ],
+          "resultDisplay": "package src // b\n",
+          "status": "success",
+          "timestamp": "2026-03-18T21:06:03.000Z",
+          "displayName": "ReadFile",
+          "description": "Reads and returns the content of a specified file.",
+          "renderOutputAsMarkdown": true
         }
       ]
     },

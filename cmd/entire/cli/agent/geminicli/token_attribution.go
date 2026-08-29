@@ -13,17 +13,13 @@ import (
 
 var _ agent.TokenAttributor = (*GeminiCLIAgent)(nil)
 
-const (
-	// messageTypeInfo is Gemini's system-notice message type ("Model switched
-	// to …"); it is never an API call and never carries tokens.
-	messageTypeInfo = "info"
-
-	// argAbsolutePath is the key Gemini CLI's read_file tool takes its path
-	// under (ReadFileToolParams.absolute_path). transcript.ToolInput knows
-	// file_path / filePath / path but not this spelling, so it is mapped onto
-	// ToolInput.FilePath here rather than taught to ToolDetail.
-	argAbsolutePath = "absolute_path"
-)
+// argAbsolutePath is the path key older Gemini CLI `read_file` calls used;
+// current versions write `file_path`, which transcript.ToolInput already
+// knows (a survey of 530 local sessions, 2026-08-28, found `file_path` on
+// 113/113 read_file calls and `absolute_path` on none). It is mapped onto
+// ToolInput.FilePath only when no known path key is set, and only here —
+// ToolDetail is not taught the spelling.
+const argAbsolutePath = "absolute_path"
 
 // attributionSession is the slice of a Gemini session file attribution
 // reads: the messages array with the per-message keys the exported
@@ -38,7 +34,6 @@ type attributionSession struct {
 // gemini message that records no tokens block (types.CallUsage.UsageUnknown)
 // is told apart from one that records zeros.
 type attributionMessage struct {
-	ID        string                `json:"id"`
 	Type      string                `json:"type"`
 	Timestamp string                `json:"timestamp"`
 	Model     string                `json:"model"`
@@ -49,7 +44,9 @@ type attributionMessage struct {
 // attributionToolCall is one entry of a gemini message's toolCalls. Result is
 // kept raw: it is the functionResponse array Gemini sent back to the model
 // ([{"functionResponse":{"id","name","response":{"output":…}}}]) and only its
-// size matters here. It is absent for a call that never completed.
+// size matters here. Every real call seen carries one — cancelled and errored
+// calls included (752/752 toolCalls across 530 local sessions, 2026-08-28) —
+// so a missing result is handled defensively, not as a known state.
 type attributionToolCall struct {
 	ID     string          `json:"id"`
 	Name   string          `json:"name"`
@@ -118,11 +115,13 @@ type attributionWalk struct {
 //   - Emitted is the message's toolCalls, in order: ID and Tool are the
 //     call's id and name, Detail is transcript.ToolDetail on the args map
 //     decoded into transcript.ToolInput (`command`, `file_path`, `path`,
-//     `pattern` are known to it), with Gemini's read_file `absolute_path`
-//     mapped onto ToolInput.FilePath first when no known path key is set.
-//     SkillName, SubagentType and Model stay "": Gemini CLI has no skill or
-//     subagent tool. Its web_fetch takes a `prompt` (URLs embedded in prose)
-//     rather than a `url`, so its Detail is "" like list_directory's.
+//     `pattern` are known to it). The `absolute_path` key older read_file
+//     calls used is mapped onto ToolInput.FilePath only when no known path
+//     key is set (see argAbsolutePath). SkillName, SubagentType and Model
+//     stay "": Gemini CLI's `activate_skill` and `delegate_to_agent` are not
+//     labelled yet (follow-up). Its web_fetch takes a `prompt` (URLs embedded
+//     in prose) rather than a `url`, so its Detail is "" like
+//     list_directory's.
 //   - Consumed: Gemini stores a tool's result on the SAME toolCall entry
 //     that emitted it (`result`, a functionResponse array); there is no
 //     result message. The result enters the model's context on the NEXT
@@ -134,13 +133,15 @@ type attributionWalk struct {
 //     slices count each result exactly once); the last gemini message's
 //     results are consumed by nothing. Bytes is len() of the `result` JSON
 //     compacted (Gemini writes its session files indented, and the model
-//     never saw that whitespace); 0 for a toolCall without a result. Each
+//     never saw that whitespace); 0 for a toolCall without a result, which
+//     no real session has shown (cancelled and errored calls carry one). Each
 //     result's ToolUse is the emitting call's own ref, so it is always
 //     labelled, even when the emitting message precedes startLine.
 //   - Start/End are the earliest/latest parsable timestamps over messages in
 //     the slice, whatever their type — info messages included.
-//   - Subagents is always empty and subagentsDir is ignored: Gemini CLI has
-//     no subagent tool and writes no child transcripts.
+//   - Subagents is always empty and subagentsDir is ignored: Gemini CLI
+//     writes no child transcripts, and `delegate_to_agent` is not yet
+//     recognised.
 //   - AgentReportedCost stays 0: Gemini records no dollar cost.
 //
 // Error contract (agent.TokenAttributor): the session is one JSON document,
@@ -179,7 +180,8 @@ func parseAttributionSession(data []byte) (*attributionSession, error) {
 }
 
 // visitMessage notes the message's timestamp when it is in the slice and
-// folds a gemini message into a call (see visitGemini).
+// folds a gemini message into a call (see visitGemini); "user" and "info"
+// messages contribute their timestamp only.
 func (w *attributionWalk) visitMessage(index int, msg *attributionMessage) {
 	inSlice := index >= w.startLine
 	at := parseMessageTimestamp(msg.Timestamp)
@@ -246,7 +248,8 @@ func callUsageFrom(t *geminiMessageTokens) types.TokenUsage {
 }
 
 // resultBytes is the size of a toolCall's result as the model saw it: the
-// raw `result` JSON with the file's indentation removed. 0 when absent; a
+// raw `result` JSON with the file's indentation removed. 0 when absent
+// (defensive: every real call carries one); a
 // result that cannot be compacted (it decoded, so this does not happen in
 // practice) is measured as written.
 func resultBytes(raw json.RawMessage) int {
