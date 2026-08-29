@@ -43,6 +43,12 @@ const (
 	WorktreeIDHashLength = 6
 )
 
+// createBlobFromContent is an indirection over CreateBlobFromContent so tests
+// can force a single blob write to fail and assert that the shadow write
+// refuses to commit a partial transcript chunk set. Production code paths
+// always use the real function. Mirrors chunkTranscript in persistent.go.
+var createBlobFromContent = CreateBlobFromContent
+
 // HashWorktreeID returns a short hash of the worktree identifier.
 // Used to create unique shadow branch names per worktree.
 func HashWorktreeID(worktreeID string) string {
@@ -410,7 +416,17 @@ func (s *ephemeralStore) addTaskMetadataToTree(ctx context.Context, baseTreeHash
 
 		// Add session transcript (with chunking support for large transcripts)
 		if opts.TranscriptPath != "" {
-			if transcriptContent, readErr := os.ReadFile(opts.TranscriptPath); readErr == nil {
+			transcriptContent, readErr := os.ReadFile(opts.TranscriptPath)
+			if readErr != nil {
+				// Not fatal: the agent may not have flushed its transcript yet.
+				// It IS worth a line, though — before this the checkpoint was
+				// stored transcript-free with no trace of why.
+				logging.Warn(ctx, "failed to read transcript, checkpoint will be saved without it",
+					slog.String("error", readErr.Error()),
+					slog.String("session_id", opts.SessionID),
+					slog.String("transcript_path", opts.TranscriptPath),
+				)
+			} else {
 				agentType := agent.DetectAgentTypeFromContent(transcriptContent)
 
 				// Chunk if necessary
@@ -423,14 +439,17 @@ func (s *ephemeralStore) addTaskMetadataToTree(ctx context.Context, baseTreeHash
 				} else {
 					for i, chunk := range chunks {
 						chunkPath := sessionMetadataDir + "/" + agent.ChunkFileName(paths.TranscriptFileName, i)
-						blobHash, blobErr := CreateBlobFromContent(s.repo, chunk)
+						blobHash, blobErr := createBlobFromContent(s.repo, chunk)
 						if blobErr != nil {
-							logging.Warn(ctx, "failed to create blob for transcript chunk",
-								slog.String("error", blobErr.Error()),
-								slog.String("session_id", opts.SessionID),
-								slog.Int("chunk_index", i),
-							)
-							continue
+							// Never commit a partial chunk set. Readers
+							// reassemble whatever chunks are present, in index
+							// order, with no gap marker (agent.SortChunkFiles /
+							// ReassembleTranscript), so skipping one chunk
+							// yields a transcript that parses cleanly and is
+							// silently short by up to agent.MaxChunkSize. Fail
+							// the write instead, exactly as the committed store
+							// does for the same operation.
+							return plumbing.ZeroHash, fmt.Errorf("failed to create blob for transcript chunk %d of %d: %w", i, len(chunks), blobErr)
 						}
 						changes = append(changes, TreeChange{
 							Path:  chunkPath,
