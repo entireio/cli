@@ -8,8 +8,9 @@ import (
 // flattenTokenUsage collapses a usage and its SubagentTokens chain into one
 // level, summing every level through types.AddTokenUsage so subset fields
 // (ThinkingTokens, CacheCreation1hTokens) and the Model label travel with the
-// four token classes and APICallCount. The result has no SubagentTokens and
-// shares no memory with u; u is not mutated.
+// four token classes and APICallCount. Model follows AddTokenUsage's merge
+// rule: kept when every level agrees, cleared to "" when levels differ. The
+// result has no SubagentTokens and shares no memory with u; u is not mutated.
 //
 // Like AddTokenUsage, the walk stops after types.MaxSubagentDepth nested levels
 // (real chains are depth 1). A nil input yields nil, matching AddTokenUsage, so
@@ -19,10 +20,11 @@ func flattenTokenUsage(u *agent.TokenUsage) *agent.TokenUsage {
 		return nil
 	}
 	var flat *agent.TokenUsage
-	for level, depth := u, 0; level != nil && depth <= types.MaxSubagentDepth; level, depth = level.SubagentTokens, depth+1 {
+	for level, depth := u, 0; level != nil && depth <= types.MaxSubagentDepth; depth++ {
 		leaf := *level
 		leaf.SubagentTokens = nil
 		flat = types.AddTokenUsage(flat, &leaf)
+		level = level.SubagentTokens
 	}
 	return flat
 }

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"strconv"
 	"strings"
 
@@ -358,14 +359,15 @@ func checkpointTokenUsage(summary *checkpoint.CheckpointSummary, metas []*checkp
 	return sessionUsage
 }
 
+// saturatingIntAdd returns a+b pinned at math.MaxInt / math.MinInt. It mirrors
+// the unexported types.saturatingAdd; kept for totalTokens and
+// topLevelSessionTokenTotal until the two are consolidated.
 func saturatingIntAdd(a, b int) int {
-	maxValue := int(^uint(0) >> 1)
-	minValue := -maxValue - 1
-	if b > 0 && a > maxValue-b {
-		return maxValue
+	if b > 0 && a > math.MaxInt-b {
+		return math.MaxInt
 	}
-	if b < 0 && a < minValue-b {
-		return minValue
+	if b < 0 && a < math.MinInt-b {
+		return math.MinInt
 	}
 	return a + b
 }

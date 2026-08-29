@@ -17,6 +17,7 @@ func TestFlattenTokenUsage_CarriesSubsetFieldsAcrossLevels(t *testing.T) {
 			OutputTokens: 10, ThinkingTokens: 4, CacheCreationTokens: 5, CacheCreation1hTokens: 0, APICallCount: 2, Model: "claude-haiku-4-5",
 		},
 	}
+	before, beforeSub := *u, *u.SubagentTokens
 	flat := flattenTokenUsage(u)
 	if flat.OutputTokens != 110 || flat.ThinkingTokens != 44 || flat.CacheCreationTokens != 55 || flat.CacheCreation1hTokens != 50 || flat.APICallCount != 5 {
 		t.Errorf("flatten = %+v", flat)
@@ -24,7 +25,7 @@ func TestFlattenTokenUsage_CarriesSubsetFieldsAcrossLevels(t *testing.T) {
 	if flat.SubagentTokens != nil {
 		t.Error("flattened usage must have no nested chain")
 	}
-	if u.SubagentTokens == nil || u.OutputTokens != 100 {
+	if *u != before || *u.SubagentTokens != beforeSub {
 		t.Error("input mutated")
 	}
 }
@@ -46,9 +47,9 @@ func TestFlattenTokenUsage_NilAndLeaf(t *testing.T) {
 	}
 }
 
-// TestFlattenTokenUsage_SaturatesOverflow replaced the same pin on the retired
-// addCheckpointTokenUsage: a corrupt or hostile blob near math.MaxInt must
-// saturate on every field, including across the nested chain, never wrap.
+// TestFlattenTokenUsage_SaturatesOverflow pins that a corrupt or hostile blob
+// near math.MaxInt saturates on every field, including across the nested chain,
+// and never wraps.
 func TestFlattenTokenUsage_SaturatesOverflow(t *testing.T) {
 	t.Parallel()
 
@@ -88,18 +89,36 @@ func TestFlattenTokenUsage_SaturatesOverflow(t *testing.T) {
 
 // TestFlattenTokenUsage_TruncatesDeepChains mirrors the AddTokenUsage cap: the
 // top level plus MaxSubagentDepth nested levels are summed, anything deeper is
-// dropped rather than walked.
+// dropped rather than walked. Each level carries InputTokens 1, so the flattened
+// InputTokens counts the levels that were summed.
 func TestFlattenTokenUsage_TruncatesDeepChains(t *testing.T) {
 	t.Parallel()
 
-	deep := &agent.TokenUsage{InputTokens: 1}
-	for range types.MaxSubagentDepth * 3 {
-		deep = &agent.TokenUsage{InputTokens: 1, SubagentTokens: deep}
+	chain := func(levels int) *agent.TokenUsage {
+		u := &agent.TokenUsage{InputTokens: 1}
+		for range levels - 1 {
+			u = &agent.TokenUsage{InputTokens: 1, SubagentTokens: u}
+		}
+		return u
 	}
+	kept := types.MaxSubagentDepth + 1
 
-	got := flattenTokenUsage(deep)
-	if want := types.MaxSubagentDepth + 1; got.InputTokens != want {
-		t.Errorf("flattened InputTokens = %d, want %d (top level + MaxSubagentDepth)", got.InputTokens, want)
+	cases := []struct {
+		name   string
+		levels int
+	}{
+		{"exactly at the cap is not truncated", kept},
+		{"one past the cap drops one level", kept + 1},
+		{"far past the cap", types.MaxSubagentDepth*3 + 1},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := flattenTokenUsage(chain(tc.levels))
+			if got.InputTokens != kept {
+				t.Errorf("%d-level chain: flattened InputTokens = %d, want %d (top level + MaxSubagentDepth)", tc.levels, got.InputTokens, kept)
+			}
+		})
 	}
 }
 
