@@ -90,3 +90,18 @@ func TestTrustIdentityFollowsElectedSyncRemote(t *testing.T) {
 		require.Error(t, err)
 	})
 }
+
+// The held-checkpoint count shown after `entire trust --remote X` must be
+// measured against X, not the election.
+func TestResolveCheckpointSyncRemoteForTrust_HonorsOverride(t *testing.T) {
+	testutil.IsolateGitConfigEnv(t)
+	dir := newTrustIdentityRepo(t)
+	t.Chdir(dir)
+	ctx := context.Background()
+	got, err := ResolveCheckpointSyncRemoteForTrust(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, "origin", got.Name)
+	got, err = ResolveCheckpointSyncRemoteForTrust(WithSyncRemoteOverride(ctx, "fork"))
+	require.NoError(t, err)
+	assert.Equal(t, "fork", got.Name)
+}

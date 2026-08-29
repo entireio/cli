@@ -73,8 +73,27 @@ func runtimeRootForPath(ctx context.Context, root string) (string, error) {
 			return "", fmt.Errorf("%w: classifying repository policy: %w", ErrUnroutableRuntimePath, err)
 		}
 	}
-	if filepath.Clean(policy.WorktreeRoot) != filepath.Clean(root) {
+	if !sameWorktree(policy.WorktreeRoot, root) {
 		return "", fmt.Errorf("%w: policy worktree identity mismatch", ErrUnroutableRuntimePath)
 	}
 	return policy.RuntimeRoot(), nil
+}
+
+// sameWorktree compares the policy's (symlink-resolved) worktree root with the
+// caller's, resolving symlinks on the caller's side too so a path reached
+// through a linked component (/tmp → /private/tmp, a symlinked project dir)
+// is not mistaken for a different repository. git already canonicalizes
+// --show-toplevel, so this is defense in depth for the fail-closed check.
+func sameWorktree(policyRoot, root string) bool {
+	a, b := filepath.Clean(policyRoot), filepath.Clean(root)
+	if a == b {
+		return true
+	}
+	if ra, err := filepath.EvalSymlinks(a); err == nil {
+		a = ra
+	}
+	if rb, err := filepath.EvalSymlinks(b); err == nil {
+		b = rb
+	}
+	return a == b
 }

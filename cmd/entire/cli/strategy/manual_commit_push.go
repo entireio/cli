@@ -543,8 +543,21 @@ func PushQueuedCheckpointRefs(ctx context.Context, repo *git.Repository, remote 
 		return 0, true, nil
 	}
 	// Second egress entry point (bypasses prePush): same trust gate, no
-	// prompt; refs stay queued for after `entire trust`.
-	if !settings.CheckpointEgressAllowed(ctx) {
+	// prompt; refs stay queued for after `entire trust`. The caller names the
+	// push target (`doctor migrate --remote` may pick a remote other than the
+	// election), so consent is evaluated for THAT remote — a trusted election
+	// must not let refs leave for a destination the user never consented to.
+	if isConfiguredRemote(ctx, ps.remote) {
+		var policyOK bool
+		if ctx, policyOK = policyForPendingCapture(ctx, ps.remote); !policyOK {
+			return 0, false, fmt.Errorf("checkpoint sync is held — could not verify trust for %s; refs stay queued", ps.remote)
+		}
+		if !settings.CheckpointEgressAllowed(ctx) {
+			return 0, false, fmt.Errorf("checkpoint sync is held — this repo isn't trusted for %s yet; refs stay queued — run `entire trust --remote %s` first", ps.remote, ps.remote)
+		}
+	} else if !settings.CheckpointEgressAllowed(ctx) {
+		// A raw URL or path target has no remote identity of its own; the
+		// election's consent is the only one there is.
 		return 0, false, errors.New("checkpoint sync is held — this repo isn't trusted yet; refs stay queued — run `entire trust` first")
 	}
 	syncCheckpointPolicyForPrePush(ctx, repo, ps)

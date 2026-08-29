@@ -282,7 +282,7 @@ func computeRepoTrustState(policy repopolicy.RepoPolicy) (string, settings.Trust
 // checkpoint sync remote, shared by status, doctor, and `entire trust`.
 // Best-effort: any failure reads as 0.
 func heldCheckpointCount(ctx context.Context) int {
-	elected, err := strategy.ResolveCheckpointSyncRemote(ctx)
+	elected, err := strategy.ResolveCheckpointSyncRemoteForTrust(ctx)
 	if err != nil || elected.Name == "" {
 		return 0
 	}
@@ -1247,7 +1247,11 @@ func runStatusJSON(ctx context.Context, w io.Writer) error {
 		AgentHelp:      agentHelpCommand,
 	}
 
-	if s.Enabled {
+	// Guard on the EFFECTIVE state, not the raw file: an excluded repo with
+	// repo-level enabled:true must not report agents, sync lines or sessions
+	// (collectActiveSessionsJSON also finalizes exited sessions — a write a
+	// read-only status on an inactive repo must not perform).
+	if result.Enabled {
 		if names := InstalledAgentDisplayNames(ctx); len(names) > 0 {
 			result.Agents = names
 		}

@@ -24,6 +24,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
+	"github.com/entireio/cli/cmd/entire/cli/settings/repopolicy"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 )
@@ -4047,5 +4048,38 @@ func TestRunDisable_GloballyTrackedRepoWritesNothing(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), "Entire is now disabled") || settings.IsActiveForRepo(t.Context()) {
 		t.Fatalf("repo-enabled disable must write the veto, got:\n%s", out.String())
+	}
+}
+
+// TestRunUninstall_RemovesGlobalRuntimeAfterTierOff: runtime data a globally
+// tracked period left under .git must be removed by --uninstall even after the
+// tier was turned off (the repo no longer classifies as ActivationGlobal).
+func TestRunUninstall_RemovesGlobalRuntimeAfterTierOff(t *testing.T) {
+	isolatedUserHome(t)
+	pretendAgentBinaries(t)
+	dir := setupTestDir(t)
+	testutil.InitRepo(t, dir)
+	repository, err := repopolicy.ResolveRepository(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	leftover := repository.GlobalRuntimeRoot()
+	if err := os.MkdirAll(filepath.Join(leftover, "metadata"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(leftover, "metadata", "x"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	writeUserSettings(t, `{"global":{"enabled":false}}`)
+
+	var out, errOut bytes.Buffer
+	if err := runUninstall(context.Background(), &out, &errOut, true); err != nil {
+		t.Fatalf("runUninstall: %v\n%s", err, errOut.String())
+	}
+	if _, statErr := os.Stat(leftover); !os.IsNotExist(statErr) {
+		t.Fatalf("global runtime data still present after uninstall with the tier off: %s\n%s", leftover, out.String())
+	}
+	if !strings.Contains(out.String(), "Removed global-mode runtime data") {
+		t.Errorf("uninstall should report the removal:\n%s", out.String())
 	}
 }

@@ -147,7 +147,14 @@ predicate for whether checkpoint data may leave the machine:
   (unreadable settings, `checkpoint_push_remote` naming a missing remote)
   disables sync and the gate fails closed with it. The prompt, `entire trust`,
   `enable`, and `status` name the remote (`status --json`:
-  `global_tracking.sync_remote`).
+  `global_tracking.sync_remote`). Consent is evaluated for the remote a push
+  actually targets: `PushQueuedCheckpointRefs` (`doctor migrate --remote`)
+  re-derives the policy for that remote when it is a configured remote other
+  than the election, so a trusted election never releases refs to an
+  unconsented destination. `disable --uninstall` locates leftover global-mode
+  runtime data from the repository's identity (`Repository.GlobalRuntimeRoot`),
+  not its current policy, so it is removed even after the tier was turned off
+  or the repo excluded.
 
 Consent is recorded three ways, all into the same file: `entire enable`
 records it for the repo being enabled; the pre-push prompt offers **Yes**

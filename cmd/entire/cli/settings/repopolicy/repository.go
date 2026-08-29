@@ -22,6 +22,18 @@ type Repository struct {
 	WorktreeKey  string
 }
 
+// GlobalRuntimeRoot is where the global tier keeps this worktree's runtime
+// data (metadata, logs, tmp): <git-common-dir>/entire/worktree/<key>. It is a
+// function of repository identity alone — not of the current policy — so
+// uninstall can find data left by a globally tracked period after the tier
+// was turned off or the repo excluded. "" when identity is incomplete.
+func (r Repository) GlobalRuntimeRoot() string {
+	if r.GitCommonDir == "" || r.WorktreeKey == "" {
+		return ""
+	}
+	return filepath.Join(r.GitCommonDir, WorktreeRegistryRelative, r.WorktreeKey)
+}
+
 // RepositoryResolver resolves repository facts lazily after global enablement
 // and exclusion validation have passed their no-Git fast path.
 type RepositoryResolver func(context.Context) (Repository, error)

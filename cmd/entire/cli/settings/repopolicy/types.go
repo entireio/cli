@@ -105,7 +105,7 @@ type RepoPolicy struct {
 // (doctor logs, status) look where main always looked.
 func (p RepoPolicy) RuntimeRoot() string {
 	if p.ActivationSource == ActivationGlobal {
-		return filepath.Join(p.GitCommonDir, WorktreeRegistryRelative, p.WorktreeKey)
+		return Repository{GitCommonDir: p.GitCommonDir, WorktreeKey: p.WorktreeKey}.GlobalRuntimeRoot()
 	}
 	return filepath.Join(p.WorktreeRoot, ".entire") // entire-join-ok: repo-level layout is the worktree .entire directory by definition
 }

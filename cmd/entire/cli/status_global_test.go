@@ -248,6 +248,11 @@ func TestStatus_ExcludedRepoWithRepoSetup(t *testing.T) {
 	if result.Enabled || !strings.Contains(out.String(), `"inactive_reason":"repo_excluded"`) {
 		t.Errorf("want enabled=false with inactive_reason=repo_excluded:\n%s", out.String())
 	}
+	// The enabled-only block must not run for an excluded repo: no agents,
+	// no sync remote, no sessions (and no session finalization side effects).
+	if len(result.Agents) != 0 || len(result.ActiveSessions) != 0 || result.CheckpointSyncRemote != "" {
+		t.Errorf("excluded repo must not populate enabled-only fields:\n%s", out.String())
+	}
 
 	out.Reset()
 	if err := runEnable(context.Background(), &out, true); err != nil {

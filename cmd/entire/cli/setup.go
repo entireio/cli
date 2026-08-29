@@ -2471,10 +2471,16 @@ func runUninstall(ctx context.Context, w, errW io.Writer, force bool) error {
 
 	// A globally tracked repo keeps its runtime data under .git/ — captured
 	// sessions that may never have synced. Disclose and remove it too.
+	// Leftover global-mode runtime data is located from the repository's
+	// IDENTITY, not its current policy: the tier may since have been turned
+	// off, or this repo excluded, and uninstall must still remove what a
+	// globally tracked period left under .git.
 	var globalRuntimeRoot string
-	if policy, err := repopolicy.ClassifyRepoPolicy(ctx); err == nil && policy.ActivationSource == repopolicy.ActivationGlobal {
-		if _, statErr := os.Stat(policy.RuntimeRoot()); statErr == nil {
-			globalRuntimeRoot = policy.RuntimeRoot()
+	if repository, err := repopolicy.ResolveRepository(ctx); err == nil {
+		if candidate := repository.GlobalRuntimeRoot(); candidate != "" {
+			if _, statErr := os.Stat(candidate); statErr == nil {
+				globalRuntimeRoot = candidate
+			}
 		}
 	}
 

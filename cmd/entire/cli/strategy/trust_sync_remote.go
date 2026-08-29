@@ -51,6 +51,17 @@ func pendingSyncRemoteFromContext(ctx context.Context) string {
 	return name
 }
 
+// ResolveCheckpointSyncRemoteForTrust is ResolveCheckpointSyncRemote as the
+// trust surfaces see it: a remote named by WithSyncRemoteOverride (`entire
+// trust --remote`) wins, so the held-checkpoint count reported after a grant
+// is measured against the remote the user just trusted, not the election.
+func ResolveCheckpointSyncRemoteForTrust(ctx context.Context) (CheckpointSyncRemote, error) {
+	if name := pendingSyncRemoteFromContext(ctx); name != "" {
+		return CheckpointSyncRemote{Name: name, Source: SyncRemoteSourceConfig}, nil
+	}
+	return ResolveCheckpointSyncRemote(ctx)
+}
+
 // resolveTrustSyncRemote is the installed repopolicy.ResolveSyncRemote. The
 // election helpers are scoped to the current worktree, which is also the
 // worktree policy is classified for in production (ClassifyRepoPolicy

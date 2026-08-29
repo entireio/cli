@@ -138,9 +138,12 @@ func RevokeCurrentRepo(ctx context.Context) (TrustIdentity, error) {
 	if err != nil {
 		return TrustIdentity{}, fmt.Errorf("resolving repository: %w", err)
 	}
-	identity, identityErr := repopolicy.ResolveTrustIdentity(ctx, repository)
-	if identityErr != nil {
-		identity = TrustIdentity{Path: repository.WorktreeRoot}
+	identity, err := repopolicy.ResolveTrustIdentity(ctx, repository)
+	if err != nil {
+		// Same failure direction as TrustCurrentRepo: with no identity the
+		// origin-keyed entries cannot be found, and a "✓ Revoked" over a no-op
+		// would leave live trust the user believes is gone.
+		return TrustIdentity{}, fmt.Errorf("resolving trust identity: %w", err)
 	}
 	err = ModifyUserSettings(ctx, func(us *UserSettings) error {
 		if err := requireConfiguredGlobal(us); err != nil {
