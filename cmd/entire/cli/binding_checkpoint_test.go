@@ -301,3 +301,37 @@ func TestReplayedTurnEnd_UsesReplicaDirtyBaselineForTrackedChanges(t *testing.T)
 		t.Errorf("the user's pending edit predates the session and must not be attributed: %v", got.FilesTouched)
 	}
 }
+
+// The lifecycle handlers reach the collector through the context and never
+// guard for nil: a hook entry point installs one, other callers (tests, direct
+// invocations) do not. Every method must therefore be nil-safe, and the primary
+// selection must degrade to "the current repo, if it changed".
+func TestSelectBindingTurnPrimary_NilCollectorIsSafe(t *testing.T) {
+	root := newBindingRepo(t)
+	testutil.WriteFile(t, root, "f.txt", "x\n")
+	testutil.GitAdd(t, root, "f.txt")
+	testutil.GitCommit(t, root, "initial")
+	current, ok := binding.ResolveRepoForPath(context.Background(), filepath.Join(root, ".git"))
+	if !ok {
+		t.Fatal("resolve current repo")
+	}
+	var collector *bindingTurnCollector
+
+	if got := selectBindingTurnPrimary(context.Background(), collector, root, []string{"f.txt"}, true); got != current.CommonDir {
+		t.Fatalf("primary = %q, want the current repo when it changed", got)
+	}
+	if got := selectBindingTurnPrimary(context.Background(), collector, root, []string{filepath.Join(t.TempDir(), "elsewhere.txt")}, false); got != "" {
+		t.Fatalf("primary = %q, want none with a nil collector and no current change", got)
+	}
+	collector.recordSuccessfulReplay(binding.Evidence{Repo: current})
+	collector.setPrimary(current.CommonDir)
+	if collector.hasReplay(current.CommonDir) {
+		t.Fatal("a nil collector records nothing")
+	}
+	if targets, primary := collector.replaySnapshot(); len(targets) != 0 || primary != "" {
+		t.Fatalf("nil collector snapshot = %v, %q; want empty", targets, primary)
+	}
+	if !bindingTurnKeepsTokenUsage(context.Background(), current.CommonDir) {
+		t.Fatal("with no collector the launching repo keeps its tokens")
+	}
+}
