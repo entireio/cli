@@ -34,8 +34,16 @@ import (
 //
 // It deliberately does NOT refuse a symlinked file at the leaf. A developer
 // pointing `.claude/settings.json` at a dotfile repo is a real setup and Entire
-// has no business breaking it; what must not happen is Entire CREATING the path
-// through a link it did not put there.
+// has no business breaking it.
+//
+// A symlinked DIRECTORY is a different thing and is refused by every operation,
+// not just the ones that create. os.Root blocks a link that escapes the worktree
+// but follows one pointing elsewhere INSIDE it, so a repository shipping
+// `.claude -> vendor/x` previously had its planted settings read by Read and
+// GeneratedState, reported present by Exists, and had Remove delete the file at
+// the far end. Only Write refused, because it was the only one that checked.
+// Which files Entire believes the agent has is not something a checked-in
+// symlink gets to decide.
 type HookConfigFile struct {
 	root *os.Root
 	name string
@@ -71,11 +79,22 @@ func (f *HookConfigFile) Path() string { return f.path }
 // callers can classify it with os.IsNotExist, which is how every agent's
 // install path decides between "merge into existing" and "write fresh".
 func (f *HookConfigFile) Read() ([]byte, error) {
+	if err := osroot.NoSymlinkedParent(f.root, f.name); err != nil {
+		return nil, err //nolint:wrapcheck // names the offending component; see doc comment
+	}
 	return osroot.ReadFile(f.root, f.name) //nolint:wrapcheck // see doc comment
 }
 
-// Exists reports whether the file is present.
+// Exists reports whether the file is present at a path Entire will read.
+//
+// A symlinked parent directory counts as absent rather than as an error, since
+// the signature has nowhere to put one. That is the useful answer: every caller
+// uses this to choose between merging into an existing file and writing a fresh
+// one, and Write refuses the same path with a message that names the link.
 func (f *HookConfigFile) Exists() bool {
+	if osroot.NoSymlinkedParent(f.root, f.name) != nil {
+		return false
+	}
 	_, err := f.root.Lstat(f.name)
 	return err == nil
 }
@@ -94,8 +113,13 @@ func (f *HookConfigFile) Write(data []byte, perm os.FileMode) error {
 	return nil
 }
 
-// Remove deletes the file. A file that is not there is not an error.
+// Remove deletes the file. A file that is not there is not an error; a
+// symlinked parent directory is, because the file this would delete is at the
+// far end of a link Entire did not create.
 func (f *HookConfigFile) Remove() error {
+	if err := osroot.NoSymlinkedParent(f.root, f.name); err != nil {
+		return fmt.Errorf("remove %s: %w", f.path, err)
+	}
 	if err := osroot.Remove(f.root, f.name); err != nil {
 		return fmt.Errorf("remove %s: %w", f.path, err)
 	}
@@ -107,7 +131,9 @@ func (f *HookConfigFile) Remove() error {
 // before and after opening it and compares os.SameFile, which Read cannot
 // express. Everything else must use Read/Write/Remove.
 //
-// The root is owned by the shared registry — do not close it.
+// The root is owned by the shared registry — do not close it. The caller is
+// responsible for the symlinked-parent check the other methods perform;
+// osroot.NoSymlinkedParent is that check.
 func (f *HookConfigFile) Root() (*os.Root, string) { return f.root, f.name }
 
 // GeneratedState is GeneratedHookFileState for a file read through this root.

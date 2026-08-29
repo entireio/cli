@@ -133,3 +133,58 @@ func TestHookConfig_RequiresAWorktreeRoot(t *testing.T) {
 	_, err := agent.OpenHookConfig("", ".claude/settings.json")
 	require.Error(t, err)
 }
+
+// os.Root blocks a symlink that escapes the worktree but follows one pointing
+// elsewhere inside it. Only Write checked, so a repository shipping
+// ".claude -> vendor/x" had its planted settings read, reported present, and had
+// Remove delete the file at the far end.
+func TestHookConfigFile_RefusesASymlinkedDirectoryOnEveryOperation(t *testing.T) {
+	t.Parallel()
+
+	worktree := t.TempDir()
+	planted := filepath.Join(worktree, "vendor")
+	require.NoError(t, os.MkdirAll(planted, 0o750))
+	plantedFile := filepath.Join(planted, "settings.json")
+	require.NoError(t, os.WriteFile(plantedFile, []byte(`{"planted":true}`), 0o600))
+	if err := os.Symlink("vendor", filepath.Join(worktree, ".claude")); err != nil {
+		t.Skipf("symlink not supported: %v", err)
+	}
+
+	f, err := agent.OpenHookConfig(worktree, ".claude/settings.json")
+	require.NoError(t, err)
+
+	_, readErr := f.Read()
+	require.ErrorIs(t, readErr, osroot.ErrSymlinkedPath)
+
+	require.False(t, f.Exists(), "a file behind a symlinked directory is not present at a path Entire will read")
+
+	require.ErrorIs(t, f.Write([]byte(`{"entire":true}`), 0o600), osroot.ErrSymlinkedPath)
+
+	require.ErrorIs(t, f.Remove(), osroot.ErrSymlinkedPath)
+	got, err := os.ReadFile(plantedFile)
+	require.NoError(t, err, "Remove must not delete the file at the far end of the link")
+	require.Equal(t, `{"planted":true}`, string(got))
+
+	require.Equal(t, agent.HooksAbsent, f.GeneratedState("marker", "render"))
+}
+
+// The documented dotfile-repo setup still works: only the DIRECTORY components
+// are refused, never the leaf.
+func TestHookConfigFile_StillFollowsASymlinkedFileAtTheLeaf(t *testing.T) {
+	t.Parallel()
+
+	worktree := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(worktree, ".claude"), 0o750))
+	require.NoError(t, os.WriteFile(filepath.Join(worktree, "dotfiles.json"), []byte(`{"from":"dotfiles"}`), 0o600))
+	if err := os.Symlink("../dotfiles.json", filepath.Join(worktree, ".claude", "settings.json")); err != nil {
+		t.Skipf("symlink not supported: %v", err)
+	}
+
+	f, err := agent.OpenHookConfig(worktree, ".claude/settings.json")
+	require.NoError(t, err)
+
+	data, err := f.Read()
+	require.NoError(t, err)
+	require.JSONEq(t, `{"from":"dotfiles"}`, string(data))
+	require.True(t, f.Exists())
+}

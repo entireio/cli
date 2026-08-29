@@ -14,6 +14,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
+	"github.com/entireio/cli/cmd/entire/cli/osroot"
 )
 
 // HooksFileName is the hooks config file used by Codex.
@@ -538,6 +539,13 @@ func hooksDocumentRoot(path string) (*os.Root, string, error) {
 		return nil, "", err //nolint:wrapcheck // caller names the path it asked about
 	}
 	root, rootName := cfg.Root()
+	// cfg.Root() hands over the primitives, so the symlinked-parent refusal the
+	// HookConfigFile methods perform is this caller's to make. A `.codex`
+	// symlinked elsewhere inside the worktree is followed by os.Root, and every
+	// reader below would then be inspecting another directory's hooks.json.
+	if err := osroot.NoSymlinkedParent(root, rootName); err != nil {
+		return nil, "", err //nolint:wrapcheck // names the offending component
+	}
 	return root, rootName, nil
 }
 

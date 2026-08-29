@@ -290,6 +290,43 @@ func WalkDirNoSymlinks(root *os.Root, dir string, fn fs.WalkDirFunc) error {
 	})
 }
 
+// NoSymlinkedParent reports ErrSymlinkedPath when any DIRECTORY component of
+// name already exists as a symlink. The leaf is deliberately not examined.
+//
+// It is MkdirAllNoSymlink's read-only counterpart, for the operations that must
+// not traverse a directory Entire did not create but have nothing to create
+// themselves. os.Root refuses a link that ESCAPES the root and follows one
+// pointing elsewhere inside it, so without this a read of
+// ".claude/settings.json" through a planted ".claude -> vendor/x" returns
+// vendor/x's contents and reports success.
+//
+// Leaving the leaf alone is what keeps a symlinked FILE working, which is a real
+// setup: pointing .claude/settings.json at a dotfile repo is something people
+// do deliberately. Pointing the directory somewhere is not the same thing, and
+// it changes which files Entire believes the agent has.
+//
+// A component that does not exist is not an error: the caller is about to fail
+// on the missing file, with a better message than this could give.
+func NoSymlinkedParent(root *os.Root, name string) error {
+	dir := path.Dir(name)
+	if dir == "." || dir == "" || dir == "/" {
+		return nil
+	}
+	for _, prefix := range dirPrefixes(dir) {
+		info, err := root.Lstat(prefix)
+		if err != nil {
+			if os.IsNotExist(err) {
+				return nil // nothing below a missing directory to reach
+			}
+			return err //nolint:wrapcheck // preserve the original for errors.Is/os.IsNotExist
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("%s: %w", prefix, ErrSymlinkedPath)
+		}
+	}
+	return nil
+}
+
 // SymlinkPaths walks dir within root and returns the names of every symlink it
 // finds, in the root's coordinates. It never follows one, so a symlinked
 // directory is reported and not descended into.

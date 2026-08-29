@@ -15,7 +15,6 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent/geminicli"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
-	"github.com/entireio/cli/cmd/entire/cli/testutil"
 )
 
 func TestScaffoldSearchSkill_CreatesManagedFiles(t *testing.T) {
@@ -53,7 +52,7 @@ func TestScaffoldSearchSkill_CreatesManagedFiles(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			tmpDir := setupTestDir(t)
+			tmpDir := setupTestRepo(t)
 
 			result, err := tc.scaffoldFn()
 			if err != nil {
@@ -83,7 +82,7 @@ func TestScaffoldSearchSkill_CreatesManagedFiles(t *testing.T) {
 }
 
 func TestScaffoldSearchSkill_IdempotentManagedFile(t *testing.T) {
-	setupTestDir(t)
+	setupTestRepo(t)
 
 	ag := claudecode.NewClaudeCodeAgent()
 	if _, err := scaffoldSearchSkill(context.Background(), ag); err != nil {
@@ -100,7 +99,7 @@ func TestScaffoldSearchSkill_IdempotentManagedFile(t *testing.T) {
 }
 
 func TestScaffoldSearchSkill_UpdatesManagedFile(t *testing.T) {
-	tmpDir := setupTestDir(t)
+	tmpDir := setupTestRepo(t)
 
 	ag := claudecode.NewClaudeCodeAgent()
 	relPath, _, ok := searchSkillTemplate(ag.Name())
@@ -136,7 +135,7 @@ func TestScaffoldSearchSkill_UpdatesManagedFile(t *testing.T) {
 }
 
 func TestScaffoldSearchSkill_PreservesUserOwnedFile(t *testing.T) {
-	tmpDir := setupTestDir(t)
+	tmpDir := setupTestRepo(t)
 
 	ag := claudecode.NewClaudeCodeAgent()
 	relPath, _, ok := searchSkillTemplate(ag.Name())
@@ -171,8 +170,7 @@ func TestScaffoldSearchSkill_PreservesUserOwnedFile(t *testing.T) {
 }
 
 func TestSetupAgentHooksNonInteractive_SearchSkillOptInOnly(t *testing.T) {
-	tmpDir := setupTestDir(t)
-	testutil.InitRepo(t, tmpDir)
+	tmpDir := setupTestRepo(t)
 	ag := claudecode.NewClaudeCodeAgent()
 
 	var out bytes.Buffer

@@ -47,11 +47,20 @@ func setupTestDir(t *testing.T) string {
 	return tmpDir
 }
 
-// setupTestRepo creates a temp directory with a git repo initialized.
-func setupTestRepo(t *testing.T) {
+// setupTestRepo creates a temp directory with a git repo initialized, chdirs
+// into it, and returns its path. Callers that only need the chdir can ignore the
+// result.
+//
+// Prefer this over setupTestDir for anything that resolves a worktree root.
+// setupTestDir leaves the directory repository-less, and paths.WorktreeRoot
+// fails there — which used to be papered over by callers falling back to
+// os.Getwd(). Those fallbacks are gone, because a fallback that exists for the
+// tests is a fallback shipping to users.
+func setupTestRepo(t *testing.T) string {
 	t.Helper()
 	tmpDir := setupTestDir(t)
 	testutil.InitRepo(t, tmpDir)
+	return tmpDir
 }
 
 // writeSettings writes settings content to the settings file.

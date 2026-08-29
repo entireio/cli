@@ -848,6 +848,24 @@ comments at each site say which case applies:
   change worth knowing: an **absolute** link there no longer resolves, since
   `os.Root` refuses absolute symlinks unconditionally. A relative one inside the
   worktree still works.
+
+  **A symlinked agent DIRECTORY is refused by every operation, not just the ones
+  that create.** `os.Root` blocks a link that escapes the worktree and follows
+  one pointing elsewhere inside it, so `.claude -> vendor/x` was previously read
+  by `Read`/`GeneratedState`, reported present by `Exists`, and had `Remove`
+  delete the file at the far end; only `Write` checked, because
+  `MkdirAllNoSymlink` was the only check there was. `osroot.NoSymlinkedParent` is
+  that function's read-only counterpart, and every `HookConfigFile` method calls
+  it. `HookConfigFile.Root()` hands over the raw primitives, so its one caller
+  (Codex's `hooksDocumentRoot`) makes the check itself.
+
+  **`writeManagedScaffold` is the same rule for the skill scaffolds** —
+  `.claude/skills/`, `.claude/agents/`, `.codex/agents/`, `.gemini/agents/`. It
+  was not one of the seven call sites `HookConfigFile` replaced, and until it was
+  anchored it did `os.MkdirAll` two levels and `os.WriteFile` through a symlinked
+  `.claude`, landing files outside the repository and reporting Created. It now
+  takes a worktree root rather than an assembled absolute path, and its callers
+  no longer fall back to `os.Getwd()` when `WorktreeRoot` fails.
 - **Call `Reset()` before deleting a rooted directory** (see
   `removeEntireDirectory`). A root that outlives its directory is a handle to an
   unlinked inode: writes succeed and land nowhere.

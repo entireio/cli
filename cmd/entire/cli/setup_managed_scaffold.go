@@ -7,10 +7,12 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"path/filepath"
+	"path"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
+	"github.com/entireio/cli/cmd/entire/cli/osroot"
+	"github.com/entireio/cli/cmd/entire/cli/worktreedir"
 )
 
 // managedScaffoldStatus is the outcome of writing an Entire-managed scaffold file
@@ -31,13 +33,40 @@ type managedScaffoldResult struct {
 	RelPath string
 }
 
-// writeManagedScaffold writes content to targetPath idempotently: it creates the
-// file when absent, leaves it untouched (Unchanged) when identical, rewrites it
-// (Updated) only when Entire already manages it, and refuses to clobber an
-// unmanaged file (SkippedConflict). isManaged reports whether existing bytes
-// carry this feature's management marker.
-func writeManagedScaffold(targetPath, relPath string, content []byte, isManaged func([]byte) bool) (managedScaffoldResult, error) {
-	existingData, err := os.ReadFile(targetPath) //nolint:gosec // target path is derived from repo root + fixed relative path
+// writeManagedScaffold writes content into worktreeRoot at relPath
+// idempotently: it creates the file when absent, leaves it untouched
+// (Unchanged) when identical, rewrites it (Updated) only when Entire already
+// manages it, and refuses to clobber an unmanaged file (SkippedConflict).
+// isManaged reports whether existing bytes carry this feature's management
+// marker.
+//
+// Everything goes through the worktree root rather than an assembled absolute
+// path, and relPath names a file under an agent's own directory —
+// .claude/skills/, .claude/agents/, .codex/agents/, .gemini/agents/. Those
+// arrive with a checkout, so a repository shipping a symlink at `.claude` had
+// this function os.MkdirAll two levels and os.WriteFile a file through it, to
+// wherever it pointed, outside the repository included, and report success.
+// That is the same failure agent.HookConfigFile was built to close; this call
+// site was simply not one of the seven it replaced.
+//
+// MkdirAllNoSymlink refuses a component that already exists as a symlink, and
+// NoSymlinkedParent applies the same rule to the read that precedes the write,
+// so an unmanaged file at the far end of a link cannot be mistaken for one of
+// ours and rewritten.
+func writeManagedScaffold(worktreeRoot, relPath string, content []byte, isManaged func([]byte) bool) (managedScaffoldResult, error) {
+	root, err := worktreedir.OpenAt(worktreeRoot)
+	if err != nil {
+		return managedScaffoldResult{}, fmt.Errorf("open worktree root: %w", err)
+	}
+	name, err := worktreedir.Name(worktreeRoot, relPath)
+	if err != nil {
+		return managedScaffoldResult{}, fmt.Errorf("resolve scaffold path: %w", err)
+	}
+	if err := osroot.NoSymlinkedParent(root, name); err != nil {
+		return managedScaffoldResult{}, fmt.Errorf("write %s: %w", relPath, err)
+	}
+
+	existingData, err := osroot.ReadFile(root, name)
 	if err == nil {
 		if !isManaged(existingData) {
 			return managedScaffoldResult{Status: managedScaffoldSkippedConflict, RelPath: relPath}, nil
@@ -45,7 +74,7 @@ func writeManagedScaffold(targetPath, relPath string, content []byte, isManaged 
 		if bytes.Equal(existingData, content) {
 			return managedScaffoldResult{Status: managedScaffoldUnchanged, RelPath: relPath}, nil
 		}
-		if err := os.WriteFile(targetPath, content, 0o600); err != nil {
+		if err := osroot.WriteFile(root, name, content, 0o600); err != nil {
 			return managedScaffoldResult{}, fmt.Errorf("update managed scaffold: %w", err)
 		}
 		return managedScaffoldResult{Status: managedScaffoldUpdated, RelPath: relPath}, nil
@@ -54,10 +83,12 @@ func writeManagedScaffold(targetPath, relPath string, content []byte, isManaged 
 		return managedScaffoldResult{}, fmt.Errorf("read managed scaffold: %w", err)
 	}
 
-	if err := os.MkdirAll(filepath.Dir(targetPath), 0o750); err != nil {
-		return managedScaffoldResult{}, fmt.Errorf("create managed scaffold directory: %w", err)
+	if dir := path.Dir(name); dir != "." {
+		if err := osroot.MkdirAllNoSymlink(root, dir, 0o750); err != nil {
+			return managedScaffoldResult{}, fmt.Errorf("create managed scaffold directory: %w", err)
+		}
 	}
-	if err := os.WriteFile(targetPath, content, 0o600); err != nil {
+	if err := osroot.WriteFile(root, name, content, 0o600); err != nil {
 		return managedScaffoldResult{}, fmt.Errorf("write managed scaffold: %w", err)
 	}
 	return managedScaffoldResult{Status: managedScaffoldCreated, RelPath: relPath}, nil
