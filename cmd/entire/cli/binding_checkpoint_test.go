@@ -238,11 +238,13 @@ func TestReplayedTurnEnd_UsesReplicaDirtyBaselineForTrackedChanges(t *testing.T)
 
 	root := newBindingRepo(t)
 	testutil.WriteFile(t, root, "user-edit.txt", "base\n")
+	testutil.WriteFile(t, root, "zz-user-edit.txt", "base\n")
 	testutil.WriteFile(t, root, "gone.txt", "base\n")
 	testutil.WriteFile(t, root, "agent-edit.txt", "base\n")
-	testutil.GitAdd(t, root, "user-edit.txt", "gone.txt", "agent-edit.txt")
+	testutil.GitAdd(t, root, "user-edit.txt", "zz-user-edit.txt", "gone.txt", "agent-edit.txt")
 	testutil.GitCommit(t, root, "initial")
-	testutil.WriteFile(t, root, "user-edit.txt", "the user's own pending change\n") // predates the session
+	testutil.WriteFile(t, root, "user-edit.txt", "the user's own pending change\n")      // predates the session
+	testutil.WriteFile(t, root, "zz-user-edit.txt", "the user's other pending change\n") // predates the session
 	// The agent's turn: edits one tracked file, deletes another that the
 	// user had a pending edit on at the baseline.
 	testutil.WriteFile(t, root, "agent-edit.txt", "changed by the agent\n")
@@ -270,7 +272,7 @@ func TestReplayedTurnEnd_UsesReplicaDirtyBaselineForTrackedChanges(t *testing.T)
 		AgentType:                types.AgentType("Mock Analyzer Agent"),
 		TranscriptPath:           transcriptPath,
 		FilesTouched:             []string{"agent-edit.txt"},
-		DirtyTrackedFilesAtStart: []string{"user-edit.txt", "gone.txt"},
+		DirtyTrackedFilesAtStart: []string{"zz-user-edit.txt", "user-edit.txt", "gone.txt"},
 	}
 	store := session.NewStateStoreWithDir(filepath.Join(root, ".git", session.SessionStateDirName))
 	if err := store.Save(context.Background(), state); err != nil {
@@ -300,14 +302,15 @@ func TestReplayedTurnEnd_UsesReplicaDirtyBaselineForTrackedChanges(t *testing.T)
 	if !slices.Contains(got.FilesTouched, "agent-edit.txt") {
 		t.Errorf("the agent's tracked edit must be credited: %v", got.FilesTouched)
 	}
-	if slices.Contains(got.FilesTouched, "user-edit.txt") {
-		t.Errorf("the user's pending edit predates the session and must not be attributed: %v", got.FilesTouched)
+	if slices.Contains(got.FilesTouched, "user-edit.txt") || slices.Contains(got.FilesTouched, "zz-user-edit.txt") {
+		t.Errorf("the user's pending edits predate the session and must not be attributed: %v", got.FilesTouched)
 	}
 	// The next baseline is the post-turn tree minus what this turn was
-	// credited with: the user's edit stays baselined; the agent's edit and
-	// deletion do not, so a later unevidenced change to them is still caught.
-	if !slices.Equal(got.DirtyTrackedFilesAtStart, []string{"user-edit.txt"}) {
-		t.Errorf("post-turn dirty baseline = %v, want only the user's pending edit", got.DirtyTrackedFilesAtStart)
+	// credited with, in canonical (sorted) order: the user's edits stay
+	// baselined; the agent's edit and deletion do not, so a later unevidenced
+	// change to them is still caught.
+	if !slices.Equal(got.DirtyTrackedFilesAtStart, []string{"user-edit.txt", "zz-user-edit.txt"}) {
+		t.Errorf("post-turn dirty baseline = %v, want the user's pending edits, sorted", got.DirtyTrackedFilesAtStart)
 	}
 	if len(got.DeletedTrackedFilesAtStart) != 0 {
 		t.Errorf("post-turn deleted baseline = %v, want the credited deletion left out", got.DeletedTrackedFilesAtStart)
