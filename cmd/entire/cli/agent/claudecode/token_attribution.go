@@ -127,11 +127,11 @@ const callNotInSlice = -1
 //     once, to that call. Results after the last message are attributed to
 //     nothing. Each is labelled through a map built from EVERY assistant row,
 //     so a result whose tool_use precedes startLine is still labelled. Bytes
-//     is len() of the raw JSON of the
-//     block's `content` field as written in the transcript — quotes, escapes
-//     and array brackets included; 0 when absent. A tool_use_id found in no
-//     assistant row keeps the ref with only ToolUse.ID set (its bytes did
-//     enter the context) rather than dropping it.
+//     is len() of the raw JSON of the block's `content` field as written in
+//     the transcript — quotes, escapes and array brackets included; 0 when
+//     absent. A tool_use_id found in no assistant row keeps the ref with only
+//     ToolUse.ID set (its bytes did enter the context) rather than dropping
+//     it.
 //   - Start/End are the earliest/latest parsable row timestamps in the slice,
 //     whatever the row's type.
 //   - Subagents (subagentsDir != "" only): every agentId in an Agent (formerly

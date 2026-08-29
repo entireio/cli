@@ -1,5 +1,8 @@
-// Package transcript provides shared types and utilities for parsing JSONL transcripts.
-// Used by agents that share the same JSONL format (Claude Code, Cursor).
+// Package transcript provides shared types and utilities for parsing JSONL
+// transcripts — the Line/Message/ContentBlock shapes agents with Claude Code's
+// JSONL format (Claude Code, Cursor) share — plus the tool-input helpers every
+// agent's token attribution uses: ToolInput, ToolInputFromJSON,
+// ToolInputFromMap, StringArg and ToolDetail.
 package transcript
 
 import "encoding/json"
@@ -53,9 +56,10 @@ type ContentBlock struct {
 // OpenCode and Pi (path) use for the same thing. Build one from raw JSON with
 // ToolInputFromJSON or from an already-decoded map with ToolInputFromMap; both
 // are best-effort — a non-string value under one of these keys leaves that
-// field empty while the remaining fields still populate. Note encoding/json
-// matches keys case-insensitively, so this type is NOT suitable where the
-// exact key spelling matters; compaction uses RawToolDetail for that reason.
+// field empty while the remaining fields still populate. Note ToolInputFromJSON
+// inherits encoding/json's case-insensitive key matching, so it is NOT
+// suitable where the exact key spelling matters; compaction uses RawToolDetail
+// for that reason. ToolInputFromMap matches keys exactly.
 type ToolInput struct {
 	FilePath     string `json:"file_path,omitempty"`
 	NotebookPath string `json:"notebook_path,omitempty"`
@@ -112,12 +116,7 @@ func ToolInputFromJSON(raw json.RawMessage) ToolInput {
 // ToolInputFromJSON `Command` does not fill Command. A nil map yields a zero
 // ToolInput.
 func ToolInputFromMap(m map[string]any) ToolInput {
-	str := func(key string) string {
-		if s, ok := m[key].(string); ok {
-			return s
-		}
-		return ""
-	}
+	str := func(key string) string { return StringArg(m, key) }
 	return ToolInput{
 		FilePath:      str("file_path"),
 		NotebookPath:  str("notebook_path"),
@@ -132,6 +131,17 @@ func ToolInputFromMap(m map[string]any) ToolInput {
 		URL:           str("url"),
 		Prompt:        str("prompt"),
 	}
+}
+
+// StringArg is the string under key in an already-decoded tool input (a
+// tool_use input, OpenCode state.input, Gemini toolCalls[].args); "" when the
+// key is absent, the map is nil, or the value is not a string. Keys are
+// matched exactly.
+func StringArg(m map[string]any, key string) string {
+	if s, ok := m[key].(string); ok {
+		return s
+	}
+	return ""
 }
 
 // rawDetailKeys is the order RawToolDetail consults a tool_use input's keys.

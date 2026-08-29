@@ -252,26 +252,17 @@ func resultBytes(raw json.RawMessage) int {
 func toolUseRefFrom(tc *attributionToolCall) types.ToolUseRef {
 	in := transcript.ToolInputFromMap(tc.Args)
 	if in.AnyFilePath() == "" {
-		in.FilePath = argString(tc.Args, argAbsolutePath)
+		in.FilePath = transcript.StringArg(tc.Args, argAbsolutePath)
 	}
 	ref := types.ToolUseRef{ID: tc.ID, Tool: tc.Name}
 	switch strings.ToLower(tc.Name) {
 	case toolNameActivateSkill:
-		in.Skill = argString(tc.Args, argSkillName)
+		in.Skill = transcript.StringArg(tc.Args, argSkillName)
 		ref.SkillName = in.Skill
 	case toolNameDelegateToAgent:
-		in.SubagentType = argString(tc.Args, argAgentName)
+		in.SubagentType = transcript.StringArg(tc.Args, argAgentName)
 		ref.SubagentType = in.SubagentType
 	}
 	ref.Detail = transcript.ToolDetail(tc.Name, in)
 	return ref
-}
-
-// argString is the string under key in a toolCall's args; "" when the key is
-// absent or its value is not a string.
-func argString(args map[string]any, key string) string {
-	if s, ok := args[key].(string); ok {
-		return s
-	}
-	return ""
 }

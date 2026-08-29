@@ -209,7 +209,7 @@ func toolUseRefFrom(part *Part) types.ToolUseRef {
 	in := transcript.ToolInputFromMap(part.State.Input)
 	switch strings.ToLower(part.Tool) {
 	case toolNameSkill:
-		if name, ok := part.State.Input[skillInputName].(string); ok {
+		if name := transcript.StringArg(part.State.Input, skillInputName); name != "" {
 			in.Skill = name
 		}
 		ref.SkillName = in.Skill

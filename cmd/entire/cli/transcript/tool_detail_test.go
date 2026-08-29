@@ -1,6 +1,7 @@
 package transcript
 
 import (
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -246,6 +247,58 @@ func TestToolInputFromJSON(t *testing.T) {
 
 			if got := ToolInputFromJSON([]byte(tt.raw)); got != tt.want {
 				t.Errorf("ToolInputFromJSON(%s) = %+v, want %+v", tt.raw, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestToolInputFromMap_CoversEveryField fails when a field is added to
+// ToolInput without teaching ToolInputFromMap its key: every field's json tag
+// is fed as a key and every field must read its value back.
+func TestToolInputFromMap_CoversEveryField(t *testing.T) {
+	t.Parallel()
+
+	typ := reflect.TypeFor[ToolInput]()
+	keys := make([]string, typ.NumField())
+	m := make(map[string]any, typ.NumField())
+	for i := range typ.NumField() {
+		key, _, _ := strings.Cut(typ.Field(i).Tag.Get("json"), ",")
+		if key == "" {
+			t.Fatalf("ToolInput.%s has no json key", typ.Field(i).Name)
+		}
+		keys[i] = key
+		m[key] = "v:" + key
+	}
+	got := reflect.ValueOf(ToolInputFromMap(m))
+	for i, key := range keys {
+		if want, val := "v:"+key, got.Field(i).String(); val != want {
+			t.Errorf("ToolInputFromMap does not fill ToolInput.%s from key %q: got %q, want %q", typ.Field(i).Name, key, val, want)
+		}
+	}
+}
+
+func TestStringArg(t *testing.T) {
+	t.Parallel()
+
+	m := map[string]any{"name": "x", "n": 3, "Name": "cased"}
+	tests := []struct {
+		name string
+		m    map[string]any
+		key  string
+		want string
+	}{
+		{name: "string value", m: m, key: "name", want: "x"},
+		{name: "non-string value", m: m, key: "n", want: ""},
+		{name: "absent key", m: m, key: "missing", want: ""},
+		{name: "exact case", m: m, key: "NAME", want: ""},
+		{name: "nil map", m: nil, key: "name", want: ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			if got := StringArg(tt.m, tt.key); got != tt.want {
+				t.Errorf("StringArg(%v, %q) = %q, want %q", tt.m, tt.key, got, tt.want)
 			}
 		})
 	}

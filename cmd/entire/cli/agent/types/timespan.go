@@ -23,9 +23,9 @@ func (s *TimeSpan) Note(at time.Time) {
 	}
 }
 
-// ParseTimestamp parses the RFC 3339 timestamp Claude Code, Codex and Pi write
-// on each row and Gemini CLI on each message — with or without fractional
-// seconds, "Z" or a numeric offset; zero when s is empty or malformed.
+// ParseTimestamp parses an RFC 3339 timestamp (time.RFC3339Nano layout: with
+// or without fractional seconds, "Z" or a numeric offset); zero when s is
+// empty or malformed.
 func ParseTimestamp(s string) time.Time {
 	if s == "" {
 		return time.Time{}

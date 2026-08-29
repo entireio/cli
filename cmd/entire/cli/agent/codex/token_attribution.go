@@ -106,8 +106,8 @@ type attributionWalk struct {
 //     the call's group, not its first as types.CallUsage.Line describes for
 //     row-grouped agents: a Codex call has no row of its own before its
 //     token_count, and the tool calls that precede it are only known to be
-//     the call's once the total closes them. Model and
-//     Effort are the latest turn_context's `model` and `effort` (falling back
+//     the call's once the total closes them. Model and Effort are the latest
+//     turn_context's `model` and `effort` (falling back
 //     to collaboration_mode.settings.model / .reasoning_effort), tracked
 //     across the full transcript so a call whose turn_context precedes
 //     startLine is still labelled; both are "" before any turn_context. Model
@@ -241,7 +241,8 @@ func (w *attributionWalk) visitResponseItem(payload json.RawMessage) {
 // visitTotal handles one token_count total: a duplicate of the previous
 // distinct total is ignored. Every distinct total takes the pending emits and
 // outputs and becomes the baseline; inside the slice it also closes the call
-// they belong to, before the slice they are dropped with it.
+// they belong to, before the slice they are dropped, since the call they
+// belonged to is never materialised.
 func (w *attributionWalk) visitTotal(line int, inSlice bool, timestamp string, total *tokenUsageData) {
 	if w.prevTotal != nil && *total == *w.prevTotal {
 		return
