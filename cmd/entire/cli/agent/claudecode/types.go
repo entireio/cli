@@ -127,3 +127,19 @@ type messageWithUsage struct {
 	Model string       `json:"model"`
 	Usage messageUsage `json:"usage"`
 }
+
+// contentTypeToolResult is the content block type of a tool's output in a
+// user row (the assistant-side counterpart is transcript.ContentTypeToolUse).
+const contentTypeToolResult = "tool_result"
+
+// contentBlockRaw is one content block of either role: tool_use blocks fill
+// ID/Name/Input, tool_result blocks fill ToolUseID/Content. It is the struct
+// ExtractSpawnedAgentIDs decodes tool results into as well.
+type contentBlockRaw struct {
+	Type      string          `json:"type"`
+	ID        string          `json:"id"`
+	Name      string          `json:"name"`
+	Input     json.RawMessage `json:"input"`
+	ToolUseID string          `json:"tool_use_id"`
+	Content   json.RawMessage `json:"content"`
+}

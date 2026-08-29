@@ -220,9 +220,9 @@ func TestAttributeTokens_AgentAndSkillEmits(t *testing.T) {
 	got := attributeFixture(t, 0, "")
 	m3, m4 := got.Calls[2], got.Calls[3]
 
-	wantTask := types.ToolUseRef{ID: "toolu_t1", Tool: "Agent", Detail: "Explore (haiku)", SubagentType: "Explore", Model: "haiku"}
-	if len(m3.Emitted) != 1 || m3.Emitted[0] != wantTask {
-		t.Errorf("m3.Emitted = %+v, want [%+v]", m3.Emitted, wantTask)
+	wantAgent := types.ToolUseRef{ID: "toolu_t1", Tool: "Agent", Detail: "Explore (haiku)", SubagentType: "Explore", Model: "haiku"}
+	if len(m3.Emitted) != 1 || m3.Emitted[0] != wantAgent {
+		t.Errorf("m3.Emitted = %+v, want [%+v]", m3.Emitted, wantAgent)
 	}
 	if m3.Line != fixtureLineM3 {
 		t.Errorf("m3.Line = %d, want %d", m3.Line, fixtureLineM3)
@@ -243,20 +243,22 @@ func TestAttributeTokens_AgentAndSkillEmits(t *testing.T) {
 		t.Errorf("m4.Usage = %+v, want zero when unknown", m4.Usage)
 	}
 	// The Agent result (line 8) is consumed by m4, labelled with the Agent emit.
-	if len(m4.Consumed) != 1 || m4.Consumed[0].ToolUse != wantTask {
-		t.Errorf("m4.Consumed = %+v, want the Agent result labelled %+v", m4.Consumed, wantTask)
+	if len(m4.Consumed) != 1 || m4.Consumed[0].ToolUse != wantAgent {
+		t.Errorf("m4.Consumed = %+v, want the Agent result labelled %+v", m4.Consumed, wantAgent)
 	}
 }
 
-// TestAttributeTokens_LegacyTaskNameAndDedupedEmits pins two rules on one
+// TestAttributeTokens_LegacyTaskNameAndDedupedEmits pins three rules on one
 // inline transcript: the older "Task" tool name (and any casing) still fills
-// SubagentType/Model, and a tool_use block repeated across streamed rows of
-// one message is emitted once.
+// SubagentType/Model, a tool_use block repeated across streamed rows of one
+// message is emitted once, and a later streamed row WITHOUT usage does not
+// clobber the usage an earlier row recorded.
 func TestAttributeTokens_LegacyTaskNameAndDedupedEmits(t *testing.T) {
 	t.Parallel()
 
 	data := `{"type":"assistant","uuid":"a1","timestamp":"2026-08-27T11:00:00Z","message":{"id":"msg_1","model":"claude-fable-5","content":[{"type":"tool_use","id":"toolu_t","name":"Task","input":{"subagent_type":"Explore","model":"haiku"}}],"usage":{"input_tokens":1,"output_tokens":2}}}
 {"type":"assistant","uuid":"a2","timestamp":"2026-08-27T11:00:01Z","message":{"id":"msg_1","model":"claude-fable-5","content":[{"type":"tool_use","id":"toolu_t","name":"Task","input":{"subagent_type":"Explore","model":"haiku"}},{"type":"tool_use","id":"toolu_k","name":"skill","input":{"skill":"design"}}],"usage":{"input_tokens":1,"output_tokens":9}}}
+{"type":"assistant","uuid":"a3","timestamp":"2026-08-27T11:00:02Z","message":{"id":"msg_1","model":"claude-fable-5","content":[{"type":"text","text":"done"}]}}
 `
 	got, err := (&ClaudeCodeAgent{}).AttributeTokens([]byte(data), 0, "")
 	if err != nil || len(got.Calls) != 1 {
@@ -273,6 +275,9 @@ func TestAttributeTokens_LegacyTaskNameAndDedupedEmits(t *testing.T) {
 		if got.Calls[0].Emitted[i] != want[i] {
 			t.Errorf("Emitted[%d] = %+v, want %+v", i, got.Calls[0].Emitted[i], want[i])
 		}
+	}
+	if call := got.Calls[0]; call.UsageUnknown || call.Usage.OutputTokens != 9 {
+		t.Errorf("call usage = %+v (unknown=%v), want output_tokens 9 kept after a usage-less row", call.Usage, call.UsageUnknown)
 	}
 }
 

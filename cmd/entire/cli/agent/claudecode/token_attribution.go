@@ -17,10 +17,6 @@ import (
 
 var _ agent.TokenAttributor = (*ClaudeCodeAgent)(nil)
 
-// contentTypeToolResult is the content block type of a tool's output in a
-// user row (the assistant-side counterpart is transcript.ContentTypeToolUse).
-const contentTypeToolResult = "tool_result"
-
 // Lower-cased tool names whose tool_use input carries an attribution-specific
 // field, matched case-insensitively like transcript.ToolDetail. Claude Code's
 // subagent tool is "Agent" (see hooks.go: it never shipped one named "Task");
@@ -57,18 +53,6 @@ type attributionMessage struct {
 	Content json.RawMessage `json:"content"`
 }
 
-// contentBlockRaw is one content block of either role: tool_use blocks fill
-// ID/Name/Input, tool_result blocks fill ToolUseID/Content. It is the struct
-// ExtractSpawnedAgentIDs decodes tool results into as well.
-type contentBlockRaw struct {
-	Type      string          `json:"type"`
-	ID        string          `json:"id"`
-	Name      string          `json:"name"`
-	Input     json.RawMessage `json:"input"`
-	ToolUseID string          `json:"tool_use_id"`
-	Content   json.RawMessage `json:"content"`
-}
-
 // blocks decodes the message content as a block array; a string content (a
 // user prompt) or anything else yields nil.
 func (m *attributionMessage) blocks() []contentBlockRaw {
@@ -86,10 +70,32 @@ type spawnedAgent struct {
 	toolUseID string
 }
 
+// timeSpan is the earliest and latest timestamp noted so far; zero until the
+// first note.
+type timeSpan struct {
+	start, end time.Time
+}
+
+// note widens the span to include at; a zero at is ignored.
+func (s *timeSpan) note(at time.Time) {
+	if at.IsZero() {
+		return
+	}
+	if s.start.IsZero() || at.Before(s.start) {
+		s.start = at
+	}
+	if s.end.IsZero() || at.After(s.end) {
+		s.end = at
+	}
+}
+
 // attributionWalk is the single pass over the whole transcript. Labels and
 // spawned agents come from every row (the full transcript); calls, consumed
-// results and Start/End only from rows at or after startLine.
+// results and the embedded timeSpan (Start/End) only from rows at or after
+// startLine.
 type attributionWalk struct {
+	timeSpan
+
 	startLine int
 	// labels maps tool_use id → the emitting ref, from every assistant row.
 	labels map[string]types.ToolUseRef
@@ -105,8 +111,6 @@ type attributionWalk struct {
 	// pending is the tool results seen since the current last call started;
 	// they become the next new call's Consumed.
 	pending []types.ToolResultRef
-	start   time.Time
-	end     time.Time
 }
 
 // AttributeTokens implements agent.TokenAttributor for Claude Code: one
@@ -119,7 +123,7 @@ type attributionWalk struct {
 //     count, so startLine and CallUsage.Line stay in TokenTranscriptStart's
 //     coordinate. Malformed lines are skipped; they are never an error.
 //   - Rows sharing message.id are one call: Line/At/Model/Effort/ActiveSkill
-//     from the first row, Usage from the row with the highest output_tokens
+//     from the first row in the slice carrying that message.id, Usage from the row with the highest output_tokens
 //     (every field from that row, APICallCount 1), Emitted the union of
 //     tool_use blocks in row order, deduplicated by tool_use id. A message
 //     none of whose rows record usage has UsageUnknown set and a zero Usage.
@@ -211,7 +215,7 @@ func (w *attributionWalk) visitRow(line int, raw []byte) {
 	}
 	inSlice := line >= w.startLine
 	if inSlice {
-		w.noteTimestamp(row.Timestamp)
+		w.note(parseRowTimestamp(row.Timestamp))
 	}
 	if len(row.Message) == 0 {
 		return
@@ -225,20 +229,6 @@ func (w *attributionWalk) visitRow(line int, raw []byte) {
 		w.visitAssistant(line, inSlice, &row, &msg)
 	case transcript.TypeUser:
 		w.visitUser(inSlice, &msg)
-	}
-}
-
-// noteTimestamp widens Start/End with a parsable row timestamp.
-func (w *attributionWalk) noteTimestamp(ts string) {
-	at := parseRowTimestamp(ts)
-	if at.IsZero() {
-		return
-	}
-	if w.start.IsZero() || at.Before(w.start) {
-		w.start = at
-	}
-	if w.end.IsZero() || at.After(w.end) {
-		w.end = at
 	}
 }
 
@@ -345,15 +335,10 @@ func toolUseRefFrom(b contentBlockRaw) types.ToolUseRef {
 // decodeToolInput decodes a tool_use input best-effort: a non-string value
 // under a known key makes encoding/json report an UnmarshalTypeError while
 // the remaining fields still populate (see transcript.ToolInput), so the
-// partial result is returned either way.
+// partial result is returned either way and the error carries nothing.
 func decodeToolInput(raw json.RawMessage) toolInput {
 	var in toolInput
-	if len(raw) == 0 {
-		return in
-	}
-	if err := json.Unmarshal(raw, &in); err != nil {
-		return in
-	}
+	_ = json.Unmarshal(raw, &in) //nolint:errcheck // best-effort partial decode, see doc
 	return in
 }
 
@@ -413,6 +398,9 @@ func (w *attributionWalk) subagentRecords(subagentsDir string) []types.SubagentR
 		rec.SubagentType = w.labels[s.toolUseID].SubagentType
 		records = append(records, rec)
 	}
+	// spawned is in completion order (tool_result rows); the report wants
+	// dispatch order (tool_use rows), and parallel subagents complete out of
+	// order.
 	sort.SliceStable(records, func(i, j int) bool {
 		si, sj := w.labelSeq[records[i].ToolUseID], w.labelSeq[records[j].ToolUseID]
 		if si != sj {
@@ -427,6 +415,13 @@ func (w *attributionWalk) subagentRecords(subagentsDir string) []types.SubagentR
 // model via the same dedupe CalculateTokenUsageFromFile applies, Start/End
 // from the file's first/last row timestamps. ok is false when the file cannot
 // be read — it may not exist yet or may have been cleaned up.
+//
+// PERF (considered, retained deliberately): the bytes are decoded twice — once
+// by transcript.ParseFromBytes for the shared usage dedupe, once by
+// rowTimestampBounds for the timestamps transcript.Line drops. Folding the
+// timestamp scan into the usage pass would mean a private copy of
+// calculateTokenUsageWithModel; subagent transcripts are short and this runs
+// only when subagentsDir != "", so one extra pass is the cheaper debt.
 func readSubagentRecord(path, toolUseID string) (types.SubagentRecord, bool) {
 	data, err := os.ReadFile(path) //nolint:gosec // path is subagentsDir + validated agent id
 	if err != nil {
@@ -449,14 +444,14 @@ func readSubagentRecord(path, toolUseID string) (types.SubagentRecord, bool) {
 // rowTimestampBounds returns the earliest and latest parsable row timestamps
 // in a JSONL transcript; zero when none.
 func rowTimestampBounds(data []byte) (time.Time, time.Time) {
-	w := newAttributionWalk(0)
+	var span timeSpan
 	forEachLine(data, func(_ int, raw []byte) {
 		var row struct {
 			Timestamp string `json:"timestamp"`
 		}
 		if err := json.Unmarshal(raw, &row); err == nil {
-			w.noteTimestamp(row.Timestamp)
+			span.note(parseRowTimestamp(row.Timestamp))
 		}
 	})
-	return w.start, w.end
+	return span.start, span.end
 }
