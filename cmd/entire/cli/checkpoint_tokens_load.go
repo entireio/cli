@@ -181,7 +181,13 @@ type sessionTokenAnalysis struct {
 	agentReportedCost float64
 	// unmatchedSubagentRefs counts subagent tool calls with no task record.
 	unmatchedSubagentRefs int
-	notes                 []string
+	// transcriptThinking and transcriptCacheWrite1h are the thinking and
+	// 1-hour cache-write counts summed over a legacy session's attributed
+	// calls — subset figures the committed token_usage predates. They are
+	// surfaced beside the committed totals, never added into them.
+	transcriptThinking     int
+	transcriptCacheWrite1h int
+	notes                  []string
 }
 
 // buildCheckpointTokensReport turns the loaded inputs into the report:
@@ -199,21 +205,22 @@ func buildCheckpointTokensReport(ctx context.Context, in checkpointTokenInputs) 
 	legacy := in.summary == nil || in.summary.TokenUsageVersion < checkpoint.TokenUsageVersionDelta
 	analyses := analyzeCheckpointTokenSessions(ctx, in, legacy)
 	view := assembleTokenReportView(analyses, metas)
-	view.Limitations = append(view.Limitations, checkpointTokenNotes(in, analyses, legacy)...)
+	rootFallback := applyRootSummaryFallback(&view, in)
+	view.Limitations = append(view.Limitations, checkpointTokenNotes(in, analyses, legacy, rootFallback)...)
 	if legacy && view.HasUsage {
-		view.Legacy = &tokenLegacyInfo{
-			Cumulative:       anyLegacyFromStart(in.summary, metas),
-			ThinkingRecorded: view.Report.Usage.ThinkingTokens > 0,
-			CacheTTLRecorded: view.Report.Usage.CacheCreation1hTokens > 0,
-		}
+		view.FromTranscript = legacyTranscriptSubsets(&view.Report.Usage, analyses)
+		view.Legacy = legacyInfo(&view, in.summary, metas)
 	}
 	if view.HasUsage {
 		view.Recommendations = tokenreport.Recommend(view.Report)
 	}
 
 	recomputed, fallback := countTokenSources(analyses)
-	if recomputed > 0 && fallback == 0 {
+	if recomputed > 0 && fallback == 0 && !rootFallback {
 		report.Source = checkpointTokensSourceTranscript
+	}
+	if report.SessionCount == 1 && len(metas) == 1 && metas[0] != nil && metas[0].SessionMetrics != nil {
+		report.Context = buildSessionTokensContext(metas[0].SessionMetrics.ContextTokens, metas[0].SessionMetrics.ContextWindowSize)
 	}
 	if len(view.Report.Attributed.Contributors) > 0 || view.Attributed {
 		report.Models = mergeModelLabels(report.Models, view.Report.Model)
@@ -223,6 +230,84 @@ func buildCheckpointTokensReport(ctx context.Context, in checkpointTokenInputs) 
 	}
 	report.applyView(view)
 	return report
+}
+
+// applyRootSummaryFallback replaces the view's totals with the checkpoint's
+// root token_usage when a session's metadata could not be read: the root
+// summary was aggregated over every session at write time, so it is the
+// complete total while the readable sessions' sum undercounts. The
+// breakdown keeps the readable sessions' attribution; the class shares are
+// re-priced over the root total with the report model's base ratios. Returns
+// whether the fallback applied.
+func applyRootSummaryFallback(view *tokenReportView, in checkpointTokenInputs) bool {
+	if in.metadataWarnings == 0 || in.summary == nil || in.summary.TokenUsage == nil {
+		return false
+	}
+	flat := flattenTokenUsage(in.summary.TokenUsage)
+	if tokenVolume(flat) == 0 && flat.APICallCount == 0 {
+		return false
+	}
+	flat.Model = ""
+	view.Report.Usage = *flat
+	view.HasUsage = true
+	view.Report.Calls = flat.APICallCount
+	view.Subagent = types.TokenUsage{}
+	if sub := flattenTokenUsage(in.summary.TokenUsage.SubagentTokens); sub != nil {
+		sub.Model = ""
+		view.Subagent = *sub
+	}
+	view.Report.Cost = tokenreport.CostShares{}
+	if w, _, ok := tokenreport.WeightsFor(view.Report.Model); ok {
+		view.Report.Cost = tokenreport.ComputeCostShares(flat, w)
+	}
+	return true
+}
+
+// legacyTranscriptSubsets returns the thinking and 1-hour cache-write counts
+// a legacy checkpoint's whole-transcript attribution found that the committed
+// usage lacks (its subset fields are 0). Nil when there is nothing to add.
+// The figures are shown beside the committed totals with a "(from stored
+// transcript)" marker and are never added into Report.Usage or the Total: the
+// committed total cannot confirm them, and the whole transcript may cover
+// more than this checkpoint's window.
+func legacyTranscriptSubsets(usage *types.TokenUsage, analyses []sessionTokenAnalysis) *tokenTranscriptSubsets {
+	var ft tokenTranscriptSubsets
+	for i := range analyses {
+		ft.Thinking += analyses[i].transcriptThinking
+		ft.CacheWrite1h += analyses[i].transcriptCacheWrite1h
+	}
+	if usage.ThinkingTokens > 0 {
+		ft.Thinking = 0
+	}
+	if usage.CacheCreation1hTokens > 0 || usage.CacheCreationTokens == 0 {
+		ft.CacheWrite1h = 0
+	}
+	if ft.Thinking == 0 && ft.CacheWrite1h == 0 {
+		return nil
+	}
+	return &ft
+}
+
+// legacyInfo builds the JSON `legacy` object: whether the totals may be a
+// running total, and whether thinking / cache-TTL counts are known — from
+// the committed usage or, marked as such, from the stored transcript.
+func legacyInfo(view *tokenReportView, summary *checkpoint.CheckpointSummary, metas []*checkpoint.Metadata) *tokenLegacyInfo {
+	info := &tokenLegacyInfo{
+		Cumulative:       anyLegacyFromStart(summary, metas),
+		ThinkingRecorded: view.Report.Usage.ThinkingTokens > 0,
+		CacheTTLRecorded: view.Report.Usage.CacheCreation1hTokens > 0,
+	}
+	if ft := view.FromTranscript; ft != nil {
+		if ft.Thinking > 0 {
+			info.ThinkingRecorded = true
+			info.ThinkingFromTranscript = ft.Thinking
+		}
+		if ft.CacheWrite1h > 0 {
+			info.CacheTTLRecorded = true
+			info.CacheWrite1hFromTranscript = ft.CacheWrite1h
+		}
+	}
+	return info
 }
 
 // fillCheckpointTokensIdentity sets the header fields: session count, the
@@ -468,7 +553,8 @@ func finishSessionTokenAnalysis(a *sessionTokenAnalysis) {
 			a.models[call.Model]++
 		}
 		if w, ok := callWeights(call); ok {
-			a.costParts = append(a.costParts, tokenreport.ComputeCostShares(&call.Usage, w))
+			// A per-call usage block records its TTL split: 0 means all 5m.
+			a.costParts = append(a.costParts, tokenreport.ComputeCostSharesKnownTTL(&call.Usage, w))
 		}
 	}
 	for i := range attr.Subagents {
@@ -484,7 +570,7 @@ func finishSessionTokenAnalysis(a *sessionTokenAnalysis) {
 			model = rec.Usage.Model
 		}
 		if w, _, ok := tokenreport.WeightsFor(model); ok {
-			a.costParts = append(a.costParts, tokenreport.ComputeCostShares(rec.Usage, w))
+			a.costParts = append(a.costParts, tokenreport.ComputeCostSharesKnownTTL(rec.Usage, w))
 		}
 	}
 	a.usage = types.AddTokenUsage(usage, a.subagent)
@@ -521,6 +607,8 @@ func (a *sessionTokenAnalysis) finishLegacyFromTranscript() {
 		if call.Model != "" {
 			a.models[call.Model]++
 		}
+		a.transcriptThinking += call.Usage.ThinkingTokens
+		a.transcriptCacheWrite1h += call.Usage.CacheCreation1hTokens
 	}
 	a.attributed = tokenreport.Attribute(attr, nil)
 	a.agentReportedCost = attr.AgentReportedCost
@@ -562,22 +650,30 @@ func callWeights(call *types.CallUsage) (tokenreport.Weights, bool) {
 	return tokenreport.WeightsForCall(call.Model, u.InputTokens+u.CacheReadTokens+u.CacheCreationTokens), true
 }
 
-// countUnmatchedSubagentRefs counts emitted subagent tool calls that no
-// SubagentRecord accounts for — their tokens are not in the report.
+// countUnmatchedSubagentRefs counts the distinct subagent tool calls seen in
+// the window — emitted, or consumed from before it — that no SubagentRecord
+// accounts for: their tokens are not in the report.
 func countUnmatchedSubagentRefs(a *types.Attribution) int {
 	recorded := make(map[string]bool, len(a.Subagents))
 	for _, rec := range a.Subagents {
 		recorded[rec.ToolUseID] = true
 	}
-	var n int
-	for _, call := range a.Calls {
-		for _, ref := range call.Emitted {
-			if ref.SubagentType != "" && !recorded[ref.ID] {
-				n++
-			}
+	unmatched := make(map[string]bool)
+	note := func(ref *types.ToolUseRef) {
+		if ref.SubagentType != "" && !recorded[ref.ID] {
+			unmatched[ref.ID] = true
 		}
 	}
-	return n
+	for i := range a.Calls {
+		call := &a.Calls[i]
+		for j := range call.Emitted {
+			note(&call.Emitted[j])
+		}
+		for j := range call.Consumed {
+			note(&call.Consumed[j].ToolUse)
+		}
+	}
+	return len(unmatched)
 }
 
 // metadataDuration is the hook-reported session duration, or 0.
@@ -701,13 +797,18 @@ func anyLegacyFromStart(summary *checkpoint.CheckpointSummary, metas []*checkpoi
 	return false
 }
 
-// checkpointTokenNotes collects the report-level notes: unreadable metadata,
+// checkpointTokenNotes collects the report-level notes: unreadable metadata
+// (and whether the root summary stood in for the totals),
 // unreadable task records, per-session attribution notes, subagent calls
 // without records (worded per agent), the mixed-source note, and the
 // multi-session lower-bound note.
-func checkpointTokenNotes(in checkpointTokenInputs, analyses []sessionTokenAnalysis, legacy bool) []string {
+func checkpointTokenNotes(in checkpointTokenInputs, analyses []sessionTokenAnalysis, legacy, rootFallback bool) []string {
 	var notes []string
-	if in.metadataWarnings > 0 {
+	switch {
+	case rootFallback:
+		notes = append(notes, fmt.Sprintf("%d session metadata file%s could not be read; totals are the checkpoint's root summary (aggregated at write time) and the breakdown covers only the readable sessions.",
+			in.metadataWarnings, tokenPluralSuffix(in.metadataWarnings)))
+	case in.metadataWarnings > 0:
 		notes = append(notes, fmt.Sprintf("%d session metadata file%s could not be read; those sessions are not in the totals.",
 			in.metadataWarnings, tokenPluralSuffix(in.metadataWarnings)))
 	}

@@ -164,16 +164,15 @@ func TestCheckpointTokensCmd_TextOutputIsBreakdownFirst(t *testing.T) {
 		"(0.1×)",
 		// Recommendations: subagent_model fires on the parent-model record.
 		"Recommendations",
-		"Explore subagents ran on `claude-fable-5` (27k tokens, 94% of cost)",
+		"Explore subagents ran on `claude-fable-5` (27k tokens, 93% of cost)",
 		// Notes.
 		"Notes",
 		"Cost shares use Anthropic list-price ratios (input 1×, 5m write 1.25×, 1h write 2×, cache read 0.1×, output 5×), not your plan's rates.",
 		"1 call with no usage recorded",
-		// The 5-minute writes of two calls have no recorded TTL, so the
-		// summed cache-write share is unpriced (tokenreport contract).
-		"cache-write TTL not recorded; not priced",
 	)
-	for _, absent := range []string{"Token scope: legacy", "Likely contributors", "Limitations", "Skill: artifact-design"} {
+	// Per-call usage blocks record their TTL split, so the two calls' 5m
+	// writes are priced: no "TTL not recorded" note on a v2 checkpoint.
+	for _, absent := range []string{"Token scope: legacy", "Likely contributors", "Limitations", "Skill: artifact-design", "TTL not recorded", "(from stored transcript)"} {
 		if strings.Contains(out, absent) {
 			t.Errorf("did not expect %q in output, got:\n%s", absent, out)
 		}
@@ -232,10 +231,13 @@ func TestCheckpointTokensCmd_JSONOutputShape(t *testing.T) {
 	if result.Cost == nil || result.Cost.Provider != tokenreport.ProviderAnthropic || result.Cost.Family != tokenreport.FamilyAnthropic || result.Cost.Weights == nil || result.Cost.Weights.Output != 5 {
 		t.Errorf("cost = %+v", result.Cost)
 	}
-	// Units: m1 622.5 + m2 290 + m3 360 (their 5m writes unpriced) + record
-	// 17000 = 18272.5; output units 10575.
-	if result.Cost != nil && math.Abs(result.Cost.Shares.Output-0.5787) > 0.001 {
-		t.Errorf("cost.shares.output = %v, want ≈0.579", result.Cost.Shares.Output)
+	// Units: m1 622.5 + m2 415 + m3 460 (5m writes priced at 1.25×) + record
+	// 17000 = 18497.5; output units 10575.
+	if result.Cost != nil && (math.Abs(result.Cost.Shares.Output-0.5717) > 0.001 || result.Cost.Shares.CacheWriteUnpriced) {
+		t.Errorf("cost.shares = %+v, want output ≈0.572 with cache writes priced", result.Cost.Shares)
+	}
+	if _, ok := raw["context"]; ok {
+		t.Errorf("no context key without SessionMetrics:\n%s", out)
 	}
 	if len(result.Contributors) != 7 {
 		t.Fatalf("contributors = %d rows, want 7: %+v", len(result.Contributors), result.Contributors)
@@ -274,7 +276,7 @@ func TestCheckpointTokensCmd_AgentBrief(t *testing.T) {
 		"Checkpoint: b1efbeefcafe",
 		"Token usage: 31.1k total; 3 API calls; 10s; cache read 13% of cost.",
 		"Next best action:",
-		"Explore subagents ran on `claude-fable-5` (27k tokens, 94% of cost); delegated work like this often runs well on a smaller model.",
+		"Explore subagents ran on `claude-fable-5` (27k tokens, 93% of cost); delegated work like this often runs well on a smaller model.",
 		"Signals:",
 		"- subagent_model",
 	)

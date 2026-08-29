@@ -25,10 +25,13 @@ type checkpointTokensReport struct {
 	Branch       string   `json:"branch,omitempty"`
 	// Source is checkpointTokensSourceTranscript when every session's totals
 	// were recomputed from its transcript, else checkpointTokensSourceCommitted.
-	Source            string                      `json:"source"`
-	DurationSeconds   int                         `json:"duration_seconds,omitempty"`
-	Effort            *tokenEffortJSON            `json:"effort,omitempty"`
-	Tokens            *tokenUsageJSON             `json:"tokens,omitempty"`
+	Source          string           `json:"source"`
+	DurationSeconds int              `json:"duration_seconds,omitempty"`
+	Effort          *tokenEffortJSON `json:"effort,omitempty"`
+	Tokens          *tokenUsageJSON  `json:"tokens,omitempty"`
+	// Context is the single session's hook-reported context pressure
+	// (SessionMetrics), kept under the previous schema's key.
+	Context           *sessionTokensContext       `json:"context,omitempty"`
 	Cost              *tokenCostJSON              `json:"cost,omitempty"`
 	Contributors      []tokenreport.Contributor   `json:"contributors"`
 	Recommendations   []tokenRecommendationJSON   `json:"recommendations,omitempty"`

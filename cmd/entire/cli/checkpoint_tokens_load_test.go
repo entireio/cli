@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
@@ -76,8 +77,8 @@ func TestBuildCheckpointTokensReport_LegacyCheckpoint(t *testing.T) {
 		"108k",
 		"cache-write TTL not recorded; not priced",
 	)
-	if strings.Contains(out, "Cache write, 1-hour") || strings.Contains(out, "of which 1-hour") {
-		t.Errorf("legacy totals carry no TTL split, got:\n%s", out)
+	if strings.Contains(out, "Cache write, 1-hour") {
+		t.Errorf("legacy committed totals carry no TTL split, got:\n%s", out)
 	}
 	if report.Source != checkpointTokensSourceCommitted {
 		t.Errorf("source = %q, want committed_checkpoint for legacy totals", report.Source)
@@ -85,8 +86,15 @@ func TestBuildCheckpointTokensReport_LegacyCheckpoint(t *testing.T) {
 	if report.Tokens == nil || report.Tokens.Total != 108_000 || report.Tokens.APICalls != 20 {
 		t.Errorf("tokens = %+v, want the committed totals", report.Tokens)
 	}
-	if report.Legacy == nil || !report.Legacy.Cumulative || report.Legacy.ThinkingRecorded || report.Legacy.CacheTTLRecorded {
-		t.Errorf("legacy = %+v", report.Legacy)
+	// The committed usage predates the subset fields; the stored transcript
+	// records thinking 17 and 1h writes 50, shown marked and kept out of Total.
+	assertContainsAll(t, out, "of which thinking", "of which 1-hour", "(from stored transcript)")
+	want := &tokenLegacyInfo{Cumulative: true, ThinkingRecorded: true, CacheTTLRecorded: true, ThinkingFromTranscript: 17, CacheWrite1hFromTranscript: 50}
+	if report.Legacy == nil || *report.Legacy != *want {
+		t.Errorf("legacy = %+v, want %+v", report.Legacy, want)
+	}
+	if report.Tokens.ThinkingTokens != 0 || report.Tokens.CacheCreation1hTokens != 0 {
+		t.Errorf("transcript-derived subsets must not enter the committed totals: %+v", report.Tokens)
 	}
 	if !report.view.Report.Cost.CacheWriteUnpriced || report.view.Report.Cost.Units == 0 {
 		t.Errorf("cost = %+v, want priced classes with cache write unpriced", report.view.Report.Cost)
@@ -184,12 +192,19 @@ func TestBuildCheckpointTokensReport_CursorShapedSessionPrintsTotalsOnly(t *test
 	meta := checkpoint.Metadata{
 		SessionID: "cursor", Agent: agent.AgentTypeCursor,
 		TokenUsage:     &types.TokenUsage{InputTokens: 1000, OutputTokens: 500, APICallCount: 3},
-		SessionMetrics: &checkpoint.SessionMetrics{DurationMs: 3_600_000},
+		SessionMetrics: &checkpoint.SessionMetrics{DurationMs: 3_600_000, ContextTokens: 9000, ContextWindowSize: 10000},
 	}
 	report := buildStubTokensReport(t, &stubCommittedReader{
 		summary:  tokenTestSummary(1, checkpoint.TokenUsageVersionDelta),
 		contents: map[int]*checkpoint.SessionContent{0: tokenTestSession(meta, []byte("not a transcript\n"))},
 	}, nil)
+
+	if report.Context == nil || *report.Context != (sessionTokensContext{Tokens: 9000, WindowSize: 10000, Percent: 90}) {
+		t.Errorf("context = %+v, want the SessionMetrics context under the previous key", report.Context)
+	}
+	if encoded, err := json.Marshal(report); err != nil || !strings.Contains(string(encoded), `"context":{"tokens":9000,"window_size":10000,"percent":90}`) {
+		t.Errorf("context JSON missing: %v\n%s", err, encoded)
+	}
 
 	out := renderTokensReport(&report)
 	assertContainsAll(t, out,
@@ -375,5 +390,103 @@ func TestModalKeyCountPrefersHighestThenLexical(t *testing.T) {
 	}
 	if k, n := modalKeyCount(nil); k != "" || n != 0 {
 		t.Errorf("empty map → %q/%d", k, n)
+	}
+}
+
+// TestFinishSessionTokenAnalysis_KnownTTLPricesFiveMinuteWrites pins the
+// per-call pricing rule: an agent-written usage block with cache writes and
+// a zero 1h split is all-5m, so the class shares agree with the contributor
+// table's units and the usage table prices the row.
+func TestFinishSessionTokenAnalysis_KnownTTLPricesFiveMinuteWrites(t *testing.T) {
+	t.Parallel()
+
+	meta := &checkpoint.Metadata{SessionID: "cw-only", Agent: agent.AgentTypeClaudeCode, Model: checkpointTokensFixtureModel}
+	attribution := &types.Attribution{Calls: []types.CallUsage{
+		{Model: checkpointTokensFixtureModel, Usage: types.TokenUsage{CacheCreationTokens: 4000, APICallCount: 1}},
+		{Model: checkpointTokensFixtureModel, Usage: types.TokenUsage{CacheCreationTokens: 6000, APICallCount: 1}},
+	}}
+	a := sessionTokenAnalysis{meta: meta, attribution: attribution, efforts: map[string]int{}, models: map[string]int{}}
+	finishSessionTokenAnalysis(&a)
+
+	summed := tokenreport.SumCostShares(a.costParts...)
+	if summed.Units == 0 || summed.Units != a.attributed.PricedUnits || summed.CacheWriteUnpriced {
+		t.Fatalf("class units %v (unpriced=%v) must equal contributor units %v", summed.Units, summed.CacheWriteUnpriced, a.attributed.PricedUnits)
+	}
+
+	view := assembleTokenReportView([]sessionTokenAnalysis{a}, []*checkpoint.Metadata{meta})
+	out := renderBody(&view)
+	assertContainsAll(t, out, "Cache write, 5-minute", "(1.25×)", "10k")
+	if strings.Contains(out, "TTL not recorded") || strings.Contains(out, tokenTableUnpriced) {
+		t.Errorf("all-5m writes from a per-call block are priced, got:\n%s", out)
+	}
+}
+
+func TestBuildCheckpointTokensReport_RootSummaryWhenSessionMetadataIncomplete(t *testing.T) {
+	t.Parallel()
+
+	summary := tokenTestSummary(2, checkpoint.TokenUsageVersionDelta)
+	summary.TokenUsage = &types.TokenUsage{InputTokens: 1000, OutputTokens: 500, APICallCount: 7}
+	meta := checkpoint.Metadata{
+		SessionID: "readable-session", Agent: agent.AgentTypeClaudeCode, Model: "claude-opus-4-6",
+		TokenUsage:     &types.TokenUsage{InputTokens: 100},
+		SessionMetrics: &checkpoint.SessionMetrics{ContextTokens: 9000, ContextWindowSize: 10000},
+	}
+	report := buildStubTokensReport(t, &stubCommittedReader{
+		summary:  summary,
+		contents: map[int]*checkpoint.SessionContent{0: tokenTestSession(meta, nil)},
+		err:      errors.New("unreadable"),
+	}, nil)
+
+	if report.Tokens == nil || report.Tokens.Total != 1500 || report.Tokens.APICalls != 7 {
+		t.Fatalf("expected root summary totals, got %+v", report.Tokens)
+	}
+	if report.Source != checkpointTokensSourceCommitted {
+		t.Errorf("source = %q", report.Source)
+	}
+	if report.SessionID != "" || report.Agent != "" || report.Model != "" || report.Context != nil {
+		t.Errorf("multi-session checkpoint must omit singular fields: session_id=%q agent=%q model=%q context=%+v", report.SessionID, report.Agent, report.Model, report.Context)
+	}
+	if !strings.Contains(strings.Join(report.Limitations, "\n"), "1 session metadata file could not be read; totals are the checkpoint's root summary") {
+		t.Errorf("limitations = %+v", report.Limitations)
+	}
+	if report.Cost == nil || report.Cost.Provider != tokenreport.ProviderAnthropic {
+		t.Errorf("root totals should be priced with the readable session's model, got %+v", report.Cost)
+	}
+}
+
+func TestBuildCheckpointTokensReport_RootSummaryWhenNoSessionMetadataReadable(t *testing.T) {
+	t.Parallel()
+
+	summary := tokenTestSummary(2, checkpoint.TokenUsageVersionDelta)
+	summary.TokenUsage = &types.TokenUsage{InputTokens: 1000, OutputTokens: 500, APICallCount: 7, SubagentTokens: &types.TokenUsage{OutputTokens: 200}}
+	report := buildStubTokensReport(t, &stubCommittedReader{summary: summary, err: errors.New("unreadable")}, nil)
+
+	if report.Tokens == nil || report.Tokens.Total != 1700 || report.Tokens.APICalls != 7 || report.Tokens.SubagentTotal != 200 {
+		t.Fatalf("expected root summary totals, got %+v", report.Tokens)
+	}
+	out := renderTokensReport(&report)
+	assertContainsAll(t, out, "Sessions:   2", "Total", "1.7k", "of which subagents", "200", "2 session metadata files could not be read; totals are the checkpoint's root summary")
+	if strings.Contains(out, "Where it went") {
+		t.Errorf("no breakdown without readable sessions:\n%s", out)
+	}
+}
+
+func TestCountUnmatchedSubagentRefsIncludesConsumedOnlyRefs(t *testing.T) {
+	t.Parallel()
+
+	spawned := types.ToolUseRef{ID: "toolu_before", Tool: "Agent", SubagentType: "Explore"}
+	emitted := types.ToolUseRef{ID: "toolu_in", Tool: "Agent", SubagentType: "Explore"}
+	attribution := &types.Attribution{
+		Calls: []types.CallUsage{
+			{Emitted: []types.ToolUseRef{emitted}, Consumed: []types.ToolResultRef{{ToolUse: spawned}}},
+			{Consumed: []types.ToolResultRef{{ToolUse: emitted}, {ToolUse: types.ToolUseRef{ID: "toolu_bash", Tool: "Bash"}}}},
+		},
+	}
+	if got := countUnmatchedSubagentRefs(attribution); got != 2 {
+		t.Errorf("unmatched = %d, want 2 (one emitted, one consumed from before the window, each once)", got)
+	}
+	attribution.Subagents = []types.SubagentRecord{{ToolUseID: "toolu_before", SubagentType: "Explore"}}
+	if got := countUnmatchedSubagentRefs(attribution); got != 1 {
+		t.Errorf("unmatched after recording the consumed-only ref = %d, want 1", got)
 	}
 }

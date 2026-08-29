@@ -47,6 +47,10 @@ type tokenReportView struct {
 	AgentReportedCost float64
 	// Legacy is non-nil for a checkpoint written before token_usage_version 2.
 	Legacy *tokenLegacyInfo
+	// FromTranscript holds subset figures a legacy checkpoint's stored
+	// transcript recorded but its committed usage lacks; printed with a
+	// "(from stored transcript)" marker and never added into the totals.
+	FromTranscript *tokenTranscriptSubsets
 	// Limitations are the caller's Notes lines: attribution failures,
 	// unreadable metadata, unmatched subagent records. tokenReportNotes adds
 	// the pricing and profile notes derived from Report.
@@ -64,8 +68,23 @@ type tokenLegacyInfo struct {
 	// token count.
 	ThinkingRecorded bool `json:"thinking_recorded"`
 	// CacheTTLRecorded is true when the committed usage carries the 1-hour
-	// cache-write split.
+	// cache-write split, or the stored transcript did.
 	CacheTTLRecorded bool `json:"cache_ttl_recorded"`
+	// ThinkingFromTranscript is the thinking count read from the stored
+	// transcript when the committed usage has none; 0 otherwise.
+	ThinkingFromTranscript int `json:"thinking_from_transcript,omitempty"`
+	// CacheWrite1hFromTranscript is the 1-hour cache-write count read from
+	// the stored transcript when the committed usage has none; 0 otherwise.
+	CacheWrite1hFromTranscript int `json:"cache_write_1h_from_transcript,omitempty"`
+}
+
+// tokenTranscriptSubsets are subset token counts (thinking, 1-hour cache
+// writes) taken from a legacy checkpoint's stored transcript rather than its
+// committed token_usage. They annotate the usage table but are excluded from
+// every total, which the committed usage alone defines.
+type tokenTranscriptSubsets struct {
+	Thinking     int
+	CacheWrite1h int
 }
 
 // tokenUsageJSON is the `tokens` object of a token report's --json output.
@@ -121,6 +140,8 @@ const (
 	tokenUsageNotRecorded   = "(usage not recorded)" //nolint:gosec // G101: a table note, not a credential
 	tokenLabelContextReplay = tokenreport.LabelContextReplay + " (cache read)"
 	tokenLabelCacheWrite    = "Cache write"
+	tokenFromTranscriptNote = "(from stored transcript)" //nolint:gosec // G101: a table note, not a credential
+	tokenLabelOneHourSubset = "of which 1-hour"
 	tokenRecommendationWrap = 78
 	tokenDetailMaxRunes     = 40
 )
@@ -520,17 +541,28 @@ func cacheWriteLines(v *tokenReportView, weights tokenreport.Weights, haveWeight
 		if !cs.CacheWriteUnpriced {
 			line.note = ratio(weights.CacheWrite5m)
 		}
+		if ft := v.FromTranscript; ft != nil && ft.CacheWrite1h > 0 {
+			return []tokenTableLine{line, {indent: 4, label: tokenLabelOneHourSubset, tokens: tokenreport.FormatTokenCount(ft.CacheWrite1h), note: tokenFromTranscriptNote}}
+		}
 		return []tokenTableLine{line}
 	default:
-		return []tokenTableLine{line, {indent: 4, label: "of which 1-hour", tokens: tokenreport.FormatTokenCount(u.CacheCreation1hTokens), note: ratio(weights.CacheWrite1h)}}
+		return []tokenTableLine{line, {indent: 4, label: tokenLabelOneHourSubset, tokens: tokenreport.FormatTokenCount(u.CacheCreation1hTokens), note: ratio(weights.CacheWrite1h)}}
 	}
 }
 
 // thinkingLine renders "of which thinking" with the thinking share of cost
-// and of output, or "not recorded" when the agent does not record thinking.
+// and of output; a legacy checkpoint whose committed usage has no thinking
+// count prints the stored transcript's figure with a "(from stored
+// transcript)" marker instead; "not recorded" when the agent does not record
+// thinking.
 func thinkingLine(v *tokenReportView) tokenTableLine {
 	u := &v.Report.Usage
 	line := tokenTableLine{indent: 4, label: "of which thinking"}
+	if ft := v.FromTranscript; u.ThinkingTokens == 0 && ft != nil && ft.Thinking > 0 {
+		line.tokens = tokenreport.FormatTokenCount(ft.Thinking)
+		line.note = tokenFromTranscriptNote
+		return line
+	}
 	if !v.Report.Profile.RecordsThinking && u.ThinkingTokens == 0 {
 		line.tokens = tokenNotRecorded
 		return line
