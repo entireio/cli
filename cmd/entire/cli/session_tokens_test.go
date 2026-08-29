@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
+	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
@@ -281,6 +283,46 @@ func TestSessionTokens_FallsBackToSessionStateWhenTranscriptUnreadable(t *testin
 	}
 	if !strings.Contains(strings.Join(result.Limitations, "\n"), "transcript unavailable; totals from session state") {
 		t.Errorf("limitations = %+v", result.Limitations)
+	}
+}
+
+func TestSessionTokens_UnreadableTranscriptWarnOmitsPath(t *testing.T) {
+	setupStopTestRepo(t)
+	logDir := t.TempDir()
+	l, err := logging.New(logging.Config{Dir: logDir})
+	if err != nil {
+		t.Fatalf("logging.New() error = %v", err)
+	}
+	ctx := logging.WithLogger(context.Background(), l)
+	transcriptPath := filepath.Join(t.TempDir(), "secret-project-name.jsonl")
+	state := liveSessionTokensState("warn-tokens", transcriptPath)
+
+	out := runSessionTokensCmd(ctx, t, state)
+	if err := l.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+	assertContainsAll(t, out, "transcript unavailable; totals from session state")
+
+	entries, err := os.ReadDir(logDir)
+	if err != nil || len(entries) == 0 {
+		t.Fatalf("no log file written (%v): %v", err, entries)
+	}
+	var logged strings.Builder
+	for _, e := range entries {
+		data, err := os.ReadFile(filepath.Join(logDir, e.Name()))
+		if err != nil {
+			t.Fatalf("read %s: %v", e.Name(), err)
+		}
+		logged.Write(data)
+	}
+	assertContainsAll(t, logged.String(), "session tokens: transcript unreadable", `"session_id":"warn-tokens"`, `"agent":"Claude Code"`, `"reason":"not_found"`)
+	for _, absent := range []string{transcriptPath, "secret-project-name", `"error"`} {
+		if strings.Contains(logged.String(), absent) {
+			t.Errorf("the log must not carry %q:\n%s", absent, logged.String())
+		}
+	}
+	if got := transcriptUnavailableReason(errors.New("permission denied")); got != "unreadable" {
+		t.Errorf("transcriptUnavailableReason(other) = %q, want unreadable", got)
 	}
 }
 

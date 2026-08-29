@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"log/slog"
 	"math/bits"
 	"os"
@@ -276,10 +277,13 @@ func attributeSessionTokens(ctx context.Context, state *strategy.SessionState, m
 	}
 	data, transcriptPath, err := readSessionTranscript(state)
 	if err != nil {
+		// The error names the transcript path (user content); the log sinks
+		// to a file, so only a classification is logged.
 		a.notes = append(a.notes, "transcript unavailable"+sessionTokensStateFallback)
 		logging.Warn(ctx, "session tokens: transcript unreadable",
 			slog.String("session_id", state.SessionID),
-			slog.String("error", err.Error()))
+			slog.String("agent", string(state.AgentType)),
+			slog.String("reason", transcriptUnavailableReason(err)))
 		return a
 	}
 	subagentsDir := paths.SubagentsDir(filepath.Dir(transcriptPath), state.SessionID)
@@ -299,6 +303,16 @@ func attributeSessionTokens(ctx context.Context, state *strategy.SessionState, m
 	applySkillEventAnchors(attribution, state.SkillEvents)
 	a.attribution = attribution
 	return a
+}
+
+// transcriptUnavailableReason classifies a readSessionTranscript error for
+// the log: "not_found" when the file does not exist, else "unreadable".
+// Neither carries the path.
+func transcriptUnavailableReason(err error) string {
+	if errors.Is(err, fs.ErrNotExist) {
+		return "not_found"
+	}
+	return "unreadable"
 }
 
 // readSessionTranscript resolves the session's live transcript path (the
