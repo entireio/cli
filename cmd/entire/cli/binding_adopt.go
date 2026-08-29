@@ -81,27 +81,28 @@ func ensureSessionReplicated(ctx context.Context, sessionID string, meta binding
 	// existence check runs under the target's session-state lock, both for a
 	// marked and an unmarked repo, so a replica removed between an unlocked
 	// check and the write (cleanup, stale-state collection) is rebuilt rather
-	// than assumed present. The lock timeout bounds the ACQUIRE only; the
-	// state build gets a context that cannot expire — it reads git status
-	// through StatusWithBudget, whose breach latch is process-wide, and a 2s
-	// lock deadline must not put the launching repo's own capture into
-	// degraded mode for the rest of this hook.
+	// than assumed present. The lock timeout bounds the ACQUIRE only
+	// (WithSessionStateLocks uses its ctx for that alone); the work inside
+	// runs under the hook's own ctx so the agent's deadline and a Ctrl-C are
+	// still honored, and the target's status walk gets its own small,
+	// isolated budget (see targetWorktreeBaseline) so a slow foreign repo can
+	// neither hold the target's lock for long nor arm the process-wide status
+	// latch that would degrade the launching repo's own capture.
 	lockCtx, cancel := context.WithTimeout(ctx, bindingAdoptLockTimeout)
 	defer cancel()
-	buildCtx := context.WithoutCancel(ctx)
 	err = strategy.WithSessionStateLocks(lockCtx, sessionID, []string{ev.Repo.CommonDir}, func() error {
-		existing, loadErr := targetStore.Load(buildCtx, sessionID)
+		existing, loadErr := targetStore.Load(ctx, sessionID)
 		if loadErr != nil {
 			return fmt.Errorf("load target session state: %w", loadErr)
 		}
 		if existing != nil {
 			return nil
 		}
-		state, buildErr := buildReplicatedSessionState(buildCtx, source, rec, meta, ev.Repo, ev.Files)
+		state, buildErr := buildReplicatedSessionState(ctx, source, rec, meta, ev.Repo, ev.Files)
 		if buildErr != nil {
 			return buildErr
 		}
-		if saveErr := targetStore.Save(buildCtx, state); saveErr != nil {
+		if saveErr := targetStore.Save(ctx, state); saveErr != nil {
 			return fmt.Errorf("save target session state: %w", saveErr)
 		}
 		return nil
@@ -138,7 +139,7 @@ func buildReplicatedSessionState(ctx context.Context, source *session.State, rec
 	if err != nil {
 		return nil, fmt.Errorf("resolve target worktree ID: %w", err)
 	}
-	untrackedFiles := targetUntrackedFiles(ctx, repo)
+	untrackedFiles, dirtyTrackedFiles := targetWorktreeBaseline(ctx, repo)
 
 	now := time.Now()
 	var replicated session.State
@@ -175,37 +176,49 @@ func buildReplicatedSessionState(ctx context.Context, source *session.State, rec
 	}
 
 	resetSessionStateForTarget(&replicated, sessionTargetSnapshot{
-		headHash:       head.Hash().String(),
-		worktreeRoot:   target.WorktreeRoot,
-		worktreeID:     worktreeID,
-		branch:         strategy.GetCurrentBranchName(repo),
-		filesTouched:   append([]string(nil), evidenceFiles...),
-		untrackedFiles: untrackedFiles,
-		now:            now,
+		headHash:          head.Hash().String(),
+		worktreeRoot:      target.WorktreeRoot,
+		worktreeID:        worktreeID,
+		branch:            strategy.GetCurrentBranchName(repo),
+		filesTouched:      append([]string(nil), evidenceFiles...),
+		untrackedFiles:    untrackedFiles,
+		dirtyTrackedFiles: dirtyTrackedFiles,
+		now:               now,
 	}, true)
 	return &replicated, nil
 }
 
-// targetUntrackedFiles seeds the replica's untracked baseline. It is
-// best-effort: without it, files that already existed untracked in the target
-// would be attributed to the session as new, so a failure is worth a log line
-// even though adoption proceeds.
-func targetUntrackedFiles(ctx context.Context, repo *git.Repository) []string {
-	status, err := gitrepo.StatusWithBudget(ctx, repo)
+// bindingAdoptStatusBudget bounds the target's status walk during adoption.
+// It runs under the target's session-state lock, which every hook in that
+// repo waits on, so it must stay far below StatusWalkBudget.
+const bindingAdoptStatusBudget = 5 * time.Second
+
+// targetWorktreeBaseline seeds the replica's two baselines from one status
+// walk: untracked files (so pre-existing untracked files are not attributed
+// as new) and tracked paths already modified/deleted/staged (so a replayed
+// turn-end, which has no pre-prompt baseline, does not attribute the user's
+// own pending edits or deletions to the session). Best-effort: a failure is
+// logged and adoption proceeds with empty baselines.
+func targetWorktreeBaseline(ctx context.Context, repo *git.Repository) (untracked, dirtyTracked []string) {
+	status, err := gitrepo.StatusWithIsolatedBudget(ctx, repo, bindingAdoptStatusBudget)
 	if err != nil {
-		logging.Warn(logging.WithComponent(ctx, "binding"), "adopted target's untracked baseline unavailable; pre-existing untracked files may be attributed to the session",
+		logging.Warn(logging.WithComponent(ctx, "binding"), "adopted target's worktree baseline unavailable; pre-existing untracked files and pending edits may be attributed to the session",
 			slog.String("error", err.Error()))
-		return nil
+		return nil, nil
 	}
-	var untracked []string
 	for name, fileStatus := range status {
 		if name == ".entire" || strings.HasPrefix(name, ".entire/") {
 			continue
 		}
-		if fileStatus.Worktree == git.Untracked || fileStatus.Staging == git.Untracked {
-			untracked = append(untracked, filepath.ToSlash(name))
+		slashed := filepath.ToSlash(name)
+		switch {
+		case fileStatus.Worktree == git.Untracked || fileStatus.Staging == git.Untracked:
+			untracked = append(untracked, slashed)
+		case fileStatus.Worktree != git.Unmodified || fileStatus.Staging != git.Unmodified:
+			dirtyTracked = append(dirtyTracked, slashed)
 		}
 	}
 	sort.Strings(untracked)
-	return untracked
+	sort.Strings(dirtyTracked)
+	return untracked, dirtyTracked
 }

@@ -122,8 +122,22 @@ func (s *ManualCommitStrategy) SaveStep(ctx context.Context, step StepContext) e
 			state.TranscriptIdentifierAtStart = step.StepTranscriptIdentifier
 		}
 		if step.TokenUsage != nil {
+			var subagentBefore *agent.TokenUsage
+			if state.TokenUsage != nil {
+				subagentBefore = state.TokenUsage.SubagentTokens
+			}
 			state.TokenUsage = accumulateTokenUsage(state.TokenUsage, step.TokenUsage)
-			if !step.TokensAttributedElsewhere {
+			if step.TokensAttributedElsewhere {
+				// This turn's share belongs on another repo's checkpoint: the
+				// main-agent delta is simply not added to the pending
+				// checkpoint, and the growth of the cumulative subagent
+				// snapshot during this turn is folded into the baseline so the
+				// rescope below — run on a later primary turn in this window —
+				// cannot re-absorb it. The session-wide total above keeps it.
+				if grown := types.SubtractTokenUsage(state.TokenUsage.SubagentTokens, subagentBefore); grown != nil {
+					state.SubagentTokensBaseline = types.AddTokenUsage(state.SubagentTokensBaseline, grown)
+				}
+			} else {
 				state.CheckpointTokenUsage = accumulateTokenUsage(state.CheckpointTokenUsage, step.TokenUsage)
 			}
 			// step.TokenUsage.SubagentTokens is a cumulative-since-session-start
@@ -150,7 +164,7 @@ func (s *ManualCommitStrategy) SaveStep(ctx context.Context, step StepContext) e
 			// that would double-subtract and (via clampSubtract) shrink or zero a
 			// real subagent total. Recomputing from the session-wide cumulative
 			// is idempotent regardless of whether this step carried a snapshot.
-			if state.CheckpointTokenUsage != nil {
+			if state.CheckpointTokenUsage != nil && !step.TokensAttributedElsewhere {
 				state.CheckpointTokenUsage.SubagentTokens = types.SubtractTokenUsage(
 					state.TokenUsage.SubagentTokens, state.SubagentTokensBaseline)
 			}

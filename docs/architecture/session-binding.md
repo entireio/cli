@@ -40,10 +40,13 @@ Rules that are load-bearing:
 - **The existence check runs under the target's session-state lock**, for a
   marked and an unmarked repo alike. The record's `adopted_at` is a hint;
   a replica removed by cleanup is rebuilt from the next evidence.
-- **The lock timeout (2s) bounds only the acquire.** The state build reads git
-  status through `StatusWithBudget`, whose breach latch is process-wide, so it
-  runs under a context that cannot expire — a slow target must not put the
-  launching repo's own capture into degraded mode.
+- **The lock timeout (2s) bounds only the acquire.** The work inside runs
+  under the hook's own context (agent deadline and Ctrl-C still apply), and
+  the target's status walk uses `gitrepo.StatusWithIsolatedBudget` with a 5s
+  budget: a slow foreign repo neither holds the target's lock for long nor
+  arms the process-wide status latch that would degrade the launching repo's
+  own capture. That walk seeds two baselines — untracked files and already
+  dirty tracked paths (`DirtyTrackedFilesAtStart`).
 - **A linked worktree of the launching clone is never a target.** Session
   state is shared across a clone's worktrees, so the "target store" would be
   the source's own; its evidence is recorded, nothing is replicated, and
@@ -63,10 +66,11 @@ checkpoint the target silently missed.
 
 Inside a replay child:
 
-- With no pre-prompt baseline in the target, the turn is credited only with
-  transcript-evidenced files: the git-status fallback for modified files is
-  withheld and new/deleted files are narrowed to evidenced paths, so the
-  target's pre-existing dirty edits are not attributed to the session.
+- With no pre-prompt baseline in the target, tracked changes are credited to
+  the turn only when they are not in the replica's dirty-tracked baseline
+  (the user's pending edits stay out; the agent's edits and deletions — which
+  no transcript names — stay in), and new files only when the transcript
+  evidences them.
 - **Tokens exist once per turn.** The token-primary repo (latest evidence)
   puts them on its checkpoint; every other repo still folds them into its
   session-wide total (`StepContext.TokensAttributedElsewhere` — the transcript
@@ -74,6 +78,12 @@ Inside a replay child:
   into its pending checkpoint delta.
 - The tap does not run (`ENTIRE_BINDING_REPLAY` short-circuits it), so a
   replay never fans out again.
+
+Known limits: the launching process decides token attribution before the
+replay runs, so if the primary repo's replay child fails or times out, that
+turn's tokens land on no checkpoint (the session totals are unaffected). And
+since the adopted marker is only a hint, every turn re-takes the target's
+lock for each already-adopted repo — correct, but no longer free.
 
 Commit linking is unchanged: a commit in the target links to the session
 through the identity-first matcher in `strategy/session_identity.go`.

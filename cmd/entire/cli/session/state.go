@@ -240,6 +240,13 @@ type State struct {
 
 	// UntrackedFilesAtStart tracks files that existed at session start (to preserve during rewind)
 	UntrackedFilesAtStart []string `json:"untracked_files_at_start,omitempty"`
+	// DirtyTrackedFilesAtStart lists tracked paths that were already modified,
+	// deleted or staged in the worktree when a bound session was replicated
+	// into this repository (cross-repo session binding). A replayed turn-end
+	// there has no pre-prompt baseline, so it subtracts these from git-status
+	// changes to avoid attributing the user's own pending edits to the session.
+	// Empty for sessions launched in this repository.
+	DirtyTrackedFilesAtStart []string `json:"dirty_tracked_files_at_start,omitempty"`
 
 	// FilesTouched tracks files modified/created/deleted during this session
 	FilesTouched []string `json:"files_touched,omitempty"`

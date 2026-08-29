@@ -1012,29 +1012,33 @@ func handleLifecycleTurnEnd(ctx context.Context, ag agent.Agent, event *agent.Ev
 	}
 	// A replay child without a pre-prompt baseline sees the target repo's
 	// whole working tree as "changed": the user's own uncommitted edits and
-	// deletions there predate the session. With no baseline to subtract, the
-	// only files this turn can be credited with are the ones the transcript
-	// names, so the git-status fallback (which exists to catch what transcript
-	// parsing missed) is withheld and New/Deleted are narrowed to evidenced
-	// paths, mirroring the untracked-file rule below.
+	// deletions there predate the session. The replica carries the baseline
+	// adoption snapshotted (DirtyTrackedFilesAtStart), so tracked changes are
+	// credited to the turn only when they are NOT in it — a deletion the agent
+	// made is kept (transcripts never name deletions, so evidence-narrowing
+	// would drop every deletion), the user's pending edit is not. New files
+	// follow the untracked rule below: only evidenced ones count.
 	replayWithoutBaseline := bindingReplayActive() && preState == nil
 	transcriptEvidenced := relModifiedFiles
 	var relNewFiles, relDeletedFiles []string
 	if changes != nil {
 		relNewFiles = FilterAndNormalizePaths(changes.New, repoRoot)
 		relDeletedFiles = FilterAndNormalizePaths(changes.Deleted, repoRoot)
+		statusModified := FilterAndNormalizePaths(changes.Modified, repoRoot)
+		if replayWithoutBaseline {
+			dirtyAtStart := replicaDirtyTrackedBaseline(ctx, sessionID)
+			relDeletedFiles = excludeFiles(relDeletedFiles, dirtyAtStart)
+			statusModified = excludeFiles(statusModified, dirtyAtStart)
+		}
 
 		// Merge git-status modified files as a fallback for transcript parsing.
 		// Transcript parsing is the primary source for modified files, but it can miss
 		// files if the agent uses an unrecognized tool or the transcript format changes.
 		// Git status catches any tracked file with working-tree changes.
-		if !replayWithoutBaseline {
-			relModifiedFiles = mergeUnique(relModifiedFiles, FilterAndNormalizePaths(changes.Modified, repoRoot))
-		}
+		relModifiedFiles = mergeUnique(relModifiedFiles, statusModified)
 	}
 	if replayWithoutBaseline {
 		relNewFiles = filterBindingReplayNewFiles(relNewFiles, transcriptEvidenced)
-		relDeletedFiles = filterBindingReplayNewFiles(relDeletedFiles, transcriptEvidenced)
 		if len(relNewFiles) > 0 {
 			newSet := make(map[string]struct{}, len(relNewFiles))
 			for _, file := range relNewFiles {
