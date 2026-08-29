@@ -3,7 +3,6 @@ package codex
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -185,20 +184,12 @@ func pollForRollout(ctx context.Context, sessionDir, threadID string, stop <-cha
 
 // parseRolloutTokenCount extracts cumulative input/output token totals from one
 // rollout JSONL line. ok is false for any line that isn't a token_count event
-// carrying total_token_usage. Reuses the rolloutLine/eventMsgPayload/
-// tokenCountInfo shapes from transcript.go so the two readers can't drift.
+// carrying total_token_usage. Reads through tokenCountTotal (transcript.go) so
+// this reader and CalculateTokenUsage can't drift.
 func parseRolloutTokenCount(data []byte) (in, out int, ok bool) {
-	var line rolloutLine
-	if json.Unmarshal(data, &line) != nil || line.Type != "event_msg" {
+	total := tokenCountTotal(data)
+	if total == nil {
 		return 0, 0, false
 	}
-	var evt eventMsgPayload
-	if json.Unmarshal(line.Payload, &evt) != nil || evt.Type != "token_count" || len(evt.Info) == 0 {
-		return 0, 0, false
-	}
-	var info tokenCountInfo
-	if json.Unmarshal(evt.Info, &info) != nil || info.TotalTokenUsage == nil {
-		return 0, 0, false
-	}
-	return info.TotalTokenUsage.InputTokens, info.TotalTokenUsage.OutputTokens, true
+	return total.InputTokens, total.OutputTokens, true
 }

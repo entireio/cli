@@ -47,6 +47,13 @@ type responseItemPayload struct {
 	Name    string          `json:"name,omitempty"`
 	Input   string          `json:"input,omitempty"`   // apply_patch input (plain text, not JSON)
 	Content json.RawMessage `json:"content,omitempty"` // for messages
+	// Arguments is a function_call's JSON-encoded arguments object, as a string.
+	Arguments string `json:"arguments,omitempty"`
+	// CallID joins a function_call / custom_tool_call to its *_output row.
+	CallID string `json:"call_id,omitempty"`
+	// Output is a *_output row's result, kept raw: current builds write a
+	// string, older ones an object.
+	Output json.RawMessage `json:"output,omitempty"`
 }
 
 // contentItem is a single content block in a message.
@@ -66,12 +73,17 @@ type tokenCountInfo struct {
 	TotalTokenUsage *tokenUsageData `json:"total_token_usage,omitempty"`
 }
 
-// tokenUsageData maps to Codex's token usage fields.
+// tokenUsageData maps to Codex's cumulative token usage fields. It is
+// comparable so two token_count rows carrying the same total can be told
+// apart from two distinct API calls.
 type tokenUsageData struct {
 	InputTokens           int `json:"input_tokens"`
 	CachedInputTokens     int `json:"cached_input_tokens"`
 	OutputTokens          int `json:"output_tokens"`
 	ReasoningOutputTokens int `json:"reasoning_output_tokens"`
+	// CacheWriteInputTokens is the part of InputTokens written to the prompt
+	// cache; absent (0) on models that do not bill cache writes.
+	CacheWriteInputTokens int `json:"cache_write_input_tokens"`
 	TotalTokens           int `json:"total_tokens"`
 }
 
@@ -266,39 +278,29 @@ func classifyApplyPatchPaths(input string) (added, modified, deleted []string) {
 
 // CalculateTokenUsage computes token usage from the transcript starting at the given line offset.
 // Codex reports cumulative total_token_usage, so we compute the delta between the last
-// token_count at/before the offset and the last token_count after the offset.
+// token_count at/before the offset and the last token_count after the offset. Lines are
+// counted as splitJSONL yields them (1-based here; fromOffset N means N lines precede the
+// slice). APICallCount is the number of DISTINCT totals after the offset: Codex often
+// writes the same cumulative total twice in a row, and a repeat is not another call — nor
+// is a repeat of the baseline that lands after the offset.
 func (c *CodexAgent) CalculateTokenUsage(transcriptData []byte, fromOffset int) (*agent.TokenUsage, error) {
-	var baselineUsage *tokenUsageData // last token_count at or before offset
-	var lastUsage *tokenUsageData     // last token_count after offset
+	var baselineUsage *tokenUsageData // last distinct token_count at or before offset
+	var lastUsage *tokenUsageData     // last distinct token_count after offset
+	var prevTotal *tokenUsageData     // last distinct token_count anywhere
 	apiCalls := 0
 	lineNum := 0
 
 	for _, lineData := range splitJSONL(transcriptData) {
 		lineNum++
-
-		var line rolloutLine
-		if json.Unmarshal(lineData, &line) != nil {
+		total := tokenCountTotal(lineData)
+		if total == nil || (prevTotal != nil && *total == *prevTotal) {
 			continue
 		}
-		if line.Type != "event_msg" {
-			continue
-		}
-		var evt eventMsgPayload
-		if json.Unmarshal(line.Payload, &evt) != nil {
-			continue
-		}
-		if evt.Type != "token_count" || len(evt.Info) == 0 {
-			continue
-		}
-		var info tokenCountInfo
-		if json.Unmarshal(evt.Info, &info) != nil || info.TotalTokenUsage == nil {
-			continue
-		}
-
+		prevTotal = total
 		if lineNum <= fromOffset {
-			baselineUsage = info.TotalTokenUsage
+			baselineUsage = total
 		} else {
-			lastUsage = info.TotalTokenUsage
+			lastUsage = total
 			apiCalls++
 		}
 	}
@@ -306,34 +308,66 @@ func (c *CodexAgent) CalculateTokenUsage(transcriptData []byte, fromOffset int) 
 	if lastUsage == nil {
 		return nil, nil //nolint:nilnil // no usage data found
 	}
+	usage := tokenUsageDelta(lastUsage, baselineUsage, apiCalls)
+	return &usage, nil
+}
 
-	// Subtract baseline to get the delta for this checkpoint range
-	inputTokens := lastUsage.InputTokens
-	cacheReadTokens := lastUsage.CachedInputTokens
-	outputTokens := lastUsage.OutputTokens
-	reasoningTokens := lastUsage.ReasoningOutputTokens // ⊂ output_tokens
-	if baselineUsage != nil {
-		inputTokens -= baselineUsage.InputTokens
-		cacheReadTokens -= baselineUsage.CachedInputTokens
-		outputTokens -= baselineUsage.OutputTokens
-		reasoningTokens -= baselineUsage.ReasoningOutputTokens
+// tokenCountTotal returns the total_token_usage of an event_msg/token_count
+// row, or nil when the row is anything else (including a token_count whose
+// info is null, as Codex writes for rate-limit-only updates) or malformed.
+func tokenCountTotal(lineData []byte) *tokenUsageData {
+	var line rolloutLine
+	if json.Unmarshal(lineData, &line) != nil {
+		return nil
 	}
-	if reasoningTokens < 0 {
-		reasoningTokens = 0
-	}
+	return lineTokenCountTotal(&line)
+}
 
-	freshInputTokens := inputTokens - cacheReadTokens
-	if freshInputTokens < 0 {
-		freshInputTokens = 0
+// lineTokenCountTotal is tokenCountTotal on an already-decoded envelope.
+func lineTokenCountTotal(line *rolloutLine) *tokenUsageData {
+	if line.Type != rolloutLineTypeEventMsg {
+		return nil
 	}
+	var evt eventMsgPayload
+	if json.Unmarshal(line.Payload, &evt) != nil || evt.Type != eventMsgTypeTokenCount || len(evt.Info) == 0 {
+		return nil
+	}
+	var info tokenCountInfo
+	if json.Unmarshal(evt.Info, &info) != nil {
+		return nil
+	}
+	return info.TotalTokenUsage
+}
 
-	return &agent.TokenUsage{
-		InputTokens:     freshInputTokens,
-		CacheReadTokens: cacheReadTokens,
-		OutputTokens:    outputTokens,
-		ThinkingTokens:  reasoningTokens,
-		APICallCount:    apiCalls,
-	}, nil
+// tokenUsageDelta converts the cumulative total at the end of a range into
+// that range's own usage by subtracting the cumulative total before it
+// (baseline nil = the session start). Codex's input_tokens includes the cached
+// part, so fresh input is Δinput − Δcached; reasoning is a subset of output.
+// Negative fresh-input and reasoning deltas are clamped to 0.
+func tokenUsageDelta(last, baseline *tokenUsageData, apiCalls int) agent.TokenUsage {
+	inputTokens := last.InputTokens
+	cacheReadTokens := last.CachedInputTokens
+	cacheWriteTokens := last.CacheWriteInputTokens
+	outputTokens := last.OutputTokens
+	reasoningTokens := last.ReasoningOutputTokens // ⊂ output_tokens
+	if baseline != nil {
+		inputTokens -= baseline.InputTokens
+		cacheReadTokens -= baseline.CachedInputTokens
+		cacheWriteTokens -= baseline.CacheWriteInputTokens
+		outputTokens -= baseline.OutputTokens
+		reasoningTokens -= baseline.ReasoningOutputTokens
+	}
+	reasoningTokens = max(reasoningTokens, 0)
+	freshInputTokens := max(inputTokens-cacheReadTokens, 0)
+
+	return agent.TokenUsage{
+		InputTokens:         freshInputTokens,
+		CacheCreationTokens: cacheWriteTokens,
+		CacheReadTokens:     cacheReadTokens,
+		OutputTokens:        outputTokens,
+		ThinkingTokens:      reasoningTokens,
+		APICallCount:        apiCalls,
+	}
 }
 
 // ExtractPrompts returns user prompts from the transcript starting at the given offset.
