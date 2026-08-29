@@ -35,8 +35,11 @@ var bareRedirectPattern = regexp.MustCompile(`^&?\d*[<>]{1,3}&?$`)
 //     starts with `.`, or contains `*`) — command, subcommand, and the
 //     path or glob it targets. `go test ./cmd/entire/... -run TestX` →
 //     `go test ./cmd/entire/...`; `git log -p -3` → `git log`;
-//     `npm run build` → `npm run`. The raw command is never returned: it is
-//     user content and is not stored.
+//     `npm run build` → `npm run`. Words that can carry secrets are never
+//     kept (isSensitiveWord: contain `://` or `@`, or start with `$`), so
+//     `curl https://user:pass@example.com/x` → `curl` and `echo $TOKEN` →
+//     `echo`. The raw command is never returned: it is user content and is
+//     not stored.
 //   - file tools (Read, Edit, Write, MultiEdit, NotebookEdit, read_file,
 //     write_file, edit_file, apply_patch): ToolInput.AnyFilePath, falling
 //     back to NotebookPath.
@@ -81,6 +84,8 @@ func shellCommandHead(cmd string) string {
 			// punctuation.
 		case skipNext:
 			skipNext = false // the target of a bare redirection operator
+		case isSensitiveWord(tok):
+			// URL, address or variable expansion: may carry a credential.
 		case bareRedirectPattern.MatchString(tok):
 			skipNext = true
 		case strings.ContainsAny(tok, "<>"):
@@ -101,6 +106,14 @@ func shellCommandHead(cmd string) string {
 		}
 	}
 	return strings.Join(words, " ")
+}
+
+// isSensitiveWord reports whether a command word could carry a credential or
+// other secret and so must never appear in a detail: a URL or anything else
+// with `://` (userinfo, tokens in paths), an `@` (user@host, git remotes,
+// email addresses), or a `$` expansion whose value is unknown.
+func isSensitiveWord(tok string) bool {
+	return strings.Contains(tok, "://") || strings.Contains(tok, "@") || strings.HasPrefix(tok, "$")
 }
 
 // isPathLikeWord reports whether a command word names a path or glob target

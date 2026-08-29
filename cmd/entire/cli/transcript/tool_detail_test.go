@@ -20,7 +20,6 @@ func TestToolDetail(t *testing.T) {
 	}{
 		// Shell tools.
 		{name: "bash plain command", tool: toolBash, in: ToolInput{Command: "ls"}, want: "ls"},
-		{name: "bash two words", tool: toolBash, in: ToolInput{Command: "npm run build"}, want: "npm run"},
 		{name: "bash flags dropped", tool: toolBash, in: ToolInput{Command: "git log -p -3"}, want: "git log"},
 		{name: "bash long flag with value dropped", tool: toolBash, in: ToolInput{Command: "git log --since=yesterday --oneline"}, want: "git log"},
 		{name: "bash flag dropped but its separate value is kept, plain third word dropped", tool: toolBash, in: ToolInput{Command: "docker -H host ps -a"}, want: "docker host"},
@@ -56,7 +55,14 @@ func TestToolDetail(t *testing.T) {
 		{name: "bash input redirect dropped", tool: toolBash, in: ToolInput{Command: "sort < in.txt"}, want: "sort"},
 		{name: "bash subshell grouping stripped", tool: toolBash, in: ToolInput{Command: "(cd x && make all)"}, want: "make all"},
 		{name: "bash brace group stripped", tool: toolBash, in: ToolInput{Command: "{ a; b two; }"}, want: "b two"},
-		{name: "bash substitution kept intact", tool: toolBash, in: ToolInput{Command: "echo $(date)"}, want: "echo $(date)"},
+		{name: "bash substitution is an expansion and dropped", tool: toolBash, in: ToolInput{Command: "echo $(date)"}, want: "echo"},
+		{name: "bash url with credentials dropped", tool: toolBash, in: ToolInput{Command: "curl https://user:pass@example.com/x"}, want: "curl"},
+		{name: "bash plain url dropped", tool: toolBash, in: ToolInput{Command: "curl -s https://example.com/api?token=abc"}, want: "curl"},
+		{name: "bash variable expansion dropped", tool: toolBash, in: ToolInput{Command: "echo $TOKEN"}, want: "echo"},
+		{name: "bash braced expansion dropped", tool: toolBash, in: ToolInput{Command: "echo ${TOKEN}"}, want: "echo"},
+		{name: "bash git remote url dropped", tool: toolBash, in: ToolInput{Command: "git remote add origin git@example.com:o/r.git"}, want: "git remote"},
+		{name: "bash scp address dropped", tool: toolBash, in: ToolInput{Command: "scp user@example.com:/x ./y"}, want: "scp ./y"},
+		{name: "bash expansion then path-like word", tool: toolBash, in: ToolInput{Command: "go test $PKG ./..."}, want: "go test ./..."},
 		{name: "bash only flags", tool: toolBash, in: ToolInput{Command: "--version"}, want: ""},
 		{name: "bash only quoted", tool: toolBash, in: ToolInput{Command: `"whole thing"`}, want: ""},
 		{name: "bash empty command", tool: toolBash, in: ToolInput{Command: ""}, want: ""},
@@ -162,35 +168,6 @@ func TestToolInput_AnyFilePath(t *testing.T) {
 
 			if got := tt.in.AnyFilePath(); got != tt.want {
 				t.Errorf("AnyFilePath(%+v) = %q, want %q", tt.in, got, tt.want)
-			}
-		})
-	}
-}
-
-func TestToolInput_RawDetail(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name string
-		in   ToolInput
-		want string
-	}{
-		{name: "none", in: ToolInput{}, want: ""},
-		{name: "description first", in: ToolInput{Description: "d", Command: "c", FilePath: "f", FilePathCamel: "fc", Path: "p", Pattern: "pt"}, want: "d"},
-		{name: "command", in: ToolInput{Command: "c", FilePath: "f"}, want: "c"},
-		{name: "file_path", in: ToolInput{FilePath: "f", FilePathCamel: "fc", Path: "p"}, want: "f"},
-		{name: "filePath", in: ToolInput{FilePathCamel: "fc", Path: "p"}, want: "fc"},
-		{name: "path", in: ToolInput{Path: "p", Pattern: "pt"}, want: "p"},
-		{name: "pattern", in: ToolInput{Pattern: "pt"}, want: "pt"},
-		{name: "notebook_path, url, skill are not details", in: ToolInput{NotebookPath: "nb", URL: "u", Skill: "s", SubagentType: "t"}, want: ""},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-
-			if got := tt.in.RawDetail(); got != tt.want {
-				t.Errorf("RawDetail(%+v) = %q, want %q", tt.in, got, tt.want)
 			}
 		})
 	}

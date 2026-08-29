@@ -53,7 +53,9 @@ type ContentBlock struct {
 // OpenCode and Pi (path) use for the same thing. Decode a tool_use input into
 // it best-effort — a non-string value under one of these keys is skipped by
 // encoding/json rather than aborting the decode, so the remaining fields still
-// populate.
+// populate. Note encoding/json matches keys case-insensitively, so this type
+// is NOT suitable where the exact key spelling matters; compaction uses
+// RawToolDetail for that reason.
 type ToolInput struct {
 	FilePath     string `json:"file_path,omitempty"`
 	NotebookPath string `json:"notebook_path,omitempty"`
@@ -89,14 +91,30 @@ func (in ToolInput) AnyFilePath() string {
 	}
 }
 
-// RawDetail returns the first non-empty of Description, Command, FilePath,
-// FilePathCamel, Path and Pattern, verbatim. This is the string condensation
-// stores in checkpoints as the tool's detail, so its precedence is a stored
-// data contract: change it and previously written checkpoints stop matching
-// freshly condensed ones.
-func (in ToolInput) RawDetail() string {
-	for _, v := range []string{in.Description, in.Command, in.FilePath, in.FilePathCamel, in.Path, in.Pattern} {
-		if v != "" {
+// rawDetailKeys is the order RawToolDetail consults a tool_use input's keys.
+// It is a stored data contract (see RawToolDetail): do not reorder or extend.
+var rawDetailKeys = []string{"description", "command", "file_path", "filePath", "path", "pattern"}
+
+// RawToolDetail returns the first non-empty JSON string among a tool_use
+// input's description, command, file_path, filePath, path and pattern keys,
+// verbatim, matching key names EXACTLY (case-sensitive; `Command` and
+// `FILE_PATH` do not count). A value under a matching key that is not a
+// string (number, object, null) is skipped, and a raw input that is missing,
+// empty, or not a JSON object yields "".
+//
+// This is the string condensation stores in checkpoints as the tool's detail,
+// so the precedence and exact-key semantics are a stored data contract:
+// change them and previously written checkpoints stop matching freshly
+// condensed ones. It deliberately does not go through ToolInput, whose
+// encoding/json decoding folds key case.
+func RawToolDetail(raw json.RawMessage) string {
+	var input map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &input); err != nil {
+		return ""
+	}
+	for _, key := range rawDetailKeys {
+		var v string
+		if r, ok := input[key]; ok && json.Unmarshal(r, &v) == nil && v != "" {
 			return v
 		}
 	}

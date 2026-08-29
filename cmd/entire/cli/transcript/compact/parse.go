@@ -92,19 +92,10 @@ func BuildCondensedEntries(content []byte) ([]CondensedEntry, error) {
 						continue
 					}
 
-					// Best-effort decode: a non-string value under one key is
-					// skipped by encoding/json while the rest still populate,
-					// and a non-object input leaves the zero value — either
-					// way RawDetail yields what the old map-based lookup did.
-					var input transcript.ToolInput
-					if inputJSON, ok := block["input"]; ok && len(inputJSON) > 0 {
-						_ = json.Unmarshal(inputJSON, &input) //nolint:errcheck // best-effort, see above
-					}
-
 					entries = append(entries, CondensedEntry{
 						Type:       "tool",
 						ToolName:   toolName,
-						ToolDetail: input.RawDetail(),
+						ToolDetail: transcript.RawToolDetail(block["input"]),
 					})
 				}
 			}

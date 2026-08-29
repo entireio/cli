@@ -45,6 +45,12 @@ func TestBuildCondensedEntries_ToolDetail(t *testing.T) {
 		{name: "null input yields empty", input: `null`, want: ""},
 		{name: "non-object input yields empty", input: `"just a string"`, want: ""},
 		{name: "array input yields empty", input: `["a","b"]`, want: ""},
+		// Keys match exactly: case variants of a detail key are not details.
+		{name: "Command (capitalised) is not a key", input: `{"Command":"ls"}`, want: ""},
+		{name: "filepath (lowercase) is not a key", input: `{"filepath":"x"}`, want: ""},
+		{name: "FILE_PATH (uppercase) is not a key", input: `{"FILE_PATH":"x"}`, want: ""},
+		{name: "Path (capitalised) is not a key", input: `{"Path":"p"}`, want: ""},
+		{name: "case variant is skipped, exact key later in order wins", input: `{"Command":"ls","pattern":"pt"}`, want: "pt"},
 	}
 
 	for _, tt := range tests {

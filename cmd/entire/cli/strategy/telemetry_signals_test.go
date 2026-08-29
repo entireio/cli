@@ -177,6 +177,10 @@ func TestSearchHintsCoverPattern(t *testing.T) {
 		"echo hi; entire search foo",
 		"$(entire search foo)",
 		`entire search "two words"`,
+		// A here-string is not a heredoc opener; the command after it is live
+		// shell. The sanitizer misread `<<< x` as a heredoc before it moved
+		// to stringutil, which made this a false negative.
+		"cat <<< x; entire search foo",
 	}
 	for _, cmd := range accepted {
 		if !commandInvokesEntireSearch(cmd) {
