@@ -15,8 +15,8 @@ import (
 // session restarts from ENDED into IDLE.
 //
 // The first turn is committed before the session ends so that FilesTouched is
-// empty at session-end and eager condensation actually runs. That is what the
-// historical #411 failure needed: the restarted session must have been
+// empty at session-end and eager condensation actually runs. That setup is
+// load-bearing: the regression is only reachable when the restarted session was
 // FullyCondensed while ENDED. Without the commit, eager condensation skips on
 // non-empty FilesTouched, the session reaches ENDED with FullyCondensed still
 // false, and the test would stay green even if SessionStart stopped clearing
