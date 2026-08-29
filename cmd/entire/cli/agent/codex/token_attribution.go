@@ -3,6 +3,7 @@ package codex
 import (
 	"cmp"
 	"encoding/json"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -47,13 +48,11 @@ type turnContextPayload struct {
 // functionCallArguments is the decoded `arguments` JSON of a function_call,
 // reduced to the keys attribution reads. exec_command carries the script under
 // `cmd`; the older `shell` tool carried an argv array under `command`;
-// spawn_agent names its subagent under `agent_type` (never `subagent_type`),
-// and `model` is decoded in case a build records a requested model there.
+// spawn_agent names its subagent under `agent_type` (never `subagent_type`).
 type functionCallArguments struct {
 	Cmd       string          `json:"cmd"`
 	Command   json.RawMessage `json:"command"`
 	AgentType string          `json:"agent_type"`
-	Model     string          `json:"model"`
 }
 
 // timeSpan is the earliest and latest timestamp noted so far; zero until the
@@ -120,7 +119,11 @@ type attributionWalk struct {
 //   - Baseline: the last distinct total at or before startLine, as
 //     CalculateTokenUsage. A call with no prior total takes the raw
 //     cumulative total as its usage, matching CalculateTokenUsage from 0.
-//   - Line/At are the token_count row's index and timestamp. Model and
+//   - Line/At are the token_count row's index and timestamp — the LAST row of
+//     the call's group, not its first as types.CallUsage.Line describes for
+//     row-grouped agents: a Codex call has no row of its own before its
+//     token_count, and the tool calls that precede it are only known to be
+//     the call's once the total closes them. Model and
 //     Effort are the latest turn_context's `model` and `effort` (falling back
 //     to collaboration_mode.settings.model / .reasoning_effort), tracked
 //     across the full transcript so a call whose turn_context precedes
@@ -140,8 +143,11 @@ type attributionWalk struct {
 //   - ToolUseRef: ID is call_id, Tool the tool name, Detail is
 //     transcript.ToolDetail on a transcript.ToolInput built from the
 //     arguments: Command from `cmd`, or from a `command` argv array joined
-//     with spaces — a `<shell> -c|-lc <script>` argv unwrapped to the script
-//     first; SubagentType/Model from `agent_type`/`model`. For apply_patch
+//     with spaces (lossy; only ever reduced by ToolDetail) — a
+//     `<shell> -c|-lc <script>` argv unwrapped to the script first;
+//     SubagentType from `agent_type`. ToolUseRef.Model stays "": no Codex
+//     build has been seen recording a requested model on spawn_agent, and
+//     the subagent's model is that thread's own. For apply_patch
 //     (a custom_tool_call whose Input is the patch text) the input is the
 //     first `*** Add|Update|Delete File:` path, so Detail is that path; any
 //     other custom tool has "". A function_call whose arguments do not decode
@@ -304,10 +310,8 @@ func toolUseRefFrom(item *responseItemPayload) types.ToolUseRef {
 		}
 		in.Command = shellCommandFromArguments(&args)
 		in.SubagentType = args.AgentType
-		in.Model = args.Model
 		if item.Name == toolNameSpawnAgent {
 			ref.SubagentType = args.AgentType
-			ref.Model = args.Model
 		}
 	}
 	ref.Detail = transcript.ToolDetail(item.Name, in)
@@ -316,22 +320,34 @@ func toolUseRefFrom(item *responseItemPayload) types.ToolUseRef {
 
 // shellCommandFromArguments returns the shell script a tool call runs: `cmd`
 // when present (exec_command), else the `command` argv — the script itself
-// when the argv is `<shell> -c|-lc <script> …`, the words joined with spaces
-// otherwise; "" when neither key is usable.
+// when the argv is `<shell> -c|-lc <script> …` (isShellWrapper), the words
+// joined with spaces otherwise (lossy; only ever reduced by ToolDetail); ""
+// when `cmd` is empty and `command` is not a non-empty array.
 func shellCommandFromArguments(args *functionCallArguments) string {
 	if args.Cmd != "" {
 		return args.Cmd
 	}
 	var argv []string
 	if json.Unmarshal(args.Command, &argv) != nil || len(argv) == 0 {
-		var single string
-		if json.Unmarshal(args.Command, &single) == nil {
-			return single
-		}
 		return ""
 	}
-	if len(argv) >= 3 && (argv[1] == "-c" || argv[1] == "-lc") {
+	if isShellWrapper(argv) {
 		return argv[2]
 	}
 	return strings.Join(argv, " ")
+}
+
+// isShellWrapper reports whether argv is `<shell> -c|-lc <script> …` with a
+// POSIX shell as argv[0] (by basename), so that `git -c core.pager=cat log`
+// is not mistaken for a wrapper.
+func isShellWrapper(argv []string) bool {
+	if len(argv) < 3 || (argv[1] != "-c" && argv[1] != "-lc") {
+		return false
+	}
+	switch filepath.Base(argv[0]) {
+	case "sh", "bash", "zsh", "dash":
+		return true
+	default:
+		return false
+	}
 }

@@ -39,6 +39,7 @@ const (
 	fixtureModel       = "gpt-5.5"
 	fixtureEffortHigh  = "high"
 	fixtureToolExec    = "exec_command"
+	toolNameShell      = "shell"
 	fixtureDetailTest  = "go test ./..."
 	fixtureDetailPatch = "src/a.go"
 )
@@ -103,19 +104,9 @@ func fixtureOutputBytes(t *testing.T, line int) int {
 	return len(row.Payload.Output)
 }
 
-func assertRefs(t *testing.T, name string, got, want []types.ToolUseRef) {
-	t.Helper()
-	if len(got) != len(want) {
-		t.Fatalf("%s = %+v, want %+v", name, got, want)
-	}
-	for i := range want {
-		if got[i] != want[i] {
-			t.Errorf("%s[%d] = %+v, want %+v", name, i, got[i], want[i])
-		}
-	}
-}
-
-func assertConsumed(t *testing.T, name string, got, want []types.ToolResultRef) {
+// assertSame fails when got and want differ in length or in any element,
+// naming the first differing index.
+func assertSame[T comparable](t *testing.T, name string, got, want []T) {
 	t.Helper()
 	if len(got) != len(want) {
 		t.Fatalf("%s = %+v, want %+v", name, got, want)
@@ -234,13 +225,15 @@ func TestAttributeTokens_EmittedAndConsumed(t *testing.T) {
 	got := attributeFixture(t, 0, "")
 	c1, c2, c3 := got.Calls[0], got.Calls[1], got.Calls[2]
 
-	assertRefs(t, "call1.Emitted", c1.Emitted, []types.ToolUseRef{fixtureC1Ref})
-	assertConsumed(t, "call1.Consumed", c1.Consumed, []types.ToolResultRef{{ToolUse: fixtureC1Ref, Bytes: 5000}})
+	assertSame(t, "call1.Emitted", c1.Emitted, []types.ToolUseRef{fixtureC1Ref})
+	// c1's output is a 4998-character string: 5000 raw bytes pins that Bytes
+	// counts the JSON as written, quotes included.
+	assertSame(t, "call1.Consumed", c1.Consumed, []types.ToolResultRef{{ToolUse: fixtureC1Ref, Bytes: 5000}})
 
-	assertRefs(t, "call2.Emitted", c2.Emitted, []types.ToolUseRef{fixtureC2Ref, fixtureC3Ref})
-	assertConsumed(t, "call2.Consumed", c2.Consumed, []types.ToolResultRef{{ToolUse: fixtureC2Ref, Bytes: fixtureOutputBytes(t, fixtureLineC2Output)}})
+	assertSame(t, "call2.Emitted", c2.Emitted, []types.ToolUseRef{fixtureC2Ref, fixtureC3Ref})
+	assertSame(t, "call2.Consumed", c2.Consumed, []types.ToolResultRef{{ToolUse: fixtureC2Ref, Bytes: fixtureOutputBytes(t, fixtureLineC2Output)}})
 
-	assertRefs(t, "call3.Emitted", c3.Emitted, []types.ToolUseRef{fixtureC4Ref})
+	assertSame(t, "call3.Emitted", c3.Emitted, []types.ToolUseRef{fixtureC4Ref})
 	if len(c3.Consumed) != 0 {
 		t.Errorf("call3.Consumed = %+v, want none (no outputs between T2 and T3)", c3.Consumed)
 	}
@@ -292,7 +285,7 @@ func TestAttributeTokens_LabelsResolveAcrossStartLine(t *testing.T) {
 	if len(c1.Emitted) != 0 {
 		t.Errorf("call1.Emitted = %+v, want none (c1's function_call precedes startLine)", c1.Emitted)
 	}
-	assertConsumed(t, "call1.Consumed", c1.Consumed, []types.ToolResultRef{{ToolUse: fixtureC1Ref, Bytes: 5000}})
+	assertSame(t, "call1.Consumed", c1.Consumed, []types.ToolResultRef{{ToolUse: fixtureC1Ref, Bytes: 5000}})
 }
 
 func TestAttributeTokens_SubagentsDirYieldsNoRecords(t *testing.T) {
@@ -329,7 +322,8 @@ func TestAttributeTokens_EmptyAndGarbage(t *testing.T) {
 
 // TestAttributeTokens_ToolRefShapes pins the per-tool reduction on inline
 // rows: the legacy `shell` tool's argv array (`bash -lc <script>` unwrapped
-// to the script, any other argv joined), a function_call whose arguments do
+// to the script; `git -c …` NOT unwrapped; any other argv joined; a
+// non-array `command` yields no Detail), a function_call whose arguments do
 // not decode (id and name survive), a non-apply_patch custom tool, an output
 // whose call_id no row emitted (kept, id only), and a call before the first
 // turn_context (Model/Effort empty).
@@ -338,6 +332,8 @@ func TestAttributeTokens_ToolRefShapes(t *testing.T) {
 
 	data := `{"timestamp":"2026-08-28T11:00:00Z","type":"response_item","payload":{"type":"function_call","name":"shell","arguments":"{\"command\":[\"bash\",\"-lc\",\"npm run build\"]}","call_id":"s1"}}
 {"timestamp":"2026-08-28T11:00:01Z","type":"response_item","payload":{"type":"function_call","name":"shell","arguments":"{\"command\":[\"ls\",\"-la\",\"src/\"]}","call_id":"s2"}}
+{"timestamp":"2026-08-28T11:00:01Z","type":"response_item","payload":{"type":"function_call","name":"shell","arguments":"{\"command\":[\"git\",\"-c\",\"core.pager=cat\",\"log\"]}","call_id":"s2b"}}
+{"timestamp":"2026-08-28T11:00:01Z","type":"response_item","payload":{"type":"function_call","name":"shell","arguments":"{\"command\":\"npm run build\"}","call_id":"s2c"}}
 {"timestamp":"2026-08-28T11:00:02Z","type":"response_item","payload":{"type":"function_call","name":"exec_command","arguments":"not json","call_id":"s3"}}
 {"timestamp":"2026-08-28T11:00:03Z","type":"response_item","payload":{"type":"custom_tool_call","name":"other_tool","input":"*** Update File: not/a/patch.go","call_id":"s4"}}
 {"timestamp":"2026-08-28T11:00:04Z","type":"response_item","payload":{"type":"function_call_output","call_id":"orphan","output":"12345"}}
@@ -351,13 +347,18 @@ func TestAttributeTokens_ToolRefShapes(t *testing.T) {
 	if call.Model != "" || call.Effort != "" {
 		t.Errorf("Model/Effort = %q/%q, want empty before any turn_context", call.Model, call.Effort)
 	}
-	assertRefs(t, "Emitted", call.Emitted, []types.ToolUseRef{
-		{ID: "s1", Tool: "shell", Detail: "npm run"},
-		{ID: "s2", Tool: "shell", Detail: "ls src/"},
+	assertSame(t, "Emitted", call.Emitted, []types.ToolUseRef{
+		{ID: "s1", Tool: toolNameShell, Detail: "npm run"},
+		{ID: "s2", Tool: toolNameShell, Detail: "ls src/"},
+		// Not a shell wrapper, so not unwrapped: ToolDetail sees the joined
+		// argv (its own reduction keeps `core.pager=cat`, a `-c` operand the
+		// env-assignment rule does not match).
+		{ID: "s2b", Tool: toolNameShell, Detail: "git core.pager=cat"},
+		{ID: "s2c", Tool: toolNameShell},
 		{ID: "s3", Tool: fixtureToolExec},
 		{ID: "s4", Tool: "other_tool"},
 	})
-	assertConsumed(t, "Consumed", call.Consumed, []types.ToolResultRef{{ToolUse: types.ToolUseRef{ID: "orphan"}, Bytes: len(`"12345"`)}})
+	assertSame(t, "Consumed", call.Consumed, []types.ToolResultRef{{ToolUse: types.ToolUseRef{ID: "orphan"}, Bytes: len(`"12345"`)}})
 	if want := (types.TokenUsage{InputTokens: 100, OutputTokens: 10, APICallCount: 1}); call.Usage != want {
 		t.Errorf("Usage = %+v, want %+v", call.Usage, want)
 	}
