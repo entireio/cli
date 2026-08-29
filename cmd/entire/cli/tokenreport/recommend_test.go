@@ -295,6 +295,14 @@ func deepSkillReport() Report {
 	return r
 }
 
+// multiSessionSkillReport merges two sessions in which the skill was loaded
+// three times in total — one more than one-per-session.
+func multiSessionSkillReport() Report {
+	r := repeatedSkillReport(3)
+	r.Sessions = 2
+	return r
+}
+
 // capReport fires four causes: context_growth (row 40%), long_session (cache
 // read 30%, 9h), subagent_model (20%), repeated_skill (5%).
 func capReport() Report {
@@ -745,6 +753,18 @@ func TestRecommend_RepeatedSkill(t *testing.T) {
 		r.Attributed.Contributors[3].Details = nil
 		mustFireNothing(t, Recommend(r))
 	})
+	t.Run("one load per merged session does not fire", func(t *testing.T) {
+		t.Parallel()
+		r := repeatedSkillReport(2)
+		r.Sessions = 2
+		mustFireNothing(t, Recommend(r))
+	})
+	t.Run("more loads than merged sessions fires with the across-sessions wording", func(t *testing.T) {
+		t.Parallel()
+		rec := mustFireOnly(t, Recommend(multiSessionSkillReport()), CauseRepeatedSkill)
+		mustContain(t, rec.Text, "`"+testSkill+"` was loaded 3 times across 2 sessions (41.3k tokens, 4% "+phraseOfCost+"); once per session is enough.")
+		mustCite(t, rec, Citation{Kind: KindSkill, Label: testSkill, Detail: testSkill})
+	})
 	t.Run("a deep-ranked skill row fires with a <1% share", func(t *testing.T) {
 		t.Parallel()
 		rec := mustFireOnly(t, Recommend(deepSkillReport()), CauseRepeatedSkill)
@@ -854,6 +874,7 @@ func renderedFigures(r *Report, cited []Citation) map[string]bool {
 	set[FormatDuration(r.Duration)] = true
 	set[strconv.Itoa(r.Calls)] = true
 	set[strconv.Itoa(u.APICallCount)] = true
+	set[strconv.Itoa(r.Sessions)] = true // the header prints "Sessions: N"
 	for i := range r.Attributed.Contributors {
 		c := &r.Attributed.Contributors[i]
 		if i < MaxRenderedRows || citesRow(cited, c) {
@@ -918,6 +939,7 @@ func TestRecommend_EveryFigureIsRendered(t *testing.T) {
 		"cache_miss tool row no details":    cacheMissNoDetailReport(),
 		"cache_miss without tool row":       cacheMissNoToolRowReport(),
 		"repeated_skill":                    repeatedSkillReport(3),
+		"repeated_skill across sessions":    multiSessionSkillReport(),
 		"repeated_skill two skills":         twoSkillsReport(),
 		"repeated_skill deep-ranked":        deepSkillReport(),
 		"cap and order":                     capReport(),

@@ -126,7 +126,9 @@ type Gates struct {
 	// CacheMissShare is the fresh-input share of cost for CauseCacheMiss.
 	CacheMissShare float64
 	// RepeatedSkillMinLoads is how many times one skill must be loaded for
-	// CauseRepeatedSkill.
+	// CauseRepeatedSkill in a single session; with Report.Sessions merged
+	// sessions the gate is Sessions + RepeatedSkillMinLoads − 1 loads (one
+	// load per session is expected).
 	RepeatedSkillMinLoads int
 }
 
@@ -146,7 +148,8 @@ type Gates struct {
 //   - cache_miss: 45% Codex (18%), 40% OpenCode (~10%), 70% Gemini (~33%,
 //     n=6 provisional); other agents take the Codex value (Pi on OpenAI fires
 //     5% at 45%). Anthropic-priced reports never fire (see cacheMissEligible).
-//   - repeated_skill: 2 loads (spec §3.6).
+//   - repeated_skill: 2 loads in one session (spec §3.6); one more per
+//     additional merged session.
 const (
 	longSessionDurationClaudeCode = 8 * time.Hour
 	longSessionDurationDefault    = 4 * time.Hour
@@ -234,6 +237,10 @@ type Report struct {
 	// which is what callers normally have; the field exists so a caller with
 	// a better count (distinct calls after deduplication) can pass it.
 	Calls int
+	// Sessions is the number of attributed sessions merged into Attributed
+	// (MergeContributors); 0 or 1 means a single session. It raises the
+	// repeated_skill gate so one load per session never fires.
+	Sessions int
 }
 
 // Recommend returns at most two session-kind recommendations for r, gated by
@@ -683,9 +690,11 @@ func cacheMissEligible(p Provider) bool {
 }
 
 // recommendRepeatedSkill fires when a KindSkill row's selfDetail counts at
-// least RepeatedSkillMinLoads loads; with several, the most-loaded row wins
-// (ties: higher share). The row and its self detail are cited. Addressed
-// share: that row's.
+// least max(Sessions,1) + RepeatedSkillMinLoads − 1 loads — one load per
+// merged session is expected, so two loads fire for one session and three
+// for two; with several rows, the most-loaded wins (ties: higher share). The
+// row and its self detail are cited. Addressed share: that row's. With more
+// than one session the sentence says "across N sessions".
 func recommendRepeatedSkill(r *Report, g Gates) (Recommendation, float64, bool) {
 	var row *Contributor
 	var loads *Detail
@@ -702,9 +711,14 @@ func recommendRepeatedSkill(r *Report, g Gates) (Recommendation, float64, bool) 
 			row, loads = c, d
 		}
 	}
-	if row == nil || loads.Calls < g.RepeatedSkillMinLoads {
+	sessions := max(r.Sessions, 1)
+	if row == nil || loads.Calls < sessions+g.RepeatedSkillMinLoads-1 {
 		return Recommendation{}, 0, false
 	}
-	text := "`" + row.Label + "` was loaded " + strconv.Itoa(loads.Calls) + " times (" + rowFigures(r, row, true) + "); once per session is enough."
+	across := ""
+	if sessions > 1 {
+		across = " across " + strconv.Itoa(sessions) + " sessions"
+	}
+	text := "`" + row.Label + "` was loaded " + strconv.Itoa(loads.Calls) + " times" + across + " (" + rowFigures(r, row, true) + "); once per session is enough."
 	return sessionRecommendation(CauseRepeatedSkill, text, cite(row, loads)), row.CostShare, true
 }
