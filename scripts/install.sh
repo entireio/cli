@@ -61,9 +61,13 @@ detect_os() {
             echo "linux"
             ;;
         mingw*|msys*|cygwin*)
-            error "install.sh does not support Windows. Run this from PowerShell 5.1 or later:
+             error "install.sh does not support Windows. Run one of these from PowerShell:
 
+    # Windows PowerShell 5.1:
     irm https://raw.githubusercontent.com/entireio/cli/main/scripts/install.ps1 -UseBasicParsing | iex
+    
+    # PowerShell 7+:
+    irm https://raw.githubusercontent.com/entireio/cli/main/scripts/install.ps1 | iex
 
   Or install the Entire CLI using Scoop:
 
