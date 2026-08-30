@@ -264,6 +264,10 @@ func runDispatchWizard(cmd *cobra.Command) (dispatchpkg.Options, error) {
 	jurisdiction := &dispatchJurisdictionAccessor{state: &state}
 
 	validateRepos := func(value []string) error {
+		// In local mode, the repo list is unused (and --repos is invalid), so don't require a selection.
+ 		if state.isLocal() {
+ 			return nil
+ 		}
 		selected := normalizeDispatchWizardSelections(value)
 		if len(selected) == 0 {
 			return errors.New("select at least one repo")
