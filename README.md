@@ -66,10 +66,15 @@ curl -fsSL https://entire.io/install.sh | bash                          # stable
 
 Install with Windows PowerShell 5.1 or later:
 
-```powershell
-irm https://raw.githubusercontent.com/entireio/cli/main/scripts/install.ps1 -UseBasicParsing | iex
-# & ([scriptblock]::Create((irm https://raw.githubusercontent.com/entireio/cli/main/scripts/install.ps1 -UseBasicParsing))) -Channel nightly
-```
+     $uri = "https://raw.githubusercontent.com/entireio/cli/main/scripts/install.ps1"
+     if ((Get-Command Invoke-RestMethod).Parameters.ContainsKey("UseBasicParsing")) {
+       irm $uri -UseBasicParsing | iex
+     } else {
+       irm $uri | iex
+     }
+     # Nightly:
+     # $script = if ((Get-Command Invoke-RestMethod).Parameters.ContainsKey("UseBasicParsing")) { irm $uri -UseBasicParsing } else { irm $uri }
+     # & ([scriptblock]::Create($script)) -Channel nightly
 
 For stable releases, the PowerShell installer uses Scoop when it is available,
 adding the Entire bucket if needed. Without Scoop — and for nightly releases —
@@ -137,8 +142,8 @@ How to use each channel:
 - Homebrew nightly: `brew install --cask entire@nightly`
 - `install.sh` stable: `curl -fsSL https://entire.io/install.sh | bash`
 - `install.sh` nightly: `curl -fsSL https://entire.io/install.sh | bash -s -- --channel nightly`
-- `install.ps1` stable (uses Scoop when available): `irm https://raw.githubusercontent.com/entireio/cli/main/scripts/install.ps1 -UseBasicParsing | iex`
-- `install.ps1` nightly: `& ([scriptblock]::Create((irm https://raw.githubusercontent.com/entireio/cli/main/scripts/install.ps1 -UseBasicParsing))) -Channel nightly`
+- `install.ps1` stable (uses Scoop when available): `$uri="https://raw.githubusercontent.com/entireio/cli/main/scripts/install.ps1"; if ((Get-Command irm).Parameters.ContainsKey('UseBasicParsing')) { irm $uri -UseBasicParsing | iex } else { irm $uri | iex }`
+- `install.ps1` nightly: `$uri="https://raw.githubusercontent.com/entireio/cli/main/scripts/install.ps1"; $s = if ((Get-Command irm).Parameters.ContainsKey('UseBasicParsing')) { irm $uri -UseBasicParsing } else { irm $uri }; & ([scriptblock]::Create($s)) -Channel nightly`
 - Scoop: currently supports `stable` only via `scoop install entire/entire`
 
 ## Typical Workflow
