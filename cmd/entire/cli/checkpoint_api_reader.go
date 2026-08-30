@@ -288,7 +288,11 @@ func (r *apiCheckpointReader) ReadSessionContent(ctx context.Context, checkpoint
 // ReadTaskRecords reports no task records: the API exposes no per-subagent
 // task record endpoint, so a checkpoint read this way has no attributable
 // subagent work.
-func (r *apiCheckpointReader) ReadTaskRecords(context.Context, id.CheckpointID) ([]checkpoint.StoredTaskRecord, error) {
+func (r *apiCheckpointReader) ReadTaskRecords(ctx context.Context, checkpointID id.CheckpointID) ([]checkpoint.StoredTaskRecord, error) {
+ 	// Ensure missing/forbidden checkpoints surface the same errors as other read paths.
+ 	if _, err := r.loadDetail(ctx, checkpointID); err != nil {
+ 		return nil, err
+ 	}
 	return nil, nil
 }
 
