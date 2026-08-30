@@ -183,7 +183,12 @@ func FormatSourceRef(branch, commitHash string) string {
 // for the rest. Applied to the trailer VALUES too: a value carrying a newline
 // would splice an extra trailer line into the block just as effectively.
 func flattenSubject(s string) string {
-	return stringutil.CollapseWhitespace(s)
+ 	s = stringutil.CollapseWhitespace(s)
+ 	// Prevent a subject line from being parsed as an Entire trailer when it begins with a trailer key.
+ 	if strings.HasPrefix(s, "Entire-") {
+ 		return "(subject) " + s
+ 	}
+ 	return s
 }
 
 // FormatShadowCommit creates a commit message for manual-commit strategy checkpoints.
