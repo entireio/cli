@@ -27,7 +27,8 @@ import (
 // reproduce with:
 //
 //	printf %s 'test-123' | shasum -a 256 | cut -c1-6
-func TestHashWorktreeID(t *testing.T) {
+ func TestHashWorktreeID(t *testing.T) {
+ 	t.Parallel()
 	tests := []struct {
 		name       string
 		worktreeID string
@@ -84,9 +85,10 @@ func TestHashWorktreeID_DifferentInputs(t *testing.T) {
 }
 
 func TestShadowBranchNameForCommit(t *testing.T) {
-	tests := []struct {
-		name       string
-		baseCommit string
+    t.Parallel()
+    tests := []struct {
+        name       string
+        baseCommit string
 		worktreeID string
 		want       string
 	}{
