@@ -1573,7 +1573,7 @@ func (s *GitStore) ReadTaskRecords(ctx context.Context, checkpointID id.Checkpoi
 	}
 	checkpointTree, err := s.getCheckpointFetchingTree(ctx, checkpointID)
 	if err != nil {
-		return nil, ErrCheckpointNotFound
+		return nil, err
 	}
 	return readTaskRecordsFromCheckpointTree(ctx, checkpointTree)
 }
