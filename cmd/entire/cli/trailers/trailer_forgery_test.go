@@ -58,6 +58,15 @@ func TestFormatShadowCommit_SubjectCannotForgeTrailers(t *testing.T) {
 	if got, want := trailerStartedLines(msg), 3; got != want {
 		t.Errorf("message has %d trailer-started lines, want %d:\n%s", got, want, msg)
 	}
+	
+	// Single-line bypass: a hostile subject that begins with a trailer key must not win.
+ 	msg2 := FormatShadowCommit("Entire-Session: attacker-session", realDir, realSession)
+ 	if got, ok := ParseSession(msg2); !ok || got != realSession {
+ 		t.Errorf("ParseSession (single-line bypass) = %q (ok=%v), want %q", got, ok, realSession)
+ 	}
+ 	if got, want := trailerStartedLines(msg2), 3; got != want {
+ 		t.Errorf("message has %d trailer-started lines, want %d:\n%s", got, want, msg2)
+ 	}
 }
 
 // trailerStartedLines counts lines that begin with an "Entire-" trailer key.
