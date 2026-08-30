@@ -32,17 +32,23 @@ func TestAddTaskMetadataToTree_PartialTranscriptChunkSetFails(t *testing.T) {
 	store := newEphemeralStore(repo, DefaultV1Refs())
 
 	transcriptPath := filepath.Join(dir, "full.jsonl")
-	if err := os.WriteFile(transcriptPath, []byte(`{"type":"user"}`+"\n"), 0o600); err != nil {
+	// Force chunking: content must exceed agent.MaxChunkSize but still be splittable
+ 	// by the JSONL chunker (no single line may exceed MaxChunkSize).
+ 	content := []byte(strings.Repeat("a", agent.MaxChunkSize-1) + "\n" + "b\n")
+ 	if err := os.WriteFile(transcriptPath, content, 0o600); err != nil {
 		t.Fatalf("write transcript: %v", err)
 	}
 
-	// Fail the transcript chunk write the way a full disk or a read-only
-	// object store would. Only the chunk loop goes through this seam, so every
-	// other blob in the checkpoint still writes normally.
+	// Fail exactly one transcript chunk write (after at least one succeeds).
 	original := createBlobFromContent
 	t.Cleanup(func() { createBlobFromContent = original })
-	createBlobFromContent = func(*git.Repository, []byte) (plumbing.Hash, error) {
-		return plumbing.ZeroHash, os.ErrPermission
+	calls := 0
+ 	createBlobFromContent = func(r *git.Repository, b []byte) (plumbing.Hash, error) {
+ 		calls++
+ 		if calls == 2 {
+ 			return plumbing.ZeroHash, os.ErrPermission
+ 		}
+ 		return original(r, b)
 	}
 
 	baseTreeHash := headTreeHash(t, repo)
