@@ -126,7 +126,12 @@ verified release archive because the Scoop bucket only publishes stable builds.
             $headers["Authorization"] = "Bearer $($env:GITHUB_TOKEN)"
         }
 
-        Invoke-RestMethod -Uri $Uri -Headers $headers -UseBasicParsing
+         if ((Get-Command Invoke-RestMethod).Parameters.ContainsKey("UseBasicParsing")) {
+             Invoke-RestMethod -Uri $Uri -Headers $headers -UseBasicParsing
+         }
+         else {
+             Invoke-RestMethod -Uri $Uri -Headers $headers
+         }
     }
 
     function Get-ReleaseVersion {
@@ -171,7 +176,12 @@ verified release archive because the Scoop bucket only publishes stable builds.
             [string] $Destination
         )
 
-        Invoke-WebRequest -Uri $Uri -OutFile $Destination -UseBasicParsing
+        if ((Get-Command Invoke-WebRequest).Parameters.ContainsKey("UseBasicParsing")) {
+    Invoke-WebRequest -Uri $Uri -OutFile $Destination -UseBasicParsing
+    }
+        else {
+    Invoke-WebRequest -Uri $Uri -OutFile $Destination
+        }
     }
 
     function Assert-Checksum {
