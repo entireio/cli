@@ -370,7 +370,7 @@ func oldBinaryAsideName(destName string) string {
 // sweepOldBinaries best-effort removes .old-* leftovers from the Windows
 // rename-aside fallback. Failures are ignored — the files are inert.
 func sweepOldBinaries(root *os.Root, pkgName string) {
-	entries, err := osroot.ReadDir(root, pkgName)
+	entries, err := osroot.ReadDirNoSymlinks(root, pkgName)
 	if err != nil {
 		return
 	}

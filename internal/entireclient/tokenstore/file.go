@@ -158,7 +158,7 @@ func (f *fileStore) load() (map[string]map[string]string, error) {
 			fmt.Fprintf(loosePermsWarnW, "Warning: token store %s is accessible by group/others (mode %04o) and holds bearer tokens; run: chmod 0600 %s\n", f.path, info.Mode().Perm(), f.path)
 		}
 	}
-	data, err := osroot.ReadFile(root, name)
+	data, err := osroot.ReadFileNoFollow(root, name)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return make(map[string]map[string]string), nil

@@ -15,6 +15,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	agenttypes "github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/gitdir"
+	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/osroot"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
@@ -712,7 +713,7 @@ func writeLocalReviewManifest(ctx context.Context, manifest LocalReviewManifest)
 	if err != nil {
 		return fmt.Errorf("encode review manifest: %w", err)
 	}
-	if err := osroot.WriteFile(root, dir+"/"+localReviewManifestFilename(manifest), b, 0o600); err != nil {
+	if err := jsonutil.WriteFileAtomicIn(root, dir+"/"+localReviewManifestFilename(manifest), b, 0o600); err != nil {
 		return fmt.Errorf("write review manifest: %w", err)
 	}
 	return nil
@@ -723,7 +724,7 @@ func loadLocalReviewManifests(ctx context.Context, worktreeRoot string) ([]Local
 	if err != nil {
 		return nil, err
 	}
-	entries, err := osroot.ReadDir(root, dir)
+	entries, err := osroot.ReadDirNoSymlinks(root, dir)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, nil
 	}
@@ -736,7 +737,7 @@ func loadLocalReviewManifests(ctx context.Context, worktreeRoot string) ([]Local
 		if entry.IsDir() || filepath.Ext(entry.Name()) != ".json" {
 			continue
 		}
-		b, readErr := osroot.ReadFile(root, dir+"/"+entry.Name())
+		b, readErr := osroot.ReadFileNoFollow(root, dir+"/"+entry.Name())
 		if readErr != nil {
 			return nil, fmt.Errorf("read review manifest %s: %w", entry.Name(), readErr)
 		}

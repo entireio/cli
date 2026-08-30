@@ -458,20 +458,20 @@ func fetchAndVerify(ctx context.Context, rawURL, asset, wantDigest, stagingDir s
 	n, err := io.Copy(io.MultiWriter(out, h), io.LimitReader(resp.Body, maxPluginAssetSize+1))
 	closeErr := out.Close()
 	if err != nil {
-		_ = osroot.Remove(stagingRoot, asset) //nolint:errcheck // best-effort cleanup of a staging file we are already abandoning
+		_ = osroot.RemoveNoSymlinks(stagingRoot, asset) //nolint:errcheck // best-effort cleanup of a staging file we are already abandoning
 		return nil, fmt.Errorf("download %s: %w", redactURL(rawURL), err)
 	}
 	if closeErr != nil {
-		_ = osroot.Remove(stagingRoot, asset) //nolint:errcheck // best-effort cleanup of a staging file we are already abandoning
+		_ = osroot.RemoveNoSymlinks(stagingRoot, asset) //nolint:errcheck // best-effort cleanup of a staging file we are already abandoning
 		return nil, fmt.Errorf("write staging file: %w", closeErr)
 	}
 	if n > maxPluginAssetSize {
-		_ = osroot.Remove(stagingRoot, asset) //nolint:errcheck // best-effort cleanup of a staging file we are already abandoning
+		_ = osroot.RemoveNoSymlinks(stagingRoot, asset) //nolint:errcheck // best-effort cleanup of a staging file we are already abandoning
 		return nil, fmt.Errorf("download %s: exceeds %d byte limit", redactURL(rawURL), int64(maxPluginAssetSize))
 	}
 	got := hex.EncodeToString(h.Sum(nil))
 	if wantDigest != "" && !strings.EqualFold(got, wantDigest) {
-		_ = osroot.Remove(stagingRoot, asset) //nolint:errcheck // best-effort cleanup of a staging file we are already abandoning
+		_ = osroot.RemoveNoSymlinks(stagingRoot, asset) //nolint:errcheck // best-effort cleanup of a staging file we are already abandoning
 		return nil, fmt.Errorf("checksum mismatch for %s: got %s, want %s", asset, got, wantDigest)
 	}
 	return &fetchedAsset{Path: dest, Asset: asset, SHA256: got, Verified: wantDigest != ""}, nil

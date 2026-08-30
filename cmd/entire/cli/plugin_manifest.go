@@ -56,7 +56,7 @@ func pluginPkgName(name string) (string, error) {
 
 // readFileLimitedIn is readFileLimited for a name inside root.
 func readFileLimitedIn(root *os.Root, name string, limit int64) ([]byte, error) {
-	f, err := root.Open(name)
+	f, err := osroot.OpenNoFollow(root, name)
 	if err != nil {
 		// Returned bare so callers can still test it with errors.Is against
 		// os.ErrNotExist — LoadPluginManifest depends on that to report an
@@ -331,7 +331,7 @@ func ListPluginManifests() ([]*PluginManifest, error) {
 		}
 		return nil, err
 	}
-	entries, err := osroot.ReadDir(root, pluginManagedPkgSubdir)
+	entries, err := osroot.ReadDirNoSymlinks(root, pluginManagedPkgSubdir)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return nil, nil

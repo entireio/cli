@@ -27,6 +27,7 @@ import (
 	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/gitdir"
+	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
 	"github.com/entireio/cli/cmd/entire/cli/osroot"
 	reviewtypes "github.com/entireio/cli/cmd/entire/cli/review/types"
 	"github.com/entireio/cli/cmd/entire/cli/session"
@@ -82,7 +83,7 @@ func WritePendingReviewMarker(ctx context.Context, m PendingReviewMarker) error 
 	if err != nil {
 		return fmt.Errorf("marshal marker: %w", err)
 	}
-	if err := osroot.WriteFile(root, pendingMarkerName, data, 0o600); err != nil {
+	if err := jsonutil.WriteFileAtomicIn(root, pendingMarkerName, data, 0o600); err != nil {
 		return fmt.Errorf("write marker: %w", err)
 	}
 	return nil
@@ -95,7 +96,7 @@ func ReadPendingReviewMarker(ctx context.Context) (PendingReviewMarker, bool, er
 	if err != nil {
 		return PendingReviewMarker{}, false, err
 	}
-	data, err := osroot.ReadFile(root, pendingMarkerName)
+	data, err := osroot.ReadFileNoFollow(root, pendingMarkerName)
 	if errors.Is(err, os.ErrNotExist) {
 		return PendingReviewMarker{}, false, nil
 	}

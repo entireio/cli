@@ -265,7 +265,7 @@ func readNoLock(configDir string) (*File, error) {
 	if err != nil {
 		return nil, err
 	}
-	data, err := osroot.ReadFile(root, name)
+	data, err := osroot.ReadFileNoFollow(root, name)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return &File{}, nil

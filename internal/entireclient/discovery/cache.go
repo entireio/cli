@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
 	"github.com/entireio/cli/cmd/entire/cli/osroot"
 	"github.com/gofrs/flock"
 )
@@ -195,7 +196,7 @@ func readCacheBytes(f cacheFile) ([]byte, bool, error) {
 		}
 		return nil, false, err
 	}
-	data, err := osroot.ReadFile(root, name)
+	data, err := osroot.ReadFileNoFollow(root, name)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, false, nil
@@ -212,13 +213,8 @@ func writeCacheBytesAtomic(f cacheFile, data []byte) error {
 	if err != nil {
 		return err
 	}
-	tmp := name + ".tmp"
-	if err := osroot.WriteFile(root, tmp, data, 0600); err != nil {
-		return fmt.Errorf("write cache tmp: %w", err)
-	}
-	if err := root.Rename(tmp, name); err != nil {
-		_ = root.Remove(tmp) //nolint:errcheck // cleanup best-effort
-		return fmt.Errorf("rename cache: %w", err)
+	if err := jsonutil.WriteFileAtomicIn(root, name, data, 0o600); err != nil {
+		return fmt.Errorf("write cache: %w", err)
 	}
 	return nil
 }

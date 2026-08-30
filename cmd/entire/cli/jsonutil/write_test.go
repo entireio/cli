@@ -7,6 +7,8 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/entireio/cli/cmd/entire/cli/osroot"
 )
 
 func TestWriteFileAtomic_CreatesNewFile(t *testing.T) {
@@ -236,5 +238,31 @@ func TestWriteFileAtomicIn_RejectsEscapingName(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(dir, "escaped.json")); !os.IsNotExist(err) {
 		t.Errorf("escaping write landed outside the root: %v", err)
+	}
+}
+
+func TestWriteFileAtomicIn_RejectsSymlinkedParentInsideRoot(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	realDir := filepath.Join(dir, "real")
+	if err := os.MkdirAll(realDir, 0o750); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.Symlink("real", filepath.Join(dir, "metadata")); err != nil {
+		t.Skipf("symlink not supported: %v", err)
+	}
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		t.Fatalf("os.OpenRoot: %v", err)
+	}
+	defer root.Close()
+
+	err = WriteFileAtomicIn(root, "metadata/state.json", []byte("nope"), 0o600)
+	if !errors.Is(err, osroot.ErrSymlinkedPath) {
+		t.Fatalf("WriteFileAtomicIn error = %v, want ErrSymlinkedPath", err)
+	}
+	if _, err := os.Stat(filepath.Join(realDir, "state.json")); !os.IsNotExist(err) {
+		t.Fatalf("write reached symlink target: %v", err)
 	}
 }

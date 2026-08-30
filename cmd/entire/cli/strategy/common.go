@@ -1466,7 +1466,7 @@ func readWorktreeFile(repoRoot, file string) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("resolve %s in worktree: %w", file, err)
 	}
-	content, err := osroot.ReadFile(root, name)
+	content, err := osroot.ReadFileNoFollow(root, name)
 	if err != nil {
 		return nil, fmt.Errorf("read %s: %w", file, err)
 	}

@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
+	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
 	"github.com/entireio/cli/cmd/entire/cli/osroot"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 )
@@ -158,7 +159,7 @@ func (s *SessionStore) ReadFile(name string) ([]byte, error) {
 		return nil, err
 	}
 	defer root.Close()
-	return osroot.ReadFile(root, name) //nolint:wrapcheck // preserved for os.IsNotExist at call sites
+	return osroot.ReadFileNoFollow(root, name) //nolint:wrapcheck // preserved for os.IsNotExist at call sites
 }
 
 // WriteFile writes name in the store, creating parent directories. Session
@@ -175,7 +176,12 @@ func (s *SessionStore) WriteFile(name string, data []byte, perm os.FileMode) err
 			return fmt.Errorf("create session directory: %w", err)
 		}
 	}
-	return osroot.WriteFile(root, name, data, perm) //nolint:wrapcheck // preserved for os.IsNotExist at call sites
+	if info, err := osroot.LstatNoSymlinks(root, name); err == nil && info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("write session file: %w", osroot.ErrSymlinkedPath)
+	} else if err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("inspect session file: %w", err)
+	}
+	return jsonutil.WriteFileAtomicIn(root, name, data, perm) //nolint:wrapcheck // preserved for os.IsNotExist at call sites
 }
 
 // Exists reports whether name is present in the store. Lstat, not Stat: a
@@ -187,7 +193,7 @@ func (s *SessionStore) Exists(name string) bool {
 		return false
 	}
 	defer root.Close()
-	_, err = root.Lstat(name)
+	_, err = osroot.LstatNoSymlinks(root, name)
 	return err == nil
 }
 

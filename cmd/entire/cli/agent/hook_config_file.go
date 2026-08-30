@@ -6,6 +6,7 @@ import (
 	"path"
 	"path/filepath"
 
+	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
 	"github.com/entireio/cli/cmd/entire/cli/osroot"
 	"github.com/entireio/cli/cmd/entire/cli/worktreedir"
 )
@@ -32,18 +33,23 @@ import (
 // copies into one, which is what keeps the next agent integration from
 // reintroducing the pattern.
 //
-// It deliberately does NOT refuse a symlinked file at the leaf. A developer
-// pointing `.claude/settings.json` at a dotfile repo is a real setup and Entire
-// has no business breaking it.
+// Every symlink component is refused, including the file itself. os.Root blocks
+// a link that escapes the worktree but follows one pointing elsewhere inside
+// it; accepting the leaf would let `.claude/settings.json -> ../victim.json`
+// redirect both the merge read and the subsequent write.
 //
-// A symlinked DIRECTORY is a different thing and is refused by every operation,
-// not just the ones that create. os.Root blocks a link that escapes the worktree
-// but follows one pointing elsewhere INSIDE it, so a repository shipping
-// `.claude -> vendor/x` previously had its planted settings read by Read and
-// GeneratedState, reported present by Exists, and had Remove delete the file at
-// the far end. Only Write refused, because it was the only one that checked.
-// Which files Entire believes the agent has is not something a checked-in
-// symlink gets to decide.
+// An earlier revision of this type deliberately allowed a symlinked leaf, on the
+// grounds that pointing `.claude/settings.json` at a dotfile repo is a real
+// setup Entire has no business breaking. That was reconsidered, and the reason
+// is worth keeping: the merge READ pulls the target's contents into what Entire
+// then writes, and the write is a rename, which replaces the user's link with a
+// regular file rather than following it. Both happen silently. Refusing is the
+// legible version of the same outcome.
+//
+// The setup still works, because the thing that makes a link dangerous here is
+// that it arrived with the checkout. A developer who wants one keeps it out of
+// the repository — `git rm --cached .claude/settings.json` and a .gitignore
+// entry — and manages it locally, which is what a dotfile workflow does anyway.
 type HookConfigFile struct {
 	root *os.Root
 	name string
@@ -79,10 +85,7 @@ func (f *HookConfigFile) Path() string { return f.path }
 // callers can classify it with os.IsNotExist, which is how every agent's
 // install path decides between "merge into existing" and "write fresh".
 func (f *HookConfigFile) Read() ([]byte, error) {
-	if err := osroot.NoSymlinkedParent(f.root, f.name); err != nil {
-		return nil, err //nolint:wrapcheck // names the offending component; see doc comment
-	}
-	return osroot.ReadFile(f.root, f.name) //nolint:wrapcheck // see doc comment
+	return osroot.ReadFileNoFollow(f.root, f.name) //nolint:wrapcheck // see doc comment
 }
 
 // Exists reports whether the file is present at a path Entire will read.
@@ -92,11 +95,8 @@ func (f *HookConfigFile) Read() ([]byte, error) {
 // uses this to choose between merging into an existing file and writing a fresh
 // one, and Write refuses the same path with a message that names the link.
 func (f *HookConfigFile) Exists() bool {
-	if osroot.NoSymlinkedParent(f.root, f.name) != nil {
-		return false
-	}
-	_, err := f.root.Lstat(f.name)
-	return err == nil
+	info, err := osroot.LstatNoSymlinks(f.root, f.name)
+	return err == nil && info.Mode()&os.ModeSymlink == 0
 }
 
 // Write writes data, creating parent directories. A parent that already exists
@@ -107,7 +107,12 @@ func (f *HookConfigFile) Write(data []byte, perm os.FileMode) error {
 			return fmt.Errorf("create %s: %w", path.Dir(f.path), err)
 		}
 	}
-	if err := osroot.WriteFile(f.root, f.name, data, perm); err != nil {
+	if info, err := osroot.LstatNoSymlinks(f.root, f.name); err == nil && info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("write %s: %w", f.path, osroot.ErrSymlinkedPath)
+	} else if err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("write %s: %w", f.path, err)
+	}
+	if err := jsonutil.WriteFileAtomicIn(f.root, f.name, data, perm); err != nil {
 		return fmt.Errorf("write %s: %w", f.path, err)
 	}
 	return nil
@@ -117,10 +122,7 @@ func (f *HookConfigFile) Write(data []byte, perm os.FileMode) error {
 // symlinked parent directory is, because the file this would delete is at the
 // far end of a link Entire did not create.
 func (f *HookConfigFile) Remove() error {
-	if err := osroot.NoSymlinkedParent(f.root, f.name); err != nil {
-		return fmt.Errorf("remove %s: %w", f.path, err)
-	}
-	if err := osroot.Remove(f.root, f.name); err != nil {
+	if err := osroot.RemoveNoSymlinks(f.root, f.name); err != nil {
 		return fmt.Errorf("remove %s: %w", f.path, err)
 	}
 	return nil
@@ -131,9 +133,8 @@ func (f *HookConfigFile) Remove() error {
 // before and after opening it and compares os.SameFile, which Read cannot
 // express. Everything else must use Read/Write/Remove.
 //
-// The root is owned by the shared registry — do not close it. The caller is
-// responsible for the symlinked-parent check the other methods perform;
-// osroot.NoSymlinkedParent is that check.
+// The root is owned by the shared registry — do not close it. Callers must use
+// the osroot no-follow primitives rather than resolving name with Root.Open.
 func (f *HookConfigFile) Root() (*os.Root, string) { return f.root, f.name }
 
 // GeneratedState is GeneratedHookFileState for a file read through this root.

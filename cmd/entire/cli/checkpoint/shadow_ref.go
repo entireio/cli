@@ -176,5 +176,5 @@ func tryDeleteLooseObject(commonDir string, hash plumbing.Hash) {
 	if err != nil {
 		return
 	}
-	_ = osroot.Remove(root, "objects/"+h[:2]+"/"+h[2:]) //nolint:errcheck // best-effort; see doc comment
+	_ = osroot.RemoveNoSymlinks(root, "objects/"+h[:2]+"/"+h[2:]) //nolint:errcheck // best-effort; see doc comment
 }

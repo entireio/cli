@@ -2532,7 +2532,7 @@ func (s *treeWriter) copyMetadataDir(ctx context.Context, root *os.Root, dirName
 // local machine.
 // JSONL files get JSONL-aware redaction; all other files get plain byte redaction.
 func createRedactedBlobFromFile(ctx context.Context, repo *git.Repository, cache *redactCache, root *os.Root, name, treePath string) (plumbing.Hash, filemode.FileMode, error) {
-	info, err := root.Stat(name)
+	info, err := osroot.LstatNoSymlinks(root, name)
 	if err != nil {
 		return plumbing.ZeroHash, 0, fmt.Errorf("failed to stat file: %w", err)
 	}

@@ -46,7 +46,7 @@ func StatTranscriptFile(filePath string) (os.FileInfo, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open %s for transcript %s: %w", paths.EntireDir, filePath, err)
 	}
-	info, err := root.Lstat(name)
+	info, err := osroot.LstatNoSymlinks(root, name)
 	if err != nil {
 		return nil, err //nolint:wrapcheck // preserve missing-file classification
 	}

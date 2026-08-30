@@ -378,7 +378,7 @@ func loadShallowHashes(ctx context.Context, repoPath string) (map[plumbing.Hash]
 	if err != nil {
 		return nil, fmt.Errorf("open git common dir: %w", err)
 	}
-	data, err := osroot.ReadFile(root, "shallow")
+	data, err := osroot.ReadFileNoFollow(root, "shallow")
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return map[plumbing.Hash]bool{}, nil

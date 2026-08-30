@@ -65,10 +65,7 @@ func TestHookConfig_WriteRefusesASymlinkedConfigDirectory(t *testing.T) {
 	require.ErrorIs(t, statErr, os.ErrNotExist, "nothing may be written through the link")
 }
 
-// A symlinked config FILE is not refused by this type — only a symlinked parent
-// directory is. Pointing .claude/settings.json at another file in the checkout
-// is a real setup and Entire has no business breaking it.
-func TestHookConfig_ReadFollowsARelativeSymlinkInsideTheWorktree(t *testing.T) {
+func TestHookConfig_ReadRejectsARelativeSymlinkInsideTheWorktree(t *testing.T) {
 	t.Parallel()
 	skipWithoutSymlinks(t)
 
@@ -79,21 +76,13 @@ func TestHookConfig_ReadFollowsARelativeSymlinkInsideTheWorktree(t *testing.T) {
 
 	cfg, err := agent.OpenHookConfig(worktree, ".claude/settings.json")
 	require.NoError(t, err)
-	got, err := cfg.Read()
-	require.NoError(t, err)
-	require.JSONEq(t, `{"a":1}`, string(got))
+	_, err = cfg.Read()
+	require.ErrorIs(t, err, osroot.ErrSymlinkedPath)
 }
 
-// An ABSOLUTE symlink at the leaf is refused, and that is a deliberate
-// behaviour change rather than a side effect worth glossing over: os.Root
-// documents that "symbolic links must not be absolute" unconditionally, so a
-// `.claude/settings.json -> ~/dotfiles/claude/settings.json` created by a
-// dotfile manager stops resolving.
-//
-// It is kept because the alternative is a root that can be stepped out of by
-// anything that plants an absolute link, which is the whole property this type
-// exists for, and because the same rule already governs `.entire`. What it costs
-// is a legitimate setup, so the failure has to be legible: the error names the
+// An absolute symlink at the leaf is refused for the same reason as a relative
+// one: agent configuration must identify the file stored at that exact path.
+// The failure has to be legible: the error names the
 // path, and read failures surface as "could not tell" rather than as "no hooks
 // installed".
 func TestHookConfig_ReadRefusesAnAbsoluteSymlinkAtTheLeaf(t *testing.T) {
@@ -168,9 +157,7 @@ func TestHookConfigFile_RefusesASymlinkedDirectoryOnEveryOperation(t *testing.T)
 	require.Equal(t, agent.HooksAbsent, f.GeneratedState("marker", "render"))
 }
 
-// The documented dotfile-repo setup still works: only the DIRECTORY components
-// are refused, never the leaf.
-func TestHookConfigFile_StillFollowsASymlinkedFileAtTheLeaf(t *testing.T) {
+func TestHookConfigFile_RefusesASymlinkedFileAtTheLeaf(t *testing.T) {
 	t.Parallel()
 
 	worktree := t.TempDir()
@@ -183,8 +170,12 @@ func TestHookConfigFile_StillFollowsASymlinkedFileAtTheLeaf(t *testing.T) {
 	f, err := agent.OpenHookConfig(worktree, ".claude/settings.json")
 	require.NoError(t, err)
 
-	data, err := f.Read()
+	_, err = f.Read()
+	require.ErrorIs(t, err, osroot.ErrSymlinkedPath)
+	require.False(t, f.Exists())
+	require.ErrorIs(t, f.Write([]byte(`{"entire":true}`), 0o600), osroot.ErrSymlinkedPath)
+
+	data, err := os.ReadFile(filepath.Join(worktree, "dotfiles.json"))
 	require.NoError(t, err)
 	require.JSONEq(t, `{"from":"dotfiles"}`, string(data))
-	require.True(t, f.Exists())
 }

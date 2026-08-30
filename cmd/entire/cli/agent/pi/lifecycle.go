@@ -366,7 +366,7 @@ func clearCachedSessionID(ctx context.Context) {
 	if !ok {
 		return
 	}
-	_ = osroot.Remove(root, sessionCacheDir+"/"+activeSessionFile) //nolint:errcheck // best-effort cache clear; a stale id is re-resolved next hook
+	_ = osroot.RemoveNoSymlinks(root, sessionCacheDir+"/"+activeSessionFile) //nolint:errcheck // best-effort cache clear; a stale id is re-resolved next hook
 }
 
 // captureTranscript copies the Pi JSONL session file to

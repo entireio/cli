@@ -178,7 +178,7 @@ func (s *LocalManifestStore) List(ctx context.Context) ([]LocalManifest, error) 
 		}
 		return nil, fmt.Errorf("open investigations store: %w", err)
 	}
-	entries, err := osroot.ReadDir(root, s.dirName)
+	entries, err := osroot.ReadDirNoSymlinks(root, s.dirName)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return nil, nil
@@ -195,7 +195,7 @@ func (s *LocalManifestStore) List(ctx context.Context) ([]LocalManifest, error) 
 		if !strings.HasSuffix(name, ".json") || strings.HasSuffix(name, ".tmp") {
 			continue
 		}
-		b, readErr := osroot.ReadFile(root, s.name(name))
+		b, readErr := osroot.ReadFileNoFollow(root, s.name(name))
 		if readErr != nil {
 			return nil, fmt.Errorf("read manifest %s: %w", name, readErr)
 		}
@@ -243,7 +243,7 @@ func (s *LocalManifestStore) FindByRunID(ctx context.Context, runID string) (Loc
 	// os.Root has no glob, and a literal match is the safer primitive anyway —
 	// runID is validated above, but a pattern would let metacharacters in a
 	// future caller's id match unrelated manifests.
-	entries, err := osroot.ReadDir(root, s.dirName)
+	entries, err := osroot.ReadDirNoSymlinks(root, s.dirName)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return LocalManifest{}, false, nil
@@ -261,7 +261,7 @@ func (s *LocalManifestStore) FindByRunID(ctx context.Context, runID string) (Loc
 	if match == "" {
 		return LocalManifest{}, false, nil
 	}
-	b, err := osroot.ReadFile(root, s.name(match))
+	b, err := osroot.ReadFileNoFollow(root, s.name(match))
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return LocalManifest{}, false, nil
@@ -348,7 +348,7 @@ func (s *LocalManifestStore) Latest(ctx context.Context) (LocalManifest, bool, e
 		}
 		return LocalManifest{}, false, fmt.Errorf("open investigations store: %w", err)
 	}
-	entries, err := osroot.ReadDir(root, s.dirName)
+	entries, err := osroot.ReadDirNoSymlinks(root, s.dirName)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return LocalManifest{}, false, nil
@@ -371,7 +371,7 @@ func (s *LocalManifestStore) Latest(ctx context.Context) (LocalManifest, bool, e
 	if latest == "" {
 		return LocalManifest{}, false, nil
 	}
-	b, err := osroot.ReadFile(root, s.name(latest))
+	b, err := osroot.ReadFileNoFollow(root, s.name(latest))
 	if err != nil {
 		return LocalManifest{}, false, fmt.Errorf("read manifest %s: %w", latest, err)
 	}
@@ -410,7 +410,7 @@ func (s *LocalManifestStore) Remove(m LocalManifest) error {
 		}
 		return fmt.Errorf("open investigations store: %w", err)
 	}
-	if err := osroot.Remove(root, s.name(manifestFilename(m))); err != nil {
+	if err := osroot.RemoveNoSymlinks(root, s.name(manifestFilename(m))); err != nil {
 		return fmt.Errorf("remove manifest: %w", err)
 	}
 	return nil

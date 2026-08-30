@@ -200,7 +200,7 @@ func (s *StateStore) Load(ctx context.Context, runID string) (*RunState, error) 
 		}
 		return nil, fmt.Errorf("open investigation store: %w", err)
 	}
-	data, err := osroot.ReadFile(root, s.runStateName(runID))
+	data, err := osroot.ReadFileNoFollow(root, s.runStateName(runID))
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, nil //nolint:nilnil // nil,nil indicates run not found
@@ -235,7 +235,7 @@ func (s *StateStore) ReadFindings(runID string) ([]byte, bool, error) {
 		}
 		return nil, false, fmt.Errorf("open investigation store: %w", err)
 	}
-	data, err := osroot.ReadFile(root, s.name(runID, FindingsFileName))
+	data, err := osroot.ReadFileNoFollow(root, s.name(runID, FindingsFileName))
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, false, nil
@@ -260,7 +260,7 @@ func (s *StateStore) WriteFindings(runID string, body []byte) error {
 	if err := osroot.MkdirAllNoSymlink(root, s.name(runID), 0o750); err != nil {
 		return fmt.Errorf("create investigation run directory: %w", err)
 	}
-	if err := osroot.WriteFile(root, s.name(runID, FindingsFileName), body, 0o600); err != nil {
+	if err := jsonutil.WriteFileAtomicIn(root, s.name(runID, FindingsFileName), body, 0o600); err != nil {
 		return fmt.Errorf("write findings doc: %w", err)
 	}
 	return nil

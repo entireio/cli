@@ -964,7 +964,7 @@ func (s *StateStore) Load(ctx context.Context, sessionID string) (*State, error)
 		return nil, fmt.Errorf("failed to open session state directory: %w", err)
 	}
 
-	data, err := osroot.ReadFile(root, s.name(sessionID+".json"))
+	data, err := osroot.ReadFileNoFollow(root, s.name(sessionID+".json"))
 	if os.IsNotExist(err) {
 		return nil, nil //nolint:nilnil // nil,nil indicates session not found (expected case)
 	}
@@ -1016,33 +1016,9 @@ func (s *StateStore) Save(ctx context.Context, state *State) error {
 	}
 
 	fileName := s.name(state.SessionID + ".json")
-
-	// Use a unique temp file per save. Concurrent hook processes can write the
-	// same session ID, so a fixed "<session>.json.tmp" path can corrupt JSON.
-	tmpFile, tmpName, err := jsonutil.CreateTempIn(root, fileName)
-	if err != nil {
-		return fmt.Errorf("failed to create temporary session state file: %w", err)
+	if err := jsonutil.WriteFileAtomicIn(root, fileName, data, 0o600); err != nil {
+		return fmt.Errorf("failed to write session state file: %w", err)
 	}
-	removeTmp := true
-	defer func() {
-		if removeTmp {
-			_ = osroot.Remove(root, tmpName) //nolint:errcheck // best-effort cleanup of a temp file the rename did not consume
-		}
-	}()
-
-	if _, err := tmpFile.Write(data); err != nil {
-		_ = tmpFile.Close()
-		return fmt.Errorf("failed to write session state: %w", err)
-	}
-	if err := tmpFile.Close(); err != nil {
-		return fmt.Errorf("failed to close session state file: %w", err)
-	}
-
-	// Atomic rename into the validated final path, via os.Root.
-	if err := root.Rename(tmpName, fileName); err != nil {
-		return fmt.Errorf("failed to rename session state file: %w", err)
-	}
-	removeTmp = false
 	return nil
 }
 
@@ -1068,7 +1044,7 @@ func (s *StateStore) Clear(ctx context.Context, sessionID string) error {
 		return fmt.Errorf("failed to open session state directory for cleanup: %w", err)
 	}
 	for _, name := range s.matchSessionFiles(root, sessionID) {
-		_ = osroot.Remove(root, s.name(name)) //nolint:errcheck // best-effort cleanup
+		_ = osroot.RemoveNoSymlinks(root, s.name(name)) //nolint:errcheck // best-effort cleanup
 	}
 
 	return nil
@@ -1079,7 +1055,7 @@ func (s *StateStore) Clear(ctx context.Context, sessionID string) error {
 // uses literal prefix matching, never glob patterns, so a session ID containing
 // glob metacharacters cannot match unrelated files.
 func (s *StateStore) matchSessionFiles(root *os.Root, sessionID string) []string {
-	entries, err := osroot.ReadDir(root, s.dirName)
+	entries, err := osroot.ReadDirNoSymlinks(root, s.dirName)
 	if err != nil {
 		return nil // missing/unreadable dir => nothing to clear
 	}
@@ -1112,7 +1088,7 @@ func (s *StateStore) List(ctx context.Context) ([]*State, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to open session state directory: %w", err)
 	}
-	entries, err := osroot.ReadDir(root, s.dirName)
+	entries, err := osroot.ReadDirNoSymlinks(root, s.dirName)
 	if os.IsNotExist(err) {
 		return nil, nil
 	}

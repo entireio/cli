@@ -13,6 +13,7 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/entiredir"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
+	"github.com/entireio/cli/cmd/entire/cli/osroot"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/spf13/cobra"
 )
@@ -62,7 +63,7 @@ Use --follow to stream new lines as they are written (Ctrl+C to exit).`,
 }
 
 func printTail(w io.Writer, root *os.Root, name string, n int) error {
-	f, err := root.Open(name)
+	f, err := osroot.OpenNoFollow(root, name)
 	if err != nil {
 		return fmt.Errorf("open log: %w", err)
 	}
@@ -121,7 +122,7 @@ func readLastNLines(r io.Reader, n int) ([]string, error) {
 // followFile polls the log file for appended bytes. It exits cleanly when the
 // command's context is cancelled (Ctrl+C in a TTY).
 func followFile(ctx context.Context, w io.Writer, root *os.Root, name string) error {
-	f, err := root.Open(name)
+	f, err := osroot.OpenNoFollow(root, name)
 	if err != nil {
 		return fmt.Errorf("open log: %w", err)
 	}

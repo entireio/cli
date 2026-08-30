@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/entireio/cli/cmd/entire/cli/osroot"
 	"github.com/entireio/cli/perf"
 
 	"charm.land/lipgloss/v2"
@@ -224,7 +225,7 @@ func traceStepChildIndex(parentName, childName string) (int, bool) {
 // rather than the last N slow traces — which reads as "no traces" whenever
 // DEBUG logging fills the window with fast ones.
 func collectTraceEntries(root *os.Root, name string, last int, hookFilter string, slowOnly bool) ([]traceEntry, error) {
-	f, err := root.Open(name)
+	f, err := osroot.OpenNoFollow(root, name)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
 			return nil, nil

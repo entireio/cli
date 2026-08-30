@@ -45,7 +45,7 @@ func loadTuneRunners(repoRoot, filter string) ([]tuneRunner, error) {
 	if err != nil {
 		return nil, fmt.Errorf("reading %s: %w", dir, err)
 	}
-	entries, err := osroot.ReadDir(root, runnersName)
+	entries, err := osroot.ReadDirNoSymlinks(root, runnersName)
 	if err != nil {
 		return nil, fmt.Errorf("reading %s: %w", dir, err)
 	}

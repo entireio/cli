@@ -716,7 +716,7 @@ func TestRunCleanAllWithItems_PartialFailure(t *testing.T) {
 	}
 
 	cmd, stdout, stderr := newTestCleanCmd(t)
-	err := runCleanAllWithItems(cmd.Context(), cmd, true, false, items, nil)
+	err := runCleanAllWithItems(cmd.Context(), cmd, true, false, items, nil, nil)
 
 	if err == nil {
 		t.Fatal("runCleanAllWithItems() should return error when items fail to delete")
@@ -750,7 +750,7 @@ func TestRunCleanAllWithItems_AllFailures(t *testing.T) {
 	}
 
 	cmd, stdout, stderr := newTestCleanCmd(t)
-	err := runCleanAllWithItems(cmd.Context(), cmd, true, false, items, nil)
+	err := runCleanAllWithItems(cmd.Context(), cmd, true, false, items, nil, nil)
 
 	if err == nil {
 		t.Fatal("runCleanAllWithItems() should return error when items fail to delete")
@@ -774,7 +774,7 @@ func TestRunCleanAllWithItems_NoItems(t *testing.T) {
 	setupCleanTestRepo(t)
 
 	cmd, stdout, _ := newTestCleanCmd(t)
-	err := runCleanAllWithItems(cmd.Context(), cmd, false, false, []strategy.CleanupItem{}, nil)
+	err := runCleanAllWithItems(cmd.Context(), cmd, false, false, []strategy.CleanupItem{}, nil, nil)
 	if err != nil {
 		t.Fatalf("runCleanAllWithItems() error = %v", err)
 	}
@@ -795,7 +795,7 @@ func TestRunCleanAllWithItems_MixedTypes_Preview(t *testing.T) {
 	}
 
 	cmd, stdout, _ := newTestCleanCmd(t)
-	err := runCleanAllWithItems(cmd.Context(), cmd, false, true, items, nil)
+	err := runCleanAllWithItems(cmd.Context(), cmd, false, true, items, nil, nil)
 	if err != nil {
 		t.Fatalf("runCleanAllWithItems() error = %v", err)
 	}

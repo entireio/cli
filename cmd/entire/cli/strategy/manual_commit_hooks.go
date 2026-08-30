@@ -26,6 +26,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/gitops"
 	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/entireio/cli/cmd/entire/cli/interactive"
+	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/osroot"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
@@ -839,7 +840,7 @@ func warnStaleEndedSessionsTo(ctx context.Context, count int, w io.Writer) {
 	//nolint:errcheck // Best-effort warning — fail-open if file ops fail
 	_ = osroot.MkdirAllNoSymlink(root, session.SessionStateDirName, 0o750)
 	//nolint:errcheck // Best-effort sentinel file write
-	_ = osroot.WriteFile(root, warnFile, []byte{}, 0o644)
+	_ = jsonutil.WriteFileAtomicIn(root, warnFile, []byte{}, 0o644)
 	fmt.Fprintf(w,
 		"\nentire: %d ended session(s) are accumulating and slowing down commits.\n"+
 			"Run 'entire doctor' to condense them and restore commit performance.\n\n",

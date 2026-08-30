@@ -73,3 +73,22 @@ func TestWriteManagedScaffold_CreatesThroughARealDirectory(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, managedScaffoldSkippedConflict, res.Status)
 }
+
+func TestWriteManagedScaffold_RefusesSymlinkedLeaf(t *testing.T) {
+	t.Parallel()
+
+	worktree := t.TempDir()
+	rel := filepath.Join(".claude", "skills", "entire", "SKILL.md")
+	require.NoError(t, os.MkdirAll(filepath.Dir(filepath.Join(worktree, rel)), 0o750))
+	target := filepath.Join(worktree, "victim.md")
+	require.NoError(t, os.WriteFile(target, []byte("managed old\n"), 0o600))
+	if err := os.Symlink(filepath.Join("..", "..", "..", "victim.md"), filepath.Join(worktree, rel)); err != nil {
+		t.Skipf("symlink not supported: %v", err)
+	}
+
+	_, err := writeManagedScaffold(worktree, rel, []byte("managed new\n"), func([]byte) bool { return true })
+	require.ErrorIs(t, err, osroot.ErrSymlinkedPath)
+	got, err := os.ReadFile(target)
+	require.NoError(t, err)
+	require.Equal(t, "managed old\n", string(got))
+}

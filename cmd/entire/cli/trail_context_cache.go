@@ -463,14 +463,14 @@ func recentlySpawnedMarker(commonDir, marker string, ttl time.Duration, now time
 	}
 	defer release()
 
-	if data, readErr := osroot.ReadFile(root, markerName); readErr == nil {
+	if data, readErr := osroot.ReadFileNoFollow(root, markerName); readErr == nil {
 		if last, parseErr := time.Parse(time.RFC3339Nano, strings.TrimSpace(string(data))); parseErr == nil &&
 			now.After(last) && now.Sub(last) < ttl {
 			return true
 		}
 	}
 	//nolint:errcheck // best-effort marker; a failed write just means the next hook re-spawns
-	_ = osroot.WriteFile(root, markerName, []byte(now.UTC().Format(time.RFC3339Nano)), 0o600)
+	_ = jsonutil.WriteFileAtomicIn(root, markerName, []byte(now.UTC().Format(time.RFC3339Nano)), 0o600)
 	return false
 }
 

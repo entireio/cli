@@ -40,11 +40,10 @@ func ReadFile(root *os.Root, name string) ([]byte, error) {
 	return data, nil
 }
 
-// ReadFileNoFollow reads name while refusing a symbolic link at the leaf.
+// ReadFileNoFollow reads name while refusing a symbolic link in any component.
 // os.Root already prevents a link from escaping root, but follows links whose
 // targets remain inside it. Entire-owned trees require the stronger property:
-// a name must identify the file stored at that name, not another file in the
-// same tree.
+// every component must identify the object stored at that name.
 func ReadFileNoFollow(root *os.Root, name string) ([]byte, error) {
 	f, err := OpenNoFollow(root, name)
 	if err != nil {
@@ -59,12 +58,18 @@ func ReadFileNoFollow(root *os.Root, name string) ([]byte, error) {
 	return data, nil
 }
 
-// OpenNoFollow opens an existing file and verifies that the directory entry is
-// a non-symlink referring to the opened object. The second check closes the
-// Lstat/Open race; once verified, later replacements cannot redirect the open
-// descriptor.
+// OpenNoFollow opens an existing file without following any symlink component.
+// Parent directories are opened and pinned one at a time; the leaf's second
+// check closes its Lstat/Open race. Once verified, later replacements cannot
+// redirect the open descriptor.
 func OpenNoFollow(root *os.Root, name string) (*os.File, error) {
-	before, err := root.Lstat(name)
+	parent, leaf, closeParent, err := OpenParentNoSymlinks(root, name)
+	if err != nil {
+		return nil, err
+	}
+	defer closeParent()
+
+	before, err := parent.Lstat(leaf)
 	if err != nil {
 		return nil, err //nolint:wrapcheck // preserve original error classification
 	}
@@ -72,18 +77,18 @@ func OpenNoFollow(root *os.Root, name string) (*os.File, error) {
 		return nil, fmt.Errorf("%s: %w", name, ErrSymlinkedPath)
 	}
 
-	f, err := root.Open(name)
+	f, err := parent.Open(leaf)
 	if err != nil {
 		return nil, err //nolint:wrapcheck // preserve original error classification
 	}
-	if err := validateOpenedFile(root, name, f); err != nil {
+	if err := validateOpenedFile(parent, leaf, f); err != nil {
 		_ = f.Close()
 		return nil, err
 	}
 	return f, nil
 }
 
-// OpenFileNoFollow opens or creates a file without following a leaf symlink.
+// OpenFileNoFollow opens or creates a file without following any symlink.
 // It is intended for append-style writers: O_TRUNC is rejected because
 // truncating Entire-owned writes should use an atomic temp-file-and-rename
 // operation instead. Unix builds add O_NOFOLLOW to close the write-before-
@@ -93,7 +98,13 @@ func OpenFileNoFollow(root *os.Root, name string, flag int, perm os.FileMode) (*
 	if flag&os.O_TRUNC != 0 {
 		return nil, errors.New("osroot: OpenFileNoFollow does not permit O_TRUNC")
 	}
-	if before, err := root.Lstat(name); err == nil {
+	parent, leaf, closeParent, err := OpenParentNoSymlinks(root, name)
+	if err != nil {
+		return nil, err
+	}
+	defer closeParent()
+
+	if before, err := parent.Lstat(leaf); err == nil {
 		if before.Mode()&os.ModeSymlink != 0 {
 			return nil, fmt.Errorf("%s: %w", name, ErrSymlinkedPath)
 		}
@@ -101,16 +112,16 @@ func OpenFileNoFollow(root *os.Root, name string, flag int, perm os.FileMode) (*
 		return nil, err //nolint:wrapcheck // preserve original error classification
 	}
 
-	f, err := root.OpenFile(name, flag|noFollowOpenFlag, perm)
+	f, err := parent.OpenFile(leaf, flag|noFollowOpenFlag, perm)
 	if err != nil {
 		// Preserve the package sentinel when a link appeared after the first
 		// Lstat and O_NOFOLLOW rejected it.
-		if info, lstatErr := root.Lstat(name); lstatErr == nil && info.Mode()&os.ModeSymlink != 0 {
+		if info, lstatErr := parent.Lstat(leaf); lstatErr == nil && info.Mode()&os.ModeSymlink != 0 {
 			return nil, fmt.Errorf("%s: %w", name, ErrSymlinkedPath)
 		}
 		return nil, err //nolint:wrapcheck // preserve original error classification
 	}
-	if err := validateOpenedFile(root, name, f); err != nil {
+	if err := validateOpenedFile(parent, leaf, f); err != nil {
 		_ = f.Close()
 		return nil, err
 	}
@@ -197,7 +208,20 @@ func ReadDir(root *os.Root, name string) ([]os.DirEntry, error) {
 	return entries, nil
 }
 
-// ErrSymlinkedPath reports a symlink found where a real directory was required.
+// ReadDirNoSymlinks reads a directory after opening every component beneath
+// root as a real directory. Unlike ReadDir, an in-root symlink is rejected
+// rather than followed.
+func ReadDirNoSymlinks(root *os.Root, name string) ([]os.DirEntry, error) {
+	dir, closeDir, err := OpenDirNoSymlinks(root, name)
+	if err != nil {
+		return nil, err
+	}
+	defer closeDir()
+
+	return ReadDir(dir, ".")
+}
+
+// ErrSymlinkedPath reports a symlink where a real path component was required.
 // Callers match it with errors.Is.
 var ErrSymlinkedPath = errors.New("path component is a symlink")
 
@@ -212,25 +236,43 @@ var ErrSymlinkedPath = errors.New("path component is a symlink")
 // from the cause. Checking at the point the directory is established turns both
 // into one named error while the caller still has the context to report it.
 //
-// This is a check against a symlink that is already there — planted by hand, or
-// arriving with a checkout — not a defence against one appearing between the
-// check and the Mkdir. That race is not worth closing: os.Root still bounds the
-// result to inside the root either way, so the worst case is the silent-follow
-// behaviour that existed before this function.
+// Each component is opened relative to its already-pinned parent, including
+// components created by this call. That makes creation and validation one
+// descriptor-relative sequence rather than a check followed by MkdirAll.
 func MkdirAllNoSymlink(root *os.Root, name string, perm os.FileMode) error {
-	for _, prefix := range dirPrefixes(name) {
-		info, err := root.Lstat(prefix)
-		if err != nil {
-			if os.IsNotExist(err) {
-				continue // MkdirAll below creates it as a real directory
-			}
-			return err //nolint:wrapcheck // preserve the original for errors.Is/os.IsNotExist
-		}
-		if info.Mode()&os.ModeSymlink != 0 {
-			return fmt.Errorf("%s: %w", prefix, ErrSymlinkedPath)
-		}
+	if name == "." {
+		return nil
 	}
-	return root.MkdirAll(name, perm) //nolint:wrapcheck // preserve original error for errors.Is/os.IsNotExist
+	if !fs.ValidPath(name) {
+		return fmt.Errorf("%q is not a valid root-relative path", name)
+	}
+
+	current := root
+	var owned *os.Root
+	defer func() {
+		if owned != nil {
+			_ = owned.Close()
+		}
+	}()
+	for _, component := range strings.Split(name, "/") {
+		if _, err := current.Lstat(component); os.IsNotExist(err) {
+			if err := current.Mkdir(component, perm); err != nil && !errors.Is(err, fs.ErrExist) {
+				return err //nolint:wrapcheck // preserve original error classification
+			}
+		} else if err != nil {
+			return err //nolint:wrapcheck // preserve original error classification
+		}
+		next, err := OpenChild(current, component)
+		if err != nil {
+			return err
+		}
+		if owned != nil {
+			_ = owned.Close()
+		}
+		owned = next
+		current = next
+	}
+	return nil
 }
 
 // ErrWalkRootNotDirectory reports a walk root that exists but is not a
@@ -239,30 +281,91 @@ func MkdirAllNoSymlink(root *os.Root, name string, perm os.FileMode) error {
 // user gets told to fix the wrong thing.
 var ErrWalkRootNotDirectory = errors.New("path is not a directory")
 
-// lstatWalkRoot is the check fs.WalkDir does not do for itself.
+// OpenParentNoSymlinks opens and pins the parent directory of name while
+// rejecting a symlink in every parent component. The returned close function
+// must be called; it is a no-op when name is directly beneath root.
 //
-// fs.WalkDir obtains the DirEntry for its ROOT from fs.Stat, which follows a
-// symlink; only the entries below it come from ReadDir, which does not. So a
-// callback that inspects d.Type() for ModeSymlink — every one in this codebase
-// does — is dead code for the walk root, and a symlinked root is silently
-// descended into and reported as a real directory. filepath.Walk did lstat its
-// root, so this was lost in the move to os.Root, not absent from the start.
-//
-// Verified against go1.26: with meta/sess -> ../real, fs.WalkDir yields
-// meta/sess (isdir=true) then meta/sess/secret.txt, while filepath.Walk yielded
-// only the link.
-func lstatWalkRoot(root *os.Root, dir string) error {
-	info, err := root.Lstat(dir)
+// Operations that must not follow parent symlinks should act on the returned
+// root using leaf, rather than validating and then resolving name again from
+// the original root. Holding the parent descriptor closes that check/use gap.
+func OpenParentNoSymlinks(root *os.Root, name string) (parent *os.Root, leaf string, closeParent func(), err error) {
+	if root == nil {
+		return nil, "", nil, errors.New("osroot: root is required")
+	}
+	if !fs.ValidPath(name) || name == "." {
+		return nil, "", nil, fmt.Errorf("%q is not a valid file name beneath root", name)
+	}
+
+	dir, leaf := path.Split(name)
+	dir = strings.TrimSuffix(dir, "/")
+	if dir == "" {
+		return root, leaf, func() {}, nil
+	}
+	parent, closeParent, err = OpenDirNoSymlinks(root, dir)
 	if err != nil {
-		return err //nolint:wrapcheck // preserve os.IsNotExist for the caller
+		return nil, "", nil, err
 	}
-	if info.Mode()&os.ModeSymlink != 0 {
-		return fmt.Errorf("%s: %w", dir, ErrSymlinkedPath)
+	return parent, leaf, closeParent, nil
+}
+
+// OpenDirNoSymlinks opens dir one component at a time. Every child is lstat'd,
+// opened relative to its already-pinned parent, and identity-checked, so a
+// symlink or a replacement racing the open is rejected. The caller must invoke
+// the returned close function.
+func OpenDirNoSymlinks(root *os.Root, dir string) (*os.Root, func(), error) {
+	if root == nil {
+		return nil, nil, errors.New("osroot: root is required")
 	}
-	if !info.IsDir() {
-		return fmt.Errorf("%s: %w", dir, ErrWalkRootNotDirectory)
+	if dir == "." || dir == "" {
+		return root, func() {}, nil
 	}
-	return nil
+	if !fs.ValidPath(dir) {
+		return nil, nil, fmt.Errorf("%q is not a valid directory name beneath root", dir)
+	}
+
+	current := root
+	var owned *os.Root
+	for _, component := range strings.Split(dir, "/") {
+		next, err := OpenChild(current, component)
+		if err != nil {
+			if owned != nil {
+				_ = owned.Close()
+			}
+			return nil, nil, err
+		}
+		if owned != nil {
+			_ = owned.Close()
+		}
+		owned = next
+		current = next
+	}
+	return current, func() { _ = current.Close() }, nil
+}
+
+// LstatNoSymlinks lstats the leaf while rejecting and pinning every parent
+// directory component. The leaf itself is returned as-is, including when it is
+// a symlink, so callers can choose whether to reject or unlink it.
+func LstatNoSymlinks(root *os.Root, name string) (os.FileInfo, error) {
+	parent, leaf, closeParent, err := OpenParentNoSymlinks(root, name)
+	if err != nil {
+		return nil, err
+	}
+	defer closeParent()
+	return parent.Lstat(leaf) //nolint:wrapcheck // preserve original error classification
+}
+
+// RemoveNoSymlinks removes leaf without following it and rejects a symlink in
+// every parent directory component. A missing leaf is not an error.
+func RemoveNoSymlinks(root *os.Root, name string) error {
+	parent, leaf, closeParent, err := OpenParentNoSymlinks(root, name)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	defer closeParent()
+	return Remove(parent, leaf)
 }
 
 // WalkDirNoSymlinks walks dir within root, refusing a symlink anywhere it goes:
@@ -279,51 +382,39 @@ func lstatWalkRoot(root *os.Root, dir string) error {
 // A missing dir is reported unwrapped, so callers can keep classifying it with
 // os.IsNotExist.
 func WalkDirNoSymlinks(root *os.Root, dir string, fn fs.WalkDirFunc) error {
-	if err := lstatWalkRoot(root, dir); err != nil {
+	walkRoot, closeWalkRoot, err := OpenDirNoSymlinks(root, dir)
+	if err != nil {
 		return err
 	}
-	return fs.WalkDir(root.FS(), dir, func(name string, d fs.DirEntry, err error) error { //nolint:wrapcheck // the callback's errors are the caller's own
-		if err == nil && d.Type()&fs.ModeSymlink != 0 {
-			return fmt.Errorf("%s: %w", name, ErrSymlinkedPath)
+	defer closeWalkRoot()
+	return fs.WalkDir(walkRoot.FS(), ".", func(name string, d fs.DirEntry, err error) error { //nolint:wrapcheck // the callback's errors are the caller's own
+		reported := dir
+		if name != "." {
+			reported = path.Join(dir, strings.TrimPrefix(name, "./"))
 		}
-		return fn(name, d, err)
+		if err == nil && d.Type()&fs.ModeSymlink != 0 {
+			return fmt.Errorf("%s: %w", reported, ErrSymlinkedPath)
+		}
+		return fn(reported, d, err)
 	})
 }
 
-// NoSymlinkedParent reports ErrSymlinkedPath when any DIRECTORY component of
-// name already exists as a symlink. The leaf is deliberately not examined.
-//
-// It is MkdirAllNoSymlink's read-only counterpart, for the operations that must
-// not traverse a directory Entire did not create but have nothing to create
-// themselves. os.Root refuses a link that ESCAPES the root and follows one
-// pointing elsewhere inside it, so without this a read of
-// ".claude/settings.json" through a planted ".claude -> vendor/x" returns
-// vendor/x's contents and reports success.
-//
-// Leaving the leaf alone is what keeps a symlinked FILE working, which is a real
-// setup: pointing .claude/settings.json at a dotfile repo is something people
-// do deliberately. Pointing the directory somewhere is not the same thing, and
-// it changes which files Entire believes the agent has.
+// NoSymlinkedParent reports ErrSymlinkedPath when any directory component of
+// name is a symlink. The leaf is deliberately not examined. This is a
+// diagnostic predicate; an operation that follows it must still use
+// OpenParentNoSymlinks so the checked parent remains pinned through the use.
 //
 // A component that does not exist is not an error: the caller is about to fail
 // on the missing file, with a better message than this could give.
 func NoSymlinkedParent(root *os.Root, name string) error {
-	dir := path.Dir(name)
-	if dir == "." || dir == "" || dir == "/" {
+	_, _, closeParent, err := OpenParentNoSymlinks(root, name)
+	if os.IsNotExist(err) {
 		return nil
 	}
-	for _, prefix := range dirPrefixes(dir) {
-		info, err := root.Lstat(prefix)
-		if err != nil {
-			if os.IsNotExist(err) {
-				return nil // nothing below a missing directory to reach
-			}
-			return err //nolint:wrapcheck // preserve the original for errors.Is/os.IsNotExist
-		}
-		if info.Mode()&os.ModeSymlink != 0 {
-			return fmt.Errorf("%s: %w", prefix, ErrSymlinkedPath)
-		}
+	if err != nil {
+		return err
 	}
+	closeParent()
 	return nil
 }
 
@@ -338,28 +429,34 @@ func NoSymlinkedParent(root *os.Root, name string) error {
 //
 // A missing dir yields no names and no error: nothing there is nothing wrong.
 func SymlinkPaths(root *os.Root, dir string) ([]string, error) {
-	switch err := lstatWalkRoot(root, dir); {
-	case err == nil:
-	case os.IsNotExist(err):
+	walkRoot, closeWalkRoot, openErr := OpenDirNoSymlinks(root, dir)
+	switch {
+	case openErr == nil:
+		defer closeWalkRoot()
+	case os.IsNotExist(openErr):
 		return nil, nil
-	case errors.Is(err, ErrSymlinkedPath):
+	case errors.Is(openErr, ErrSymlinkedPath):
 		return []string{dir}, nil
-	case errors.Is(err, ErrWalkRootNotDirectory):
+	case errors.Is(openErr, ErrWalkRootNotDirectory):
 		return nil, nil // not a directory, so nothing below it to report
 	default:
-		return nil, err
+		return nil, openErr
 	}
 
 	var found []string
-	err := fs.WalkDir(root.FS(), dir, func(name string, d fs.DirEntry, err error) error {
+	err := fs.WalkDir(walkRoot.FS(), ".", func(name string, d fs.DirEntry, err error) error {
+		reported := dir
+		if name != "." {
+			reported = path.Join(dir, strings.TrimPrefix(name, "./"))
+		}
 		if err != nil {
-			if name == dir && os.IsNotExist(err) {
+			if name == "." && os.IsNotExist(err) {
 				return nil
 			}
 			return err
 		}
 		if d.Type()&fs.ModeSymlink != 0 {
-			found = append(found, name)
+			found = append(found, reported)
 		}
 		return nil
 	})
@@ -367,21 +464,6 @@ func SymlinkPaths(root *os.Root, dir string) ([]string, error) {
 		return nil, err //nolint:wrapcheck // caller names the directory it asked about
 	}
 	return found, nil
-}
-
-// dirPrefixes returns each ancestor of name in order, including name itself,
-// and nothing for "." or "". Names are slash-separated, as os.Root requires.
-func dirPrefixes(name string) []string {
-	cleaned := path.Clean(name)
-	if cleaned == "." || cleaned == "" || cleaned == "/" {
-		return nil
-	}
-	parts := strings.Split(strings.TrimPrefix(cleaned, "/"), "/")
-	prefixes := make([]string, 0, len(parts))
-	for i := range parts {
-		prefixes = append(prefixes, strings.Join(parts[:i+1], "/"))
-	}
-	return prefixes
 }
 
 // sharedRoots is the process-wide registry behind Shared. Entire anchors roots
@@ -446,8 +528,11 @@ func OpenChild(parent *os.Root, name string) (*os.Root, error) {
 	if err != nil {
 		return nil, err //nolint:wrapcheck // preserve original error classification
 	}
-	if before.Mode()&os.ModeSymlink != 0 || !before.IsDir() {
+	if before.Mode()&os.ModeSymlink != 0 {
 		return nil, fmt.Errorf("%s: %w", name, ErrSymlinkedPath)
+	}
+	if !before.IsDir() {
+		return nil, fmt.Errorf("%s: %w", name, ErrWalkRootNotDirectory)
 	}
 
 	root, err := parent.OpenRoot(name)

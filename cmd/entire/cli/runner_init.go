@@ -73,7 +73,7 @@ func runnerConfigsExist(repoRoot string) bool {
 	if err != nil {
 		return false
 	}
-	entries, err := osroot.ReadDir(root, runnersName)
+	entries, err := osroot.ReadDirNoSymlinks(root, runnersName)
 	if err != nil {
 		return false
 	}

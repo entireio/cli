@@ -19,6 +19,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/gitdir"
 	"github.com/entireio/cli/cmd/entire/cli/internal/flock"
+	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/osroot"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
@@ -316,7 +317,7 @@ func StoreModelHint(ctx context.Context, sessionID, model string) error {
 	}
 	defer root.Close()
 
-	if err := osroot.WriteFile(root, sessionID+".model", []byte(model), 0o600); err != nil {
+	if err := jsonutil.WriteFileAtomicIn(root, sessionID+".model", []byte(model), 0o600); err != nil {
 		return fmt.Errorf("failed to write model hint file: %w", err)
 	}
 	return nil
@@ -341,7 +342,7 @@ func LoadModelHint(ctx context.Context, sessionID string) string {
 	}
 	defer root.Close()
 
-	data, err := osroot.ReadFile(root, sessionID+".model")
+	data, err := osroot.ReadFileNoFollow(root, sessionID+".model")
 	if err != nil {
 		if !os.IsNotExist(err) {
 			logging.Warn(logging.WithComponent(ctx, "session"), "failed to read model hint file",
@@ -457,7 +458,7 @@ func LoadAgentTypeHint(ctx context.Context, sessionID string) types.AgentType {
 	}
 	defer root.Close()
 
-	data, err := osroot.ReadFile(root, sessionID+".agent")
+	data, err := osroot.ReadFileNoFollow(root, sessionID+".agent")
 	if err != nil {
 		if !os.IsNotExist(err) {
 			logging.Warn(logging.WithComponent(ctx, "session"), "failed to read agent hint file",
@@ -909,10 +910,10 @@ func ClearSessionState(ctx context.Context, sessionID string) error {
 	// match and delete other sessions' files. os.Root ensures traversal-resistant
 	// removal.
 	prefix := sessionID + "."
-	entries, _ := osroot.ReadDir(root, ".") //nolint:errcheck // best-effort cleanup; missing dir => nothing to clear
+	entries, _ := osroot.ReadDirNoSymlinks(root, ".") //nolint:errcheck // best-effort cleanup; missing dir => nothing to clear
 	for _, e := range entries {
 		if name := e.Name(); strings.HasPrefix(name, prefix) {
-			_ = osroot.Remove(root, name) //nolint:errcheck // best-effort cleanup
+			_ = osroot.RemoveNoSymlinks(root, name) //nolint:errcheck // best-effort cleanup
 		}
 	}
 

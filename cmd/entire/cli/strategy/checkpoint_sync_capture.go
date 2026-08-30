@@ -52,7 +52,7 @@ func loadCapturedSyncRemotes(ctx context.Context) []string {
 	if err != nil {
 		return nil
 	}
-	data, err := osroot.ReadFile(root, capturedSyncRemotesFileName)
+	data, err := osroot.ReadFileNoFollow(root, capturedSyncRemotesFileName)
 	if err != nil {
 		return nil
 	}

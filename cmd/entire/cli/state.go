@@ -217,7 +217,7 @@ func cleanupTmpStateFile(ctx context.Context, fileName string) error {
 		return fmt.Errorf("failed to open %s: %w", paths.EntireDir, err)
 	}
 
-	return osroot.Remove(root, entireTmpName+"/"+fileName) //nolint:wrapcheck // best-effort cleanup, caller adds context via wrapping function name
+	return osroot.RemoveNoSymlinks(root, entireTmpName+"/"+fileName) //nolint:wrapcheck // best-effort cleanup, caller adds context via wrapping function name
 }
 
 // FileChanges holds categorized file changes from git status.
@@ -640,7 +640,7 @@ func FindActivePreTaskFile(ctx context.Context) (taskToolUseID string, found boo
 	if err != nil {
 		return "", false
 	}
-	entries, err := osroot.ReadDir(root, entireTmpName)
+	entries, err := osroot.ReadDirNoSymlinks(root, entireTmpName)
 	if err != nil {
 		return "", false
 	}
@@ -699,7 +699,7 @@ func GetNextCheckpointSequence(ctx context.Context, sessionID, taskToolUseID str
 	sessionMetadataDir := sessionMetadataName(sessionID)
 	taskMetadataDir := strategy.TaskMetadataDir(sessionMetadataDir, taskToolUseID)
 
-	entries, err := osroot.ReadDir(root, taskMetadataDir+"/checkpoints")
+	entries, err := osroot.ReadDirNoSymlinks(root, taskMetadataDir+"/checkpoints")
 	if err != nil {
 		// Directory doesn't exist or can't be read - start at 1
 		return 1

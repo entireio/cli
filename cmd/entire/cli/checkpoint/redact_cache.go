@@ -171,7 +171,7 @@ func (c *redactCache) entryName(treePath string) string {
 }
 
 func (c *redactCache) load(treePath string) *redactPrefixEntry {
-	data, err := osroot.ReadFile(c.root, c.entryName(treePath))
+	data, err := osroot.ReadFileNoFollow(c.root, c.entryName(treePath))
 	if err != nil {
 		return nil
 	}

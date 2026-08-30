@@ -69,6 +69,39 @@ func TestReadFileNoFollow_RejectsLeafSymlink(t *testing.T) {
 	require.ErrorIs(t, err, osroot.ErrSymlinkedPath)
 }
 
+func TestReadFileNoFollow_RejectsSymlinkedParentInsideRoot(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, "real"), 0o750))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "real", "secret.txt"), []byte("secret"), 0o600))
+	if err := os.Symlink("real", filepath.Join(dir, "linked")); err != nil {
+		t.Skipf("symlink not supported: %v", err)
+	}
+	root, err := os.OpenRoot(dir)
+	require.NoError(t, err)
+	defer root.Close()
+
+	_, err = osroot.ReadFileNoFollow(root, "linked/secret.txt")
+	require.ErrorIs(t, err, osroot.ErrSymlinkedPath)
+}
+
+func TestReadDirNoSymlinks_RejectsIntermediateSymlink(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, "real", "session"), 0o750))
+	if err := os.Symlink("real", filepath.Join(dir, "metadata")); err != nil {
+		t.Skipf("symlink not supported: %v", err)
+	}
+	root, err := os.OpenRoot(dir)
+	require.NoError(t, err)
+	defer root.Close()
+
+	_, err = osroot.ReadDirNoSymlinks(root, "metadata/session")
+	require.ErrorIs(t, err, osroot.ErrSymlinkedPath)
+}
+
 func TestOpenFileNoFollow_RejectsLeafSymlink(t *testing.T) {
 	t.Parallel()
 
@@ -560,6 +593,23 @@ func TestWalkDirNoSymlinks_RefusesSymlinkedWalkRoot(t *testing.T) {
 	})
 	require.ErrorIs(t, err, osroot.ErrSymlinkedPath)
 	require.Empty(t, visited, "the callback must not run at all for a symlinked walk root")
+}
+
+func TestWalkDirNoSymlinks_RefusesSymlinkedWalkRootAncestor(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, "real", "session"), 0o750))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "real", "session", "secret.txt"), []byte("leak"), 0o600))
+	if err := os.Symlink("real", filepath.Join(dir, "metadata")); err != nil {
+		t.Skipf("symlink not supported: %v", err)
+	}
+	root, err := os.OpenRoot(dir)
+	require.NoError(t, err)
+	defer root.Close()
+
+	err = osroot.WalkDirNoSymlinks(root, "metadata/session", func(_ string, _ fs.DirEntry, err error) error { return err })
+	require.ErrorIs(t, err, osroot.ErrSymlinkedPath)
 }
 
 func TestWalkDirNoSymlinks_RefusesSymlinkedEntry(t *testing.T) {

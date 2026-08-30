@@ -158,7 +158,7 @@ func listWorktreeTopLevel(repoRoot string) ([]os.DirEntry, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open worktree root: %w", err)
 	}
-	entries, err := osroot.ReadDir(root, ".")
+	entries, err := osroot.ReadDirNoSymlinks(root, ".")
 	if err != nil {
 		return nil, fmt.Errorf("read worktree root: %w", err)
 	}

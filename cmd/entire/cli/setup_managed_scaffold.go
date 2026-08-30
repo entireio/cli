@@ -11,6 +11,7 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
+	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
 	"github.com/entireio/cli/cmd/entire/cli/osroot"
 	"github.com/entireio/cli/cmd/entire/cli/worktreedir"
 )
@@ -49,10 +50,10 @@ type managedScaffoldResult struct {
 // That is the same failure agent.HookConfigFile was built to close; this call
 // site was simply not one of the seven it replaced.
 //
-// MkdirAllNoSymlink refuses a component that already exists as a symlink, and
-// NoSymlinkedParent applies the same rule to the read that precedes the write,
-// so an unmanaged file at the far end of a link cannot be mistaken for one of
-// ours and rewritten.
+// ReadFileNoFollow and MkdirAllNoSymlink reject every symlink component, while
+// the atomic writer pins the real parent for the whole replacement. An
+// unmanaged file at the far end of a link therefore cannot be mistaken for one
+// of ours and rewritten.
 func writeManagedScaffold(worktreeRoot, relPath string, content []byte, isManaged func([]byte) bool) (managedScaffoldResult, error) {
 	root, err := worktreedir.OpenAt(worktreeRoot)
 	if err != nil {
@@ -62,11 +63,7 @@ func writeManagedScaffold(worktreeRoot, relPath string, content []byte, isManage
 	if err != nil {
 		return managedScaffoldResult{}, fmt.Errorf("resolve scaffold path: %w", err)
 	}
-	if err := osroot.NoSymlinkedParent(root, name); err != nil {
-		return managedScaffoldResult{}, fmt.Errorf("write %s: %w", relPath, err)
-	}
-
-	existingData, err := osroot.ReadFile(root, name)
+	existingData, err := osroot.ReadFileNoFollow(root, name)
 	if err == nil {
 		if !isManaged(existingData) {
 			return managedScaffoldResult{Status: managedScaffoldSkippedConflict, RelPath: relPath}, nil
@@ -74,7 +71,7 @@ func writeManagedScaffold(worktreeRoot, relPath string, content []byte, isManage
 		if bytes.Equal(existingData, content) {
 			return managedScaffoldResult{Status: managedScaffoldUnchanged, RelPath: relPath}, nil
 		}
-		if err := osroot.WriteFile(root, name, content, 0o600); err != nil {
+		if err := jsonutil.WriteFileAtomicIn(root, name, content, 0o600); err != nil {
 			return managedScaffoldResult{}, fmt.Errorf("update managed scaffold: %w", err)
 		}
 		return managedScaffoldResult{Status: managedScaffoldUpdated, RelPath: relPath}, nil
@@ -88,7 +85,7 @@ func writeManagedScaffold(worktreeRoot, relPath string, content []byte, isManage
 			return managedScaffoldResult{}, fmt.Errorf("create managed scaffold directory: %w", err)
 		}
 	}
-	if err := osroot.WriteFile(root, name, content, 0o600); err != nil {
+	if err := jsonutil.WriteFileAtomicIn(root, name, content, 0o600); err != nil {
 		return managedScaffoldResult{}, fmt.Errorf("write managed scaffold: %w", err)
 	}
 	return managedScaffoldResult{Status: managedScaffoldCreated, RelPath: relPath}, nil

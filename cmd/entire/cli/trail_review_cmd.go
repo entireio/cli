@@ -1023,7 +1023,7 @@ func readWorktreeFileSafely(worktreeRoot, filePath string) ([]byte, bool) {
 	if err != nil {
 		return nil, false
 	}
-	data, err := osroot.ReadFile(root, name)
+	data, err := osroot.ReadFileNoFollow(root, name)
 	if err != nil {
 		return nil, false
 	}

@@ -539,13 +539,6 @@ func hooksDocumentRoot(path string) (*os.Root, string, error) {
 		return nil, "", err //nolint:wrapcheck // caller names the path it asked about
 	}
 	root, rootName := cfg.Root()
-	// cfg.Root() hands over the primitives, so the symlinked-parent refusal the
-	// HookConfigFile methods perform is this caller's to make. A `.codex`
-	// symlinked elsewhere inside the worktree is followed by os.Root, and every
-	// reader below would then be inspecting another directory's hooks.json.
-	if err := osroot.NoSymlinkedParent(root, rootName); err != nil {
-		return nil, "", err //nolint:wrapcheck // names the offending component
-	}
 	return root, rootName, nil
 }
 
@@ -566,21 +559,10 @@ func readHooksDocument(path string) (*hooksDocument, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open Codex project directory for %q: %w", path, err)
 	}
-	before, err := root.Stat(name)
+	file, err := osroot.OpenNoFollow(root, name)
 	if errors.Is(err, os.ErrNotExist) {
 		return document, nil
 	}
-	if err != nil {
-		return nil, fmt.Errorf("inspect Codex hooks file %q: %w", path, err)
-	}
-	if !before.Mode().IsRegular() {
-		return nil, fmt.Errorf("codex hooks path %q is not a regular file", path)
-	}
-	if before.Size() > maxHooksFileBytes {
-		return nil, fmt.Errorf("codex hooks file %q exceeds %d bytes", path, maxHooksFileBytes)
-	}
-
-	file, err := root.Open(name)
 	if err != nil {
 		return nil, fmt.Errorf("open Codex hooks file %q: %w", path, err)
 	}
@@ -590,8 +572,11 @@ func readHooksDocument(path string) (*hooksDocument, error) {
 	if err != nil {
 		return nil, fmt.Errorf("inspect opened Codex hooks file %q: %w", path, err)
 	}
-	if !opened.Mode().IsRegular() || !os.SameFile(before, opened) {
-		return nil, fmt.Errorf("codex hooks file %q changed while opening", path)
+	if !opened.Mode().IsRegular() {
+		return nil, fmt.Errorf("codex hooks path %q is not a regular file", path)
+	}
+	if opened.Size() > maxHooksFileBytes {
+		return nil, fmt.Errorf("codex hooks file %q exceeds %d bytes", path, maxHooksFileBytes)
 	}
 	data, err := io.ReadAll(io.LimitReader(file, maxHooksFileBytes+1))
 	if err != nil {
@@ -599,13 +584,6 @@ func readHooksDocument(path string) (*hooksDocument, error) {
 	}
 	if len(data) > maxHooksFileBytes {
 		return nil, fmt.Errorf("codex hooks file %q exceeds %d bytes", path, maxHooksFileBytes)
-	}
-	after, err := root.Stat(name)
-	if err != nil {
-		return nil, fmt.Errorf("reinspect Codex hooks file %q: %w", path, err)
-	}
-	if !after.Mode().IsRegular() || !os.SameFile(before, after) {
-		return nil, fmt.Errorf("codex hooks file %q changed while reading", path)
 	}
 	document.exists = true
 	if err := json.Unmarshal(data, &document.topLevel); err != nil {

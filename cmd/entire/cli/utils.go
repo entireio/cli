@@ -10,7 +10,7 @@ import (
 
 	"charm.land/huh/v2"
 
-	"github.com/entireio/cli/cmd/entire/cli/osroot"
+	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/uiform"
 )
@@ -89,7 +89,7 @@ func copyFile(src, dst string) error {
 	}
 	defer root.Close()
 
-	if err := osroot.WriteFile(root, relPath, input, 0o600); err != nil {
+	if err := jsonutil.WriteFileAtomicIn(root, relPath, input, 0o600); err != nil {
 		return fmt.Errorf("failed to write file: %w", err)
 	}
 	return nil
@@ -134,7 +134,7 @@ func openAllowedRoot(dst string) (*os.Root, string, error) {
 		if err != nil {
 			return nil, "", fmt.Errorf("openAllowedRoot: failed to open root %q: %w", dir, err)
 		}
-		return root, rel, nil
+		return root, filepath.ToSlash(rel), nil
 	}
 
 	return nil, "", fmt.Errorf("openAllowedRoot: dst %q is outside allowed directories", dst)

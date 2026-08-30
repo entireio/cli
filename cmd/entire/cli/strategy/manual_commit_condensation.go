@@ -1605,7 +1605,7 @@ func clearFilesystemPrompt(ctx context.Context, sessionID string) {
 	if err != nil {
 		return
 	}
-	_ = osroot.Remove(root, sessionPromptName(sessionID)) //nolint:errcheck // best-effort; a leftover prompt.txt is overwritten next turn
+	_ = osroot.RemoveNoSymlinks(root, sessionPromptName(sessionID)) //nolint:errcheck // best-effort; a leftover prompt.txt is overwritten next turn
 }
 
 func ensureCondensationAttemptID(ctx context.Context, state *SessionState) (id.CheckpointID, bool, error) {

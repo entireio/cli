@@ -15,6 +15,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	cpkg "github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
+	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
 	"github.com/entireio/cli/cmd/entire/cli/osroot"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/textutil"
@@ -436,7 +437,7 @@ func (s *ManualCommitStrategy) Rewind(ctx context.Context, w, errW io.Writer, po
 		}
 
 		// File is untracked and not in checkpoint - delete it via os.Root
-		if removeErr := osroot.Remove(repoRootHandle, relPath); removeErr == nil {
+		if removeErr := osroot.RemoveNoSymlinks(repoRootHandle, relPath); removeErr == nil {
 			fmt.Fprintf(w, "  Deleted: %s\n", relPath)
 		}
 	}
@@ -477,7 +478,7 @@ func (s *ManualCommitStrategy) Rewind(ctx context.Context, w, errW io.Writer, po
 		if f.Mode == filemode.Executable {
 			perm = 0o755
 		}
-		if err := osroot.WriteFile(repoRootHandle, f.Name, []byte(contents), perm); err != nil {
+		if err := jsonutil.WriteFileAtomicIn(repoRootHandle, f.Name, []byte(contents), perm); err != nil {
 			return fmt.Errorf("failed to write file %s: %w", f.Name, err)
 		}
 

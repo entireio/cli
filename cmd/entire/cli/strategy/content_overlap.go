@@ -530,7 +530,7 @@ func workingTreeMatchesCommit(worktreeRoot, filePath string, commitHash plumbing
 	if err != nil {
 		return false
 	}
-	diskContent, err := osroot.ReadFile(root, name)
+	diskContent, err := osroot.ReadFileNoFollow(root, name)
 	if err != nil {
 		return false
 	}

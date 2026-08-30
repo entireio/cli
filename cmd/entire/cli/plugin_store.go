@@ -308,7 +308,7 @@ func ListInstalledPlugins() ([]*InstalledPlugin, error) {
 		}
 		return nil, err
 	}
-	entries, err := osroot.ReadDir(root, pluginManagedBinSubdir)
+	entries, err := osroot.ReadDirNoSymlinks(root, pluginManagedBinSubdir)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return nil, nil
@@ -327,7 +327,7 @@ func ListInstalledPlugins() ([]*InstalledPlugin, error) {
 			continue
 		}
 		name := pluginBinName(full)
-		info, err := root.Lstat(name)
+		info, err := osroot.LstatNoSymlinks(root, name)
 		if err != nil {
 			continue
 		}

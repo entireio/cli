@@ -132,7 +132,7 @@ func loadCache() (*VersionCache, error) {
 	if err != nil {
 		return nil, fmt.Errorf("reading cache file: %w", err)
 	}
-	data, err := osroot.ReadFile(root, cacheFileName)
+	data, err := osroot.ReadFileNoFollow(root, cacheFileName)
 	if err != nil {
 		return nil, fmt.Errorf("reading cache file: %w", err)
 	}

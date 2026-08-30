@@ -905,14 +905,20 @@ func FlattenTree(repo *git.Repository, tree *object.Tree, prefix string, entries
 // dangling symlink is still an entry the caller must decide about rather than
 // treat as a deletion.
 func fileExistsIn(root *os.Root, name string) bool {
-	_, err := root.Lstat(name)
+	_, err := osroot.LstatNoSymlinks(root, name)
 	return err == nil
 }
 
 // createBlobFromFile creates a blob object from a file in the working directory,
 // named inside the worktree root.
 func createBlobFromFile(repo *git.Repository, root *os.Root, name string) (plumbing.Hash, filemode.FileMode, error) {
-	info, err := root.Lstat(name)
+	parent, leaf, closeParent, err := osroot.OpenParentNoSymlinks(root, name)
+	if err != nil {
+		return plumbing.ZeroHash, 0, fmt.Errorf("failed to open file parent: %w", err)
+	}
+	defer closeParent()
+
+	info, err := parent.Lstat(leaf)
 	if err != nil {
 		return plumbing.ZeroHash, 0, fmt.Errorf("failed to stat file: %w", err)
 	}
@@ -931,7 +937,7 @@ func createBlobFromFile(repo *git.Repository, root *os.Root, name string) (plumb
 		// A symlink is committed as its target text, so it is read rather than
 		// followed — which is also why the root's refusal to follow one out of
 		// the worktree does not apply here.
-		target, readErr := root.Readlink(name)
+		target, readErr := parent.Readlink(leaf)
 		if readErr != nil {
 			return plumbing.ZeroHash, 0, fmt.Errorf("failed to read symlink: %w", readErr)
 		}
@@ -946,7 +952,7 @@ func createBlobFromFile(repo *git.Repository, root *os.Root, name string) (plumb
 		// above from the Lstat, so reaching this branch on a link means the
 		// entry changed underneath us, and following it would store some other
 		// file's contents under this name.
-		content, err = osroot.ReadFileNoFollow(root, name)
+		content, err = osroot.ReadFileNoFollow(parent, leaf)
 		if err != nil {
 			return plumbing.ZeroHash, 0, fmt.Errorf("failed to read file: %w", err)
 		}

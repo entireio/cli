@@ -19,6 +19,7 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/remote"
 	"github.com/entireio/cli/cmd/entire/cli/interactive"
+	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
 	"github.com/entireio/cli/cmd/entire/cli/osroot"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/worktreedir"
@@ -124,7 +125,7 @@ func appendIgnoreRule(worktreeRoot string) (bool, error) {
 	if err != nil {
 		return false, fmt.Errorf("failed to open worktree root: %w", err)
 	}
-	content, err := osroot.ReadFile(wt, name)
+	content, err := osroot.ReadFileNoFollow(wt, name)
 	if errors.Is(err, os.ErrNotExist) {
 		return false, nil
 	}
@@ -141,7 +142,7 @@ func appendIgnoreRule(worktreeRoot string) (bool, error) {
 		prefix = "\n"
 	}
 	updated := string(content) + prefix + rule + "\n"
-	if err := osroot.WriteFile(wt, name, []byte(updated), 0o600); err != nil {
+	if err := jsonutil.WriteFileAtomicIn(wt, name, []byte(updated), 0o600); err != nil {
 		return false, fmt.Errorf("failed to update %s: %w", name, err)
 	}
 	return true, nil
@@ -199,7 +200,7 @@ func loadWorktreeIncludePatterns(root string) ([]string, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to open worktree root: %w", err)
 	}
-	data, err := osroot.ReadFile(wt, worktreeIncludeFile)
+	data, err := osroot.ReadFileNoFollow(wt, worktreeIncludeFile)
 	if errors.Is(err, fs.ErrNotExist) {
 		return nil, nil
 	}
@@ -275,24 +276,17 @@ func cleanRelativeIncludeFile(rel string) (string, bool) {
 // branch nor one in the source checkout can redirect the copy outside it.
 func copyIncludedFile(srcRoot, destRoot *os.Root, rel string) error {
 	name := filepath.ToSlash(rel)
-	srcInfo, err := srcRoot.Lstat(name)
-	if err != nil {
-		return err //nolint:wrapcheck // lstat error is sufficient for caller context
-	}
-	if !srcInfo.Mode().IsRegular() {
-		return errors.New("source is not a regular file")
-	}
-	in, err := srcRoot.Open(name)
+	in, err := osroot.OpenNoFollow(srcRoot, name)
 	if err != nil {
 		return err //nolint:wrapcheck // open error is sufficient for caller context
 	}
 	defer in.Close()
-	openedInfo, err := in.Stat()
+	srcInfo, err := in.Stat()
 	if err != nil {
 		return err //nolint:wrapcheck // stat error is sufficient for caller context
 	}
-	if !openedInfo.Mode().IsRegular() || !os.SameFile(srcInfo, openedInfo) {
-		return errors.New("source changed while opening")
+	if !srcInfo.Mode().IsRegular() {
+		return errors.New("source is not a regular file")
 	}
 	// NoSymlink: dest is a checkout of a branch the invoking user did not
 	// author, and os.Root follows a symlink that stays INSIDE the root.
@@ -301,7 +295,12 @@ func copyIncludedFile(srcRoot, destRoot *os.Root, rel string) error {
 			return err //nolint:wrapcheck // mkdir error is sufficient for caller context
 		}
 	}
-	out, err := destRoot.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_EXCL, srcInfo.Mode().Perm())
+	destParent, destLeaf, closeDestParent, err := osroot.OpenParentNoSymlinks(destRoot, name)
+	if err != nil {
+		return err //nolint:wrapcheck // names the offending component; caller adds the file context
+	}
+	defer closeDestParent()
+	out, err := destParent.OpenFile(destLeaf, os.O_WRONLY|os.O_CREATE|os.O_EXCL, srcInfo.Mode().Perm())
 	if err != nil {
 		return err //nolint:wrapcheck // openfile error is sufficient for caller context
 	}
@@ -309,7 +308,7 @@ func copyIncludedFile(srcRoot, destRoot *os.Root, rel string) error {
 	defer func() {
 		if !copied {
 			_ = out.Close()
-			_ = osroot.Remove(destRoot, name) //nolint:errcheck // best-effort cleanup after a failed copy
+			_ = osroot.Remove(destParent, destLeaf) //nolint:errcheck // best-effort cleanup after a failed copy
 		}
 	}()
 	if _, err := io.Copy(out, in); err != nil {
@@ -318,7 +317,7 @@ func copyIncludedFile(srcRoot, destRoot *os.Root, rel string) error {
 	if err := out.Close(); err != nil {
 		return err //nolint:wrapcheck // close error is sufficient for caller context
 	}
-	if err := destRoot.Chmod(name, srcInfo.Mode().Perm()); err != nil {
+	if err := destParent.Chmod(destLeaf, srcInfo.Mode().Perm()); err != nil {
 		return err //nolint:wrapcheck // chmod error is sufficient for caller context
 	}
 	copied = true
