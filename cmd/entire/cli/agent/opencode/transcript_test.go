@@ -981,3 +981,58 @@ func TestCalculateTokenUsage_ReasoningRecordedAsThinking(t *testing.T) {
 		t.Errorf("thinking %d output %d, want 300 / 400", usage.ThinkingTokens, usage.OutputTokens)
 	}
 }
+
+// ThinkingTokens is documented as a subset of OutputTokens — readers derive
+// non-thinking output as output minus thinking, which goes negative if thinking
+// can exceed it. BilledOutput only folds reasoning into output when the total
+// identity confirms reasoning is billed separately; a message with no total
+// cannot confirm it, so the reasoning we report must not outrun the output we
+// actually counted.
+func TestCalculateTokenUsage_ThinkingNeverExceedsOutput(t *testing.T) {
+	t.Parallel()
+
+	transcript := []byte(`{
+		"info": {"id": "ses_1"},
+		"messages": [
+			{"info": {"id": "m1", "role": "assistant",
+			  "tokens": {"input": 100, "output": 10, "reasoning": 50,
+			             "cache": {"read": 0, "write": 0}}},
+			 "parts": []}
+		]
+	}`)
+
+	a := &OpenCodeAgent{}
+	usage, err := a.CalculateTokenUsage(transcript, 0)
+	require.NoError(t, err)
+	require.NotNil(t, usage)
+
+	require.Equal(t, 10, usage.OutputTokens,
+		"with no total to confirm the shape, only the reported output is billed")
+	require.LessOrEqual(t, usage.ThinkingTokens, usage.OutputTokens,
+		"thinking tokens must stay a subset of the output tokens counted")
+}
+
+// When the total identity confirms reasoning is billed outside output, both the
+// billed output and the full reasoning are recorded, and the subset holds.
+func TestCalculateTokenUsage_ReasoningOutsideOutputIsCountedInFull(t *testing.T) {
+	t.Parallel()
+
+	transcript := []byte(`{
+		"info": {"id": "ses_2"},
+		"messages": [
+			{"info": {"id": "m1", "role": "assistant",
+			  "tokens": {"input": 100, "output": 10, "reasoning": 50, "total": 160,
+			             "cache": {"read": 0, "write": 0}}},
+			 "parts": []}
+		]
+	}`)
+
+	a := &OpenCodeAgent{}
+	usage, err := a.CalculateTokenUsage(transcript, 0)
+	require.NoError(t, err)
+	require.NotNil(t, usage)
+
+	require.Equal(t, 60, usage.OutputTokens, "reasoning is billed at the output rate")
+	require.Equal(t, 50, usage.ThinkingTokens)
+	require.LessOrEqual(t, usage.ThinkingTokens, usage.OutputTokens)
+}
