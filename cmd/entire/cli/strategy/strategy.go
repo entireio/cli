@@ -102,22 +102,6 @@ type RewindPoint struct {
 	Imported bool
 }
 
-// RewindPreview describes what will happen when rewinding to a checkpoint.
-// Used to warn users about files that will be modified or deleted.
-type RewindPreview struct {
-	// FilesToRestore are files from the checkpoint that will be written/restored.
-	FilesToRestore []string
-
-	// FilesToDelete are untracked files that will be removed.
-	// These are files created after the checkpoint that aren't in the checkpoint tree
-	// and weren't present at session start.
-	FilesToDelete []string
-
-	// TrackedChanges are tracked files with uncommitted changes that will be reverted.
-	// These come from the existing CanRewind() warning.
-	TrackedChanges []string
-}
-
 // StepContext contains all information needed for saving a step checkpoint.
 // All file paths should be pre-filtered and normalized by the CLI layer.
 type StepContext struct {

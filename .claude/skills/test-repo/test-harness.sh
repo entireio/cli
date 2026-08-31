@@ -155,7 +155,7 @@ list-rewind-points)
   ;;
 
 create-changes)
-  echo "==> Creating additional changes for rewind test..."
+  echo "==> Creating post-checkpoint changes..."
   cd "$REPO_DIR"
 
   echo "// More changes" >>app.js
@@ -163,37 +163,6 @@ create-changes)
 
   echo "Modified: app.js"
   echo "Created: extra.js"
-  ;;
-
-rewind)
-  checkpoint_id="${1:-}"
-  if [ -z "$checkpoint_id" ]; then
-    echo "Usage: $0 rewind <checkpoint-id>"
-    exit 1
-  fi
-
-  echo "==> Rewinding to checkpoint: $checkpoint_id"
-  cd "$REPO_DIR"
-
-  git stash
-  "$BIN_PATH" rewind --to "$checkpoint_id"
-
-  echo "Rewound to: $checkpoint_id"
-  ;;
-
-verify-rewind)
-  echo "==> Verifying rewind..."
-  cd "$REPO_DIR"
-
-  echo "Contents of app.js:"
-  cat app.js
-
-  if [ -f extra.js ]; then
-    echo "✗ FAIL: extra.js should not exist after rewind"
-    exit 1
-  else
-    echo "✓ PASS: extra.js correctly removed"
-  fi
   ;;
 
 cleanup)
@@ -226,9 +195,7 @@ info)
   echo "  verify-shadow-branch   - Verify shadow branch exists"
   echo "  verify-metadata-branch - Verify metadata branch exists"
   echo "  list-rewind-points     - List available rewind points"
-  echo "  create-changes         - Create changes for rewind test"
-  echo "  rewind <id>            - Rewind to checkpoint ID"
-  echo "  verify-rewind          - Verify rewind worked"
+  echo "  create-changes         - Create changes on top of the checkpoint"
   echo "  cleanup                - Clean up test environment"
   echo "  info                   - Show environment info"
   echo ""

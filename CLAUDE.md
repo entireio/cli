@@ -766,8 +766,8 @@ same sentinel; the lifecycle handlers warn-and-skip the checkpoint on it. Turn
 end persists whether the turn degraded (`SessionState.CaptureDegradedAt` — set
 on breach, cleared by the next healthy turn) so `entire status` surfaces the
 degradation instead of it living only in `.entire/logs`. Paths
-where a user is actively waiting on a command (review, rewind, and
-`session adopt` via `detectFileChangesUnbounded`) keep the unbounded
+where a user is actively waiting on a command (review, and `session adopt`
+via `detectFileChangesUnbounded`) keep the unbounded
 `gitrepo.Status`.
 
 #### `git status` Is a Write - Always Pass `--no-optional-locks`
@@ -989,28 +989,30 @@ this automatically; do not call `NewEntireAPICellClient` in a loop.
 
 ### Session Strategy (`cmd/entire/cli/strategy/`)
 
-The CLI uses a manual-commit strategy for managing session data and checkpoints. The strategy implements the `Strategy` interface defined in `strategy.go`.
+The CLI uses a manual-commit strategy for managing session data and checkpoints. There is no `Strategy` interface: `*ManualCommitStrategy` (`manual_commit.go`, constructed by `NewManualCommitStrategy()`) is the only implementation and callers hold it concretely. `strategy.go` holds the types its methods take and return.
 
-#### Strategy Interface
+#### Strategy Methods
 
-The `Strategy` interface provides:
+`*ManualCommitStrategy`'s main entry points:
 
 - `SaveStep()` - Save session step checkpoint (code + metadata)
 - `SaveTaskStep()` - Save subagent task step checkpoint
-- `GetRewindPoints()` / `Rewind()` - List and restore to checkpoints
+- `GetRewindPoints()` - List checkpoints (see the note below: there is no restore path)
 - `GetSessionLog()` / `GetSessionInfo()` - Retrieve session data
 
-`Rewind()` has **no CLI surface**. The `rewind` commands were removed, so
-nothing outside tests calls it; `GetRewindPoints()` is still live, feeding
-`checkpoint list --pending`. Treat the restore path as machinery pending
-removal rather than as a supported entry point — do not build on it, and do not
-re-expose it without deciding whether the removal was meant to be permanent.
-Mind the split in its test coverage: `PreviewRewind` tests cover which untracked
-files are *planned* for deletion, while
-`TestShadowStrategy_Rewind_PreservesIgnoredFiles` covers what survives an actual
-execution — that ignored paths such as `.entire/` are still there afterwards.
-The second half is where the go-git hazard lives, so keep it covered for as long
-as the restore path exists.
+**There is no restore path.** `Rewind()`, `PreviewRewind()`, `CanRewind()` and
+their helpers were removed once the `rewind` commands went and nothing outside
+tests still called them. Nothing in the strategy writes checkpoint contents back
+over the worktree, and re-adding that is a product decision, not a refactor.
+
+What survives is everything that reads a checkpoint without touching working
+files. `GetRewindPoints()` / `GetLogsOnlyRewindPoints()` feed
+`checkpoint list --pending`. `RestoreLogsOnly()` writes a checkpoint's session
+logs into the agent's session directory — logs only, never worktree files — and
+feeds `entire resume` and `entire trail resume`. The `RewindPoint`,
+`RestoredSession` and `SessionRestoreStatus` types keep the "rewind point"
+vocabulary; it names a point you can list and resume from, not one the CLI can
+restore files to.
 
 #### How It Works
 
@@ -1028,8 +1030,7 @@ The manual-commit strategy (`manual_commit*.go`) does not modify the active bran
 - **Subagent task records** - subagent work (Claude Code's Task tool) is captured as durable `session.TaskRecord` entries on session state, a pointer mid-turn (declared transcript path + labels; background launches record at launch, completions attach files/tokens/path exactly-once via `strategy.CompleteTaskRecord`, Factory Droid Workers upsert). Condensation materializes each record — declared path first, agent-layout fallback, same sanitize → externalize → redact pipeline — into `tasks/<toolUseID>/{agent-<agentID>.jsonl, task.json}` inside the parent session's checkpoint (unavailable transcript → `task.json` with a stable path-free reason; the writer redacts `task.json`'s free-text `task_description` itself, since the record carries it verbatim); live records store transcript-so-far each condensation, completed records are removed after a successful write. `State.HasTaskContent()` is the trigger currency: records-only sessions condense, records never live on the shadow branch, and shadow-branch existence does not imply task content (shadow pinning keys on `StepCount` only). `SaveTaskStep` is incremental-only (post-todo).
 - Uses the `post-rewrite` Git hook to keep local session linkage aligned after amend/rebase rewrites
 - Builds git trees in-memory using go-git plumbing APIs
-- Rewind restores files from shadow branch commit tree (does not use `git reset`)
-- **Location-independent transcript resolution** - transcript paths are always computed dynamically from the current repo location (via `agent.GetSessionDir` + `agent.ResolveSessionFile`), never stored in checkpoint metadata. This ensures restore/rewind works after repo relocation or across machines.
+- **Location-independent transcript resolution** - transcript paths are always computed dynamically from the current repo location (via `agent.GetSessionDir` + `agent.ResolveSessionFile`), never stored in checkpoint metadata. This ensures log restore (`RestoreLogsOnly`) works after repo relocation or across machines.
 - **Token usage scoping** - `SessionState.TokenUsage` is the session-wide total used by `entire status`; `SessionState.CheckpointTokenUsage` is the pending checkpoint delta since the last condensation. Checkpoint metadata must stay scoped to `CheckpointTranscriptStart` or the pending checkpoint delta. Cursor tokens come only from stop-hook payloads, while Copilot CLI can also backfill full-session totals from `session.shutdown`. Condensation's transcript recompute runs with `subagentsDir=""` and so drops `SubagentTokens`; `withSubagentTokensFrom` refills it from the already-rescoped `state.CheckpointTokenUsage`, and the store sums it across a checkpoint's sessions via `types.AddTokenUsage` (the single token-summing primitive — do not hand-roll another; a field-by-field copy is how the nested total came to be dropped in the first place).
 - Tracks session state in `.git/entire-sessions/` (shared across worktrees)
 - **Commit-to-session linking is identity-first** (`strategy/session_identity.go`): identity comes from `SessionState.Owner`, the `proclive.Identity` that `captureSessionOwner` already records on every turn start (first non-transient ancestor — proclive skips shells, `entire` itself, and the Go toolchain, so a human commit typed in the same terminal never matches). Commit hooks snapshot their own ancestry once (`proclive.CurrentAncestry`) and match every candidate against it in memory (`Ancestry.Depth`) — one hostname/boot-id/proc walk per commit, not one per session state — linking the commit to the session whose agent process is an ancestor — in any worktree (nearest ancestor wins, so a nested agent beats the outer agent that spawned it, and only a tie at equal depth falls to the latest interaction; host/boot/start-time guards defeat PID reuse and cross-machine matches; Windows cannot introspect and falls back to worktree matching). The identity match is UNIONED with the worktree-matched set, never a replacement: a commit condenses every session with pending content in its worktree. Any session matched outside its home worktree is guest-linked — whether identity-matched or selected by the pre-existing single-worktree fallback — and is condensed and linked without mutating worktree-coupled state (`BaseCommit`, shadow-branch realignment) from the foreign worktree (`isSessionHomeWorktree`). Worktree matching is always computed (it is the sole mechanism for commits with no agent ancestry): imported sessions never link, and multi-worktree ambiguity is filtered to recently-interacting sessions (15 min) before declining. This deliberately turns some former ambiguity declines into a best-candidate link; `recentSessionWindow` is a correctness tradeoff because a session in a long-running build or tool call can age out and leave the other recent worktree to win. The stderr hint naming `entire session adopt` fires only from the commit-linking path, and only when identity matching could not rescue the commit either. Under `go test`, `session.NewStateStore` and `NewStateStoreForWorktree` refuse to open outside the temp root so non-isolated tests fail loudly instead of leaking fixture sessions into a real repo.
@@ -1048,9 +1049,9 @@ The manual-commit strategy (`manual_commit*.go`) does not modify the active bran
 
 #### Key Files
 
-- `strategy.go` - Interface definition and context structs (`StepContext`, `TaskStepContext`, `RewindPoint`, etc.)
-- `common.go` - Helpers for metadata extraction, tree building, rewind validation, `ListCheckpoints()`
-- `manual_commit*.go` - Manual-commit strategy: main impl, types, session state, condensation, rewind, git ops, logs, hook handlers (prepare-commit-msg, post-commit, post-rewrite, pre-push), reset
+- `strategy.go` - Shared types only, no behaviour: the sentinel errors (`ErrNoMetadata`, `ErrNoSession`, `ErrNotTaskCheckpoint`, `ErrEmptyRepository`), the argument and result structs (`SessionInfo`, `RewindPoint`, `StepContext`, `TaskStepContext`, `TaskCheckpoint`, `SubagentCheckpoint`, `RestoredSession`), and `TaskMetadataDir()`. The strategy type itself and its constructor live in `manual_commit.go`.
+- `common.go` - Helpers for metadata extraction, tree building, `ListCheckpoints()`
+- `manual_commit*.go` - Manual-commit strategy: main impl, types, session state, condensation, checkpoint listing + log restore (`manual_commit_rewind.go`), git ops, logs, hook handlers (prepare-commit-msg, post-commit, post-rewrite, pre-push), reset
 - `manual_commit_opf_rewrite.go` - Pre-push OPF re-redaction: walks unpushed v1 commits, runs OPF over their blobs, rebuilds commits with `Entire-OPF-Applied: true` trailer, CAS-updates the local ref. Sentinel error types (use `errors.As`): `V1DivergedError`, `BootstrapTooLargeError`, `V1RefMovedError`, `OPFRuntimeFailedError`, `OPFBatchTooLargeError`, `OPFRawBytesTooLargeError`, `OPFNoCategoriesError` (OPF enabled with zero effective categories — the pre-push decision and the rewrite both fail closed instead of stamping the trailer without a scan).
 - `manual_commit_opf_refs.go` - The git-refs half of pre-push OPF: `RewriteQueuedCheckpointRefsWithOPF` walks the push queue and rewrites every unpushed commit on each queued ref, reusing the v1 rewrite's blob walk, caps, and error types. See the OPF bullet above for why the two backends fail closed differently.
 - `settings/opf_command_trust.go` - Ownership gate for the executed OPF `command` (local-only + untracked); see the OPF trust-boundary bullet above
@@ -1070,7 +1071,7 @@ The phase state machine, metadata directory layout, sharded checkpoint format, m
 
 #### When Modifying the Strategy
 
-- The strategy must implement the full `Strategy` interface
+- Adding a method to `*ManualCommitStrategy` is enough — there is no interface to satisfy, and no second implementation to keep in step
 - Test with `mise run test` - strategy tests are in `*_test.go` files
 - Keep this file and `docs/architecture/sessions-and-checkpoints.md` current when changing strategy behavior (`AGENTS.md` is a symlink to this file)
 

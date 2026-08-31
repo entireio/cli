@@ -25,6 +25,8 @@ import (
 	"time"
 
 	"github.com/gofrs/flock"
+
+	"github.com/entireio/cli/internal/entireclient/userdirs"
 )
 
 // Context is a single kubectl-style entry: which core to talk to, as
@@ -59,9 +61,10 @@ type File struct {
 }
 
 // FilePath returns $configDir/contexts.json after ensuring the directory
-// exists with 0700 perms.
+// exists and is private to its owner — 0700, or stricter if the user already
+// made it so; see userdirs.EnsurePrivateDir.
 func FilePath(configDir string) (string, error) {
-	if err := os.MkdirAll(configDir, 0700); err != nil {
+	if err := userdirs.EnsurePrivateDir(configDir); err != nil {
 		return "", fmt.Errorf("create config dir: %w", err)
 	}
 	return filepath.Join(configDir, "contexts.json"), nil

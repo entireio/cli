@@ -107,9 +107,16 @@ func globalConfigDirPath() string {
 }
 
 // ensureGlobalConfigDir creates the global config directory if it doesn't exist.
+//
+// It goes through userdirs.EnsurePrivateDir rather than MkdirAll because this
+// directory is shared with contexts.json and the file token store, both of
+// which hold bearer tokens. The version check runs from the root command's
+// PersistentPostRun, so on a fresh machine it is almost always what creates
+// the directory — before the first login ever runs. Creating it world-readable
+// here left it that way permanently, since the credential stores' own
+// MkdirAll(0700) cannot change the mode of a directory that already exists.
 func ensureGlobalConfigDir() error {
-	//nolint:gosec // ~/.config/entire is user home directory, 0o755 is appropriate
-	if err := os.MkdirAll(globalConfigDirPath(), 0o755); err != nil {
+	if err := userdirs.EnsurePrivateDir(globalConfigDirPath()); err != nil {
 		return fmt.Errorf("creating config directory: %w", err)
 	}
 

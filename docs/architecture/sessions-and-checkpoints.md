@@ -51,8 +51,8 @@ const (
 
 | Type | Contents | Use Case |
 |------|----------|----------|
-| Ephemeral | Full state (code + metadata) | Intra-session rewind, pre-commit |
-| Persistent | Metadata + commit reference | Permanent record, post-commit rewind |
+| Ephemeral | Full state (code + metadata) | Pending session state, pre-commit |
+| Persistent | Metadata + commit reference | Permanent record, post-commit |
 
 ## Interface
 
@@ -510,7 +510,7 @@ Metadata only, sharded by checkpoint ID. Supports **multiple sessions per checkp
 ├── metadata.json        # CheckpointSummary (aggregated stats)
 ├── 0/                   # First session (0-based indexing)
 │   ├── metadata.json    # Session-specific Metadata
-│   ├── full.jsonl       # Agent transcript, sanitized + redacted (CLI rewind/resume/explain)
+│   ├── full.jsonl       # Agent transcript, sanitized + redacted (CLI resume/explain)
 │   ├── transcript.jsonl # Full compacted session (slice at compact_transcript_start)
 │   ├── prompt.txt       # Checkpoint-scoped user prompts
 │   └── content_hash.txt # sha256 of full.jsonl (dedup short-circuit)
@@ -548,7 +548,7 @@ root `metadata.json` `sessions[].transcript` pointer keeps targeting
 `full.jsonl`; when a compact transcript was generated the session entry also
 carries a `compact_transcript` path pointing at `transcript.jsonl` (omitted
 otherwise) so external readers can find it next to `full.jsonl`.
-CLI read paths (rewind/resume/explain) read `full.jsonl` by filename. Compact
+CLI read paths (resume/explain) read `full.jsonl` by filename. Compact
 generation is best-effort: failures are logged but never fail the checkpoint
 write. It is also **skipped when the compacted output exceeds the 50MB blob cap**
 — unlike `full.jsonl`, `transcript.jsonl` is not chunked, so a very long session
@@ -836,13 +836,19 @@ Strategies determine checkpoint timing and type:
 
 Each `RewindPoint` includes `SessionID` and `SessionPrompt` to help identify which checkpoint belongs to which session when multiple sessions are interleaved.
 
+A rewind point is something you can list and resume from, not something the CLI
+restores working files to: the file-restoring path (`Rewind`, `PreviewRewind`,
+`CanRewind`) was removed along with the `rewind` commands. `RestoreLogsOnly`
+still writes a checkpoint's session logs into the agent's session directory for
+`entire resume`, and leaves the worktree alone.
+
 ## Concurrent Sessions
 
 Multiple AI sessions can run concurrently on the same base commit:
 
 1. **Warning on start** - When a second session starts while another has uncommitted checkpoints, a warning is shown
 2. **Both proceed** - User can continue; checkpoints interleave on the same shadow branch
-3. **Identification** - Each checkpoint is tagged with its session ID; rewind UI shows session prompt
+3. **Identification** - Each checkpoint is tagged with its session ID; `checkpoint list --pending` shows the session prompt
 4. **Condensation** - On commit, all sessions are condensed together with archived subfolders
 
 ### Conflict Handling
