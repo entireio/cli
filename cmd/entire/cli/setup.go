@@ -319,10 +319,11 @@ func updateGlobalSettings(ctx context.Context, cmd *cobra.Command, w io.Writer, 
 	}
 
 	if cmd.Flags().Changed(flagForce) || cmd.Flags().Changed(flagAbsoluteGitHookPath) {
-		if _, err := strategy.InstallGitHook(ctx, true, s.AbsoluteGitHookPath); err != nil {
+		_, huskySafe, err := strategy.InstallGitHook(ctx, true, s.AbsoluteGitHookPath)
+		if err != nil {
 			return fmt.Errorf("failed to reinstall git hook: %w", err)
 		}
-		strategy.CheckAndWarnHookManagers(ctx, w, s.AbsoluteGitHookPath)
+		strategy.CheckAndWarnHookManagers(ctx, w, s.AbsoluteGitHookPath, huskySafe)
 		fmt.Fprintln(w, "  ✓ Reinstalled git hook")
 	}
 
@@ -1321,10 +1322,11 @@ func runEnableInteractive(ctx context.Context, w io.Writer, agents []agent.Agent
 
 	// Use settings values (merged from existing config + flags) for hook installation
 	// This ensures re-running `entire enable` without flags preserves existing settings
-	if _, err := strategy.InstallGitHook(ctx, true, settings.AbsoluteGitHookPath); err != nil {
+	_, huskySafe, err := strategy.InstallGitHook(ctx, true, settings.AbsoluteGitHookPath)
+	if err != nil {
 		return fmt.Errorf("failed to install git hooks: %w", err)
 	}
-	strategy.CheckAndWarnHookManagers(ctx, w, settings.AbsoluteGitHookPath)
+	strategy.CheckAndWarnHookManagers(ctx, w, settings.AbsoluteGitHookPath, huskySafe)
 	fmt.Fprintln(w, "  ✓ Installed hooks")
 
 	configDisplay := configDisplayProject
@@ -2028,10 +2030,11 @@ func setupAgentHooksNonInteractive(ctx context.Context, w io.Writer, ag agent.Ag
 	}
 	hookAbsoluteGitHookPath := mergedSettings.AbsoluteGitHookPath || opts.AbsoluteGitHookPath
 
-	if _, err := strategy.InstallGitHook(ctx, true, hookAbsoluteGitHookPath); err != nil {
+	_, huskySafe, err := strategy.InstallGitHook(ctx, true, hookAbsoluteGitHookPath)
+	if err != nil {
 		return fmt.Errorf("failed to install git hooks: %w", err)
 	}
-	strategy.CheckAndWarnHookManagers(ctx, w, hookAbsoluteGitHookPath)
+	strategy.CheckAndWarnHookManagers(ctx, w, hookAbsoluteGitHookPath, huskySafe)
 
 	if installedHooks == 0 {
 		msg := fmt.Sprintf("Hooks for %s already installed", ag.Description())

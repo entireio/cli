@@ -64,7 +64,9 @@ func detectHookManagers(repoRoot string) []hookManager {
 
 // hookManagerWarning builds a warning string for detected hook managers.
 // cmdPrefix is the CLI command prefix (e.g., "entire" or an absolute binary path).
-func hookManagerWarning(managers []hookManager, cmdPrefix string) string {
+// huskySafe is true when the current core.hooksPath is a husky `_` dir with the
+// dispatcher present (Entire will install into the parent user-hook directory).
+func hookManagerWarning(managers []hookManager, cmdPrefix string, huskySafe bool) string {
 	if len(managers) == 0 {
 		return ""
 	}
@@ -75,6 +77,17 @@ func hookManagerWarning(managers []hookManager, cmdPrefix string) string {
 
 	for _, m := range managers {
 		if m.OverwritesHooks {
+			// Husky v9 safe path: dispatcher present under core.hooksPath=`_/`.
+			if m.Name == "Husky" && huskySafe {
+				fmt.Fprintf(&b, "Note: %s detected (%s)\n", m.Name, m.ConfigPath)
+				fmt.Fprintf(&b, "\n")
+				fmt.Fprintf(&b, "  Entire installs git hooks into the husky user-hook directory\n")
+				fmt.Fprintf(&b, "  (parent of core.hooksPath), which survives husky/npm prepare.\n")
+				fmt.Fprintf(&b, "  Regenerable `_` stubs are never replaced with Entire hooks.\n")
+				fmt.Fprintf(&b, "\n")
+				continue
+			}
+
 			fmt.Fprintf(&b, "Warning: %s detected (%s)\n", m.Name, m.ConfigPath)
 			fmt.Fprintf(&b, "\n")
 			fmt.Fprintf(&b, "  %s may overwrite hooks installed by Entire on npm install.\n", m.Name)
@@ -121,7 +134,9 @@ func extractCommandLine(hookContent string) string {
 // CheckAndWarnHookManagers detects external hook managers and writes a warning
 // to w if any are found.
 // absolutePath embeds the full binary path for GUI git clients.
-func CheckAndWarnHookManagers(ctx context.Context, w io.Writer, absolutePath bool) {
+// huskySafeInstall must match InstallGitHook's second return value so the Husky
+// advisory cannot disagree with where hooks were just installed.
+func CheckAndWarnHookManagers(ctx context.Context, w io.Writer, absolutePath, huskySafeInstall bool) {
 	repoRoot, err := paths.WorktreeRoot(ctx)
 	if err != nil {
 		return
@@ -137,7 +152,7 @@ func CheckAndWarnHookManagers(ctx context.Context, w io.Writer, absolutePath boo
 		// Best-effort: hook manager warnings are advisory, skip on resolution failure
 		return
 	}
-	warning := hookManagerWarning(managers, cmdPrefix)
+	warning := hookManagerWarning(managers, cmdPrefix, huskySafeInstall)
 	if warning != "" {
 		fmt.Fprintln(w)
 		fmt.Fprint(w, warning)
