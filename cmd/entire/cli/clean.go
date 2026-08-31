@@ -345,7 +345,7 @@ func runCleanAllWithItems(ctx context.Context, cmd *cobra.Command, force, dryRun
 	}
 
 	// Group items by type for display
-	var branches, states, checkpoints, redactCaches []strategy.CleanupItem
+	var branches, states, checkpoints, redactCaches, lockFiles []strategy.CleanupItem
 	for _, item := range items {
 		switch item.Type {
 		case strategy.CleanupTypeShadowBranch:
@@ -356,6 +356,8 @@ func runCleanAllWithItems(ctx context.Context, cmd *cobra.Command, force, dryRun
 			checkpoints = append(checkpoints, item)
 		case strategy.CleanupTypeRedactCache:
 			redactCaches = append(redactCaches, item)
+		case strategy.CleanupTypeLockFile:
+			lockFiles = append(lockFiles, item)
 		}
 	}
 
@@ -368,6 +370,7 @@ func runCleanAllWithItems(ctx context.Context, cmd *cobra.Command, force, dryRun
 		printSection(w, "Session states", cleanupItemIDs(states))
 		printSection(w, "Checkpoint metadata", cleanupItemIDs(checkpoints))
 		printSection(w, "Redaction cache", cleanupItemIDs(redactCaches))
+		printSection(w, "Lock files", cleanupItemIDs(lockFiles))
 		printSection(w, "Temp files", tempFiles)
 		printSection(w, "Stray agent temp files", orphanTemps)
 		printUnscannedNote(w, unscanned)
@@ -409,8 +412,8 @@ func runCleanAllWithItems(ctx context.Context, cmd *cobra.Command, force, dryRun
 	failedTempFiles = append(failedTempFiles, failedOrphans...)
 
 	// Report results
-	totalDeleted := len(result.ShadowBranches) + len(result.SessionStates) + len(result.Checkpoints) + len(deletedTempFiles)
-	totalFailed := len(result.FailedBranches) + len(result.FailedStates) + len(result.FailedCheckpoints) + len(failedTempFiles)
+	totalDeleted := len(result.ShadowBranches) + len(result.SessionStates) + len(result.Checkpoints) + len(result.RedactCaches) + len(result.LockFiles) + len(deletedTempFiles)
+	totalFailed := len(result.FailedBranches) + len(result.FailedStates) + len(result.FailedCheckpoints) + len(result.FailedRedactCache) + len(result.FailedLockFiles) + len(failedTempFiles)
 
 	if totalDeleted > 0 {
 		fmt.Fprintf(w, "✓ Deleted %d %s:\n", totalDeleted, itemWord(totalDeleted))
@@ -418,6 +421,8 @@ func runCleanAllWithItems(ctx context.Context, cmd *cobra.Command, force, dryRun
 		printResultSection(w, "Shadow branches", result.ShadowBranches)
 		printResultSection(w, "Session states", result.SessionStates)
 		printResultSection(w, "Checkpoints", result.Checkpoints)
+		printResultSection(w, "Redaction cache", result.RedactCaches)
+		printResultSection(w, "Lock files", result.LockFiles)
 
 		printResultSection(w, "Temp files", deletedTempFiles)
 		printResultSection(w, "Stray agent temp files", deletedOrphans)
@@ -430,6 +435,8 @@ func runCleanAllWithItems(ctx context.Context, cmd *cobra.Command, force, dryRun
 		printResultSection(errW, "Shadow branches", result.FailedBranches)
 		printResultSection(errW, "Session states", result.FailedStates)
 		printResultSection(errW, "Checkpoints", result.FailedCheckpoints)
+		printResultSection(errW, "Redaction cache", result.FailedRedactCache)
+		printResultSection(errW, "Lock files", result.FailedLockFiles)
 
 		if len(failedTempFiles) > 0 {
 			fmt.Fprintf(errW, "\nTemp files:\n")
