@@ -3052,6 +3052,50 @@ func TestSaveSubagentSessionTaskStep_SecondTurn_MergesAndKeepsDeclaredPath(t *te
 	assert.False(t, rec.CompletedAt.IsZero())
 }
 
+// TestSaveSubagentSessionTaskStep_ClearsChildPendingFiles pins the
+// double-count fix: once a detached child session's turn is recorded as a task
+// on the parent, the child's own FilesTouched must be cleared. Post-commit
+// condensation gates on FilesTouched, so leaving them in place condenses the
+// child as a second top-level session claiming the same files as the parent's
+// task record (observed with Grok in the 2026-08-31 TestSubagentCommitFlow
+// E2E run: two sessions, both claiming docs/red.md).
+func TestSaveSubagentSessionTaskStep_ClearsChildPendingFiles(t *testing.T) {
+	// NOT parallel: uses t.Chdir via setupSubagentEndTestRepo.
+	setupSubagentEndTestRepo(t)
+	ctx := context.Background()
+	strat := GetStrategy(ctx)
+
+	// The child accumulated pending files via its mid-turn post-tool-use hooks.
+	require.NoError(t, strat.EnsureSessionExists(ctx, "grok-child", agent.AgentTypeClaudeCode))
+	require.NoError(t, strategy.MutateSessionState(ctx, "grok-child", func(state *strategy.SessionState) error {
+		state.FilesTouched = []string{"docs/red.md"}
+		return nil
+	}))
+
+	step := subagentSessionStep{
+		link:          agent.SubagentSessionLink{ParentSessionID: "grok-parent", ToolUseID: "grok-child-tool-use", SubagentType: "worker"},
+		sessionID:     "grok-child",
+		event:         &agent.Event{Type: agent.TurnEnd, SessionID: "grok-child", Timestamp: time.Now()},
+		transcriptRef: "/tmp/child-updates.jsonl",
+		modifiedFiles: []string{"docs/red.md"},
+		agentType:     agent.AgentTypeClaudeCode,
+		strat:         strat,
+	}
+	require.NoError(t, saveSubagentSessionTaskStep(ctx, step))
+
+	parent, err := strategy.LoadSessionState(ctx, "grok-parent")
+	require.NoError(t, err)
+	rec := parent.FindTaskRecord("grok-child-tool-use")
+	require.NotNil(t, rec, "the turn must be recorded as a task on the parent")
+	assert.ElementsMatch(t, []string{"docs/red.md"}, rec.Files)
+
+	child, err := strategy.LoadSessionState(ctx, "grok-child")
+	require.NoError(t, err)
+	require.NotNil(t, child)
+	assert.Empty(t, child.FilesTouched,
+		"the child's pending files must move to the parent's task record, or post-commit condenses the child as a second session")
+}
+
 // --- handleLifecycleSubagentEnd: background launch marker + SubagentStop dispatch ---
 
 // setupSubagentEndTestRepo initializes a git repo with one commit and chdirs

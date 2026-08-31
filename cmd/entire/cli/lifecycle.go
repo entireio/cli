@@ -1847,6 +1847,25 @@ func saveSubagentSessionTaskStep(ctx context.Context, step subagentSessionStep) 
 		return fmt.Errorf("failed to record subagent session task: %w", err)
 	}
 
+	// The turn's files now live on the parent's task record; clear the child's
+	// own pending capture so post-commit condensation does not ALSO mint a
+	// top-level session checkpoint for it. HandleCondenseIfFilesTouched gates
+	// on FilesTouched, and the child accumulated them via its mid-turn
+	// post-tool-use hooks — leaving them in place double-counts every file the
+	// subagent wrote, once under the parent's task and once under a second
+	// session claiming the same checkpoint (observed with Grok in the
+	// 2026-08-31 TestSubagentCommitFlow run). Failure is a warn, not an error:
+	// the task record is already saved, and the fallback is the pre-existing
+	// double-count rather than data loss.
+	if err := strategy.MutateSessionState(ctx, step.sessionID, func(state *strategy.SessionState) error {
+		state.FilesTouched = nil
+		return nil
+	}); err != nil {
+		logging.Warn(logCtx, "failed to clear subagent session's pending files; its files may double-count on the next commit",
+			slog.String("session_id", step.sessionID),
+			slog.String("error", err.Error()))
+	}
+
 	// Retire the subagent's own session the same way an ordinary turn-end does,
 	// so its phase and pre-prompt state do not linger as an active session.
 	transitionSessionTurnEnd(ctx, step.sessionID, step.event)

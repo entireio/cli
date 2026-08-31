@@ -509,10 +509,30 @@ still.
    return false and restore today's behaviour. A total schema mismatch makes it
    inert, not wrong.
 
-   **Still unverified against a real `subagents/` directory** (the quota ran
-   out first). That is the one thing to check when quota returns; the binary
-   also mentions `output.json` and `refs/grok/subagents/<id>` git refs for
-   worktree-isolated subagents, neither of which is handled yet.
+   ~~Still unverified against a real `subagents/` directory~~ — **verified
+   2026-08-31**: with `subagent_stop` mapped to the child's TurnEnd, a real
+   `TestSubagentCommitFlow` run logged `resolved subagent session` (parent
+   `…d076`, child `…faa1`) and `recording subagent session as task record`,
+   and the committed checkpoint contains
+   `tasks/<childSessionID>/task.json` — so the resolver's read of the real
+   `subagents/` layout works. Two follow-on findings from that run:
+
+   - **The double-count had a second cause, now fixed**: the task record was
+     written, but the child's own session state still carried `FilesTouched`
+     from its mid-turn `post_tool_use` hooks, so post-commit condensation
+     minted a second top-level session anyway.
+     `saveSubagentSessionTaskStep` now clears the child's pending files once
+     the task record is saved.
+   - **`task.json` carried `transcript unavailable: unreadable` — harness
+     artifact, not a product bug.** The E2E runner creates a per-prompt
+     `GROK_HOME` and deletes it when the headless invocation returns (same
+     pattern as the Codex runner), so the child's `updates.jsonl` is gone by
+     post-commit condensation. Real users keep `~/.grok`, where the deferred
+     read works. An E2E-fidelity improvement (per-session home) is possible
+     but not required.
+
+   The binary also mentions `output.json` and `refs/grok/subagents/<id>` git
+   refs for worktree-isolated subagents, neither of which is handled yet.
 
    Recovering these names needed no quota: `strings` on
    `~/.grok/downloads/grok-macos-aarch64`.
@@ -594,7 +614,16 @@ Two passes on the personal free tier, both cut short by quota.
   (24 quota failures, 1 rate-limit failure at 21 requests/minute).
   `TestCheckpointMetadataDeepValidation` had passed individually on 08-25.
 
-Net: **30 of 56 scenarios verified**, no failure attributable to this
+- **2026-08-31** run of the 26 outstanding: 6 more passed —
+  `TestSubagentCommitFlow` (again, exercising the new `subagent_stop` →
+  TurnEnd mapping), `TestMultiSessionManualCommit`,
+  `TestInteractiveAttributionMultiCommitSameSession`,
+  `TestInteractiveContentOverlapRevertNewFile`,
+  `TestAgentCommitsMidTurnUserCommitsRemainder`, `TestExplainCheckpoint` —
+  before quota ran out again (18 quota failures, 4 rate-limit at
+  21 req/min / 2 req/sec).
+
+Net: **35 of 56 scenarios verified**, no failure attributable to this
 package. `TestSubagentCommitFlow` passes but surfaced the subagent
 double-count described under Gaps (the test does not assert session count).
 Completing the suite needs SuperGrok, a billed `XAI_API_KEY`, or an xAI team
