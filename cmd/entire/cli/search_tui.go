@@ -382,18 +382,29 @@ func (m searchModel) resetCodeSelectionReporting() searchModel {
 	return m
 }
 
-// reportSelection emits one cli_search_result_selected for the row the user
-// just opened, at most once per (tab, rank) per result set. Called from the
-// Confirm key handler — the single seam both tabs' detail views open through,
-// so this is the CLI's equivalent of a search-result click.
+// reportSelection records that the user opened a row and returns the tea.Cmd
+// that emits its cli_search_result_selected, at most once per (tab, rank) per
+// result set. Called from the Confirm key handler — the single seam both tabs'
+// detail views open through, so this is the CLI's equivalent of a
+// search-result click. Returns a nil Cmd when the selection was already
+// reported.
 //
 // Dedupe is keyed on the active tab and recorded in the ledger belonging to
 // that tab's result set; see the ledger field comment for why both the key and
 // the split matter.
 //
+// The ledger write is synchronous (a map write, and it must be ordered against
+// the key press) but the EMIT is not: it is handed back as a tea.Cmd so
+// bubbletea runs it off the Update loop. emitSearchSelection loads settings —
+// a stat plus a directory scan plus a git-backed tracked-file probe, single-digit
+// to tens of milliseconds depending on the ref backend — and then forks the
+// detached analytics process. Doing that inline would stall the single-threaded
+// Update loop on every Enter press. This matches the outcome event, which only
+// ever emits from inside the async searcher Cmd.
+//
 // Content-free: the result's type enum, its rank, and the size of the list it
 // came from. Nothing derived from the query or from what the result says.
-func (m searchModel) reportSelection(mode, resultType string, rank, resultCount int) searchModel {
+func (m searchModel) reportSelection(mode, resultType string, rank, resultCount int) (searchModel, tea.Cmd) {
 	key := string(m.filterType) + ":" + strconv.Itoa(rank)
 	isCode := m.filterType == typeFilterCode
 
@@ -402,7 +413,7 @@ func (m searchModel) reportSelection(mode, resultType string, rank, resultCount 
 		ledger = m.codeSelectionsReported
 	}
 	if ledger[key] {
-		return m
+		return m, nil
 	}
 	if ledger == nil {
 		ledger = make(map[string]bool)
@@ -414,17 +425,21 @@ func (m searchModel) reportSelection(mode, resultType string, rank, resultCount 
 	}
 	ledger[key] = true
 
-	// context.Background matches the other telemetry/search call sites in this
-	// file: bubbletea's Update carries no context, and the emit is detached and
-	// best-effort, so there is nothing for a cancellable context to cancel.
-	emitSearchSelection(context.Background(), telemetry.SearchSelection{
+	selection := telemetry.SearchSelection{
 		Command:     searchTUICommandPath,
 		Mode:        mode,
 		ResultType:  resultType,
 		Rank:        rank,
 		ResultCount: resultCount,
-	})
-	return m
+	}
+	return m, func() tea.Msg {
+		// context.Background matches the other telemetry/search call sites in
+		// this file: the emit is detached and best-effort, so there is nothing
+		// for a cancellable context to cancel. Returning nil produces no
+		// follow-up Update.
+		emitSearchSelection(context.Background(), selection)
+		return nil
+	}
 }
 
 func (m searchModel) Init() tea.Cmd {
@@ -729,22 +744,24 @@ func (m searchModel) updateBrowseMode(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) 
 		// the detail view is open can't move the highlight underneath it.
 		if m.filterType == typeFilterCode {
 			if r := m.selectedCodeResult(); r != nil {
-				m = m.reportSelection(telemetry.SearchModeCode, telemetry.SearchSelectionTypeCode, m.cursor, len(m.codeResults))
+				var emit tea.Cmd
+				m, emit = m.reportSelection(telemetry.SearchModeCode, telemetry.SearchSelectionTypeCode, m.cursor, len(m.codeResults))
 				m.mode = modeDetail
 				m.pinToEnd = false
 				content := m.renderCodeDetail(*r, m.width, true)
 				m.detailVP = viewport.New(viewport.WithWidth(m.width), viewport.WithHeight(max(m.height-2, 1)))
 				m.detailVP.SetContent(content)
-				return m, nil
+				return m, emit
 			}
 		} else if r := m.selectedResult(); r != nil {
-			m = m.reportSelection(telemetry.SearchModeCheckpoint, searchSelectionResultType(r.Type), m.cursor, m.visibleCount())
+			var emit tea.Cmd
+			m, emit = m.reportSelection(telemetry.SearchModeCheckpoint, searchSelectionResultType(r.Type), m.cursor, m.visibleCount())
 			m.mode = modeDetail
 			m.pinToEnd = false
 			content := m.renderDetailContent(*r, m.width, true)
 			m.detailVP = viewport.New(viewport.WithWidth(m.width), viewport.WithHeight(max(m.height-2, 1)))
 			m.detailVP.SetContent(content)
-			return m, nil
+			return m, emit
 		}
 	case key.Matches(msg, keys.Search):
 		m.mode = modeSearch
