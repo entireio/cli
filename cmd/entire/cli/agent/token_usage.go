@@ -87,6 +87,47 @@ func CalculateUsageWithCost(ag Agent, transcriptData []byte, fromOffset int, sub
 		return nil, nil, nil
 	}
 
+	return priceFlatUsage(ag, transcriptData, fromOffset, flat, accountedSubagentTokens, table, fallbackModel, disableEstimation)
+}
+
+// CalculateUsageWithCostForSubagentTotal is CalculateUsageWithCost for a caller
+// that already holds a correctly-scoped subagent total and must not re-derive one
+// from the subagent transcripts.
+//
+// Condensation is that caller. It cannot pass a real subagentsDir: flatTokenUsage
+// would re-read every subagent transcript from line 0 and hand back the
+// CUMULATIVE session total, which remainderBucket would then attribute in full to
+// this one checkpoint window — the unbounded per-turn inflation its SCOPING
+// comment describes. Passing "" avoided that but went too far: with no subtree at
+// all there is no shortfall, so no remainder bucket, so the subagent tokens are
+// priced at nothing and the checkpoint persists a main-only cost.
+//
+// subagentTokens is therefore supplied by the caller, already rescoped to this
+// window (the accumulated state.CheckpointTokenUsage subtree), and
+// accountedSubagentTokens is nil because that rescoping has already happened —
+// SubtractTokenUsage(scoped, nil) returns it unchanged. The result matches what
+// the live turn-end path produces for the same window.
+func CalculateUsageWithCostForSubagentTotal(ag Agent, transcriptData []byte, fromOffset int, subagentTokens *types.TokenUsage, table *pricing.Table, fallbackModel string, disableEstimation bool) (*types.TokenUsage, []types.ModelUsage, error) {
+	fallbackModel = resolveTierFallback(fallbackModel, table)
+
+	flat, err := flatTokenUsage(ag, transcriptData, fromOffset, "")
+	if err != nil {
+		return nil, nil, err
+	}
+	if flat == nil {
+		return nil, nil, nil
+	}
+	// Inject the caller's already-scoped subtree so the shortfall — and therefore
+	// the remainder bucket and the folded cost — covers subagent usage.
+	flat.SubagentTokens = subagentTokens
+
+	return priceFlatUsage(ag, transcriptData, fromOffset, flat, nil /* already rescoped */, table, fallbackModel, disableEstimation)
+}
+
+// priceFlatUsage is the shared tail of both entry points: bucket the main
+// transcript, attribute the flat-vs-buckets shortfall to a remainder bucket,
+// price everything, and fold the total back onto flat.
+func priceFlatUsage(ag Agent, transcriptData []byte, fromOffset int, flat, accountedSubagentTokens *types.TokenUsage, table *pricing.Table, fallbackModel string, disableEstimation bool) (*types.TokenUsage, []types.ModelUsage, error) {
 	buckets, err := modelUsageBuckets(ag, transcriptData, fromOffset, flat, fallbackModel)
 	if err != nil {
 		return nil, nil, err

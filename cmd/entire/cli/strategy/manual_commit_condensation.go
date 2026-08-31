@@ -834,10 +834,15 @@ func sessionDataUnpricedFromTranscript(d *ExtractedSessionData) bool {
 // remainder bucket is already a pure main-agent shortfall. If this ever starts
 // passing a subagents dir, it must pass a baseline too (see the scoping contract
 // on agent.CalculateUsageWithCost).
-func tokenUsageWithCost(ctx context.Context, ag agent.Agent, transcript []byte, fromOffset int, fallbackModel string, agentType types.AgentType) (*agent.TokenUsage, []agent.ModelUsage) {
+func tokenUsageWithCost(ctx context.Context, ag agent.Agent, transcript []byte, fromOffset int, fallbackModel string, agentType types.AgentType, subagentTokens *agent.TokenUsage) (*agent.TokenUsage, []agent.ModelUsage) {
 	table, disableEstimation := settings.LoadPricingTable(ctx)
 	pricingModel := settings.PricingModelForAgent(ctx, agentType, fallbackModel)
-	usage, buckets, err := agent.CalculateUsageWithCost(ag, transcript, fromOffset, "", nil /* accountedSubagentTokens */, table, pricingModel, disableEstimation)
+	// subagentTokens is the already-rescoped subtree for this window. Passing it
+	// through is what makes the recompute price subagent usage: without it the
+	// recompute sees a main-only flat total, finds no shortfall, emits no
+	// remainder bucket, and folds a main-only cost onto the checkpoint — which
+	// entire-api then stores as the authoritative figure.
+	usage, buckets, err := agent.CalculateUsageWithCostForSubagentTotal(ag, transcript, fromOffset, subagentTokens, table, pricingModel, disableEstimation)
 	if err != nil {
 		logging.Debug(ctx, "failed usage-with-cost extraction",
 			slog.String("error", err.Error()))
@@ -883,11 +888,11 @@ func backfillModelAndReprice(ctx context.Context, ag agent.Agent, sessionData *E
 
 	if state.AgentType == agent.AgentTypeCopilotCLI && state.TokenUsage != sessionData.TokenUsage &&
 		hasTokenUsageData(state.TokenUsage) && state.TokenUsage.CostUSD == nil {
-		fullUsage, _ := tokenUsageWithCost(ctx, ag, sessionData.Transcript, 0, state.ModelName, state.AgentType)
+		// Session-wide recompute, so the session-wide subagent subtree is the
+		// matching scope. Supplying it prices the subagent usage instead of
+		// merely carrying its token counts across afterwards.
+		fullUsage, _ := tokenUsageWithCost(ctx, ag, sessionData.Transcript, 0, state.ModelName, state.AgentType, subagentSubtree(state.TokenUsage))
 		if hasTokenUsageData(fullUsage) {
-			// The reprice recomputes with subagentsDir="" and so drops the
-			// cumulative subagent total; carry it across, same as the backfill
-			// path does (finding 019f5ebf-a57e).
 			state.TokenUsage = withSubagentTokensFrom(fullUsage, state.TokenUsage)
 		}
 	}
@@ -895,7 +900,8 @@ func backfillModelAndReprice(ctx context.Context, ag agent.Agent, sessionData *E
 	if !sessionDataUnpricedFromTranscript(sessionData) {
 		return
 	}
-	usage, buckets := tokenUsageWithCost(ctx, ag, sessionData.Transcript, state.CheckpointTranscriptStart, state.ModelName, state.AgentType)
+	usage, buckets := tokenUsageWithCost(ctx, ag, sessionData.Transcript, state.CheckpointTranscriptStart, state.ModelName, state.AgentType,
+		subagentSubtree(sessionData.TokenUsage))
 	if !hasTokenUsageData(usage) {
 		return
 	}
@@ -933,6 +939,16 @@ func backfillModelAndReprice(ctx context.Context, ag agent.Agent, sessionData *E
 // no CheckpointTokenUsage to draw on, so it records no subagent tokens. The live
 // path could resolve a subagents dir from session state (as review/manifest.go
 // does) and rescope against SubagentTokensBaseline; deferred, not blocked.
+// subagentSubtree returns src's subagent subtree, or nil when there is none. It
+// exists so the reprice call sites read as "price this window including its
+// subagent total" rather than dereferencing a possibly-nil usage inline.
+func subagentSubtree(src *agent.TokenUsage) *agent.TokenUsage {
+	if src == nil {
+		return nil
+	}
+	return src.SubagentTokens
+}
+
 func withSubagentTokensFrom(usage, src *agent.TokenUsage) *agent.TokenUsage {
 	if usage == nil || usage.SubagentTokens != nil || src == nil || src.SubagentTokens == nil {
 		return usage
@@ -966,7 +982,13 @@ func sessionStateBackfillTokenUsage(ctx context.Context, ag agent.Agent, agentTy
 	if agentType == agent.AgentTypeCopilotCLI && len(transcript) > 0 {
 		// Session-wide backfill (state.TokenUsage); per-model buckets are
 		// checkpoint-scoped and not persisted here, so discard them.
-		fullSessionUsage, _ := tokenUsageWithCost(ctx, ag, transcript, 0, sessionModel, agentType)
+		// nil subtree deliberately: this recompute is SESSION-wide, and the only
+		// subtree in scope here (checkpointUsage's) is checkpoint-scoped. Feeding a
+		// narrower total into a wider window would attribute one checkpoint's
+		// subagent usage to the whole session, which is worse than leaving it
+		// unpriced. The checkpoint-scoped reprice in repriceSessionData is where
+		// subagent cost is attributed.
+		fullSessionUsage, _ := tokenUsageWithCost(ctx, ag, transcript, 0, sessionModel, agentType, nil)
 		if hasTokenUsageData(fullSessionUsage) {
 			return fullSessionUsage
 		}
@@ -1258,7 +1280,10 @@ func (s *ManualCommitStrategy) extractSessionData(ctx context.Context, repo *git
 		// also finds nothing on this path once the agent has cleaned the transcripts
 		// up. CondenseSession fills the already-rescoped window total in instead;
 		// see withSubagentTokensFrom.
-		data.TokenUsage, data.ModelUsage = tokenUsageWithCost(ctx, ag, data.Transcript, checkpointTranscriptStart, sessionModel, agentType)
+		// nil subtree: as the comment above says, the rescoped window total is not
+		// available yet — CondenseSession fills it in afterwards. The reprice that
+		// runs after that fill is what prices it.
+		data.TokenUsage, data.ModelUsage = tokenUsageWithCost(ctx, ag, data.Transcript, checkpointTranscriptStart, sessionModel, agentType, nil)
 		data.SkillEvents = agent.ExtractSkillEvents(ctx, ag, data.Transcript, 0)
 	}
 
@@ -1300,11 +1325,15 @@ func (s *ManualCommitStrategy) extractSessionDataFromLiveTranscript(ctx context.
 	// extract them from offset 0; consumers can filter by checkpoint_transcript_start
 	// if they only render the checkpoint-scoped slice.
 	if len(data.Transcript) > 0 {
-		// subagentsDir="" for the cost reason in extractSessionData above — but NOT
-		// for the cleanup reason: this is the live mid-turn path, where the subagent
-		// transcripts are still on disk. It is the one place the gap noted on
-		// withSubagentTokensFrom could be closed by reading them.
-		data.TokenUsage, data.ModelUsage = tokenUsageWithCost(ctx, ag, data.Transcript, state.CheckpointTranscriptStart, state.ModelName, state.AgentType)
+		// Still no subagentsDir — re-reading the transcripts would hand back the
+		// cumulative session total and mis-attribute it to this window. Instead the
+		// already-rescoped subtree accumulated in state is supplied directly, which
+		// is scope-matched: both it and this recompute cover the window starting at
+		// CheckpointTranscriptStart. That closes the gap this comment used to only
+		// note — the subagent shortfall now becomes a priced remainder bucket here,
+		// so the checkpoint no longer persists a main-only cost.
+		data.TokenUsage, data.ModelUsage = tokenUsageWithCost(ctx, ag, data.Transcript, state.CheckpointTranscriptStart, state.ModelName, state.AgentType,
+			subagentSubtree(state.CheckpointTokenUsage))
 		data.SkillEvents = agent.ExtractSkillEvents(ctx, ag, data.Transcript, 0)
 	}
 

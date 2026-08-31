@@ -284,3 +284,75 @@ func TestSubtractTokenUsage_RescopesCacheCreation1h(t *testing.T) {
 		t.Errorf("delta CacheCreation1hTokens = %d, want 400_000 (0 pre-fix)", delta.CacheCreation1hTokens)
 	}
 }
+
+// TestCalculateUsageWithCostForSubagentTotal_PricesTheSuppliedSubtree is the
+// regression for a checkpoint persisting a MAIN-ONLY cost.
+//
+// Condensation cannot pass a real subagentsDir — re-reading the subagent
+// transcripts yields the cumulative session total, which remainderBucket would
+// attribute in full to one window (the inflation the SCOPING comment describes).
+// It passed "" instead, which went too far: with no subtree there is no
+// shortfall, so no remainder bucket, so subagent tokens priced at nothing. The
+// checkpoint then persisted a main-only cost — and entire-api stores the CLI's
+// cost as authoritative, so the understatement became the platform's figure.
+//
+// Supplying the already-rescoped subtree restores the live path's result.
+func TestCalculateUsageWithCostForSubagentTotal_PricesTheSuppliedSubtree(t *testing.T) {
+	table := anthropicTestTable(t)
+
+	// What a subagentsDir="" recompute sees: main-transcript tokens only, and
+	// per-model buckets covering exactly those.
+	mainOnly := func() *TokenUsage { return &TokenUsage{InputTokens: 1_000_000} }
+	newAgent := func() *fakeSubagentModelUsageAgent {
+		return &fakeSubagentModelUsageAgent{
+			flat:    mainOnly(),
+			buckets: []types.ModelUsage{{Model: "anth-test", TokenUsage: TokenUsage{InputTokens: 1_000_000}}},
+		}
+	}
+
+	// The window's already-rescoped subagent total, as state carries it.
+	subagents := &TokenUsage{InputTokens: 5_000_000}
+
+	// Without a subtree there is no shortfall: 1M main tokens at $1/MTok = $1.
+	bare, bareBuckets, err := CalculateUsageWithCost(newAgent(), []byte("x"), 0, "", nil, table, "anth-test", false)
+	if err != nil {
+		t.Fatalf("CalculateUsageWithCost: %v", err)
+	}
+	if bare.CostUSD == nil || *bare.CostUSD != 1.0 {
+		t.Fatalf("baseline cost = %v, want $1.00 (main only)", bare.CostUSD)
+	}
+	if len(bareBuckets) != 1 {
+		t.Fatalf("baseline buckets = %d, want 1 (no remainder without a subtree)", len(bareBuckets))
+	}
+
+	// With it, the 5M subagent tokens become a priced remainder: $1 + $5 = $6.
+	got, buckets, err := CalculateUsageWithCostForSubagentTotal(newAgent(), []byte("x"), 0, subagents, table, "anth-test", false)
+	if err != nil {
+		t.Fatalf("CalculateUsageWithCostForSubagentTotal: %v", err)
+	}
+	if got.CostUSD == nil {
+		t.Fatal("cost must be priced when a subagent total is supplied")
+	}
+	if *got.CostUSD != 6.0 {
+		t.Errorf("cost = $%.2f, want $6.00 (1M main + 5M subagent at $1/MTok) — a main-only $1.00 is the bug", *got.CostUSD)
+	}
+
+	// The subagent tokens must be attributed, not merely summed into the total:
+	// entire-api prices a checkpoint from the model_usage buckets, so a cost with
+	// no covering bucket would still land as an understatement downstream.
+	var remainder int
+	for _, b := range buckets {
+		if b.TokenUsage.InputTokens == 5_000_000 {
+			remainder++
+		}
+	}
+	if remainder != 1 {
+		t.Errorf("want exactly one 5M remainder bucket covering the subagent tokens, got %d in %+v", remainder, buckets)
+	}
+
+	// And the subtree itself must survive onto the returned usage, or the
+	// checkpoint reports subagent_tokens: null.
+	if got.SubagentTokens == nil || got.SubagentTokens.InputTokens != 5_000_000 {
+		t.Errorf("subagent subtree = %+v, want it carried through", got.SubagentTokens)
+	}
+}

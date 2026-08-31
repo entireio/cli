@@ -74,12 +74,12 @@ func TestCondensationRepricesCodexPriorityTier(t *testing.T) {
 	transcript := []byte(codexTierTranscript)
 
 	// Priority: fallback bucket priced under gpt-5.5-priority.
-	prioUsage, prioBuckets := tokenUsageWithCost(ctxWithCodexTier(t, "priority"), ag, transcript, 0, "gpt-5.5", agent.AgentTypeCodex)
+	prioUsage, prioBuckets := tokenUsageWithCost(ctxWithCodexTier(t, "priority"), ag, transcript, 0, "gpt-5.5", agent.AgentTypeCodex, nil)
 	assertCost(t, "priority flat", prioUsage.CostUSD, codexTierPriorityCost)
 	assertSingleBucket(t, "priority", prioBuckets, "gpt-5.5-priority", codexTierPriorityCost)
 
 	// Standard (no knob): fallback bucket priced under gpt-5.5.
-	stdUsage, stdBuckets := tokenUsageWithCost(ctxWithCodexTier(t, ""), ag, transcript, 0, "gpt-5.5", agent.AgentTypeCodex)
+	stdUsage, stdBuckets := tokenUsageWithCost(ctxWithCodexTier(t, ""), ag, transcript, 0, "gpt-5.5", agent.AgentTypeCodex, nil)
 	assertCost(t, "standard flat", stdUsage.CostUSD, codexTierStandardCost)
 	assertSingleBucket(t, "standard", stdBuckets, "gpt-5.5", codexTierStandardCost)
 
@@ -89,7 +89,7 @@ func TestCondensationRepricesCodexPriorityTier(t *testing.T) {
 	}
 
 	// A non-Codex agent type is unaffected even with the priority knob present.
-	claudeUsage, claudeBuckets := tokenUsageWithCost(ctxWithCodexTier(t, "priority"), ag, transcript, 0, "gpt-5.5", agent.AgentTypeClaudeCode)
+	claudeUsage, claudeBuckets := tokenUsageWithCost(ctxWithCodexTier(t, "priority"), ag, transcript, 0, "gpt-5.5", agent.AgentTypeClaudeCode, nil)
 	assertCost(t, "non-codex flat", claudeUsage.CostUSD, codexTierStandardCost)
 	assertSingleBucket(t, "non-codex", claudeBuckets, "gpt-5.5", codexTierStandardCost)
 }
@@ -113,7 +113,7 @@ func TestCondensationDowngradesUnpriceableTierVariant(t *testing.T) {
 {"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":35000,"cached_input_tokens":20000,"output_tokens":8000,"total_tokens":63000}}}}`)
 	const standardCost = 0.14175
 
-	usage, buckets := tokenUsageWithCost(ctxWithCodexTier(t, "priority"), ag, transcript, 0, "gpt-5.3-codex", agent.AgentTypeCodex)
+	usage, buckets := tokenUsageWithCost(ctxWithCodexTier(t, "priority"), ag, transcript, 0, "gpt-5.3-codex", agent.AgentTypeCodex, nil)
 	assertCost(t, "downgraded flat", usage.CostUSD, standardCost)
 	assertSingleBucket(t, "downgraded", buckets, "gpt-5.3-codex", standardCost)
 }
