@@ -180,7 +180,8 @@ func newHooksGitCmd() *cobra.Command {
 			ctx = repopolicy.WithRepoPolicy(policyCtx, policy)
 			// Lazy invisible setup for globally tracked repos — the git-hook
 			// half of the trigger (agent hooks run it in executeAgentHook).
-			// Cheap no-op once the clone-prefs marker is set.
+			// Cheap no-op once the clone preferences file records setup as
+			// complete for this worktree.
 			strategy.MaybeEnsureGlobalSetup(ctx)
 			// Discover external agent plugins so GetByAgentType works correctly
 			// during condensation (e.g. post-commit). Without this, external agents

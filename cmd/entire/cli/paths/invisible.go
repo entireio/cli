@@ -76,7 +76,13 @@ func runtimeRootForPath(ctx context.Context, root string) (string, error) {
 	if !sameWorktree(policy.WorktreeRoot, root) {
 		return "", fmt.Errorf("%w: policy worktree identity mismatch", ErrUnroutableRuntimePath)
 	}
-	return policy.RuntimeRoot(), nil
+	runtimeRoot := policy.RuntimeRoot()
+	if runtimeRoot == "" {
+		// A global-mode policy without its common dir or worktree key: joining
+		// onto "" would route runtime writes to a relative path in the cwd.
+		return "", fmt.Errorf("%w: policy carries no runtime root", ErrUnroutableRuntimePath)
+	}
+	return runtimeRoot, nil
 }
 
 // sameWorktree compares the policy's (symlink-resolved) worktree root with the

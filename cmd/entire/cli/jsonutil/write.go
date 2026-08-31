@@ -127,10 +127,6 @@ func resolveWriteTarget(filePath string) (string, error) {
 	path := filePath
 	seen := make(map[string]struct{}, 4)
 	for range maxSymlinkHops {
-		if _, cycled := seen[path]; cycled {
-			return "", fmt.Errorf("resolve %s: symlink cycle at %s", filePath, path)
-		}
-		seen[path] = struct{}{}
 		if resolved, err := filepath.EvalSymlinks(path); err == nil {
 			return resolved, nil
 		}
@@ -140,6 +136,14 @@ func resolveWriteTarget(filePath string) (string, error) {
 		if resolvedDir, err := filepath.EvalSymlinks(filepath.Dir(path)); err == nil {
 			path = filepath.Join(resolvedDir, filepath.Base(path))
 		}
+		// Cycle detection keys on the CANONICAL form (parent symlinks resolved,
+		// cleaned): a cycle spelled two ways — a/link -> ../b/link -> ../a/link,
+		// or the same link reached through a linked directory — must be
+		// reported as a cycle, not run into the hop cap.
+		if _, cycled := seen[path]; cycled {
+			return "", fmt.Errorf("resolve %s: symlink cycle at %s", filePath, path)
+		}
+		seen[path] = struct{}{}
 		info, err := os.Lstat(path)
 		if err != nil || info.Mode()&fs.ModeSymlink == 0 {
 			// The final component is genuinely absent (create it here) or not
@@ -153,7 +157,7 @@ func resolveWriteTarget(filePath string) (string, error) {
 		if !filepath.IsAbs(target) {
 			target = filepath.Join(filepath.Dir(path), target)
 		}
-		path = target
+		path = filepath.Clean(target)
 	}
 	return "", fmt.Errorf("resolve %s: symlink chain exceeds %d hops", filePath, maxSymlinkHops)
 }

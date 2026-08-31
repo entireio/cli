@@ -298,11 +298,42 @@ func installHooksToFile(ctx context.Context, settingsPath string, force, userSco
 // SessionStart entry in the exact current-mode form stands in for the whole
 // install.
 func installAlreadyCurrent(sections map[string]*[]GeminiHookMatcher, cmdPrefix string, userScope bool) bool {
+	// An exact duplicate of a current entry is not "current": it fires the
+	// hook twice per event — machine-wide in user scope — and only the
+	// remove-and-re-add pass below heals it (Claude Code's user-hook
+	// installer forces that pass for the same reason).
+	if hasDuplicateEntireHook(sections) {
+		return false
+	}
 	if userScope {
 		return userHooksCurrent(sections)
 	}
 	expectedCmd := agent.WrapProductionJSONWarningHookCommand(cmdPrefix+"session-start", agent.WarningFormatSingleLine)
 	return getFirstEntireHookCommand(*sections["SessionStart"]) == expectedCmd
+}
+
+// hasDuplicateEntireHook reports whether any managed section carries the same
+// Entire command more than once under the same matcher. The matcher is part
+// of the key: SessionEnd legitimately lists one session-end command under
+// both the "exit" and "logout" matchers.
+func hasDuplicateEntireHook(sections map[string]*[]GeminiHookMatcher) bool {
+	type entryKey struct{ matcher, command string }
+	for _, matchers := range sections {
+		seen := make(map[entryKey]struct{})
+		for _, matcher := range *matchers {
+			for _, hook := range matcher.Hooks {
+				if !isEntireHookEntry(hook) {
+					continue
+				}
+				key := entryKey{matcher.Matcher, hook.Command}
+				if _, dup := seen[key]; dup {
+					return true
+				}
+				seen[key] = struct{}{}
+			}
+		}
+	}
+	return false
 }
 
 // anyEntireHook reports whether any managed section carries an entry
@@ -456,6 +487,13 @@ func uninstallHooksFromFile(ctx context.Context, settingsPath string) error {
 		rawSettings["hooks"] = hooksJSON
 	} else {
 		delete(rawSettings, "hooks")
+		// Install set hooksConfig.enabled so Gemini would run our hooks. With
+		// no hooks left it only serves that purpose, so uninstall takes it
+		// back too; while any user hook remains it is left alone, since
+		// removing it would silently switch theirs off.
+		if err := dropHooksConfigEnabled(rawSettings, settingsPath); err != nil {
+			return err
+		}
 	}
 
 	// Write back
@@ -467,6 +505,30 @@ func uninstallHooksFromFile(ctx context.Context, settingsPath string) error {
 	if err := jsonutil.WriteFileAtomicFollowingSymlinks(settingsPath, output, 0o600); err != nil {
 		return fmt.Errorf("failed to write %s: %w", settingsPath, err)
 	}
+	return nil
+}
+
+// dropHooksConfigEnabled removes hooksConfig.enabled, and hooksConfig itself
+// once empty, leaving every other hooksConfig key untouched.
+func dropHooksConfigEnabled(rawSettings map[string]json.RawMessage, settingsPath string) error {
+	hooksConfigRaw, ok := rawSettings["hooksConfig"]
+	if !ok {
+		return nil
+	}
+	var hooksConfig map[string]json.RawMessage
+	if err := json.Unmarshal(hooksConfigRaw, &hooksConfig); err != nil {
+		return fmt.Errorf("failed to parse hooksConfig in %s: %w", settingsPath, err)
+	}
+	delete(hooksConfig, "enabled")
+	if len(hooksConfig) == 0 {
+		delete(rawSettings, "hooksConfig")
+		return nil
+	}
+	hooksConfigJSON, err := jsonutil.MarshalWithNoHTMLEscape(hooksConfig)
+	if err != nil {
+		return fmt.Errorf("failed to marshal hooksConfig: %w", err)
+	}
+	rawSettings["hooksConfig"] = hooksConfigJSON
 	return nil
 }
 

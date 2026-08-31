@@ -5,8 +5,11 @@ a machine without running `entire enable` in each one. It is configured only
 in the user's settings file — there is no CLI flag that turns it on and no
 wizard — and it is built from two inputs that already exist: the repository's
 own `.entire/settings*.json` and the user's `~/.config/entire/settings.json`.
-Nothing under `.git/` is a policy record; the only files Entire writes there
-in global mode are runtime data and one stamp.
+Nothing under `.git/` is a policy record. What Entire writes there in global
+mode is runtime data (`entire/worktree/<key>/`, session state in
+`entire-sessions/`, git hooks) plus small bookkeeping files: the clone
+preferences file that records the lazy setup as complete, the hook-install
+lock, and the captured checkpoint sync remote.
 
 ## The settings file
 
@@ -124,12 +127,15 @@ This is main's `IsSetUpAndEnabled` contract for repo-enabled repos, with one
 deliberate refinement: a `settings.local.json` written by an unrelated feature
 (investigate config, …) without an `enabled` key does not pin a globally
 tracked repo into local mode. Committed `.entire/settings.json` activates a
-fresh clone exactly as it does today — consent for *egress* is a separate
-question (below), so cloned content never opens the sync path by itself. A
-*tracked* (or symlinked) `settings.local.json` is ignored wholesale, as the
-merged loader ignores it: a clone cannot force activation, or bypass the user's
-exclusions, by shipping a "local" file (`repopolicy.LocalSettingsTrusted`,
-installed by the `settings` package).
+fresh clone exactly as it does today while the tier is off; with the tier on,
+the user's exclude lists outrank it (previous row). Consent for *egress* is a
+separate question (below), so cloned content never opens the sync path by
+itself. A *tracked* (or symlinked) `settings.local.json` is ignored wholesale,
+as the merged loader ignores it: a clone cannot force activation, or bypass the
+user's exclusions, by shipping a "local" file. The probe is three-state
+(`repopolicy.ClassifyLocalSettings`, installed by the `settings` package): a
+file the repository could not be checked against keeps its settings but is not
+the developer's *verified* action, so it never lifts an exclusion either.
 
 Hooks classify once (`prepareHookPolicy`) and carry the snapshot on `ctx`; a
 repo-enabled repo whose settings the full loader rejects (`ErrScannerConfig`)
@@ -225,12 +231,16 @@ predicate for whether checkpoint data may leave the machine:
   or the repo excluded.
 
 Consent is recorded three ways, all into the same file: `entire enable`
-records it for the repo being enabled; the pre-push prompt offers **Yes**
-(this repo / all clones of its origin), **Not now** (re-ask next push), and
+records it for the repo being enabled (only when the tier actually captures
+it — an excluded or vetoed repo gets a note, never a trust entry); the pre-push
+prompt offers **Yes** (this repo — every clone on this machine that syncs to
+the same remote), **Not now** (re-ask next push), and
 **Always** (`trust_all`) — through the terminal, never Git's stdin, and never
 implicitly in accessible mode; `entire trust [--revoke] [--remote <name>]` grants or withdraws
-it. Revoke removes the repo's current origin keys and its current path; an
-entry from a *previous* origin URL is not recognized and stays. A hold never
+it. Revoke removes the repo's current sync-remote keys and its current path;
+an entry from a *previous* remote URL is not recognized and stays. Keys follow
+git's delivery rule: a remote's `pushurl` entries when configured (pushes never
+reach the fetch URL then), else its fetch URLs. A hold never
 blocks the user's own push: the branch lands, checkpoint data stays local (the
 refs backend keeps its queue), one stderr line explains, and the first trusted
 push drains the backlog. The SessionStart banner names the hold in an

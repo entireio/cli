@@ -22,24 +22,46 @@ func RuntimeDir(repository Repository) string {
 
 var repoSettingsFiles = []string{"settings.json", "settings.local.json"}
 
-// LocalSettingsTrusted reports whether .entire/settings.local.json at path is
-// this developer's own file rather than repository content. The settings
-// package installs the real probe at init (git index + symlink check, memoized
-// per process) — this leaf cannot import it without a cycle through paths.
-// The default stands in only for tests that link repopolicy alone: it rejects
-// a symlinked .entire or file (the shape a clone can ship without the literal
+// LocalSettingsVerdict is what the tracked-file probe knows about a
+// .entire/settings.local.json: repository content, this developer's own file,
+// or undecidable.
+type LocalSettingsVerdict int
+
+const (
+	// LocalSettingsUnverifiable: the repository could not be read (index
+	// error, cancelled context). The file's "enabled" still applies — losing
+	// every local setting is the worse failure — but it never counts as the
+	// developer's verified action (RepoActivation.LocalOverride stays false),
+	// so it cannot bypass the user's exclude lists.
+	LocalSettingsUnverifiable LocalSettingsVerdict = iota
+	// LocalSettingsTracked: proven present in the index (or reached through a
+	// symlink). Ignored wholesale — .gitignore does not protect an
+	// already-committed path, and a clone must not force activation by
+	// shipping a "local" file.
+	LocalSettingsTracked
+	// LocalSettingsOwn: verified untracked and a regular file, or no
+	// repository to have cloned it from.
+	LocalSettingsOwn
+)
+
+// ClassifyLocalSettings is the tracked-file probe for settings.local.json.
+// The leaf cannot import the settings package that owns git access (cycle
+// through paths), so settings installs the real probe at package
+// initialization (git index + symlink check, memoized per process). The
+// default stands in only for tests that link repopolicy alone: it rejects a
+// symlinked .entire or file (the shape a clone can ship without the literal
 // path ever appearing in the index) and otherwise trusts the file.
-var LocalSettingsTrusted = func(_ context.Context, path string) bool {
+var ClassifyLocalSettings = func(_ context.Context, path string) LocalSettingsVerdict {
 	for _, candidate := range []string{filepath.Dir(path), path} {
 		if info, err := os.Lstat(candidate); err == nil && info.Mode()&fs.ModeSymlink != 0 {
-			return false
+			return LocalSettingsTracked
 		}
 	}
-	return true
+	return LocalSettingsOwn
 }
 
 // ReadRepoActivation reads the repository's own settings files. It is the
-// leaf-level twin of settings.IsSetUpAndEnabled: a project settings.json
+// leaf-level form of main's repo-level activation gate: a project settings.json
 // (default enabled) or a settings.local.json with an explicit "enabled" key
 // counts as repo-level configuration; the local value wins. A local file that
 // is repository content (tracked, or reached through a symlink) is ignored
@@ -52,15 +74,20 @@ func ReadRepoActivation(ctx context.Context, worktreeRoot string) (RepoActivatio
 	for i, name := range repoSettingsFiles {
 		path := filepath.Join(worktreeRoot, ".entire", name) // entire-join-ok: repo configuration lives in the literal worktree, never runtime-routed
 		isProject := i == 0
-		if !isProject && !LocalSettingsTrusted(ctx, path) {
-			continue
-		}
 		data, err := os.ReadFile(path) //nolint:gosec // fixed repo-relative configuration path
 		if errors.Is(err, fs.ErrNotExist) {
 			continue
 		}
 		if err != nil {
 			return RepoActivation{}, fmt.Errorf("reading %s: %w", path, err)
+		}
+		// Probe only a file that exists: the probe opens the repository, which
+		// is the expensive half, and most repos have no local file at all.
+		verdict := LocalSettingsOwn
+		if !isProject {
+			if verdict = ClassifyLocalSettings(ctx, path); verdict == LocalSettingsTracked {
+				continue
+			}
 		}
 		enabled, err := enabledFromSettingsData(data)
 		if err != nil {
@@ -72,7 +99,7 @@ func ReadRepoActivation(ctx context.Context, worktreeRoot string) (RepoActivatio
 		switch {
 		case enabled != nil:
 			activation.Enabled = *enabled
-			activation.LocalOverride = !isProject
+			activation.LocalOverride = !isProject && verdict == LocalSettingsOwn
 		case isProject:
 			activation.Enabled = true // main's default: a project file without the key is enabled
 		}

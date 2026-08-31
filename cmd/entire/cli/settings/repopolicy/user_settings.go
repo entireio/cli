@@ -401,7 +401,13 @@ func MatchesExcludePathExactFold(_ context.Context, entries []string, worktreeRo
 	return false, nil
 }
 
-// MatchesExcludeOrigin reports whether a normalized origin matches a glob.
+// MatchesExcludeOrigin reports whether a normalized origin matches an entry.
+// Entries are doublestar globs over the host/owner/repo form; an entry with no
+// glob characters is also accepted as a pasted remote URL
+// (`https://github.com/acme/widgets.git`, `git@github.com:acme/widgets`) and
+// compared after the same normalization the origin went through — an
+// exclusion is a veto, and one that silently never matched because the user
+// pasted a URL instead of a key would fail open.
 func MatchesExcludeOrigin(_ context.Context, patterns []string, normalizedOrigin string) (bool, error) {
 	for i, pattern := range patterns {
 		pattern = strings.TrimSpace(pattern)
@@ -420,6 +426,9 @@ func MatchesExcludeOrigin(_ context.Context, patterns []string, normalizedOrigin
 			return false, fmt.Errorf("exclude_origins[%d]: invalid glob: %w", i, err)
 		}
 		if matched {
+			return true, nil
+		}
+		if !strings.ContainsAny(pattern, "*?[{") && NormalizeOrigin(pattern) == normalizedOrigin {
 			return true, nil
 		}
 	}

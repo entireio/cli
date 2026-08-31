@@ -892,7 +892,7 @@ func ModifyClonePreferences(ctx context.Context, fn func(*ClonePreferences) erro
 	if err != nil {
 		return err
 	}
-	return modifyClonePreferencesFile(path, fn)
+	return modifyClonePreferencesFile(ctx, path, fn)
 }
 
 // LoadFromBytes parses settings from raw JSON bytes without merging local overrides.
@@ -1054,7 +1054,7 @@ func mergeReviewProfiles(base, src map[string]ReviewProfileConfig) map[string]Re
 	return out
 }
 
-func modifyClonePreferencesFile(filePath string, fn func(*ClonePreferences) error) error {
+func modifyClonePreferencesFile(ctx context.Context, filePath string, fn func(*ClonePreferences) error) error {
 	if err := os.MkdirAll(filepath.Dir(filePath), 0o750); err != nil {
 		return fmt.Errorf("creating preferences directory: %w", err)
 	}
@@ -1073,7 +1073,18 @@ func modifyClonePreferencesFile(filePath string, fn func(*ClonePreferences) erro
 		// nothing is lost by starting fresh. Recreating it here (under the
 		// flock held above) is what keeps one bad write from permanently
 		// wedging every future read-modify-write — e.g. the lazy global
-		// setup's completion marker.
+		// setup's completion marker. The bad bytes are set aside rather than
+		// overwritten, and the reset is logged, so the loss of whatever the
+		// file held (trail context, setup markers) is diagnosable.
+		aside := fmt.Sprintf("%s.corrupt-%d", filePath, time.Now().UnixNano())
+		if renameErr := os.Rename(filePath, aside); renameErr != nil && !errors.Is(renameErr, fs.ErrNotExist) {
+			return fmt.Errorf("setting aside corrupt preferences file: %w", renameErr)
+		}
+		logging.Warn(ctx, "clone preferences file was corrupt; reset to empty",
+			slog.String("path", filePath),
+			slog.String("preserved_as", aside),
+			slog.String("error", err.Error()),
+		)
 		prefs = &ClonePreferences{}
 	}
 	if err := fn(prefs); err != nil {

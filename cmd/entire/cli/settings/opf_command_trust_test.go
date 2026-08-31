@@ -13,6 +13,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
+	"github.com/entireio/cli/cmd/entire/cli/internal/gitpath"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 )
 
@@ -650,4 +651,29 @@ func TestOPFCommandTrust_CommandInsideWorktreeIsRejected(t *testing.T) {
 	assert.Equal(t, trustedCommand, loadedOPF(t, project, local).Command, "an absolute path outside the repo is still honored")
 	writeSettingsFile(t, local, localOPFSettings("opf-custom"))
 	assert.Equal(t, "opf-custom", loadedOPF(t, project, local).Command, "a bare $PATH name is still honored")
+}
+
+// The containment check must use the same path equivalence as the exact-root
+// match: on a case-insensitive filesystem `/Repo/tool` is inside `/repo`, and
+// a byte-wise prefix would let a repository-delivered binary through.
+func TestPathUnderRoot_MatchesEquivalentPrefix(t *testing.T) {
+	t.Parallel()
+	sep := string(filepath.Separator)
+	root := filepath.Join(sep+"repo", "work")
+	if !pathUnderRoot(filepath.Join(root, "bin", "tool"), root) {
+		t.Fatal("child path must be under root")
+	}
+	if pathUnderRoot(root, root) {
+		t.Fatal("the root itself is not strictly under root")
+	}
+	if pathUnderRoot(root+"2"+sep+"tool", root) {
+		t.Fatal("a sibling sharing the prefix is not under root")
+	}
+	if !pathUnderRoot(filepath.Join(root, "tool"), root+sep) {
+		t.Fatal("a trailing separator on root must not matter")
+	}
+	folded := filepath.Join(sep+"Repo", "Work", "tool")
+	if got, want := pathUnderRoot(folded, root), gitpath.Equivalent(sep+"Repo"+sep+"Work", root); got != want {
+		t.Fatalf("case-folded child: pathUnderRoot = %v, want the platform equivalence %v", got, want)
+	}
 }

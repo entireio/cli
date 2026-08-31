@@ -1479,12 +1479,6 @@ func runEnable(ctx context.Context, w io.Writer, useProjectSettings bool) error 
 	return nil
 }
 
-// recordEnableTrust records checkpoint-egress trust for a repo the user just
-// explicitly enabled. Only meaningful while global tracking is ON: from then
-// on every active repo needs trust in the user settings file before its
-// checkpoints leave the machine, and running `entire enable` here IS that
-// consent. Silent when egress is already allowed (trust_all or an existing
-// entry). Best-effort — enable never fails because of it.
 // noteExcludedAfterEnable tells the user when the repo they just enabled is
 // carved out by their own exclude lists: the (committed) settings.json is
 // repository content and does not outrank them, so Entire stays inactive here
@@ -1498,9 +1492,20 @@ func noteExcludedAfterEnable(ctx context.Context, w io.Writer) {
 		settings.UserSettingsPath())
 }
 
+// recordEnableTrust records checkpoint-sync consent for the repo the user just
+// enabled — `entire enable` is the explicit act consent stands for. It is
+// gated on the repo actually being active: CheckpointEgressAllowed is also
+// false for a repo the user's exclude lists (or a local enabled:false veto)
+// keep inactive, and writing a machine-wide trust entry there would
+// pre-consent a repo the user never saw sync — the exact case
+// refuseTrustWhenInactive exists to stop for `entire trust`. Those repos get
+// noteExcludedAfterEnable instead.
 func recordEnableTrust(ctx context.Context, w io.Writer) {
 	us, err := settings.LoadUserSettings(ctx)
 	if err != nil || !us.GlobalEnabled() {
+		return
+	}
+	if active, _ := settings.IsActiveForRepoWithReason(ctx); !active {
 		return
 	}
 	if settings.CheckpointEgressAllowed(ctx) {
@@ -2594,7 +2599,7 @@ func runUninstall(ctx context.Context, w, errW io.Writer, force bool) error {
 	}
 
 	if settings.GlobalTierEnabled(ctx) {
-		fmt.Fprintf(w, "\nNote: global tracking is on (%s). The next agent session here will track this repo again\n  unless you add it to exclude_paths there.\n", settings.UserSettingsPath())
+		fmt.Fprintf(w, "\nNote: global tracking is on (%s). The next agent session here will track this repo again\n  unless you add it to exclude_paths there. Any checkpoint-sync trust recorded for this repo stays\n  in that file too; `entire trust --revoke` withdraws it.\n", settings.UserSettingsPath())
 	}
 
 	fmt.Fprintln(w, "\nEntire CLI uninstalled successfully.")

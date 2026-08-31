@@ -4083,3 +4083,40 @@ func TestRunUninstall_RemovesGlobalRuntimeAfterTierOff(t *testing.T) {
 		t.Errorf("uninstall should report the removal:\n%s", out.String())
 	}
 }
+
+// `entire enable` records checkpoint-sync consent for the repo it enables, but
+// only when the tier actually captures it: in a repo the user's exclude lists
+// keep inactive, the enable must not pre-consent a machine-wide trust entry
+// that would sync the repo the moment the exclusion is lifted.
+func TestRunEnable_ExcludedRepoRecordsNoTrust(t *testing.T) {
+	isolatedUserHome(t)
+	pretendAgentBinaries(t)
+	dir := setupTestDir(t)
+	testutil.InitRepo(t, dir)
+	testutil.AddRemote(t, dir, "origin", "https://github.com/acme/widgets.git")
+	resolved, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeUserSettings(t, `{"global":{"enabled":true,"exclude_paths":["`+filepath.ToSlash(resolved)+`"]}}`)
+
+	// --project: a bare enable writes settings.local.json, whose enabled:true is
+	// this developer's own override and legitimately lifts the exclusion.
+	var stdout bytes.Buffer
+	if err := runEnable(context.Background(), &stdout, true); err != nil {
+		t.Fatalf("runEnable() error = %v", err)
+	}
+	if !strings.Contains(stdout.String(), "matches an exclude list") {
+		t.Errorf("want the exclusion note after enable, got:\n%s", stdout.String())
+	}
+	if strings.Contains(stdout.String(), "Trusted") {
+		t.Errorf("enable must not report trust for an excluded repo:\n%s", stdout.String())
+	}
+	us, err := settings.LoadUserSettings(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(us.Global.TrustedOrigins) != 0 || len(us.Global.TrustedPaths) != 0 {
+		t.Fatalf("excluded repo must not gain a trust entry: origins=%v paths=%v", us.Global.TrustedOrigins, us.Global.TrustedPaths)
+	}
+}

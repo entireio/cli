@@ -54,15 +54,34 @@ func (s *ManualCommitStrategy) PrePushFromGitHook(ctx context.Context, remote st
 }
 
 // gateCheckpointEgress is the pre-push consent gate. An already-trusted repo
-// passes with ctx unchanged. Otherwise the user is asked (TTY only; see
+// passes with ctx unchanged and pays nothing — the pending-checkpoint count
+// runs only behind a closed gate, so a repo-enabled repo with the tier off
+// (main's whole population) or a trusted one keeps main's pre-push flow,
+// including on the dedicated-remote and refs backends where the count is
+// approximate or unavailable. With the gate closed, a push that has no Entire
+// data to send asks no question. Otherwise the user is asked (TTY only; see
 // resolveTrustDecisionForPrePush) and, when they grant, the stale hook-start
 // policy snapshot on ctx is replaced by a fresh classification — rechecking
 // through the pre-write snapshot would keep the gate closed for the rest of
 // this same push. Every hold prints exactly one stderr line and returns false;
 // none of them fails the user's own push.
-func gateCheckpointEgress(ctx context.Context, pendingCapture string) (context.Context, bool) {
+func gateCheckpointEgress(ctx context.Context, remote, pendingCapture string) (context.Context, bool) {
 	if settings.CheckpointEgressAllowed(ctx) {
 		return ctx, true
+	}
+	pendingCheckpoints, pendingErr := CountUnpushedCheckpoints(ctx, remote)
+	if pendingErr != nil {
+		// Holding is the only safe answer — checkpoint egress must never make
+		// the user's branch push fail or consume Git's stdin — but a silent
+		// hold would look identical to "nothing to send".
+		logging.Warn(ctx, "could not determine pending checkpoints; holding checkpoint sync",
+			slog.String("error", pendingErr.Error()),
+		)
+		fmt.Fprintln(stderrWriter, "Entire: checkpoint sync held — could not count this repo's pending checkpoints; see .entire/logs. Run `entire trust` to sync without this check.")
+		return ctx, false
+	}
+	if pendingCheckpoints == 0 {
+		return ctx, false
 	}
 	decision, decisionErr := resolveTrustDecisionFn(ctx, stderrWriter)
 	if decisionErr != nil {
@@ -86,11 +105,14 @@ func gateCheckpointEgress(ctx context.Context, pendingCapture string) (context.C
 		logging.Warn(ctx, "could not reclassify repository after saving trust; holding checkpoint sync",
 			slog.String("error", policyErr.Error()),
 		)
-		fmt.Fprintln(stderrWriter, "Warning: trust was saved but repository policy could not be refreshed; checkpoint sync skipped for this push.")
+		fmt.Fprintln(stderrWriter, "Warning: trust was saved but repository policy could not be refreshed; checkpoint sync skipped for this push (details in .entire/logs; the next push retries).")
 		return ctx, false
 	}
-	ctx = repopolicy.WithRepoPolicy(ctx, policy)
-	if !settings.CheckpointEgressAllowed(ctx) {
+	// Every hold returns the caller's ORIGINAL ctx: the fresh policy is handed
+	// back only with an open gate, so no hold can leave a context on which
+	// CheckpointEgressAllowed answers differently from the decision made here.
+	freshCtx := repopolicy.WithRepoPolicy(ctx, policy)
+	if !settings.CheckpointEgressAllowed(freshCtx) {
 		// The write succeeded but the fresh classification still holds —
 		// e.g. the consent key the prompt recorded is not the one the
 		// election now resolves to. Log what the gate saw so the mismatch
@@ -105,7 +127,7 @@ func gateCheckpointEgress(ctx context.Context, pendingCapture string) (context.C
 		fmt.Fprintln(stderrWriter, "Warning: trust was saved but the gate still holds; checkpoint sync skipped for this push.")
 		return ctx, false
 	}
-	return ctx, true
+	return freshCtx, true
 }
 
 // policyForPendingCapture re-derives the repository policy when this push is
@@ -191,25 +213,12 @@ func (s *ManualCommitStrategy) prePush(ctx context.Context, remote string, prote
 		return nil
 	}
 
-	// Do not ask for consent when this push has no Entire data to send. A
-	// count failure also holds silently: checkpoint egress must never make the
-	// user's branch push fail or consume Git's stdin.
-	pendingCheckpoints, pendingErr := CountUnpushedCheckpoints(ctx, ps.remote)
-	if pendingErr != nil {
-		logging.Warn(ctx, "could not determine pending checkpoints; holding checkpoint sync",
-			slog.String("error", pendingErr.Error()),
-		)
-		return nil
-	}
-	if pendingCheckpoints == 0 {
-		return nil
-	}
-
 	// Egress trust gate, above both backend branches: a globally enrolled repo
 	// syncs only after the user trusts it once. A hold pairs with exactly one
-	// stderr explanation and never fails the user's own push.
+	// stderr explanation and never fails the user's own push; a trusted repo
+	// passes straight through to main's flow.
 	var egressOK bool
-	if ctx, egressOK = gateCheckpointEgress(ctx, pendingCapture); !egressOK {
+	if ctx, egressOK = gateCheckpointEgress(ctx, ps.remote, pendingCapture); !egressOK {
 		return nil
 	}
 

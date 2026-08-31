@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -12,9 +13,11 @@ import (
 	"strings"
 	"sync"
 	"syscall"
+	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/internal/flock"
 	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
+	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
 )
 
@@ -465,7 +468,13 @@ func installGitHooks(ctx context.Context, silent, absolutePath bool, backupNotic
 		backupPath := hookPath + backupSuffix
 		backupExists := fileExists(backupPath)
 
-		// Back up existing non-Entire hooks
+		// Back up existing non-Entire hooks. A user hook is never overwritten
+		// without a copy: when the chained backup slot is already taken (the
+		// user replaced our hook after an earlier install), the current file
+		// goes to a timestamped sibling instead. The notice writer is stderr
+		// for foreground installs and discarded for the lazy hook-context
+		// install, so the event is also logged where a hook run can be
+		// diagnosed later.
 		existing, existingErr := os.ReadFile(hookPath) //nolint:gosec // path is controlled
 		if existingErr == nil && !strings.Contains(string(existing), entireHookMarker) {
 			if !backupExists {
@@ -473,8 +482,16 @@ func installGitHooks(ctx context.Context, silent, absolutePath bool, backupNotic
 					return installedCount, fmt.Errorf("failed to back up %s: %w", spec.name, err)
 				}
 				fmt.Fprintf(backupNoticeW, "[entire] Backed up existing %s to %s%s\n", spec.name, spec.name, backupSuffix)
+				logging.Info(ctx, "backed up existing git hook before install",
+					slog.String("hook", spec.name), slog.String("backup", backupPath))
 			} else {
-				fmt.Fprintf(backupNoticeW, "[entire] Warning: replacing %s (backup %s%s already exists from a previous install)\n", spec.name, spec.name, backupSuffix)
+				extraBackup := fmt.Sprintf("%s.%d", backupPath, time.Now().Unix())
+				if err := os.Rename(hookPath, extraBackup); err != nil {
+					return installedCount, fmt.Errorf("failed to back up %s: %w", spec.name, err)
+				}
+				fmt.Fprintf(backupNoticeW, "[entire] Warning: %s was modified since the last install; saved it as %s (the chained %s%s is kept)\n", spec.name, filepath.Base(extraBackup), spec.name, backupSuffix)
+				logging.Warn(ctx, "git hook modified since install; saved aside before reinstall",
+					slog.String("hook", spec.name), slog.String("saved_as", extraBackup))
 			}
 			backupExists = true
 		}
@@ -528,7 +545,10 @@ func lockHookInstall(ctx context.Context) (func(), error) {
 	if err != nil {
 		return nil, fmt.Errorf("resolve git common dir for hook-install lock: %w", err)
 	}
-	release, err := flock.Acquire(filepath.Join(commonDir, "entire-hook-install.lock"))
+	// Context-aware on purpose: the lazy global setup runs this inside agent
+	// hook processes that may carry a session-end deadline (Codex's 3s cap),
+	// and a lock race there must fail fast rather than block past the budget.
+	release, err := flock.AcquireContext(ctx, filepath.Join(commonDir, "entire-hook-install.lock"))
 	if err != nil {
 		return nil, fmt.Errorf("lock hook installation: %w", err)
 	}

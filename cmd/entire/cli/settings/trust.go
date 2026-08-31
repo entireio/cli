@@ -20,7 +20,8 @@ const (
 )
 
 // RepoTrustIdentity derives the current repository's egress-consent identity:
-// its normalized origin keys, or its canonical path when it has no origin.
+// the normalized keys of its elected checkpoint sync remote, or its canonical
+// path when that remote is absent or has a URL that cannot be normalized.
 func RepoTrustIdentity(ctx context.Context) (TrustIdentity, error) {
 	repository, err := repopolicy.ResolveRepository(ctx)
 	if err != nil {
@@ -128,11 +129,11 @@ func TrustAllRepos(ctx context.Context) error {
 }
 
 // RevokeCurrentRepo withdraws trust for the current repository. It removes
-// both the repo's current origin keys and its current path, so a repo
-// trusted by folder that later gained an origin (or vice versa) is fully
+// both the repo's current sync-remote keys and its current path, so a repo
+// trusted by folder that later gained a remote (or vice versa) is fully
 // revoked. Entries for other repositories are never touched. A key from a
-// PREVIOUS origin URL of this repo is not recognized and stays; the settings
-// file is the audit trail for that.
+// PREVIOUS remote URL (or a previously elected remote) of this repo is not
+// recognized and stays; the settings file is the audit trail for that.
 func RevokeCurrentRepo(ctx context.Context) (TrustIdentity, error) {
 	repository, err := repopolicy.ResolveRepository(ctx)
 	if err != nil {
@@ -141,7 +142,7 @@ func RevokeCurrentRepo(ctx context.Context) (TrustIdentity, error) {
 	identity, err := repopolicy.ResolveTrustIdentity(ctx, repository)
 	if err != nil {
 		// Same failure direction as TrustCurrentRepo: with no identity the
-		// origin-keyed entries cannot be found, and a "✓ Revoked" over a no-op
+		// remote-keyed entries cannot be found, and a "✓ Revoked" over a no-op
 		// would leave live trust the user believes is gone.
 		return TrustIdentity{}, fmt.Errorf("resolving trust identity: %w", err)
 	}
