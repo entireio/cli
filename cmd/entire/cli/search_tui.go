@@ -191,22 +191,29 @@ type searchModel struct {
 	codeSearchOpts codeSearchOpts      // opts for code search (set by caller)
 	codeSearchGen  uint64              // generation counter; incremented on each new code search
 
-	// selectionsReported dedupes cli_search_result_selected within one result
-	// set, keyed by "<tab>:<rank>". Opening a result, backing out, and opening
-	// it again is one act of selection, not two, so an idle enter/esc/enter must
+	// selection ledgers dedupe cli_search_result_selected within one result set,
+	// keyed by "<tab>:<rank>". Opening a result, backing out, and opening it
+	// again is one act of selection, not two, so an idle enter/esc/enter must
 	// not inflate the click-through rate. Distinct ranks still each report —
 	// having to open four results before finding the right one is itself the
-	// signal. Reset whenever a fresh result set replaces the old one (see
-	// resetSelectionReporting); a map field on this value-type model is shared
-	// by reference across copies, which is what lets a write in Update persist.
+	// signal. A map field on this value-type model is shared by reference across
+	// copies, which is what lets a write in Update persist.
 	//
 	// The key is the TAB, not the reported mode: Commits and Sessions both
 	// report mode "checkpoint", and switching tabs resets the cursor to 0
-	// without clearing this ledger, so a mode-keyed ledger silently swallowed
+	// without clearing the ledger, so a mode-keyed ledger silently swallowed
 	// rank 0 on the second tab the user visited. The tab is also the coordinate
 	// space cursor actually indexes into, which is what makes it the correct
 	// discriminator rather than merely a wider one.
-	selectionsReported map[string]bool
+	//
+	// There are TWO ledgers because the semantic and code result sets refresh on
+	// independent schedules — one query dispatches both, and either can land
+	// first. A single shared ledger is therefore cleared by the *sibling* set's
+	// refresh: open a code row, let the slower semantic response land, and
+	// re-opening that same unchanged code row reports a second time. Each ledger
+	// is reset only by the refresh of the set it belongs to.
+	semanticSelectionsReported map[string]bool
+	codeSelectionsReported     map[string]bool
 }
 
 // codeSearchWarning summarizes a code response's scope loss for the status
@@ -357,12 +364,21 @@ func newSearchModel(results []search.Result, query string, total int, cfg search
 	return m
 }
 
-// resetSelectionReporting clears the per-result-set selection dedupe so the
-// next result set reports its own selections. Called wherever a fresh set
-// replaces the previous one — never on pagination, which appends to the set
-// the user is already looking at and whose earlier ranks are unchanged.
-func (m searchModel) resetSelectionReporting() searchModel {
-	m.selectionsReported = nil
+// resetSemanticSelectionReporting clears the semantic (non-code tabs) selection
+// dedupe so the next semantic result set reports its own selections. Called
+// wherever a fresh semantic set replaces the previous one — never on
+// pagination, which appends to the set the user is already looking at and whose
+// earlier ranks are unchanged. Deliberately leaves the code ledger alone: the
+// code results are unchanged by a semantic refresh.
+func (m searchModel) resetSemanticSelectionReporting() searchModel {
+	m.semanticSelectionsReported = nil
+	return m
+}
+
+// resetCodeSelectionReporting is the code-tab counterpart, called when a new
+// code search is dispatched. Likewise leaves the semantic ledger alone.
+func (m searchModel) resetCodeSelectionReporting() searchModel {
+	m.codeSelectionsReported = nil
 	return m
 }
 
@@ -371,20 +387,32 @@ func (m searchModel) resetSelectionReporting() searchModel {
 // Confirm key handler — the single seam both tabs' detail views open through,
 // so this is the CLI's equivalent of a search-result click.
 //
-// Dedupe is keyed on the active tab rather than the reported mode; see the
-// selectionsReported field comment for why the distinction matters.
+// Dedupe is keyed on the active tab and recorded in the ledger belonging to
+// that tab's result set; see the ledger field comment for why both the key and
+// the split matter.
 //
 // Content-free: the result's type enum, its rank, and the size of the list it
 // came from. Nothing derived from the query or from what the result says.
 func (m searchModel) reportSelection(mode, resultType string, rank, resultCount int) searchModel {
 	key := string(m.filterType) + ":" + strconv.Itoa(rank)
-	if m.selectionsReported[key] {
+	isCode := m.filterType == typeFilterCode
+
+	ledger := m.semanticSelectionsReported
+	if isCode {
+		ledger = m.codeSelectionsReported
+	}
+	if ledger[key] {
 		return m
 	}
-	if m.selectionsReported == nil {
-		m.selectionsReported = make(map[string]bool)
+	if ledger == nil {
+		ledger = make(map[string]bool)
+		if isCode {
+			m.codeSelectionsReported = ledger
+		} else {
+			m.semanticSelectionsReported = ledger
+		}
 	}
-	m.selectionsReported[key] = true
+	ledger[key] = true
 
 	// context.Background matches the other telemetry/search call sites in this
 	// file: bubbletea's Update carries no context, and the emit is detached and
@@ -421,8 +449,9 @@ func (m searchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) { //nolint:cyclop 
 			return m, nil
 		}
 		m.searchErr = ""
-		// A fresh set: previously reported ranks now index different rows.
-		m = m.resetSelectionReporting()
+		// A fresh semantic set: previously reported ranks now index different
+		// rows. The code ledger is untouched — code results did not change.
+		m = m.resetSemanticSelectionReporting()
 		m.results = msg.results
 		m.total = msg.total
 		m.counts = msg.counts
@@ -562,7 +591,7 @@ func (m searchModel) updateSearchMode(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) 
 				}
 			}
 			m.codeSearchGen++
-			m = m.resetSelectionReporting()
+			m = m.resetCodeSelectionReporting()
 			m.codeLoading = true
 			m.codeResults = nil
 			m.codeSearchErr = ""
@@ -574,7 +603,7 @@ func (m searchModel) updateSearchMode(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) 
 			// from a prior query is discarded when it completes. Nothing
 			// will arrive to overwrite the warning, so clear it here too.
 			m.codeSearchGen++
-			m = m.resetSelectionReporting()
+			m = m.resetCodeSelectionReporting()
 			m.codeLoading = false
 			m.codeResults = nil
 			m.codeSearchErr = ""
