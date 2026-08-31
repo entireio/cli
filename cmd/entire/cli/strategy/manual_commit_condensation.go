@@ -1166,33 +1166,57 @@ func withSubagentTokensFrom(usage, src *agent.TokenUsage) *agent.TokenUsage {
 // which copies so the cumulative is never mixed into checkpointUsage (the
 // checkpoint-scoped value written to metadata).
 func applyBackfilledSessionTokenUsage(ctx context.Context, ag agent.Agent, state *SessionState, transcript []byte, checkpointUsage *agent.TokenUsage) {
-	backfillUsage := sessionStateBackfillTokenUsage(ctx, ag, state.AgentType, transcript, checkpointUsage)
+	backfillUsage, sessionWide := sessionStateBackfillTokenUsage(ctx, ag, state.AgentType, transcript, checkpointUsage)
 	if backfillUsage == nil {
+		return
+	}
+	// Only a genuinely session-wide recompute may replace the accumulator.
+	// The other sources are the checkpoint-scoped delta (token_usage_version 2),
+	// which is a fraction of the session — adopting it as the session total makes
+	// entire status report the last checkpoint's spend instead of the session's.
+	// It stays usable as a last resort for a session whose hooks never reported
+	// per-step usage, so there is no accumulator to lose.
+	if !sessionWide && hasSessionTotalTokenUsage(state.TokenUsage) {
 		return
 	}
 	state.TokenUsage = withSubagentTokensFrom(backfillUsage, state.TokenUsage)
 }
 
+// hasSessionTotalTokenUsage reports whether usage already carries a session
+// total of its own. Deliberately ignores SubagentTokens: that field is a
+// cumulative snapshot maintained separately (see withSubagentTokensFrom), so a
+// state carrying only subagent tokens has no session total to protect.
+func hasSessionTotalTokenUsage(usage *agent.TokenUsage) bool {
+	if usage == nil {
+		return false
+	}
+	return usage.InputTokens > 0 || usage.CacheCreationTokens > 0 ||
+		usage.CacheReadTokens > 0 || usage.OutputTokens > 0 || usage.APICallCount > 0
+}
+
 // sessionStateBackfillTokenUsage returns the best session-level token usage to
-// persist in session state after condensation.
-func sessionStateBackfillTokenUsage(ctx context.Context, ag agent.Agent, agentType types.AgentType, transcript []byte, checkpointUsage *agent.TokenUsage) *agent.TokenUsage {
+// persist in session state after condensation, and whether that value actually
+// covers the whole session. Only the Copilot CLI full-transcript read is
+// session-wide; the checkpoint fallbacks are per-checkpoint deltas that callers
+// must not adopt over an existing session total.
+func sessionStateBackfillTokenUsage(ctx context.Context, ag agent.Agent, agentType types.AgentType, transcript []byte, checkpointUsage *agent.TokenUsage) (usage *agent.TokenUsage, sessionWide bool) {
 	if agentType == agent.AgentTypeCopilotCLI && len(transcript) > 0 {
 		fullSessionUsage := agent.CalculateTokenUsage(ctx, ag, transcript, 0, "")
 		if hasTokenUsageData(fullSessionUsage) {
-			return fullSessionUsage
+			return fullSessionUsage, true
 		}
 		logging.Debug(ctx, "copilot-cli: full-session token read produced no data, falling back to checkpoint usage")
 	}
 
 	if agentType == agent.AgentTypeCopilotCLI && hasTokenUsageData(checkpointUsage) {
-		return checkpointUsage
+		return checkpointUsage, false
 	}
 
 	if checkpointUsage != nil && checkpointUsage.InputTokens > 0 {
-		return checkpointUsage
+		return checkpointUsage, false
 	}
 
-	return nil
+	return nil, false
 }
 
 // sessionStateBackfillModel extracts the LLM model from the transcript for
