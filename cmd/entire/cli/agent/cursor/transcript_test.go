@@ -221,26 +221,6 @@ func TestCursorAgent_ExtractModifiedFilesFromOffset_EmptyPath(t *testing.T) {
 	}
 }
 
-// TestCursorAgent_MustNotImplementToolInvocationScanner pins that Cursor stays
-// out of the tool-invocation probe until its shell-command input key is
-// confirmed.
-//
-// Not because Cursor is unprobeable. It shares this JSONL shape and does record
-// tool_use blocks; the "contains no tool_use blocks" claims elsewhere in this
-// package date to 2026-03, are pinned by no test, and are stale — they also
-// make ExtractModifiedFilesFromOffset give up entirely, which deserves its own
-// look. The narrow blocker is that ToolInvocation.Command assumes Claude's
-// `command` input key; guessing it for Cursor would produce the silent false
-// negative the interface exists to prevent. Confirm the mapping, implement the
-// scanner, and delete this test.
-func TestCursorAgent_MustNotImplementToolInvocationScanner(t *testing.T) {
-	t.Parallel()
-	if _, ok := agent.AsToolInvocationScanner(&CursorAgent{}); ok {
-		t.Fatal("CursorAgent must not implement ToolInvocationScanner until its shell-command " +
-			"input key is confirmed: reusing Claude's `command` key would fabricate negatives")
-	}
-}
-
 // --- Real captured session ---
 
 // realSessionFixture is a verbatim 9-line excerpt of a real Cursor session,

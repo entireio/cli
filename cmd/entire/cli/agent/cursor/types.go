@@ -201,10 +201,18 @@ type subagentStopHookInputRaw struct {
 // shared with claudecode.FileModificationTools.
 var FileModificationTools = []string{"Write", "StrReplace"}
 
-// toolInput is the subset of a Cursor tool_use input that carries the target file.
+// toolInput is the subset of a Cursor tool_use input this package reads: the
+// target file of a file-modifying tool, and the command of a Shell call.
 //
-// Cursor keys it "path", where Claude Code uses "file_path" — which is why the
-// shared transcript.ToolInput type does not fit. Values observed are absolute.
+// Cursor keys the file "path", where Claude Code uses "file_path" — which is why
+// the shared transcript.ToolInput type does not fit. Values observed are
+// absolute. The command key does NOT diverge: Cursor's Shell tool keys it
+// "command", the same as Claude Code's Bash, which is what lets
+// ScanToolInvocations reuse agent.ToolInvocation.Command as-is.
+//
+// Both keys are confirmed against a real session, not assumed — see
+// testdata/real_session_tool_use.jsonl and AGENT.md's tool table.
 type toolInput struct {
-	Path string `json:"path"`
+	Path    string `json:"path"`
+	Command string `json:"command"`
 }

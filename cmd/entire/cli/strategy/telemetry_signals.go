@@ -283,8 +283,10 @@ func skipHeredocBody(cmd string, i int, delim string) int {
 // sessions still on the old artifact. Skill-based sessions run the command in
 // the main transcript and surface through the command match instead — but
 // only where the command match runs at all: ScanToolInvocations requires
-// ToolInvocationScanner, which Claude Code alone implements, so the other
-// agents' sessions report searchSourceUnsupported regardless of skill use.
+// ToolInvocationScanner, which Claude Code and Cursor implement, so the
+// remaining agents' sessions report searchSourceUnsupported regardless of
+// skill use. That is a hole in the measurement, not a verdict about those
+// sessions — see agent.ToolInvocationScanner for what closing one takes.
 const EntireSearchSubagentName = "entire-search"
 
 // detectSearchUsage reports whether the session consulted Entire's history

@@ -189,6 +189,8 @@ Note: IDE also sends `composer_mode: "agent"` — CLI omits this field.
   | `Shell` | `command`, `description`, optional `working_directory` | unattributable |
 
   `path` values are absolute. Note the divergence from Claude Code, which keys the target file as `file_path` — this is why `transcript.ToolInput` does not fit and `cursor.toolInput` exists. Blocks carry no `id` field. `ExtractModifiedFiles` reads `Write` and `StrReplace`; git status remains the broader signal because `Shell` can modify files while recording only a command string.
+- The shell command key does NOT diverge: `Shell` keys it `command`, the same as Claude Code's `Bash`. That is what lets Cursor implement `agent.ToolInvocationScanner` (`tool_invocations.go`) reusing `agent.ToolInvocation.Command` unchanged, so "did this session run X?" is answerable for Cursor sessions instead of reporting `unsupported`. The walk itself is shared with Claude Code via `transcript.ScanToolUseBlocks`; what Cursor adds is envelope normalization, since Cursor keys the envelope `role` where Claude Code keys it `type`.
+- Subagent dispatch is NOT probed. Cursor dispatches subagents (see the `subagentStart` hook's `subagent_type`), but the transcript input key naming them is unconfirmed, so `ToolInvocation.SubagentType` is left unset rather than guessed. Nothing is lost today: Entire never scaffolded an `entire-search` subagent for Cursor, so no Cursor session carries a legacy dispatch to match.
 - Override for testing: set `ENTIRE_TEST_CURSOR_PROJECT_DIR` env var to override the transcript directory
 
 ## Config Preservation
@@ -222,6 +224,7 @@ Note: IDE also sends `composer_mode: "agent"` — CLI omits this field.
 3. **No `composer_mode` field in CLI**: IDE sends `"agent"`, CLI omits it. Not impactful.
 4. **Shell-driven file changes are unattributable**: `ExtractModifiedFiles` covers `Write` and `StrReplace`, but a file changed by a `Shell` command records only the command string, so git status stays the backstop. (Through 2026-08 this entry instead read "transcript lacks tool_use blocks", which was never true of the format and disabled file extraction entirely; see the transcript section above.)
 5. **`tool_use_id` format**: Contains newline (`call_xxx\nctc_xxx`) — may need sanitization if used as identifiers.
+6. **Subagent dispatch is not visible to the tool-invocation probe**: the transcript input key naming a dispatched subagent is unconfirmed, so `ScanToolInvocations` reports tool names and shell commands only. Confirm the key against a real session before relying on a subagent signal for Cursor.
 
 ## Captured Payloads
 
