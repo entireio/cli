@@ -1119,7 +1119,7 @@ func hasTokenUsageData(usage *agent.TokenUsage) bool {
 		return false
 	}
 
-	if usage.InputTokens > 0 || usage.CacheCreationTokens > 0 || usage.CacheReadTokens > 0 || usage.OutputTokens > 0 || usage.APICallCount > 0 {
+	if hasSessionTotalTokenUsage(usage) {
 		return true
 	}
 
@@ -1417,8 +1417,10 @@ func committedFilesExcludingMetadata(committedFiles map[string]struct{}) []strin
 // This handles the case where SaveStep was skipped (no code changes) but the transcript
 // continued growing — the shadow branch copy would be stale.
 // tokenTranscriptStart is the line offset (Claude) or message index (Gemini) where this checkpoint's token window
-// began. It equals state.CheckpointTranscriptStart except after a carry-forward, which resets only the transcript
-// offset (see advanceTranscriptWindows); the stored transcript itself is always the full file.
+// began. It equals state.CheckpointTranscriptStart except where the two windows diverge (see
+// advanceTranscriptWindows): a carry-forward resets the transcript offset to 0, leaving it below the token
+// offset, and the turn-end advance after a mid-turn commit pushes the transcript offset above it. The stored
+// transcript itself is always the full file, so both offsets index the same bytes.
 func (s *ManualCommitStrategy) extractSessionData(ctx context.Context, repo *git.Repository, shadowRef plumbing.Hash, sessionID string, filesTouched []string, agentType types.AgentType, liveTranscriptPath string, tokenTranscriptStart int, isActive bool) (*ExtractedSessionData, error) {
 	ag, _ := agent.GetByAgentType(agentType) //nolint:errcheck // ag may be nil for unknown agent types; callers use type assertions so nil is safe
 	commit, err := repo.CommitObject(shadowRef)

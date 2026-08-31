@@ -81,6 +81,8 @@ func TestResolveTokenUsageVersion(t *testing.T) {
 		{"legacy rows survive, so the legacy value is kept", 0, false, 0},
 		{"legacy rows replaced outright, so the delta version applies", 0, true, TokenUsageVersionDelta},
 		{"an already-delta checkpoint stays delta when sessions are added", TokenUsageVersionDelta, false, TokenUsageVersionDelta},
+		{"an already-delta checkpoint stays delta when rewritten whole", TokenUsageVersionDelta, true, TokenUsageVersionDelta},
+		{"a version below the delta scope is kept as-is", 1, false, 1},
 		{"a future version is floored to what this writer produces", TokenUsageVersionDelta + 1, false, TokenUsageVersionDelta},
 	}
 

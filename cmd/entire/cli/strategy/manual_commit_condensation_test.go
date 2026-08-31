@@ -1220,6 +1220,31 @@ func TestApplyBackfilledSessionTokenUsage_KeepsSessionAccumulator(t *testing.T) 
 	assert.Equal(t, 12, state.TokenUsage.APICallCount)
 }
 
+// Copilot CLI's checkpoint fallback (used when the full-transcript read yields
+// nothing) is still checkpoint-scoped, so it may not replace an accumulator
+// either — only the session-wide read at branch one may.
+func TestApplyBackfilledSessionTokenUsage_CopilotFallbackKeepsAccumulator(t *testing.T) {
+	t.Parallel()
+
+	ag, err := agent.GetByAgentType(agent.AgentTypeCopilotCLI)
+	require.NoError(t, err)
+
+	state := &SessionState{
+		SessionID:  "copilot-fallback",
+		AgentType:  agent.AgentTypeCopilotCLI,
+		TokenUsage: &agent.TokenUsage{InputTokens: 900, OutputTokens: 300},
+	}
+	checkpointUsage := &agent.TokenUsage{InputTokens: 90, OutputTokens: 30}
+
+	// Empty transcript: the session-wide read cannot run, so the fallback applies.
+	applyBackfilledSessionTokenUsage(context.Background(), ag, state, nil, checkpointUsage)
+
+	require.NotNil(t, state.TokenUsage)
+	assert.Equal(t, 900, state.TokenUsage.InputTokens,
+		"the checkpoint fallback is not session-wide, so it must not replace the accumulator")
+	assert.Equal(t, 300, state.TokenUsage.OutputTokens)
+}
+
 // TestApplyBackfilledSessionTokenUsage_FillsEmptyAccumulator keeps the delta
 // usable as a last resort: a session whose hooks never reported per-step usage
 // has no accumulator to protect, so the checkpoint value is better than nothing.

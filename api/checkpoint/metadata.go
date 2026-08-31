@@ -174,9 +174,11 @@ type WriteOptions struct {
 	CheckpointTranscriptStart   int    // Transcript line offset at start of this checkpoint's data
 	// TokenTranscriptStart is the transcript offset where this checkpoint's
 	// token_usage window began (SessionState.TokenTranscriptStart). It equals
-	// CheckpointTranscriptStart except after a carry-forward, which resets only
-	// the transcript offset; readers slicing the stored transcript for
-	// per-checkpoint token attribution must use this one.
+	// CheckpointTranscriptStart except where the two windows diverge: a
+	// carry-forward resets the transcript offset to 0 (leaving it below this
+	// one) and the turn-end advance after a mid-turn commit pushes it above
+	// this one. Readers slicing the stored transcript for per-checkpoint token
+	// attribution must use this one.
 	TokenTranscriptStart int
 
 	// CheckpointTranscriptStart is written to both Metadata.CheckpointTranscriptStart
