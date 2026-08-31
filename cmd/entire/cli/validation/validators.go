@@ -21,6 +21,15 @@ var pathSafeRegex = regexp.MustCompile(`^[a-zA-Z0-9_-]+$`)
 // it outright where a plain filepath.Join would quietly open the device. IDs
 // travel inside checkpoint metadata and are restored on whatever machine pulls
 // them, so the check runs on every platform, not just Windows.
+//
+// The set is a deliberate SUPERSET of the documented reserved list (Naming
+// Files, Paths, and Namespaces: CON, PRN, AUX, NUL, COM1–COM9, COM¹ ² ³,
+// LPT1–LPT9, LPT¹ ² ³). COM0/LPT0 are not on that list, but COM0 exists as a
+// real Win32 device-namespace symlink on systems with a Serial0, and
+// CONIN$/CONOUT$ are CreateFile-special console names — both fail or
+// misbehave as file names in practice. IDs are machine-generated
+// (UUID-shaped), so rejecting a name no agent would ever emit costs nothing,
+// while admitting one breaks the checkout that pulls it.
 var windowsReservedDeviceNames = func() map[string]struct{} {
 	names := map[string]struct{}{"CON": {}, "PRN": {}, "AUX": {}, "NUL": {}, "CONIN$": {}, "CONOUT$": {}}
 	for _, d := range []string{"0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "¹", "²", "³"} {
