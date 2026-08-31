@@ -122,3 +122,42 @@ func instrumentSemanticSearcher(command string, searcher semanticSearcher) seman
 		return resp, err
 	}
 }
+
+// emitSearchSelection reports that the user opened one search result, when
+// telemetry is opted in (settings.Telemetry == true). Content-free: enums,
+// counts, and the selected result's rank only — never query text, result
+// titles, repo names, or file paths. Best-effort and non-blocking; failures to
+// load settings suppress the event.
+//
+// Gating is deliberately identical to emitSearchOutcome's, so a user opted out
+// of one search event is opted out of both.
+func emitSearchSelection(ctx context.Context, selection telemetry.SearchSelection) {
+	if telemetry.IsEnvOptedOut() {
+		return
+	}
+	s, loadErr := LoadEntireSettings(ctx)
+	if loadErr != nil || !s.IsTelemetryEnabled() {
+		return
+	}
+
+	telemetry.TrackSearchSelectionDetached(selection, s.Enabled, versioninfo.Version)
+}
+
+// searchSelectionResultType clamps a semantic result's type to the vocabulary
+// the search API is known to emit, mapping anything else to "other".
+//
+// This is not defensive padding: search.Result.UnmarshalJSON assigns
+// raw.Type verbatim and its default branch accepts types it does not model, so
+// an unrecognized string from a newer (or misbehaving) server would otherwise
+// reach PostHog as a property value. Clamping is what makes SearchSelection's
+// "content-free by construction" claim true here rather than a matter of
+// trusting the server, and it keeps the property's cardinality bounded. A new
+// result type added server-side lands in "other" until it is added below.
+func searchSelectionResultType(resultType string) string {
+	switch resultType {
+	case search.TypeCheckpoint, search.TypeCommit, search.TypeSession, search.TypeRepo, search.TypePR:
+		return resultType
+	default:
+		return telemetry.SearchSelectionTypeOther
+	}
+}

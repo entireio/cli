@@ -21,8 +21,14 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/palette"
 	"github.com/entireio/cli/cmd/entire/cli/search"
 	"github.com/entireio/cli/cmd/entire/cli/stringutil"
+	"github.com/entireio/cli/cmd/entire/cli/telemetry"
 	"github.com/muesli/termenv"
 )
+
+// searchTUICommandPath is the command label reported on telemetry emitted from
+// inside the TUI. The TUI outlives the cobra command layer that launched it, so
+// the path is fixed here rather than read from a *cobra.Command at emit time.
+const searchTUICommandPath = "entire search"
 
 // searchMode tracks whether the user is browsing results or editing the search bar.
 type searchMode int
@@ -184,6 +190,16 @@ type searchModel struct {
 	codeWarning    string              // code tab's completeness note (failed regions, skipped repos)
 	codeSearchOpts codeSearchOpts      // opts for code search (set by caller)
 	codeSearchGen  uint64              // generation counter; incremented on each new code search
+
+	// selectionsReported dedupes cli_search_result_selected within one result
+	// set, keyed by "<mode>:<rank>". Opening a result, backing out, and opening
+	// it again is one act of selection, not two, so an idle enter/esc/enter must
+	// not inflate the click-through rate. Distinct ranks still each report —
+	// having to open four results before finding the right one is itself the
+	// signal. Reset whenever a fresh result set replaces the old one (see
+	// resetSelectionReporting); a map field on this value-type model is shared
+	// by reference across copies, which is what lets a write in Update persist.
+	selectionsReported map[string]bool
 }
 
 // codeSearchWarning summarizes a code response's scope loss for the status
@@ -321,7 +337,7 @@ func newSearchModel(results []search.Result, query string, total int, cfg search
 		filterType: typeFilterCommits, // default to the leftmost tab (Commits), matching the web UI order
 		// Command layer overrides with its session searcher; instrumented
 		// anyway so a forgotten override never silently drops telemetry.
-		semanticSearch: instrumentSemanticSearcher("entire search", newSemanticSearcher(false)),
+		semanticSearch: instrumentSemanticSearcher(searchTUICommandPath, newSemanticSearcher(false)),
 	}
 	if codeOpts != nil {
 		m.codeSearchOpts = *codeOpts
@@ -331,6 +347,45 @@ func newSearchModel(results []search.Result, query string, total int, cfg search
 		}
 	}
 	m = m.refreshBrowseContent()
+	return m
+}
+
+// resetSelectionReporting clears the per-result-set selection dedupe so the
+// next result set reports its own selections. Called wherever a fresh set
+// replaces the previous one — never on pagination, which appends to the set
+// the user is already looking at and whose earlier ranks are unchanged.
+func (m searchModel) resetSelectionReporting() searchModel {
+	m.selectionsReported = nil
+	return m
+}
+
+// reportSelection emits one cli_search_result_selected for the row the user
+// just opened, at most once per (mode, rank) per result set. Called from the
+// Confirm key handler — the single seam both tabs' detail views open through,
+// so this is the CLI's equivalent of a search-result click.
+//
+// Content-free: the result's type enum, its rank, and the size of the list it
+// came from. Nothing derived from the query or from what the result says.
+func (m searchModel) reportSelection(mode, resultType string, rank, resultCount int) searchModel {
+	key := mode + ":" + strconv.Itoa(rank)
+	if m.selectionsReported[key] {
+		return m
+	}
+	if m.selectionsReported == nil {
+		m.selectionsReported = make(map[string]bool)
+	}
+	m.selectionsReported[key] = true
+
+	// context.Background matches the other telemetry/search call sites in this
+	// file: bubbletea's Update carries no context, and the emit is detached and
+	// best-effort, so there is nothing for a cancellable context to cancel.
+	emitSearchSelection(context.Background(), telemetry.SearchSelection{
+		Command:     searchTUICommandPath,
+		Mode:        mode,
+		ResultType:  resultType,
+		Rank:        rank,
+		ResultCount: resultCount,
+	})
 	return m
 }
 
@@ -356,6 +411,8 @@ func (m searchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) { //nolint:cyclop 
 			return m, nil
 		}
 		m.searchErr = ""
+		// A fresh set: previously reported ranks now index different rows.
+		m = m.resetSelectionReporting()
 		m.results = msg.results
 		m.total = msg.total
 		m.counts = msg.counts
@@ -495,6 +552,7 @@ func (m searchModel) updateSearchMode(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) 
 				}
 			}
 			m.codeSearchGen++
+			m = m.resetSelectionReporting()
 			m.codeLoading = true
 			m.codeResults = nil
 			m.codeSearchErr = ""
@@ -506,6 +564,7 @@ func (m searchModel) updateSearchMode(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) 
 			// from a prior query is discarded when it completes. Nothing
 			// will arrive to overwrite the warning, so clear it here too.
 			m.codeSearchGen++
+			m = m.resetSelectionReporting()
 			m.codeLoading = false
 			m.codeResults = nil
 			m.codeSearchErr = ""
@@ -631,6 +690,7 @@ func (m searchModel) updateBrowseMode(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) 
 		// the detail view is open can't move the highlight underneath it.
 		if m.filterType == typeFilterCode {
 			if r := m.selectedCodeResult(); r != nil {
+				m = m.reportSelection(telemetry.SearchModeCode, telemetry.SearchSelectionTypeCode, m.cursor, len(m.codeResults))
 				m.mode = modeDetail
 				m.pinToEnd = false
 				content := m.renderCodeDetail(*r, m.width, true)
@@ -639,6 +699,7 @@ func (m searchModel) updateBrowseMode(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) 
 				return m, nil
 			}
 		} else if r := m.selectedResult(); r != nil {
+			m = m.reportSelection(telemetry.SearchModeCheckpoint, searchSelectionResultType(r.Type), m.cursor, m.visibleCount())
 			m.mode = modeDetail
 			m.pinToEnd = false
 			content := m.renderDetailContent(*r, m.width, true)
