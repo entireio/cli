@@ -104,6 +104,31 @@ func TestFanout_WriteFansOutToAllMirrors(t *testing.T) {
 	assert.Len(t, m2.writes, 1)
 }
 
+func TestFanout_BatchCanonicalizesOnceForEveryBackend(t *testing.T) {
+	t.Parallel()
+	primary := &fakePrimary{}
+	mirror := &fakeMirror{}
+	store := newFanoutStore(primary, []Writer{mirror})
+	checkpointID := id.MustCheckpointID("a1b2c3d4e5f6")
+
+	require.NoError(t, store.Write(t.Context(), BatchSessions{
+		CheckpointID: checkpointID,
+		Sessions: []ReservedSession{
+			{CheckpointID: checkpointID, SessionID: "session-b"},
+			{CheckpointID: checkpointID, SessionID: "session-a"},
+		},
+	}))
+	require.Len(t, primary.writes, 1)
+	require.Len(t, mirror.writes, 1)
+	primaryBatch, primaryOK := primary.writes[0].(BatchSessions)
+	require.True(t, primaryOK)
+	mirrorBatch, mirrorOK := mirror.writes[0].(BatchSessions)
+	require.True(t, mirrorOK)
+	assert.Equal(t, primaryBatch, mirrorBatch)
+	assert.False(t, primaryBatch.CommitTime.IsZero())
+	assert.Equal(t, "session-a", WriteOptions(primaryBatch.Sessions[0]).SessionID)
+}
+
 func TestFanout_MirrorFailureDoesNotFailWrite(t *testing.T) {
 	t.Parallel()
 

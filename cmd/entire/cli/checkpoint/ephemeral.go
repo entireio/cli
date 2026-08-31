@@ -101,7 +101,7 @@ func (s *ephemeralStore) writeCheckpoint(ctx context.Context, opts WriteEphemera
 
 	commitMsg := trailers.FormatShadowCommit(opts.CommitMessage, opts.MetadataDir, opts.SessionID)
 
-	repoRoot, commonDir, err := s.repoDirs(ctx)
+	commonDir, err := s.repoCommonDir(ctx)
 	if err != nil {
 		return WriteEphemeralResult{}, fmt.Errorf("failed to resolve repo dirs: %w", err)
 	}
@@ -115,7 +115,7 @@ func (s *ephemeralStore) writeCheckpoint(ctx context.Context, opts WriteEphemera
 		// code are impossible. Retries cover the pathological case of an
 		// external writer (a user invoking `git update-ref` manually, etc.).
 		for attempt := range shadowRefMaxRetries {
-			parentHash, baseTreeHash, gErr := s.getOrCreateShadowBranch(shadowBranchName)
+			parentHash, baseTreeHash, gErr := s.getOrCreateShadowBranch(shadowBranchName, opts.BaseCommit)
 			if gErr != nil {
 				return fmt.Errorf("failed to get shadow branch: %w", gErr)
 			}
@@ -147,7 +147,7 @@ func (s *ephemeralStore) writeCheckpoint(ctx context.Context, opts WriteEphemera
 				return fmt.Errorf("failed to create commit: %w", cErr)
 			}
 
-			refErr := casUpdateShadowBranchRef(ctx, repoRoot, shadowBranchName, commitHash, parentHash)
+			refErr := casUpdateShadowBranchRef(ctx, s.repo, shadowBranchName, commitHash, parentHash)
 			if refErr == nil {
 				result = WriteEphemeralResult{
 					CommitHash: commitHash,
@@ -303,7 +303,7 @@ func (s *ephemeralStore) writeTask(ctx context.Context, opts WriteEphemeralTaskO
 	candidateFiles = append(candidateFiles, opts.NewFiles...)
 	allFiles := filterGitIgnoredFiles(ctx, s.repo, candidateFiles)
 
-	repoRoot, commonDir, err := s.repoDirs(ctx)
+	commonDir, err := s.repoCommonDir(ctx)
 	if err != nil {
 		return plumbing.ZeroHash, fmt.Errorf("failed to resolve repo dirs: %w", err)
 	}
@@ -311,7 +311,7 @@ func (s *ephemeralStore) writeTask(ctx context.Context, opts WriteEphemeralTaskO
 	var resultHash plumbing.Hash
 	err = withShadowBranchFlock(commonDir, shadowBranchName, func() error {
 		for attempt := range shadowRefMaxRetries {
-			parentHash, baseTreeHash, gErr := s.getOrCreateShadowBranch(shadowBranchName)
+			parentHash, baseTreeHash, gErr := s.getOrCreateShadowBranch(shadowBranchName, opts.BaseCommit)
 			if gErr != nil {
 				return fmt.Errorf("failed to get shadow branch: %w", gErr)
 			}
@@ -331,7 +331,7 @@ func (s *ephemeralStore) writeTask(ctx context.Context, opts WriteEphemeralTaskO
 				return fmt.Errorf("failed to create commit: %w", cErr)
 			}
 
-			refErr := casUpdateShadowBranchRef(ctx, repoRoot, shadowBranchName, commitHash, parentHash)
+			refErr := casUpdateShadowBranchRef(ctx, s.repo, shadowBranchName, commitHash, parentHash)
 			if refErr == nil {
 				resultHash = commitHash
 				return nil
@@ -745,7 +745,7 @@ func ParseShadowBranchName(branchName string) (commitPrefix, worktreeHash string
 
 // getOrCreateShadowBranch gets or creates the shadow branch for checkpoints.
 // Returns (parentHash, baseTreeHash, error).
-func (s *ephemeralStore) getOrCreateShadowBranch(branchName string) (plumbing.Hash, plumbing.Hash, error) {
+func (s *ephemeralStore) getOrCreateShadowBranch(branchName, expectedBase string) (plumbing.Hash, plumbing.Hash, error) {
 	refName := plumbing.NewBranchReferenceName(branchName)
 	ref, err := s.repo.Reference(refName, true)
 
@@ -762,6 +762,11 @@ func (s *ephemeralStore) getOrCreateShadowBranch(branchName string) (plumbing.Ha
 	head, err := s.repo.Head()
 	if err != nil {
 		return plumbing.ZeroHash, plumbing.ZeroHash, fmt.Errorf("failed to get HEAD: %w", err)
+	}
+	if head.Hash().String() != expectedBase {
+		return plumbing.ZeroHash, plumbing.ZeroHash, fmt.Errorf(
+			"%w: expected base %s, current HEAD %s", ErrShadowBranchMoved, expectedBase, head.Hash(),
+		)
 	}
 
 	headCommit, err := s.repo.CommitObject(head.Hash())

@@ -17,7 +17,7 @@ import (
 
 // TestSeam_GitRefsPrimaryWithGitBranchMirror drives the branch->refs rollout
 // topology through checkpoint.Open: a git-refs primary with a git-branch mirror.
-// It writes all five WriteRequest variants and asserts reads resolve from the
+// It writes all six WriteRequest variants and asserts reads resolve from the
 // git-refs primary while the git-branch mirror (the v1 branch) independently
 // received every write.
 //
@@ -42,6 +42,7 @@ func TestSeam_GitRefsPrimaryWithGitBranchMirror(t *testing.T) {
 	ctx := context.Background()
 	cid := id.MustCheckpointID("a1b2c3d4e5f6")
 	reservedCID := id.MustCheckpointID("01ARZ3NDEKTSV4RRFFQ69G5FAV")
+	batchCID := id.MustCheckpointID("01ARZ3NDEKTSV4RRFFQ69G5FAW")
 	const sessionID = "sess-1"
 
 	require.NoError(t, stores.Persistent.Write(ctx, Session{
@@ -53,6 +54,14 @@ func TestSeam_GitRefsPrimaryWithGitBranchMirror(t *testing.T) {
 	require.NoError(t, stores.Persistent.Write(ctx, ReservedSession{
 		CheckpointID: reservedCID, SessionID: "reserved-session", Strategy: "manual-commit",
 		Transcript: redact.AlreadyRedacted([]byte("reserved transcript")),
+		AuthorName: "Test", AuthorEmail: "test@example.com",
+	}))
+	require.NoError(t, stores.Persistent.Write(ctx, BatchSessions{
+		CheckpointID: batchCID,
+		Sessions: []ReservedSession{
+			{CheckpointID: batchCID, SessionID: "batch-b", Strategy: "manual-commit"},
+			{CheckpointID: batchCID, SessionID: "batch-a", Strategy: "manual-commit"},
+		},
 		AuthorName: "Test", AuthorEmail: "test@example.com",
 	}))
 	require.NoError(t, stores.Persistent.Write(ctx, SessionTranscript{
@@ -69,7 +78,7 @@ func TestSeam_GitRefsPrimaryWithGitBranchMirror(t *testing.T) {
 
 	// Reads resolve from the git-refs primary.
 	t.Run("git-refs primary", func(t *testing.T) {
-		assertSeamVariants(t, stores.Persistent, cid, reservedCID)
+		assertSeamVariants(t, stores.Persistent, cid, reservedCID, batchCID)
 		// The primary is the per-checkpoint-ref store, not a fan-out of nothing.
 		_, err := repo.Reference(mustRefName(t, cid), true)
 		assert.NoError(t, err, "primary should have written the per-checkpoint ref")
@@ -78,18 +87,18 @@ func TestSeam_GitRefsPrimaryWithGitBranchMirror(t *testing.T) {
 	// The git-branch mirror independently received every write on the v1 branch.
 	t.Run("git-branch mirror", func(t *testing.T) {
 		mirror := NewGitStore(repo, DefaultV1Refs())
-		assertSeamVariants(t, mirror, cid, reservedCID)
+		assertSeamVariants(t, mirror, cid, reservedCID, batchCID)
 	})
 
 	// Reads must be served by the git-refs primary, not the mirror: after the
 	// mirror's v1 branch is deleted, the composed store still reads everything.
 	t.Run("reads resolve from primary", func(t *testing.T) {
 		require.NoError(t, repo.Storer.RemoveReference(v1BranchRef()))
-		assertSeamVariants(t, stores.Persistent, cid, reservedCID)
+		assertSeamVariants(t, stores.Persistent, cid, reservedCID, batchCID)
 	})
 }
 
-func assertSeamVariants(t *testing.T, store PersistentStore, cid, reservedCID id.CheckpointID) {
+func assertSeamVariants(t *testing.T, store PersistentStore, cid, reservedCID, batchCID id.CheckpointID) {
 	t.Helper()
 	ctx := context.Background()
 
@@ -112,4 +121,11 @@ func assertSeamVariants(t *testing.T, store PersistentStore, cid, reservedCID id
 	reservedContent, err := store.ReadSessionContent(ctx, reservedCID, 0)
 	require.NoError(t, err)
 	assert.Equal(t, []byte("reserved transcript"), reservedContent.Transcript)
+
+	batchSummary, err := store.Read(ctx, batchCID)
+	require.NoError(t, err)
+	require.Len(t, batchSummary.Sessions, 2)
+	batchFirst, err := store.ReadSessionMetadata(ctx, batchCID, 0)
+	require.NoError(t, err)
+	assert.Equal(t, "batch-a", batchFirst.SessionID)
 }

@@ -194,19 +194,6 @@ func ReconcileDisconnectedMetadataRef(
 	remoteRefName plumbing.ReferenceName,
 	w io.Writer,
 ) error {
-	advance := func(hash plumbing.Hash) error {
-		return setRefHash(repo, localRefName, hash)
-	}
-
-	// Check local ref
-	localRef, err := repo.Reference(localRefName, true)
-	if errors.Is(err, plumbing.ErrReferenceNotFound) {
-		return nil // No local ref — nothing to reconcile
-	}
-	if err != nil {
-		return fmt.Errorf("failed to check local metadata ref: %w", err)
-	}
-
 	// Check remote-tracking or fetched ref
 	remoteRef, err := repo.Reference(remoteRefName, true)
 	if errors.Is(err, plumbing.ErrReferenceNotFound) {
@@ -216,75 +203,69 @@ func ReconcileDisconnectedMetadataRef(
 		return fmt.Errorf("failed to check remote metadata ref: %w", err)
 	}
 
-	localHash := localRef.Hash()
 	remoteHash := remoteRef.Hash()
-
-	// Same hash — nothing to do
-	if localHash == remoteHash {
-		return nil
-	}
-
-	// Check if disconnected using git merge-base
 	repoPath, err := getRepoPath(repo)
 	if err != nil {
 		return err
 	}
+	reconciled := false
+	dataCommitCount := 0
+	_, err = checkpoint.RunRefTransaction(ctx, repo, localRefName, func(localHash plumbing.Hash) (plumbing.Hash, bool, error) {
+		reconciled = false
+		dataCommitCount = 0
+		if localHash.IsZero() || localHash == remoteHash {
+			return localHash, false, nil
+		}
+		disconnected, err := isDisconnected(ctx, repoPath, localHash.String(), remoteHash.String())
+		if err != nil {
+			return plumbing.ZeroHash, false, fmt.Errorf("failed to check metadata ref ancestry: %w", err)
+		}
+		if !disconnected {
+			return localHash, false, nil
+		}
 
-	disconnected, err := isDisconnected(ctx, repoPath, localHash.String(), remoteHash.String())
+		shallow, err := loadShallowHashes(ctx, repoPath)
+		if err != nil {
+			return plumbing.ZeroHash, false, fmt.Errorf("failed to load shallow boundaries: %w", err)
+		}
+		localCommits, err := collectCommitChain(repo, localHash, shallow)
+		if err != nil {
+			return plumbing.ZeroHash, false, fmt.Errorf("failed to collect local commits: %w", err)
+		}
+		dataCommits := make([]*object.Commit, 0, len(localCommits))
+		for _, commit := range localCommits {
+			tree, treeErr := commit.Tree()
+			if treeErr != nil {
+				return plumbing.ZeroHash, false, fmt.Errorf("failed to read tree for commit %s: %w", commit.Hash.String()[:7], treeErr)
+			}
+			if len(tree.Entries) > 0 {
+				dataCommits = append(dataCommits, commit)
+			}
+		}
+
+		reconciled = true
+		dataCommitCount = len(dataCommits)
+		if len(dataCommits) == 0 {
+			return remoteHash, true, nil
+		}
+		newTip, err := cherryPickOnto(ctx, repo, remoteHash, dataCommits, shallow)
+		if err != nil {
+			return plumbing.ZeroHash, false, fmt.Errorf("failed to cherry-pick local commits onto remote: %w", err)
+		}
+		return newTip, true, nil
+	})
 	if err != nil {
-		return fmt.Errorf("failed to check metadata ref ancestry: %w", err)
+		return fmt.Errorf("failed to update metadata ref: %w", err)
 	}
-	if !disconnected {
-		// Shared ancestry (diverged or ancestor) — not our problem
+	if !reconciled {
 		return nil
 	}
-
-	// Disconnected — cherry-pick local commits onto remote tip
 	fmt.Fprintln(w, "[entire] Detected disconnected session metadata (local and remote share no common ancestor)")
-
-	shallow, err := loadShallowHashes(ctx, repoPath)
-	if err != nil {
-		return fmt.Errorf("failed to load shallow boundaries: %w", err)
-	}
-
-	// Collect local commits oldest-first
-	localCommits, err := collectCommitChain(repo, localHash, shallow)
-	if err != nil {
-		return fmt.Errorf("failed to collect local commits: %w", err)
-	}
-
-	// Filter out empty-tree commits (the orphan bug commit)
-	var dataCommits []*object.Commit
-	for _, c := range localCommits {
-		tree, treeErr := c.Tree()
-		if treeErr != nil {
-			return fmt.Errorf("failed to read tree for commit %s: %w", c.Hash.String()[:7], treeErr)
-		}
-		if len(tree.Entries) > 0 {
-			dataCommits = append(dataCommits, c)
-		}
-	}
-
-	if len(dataCommits) == 0 {
-		// Local only had empty orphan — just point to remote
-		if err := advance(remoteHash); err != nil {
-			return fmt.Errorf("failed to reset metadata ref to remote: %w", err)
-		}
+	if dataCommitCount == 0 {
 		fmt.Fprintln(w, "[entire] Done — local had no checkpoint data, reset to remote")
 		return nil
 	}
-
-	fmt.Fprintf(w, "[entire] Cherry-picking %d local checkpoint(s) onto remote...\n", len(dataCommits))
-
-	newTip, err := cherryPickOnto(ctx, repo, remoteHash, dataCommits, shallow)
-	if err != nil {
-		return fmt.Errorf("failed to cherry-pick local commits onto remote: %w", err)
-	}
-
-	if err := advance(newTip); err != nil {
-		return fmt.Errorf("failed to update metadata ref: %w", err)
-	}
-
+	fmt.Fprintf(w, "[entire] Cherry-picked %d local checkpoint(s) onto remote\n", dataCommitCount)
 	fmt.Fprintln(w, "[entire] Done — all local and remote checkpoints preserved")
 	return nil
 }

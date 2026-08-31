@@ -7,17 +7,23 @@ import (
 	"math/rand/v2"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/internal/flock"
 
+	"github.com/go-git/go-git/v6"
 	"github.com/go-git/go-git/v6/plumbing"
 )
 
 // ErrShadowRefBusy is returned by casUpdateShadowBranchRef when the ref has
 // moved since the caller read it. Callers retry with a fresh parent.
 var ErrShadowRefBusy = errors.New("shadow branch ref moved (CAS mismatch)")
+
+// ErrShadowBranchMoved means the caller's base no longer names the current
+// shadow branch and migration must be retried before publishing.
+var ErrShadowBranchMoved = errors.New("shadow branch base changed during write")
 
 // shadowRefMaxRetries bounds the WriteTemporary retry loop. With the
 // per-shadow-branch flock held, our own writers never collide; this budget
@@ -30,20 +36,19 @@ const shadowRefMaxRetries = 16
 // sessions hit the same shadow branch simultaneously.
 const shadowRefMaxJitter = 8 * time.Millisecond
 
-// repoDirs returns the worktree root and git common dir for the store's
-// repository. Callers use the worktree root as cmd.Dir for git invocations
-// and the common dir to locate filesystem paths (lock files, loose objects)
-// — both without depending on the process cwd.
-func (s *ephemeralStore) repoDirs(ctx context.Context) (worktreeRoot, commonDir string, err error) {
-	return repositoryDirs(ctx, s.repo)
+// repoCommonDir returns the git common dir used for shadow-ref locks and loose
+// object cleanup without depending on the process working directory.
+func (s *ephemeralStore) repoCommonDir(ctx context.Context) (string, error) {
+	commonDir, err := resolveGitCommonDir(ctx, s.repo)
+	if err != nil {
+		return "", err
+	}
+	return commonDir, nil
 }
 
 // casUpdateShadowBranchRef atomically updates a shadow branch ref via
 // `git update-ref <ref> <new> <old>`. Pass plumbing.ZeroHash as expectedHash
 // to require the ref to NOT exist (first-checkpoint case).
-//
-// repoRoot is used as cmd.Dir so the update targets the same repository as
-// the rest of WriteTemporary (i.e. s.repo) regardless of the process cwd.
 //
 // Returns ErrShadowRefBusy when git reports the ref moved since expectedHash
 // was observed; callers retry with a fresh parent. Any other failure is
@@ -53,8 +58,12 @@ func (s *ephemeralStore) repoDirs(ctx context.Context) (worktreeRoot, commonDir 
 // CAS — go-git's CheckAndSetReference doesn't interoperate with native git's
 // .lock files, and shadow branches can be touched concurrently by separate
 // `entire` hook processes.
-func casUpdateShadowBranchRef(ctx context.Context, repoRoot, branchName string, newHash, expectedHash plumbing.Hash) error {
-	return casUpdateRef(ctx, repoRoot, plumbing.NewBranchReferenceName(branchName), newHash, expectedHash)
+func casUpdateShadowBranchRef(ctx context.Context, repo *git.Repository, branchName string, newHash, expectedHash plumbing.Hash) error {
+	err := CompareAndSwapRef(ctx, repo, plumbing.NewBranchReferenceName(branchName), newHash, expectedHash)
+	if errors.Is(err, ErrRefConflict) {
+		return ErrShadowRefBusy
+	}
+	return err
 }
 
 // shadowRefBackoff sleeps for a small random jitter before the next CAS
@@ -97,16 +106,79 @@ func shadowBranchLockPath(commonDir, branchName string) (string, error) {
 // commonDir is the git common directory (from s.repoDirs); it locates the
 // lock file independently of the process cwd.
 func withShadowBranchFlock(commonDir, branchName string, fn func() error) error {
-	path, err := shadowBranchLockPath(commonDir, branchName)
-	if err != nil {
-		return err
+	return withShadowBranchFlocks(commonDir, []string{branchName}, fn)
+}
+
+func withShadowBranchFlocks(commonDir string, branchNames []string, fn func() error) error {
+	ordered := append([]string(nil), branchNames...)
+	sort.Strings(ordered)
+	unique := ordered[:0]
+	for _, branchName := range ordered {
+		if len(unique) == 0 || unique[len(unique)-1] != branchName {
+			unique = append(unique, branchName)
+		}
 	}
-	release, err := flock.Acquire(path)
-	if err != nil {
-		return fmt.Errorf("acquire shadow flock %s: %w", branchName, err)
+
+	releases := make([]func(), 0, len(unique))
+	for _, branchName := range unique {
+		path, err := shadowBranchLockPath(commonDir, branchName)
+		if err != nil {
+			for i := len(releases) - 1; i >= 0; i-- {
+				releases[i]()
+			}
+			return err
+		}
+		release, err := flock.Acquire(path)
+		if err != nil {
+			for i := len(releases) - 1; i >= 0; i-- {
+				releases[i]()
+			}
+			return fmt.Errorf("acquire shadow flock %s: %w", branchName, err)
+		}
+		releases = append(releases, release)
 	}
-	defer release()
+	defer func() {
+		for i := len(releases) - 1; i >= 0; i-- {
+			releases[i]()
+		}
+	}()
 	return fn()
+}
+
+// MoveShadowBranch locks both shadow branches before observing and moving the
+// source ref. A missing source is an idempotent no-op.
+func MoveShadowBranch(
+	ctx context.Context,
+	repo *git.Repository,
+	sourceBranch, destinationBranch string,
+) (bool, error) {
+	commonDir, err := resolveGitCommonDir(ctx, repo)
+	if err != nil {
+		return false, err
+	}
+	moved := false
+	err = withShadowBranchFlocks(commonDir, []string{sourceBranch, destinationBranch}, func() error {
+		sourceRef := plumbing.NewBranchReferenceName(sourceBranch)
+		expectedSource, err := ReadRefHash(repo, sourceRef)
+		if err != nil {
+			return err
+		}
+		if expectedSource.IsZero() {
+			return nil
+		}
+		if err := MoveRefIfUnchanged(ctx, repo,
+			sourceRef,
+			plumbing.NewBranchReferenceName(destinationBranch),
+			expectedSource); err != nil {
+			return err
+		}
+		moved = true
+		return nil
+	})
+	if err != nil {
+		return false, err
+	}
+	return moved, nil
 }
 
 // tryDeleteLooseObject best-effort removes a loose object file. Used to

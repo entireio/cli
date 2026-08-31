@@ -48,26 +48,39 @@ func (s *countingStore) Write(ctx context.Context, req WriteRequest) error {
 }
 
 func reservedRoutingRequest(checkpointID id.CheckpointID) ReservedSession {
+	return reservedRoutingRequestWith(checkpointID, "reserved-routing", "reserved transcript")
+}
+
+func reservedRoutingRequestWith(checkpointID id.CheckpointID, sessionID, transcript string) ReservedSession {
 	return ReservedSession(WriteOptions{
 		CheckpointID: checkpointID,
-		SessionID:    "reserved-routing",
+		SessionID:    sessionID,
 		Strategy:     "manual-commit",
-		Transcript:   redact.AlreadyRedacted([]byte("reserved transcript")),
+		Transcript:   redact.AlreadyRedacted([]byte(transcript)),
 		AuthorName:   "Test",
 		AuthorEmail:  "test@example.com",
 	})
 }
 
-// TestKindRoutingStore_ReservedSessionSurvivesReadTargetFailure keeps a
-// transient read failure in one backend from losing a retry.
+func batchRoutingRequest(checkpointID id.CheckpointID) BatchSessions {
+	return BatchSessions{
+		CheckpointID: checkpointID,
+		Sessions: []ReservedSession{
+			reservedRoutingRequest(checkpointID),
+		},
+		CommitTime:  batchTestTime,
+		AuthorName:  "Test",
+		AuthorEmail: "test@example.com",
+	}
+}
+
+// TestKindRoutingStore_ReservedSessionProbeFailurePublishesNowhere keeps a
+// transient read failure from publishing a one-sided migrated write.
 //
-// writeReservedSession reads the read-preferred backend first, to find out
+// writeReservedRequest reads the read-preferred backend first, to find out
 // whether a migrated copy also needs updating. Treating that read's error as
-// fatal fails the whole condensation, even though the write it was about to make
-// would have been perfectly visible: under a git-refs primary, readOrder for a
-// hex ID is [refs, branch], and firstResolved falls through a non-final store
-// that errors. So a branch-only write still resolves.
-func TestKindRoutingStore_ReservedSessionSurvivesReadTargetFailure(t *testing.T) {
+// non-fatal could leave the copy stale and read-preferred after recovery.
+func TestKindRoutingStore_ReservedSessionProbeFailurePublishesNowhere(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	checkpointID := id.MustCheckpointID("a1b2c3d4e5f6")
@@ -77,18 +90,53 @@ func TestKindRoutingStore_ReservedSessionSurvivesReadTargetFailure(t *testing.T)
 	refs := &flakyReadStore{PersistentStore: newGitRefsStore(repo), readErr: errors.New("refs fetch unavailable")}
 
 	router := newKindRoutingStore(refs, branch, refs, BackendTypeGitRefs)
-	require.NoError(t, router.Write(ctx, reservedRoutingRequest(checkpointID)),
-		"a read failure in the other backend must not fail the reserved write")
+	err := router.Write(ctx, reservedRoutingRequest(checkpointID))
+	require.ErrorContains(t, err, "probe read-preferred backend")
 
 	summary, err := branch.Read(ctx, checkpointID)
 	require.NoError(t, err)
-	require.NotNil(t, summary, "the reserved write must land on the backend its ID belongs to")
+	assert.Nil(t, summary, "a failed read-preferred probe must not publish the original-backend write")
+}
+
+func TestKindRoutingStore_ReservedSessionProbeFailurePreservesExistingCopies(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	checkpointID := id.MustCheckpointID("b1b2c3d4e5f6")
+
+	_, repo, _ := newTestRepo(t)
+	branch := NewGitStore(repo, DefaultV1Refs())
+	refsBase := newGitRefsStore(repo)
+	writeRoutingCheckpoint(t, branch, checkpointID, "old-session")
+	writeRoutingCheckpoint(t, refsBase, checkpointID, "old-session")
+	refs := &flakyReadStore{PersistentStore: refsBase, readErr: errors.New("refs fetch unavailable")}
+	router := newKindRoutingStore(refs, branch, refs, BackendTypeGitRefs)
+
+	err := router.Write(ctx, reservedRoutingRequest(checkpointID))
+	require.ErrorContains(t, err, "probe read-preferred backend")
+
+	refs.readErr = nil
+	branchContent, err := branch.ReadSessionContent(ctx, checkpointID, 0)
+	require.NoError(t, err)
+	assert.Contains(t, string(branchContent.Transcript), "old-session")
+	refsContent, err := refsBase.ReadSessionContent(ctx, checkpointID, 0)
+	require.NoError(t, err)
+	assert.Contains(t, string(refsContent.Transcript), "old-session")
+
+	require.NoError(t, router.Write(ctx, reservedRoutingRequestWith(checkpointID, "old-session", "new transcript")))
+	summary, err := router.Read(ctx, checkpointID)
+	require.NoError(t, err)
+	require.NotNil(t, summary)
+	assert.Len(t, summary.Sessions, 1)
+	latestIndex := len(summary.Sessions) - 1
+	visibleContent, err := router.ReadSessionContent(ctx, checkpointID, latestIndex)
+	require.NoError(t, err)
+	assert.Contains(t, string(visibleContent.Transcript), "new transcript")
 }
 
 // TestKindRoutingStore_ReservedSessionFallsBackToWriterForUnknownPrimary keeps an
 // unrecognised primary from being bypassed.
 //
-// writeReservedSession compares the ID-derived backend against primaryType, so
+// writeReservedRequest compares the ID-derived backend against primaryType, so
 // when primaryType is neither git-branch nor git-refs the comparison never
 // matches and every reserved write skips s.writer — the configured primary and
 // all its mirrors. readOrder already has an explicit default arm for this case;
@@ -132,4 +180,49 @@ func TestKindRoutingStore_FreshSessionWriteIsNotKindRouted(t *testing.T) {
 	onBranch, err := branch.Read(ctx, checkpointID)
 	require.NoError(t, err)
 	assert.Nil(t, onBranch, "a fresh create must not be relocated to the other backend by ID format")
+}
+
+func TestKindRoutingStore_BatchProbeFailurePublishesNowhere(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	checkpointID := id.MustCheckpointID("a1b2c3d4e5f6")
+
+	_, repo, _ := newTestRepo(t)
+	branch := NewGitStore(repo, DefaultV1Refs())
+	refs := &flakyReadStore{PersistentStore: newGitRefsStore(repo), readErr: errors.New("refs fetch unavailable")}
+	router := newKindRoutingStore(refs, branch, refs, BackendTypeGitRefs)
+
+	err := router.Write(ctx, batchRoutingRequest(checkpointID))
+	require.ErrorContains(t, err, "probe read-preferred backend")
+	assert.Zero(t, refs.writes, "the read-preferred backend was written after its probe failed")
+	summary, readErr := branch.Read(ctx, checkpointID)
+	require.NoError(t, readErr)
+	assert.Nil(t, summary, "the original backend was written before the probe succeeded")
+}
+
+func TestClassifyWriteRequest_CoversSealedUnion(t *testing.T) {
+	t.Parallel()
+	checkpointID := id.MustCheckpointID("a1b2c3d4e5f6")
+	tests := []struct {
+		name string
+		req  WriteRequest
+		want writeRequestClass
+	}{
+		{"Session", Session{CheckpointID: checkpointID, SessionID: "session"}, writeRequestCreate},
+		{"ReservedSession", reservedRoutingRequest(checkpointID), writeRequestReserved},
+		{"BatchSessions", batchRoutingRequest(checkpointID), writeRequestReserved},
+		{"SessionTranscript", SessionTranscript{CheckpointID: checkpointID}, writeRequestBackfill},
+		{"SessionSummary", SessionSummary{CheckpointID: checkpointID}, writeRequestBackfill},
+		{"CheckpointAttribution", CheckpointAttribution{CheckpointID: checkpointID}, writeRequestBackfill},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got, gotID, normalized, err := classifyWriteRequest(tt.req)
+			require.NoError(t, err)
+			assert.Equal(t, tt.want, got)
+			assert.Equal(t, checkpointID, gotID)
+			assert.IsType(t, tt.req, normalized)
+		})
+	}
 }

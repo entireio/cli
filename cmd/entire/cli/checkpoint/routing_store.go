@@ -9,6 +9,7 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
+	"github.com/go-git/go-git/v6/plumbing"
 )
 
 // kindRoutingStore resolves id-keyed reads across the two git backends so a repo
@@ -26,9 +27,9 @@ import (
 // List unions both backends (disjoint ID spaces). Fresh creates (Session) are NOT
 // kind-routed: they go to the configured primary (+ mirrors) via writer, since
 // a new checkpoint's ID is already minted to match the primary's format (see
-// checkpoint.GenerateCheckpointID). ReservedSession writes preserve the backend
-// chosen before an interrupted write; when a migrated copy already exists in the
-// read-preferred backend, they update that copy too. Backfills update an existing
+// checkpoint.GenerateCheckpointID). ReservedSession and BatchSessions writes
+// preserve the backend chosen before an interrupted write; when a migrated copy
+// already exists in the read-preferred backend, they update that copy too. Backfills update an existing
 // checkpoint, so they follow the same store order as reads, though only
 // ErrCheckpointNotFound falls through (stricter than reads) — see Write.
 type kindRoutingStore struct {
@@ -206,17 +207,24 @@ func (s *kindRoutingStore) ReadSessionMetadataAndPrompts(ctx context.Context, ch
 // whose ref exists only remotely is fetched and backfilled in place rather
 // than falling through to the fallback store.
 func (s *kindRoutingStore) Write(ctx context.Context, req WriteRequest) error {
-	if reserved, ok := req.(ReservedSession); ok {
-		return s.writeReservedSession(ctx, reserved)
+	requestClass, checkpointID, normalized, err := classifyWriteRequest(req)
+	if err != nil {
+		return err
 	}
-	checkpointID, isBackfill := backfillTarget(req)
-	if !isBackfill {
+	switch requestClass {
+	case writeRequestCreate:
 		return s.writer.Write(ctx, req) //nolint:wrapcheck // primary error is the operation's error, surfaced verbatim
+	case writeRequestReserved:
+		return s.writeReservedRequest(ctx, checkpointID, normalized)
+	case writeRequestBackfill:
+		// Continue below.
+	default:
+		return fmt.Errorf("checkpoint: unsupported write request %T", req)
 	}
 	stores := s.backfillOrder(checkpointID)
-	var err error
+	err = nil
 	for i, st := range stores {
-		err = st.Write(ctx, req)
+		err = st.Write(ctx, normalized)
 		if !errors.Is(err, ErrCheckpointNotFound) {
 			if err == nil && i > 0 {
 				// The most consequential routing decision here: the data landed
@@ -226,22 +234,21 @@ func (s *kindRoutingStore) Write(ctx context.Context, req WriteRequest) error {
 				// stays diagnosable.
 				logging.Info(ctx, "checkpoint: backfill served by fallback store; absent from primary, mirrors skipped",
 					slog.String("checkpoint_id", checkpointID.String()),
-					slog.String("request_type", fmt.Sprintf("%T", req)))
+					slog.String("request_type", fmt.Sprintf("%T", normalized)))
 			}
 			return err //nolint:wrapcheck // in-package store error surfaced verbatim
 		}
 		if i < len(stores)-1 {
 			logging.Debug(ctx, "checkpoint: backfill target absent in store, trying next",
 				slog.String("checkpoint_id", checkpointID.String()),
-				slog.String("request_type", fmt.Sprintf("%T", req)),
+				slog.String("request_type", fmt.Sprintf("%T", normalized)),
 				slog.Int("store_index", i))
 		}
 	}
 	return err //nolint:wrapcheck // ErrCheckpointNotFound from the final store, surfaced verbatim
 }
 
-func (s *kindRoutingStore) writeReservedSession(ctx context.Context, req ReservedSession) error {
-	checkpointID := WriteOptions(req).CheckpointID
+func (s *kindRoutingStore) writeReservedRequest(ctx context.Context, checkpointID id.CheckpointID, req WriteRequest) error {
 	if s.primaryType != BackendTypeGitBranch && s.primaryType != BackendTypeGitRefs {
 		// An unrecognised primary tells us nothing about which backend minted the
 		// ID, and picking one anyway would bypass the configured primary and all of
@@ -262,21 +269,52 @@ func (s *kindRoutingStore) writeReservedSession(ctx context.Context, req Reserve
 	updateReadTarget := false
 	if readTarget != target {
 		existing, err := readTarget.Read(ctx, checkpointID)
-		switch {
-		case err != nil:
-			// Not fatal. readOrder puts this store ahead of target for this ID, and
-			// firstResolved falls through a non-final store that errors, so the
-			// target write below still resolves through normal reads. The cost of
-			// skipping the update is a migrated copy left stale — the same lag the
-			// mirror fan-out contract already permits — whereas failing here would
-			// abandon a condensation over a transient fetch error in the backend the
-			// checkpoint is not even stored in.
-			logging.Warn(ctx, "checkpoint: reserved session could not check the read-preferred backend; writing the ID's backend only",
+		if err != nil {
+			// A read-preferred copy may exist remotely even when its probe fails.
+			// Publishing only the ID-selected backend could leave that copy stale,
+			// and normal reads would prefer it when the backend recovers.
+			return fmt.Errorf("checkpoint: probe read-preferred backend before reserved write: %w", err)
+		}
+		updateReadTarget = existing != nil
+	}
+	if batch, ok := req.(BatchSessions); ok && updateReadTarget {
+		first, firstOK := target.(batchRefWriter)
+		second, secondOK := readTarget.(batchRefWriter)
+		if firstOK && secondOK {
+			if err := writeBatchToBoth(ctx, batch, first, second); err != nil {
+				return err
+			}
+			logging.Info(ctx, "checkpoint: reserved batch written atomically to both backends",
 				slog.String("checkpoint_id", checkpointID.String()),
-				slog.String("primary_backend", s.primaryType),
-				slog.String("error", err.Error()))
-		default:
-			updateReadTarget = existing != nil
+				slog.String("target_backend", targetType),
+				slog.String("primary_backend", s.primaryType))
+			return nil
+		}
+	}
+	if reserved, ok := req.(ReservedSession); ok && updateReadTarget {
+		firstBatch, firstBatchOK := target.(batchRefWriter)
+		secondBatch, secondBatchOK := readTarget.(batchRefWriter)
+		firstAttribution, firstAttributionOK := target.(attributionRefWriter)
+		secondAttribution, secondAttributionOK := readTarget.(attributionRefWriter)
+		if firstBatchOK && secondBatchOK && firstAttributionOK && secondAttributionOK {
+			batch, err := CanonicalizeBatchSessions(singleSessionBatch(WriteOptions(reserved)))
+			if err != nil {
+				return err
+			}
+			if err := writeBatchToBoth(ctx, batch, firstBatch, secondBatch); err != nil {
+				return err
+			}
+			opts := WriteOptions(reserved)
+			if opts.CombinedAttribution != nil {
+				if err := writeAttributionToBoth(ctx, opts.CheckpointID, opts.CombinedAttribution, firstAttribution, secondAttribution); err != nil {
+					return err
+				}
+			}
+			logging.Info(ctx, "checkpoint: reserved session written atomically to both backends",
+				slog.String("checkpoint_id", checkpointID.String()),
+				slog.String("target_backend", targetType),
+				slog.String("primary_backend", s.primaryType))
+			return nil
 		}
 	}
 	if err := target.Write(ctx, req); err != nil {
@@ -298,24 +336,131 @@ func (s *kindRoutingStore) writeReservedSession(ctx context.Context, req Reserve
 	return nil
 }
 
-// backfillTarget returns the checkpoint ID a backfill request updates.
-// ok is false for Session and ReservedSession (creates) and unknown request
-// types, which are not routed by backfillOrder.
-//
-// WriteRequest is a closed union: any new backfill-shaped request type MUST be
-// added to this switch, or it silently gets create routing — primary-only, no
-// fallback — which for a pre-migration checkpoint reintroduces the discarded-
-// write bug this routing exists to prevent.
-func backfillTarget(req WriteRequest) (id.CheckpointID, bool) {
+func writeBatchToBoth(ctx context.Context, req BatchSessions, first, second batchRefWriter) error {
+	repo := first.batchRepo()
+	if repo != second.batchRepo() {
+		return errors.New("checkpoint: atomic batch write requires both backends to share a repository")
+	}
+	preparedFirst, err := first.prepareBatchSessions(ctx, req)
+	if err != nil {
+		return err
+	}
+	preparedSecond, err := second.prepareBatchSessions(ctx, req)
+	if err != nil {
+		return err
+	}
+	if err := first.prepareBatchRef(ctx); err != nil {
+		return err
+	}
+	if err := second.prepareBatchRef(ctx); err != nil {
+		return err
+	}
+	firstRef, err := first.batchRefName(req.CheckpointID)
+	if err != nil {
+		return err
+	}
+	secondRef, err := second.batchRefName(req.CheckpointID)
+	if err != nil {
+		return err
+	}
+	if firstRef == secondRef {
+		return fmt.Errorf("checkpoint: atomic batch write requires distinct refs, both are %s", firstRef)
+	}
+	if err := RunRefTransactions(ctx, repo, []plumbing.ReferenceName{firstRef, secondRef}, func(current map[plumbing.ReferenceName]plumbing.Hash) (map[plumbing.ReferenceName]plumbing.Hash, bool, error) {
+		firstCommit, err := first.buildPreparedBatchCommit(ctx, preparedFirst, current[firstRef])
+		if err != nil {
+			return nil, false, err
+		}
+		secondCommit, err := second.buildPreparedBatchCommit(ctx, preparedSecond, current[secondRef])
+		if err != nil {
+			return nil, false, err
+		}
+		return map[plumbing.ReferenceName]plumbing.Hash{
+			firstRef:  firstCommit,
+			secondRef: secondCommit,
+		}, true, nil
+	}); err != nil {
+		return err
+	}
+	first.afterBatchPublish(ctx, firstRef)
+	second.afterBatchPublish(ctx, secondRef)
+	return nil
+}
+
+func writeAttributionToBoth(ctx context.Context, checkpointID id.CheckpointID, attribution *Attribution, first, second attributionRefWriter) error {
+	repo := first.batchRepo()
+	if repo != second.batchRepo() {
+		return errors.New("checkpoint: atomic attribution write requires both backends to share a repository")
+	}
+	if err := first.prepareBatchRef(ctx); err != nil {
+		return err
+	}
+	if err := second.prepareBatchRef(ctx); err != nil {
+		return err
+	}
+	firstRef, err := first.batchRefName(checkpointID)
+	if err != nil {
+		return err
+	}
+	secondRef, err := second.batchRefName(checkpointID)
+	if err != nil {
+		return err
+	}
+	if firstRef == secondRef {
+		return fmt.Errorf("checkpoint: atomic attribution write requires distinct refs, both are %s", firstRef)
+	}
+	authorName, authorEmail := GetGitAuthorFromRepo(repo)
+	if err := RunRefTransactions(ctx, repo, []plumbing.ReferenceName{firstRef, secondRef}, func(current map[plumbing.ReferenceName]plumbing.Hash) (map[plumbing.ReferenceName]plumbing.Hash, bool, error) {
+		firstCommit, err := first.buildPreparedAttributionCommit(ctx, checkpointID, attribution, current[firstRef], authorName, authorEmail)
+		if err != nil {
+			return nil, false, err
+		}
+		secondCommit, err := second.buildPreparedAttributionCommit(ctx, checkpointID, attribution, current[secondRef], authorName, authorEmail)
+		if err != nil {
+			return nil, false, err
+		}
+		return map[plumbing.ReferenceName]plumbing.Hash{
+			firstRef:  firstCommit,
+			secondRef: secondCommit,
+		}, true, nil
+	}); err != nil {
+		return err
+	}
+	first.afterBatchPublish(ctx, firstRef)
+	second.afterBatchPublish(ctx, secondRef)
+	return nil
+}
+
+type writeRequestClass int
+
+const (
+	writeRequestCreate writeRequestClass = iota
+	writeRequestReserved
+	writeRequestBackfill
+)
+
+// classifyWriteRequest is the exhaustive routing boundary for the sealed write
+// union. Unknown requests fail instead of silently inheriting create routing.
+func classifyWriteRequest(req WriteRequest) (writeRequestClass, id.CheckpointID, WriteRequest, error) {
 	switch r := req.(type) {
+	case Session:
+		return writeRequestCreate, WriteOptions(r).CheckpointID, r, nil
+	case ReservedSession:
+		return writeRequestReserved, WriteOptions(r).CheckpointID, r, nil
+	case BatchSessions:
+		canonical, err := CanonicalizeBatchSessions(r)
+		if err != nil {
+			return 0, id.EmptyCheckpointID, nil, err
+		}
+		return writeRequestReserved, canonical.CheckpointID, canonical, nil
 	case SessionTranscript:
-		return r.CheckpointID, true
+		return writeRequestBackfill, r.CheckpointID, r, nil
 	case SessionSummary:
-		return r.CheckpointID, true
+		return writeRequestBackfill, r.CheckpointID, r, nil
 	case CheckpointAttribution:
-		return r.CheckpointID, true
+		return writeRequestBackfill, r.CheckpointID, r, nil
 	default:
-		return id.EmptyCheckpointID, false
+		return 0, id.EmptyCheckpointID, nil, fmt.Errorf("checkpoint: unsupported write request %T", req)
 	}
 }
 

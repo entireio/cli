@@ -4396,15 +4396,10 @@ func TestUpdateSummary_RedactsSecrets(t *testing.T) {
 	}
 }
 
-// TestWriteCommitted_TaskPayload_MaterializesTranscriptAndMetadata is the core
-// #2058 regression: subagent task data used to die at condensation because no
-// producer ever set the old IsTask/ToolUseID route, leaving
-// writeTaskCheckpointEntries permanently unreachable. WriteOptions.Tasks
-// replaces that route; this proves a TaskPayload actually lands under the
-// checkpoint's tasks/<tool-use-id>/ subtree on both persistent backends —
-// which applySessionWrite backs identically (see writeTaskRecordEntries), so
-// covering both here guards against a backend later shadowing or
-// de-embedding that shared write path.
+// TestWriteCommitted_TaskPayload_MaterializesTranscriptAndMetadata proves a
+// TaskPayload lands under tasks/<tool-use-id>/ on both persistent backends.
+// Both paths share prepareTaskSubtree and writeTaskRecordEntry, so covering both
+// guards against a backend bypassing the shared task writer.
 func TestWriteCommitted_TaskPayload_MaterializesTranscriptAndMetadata(t *testing.T) {
 	tests := []struct {
 		name      string

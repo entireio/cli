@@ -460,19 +460,3 @@ func splitFirstSegment(path string) (first, rest string) {
 	}
 	return parts[0], parts[1]
 }
-
-// getSessionsBranchRef returns the primary metadata ref's commit hash and root tree
-// hash without flattening the tree.
-func (s *GitStore) getSessionsBranchRef() (plumbing.Hash, plumbing.Hash, error) {
-	ref, err := s.repo.Reference(s.refs.Primary, true)
-	if err != nil {
-		return plumbing.ZeroHash, plumbing.ZeroHash, fmt.Errorf("failed to get primary metadata ref %s: %w", s.refs.Primary, err)
-	}
-
-	parentCommit, err := s.repo.CommitObject(ref.Hash())
-	if err != nil {
-		return plumbing.ZeroHash, plumbing.ZeroHash, fmt.Errorf("failed to get commit object: %w", err)
-	}
-
-	return ref.Hash(), parentCommit.TreeHash, nil
-}

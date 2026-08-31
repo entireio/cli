@@ -20,7 +20,7 @@ import (
 
 // TestSeam_GitPrimaryWithFsMirror exercises the full pluggable seam: a git
 // primary with the fsstore as a configured mirror, driven through
-// checkpoint.Open. It writes all five WriteRequest variants and asserts each
+// checkpoint.Open. It writes all six WriteRequest variants and asserts each
 // lands in BOTH backends, while reads resolve from the git primary.
 //
 // Not parallel: uses t.Chdir so settings + ref resolution target the test repo.
@@ -45,6 +45,7 @@ func TestSeam_GitPrimaryWithFsMirror(t *testing.T) {
 	ctx := context.Background()
 	cid := id.MustCheckpointID("a1b2c3d4e5f6")
 	reservedCID := id.MustCheckpointID("b1b2c3d4e5f6")
+	batchCID := id.MustCheckpointID("c1b2c3d4e5f6")
 	const sessionID = "sess-1"
 
 	// 1. Session: create the checkpoint.
@@ -60,35 +61,44 @@ func TestSeam_GitPrimaryWithFsMirror(t *testing.T) {
 		Transcript: redact.AlreadyRedacted([]byte("reserved transcript")),
 		AuthorName: "Test", AuthorEmail: "test@example.com",
 	}))
-	// 3. SessionTranscript: replace transcript at stop time.
+	// 3. BatchSessions: atomically write a canonical multi-session checkpoint.
+	require.NoError(t, stores.Persistent.Write(ctx, cp.BatchSessions{
+		CheckpointID: batchCID,
+		Sessions: []cp.ReservedSession{
+			{CheckpointID: batchCID, SessionID: "batch-b", Strategy: "manual-commit"},
+			{CheckpointID: batchCID, SessionID: "batch-a", Strategy: "manual-commit"},
+		},
+		AuthorName: "Test", AuthorEmail: "test@example.com",
+	}))
+	// 4. SessionTranscript: replace transcript at stop time.
 	require.NoError(t, stores.Persistent.Write(ctx, cp.SessionTranscript{
 		CheckpointID: cid, SessionID: sessionID,
 		Transcript: redact.AlreadyRedacted([]byte("final transcript")),
 		Prompts:    []string{"do the thing"},
 	}))
-	// 4. SessionSummary: set the latest session's summary.
+	// 5. SessionSummary: set the latest session's summary.
 	require.NoError(t, stores.Persistent.Write(ctx, cp.SessionSummary{
 		CheckpointID: cid, Summary: &cp.Summary{Intent: "intent-x", Outcome: "outcome-y"},
 	}))
-	// 5. CheckpointAttribution: set combined attribution.
+	// 6. CheckpointAttribution: set combined attribution.
 	require.NoError(t, stores.Persistent.Write(ctx, cp.CheckpointAttribution{
 		CheckpointID: cid, Attribution: &cp.Attribution{AgentLines: 7, AgentPercentage: 70},
 	}))
 
 	// Reads resolve from the git primary.
 	t.Run("git primary", func(t *testing.T) {
-		assertAllVariants(t, stores.Persistent, cid, reservedCID)
+		assertAllVariants(t, stores.Persistent, cid, reservedCID, batchCID)
 	})
 
 	// The fsstore mirror independently received every write.
 	t.Run("fs mirror", func(t *testing.T) {
 		mirror := New(mirrorDir)
-		assertAllVariants(t, mirror, cid, reservedCID)
+		assertAllVariants(t, mirror, cid, reservedCID, batchCID)
 	})
 }
 
 // assertAllVariants verifies that all five writes are visible in a backend.
-func assertAllVariants(t *testing.T, store cp.PersistentStore, cid, reservedCID id.CheckpointID) {
+func assertAllVariants(t *testing.T, store cp.PersistentStore, cid, reservedCID, batchCID id.CheckpointID) {
 	t.Helper()
 	ctx := context.Background()
 
@@ -115,6 +125,13 @@ func assertAllVariants(t *testing.T, store cp.PersistentStore, cid, reservedCID 
 	reservedContent, err := store.ReadSessionContent(ctx, reservedCID, 0)
 	require.NoError(t, err)
 	assert.Equal(t, []byte("reserved transcript"), reservedContent.Transcript)
+
+	batchSummary, err := store.Read(ctx, batchCID)
+	require.NoError(t, err)
+	require.Len(t, batchSummary.Sessions, 2)
+	batchFirst, err := store.ReadSessionMetadata(ctx, batchCID, 0)
+	require.NoError(t, err)
+	assert.Equal(t, "batch-a", batchFirst.SessionID)
 }
 
 func writeMirrorSettings(t *testing.T, repoDir, mirrorDir string) {

@@ -59,8 +59,8 @@ func (s *ManualCommitStrategy) SaveStep(ctx context.Context, step StepContext) e
 			return err
 		}
 
-		shadowBranchName := checkpoint.ShadowBranchNameForCommit(state.BaseCommit, state.WorktreeID)
-		branchExisted := store.ShadowBranchExists(state.BaseCommit, state.WorktreeID)
+		shadowBranchName := ""
+		branchExisted := false
 
 		var promptAttr PromptAttribution
 		if state.PendingPromptAttribution != nil {
@@ -81,20 +81,32 @@ func (s *ManualCommitStrategy) SaveStep(ctx context.Context, step StepContext) e
 
 		_, writeCheckpointSpan := perf.Start(ctx, "write_temporary_checkpoint")
 		isFirstCheckpointOfSession := state.StepCount == 0
-		result, err := store.Write(ctx, checkpoint.Step{
-			SessionID:         sessionID,
-			BaseCommit:        state.BaseCommit,
-			WorktreeID:        state.WorktreeID,
-			ModifiedFiles:     step.ModifiedFiles,
-			NewFiles:          step.NewFiles,
-			DeletedFiles:      step.DeletedFiles,
-			MetadataDir:       step.MetadataDir,
-			MetadataDirAbs:    step.MetadataDirAbs,
-			CommitMessage:     step.CommitMessage,
-			AuthorName:        step.AuthorName,
-			AuthorEmail:       step.AuthorEmail,
-			IsFirstCheckpoint: isFirstCheckpointOfSession,
-		})
+		var result checkpoint.WriteEphemeralResult
+		for attempt := range 2 {
+			shadowBranchName = checkpoint.ShadowBranchNameForCommit(state.BaseCommit, state.WorktreeID)
+			branchExisted = store.ShadowBranchExists(state.BaseCommit, state.WorktreeID)
+			result, err = store.Write(ctx, checkpoint.Step{
+				SessionID:         sessionID,
+				BaseCommit:        state.BaseCommit,
+				WorktreeID:        state.WorktreeID,
+				ModifiedFiles:     step.ModifiedFiles,
+				NewFiles:          step.NewFiles,
+				DeletedFiles:      step.DeletedFiles,
+				MetadataDir:       step.MetadataDir,
+				MetadataDirAbs:    step.MetadataDirAbs,
+				CommitMessage:     step.CommitMessage,
+				AuthorName:        step.AuthorName,
+				AuthorEmail:       step.AuthorEmail,
+				IsFirstCheckpoint: isFirstCheckpointOfSession,
+			})
+			if !errors.Is(err, checkpoint.ErrShadowBranchMoved) || attempt == 1 {
+				break
+			}
+			if _, _, migrateErr := s.migrateShadowBranchIfNeeded(ctx, repo, state); migrateErr != nil {
+				err = fmt.Errorf("failed to retry shadow branch migration: %w", migrateErr)
+				break
+			}
+		}
 		writeCheckpointSpan.RecordError(err)
 		writeCheckpointSpan.End()
 		if err != nil {
@@ -228,8 +240,8 @@ func (s *ManualCommitStrategy) SaveTaskStep(ctx context.Context, step TaskStepCo
 			return err
 		}
 
-		shadowBranchName := checkpoint.ShadowBranchNameForCommit(state.BaseCommit, state.WorktreeID)
-		branchExisted := store.ShadowBranchExists(state.BaseCommit, state.WorktreeID)
+		shadowBranchName := ""
+		branchExisted := false
 
 		sessionMetadataDir := paths.SessionMetadataDirFromSessionID(step.SessionID)
 		taskMetadataDir := TaskMetadataDir(sessionMetadataDir, step.ToolUseID)
@@ -246,28 +258,41 @@ func (s *ManualCommitStrategy) SaveTaskStep(ctx context.Context, step TaskStepCo
 			step.SessionID,
 		)
 
-		if _, err := store.Write(ctx, checkpoint.TaskStep{
-			SessionID:              step.SessionID,
-			BaseCommit:             state.BaseCommit,
-			WorktreeID:             state.WorktreeID,
-			ToolUseID:              step.ToolUseID,
-			AgentID:                step.AgentID,
-			Agent:                  step.AgentType,
-			ModifiedFiles:          step.ModifiedFiles,
-			NewFiles:               step.NewFiles,
-			DeletedFiles:           step.DeletedFiles,
-			TranscriptPath:         step.TranscriptPath,
-			SubagentTranscriptPath: step.SubagentTranscriptPath,
-			CheckpointUUID:         step.CheckpointUUID,
-			CommitMessage:          commitMsg,
-			AuthorName:             step.AuthorName,
-			AuthorEmail:            step.AuthorEmail,
-			IsIncremental:          step.IsIncremental,
-			IncrementalSequence:    step.IncrementalSequence,
-			IncrementalType:        step.IncrementalType,
-			IncrementalData:        step.IncrementalData,
-		}); err != nil {
-			return fmt.Errorf("failed to write task checkpoint: %w", err)
+		var writeErr error
+		for attempt := range 2 {
+			shadowBranchName = checkpoint.ShadowBranchNameForCommit(state.BaseCommit, state.WorktreeID)
+			branchExisted = store.ShadowBranchExists(state.BaseCommit, state.WorktreeID)
+			_, writeErr = store.Write(ctx, checkpoint.TaskStep{
+				SessionID:              step.SessionID,
+				BaseCommit:             state.BaseCommit,
+				WorktreeID:             state.WorktreeID,
+				ToolUseID:              step.ToolUseID,
+				AgentID:                step.AgentID,
+				Agent:                  step.AgentType,
+				ModifiedFiles:          step.ModifiedFiles,
+				NewFiles:               step.NewFiles,
+				DeletedFiles:           step.DeletedFiles,
+				TranscriptPath:         step.TranscriptPath,
+				SubagentTranscriptPath: step.SubagentTranscriptPath,
+				CheckpointUUID:         step.CheckpointUUID,
+				CommitMessage:          commitMsg,
+				AuthorName:             step.AuthorName,
+				AuthorEmail:            step.AuthorEmail,
+				IsIncremental:          step.IsIncremental,
+				IncrementalSequence:    step.IncrementalSequence,
+				IncrementalType:        step.IncrementalType,
+				IncrementalData:        step.IncrementalData,
+			})
+			if !errors.Is(writeErr, checkpoint.ErrShadowBranchMoved) || attempt == 1 {
+				break
+			}
+			if _, _, migrateErr := s.migrateShadowBranchIfNeeded(ctx, repo, state); migrateErr != nil {
+				writeErr = fmt.Errorf("failed to retry shadow branch migration: %w", migrateErr)
+				break
+			}
+		}
+		if writeErr != nil {
+			return fmt.Errorf("failed to write task checkpoint: %w", writeErr)
 		}
 
 		state.FilesTouched = mergeFilesTouched(state.FilesTouched, step.ModifiedFiles, step.NewFiles, step.DeletedFiles)

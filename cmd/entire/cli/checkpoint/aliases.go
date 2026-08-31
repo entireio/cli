@@ -45,9 +45,10 @@ type (
 	Writer           = apicheckpoint.Writer
 	WriteRequest     = apicheckpoint.WriteRequest
 	// Write request union: session-level (Session, ReservedSession, SessionTranscript,
-	// SessionSummary) and checkpoint-level (CheckpointAttribution).
+	// SessionSummary) and checkpoint-level (BatchSessions, CheckpointAttribution).
 	Session           = apicheckpoint.Session
 	ReservedSession   = apicheckpoint.ReservedSession
+	BatchSessions     = apicheckpoint.BatchSessions
 	SessionTranscript = apicheckpoint.SessionTranscript
 	SessionSummary    = apicheckpoint.SessionSummary
 	//nolint:revive // CheckpointAttribution stutter is accepted — makes the checkpoint (vs session) tier explicit.
@@ -58,7 +59,10 @@ type (
 var (
 	ErrCheckpointNotFound = apicheckpoint.ErrCheckpointNotFound
 	ErrNoTranscript       = apicheckpoint.ErrNoTranscript
+	ErrSessionNotFound    = apicheckpoint.ErrSessionNotFound
 )
+
+type SessionNotFoundError = apicheckpoint.SessionNotFoundError
 
 // Contract helper functions, re-exported as thin wrappers rather than vars so
 // the facade symbols can't be reassigned by consumers.

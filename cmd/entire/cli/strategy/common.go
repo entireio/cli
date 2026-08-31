@@ -155,73 +155,74 @@ func PromoteTmpRefSafely(ctx context.Context, tmpRefName, destRefName plumbing.R
 // replayed tip. If there is no merge-base and the reachable histories are
 // complete, the full local chain is replayed.
 func SafelyAdvanceLocalRef(ctx context.Context, repo *git.Repository, localRefName plumbing.ReferenceName, targetHash plumbing.Hash) error {
-	currentLocal, localErr := repo.Reference(localRefName, true)
-	if localErr != nil {
-		if !errors.Is(localErr, plumbing.ErrReferenceNotFound) {
-			return fmt.Errorf("failed to read local ref %s: %w", localRefName, localErr)
-		}
-		return setRefHash(repo, localRefName, targetHash)
+	if _, err := checkpoint.ReadRefHash(repo, localRefName); err != nil {
+		return fmt.Errorf("failed to read local ref %s: %w", localRefName, err)
 	}
-
-	localHash := currentLocal.Hash()
-	if localHash == targetHash {
-		return nil
-	}
-
 	repoPath, err := getRepoPath(repo)
 	if err != nil {
 		return fmt.Errorf("failed to get repo path: %w", err)
 	}
+	_, err = checkpoint.RunRefTransaction(ctx, repo, localRefName, func(localHash plumbing.Hash) (plumbing.Hash, bool, error) {
+		if localHash.IsZero() {
+			return targetHash, true, nil
+		}
+		if localHash == targetHash {
+			return localHash, false, nil
+		}
 
-	mergeBase, err := getMergeBase(ctx, repoPath, localHash.String(), targetHash.String())
-	if errors.Is(err, errNoMergeBase) {
-		shallow, shallowErr := hasReachableShallowBoundary(ctx, repo, repoPath, localHash.String(), targetHash.String())
-		if shallowErr != nil {
-			return fmt.Errorf("failed to check shallow history for %s: %w", localRefName, shallowErr)
+		mergeBase, mergeErr := getMergeBase(ctx, repoPath, localHash.String(), targetHash.String())
+		if errors.Is(mergeErr, errNoMergeBase) {
+			shallow, shallowErr := hasReachableShallowBoundary(ctx, repo, repoPath, localHash.String(), targetHash.String())
+			if shallowErr != nil {
+				return plumbing.ZeroHash, false, fmt.Errorf("failed to check shallow history for %s: %w", localRefName, shallowErr)
+			}
+			if shallow {
+				return plumbing.ZeroHash, false, fmt.Errorf("no merge base for %s, and reachable shallow history prevents proving refs are disconnected; run 'entire doctor' or 'git fetch --unshallow' and try again", localRefName)
+			}
+			return replayDisconnectedLocalRef(ctx, repo, repoPath, localRefName, localHash, targetHash)
 		}
-		if shallow {
-			return fmt.Errorf("no merge base for %s, and reachable shallow history prevents proving refs are disconnected; run 'entire doctor' or 'git fetch --unshallow' and try again", localRefName)
+		if mergeErr != nil {
+			return plumbing.ZeroHash, false, fmt.Errorf("failed to find merge base for %s: %w", localRefName, mergeErr)
 		}
-		return replayDisconnectedLocalRef(ctx, repo, repoPath, localRefName, localHash, targetHash)
-	}
+		if mergeBase == targetHash {
+			return localHash, false, nil
+		}
+		if mergeBase == localHash {
+			return targetHash, true, nil
+		}
+		return replayLocalRefFromBase(ctx, repo, repoPath, localRefName, localHash, targetHash, mergeBase)
+	})
 	if err != nil {
-		return fmt.Errorf("failed to find merge base for %s: %w", localRefName, err)
+		return fmt.Errorf("advance local ref %s: %w", localRefName, err)
 	}
-	if mergeBase == targetHash {
-		return nil
-	}
-	if mergeBase == localHash {
-		return setRefHash(repo, localRefName, targetHash)
-	}
-
-	return replayLocalRefFromBase(ctx, repo, repoPath, localRefName, localHash, targetHash, mergeBase)
+	return nil
 }
 
-func replayLocalRefFromBase(ctx context.Context, repo *git.Repository, repoPath string, localRefName plumbing.ReferenceName, localHash, targetHash, baseHash plumbing.Hash) error {
+func replayLocalRefFromBase(ctx context.Context, repo *git.Repository, repoPath string, localRefName plumbing.ReferenceName, localHash, targetHash, baseHash plumbing.Hash) (plumbing.Hash, bool, error) {
 	localCommits, err := collectCommitsSince(ctx, repo, repoPath, localHash, baseHash)
 	if err != nil {
-		return fmt.Errorf("failed to collect local replay commits for %s: %w", localRefName, err)
+		return plumbing.ZeroHash, false, fmt.Errorf("failed to collect local replay commits for %s: %w", localRefName, err)
 	}
 	shallow, err := loadShallowHashes(ctx, repoPath)
 	if err != nil {
-		return fmt.Errorf("failed to load shallow boundaries for %s: %w", localRefName, err)
+		return plumbing.ZeroHash, false, fmt.Errorf("failed to load shallow boundaries for %s: %w", localRefName, err)
 	}
 	return replayLocalCommits(ctx, repo, "diverged", localRefName, localHash, targetHash, localCommits, shallow)
 }
 
-func replayDisconnectedLocalRef(ctx context.Context, repo *git.Repository, repoPath string, localRefName plumbing.ReferenceName, localHash, targetHash plumbing.Hash) error {
+func replayDisconnectedLocalRef(ctx context.Context, repo *git.Repository, repoPath string, localRefName plumbing.ReferenceName, localHash, targetHash plumbing.Hash) (plumbing.Hash, bool, error) {
 	shallow, err := loadShallowHashes(ctx, repoPath)
 	if err != nil {
-		return fmt.Errorf("failed to load shallow boundaries for %s: %w", localRefName, err)
+		return plumbing.ZeroHash, false, fmt.Errorf("failed to load shallow boundaries for %s: %w", localRefName, err)
 	}
 	localCommits, err := collectCommitChain(repo, localHash, shallow)
 	if err != nil {
-		return fmt.Errorf("failed to collect disconnected local commits for %s: %w", localRefName, err)
+		return plumbing.ZeroHash, false, fmt.Errorf("failed to collect disconnected local commits for %s: %w", localRefName, err)
 	}
 	return replayLocalCommits(ctx, repo, "disconnected", localRefName, localHash, targetHash, localCommits, shallow)
 }
 
-func replayLocalCommits(ctx context.Context, repo *git.Repository, reason string, localRefName plumbing.ReferenceName, localHash, targetHash plumbing.Hash, localCommits []*object.Commit, shallow map[plumbing.Hash]bool) error {
+func replayLocalCommits(ctx context.Context, repo *git.Repository, reason string, localRefName plumbing.ReferenceName, localHash, targetHash plumbing.Hash, localCommits []*object.Commit, shallow map[plumbing.Hash]bool) (plumbing.Hash, bool, error) {
 	// Logged here rather than in each caller: this is the function that performs
 	// the rewrite, so a future third caller cannot silently skip the trace.
 	//
@@ -243,15 +244,14 @@ func replayLocalCommits(ctx context.Context, repo *git.Repository, reason string
 		slog.Int("commits_replayed", len(localCommits)))
 
 	if len(localCommits) == 0 {
-		return setRefHash(repo, localRefName, targetHash)
+		return targetHash, true, nil
 	}
 
 	newTip, err := cherryPickOnto(ctx, repo, targetHash, localCommits, shallow)
 	if err != nil {
-		return fmt.Errorf("failed to replay local commits for %s: %w", localRefName, err)
+		return plumbing.ZeroHash, false, fmt.Errorf("failed to replay local commits for %s: %w", localRefName, err)
 	}
-
-	return setRefHash(repo, localRefName, newTip)
+	return newTip, true, nil
 }
 
 func hasReachableShallowBoundary(ctx context.Context, repo *git.Repository, repoPath string, hashes ...string) (bool, error) {
@@ -297,12 +297,42 @@ func historyReachesShallowBoundary(ctx context.Context, repoPath, hash string, s
 	return false, nil
 }
 
-func setRefHash(repo *git.Repository, refName plumbing.ReferenceName, hash plumbing.Hash) error {
-	newRef := plumbing.NewHashReference(refName, hash)
-	if err := repo.Storer.SetReference(newRef); err != nil {
-		return fmt.Errorf("failed to update local ref %s: %w", refName, err)
+func createRefIfAbsent(ctx context.Context, repo *git.Repository, refName plumbing.ReferenceName, hash plumbing.Hash) error {
+	_, err := checkpoint.RunRefTransaction(ctx, repo, refName, func(current plumbing.Hash) (plumbing.Hash, bool, error) {
+		if !current.IsZero() {
+			return current, false, nil
+		}
+		return hash, true, nil
+	})
+	if err != nil {
+		return fmt.Errorf("create ref %s: %w", refName, err)
 	}
 	return nil
+}
+
+func replaceDataFreeMetadataRef(ctx context.Context, repo *git.Repository, refName plumbing.ReferenceName, hash plumbing.Hash) (bool, error) {
+	changed := false
+	_, err := checkpoint.RunRefTransaction(ctx, repo, refName, func(current plumbing.Hash) (plumbing.Hash, bool, error) {
+		changed = false
+		if current == hash {
+			return current, false, nil
+		}
+		if !current.IsZero() {
+			hasData, err := metadataBranchHasData(repo, plumbing.NewHashReference(refName, current))
+			if err != nil {
+				return plumbing.ZeroHash, false, err
+			}
+			if hasData {
+				return current, false, nil
+			}
+		}
+		changed = true
+		return hash, true, nil
+	})
+	if err != nil {
+		return false, fmt.Errorf("replace data-free metadata ref %s: %w", refName, err)
+	}
+	return changed, nil
 }
 
 // ListCheckpoints returns all checkpoints from committed checkpoint storage.
@@ -753,10 +783,13 @@ func EnsurePrimaryRef(ctx context.Context, repo *git.Repository) error {
 			}
 			if !hasData {
 				// Un-initialized orphan — just point to remote
-				if setErr := setRefHash(repo, refs.Primary, remoteRef.Hash()); setErr != nil {
+				changed, setErr := replaceDataFreeMetadataRef(ctx, repo, refs.Primary, remoteRef.Hash())
+				if setErr != nil {
 					return fmt.Errorf("failed to update metadata ref from remote: %w", setErr)
 				}
-				fmt.Fprintf(os.Stderr, "[entire] Updated local ref '%s' from %s\n", primaryName, electedName)
+				if changed {
+					fmt.Fprintf(os.Stderr, "[entire] Updated local ref '%s' from %s\n", primaryName, electedName)
+				}
 			} else {
 				// Local has real data and differs from remote — if disconnected
 				// (no common ancestor), reconciliation happens at pre-push time
@@ -772,7 +805,7 @@ func EnsurePrimaryRef(ctx context.Context, repo *git.Repository) error {
 
 	// Local ref doesn't exist — create from the elected remote if available.
 	if remoteRef != nil {
-		if err := setRefHash(repo, refs.Primary, remoteRef.Hash()); err != nil {
+		if err := createRefIfAbsent(ctx, repo, refs.Primary, remoteRef.Hash()); err != nil {
 			return fmt.Errorf("failed to create metadata ref from remote: %w", err)
 		}
 		fmt.Fprintf(os.Stderr, "✓ Created local ref '%s' from %s\n", primaryName, electedName)
@@ -784,7 +817,7 @@ func EnsurePrimaryRef(ctx context.Context, repo *git.Repository) error {
 	if electionFailed && refs.PrimaryFetchableFromRemote() {
 		originRef, originErr := repo.Reference(plumbing.NewRemoteReferenceName("origin", primaryName), true)
 		if originErr == nil {
-			if err := setRefHash(repo, refs.Primary, originRef.Hash()); err != nil {
+			if err := createRefIfAbsent(ctx, repo, refs.Primary, originRef.Hash()); err != nil {
 				return fmt.Errorf("failed to create metadata ref from origin under failed election: %w", err)
 			}
 			fmt.Fprintf(os.Stderr, "✓ Created local ref '%s' from origin (checkpoint sync remote election failed; fix checkpoint_push_remote to resume syncing)\n", primaryName)
@@ -851,7 +884,13 @@ func createOrphanMetadataRef(ctx context.Context, repo *git.Repository, refs che
 		return fmt.Errorf("failed to store orphan commit: %w", err)
 	}
 
-	if err := setRefHash(repo, refs.Primary, commitHash); err != nil {
+	_, err = checkpoint.RunRefTransaction(ctx, repo, refs.Primary, func(current plumbing.Hash) (plumbing.Hash, bool, error) {
+		if !current.IsZero() {
+			return current, false, nil
+		}
+		return commitHash, true, nil
+	})
+	if err != nil {
 		return fmt.Errorf("failed to create metadata ref: %w", err)
 	}
 
@@ -1057,8 +1096,12 @@ func healEmptyOrphanFromCheckpointRemote(ctx context.Context, repo *git.Reposito
 	}
 
 	// Force-set the local ref to the fetched tip, discarding the data-free orphan.
-	if err := setRefHash(repo, primary, fetchedRef.Hash()); err != nil {
+	changed, err := replaceDataFreeMetadataRef(ctx, repo, primary, fetchedRef.Hash())
+	if err != nil {
 		return false, fmt.Errorf("failed to replace empty orphan metadata ref: %w", err)
+	}
+	if !changed {
+		return false, nil
 	}
 	logging.Info(ctx, "checkpoint-remote: healed empty orphan metadata branch from checkpoint remote",
 		slog.String("ref", primary.String()),

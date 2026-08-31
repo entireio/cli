@@ -1,8 +1,6 @@
 package checkpoint
 
 import (
-	"context"
-
 	"github.com/go-git/go-git/v6"
 	"github.com/go-git/go-git/v6/plumbing"
 )
@@ -110,15 +108,4 @@ func (s *GitStore) Refs() PersistentRefs {
 // PersistentReadRef returns the ref that committed-checkpoint reads resolve against.
 func (s *GitStore) PersistentReadRef() plumbing.ReferenceName {
 	return s.refs.Read
-}
-
-func (s *GitStore) updatePrimaryRef(ctx context.Context, build func(parentHash, rootTreeHash plumbing.Hash) (plumbing.Hash, error)) error {
-	return updatePersistentRef(ctx, s.repo, s.refs.Primary, func() (plumbing.Hash, plumbing.Hash, error) {
-		parentHash, rootTreeHash, err := s.getSessionsBranchRef()
-		if err != nil {
-			return plumbing.ZeroHash, plumbing.ZeroHash, err
-		}
-		newHash, buildErr := build(parentHash, rootTreeHash)
-		return newHash, parentHash, buildErr
-	})
 }

@@ -1,10 +1,46 @@
 package checkpoint
 
 import (
+	"context"
+	"errors"
 	"testing"
 
+	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
+	"github.com/entireio/cli/cmd/entire/cli/testutil"
 )
+
+func TestWriteTemporary_MissingStaleBranchRequiresMigration(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	testutil.InitRepo(t, dir)
+	testutil.WriteFile(t, dir, "initial.txt", "initial")
+	testutil.GitAdd(t, dir, "initial.txt")
+	testutil.GitCommit(t, dir, "initial")
+	oldBase := testutil.GetHeadHash(t, dir)
+	testutil.WriteFile(t, dir, "advanced.txt", "advanced")
+	testutil.GitAdd(t, dir, "advanced.txt")
+	testutil.GitCommit(t, dir, "advanced")
+
+	repo, err := gitrepo.OpenPath(dir)
+	if err != nil {
+		t.Fatalf("open repo: %v", err)
+	}
+	defer repo.Close()
+
+	store := newEphemeralStore(repo, DefaultV1Refs())
+	_, err = store.Write(context.Background(), Step{
+		SessionID:         "stale-session",
+		BaseCommit:        oldBase,
+		AuthorName:        "Test",
+		AuthorEmail:       "test@example.com",
+		CommitMessage:     "stale checkpoint",
+		IsFirstCheckpoint: false,
+	})
+	if !errors.Is(err, ErrShadowBranchMoved) {
+		t.Fatalf("Write() error = %v, want ErrShadowBranchMoved", err)
+	}
+}
 
 func TestHashWorktreeID(t *testing.T) {
 	tests := []struct {

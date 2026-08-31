@@ -66,6 +66,13 @@ func (s *fanoutStore) ReadSessionMetadataAndPrompts(ctx context.Context, checkpo
 // Write applies to the primary first; only on primary success does it fan out to
 // each mirror best-effort. A mirror error is logged and dropped.
 func (s *fanoutStore) Write(ctx context.Context, req WriteRequest) error {
+	if batch, ok := req.(BatchSessions); ok {
+		canonical, err := CanonicalizeBatchSessions(batch)
+		if err != nil {
+			return err
+		}
+		req = canonical
+	}
 	if err := s.primary.Write(ctx, req); err != nil {
 		return err //nolint:wrapcheck // primary error is the operation's error, surfaced verbatim
 	}

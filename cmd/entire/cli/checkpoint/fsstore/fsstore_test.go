@@ -44,6 +44,61 @@ func TestStore_WriteSessionRoundTrips(t *testing.T) {
 	assert.Contains(t, content.Prompts, "hello")
 }
 
+func TestStore_BatchSessionsUsesCanonicalCheckpointSemantics(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	store := New(t.TempDir())
+	cid := id.MustCheckpointID("b1b2c3d4e5f6")
+
+	require.NoError(t, store.Write(ctx, cp.Session{
+		CheckpointID: cid,
+		SessionID:    "session-b",
+		HasReview:    true,
+		CombinedAttribution: &cp.Attribution{
+			AgentLines: 8,
+		},
+	}))
+	require.NoError(t, store.Write(ctx, cp.BatchSessions{
+		CheckpointID: cid,
+		Sessions: []cp.ReservedSession{
+			{CheckpointID: cid, SessionID: "session-c", Strategy: "", Branch: "", CheckpointsCount: 3, FilesTouched: []string{"c.go"}},
+			{CheckpointID: cid, SessionID: "session-b", Strategy: "strategy-b", Branch: "branch-b", CheckpointsCount: 2, FilesTouched: []string{"b.go"}},
+			{CheckpointID: cid, SessionID: "session-a", Strategy: "strategy-a", Branch: "branch-a", CheckpointsCount: 1, FilesTouched: []string{"a.go"}},
+		},
+		CommitTime: time.Unix(100, 0),
+	}))
+
+	summary, err := store.Read(ctx, cid)
+	require.NoError(t, err)
+	require.NotNil(t, summary)
+	assert.Empty(t, summary.Strategy)
+	assert.Empty(t, summary.Branch)
+	assert.Equal(t, 6, summary.CheckpointsCount)
+	assert.Equal(t, []string{"a.go", "b.go", "c.go"}, summary.FilesTouched)
+	assert.True(t, summary.HasReview, "legacy root flag must survive the upsert")
+	require.NotNil(t, summary.CombinedAttribution)
+	assert.Equal(t, 8, summary.CombinedAttribution.AgentLines)
+
+	wantIDs := []string{"session-b", "session-a", "session-c"}
+	for index, wantID := range wantIDs {
+		metadata, err := store.ReadSessionMetadata(ctx, cid, index)
+		require.NoError(t, err)
+		assert.Equal(t, wantID, metadata.SessionID)
+	}
+
+	err = store.Write(ctx, cp.BatchSessions{
+		CheckpointID: cid,
+		Sessions: []cp.ReservedSession{
+			{CheckpointID: cid, SessionID: "duplicate"},
+			{CheckpointID: cid, SessionID: "duplicate"},
+		},
+	})
+	require.ErrorContains(t, err, "duplicate session ID")
+	after, readErr := store.Read(ctx, cid)
+	require.NoError(t, readErr)
+	assert.Equal(t, summary, after, "invalid batch changed the filesystem checkpoint")
+}
+
 func TestStore_ReadUnknownCheckpoint(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -91,8 +146,13 @@ func TestStore_SessionSummaryAndAttribution(t *testing.T) {
 		CheckpointID: cid, SessionID: "sess-1", Strategy: "manual-commit",
 		Transcript: redact.AlreadyRedacted([]byte("t")),
 	}))
+	require.NoError(t, store.Write(ctx, cp.Session{
+		CheckpointID: cid, SessionID: "sess-2", Strategy: "manual-commit",
+		Transcript: redact.AlreadyRedacted([]byte("t2")),
+	}))
 	require.NoError(t, store.Write(ctx, cp.SessionSummary{
-		CheckpointID: cid, Summary: &cp.Summary{Intent: "do a thing", Outcome: "did it"},
+		CheckpointID: cid, SessionID: "sess-1",
+		Summary: &cp.Summary{Intent: "do a thing", Outcome: "did it"},
 	}))
 	require.NoError(t, store.Write(ctx, cp.CheckpointAttribution{
 		CheckpointID: cid, Attribution: &cp.Attribution{AgentLines: 10, AgentPercentage: 80},
@@ -102,6 +162,9 @@ func TestStore_SessionSummaryAndAttribution(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, meta.Summary)
 	assert.Equal(t, "do a thing", meta.Summary.Intent)
+	meta, err = store.ReadSessionMetadata(ctx, cid, 1)
+	require.NoError(t, err)
+	assert.Nil(t, meta.Summary)
 
 	summary, err := store.Read(ctx, cid)
 	require.NoError(t, err)

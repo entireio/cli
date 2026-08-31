@@ -216,7 +216,7 @@ func TestKindRoutingStore_ReservedSessionRetryUpdatesBothBackendsOnce(t *testing
 	writeRoutingCheckpoint(t, branch, checkpointID, "reserved-session")
 	writeRoutingCheckpoint(t, refs, checkpointID, "reserved-session")
 
-	branchBefore, _, err := branch.getSessionsBranchRef()
+	branchBefore, err := ReadRefHash(branch.repo, branch.refs.Primary)
 	require.NoError(t, err)
 	writer := newFanoutStore(refs, []Writer{branch})
 	router := newKindRoutingStore(writer, branch, refs, BackendTypeGitRefs)
@@ -238,12 +238,62 @@ func TestKindRoutingStore_ReservedSessionRetryUpdatesBothBackendsOnce(t *testing
 	require.Contains(t, string(visibleContent.Transcript), "new transcript from retry",
 		"a successful retry must be visible through normal refs-first reads")
 
-	branchAfter, _, err := branch.getSessionsBranchRef()
+	branchAfter, err := ReadRefHash(branch.repo, branch.refs.Primary)
 	require.NoError(t, err)
 	commit, err := repo.CommitObject(branchAfter)
 	require.NoError(t, err)
 	require.Equal(t, []plumbing.Hash{branchBefore}, commit.ParentHashes,
 		"the required original-backend write must not be repeated by mirror fan-out")
+}
+
+func TestKindRoutingStore_BatchSessionsUsesOriginalBackendAfterConfigChange(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	tests := []struct {
+		name        string
+		primaryType string
+		checkpoint  id.CheckpointID
+		wantBackend string
+	}{
+		{
+			name:        "ULID batch under refs after switching to branch",
+			primaryType: BackendTypeGitBranch,
+			checkpoint:  id.MustCheckpointID(routingSampleULID),
+			wantBackend: BackendTypeGitRefs,
+		},
+		{
+			name:        "hex batch under branch after switching to refs",
+			primaryType: BackendTypeGitRefs,
+			checkpoint:  id.MustCheckpointID("a1b2c3d4e5f6"),
+			wantBackend: BackendTypeGitBranch,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			_, repo, _ := newTestRepo(t)
+			branch := NewGitStore(repo, DefaultV1Refs())
+			refs := newGitRefsStore(repo)
+			var writer PersistentStore = branch
+			if tt.primaryType == BackendTypeGitRefs {
+				writer = refs
+			}
+			router := newKindRoutingStore(writer, branch, refs, tt.primaryType)
+			require.NoError(t, router.Write(ctx, batchRoutingRequest(tt.checkpoint)))
+
+			branchSummary, err := branch.Read(ctx, tt.checkpoint)
+			require.NoError(t, err)
+			refsSummary, err := refs.Read(ctx, tt.checkpoint)
+			require.NoError(t, err)
+			if tt.wantBackend == BackendTypeGitRefs {
+				require.NotNil(t, refsSummary)
+				assert.Nil(t, branchSummary)
+			} else {
+				require.NotNil(t, branchSummary)
+				assert.Nil(t, refsSummary)
+			}
+		})
+	}
 }
 
 func TestKindRoutingStore_ListUnionsBothBackends(t *testing.T) {

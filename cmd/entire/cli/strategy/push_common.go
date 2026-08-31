@@ -526,76 +526,18 @@ func fetchAndRebaseRefCommon(ctx context.Context, target string, ref plumbing.Re
 		return fmt.Errorf("metadata reconciliation failed: %w", reconcileErr)
 	}
 
-	// Get local ref (re-read after potential reconciliation update)
-	localRef, err := repo.Reference(ref, true)
-	if err != nil {
-		return fmt.Errorf("failed to get local ref: %w", err)
-	}
-
 	// Get fetched ref (remote-tracking or temp ref, updated by the fetch above)
 	remoteRef, err := repo.Reference(fetchedRefName, true)
 	if err != nil {
 		return fmt.Errorf("failed to get remote ref: %w", err)
 	}
-
-	advance := func(hash plumbing.Hash) error {
-		if err := setRefHash(repo, ref, hash); err != nil {
-			return err
-		}
-		if usedTempRef {
-			_ = repo.Storer.RemoveReference(fetchedRefName) //nolint:errcheck // cleanup is best-effort
-		}
-		return nil
+	if err := SafelyAdvanceLocalRef(ctx, repo, ref, remoteRef.Hash()); err != nil {
+		return fmt.Errorf("failed to advance local metadata ref: %w", err)
 	}
-
-	// If local is already at or behind remote, fast-forward
-	if localRef.Hash() == remoteRef.Hash() {
-		return advance(remoteRef.Hash())
+	if usedTempRef {
+		_ = repo.Storer.RemoveReference(fetchedRefName) //nolint:errcheck // cleanup is best-effort
 	}
-
-	// Find merge base
-	repoPath, err := getRepoPath(repo)
-	if err != nil {
-		return fmt.Errorf("failed to get repo path: %w", err)
-	}
-	mergeBase, err := getMergeBase(ctx, repoPath, localRef.Hash().String(), remoteRef.Hash().String())
-	if err != nil {
-		return fmt.Errorf("failed to find merge base: %w", err)
-	}
-
-	// If local is ancestor of remote (merge base == local), fast-forward to remote
-	if mergeBase == localRef.Hash() {
-		if err := advance(remoteRef.Hash()); err != nil {
-			return fmt.Errorf("failed to fast-forward ref: %w", err)
-		}
-		return nil
-	}
-
-	// Collect commits reachable from local but not from remote and cherry-pick
-	// them onto the remote tip. This preserves local-only commits even when the
-	// local metadata branch already contains old merge commits, while avoiding
-	// replaying shared ancestors older than the true merge-base.
-	localCommits, err := collectCommitsSince(ctx, repo, repoPath, localRef.Hash(), remoteRef.Hash())
-	if err != nil {
-		return fmt.Errorf("failed to collect local commits: %w", err)
-	}
-
-	if len(localCommits) == 0 {
-		// No local-only commits — just point to remote
-		return advance(remoteRef.Hash())
-	}
-
-	shallow, err := loadShallowHashes(ctx, repoPath)
-	if err != nil {
-		return fmt.Errorf("failed to load shallow boundaries: %w", err)
-	}
-
-	newTip, err := cherryPickOnto(ctx, repo, remoteRef.Hash(), localCommits, shallow)
-	if err != nil {
-		return fmt.Errorf("failed to rebase local commits onto remote: %w", err)
-	}
-
-	return advance(newTip)
+	return nil
 }
 
 // getMergeBase returns the merge base hash of two commits, or an error if they

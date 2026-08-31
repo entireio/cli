@@ -1185,6 +1185,40 @@ func TestGenerateCheckpointSummary_AdvancesV1Metadata(t *testing.T) {
 	require.NotEqual(t, fixture.v1Hash, v1After.Hash(), "v1 metadata branch must advance after UpdateSummary")
 }
 
+type capturedWrite struct {
+	req checkpoint.WriteRequest
+}
+
+func (w *capturedWrite) Write(_ context.Context, req checkpoint.WriteRequest) error {
+	w.req = req
+	return nil
+}
+
+func TestGenerateCheckpointSummary_ForwardsSessionID(t *testing.T) {
+	fixture := setupGenerateSummaryFixture(t)
+	stubSummaryProviderForTest(t)
+	writer := &capturedWrite{}
+
+	var stdout, stderr bytes.Buffer
+	require.NoError(t, generateCheckpointSummary(
+		fixture.ctx,
+		&stdout,
+		&stderr,
+		writer,
+		fixture.cpID,
+		fixture.cpSummary,
+		fixture.content,
+		false,
+		0,
+	))
+
+	req, ok := writer.req.(checkpoint.SessionSummary)
+	require.True(t, ok, "captured request type = %T", writer.req)
+	if req.SessionID != "session-001" {
+		t.Fatalf("SessionSummary.SessionID = %q, want %q", req.SessionID, "session-001")
+	}
+}
+
 func TestRunExplainGenerateBlocksWhenPolicyWriteUnsupported(t *testing.T) {
 	fixture := setupGenerateSummaryFixture(t)
 	stubSummaryProviderForTest(t)

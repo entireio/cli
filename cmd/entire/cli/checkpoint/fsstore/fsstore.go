@@ -12,12 +12,11 @@
 // directly, which keeps the example small and makes the contract's remaining
 // git leakage concrete.
 //
-// It is faithful to the contract's per-session metadata and write-request
-// semantics — including prompt and summary redaction via the shared
-// checkpoint helpers — but it does not replicate two git-writer behaviors:
-// cross-session aggregation (the root summary's TokenUsage reflects the latest
-// session, not a sum) and derived stamps the git writer adds (CLI version,
-// skill-events version). Neither is needed to validate the pluggable seam.
+// It is faithful to the contract's per-session metadata, batch aggregation,
+// and write-request semantics — including prompt and summary redaction via the
+// shared checkpoint helpers. It does not replicate derived stamps the git
+// writer adds (CLI version and skill-events version); neither is needed to
+// validate the pluggable seam.
 package fsstore
 
 import (
@@ -32,9 +31,16 @@ import (
 	"time"
 
 	cp "github.com/entireio/cli/api/checkpoint"
+	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
 	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
+)
+
+const (
+	checkpointKindAgentReview      = "agent_review"
+	checkpointKindAgentInvestigate = "agent_investigate"
+	checkpointKindImported         = "imported"
 )
 
 // Store is a JSON-file-backed persistent checkpoint store. One file per
@@ -112,9 +118,11 @@ func (s *Store) Write(_ context.Context, req cp.WriteRequest) error {
 
 	switch r := req.(type) {
 	case cp.Session:
-		return s.writeSession(cp.WriteOptions(r))
+		return s.writeSingleSession(cp.WriteOptions(r))
 	case cp.ReservedSession:
-		return s.writeSession(cp.WriteOptions(r))
+		return s.writeSingleSession(cp.WriteOptions(r))
+	case cp.BatchSessions:
+		return s.writeBatchSessions(r)
 	case cp.SessionTranscript:
 		return s.backfillTranscript(cp.UpdateOptions(r))
 	case cp.SessionSummary:
@@ -126,32 +134,48 @@ func (s *Store) Write(_ context.Context, req cp.WriteRequest) error {
 	}
 }
 
-func (s *Store) writeSession(opts cp.WriteOptions) error {
-	sc, err := s.load(opts.CheckpointID)
+func (s *Store) writeSingleSession(opts cp.WriteOptions) error {
+	req := cp.BatchSessions{
+		CheckpointID: opts.CheckpointID,
+		Sessions:     []cp.ReservedSession{cp.ReservedSession(opts)},
+	}
+	if err := s.writeBatchSessions(req); err != nil {
+		return err
+	}
+	if opts.CombinedAttribution != nil {
+		return s.writeAttribution(cp.CheckpointAttribution{
+			CheckpointID: opts.CheckpointID,
+			Attribution:  opts.CombinedAttribution,
+		})
+	}
+	return nil
+}
+
+func (s *Store) writeBatchSessions(req cp.BatchSessions) error {
+	canonical, err := checkpoint.CanonicalizeBatchSessions(req)
+	if err != nil {
+		return fmt.Errorf("fsstore: validate batch: %w", err)
+	}
+	sc, err := s.load(canonical.CheckpointID)
 	if err != nil {
 		return err
 	}
 	if sc == nil {
-		sc = &storedCheckpoint{Summary: cp.CheckpointSummary{CheckpointID: opts.CheckpointID}}
+		sc = &storedCheckpoint{Summary: cp.CheckpointSummary{CheckpointID: canonical.CheckpointID}}
 	}
 
-	session := storedSession{
-		SessionID:  opts.SessionID,
-		Metadata:   metadataFromWriteOptions(opts),
-		Transcript: opts.Transcript.Bytes(),
-		Prompts:    checkpoint.RedactedJoinedPrompts(opts.Prompts),
+	for _, reserved := range canonical.Sessions {
+		opts := cp.WriteOptions(reserved)
+		session := storedSession{
+			SessionID:  opts.SessionID,
+			Metadata:   metadataFromWriteOptions(opts),
+			Transcript: opts.Transcript.Bytes(),
+			Prompts:    checkpoint.RedactedJoinedPrompts(opts.Prompts),
+		}
+		sc.Sessions = upsertSession(sc.Sessions, session)
+		sc.Summary.HasReview = sc.Summary.HasReview || opts.HasReview
+		sc.Summary.HasInvestigation = sc.Summary.HasInvestigation || opts.HasInvestigation
 	}
-	sc.Sessions = upsertSession(sc.Sessions, session)
-
-	// Summary-level flags accumulate across sessions and survive recompute.
-	sc.Summary.HasReview = sc.Summary.HasReview || opts.HasReview
-	sc.Summary.HasInvestigation = sc.Summary.HasInvestigation || opts.HasInvestigation
-	if opts.CombinedAttribution != nil {
-		// Migration path: an initial write may carry holistic attribution. Normal
-		// condensation sets this later via a CheckpointAttribution write instead.
-		sc.Summary.CombinedAttribution = opts.CombinedAttribution
-	}
-
 	recomputeSummary(sc)
 	return s.save(sc)
 }
@@ -186,7 +210,15 @@ func (s *Store) writeSessionSummary(r cp.SessionSummary) error {
 	if sc == nil || len(sc.Sessions) == 0 {
 		return fmt.Errorf("fsstore: cannot set summary for unknown checkpoint %s", r.CheckpointID)
 	}
-	sc.Sessions[len(sc.Sessions)-1].Metadata.Summary = checkpoint.RedactSummary(r.Summary)
+	targetSessionID := r.SessionID
+	if targetSessionID == "" {
+		targetSessionID = sc.Sessions[len(sc.Sessions)-1].SessionID
+	}
+	idx := sessionIndexByID(sc.Sessions, targetSessionID)
+	if idx < 0 {
+		return &checkpoint.SessionNotFoundError{CheckpointID: r.CheckpointID, SessionID: targetSessionID}
+	}
+	sc.Sessions[idx].Metadata.Summary = checkpoint.RedactSummary(r.Summary)
 	return s.save(sc)
 }
 
@@ -318,6 +350,7 @@ func metadataFromWriteOptions(opts cp.WriteOptions) cp.Metadata {
 		Strategy:                    opts.Strategy,
 		CreatedAt:                   createdAt,
 		Branch:                      opts.Branch,
+		CommitSHA:                   opts.CommitSHA,
 		CheckpointsCount:            opts.CheckpointsCount,
 		SaveStepCount:               opts.SaveStepCount,
 		FilesTouched:                checkpoint.NormalizeFilesTouched(opts.FilesTouched),
@@ -364,34 +397,43 @@ func recomputeSummary(sc *storedCheckpoint) {
 	summary := &sc.Summary
 	summary.Sessions = make([]cp.SessionFilePaths, len(sc.Sessions))
 	summary.CheckpointsCount = 0
+	summary.TokenUsage = nil
 	files := map[string]struct{}{}
-	var orderedFiles []string
 
 	for i := range sc.Sessions {
-		session := &sc.Sessions[i]
 		summary.Sessions[i] = cp.SessionFilePaths{
 			Metadata:   fmt.Sprintf("%d/metadata.json", i+1),
 			Transcript: fmt.Sprintf("%d/full.jsonl", i+1),
 			Prompt:     fmt.Sprintf("%d/prompt.txt", i+1),
 		}
-		summary.CheckpointsCount += session.Metadata.CheckpointsCount
-		if session.Metadata.Strategy != "" {
-			summary.Strategy = session.Metadata.Strategy
+	}
+
+	ordered := make([]*storedSession, len(sc.Sessions))
+	for i := range sc.Sessions {
+		ordered[i] = &sc.Sessions[i]
+	}
+	sort.Slice(ordered, func(i, j int) bool { return ordered[i].SessionID < ordered[j].SessionID })
+	for _, session := range ordered {
+		metadata := &session.Metadata
+		summary.Strategy = metadata.Strategy
+		summary.Branch = metadata.Branch
+		if metadata.CommitSHA != "" {
+			summary.CommitSHA = metadata.CommitSHA
 		}
-		if session.Metadata.Branch != "" {
-			summary.Branch = session.Metadata.Branch
-		}
-		if session.Metadata.TokenUsage != nil {
-			summary.TokenUsage = session.Metadata.TokenUsage
-		}
-		for _, f := range session.Metadata.FilesTouched {
-			if _, seen := files[f]; !seen {
-				files[f] = struct{}{}
-				orderedFiles = append(orderedFiles, f)
-			}
+		summary.CheckpointsCount += metadata.CheckpointsCount
+		summary.TokenUsage = types.AddTokenUsage(summary.TokenUsage, metadata.TokenUsage)
+		summary.HasReview = summary.HasReview || metadata.Kind == checkpointKindAgentReview
+		summary.HasInvestigation = summary.HasInvestigation || metadata.Kind == checkpointKindAgentInvestigate
+		summary.Imported = summary.Imported || metadata.Kind == checkpointKindImported
+		for _, f := range metadata.FilesTouched {
+			files[f] = struct{}{}
 		}
 	}
-	summary.FilesTouched = orderedFiles
+	summary.FilesTouched = summary.FilesTouched[:0]
+	for f := range files {
+		summary.FilesTouched = append(summary.FilesTouched, f)
+	}
+	sort.Strings(summary.FilesTouched)
 }
 
 func infoFromStored(sc *storedCheckpoint) cp.CheckpointInfo {

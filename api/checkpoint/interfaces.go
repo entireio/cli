@@ -3,6 +3,7 @@ package checkpoint
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
 )
@@ -39,10 +40,11 @@ type PersistentStore interface {
 // mirror/fan-out store forwards the same value to each backend's Write.
 //
 // Four requests are session-level (Session, ReservedSession, SessionTranscript,
-// SessionSummary) and one is checkpoint-level (CheckpointAttribution). Adding
-// a write operation is a new request type plus one dispatch case in every
-// backend. The Store interface stays unchanged, so seam tests must exercise the
-// full union because Go does not exhaustively check type switches.
+// SessionSummary) and two are checkpoint-level (BatchSessions,
+// CheckpointAttribution). Adding a write operation is a new request type plus
+// one dispatch case in every backend. The Store interface stays unchanged, so
+// seam tests must exercise the full union because Go does not exhaustively
+// check type switches.
 type WriteRequest interface {
 	isWriteRequest()
 }
@@ -56,14 +58,29 @@ type Session WriteOptions
 // retries remain readable even if the configured primary changed meanwhile.
 type ReservedSession WriteOptions
 
+// BatchSessions atomically creates or replaces one or more sessions in the
+// same checkpoint. It has the same reserved-ID routing semantics as
+// ReservedSession: CheckpointID identifies the backend which minted the ID.
+// Sessions are canonicalized by SessionID before publication.
+type BatchSessions struct {
+	CheckpointID  id.CheckpointID
+	Sessions      []ReservedSession
+	CommitTime    time.Time
+	AuthorName    string
+	AuthorEmail   string
+	CommitSubject string
+}
+
 // SessionTranscript replaces a session's transcript, prompts, and skill events
 // at stop time without clobbering sibling fields. (session-level)
 type SessionTranscript UpdateOptions
 
-// SessionSummary rewrites only the summary of the checkpoint's latest session.
+// SessionSummary rewrites only the summary of the named session. An empty
+// SessionID is retained for legacy callers and is resolved once by the writer.
 // (session-level)
 type SessionSummary struct {
 	CheckpointID id.CheckpointID
+	SessionID    string
 	Summary      *Summary
 }
 
@@ -78,6 +95,7 @@ type CheckpointAttribution struct {
 
 func (Session) isWriteRequest()               {}
 func (ReservedSession) isWriteRequest()       {}
+func (BatchSessions) isWriteRequest()         {}
 func (SessionTranscript) isWriteRequest()     {}
 func (SessionSummary) isWriteRequest()        {}
 func (CheckpointAttribution) isWriteRequest() {}

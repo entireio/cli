@@ -318,81 +318,60 @@ func DeleteOrphanedCheckpoints(ctx context.Context, checkpointIDs []string) (del
 	defer repo.Close()
 
 	refs := checkpoint.ResolveRefs(ctx)
-	ref, err := repo.Reference(refs.Primary, true)
-	if err != nil {
-		return nil, nil, fmt.Errorf("primary metadata ref %s not found: %w", refs.Primary, err)
-	}
-
-	parentCommit, err := repo.CommitObject(ref.Hash())
-	if err != nil {
-		return nil, nil, fmt.Errorf("failed to get commit: %w", err)
-	}
-
-	baseTree, err := parentCommit.Tree()
-	if err != nil {
-		return nil, nil, fmt.Errorf("failed to get tree: %w", err)
-	}
-
-	// Flatten tree to entries
-	entries := make(map[string]object.TreeEntry)
-	if err := checkpoint.FlattenTree(repo, baseTree, "", entries); err != nil {
-		return nil, nil, fmt.Errorf("failed to flatten tree: %w", err)
-	}
-
-	// Remove entries for each checkpoint
-	checkpointSet := make(map[string]bool)
-	for _, id := range checkpointIDs {
-		checkpointSet[id] = true
-	}
-
-	// Find and remove entries matching checkpoint paths
-	for path := range entries {
-		for checkpointIDStr := range checkpointSet {
-			cpID, err := id.NewCheckpointID(checkpointIDStr)
-			if err != nil {
-				continue // Skip invalid checkpoint IDs
-			}
-			cpPath := cpID.Path()
-			if strings.HasPrefix(path, cpPath+"/") {
-				delete(entries, path)
-			}
+	checkpointPaths := make([]string, 0, len(checkpointIDs))
+	for _, checkpointID := range checkpointIDs {
+		cpID, parseErr := id.NewCheckpointID(checkpointID)
+		if parseErr == nil {
+			checkpointPaths = append(checkpointPaths, cpID.Path()+"/")
 		}
 	}
 
-	// Build new tree
-	newTreeHash, err := checkpoint.BuildTreeFromEntries(ctx, repo, entries)
+	_, err = checkpoint.RunRefTransaction(ctx, repo, refs.Primary, func(parentHash plumbing.Hash) (plumbing.Hash, bool, error) {
+		if parentHash.IsZero() {
+			return plumbing.ZeroHash, false, fmt.Errorf("primary metadata ref %s not found", refs.Primary)
+		}
+		parentCommit, err := repo.CommitObject(parentHash)
+		if err != nil {
+			return plumbing.ZeroHash, false, fmt.Errorf("failed to get commit: %w", err)
+		}
+		baseTree, err := parentCommit.Tree()
+		if err != nil {
+			return plumbing.ZeroHash, false, fmt.Errorf("failed to get tree: %w", err)
+		}
+		entries := make(map[string]object.TreeEntry)
+		if err := checkpoint.FlattenTree(repo, baseTree, "", entries); err != nil {
+			return plumbing.ZeroHash, false, fmt.Errorf("failed to flatten tree: %w", err)
+		}
+		for path := range entries {
+			for _, checkpointPath := range checkpointPaths {
+				if strings.HasPrefix(path, checkpointPath) {
+					delete(entries, path)
+					break
+				}
+			}
+		}
+		newTreeHash, err := checkpoint.BuildTreeFromEntries(ctx, repo, entries)
+		if err != nil {
+			return plumbing.ZeroHash, false, fmt.Errorf("failed to build tree: %w", err)
+		}
+		commit := &object.Commit{
+			Author:       object.Signature{Name: "Entire CLI", Email: "cli@entire.io", When: parentCommit.Author.When},
+			Committer:    object.Signature{Name: "Entire CLI", Email: "cli@entire.io", When: parentCommit.Committer.When},
+			Message:      fmt.Sprintf("Cleanup: removed %d orphaned checkpoints", len(checkpointIDs)),
+			TreeHash:     newTreeHash,
+			ParentHashes: []plumbing.Hash{parentHash},
+		}
+		obj := repo.Storer.NewEncodedObject()
+		if err := commit.Encode(obj); err != nil {
+			return plumbing.ZeroHash, false, fmt.Errorf("failed to encode commit: %w", err)
+		}
+		commitHash, err := repo.Storer.SetEncodedObject(obj)
+		if err != nil {
+			return plumbing.ZeroHash, false, fmt.Errorf("failed to store cleanup commit: %w", err)
+		}
+		return commitHash, true, nil
+	})
 	if err != nil {
-		return nil, nil, fmt.Errorf("failed to build tree: %w", err)
-	}
-
-	// Create commit
-	commit := &object.Commit{
-		Author: object.Signature{
-			Name:  "Entire CLI",
-			Email: "cli@entire.io",
-			When:  parentCommit.Author.When,
-		},
-		Committer: object.Signature{
-			Name:  "Entire CLI",
-			Email: "cli@entire.io",
-			When:  parentCommit.Committer.When,
-		},
-		Message:      fmt.Sprintf("Cleanup: removed %d orphaned checkpoints", len(checkpointIDs)),
-		TreeHash:     newTreeHash,
-		ParentHashes: []plumbing.Hash{ref.Hash()},
-	}
-
-	obj := repo.Storer.NewEncodedObject()
-	if err := commit.Encode(obj); err != nil {
-		return nil, nil, fmt.Errorf("failed to encode commit: %w", err)
-	}
-
-	commitHash, err := repo.Storer.SetEncodedObject(obj)
-	if err != nil {
-		return nil, nil, fmt.Errorf("failed to store commit: %w", err)
-	}
-
-	if err := setRefHash(repo, refs.Primary, commitHash); err != nil {
 		return nil, nil, fmt.Errorf("failed to update branch: %w", err)
 	}
 

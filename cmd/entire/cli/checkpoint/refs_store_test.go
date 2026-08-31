@@ -578,13 +578,15 @@ func TestGitRefsStore_WriteAllVariantsAndRead(t *testing.T) {
 	const sessionID = "sess-1"
 
 	refsWrite(t, store, cid, sessionID, "initial transcript")
+	refsWrite(t, store, cid, "sess-2", "second transcript")
 	require.NoError(t, store.Write(ctx, SessionTranscript{
 		CheckpointID: cid, SessionID: sessionID,
 		Transcript: redact.AlreadyRedacted([]byte("final transcript")),
 		Prompts:    []string{"do the thing"},
 	}))
 	require.NoError(t, store.Write(ctx, SessionSummary{
-		CheckpointID: cid, Summary: &Summary{Intent: "intent-x", Outcome: "outcome-y"},
+		CheckpointID: cid, SessionID: sessionID,
+		Summary: &Summary{Intent: "intent-x", Outcome: "outcome-y"},
 	}))
 	require.NoError(t, store.Write(ctx, CheckpointAttribution{
 		CheckpointID: cid, Attribution: &Attribution{AgentLines: 7, AgentPercentage: 70},
@@ -597,7 +599,7 @@ func TestGitRefsStore_WriteAllVariantsAndRead(t *testing.T) {
 	summary, err := store.Read(ctx, cid)
 	require.NoError(t, err)
 	require.NotNil(t, summary)
-	require.Len(t, summary.Sessions, 1)
+	require.Len(t, summary.Sessions, 2)
 	require.NotNil(t, summary.CombinedAttribution)
 	assert.Equal(t, 7, summary.CombinedAttribution.AgentLines)
 
@@ -609,6 +611,86 @@ func TestGitRefsStore_WriteAllVariantsAndRead(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, meta.Summary)
 	assert.Equal(t, "intent-x", meta.Summary.Intent)
+	meta, err = store.ReadSessionMetadata(ctx, cid, 1)
+	require.NoError(t, err)
+	assert.Nil(t, meta.Summary)
+}
+
+func TestGitRefsStore_SummaryRetryUpdatesOriginalSession(t *testing.T) {
+	t.Parallel()
+	store := newRefsStore(t)
+	ctx := context.Background()
+	cpID := id.MustCheckpointID("d1e2f3a4b5c6")
+
+	refsWrite(t, store, cpID, "session-001", "first transcript")
+	inserted := false
+	ctx = withBeforeRefCAS(ctx, func() {
+		if inserted {
+			return
+		}
+		inserted = true
+		refsWrite(t, store, cpID, "session-002", "second transcript")
+	})
+	if err := store.Write(ctx, SessionSummary{
+		CheckpointID: cpID,
+		SessionID:    "session-001",
+		Summary:      &Summary{Intent: "first summary"},
+	}); err != nil {
+		t.Fatalf("Write(SessionSummary) error = %v", err)
+	}
+
+	first, err := store.ReadSessionMetadata(ctx, cpID, 0)
+	if err != nil {
+		t.Fatalf("read first metadata: %v", err)
+	}
+	if first.Summary == nil || first.Summary.Intent != "first summary" {
+		t.Fatalf("first summary = %+v", first.Summary)
+	}
+	second, err := store.ReadSessionMetadata(ctx, cpID, 1)
+	if err != nil {
+		t.Fatalf("read second metadata: %v", err)
+	}
+	if second.Summary != nil {
+		t.Fatalf("second summary = %+v, want nil", second.Summary)
+	}
+}
+
+func TestGitRefsStore_LegacySummaryTargetPinnedAcrossRetry(t *testing.T) {
+	t.Parallel()
+	store := newRefsStore(t)
+	ctx := context.Background()
+	cpID := id.MustCheckpointID("e1f2a3b4c5d6")
+
+	refsWrite(t, store, cpID, "session-001", "first transcript")
+	inserted := false
+	ctx = withBeforeRefCAS(ctx, func() {
+		if inserted {
+			return
+		}
+		inserted = true
+		refsWrite(t, store, cpID, "session-002", "second transcript")
+	})
+	if err := store.Write(ctx, SessionSummary{
+		CheckpointID: cpID,
+		Summary:      &Summary{Intent: "first summary"},
+	}); err != nil {
+		t.Fatalf("legacy Write(SessionSummary) error = %v", err)
+	}
+
+	first, err := store.ReadSessionMetadata(ctx, cpID, 0)
+	if err != nil {
+		t.Fatalf("read first metadata: %v", err)
+	}
+	if first.Summary == nil || first.Summary.Intent != "first summary" {
+		t.Fatalf("first summary = %+v", first.Summary)
+	}
+	second, err := store.ReadSessionMetadata(ctx, cpID, 1)
+	if err != nil {
+		t.Fatalf("read second metadata: %v", err)
+	}
+	if second.Summary != nil {
+		t.Fatalf("second summary = %+v, want nil", second.Summary)
+	}
 }
 
 func TestGitRefsStore_RefSharding(t *testing.T) {
@@ -775,10 +857,7 @@ func TestGitRefsStore_EnqueuesAfterCancellationFollowingCAS(t *testing.T) {
 	require.NoError(t, err)
 
 	ctx, cancel := context.WithCancel(context.Background())
-	repoRoot, _, err := repositoryDirs(ctx, store.repo)
-	require.NoError(t, err)
-	require.NoError(t, casUpdateRef(ctx, repoRoot, refName, head.Hash(), plumbing.ZeroHash))
-
+	require.NoError(t, CompareAndSwapRef(context.Background(), store.repo, refName, head.Hash(), plumbing.ZeroHash))
 	cancel()
 	store.enqueueForPush(ctx, refName)
 
