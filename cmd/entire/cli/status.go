@@ -443,6 +443,16 @@ func runStatusDetailed(ctx context.Context, w io.Writer, sty statusStyles, setti
 		}
 	}
 
+	// Dropped user-settings-file preference blocks (unknown key, malformed
+	// repos entry). The strict blocks (`global`, `redaction`) are not listed
+	// here — a failure there fails the whole file, which doctor reports.
+	if rejections := effectiveSettings.UserLayerRejections(); len(rejections) > 0 {
+		fmt.Fprintf(w, "User settings (%s): %d block(s) ignored\n", settings.UserSettingsPath(), len(rejections))
+		for _, reason := range rejections {
+			fmt.Fprintf(w, "  %s\n", reason)
+		}
+	}
+
 	if effectiveSettings.Enabled {
 		writeActiveSessions(ctx, w, sty)
 	}

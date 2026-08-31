@@ -493,6 +493,18 @@ func EnsureRedactionConfigured(ctx context.Context) error {
 			)
 		}
 
+		// A preferences/repos block in the user settings file was dropped
+		// (unknown key, malformed entry). Same rationale as the local-layer
+		// warning above: the user's own settings silently stopped applying,
+		// and a line in .entire/logs is not a signal they will see.
+		for _, reason := range s.UserLayerRejections() {
+			warnUser(ctx, "settings",
+				"ignoring a block of the user settings file",
+				fmt.Sprintf("ignoring part of %s (%s); fix that block — the rest of the file still applies.", settings.UserSettingsPath(), reason),
+				slog.String("reason", reason),
+			)
+		}
+
 		// PII detection (opt-in).
 		if s.Redaction != nil && s.Redaction.PII != nil && s.Redaction.PII.Enabled {
 			pii := s.Redaction.PII
