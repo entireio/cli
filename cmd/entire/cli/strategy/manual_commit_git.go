@@ -493,25 +493,49 @@ func accumulateTokenUsage(existing, incoming *agent.TokenUsage) *agent.TokenUsag
 // successful (non-skipped) CondenseSession write, so this is exactly the
 // point at which materializeTaskRecords' payloads have just been durably
 // stored — see removeCompletedTaskRecords.
-// advanceTranscriptWindows moves both per-checkpoint offsets to the end of the
-// transcript just condensed. CheckpointTranscriptStart scopes the next
-// checkpoint's stored transcript; TokenTranscriptStart scopes its token_usage.
-// They advance together here and diverge in exactly one place:
-// carryForwardToNewShadowBranch resets the transcript offset to 0 (so the
-// post-partial-commit checkpoint's transcript is self-contained) and leaves the
-// token offset alone (so its token_usage stays a delta). Every condensation
-// site must go through this helper rather than setting one offset by hand.
-func advanceTranscriptWindows(state *SessionState, transcriptEnd int) {
-	state.CheckpointTranscriptStart = transcriptEnd
-	state.TokenTranscriptStart = transcriptEnd
-}
-
 func resetCheckpointWindow(state *SessionState) {
 	state.StepCount = 0
 	state.CheckpointTokenUsage = nil
 	state.ClearCondensationAttempt()
 	state.RebaselineSubagentTokens()
 	removeCompletedTaskRecords(state)
+}
+
+// advanceTranscriptWindows moves both per-checkpoint offsets to the end of the
+// transcript just condensed. CheckpointTranscriptStart scopes the next
+// checkpoint's stored transcript; TokenTranscriptStart scopes its token_usage.
+// They advance together here and diverge in exactly two places, both of which
+// go through a dedicated helper rather than assigning an offset by hand:
+//
+//   - carryForwardToNewShadowBranch resets the transcript offset to 0 (so the
+//     post-partial-commit checkpoint's transcript is self-contained) and leaves
+//     the token offset alone (so its token_usage stays a delta).
+//   - the turn-end advance after a complete mid-turn commit moves only the
+//     transcript offset, via advanceStoredTranscriptWindow.
+//
+// Every condensation site must go through this helper rather than setting one
+// offset by hand.
+func advanceTranscriptWindows(state *SessionState, transcriptEnd int) {
+	state.CheckpointTranscriptStart = transcriptEnd
+	state.TokenTranscriptStart = transcriptEnd
+}
+
+// advanceStoredTranscriptWindow moves only CheckpointTranscriptStart — the
+// offset scoping the next checkpoint's STORED transcript — and deliberately
+// leaves TokenTranscriptStart where it is.
+//
+// Used at turn end after a complete mid-turn commit. Condensation wrote that
+// checkpoint's token_usage over [TokenTranscriptStart, N], and
+// finalizeAllTurnCheckpoints then rewrites the checkpoint with the full
+// transcript only (SessionTranscript: transcript, assets, prompts, skill
+// events — no token recompute). Advancing the token window past N as well
+// would leave the tokens in (N, turnEnd] — the tool results, token counts and
+// task_complete that land after the commit, which for Codex is the turn's
+// whole accounting — recorded in no checkpoint at all. The transcript offset
+// must still advance so the next checkpoint's stored transcript does not
+// re-include already-condensed content.
+func advanceStoredTranscriptWindow(state *SessionState, transcriptEnd int) {
+	state.CheckpointTranscriptStart = transcriptEnd
 }
 
 // removeCompletedTaskRecords drops every completed task record (CompletedAt
