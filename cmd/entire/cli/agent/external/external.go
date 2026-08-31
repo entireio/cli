@@ -574,11 +574,12 @@ func convertTokenUsage(r *TokenUsageResponse) *agent.TokenUsage {
 		return nil
 	}
 	usage := &agent.TokenUsage{
-		InputTokens:         r.InputTokens,
-		CacheCreationTokens: r.CacheCreationTokens,
-		CacheReadTokens:     r.CacheReadTokens,
-		OutputTokens:        r.OutputTokens,
-		APICallCount:        r.APICallCount,
+		InputTokens:           r.InputTokens,
+		CacheCreationTokens:   r.CacheCreationTokens,
+		CacheCreation1hTokens: r.CacheCreation1hTokens,
+		CacheReadTokens:       r.CacheReadTokens,
+		OutputTokens:          r.OutputTokens,
+		APICallCount:          r.APICallCount,
 	}
 	if r.SubagentTokens != nil {
 		usage.SubagentTokens = convertTokenUsage(r.SubagentTokens)

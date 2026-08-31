@@ -884,3 +884,50 @@ func TestStripExeExt(t *testing.T) {
 		})
 	}
 }
+
+// TestConvertTokenUsage_CarriesCacheCreation1hTokens pins the 1h-TTL subset
+// across the external-agent protocol boundary, at the top level and through the
+// subagent subtree.
+//
+// Before the field existed an Anthropic-backed external agent could only report
+// cache_creation_tokens, so pricing saw CacheCreation1hTokens == 0 and billed
+// every cache write at the 1.25x 5-minute rate even when the session used the 2x
+// 1-hour TTL — silently, since a zero subset is indistinguishable from a session
+// that genuinely used no 1h caching.
+func TestConvertTokenUsage_CarriesCacheCreation1hTokens(t *testing.T) {
+	got := convertTokenUsage(&TokenUsageResponse{
+		InputTokens:           10,
+		CacheCreationTokens:   1000,
+		CacheCreation1hTokens: 400,
+		CacheReadTokens:       20,
+		OutputTokens:          30,
+		APICallCount:          2,
+		SubagentTokens: &TokenUsageResponse{
+			CacheCreationTokens:   500,
+			CacheCreation1hTokens: 250,
+		},
+	})
+	if got == nil {
+		t.Fatal("convertTokenUsage returned nil")
+	}
+	if got.CacheCreation1hTokens != 400 {
+		t.Errorf("cache_creation_1h_tokens = %d, want 400", got.CacheCreation1hTokens)
+	}
+	if got.CacheCreationTokens != 1000 {
+		t.Errorf("cache_creation_tokens = %d, want 1000 (the 1h count is a subset, not a replacement)", got.CacheCreationTokens)
+	}
+	if got.SubagentTokens == nil {
+		t.Fatal("subagent subtree dropped")
+	}
+	if got.SubagentTokens.CacheCreation1hTokens != 250 {
+		t.Errorf("subagent cache_creation_1h_tokens = %d, want 250 — the recursive conversion must carry it too",
+			got.SubagentTokens.CacheCreation1hTokens)
+	}
+
+	// An agent that omits the field reports no 1h usage, which is the
+	// pre-existing all-5-minute behaviour rather than an error.
+	legacy := convertTokenUsage(&TokenUsageResponse{CacheCreationTokens: 1000})
+	if legacy.CacheCreation1hTokens != 0 {
+		t.Errorf("omitted field = %d, want 0", legacy.CacheCreation1hTokens)
+	}
+}

@@ -93,12 +93,20 @@ type ExtractSummaryResponse struct {
 
 // TokenUsageResponse is the JSON returned by token calculation subcommands.
 type TokenUsageResponse struct {
-	InputTokens         int                 `json:"input_tokens"`
-	CacheCreationTokens int                 `json:"cache_creation_tokens"`
-	CacheReadTokens     int                 `json:"cache_read_tokens"`
-	OutputTokens        int                 `json:"output_tokens"`
-	APICallCount        int                 `json:"api_call_count"`
-	SubagentTokens      *TokenUsageResponse `json:"subagent_tokens,omitempty"`
+	InputTokens         int `json:"input_tokens"`
+	CacheCreationTokens int `json:"cache_creation_tokens"`
+	// CacheCreation1hTokens is the SUBSET of CacheCreationTokens written with a
+	// 1-hour TTL, which Anthropic bills at 2x input against 1.25x for the
+	// 5-minute default. Optional: an agent that omits it (or predates the field)
+	// reports 0, which prices its cache writes as all-5-minute — the behaviour
+	// before this existed. An Anthropic-backed external agent that DOES use 1h
+	// caching had no way to say so, and was underpriced by up to 37.5% on that
+	// component with no error and no signal.
+	CacheCreation1hTokens int                 `json:"cache_creation_1h_tokens,omitempty"`
+	CacheReadTokens       int                 `json:"cache_read_tokens"`
+	OutputTokens          int                 `json:"output_tokens"`
+	APICallCount          int                 `json:"api_call_count"`
+	SubagentTokens        *TokenUsageResponse `json:"subagent_tokens,omitempty"`
 }
 
 // GenerateTextResponse is the JSON returned by the "generate-text" subcommand.
