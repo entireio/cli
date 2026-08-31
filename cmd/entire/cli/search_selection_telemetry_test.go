@@ -42,16 +42,38 @@ func TestReportSelection_DistinctRanksEachReport(t *testing.T) {
 	}
 }
 
-// The ledger is keyed by mode as well as rank: rank 0 on the Code tab is a
+// The ledger is keyed by tab as well as rank: rank 0 on the Code tab is a
 // different result from rank 0 on the Commits tab.
-func TestReportSelection_ModesDoNotCollide(t *testing.T) {
+func TestReportSelection_TabsDoNotCollide(t *testing.T) {
 	t.Parallel()
-	var m searchModel
+	m := searchModel{filterType: typeFilterCommits}
 
 	m = m.reportSelection(telemetry.SearchModeCheckpoint, "commit", 0, 10)
+	m = m.switchTab(typeFilterCode)
 	m = m.reportSelection(telemetry.SearchModeCode, telemetry.SearchSelectionTypeCode, 0, 3)
 	if len(m.selectionsReported) != 2 {
-		t.Errorf("ledger has %d entries, want 2 — mode must be part of the key", len(m.selectionsReported))
+		t.Errorf("ledger has %d entries, want 2 — tab must be part of the key", len(m.selectionsReported))
+	}
+}
+
+// Regression: Commits and Sessions both report mode "checkpoint", and
+// switchTab resets the cursor to 0 without clearing the ledger. Keying the
+// ledger on the reported mode therefore swallowed rank 0 on whichever of the
+// two tabs the user visited second — an ordinary navigation flow, silently
+// undercounted. Found by trail review on this branch.
+func TestReportSelection_SameModeDifferentTabsBothReport(t *testing.T) {
+	t.Parallel()
+	m := searchModel{filterType: typeFilterCommits}
+
+	m = m.reportSelection(telemetry.SearchModeCheckpoint, "commit", 0, 10)
+	m = m.switchTab(typeFilterSessions)
+	if m.cursor != 0 {
+		t.Fatalf("switchTab left cursor at %d, want 0 — the premise of this test", m.cursor)
+	}
+	m = m.reportSelection(telemetry.SearchModeCheckpoint, "session", 0, 10)
+
+	if len(m.selectionsReported) != 2 {
+		t.Errorf("ledger has %d entries, want 2 — rank 0 on Commits and rank 0 on Sessions are different results", len(m.selectionsReported))
 	}
 }
 

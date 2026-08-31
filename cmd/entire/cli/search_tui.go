@@ -192,13 +192,20 @@ type searchModel struct {
 	codeSearchGen  uint64              // generation counter; incremented on each new code search
 
 	// selectionsReported dedupes cli_search_result_selected within one result
-	// set, keyed by "<mode>:<rank>". Opening a result, backing out, and opening
+	// set, keyed by "<tab>:<rank>". Opening a result, backing out, and opening
 	// it again is one act of selection, not two, so an idle enter/esc/enter must
 	// not inflate the click-through rate. Distinct ranks still each report —
 	// having to open four results before finding the right one is itself the
 	// signal. Reset whenever a fresh result set replaces the old one (see
 	// resetSelectionReporting); a map field on this value-type model is shared
 	// by reference across copies, which is what lets a write in Update persist.
+	//
+	// The key is the TAB, not the reported mode: Commits and Sessions both
+	// report mode "checkpoint", and switching tabs resets the cursor to 0
+	// without clearing this ledger, so a mode-keyed ledger silently swallowed
+	// rank 0 on the second tab the user visited. The tab is also the coordinate
+	// space cursor actually indexes into, which is what makes it the correct
+	// discriminator rather than merely a wider one.
 	selectionsReported map[string]bool
 }
 
@@ -360,14 +367,17 @@ func (m searchModel) resetSelectionReporting() searchModel {
 }
 
 // reportSelection emits one cli_search_result_selected for the row the user
-// just opened, at most once per (mode, rank) per result set. Called from the
+// just opened, at most once per (tab, rank) per result set. Called from the
 // Confirm key handler — the single seam both tabs' detail views open through,
 // so this is the CLI's equivalent of a search-result click.
+//
+// Dedupe is keyed on the active tab rather than the reported mode; see the
+// selectionsReported field comment for why the distinction matters.
 //
 // Content-free: the result's type enum, its rank, and the size of the list it
 // came from. Nothing derived from the query or from what the result says.
 func (m searchModel) reportSelection(mode, resultType string, rank, resultCount int) searchModel {
-	key := mode + ":" + strconv.Itoa(rank)
+	key := string(m.filterType) + ":" + strconv.Itoa(rank)
 	if m.selectionsReported[key] {
 		return m
 	}
