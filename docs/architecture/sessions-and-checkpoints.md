@@ -2,7 +2,7 @@
 
 ## Overview
 
-Entire CLI creates checkpoints for AI coding sessions. The system is agent-agnostic - it works with Claude Code, Codex, Gemini CLI, OpenCode, Cursor, Factory AI Droid, Copilot CLI, or any tool that triggers Entire hooks.
+Entire CLI creates checkpoints for AI coding sessions. The system is agent-agnostic - it works with Claude Code, Codex, Gemini CLI, Antigravity, OpenCode, Cursor, Factory AI Droid, Copilot CLI, or any tool that triggers Entire hooks.
 
 This document covers the domain model shared by both checkpoint storage backends. For how the **git-refs** backend stores checkpoints as one ref per checkpoint — its layout, push/fetch model, read routing, and configuration — see [Ref-Based Checkpoint Backend](ref-checkpoint-backend.md).
 

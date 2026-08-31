@@ -213,7 +213,7 @@ These are markdown files that define specialized behaviors for Claude Code (e.g.
 
 ### 2. Coding Agent Integrations (Go)
 
-These are Go implementations that integrate Entire with different AI coding tools (Claude Code, Gemini CLI, OpenCode, Cursor, Factory AI Droid, Copilot CLI, etc.) using the Agent abstraction layer.
+These are Go implementations that integrate Entire with different AI coding tools (Claude Code, Gemini CLI, Antigravity, OpenCode, Cursor, Factory AI Droid, Copilot CLI, etc.) using the Agent abstraction layer.
 
 - **Location:** `cmd/entire/cli/agent/`
 - **Steps:**
@@ -272,7 +272,7 @@ Addressing Copilot feedback upfront is the fastest path to maintainer review.
 
 Entire exists to help you work with AI coding agents, so it would be odd if you weren't using one to contribute. There's no need to tell us you did. Our general thinking: use whatever agent and methodology you like, but until the robot revolution comes, you are responsible for the final code. Before submitting a PR for review, make sure you have reviewed it yourself. We'll close PRs that obviously skipped this step.
 
-Entire supports Claude Code, Gemini CLI, OpenCode, Cursor, Factory AI Droid, Copilot CLI, and Pi, so feel free to use whichever one you're most comfortable with.
+Entire supports Claude Code, Gemini CLI, Antigravity, OpenCode, Cursor, Factory AI Droid, Copilot CLI, and Pi, so feel free to use whichever one you're most comfortable with.
 
 One thing to watch out for is LLM eagerness. Agents like to please and they're in a hurry. A few common failure modes to push back on:
 

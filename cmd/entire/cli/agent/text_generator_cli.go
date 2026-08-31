@@ -100,12 +100,13 @@ func RunIsolatedTextGeneratorCLI(ctx context.Context, runner TextCommandRunner, 
 // diagnostic's "run `claude` directly" suggestion) should use
 // SummaryCLIBinaryName rather than duplicating the mapping.
 var summaryProviderBinaries = map[types.AgentName]string{
-	AgentNameClaudeCode: "claude",
-	AgentNameCodex:      "codex",
-	AgentNameCopilotCLI: "copilot",
-	AgentNameCursor:     "agent",
-	AgentNameGemini:     "gemini",
-	AgentNamePi:         "pi",
+	AgentNameAntigravity: "agy",
+	AgentNameClaudeCode:  "claude",
+	AgentNameCodex:       "codex",
+	AgentNameCopilotCLI:  "copilot",
+	AgentNameCursor:      "agent",
+	AgentNameGemini:      "gemini",
+	AgentNamePi:          "pi",
 }
 
 // SummaryCLIBinaryName returns the CLI binary name for a summary-capable

@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
+	"github.com/entireio/cli/cmd/entire/cli/agent/antigravity"
 	codexagent "github.com/entireio/cli/cmd/entire/cli/agent/codex"
 	"github.com/entireio/cli/cmd/entire/cli/agent/external"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
@@ -31,6 +32,10 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 )
+
+// previewLabel marks agent integrations whose IsPreview() is true wherever an
+// agent is presented to the user (selector options, install messages).
+const previewLabel = " (Preview)"
 
 // Config path display strings
 const (
@@ -444,7 +449,11 @@ func hookAgentOptions(selected map[types.AgentName]struct{}) []huh.Option[string
 		if to, ok := ag.(agent.TestOnly); ok && to.IsTestOnly() {
 			continue
 		}
-		opt := huh.NewOption(string(ag.Type()), string(name))
+		label := string(ag.Type())
+		if ag.IsPreview() {
+			label += previewLabel
+		}
+		opt := huh.NewOption(label, string(name))
 		if _, ok := selected[name]; ok {
 			opt = opt.Selected(true)
 		}
@@ -776,7 +785,7 @@ Examples:
 	cmd.Flags().BoolVar(&opts.SkipPushSessions, flagSkipPushSessions, false, "Disable automatic pushing of session logs on git push")
 	cmd.Flags().StringVar(&opts.CheckpointRemote, flagCheckpointRemote, "", "Checkpoint remote in provider:owner/repo format (e.g., github:org/checkpoints-repo)")
 	cmd.Flags().StringVar(&opts.CheckpointBackend, flagCheckpointBackend, "", "Checkpoint storage backend: refs (one git ref per checkpoint; recommended) or branch (shared entire/checkpoints/v1 branch)")
-	cmd.Flags().StringVar(&summarizeProvider, flagSummarizeAgent, "", "Set the provider used by explain --generate (e.g., claude-code, codex, gemini, pi, cursor, copilot-cli)")
+	cmd.Flags().StringVar(&summarizeProvider, flagSummarizeAgent, "", "Set the provider used by explain --generate (e.g., claude-code, codex, gemini, antigravity, pi, cursor, copilot-cli)")
 	cmd.Flags().StringVar(&summarizeModel, flagSummarizeModel, "", "Set the model hint used by explain --generate")
 	cmd.Flags().IntVar(&summarizeTimeoutSeconds, flagSummarizeTimeout, 0, "Set the hard deadline (seconds) for explain --generate summary generation. 0 clears (falls back to 5m default).")
 	cmd.Flags().BoolVar(&opts.Telemetry, flagTelemetry, true, "Enable anonymous usage analytics")
@@ -1612,7 +1621,28 @@ func runRemoveAgent(ctx context.Context, w io.Writer, name string) error {
 	}
 	warnCodexHooksAfterRemoval(ctx, w, ag)
 
+	// Antigravity's title tee lives in agy's GLOBAL settings.json, not in
+	// this repo — only remove it when the user removes the agent itself,
+	// never on per-repo disable. Because the slot is global, removing it here
+	// silently breaks token capture for every OTHER repo still using
+	// Antigravity, so tell the user (doctor / `entire agent add antigravity`
+	// in the affected repo repairs it).
+	teeRemoved := false
+	if ag.Name() == agent.AgentNameAntigravity && antigravity.TitleTeeInstalled() {
+		if err := antigravity.UninstallTitleTee(); err != nil {
+			logging.Warn(ctx, "failed to uninstall antigravity title tee",
+				"error", err.Error())
+		} else {
+			teeRemoved = true
+		}
+	}
+
 	fmt.Fprintf(w, "Removed %s hooks.\n", ag.Type())
+	if teeRemoved {
+		fmt.Fprintln(w, "Note: the Antigravity title-tee was removed from agy's global settings —")
+		fmt.Fprintln(w, "this disables token capture in any other repositories still using Antigravity.")
+		fmt.Fprintln(w, "Run `entire agent add antigravity` (or `entire doctor`) there to restore it.")
+	}
 	return nil
 }
 
@@ -2036,13 +2066,13 @@ func setupAgentHooksNonInteractive(ctx context.Context, w io.Writer, ag agent.Ag
 	if installedHooks == 0 {
 		msg := fmt.Sprintf("Hooks for %s already installed", ag.Description())
 		if ag.IsPreview() {
-			msg += " (Preview)"
+			msg += previewLabel
 		}
 		fmt.Fprintf(w, "  %s\n", msg)
 	} else {
 		msg := fmt.Sprintf("Installed %d hooks for %s", installedHooks, ag.Description())
 		if ag.IsPreview() {
-			msg += " (Preview)"
+			msg += previewLabel
 		}
 		fmt.Fprintf(w, "  %s\n", msg)
 	}

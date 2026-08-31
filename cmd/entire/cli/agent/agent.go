@@ -5,6 +5,7 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"io"
 	"os/exec"
 	"time"
@@ -244,6 +245,26 @@ type TranscriptPreparer interface {
 	PrepareTranscript(ctx context.Context, sessionRef string) error
 }
 
+// LateTranscriptWriter marks agents whose transcript file is written only
+// AFTER the Stop hook rather than streamed during the turn (e.g. Antigravity).
+// Implementing this interface is the trait signal the strategy layer keys off
+// instead of hardcoding agent types: mid-turn, such an agent's on-disk
+// transcript can only contain previous turns' content, so an empty live
+// transcript at condensation is a legitimate state (degrade, don't error) and
+// transcript positions recorded at Stop may lag when the flush loses the race.
+type LateTranscriptWriter interface {
+	Agent
+
+	// CountTranscriptPosition returns the checkpoint-offset position for raw
+	// transcript content, using the same counting rule as the agent's readers
+	// (GetTranscriptPosition, ExtractPrompts). The value is stored in
+	// CheckpointTranscriptStart and later fed back to those readers as an
+	// offset — writer and readers must agree on the metric or an interior
+	// format quirk (e.g. a blank line) silently shifts extraction for the
+	// next checkpoint.
+	CountTranscriptPosition(content []byte) int
+}
+
 // TranscriptFetcher is implemented by agents that can materialize a session
 // transcript on demand (e.g. OpenCode via `opencode export`), including for
 // sessions Entire never tracked — where no hook-cached transcript file exists
@@ -302,6 +323,31 @@ type TokenCalculator interface {
 
 	// CalculateTokenUsage computes token usage from the transcript starting at the given offset.
 	CalculateTokenUsage(transcriptData []byte, fromOffset int) (*TokenUsage, error)
+}
+
+// OutOfBandTokenSource provides token usage from a source other than the
+// transcript. Antigravity is the only agent that needs this: agy never writes
+// token data into its transcript or hook payloads — its title/statusline pipe
+// is the only surface, captured to disk by `entire hooks antigravity
+// title-tee` (see agent/antigravity/statusline.go).
+//
+// Flow: the lifecycle calls SnapshotTokenBaseline at TurnStart and stores the
+// opaque baseline in PrePromptState; at TurnEnd (when transcript-based
+// calculation yields nothing) it calls CalculateTokenUsageSince to get the
+// checkpoint-scoped delta — the same cumulative-totals-minus-baseline pattern
+// Codex uses, sourced out-of-band.
+type OutOfBandTokenSource interface {
+	Agent
+
+	// SnapshotTokenBaseline returns an opaque, agent-defined marker of the
+	// current cumulative token position for the session. A nil baseline with
+	// nil error means "no usage observed yet" (delta will count from zero).
+	SnapshotTokenBaseline(ctx context.Context, sessionID string) (json.RawMessage, error)
+
+	// CalculateTokenUsageSince computes usage between the baseline and now.
+	// A nil result with nil error means no data is available (degrade to no
+	// token counts, never to an error).
+	CalculateTokenUsageSince(ctx context.Context, sessionID string, baseline json.RawMessage) (*TokenUsage, error)
 }
 
 // ModelExtractor extracts the LLM model identifier from a transcript for agents

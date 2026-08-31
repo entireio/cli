@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"io"
 	"testing"
 
@@ -86,6 +87,15 @@ func (m *mockFullAgent) GenerateText(context.Context, string, string) (string, e
 	return "", nil
 }
 
+// OutOfBandTokenSource (mockFullAgent is a CapabilityDeclarer, so AsOutOfBandTokenSource
+// must still exclude it — verifies the built-in-only gate).
+func (m *mockFullAgent) SnapshotTokenBaseline(context.Context, string) (json.RawMessage, error) {
+	return nil, nil
+}
+func (m *mockFullAgent) CalculateTokenUsageSince(context.Context, string, json.RawMessage) (*TokenUsage, error) {
+	return nil, nil //nolint:nilnil // test mock
+}
+
 // StreamingTextGenerator
 func (m *mockFullAgent) GenerateTextStreaming(context.Context, string, string, ProgressFn) (string, error) {
 	return "", nil
@@ -123,6 +133,19 @@ type mockBuiltinPromptAgent struct {
 
 func (m *mockBuiltinPromptAgent) ExtractPrompts(string, int) ([]string, error) {
 	return []string{"test prompt"}, nil
+}
+
+// mockBuiltinOOBAgent is a built-in agent that implements OutOfBandTokenSource
+// but NOT CapabilityDeclarer.
+type mockBuiltinOOBAgent struct {
+	mockBaseAgent
+}
+
+func (m *mockBuiltinOOBAgent) SnapshotTokenBaseline(context.Context, string) (json.RawMessage, error) {
+	return nil, nil
+}
+func (m *mockBuiltinOOBAgent) CalculateTokenUsageSince(context.Context, string, json.RawMessage) (*TokenUsage, error) {
+	return nil, nil //nolint:nilnil // test mock
 }
 
 // --- Tests ---
@@ -403,6 +426,44 @@ func TestAsSubagentAwareExtractor(t *testing.T) {
 		_, ok := AsSubagentAwareExtractor(ag)
 		if ok {
 			t.Error("expected false")
+		}
+	})
+}
+
+func TestAsOutOfBandTokenSource(t *testing.T) {
+	t.Parallel()
+
+	t.Run("nil agent", func(t *testing.T) {
+		t.Parallel()
+		_, ok := AsOutOfBandTokenSource(nil)
+		if ok {
+			t.Error("expected false for nil agent")
+		}
+	})
+
+	t.Run("not implemented", func(t *testing.T) {
+		t.Parallel()
+		_, ok := AsOutOfBandTokenSource(&mockBaseAgent{})
+		if ok {
+			t.Error("expected false for agent not implementing OutOfBandTokenSource")
+		}
+	})
+
+	t.Run("builtin agent", func(t *testing.T) {
+		t.Parallel()
+		src, ok := AsOutOfBandTokenSource(&mockBuiltinOOBAgent{})
+		if !ok || src == nil {
+			t.Error("expected true for built-in agent implementing OutOfBandTokenSource")
+		}
+	})
+
+	t.Run("capability declarer excluded", func(t *testing.T) {
+		t.Parallel()
+		// mockFullAgent implements the interface but is a CapabilityDeclarer
+		// (external agent), so it must be excluded.
+		_, ok := AsOutOfBandTokenSource(&mockFullAgent{})
+		if ok {
+			t.Error("expected false for CapabilityDeclarer agent")
 		}
 	})
 }

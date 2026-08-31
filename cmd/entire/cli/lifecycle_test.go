@@ -24,6 +24,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/entireio/cli/cmd/entire/cli/investigate"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
+	"github.com/entireio/cli/cmd/entire/cli/proclive"
 	"github.com/entireio/cli/cmd/entire/cli/review"
 	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
@@ -165,6 +166,59 @@ func TestDispatchLifecycleEvent_NilEvent(t *testing.T) {
 	if !strings.Contains(err.Error(), "event cannot be nil") {
 		t.Errorf("expected error message about nil event, got: %v", err)
 	}
+}
+
+// mockOOBTokenAgent implements OutOfBandTokenSource on top of the standard
+// lifecycle mock; CalculateTokenUsageSince returns a fixed value regardless of
+// baseline, mimicking the count-from-zero behavior of a nil baseline.
+type mockOOBTokenAgent struct {
+	mockLifecycleAgent
+
+	usage *agent.TokenUsage
+}
+
+func (m *mockOOBTokenAgent) SnapshotTokenBaseline(_ context.Context, _ string) (json.RawMessage, error) {
+	return nil, nil
+}
+
+//nolint:unparam // error return is fixed by the OutOfBandTokenSource interface
+func (m *mockOOBTokenAgent) CalculateTokenUsageSince(_ context.Context, _ string, _ json.RawMessage) (*agent.TokenUsage, error) {
+	return m.usage, nil
+}
+
+// TestComputeOutOfBandTokenUsage_MissingBaselineMidSession pins the nil-baseline
+// contract: a missing baseline is only legitimate on a session's first tracked
+// turn (count from zero). Mid-session — after earlier turns already accumulated
+// deltas — a lost/corrupt PrePromptState must degrade to no-data; counting from
+// zero would return session-cumulative totals and double-count every earlier
+// turn in entire status and the next checkpoint.
+func TestComputeOutOfBandTokenUsage_MissingBaselineMidSession(t *testing.T) {
+	setupStopTestRepo(t)
+	ctx := context.Background()
+
+	cumulative := &agent.TokenUsage{InputTokens: 700, OutputTokens: 500, APICallCount: 3}
+	ag := &mockOOBTokenAgent{usage: cumulative}
+
+	sessionID := "test-oob-midsession"
+	require.NoError(t, strategy.SaveSessionState(ctx, &strategy.SessionState{
+		SessionID:  sessionID,
+		BaseCommit: "abc123",
+		StartedAt:  time.Now(),
+		TokenUsage: &agent.TokenUsage{InputTokens: 250, OutputTokens: 280, APICallCount: 2},
+	}))
+
+	got := computeOutOfBandTokenUsage(ctx, ag, sessionID, nil)
+	require.Nil(t, got, "missing baseline mid-session must degrade to no-data, not count-from-zero")
+
+	// First tracked turn (nothing accumulated yet): count-from-zero is the
+	// documented, correct behavior — the guard must not break it.
+	freshID := "test-oob-first-turn"
+	require.NoError(t, strategy.SaveSessionState(ctx, &strategy.SessionState{
+		SessionID:  freshID,
+		BaseCommit: "abc123",
+		StartedAt:  time.Now(),
+	}))
+	require.Equal(t, cumulative, computeOutOfBandTokenUsage(ctx, ag, freshID, nil))
 }
 
 // TestDispatchLifecycleEvent_SkipsForwardedHookFromNonOwningAgent verifies the
@@ -852,6 +906,52 @@ func TestHandleLifecycleTurnEnd_EmptyRepository(t *testing.T) {
 	// The user was already warned at session start.
 	if err != nil {
 		t.Errorf("expected nil for empty repository (graceful no-op), got: %v", err)
+	}
+}
+
+func TestShouldSuppressConditionalTurnStart(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now()
+	stuckAt := now.Add(-2 * session.StuckActiveThreshold)
+	active := &strategy.SessionState{Phase: session.PhaseActive, StartedAt: now, LastInteractionTime: &now}
+	stuckActive := &strategy.SessionState{Phase: session.PhaseActive, StartedAt: stuckAt, LastInteractionTime: &stuckAt}
+	idle := &strategy.SessionState{Phase: session.PhaseIdle, StartedAt: now, LastInteractionTime: &now}
+
+	// Conditional TurnStart (agy invocationNum>0) with an active mid-turn
+	// session is a follow-up model call — suppress so the baseline isn't clobbered.
+	if !shouldSuppressConditionalTurnStart(&agent.Event{Type: agent.TurnStart, SuppressIfSessionActive: true}, active) {
+		t.Error("conditional TurnStart with a recently-active session must be suppressed (follow-up invocation)")
+	}
+	// Stuck-ACTIVE (crashed session whose Stop never fired) => a resume must
+	// fire, or the crashed conversation is untracked forever.
+	if shouldSuppressConditionalTurnStart(&agent.Event{Type: agent.TurnStart, SuppressIfSessionActive: true}, stuckActive) {
+		t.Error("conditional TurnStart with a stuck-ACTIVE session must fire (resume after crash)")
+	}
+	// Dead owner (crash detected via PID liveness) => a resume must fire
+	// immediately, without waiting out StuckActiveThreshold. A mismatched
+	// start fingerprint on our own PID is proclive's deterministic "dead
+	// owner" signal on supported platforms.
+	deadOwner := &strategy.SessionState{
+		Phase: session.PhaseActive, StartedAt: now, LastInteractionTime: &now,
+		Owner: &proclive.Identity{PID: os.Getpid(), Start: "bogus-start-fingerprint"},
+	}
+	if deadOwner.OwnerLiveness() != proclive.LivenessDead {
+		t.Logf("skipping dead-owner case: liveness = %v on this platform", deadOwner.OwnerLiveness())
+	} else if shouldSuppressConditionalTurnStart(&agent.Event{Type: agent.TurnStart, SuppressIfSessionActive: true}, deadOwner) {
+		t.Error("conditional TurnStart with a dead-owner ACTIVE session must fire (resume within the stuck threshold)")
+	}
+	// Idle session => the prior turn finished; a new/resumed turn must fire.
+	if shouldSuppressConditionalTurnStart(&agent.Event{Type: agent.TurnStart, SuppressIfSessionActive: true}, idle) {
+		t.Error("conditional TurnStart with an IDLE session must fire (new/resumed turn)")
+	}
+	// No session (condensed away / fresh) => resume must fire.
+	if shouldSuppressConditionalTurnStart(&agent.Event{Type: agent.TurnStart, SuppressIfSessionActive: true}, nil) {
+		t.Error("conditional TurnStart with no session must fire (resume after condensation)")
+	}
+	// Unconditional TurnStart (invocationNum==0) must never be suppressed.
+	if shouldSuppressConditionalTurnStart(&agent.Event{Type: agent.TurnStart, SuppressIfSessionActive: false}, active) {
+		t.Error("unconditional TurnStart must never be suppressed")
 	}
 }
 

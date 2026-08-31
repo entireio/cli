@@ -49,6 +49,21 @@ type Agent interface {
 	IsTransientError(out Output, err error) bool
 }
 
+// RepoPreparer is implemented by agents that need repo-local setup after
+// `entire enable` (e.g. extra hook entries for diagnostics). Optional.
+type RepoPreparer interface {
+	PrepareRepo(repoDir string) error
+}
+
+// ArtifactCollector is implemented by agents that keep state outside the test
+// repo (an isolated HOME, the agent's own logs) worth capturing when artifacts
+// are collected. Keys are artifact names (written under the test's artifact
+// dir), values are source files or directories; missing sources are skipped.
+// Optional.
+type ArtifactCollector interface {
+	ExtraArtifacts(repoDir string) map[string]string
+}
+
 type Session interface {
 	Send(input string) error
 	WaitFor(pattern string, timeout time.Duration) (string, error)

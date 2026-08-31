@@ -1455,9 +1455,16 @@ func (s *ManualCommitStrategy) postCommitProcessSessionLocked(
 
 	// State is saved by the outer MutateSessionState in PostCommit.
 
-	// Only preserve shadow branch for active sessions that were NOT condensed.
-	// Condensed sessions already have their data on entire/checkpoints/v1.
-	if state.Phase.IsActive() && !handler.condensed {
+	// Only preserve the shadow branch for active sessions that were NOT
+	// condensed AND still track files — their uncondensed checkpoints are the
+	// only copy of that work. An active session with no tracked files has
+	// nothing on the branch to lose (SaveStep recreates shadow branches on
+	// demand), so it must not pin the branch. Observed with Antigravity:
+	// a subagent runs as its own conversation and does all the work, while
+	// the parent conversation's final fullyIdle Stop never arrives in
+	// headless mode — leaving a "ghost" session that is ACTIVE forever with
+	// zero files, which would otherwise preserve the branch indefinitely.
+	if state.Phase.IsActive() && !handler.condensed && len(handler.filesTouchedBefore) > 0 {
 		uncondensedActiveOnBranch[shadowBranchName] = true
 	}
 
@@ -2265,14 +2272,7 @@ func (s *ManualCommitStrategy) tryAgentCommitFastPath(ctx context.Context, commi
 			continue
 		}
 		eligibleSessions++
-		// Skip sessions that have no condensable content: no transcript path,
-		// no tracked files, no SaveStep checkpoints, and no task records. These
-		// would produce a Skipped result in CondenseSession, leaving the
-		// Entire-Checkpoint trailer pointing to nothing on the metadata branch.
-		// NOTE: conservative approximation of the skip gate in CondenseSession
-		// (which checks extracted data, not raw state). Keep aligned.
-		if state.TranscriptPath == "" && len(state.FilesTouched) == 0 &&
-			state.StepCount == 0 && !state.HasTaskContent() {
+		if sessionLacksCondensableContent(state) {
 			emptyEligibleSessions++
 			logging.Debug(logCtx, "prepare-commit-msg: fast path skipping empty session",
 				slog.String("session_id", state.SessionID),
@@ -2303,6 +2303,39 @@ func (s *ManualCommitStrategy) tryAgentCommitFastPath(ctx context.Context, commi
 		slog.Int("task_records", totalTaskRecords),
 		slog.Any("session_phases", phases),
 	)
+	return false
+}
+
+// sessionLacksCondensableContent reports whether an ACTIVE session has nothing
+// CondenseSession could turn into a checkpoint: no tracked files, no shadow
+// branch data (StepCount == 0), no task records, and no transcript content. Stamping a trailer
+// for such a session would leave the commit permanently referencing a
+// checkpoint the condensation skip gate never writes (dangling trailer).
+//
+// For most agents a non-empty TranscriptPath implies content — their
+// transcripts stream during the turn. A LateTranscriptWriter (e.g. agy)
+// writes its transcript file only AFTER the Stop hook, so mid-turn the
+// recorded path routinely points at a missing or still-empty file; only an
+// on-disk stat tells the truth. Other agents keep the cheap path-only check:
+// for them an empty transcript file at commit time is a transient write race,
+// and condensation errors-and-retries rather than skipping, so the trailer
+// heals on the next commit.
+//
+// NOTE: conservative approximation of the skip gate in CondenseSession (which
+// checks extracted data, not raw state). Keep aligned.
+func sessionLacksCondensableContent(state *SessionState) bool {
+	if len(state.FilesTouched) > 0 || state.StepCount > 0 || state.HasTaskContent() {
+		return false
+	}
+	if state.TranscriptPath == "" {
+		return true
+	}
+	if ag, err := agent.GetByAgentType(state.AgentType); err == nil {
+		if _, lateOK := agent.AsLateTranscriptWriter(ag); lateOK {
+			info, statErr := os.Stat(state.TranscriptPath)
+			return statErr != nil || info.Size() == 0
+		}
+	}
 	return false
 }
 
@@ -2926,25 +2959,61 @@ func (s *ManualCommitStrategy) HandleTurnEnd(ctx context.Context, state *Session
 	// intentionally resets CheckpointTranscriptStart to 0 so the next checkpoint
 	// remains self-contained with the full transcript.
 	if hadMidTurnCommits && state.TranscriptPath != "" && len(state.FilesTouched) == 0 {
-		transcriptPath, resolveErr := resolveTranscriptPath(state)
-		if resolveErr == nil {
-			if ag, agErr := agent.GetByAgentType(state.AgentType); agErr == nil {
-				if analyzer, ok := agent.AsTranscriptAnalyzer(ag); ok {
-					if pos, posErr := analyzer.GetTranscriptPosition(transcriptPath); posErr == nil && pos > state.CheckpointTranscriptStart {
-						logging.Debug(logging.WithComponent(ctx, "hooks"),
-							"advancing CheckpointTranscriptStart to turn end after mid-turn commit",
-							slog.String("session_id", state.SessionID),
-							slog.Int("old_offset", state.CheckpointTranscriptStart),
-							slog.Int("new_offset", pos),
-						)
-						state.CheckpointTranscriptStart = pos
-					}
-				}
+		advanceCheckpointTranscriptStartToTurnEnd(ctx, state)
+	}
+
+	return nil
+}
+
+// advanceCheckpointTranscriptStartToTurnEnd moves CheckpointTranscriptStart to
+// the current transcript end after a fully-condensed turn (see HandleTurnEnd's
+// call-site comment). When the advance cannot run for a late-transcript agent
+// — agy flushes its transcript only after Stop, so this read routinely races
+// the flush and sees the pre-turn state — the failure is recorded in
+// TranscriptOffsetPending so the next mid-turn condensation can retry against
+// the by-then-flushed file (resolvePendingTranscriptOffset). Without the
+// retry, a lost race leaves the offset inside the previous turn, so the next
+// checkpoint's prompt extraction picks up the previous turn's prompt and its
+// scoped transcript includes an already-condensed tail. Streaming-transcript
+// agents never set the flag: for them a non-growing transcript legitimately
+// means "no new content".
+func advanceCheckpointTranscriptStartToTurnEnd(ctx context.Context, state *SessionState) {
+	logCtx := logging.WithComponent(ctx, "hooks")
+	ag, agErr := agent.GetByAgentType(state.AgentType)
+	if agErr != nil {
+		return
+	}
+	_, isLate := agent.AsLateTranscriptWriter(ag)
+
+	advanced := false
+	if transcriptPath, resolveErr := resolveTranscriptPath(state); resolveErr == nil {
+		if analyzer, ok := agent.AsTranscriptAnalyzer(ag); ok {
+			if pos, posErr := analyzer.GetTranscriptPosition(transcriptPath); posErr == nil && pos > state.CheckpointTranscriptStart {
+				logging.Debug(logCtx,
+					"advancing CheckpointTranscriptStart to turn end after mid-turn commit",
+					slog.String("session_id", state.SessionID),
+					slog.Int("old_offset", state.CheckpointTranscriptStart),
+					slog.Int("new_offset", pos),
+				)
+				state.CheckpointTranscriptStart = pos
+				advanced = true
 			}
 		}
 	}
 
-	return nil
+	if !isLate {
+		return
+	}
+	if advanced {
+		state.TranscriptOffsetPending = false
+		return
+	}
+	state.TranscriptOffsetPending = true
+	logging.Debug(logCtx,
+		"turn-end offset advance lost the transcript flush race, deferring to next condensation",
+		slog.String("session_id", state.SessionID),
+		slog.Int("offset", state.CheckpointTranscriptStart),
+	)
 }
 
 // precomputeTranscriptBlobsForFinalize chunks + zlib-compresses the redacted
@@ -3336,6 +3405,9 @@ func (s *ManualCommitStrategy) carryForwardToNewShadowBranch(
 	state.StepCount = 1
 	state.CheckpointTranscriptStart = 0
 	state.CheckpointTranscriptSize = 0
+	// Carry-forward deliberately restarts the offset at 0; a pending turn-end
+	// advance from before the carry-forward must not re-apply on top of it.
+	state.TranscriptOffsetPending = false
 	state.LastCheckpointID = ""
 	// NOTE: TurnCheckpointIDs is intentionally NOT cleared here. Those checkpoint
 	// IDs from earlier in the turn still need finalization with the full transcript

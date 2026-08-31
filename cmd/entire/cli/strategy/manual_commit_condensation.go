@@ -536,6 +536,10 @@ func (s *ManualCommitStrategy) CondenseSession(ctx context.Context, repo *git.Re
 	// Errors are ignored; downstream readers handle missing transcripts gracefully.
 	resolveTranscriptPath(state) //nolint:errcheck,gosec // best-effort; downstream readers handle missing files
 
+	// Complete a turn-end offset advance that lost the transcript flush race
+	// (late-transcript agents) before any offset-scoped extraction below.
+	resolvePendingTranscriptOffset(logCtx, ag, state)
+
 	extractStart := time.Now()
 	_, extractSessionDataSpan := perf.Start(ctx, "extract_session_data")
 	var shadowHash plumbing.Hash
@@ -551,23 +555,7 @@ func (s *ManualCommitStrategy) CondenseSession(ctx context.Context, repo *git.Re
 	extractSessionDataSpan.End()
 	extractDuration := time.Since(extractStart)
 
-	// Backfill session state token usage from the freshly-extracted transcript.
-	// Copilot CLI writes session.shutdown after the hooks return, so by condensation
-	// time we can recover the authoritative full-session total from the transcript
-	// while keeping checkpoint metadata scoped to CheckpointTranscriptStart. The
-	// recompute drops SubagentTokens (subagentsDir=""); the helper preserves the
-	// cumulative subagent total across the backfill so resetCheckpointWindow's
-	// baseline does not regress to nil (finding 019f5ebf-a57e).
-	applyBackfilledSessionTokenUsage(ctx, ag, state, sessionData.Transcript, sessionData.TokenUsage)
-
-	if !hasTokenUsageData(sessionData.TokenUsage) && hasTokenUsageData(state.CheckpointTokenUsage) {
-		// Whole-value fallback: accumulateTokenUsage already carries SubagentTokens.
-		sessionData.TokenUsage = accumulateTokenUsage(nil, state.CheckpointTokenUsage)
-	} else {
-		// Refill only the subagent total the recompute dropped. Runs after
-		// applyBackfilledSessionTokenUsage, which needs the usage without it.
-		sessionData.TokenUsage = withSubagentTokensFrom(sessionData.TokenUsage, state.CheckpointTokenUsage)
-	}
+	resolveCondensedTokenUsage(ctx, ag, state, sessionData)
 
 	// Backfill the model from the transcript for agents that don't report it via
 	// hooks (e.g., Pi records message.model but its hook events carry no model
@@ -1002,7 +990,12 @@ func generateSummary(ctx context.Context, redactedTranscript redact.RedactedByte
 				slog.String("error", sliceErr.Error()))
 		}
 		scopedTranscript = scoped
-	case agent.AgentTypeCodex, agent.AgentTypeClaudeCode, agent.AgentTypeCursor, agent.AgentTypeFactoryAIDroid, agent.AgentTypeUnknown:
+	case agent.AgentTypeCodex, agent.AgentTypeClaudeCode, agent.AgentTypeCursor, agent.AgentTypeFactoryAIDroid, agent.AgentTypeAntigravity, agent.AgentTypeUnknown:
+		// Antigravity is JSONL like Claude/Codex, so line slicing applies.
+		// (agy offsets count non-blank lines; SliceFromLine slices raw lines —
+		// exact only when the transcript has no interior blank lines, which
+		// matches every captured agy transcript. Worst case the summary scope
+		// shifts by a line; prompts/positions are unaffected.)
 		scopedTranscript = transcript.SliceFromLine(transcriptBytes, state.CheckpointTranscriptStart)
 	}
 
@@ -1110,6 +1103,46 @@ func buildSessionMetrics(state *SessionState) *cpkg.SessionMetrics {
 		TurnCount:         state.SessionTurnCount,
 		ContextTokens:     state.ContextTokens,
 		ContextWindowSize: state.ContextWindowSize,
+	}
+}
+
+// resolveCondensedTokenUsage settles the token usage that goes into the
+// condensed checkpoint metadata (sessionData.TokenUsage) and backfills the
+// session-state total, applying the per-source fallbacks in priority order:
+//
+//  1. Session-state backfill from the freshly-extracted transcript: Copilot
+//     CLI writes session.shutdown after the hooks return, so by condensation
+//     time the authoritative full-session total is recoverable while
+//     checkpoint metadata stays scoped to CheckpointTranscriptStart.
+//  2. Accumulated per-checkpoint usage (state.CheckpointTokenUsage, reset at
+//     every condensation). This is what carries out-of-band token counts
+//     (e.g. Antigravity, whose transcript has no token data — SaveStep
+//     accumulates the title-tee delta here). Deliberately NOT
+//     state.TokenUsage: that is the session-cumulative total, which is never
+//     reset at condensation and would double-count earlier turns on every
+//     checkpoint after the first.
+//     Known limitation (mid-turn commits): the out-of-band baseline only
+//     re-snapshots at TurnStart, so a mid-turn commit condenses with zero
+//     tokens and the whole turn's delta lands on the next condensation.
+//     Totals across the turn remain correct; only per-checkpoint scoping is
+//     coarse.
+func resolveCondensedTokenUsage(ctx context.Context, ag agent.Agent, state *SessionState, sessionData *ExtractedSessionData) {
+	// Backfill session state token usage from the freshly-extracted transcript.
+	// Copilot CLI writes session.shutdown after the hooks return, so by condensation
+	// time we can recover the authoritative full-session total from the transcript
+	// while keeping checkpoint metadata scoped to CheckpointTranscriptStart. The
+	// recompute drops SubagentTokens (subagentsDir=""); the helper preserves the
+	// cumulative subagent total across the backfill so resetCheckpointWindow's
+	// baseline does not regress to nil (finding 019f5ebf-a57e).
+	applyBackfilledSessionTokenUsage(ctx, ag, state, sessionData.Transcript, sessionData.TokenUsage)
+
+	if !hasTokenUsageData(sessionData.TokenUsage) && hasTokenUsageData(state.CheckpointTokenUsage) {
+		// Whole-value fallback: accumulateTokenUsage already carries SubagentTokens.
+		sessionData.TokenUsage = accumulateTokenUsage(nil, state.CheckpointTokenUsage)
+	} else {
+		// Refill only the subagent total the recompute dropped. Runs after
+		// applyBackfilledSessionTokenUsage, which needs the usage without it.
+		sessionData.TokenUsage = withSubagentTokensFrom(sessionData.TokenUsage, state.CheckpointTokenUsage)
 	}
 }
 
@@ -1450,6 +1483,12 @@ func (s *ManualCommitStrategy) extractSessionData(ctx context.Context, repo *git
 		if len(data.Prompts) == 0 {
 			data.Prompts = readPromptsFromFilesystem(ctx, sessionID)
 		}
+		// Late-flush fallback: re-extract from the populated live transcript when
+		// prompt.txt is still empty (e.g. Antigravity writes the transcript after
+		// the Stop hook, so the TurnEnd prompt backfill saw an empty file).
+		if len(data.Prompts) == 0 {
+			data.Prompts = resolvePromptsFromLateFlushedTranscript(ctx, ag, liveTranscriptPath, checkpointTranscriptStart)
+		}
 	}
 
 	// Use tracked files from session state (not all files in tree)
@@ -1492,14 +1531,35 @@ func (s *ManualCommitStrategy) extractSessionDataFromLiveTranscript(ctx context.
 		return nil, fmt.Errorf("failed to read live transcript: %w", err)
 	}
 
+	// An empty live transcript degrades for late-transcript agents but errors
+	// for the rest. A LateTranscriptWriter (e.g. agy) flushes its transcript
+	// AFTER the Stop hook, so a first-turn mid-turn commit legitimately
+	// condenses while the transcript is still an empty placeholder — and
+	// erroring happens after prepare-commit-msg already stamped the
+	// Entire-Checkpoint trailer, leaving the commit pointing at a checkpoint
+	// that never gets written. For every other agent an empty live transcript
+	// is a transient race (the file exists but the write hasn't landed), and
+	// erroring preserves the retry invariant: the failed condensation leaves
+	// session state untouched so the next commit re-condenses with the
+	// populated transcript.
 	if len(liveData) == 0 {
-		return nil, errors.New("live transcript is empty")
+		if _, lateOK := agent.AsLateTranscriptWriter(ag); !lateOK {
+			return nil, errors.New("live transcript is empty")
+		}
+		logging.Warn(logging.WithComponent(ctx, "checkpoint"),
+			"live transcript is empty at condensation, degrading to files/prompt-only checkpoint",
+			slog.String("session_id", state.SessionID))
 	}
 
 	fullTranscript := string(liveData)
 	data.Transcript = liveData
 	data.FullTranscriptLines = countTranscriptItems(state.AgentType, fullTranscript)
 	data.Prompts = readPromptsFromFilesystem(ctx, state.SessionID)
+	// Late-flush fallback: re-extract from the live transcript when prompt.txt is
+	// still empty (e.g. Antigravity writes the transcript after the Stop hook).
+	if len(data.Prompts) == 0 {
+		data.Prompts = resolvePromptsFromLateFlushedTranscript(ctx, ag, transcriptPath, state.CheckpointTranscriptStart)
+	}
 
 	// Resolve files touched: prefers hook-populated state, falls back to transcript extraction
 	data.FilesTouched = s.resolveFilesTouched(ctx, state)
@@ -1518,6 +1578,76 @@ func (s *ManualCommitStrategy) extractSessionDataFromLiveTranscript(ctx context.
 	}
 
 	return data, nil
+}
+
+// resolvePendingTranscriptOffset completes a turn-end advance of
+// CheckpointTranscriptStart that HandleTurnEnd could not perform because a
+// late-transcript agent (agent.LateTranscriptWriter) had not flushed its
+// transcript by the Stop hook. TranscriptOffsetPending guarantees everything
+// the flush eventually wrote is already-condensed content, and mid-turn
+// (ACTIVE) such an agent's file cannot yet contain the current turn — so the
+// flushed file end IS the correct start of the current checkpoint scope.
+// Without this, prompt extraction and the scoped transcript for the current
+// checkpoint would start inside the previous turn, attributing the previous
+// turn's prompt to this checkpoint.
+//
+// The flag is one-shot: condensation rewrites CheckpointTranscriptStart to
+// the current transcript end on success regardless, so a pending advance must
+// never outlive this attempt. Outside ACTIVE phase the file may already
+// include the current turn's (uncondensed) content, so the advance is skipped
+// — the scope is bloated by the condensed tail this once, then self-heals.
+func resolvePendingTranscriptOffset(ctx context.Context, ag agent.Agent, state *SessionState) {
+	if !state.TranscriptOffsetPending {
+		return
+	}
+	state.TranscriptOffsetPending = false
+	if !state.Phase.IsActive() {
+		return
+	}
+	if _, ok := agent.AsLateTranscriptWriter(ag); !ok {
+		return
+	}
+	analyzer, ok := agent.AsTranscriptAnalyzer(ag)
+	if !ok {
+		return
+	}
+	transcriptPath, err := resolveTranscriptPath(state)
+	if err != nil {
+		return
+	}
+	pos, posErr := analyzer.GetTranscriptPosition(transcriptPath)
+	if posErr != nil || pos <= state.CheckpointTranscriptStart {
+		return
+	}
+	logging.Info(ctx, "completing deferred turn-end offset advance before condensation",
+		slog.String("session_id", state.SessionID),
+		slog.Int("old_offset", state.CheckpointTranscriptStart),
+		slog.Int("new_offset", pos),
+	)
+	state.CheckpointTranscriptStart = pos
+}
+
+// resolvePromptsFromLateFlushedTranscript re-extracts user prompts directly
+// from a populated transcript at condensation time. Agents like Antigravity
+// write their transcript AFTER the Stop hook, so the TurnEnd prompt backfill
+// (lifecycle.go) saw an empty transcript and prompt.txt is empty. By
+// condensation the live transcript is populated. General — any PromptExtractor
+// benefits; callers only invoke this when prompts are otherwise empty.
+func resolvePromptsFromLateFlushedTranscript(ctx context.Context, ag agent.Agent, transcriptPath string, offset int) []string {
+	if transcriptPath == "" {
+		return nil
+	}
+	extractor, ok := agent.AsPromptExtractor(ag)
+	if !ok {
+		return nil
+	}
+	prompts, err := extractor.ExtractPrompts(transcriptPath, offset)
+	if err != nil {
+		logging.Warn(ctx, "condensation prompt extraction failed",
+			slog.String("error", err.Error()))
+		return nil
+	}
+	return prompts
 }
 
 // countTranscriptItems counts lines (JSONL) or messages (JSON) in a transcript.
@@ -1549,6 +1679,18 @@ func countTranscriptItems(agentType types.AgentType, content string) int {
 			return 0
 		}
 		// Otherwise fall through to JSONL parsing for Unknown type
+	}
+
+	// Late-transcript agents (e.g. Antigravity) own their offset metric: the
+	// value counted here lands in CheckpointTranscriptStart and is later fed
+	// back to the agent's own readers (ExtractPrompts, GetTranscriptPosition)
+	// as an offset, so writer and readers must agree on the counting rule.
+	// Delegating via the capability keeps the metric in one place instead of
+	// hand-syncing a copy across the package boundary.
+	if ag, agErr := agent.GetByAgentType(agentType); agErr == nil {
+		if lw, ok := agent.AsLateTranscriptWriter(ag); ok {
+			return lw.CountTranscriptPosition([]byte(content))
+		}
 	}
 
 	// Claude Code and other JSONL-based agents

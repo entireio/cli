@@ -9,6 +9,7 @@ package cli
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -90,6 +91,20 @@ func DispatchLifecycleEvent(ctx context.Context, ag agent.Agent, event *agent.Ev
 				slog.String("owning_agent", string(state.AgentType)),
 				slog.String("firing_agent", string(ag.Type())),
 			)
+			return nil
+		}
+	}
+
+	// Conditional TurnStart (e.g. Antigravity's per-invocation PreInvocation):
+	// drop it when a turn is already active so a mid-turn follow-up model call
+	// doesn't clobber the pre-prompt baseline. A resumed turn (session idle,
+	// ended, condensed, or absent) falls through and is tracked.
+	if event.Type == agent.TurnStart && event.SuppressIfSessionActive {
+		state, _ := strategy.LoadSessionState(ctx, event.SessionID) //nolint:errcheck // a load failure means treat as no active session and let TurnStart proceed
+		if shouldSuppressConditionalTurnStart(event, state) {
+			logging.Info(logging.WithAgent(logging.WithComponent(ctx, "lifecycle"), ag.Name()),
+				"dropping conditional TurnStart for active session (follow-up invocation)",
+				slog.String("session_id", event.SessionID))
 			return nil
 		}
 	}
@@ -854,7 +869,8 @@ func handleLifecycleTurnEnd(ctx context.Context, ag agent.Agent, event *agent.Ev
 	// Single load serves both prompt retrieval and backfill.
 	_, commitMsgSpan := perf.Start(ctx, "generate_commit_message")
 	lastPrompt := ""
-	if sessionState, stateErr := strategy.LoadSessionState(ctx, sessionID); stateErr == nil && sessionState != nil {
+	sessionState, stateErr := strategy.LoadSessionState(ctx, sessionID)
+	if stateErr == nil && sessionState != nil {
 		lastPrompt = sessionState.LastPrompt
 	}
 	// Backfill LastPrompt so `entire status` shows the prompt even when no
@@ -927,10 +943,19 @@ func handleLifecycleTurnEnd(ctx context.Context, ag agent.Agent, event *agent.Ev
 		relModifiedFiles = mergeUnique(relModifiedFiles, FilterAndNormalizePaths(changes.Modified, repoRoot))
 	}
 
-	// Filter transcript-extracted files to exclude files already committed to HEAD.
-	// When an agent commits files mid-turn, those files are condensed by PostCommit
-	// and should not be re-added to FilesTouched by SaveStep. A file is "committed"
-	// if it exists in HEAD with the same content as the working tree.
+	// Filter detected changes to exclude state already committed to HEAD.
+	// When an agent commits files mid-turn, those changes are condensed by
+	// PostCommit and must not be re-checkpointed by SaveStep — otherwise a
+	// Stop right after the commit produces an empty duplicate checkpoint
+	// (observed with Antigravity, whose Stop fires after its own git commit).
+	// A file is "committed" if it exists in HEAD with the same content as the
+	// working tree. Only relModifiedFiles needs this: it merges
+	// transcript-extracted files, which can include already-committed ones.
+	// relNewFiles (untracked ⇒ never in HEAD) and relDeletedFiles (git status
+	// cannot report a committed deletion) are uncommitted by construction —
+	// filtering them against HEAD would wrongly drop deletions of files
+	// created-then-deleted within the session (absent from HEAD) and make
+	// checkpoint rewind resurrect them.
 	relModifiedFiles = filterToUncommittedFiles(ctx, relModifiedFiles, repoRoot)
 	normalizeSpan.End()
 
@@ -939,6 +964,18 @@ func handleLifecycleTurnEnd(ctx context.Context, ag agent.Agent, event *agent.Ev
 	if totalChanges == 0 {
 		logging.Info(logCtx, "no files modified during session, skipping checkpoint")
 		recordCaptureDegraded(ctx, sessionID, captureDegraded)
+		// SaveStep is skipped, but out-of-band token usage must still be
+		// recorded: an Antigravity turn that commits ALL its work mid-turn
+		// (its normal flow) ends with a clean tree, and the mid-turn
+		// condensation ran with a zero delta (the baseline only re-snapshots
+		// at TurnStart). Without this, CleanupPrePromptState deletes the
+		// baseline and the turn's tokens are lost permanently.
+		if oobUsage := computeOutOfBandTokenUsage(ctx, ag, sessionID, preState); oobUsage != nil {
+			if accErr := strategy.AccumulateSessionTokenUsage(ctx, sessionID, oobUsage); accErr != nil {
+				logging.Warn(logCtx, "failed to record out-of-band token usage for checkpoint-less turn",
+					slog.String("error", accErr.Error()))
+			}
+		}
 		transitionSessionTurnEnd(ctx, sessionID, event)
 		if cleanupErr := CleanupPrePromptState(ctx, sessionID); cleanupErr != nil {
 			logging.Warn(logCtx, "failed to cleanup pre-prompt state",
@@ -994,6 +1031,14 @@ func handleLifecycleTurnEnd(ctx context.Context, ag agent.Agent, event *agent.Ev
 	tokenUsage := event.TokenUsage
 	if tokenUsage == nil {
 		tokenUsage = agent.CalculateTokenUsage(ctx, ag, transcriptData, transcriptLinesAtStart, subagentsDir)
+	}
+
+	// Out-of-band fallback: Antigravity exposes token usage only via its
+	// title/statusline pipe (captured by the title-tee shim), never in the
+	// transcript. Delta = current cumulative totals minus the TurnStart
+	// baseline stored in PrePromptState.
+	if tokenUsage == nil {
+		tokenUsage = computeOutOfBandTokenUsage(ctx, ag, sessionID, preState)
 	}
 
 	// Build fully-populated step context and delegate to strategy
@@ -2030,6 +2075,61 @@ func markSessionEnded(ctx context.Context, event *agent.Event, sessionID string,
 		return false, fmt.Errorf("failed to save session state: %w", mutErr)
 	}
 	return ended, nil
+}
+
+// computeOutOfBandTokenUsage returns the turn's token delta for
+// OutOfBandTokenSource agents (e.g. Antigravity, whose only token surface is
+// the title/statusline pipe captured by the title-tee shim): current
+// cumulative totals minus the TurnStart baseline stored in PrePromptState.
+// Returns nil for other agents, on error (logged), or when no data exists.
+func computeOutOfBandTokenUsage(ctx context.Context, ag agent.Agent, sessionID string, preState *PrePromptState) *agent.TokenUsage {
+	src, ok := agent.AsOutOfBandTokenSource(ag)
+	if !ok {
+		return nil
+	}
+	var baseline json.RawMessage
+	if preState != nil {
+		baseline = preState.TokenBaseline
+	}
+	// A missing baseline means count-from-zero, which is only legitimate on
+	// the session's first tracked turn (no snapshot existed yet). Mid-session
+	// — after earlier turns already accumulated deltas — it means the
+	// PrePromptState was lost or corrupt: counting from zero would return
+	// session-cumulative totals and AccumulateSessionTokenUsage would re-add
+	// tokens the earlier turns already recorded. Degrade to no-data instead.
+	if len(baseline) == 0 {
+		if state, stateErr := strategy.LoadSessionState(ctx, sessionID); stateErr == nil &&
+			state != nil && state.TokenUsage != nil && state.TokenUsage.APICallCount > 0 {
+			logging.Warn(logging.WithComponent(ctx, "lifecycle"),
+				"out-of-band token baseline missing mid-session; skipping this turn's token delta to avoid double counting",
+				slog.String("session_id", sessionID))
+			return nil
+		}
+	}
+	oobUsage, oobErr := src.CalculateTokenUsageSince(ctx, sessionID, baseline)
+	if oobErr != nil {
+		logging.Warn(logging.WithComponent(ctx, "lifecycle"), "failed to compute out-of-band token usage",
+			slog.String("error", oobErr.Error()))
+		return nil
+	}
+	return oobUsage
+}
+
+// shouldSuppressConditionalTurnStart reports whether a conditional TurnStart
+// (Event.SuppressIfSessionActive, set by agents whose per-invocation hooks
+// can't tell a follow-up model call from a resumed turn) must be dropped. Only
+// a genuinely mid-turn session suppresses it — an idle/ended/condensed/absent
+// session means the prior turn finished, so a new or resumed turn should be
+// tracked. A crashed session (killed before its Stop hook fired) must NOT
+// suppress — otherwise every resume of a crashed conversation would run
+// untracked and uninitialized, computing its TurnEnd delta against the stale
+// crashed-turn baseline. Crash detection is two-tier: OwnerExited catches a
+// dead owner process immediately (PID liveness), and IsStuckActive covers the
+// cases liveness can't see (no recorded owner, cross-host state) after
+// session.StuckActiveThreshold of silence.
+func shouldSuppressConditionalTurnStart(event *agent.Event, state *strategy.SessionState) bool {
+	return event.SuppressIfSessionActive && state != nil && state.Phase.IsActive() &&
+		!state.IsStuckActive() && !state.OwnerExited()
 }
 
 // logFileChanges logs the files modified, created, and deleted during a session.

@@ -97,7 +97,7 @@ If `mise run test` passes, you're good to go. If something failed, see [Troubles
 
 Entire exists to help you work with AI coding agents, so it would be odd if you weren't using one to contribute. There's no need to tell us you did. Our general thinking: use whatever agent and methodology you like, but until the robot revolution comes, you are responsible for the final code. Before submitting a PR for review, make sure you have reviewed it yourself. We'll close PRs that obviously skipped this step.
 
-Entire supports agents including Claude Code, Codex, Gemini CLI, OpenCode, Cursor, Factory AI Droid, Copilot CLI, and Pi, so feel free to use whichever one you're most comfortable with. Whichever you choose, your session will be captured the same way (see [Using Entire while you contribute](#using-entire-while-you-contribute) below).
+Entire supports agents including Claude Code, Codex, Gemini CLI, Antigravity, OpenCode, Cursor, Factory AI Droid, Copilot CLI, and Pi, so feel free to use whichever one you're most comfortable with. Whichever you choose, your session will be captured the same way (see [Using Entire while you contribute](#using-entire-while-you-contribute) below).
 
 One thing to watch out for is LLM eagerness. Agents like to please and they're in a hurry. A few common failure modes to push back on:
 

@@ -102,6 +102,11 @@ func SetupRepo(t *testing.T, agent agents.Agent) *RepoState {
 	}
 
 	entire.Enable(t, dir, agent.EntireAgent())
+	if preparer, ok := agent.(agents.RepoPreparer); ok {
+		if err := preparer.PrepareRepo(dir); err != nil {
+			t.Fatalf("prepare repo for %s: %v", agent.Name(), err)
+		}
+	}
 	if agent.Name() == "gemini-cli" {
 		setupGeminiTestHome(t, dir)
 	}
@@ -476,7 +481,7 @@ func (s *RepoState) RunPrompt(t *testing.T, ctx context.Context, prompt string, 
 	s.logPromptResult(out)
 
 	if err != nil && s.Agent.IsTransientError(out, err) {
-		errMsg := fmt.Sprintf("transient API error (stderr: %s)", strings.TrimSpace(out.Stderr))
+		errMsg := fmt.Sprintf("transient API error: %v (stderr: %s)", err, strings.TrimSpace(out.Stderr))
 		t.Logf("%s — restarting scenario", errMsg)
 		fmt.Fprintf(s.ConsoleLog, "> [transient] %s — restarting scenario\n", errMsg)
 		panic(errScenarioRestart{msg: errMsg})

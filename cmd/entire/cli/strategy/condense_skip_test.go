@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
 	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/redact"
@@ -387,6 +388,56 @@ func TestTryAgentCommitFastPath_SkipsEmptySession(t *testing.T) {
 	content, err := os.ReadFile(commitMsgFile)
 	require.NoError(t, err)
 	assert.NotContains(t, string(content), "Entire-Checkpoint", "should not add trailer for empty session")
+}
+
+func TestTryAgentCommitFastPath_SkipsAntigravityWithUnflushedTranscript(t *testing.T) {
+	dir := setupGitRepo(t)
+	t.Chdir(dir)
+
+	s := &ManualCommitStrategy{}
+
+	commitMsgFile := filepath.Join(dir, "COMMIT_EDITMSG")
+	require.NoError(t, os.WriteFile(commitMsgFile, []byte("test commit\n"), 0o644))
+
+	// agy writes its transcript only after Stop: mid-turn the recorded path
+	// points at a missing (or empty placeholder) file. With no tracked files
+	// and no shadow branch, condensation degrades to an empty transcript and
+	// the skip gate fires — a stamped trailer would dangle permanently.
+	emptyTranscript := filepath.Join(dir, "transcript_full.jsonl")
+	require.NoError(t, os.WriteFile(emptyTranscript, nil, 0o600))
+
+	for name, path := range map[string]string{
+		"missing transcript file": filepath.Join(dir, "does-not-exist.jsonl"),
+		"empty transcript file":   emptyTranscript,
+	} {
+		agySession := &SessionState{
+			SessionID:      "agy-midturn-" + name,
+			AgentType:      agent.AgentTypeAntigravity,
+			Phase:          session.PhaseActive,
+			TranscriptPath: path,
+		}
+		result := s.tryAgentCommitFastPath(context.Background(), commitMsgFile, []*SessionState{agySession}, "message")
+		assert.False(t, result, "fast path must not fire for agy with %s", name)
+	}
+
+	content, err := os.ReadFile(commitMsgFile)
+	require.NoError(t, err)
+	assert.NotContains(t, string(content), "Entire-Checkpoint", "no trailer for agy sessions condensation would skip")
+
+	// Once the transcript has real content, the trailer is stamped as usual.
+	populated := filepath.Join(dir, "transcript_populated.jsonl")
+	require.NoError(t, os.WriteFile(populated, []byte(`{"type":"USER_INPUT","content":"hi"}`+"\n"), 0o600))
+	agySession := &SessionState{
+		SessionID:      "agy-midturn-populated",
+		AgentType:      agent.AgentTypeAntigravity,
+		Phase:          session.PhaseActive,
+		TranscriptPath: populated,
+	}
+	result := s.tryAgentCommitFastPath(context.Background(), commitMsgFile, []*SessionState{agySession}, "message")
+	assert.True(t, result, "fast path should fire for agy with a flushed transcript")
+	content, err = os.ReadFile(commitMsgFile)
+	require.NoError(t, err)
+	assert.Contains(t, string(content), "Entire-Checkpoint")
 }
 
 func TestTryAgentCommitFastPath_AcceptsSessionWithContent(t *testing.T) {
