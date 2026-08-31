@@ -144,7 +144,9 @@ func (s *Store) writeSession(opts cp.WriteOptions) error {
 	sc.Sessions = upsertSession(sc.Sessions, session)
 
 	// Summary-level flags accumulate across sessions and survive recompute.
-	sc.Summary.TokenUsageVersion = cp.TokenUsageVersionDelta
+	// token_usage_version is the exception: it may only claim the delta scope
+	// once no legacy row is left in the checkpoint (see ResolveTokenUsageVersion).
+	sc.Summary.TokenUsageVersion = cp.ResolveTokenUsageVersion(sc.Summary.TokenUsageVersion, len(sc.Sessions) == 1)
 	sc.Summary.HasReview = sc.Summary.HasReview || opts.HasReview
 	sc.Summary.HasInvestigation = sc.Summary.HasInvestigation || opts.HasInvestigation
 	if opts.CombinedAttribution != nil {

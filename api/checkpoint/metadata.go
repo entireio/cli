@@ -432,8 +432,12 @@ type Metadata struct {
 	// TokenTranscriptStart is the raw transcript offset where this checkpoint's
 	// token_usage window begins. Differs from CheckpointTranscriptStart after a
 	// carry-forward (which resets the transcript offset to 0 so the stored
-	// transcript is self-contained, but leaves the token window alone). Present
-	// on checkpoints with token_usage_version ≥ 2; absent on legacy ones.
+	// transcript is self-contained, but leaves the token window alone).
+	//
+	// Written only by CLIs that stamp token_usage_version >= 2, but its presence
+	// is not a version marker: omitempty also drops it at offset 0, so a
+	// session's first checkpoint omits it on v2 too. Absent decodes as 0, which
+	// is the correct window start in exactly those cases.
 	TokenTranscriptStart int `json:"token_transcript_start,omitempty"`
 
 	// Deprecated: Use CheckpointTranscriptStart instead. Written for backward compatibility with older CLI versions.
@@ -611,6 +615,35 @@ type CheckpointSummary struct {
 // TokenUsageVersionDelta is the TokenUsageVersion written since token scope was
 // split from transcript scope and the subset fields were added (v0.11).
 const TokenUsageVersionDelta = 2
+
+// ResolveTokenUsageVersion decides the TokenUsageVersion to stamp when writing
+// a checkpoint summary.
+//
+// The field sits on the summary but describes a per-session property: it tells
+// readers that every session's token_usage in this checkpoint is a
+// per-checkpoint delta. A single write only ever produces a delta-scoped row
+// for the one session it writes, so a checkpoint that still carries rows from a
+// legacy (pre-delta) CLI must keep its legacy value. Stamping the delta version
+// over them — which a CLI upgrade between two writes to the same checkpoint
+// would otherwise do — makes readers treat session-cumulative rows as deltas
+// and skip the per-session dedupe those rows still need.
+//
+// existingVersion is the version already on the summary (0 when the checkpoint
+// is new or predates the field). writesEverySession reports whether the write
+// leaves the checkpoint holding only the session it just wrote, so that no
+// older row survives it.
+//
+// When older rows do survive, the summary reports the weakest guarantee across
+// them: the existing version, floored at what this writer itself produces. A
+// legacy 0 therefore stays 0, and a hypothetical future version is reported as
+// TokenUsageVersionDelta rather than claiming that scope for the row just
+// written.
+func ResolveTokenUsageVersion(existingVersion int, writesEverySession bool) int {
+	if writesEverySession {
+		return TokenUsageVersionDelta
+	}
+	return min(existingVersion, TokenUsageVersionDelta)
+}
 
 // SessionMetrics contains hook-provided session metrics from agents that report
 // them via lifecycle hooks (e.g., Cursor). These supplement transcript-derived

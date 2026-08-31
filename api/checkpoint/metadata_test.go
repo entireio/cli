@@ -67,3 +67,31 @@ func TestCompactTranscriptStart_JSONRoundTrip(t *testing.T) {
 		t.Fatalf("round-trip: got (%d, %v), want (0, true)", offset, ok)
 	}
 }
+
+func TestResolveTokenUsageVersion(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name               string
+		existingVersion    int
+		writesEverySession bool
+		want               int
+	}{
+		{"new checkpoint stamps the delta version", 0, true, TokenUsageVersionDelta},
+		{"legacy rows survive, so the legacy value is kept", 0, false, 0},
+		{"legacy rows replaced outright, so the delta version applies", 0, true, TokenUsageVersionDelta},
+		{"an already-delta checkpoint stays delta when sessions are added", TokenUsageVersionDelta, false, TokenUsageVersionDelta},
+		{"a future version is floored to what this writer produces", TokenUsageVersionDelta + 1, false, TokenUsageVersionDelta},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := ResolveTokenUsageVersion(tt.existingVersion, tt.writesEverySession)
+			if got != tt.want {
+				t.Errorf("ResolveTokenUsageVersion(%d, %t) = %d, want %d",
+					tt.existingVersion, tt.writesEverySession, got, tt.want)
+			}
+		})
+	}
+}

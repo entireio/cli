@@ -81,3 +81,9 @@ func ReadRawSessionLogForCheckpoint(ctx context.Context, reader interface {
 // TokenUsageVersionDelta re-exports the root metadata token_usage_version value
 // written by this CLI; see api/checkpoint.CheckpointSummary.TokenUsageVersion.
 const TokenUsageVersionDelta = apicheckpoint.TokenUsageVersionDelta
+
+// ResolveTokenUsageVersion re-exports the token_usage_version stamping policy;
+// see api/checkpoint.ResolveTokenUsageVersion.
+func ResolveTokenUsageVersion(existingVersion int, writesEverySession bool) int {
+	return apicheckpoint.ResolveTokenUsageVersion(existingVersion, writesEverySession)
+}
