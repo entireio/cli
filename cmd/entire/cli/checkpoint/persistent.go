@@ -80,40 +80,30 @@ func (s *GitStore) writeSession(ctx context.Context, opts WriteOptions) error {
 		return fmt.Errorf("failed to ensure sessions branch: %w", err)
 	}
 
-	// Get branch ref and root tree hash (O(1), no flatten)
-	parentHash, rootTreeHash, err := s.getSessionsBranchRef()
-	if err != nil {
-		return err
-	}
+	return s.updatePrimaryRef(ctx, func(parentHash, rootTreeHash plumbing.Hash) (plumbing.Hash, error) {
+		// Build the checkpoint subtree from the fresh branch tip on every retry,
+		// then splice it back into that same root tree.
+		existing, err := s.subtreeObjAt(rootTreeHash, opts.CheckpointID.Path())
+		if err != nil {
+			return plumbing.ZeroHash, err
+		}
+		checkpointSubtree, err := s.applySessionWrite(ctx, opts, existing, opts.CheckpointID.Path()+"/")
+		if err != nil {
+			return plumbing.ZeroHash, err
+		}
 
-	// Build the new checkpoint subtree from its current state on the v1 branch,
-	// then splice it back at the shard path. basePath keeps the v1 sharded layout
-	// so stored session-file pointers stay /<shard>/<id>/<n>/... as before.
-	existing, err := s.subtreeObjAt(rootTreeHash, opts.CheckpointID.Path())
-	if err != nil {
-		return err
-	}
-	checkpointSubtree, err := s.applySessionWrite(ctx, opts, existing, opts.CheckpointID.Path()+"/")
-	if err != nil {
-		return err
-	}
+		newTreeHash, err := s.spliceCheckpointSubtree(rootTreeHash, opts.CheckpointID, checkpointSubtree)
+		if err != nil {
+			return plumbing.ZeroHash, err
+		}
+		newTreeHash, err = s.maybeMergeVercelConfig(ctx, newTreeHash)
+		if err != nil {
+			return plumbing.ZeroHash, err
+		}
 
-	newTreeHash, err := s.spliceCheckpointSubtree(rootTreeHash, opts.CheckpointID, checkpointSubtree)
-	if err != nil {
-		return err
-	}
-	newTreeHash, err = s.maybeMergeVercelConfig(ctx, newTreeHash)
-	if err != nil {
-		return err
-	}
-
-	commitMsg := s.buildCommitMessage(opts)
-	newCommitHash, err := CreateCommit(ctx, s.repo, newTreeHash, parentHash, commitMsg, opts.AuthorName, opts.AuthorEmail)
-	if err != nil {
-		return err
-	}
-
-	return s.setPrimaryRef(newCommitHash)
+		commitMsg := s.buildCommitMessage(opts)
+		return CreateCommit(ctx, s.repo, newTreeHash, parentHash, commitMsg, opts.AuthorName, opts.AuthorEmail)
+	})
 }
 
 // subtreeObjAt returns the tree object for one checkpoint's subtree within a root
@@ -855,33 +845,25 @@ func (s *GitStore) backfillAttribution(ctx context.Context, checkpointID id.Chec
 		return err
 	}
 
-	parentHash, rootTreeHash, err := s.getSessionsBranchRef()
-	if err != nil {
-		return err
-	}
+	return s.updatePrimaryRef(ctx, func(parentHash, rootTreeHash plumbing.Hash) (plumbing.Hash, error) {
+		existing, err := s.subtreeObjAt(rootTreeHash, checkpointID.Path())
+		if err != nil {
+			return plumbing.ZeroHash, err
+		}
+		checkpointSubtree, err := s.applyAttributionBackfill(ctx, existing, checkpointID.Path()+"/", combinedAttribution)
+		if err != nil {
+			return plumbing.ZeroHash, err
+		}
 
-	existing, err := s.subtreeObjAt(rootTreeHash, checkpointID.Path())
-	if err != nil {
-		return err
-	}
-	checkpointSubtree, err := s.applyAttributionBackfill(ctx, existing, checkpointID.Path()+"/", combinedAttribution)
-	if err != nil {
-		return err
-	}
+		newTreeHash, err := s.spliceCheckpointSubtree(rootTreeHash, checkpointID, checkpointSubtree)
+		if err != nil {
+			return plumbing.ZeroHash, err
+		}
 
-	newTreeHash, err := s.spliceCheckpointSubtree(rootTreeHash, checkpointID, checkpointSubtree)
-	if err != nil {
-		return err
-	}
-
-	authorName, authorEmail := GetGitAuthorFromRepo(s.repo)
-	commitMsg := fmt.Sprintf("Update checkpoint summary for %s", checkpointID)
-	newCommitHash, err := CreateCommit(ctx, s.repo, newTreeHash, parentHash, commitMsg, authorName, authorEmail)
-	if err != nil {
-		return err
-	}
-
-	return s.setPrimaryRef(newCommitHash)
+		authorName, authorEmail := GetGitAuthorFromRepo(s.repo)
+		commitMsg := fmt.Sprintf("Update checkpoint summary for %s", checkpointID)
+		return CreateCommit(ctx, s.repo, newTreeHash, parentHash, commitMsg, authorName, authorEmail)
+	})
 }
 
 // findSessionIndex returns the index of an existing session with the given ID,
@@ -1721,34 +1703,25 @@ func (s *GitStore) backfillSummary(ctx context.Context, checkpointID id.Checkpoi
 		return err
 	}
 
-	// Get branch ref and root tree hash (O(1), no flatten)
-	parentHash, rootTreeHash, err := s.getSessionsBranchRef()
-	if err != nil {
-		return err
-	}
+	return s.updatePrimaryRef(ctx, func(parentHash, rootTreeHash plumbing.Hash) (plumbing.Hash, error) {
+		existing, err := s.subtreeObjAt(rootTreeHash, checkpointID.Path())
+		if err != nil {
+			return plumbing.ZeroHash, err
+		}
+		checkpointSubtree, sessionID, err := s.applySummaryBackfill(ctx, existing, checkpointID.Path()+"/", summary)
+		if err != nil {
+			return plumbing.ZeroHash, err
+		}
 
-	existing, err := s.subtreeObjAt(rootTreeHash, checkpointID.Path())
-	if err != nil {
-		return err
-	}
-	checkpointSubtree, sessionID, err := s.applySummaryBackfill(ctx, existing, checkpointID.Path()+"/", summary)
-	if err != nil {
-		return err
-	}
+		newTreeHash, err := s.spliceCheckpointSubtree(rootTreeHash, checkpointID, checkpointSubtree)
+		if err != nil {
+			return plumbing.ZeroHash, err
+		}
 
-	newTreeHash, err := s.spliceCheckpointSubtree(rootTreeHash, checkpointID, checkpointSubtree)
-	if err != nil {
-		return err
-	}
-
-	authorName, authorEmail := GetGitAuthorFromRepo(s.repo)
-	commitMsg := fmt.Sprintf("Update summary for checkpoint %s (session: %s)", checkpointID, sessionID)
-	newCommitHash, err := CreateCommit(ctx, s.repo, newTreeHash, parentHash, commitMsg, authorName, authorEmail)
-	if err != nil {
-		return err
-	}
-
-	return s.setPrimaryRef(newCommitHash)
+		authorName, authorEmail := GetGitAuthorFromRepo(s.repo)
+		commitMsg := fmt.Sprintf("Update summary for checkpoint %s (session: %s)", checkpointID, sessionID)
+		return CreateCommit(ctx, s.repo, newTreeHash, parentHash, commitMsg, authorName, authorEmail)
+	})
 }
 
 // backfillTranscript replaces the transcript, prompts, and context for an existing
@@ -1772,38 +1745,29 @@ func (s *GitStore) backfillTranscript(ctx context.Context, opts UpdateOptions) e
 		return err
 	}
 
-	// Get branch ref and root tree hash (O(1), no flatten)
-	parentHash, rootTreeHash, err := s.getSessionsBranchRef()
-	if err != nil {
-		return err
-	}
+	return s.updatePrimaryRef(ctx, func(parentHash, rootTreeHash plumbing.Hash) (plumbing.Hash, error) {
+		existing, err := s.subtreeObjAt(rootTreeHash, opts.CheckpointID.Path())
+		if err != nil {
+			return plumbing.ZeroHash, err
+		}
+		checkpointSubtree, err := s.applyTranscriptBackfill(ctx, opts, existing, opts.CheckpointID.Path()+"/")
+		if err != nil {
+			return plumbing.ZeroHash, err
+		}
 
-	existing, err := s.subtreeObjAt(rootTreeHash, opts.CheckpointID.Path())
-	if err != nil {
-		return err
-	}
-	checkpointSubtree, err := s.applyTranscriptBackfill(ctx, opts, existing, opts.CheckpointID.Path()+"/")
-	if err != nil {
-		return err
-	}
+		newTreeHash, err := s.spliceCheckpointSubtree(rootTreeHash, opts.CheckpointID, checkpointSubtree)
+		if err != nil {
+			return plumbing.ZeroHash, err
+		}
+		newTreeHash, err = s.maybeMergeVercelConfig(ctx, newTreeHash)
+		if err != nil {
+			return plumbing.ZeroHash, err
+		}
 
-	newTreeHash, err := s.spliceCheckpointSubtree(rootTreeHash, opts.CheckpointID, checkpointSubtree)
-	if err != nil {
-		return err
-	}
-	newTreeHash, err = s.maybeMergeVercelConfig(ctx, newTreeHash)
-	if err != nil {
-		return err
-	}
-
-	authorName, authorEmail := GetGitAuthorFromRepo(s.repo)
-	commitMsg := fmt.Sprintf("Finalize transcript for Checkpoint: %s", opts.CheckpointID)
-	newCommitHash, err := CreateCommit(ctx, s.repo, newTreeHash, parentHash, commitMsg, authorName, authorEmail)
-	if err != nil {
-		return err
-	}
-
-	return s.setPrimaryRef(newCommitHash)
+		authorName, authorEmail := GetGitAuthorFromRepo(s.repo)
+		commitMsg := fmt.Sprintf("Finalize transcript for Checkpoint: %s", opts.CheckpointID)
+		return CreateCommit(ctx, s.repo, newTreeHash, parentHash, commitMsg, authorName, authorEmail)
+	})
 }
 
 // updateSessionMetadata reads the session metadata blob from entries, applies
@@ -2156,23 +2120,32 @@ func (s *GitStore) ensureSessionsBranch(ctx context.Context) error {
 		return fmt.Errorf("failed to check sessions branch: %w", err)
 	}
 
-	// Create orphan branch with empty tree
-	emptyTreeHash, err := BuildTreeFromEntries(ctx, s.repo, make(map[string]object.TreeEntry))
-	if err != nil {
-		return err
-	}
-	emptyTreeHash, err = s.maybeMergeVercelConfig(ctx, emptyTreeHash)
-	if err != nil {
-		return err
-	}
+	return updatePersistentRef(ctx, s.repo, s.refs.Primary, func() (plumbing.Hash, plumbing.Hash, error) {
+		// Another process may have initialized the branch before this callback
+		// acquired the ref lock or between CAS retries.
+		if ref, refErr := s.repo.Reference(s.refs.Primary, true); refErr == nil {
+			return ref.Hash(), ref.Hash(), nil
+		} else if !errors.Is(refErr, plumbing.ErrReferenceNotFound) {
+			return plumbing.ZeroHash, plumbing.ZeroHash,
+				fmt.Errorf("failed to check sessions branch: %w", refErr)
+		}
 
-	authorName, authorEmail := GetGitAuthorFromRepo(s.repo)
-	commitHash, err := CreateCommit(ctx, s.repo, emptyTreeHash, plumbing.ZeroHash, "Initialize sessions branch", authorName, authorEmail)
-	if err != nil {
-		return err
-	}
+		emptyTreeHash, buildErr := BuildTreeFromEntries(ctx, s.repo, make(map[string]object.TreeEntry))
+		if buildErr != nil {
+			return plumbing.ZeroHash, plumbing.ZeroHash, buildErr
+		}
+		emptyTreeHash, buildErr = s.maybeMergeVercelConfig(ctx, emptyTreeHash)
+		if buildErr != nil {
+			return plumbing.ZeroHash, plumbing.ZeroHash, buildErr
+		}
 
-	return s.setPrimaryRef(commitHash)
+		authorName, authorEmail := GetGitAuthorFromRepo(s.repo)
+		commitHash, buildErr := CreateCommit(ctx, s.repo, emptyTreeHash, plumbing.ZeroHash, "Initialize sessions branch", authorName, authorEmail)
+		if buildErr != nil {
+			return plumbing.ZeroHash, plumbing.ZeroHash, buildErr
+		}
+		return commitHash, plumbing.ZeroHash, nil
+	})
 }
 
 func (s *GitStore) maybeMergeVercelConfig(ctx context.Context, rootTreeHash plumbing.Hash) (plumbing.Hash, error) {

@@ -1,7 +1,7 @@
 package checkpoint
 
 import (
-	"fmt"
+	"context"
 
 	"github.com/go-git/go-git/v6"
 	"github.com/go-git/go-git/v6/plumbing"
@@ -112,9 +112,13 @@ func (s *GitStore) PersistentReadRef() plumbing.ReferenceName {
 	return s.refs.Read
 }
 
-func (s *GitStore) setPrimaryRef(hash plumbing.Hash) error {
-	if err := s.repo.Storer.SetReference(plumbing.NewHashReference(s.refs.Primary, hash)); err != nil {
-		return fmt.Errorf("set primary metadata ref %s to %s: %w", s.refs.Primary, hash, err)
-	}
-	return nil
+func (s *GitStore) updatePrimaryRef(ctx context.Context, build func(parentHash, rootTreeHash plumbing.Hash) (plumbing.Hash, error)) error {
+	return updatePersistentRef(ctx, s.repo, s.refs.Primary, func() (plumbing.Hash, plumbing.Hash, error) {
+		parentHash, rootTreeHash, err := s.getSessionsBranchRef()
+		if err != nil {
+			return plumbing.ZeroHash, plumbing.ZeroHash, err
+		}
+		newHash, buildErr := build(parentHash, rootTreeHash)
+		return newHash, parentHash, buildErr
+	})
 }
