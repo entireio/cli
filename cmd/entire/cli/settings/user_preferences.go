@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/settings/repopolicy"
@@ -148,7 +149,7 @@ func (o *userOverlay) repoPreferences(ctx context.Context, worktreeRoot string) 
 	if len(o.repos) == 0 {
 		return nil
 	}
-	originKeys, _, err := repopolicy.OriginKeysAt(ctx, worktreeRoot)
+	originKeys, _, err := originKeysAtCached(ctx, worktreeRoot)
 	if err != nil {
 		// Present but unnormalizable, or unreadable: the repository keys by
 		// path, exactly as its trust identity would.
@@ -177,6 +178,56 @@ func (o *userOverlay) repoPreferences(ctx context.Context, worktreeRoot string) 
 		}
 	}
 	return matched
+}
+
+// originKeysByRoot memoizes OriginKeysAt for the process lifetime.
+//
+// settings.Load has no caching of its own and runs ~5 times per hook, and
+// OriginKeysAt shells out to git twice (fetch + push URLs) — so once a repo
+// has a `repos` block, an unmemoized resolve multiplies two subprocess spawns
+// into ten per hook. A repository's origin URLs cannot change inside a single
+// short-lived hook process. Only successful determinations are cached; an
+// error means "could not read the remote config" and may be transient. Same
+// shape, and same long-lived-process caveat, as versionedPaths in
+// opf_command_trust.go.
+type originKeysResult struct {
+	keys    []string
+	present bool
+}
+
+var (
+	originKeysMu     sync.Mutex
+	originKeysByRoot = map[string]originKeysResult{}
+)
+
+// ClearOriginKeyCache drops the memoized origin keys. Tests that change a
+// repository's remotes within one process must call it; every other
+// process-wide cache in this codebase ships the same seam.
+func ClearOriginKeyCache() {
+	originKeysMu.Lock()
+	defer originKeysMu.Unlock()
+	clear(originKeysByRoot)
+}
+
+func originKeysAtCached(ctx context.Context, worktreeRoot string) ([]string, bool, error) {
+	cacheKey := filepath.Clean(worktreeRoot)
+
+	originKeysMu.Lock()
+	cached, ok := originKeysByRoot[cacheKey]
+	originKeysMu.Unlock()
+	if ok {
+		return cached.keys, cached.present, nil
+	}
+
+	keys, present, err := repopolicy.OriginKeysAt(ctx, worktreeRoot)
+	if err != nil {
+		return nil, false, err //nolint:wrapcheck // pass-through; the caller logs and degrades to path matching
+	}
+
+	originKeysMu.Lock()
+	originKeysByRoot[cacheKey] = originKeysResult{keys: keys, present: present}
+	originKeysMu.Unlock()
+	return keys, present, nil
 }
 
 // repoKeyMatches decides whether one `repos` key names the worktree. A key

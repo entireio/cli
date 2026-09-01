@@ -122,6 +122,29 @@ func TestUserPreferences_UnknownKeyDropsOnlyThatBlock(t *testing.T) {
 	assert.Contains(t, rejections[1], `repos["github.com/acme/widgets"]`)
 }
 
+// Origin keys are memoized per process: settings.Load runs several times per
+// hook and each resolve costs two git spawns, and remotes cannot change inside
+// one short-lived hook process.
+func TestUserPreferences_OriginKeysAreMemoizedPerProcess(t *testing.T) {
+	ClearOriginKeyCache()
+	t.Cleanup(ClearOriginKeyCache)
+	root, project, local := newOPFRepo(t)
+	testutil.RunGit(t, root, "remote", "add", "origin", "https://github.com/acme/widgets.git")
+	writeSettingsFile(t, project, `{"enabled":true}`)
+	setUserSettingsFile(t, `{"repos":{"github.com/acme/widgets":{"review_fix_agent":"codex"}}}`)
+
+	assert.Equal(t, "codex", loadedSettings(t, project, local).ReviewFixAgent)
+
+	// The remote is gone, but the process-scoped cache still answers.
+	testutil.RunGit(t, root, "remote", "remove", "origin")
+	assert.Equal(t, "codex", loadedSettings(t, project, local).ReviewFixAgent,
+		"origin keys must be memoized for the process lifetime")
+
+	ClearOriginKeyCache()
+	assert.Empty(t, loadedSettings(t, project, local).ReviewFixAgent,
+		"after the cache is cleared the fresh resolve sees no origin")
+}
+
 // A user file with no repos block resolves no git remotes at all; one with an
 // unrelated repos entry applies nothing.
 func TestUserPreferences_NonMatchingReposApplyNothing(t *testing.T) {
