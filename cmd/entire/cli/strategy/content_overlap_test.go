@@ -3,6 +3,7 @@ package strategy
 import (
 	"context"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"testing"
 	"time"
@@ -414,6 +415,58 @@ func TestFilesWithRemainingAgentChanges_ReplacedContent(t *testing.T) {
 	// Content differs from shadow but working tree is clean — no carry-forward
 	remaining := filesWithRemainingAgentChanges(context.Background(), repo, shadowBranch, commit, []string{"config.go"}, committedFiles)
 	assert.Empty(t, remaining, "Replaced content with clean working tree should not be in remaining")
+}
+
+// TestFilesWithRemainingAgentChanges_AutocrlfNormalizedWorkingTree verifies that
+// line-ending normalization does not create phantom carry-forward files.
+func TestFilesWithRemainingAgentChanges_AutocrlfNormalizedWorkingTree(t *testing.T) {
+	t.Parallel()
+	dir := setupGitRepo(t)
+
+	repo, err := git.PlainOpen(dir)
+	require.NoError(t, err)
+
+	runGit := func(args ...string) {
+		t.Helper()
+		cmd := exec.CommandContext(context.Background(), "git", args...)
+		cmd.Dir = dir
+		out, err := cmd.CombinedOutput()
+		require.NoError(t, err, "git %v failed: %s", args, string(out))
+	}
+
+	runGit("config", "core.autocrlf", "true")
+
+	shadowContent := []byte("package main\r\n\r\nimport \"fmt\"\r\n\r\nfunc main() {\r\n\tfmt.Println(\"hello world\")\n\tfmt.Println(\"goodbye world\")\n}\n")
+	createShadowBranchWithContent(t, repo, "crlf123", "e3b0c4", map[string][]byte{
+		"src/main.go": shadowContent,
+	})
+
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, "src"), 0o755))
+	workingTreeContent := []byte("package main\r\n\r\nimport \"fmt\"\r\n\r\nfunc main() {\r\n\tfmt.Println(\"hello world\")\r\n\tfmt.Println(\"goodbye world\")\r\n}\r\n")
+	testFile := filepath.Join(dir, "src", "main.go")
+	require.NoError(t, os.WriteFile(testFile, workingTreeContent, 0o644))
+
+	wt, err := repo.Worktree()
+	require.NoError(t, err)
+	_, err = wt.Add("src/main.go")
+	require.NoError(t, err)
+	headCommit, err := wt.Commit("Commit normalized content", &git.CommitOptions{
+		Author: &object.Signature{Name: "Test", Email: "test@test.com", When: time.Now()},
+	})
+	require.NoError(t, err)
+
+	commit, err := repo.CommitObject(headCommit)
+	require.NoError(t, err)
+
+	shadowBranch := checkpoint.ShadowBranchNameForCommit("crlf123", "e3b0c4")
+	committedFiles := map[string]struct{}{"src/main.go": {}}
+
+	// Git reports no diff here even though the on-disk bytes are CRLF and the
+	// committed blob is LF-normalized under core.autocrlf=true.
+	runGit("diff", "--exit-code", "--", "src/main.go")
+
+	remaining := filesWithRemainingAgentChanges(context.Background(), repo, shadowBranch, commit, []string{"src/main.go"}, committedFiles)
+	assert.Empty(t, remaining, "autocrlf-only working tree differences should not be carried forward")
 }
 
 // TestFilesWithRemainingAgentChanges_NoShadowBranch tests fallback to file-level subtraction.

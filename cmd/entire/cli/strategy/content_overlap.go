@@ -2,10 +2,13 @@ package strategy
 
 import (
 	"context"
+	"errors"
 	"io"
 	"log/slog"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/go-git/go-git/v6"
@@ -493,7 +496,7 @@ func filesWithRemainingAgentChanges(
 		// Committed content differs from shadow. Check whether the working tree
 		// still has changes — if clean, the user intentionally replaced the content
 		// and there's nothing left to carry forward.
-		if worktreeRoot != "" && workingTreeMatchesCommit(worktreeRoot, filePath, commitFile.Hash) {
+		if worktreeRoot != "" && workingTreeMatchesCommit(ctx, worktreeRoot, filePath, commitFile.Hash) {
 			logging.Debug(logCtx, "filesWithRemainingAgentChanges: content differs from shadow but working tree is clean, skipping",
 				slog.String("file", filePath),
 				slog.String("commit_hash", commitFile.Hash.String()[:7]),
@@ -521,7 +524,22 @@ func filesWithRemainingAgentChanges(
 
 // workingTreeMatchesCommit checks if the file on disk matches the committed blob hash.
 // Returns true if the working tree is clean for this file (no remaining changes).
-func workingTreeMatchesCommit(worktreeRoot, filePath string, commitHash plumbing.Hash) bool {
+func workingTreeMatchesCommit(ctx context.Context, worktreeRoot, filePath string, commitHash plumbing.Hash) bool {
+	// Ask Git first so clean/smudge filters like core.autocrlf don't create
+	// phantom differences between the working tree bytes and the committed blob.
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "git", "-C", worktreeRoot, "diff", "--exit-code", "--quiet", "--", filePath)
+	err := cmd.Run()
+	if err == nil {
+		return true
+	}
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) && exitErr.ExitCode() == 1 {
+		return false // git says file is dirty
+	}
+	// git itself failed (128+, timeout, etc.) — fall back to raw blob hash
+
 	absPath := filepath.Join(worktreeRoot, filePath)
 	diskContent, err := os.ReadFile(absPath) //nolint:gosec // filePath is from git status, not user input
 	if err != nil {
