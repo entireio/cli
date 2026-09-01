@@ -353,3 +353,59 @@ func TestWriteCheckpointTokenClasses_StatesTheRealReason(t *testing.T) {
 		t.Errorf("expected the TTL reason\n%s", out)
 	}
 }
+
+// #2155 records a Model per subagent entry precisely so cost can be weighted
+// per model. Those tokens are flattened into the classes, so a subagent on a
+// differently-priced model would otherwise be costed at its parent's rate while
+// the report claims the total is priced.
+func TestCheckpointTokensReport_Classes_SubagentOnAnotherProviderIsUnpriced(t *testing.T) {
+	t.Parallel()
+
+	report := classesReportFor(t, "Pi", "claude-sonnet-4.6", checkpoint.TokenUsageVersionDelta,
+		&agent.TokenUsage{
+			InputTokens: 1000, OutputTokens: 100,
+			SubagentTokens: &agent.TokenUsage{
+				Model:       "gpt-5.3-codex", // 8x output against the parent's 5x
+				InputTokens: 5000, OutputTokens: 900,
+			},
+		})
+
+	if report.Classes == nil {
+		t.Fatal("volume shares must still be reported")
+	}
+	if report.Classes.Priced {
+		t.Error("a subagent priced by another provider's ratios must unprice the total")
+	}
+}
+
+// A subagent on the same price family is fine — all Claude models share one
+// Anthropic row, so this must not unprice every subagent-bearing checkpoint.
+func TestCheckpointTokensReport_Classes_SubagentInSameFamilyStaysPriced(t *testing.T) {
+	t.Parallel()
+
+	report := classesReportFor(t, "Claude Code", "claude-sonnet-4.6", checkpoint.TokenUsageVersionDelta,
+		&agent.TokenUsage{
+			InputTokens: 1000, OutputTokens: 100,
+			SubagentTokens: &agent.TokenUsage{Model: "claude-haiku-4.5", InputTokens: 5000, OutputTokens: 900},
+		})
+
+	if report.Classes == nil || !report.Classes.Priced {
+		t.Error("a subagent in the parent's price family must stay priced")
+	}
+}
+
+// Subagent entries usually record no model at all. Unpricing on that would gut
+// the feature for the common case, so the parent's family is inherited.
+func TestCheckpointTokensReport_Classes_SubagentWithoutModelInheritsParent(t *testing.T) {
+	t.Parallel()
+
+	report := classesReportFor(t, "Claude Code", "claude-sonnet-4.6", checkpoint.TokenUsageVersionDelta,
+		&agent.TokenUsage{
+			InputTokens: 1000, OutputTokens: 100,
+			SubagentTokens: &agent.TokenUsage{InputTokens: 5000, OutputTokens: 900},
+		})
+
+	if report.Classes == nil || !report.Classes.Priced {
+		t.Error("an unrecorded subagent model must inherit the parent's family, not unprice")
+	}
+}

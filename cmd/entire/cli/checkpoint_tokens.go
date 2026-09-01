@@ -328,13 +328,38 @@ func checkpointTokenWeights(metas []*checkpoint.Metadata, metadataWarnings int) 
 		}
 		if resolved.Family == "" {
 			resolved = weights
-			continue
+		} else if resolved.Family != weights.Family {
+			return tokenWeights{}
 		}
-		if resolved.Family != weights.Family {
+		if !subagentModelsMatch(meta.TokenUsage, resolved.Family) {
 			return tokenWeights{}
 		}
 	}
 	return resolved
+}
+
+// subagentModelsMatch reports whether every subagent entry that records a model
+// belongs to family. Subagent tokens are flattened into the classes, so an entry
+// billed at another provider's ratios would be costed at its parent's rate while
+// the report claims the whole total is priced — #2155 records Model on these
+// entries precisely so that cannot be assumed away.
+//
+// An entry with no recorded model inherits the parent's family rather than
+// unpricing the checkpoint: absence is the norm, and for a single-provider agent
+// the parent is the best available evidence. That inference is wrong only for an
+// agent that mixes providers within one session (Pi), and only when it also
+// fails to record the subagent's model.
+func subagentModelsMatch(usage *agent.TokenUsage, family string) bool {
+	for u := usage; u != nil; u = u.SubagentTokens {
+		if u.Model == "" {
+			continue
+		}
+		weights, ok := tokenWeightsForModel(u.Model)
+		if !ok || weights.Family != family {
+			return false
+		}
+	}
+	return true
 }
 
 // checkpointTokenTTLKnown reports whether an absent 1-hour cache-write figure
