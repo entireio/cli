@@ -31,7 +31,6 @@ func mustRefName(t *testing.T, cid id.CheckpointID) plumbing.ReferenceName {
 // pointing at HEAD, plus a fresh bare remote. Returns (workDir, bareDir, refs).
 func setupRepoWithCheckpointRefs(t *testing.T) (string, string, []plumbing.ReferenceName) {
 	t.Helper()
-	ctx := context.Background()
 
 	workDir := t.TempDir()
 	testutil.InitRepo(t, workDir)
@@ -53,11 +52,7 @@ func setupRepoWithCheckpointRefs(t *testing.T) (string, string, []plumbing.Refer
 	}
 
 	bareDir := t.TempDir()
-	initCmd := exec.CommandContext(ctx, "git", "init", "--bare")
-	initCmd.Dir = bareDir
-	initCmd.Env = testutil.GitIsolatedEnv()
-	out, err := initCmd.CombinedOutput()
-	require.NoError(t, err, "git init --bare failed: %s", out)
+	testutil.RunGit(t, bareDir, "init", "--bare")
 
 	return workDir, bareDir, refs
 }
@@ -136,12 +131,7 @@ func TestBatchPushRefs_RejectsNonFastForward(t *testing.T) {
 	// Point refs[0] at an orphan commit (no parent) — not a descendant of what was
 	// pushed, so the update is non-fast-forward.
 	runGit := func(args ...string) string {
-		c := exec.CommandContext(ctx, "git", args...)
-		c.Dir = workDir
-		c.Env = testutil.GitIsolatedEnv()
-		out, gitErr := c.CombinedOutput()
-		require.NoError(t, gitErr, "git %v failed: %s", args, out)
-		return strings.TrimSpace(string(out))
+		return strings.TrimSpace(testutil.RunGit(t, workDir, args...))
 	}
 	tree := runGit("rev-parse", "HEAD^{tree}")
 	orphan := runGit("commit-tree", tree, "-m", "divergent")

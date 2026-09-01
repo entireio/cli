@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -1791,10 +1790,5 @@ func claudeAdoptTranscriptPath(t *testing.T, sourceRepo, sessionID string) strin
 func runAdoptGit(t *testing.T, dir string, args ...string) {
 	t.Helper()
 
-	cmd := exec.CommandContext(context.Background(), "git", args...)
-	cmd.Dir = dir
-	cmd.Env = testutil.GitIsolatedEnv()
-	if output, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("git %s failed: %v\n%s", strings.Join(args, " "), err, output)
-	}
+	testutil.RunGit(t, dir, args...)
 }

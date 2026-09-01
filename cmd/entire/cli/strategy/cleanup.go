@@ -13,6 +13,7 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
+	"github.com/entireio/cli/cmd/entire/cli/gitdir"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
@@ -612,7 +613,11 @@ func deleteRedactCache(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	if err := os.RemoveAll(dir); err != nil {
+	root, err := gitdir.Open(ctx)
+	if err != nil {
+		return fmt.Errorf("open git common dir: %w", err)
+	}
+	if err := root.RemoveAll(checkpoint.RedactCacheDirName); err != nil {
 		return fmt.Errorf("remove redaction cache %s: %w", dir, err)
 	}
 	return nil

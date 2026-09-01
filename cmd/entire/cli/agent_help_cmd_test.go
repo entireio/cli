@@ -7,14 +7,14 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"os/exec"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/spf13/cobra"
+
 	"github.com/entireio/cli/cmd/entire/cli/api"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
-	"github.com/spf13/cobra"
 )
 
 const agentHelpTestRepo = "gh/acme/app"
@@ -116,12 +116,7 @@ func TestAgentHelpRepoContext_RefreshesUnknownTrailsEnablement(t *testing.T) {
 	testutil.IsolateGitConfigEnv(t)
 	t.Setenv("ENTIRE_CONFIG_DIR", t.TempDir())
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
-	cmd := exec.CommandContext(t.Context(), "git", "remote", "add", "origin", "git@github.com:acme/app.git")
-	cmd.Dir = repoDir
-	cmd.Env = testutil.GitIsolatedEnv()
-	if err := cmd.Run(); err != nil {
-		t.Fatalf("git remote add: %v", err)
-	}
+	testutil.RunGit(t, repoDir, "remote", "add", "origin", "git@github.com:acme/app.git")
 	t.Chdir(repoDir)
 
 	refreshCalls := 0
@@ -151,12 +146,7 @@ func TestAgentHelpRepoContext_CachesRefreshFailureBriefly(t *testing.T) {
 	t.Setenv("ENTIRE_TOKEN", makeTestJWT(t, `{"iss":"https://auth.entire.io","sub":"user-1","handle":"alice","aud":"https://entire.io"}`))
 	repoDir := t.TempDir()
 	testutil.InitRepo(t, repoDir)
-	cmd := exec.CommandContext(t.Context(), "git", "remote", "add", "origin", "git@github.com:acme/app.git")
-	cmd.Dir = repoDir
-	cmd.Env = testutil.GitIsolatedEnv()
-	if err := cmd.Run(); err != nil {
-		t.Fatalf("git remote add: %v", err)
-	}
+	testutil.RunGit(t, repoDir, "remote", "add", "origin", "git@github.com:acme/app.git")
 	t.Chdir(repoDir)
 
 	refreshCalls := 0
@@ -209,12 +199,7 @@ func TestAgentHelpRepoContext_SkipsRefreshWithoutLocalIdentity(t *testing.T) {
 	t.Setenv("ENTIRE_CONFIG_DIR", t.TempDir())
 	repoDir := t.TempDir()
 	testutil.InitRepo(t, repoDir)
-	cmd := exec.CommandContext(t.Context(), "git", "remote", "add", "origin", "git@github.com:acme/app.git")
-	cmd.Dir = repoDir
-	cmd.Env = testutil.GitIsolatedEnv()
-	if err := cmd.Run(); err != nil {
-		t.Fatalf("git remote add: %v", err)
-	}
+	testutil.RunGit(t, repoDir, "remote", "add", "origin", "git@github.com:acme/app.git")
 	t.Chdir(repoDir)
 
 	refreshCalls := 0

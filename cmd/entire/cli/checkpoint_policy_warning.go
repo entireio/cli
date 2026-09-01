@@ -33,7 +33,14 @@ func isCheckpointPolicyWarningExcludedCommand(name string) bool {
 }
 
 func WarnCheckpointPolicyIfNeeded(ctx context.Context, w io.Writer, currentVersion string) {
-	repo, err := gitrepo.OpenCurrent(ctx)
+	// OpenCurrentOrCwd, not OpenCurrent: this runs from main.go after cobra has
+	// finished, so it is the one repository open with no pre-run guard ahead of
+	// it, and it fires on every command — including outside a repository, where
+	// resolving a worktree root legitimately fails. It reads a policy ref to
+	// decide whether to print one advisory line, and discards every error, so
+	// the cwd fallback costs at most a skipped warning. Nothing that writes may
+	// use it.
+	repo, err := gitrepo.OpenCurrentOrCwd(ctx)
 	if err != nil {
 		return
 	}

@@ -38,7 +38,7 @@ func (c *ClaudeCodeAgent) InstallUserHooks(ctx context.Context) (agent.UserHookI
 		return agent.UserHookInstallResult{}, fmt.Errorf("lock Claude Code user hook settings: %w", err)
 	}
 	defer release()
-	count, repaired, err := installHooksToFile(settingsPath, false, false)
+	count, repaired, err := installHooksToFile(userSettingsIO{path: settingsPath}, false, false)
 	return agent.UserHookInstallResult{Installed: count, Repaired: repaired}, err
 }
 
@@ -54,7 +54,7 @@ func (c *ClaudeCodeAgent) UninstallUserHooks(ctx context.Context) error {
 		return fmt.Errorf("lock Claude Code user hook settings: %w", err)
 	}
 	defer release()
-	return uninstallHooksFromFile(settingsPath, false)
+	return uninstallHooksFromFile(userSettingsIO{path: settingsPath}, false)
 }
 
 // AreUserHooksInstalled requires the complete current inventory. Missing is
@@ -64,7 +64,7 @@ func (c *ClaudeCodeAgent) AreUserHooksInstalled(_ context.Context) (bool, error)
 	if err != nil {
 		return false, err
 	}
-	settings, err := loadClaudeSettingsFile(settingsPath)
+	settings, err := loadClaudeSettingsFile(userSettingsIO{path: settingsPath})
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
 			return false, nil

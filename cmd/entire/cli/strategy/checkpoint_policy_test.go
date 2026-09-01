@@ -3,10 +3,15 @@ package strategy
 import (
 	"context"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/go-git/go-git/v6"
+	"github.com/go-git/go-git/v6/plumbing"
+	"github.com/go-git/go-git/v6/plumbing/filemode"
+	"github.com/go-git/go-git/v6/plumbing/object"
+	"github.com/stretchr/testify/require"
 
 	cpkg "github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpointpolicy"
@@ -15,11 +20,6 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 	"github.com/entireio/cli/redact"
-	"github.com/go-git/go-git/v6"
-	"github.com/go-git/go-git/v6/plumbing"
-	"github.com/go-git/go-git/v6/plumbing/filemode"
-	"github.com/go-git/go-git/v6/plumbing/object"
-	"github.com/stretchr/testify/require"
 )
 
 func TestCondenseSessionRejectsUnsupportedPolicy(t *testing.T) {
@@ -293,10 +293,5 @@ func writeMalformedCheckpointPolicy(t *testing.T, repo *git.Repository) {
 
 func runCheckpointPolicyGit(t *testing.T, dir string, args ...string) string {
 	t.Helper()
-	cmd := exec.CommandContext(context.Background(), "git", args...)
-	cmd.Dir = dir
-	cmd.Env = testutil.GitIsolatedEnv()
-	output, err := cmd.CombinedOutput()
-	require.NoError(t, err, string(output))
-	return string(output)
+	return testutil.RunGit(t, dir, args...)
 }

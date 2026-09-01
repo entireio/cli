@@ -123,16 +123,7 @@ func requireGitSHA256Support(t *testing.T) {
 func gitOutput(t *testing.T, dir string, args ...string) string {
 	t.Helper()
 
-	cmd := exec.Command("git", args...) //nolint:noctx // test helper
-	if dir != "" {
-		cmd.Dir = dir
-	}
-	cmd.Env = testutil.GitIsolatedEnv()
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("git %s failed: %v\n%s", strings.Join(args, " "), err, output)
-	}
-	return strings.TrimSpace(string(output))
+	return strings.TrimSpace(testutil.RunGit(t, dir, args...))
 }
 
 const sha256HexLen = 64

@@ -19,7 +19,7 @@ import (
 // Reconcile path: if HEAD carries this session's LastCheckpointID as an
 // Entire-Checkpoint trailer (e.g. after git reset --hard to a condensed commit),
 // both BaseCommit and AttributionBaseCommit are updated to HEAD. The old shadow
-// branch is intentionally left untouched to preserve rewind data.
+// branch is intentionally left untouched to preserve its checkpoint data.
 //
 // Migrate path: for all other HEAD changes (pull, rebase, tool-call commits),
 // the shadow branch is renamed to the new base and only BaseCommit is updated.
@@ -49,7 +49,7 @@ func (s *ManualCommitStrategy) migrateShadowBranchIfNeeded(ctx context.Context, 
 	// LastCheckpointID, the user has reset back to the last condensed
 	// checkpoint. Update both BaseCommit and AttributionBaseCommit to HEAD.
 	// Deliberately do NOT rename or touch the old shadow branch — it
-	// preserves rewind data from the discarded segment of history.
+	// preserves checkpoint data from the discarded segment of history.
 	//
 	// The SHA guard (currentHead == LastCheckpointCommitHash) distinguishes a
 	// true reset from a cherry-pick/rebase that merely preserved the trailer.

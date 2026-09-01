@@ -404,7 +404,7 @@ func displayTrailRestoredSessions(w io.Writer, sessions []strategy.RestoredSessi
 	isMulti := len(choices) > 1
 	mostRecentSessionID := mostRecentRestoredSessionID(sessions)
 	for _, choice := range choices {
-		sessionAgent, err := strategy.ResolveAgentForRewind(choice.Session.Agent)
+		sessionAgent, err := strategy.ResolveAgentForResume(choice.Session.Agent)
 		if err != nil {
 			return fmt.Errorf("failed to resolve agent for session %s: %w", choice.SessionID, err)
 		}
@@ -1079,7 +1079,7 @@ func findTrailRestoredSession(sessions []strategy.RestoredSession, sessionID str
 }
 
 func launchTrailRestoredSession(ctx context.Context, w io.Writer, session strategy.RestoredSession) error {
-	resumeAgent, err := strategy.ResolveAgentForRewind(session.Agent)
+	resumeAgent, err := strategy.ResolveAgentForResume(session.Agent)
 	if err != nil {
 		return fmt.Errorf("failed to resolve agent for session %s: %w", session.SessionID, err)
 	}

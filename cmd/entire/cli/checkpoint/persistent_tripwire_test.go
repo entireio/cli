@@ -2,11 +2,11 @@ package checkpoint
 
 import (
 	"context"
-	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
+	"github.com/entireio/cli/cmd/entire/cli/entiredir"
 	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
@@ -32,7 +32,7 @@ func TestWriteStandardCheckpointEntries_RefusesUnexpectedSessionZeroOverwrite(t 
 
 	// The write path warns through the context's logger; give it a real one so
 	// the tripwire's diagnostics land in the log file instead of the terminal.
-	l, err := logging.New(logging.Config{Dir: filepath.Join(tmpDir, logging.LogsDir)})
+	l, err := logging.New(logging.Config{Root: entiredir.OpenerAt(tmpDir), Dir: logging.LogsName})
 	if err != nil {
 		t.Fatalf("logging.New() error = %v", err)
 	}

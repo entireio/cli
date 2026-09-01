@@ -187,9 +187,12 @@ func (g *GeminiCLIAgent) WriteSession(_ context.Context, session *agent.AgentSes
 		return errors.New("session has no native data to write")
 	}
 
-	// Write the raw JSON data
-	if err := os.WriteFile(session.SessionRef, session.NativeData, 0o600); err != nil {
-		return fmt.Errorf("failed to write transcript: %w", err)
+	// Write the raw JSON data through Gemini's own session store. Gemini nests
+	// chats under <project-hash>/chats/, so the store's parent-directory create
+	// is what makes a restore into a project directory that does not exist yet
+	// work without a separate MkdirAll here.
+	if err := agent.WriteSessionFile(g, session, session.NativeData, 0o600); err != nil {
+		return fmt.Errorf("write transcript: %w", err)
 	}
 
 	return nil

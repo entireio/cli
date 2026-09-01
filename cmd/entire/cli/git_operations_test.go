@@ -471,10 +471,7 @@ func TestResolveCheckpointFetchTarget_NoCheckpointRemote(t *testing.T) {
 	testutil.GitCommit(t, localDir, "init")
 
 	// Add origin remote
-	cmd := exec.CommandContext(context.Background(), "git", "remote", "add", "origin", "git@github.com:org/main-repo.git")
-	cmd.Dir = localDir
-	cmd.Env = testutil.GitIsolatedEnv()
-	require.NoError(t, cmd.Run())
+	testutil.RunGit(t, localDir, "remote", "add", "origin", "git@github.com:org/main-repo.git")
 
 	// Settings with no checkpoint_remote
 	entireDir := filepath.Join(localDir, ".entire")
@@ -500,10 +497,7 @@ func TestResolveCheckpointFetchTarget_WithCheckpointRemote(t *testing.T) {
 	testutil.GitCommit(t, localDir, "init")
 
 	// Add SSH origin remote — checkpoint URL derives protocol from origin
-	cmd := exec.CommandContext(context.Background(), "git", "remote", "add", "origin", "git@github.com:org/main-repo.git")
-	cmd.Dir = localDir
-	cmd.Env = testutil.GitIsolatedEnv()
-	require.NoError(t, cmd.Run())
+	testutil.RunGit(t, localDir, "remote", "add", "origin", "git@github.com:org/main-repo.git")
 
 	// Settings with checkpoint_remote configured
 	entireDir := filepath.Join(localDir, ".entire")
@@ -665,23 +659,13 @@ func TestFetchBlobsByHash_FailsWhenBlobUnreachable(t *testing.T) {
 // gitRun runs a git command in dir and fails the test on error.
 func gitRun(t *testing.T, dir string, args ...string) {
 	t.Helper()
-	cmd := exec.CommandContext(context.Background(), "git", args...)
-	cmd.Dir = dir
-	cmd.Env = testutil.GitIsolatedEnv()
-	if output, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("git %s failed: %v\nOutput: %s", args[0], err, output)
-	}
+	testutil.RunGit(t, dir, args...)
 }
 
 // gitOutput runs a git command and returns trimmed stdout.
 func gitOutput(t *testing.T, dir string, args ...string) string {
 	t.Helper()
-	cmd := exec.CommandContext(context.Background(), "git", args...)
-	cmd.Dir = dir
-	cmd.Env = testutil.GitIsolatedEnv()
-	out, err := cmd.Output()
-	require.NoError(t, err)
-	return strings.TrimSpace(string(out))
+	return strings.TrimSpace(testutil.RunGit(t, dir, args...))
 }
 
 // gitDefaultBranch returns the current branch name in a repo.

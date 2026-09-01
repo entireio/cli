@@ -14,10 +14,12 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/api"
 	"github.com/entireio/cli/cmd/entire/cli/auth"
 	"github.com/entireio/cli/cmd/entire/cli/execx"
+	"github.com/entireio/cli/cmd/entire/cli/gitdir"
 	"github.com/entireio/cli/cmd/entire/cli/gitremote"
 	"github.com/entireio/cli/cmd/entire/cli/internal/flock"
 	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
+	"github.com/entireio/cli/cmd/entire/cli/osroot"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
@@ -444,30 +446,37 @@ func trailRefreshRecentlySpawned(commonDir string, now time.Time) bool {
 // trail-enablement refresh and the zombie-session sweep, each with its own
 // marker name and ttl.
 func recentlySpawnedMarker(commonDir, marker string, ttl time.Duration, now time.Time) bool {
-	dir := filepath.Join(commonDir, "entire")
-	// Create the directory before acquiring the lock: flock.Acquire opens the
-	// lock file, which fails if its parent doesn't exist yet (mirrors
-	// ModifyClonePreferences, which MkdirAlls before locking).
-	if err := os.MkdirAll(dir, 0o750); err != nil {
+	root, err := gitdir.OpenAt(commonDir)
+	if err != nil {
 		return false
 	}
-	markerPath := filepath.Join(dir, marker)
-	release, err := flock.Acquire(markerPath + ".lock")
+	// Create the directory before acquiring the lock: flock opens the lock file,
+	// which fails if its parent doesn't exist yet (mirrors
+	// ModifyClonePreferences, which creates before locking).
+	if err := osroot.MkdirAllNoSymlink(root, spawnMarkerDirName, 0o750); err != nil {
+		return false
+	}
+	markerName := spawnMarkerDirName + "/" + marker
+	release, err := flock.AcquireIn(root, markerName+".lock")
 	if err != nil {
 		return false
 	}
 	defer release()
 
-	if data, readErr := os.ReadFile(markerPath); readErr == nil { //nolint:gosec // markerPath is derived from the trusted git-common-dir, not user input
+	if data, readErr := osroot.ReadFileNoFollow(root, markerName); readErr == nil {
 		if last, parseErr := time.Parse(time.RFC3339Nano, strings.TrimSpace(string(data))); parseErr == nil &&
 			now.After(last) && now.Sub(last) < ttl {
 			return true
 		}
 	}
 	//nolint:errcheck // best-effort marker; a failed write just means the next hook re-spawns
-	_ = os.WriteFile(markerPath, []byte(now.UTC().Format(time.RFC3339Nano)), 0o600)
+	_ = jsonutil.WriteFileAtomicIn(root, markerName, []byte(now.UTC().Format(time.RFC3339Nano)), 0o600)
 	return false
 }
+
+// spawnMarkerDirName is the marker directory inside the git common dir. It is
+// the same "entire" directory clone preferences live in.
+const spawnMarkerDirName = "entire"
 
 // newRefreshTrailEnablementCmd creates the hidden command that performs the
 // (potentially slow) trails-enablement network refresh out of band. It is

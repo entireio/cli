@@ -102,12 +102,7 @@ func TestShadow_MidSessionRebaseMigration(t *testing.T) {
 	// This simulates what happens when Claude runs: git rebase master
 	// Note: We're NOT calling SimulateUserPromptSubmit here because the rebase
 	// happens mid-session as part of Claude's tool execution
-	cmd := exec.CommandContext(t.Context(), "git", "rebase", "master")
-	cmd.Dir = env.RepoDir
-	cmd.Env = testutil.GitIsolatedEnv()
-	if output, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("git rebase failed: %v\nOutput: %s", err, output)
-	}
+	testutil.RunGit(t, env.RepoDir, "rebase", "master")
 
 	newFeatureHead := env.GetHeadHash()
 	t.Logf("After rebase, feature HEAD: %s (was: %s)", newFeatureHead[:7], initialFeatureHead[:7])
@@ -310,12 +305,7 @@ func TestShadow_CommitThenRebaseMidSession(t *testing.T) {
 	// ========================================
 	t.Log("Phase 4: Claude rebases onto master")
 
-	cmd := exec.CommandContext(t.Context(), "git", "rebase", "master")
-	cmd.Dir = env.RepoDir
-	cmd.Env = testutil.GitIsolatedEnv()
-	if output, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("git rebase failed: %v\nOutput: %s", err, output)
-	}
+	testutil.RunGit(t, env.RepoDir, "rebase", "master")
 
 	postRebaseHead := env.GetHeadHash()
 	t.Logf("After rebase, feature HEAD: %s (was: %s)", postRebaseHead[:7], postCommitHead[:7])

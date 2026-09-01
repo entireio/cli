@@ -1,7 +1,9 @@
 package paths
 
 import (
+	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -60,11 +62,22 @@ var (
 	worktreeRootCacheDir string
 )
 
-// WorktreeRoot returns the git worktree root directory.
-// Uses 'git rev-parse --show-toplevel' which returns the working tree toplevel.
-// In a worktree this is the worktree root, not the main repository root.
-// The result is cached per working directory.
-// Returns an error if not inside a git repository.
+// WorktreeRoot returns the git worktree root directory — in a linked worktree
+// that worktree's root, not the main repository's. The result is cached per
+// working directory. Callers that need to distinguish "outside a repository"
+// from "could not find out" match ErrNotARepository; nothing else may be
+// read as the benign case.
+//
+// Everything Entire stores is located from this path — .entire via the entiredir
+// package, and the git common dir via gitdir — so a failure here used to be
+// papered over by callers falling back to a relative path, which then resolved
+// against wherever the process happened to be. From a subdirectory that silently
+// meant a second .entire beside the agent instead of the repository's one.
+//
+// The subprocess fails for more reasons than "no repository" — `git` off $PATH
+// is the common one — so those two outcomes are separated rather than merged:
+// only ErrNotARepository means "there is nothing here", and it is the only
+// failure any caller is allowed to answer with a directory of its own.
 func WorktreeRoot(ctx context.Context) (string, error) {
 	// Get current working directory to check cache validity
 	cwd, err := os.Getwd() //nolint:forbidigo // already present in codebase
@@ -81,14 +94,10 @@ func WorktreeRoot(ctx context.Context) (string, error) {
 	}
 	worktreeRootMu.RUnlock()
 
-	// Cache miss - get worktree root and update cache with write lock
-	cmd := exec.CommandContext(ctx, "git", "rev-parse", "--show-toplevel")
-	output, err := cmd.Output()
+	root, err := resolveWorktreeRoot(ctx)
 	if err != nil {
-		return "", fmt.Errorf("failed to get git worktree root: %w", err)
+		return "", err
 	}
-
-	root := strings.TrimSpace(string(output))
 
 	worktreeRootMu.Lock()
 	worktreeRootCache = root
@@ -96,6 +105,120 @@ func WorktreeRoot(ctx context.Context) (string, error) {
 	worktreeRootMu.Unlock()
 
 	return root, nil
+}
+
+// resolveWorktreeRoot asks git, and treats every failure to get an answer as a
+// failure — it never substitutes a guess of its own.
+//
+// A walk up for a .git entry was tried here and removed. It looks like a free
+// improvement (it is the same search git performs, so it agrees with git
+// whenever both can run) but it is not, because it can only run in the cases
+// where git did NOT agree, and in every one of those git knew something the walk
+// cannot see: dubious ownership fires INSIDE a repository, so walking up finds
+// the .git git just refused and hands back a root the user's own git will not
+// use; a GIT_DIR pointing elsewhere makes the nearest .git the wrong answer, not
+// the right one. Refusing to run on a machine whose git is broken is the cheaper
+// mistake, and it is the rule RequireEntireDir already states.
+//
+// The one thing that must not happen is a failure here becoming a path anyway.
+// Callers used to fall back to a path relative to the current directory, which
+// from a subdirectory silently meant a second .entire beside the agent instead
+// of the repository's one. entiredir.anchor is the surviving fallback and it
+// fires only on the positive ErrNotARepository verdict below.
+func resolveWorktreeRoot(ctx context.Context) (string, error) {
+	cmd := exec.CommandContext(ctx, "git", "rev-parse", "--show-toplevel")
+	// Force C messages so classifyWorktreeRootError can recognise git's
+	// "not a repository" on a localized machine. Built by filtering rather than
+	// appending, because a duplicate key in the environment resolves to the
+	// first match on Unix, not the last. Everything else is inherited, so the
+	// GIT_DIR/GIT_WORK_TREE a hook exports still selects the worktree.
+	cmd.Env = envWithCMessages(os.Environ())
+
+	output, err := cmd.Output()
+	if err != nil {
+		return "", classifyWorktreeRootError(ctx, err)
+	}
+
+	root := strings.TrimSpace(string(output))
+	// Git printed no path but reported success. Whatever produced that, it is
+	// not an answer, and treating "" as a worktree root resolves every repo
+	// path against the filesystem root.
+	if root == "" {
+		return "", errors.New("git rev-parse --show-toplevel reported success but printed no path")
+	}
+	return root, nil
+}
+
+// ErrNotARepository reports that git positively identified the working
+// directory as being outside any repository. It is the ONLY worktree-root
+// failure that means "there is nothing here to look at" — every other one
+// (git missing from PATH, a cancelled context, a permission failure, dubious
+// ownership, malformed output) means "we could not find out", which is a
+// different thing and must not be treated as the benign case.
+var ErrNotARepository = errors.New("not a git repository")
+
+// classifyWorktreeRootError separates git's "not a repository" verdict from
+// every other reason `git rev-parse --show-toplevel` can fail.
+//
+// The distinction is load-bearing rather than cosmetic. Callers skip work when
+// there is no repository, and settings resolution falls back to a path relative
+// to the current directory when the root cannot be resolved — so folding an
+// unexpected failure into "not a repository" turns a broken git into a silent
+// read of ./.entire/settings.json, which is exactly the path a `.entire`
+// symlink redirects.
+//
+// Identification is positive, not by elimination: git must have run and exited
+// non-zero, and must have said so. Exit code 128 alone is not enough, since git
+// also uses it for dubious ownership and permission failures, both of which
+// happen INSIDE a repository.
+func classifyWorktreeRootError(ctx context.Context, err error) error {
+	// Checked first: a cancelled context kills the child, and the resulting
+	// exit status carries no verdict about the repository.
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return fmt.Errorf("failed to get git worktree root: %w", ctxErr)
+	}
+
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) {
+		if bytes.Contains(bytes.ToLower(exitErr.Stderr), []byte("not a git repository")) {
+			return fmt.Errorf("%w: %s", ErrNotARepository, firstLine(exitErr.Stderr))
+		}
+		// Git's own fatal, not just the exit status. "exit status 128" names no
+		// cause, and the causes here are ones the user has to act on -- most
+		// often safe.directory's ownership check, whose fix is a git config the
+		// message states outright.
+		if line := firstLine(exitErr.Stderr); line != "" {
+			return fmt.Errorf("failed to get git worktree root: %s", line)
+		}
+	}
+
+	return fmt.Errorf("failed to get git worktree root: %w", err)
+}
+
+// firstLine trims git's stderr to its opening line, which carries the fatal.
+func firstLine(b []byte) string {
+	if i := bytes.IndexByte(b, '\n'); i >= 0 {
+		b = b[:i]
+	}
+	return strings.TrimSpace(string(b))
+}
+
+// envWithCMessages returns env with the locale variables git consults for
+// message translation replaced by C, leaving everything else untouched.
+func envWithCMessages(env []string) []string {
+	out := make([]string, 0, len(env)+2)
+	for _, kv := range env {
+		switch {
+		case strings.HasPrefix(kv, "LC_ALL="),
+			strings.HasPrefix(kv, "LC_MESSAGES="),
+			strings.HasPrefix(kv, "LANGUAGE="),
+			strings.HasPrefix(kv, "LANG="):
+			continue
+		}
+		out = append(out, kv)
+	}
+	// LANGUAGE overrides LC_ALL for gettext, so both are pinned.
+	return append(out, "LC_ALL=C", "LANGUAGE=")
 }
 
 // ClearWorktreeRootCache clears the cached worktree root.

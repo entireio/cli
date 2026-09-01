@@ -38,7 +38,7 @@ type Type int
 
 const (
 	// Ephemeral checkpoints contain full state (code + metadata) and are stored
-	// on shadow branches (entire/<commit-hash>). Used for intra-session rewind.
+	// on shadow branches (entire/<commit-hash>). Holds pending intra-session state.
 	Ephemeral Type = iota
 
 	// Persistent checkpoints contain metadata + commit reference and are stored
@@ -89,11 +89,12 @@ type WriteEphemeralOptions struct {
 	// DeletedFiles are files that have been deleted (relative paths)
 	DeletedFiles []string
 
-	// MetadataDir is the relative path to the metadata directory
+	// MetadataDir is the repo-relative path to the metadata directory
+	// (.entire/metadata/<session>). It doubles as the git tree path the
+	// directory's files land at, and as the name the .entire root reads them
+	// through — there is deliberately no absolute counterpart, because two
+	// spellings of one directory is how they come to disagree.
 	MetadataDir string
-
-	// MetadataDirAbs is the absolute path to the metadata directory
-	MetadataDirAbs string
 
 	// CommitMessage is the commit subject line
 	CommitMessage string
@@ -204,7 +205,7 @@ type WriteEphemeralTaskOptions struct {
 	// SubagentTranscriptPath is the path to the subagent's transcript
 	SubagentTranscriptPath string
 
-	// CheckpointUUID is the UUID for transcript truncation when rewinding
+	// CheckpointUUID is the UUID marking where this checkpoint's transcript slice starts
 	CheckpointUUID string
 
 	// CommitMessage is the commit message (already formatted)
@@ -230,7 +231,7 @@ type WriteEphemeralTaskOptions struct {
 }
 
 // EphemeralCheckpointInfo contains information about a single commit on a shadow branch.
-// Used by ListCheckpoints to provide rewind point data.
+// Used by ListCheckpoints to provide pending checkpoint data.
 type EphemeralCheckpointInfo struct {
 	// CommitHash is the hash of the checkpoint commit
 	CommitHash plumbing.Hash

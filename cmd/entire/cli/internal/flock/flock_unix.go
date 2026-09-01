@@ -43,7 +43,29 @@ func AcquireContext(ctx context.Context, path string) (release func(), err error
 	if err != nil {
 		return nil, fmt.Errorf("open flock: %w", err)
 	}
+	return lockFile(ctx, f)
+}
 
+// AcquireIn is Acquire for a lock file named inside root. It is the form the
+// .git-resident locks use: their names carry agent-supplied session IDs, so
+// resolving them through the git common dir's root keeps a name that escaped
+// validation from naming a file outside the clone.
+func AcquireIn(root *os.Root, name string) (release func(), err error) {
+	return AcquireContextIn(context.Background(), root, name)
+}
+
+// AcquireContextIn is AcquireContext for a lock file named inside root.
+func AcquireContextIn(ctx context.Context, root *os.Root, name string) (release func(), err error) {
+	f, err := openLockFileIn(root, name)
+	if err != nil {
+		return nil, fmt.Errorf("open flock: %w", err)
+	}
+	return lockFile(ctx, f)
+}
+
+// lockFile holds the locking logic shared by the path- and root-based entry
+// points, which differ only in how the file was opened.
+func lockFile(ctx context.Context, f *os.File) (release func(), err error) {
 	// Fast path: no deadline -> block in the kernel exactly like the historical
 	// Acquire. This preserves behavior (and efficiency) for callers that must
 	// wait as long as it takes, such as turn-end checkpoint condensation.

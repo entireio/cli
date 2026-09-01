@@ -12,7 +12,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
 )
 
-// pendingRewindPointJSON is the machine-readable shape emitted by
+// pendingCheckpointJSON is the machine-readable shape emitted by
 // `entire checkpoint list --pending --json` (and the deprecated `rewind --list`
 // bridge). It is byte-for-byte the JSON that `rewind --list` historically
 // produced, so downstream consumers (integration and e2e test harnesses,
@@ -21,10 +21,10 @@ import (
 //
 // The field set, JSON names, omitempty markers, and the RFC3339 Date encoding
 // are load-bearing — this is a stable contract. CondensationID carries the
-// checkpoint ID (RewindPoint.CheckpointID) for logs-only points; it is empty
+// checkpoint ID (PendingCheckpoint.CheckpointID) for logs-only points; it is empty
 // for shadow-branch (uncommitted) points. Do not change these without
 // migrating every consumer.
-type pendingRewindPointJSON struct {
+type pendingCheckpointJSON struct {
 	ID               string `json:"id"`
 	Message          string `json:"message"`
 	MetadataDir      string `json:"metadata_dir"`
@@ -37,26 +37,26 @@ type pendingRewindPointJSON struct {
 	SessionPrompt    string `json:"session_prompt,omitempty"`
 }
 
-// pendingRewindPointsLimit caps how many live shadow-branch rewind points the
+// pendingCheckpointsLimit caps how many pending checkpoints (both shapes) the
 // pending views request. Matches the historical `rewind --list` cap of 20 so
 // the migrated output is identical.
-const pendingRewindPointsLimit = 20
+const pendingCheckpointsLimit = 20
 
-// runCheckpointPendingListJSON emits the live shadow-branch rewind points as
+// runCheckpointPendingListJSON emits the pending checkpoints as
 // JSON. This is the drop-in replacement for (and the implementation behind)
-// the deprecated `rewind --list` bridge: same dataset (strategy.GetRewindPoints),
+// the deprecated `rewind --list` bridge: same dataset (strategy.ListPendingCheckpoints),
 // same cap, same JSON shape.
 func runCheckpointPendingListJSON(ctx context.Context, w io.Writer) error {
 	start := GetStrategy(ctx)
 
-	points, err := start.GetRewindPoints(ctx, pendingRewindPointsLimit)
+	points, err := start.ListPendingCheckpoints(ctx, pendingCheckpointsLimit)
 	if err != nil {
-		return fmt.Errorf("failed to find rewind points: %w", err)
+		return fmt.Errorf("failed to list pending checkpoints: %w", err)
 	}
 
-	output := make([]pendingRewindPointJSON, len(points))
+	output := make([]pendingCheckpointJSON, len(points))
 	for i, p := range points {
-		output[i] = pendingRewindPointJSON{
+		output[i] = pendingCheckpointJSON{
 			ID:               p.ID,
 			Message:          p.Message,
 			MetadataDir:      p.MetadataDir,
@@ -78,34 +78,34 @@ func runCheckpointPendingListJSON(ctx context.Context, w io.Writer) error {
 	return nil
 }
 
-// runCheckpointPendingListHuman prints the live shadow-branch rewind points in
+// runCheckpointPendingListHuman prints the pending checkpoints in
 // a human-readable list. `rewind --list` was JSON-only, so there is no legacy
 // human output to mirror; this renders each point with the same label format
-// the former interactive rewind picker used (see rewindPointLabel).
+// the former interactive rewind picker used (see pendingCheckpointLabel).
 func runCheckpointPendingListHuman(ctx context.Context, w io.Writer) error {
 	start := GetStrategy(ctx)
 
-	points, err := start.GetRewindPoints(ctx, pendingRewindPointsLimit)
+	points, err := start.ListPendingCheckpoints(ctx, pendingCheckpointsLimit)
 	if err != nil {
-		return fmt.Errorf("failed to find rewind points: %w", err)
+		return fmt.Errorf("failed to list pending checkpoints: %w", err)
 	}
 
 	if len(points) == 0 {
-		fmt.Fprintln(w, "No pending rewind points found.")
-		fmt.Fprintln(w, "Pending rewind points are created automatically during active agent sessions.")
+		fmt.Fprintln(w, "No pending checkpoints found.")
+		fmt.Fprintln(w, "Pending checkpoints are created automatically during active agent sessions.")
 		return nil
 	}
 
 	multi := hasMultipleSessions(points)
 	for _, p := range points {
-		fmt.Fprintln(w, rewindPointLabel(p, multi))
+		fmt.Fprintln(w, pendingCheckpointLabel(p, multi))
 	}
 	return nil
 }
 
 // hasMultipleSessions reports whether the points span more than one session,
 // which controls whether per-line session identifiers are shown.
-func hasMultipleSessions(points []strategy.RewindPoint) bool {
+func hasMultipleSessions(points []strategy.PendingCheckpoint) bool {
 	sessionIDs := make(map[string]bool)
 	for _, p := range points {
 		if p.SessionID != "" {
@@ -115,11 +115,11 @@ func hasMultipleSessions(points []strategy.RewindPoint) bool {
 	return len(sessionIDs) > 1
 }
 
-// rewindPointLabel renders a single rewind point as a display label for the
+// pendingCheckpointLabel renders a single pending checkpoint as a display label for the
 // `checkpoint list --pending` human view. When hasMultipleSessions is true, a
 // sanitized session prompt is appended to help disambiguate concurrent
 // sessions.
-func rewindPointLabel(p strategy.RewindPoint, hasMultipleSessions bool) string {
+func pendingCheckpointLabel(p strategy.PendingCheckpoint, hasMultipleSessions bool) string {
 	timestamp := p.Date.Format("2006-01-02 15:04")
 
 	sessionLabel := ""

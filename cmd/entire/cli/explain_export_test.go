@@ -768,17 +768,17 @@ func TestCheckpointExportJSON_PartialContract(t *testing.T) {
 func TestCheckpointMatchesSessionFilter(t *testing.T) {
 	t.Parallel()
 
-	multi := strategy.RewindPoint{
+	multi := strategy.PendingCheckpoint{
 		SessionID:  "9f44f514-b012", // latest
 		SessionIDs: []string{"older-session-aaaa", "9f44f514-b012"},
 	}
-	single := strategy.RewindPoint{
+	single := strategy.PendingCheckpoint{
 		SessionID: "lone-session-bbbb",
 	}
 
 	tests := []struct {
 		name   string
-		point  strategy.RewindPoint
+		point  strategy.PendingCheckpoint
 		filter string
 		want   bool
 	}{

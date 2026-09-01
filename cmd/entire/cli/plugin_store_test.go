@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"path"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -333,11 +334,16 @@ func TestMaterializeManagedEntry_HappyPath(t *testing.T) {
 		t.Fatalf("stat src: %v", err)
 	}
 
-	dest := filepath.Join(t.TempDir(), "out")
-	if err := materializeManagedEntry(src, dest, srcInfo); err != nil {
+	destDir := t.TempDir()
+	destRoot, err := os.OpenRoot(destDir)
+	if err != nil {
+		t.Fatalf("os.OpenRoot: %v", err)
+	}
+	defer destRoot.Close()
+	if err := materializeManagedEntry(destRoot, src, "out", srcInfo); err != nil {
 		t.Fatalf("materializeManagedEntry: %v", err)
 	}
-	got, err := os.ReadFile(dest)
+	got, err := os.ReadFile(filepath.Join(destDir, "out"))
 	if err != nil {
 		t.Fatalf("read result: %v", err)
 	}
@@ -457,24 +463,27 @@ func TestInstallPluginFromPath_RequiresForceForSameBareName(t *testing.T) { //no
 	}
 }
 
-func TestMakeInstallTmpPath_Unique(t *testing.T) {
+func TestMakeInstallTmpName_Unique(t *testing.T) {
 	t.Parallel()
-	dir := t.TempDir()
-	a, err := makeInstallTmpPath(dir)
+	a, err := makeInstallTmpName()
 	if err != nil {
-		t.Fatalf("makeInstallTmpPath: %v", err)
+		t.Fatalf("makeInstallTmpName: %v", err)
 	}
-	b, err := makeInstallTmpPath(dir)
+	b, err := makeInstallTmpName()
 	if err != nil {
-		t.Fatalf("makeInstallTmpPath: %v", err)
+		t.Fatalf("makeInstallTmpName: %v", err)
 	}
 	if a == b {
-		t.Errorf("two calls returned the same path: %q", a)
+		t.Errorf("two calls returned the same name: %q", a)
+	}
+	// The name is relative to the managed tree's root, inside the bin subdir.
+	if !strings.HasPrefix(a, pluginManagedBinSubdir+"/") {
+		t.Errorf("tmp name %q is not inside %q", a, pluginManagedBinSubdir)
 	}
 	// Tmp prefix must not match the listing filter (which keys off
 	// "entire-"); the dot-prefix achieves that.
-	if !strings.HasPrefix(filepath.Base(a), ".install-") {
-		t.Errorf("tmp path %q does not start with .install-", a)
+	if !strings.HasPrefix(path.Base(a), ".install-") {
+		t.Errorf("tmp name %q does not start with .install-", a)
 	}
 }
 

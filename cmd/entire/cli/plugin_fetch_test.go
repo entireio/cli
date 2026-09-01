@@ -327,7 +327,7 @@ func TestExtractPluginBinary_TarGz(t *testing.T) {
 		t.Fatal(err)
 	}
 	dest := filepath.Join(dir, "out")
-	if err := extractPluginBinary(archive, "run", dest); err != nil {
+	if err := extractPluginBinary(archive, "run", mustTestRoot(t, dir), "out"); err != nil {
 		t.Fatalf("extractPluginBinary: %v", err)
 	}
 	got, err := os.ReadFile(dest)
@@ -357,7 +357,7 @@ func TestExtractPluginBinary_Zip(t *testing.T) {
 		t.Fatal(err)
 	}
 	dest := filepath.Join(dir, "out")
-	if err := extractPluginBinary(archive, "run", dest); err != nil {
+	if err := extractPluginBinary(archive, "run", mustTestRoot(t, dir), "out"); err != nil {
 		t.Fatalf("extractPluginBinary: %v", err)
 	}
 	got, err := os.ReadFile(dest)
@@ -376,7 +376,7 @@ func TestExtractPluginBinary_MissingEntry(t *testing.T) {
 	if err := os.WriteFile(archive, makeTarGz(t, map[string][]byte{"other": []byte("x")}), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := extractPluginBinary(archive, "run", filepath.Join(dir, "out")); err == nil {
+	if err := extractPluginBinary(archive, "run", mustTestRoot(t, dir), "out"); err == nil {
 		t.Error("extractPluginBinary succeeded on archive without the binary")
 	}
 }
@@ -390,7 +390,7 @@ func TestExtractPluginBinary_RawBinary(t *testing.T) {
 		t.Fatal(err)
 	}
 	dest := filepath.Join(dir, "out")
-	if err := extractPluginBinary(raw, "run", dest); err != nil {
+	if err := extractPluginBinary(raw, "run", mustTestRoot(t, dir), "out"); err != nil {
 		t.Fatalf("extractPluginBinary: %v", err)
 	}
 	got, err := os.ReadFile(dest)
@@ -547,10 +547,12 @@ func TestDownloadPluginAsset_StaleManifestFallsThroughToProbe(t *testing.T) {
 func TestWriteExecutableLimited_RejectsOversize(t *testing.T) {
 	t.Parallel()
 	const limit = 32
-	dest := filepath.Join(t.TempDir(), "bin")
+	dir := t.TempDir()
+	dest := filepath.Join(dir, "bin")
+	root := mustTestRoot(t, dir)
 
 	// Exactly at the limit is a complete file, not an overflow.
-	if err := writeExecutableLimited(bytes.NewReader(bytes.Repeat([]byte("a"), limit)), dest, limit); err != nil {
+	if err := writeExecutableLimited(root, "bin", bytes.NewReader(bytes.Repeat([]byte("a"), limit)), limit); err != nil {
 		t.Fatalf("writeExecutableLimited at the limit: %v", err)
 	}
 	got, err := os.ReadFile(dest)
@@ -562,7 +564,7 @@ func TestWriteExecutableLimited_RejectsOversize(t *testing.T) {
 	}
 
 	// One byte over must fail loudly rather than truncate.
-	err = writeExecutableLimited(bytes.NewReader(bytes.Repeat([]byte("a"), limit+1)), dest, limit)
+	err = writeExecutableLimited(root, "bin", bytes.NewReader(bytes.Repeat([]byte("a"), limit+1)), limit)
 	if err == nil {
 		t.Fatal("writeExecutableLimited accepted an oversize source")
 	}
@@ -605,7 +607,7 @@ func TestWriteExecutableLimited_DoesNotFollowSymlink(t *testing.T) {
 	if err := os.Symlink(victim, dest); err != nil {
 		t.Skipf("symlinks unavailable: %v", err)
 	}
-	if err := writeExecutableLimited(bytes.NewReader([]byte("PAYLOAD")), dest, 1<<20); err != nil {
+	if err := writeExecutableLimited(mustTestRoot(t, dir), "bin", bytes.NewReader([]byte("PAYLOAD")), 1<<20); err != nil {
 		t.Fatalf("writeExecutableLimited: %v", err)
 	}
 	got, err := os.ReadFile(victim)
@@ -634,7 +636,7 @@ func TestExtractPluginBinary_OversizeEntryIsRejected(t *testing.T) {
 		t.Fatal(err)
 	}
 	dest := filepath.Join(dir, "out")
-	err := extractPluginBinary(archive, "run", dest)
+	err := extractPluginBinary(archive, "run", mustTestRoot(t, dir), "out")
 	if err == nil {
 		t.Fatal("extractPluginBinary accepted an oversize archive entry")
 	}
@@ -804,11 +806,12 @@ func TestExtractPluginBinary_TakesOnlyItsOwnBinary(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	dest := filepath.Join(dir, "out", pluginBinaryName("mine"))
+	destName := "out/" + pluginBinaryName("mine")
+	dest := filepath.Join(dir, filepath.FromSlash(destName))
 	if err := os.MkdirAll(filepath.Dir(dest), 0o750); err != nil {
 		t.Fatal(err)
 	}
-	if err := extractPluginBinary(archive, "mine", dest); err != nil {
+	if err := extractPluginBinary(archive, "mine", mustTestRoot(t, dir), destName); err != nil {
 		t.Fatalf("extractPluginBinary: %v", err)
 	}
 
@@ -879,7 +882,7 @@ func TestExtractPluginBinary_PrefersRootEntryEveryTime(t *testing.T) {
 			t.Fatal(err)
 		}
 		dest := filepath.Join(dir, "out")
-		if err := extractPluginBinary(archive, "mine", dest); err != nil {
+		if err := extractPluginBinary(archive, "mine", mustTestRoot(t, dir), "out"); err != nil {
 			t.Fatalf("extractPluginBinary: %v", err)
 		}
 		got, err := os.ReadFile(dest)
@@ -890,4 +893,16 @@ func TestExtractPluginBinary_PrefersRootEntryEveryTime(t *testing.T) {
 			t.Fatalf("run %d extracted %q, want the root entry", i, got)
 		}
 	}
+}
+
+// mustTestRoot opens dir as an os.Root, standing in for the managed plugin tree
+// or the staging directory the production callers pass.
+func mustTestRoot(t *testing.T, dir string) *os.Root {
+	t.Helper()
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		t.Fatalf("os.OpenRoot(%s): %v", dir, err)
+	}
+	t.Cleanup(func() { _ = root.Close() })
+	return root
 }

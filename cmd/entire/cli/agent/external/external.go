@@ -279,23 +279,27 @@ func (e *Agent) InstallHooks(ctx context.Context, force bool) (int, error) {
 }
 
 func (e *Agent) UninstallHooks(ctx context.Context) error {
+	// Returned unwrapped for the same reason as probeHooksInstalled below: run
+	// already prefixes the subcommand, and uninstall reports this to the user.
 	_, err := e.run(ctx, nil, "uninstall-hooks")
-	if err != nil {
-		return fmt.Errorf("uninstall-hooks: %w", err)
-	}
-	return nil
+	return err
 }
 
-func (e *Agent) AreHooksInstalled(ctx context.Context) bool {
+// AreHooksInstalled asks the plugin. A plugin that crashes, times out, or prints
+// junk is not a plugin with no hooks, so that is reported as an error rather
+// than collapsed into false — the caller decides what an unknown state means.
+func (e *Agent) AreHooksInstalled(ctx context.Context) (bool, error) {
 	stdout, err := e.run(ctx, nil, "are-hooks-installed")
 	if err != nil {
-		return false
+		// run already names the subcommand and carries the plugin's stderr; this
+		// error reaches the user verbatim, so do not prefix it again.
+		return false, err
 	}
 	var resp AreHooksInstalledResponse
 	if err := json.Unmarshal(stdout, &resp); err != nil {
-		return false
+		return false, fmt.Errorf("are-hooks-installed: invalid JSON: %w", err)
 	}
-	return resp.Installed
+	return resp.Installed, nil
 }
 
 // --- TranscriptAnalyzer methods ---

@@ -186,7 +186,7 @@ const DefaultAgentName types.AgentName = AgentNameClaudeCode
 // This is acceptable because:
 //   - Agent count is small (~2-20 agents)
 //   - Agent factories are lightweight (empty struct allocation)
-//   - Called infrequently (commit hooks, rewind, debug commands - not hot paths)
+//   - Called infrequently (commit hooks, resume, debug commands - not hot paths)
 //   - Cost is ~400ns worst case vs milliseconds for I/O operations
 //
 // Only optimize if agent count exceeds 100 or profiling shows this as a bottleneck.

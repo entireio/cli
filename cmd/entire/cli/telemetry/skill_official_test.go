@@ -11,6 +11,7 @@ func TestSkillNameForTelemetry(t *testing.T) {
 		want  string
 	}{
 		{"scaffolded agent-help skill", "entire", "entire"},
+		{"scaffolded search skill", "entire-search", "entire-search"},
 		{"entire plugin skill", "entire:search", "entire:search"},
 		{"entire plugin command", "entire:explain", "entire:explain"},
 		{"hyphenated entire plugin skill", "entire:what-happened", "entire:what-happened"},
@@ -50,6 +51,7 @@ func TestSkillNameForTelemetry_NeverEmitsAnUnrecognizedName(t *testing.T) {
 	// an allowlisted Entire skill name or one of the two fixed categories.
 	allowed := map[string]struct{}{
 		scaffoldedAgentHelpSkill: {},
+		scaffoldedSearchSkill:    {},
 		customSkillCategory:      {},
 		unlistedEntireSkill:      {},
 	}

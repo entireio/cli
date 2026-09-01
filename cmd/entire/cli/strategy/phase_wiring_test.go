@@ -506,15 +506,14 @@ func TestCondenseAndMarkFullyCondensed_WithDataNoFiles(t *testing.T) {
 
 	// SaveStep creates the shadow branch
 	err = s.SaveStep(context.Background(), StepContext{
-		SessionID:      sessionID,
-		ModifiedFiles:  []string{},
-		NewFiles:       []string{"agent_file.txt"},
-		DeletedFiles:   []string{},
-		MetadataDir:    metadataDir,
-		MetadataDirAbs: metadataDirAbs,
-		CommitMessage:  "Checkpoint 1",
-		AuthorName:     "Test",
-		AuthorEmail:    "test@test.com",
+		SessionID:     sessionID,
+		ModifiedFiles: []string{},
+		NewFiles:      []string{"agent_file.txt"},
+		DeletedFiles:  []string{},
+		MetadataDir:   metadataDir,
+		CommitMessage: "Checkpoint 1",
+		AuthorName:    "Test",
+		AuthorEmail:   "test@test.com",
 	})
 	require.NoError(t, err)
 

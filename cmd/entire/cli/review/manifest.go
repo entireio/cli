@@ -14,7 +14,10 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	agenttypes "github.com/entireio/cli/cmd/entire/cli/agent/types"
+	"github.com/entireio/cli/cmd/entire/cli/gitdir"
+	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
+	"github.com/entireio/cli/cmd/entire/cli/osroot"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	reviewtypes "github.com/entireio/cli/cmd/entire/cli/review/types"
 	"github.com/entireio/cli/cmd/entire/cli/session"
@@ -428,7 +431,7 @@ func reviewTokenUsageForSession(ctx context.Context, st *session.State, lookup a
 			slog.String("error", err.Error()))
 		return nil
 	}
-	transcript, err := os.ReadFile(st.TranscriptPath)
+	transcript, err := agent.ReadTranscriptFile(st.TranscriptPath)
 	if err != nil {
 		logging.Debug(ctx, "review token usage: transcript read failed",
 			slog.String("session_id", st.SessionID),
@@ -698,11 +701,11 @@ func writeLocalReviewManifest(ctx context.Context, manifest LocalReviewManifest)
 		manifest.CreatedAt = time.Now()
 	}
 
-	dir, err := localReviewManifestDir(ctx)
+	root, dir, err := localReviewManifestStore(ctx)
 	if err != nil {
 		return err
 	}
-	if err := os.MkdirAll(dir, 0o700); err != nil {
+	if err := osroot.MkdirAllNoSymlink(root, dir, 0o700); err != nil {
 		return fmt.Errorf("create review manifest dir: %w", err)
 	}
 
@@ -710,19 +713,18 @@ func writeLocalReviewManifest(ctx context.Context, manifest LocalReviewManifest)
 	if err != nil {
 		return fmt.Errorf("encode review manifest: %w", err)
 	}
-	path := filepath.Join(dir, localReviewManifestFilename(manifest))
-	if err := os.WriteFile(path, b, 0o600); err != nil {
+	if err := jsonutil.WriteFileAtomicIn(root, dir+"/"+localReviewManifestFilename(manifest), b, 0o600); err != nil {
 		return fmt.Errorf("write review manifest: %w", err)
 	}
 	return nil
 }
 
 func loadLocalReviewManifests(ctx context.Context, worktreeRoot string) ([]LocalReviewManifest, error) {
-	dir, err := localReviewManifestDir(ctx)
+	root, dir, err := localReviewManifestStore(ctx)
 	if err != nil {
 		return nil, err
 	}
-	entries, err := os.ReadDir(dir)
+	entries, err := osroot.ReadDirNoSymlinks(root, dir)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, nil
 	}
@@ -735,7 +737,7 @@ func loadLocalReviewManifests(ctx context.Context, worktreeRoot string) ([]Local
 		if entry.IsDir() || filepath.Ext(entry.Name()) != ".json" {
 			continue
 		}
-		b, readErr := os.ReadFile(filepath.Join(dir, entry.Name())) //nolint:gosec // entry names come directly from os.ReadDir(dir).
+		b, readErr := osroot.ReadFileNoFollow(root, dir+"/"+entry.Name())
 		if readErr != nil {
 			return nil, fmt.Errorf("read review manifest %s: %w", entry.Name(), readErr)
 		}
@@ -754,23 +756,29 @@ func loadLocalReviewManifests(ctx context.Context, worktreeRoot string) ([]Local
 	return manifests, nil
 }
 
-func localReviewManifestDir(ctx context.Context) (string, error) {
+// localReviewManifestName is the manifest directory inside the git common dir.
+const localReviewManifestName = "entire-review/manifests"
+
+// localReviewManifestStore returns the shared *os.Root over the git common dir
+// and the manifest directory's name inside it.
+//
+// The common-dir resolution comes from gitdir rather than a fourth hand-rolled
+// `git rev-parse --git-common-dir` — this file had one, and it was the only copy
+// that remembered to resolve a relative answer against the worktree root.
+func localReviewManifestStore(ctx context.Context) (*os.Root, string, error) {
 	worktreeRoot, err := paths.WorktreeRoot(ctx)
 	if err != nil {
-		return "", fmt.Errorf("resolve worktree root: %w", err)
+		return nil, "", fmt.Errorf("resolve worktree root: %w", err)
 	}
-	commonDir, err := runGit(ctx, worktreeRoot, "rev-parse", "--git-common-dir")
+	commonDir, err := gitdir.CommonDirForWorktree(ctx, worktreeRoot)
 	if err != nil {
-		return "", fmt.Errorf("resolve git common dir: %w", err)
+		return nil, "", fmt.Errorf("resolve git common dir: %w", err)
 	}
-	commonDir = strings.TrimSpace(commonDir)
-	if commonDir == "" {
-		return "", errors.New("git common dir is empty")
+	root, err := gitdir.OpenAt(commonDir)
+	if err != nil {
+		return nil, "", fmt.Errorf("open git common dir: %w", err)
 	}
-	if !filepath.IsAbs(commonDir) {
-		commonDir = filepath.Join(worktreeRoot, commonDir)
-	}
-	return filepath.Join(commonDir, "entire-review", "manifests"), nil
+	return root, localReviewManifestName, nil
 }
 
 func localReviewManifestFilename(manifest LocalReviewManifest) string {

@@ -61,7 +61,7 @@ func (m *mockHookSupport) ParseHookEvent(_ context.Context, _ string, _ io.Reade
 }
 func (m *mockHookSupport) InstallHooks(_ context.Context, _ bool) (int, error) { return 0, nil }
 func (m *mockHookSupport) UninstallHooks(_ context.Context) error              { return nil }
-func (m *mockHookSupport) AreHooksInstalled(_ context.Context) bool            { return false }
+func (m *mockHookSupport) AreHooksInstalled(_ context.Context) (bool, error)   { return false, nil }
 
 // mockFileWatcher implements both Agent and FileWatcher interfaces.
 type mockFileWatcher struct {
@@ -130,30 +130,6 @@ func TestHookTypeConstants(t *testing.T) {
 
 			if string(tt.hookType) != tt.expected {
 				t.Errorf("expected %q, got %q", tt.expected, string(tt.hookType))
-			}
-		})
-	}
-}
-
-func TestEntryTypeConstants(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		entryType EntryType
-		expected  string
-	}{
-		{EntryUser, "user"},
-		{EntryAssistant, "assistant"},
-		{EntryTool, "tool"},
-		{EntrySystem, "system"},
-	}
-
-	for _, tt := range tests {
-		t.Run(string(tt.entryType), func(t *testing.T) {
-			t.Parallel()
-
-			if string(tt.entryType) != tt.expected {
-				t.Errorf("expected %q, got %q", tt.expected, string(tt.entryType))
 			}
 		})
 	}

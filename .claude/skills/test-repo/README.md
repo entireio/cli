@@ -61,5 +61,5 @@ This runs the full test suite and is the recommended approach for validation.
 The test harness is most useful for:
 - Debugging specific strategy behaviors
 - Manual verification of edge cases
-- Interactive exploration of the checkpoint/rewind workflow
+- Interactive exploration of the checkpoint workflow
 - Understanding how the system works step-by-step

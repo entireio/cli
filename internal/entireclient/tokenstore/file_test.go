@@ -417,3 +417,81 @@ func TestLoosePermsWarnWriter_DefaultsToStderr(t *testing.T) {
 		t.Fatalf("loosePermsWarnW default = %T, want the process stderr", loosePermsWarnW)
 	}
 }
+
+// A path the user pointed us at with ENTIRE_TOKEN_STORE_PATH names a
+// directory Entire did not choose — a CI secret mount, a shared secrets
+// directory, or $HOME itself. Tightening it is a side effect nobody asked
+// for, and on a mount the caller doesn't own the chmod fails and takes every
+// Get/Set/Delete with it.
+func TestFileStore_LeavesUnownedDirectoryModeAlone(t *testing.T) {
+	if runtime.GOOS == goosWindows {
+		t.Skip("unix permission bits are synthetic on Windows")
+	}
+	t.Parallel()
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	s := &fileStore{path: filepath.Join(dir, "tokens.json")}
+
+	if err := s.Set("svc", "alice", "secret"); err != nil {
+		t.Fatal(err)
+	}
+
+	info, err := os.Stat(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := info.Mode().Perm(); got != 0o755 {
+		t.Errorf("directory mode = %04o, want 0755 left as the user set it", got)
+	}
+}
+
+// The default location is Entire's own config directory, shared with
+// contexts.json, and a mode-0755 one left behind by an early version check is
+// exactly what EnsurePrivateDir exists to repair.
+func TestFileStore_TightensOwnedDirectory(t *testing.T) {
+	if runtime.GOOS == goosWindows {
+		t.Skip("unix permission bits are synthetic on Windows")
+	}
+	t.Parallel()
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	s := &fileStore{path: filepath.Join(dir, "tokens.json"), ownsDir: true}
+
+	if err := s.Set("svc", "alice", "secret"); err != nil {
+		t.Fatal(err)
+	}
+
+	info, err := os.Stat(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := info.Mode().Perm(); got&0o077 != 0 {
+		t.Errorf("directory mode = %04o, still accessible by group/other", got)
+	}
+}
+
+func TestResolveBackend_OwnsDirOnlyForTheDefaultPath(t *testing.T) {
+	t.Setenv(BackendEnvVar, "file")
+
+	t.Setenv(PathEnvVar, "")
+	def, ok := resolveBackendLocked().(*fileStore)
+	if !ok {
+		t.Fatalf("default path: got %T, want *fileStore", resolveBackendLocked())
+	}
+	if !def.ownsDir {
+		t.Error("default path: ownsDir = false, want true")
+	}
+
+	t.Setenv(PathEnvVar, filepath.Join(t.TempDir(), "tokens.json"))
+	custom, ok := resolveBackendLocked().(*fileStore)
+	if !ok {
+		t.Fatalf("custom path: got %T, want *fileStore", resolveBackendLocked())
+	}
+	if custom.ownsDir {
+		t.Error("custom path: ownsDir = true, want false")
+	}
+}

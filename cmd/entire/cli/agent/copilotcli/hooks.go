@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
@@ -32,23 +31,37 @@ var hookConfigKey = map[string]string{
 	HookNameErrorOccurred:       "errorOccurred",
 }
 
+// copilotHookConfig returns .github/hooks/entire.json for the current worktree,
+// opened through the worktree's root. That directory lives in the working tree,
+// which arrives by clone, so a checked-in symlink at `.github` or
+// `.github/hooks` must not be something Entire creates directories under and
+// writes through. See agent.HookConfigFile.
+func copilotHookConfig(ctx context.Context) (*agent.HookConfigFile, error) {
+	worktreeRoot, err := paths.WorktreeRoot(ctx)
+	if err != nil {
+		// Not a repository (tests, and `enable` before `git init`): the process
+		// directory is the only candidate, and it is a directory the caller
+		// chose rather than one derived from anything read off disk.
+		worktreeRoot = "."
+	}
+	return agent.OpenHookConfig(worktreeRoot, hooksDir+"/"+HooksFileName) //nolint:wrapcheck // agent.HookConfigFile already names the file in its error
+}
+
 // InstallHooks installs Copilot CLI hooks in .github/hooks/entire.json.
 // If force is true, removes existing Entire hooks before installing.
 // Returns the number of hooks installed.
 // Unknown top-level fields and hook types are preserved on round-trip.
 func (c *CopilotCLIAgent) InstallHooks(ctx context.Context, force bool) (int, error) {
-	worktreeRoot, err := paths.WorktreeRoot(ctx)
+	cfg, err := copilotHookConfig(ctx)
 	if err != nil {
-		worktreeRoot = "."
+		return 0, err
 	}
-
-	hooksPath := filepath.Join(worktreeRoot, hooksDir, HooksFileName)
 
 	// Use raw maps to preserve unknown fields on round-trip
 	var rawFile map[string]json.RawMessage
 	var rawHooks map[string]json.RawMessage
 
-	existingData, readErr := os.ReadFile(hooksPath) //nolint:gosec // path is constructed from repo root + fixed path
+	existingData, readErr := cfg.Read()
 	switch {
 	case readErr == nil:
 		if err := json.Unmarshal(existingData, &rawFile); err != nil {
@@ -150,17 +163,13 @@ func (c *CopilotCLIAgent) InstallHooks(ctx context.Context, force bool) (int, er
 	rawFile["hooks"] = hooksJSON
 
 	// Write to file
-	if err := os.MkdirAll(filepath.Dir(hooksPath), 0o750); err != nil {
-		return 0, fmt.Errorf("failed to create %s directory: %w", hooksDir, err)
-	}
-
 	output, err := jsonutil.MarshalIndentWithNewline(rawFile, "", "  ")
 	if err != nil {
 		return 0, fmt.Errorf("failed to marshal %s: %w", HooksFileName, err)
 	}
 
-	if err := os.WriteFile(hooksPath, output, 0o600); err != nil {
-		return 0, fmt.Errorf("failed to write %s: %w", HooksFileName, err)
+	if err := cfg.Write(output, 0o600); err != nil {
+		return 0, err //nolint:wrapcheck // agent.HookConfigFile already names the file in its error
 	}
 
 	return count, nil
@@ -169,12 +178,11 @@ func (c *CopilotCLIAgent) InstallHooks(ctx context.Context, force bool) (int, er
 // UninstallHooks removes Entire hooks from Copilot CLI's entire.json.
 // Unknown top-level fields and hook types are preserved on round-trip.
 func (c *CopilotCLIAgent) UninstallHooks(ctx context.Context) error {
-	worktreeRoot, err := paths.WorktreeRoot(ctx)
+	cfg, err := copilotHookConfig(ctx)
 	if err != nil {
-		worktreeRoot = "."
+		return err
 	}
-	hooksPath := filepath.Join(worktreeRoot, hooksDir, HooksFileName)
-	data, err := os.ReadFile(hooksPath) //nolint:gosec // path is constructed from repo root + fixed path
+	data, err := cfg.Read()
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return nil // No hooks file means nothing to uninstall
@@ -227,31 +235,36 @@ func (c *CopilotCLIAgent) UninstallHooks(ctx context.Context) error {
 		return fmt.Errorf("failed to marshal %s: %w", HooksFileName, err)
 	}
 
-	if err := os.WriteFile(hooksPath, output, 0o600); err != nil {
-		return fmt.Errorf("failed to write %s: %w", HooksFileName, err)
+	if err := cfg.Write(output, 0o600); err != nil {
+		return err //nolint:wrapcheck // agent.HookConfigFile already names the file in its error
 	}
 	return nil
 }
 
-// AreHooksInstalled checks if Entire hooks are installed in the Copilot CLI config.
-func (c *CopilotCLIAgent) AreHooksInstalled(ctx context.Context) bool {
-	worktreeRoot, err := paths.WorktreeRoot(ctx)
+// AreHooksInstalled checks if Entire hooks are installed in the Copilot CLI
+// config.
+//
+// A missing config file is an answer — no hooks — while an unreadable or
+// malformed one is an error: "we could not tell" and "there are none" are
+// different things to a caller deciding whether hooks can be left alone.
+func (c *CopilotCLIAgent) AreHooksInstalled(ctx context.Context) (bool, error) {
+	cfg, err := copilotHookConfig(ctx)
 	if err != nil {
-		worktreeRoot = "."
+		return false, err
 	}
-	hooksPath := filepath.Join(worktreeRoot, hooksDir, HooksFileName)
-	data, err := os.ReadFile(hooksPath) //nolint:gosec // path is constructed from repo root + fixed path
+	data, err := cfg.Read()
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
 	if err != nil {
-		if !errors.Is(err, os.ErrNotExist) {
-			logging.Warn(ctx, "copilot-cli: failed to read hooks file", "path", hooksPath, "err", err)
-		}
-		return false
+		logging.Warn(ctx, "copilot-cli: failed to read hooks file", "path", cfg.Path(), "err", err)
+		return false, fmt.Errorf("read %s: %w", cfg.Path(), err)
 	}
 
 	var hooksFile CopilotHooksFile
 	if err := json.Unmarshal(data, &hooksFile); err != nil {
-		logging.Warn(ctx, "copilot-cli: failed to parse hooks file", "path", hooksPath, "err", err)
-		return false
+		logging.Warn(ctx, "copilot-cli: failed to parse hooks file", "path", cfg.Path(), "err", err)
+		return false, fmt.Errorf("parse %s: %w", cfg.Path(), err)
 	}
 
 	return hasEntireHook(hooksFile.Hooks.UserPromptSubmitted) ||
@@ -261,7 +274,7 @@ func (c *CopilotCLIAgent) AreHooksInstalled(ctx context.Context) bool {
 		hasEntireHook(hooksFile.Hooks.SubagentStop) ||
 		hasEntireHook(hooksFile.Hooks.PreToolUse) ||
 		hasEntireHook(hooksFile.Hooks.PostToolUse) ||
-		hasEntireHook(hooksFile.Hooks.ErrorOccurred)
+		hasEntireHook(hooksFile.Hooks.ErrorOccurred), nil
 }
 
 // GetSupportedHooks returns the normalized lifecycle events this agent supports.

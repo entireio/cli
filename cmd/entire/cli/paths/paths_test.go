@@ -105,8 +105,9 @@ func TestCaseInsensitiveFS(t *testing.T) {
 }
 
 // TestIsSubpath_AlwaysCaseSensitive locks in that IsSubpath — the fail-closed
-// containment primitive used by allow gates (rewind/utils) — never folds case
-// on any OS. A differently-cased path must not count as contained, or a
+// containment primitive used by allow gates (utils.go, and strategy's
+// nested-worktree check) — never folds case on any OS. A differently-cased
+// path must not count as contained, or a
 // crafted, attacker-influenced value could fail open on a case-sensitive volume.
 func TestIsSubpath_AlwaysCaseSensitive(t *testing.T) {
 	t.Parallel()

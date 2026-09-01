@@ -12,12 +12,12 @@ import (
 )
 
 // GetTaskCheckpoint retrieves a task checkpoint.
-func (s *ManualCommitStrategy) GetTaskCheckpoint(ctx context.Context, point RewindPoint) (*TaskCheckpoint, error) {
+func (s *ManualCommitStrategy) GetTaskCheckpoint(ctx context.Context, point PendingCheckpoint) (*TaskCheckpoint, error) {
 	return getTaskCheckpointFromTree(ctx, point)
 }
 
 // GetTaskCheckpointTranscript retrieves the transcript for a task checkpoint.
-func (s *ManualCommitStrategy) GetTaskCheckpointTranscript(ctx context.Context, point RewindPoint) ([]byte, error) {
+func (s *ManualCommitStrategy) GetTaskCheckpointTranscript(ctx context.Context, point PendingCheckpoint) ([]byte, error) {
 	return getTaskTranscriptFromTree(ctx, point)
 }
 

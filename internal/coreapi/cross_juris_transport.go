@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/entireio/cli/cmd/entire/cli/versioninfo"
 	"github.com/entireio/cli/internal/entireclient/httpclient"
 	"github.com/entireio/cli/internal/entireclient/httputil"
 )
@@ -25,7 +26,11 @@ import (
 // home jurisdiction is another region. Inert for same-jurisdiction calls.
 func newCrossJurisHTTPClient() *http.Client {
 	return &http.Client{
-		Transport: newCrossJurisRoundTripper(httpclient.NewTransport(false)),
+		// The User-Agent wrapper goes *under* the cross-juris round tripper,
+		// not over it. That transport sends requests it builds itself — the
+		// RFC 8693 exchange and the federation manifest fetch, both straight
+		// to t.base — and those bypass anything wrapped outside it.
+		Transport: newCrossJurisRoundTripper(versioninfo.WrapTransport(httpclient.NewTransport(false))),
 	}
 }
 

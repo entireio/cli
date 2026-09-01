@@ -55,18 +55,18 @@ func newCheckpointSearchCmd() *cobra.Command {
 }
 
 // newCheckpointListCmd wraps the existing branch-default list view and adds
-// machine-readable (--json) and pending-rewind-point (--pending) modes.
+// machine-readable (--json) and pending-checkpoint (--pending) modes.
 //
 // Dataset/format matrix:
 //
 //	(default)            condensed checkpoints on the branch, human view (pager)
 //	--json               condensed checkpoints as JSON (branchCheckpointJSON shape)
-//	--pending            live shadow-branch rewind points, human list
-//	--pending --json     live shadow-branch rewind points as JSON — the drop-in
+//	--pending            pending checkpoints (live + logs-only), human list
+//	--pending --json     pending checkpoints as JSON — the drop-in
 //	                     replacement for the deprecated `rewind --list` bridge
 //
 // The condensed dataset (entire/checkpoints/v1 for the branch) and the pending
-// dataset (strategy.GetRewindPoints; task checkpoints, logs-only points,
+// dataset (strategy.ListPendingCheckpoints; task checkpoints, logs-only points,
 // condensation IDs) are deliberately distinct — see issue #1767.
 func newCheckpointListCmd() *cobra.Command {
 	var sessionFlag string
@@ -80,13 +80,15 @@ func newCheckpointListCmd() *cobra.Command {
 		Long: `List checkpoints on the current branch.
 
 By default shows condensed checkpoints from the checkpoints branch for the
-current branch. Use --pending to list the live session's shadow-branch rewind
-points instead (task checkpoints, logs-only points, condensation IDs).
+current branch. Use --pending for the resume view instead: live checkpoints on
+the session's shadow branch (not yet condensed), plus logs-only resume points
+recovered from commits whose logs are already condensed.
 
 Output modes:
   --json             Machine-readable JSON instead of the human view.
-  --pending          Select the live shadow-branch rewind-point dataset.
-  --pending --json   Rewind points as JSON (replaces the deprecated rewind --list).
+  --pending          Select the pending dataset: live shadow-branch
+                     checkpoints plus logs-only resume points.
+  --pending --json   Pending checkpoints as JSON (replaces the deprecated rewind --list).
 
 Optionally filter condensed checkpoints by session ID with --session
 (not applicable with --pending).`,
@@ -120,6 +122,6 @@ Optionally filter condensed checkpoints by session ID with --session
 	cmd.Flags().StringVar(&sessionFlag, "session", "", "Filter checkpoints by session ID (or prefix)")
 	cmd.Flags().BoolVar(&noPagerFlag, "no-pager", false, "Disable pager output")
 	cmd.Flags().BoolVar(&jsonFlag, "json", false, "Output as JSON instead of the human view")
-	cmd.Flags().BoolVar(&pendingFlag, "pending", false, "List the live session's shadow-branch rewind points instead of condensed checkpoints")
+	cmd.Flags().BoolVar(&pendingFlag, "pending", false, "List pending checkpoints — live shadow-branch state plus logs-only resume points")
 	return cmd
 }

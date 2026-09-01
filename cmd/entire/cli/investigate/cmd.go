@@ -2,7 +2,6 @@ package investigate
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -311,9 +310,9 @@ func newCleanSubcommand(deps Deps) *cobra.Command {
 				Out:    cmd.OutOrStdout(),
 				ErrOut: cmd.ErrOrStderr(),
 			}, CleanDeps{
-				ManifestStore: store,
-				RunDir:        stateStore.RunDir,
-				ManifestPath:  store.PathFor,
+				ManifestStore:  store,
+				RemoveRun:      stateStore.RemoveRun,
+				RemoveManifest: store.Remove,
 			})
 		},
 	}
@@ -455,16 +454,21 @@ func runEdit(ctx context.Context, cmd *cobra.Command, deps Deps) error {
 // reading the local file first, mutating, and writing it back. The
 // committed .entire/settings.json is never touched.
 func saveInvestigateConfig(ctx context.Context, cfg *settings.InvestigateConfig) error {
-	path, raw, _, err := settings.LoadLocalRaw(ctx)
-	if err != nil {
-		return fmt.Errorf("load local settings: %w", err)
+	local := &settings.EntireSettings{}
+	data, readErr := settings.LoadLocalBytes(ctx)
+	if readErr != nil {
+		return fmt.Errorf("read local settings: %w", readErr)
 	}
-	investigateJSON, err := json.Marshal(cfg)
-	if err != nil {
-		return fmt.Errorf("marshal investigate settings: %w", err)
+	if len(data) > 0 {
+		var err error
+		local, err = settings.LoadFromBytes(data)
+		if err != nil {
+			return fmt.Errorf("parse local settings: %w", err)
+		}
 	}
-	raw["investigate"] = investigateJSON
-	if err := settings.SaveLocalRaw(path, raw); err != nil {
+
+	local.Investigate = cfg
+	if err := settings.SaveLocal(ctx, local); err != nil {
 		return fmt.Errorf("save local settings: %w", err)
 	}
 	return nil
@@ -713,10 +717,19 @@ func runFresh(ctx context.Context, cmd *cobra.Command, args []string, f runFlags
 		Topic:          topicForBootstrap(topic, seedDoc, issueSeed),
 		IssueLinkSeed:  issueSeed,
 		IssueLinkTopic: issueTopic,
-		FindingsDoc:    findingsDoc,
 	})
 	if err != nil {
 		return fmt.Errorf("bootstrap docs: %w", err)
+	}
+	// Bootstrap renders; the store writes. findingsDoc below is the same file,
+	// kept as a path only because the manifest records where it lives and the
+	// investigating agent is told where to edit.
+	bootstrapStore, err := NewStateStore(ctx)
+	if err != nil {
+		return fmt.Errorf("open run state store: %w", err)
+	}
+	if err := bootstrapStore.WriteFindings(runID, bres.Body); err != nil {
+		return fmt.Errorf("write findings doc: %w", err)
 	}
 	if strings.TrimSpace(bres.Topic) != "" {
 		topic = bres.Topic
@@ -881,7 +894,7 @@ func topicForBootstrap(topic, seedDoc string, issueSeed []byte) string {
 // clean — investigation findings are session-scoped scratch space, not
 // part of the user's source tree.
 func resolveDocPaths(commonDir, runID string) string {
-	return filepath.Join(commonDir, InvestigationsDirName, runID, "findings.md")
+	return filepath.Join(commonDir, InvestigationsDirName, runID, FindingsFileName)
 }
 
 // executeLoopAndCapture runs the loop and returns the LoopResult so the
@@ -982,6 +995,20 @@ func writeRunManifest(
 		endedAt = time.Now().UTC()
 	}
 
+	// One store for the three things below that touch the per-run directory:
+	// reading findings.md into the manifest, deleting the directory once that
+	// succeeded, and rendering the footer. Each resolves the run id as a name
+	// inside the store's root rather than following m.FindingsDoc, which is a
+	// path this function only carries so the manifest can record it.
+	//
+	// A store that will not open is soft: the manifest is still written, just
+	// without the findings body, and nothing is deleted.
+	stateStore, storeErr := NewStateStore(ctx)
+	if storeErr != nil {
+		logging.Debug(ctx, "investigate: open run state store",
+			slog.String("err", storeErr.Error()), slog.String("run_id", runID))
+	}
+
 	// Capture findings into the manifest on terminal outcomes so the
 	// content survives even after the per-run dir is deleted. Failure to
 	// read is logged but non-fatal — the manifest still records that
@@ -991,12 +1018,13 @@ func writeRunManifest(
 	terminal := result.Outcome == OutcomeQuorum || result.Outcome == OutcomeStalled
 	findingsContent := ""
 	captured := false
-	if terminal && findingsDoc != "" {
-		data, readErr := os.ReadFile(findingsDoc) //nolint:gosec // path computed from runID + git common dir
-		if readErr != nil {
+	if terminal && stateStore != nil {
+		data, found, readErr := stateStore.ReadFindings(runID)
+		switch {
+		case readErr != nil:
 			logging.Debug(ctx, "investigate: read findings for manifest capture",
 				slog.String("err", readErr.Error()), slog.String("run_id", runID))
-		} else {
+		case found:
 			findingsContent = string(data)
 			captured = true
 		}
@@ -1027,15 +1055,19 @@ func writeRunManifest(
 	// modes safe: a manifest write failure leaves the per-run dir intact
 	// (for retry/inspection); a read failure leaves the file on disk so
 	// the user can recover it.
-	if terminal && captured && findingsDoc != "" {
-		runDir := filepath.Dir(findingsDoc)
-		if rmErr := os.RemoveAll(runDir); rmErr != nil {
+	//
+	// Removal goes through the store by run id rather than through
+	// filepath.Dir(findingsDoc). Deriving the directory to delete from the path
+	// of a file inside it means the delete lands wherever that path points; the
+	// id resolves as a name inside the git common dir instead.
+	if terminal && captured && stateStore != nil {
+		if rmErr := stateStore.RemoveRun(runID); rmErr != nil {
 			logging.Debug(ctx, "investigate: cleanup per-run dir",
 				slog.String("err", rmErr.Error()), slog.String("run_id", runID))
 		}
 	}
 
-	writeInvestigateFooter(out, m)
+	writeInvestigateFooter(stateStore, out, m)
 }
 
 // writeInvestigateFooter prints the post-run summary, the findings
@@ -1043,7 +1075,7 @@ func writeRunManifest(
 // content comes from the manifest's embedded FindingsContent on
 // terminal outcomes (Quorum/Stalled — the per-run dir is gone); on
 // paused/cancelled outcomes findings.md is read from the per-run dir.
-func writeInvestigateFooter(w io.Writer, m LocalManifest) {
+func writeInvestigateFooter(store *StateStore, w io.Writer, m LocalManifest) {
 	fmt.Fprintln(w)
 	if m.Outcome != "" {
 		fmt.Fprintf(w, "Outcome: %s\n", m.Outcome)
@@ -1059,7 +1091,7 @@ func writeInvestigateFooter(w io.Writer, m LocalManifest) {
 	}
 	fmt.Fprintln(w)
 
-	body := findingsContentFor(m)
+	body := findingsContentFor(store, m)
 	if body != "" {
 		writeRenderedFindings(w, body)
 		fmt.Fprintln(w)
@@ -1081,20 +1113,15 @@ func writeInvestigateFooter(w io.Writer, m LocalManifest) {
 // findingsContentFor returns the findings body to render in the footer.
 // Prefers the manifest's embedded content (set on terminal outcomes
 // when the per-run dir has been cleaned); falls back to reading the
-// on-disk findings.md for paused/cancelled outcomes. Errors and
-// missing files both yield "" — the caller prints a shorter footer.
-func findingsContentFor(m LocalManifest) string {
+// per-run findings document, resolved by run id, for paused/cancelled
+// outcomes. Errors and missing files both yield "" — the caller prints a
+// shorter footer.
+func findingsContentFor(store *StateStore, m LocalManifest) string {
 	if m.FindingsContent != "" {
 		return m.FindingsContent
 	}
-	if m.FindingsDoc == "" {
-		return ""
-	}
-	data, err := os.ReadFile(m.FindingsDoc)
-	if err != nil {
-		return ""
-	}
-	return string(data)
+	// By run id rather than through m.FindingsDoc — see ReadRunFindings.
+	return ReadRunFindings(store, m.RunID)
 }
 
 // newRunID returns a fresh 12-hex-char run identifier, sharing the

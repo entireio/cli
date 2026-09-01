@@ -6,9 +6,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"log/slog"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -21,12 +23,15 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/remote"
+	"github.com/entireio/cli/cmd/entire/cli/entiredir"
 	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/entireio/cli/cmd/entire/cli/interactive"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
+	"github.com/entireio/cli/cmd/entire/cli/osroot"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/cmd/entire/cli/vercelconfig"
+	"github.com/entireio/cli/cmd/entire/cli/worktreedir"
 	"github.com/entireio/cli/redact"
 
 	"github.com/go-git/go-git/v6"
@@ -369,7 +374,7 @@ const (
 )
 
 // isProtectedPath returns true if relPath is inside a directory that should
-// never be modified or deleted during rewind or other destructive operations.
+// never be recorded as session changes or captured into a checkpoint.
 // Protected directories include git internals, entire metadata, and all
 // registered agent config directories.
 func isProtectedPath(relPath string) bool {
@@ -513,14 +518,20 @@ func EnsureRedactionConfigured(ctx context.Context) error {
 		if s.Redaction != nil {
 			inline = s.Redaction.CustomRedactions
 		}
-		packsRelPath := filepath.Join(paths.EntireDir, redact.RedactorsDirName)
-		packsDir, perr := paths.AbsPath(ctx, packsRelPath)
-		if perr != nil {
-			logCtx := logging.WithComponent(ctx, "redaction")
-			logging.Warn(logCtx, "failed to resolve redactors path", slog.String("error", perr.Error()))
-			packsDir = packsRelPath
+		var packs []*redact.Pack
+		var lerr error
+		// Packs are discovered at the WORKTREE anchor, not the routed runtime
+		// base: a committed .entire/redactors/ is repo content the user put
+		// there — a globally tracked repo can carry one without pinning
+		// routing to the worktree — and the runtime root never holds packs.
+		if worktreeRoot, werr := paths.WorktreeRoot(ctx); werr == nil {
+			if root, rerr := entiredir.OpenAtForRead(worktreeRoot); rerr == nil {
+				packs, lerr = redact.LoadPacks(root.FS(), redact.RedactorsDirName, logger)
+			} else if !errors.Is(rerr, fs.ErrNotExist) {
+				logCtx := logging.WithComponent(ctx, "redaction")
+				logging.Warn(logCtx, "failed to open .entire for redactor packs", slog.String("error", rerr.Error()))
+			}
 		}
-		packs, lerr := redact.LoadPacks(packsDir, logger)
 		if lerr != nil {
 			warnUser(ctx, "redaction",
 				"failed to load redactor packs",
@@ -600,13 +611,13 @@ func maybeWarnNarrowedScanners(ctx context.Context, s *settings.EntireSettings) 
 		return
 	}
 	const marker = "betterleaks=false goredact=true\n"
-	markerRel := filepath.Join(paths.EntireDir, "tmp", "scanner-notice")
-	markerAbs, err := paths.AbsPath(ctx, markerRel)
-	if err != nil {
-		markerAbs = markerRel
-	}
-	if prev, rerr := os.ReadFile(markerAbs); rerr == nil && string(prev) == marker { //nolint:gosec // path is from AbsPath or constant
-		return
+	markerName := entiredir.MustName(paths.EntireTmpDir) + "/scanner-notice"
+	// Read without creating: a repo that has never made .entire has no marker,
+	// and the warning below is what earns the directory.
+	if root, rerr := entiredir.OpenForRead(ctx); rerr == nil {
+		if prev, prerr := entiredir.ReadFile(root, markerName); prerr == nil && string(prev) == marker {
+			return
+		}
 	}
 	// warnUser always logs but prints only on a TTY: if the first fire is in a
 	// non-TTY hook the notice is log-only and the marker still suppresses later
@@ -615,8 +626,14 @@ func maybeWarnNarrowedScanners(ctx context.Context, s *settings.EntireSettings) 
 		"betterleaks scanning disabled; checkpoint redaction narrowed to the remaining layers plus goredact",
 		"betterleaks scanning is disabled in .entire/settings.json; checkpoint redaction relies on the remaining layers plus goredact.",
 	)
-	_ = os.MkdirAll(filepath.Dir(markerAbs), 0o750)    //nolint:errcheck // best-effort marker; failure degrades to warning every run
-	_ = os.WriteFile(markerAbs, []byte(marker), 0o640) //nolint:errcheck,gosec // best-effort non-sensitive marker file
+	root, err := entiredir.Open(ctx)
+	if err != nil {
+		return
+	}
+	//nolint:errcheck // best-effort marker; failure degrades to warning every run
+	_ = osroot.MkdirAllNoSymlink(root, path.Dir(markerName), 0o750)
+	//nolint:errcheck // best-effort non-sensitive marker file
+	_ = entiredir.WriteFile(root, markerName, []byte(marker), 0o640)
 }
 
 // resolveAgentType picks the best agent type from the context and existing state.
@@ -1421,15 +1438,17 @@ func GetGitCommonDir(ctx context.Context) (string, error) {
 // EnsureEntireGitignore ensures all required entries are in .entire/.gitignore
 // Works correctly from any subdirectory within the repository.
 func EnsureEntireGitignore(ctx context.Context) error {
-	// Get absolute path for the gitignore file
-	gitignoreAbs, err := paths.AbsPath(ctx, entireGitignore)
+	// Open (creating if needed) the shared .entire root; the gitignore lives at
+	// its top level, so the root is also the directory this would have created.
+	root, err := entiredir.Open(ctx)
 	if err != nil {
-		gitignoreAbs = entireGitignore // Fallback to relative
+		return fmt.Errorf("failed to create .entire directory: %w", err)
 	}
+	gitignoreName := entiredir.MustName(entireGitignore)
 
 	// Read existing content
 	var content string
-	if data, err := os.ReadFile(gitignoreAbs); err == nil { //nolint:gosec // path is from AbsPath or constant
+	if data, rerr := entiredir.ReadFile(root, gitignoreName); rerr == nil {
 		content = string(data)
 	}
 
@@ -1455,11 +1474,6 @@ func EnsureEntireGitignore(ctx context.Context) error {
 		return nil
 	}
 
-	// Ensure .entire directory exists
-	if err := os.MkdirAll(filepath.Dir(gitignoreAbs), 0o750); err != nil {
-		return fmt.Errorf("failed to create .entire directory: %w", err)
-	}
-
 	// Append missing entries to gitignore
 	var sb strings.Builder
 	for _, entry := range toAdd {
@@ -1467,201 +1481,31 @@ func EnsureEntireGitignore(ctx context.Context) error {
 	}
 	content += sb.String()
 
-	if err := os.WriteFile(gitignoreAbs, []byte(content), 0o644); err != nil { //nolint:gosec // path is from AbsPath or constant
+	if err := entiredir.WriteFile(root, gitignoreName, []byte(content), 0o644); err != nil {
 		return fmt.Errorf("failed to write gitignore: %w", err)
 	}
 	return nil
 }
 
-// checkCanRewindWithWarning checks working directory and returns a warning with diff stats.
-// Always returns canRewind=true but includes a warning message with +/- line stats for
-// uncommitted changes. Used by manual-commit strategy.
-func checkCanRewindWithWarning(ctx context.Context) (bool, string, error) {
-	repo, err := OpenRepository(ctx)
+// readWorktreeFile reads a repo-relative file through the worktree's shared
+// root. The names come from git status, so they are already the coordinate the
+// root reads in — joining them onto repoRoot and reading the result was the
+// thing that made "which directory is this relative to?" a per-call-site
+// question.
+func readWorktreeFile(repoRoot, file string) ([]byte, error) {
+	root, err := worktreedir.OpenAt(repoRoot)
 	if err != nil {
-		// Can't open repo - still allow rewind but without stats
-		return true, "", nil
+		return nil, fmt.Errorf("open worktree root: %w", err)
 	}
-	defer repo.Close()
-
-	status, err := gitrepo.Status(ctx, repo)
+	name, err := worktreedir.Name(repoRoot, file)
 	if err != nil {
-		return true, "", nil
+		return nil, fmt.Errorf("resolve %s in worktree: %w", file, err)
 	}
-
-	if status.IsClean() {
-		return true, "", nil
-	}
-
-	// Get HEAD commit tree for comparison - if we can't get it, just return without stats
-	head, err := repo.Head()
+	content, err := osroot.ReadFileNoFollow(root, name)
 	if err != nil {
-		return true, "", nil
+		return nil, fmt.Errorf("read %s: %w", file, err)
 	}
-
-	headCommit, err := repo.CommitObject(head.Hash())
-	if err != nil {
-		return true, "", nil
-	}
-
-	headTree, err := headCommit.Tree()
-	if err != nil {
-		return true, "", nil
-	}
-
-	type fileChange struct {
-		status   string // "modified", "added", "deleted"
-		added    int
-		removed  int
-		filename string
-	}
-
-	var changes []fileChange
-	// Use repo root, not cwd - git status returns paths relative to repo root
-	repoRoot, err := paths.WorktreeRoot(ctx)
-	if err != nil {
-		return true, "", nil
-	}
-
-	for file, st := range status {
-		// Skip .entire directory
-		if paths.IsInfrastructurePath(file) {
-			continue
-		}
-
-		// Skip untracked files
-		if st.Worktree == git.Untracked {
-			continue
-		}
-
-		var change fileChange
-		change.filename = file
-
-		switch {
-		case st.Staging == git.Added || st.Worktree == git.Added:
-			change.status = "added"
-			// New file - count all lines as added
-			absPath := filepath.Join(repoRoot, file)
-			if content, err := os.ReadFile(absPath); err == nil { //nolint:gosec // absPath is repo root + relative path from git status
-				change.added = countLines(content)
-			}
-		case st.Staging == git.Deleted || st.Worktree == git.Deleted:
-			change.status = "deleted"
-			// Deleted file - count lines from HEAD as removed
-			if entry, err := headTree.File(file); err == nil {
-				if content, err := entry.Contents(); err == nil {
-					change.removed = countLines([]byte(content))
-				}
-			}
-		case st.Staging == git.Modified || st.Worktree == git.Modified:
-			change.status = "modified"
-			// Modified file - compute diff stats
-			var headContent, workContent []byte
-			if entry, err := headTree.File(file); err == nil {
-				if content, err := entry.Contents(); err == nil {
-					headContent = []byte(content)
-				}
-			}
-			absPath := filepath.Join(repoRoot, file)
-			if content, err := os.ReadFile(absPath); err == nil { //nolint:gosec // absPath is repo root + relative path from git status
-				workContent = content
-			}
-			if headContent != nil && workContent != nil {
-				change.added, change.removed = computeDiffStats(headContent, workContent)
-			}
-		default:
-			continue
-		}
-
-		changes = append(changes, change)
-	}
-
-	if len(changes) == 0 {
-		return true, "", nil
-	}
-
-	// Sort changes by filename for consistent output
-	sort.Slice(changes, func(i, j int) bool {
-		return changes[i].filename < changes[j].filename
-	})
-
-	var msg strings.Builder
-	msg.WriteString("The following uncommitted changes will be reverted:\n")
-
-	totalAdded, totalRemoved := 0, 0
-	for _, c := range changes {
-		totalAdded += c.added
-		totalRemoved += c.removed
-
-		var stats string
-		switch {
-		case c.added > 0 && c.removed > 0:
-			stats = fmt.Sprintf("+%d/-%d", c.added, c.removed)
-		case c.added > 0:
-			stats = fmt.Sprintf("+%d", c.added)
-		case c.removed > 0:
-			stats = fmt.Sprintf("-%d", c.removed)
-		}
-
-		fmt.Fprintf(&msg, "  %-10s %s", c.status+":", c.filename)
-		if stats != "" {
-			fmt.Fprintf(&msg, " (%s)", stats)
-		}
-		msg.WriteString("\n")
-	}
-
-	if totalAdded > 0 || totalRemoved > 0 {
-		fmt.Fprintf(&msg, "\nTotal: +%d/-%d lines\n", totalAdded, totalRemoved)
-	}
-
-	return true, msg.String(), nil
-}
-
-// countLines counts the number of lines in content.
-func countLines(content []byte) int {
-	if len(content) == 0 {
-		return 0
-	}
-	count := 1
-	for _, b := range content {
-		if b == '\n' {
-			count++
-		}
-	}
-	// Don't count trailing newline as extra line
-	if len(content) > 0 && content[len(content)-1] == '\n' {
-		count--
-	}
-	return count
-}
-
-// computeDiffStats computes added and removed line counts between old and new content.
-// Uses a simple line-based diff algorithm.
-func computeDiffStats(oldContent, newContent []byte) (added, removed int) {
-	oldLines := splitLines(oldContent)
-	newLines := splitLines(newContent)
-
-	// Build a set of old lines with counts
-	oldSet := make(map[string]int)
-	for _, line := range oldLines {
-		oldSet[line]++
-	}
-
-	// Check which new lines are truly new
-	for _, line := range newLines {
-		if oldSet[line] > 0 {
-			oldSet[line]--
-		} else {
-			added++
-		}
-	}
-
-	// Remaining old lines are removed
-	for _, count := range oldSet {
-		removed += count
-	}
-
-	return added, removed
+	return content, nil
 }
 
 // splitLines splits content into lines, preserving empty lines.
@@ -1686,7 +1530,7 @@ func fileExists(path string) bool {
 
 // getTaskCheckpointFromTree retrieves a task checkpoint from a commit tree.
 // Shared implementation for shadow and linear-shadow strategies.
-func getTaskCheckpointFromTree(ctx context.Context, point RewindPoint) (*TaskCheckpoint, error) {
+func getTaskCheckpointFromTree(ctx context.Context, point PendingCheckpoint) (*TaskCheckpoint, error) {
 	if !point.IsTaskCheckpoint {
 		return nil, ErrNotTaskCheckpoint
 	}
@@ -1730,7 +1574,7 @@ func getTaskCheckpointFromTree(ctx context.Context, point RewindPoint) (*TaskChe
 
 // getTaskTranscriptFromTree retrieves a task transcript from a commit tree.
 // Shared implementation for shadow and linear-shadow strategies.
-func getTaskTranscriptFromTree(ctx context.Context, point RewindPoint) ([]byte, error) {
+func getTaskTranscriptFromTree(ctx context.Context, point PendingCheckpoint) ([]byte, error) {
 	if !point.IsTaskCheckpoint {
 		return nil, ErrNotTaskCheckpoint
 	}
@@ -1782,7 +1626,8 @@ var ErrBranchNotFound = errors.New("branch not found")
 // Uses `git branch -D` instead of go-git's RemoveReference because go-git v5
 // doesn't properly persist deletions when refs are packed (.git/packed-refs)
 // or in a worktree context. This is the same class of go-git v5 bug that
-// affects checkout and reset --hard (see HardResetWithProtection).
+// affects checkout and reset --hard (see CheckoutBranch in git_operations.go,
+// which shells out to the git CLI for the same reason).
 //
 // Returns ErrBranchNotFound if the branch does not exist, allowing callers
 // to use errors.Is for idempotent deletion patterns.
@@ -1820,7 +1665,7 @@ func branchExistsCLI(ctx context.Context, branchName string) error {
 
 // collectUntrackedFiles collects untracked files in the working directory that are
 // NOT ignored by .gitignore. This is used to capture the initial state when starting
-// a session, ensuring untracked files present at session start are preserved during rewind.
+// a session, distinguishing files present at session start from ones it created.
 // Uses "git ls-files --others --exclude-standard -z" to respect .gitignore rules,
 // avoiding bloated session state from large ignored directories like node_modules/.
 // Returns paths relative to the repository root.

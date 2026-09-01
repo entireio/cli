@@ -39,7 +39,7 @@ func (g *GeminiCLIAgent) InstallUserHooks(ctx context.Context) (agent.UserHookIn
 		return agent.UserHookInstallResult{}, fmt.Errorf("lock Gemini CLI user hook settings: %w", err)
 	}
 	defer release()
-	count, repaired, err := installHooksToFile(ctx, settingsPath, false, true)
+	count, repaired, err := installHooksToFile(ctx, userSettingsIO{path: settingsPath}, false, true)
 	return agent.UserHookInstallResult{Installed: count, Repaired: repaired}, err
 }
 
@@ -55,7 +55,7 @@ func (g *GeminiCLIAgent) UninstallUserHooks(ctx context.Context) error {
 		return fmt.Errorf("lock Gemini CLI user hook settings: %w", err)
 	}
 	defer release()
-	return uninstallHooksFromFile(ctx, settingsPath)
+	return uninstallHooksFromFile(ctx, userSettingsIO{path: settingsPath})
 }
 
 // AreUserHooksInstalled requires the complete current inventory. Missing is
@@ -65,7 +65,7 @@ func (g *GeminiCLIAgent) AreUserHooksInstalled(_ context.Context) (bool, error) 
 	if err != nil {
 		return false, err
 	}
-	current, err := areUserHooksCurrentInFile(settingsPath)
+	current, err := areUserHooksCurrentInFile(userSettingsIO{path: settingsPath})
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
 			return false, nil

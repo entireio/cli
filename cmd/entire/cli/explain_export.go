@@ -23,7 +23,7 @@ import (
 // Multi-session checkpoints expose archived contributors via SessionIDs;
 // matching only against SessionID (the latest contributor) silently drops
 // any checkpoint where the requested session was archived.
-func checkpointMatchesSessionFilter(p strategy.RewindPoint, sessionFilter string) bool {
+func checkpointMatchesSessionFilter(p strategy.PendingCheckpoint, sessionFilter string) bool {
 	if strings.HasPrefix(p.SessionID, sessionFilter) {
 		return true
 	}

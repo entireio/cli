@@ -134,7 +134,10 @@ func FileBackendPath() string {
 
 func resolveBackendLocked() store {
 	if FileBackendSelected() {
-		return &fileStore{path: FileBackendPath()}
+		// Entire owns the directory only when it also picked it: an
+		// explicit PathEnvVar names a location the user chose, and its
+		// mode is theirs to set.
+		return &fileStore{path: FileBackendPath(), ownsDir: os.Getenv(PathEnvVar) == ""}
 	}
 	// Under `go test`, never fall through to the real OS keyring: a test
 	// that forgets tokenstore.UseFileBackendForTesting would otherwise write
@@ -142,7 +145,7 @@ func resolveBackendLocked() store {
 	// need isolation from each other still swap in a per-test file via
 	// UseFileBackendForTesting.
 	if dir, ok := testdirs.Dir("tokenstore"); ok {
-		return &fileStore{path: filepath.Join(dir, "tokens.json")}
+		return &fileStore{path: filepath.Join(dir, "tokens.json"), ownsDir: true}
 	}
 	return keyringStore{}
 }

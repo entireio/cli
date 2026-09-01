@@ -79,12 +79,7 @@ func TestTrailCommandRejectsRemovedReviewCommand(t *testing.T) {
 func TestResolveTrailReviewTargetRejectsUnsupportedForge(t *testing.T) {
 	repoDir := t.TempDir()
 	testutil.InitRepo(t, repoDir)
-	cmd := exec.CommandContext(context.Background(), "git", "remote", "add", "origin", "git@gitlab.com:acme/my-app.git")
-	cmd.Dir = repoDir
-	cmd.Env = testutil.GitIsolatedEnv()
-	if err := cmd.Run(); err != nil {
-		t.Fatalf("git remote add: %v", err)
-	}
+	testutil.RunGit(t, repoDir, "remote", "add", "origin", "git@gitlab.com:acme/my-app.git")
 	t.Chdir(repoDir)
 
 	_, err := resolveTrailReviewTarget(context.Background(), api.NewClient("tok"), "", "", "")
@@ -1165,3 +1160,20 @@ func encodeTrailReviewTestJSON(t *testing.T, w http.ResponseWriter, v any) {
 }
 
 func trailReviewStrPtr(s string) *string { return &s }
+
+func TestTrailReviewSelectedTextFromWorktree_RejectsSymlink(t *testing.T) {
+	t.Parallel()
+
+	worktree := t.TempDir()
+	if err := os.WriteFile(filepath.Join(worktree, ".env"), []byte("SECRET=value\n"), 0o600); err != nil {
+		t.Fatalf("seed secret: %v", err)
+	}
+	if err := os.Symlink(".env", filepath.Join(worktree, "reviewed.txt")); err != nil {
+		t.Skipf("symlink not supported: %v", err)
+	}
+
+	selected, fileOK, selectedOK := trailReviewSelectedTextFromWorktree(worktree, "reviewed.txt", 1, 1)
+	if selected != "" || fileOK || selectedOK {
+		t.Fatalf("symlinked file was read: selected=%q fileOK=%v selectedOK=%v", selected, fileOK, selectedOK)
+	}
+}

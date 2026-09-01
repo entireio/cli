@@ -89,12 +89,21 @@ func TestTrailRequestsUseEntireAPICasing(t *testing.T) {
 func TestTrailResourceToMetadataUsesID(t *testing.T) {
 	t.Parallel()
 
-	metadata := (&TrailResource{ID: "trail-db-id", URL: "https://entire.io/gh/o/r/trails/9", Branch: "feature/x", Phase: "has_code"}).ToMetadata()
+	metadata := (&TrailResource{
+		ID:             "trail-db-id",
+		URL:            "https://entire.io/gh/o/r/trails/9",
+		Branch:         "feature/x",
+		OriginalBranch: "feature/former",
+		Phase:          "has_code",
+	}).ToMetadata()
 	if got := metadata.TrailID.String(); got != "trail-db-id" {
 		t.Fatalf("metadata TrailID = %q, want stable API id", got)
 	}
 	if metadata.Phase != "has_code" {
 		t.Fatalf("metadata Phase = %q, want has_code", metadata.Phase)
+	}
+	if metadata.OriginalBranch != "feature/former" {
+		t.Fatalf("metadata OriginalBranch = %q, want feature/former", metadata.OriginalBranch)
 	}
 	// The server-provided URL must propagate so callers relying on ToMetadata()
 	// don't silently drop it.

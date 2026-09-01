@@ -1,18 +1,17 @@
 package checkpointpolicy_test
 
 import (
-	"context"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"testing"
+
+	"github.com/go-git/go-git/v6"
+	"github.com/go-git/go-git/v6/plumbing"
+	"github.com/stretchr/testify/require"
 
 	"github.com/entireio/cli/cmd/entire/cli/checkpointpolicy"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
-	"github.com/go-git/go-git/v6"
-	"github.com/go-git/go-git/v6/plumbing"
-	"github.com/stretchr/testify/require"
 )
 
 func TestSyncRemotePolicyDefaultsWhenRemoteMissing(t *testing.T) {
@@ -210,11 +209,7 @@ func pushPolicyRefWithGit(t *testing.T, dir, remote string) {
 
 func runPolicyGit(t *testing.T, dir string, args ...string) {
 	t.Helper()
-	cmd := exec.CommandContext(context.Background(), "git", args...)
-	cmd.Dir = dir
-	cmd.Env = testutil.GitIsolatedEnv()
-	output, err := cmd.CombinedOutput()
-	require.NoError(t, err, string(output))
+	testutil.RunGit(t, dir, args...)
 }
 
 func requireNoPolicyFetchRef(t *testing.T, repo *git.Repository) {

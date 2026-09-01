@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path"
@@ -14,8 +15,11 @@ import (
 	"strings"
 	"time"
 
+	"github.com/entireio/cli/cmd/entire/cli/entiredir"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
+	"github.com/entireio/cli/cmd/entire/cli/osroot"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
+	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/cmd/entire/cli/versioninfo"
 	"github.com/entireio/cli/redact"
 	"github.com/spf13/cobra"
@@ -59,18 +63,21 @@ that path is printed to stdout. Use --out to choose a specific path.`,
 				outPath = filepath.Join(os.TempDir(), fmt.Sprintf("entire-bundle-%s.zip", time.Now().UTC().Format("20060102-150405")))
 			}
 
-			// AbsPath (not a bare repoRoot join): globally tracked repos
-			// route .entire/logs under the git common dir. An unroutable
-			// path must not abort the bundle — this command exists to
-			// debug exactly such broken setups — so fall back to the
-			// worktree location, which addDirToZip tolerates when absent.
-			logsDir, err := paths.AbsPath(ctx, logging.LogsDir)
-			if err != nil {
-				fmt.Fprintf(cmd.ErrOrStderr(), "Warning: could not resolve routed logs directory (%v); bundling worktree logs only.\n", err)
-				logsDir = filepath.Join(repoRoot, logging.LogsDir)
+			// The routed runtime root (entiredir): globally tracked repos
+			// contribute their common-dir logs. A resolution failure must not
+			// abort the bundle — this command exists to debug exactly such
+			// broken setups — so it degrades to a bundle without .entire
+			// entries, with a warning.
+			entireRoot, rootErr := entiredir.OpenForRead(ctx)
+			switch {
+			case errors.Is(rootErr, fs.ErrNotExist):
+				entireRoot = nil
+			case rootErr != nil:
+				fmt.Fprintf(cmd.ErrOrStderr(), "Warning: could not open the runtime directory (%v); bundling without logs and settings.\n", rootErr)
+				entireRoot = nil
 			}
 
-			if err := writeDoctorBundle(ctx, repoRoot, logsDir, outPath, rawFlag); err != nil {
+			if err := writeDoctorBundle(ctx, repoRoot, entireRoot, outPath, rawFlag); err != nil {
 				return err
 			}
 
@@ -89,11 +96,11 @@ that path is printed to stdout. Use --out to choose a specific path.`,
 	return cmd
 }
 
-// writeDoctorBundle writes the diagnostic zip. logsDir is resolved by the
-// caller (via paths.AbsPath, so globally tracked repos contribute their
-// routed logs); repoRoot anchors the settings files and git commands, which
-// are worktree-resolved by design.
-func writeDoctorBundle(ctx context.Context, repoRoot, logsDir, outPath string, raw bool) error {
+// writeDoctorBundle writes the diagnostic zip. entireRoot is the caller's
+// (routed) runtime root, or nil for none — resolved by the caller so tests
+// can hand in a fixture's root; repoRoot anchors the git commands, which are
+// worktree-resolved by design.
+func writeDoctorBundle(ctx context.Context, repoRoot string, entireRoot *os.Root, outPath string, raw bool) error {
 	out, err := os.OpenFile(outPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600) //nolint:gosec // user-provided output path is intentional
 	if err != nil {
 		return fmt.Errorf("create bundle: %w", err)
@@ -117,18 +124,25 @@ func writeDoctorBundle(ctx context.Context, repoRoot, logsDir, outPath string, r
 		}
 	}()
 
-	if err := addDirToZip(zw, logsDir, "logs", raw); err != nil {
-		return err
-	}
-
-	for _, name := range []string{"settings.json", "settings.local.json"} {
-		src := filepath.Join(repoRoot, ".entire", name) // entire-join-ok: collects repo-level settings files; a globally tracked repo has none
-		if err := addFileToZip(zw, src, path.Join("settings", name), raw); err != nil {
+	// Everything the bundle collects from .entire is read through the shared
+	// root, so a symlink under .entire cannot pull an arbitrary file into a
+	// bundle the user is about to send somewhere. The root is the caller's
+	// ROUTED runtime base, so a globally tracked repo contributes its
+	// common-dir logs; a repo with no runtime data contributes no log or
+	// settings entries and is not an error.
+	if entireRoot != nil {
+		if err := addDirToZip(zw, entireRoot, logging.LogsName, "logs", raw); err != nil {
 			return err
+		}
+
+		for _, name := range []string{settings.SettingsName, settings.SettingsLocalName} {
+			if err := addFileToZip(zw, entireRoot, name, path.Join("settings", name), raw); err != nil {
+				return err
+			}
 		}
 	}
 
-	if err := addCommandOutput(ctx, zw, "git-status.txt", repoRoot, raw, "git", "status", "--short", "--branch"); err != nil {
+	if err := addCommandOutput(ctx, zw, "git-status.txt", repoRoot, raw, "git", "--no-optional-locks", "status", "--short", "--branch"); err != nil {
 		return err
 	}
 	if err := addCommandOutput(ctx, zw, "git-log.txt", repoRoot, raw, "git", "log", "-n", "50", "--oneline"); err != nil {
@@ -186,29 +200,39 @@ func versionInfoString() string {
 	return sb.String()
 }
 
-func addDirToZip(zw *zip.Writer, srcDir, archivePrefix string, raw bool) error {
-	info, err := os.Stat(srcDir)
+func addDirToZip(zw *zip.Writer, root *os.Root, srcDir, archivePrefix string, raw bool) error {
+	// Lstat, not Stat. Stat follows a symlink, and so does fs.WalkDir on its
+	// own walk root, so a symlinked .entire/logs used to be bundled as whatever
+	// it pointed at — presented to whoever reads the bundle as this repo's logs.
+	info, err := root.Lstat(srcDir)
 	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
+		if errors.Is(err, fs.ErrNotExist) {
 			return nil
 		}
 		return fmt.Errorf("stat %s: %w", srcDir, err)
 	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		// Doctor is the command a user runs when the repo is already broken, so
+		// this records the finding instead of failing the bundle the way the
+		// checkpoint walks do. addFileToZip takes the same line.
+		return addStringToZip(zw, zipEntryName(archivePrefix, "SYMLINK.txt"),
+			fmt.Sprintf("[skipped: %s is a symlink, not a directory; its target was not bundled]\n", srcDir), raw)
+	}
 	if !info.IsDir() {
 		return nil
 	}
-	walkErr := filepath.Walk(srcDir, func(path string, fi os.FileInfo, werr error) error {
+	walkErr := fs.WalkDir(root.FS(), srcDir, func(name string, d fs.DirEntry, werr error) error {
 		if werr != nil {
 			return werr
 		}
-		if fi.IsDir() {
+		if d.IsDir() {
 			return nil
 		}
-		rel, err := filepath.Rel(srcDir, path)
+		rel, err := filepath.Rel(srcDir, name)
 		if err != nil {
 			return fmt.Errorf("rel: %w", err)
 		}
-		return addFileToZip(zw, path, zipEntryName(archivePrefix, rel), raw)
+		return addFileToZip(zw, root, name, zipEntryName(archivePrefix, rel), raw)
 	})
 	if walkErr != nil {
 		return fmt.Errorf("walk %s: %w", srcDir, walkErr)
@@ -227,13 +251,19 @@ func zipEntryName(parts ...string) string {
 	return path.Join(cleanParts...)
 }
 
-func addFileToZip(zw *zip.Writer, src, archivePath string, raw bool) error {
-	f, err := os.Open(src) //nolint:gosec // path comes from repo-internal walk
+func addFileToZip(zw *zip.Writer, root *os.Root, src, archivePath string, raw bool) error {
+	f, err := osroot.OpenNoFollow(root, src)
 	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
+		if errors.Is(err, fs.ErrNotExist) {
 			return nil
 		}
-		return fmt.Errorf("open %s: %w", src, err)
+		// A bundle that aborts is worse than a bundle with a gap: this is the
+		// command a user runs when something is already wrong. The most likely
+		// cause here is a symlink under .entire pointing outside it, which the
+		// root refuses to follow — before that refusal existed the target was
+		// silently bundled instead, so record the reason rather than either
+		// including it or failing.
+		return addStringToZip(zw, archivePath, fmt.Sprintf("[error: open %s: %v]\n", src, err), raw)
 	}
 	defer f.Close()
 

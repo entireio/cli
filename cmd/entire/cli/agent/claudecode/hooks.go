@@ -13,6 +13,7 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
+	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 )
 
@@ -58,6 +59,51 @@ const ClaudeSettingsFileName = "settings.json"
 
 // metadataDenyRule blocks Claude from reading Entire session metadata
 const metadataDenyRule = "Read(./.entire/metadata/**)"
+
+// hookSettingsIO abstracts where a hook install reads and writes its settings
+// file. Repo scope uses agent.HookConfigFile: the path lives in the working
+// tree, which arrives by clone, so a checked-in symlink at .claude must be
+// refused rather than followed. User scope (~/.claude) is the opposite case —
+// dotfile managers legitimately symlink it — so it follows symlinks
+// (jsonutil.WriteFileAtomicFollowingSymlinks) under the user-hook lock.
+type hookSettingsIO interface {
+	Read() ([]byte, error)
+	Write(data []byte, perm os.FileMode) error
+	Path() string
+}
+
+// userSettingsIO is the user-scope implementation of hookSettingsIO.
+type userSettingsIO struct{ path string }
+
+func (u userSettingsIO) Path() string { return u.path }
+
+func (u userSettingsIO) Read() ([]byte, error) {
+	return os.ReadFile(u.path) //nolint:wrapcheck // fixed user-level settings location; callers name the file
+}
+
+func (u userSettingsIO) Write(data []byte, perm os.FileMode) error {
+	if err := os.MkdirAll(filepath.Dir(u.path), 0o750); err != nil {
+		return fmt.Errorf("create %s: %w", filepath.Dir(u.path), err)
+	}
+	return jsonutil.WriteFileAtomicFollowingSymlinks(u.path, data, perm) //nolint:wrapcheck // callers name the file
+}
+
+// claudeHookConfig returns .claude/settings.json for the current worktree,
+// opened through the worktree's root. Every repo-scope read, write and removal
+// of that file goes through it: the path lives in the working tree, which
+// arrives by clone, so a checked-in symlink at `.claude` must not be a
+// directory Entire creates and writes through.
+func claudeHookConfig(ctx context.Context) (*agent.HookConfigFile, error) {
+	repoRoot, err := paths.WorktreeRoot(ctx)
+	if err != nil {
+		// Fallback to CWD if not in a git repo (e.g., during tests)
+		repoRoot, err = os.Getwd() //nolint:forbidigo // Intentional fallback when WorktreeRoot() fails (tests run outside git repos)
+		if err != nil {
+			return nil, fmt.Errorf("failed to get current directory: %w", err)
+		}
+	}
+	return agent.OpenHookConfig(repoRoot, ".claude/"+ClaudeSettingsFileName) //nolint:wrapcheck // agent.HookConfigFile already names the file in its error
+}
 
 // entireClaudeHookCount is the number of hook entries a full install writes
 // (SessionStart, SessionEnd, Stop, SubagentStop, UserPromptSubmit, PreToolUse[Agent],
@@ -115,17 +161,11 @@ func newClaudeHookSections() map[string]*[]ClaudeHookMatcher {
 func (c *ClaudeCodeAgent) InstallHooks(ctx context.Context, force bool) (int, error) {
 	// Use repo root instead of CWD to find .claude directory
 	// This ensures hooks are installed correctly when run from a subdirectory
-	repoRoot, err := paths.WorktreeRoot(ctx)
+	cfg, err := claudeHookConfig(ctx)
 	if err != nil {
-		// Fallback to CWD if not in a git repo (e.g., during tests)
-		repoRoot, err = os.Getwd() //nolint:forbidigo // Intentional fallback when WorktreeRoot() fails (tests run outside git repos)
-		if err != nil {
-			return 0, fmt.Errorf("failed to get current directory: %w", err)
-		}
+		return 0, err
 	}
-
-	settingsPath := filepath.Join(repoRoot, ".claude", ClaudeSettingsFileName)
-	count, _, err := installHooksToFile(settingsPath, force, true)
+	count, _, err := installHooksToFile(cfg, force, true)
 	return count, err
 }
 
@@ -136,8 +176,9 @@ func (c *ClaudeCodeAgent) InstallHooks(ctx context.Context, force bool) (int, er
 // missing file means "start fresh"; any other read failure (permissions, I/O)
 // aborts, because proceeding would replace the user's whole settings file
 // with an Entire-only one.
-func readClaudeRawSettings(settingsPath string, projectScope bool) (rawSettings, rawHooks, rawPermissions map[string]json.RawMessage, err error) {
-	existingData, readErr := os.ReadFile(settingsPath) //nolint:gosec // path is constructed from repo root + settings file name
+func readClaudeRawSettings(file hookSettingsIO, projectScope bool) (rawSettings, rawHooks, rawPermissions map[string]json.RawMessage, err error) {
+	settingsPath := file.Path()
+	existingData, readErr := file.Read()
 	switch {
 	case readErr == nil:
 		if err := json.Unmarshal(existingData, &rawSettings); err != nil {
@@ -195,8 +236,9 @@ func ensureMetadataDenyRule(rawPermissions map[string]json.RawMessage, settingsP
 // repaired reports a user-scope rewrite that normalized pre-existing Entire
 // entries (rather than a pure add or a no-op), so the caller can report the
 // repair instead of "already installed".
-func installHooksToFile(settingsPath string, force, projectScope bool) (count int, repaired bool, err error) {
-	rawSettings, rawHooks, rawPermissions, err := readClaudeRawSettings(settingsPath, projectScope)
+func installHooksToFile(file hookSettingsIO, force, projectScope bool) (count int, repaired bool, err error) {
+	settingsPath := file.Path()
+	rawSettings, rawHooks, rawPermissions, err := readClaudeRawSettings(file, projectScope)
 	if err != nil {
 		return 0, false, err
 	}
@@ -322,17 +364,15 @@ func installHooksToFile(settingsPath string, force, projectScope bool) (count in
 		rawSettings["permissions"] = permJSON
 	}
 
-	// Write back to file
-	if err := os.MkdirAll(filepath.Dir(settingsPath), 0o750); err != nil {
-		return 0, false, fmt.Errorf("failed to create .claude directory: %w", err)
-	}
-
 	output, err := jsonutil.MarshalIndentWithNewline(rawSettings, "", "  ")
 	if err != nil {
 		return 0, false, fmt.Errorf("failed to marshal settings: %w", err)
 	}
 
-	if err := jsonutil.WriteFileAtomicFollowingSymlinks(settingsPath, output, 0o600); err != nil {
+	// Repo scope creates .claude with MkdirAllNoSymlink inside the write, so a
+	// checked-in symlink there is refused by name rather than followed; user
+	// scope follows dotfile-manager symlinks instead (see hookSettingsIO).
+	if err := file.Write(output, 0o600); err != nil {
 		return 0, false, fmt.Errorf("failed to write %s: %w", settingsPath, err)
 	}
 
@@ -377,20 +417,19 @@ func marshalHookType(rawHooks map[string]json.RawMessage, hookType string, match
 
 // UninstallHooks removes Entire hooks from Claude Code settings.
 func (c *ClaudeCodeAgent) UninstallHooks(ctx context.Context) error {
-	// Use repo root to find .claude directory when run from a subdirectory
-	repoRoot, err := paths.WorktreeRoot(ctx)
+	cfg, err := claudeHookConfig(ctx)
 	if err != nil {
-		repoRoot = "." // Fallback to CWD if not in a git repo
+		return err
 	}
-	settingsPath := filepath.Join(repoRoot, ".claude", ClaudeSettingsFileName)
-	return uninstallHooksFromFile(settingsPath, true)
+	return uninstallHooksFromFile(cfg, true)
 }
 
 // uninstallHooksFromFile removes Entire hooks (and only Entire hooks) from
 // the settings file at settingsPath. projectScope additionally removes the
 // repo-scoped permissions.deny rule; the user-level uninstall passes false.
-func uninstallHooksFromFile(settingsPath string, projectScope bool) error {
-	data, err := os.ReadFile(settingsPath) //nolint:gosec // path is constructed from repo root + fixed path
+func uninstallHooksFromFile(file hookSettingsIO, projectScope bool) error {
+	settingsPath := file.Path()
+	data, err := file.Read()
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
 			return nil // No settings file means nothing to uninstall
@@ -483,7 +522,7 @@ func uninstallHooksFromFile(settingsPath string, projectScope bool) error {
 	if err != nil {
 		return fmt.Errorf("failed to marshal settings: %w", err)
 	}
-	if err := jsonutil.WriteFileAtomicFollowingSymlinks(settingsPath, output, 0o600); err != nil {
+	if err := file.Write(output, 0o600); err != nil {
 		return fmt.Errorf("failed to write %s: %w", settingsPath, err)
 	}
 	return nil
@@ -491,42 +530,51 @@ func uninstallHooksFromFile(settingsPath string, projectScope bool) error {
 
 // loadClaudeSettings reads and parses .claude/settings.json from the repo root.
 // Returns ok=false when the file is missing or unparseable.
-func loadClaudeSettings(ctx context.Context) (ClaudeSettings, bool) {
-	// Use repo root to find .claude directory when run from a subdirectory
-	repoRoot, err := paths.WorktreeRoot(ctx)
+// loadClaudeSettings reads the repo-scope settings through the worktree root.
+// A missing file yields empty settings; an unreadable or unparseable one is an
+// error (and a Warn — "not installed" and "cannot tell" must not collapse).
+func loadClaudeSettings(ctx context.Context) (ClaudeSettings, error) {
+	cfg, err := claudeHookConfig(ctx)
 	if err != nil {
-		repoRoot = "." // Fallback to CWD if not in a git repo
+		return ClaudeSettings{}, err
 	}
-	settingsPath := filepath.Join(repoRoot, ".claude", ClaudeSettingsFileName)
-	settings, err := loadClaudeSettingsFile(settingsPath)
-	return settings, err == nil
+	settings, err := loadClaudeSettingsFile(cfg)
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+		return ClaudeSettings{}, nil
+	case err != nil:
+		logging.Warn(ctx, "claude-code: failed to load settings file", "path", cfg.Path(), "err", err)
+		return ClaudeSettings{}, err
+	}
+	return settings, nil
 }
 
 // loadClaudeSettingsFile reads and parses a Claude Code settings file. A
 // missing file is an fs.ErrNotExist error; callers that need to distinguish
 // "not installed" from "cannot tell" (a real read or parse failure) branch on
 // errors.Is.
-func loadClaudeSettingsFile(settingsPath string) (ClaudeSettings, error) {
-	data, err := os.ReadFile(settingsPath) //nolint:gosec // path is constructed from a fixed settings location
+func loadClaudeSettingsFile(file hookSettingsIO) (ClaudeSettings, error) {
+	data, err := file.Read()
 	if err != nil {
-		return ClaudeSettings{}, fmt.Errorf("read %s: %w", settingsPath, err)
+		return ClaudeSettings{}, fmt.Errorf("read %s: %w", file.Path(), err)
 	}
 
 	var settings ClaudeSettings
 	if err := json.Unmarshal(data, &settings); err != nil {
-		return ClaudeSettings{}, fmt.Errorf("parse %s: %w", settingsPath, err)
+		return ClaudeSettings{}, fmt.Errorf("parse %s: %w", file.Path(), err)
 	}
 	return settings, nil
 }
 
-// AreHooksInstalled checks if Entire hooks are installed.
-func (c *ClaudeCodeAgent) AreHooksInstalled(ctx context.Context) bool {
-	settings, ok := loadClaudeSettings(ctx)
-	if !ok {
-		return false
+// AreHooksInstalled reports whether Entire hooks are installed; an unreadable
+// or malformed settings file is an error, not "not installed".
+func (c *ClaudeCodeAgent) AreHooksInstalled(ctx context.Context) (bool, error) {
+	settings, err := loadClaudeSettings(ctx)
+	if err != nil {
+		return false, err
 	}
 	// Check for at least one of our hooks (new, wrapped, or legacy format)
-	return hasEntireHook(settings.Hooks.Stop)
+	return hasEntireHook(settings.Hooks.Stop), nil
 }
 
 // HookConfigState describes how Entire's Claude Code hooks compare to what
@@ -562,8 +610,8 @@ func (c *ClaudeCodeAgent) CheckHookConfig(ctx context.Context) agent.HookConfigS
 // positive spec: Entire is installed (Stop hook present) yet one of the current
 // tool-use matchers does not carry its Entire hook.
 func CheckHookConfig(ctx context.Context) HookConfigState {
-	settings, ok := loadClaudeSettings(ctx)
-	if !ok || !hasEntireHook(settings.Hooks.Stop) {
+	settings, err := loadClaudeSettings(ctx)
+	if err != nil || !hasEntireHook(settings.Hooks.Stop) {
 		return HooksAbsent
 	}
 	subagentTools := splitMatcherTools(subagentToolMatcher)

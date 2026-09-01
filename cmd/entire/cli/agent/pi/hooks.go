@@ -3,12 +3,14 @@ package pi
 import (
 	"context"
 	_ "embed"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
+	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 )
 
@@ -117,17 +119,28 @@ func (a *PiAgent) UninstallHooks(ctx context.Context) error {
 
 // AreHooksInstalled returns true when the extension file exists and is
 // recognisable as Entire-owned (contains the marker string).
-func (a *PiAgent) AreHooksInstalled(ctx context.Context) bool {
+//
+// A missing config file is an answer, not a failure: that file is where the
+// state lives, so its absence means no hooks. Anything that stops us reading the
+// answer — an unreadable file, malformed config — is returned as an error, since
+// "we could not tell" and "there are none" are different things to a caller
+// deciding whether hooks can be left alone.
+func (a *PiAgent) AreHooksInstalled(ctx context.Context) (bool, error) {
 	path, err := extensionPath(ctx)
 	if err != nil {
-		return false
+		logging.Warn(ctx, "pi: failed to resolve extension path", "err", err)
+		return false, err
 	}
 	//nolint:gosec // path from validated repo root
 	data, err := os.ReadFile(path)
-	if err != nil {
-		return false
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
 	}
-	return strings.Contains(string(data), entireMarker)
+	if err != nil {
+		logging.Warn(ctx, "pi: failed to read extension file", "path", path, "err", err)
+		return false, fmt.Errorf("read %s: %w", path, err)
+	}
+	return strings.Contains(string(data), entireMarker), nil
 }
 
 // CheckHookConfig reports whether the installed extension matches what

@@ -206,14 +206,14 @@ Run: `mise run fmt && mise run lint`
 
 **Commit:** Use `/commit` to commit all files. Skip if no files changed.
 
-### Step 11: E2E Tier 6 — Interactive and Rewind Tests
+### Step 11: E2E Tier 6 — Interactive and Resume Tests
 
 Run these if the agent supports interactive multi-step sessions:
 
 - `TestInteractiveMultiStep` — Multiple prompts in one session
-- `TestRewindPreCommit` — Rewind to a checkpoint before committing
-- `TestRewindAfterCommit` — Rewind to a checkpoint after committing
-- `TestRewindMultipleFiles` — Rewind with multiple files changed
+- `TestResumeFromFeatureBranch` — Resume a session from its branch
+- `TestResumeFromClonedRepo` — Resume where the checkpoint comes from the remote
+- `TestResumeOlderCheckpointWithNewerCommits` — Resume an earlier checkpoint with newer commits present
 
 **Cycle:** Same pattern — run, **watch it fail**, `/e2e:debug` on failures, fix, repeat.
 

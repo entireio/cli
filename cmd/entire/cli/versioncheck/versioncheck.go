@@ -13,7 +13,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
+	"github.com/entireio/cli/cmd/entire/cli/osroot"
 	"github.com/entireio/cli/cmd/entire/cli/versioninfo"
 	"github.com/entireio/cli/internal/entireclient/userdirs"
 	"golang.org/x/mod/module"
@@ -107,24 +109,30 @@ func globalConfigDirPath() string {
 }
 
 // ensureGlobalConfigDir creates the global config directory if it doesn't exist.
+//
+// It goes through userdirs.ConfigRoot, whose create path is
+// userdirs.EnsurePrivateDir, rather than a bare MkdirAll: this directory is
+// shared with contexts.json and the file token store, both of which hold bearer
+// tokens. The version check runs from the root command's PersistentPostRun, so
+// on a fresh machine it is almost always what creates the directory, before the
+// first login ever runs. Creating it world-readable here left it that way
+// permanently, since MkdirAll cannot change the mode of a directory that
+// already exists.
 func ensureGlobalConfigDir() error {
-	//nolint:gosec // ~/.config/entire is user home directory, 0o755 is appropriate
-	if err := os.MkdirAll(globalConfigDirPath(), 0o755); err != nil {
+	if _, err := userdirs.ConfigRoot(); err != nil {
 		return fmt.Errorf("creating config directory: %w", err)
 	}
-
 	return nil
-}
-
-// cacheFilePath returns the full path to the version check cache file.
-func cacheFilePath() string {
-	return filepath.Join(globalConfigDirPath(), cacheFileName)
 }
 
 // loadCache loads the version check cache from disk.
 // Returns an error if the file doesn't exist or is corrupted.
 func loadCache() (*VersionCache, error) {
-	data, err := os.ReadFile(cacheFilePath())
+	root, err := userdirs.ConfigRootForRead()
+	if err != nil {
+		return nil, fmt.Errorf("reading cache file: %w", err)
+	}
+	data, err := osroot.ReadFileNoFollow(root, cacheFileName)
 	if err != nil {
 		return nil, fmt.Errorf("reading cache file: %w", err)
 	}
@@ -140,21 +148,23 @@ func loadCache() (*VersionCache, error) {
 // saveCache saves the version check cache to disk.
 // Uses atomic write semantics (write to temp file, then rename).
 func saveCache(cache *VersionCache) error {
-	filePath := cacheFilePath()
-
 	// Marshal to JSON
 	data, err := json.MarshalIndent(cache, "", "  ")
 	if err != nil {
 		return fmt.Errorf("marshaling cache: %w", err)
 	}
 
+	root, err := userdirs.ConfigRoot()
+	if err != nil {
+		return fmt.Errorf("opening config directory: %w", err)
+	}
+
 	// Write to temp file first (atomic write)
-	dir := filepath.Dir(filePath)
-	tmpFile, err := os.CreateTemp(dir, ".version_check_tmp_")
+	tmpFile, tmpName, err := jsonutil.CreateTempIn(root, cacheFileName)
 	if err != nil {
 		return fmt.Errorf("creating temp file: %w", err)
 	}
-	defer os.Remove(tmpFile.Name())
+	defer func() { _ = root.Remove(tmpName) }() //nolint:errcheck // best-effort; a successful rename already consumed it
 
 	if _, err := tmpFile.Write(data); err != nil {
 		_ = tmpFile.Close() // cleanup on error path
@@ -166,8 +176,7 @@ func saveCache(cache *VersionCache) error {
 	}
 
 	// Rename temp file to final location
-
-	if err := os.Rename(tmpFile.Name(), filePath); err != nil {
+	if err := root.Rename(tmpName, cacheFileName); err != nil {
 		return fmt.Errorf("renaming cache file: %w", err)
 	}
 

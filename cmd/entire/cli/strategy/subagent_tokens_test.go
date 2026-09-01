@@ -94,14 +94,13 @@ func TestSaveStep_SubagentTokensNotDoubleCountedAcrossCheckpoints(t *testing.T) 
 			// cumulative usage as of now is 500/250 across 5 calls.
 			subagentAtCheckpoint1 := &agent.TokenUsage{InputTokens: 500, OutputTokens: 250, APICallCount: 5}
 			require.NoError(t, s.SaveStep(ctx, StepContext{
-				SessionID:      sessionID,
-				MetadataDir:    metadataDir,
-				MetadataDirAbs: metadataDirAbs,
-				ModifiedFiles:  []string{"test.txt"},
-				CommitMessage:  "checkpoint 1 step 1",
-				AuthorName:     "Test",
-				AuthorEmail:    "test@test.com",
-				AgentType:      agentType,
+				SessionID:     sessionID,
+				MetadataDir:   metadataDir,
+				ModifiedFiles: []string{"test.txt"},
+				CommitMessage: "checkpoint 1 step 1",
+				AuthorName:    "Test",
+				AuthorEmail:   "test@test.com",
+				AgentType:     agentType,
 				TokenUsage: &agent.TokenUsage{
 					InputTokens: 100, OutputTokens: 50, APICallCount: 1,
 					SubagentTokens: subagentAtCheckpoint1,
@@ -114,14 +113,13 @@ func TestSaveStep_SubagentTokensNotDoubleCountedAcrossCheckpoints(t *testing.T) 
 			// Change the working tree so SaveStep sees a real diff to save.
 			require.NoError(t, os.WriteFile(filepath.Join(dir, "test.txt"), []byte("v2"), 0o644))
 			require.NoError(t, s.SaveStep(ctx, StepContext{
-				SessionID:      sessionID,
-				MetadataDir:    metadataDir,
-				MetadataDirAbs: metadataDirAbs,
-				ModifiedFiles:  []string{"test.txt"},
-				CommitMessage:  "checkpoint 1 step 2",
-				AuthorName:     "Test",
-				AuthorEmail:    "test@test.com",
-				AgentType:      agentType,
+				SessionID:     sessionID,
+				MetadataDir:   metadataDir,
+				ModifiedFiles: []string{"test.txt"},
+				CommitMessage: "checkpoint 1 step 2",
+				AuthorName:    "Test",
+				AuthorEmail:   "test@test.com",
+				AgentType:     agentType,
 				TokenUsage: &agent.TokenUsage{
 					InputTokens: 100, OutputTokens: 50, APICallCount: 1,
 					SubagentTokens: subagentAtCheckpoint1,
@@ -158,14 +156,13 @@ func TestSaveStep_SubagentTokensNotDoubleCountedAcrossCheckpoints(t *testing.T) 
 			subagentAtCheckpoint2 := &agent.TokenUsage{InputTokens: 620, OutputTokens: 310, APICallCount: 6}
 			require.NoError(t, os.WriteFile(filepath.Join(dir, "test.txt"), []byte("v3"), 0o644))
 			require.NoError(t, s.SaveStep(ctx, StepContext{
-				SessionID:      sessionID,
-				MetadataDir:    metadataDir,
-				MetadataDirAbs: metadataDirAbs,
-				ModifiedFiles:  []string{"test.txt"},
-				CommitMessage:  "checkpoint 2 step 1",
-				AuthorName:     "Test",
-				AuthorEmail:    "test@test.com",
-				AgentType:      agentType,
+				SessionID:     sessionID,
+				MetadataDir:   metadataDir,
+				ModifiedFiles: []string{"test.txt"},
+				CommitMessage: "checkpoint 2 step 1",
+				AuthorName:    "Test",
+				AuthorEmail:   "test@test.com",
+				AgentType:     agentType,
 				TokenUsage: &agent.TokenUsage{
 					InputTokens: 100, OutputTokens: 50, APICallCount: 1,
 					SubagentTokens: subagentAtCheckpoint2,
@@ -240,14 +237,13 @@ func TestSaveStep_SubagentBaselineNotDoubleSubtractedWhenLaterStepDropsSubagent(
 
 			// Checkpoint 1: a subagent is discovered with cumulative usage 500/250.
 			require.NoError(t, s.SaveStep(ctx, StepContext{
-				SessionID:      sessionID,
-				MetadataDir:    metadataDir,
-				MetadataDirAbs: metadataDirAbs,
-				ModifiedFiles:  []string{"test.txt"},
-				CommitMessage:  "checkpoint 1",
-				AuthorName:     "Test",
-				AuthorEmail:    "test@test.com",
-				AgentType:      agentType,
+				SessionID:     sessionID,
+				MetadataDir:   metadataDir,
+				ModifiedFiles: []string{"test.txt"},
+				CommitMessage: "checkpoint 1",
+				AuthorName:    "Test",
+				AuthorEmail:   "test@test.com",
+				AgentType:     agentType,
 				TokenUsage: &agent.TokenUsage{
 					InputTokens: 100, OutputTokens: 50, APICallCount: 1,
 					SubagentTokens: &agent.TokenUsage{InputTokens: 500, OutputTokens: 250, APICallCount: 5},
@@ -269,14 +265,13 @@ func TestSaveStep_SubagentBaselineNotDoubleSubtractedWhenLaterStepDropsSubagent(
 			// checkpoint delta must be 620-500 / 310-250 = 120 / 60.
 			require.NoError(t, os.WriteFile(filepath.Join(dir, "test.txt"), []byte("v2"), 0o644))
 			require.NoError(t, s.SaveStep(ctx, StepContext{
-				SessionID:      sessionID,
-				MetadataDir:    metadataDir,
-				MetadataDirAbs: metadataDirAbs,
-				ModifiedFiles:  []string{"test.txt"},
-				CommitMessage:  "checkpoint 2 step 1",
-				AuthorName:     "Test",
-				AuthorEmail:    "test@test.com",
-				AgentType:      agentType,
+				SessionID:     sessionID,
+				MetadataDir:   metadataDir,
+				ModifiedFiles: []string{"test.txt"},
+				CommitMessage: "checkpoint 2 step 1",
+				AuthorName:    "Test",
+				AuthorEmail:   "test@test.com",
+				AgentType:     agentType,
 				TokenUsage: &agent.TokenUsage{
 					InputTokens: 100, OutputTokens: 50, APICallCount: 1,
 					SubagentTokens: &agent.TokenUsage{InputTokens: 620, OutputTokens: 310, APICallCount: 6},
@@ -291,14 +286,13 @@ func TestSaveStep_SubagentBaselineNotDoubleSubtractedWhenLaterStepDropsSubagent(
 			// NOT be subtracted again.
 			require.NoError(t, os.WriteFile(filepath.Join(dir, "test.txt"), []byte("v3"), 0o644))
 			require.NoError(t, s.SaveStep(ctx, StepContext{
-				SessionID:      sessionID,
-				MetadataDir:    metadataDir,
-				MetadataDirAbs: metadataDirAbs,
-				ModifiedFiles:  []string{"test.txt"},
-				CommitMessage:  "checkpoint 2 step 2",
-				AuthorName:     "Test",
-				AuthorEmail:    "test@test.com",
-				AgentType:      agentType,
+				SessionID:     sessionID,
+				MetadataDir:   metadataDir,
+				ModifiedFiles: []string{"test.txt"},
+				CommitMessage: "checkpoint 2 step 2",
+				AuthorName:    "Test",
+				AuthorEmail:   "test@test.com",
+				AgentType:     agentType,
 				TokenUsage: &agent.TokenUsage{
 					InputTokens: 100, OutputTokens: 50, APICallCount: 1,
 					// SubagentTokens intentionally nil.
@@ -368,15 +362,14 @@ func TestSaveStep_CheckpointSubagentAlwaysDerivedFromSessionCumulative(t *testin
 		rev++
 		require.NoError(t, os.WriteFile(filepath.Join(dir, "test.txt"), []byte(fmt.Sprintf("rev%d", rev)), 0o644))
 		require.NoError(t, s.SaveStep(ctx, StepContext{
-			SessionID:      sessionID,
-			MetadataDir:    metadataDir,
-			MetadataDirAbs: metadataDirAbs,
-			ModifiedFiles:  []string{"test.txt"},
-			CommitMessage:  fmt.Sprintf("step %d", rev),
-			AuthorName:     "Test",
-			AuthorEmail:    "test@test.com",
-			AgentType:      agent.AgentTypeClaudeCode,
-			TokenUsage:     &agent.TokenUsage{InputTokens: 10, APICallCount: 1, SubagentTokens: sub},
+			SessionID:     sessionID,
+			MetadataDir:   metadataDir,
+			ModifiedFiles: []string{"test.txt"},
+			CommitMessage: fmt.Sprintf("step %d", rev),
+			AuthorName:    "Test",
+			AuthorEmail:   "test@test.com",
+			AgentType:     agent.AgentTypeClaudeCode,
+			TokenUsage:    &agent.TokenUsage{InputTokens: 10, APICallCount: 1, SubagentTokens: sub},
 		}))
 	}
 	// checkpointSubIn returns the current checkpoint subagent InputTokens (0 when nil).
@@ -461,14 +454,13 @@ func TestCondenseSessionByID_CapturesSubagentBaselineViaRealResetPath(t *testing
 	// Checkpoint 1: subagent discovered with cumulative usage 500/250.
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "test.txt"), []byte("v2"), 0o644))
 	require.NoError(t, s.SaveStep(ctx, StepContext{
-		SessionID:      sessionID,
-		MetadataDir:    metadataDir,
-		MetadataDirAbs: metadataDirAbs,
-		ModifiedFiles:  []string{"test.txt"},
-		CommitMessage:  "checkpoint 1",
-		AuthorName:     "Test",
-		AuthorEmail:    "test@test.com",
-		AgentType:      agent.AgentTypeClaudeCode,
+		SessionID:     sessionID,
+		MetadataDir:   metadataDir,
+		ModifiedFiles: []string{"test.txt"},
+		CommitMessage: "checkpoint 1",
+		AuthorName:    "Test",
+		AuthorEmail:   "test@test.com",
+		AgentType:     agent.AgentTypeClaudeCode,
 		TokenUsage: &agent.TokenUsage{
 			InputTokens: 100, OutputTokens: 50, APICallCount: 1,
 			SubagentTokens: &agent.TokenUsage{InputTokens: 500, OutputTokens: 250, APICallCount: 5},
@@ -493,14 +485,13 @@ func TestCondenseSessionByID_CapturesSubagentBaselineViaRealResetPath(t *testing
 	// checkpoint delta must be rescoped against the real-path baseline (120/60).
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "test.txt"), []byte("v3"), 0o644))
 	require.NoError(t, s.SaveStep(ctx, StepContext{
-		SessionID:      sessionID,
-		MetadataDir:    metadataDir,
-		MetadataDirAbs: metadataDirAbs,
-		ModifiedFiles:  []string{"test.txt"},
-		CommitMessage:  "checkpoint 2",
-		AuthorName:     "Test",
-		AuthorEmail:    "test@test.com",
-		AgentType:      agent.AgentTypeClaudeCode,
+		SessionID:     sessionID,
+		MetadataDir:   metadataDir,
+		ModifiedFiles: []string{"test.txt"},
+		CommitMessage: "checkpoint 2",
+		AuthorName:    "Test",
+		AuthorEmail:   "test@test.com",
+		AgentType:     agent.AgentTypeClaudeCode,
 		TokenUsage: &agent.TokenUsage{
 			InputTokens: 100, OutputTokens: 50, APICallCount: 1,
 			SubagentTokens: &agent.TokenUsage{InputTokens: 620, OutputTokens: 310, APICallCount: 6},
@@ -589,14 +580,13 @@ func TestSaveStep_TokensAttributedElsewhereKeepSessionTotal(t *testing.T) {
 	step := func(content string, elsewhere bool, subagentCumulative int) {
 		require.NoError(t, os.WriteFile(filepath.Join(dir, "test.txt"), []byte(content), 0o644))
 		require.NoError(t, s.SaveStep(ctx, StepContext{
-			SessionID:      sessionID,
-			MetadataDir:    metadataDir,
-			MetadataDirAbs: metadataDirAbs,
-			ModifiedFiles:  []string{"test.txt"},
-			CommitMessage:  "step",
-			AuthorName:     "Test",
-			AuthorEmail:    "test@test.com",
-			AgentType:      agent.AgentTypeClaudeCode,
+			SessionID:     sessionID,
+			MetadataDir:   metadataDir,
+			ModifiedFiles: []string{"test.txt"},
+			CommitMessage: "step",
+			AuthorName:    "Test",
+			AuthorEmail:   "test@test.com",
+			AgentType:     agent.AgentTypeClaudeCode,
 			TokenUsage: &agent.TokenUsage{
 				InputTokens: 100, OutputTokens: 50, APICallCount: 1,
 				SubagentTokens: &agent.TokenUsage{InputTokens: subagentCumulative, APICallCount: 1},

@@ -204,7 +204,7 @@ func NewRepoWithCommit(t *testing.T) *TestEnv {
 // NewFeatureBranchEnv creates a TestEnv ready for session testing.
 // It initializes the repo, creates an initial commit on main,
 // and checks out a feature branch. This is the most common setup
-// for session and rewind tests since Entire tracking skips main/master.
+// for session and checkpoint tests since Entire tracking skips main/master.
 func NewFeatureBranchEnv(t *testing.T) *TestEnv {
 	t.Helper()
 	env := NewRepoWithCommit(t)
@@ -706,8 +706,8 @@ func (env *TestEnv) GetCurrentBranch() string {
 	return head.Name().Short()
 }
 
-// RewindPoint mirrors strategy.RewindPoint for test assertions.
-type RewindPoint struct {
+// PendingCheckpoint mirrors strategy.PendingCheckpoint for test assertions.
+type PendingCheckpoint struct {
 	ID               string
 	Message          string
 	MetadataDir      string
@@ -718,8 +718,8 @@ type RewindPoint struct {
 	CondensationID   string
 }
 
-// GetRewindPoints returns available rewind points using the CLI.
-func (env *TestEnv) GetRewindPoints() []RewindPoint {
+// ListPendingCheckpoints returns the session's pending checkpoints using the CLI.
+func (env *TestEnv) ListPendingCheckpoints() []PendingCheckpoint {
 	env.T.Helper()
 
 	// Run `checkpoint list --pending --json` using the shared binary. This is
@@ -749,16 +749,16 @@ func (env *TestEnv) GetRewindPoints() []RewindPoint {
 	}
 
 	if err := json.Unmarshal(output, &jsonPoints); err != nil {
-		env.T.Fatalf("failed to parse rewind points: %v\nOutput: %s", err, output)
+		env.T.Fatalf("failed to parse pending checkpoints: %v\nOutput: %s", err, output)
 	}
 
-	points := make([]RewindPoint, len(jsonPoints))
+	points := make([]PendingCheckpoint, len(jsonPoints))
 	for i, jp := range jsonPoints {
 		date, err := time.Parse(time.RFC3339, jp.Date)
 		if err != nil {
-			env.T.Fatalf("failed to parse rewind point date %q: %v", jp.Date, err)
+			env.T.Fatalf("failed to parse pending checkpoint date %q: %v", jp.Date, err)
 		}
-		points[i] = RewindPoint{
+		points[i] = PendingCheckpoint{
 			ID:               jp.ID,
 			Message:          jp.Message,
 			MetadataDir:      jp.MetadataDir,
@@ -1781,28 +1781,16 @@ func (env *TestEnv) SetupNamedBareRemote(remoteName string) string {
 func (env *TestEnv) SetupEmptyNamedBareRemote(remoteName string) string {
 	env.T.Helper()
 
-	ctx := env.T.Context()
-
 	bareDir := env.T.TempDir()
 	if resolved, err := filepath.EvalSymlinks(bareDir); err == nil {
 		bareDir = resolved
 	}
 
 	// Initialize bare repo
-	cmd := exec.CommandContext(ctx, "git", "init", "--bare")
-	cmd.Dir = bareDir
-	cmd.Env = testutil.GitIsolatedEnv()
-	if output, err := cmd.CombinedOutput(); err != nil {
-		env.T.Fatalf("failed to init bare repo: %v\n%s", err, output)
-	}
+	testutil.RunGit(env.T, bareDir, "init", "--bare")
 
 	// Add as remote
-	cmd = exec.CommandContext(ctx, "git", "remote", "add", remoteName, bareDir)
-	cmd.Dir = env.RepoDir
-	cmd.Env = testutil.GitIsolatedEnv()
-	if output, err := cmd.CombinedOutput(); err != nil {
-		env.T.Fatalf("failed to add remote %s: %v\n%s", remoteName, err, output)
-	}
+	testutil.RunGit(env.T, env.RepoDir, "remote", "add", remoteName, bareDir)
 
 	env.setGitConfigBaseline()
 
@@ -1818,8 +1806,6 @@ func (env *TestEnv) SetupEmptyNamedBareRemote(remoteName string) string {
 // fresh clone" scenarios.
 func (env *TestEnv) CloneFromWithoutInit(bareDir string) *TestEnv {
 	env.T.Helper()
-
-	ctx := env.T.Context()
 
 	cloneDir := env.T.TempDir()
 	if resolved, err := filepath.EvalSymlinks(cloneDir); err == nil {
@@ -1837,11 +1823,7 @@ func (env *TestEnv) CloneFromWithoutInit(bareDir string) *TestEnv {
 		cloneArgs = append(cloneArgs, "--branch", currentBranch)
 	}
 	cloneArgs = append(cloneArgs, bareDir, cloneDir)
-	cmd := exec.CommandContext(ctx, "git", cloneArgs...)
-	cmd.Env = testutil.GitIsolatedEnv()
-	if output, err := cmd.CombinedOutput(); err != nil {
-		env.T.Fatalf("failed to clone from %s: %v\n%s", bareDir, err, output)
-	}
+	testutil.RunGit(env.T, "", cloneArgs...)
 
 	// Configure git user (clone doesn't inherit local config from the bare repo)
 	for _, kv := range [][2]string{
@@ -1849,12 +1831,7 @@ func (env *TestEnv) CloneFromWithoutInit(bareDir string) *TestEnv {
 		{"user.email", "test@example.com"},
 		{"commit.gpgsign", "false"},
 	} {
-		cmd = exec.CommandContext(ctx, "git", "config", kv[0], kv[1])
-		cmd.Dir = cloneDir
-		cmd.Env = testutil.GitIsolatedEnv()
-		if output, err := cmd.CombinedOutput(); err != nil {
-			env.T.Fatalf("failed to set git config %s: %v\n%s", kv[0], err, output)
-		}
+		testutil.RunGit(env.T, cloneDir, "config", kv[0], kv[1])
 	}
 
 	claudeProjectDir := env.T.TempDir()

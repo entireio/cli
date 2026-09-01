@@ -63,11 +63,18 @@ func TestWorktreeRoot_Cache(t *testing.T) {
 		t.Fatalf("paths.WorktreeRoot(context.Background()) cached = %q, want %q", got2, want)
 	}
 
-	// After clearing the cache the broken PATH should cause a failure.
+	// After clearing the cache the broken PATH must cause a failure, even though
+	// this directory plainly is a repository and a walk up for .git would say so.
+	// Nothing here may substitute a guess for git's answer: the failure is what
+	// keeps entiredir's fallback to the current directory narrow, since that
+	// fallback fires only on ErrNotARepository, which this is not.
 	paths.ClearWorktreeRootCache()
 	_, err = paths.WorktreeRoot(context.Background())
 	if err == nil {
 		t.Fatal("paths.WorktreeRoot(context.Background()) should fail after cache clear with broken PATH")
+	}
+	if errors.Is(err, paths.ErrNotARepository) {
+		t.Fatalf("a git that could not be run was reported as no repository: %v", err)
 	}
 }
 
@@ -838,12 +845,7 @@ func initBareWithMetadataBranch(t *testing.T) string {
 	// Init bare, create main branch with a commit
 	workDir := t.TempDir()
 	run := func(dir string, args ...string) {
-		cmd := exec.CommandContext(context.Background(), "git", args...)
-		cmd.Dir = dir
-		cmd.Env = testutil.GitIsolatedEnv()
-		if out, err := cmd.CombinedOutput(); err != nil {
-			t.Fatalf("git %v failed: %v\n%s", args, err, out)
-		}
+		testutil.RunGit(t, dir, args...)
 	}
 	run(bareDir, "init", "--bare", "-b", "main")
 	run(workDir, "clone", bareDir, ".")
@@ -1138,12 +1140,7 @@ func cloneWithConfig(t *testing.T, bareDir string) (string, func(args ...string)
 		t.Fatalf("clone failed: %v\n%s", err, out)
 	}
 	run := func(args ...string) {
-		cmd := exec.CommandContext(context.Background(), "git", args...)
-		cmd.Dir = cloneDir
-		cmd.Env = testutil.GitIsolatedEnv()
-		if out, err := cmd.CombinedOutput(); err != nil {
-			t.Fatalf("git %v failed: %v\n%s", args, err, out)
-		}
+		testutil.RunGit(t, cloneDir, args...)
 	}
 	run("config", "user.email", "test@test.com")
 	run("config", "user.name", "Test User")
@@ -1306,11 +1303,7 @@ func TestSafelyAdvanceLocalRef_DoesNotReplayDisconnectedChainWhenTargetIsShallow
 
 	run := func(dir string, args ...string) {
 		t.Helper()
-		cmd := exec.CommandContext(ctx, "git", args...)
-		cmd.Dir = dir
-		cmd.Env = testutil.GitIsolatedEnv()
-		out, err := cmd.CombinedOutput()
-		require.NoError(t, err, "git %v in %s failed: %s", args, dir, out)
+		testutil.RunGit(t, dir, args...)
 	}
 
 	run(bareDir, "init", "--bare", "-b", "main")

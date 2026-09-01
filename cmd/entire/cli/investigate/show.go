@@ -5,8 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"os"
-	"path/filepath"
 	"sort"
 	"strings"
 
@@ -29,6 +27,10 @@ type ShowInput struct {
 // ShowDeps collects what RunShow needs that's test-injectable.
 type ShowDeps struct {
 	ManifestStore *LocalManifestStore
+	// StateStore reads the per-run findings document for manifests that do not
+	// embed one. Nil means "resolve from the current repository"; RunShow fills
+	// it in, and a nil result is soft — the findings block is simply omitted.
+	StateStore *StateStore
 }
 
 // RunShow prints the saved investigation summary + findings for the
@@ -39,12 +41,20 @@ type ShowDeps struct {
 //     otherwise return an "ambiguous" or "not found" error
 //
 // Findings come from manifest.FindingsContent when present (terminal
-// outcomes), or by reading manifest.FindingsDoc from disk (paused /
-// cancelled runs whose per-run dir still exists). Both paths missing
-// is a soft state — the header is printed with an explanatory line.
+// outcomes), or from the per-run findings document resolved by run id (paused /
+// cancelled runs whose per-run dir still exists). Both missing is a soft
+// state — the header is printed with an explanatory line.
 func RunShow(ctx context.Context, in ShowInput, deps ShowDeps) error {
 	if deps.ManifestStore == nil {
 		return errors.New("show: manifest store not wired")
+	}
+	if deps.StateStore == nil {
+		// Best-effort: a repo-less invocation still prints every manifest that
+		// embeds its findings, which is every terminal outcome. A nil store
+		// reads as "no per-run document", which is the same soft state.
+		if store, err := NewStateStore(ctx); err == nil {
+			deps.StateStore = store
+		}
 	}
 
 	// Fast path: a full 12-hex run id resolves via Glob + one file read.
@@ -58,7 +68,7 @@ func RunShow(ctx context.Context, in ShowInput, deps ShowDeps) error {
 			return fmt.Errorf("no investigation found with run id %q", runID)
 		}
 		printShowSummary(in.Out, m)
-		printShowFindings(in.Out, m)
+		printShowFindings(deps.StateStore, in.Out, m)
 		return nil
 	}
 
@@ -74,7 +84,7 @@ func RunShow(ctx context.Context, in ShowInput, deps ShowDeps) error {
 	if runID == "" {
 		if len(manifests) == 1 {
 			printShowSummary(in.Out, manifests[0])
-			printShowFindings(in.Out, manifests[0])
+			printShowFindings(deps.StateStore, in.Out, manifests[0])
 			return nil
 		}
 		return ambiguousRunIDError(manifests, "")
@@ -85,7 +95,7 @@ func RunShow(ctx context.Context, in ShowInput, deps ShowDeps) error {
 		return err
 	}
 	printShowSummary(in.Out, resolved[0])
-	printShowFindings(in.Out, resolved[0])
+	printShowFindings(deps.StateStore, in.Out, resolved[0])
 	return nil
 }
 
@@ -129,19 +139,13 @@ func printShowSummary(w io.Writer, m LocalManifest) {
 // to reading the on-disk findings file (still present for paused or
 // cancelled runs). Body is rendered through mdrender for terminal
 // output; raw markdown passes through for piped/NO_COLOR output.
-func printShowFindings(w io.Writer, m LocalManifest) {
-	body := ""
-	switch {
-	case m.FindingsContent != "":
-		body = m.FindingsContent
-	case m.FindingsDoc != "" && filepath.IsAbs(m.FindingsDoc):
-		// FindingsDoc is contractually absolute (see LocalManifest docs).
-		// Refuse to read relative paths: those would resolve against the
-		// current process cwd, which may differ from where the run wrote
-		// findings.md, and could surface unrelated content.
-		if data, err := os.ReadFile(m.FindingsDoc); err == nil {
-			body = string(data)
-		}
+func printShowFindings(store *StateStore, w io.Writer, m LocalManifest) {
+	// By run id, not by m.FindingsDoc. That field is an absolute path decoded
+	// from a manifest file, and a manifest naming something else on the
+	// filesystem is exactly what must not be read and printed.
+	body := m.FindingsContent
+	if body == "" {
+		body = ReadRunFindings(store, m.RunID)
 	}
 	if body == "" {
 		fmt.Fprintf(w, "No findings content available for run %s.\n", m.RunID)
