@@ -6,7 +6,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"maps"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"slices"
@@ -16,6 +18,8 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
+	"github.com/entireio/cli/cmd/entire/cli/interactive"
+	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
@@ -26,9 +30,34 @@ import (
 type adoptOptions struct {
 	FromWorktree string
 	Force        bool
+	// SkipTranscriptValidation allows auto-adopt to proceed when a source
+	// transcript path is missing or not owned by a registered agent. The
+	// adopted state clears an invalid transcript path instead of failing.
+	SkipTranscriptValidation bool
+	// DeferSourceRetire splits the external-store adopt across git hooks: register
+	// the adopted session in the target and stamp a PendingSourceRetire marker,
+	// but SKIP the destructive source-side tombstone. Cross-common-dir auto-adopt
+	// sets this from prepare-commit-msg so an aborted commit (editor abort,
+	// empty-message strip) never retires the source with no commit; post-commit
+	// completes the retire via finalizePendingSourceRetires. Manual
+	// `entire session adopt` leaves it false and retires immediately.
+	DeferSourceRetire bool
+	// AdoptionAttemptID binds a deferred target marker to its exact registry
+	// claim. Auto-adopt supplies a fresh value for every prepare invocation.
+	AdoptionAttemptID string
+	// RevalidateSource re-runs the caller's own admission checks against the
+	// source state as loaded UNDER the source lock. The locked reload here only
+	// re-establishes manual-adopt eligibility; a caller whose decision rested on
+	// additional unlocked reads (automatic adoption: phase, recency, process
+	// owner, staged-path overlap) supplies those checks here so they hold at the
+	// moment the adopt commits. nil for manual `entire session adopt`.
+	RevalidateSource func(*session.State) error
 }
 
-const adoptRecentWindow = 12 * time.Hour
+// adoptRecentWindow bounds how recently a session must have been active to be
+// an adopt candidate. Tied to the live-registry TTL so the two stay in lockstep
+// (an entry swept from the registry is also too old to adopt).
+const adoptRecentWindow = session.LiveSessionMaxAge
 
 func newAdoptCmd() *cobra.Command {
 	var opts adoptOptions
@@ -88,8 +117,10 @@ func runAdopt(ctx context.Context, w io.Writer, sessionID string, opts adoptOpti
 	if err != nil {
 		return err
 	}
-	if err := validateAdoptSourceTranscript(sourceState, sourceWorktree); err != nil {
-		return err
+	if !opts.SkipTranscriptValidation {
+		if err := validateAdoptSourceTranscript(sourceState, sourceWorktree); err != nil {
+			return err
+		}
 	}
 
 	var adopted *session.State
@@ -150,17 +181,55 @@ func adoptFromExternalSessionStore(
 		if !isAdoptableSourceSession(sourceState) {
 			return fmt.Errorf("session %s is ended or fully condensed and cannot be adopted", sessionID)
 		}
+		// Cross-process mutual exclusion, enforced on EVERY adopt path. The shared
+		// sourceCommonDir lock serializes two concurrent adopts of the same unique
+		// candidate; this makes the loser OBSERVE the winner's claim and refuse, so
+		// the session is adopted into exactly one repo. A stale claim (aborted
+		// commit) or a re-claim by this same target does not block.
+		//
+		// This must NOT be gated on opts.DeferSourceRetire. A claim marks a source
+		// that another target has already registered non-destructively and will
+		// finalize at post-commit; the manual path (DeferSourceRetire false) skips
+		// straight to retireAdoptedSourceSession, so gating here would let
+		// `entire session adopt --from <src> --force` tombstone a source out from
+		// under that pending target and leave the session adopted into two repos —
+		// the same double-adopt this claim exists to prevent, via the manual door.
+		// --force is scoped to replacing the target's own session below; it is not
+		// a license to steal another repo's claim.
+		// The claim lives in the cross-repo live-session registry, which is keyed by
+		// session ID alone — one file every repo on the machine shares — so it is the
+		// only store both racers can see. Reading it here (under the shared source
+		// lock) is what makes the loser OBSERVE the winner and refuse.
+		if !opts.DeferSourceRetire {
+			claim, err := session.LiveSessionClaimContext(ctx, sessionID)
+			if err != nil {
+				return fmt.Errorf("read adopt claim: %w", err)
+			}
+			if freshAdoptClaim(claim) {
+				return &sourceClaimedError{sessionID: sessionID, claimedBy: adoptClaimLabel(claim)}
+			}
+		}
 		if !sessionBelongsToSourceWorktree(sourceState, sourceWorktree, sourceWorktreeID) {
 			return fmt.Errorf("session %s belongs to %s, not %s",
 				sessionID, adoptSessionWorktreeLabel(sourceState), sourceWorktree)
 		}
-		if err := validateAdoptSourceTranscript(sourceState, sourceWorktree); err != nil {
-			return err
+		if opts.RevalidateSource != nil {
+			if err := opts.RevalidateSource(sourceState); err != nil {
+				return fmt.Errorf("revalidate adoption source: %w", err)
+			}
+		}
+		if !opts.SkipTranscriptValidation {
+			if err := validateAdoptSourceTranscript(sourceState, sourceWorktree); err != nil {
+				return err
+			}
 		}
 
 		next, touched, err := buildAdoptedSessionState(ctx, sourceState)
 		if err != nil {
 			return err
+		}
+		if opts.SkipTranscriptValidation {
+			clearInvalidAdoptTranscript(ctx, next, sourceWorktree)
 		}
 		existing, err := targetStore.Load(ctx, next.SessionID)
 		if err != nil {
@@ -169,13 +238,80 @@ func adoptFromExternalSessionStore(
 		if existing != nil && !opts.Force {
 			return fmt.Errorf("session %s is already tracked in this repo; rerun with --force to replace it", next.SessionID)
 		}
+		if opts.DeferSourceRetire {
+			if opts.AdoptionAttemptID == "" {
+				attemptID, generateErr := id.Generate()
+				if generateErr != nil {
+					return fmt.Errorf("generate adoption attempt ID: %w", generateErr)
+				}
+				opts.AdoptionAttemptID = attemptID.String()
+			}
+			// Stage the source-side tombstone instead of applying it: record where
+			// the source lives so post-commit can retire it once the commit is a
+			// fact. The source stays ACTIVE for now — if the commit aborts,
+			// post-commit never runs and the source keeps its checkpointing.
+			next.PendingSourceRetire = &session.PendingSourceRetire{
+				SourceCommonDir:    sourceCommonDir,
+				SourceWorktreePath: sourceWorktree,
+				AdoptionAttemptID:  opts.AdoptionAttemptID,
+			}
+		}
+		if opts.DeferSourceRetire {
+			// Non-destructive prepare phase: take the claim in the shared registry
+			// BEFORE registering the target, so a concurrent adopt by a different
+			// target sees it and skips, while the source stays ACTIVE and keeps
+			// checkpointing until post-commit finalizes the retire.
+			//
+			// Claiming first is what removes the rollback: the old order registered the
+			// target and only then wrote the claim to a second store, so a failed claim
+			// left a claimless double-adopt window that had to be compensated. With one
+			// store, claimed first, a later failure leaves at worst a recency-bounded
+			// claim held by US — which self-heals and which our own re-adopt treats as
+			// idempotent.
+			claim := session.AdoptClaim{
+				ByCommonDir:    targetCommonDir,
+				ByWorktreePath: next.WorktreePath,
+				ByWorktreeID:   next.WorktreeID,
+				AttemptID:      opts.AdoptionAttemptID,
+				At:             time.Now(),
+			}
+			claimed, err := session.ClaimLiveSessionContext(ctx, sessionID, claim)
+			if err != nil {
+				return fmt.Errorf("claim source session: %w", err)
+			}
+			if !claimed {
+				// Lost the race between the read above and here. The registry claim is
+				// authoritative; the earlier read is only a fast path.
+				current, readErr := session.LiveSessionClaimContext(ctx, sessionID)
+				if readErr != nil {
+					return fmt.Errorf("read adopt claim: %w", readErr)
+				}
+				return &sourceClaimedError{sessionID: sessionID, claimedBy: adoptClaimLabel(current)}
+			}
+			if err := targetStore.Save(ctx, next); err != nil {
+				if _, releaseErr := session.ReleaseLiveSessionClaimIfOwned(context.Background(), sessionID, claim); releaseErr != nil {
+					logging.Debug(logging.WithComponent(ctx, "session"), "failed to release auto-adopt claim after target save failure",
+						slog.String("session_id", sessionID),
+						slog.String("error", releaseErr.Error()),
+					)
+				}
+				return fmt.Errorf("save adopted session state: %w", err)
+			}
+			adopted = next
+			filesTouched = touched
+			return nil
+		}
 		if err := targetStore.Save(ctx, next); err != nil {
 			return fmt.Errorf("save adopted session state: %w", err)
 		}
 		retired := retireAdoptedSourceSession(sourceState, next)
 		if err := sourceStore.Save(ctx, &retired); err != nil {
-			if rollbackErr := rollbackExternalAdoptTarget(ctx, targetStore, next.SessionID, existing); rollbackErr != nil {
-				return fmt.Errorf("retire source session state: %w; rollback adopted target session state: %w", err, rollbackErr)
+			// Roll back on a non-cancelable context: the caller's ctx may already
+			// be canceled/timed-out (auto-adopt bounds this whole path), and a
+			// rollback that inherits that cancellation would fail spuriously and
+			// leave the session registered in BOTH repos.
+			if rollbackErr := rollbackExternalAdoptTarget(context.WithoutCancel(ctx), targetStore, next.SessionID, existing); rollbackErr != nil {
+				return &adoptRollbackFailedError{retireErr: err, rollbackErr: rollbackErr}
 			}
 			return fmt.Errorf("retire source session state: %w", err)
 		}
@@ -187,6 +323,24 @@ func adoptFromExternalSessionStore(
 		return nil, nil, fmt.Errorf("adopt external session state: %w", err)
 	}
 	return adopted, filesTouched, nil
+}
+
+// adoptRollbackFailedError is returned when retiring the source session failed
+// AND the compensating rollback of the target also failed, leaving the session
+// registered in both repos. Callers (auto-adopt) surface this at Error — it is
+// the two-repos-active corruption case, not an ordinary miss.
+type adoptRollbackFailedError struct {
+	retireErr   error
+	rollbackErr error
+}
+
+func (e *adoptRollbackFailedError) Error() string {
+	return fmt.Sprintf("retire source session state: %v; rollback adopted target session state: %v",
+		e.retireErr, e.rollbackErr)
+}
+
+func (e *adoptRollbackFailedError) Unwrap() []error {
+	return []error{e.retireErr, e.rollbackErr}
 }
 
 func rollbackExternalAdoptTarget(ctx context.Context, targetStore *session.StateStore, sessionID string, previous *session.State) error {
@@ -212,6 +366,8 @@ func retireAdoptedSourceSession(source, target *session.State) session.State {
 	retired.FilesTouched = nil
 	retired.TurnID = ""
 	retired.TurnCheckpointIDs = nil
+	// The tombstone supersedes any in-flight adoption claim on the source.
+	retired.AdoptClaim = nil
 	retired.AdoptedIntoWorktreePath = target.WorktreePath
 	retired.AdoptedIntoWorktreeID = target.WorktreeID
 	return retired
@@ -275,6 +431,52 @@ func validateAdoptSourceTranscript(source *session.State, sourceWorktree string)
 			source.SessionID, source.TranscriptPath, owner.Type(), source.AgentType)
 	}
 	return nil
+}
+
+// clearInvalidAdoptTranscript wipes a transcript pointer that would fail
+// validateAdoptSourceTranscript. Used by auto-adopt (SkipTranscriptValidation)
+// so a missing/unowned path does not block adoption; surfaces a warning so the
+// user can see continuity was degraded until the next agent turn re-resolves it.
+func clearInvalidAdoptTranscript(ctx context.Context, state *session.State, sourceWorktree string) {
+	if state == nil || strings.TrimSpace(state.TranscriptPath) == "" {
+		return
+	}
+	if err := validateAdoptSourceTranscript(state, sourceWorktree); err != nil {
+		logCtx := logging.WithComponent(ctx, "session")
+		logging.Warn(logCtx, "adopt: clearing invalid transcript path",
+			slog.String("session_id", state.SessionID),
+			slog.String("error", err.Error()),
+		)
+		writeAdoptUserWarning(fmt.Sprintf(
+			"[entire] Warning: adopted session %s lost its transcript pointer (%v); it will be re-resolved on the next agent turn.\n",
+			shortSessionID(state.SessionID), err,
+		))
+		state.TranscriptPath = ""
+	}
+}
+
+// adoptWarningWriter is the fallback sink for writeAdoptUserWarning when no
+// /dev/tty is available. It exists so tests can capture the warning without
+// swapping the process-global os.Stderr.
+var adoptWarningWriter io.Writer = os.Stderr
+
+// writeAdoptUserWarning best-effort surfaces a transcript-continuity warning.
+// It is reached only via clearInvalidAdoptTranscript under SkipTranscriptValidation
+// — i.e. cross-common-dir auto-adopt, never manual `entire session adopt`. That
+// path runs inside prepare-commit-msg, whose stderr the git hook swallows
+// (2>/dev/null), so it tries /dev/tty first. But an agent committer has no
+// controlling terminal, and Windows has no /dev/tty, so the write is frequently
+// a no-op: the durable record is the logging.Warn that clearInvalidAdoptTranscript
+// writes to .entire/logs.
+func writeAdoptUserWarning(msg string) {
+	if !interactive.UnderTest() {
+		if tty, err := os.OpenFile("/dev/tty", os.O_WRONLY, 0); err == nil {
+			_, _ = fmt.Fprint(tty, msg)
+			_ = tty.Close()
+			return
+		}
+	}
+	fmt.Fprint(adoptWarningWriter, msg)
 }
 
 func stateStoreForWorktree(ctx context.Context, worktreePath string) (*session.StateStore, string, string, error) {
@@ -405,6 +607,38 @@ func isAdoptableSourceSession(state *session.State) bool {
 		!state.FullyCondensed
 }
 
+func freshAdoptClaim(claim *session.AdoptClaim) bool {
+	return claim != nil && !claim.At.IsZero() && time.Since(claim.At) <= session.AdoptClaimMaxAge
+}
+
+func adoptClaimLabel(claim *session.AdoptClaim) string {
+	if claim == nil {
+		return unknownPlaceholder
+	}
+	if claim.ByWorktreePath != "" {
+		return claim.ByWorktreePath
+	}
+	if claim.ByCommonDir != "" {
+		return claim.ByCommonDir
+	}
+	return unknownPlaceholder
+}
+
+// sourceClaimedError is returned by adoptFromExternalSessionStore when the source
+// session already carries a FRESH cross-common-dir adoption claim by a DIFFERENT
+// target — a concurrent commit is mid-adopt of the same unique session. It is a
+// benign "lost the race" outcome that preserves adopt-exactly-once, not
+// corruption, so auto-adopt logs it at Debug and moves on rather than warning.
+type sourceClaimedError struct {
+	sessionID string
+	claimedBy string
+}
+
+func (e *sourceClaimedError) Error() string {
+	return fmt.Sprintf("session %s is already claimed for cross-common-dir adoption by %s",
+		e.sessionID, e.claimedBy)
+}
+
 func sessionLastSeen(state *session.State) time.Time {
 	if state.LastInteractionTime != nil {
 		return *state.LastInteractionTime
@@ -460,6 +694,9 @@ func buildAdoptedSessionState(ctx context.Context, source *session.State) (*sess
 	adopted.WorktreeID = worktreeID
 	adopted.AdoptedIntoWorktreePath = ""
 	adopted.AdoptedIntoWorktreeID = ""
+	// AdoptClaim is a source-side marker; the adopted (target) copy never carries
+	// one. The caller re-stamps it on the source under the shared lock.
+	adopted.AdoptClaim = nil
 	adopted.Branch = branch
 	adopted.LastInteractionTime = &now
 	adopted.Phase = session.PhaseActive
@@ -521,6 +758,10 @@ func cloneAdoptSourceState(source *session.State) session.State {
 	if source.PendingPromptAttribution != nil {
 		pending := clonePromptAttribution(*source.PendingPromptAttribution)
 		adopted.PendingPromptAttribution = &pending
+	}
+	if source.AdoptClaim != nil {
+		claim := *source.AdoptClaim
+		adopted.AdoptClaim = &claim
 	}
 	return adopted
 }

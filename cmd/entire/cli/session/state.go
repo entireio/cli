@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -142,6 +143,22 @@ type State struct {
 	// AdoptedIntoWorktreeID is the target worktree ID paired with
 	// AdoptedIntoWorktreePath when available.
 	AdoptedIntoWorktreeID string `json:"adopted_into_worktree_id,omitempty"`
+
+	// PendingSourceRetire records a cross-common-dir source session that must be
+	// tombstoned after this adopted session's commit becomes a fact. Written at
+	// prepare-commit-msg time by cross-common-dir auto-adopt, which registers the
+	// adopted session in this (target) worktree so the checkpoint trailer lands,
+	// but DEFERS the destructive source-side retire to post-commit — an aborted
+	// commit must never strand the source with its checkpointing retired and no
+	// commit to show for it. Cleared once post-commit completes the retire
+	// (finalizePendingSourceRetires). nil in the normal steady state.
+	PendingSourceRetire *PendingSourceRetire `json:"pending_source_retire,omitempty"`
+
+	// AdoptClaim is retained only for backward-compatible decoding of state files
+	// written by early cross-common-dir builds. New claims live exclusively in the
+	// cross-repo live-session registry, where competing repositories can observe
+	// and atomically update them.
+	AdoptClaim *AdoptClaim `json:"adopt_claim,omitempty"`
 
 	// Branch is the git branch HEAD pointed at the last time this session took a
 	// turn. Captured on each turn start so it tracks branches created or renamed
@@ -580,6 +597,45 @@ func (s *State) LiveTaskRecords() []TaskRecord {
 	return live
 }
 
+// PendingSourceRetire locates the source session store whose ACTIVE session was
+// adopted into a worktree and now awaits a post-commit tombstone. It is the
+// staged intent recorded by cross-common-dir auto-adopt at prepare-commit-msg
+// time so post-commit can complete the (destructive) source-side retire once
+// the commit is a fact. The session ID is the enclosing State's SessionID.
+type PendingSourceRetire struct {
+	// SourceCommonDir is the git common dir of the source repo/worktree, used to
+	// reopen the source session store and retire the session there.
+	SourceCommonDir string `json:"source_common_dir"`
+	// SourceWorktreePath is the source worktree root (best-effort, for logging).
+	SourceWorktreePath string `json:"source_worktree_path,omitempty"`
+	// AdoptionAttemptID binds this marker to the exact registry claim created by
+	// prepare-commit-msg. It prevents a stale marker from retiring a source after
+	// another worktree has legitimately replaced an expired claim.
+	AdoptionAttemptID string `json:"adoption_attempt_id,omitempty"`
+	// ExpectedCheckpointID is the trailer written by the same prepare-commit-msg
+	// invocation. Post-commit must observe this exact ID on HEAD before it may
+	// destructively retire the source.
+	ExpectedCheckpointID id.CheckpointID `json:"expected_checkpoint_id,omitempty"`
+}
+
+// AdoptClaim records an in-flight adoption in the cross-repo live-session
+// registry. It binds one target worktree and one prepare-commit-msg attempt.
+type AdoptClaim struct {
+	// ByCommonDir is the git common dir of the TARGET worktree that claimed this
+	// source. A claim by a *different* common dir blocks a new adoption; a
+	// re-claim by the same common dir is idempotent (re-adopt is fine).
+	ByCommonDir string `json:"by_common_dir"`
+	// ByWorktreePath is the target worktree root (best-effort, for logging).
+	ByWorktreePath string `json:"by_worktree_path,omitempty"`
+	// ByWorktreeID distinguishes linked worktrees that share a git common dir.
+	ByWorktreeID string `json:"by_worktree_id,omitempty"`
+	// AttemptID uniquely identifies one prepare-commit-msg adoption attempt.
+	AttemptID string `json:"attempt_id,omitempty"`
+	// At is when the claim was written. A claim older than the adopt-recency
+	// window is treated as abandoned (aborted commit) and no longer blocks.
+	At time.Time `json:"at"`
+}
+
 // PromptAttribution captures line-level attribution data at the start of each prompt.
 // By recording what changed since the last checkpoint BEFORE the agent works,
 // we can accurately separate user edits from agent contributions.
@@ -939,7 +995,7 @@ func (s *StateStore) Load(ctx context.Context, sessionID string) (*State, error)
 	defer root.Close()
 
 	fileName := sessionID + ".json"
-	data, err := osroot.ReadFile(root, fileName)
+	data, err := readStateFile(ctx, root, fileName)
 	if os.IsNotExist(err) {
 		return nil, nil //nolint:nilnil // nil,nil indicates session not found (expected case)
 	}
@@ -951,6 +1007,15 @@ func (s *StateStore) Load(ctx context.Context, sessionID string) (*State, error)
 	if err := json.Unmarshal(data, &state); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal session state: %w", err)
 	}
+	// The filename is the session's identity everywhere else in the codebase
+	// (locks, registry keys, adopt claims are all keyed by the requested ID). A
+	// body whose session_id disagrees would let a replaced or hand-edited file
+	// redirect a caller onto a different session than the one it validated and
+	// locked, so refuse it instead of returning the mismatched state.
+	if state.SessionID != "" && state.SessionID != sessionID {
+		return nil, fmt.Errorf("session state file %s declares session ID %q", fileName, state.SessionID)
+	}
+	state.SessionID = sessionID
 	state.NormalizeAfterLoad(ctx)
 
 	if state.IsStale() {
@@ -965,10 +1030,50 @@ func (s *StateStore) Load(ctx context.Context, sessionID string) (*State, error)
 	return &state, nil
 }
 
+// maxStateFileBytes caps a single session state read. Session state is
+// operational metadata (paths, counters, attribution maps); real files are a few
+// hundred kilobytes at the extreme. The cap exists so a git hook running under
+// the auto-adopt budget cannot be made to read an arbitrarily large file.
+const maxStateFileBytes = 64 << 20
+
+// readStateFile reads one session state file with the bounds a git-hook caller
+// needs: it refuses anything that is not a regular file (a fifo would block the
+// hook forever), caps the read at maxStateFileBytes, and honors ctx before and
+// after the read so a cancelled hook budget stops the scan.
+func readStateFile(ctx context.Context, root *os.Root, name string) ([]byte, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, fmt.Errorf("session state read canceled: %w", err)
+	}
+	info, err := root.Stat(name)
+	if err != nil {
+		return nil, err //nolint:wrapcheck // preserve os.IsNotExist for callers
+	}
+	if !info.Mode().IsRegular() {
+		return nil, fmt.Errorf("session state %s is not a regular file", name)
+	}
+	if info.Size() > maxStateFileBytes {
+		return nil, fmt.Errorf("session state %s exceeds %d bytes", name, maxStateFileBytes)
+	}
+	f, err := root.Open(name)
+	if err != nil {
+		return nil, err //nolint:wrapcheck // preserve os.IsNotExist for callers
+	}
+	defer f.Close()
+	data, err := io.ReadAll(io.LimitReader(f, maxStateFileBytes+1))
+	if err != nil {
+		return nil, fmt.Errorf("read session state %s: %w", name, err)
+	}
+	if len(data) > maxStateFileBytes {
+		return nil, fmt.Errorf("session state %s exceeds %d bytes", name, maxStateFileBytes)
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, fmt.Errorf("session state read canceled: %w", err)
+	}
+	return data, nil
+}
+
 // Save saves the session state atomically.
 func (s *StateStore) Save(ctx context.Context, state *State) error {
-	_ = ctx // Reserved for future use
-
 	// Validate session ID to prevent path traversal
 	if err := validation.ValidateSessionID(state.SessionID); err != nil {
 		return fmt.Errorf("invalid session ID: %w", err)
@@ -1021,13 +1126,22 @@ func (s *StateStore) Save(ctx context.Context, state *State) error {
 		return fmt.Errorf("failed to rename session state file: %w", err)
 	}
 	removeTmp = false
+
+	// Best-effort cross-repo live pointer so prepare-commit-msg in another
+	// common dir can auto-adopt a unique ACTIVE session (#1439).
+	commonDir := CommonDirFromStateDir(s.stateDir)
+	if ShouldRegisterLive(state) {
+		_ = registerLiveSession(ctx, state, commonDir) //nolint:errcheck // hook-path resilient
+	} else {
+		// Common-dir-scoped: retiring a source session (cross-repo adopt) must not
+		// delete the target's freshly-written entry for the same session ID.
+		_ = unregisterLiveSession(ctx, state.SessionID, commonDir, state.WorktreePath) //nolint:errcheck // hook-path resilient
+	}
 	return nil
 }
 
 // Clear removes the session state file for the given session ID.
 func (s *StateStore) Clear(ctx context.Context, sessionID string) error {
-	_ = ctx // Reserved for future use
-
 	// Validate session ID to prevent path traversal
 	if err := validation.ValidateSessionID(sessionID); err != nil {
 		return fmt.Errorf("invalid session ID: %w", err)
@@ -1038,6 +1152,19 @@ func (s *StateStore) Clear(ctx context.Context, sessionID string) error {
 	// session ID is user-controlled, and a glob pattern would let metacharacters
 	// match and delete other sessions' files. os.Root ensures traversal-resistant
 	// removal.
+	var registryOwner struct {
+		WorktreePath string `json:"worktree_path"`
+	}
+	if root, rootErr := os.OpenRoot(s.stateDir); rootErr == nil {
+		if data, err := readStateFile(ctx, root, sessionID+".json"); err == nil {
+			if err := json.Unmarshal(data, &registryOwner); err != nil {
+				registryOwner.WorktreePath = ""
+			}
+		}
+		// Read-only handle: nothing is buffered, so a close error has nothing to report.
+		_ = root.Close()
+	}
+	primaryFile := sessionID + ".json"
 	matches := matchSessionFiles(s.stateDir, sessionID)
 	if len(matches) > 0 {
 		root, rootErr := os.OpenRoot(s.stateDir)
@@ -1046,10 +1173,19 @@ func (s *StateStore) Clear(ctx context.Context, sessionID string) error {
 		}
 		defer root.Close()
 		for _, name := range matches {
-			_ = osroot.Remove(root, name) //nolint:errcheck // best-effort cleanup
+			removeErr := osroot.Remove(root, name)
+			// Auxiliary hint files (.model, …) are best-effort, but the primary
+			// state file IS the session's registration in this store. Callers that
+			// roll back an adoption depend on its removal to know the session is no
+			// longer active here; swallowing that failure would leave the session
+			// registered in two repos with nothing to retry from.
+			if removeErr != nil && name == primaryFile {
+				return fmt.Errorf("failed to remove session state file: %w", removeErr)
+			}
 		}
 	}
 
+	_ = unregisterLiveSession(ctx, sessionID, CommonDirFromStateDir(s.stateDir), registryOwner.WorktreePath) //nolint:errcheck // best-effort registry cleanup
 	return nil
 }
 
@@ -1082,7 +1218,16 @@ func (s *StateStore) RemoveAll() error {
 }
 
 // List returns all session states.
+//
+// The scan is context-aware: it is reached from git hooks that run under a
+// wall-clock budget (cross-common-dir auto-adopt), so an expired ctx aborts with
+// an error rather than returning a silently partial list that a caller could
+// mistake for "no other sessions exist". Individual unreadable or oversized
+// state files are skipped (see readStateFile for the per-file bounds).
 func (s *StateStore) List(ctx context.Context) ([]*State, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, fmt.Errorf("session state list canceled: %w", err)
+	}
 	entries, err := os.ReadDir(s.stateDir)
 	if os.IsNotExist(err) {
 		return nil, nil
@@ -1093,6 +1238,9 @@ func (s *StateStore) List(ctx context.Context) ([]*State, error) {
 
 	var states []*State
 	for _, entry := range entries {
+		if err := ctx.Err(); err != nil {
+			return nil, fmt.Errorf("session state list canceled: %w", err)
+		}
 		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
 			continue
 		}
@@ -1103,6 +1251,9 @@ func (s *StateStore) List(ctx context.Context) ([]*State, error) {
 		sessionID := strings.TrimSuffix(entry.Name(), ".json")
 		state, err := s.Load(ctx, sessionID)
 		if err != nil {
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return nil, fmt.Errorf("session state list canceled: %w", ctxErr)
+			}
 			continue // Skip corrupted state files
 		}
 		if state == nil {
@@ -1169,12 +1320,14 @@ func getGitCommonDir(ctx context.Context) (string, error) {
 
 	commonDir := strings.TrimSpace(string(output))
 
-	// git rev-parse --git-common-dir returns relative paths from the working directory,
-	// so we need to make it absolute if it isn't already
-	if !filepath.IsAbs(commonDir) {
-		commonDir = filepath.Join(".", commonDir)
+	// git rev-parse --git-common-dir often returns a CWD-relative path (e.g. ".git").
+	// Absolutize before caching/persisting so cross-process consumers (live-session
+	// registry) don't reinterpret ".git" against a different CWD.
+	abs, absErr := filepath.Abs(commonDir)
+	if absErr != nil {
+		return "", fmt.Errorf("absolutize git common dir %q: %w", commonDir, absErr)
 	}
-	commonDir = filepath.Clean(commonDir)
+	commonDir = filepath.Clean(abs)
 
 	gitCommonDirMu.Lock()
 	gitCommonDirCache = commonDir

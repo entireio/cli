@@ -1,9 +1,5 @@
 //go:build unix
 
-// Package flock provides a small cross-process advisory-lock primitive built
-// on POSIX flock (Unix) / LockFileEx (Windows). It exists so that checkpoint
-// and strategy can both serialize on shared resources without one taking
-// the other as an import dependency.
 package flock
 
 import (
@@ -15,65 +11,71 @@ import (
 	"time"
 )
 
-// pollInterval is how often the bounded AcquireContext path retries a
-// non-blocking lock while waiting for a deadline.
-const pollInterval = 25 * time.Millisecond
-
 // Acquire takes an exclusive advisory lock on path, creating the file if
 // needed. The returned release closes the file, which drops the flock.
 // Callers must invoke release exactly once. The lock file persists between
 // runs — flock state is held by the file descriptor, not by the inode on
 // disk — so the lockfile contents are immaterial.
 //
-// Acquire blocks indefinitely until the lock is available. Use AcquireContext
-// with a deadline to bound the wait.
+// Acquire blocks indefinitely on a contended lock and cannot be interrupted
+// by context cancellation. Callers that need a bounded wait must use
+// AcquireContext instead.
 func Acquire(path string) (release func(), err error) {
-	return AcquireContext(context.Background(), path)
+	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0o600) //nolint:gosec // caller is responsible for path validation
+	if err != nil {
+		return nil, fmt.Errorf("open flock: %w", err)
+	}
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil { //nolint:gosec // file descriptors are non-negative; standard Go pattern for syscall.Flock
+		_ = f.Close()
+		return nil, fmt.Errorf("flock: %w", err)
+	}
+	return onceRelease(func() { _ = f.Close() }), nil
 }
 
-// AcquireContext behaves like Acquire but honors ctx. When ctx carries a
-// deadline it polls a non-blocking lock until the lock is acquired or the
-// deadline/cancellation fires, returning a wrapped ctx.Err() on timeout. When
-// ctx has no deadline it takes the same blocking kernel path as Acquire, so
-// existing callers keep their exact behavior. This lets latency-critical hooks
-// (turn-start) bound their wait and degrade gracefully instead of stalling
-// behind a long-running lock holder (e.g. checkpoint condensation).
+// AcquireContext behaves like Acquire, except the wait for a contended lock
+// is bounded by ctx: it repeatedly attempts a non-blocking flock
+// (LOCK_EX|LOCK_NB) and polls at acquirePollInterval until either the lock
+// is obtained or ctx is done, in which case it returns ctx.Err(). Use this
+// instead of Acquire whenever the caller has a deadline that must bound
+// lock acquisition — the blocking syscall.Flock(LOCK_EX) used by Acquire
+// ignores context cancellation entirely.
+//
+// When ctx has no Done channel (Background/TODO) it can neither time out nor
+// be canceled, so AcquireContext falls back to the blocking Acquire rather
+// than spinning at acquirePollInterval forever. Cancelable contexts keep the
+// poll loop so cancellation is still observed.
 func AcquireContext(ctx context.Context, path string) (release func(), err error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err //nolint:wrapcheck // canonical context cancellation
+	}
+	// A context with no Done channel (Background/TODO) can neither time out nor
+	// be canceled, so the poll loop would spin forever at acquirePollInterval.
+	// Block on the OS lock instead — the kernel wakes us when it frees, no spin.
+	// Cancelable contexts (WithCancel) keep the poll loop so cancellation works.
+	if ctx.Done() == nil {
+		return Acquire(path)
+	}
 	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0o600) //nolint:gosec // caller is responsible for path validation
 	if err != nil {
 		return nil, fmt.Errorf("open flock: %w", err)
 	}
 
-	// Fast path: no deadline -> block in the kernel exactly like the historical
-	// Acquire. This preserves behavior (and efficiency) for callers that must
-	// wait as long as it takes, such as turn-end checkpoint condensation.
-	if _, hasDeadline := ctx.Deadline(); !hasDeadline {
-		if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil { //nolint:gosec // file descriptors are non-negative; standard Go pattern for syscall.Flock
-			_ = f.Close()
-			return nil, fmt.Errorf("flock: %w", err)
-		}
-		return func() { _ = f.Close() }, nil
-	}
-
-	// Bounded path: poll a non-blocking lock until acquired or ctx is done.
+	ticker := time.NewTicker(acquirePollInterval)
+	defer ticker.Stop()
 	for {
-		lockErr := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB) //nolint:gosec // see above
-		if lockErr == nil {
-			return func() { _ = f.Close() }, nil
+		flockErr := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB) //nolint:gosec // file descriptors are non-negative; standard Go pattern for syscall.Flock
+		if flockErr == nil {
+			return onceRelease(func() { _ = f.Close() }), nil
 		}
-		if !errors.Is(lockErr, syscall.EWOULDBLOCK) {
+		if !errors.Is(flockErr, syscall.EWOULDBLOCK) && !errors.Is(flockErr, syscall.EAGAIN) {
 			_ = f.Close()
-			return nil, fmt.Errorf("flock: %w", lockErr)
-		}
-		if err := ctx.Err(); err != nil {
-			_ = f.Close()
-			return nil, fmt.Errorf("flock: %w", err)
+			return nil, fmt.Errorf("flock: %w", flockErr)
 		}
 		select {
 		case <-ctx.Done():
 			_ = f.Close()
-			return nil, fmt.Errorf("flock: %w", ctx.Err())
-		case <-time.After(pollInterval):
+			return nil, ctx.Err() //nolint:wrapcheck // canonical context cancellation
+		case <-ticker.C:
 		}
 	}
 }

@@ -283,8 +283,12 @@ t.Chdir(tmpDir)                                 // redirect CWD-based git resolu
 
 Tests must never read or write the developer's real `~/.config/entire`
 (contexts.json, version_check.json), `~/.cache/entire` (nodes.json,
-cluster_cores.json, api_discovery.json), or OS keychain. The developer may be
-using `entire` for real while tests run.
+cluster_cores.json, api_discovery.json, and the `live-sessions/` cross-repo
+live-session registry), or OS keychain. The developer may be using `entire` for
+real while tests run — a test that exercises session `Save`/`Clear` or
+cross-common-dir auto-adopt without isolating `XDG_CACHE_HOME` will write to
+(and TTL-sweep) the developer's real `~/.cache/entire/live-sessions/`. Set
+`t.Setenv("XDG_CACHE_HOME", t.TempDir())` in any such test.
 
 - **Single resolver**: `internal/entireclient/userdirs` is the only place
   that resolves the per-user config dir (`userdirs.Config()`:

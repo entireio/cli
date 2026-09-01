@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent/external"
+	checkpointid "github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
 	"github.com/entireio/cli/cmd/entire/cli/checkpointpolicy"
 	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/entireio/cli/cmd/entire/cli/interactive"
@@ -214,7 +215,22 @@ func newHooksGitPrepareCommitMsgCmd() *cobra.Command {
 			if g.skipUnsupportedCheckpointPolicy() {
 				return nil
 			}
+			// When an ACTIVE agent session lives in another git common dir,
+			// adopt it into this repo before trailer insertion (#1439).
+			// Skip the same cases PrepareCommitMsg skips (merge/squash/amend
+			// and rebase/cherry-pick/revert): adopting there would retire a
+			// live session with no trailer written.
+			var pendingAdoption *pendingAutoAdoption
+			var trailersBefore map[checkpointid.CheckpointID]struct{}
+			if shouldTryAutoAdoptOnPrepareCommitMsg(g.ctx, source) {
+				// Snapshot the trailers already in the message. PrepareCommitMsg
+				// preserves a pre-existing Entire-Checkpoint, so only a trailer
+				// absent here may bind the deferred source retire.
+				trailersBefore = autoAdoptTrailerSnapshot(commitMsgFile)
+				pendingAdoption = tryAutoAdoptCrossCommonDirSession(g.ctx)
+			}
 			hookErr := g.strategy.PrepareCommitMsg(g.ctx, commitMsgFile, source)
+			finishPreparedAutoAdoption(g.ctx, pendingAdoption, commitMsgFile, trailersBefore, hookErr)
 			g.logCompleted(hookErr)
 
 			return nil
@@ -267,6 +283,11 @@ func newHooksGitPostCommitCmd() *cobra.Command {
 			}
 			hookErr := g.strategy.PostCommit(g.ctx)
 			g.logCompleted(hookErr)
+
+			// Complete any cross-common-dir auto-adopt whose destructive
+			// source-side retire prepare-commit-msg deferred to here (#1439):
+			// the commit is now a fact, so it is safe to tombstone the source.
+			finalizePendingSourceRetires(g.ctx)
 
 			return nil
 		},

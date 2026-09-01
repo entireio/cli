@@ -87,16 +87,18 @@ const maxAncestorDepth = 12
 // (node, bun, python) are deliberately absent — for several agents the runtime
 // IS the long-lived agent, so treating it as transient would skip the real owner.
 var transientNames = map[string]bool{
-	"entire": true,
-	"sh":     true,
-	"bash":   true,
-	"zsh":    true,
-	"dash":   true,
-	"fish":   true,
-	"ash":    true,
-	"ksh":    true,
-	"env":    true,
-	"go":     true,
+	"entire":  true,
+	"sh":      true,
+	"bash":    true,
+	"zsh":     true,
+	"dash":    true,
+	"fish":    true,
+	"ash":     true,
+	"ksh":     true,
+	"env":     true,
+	"go":      true,
+	"git":     true, // prepare-commit-msg / commit hooks run under git
+	"git.exe": true,
 }
 
 func isTransient(name string) bool {

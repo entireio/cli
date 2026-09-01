@@ -12,65 +12,73 @@ import (
 	"golang.org/x/sys/windows"
 )
 
-// pollInterval is how often the bounded AcquireContext path retries a
-// non-blocking lock while waiting for a deadline.
-const pollInterval = 25 * time.Millisecond
-
 // Acquire takes an exclusive lock on path via Windows LockFileEx. The
 // returned release unlocks and closes the file. Callers must invoke release
-// exactly once. Acquire blocks indefinitely until the lock is available; use
-// AcquireContext with a deadline to bound the wait.
+// exactly once.
+//
+// Acquire blocks indefinitely on a contended lock and cannot be interrupted
+// by context cancellation. Callers that need a bounded wait must use
+// AcquireContext instead.
 func Acquire(path string) (release func(), err error) {
-	return AcquireContext(context.Background(), path)
-}
-
-// AcquireContext behaves like Acquire but honors ctx. When ctx carries a
-// deadline it polls a fail-immediately lock until acquired or the deadline
-// fires; otherwise it blocks like Acquire. See the unix implementation for the
-// rationale.
-func AcquireContext(ctx context.Context, path string) (release func(), err error) {
 	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0o600) //nolint:gosec // caller is responsible for path validation
 	if err != nil {
 		return nil, fmt.Errorf("open flock: %w", err)
 	}
 	overlapped := new(windows.Overlapped)
-	releaseFn := func() {
+	if err := windows.LockFileEx(windows.Handle(f.Fd()), windows.LOCKFILE_EXCLUSIVE_LOCK, 0, 1, 0, overlapped); err != nil {
+		_ = f.Close()
+		return nil, fmt.Errorf("lock flock: %w", err)
+	}
+	return onceRelease(func() {
 		_ = windows.UnlockFileEx(windows.Handle(f.Fd()), 0, 1, 0, overlapped)
 		_ = f.Close()
+	}), nil
+}
+
+// AcquireContext behaves like Acquire, except the wait for a contended lock
+// is bounded by ctx: it repeatedly attempts a non-blocking LockFileEx
+// (LOCKFILE_EXCLUSIVE_LOCK|LOCKFILE_FAIL_IMMEDIATELY) and polls at
+// acquirePollInterval until either the lock is obtained or ctx is done, in
+// which case it returns ctx.Err(). Use this instead of Acquire whenever the
+// caller has a deadline that must bound lock acquisition.
+//
+// When ctx has no Done channel (Background/TODO) it can neither time out nor
+// be canceled, so AcquireContext falls back to the blocking Acquire rather
+// than spinning at acquirePollInterval forever. Cancelable contexts keep the
+// poll loop so cancellation is still observed.
+func AcquireContext(ctx context.Context, path string) (release func(), err error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err //nolint:wrapcheck // canonical context cancellation
+	}
+	if ctx.Done() == nil {
+		return Acquire(path)
+	}
+	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0o600) //nolint:gosec // caller is responsible for path validation
+	if err != nil {
+		return nil, fmt.Errorf("open flock: %w", err)
 	}
 
-	if _, hasDeadline := ctx.Deadline(); !hasDeadline {
-		if err := windows.LockFileEx(windows.Handle(f.Fd()), windows.LOCKFILE_EXCLUSIVE_LOCK, 0, 1, 0, overlapped); err != nil {
-			_ = f.Close()
-			return nil, fmt.Errorf("lock flock: %w", err)
-		}
-		return releaseFn, nil
-	}
-
+	ticker := time.NewTicker(acquirePollInterval)
+	defer ticker.Stop()
+	flags := uint32(windows.LOCKFILE_EXCLUSIVE_LOCK | windows.LOCKFILE_FAIL_IMMEDIATELY)
 	for {
-		lockErr := windows.LockFileEx(windows.Handle(f.Fd()),
-			windows.LOCKFILE_EXCLUSIVE_LOCK|windows.LOCKFILE_FAIL_IMMEDIATELY, 0, 1, 0, overlapped)
+		overlapped := new(windows.Overlapped)
+		lockErr := windows.LockFileEx(windows.Handle(f.Fd()), flags, 0, 1, 0, overlapped)
 		if lockErr == nil {
-			return releaseFn, nil
+			return onceRelease(func() {
+				_ = windows.UnlockFileEx(windows.Handle(f.Fd()), 0, 1, 0, overlapped)
+				_ = f.Close()
+			}), nil
 		}
-		// Only lock contention is retryable. LOCKFILE_FAIL_IMMEDIATELY reports a
-		// held lock as ERROR_LOCK_VIOLATION (or ERROR_IO_PENDING); any other error
-		// is a genuine failure (I/O, bad handle) that must fail fast rather than
-		// polling until the deadline and masking the real cause as a timeout —
-		// mirroring the unix path, which only retries on EWOULDBLOCK.
 		if !errors.Is(lockErr, windows.ERROR_LOCK_VIOLATION) && !errors.Is(lockErr, windows.ERROR_IO_PENDING) {
 			_ = f.Close()
 			return nil, fmt.Errorf("lock flock: %w", lockErr)
 		}
-		if err := ctx.Err(); err != nil {
-			_ = f.Close()
-			return nil, fmt.Errorf("lock flock: %w", err)
-		}
 		select {
 		case <-ctx.Done():
 			_ = f.Close()
-			return nil, fmt.Errorf("lock flock: %w", ctx.Err())
-		case <-time.After(pollInterval):
+			return nil, ctx.Err() //nolint:wrapcheck // canonical context cancellation
+		case <-ticker.C:
 		}
 	}
 }

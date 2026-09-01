@@ -407,13 +407,13 @@ func initHooksWorktreeRepo(t *testing.T) (string, string) {
 	return mainRepo, worktreeDir
 }
 
-// isGitSequenceOperation tests use t.Chdir() so cannot call t.Parallel().
+// IsGitSequenceOperation tests use t.Chdir() so cannot call t.Parallel().
 
 func TestIsGitSequenceOperation_NoOperation(t *testing.T) {
 	initHooksTestRepo(t)
 
 	if isGitSequenceOperation(context.Background()) {
-		t.Error("isGitSequenceOperation(context.Background()) = true, want false for clean repo")
+		t.Error("IsGitSequenceOperation(context.Background()) = true, want false for clean repo")
 	}
 }
 
@@ -425,7 +425,7 @@ func TestIsGitSequenceOperation_RebaseMerge(t *testing.T) {
 	}
 
 	if !isGitSequenceOperation(context.Background()) {
-		t.Error("isGitSequenceOperation(context.Background()) = false, want true during rebase-merge")
+		t.Error("IsGitSequenceOperation(context.Background()) = false, want true during rebase-merge")
 	}
 }
 
@@ -437,7 +437,7 @@ func TestIsGitSequenceOperation_RebaseApply(t *testing.T) {
 	}
 
 	if !isGitSequenceOperation(context.Background()) {
-		t.Error("isGitSequenceOperation(context.Background()) = false, want true during rebase-apply")
+		t.Error("IsGitSequenceOperation(context.Background()) = false, want true during rebase-apply")
 	}
 }
 
@@ -449,7 +449,7 @@ func TestIsGitSequenceOperation_CherryPick(t *testing.T) {
 	}
 
 	if !isGitSequenceOperation(context.Background()) {
-		t.Error("isGitSequenceOperation(context.Background()) = false, want true during cherry-pick")
+		t.Error("IsGitSequenceOperation(context.Background()) = false, want true during cherry-pick")
 	}
 }
 
@@ -461,7 +461,7 @@ func TestIsGitSequenceOperation_Revert(t *testing.T) {
 	}
 
 	if !isGitSequenceOperation(context.Background()) {
-		t.Error("isGitSequenceOperation(context.Background()) = false, want true during revert")
+		t.Error("IsGitSequenceOperation(context.Background()) = false, want true during revert")
 	}
 }
 
@@ -502,7 +502,7 @@ func TestIsGitSequenceOperation_Worktree(t *testing.T) {
 
 	// Should not detect sequence operation in clean worktree
 	if isGitSequenceOperation(context.Background()) {
-		t.Error("isGitSequenceOperation(context.Background()) = true in clean worktree, want false")
+		t.Error("IsGitSequenceOperation(context.Background()) = true in clean worktree, want false")
 	}
 
 	// Get the worktree's git dir and simulate rebase state there
@@ -516,7 +516,7 @@ func TestIsGitSequenceOperation_Worktree(t *testing.T) {
 
 	// Now should detect sequence operation
 	if !isGitSequenceOperation(context.Background()) {
-		t.Error("isGitSequenceOperation(context.Background()) = false in worktree during rebase, want true")
+		t.Error("IsGitSequenceOperation(context.Background()) = false in worktree during rebase, want true")
 	}
 }
 
@@ -810,6 +810,15 @@ func TestGitHookCommand_GuardsEveryInstallablePrefix(t *testing.T) {
 				t.Errorf("hook command must not build or run from source: %s", command)
 			}
 		})
+	}
+}
+
+func TestBuildHookSpecs_PrepareCommitMsgSwallowsStderr(t *testing.T) {
+	t.Parallel()
+
+	hook := findHookSpec(t, buildHookSpecs("entire"), "prepare-commit-msg")
+	if !strings.Contains(hook.content, `prepare-commit-msg "$1" "$2" 2>/dev/null || true`) {
+		t.Fatalf("prepare-commit-msg should swallow stderr (logging fallbacks) and exit code, got:\n%s", hook.content)
 	}
 }
 
