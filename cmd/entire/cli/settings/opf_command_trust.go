@@ -17,6 +17,7 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/entireio/cli/cmd/entire/cli/internal/gitpath"
+	"github.com/entireio/cli/cmd/entire/cli/settings/repopolicy"
 )
 
 // localLayerTrackedReason explains why a tracked .entire/settings.local.json
@@ -38,8 +39,10 @@ import (
 // `status` and `doctor`, the tools needed to diagnose it.
 const localLayerTrackedReason = "it is tracked in git, so it is not local to this clone — it arrives with the repository and overrides project settings for everyone"
 
-// enforceOPFCommandTrust drops redaction.openai_privacy_filter.command unless
-// it came from a local file positively verified as this developer's own.
+// enforceOPFCommandTrust decides the effective
+// redaction.openai_privacy_filter.command: the user settings file wins
+// outright; failing that, a local file positively verified as this
+// developer's own; failing that, the command is dropped.
 //
 // The command becomes argv[0] of an exec in the pre-push OPF rewrite (see
 // redact.ConfigurePrivacyFilter -> newShellOut), so whoever controls the string
@@ -50,27 +53,61 @@ const localLayerTrackedReason = "it is tracked in git, so it is not local to thi
 // prompt is no defense: it never names the command, prompt_default "always"
 // skips it, and non-TTY pushes auto-run.
 //
-// localData is the raw local-file bytes, nil when the file is absent or its
-// layer was dropped as tracked. When the command does come from there, this
-// re-verifies with the deep (index AND HEAD) check and requires localOwn:
-// unlike the layer as a whole, an unverifiable repository fails CLOSED here,
-// because the cost of being wrong is executing an attacker's binary rather
-// than losing a preference.
+// The user file (~/.config/entire/settings.json) is the supported location.
+// It is the one root that is the developer's by construction — no clone,
+// submodule, or symlink can put content there — so a command from it needs no
+// ownership probe at all: no git index read, no HEAD read. Only the location
+// rule below still applies to it.
+//
+// The local file is the deprecated location. localData is its raw bytes, nil
+// when the file is absent or its layer was dropped as tracked. When the
+// command comes from there, this re-verifies with the deep (index AND HEAD)
+// check and requires localOwn: unlike the layer as a whole, an unverifiable
+// repository fails CLOSED here, because the cost of being wrong is executing
+// an attacker's binary rather than losing a preference. The honored command is
+// tagged OPFCommandSourceLocal so the pre-push consumer can point at the new
+// home.
 //
 // Rejection is a downgrade, never an error: Command resets to "" and
 // ConfigurePrivacyFilter falls back to resolving "opf" on $PATH, where Go's
 // exec.LookPath refuses a match from the current directory (exec.ErrDot). That
 // protection covers $PATH lookups only: a command that itself contains a path
 // separator never consults $PATH, so a `./…` or worktree-absolute command is
-// rejected here on location, independent of ownership. If the fallback binary
-// is missing, the pre-push rewrite fails closed rather than pushing content
-// the user believed OPF had scanned.
-func enforceOPFCommandTrust(ctx context.Context, s *EntireSettings, localSettingsPath string, localData []byte) {
-	if s == nil || s.Redaction == nil || s.Redaction.OpenAIPrivacyFilter == nil || s.Redaction.OpenAIPrivacyFilter.Command == "" {
+// rejected here on location, independent of ownership and of which file named
+// it. If the fallback binary is missing, the pre-push rewrite fails closed
+// rather than pushing content the user believed OPF had scanned.
+func enforceOPFCommandTrust(ctx context.Context, s *EntireSettings, localSettingsPath string, localData []byte, userOPF *repopolicy.UserOPFConfig) {
+	if s == nil || s.Redaction == nil || s.Redaction.OpenAIPrivacyFilter == nil {
+		return
+	}
+	worktreeRoot := filepath.Dir(filepath.Dir(localSettingsPath))
+	if userOPF != nil && userOPF.Command != "" {
+		applyUserOPFCommand(s.Redaction.OpenAIPrivacyFilter, userOPF.Command, worktreeRoot)
+		return
+	}
+	if s.Redaction.OpenAIPrivacyFilter.Command == "" {
 		return
 	}
 	localVerified := classifyLocalSettingsDeep(ctx, localSettingsPath) == localOwn
-	enforceOPFCommandTrustForVerifiedData(s, localData, localVerified, filepath.Dir(filepath.Dir(localSettingsPath)))
+	enforceOPFCommandTrustForVerifiedData(s, localData, localVerified, worktreeRoot)
+}
+
+// applyUserOPFCommand installs a command from the user settings file. It
+// supersedes whatever the project or local file set (the project value was
+// never honored; the local value is the deprecated location), subject only to
+// the location rule — the user's own file can still name a binary that lives
+// inside the repository, and that binary is repo-deliverable regardless of
+// which file pointed at it.
+func applyUserOPFCommand(opf *OPFSettings, command, worktreeRoot string) {
+	if commandInsideWorktree(command, worktreeRoot) {
+		opf.rejectedCommand = command
+		opf.rejectionReason = "it points inside the repository worktree; install the binary outside the repo or use a $PATH name"
+		opf.Command = ""
+		opf.commandSource = ""
+		return
+	}
+	opf.Command = command
+	opf.commandSource = OPFCommandSourceUser
 }
 
 // enforceOPFCommandTrustForVerifiedData applies the ownership verdict and the
@@ -99,6 +136,7 @@ func enforceOPFCommandTrustForVerifiedData(s *EntireSettings, localData []byte, 
 		// run, even from a genuinely untracked local file.
 		reason = "it points inside the repository worktree; install the binary outside the repo or use a $PATH name"
 	default:
+		opf.commandSource = OPFCommandSourceLocal
 		return
 	}
 
@@ -174,11 +212,18 @@ func canonicalizeBestEffort(p string) string {
 // local file yields false, which is the safe direction — the merge itself
 // fails separately with a parse error.
 func localSetsOPFCommand(data []byte) bool {
+	return localSetsOPFKey(data, "command")
+}
+
+// localSetsOPFKey reports whether the local override file explicitly sets
+// redaction.openai_privacy_filter.<key>. Same presence-not-value contract as
+// localSetsOPFCommand; nil data (absent or dropped layer) sets nothing.
+func localSetsOPFKey(data []byte, key string) bool {
 	var raw map[string]json.RawMessage
 	if err := json.Unmarshal(data, &raw); err != nil {
 		return false
 	}
-	return rawHasKey(raw, "redaction", "openai_privacy_filter", "command")
+	return rawHasKey(raw, "redaction", "openai_privacy_filter", key)
 }
 
 // rawHasKey reports whether a nested key is present in a decoded JSON object,

@@ -14,13 +14,27 @@ lock, and the captured checkpoint sync remote.
 ## The settings file
 
 `~/.config/entire/settings.json` (or `$ENTIRE_CONFIG_DIR/settings.json`) is
-decoded with **per-block strictness**: the `global` block rejects unknown keys
-— an unknown key inside it, or malformed JSON, turns the tier off machine-wide
-(fail closed; an older binary must never misread recorded consent) and
-`entire doctor` says so — while unknown **top-level** blocks are ignored and
-preserved byte-for-byte across writes, so a newer `entire` on the same machine
-can add a block without switching the tier off for older binaries. New
-features add top-level blocks, not keys inside `global`.
+the developer's own file: the one root no repository can deliver content
+into. It has four top-level blocks, split by what a mistake in them costs:
+
+| Block | Owner | Contents | On a bad key |
+| --- | --- | --- | --- |
+| `global` | `repopolicy` | activation, exclusions, egress consent | whole file fails → tier off machine-wide |
+| `redaction` | `repopolicy` | how OPF runs here: `command`, `timeout_seconds`, `prompt_default` | whole file fails → tier off machine-wide |
+| `preferences` | `settings` | machine-wide developer defaults (allowlist below) | that block dropped, warning, `entire doctor` |
+| `repos` | `settings` | `preferences`-shaped overrides per repository | that entry dropped, warning |
+
+The two `repopolicy` blocks are **strict** because an older binary must never
+misread recorded consent or an executable name: an unknown key inside one, or
+malformed JSON, turns the tier off machine-wide (fail closed) and `entire
+doctor` says so. The two `settings` blocks are strict on their allowlist but
+fail *alone* — a review preference must never switch tracking off. Unknown
+**top-level** blocks are ignored and preserved across writes, so a newer
+`entire` on the same machine can add a block without switching the tier off
+for older binaries. New features add top-level blocks, not keys inside
+existing ones (`repopolicy.userSettingsBlocks` is the registry for the strict
+pair; `settings/user_preferences.go` decodes the other two through
+`UserSettings.Block`).
 
 ```json
 {
@@ -32,9 +46,51 @@ features add top-level blocks, not keys inside `global`.
     "trust_all": false,
     "trusted_origins": ["github.com/acme/widgets"],
     "trusted_paths": ["/Users/me/code/notes"]
+  },
+  "redaction": {
+    "openai_privacy_filter": {
+      "command": "/opt/opf/bin/opf",
+      "timeout_seconds": 120,
+      "prompt_default": "ask"
+    }
+  },
+  "preferences": {
+    "telemetry": false,
+    "review_profiles": { "quick": { "task": "Only real defects." } },
+    "review_default_profile": "quick",
+    "review_fix_agent": "claude-code",
+    "investigate": { "agents": ["claude-code", "codex"], "max_turns": 2 },
+    "summary_generation": { "provider": "claude-code" }
+  },
+  "repos": {
+    "github.com/acme/widgets": { "review_default_profile": "widgets-full" },
+    "/Users/me/code/notes":    { "review_fix_agent": "codex" }
   }
 }
 ```
+
+**Precedence** for a repository's effective settings, lowest to highest:
+`.entire/settings.json` (team) → clone preferences (`.git/entire/preferences.json`)
+→ `preferences` (me, every repo) → `repos[<this repo>]` (me, this repo, every
+worktree and clone) → `.entire/settings.local.json` (me, this worktree). The
+one exception is OPF `command`: the user file wins outright (see
+[Security & Privacy](../security-and-privacy.md#why-command-is-user-only)).
+
+`repos` keys are the same keys the trust and exclusion lists use: a normalized
+origin `host/owner/repo` (every fetch and push URL of `origin`, case-folded —
+`repopolicy.OriginKeysAt`), or, for a repository with no usable origin, its
+absolute worktree path matched like `trusted_paths`. A user file without a
+`repos` block costs no git reads. Several entries may match one repository
+(two origin URLs, or a path and an origin); they apply in sorted key order.
+
+The `preferences` allowlist (`settings.UserPreferences`): `telemetry`,
+`log_level`, `review_profiles` (merged by name with the team's),
+`review_default_profile`, `review_fix_agent`, `investigate`,
+`summary_generation`, `summary_timeout_seconds`. Nothing that activates
+tracking (`enabled`), changes what is redacted (`redaction.*` engines, PII,
+OPF `enabled`/`categories`), moves checkpoints (`strategy_options`), or names
+an executable is on it — those are team policy, consent, or exec, and land in
+the project file, `global`, or `redaction` respectively.
 
 - `enabled` — both `true` and `false` count as *configured*; an absent block is
   *unconfigured* (zero cost, no user-level hooks).
@@ -47,6 +103,13 @@ features add top-level blocks, not keys inside `global`.
   (fail closed).
 - `trust_all`, `trusted_origins`, `trusted_paths` — checkpoint-egress consent
   (below). `entire trust` writes these; users may edit them by hand.
+- `redaction.openai_privacy_filter` — how the OpenAI Privacy Filter runs on
+  *this machine*: `command` (the executable; honored from here with no
+  ownership probe, because no repository can deliver content into this file),
+  `timeout_seconds`, `prompt_default`. Whether OPF runs and what it redacts
+  (`enabled`, `categories`) is team policy and stays in the repository's
+  `.entire/settings.json`; those keys are unknown here and fail closed. See
+  [Security & Privacy](../security-and-privacy.md#why-command-is-user-only).
 
 ## Activation (derived, never recorded)
 

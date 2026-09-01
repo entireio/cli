@@ -42,14 +42,68 @@ func resolveUserSettingsPath() (string, error) {
 	return filepath.Join(configDir, UserSettingsFileName), nil
 }
 
-// userSettingsGlobalKey is the one block this binary interprets.
-const userSettingsGlobalKey = "global"
+// Top-level blocks this binary interprets. Every entry is decoded strictly
+// (DisallowUnknownFields) and fails the load closed on an unknown key: `global`
+// records consent and `redaction` names an executable, so an older binary must
+// not guess at either. A top-level key absent from this table belongs to a
+// newer binary and is kept verbatim for round-tripping (see UserSettings).
+//
+// Adding a block: a field on UserSettings, an entry here, nothing else.
+const (
+	userSettingsGlobalKey    = "global"
+	userSettingsRedactionKey = "redaction"
+)
 
-// UnmarshalJSON decodes the user settings file with per-block strictness: the
-// `global` block is strict (an unknown key inside it is an error — an older
-// binary must fail closed rather than misread consent it does not understand),
-// while unknown top-level blocks are kept verbatim for round-tripping. See the
-// UserSettings type comment for why.
+// userSettingsBlock is the decode/encode pair for one known block. decode
+// receives the raw block (never null — decodeStrictBlock maps null to an
+// absent block); encode reports the value to write and whether it is set.
+type userSettingsBlock struct {
+	decode func(us *UserSettings, raw json.RawMessage) error
+	encode func(us *UserSettings) (value any, set bool)
+}
+
+var userSettingsBlocks = map[string]userSettingsBlock{
+	userSettingsGlobalKey: {
+		decode: func(us *UserSettings, raw json.RawMessage) error {
+			v, err := decodeStrictBlock[GlobalConfig](raw)
+			us.Global = v
+			return err
+		},
+		encode: func(us *UserSettings) (any, bool) { return us.Global, us.Global != nil },
+	},
+	userSettingsRedactionKey: {
+		decode: func(us *UserSettings, raw json.RawMessage) error {
+			v, err := decodeStrictBlock[UserRedactionConfig](raw)
+			if err == nil && v != nil {
+				err = v.validate()
+			}
+			us.Redaction = v
+			return err
+		},
+		encode: func(us *UserSettings) (any, bool) { return us.Redaction, us.Redaction != nil },
+	},
+}
+
+// decodeStrictBlock decodes raw into a T, rejecting unknown keys. A JSON null
+// is "unset" and yields a nil pointer, exactly like an absent block.
+func decodeStrictBlock[T any](raw json.RawMessage) (*T, error) {
+	if bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+		return nil, nil //nolint:nilnil // nil is the documented "block unset" value, not an error
+	}
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.DisallowUnknownFields()
+	var v T
+	if err := decoder.Decode(&v); err != nil {
+		return nil, err //nolint:wrapcheck // the caller prefixes the block name
+	}
+	return &v, nil
+}
+
+// UnmarshalJSON decodes the user settings file with per-block strictness: each
+// block in userSettingsBlocks is strict (an unknown key inside it is an error —
+// an older binary must fail closed rather than misread consent or an
+// executable name it does not understand), while unknown top-level blocks are
+// kept verbatim for round-tripping. See the UserSettings type comment for why.
 func (us *UserSettings) UnmarshalJSON(data []byte) error {
 	var blocks map[string]json.RawMessage
 	if err := json.Unmarshal(data, &blocks); err != nil {
@@ -57,42 +111,38 @@ func (us *UserSettings) UnmarshalJSON(data []byte) error {
 	}
 	*us = UserSettings{}
 	for key, raw := range blocks {
-		if key != userSettingsGlobalKey {
+		block, known := userSettingsBlocks[key]
+		if !known {
 			if us.extra == nil {
 				us.extra = make(map[string]json.RawMessage, len(blocks))
 			}
 			us.extra[key] = raw
 			continue
 		}
-		if bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
-			continue
+		if err := block.decode(us, raw); err != nil {
+			return fmt.Errorf("%s: %w", key, err)
 		}
-		decoder := json.NewDecoder(bytes.NewReader(raw))
-		decoder.DisallowUnknownFields()
-		var global GlobalConfig
-		if err := decoder.Decode(&global); err != nil {
-			return fmt.Errorf("%s: %w", userSettingsGlobalKey, err)
-		}
-		us.Global = &global
 	}
 	return nil
 }
 
-// MarshalJSON writes the known block plus every preserved unknown block. Value
-// receiver on purpose: a UserSettings marshalled by value (not through a
-// pointer) must still carry its preserved blocks, or a round-trip would drop
-// every setting another tool stored in the file.
+// MarshalJSON writes every known block that is set plus every preserved
+// unknown block. Value receiver on purpose — see the UserSettings type comment.
 func (us UserSettings) MarshalJSON() ([]byte, error) {
-	out := make(map[string]json.RawMessage, len(us.extra)+1)
+	out := make(map[string]json.RawMessage, len(us.extra)+len(userSettingsBlocks))
 	for key, raw := range us.extra {
 		out[key] = raw
 	}
-	if us.Global != nil {
-		raw, err := json.Marshal(us.Global)
-		if err != nil {
-			return nil, fmt.Errorf("encoding %s block: %w", userSettingsGlobalKey, err)
+	for key, block := range userSettingsBlocks {
+		value, set := block.encode(&us)
+		if !set {
+			continue
 		}
-		out[userSettingsGlobalKey] = raw
+		raw, err := json.Marshal(value)
+		if err != nil {
+			return nil, fmt.Errorf("encoding %s block: %w", key, err)
+		}
+		out[key] = raw
 	}
 	data, err := json.Marshal(out)
 	if err != nil {

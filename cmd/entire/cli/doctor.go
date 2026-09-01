@@ -809,7 +809,8 @@ func checkGlobalTracking(cmd *cobra.Command) {
 		fmt.Fprintf(w, "  %s cannot be read or parsed: %v\n", settings.UserSettingsPath(), err)
 		fmt.Fprintln(w, "  Global tracking is silently off machine-wide (fail closed), and hook debug logs")
 		fmt.Fprintln(w, "  cannot report it: hook logging starts only after this file has gated the hook off.")
-		fmt.Fprintln(w, "  Fix the JSON by hand or remove the file (an unknown key means a newer entire wrote it — upgrade instead).")
+		fmt.Fprintln(w, "  The error above names the block and key. Fix the JSON by hand (a typo inside `global` or `redaction`,")
+		fmt.Fprintln(w, "  or an `enabled`/`categories` key that belongs in .entire/settings.json) or remove the file.")
 		return
 	}
 	if !us.GlobalEnabled() {

@@ -99,7 +99,19 @@ Prerequisites:
 pip install opf
 ```
 
-Verify `opf --help` works; the CLI defaults to resolving the binary via `$PATH`. If you need a specific path, set `command` in `.entire/settings.local.json` — it is deliberately not honored from the committed `.entire/settings.json`. See [Why `command` is local-only](#why-command-is-local-only).
+Verify `opf --help` works; the CLI defaults to resolving the binary via `$PATH`. If you need a specific path, set `command` in your user settings file, `~/.config/entire/settings.json` (or `$ENTIRE_CONFIG_DIR/settings.json`) — once, for every repository and worktree on the machine:
+
+```json
+{
+  "redaction": {
+    "openai_privacy_filter": {
+      "command": "/opt/opf/bin/opf"
+    }
+  }
+}
+```
+
+It is deliberately not honored from the committed `.entire/settings.json`, and the older `.entire/settings.local.json` location is deprecated. See [Why `command` is user-only](#why-command-is-user-only).
 
 Enable in `.entire/settings.json`:
 
@@ -156,11 +168,11 @@ Full settings reference:
 }
 ```
 
-- `command` — path or PATH-resolvable name of the `opf` binary. Defaults to `opf`. **Only read from `.entire/settings.local.json`**, and only when that file is untracked; see [Why `command` is local-only](#why-command-is-local-only).
+- `command` — path or PATH-resolvable name of the `opf` binary. Defaults to `opf`. **Read from your user settings file** (`~/.config/entire/settings.json`), never from the committed project file; the deprecated `.entire/settings.local.json` location still works while untracked. See [Why `command` is user-only](#why-command-is-user-only).
 - `timeout_seconds` — per-invocation timeout. Defaults to `30`.
 - `prompt_default` — `"ask"` (default), `"never"`, or `"always"`. Controls whether the pre-push hook surfaces an interactive prompt before running OPF. `ENTIRE_OPF=yes` or `ENTIRE_OPF=no` on a single `git push` invocation overrides this for that push only.
 
-### Why `command` is local-only
+### Why `command` is user-only
 
 `command` becomes `argv[0]` of a process Entire executes during `git push`, so
 whoever controls that string controls what runs on the developer's machine.
@@ -170,7 +182,21 @@ settings diff does not read as executable to a reviewer. The pre-push prompt is
 no defense either: it never names the command, `prompt_default: "always"` skips
 it, and non-TTY pushes (CI, agent-driven) auto-run.
 
-Entire therefore honors `command` only when it is genuinely developer-owned:
+Entire therefore honors `command` only when it is genuinely developer-owned.
+The supported location is the **user settings file**,
+`~/.config/entire/settings.json`: it lives outside every repository, so no
+clone, submodule, or symlink can put content there, and a `command` read from
+it needs no further verification — the only remaining check is that the binary
+must not resolve inside the repository worktree (below). A user-file `command`
+supersedes one in `.entire/settings.local.json`. `timeout_seconds` and
+`prompt_default` may be set there too; they apply on top of the project file
+and beneath `.entire/settings.local.json`, so the prompt's **Always** (which
+writes to the local file) still wins. `enabled` and `categories` are team
+policy and are rejected from the user file.
+
+The older location, `.entire/settings.local.json`, is **deprecated** and will
+be removed in a future release; each push that relies on it prints a hint. For
+now it is still honored, but only when all of the following hold:
 
 - it must come from `.entire/settings.local.json`, not `.entire/settings.json`
 - that file must be **untracked** — absent from both the git index and `HEAD`
@@ -204,12 +230,12 @@ preference over an unreadable repo is worse than the risk. The executed
 someone else's binary. With no repository at all, nothing can have arrived by
 cloning, so the file is treated as yours.
 
-When a `command` fails these checks it is ignored with a warning in
-`.entire/logs/entire.log` and OPF falls back to resolving `opf` on `$PATH`. If
-that binary is missing, the pre-push rewrite fails closed rather than pushing
-content you believed OPF had scanned. Everything else in the OPF block
-(`enabled`, `categories`, `timeout_seconds`, `prompt_default`) is ordinary
-configuration and still works from the shared project file.
+When a `command` fails these checks — from either file — it is ignored with a
+warning in `.entire/logs/entire.log` and OPF falls back to resolving `opf` on
+`$PATH`. If that binary is missing, the pre-push rewrite fails closed rather
+than pushing content you believed OPF had scanned. Everything else in the OPF
+block (`enabled`, `categories`, `timeout_seconds`, `prompt_default`) is
+ordinary configuration and still works from the shared project file.
 
 The interactive prompt offers three options and reacts to **Ctrl-C** for cancellation:
 

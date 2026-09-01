@@ -105,12 +105,14 @@ func runStatus(ctx context.Context, w io.Writer, detailed, jsonOutput bool) erro
 		if info.trackedHere() {
 			fmt.Fprintln(w, formatGloballyTrackedStatusShort(ctx, sty))
 			renderGlobalTrackingLine(w, sty, info)
+			writeUserLayerRejections(ctx, w, nil)
 			writeActiveSessions(ctx, w, sty)
 			writeAgentHelpHint(w, sty)
 			return nil
 		}
 		fmt.Fprintln(w, "○ not set up (run `entire enable` to get started)")
 		renderGlobalTrackingLine(w, sty, info)
+		writeUserLayerRejections(ctx, w, nil)
 		return nil
 	}
 
@@ -121,6 +123,7 @@ func runStatus(ctx context.Context, w io.Writer, detailed, jsonOutput bool) erro
 	if info.excludedHere() {
 		fmt.Fprintln(w, formatExcludedStatusShort(ctx, sty, info))
 		renderGlobalTrackingLine(w, sty, info)
+		writeUserLayerRejections(ctx, w, nil)
 		writeAgentHelpHint(w, sty)
 		return nil
 	}
@@ -137,12 +140,36 @@ func runStatus(ctx context.Context, w io.Writer, detailed, jsonOutput bool) erro
 
 	fmt.Fprintln(w, formatSettingsStatusShort(ctx, s, sty))
 	renderGlobalTrackingLine(w, sty, info)
+	writeUserLayerRejections(ctx, w, s)
 	if s.Enabled {
 		writeActiveSessions(ctx, w, sty)
 	}
 	writeAgentHelpHint(w, sty)
 
 	return nil
+}
+
+// writeUserLayerRejections prints the user-settings preference blocks that
+// Load dropped. The user file is machine-wide and its preference blocks apply
+// regardless of repo enablement, so EVERY branch of runStatus shows this.
+// Callers that already hold loaded settings pass them; the globally-tracked,
+// not-set-up, and excluded branches pass nil and the rejections are computed
+// from the user file ALONE (settings.UserPreferenceRejections) — never
+// through a full settings load, whose failure on a broken repo-side file
+// would otherwise silently hide warnings about an unrelated file.
+func writeUserLayerRejections(ctx context.Context, w io.Writer, s *EntireSettings) {
+	var rejections []string
+	if s != nil {
+		rejections = s.UserLayerRejections()
+	} else {
+		rejections = settings.UserPreferenceRejections(ctx)
+	}
+	// A dropped user-settings block is otherwise invisible in the short view:
+	// the file is machine-wide, so unlike a repo settings problem there is no
+	// second surface (a teammate, a PR diff) that would ever catch it.
+	for _, reason := range rejections {
+		fmt.Fprintf(w, "  user settings: %s ignored (%s) · run `entire status --detailed`\n", reason, settings.UserSettingsPath())
+	}
 }
 
 // globalTrackingInfo is the shared computation behind the text and JSON
@@ -440,6 +467,16 @@ func runStatusDetailed(ctx context.Context, w io.Writer, sty statusStyles, setti
 		fmt.Fprintln(w, formatSettingsStatus(label, localSettings, sty))
 		if reason := effectiveSettings.LocalLayerRejection(); reason != "" {
 			fmt.Fprintf(w, "  %s\n  fix with: git rm --cached %s\n", reason, settings.EntireSettingsLocalFile)
+		}
+	}
+
+	// Dropped user-settings-file preference blocks (unknown key, malformed
+	// repos entry). The strict blocks (`global`, `redaction`) are not listed
+	// here — a failure there fails the whole file, which doctor reports.
+	if rejections := effectiveSettings.UserLayerRejections(); len(rejections) > 0 {
+		fmt.Fprintf(w, "User settings (%s): %d block(s) ignored\n", settings.UserSettingsPath(), len(rejections))
+		for _, reason := range rejections {
+			fmt.Fprintf(w, "  %s\n", reason)
 		}
 	}
 

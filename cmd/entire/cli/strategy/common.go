@@ -493,6 +493,18 @@ func EnsureRedactionConfigured(ctx context.Context) error {
 			)
 		}
 
+		// A preferences/repos block in the user settings file was dropped
+		// (unknown key, malformed entry). Same rationale as the local-layer
+		// warning above: the user's own settings silently stopped applying,
+		// and a line in .entire/logs is not a signal they will see.
+		for _, reason := range s.UserLayerRejections() {
+			warnUser(ctx, "settings",
+				"ignoring a block of the user settings file",
+				fmt.Sprintf("ignoring part of %s (%s); fix that block — the rest of the file still applies.", settings.UserSettingsPath(), reason),
+				slog.String("reason", reason),
+			)
+		}
+
 		// PII detection (opt-in).
 		if s.Redaction != nil && s.Redaction.PII != nil && s.Redaction.PII.Enabled {
 			pii := s.Redaction.PII
@@ -548,7 +560,18 @@ func EnsureRedactionConfigured(ctx context.Context) error {
 					fmt.Sprintf("ignoring openai_privacy_filter.command (%s); using \"opf\" from $PATH.", reason),
 					slog.String("reason", reason),
 					slog.String("ignored_command", cmd),
-					slog.String("remediation", "set redaction.openai_privacy_filter.command in .entire/settings.local.json, and keep that file out of version control"),
+					slog.String("remediation", "set redaction.openai_privacy_filter.command in "+settings.UserSettingsPath()),
+				)
+			}
+			// The local file still works, but every hook that configures
+			// redaction (commits as well as pushes) nudges: the user file
+			// covers every repo and worktree at once and needs no ownership
+			// probe.
+			if opf.CommandSource() == settings.OPFCommandSourceLocal {
+				warnUser(ctx, "redaction",
+					"openai_privacy_filter.command is set in .entire/settings.local.json (deprecated location)",
+					fmt.Sprintf("openai_privacy_filter.command in .entire/settings.local.json is deprecated; move it to redaction.openai_privacy_filter.command in %s (applies to every repo and worktree).", settings.UserSettingsPath()),
+					slog.String("remediation", "move redaction.openai_privacy_filter.command to "+settings.UserSettingsPath()),
 				)
 			}
 			redact.ConfigurePrivacyFilter(redact.OPFConfig{
