@@ -19,7 +19,9 @@ import (
 // image, plus the base64 string for assertions.
 func claudeImageLine(t *testing.T, payload string) (line, b64 string) {
 	t.Helper()
-	b64 = base64.StdEncoding.EncodeToString([]byte(payload))
+	// Externalization only lifts out bytes that identify themselves as an image
+	// (see imageextract.detectMediaType), so the fixture needs a real signature.
+	b64 = base64.StdEncoding.EncodeToString(append([]byte("\x89PNG\r\n\x1a\n"), payload...))
 	line = `{"type":"user","message":{"role":"user","content":[` +
 		`{"type":"text","text":"look"},` +
 		`{"type":"image","source":{"type":"base64","media_type":"image/png","data":"` + b64 + `"}}` +

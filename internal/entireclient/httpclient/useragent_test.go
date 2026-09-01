@@ -18,7 +18,7 @@ func TestUserAgentTransport_SetsHeader(t *testing.T) {
 
 	client := &http.Client{
 		Transport: &UserAgentTransport{
-			Next: http.DefaultTransport,
+			Next: &http.Transport{},
 			UA:   "test-binary/1.2.3",
 		},
 	}
@@ -49,7 +49,7 @@ func TestUserAgentTransport_OverwritesCallerHeader(t *testing.T) {
 
 	client := &http.Client{
 		Transport: &UserAgentTransport{
-			Next: http.DefaultTransport,
+			Next: &http.Transport{},
 			UA:   "wrapper-set",
 		},
 	}
@@ -79,7 +79,7 @@ func TestUserAgentTransport_DoesNotMutateCallerRequest(t *testing.T) {
 
 	client := &http.Client{
 		Transport: &UserAgentTransport{
-			Next: http.DefaultTransport,
+			Next: &http.Transport{},
 			UA:   "wrapper-set",
 		},
 	}

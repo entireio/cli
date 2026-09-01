@@ -73,6 +73,11 @@ type TaskPayload struct {
 	// task.json; log that detail via logging.Warn instead. Empty exactly when
 	// Transcript is non-empty.
 	TranscriptUnavailableReason string
+
+	// Assets are image blobs externalized out of Transcript, stored under this
+	// task's assets/ subtree (not the session-level assets/ folder). Empty when
+	// the transcript carries no externalized images.
+	Assets []TranscriptAsset
 }
 
 // WriteOptions contains options for writing a persistent checkpoint.

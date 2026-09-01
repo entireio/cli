@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"maps"
 	"os"
 	"path"
 	"path/filepath"
@@ -489,16 +490,27 @@ func (s *treeWriter) writeTaskRecordEntry(task TaskPayload, basePath string, ent
 	taskDir := checkpointSubtreePath(basePath, "tasks", task.ToolUseID)
 
 	if task.Transcript.Len() > 0 {
+		staged := map[string]object.TreeEntry{}
 		agentBlobHash, err := CreateBlobFromContent(s.repo, task.Transcript.Bytes())
 		if err != nil {
 			return fmt.Errorf("failed to create task transcript blob: %w", err)
 		}
-		agentPath := checkpointSubtreePath(taskDir, "agent-"+task.AgentID+".jsonl")
-		entries[agentPath] = object.TreeEntry{
+		agentPath := checkpointSubtreePath(taskDir, paths.AgentTranscriptFileName(task.AgentID))
+		staged[agentPath] = object.TreeEntry{
 			Name: agentPath,
 			Mode: filemode.Regular,
 			Hash: agentBlobHash,
 		}
+		if _, err := s.writeAssets(task.Assets, taskDir, staged); err != nil {
+			return fmt.Errorf("write task transcript assets: %w", err)
+		}
+		assetsPrefix := checkpointSubtreePath(taskDir, paths.AssetsDirName) + "/"
+		for key := range entries {
+			if strings.HasPrefix(key, assetsPrefix) {
+				delete(entries, key)
+			}
+		}
+		maps.Copy(entries, staged)
 	}
 
 	// The description is the agent's free text for the Task call (it can carry

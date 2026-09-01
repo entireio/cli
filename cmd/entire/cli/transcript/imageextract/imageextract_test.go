@@ -25,6 +25,17 @@ func lookupFrom(assets []Asset) func(string) (Asset, bool) {
 	}
 }
 
+// pngImage returns payload behind a PNG magic number. Only bytes that identify
+// themselves as an image are externalizable, so every fixture that expects
+// externalization must carry a real signature.
+func pngImage(payload string) []byte {
+	return append([]byte("\x89PNG\r\n\x1a\n"), payload...)
+}
+
+func pngB64(payload string) string {
+	return base64.StdEncoding.EncodeToString(pngImage(payload))
+}
+
 func claudeLine(b64 string) string {
 	return `{"type":"user","message":{"role":"user","content":[` +
 		`{"type":"text","text":"look at this"},` +
@@ -89,7 +100,7 @@ func TestClaudeCodec_NoImagesIsNoOp(t *testing.T) {
 func TestClaudeCodec_DedupesIdenticalImages(t *testing.T) {
 	t.Parallel()
 	c := CodecFor(agent.AgentTypeClaudeCode)
-	b64 := base64.StdEncoding.EncodeToString([]byte("same-image-bytes-repeated-with-enough-length-to-externalize"))
+	b64 := pngB64("same-image-bytes-repeated-with-enough-length-to-externalize")
 	orig := claudeLine(b64) + "\n" + claudeLine(b64) + "\n"
 	rewritten, assets, err := c.ExtractImages([]byte(orig))
 	if err != nil {
@@ -112,20 +123,25 @@ func TestClaudeCodec_DedupesIdenticalImages(t *testing.T) {
 func TestClaudeCodec_SubstringImagesRoundTrip(t *testing.T) {
 	t.Parallel()
 	c := CodecFor(agent.AgentTypeClaudeCode)
-	long := base64.StdEncoding.EncodeToString([]byte(
-		"prefix-bytes-AAAABBBBCCCCDDDD-and-a-considerably-longer-image-tail-payload-so-a-64-char-substring-fits-xyz"))
-	// A canonical base64 substring of long (>= threshold) that decodes/re-encodes
-	// cleanly, taken from a non-zero offset so it is genuinely embedded.
-	var short string
-	for i := 4; i+64 <= len(long); i += 4 {
-		cand := long[i : i+64]
-		if raw, err := base64.StdEncoding.DecodeString(cand); err == nil && base64.StdEncoding.EncodeToString(raw) == cand {
-			short = cand
-			break
-		}
+	// Both values must be externalizable, so both decode to signature-bearing
+	// image bytes — and the shorter one's base64 must be a literal substring of
+	// the longer one's. base64 encodes each 3-byte group independently, so
+	// embedding the smaller image at an offset divisible by 3, with a length
+	// divisible by 3 (hence no padding of its own), makes its encoding appear
+	// verbatim inside the larger image's.
+	shortRaw := pngImage("embedded-image-payload-that-is-a-substring-xyz012")
+	if len(shortRaw)%3 != 0 {
+		t.Fatalf("embedded fixture must be 3-byte aligned, got %d", len(shortRaw))
 	}
-	if short == "" {
-		t.Fatal("could not construct a canonical base64 substring")
+	longRaw := append(pngImage("."), shortRaw...) // 9-byte prefix: PNG magic + 1
+	longRaw = append(longRaw, "end"...)
+	short := base64.StdEncoding.EncodeToString(shortRaw)
+	long := base64.StdEncoding.EncodeToString(longRaw)
+	if !strings.Contains(long, short) {
+		t.Fatal("fixture invalid: the shorter image's base64 must be embedded in the longer's")
+	}
+	if len(short) < minExternalizedBase64Len {
+		t.Fatalf("embedded fixture too short to externalize: %d", len(short))
 	}
 	// Shorter block first, so first-seen order would (without the sort) replace it
 	// before the containing longer value.
@@ -161,8 +177,8 @@ func TestClaudeCodec_DistinctNamesUnderCollidingIDSource(t *testing.T) {
 	newAssetID = func() (string, error) { return "deadbeefdeadbeefdeadbeefdeadbeef", nil } // constant
 	defer func() { newAssetID = orig }()
 
-	img1 := base64.StdEncoding.EncodeToString([]byte("first-distinct-image-payload-long-enough-to-externalize"))
-	img2 := base64.StdEncoding.EncodeToString([]byte("second-distinct-image-payload-long-enough-to-externalize"))
+	img1 := pngB64("first-distinct-image-payload-long-enough-to-externalize")
+	img2 := pngB64("second-distinct-image-payload-long-enough-to-externalize")
 	in := claudeLine(img1) + "\n" + claudeLine(img2) + "\n"
 
 	rewritten, assets, err := c.ExtractImages([]byte(in))
@@ -190,7 +206,7 @@ func TestClaudeCodec_DistinctNamesUnderCollidingIDSource(t *testing.T) {
 func TestClaudeCodec_Base64InTextRoundTrips(t *testing.T) {
 	t.Parallel()
 	c := CodecFor(agent.AgentTypeClaudeCode)
-	b64 := base64.StdEncoding.EncodeToString([]byte("shared-image-and-text-payload-long-enough-to-externalize"))
+	b64 := pngB64("shared-image-and-text-payload-long-enough-to-externalize")
 	textLine := `{"type":"user","message":{"role":"user","content":[{"type":"text","text":"raw was ` + b64 + `"}]}}`
 	in := textLine + "\n" + claudeLine(b64) + "\n"
 
@@ -222,7 +238,7 @@ func TestClaudeCodec_SpacedAndCompactDataFields(t *testing.T) {
 		{"compact", `{"type": "image", "source": {"type": "base64", "media_type": "image/png", "data":"%s"}}`},
 		{"spaced", `{"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "%s"}}`},
 	} {
-		b64 := base64.StdEncoding.EncodeToString([]byte("spaced-vs-compact-payload-long-enough-to-externalize-" + tc.name))
+		b64 := pngB64("spaced-vs-compact-payload-long-enough-to-externalize-" + tc.name)
 		in := strings.Replace(tc.line, "%s", b64, 1) + "\n"
 		rewritten, assets, err := c.ExtractImages([]byte(in))
 		if err != nil {
@@ -251,7 +267,7 @@ func TestClaudeCodec_IDGenerationErrorSurfaces(t *testing.T) {
 	newAssetID = func() (string, error) { return "", errTestRand }
 	defer func() { newAssetID = orig }()
 
-	b64 := base64.StdEncoding.EncodeToString([]byte("payload-long-enough-to-externalize-and-trigger-id-gen"))
+	b64 := pngB64("payload-long-enough-to-externalize-and-trigger-id-gen")
 	_, _, err := c.ExtractImages([]byte(claudeLine(b64) + "\n"))
 	if err == nil {
 		t.Fatal("expected an error when id generation fails, got nil")
@@ -262,7 +278,7 @@ func TestClaudeCodec_IDGenerationErrorSurfaces(t *testing.T) {
 func TestClaudeCodec_ArrayRootedLine(t *testing.T) {
 	t.Parallel()
 	c := CodecFor(agent.AgentTypeClaudeCode)
-	b64 := base64.StdEncoding.EncodeToString([]byte("array-rooted-line-image-payload-long-enough-to-externalize"))
+	b64 := pngB64("array-rooted-line-image-payload-long-enough-to-externalize")
 	in := `[{"type":"image","source":{"type":"base64","media_type":"image/png","data":"` + b64 + `"}}]` + "\n"
 	rewritten, assets, err := c.ExtractImages([]byte(in))
 	if err != nil {
@@ -327,6 +343,140 @@ func TestClaudeCodec_LeavesOversizedImageInline(t *testing.T) {
 	}
 }
 
+// Base64 that decodes to something other than a recognized image is left inline,
+// however the transcript labels it. This is a redaction boundary, not a
+// cosmetic one: assets are written to git as raw blobs and never pass through
+// the redaction the transcript body gets, so externalizing a non-image payload
+// out of an image-shaped field would move unredacted content into git verbatim.
+func TestClaudeCodec_LeavesNonImageBase64Inline(t *testing.T) {
+	t.Parallel()
+	c := CodecFor(agent.AgentTypeClaudeCode)
+	// Declared image/png, but the bytes are a credentials dump.
+	secret := "AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY\nDB_PASSWORD=hunter2hunter2\n"
+	b64 := base64.StdEncoding.EncodeToString([]byte(secret))
+	if len(b64) < minExternalizedBase64Len {
+		t.Fatalf("fixture too short to reach the image check: %d", len(b64))
+	}
+	orig := claudeLine(b64) + "\n"
+	rewritten, assets, err := c.ExtractImages([]byte(orig))
+	if err != nil {
+		t.Fatalf("ExtractImages: %v", err)
+	}
+	if len(assets) != 0 {
+		t.Errorf("non-image payload must not become an asset, got %d", len(assets))
+	}
+	if string(rewritten) != orig {
+		t.Error("non-image payload must stay inline so redaction still sees it")
+	}
+}
+
+// Codex data-URIs get the same treatment: the declared media subtype is not
+// evidence, only the decoded bytes are.
+func TestCodexCodec_LeavesNonImageDataURIInline(t *testing.T) {
+	t.Parallel()
+	c := CodecFor(agent.AgentTypeCodex)
+	b64 := base64.StdEncoding.EncodeToString([]byte(
+		"-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXktdjEAAAAA\n-----END OPENSSH PRIVATE KEY-----\n"))
+	orig := `{"type":"message","content":[{"type":"input_image","image_url":"data:image/png;base64,` + b64 + `"}]}` + "\n"
+	rewritten, assets, err := c.ExtractImages([]byte(orig))
+	if err != nil {
+		t.Fatalf("ExtractImages: %v", err)
+	}
+	if len(assets) != 0 || string(rewritten) != orig {
+		t.Errorf("non-image data-URI must stay inline; assets=%d changed=%v", len(assets), string(rewritten) != orig)
+	}
+}
+
+// The per-image cap bounds one asset; these bound the set, which is what the
+// process actually holds in memory (every accepted image's decoded bytes are
+// retained until the caller has written them all). Images past either bound stay
+// inline, which is always a valid transcript — not an error.
+func TestExtract_BoundsTotalAssetCount(t *testing.T) {
+	c := CodecFor(agent.AgentTypeClaudeCode)
+
+	restore := maxExternalizedImageCount
+	maxExternalizedImageCount = 2
+	t.Cleanup(func() { maxExternalizedImageCount = restore })
+
+	var lines []string
+	for _, tag := range []string{"one", "two", "three", "four"} {
+		lines = append(lines, claudeLine(pngB64("distinct-image-payload-long-enough-to-externalize-"+tag)))
+	}
+	orig := strings.Join(lines, "\n") + "\n"
+
+	rewritten, assets, err := c.ExtractImages([]byte(orig))
+	if err != nil {
+		t.Fatalf("ExtractImages: %v", err)
+	}
+	if len(assets) != maxExternalizedImageCount {
+		t.Fatalf("want the count cap (%d) respected, got %d assets", maxExternalizedImageCount, len(assets))
+	}
+	// Whatever was externalized must still round-trip: a bounded pass is a
+	// correct pass, not a partial one.
+	restored, err := c.ReinjectImages(rewritten, lookupFrom(assets))
+	if err != nil {
+		t.Fatalf("ReinjectImages: %v", err)
+	}
+	if string(restored) != orig {
+		t.Fatal("capped extraction must still round-trip byte-exactly")
+	}
+}
+
+func TestExtract_BoundsTotalAssetBytes(t *testing.T) {
+	c := CodecFor(agent.AgentTypeClaudeCode)
+
+	restore := maxExternalizedTotalBytes
+	maxExternalizedTotalBytes = 80 // one fixture's worth, so the second is refused
+	t.Cleanup(func() { maxExternalizedTotalBytes = restore })
+
+	first := pngB64("first-image-payload-long-enough-to-externalize-aaaaaaaaaaaaaaaaa")
+	second := pngB64("second-image-payload-long-enough-to-externalize-bbbbbbbbbbbbbbbb")
+	orig := claudeLine(first) + "\n" + claudeLine(second) + "\n"
+
+	rewritten, assets, err := c.ExtractImages([]byte(orig))
+	if err != nil {
+		t.Fatalf("ExtractImages: %v", err)
+	}
+	if len(assets) != 1 {
+		t.Fatalf("want the byte cap to stop after the first image, got %d assets", len(assets))
+	}
+	if !strings.Contains(string(rewritten), second) {
+		t.Error("the image past the byte cap must remain inline")
+	}
+	restored, err := c.ReinjectImages(rewritten, lookupFrom(assets))
+	if err != nil {
+		t.Fatalf("ReinjectImages: %v", err)
+	}
+	if string(restored) != orig {
+		t.Fatal("capped extraction must still round-trip byte-exactly")
+	}
+}
+
+// A base64 value whose *encoded* length already exceeds the per-image cap is
+// refused without being decoded, so a huge value cannot be materialized in
+// memory inside a git hook just to be rejected afterwards.
+func TestExtract_RefusesOversizedBase64WithoutDecoding(t *testing.T) {
+	c := CodecFor(agent.AgentTypeClaudeCode)
+
+	restore := maxExternalizedImageBytes
+	maxExternalizedImageBytes = 32
+	t.Cleanup(func() { maxExternalizedImageBytes = restore })
+
+	// Encoded length is ~4/3 of 300 bytes, far past the lowered cap.
+	b64 := pngB64(strings.Repeat("x", 300))
+	if base64.StdEncoding.DecodedLen(len(b64)) <= maxExternalizedImageBytes {
+		t.Fatal("fixture does not exceed the cap on encoded length")
+	}
+	orig := claudeLine(b64) + "\n"
+	rewritten, assets, err := c.ExtractImages([]byte(orig))
+	if err != nil {
+		t.Fatalf("ExtractImages: %v", err)
+	}
+	if len(assets) != 0 || string(rewritten) != orig {
+		t.Errorf("oversized value must stay inline; assets=%d changed=%v", len(assets), string(rewritten) != orig)
+	}
+}
+
 // Non-base64 image sources (e.g. url) and non-decodable data are left inline.
 func TestClaudeCodec_LeavesNonBase64Inline(t *testing.T) {
 	t.Parallel()
@@ -359,7 +509,7 @@ func TestCodecFor_NonImageAgentsAreNil(t *testing.T) {
 func TestPlaceholder_RunsAreLowEntropy(t *testing.T) {
 	t.Parallel()
 	c := CodecFor(agent.AgentTypeClaudeCode)
-	b64 := base64.StdEncoding.EncodeToString([]byte("entropy-check-bytes-xyz-padded-to-exceed-the-externalize-threshold"))
+	b64 := pngB64("entropy-check-bytes-xyz-padded-to-exceed-the-externalize-threshold")
 	rewritten, _, err := c.ExtractImages([]byte(claudeLine(b64) + "\n"))
 	if err != nil {
 		t.Fatalf("ExtractImages: %v", err)

@@ -443,31 +443,17 @@ func (s *ephemeralStore) addTaskMetadataToTree(ctx context.Context, baseTreeHash
 
 		// Add subagent transcript if available
 		if opts.SubagentTranscriptPath != "" && opts.AgentID != "" {
-			agentContent, readErr := os.ReadFile(opts.SubagentTranscriptPath)
-			agentContent, tooLarge := prepareSubagentTranscript(ctx, opts.Agent, opts.SubagentTranscriptPath, agentContent)
-			if readErr == nil && !tooLarge {
-				// Try JSONL-aware redaction first; fall back to plain string redaction
-				// only on a JSONL parse error (avoids silently dropping the transcript).
-				redacted, jsonlErr := redact.JSONLBytes(agentContent)
-				if jsonlErr != nil {
-					if errors.Is(jsonlErr, redact.ErrScannerDegraded) {
-						return plumbing.ZeroHash, fmt.Errorf("redact subagent transcript %s: %w", opts.SubagentTranscriptPath, jsonlErr)
-					}
-					logging.Warn(ctx, "subagent transcript is not valid JSONL, falling back to plain redaction",
-						slog.String("path", opts.SubagentTranscriptPath),
-						slog.String("error", jsonlErr.Error()),
-					)
-					agentContent = redact.Bytes(agentContent)
-				} else {
-					agentContent = redacted.Bytes()
+			bundle, bundleErr := s.buildSubagentTranscriptChanges(ctx, opts, taskMetadataDir)
+			if bundleErr != nil {
+				if errors.Is(bundleErr, redact.ErrScannerDegraded) {
+					return plumbing.ZeroHash, bundleErr
 				}
-				if blobHash, blobErr := CreateBlobFromContent(s.repo, agentContent); blobErr == nil {
-					agentPath := taskMetadataDir + "/agent-" + opts.AgentID + ".jsonl"
-					changes = append(changes, TreeChange{
-						Path:  agentPath,
-						Entry: &object.TreeEntry{Mode: filemode.Regular, Hash: blobHash},
-					})
-				}
+				logging.Warn(ctx, "failed to store subagent transcript, checkpoint written without it",
+					slog.String("path", opts.SubagentTranscriptPath),
+					slog.String("error", bundleErr.Error()),
+				)
+			} else {
+				changes = append(changes, bundle...)
 			}
 		}
 
@@ -491,6 +477,121 @@ func (s *ephemeralStore) addTaskMetadataToTree(ctx context.Context, baseTreeHash
 	}
 
 	return ApplyTreeChanges(ctx, s.repo, baseTreeHash, changes)
+}
+
+// buildSubagentTranscriptChanges builds the tree changes that store a task's
+// subagent transcript plus the image assets externalized out of it. It is the
+// shadow-branch counterpart of treeWriter.writeSubagentTranscriptBundle and
+// keeps the same two guarantees:
+//
+// Atomic: the returned slice is all-or-nothing. An externalized transcript is
+// only placeholders — the image bytes live nowhere else — so appending the
+// transcript without its assets is data loss, and appending assets without the
+// transcript leaves unreachable blobs. Any blob failure returns an error and no
+// changes, so the caller's checkpoint is simply written without the transcript.
+//
+// Replacing: the task's assets/ subtree is dropped before the new set is added,
+// so a rewrite of the same task cannot accumulate the previous attempt's assets
+// (whose names are random, hence never overwritten). This holds when the new set
+// is empty too — an empty set clears the subtree, which is what must happen when
+// a rewrite no longer externalizes anything.
+//
+// An unreadable or oversize transcript yields no changes at all, deliberately:
+// whatever is already stored is internally consistent, and half-updating it is
+// worse than leaving it.
+func (s *ephemeralStore) buildSubagentTranscriptChanges(ctx context.Context, opts WriteEphemeralTaskOptions, taskMetadataDir string) ([]TreeChange, error) {
+	content, readErr := os.ReadFile(opts.SubagentTranscriptPath)
+	if readErr != nil {
+		return nil, fmt.Errorf("read subagent transcript: %w", readErr)
+	}
+	prepared, assets, tooLarge := prepareSubagentTranscript(ctx, opts.Agent, opts.SubagentTranscriptPath, content)
+	if tooLarge {
+		return nil, nil // prepareSubagentTranscript logged why.
+	}
+
+	// Try JSONL-aware redaction first; fall back to plain string redaction if the
+	// content is not valid JSONL (avoids silently dropping the transcript).
+	var body []byte
+	if redacted, jsonlErr := redact.JSONLBytes(prepared); jsonlErr != nil {
+		if errors.Is(jsonlErr, redact.ErrScannerDegraded) {
+			return nil, fmt.Errorf("redact subagent transcript: %w", jsonlErr)
+		}
+		logging.Warn(ctx, "subagent transcript is not valid JSONL, falling back to plain redaction",
+			slog.String("path", opts.SubagentTranscriptPath),
+			slog.String("error", jsonlErr.Error()),
+		)
+		body = redact.Bytes(prepared)
+	} else {
+		body = redacted.Bytes()
+	}
+
+	transcriptHash, err := CreateBlobFromContent(s.repo, body)
+	if err != nil {
+		return nil, fmt.Errorf("create subagent transcript blob: %w", err)
+	}
+	assetChanges, err := s.buildTaskAssetChanges(assets, taskMetadataDir)
+	if err != nil {
+		return nil, fmt.Errorf("build subagent transcript assets: %w", err)
+	}
+
+	changes := make([]TreeChange, 0, len(assetChanges)+2)
+	// A nil Entry on the directory path drops the whole assets/ subtree.
+	// ApplyTreeChanges resolves the removal before the additions grouped under
+	// the same path, and then builds the subtree from the empty hash, so the
+	// pair below is a replacement rather than a merge.
+	changes = append(changes, TreeChange{Path: taskMetadataDir + "/" + paths.AssetsDirName})
+	changes = append(changes, assetChanges...)
+	changes = append(changes, TreeChange{
+		Path:  taskMetadataDir + "/" + paths.AgentTranscriptFileName(opts.AgentID),
+		Entry: &object.TreeEntry{Mode: filemode.Regular, Hash: transcriptHash},
+	})
+	return changes, nil
+}
+
+// buildTaskAssetChanges stores each externalized subagent-transcript image
+// asset as a raw binary blob under the task metadata dir's assets/ folder, plus
+// an assets/manifest.json index — mirroring treeWriter.writeAssets on the
+// persistent-store session path, adapted to the TreeChange-list style this
+// shadow-branch writer uses.
+func (s *ephemeralStore) buildTaskAssetChanges(assets []TranscriptAsset, taskMetadataDir string) ([]TreeChange, error) {
+	if len(assets) == 0 {
+		return nil, nil
+	}
+	assetsDir := taskMetadataDir + "/" + paths.AssetsDirName
+	manifest := struct {
+		Version int                  `json:"version"`
+		Assets  []assetManifestEntry `json:"assets"`
+	}{Version: 1}
+
+	changes := make([]TreeChange, 0, len(assets)+1)
+	for _, a := range assets {
+		blobHash, err := CreateBlobFromContent(s.repo, a.Data)
+		if err != nil {
+			return nil, fmt.Errorf("create asset blob: %w", err)
+		}
+		changes = append(changes, TreeChange{
+			Path:  assetsDir + "/" + a.Name,
+			Entry: &object.TreeEntry{Mode: filemode.Regular, Hash: blobHash},
+		})
+		sum := sha256.Sum256(a.Data)
+		manifest.Assets = append(manifest.Assets, assetManifestEntry{
+			Name: a.Name, MediaType: a.MediaType, Size: len(a.Data), SHA256: hex.EncodeToString(sum[:]),
+		})
+	}
+
+	manifestJSON, err := jsonutil.MarshalIndentWithNewline(manifest, "", "  ")
+	if err != nil {
+		return nil, fmt.Errorf("marshal assets manifest: %w", err)
+	}
+	manifestHash, err := CreateBlobFromContent(s.repo, manifestJSON)
+	if err != nil {
+		return nil, fmt.Errorf("create assets manifest blob: %w", err)
+	}
+	changes = append(changes, TreeChange{
+		Path:  assetsDir + "/manifest.json",
+		Entry: &object.TreeEntry{Mode: filemode.Regular, Hash: manifestHash},
+	})
+	return changes, nil
 }
 
 // ListCheckpoints lists all checkpoint commits on a shadow branch.
