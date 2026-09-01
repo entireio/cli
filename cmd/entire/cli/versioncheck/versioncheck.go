@@ -409,16 +409,7 @@ func installManagerForCurrentBinary() string {
 	}
 }
 
-// canAutoInstall reports whether updateCommand(currentVersion) is safe to
-// print (and, on non-Windows, auto-run) on the current OS. Always true:
-// POSIX unknown falls back to curl | bash, Windows unknown to install.ps1.
-// Windows still never auto-runs; see MaybeAutoUpdate.
-func canAutoInstall() bool {
-	return true
-}
-
-// downloadsURL is the public page users visit when we can't offer an
-// auto-installable command on their platform.
+// downloadsURL is the GitHub releases page, used for release-notes links.
 const downloadsURL = "https://github.com/entireio/cli/releases"
 
 // Windows install.ps1 one-liners from the README. Printed, never auto-run.
@@ -486,9 +477,6 @@ func updateCommand(currentVersion string) string {
 }
 
 func UpdateCommandForCurrentBinary(currentVersion string) string {
-	if !canAutoInstall() {
-		return downloadsURL
-	}
 	return updateCommand(currentVersion)
 }
 

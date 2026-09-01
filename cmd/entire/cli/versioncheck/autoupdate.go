@@ -61,12 +61,6 @@ var (
 // replace itself). Scoop, mise, and install.ps1 commands are printed for
 // the user to run after entire has exited.
 func MaybeAutoUpdate(ctx context.Context, w io.Writer, currentVersion, latestVersion string) AutoUpdateAction {
-	if !canAutoInstall() {
-		printNotification(w, currentVersion, latestVersion)
-		fmt.Fprintf(w, "To update, download the latest release from:\n  %s\n", downloadsURL)
-		return autoUpdateActionSkip
-	}
-
 	cmdStr := updateCommand(currentVersion)
 
 	// Windows can't replace a running executable, so no installer can update
