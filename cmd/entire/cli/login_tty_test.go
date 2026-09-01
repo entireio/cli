@@ -108,7 +108,9 @@ func TestWaitForLoginURLResult_AuthCompletionCancelsTTYAndRestoresTerminal(t *te
 
 	authComplete := make(chan struct{})
 	interactor := loginURLInteractor{
-		keysAvailable: func() bool { return true },
+		availableActions: func() loginURLActions {
+			return loginURLActions{keys: true, browser: true, clipboard: true}
+		},
 		readAction: func(ctx context.Context) (loginURLAction, error) {
 			return readLoginURLActionFromTTY(ctx, io.Discard, tty)
 		},

@@ -13,6 +13,13 @@ import (
 // the shell association without launching a real browser.
 var shellExecute = windows.ShellExecute
 
+// browserOpenerAvailable reports whether this machine can open a URL for the
+// user. Windows always can: ShellExecute goes through the scheme association
+// rather than an external opener binary, so there is nothing to look up on
+// $PATH and no display server to detect. Kept as a per-platform function so
+// the login prompt's action gating has one shape everywhere.
+func browserOpenerAvailable() bool { return true }
+
 // openBrowserPlatform hands browserURL to the Windows shell association for
 // its scheme, which is the user's default browser.
 //

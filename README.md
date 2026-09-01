@@ -228,24 +228,33 @@ Multiple AI sessions can run on the same commit. If you start a second session w
 ## Headless & CI Authentication
 
 By default `entire login` stores tokens in the OS keyring (macOS Keychain,
-Linux Secret Service, Windows Credential Manager). Machines without a usable
-keyring — headless servers, containers, minimal VMs, CI runners — have two
-supported paths:
+Linux Secret Service, Windows Credential Manager).
 
 ### Interactive login on a headless machine
 
-Use the file-backed token store. The device-auth flow already works without a
-local browser (the CLI prints an approval URL you can open on any machine);
-only token storage needs the override:
+Nothing to configure: `entire login` works on headless servers, containers and
+minimal VMs as-is. The device-auth flow already works without a local browser
+(the CLI prints an approval URL you can open on any machine), and when the OS
+keyring is unusable the CLI stores the tokens in a file instead of discarding a
+login you just completed. It says so when it happens:
 
-```bash
-ENTIRE_TOKEN_STORE=file entire login
+```
+Warning: OS keyring (Secret Service (D-Bus)) is unavailable: exec: "dbus-launch": executable file not found in $PATH
+Credentials saved to /home/you/.config/entire/tokens.json instead (mode 0600). Set ENTIRE_TOKEN_STORE=file to skip the keyring, or ENTIRE_TOKEN_STORE=keyring to fail instead of writing a file.
 ```
 
 Tokens are written with `0600` permissions to `tokens.json` in your Entire
 config directory (`~/.config/entire` by default). Override the location with
-`ENTIRE_TOKEN_STORE_PATH`. Set `ENTIRE_TOKEN_STORE=file` persistently (e.g. in
-your shell profile) so later commands read from the same store.
+`ENTIRE_TOKEN_STORE_PATH`. Later commands find them there without any
+environment variable — the keyring is still tried first, so a machine that
+grows a working one goes back to using it.
+
+Two overrides are available when you want to decide rather than be adapted to:
+
+```bash
+ENTIRE_TOKEN_STORE=file entire login     # never touch the keyring
+ENTIRE_TOKEN_STORE=keyring entire login  # require the keyring; fail rather than write a file
+```
 
 ### Non-interactive automation (CI, workload identity)
 

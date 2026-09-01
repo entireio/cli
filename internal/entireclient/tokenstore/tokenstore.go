@@ -2,8 +2,14 @@
 // entiredb and entire-core CLIs.
 //
 // By default it delegates to the OS keyring (macOS Keychain, Linux Secret
-// Service, etc.). Set ENTIRE_TOKEN_STORE=file to use a JSON file instead,
-// which is useful in CI environments that lack a keyring daemon.
+// Service, etc.), falling back to a JSON file when the keyring is unusable —
+// headless servers, containers, and CI runners have no keyring daemon, and
+// losing a completed login to that is worse than storing the tokens in the
+// documented 0600 file. The fallback is announced on stderr; see fallback.go.
+//
+// ENTIRE_TOKEN_STORE overrides the arrangement in either direction: "file"
+// skips the keyring entirely, "keyring" requires it and fails rather than
+// writing tokens to disk.
 //
 // When using the file backend the tokens are stored in
 // $ENTIRE_TOKEN_STORE_PATH (default: tokens.json in the per-user config
@@ -19,6 +25,7 @@
 package tokenstore
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -93,21 +100,35 @@ func currentBackend() store {
 	return backend
 }
 
-// BackendEnvVar selects the credential backend: set to "file" to use the
-// JSON file store instead of the OS keyring. PathEnvVar overrides where the
-// file store lives (default: tokens.json in the per-user config directory).
-// Exported so user-facing guidance (e.g. login's headless hint) names the
-// same variables this package actually reads.
+// BackendEnvVar selects the credential backend: "file" uses the JSON file
+// store and never touches the OS keyring, "keyring" requires the keyring and
+// fails rather than falling back to a file. Anything else (including unset)
+// gets the default keyring-then-file arrangement. PathEnvVar overrides where
+// the file store lives (default: tokens.json in the per-user config
+// directory). Exported so user-facing guidance (e.g. login's headless hint)
+// names the same variables this package actually reads.
 const (
 	BackendEnvVar = "ENTIRE_TOKEN_STORE"
 	PathEnvVar    = "ENTIRE_TOKEN_STORE_PATH"
+)
+
+// Values BackendEnvVar accepts. Anything else means "default".
+const (
+	backendValueFile    = "file"
+	backendValueKeyring = "keyring"
 )
 
 // FileBackendSelected reports whether the environment selects the file
 // backend — the single predicate shared by backend resolution, provenance
 // wording, and login's headless hint, so they can never disagree.
 func FileBackendSelected() bool {
-	return os.Getenv(BackendEnvVar) == "file"
+	return os.Getenv(BackendEnvVar) == backendValueFile
+}
+
+// KeyringOnlySelected reports whether the environment demands the OS keyring
+// with no file fallback: a deliberate "never write my bearer tokens to disk".
+func KeyringOnlySelected() bool {
+	return os.Getenv(BackendEnvVar) == backendValueKeyring
 }
 
 // BackendDescription names the credential backend the current environment
@@ -118,6 +139,11 @@ func FileBackendSelected() bool {
 func BackendDescription() string {
 	if FileBackendSelected() {
 		return "file " + FileBackendPath()
+	}
+	// A fallback write already happened, so name where the tokens actually
+	// are rather than the keyring that refused them.
+	if path, ok := FellBackToFileStore(); ok {
+		return fmt.Sprintf("file %s (%s unavailable)", path, keyringProviderName())
 	}
 	return keyringProviderName()
 }
@@ -147,7 +173,13 @@ func resolveBackendLocked() store {
 	if dir, ok := testdirs.Dir("tokenstore"); ok {
 		return &fileStore{path: filepath.Join(dir, "tokens.json"), ownsDir: true}
 	}
-	return keyringStore{}
+	if KeyringOnlySelected() {
+		return keyringStore{}
+	}
+	return &fallbackStore{
+		keyring: keyringStore{},
+		file:    &fileStore{path: FileBackendPath()},
+	}
 }
 
 // Get retrieves a credential.

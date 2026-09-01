@@ -433,7 +433,9 @@ func noopCopyURL(string) error { return nil }
 func newTestLoginURLInteractor(actions ...loginURLAction) loginURLInteractor {
 	next := 0
 	return loginURLInteractor{
-		keysAvailable: func() bool { return true },
+		availableActions: func() loginURLActions {
+			return loginURLActions{keys: true, browser: true, clipboard: true}
+		},
 		readAction: func(ctx context.Context) (loginURLAction, error) {
 			if next >= len(actions) {
 				<-ctx.Done()
@@ -455,7 +457,7 @@ func TestWaitForLoginURLResult_NoKeysSuppressesPrompt(t *testing.T) {
 	t.Parallel()
 
 	interactor := newTestLoginURLInteractor()
-	interactor.keysAvailable = func() bool { return false }
+	interactor.availableActions = func() loginURLActions { return loginURLActions{} }
 	interactor.readAction = func(context.Context) (loginURLAction, error) {
 		return loginURLNone, nil
 	}
@@ -767,6 +769,171 @@ func TestLoginURLActionModel(t *testing.T) {
 				t.Errorf("quit command present = %v, want %v", gotQuit, tt.wantSelected)
 			}
 		})
+	}
+}
+
+// The prompt only advertises what this machine can honour: a headless box has
+// no browser opener and no clipboard helper, and offering keys for either just
+// trades a keystroke for a warning.
+func TestLoginURLPromptLine(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name    string
+		actions loginURLActions
+		want    string
+	}{
+		{name: "everything available", actions: loginURLActions{keys: true, browser: true, clipboard: true}, want: loginURLPrompt},
+		{name: "no browser", actions: loginURLActions{keys: true, clipboard: true}, want: loginURLCopyHint},
+		{name: "no clipboard", actions: loginURLActions{keys: true, browser: true}, want: loginURLOpenHint},
+		{name: "headless machine with a terminal", actions: loginURLActions{keys: true}, want: ""},
+		{name: "no keys", actions: loginURLActions{browser: true, clipboard: true}, want: ""},
+		{name: "nothing", actions: loginURLActions{}, want: ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := loginURLPromptLine(tc.actions); got != tc.want {
+				t.Errorf("loginURLPromptLine(%+v) = %q, want %q", tc.actions, got, tc.want)
+			}
+		})
+	}
+}
+
+// A terminal that can deliver keys, on a machine where no key can lead
+// anywhere, must be left alone: no prompt, and no raw-mode reader taking over
+// the user's Ctrl-C for a keystroke that could only be refused.
+func TestWaitForLoginURLResult_NoUsableActionsLeavesTerminalAlone(t *testing.T) {
+	t.Parallel()
+
+	reads := make(chan struct{}, 1)
+	interactor := newTestLoginURLInteractor()
+	interactor.availableActions = func() loginURLActions { return loginURLActions{keys: true} }
+	interactor.readAction = func(ctx context.Context) (loginURLAction, error) {
+		reads <- struct{}{}
+		<-ctx.Done()
+		return loginURLNone, ctx.Err()
+	}
+
+	var out bytes.Buffer
+	got, err := waitForLoginURLResult(
+		context.Background(), &out, &bytes.Buffer{},
+		"https://auth.test/device?code=ABCD", "Waiting... ", interactor,
+		func(context.Context) (string, error) { return testLoginComplete, nil },
+	)
+	if err != nil {
+		t.Fatalf("waitForLoginURLResult() error = %v", err)
+	}
+	if got != testLoginComplete {
+		t.Errorf("result = %q, want complete", got)
+	}
+	select {
+	case <-reads:
+		t.Error("keys were read on a machine that can honour none of the actions")
+	default:
+	}
+	if strings.Contains(out.String(), "[") {
+		t.Errorf("output advertised an action:\n%s", out.String())
+	}
+	if !strings.Contains(out.String(), "Waiting... ") {
+		t.Errorf("output missing waiting message:\n%s", out.String())
+	}
+}
+
+// Enter is a natural "get on with it" keystroke, so it can arrive even though
+// the hint was withheld. Without an opener it must answer with a sentence
+// instead of launching an exec that can only fail, and sign-in must carry on.
+func TestWaitForLoginURLResult_EnterWithoutBrowserOpenerRefusesToExec(t *testing.T) {
+	t.Parallel()
+
+	opened := make(chan struct{}, 1)
+	reads := make(chan int, 2)
+	readCount := 0
+	interactor := loginURLInteractor{
+		availableActions: func() loginURLActions {
+			return loginURLActions{keys: true, clipboard: true}
+		},
+		// Called serially by waitForLoginURLResult, one reader at a time.
+		readAction: func(ctx context.Context) (loginURLAction, error) {
+			readCount++
+			reads <- readCount
+			if readCount == 1 {
+				return loginURLOpen, nil
+			}
+			<-ctx.Done()
+			return loginURLNone, ctx.Err()
+		},
+		copyURL: noopCopyURL,
+		openURL: func(context.Context, string) error {
+			opened <- struct{}{}
+			return nil
+		},
+	}
+
+	authComplete := make(chan struct{})
+	var out, errOut bytes.Buffer
+	resultCh := make(chan loginURLWaitResult[string], 1)
+	go func() {
+		value, err := waitForLoginURLResult(
+			context.Background(), &out, &errOut,
+			"https://auth.test/device?code=ABCD", "Waiting... ", interactor,
+			func(context.Context) (string, error) {
+				<-authComplete
+				return testLoginComplete, nil
+			},
+		)
+		resultCh <- loginURLWaitResult[string]{value: value, err: err}
+	}()
+
+	// A second key read only starts once the Enter has been handled, so it is
+	// the signal that the refusal path ran to completion.
+	<-reads
+	<-reads
+	close(authComplete)
+
+	result := <-resultCh
+	if result.err != nil {
+		t.Fatalf("waitForLoginURLResult() error = %v", result.err)
+	}
+	if result.value != testLoginComplete {
+		t.Errorf("result = %q, want complete", result.value)
+	}
+	select {
+	case <-opened:
+		t.Error("openURL was called on a machine with no browser opener")
+	default:
+	}
+	if !strings.Contains(errOut.String(), noBrowserOpenerNotice) {
+		t.Errorf("Enter was swallowed without explanation:\n%s", errOut.String())
+	}
+	if strings.Contains(out.String(), loginURLOpenHint) {
+		t.Errorf("prompt advertised a browser this machine cannot open:\n%s", out.String())
+	}
+}
+
+// The non-interactive device flow prints "Waiting for approval… " without a
+// newline; whatever comes next (here a failure) must not be glued onto it.
+func TestRunLogin_NonInteractiveClosesWaitingLine(t *testing.T) {
+	t.Parallel()
+
+	client := &mockClient{
+		start: &auth.DeviceAuthStart{
+			DeviceCode:              "device-123",
+			UserCode:                "ABCD-EFGH",
+			VerificationURIComplete: "https://auth.test/device?code=ABCD-EFGH",
+			ExpiresIn:               60,
+		},
+		responses: []pollResponse{{result: &auth.DeviceAuthPoll{Error: "access_denied"}}},
+	}
+	var out bytes.Buffer
+	if err := runLogin(context.Background(), &out, &bytes.Buffer{}, client, newTestLoginURLInteractor(), false); err == nil {
+		t.Fatal("runLogin() error = nil, want device authorization denied")
+	}
+	if !strings.HasSuffix(out.String(), "Waiting for approval… \n") {
+		t.Errorf("waiting line was left open, so the error would run into it:\n%q", out.String())
+	}
+	if strings.Contains(out.String(), loginURLPrompt) {
+		t.Errorf("non-interactive login advertised key actions:\n%s", out.String())
 	}
 }
 
