@@ -140,6 +140,9 @@ func (c *CodexAgent) walkRollouts(root string, visit fs.WalkDirFunc) error {
 // regular-candidate metadata failure discards all results: partial results
 // cannot prove a child ID is unique.
 func (c *CodexAgent) scanFallbackRollouts(agentIDs map[string]struct{}) map[string]loadedRollout {
+	if len(agentIDs) == 0 {
+		return map[string]loadedRollout{}
+	}
 	matches := make(map[string][]loadedRollout)
 	seenPaths := make(map[string]struct{})
 	for _, root := range c.rolloutRoots() {

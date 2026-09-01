@@ -325,8 +325,18 @@ func TestSubagentInventory_AggregatesOnlyCompleteExactChildren(t *testing.T) {
 func TestSubagentInventory_EmptyInventoryIsExactWithoutChildTotal(t *testing.T) {
 	t.Parallel()
 
-	result, err := (&CodexAgent{RolloutRoots: []string{t.TempDir()}}).ExtractWithSubagentInventory(nil, 0, nil)
+	root := t.TempDir()
+	walks := 0
+	ag := &CodexAgent{
+		RolloutRoots: []string{root},
+		walkDir: func(root string, visit fs.WalkDirFunc) error {
+			walks++
+			return filepath.WalkDir(root, visit)
+		},
+	}
+	result, err := ag.ExtractWithSubagentInventory(nil, 0, nil)
 	require.NoError(t, err)
+	require.Zero(t, walks, "an exact empty inventory has no unresolved child and must not scan rollout archives")
 	require.Empty(t, result.Children)
 	require.NotNil(t, result.TokenUsage)
 	require.NotNil(t, result.TokenUsage.SubagentTokensComplete)
