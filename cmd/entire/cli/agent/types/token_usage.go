@@ -76,13 +76,13 @@ func addTokenUsageAtDepth(a, b *TokenUsage, depth int) *TokenUsage {
 		aSub = a.SubagentTokens
 	}
 	if b != nil {
-		sum.InputTokens += b.InputTokens
-		sum.CacheCreationTokens += b.CacheCreationTokens
-		sum.CacheReadTokens += b.CacheReadTokens
-		sum.OutputTokens += b.OutputTokens
-		sum.APICallCount += b.APICallCount
-		sum.ThinkingTokens += b.ThinkingTokens
-		sum.CacheCreation1hTokens += b.CacheCreation1hTokens
+		sum.InputTokens = clampAdd(sum.InputTokens, b.InputTokens)
+		sum.CacheCreationTokens = clampAdd(sum.CacheCreationTokens, b.CacheCreationTokens)
+		sum.CacheReadTokens = clampAdd(sum.CacheReadTokens, b.CacheReadTokens)
+		sum.OutputTokens = clampAdd(sum.OutputTokens, b.OutputTokens)
+		sum.APICallCount = clampAdd(sum.APICallCount, b.APICallCount)
+		sum.ThinkingTokens = clampAdd(sum.ThinkingTokens, b.ThinkingTokens)
+		sum.CacheCreation1hTokens = clampAdd(sum.CacheCreation1hTokens, b.CacheCreation1hTokens)
 		sum.Model = mergeModel(sum.Model, b.Model)
 		bSub = b.SubagentTokens
 	}
@@ -91,6 +91,18 @@ func addTokenUsageAtDepth(a, b *TokenUsage, depth int) *TokenUsage {
 	}
 	sum.SubagentTokens = addTokenUsageAtDepth(aSub, bSub, depth+1)
 	return sum
+}
+
+// clampAdd returns a+b, saturating at the maximum int rather than wrapping.
+// Token counts never approach it in practice, but a wrapped total would render
+// as a negative or absurd figure in a user-facing report, so overflow degrades
+// to "impossibly large" instead.
+func clampAdd(a, b int) int {
+	const maxInt = int(^uint(0) >> 1)
+	if a > 0 && b > maxInt-a {
+		return maxInt
+	}
+	return a + b
 }
 
 // SubtractTokenUsage returns a-b, recursing into subagent usage and clamping

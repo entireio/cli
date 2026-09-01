@@ -1,0 +1,202 @@
+package cli
+
+import (
+	"testing"
+
+	"github.com/entireio/cli/cmd/entire/cli/agent"
+	"github.com/entireio/cli/cmd/entire/cli/agent/types"
+	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
+	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
+)
+
+// classesReportFor builds a one-session checkpoint report with the given
+// agent, model, token-usage version and usage.
+func classesReportFor(t *testing.T, agentName types.AgentType, model string, version int, usage *agent.TokenUsage) checkpointTokensReport {
+	t.Helper()
+	cpID := id.MustCheckpointID("abc123abc123")
+	return buildCheckpointTokensReport(
+		cpID,
+		&checkpoint.CheckpointSummary{
+			CheckpointID:      cpID,
+			Sessions:          []checkpoint.SessionFilePaths{{Metadata: "0/metadata.json"}},
+			TokenUsageVersion: version,
+		},
+		[]*checkpoint.Metadata{{
+			SessionID:  "s1",
+			Agent:      agentName,
+			Model:      model,
+			TokenUsage: usage,
+		}},
+		0,
+	)
+}
+
+// The breakdown is the point of the command: a delta-scoped checkpoint from a
+// model we have ratios for gets both volume and cost shares.
+func TestCheckpointTokensReport_Classes_PricedWhenModelAndVersionKnown(t *testing.T) {
+	t.Parallel()
+
+	report := classesReportFor(t, "Claude Code", "claude-sonnet-4.6", checkpoint.TokenUsageVersionDelta,
+		&agent.TokenUsage{InputTokens: 1000, CacheCreationTokens: 2000, CacheReadTokens: 6000, OutputTokens: 1000})
+
+	if report.Classes == nil {
+		t.Fatal("a checkpoint with usage must carry a class breakdown")
+	}
+	if !report.Classes.Priced {
+		t.Error("a known model on a v2 checkpoint must be priced")
+	}
+	vol := report.Classes.Input.VolumePercent + report.Classes.CacheWrite.VolumePercent +
+		report.Classes.CacheRead.VolumePercent + report.Classes.Output.VolumePercent
+	if vol != 100 {
+		t.Errorf("volume shares sum to %d, want 100", vol)
+	}
+	cost := report.Classes.Input.CostPercent + report.Classes.CacheWrite.CostPercent +
+		report.Classes.CacheRead.CostPercent + report.Classes.Output.CostPercent
+	if cost != 100 {
+		t.Errorf("cost shares sum to %d, want 100", cost)
+	}
+	// The whole reason for showing both: 60% of the volume is not 60% of the cost.
+	if report.Classes.CacheRead.VolumePercent == report.Classes.CacheRead.CostPercent {
+		t.Error("cache read's volume and cost share should diverge — that divergence is the point")
+	}
+}
+
+// This is the agent-agnostic promise: an agent whose transcript can never be
+// attributed still gets the full billing breakdown.
+func TestCheckpointTokensReport_Classes_WorkForAnyAgent(t *testing.T) {
+	t.Parallel()
+
+	for _, agentName := range []types.AgentType{"Cursor", "Copilot CLI", "Factory AI Droid", "some-external-agent"} {
+		t.Run(string(agentName), func(t *testing.T) {
+			t.Parallel()
+			report := classesReportFor(t, agentName, "", checkpoint.TokenUsageVersionDelta,
+				&agent.TokenUsage{InputTokens: 500, CacheReadTokens: 500})
+			if report.Classes == nil {
+				t.Fatalf("%s must still get a class breakdown", agentName)
+			}
+			if report.Classes.Input.VolumePercent+report.Classes.CacheRead.VolumePercent != 100 {
+				t.Error("volume shares must be exact regardless of agent")
+			}
+		})
+	}
+}
+
+// No recorded model means no verified ratios. Volume is still exact; cost is
+// absent rather than zero, which would read as "this cost nothing".
+func TestCheckpointTokensReport_Classes_UnpricedWithoutModel(t *testing.T) {
+	t.Parallel()
+
+	report := classesReportFor(t, "Claude Code", "", checkpoint.TokenUsageVersionDelta,
+		&agent.TokenUsage{InputTokens: 1000, CacheReadTokens: 3000})
+
+	if report.Classes == nil {
+		t.Fatal("usage without a model must still produce volume shares")
+	}
+	if report.Classes.Priced {
+		t.Error("no model means no verified ratios; the breakdown must not claim a cost")
+	}
+}
+
+// A legacy row cannot tell "no 1-hour cache writes" from "TTL not recorded",
+// and Anthropic bills the two TTLs differently, so cost must stay absent.
+func TestCheckpointTokensReport_Classes_LegacyAnthropicIsUnpriced(t *testing.T) {
+	t.Parallel()
+
+	report := classesReportFor(t, "Claude Code", "claude-sonnet-4.6", 0,
+		&agent.TokenUsage{InputTokens: 1000, CacheCreationTokens: 2000, CacheReadTokens: 6000, OutputTokens: 1000})
+
+	if report.Classes == nil {
+		t.Fatal("a legacy checkpoint still gets volume shares")
+	}
+	if report.Classes.Priced {
+		t.Error("an unknown cache-write TTL must not be priced at a guessed rate")
+	}
+}
+
+// A provider that charges one rate for both cache TTLs has no ambiguity to
+// resolve, so a legacy row is still priceable.
+func TestCheckpointTokensReport_Classes_LegacySingleRateProviderIsPriced(t *testing.T) {
+	t.Parallel()
+
+	report := classesReportFor(t, "Codex", "gpt-5.3-codex", 0,
+		&agent.TokenUsage{InputTokens: 1000, CacheReadTokens: 6000, OutputTokens: 1000})
+
+	if report.Classes == nil {
+		t.Fatal("a legacy checkpoint still gets volume shares")
+	}
+	if !report.Classes.Priced {
+		t.Error("a provider with one cache-write rate has no TTL ambiguity; it should still be priced")
+	}
+}
+
+// Mixed models across sessions cannot share one ratio row. Showing a cost that
+// silently covers only some sessions is worse than showing none.
+func TestCheckpointTokensReport_Classes_MixedModelsAreUnpriced(t *testing.T) {
+	t.Parallel()
+
+	cpID := id.MustCheckpointID("abc123abc124")
+	report := buildCheckpointTokensReport(
+		cpID,
+		&checkpoint.CheckpointSummary{
+			CheckpointID: cpID,
+			Sessions: []checkpoint.SessionFilePaths{
+				{Metadata: "0/metadata.json"},
+				{Metadata: "1/metadata.json"},
+			},
+			TokenUsageVersion: checkpoint.TokenUsageVersionDelta,
+		},
+		[]*checkpoint.Metadata{
+			{SessionID: "s1", Agent: "Claude Code", Model: "claude-sonnet-4.6",
+				TokenUsage: &agent.TokenUsage{InputTokens: 1000, OutputTokens: 100}},
+			{SessionID: "s2", Agent: "Codex", Model: "gpt-5.3-codex",
+				TokenUsage: &agent.TokenUsage{InputTokens: 1000, OutputTokens: 100}},
+		},
+		0,
+	)
+
+	if report.Classes == nil {
+		t.Fatal("a multi-session checkpoint still gets volume shares")
+	}
+	if report.Classes.Priced {
+		t.Error("two different models cannot share one ratio row; cost must be omitted")
+	}
+}
+
+// A checkpoint that recorded nothing must keep saying so, not render zeros.
+func TestCheckpointTokensReport_Classes_AbsentWhenNoUsage(t *testing.T) {
+	t.Parallel()
+
+	report := classesReportFor(t, "Claude Code", "claude-sonnet-4.6", checkpoint.TokenUsageVersionDelta, nil)
+
+	if report.Classes != nil {
+		t.Error("no recorded usage must produce no breakdown at all")
+	}
+	if len(report.Limitations) == 0 {
+		t.Error("the existing 'no token usage recorded' limitation must survive")
+	}
+}
+
+// Subsets ride alongside their parent class and are never added to the total.
+func TestCheckpointTokensReport_Classes_CarrySubsets(t *testing.T) {
+	t.Parallel()
+
+	report := classesReportFor(t, "Claude Code", "claude-sonnet-4.6", checkpoint.TokenUsageVersionDelta,
+		&agent.TokenUsage{
+			InputTokens:           100,
+			CacheCreationTokens:   400,
+			CacheCreation1hTokens: 150,
+			CacheReadTokens:       400,
+			OutputTokens:          100,
+			ThinkingTokens:        60,
+		})
+
+	if report.Classes == nil {
+		t.Fatal("expected a breakdown")
+	}
+	if report.Classes.Total != 1000 {
+		t.Errorf("Total = %d, want 1000 (subsets excluded)", report.Classes.Total)
+	}
+	if report.Classes.CacheWrite1h != 150 || report.Classes.Thinking != 60 {
+		t.Error("subsets must be reported alongside their parent class")
+	}
+}

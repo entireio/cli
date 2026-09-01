@@ -9,22 +9,27 @@ import (
 	"strings"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
+	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
 	"github.com/spf13/cobra"
 )
 
 type checkpointTokensReport struct {
-	CheckpointID    string                        `json:"checkpoint_id"`
-	SessionCount    int                           `json:"session_count"`
-	SessionID       string                        `json:"session_id,omitempty"`
-	Agent           string                        `json:"agent,omitempty"`
-	Agents          []string                      `json:"agents,omitempty"`
-	Model           string                        `json:"model,omitempty"`
-	Models          []string                      `json:"models,omitempty"`
-	Branch          string                        `json:"branch,omitempty"`
-	Source          string                        `json:"source"`
-	Tokens          *sessionTokensUsage           `json:"tokens,omitempty"`
+	CheckpointID string              `json:"checkpoint_id"`
+	SessionCount int                 `json:"session_count"`
+	SessionID    string              `json:"session_id,omitempty"`
+	Agent        string              `json:"agent,omitempty"`
+	Agents       []string            `json:"agents,omitempty"`
+	Model        string              `json:"model,omitempty"`
+	Models       []string            `json:"models,omitempty"`
+	Branch       string              `json:"branch,omitempty"`
+	Source       string              `json:"source"`
+	Tokens       *sessionTokensUsage `json:"tokens,omitempty"`
+	// Classes is the billing-class breakdown — volume and, where a verified
+	// ratio row applies, cost share per class. Present for every agent that
+	// recorded any usage, including ones whose transcripts cannot be attributed.
+	Classes         *tokenClassBreakdown          `json:"classes,omitempty"`
 	Context         *sessionTokensContext         `json:"context,omitempty"`
 	Contributors    []sessionTokensContributor    `json:"contributors,omitempty"`
 	Recommendations []sessionTokensRecommendation `json:"recommendations,omitempty"`
@@ -216,6 +221,9 @@ func buildCheckpointTokensReport(cpID id.CheckpointID, summary *checkpoint.Check
 	usage := checkpointTokenUsage(summary, metas, metadataWarnings > 0)
 	if tokens := buildSessionTokensUsage(usage); tokens != nil {
 		report.Tokens = tokens
+		if classes, ok := tokenClassShares(usage, checkpointTokenWeights(metas), checkpointTokenTTLKnown(summary)); ok {
+			report.Classes = &classes
+		}
 		if tokens.SubagentTotal > 0 {
 			report.Contributors = append(report.Contributors, sessionTokensContributor{
 				Kind:       "subagents",
@@ -293,6 +301,40 @@ func buildCheckpointTokensReport(cpID id.CheckpointID, summary *checkpoint.Check
 	return report
 }
 
+// checkpointTokenWeights resolves the price ratios that apply to a whole
+// checkpoint. Every session must carry a model and they must all resolve to the
+// same ratio row: a cost column that silently covers three of five sessions is
+// worse than no cost column, so any gap or disagreement yields zero weights and
+// the report shows volume only.
+func checkpointTokenWeights(metas []*checkpoint.Metadata) tokenWeights {
+	var resolved tokenWeights
+	for _, meta := range metas {
+		if meta == nil {
+			return tokenWeights{}
+		}
+		weights, ok := tokenWeightsForModel(meta.Model)
+		if !ok {
+			return tokenWeights{}
+		}
+		if resolved.Family == "" {
+			resolved = weights
+			continue
+		}
+		if resolved.Family != weights.Family {
+			return tokenWeights{}
+		}
+	}
+	return resolved
+}
+
+// checkpointTokenTTLKnown reports whether an absent 1-hour cache-write figure
+// can be trusted to mean zero. It can on token_usage_version 2 checkpoints,
+// where the field is written whenever the agent records it; on a legacy
+// checkpoint absence means "not recorded" and the split is unknowable.
+func checkpointTokenTTLKnown(summary *checkpoint.CheckpointSummary) bool {
+	return summary != nil && summary.TokenUsageVersion >= checkpoint.TokenUsageVersionDelta
+}
+
 func checkpointAgentLabels(metas []*checkpoint.Metadata) []string {
 	labels := make([]string, 0, len(metas))
 	seen := make(map[string]struct{}, len(metas))
@@ -357,27 +399,13 @@ func checkpointTokenUsage(summary *checkpoint.CheckpointSummary, metas []*checkp
 	return sessionUsage
 }
 
+// addCheckpointTokenUsage sums two checkpoints' usage through the single
+// token-summing primitive. It previously copied five fields by hand, which
+// silently dropped ThinkingTokens, CacheCreation1hTokens and Model — exactly
+// the failure CLAUDE.md warns against ("a field-by-field copy is how the
+// nested total came to be dropped in the first place").
 func addCheckpointTokenUsage(a, b *agent.TokenUsage) *agent.TokenUsage {
-	if a == nil && b == nil {
-		return nil
-	}
-	result := &agent.TokenUsage{}
-	if a != nil {
-		result.InputTokens = a.InputTokens
-		result.CacheCreationTokens = a.CacheCreationTokens
-		result.CacheReadTokens = a.CacheReadTokens
-		result.OutputTokens = a.OutputTokens
-		result.APICallCount = a.APICallCount
-	}
-	if b != nil {
-		result.InputTokens = saturatingIntAdd(result.InputTokens, b.InputTokens)
-		result.CacheCreationTokens = saturatingIntAdd(result.CacheCreationTokens, b.CacheCreationTokens)
-		result.CacheReadTokens = saturatingIntAdd(result.CacheReadTokens, b.CacheReadTokens)
-		result.OutputTokens = saturatingIntAdd(result.OutputTokens, b.OutputTokens)
-		result.APICallCount = saturatingIntAdd(result.APICallCount, b.APICallCount)
-	}
-	result.SubagentTokens = addCheckpointTokenUsage(tokenUsageSubagents(a), tokenUsageSubagents(b))
-	return result
+	return types.AddTokenUsage(a, b)
 }
 
 func saturatingIntAdd(a, b int) int {
