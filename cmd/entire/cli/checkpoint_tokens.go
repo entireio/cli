@@ -221,7 +221,7 @@ func buildCheckpointTokensReport(cpID id.CheckpointID, summary *checkpoint.Check
 	usage := checkpointTokenUsage(summary, metas, metadataWarnings > 0)
 	if tokens := buildSessionTokensUsage(usage); tokens != nil {
 		report.Tokens = tokens
-		if classes, ok := tokenClassShares(usage, checkpointTokenWeights(metas), checkpointTokenTTLKnown(summary)); ok {
+		if classes, ok := tokenClassShares(usage, checkpointTokenWeights(metas, metadataWarnings), checkpointTokenTTLKnown(summary)); ok {
 			report.Classes = &classes
 		}
 		if tokens.SubagentTotal > 0 {
@@ -306,7 +306,17 @@ func buildCheckpointTokensReport(cpID id.CheckpointID, summary *checkpoint.Check
 // same ratio row: a cost column that silently covers three of five sessions is
 // worse than no cost column, so any gap or disagreement yields zero weights and
 // the report shows volume only.
-func checkpointTokenWeights(metas []*checkpoint.Metadata) tokenWeights {
+//
+// metadataWarnings gates the whole thing. When a session blob fails to read,
+// checkpointTokenUsage falls back to the root summary's total — which covers
+// every session — while metas holds only the ones that read. Pricing that total
+// against the models we happened to be able to read would apply, say, Anthropic
+// ratios to a total containing Codex sessions. Unreadable metadata means
+// unpriced.
+func checkpointTokenWeights(metas []*checkpoint.Metadata, metadataWarnings int) tokenWeights {
+	if metadataWarnings > 0 {
+		return tokenWeights{}
+	}
 	var resolved tokenWeights
 	for _, meta := range metas {
 		if meta == nil {
@@ -647,7 +657,11 @@ func writeCheckpointTokenClasses(w io.Writer, classes *tokenClassBreakdown) {
 	fmt.Fprintf(w, "  %-14s %10s\n", "Total", formatTokenCount(classes.Total))
 
 	if !classes.Priced {
-		fmt.Fprintln(w, "  Cost share omitted: no verified price ratios for this checkpoint's model.")
+		reason := classes.UnpricedReason
+		if reason == "" {
+			reason = unpricedNoModel
+		}
+		fmt.Fprintf(w, "  Cost share omitted: %s.\n", reason)
 	}
 }
 

@@ -76,12 +76,14 @@ func TestTokenWeightsForModel_AnthropicSeparatesCacheTTLs(t *testing.T) {
 func TestTokenClassShares_VolumeSumsTo100(t *testing.T) {
 	t.Parallel()
 
-	// Deliberately awkward: no combination of these rounds cleanly to 100.
+	// Three equal parts of a whole: 33.33% each, so the naive floors sum to 99
+	// and the largest-remainder correction has to close the gap. {1,1,1,1} would
+	// NOT test this — it divides into four exact 25s and never enters the
+	// correction at all.
 	usage := &types.TokenUsage{
 		InputTokens:         1,
 		CacheCreationTokens: 1,
 		CacheReadTokens:     1,
-		OutputTokens:        1,
 	}
 
 	shares, ok := tokenClassShares(usage, tokenWeights{}, false)
@@ -197,5 +199,101 @@ func TestTokenClassShares_NoUsageIsNotRecorded(t *testing.T) {
 	}
 	if _, ok := tokenClassShares(&types.TokenUsage{}, tokenWeights{}, false); ok {
 		t.Error("all-zero usage must report no shares")
+	}
+}
+
+// Checkpoint metadata lives on a branch anyone with push access can write. A
+// negative count must not escape as a negative or >100 percentage.
+func TestTokenClassShares_HostileNegativeCountsAreClamped(t *testing.T) {
+	t.Parallel()
+
+	shares, ok := tokenClassShares(&types.TokenUsage{InputTokens: -100, CacheReadTokens: 1000}, tokenWeights{}, false)
+	if !ok {
+		t.Fatal("expected shares")
+	}
+	for name, got := range map[string]int{
+		"input":       shares.Input.VolumePercent,
+		"cache read":  shares.CacheRead.VolumePercent,
+		"cache write": shares.CacheWrite.VolumePercent,
+		"output":      shares.Output.VolumePercent,
+	} {
+		if got < 0 || got > 100 {
+			t.Errorf("%s share = %d%%, want within [0,100]", name, got)
+		}
+	}
+	if shares.Input.Tokens < 0 {
+		t.Errorf("input tokens = %d, want clamped at zero", shares.Input.Tokens)
+	}
+}
+
+// Subagent usage is nested. The section above this one totals with recursion,
+// so these classes must too or one report shows two different totals.
+func TestTokenClassShares_FlattensSubagentUsage(t *testing.T) {
+	t.Parallel()
+
+	usage := &types.TokenUsage{
+		InputTokens: 100, OutputTokens: 100,
+		SubagentTokens: &types.TokenUsage{InputTokens: 300, OutputTokens: 500},
+	}
+
+	shares, ok := tokenClassShares(usage, tokenWeights{}, false)
+	if !ok {
+		t.Fatal("expected shares")
+	}
+	if shares.Total != 1000 {
+		t.Errorf("Total = %d, want 1000 — subagent tokens were billed too", shares.Total)
+	}
+	if shares.Input.Tokens != 400 {
+		t.Errorf("input = %d, want 400 (100 + 300 from the subagent)", shares.Input.Tokens)
+	}
+}
+
+// A 1-hour figure larger than its parent class must not make the 5-minute
+// remainder negative.
+func TestTokenClassShares_ClampsOversized1hSubset(t *testing.T) {
+	t.Parallel()
+
+	w, _ := tokenWeightsForModel("claude-sonnet-4.6")
+	shares, ok := tokenClassShares(
+		&types.TokenUsage{InputTokens: 10, CacheCreationTokens: 100, CacheCreation1hTokens: 500, OutputTokens: 10}, w, true)
+	if !ok {
+		t.Fatal("expected shares")
+	}
+	total := shares.Input.CostPercent + shares.CacheWrite.CostPercent + shares.CacheRead.CostPercent + shares.Output.CostPercent
+	if total != 100 {
+		t.Errorf("cost shares sum to %d, want 100 even with an oversized 1h subset", total)
+	}
+}
+
+// A legacy row with no cache writes has no TTL split to be ambiguous about, so
+// withholding its whole cost column would be over-cautious.
+func TestTokenClassShares_LegacyWithoutCacheWritesIsPriced(t *testing.T) {
+	t.Parallel()
+
+	w, _ := tokenWeightsForModel("claude-sonnet-4.6")
+	shares, ok := tokenClassShares(&types.TokenUsage{InputTokens: 100, CacheReadTokens: 900, OutputTokens: 50}, w, false)
+	if !ok {
+		t.Fatal("expected shares")
+	}
+	if !shares.Priced {
+		t.Errorf("no cache writes means no TTL ambiguity; want priced, reason was %q", shares.UnpricedReason)
+	}
+}
+
+// Each withholding case must state its own reason. A report that misstates why
+// it withheld a number is as wrong as withholding the wrong one.
+func TestTokenClassShares_UnpricedReasonsAreSpecific(t *testing.T) {
+	t.Parallel()
+
+	anthropic, _ := tokenWeightsForModel("claude-sonnet-4.6")
+
+	noModel, _ := tokenClassShares(&types.TokenUsage{InputTokens: 100}, tokenWeights{}, false)
+	if noModel.UnpricedReason != unpricedNoModel {
+		t.Errorf("no-model reason = %q, want %q", noModel.UnpricedReason, unpricedNoModel)
+	}
+
+	legacyTTL, _ := tokenClassShares(&types.TokenUsage{InputTokens: 100, CacheCreationTokens: 100}, anthropic, false)
+	if legacyTTL.UnpricedReason != unpricedUnknownTTL {
+		t.Errorf("legacy-TTL reason = %q, want %q — it must not claim the model has no ratios", legacyTTL.UnpricedReason, unpricedUnknownTTL)
 	}
 }

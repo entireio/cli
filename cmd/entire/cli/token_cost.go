@@ -110,12 +110,24 @@ func tokenWeightsForModel(model string) (tokenWeights, bool) {
 	return priceFamilyWeights[family], true
 }
 
+// Reasons cost can be withheld. The report prints these verbatim, so each one
+// must be true of the case it names — a report that misstates why it withheld a
+// number is the same class of error as withholding the wrong one.
+const (
+	unpricedNoModel     = "no verified price ratios for this checkpoint's model"
+	unpricedMixedModels = "this checkpoint's sessions use models with different price ratios"
+	unpricedUnknownTTL  = "this checkpoint predates the cache-write TTL split, which changes the rate"
+	unpricedNoCost      = "this checkpoint's classes carry no priced tokens"
+)
+
 // tokenClassShare is one billing class's contribution to a checkpoint.
-// CostPercent is meaningful only when the parent tokenClassShares is Priced.
+// CostPercent is meaningful only when the parent breakdown is Priced; the key
+// is always emitted so a consumer never has to tell "priced but negligible"
+// from "unpriced" by the absence of a field.
 type tokenClassShare struct {
 	Tokens        int `json:"tokens"`
 	VolumePercent int `json:"volume_percent"`
-	CostPercent   int `json:"cost_percent,omitempty"`
+	CostPercent   int `json:"cost_percent"`
 }
 
 // tokenClassBreakdown is the four-class breakdown of a checkpoint's usage. The
@@ -132,16 +144,17 @@ type tokenClassBreakdown struct {
 	Total      int             `json:"total"`
 
 	// Thinking is the part of Output the agent recorded as reasoning.
-	Thinking int `json:"thinking,omitempty"`
+	Thinking int `json:"thinking"`
 	// CacheWrite1h is the part of CacheWrite written at the 1-hour TTL, which
 	// bills higher than the 5-minute one where the provider charges for it.
-	CacheWrite1h int `json:"cache_write_1h,omitempty"`
+	CacheWrite1h int `json:"cache_write_1h"`
 
-	// Priced reports whether CostPercent carries meaning. False when the model
-	// has no verified ratios, or when the cache-write TTL split is unknown and
-	// the provider charges different rates for the two TTLs.
-	Priced bool   `json:"priced"`
-	Family string `json:"family,omitempty"`
+	// Priced reports whether CostPercent carries meaning.
+	Priced bool `json:"priced"`
+	// UnpricedReason says why cost was withheld, so the report can state the
+	// real reason instead of guessing one. Empty when Priced.
+	UnpricedReason string `json:"unpriced_reason,omitempty"`
+	Family         string `json:"family,omitempty"`
 }
 
 // tokenClassShares computes the breakdown. ttlKnown says whether the TTL split
@@ -156,49 +169,63 @@ func tokenClassShares(usage *types.TokenUsage, weights tokenWeights, ttlKnown bo
 		return tokenClassBreakdown{}, false
 	}
 
+	// Subagent usage is nested, and the section above this one reports a total
+	// that recurses into it (see totalTokens). Flattening keeps the two totals
+	// in one report from disagreeing — subagent tokens were billed in these same
+	// four classes.
+	flat := flattenTokenUsageForClasses(usage)
+
 	shares := tokenClassBreakdown{
-		Input:        tokenClassShare{Tokens: usage.InputTokens},
-		CacheWrite:   tokenClassShare{Tokens: usage.CacheCreationTokens},
-		CacheRead:    tokenClassShare{Tokens: usage.CacheReadTokens},
-		Output:       tokenClassShare{Tokens: usage.OutputTokens},
-		Thinking:     usage.ThinkingTokens,
-		CacheWrite1h: usage.CacheCreation1hTokens,
+		Input:        tokenClassShare{Tokens: flat.InputTokens},
+		CacheWrite:   tokenClassShare{Tokens: flat.CacheCreationTokens},
+		CacheRead:    tokenClassShare{Tokens: flat.CacheReadTokens},
+		Output:       tokenClassShare{Tokens: flat.OutputTokens},
+		Thinking:     flat.ThinkingTokens,
+		CacheWrite1h: flat.CacheCreation1hTokens,
 		Family:       weights.Family,
 	}
-	shares.Total = usage.InputTokens + usage.CacheCreationTokens + usage.CacheReadTokens + usage.OutputTokens
+	shares.Total = flat.InputTokens + flat.CacheCreationTokens + flat.CacheReadTokens + flat.OutputTokens
 	if shares.Total <= 0 {
 		return tokenClassBreakdown{}, false
 	}
 
-	volumes := []int{usage.InputTokens, usage.CacheCreationTokens, usage.CacheReadTokens, usage.OutputTokens}
+	volumes := []int{flat.InputTokens, flat.CacheCreationTokens, flat.CacheReadTokens, flat.OutputTokens}
 	volumePercents := exactPercents(volumes)
 
 	// Cache writes are priced only when the TTL split is known, or when the
 	// provider charges one rate for both TTLs (so the split cannot change the
 	// answer). Otherwise the whole breakdown stays unpriced rather than
 	// silently assuming the cheaper TTL.
-	ttlAmbiguous := !ttlKnown && weights.CacheWrite1h != weights.CacheWrite5m
-	priced := weights.Family != "" && !ttlAmbiguous
+	// The TTL split only matters when there are cache writes to split and the
+	// provider bills the two TTLs differently.
+	ttlAmbiguous := !ttlKnown && flat.CacheCreationTokens > 0 && weights.CacheWrite1h != weights.CacheWrite5m
 
-	if priced {
-		writes5m := usage.CacheCreationTokens - usage.CacheCreation1hTokens
+	switch {
+	case weights.Family == "":
+		shares.UnpricedReason = unpricedNoModel
+	case ttlAmbiguous:
+		shares.UnpricedReason = unpricedUnknownTTL
+	default:
+		writes5m := flat.CacheCreationTokens - flat.CacheCreation1hTokens
 		if writes5m < 0 {
 			writes5m = 0
 		}
 		costs := []float64{
-			float64(usage.InputTokens) * weights.Input,
-			float64(writes5m)*weights.CacheWrite5m + float64(usage.CacheCreation1hTokens)*weights.CacheWrite1h,
-			float64(usage.CacheReadTokens) * weights.CacheRead,
-			float64(usage.OutputTokens) * weights.Output,
+			float64(flat.InputTokens) * weights.Input,
+			float64(writes5m)*weights.CacheWrite5m + float64(flat.CacheCreation1hTokens)*weights.CacheWrite1h,
+			float64(flat.CacheReadTokens) * weights.CacheRead,
+			float64(flat.OutputTokens) * weights.Output,
 		}
 		costPercents, anyCost := exactPercentsFloat(costs)
-		if anyCost {
-			shares.Priced = true
-			shares.Input.CostPercent = costPercents[0]
-			shares.CacheWrite.CostPercent = costPercents[1]
-			shares.CacheRead.CostPercent = costPercents[2]
-			shares.Output.CostPercent = costPercents[3]
+		if !anyCost {
+			shares.UnpricedReason = unpricedNoCost
+			break
 		}
+		shares.Priced = true
+		shares.Input.CostPercent = costPercents[0]
+		shares.CacheWrite.CostPercent = costPercents[1]
+		shares.CacheRead.CostPercent = costPercents[2]
+		shares.Output.CostPercent = costPercents[3]
 	}
 
 	shares.Input.VolumePercent = volumePercents[0]
@@ -206,6 +233,23 @@ func tokenClassShares(usage *types.TokenUsage, weights tokenWeights, ttlKnown bo
 	shares.CacheRead.VolumePercent = volumePercents[2]
 	shares.Output.VolumePercent = volumePercents[3]
 	return shares, true
+}
+
+// flattenTokenUsageForClasses folds nested subagent usage into one flat total
+// and clamps every field at zero. Checkpoint metadata lives on a branch anyone
+// with push access can write, and a negative count would render as a negative
+// percentage; the depth bound comes from types.AddTokenUsage.
+func flattenTokenUsageForClasses(usage *types.TokenUsage) types.TokenUsage {
+	var flat types.TokenUsage
+	for u := usage; u != nil; u = u.SubagentTokens {
+		flat.InputTokens += max(u.InputTokens, 0)
+		flat.CacheCreationTokens += max(u.CacheCreationTokens, 0)
+		flat.CacheCreation1hTokens += max(u.CacheCreation1hTokens, 0)
+		flat.CacheReadTokens += max(u.CacheReadTokens, 0)
+		flat.OutputTokens += max(u.OutputTokens, 0)
+		flat.ThinkingTokens += max(u.ThinkingTokens, 0)
+	}
+	return flat
 }
 
 // exactPercents converts counts to whole percentages summing to exactly 100,

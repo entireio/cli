@@ -236,11 +236,14 @@ func TestWriteCheckpointTokenClasses_UnpricedOmitsCostColumn(t *testing.T) {
 	writeCheckpointTokenClasses(&buf, report.Classes)
 	out := buf.String()
 
-	if strings.Contains(out, "cost") {
-		t.Errorf("unpriced breakdown must not show a cost column\n%s", out)
+	// Assert on the header row: a substring check for "cost" would pass merely
+	// because the withheld-reason sentence starts with a capital C.
+	header := strings.SplitN(out, "\n", 4)[2]
+	if strings.Contains(header, "cost") {
+		t.Errorf("unpriced breakdown must not show a cost column, header was %q\n%s", header, out)
 	}
-	if !strings.Contains(out, "volume") {
-		t.Errorf("unpriced breakdown must still show volume\n%s", out)
+	if !strings.Contains(header, "volume") {
+		t.Errorf("unpriced breakdown must still show volume, header was %q\n%s", header, out)
 	}
 	if !strings.Contains(out, "no verified price ratios") {
 		t.Errorf("unpriced breakdown must say why cost is missing\n%s", out)
@@ -255,5 +258,98 @@ func TestWriteCheckpointTokenClasses_NilRendersNothing(t *testing.T) {
 	writeCheckpointTokenClasses(&buf, nil)
 	if buf.Len() != 0 {
 		t.Errorf("nil breakdown must render nothing, got %q", buf.String())
+	}
+}
+
+// Unreadable session metadata makes the report fall back to the root summary's
+// total, which covers sessions whose models we never saw. Pricing that total
+// against the models that happened to read would apply one provider's ratios to
+// another's tokens.
+func TestCheckpointTokensReport_Classes_UnreadableMetadataIsUnpriced(t *testing.T) {
+	t.Parallel()
+
+	cpID := id.MustCheckpointID("abc123abc125")
+	report := buildCheckpointTokensReport(
+		cpID,
+		&checkpoint.CheckpointSummary{
+			CheckpointID: cpID,
+			Sessions: []checkpoint.SessionFilePaths{
+				{Metadata: "0/metadata.json"},
+				{Metadata: "1/metadata.json"},
+			},
+			TokenUsageVersion: checkpoint.TokenUsageVersionDelta,
+			TokenUsage:        &agent.TokenUsage{InputTokens: 5000, OutputTokens: 5000},
+		},
+		[]*checkpoint.Metadata{
+			{SessionID: "s1", Agent: "Claude Code", Model: "claude-sonnet-4.6",
+				TokenUsage: &agent.TokenUsage{InputTokens: 1000, OutputTokens: 100}},
+		},
+		1, // the second session's metadata failed to read
+	)
+
+	if report.Classes == nil {
+		t.Fatal("volume shares must still be reported")
+	}
+	if report.Classes.Priced {
+		t.Error("a total covering sessions whose models were never read must not be priced")
+	}
+}
+
+// Two sessions on the same model share one ratio row, so they stay priced —
+// otherwise the mixed-model guard would quietly unprice every multi-session
+// checkpoint.
+func TestCheckpointTokensReport_Classes_SameModelMultiSessionStaysPriced(t *testing.T) {
+	t.Parallel()
+
+	cpID := id.MustCheckpointID("abc123abc126")
+	report := buildCheckpointTokensReport(
+		cpID,
+		&checkpoint.CheckpointSummary{
+			CheckpointID: cpID,
+			Sessions: []checkpoint.SessionFilePaths{
+				{Metadata: "0/metadata.json"},
+				{Metadata: "1/metadata.json"},
+			},
+			TokenUsageVersion: checkpoint.TokenUsageVersionDelta,
+		},
+		[]*checkpoint.Metadata{
+			{SessionID: "s1", Agent: "Claude Code", Model: "claude-sonnet-4.6",
+				TokenUsage: &agent.TokenUsage{InputTokens: 1000, OutputTokens: 100}},
+			{SessionID: "s2", Agent: "Claude Code", Model: "claude-opus-4.6",
+				TokenUsage: &agent.TokenUsage{InputTokens: 1000, OutputTokens: 100}},
+		},
+		0,
+	)
+
+	if report.Classes == nil || !report.Classes.Priced {
+		t.Error("two sessions in one price family must stay priced")
+	}
+}
+
+// A nil element among the metadata must not be read past.
+func TestCheckpointTokenWeights_NilMetaIsUnpriced(t *testing.T) {
+	t.Parallel()
+
+	if w := checkpointTokenWeights([]*checkpoint.Metadata{nil}, 0); w.Family != "" {
+		t.Errorf("a nil session metadata must yield no weights, got %q", w.Family)
+	}
+}
+
+// The withheld reason must name the real cause, not default to "no ratios".
+func TestWriteCheckpointTokenClasses_StatesTheRealReason(t *testing.T) {
+	t.Parallel()
+
+	report := classesReportFor(t, "Claude Code", "claude-sonnet-4.6", 0,
+		&agent.TokenUsage{InputTokens: 1000, CacheCreationTokens: 2000, OutputTokens: 100})
+
+	var buf bytes.Buffer
+	writeCheckpointTokenClasses(&buf, report.Classes)
+	out := buf.String()
+
+	if strings.Contains(out, "no verified price ratios") {
+		t.Errorf("a legacy Anthropic checkpoint has ratios; the reason must be the TTL split\n%s", out)
+	}
+	if !strings.Contains(out, "TTL") {
+		t.Errorf("expected the TTL reason\n%s", out)
 	}
 }
