@@ -119,6 +119,16 @@ linters:
         - pattern: '^.*\.(Print|Println|Printf)$'
           msg: "cobra's Print* writes to OutOrStderr (stderr in production); use fmt.Fprint*(cmd.OutOrStdout(), ...)"
           pkg: 'github\.com/spf13/cobra'
+        # forbidigo matches identifiers/selectors, not call arguments, so it
+        # cannot single out exec.Command(..., "git", ...) from other exec.Command
+        # uses (spawning the test binary, "sh", etc). It bans the whole
+        # exec.Command/CommandContext selector instead, scoped down to just the
+        # test files that should exclusively shell to git through the isolated
+        # helper (testutil.RunGit / gitenv.Run) via the path-except exclusion
+        # below - see the "git isolation" exclusion rule.
+        - pattern: '^exec\.(Command|CommandContext)$'
+          msg: "raw exec.Command/CommandContext in this test file reads the developer's global gitconfig - shell out via testutil.RunGit(t, dir, args...) (or gitenv.Run) so GitIsolatedEnv() applies; see #2202"
+          pkg: '^os/exec$'
     govet:
       enable-all: true
       disable:
@@ -142,7 +152,29 @@ linters:
         linters:
           - gosec
           - wrapcheck
+      # forbidigo's other rules (os.Getwd, go-git Reset/Checkout/Worktree.Status,
+      # cobra Print*) are about production code; test files legitimately use
+      # some of these APIs directly, so those specific messages stay exempt
+      # here exactly as before. The git-isolation rule added above is NOT
+      # listed here on purpose - it must keep firing in the handful of test
+      # files it targets (see the path-except rule below), or the whole point
+      # of adding it is defeated.
+      - path: _test\.go
+        linters:
           - forbidigo
+        text: "os\\.Getwd\\(\\) breaks when running from subdirectories|go-git Reset deletes \\.gitignored dirs|go-git Checkout deletes \\.gitignored dirs|go-git Worktree\\.Status\\(\\) walks the whole worktree|cobra's Print\\* writes to OutOrStderr"
+      # The git-isolation exec.Command/CommandContext ban (see forbidigo.forbid
+      # above) is scoped to just the test files issue #2202 covers. Enabling it
+      # repo-wide would also flag every other pre-existing direct git shell-out
+      # in *_test.go (a much larger, separate cleanup) and the handful of
+      # legitimate non-git exec.Command calls (spawning the built binary, `sh`
+      # for a fake-failure fixture) inside these same files, which carry their
+      # own //nolint:forbidigo instead. path-except keeps the issue suppressed
+      # everywhere except inside this file list, i.e. it only fires there.
+      - linters:
+          - forbidigo
+        text: "raw exec\\.Command/CommandContext in this test file reads the developer's global gitconfig"
+        path-except: '(^|/)cmd/entire/cli/(review/scope_test\.go|gitrepo/gitstatus_guard_test\.go|strategy/commit_hook_perf_test\.go|review_context_test\.go|integration_test/resume_test\.go|checkpoint/redact_cache_scope_test\.go|checkpoint/remote/git_test\.go)$'
       - path: ^e2e/
         linters:
           - errcheck
