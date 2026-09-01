@@ -43,6 +43,7 @@ func TestLockFiles_ListedAndDeletedByCleanAll(t *testing.T) {
 		filepath.Join("entire-shadow-locks", "entire_deadbeef.lock"),
 		filepath.Join("entire-persistent-ref-locks", "refs_heads_entire_checkpoints_v1.lock"),
 	}, result.LockFiles)
+	require.Empty(t, result.SkippedLockFiles)
 	require.Empty(t, result.FailedLockFiles)
 	require.NoFileExists(t, shadowLock)
 	require.NoFileExists(t, persistentLock)

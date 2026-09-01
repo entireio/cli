@@ -294,6 +294,23 @@ func runCleanAll(ctx context.Context, cmd *cobra.Command, force, dryRun bool) er
 		unscanned = append(unscanned, "stray agent temp files")
 	}
 
+	if !force && !dryRun {
+		activeSessions, err := activeSessionsInRepository(ctx)
+		if err != nil {
+			fmt.Fprintf(cmd.ErrOrStderr(), "Warning: could not check for active sessions: %v\n", err)
+			fmt.Fprintln(cmd.ErrOrStderr(), "Use --force to override.")
+			return nil
+		}
+		if len(activeSessions) > 0 {
+			fmt.Fprintln(cmd.ErrOrStderr(), "Active sessions detected:")
+			for _, s := range activeSessions {
+				fmt.Fprintf(cmd.ErrOrStderr(), "  %s (phase: %s)\n", s.SessionID, s.Phase)
+			}
+			fmt.Fprintln(cmd.ErrOrStderr(), "Use --force to override or wait for sessions to finish.")
+			return nil
+		}
+	}
+
 	return runCleanAllWithItems(ctx, cmd, force, dryRun, items, tempFiles, orphanTemps, unscanned)
 }
 
@@ -413,6 +430,7 @@ func runCleanAllWithItems(ctx context.Context, cmd *cobra.Command, force, dryRun
 
 	// Report results
 	totalDeleted := len(result.ShadowBranches) + len(result.SessionStates) + len(result.Checkpoints) + len(result.RedactCaches) + len(result.LockFiles) + len(deletedTempFiles)
+	totalSkipped := len(result.SkippedLockFiles)
 	totalFailed := len(result.FailedBranches) + len(result.FailedStates) + len(result.FailedCheckpoints) + len(result.FailedRedactCache) + len(result.FailedLockFiles) + len(failedTempFiles)
 
 	if totalDeleted > 0 {
@@ -428,6 +446,11 @@ func runCleanAllWithItems(ctx context.Context, cmd *cobra.Command, force, dryRun
 		printResultSection(w, "Stray agent temp files", deletedOrphans)
 	}
 	printUnscannedNote(w, unscanned)
+
+	if totalSkipped > 0 {
+		fmt.Fprintf(w, "\nSkipped %d active %s:\n", totalSkipped, itemWord(totalSkipped))
+		printResultSection(w, "Lock files", result.SkippedLockFiles)
+	}
 
 	if totalFailed > 0 {
 		fmt.Fprintf(errW, "\nFailed to delete %d %s:\n", totalFailed, itemWord(totalFailed))
@@ -653,6 +676,22 @@ func activeSessionsOnCurrentHead(ctx context.Context) ([]*session.State, error) 
 		if state.BaseCommit != currentHead {
 			continue
 		}
+		if state.Phase.IsActive() {
+			active = append(active, state)
+		}
+	}
+
+	return active, nil
+}
+
+func activeSessionsInRepository(ctx context.Context) ([]*session.State, error) {
+	states, err := strategy.ListSessionStates(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to list session states: %w", err)
+	}
+
+	var active []*session.State
+	for _, state := range states {
 		if state.Phase.IsActive() {
 			active = append(active, state)
 		}
