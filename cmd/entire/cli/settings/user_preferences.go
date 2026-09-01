@@ -12,6 +12,7 @@ import (
 	"sync"
 
 	"github.com/entireio/cli/cmd/entire/cli/logging"
+	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/settings/repopolicy"
 )
 
@@ -95,6 +96,23 @@ func loadUserOverlay(ctx context.Context) userOverlay {
 		}
 	}
 	return overlay
+}
+
+// UserPreferenceRejections reports the user-settings preference blocks (and
+// this worktree's repos entries) that Load would drop, computed from the user
+// file ALONE. Surfaces that must show these even when the repository's own
+// settings cannot be loaded — status's not-set-up, globally-tracked, and
+// excluded branches — use this instead of a full Load, so a broken
+// .entire/settings.json or clone-preferences file can never hide a warning
+// about the machine-wide user file.
+func UserPreferenceRejections(ctx context.Context) []string {
+	overlay := loadUserOverlay(ctx)
+	if len(overlay.repos) > 0 {
+		if root, err := paths.WorktreeRoot(ctx); err == nil {
+			_ = overlay.repoPreferences(ctx, root)
+		}
+	}
+	return overlay.rejections
 }
 
 // reject records a dropped block for the consumers that surface it — `entire

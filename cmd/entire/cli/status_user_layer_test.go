@@ -47,6 +47,30 @@ func TestStatus_UserLayerRejectionShownInEveryBranch(t *testing.T) {
 		}
 	})
 
+	// The rejection must not depend on a full settings load succeeding: a
+	// broken repo-side file (here, malformed clone preferences in the git
+	// common dir) fails LoadEntireSettings, but the warning is about the
+	// machine-wide user file and must still appear.
+	t.Run("not set up with broken clone preferences", func(t *testing.T) {
+		dir := setupTestDir(t)
+		testutil.InitRepo(t, dir)
+		if err := os.MkdirAll(filepath.Join(dir, ".git", "entire"), 0o750); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, ".git", "entire", "preferences.json"), []byte("{not json"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		writeUserSettingsFileForStatus(t, `{"preferences":{"unknown_key":true}}`)
+
+		var out bytes.Buffer
+		if err := runStatus(context.Background(), &out, false, false); err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(out.String(), "user settings:") || !strings.Contains(out.String(), "unknown_key") {
+			t.Fatalf("a broken repo-side file must not hide the user-file warning, got:\n%s", out.String())
+		}
+	})
+
 	t.Run("globally tracked", func(t *testing.T) {
 		dir := setupTestDir(t)
 		testutil.InitRepo(t, dir)

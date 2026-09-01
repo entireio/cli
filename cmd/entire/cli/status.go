@@ -151,23 +151,23 @@ func runStatus(ctx context.Context, w io.Writer, detailed, jsonOutput bool) erro
 
 // writeUserLayerRejections prints the user-settings preference blocks that
 // Load dropped. The user file is machine-wide and its preference blocks apply
-// regardless of repo enablement, so EVERY branch of runStatus shows this —
-// including the globally-tracked, not-set-up, and excluded branches, which
-// load no repo settings for any other reason (nil s; best-effort there — a
-// load error stays silent, since those branches rendered without settings
-// before and must keep doing so).
+// regardless of repo enablement, so EVERY branch of runStatus shows this.
+// Callers that already hold loaded settings pass them; the globally-tracked,
+// not-set-up, and excluded branches pass nil and the rejections are computed
+// from the user file ALONE (settings.UserPreferenceRejections) — never
+// through a full settings load, whose failure on a broken repo-side file
+// would otherwise silently hide warnings about an unrelated file.
 func writeUserLayerRejections(ctx context.Context, w io.Writer, s *EntireSettings) {
-	if s == nil {
-		loaded, err := LoadEntireSettings(ctx)
-		if err != nil {
-			return
-		}
-		s = loaded
+	var rejections []string
+	if s != nil {
+		rejections = s.UserLayerRejections()
+	} else {
+		rejections = settings.UserPreferenceRejections(ctx)
 	}
 	// A dropped user-settings block is otherwise invisible in the short view:
 	// the file is machine-wide, so unlike a repo settings problem there is no
 	// second surface (a teammate, a PR diff) that would ever catch it.
-	for _, reason := range s.UserLayerRejections() {
+	for _, reason := range rejections {
 		fmt.Fprintf(w, "  user settings: %s ignored (%s) · run `entire status --detailed`\n", reason, settings.UserSettingsPath())
 	}
 }
