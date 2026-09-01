@@ -137,6 +137,12 @@ func runStatus(ctx context.Context, w io.Writer, detailed, jsonOutput bool) erro
 
 	fmt.Fprintln(w, formatSettingsStatusShort(ctx, s, sty))
 	renderGlobalTrackingLine(w, sty, info)
+	// A dropped user-settings block is otherwise invisible in the short view:
+	// the file is machine-wide, so unlike a repo settings problem there is no
+	// second surface (a teammate, a PR diff) that would ever catch it.
+	for _, reason := range s.UserLayerRejections() {
+		fmt.Fprintf(w, "  user settings: %s ignored (%s) · run `entire status --detailed`\n", reason, settings.UserSettingsPath())
+	}
 	if s.Enabled {
 		writeActiveSessions(ctx, w, sty)
 	}
