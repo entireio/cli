@@ -22,6 +22,21 @@ type tokenWeights struct {
 	Output       float64
 }
 
+// Ratio-row identifiers. A family is a set of models that share one price
+// shape; the string is surfaced in --json so readers can see which row priced
+// a checkpoint.
+const (
+	priceFamilyAnthropic       = "anthropic"
+	priceFamilyOpenAI8x        = "openai-8x"
+	priceFamilyOpenAI6x        = "openai-6x"
+	priceFamilyOpenAI56Sol     = "openai-5.6-sol"
+	priceFamilyOpenAI56TerraLu = "openai-5.6-terra-luna"
+	priceFamilyGemini25Flash   = "gemini-2.5-flash"
+	priceFamilyGemini25Pro     = "gemini-2.5-pro"
+	priceFamilyGemini35Flash   = "gemini-3.5-flash"
+	priceFamilyGemini36Flash   = "gemini-3.6-flash"
+)
+
 // Price ratios per model family, verified 2026-08-28 against the providers'
 // public pricing pages. Re-verify quarterly and bump the date.
 //
@@ -41,45 +56,45 @@ type tokenWeights struct {
 //     from per-call data can refine that later.
 //   - Anthropic fast mode and data-residency uplifts are not detectable from a
 //     transcript and are not modelled.
-var tokenFamilyWeights = map[string]tokenWeights{
-	"anthropic":             {Family: "anthropic", Input: 1, CacheWrite5m: 1.25, CacheWrite1h: 2, CacheRead: 0.1, Output: 5},
-	"openai-8x":             {Family: "openai-8x", Input: 1, CacheRead: 0.1, Output: 8},
-	"openai-6x":             {Family: "openai-6x", Input: 1, CacheRead: 0.1, Output: 6},
-	"openai-5.6-sol":        {Family: "openai-5.6-sol", Input: 1, CacheWrite5m: 1.25, CacheWrite1h: 1.25, CacheRead: 0.1, Output: 5},
-	"openai-5.6-terra-luna": {Family: "openai-5.6-terra-luna", Input: 1, CacheWrite5m: 1.25, CacheWrite1h: 1.25, CacheRead: 0.1, Output: 6},
-	"gemini-2.5-flash":      {Family: "gemini-2.5-flash", Input: 1, CacheRead: 0.1, Output: 8.33},
-	"gemini-2.5-pro":        {Family: "gemini-2.5-pro", Input: 1, CacheRead: 0.1, Output: 8},
-	"gemini-3.5-flash":      {Family: "gemini-3.5-flash", Input: 1, CacheRead: 0.1, Output: 6},
-	"gemini-3.6-flash":      {Family: "gemini-3.6-flash", Input: 1, CacheRead: 0.1, Output: 5},
+var priceFamilyWeights = map[string]tokenWeights{
+	priceFamilyAnthropic:       {Family: priceFamilyAnthropic, Input: 1, CacheWrite5m: 1.25, CacheWrite1h: 2, CacheRead: 0.1, Output: 5},
+	priceFamilyOpenAI8x:        {Family: priceFamilyOpenAI8x, Input: 1, CacheRead: 0.1, Output: 8},
+	priceFamilyOpenAI6x:        {Family: priceFamilyOpenAI6x, Input: 1, CacheRead: 0.1, Output: 6},
+	priceFamilyOpenAI56Sol:     {Family: priceFamilyOpenAI56Sol, Input: 1, CacheWrite5m: 1.25, CacheWrite1h: 1.25, CacheRead: 0.1, Output: 5},
+	priceFamilyOpenAI56TerraLu: {Family: priceFamilyOpenAI56TerraLu, Input: 1, CacheWrite5m: 1.25, CacheWrite1h: 1.25, CacheRead: 0.1, Output: 6},
+	priceFamilyGemini25Flash:   {Family: priceFamilyGemini25Flash, Input: 1, CacheRead: 0.1, Output: 8.33},
+	priceFamilyGemini25Pro:     {Family: priceFamilyGemini25Pro, Input: 1, CacheRead: 0.1, Output: 8},
+	priceFamilyGemini35Flash:   {Family: priceFamilyGemini35Flash, Input: 1, CacheRead: 0.1, Output: 6},
+	priceFamilyGemini36Flash:   {Family: priceFamilyGemini36Flash, Input: 1, CacheRead: 0.1, Output: 5},
 }
 
-// tokenFamilyForModel maps a recorded model name to a verified ratio row.
+// priceFamilyForModel maps a recorded model name to a verified ratio row.
 // An unrecognised model returns ok=false: callers report volume only rather
 // than pricing it against a guessed row.
-func tokenFamilyForModel(model string) (string, bool) {
+func priceFamilyForModel(model string) (string, bool) {
 	m := strings.ToLower(strings.TrimSpace(model))
 	switch {
 	case m == "":
 		return "", false
 	case strings.HasPrefix(m, "claude-"):
-		return "anthropic", true
+		return priceFamilyAnthropic, true
 	case strings.HasPrefix(m, "gpt-5.6-sol"):
-		return "openai-5.6-sol", true
+		return priceFamilyOpenAI56Sol, true
 	case strings.HasPrefix(m, "gpt-5.6-terra"), strings.HasPrefix(m, "gpt-5.6-luna"):
-		return "openai-5.6-terra-luna", true
+		return priceFamilyOpenAI56TerraLu, true
 	case strings.HasPrefix(m, "gpt-5.4"), strings.HasPrefix(m, "gpt-5.5"):
-		return "openai-6x", true
+		return priceFamilyOpenAI6x, true
 	case m == "gpt-5", strings.HasPrefix(m, "gpt-5-"), strings.HasPrefix(m, "gpt-5.1"),
 		strings.HasPrefix(m, "gpt-5.2"), strings.HasPrefix(m, "gpt-5.3-codex"):
-		return "openai-8x", true
+		return priceFamilyOpenAI8x, true
 	case strings.HasPrefix(m, "gemini-2.5-flash"):
-		return "gemini-2.5-flash", true
+		return priceFamilyGemini25Flash, true
 	case strings.HasPrefix(m, "gemini-2.5-pro"):
-		return "gemini-2.5-pro", true
+		return priceFamilyGemini25Pro, true
 	case strings.HasPrefix(m, "gemini-3.5-flash"):
-		return "gemini-3.5-flash", true
+		return priceFamilyGemini35Flash, true
 	case strings.HasPrefix(m, "gemini-3.6-flash"), strings.HasPrefix(m, "gemini-3.7-flash"):
-		return "gemini-3.6-flash", true
+		return priceFamilyGemini36Flash, true
 	default:
 		return "", false
 	}
@@ -88,11 +103,11 @@ func tokenFamilyForModel(model string) (string, bool) {
 // tokenWeightsForModel returns the base-tier ratios for model. ok=false means
 // the model has no verified row and the report must show volume only.
 func tokenWeightsForModel(model string) (tokenWeights, bool) {
-	family, ok := tokenFamilyForModel(model)
+	family, ok := priceFamilyForModel(model)
 	if !ok {
 		return tokenWeights{}, false
 	}
-	return tokenFamilyWeights[family], true
+	return priceFamilyWeights[family], true
 }
 
 // tokenClassShare is one billing class's contribution to a checkpoint.

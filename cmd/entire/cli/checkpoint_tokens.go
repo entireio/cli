@@ -420,13 +420,6 @@ func saturatingIntAdd(a, b int) int {
 	return a + b
 }
 
-func tokenUsageSubagents(usage *agent.TokenUsage) *agent.TokenUsage {
-	if usage == nil {
-		return nil
-	}
-	return usage.SubagentTokens
-}
-
 func tokenPluralSuffix(count int) string {
 	if count == 1 {
 		return ""
