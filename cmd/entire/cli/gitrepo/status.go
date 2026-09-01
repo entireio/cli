@@ -90,9 +90,33 @@ func StatusWithBudget(ctx context.Context, repo *git.Repository) (git.Status, er
 	})
 }
 
+// StatusWithIsolatedBudget is StatusWithBudget for a walk over a DIFFERENT
+// worktree than the one the hook is capturing (cross-repo session adoption
+// reads the target repo's status). It honors an earlier breach — the process
+// is already past its budget — but a breach or cancellation of THIS walk does
+// not arm the process-wide latch: the latch exists because every walk covers
+// the same worktree, and a slow foreign repo must not put the launching repo's
+// own capture into degraded mode. The caller supplies the budget, which should
+// be small: the walk may run under a lock other hooks in the target wait on.
+func StatusWithIsolatedBudget(ctx context.Context, repo *git.Repository, budget time.Duration) (git.Status, error) {
+	worktree, err := repo.Worktree()
+	if err != nil {
+		return nil, err //nolint:wrapcheck // callers add their own context
+	}
+	return statusWithBudgetLatch(ctx, worktree.Filesystem().Root(), budget, false, func() (git.Status, error) {
+		return Status(ctx, repo)
+	})
+}
+
 // statusWithBudget is the testable core of StatusWithBudget: root and budget
 // are parameters and walk stands in for the real status call.
 func statusWithBudget(ctx context.Context, root string, budget time.Duration, walk func() (git.Status, error)) (git.Status, error) {
+	return statusWithBudgetLatch(ctx, root, budget, true, walk)
+}
+
+// statusWithBudgetLatch is statusWithBudget with the latch arming explicit:
+// armLatch=false is the isolated (foreign-worktree) variant.
+func statusWithBudgetLatch(ctx context.Context, root string, budget time.Duration, armLatch bool, walk func() (git.Status, error)) (git.Status, error) {
 	if statusBudgetBreached.Load() {
 		return nil, fmt.Errorf("status walk of %s skipped: an earlier walk in this process breached its budget: %w",
 			root, ErrStatusBudgetExceeded)
@@ -128,11 +152,15 @@ func statusWithBudget(ctx context.Context, root string, budget time.Duration, wa
 		// errors.Is degrade check misses, the hook fails hard, and a later
 		// call in this process could re-enter the abandoned walk. ctx.Err()
 		// stays in the chain so cancellation remains distinguishable.
-		statusBudgetBreached.Store(true)
+		if armLatch {
+			statusBudgetBreached.Store(true)
+		}
 		return nil, fmt.Errorf("worktree status walk of %s abandoned on cancellation: %w: %w",
 			root, ctx.Err(), ErrStatusBudgetExceeded)
 	case <-timer.C:
-		statusBudgetBreached.Store(true)
+		if armLatch {
+			statusBudgetBreached.Store(true)
+		}
 		elapsed := time.Since(start).Round(time.Millisecond)
 		logging.Warn(logging.WithComponent(ctx, "gitrepo"),
 			"worktree status walk exceeded budget; capture degraded: untracked/new file detection skipped this turn",

@@ -22,6 +22,7 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
+	"github.com/entireio/cli/cmd/entire/cli/binding"
 	"github.com/entireio/cli/cmd/entire/cli/entiredir"
 	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
@@ -399,9 +400,22 @@ func handleLifecycleToolUse(ctx context.Context, ag agent.Agent, event *agent.Ev
 		return nil
 	}
 
-	modified := normalizeToolUsePaths(event.ModifiedFiles, event.CWD, repoRoot)
-	added := normalizeToolUsePaths(event.NewFiles, event.CWD, repoRoot)
-	deleted := normalizeToolUsePaths(event.DeletedFiles, event.CWD, repoRoot)
+	modified, foreignModified := normalizeToolUsePaths(event.ModifiedFiles, event.CWD, repoRoot)
+	added, foreignAdded := normalizeToolUsePaths(event.NewFiles, event.CWD, repoRoot)
+	deleted, foreignDeleted := normalizeToolUsePaths(event.DeletedFiles, event.CWD, repoRoot)
+
+	// ToolUse and TurnEnd run as separate hook processes: foreign paths seen
+	// here never reach the TurnEnd tap, so record them from this process. The
+	// kept lists are passed too — a kept path inside an unregistered repo
+	// NESTED under repoRoot (home-as-repo dotfiles setups) is cross-repo
+	// evidence the foreign clamp can never see; the tap only reads them, so
+	// the capture inputs below stay untouched.
+	foreign := append(append(foreignModified, foreignAdded...), foreignDeleted...)
+	recordForeignEvidence(ctx, event.SessionID, binding.SessionMeta{
+		AgentType:      string(ag.Type()),
+		TranscriptPath: event.SessionRef,
+		LaunchRoot:     repoRoot,
+	}, repoRoot, foreign, modified, added, deleted)
 
 	if len(modified) == 0 && len(added) == 0 && len(deleted) == 0 {
 		return nil
@@ -425,10 +439,11 @@ func handleLifecycleToolUse(ctx context.Context, ag agent.Agent, event *agent.Ev
 
 // normalizeToolUsePaths converts hook-payload paths to repo-root-relative form.
 // Codex apply_patch envelopes carry cwd-relative paths, so we join them against
-// eventCWD before FilterAndNormalizePaths rewrites against repoRoot.
-func normalizeToolUsePaths(files []string, eventCWD, repoRoot string) []string {
+// eventCWD before FilterAndNormalizePaths rewrites against repoRoot. foreign
+// carries the absolute out-of-repo paths the clamp dropped (binding evidence).
+func normalizeToolUsePaths(files []string, eventCWD, repoRoot string) (kept, foreign []string) {
 	if len(files) == 0 {
-		return nil
+		return nil, nil
 	}
 	resolved := make([]string, 0, len(files))
 	for _, f := range files {
@@ -441,7 +456,7 @@ func normalizeToolUsePaths(files []string, eventCWD, repoRoot string) []string {
 		}
 		resolved = append(resolved, filepath.Join(eventCWD, f))
 	}
-	return FilterAndNormalizePaths(resolved, repoRoot)
+	return FilterAndNormalizePathsCollectingForeign(resolved, repoRoot)
 }
 
 // handleLifecycleTurnStart handles turn start: captures pre-prompt state,
@@ -980,17 +995,109 @@ func handleLifecycleTurnEnd(ctx context.Context, ag agent.Agent, event *agent.Ev
 
 	// Filter and normalize all paths
 	_, normalizeSpan := perf.Start(ctx, "filter_and_normalize_paths")
-	relModifiedFiles := FilterAndNormalizePaths(modifiedFiles, repoRoot)
+	relModifiedFiles, foreignModifiedFiles := FilterAndNormalizePathsCollectingForeign(modifiedFiles, repoRoot)
+	// Transcript-extracted paths landing outside this repo are cross-repo
+	// binding evidence. Only this clamp taps: the DetectFileChanges clamps
+	// below operate on git-status output, in-repo by construction. The KEPT
+	// list is passed too — a kept path inside an unregistered repo nested
+	// under repoRoot is evidence the foreign clamp cannot see (home-as-repo
+	// dotfiles setups make everything path-wise "inside"); the tap only reads
+	// it, so relModifiedFiles feeds capture below byte-identical.
+	if !bindingReplayActive() {
+		recordForeignEvidence(ctx, sessionID, binding.SessionMeta{
+			AgentType:      string(ag.Type()),
+			TranscriptPath: event.SessionRef,
+			LaunchRoot:     repoRoot,
+		}, repoRoot, foreignModifiedFiles, relModifiedFiles)
+	}
+	// A replay child never gets a pre-prompt baseline (only TurnEnd is
+	// replayed), so it would see the target repo's whole working tree as
+	// "changed": the user's own uncommitted edits and deletions there are not
+	// the session's. The replica carries the tracked-dirty baseline as of the
+	// LAST replayed turn (seeded at adoption, rewritten below after every
+	// turn), so tracked changes are credited to this turn only when they are
+	// not in it — a deletion the agent made is kept (transcripts never name
+	// deletions, so evidence-narrowing would drop every deletion), the user's
+	// pending edit is not. Kinds are kept apart: a file dirty at the baseline
+	// and deleted since IS a deletion. New files follow the untracked rule
+	// below: only evidenced ones count.
+	replayWithoutBaseline := bindingReplayActive() && preState == nil
+	transcriptEvidenced := relModifiedFiles
 	var relNewFiles, relDeletedFiles []string
+	var statusModified []string
 	if changes != nil {
 		relNewFiles = FilterAndNormalizePaths(changes.New, repoRoot)
 		relDeletedFiles = FilterAndNormalizePaths(changes.Deleted, repoRoot)
+		statusModified = FilterAndNormalizePaths(changes.Modified, repoRoot)
+		if replayWithoutBaseline {
+			dirtyAtStart, deletedAtStart := replicaTrackedBaseline(ctx, sessionID)
+			relDeletedFiles = excludeFiles(relDeletedFiles, deletedAtStart)
+			statusModified = excludeFiles(statusModified, dirtyAtStart)
+		}
 
 		// Merge git-status modified files as a fallback for transcript parsing.
 		// Transcript parsing is the primary source for modified files, but it can miss
 		// files if the agent uses an unrecognized tool or the transcript format changes.
 		// Git status catches any tracked file with working-tree changes.
-		relModifiedFiles = mergeUnique(relModifiedFiles, FilterAndNormalizePaths(changes.Modified, repoRoot))
+		relModifiedFiles = mergeUnique(relModifiedFiles, statusModified)
+	}
+	if replayWithoutBaseline {
+		relNewFiles = filterBindingReplayNewFiles(relNewFiles, transcriptEvidenced)
+		newSet := make(map[string]struct{}, len(relNewFiles))
+		for _, file := range relNewFiles {
+			newSet[file] = struct{}{}
+		}
+		// Rewrite the baselines to the tree as this turn leaves it, MINUS the
+		// paths this turn is credited with. Files created this turn leave the
+		// untracked baseline; the tracked baselines become the post-turn
+		// dirty/deleted sets without the credited files. Keeping a credited
+		// file out of the baseline is what lets a later change to it that no
+		// transcript names (a sed in Bash, a formatter) still reach the
+		// checkpoint through the git-status fallback — the baseline stores
+		// paths, so "still dirty from the user" and "dirty again from the
+		// agent" would otherwise be indistinguishable and the second edit's
+		// content would never be written to the shadow tree. It also means a
+		// turn whose SaveStep is skipped or fails re-credits the same files
+		// next turn instead of losing them. The cost — a touched file that
+		// nobody changes again is re-listed on every later replayed turn
+		// while it stays dirty — is the launching repo's normal behavior (it
+		// subtracts no dirty baseline at all). Sorted: git status is a map,
+		// so the unchanged-set check and the persisted JSON need a canonical
+		// order (targetWorktreeBaseline sorts its seeds the same way).
+		var nextDirty, nextDeleted []string
+		if changes != nil {
+			credited := slices.Concat(relModifiedFiles, relDeletedFiles, relNewFiles)
+			nextDirty = excludeFiles(FilterAndNormalizePaths(changes.Modified, repoRoot), credited)
+			nextDeleted = excludeFiles(FilterAndNormalizePaths(changes.Deleted, repoRoot), credited)
+			slices.Sort(nextDirty)
+			slices.Sort(nextDeleted)
+		}
+		mutErr := strategy.MutateSessionState(ctx, sessionID, func(state *strategy.SessionState) error {
+			untracked := slices.DeleteFunc(slices.Clone(state.UntrackedFilesAtStart), func(file string) bool {
+				_, createdThisTurn := newSet[file]
+				return createdThisTurn
+			})
+			if changes == nil {
+				if len(untracked) == len(state.UntrackedFilesAtStart) {
+					return strategy.ErrMutationSkip
+				}
+				state.UntrackedFilesAtStart = untracked
+				return nil
+			}
+			if len(untracked) == len(state.UntrackedFilesAtStart) &&
+				slices.Equal(state.DirtyTrackedFilesAtStart, nextDirty) &&
+				slices.Equal(state.DeletedTrackedFilesAtStart, nextDeleted) {
+				return strategy.ErrMutationSkip
+			}
+			state.UntrackedFilesAtStart = untracked
+			state.DirtyTrackedFilesAtStart = append([]string(nil), nextDirty...)
+			state.DeletedTrackedFilesAtStart = append([]string(nil), nextDeleted...)
+			return nil
+		})
+		if mutErr != nil && !errors.Is(mutErr, strategy.ErrStateNotFound) {
+			logging.Warn(logCtx, "failed to refresh replayed turn baselines",
+				slog.String("error", mutErr.Error()))
+		}
 	}
 
 	// Filter transcript-extracted files to exclude files already committed to HEAD.
@@ -1002,6 +1109,13 @@ func handleLifecycleTurnEnd(ctx context.Context, ag agent.Agent, event *agent.Ev
 
 	// Check if there are any changes
 	totalChanges := len(relModifiedFiles) + len(relNewFiles) + len(relDeletedFiles)
+	currentCommonDir := ""
+	if currentRepo, ok := binding.ResolveRepoForPath(ctx, filepath.Join(repoRoot, ".git")); ok {
+		currentCommonDir = currentRepo.CommonDir
+	}
+	if !bindingReplayActive() {
+		selectBindingTurnPrimary(ctx, bindingTurnCollectorFromContext(ctx), repoRoot, modifiedFiles, totalChanges > 0)
+	}
 	if totalChanges == 0 {
 		logging.Info(logCtx, "no files modified during session, skipping checkpoint")
 		recordCaptureDegraded(ctx, sessionID, captureDegraded)
@@ -1061,22 +1175,28 @@ func handleLifecycleTurnEnd(ctx context.Context, ag agent.Agent, event *agent.Ev
 	if tokenUsage == nil {
 		tokenUsage = agent.CalculateTokenUsage(ctx, ag, transcriptData, transcriptLinesAtStart, subagentsDir)
 	}
+	// A turn that touched several repos puts its tokens on ONE repo's
+	// checkpoint (the token-primary); the others still fold them into the
+	// session-wide total their `entire status` reports, since the transcript
+	// — and therefore the spend — is shared.
+	tokensAttributedElsewhere := !bindingTurnKeepsTokenUsage(ctx, currentCommonDir)
 
 	// Build fully-populated step context and delegate to strategy
 	stepCtx := strategy.StepContext{
-		SessionID:                sessionID,
-		ModifiedFiles:            relModifiedFiles,
-		NewFiles:                 relNewFiles,
-		DeletedFiles:             relDeletedFiles,
-		MetadataDir:              sessionDir,
-		CommitMessage:            commitMessage,
-		TranscriptPath:           transcriptRef,
-		AuthorName:               author.Name,
-		AuthorEmail:              author.Email,
-		AgentType:                agentType,
-		StepTranscriptIdentifier: transcriptIdentifierAtStart,
-		StepTranscriptStart:      transcriptLinesAtStart,
-		TokenUsage:               tokenUsage,
+		TokensAttributedElsewhere: tokensAttributedElsewhere,
+		SessionID:                 sessionID,
+		ModifiedFiles:             relModifiedFiles,
+		NewFiles:                  relNewFiles,
+		DeletedFiles:              relDeletedFiles,
+		MetadataDir:               sessionDir,
+		CommitMessage:             commitMessage,
+		TranscriptPath:            transcriptRef,
+		AuthorName:                author.Name,
+		AuthorEmail:               author.Email,
+		AgentType:                 agentType,
+		StepTranscriptIdentifier:  transcriptIdentifierAtStart,
+		StepTranscriptStart:       transcriptLinesAtStart,
+		TokenUsage:                tokenUsage,
 	}
 
 	// finishTurn is the shared turn-end tail, run whether the save succeeded

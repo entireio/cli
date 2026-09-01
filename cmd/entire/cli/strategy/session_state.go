@@ -783,7 +783,10 @@ func WithSessionStateLocks(ctx context.Context, sessionID string, commonDirs []s
 			releaseAll()
 			return fmt.Errorf("session state lock canceled: %w", err)
 		}
-		release, err := flock.AcquireIn(lock.root, lock.name)
+		// AcquireContextIn: rooted (the lock name cannot escape the state
+		// dir) AND bounded by the caller's ctx — cross-repo adoption relies
+		// on the acquire honoring its 2s deadline.
+		release, err := flock.AcquireContextIn(ctx, lock.root, lock.name)
 		if err != nil {
 			releaseAll()
 			return fmt.Errorf("acquire session state lock: %w", err)

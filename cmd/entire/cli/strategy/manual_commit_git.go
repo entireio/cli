@@ -121,8 +121,32 @@ func (s *ManualCommitStrategy) SaveStep(ctx context.Context, step StepContext) e
 			state.TranscriptIdentifierAtStart = step.StepTranscriptIdentifier
 		}
 		if step.TokenUsage != nil {
+			var subagentBefore *agent.TokenUsage
+			if state.TokenUsage != nil {
+				subagentBefore = state.TokenUsage.SubagentTokens
+			}
 			state.TokenUsage = accumulateTokenUsage(state.TokenUsage, step.TokenUsage)
-			state.CheckpointTokenUsage = accumulateTokenUsage(state.CheckpointTokenUsage, step.TokenUsage)
+			if step.TokensAttributedElsewhere {
+				// This turn's share belongs on another repo's checkpoint: the
+				// main-agent delta is simply not added to the pending
+				// checkpoint, and the growth of the cumulative subagent
+				// snapshot during this turn is folded into the baseline so the
+				// rescope below — run on a later primary turn in this window —
+				// cannot re-absorb it. The session-wide total above keeps it.
+				// Only a step that carried a snapshot can have grown the
+				// cumulative; a nil snapshot leaves it unchanged and would only
+				// promote a nil baseline to a persisted zero struct. Growth
+				// first observed on an elsewhere turn (no earlier snapshot in
+				// this window) is folded in whole — inherent to snapshot
+				// accounting, not attributable per turn after the fact.
+				if step.TokenUsage.SubagentTokens != nil {
+					if grown := types.SubtractTokenUsage(state.TokenUsage.SubagentTokens, subagentBefore); grown != nil {
+						state.SubagentTokensBaseline = types.AddTokenUsage(state.SubagentTokensBaseline, grown)
+					}
+				}
+			} else {
+				state.CheckpointTokenUsage = accumulateTokenUsage(state.CheckpointTokenUsage, step.TokenUsage)
+			}
 			// step.TokenUsage.SubagentTokens is a cumulative-since-session-start
 			// snapshot (agent IDs are discovered from the full transcript and each
 			// subagent's own transcript is re-read from its start on every call —
@@ -147,7 +171,7 @@ func (s *ManualCommitStrategy) SaveStep(ctx context.Context, step StepContext) e
 			// that would double-subtract and (via clampSubtract) shrink or zero a
 			// real subagent total. Recomputing from the session-wide cumulative
 			// is idempotent regardless of whether this step carried a snapshot.
-			if state.CheckpointTokenUsage != nil {
+			if state.CheckpointTokenUsage != nil && !step.TokensAttributedElsewhere {
 				state.CheckpointTokenUsage.SubagentTokens = types.SubtractTokenUsage(
 					state.TokenUsage.SubagentTokens, state.SubagentTokensBaseline)
 			}
