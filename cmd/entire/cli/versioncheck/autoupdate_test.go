@@ -385,7 +385,7 @@ func nonWindowsAutoInstallers() []installerCase {
 // that the prompt seam is invoked with the right shell command for every
 // install manager. The huh.Select itself is exercised by the manual
 // smoke script (test-auto.sh); here we only check that the cmd we build
-// from updateCommand() is what reaches the prompt.
+// from UpdateCommandForCurrentBinary() is what reaches the prompt.
 func TestMaybeAutoUpdate_AllInstallers_PromptReceivesCorrectCommand(t *testing.T) {
 	pinNonWindowsGOOS(t)
 	for _, tt := range nonWindowsAutoInstallers() {

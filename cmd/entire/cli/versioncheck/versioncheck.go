@@ -418,8 +418,9 @@ const (
 	windowsInstallNightlyCmd = "& ([scriptblock]::Create((irm https://raw.githubusercontent.com/entireio/cli/main/scripts/install.ps1 -UseBasicParsing))) -Channel nightly"
 )
 
-// updateCommand returns the appropriate update instruction based on how the binary was installed.
-func updateCommand(currentVersion string) string {
+// UpdateCommandForCurrentBinary returns the shell command that updates this
+// binary, based on how it was installed.
+func UpdateCommandForCurrentBinary(currentVersion string) string {
 	switch installManagerForCurrentBinary() {
 	case installManagerBrew:
 		if releaseChannel(currentVersion) == installChannelNightly {
@@ -474,10 +475,6 @@ func updateCommand(currentVersion string) string {
 		return "curl -fsSL https://entire.io/install.sh | bash -s -- --channel nightly"
 	}
 	return "curl -fsSL https://entire.io/install.sh | bash"
-}
-
-func UpdateCommandForCurrentBinary(currentVersion string) string {
-	return updateCommand(currentVersion)
 }
 
 // printNotification prints the version update notification to the user.

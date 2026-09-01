@@ -61,7 +61,7 @@ var (
 // replace itself). Scoop, mise, and install.ps1 commands are printed for
 // the user to run after entire has exited.
 func MaybeAutoUpdate(ctx context.Context, w io.Writer, currentVersion, latestVersion string) AutoUpdateAction {
-	cmdStr := updateCommand(currentVersion)
+	cmdStr := UpdateCommandForCurrentBinary(currentVersion)
 
 	// Windows can't replace a running executable, so no installer can update
 	// entire in place while it runs. For Scoop this is acute: the live
