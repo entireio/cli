@@ -603,12 +603,68 @@ func writeCheckpointTokensText(w io.Writer, report checkpointTokensReport) {
 	}
 
 	writeTokenUsageSection(w, report.Tokens)
+	writeCheckpointTokenClasses(w, report.Classes)
 	writeCheckpointTokenComparison(w, report.Comparison)
 	if len(report.Recommendations) > 0 {
 		writeTokenRecommendations(w, report.Recommendations)
 	}
 	writeTokenContributors(w, report.Contributors, report.Context)
 	writeTokenLimitations(w, report.Limitations)
+}
+
+// writeCheckpointTokenClasses renders the billing-class breakdown. The cost
+// column is present only when the classes are priced: an empty or zeroed cost
+// column would read as "this cost nothing" rather than "we cannot say".
+func writeCheckpointTokenClasses(w io.Writer, classes *tokenClassBreakdown) {
+	if classes == nil {
+		return
+	}
+
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, "How it was billed")
+	if classes.Priced {
+		fmt.Fprintf(w, "  %-14s %10s %8s %7s\n", "", "tokens", "volume", "cost")
+	} else {
+		fmt.Fprintf(w, "  %-14s %10s %8s\n", "", "tokens", "volume")
+	}
+
+	rows := []struct {
+		label string
+		share tokenClassShare
+		note  string
+	}{
+		{"Fresh input", classes.Input, ""},
+		{"Cache write", classes.CacheWrite, subsetNote("1h TTL", classes.CacheWrite1h)},
+		{"Cache read", classes.CacheRead, ""},
+		{"Output", classes.Output, subsetNote("thinking", classes.Thinking)},
+	}
+	for _, row := range rows {
+		if classes.Priced {
+			fmt.Fprintf(w, "  %-14s %10s %7d%% %6d%%", row.label,
+				formatTokenCount(row.share.Tokens), row.share.VolumePercent, row.share.CostPercent)
+		} else {
+			fmt.Fprintf(w, "  %-14s %10s %7d%%", row.label,
+				formatTokenCount(row.share.Tokens), row.share.VolumePercent)
+		}
+		if row.note != "" {
+			fmt.Fprintf(w, "  %s", row.note)
+		}
+		fmt.Fprintln(w)
+	}
+	fmt.Fprintf(w, "  %-14s %10s\n", "Total", formatTokenCount(classes.Total))
+
+	if !classes.Priced {
+		fmt.Fprintln(w, "  Cost share omitted: no verified price ratios for this checkpoint's model.")
+	}
+}
+
+// subsetNote renders a subset figure alongside its parent class, or "" when the
+// agent recorded none. Subsets are part of their class, never added to the total.
+func subsetNote(label string, tokens int) string {
+	if tokens <= 0 {
+		return ""
+	}
+	return fmt.Sprintf("(%s %s)", label, formatTokenCount(tokens))
 }
 
 func writeCheckpointTokensAgentBrief(w io.Writer, report checkpointTokensReport) {

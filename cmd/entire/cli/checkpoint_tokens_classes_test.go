@@ -1,6 +1,8 @@
 package cli
 
 import (
+	"bytes"
+	"strings"
 	"testing"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
@@ -198,5 +200,60 @@ func TestCheckpointTokensReport_Classes_CarrySubsets(t *testing.T) {
 	}
 	if report.Classes.CacheWrite1h != 150 || report.Classes.Thinking != 60 {
 		t.Error("subsets must be reported alongside their parent class")
+	}
+}
+
+// The breakdown must render for a human, not just in --json.
+func TestWriteCheckpointTokenClasses_Priced(t *testing.T) {
+	t.Parallel()
+
+	report := classesReportFor(t, "Claude Code", "claude-sonnet-4.6", checkpoint.TokenUsageVersionDelta,
+		&agent.TokenUsage{
+			InputTokens: 1000, CacheCreationTokens: 2000, CacheCreation1hTokens: 500,
+			CacheReadTokens: 6000, OutputTokens: 1000, ThinkingTokens: 300,
+		})
+
+	var buf bytes.Buffer
+	writeCheckpointTokenClasses(&buf, report.Classes)
+	out := buf.String()
+
+	for _, want := range []string{"How it was billed", "Fresh input", "Cache write", "Cache read", "Output", "cost", "1h TTL", "thinking"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("rendered breakdown missing %q\n%s", want, out)
+		}
+	}
+}
+
+// Without a verified ratio row the cost column must not appear at all — an
+// empty or zeroed column reads as "this cost nothing".
+func TestWriteCheckpointTokenClasses_UnpricedOmitsCostColumn(t *testing.T) {
+	t.Parallel()
+
+	report := classesReportFor(t, "Cursor", "", checkpoint.TokenUsageVersionDelta,
+		&agent.TokenUsage{InputTokens: 1000, CacheReadTokens: 3000})
+
+	var buf bytes.Buffer
+	writeCheckpointTokenClasses(&buf, report.Classes)
+	out := buf.String()
+
+	if strings.Contains(out, "cost") {
+		t.Errorf("unpriced breakdown must not show a cost column\n%s", out)
+	}
+	if !strings.Contains(out, "volume") {
+		t.Errorf("unpriced breakdown must still show volume\n%s", out)
+	}
+	if !strings.Contains(out, "no verified price ratios") {
+		t.Errorf("unpriced breakdown must say why cost is missing\n%s", out)
+	}
+}
+
+// Nothing recorded renders nothing rather than an empty table.
+func TestWriteCheckpointTokenClasses_NilRendersNothing(t *testing.T) {
+	t.Parallel()
+
+	var buf bytes.Buffer
+	writeCheckpointTokenClasses(&buf, nil)
+	if buf.Len() != 0 {
+		t.Errorf("nil breakdown must render nothing, got %q", buf.String())
 	}
 }
