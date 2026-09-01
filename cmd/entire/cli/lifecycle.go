@@ -1214,10 +1214,12 @@ func refreshCodexInventory(ctx context.Context, ag agent.Agent, sessionID string
 				}
 				for i := range current.TaskRecords {
 					record := &current.TaskRecords[i]
-					if record.AgentID != child.AgentID || !record.CompletedAt.IsZero() {
+					if record.AgentID != child.AgentID {
 						continue
 					}
-					record.CompletedAt = time.Now()
+					if record.CompletedAt.IsZero() {
+						record.CompletedAt = time.Now()
+					}
 					record.Files = child.ModifiedFiles
 					record.DeclaredTranscriptPath = child.ResolvedPath
 					// nil is evidence too: a newer terminal snapshot without exact
