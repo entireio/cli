@@ -105,12 +105,14 @@ func runStatus(ctx context.Context, w io.Writer, detailed, jsonOutput bool) erro
 		if info.trackedHere() {
 			fmt.Fprintln(w, formatGloballyTrackedStatusShort(ctx, sty))
 			renderGlobalTrackingLine(w, sty, info)
+			writeUserLayerRejections(ctx, w, nil)
 			writeActiveSessions(ctx, w, sty)
 			writeAgentHelpHint(w, sty)
 			return nil
 		}
 		fmt.Fprintln(w, "○ not set up (run `entire enable` to get started)")
 		renderGlobalTrackingLine(w, sty, info)
+		writeUserLayerRejections(ctx, w, nil)
 		return nil
 	}
 
@@ -121,6 +123,7 @@ func runStatus(ctx context.Context, w io.Writer, detailed, jsonOutput bool) erro
 	if info.excludedHere() {
 		fmt.Fprintln(w, formatExcludedStatusShort(ctx, sty, info))
 		renderGlobalTrackingLine(w, sty, info)
+		writeUserLayerRejections(ctx, w, nil)
 		writeAgentHelpHint(w, sty)
 		return nil
 	}
@@ -137,18 +140,36 @@ func runStatus(ctx context.Context, w io.Writer, detailed, jsonOutput bool) erro
 
 	fmt.Fprintln(w, formatSettingsStatusShort(ctx, s, sty))
 	renderGlobalTrackingLine(w, sty, info)
-	// A dropped user-settings block is otherwise invisible in the short view:
-	// the file is machine-wide, so unlike a repo settings problem there is no
-	// second surface (a teammate, a PR diff) that would ever catch it.
-	for _, reason := range s.UserLayerRejections() {
-		fmt.Fprintf(w, "  user settings: %s ignored (%s) · run `entire status --detailed`\n", reason, settings.UserSettingsPath())
-	}
+	writeUserLayerRejections(ctx, w, s)
 	if s.Enabled {
 		writeActiveSessions(ctx, w, sty)
 	}
 	writeAgentHelpHint(w, sty)
 
 	return nil
+}
+
+// writeUserLayerRejections prints the user-settings preference blocks that
+// Load dropped. The user file is machine-wide and its preference blocks apply
+// regardless of repo enablement, so EVERY branch of runStatus shows this —
+// including the globally-tracked, not-set-up, and excluded branches, which
+// load no repo settings for any other reason (nil s; best-effort there — a
+// load error stays silent, since those branches rendered without settings
+// before and must keep doing so).
+func writeUserLayerRejections(ctx context.Context, w io.Writer, s *EntireSettings) {
+	if s == nil {
+		loaded, err := LoadEntireSettings(ctx)
+		if err != nil {
+			return
+		}
+		s = loaded
+	}
+	// A dropped user-settings block is otherwise invisible in the short view:
+	// the file is machine-wide, so unlike a repo settings problem there is no
+	// second surface (a teammate, a PR diff) that would ever catch it.
+	for _, reason := range s.UserLayerRejections() {
+		fmt.Fprintf(w, "  user settings: %s ignored (%s) · run `entire status --detailed`\n", reason, settings.UserSettingsPath())
+	}
 }
 
 // globalTrackingInfo is the shared computation behind the text and JSON
