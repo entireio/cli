@@ -43,20 +43,10 @@ func resolveUserSettingsPath() (string, error) {
 }
 
 // Top-level blocks this binary interprets. Every entry is decoded strictly
-// (DisallowUnknownFields); what a decode error costs differs per block:
-//
-//   - fatal (`global`): the whole load fails. The block records consent, and
-//     a binary must never guess at consent it cannot parse — the tier goes
-//     off machine-wide and `entire doctor` says so.
-//   - non-fatal (`redaction`): the block alone is dropped. Dropping it is
-//     already fail-closed for exec — no command is honored from a block that
-//     did not decode — so a purely personal OPF typo must not switch
-//     tracking off machine-wide. The raw bytes stay preserved in extra so a
-//     read-modify-write (`entire trust`) cannot destroy the user's content,
-//     and the reason is recorded for the surfaces (status, hooks, doctor).
-//
-// A top-level key absent from this table belongs to a newer binary and is
-// kept verbatim for round-tripping (see UserSettings).
+// (DisallowUnknownFields) and fails the load closed on an unknown key: `global`
+// records consent and `redaction` names an executable, so an older binary must
+// not guess at either. A top-level key absent from this table belongs to a
+// newer binary and is kept verbatim for round-tripping (see UserSettings).
 //
 // Adding a block: a field on UserSettings, an entry here, nothing else.
 const (
@@ -66,41 +56,29 @@ const (
 
 // userSettingsBlock is the decode/encode pair for one known block. decode
 // receives the raw block (never null — decodeStrictBlock maps null to an
-// absent block) and must leave us untouched on error; encode reports the
-// value to write and whether it is set.
+// absent block); encode reports the value to write and whether it is set.
 type userSettingsBlock struct {
 	decode func(us *UserSettings, raw json.RawMessage) error
 	encode func(us *UserSettings) (value any, set bool)
-	// fatal: a decode error fails the whole file instead of dropping the block.
-	fatal bool
 }
 
 var userSettingsBlocks = map[string]userSettingsBlock{
 	userSettingsGlobalKey: {
 		decode: func(us *UserSettings, raw json.RawMessage) error {
 			v, err := decodeStrictBlock[GlobalConfig](raw)
-			if err != nil {
-				return err
-			}
 			us.Global = v
-			return nil
+			return err
 		},
 		encode: func(us *UserSettings) (any, bool) { return us.Global, us.Global != nil },
-		fatal:  true,
 	},
 	userSettingsRedactionKey: {
 		decode: func(us *UserSettings, raw json.RawMessage) error {
 			v, err := decodeStrictBlock[UserRedactionConfig](raw)
-			if err != nil {
-				return err
-			}
-			if v != nil {
-				if err := v.validate(); err != nil {
-					return err
-				}
+			if err == nil && v != nil {
+				err = v.validate()
 			}
 			us.Redaction = v
-			return nil
+			return err
 		},
 		encode: func(us *UserSettings) (any, bool) { return us.Redaction, us.Redaction != nil },
 	},
@@ -122,11 +100,10 @@ func decodeStrictBlock[T any](raw json.RawMessage) (*T, error) {
 }
 
 // UnmarshalJSON decodes the user settings file with per-block strictness: each
-// block in userSettingsBlocks is strict (an unknown key inside it is an
-// error), a fatal block's error fails the file, a non-fatal block's error
-// drops that block alone — bytes preserved, reason recorded — and unknown
-// top-level blocks are kept verbatim for round-tripping. See the
-// userSettingsBlocks comment for which block gets which treatment and why.
+// block in userSettingsBlocks is strict (an unknown key inside it is an error —
+// an older binary must fail closed rather than misread consent or an
+// executable name it does not understand), while unknown top-level blocks are
+// kept verbatim for round-tripping. See the UserSettings type comment for why.
 func (us *UserSettings) UnmarshalJSON(data []byte) error {
 	var blocks map[string]json.RawMessage
 	if err := json.Unmarshal(data, &blocks); err != nil {
@@ -136,42 +113,17 @@ func (us *UserSettings) UnmarshalJSON(data []byte) error {
 	for key, raw := range blocks {
 		block, known := userSettingsBlocks[key]
 		if !known {
-			us.preserveRaw(key, raw, len(blocks))
+			if us.extra == nil {
+				us.extra = make(map[string]json.RawMessage, len(blocks))
+			}
+			us.extra[key] = raw
 			continue
 		}
-		err := block.decode(us, raw)
-		if err == nil {
-			continue
-		}
-		if block.fatal {
+		if err := block.decode(us, raw); err != nil {
 			return fmt.Errorf("%s: %w", key, err)
 		}
-		// Dropped, not fatal: keep the user's bytes so a read-modify-write
-		// cannot delete them, and record why for the reporting surfaces.
-		us.preserveRaw(key, raw, len(blocks))
-		if us.blockErrs == nil {
-			us.blockErrs = make(map[string]string, 1)
-		}
-		us.blockErrs[key] = err.Error()
 	}
 	return nil
-}
-
-func (us *UserSettings) preserveRaw(key string, raw json.RawMessage, sizeHint int) {
-	if us.extra == nil {
-		us.extra = make(map[string]json.RawMessage, sizeHint)
-	}
-	us.extra[key] = raw
-}
-
-// RedactionError reports why the redaction block was dropped during decode,
-// or "" when it decoded (or was absent). The dropped block's bytes are still
-// in the file; nothing from it is honored until the user fixes it.
-func (us *UserSettings) RedactionError() string {
-	if us == nil {
-		return ""
-	}
-	return us.blockErrs[userSettingsRedactionKey]
 }
 
 // MarshalJSON writes every known block that is set plus every preserved

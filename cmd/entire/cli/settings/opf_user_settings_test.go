@@ -151,25 +151,7 @@ func TestOPFUserSettings_LayerUnderALocalFileThatCreatesTheBlock(t *testing.T) {
 	assert.Equal(t, OPFPromptAlways, opf.PromptDefault, "the local file keeps a key it set explicitly")
 }
 
-// A bad redaction BLOCK is dropped alone: the local path still applies, and
-// the drop is reported through UserLayerRejections so status and the hook
-// warning surface it.
-func TestOPFUserSettings_BadRedactionBlockFallsBackToLocalAndIsReported(t *testing.T) {
-	setUserSettingsFile(t, `{"redaction":{"openai_privacy_filter":{"prompt_default":"sometimes"}}}`)
-	_, project, local := newOPFRepo(t)
-	writeSettingsFile(t, project, opfSettings(""))
-	writeSettingsFile(t, local, localOPFSettings(trustedCommand))
-
-	s, err := loadMergedSettings(t.Context(), project, "", local)
-	require.NoError(t, err)
-	opf := s.Redaction.OpenAIPrivacyFilter
-	assert.Equal(t, trustedCommand, opf.Command)
-	assert.Equal(t, OPFCommandSourceLocal, opf.CommandSource())
-	require.Len(t, s.UserLayerRejections(), 1)
-	assert.Contains(t, s.UserLayerRejections()[0], "redaction")
-}
-
-// A malformed user FILE is the user's own problem to fix and turns the global
+// A malformed user file is the user's own problem to fix and turns the global
 // tier off; it must never take repository settings down with it. The overlay
 // is skipped and the pre-existing local path still applies.
 func TestOPFUserSettings_MalformedUserFileIsSkipped(t *testing.T) {
