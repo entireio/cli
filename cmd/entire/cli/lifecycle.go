@@ -1261,6 +1261,14 @@ func declaredSubagentTranscript(ctx context.Context, event *agent.Event) string 
 //     resurrects state — see handleSubagentStopFinal's zombie guard).
 func handleLifecycleSubagentEnd(ctx context.Context, ag agent.Agent, event *agent.Event) error {
 	logCtx := logging.WithAgent(logging.WithComponent(ctx, "lifecycle"), ag.Name())
+	if event.SubagentID != "" && event.ToolUseID != "" {
+		if stampErr := StampPreTaskAgentID(ctx, event.ToolUseID, event.SubagentID); stampErr != nil {
+			logging.Warn(logCtx, "failed to stamp agent id on pre-task file",
+				slog.String("tool_use_id", event.ToolUseID),
+				slog.String("agent_id", event.SubagentID),
+				slog.String("error", stampErr.Error()))
+		}
+	}
 	if event.SubagentType == "" && event.TaskDescription == "" {
 		// Extract subagent type and description from tool input
 		event.SubagentType, event.TaskDescription = ParseSubagentTypeAndDescription(event.ToolInput)

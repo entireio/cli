@@ -20,6 +20,15 @@ type SubagentCheckpointHookInput struct {
 	ToolUseID      string          `json:"tool_use_id"`
 	ToolInput      json.RawMessage `json:"tool_input"`
 	ToolResponse   json.RawMessage `json:"tool_response"`
+
+	// AgentID identifies the subagent instance issuing this hook call, per Claude
+	// Code's PostToolUse hook docs (top-level "agent_id"). Only present when the hook
+	// fires inside a subagent. Used to disambiguate sibling (non-nested) parallel
+	// Tasks, whose incremental checkpoints would otherwise be misattributed by
+	// FindActivePreTaskFile's "most recently modified" heuristic. Note this is
+	// distinct from tool_response.agentId, which only appears on the parent's Task
+	// tool result once a subagent finishes (SubagentEnd), not on TodoWrite calls.
+	AgentID string `json:"agent_id,omitempty"`
 }
 
 // parseSubagentCheckpointHookInput parses PostToolUse hook input for subagent

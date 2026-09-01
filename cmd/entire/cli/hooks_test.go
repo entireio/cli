@@ -57,6 +57,24 @@ func TestParseSubagentCheckpointHookInput(t *testing.T) {
 			},
 			wantErr: false,
 		},
+		{
+			name: "TodoWrite input with top-level agent_id",
+			input: `{
+				"session_id": "abc123",
+				"tool_name": "TodoWrite",
+				"tool_use_id": "toolu_xyz",
+				"agent_id": "agent-A",
+				"tool_input": {"todos": [{"content": "Task 1", "status": "pending"}]},
+				"tool_response": {"success": true}
+			}`,
+			want: &SubagentCheckpointHookInput{
+				SessionID: "abc123",
+				ToolName:  "TodoWrite",
+				ToolUseID: "toolu_xyz",
+				AgentID:   "agent-A",
+			},
+			wantErr: false,
+		},
 	}
 
 	for _, tt := range tests {
@@ -78,6 +96,9 @@ func TestParseSubagentCheckpointHookInput(t *testing.T) {
 				}
 				if got.ToolUseID != tt.want.ToolUseID {
 					t.Errorf("ToolUseID = %v, want %v", got.ToolUseID, tt.want.ToolUseID)
+				}
+				if got.AgentID != tt.want.AgentID {
+					t.Errorf("AgentID = %v, want %v", got.AgentID, tt.want.AgentID)
 				}
 				// ToolInput and ToolResponse are json.RawMessage, just verify they're not nil
 				if got.ToolInput == nil {
