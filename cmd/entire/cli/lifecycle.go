@@ -1201,14 +1201,15 @@ func refreshCodexInventory(ctx context.Context, ag agent.Agent, sessionID string
 	}
 
 	usage := extraction.TokenUsage
-	if !*state.SubagentInventoryComplete {
-		// A legacy/partial inventory may still provide main transcript evidence,
-		// but cannot truthfully claim full child coverage.
-		usage = types.WithClearedSubagentTokens(usage, false)
-	}
 	if err := strategy.MutateSessionState(ctx, sessionID, func(current *strategy.SessionState) error {
 		if current.SubagentLedgerVersion != version {
 			return strategy.ErrMutationSkip
+		}
+		usage = extraction.TokenUsage
+		if current.SubagentInventoryComplete == nil || !*current.SubagentInventoryComplete {
+			// A legacy/partial inventory may still provide main transcript evidence,
+			// but cannot truthfully claim full child coverage.
+			usage = types.WithClearedSubagentTokens(usage, false)
 		}
 		for _, child := range extraction.Children {
 			current.UpdateSubagentTranscriptPaths(child.AgentID, "", child.ResolvedPath)

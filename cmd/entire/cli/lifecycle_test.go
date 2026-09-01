@@ -137,12 +137,16 @@ func (m *mockAnalyzerAgent) ExtractModifiedFilesFromOffset(_ string, _ int) ([]s
 type mockInventoryAgent struct {
 	*mockLifecycleAgent
 
-	extraction agent.InventoryExtraction
+	extraction   agent.InventoryExtraction
+	beforeReturn func()
 }
 
 var _ agent.InventoryAwareExtractor = (*mockInventoryAgent)(nil)
 
 func (m *mockInventoryAgent) ExtractWithSubagentInventory(_ []byte, _ int, _ []agent.SubagentReference) (agent.InventoryExtraction, error) {
+	if m.beforeReturn != nil {
+		m.beforeReturn()
+	}
 	return m.extraction, nil
 }
 
@@ -243,6 +247,51 @@ func TestFinalizeCodexObservedAtSessionEnd_MultiTurnChildClearsStaleEvidence(t *
 	assert.Empty(t, record.Files, "files from an earlier turn are not exact evidence for an unresolved later turn")
 	assert.Nil(t, record.TokenUsage, "tokens from an earlier turn are not exact evidence for an unresolved later turn")
 	assert.Contains(t, state.FindSubagentInventory(agentID).FinalizedTurnIDs, "turn-2")
+}
+
+func TestRefreshCodexInventory_UsesCurrentCompletenessWhenPersistingUsage(t *testing.T) {
+	// NOT parallel: setupStopTestRepo changes the process working directory.
+	setupStopTestRepo(t)
+	ctx := context.Background()
+	const sessionID = "codex-completeness-race"
+	complete := true
+	require.NoError(t, strategy.SaveSessionState(ctx, &strategy.SessionState{
+		SessionID:                 sessionID,
+		StartedAt:                 time.Now(),
+		Phase:                     session.PhaseActive,
+		SubagentInventoryComplete: &complete,
+		SubagentLedgerVersion:     2,
+	}))
+
+	extractedComplete := true
+	ag := &mockInventoryAgent{
+		mockLifecycleAgent: newMockAgent(),
+		extraction: agent.InventoryExtraction{TokenUsage: &agent.TokenUsage{
+			SubagentTokens:         &agent.TokenUsage{InputTokens: 25},
+			SubagentTokensComplete: &extractedComplete,
+		}},
+		beforeReturn: func() {
+			require.NoError(t, strategy.MutateSessionState(ctx, sessionID, func(state *strategy.SessionState) error {
+				incomplete := false
+				state.SubagentInventoryComplete = &incomplete
+				return nil
+			}))
+		},
+	}
+
+	usage, version := refreshCodexInventory(ctx, ag, sessionID, nil, 0)
+	assert.Equal(t, uint64(2), version)
+	require.NotNil(t, usage)
+	require.NotNil(t, usage.SubagentTokensComplete)
+	assert.False(t, *usage.SubagentTokensComplete)
+	assert.Nil(t, usage.SubagentTokens)
+
+	state, err := strategy.LoadSessionState(ctx, sessionID)
+	require.NoError(t, err)
+	require.NotNil(t, state.TokenUsage)
+	require.NotNil(t, state.TokenUsage.SubagentTokensComplete)
+	assert.False(t, *state.TokenUsage.SubagentTokensComplete)
+	assert.Nil(t, state.TokenUsage.SubagentTokens)
 }
 
 // --- DispatchLifecycleEvent tests ---
