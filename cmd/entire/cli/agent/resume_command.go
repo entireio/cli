@@ -64,6 +64,14 @@ func ResumeCommandSpecFor(name types.AgentName, sessionID string) (ForegroundCom
 			return ForegroundCommandSpec{}, false
 		}
 		return ForegroundCommandSpec{Binary: "pi", Args: []string{"--session", sessionID}}, true
+	case AgentNameGrok:
+		if sessionID == "" {
+			return ForegroundCommandSpec{Binary: "grok", Args: []string{"--continue"}}, true
+		}
+		if !isLaunchableResumeSessionID(sessionID) {
+			return ForegroundCommandSpec{}, false
+		}
+		return ForegroundCommandSpec{Binary: "grok", Args: []string{"--resume", sessionID}}, true
 	default:
 		return ForegroundCommandSpec{}, false
 	}

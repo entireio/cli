@@ -160,6 +160,7 @@ const (
 	AgentNameCursor         types.AgentName = "cursor"
 	AgentNameFactoryAIDroid types.AgentName = "factoryai-droid"
 	AgentNameGemini         types.AgentName = "gemini"
+	AgentNameGrok           types.AgentName = "grok"
 	AgentNameOpenCode       types.AgentName = "opencode"
 	AgentNamePi             types.AgentName = "pi"
 )
@@ -172,6 +173,7 @@ const (
 	AgentTypeCursor         types.AgentType = "Cursor"
 	AgentTypeFactoryAIDroid types.AgentType = "Factory AI Droid"
 	AgentTypeGemini         types.AgentType = "Gemini CLI"
+	AgentTypeGrok           types.AgentType = "Grok Build"
 	AgentTypeOpenCode       types.AgentType = "OpenCode"
 	AgentTypePi             types.AgentType = "Pi"
 	AgentTypeUnknown        types.AgentType = "Unknown"

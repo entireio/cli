@@ -67,6 +67,27 @@ func TestResumeCommandSpecFor(t *testing.T) {
 			wantOK:    true,
 		},
 		{
+			name:      "grok",
+			agentName: AgentNameGrok,
+			sessionID: "session-123",
+			want:      ForegroundCommandSpec{Binary: "grok", Args: []string{"--resume", "session-123"}},
+			wantOK:    true,
+		},
+		{
+			name:      "grok without session id continues most recent",
+			agentName: AgentNameGrok,
+			sessionID: "",
+			want:      ForegroundCommandSpec{Binary: "grok", Args: []string{"--continue"}},
+			wantOK:    true,
+		},
+		{
+			name:      "grok unsafe session id is not launchable",
+			agentName: AgentNameGrok,
+			sessionID: "../evil",
+			want:      ForegroundCommandSpec{},
+			wantOK:    false,
+		},
+		{
 			name:      "leading dash session id is not launchable",
 			agentName: AgentNameClaudeCode,
 			sessionID: "--dangerously-skip-permissions",

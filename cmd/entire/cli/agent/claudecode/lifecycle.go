@@ -73,6 +73,37 @@ func (c *ClaudeCodeAgent) HookNames() []string {
 // ParseHookEvent translates a Claude Code hook into a normalized lifecycle Event.
 // Returns nil if the hook has no lifecycle significance.
 func (c *ClaudeCodeAgent) ParseHookEvent(ctx context.Context, hookName string, stdin io.Reader) (*agent.Event, error) {
+	event, err := c.parseHookEvent(ctx, hookName, stdin)
+	if err != nil || event == nil {
+		return event, err
+	}
+	// Claude Code always sends session_id. An event without one did not come
+	// from Claude Code, and there is nothing valid to record for it.
+	//
+	// This is not hypothetical: other agents read Claude Code's config. Grok
+	// Build scans ~/.claude/settings.json for hooks by default and treats the
+	// user scope as always-trusted, so on a machine with both installed it
+	// executes Entire's `entire hooks claude-code ...` commands and feeds them
+	// its own payloads — which spell the field sessionId, not session_id.
+	//
+	// Scope of this guard, measured rather than assumed: firing real captured
+	// Grok payloads at these hooks in an Entire-enabled repo created no session
+	// and no state either side of this check, so the downstream path was
+	// already inert. This makes that outcome explicit and, more usefully, warns
+	// — otherwise the only symptom of another agent driving our hooks is silence.
+	// It is hardening plus a diagnostic, not a fix for observed corruption. The
+	// actual fix is to stop the foreign invocation at its source:
+	// `[compat.claude] hooks = false` in ~/.grok/config.toml.
+	if event.SessionID == "" {
+		logging.Warn(ctx, "claude-code: hook payload has no session_id; ignoring",
+			"hook", hookName,
+			"hint", "another agent may be invoking Claude Code's hooks; see docs/architecture/agent-guide.md")
+		return nil, nil //nolint:nilnil // unidentifiable payload = no lifecycle action
+	}
+	return event, nil
+}
+
+func (c *ClaudeCodeAgent) parseHookEvent(ctx context.Context, hookName string, stdin io.Reader) (*agent.Event, error) {
 	switch hookName {
 	case HookNameSessionStart:
 		return c.parseSessionInfoEvent(stdin, agent.SessionStart)

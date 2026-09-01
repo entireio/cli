@@ -5,6 +5,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -22,13 +23,17 @@ func TestBetterleaksDoesNotPoisonGitEnvironment(t *testing.T) {
 	repoRoot := filepath.Clean(filepath.Join(filepath.Dir(sourceFile), ".."))
 
 	tmpDir := t.TempDir()
+	// The replace target is quoted: go.mod tokenizes on whitespace, so an
+	// unquoted path fails to parse in any checkout whose directory name
+	// contains a space, and the test then fails with a go.mod syntax error
+	// that has nothing to do with what it is covering.
 	goMod := `module betterleaksenvcheck
 
 go 1.26.2
 
 require github.com/entireio/cli v0.0.0
 
-replace github.com/entireio/cli => ` + filepath.ToSlash(repoRoot) + `
+replace github.com/entireio/cli => ` + strconv.Quote(filepath.ToSlash(repoRoot)) + `
 `
 	if err := os.WriteFile(filepath.Join(tmpDir, "go.mod"), []byte(goMod), 0o644); err != nil {
 		t.Fatalf("write go.mod: %v", err)
