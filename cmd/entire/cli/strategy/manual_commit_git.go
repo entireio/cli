@@ -46,6 +46,11 @@ func (s *ManualCommitStrategy) SaveStep(ctx context.Context, step StepContext) e
 	}
 
 	mutErr := MutateSessionState(ctx, sessionID, func(state *SessionState) error {
+		if step.SubagentLedgerVersion != 0 && state.SubagentLedgerVersion != step.SubagentLedgerVersion && step.TokenUsage != nil {
+			// Keep valid main-agent deltas but never persist a child aggregate
+			// computed against an older authoritative inventory.
+			step.TokenUsage = types.WithClearedSubagentTokens(step.TokenUsage, false)
+		}
 		_, migrateSpan := perf.Start(ctx, "migrate_shadow_branch")
 		if _, _, err := s.migrateShadowBranchIfNeeded(ctx, repo, state); err != nil {
 			migrateSpan.RecordError(err)
@@ -148,9 +153,23 @@ func (s *ManualCommitStrategy) SaveStep(ctx context.Context, step StepContext) e
 			// that would double-subtract and (via clampSubtract) shrink or zero a
 			// real subagent total. Recomputing from the session-wide cumulative
 			// is idempotent regardless of whether this step carried a snapshot.
-			if state.CheckpointTokenUsage != nil {
-				state.CheckpointTokenUsage.SubagentTokens = types.SubtractTokenUsage(
-					state.TokenUsage.SubagentTokens, state.SubagentTokensBaseline)
+			if state.CheckpointTokenUsage != nil && state.TokenUsage != nil {
+				complete := state.TokenUsage.SubagentTokensComplete
+				switch {
+				case complete != nil && !*complete:
+					state.CheckpointTokenUsage = types.WithClearedSubagentTokens(state.CheckpointTokenUsage, false)
+				case state.SubagentTokensBaselineComplete != nil && !*state.SubagentTokensBaselineComplete:
+					// A known-incomplete baseline cannot yield an exact delta, even
+					// when the current inventory has become complete again.
+					state.CheckpointTokenUsage = types.WithClearedSubagentTokens(state.CheckpointTokenUsage, false)
+				default:
+					state.CheckpointTokenUsage.SubagentTokens = types.SubtractTokenUsage(
+						state.TokenUsage.SubagentTokens, state.SubagentTokensBaseline)
+					if complete != nil {
+						value := *complete
+						state.CheckpointTokenUsage.SubagentTokensComplete = &value
+					}
+				}
 			}
 		}
 
@@ -446,7 +465,7 @@ func accumulateTokenUsage(existing, incoming *agent.TokenUsage) *agent.TokenUsag
 	}
 	if existing == nil {
 		// Return a copy to avoid sharing the pointer
-		return &agent.TokenUsage{
+		result := &agent.TokenUsage{
 			InputTokens:         incoming.InputTokens,
 			CacheCreationTokens: incoming.CacheCreationTokens,
 			CacheReadTokens:     incoming.CacheReadTokens,
@@ -454,6 +473,14 @@ func accumulateTokenUsage(existing, incoming *agent.TokenUsage) *agent.TokenUsag
 			APICallCount:        incoming.APICallCount,
 			SubagentTokens:      incoming.SubagentTokens,
 		}
+		if incoming.SubagentTokensComplete != nil {
+			complete := *incoming.SubagentTokensComplete
+			result.SubagentTokensComplete = &complete
+			if !complete {
+				result.SubagentTokens = nil
+			}
+		}
+		return result
 	}
 
 	// Accumulate values
@@ -466,7 +493,13 @@ func accumulateTokenUsage(existing, incoming *agent.TokenUsage) *agent.TokenUsag
 	// Replace (not add) subagent tokens: incoming.SubagentTokens is already
 	// the cumulative total as of this step, so the latest snapshot supersedes
 	// whatever was recorded before rather than stacking on top of it.
-	if incoming.SubagentTokens != nil {
+	if incoming.SubagentTokensComplete != nil {
+		complete := *incoming.SubagentTokensComplete
+		existing.SubagentTokensComplete = &complete
+		// An explicit inventory result is authoritative, including exact empty
+		// (complete with nil) and unavailable (incomplete with nil).
+		existing.SubagentTokens = incoming.SubagentTokens
+	} else if incoming.SubagentTokens != nil {
 		existing.SubagentTokens = incoming.SubagentTokens
 	}
 

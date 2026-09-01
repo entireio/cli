@@ -1146,11 +1146,18 @@ func hasTokenUsageData(usage *agent.TokenUsage) bool {
 // path could resolve a subagents dir from session state (as review/manifest.go
 // does) and rescope against SubagentTokensBaseline; deferred, not blocked.
 func withSubagentTokensFrom(usage, src *agent.TokenUsage) *agent.TokenUsage {
-	if usage == nil || usage.SubagentTokens != nil || src == nil || src.SubagentTokens == nil {
+	if usage == nil || usage.SubagentTokens != nil || usage.SubagentTokensComplete != nil || src == nil {
 		return usage
 	}
 	filled := *usage
 	filled.SubagentTokens = src.SubagentTokens
+	if src.SubagentTokensComplete != nil {
+		complete := *src.SubagentTokensComplete
+		filled.SubagentTokensComplete = &complete
+		if !complete {
+			filled.SubagentTokens = nil
+		}
+	}
 	return &filled
 }
 

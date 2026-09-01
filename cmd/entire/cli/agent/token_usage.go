@@ -7,6 +7,22 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 )
 
+// ExtractWithSubagentInventory gives built-in agents an authoritative child
+// ledger. It deliberately has no external-agent protocol equivalent: callers
+// supply the inventory rather than asking an agent to infer children from text.
+func ExtractWithSubagentInventory(ctx context.Context, ag Agent, transcriptData []byte, transcriptLinesAtStart int, refs []SubagentReference) (InventoryExtraction, bool) {
+	extractor, ok := AsInventoryAwareExtractor(ag)
+	if !ok {
+		return InventoryExtraction{}, false
+	}
+	extraction, err := extractor.ExtractWithSubagentInventory(transcriptData, transcriptLinesAtStart, refs)
+	if err != nil {
+		logging.Debug(ctx, "failed inventory-aware token extraction", slog.String("error", err.Error()))
+		return InventoryExtraction{}, false
+	}
+	return extraction, true
+}
+
 // CalculateTokenUsage calculates token usage from transcript data.
 // Returns nil if the agent doesn't support token calculation or on error.
 // Errors are debug-logged because callers treat nil token usage as "no data available".

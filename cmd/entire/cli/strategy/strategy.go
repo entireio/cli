@@ -161,6 +161,10 @@ type StepContext struct {
 
 	// TokenUsage contains the token usage for this checkpoint
 	TokenUsage *agent.TokenUsage
+
+	// SubagentLedgerVersion is the authoritative inventory version observed
+	// while token evidence was extracted. Zero means no inventory snapshot.
+	SubagentLedgerVersion uint64
 }
 
 // TaskStepContext contains all information needed for saving a task step checkpoint.
