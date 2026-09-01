@@ -96,10 +96,7 @@ func TestResolveTargetForTokenAuth_RemoteName_HTTPS(t *testing.T) {
 	testutil.GitAdd(t, tmpDir, "f.txt")
 	testutil.GitCommit(t, tmpDir, "init")
 
-	cmd := exec.CommandContext(ctx, "git", "remote", "add", "origin", "https://github.com/org/repo.git")
-	cmd.Dir = tmpDir
-	cmd.Env = testutil.GitIsolatedEnv()
-	require.NoError(t, cmd.Run())
+	testutil.RunGit(t, tmpDir, "remote", "add", "origin", "https://github.com/org/repo.git")
 
 	t.Chdir(tmpDir)
 
@@ -118,10 +115,7 @@ func TestResolveTargetForTokenAuth_RemoteName_SSH_RewritesToHTTPS(t *testing.T) 
 	testutil.GitAdd(t, tmpDir, "f.txt")
 	testutil.GitCommit(t, tmpDir, "init")
 
-	cmd := exec.CommandContext(ctx, "git", "remote", "add", "origin", "git@github.com:org/repo.git")
-	cmd.Dir = tmpDir
-	cmd.Env = testutil.GitIsolatedEnv()
-	require.NoError(t, cmd.Run())
+	testutil.RunGit(t, tmpDir, "remote", "add", "origin", "git@github.com:org/repo.git")
 
 	t.Chdir(tmpDir)
 
@@ -188,10 +182,7 @@ func TestResolvePushCommandTarget(t *testing.T) {
 			testutil.GitAdd(t, tmpDir, "f.txt")
 			testutil.GitCommit(t, tmpDir, "init")
 			if tt.originURL != "" {
-				cmd := exec.CommandContext(ctx, "git", "remote", "add", "origin", tt.originURL)
-				cmd.Dir = tmpDir
-				cmd.Env = testutil.GitIsolatedEnv()
-				require.NoError(t, cmd.Run())
+				testutil.RunGit(t, tmpDir, "remote", "add", "origin", tt.originURL)
 			}
 			if tt.settingsJSON != "" {
 				testutil.WriteFile(t, tmpDir, ".entire/settings.json", tt.settingsJSON)
@@ -218,10 +209,7 @@ func TestResolveFetchTarget(t *testing.T) {
 	testutil.GitAdd(t, tmpDir, "f.txt")
 	testutil.GitCommit(t, tmpDir, "init")
 
-	cmd := exec.CommandContext(ctx, "git", "remote", "add", "origin", "https://github.com/org/repo.git")
-	cmd.Dir = tmpDir
-	cmd.Env = testutil.GitIsolatedEnv()
-	require.NoError(t, cmd.Run())
+	testutil.RunGit(t, tmpDir, "remote", "add", "origin", "https://github.com/org/repo.git")
 
 	t.Chdir(tmpDir)
 
@@ -264,7 +252,7 @@ func TestFetch_Unshallow(t *testing.T) {
 		t.Parallel()
 		ctx := context.Background()
 
-		bareDir, cloneDir := setupShallowClone(ctx, t)
+		bareDir, cloneDir := setupShallowClone(t)
 		require.True(t, isShallowRepository(ctx, cloneDir), "test setup should produce a shallow repo")
 
 		out, err := Fetch(ctx, FetchOptions{
@@ -284,7 +272,7 @@ func TestFetch_Unshallow(t *testing.T) {
 		t.Parallel()
 		ctx := context.Background()
 
-		bareDir, cloneDir := setupShallowClone(ctx, t)
+		bareDir, cloneDir := setupShallowClone(t)
 		require.True(t, isShallowRepository(ctx, cloneDir))
 
 		out, err := Fetch(ctx, FetchOptions{
@@ -304,11 +292,11 @@ func TestFetch_Shallow(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 
-	bareDir, _ := setupShallowClone(ctx, t)
+	bareDir, _ := setupShallowClone(t)
 	// Make a fresh non-shallow clone, then fetch with Shallow=true and check
 	// .git/shallow appears.
 	cloneDir := t.TempDir()
-	runIsolatedGit(ctx, t, "", "clone", "--branch", "main", "file://"+bareDir, cloneDir)
+	runIsolatedGit(t, "", "clone", "--branch", "main", "file://"+bareDir, cloneDir)
 	require.False(t, isShallowRepository(ctx, cloneDir), "fresh clone should not be shallow")
 
 	out, err := Fetch(ctx, FetchOptions{
@@ -334,32 +322,32 @@ func TestFetch_Depth(t *testing.T) {
 	tmpDir := t.TempDir()
 	bareDir := filepath.Join(tmpDir, "bare.git")
 	seedDir := filepath.Join(tmpDir, "seed")
-	runIsolatedGit(ctx, t, "", "init", "--bare", bareDir)
+	runIsolatedGit(t, "", "init", "--bare", bareDir)
 
 	testutil.InitRepo(t, seedDir)
-	runIsolatedGit(ctx, t, seedDir, "remote", "add", "origin", bareDir)
+	runIsolatedGit(t, seedDir, "remote", "add", "origin", bareDir)
 	for _, c := range []string{"m1", "m2", "m3"} { // main: 3 commits
 		testutil.WriteFile(t, seedDir, "f.txt", c)
 		testutil.GitAdd(t, seedDir, "f.txt")
 		testutil.GitCommit(t, seedDir, c)
 	}
-	runIsolatedGit(ctx, t, seedDir, "push", "origin", "HEAD:refs/heads/main")
-	runIsolatedGit(ctx, t, seedDir, "checkout", "--orphan", "meta")
-	runIsolatedGit(ctx, t, seedDir, "rm", "-rf", ".")
+	runIsolatedGit(t, seedDir, "push", "origin", "HEAD:refs/heads/main")
+	runIsolatedGit(t, seedDir, "checkout", "--orphan", "meta")
+	runIsolatedGit(t, seedDir, "rm", "-rf", ".")
 	for _, c := range []string{"c1", "c2"} { // meta: 2 commits
 		testutil.WriteFile(t, seedDir, "g.txt", c)
 		testutil.GitAdd(t, seedDir, "g.txt")
 		testutil.GitCommit(t, seedDir, c)
 	}
-	runIsolatedGit(ctx, t, seedDir, "push", "origin", "HEAD:refs/heads/meta")
+	runIsolatedGit(t, seedDir, "push", "origin", "HEAD:refs/heads/meta")
 
 	// Shallow clone of main + shallow fetch of meta → both branches shallow.
 	cloneDir := filepath.Join(tmpDir, "clone")
-	runIsolatedGit(ctx, t, "", "clone", "--depth=1", "--single-branch", "--branch", "main", "file://"+bareDir, cloneDir)
-	runIsolatedGit(ctx, t, cloneDir, "fetch", "--depth=1", "origin", "+refs/heads/meta:refs/remotes/origin/meta")
+	runIsolatedGit(t, "", "clone", "--depth=1", "--single-branch", "--branch", "main", "file://"+bareDir, cloneDir)
+	runIsolatedGit(t, cloneDir, "fetch", "--depth=1", "origin", "+refs/heads/meta:refs/remotes/origin/meta")
 	require.True(t, isShallowRepository(ctx, cloneDir))
-	require.Equal(t, 1, revListCount(ctx, t, cloneDir, "refs/remotes/origin/meta"))
-	require.Equal(t, 1, revListCount(ctx, t, cloneDir, "refs/remotes/origin/main"))
+	require.Equal(t, 1, revListCount(t, cloneDir, "refs/remotes/origin/meta"))
+	require.Equal(t, 1, revListCount(t, cloneDir, "refs/remotes/origin/main"))
 
 	out, err := Fetch(ctx, FetchOptions{
 		Remote:   "file://" + bareDir,
@@ -370,22 +358,17 @@ func TestFetch_Depth(t *testing.T) {
 	})
 	require.NoError(t, err, "fetch output: %s", out)
 
-	assert.Equal(t, 2, revListCount(ctx, t, cloneDir, "refs/remotes/origin/meta"),
+	assert.Equal(t, 2, revListCount(t, cloneDir, "refs/remotes/origin/meta"),
 		"Depth should fully fetch (heal) the named branch")
-	assert.Equal(t, 1, revListCount(ctx, t, cloneDir, "refs/remotes/origin/main"),
+	assert.Equal(t, 1, revListCount(t, cloneDir, "refs/remotes/origin/main"),
 		"Depth is ref-scoped: an independently-shallow branch must stay shallow")
 	assert.True(t, isShallowRepository(ctx, cloneDir),
 		"repo stays shallow because main is still bounded")
 }
 
-func revListCount(ctx context.Context, t *testing.T, dir, ref string) int {
+func revListCount(t *testing.T, dir, ref string) int {
 	t.Helper()
-	cmd := exec.CommandContext(ctx, "git", "rev-list", "--count", ref)
-	cmd.Dir = dir
-	cmd.Env = testutil.GitIsolatedEnv()
-	out, err := cmd.Output()
-	require.NoError(t, err)
-	n, err := strconv.Atoi(strings.TrimSpace(string(out)))
+	n, err := strconv.Atoi(strings.TrimSpace(testutil.RunGit(t, dir, "rev-list", "--count", ref)))
 	require.NoError(t, err)
 	return n
 }
@@ -394,7 +377,7 @@ func revListCount(ctx context.Context, t *testing.T, dir, ref string) int {
 // to it, a shallow (--depth=1) clone, and then advances origin by one more
 // commit so that a subsequent fetch into the clone has work to do. Returns the
 // bare origin path and the shallow clone path.
-func setupShallowClone(ctx context.Context, t *testing.T) (bareDir, cloneDir string) {
+func setupShallowClone(t *testing.T) (bareDir, cloneDir string) {
 	t.Helper()
 	tmpDir := t.TempDir()
 	bareDir = filepath.Join(tmpDir, "bare.git")
@@ -406,27 +389,22 @@ func setupShallowClone(ctx context.Context, t *testing.T) (bareDir, cloneDir str
 	testutil.GitAdd(t, seedDir, "f.txt")
 	testutil.GitCommit(t, seedDir, "init")
 
-	runIsolatedGit(ctx, t, "", "init", "--bare", bareDir)
-	runIsolatedGit(ctx, t, seedDir, "remote", "add", "origin", bareDir)
-	runIsolatedGit(ctx, t, seedDir, "push", "origin", "HEAD:refs/heads/main")
-	runIsolatedGit(ctx, t, "", "clone", "--depth=1", "--branch", "main", "file://"+bareDir, cloneDir)
+	runIsolatedGit(t, "", "init", "--bare", bareDir)
+	runIsolatedGit(t, seedDir, "remote", "add", "origin", bareDir)
+	runIsolatedGit(t, seedDir, "push", "origin", "HEAD:refs/heads/main")
+	runIsolatedGit(t, "", "clone", "--depth=1", "--branch", "main", "file://"+bareDir, cloneDir)
 
 	testutil.WriteFile(t, seedDir, "f.txt", "init\nnext\n")
 	testutil.GitAdd(t, seedDir, "f.txt")
 	testutil.GitCommit(t, seedDir, "next")
-	runIsolatedGit(ctx, t, seedDir, "push", "origin", "HEAD:refs/heads/main")
+	runIsolatedGit(t, seedDir, "push", "origin", "HEAD:refs/heads/main")
 
 	return bareDir, cloneDir
 }
 
-func runIsolatedGit(ctx context.Context, t *testing.T, dir string, args ...string) {
+func runIsolatedGit(t *testing.T, dir string, args ...string) {
 	t.Helper()
-	cmd := exec.CommandContext(ctx, "git", args...)
-	if dir != "" {
-		cmd.Dir = dir
-	}
-	cmd.Env = testutil.GitIsolatedEnv()
-	require.NoError(t, cmd.Run(), "git %v", args)
+	testutil.RunGit(t, dir, args...)
 }
 
 func TestAppendCheckpointTokenEnv(t *testing.T) {
@@ -796,6 +774,7 @@ func envToMap(env []string) map[string]string {
 // true value. Missing keys and read errors report false.
 func gitConfigBool(ctx context.Context, dir, key string) bool {
 	cmd := exec.CommandContext(ctx, "git", "config", "--local", "--get", "--type=bool", key)
+	cmd.Env = testutil.GitIsolatedEnv()
 	if dir != "" {
 		cmd.Dir = dir
 	}
@@ -827,18 +806,18 @@ func TestFetch_FilteredURLFetchMarksNewRemoteSkipped(t *testing.T) {
 
 	// Separate origin and checkpoint repos, mirroring the real setup where
 	// checkpoints are fetched by URL from a repo that is not origin.
-	runIsolatedGit(ctx, t, "", "init", "--bare", originBare)
-	runIsolatedGit(ctx, t, "", "init", "--bare", checkpointBare)
-	runIsolatedGit(ctx, t, checkpointBare, "config", "uploadpack.allowFilter", "true")
-	runIsolatedGit(ctx, t, seedDir, "push", originBare, "HEAD:refs/heads/main")
-	runIsolatedGit(ctx, t, "", "clone", "--branch", "main", "file://"+originBare, cloneDir)
+	runIsolatedGit(t, "", "init", "--bare", originBare)
+	runIsolatedGit(t, "", "init", "--bare", checkpointBare)
+	runIsolatedGit(t, checkpointBare, "config", "uploadpack.allowFilter", "true")
+	runIsolatedGit(t, seedDir, "push", originBare, "HEAD:refs/heads/main")
+	runIsolatedGit(t, "", "clone", "--branch", "main", "file://"+originBare, cloneDir)
 
 	// A commit only in the checkpoint repo so the filtered fetch has
 	// something to transfer.
 	testutil.WriteFile(t, seedDir, "f.txt", "init\nnext\n")
 	testutil.GitAdd(t, seedDir, "f.txt")
 	testutil.GitCommit(t, seedDir, "next")
-	runIsolatedGit(ctx, t, seedDir, "push", checkpointBare, "HEAD:refs/heads/main")
+	runIsolatedGit(t, seedDir, "push", checkpointBare, "HEAD:refs/heads/main")
 
 	// Filtered fetches read .entire settings from the CWD repo.
 	testutil.WriteFile(
@@ -869,7 +848,7 @@ func TestFetch_FilteredURLFetchMarksNewRemoteSkipped(t *testing.T) {
 	// checkpoint repo gone, --all only succeeds if the URL-keyed entry is
 	// skipped (origin is still reachable).
 	require.NoError(t, os.RemoveAll(checkpointBare))
-	runIsolatedGit(ctx, t, cloneDir, "fetch", "--all", "--no-auto-gc")
+	runIsolatedGit(t, cloneDir, "fetch", "--all", "--no-auto-gc")
 }
 
 // TestFetch_FailedFilteredFetchStillStampsNewRemote guards the resume
@@ -891,11 +870,11 @@ func TestFetch_FailedFilteredFetchStillStampsNewRemote(t *testing.T) {
 	testutil.GitAdd(t, seedDir, "f.txt")
 	testutil.GitCommit(t, seedDir, "init")
 
-	runIsolatedGit(ctx, t, "", "init", "--bare", originBare)
-	runIsolatedGit(ctx, t, "", "init", "--bare", checkpointBare)
-	runIsolatedGit(ctx, t, checkpointBare, "config", "uploadpack.allowFilter", "true")
-	runIsolatedGit(ctx, t, seedDir, "push", originBare, "HEAD:refs/heads/main")
-	runIsolatedGit(ctx, t, "", "clone", "--branch", "main", "file://"+originBare, cloneDir)
+	runIsolatedGit(t, "", "init", "--bare", originBare)
+	runIsolatedGit(t, "", "init", "--bare", checkpointBare)
+	runIsolatedGit(t, checkpointBare, "config", "uploadpack.allowFilter", "true")
+	runIsolatedGit(t, seedDir, "push", originBare, "HEAD:refs/heads/main")
+	runIsolatedGit(t, "", "clone", "--branch", "main", "file://"+originBare, cloneDir)
 
 	testutil.WriteFile(
 		t,
@@ -938,10 +917,10 @@ func TestFetch_UnfilteredFetchDoesNotCreateConfigSection(t *testing.T) {
 	testutil.GitAdd(t, seedDir, "f.txt")
 	testutil.GitCommit(t, seedDir, "init")
 
-	runIsolatedGit(ctx, t, "", "init", "--bare", bareDir)
-	runIsolatedGit(ctx, t, seedDir, "remote", "add", "origin", bareDir)
-	runIsolatedGit(ctx, t, seedDir, "push", "origin", "HEAD:refs/heads/main")
-	runIsolatedGit(ctx, t, "", "clone", "--branch", "main", "file://"+bareDir, cloneDir)
+	runIsolatedGit(t, "", "init", "--bare", bareDir)
+	runIsolatedGit(t, seedDir, "remote", "add", "origin", bareDir)
+	runIsolatedGit(t, seedDir, "push", "origin", "HEAD:refs/heads/main")
+	runIsolatedGit(t, "", "clone", "--branch", "main", "file://"+bareDir, cloneDir)
 
 	testutil.WriteFile(
 		t,
@@ -982,16 +961,16 @@ func TestFetch_ExistingURLRemoteNotReStamped(t *testing.T) {
 	testutil.GitAdd(t, seedDir, "f.txt")
 	testutil.GitCommit(t, seedDir, "init")
 
-	runIsolatedGit(ctx, t, "", "init", "--bare", originBare)
-	runIsolatedGit(ctx, t, "", "init", "--bare", checkpointBare)
-	runIsolatedGit(ctx, t, checkpointBare, "config", "uploadpack.allowFilter", "true")
-	runIsolatedGit(ctx, t, seedDir, "push", originBare, "HEAD:refs/heads/main")
-	runIsolatedGit(ctx, t, "", "clone", "--branch", "main", "file://"+originBare, cloneDir)
+	runIsolatedGit(t, "", "init", "--bare", originBare)
+	runIsolatedGit(t, "", "init", "--bare", checkpointBare)
+	runIsolatedGit(t, checkpointBare, "config", "uploadpack.allowFilter", "true")
+	runIsolatedGit(t, seedDir, "push", originBare, "HEAD:refs/heads/main")
+	runIsolatedGit(t, "", "clone", "--branch", "main", "file://"+originBare, cloneDir)
 
 	testutil.WriteFile(t, seedDir, "f.txt", "init\nnext\n")
 	testutil.GitAdd(t, seedDir, "f.txt")
 	testutil.GitCommit(t, seedDir, "next")
-	runIsolatedGit(ctx, t, seedDir, "push", checkpointBare, "HEAD:refs/heads/main")
+	runIsolatedGit(t, seedDir, "push", checkpointBare, "HEAD:refs/heads/main")
 
 	testutil.WriteFile(
 		t,
@@ -1004,7 +983,7 @@ func TestFetch_ExistingURLRemoteNotReStamped(t *testing.T) {
 	fetchURL := "file://" + checkpointBare
 	// Simulate a pre-existing URL-keyed remote (e.g. a phantom left by an older
 	// CLI). Its presence means the section already exists before our fetch.
-	runIsolatedGit(ctx, t, cloneDir, "config", "--local", "remote."+fetchURL+".promisor", "true")
+	runIsolatedGit(t, cloneDir, "config", "--local", "remote."+fetchURL+".promisor", "true")
 
 	out, err := Fetch(ctx, FetchOptions{
 		Remote:   fetchURL,
@@ -1043,7 +1022,7 @@ func TestGitRemoteSectionExists(t *testing.T) {
 	const url = "https://example.com/org/checkpoints.git"
 	assert.False(t, gitRemoteSectionExists(ctx, repoDir, url))
 
-	runIsolatedGit(ctx, t, repoDir, "config", "--local", "remote."+url+".promisor", "true")
+	runIsolatedGit(t, repoDir, "config", "--local", "remote."+url+".promisor", "true")
 	assert.True(t, gitRemoteSectionExists(ctx, repoDir, url))
 }
 
@@ -1059,7 +1038,7 @@ func TestGitRemoteSectionExists_ExactSubsectionMatch(t *testing.T) {
 
 	const longURL = "https://example.com/org/repo.git"
 	const shortURL = "https://example.com/org/repo"
-	runIsolatedGit(ctx, t, repoDir, "config", "--local", "remote."+longURL+".promisor", "true")
+	runIsolatedGit(t, repoDir, "config", "--local", "remote."+longURL+".promisor", "true")
 
 	assert.True(t, gitRemoteSectionExists(ctx, repoDir, longURL),
 		"the exact URL section is present")
@@ -1079,7 +1058,7 @@ func TestStampNewlyCreatedRemote_StampsUnderCancelledContext(t *testing.T) {
 	const url = "https://example.com/org/checkpoints.git"
 	// Simulate git having recorded the promisor section during a fetch that
 	// then timed out.
-	runIsolatedGit(context.Background(), t, repoDir, "config", "--local", "remote."+url+".promisor", "true")
+	runIsolatedGit(t, repoDir, "config", "--local", "remote."+url+".promisor", "true")
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel() // parent context already done, as after a timed-out fetch

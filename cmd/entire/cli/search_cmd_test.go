@@ -150,7 +150,11 @@ func TestWriteSearchCompactJSON_TrimsResults(t *testing.T) {
 
 // Repo/pr rows (reachable via --all-repos) have no typed struct; compact hits
 // must still carry identifying info from the raw payload instead of collapsing
-// to just {id, type, score}.
+// to just {id, type, score}. checkpointCount is carried through (core
+// repo_facts); the repo description is not — its only source was the retired
+// MySQL repos table and the v1 wire now sends it as always-null (ENT-1912,
+// entire-search#198). The fixture sends a non-null value to prove the CLI
+// drops it regardless of what an un-redeployed cell still emits.
 func TestWriteSearchCompactJSON_RepoAndPRRowsKeepIdentifyingFields(t *testing.T) {
 	t.Parallel()
 
@@ -173,7 +177,6 @@ func TestWriteSearchCompactJSON_RepoAndPRRowsKeepIdentifyingFields(t *testing.T)
 		`"id": "01JREPO"`,
 		`"repo": "acme/backend"`,
 		`"title": "backend"`,
-		`"description": "Backend services"`,
 		`"checkpointCount": 18`,
 		`"id": "pr-9"`,
 		`"title": "Fix login retry"`,
@@ -186,6 +189,10 @@ func TestWriteSearchCompactJSON_RepoAndPRRowsKeepIdentifyingFields(t *testing.T)
 	// The owner must never be doubled when the payload carries a qualified fullName.
 	if strings.Contains(output, "acme/acme/") {
 		t.Errorf("compact output doubled the repo owner:\n%s", output)
+	}
+	// The MySQL-era repo description is never surfaced, even when a cell sends it.
+	if strings.Contains(output, `"description"`) {
+		t.Errorf("compact output carries retired repo description:\n%s", output)
 	}
 }
 

@@ -13,11 +13,17 @@ import (
 
 // Compile-time interface assertions.
 var (
-	_ agent.HookSupport        = (*CodexAgent)(nil)
-	_ agent.HookResponseWriter = (*CodexAgent)(nil)
-	_ agent.ContextInjector    = (*CodexAgent)(nil)
-	_ agent.SessionEndBudgeter = (*CodexAgent)(nil)
+	_ agent.HookSupport              = (*CodexAgent)(nil)
+	_ agent.HookFreshness            = (*CodexAgent)(nil)
+	_ agent.EffectiveHookDiagnostics = (*CodexAgent)(nil)
+	_ agent.HookResponseWriter       = (*CodexAgent)(nil)
+	_ agent.ContextInjector          = (*CodexAgent)(nil)
+	_ agent.SessionEndBudgeter       = (*CodexAgent)(nil)
 )
+
+// OwnsEffectiveHookDiagnostics keeps Codex's discovered-file state out of the
+// generic current-worktree freshness report.
+func (c *CodexAgent) OwnsEffectiveHookDiagnostics() {}
 
 // WriteHookResponse outputs a JSON hook response to stdout.
 // Codex reads the systemMessage field and displays it to the user.

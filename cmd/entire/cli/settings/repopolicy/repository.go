@@ -46,6 +46,10 @@ type RepositoryResolver func(context.Context) (Repository, error)
 const runtimeKeyLength = 16
 
 // runtimeKey returns the stable runtime-directory name for a Git worktree ID.
+// RuntimeKeyLength is the hex length of the per-worktree runtime key —
+// consumers that must RECOGNIZE a routed runtime path (entiredir) match on it.
+const RuntimeKeyLength = runtimeKeyLength
+
 func runtimeKey(worktreeID string) string {
 	sum := sha256.Sum256([]byte(worktreeID))
 	return hex.EncodeToString(sum[:])[:runtimeKeyLength]

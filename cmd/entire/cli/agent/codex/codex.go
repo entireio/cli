@@ -53,7 +53,7 @@ func (c *CodexAgent) IsPreview() bool { return true }
 
 // DetectPresence checks if Codex is configured in the repository.
 func (c *CodexAgent) DetectPresence(ctx context.Context) (bool, error) {
-	return c.AreHooksInstalled(ctx), nil
+	return c.AreHooksInstalled(ctx)
 }
 
 // GetSessionID extracts the session ID from hook input.
@@ -88,7 +88,7 @@ func (c *CodexAgent) GetSessionDir(_ string) (string, error) {
 
 // ResolveSessionFile returns the path to a Codex session transcript file.
 // Codex provides the transcript path directly in hook payloads as an absolute path.
-// When only a session ID is available, attach/rewind must recover it from the
+// When only a session ID is available, callers recover it from the
 // sessions/YYYY/MM/DD/rollout-...-<session-id>.jsonl layout.
 func (c *CodexAgent) ResolveSessionFile(sessionDir, agentSessionID string) string {
 	if filepath.IsAbs(agentSessionID) {
@@ -176,8 +176,8 @@ func (c *CodexAgent) WriteSession(_ context.Context, session *agent.AgentSession
 	}
 
 	dataToWrite := SanitizePortableTranscript(session.NativeData)
-	if err := os.WriteFile(session.SessionRef, dataToWrite, 0o600); err != nil {
-		return fmt.Errorf("failed to write transcript: %w", err)
+	if err := agent.WriteSessionFile(c, session, dataToWrite, 0o600); err != nil {
+		return fmt.Errorf("write transcript: %w", err)
 	}
 
 	return nil

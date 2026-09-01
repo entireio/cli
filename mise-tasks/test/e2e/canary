@@ -25,6 +25,15 @@ rr_rc=0
 
 # --- vogon: runs all tests (built-in agent) ---
 echo "--- canary: vogon ---"
+
+# Preflight, mirroring the roger-roger check below: vogon registers itself only
+# if its binary is on PATH when the test binary starts. Without it nothing
+# registers, every test skips, and the lane exits 0 having run nothing.
+if ! PATH="$E2E_PATH" command -v vogon >/dev/null 2>&1; then
+  echo "error: vogon binary not found on PATH after build; the canary lane would skip every test and still report success." >&2
+  exit 1
+fi
+
 PATH="$E2E_PATH" E2E_AGENT=vogon gotestsum --format dots \
   --jsonfile "$E2E_ARTIFACT_DIR/test-events-vogon.json" -- \
   -tags=e2e -count=1 -timeout=10m \

@@ -7,6 +7,8 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/entireio/cli/cmd/entire/cli/osroot"
 )
 
 func TestWriteFileAtomic_CreatesNewFile(t *testing.T) {
@@ -142,6 +144,129 @@ func TestWriteFileAtomic_CleansUpTempOnRenameFailure(t *testing.T) {
 	}
 }
 
+func TestWriteFileAtomic_ParentMissing(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	target := filepath.Join(dir, "does-not-exist", "out.json")
+
+	err := WriteFileAtomic(target, []byte("x"), 0o644)
+	if err == nil {
+		t.Fatal("expected error when parent dir is missing")
+	}
+	if !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("expected ErrNotExist; got: %v", err)
+	}
+}
+
+func TestWriteFileAtomicIn_WritesThroughRoot(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		t.Fatalf("os.OpenRoot: %v", err)
+	}
+	defer root.Close()
+
+	if err := os.MkdirAll(filepath.Join(dir, "metadata"), 0o750); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := WriteFileAtomicIn(root, "metadata/state.json", []byte(`{"a":1}`), 0o600); err != nil {
+		t.Fatalf("WriteFileAtomicIn: %v", err)
+	}
+
+	got, err := os.ReadFile(filepath.Join(dir, "metadata", "state.json"))
+	if err != nil {
+		t.Fatalf("read back: %v", err)
+	}
+	if string(got) != `{"a":1}` {
+		t.Errorf("contents = %q, want %q", got, `{"a":1}`)
+	}
+}
+
+func TestWriteFileAtomicIn_ReplacesExistingAndLeavesNoTemp(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		t.Fatalf("os.OpenRoot: %v", err)
+	}
+	defer root.Close()
+
+	if err := os.WriteFile(filepath.Join(dir, "settings.json"), []byte("stale"), 0o600); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	if err := WriteFileAtomicIn(root, "settings.json", []byte("fresh"), 0o644); err != nil {
+		t.Fatalf("WriteFileAtomicIn: %v", err)
+	}
+
+	got, err := os.ReadFile(filepath.Join(dir, "settings.json"))
+	if err != nil {
+		t.Fatalf("read back: %v", err)
+	}
+	if string(got) != "fresh" {
+		t.Errorf("contents = %q, want %q", got, "fresh")
+	}
+
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("readdir: %v", err)
+	}
+	if len(entries) != 1 || entries[0].Name() != "settings.json" {
+		t.Errorf("temp file left behind: %v", entries)
+	}
+}
+
+// The whole reason .entire writes go through a root: a name assembled from
+// agent-supplied input must not be able to land outside it.
+func TestWriteFileAtomicIn_RejectsEscapingName(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "inner"), 0o750); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	root, err := os.OpenRoot(filepath.Join(dir, "inner"))
+	if err != nil {
+		t.Fatalf("os.OpenRoot: %v", err)
+	}
+	defer root.Close()
+
+	if err := WriteFileAtomicIn(root, "../escaped.json", []byte("nope"), 0o600); err == nil {
+		t.Fatal("expected an escaping name to be rejected")
+	}
+	if _, err := os.Stat(filepath.Join(dir, "escaped.json")); !os.IsNotExist(err) {
+		t.Errorf("escaping write landed outside the root: %v", err)
+	}
+}
+
+func TestWriteFileAtomicIn_RejectsSymlinkedParentInsideRoot(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	realDir := filepath.Join(dir, "real")
+	if err := os.MkdirAll(realDir, 0o750); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.Symlink("real", filepath.Join(dir, "metadata")); err != nil {
+		t.Skipf("symlink not supported: %v", err)
+	}
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		t.Fatalf("os.OpenRoot: %v", err)
+	}
+	defer root.Close()
+
+	err = WriteFileAtomicIn(root, "metadata/state.json", []byte("nope"), 0o600)
+	if !errors.Is(err, osroot.ErrSymlinkedPath) {
+		t.Fatalf("WriteFileAtomicIn error = %v, want ErrSymlinkedPath", err)
+	}
+	if _, err := os.Stat(filepath.Join(realDir, "state.json")); !os.IsNotExist(err) {
+		t.Fatalf("write reached symlink target: %v", err)
+	}
+}
+
 // DanglingSymlink pins the stow/chezmoi link-farm case: an existing symlink
 // whose target file does not exist yet must be written THROUGH (creating the
 // target), not replaced by a regular file — EvalSymlinks errors on a dangling
@@ -204,20 +329,6 @@ func TestWriteFileAtomicFollowingSymlinks_PreservesExistingMode(t *testing.T) {
 	}
 	if got := info.Mode().Perm(); got != 0o644 {
 		t.Errorf("perm after rewrite: got %#o want %#o", got, 0o644)
-	}
-}
-
-func TestWriteFileAtomic_ParentMissing(t *testing.T) {
-	t.Parallel()
-	dir := t.TempDir()
-	target := filepath.Join(dir, "does-not-exist", "out.json")
-
-	err := WriteFileAtomic(target, []byte("x"), 0o644)
-	if err == nil {
-		t.Fatal("expected error when parent dir is missing")
-	}
-	if !errors.Is(err, os.ErrNotExist) {
-		t.Errorf("expected ErrNotExist; got: %v", err)
 	}
 }
 

@@ -47,8 +47,8 @@ func TestSetupCodexHooks_AddsAllRequiredHooks(t *testing.T) {
 		t.Error("Codex PostToolUse hook should exist")
 	}
 
-	searchAgentPath := filepath.Join(env.RepoDir, ".codex", "agents", "entire-search.toml")
-	if _, err := os.Stat(searchAgentPath); !os.IsNotExist(err) {
+	searchSkillPath := filepath.Join(env.RepoDir, ".agents", "skills", "entire-search", "SKILL.md")
+	if _, err := os.Stat(searchSkillPath); !os.IsNotExist(err) {
 		t.Fatalf("default enable should not create Codex search skill, stat err = %v", err)
 	}
 }
@@ -68,8 +68,8 @@ func TestSetupCodexHooks_SearchSkillOptIn(t *testing.T) {
 		t.Fatalf("enable codex --search-skill command failed: %v\nOutput: %s", err, output)
 	}
 
-	searchAgentPath := filepath.Join(env.RepoDir, ".codex", "agents", "entire-search.toml")
-	searchData, err := os.ReadFile(searchAgentPath)
+	searchSkillPath := filepath.Join(env.RepoDir, ".agents", "skills", "entire-search", "SKILL.md")
+	searchData, err := os.ReadFile(searchSkillPath)
 	if err != nil {
 		t.Fatalf("failed to read generated Codex search skill: %v", err)
 	}

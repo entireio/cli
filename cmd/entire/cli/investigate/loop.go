@@ -180,7 +180,7 @@ func RunInvestigateLoop(ctx context.Context, in LoopInput, deps LoopDeps) (LoopR
 		now:         now,
 		quorum:      quorum,
 		maxPerAgent: maxTurnsPerAgent,
-		stateDoc:    deps.States.runStatePath(in.RunID),
+		stateDoc:    deps.States.RunStatePath(in.RunID),
 	}
 	consecutiveFails := 0
 	var lastErr error
@@ -282,7 +282,7 @@ func runOneTurn(ctx context.Context, cfg turnConfig, state *RunState) turnOutcom
 	state.Turn++
 	round := ((state.Turn - 1) / len(state.Agents)) + 1
 
-	preFindings := fileFingerprint(ctx, in.FindingsDoc)
+	preFindings := findingsFingerprint(ctx, deps.States, in.RunID)
 
 	deps.Progress.TurnStarted(agentName, state.Turn, round, cfg.maxPerAgent)
 
@@ -329,7 +329,7 @@ func runOneTurn(ctx context.Context, cfg turnConfig, state *RunState) turnOutcom
 	runErr := cmd.Run()
 	turnDuration := cfg.now().Sub(turnStart)
 
-	postFindings := fileFingerprint(ctx, in.FindingsDoc)
+	postFindings := findingsFingerprint(ctx, deps.States, in.RunID)
 
 	if runErr != nil {
 		turn := TurnStance{
@@ -530,41 +530,37 @@ func recordFailureStance(state *RunState, round int, agent string, err error, no
 	state.UpdatedAt = now()
 }
 
-// fileFingerprint returns "<size>:<sha256>" for the file at path, or the
-// empty string when the file is missing or unreadable. Used to drive
+// findingsFingerprint returns "<size>:<sha256>" for runID's findings document,
+// or the empty string when it is missing or unreadable. Used to drive
 // PlanChanged across a turn.
+//
+// It reads through the store rather than through in.FindingsDoc, which is the
+// same file named as an absolute path. The path is what the investigating agent
+// is told to edit; this side of the loop resolves it as a name inside the store
+// so a run id is the only thing that selects a file.
 //
 // Includes a content SHA rather than mtime: filesystems with second-
 // granularity mtime (FAT, some network mounts) would let a same-length
 // sub-second edit escape detection if we keyed on size+mtime alone, and
 // the typical findings doc is small enough that hashing once per turn is
-// cheap. Stat-only fallback keeps the loop moving when the file does not
-// yet exist (turn 1 of a new run); a missing file is detected downstream
-// by comparing the empty fingerprint before vs. after the turn.
-func fileFingerprint(ctx context.Context, path string) string {
-	info, err := os.Stat(path)
-	if err != nil {
-		logging.Debug(ctx, "investigate: stat findings doc failed",
-			slog.String("path", path), sErr(err))
+// cheap. A missing document yields the empty string, which keeps the loop
+// moving on turn 1 of a new run and is detected downstream by comparing the
+// fingerprint before vs. after the turn.
+func findingsFingerprint(ctx context.Context, store *StateStore, runID string) string {
+	if store == nil {
 		return ""
 	}
-	f, err := os.Open(path) //nolint:gosec // path is the findings doc the caller already validated
+	data, found, err := store.ReadFindings(runID)
 	if err != nil {
-		// Fall back to size+mtime when content cannot be read; better than
-		// returning empty (which would mis-report PlanChanged for a missing
-		// vs unreadable file).
-		logging.Debug(ctx, "investigate: open findings doc for hashing failed",
-			slog.String("path", path), sErr(err))
-		return fmt.Sprintf("%d:m%d", info.Size(), info.ModTime().UnixNano())
+		logging.Debug(ctx, "investigate: read findings doc for hashing failed",
+			sRun(runID), sErr(err))
+		return ""
 	}
-	defer func() { _ = f.Close() }()
-	h := sha256.New()
-	if _, err := io.Copy(h, f); err != nil {
-		logging.Debug(ctx, "investigate: hash findings doc failed",
-			slog.String("path", path), sErr(err))
-		return fmt.Sprintf("%d:m%d", info.Size(), info.ModTime().UnixNano())
+	if !found {
+		return ""
 	}
-	return fmt.Sprintf("%d:%s", info.Size(), hex.EncodeToString(h.Sum(nil)))
+	sum := sha256.Sum256(data)
+	return fmt.Sprintf("%d:%s", len(data), hex.EncodeToString(sum[:]))
 }
 
 // classifyRunErr formats the per-turn agent error so the recorded Note

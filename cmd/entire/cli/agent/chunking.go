@@ -138,10 +138,24 @@ func ParseChunkIndex(filename, baseName string) int {
 		return -1
 	}
 
+	// The suffix must be digits and nothing else. fmt.Sscanf("%03d") was too
+	// permissive: it stops at the first non-digit and reports success, so
+	// "full.jsonl.123abcdef0123456.tmp" — the shape jsonutil.CreateTempIn
+	// leaves behind when an atomic write is interrupted — parsed as chunk 123
+	// and was reassembled into the transcript. The checkpoint walks now skip
+	// those files, and this refuses to read one as a chunk if one ever reaches
+	// a tree written by an older CLI.
 	suffix := strings.TrimPrefix(filename, baseName+".")
-	var index int
-	if _, err := fmt.Sscanf(suffix, "%03d", &index); err != nil {
+	if suffix == "" {
 		return -1
+	}
+	index := 0
+	for i := range len(suffix) {
+		c := suffix[i]
+		if c < '0' || c > '9' {
+			return -1
+		}
+		index = index*10 + int(c-'0')
 	}
 	return index
 }

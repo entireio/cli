@@ -142,8 +142,8 @@ echo -e "${GREEN}main.py after user edit:${NC}"
 cat main.py
 echo ""
 
-# Check rewind points
-echo -e "${BLUE}=== Step 9: Check rewind points ===${NC}"
+# Check pending checkpoints
+echo -e "${BLUE}=== Step 9: Check pending checkpoints ===${NC}"
 entire checkpoint list --pending --json || true
 
 # Show session state (includes PromptAttributions for debugging)
@@ -254,10 +254,10 @@ else
     echo -e "${YELLOW}No Entire-Checkpoint trailer found (user may have removed it)${NC}"
 fi
 
-# Show rewind points summary
+# Show pending checkpoints summary
 echo ""
-echo -e "${BLUE}=== Step 15: Rewind points summary ===${NC}"
-entire checkpoint list --pending --json | jq -r '.[] | "  \(.id[0:8])... - \(.message[0:60])"' 2>/dev/null || echo "  (no rewind points)"
+echo -e "${BLUE}=== Step 15: Pending checkpoints summary ===${NC}"
+entire checkpoint list --pending --json | jq -r '.[] | "  \(.id[0:8])... - \(.message[0:60])"' 2>/dev/null || echo "  (no pending checkpoints)"
 
 # Final summary
 echo ""

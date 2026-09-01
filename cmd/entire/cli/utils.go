@@ -10,7 +10,7 @@ import (
 
 	"charm.land/huh/v2"
 
-	"github.com/entireio/cli/cmd/entire/cli/osroot"
+	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/uiform"
 )
@@ -89,7 +89,7 @@ func copyFile(src, dst string) error {
 	}
 	defer root.Close()
 
-	if err := osroot.WriteFile(root, relPath, input, 0o600); err != nil {
+	if err := jsonutil.WriteFileAtomicIn(root, relPath, input, 0o600); err != nil {
 		return fmt.Errorf("failed to write file: %w", err)
 	}
 	return nil
@@ -97,7 +97,12 @@ func copyFile(src, dst string) error {
 
 // openAllowedRoot finds the allowed root directory that contains dst and returns
 // an os.Root handle along with the relative path within that root.
-// Allowed directories: repo worktree root, user home, system temp dir.
+//
+// The root's base is always one of three directories resolved independently of
+// dst — the worktree root, the user's home, the system temp dir — never
+// filepath.Dir(dst). dst only selects WHICH of them applies and supplies the
+// name inside it, so a dst that escapes every one of them is refused here rather
+// than opening a root wherever it points.
 // dst is resolved through symlinks before matching to handle macOS /var → /private/var.
 func openAllowedRoot(dst string) (*os.Root, string, error) {
 	allowed := allowedRootDirs()
@@ -118,11 +123,18 @@ func openAllowedRoot(dst string) (*os.Root, string, error) {
 		if err != nil {
 			continue
 		}
+		// A PRIVATE root, deliberately not osroot.Shared. Two of the three
+		// candidate bases are the user's home and the system temp dir, which have
+		// no business sharing a lifecycle with .entire: ResetShared closes every
+		// cached root, so routing this through the registry let an unrelated
+		// `entire disable` — or, in tests, any parallel entiredir.Reset — close
+		// the handle out from under a copy in progress. The registry exists to
+		// memoize long-lived anchors, and this is a single write.
 		root, err := os.OpenRoot(dir)
 		if err != nil {
 			return nil, "", fmt.Errorf("openAllowedRoot: failed to open root %q: %w", dir, err)
 		}
-		return root, rel, nil
+		return root, filepath.ToSlash(rel), nil
 	}
 
 	return nil, "", fmt.Errorf("openAllowedRoot: dst %q is outside allowed directories", dst)

@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -302,11 +301,7 @@ func TestPathIsVersioned_LinkedWorktreeUsesOwnIndex(t *testing.T) {
 func TestPathIsVersioned_ReftableRepo(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
-	init := exec.CommandContext(t.Context(), "git", "init", "-q", "--ref-format=reftable", ".")
-	init.Dir = root
-	init.Env = testutil.GitIsolatedEnv()
-	out, err := init.CombinedOutput()
-	require.NoError(t, err, "reftable init: %s", out)
+	testutil.RunGit(t, root, "init", "-q", "--ref-format=reftable", ".")
 	for _, kv := range [][]string{{"user.email", "t@t.io"}, {"user.name", "T"}, {"commit.gpgsign", "false"}} {
 		testutil.RunGit(t, root, "config", kv[0], kv[1])
 	}
@@ -588,8 +583,13 @@ func TestOPFCommandTrust_SymlinkedEntireDirIsIgnored(t *testing.T) {
 
 	project := filepath.Join(root, EntireSettingsFile)
 	local := filepath.Join(root, EntireSettingsLocalFile)
-	assert.Empty(t, loadedOPF(t, project, local).Command,
-		"a command reached through a symlinked .entire is repository content, not the developer's")
+	// The rooted loader refuses to read through a symlinked .entire at all
+	// (fail closed): the attacker's command never even loads. Guarded
+	// commands are refused earlier by checkEntireDirBeforeRun; this pins the
+	// loader's own behavior for the paths that reach it directly.
+	_, err := loadMergedSettings(t.Context(), project, "", local)
+	require.Error(t, err, "a symlinked .entire is repository content; loading through it must fail closed")
+	assert.Contains(t, err.Error(), "symlink")
 }
 
 // A submodule mounted at `.entire` is a real directory — the symlink probe

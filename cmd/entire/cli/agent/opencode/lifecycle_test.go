@@ -305,7 +305,7 @@ func TestPrepareTranscript_AlwaysRefreshesTranscript(t *testing.T) {
 	}
 
 	wantErr := errors.New("refresh attempted")
-	stubExport(t, func(context.Context, string, string) error { return wantErr })
+	stubExport(t, func(context.Context, *os.Root, string, string) error { return wantErr })
 
 	err := (&OpenCodeAgent{}).PrepareTranscript(context.Background(), transcriptPath)
 	if !errors.Is(err, wantErr) {
@@ -347,7 +347,7 @@ func TestPrepareTranscript_BrokenSymlinkFallsThroughToExport(t *testing.T) {
 	}
 
 	wantErr := errors.New("export attempted")
-	stubExport(t, func(context.Context, string, string) error { return wantErr })
+	stubExport(t, func(context.Context, *os.Root, string, string) error { return wantErr })
 
 	err := (&OpenCodeAgent{}).PrepareTranscript(context.Background(), transcriptPath)
 	if !errors.Is(err, wantErr) {
@@ -410,11 +410,11 @@ func TestFetchAndCacheExport_WritesAndValidatesExportFile(t *testing.T) {
 	t.Cleanup(paths.ClearWorktreeRootCache)
 
 	original := runOpenCodeExportToFileFn
-	runOpenCodeExportToFileFn = func(_ context.Context, sessionID, outputPath string) error {
+	runOpenCodeExportToFileFn = func(_ context.Context, root *os.Root, sessionID, outputName string) error {
 		if sessionID != "ses_abc123" {
 			return fmt.Errorf("unexpected session id: %s", sessionID)
 		}
-		return os.WriteFile(outputPath, []byte(`{"info":{"id":"ses_abc123"},"messages":[]}`), 0o600)
+		return root.WriteFile(outputName, []byte(`{"info":{"id":"ses_abc123"},"messages":[]}`), 0o600)
 	}
 	t.Cleanup(func() {
 		runOpenCodeExportToFileFn = original
@@ -450,8 +450,9 @@ func cachedTranscriptFixture(t *testing.T, sessionID, content string) string {
 }
 
 // stubExport replaces the export runner for the duration of the test. The stub
-// receives the staging path, exactly as the real runner does.
-func stubExport(t *testing.T, fn func(ctx context.Context, sessionID, outputPath string) error) {
+// receives the .entire root and the staging name within it, exactly as the real
+// runner does.
+func stubExport(t *testing.T, fn func(ctx context.Context, root *os.Root, sessionID, outputName string) error) {
 	t.Helper()
 
 	original := runOpenCodeExportToFileFn
@@ -482,8 +483,8 @@ func TestFetchAndCacheExport_PartialFailurePreservesCachedTranscript(t *testing.
 	)
 	cachedPath := cachedTranscriptFixture(t, sessionID, cached)
 
-	stubExport(t, func(_ context.Context, _, outputPath string) error {
-		if err := os.WriteFile(outputPath, []byte(`{"info":{"id":"ses_par`), 0o600); err != nil {
+	stubExport(t, func(_ context.Context, root *os.Root, _, outputName string) error {
+		if err := root.WriteFile(outputName, []byte(`{"info":{"id":"ses_par`), 0o600); err != nil {
 			return err
 		}
 		return errors.New("export timed out")
@@ -510,9 +511,9 @@ func TestFetchAndCacheExport_TruncatedZeroExitPreservesCachedTranscript(t *testi
 	)
 	cachedPath := cachedTranscriptFixture(t, sessionID, cached)
 
-	stubExport(t, func(_ context.Context, _, outputPath string) error {
+	stubExport(t, func(_ context.Context, root *os.Root, _, outputName string) error {
 		// Exit 0, truncated payload.
-		return os.WriteFile(outputPath, []byte(`{"info":{"id":"ses_trun`), 0o600)
+		return root.WriteFile(outputName, []byte(`{"info":{"id":"ses_trun`), 0o600)
 	})
 
 	_, err := (&OpenCodeAgent{}).fetchAndCacheExport(context.Background(), sessionID)
@@ -532,8 +533,8 @@ func TestFetchAndCacheExport_EmptyZeroExitPreservesCachedTranscript(t *testing.T
 	)
 	cachedPath := cachedTranscriptFixture(t, sessionID, cached)
 
-	stubExport(t, func(_ context.Context, _, outputPath string) error {
-		return os.WriteFile(outputPath, nil, 0o600)
+	stubExport(t, func(_ context.Context, root *os.Root, _, outputName string) error {
+		return root.WriteFile(outputName, nil, 0o600)
 	})
 
 	_, err := (&OpenCodeAgent{}).fetchAndCacheExport(context.Background(), sessionID)
@@ -553,7 +554,7 @@ func TestFetchAndCacheExport_InstallsValidExportOverCachedTranscript(t *testing.
 	)
 	cachedPath := cachedTranscriptFixture(t, sessionID, cached)
 
-	stubExport(t, func(_ context.Context, _, outputPath string) error {
+	stubExport(t, func(_ context.Context, root *os.Root, _, outputName string) error {
 		// The staging path is not the live transcript, so the cached copy must
 		// still be intact at this point.
 		current, err := os.ReadFile(cachedPath)
@@ -563,7 +564,7 @@ func TestFetchAndCacheExport_InstallsValidExportOverCachedTranscript(t *testing.
 		if string(current) != cached {
 			return fmt.Errorf("export wrote through to the live transcript: %q", string(current))
 		}
-		return os.WriteFile(outputPath, []byte(fresh), 0o600)
+		return root.WriteFile(outputName, []byte(fresh), 0o600)
 	})
 
 	got, err := (&OpenCodeAgent{}).fetchAndCacheExport(context.Background(), sessionID)
@@ -593,7 +594,7 @@ func TestFetchTranscript_AttemptsExport(t *testing.T) {
 
 	wantErr := errors.New("export attempted")
 	original := runOpenCodeExportToFileFn
-	runOpenCodeExportToFileFn = func(context.Context, string, string) error { return wantErr }
+	runOpenCodeExportToFileFn = func(context.Context, *os.Root, string, string) error { return wantErr }
 	t.Cleanup(func() { runOpenCodeExportToFileFn = original })
 
 	ag := &OpenCodeAgent{}
@@ -609,8 +610,8 @@ func TestFetchTranscript_ReportsInvalidJSON(t *testing.T) {
 	t.Cleanup(paths.ClearWorktreeRootCache)
 
 	original := runOpenCodeExportToFileFn
-	runOpenCodeExportToFileFn = func(_ context.Context, _, outputPath string) error {
-		return os.WriteFile(outputPath, []byte("not json"), 0o600)
+	runOpenCodeExportToFileFn = func(_ context.Context, root *os.Root, _, outputName string) error {
+		return root.WriteFile(outputName, []byte("not json"), 0o600)
 	}
 	t.Cleanup(func() { runOpenCodeExportToFileFn = original })
 

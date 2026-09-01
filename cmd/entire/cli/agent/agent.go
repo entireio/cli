@@ -39,8 +39,8 @@ type Agent interface {
 	// DetectPresence checks if this agent is configured in the repository
 	DetectPresence(ctx context.Context) (bool, error)
 
-	// ProtectedDirs returns repo-root-relative directories that should never be
-	// modified or deleted during rewind or other destructive operations.
+	// ProtectedDirs returns repo-root-relative directories that Entire must never
+	// record as session changes or capture into a checkpoint.
 	// Examples: [".claude"] for Claude, [".gemini"] for Gemini.
 	ProtectedDirs() []string
 
@@ -73,7 +73,7 @@ type Agent interface {
 	// it verbatim when absolute. Callers that source agentSessionID from
 	// untrusted data (e.g. checkpoint metadata on the shared
 	// entire/checkpoints/v1 branch, hook input) MUST validate it with
-	// validation.ValidateSessionID first. The resume/rewind restore paths do
+	// validation.ValidateSessionID first. The resume/log-restore paths do
 	// this at their choke points (transcript.resolveTranscriptPath and
 	// strategy.RestoreLogsOnly); do not call this with unvalidated input.
 	ResolveSessionFile(sessionDir, agentSessionID string) string
@@ -121,8 +121,16 @@ type HookSupport interface {
 	// UninstallHooks removes installed hooks
 	UninstallHooks(ctx context.Context) error
 
-	// AreHooksInstalled checks if hooks are currently installed
-	AreHooksInstalled(ctx context.Context) bool
+	// AreHooksInstalled reports whether hooks are currently installed, and
+	// returns an error when the agent could not find out.
+	//
+	// The two are different answers and callers may act on the difference: "no
+	// hooks" means there is nothing to remove, while an error means the state is
+	// unknown and hooks may well be installed. Built-in agents read a local
+	// config file, where absent means absent, so they report no error. An
+	// external agent answers over a subprocess that can crash, time out, or
+	// print junk, and reports that as an error rather than as "no hooks".
+	AreHooksInstalled(ctx context.Context) (bool, error)
 }
 
 // HookConfigState describes how an agent's installed Entire hook config
@@ -159,6 +167,13 @@ type HookFreshness interface {
 	// CheckHookConfig reports whether this agent's Entire hook config is
 	// absent, current, or outdated in the current repo.
 	CheckHookConfig(ctx context.Context) HookConfigState
+}
+
+// EffectiveHookDiagnostics marks agents whose effective hook state is reported
+// by an agent-owned diagnostic surface rather than generic freshness output.
+type EffectiveHookDiagnostics interface {
+	Agent
+	OwnsEffectiveHookDiagnostics()
 }
 
 // FileWatcher is implemented by agents that use file-based detection.

@@ -3,9 +3,11 @@ package cli
 import (
 	"archive/zip"
 	"context"
+	"errors"
+	"github.com/entireio/cli/cmd/entire/cli/entiredir"
 	"io"
+	"io/fs"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -37,7 +39,7 @@ func TestWriteDoctorBundle_ContainsExpectedEntries(t *testing.T) {
 	}
 
 	out := filepath.Join(dir, "bundle.zip")
-	if err := writeDoctorBundle(context.Background(), dir, filepath.Join(dir, logging.LogsDir), out, false); err != nil {
+	if err := writeDoctorBundle(context.Background(), dir, mustOpenEntireAt(t, dir), out, false); err != nil {
 		t.Fatalf("writeDoctorBundle: %v", err)
 	}
 	info, err := os.Stat(out)
@@ -90,7 +92,7 @@ func TestWriteDoctorBundle_CapturesEntireRefs(t *testing.T) {
 	runDoctorBundleGit(t, dir, "update-ref", "refs/heads/entire/checkpoints/v1", "HEAD")
 
 	out := filepath.Join(dir, "bundle.zip")
-	if err := writeDoctorBundle(context.Background(), dir, filepath.Join(dir, logging.LogsDir), out, false); err != nil {
+	if err := writeDoctorBundle(context.Background(), dir, mustOpenEntireAt(t, dir), out, false); err != nil {
 		t.Fatalf("writeDoctorBundle: %v", err)
 	}
 
@@ -108,7 +110,7 @@ func TestWriteDoctorBundle_RedactsCredentialedRemote(t *testing.T) {
 	runDoctorBundleGit(t, dir, "remote", "add", "origin", "https://user:s3cr3tTOKEN12345@example.com/owner/repo.git")
 
 	out := filepath.Join(dir, "bundle.zip")
-	if err := writeDoctorBundle(context.Background(), dir, filepath.Join(dir, logging.LogsDir), out, false); err != nil {
+	if err := writeDoctorBundle(context.Background(), dir, mustOpenEntireAt(t, dir), out, false); err != nil {
 		t.Fatalf("writeDoctorBundle: %v", err)
 	}
 
@@ -125,7 +127,7 @@ func TestWriteDoctorBundle_OmitsAbsentLogsDirectory(t *testing.T) {
 	testutil.InitRepo(t, dir)
 
 	out := filepath.Join(dir, "bundle.zip")
-	if err := writeDoctorBundle(context.Background(), dir, filepath.Join(dir, logging.LogsDir), out, false); err != nil {
+	if err := writeDoctorBundle(context.Background(), dir, mustOpenEntireAt(t, dir), out, false); err != nil {
 		t.Fatalf("writeDoctorBundle: %v", err)
 	}
 
@@ -182,12 +184,7 @@ func readZipEntry(t *testing.T, zipPath, name string) string {
 func runDoctorBundleGit(t *testing.T, dir string, args ...string) {
 	t.Helper()
 
-	cmd := exec.Command("git", args...) //nolint:noctx // test helper, no context needed
-	cmd.Dir = dir
-	cmd.Env = testutil.GitIsolatedEnv()
-	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("git %v: %v\n%s", args, err, out)
-	}
+	testutil.RunGit(t, dir, args...)
 }
 
 func TestWriteDoctorBundle_RedactsLogContents(t *testing.T) {
@@ -207,7 +204,7 @@ func TestWriteDoctorBundle_RedactsLogContents(t *testing.T) {
 	}
 
 	out := filepath.Join(dir, "bundle.zip")
-	if err := writeDoctorBundle(context.Background(), dir, filepath.Join(dir, logging.LogsDir), out, false); err != nil {
+	if err := writeDoctorBundle(context.Background(), dir, mustOpenEntireAt(t, dir), out, false); err != nil {
 		t.Fatalf("writeDoctorBundle: %v", err)
 	}
 
@@ -240,7 +237,7 @@ func TestWriteDoctorBundle_RedactsSettings(t *testing.T) {
 	}
 
 	out := filepath.Join(dir, "bundle.zip")
-	if err := writeDoctorBundle(context.Background(), dir, filepath.Join(dir, logging.LogsDir), out, false); err != nil {
+	if err := writeDoctorBundle(context.Background(), dir, mustOpenEntireAt(t, dir), out, false); err != nil {
 		t.Fatalf("writeDoctorBundle: %v", err)
 	}
 
@@ -269,7 +266,7 @@ func TestWriteDoctorBundle_RawSkipsRedaction(t *testing.T) {
 	}
 
 	out := filepath.Join(dir, "bundle.zip")
-	if err := writeDoctorBundle(context.Background(), dir, filepath.Join(dir, logging.LogsDir), out, true); err != nil {
+	if err := writeDoctorBundle(context.Background(), dir, mustOpenEntireAt(t, dir), out, true); err != nil {
 		t.Fatalf("writeDoctorBundle raw: %v", err)
 	}
 
@@ -371,4 +368,18 @@ func TestDoctorBundleCmd_StderrBannerNamesMode(t *testing.T) {
 			}
 		})
 	}
+}
+
+// mustOpenEntireAt opens the fixture's .entire root the way the command opens
+// the routed runtime root; a fixture without one contributes nil, as prod does.
+func mustOpenEntireAt(t *testing.T, dir string) *os.Root {
+	t.Helper()
+	root, err := entiredir.OpenAtForRead(dir)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	return root
 }

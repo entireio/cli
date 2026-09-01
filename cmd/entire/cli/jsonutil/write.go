@@ -1,36 +1,41 @@
 package jsonutil
 
 import (
+	"crypto/rand"
+	"encoding/hex"
+	"errors"
 	"fmt"
 	"io/fs"
 	"os"
+	"path"
 	"path/filepath"
+	"strings"
+
+	"github.com/entireio/cli/cmd/entire/cli/osroot"
 )
 
 // WriteFileAtomic writes data to filePath atomically by writing to a temp file
-// in the same directory, fsyncing it, renaming into place, and fsyncing the
-// parent directory. A crash or signal mid-write leaves the original file
-// intact rather than a truncated partial — important for config files like
-// .entire/settings.json that callers expect to remain parseable across
-// interrupted writes.
+// in the same directory and renaming it into place. A crash or signal mid-write
+// leaves the original file intact rather than a truncated partial — important
+// for config files like .entire/settings.json that callers expect to remain
+// parseable across interrupted writes.
 //
-// The fsync between Write and Close guarantees the temp file's bytes are on
-// disk before the rename takes effect; without it, some filesystems (notably
-// ext4 with non-default mount options) can surface the rename as completed
-// while the file is still empty after a hard crash.
+// The rename is what provides that, and it is deliberately NOT paired with an
+// fsync. The property every caller here needs is "a reader never sees a torn
+// file", which the rename gives on its own. fsync buys something different —
+// that the bytes survive a power loss — and nothing written through this
+// function is worth that price: settings, session state, caches and manifests
+// are all reconstructible, and losing the last write to one costs a repeated
+// command, not data. The price is not small, measured at 14x on a 4KiB payload
+// (1.02ms against 71µs), and session state is written on every agent hook.
 //
-// The parent-directory fsync after rename guarantees the rename's directory
-// entry is durable. Without it, the file contents are on disk but the
-// directory may still point to the pre-rename state after a crash, so the
-// "leaves the original intact" promise would silently break. Windows does
-// not support directory fsync; we make this step best-effort so the call
-// does not fail on platforms where the operation is a no-op.
+// What is given up, precisely: on a filesystem that reorders the rename ahead
+// of the data write, a hard power loss can leave a zero-length file where the
+// old contents used to be. Every reader here treats an unparseable or empty
+// file as absent and rebuilds it.
 //
-// perm is applied to the OPEN temp file (fd-based chmod) before close, so the
-// final file lands with the requested permission with no path-based window —
-// the same pattern as copyFileThenRemove's migration writer. The temp's name
-// is random and never published until the rename, so its transient state is
-// unreachable by path anyway.
+// perm is applied to the temp file via Chmod before rename so the final file
+// lands with the requested permission regardless of the temp file's default.
 func WriteFileAtomic(filePath string, data []byte, perm fs.FileMode) error {
 	dir := filepath.Dir(filePath)
 	base := filepath.Base(filePath)
@@ -49,26 +54,65 @@ func WriteFileAtomic(filePath string, data []byte, perm fs.FileMode) error {
 		_ = tmp.Close()
 		return fmt.Errorf("write temp for %s: %w", filePath, err)
 	}
-	if err := tmp.Chmod(perm); err != nil {
-		_ = tmp.Close()
-		return fmt.Errorf("chmod temp for %s: %w", filePath, err)
-	}
-	if err := tmp.Sync(); err != nil {
-		_ = tmp.Close()
-		return fmt.Errorf("sync temp for %s: %w", filePath, err)
-	}
 	if err := tmp.Close(); err != nil {
 		return fmt.Errorf("close temp for %s: %w", filePath, err)
+	}
+	if err := os.Chmod(tmpName, perm); err != nil {
+		return fmt.Errorf("chmod temp for %s: %w", filePath, err)
 	}
 	if err := os.Rename(tmpName, filePath); err != nil {
 		return fmt.Errorf("rename temp to %s: %w", filePath, err)
 	}
 	removeTmp = false
-	// Best-effort: the rename succeeded, so don't propagate failures here.
-	// Directory fsync isn't supported on Windows, and on POSIX an error
-	// after a successful rename would mislead callers who already have the
-	// file in place.
-	_ = SyncDir(dir) //nolint:errcheck // best-effort: failure cannot roll back the successful rename
+	return nil
+}
+
+// WriteFileAtomicIn is WriteFileAtomic confined to root: name is resolved
+// relative to root by the kernel, so neither the temp file nor the rename
+// target can escape it. It is the form every .entire writer uses, because the
+// names under .entire are built from agent-supplied session and tool-use IDs.
+//
+// The sequence is identical to WriteFileAtomic — write, close, chmod, rename,
+// and no fsync — and the same reasoning applies to each step. Two differences:
+// os.Root has no CreateTemp, so the unique temp name is drawn here and created
+// with O_EXCL (a collision retries rather than clobbering a concurrent writer's
+// temp file); and the parent directory is opened once, up front, with every
+// component checked for symlinks, so the temp file, the chmod and the rename
+// all act on the same pinned directory rather than re-resolving name each time.
+//
+// name must be a valid slash-separated path beneath root (see fs.ValidPath):
+// "./x", "x//y" and "x/./y" are rejected rather than cleaned.
+func WriteFileAtomicIn(root *os.Root, name string, data []byte, perm fs.FileMode) error {
+	parent, leaf, closeParent, err := osroot.OpenParentNoSymlinks(root, name)
+	if err != nil {
+		return fmt.Errorf("open parent for %s: %w", name, err)
+	}
+	defer closeParent()
+
+	tmp, tmpName, err := CreateTempIn(parent, leaf)
+	if err != nil {
+		return fmt.Errorf("create temp for %s: %w", name, err)
+	}
+	removeTmp := true
+	defer func() {
+		if removeTmp {
+			_ = parent.Remove(tmpName) //nolint:errcheck // best-effort cleanup of a temp file the rename did not consume
+		}
+	}()
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("write temp for %s: %w", name, err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("close temp for %s: %w", name, err)
+	}
+	if err := parent.Chmod(tmpName, perm); err != nil {
+		return fmt.Errorf("chmod temp for %s: %w", name, err)
+	}
+	if err := parent.Rename(tmpName, leaf); err != nil {
+		return fmt.Errorf("rename temp to %s: %w", name, err)
+	}
+	removeTmp = false
 	return nil
 }
 
@@ -160,4 +204,80 @@ func resolveWriteTarget(filePath string) (string, error) {
 		path = filepath.Clean(target)
 	}
 	return "", fmt.Errorf("resolve %s: symlink chain exceeds %d hops", filePath, maxSymlinkHops)
+}
+
+// tempNameAttempts bounds the O_EXCL retry loop in createTempIn.
+const tempNameAttempts = 100
+
+// tempSuffix ends every name CreateTempIn hands out.
+const tempSuffix = ".tmp"
+
+// tempRandomHexLen is the length of the random component CreateTempIn inserts,
+// in hex characters: 8 bytes, so 16.
+const tempRandomHexLen = 16
+
+// IsTempName reports whether name was produced by CreateTempIn.
+//
+// It exists because an atomic write leaves its temp file in the SAME directory
+// as its target, and one of those directories — .entire/metadata/<session> — is
+// walked wholesale into every checkpoint tree. A hook killed between
+// CreateTempIn and Rename (an agent's hook timeout, Codex's session-end process
+// tree kill, a crash) leaves the temp behind, and without this the walk redacts
+// it, commits it, and pushes it on every checkpoint from then on.
+//
+// The match is the whole shape CreateTempIn produces — "<base>.<16 hex>.tmp" —
+// not a bare ".tmp" suffix, so a file a user or an agent legitimately named
+// something.tmp is still captured.
+func IsTempName(name string) bool {
+	base := path.Base(name)
+	rest, ok := strings.CutSuffix(base, tempSuffix)
+	if !ok {
+		return false
+	}
+	dot := strings.LastIndexByte(rest, '.')
+	if dot < 0 {
+		return false
+	}
+	hexPart := rest[dot+1:]
+	if len(hexPart) != tempRandomHexLen {
+		return false
+	}
+	for i := range len(hexPart) {
+		if !isHexDigit(hexPart[i]) {
+			return false
+		}
+	}
+	// A temp name is always "<something>.<hex>.tmp": CreateTempIn appends to a
+	// base it was given, so an empty base means this is not one of ours.
+	return dot > 0
+}
+
+func isHexDigit(c byte) bool {
+	return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')
+}
+
+// CreateTempIn creates a uniquely named, exclusively created temp file next to
+// name inside root, and returns it with its root-relative name. It is the
+// os.Root counterpart to os.CreateTemp, which has no Root form.
+//
+// O_EXCL rather than a fixed "<name>.tmp": concurrent hook processes write the
+// same session and checkpoint files, and a shared temp path corrupts whichever
+// write lands second.
+func CreateTempIn(root *os.Root, name string) (*os.File, string, error) {
+	dir, base := path.Split(name)
+	var buf [8]byte
+	for range tempNameAttempts {
+		if _, err := rand.Read(buf[:]); err != nil {
+			return nil, "", fmt.Errorf("read random suffix: %w", err)
+		}
+		candidate := dir + base + "." + hex.EncodeToString(buf[:]) + tempSuffix
+		f, err := root.OpenFile(candidate, os.O_RDWR|os.O_CREATE|os.O_EXCL, 0o600)
+		if err == nil {
+			return f, candidate, nil
+		}
+		if !errors.Is(err, fs.ErrExist) {
+			return nil, "", err //nolint:wrapcheck // caller names the file; the os error carries op and path
+		}
+	}
+	return nil, "", fmt.Errorf("exhausted %d temp name attempts for %s", tempNameAttempts, name)
 }

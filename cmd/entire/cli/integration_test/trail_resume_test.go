@@ -3,7 +3,6 @@
 package integration
 
 import (
-	"context"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -11,7 +10,6 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -286,12 +284,7 @@ func mustTrailResumeIntegrationHost(t *testing.T, rawURL string) string {
 func addTrailResumeIntegrationOrigin(t *testing.T, env *TestEnv, remoteURL string) {
 	t.Helper()
 
-	cmd := exec.CommandContext(context.Background(), "git", "remote", "add", "origin", remoteURL)
-	cmd.Dir = env.RepoDir
-	cmd.Env = testutil.GitIsolatedEnv()
-	if output, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("git remote add origin: %v\n%s", err, output)
-	}
+	testutil.RunGit(t, env.RepoDir, "remote", "add", "origin", remoteURL)
 
 	configData, err := os.ReadFile(filepath.Join(env.RepoDir, ".git", "config"))
 	if err != nil {

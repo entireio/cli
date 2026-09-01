@@ -681,22 +681,10 @@ func TestResume_FetchesPrimaryBranchFullyWithFilteredFetches(t *testing.T) {
 	// locally so it only exists on the remote. This forces resume to fetch it.
 	cloneEnv := env.CloneFrom(bareDir)
 
-	ctx := t.Context()
-
 	// Detach HEAD so we can delete the feature branch.
-	cmd := exec.CommandContext(ctx, "git", "checkout", "--detach")
-	cmd.Dir = cloneEnv.RepoDir
-	cmd.Env = testutil.GitIsolatedEnv()
-	if output, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("detach HEAD: %v\n%s", err, output)
-	}
+	testutil.RunGit(t, cloneEnv.RepoDir, "checkout", "--detach")
 
-	cmd = exec.CommandContext(ctx, "git", "branch", "-D", "feature/test-branch")
-	cmd.Dir = cloneEnv.RepoDir
-	cmd.Env = testutil.GitIsolatedEnv()
-	if output, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("delete feature branch: %v\n%s", err, output)
-	}
+	testutil.RunGit(t, cloneEnv.RepoDir, "branch", "-D", "feature/test-branch")
 
 	cloneEnv.setGitConfigBaseline()
 

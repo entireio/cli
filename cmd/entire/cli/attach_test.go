@@ -931,7 +931,7 @@ func TestExtractTranscriptMetadataForAgent_Pi(t *testing.T) {
 // review sessions (and any session where the agent injects an instruction
 // preamble) record the <environment_context> block as the first user message.
 // Attach must use the first genuine user prompt as the checkpoint title — the
-// same filter the rewind display path applies (strategy.FirstDisplayPrompt).
+// same filter the resume display path applies (strategy.FirstDisplayPrompt).
 func TestExtractTranscriptMetadataForAgent_CodexSkipsEnvironmentContext(t *testing.T) {
 	t.Parallel()
 

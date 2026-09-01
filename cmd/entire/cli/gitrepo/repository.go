@@ -27,14 +27,52 @@ var sharedObjectCache = cache.NewObjectLRUDefault()
 
 // OpenCurrent opens the current git worktree with object alternates enabled.
 // The caller owns the returned repository and must close it.
+//
+// A worktree root that will not resolve is an error, not a reason to open the
+// current directory. This used to fall back to ".", which is a different
+// repository whenever the two disagree, and go-git disagrees with git in exactly
+// the cases that made the resolution fail:
+//
+//   - git exports GIT_DIR and GIT_WORK_TREE to the hooks it runs, and
+//     paths.WorktreeRoot honours them. OpenPath(".") cannot see them, so a hook
+//     running for repo A whose git lookup failed opened repo B, the unrelated
+//     repository it happened to be sitting in. Verified.
+//   - git refuses a repository whose ownership fails its safe.directory check,
+//     and refuses a .git it cannot parse. go-git applies neither check, so the
+//     fallback opened repositories the user's own git declines to touch.
+//
+// Five of the six callers write through the repository they are handed, and all
+// five sit behind the root pre-run, which already refuses to run when the
+// worktree root does not resolve — so this closes a trap rather than a live bug.
+// The sixth is a best-effort advisory that genuinely wants the old behaviour and
+// now asks for it by name: see OpenCurrentOrCwd.
 func OpenCurrent(ctx context.Context) (*git.Repository, error) {
 	repoRoot, err := paths.WorktreeRoot(ctx)
 	if err != nil {
-		// Fallback to current directory if git command fails
-		// (e.g., if git is not installed or we're not in a repo).
-		repoRoot = "."
+		return nil, fmt.Errorf("resolve worktree root: %w", err)
 	}
 	return OpenPath(repoRoot)
+}
+
+// OpenCurrentOrCwd is OpenCurrent with the current directory as a fallback when
+// the worktree root will not resolve.
+//
+// It exists for one caller, WarnCheckpointPolicyIfNeeded, and the properties
+// that make it acceptable there do not generalise: it is dispatched from
+// main.go after cobra has finished, so unlike every other repository open it has
+// no pre-run guard in front of it; it only READS a policy ref to decide whether
+// to print an advisory line; and it discards every error it gets. Opening the
+// wrong repository there costs a warning that is skipped or shown, not a write
+// that lands in the wrong place.
+//
+// Do not reach for this because OpenCurrent started returning an error. That
+// error means Entire could not establish which repository this is, and for
+// anything that writes, stopping is the whole point.
+func OpenCurrentOrCwd(ctx context.Context) (*git.Repository, error) {
+	if repo, err := OpenCurrent(ctx); err == nil {
+		return repo, nil
+	}
+	return OpenPath(".")
 }
 
 // OpenPath opens a git repository with object alternates enabled.
@@ -55,6 +93,18 @@ func OpenPath(repoRoot string) (*git.Repository, error) {
 		return nil, fmt.Errorf("failed to open repository: %w", err)
 	}
 	return repo, nil
+}
+
+// ResolveDotGitPath resolves the .git entry for a worktree without opening the
+// repository. Callers that need Git metadata should use this shared resolver.
+func ResolveDotGitPath(repoRoot string) (string, error) {
+	return resolveDotGitPath(repoRoot)
+}
+
+// ResolveCommonGitPath resolves the shared Git directory for a resolved .git
+// directory. An empty result means the repository has no commondir file.
+func ResolveCommonGitPath(dotGitPath string) (string, error) {
+	return resolveCommonGitPath(dotGitPath)
 }
 
 func hasObjectAlternates(repoRoot string) (bool, error) {

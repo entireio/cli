@@ -34,12 +34,24 @@ jobs:
       agents: ${{ steps.set.outputs.agents }}
     steps:
       - id: set
+        # Pass the input through env rather than interpolating it into the script:
+        # `type: choice` only constrains the UI, so a REST-API dispatch could inject
+        # shell metacharacters here otherwise.
+        env:
+          AGENT_INPUT: ${{ github.event.inputs.agent }}
+        # gemini-cli is deliberately absent from the all-agents list. Since
+        # Gemini CLI 0.57.0 the agent forces `core.hooksPath=''` on every shell
+        # command it runs, so no checkpoint is recorded for a commit it makes and
+        # the leg fails for a reason no change on our side can fix. It stays in
+        # the workflow_dispatch choices above so the leg can be run by hand
+        # against a newer Gemini release; put it back in this list (it is still
+        # in the RED "reliable" tier in notify-slack) once one restores hooks.
         run: |
-          input="${{ github.event.inputs.agent }}"
+          input="$AGENT_INPUT"
           if [ -n "$input" ]; then
             echo "agents=[\"$input\"]" >> "$GITHUB_OUTPUT"
           else
-            echo 'agents=["claude-code","opencode","gemini-cli","factoryai-droid","cursor-cli","copilot-cli","roger-roger","codex"]' >> "$GITHUB_OUTPUT"
+            echo 'agents=["claude-code","opencode","factoryai-droid","cursor-cli","copilot-cli","roger-roger","codex"]' >> "$GITHUB_OUTPUT"
           fi
 
   e2e-tests:

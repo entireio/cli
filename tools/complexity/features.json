@@ -1,0 +1,495 @@
+{
+ "_doc": "Two ordered passes, first match wins in each: (1) the literal path against every rule, so a rule naming a _test.go file explicitly always wins; (2) for test files, the source-file name (foo_test.go -> foo.go), so tests follow their source by default. A path ending in '/' is a directory-prefix match; otherwise the directory must match exactly and the basename is a glob. norank:true keeps a feature out of rankings and headline totals while still measuring it.",
+ "features": [
+  {
+   "name": "generated:coreapi",
+   "area": "generated",
+   "paths": [
+    "internal/coreapi/*_gen.go"
+   ],
+   "note": "ogen output; excluded from complexity",
+   "norank": true
+  },
+  {
+   "name": "cmd:status",
+   "area": "command",
+   "paths": [
+    "cmd/entire/cli/status*.go"
+   ]
+  },
+  {
+   "name": "cmd:enable-disable-configure",
+   "area": "command",
+   "paths": [
+    "cmd/entire/cli/setup*.go",
+    "cmd/entire/cli/uninstall_output.go",
+    "cmd/entire/cli/dogfood_hooks.go"
+   ]
+  },
+  {
+   "name": "cmd:doctor",
+   "area": "command",
+   "paths": [
+    "cmd/entire/cli/doctor*.go",
+    "cmd/entire/cli/trace*.go",
+    "cmd/entire/cli/codex_hook_diagnostics.go"
+   ]
+  },
+  {
+   "name": "cmd:clean",
+   "area": "command",
+   "paths": [
+    "cmd/entire/cli/clean.go"
+   ]
+  },
+  {
+   "name": "cmd:session",
+   "area": "command",
+   "paths": [
+    "cmd/entire/cli/sessions.go",
+    "cmd/entire/cli/session_*.go",
+    "cmd/entire/cli/attach*.go",
+    "cmd/entire/cli/resume*.go"
+   ]
+  },
+  {
+   "name": "cmd:checkpoint",
+   "area": "command",
+   "paths": [
+    "cmd/entire/cli/checkpoint_group.go",
+    "cmd/entire/cli/checkpoint_list.go",
+    "cmd/entire/cli/checkpoint_resume.go",
+    "cmd/entire/cli/checkpoint_tokens.go",
+    "cmd/entire/cli/checkpoint_api_reader.go",
+    "cmd/entire/cli/head_checkpoint_flags.go"
+   ]
+  },
+  {
+   "name": "cmd:checkpoint-policy",
+   "area": "command",
+   "paths": [
+    "cmd/entire/cli/checkpoint_policy*.go",
+    "cmd/entire/cli/checkpointpolicy/"
+   ]
+  },
+  {
+   "name": "cmd:explain",
+   "area": "command",
+   "paths": [
+    "cmd/entire/cli/explain*.go",
+    "cmd/entire/cli/summarize/",
+    "cmd/entire/cli/mdrender/"
+   ]
+  },
+  {
+   "name": "cmd:search",
+   "area": "command",
+   "paths": [
+    "cmd/entire/cli/search_*.go",
+    "cmd/entire/cli/search/",
+    "cmd/entire/cli/codesearch/",
+    "cmd/entire/cli/setup_search_skill.go"
+   ]
+  },
+  {
+   "name": "cmd:tokens",
+   "area": "command",
+   "paths": [
+    "cmd/entire/cli/tokens_profile.go"
+   ]
+  },
+  {
+   "name": "cmd:activity",
+   "area": "command",
+   "paths": [
+    "cmd/entire/cli/activity_*.go"
+   ]
+  },
+  {
+   "name": "cmd:recap",
+   "area": "command",
+   "paths": [
+    "cmd/entire/cli/recap*.go",
+    "cmd/entire/cli/recap/"
+   ]
+  },
+  {
+   "name": "cmd:dispatch",
+   "area": "command",
+   "paths": [
+    "cmd/entire/cli/dispatch*.go",
+    "cmd/entire/cli/dispatch/",
+    "cmd/entire/cli/agentlaunch/"
+   ]
+  },
+  {
+   "name": "cmd:review",
+   "area": "command",
+   "paths": [
+    "cmd/entire/cli/review_*.go",
+    "cmd/entire/cli/review/"
+   ]
+  },
+  {
+   "name": "cmd:investigate",
+   "area": "command",
+   "paths": [
+    "cmd/entire/cli/investigate_bridge.go",
+    "cmd/entire/cli/investigate/"
+   ]
+  },
+  {
+   "name": "cmd:experts",
+   "area": "command",
+   "paths": [
+    "cmd/entire/cli/experts_*.go",
+    "cmd/entire/cli/provenance/"
+   ]
+  },
+  {
+   "name": "cmd:trail",
+   "area": "command",
+   "paths": [
+    "cmd/entire/cli/trail_*.go",
+    "cmd/entire/cli/trail/"
+   ]
+  },
+  {
+   "name": "cmd:runner",
+   "area": "command",
+   "paths": [
+    "cmd/entire/cli/runner_*.go",
+    "cmd/entire/cli/runnerdefaults/"
+   ]
+  },
+  {
+   "name": "cmd:import",
+   "area": "command",
+   "paths": [
+    "cmd/entire/cli/import_*.go",
+    "cmd/entire/cli/setup_import.go",
+    "cmd/entire/cli/agentimport/"
+   ]
+  },
+  {
+   "name": "cmd:plugin",
+   "area": "command",
+   "paths": [
+    "cmd/entire/cli/plugin*.go"
+   ]
+  },
+  {
+   "name": "cmd:blame-why",
+   "area": "command",
+   "paths": [
+    "cmd/entire/cli/attribution*.go"
+   ]
+  },
+  {
+   "name": "cmd:auth-login",
+   "area": "command",
+   "paths": [
+    "cmd/entire/cli/auth*.go",
+    "cmd/entire/cli/authcmd.go",
+    "cmd/entire/cli/login.go",
+    "cmd/entire/cli/logout.go",
+    "cmd/entire/cli/browser_open_*.go",
+    "cmd/entire/cli/auth/",
+    "internal/entireclient/",
+    "cmd/entire/cli/login_*.go"
+   ]
+  },
+  {
+   "name": "cmd:control-plane",
+   "area": "command",
+   "paths": [
+    "cmd/entire/cli/corecmd.go",
+    "cmd/entire/cli/org.go",
+    "cmd/entire/cli/project.go",
+    "cmd/entire/cli/repo*.go",
+    "cmd/entire/cli/grant.go",
+    "cmd/entire/cli/resolveref.go",
+    "cmd/entire/cli/context_flag.go",
+    "cmd/entire/cli/remote_topology.go",
+    "cmd/entire/cli/corecmd_*.go",
+    "cmd/entire/cli/grant_wiring.go",
+    "cmd/entire/cli/list_pagination.go"
+   ]
+  },
+  {
+   "name": "cmd:api-passthrough",
+   "area": "command",
+   "paths": [
+    "cmd/entire/cli/api_cmd.go"
+   ]
+  },
+  {
+   "name": "cmd:agent",
+   "area": "command",
+   "paths": [
+    "cmd/entire/cli/agent_group.go",
+    "cmd/entire/cli/agent/skilldiscovery/"
+   ]
+  },
+  {
+   "name": "cmd:agent-help-mcp",
+   "area": "command",
+   "paths": [
+    "cmd/entire/cli/agent_help_*.go",
+    "cmd/entire/cli/setup_agent_help_skill.go",
+    "cmd/entire/cli/mcp.go"
+   ]
+  },
+  {
+   "name": "cmd:labs-version-shell",
+   "area": "command",
+   "paths": [
+    "cmd/entire/cli/labs.go",
+    "cmd/entire/cli/help.go",
+    "cmd/entire/cli/root.go",
+    "cmd/entire/cli/errors.go",
+    "cmd/entire/cli/constants.go",
+    "cmd/entire/cli/types.go",
+    "cmd/entire/cli/utils.go",
+    "cmd/entire/cli/progress.go",
+    "cmd/entire/cli/flaggroups.go",
+    "cmd/entire/cli/model_label.go",
+    "cmd/entire/cli/keys.go",
+    "cmd/entire/cli/deprecated_strings.go",
+    "cmd/entire/cli/experimental/",
+    "cmd/entire/*.go",
+    "cmd/entire/cli/experimental_wiring.go",
+    "cmd/entire/cli/root_logging.go"
+   ]
+  },
+  {
+   "name": "capture:hooks-lifecycle",
+   "area": "capture",
+   "paths": [
+    "cmd/entire/cli/hooks*.go",
+    "cmd/entire/cli/hook_*.go",
+    "cmd/entire/cli/lifecycle.go",
+    "cmd/entire/cli/state.go",
+    "cmd/entire/cli/transcript.go",
+    "cmd/entire/cli/git_operations.go",
+    "cmd/entire/cli/commit_message.go",
+    "cmd/entire/cli/entiredir_guard.go",
+    "cmd/entire/cli/checkpoint_backend.go",
+    "cmd/entire/cli/fetch_*.go",
+    "cmd/entire/cli/treeless_*.go",
+    "cmd/entire/cli/phase_wiring.go"
+   ]
+  },
+  {
+   "name": "capture:strategy",
+   "area": "capture",
+   "paths": [
+    "cmd/entire/cli/strategy/"
+   ]
+  },
+  {
+   "name": "capture:checkpoint-store",
+   "area": "capture",
+   "paths": [
+    "cmd/entire/cli/checkpoint/",
+    "api/checkpoint/"
+   ]
+  },
+  {
+   "name": "capture:session-state",
+   "area": "capture",
+   "paths": [
+    "cmd/entire/cli/session/"
+   ]
+  },
+  {
+   "name": "capture:redaction",
+   "area": "capture",
+   "paths": [
+    "redact/"
+   ]
+  },
+  {
+   "name": "capture:transcript",
+   "area": "capture",
+   "paths": [
+    "cmd/entire/cli/transcript/",
+    "cmd/entire/cli/trailers/"
+   ]
+  },
+  {
+   "name": "capture:cell-routing",
+   "area": "capture",
+   "paths": [
+    "cmd/entire/cli/api_client.go",
+    "cmd/entire/cli/cell_*.go",
+    "cmd/entire/cli/entireapi_client.go",
+    "cmd/entire/cli/api/"
+   ]
+  },
+  {
+   "name": "agent:framework",
+   "area": "agents",
+   "paths": [
+    "cmd/entire/cli/agent/*.go",
+    "cmd/entire/cli/agent/types/",
+    "cmd/entire/cli/agent/spawn/",
+    "cmd/entire/cli/agent/external/",
+    "cmd/entire/cli/agent/testutil/"
+   ]
+  },
+  {
+   "name": "agent:claudecode",
+   "area": "agents",
+   "paths": [
+    "cmd/entire/cli/agent/claudecode/"
+   ]
+  },
+  {
+   "name": "agent:codex",
+   "area": "agents",
+   "paths": [
+    "cmd/entire/cli/agent/codex/"
+   ]
+  },
+  {
+   "name": "agent:copilotcli",
+   "area": "agents",
+   "paths": [
+    "cmd/entire/cli/agent/copilotcli/"
+   ]
+  },
+  {
+   "name": "agent:cursor",
+   "area": "agents",
+   "paths": [
+    "cmd/entire/cli/agent/cursor/"
+   ]
+  },
+  {
+   "name": "agent:factoryaidroid",
+   "area": "agents",
+   "paths": [
+    "cmd/entire/cli/agent/factoryaidroid/"
+   ]
+  },
+  {
+   "name": "agent:geminicli",
+   "area": "agents",
+   "paths": [
+    "cmd/entire/cli/agent/geminicli/"
+   ]
+  },
+  {
+   "name": "agent:opencode",
+   "area": "agents",
+   "paths": [
+    "cmd/entire/cli/agent/opencode/"
+   ]
+  },
+  {
+   "name": "agent:pi",
+   "area": "agents",
+   "paths": [
+    "cmd/entire/cli/agent/pi/"
+   ]
+  },
+  {
+   "name": "agent:vogon",
+   "area": "agents",
+   "paths": [
+    "cmd/entire/cli/agent/vogon/",
+    "e2e/vogon/"
+   ],
+   "norank": true
+  },
+  {
+   "name": "infra:settings",
+   "area": "infra",
+   "paths": [
+    "cmd/entire/cli/settings/",
+    "cmd/entire/cli/config.go",
+    "cmd/entire/cli/vercelconfig/"
+   ]
+  },
+  {
+   "name": "infra:git-layer",
+   "area": "infra",
+   "paths": [
+    "cmd/entire/cli/paths/",
+    "cmd/entire/cli/gitrepo/",
+    "cmd/entire/cli/gitops/",
+    "cmd/entire/cli/gitexec/",
+    "cmd/entire/cli/gitremote/"
+   ]
+  },
+  {
+   "name": "infra:process-layer",
+   "area": "infra",
+   "paths": [
+    "cmd/entire/cli/proclive/",
+    "cmd/entire/cli/procutil/",
+    "cmd/entire/cli/execx/",
+    "cmd/entire/cli/internal/flock/",
+    "cmd/entire/cli/osroot/",
+    "internal/procsignal/"
+   ]
+  },
+  {
+   "name": "infra:observability",
+   "area": "infra",
+   "paths": [
+    "cmd/entire/cli/logging/",
+    "cmd/entire/cli/telemetry/",
+    "cmd/entire/cli/versioncheck/",
+    "cmd/entire/cli/versioninfo/",
+    "perf/"
+   ]
+  },
+  {
+   "name": "infra:ui-utils",
+   "area": "infra",
+   "paths": [
+    "cmd/entire/cli/interactive/",
+    "cmd/entire/cli/tuiutil/",
+    "cmd/entire/cli/uiform/",
+    "cmd/entire/cli/palette/",
+    "cmd/entire/cli/textutil/",
+    "cmd/entire/cli/stringutil/",
+    "cmd/entire/cli/jsonutil/",
+    "cmd/entire/cli/validation/"
+   ]
+  },
+  {
+   "name": "platform:coreapi-handwritten",
+   "area": "platform",
+   "paths": [
+    "internal/coreapi/"
+   ]
+  },
+  {
+   "name": "platform:git-remote-entire",
+   "area": "platform",
+   "paths": [
+    "cmd/git-remote-entire/",
+    "internal/remotehelper/"
+   ]
+  },
+  {
+   "name": "test-infra",
+   "area": "test-infra",
+   "paths": [
+    "cmd/entire/cli/testutil/",
+    "cmd/entire/cli/benchutil/",
+    "cmd/entire/cli/integration_test/",
+    "cmd/entire/cli/bench*.go",
+    "cmd/entire/cli/global_test.go",
+    "cmd/entire/cli/dogfood_hooks_test.go",
+    "e2e/",
+    "internal/testdirs/",
+    "cmd/entire/cli/pr_binary_size.go"
+   ],
+   "norank": true
+  }
+ ]
+}

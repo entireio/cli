@@ -10,6 +10,7 @@ import (
 	"runtime"
 	"testing"
 
+	"github.com/entireio/cli/cmd/entire/cli/testutil/gitenv"
 	"github.com/entireio/cli/e2e/agents"
 	"github.com/entireio/cli/e2e/entire"
 	"github.com/entireio/cli/e2e/testutil"
@@ -89,6 +90,25 @@ func TestMain(m *testing.M) {
 		os.Exit(1)
 	}
 
+	// Preflight: at least one agent must be registered. Registration happens in
+	// each agent package's init, and is conditional on E2E_AGENT naming that
+	// agent AND its binary being on PATH at process start. When nothing
+	// registers, the missing-binaries loop above has nothing to iterate,
+	// ForEachAgent calls t.Skip in every test, and the run exits 0 — the suite
+	// reports success having exercised nothing. Measured on this suite: with
+	// E2E_AGENT=vogon and vogon absent from PATH, 54 of 56 tests skip and
+	// `go test -tags=e2e ./e2e/tests` passes in 1.5s.
+	//
+	// The e2e canary is the deterministic gate that guards checkpoint capture
+	// on every PR, so a green run that ran nothing is worse than a red one.
+	// Fail the same way a missing binary does.
+	if len(agents.All()) == 0 {
+		fmt.Fprintf(os.Stderr,
+			"preflight: no agents registered (E2E_AGENT=%q); every test would skip and the run would report success\n",
+			os.Getenv("E2E_AGENT"))
+		os.Exit(1)
+	}
+
 	version := "unknown"
 	if out, err := exec.Command(entireBin, "version").Output(); err == nil {
 		version = string(out)
@@ -100,13 +120,10 @@ func TestMain(m *testing.M) {
 		entireBin, version)
 	_ = os.WriteFile(filepath.Join(runDir, "entire-version.txt"), []byte(preflight), 0o644)
 
-	// Don't look at user's Git config, ignore everything except the project-local Git settings.
-	// This avoids oddball configs in ~/.gitconfig messing with our E2E tests.
-	// We use an empty temp file instead of os.DevNull because git on Windows
-	// cannot open NUL as a config file ("unable to access 'NUL': Invalid argument").
-	emptyConfig := filepath.Join(runDir, "empty-gitconfig")
-	_ = os.WriteFile(emptyConfig, nil, 0o644)
-	os.Setenv("GIT_CONFIG_GLOBAL", emptyConfig)
+	// Don't look at user's Git config, ignore everything except the project-local
+	// Git settings. This avoids oddball configs in ~/.gitconfig messing with our
+	// E2E tests; the isolation is inherited by every spawned binary and git hook.
+	gitenv.IsolateMain()
 
 	os.Exit(m.Run())
 }

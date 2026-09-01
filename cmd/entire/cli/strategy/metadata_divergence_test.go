@@ -9,6 +9,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/entireio/cli/cmd/entire/cli/entiredir"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 
@@ -192,7 +193,7 @@ func TestSafelyAdvanceLocalRef_LogsTheReplay(t *testing.T) {
 	run("checkout", "main")
 
 	t.Chdir(cloneDir)
-	l, logErr := logging.New(logging.Config{Dir: filepath.Join(cloneDir, logging.LogsDir)})
+	l, logErr := logging.New(logging.Config{Root: entiredir.OpenerAt(cloneDir), Dir: logging.LogsName})
 	require.NoError(t, logErr)
 	// Registered immediately: an assertion failing before the explicit flush below
 	// would otherwise leave the logger holding the file handle. Close is safe to

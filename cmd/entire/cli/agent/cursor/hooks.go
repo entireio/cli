@@ -3,12 +3,13 @@ package cursor
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
+	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 )
 
@@ -45,23 +46,36 @@ func (c *CursorAgent) HookNames() []string {
 	}
 }
 
+// cursorHookConfig returns .cursor/hooks.json for the current worktree, opened through the
+// worktree's root. That directory lives in the working tree, which arrives by
+// clone, so a checked-in symlink at `.cursor` must not be something Entire creates
+// directories under and writes through. See agent.HookConfigFile.
+func cursorHookConfig(ctx context.Context) (*agent.HookConfigFile, error) {
+	worktreeRoot, err := paths.WorktreeRoot(ctx)
+	if err != nil {
+		// Not a repository (tests, and `enable` before `git init`): the process
+		// directory is the only candidate, and it is a directory the caller
+		// chose rather than one derived from anything read off disk.
+		worktreeRoot = "."
+	}
+	return agent.OpenHookConfig(worktreeRoot, ".cursor/"+HooksFileName) //nolint:wrapcheck // agent.HookConfigFile already names the file in its error
+}
+
 // InstallHooks installs Cursor hooks in .cursor/hooks.json.
 // If force is true, removes existing Entire hooks before installing.
 // Returns the number of hooks installed.
 // Unknown top-level fields and hook types are preserved on round-trip.
 func (c *CursorAgent) InstallHooks(ctx context.Context, force bool) (int, error) {
-	worktreeRoot, err := paths.WorktreeRoot(ctx)
+	cfg, err := cursorHookConfig(ctx)
 	if err != nil {
-		worktreeRoot = "."
+		return 0, err
 	}
-
-	hooksPath := filepath.Join(worktreeRoot, ".cursor", HooksFileName)
 
 	// Use raw maps to preserve unknown fields on round-trip
 	var rawFile map[string]json.RawMessage
 	var rawHooks map[string]json.RawMessage
 
-	existingData, readErr := os.ReadFile(hooksPath) //nolint:gosec // path is constructed from repo root + fixed path
+	existingData, readErr := cfg.Read()
 	if readErr == nil {
 		if err := json.Unmarshal(existingData, &rawFile); err != nil {
 			return 0, fmt.Errorf("failed to parse existing "+HooksFileName+": %w", err)
@@ -173,17 +187,13 @@ func (c *CursorAgent) InstallHooks(ctx context.Context, force bool) (int, error)
 	rawFile["hooks"] = hooksJSON
 
 	// Write to file
-	if err := os.MkdirAll(filepath.Dir(hooksPath), 0o750); err != nil {
-		return 0, fmt.Errorf("failed to create .cursor directory: %w", err)
-	}
-
 	output, err := jsonutil.MarshalIndentWithNewline(rawFile, "", "  ")
 	if err != nil {
 		return 0, fmt.Errorf("failed to marshal "+HooksFileName+": %w", err)
 	}
 
-	if err := os.WriteFile(hooksPath, output, 0o600); err != nil {
-		return 0, fmt.Errorf("failed to write "+HooksFileName+": %w", err)
+	if err := cfg.Write(output, 0o600); err != nil {
+		return 0, err //nolint:wrapcheck // agent.HookConfigFile already names the file in its error
 	}
 
 	return count, nil
@@ -192,14 +202,18 @@ func (c *CursorAgent) InstallHooks(ctx context.Context, force bool) (int, error)
 // UninstallHooks removes Entire hooks from Cursor HooksFileName.
 // Unknown top-level fields and hook types are preserved on round-trip.
 func (c *CursorAgent) UninstallHooks(ctx context.Context) error {
-	worktreeRoot, err := paths.WorktreeRoot(ctx)
+	cfg, err := cursorHookConfig(ctx)
 	if err != nil {
-		worktreeRoot = "."
+		return err
 	}
-	hooksPath := filepath.Join(worktreeRoot, ".cursor", HooksFileName)
-	data, err := os.ReadFile(hooksPath) //nolint:gosec // path is constructed from repo root + fixed path
+	data, err := cfg.Read()
 	if err != nil {
-		return nil //nolint:nilerr // No hooks file means nothing to uninstall
+		// An absent file means nothing to uninstall; an unreadable one does not.
+		// Collapsing both leaves hooks on disk while reporting success.
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return fmt.Errorf("read %s: %w", cfg.Path(), err)
 	}
 
 	var rawFile map[string]json.RawMessage
@@ -262,28 +276,38 @@ func (c *CursorAgent) UninstallHooks(ctx context.Context) error {
 		return fmt.Errorf("failed to marshal "+HooksFileName+": %w", err)
 	}
 
-	if err := os.WriteFile(hooksPath, output, 0o600); err != nil {
-		return fmt.Errorf("failed to write "+HooksFileName+": %w", err)
+	if err := cfg.Write(output, 0o600); err != nil {
+		return err //nolint:wrapcheck // agent.HookConfigFile already names the file in its error
 	}
 
 	return nil
 }
 
 // AreHooksInstalled checks if Entire hooks are installed.
-func (c *CursorAgent) AreHooksInstalled(ctx context.Context) bool {
-	worktreeRoot, err := paths.WorktreeRoot(ctx)
+//
+// A missing config file is an answer, not a failure: that file is where the
+// state lives, so its absence means no hooks. Anything that stops us reading the
+// answer — an unreadable file, malformed config — is returned as an error, since
+// "we could not tell" and "there are none" are different things to a caller
+// deciding whether hooks can be left alone.
+func (c *CursorAgent) AreHooksInstalled(ctx context.Context) (bool, error) {
+	cfg, err := cursorHookConfig(ctx)
 	if err != nil {
-		worktreeRoot = "."
+		return false, err
 	}
-	hooksPath := filepath.Join(worktreeRoot, ".cursor", HooksFileName)
-	data, err := os.ReadFile(hooksPath) //nolint:gosec // path is constructed from repo root + fixed path
+	data, err := cfg.Read()
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
 	if err != nil {
-		return false
+		logging.Warn(ctx, "cursor: failed to read hooks file", "path", cfg.Path(), "err", err)
+		return false, fmt.Errorf("read %s: %w", cfg.Path(), err)
 	}
 
 	var hooksFile CursorHooksFile
 	if err := json.Unmarshal(data, &hooksFile); err != nil {
-		return false
+		logging.Warn(ctx, "cursor: failed to parse hooks file", "path", cfg.Path(), "err", err)
+		return false, fmt.Errorf("parse hook config: %w", err)
 	}
 
 	return hasEntireHook(hooksFile.Hooks.SessionStart) ||
@@ -292,7 +316,7 @@ func (c *CursorAgent) AreHooksInstalled(ctx context.Context) bool {
 		hasEntireHook(hooksFile.Hooks.Stop) ||
 		hasEntireHook(hooksFile.Hooks.PreCompact) ||
 		hasEntireHook(hooksFile.Hooks.SubagentStart) ||
-		hasEntireHook(hooksFile.Hooks.SubagentStop)
+		hasEntireHook(hooksFile.Hooks.SubagentStop), nil
 }
 
 // GetSupportedHooks returns the hook types Cursor supports.

@@ -20,6 +20,10 @@ import (
 	"slices"
 	"strings"
 	"time"
+
+	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
+	"github.com/entireio/cli/cmd/entire/cli/osroot"
+	"github.com/entireio/cli/cmd/entire/cli/versioninfo"
 )
 
 // Release-asset download. The one irreducibly forge-specific piece of the
@@ -93,7 +97,8 @@ const maxAssetRedirects = 10
 // https:// entry point could deliver both the asset and its checksums.txt over
 // plaintext — exactly the outcome requireSecureAssetURL exists to prevent.
 var pluginHTTPClient = &http.Client{
-	Timeout: 5 * time.Minute,
+	Timeout:   5 * time.Minute,
+	Transport: versioninfo.WrapTransport(nil),
 	CheckRedirect: func(req *http.Request, via []*http.Request) error {
 		if len(via) >= maxAssetRedirects {
 			return fmt.Errorf("stopped after %d redirects", maxAssetRedirects)
@@ -404,6 +409,11 @@ func httpGetSmall(ctx context.Context, rawURL string) ([]byte, error) {
 // command errors to stderr and a download failure is an ordinary event
 // (network hiccup, 5xx, checksum mismatch), not an exceptional one.
 func fetchAndVerify(ctx context.Context, rawURL, asset, wantDigest, stagingDir string) (*fetchedAsset, error) {
+	stagingRoot, err := osroot.Shared(stagingDir)
+	if err != nil {
+		return nil, fmt.Errorf("open staging dir: %w", err)
+	}
+
 	// The asset name is normally one of our own candidates, but the
 	// single-URL download_url template path derives it from the URL and a
 	// future caller could pass a name straight from a remote manifest.
@@ -434,29 +444,34 @@ func fetchAndVerify(ctx context.Context, rawURL, asset, wantDigest, stagingDir s
 		return nil, fmt.Errorf("download %s: %s", redactURL(rawURL), resp.Status)
 	}
 
-	dest := filepath.Join(stagingDir, asset)
-	out, err := os.Create(dest) //nolint:gosec // dest is inside the caller-owned staging dir; asset name came from our candidate list or checksum manifest
+	// Through the staging root, with the asset as a name inside it. asset comes
+	// from assetCandidates today — selectAssetFromChecksums uses the downloaded
+	// manifest only as a membership test, so a remote name never reaches here —
+	// and assetNameFromURL runs path.Base. The root is what keeps that true if
+	// either of those ever starts trusting the manifest's spelling.
+	out, err := stagingRoot.Create(asset)
 	if err != nil {
 		return nil, fmt.Errorf("create staging file: %w", err)
 	}
+	dest := filepath.Join(stagingDir, asset)
 	h := sha256.New()
 	n, err := io.Copy(io.MultiWriter(out, h), io.LimitReader(resp.Body, maxPluginAssetSize+1))
 	closeErr := out.Close()
 	if err != nil {
-		_ = os.Remove(dest)
+		_ = osroot.RemoveNoSymlinks(stagingRoot, asset) //nolint:errcheck // best-effort cleanup of a staging file we are already abandoning
 		return nil, fmt.Errorf("download %s: %w", redactURL(rawURL), err)
 	}
 	if closeErr != nil {
-		_ = os.Remove(dest)
+		_ = osroot.RemoveNoSymlinks(stagingRoot, asset) //nolint:errcheck // best-effort cleanup of a staging file we are already abandoning
 		return nil, fmt.Errorf("write staging file: %w", closeErr)
 	}
 	if n > maxPluginAssetSize {
-		_ = os.Remove(dest)
+		_ = osroot.RemoveNoSymlinks(stagingRoot, asset) //nolint:errcheck // best-effort cleanup of a staging file we are already abandoning
 		return nil, fmt.Errorf("download %s: exceeds %d byte limit", redactURL(rawURL), int64(maxPluginAssetSize))
 	}
 	got := hex.EncodeToString(h.Sum(nil))
 	if wantDigest != "" && !strings.EqualFold(got, wantDigest) {
-		_ = os.Remove(dest)
+		_ = osroot.RemoveNoSymlinks(stagingRoot, asset) //nolint:errcheck // best-effort cleanup of a staging file we are already abandoning
 		return nil, fmt.Errorf("checksum mismatch for %s: got %s, want %s", asset, got, wantDigest)
 	}
 	return &fetchedAsset{Path: dest, Asset: asset, SHA256: got, Verified: wantDigest != ""}, nil
@@ -466,21 +481,21 @@ func fetchAndVerify(ctx context.Context, rawURL, asset, wantDigest, stagingDir s
 // asset and writes it to destPath (mode 0755 on Unix). Raw binaries are
 // copied; .tar.gz/.tgz and .zip archives are searched for an entry whose
 // basename matches entire-<name>[.exe], wherever it sits in the archive.
-func extractPluginBinary(assetPath, name, destPath string) error {
+func extractPluginBinary(assetPath, name string, destRoot *os.Root, destName string) error {
 	binName := pluginBinaryPrefix + name
 	lower := strings.ToLower(assetPath)
 	switch {
 	case strings.HasSuffix(lower, ".tar.gz") || strings.HasSuffix(lower, ".tgz"):
-		return extractFromTarGz(assetPath, binName, destPath)
+		return extractFromTarGz(assetPath, binName, destRoot, destName)
 	case strings.HasSuffix(lower, ".zip"):
-		return extractFromZip(assetPath, binName, destPath)
+		return extractFromZip(assetPath, binName, destRoot, destName)
 	default:
 		src, err := os.Open(assetPath) //nolint:gosec // staging-dir file we just wrote
 		if err != nil {
 			return fmt.Errorf("open asset: %w", err)
 		}
 		defer src.Close()
-		return writeExecutable(src, destPath)
+		return writeExecutable(destRoot, destName, src)
 	}
 }
 
@@ -613,7 +628,7 @@ func selectTarEntry(archivePath, binName string) (string, error) {
 	return p.best, nil
 }
 
-func extractFromTarGz(archivePath, binName, destPath string) error {
+func extractFromTarGz(archivePath, binName string, destRoot *os.Root, destName string) error {
 	// Two passes: a tar stream cannot seek backwards, so choosing among
 	// candidates means selecting first and extracting second. The cost is one
 	// extra inflation of an archive already capped at maxPluginAssetSize —
@@ -632,7 +647,7 @@ func extractFromTarGz(archivePath, binName, destPath string) error {
 			return false, nil
 		}
 		found = true
-		return true, writeExecutable(r, destPath)
+		return true, writeExecutable(destRoot, destName, r)
 	}); err != nil {
 		return err
 	}
@@ -642,7 +657,7 @@ func extractFromTarGz(archivePath, binName, destPath string) error {
 	return nil
 }
 
-func extractFromZip(archivePath, binName, destPath string) error {
+func extractFromZip(archivePath, binName string, destRoot *os.Root, destName string) error {
 	zr, err := zip.OpenReader(archivePath)
 	if err != nil {
 		return fmt.Errorf("open zip: %w", err)
@@ -671,7 +686,7 @@ func extractFromZip(archivePath, binName, destPath string) error {
 		return fmt.Errorf("open zip entry: %w", err)
 	}
 	defer rc.Close()
-	return writeExecutable(rc, destPath)
+	return writeExecutable(destRoot, destName, rc)
 }
 
 // fileSHA256 returns the hex SHA-256 of the file at path. Used to record the
@@ -693,8 +708,8 @@ func fileSHA256(path string) (string, error) {
 // maxPluginAssetSize. Explicit chmod (not inherited archive mode) because
 // zip-built and raw-binary releases routinely lose the bit — the #1
 // "downloaded plugin doesn't run" failure.
-func writeExecutable(r io.Reader, destPath string) error {
-	return writeExecutableLimited(r, destPath, maxPluginAssetSize)
+func writeExecutable(root *os.Root, destName string, r io.Reader) error {
+	return writeExecutableLimited(root, destName, r, maxPluginAssetSize)
 }
 
 // writeExecutableLimited is writeExecutable with an explicit cap, so the
@@ -707,25 +722,27 @@ func writeExecutable(r io.Reader, destPath string) error {
 // since binary_sha256 landed — the digest is computed from the truncated bytes,
 // so `plugin doctor` would confirm the corrupt binary as intact. Reading one
 // byte past the cap makes the overflow detectable, mirroring fetchAndVerify.
-func writeExecutableLimited(r io.Reader, destPath string, limit int64) error {
+func writeExecutableLimited(root *os.Root, destName string, r io.Reader, limit int64) error {
 	// Write to a sibling temp file and rename into place. Two reasons, both
 	// load-bearing:
 	//
-	//  - O_CREATE without O_EXCL follows a symlink at destPath, so a symlink
+	//  - O_CREATE without O_EXCL follows a symlink at destName, so a symlink
 	//    planted at pkg/<name>/entire-<name> by an earlier malicious plugin
 	//    would redirect this write anywhere the user can write (~/.zshrc, a git
 	//    hook). Creating a fresh temp name and renaming cannot follow anything.
+	//    The root is the second, structural half of that: destName resolves
+	//    inside the managed tree, so even a rename target that escaped the
+	//    naming rules cannot land outside it.
 	//  - Opening destPath with O_TRUNC destroys the working binary before the
 	//    new bytes are known-good, so an interrupted or failed copy left the
 	//    plugin broken. This path is the *normal* one whenever staging and the
 	//    managed dir are on different filesystems (a tmpfs /tmp), not an edge
 	//    case.
-	tmp, err := os.CreateTemp(filepath.Dir(destPath), ".tmp-"+filepath.Base(destPath)+"-*")
+	tmp, tmpName, err := jsonutil.CreateTempIn(root, destName)
 	if err != nil {
 		return fmt.Errorf("create staging binary: %w", err)
 	}
-	tmpName := tmp.Name()
-	defer func() { _ = os.Remove(tmpName) }() // no-op once the rename succeeds
+	defer func() { _ = root.Remove(tmpName) }() //nolint:errcheck // no-op once the rename succeeds
 
 	n, err := io.Copy(tmp, io.LimitReader(r, limit+1))
 	if err != nil {
@@ -738,11 +755,11 @@ func writeExecutableLimited(r io.Reader, destPath string, limit int64) error {
 	if n > limit {
 		return fmt.Errorf("plugin binary exceeds the %d byte limit", limit)
 	}
-	// CreateTemp makes 0600; the dispatcher needs it executable.
-	if err := os.Chmod(tmpName, 0o755); err != nil { //nolint:gosec // a plugin binary must be executable
+	// CreateTempIn makes 0600; the dispatcher needs it executable.
+	if err := root.Chmod(tmpName, 0o755); err != nil {
 		return fmt.Errorf("set executable bit: %w", err)
 	}
-	if err := os.Rename(tmpName, destPath); err != nil {
+	if err := root.Rename(tmpName, destName); err != nil {
 		return fmt.Errorf("place binary: %w", err)
 	}
 	return nil

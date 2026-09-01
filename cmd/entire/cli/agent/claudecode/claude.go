@@ -169,9 +169,9 @@ func (c *ClaudeCodeAgent) WriteSession(_ context.Context, session *agent.AgentSe
 		return errors.New("session has no native data to write")
 	}
 
-	// Write the raw JSONL data
-	if err := os.WriteFile(session.SessionRef, session.NativeData, 0o600); err != nil {
-		return fmt.Errorf("failed to write transcript: %w", err)
+	// Write the raw JSONL data through Claude Code's own session store.
+	if err := agent.WriteSessionFile(c, session, session.NativeData, 0o600); err != nil {
+		return fmt.Errorf("write transcript: %w", err)
 	}
 
 	return nil
@@ -180,87 +180,6 @@ func (c *ClaudeCodeAgent) WriteSession(_ context.Context, session *agent.AgentSe
 // FormatResumeCommand returns the command to resume a Claude Code session.
 func (c *ClaudeCodeAgent) FormatResumeCommand(sessionID string) string {
 	return "claude -r " + sessionID
-}
-
-// Session helper methods - work on AgentSession with Claude's native JSONL data
-
-// TruncateAtUUID returns a new session truncated at the given UUID (inclusive).
-// This is used for rewind operations to restore transcript state.
-// Requires NativeData to be populated.
-func (c *ClaudeCodeAgent) TruncateAtUUID(session *agent.AgentSession, uuid string) (*agent.AgentSession, error) {
-	if session == nil {
-		return nil, errors.New("session is nil")
-	}
-
-	if len(session.NativeData) == 0 {
-		return nil, errors.New("session has no native data")
-	}
-
-	if uuid == "" {
-		// No truncation needed, return copy
-		return &agent.AgentSession{
-			SessionID:     session.SessionID,
-			AgentName:     session.AgentName,
-			RepoPath:      session.RepoPath,
-			SessionRef:    session.SessionRef,
-			StartTime:     session.StartTime,
-			NativeData:    session.NativeData,
-			ModifiedFiles: session.ModifiedFiles,
-		}, nil
-	}
-
-	// Parse, truncate, re-serialize
-	lines, err := transcript.ParseFromBytes(session.NativeData)
-	if err != nil {
-		return nil, fmt.Errorf("failed to parse transcript: %w", err)
-	}
-
-	truncated := TruncateAtUUID(lines, uuid)
-
-	newData, err := SerializeTranscript(truncated)
-	if err != nil {
-		return nil, fmt.Errorf("failed to serialize truncated transcript: %w", err)
-	}
-
-	return &agent.AgentSession{
-		SessionID:     session.SessionID,
-		AgentName:     session.AgentName,
-		RepoPath:      session.RepoPath,
-		SessionRef:    session.SessionRef,
-		StartTime:     session.StartTime,
-		NativeData:    newData,
-		ModifiedFiles: ExtractModifiedFiles(truncated),
-	}, nil
-}
-
-// FindCheckpointUUID finds the UUID of the message containing the tool_result
-// for the given tool use ID.
-// Returns the UUID and true if found, empty string and false otherwise.
-//
-// No production caller remains: this served task checkpoint rewind, which went
-// away with the rewind commands. Only a test exercises it now, so it should be
-// removed along with the rest of the strategy-level rewind machinery rather
-// than kept as exported-but-unreachable API.
-func (c *ClaudeCodeAgent) FindCheckpointUUID(session *agent.AgentSession, toolUseID string) (string, bool) {
-	if session == nil || len(session.NativeData) == 0 {
-		return "", false
-	}
-
-	lines, err := transcript.ParseFromBytes(session.NativeData)
-	if err != nil {
-		return "", false
-	}
-
-	return FindCheckpointUUID(lines, toolUseID)
-}
-
-// ReadSessionFromPath is a convenience method that reads a session directly from a file path.
-// This is useful when you have the path but not a HookInput.
-func (c *ClaudeCodeAgent) ReadSessionFromPath(transcriptPath, sessionID string) (*agent.AgentSession, error) {
-	return c.ReadSession(&agent.HookInput{
-		SessionID:  sessionID,
-		SessionRef: transcriptPath,
-	})
 }
 
 // SanitizePathForClaude converts a path to Claude's project directory format.

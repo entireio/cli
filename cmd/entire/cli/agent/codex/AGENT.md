@@ -4,7 +4,11 @@
 
 Codex (OpenAI's CLI coding agent) supports lifecycle hooks via `hooks.json` config files with JSON stdin/stdout transport. The hook mechanism closely mirrors Claude Code's architecture (matcher-based hook groups, JSON on stdin, structured JSON output on stdout). Eleven hook events are available: PreToolUse, PermissionRequest, PostToolUse, PreCompact, PostCompact, SessionStart, SessionEnd, UserPromptSubmit, SubagentStart, SubagentStop, and Stop.
 
-**Verified against** codex `main` @ `1c042dd4d8` (2026-08-10); installed reference `codex-cli 0.147.0`. Re-check `codex-rs/hooks/schema/generated/` and `codex-rs/config/src/hook_config.rs` when revisiting — this surface moves.
+**Verified against** the pinned `codex-cli 0.149.0`. The integration test, not a
+source comment or a reimplementation of Codex's Git traversal, is the contract
+for linked-worktree behavior. Re-run the no-model `hooks/list` test before
+changing the pin. Re-check `codex-rs/hooks/schema/generated/` and
+`codex-rs/config/src/hook_config.rs` when revisiting the general hook protocol.
 
 ## Static Checks
 
@@ -12,7 +16,7 @@ Codex (OpenAI's CLI coding agent) supports lifecycle hooks via `hooks.json` conf
 |-------|--------|-------|
 | Binary present | PASS | `codex` found on PATH |
 | Help available | PASS | `codex --help` shows full subcommand list |
-| Version info | PASS | `codex-cli 0.147.0` (assessed at 0.116.0) |
+| Version info | PASS | `codex-cli 0.149.0` |
 | Hook keywords | PASS | Hook system via `hooks.json` config files |
 | Session keywords | PASS | `resume`, `fork` subcommands; session stored as threads in SQLite + JSONL rollout files |
 | Config directory | PASS | `~/.codex/` (overridable via `CODEX_HOME`) |
@@ -21,15 +25,89 @@ Codex (OpenAI's CLI coding agent) supports lifecycle hooks via `hooks.json` conf
 ## Binary
 
 - Name: `codex`
-- Version: `codex-cli 0.147.0` (SessionEnd requires 0.146+)
+- Version: `codex-cli 0.149.0` (SessionEnd requires 0.146+)
 - Install: `npm install -g @openai/codex` or build from source
 
 ## Hook Mechanism
 
-- Config file: `.codex/hooks.json` (project-level, in repo root) or `~/.codex/hooks.json` (user-level)
+- Config file: `.codex/hooks.json` (project-level) or `~/.codex/hooks.json` (user-level)
 - Config format: JSON
 - Config layer stack: System (`~/.codex/`) → Project (`.codex/`) — project takes precedence
 - Hook registration: JSON file with `hooks` object containing event arrays of matcher groups
+
+### Linked-worktree discovery and ownership
+
+Codex 0.149.0 does not necessarily load the hooks file owned by the checkout in
+which it runs. Pinned, no-model `codex app-server` integration tests call
+`hooks/list` from both a conventional linked worktree and a `.bare/worktrees`
+layout. The tests are the contract for which project root Codex actually uses.
+
+Entire deliberately separates that read behavior from write ownership:
+
+- `WorktreeHooksPath` is exactly
+  `<current-checkout>/.codex/hooks.json`. Installation, removal, presence, and
+  freshness checks use this path.
+- `DiscoveredHooksPath` is the hook file Codex is expected to load for the
+  current checkout. Discovery, configuration inspection, and trust inspection
+  use it read-only.
+
+The checkout where a command runs is the write boundary because worktrees share
+Git objects, not working-tree state. Another checkout may be on a different
+branch or have uncommitted changes. `entire enable`, agent removal, and
+`entire clean` may update the current checkout because the user explicitly ran
+a mutating command there. They must not dirty another checkout. Doctor, status,
+SessionStart, and discovery never write hook configuration.
+
+`ResolveHookDiscovery` reuses the shared `.git` and `commondir` path resolvers,
+then applies Codex-specific checks for linked-worktree registration and hook
+root ownership. Conventional linked worktrees discover the primary checkout's
+hook file. Normal checkouts, ordinary submodules, and separate-Git-directory
+checkouts discover their own hook file. A
+The pinned 0.149.0 test verifies that a `.bare/worktrees` layout discovers the
+layout root's hook file; linked submodules remain worktree-local because their
+Git metadata is submodule-owned. If the Git metadata cannot be resolved or
+would point at a user-wide root, Entire reports discovery as unresolved rather
+than guessing.
+
+Discovery never supplies a mutation, migration, cleanup, or lock target. Entire
+does not create or rewrite another checkout's `.codex` directory, migrate a
+worktree-local file, or remove a discovered file owned elsewhere. Mutating
+commands continue to operate only on the current checkout's hook file and warn
+when Codex discovers a different path. Doctor, status, SessionStart, and
+discovery never write hook configuration.
+
+Read-only inspection opens only the resolved `.codex` directory, rejects
+redirected or non-regular files, caps `hooks.json` at 1 MiB, reads one extra
+byte to detect overflow, and verifies that the file identity is stable before
+and after reading.
+
+`entire doctor` reports the current-worktree and Codex-discovered paths,
+project-layer gaps, invalid or unresolved discovery, managed-command/timeout
+drift, and missing trust records. `entire status` exposes the concise warning and
+the same structured mismatch in `codex_hooks`; SessionStart appends a bounded,
+read-only warning. Entire never computes or copies Codex trust hashes.
+
+When the two paths differ, status and doctor report that the current-worktree
+file is not active and identify the discovered project root. If that root is a
+normal Git checkout, the user can run `entire enable` there; in a `.bare`
+layout, the project root is not a worktree, so the generated `.codex/hooks.json`
+change must be applied there directly. Malformed or unavailable discovered files
+take priority over local shadows. An unsupported layout remains
+`discovery_unresolved`.
+
+### Pinned app-server contract
+
+`TestCodexAppServerHooksList_LinkedWorktreeUsesPrimaryCheckout` and
+`TestCodexAppServerHooksList_BareWorktreeUsesLayoutRoot` run against exactly
+`@openai/codex@0.149.0`. They start `codex app-server` with an isolated
+`CODEX_HOME`, then send `initialize`, `initialized`, and `hooks/list` JSONL
+messages over stdio. The conventional case requires Codex's primary checkout
+path; the `.bare` case requires the layout-root path. The tests make no model
+request and need no OpenAI credentials. Local integration runs skip when the
+exact binary is unavailable. CI installs the pinned version and sets
+`ENTIRE_TEST_REQUIRE_CODEX_APP_SERVER=1`, so absence or version drift fails
+instead of skipping. Do not relax that guard or replace the exact version with
+a range.
 
 **hooks.json structure:**
 ```json
@@ -88,9 +166,10 @@ Codex (OpenAI's CLI coding agent) supports lifecycle hooks via `hooks.json` conf
 | `Stop` | Agent finishes a turn | `TurnEnd` | Includes `last_assistant_message` |
 | `PostToolUse` | After tool execution | `ToolUse` | Consumed for `apply_patch` only |
 | `PreToolUse` | Before tool execution | *(pass-through)* | No lifecycle action needed |
+| `SubagentStart` | A thread-spawned subagent begins | `SubagentStart` | `agent_id` is Entire's task correlation ID |
+| `SubagentStop` | A thread-spawned subagent ends | `SubagentEnd` | `agent_transcript_path` is the subagent rollout |
 
-Not consumed by Entire: `PermissionRequest`, `PreCompact`, `PostCompact`,
-`SubagentStart`, `SubagentStop`.
+Not consumed by Entire: `PermissionRequest`, `PreCompact`, `PostCompact`.
 
 ### SessionEnd's timeout ceiling
 
@@ -238,9 +317,12 @@ The `systemMessage` field can be used to display messages to the user via the ag
 
 ## Config Preservation
 
-- Use read-modify-write on entire `hooks.json` file
-- Preserve unknown keys in the `hooks` object (future event types)
-- The `hooks.json` is separate from `config.toml` — safe to create/modify independently
+- Read-modify-write applies only to the current checkout's `hooks.json`.
+- Preserve unknown top-level fields, unknown hook event types, and user hooks.
+- Removal deletes only Entire-managed entries from the current checkout.
+- Never merge from, migrate, clean, or mutate another checkout's file.
+- The `hooks.json` is separate from `config.toml`; Entire does not write trust
+  records.
 
 ## CLI Flags
 
@@ -256,8 +338,8 @@ The `systemMessage` field can be used to display messages to the user via the ag
 
 - **SessionEnd is tightly budgeted:** 1s default, 3s hard cap, process tree killed on expiry. See "SessionEnd's timeout ceiling" above. This is the only Entire hook that cannot assume it will finish.
 - **SessionEnd needs Codex 0.146+:** Added 2026-07-17 (openai/codex#33895), first tagged in `rust-v0.146.0-alpha.3`. On older Codex the hook is simply never called, and such sessions are instead reclaimed by the exited-owner sweep in `entire status` / `entire doctor` (`session.State.OwnerExited`).
-- **SessionEnd must be trusted before it fires:** Codex silently skips hooks with no `trusted_hash` entry in the user's `config.toml`. Existing users have trusted the four older events but not `session_end`, so the hook does nothing until they approve it via `/hooks` inside Codex. `HookTrustGaps` and `MissingEntireHooks` both cover `session_end`, so `entire doctor` and the SessionStart banner say so — without that it would fail silently. The e2e suite pre-trusts hooks by generating the same hashes itself (`e2e/agents/codex_trust.go`), so **an event added to `managedHooks` must also be added to `codexHookEventLabels`, the `codexHookEvents` struct, and the `codexEventGroups` switch there** — all three, or it is installed but inert for every e2e run; `TestCodexHookTrustState_CoversEveryInstalledEvent` fails when they drift.
-- **A pre-SessionEnd install still counts as installed:** `AreHooksInstalled` gates on the core events only, so adding an event does not retroactively drop Codex out of `entire status` and the agent pickers for everyone who enabled it earlier. The stale install is reported as drift by `MissingEntireHooks` instead, with `entire enable` as the fix.
+- **SessionEnd must be trusted before it fires:** Codex silently skips hooks with no `trusted_hash` entry in the user's `config.toml`. Existing users have trusted the four older events but not `session_end`, so the hook does nothing until they approve it via `/hooks` inside Codex. `HookTrustGaps` and `InspectHookConfig(...).Missing` both cover `session_end`, so `entire doctor` and the SessionStart banner say so — without that it would fail silently. The e2e suite pre-trusts hooks by generating the same hashes itself (`e2e/agents/codex_trust.go`), so **an event added to `managedHooks` must also be added to `codexHookEventLabels`, the `codexHookEvents` struct, and the `codexEventGroups` switch there** — all three, or it is installed but inert for every e2e run; `TestCodexHookTrustState_CoversEveryInstalledEvent` fails when they drift.
+- **A pre-SessionEnd install still counts as installed:** `AreHooksInstalled` gates on the core events only, so adding an event does not retroactively drop Codex out of `entire status` and the agent pickers for everyone who enabled it earlier. The stale install is reported as drift through `InspectHookConfig(...).Missing` instead, with `entire enable` as the fix.
 - **`reason` carries no information:** always `"other"`, so a session ended by `/clear` is indistinguishable from one ended by quitting.
 - **Transcript may be null:** In `--ephemeral` mode, `transcript_path` is null. The integration handles this gracefully.
 - **No hooks fire under `-s read-only`:** verified against 0.147.0 — a `codex exec -s read-only` run produces no hook invocations at all, so no session is tracked. `-s workspace-write` fires the full set.

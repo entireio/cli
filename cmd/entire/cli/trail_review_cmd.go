@@ -18,7 +18,9 @@ import (
 	"text/tabwriter"
 
 	"github.com/entireio/cli/cmd/entire/cli/api"
+	"github.com/entireio/cli/cmd/entire/cli/osroot"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
+	"github.com/entireio/cli/cmd/entire/cli/worktreedir"
 
 	"github.com/google/uuid"
 	"github.com/spf13/cobra"
@@ -979,12 +981,8 @@ func trailReviewSelectedTextFromWorktree(worktreeRoot, filePath string, startLin
 	if strings.TrimSpace(worktreeRoot) == "" || strings.TrimSpace(filePath) == "" || startLine <= 0 || endLine < startLine {
 		return "", false, false
 	}
-	fullPath, ok := safeWorktreeFilePath(worktreeRoot, filePath)
+	data, ok := readWorktreeFileSafely(worktreeRoot, filePath)
 	if !ok {
-		return "", false, false
-	}
-	data, err := os.ReadFile(fullPath) //nolint:gosec // path is constrained to the current worktree root.
-	if err != nil {
 		return "", false, false
 	}
 	contents := strings.ReplaceAll(string(data), "\r\n", "\n")
@@ -999,21 +997,37 @@ func trailReviewSelectedTextFromWorktree(worktreeRoot, filePath string, startLin
 	return text, true, true
 }
 
-func safeWorktreeFilePath(worktreeRoot, filePath string) (string, bool) {
+// readWorktreeFileSafely reads filePath from the worktree at worktreeRoot
+// through that worktree's shared root.
+//
+// It replaces a safeWorktreeFilePath helper that validated a relative path and
+// returned a joined string for the caller to os.ReadFile. The validation was
+// correct and it was still the only thing keeping the read inside the tree:
+// filePath here is a review location, which arrives from the API, and lexical
+// checks say nothing about a symlink on the way down. Anchoring on the worktree
+// root and resolving filePath as a name inside it makes containment the
+// kernel's, and worktreedir.Name performs the same rejections this used to do
+// by hand.
+//
+// ok=false covers both "not a path inside the worktree" and "could not be
+// read"; every caller treats them the same way.
+func readWorktreeFileSafely(worktreeRoot, filePath string) ([]byte, bool) {
 	if filepath.IsAbs(filePath) {
-		return "", false
+		return nil, false
 	}
-	root := filepath.Clean(worktreeRoot)
-	cleanRel := filepath.Clean(filepath.FromSlash(filePath))
-	if cleanRel == "." || cleanRel == "" || cleanRel == ".." || strings.HasPrefix(cleanRel, ".."+string(os.PathSeparator)) {
-		return "", false
+	name, err := worktreedir.Name(worktreeRoot, filePath)
+	if err != nil {
+		return nil, false
 	}
-	fullPath := filepath.Join(root, cleanRel)
-	rel, err := filepath.Rel(root, fullPath)
-	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) || filepath.IsAbs(rel) {
-		return "", false
+	root, err := worktreedir.OpenAt(worktreeRoot)
+	if err != nil {
+		return nil, false
 	}
-	return fullPath, true
+	data, err := osroot.ReadFileNoFollow(root, name)
+	if err != nil {
+		return nil, false
+	}
+	return data, true
 }
 
 func createTrailReviewFinding(ctx context.Context, client *api.Client, trailID string, input api.TrailReviewCommentInput) (api.TrailReviewComment, error) {

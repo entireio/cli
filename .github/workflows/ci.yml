@@ -36,6 +36,21 @@ jobs:
           GO_TEST_PARALLEL: "16"
         run: mise run test:ci:integration:shard -- ${{ matrix.shard }}
 
+  test-codex-hooks:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - uses: jdx/mise-action@f10502fc09dadecfefb962fff68ce77213930204 # v4
+      - name: Install latest Codex CLI
+        run: npm install --global @openai/codex
+      - name: Codex app-server integration tests
+        env:
+          ENTIRE_TEST_REQUIRE_CODEX_APP_SERVER: "1"
+        run: go test -tags=integration -race -count=1 ./cmd/entire/cli/integration_test -run '^TestCodexAppServerHooksList_'
+
   test-canary:
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -75,6 +90,7 @@ jobs:
     needs:
       - test-core
       - test-integration
+      - test-codex-hooks
       - test-canary
       - test-windows
     if: ${{ always() }}
@@ -83,5 +99,6 @@ jobs:
         run: |
           [ "${{ needs.test-core.result }}" = "success" ]
           [ "${{ needs.test-integration.result }}" = "success" ]
+          [ "${{ needs.test-codex-hooks.result }}" = "success" ]
           [ "${{ needs.test-canary.result }}" = "success" ]
           [ "${{ needs.test-windows.result }}" = "success" ]

@@ -21,6 +21,10 @@ import (
 	"time"
 
 	"charm.land/huh/v2"
+	"github.com/go-git/go-git/v6"
+	"github.com/spf13/cobra"
+	"github.com/stretchr/testify/require"
+
 	"github.com/entireio/cli/cmd/entire/cli/api"
 	"github.com/entireio/cli/cmd/entire/cli/auth"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
@@ -29,9 +33,6 @@ import (
 	"github.com/entireio/cli/internal/entireclient/clusterdiscovery"
 	"github.com/entireio/cli/internal/entireclient/contexts"
 	"github.com/entireio/cli/internal/entireclient/tokenstore"
-	"github.com/go-git/go-git/v6"
-	"github.com/spf13/cobra"
-	"github.com/stretchr/testify/require"
 )
 
 const (
@@ -866,12 +867,7 @@ func TestDeleteTrailByNumber(t *testing.T) {
 func TestResolveTrailRemote_RejectsUnsupportedForge(t *testing.T) {
 	repoDir := t.TempDir()
 	testutil.InitRepo(t, repoDir)
-	cmd := exec.CommandContext(context.Background(), "git", "remote", "add", "origin", "git@gitlab.com:acme/my-app.git")
-	cmd.Dir = repoDir
-	cmd.Env = testutil.GitIsolatedEnv()
-	if err := cmd.Run(); err != nil {
-		t.Fatalf("git remote add: %v", err)
-	}
+	testutil.RunGit(t, repoDir, "remote", "add", "origin", "git@gitlab.com:acme/my-app.git")
 	t.Chdir(repoDir)
 
 	_, _, _, err := resolveTrailRemote(context.Background())
@@ -901,12 +897,7 @@ func TestTrailEnablementCache_ReadsClonePreference(t *testing.T) {
 
 	repoDir := t.TempDir()
 	testutil.InitRepo(t, repoDir)
-	cmd := exec.CommandContext(context.Background(), "git", "remote", "add", "origin", "git@github.com:acme/repo.git")
-	cmd.Dir = repoDir
-	cmd.Env = testutil.GitIsolatedEnv()
-	if err := cmd.Run(); err != nil {
-		t.Fatalf("git remote add: %v", err)
-	}
+	testutil.RunGit(t, repoDir, "remote", "add", "origin", "git@github.com:acme/repo.git")
 	t.Chdir(repoDir)
 	ctx := context.Background()
 
@@ -1037,7 +1028,7 @@ func TestListTrailResourcesRejectsNonPositiveLimit(t *testing.T) {
 func TestRunTrailListAllPrintsNoServerLimitNote(t *testing.T) {
 	t.Parallel()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		_, _ = fmt.Fprint(w, `{"items":[{"id":"trl_1","number":1,"branch":"feature/x","status":"open"}],"totalCount":1033}`)
+		_, _ = fmt.Fprint(w, `{"items":[{"id":"trl_1","number":1,"branch":"feature/x","originalBranch":"feature/former","status":"open"}],"totalCount":1033}`)
 	}))
 	defer srv.Close()
 
@@ -1054,6 +1045,9 @@ func TestRunTrailListAllPrintsNoServerLimitNote(t *testing.T) {
 	}
 	if strings.Contains(out.String(), "exceeds the server maximum") {
 		t.Fatalf("unexpected server-limit note:\n%s", out.String())
+	}
+	if strings.Contains(out.String(), "feature/former") {
+		t.Fatalf("human output contains original branch:\n%s", out.String())
 	}
 }
 
@@ -1635,6 +1629,63 @@ func trailShowTestServer(t *testing.T, resource api.TrailResource, detailSnapsho
 	return srv
 }
 
+func TestRunTrailListAndShowJSONPreserveBranchState(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name           string
+		branch         string
+		originalBranch string
+	}{
+		{name: "linked", branch: "feature/current", originalBranch: "feature/original"},
+		{name: "unlinked", originalBranch: "feature/former"},
+		{name: "empty original branch", branch: "feature/current"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			resource := api.TrailResource{
+				ID:             "trl_1",
+				Number:         7,
+				Branch:         tt.branch,
+				OriginalBranch: tt.originalBranch,
+				Title:          "Branch state",
+				Status:         string(trail.StatusOpen),
+			}
+			srv := trailShowTestServer(t, resource, "", 0)
+			client := api.NewClientWithBaseURL("tok", srv.URL)
+
+			var listOut bytes.Buffer
+			err := runTrailListAllWithClient(t.Context(), &listOut, client, trailListOptions{
+				Repo: "gh/acme/repo", Limit: 10, JSON: true,
+			}, nil)
+			require.NoError(t, err)
+
+			var showOut, showErr bytes.Buffer
+			err = runTrailShowWithClient(t.Context(), &showOut, &showErr, client, "gh", "acme", "repo", trailShowOptions{Selector: "7", JSON: true})
+			require.NoError(t, err)
+			require.Empty(t, showErr.String())
+
+			type branchState struct {
+				Branch         string  `json:"branch"`
+				OriginalBranch *string `json:"original_branch"`
+			}
+			var listed []branchState
+			require.NoError(t, json.Unmarshal(listOut.Bytes(), &listed))
+			require.Len(t, listed, 1)
+			var shown branchState
+			require.NoError(t, json.Unmarshal(showOut.Bytes(), &shown))
+
+			for output, got := range map[string]branchState{"list": listed[0], "show": shown} {
+				require.Equal(t, tt.branch, got.Branch, "%s branch", output)
+				require.NotNil(t, got.OriginalBranch, "%s original_branch must be present", output)
+				require.Equal(t, tt.originalBranch, *got.OriginalBranch, "%s original_branch", output)
+			}
+		})
+	}
+}
+
 func TestRunTrailShowJSONEmitsOneTrailObject(t *testing.T) {
 	t.Parallel()
 
@@ -1768,7 +1819,7 @@ func TestRunTrailShowTextStillRendersTheHumanView(t *testing.T) {
 
 	srv := trailShowTestServer(t, api.TrailResource{
 		ID: "trl_1", Number: 7, URL: "https://entire.io/gh/acme/repo/trails/7",
-		Branch: "feature/x", Base: "main", Title: "Shown trail", Status: string(trail.StatusOpen),
+		Branch: "feature/x", OriginalBranch: "feature/former", Base: "main", Title: "Shown trail", Status: string(trail.StatusOpen),
 	}, "detail body", 0)
 
 	var out, errOut bytes.Buffer
@@ -1780,6 +1831,7 @@ func TestRunTrailShowTextStillRendersTheHumanView(t *testing.T) {
 	for _, want := range []string{"Trail: Shown trail", "Number:", "feature/x", "https://entire.io/gh/acme/repo/trails/7", "Description:", "detail body"} {
 		require.Containsf(t, text, want, "text output missing %q:\n%s", want, text)
 	}
+	require.NotContains(t, text, "feature/former")
 }
 
 func TestTrailShowCmdHasJSONFlag(t *testing.T) {

@@ -2,6 +2,7 @@ package settings
 
 import (
 	"context"
+	"github.com/entireio/cli/cmd/entire/cli/testutil"
 	"os"
 	"path/filepath"
 	"testing"
@@ -109,7 +110,7 @@ func TestGetCheckpointRemote_JSONRoundTrip(t *testing.T) {
 	tmpDir := t.TempDir()
 	entireDir := filepath.Join(tmpDir, ".entire")
 	require.NoError(t, os.MkdirAll(entireDir, 0o755))
-	require.NoError(t, os.MkdirAll(filepath.Join(tmpDir, ".git"), 0o755))
+	testutil.InitRepo(t, tmpDir)
 
 	settingsJSON := `{
 		"enabled": true,

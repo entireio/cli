@@ -763,26 +763,29 @@ func TestGitRefsStore_WriteRefusesCanceledContext(t *testing.T) {
 		"a write refused for cancellation must not leave a checkpoint ref behind")
 }
 
-// TestGitRefsStore_EnqueuesForPushDuringShutdown pins that a ref written during
-// shutdown is still queued for push — see enqueueForPush for why dropping the
-// record would strand the checkpoint locally forever.
-func TestGitRefsStore_EnqueuesForPushDuringShutdown(t *testing.T) {
+// TestGitRefsStore_EnqueuesAfterCancellationFollowingCAS pins that cancellation
+// after a successful ref update does not drop the push-queue record.
+func TestGitRefsStore_EnqueuesAfterCancellationFollowingCAS(t *testing.T) {
 	t.Parallel()
 	store := newRefsStore(t)
 	cid := id.MustCheckpointID("a1b2c3d4e5f6")
+	refName := mustRefName(t, cid)
 
 	head, err := store.repo.Head()
 	require.NoError(t, err)
 
 	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
+	repoRoot, _, err := repositoryDirs(ctx, store.repo)
+	require.NoError(t, err)
+	require.NoError(t, casUpdateRef(ctx, repoRoot, refName, head.Hash(), plumbing.ZeroHash))
 
-	require.NoError(t, store.setRef(ctx, cid, head.Hash()))
+	cancel()
+	store.enqueueForPush(ctx, refName)
 
 	q, err := PushQueueForRepo(context.Background(), store.repo)
 	require.NoError(t, err)
 	refs, err := q.Drain()
 	require.NoError(t, err)
-	assert.Contains(t, refs, mustRefName(t, cid),
-		"a ref written during shutdown must still be queued for push")
+	assert.Contains(t, refs, refName,
+		"a successful CAS must still be queued when cancellation follows it")
 }

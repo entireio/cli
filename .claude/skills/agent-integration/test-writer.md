@@ -21,7 +21,7 @@ Read these files to understand the existing test patterns.
 4. `e2e/agents/tmux.go` — `TmuxSession` for interactive PTY-based tests: `NewTmuxSession`, `Send`, `SendKeys`, `WaitFor` (with settle-time logic), `Capture`, `Close`
 5. `e2e/testutil/assertions.go` — Rich assertion helpers: `AssertFileExists`, `WaitForFileExists`, `AssertNewCommits`, `WaitForCheckpoint`, `AssertCheckpointAdvanced`, `AssertHasCheckpointTrailer`, `AssertCheckpointExists`, `AssertCommitLinkedToCheckpoint`, `AssertCheckpointMetadataComplete`, `ValidateCheckpointDeep`, and many more
 6. `e2e/testutil/metadata.go` — `CheckpointMetadata`, `SessionMetadata`, `TokenUsage`, `Attribution`, `SessionRef` types; `CheckpointPath()` helper for sharded directory layout
-7. `e2e/entire/entire.go` — CLI wrapper: `BinPath()` (builds from source or uses `E2E_ENTIRE_BIN`), `Enable`, `Disable`, `RewindList`, `Rewind`, `RewindLogsOnly`, `Explain`, `ExplainGenerate`, `ExplainCommit`, `Resume`
+7. `e2e/entire/entire.go` — CLI wrapper: `BinPath()` (builds from source or uses `E2E_ENTIRE_BIN`), `Enable`, `Disable`, `Doctor`, `CleanDryRun`, `CleanForce`, `Explain`, `AttachWithEnv`, `Resume` / `ResumeWithEnv`
 8. `e2e/testutil/artifacts.go` — Automatic artifact capture via `t.Cleanup`: `CaptureArtifacts` saves git-log, git-tree, checkpoint metadata, entire logs, and tmux pane content
 
 ### Step 2: Read Existing E2E Test Scenarios
@@ -30,7 +30,7 @@ Run `Glob("e2e/tests/*_test.go")` to find all existing test files. Read a few to
 - How tests use `testutil.ForEachAgent` with a timeout and callback `func(t, s, ctx)`
 - How prompts are written inline (no separate prompt template file)
 - How `s.RunPrompt`, `s.Git`, `s.StartSession`, `s.WaitFor`, `s.Send` are used
-- How assertions validate checkpoints, rewind, metadata, etc.
+- How assertions validate checkpoints, resume, metadata, etc.
 
 ### Step 3: Read Checkpoint Scenarios Doc
 
@@ -192,7 +192,7 @@ Use `/commit` to commit all files.
 - **Repo setup**: `ForEachAgent` calls `SetupRepo` automatically — do not call it manually
 - **Prompts**: Write prompts inline in the test. Include "Do not ask for confirmation" to prevent agent stalling
 - **Assertions**: Use helpers from `e2e/testutil/assertions.go` — see `AssertFileExists`, `WaitForCheckpoint`, `AssertCommitLinkedToCheckpoint`, `ValidateCheckpointDeep`, etc.
-- **CLI operations**: Use the `e2e/entire` package (`entire.Enable`, `entire.RewindList`, `entire.Rewind`, etc.) — never call the binary via raw `exec.Command`
+- **CLI operations**: Use the `e2e/entire` package (`entire.Enable`, `entire.Explain`, `entire.Resume`, etc.) — never call the binary via raw `exec.Command`
 - **No hardcoded paths**: Use `s.Dir` for repo paths, `s.ArtifactDir` for artifacts
 - **Console logging**: All operations through `s.RunPrompt`, `s.Git`, `s.Send`, `s.WaitFor` are automatically logged to `console.log`
 - **Transient errors**: `s.RunPrompt` auto-retries once on transient API errors via `IsTransientError`

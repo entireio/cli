@@ -370,7 +370,6 @@ func (br *BenchRepo) SeedShadowBranch(b *testing.B, sessionID string, checkpoint
 			WorktreeID:        br.WorktreeID,
 			ModifiedFiles:     modified,
 			MetadataDir:       metadataDir,
-			MetadataDirAbs:    metadataDirAbs,
 			CommitMessage:     fmt.Sprintf("Checkpoint %d", i+1),
 			AuthorName:        "Bench User",
 			AuthorEmail:       "bench@example.com",

@@ -355,7 +355,7 @@ func TestAreHooksInstalled(t *testing.T) {
 	t.Chdir(dir)
 	ag := &OpenCodeAgent{}
 
-	if ag.AreHooksInstalled(context.Background()) {
+	if hooksInstalledNow(t, ag) {
 		t.Error("hooks should not be installed initially")
 	}
 
@@ -363,7 +363,7 @@ func TestAreHooksInstalled(t *testing.T) {
 		t.Fatalf("install failed: %v", err)
 	}
 
-	if !ag.AreHooksInstalled(context.Background()) {
+	if !hooksInstalledNow(t, ag) {
 		t.Error("hooks should be installed after InstallHooks")
 	}
 
@@ -371,7 +371,7 @@ func TestAreHooksInstalled(t *testing.T) {
 		t.Fatalf("uninstall failed: %v", err)
 	}
 
-	if ag.AreHooksInstalled(context.Background()) {
+	if hooksInstalledNow(t, ag) {
 		t.Error("hooks should not be installed after UninstallHooks")
 	}
 }
@@ -406,7 +406,7 @@ func TestCheckHookConfig(t *testing.T) {
 	if err := os.WriteFile(path, []byte(legacy), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if !a.AreHooksInstalled(ctx) {
+	if !hooksInstalledNow(t, a) {
 		t.Error("AreHooksInstalled = false; a legacy local-dev plugin is still ours")
 	}
 	if got := a.CheckHookConfig(ctx); got != agent.HooksOutdated {
@@ -417,7 +417,7 @@ func TestCheckHookConfig(t *testing.T) {
 	if err := os.WriteFile(path, []byte(stale), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if !a.AreHooksInstalled(ctx) {
+	if !hooksInstalledNow(t, a) {
 		t.Error("AreHooksInstalled = false; a stale-but-marked plugin is still installed")
 	}
 	if got := a.CheckHookConfig(ctx); got != agent.HooksOutdated {
@@ -529,4 +529,20 @@ func legacyLocalDevRender() string {
 		"command -v entire >/dev/null 2>&1; then exit 0; fi; exec entire hooks opencode",
 		"command -v "+testutil.LegacyLocalDevCommand("")+" >/dev/null 2>&1; then exit 0; fi; exec "+testutil.LegacyLocalDevCommand("hooks opencode"),
 	)
+}
+
+// hooksInstalledNow reports whether the agent's hooks are installed, failing the
+// test if it could not tell. Built-in agents read a local config file where
+// absent means absent, so an error here is a bug, not a state to tolerate.
+func hooksInstalledNow(t *testing.T, ag interface {
+	AreHooksInstalled(ctx context.Context) (bool, error)
+},
+) bool {
+	t.Helper()
+
+	installed, err := ag.AreHooksInstalled(context.Background())
+	if err != nil {
+		t.Fatalf("AreHooksInstalled() error = %v", err)
+	}
+	return installed
 }

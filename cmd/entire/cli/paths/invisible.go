@@ -23,6 +23,28 @@ func IsUnroutableRuntimePath(err error) bool {
 
 var runtimeDataPrefixes = []string{EntireMetadataDir, EntireLogsDir, EntireTmpDir}
 
+// IsRuntimeDataPath reports whether relPath names runtime-class data under
+// .entire (metadata, logs, tmp) — the classes the global tier routes under the
+// git common dir. Config-class paths (settings files, runner config) always
+// stay in the worktree.
+func IsRuntimeDataPath(relPath string) bool {
+	_, ok := runtimeDataSubpath(relPath)
+	return ok
+}
+
+// RuntimeDirBase returns the routed base directory holding this repository's
+// .entire-class runtime data: <worktree>/.entire under repo-level activation,
+// the per-worktree runtime root under the git common dir when the global tier
+// owns the repo. Unroutable tier-owned repos return an error carrying
+// ErrUnroutableRuntimePath (fail closed — see AbsPath).
+func RuntimeDirBase(ctx context.Context) (string, error) {
+	root, err := WorktreeRoot(ctx)
+	if err != nil {
+		return "", err
+	}
+	return runtimeRootForPath(ctx, root)
+}
+
 func runtimeDataSubpath(relPath string) (string, bool) {
 	rel := filepath.ToSlash(relPath)
 	for _, prefix := range runtimeDataPrefixes {

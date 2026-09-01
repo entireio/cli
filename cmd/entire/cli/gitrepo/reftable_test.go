@@ -13,6 +13,8 @@ import (
 	"github.com/go-git/go-git/v6/plumbing"
 	gitstorage "github.com/go-git/go-git/v6/storage"
 	"github.com/stretchr/testify/require"
+
+	"github.com/entireio/cli/cmd/entire/cli/testutil/gitenv"
 )
 
 // initReftableRepo creates a repository using the reftable ref backend via the
@@ -32,31 +34,20 @@ func initReftableRepoWithFormat(t *testing.T, objectFormat, name, content string
 	t.Helper()
 	repoDir := t.TempDir()
 
-	env := append(os.Environ(),
-		"GIT_CONFIG_GLOBAL="+filepath.Join(t.TempDir(), "gitconfig"),
-		"GIT_CONFIG_SYSTEM=/dev/null",
-		"GIT_TERMINAL_PROMPT=0",
-	)
-
 	initArgs := []string{"init", "-b", "main", "--ref-format=reftable"}
 	if objectFormat != "" {
 		initArgs = append(initArgs, "--object-format="+objectFormat)
 	}
 	initArgs = append(initArgs, repoDir)
 	initCmd := exec.Command("git", initArgs...) //nolint:noctx // test capability probe
-	initCmd.Env = env
+	initCmd.Env = gitenv.Isolated()
 	if out, err := initCmd.CombinedOutput(); err != nil {
 		t.Skipf("git does not support reftable repositories: %v\n%s", err, out)
 	}
 
 	git := func(args ...string) string {
 		t.Helper()
-		cmd := exec.Command("git", args...) //nolint:noctx // test helper
-		cmd.Dir = repoDir
-		cmd.Env = env
-		out, err := cmd.CombinedOutput()
-		require.NoErrorf(t, err, "git %s: %s", strings.Join(args, " "), out)
-		return strings.TrimSpace(string(out))
+		return strings.TrimSpace(gitenv.Run(t, repoDir, args...))
 	}
 
 	if got := git("rev-parse", "--show-ref-format"); got != "reftable" {
@@ -82,15 +73,7 @@ func initReftableRepoWithFormat(t *testing.T, objectFormat, name, content string
 // read or written (matching the reftable test helpers).
 func setRepoConfig(t *testing.T, repoDir, key, value string) {
 	t.Helper()
-	cmd := exec.Command("git", "config", key, value) //nolint:noctx // test helper
-	cmd.Dir = repoDir
-	cmd.Env = append(os.Environ(),
-		"GIT_CONFIG_GLOBAL="+filepath.Join(t.TempDir(), "gitconfig"),
-		"GIT_CONFIG_SYSTEM=/dev/null",
-		"GIT_TERMINAL_PROMPT=0",
-	)
-	out, err := cmd.CombinedOutput()
-	require.NoErrorf(t, err, "git config %s %s: %s", key, value, out)
+	gitenv.Run(t, repoDir, "config", key, value)
 }
 
 // reftableCommit adds a file and commits it in an existing reftable repo,
@@ -98,24 +81,10 @@ func setRepoConfig(t *testing.T, repoDir, key, value string) {
 // by initReftableRepo, so only an isolated global/system config is supplied.
 func reftableCommit(t *testing.T, repoDir, name, content string) string {
 	t.Helper()
-	env := append(os.Environ(),
-		"GIT_CONFIG_GLOBAL="+filepath.Join(t.TempDir(), "gitconfig"),
-		"GIT_CONFIG_SYSTEM=/dev/null",
-		"GIT_TERMINAL_PROMPT=0",
-	)
-	run := func(args ...string) string {
-		t.Helper()
-		cmd := exec.Command("git", args...) //nolint:noctx // test helper
-		cmd.Dir = repoDir
-		cmd.Env = env
-		out, err := cmd.CombinedOutput()
-		require.NoErrorf(t, err, "git %s: %s", strings.Join(args, " "), out)
-		return strings.TrimSpace(string(out))
-	}
 	require.NoError(t, os.WriteFile(filepath.Join(repoDir, name), []byte(content), 0o644))
-	run("add", name)
-	run("commit", "-m", content)
-	return run("rev-parse", "HEAD")
+	gitenv.Run(t, repoDir, "add", name)
+	gitenv.Run(t, repoDir, "commit", "-m", content)
+	return strings.TrimSpace(gitenv.Run(t, repoDir, "rev-parse", "HEAD"))
 }
 
 // TestCheckAndSetReference_ConflictVsError verifies that CheckAndSetReference

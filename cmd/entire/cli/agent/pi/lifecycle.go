@@ -12,7 +12,9 @@ import (
 	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
+	"github.com/entireio/cli/cmd/entire/cli/entiredir"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
+	"github.com/entireio/cli/cmd/entire/cli/osroot"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/validation"
 )
@@ -276,42 +278,43 @@ const piHookCacheSubdir = "pi"
 // firing; the framework records the cached path as SessionRef in
 // checkpoint metadata, so subsequent operations on hooked sessions go
 // through the recorded path rather than re-resolving via GetSessionDir.
-// resolveSessionDir returns "" when the runtime path is unroutable in a
-// tier-owned repo (paths.IsUnroutableRuntimePath): the cwd fallback below
-// would place the cache in the worktree of a repo the global tier must keep
-// invisible. Callers skip the cache operation on "".
-func resolveSessionDir(ctx context.Context) string {
-	// AbsPath (not a bare WorktreeRoot join) so globally tracked repos keep
-	// this cache out of the worktree (invisible-mode routing in paths).
-	dir, err := paths.AbsPath(ctx, paths.EntireTmpDir+"/"+piHookCacheSubdir)
-	if err == nil {
-		return dir
+// sessionCacheDir is .entire/tmp/pi relative to the .entire root.
+var sessionCacheDir = entiredir.MustName(paths.EntireTmpDir) + "/" + piHookCacheSubdir
+
+// openSessionCache returns the shared root for the repo this hook is running
+// in — the ROUTED runtime base, so a globally tracked repo keeps this cache
+// under the git common dir — with the pi/ cache directory created under it
+// when create is set. A repo that cannot be resolved (or an unroutable
+// tier-owned repo) yields ok=false and every caller degrades: the cache is an
+// optimization, never the only copy of anything.
+func openSessionCache(ctx context.Context, create bool) (root *os.Root, ok bool) {
+	open := entiredir.OpenForRead
+	if create {
+		open = entiredir.Open
 	}
-	if paths.IsUnroutableRuntimePath(err) {
-		return ""
+	root, err := open(ctx)
+	if err != nil {
+		return nil, false
 	}
-	//nolint:forbidigo // fallback when no git repo (tests run outside repos)
-	wd, wdErr := os.Getwd()
-	if wdErr != nil {
-		return filepath.Join(paths.EntireTmpDir, piHookCacheSubdir)
+	if create {
+		if err := osroot.MkdirAllNoSymlink(root, sessionCacheDir, 0o750); err != nil {
+			logging.Debug(ctx, "pi: session cache mkdir", slog.String("err", err.Error()))
+			return nil, false
+		}
 	}
-	return filepath.Join(wd, paths.EntireTmpDir, piHookCacheSubdir) // entire-join-ok: sentinel-guarded no-repo fallback
+	return root, true
 }
 
 func cacheSessionID(ctx context.Context, id string) {
 	if id == "" {
 		return
 	}
-	dir := resolveSessionDir(ctx)
-	if dir == "" {
-		return
-	}
-	if err := os.MkdirAll(dir, 0o750); err != nil {
-		logging.Debug(ctx, "pi: cache session id mkdir", slog.String("err", err.Error()))
+	root, ok := openSessionCache(ctx, true)
+	if !ok {
 		return
 	}
 
-	if err := os.WriteFile(filepath.Join(dir, activeSessionFile), []byte(id), 0o600); err != nil {
+	if err := entiredir.WriteFile(root, sessionCacheDir+"/"+activeSessionFile, []byte(id), 0o600); err != nil {
 		logging.Debug(ctx, "pi: cache session id write", slog.String("err", err.Error()))
 	}
 }
@@ -320,8 +323,7 @@ func extractModelFromPiSessionFile(path string) string {
 	if path == "" {
 		return ""
 	}
-	//nolint:gosec // path comes from Pi's hook payload or our captured transcript path
-	data, err := os.ReadFile(path)
+	data, err := agent.ReadTranscriptFile(path)
 	if err != nil {
 		return ""
 	}
@@ -333,12 +335,11 @@ func extractModelFromPiSessionFile(path string) string {
 }
 
 func readCachedSessionID(ctx context.Context) string {
-	dir := resolveSessionDir(ctx)
-	if dir == "" {
+	root, ok := openSessionCache(ctx, false)
+	if !ok {
 		return ""
 	}
-	//nolint:gosec // path constructed from validated repo root
-	data, err := os.ReadFile(filepath.Join(dir, activeSessionFile))
+	data, err := entiredir.ReadFile(root, sessionCacheDir+"/"+activeSessionFile)
 	if err != nil {
 		return ""
 	}
@@ -346,11 +347,11 @@ func readCachedSessionID(ctx context.Context) string {
 }
 
 func clearCachedSessionID(ctx context.Context) {
-	dir := resolveSessionDir(ctx)
-	if dir == "" {
+	root, ok := openSessionCache(ctx, false)
+	if !ok {
 		return
 	}
-	_ = os.Remove(filepath.Join(dir, activeSessionFile))
+	_ = osroot.RemoveNoSymlinks(root, sessionCacheDir+"/"+activeSessionFile) //nolint:errcheck // best-effort cache clear; a stale id is re-resolved next hook
 }
 
 // captureTranscript copies the Pi JSONL session file to
@@ -371,16 +372,11 @@ func captureTranscript(ctx context.Context, sessionID, piSessionFile string) str
 			slog.String("session_id", sessionID), slog.String("err", err.Error()))
 		return ""
 	}
-	dir := resolveSessionDir(ctx)
-	if dir == "" {
+	root, ok := openSessionCache(ctx, true)
+	if !ok {
 		return ""
 	}
-	if err := os.MkdirAll(dir, 0o750); err != nil {
-		logging.Warn(ctx, "pi: capture transcript mkdir failed",
-			slog.String("dir", dir), slog.String("err", err.Error()))
-		return ""
-	}
-	dst := filepath.Join(dir, sessionID+".json")
+	name := sessionCacheDir + "/" + sessionID + ".json"
 	//nolint:gosec // G703: piSessionFile from trusted Pi extension stdin payload
 	data, err := os.ReadFile(piSessionFile)
 	if err != nil {
@@ -388,13 +384,20 @@ func captureTranscript(ctx context.Context, sessionID, piSessionFile string) str
 			slog.String("src", piSessionFile), slog.String("err", err.Error()))
 		return ""
 	}
-	//nolint:gosec // G703: dst is sessionID (validated above) under .entire/tmp/pi
-	if err := os.WriteFile(dst, data, 0o600); err != nil {
+	if err := entiredir.WriteFile(root, name, data, 0o600); err != nil {
 		logging.Warn(ctx, "pi: capture transcript write failed",
-			slog.String("dst", dst), slog.String("err", err.Error()))
+			slog.String("dst", name), slog.String("err", err.Error()))
 		return ""
 	}
-	return dst
+	// Absolute on purpose: the framework records this as the session's
+	// SessionRef, which travels into checkpoint metadata and back out to
+	// callers that resolve it from anywhere in the repo. entiredir.Path is
+	// the same ROUTED base the root above writes through.
+	base, err := entiredir.Path(ctx)
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(base, filepath.FromSlash(name))
 }
 
 // extractSessionIDFromPath extracts the UUID from a Pi session filename.

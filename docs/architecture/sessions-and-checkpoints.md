@@ -51,8 +51,8 @@ const (
 
 | Type | Contents | Use Case |
 |------|----------|----------|
-| Ephemeral | Full state (code + metadata) | Intra-session rewind, pre-commit |
-| Persistent | Metadata + commit reference | Permanent record, post-commit rewind |
+| Ephemeral | Full state (code + metadata) | Pending session state, pre-commit |
+| Persistent | Metadata + commit reference | Permanent record, post-commit |
 
 ## Interface
 
@@ -510,7 +510,7 @@ Metadata only, sharded by checkpoint ID. Supports **multiple sessions per checkp
 ├── metadata.json        # CheckpointSummary (aggregated stats)
 ├── 0/                   # First session (0-based indexing)
 │   ├── metadata.json    # Session-specific Metadata
-│   ├── full.jsonl       # Agent transcript, sanitized + redacted (CLI rewind/resume/explain)
+│   ├── full.jsonl       # Agent transcript, sanitized + redacted (CLI resume/explain)
 │   ├── transcript.jsonl # Full compacted session (slice at compact_transcript_start)
 │   ├── prompt.txt       # Checkpoint-scoped user prompts
 │   └── content_hash.txt # sha256 of full.jsonl (dedup short-circuit)
@@ -521,7 +521,7 @@ Metadata only, sharded by checkpoint ID. Supports **multiple sessions per checkp
 ├── 2/                   # Third session...
 └── tasks/<tool-use-id>/ # Subagent task records, materialized at condensation
     ├── agent-<agent-id>.jsonl # Subagent transcript, sanitized + redacted (omitted when unavailable)
-    └── task.json        # Record metadata (files, tokens, timings, unavailable reason)
+    └── task.json        # Record metadata (files, tokens, timings, unavailable reason); description redacted at write
 ```
 
 **Compact transcript (`transcript.jsonl`):** generated best-effort from
@@ -548,7 +548,7 @@ root `metadata.json` `sessions[].transcript` pointer keeps targeting
 `full.jsonl`; when a compact transcript was generated the session entry also
 carries a `compact_transcript` path pointing at `transcript.jsonl` (omitted
 otherwise) so external readers can find it next to `full.jsonl`.
-CLI read paths (rewind/resume/explain) read `full.jsonl` by filename. Compact
+CLI read paths (resume/explain) read `full.jsonl` by filename. Compact
 generation is best-effort: failures are logged but never fail the checkpoint
 write. It is also **skipped when the compacted output exceeds the 50MB blob cap**
 — unlike `full.jsonl`, `transcript.jsonl` is not chunked, so a very long session
@@ -832,9 +832,29 @@ Strategies determine checkpoint timing and type:
 | On Task Complete | Task record on session state → materialized at condensation |
 | On User Commit | Condense → Committed |
 
-## Rewind
+## Pending Checkpoints
 
-Each `RewindPoint` includes `SessionID` and `SessionPrompt` to help identify which checkpoint belongs to which session when multiple sessions are interleaved.
+Each `PendingCheckpoint` includes `SessionID` and `SessionPrompt` to help identify which checkpoint belongs to which session when multiple sessions are interleaved.
+
+`checkpoint list --pending` is the resume view of the current branch, and a
+`PendingCheckpoint` row is one of two things:
+
+- a **live checkpoint** on the session's shadow branch, not yet condensed onto
+  `entire/checkpoints/v1`; or
+- a **logs-only resume point** — a commit on the current branch whose
+  `Entire-Checkpoint` trailer resolves to a checkpoint that *is* already
+  condensed onto `entire/checkpoints/v1`, listed so its session transcript can
+  be restored from there (file state would need a git checkout).
+
+So "pending" describes the listing, not a guarantee that the work behind every
+row is un-condensed: `ListLogsOnlyPendingCheckpoints` builds the second kind by
+scanning branch history against committed checkpoint storage.
+
+Either shape can be listed and resumed from, but the CLI cannot restore working
+files to it: the file-restoring path (`Rewind`, `PreviewRewind`, `CanRewind`) was
+removed along with the `rewind` commands. `RestoreLogsOnly` still writes a
+checkpoint's session logs into the agent's session directory for
+`entire resume`, and leaves the worktree alone.
 
 ## Concurrent Sessions
 
@@ -842,7 +862,7 @@ Multiple AI sessions can run concurrently on the same base commit:
 
 1. **Warning on start** - When a second session starts while another has uncommitted checkpoints, a warning is shown
 2. **Both proceed** - User can continue; checkpoints interleave on the same shadow branch
-3. **Identification** - Each checkpoint is tagged with its session ID; rewind UI shows session prompt
+3. **Identification** - Each checkpoint is tagged with its session ID; `checkpoint list --pending` shows the session prompt
 4. **Condensation** - On commit, all sessions are condensed together with archived subfolders
 
 ### Conflict Handling

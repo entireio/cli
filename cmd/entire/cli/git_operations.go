@@ -211,7 +211,9 @@ func GetCurrentBranch(ctx context.Context) (string, error) {
 // Uses git CLI instead of go-git because go-git doesn't respect global gitignore
 // (core.excludesfile) which can cause false positives for globally ignored files.
 func HasUncommittedChanges(ctx context.Context) (bool, error) {
-	cmd := exec.CommandContext(ctx, "git", "status", "--porcelain")
+	// --no-optional-locks keeps this a read: a bare `git status` rewrites
+	// .git/index to refresh its stat cache (issue #2111).
+	cmd := exec.CommandContext(ctx, "git", "--no-optional-locks", "status", "--porcelain")
 	output, err := cmd.Output()
 	if err != nil {
 		return false, fmt.Errorf("failed to get git status: %w", err)

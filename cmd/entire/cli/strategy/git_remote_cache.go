@@ -15,7 +15,7 @@ import (
 // command against one repository, and there are several: `entire checkpoint list`
 // resolves the chain four times (metadata-disconnection warning, the branch
 // listing itself, the git-refs store's remote discovery, and the
-// imported-rewind-point pass), costing 9 git subprocesses where the same command
+// imported-pending-checkpoint pass), costing 9 git subprocesses where the same command
 // on the pre-election code spent 3.
 //
 // This caches only those two .git/config reads — never the election result.

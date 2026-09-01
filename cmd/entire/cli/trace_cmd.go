@@ -3,8 +3,9 @@ package cli
 import (
 	"errors"
 	"fmt"
-	"path/filepath"
+	"io/fs"
 
+	"github.com/entireio/cli/cmd/entire/cli/entiredir"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/perf"
@@ -58,24 +59,24 @@ Examples:
 				last = summaryDefaultLast
 			}
 
-			// AbsPath (not a bare WorktreeRoot join): globally tracked
-			// repos route .entire/logs under the git common dir.
-			logFile, err := paths.AbsPath(cmd.Context(), filepath.Join(logging.LogsDir, "entire.log"))
-			if err != nil {
-				cmd.SilenceUsage = true
-				// A routing failure happens inside a valid git repo —
-				// "not a git repository" would misdiagnose it.
-				if paths.IsUnroutableRuntimePath(err) {
-					fmt.Fprintf(cmd.ErrOrStderr(), "Logs unavailable: %v.\n", err)
-					return NewSilentError(err)
-				}
-				fmt.Fprintln(cmd.ErrOrStderr(), "Not a git repository. Please run from within a git repository.")
-				return NewSilentError(fmt.Errorf("not a git repository: %w", err))
-			}
+			// The root below is the ROUTED runtime base: globally tracked
+			// repos keep .entire/logs under the git common dir. A routing
+			// failure (unroutable tier-owned repo) surfaces as the open error.
 
-			entries, err := collectTraceEntries(logFile, last, hookFilter, slowOnly)
-			if err != nil {
-				return fmt.Errorf("collecting trace entries: %w", err)
+			// A repo with no .entire has no log, which is the same "no traces
+			// yet" outcome as an absent log file — render an empty result
+			// rather than an error.
+			var entries []traceEntry
+			root, err := entiredir.OpenForRead(cmd.Context())
+			switch {
+			case errors.Is(err, fs.ErrNotExist):
+			case err != nil:
+				return fmt.Errorf("open %s: %w", paths.EntireDir, err)
+			default:
+				entries, err = collectTraceEntries(root, logging.LogName, last, hookFilter, slowOnly)
+				if err != nil {
+					return fmt.Errorf("collecting trace entries: %w", err)
+				}
 			}
 
 			switch {

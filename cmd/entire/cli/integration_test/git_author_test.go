@@ -9,8 +9,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/entireio/cli/cmd/entire/cli/testutil"
 	"github.com/go-git/go-git/v6"
+
+	"github.com/entireio/cli/cmd/entire/cli/testutil"
 )
 
 // TestGetGitAuthorWithLocalConfig tests the normal path where local repo config exists.
@@ -51,20 +52,10 @@ func TestGetGitAuthorFallbackToGitCommand(t *testing.T) {
 	env := NewTestEnv(t)
 
 	// Initialize repo using git command (not go-git) to avoid setting local config
-	cmd := exec.CommandContext(t.Context(), "git", "init")
-	cmd.Dir = env.RepoDir
-	cmd.Env = testutil.GitIsolatedEnv()
-	if err := cmd.Run(); err != nil {
-		t.Fatalf("git init failed: %v", err)
-	}
+	testutil.RunGit(t, env.RepoDir, "init")
 
 	// Disable GPG signing for test commits
-	configCmd := exec.CommandContext(t.Context(), "git", "config", "commit.gpgsign", "false")
-	configCmd.Dir = env.RepoDir
-	configCmd.Env = testutil.GitIsolatedEnv()
-	if err := configCmd.Run(); err != nil {
-		t.Fatalf("git config commit.gpgsign failed: %v", err)
-	}
+	testutil.RunGit(t, env.RepoDir, "config", "commit.gpgsign", "false")
 
 	// The repo now has no local user config. We'll use GIT_AUTHOR_* and GIT_COMMITTER_*
 	// env vars for commits, simulating global config that go-git can't see but git command can.
@@ -74,12 +65,7 @@ func TestGetGitAuthorFallbackToGitCommand(t *testing.T) {
 	// Create initial commit using environment variables for author/committer
 	env.WriteFile("README.md", "# Test")
 
-	addCmd := exec.CommandContext(t.Context(), "git", "add", "README.md")
-	addCmd.Dir = env.RepoDir
-	addCmd.Env = testutil.GitIsolatedEnv()
-	if err := addCmd.Run(); err != nil {
-		t.Fatalf("git add failed: %v", err)
-	}
+	testutil.RunGit(t, env.RepoDir, "add", "README.md")
 
 	// Use environment variables to set author and committer (works in CI without global config)
 	commitCmd := exec.CommandContext(t.Context(), "git", "commit", "-m", "Initial")
@@ -95,12 +81,7 @@ func TestGetGitAuthorFallbackToGitCommand(t *testing.T) {
 	}
 
 	// Create feature branch
-	branchCmd := exec.CommandContext(t.Context(), "git", "checkout", "-b", "feature/test")
-	branchCmd.Dir = env.RepoDir
-	branchCmd.Env = testutil.GitIsolatedEnv()
-	if err := branchCmd.Run(); err != nil {
-		t.Fatalf("git checkout -b failed: %v", err)
-	}
+	testutil.RunGit(t, env.RepoDir, "checkout", "-b", "feature/test")
 
 	env.WriteFile("test.txt", "content")
 
@@ -254,12 +235,7 @@ func TestGetGitAuthorRemovingLocalConfig(t *testing.T) {
 	// Need to create initial commit - use environment variables (works in CI without global config)
 	env.WriteFile("README.md", "# Test")
 
-	addCmd := exec.CommandContext(t.Context(), "git", "add", "README.md")
-	addCmd.Dir = env.RepoDir
-	addCmd.Env = testutil.GitIsolatedEnv()
-	if err := addCmd.Run(); err != nil {
-		t.Fatalf("git add failed: %v", err)
-	}
+	testutil.RunGit(t, env.RepoDir, "add", "README.md")
 
 	commitCmd := exec.CommandContext(t.Context(), "git", "commit", "-m", "Initial")
 	commitCmd.Dir = env.RepoDir
@@ -274,12 +250,7 @@ func TestGetGitAuthorRemovingLocalConfig(t *testing.T) {
 	}
 
 	// Create feature branch
-	branchCmd := exec.CommandContext(t.Context(), "git", "checkout", "-b", "feature/test")
-	branchCmd.Dir = env.RepoDir
-	branchCmd.Env = testutil.GitIsolatedEnv()
-	if err := branchCmd.Run(); err != nil {
-		t.Fatalf("git checkout -b failed: %v", err)
-	}
+	testutil.RunGit(t, env.RepoDir, "checkout", "-b", "feature/test")
 
 	env.WriteFile("test.txt", "content")
 
