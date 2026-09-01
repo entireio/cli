@@ -21,13 +21,16 @@ import (
 // the Errno, or the retry silently never fires.
 func TestRenameIsTransient_Windows(t *testing.T) {
 	t.Parallel()
-	for _, errno := range []windows.Errno{windows.ERROR_SHARING_VIOLATION, windows.ERROR_LOCK_VIOLATION, windows.ERROR_ACCESS_DENIED} {
+	for _, errno := range []windows.Errno{windows.ERROR_SHARING_VIOLATION, windows.ERROR_LOCK_VIOLATION} {
 		err := &os.LinkError{Op: "rename", Old: "a", New: "b", Err: errno}
 		if !renameIsTransient(err) {
 			t.Errorf("renameIsTransient(%v) = false, want true", err)
 		}
 	}
 	for _, err := range []error{
+		// ACCESS_DENIED also spells a permanent permissions verdict; it must
+		// not be retried as if it were contention.
+		&os.LinkError{Op: "rename", Old: "a", New: "b", Err: windows.ERROR_ACCESS_DENIED},
 		&os.LinkError{Op: "rename", Old: "a", New: "b", Err: windows.ERROR_FILE_NOT_FOUND},
 		fs.ErrNotExist,
 		errors.New("unrelated"),
