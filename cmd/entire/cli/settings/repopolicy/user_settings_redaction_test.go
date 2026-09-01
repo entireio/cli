@@ -81,7 +81,7 @@ func TestLoadUserSettings_BadRedactionBlockDropsAloneAndIsPreserved(t *testing.T
 			if reloaded.RedactionError() == "" {
 				t.Fatalf("the malformed redaction block must survive the rewrite; got a clean reload")
 			}
-			var orig, round map[string]json.RawMessage
+			var orig map[string]json.RawMessage
 			mustUnmarshalRaw(t, []byte(tt.body), &orig)
 			raw, ok := reloaded.Block(userSettingsRedactionKey)
 			if !ok {
