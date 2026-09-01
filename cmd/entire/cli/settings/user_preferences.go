@@ -96,9 +96,14 @@ func loadUserOverlay(ctx context.Context) userOverlay {
 	return overlay
 }
 
+// reject records a dropped block for the consumers that surface it — `entire
+// status` lists rejections and the hook path warns via warnUser. Debug, not
+// Warn, here: settings.Load is uncached and runs several times per command,
+// so a Warn at this level prints the same line once per Load, raw on stderr,
+// before any logger is initialized.
 func (o *userOverlay) reject(ctx context.Context, reason string) {
 	o.rejections = append(o.rejections, reason)
-	logging.Warn(ctx, "user settings block ignored",
+	logging.Debug(ctx, "user settings block ignored",
 		slog.String("file", repopolicy.UserSettingsPath()),
 		slog.String("reason", reason))
 }
