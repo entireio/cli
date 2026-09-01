@@ -339,9 +339,17 @@ func gitEmptyConfigPath() string {
 // GIT_CONFIG_PARAMETERS and the indexed KEY_/VALUE_ pairs that can inject
 // `git -c` overrides — so our explicit isolation overrides take effect
 // regardless of parent env.
+//
+// GIT_CONFIG_NOSYSTEM=1 is required, not redundant with GIT_CONFIG_SYSTEM.
+// Apple Git still reads credential.helper=osxkeychain from
+// /Library/Developer/CommandLineTools/usr/share/git-core/gitconfig when only
+// GIT_CONFIG_SYSTEM is overridden; that helper is what hangs a 401 from a
+// loopback HTTPS server (GIT_TERMINAL_PROMPT=0 does not stop helpers, and the
+// hermetic proxy does not cover 127.0.0.1). IsolateGitConfigEnv sets the same
+// flag for in-process git.
 func GitIsolatedEnv() []string {
 	env := os.Environ()
-	filtered := make([]string, 0, len(env)+2)
+	filtered := make([]string, 0, len(env)+3)
 	for _, e := range env {
 		if isGitConfigEnv(e) {
 			continue
@@ -351,6 +359,7 @@ func GitIsolatedEnv() []string {
 	return append(filtered,
 		"GIT_CONFIG_GLOBAL="+gitEmptyConfigPath(), // Isolate from user's global git config (e.g. global gitignore)
 		"GIT_CONFIG_SYSTEM="+gitEmptyConfigPath(), // Isolate from system git config
+		"GIT_CONFIG_NOSYSTEM=1",                   // Skip Apple git-core config (osxkeychain); GIT_CONFIG_SYSTEM does not replace it
 	)
 }
 
