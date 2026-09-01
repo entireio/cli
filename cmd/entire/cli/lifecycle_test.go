@@ -205,6 +205,46 @@ func TestRefreshCodexInventory_MultiTurnChildRefreshesCompletedTaskRecord(t *tes
 	assert.Contains(t, state.FindSubagentInventory(agentID).FinalizedTurnIDs, "turn-2")
 }
 
+func TestFinalizeCodexObservedAtSessionEnd_MultiTurnChildClearsStaleEvidence(t *testing.T) {
+	// NOT parallel: setupStopTestRepo changes the process working directory.
+	setupStopTestRepo(t)
+	ctx := context.Background()
+	const (
+		sessionID = "codex-session-end-multi-turn-child"
+		agentID   = "child-1"
+	)
+	completedAt := time.Now().UTC().Truncate(time.Microsecond)
+	require.NoError(t, strategy.SaveSessionState(ctx, &strategy.SessionState{
+		SessionID: sessionID,
+		StartedAt: time.Now(),
+		Phase:     session.PhaseActive,
+		SubagentInventory: []session.SubagentInventoryEntry{{
+			AgentID:          agentID,
+			ObservedTurnIDs:  []string{"turn-1", "turn-2"},
+			FinalizedTurnIDs: []string{"turn-1"},
+		}},
+		TaskRecords: []session.TaskRecord{{
+			ToolUseID:   agentID,
+			AgentID:     agentID,
+			StartedAt:   completedAt.Add(-time.Minute),
+			CompletedAt: completedAt,
+			Files:       []string{"first.go"},
+			TokenUsage:  &agent.TokenUsage{InputTokens: 10},
+		}},
+	}))
+
+	finalizeCodexObservedAtSessionEnd(ctx, sessionID)
+
+	state, err := strategy.LoadSessionState(ctx, sessionID)
+	require.NoError(t, err)
+	record := state.FindTaskRecord(agentID)
+	require.NotNil(t, record)
+	assert.Equal(t, completedAt, record.CompletedAt, "force-closing a later turn must not complete the task twice")
+	assert.Empty(t, record.Files, "files from an earlier turn are not exact evidence for an unresolved later turn")
+	assert.Nil(t, record.TokenUsage, "tokens from an earlier turn are not exact evidence for an unresolved later turn")
+	assert.Contains(t, state.FindSubagentInventory(agentID).FinalizedTurnIDs, "turn-2")
+}
+
 // --- DispatchLifecycleEvent tests ---
 
 func TestDispatchLifecycleEvent_NilAgent(t *testing.T) {

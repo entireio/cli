@@ -1163,11 +1163,15 @@ func finalizeCodexObservedAtSessionEnd(ctx context.Context, sessionID string) {
 				}
 				for i := range state.TaskRecords {
 					record := &state.TaskRecords[i]
-					if record.AgentID == entry.AgentID && record.CompletedAt.IsZero() {
-						record.CompletedAt = time.Now()
-						record.TokenUsage = nil
-						break
+					if record.AgentID != entry.AgentID {
+						continue
 					}
+					if record.CompletedAt.IsZero() {
+						record.CompletedAt = time.Now()
+					}
+					record.Files = nil
+					record.TokenUsage = nil
+					break
 				}
 			}
 		}
