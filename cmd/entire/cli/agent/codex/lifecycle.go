@@ -150,6 +150,8 @@ func (c *CodexAgent) parseSubagentStart(stdin io.Reader) (*agent.Event, error) {
 		SessionID:    raw.SessionID,
 		SessionRef:   derefString(raw.TranscriptPath),
 		ToolUseID:    raw.AgentID,
+		TurnID:       raw.TurnID,
+		SubagentID:   raw.AgentID,
 		SubagentType: raw.AgentType,
 		Model:        raw.Model,
 		Timestamp:    time.Now(),
@@ -165,15 +167,18 @@ func (c *CodexAgent) parseSubagentStop(stdin io.Reader) (*agent.Event, error) {
 		return nil, err
 	}
 	return &agent.Event{
-		Type:                   agent.SubagentEnd,
-		SessionID:              raw.SessionID,
-		SessionRef:             derefString(raw.TranscriptPath),
-		ToolUseID:              raw.AgentID,
-		SubagentID:             raw.AgentID,
-		SubagentType:           raw.AgentType,
-		SubagentTranscriptPath: derefString(raw.AgentTranscriptPath),
-		Model:                  raw.Model,
-		Timestamp:              time.Now(),
+		Type:                    agent.SubagentEnd,
+		SessionID:               raw.SessionID,
+		SessionRef:              derefString(raw.TranscriptPath),
+		ToolUseID:               raw.AgentID,
+		TurnID:                  raw.TurnID,
+		SubagentID:              raw.AgentID,
+		StopHookActive:          raw.StopHookActive,
+		ProvisionalSubagentStop: true,
+		SubagentType:            raw.AgentType,
+		SubagentTranscriptPath:  derefString(raw.AgentTranscriptPath),
+		Model:                   raw.Model,
+		Timestamp:               time.Now(),
 	}, nil
 }
 
@@ -200,6 +205,9 @@ func (c *CodexAgent) parseTurnStart(stdin io.Reader) (*agent.Event, error) {
 	raw, err := agent.ReadAndParseHookInput[userPromptSubmitRaw](stdin)
 	if err != nil {
 		return nil, err
+	}
+	if classifyRollout(derefString(raw.TranscriptPath)) != rolloutRoot {
+		return nil, nil //nolint:nilnil // only proven root rollouts mutate lifecycle state
 	}
 	return &agent.Event{
 		Type:       agent.TurnStart,
@@ -271,6 +279,9 @@ func (c *CodexAgent) parseTurnEnd(stdin io.Reader) (*agent.Event, error) {
 	raw, err := agent.ReadAndParseHookInput[stopRaw](stdin)
 	if err != nil {
 		return nil, err
+	}
+	if classifyRollout(derefString(raw.TranscriptPath)) != rolloutRoot {
+		return nil, nil //nolint:nilnil // only proven root rollouts mutate lifecycle state
 	}
 	return &agent.Event{
 		Type:       agent.TurnEnd,

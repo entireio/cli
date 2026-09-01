@@ -20,10 +20,49 @@ import (
 var (
 	_ agent.TranscriptAnalyzer          = (*CodexAgent)(nil)
 	_ agent.TokenCalculator             = (*CodexAgent)(nil)
+	_ agent.InventoryAwareExtractor     = (*CodexAgent)(nil)
 	_ agent.PromptExtractor             = (*CodexAgent)(nil)
 	_ agent.RestoredSessionPathResolver = (*CodexAgent)(nil)
 	_ agent.TranscriptSanitizer         = (*CodexAgent)(nil)
 )
+
+// readSessionMetaID reads the first record of a Codex rollout and returns its
+// non-empty native thread ID. Callers use it to prove a path belongs to a
+// supplied child rather than inferring that fact from its filename or age.
+//
+//nolint:unused // Kept as the path helper for direct internal callers; evidence uses same-byte loading instead.
+func readSessionMetaID(path string) (string, error) {
+	if path == "" {
+		return "", errors.New("empty rollout path")
+	}
+	loaded, err := readRegularRollout(path)
+	if err != nil {
+		return "", fmt.Errorf("load rollout: %w", err)
+	}
+	return sessionMetaID(loaded.Data)
+}
+
+func sessionMetaID(data []byte) (string, error) {
+	lines := splitJSONL(data)
+	if len(lines) == 0 {
+		return "", errors.New("rollout is empty")
+	}
+	var line rolloutLine
+	if err := json.Unmarshal(lines[0], &line); err != nil {
+		return "", fmt.Errorf("parse first rollout record: %w", err)
+	}
+	if line.Type != rolloutLineTypeSessionMeta {
+		return "", fmt.Errorf("first transcript line is %q, want session_meta", line.Type)
+	}
+	var meta sessionMetaPayload
+	if err := json.Unmarshal(line.Payload, &meta); err != nil {
+		return "", fmt.Errorf("parse session_meta payload: %w", err)
+	}
+	if meta.ID == "" {
+		return "", errors.New("session_meta id is empty")
+	}
+	return meta.ID, nil
+}
 
 // rolloutLine is the top-level JSONL line structure in Codex rollout files.
 type rolloutLine struct {
@@ -32,12 +71,92 @@ type rolloutLine struct {
 	Payload   json.RawMessage `json:"payload"`
 }
 
-const rolloutLineTypeResponseItem = "response_item"
+const (
+	rolloutLineTypeResponseItem = "response_item"
+	rolloutLineTypeSessionMeta  = "session_meta"
+	rolloutLineTypeEventMsg     = "event_msg"
+	eventMsgTypeTokenCount      = "token_count"
+)
+
+// rolloutClassification identifies whether a rollout belongs to a root thread
+// or a child thread. Lifecycle hooks mutate the root session, so uncertainty is
+// intentionally distinct from root and must not be treated as a root rollout.
+type rolloutClassification uint8
+
+const (
+	rolloutUnknown rolloutClassification = iota
+	rolloutRoot
+	rolloutChild
+)
 
 // sessionMetaPayload is the payload for type="session_meta" lines.
 type sessionMetaPayload struct {
-	ID        string `json:"id"`
-	Timestamp string `json:"timestamp"`
+	ID           string          `json:"id"`
+	Timestamp    string          `json:"timestamp"`
+	ThreadSource string          `json:"thread_source"`
+	Source       json.RawMessage `json:"source"`
+}
+
+// classifyRollout reads only the rollout's session_meta record. Newer Codex
+// rollouts identify root and child threads with thread_source; older rollouts
+// encode their source as either a recognized root string or source.subagent.
+func classifyRollout(path string) rolloutClassification {
+	if path == "" {
+		return rolloutUnknown
+	}
+
+	file, err := os.Open(path) //nolint:gosec // Path comes from agent hook input
+	if err != nil {
+		return rolloutUnknown
+	}
+	defer file.Close()
+
+	lineData, err := bufio.NewReader(file).ReadBytes('\n')
+	if err != nil && !errors.Is(err, io.EOF) {
+		return rolloutUnknown
+	}
+
+	var line rolloutLine
+	if json.Unmarshal(lineData, &line) != nil || line.Type != rolloutLineTypeSessionMeta {
+		return rolloutUnknown
+	}
+
+	var meta sessionMetaPayload
+	if json.Unmarshal(line.Payload, &meta) != nil {
+		return rolloutUnknown
+	}
+
+	switch meta.ThreadSource {
+	case "user":
+		return rolloutRoot
+	case "subagent":
+		return rolloutChild
+	case "":
+		// Fall through to the legacy source encoding.
+	default:
+		return rolloutUnknown
+	}
+
+	var source string
+	if json.Unmarshal(meta.Source, &source) == nil {
+		switch source {
+		case "startup", "resume", "clear", "compact", "cli", codexExecCommand, "vscode", "mcp":
+			return rolloutRoot
+		default:
+			return rolloutUnknown
+		}
+	}
+
+	var structuredSource struct {
+		Subagent json.RawMessage `json:"subagent"`
+	}
+	if json.Unmarshal(meta.Source, &structuredSource) == nil &&
+		len(structuredSource.Subagent) > 0 &&
+		!bytes.Equal(structuredSource.Subagent, []byte("null")) {
+		return rolloutChild
+	}
+
+	return rolloutUnknown
 }
 
 // responseItemPayload is the payload for type="response_item" lines.
@@ -57,8 +176,9 @@ type contentItem struct {
 
 // eventMsgPayload is the payload for type="event_msg" lines.
 type eventMsgPayload struct {
-	Type string          `json:"type"` // "token_count", "task_started", "user_message", "agent_message", "task_complete"
-	Info json.RawMessage `json:"info,omitempty"`
+	Type   string          `json:"type"` // "token_count", "task_started", "user_message", "agent_message", "task_complete"
+	TurnID *string         `json:"turn_id,omitempty"`
+	Info   json.RawMessage `json:"info,omitempty"`
 }
 
 // tokenCountInfo contains token usage data from event_msg.token_count.
@@ -73,6 +193,17 @@ type tokenUsageData struct {
 	OutputTokens          int `json:"output_tokens"`
 	ReasoningOutputTokens int `json:"reasoning_output_tokens"`
 	TotalTokens           int `json:"total_tokens"`
+}
+
+// exactTokenUsageData uses pointers so a native zero is distinguishable from a
+// field Codex did not report. It is used for child cumulative snapshots, where
+// approximation would turn an incomplete inventory into a misleading total.
+type exactTokenUsageData struct {
+	InputTokens           *int `json:"input_tokens"`
+	CachedInputTokens     *int `json:"cached_input_tokens"`
+	OutputTokens          *int `json:"output_tokens"`
+	ReasoningOutputTokens *int `json:"reasoning_output_tokens"`
+	TotalTokens           *int `json:"total_tokens"`
 }
 
 // Apply-patch envelope verbs Codex uses in tool_input.command — see
@@ -280,14 +411,14 @@ func (c *CodexAgent) CalculateTokenUsage(transcriptData []byte, fromOffset int) 
 		if json.Unmarshal(lineData, &line) != nil {
 			continue
 		}
-		if line.Type != "event_msg" {
+		if line.Type != rolloutLineTypeEventMsg {
 			continue
 		}
 		var evt eventMsgPayload
 		if json.Unmarshal(line.Payload, &evt) != nil {
 			continue
 		}
-		if evt.Type != "token_count" || len(evt.Info) == 0 {
+		if evt.Type != eventMsgTypeTokenCount || len(evt.Info) == 0 {
 			continue
 		}
 		var info tokenCountInfo
@@ -328,6 +459,201 @@ func (c *CodexAgent) CalculateTokenUsage(transcriptData []byte, fromOffset int) 
 		OutputTokens:    outputTokens,
 		APICallCount:    apiCalls,
 	}, nil
+}
+
+// exactCumulativeTokenUsage returns the last recognizable Codex token_count
+// snapshot exactly as reported. A malformed final snapshot makes the entire
+// result unavailable instead of silently falling back to an earlier record.
+func exactCumulativeTokenUsage(data []byte) *agent.TokenUsage {
+	var lastInfo json.RawMessage
+	found := false
+	for _, lineData := range splitJSONL(data) {
+		var line rolloutLine
+		if json.Unmarshal(lineData, &line) != nil || line.Type != rolloutLineTypeEventMsg {
+			continue
+		}
+		var event eventMsgPayload
+		if json.Unmarshal(line.Payload, &event) != nil || event.Type != eventMsgTypeTokenCount {
+			continue
+		}
+		found = true
+		lastInfo = event.Info
+	}
+	if !found || len(lastInfo) == 0 {
+		return nil
+	}
+	var info struct {
+		TotalTokenUsage *exactTokenUsageData `json:"total_token_usage"`
+	}
+	if json.Unmarshal(lastInfo, &info) != nil || info.TotalTokenUsage == nil {
+		return nil
+	}
+	usage := info.TotalTokenUsage
+	if usage.InputTokens == nil || usage.CachedInputTokens == nil || usage.OutputTokens == nil {
+		return nil
+	}
+	input, cached, output := *usage.InputTokens, *usage.CachedInputTokens, *usage.OutputTokens
+	if input < 0 || cached < 0 || output < 0 || cached > input {
+		return nil
+	}
+	if usage.ReasoningOutputTokens != nil && (*usage.ReasoningOutputTokens < 0 || *usage.ReasoningOutputTokens > output) {
+		return nil
+	}
+	if usage.TotalTokens != nil && (*usage.TotalTokens < 0 || *usage.TotalTokens != input+output) {
+		return nil
+	}
+	return &agent.TokenUsage{InputTokens: input - cached, CacheReadTokens: cached, OutputTokens: output}
+}
+
+// terminalTurnIDs accepts only ordered, one-at-a-time task boundaries. Modern
+// records name the same turn at both ends; the legacy ID-less completion is
+// accepted only while exactly one started turn is open.
+func terminalTurnIDs(data []byte) []string {
+	var terminal []string
+	open := ""
+	seen := make(map[string]struct{})
+	for _, lineData := range splitJSONL(data) {
+		var line rolloutLine
+		if json.Unmarshal(lineData, &line) != nil {
+			return nil
+		}
+		if line.Type != rolloutLineTypeEventMsg {
+			continue
+		}
+		var rawEvent struct {
+			Type string `json:"type"`
+		}
+		if json.Unmarshal(line.Payload, &rawEvent) != nil {
+			return nil
+		}
+		if rawEvent.Type != "task_started" && rawEvent.Type != "task_complete" {
+			continue
+		}
+		var event eventMsgPayload
+		if json.Unmarshal(line.Payload, &event) != nil {
+			return nil
+		}
+		switch event.Type {
+		case "task_started":
+			if open != "" || event.TurnID == nil || *event.TurnID == "" {
+				return nil
+			}
+			if _, duplicate := seen[*event.TurnID]; duplicate {
+				return nil
+			}
+			open = *event.TurnID
+		case "task_complete":
+			if open == "" || (event.TurnID != nil && (*event.TurnID == "" || *event.TurnID != open)) {
+				return nil
+			}
+			terminal = append(terminal, open)
+			seen[open] = struct{}{}
+			open = ""
+		}
+	}
+	if open != "" {
+		return nil
+	}
+	return terminal
+}
+
+// ExtractWithSubagentInventory gathers evidence only for refs supplied by the
+// caller's authoritative ledger. It never discovers children from transcript
+// text, filenames, timestamps, or token-count events.
+func (c *CodexAgent) ExtractWithSubagentInventory(parent []byte, fromOffset int, refs []agent.SubagentReference) (agent.InventoryExtraction, error) {
+	result := agent.InventoryExtraction{ModifiedFiles: extractFilesFromData(parent, fromOffset)}
+	parentUsage, err := c.CalculateTokenUsage(parent, fromOffset)
+	if err != nil {
+		return result, err
+	}
+	complete := true
+	var childTotal *agent.TokenUsage
+	resolved := make([]loadedRollout, len(refs))
+	unresolvedIDs := make(map[string]struct{})
+	for index, ref := range refs {
+		if loaded, ok := c.loadDirectRollout(ref); ok {
+			resolved[index] = loaded
+		} else if ref.AgentID != "" {
+			unresolvedIDs[ref.AgentID] = struct{}{}
+		}
+	}
+	fallback := c.scanFallbackRollouts(unresolvedIDs)
+	for index, ref := range refs {
+		if resolved[index].Path == "" {
+			resolved[index] = fallback[ref.AgentID]
+		}
+	}
+	for index, ref := range refs {
+		analysis := agent.SubagentAnalysis{AgentID: ref.AgentID}
+		loaded := resolved[index]
+		analysis.ResolvedPath = loaded.Path
+		if loaded.Path == "" {
+			complete = false
+			result.Children = append(result.Children, analysis)
+			continue
+		}
+		analysis.ModifiedFiles = extractFilesFromData(loaded.Data, 0)
+		analysis.TerminalTurnIDs = terminalTurnIDs(loaded.Data)
+		analysis.TokenUsage = exactCumulativeTokenUsage(loaded.Data)
+		if analysis.TokenUsage == nil {
+			complete = false
+		} else {
+			childTotal = addExactUsage(childTotal, analysis.TokenUsage)
+		}
+		result.ModifiedFiles = appendUniqueFiles(result.ModifiedFiles, analysis.ModifiedFiles)
+		result.Children = append(result.Children, analysis)
+	}
+	result.TokenUsage = withChildCoverage(parentUsage, complete)
+	if complete && len(refs) > 0 {
+		result.TokenUsage.SubagentTokens = childTotal
+	}
+	return result, nil
+}
+
+func withChildCoverage(usage *agent.TokenUsage, complete bool) *agent.TokenUsage {
+	if usage == nil {
+		return &agent.TokenUsage{SubagentTokensComplete: &complete}
+	}
+	result := *usage
+	result.SubagentTokens = nil
+	result.SubagentTokensComplete = &complete
+	return &result
+}
+
+func extractFilesFromData(data []byte, fromOffset int) []string {
+	var files []string
+	for index, lineData := range splitJSONL(data) {
+		if index+1 <= fromOffset {
+			continue
+		}
+		files = appendUniqueFiles(files, extractFilesFromLine(lineData))
+	}
+	return files
+}
+
+func appendUniqueFiles(files, additions []string) []string {
+	seen := make(map[string]struct{}, len(files)+len(additions))
+	for _, file := range files {
+		seen[file] = struct{}{}
+	}
+	for _, file := range additions {
+		if _, exists := seen[file]; !exists {
+			seen[file] = struct{}{}
+			files = append(files, file)
+		}
+	}
+	return files
+}
+
+func addExactUsage(total, addition *agent.TokenUsage) *agent.TokenUsage {
+	if total == nil {
+		cloned := *addition
+		return &cloned
+	}
+	total.InputTokens += addition.InputTokens
+	total.CacheReadTokens += addition.CacheReadTokens
+	total.OutputTokens += addition.OutputTokens
+	return total
 }
 
 // ExtractPrompts returns user prompts from the transcript starting at the given offset.
@@ -585,7 +911,7 @@ func parseSessionStartTime(data []byte) (time.Time, error) {
 	if err := json.Unmarshal(lines[0], &line); err != nil {
 		return time.Time{}, fmt.Errorf("parse first transcript line: %w", err)
 	}
-	if line.Type != "session_meta" {
+	if line.Type != rolloutLineTypeSessionMeta {
 		return time.Time{}, fmt.Errorf("first transcript line is %q, want session_meta", line.Type)
 	}
 

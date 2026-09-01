@@ -15,6 +15,21 @@ type TokenUsage struct {
 	APICallCount int `json:"api_call_count"`
 	// SubagentTokens contains token usage from spawned subagents (if any)
 	SubagentTokens *TokenUsage `json:"subagent_tokens,omitempty"`
+	// SubagentTokensComplete says whether the outer result has exact child coverage.
+	SubagentTokensComplete *bool `json:"subagent_tokens_complete,omitempty"`
+}
+
+// WithClearedSubagentTokens returns an independent usage result with child
+// totals removed and an explicit coverage marker. A nil usage becomes a
+// marker-only result so unavailable coverage persists.
+func WithClearedSubagentTokens(usage *TokenUsage, complete bool) *TokenUsage {
+	if usage == nil {
+		usage = &TokenUsage{}
+	}
+	cleared := *usage
+	cleared.SubagentTokens = nil
+	cleared.SubagentTokensComplete = &complete
+	return &cleared
 }
 
 // MaxSubagentDepth caps how deep a SubagentTokens chain is walked. Real chains
@@ -61,10 +76,28 @@ func addTokenUsageAtDepth(a, b *TokenUsage, depth int) *TokenUsage {
 		bSub = b.SubagentTokens
 	}
 	if depth >= MaxSubagentDepth {
+		if depth == 0 {
+			sum.SubagentTokensComplete = tokenCompleteness(a, b)
+		}
 		return sum
 	}
 	sum.SubagentTokens = addTokenUsageAtDepth(aSub, bSub, depth+1)
+	if depth == 0 {
+		sum.SubagentTokensComplete = tokenCompleteness(a, b)
+	}
 	return sum
+}
+
+func tokenCompleteness(a, b *TokenUsage) *bool {
+	if a != nil && a.SubagentTokensComplete != nil {
+		complete := *a.SubagentTokensComplete
+		return &complete
+	}
+	if b != nil && b.SubagentTokensComplete != nil {
+		complete := *b.SubagentTokensComplete
+		return &complete
+	}
+	return nil
 }
 
 // SubtractTokenUsage returns a-b, recursing into subagent usage and clamping
@@ -73,6 +106,10 @@ func addTokenUsageAtDepth(a, b *TokenUsage, depth int) *TokenUsage {
 // subagent token usage, which is always re-read from the start of each
 // subagent transcript) down to a delta since a previously captured baseline.
 func SubtractTokenUsage(a, b *TokenUsage) *TokenUsage {
+	return subtractTokenUsageAtDepth(a, b, 0)
+}
+
+func subtractTokenUsageAtDepth(a, b *TokenUsage, depth int) *TokenUsage {
 	if a == nil {
 		return nil
 	}
@@ -86,7 +123,11 @@ func SubtractTokenUsage(a, b *TokenUsage) *TokenUsage {
 		OutputTokens:        clampSubtract(a.OutputTokens, b.OutputTokens),
 		APICallCount:        clampSubtract(a.APICallCount, b.APICallCount),
 	}
-	diff.SubagentTokens = SubtractTokenUsage(a.SubagentTokens, b.SubagentTokens)
+	diff.SubagentTokens = subtractTokenUsageAtDepth(a.SubagentTokens, b.SubagentTokens, depth+1)
+	if depth == 0 && a.SubagentTokensComplete != nil {
+		complete := *a.SubagentTokensComplete
+		diff.SubagentTokensComplete = &complete
+	}
 	return diff
 }
 

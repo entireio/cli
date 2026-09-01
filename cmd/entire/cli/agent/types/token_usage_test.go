@@ -1,6 +1,44 @@
 package types
 
-import "testing"
+import (
+	"encoding/json"
+	"testing"
+)
+
+func TestTokenUsage_SubagentTokensCompleteRoundTripAndClear(t *testing.T) {
+	t.Parallel()
+
+	complete := true
+	usage := &TokenUsage{
+		InputTokens:            3,
+		SubagentTokens:         &TokenUsage{OutputTokens: 2},
+		SubagentTokensComplete: &complete,
+	}
+	data, err := json.Marshal(usage)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var roundTripped TokenUsage
+	if err := json.Unmarshal(data, &roundTripped); err != nil {
+		t.Fatal(err)
+	}
+	if roundTripped.SubagentTokensComplete == nil || !*roundTripped.SubagentTokensComplete {
+		t.Fatalf("round trip completeness = %v, want true", roundTripped.SubagentTokensComplete)
+	}
+
+	cleared := WithClearedSubagentTokens(&roundTripped, false)
+	if cleared == &roundTripped || cleared.SubagentTokens != nil || cleared.SubagentTokensComplete == nil || *cleared.SubagentTokensComplete {
+		t.Fatalf("cleared usage = %+v, want independent explicitly incomplete copy", cleared)
+	}
+	if roundTripped.SubagentTokens == nil || roundTripped.SubagentTokensComplete == nil || !*roundTripped.SubagentTokensComplete {
+		t.Fatalf("clear mutated input: %+v", roundTripped)
+	}
+
+	usageCopy := AddTokenUsage(nil, usage)
+	if usageCopy.SubagentTokensComplete == nil || !*usageCopy.SubagentTokensComplete {
+		t.Fatalf("AddTokenUsage copy dropped completeness: %+v", usageCopy)
+	}
+}
 
 func TestAddTokenUsage(t *testing.T) {
 	t.Parallel()

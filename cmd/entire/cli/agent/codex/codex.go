@@ -5,6 +5,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -26,6 +28,191 @@ func init() {
 //nolint:revive // CodexAgent is clearer than Agent in this context
 type CodexAgent struct {
 	CommandRunner agent.TextCommandRunner
+	// RolloutRoots overrides the active and archived rollout roots for callers
+	// that already know them (notably tests). Nil uses Codex's normal home.
+	RolloutRoots []string
+	// loadRollout and walkDir are package-private deterministic test seams.
+	// Production always uses regular-file, same-descriptor loading and
+	// filepath.WalkDir respectively.
+	loadRollout func(string) (loadedRollout, error)
+	walkDir     func(string, fs.WalkDirFunc) error
+}
+
+type loadedRollout struct {
+	Path string
+	Data []byte
+}
+
+func rolloutRegularMode(mode fs.FileMode) bool {
+	return mode.Type() == 0
+}
+
+func readRegularRollout(path string) (loadedRollout, error) {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return loadedRollout{}, fmt.Errorf("lstat rollout: %w", err)
+	}
+	if !rolloutRegularMode(info.Mode()) {
+		return loadedRollout{}, errors.New("rollout is not a regular file")
+	}
+	file, err := os.Open(path) //nolint:gosec // Lstat above rejects known special entries; Stat below verifies the opened descriptor.
+	if err != nil {
+		return loadedRollout{}, fmt.Errorf("open rollout: %w", err)
+	}
+	defer file.Close()
+	opened, err := file.Stat()
+	if err != nil {
+		return loadedRollout{}, fmt.Errorf("stat opened rollout: %w", err)
+	}
+	if !rolloutRegularMode(opened.Mode()) || !os.SameFile(info, opened) {
+		return loadedRollout{}, errors.New("rollout changed or is not a regular file")
+	}
+	data, err := io.ReadAll(file)
+	if err != nil {
+		return loadedRollout{}, fmt.Errorf("read rollout: %w", err)
+	}
+	return loadedRollout{Path: path, Data: data}, nil
+}
+
+func (c *CodexAgent) loadCandidateRollout(path string) (loadedRollout, error) {
+	if c.loadRollout != nil {
+		return c.loadRollout(path)
+	}
+	return readRegularRollout(path)
+}
+
+func (c *CodexAgent) loadVerifiedRollout(path, agentID string) (loadedRollout, bool) {
+	loaded, err := c.loadCandidateRollout(path)
+	if err != nil {
+		return loadedRollout{}, false
+	}
+	if loaded.Path == "" {
+		loaded.Path = path
+	}
+	if loaded.Path != path {
+		return loadedRollout{}, false
+	}
+	id, err := sessionMetaID(loaded.Data)
+	if err != nil || id != agentID {
+		return loadedRollout{}, false
+	}
+	return loaded, true
+}
+
+func (c *CodexAgent) rolloutRoots() []string {
+	if c.RolloutRoots != nil {
+		return c.RolloutRoots
+	}
+	sessionDir, err := c.GetSessionDir("")
+	if err != nil {
+		return nil
+	}
+	codexHome, err := resolveCodexHome()
+	if err != nil {
+		return []string{sessionDir}
+	}
+	return []string{sessionDir, filepath.Join(codexHome, "archived_sessions")}
+}
+
+func (c *CodexAgent) loadDirectRollout(ref agent.SubagentReference) (loadedRollout, bool) {
+	for _, path := range []string{ref.DeclaredTranscriptPath, ref.ResolvedTranscriptPath} {
+		if path == "" {
+			continue
+		}
+		if loaded, ok := c.loadVerifiedRollout(path, ref.AgentID); ok {
+			return loaded, true
+		}
+	}
+	return loadedRollout{}, false
+}
+
+func (c *CodexAgent) walkRollouts(root string, visit fs.WalkDirFunc) error {
+	if c.walkDir != nil {
+		return c.walkDir(root, visit)
+	}
+	if err := filepath.WalkDir(root, visit); err != nil {
+		return fmt.Errorf("walk Codex rollouts: %w", err)
+	}
+	return nil
+}
+
+// scanFallbackRollouts scans every configured root once. Any traversal or
+// regular-candidate metadata failure discards all results: partial results
+// cannot prove a child ID is unique.
+func (c *CodexAgent) scanFallbackRollouts(agentIDs map[string]struct{}) map[string]loadedRollout {
+	matches := make(map[string][]loadedRollout)
+	seenPaths := make(map[string]struct{})
+	for _, root := range c.rolloutRoots() {
+		if root == "" {
+			continue
+		}
+		walkErr := c.walkRollouts(root, func(path string, entry fs.DirEntry, entryErr error) error {
+			if entryErr != nil {
+				if path == root && errors.Is(entryErr, fs.ErrNotExist) {
+					return nil // Missing configured roots are normal.
+				}
+				return fmt.Errorf("walk rollout candidate: %w", entryErr)
+			}
+			if entry.IsDir() || filepath.Ext(path) != ".jsonl" {
+				return nil
+			}
+			info, err := entry.Info()
+			if err != nil {
+				return fmt.Errorf("stat rollout candidate: %w", err)
+			}
+			if !rolloutRegularMode(info.Mode()) {
+				return nil
+			}
+			loaded, err := c.loadCandidateRollout(path)
+			if err != nil {
+				return fmt.Errorf("load rollout candidate: %w", err)
+			}
+			if loaded.Path == "" {
+				loaded.Path = path
+			}
+			if loaded.Path != path {
+				return errors.New("rollout loader returned a different path")
+			}
+			id, err := sessionMetaID(loaded.Data)
+			if err != nil {
+				return fmt.Errorf("read rollout metadata: %w", err)
+			}
+			if _, wanted := agentIDs[id]; !wanted {
+				return nil
+			}
+			if _, duplicate := seenPaths[path]; !duplicate {
+				seenPaths[path] = struct{}{}
+				matches[id] = append(matches[id], loaded)
+			}
+			return nil
+		})
+		if walkErr != nil {
+			return nil
+		}
+	}
+	resolved := make(map[string]loadedRollout)
+	for id, candidates := range matches {
+		if len(candidates) == 1 {
+			resolved[id] = candidates[0]
+		}
+	}
+	return resolved
+}
+
+// resolveSubagentRollout is the path-only compatibility wrapper used by
+// callers that need only discovery. Inventory extraction uses the verified
+// bytes returned by the same load operation instead.
+func (c *CodexAgent) resolveSubagentRollout(ref agent.SubagentReference) string {
+	if ref.AgentID == "" {
+		return ""
+	}
+	if loaded, ok := c.loadDirectRollout(ref); ok {
+		return loaded.Path
+	}
+	if loaded, ok := c.scanFallbackRollouts(map[string]struct{}{ref.AgentID: {}})[ref.AgentID]; ok {
+		return loaded.Path
+	}
+	return ""
 }
 
 // NewCodexAgent creates a new Codex agent instance.
