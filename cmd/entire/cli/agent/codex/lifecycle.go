@@ -5,10 +5,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
+	"github.com/entireio/cli/cmd/entire/cli/logging"
 )
 
 // Compile-time interface assertions.
@@ -109,16 +111,16 @@ func (c *CodexAgent) SessionEndBudget() time.Duration { return sessionEndBudget 
 
 // ParseHookEvent translates a Codex hook into a normalized lifecycle Event.
 // Returns nil if the hook has no lifecycle significance.
-func (c *CodexAgent) ParseHookEvent(_ context.Context, hookName string, stdin io.Reader) (*agent.Event, error) {
+func (c *CodexAgent) ParseHookEvent(ctx context.Context, hookName string, stdin io.Reader) (*agent.Event, error) {
 	switch hookName {
 	case HookNameSessionStart:
 		return c.parseSessionInfoEvent(stdin, agent.SessionStart)
 	case HookNameSessionEnd:
 		return c.parseSessionInfoEvent(stdin, agent.SessionEnd)
 	case HookNameUserPromptSubmit:
-		return c.parseTurnStart(stdin)
+		return c.parseTurnStart(ctx, stdin)
 	case HookNameStop:
-		return c.parseTurnEnd(stdin)
+		return c.parseTurnEnd(ctx, stdin)
 	case HookNamePreToolUse:
 		// PreToolUse has no lifecycle significance — pass through
 		return nil, nil //nolint:nilnil // nil event = no lifecycle action
@@ -201,12 +203,12 @@ func (c *CodexAgent) parseSessionInfoEvent(stdin io.Reader, eventType agent.Even
 	}, nil
 }
 
-func (c *CodexAgent) parseTurnStart(stdin io.Reader) (*agent.Event, error) {
+func (c *CodexAgent) parseTurnStart(ctx context.Context, stdin io.Reader) (*agent.Event, error) {
 	raw, err := agent.ReadAndParseHookInput[userPromptSubmitRaw](stdin)
 	if err != nil {
 		return nil, err
 	}
-	if classifyRollout(derefString(raw.TranscriptPath)) != rolloutRoot {
+	if !isRootTurnRollout(ctx, derefString(raw.TranscriptPath)) {
 		return nil, nil //nolint:nilnil // only proven root rollouts mutate lifecycle state
 	}
 	return &agent.Event{
@@ -275,12 +277,12 @@ func isApplyPatchTool(name string) bool {
 	}
 }
 
-func (c *CodexAgent) parseTurnEnd(stdin io.Reader) (*agent.Event, error) {
+func (c *CodexAgent) parseTurnEnd(ctx context.Context, stdin io.Reader) (*agent.Event, error) {
 	raw, err := agent.ReadAndParseHookInput[stopRaw](stdin)
 	if err != nil {
 		return nil, err
 	}
-	if classifyRollout(derefString(raw.TranscriptPath)) != rolloutRoot {
+	if !isRootTurnRollout(ctx, derefString(raw.TranscriptPath)) {
 		return nil, nil //nolint:nilnil // only proven root rollouts mutate lifecycle state
 	}
 	return &agent.Event{
@@ -290,4 +292,17 @@ func (c *CodexAgent) parseTurnEnd(stdin io.Reader) (*agent.Event, error) {
 		Model:      raw.Model,
 		Timestamp:  time.Now(),
 	}, nil
+}
+
+func isRootTurnRollout(ctx context.Context, path string) bool {
+	switch classifyRollout(path) {
+	case rolloutRoot:
+		return true
+	case rolloutChild:
+		return false
+	case rolloutUnknown:
+		logging.Warn(ctx, "codex: skipped turn lifecycle event for unclassified rollout", slog.String("path", path))
+		return false
+	}
+	return false
 }

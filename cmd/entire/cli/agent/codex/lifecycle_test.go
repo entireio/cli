@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
+	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/stretchr/testify/require"
 )
 
@@ -246,6 +247,30 @@ func TestParseHookEvent_UserPromptSubmitAndStopRequireRootRollout(t *testing.T) 
 			}
 		})
 	}
+}
+
+func TestParseHookEvent_UnknownTurnRolloutWritesDiagnostic(t *testing.T) {
+	t.Parallel()
+
+	rolloutPath := filepath.Join(t.TempDir(), "rollout.jsonl")
+	require.NoError(t, os.WriteFile(rolloutPath, []byte(`{"type":"session_meta","payload":{"source":"future-source"}}`+"\n"), 0o600))
+
+	logDir := t.TempDir()
+	logger, err := logging.New(logging.Config{Dir: logDir})
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, logger.Close()) })
+	ctx := logging.WithLogger(context.Background(), logger)
+	input := `{"session_id":"root-session-1","turn_id":"turn-1","transcript_path":"` + rolloutPath + `","model":"gpt-5","prompt":"do work"}`
+
+	event, err := (&CodexAgent{}).ParseHookEvent(ctx, HookNameUserPromptSubmit, strings.NewReader(input))
+	require.NoError(t, err)
+	require.Nil(t, event)
+	require.NoError(t, logger.Close())
+
+	logData, err := os.ReadFile(filepath.Join(logDir, "entire.log"))
+	require.NoError(t, err)
+	require.Contains(t, string(logData), "codex: skipped turn lifecycle event for unclassified rollout")
+	require.Contains(t, string(logData), rolloutPath)
 }
 
 func TestParseHookEvent_PreToolUse_ReturnsNil(t *testing.T) {

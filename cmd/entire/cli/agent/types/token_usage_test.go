@@ -69,6 +69,22 @@ func TestAddTokenUsage(t *testing.T) {
 	}
 }
 
+func TestAddTokenUsage_ExplicitIncompleteDominatesComplete(t *testing.T) {
+	t.Parallel()
+
+	complete := true
+	incomplete := false
+	for _, operands := range [][2]*TokenUsage{
+		{{SubagentTokensComplete: &complete}, {SubagentTokensComplete: &incomplete}},
+		{{SubagentTokensComplete: &incomplete}, {SubagentTokensComplete: &complete}},
+	} {
+		got := AddTokenUsage(operands[0], operands[1])
+		if got.SubagentTokensComplete == nil || *got.SubagentTokensComplete {
+			t.Fatalf("AddTokenUsage(%v, %v) completeness = %v, want false", *operands[0].SubagentTokensComplete, *operands[1].SubagentTokensComplete, got.SubagentTokensComplete)
+		}
+	}
+}
+
 // TestAddTokenUsage_TruncatesDeepSubagentChains pins MaxSubagentDepth. Token usage
 // is read back from per-session metadata.json blobs on the shared checkpoint
 // branch, so the chain depth is not trustworthy; an unbounded chain reaching the
