@@ -355,6 +355,11 @@ const scoopEntireExecutablePath = `C:\Users\test\scoop\apps\entire\current\entir
 // plainBinPath is a POSIX install under no recognized install manager.
 const plainBinPath = "/usr/local/bin/entire"
 
+// windowsLocalBinPath is a direct install.ps1 destination. windowsProgramFilesPath
+// is an unknown Windows path that matches none of the install-manager prefixes.
+const windowsLocalBinPath = `C:\Users\test\.local\bin\entire.exe`
+const windowsProgramFilesPath = `C:\Program Files\Entire\entire.exe`
+
 // TestScoopAppName pins the signal the rename migration keys off. The ""
 // results matter most: they are what keeps the `== "cli"` comparison in
 // updateCommand from misfiring on a non-Scoop binary that happens to live in a
@@ -409,6 +414,7 @@ func TestUpdateCommand(t *testing.T) {
 	tests := []struct {
 		name           string
 		currentVersion string
+		goos           string
 		execPath       func() (string, error)
 		want           string
 	}{
@@ -457,20 +463,37 @@ func TestUpdateCommand(t *testing.T) {
 		{
 			name:           "unknown path stable falls back to stable curl command",
 			currentVersion: "1.0.0",
+			goos:           "linux",
 			execPath:       func() (string, error) { return plainBinPath, nil },
 			want:           "curl -fsSL https://entire.io/install.sh | bash",
 		},
 		{
 			name:           "unknown path nightly falls back to nightly curl command",
 			currentVersion: "1.0.1-nightly.202604101200.abc1234",
+			goos:           "linux",
 			execPath:       func() (string, error) { return plainBinPath, nil },
 			want:           "curl -fsSL https://entire.io/install.sh | bash -s -- --channel nightly",
 		},
 		{
 			name:           "executable error falls back to stable curl command",
 			currentVersion: "1.0.0",
+			goos:           "linux",
 			execPath:       func() (string, error) { return "", errors.New("not found") },
 			want:           "curl -fsSL https://entire.io/install.sh | bash",
+		},
+		{
+			name:           "windows unknown path stable uses install.ps1",
+			currentVersion: "1.0.0",
+			goos:           goosWindows,
+			execPath:       func() (string, error) { return windowsLocalBinPath, nil },
+			want:           windowsInstallCmd,
+		},
+		{
+			name:           "windows unknown path nightly uses install.ps1 -Channel nightly",
+			currentVersion: "1.0.1-nightly.202604101200.abc1234",
+			goos:           goosWindows,
+			execPath:       func() (string, error) { return windowsLocalBinPath, nil },
+			want:           windowsInstallNightlyCmd,
 		},
 	}
 
@@ -479,6 +502,12 @@ func TestUpdateCommand(t *testing.T) {
 			original := executablePath
 			executablePath = tt.execPath
 			t.Cleanup(func() { executablePath = original })
+
+			if tt.goos != "" {
+				origGOOS := goos
+				goos = tt.goos
+				t.Cleanup(func() { goos = origGOOS })
+			}
 
 			if got := updateCommand(tt.currentVersion); got != tt.want {
 				t.Errorf("updateCommand() = %q, want %q", got, tt.want)
@@ -503,11 +532,18 @@ func TestUpdateCommandForCurrentBinary(t *testing.T) {
 			want:           "scoop update entire/entire",
 		},
 		{
-			name:           "windows unknown installer returns releases URL",
+			name:           "windows unknown installer returns install.ps1 command",
 			currentVersion: "1.2.3",
 			goos:           goosWindows,
-			execPath:       func() (string, error) { return `C:\Program Files\Entire\entire.exe`, nil },
-			want:           downloadsURL,
+			execPath:       func() (string, error) { return windowsProgramFilesPath, nil },
+			want:           windowsInstallCmd,
+		},
+		{
+			name:           "windows unknown nightly installer returns install.ps1 -Channel nightly",
+			currentVersion: "1.0.1-nightly.202604101200.abc1234",
+			goos:           goosWindows,
+			execPath:       func() (string, error) { return windowsProgramFilesPath, nil },
+			want:           windowsInstallNightlyCmd,
 		},
 		{
 			name:           "non-windows unknown installer returns curl command",

@@ -410,24 +410,22 @@ func installManagerForCurrentBinary() string {
 }
 
 // canAutoInstall reports whether updateCommand(currentVersion) is safe to
-// execute on the current OS. Returns false on Windows when the install
-// manager is unknown, because the POSIX curl-pipe-bash fallback can't run
-// from cmd.exe and there's no Windows-native installer to substitute.
+// print (and, on non-Windows, auto-run) on the current OS. Always true:
+// POSIX unknown falls back to curl | bash, Windows unknown to install.ps1.
+// Windows still never auto-runs; see MaybeAutoUpdate.
 func canAutoInstall() bool {
-	if goos != goosWindows {
-		return true
-	}
-	switch installManagerForCurrentBinary() {
-	case installManagerScoop, installManagerMise:
-		return true
-	default:
-		return false
-	}
+	return true
 }
 
 // downloadsURL is the public page users visit when we can't offer an
 // auto-installable command on their platform.
 const downloadsURL = "https://github.com/entireio/cli/releases"
+
+// Windows install.ps1 one-liners from the README. Printed, never auto-run.
+const (
+	windowsInstallCmd        = "irm https://raw.githubusercontent.com/entireio/cli/main/scripts/install.ps1 -UseBasicParsing | iex"
+	windowsInstallNightlyCmd = "& ([scriptblock]::Create((irm https://raw.githubusercontent.com/entireio/cli/main/scripts/install.ps1 -UseBasicParsing))) -Channel nightly"
+)
 
 // updateCommand returns the appropriate update instruction based on how the binary was installed.
 func updateCommand(currentVersion string) string {
@@ -472,6 +470,13 @@ func updateCommand(currentVersion string) string {
 			return `cmd.exe /D /C "scoop install entire/entire && scoop uninstall entire/cli && scoop reset entire"`
 		}
 		return "scoop update entire/entire"
+	}
+
+	if goos == goosWindows {
+		if releaseChannel(currentVersion) == installChannelNightly {
+			return windowsInstallNightlyCmd
+		}
+		return windowsInstallCmd
 	}
 
 	if releaseChannel(currentVersion) == installChannelNightly {

@@ -92,9 +92,8 @@ func useUnknownExecutable(t *testing.T) {
 }
 
 // pinNonWindowsGOOS pins the goos seam to a non-Windows value so the
-// table-driven tests below pass on Windows hosts. canAutoInstall() blocks
-// brew and the curl-bash fallback on Windows; without this pin those
-// installer cases would short-circuit to the downloads-page path.
+// table-driven tests below exercise the interactive/auto-run path rather
+// than the Windows print-only branch.
 func pinNonWindowsGOOS(t *testing.T) {
 	t.Helper()
 	orig := goos
@@ -175,36 +174,63 @@ func TestMaybeAutoUpdate_NonTerminalWriter(t *testing.T) {
 }
 
 // TestMaybeAutoUpdate_WindowsUnknownInstallerNoAutoRun verifies that on
-// Windows without a detected install manager we never execute the POSIX
-// curl-pipe-bash fallback (which would error from cmd.exe). Instead the
-// user is pointed at the releases download page.
+// Windows without Scoop or mise we print the install.ps1 one-liner and
+// never auto-run it (a running entire.exe cannot replace itself). The
+// POSIX curl fallback must not appear.
 func TestMaybeAutoUpdate_WindowsUnknownInstallerNoAutoRun(t *testing.T) {
-	f := newAutoUpdateFixture(t)
-	// Force unknown install manager: point executablePath at a plain
-	// Program Files path that matches none of the known prefixes.
-	orig := executablePath
-	executablePath = func() (string, error) {
-		return `C:\Program Files\Entire\entire.exe`, nil
+	tests := []struct {
+		name           string
+		currentVersion string
+		wantCmd        string
+	}{
+		{
+			name:           "stable",
+			currentVersion: "1.0.0",
+			wantCmd:        windowsInstallCmd,
+		},
+		{
+			name:           "nightly",
+			currentVersion: "1.0.1-nightly.202604101200.abc1234",
+			wantCmd:        windowsInstallNightlyCmd,
+		},
 	}
-	t.Cleanup(func() { executablePath = orig })
 
-	origGOOS := goos
-	goos = goosWindows
-	t.Cleanup(func() { goos = origGOOS })
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			f := newAutoUpdateFixture(t)
+			orig := executablePath
+			executablePath = func() (string, error) {
+				return windowsProgramFilesPath, nil
+			}
+			t.Cleanup(func() { executablePath = orig })
 
-	var buf bytes.Buffer
-	MaybeAutoUpdate(context.Background(), &buf, "1.0.0", "v2.0.0")
+			origGOOS := goos
+			goos = goosWindows
+			t.Cleanup(func() { goos = origGOOS })
 
-	if f.installCalls != 0 {
-		t.Errorf("installer was auto-run on Windows + unknown install manager")
-	}
-	out := buf.String()
-	if !strings.Contains(out, "download the latest release") ||
-		!strings.Contains(out, "github.com/entireio/cli/releases") {
-		t.Errorf("expected download-page hint, got: %q", out)
-	}
-	if strings.Contains(out, "curl -fsSL") {
-		t.Errorf("Windows fallback must not show POSIX curl command: %q", out)
+			var buf bytes.Buffer
+			action := MaybeAutoUpdate(context.Background(), &buf, tt.currentVersion, "v2.0.0")
+
+			if f.installCalls != 0 {
+				t.Errorf("installer was auto-run on Windows + unknown install manager")
+			}
+			if action != autoUpdateActionSkip {
+				t.Errorf("action = %q, want %q", action, autoUpdateActionSkip)
+			}
+			out := buf.String()
+			if !strings.Contains(out, "when entire is not running") {
+				t.Errorf("missing Windows manual-run hint: %q", out)
+			}
+			if !strings.Contains(out, "  "+tt.wantCmd) {
+				t.Errorf("manual hint missing command %q: %q", tt.wantCmd, out)
+			}
+			if strings.Contains(out, "curl -fsSL") {
+				t.Errorf("Windows fallback must not show POSIX curl command: %q", out)
+			}
+			if strings.Contains(out, "download the latest release") {
+				t.Errorf("Windows unknown installer must not point at the releases page: %q", out)
+			}
+		})
 	}
 }
 
@@ -228,6 +254,18 @@ func TestMaybeAutoUpdate_WindowsNeverAutoRuns(t *testing.T) {
 			name:    "mise prints upgrade command",
 			setup:   useMiseExecutable,
 			wantCmd: "mise upgrade entire",
+		},
+		{
+			name: "unknown prints install.ps1 command",
+			setup: func(t *testing.T) {
+				t.Helper()
+				orig := executablePath
+				executablePath = func() (string, error) {
+					return windowsLocalBinPath, nil
+				}
+				t.Cleanup(func() { executablePath = orig })
+			},
+			wantCmd: windowsInstallCmd,
 		},
 	}
 
