@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"testing"
 
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
@@ -23,6 +24,9 @@ func TestMain(m *testing.M) {
 	}
 
 	testBinaryPath = filepath.Join(tmpDir, "entire")
+	if runtime.GOOS == "windows" {
+		testBinaryPath += ".exe"
+	}
 
 	// Route every spawned CLI away from the developer's real ~/.config/entire
 	// (contexts.json, version_check.json), ~/.cache/entire (discovery caches),

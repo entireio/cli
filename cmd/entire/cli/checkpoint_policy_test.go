@@ -4,17 +4,17 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 
-	"github.com/entireio/cli/cmd/entire/cli/checkpointpolicy"
-	"github.com/entireio/cli/cmd/entire/cli/testutil"
 	"github.com/go-git/go-git/v6"
 	"github.com/go-git/go-git/v6/plumbing"
 	"github.com/spf13/cobra"
 	"github.com/stretchr/testify/require"
+
+	"github.com/entireio/cli/cmd/entire/cli/checkpointpolicy"
+	"github.com/entireio/cli/cmd/entire/cli/testutil"
 )
 
 func TestCheckpointPolicyCmd_PrintsDefaults(t *testing.T) {
@@ -221,10 +221,5 @@ func checkpointPolicyRemoteHashForCommandTest(t *testing.T, dir, remote string) 
 
 func runCheckpointPolicyGit(t *testing.T, dir string, args ...string) string {
 	t.Helper()
-	cmd := exec.CommandContext(context.Background(), "git", args...)
-	cmd.Dir = dir
-	cmd.Env = testutil.GitIsolatedEnv()
-	output, err := cmd.CombinedOutput()
-	require.NoError(t, err, string(output))
-	return string(output)
+	return testutil.RunGit(t, dir, args...)
 }

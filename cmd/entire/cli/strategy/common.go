@@ -358,7 +358,7 @@ const (
 )
 
 // isProtectedPath returns true if relPath is inside a directory that should
-// never be modified or deleted during rewind or other destructive operations.
+// never be recorded as session changes or captured into a checkpoint.
 // Protected directories include git internals, entire metadata, and all
 // registered agent config directories.
 func isProtectedPath(relPath string) bool {
@@ -1444,197 +1444,6 @@ func EnsureEntireGitignore(ctx context.Context) error {
 	return nil
 }
 
-// checkCanRewindWithWarning checks working directory and returns a warning with diff stats.
-// Always returns canRewind=true but includes a warning message with +/- line stats for
-// uncommitted changes. Used by manual-commit strategy.
-func checkCanRewindWithWarning(ctx context.Context) (bool, string, error) {
-	repo, err := OpenRepository(ctx)
-	if err != nil {
-		// Can't open repo - still allow rewind but without stats
-		return true, "", nil
-	}
-	defer repo.Close()
-
-	status, err := gitrepo.Status(ctx, repo)
-	if err != nil {
-		return true, "", nil
-	}
-
-	if status.IsClean() {
-		return true, "", nil
-	}
-
-	// Get HEAD commit tree for comparison - if we can't get it, just return without stats
-	head, err := repo.Head()
-	if err != nil {
-		return true, "", nil
-	}
-
-	headCommit, err := repo.CommitObject(head.Hash())
-	if err != nil {
-		return true, "", nil
-	}
-
-	headTree, err := headCommit.Tree()
-	if err != nil {
-		return true, "", nil
-	}
-
-	type fileChange struct {
-		status   string // "modified", "added", "deleted"
-		added    int
-		removed  int
-		filename string
-	}
-
-	var changes []fileChange
-	// Use repo root, not cwd - git status returns paths relative to repo root
-	repoRoot, err := paths.WorktreeRoot(ctx)
-	if err != nil {
-		return true, "", nil
-	}
-
-	for file, st := range status {
-		// Skip .entire directory
-		if paths.IsInfrastructurePath(file) {
-			continue
-		}
-
-		// Skip untracked files
-		if st.Worktree == git.Untracked {
-			continue
-		}
-
-		var change fileChange
-		change.filename = file
-
-		switch {
-		case st.Staging == git.Added || st.Worktree == git.Added:
-			change.status = "added"
-			// New file - count all lines as added
-			absPath := filepath.Join(repoRoot, file)
-			if content, err := os.ReadFile(absPath); err == nil { //nolint:gosec // absPath is repo root + relative path from git status
-				change.added = countLines(content)
-			}
-		case st.Staging == git.Deleted || st.Worktree == git.Deleted:
-			change.status = "deleted"
-			// Deleted file - count lines from HEAD as removed
-			if entry, err := headTree.File(file); err == nil {
-				if content, err := entry.Contents(); err == nil {
-					change.removed = countLines([]byte(content))
-				}
-			}
-		case st.Staging == git.Modified || st.Worktree == git.Modified:
-			change.status = "modified"
-			// Modified file - compute diff stats
-			var headContent, workContent []byte
-			if entry, err := headTree.File(file); err == nil {
-				if content, err := entry.Contents(); err == nil {
-					headContent = []byte(content)
-				}
-			}
-			absPath := filepath.Join(repoRoot, file)
-			if content, err := os.ReadFile(absPath); err == nil { //nolint:gosec // absPath is repo root + relative path from git status
-				workContent = content
-			}
-			if headContent != nil && workContent != nil {
-				change.added, change.removed = computeDiffStats(headContent, workContent)
-			}
-		default:
-			continue
-		}
-
-		changes = append(changes, change)
-	}
-
-	if len(changes) == 0 {
-		return true, "", nil
-	}
-
-	// Sort changes by filename for consistent output
-	sort.Slice(changes, func(i, j int) bool {
-		return changes[i].filename < changes[j].filename
-	})
-
-	var msg strings.Builder
-	msg.WriteString("The following uncommitted changes will be reverted:\n")
-
-	totalAdded, totalRemoved := 0, 0
-	for _, c := range changes {
-		totalAdded += c.added
-		totalRemoved += c.removed
-
-		var stats string
-		switch {
-		case c.added > 0 && c.removed > 0:
-			stats = fmt.Sprintf("+%d/-%d", c.added, c.removed)
-		case c.added > 0:
-			stats = fmt.Sprintf("+%d", c.added)
-		case c.removed > 0:
-			stats = fmt.Sprintf("-%d", c.removed)
-		}
-
-		fmt.Fprintf(&msg, "  %-10s %s", c.status+":", c.filename)
-		if stats != "" {
-			fmt.Fprintf(&msg, " (%s)", stats)
-		}
-		msg.WriteString("\n")
-	}
-
-	if totalAdded > 0 || totalRemoved > 0 {
-		fmt.Fprintf(&msg, "\nTotal: +%d/-%d lines\n", totalAdded, totalRemoved)
-	}
-
-	return true, msg.String(), nil
-}
-
-// countLines counts the number of lines in content.
-func countLines(content []byte) int {
-	if len(content) == 0 {
-		return 0
-	}
-	count := 1
-	for _, b := range content {
-		if b == '\n' {
-			count++
-		}
-	}
-	// Don't count trailing newline as extra line
-	if len(content) > 0 && content[len(content)-1] == '\n' {
-		count--
-	}
-	return count
-}
-
-// computeDiffStats computes added and removed line counts between old and new content.
-// Uses a simple line-based diff algorithm.
-func computeDiffStats(oldContent, newContent []byte) (added, removed int) {
-	oldLines := splitLines(oldContent)
-	newLines := splitLines(newContent)
-
-	// Build a set of old lines with counts
-	oldSet := make(map[string]int)
-	for _, line := range oldLines {
-		oldSet[line]++
-	}
-
-	// Check which new lines are truly new
-	for _, line := range newLines {
-		if oldSet[line] > 0 {
-			oldSet[line]--
-		} else {
-			added++
-		}
-	}
-
-	// Remaining old lines are removed
-	for _, count := range oldSet {
-		removed += count
-	}
-
-	return added, removed
-}
-
 // splitLines splits content into lines, preserving empty lines.
 // Handles both Unix (\n) and Windows (\r\n) line endings.
 func splitLines(content []byte) []string {
@@ -1657,7 +1466,7 @@ func fileExists(path string) bool {
 
 // getTaskCheckpointFromTree retrieves a task checkpoint from a commit tree.
 // Shared implementation for shadow and linear-shadow strategies.
-func getTaskCheckpointFromTree(ctx context.Context, point RewindPoint) (*TaskCheckpoint, error) {
+func getTaskCheckpointFromTree(ctx context.Context, point PendingCheckpoint) (*TaskCheckpoint, error) {
 	if !point.IsTaskCheckpoint {
 		return nil, ErrNotTaskCheckpoint
 	}
@@ -1701,7 +1510,7 @@ func getTaskCheckpointFromTree(ctx context.Context, point RewindPoint) (*TaskChe
 
 // getTaskTranscriptFromTree retrieves a task transcript from a commit tree.
 // Shared implementation for shadow and linear-shadow strategies.
-func getTaskTranscriptFromTree(ctx context.Context, point RewindPoint) ([]byte, error) {
+func getTaskTranscriptFromTree(ctx context.Context, point PendingCheckpoint) ([]byte, error) {
 	if !point.IsTaskCheckpoint {
 		return nil, ErrNotTaskCheckpoint
 	}
@@ -1753,7 +1562,8 @@ var ErrBranchNotFound = errors.New("branch not found")
 // Uses `git branch -D` instead of go-git's RemoveReference because go-git v5
 // doesn't properly persist deletions when refs are packed (.git/packed-refs)
 // or in a worktree context. This is the same class of go-git v5 bug that
-// affects checkout and reset --hard (see HardResetWithProtection).
+// affects checkout and reset --hard (see CheckoutBranch in git_operations.go,
+// which shells out to the git CLI for the same reason).
 //
 // Returns ErrBranchNotFound if the branch does not exist, allowing callers
 // to use errors.Is for idempotent deletion patterns.
@@ -1791,7 +1601,7 @@ func branchExistsCLI(ctx context.Context, branchName string) error {
 
 // collectUntrackedFiles collects untracked files in the working directory that are
 // NOT ignored by .gitignore. This is used to capture the initial state when starting
-// a session, ensuring untracked files present at session start are preserved during rewind.
+// a session, distinguishing files present at session start from ones it created.
 // Uses "git ls-files --others --exclude-standard -z" to respect .gitignore rules,
 // avoiding bloated session state from large ignored directories like node_modules/.
 // Returns paths relative to the repository root.

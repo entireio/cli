@@ -16,6 +16,11 @@ import (
 	"time"
 
 	"charm.land/lipgloss/v2"
+	"github.com/go-git/go-git/v6"
+	"github.com/go-git/go-git/v6/plumbing"
+	"github.com/go-git/go-git/v6/plumbing/object"
+	"github.com/stretchr/testify/require"
+
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/claudecode"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
@@ -29,10 +34,6 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/trailers"
 	"github.com/entireio/cli/cmd/entire/cli/transcript"
 	"github.com/entireio/cli/redact"
-	"github.com/go-git/go-git/v6"
-	"github.com/go-git/go-git/v6/plumbing"
-	"github.com/go-git/go-git/v6/plumbing/object"
-	"github.com/stretchr/testify/require"
 )
 
 func TestNewExplainCmd(t *testing.T) {
@@ -3369,7 +3370,7 @@ func TestBuildPagerCmd_HonorsCustomPager(t *testing.T) {
 
 func TestFormatBranchCheckpoints_BasicOutput(t *testing.T) {
 	now := time.Now()
-	points := []strategy.RewindPoint{
+	points := []strategy.PendingCheckpoint{
 		{
 			ID:            "abc123def456",
 			Message:       "Add feature X",
@@ -3414,7 +3415,7 @@ func TestFormatBranchCheckpoints_GroupedByCheckpointID(t *testing.T) {
 	today := time.Date(2026, 1, 22, 10, 0, 0, 0, time.UTC)
 	yesterday := time.Date(2026, 1, 21, 14, 0, 0, 0, time.UTC)
 
-	points := []strategy.RewindPoint{
+	points := []strategy.PendingCheckpoint{
 		{
 			ID:            "abc123def456",
 			Message:       "Today checkpoint 1",
@@ -3483,7 +3484,7 @@ func TestFormatBranchCheckpoints_NoCheckpoints(t *testing.T) {
 
 func TestFormatBranchCheckpoints_ShowsSessionInfo(t *testing.T) {
 	now := time.Now()
-	points := []strategy.RewindPoint{
+	points := []strategy.PendingCheckpoint{
 		{
 			ID:            "abc123def456",
 			Message:       "Test checkpoint",
@@ -3504,7 +3505,7 @@ func TestFormatBranchCheckpoints_ShowsSessionInfo(t *testing.T) {
 
 func TestFormatBranchCheckpoints_ShowsTemporaryIndicator(t *testing.T) {
 	now := time.Now()
-	points := []strategy.RewindPoint{
+	points := []strategy.PendingCheckpoint{
 		{
 			ID:           "abc123def456",
 			Message:      "Committed checkpoint",
@@ -3542,7 +3543,7 @@ func TestFormatBranchCheckpoints_ShowsTemporaryIndicator(t *testing.T) {
 
 func TestFormatBranchCheckpoints_ShowsTaskCheckpoints(t *testing.T) {
 	now := time.Now()
-	points := []strategy.RewindPoint{
+	points := []strategy.PendingCheckpoint{
 		{
 			ID:               "abc123def456",
 			Message:          "Running tests (toolu_01ABC)",
@@ -3608,7 +3609,7 @@ func TestFormatCheckpointGroup_FallsBackToCommitMessage(t *testing.T) {
 func TestFormatBranchCheckpoints_TruncatesLongMessages(t *testing.T) {
 	now := time.Now()
 	longMessage := strings.Repeat("a", 200) // 200 character message
-	points := []strategy.RewindPoint{
+	points := []strategy.PendingCheckpoint{
 		{
 			ID:           "abc123def456",
 			Message:      longMessage,
@@ -4279,7 +4280,7 @@ func TestRunExplainCommit_WithCheckpointTrailer(t *testing.T) {
 
 func TestFormatBranchCheckpoints_SessionFilter(t *testing.T) {
 	now := time.Now()
-	points := []strategy.RewindPoint{
+	points := []strategy.PendingCheckpoint{
 		{
 			ID:            "abc123def456",
 			Message:       "Checkpoint from session 1",
@@ -4370,7 +4371,7 @@ func TestFormatBranchCheckpoints_SessionFilter(t *testing.T) {
 	t.Run("filter matches archived SessionIDs contributor", func(t *testing.T) {
 		// Multi-session checkpoint: latest SessionID is beta, but alpha is still
 		// in SessionIDs. The shared matcher must keep it when filtering for alpha.
-		multi := []strategy.RewindPoint{
+		multi := []strategy.PendingCheckpoint{
 			{
 				ID:           "abc123def456",
 				Message:      "multi-session checkpoint",
@@ -4391,7 +4392,7 @@ func TestFormatBranchCheckpoints_SessionFilter(t *testing.T) {
 		// List stub has empty SessionID, so --session would drop it. Production
 		// collectCheckpoint hydrates before formatting; this asserts the filter
 		// itself does not invent a match for an empty SessionID.
-		stub := []strategy.RewindPoint{
+		stub := []strategy.PendingCheckpoint{
 			{
 				ID:           "abc123def456",
 				Message:      "remote-discovered stub",
@@ -4418,12 +4419,7 @@ func TestRunExplain_SessionFlagFiltersListView(t *testing.T) {
 		{"config", "user.name", "Test User"},
 		{"commit", "--allow-empty", "-m", "init"},
 	} {
-		cmd := exec.CommandContext(context.Background(), "git", args...)
-		cmd.Dir = tmp
-		cmd.Env = testutil.GitIsolatedEnv()
-		if out, err := cmd.CombinedOutput(); err != nil {
-			t.Fatalf("git %v: %v\n%s", args, err, out)
-		}
+		testutil.RunGit(t, tmp, args...)
 	}
 	t.Chdir(tmp)
 
@@ -5492,7 +5488,7 @@ func TestGetBranchCheckpoints_DefaultBranchFindsMergedCheckpoints(t *testing.T) 
 }
 
 func TestGetBranchCheckpoints_ReadsPromptFromCommittedCheckpoint(t *testing.T) {
-	// Verifies that getBranchCheckpoints populates RewindPoint.SessionPrompt
+	// Verifies that getBranchCheckpoints populates PendingCheckpoint.SessionPrompt
 	// from prompt.txt on entire/checkpoints/v1 (committed checkpoint) without
 	// needing to read/parse the full transcript.
 	tmpDir := t.TempDir()
@@ -5624,7 +5620,7 @@ func TestGetBranchCheckpoints_PopulatesCommittedSessionIDs(t *testing.T) {
 	points, _, err := getBranchCheckpoints(context.Background(), repo, 10)
 	require.NoError(t, err)
 
-	var found *strategy.RewindPoint
+	var found *strategy.PendingCheckpoint
 	for i := range points {
 		if points[i].CheckpointID == cpID {
 			found = &points[i]

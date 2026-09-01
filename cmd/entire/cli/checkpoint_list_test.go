@@ -19,19 +19,19 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestPendingRewindPointJSON_MatchesRewindListContract pins the machine-readable
+// TestPendingCheckpointJSON_MatchesRewindListContract pins the machine-readable
 // shape emitted by `checkpoint list --pending --json`. It must stay byte-for-byte
 // compatible with the JSON `rewind --list` historically produced, so consumers that
 // parsed rewind --list keep working after repointing. Field names, omitempty
 // behavior, and the RFC3339 date encoding are the contract.
-func TestPendingRewindPointJSON_MatchesRewindListContract(t *testing.T) {
+func TestPendingCheckpointJSON_MatchesRewindListContract(t *testing.T) {
 	t.Parallel()
 
 	fixed := time.Date(2026, 7, 9, 12, 30, 0, 0, time.UTC)
 
 	// A logs-only (committed) point: has condensation_id, session_id,
 	// session_prompt; tool_use_id is empty and must be omitted.
-	logsOnly := pendingRewindPointJSON{
+	logsOnly := pendingCheckpointJSON{
 		ID:               "abc123def456",
 		Message:          "user commit",
 		MetadataDir:      ".entire/metadata/s1",
@@ -45,7 +45,7 @@ func TestPendingRewindPointJSON_MatchesRewindListContract(t *testing.T) {
 	// A task (shadow, uncommitted) point: has tool_use_id; condensation_id,
 	// session_id, session_prompt are empty and must be omitted. metadata_dir and
 	// the two bools have no omitempty and must always render.
-	task := pendingRewindPointJSON{
+	task := pendingCheckpointJSON{
 		ID:               "0f1e2d3c",
 		Message:          "task step",
 		MetadataDir:      "",
@@ -55,7 +55,7 @@ func TestPendingRewindPointJSON_MatchesRewindListContract(t *testing.T) {
 		IsLogsOnly:       false,
 	}
 
-	data, err := jsonutil.MarshalIndentWithNewline([]pendingRewindPointJSON{logsOnly, task}, "", "  ")
+	data, err := jsonutil.MarshalIndentWithNewline([]pendingCheckpointJSON{logsOnly, task}, "", "  ")
 	require.NoError(t, err)
 
 	var got []map[string]any
@@ -91,7 +91,7 @@ func keysOf(m map[string]any) []string {
 }
 
 // TestRunCheckpointPendingList_EmptyReturnsEmptyArray verifies the pending JSON
-// view emits `[]` (not `null`) when there are no rewind points — the drop-in
+// view emits `[]` (not `null`) when there are no pending checkpoints — the drop-in
 // contract downstream JSON parsers rely on.
 func TestRunCheckpointPendingList_EmptyReturnsEmptyArray(t *testing.T) {
 	setupCheckpointListRepo(t)
@@ -107,20 +107,20 @@ func TestRunCheckpointPendingList_EmptyReturnsEmptyArray(t *testing.T) {
 }
 
 // TestRunCheckpointPendingListHuman_Empty pins the human-view message shown when
-// no pending rewind points exist.
+// no pending checkpoints exist.
 func TestRunCheckpointPendingListHuman_Empty(t *testing.T) {
 	setupCheckpointListRepo(t)
 
 	var stdout bytes.Buffer
 	require.NoError(t, runCheckpointPendingListHuman(context.Background(), &stdout))
-	require.Contains(t, stdout.String(), "No pending rewind points found.")
+	require.Contains(t, stdout.String(), "No pending checkpoints found.")
 }
 
 // TestCheckpointListCmd_Routing drives the real `checkpoint list` command
 // end-to-end and asserts each flag combination routes to the right
 // dataset/renderer. The repo is seeded with a shadow checkpoint so the
 // condensed dataset is non-empty; the pending dataset stays empty because
-// GetRewindPoints requires active-session state (created by lifecycle hooks,
+// ListPendingCheckpoints requires active-session state (created by lifecycle hooks,
 // exercised by the integration canary), which a raw ephemeral-store seed does
 // not register — this also demonstrates the two datasets are distinct.
 func TestCheckpointListCmd_Routing(t *testing.T) {
@@ -134,7 +134,7 @@ func TestCheckpointListCmd_Routing(t *testing.T) {
 
 	// --pending (human) → pending renderer, empty here.
 	pendingHuman := runListCmd(t, "--pending")
-	require.Contains(t, pendingHuman, "No pending rewind points found.",
+	require.Contains(t, pendingHuman, "No pending checkpoints found.",
 		"--pending (human) must route to the pending human renderer")
 
 	// --pending --json → pending JSON renderer, empty array (distinct from the

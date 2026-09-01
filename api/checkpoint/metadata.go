@@ -531,7 +531,7 @@ func (m Metadata) GetCompactTranscriptStart() (offset int, ok bool) {
 type SessionFilePaths struct {
 	Metadata string `json:"metadata"`
 	// Transcript points at the raw full.jsonl, which CLI read paths
-	// (rewind/resume/explain) resolve by filename.
+	// (resume/explain) resolve by filename.
 	Transcript string `json:"transcript,omitempty"`
 	// CompactTranscript points at the compact transcript.jsonl when one was
 	// generated alongside full.jsonl. Omitted otherwise (non-compactable,

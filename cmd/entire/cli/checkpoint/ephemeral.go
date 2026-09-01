@@ -494,7 +494,7 @@ func (s *ephemeralStore) addTaskMetadataToTree(ctx context.Context, baseTreeHash
 }
 
 // ListCheckpoints lists all checkpoint commits on a shadow branch.
-// This returns individual commits (rewind points), not just branch info.
+// This returns individual commits (pending checkpoints), not just branch info.
 // The sessionID filter, if provided, limits results to commits from that session.
 // worktreeID should be empty for main worktree or the internal git worktree name for linked worktrees.
 func (s *ephemeralStore) ListCheckpoints(ctx context.Context, baseCommit, worktreeID, sessionID string, limit int) ([]EphemeralCheckpointInfo, error) {
@@ -1211,7 +1211,7 @@ func filterGitIgnoredFiles(ctx context.Context, repo *git.Repository, files []st
 // This mirrors shouldIgnoreSessionTrackingPath in the cli package. The two
 // cannot share an implementation because cli imports checkpoint, so the logic
 // is duplicated deliberately. The first-checkpoint path (collectChangedFiles)
-// must apply the same exclusions as the session-tracking and rewind paths, or
+// must apply the same exclusions as the session-tracking and condensation paths, or
 // protected-dir content is captured into the shadow tree on session start
 // (see the DetectFileChanges / isProtectedPath call sites).
 func isProtectedCheckpointPath(relPath string) bool {

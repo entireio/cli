@@ -837,12 +837,7 @@ func initBareWithMetadataBranch(t *testing.T) string {
 	// Init bare, create main branch with a commit
 	workDir := t.TempDir()
 	run := func(dir string, args ...string) {
-		cmd := exec.CommandContext(context.Background(), "git", args...)
-		cmd.Dir = dir
-		cmd.Env = testutil.GitIsolatedEnv()
-		if out, err := cmd.CombinedOutput(); err != nil {
-			t.Fatalf("git %v failed: %v\n%s", args, err, out)
-		}
+		testutil.RunGit(t, dir, args...)
 	}
 	run(bareDir, "init", "--bare", "-b", "main")
 	run(workDir, "clone", bareDir, ".")
@@ -1113,12 +1108,7 @@ func cloneWithConfig(t *testing.T, bareDir string) (string, func(args ...string)
 		t.Fatalf("clone failed: %v\n%s", err, out)
 	}
 	run := func(args ...string) {
-		cmd := exec.CommandContext(context.Background(), "git", args...)
-		cmd.Dir = cloneDir
-		cmd.Env = testutil.GitIsolatedEnv()
-		if out, err := cmd.CombinedOutput(); err != nil {
-			t.Fatalf("git %v failed: %v\n%s", args, err, out)
-		}
+		testutil.RunGit(t, cloneDir, args...)
 	}
 	run("config", "user.email", "test@test.com")
 	run("config", "user.name", "Test User")
@@ -1281,11 +1271,7 @@ func TestSafelyAdvanceLocalRef_DoesNotReplayDisconnectedChainWhenTargetIsShallow
 
 	run := func(dir string, args ...string) {
 		t.Helper()
-		cmd := exec.CommandContext(ctx, "git", args...)
-		cmd.Dir = dir
-		cmd.Env = testutil.GitIsolatedEnv()
-		out, err := cmd.CombinedOutput()
-		require.NoError(t, err, "git %v in %s failed: %s", args, dir, out)
+		testutil.RunGit(t, dir, args...)
 	}
 
 	run(bareDir, "init", "--bare", "-b", "main")

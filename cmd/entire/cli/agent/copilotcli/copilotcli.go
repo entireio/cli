@@ -65,6 +65,15 @@ func (c *CopilotCLIAgent) GetSessionDir(_ string) (string, error) {
 		return override, nil
 	}
 
+	// Copilot stores its config and state under COPILOT_HOME when that is set,
+	// falling back to ~/.copilot. Honouring it points transcript resolution at
+	// wherever the agent actually wrote, rather than at a directory it never
+	// used — which is what a user with COPILOT_HOME set, or a harness that
+	// isolates Copilot state per session, would otherwise get.
+	if copilotHome := os.Getenv("COPILOT_HOME"); copilotHome != "" {
+		return filepath.Join(copilotHome, "session-state"), nil
+	}
+
 	homeDir, err := os.UserHomeDir()
 	if err != nil {
 		return "", fmt.Errorf("failed to get home directory: %w", err)

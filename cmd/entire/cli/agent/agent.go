@@ -39,8 +39,8 @@ type Agent interface {
 	// DetectPresence checks if this agent is configured in the repository
 	DetectPresence(ctx context.Context) (bool, error)
 
-	// ProtectedDirs returns repo-root-relative directories that should never be
-	// modified or deleted during rewind or other destructive operations.
+	// ProtectedDirs returns repo-root-relative directories that Entire must never
+	// record as session changes or capture into a checkpoint.
 	// Examples: [".claude"] for Claude, [".gemini"] for Gemini.
 	ProtectedDirs() []string
 
@@ -73,7 +73,7 @@ type Agent interface {
 	// it verbatim when absolute. Callers that source agentSessionID from
 	// untrusted data (e.g. checkpoint metadata on the shared
 	// entire/checkpoints/v1 branch, hook input) MUST validate it with
-	// validation.ValidateSessionID first. The resume/rewind restore paths do
+	// validation.ValidateSessionID first. The resume/log-restore paths do
 	// this at their choke points (transcript.resolveTranscriptPath and
 	// strategy.RestoreLogsOnly); do not call this with unvalidated input.
 	ResolveSessionFile(sessionDir, agentSessionID string) string

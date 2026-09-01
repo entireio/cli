@@ -91,7 +91,7 @@ func (k Kind) IsInvestigate() bool {
 // IsImported reports whether this Kind is a read-only session reconstructed by
 // `entire import` from a pre-existing transcript. Imported sessions are exempt
 // from lifecycle management (staleness, orphan cleanup) and are not
-// resumable/rewindable. Centralized here so those call sites don't couple to
+// resumable. Centralized here so those call sites don't couple to
 // the string literal across packages.
 func (k Kind) IsImported() bool {
 	// See IsReview for why this is an equality check rather than a switch.
@@ -254,7 +254,8 @@ type State struct {
 	// Use NormalizeAfterLoad() to migrate.
 	CondensedTranscriptLines int `json:"condensed_transcript_lines,omitempty"`
 
-	// UntrackedFilesAtStart tracks files that existed at session start (to preserve during rewind)
+	// UntrackedFilesAtStart tracks files that existed at session start (so they are
+	// not attributed to the session)
 	UntrackedFilesAtStart []string `json:"untracked_files_at_start,omitempty"`
 
 	// FilesTouched tracks files modified/created/deleted during this session

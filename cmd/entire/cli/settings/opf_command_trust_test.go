@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -300,11 +299,7 @@ func TestPathIsVersioned_LinkedWorktreeUsesOwnIndex(t *testing.T) {
 func TestPathIsVersioned_ReftableRepo(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
-	init := exec.CommandContext(t.Context(), "git", "init", "-q", "--ref-format=reftable", ".")
-	init.Dir = root
-	init.Env = testutil.GitIsolatedEnv()
-	out, err := init.CombinedOutput()
-	require.NoError(t, err, "reftable init: %s", out)
+	testutil.RunGit(t, root, "init", "-q", "--ref-format=reftable", ".")
 	for _, kv := range [][]string{{"user.email", "t@t.io"}, {"user.name", "T"}, {"commit.gpgsign", "false"}} {
 		testutil.RunGit(t, root, "config", kv[0], kv[1])
 	}

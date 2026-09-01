@@ -88,7 +88,7 @@ func (c *CodexAgent) GetSessionDir(_ string) (string, error) {
 
 // ResolveSessionFile returns the path to a Codex session transcript file.
 // Codex provides the transcript path directly in hook payloads as an absolute path.
-// When only a session ID is available, attach/rewind must recover it from the
+// When only a session ID is available, callers recover it from the
 // sessions/YYYY/MM/DD/rollout-...-<session-id>.jsonl layout.
 func (c *CodexAgent) ResolveSessionFile(sessionDir, agentSessionID string) string {
 	if filepath.IsAbs(agentSessionID) {

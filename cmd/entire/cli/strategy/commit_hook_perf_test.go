@@ -6,7 +6,6 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -17,6 +16,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
+	"github.com/entireio/cli/cmd/entire/cli/testutil"
 	"github.com/entireio/cli/cmd/entire/cli/trailers"
 
 	"github.com/go-git/go-git/v6"
@@ -286,12 +286,7 @@ func cloneSourceRepo(t *testing.T) string {
 	t.Logf("Cloning %s (full history, single branch) ...", hookPerfRepoURL)
 	start := time.Now()
 
-	//nolint:gosec // test-only, URL is a constant
-	cmd := exec.Command("git", "clone", "--single-branch", hookPerfRepoURL, dir)
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("git clone failed: %v\n%s", err, out)
-	}
+	testutil.RunGit(t, "", "clone", "--single-branch", hookPerfRepoURL, dir)
 	t.Logf("Source clone completed in %s", time.Since(start).Round(time.Millisecond))
 
 	return dir
@@ -306,12 +301,7 @@ func localClone(t *testing.T, sourceDir string) string {
 		dir = resolved
 	}
 
-	//nolint:gosec // test-only, sourceDir is from t.TempDir()
-	cmd := exec.Command("git", "clone", "--local", sourceDir, dir)
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("local clone failed: %v\n%s", err, out)
-	}
+	testutil.RunGit(t, "", "clone", "--local", sourceDir, dir)
 
 	return dir
 }
@@ -319,13 +309,7 @@ func localClone(t *testing.T, sourceDir string) string {
 // gitRun executes a git command in the given directory and fails the test on error.
 func gitRun(t *testing.T, dir string, args ...string) {
 	t.Helper()
-	//nolint:gosec // test-only helper
-	cmd := exec.Command("git", args...)
-	cmd.Dir = dir
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("git %s failed: %v\n%s", strings.Join(args, " "), err, out)
-	}
+	testutil.RunGit(t, dir, args...)
 }
 
 // createHookPerfSettings writes .entire/settings.json with commit_linking=always

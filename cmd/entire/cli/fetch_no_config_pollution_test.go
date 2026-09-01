@@ -93,12 +93,7 @@ func TestFetchDoesNotPolluteOriginConfig(t *testing.T) {
 
 func runGit(t *testing.T, dir string, args ...string) {
 	t.Helper()
-	cmd := exec.CommandContext(t.Context(), "git", args...)
-	cmd.Dir = dir
-	cmd.Env = testutil.GitIsolatedEnv()
-	if output, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("git %s failed: %v\nOutput: %s", strings.Join(args, " "), err, output)
-	}
+	testutil.RunGit(t, dir, args...)
 }
 
 func runGitAllow(t *testing.T, dir string, args ...string) error {

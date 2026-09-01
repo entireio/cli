@@ -18,7 +18,7 @@ var ErrNoMetadata = errors.New("commit has no entire metadata")
 // ErrNoSession is returned when no session info is available.
 var ErrNoSession = errors.New("no session info available")
 
-// ErrNotTaskCheckpoint is returned when a rewind point is not a task checkpoint.
+// ErrNotTaskCheckpoint is returned when a pending checkpoint is not a task checkpoint.
 var ErrNotTaskCheckpoint = errors.New("not a task checkpoint")
 
 // ErrEmptyRepository is returned when the repository has no commits yet.
@@ -40,11 +40,25 @@ type SessionInfo struct {
 	CommitHash string
 }
 
-// RewindPoint represents a point to which the user can rewind.
+// PendingCheckpoint is one row of `checkpoint list --pending`, which is the
+// resume view of the current branch rather than a single kind of thing. A row is
+// one of two shapes:
+//
+//   - A live checkpoint on the session's shadow branch, not yet condensed onto
+//     entire/checkpoints/v1. ID is the shadow commit; CheckpointID is empty.
+//   - A logs-only resume point: a commit on the current branch whose
+//     Entire-Checkpoint trailer resolves to a checkpoint that IS already
+//     condensed onto entire/checkpoints/v1. ID is that commit, CheckpointID the
+//     condensed checkpoint, and IsLogsOnly is true. It is listed so the session
+//     transcript can be restored from v1 (RestoreLogsOnly); file state would
+//     need a git checkout.
+//
+// So "pending" describes the listing, not a guarantee that the underlying work
+// is un-condensed — half these rows are recovered from condensed history.
 // This abstraction allows different strategies to use different
 // identifiers (commit hashes, branch names, stash refs, etc.)
-type RewindPoint struct {
-	// ID is the unique identifier for this rewind point
+type PendingCheckpoint struct {
+	// ID is the unique identifier for this pending checkpoint
 	// (commit hash, branch name, stash ref, etc.)
 	ID string
 
@@ -54,7 +68,7 @@ type RewindPoint struct {
 	// MetadataDir is the path to the metadata directory
 	MetadataDir string
 
-	// Date is when this rewind point was created
+	// Date is when this pending checkpoint was created
 	Date time.Time
 
 	// IsTaskCheckpoint indicates if this is a task checkpoint (vs a session checkpoint)
@@ -98,24 +112,8 @@ type RewindPoint struct {
 	SessionPrompts []string
 
 	// Imported indicates this point is a read-only imported (commit-less)
-	// checkpoint on the v1 metadata branch. Imported points are not rewindable.
+	// checkpoint on the v1 metadata branch. Imported points are read-only.
 	Imported bool
-}
-
-// RewindPreview describes what will happen when rewinding to a checkpoint.
-// Used to warn users about files that will be modified or deleted.
-type RewindPreview struct {
-	// FilesToRestore are files from the checkpoint that will be written/restored.
-	FilesToRestore []string
-
-	// FilesToDelete are untracked files that will be removed.
-	// These are files created after the checkpoint that aren't in the checkpoint tree
-	// and weren't present at session start.
-	FilesToDelete []string
-
-	// TrackedChanges are tracked files with uncommitted changes that will be reverted.
-	// These come from the existing CanRewind() warning.
-	TrackedChanges []string
 }
 
 // StepContext contains all information needed for saving a step checkpoint.
@@ -196,7 +194,7 @@ type TaskStepContext struct {
 	// SubagentTranscriptPath is the path to the subagent's transcript (if available)
 	SubagentTranscriptPath string
 
-	// CheckpointUUID is the UUID for transcript truncation when rewinding
+	// CheckpointUUID is the UUID marking where this checkpoint's transcript slice starts
 	CheckpointUUID string
 
 	// AuthorName is the name to use for commits

@@ -1370,9 +1370,9 @@ func TestDisplayRestoredSessions_SingleSessionOutput(t *testing.T) {
 		CreatedAt: time.Date(2026, time.February, 2, 12, 0, 0, 0, time.UTC),
 	}
 
-	ag, err := strategy.ResolveAgentForRewind(session.Agent)
+	ag, err := strategy.ResolveAgentForResume(session.Agent)
 	if err != nil {
-		t.Fatalf("ResolveAgentForRewind() error = %v", err)
+		t.Fatalf("ResolveAgentForResume() error = %v", err)
 	}
 
 	var output bytes.Buffer
@@ -1403,9 +1403,9 @@ func TestDisplayRestoredSessions_CodexShowsResumeCommand(t *testing.T) {
 		CreatedAt: time.Date(2026, time.April, 8, 18, 46, 0, 0, time.UTC),
 	}
 
-	ag, err := strategy.ResolveAgentForRewind(session.Agent)
+	ag, err := strategy.ResolveAgentForResume(session.Agent)
 	if err != nil {
-		t.Fatalf("ResolveAgentForRewind() error = %v", err)
+		t.Fatalf("ResolveAgentForResume() error = %v", err)
 	}
 
 	var output bytes.Buffer

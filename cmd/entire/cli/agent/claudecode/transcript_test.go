@@ -86,30 +86,6 @@ not valid json
 	}
 }
 
-func TestSerializeTranscript(t *testing.T) {
-	t.Parallel()
-
-	lines := []TranscriptLine{
-		{Type: "user", UUID: "u1"},
-		{Type: "assistant", UUID: "a1"},
-	}
-
-	data, err := SerializeTranscript(lines)
-	if err != nil {
-		t.Fatalf("SerializeTranscript() error = %v", err)
-	}
-
-	// Parse back to verify round-trip
-	parsed, err := transcript.ParseFromBytes(data)
-	if err != nil {
-		t.Fatalf("ParseFromBytes(serialized) error = %v", err)
-	}
-
-	if len(parsed) != 2 {
-		t.Errorf("Round-trip got %d lines, want 2", len(parsed))
-	}
-}
-
 func TestExtractModifiedFiles(t *testing.T) {
 	t.Parallel()
 
@@ -144,86 +120,6 @@ func TestExtractModifiedFiles(t *testing.T) {
 	}
 	if !hasFile("bar.go") {
 		t.Error("ExtractModifiedFiles() missing bar.go")
-	}
-}
-
-func TestTruncateAtUUID(t *testing.T) {
-	t.Parallel()
-
-	data := []byte(`{"type":"user","uuid":"u1","message":{}}
-{"type":"assistant","uuid":"a1","message":{}}
-{"type":"user","uuid":"u2","message":{}}
-{"type":"assistant","uuid":"a2","message":{}}
-`)
-
-	lines, err := transcript.ParseFromBytes(data)
-	if err != nil {
-		t.Fatalf("ParseFromBytes() error = %v", err)
-	}
-
-	tests := []struct {
-		name     string
-		uuid     string
-		wantLen  int
-		lastUUID string
-	}{
-		{"truncate at u1", "u1", 1, "u1"},
-		{"truncate at a1", "a1", 2, "a1"},
-		{"truncate at u2", "u2", 3, "u2"},
-		{"truncate at a2", "a2", 4, "a2"},
-		{"empty uuid returns all", "", 4, "a2"},
-		{"unknown uuid returns all", "unknown", 4, "a2"},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			truncated := TruncateAtUUID(lines, tt.uuid)
-			if len(truncated) != tt.wantLen {
-				t.Errorf("TruncateAtUUID(%q) got %d lines, want %d", tt.uuid, len(truncated), tt.wantLen)
-			}
-			if len(truncated) > 0 && truncated[len(truncated)-1].UUID != tt.lastUUID {
-				t.Errorf("TruncateAtUUID(%q) last UUID = %q, want %q", tt.uuid, truncated[len(truncated)-1].UUID, tt.lastUUID)
-			}
-		})
-	}
-}
-
-func TestFindCheckpointUUID(t *testing.T) {
-	t.Parallel()
-
-	data := []byte(`{"type":"assistant","uuid":"a1","message":{"content":[{"type":"tool_use","id":"tool1"}]}}
-{"type":"user","uuid":"u1","message":{"content":[{"type":"tool_result","tool_use_id":"tool1"}]}}
-{"type":"assistant","uuid":"a2","message":{"content":[{"type":"tool_use","id":"tool2"}]}}
-{"type":"user","uuid":"u2","message":{"content":[{"type":"tool_result","tool_use_id":"tool2"}]}}
-`)
-
-	lines, err := transcript.ParseFromBytes(data)
-	if err != nil {
-		t.Fatalf("ParseFromBytes() error = %v", err)
-	}
-
-	tests := []struct {
-		toolUseID string
-		wantUUID  string
-		wantFound bool
-	}{
-		{"tool1", "u1", true},
-		{"tool2", "u2", true},
-		{"unknown", "", false},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.toolUseID, func(t *testing.T) {
-			t.Parallel()
-			uuid, found := FindCheckpointUUID(lines, tt.toolUseID)
-			if found != tt.wantFound {
-				t.Errorf("FindCheckpointUUID(%q) found = %v, want %v", tt.toolUseID, found, tt.wantFound)
-			}
-			if uuid != tt.wantUUID {
-				t.Errorf("FindCheckpointUUID(%q) uuid = %q, want %q", tt.toolUseID, uuid, tt.wantUUID)
-			}
-		})
 	}
 }
 

@@ -1,7 +1,6 @@
 package claudecode
 
 import (
-	"bytes"
 	"encoding/json"
 	"fmt"
 	"path/filepath"
@@ -22,20 +21,6 @@ type (
 	assistantMessage = transcript.AssistantMessage
 	toolInput        = transcript.ToolInput
 )
-
-// SerializeTranscript converts transcript lines back to JSONL bytes
-func SerializeTranscript(lines []TranscriptLine) ([]byte, error) {
-	var buf bytes.Buffer
-	for _, line := range lines {
-		data, err := json.Marshal(line)
-		if err != nil {
-			return nil, fmt.Errorf("failed to marshal line: %w", err)
-		}
-		buf.Write(data)
-		buf.WriteByte('\n')
-	}
-	return buf.Bytes(), nil
-}
 
 // ExtractModifiedFiles extracts files modified by tool calls from transcript
 func ExtractModifiedFiles(lines []TranscriptLine) []string {
@@ -88,55 +73,6 @@ func ExtractModifiedFiles(lines []TranscriptLine) []string {
 	}
 
 	return files
-}
-
-// TruncateAtUUID returns transcript lines up to and including the line with given UUID
-func TruncateAtUUID(lines []TranscriptLine, uuid string) []TranscriptLine {
-	if uuid == "" {
-		return lines
-	}
-
-	for i, line := range lines {
-		if line.UUID == uuid {
-			return lines[:i+1]
-		}
-	}
-
-	// UUID not found, return full transcript
-	return lines
-}
-
-// toolResultBlock represents a tool_result in a user message
-type toolResultBlock struct {
-	Type      string `json:"type"`
-	ToolUseID string `json:"tool_use_id"`
-}
-
-// userMessageWithToolResults represents a user message that may contain tool results
-type userMessageWithToolResults struct {
-	Content []toolResultBlock `json:"content"`
-}
-
-// FindCheckpointUUID finds the UUID of the message containing the tool_result
-// for the given tool_use_id
-func FindCheckpointUUID(lines []TranscriptLine, toolUseID string) (string, bool) {
-	for _, line := range lines {
-		if line.Type != "user" {
-			continue
-		}
-
-		var msg userMessageWithToolResults
-		if err := json.Unmarshal(line.Message, &msg); err != nil {
-			continue
-		}
-
-		for _, block := range msg.Content {
-			if block.Type == "tool_result" && block.ToolUseID == toolUseID {
-				return line.UUID, true
-			}
-		}
-	}
-	return "", false
 }
 
 // CalculateTokenUsage calculates token usage from a Claude Code transcript.

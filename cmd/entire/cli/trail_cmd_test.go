@@ -21,6 +21,10 @@ import (
 	"time"
 
 	"charm.land/huh/v2"
+	"github.com/go-git/go-git/v6"
+	"github.com/spf13/cobra"
+	"github.com/stretchr/testify/require"
+
 	"github.com/entireio/cli/cmd/entire/cli/api"
 	"github.com/entireio/cli/cmd/entire/cli/auth"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
@@ -29,9 +33,6 @@ import (
 	"github.com/entireio/cli/internal/entireclient/clusterdiscovery"
 	"github.com/entireio/cli/internal/entireclient/contexts"
 	"github.com/entireio/cli/internal/entireclient/tokenstore"
-	"github.com/go-git/go-git/v6"
-	"github.com/spf13/cobra"
-	"github.com/stretchr/testify/require"
 )
 
 const (
@@ -866,12 +867,7 @@ func TestDeleteTrailByNumber(t *testing.T) {
 func TestResolveTrailRemote_RejectsUnsupportedForge(t *testing.T) {
 	repoDir := t.TempDir()
 	testutil.InitRepo(t, repoDir)
-	cmd := exec.CommandContext(context.Background(), "git", "remote", "add", "origin", "git@gitlab.com:acme/my-app.git")
-	cmd.Dir = repoDir
-	cmd.Env = testutil.GitIsolatedEnv()
-	if err := cmd.Run(); err != nil {
-		t.Fatalf("git remote add: %v", err)
-	}
+	testutil.RunGit(t, repoDir, "remote", "add", "origin", "git@gitlab.com:acme/my-app.git")
 	t.Chdir(repoDir)
 
 	_, _, _, err := resolveTrailRemote(context.Background())
@@ -901,12 +897,7 @@ func TestTrailEnablementCache_ReadsClonePreference(t *testing.T) {
 
 	repoDir := t.TempDir()
 	testutil.InitRepo(t, repoDir)
-	cmd := exec.CommandContext(context.Background(), "git", "remote", "add", "origin", "git@github.com:acme/repo.git")
-	cmd.Dir = repoDir
-	cmd.Env = testutil.GitIsolatedEnv()
-	if err := cmd.Run(); err != nil {
-		t.Fatalf("git remote add: %v", err)
-	}
+	testutil.RunGit(t, repoDir, "remote", "add", "origin", "git@github.com:acme/repo.git")
 	t.Chdir(repoDir)
 	ctx := context.Background()
 

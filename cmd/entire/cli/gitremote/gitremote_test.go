@@ -2,7 +2,6 @@ package gitremote
 
 import (
 	"context"
-	"os/exec"
 	"testing"
 
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
@@ -233,10 +232,7 @@ func TestResolveRemoteRepo(t *testing.T) {
 			repoDir := t.TempDir()
 			testutil.InitRepo(t, repoDir)
 
-			cmd := exec.CommandContext(ctx, "git", "remote", "add", "origin", tt.originURL)
-			cmd.Dir = repoDir
-			cmd.Env = testutil.GitIsolatedEnv()
-			require.NoError(t, cmd.Run())
+			testutil.RunGit(t, repoDir, "remote", "add", "origin", tt.originURL)
 
 			t.Chdir(repoDir)
 

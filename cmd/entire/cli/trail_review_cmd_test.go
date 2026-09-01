@@ -79,12 +79,7 @@ func TestTrailCommandRejectsRemovedReviewCommand(t *testing.T) {
 func TestResolveTrailReviewTargetRejectsUnsupportedForge(t *testing.T) {
 	repoDir := t.TempDir()
 	testutil.InitRepo(t, repoDir)
-	cmd := exec.CommandContext(context.Background(), "git", "remote", "add", "origin", "git@gitlab.com:acme/my-app.git")
-	cmd.Dir = repoDir
-	cmd.Env = testutil.GitIsolatedEnv()
-	if err := cmd.Run(); err != nil {
-		t.Fatalf("git remote add: %v", err)
-	}
+	testutil.RunGit(t, repoDir, "remote", "add", "origin", "git@gitlab.com:acme/my-app.git")
 	t.Chdir(repoDir)
 
 	_, err := resolveTrailReviewTarget(context.Background(), api.NewClient("tok"), "", "", "")

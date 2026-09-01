@@ -2,7 +2,6 @@ package cli
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -11,7 +10,6 @@ import (
 
 	agentpkg "github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
-	"github.com/entireio/cli/cmd/entire/cli/transcript"
 	"github.com/entireio/cli/cmd/entire/cli/validation"
 )
 
@@ -126,39 +124,4 @@ func ResolveAgentTranscriptPath(transcriptDir, sessionID, agentID string) string
 		return legacy
 	}
 	return ""
-}
-
-// toolResultBlock represents a tool_result in a user message
-type toolResultBlock struct {
-	Type      string `json:"type"`
-	ToolUseID string `json:"tool_use_id"`
-}
-
-// userMessageWithToolResults represents a user message that may contain tool results
-type userMessageWithToolResults struct {
-	Content []toolResultBlock `json:"content"`
-}
-
-// FindCheckpointUUID finds the UUID of the message containing the tool_result
-// for the given tool_use_id. This is used to find the checkpoint point for
-// transcript truncation when rewinding to a task.
-// Returns the UUID and true if found, empty string and false otherwise.
-func FindCheckpointUUID(lines []transcriptLine, toolUseID string) (string, bool) {
-	for _, line := range lines {
-		if line.Type != transcript.TypeUser {
-			continue
-		}
-
-		var msg userMessageWithToolResults
-		if err := json.Unmarshal(line.Message, &msg); err != nil {
-			continue
-		}
-
-		for _, block := range msg.Content {
-			if block.Type == "tool_result" && block.ToolUseID == toolUseID {
-				return line.UUID, true
-			}
-		}
-	}
-	return "", false
 }

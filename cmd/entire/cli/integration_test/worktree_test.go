@@ -4,13 +4,13 @@ package integration
 
 import (
 	"context"
-	"os/exec"
 	"path/filepath"
 	"testing"
 
+	"github.com/go-git/go-git/v6/plumbing"
+
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
-	"github.com/go-git/go-git/v6/plumbing"
 )
 
 // TestWorktreeOpenRepository verifies that OpenRepository() works correctly
@@ -30,12 +30,7 @@ func TestWorktreeOpenRepository(t *testing.T) {
 		worktreeDir = filepath.Join(resolved, "worktree")
 	}
 
-	cmd := exec.CommandContext(t.Context(), "git", "worktree", "add", worktreeDir, "-b", "test-branch")
-	cmd.Dir = env.RepoDir
-	cmd.Env = testutil.GitIsolatedEnv()
-	if output, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("failed to create worktree: %v\nOutput: %s", err, output)
-	}
+	testutil.RunGit(t, env.RepoDir, "worktree", "add", worktreeDir, "-b", "test-branch")
 
 	t.Chdir(worktreeDir)
 

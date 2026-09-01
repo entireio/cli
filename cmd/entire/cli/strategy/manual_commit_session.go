@@ -537,13 +537,13 @@ func (s *ManualCommitStrategy) findSessionsForCommit(ctx context.Context, baseCo
 }
 
 // FindSessionsForCommit is the exported version of findSessionsForCommit.
-// Used by the rewind reset command to find sessions to clean up.
+// Used by `entire clean` to find sessions to clean up.
 func (s *ManualCommitStrategy) FindSessionsForCommit(ctx context.Context, baseCommitSHA string) ([]*SessionState, error) {
 	return s.findSessionsForCommit(ctx, baseCommitSHA)
 }
 
 // ClearSessionState is the exported version of clearSessionState.
-// Used by the rewind reset command to clean up session state files.
+// Used by `entire doctor` to clean up session state files.
 func (s *ManualCommitStrategy) ClearSessionState(ctx context.Context, sessionID string) error {
 	return s.clearSessionState(ctx, sessionID)
 }
@@ -614,7 +614,8 @@ func (s *ManualCommitStrategy) initializeSession(ctx context.Context, repo *git.
 		return fmt.Errorf("failed to get worktree ID: %w", err)
 	}
 
-	// Capture untracked files at session start to preserve them during rewind
+	// Capture untracked files at session start so checkpoint bookkeeping can tell
+	// them apart from files the session created
 	untrackedFiles, err := collectUntrackedFiles(ctx)
 	if err != nil {
 		// Non-fatal: continue even if we can't collect untracked files

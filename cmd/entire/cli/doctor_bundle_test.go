@@ -5,7 +5,6 @@ import (
 	"context"
 	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -181,12 +180,7 @@ func readZipEntry(t *testing.T, zipPath, name string) string {
 func runDoctorBundleGit(t *testing.T, dir string, args ...string) {
 	t.Helper()
 
-	cmd := exec.Command("git", args...) //nolint:noctx // test helper, no context needed
-	cmd.Dir = dir
-	cmd.Env = testutil.GitIsolatedEnv()
-	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("git %v: %v\n%s", args, err, out)
-	}
+	testutil.RunGit(t, dir, args...)
 }
 
 func TestWriteDoctorBundle_RedactsLogContents(t *testing.T) {

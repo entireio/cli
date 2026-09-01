@@ -2,12 +2,12 @@ package codex
 
 import (
 	"os"
-	"os/exec"
 	"path/filepath"
 	"testing"
 
-	"github.com/entireio/cli/cmd/entire/cli/testutil"
 	"github.com/stretchr/testify/require"
+
+	"github.com/entireio/cli/cmd/entire/cli/testutil"
 )
 
 func TestResolveHookDiscovery_NormalCheckout(t *testing.T) {
@@ -199,11 +199,7 @@ func runGit(t *testing.T, repoRoot string, args ...string) {
 
 func runGitWithDir(t *testing.T, commandDir string, args ...string) {
 	t.Helper()
-	cmd := exec.CommandContext(t.Context(), "git", args...)
-	cmd.Dir = commandDir
-	cmd.Env = testutil.GitIsolatedEnv()
-	output, err := cmd.CombinedOutput()
-	require.NoError(t, err, "%s", output)
+	testutil.RunGit(t, commandDir, args...)
 }
 
 func canonicalHooksPath(t *testing.T, root string) string {

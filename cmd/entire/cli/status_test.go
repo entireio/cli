@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime"
 	"slices"
@@ -14,6 +13,7 @@ import (
 	"time"
 
 	"charm.land/lipgloss/v2"
+
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/codex"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
@@ -1888,12 +1888,7 @@ func TestRunStatusJSON_CodexLinkedWorktreeHooksReportInactiveDiscovery(t *testin
 		t.Fatalf("WorktreeRoot() error = %v", err)
 	}
 	linkedRoot := filepath.Join(t.TempDir(), "linked")
-	cmd := exec.CommandContext(t.Context(), "git", "worktree", "add", "-b", "codex-linked-status", linkedRoot)
-	cmd.Dir = repoRoot
-	cmd.Env = testutil.GitIsolatedEnv()
-	if output, cmdErr := cmd.CombinedOutput(); cmdErr != nil {
-		t.Fatalf("git worktree add: %v: %s", cmdErr, output)
-	}
+	testutil.RunGit(t, repoRoot, "worktree", "add", "-b", "codex-linked-status", linkedRoot)
 	t.Chdir(linkedRoot)
 	writeSettings(t, testSettingsEnabled)
 	if err := os.MkdirAll(".codex", 0o755); err != nil {
