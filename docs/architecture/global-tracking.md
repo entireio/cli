@@ -20,15 +20,20 @@ into. It has four top-level blocks, split by what a mistake in them costs:
 | Block | Owner | Contents | On a bad key |
 | --- | --- | --- | --- |
 | `global` | `repopolicy` | activation, exclusions, egress consent | whole file fails → tier off machine-wide |
-| `redaction` | `repopolicy` | how OPF runs here: `command`, `timeout_seconds`, `prompt_default` | whole file fails → tier off machine-wide |
+| `redaction` | `repopolicy` | how OPF runs here: `command`, `timeout_seconds`, `prompt_default` | block dropped (bytes preserved), nothing from it honored; status/doctor report it |
 | `preferences` | `settings` | machine-wide developer defaults (allowlist below) | that block dropped, warning, `entire doctor` |
 | `repos` | `settings` | `preferences`-shaped overrides per repository | that entry dropped, warning |
 
-The two `repopolicy` blocks are **strict** because an older binary must never
-misread recorded consent or an executable name: an unknown key inside one, or
-malformed JSON, turns the tier off machine-wide (fail closed) and `entire
-doctor` says so. The two `settings` blocks are strict on their allowlist but
-fail *alone* — a review preference must never switch tracking off. Unknown
+Every known block is **strict** — an unknown key inside one is an error, never
+merged — but what the error costs differs. Only `global` is file-fatal:
+malformed JSON, or an unknown key inside `global`, turns the tier off
+machine-wide (fail closed; consent must never be guessed at) and `entire
+doctor` says so. A bad `redaction` block is dropped alone: dropping it is
+already fail-closed for exec — no command is honored from a block that did not
+decode, OPF falls back to `opf` on `$PATH` — so a personal OPF typo cannot
+switch tracking off; the block's bytes stay in the file for the user to fix.
+The two `settings` blocks likewise fail *alone* — a review preference must
+never switch tracking off. Unknown
 **top-level** blocks are ignored and preserved across writes, so a newer
 `entire` on the same machine can add a block without switching the tier off
 for older binaries. New features add top-level blocks, not keys inside

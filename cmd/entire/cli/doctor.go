@@ -809,9 +809,15 @@ func checkGlobalTracking(cmd *cobra.Command) {
 		fmt.Fprintf(w, "  %s cannot be read or parsed: %v\n", settings.UserSettingsPath(), err)
 		fmt.Fprintln(w, "  Global tracking is silently off machine-wide (fail closed), and hook debug logs")
 		fmt.Fprintln(w, "  cannot report it: hook logging starts only after this file has gated the hook off.")
-		fmt.Fprintln(w, "  The error above names the block and key. Fix the JSON by hand (a typo inside `global` or `redaction`,")
-		fmt.Fprintln(w, "  or an `enabled`/`categories` key that belongs in .entire/settings.json) or remove the file.")
+		fmt.Fprintln(w, "  The error above names the block and key. Fix the JSON by hand (a typo inside `global`,")
+		fmt.Fprintln(w, "  or malformed JSON) or remove the file.")
 		return
+	}
+	if reason := us.RedactionError(); reason != "" {
+		fmt.Fprintln(w, "User settings: REDACTION BLOCK IGNORED")
+		fmt.Fprintf(w, "  %s: the `redaction` block did not decode (%s).\n", settings.UserSettingsPath(), reason)
+		fmt.Fprintln(w, "  Nothing from it is honored — the OPF command falls back to \"opf\" on $PATH — but the")
+		fmt.Fprintln(w, "  block's content is preserved in the file. Fix that block; tracking is unaffected.")
 	}
 	if !us.GlobalEnabled() {
 		return

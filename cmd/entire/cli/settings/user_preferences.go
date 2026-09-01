@@ -34,6 +34,8 @@ import (
 const (
 	userPreferencesBlock = "preferences"
 	userReposBlock       = "repos"
+	// userSettingsRedactionBlock mirrors repopolicy's key for reporting only.
+	userSettingsRedactionBlock = "redaction"
 )
 
 // UserPreferences is the allowlist of settings a developer may set for
@@ -78,6 +80,12 @@ func loadUserOverlay(ctx context.Context) userOverlay {
 		return overlay
 	}
 	overlay.opf = us.OPFConfig()
+	if reason := us.RedactionError(); reason != "" {
+		// The block was dropped by the decoder (fail-closed for exec: no
+		// command is honored from it); report it beside the preference
+		// rejections so status and the hook warning surface it.
+		overlay.reject(ctx, fmt.Sprintf("%s: %s", userSettingsRedactionBlock, reason))
+	}
 	if raw, ok := us.Block(userPreferencesBlock); ok {
 		prefs, err := decodeUserPreferences(raw)
 		if err != nil {

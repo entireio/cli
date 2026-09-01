@@ -280,12 +280,18 @@ func ValidateOPFRunSettings(timeoutSeconds int, promptDefault string) error {
 type UserSettings struct {
 	Global    *GlobalConfig        `json:"global,omitempty"`
 	Redaction *UserRedactionConfig `json:"redaction,omitempty"`
-	// extra holds every top-level block this leaf does not decode: the
+	// extra holds every top-level block this binary is not applying: the
 	// preference blocks the settings package owns (`preferences`, `repos` —
-	// their types live there; read them with Block) and any block a newer
-	// binary wrote. All are preserved across read-modify-write so a newer
-	// binary's settings survive an older one's `entire trust`.
+	// their types live there; read them with Block), any block a newer
+	// binary wrote, and a non-fatal known block that failed to decode. All
+	// are preserved across read-modify-write so a newer binary's settings —
+	// or the user's own malformed block, awaiting their fix — survive an
+	// older binary's `entire trust`.
 	extra map[string]json.RawMessage
+
+	// blockErrs records why a non-fatal known block was dropped (key →
+	// reason); see RedactionError.
+	blockErrs map[string]string
 }
 
 // Block returns a top-level block this leaf does not decode, as raw JSON.
