@@ -21,6 +21,7 @@ func TestLoad_MissingFileReturnsEmpty(t *testing.T) {
 	}
 	if f == nil {
 		t.Fatal("Load returned nil File")
+		return
 	}
 	if f.CurrentContext != "" || len(f.Contexts) != 0 {
 		t.Errorf("expected zero-valued File, got %+v", f)
