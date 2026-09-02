@@ -522,7 +522,10 @@ still.
      from its mid-turn `post_tool_use` hooks, so post-commit condensation
      minted a second top-level session anyway.
      `saveSubagentSessionTaskStep` now clears the child's pending files once
-     the task record is saved.
+     the task record is saved. **Confirmed end-to-end 2026-09-02**: with the
+     fix, `TestSubagentCommitFlow` produced a checkpoint with exactly one
+     session plus `tasks/<childSessionID>/task.json` — the double-count is
+     gone.
    - **`task.json` carried `transcript unavailable: unreadable` — harness
      artifact, not a product bug.** The E2E runner creates a per-prompt
      `GROK_HOME` and deletes it when the headless invocation returns (same
@@ -623,8 +626,23 @@ Two passes on the personal free tier, both cut short by quota.
   before quota ran out again (18 quota failures, 4 rate-limit at
   21 req/min / 2 req/sec).
 
-Net: **35 of 56 scenarios verified**, no failure attributable to this
-package. `TestSubagentCommitFlow` passes but surfaced the subagent
+- **2026-09-02** window: `TestSubagentCommitFlow` re-passed on the
+  double-count fix (one session + task record in the checkpoint — see Gaps),
+  and `TestAgentAmendsCommit`,
+  `TestInteractiveShadowBranchCleanedAfterAgentCommit`,
+  `TestMidTurnCommit_DifferentFilesThanPreviousTurn` passed before quota ran
+  out (14 quota, 3 rate-limit).
+
+Net: **38 of 56 scenarios verified**, no failure attributable to this
+package. Still unrun (all quota-blocked, none has ever failed on its own
+merits): CheckpointMetadataDeepValidation, MultiSessionSequential,
+SingleSessionSubagentCommitInTurn, AttributionMixedHumanAndAgent,
+CleanCurrentHead, DeletedFilesCommitDeletion, DirtyWorkingTree,
+LineAttributionReasonable, MixedNewAndModifiedFiles,
+ModifiedFileAlwaysGetsCheckpoint, ModifyExistingTrackedFile,
+RapidSequentialCommits, ResumeFromClonedRepo, ResumeFromFeatureBranch,
+ResumeMetadataBranchAlreadyLocal, ResumeOlderCheckpointWithNewerCommits,
+ResumeSquashMergeMultipleCheckpoints. `TestSubagentCommitFlow` passes but surfaced the subagent
 double-count described under Gaps (the test does not assert session count).
 Completing the suite needs SuperGrok, a billed `XAI_API_KEY`, or an xAI team
 plan; the free tier also rate-limits at 21 requests/minute, which the
