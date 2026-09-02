@@ -2354,23 +2354,65 @@ func promptTelemetryConsent(settings *EntireSettings, telemetryFlag bool) error 
 	return nil
 }
 
+// worktreeFileName reports the name to read a working-tree file by, and whether
+// it is there at all, following a symlink whose target stays inside the worktree
+// and refusing one that leaves it.
+//
+// The two-step exists because os.Root refuses an ABSOLUTE symlink target
+// unconditionally — including one resolving inside the root — with an error that
+// is not os.ErrNotExist. A repo pointing vercel.json at a monorepo's shared
+// config with an absolute link would therefore be reported as unreadable and
+// skipped, dropping the feature for a setup that worked before the anchor went
+// in. Resolving and re-checking containment is what actually delivers "follow a
+// link that stays inside, refuse one that leaves"; the retried read still goes
+// through the root at a worktree-relative name.
+//
+// Only for files that are the USER's. Entire's own trees refuse a link either
+// way and must keep using the root directly.
+func worktreeFileName(worktreeRoot string, root *os.Root, name string) (string, bool, error) {
+	_, err := root.Stat(name)
+	switch {
+	case err == nil:
+		return name, true, nil
+	case os.IsNotExist(err):
+		return "", false, nil
+	}
+
+	resolved, resolveErr := worktreedir.NameFollowingLinks(worktreeRoot, name)
+	if resolveErr != nil {
+		if errors.Is(resolveErr, os.ErrNotExist) {
+			// A dangling link reads as absent, which is what os.Stat gave before.
+			return "", false, nil
+		}
+		// The original error names the refusal; the resolve failure only says
+		// the fallback did not apply.
+		return "", false, fmt.Errorf("check %s: %w", name, err)
+	}
+	if _, err := root.Stat(resolved); err != nil {
+		if os.IsNotExist(err) {
+			return "", false, nil
+		}
+		return "", false, fmt.Errorf("check %s: %w", resolved, err)
+	}
+	return resolved, true, nil
+}
+
 func maybePromptVercelDeploymentDisable(ctx context.Context, w io.Writer, targetFile string, promptFn func() (bool, error)) (bool, error) {
 	repoRoot, rootErr := paths.WorktreeRoot(ctx)
 	if rootErr == nil {
 		// Through the worktree's root: these are working-tree files, so they
 		// arrive by clone, and a joined path handed to os.Stat/os.ReadFile
 		// resolves wherever a checked-in symlink points. In-repo links are
-		// still followed, which is what a monorepo's shared vercel.json needs.
+		// still followed, which is what a monorepo's shared vercel.json needs —
+		// see worktreeFileName for why the root alone does not give that.
 		worktree, err := worktreedir.OpenAt(repoRoot)
 		if err != nil {
 			fmt.Fprintf(w, "Note: Skipping Vercel deployment update: could not open the worktree: %v\n", err)
 			return false, nil
 		}
 
-		hasVercelJSON := false
-		if _, err := worktree.Stat(vercelconfig.FileName); err == nil {
-			hasVercelJSON = true
-		} else if !os.IsNotExist(err) {
+		vercelJSONName, hasVercelJSON, err := worktreeFileName(repoRoot, worktree, vercelconfig.FileName)
+		if err != nil {
 			fmt.Fprintf(w, "Note: Skipping Vercel deployment update: could not check %s: %v\n", vercelconfig.FileName, err)
 			return false, nil
 		}
@@ -2378,12 +2420,14 @@ func maybePromptVercelDeploymentDisable(ctx context.Context, w io.Writer, target
 		hasVercelProject := hasVercelJSON
 		if !hasVercelProject {
 			for _, name := range []string{".vercel", "vercel.ts"} {
-				if _, err := worktree.Stat(name); err == nil {
+				_, found, statErr := worktreeFileName(repoRoot, worktree, name)
+				if statErr != nil {
+					fmt.Fprintf(w, "Note: Skipping Vercel deployment update: could not check %s: %v\n", name, statErr)
+					return false, nil
+				}
+				if found {
 					hasVercelProject = true
 					break
-				} else if !os.IsNotExist(err) {
-					fmt.Fprintf(w, "Note: Skipping Vercel deployment update: could not check %s: %v\n", name, err)
-					return false, nil
 				}
 			}
 		}
@@ -2406,7 +2450,10 @@ func maybePromptVercelDeploymentDisable(ctx context.Context, w io.Writer, target
 			return false, nil
 		}
 
-		if config, alreadyDisabled, loadErr := vercelconfig.LoadIn(worktree, vercelconfig.FileName); loadErr == nil &&
+		if vercelJSONName == "" {
+			vercelJSONName = vercelconfig.FileName
+		}
+		if config, alreadyDisabled, loadErr := vercelconfig.LoadIn(worktree, vercelJSONName); loadErr == nil &&
 			config != nil && alreadyDisabled {
 			targetSettings.Vercel = true
 			if err := saveSettingsToTarget(ctx, targetSettings, targetFile); err != nil {

@@ -1,8 +1,10 @@
 package vercelconfig
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -107,4 +109,56 @@ func TestLoadIn(t *testing.T) {
 			t.Errorf("LoadIn followed a link out of the worktree: %v", got)
 		}
 	})
+}
+
+// TestLoadIn_AbsoluteInRepoSymlink documents what a root alone cannot do, which
+// is why the caller resolves the name first. os.Root refuses an absolute
+// symlink target unconditionally — even one landing inside the root — so
+// pointing vercel.json at a monorepo's shared config with an absolute link
+// reaches LoadIn as an error that is NOT os.ErrNotExist.
+func TestLoadIn_AbsoluteInRepoSymlink(t *testing.T) {
+	t.Parallel()
+
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink creation needs elevation on Windows")
+	}
+
+	dir := t.TempDir()
+	shared := filepath.Join(dir, "shared")
+	if err := os.MkdirAll(shared, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(shared, FileName)
+	if err := os.WriteFile(target, []byte(`{"git":{"deploymentEnabled":{"entire/**":false}}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// Absolute, and resolving inside the worktree.
+	if err := os.Symlink(target, filepath.Join(dir, FileName)); err != nil {
+		t.Fatal(err)
+	}
+
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+
+	// The raw name is refused, and not as "absent" — which is what made this
+	// silently drop the feature rather than fall through.
+	_, _, err = LoadIn(root, FileName)
+	if err == nil {
+		t.Fatalf("LoadIn(%q) succeeded; os.Root is expected to refuse an absolute link", FileName)
+	}
+	if errors.Is(err, os.ErrNotExist) {
+		t.Errorf("LoadIn error = %v, want something other than os.ErrNotExist", err)
+	}
+
+	// The resolved name is what the caller passes, and it reads.
+	config, disabled, err := LoadIn(root, "shared/"+FileName)
+	if err != nil {
+		t.Fatalf("LoadIn(resolved) error = %v", err)
+	}
+	if config == nil || !disabled {
+		t.Errorf("LoadIn(resolved) = %v, disabled=%v; want the shared config read", config, disabled)
+	}
 }
