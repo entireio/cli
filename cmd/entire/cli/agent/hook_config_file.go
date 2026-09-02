@@ -5,6 +5,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"slices"
 
 	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
 	"github.com/entireio/cli/cmd/entire/cli/osroot"
@@ -128,7 +129,7 @@ func (f *HookConfigFile) Exists() bool {
 func (f *HookConfigFile) Write(data []byte, perm os.FileMode) error {
 	if dir := path.Dir(f.name); dir != "." {
 		if err := osroot.MkdirAllNoSymlink(f.root, dir, 0o750); err != nil {
-			return fmt.Errorf("create %s: %w", path.Dir(f.path), err)
+			return fmt.Errorf("create %s: %w", filepath.Dir(f.path), err)
 		}
 	}
 	if info, err := osroot.LstatNoSymlinks(f.root, f.name); err == nil && info.Mode()&os.ModeSymlink != 0 {
@@ -164,12 +165,25 @@ func (f *HookConfigFile) Remove() error {
 // correct uninstall and taking the parent would delete the user's own config
 // with it.
 //
-// Refuses to act when the file sits directly at the worktree root, which would
-// make the directory to delete the repository.
+// Two refusals, because "every other agent must not call this" was a comment
+// and nothing else. A file directly at the worktree root would make the
+// directory to delete the repository; a file one level down makes it the
+// agent's own top-level directory, so `.claude/settings.json` would take
+// `.claude` — the user's hand-written settings, subagents and skills with it.
+// The second is the one a copy-paste during the next agent integration reaches,
+// which is the same argument the HookConfigLocator build guard makes: a
+// precondition this load-bearing belongs in the code, not in the doc comment
+// above it.
 func (f *HookConfigFile) RemoveDir() error {
 	dir := path.Dir(f.name)
 	if dir == "." {
 		return fmt.Errorf("remove %s: refusing to remove the worktree root", filepath.Dir(f.path))
+	}
+	// Compared slash-to-slash: ProtectedDirs entries are repo-relative git-style
+	// paths, and dir came from path.Dir of one.
+	if slices.Contains(AllProtectedDirs(), dir) {
+		return fmt.Errorf("remove %s: refusing to remove an agent's own directory; "+
+			"RemoveDir is for a directory Entire created to hold one generated file", filepath.Dir(f.path))
 	}
 	if err := osroot.RemoveAllNoSymlinks(f.root, dir); err != nil {
 		return fmt.Errorf("remove %s: %w", filepath.Dir(f.path), err)
@@ -188,8 +202,11 @@ func (f *HookConfigFile) RemoveDir() error {
 // Root.Open, which is what Read does for them.
 func (f *HookConfigFile) Root() (*os.Root, string) { return f.root, f.name }
 
-// GeneratedState is GeneratedHookFileState for a file read through this root.
-// See that function for what marker and render mean.
+// GeneratedState reports whether a generated hook file is absent, current or
+// outdated, for the agents whose whole integration is one file Entire writes
+// (Pi, OpenCode). marker is the Entire-managed sentinel that identifies the file
+// as ours rather than the user's; render is what the current template would
+// write, compared against the file's contents to tell current from outdated.
 func (f *HookConfigFile) GeneratedState(marker, render string) HookConfigState {
 	data, err := f.Read()
 	if err != nil {

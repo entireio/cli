@@ -103,7 +103,14 @@ func (a *PiAgent) InstallHooks(ctx context.Context, force bool) (int, error) {
 		}
 	}
 
-	// Write creates .pi/extensions/entire with MkdirAllNoSymlink. 0644 because
+	// Write creates .pi/extensions/entire with MkdirAllNoSymlink, at the 0750 it
+	// uses for every agent's config directory. That is a change from the 0755
+	// this call site used to pass with a note saying pi reads the directory —
+	// deliberately dropped rather than preserved, because the eight other
+	// agents have been on 0750 all along and pi is not structurally different:
+	// pi runs as the user who ran `entire enable`. A setup where those differ
+	// (enable as root, agent as another uid) breaks all nine equally and is not
+	// pi's to solve here. 0644 because
 	// pi reads the extension itself.
 	if err := cfg.Write([]byte(content), 0o644); err != nil {
 		return 0, err //nolint:wrapcheck // agent.HookConfigFile already names the file in its error
