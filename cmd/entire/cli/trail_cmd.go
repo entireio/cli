@@ -2417,15 +2417,26 @@ func fetchBranchFromRemote(ctx context.Context, remote, branchName string) error
 	return nil
 }
 
-// trailBranchPushTimeout bounds the trail branch delivery. It covers the
-// pre-push hook as well as the network push, which is why it is not the two
-// minutes a bare push wants: Entire's hook can run the OpenAI Privacy Filter
-// over every unpushed checkpoint — advertised at ~30s in the steady state, and
-// bounded only by history the first time a repo enables it, since the bootstrap
-// walks everything unpushed — and it may also wait on the OPF prompt. At two
-// minutes exec would SIGKILL git part-way through that, mid-rewrite. The bound
-// still exists because trail create is a multi-step command, and a wedged push
-// must not hang it forever.
+// trailBranchPushTimeout bounds the trail branch delivery, which now covers the
+// pre-push hook as well as the network push.
+//
+// The hook's compute cost is smaller than it looks: OPF makes exactly one
+// shell-out per push (see manual_commit_opf_rewrite.go and
+// manual_commit_opf_refs.go), bounded by
+// redaction.openai_privacy_filter.timeout_seconds — 30s by default — and an
+// oversized first run is rejected outright by BootstrapTooLargeError or
+// OPFRawBytesTooLargeError rather than allowed to run long. What is genuinely
+// unbounded is the OPF prompt, which waits on a person. Ten minutes is sized to
+// leave room for someone to answer it, not to cover a slow scan; two minutes
+// was not enough for either.
+//
+// Known limitation: timeout_seconds is validated only as >= 0, so a value
+// configured above this bound is truncated and git is killed mid-rewrite.
+// Deriving the bound from that setting is the fix if anyone hits it.
+//
+// A bound exists at all only because trail create is a multi-step command and a
+// wedged push must not hang it forever. A plain `git push` has none — the hook
+// runs undeadlined — so this ceiling is Entire's, not git's.
 const trailBranchPushTimeout = 10 * time.Minute
 
 // pushBranchToRemote pushes a branch to remote, which callers resolve through
@@ -2451,12 +2462,17 @@ const trailBranchPushTimeout = 10 * time.Minute
 //     therefore rendered into the buffer while reading real keystrokes: a push
 //     that blocks on a prompt the user cannot see.
 //
+// Both fixes rest on the writers arriving here being real *os.File values:
+// os/exec hands an *os.File's descriptor straight to the child, so the hook
+// inherits the terminal, whereas any other io.Writer gets an os.Pipe and the
+// child's stdout stops being a tty. Today they are — cobra's OutOrStdout and
+// ErrOrStderr fall through to os.Stdout/os.Stderr, and nothing on the path to
+// trail create calls SetOut/SetErr — so a pager or output tee added to the root
+// command would silently undo this.
+//
 // stdin is inherited so git can prompt for credentials as on a push the user
 // typed. It does not reach the hook, which git hands a pipe carrying the ref
 // list — that is why the prompt's input path goes through /dev/tty above.
-//
-// git prints its own diagnostics to the stderr now reaching the user, so the
-// returned error carries the exit status alone rather than a second copy.
 func pushBranchToRemote(ctx context.Context, out, errOut io.Writer, remote, branchName string) error {
 	ctx, cancel := context.WithTimeout(ctx, trailBranchPushTimeout)
 	defer cancel()

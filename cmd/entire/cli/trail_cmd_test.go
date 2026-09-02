@@ -2785,10 +2785,10 @@ func TestPrepareTrailCreateBranchRunsPrePushHook(t *testing.T) {
 	defer repo.Close()
 	t.Chdir(localDir)
 
-	writeTrailCreatePrePushHook(t, localDir,
-		"#!/bin/sh\n"+
-			"printf '%s\\n' \"$1\" > \"$(git rev-parse --git-dir)/trail-create-pre-push-ran\"\n"+
-			"echo 'hook-said-this' >&2\n")
+	writeTrailCreatePrePushHook(t, localDir, `#!/bin/sh
+printf '%s\n' "$1" > "$(git rev-parse --git-dir)/trail-create-pre-push-ran"
+echo 'hook-said-this' >&2
+`)
 
 	const branch = "feature/checkpoint-sync"
 	var out, errOut bytes.Buffer
@@ -2814,7 +2814,10 @@ func TestPrepareTrailCreateBranchFailsWhenPrePushHookRejects(t *testing.T) {
 	defer repo.Close()
 	t.Chdir(localDir)
 
-	writeTrailCreatePrePushHook(t, localDir, "#!/bin/sh\necho 'refusing this push' >&2\nexit 1\n")
+	writeTrailCreatePrePushHook(t, localDir, `#!/bin/sh
+echo 'refusing this push' >&2
+exit 1
+`)
 
 	const branch = "feature/hook-rejects"
 	var out, errOut bytes.Buffer
