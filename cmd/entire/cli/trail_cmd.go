@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"os"
 	"os/exec"
 	"reflect"
 	"strconv"
@@ -1123,9 +1124,14 @@ func prepareTrailCreateBranch(ctx context.Context, w, errW io.Writer, repo *git.
 	// For branch-backed trails, always push the branch first: the trail binds to a
 	// remote branch, so deliver it before creating the trail rather than letting
 	// the server backfill it at the base tip. Branchless trails skip this entirely.
-	if err := pushBranchToRemote(ctx, remote, branch); err != nil {
+	if err := pushBranchToRemote(ctx, w, errW, remote, branch); err != nil {
 		cleanupCreatedTrailBranch(ctx, repo, remote, branch, state.LocalCreated, false, errW)
-		return state, fmt.Errorf("failed to push branch %q to %q: %w\nhint: the trail was not created because its branch could not be delivered to the remote.\n  - if this is an auth error, link your GitHub account and retry\n  - if this is a non-fast-forward, update branch %q from %q and retry", branch, remote, err, branch, remote)
+		// The push runs pre-push hooks, so a failure here is no longer only a
+		// delivery problem: Entire's hook can decline the push, and so can any
+		// hook the repo installed for its own reasons. The hook's own reason has
+		// already streamed to errW, so the hint names that cause and points at
+		// it rather than reprinting it.
+		return state, fmt.Errorf("failed to push branch %q to %q: %w\nhint: the trail was not created because its branch could not be delivered to the remote.\n  - if a pre-push hook rejected the push, see its output above and retry once it passes\n  - if this is an auth error, link your GitHub account and retry\n  - if this is a non-fast-forward, update branch %q from %q and retry", branch, remote, err, branch, remote)
 	}
 	state.RemotePushed = !existedOnRemote
 	fmt.Fprintf(w, "Pushed branch %s to %s\n", branch, remote)
@@ -2411,16 +2417,57 @@ func fetchBranchFromRemote(ctx context.Context, remote, branchName string) error
 	return nil
 }
 
+// trailBranchPushTimeout bounds the trail branch delivery. It covers the
+// pre-push hook as well as the network push, which is why it is not the two
+// minutes a bare push wants: Entire's hook can run the OpenAI Privacy Filter
+// over every unpushed checkpoint — advertised at ~30s in the steady state, and
+// bounded only by history the first time a repo enables it, since the bootstrap
+// walks everything unpushed — and it may also wait on the OPF prompt. At two
+// minutes exec would SIGKILL git part-way through that, mid-rewrite. The bound
+// still exists because trail create is a multi-step command, and a wedged push
+// must not hang it forever.
+const trailBranchPushTimeout = 10 * time.Minute
+
 // pushBranchToRemote pushes a branch to remote, which callers resolve through
 // resolveTrailPushRemote rather than assuming "origin". This must run Git's
 // pre-push hooks: Entire's hook publishes any checkpoint data that was captured
 // before the trail branch was created.
-func pushBranchToRemote(ctx context.Context, remote, branchName string) error {
-	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+//
+// Because the hook runs, this has to be a real push rather than an internal
+// subprocess whose output nobody reads, so stdout and stderr stream to the
+// caller's writers instead of into a CombinedOutput() buffer read only on
+// failure. Two things went wrong while that buffer swallowed them:
+//
+//   - Entire's hook reports on stderr both when it pushes checkpoint refs and
+//     when it withholds them, and on the git-refs backend it withholds them
+//     while still exiting zero. So trail create could print "Pushed branch" for
+//     a push that published nothing — the failure this path exists to prevent,
+//     with its only diagnostic discarded.
+//   - The OPF prompt became unanswerable-in-practice rather than skipped.
+//     interactive.CanPromptInteractively() decides from a /dev/tty probe and
+//     never consults stdio, so it still said yes; bubbletea then falls back to
+//     /dev/tty for prompt INPUT when stdin is not a terminal but has no such
+//     fallback for OUTPUT, which is unconditionally os.Stdout. The form
+//     therefore rendered into the buffer while reading real keystrokes: a push
+//     that blocks on a prompt the user cannot see.
+//
+// stdin is inherited so git can prompt for credentials as on a push the user
+// typed. It does not reach the hook, which git hands a pipe carrying the ref
+// list — that is why the prompt's input path goes through /dev/tty above.
+//
+// git prints its own diagnostics to the stderr now reaching the user, so the
+// returned error carries the exit status alone rather than a second copy.
+func pushBranchToRemote(ctx context.Context, out, errOut io.Writer, remote, branchName string) error {
+	ctx, cancel := context.WithTimeout(ctx, trailBranchPushTimeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "git", "push", "-u", remote, branchName)
-	if output, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("%s: %w", strings.TrimSpace(string(output)), err)
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = out
+	cmd.Stderr = errOut
+	if err := cmd.Run(); err != nil {
+		// git's own message already reached errOut, so this names the command
+		// and carries the exit status rather than repeating the diagnostic.
+		return fmt.Errorf("git push: %w", err)
 	}
 	return nil
 }
@@ -2446,6 +2493,13 @@ func remoteHasBranch(ctx context.Context, remote, branchName string) (bool, erro
 	return strings.TrimSpace(string(output)) != "", nil
 }
 
+// deleteBranchFromRemote keeps --no-verify, which is deliberate and is the
+// opposite of the rule pushBranchToRemote documents. That one must run the hook
+// because it delivers commits whose checkpoint data has to go with them; this
+// one retracts a branch on a failed trail create, so there is nothing to
+// publish, and running Entire's checkpoint sync (or the repo's own hooks) while
+// unwinding is work in the wrong direction on a path that is already handling
+// an error.
 func deleteBranchFromRemote(ctx context.Context, remote, branchName string) error {
 	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 	defer cancel()

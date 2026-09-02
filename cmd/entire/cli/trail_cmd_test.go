@@ -2764,20 +2764,31 @@ func TestResolveTrailPushRemote(t *testing.T) {
 	}
 }
 
+// writeTrailCreatePrePushHook installs script as localDir's pre-push hook. The
+// two hook tests differ only in whether the hook accepts the push.
+func writeTrailCreatePrePushHook(t *testing.T, localDir, script string) {
+	t.Helper()
+	hooksDir := filepath.Join(localDir, ".git", "hooks")
+	require.NoError(t, os.MkdirAll(hooksDir, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(hooksDir, "pre-push"), []byte(script), 0o755))
+}
+
 // TestPrepareTrailCreateBranchRunsPrePushHook guards checkpoint publication:
 // trail creation must push like a user would, without bypassing Entire's hook.
+//
+// It also asserts the hook's own output reaches the caller's stderr. That is not
+// cosmetic: Entire's hook reports there when it withholds checkpoint refs, and
+// the git-refs backend withholds them while still exiting zero, so a captured
+// buffer turns the exact failure this test guards against into a silent one.
 func TestPrepareTrailCreateBranchRunsPrePushHook(t *testing.T) {
 	localDir, originDir, repo := initTrailCleanupRepo(t)
 	defer repo.Close()
 	t.Chdir(localDir)
 
-	hooksDir := filepath.Join(localDir, ".git", "hooks")
-	require.NoError(t, os.MkdirAll(hooksDir, 0o755))
-	require.NoError(t, os.WriteFile(
-		filepath.Join(hooksDir, "pre-push"),
-		[]byte("#!/bin/sh\nprintf '%s\\n' \"$1\" > \"$(git rev-parse --git-dir)/trail-create-pre-push-ran\"\n"),
-		0o755,
-	))
+	writeTrailCreatePrePushHook(t, localDir,
+		"#!/bin/sh\n"+
+			"printf '%s\\n' \"$1\" > \"$(git rev-parse --git-dir)/trail-create-pre-push-ran\"\n"+
+			"echo 'hook-said-this' >&2\n")
 
 	const branch = "feature/checkpoint-sync"
 	var out, errOut bytes.Buffer
@@ -2788,6 +2799,34 @@ func TestPrepareTrailCreateBranchRunsPrePushHook(t *testing.T) {
 	hookRemote, err := os.ReadFile(filepath.Join(localDir, ".git", "trail-create-pre-push-ran"))
 	require.NoError(t, err, "trail create branch push bypassed the pre-push hook")
 	require.Equal(t, "origin\n", string(hookRemote))
+	require.Contains(t, errOut.String(), "hook-said-this",
+		"the hook's output must reach the user, not a buffer read only on failure")
+}
+
+// TestPrepareTrailCreateBranchFailsWhenPrePushHookRejects is the other half of
+// running the hook. The branch push is a precondition for creating the trail, so
+// a hook that says no now fails trail creation — Entire's own hook aborting the
+// push on the git-branch backend, or any hook the repo installed for its own
+// reasons. The error must name the hook among the causes, the hook's reason must
+// have reached the user, and the branch must not be left behind on either side.
+func TestPrepareTrailCreateBranchFailsWhenPrePushHookRejects(t *testing.T) {
+	localDir, originDir, repo := initTrailCleanupRepo(t)
+	defer repo.Close()
+	t.Chdir(localDir)
+
+	writeTrailCreatePrePushHook(t, localDir, "#!/bin/sh\necho 'refusing this push' >&2\nexit 1\n")
+
+	const branch = "feature/hook-rejects"
+	var out, errOut bytes.Buffer
+	_, err := prepareTrailCreateBranch(context.Background(), &out, &errOut, repo, "origin", branch, "main", false)
+
+	require.Error(t, err, "a rejected push must fail trail creation")
+	require.Contains(t, err.Error(), "pre-push hook",
+		"the hint must offer a rejected hook as a cause, not just auth and non-fast-forward")
+	require.Contains(t, errOut.String(), "refusing this push",
+		"the hook's reason is the only diagnostic the user gets")
+	require.False(t, gitBranchExistsTrailTest(t, originDir, branch), "a rejected push must not land the branch")
+	require.False(t, gitBranchExistsTrailTest(t, localDir, branch), "cleanup must remove the branch it created")
 }
 
 // TestPrepareTrailCreateBranchPushesToDeclaredRemote is the end-to-end shape of
