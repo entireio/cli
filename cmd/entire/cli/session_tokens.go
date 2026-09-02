@@ -240,12 +240,18 @@ func buildSessionTokensUsage(usage *agent.TokenUsage) *sessionTokensUsage {
 	if total == 0 && usage.APICallCount == 0 {
 		return nil
 	}
+	// Class figures are flattened, like Total: totalTokens recurses into
+	// subagent usage, so reading the classes off the top level alone left this
+	// struct's own parts not summing to its own total — and printed two
+	// different answers under one label once the class breakdown rendered
+	// beside it. Subagent usage stays separately visible as SubagentTotal.
+	flat := flattenTokenUsageForClasses(usage)
 	return &sessionTokensUsage{
 		Total:         total,
-		Input:         usage.InputTokens,
-		CacheRead:     usage.CacheReadTokens,
-		CacheWrite:    usage.CacheCreationTokens,
-		Output:        usage.OutputTokens,
+		Input:         flat.InputTokens,
+		CacheRead:     flat.CacheReadTokens,
+		CacheWrite:    flat.CacheCreationTokens,
+		Output:        flat.OutputTokens,
 		APICalls:      usage.APICallCount,
 		SubagentTotal: totalTokens(usage.SubagentTokens),
 	}

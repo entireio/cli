@@ -409,3 +409,71 @@ func TestCheckpointTokensReport_Classes_SubagentWithoutModelInheritsParent(t *te
 		t.Error("an unrecorded subagent model must inherit the parent's family, not unprice")
 	}
 }
+
+// Both blocks in one report must agree. The "Token usage" line has always set
+// Total from totalTokens, which recurses into subagents, while its class fields
+// came from the top level only — so its own parts did not sum to its own total.
+// Rendering the class breakdown beside it exposed that as two contradictory
+// lists under the same labels on a real checkpoint.
+func TestCheckpointTokensReport_UsageAndClassesAgree(t *testing.T) {
+	t.Parallel()
+
+	report := classesReportFor(t, "Claude Code", "claude-sonnet-4.6", checkpoint.TokenUsageVersionDelta,
+		&agent.TokenUsage{
+			InputTokens: 1000, CacheCreationTokens: 2000, CacheReadTokens: 6000, OutputTokens: 1000,
+			SubagentTokens: &agent.TokenUsage{
+				InputTokens: 500, CacheCreationTokens: 500, CacheReadTokens: 3000, OutputTokens: 500,
+			},
+		})
+
+	if report.Tokens == nil || report.Classes == nil {
+		t.Fatal("expected both blocks")
+	}
+
+	// The older line's parts must sum to its own total.
+	parts := report.Tokens.Input + report.Tokens.CacheRead + report.Tokens.CacheWrite + report.Tokens.Output
+	if parts != report.Tokens.Total {
+		t.Errorf("Token usage parts sum to %d but its Total is %d", parts, report.Tokens.Total)
+	}
+
+	// And the two blocks must not print different numbers under the same label.
+	for _, c := range []struct {
+		label     string
+		line, cls int
+	}{
+		{"input", report.Tokens.Input, report.Classes.Input.Tokens},
+		{"cache write", report.Tokens.CacheWrite, report.Classes.CacheWrite.Tokens},
+		{"cache read", report.Tokens.CacheRead, report.Classes.CacheRead.Tokens},
+		{"output", report.Tokens.Output, report.Classes.Output.Tokens},
+		{"total", report.Tokens.Total, report.Classes.Total},
+	} {
+		if c.line != c.cls {
+			t.Errorf("%s: Token usage says %d, the breakdown says %d — one report, two answers", c.label, c.line, c.cls)
+		}
+	}
+
+	// Subagent usage stays visible as its own figure.
+	if report.Tokens.SubagentTotal != 4500 {
+		t.Errorf("SubagentTotal = %d, want 4500", report.Tokens.SubagentTotal)
+	}
+}
+
+// A class holding real tokens must not print "0%" — that reads as broken next
+// to a six-figure token count. An empty class still prints "0%".
+func TestFormatSharePercent(t *testing.T) {
+	t.Parallel()
+
+	for _, tt := range []struct {
+		tokens, percent int
+		want            string
+	}{
+		{274800, 0, "<1%"},
+		{0, 0, "0%"},
+		{1000, 7, "7%"},
+		{9999999, 93, "93%"},
+	} {
+		if got := formatSharePercent(tt.tokens, tt.percent); got != tt.want {
+			t.Errorf("formatSharePercent(%d, %d) = %q, want %q", tt.tokens, tt.percent, got, tt.want)
+		}
+	}
+}

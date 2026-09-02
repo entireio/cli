@@ -1062,10 +1062,14 @@ func TestTokensCmd_TextOutputWithRecommendations(t *testing.T) {
 		"Model:   claude-opus-4-6[1m]",
 		"Status:  active",
 		"Total:  13.6k tokens",
-		"Input: 1k",
+		// Class figures include subagent usage, like Total always has. Before
+		// that fix these read 1k / 10k / 500 / 100 — top-level only — so the
+		// parts did not sum to the 13.6k total printed directly above them.
+		// (The subagent recorded input and output only, so cache read is unchanged.)
+		"Input: 2k",
 		"Cache read: 10k",
 		"Cache write: 500",
-		"Output: 100",
+		"Output: 1.1k",
 		"API calls: 6",
 		"Subagents: 2k tokens",
 		"Context pressure: 85% of 10k tokens",
@@ -2160,8 +2164,9 @@ func TestCheckpointTokensCmd_TextOutputWithMultipleSessionsUsesAggregateScope(t 
 		"Agents:     Claude Code, Gemini CLI",
 		"Branch:     multi-session-branch",
 		"Total:  4.5k tokens",
-		"Input: 1.5k",
-		"Output: 500",
+		// Includes subagent usage, matching the Total printed directly above it.
+		"Input: 3.5k",
+		"Output: 1k",
 		"API calls: 3",
 		"Subagents: 2.5k tokens",
 	}

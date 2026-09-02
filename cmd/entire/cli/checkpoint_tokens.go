@@ -668,11 +668,12 @@ func writeCheckpointTokenClasses(w io.Writer, classes *tokenClassBreakdown) {
 	}
 	for _, row := range rows {
 		if classes.Priced {
-			fmt.Fprintf(w, "  %-14s %10s %7d%% %6d%%", row.label,
-				formatTokenCount(row.share.Tokens), row.share.VolumePercent, row.share.CostPercent)
+			fmt.Fprintf(w, "  %-14s %10s %8s %7s", row.label,
+				formatTokenCount(row.share.Tokens), formatSharePercent(row.share.Tokens, row.share.VolumePercent),
+				formatSharePercent(row.share.Tokens, row.share.CostPercent))
 		} else {
-			fmt.Fprintf(w, "  %-14s %10s %7d%%", row.label,
-				formatTokenCount(row.share.Tokens), row.share.VolumePercent)
+			fmt.Fprintf(w, "  %-14s %10s %8s", row.label,
+				formatTokenCount(row.share.Tokens), formatSharePercent(row.share.Tokens, row.share.VolumePercent))
 		}
 		if row.note != "" {
 			fmt.Fprintf(w, "  %s", row.note)
@@ -688,6 +689,17 @@ func writeCheckpointTokenClasses(w io.Writer, classes *tokenClassBreakdown) {
 		}
 		fmt.Fprintf(w, "  Cost share omitted: %s.\n", reason)
 	}
+}
+
+// formatSharePercent renders a whole-percent share. A class with tokens in it
+// but a share that rounds to zero prints "<1%" rather than "0%": a row showing
+// 274.8k tokens beside "0%" reads as broken even though it is arithmetically
+// right. A genuinely empty class still prints "0%".
+func formatSharePercent(tokens, percent int) string {
+	if percent == 0 && tokens > 0 {
+		return "<1%"
+	}
+	return fmt.Sprintf("%d%%", percent)
 }
 
 // subsetNote renders a subset figure alongside its parent class, or "" when the
