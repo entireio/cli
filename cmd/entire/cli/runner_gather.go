@@ -301,7 +301,7 @@ func gatherTrails(ctx context.Context, errW io.Writer, limit int, insecureHTTP b
 		if err != nil {
 			return err
 		}
-		basePath, err := trailListBasePath(forge, owner, repo, repoID)
+		basePath, err := trailRepoBasePath(forge, owner, repo, repoID)
 		if err != nil {
 			return err
 		}

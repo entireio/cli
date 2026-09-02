@@ -203,20 +203,24 @@ Otherwise, <trail> may be a trail number, id, or branch in the target repo.`,
 
 // runTrailShow shows one trail, defaulting to the current branch's trail.
 func runTrailShow(ctx context.Context, w, errW io.Writer, opts trailShowOptions) error {
-	return runAuthenticatedTrailAPI(ctx, errW, opts.InsecureHTTP, opts.Repo, func(ctx context.Context, client *api.Client) error {
+	return runAuthenticatedTrailAPIWithRepoID(ctx, errW, opts.InsecureHTTP, opts.Repo, func(ctx context.Context, client *api.Client, repoID string) error {
 		forge, owner, repo, err := resolveTrailRepoOrRemote(ctx, opts.Repo)
 		if err != nil {
 			return err
 		}
-		return runTrailShowWithClient(ctx, w, errW, client, forge, owner, repo, opts)
+		basePath, err := trailRepoBasePath(forge, owner, repo, repoID)
+		if err != nil {
+			return err
+		}
+		return runTrailShowWithClientAtPath(ctx, w, errW, client, basePath, forge, owner, repo, opts)
 	})
 }
 
-// runTrailShowWithClient renders one trail once the repo and API client are
-// resolved. Warnings go to errW, so --json keeps stdout parseable even when the
-// best-effort description fetch fails.
-func runTrailShowWithClient(ctx context.Context, w, errW io.Writer, client *api.Client, forge, owner, repo string, opts trailShowOptions) error {
-	found, err := resolveTrailBySelector(ctx, client, forge, owner, repo, opts.Selector, opts.Branch)
+// runTrailShowWithClientAtPath renders one trail once the repo route and API
+// client are resolved. Warnings go to errW, so --json keeps stdout parseable
+// even when the best-effort description fetch fails.
+func runTrailShowWithClientAtPath(ctx context.Context, w, errW io.Writer, client *api.Client, basePath, forge, owner, repo string, opts trailShowOptions) error {
+	found, err := resolveTrailBySelectorAtPath(ctx, client, basePath, forge, owner, repo, opts.Selector, opts.Branch)
 	if err != nil {
 		return err
 	}
@@ -244,7 +248,7 @@ func runTrailShowWithClient(ctx context.Context, w, errW io.Writer, client *api.
 			bodyText = snapshot
 		}
 	case found.Number > 0:
-		if bt, _, derr := fetchTrailDescription(ctx, client, forge, owner, repo, found.Number); derr == nil {
+		if bt, _, derr := fetchTrailDescriptionAtPath(ctx, client, basePath, found.Number); derr == nil {
 			// A successful fetch means we authoritatively consulted the
 			// description, but it only supersedes the seeded list body when
 			// it actually carries text: an older/partial server that omits
@@ -285,13 +289,17 @@ func runTrailShowWithClient(ctx context.Context, w, errW io.Writer, client *api.
 // trail. It returns an actionable error (never a nil trail with a nil error)
 // when nothing matches, so callers can rely on a non-nil result.
 func resolveTrailBySelector(ctx context.Context, client *api.Client, forge, owner, repo, selector, branchOverride string) (*api.TrailResource, error) {
+	return resolveTrailBySelectorAtPath(ctx, client, trailsBasePath(forge, owner, repo), forge, owner, repo, selector, branchOverride)
+}
+
+func resolveTrailBySelectorAtPath(ctx context.Context, client *api.Client, basePath, forge, owner, repo, selector, branchOverride string) (*api.TrailResource, error) {
 	selector = strings.TrimSpace(selector)
 	if selector == "" {
 		branch, err := resolveTrailBranch(ctx, branchOverride)
 		if err != nil {
 			return nil, fmt.Errorf("no trail selector given and current branch is unknown: %w\nhint: run 'entire trail list --status any' or pass a trail number, id, or branch", err)
 		}
-		found, err := findTrailByBranch(ctx, client, forge, owner, repo, branch)
+		found, err := findTrailByBranchAtPath(ctx, client, basePath, branch)
 		if err != nil {
 			return nil, err
 		}
@@ -300,7 +308,7 @@ func resolveTrailBySelector(ctx context.Context, client *api.Client, forge, owne
 		}
 		return found, nil
 	}
-	found, err := findTrailBySelector(ctx, client, forge, owner, repo, selector)
+	found, err := findTrailBySelectorAtPath(ctx, client, basePath, selector)
 	if err != nil {
 		return nil, err
 	}
@@ -435,7 +443,11 @@ func trailWebURL(base, forge, owner, repo string, number int) string {
 // needs, so it is unaffected by the shape of sibling fields like
 // `checkpoints`/`thread`.
 func fetchTrailDescription(ctx context.Context, client *api.Client, forge, owner, repo string, number int) (string, string, error) {
-	resp, err := client.Get(ctx, trailNumberPath(forge, owner, repo, number))
+	return fetchTrailDescriptionAtPath(ctx, client, trailsBasePath(forge, owner, repo), number)
+}
+
+func fetchTrailDescriptionAtPath(ctx context.Context, client *api.Client, basePath string, number int) (string, string, error) {
+	resp, err := client.Get(ctx, trailNumberPathForBase(basePath, number))
 	if err != nil {
 		return "", "", fmt.Errorf("failed to fetch trail detail: %w", err)
 	}
@@ -523,7 +535,7 @@ func runTrailListAllWithClient(ctx context.Context, w io.Writer, client *api.Cli
 	// many pages as needed for --limit. Author login is filtered client-side:
 	// the new backend's author query is account-ID based, while the CLI's public
 	// flag has always accepted GitHub logins.
-	basePath, err := trailListBasePath(forge, owner, repo, repoID)
+	basePath, err := trailRepoBasePath(forge, owner, repo, repoID)
 	if err != nil {
 		return err
 	}
@@ -1236,10 +1248,10 @@ func newTrailCreateRequest(title, body, branch, base, statusStr, typeStr, priori
 // (and no etag) plus the error so the caller can warn (mirroring
 // runTrailShow); an empty detail body (older/partial server) falls back to the
 // list body with no error.
-func resolveTrailUpdateBody(ctx context.Context, client *api.Client, forge, owner, repo string, found *api.TrailResource) (body, etag string, err error) {
+func resolveTrailUpdateBodyAtPath(ctx context.Context, client *api.Client, basePath string, found *api.TrailResource) (body, etag string, err error) {
 	body = found.Body
 	if found.Number > 0 {
-		bt, et, ferr := fetchTrailDescription(ctx, client, forge, owner, repo, found.Number)
+		bt, et, ferr := fetchTrailDescriptionAtPath(ctx, client, basePath, found.Number)
 		if ferr != nil {
 			return body, "", ferr
 		}
@@ -1327,18 +1339,22 @@ type trailUpdateInputs struct {
 }
 
 func runTrailUpdate(ctx context.Context, w, errW io.Writer, insecureHTTP bool, inputs trailUpdateInputs) error {
-	return runAuthenticatedTrailAPI(ctx, errW, insecureHTTP, inputs.Repo, func(ctx context.Context, client *api.Client) error {
+	return runAuthenticatedTrailAPIWithRepoID(ctx, errW, insecureHTTP, inputs.Repo, func(ctx context.Context, client *api.Client, repoID string) error {
 		forge, owner, repoName, err := resolveTrailRepoOrRemote(ctx, inputs.Repo)
 		if err != nil {
 			return err
 		}
-		return runTrailUpdateWithClient(ctx, w, errW, client, forge, owner, repoName, inputs)
+		basePath, err := trailRepoBasePath(forge, owner, repoName, repoID)
+		if err != nil {
+			return err
+		}
+		return runTrailUpdateWithClientAtPath(ctx, w, errW, client, basePath, inputs)
 	})
 }
 
-// runTrailUpdateWithClient applies a trail update once the repo and API client
-// are resolved.
-func runTrailUpdateWithClient(ctx context.Context, w, errW io.Writer, client *api.Client, forge, owner, repoName string, inputs trailUpdateInputs) error {
+// runTrailUpdateWithClientAtPath applies a trail update once the repo route and
+// API client are resolved.
+func runTrailUpdateWithClientAtPath(ctx context.Context, w, errW io.Writer, client *api.Client, basePath string, inputs trailUpdateInputs) error {
 	// Determine branch.
 	branch := inputs.Branch
 	if branch == "" {
@@ -1350,7 +1366,7 @@ func runTrailUpdateWithClient(ctx context.Context, w, errW io.Writer, client *ap
 	}
 
 	// Find the trail by branch.
-	found, err := findTrailByBranch(ctx, client, forge, owner, repoName, branch)
+	found, err := findTrailByBranchAtPath(ctx, client, basePath, branch)
 	if err != nil {
 		return err
 	}
@@ -1387,7 +1403,7 @@ func runTrailUpdateWithClient(ctx context.Context, w, errW io.Writer, client *ap
 		// the form prefills with the current text and change detection below
 		// compares against the real server value. Warn on a fetch failure so
 		// a blank baseline doesn't silently overwrite an unseen description.
-		seedBody, seedETag, bodyErr := resolveTrailUpdateBody(ctx, client, forge, owner, repoName, found)
+		seedBody, seedETag, bodyErr := resolveTrailUpdateBodyAtPath(ctx, client, basePath, found)
 		if bodyErr != nil {
 			fmt.Fprintf(errW, "Warning: could not load current trail body: %v\n", bodyErr)
 		}
@@ -1457,7 +1473,7 @@ func runTrailUpdateWithClient(ctx context.Context, w, errW io.Writer, client *ap
 	if found.Number <= 0 {
 		return fmt.Errorf("trail for branch %q has no number yet; cannot update", branch)
 	}
-	path := trailNumberPath(forge, owner, repoName, found.Number)
+	path := trailNumberPathForBase(basePath, found.Number)
 
 	// Metadata and description live on different routes, so an update touching
 	// both sends two requests. They are not atomic: if the metadata PATCH lands
@@ -1491,14 +1507,14 @@ func runTrailUpdateWithClient(ctx context.Context, w, errW io.Writer, client *ap
 		// fallback rather than failing the whole command — but say so, since
 		// this is the unattended path most likely to run without anyone
 		// watching for a silently downgraded conflict check.
-		if _, etag, ferr := fetchTrailDescription(ctx, client, forge, owner, repoName, found.Number); ferr != nil {
+		if _, etag, ferr := fetchTrailDescriptionAtPath(ctx, client, basePath, found.Number); ferr != nil {
 			fmt.Fprintf(errW, "Warning: could not verify trail body is unchanged (%v); writing without conflict detection\n", ferr)
 		} else {
 			bodyETag = etag
 		}
 	}
 	if inputs.BodyChanged {
-		if err := sendTrailBody(ctx, client, trailBodyPath(forge, owner, repoName, found.Number), body, bodyETag, inputs.Overwrite); err != nil {
+		if err := sendTrailBody(ctx, client, trailBodyPathForBase(basePath, found.Number), body, bodyETag, inputs.Overwrite); err != nil {
 			if hasMeta {
 				return fmt.Errorf("trail metadata was updated, but the body update failed (the metadata change already applied; retry only the --body change): %w", err)
 			}
@@ -1880,8 +1896,12 @@ func runTrailDelete(cmd *cobra.Command, number int, branch string, force bool) e
 	ctx := cmd.Context()
 	w := cmd.OutOrStdout()
 
-	return runAuthenticatedTrailAPI(ctx, cmd.ErrOrStderr(), trailInsecureHTTP(cmd), trailRepoFlag(cmd), func(ctx context.Context, client *api.Client) error {
+	return runAuthenticatedTrailAPIWithRepoID(ctx, cmd.ErrOrStderr(), trailInsecureHTTP(cmd), trailRepoFlag(cmd), func(ctx context.Context, client *api.Client, repoID string) error {
 		forge, owner, repo, err := resolveTrailRepoOrRemote(ctx, trailRepoFlag(cmd))
+		if err != nil {
+			return err
+		}
+		basePath, err := trailRepoBasePath(forge, owner, repo, repoID)
 		if err != nil {
 			return err
 		}
@@ -1897,7 +1917,7 @@ func runTrailDelete(cmd *cobra.Command, number int, branch string, force bool) e
 					return fmt.Errorf("failed to determine current branch: %w", err)
 				}
 			}
-			found, ferr := findTrailByBranch(ctx, client, forge, owner, repo, branch)
+			found, ferr := findTrailByBranchAtPath(ctx, client, basePath, branch)
 			if ferr != nil {
 				return ferr
 			}
@@ -1909,7 +1929,7 @@ func runTrailDelete(cmd *cobra.Command, number int, branch string, force bool) e
 			}
 			number = found.Number
 			title = found.Title
-		} else if found, ferr := findTrailByNumber(ctx, client, forge, owner, repo, number); ferr == nil && found != nil {
+		} else if found, ferr := findTrailByNumberAtPath(ctx, client, basePath, number); ferr == nil && found != nil {
 			title = found.Title
 		}
 
@@ -1921,7 +1941,7 @@ func runTrailDelete(cmd *cobra.Command, number int, branch string, force bool) e
 			return nil
 		}
 
-		if err := deleteTrailByNumber(ctx, client, forge, owner, repo, number); err != nil {
+		if err := deleteTrailByNumberAtPath(ctx, client, basePath, number); err != nil {
 			return err
 		}
 
@@ -1933,7 +1953,11 @@ func runTrailDelete(cmd *cobra.Command, number int, branch string, force bool) e
 // deleteTrailByNumber deletes a trail; entire-api answers 204 No Content, so any
 // 2xx is a successful delete and the body is not read.
 func deleteTrailByNumber(ctx context.Context, client *api.Client, forge, owner, repo string, number int) error {
-	resp, err := client.Delete(ctx, trailNumberPath(forge, owner, repo, number))
+	return deleteTrailByNumberAtPath(ctx, client, trailsBasePath(forge, owner, repo), number)
+}
+
+func deleteTrailByNumberAtPath(ctx context.Context, client *api.Client, basePath string, number int) error {
+	resp, err := client.Delete(ctx, trailNumberPathForBase(basePath, number))
 	if err != nil {
 		return fmt.Errorf("failed to delete trail: %w", err)
 	}
@@ -2080,17 +2104,21 @@ func runTrailCreateInteractive(title, body, branch, statusStr *string, noBranch 
 
 // findTrailByBranch looks up a trail by branch name via the list API.
 func findTrailBySelector(ctx context.Context, client *api.Client, forge, owner, repo, selector string) (*api.TrailResource, error) {
+	return findTrailBySelectorAtPath(ctx, client, trailsBasePath(forge, owner, repo), selector)
+}
+
+func findTrailBySelectorAtPath(ctx context.Context, client *api.Client, basePath, selector string) (*api.TrailResource, error) {
 	selector = strings.TrimSpace(selector)
 	if selector == "" {
 		return nil, nil //nolint:nilnil // empty selector means not found for this helper
 	}
 	if n, ok := parseTrailNumberSelector(selector); ok {
-		found, err := findTrailByNumber(ctx, client, forge, owner, repo, n)
+		found, err := findTrailByNumberAtPath(ctx, client, basePath, n)
 		if err != nil || found != nil {
 			return found, err
 		}
 	}
-	return findTrail(ctx, client, forge, owner, repo, func(t api.TrailResource) bool {
+	return findTrailAtPath(ctx, client, basePath, func(t api.TrailResource) bool {
 		return t.ID == selector || t.Branch == selector
 	})
 }
@@ -2104,7 +2132,11 @@ func parseTrailNumberSelector(selector string) (int, bool) {
 }
 
 func findTrailByBranch(ctx context.Context, client *api.Client, forge, owner, repo, branch string) (*api.TrailResource, error) {
-	return findTrail(ctx, client, forge, owner, repo, func(t api.TrailResource) bool {
+	return findTrailByBranchAtPath(ctx, client, trailsBasePath(forge, owner, repo), branch)
+}
+
+func findTrailByBranchAtPath(ctx context.Context, client *api.Client, basePath, branch string) (*api.TrailResource, error) {
+	return findTrailAtPath(ctx, client, basePath, func(t api.TrailResource) bool {
 		return t.Branch == branch
 	})
 }
@@ -2112,7 +2144,11 @@ func findTrailByBranch(ctx context.Context, client *api.Client, forge, owner, re
 // findTrailByNumber looks up a trail by numeric identifier through entire-api's
 // direct number route, so it never has to scan the list pages.
 func findTrailByNumber(ctx context.Context, client *api.Client, forge, owner, repo string, number int) (*api.TrailResource, error) {
-	resp, err := client.Get(ctx, trailNumberPath(forge, owner, repo, number))
+	return findTrailByNumberAtPath(ctx, client, trailsBasePath(forge, owner, repo), number)
+}
+
+func findTrailByNumberAtPath(ctx context.Context, client *api.Client, basePath string, number int) (*api.TrailResource, error) {
+	resp, err := client.Get(ctx, trailNumberPathForBase(basePath, number))
 	if err != nil {
 		return nil, fmt.Errorf("get trail %d: %w", number, err)
 	}
@@ -2136,13 +2172,13 @@ func findTrailByNumber(ctx context.Context, client *api.Client, forge, owner, re
 	return &found, nil
 }
 
-func findTrail(ctx context.Context, client *api.Client, forge, owner, repo string, match func(api.TrailResource) bool) (*api.TrailResource, error) {
+func findTrailAtPath(ctx context.Context, client *api.Client, basePath string, match func(api.TrailResource) bool) (*api.TrailResource, error) {
 	// Walk bounded opaque-cursor pages so selector lookups do not silently miss
 	// trails beyond the first entire-api page.
 	pageToken := ""
 	seenTokens := map[string]bool{}
 	for range trailFindMaxPages {
-		resp, err := client.Get(ctx, trailsBasePath(forge, owner, repo)+trailListPageQuery(nil, trailListServerMaxLimit, pageToken))
+		resp, err := client.Get(ctx, basePath+trailListPageQuery(nil, trailListServerMaxLimit, pageToken))
 		if err != nil {
 			return nil, fmt.Errorf("list trails: %w", err)
 		}
@@ -2185,17 +2221,17 @@ func trailsBasePath(forge, owner, repo string) string {
 	return fmt.Sprintf("/api/v1/trails/%s/%s/%s", url.PathEscape(forge), url.PathEscape(owner), url.PathEscape(repo))
 }
 
-// trailListBasePath selects the repo-addressed read route for Entire-native
+// trailRepoBasePath selects the repo-addressed route for Entire-native
 // repositories. The host-addressed API deliberately cannot resolve et repos by
 // name because the cell's full_name index has no forge discriminator; the
-// opaque placement ID is unambiguous. GitHub repos retain the legacy route.
-func trailListBasePath(forge, owner, repo, repoID string) (string, error) {
+// opaque repo ID is unambiguous. GitHub repos retain the legacy route.
+func trailRepoBasePath(forge, owner, repo, repoID string) (string, error) {
 	if forge != nativeCloneForge {
 		return trailsBasePath(forge, owner, repo), nil
 	}
 	repoID = strings.TrimSpace(repoID)
 	if repoID == "" {
-		return "", errors.New("cannot list trails for an Entire-native repo without its repo ID")
+		return "", errors.New("cannot access trails for an Entire-native repo without its repo ID")
 	}
 	return "/api/v1/repos/" + url.PathEscape(repoID) + "/trails", nil
 }
@@ -2204,14 +2240,17 @@ func trailListBasePath(forge, owner, repo, repoID string) (string, error) {
 // number (e.g. "/api/v1/trails/gh/acme/repo/575"). The server validates an
 // integer here and rejects the trail UUID, so callers must pass Number, not ID.
 func trailNumberPath(forge, owner, repo string, number int) string {
-	return trailsBasePath(forge, owner, repo) + "/" + strconv.Itoa(number)
+	return trailNumberPathForBase(trailsBasePath(forge, owner, repo), number)
 }
 
-// trailBodyPath returns the route that writes a trail's description
-// (e.g. "/api/v1/trails/gh/acme/repo/575/body"). It is the only route that does;
-// see api.TrailBodyRequest.
-func trailBodyPath(forge, owner, repo string, number int) string {
-	return trailNumberPath(forge, owner, repo, number) + "/body"
+func trailNumberPathForBase(basePath string, number int) string {
+	return basePath + "/" + strconv.Itoa(number)
+}
+
+// trailBodyPathForBase returns the route that writes a trail's description. It
+// is the only route that does; see api.TrailBodyRequest.
+func trailBodyPathForBase(basePath string, number int) string {
+	return trailNumberPathForBase(basePath, number) + "/body"
 }
 
 // resolveTrailRemote resolves the origin remote and ensures the forge is

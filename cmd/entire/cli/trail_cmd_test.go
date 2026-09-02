@@ -497,28 +497,35 @@ func TestTrailsBasePath(t *testing.T) {
 	}
 }
 
-func TestTrailListBasePath(t *testing.T) {
+func TestTrailRepoBasePath(t *testing.T) {
 	t.Parallel()
 
 	t.Run("GitHub keeps host-addressed route", func(t *testing.T) {
 		t.Parallel()
-		got, err := trailListBasePath("gh", "acme", "repo", "placement-id")
+		got, err := trailRepoBasePath("gh", "acme", "repo", "placement-id")
 		require.NoError(t, err)
 		require.Equal(t, "/api/v1/trails/gh/acme/repo", got)
 	})
 
 	t.Run("Entire-native uses repo ID route", func(t *testing.T) {
 		t.Parallel()
-		got, err := trailListBasePath("et", "acme", "repo", "01ARZ3NDEKTSV4RRFFQ69G5FAV")
+		got, err := trailRepoBasePath("et", "acme", "repo", "01ARZ3NDEKTSV4RRFFQ69G5FAV")
 		require.NoError(t, err)
 		require.Equal(t, "/api/v1/repos/01ARZ3NDEKTSV4RRFFQ69G5FAV/trails", got)
 	})
 
 	t.Run("Entire-native requires repo ID", func(t *testing.T) {
 		t.Parallel()
-		_, err := trailListBasePath("et", "acme", "repo", "")
-		require.EqualError(t, err, "cannot list trails for an Entire-native repo without its repo ID")
+		_, err := trailRepoBasePath("et", "acme", "repo", "")
+		require.EqualError(t, err, "cannot access trails for an Entire-native repo without its repo ID")
 	})
+}
+
+func TestTrailPathsFromNativeRepoBase(t *testing.T) {
+	t.Parallel()
+	const basePath = "/api/v1/repos/native-repo-id/trails"
+	require.Equal(t, basePath+"/575", trailNumberPathForBase(basePath, 575))
+	require.Equal(t, basePath+"/575/body", trailBodyPathForBase(basePath, 575))
 }
 
 func TestTrailNumberPath(t *testing.T) {
@@ -665,7 +672,7 @@ func TestResolveTrailUpdateBody_PrefersDetailSnapshot(t *testing.T) {
 	// The list resource omits the description, so found.Body is empty. The
 	// seed must come from the detail endpoint, not the empty list body.
 	found := &api.TrailResource{Number: 42, Body: ""}
-	body, etag, err := resolveTrailUpdateBody(t.Context(), client, "gh", "acme", "repo", found)
+	body, etag, err := resolveTrailUpdateBodyAtPath(t.Context(), client, trailTestBasePath, found)
 	if err != nil {
 		t.Fatalf("resolveTrailUpdateBody: %v", err)
 	}
@@ -693,7 +700,7 @@ func TestResolveTrailUpdateBody_ReturnsETagEvenWhenSnapshotEmpty(t *testing.T) {
 
 	client := api.NewClientWithBaseURL("tok", srv.URL)
 	found := &api.TrailResource{Number: 42, Body: trailTestListBody}
-	body, etag, err := resolveTrailUpdateBody(t.Context(), client, "gh", "acme", "repo", found)
+	body, etag, err := resolveTrailUpdateBodyAtPath(t.Context(), client, trailTestBasePath, found)
 	if err != nil {
 		t.Fatalf("resolveTrailUpdateBody: %v", err)
 	}
@@ -718,7 +725,7 @@ func TestResolveTrailUpdateBody_FallsBackToListBody(t *testing.T) {
 
 	client := api.NewClientWithBaseURL("tok", srv.URL)
 	found := &api.TrailResource{Number: 42, Body: trailTestListBody}
-	body, etag, err := resolveTrailUpdateBody(t.Context(), client, "gh", "acme", "repo", found)
+	body, etag, err := resolveTrailUpdateBodyAtPath(t.Context(), client, trailTestBasePath, found)
 	if err != nil {
 		t.Fatalf("resolveTrailUpdateBody: %v", err)
 	}
@@ -741,7 +748,7 @@ func TestResolveTrailUpdateBody_ReturnsErrorOnFetchFailure(t *testing.T) {
 
 	client := api.NewClientWithBaseURL("tok", srv.URL)
 	found := &api.TrailResource{Number: 42, Body: trailTestListBody}
-	body, etag, err := resolveTrailUpdateBody(t.Context(), client, "gh", "acme", "repo", found)
+	body, etag, err := resolveTrailUpdateBodyAtPath(t.Context(), client, trailTestBasePath, found)
 	if err == nil {
 		t.Fatal("expected error on fetch failure, got nil")
 	}
@@ -871,6 +878,22 @@ func TestDeleteTrailByNumber(t *testing.T) {
 		if want := "/api/v1/trails/gh/acme/repo/575"; gotPath != want {
 			t.Fatalf("path = %q, want %q (integer number, not UUID)", gotPath, want)
 		}
+	})
+
+	t.Run("deletes Entire-native trail via repo ID path", func(t *testing.T) {
+		t.Parallel()
+		const basePath = "/api/v1/repos/native-repo-id/trails"
+		var gotMethod, gotPath string
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			gotMethod, gotPath = r.Method, r.URL.Path
+			w.WriteHeader(http.StatusNoContent)
+		}))
+		t.Cleanup(srv.Close)
+
+		err := deleteTrailByNumberAtPath(t.Context(), api.NewClientWithBaseURL("tok", srv.URL), basePath, 3)
+		require.NoError(t, err)
+		require.Equal(t, http.MethodDelete, gotMethod)
+		require.Equal(t, basePath+"/3", gotPath)
 	})
 
 	t.Run("surfaces a non-2xx status", func(t *testing.T) {
@@ -1170,6 +1193,30 @@ func TestFindTrailByNumberUsesDirectEntireAPIRoute(t *testing.T) {
 	}
 }
 
+func TestFindTrailByNumberAtPathUsesNativeRepoIDRoute(t *testing.T) {
+	t.Parallel()
+	const (
+		basePath    = "/api/v1/repos/native-repo-id/trails"
+		trailNumber = 3
+	)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != basePath+"/3" || r.URL.RawQuery != "" {
+			t.Errorf("request = %s?%s, want %s/3 with no query", r.URL.Path, r.URL.RawQuery, basePath)
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		if err := json.NewEncoder(w).Encode(api.TrailResource{ID: "native-trail", Number: trailNumber}); err != nil {
+			t.Errorf("encode response: %v", err)
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	found, err := findTrailByNumberAtPath(t.Context(), api.NewClientWithBaseURL("tok", srv.URL), basePath, trailNumber)
+	require.NoError(t, err)
+	require.NotNil(t, found)
+	require.Equal(t, "native-trail", found.ID)
+}
+
 // A 2xx whose body carries no trail identity is "not found", not a trail whose
 // every field is zero. Selector callers act on `found != nil`, so returning a
 // phantom would make `trail show <number>` render an empty trail instead of
@@ -1386,7 +1433,7 @@ func TestRunTrailUpdateClearsDescriptionWithEmptyBody(t *testing.T) {
 	defer srv.Close()
 
 	var out bytes.Buffer
-	err := runTrailUpdateWithClient(t.Context(), &out, io.Discard, api.NewClientWithBaseURL("tok", srv.URL), "gh", "acme", "repo", trailUpdateInputs{
+	err := runTrailUpdateWithClientAtPath(t.Context(), &out, io.Discard, api.NewClientWithBaseURL("tok", srv.URL), trailTestBasePath, trailUpdateInputs{
 		Branch:      "feature/x",
 		Body:        "",
 		BodyChanged: true,
@@ -1397,6 +1444,41 @@ func TestRunTrailUpdateClearsDescriptionWithEmptyBody(t *testing.T) {
 	defer mu.Unlock()
 	require.Equal(t, map[string]any{"markdown": "", "overwrite": true}, put)
 	require.Contains(t, out.String(), "Updated trail for branch feature/x")
+}
+
+func TestRunTrailUpdateWithClientAtPathUsesNativeRepoIDRoutes(t *testing.T) {
+	t.Parallel()
+	const basePath = "/api/v1/repos/native-repo-id/trails"
+	var methods, paths []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		methods = append(methods, r.Method)
+		paths = append(paths, r.URL.Path)
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == basePath:
+			if err := json.NewEncoder(w).Encode(api.TrailListResponse{Trails: []api.TrailResource{{
+				ID: "native-trail", Number: 3, Branch: "feature/native", Title: "Before",
+			}}}); err != nil {
+				t.Errorf("encode list response: %v", err)
+			}
+		case r.Method == http.MethodPatch && r.URL.Path == basePath+"/3":
+			if err := json.NewEncoder(w).Encode(api.TrailResource{ID: "native-trail", Number: 3}); err != nil {
+				t.Errorf("encode update response: %v", err)
+			}
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.String())
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	var out bytes.Buffer
+	err := runTrailUpdateWithClientAtPath(t.Context(), &out, io.Discard, api.NewClientWithBaseURL("tok", srv.URL), basePath, trailUpdateInputs{
+		Branch: "feature/native", Title: "After", TitleChanged: true,
+	})
+	require.NoError(t, err)
+	require.Equal(t, []string{http.MethodGet, http.MethodPatch}, methods)
+	require.Equal(t, []string{basePath, basePath + "/3"}, paths)
 }
 
 func TestValidateTrailUpdateFieldsRejectsEmptyTitle(t *testing.T) {
@@ -1708,7 +1790,7 @@ func TestRunTrailListAndShowJSONPreserveBranchState(t *testing.T) {
 			require.NoError(t, err)
 
 			var showOut, showErr bytes.Buffer
-			err = runTrailShowWithClient(t.Context(), &showOut, &showErr, client, "gh", "acme", "repo", trailShowOptions{Selector: "7", JSON: true})
+			err = runTrailShowWithClientAtPath(t.Context(), &showOut, &showErr, client, trailTestBasePath, "gh", "acme", "repo", trailShowOptions{Selector: "7", JSON: true})
 			require.NoError(t, err)
 			require.Empty(t, showErr.String())
 
@@ -1757,7 +1839,7 @@ func TestRunTrailShowJSONEmitsOneTrailObject(t *testing.T) {
 	srv := trailShowTestServer(t, resource, "detail body", 0)
 
 	var out, errOut bytes.Buffer
-	err := runTrailShowWithClient(t.Context(), &out, &errOut, api.NewClientWithBaseURL("tok", srv.URL), "gh", "acme", "repo", trailShowOptions{Selector: "7", JSON: true})
+	err := runTrailShowWithClientAtPath(t.Context(), &out, &errOut, api.NewClientWithBaseURL("tok", srv.URL), trailTestBasePath, "gh", "acme", "repo", trailShowOptions{Selector: "7", JSON: true})
 
 	require.NoError(t, err)
 	require.Empty(t, errOut.String())
@@ -1784,6 +1866,42 @@ func TestRunTrailShowJSONEmitsOneTrailObject(t *testing.T) {
 	// Human-only decoration must not leak into the data.
 	require.NotContains(t, out.String(), noTrailDescription)
 	require.NotContains(t, out.String(), "Trail: ")
+}
+
+func TestRunTrailShowWithClientAtPathUsesNativeRepoIDRoutes(t *testing.T) {
+	t.Parallel()
+	const basePath = "/api/v1/repos/native-repo-id/trails"
+	var paths []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		paths = append(paths, r.URL.Path)
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case basePath:
+			if err := json.NewEncoder(w).Encode(api.TrailListResponse{Trails: []api.TrailResource{{
+				ID: "native-trail", Number: 3, Branch: "feature/native", Title: "Native trail",
+			}}}); err != nil {
+				t.Errorf("encode list response: %v", err)
+			}
+		case basePath + "/3":
+			if err := json.NewEncoder(w).Encode(api.TrailResource{
+				ID: "native-trail", Number: 3, Branch: "feature/native",
+				BodyDocument: &api.TrailBodyDocument{TextSnapshot: "native body"},
+			}); err != nil {
+				t.Errorf("encode detail response: %v", err)
+			}
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.String())
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	var out, errOut bytes.Buffer
+	err := runTrailShowWithClientAtPath(t.Context(), &out, &errOut, api.NewClientWithBaseURL("tok", srv.URL), basePath,
+		"et", "entirehq", "marvin", trailShowOptions{Selector: "feature/native", JSON: true})
+	require.NoError(t, err)
+	require.Empty(t, errOut.String())
+	require.Equal(t, []string{basePath, basePath + "/3"}, paths)
 }
 
 // A numeric selector resolves through the detail route, which already returns
@@ -1813,7 +1931,7 @@ func TestRunTrailShowNumericSelectorFetchesDetailOnce(t *testing.T) {
 	defer srv.Close()
 
 	var out, errOut bytes.Buffer
-	err := runTrailShowWithClient(t.Context(), &out, &errOut, api.NewClientWithBaseURL("tok", srv.URL), "gh", "acme", "repo", trailShowOptions{Selector: "7", JSON: true})
+	err := runTrailShowWithClientAtPath(t.Context(), &out, &errOut, api.NewClientWithBaseURL("tok", srv.URL), trailTestBasePath, "gh", "acme", "repo", trailShowOptions{Selector: "7", JSON: true})
 
 	require.NoError(t, err)
 	require.Empty(t, errOut.String())
@@ -1830,7 +1948,7 @@ func TestRunTrailShowJSONLeavesBodyEmptyWithoutDescription(t *testing.T) {
 	srv := trailShowTestServer(t, api.TrailResource{ID: "trl_1", Number: 7, Branch: "feature/x", Status: string(trail.StatusOpen)}, "", 0)
 
 	var out, errOut bytes.Buffer
-	err := runTrailShowWithClient(t.Context(), &out, &errOut, api.NewClientWithBaseURL("tok", srv.URL), "gh", "acme", "repo", trailShowOptions{Selector: "7", JSON: true})
+	err := runTrailShowWithClientAtPath(t.Context(), &out, &errOut, api.NewClientWithBaseURL("tok", srv.URL), trailTestBasePath, "gh", "acme", "repo", trailShowOptions{Selector: "7", JSON: true})
 
 	require.NoError(t, err)
 	require.Empty(t, errOut.String())
@@ -1849,7 +1967,7 @@ func TestRunTrailShowJSONKeepsStdoutParseableWhenDescriptionFetchFails(t *testin
 	srv := trailShowTestServer(t, api.TrailResource{ID: "trl_1", Number: 7, Branch: "feature/x", Title: "T", Body: trailTestListBody, Status: string(trail.StatusOpen)}, "", http.StatusInternalServerError)
 
 	var out, errOut bytes.Buffer
-	err := runTrailShowWithClient(t.Context(), &out, &errOut, api.NewClientWithBaseURL("tok", srv.URL), "gh", "acme", "repo", trailShowOptions{Selector: "feature/x", JSON: true})
+	err := runTrailShowWithClientAtPath(t.Context(), &out, &errOut, api.NewClientWithBaseURL("tok", srv.URL), trailTestBasePath, "gh", "acme", "repo", trailShowOptions{Selector: "feature/x", JSON: true})
 
 	require.NoError(t, err)
 	require.Contains(t, errOut.String(), "could not load trail description")
@@ -1868,7 +1986,7 @@ func TestRunTrailShowTextStillRendersTheHumanView(t *testing.T) {
 	}, "detail body", 0)
 
 	var out, errOut bytes.Buffer
-	err := runTrailShowWithClient(t.Context(), &out, &errOut, api.NewClientWithBaseURL("tok", srv.URL), "gh", "acme", "repo", trailShowOptions{Selector: "7"})
+	err := runTrailShowWithClientAtPath(t.Context(), &out, &errOut, api.NewClientWithBaseURL("tok", srv.URL), trailTestBasePath, "gh", "acme", "repo", trailShowOptions{Selector: "7"})
 
 	require.NoError(t, err)
 	require.Empty(t, errOut.String())
@@ -2247,7 +2365,7 @@ func TestRunTrailUpdateSendsTitleAsPatchAndBodyAsPut(t *testing.T) {
 	defer srv.Close()
 
 	var out, errOut bytes.Buffer
-	err := runTrailUpdateWithClient(t.Context(), &out, &errOut, api.NewClientWithBaseURL("tok", srv.URL), "gh", "acme", "repo", trailUpdateInputs{
+	err := runTrailUpdateWithClientAtPath(t.Context(), &out, &errOut, api.NewClientWithBaseURL("tok", srv.URL), trailTestBasePath, trailUpdateInputs{
 		Branch:       "feature/x",
 		Title:        "new title",
 		TitleChanged: true,
@@ -2296,7 +2414,7 @@ func TestRunTrailUpdateReportsNoChangesWhenNothingWasSent(t *testing.T) {
 	// assignee slice: it clears noFlags, and buildTrailUpdateRequest still
 	// returns an empty request — the same state the split has to refuse to
 	// report as a success.
-	err := runTrailUpdateWithClient(t.Context(), &out, io.Discard, api.NewClientWithBaseURL("tok", srv.URL), "gh", "acme", "repo", trailUpdateInputs{
+	err := runTrailUpdateWithClientAtPath(t.Context(), &out, io.Discard, api.NewClientWithBaseURL("tok", srv.URL), trailTestBasePath, trailUpdateInputs{
 		Branch:      "feature/x",
 		AssigneeAdd: []string{},
 	})
@@ -2343,7 +2461,7 @@ func TestRunTrailUpdateReportsAppliedMetadataWhenBodyWriteFails(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	err := runTrailUpdateWithClient(t.Context(), io.Discard, io.Discard, api.NewClientWithBaseURL("tok", srv.URL), "gh", "acme", "repo", trailUpdateInputs{
+	err := runTrailUpdateWithClientAtPath(t.Context(), io.Discard, io.Discard, api.NewClientWithBaseURL("tok", srv.URL), trailTestBasePath, trailUpdateInputs{
 		Branch:       "feature/x",
 		Title:        "new title",
 		TitleChanged: true,
@@ -2528,7 +2646,7 @@ func TestRunTrailUpdateWithClient_EtagThreadsToIfMatch(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	err := runTrailUpdateWithClient(t.Context(), io.Discard, io.Discard, api.NewClientWithBaseURL("tok", srv.URL), "gh", "acme", "repo", trailUpdateInputs{
+	err := runTrailUpdateWithClientAtPath(t.Context(), io.Discard, io.Discard, api.NewClientWithBaseURL("tok", srv.URL), trailTestBasePath, trailUpdateInputs{
 		Branch:      "feature/x",
 		Body:        "new body",
 		BodyChanged: true,
@@ -2576,7 +2694,7 @@ func TestRunTrailUpdateWithClient_OverwriteFlagSkipsEtagFetch(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	err := runTrailUpdateWithClient(t.Context(), io.Discard, io.Discard, api.NewClientWithBaseURL("tok", srv.URL), "gh", "acme", "repo", trailUpdateInputs{
+	err := runTrailUpdateWithClientAtPath(t.Context(), io.Discard, io.Discard, api.NewClientWithBaseURL("tok", srv.URL), trailTestBasePath, trailUpdateInputs{
 		Branch:      "feature/x",
 		Body:        "new body",
 		BodyChanged: true,
@@ -2630,7 +2748,7 @@ func TestRunTrailUpdateWithClient_EtagFetchFailureWarnsAndFallsBackToOverwrite(t
 	defer srv.Close()
 
 	var errBuf bytes.Buffer
-	err := runTrailUpdateWithClient(t.Context(), io.Discard, &errBuf, api.NewClientWithBaseURL("tok", srv.URL), "gh", "acme", "repo", trailUpdateInputs{
+	err := runTrailUpdateWithClientAtPath(t.Context(), io.Discard, &errBuf, api.NewClientWithBaseURL("tok", srv.URL), trailTestBasePath, trailUpdateInputs{
 		Branch:      "feature/x",
 		Body:        "new body",
 		BodyChanged: true,
