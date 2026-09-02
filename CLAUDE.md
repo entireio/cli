@@ -85,7 +85,21 @@ the commands are always runnable in every build.
   picks among the repo's placements and asks whether to replace the remote
   (preserving the old URL under `--upstream`) or add a separate one;
   non-interactively it repoints `--remote` directly. Both `use` and `clone`
-  choose a placement through the shared `selectPlacement` picker.
+  choose a placement through the shared `selectPlacement` picker. `clone`
+  accepts a native `/et/<project>/<repo>` ref (or the `<project>/<repo>`
+  shorthand — the `gh`/`et` forge tokens can never be project names, which are
+  3+ chars server-side, so the grammar is unambiguous; both segments must also
+  match the server's name charsets, so `git@github.com:foo/bar` is not a
+  shorthand), a mirror `/gh/<owner>/<repo>` ref, or a full `entire://` URL
+  passed through verbatim. A ref matching none of these gets a targeted error
+  (`invalidCloneRefError`): a GitHub URL is pointed at its `/gh/` form, a
+  malformed `gh/` ref keeps the mirror parser's reason, anything else lists
+  the accepted shapes.
+  A native ref resolves project → repo ULID → `GetRepo`, whose response is the
+  only one carrying both `clusterHost` and `path`, and clones
+  `entire://<clusterHost><path>` from the repo's home cluster (no `.git`
+  suffix — the server strips it for `/gh/` paths only; `--cluster` is
+  rejected on native refs).
 - `grant`: manage access grants and org membership — `org`, `project`, and `repo`
   each support `add` / `list` / `remove`
 
@@ -706,6 +720,231 @@ Don't use `fmt.Print*` for operational messages (checkpoint saves, hook invocati
 
 **Privacy**: Don't log user content (prompts, file contents, commit messages). Log only operational metadata (IDs, counts, paths, durations).
 
+### The Root Anchors
+
+Entire does filesystem I/O in seven trees, and each has one package that owns a
+shared `*os.Root` over it. **Never assemble a path into one of these and hand it
+to `os.ReadFile`/`os.WriteFile`/`os.MkdirAll`/`os.ReadDir`/`filepath.Walk`.**
+
+| Tree | Owner | Anchored on |
+| --- | --- | --- |
+| `.entire` | `entiredir` | worktree root (`paths.WorktreeRoot`), cwd only when there is provably no repo |
+| git common dir | `gitdir` | `git rev-parse --git-common-dir`, absolutized |
+| the working tree | `worktreedir` | worktree root |
+| an agent's hook config | `agent.HookConfigFile` | worktree root (`.claude/`, `.cursor/`, `.gemini/`, `.github/hooks/`, `.factory/`, `.codex/`, `.opencode/plugin/`) |
+| an agent's session store | `agent.SessionStore` | the agent's own `GetSessionDir` |
+| per-user config / cache | `userdirs.ConfigRoot` / `CacheRoot` | `$ENTIRE_CONFIG_DIR` else `~/.config/entire`; `$XDG_CACHE_HOME/entire` else `~/.cache/entire` |
+| managed plugin tree | `pluginRoot` (`plugin_store.go`) | `pluginParentDir()` — `$ENTIRE_PLUGIN_DIR`, `%LOCALAPPDATA%`, or `$XDG_DATA_HOME` |
+
+**An `os.Root`'s base directory must always be a trusted path — one a resolver
+produced — never `filepath.Dir` of the file being opened, and never a path that
+arrived as data.** This is the rule the table above encodes, and it is the one
+that is easy to get wrong because the wrong version *looks* like the fix:
+
+```go
+// WRONG — the root contains exactly the one name it was handed
+root, _ := osroot.Shared(filepath.Dir(target))
+data, _ := osroot.ReadFile(root, filepath.Base(target))
+
+// RIGHT — the base is what a resolver answered; the rest is a name inside it
+root, _ := worktreedir.OpenAt(worktreeRoot)
+name, _ := worktreedir.Name(worktreeRoot, target)
+data, _ := osroot.ReadFile(root, name)
+```
+
+Anchoring on the target's own parent puts every component the caller resolved
+*above* the root, so containment covers only the final component and enforces
+nothing the `filepath.Join` had not already decided. A symlink at `.claude`, at
+`.entire`, or at `entire-investigations` is resolved before the root exists.
+Anchoring one level up makes those components **names inside** the root, which is
+what `os.Root` and `osroot.MkdirAllNoSymlink` can actually refuse. The same
+reasoning kills a containment *check* built on a derived base:
+`settings.clonePreferencesRoot` used to compute its common dir as
+`filepath.Dir(filepath.Dir(abs))` and hand both to `gitdir.OpenPathIn`, so the
+relative path was correct by construction and the check could never fire.
+
+`TestRootBasesAreTrusted` (`osroot/rootbase_guard_test.go`) enforces this: a file
+that opens a root without being in `allowedRootBases` fails the build, and an
+entry whose file no longer opens one fails too, so the allowlist cannot outlive
+its reasons. **Prefer an existing anchor over a new root** — that is what the
+anchors are for. Two entries are genuine exceptions, both on a path the *caller*
+named, where the file's parent IS the caller's choice and no other base exists:
+`tokenstore` (`$ENTIRE_TOKEN_STORE_PATH`) and `settings.readConfinedOutsideEntire`'s
+explicit-path fallback. Each says so at the call site.
+
+All of them memoize through **one** registry, `osroot.Shared(dir)` — a directory
+is opened at most once per process. `osroot.ResetShared` clears every anchor;
+`osroot.Forget(dir)` drops a single one, which is what a caller about to delete
+and recreate one directory needs (the plugin index cache is a git clone this
+process may `RemoveAll` mid-run — a root cached across that is a handle to an
+unlinked inode). There were three copies of that map before; do not add another.
+
+Pair the roots with `osroot` (`ReadFile`, `WriteFile`, `MkdirAllNoSymlink`,
+`Remove`, `ReadDir`) and `jsonutil.WriteFileAtomicIn` / `CreateTempIn`.
+
+**A subdirectory of an anchor is opened with `osroot.SharedChild` (memoized,
+registry-owned) or `osroot.OpenChild` (short-lived, caller closes), never a bare
+`parent.OpenRoot(name)`.** `os.Root` refuses a symlink that escapes the parent
+but follows one pointing elsewhere *inside* it, so the bare call silently
+accepts a redirected `.git/entire-sessions` or `.entire`. Both helpers `Lstat`
+before and `SameFile` after, which also closes the Lstat/OpenRoot race. Neither
+appears in `rootOpeners`, deliberately: their base is an already-open root, so
+it is trusted by construction and flagging their callers would defeat the point
+of having them.
+
+**An atomic write leaves its temp file in the same directory as its target, and
+one of those directories is walked wholesale into every checkpoint tree.**
+`jsonutil.CreateTempIn` writes `<base>.<16 hex>.tmp` beside the file it is
+replacing; `.entire/metadata/<session>` holds `full.jsonl` and is copied into
+the tree by `addDirectoryToChanges` (ephemeral) and `copyMetadataDir`
+(persistent). A hook killed between the create and the rename — an agent hook
+timeout, Codex's session-end process-tree kill, a crash — leaves the temp
+behind, and without a filter it is redacted, committed, and pushed on every
+later checkpoint. Both walks therefore skip `jsonutil.IsTempName`. Keep that
+predicate matching `CreateTempIn`'s output exactly
+(`TestIsTempName_MatchesWhatCreateTempInProduces` pins it): a naming change that
+outruns it turns both filters into no-ops silently. `agent.ParseChunkIndex` is
+the second half of the same defence — it requires the suffix to be *entirely*
+digits, because `fmt.Sscanf("%03d")` stopped at the first non-digit and so read
+`full.jsonl.123abc….tmp` back as chunk 123 and reassembled it into the
+transcript.
+
+**The test is "is there a containment boundary?", not "is traversal reachable
+today?"** A root is cheap and it is what keeps a *future* change safe: the names
+under several of these directories are fixed constants right now, and that is not
+a reason to skip the root. Two places already carried hand-written comments
+saying validation was the only thing keeping a path inside its tree —
+`PluginDataDir` ("guarantees ENTIRE_PLUGIN_DATA_DIR always points inside the
+managed data subtree") and `investigate.RunDir` ("an unvalidated id would be a
+path-traversal sink") — which is the argument for the primitive, not against it.
+
+**What each anchor is actually protecting.** These are not uniform, and the
+comments at each site say which case applies:
+
+- `.entire` and the git common dir hold names built from agent-supplied session
+  IDs, tool-use IDs, and investigation run IDs. Several call sites used to carry
+  hand-written comments explaining that an unvalidated ID would be a traversal
+  sink feeding `os.RemoveAll`. The root makes that structural.
+- The working tree holds names from `git status` and from checkpoint **tree
+  entries**, which may have been fetched from a remote. Rewind's restore half
+  already opened a root for that reason; its reads did not.
+- An agent's session store is where a hook payload's session ID becomes a path,
+  via the agent's own `ResolveSessionFile`. `SessionStore.SessionFile` converts
+  the result back to a name inside the store and **rejects** an ID that left it.
+
+**Rules that are load-bearing rather than stylistic:**
+
+- **`entiredir.Open` creates, `entiredir.OpenForRead` does not.** A command that
+  only looks must leave an untouched repo untouched — which is why
+  `logging.Config.Root` takes a *function*: the log file is created by the first
+  line actually written, so a command that logs nothing leaves no `.entire`.
+- **No symlinked directories.** Every create goes through
+  `osroot.MkdirAllNoSymlink`, which refuses when a component already exists as a
+  symlink (`osroot.ErrSymlinkedPath`). `os.Root` alone is not enough: it blocks a
+  symlink that *escapes* a root but follows one pointing elsewhere *inside* it,
+  and an escaping one otherwise fails later with an opaque errno far from the
+  cause. `entire doctor` reports what is already there
+  (`checkEntireDirSymlinks`). `.entire` **itself is refused too**: `entiredir`
+  opens it as a checked child of the worktree root (`osroot.SharedChild`), which
+  `Lstat`s before and `SameFile`s after. An earlier revision allowed it on the
+  grounds that `os.OpenRoot` follows a symlinked root and an existing setup
+  should keep working; that was reversed, because `.entire` holds the redaction
+  settings deciding what may be committed, and "we follow it, so your data lands
+  somewhere else" is not a property to grandfather. `doctor` is exempt from the
+  pre-run guard so it still runs on such a repo, and its message says the repo is
+  stopped rather than that the setup is fine.
+  The agent hook-config directories get the same treatment via
+  `agent.HookConfigFile`: a symlinked `.claude` / `.cursor` / `.gemini` /
+  `.codex` is refused at the create, because a working tree arrives by clone and
+  `entire enable` must not create directories and write JSON through a link the
+  repository supplied. The config FILE may still be a symlink — pointing
+  `.claude/settings.json` at a dotfile repo is a real setup — with one behaviour
+  change worth knowing: an **absolute** link there no longer resolves, since
+  `os.Root` refuses absolute symlinks unconditionally. A relative one inside the
+  worktree still works.
+
+  **A symlinked agent DIRECTORY is refused by every operation, not just the ones
+  that create.** `os.Root` blocks a link that escapes the worktree and follows
+  one pointing elsewhere inside it, so `.claude -> vendor/x` was previously read
+  by `Read`/`GeneratedState`, reported present by `Exists`, and had `Remove`
+  delete the file at the far end; only `Write` checked, because
+  `MkdirAllNoSymlink` was the only check there was. `osroot.NoSymlinkedParent` is
+  that function's read-only counterpart, and every `HookConfigFile` method calls
+  it. `HookConfigFile.Root()` hands over the raw primitives, so its one caller
+  (Codex's `hooksDocumentRoot`) makes the check itself.
+
+  **`writeManagedScaffold` is the same rule for the skill scaffolds** —
+  `.claude/skills/`, `.claude/agents/`, `.codex/agents/`, `.gemini/agents/`. It
+  was not one of the seven call sites `HookConfigFile` replaced, and until it was
+  anchored it did `os.MkdirAll` two levels and `os.WriteFile` through a symlinked
+  `.claude`, landing files outside the repository and reporting Created. It now
+  takes a worktree root rather than an assembled absolute path, and its callers
+  no longer fall back to `os.Getwd()` when `WorktreeRoot` fails.
+- **Call `Reset()` before deleting a rooted directory** (see
+  `removeEntireDirectory`). A root that outlives its directory is a handle to an
+  unlinked inode: writes succeed and land nowhere.
+- **Two coordinates, one directory.** Repo-relative constants
+  (`paths.EntireTmpDir`, `settings.EntireSettingsFile`, `logging.LogsDir`,
+  `session.SessionStateDirName`) stay as they are — git tree paths, commit
+  trailers, gitignore entries and messages all need them. `entiredir.Name` /
+  `MustName` is the one bridge to the root-relative name used for I/O. Do not
+  introduce an absolute twin of a path that already has a repo-relative spelling:
+  `checkpoint.WriteOptions.MetadataDirAbs` existed alongside `MetadataDir` and
+  was deleted for exactly that reason. Guard tests pin the pairs that must agree.
+- **Absolute paths stay absolute when they cross a process boundary** —
+  `opencode export` takes a path, `entire investigate` hands the agent its
+  `state.json` path, a transcript path becomes a checkpoint's `SessionRef`.
+  Those keep an absolute spelling; the reads and writes around them still go
+  through a root.
+- **Anything outside the CLI packages takes an `fs.FS`, not a path.**
+  `redact.LoadPacks(fsys, dir, logger)` is handed `root.FS()`, which is how pack
+  discovery stays confined without `redact` depending on the CLI.
+- **A directory cannot be created, statted, or removed through its own root.**
+  Those operations (`setupEntireDirectory`, `removeEntireDirectory`, the one
+  `MkdirAll` of an agent's session dir in `resume.go`) legitimately use plain
+  `os` calls.
+
+**Deliberately not rooted**, with the reason:
+
+- **`.git/hooks`** — `GetHooksDir` honours `core.hooksPath`, so the directory is
+  often not `.git`-resident at all, and the hook filenames are compile-time
+  constants. No untrusted name to contain.
+- **Global/system git config** — `checkpoint/configloader.go` installs a
+  *symlink-following* `billy.Basic` on purpose. `os.Root` documents that
+  "symbolic links must not be absolute" unconditionally, so go-git's default
+  (`osfs.Default`, a boundOS over `os.Root` anchored at `/`) silently dropped the
+  global config of anyone whose `~/.config` is a symlink — author identity fell
+  back to "Unknown" and signing was skipped. Scope is global + system only;
+  `.git/config` is served by `r.Storer.Config()` and never reaches this. Its
+  mutating methods fail closed.
+- **Agent `ReadTranscript(path)` / `ReadSession(input)`** — neither carries a
+  repo path, so neither can build its own store, and the path they receive was
+  already resolved through one (`ResolveTranscriptPath`, `resolveTranscriptPath`).
+  Containment is applied at resolution. Rooting them properly needs `RepoPath` on
+  `HookInput`, which is part of the external-plugin protocol.
+
+  **This is the one place the rooting is knowingly asymmetric, and it is the
+  largest gap left**, so do not read it as settled. The WRITE half is contained
+  — every agent's `WriteSession` goes through `agent.WriteSessionFile` and
+  `SessionStore`, which rejects a `SessionRef` outside the agent's session
+  directory — while the eight `os.ReadFile(sessionRef)` reads are not, and the
+  read is what pulls transcript content into checkpoints. Closing it is a
+  protocol change rather than a refactor, which is why it is scoped separately;
+  the shape it wants is `HookInput.RepoPath` plus the same
+  `sessionStoreForWrite` resolution the write half already uses. Do not "fix"
+  it by anchoring a root on `filepath.Dir(sessionRef)` — that is the derived
+  base the rule above refuses, and it would contain nothing while looking like
+  it did.
+- **Global/system git config** — see the config-loader bullet above; that is the
+  one place rooting is actively wrong.
+- **A directory the caller is about to create, replace, or delete** — creating,
+  statting, or removing a directory is an operation on it from the outside, which
+  a root over it cannot perform. `setupEntireDirectory`, `removeEntireDirectory`,
+  the `MkdirAll` behind each anchor, and the plugin index clone are all this case.
+- **Paths the user named** (`doctor bundle --out`, `api --input`) and the two
+  single fixed files `/dev/tty` and `/proc/<pid>/*`. No boundary exists to
+  enforce.
+
 ### Git Operations
 
 We use github.com/go-git/go-git for most git operations, but with important exceptions:
@@ -732,7 +971,22 @@ Routing every open through `gitrepo` guarantees two behaviours no ad-hoc
 
 If a code path opens a repo with a bare go-git call, it silently breaks on
 reftable and sha256 repositories. Reviewers should flag any new
-`git.PlainOpen*`/`git.Open` outside `gitrepo`. Key files: `gitrepo/repository.go`
+`git.PlainOpen*`/`git.Open` outside `gitrepo`.
+
+**`OpenCurrent` fails rather than opening the current directory.** It used to
+fall back to `OpenPath(".")` when `paths.WorktreeRoot` could not resolve, and
+"." is a *different repository* whenever git and the process's directory
+disagree — which is precisely what the cases that break the resolution look
+like. Git exports `GIT_DIR`/`GIT_WORK_TREE` to the hooks it runs and
+`WorktreeRoot` honours them, while `OpenPath(".")` cannot see them, so a hook
+running for repo A opened repo B; and go-git applies neither git's
+`safe.directory` ownership check nor its `.git` parse, so the fallback opened
+repositories the user's own git refuses. Use `gitrepo.OpenCurrentOrCwd` only for
+`WarnCheckpointPolicyIfNeeded`, whose three properties do not generalise: it is
+dispatched from `main.go` after cobra, so it is the one repository open with no
+pre-run guard ahead of it; it only reads a policy ref; and it discards every
+error. Anything that writes must stop instead — that is what "we could not
+find out which repository this is" means. Key files: `gitrepo/repository.go`
 (open entry points) and `gitrepo/reftable.go` (`reftableStorer`).
 
 #### Reading Worktree Status - Always Use `gitrepo.Status`

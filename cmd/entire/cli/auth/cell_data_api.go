@@ -387,12 +387,27 @@ func resolveJurisdiction(override, loginJWT string) (string, error) {
 			return "", err
 		}
 	}
-	jurisdiction = strings.ToLower(strings.TrimSpace(jurisdiction))
+	jurisdiction, err := NormalizeJurisdiction(jurisdiction)
+	if err != nil {
+		return "", fmt.Errorf("%w; refusing to route", err)
+	}
 	if jurisdiction == "" {
 		return "", errors.New("login token has no home_jurisdiction claim; cannot route to entire-api cell")
 	}
+	return jurisdiction, nil
+}
+
+// NormalizeJurisdiction is the one rule for a user- or claim-supplied
+// jurisdiction: trimmed, lowercased, and constrained to a single DNS label
+// (`--jurisdiction US`, `" us "` and `us` all yield `us`). Empty is returned as
+// "" without error so callers can apply their own default (home).
+func NormalizeJurisdiction(value string) (string, error) {
+	jurisdiction := strings.ToLower(strings.TrimSpace(value))
+	if jurisdiction == "" {
+		return "", nil
+	}
 	if !jurisdictionLabelPattern.MatchString(jurisdiction) {
-		return "", fmt.Errorf("jurisdiction %q is not a valid label; refusing to route", jurisdiction)
+		return "", fmt.Errorf("jurisdiction %q is not a valid label", jurisdiction)
 	}
 	return jurisdiction, nil
 }
@@ -562,9 +577,11 @@ func requireSafeExchangeURL(label, raw string) error {
 
 // HomeJurisdictionFromLoginJWT reads the home_jurisdiction claim without
 // verifying the signature — callers only route with it; the server
-// re-verifies. Returns "" (no error) when the claim is absent so each
-// caller can phrase its own missing-claim error. Shared with
-// git-remote-entire's jurisdiction git auth.
+// re-verifies. The claim is normalized (NormalizeJurisdiction), so a
+// malformed label is an error here and every reader sees one spelling.
+// Returns "" (no error) when the claim is absent so each caller can phrase
+// its own missing-claim error. Shared with git-remote-entire's jurisdiction
+// git auth.
 func HomeJurisdictionFromLoginJWT(loginJWT string) (string, error) {
 	parts := strings.Split(loginJWT, ".")
 	if len(parts) < 2 {
@@ -580,7 +597,7 @@ func HomeJurisdictionFromLoginJWT(loginJWT string) (string, error) {
 	if err := json.Unmarshal(payload, &claims); err != nil {
 		return "", fmt.Errorf("parse login token payload: %w", err)
 	}
-	return claims.HomeJurisdiction, nil
+	return NormalizeJurisdiction(claims.HomeJurisdiction)
 }
 
 type clusterListingRow struct {

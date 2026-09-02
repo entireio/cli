@@ -481,13 +481,12 @@ func TestCondenseSession_TagsCheckpointSummaryWithHasInvestigation(t *testing.T)
 	require.NoError(t, os.WriteFile(trackedFile, []byte("agent-modified content"), 0o644))
 
 	require.NoError(t, s.SaveStep(context.Background(), StepContext{
-		SessionID:      sessionID,
-		ModifiedFiles:  []string{"test.txt"},
-		MetadataDir:    metadataDir,
-		MetadataDirAbs: metadataDirAbs,
-		CommitMessage:  "Investigate checkpoint 1",
-		AuthorName:     "Test",
-		AuthorEmail:    "test@test.com",
+		SessionID:     sessionID,
+		ModifiedFiles: []string{"test.txt"},
+		MetadataDir:   metadataDir,
+		CommitMessage: "Investigate checkpoint 1",
+		AuthorName:    "Test",
+		AuthorEmail:   "test@test.com",
 	}))
 
 	state, err := s.loadSessionState(context.Background(), sessionID)
@@ -735,12 +734,11 @@ func TestCondenseSessionByID_DoesNotReuseCheckpointAfterSessionAdvances(t *testi
 	advancedTranscript := testTranscriptPromptResponse + `{"type":"human","message":{"content":"another prompt"}}` + "\n"
 	require.NoError(t, os.WriteFile(filepath.Join(metadataDirAbs, paths.TranscriptFileName), []byte(advancedTranscript), 0o644))
 	require.NoError(t, s.SaveStep(context.Background(), StepContext{
-		SessionID:      sessionID,
-		MetadataDir:    metadataDir,
-		MetadataDirAbs: metadataDirAbs,
-		CommitMessage:  "Checkpoint 2",
-		AuthorName:     "Test",
-		AuthorEmail:    "test@test.com",
+		SessionID:     sessionID,
+		MetadataDir:   metadataDir,
+		CommitMessage: "Checkpoint 2",
+		AuthorName:    "Test",
+		AuthorEmail:   "test@test.com",
 	}))
 
 	require.NoError(t, s.CondenseSessionByID(context.Background(), sessionID))
@@ -787,13 +785,12 @@ func setupCondensableSessionWithTranscript(t *testing.T, sessionID string) (*git
 	require.NoError(t, os.WriteFile(trackedFile, []byte("agent-modified content"), 0o644))
 
 	require.NoError(t, s.SaveStep(context.Background(), StepContext{
-		SessionID:      sessionID,
-		ModifiedFiles:  []string{"test.txt"},
-		MetadataDir:    metadataDir,
-		MetadataDirAbs: metadataDirAbs,
-		CommitMessage:  "checkpoint 1",
-		AuthorName:     "Test",
-		AuthorEmail:    "test@test.com",
+		SessionID:     sessionID,
+		ModifiedFiles: []string{"test.txt"},
+		MetadataDir:   metadataDir,
+		CommitMessage: "checkpoint 1",
+		AuthorName:    "Test",
+		AuthorEmail:   "test@test.com",
 	}))
 
 	state, err := s.loadSessionState(context.Background(), sessionID)

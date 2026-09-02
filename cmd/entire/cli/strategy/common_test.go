@@ -62,11 +62,18 @@ func TestWorktreeRoot_Cache(t *testing.T) {
 		t.Fatalf("paths.WorktreeRoot(context.Background()) cached = %q, want %q", got2, want)
 	}
 
-	// After clearing the cache the broken PATH should cause a failure.
+	// After clearing the cache the broken PATH must cause a failure, even though
+	// this directory plainly is a repository and a walk up for .git would say so.
+	// Nothing here may substitute a guess for git's answer: the failure is what
+	// keeps entiredir's fallback to the current directory narrow, since that
+	// fallback fires only on ErrNotARepository, which this is not.
 	paths.ClearWorktreeRootCache()
 	_, err = paths.WorktreeRoot(context.Background())
 	if err == nil {
 		t.Fatal("paths.WorktreeRoot(context.Background()) should fail after cache clear with broken PATH")
+	}
+	if errors.Is(err, paths.ErrNotARepository) {
+		t.Fatalf("a git that could not be run was reported as no repository: %v", err)
 	}
 }
 

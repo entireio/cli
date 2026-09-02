@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Declared for parity with test-copilot-cli-agent-integration.sh, which prints it in its banner.
+# shellcheck disable=SC2034
 AGENT_NAME="Codex"
 AGENT_SLUG="codex"
 AGENT_BIN="codex"
@@ -156,6 +158,9 @@ if [ "${1:-}" = "--run-cmd" ]; then
     shift
     echo "=== Automated Run ==="
     echo "Running: $*"
+    # --run-cmd takes a command *string*, which is intentionally re-parsed so that
+    # pipelines and redirection work. Executing "$@" directly would break that.
+    # shellcheck disable=SC2294
     eval "$@" || true
     sleep 2
 elif [ "${1:-}" = "--manual-live" ]; then

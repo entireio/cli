@@ -66,8 +66,7 @@ func (a *PiAgent) GetTranscriptPosition(path string) (int, error) {
 	if path == "" {
 		return 0, nil
 	}
-	//nolint:gosec // path from validated SessionRef set by lifecycle hooks
-	data, err := os.ReadFile(path)
+	data, err := agent.ReadTranscriptFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return 0, nil
@@ -85,8 +84,7 @@ func (a *PiAgent) ExtractModifiedFilesFromOffset(path string, startOffset int) (
 	if path == "" {
 		return nil, 0, nil
 	}
-	//nolint:gosec // path from validated SessionRef
-	data, err := os.ReadFile(path)
+	data, err := agent.ReadTranscriptFile(path)
 	if err != nil {
 		return nil, 0, fmt.Errorf("read pi transcript: %w", err)
 	}
@@ -134,8 +132,7 @@ func (a *PiAgent) ExtractPrompts(sessionRef string, fromOffset int) ([]string, e
 	if sessionRef == "" {
 		return nil, nil
 	}
-	//nolint:gosec // sessionRef from validated SessionRef
-	data, err := os.ReadFile(sessionRef)
+	data, err := agent.ReadTranscriptFile(sessionRef)
 	if err != nil {
 		return nil, fmt.Errorf("read pi transcript: %w", err)
 	}

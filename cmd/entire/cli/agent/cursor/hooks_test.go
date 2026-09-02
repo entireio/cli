@@ -6,6 +6,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/testutil"
 	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
+	"github.com/entireio/cli/cmd/entire/cli/osroot"
 	"os"
 	"path/filepath"
 	"strings"
@@ -74,6 +75,12 @@ func TestInstallHooks_WindowsProbeSuccessKeepsShWrappers(t *testing.T) {
 	}))
 
 	tempDir := t.TempDir()
+	// Installing hooks anchors a process-wide os.Root on the worktree root
+	// (worktreedir.OpenAt -> osroot.Shared), which is never closed. Windows
+	// cannot remove a directory while a handle to it is open, so the registry
+	// must be closed before t.TempDir's RemoveAll — t.Cleanup is LIFO, and
+	// TempDir registered its removal first, so this runs before it.
+	t.Cleanup(osroot.ResetShared)
 	t.Chdir(tempDir)
 
 	ag := &CursorAgent{}
@@ -95,6 +102,12 @@ func TestInstallHooks_WindowsProbeFailureUsesCmdWrappers(t *testing.T) {
 	}))
 
 	tempDir := t.TempDir()
+	// Installing hooks anchors a process-wide os.Root on the worktree root
+	// (worktreedir.OpenAt -> osroot.Shared), which is never closed. Windows
+	// cannot remove a directory while a handle to it is open, so the registry
+	// must be closed before t.TempDir's RemoveAll — t.Cleanup is LIFO, and
+	// TempDir registered its removal first, so this runs before it.
+	t.Cleanup(osroot.ResetShared)
 	t.Chdir(tempDir)
 
 	ag := &CursorAgent{}
@@ -120,6 +133,12 @@ func TestInstallHooks_WindowsProbeFlipMigratesCleanly(t *testing.T) {
 	}))
 
 	tempDir := t.TempDir()
+	// Installing hooks anchors a process-wide os.Root on the worktree root
+	// (worktreedir.OpenAt -> osroot.Shared), which is never closed. Windows
+	// cannot remove a directory while a handle to it is open, so the registry
+	// must be closed before t.TempDir's RemoveAll — t.Cleanup is LIFO, and
+	// TempDir registered its removal first, so this runs before it.
+	t.Cleanup(osroot.ResetShared)
 	t.Chdir(tempDir)
 	ag := &CursorAgent{}
 

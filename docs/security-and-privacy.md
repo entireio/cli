@@ -6,17 +6,26 @@ Entire stores AI session transcripts and metadata in your git repository. This d
 
 ### Where data is stored
 
-When you use Entire with an AI agent (Claude Code, Codex, Gemini CLI, OpenCode, Cursor, Factory AI Droid, Copilot CLI, Pi), session transcripts, user prompts, and checkpoint metadata are committed to a dedicated branch in your git repository (`entire/checkpoints/v1`). This branch is separate from your working branches, your code commits stay clean, but it lives in the same repository.
+When you use Entire with an AI agent (Claude Code, Codex, Gemini CLI, OpenCode, Cursor, Factory AI Droid, Copilot CLI, Pi), session transcripts, user prompts, and checkpoint metadata are committed to **your own git repository**. They stay out of your working branches' history, but they live in the same repo and travel with it.
 
-Entire also creates temporary local branches (e.g., `entire/<short-hash>`) as working storage during a session. Metadata written to these shadow branches — transcripts, prompts, incremental checkpoint data, subagent transcripts — goes through the same redaction pipeline as `entire/checkpoints/v1`. **Code-file snapshots, however, are written as raw blobs of your working tree without redaction**, so any hardcoded secrets in your source code would appear unredacted on the shadow branch. Gitignored files (e.g., `.env`) are filtered out of these snapshots as a partial defense. Shadow branches are **not** pushed by Entire; do not push them manually, because unredacted source content would be visible on the remote. They are cleaned up when session data is condensed into `entire/checkpoints/v1` at commit time.
+Exactly where depends on the [checkpoint backend](architecture/ref-checkpoint-backend.md) the repo uses:
 
-Anyone with access to your repository can view the transcript data on the `entire/checkpoints/v1` branch. This includes the full prompt/response history and session metadata. Note that transcripts capture all tool interactions — including file contents, MCP server calls, and other data exchanged during the session.
+| Backend | Committed checkpoints land in | Notes |
+|---|---|---|
+| `git-refs` (default for new repos) | One ref per checkpoint: `refs/entire/checkpoints/<shard>/<id>` | Not a branch. Pushed individually, and fetched individually on demand |
+| `git-branch` (legacy) | Subtrees of one long-lived branch, `entire/checkpoints/v1` | A branch, so it shows up in branch listings, CI branch triggers, and platform previews |
+
+Which one a repo is on is recorded as `checkpoints.primary.type` in `.entire/settings.json` (or `settings.local.json`); an absent `checkpoints` block means `git-branch`. The redaction described in this document applies identically to both — the pipeline is shared, and only the destination differs. Where the distinction matters below, it is called out.
+
+Entire also creates temporary local **shadow branches** (e.g. `entire/<commit>-<worktree>`) as working storage during a session, on both backends. Metadata written there — transcripts, prompts, incremental checkpoint data, subagent transcripts — goes through the same redaction pipeline as a committed checkpoint. **Code-file snapshots, however, are written as raw blobs of your working tree without redaction**, so any hardcoded secrets in your source code would appear unredacted on the shadow branch. Gitignored files (e.g., `.env`) are filtered out of these snapshots as a partial defense. Shadow branches are **not** pushed by Entire; do not push them manually, because unredacted source content would be visible on the remote. They are cleaned up when session data is condensed into a checkpoint at commit time.
+
+Anyone with access to your repository can read committed checkpoint data: the full prompt/response history and session metadata. Note that transcripts capture all tool interactions — including file contents, MCP server calls, and other data exchanged during the session. Per-checkpoint refs are less *visible* than a branch, but they are not less accessible: a `git fetch` of `refs/entire/checkpoints/*` reads them just as well.
 
 If your repository is **public**, this data is visible to the entire internet.
 
 ### What Entire redacts automatically
 
-Entire automatically scans transcript and metadata content before writing it to the `entire/checkpoints/v1` branch. Five always-on secret detection methods plus a configurable scanner layer (pattern matching, method 2 below) run during condensation, plus a conditional seventh pass for user-defined secret rules (see [Customizing redaction](#customizing-redaction) below), an opt-in eighth pass for PII (see [Optional PII redaction](#optional-pii-redaction) below), and an opt-in ninth pass that shells out to the OpenAI Privacy Filter model (see [Optional OpenAI Privacy Filter](#optional-openai-privacy-filter-opf) below):
+Entire automatically scans transcript and metadata content before writing it to a git object. Five always-on secret detection methods plus a configurable scanner layer (pattern matching, method 2 below) run during condensation, plus a conditional seventh pass for user-defined secret rules (see [Customizing redaction](#customizing-redaction) below), an opt-in eighth pass for PII (see [Optional PII redaction](#optional-pii-redaction) below), and an opt-in ninth pass that shells out to the OpenAI Privacy Filter model (see [Optional OpenAI Privacy Filter](#optional-openai-privacy-filter-opf) below):
 
 1. **Entropy scoring** — Identifies high-entropy strings (Shannon entropy > 4.5) that look like randomly generated secrets, even if they don't match a known pattern.
 2. **Pattern matching** — Runs one or both configurable scanner engines against known secret formats: [Betterleaks](https://github.com/betterleaks/betterleaks) (default on) and/or [goredact](https://github.com/lastpersonlabs/goredact) (default off). See [Choosing secret-scanner engines](#choosing-secret-scanner-engines) below.
@@ -131,7 +140,7 @@ Available categories (set to `true` to enable, `false` or omit to skip):
 
 Unknown category names are rejected at settings load time so typos surface immediately instead of silently disabling a category.
 
-The filter needs at least one enabled category to run. This is enforced at push time, not settings load: with `enabled: true` and no effective category (`categories` omitted, empty, or all-false) the model scan cannot run, so the push aborts with a configuration error rather than tagging commits as OPF-applied without a scan. Enable a category, set `enabled: false`, or pass `ENTIRE_OPF=no` on a push to skip the filter for that push only.
+The filter needs at least one enabled category to run. This is enforced at push time, not settings load: with `enabled: true` and no effective category (`categories` omitted, empty, or all-false) the model scan cannot run. Rather than tagging commits as OPF-applied without a scan, it fails closed the same way a runtime failure does: `git-branch` aborts the push, `git-refs` withholds the checkpoint refs and lets your push through. Enable a category, set `enabled: false`, or pass `ENTIRE_OPF=no` on a push to skip the filter for that push only.
 
 Full settings reference:
 
@@ -162,52 +171,22 @@ Full settings reference:
 
 ### Why `command` is local-only
 
-`command` becomes `argv[0]` of a process Entire executes during `git push`, so
-whoever controls that string controls what runs on the developer's machine.
-`.entire/settings.json` is version-controlled, which would let an ordinary pull
-request pair a `command` with a payload committed alongside it — and a JSON
-settings diff does not read as executable to a reviewer. The pre-push prompt is
-no defense either: it never names the command, `prompt_default: "always"` skips
-it, and non-TTY pushes (CI, agent-driven) auto-run.
+`command` becomes `argv[0]` of a process Entire executes during `git push`, so whoever controls that string controls what runs on the developer's machine. `.entire/settings.json` is version-controlled, which would let an ordinary pull request pair a `command` with a payload committed alongside it — and a JSON settings diff does not read as executable to a reviewer. The pre-push prompt is no defense either: it never names the command, `prompt_default: "always"` skips it, and non-TTY pushes (CI, agent-driven) auto-run.
 
 Entire therefore honors `command` only when it is genuinely developer-owned:
 
 - it must come from `.entire/settings.local.json`, not `.entire/settings.json`
 - that file must be **untracked** — absent from both the git index and `HEAD`
 
-The second check matters because the filename alone proves nothing:
-`.gitignore` does not apply to a path that is already tracked, so
-`git add -f .entire/settings.local.json` commits it and a fresh clone
-materializes it with the committed content.
+The second check matters because the filename alone proves nothing: `.gitignore` does not apply to a path that is already tracked, so `git add -f .entire/settings.local.json` commits it and a fresh clone materializes it with the committed content.
 
-This is enforced for the whole file, not just this setting: a tracked
-`.entire/settings.local.json` is ignored in its entirety, because it is not
-local to your clone — it arrives with the repository and would override project
-settings for everyone. Entire warns on stderr and tells you to run
-`git rm --cached .entire/settings.local.json`. The load still succeeds using
-project settings, so a committed file cannot brick the repository.
+This is enforced for the whole file, not just this setting: a tracked `.entire/settings.local.json` is ignored in its entirety, because it is not local to your clone — it arrives with the repository and would override project settings for everyone. Entire warns on stderr and tells you to run `git rm --cached .entire/settings.local.json`. The load still succeeds using project settings, so a committed file cannot brick the repository.
 
-The two checks also differ in depth. The layer check looks at the git index; the
-`command` check also looks at `HEAD`. A pull request that commits the file puts
-it in the index of every clone that checks the branch out, so the index is what
-catches a delivered attack — and checkout cannot produce a file that is absent
-from the index, so "committed, then `git rm --cached`" is a state you created
-locally, not one that arrived with the repository. Reading `HEAD` is the
-expensive half, so it is reserved for the setting that gets executed.
+The two checks also differ in depth. The layer check looks at the git index; the `command` check also looks at `HEAD`. A pull request that commits the file puts it in the index of every clone that checks the branch out, so the index is what catches a delivered attack — and checkout cannot produce a file that is absent from the index, so "committed, then `git rm --cached`" is a state you created locally, not one that arrived with the repository. Reading `HEAD` is the expensive half, so it is reserved for the setting that gets executed.
 
-The two checks fail in opposite directions on purpose. If the repository cannot
-be read at all, the local layer is still applied — losing every local
-preference over an unreadable repo is worse than the risk. The executed
-`command` is dropped in that case, because being wrong there means running
-someone else's binary. With no repository at all, nothing can have arrived by
-cloning, so the file is treated as yours.
+The two checks fail in opposite directions on purpose. If the repository cannot be read at all, the local layer is still applied — losing every local preference over an unreadable repo is worse than the risk. The executed `command` is dropped in that case, because being wrong there means running someone else's binary. With no repository at all, nothing can have arrived by cloning, so the file is treated as yours.
 
-When a `command` fails these checks it is ignored with a warning in
-`.entire/logs/entire.log` and OPF falls back to resolving `opf` on `$PATH`. If
-that binary is missing, the pre-push rewrite fails closed rather than pushing
-content you believed OPF had scanned. Everything else in the OPF block
-(`enabled`, `categories`, `timeout_seconds`, `prompt_default`) is ordinary
-configuration and still works from the shared project file.
+When a `command` fails these checks it is ignored with a warning in `.entire/logs/entire.log` and OPF falls back to resolving `opf` on `$PATH`. If that binary is missing, the pre-push rewrite fails closed rather than pushing content you believed OPF had scanned. Everything else in the OPF block (`enabled`, `categories`, `timeout_seconds`, `prompt_default`) is ordinary configuration and still works from the shared project file.
 
 The interactive prompt offers three options and reacts to **Ctrl-C** for cancellation:
 
@@ -224,17 +203,17 @@ Ctrl-C to cancel the push.
 - **Yes** runs OPF for this push only.
 - **No** skips OPF for this push only; the 8-layer-redacted content reaches the remote.
 - **Always** runs OPF this push AND writes `prompt_default: "always"` to `.entire/settings.local.json` so future pushes don't ask.
-- **Ctrl-C** aborts the push entirely — `git push` exits non-zero, no refs go to the remote.
+- **Ctrl-C** cancels OPF. What that costs depends on the backend: on `git-branch` your `git push` aborts and exits non-zero; on `git-refs` your push completes and the checkpoint refs stay queued for a later push. Either way nothing under-redacted reaches the remote.
 
-Non-interactive contexts (CI, scripted pipes with no TTY) skip the prompt and run OPF automatically when enabled, printing `→ OpenAI Privacy Filter: scanning checkpoints…` to stderr so the wait isn't silent. Set `ENTIRE_OPF=no` to skip OPF in those contexts without disabling the feature globally.
+Non-interactive contexts (CI, scripted pipes with no TTY) skip the prompt and run OPF automatically when enabled, printing `→ OpenAI Privacy Filter: scanning checkpoints before push (may take ~30s)…` to stderr so the wait isn't silent. Progress and completion are reported as `→ OpenAI Privacy Filter: scanning checkpoints…` and `✓ OpenAI Privacy Filter: done (12.4s, 37 blobs)`. Set `ENTIRE_OPF=no` to skip OPF in those contexts without disabling the feature globally.
 
-**CI consideration**: if you've enabled OPF locally and your CI runs `git push` (e.g. an agent-driven workflow), the CI push will attempt to run OPF too. If the `opf` binary isn't installed in CI, the push will abort with `OPFRuntimeFailedError` rather than silently shipping under-redacted content — by design, since "I enabled OPF" should mean "no content leaves my machines without OPF." The remedies are (a) install `opf` in CI, (b) set `ENTIRE_OPF=no` for CI pushes, or (c) set `prompt_default: "never"` if you only want OPF on interactive pushes.
+**CI consideration**: if you've enabled OPF locally and your CI runs `git push` (e.g. an agent-driven workflow), the CI push will attempt to run OPF too. If the `opf` binary isn't installed in CI, the failure is fail-closed rather than silently shipping under-redacted content — by design, since "I enabled OPF" should mean "no content leaves my machines without OPF." On `git-branch` that aborts the CI push; on `git-refs` the push succeeds but the checkpoints don't ship, which means they can accumulate unpushed until someone notices. The remedies are (a) install `opf` in CI, (b) set `ENTIRE_OPF=no` for CI pushes, or (c) set `prompt_default: "never"` if you only want OPF on interactive pushes.
 
 OPF failures at push time are **fail-closed**: if OPF is not on PATH, fails to start, or times out during the pre-push rewrite, the per-process circuit breaker trips and no under-redacted content reaches the remote. The intent is that "the user enabled OPF" means "I do not want unredacted content leaving this machine" — falling back to 8-layer silently on the push path would violate that contract. Fix the install or set `ENTIRE_OPF=no` for a one-off push.
 
 How that is enforced depends on the checkpoint backend, because they have different escape hatches:
 
-- **git-branch**: the rewrite aborts the push with `OPF runtime failed; aborting push`. Your `git push` exits non-zero. The checkpoint branch travels with that push, so refusing the push is the only way to withhold it.
+- **git-branch**: the rewrite aborts the push with `OPF runtime failed during pre-push rewrite (command=…); aborting push so regex-only content isn't tagged as OPF-applied`. Your `git push` exits non-zero. The checkpoint branch travels with that push, so refusing the push is the only way to withhold it.
 - **git-refs**: checkpoint refs are pushed separately from your branch and stay queued when they are not flushed, so the failure withholds the checkpoint push and lets your own `git push` succeed. Nothing under-redacted ships either way. This is not silent: a warning names the failure and states that checkpoint refs stayed queued for the next push.
 
 (The circuit breaker is per-process, so a broken install costs one warning instead of one timeout per blob — but the push still aborts.)
@@ -245,84 +224,157 @@ Cost note: each shell-out loads the OPF model (~1.5B parameters on CPU). The pre
 
 OPF execution lives in the pre-push hook. The flow:
 
-1. **Post-commit** writes the checkpoint with **8-layer-only** redaction to your local `entire/checkpoints/v1` branch. Fast, predictable, no OPF cost on the hot path.
-2. **Pre-push** (`git push`): if OPF is enabled, the hook re-reads each unpushed `entire/checkpoints/v1` commit, runs the OpenAI Privacy Filter over its blobs to add the categories the regex layers don't catch (person names, addresses, etc.), and builds **new commits** carrying an `Entire-OPF-Applied: true` trailer. The local v1 ref fast-forwards atomically to the new tip, and the (now 9-layer-redacted) commits are what get pushed.
+1. **Post-commit** writes the checkpoint with **8-layer-only** redaction to local git objects — per-checkpoint refs on `git-refs`, the `entire/checkpoints/v1` branch on `git-branch`. Fast, predictable, no OPF cost on the hot path.
+2. **Pre-push** (`git push`): if OPF is enabled, the hook re-reads each not-yet-OPF'd commit, runs the OpenAI Privacy Filter over its blobs to add the categories the regex layers don't catch (person names, addresses, etc.), and builds **new commits** carrying an `Entire-OPF-Applied: true` trailer. Each backend then points its own local ref at the new tip with a compare-and-swap, and the (now 9-layer-redacted) commits are what get pushed.
 3. The original 8-layer-only commits become **unreachable** in the local git object database and eventually get swept by `git gc`.
+
+The two backends differ in **how they find the commits to rewrite**:
+
+| | `git-refs` | `git-branch` |
+|---|---|---|
+| What it walks | Every ref in the push-discovery queue | The `entire/checkpoints/v1` commit chain |
+| Where it stops | The first ancestor already carrying `Entire-OPF-Applied: true` — the trailer is the watermark | The remote's v1 tip, fetched live (not a stale tracking ref) |
+| Already-OPF'd commits | Left byte-identical; they *are* the boundary | Re-parented onto the new chain, but not re-redacted |
+| Ref update | Each queued ref rewritten in place, CAS'd individually | One CAS on the local v1 ref |
+
+In steady state the `git-refs` walk stops at the last commit the previous push OPF'd. That is usually the tip's parent, but not always: each write to a checkpoint advances its ref by one commit, so a turn that creates a checkpoint and then backfills its transcript and summary leaves a three-commit chain to rewrite.
+
+Note that the local ref move is **not** a fast-forward on either backend — the rewritten chain replaces the old commits rather than descending from them, which is exactly why step 3 leaves them unreachable. The *push* is still fast-forward-only and never forced, because the new chain is parented on a commit the remote already has.
 
 This means:
 
 - **The remote only ever sees 9-layer-redacted content** when OPF is enabled.
 - **Local-only commits are 8-layer-redacted** until the moment you push. If you never push, OPF never runs.
-- **Re-running pre-push is idempotent** — commits already carrying the trailer get re-parented into the chain but are not re-redacted.
+- **Re-running pre-push is idempotent** — commits already carrying the trailer are never re-redacted.
 
-#### Force-pushed remote, bootstrap, and concurrent pushes
+#### Divergence, caps, and concurrent pushes
 
-The rewrite refuses to proceed and aborts the push when it detects a divergent state, so checkpoints on the remote are never silently rebased:
+The rewrite refuses to proceed in a divergent or oversized state rather than silently rebasing or shipping unscanned content. As always, `git-branch` enforces this by aborting your push and `git-refs` by withholding the checkpoint refs.
 
-- **Diverged remote**: if local `entire/checkpoints/v1` has commits that aren't ancestors of `<remote>/entire/checkpoints/v1`, the hook exits with a `entire/checkpoints/v1 has diverged from remote` error. Fetch the remote and either reset local v1 to the remote tip or resolve manually before pushing.
-- **Bootstrap** (remote has no `entire/checkpoints/v1` yet, e.g. first push): the cap is `100` unpushed commits by default. Override via the env var on the push invocation:
+**Divergence.** On `git-branch`, if local `entire/checkpoints/v1` has commits that aren't ancestors of the remote's v1, the hook exits with a `entire/checkpoints/v1 has diverged from remote` error. Fetch the remote and either reset local v1 to the remote tip or resolve manually before pushing.
 
-  ```fish
-  set -x ENTIRE_OPF_BOOTSTRAP_LIMIT 500; git push
-  # or fully unbounded:
-  set -x ENTIRE_OPF_BOOTSTRAP_LIMIT unlimited; git push
-  ```
+`git-refs` has no divergence pre-check, and doesn't need one: each checkpoint is its own ref, so divergence shows up at push time as a non-fast-forward rejection for that one ref. Recovery fetches the remote ref and replays the local-only commits on top, then retries — still without forcing, so the remote commit is preserved as an ancestor. A ref that can't be replayed stays queued.
 
-- **Batch-size cap**: independent of commit count, the rewrite refuses pushes whose cumulative prose-leaf content exceeds `ENTIRE_OPF_BATCH_LIMIT` bytes (default: 2 MiB ≈ ~110s of inference). The two caps protect different failure modes — the bootstrap cap stops "100 throwaway commits", the batch cap stops "one commit with 50 MB of pasted transcript". An `OPF would run inference on …` error means you've hit this; bump the env var or push without OPF for that push:
+**Un-OPF'd commit cap: `100` by default.** Override per push:
 
-  ```fish
-  set -x ENTIRE_OPF_BATCH_LIMIT 10485760; git push   # 10 MiB
-  # or fully unbounded:
-  set -x ENTIRE_OPF_BATCH_LIMIT unlimited; git push
-  ```
+```fish
+set -x ENTIRE_OPF_BOOTSTRAP_LIMIT 500; git push
+# or fully unbounded:
+set -x ENTIRE_OPF_BOOTSTRAP_LIMIT unlimited; git push
+```
 
-- **Concurrent push** from another worktree: the rewrite uses a CAS to update the local v1 ref. If another process moved the ref while OPF was running, the hook exits with a "concurrent push detected" error and `git push` aborts the whole batch. Fetch and retry.
+The two backends trip this differently. On `git-branch` it applies **only on bootstrap** — the first push, when the remote has no v1 yet — counted across all unpushed commits. On `git-refs` it applies on **every** push, counted **per queued ref** over that ref's un-trailered ancestry. In practice the `git-refs` trigger is "OPF was enabled late" or "checkpoints were just migrated from the branch", not "first push".
+
+**Batch cap: `2 MiB` of cumulative prose-leaf content by default** (≈110s of inference), on both backends. An `OPF would run inference on …` error means you've hit it:
+
+```fish
+set -x ENTIRE_OPF_BATCH_LIMIT 10485760; git push   # 10 MiB
+# or fully unbounded:
+set -x ENTIRE_OPF_BATCH_LIMIT unlimited; git push
+```
+
+**Raw-byte cap: `200 MiB` of blob content buffered in memory**, on both backends. It has no env var of its own — it is derived as 100× the batch cap, so raising `ENTIRE_OPF_BATCH_LIMIT` raises it too. It is checked incrementally as blobs load, so on a pathological push (one commit carrying a huge pasted transcript) this is the cap that fires first.
+
+The three caps protect different failure modes: the commit cap stops "100 throwaway commits", the batch cap stops "one commit with 50 MB of prose", and the raw-byte cap stops the loader exhausting memory before either of the others can be evaluated. On `git-refs` the two byte caps are cumulative across the whole flush (all queued refs together) while the commit cap is per ref.
+
+**Concurrent push** from another worktree: both backends compare-and-swap the local ref. If another process moved it while OPF was running, `git-branch` exits with `entire/checkpoints/v1 moved during OPF rewrite …; re-run 'git push' (no fetch needed; the move was local)` and aborts. On `git-refs` the affected ref simply stays queued and the next push picks it up. Note that the `git-refs` rewrite rebuilds every commit before touching any ref, but the ref updates themselves are not atomic *across* refs: a conflict partway through leaves the earlier refs already rewritten. They stay queued and push OPF-applied next time, so this is safe — just not "nothing moved".
 
 #### Persistence of un-redacted-by-OPF content
 
-Three places retain content that OPF *didn't* redact, with different lifetimes. Understanding them matters if your threat model goes beyond "what reaches the remote":
+Several places retain content that OPF *didn't* redact, with different lifetimes. Understanding them matters if your threat model goes beyond "what reaches the remote":
 
 | Location | Redaction level | Lifetime | Reaches remote? |
 |---|---|---|---|
-| `.entire/<session>.jsonl` | **None — raw** | Until session is deleted (managed by the agent) | No |
+| `.entire/metadata/<session>/full.jsonl` | **None** — sanitized, not redacted | Until the session's data is cleaned up (`entire clean`) | No |
+| The agent's own transcript (e.g. `~/.claude/projects/…`) | **None — raw** | Owned and managed by the agent | No |
 | Shadow branch `entire/<commit>-<worktree>` | 8-layer | Auto-deleted after the next successful push (only when its session has ended cleanly) | No |
-| Unreachable git objects after pre-push rewrite | 8-layer | Until `git gc --prune` (default `gc.pruneExpire` is 2 weeks) | No |
-| Reflog `git reflog show entire/checkpoints/v1` | 8-layer tips | Default `gc.reflogExpire` is 90 days | No |
-| `<remote>/entire/checkpoints/v1` | 9-layer (after OPF rewrite) | Until you delete the branch on the remote | Yes |
+| Unreachable git objects after the pre-push rewrite | 8-layer | Until `git gc --prune` (default `gc.pruneExpire` is 2 weeks) | No |
+| Local `refs/entire/checkpoints/*` (`git-refs`) | 8-layer before push, 9-layer after the rewrite | Kept indefinitely — these refs are never deleted after pushing | Yes, once pushed |
+| Local `entire/checkpoints/v1` (`git-branch`) | 8-layer before push, 9-layer after the rewrite | Until you delete the branch | Yes, once pushed |
+| Reflog of `entire/checkpoints/v1` (`git-branch` only) | 8-layer tips | Default `gc.reflogExpire` is 90 days | No |
+| A configured `git-branch` **mirror** | 8-layer, indefinitely | Until you delete the branch | No — mirrors aren't pushed at pre-push |
+| A leftover `entire/checkpoints/v1` after migrating to `git-refs` | 8-layer | Until you delete the branch | No |
+| The remote's copy of the pushed refs/branch | 9-layer (after OPF rewrite) | Until you delete them on the remote | Yes |
 
-The `.entire/<session>.jsonl` files are raw working state owned by the agent (Claude Code, etc.) — Entire reads from them but does not redact them in place, because the agent is reading and writing them continuously and editing under the agent's feet would corrupt the session.
+Two notes on the `git-refs` rows:
+
+- **There is no reflog concern for `refs/entire/checkpoints/*`.** Git's `core.logAllRefUpdates` default only auto-logs `refs/heads/*`, `refs/remotes/*`, `refs/notes/*`, and `HEAD`, and Entire's checkpoint-ref writes don't append reflog entries themselves. The reflog row above is genuinely branch-only (unless you've set `logAllRefUpdates=always`).
+- **The push queue holds no content.** `entire-checkpoint-push-queue.jsonl` in the git common dir stores one ref *name* per line, mode `0600`. Nothing in it is redactable.
+
+Two `git-branch`-shaped leftovers are easy to miss once a repo has moved on:
+
+- **A `git-branch` mirror never gets OPF'd.** Mirrors receive best-effort write fan-out only and never ref-level mutations, so a mirror branch keeps 8-layer content indefinitely. It isn't pushed at pre-push, so it doesn't reach the remote — but it is local content, and it has a `refs/heads/` reflog.
+- **Migration doesn't delete the old branch.** `entire doctor migrate-checkpoints` imports from `entire/checkpoints/v1` and leaves it in place, 8-layer, along with its reflog. Migrated refs also carry no OPF trailer, so the first push after a migration re-OPFs every migrated ref — one commit per ref keeps the commit cap happy, but the 2 MiB batch cap is the realistic trip point.
+
+`.entire/metadata/<session>/full.jsonl` is Entire's own local working copy of the transcript, written mode `0600`. It is *sanitized* (agent state that cannot be replayed out of a checkpoint is stripped) but **not redacted** — redaction happens on the way into a git object, not on this file. It is the input the shadow-branch walk and condensation read from.
+
+The agent's own transcript is never modified at all. Entire reads from it and leaves it alone, because the agent is writing to it continuously and editing under the agent's feet would corrupt the session.
 
 To aggressively scrub the unreachable git objects from the pre-push rewrite (instead of waiting for the 2-week GC window):
 
 ```fish
+# git-refs
+git reflog expire --expire-unreachable=now --all
+git gc --prune=now
+
+# git-branch
 git reflog expire --expire-unreachable=now refs/heads/entire/checkpoints/v1
 git gc --prune=now
 ```
 
 This is I/O-heavy on large repositories; it's not run automatically. If you want it as part of your push workflow, wrap `git push` in a script that invokes it after a successful push.
 
-Verifying it's working:
+#### Verifying OPF is working
+
+After enabling OPF, run an agent turn whose prompt contains a name — e.g. *"Create notes.txt with: Alice Johnson reviewed the proposal."* — then commit (which stays on the fast 8-layer pipeline) and push, which is when OPF runs.
 
 ```fish
-# After enabling OPF, run an agent turn that includes a name in the prompt,
-# e.g. "Create notes.txt with: Alice Johnson reviewed the proposal."
-# Commit (this stays on the fast 8-layer pipeline), then push. OPF runs
-# during the pre-push step:
 git commit -m "demo"
-git push   # → "→ OpenAI Privacy Filter: scanning N checkpoints (~30s)…"
-git log --oneline entire/checkpoints/v1 | head -2
-entire checkpoint explain HEAD | grep -i 'REDACTED_PERSON'
+git push   # → "OpenAI Privacy Filter: scanning checkpoints…"
 ```
 
-If `[REDACTED_PERSON]` appears in the prompt or transcript section and the latest `entire/checkpoints/v1` commit carries `Entire-OPF-Applied: true`, OPF is active.
+Then confirm the redaction landed and the trailer is present. Note that `git log --oneline` **cannot** show a trailer — it prints only the subject line — so use a format that includes the body:
+
+```fish
+# git-refs: which checkpoint refs exist, and which are OPF-applied
+git for-each-ref --sort=-committerdate \
+  --format='%(refname)  %(trailers:key=Entire-OPF-Applied)' refs/entire/checkpoints/
+
+# git-branch: the trailer on the latest v1 commit
+git log -1 --format='%H%n%B' entire/checkpoints/v1
+
+# either backend: confirm the content itself was redacted
+entire checkpoint list
+entire checkpoint explain <checkpoint-id> | grep -i 'REDACTED_PERSON'
+```
+
+If `[REDACTED_PERSON]` appears in the prompt or transcript section and the checkpoint's commit carries `Entire-OPF-Applied: true`, OPF is active.
+
+On `git-refs` you can also confirm nothing was withheld — an absent or empty queue file means everything flushed:
+
+```fish
+cat "$(git rev-parse --git-common-dir)/entire-checkpoint-push-queue.jsonl"
+```
 
 ### Recommendations
 
 If your AI sessions will touch sensitive data:
 
-- **Use a private repository.** This is the simplest and most complete protection. Transcripts on `entire/checkpoints/v1` are only visible to collaborators.
+- **Use a private repository.** This is the simplest and most complete protection. Committed checkpoints are then only visible to collaborators.
 - **Avoid passing sensitive files to your agent.** Content that never enters the agent conversation never appears in transcripts.
-- **Review before pushing.** You can inspect the `entire/checkpoints/v1` branch locally before pushing it to a remote.
+- **Review before pushing.** Checkpoints are written locally at commit time and pushed separately, so there is always a window to inspect them:
+
+  ```fish
+  # git-refs: list local checkpoint refs, then read one
+  git for-each-ref refs/entire/checkpoints
+  entire checkpoint list
+  entire checkpoint explain <id>
+
+  # git-branch: inspect the branch directly
+  git log --oneline entire/checkpoints/v1
+  ```
+
+- **Know your push destination.** Checkpoint data syncs to exactly one elected remote; `entire status` names it and reports how many checkpoints are still unpushed.
 
 ## What Gets Redacted
 

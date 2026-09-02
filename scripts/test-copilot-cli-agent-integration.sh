@@ -292,7 +292,7 @@ check_event() {
     local event_name="$1"
     local entire_event="$2"
     local found=false
-    for f in "$CAPTURE_DIR"/${event_name}-*.json; do
+    for f in "$CAPTURE_DIR"/"${event_name}"-*.json; do
         [[ -e "$f" ]] && found=true && break
     done
     if $found; then
@@ -317,7 +317,7 @@ echo ""
 REQUIRED_EVENTS=("sessionStart" "userPromptSubmitted" "agentStop" "sessionEnd")
 REQUIRED_FOUND=0
 for evt in "${REQUIRED_EVENTS[@]}"; do
-    for f in "$CAPTURE_DIR"/${evt}-*.json; do
+    for f in "$CAPTURE_DIR"/"${evt}"-*.json; do
         [[ -e "$f" ]] && REQUIRED_FOUND=$((REQUIRED_FOUND + 1)) && break
     done
 done

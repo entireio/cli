@@ -637,7 +637,6 @@ func writeTemporaryCheckpointForExplainTest(t *testing.T) string {
 		BaseCommit:        initialCommit.String()[:7],
 		ModifiedFiles:     []string{"temp.txt"},
 		MetadataDir:       ".entire/metadata/" + sessionID,
-		MetadataDirAbs:    metadataDir,
 		CommitMessage:     "temporary checkpoint with code changes",
 		AuthorName:        "Test",
 		AuthorEmail:       "test@example.com",
@@ -2294,7 +2293,6 @@ func writeExternalTemporaryCheckpointForExplainTest(
 		BaseCommit:        head.Hash().String()[:7],
 		ModifiedFiles:     []string{"test.txt"},
 		MetadataDir:       ".entire/metadata/" + sessionID,
-		MetadataDirAbs:    metadataDir,
 		CommitMessage:     "temporary external checkpoint",
 		AuthorName:        "Test",
 		AuthorEmail:       "test@example.com",
@@ -3689,7 +3687,6 @@ func TestGetBranchCheckpoints_ReadsPromptFromShadowBranch(t *testing.T) {
 		BaseCommit:        baseCommit,
 		ModifiedFiles:     []string{"test.txt"},
 		MetadataDir:       ".entire/metadata/" + sessionID,
-		MetadataDirAbs:    metadataDir,
 		CommitMessage:     "First checkpoint (baseline)",
 		AuthorName:        "Test",
 		AuthorEmail:       "test@test.com",
@@ -3710,7 +3707,6 @@ func TestGetBranchCheckpoints_ReadsPromptFromShadowBranch(t *testing.T) {
 		BaseCommit:        baseCommit,
 		ModifiedFiles:     []string{"test.txt"},
 		MetadataDir:       ".entire/metadata/" + sessionID,
-		MetadataDirAbs:    metadataDir,
 		CommitMessage:     "Second checkpoint with code changes",
 		AuthorName:        "Test",
 		AuthorEmail:       "test@test.com",
@@ -3810,12 +3806,10 @@ func TestGetReachableTemporaryCheckpoints_FiltersByWorktree(t *testing.T) {
 
 	writeCheckpoints := func(sessionID, worktreeID string) {
 		t.Helper()
-		metaDirAbs := filepath.Join(tmpDir, ".entire", "metadata", sessionID)
 		// Baseline
 		if _, err := store.Write(context.Background(), checkpoint.Step{
 			SessionID: sessionID, BaseCommit: baseCommit, WorktreeID: worktreeID,
 			ModifiedFiles: []string{"test.txt"}, MetadataDir: ".entire/metadata/" + sessionID,
-			MetadataDirAbs: metaDirAbs, CommitMessage: "baseline", AuthorName: "Test",
 			AuthorEmail: "test@test.com", IsFirstCheckpoint: true,
 		}); err != nil {
 			t.Fatalf("WriteTemporary baseline error: %v", err)
@@ -3827,7 +3821,6 @@ func TestGetReachableTemporaryCheckpoints_FiltersByWorktree(t *testing.T) {
 		if _, err := store.Write(context.Background(), checkpoint.Step{
 			SessionID: sessionID, BaseCommit: baseCommit, WorktreeID: worktreeID,
 			ModifiedFiles: []string{"test.txt"}, MetadataDir: ".entire/metadata/" + sessionID,
-			MetadataDirAbs: metaDirAbs, CommitMessage: "code changes", AuthorName: "Test",
 			AuthorEmail: "test@test.com", IsFirstCheckpoint: false,
 		}); err != nil {
 			t.Fatalf("WriteTemporary code changes error: %v", err)

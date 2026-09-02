@@ -6,11 +6,14 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"time"
 
+	"github.com/entireio/cli/cmd/entire/cli/entiredir"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
+	"github.com/entireio/cli/cmd/entire/cli/osroot"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/spf13/cobra"
 )
@@ -32,18 +35,25 @@ Use --follow to stream new lines as they are written (Ctrl+C to exit).`,
 				cmd.SilenceUsage = true
 				return errors.New("not a git repository")
 			}
-			logFile := filepath.Join(repoRoot, logging.LogsDir, "entire.log")
-			if _, err := os.Lstat(logFile); errors.Is(err, os.ErrNotExist) {
+			logFile := filepath.Join(repoRoot, logging.LogsDir, logging.LogFileName)
+			root, err := entiredir.OpenAtForRead(repoRoot)
+			if err == nil {
+				_, err = root.Lstat(logging.LogName)
+			}
+			if errors.Is(err, fs.ErrNotExist) {
 				fmt.Fprintf(cmd.OutOrStdout(), "No log file at %s yet.\n", logFile)
 				return nil
 			}
-			if err := printTail(cmd.OutOrStdout(), logFile, tail); err != nil {
+			if err != nil {
+				return fmt.Errorf("access log file: %w", err)
+			}
+			if err := printTail(cmd.OutOrStdout(), root, logging.LogName, tail); err != nil {
 				return err
 			}
 			if !follow {
 				return nil
 			}
-			return followFile(cmd.Context(), cmd.OutOrStdout(), logFile)
+			return followFile(cmd.Context(), cmd.OutOrStdout(), root, logging.LogName)
 		},
 	}
 
@@ -52,8 +62,8 @@ Use --follow to stream new lines as they are written (Ctrl+C to exit).`,
 	return cmd
 }
 
-func printTail(w io.Writer, path string, n int) error {
-	f, err := os.Open(path) //nolint:gosec // path is .entire/logs/entire.log under repo root
+func printTail(w io.Writer, root *os.Root, name string, n int) error {
+	f, err := osroot.OpenNoFollow(root, name)
 	if err != nil {
 		return fmt.Errorf("open log: %w", err)
 	}
@@ -111,8 +121,8 @@ func readLastNLines(r io.Reader, n int) ([]string, error) {
 
 // followFile polls the log file for appended bytes. It exits cleanly when the
 // command's context is cancelled (Ctrl+C in a TTY).
-func followFile(ctx context.Context, w io.Writer, path string) error {
-	f, err := os.Open(path) //nolint:gosec // path is .entire/logs/entire.log under repo root
+func followFile(ctx context.Context, w io.Writer, root *os.Root, name string) error {
+	f, err := osroot.OpenNoFollow(root, name)
 	if err != nil {
 		return fmt.Errorf("open log: %w", err)
 	}

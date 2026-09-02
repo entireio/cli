@@ -1,0 +1,81 @@
+// Package worktreedir owns access to the files of the working tree itself.
+//
+// It is the third of Entire's three anchors, alongside entiredir (.entire) and
+// gitdir (the git common dir), and the loosest of them: a root here contains
+// operations to the repository rather than to a directory Entire owns. That is
+// still worth having, because the paths that reach these reads and writes are
+// not Entire's own:
+//
+//   - Checkpoint writes read working files named by `git status` output, on the
+//     hook path, to turn them into blobs.
+//   - Rewind writes working files named by git TREE ENTRIES out of a checkpoint,
+//     which may have been fetched from a remote. Its restore half already opened
+//     a root for exactly this reason; the reads beside it did not.
+//   - Diff-stat and gather read working files named from status output too.
+//
+// A root makes "cannot leave the repository" a property of the handle rather
+// than of each caller remembering to validate. It is not a substitute for the
+// tree-path validation those callers do — normalizeRepoRelativeTreePath still
+// rejects names that are not repo-relative before they are used as git paths —
+// it is the layer underneath it.
+package worktreedir
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+
+	"github.com/entireio/cli/cmd/entire/cli/osroot"
+	"github.com/entireio/cli/cmd/entire/cli/paths"
+)
+
+// Open returns the shared *os.Root over the current worktree root. The returned
+// root is owned by the registry and shared with every other caller; do not close
+// it.
+func Open(ctx context.Context) (*os.Root, error) {
+	root, err := paths.WorktreeRoot(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("resolve worktree root: %w", err)
+	}
+	return OpenAt(root)
+}
+
+// OpenAt is Open for an explicit worktree root, for callers that resolved one
+// already or that act on a worktree other than the current directory.
+func OpenAt(worktreeRoot string) (*os.Root, error) {
+	if worktreeRoot == "" {
+		return nil, errors.New("worktreedir: worktree root is required")
+	}
+	abs, err := filepath.Abs(worktreeRoot)
+	if err != nil {
+		return nil, fmt.Errorf("resolve %s: %w", worktreeRoot, err)
+	}
+	return osroot.Shared(abs) //nolint:wrapcheck // Shared names the directory and returns a missing one unwrapped
+}
+
+// Name converts a path inside the worktree to a name relative to its root,
+// accepting either an absolute path or one already relative to the root.
+//
+// Git hands out slash-separated repo-relative paths and Entire assembles
+// absolute ones from them; this is the single conversion back, so callers stop
+// joining a root path onto a git path and reading the result.
+func Name(worktreeRoot, p string) (string, error) {
+	if !filepath.IsAbs(p) {
+		cleaned := filepath.ToSlash(filepath.Clean(filepath.FromSlash(p)))
+		if cleaned == "." || paths.IsRelativeTraversal(cleaned) {
+			return "", fmt.Errorf("%q does not name a file in the worktree", p)
+		}
+		return cleaned, nil
+	}
+	base, err := filepath.Abs(worktreeRoot)
+	if err != nil {
+		return "", fmt.Errorf("resolve %s: %w", worktreeRoot, err)
+	}
+	rel, err := filepath.Rel(base, p)
+	if err != nil || rel == "." || paths.IsRelativeTraversal(rel) {
+		return "", fmt.Errorf("%q is not inside %q", p, worktreeRoot)
+	}
+	return filepath.ToSlash(rel), nil
+}

@@ -134,11 +134,11 @@ type StepContext struct {
 	// (tracked files that no longer exist)
 	DeletedFiles []string
 
-	// MetadataDir is the path to the session metadata directory
+	// MetadataDir is the repo-relative path to the session metadata directory
+	// (.entire/metadata/<session>). It is both the git tree path the directory's
+	// files land at and the name the .entire root reads them through; see
+	// checkpoint.WriteOptions.MetadataDir for why there is no absolute twin.
 	MetadataDir string
-
-	// MetadataDirAbs is the absolute path to the session metadata directory
-	MetadataDirAbs string
 
 	// CommitMessage is the generated commit message
 	CommitMessage string

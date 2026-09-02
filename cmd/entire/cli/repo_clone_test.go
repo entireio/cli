@@ -46,6 +46,177 @@ func TestParseMirrorCloneRef(t *testing.T) {
 	}
 }
 
+func TestParseNativeCloneRef(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name        string
+		ref         string
+		wantProject string
+		wantRepo    string
+		wantOk      bool
+	}{
+		{name: "full et ref", ref: "/et/paul/dogbark", wantProject: "paul", wantRepo: "dogbark", wantOk: true},
+		{name: "no leading slash", ref: "et/paul/dogbark", wantProject: "paul", wantRepo: "dogbark", wantOk: true},
+		{name: "shorthand", ref: "paul/dogbark", wantProject: "paul", wantRepo: "dogbark", wantOk: true},
+		{name: "shorthand leading slash", ref: "/paul/dogbark", wantProject: "paul", wantRepo: "dogbark", wantOk: true},
+		{name: "uppercase folds server-side", ref: "Paul/DogBark", wantProject: "Paul", wantRepo: "DogBark", wantOk: true},
+		{name: "dotted repo", ref: "paul/entire-trails.el", wantProject: "paul", wantRepo: "entire-trails.el", wantOk: true},
+		{name: "ssh github url is not a shorthand", ref: "git@github.com:foo/bar", wantOk: false},
+		{name: "ssh github url with .git", ref: "git@github.com:foo/bar.git", wantOk: false},
+		{name: "dotted project", ref: "github.com/dogbark", wantOk: false},
+		{name: "underscore in project", ref: "foo_bar/dogbark", wantOk: false},
+		{name: "space in repo", ref: "paul/dog bark", wantOk: false},
+		{name: "gh ref is not native", ref: "/gh/entirehq/entire-api", wantOk: false},
+		{name: "truncated gh ref is not a shorthand", ref: "/gh/entirehq", wantOk: false},
+		{name: "truncated et ref", ref: "/et/paul", wantOk: false},
+		{name: "single segment", ref: "dogbark", wantOk: false},
+		{name: "too many segments", ref: "/et/paul/dogbark/extra", wantOk: false},
+		{name: "empty project", ref: "/et//dogbark", wantOk: false},
+		{name: "empty repo", ref: "paul/", wantOk: false},
+		{name: "empty", ref: "", wantOk: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			project, repo, ok := parseNativeCloneRef(tt.ref)
+			require.Equal(t, tt.wantOk, ok)
+			if !tt.wantOk {
+				return
+			}
+			require.Equal(t, tt.wantProject, project)
+			require.Equal(t, tt.wantRepo, repo)
+		})
+	}
+}
+
+func TestInvalidCloneRefError(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name     string
+		ref      string
+		want     string
+		dontWant string
+	}{
+		{name: "ssh github url points at /gh/", ref: "git@github.com:Foo/Bar", want: "pass GitHub mirrors as /gh/foo/bar"},
+		{name: "https github url points at /gh/", ref: "https://github.com/foo/bar.git", want: "pass GitHub mirrors as /gh/foo/bar"},
+		{name: "dot-only github url gets no /gh/ hint", ref: "git@github.com:foo/..", want: cloneRefShapes, dontWant: "/gh/foo/.."},
+		{name: "bad owner keeps parser reason", ref: "/gh/foo_bar/baz", want: "owner: letters, digits, '-'", dontWant: "/et/<project>/<repo>"},
+		{name: "dot-only repo keeps parser reason", ref: "/gh/foo/..", want: "repo cannot be dot-only", dontWant: "/et/<project>/<repo>"},
+		{name: "missing repo keeps parser reason", ref: "gh/foo", want: "expected gh/<owner>/<repo>", dontWant: "/et/<project>/<repo>"},
+		{name: "unknown shape lists all shapes", ref: "/gl/foo/bar", want: cloneRefShapes, dontWant: "expected gh/"},
+		{name: "single segment lists all shapes", ref: "dogbark", want: cloneRefShapes},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			_, _, _, parseErr := parseMirrorCloneRef(tt.ref)
+			require.Error(t, parseErr)
+			got := invalidCloneRefError(tt.ref, parseErr).Error()
+			require.Contains(t, got, `invalid <repo> "`+tt.ref+`"`)
+			require.Contains(t, got, tt.want)
+			if tt.dontWant != "" {
+				require.NotContains(t, got, tt.dontWant)
+			}
+		})
+	}
+}
+
+const testNativeRepoULID = "01ARZ3NDEKTSV4RRFFQ69G5FBB"
+
+// serveNativeRepo fakes the three-call native resolution chain: project by
+// name, repo by name within the project, then the single-repo GET (the one
+// response that carries clusterHost + path).
+func serveNativeRepo(t *testing.T, repo coreapi.Repo) *coreapi.Client {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		var body any
+		switch r.URL.Path {
+		case "/api/v1/projects":
+			body = &coreapi.ListProjectsOutputBody{Project: coreapi.NewOptProject(coreapi.Project{
+				ID: testProjectULID, Name: "paul", OwnerId: testProjectULID, OwnerType: coreapi.ProjectOwnerTypeOrg,
+			})}
+		case "/api/v1/projects/" + testProjectULID + "/repos":
+			body = &coreapi.ListProjectReposOutputBody{Repo: coreapi.NewOptRepo(coreapi.Repo{
+				ID: testNativeRepoULID, Name: repo.Name, OwningProjectId: testProjectULID,
+			})}
+		case "/api/v1/repos/" + testNativeRepoULID:
+			body = &repo
+		default:
+			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		if err := printJSON(w, body); err != nil {
+			t.Errorf("encode response: %v", err)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	c, err := coreapi.NewWithBearer(srv.URL, "tok")
+	require.NoError(t, err)
+	return c
+}
+
+func TestResolveNativeCloneURL(t *testing.T) {
+	t.Parallel()
+
+	native := func(host, path string) coreapi.Repo {
+		r := coreapi.Repo{ID: testNativeRepoULID, Name: "dogbark", OwningProjectId: testProjectULID}
+		if host != "" {
+			r.ClusterHost = coreapi.NewOptString(host)
+		}
+		if path != "" {
+			r.Path = coreapi.NewOptString(path)
+		}
+		return r
+	}
+
+	t.Run("builds the URL from the server's clusterHost and path", func(t *testing.T) {
+		t.Parallel()
+		c := serveNativeRepo(t, native("aws-ap-southeast-2.entire.io", "/et/paul/dogbark"))
+		got, err := resolveNativeCloneURL(t.Context(), c, "paul", "dogbark")
+		require.NoError(t, err)
+		require.Equal(t, "entire://aws-ap-southeast-2.entire.io/et/paul/dogbark", got)
+	})
+
+	t.Run("missing path means not ready, not a half-formed URL", func(t *testing.T) {
+		t.Parallel()
+		c := serveNativeRepo(t, native("aws-ap-southeast-2.entire.io", ""))
+		_, err := resolveNativeCloneURL(t.Context(), c, "paul", "dogbark")
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "no clone URL")
+	})
+
+	t.Run("missing cluster host means not ready", func(t *testing.T) {
+		t.Parallel()
+		c := serveNativeRepo(t, native("", "/et/paul/dogbark"))
+		_, err := resolveNativeCloneURL(t.Context(), c, "paul", "dogbark")
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "no clone URL")
+	})
+
+	t.Run("malformed server host is rejected before it reaches git", func(t *testing.T) {
+		t.Parallel()
+		c := serveNativeRepo(t, native("aws-ap-southeast-2.entire.io@evil.com", "/et/paul/dogbark"))
+		_, err := resolveNativeCloneURL(t.Context(), c, "paul", "dogbark")
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "invalid cluster host")
+	})
+}
+
+// TestRepoClone_NativeRefRejectsClusterFlag locks in that --cluster (a mirror
+// placement selector) fails fast on a native ref instead of being ignored.
+func TestRepoClone_NativeRefRejectsClusterFlag(t *testing.T) {
+	t.Parallel()
+	cmd := newRepoCloneCmd()
+	cmd.SetOut(&nopWriter{})
+	cmd.SetErr(&nopWriter{})
+	cmd.SetArgs([]string{"/et/paul/dogbark", "--cluster", "aws-us-east-2.entire.io"})
+	err := cmd.ExecuteContext(t.Context())
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "--cluster applies to /gh/ mirror refs")
+}
+
 func TestIsEntireCloneURL(t *testing.T) {
 	t.Parallel()
 	tests := []struct {

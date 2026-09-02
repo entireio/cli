@@ -4,10 +4,10 @@ import (
 	"context"
 	"io"
 	"log/slog"
-	"os"
-	"path/filepath"
 
 	"github.com/entireio/cli/cmd/entire/cli/logging"
+	"github.com/entireio/cli/cmd/entire/cli/osroot"
+	"github.com/entireio/cli/cmd/entire/cli/worktreedir"
 	"github.com/go-git/go-git/v6"
 	"github.com/go-git/go-git/v6/plumbing"
 	"github.com/go-git/go-git/v6/plumbing/format/config"
@@ -522,8 +522,15 @@ func filesWithRemainingAgentChanges(
 // workingTreeMatchesCommit checks if the file on disk matches the committed blob hash.
 // Returns true if the working tree is clean for this file (no remaining changes).
 func workingTreeMatchesCommit(worktreeRoot, filePath string, commitHash plumbing.Hash) bool {
-	absPath := filepath.Join(worktreeRoot, filePath)
-	diskContent, err := os.ReadFile(absPath) //nolint:gosec // filePath is from git status, not user input
+	root, err := worktreedir.OpenAt(worktreeRoot)
+	if err != nil {
+		return false
+	}
+	name, err := worktreedir.Name(worktreeRoot, filePath)
+	if err != nil {
+		return false
+	}
+	diskContent, err := osroot.ReadFileNoFollow(root, name)
 	if err != nil {
 		return false
 	}

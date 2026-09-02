@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -17,6 +18,8 @@ import (
 	codexagent "github.com/entireio/cli/cmd/entire/cli/agent/codex"
 	"github.com/entireio/cli/cmd/entire/cli/agent/external"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
+	"github.com/entireio/cli/cmd/entire/cli/entiredir"
+	"github.com/entireio/cli/cmd/entire/cli/gitdir"
 	"github.com/entireio/cli/cmd/entire/cli/gitremote"
 	"github.com/entireio/cli/cmd/entire/cli/interactive"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
@@ -26,6 +29,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
 	"github.com/entireio/cli/cmd/entire/cli/uiform"
 	"github.com/entireio/cli/cmd/entire/cli/vercelconfig"
+	"github.com/entireio/cli/cmd/entire/cli/worktreedir"
 
 	"charm.land/huh/v2"
 	"github.com/spf13/cobra"
@@ -343,17 +347,11 @@ func settingsTargetFile(ctx context.Context, useLocal, useProject bool) (string,
 
 	// No explicit flag — write to whichever file exists.
 	// Check project file first, then local.
-	projectAbs, err := paths.AbsPath(ctx, settings.EntireSettingsFile)
-	if err == nil {
-		if _, statErr := os.Lstat(projectAbs); statErr == nil {
-			return settings.EntireSettingsFile, configDisplayProject
-		}
+	if settings.IsSetUp(ctx) {
+		return settings.EntireSettingsFile, configDisplayProject
 	}
-	localAbs, err := paths.AbsPath(ctx, settings.EntireSettingsLocalFile)
-	if err == nil {
-		if _, statErr := os.Lstat(localAbs); statErr == nil {
-			return settings.EntireSettingsLocalFile, configDisplayLocal
-		}
+	if settings.IsSetUpLocal(ctx) {
+		return settings.EntireSettingsLocalFile, configDisplayLocal
 	}
 
 	// Neither exists — default to project
@@ -715,7 +713,7 @@ Examples:
   entire configure --absolute-git-hook-path       # Reinstall git hook with absolute path
   entire configure --force                        # Reinstall git hook
   entire configure --checkpoint-remote github:org/checkpoints
-  entire configure --checkpoint-backend refs      # Store each checkpoint as its own git ref
+  entire configure --checkpoint-backend refs      # Move a legacy repo to per-checkpoint git refs
   entire configure --summarize-provider claude-code
   entire configure --summarize-timeout-seconds 300   # 5m deadline for explain --generate`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
@@ -775,10 +773,10 @@ Examples:
 	cmd.Flags().BoolVarP(&opts.ForceHooks, flagForce, "f", false, "Reinstall the Entire git hook")
 	cmd.Flags().BoolVar(&opts.SkipPushSessions, flagSkipPushSessions, false, "Disable automatic pushing of session logs on git push")
 	cmd.Flags().StringVar(&opts.CheckpointRemote, flagCheckpointRemote, "", "Checkpoint remote in provider:owner/repo format (e.g., github:org/checkpoints-repo)")
-	cmd.Flags().StringVar(&opts.CheckpointBackend, flagCheckpointBackend, "", "Checkpoint storage backend: refs (one git ref per checkpoint; recommended) or branch (shared entire/checkpoints/v1 branch)")
+	cmd.Flags().StringVar(&opts.CheckpointBackend, flagCheckpointBackend, "", checkpointBackendFlagUsage)
 	cmd.Flags().StringVar(&summarizeProvider, flagSummarizeAgent, "", "Set the provider used by explain --generate (e.g., claude-code, codex, gemini, pi, cursor, copilot-cli)")
 	cmd.Flags().StringVar(&summarizeModel, flagSummarizeModel, "", "Set the model hint used by explain --generate")
-	cmd.Flags().IntVar(&summarizeTimeoutSeconds, flagSummarizeTimeout, 0, "Set the hard deadline (seconds) for explain --generate summary generation. 0 clears (falls back to 5m default).")
+	cmd.Flags().IntVar(&summarizeTimeoutSeconds, flagSummarizeTimeout, 0, "Set the hard deadline (seconds) for explain --generate summary generation. 0 clears the setting, leaving summary generation unbounded.")
 	cmd.Flags().BoolVar(&opts.Telemetry, flagTelemetry, true, "Enable anonymous usage analytics")
 	cmd.Flags().BoolVar(&opts.AbsoluteGitHookPath, flagAbsoluteGitHookPath, false, "Embed full binary path in git hooks (for GUI git clients that don't source shell profiles)")
 
@@ -933,7 +931,7 @@ for you and (optionally) create a matching GitHub repository via the gh CLI.`,
 	cmd.Flags().BoolVarP(&opts.ForceHooks, flagForce, "f", false, "Force reinstall hooks (removes existing Entire hooks first)")
 	cmd.Flags().BoolVar(&opts.SkipPushSessions, flagSkipPushSessions, false, "Disable automatic pushing of session logs on git push")
 	cmd.Flags().StringVar(&opts.CheckpointRemote, flagCheckpointRemote, "", "Checkpoint remote in provider:owner/repo format (e.g., github:org/checkpoints-repo)")
-	cmd.Flags().StringVar(&opts.CheckpointBackend, flagCheckpointBackend, "", "Checkpoint storage backend: refs (one git ref per checkpoint; recommended) or branch (shared entire/checkpoints/v1 branch)")
+	cmd.Flags().StringVar(&opts.CheckpointBackend, flagCheckpointBackend, "", checkpointBackendFlagUsage)
 	cmd.Flags().BoolVar(&opts.Telemetry, flagTelemetry, true, "Enable anonymous usage analytics")
 	cmd.Flags().BoolVar(&opts.AbsoluteGitHookPath, flagAbsoluteGitHookPath, false, "Embed full binary path in git hooks (for GUI git clients that don't source shell profiles)")
 	cmd.Flags().BoolVar(&opts.SearchSkill, flagSearchSkill, false, "Install the optional Entire search skill for selected agent(s)")
@@ -1296,11 +1294,7 @@ func runEnableInteractive(ctx context.Context, w io.Writer, agents []agent.Agent
 
 	// Determine which settings file to write to
 	// First run always creates settings.json (no prompt)
-	entireDirAbs, err := paths.AbsPath(ctx, paths.EntireDir)
-	if err != nil {
-		entireDirAbs = paths.EntireDir // Fallback to relative
-	}
-	shouldUseLocal, showNotification := determineSettingsTarget(entireDirAbs, opts.UseLocalSettings, opts.UseProjectSettings)
+	shouldUseLocal, showNotification := determineSettingsTarget(ctx, opts.UseLocalSettings, opts.UseProjectSettings)
 
 	if showNotification {
 		fmt.Fprintln(w, "Info: Project settings exist. Saving to settings.local.json instead.")
@@ -1572,12 +1566,7 @@ func saveEnabledState(ctx context.Context, s *EntireSettings, useProjectSettings
 
 // localExists checks if settings.local.json exists.
 func localExists(ctx context.Context) bool {
-	localFile := settings.EntireSettingsLocalFile
-	if abs, err := paths.AbsPath(ctx, localFile); err == nil {
-		localFile = abs
-	}
-	_, err := os.Lstat(localFile)
-	return err == nil
+	return settings.IsSetUpLocal(ctx)
 }
 
 // runRemoveAgent removes hooks for a specific agent.
@@ -2096,7 +2085,7 @@ func validateSetupFlags(useLocal, useProject bool) error {
 // - Whether settings.json already exists
 // - The --local and --project flags
 // Returns (useLocal, showNotification).
-func determineSettingsTarget(entireDir string, useLocal, useProject bool) (bool, bool) {
+func determineSettingsTarget(ctx context.Context, useLocal, useProject bool) (bool, bool) {
 	// Explicit --local flag always uses local settings
 	if useLocal {
 		return true, false
@@ -2108,8 +2097,7 @@ func determineSettingsTarget(entireDir string, useLocal, useProject bool) (bool,
 	}
 
 	// No flags specified - check if settings file exists
-	settingsPath := filepath.Join(entireDir, paths.SettingsFileName)
-	if _, err := os.Lstat(settingsPath); err == nil {
+	if settings.IsSetUp(ctx) {
 		// Settings file exists - auto-redirect to local with notification
 		return true, true
 	}
@@ -2121,21 +2109,17 @@ func determineSettingsTarget(entireDir string, useLocal, useProject bool) (bool,
 // setupEntireDirectory creates the .entire directory and gitignore.
 // Returns true if the directory was created, false if it already existed.
 func setupEntireDirectory(ctx context.Context) (bool, error) { //nolint:unparam // already present in codebase
-	// Get absolute path for the .entire directory
-	entireDirAbs, err := paths.AbsPath(ctx, paths.EntireDir)
-	if err != nil {
-		entireDirAbs = paths.EntireDir // Fallback to relative
+	// Determine whether creation is needed without creating on the read path.
+	_, readErr := entiredir.OpenForRead(ctx)
+	created := errors.Is(readErr, fs.ErrNotExist)
+	if readErr != nil && !created {
+		return false, fmt.Errorf("failed to inspect .entire directory: %w", readErr)
 	}
 
-	// Check if directory already exists
-	created := false
-	if _, err := os.Lstat(entireDirAbs); os.IsNotExist(err) {
-		created = true
-	}
-
-	// Create .entire directory
-	//nolint:gosec // G301: Project directory needs standard permissions for git
-	if err := os.MkdirAll(entireDirAbs, 0o755); err != nil {
+	// Open performs creation through the worktree root, so .entire itself is a
+	// checked child of the trusted anchor rather than an absolute path followed
+	// before os.Root takes effect.
+	if _, err := entiredir.Open(ctx); err != nil {
 		return false, fmt.Errorf("failed to create .entire directory: %w", err)
 	}
 
@@ -2682,11 +2666,7 @@ func countShadowBranches(ctx context.Context) int {
 
 // checkEntireDirExists checks if the .entire directory exists.
 func checkEntireDirExists(ctx context.Context) bool {
-	entireDirAbs, err := paths.AbsPath(ctx, paths.EntireDir)
-	if err != nil {
-		entireDirAbs = paths.EntireDir
-	}
-	_, err = os.Lstat(entireDirAbs)
+	_, err := entiredir.OpenForRead(ctx)
 	return err == nil
 }
 
@@ -2892,8 +2872,8 @@ func removeAllSessionStates(ctx context.Context) (int, error) {
 	// state directory rather than inside it (see strategy.stateLockPath) so
 	// session-listing code doesn't have to filter them out. Best-effort:
 	// failing here doesn't undo the state-file removal.
-	if commonDir, cdErr := strategy.GetGitCommonDir(ctx); cdErr == nil {
-		_ = os.RemoveAll(filepath.Join(commonDir, "entire-session-locks"))
+	if root, rootErr := gitdir.Open(ctx); rootErr == nil {
+		_ = root.RemoveAll(strategy.SessionLockDirName) //nolint:errcheck // best-effort sweep; see the comment above
 	}
 
 	return count, nil
@@ -2903,11 +2883,37 @@ func removeAllSessionStates(ctx context.Context) (int, error) {
 // wrapped: the caller's warning line already leads with "failed to remove
 // .entire directory", and os.RemoveAll errors carry the op and path.
 func removeEntireDirectory(ctx context.Context) error {
-	entireDirAbs, err := paths.AbsPath(ctx, paths.EntireDir)
-	if err != nil {
-		entireDirAbs = paths.EntireDir
+	worktreeRoot, err := paths.WorktreeRoot(ctx)
+	switch {
+	case err == nil:
+	case errors.Is(err, paths.ErrNotARepository):
+		// Uninstall is also supported in an uninitialized directory. Anchor that
+		// case to the absolute cwd once; never hand a relative .entire path to an
+		// os operation, where a later chdir could retarget it.
+		//
+		// The gate is the sentinel, exactly as entiredir.anchor gates its own
+		// fallback, and NOT any WorktreeRoot failure. ErrNotARepository means git
+		// ran and said there is no repository here. Everything else — git off
+		// $PATH, dubious ownership, a cancelled context — means "we could not
+		// find out", and this is the one caller where answering that with a
+		// guess deletes the user's data in whatever directory the process
+		// happens to be sitting in.
+		worktreeRoot, err = os.Getwd() //nolint:forbidigo // no repository here; see above
+		if err != nil {
+			return fmt.Errorf("resolve current directory: %w", err)
+		}
+	default:
+		return fmt.Errorf("resolve %s location: %w", paths.EntireDir, err)
 	}
-	return os.RemoveAll(entireDirAbs) //nolint:wrapcheck // caller's warning line already names the step; the os error carries op and path
+	// Drop any cached root before unlinking the directory it refers to. A root
+	// that outlives its directory still accepts writes, and they land on an
+	// unlinked inode nobody will ever read.
+	entiredir.Reset()
+	root, err := worktreedir.OpenAt(worktreeRoot)
+	if err != nil {
+		return err //nolint:wrapcheck // OpenAt names the directory it could not open
+	}
+	return root.RemoveAll(paths.EntireDir) //nolint:wrapcheck // caller names the directory; os error carries operation
 }
 
 // removeAllShadowBranches removes all shadow branches.

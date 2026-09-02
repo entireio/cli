@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"log/slog"
 	"os"
 	"path"
@@ -22,8 +23,10 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent/codex"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
+	"github.com/entireio/cli/cmd/entire/cli/entiredir"
 	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
+	"github.com/entireio/cli/cmd/entire/cli/osroot"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/cmd/entire/cli/trailers"
@@ -600,7 +603,7 @@ func (s *treeWriter) writeStandardCheckpointEntries(ctx context.Context, opts Wr
 
 	// Copy additional metadata files from directory if specified (to session subdirectory)
 	if opts.MetadataDir != "" {
-		if err := s.copyMetadataDir(ctx, opts.MetadataDir, sessionDir, entries); err != nil {
+		if err := s.copyEntireMetadataDir(ctx, opts.MetadataDir, sessionDir, entries); err != nil {
 			return fmt.Errorf("failed to copy metadata directory: %w", err)
 		}
 	}
@@ -1003,7 +1006,7 @@ func (s *treeWriter) writeTranscript(ctx context.Context, opts WriteOptions, ses
 	// so we redact it here. The in-memory path (opts.Transcript) is already
 	// pre-redacted by the caller — enforced by the RedactedBytes type.
 	if len(transcriptBytes) == 0 && opts.TranscriptPath != "" {
-		rawData, readErr := os.ReadFile(opts.TranscriptPath)
+		rawData, readErr := agent.ReadTranscriptFile(opts.TranscriptPath)
 		if readErr != nil {
 			// Non-fatal: transcript may not exist yet
 			rawData = nil
@@ -2420,40 +2423,48 @@ func CreateBlobFromContent(repo *git.Repository, content []byte) (plumbing.Hash,
 	return hash, nil
 }
 
-// copyMetadataDir copies all files from a directory to the checkpoint path.
-// Used to include additional metadata files like task checkpoints, subagent transcripts, etc.
-func (s *treeWriter) copyMetadataDir(ctx context.Context, metadataDir, sessionDir string, entries map[string]object.TreeEntry) error {
-	err := filepath.Walk(metadataDir, func(path string, info os.FileInfo, err error) error {
+// copyEntireMetadataDir copies a session's metadata directory under .entire to
+// the checkpoint path. metadataDir is the repo-relative path
+// (.entire/metadata/<session>); the walk goes through the shared .entire root,
+// so a symlink planted under it cannot redirect a read outside .entire.
+func (s *treeWriter) copyEntireMetadataDir(ctx context.Context, metadataDir, sessionDir string, entries map[string]object.TreeEntry) error {
+	root, err := entiredir.OpenForRead(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to open %s: %w", paths.EntireDir, err)
+	}
+	dirName, err := entiredir.Name(metadataDir)
+	if err != nil {
+		return fmt.Errorf("failed to resolve metadata directory: %w", err)
+	}
+	return s.copyMetadataDir(ctx, root, dirName, sessionDir, entries)
+}
+
+// copyMetadataDir copies all files from dirName within root to the checkpoint
+// path. Used to include additional metadata files like task checkpoints,
+// subagent transcripts, etc.
+func (s *treeWriter) copyMetadataDir(ctx context.Context, root *os.Root, dirName, sessionDir string, entries map[string]object.TreeEntry) error {
+	// WalkDirNoSymlinks refuses a symlink at the walk root as well as beneath
+	// it; see addDirectoryToChanges in ephemeral.go for why the callback guard
+	// this replaces never covered dirName itself.
+	err := osroot.WalkDirNoSymlinks(root, dirName, func(name string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
 
-		// Skip symlinks to prevent reading files outside the metadata directory.
-		// A symlink could point to sensitive files (e.g., /etc/passwd) which would
-		// then be captured in the checkpoint and stored in git history.
-		// NOTE: filepath.Walk uses os.Stat (follows symlinks), so info.Mode() never
-		// reports ModeSymlink. We use os.Lstat to check the entry itself.
-		// This check MUST come before IsDir() because Walk follows symlinked
-		// directories and would recurse into them otherwise.
-		linfo, lstatErr := os.Lstat(path)
-		if lstatErr != nil {
-			return fmt.Errorf("failed to lstat %s: %w", path, lstatErr)
-		}
-		if linfo.Mode()&os.ModeSymlink != 0 {
-			if info.IsDir() {
-				return filepath.SkipDir
-			}
+		if d.IsDir() {
 			return nil
 		}
 
-		if info.IsDir() {
+		// Skip an interrupted atomic write's residue, for the reasons
+		// addDirectoryToChanges in ephemeral.go gives.
+		if jsonutil.IsTempName(d.Name()) {
 			return nil
 		}
 
 		// Get relative path within metadata dir
-		relPath, err := filepath.Rel(metadataDir, path)
+		relPath, err := filepath.Rel(dirName, name)
 		if err != nil {
-			return fmt.Errorf("failed to get relative path for %s: %w", path, err)
+			return fmt.Errorf("failed to get relative path for %s: %w", name, err)
 		}
 
 		// Prevent path traversal via unexpected relative paths outside the metadata dir.
@@ -2471,9 +2482,9 @@ func (s *treeWriter) copyMetadataDir(ctx context.Context, metadataDir, sessionDi
 		// No prefix cache here: this path is unreachable in production (no
 		// production WriteOptions sets MetadataDir) and relPath is not
 		// session-scoped, so it would key every session to one slot.
-		blobHash, mode, err := createRedactedBlobFromFile(ctx, s.repo, nil, path, relPath)
+		blobHash, mode, err := createRedactedBlobFromFile(ctx, s.repo, nil, root, name, relPath)
 		if err != nil {
-			return fmt.Errorf("failed to create blob for %s: %w", path, err)
+			return fmt.Errorf("failed to create blob for %s: %w", name, err)
 		}
 
 		// Store at checkpoint path (use forward slashes for git tree compatibility on Windows)
@@ -2500,8 +2511,8 @@ func (s *treeWriter) copyMetadataDir(ctx context.Context, metadataDir, sessionDi
 // regex-only blobs into OPF-applied (9-layer) commits before they leave the
 // local machine.
 // JSONL files get JSONL-aware redaction; all other files get plain byte redaction.
-func createRedactedBlobFromFile(ctx context.Context, repo *git.Repository, cache *redactCache, filePath, treePath string) (plumbing.Hash, filemode.FileMode, error) {
-	info, err := os.Stat(filePath)
+func createRedactedBlobFromFile(ctx context.Context, repo *git.Repository, cache *redactCache, root *os.Root, name, treePath string) (plumbing.Hash, filemode.FileMode, error) {
+	info, err := osroot.LstatNoSymlinks(root, name)
 	if err != nil {
 		return plumbing.ZeroHash, 0, fmt.Errorf("failed to stat file: %w", err)
 	}
@@ -2511,7 +2522,7 @@ func createRedactedBlobFromFile(ctx context.Context, repo *git.Repository, cache
 		mode = filemode.Executable
 	}
 
-	content, err := os.ReadFile(filePath) //nolint:gosec // filePath comes from walking the metadata directory
+	content, err := entiredir.ReadFile(root, name)
 	if err != nil {
 		return plumbing.ZeroHash, 0, fmt.Errorf("failed to read file: %w", err)
 	}

@@ -1,9 +1,13 @@
 package opencode
 
 import (
+	"crypto/rand"
+	"encoding/hex"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
-	"path/filepath"
+	"path"
 	"time"
 )
 
@@ -22,19 +26,38 @@ const (
 	renameBackoff = 40 * time.Millisecond
 )
 
-// stageExportPath creates an empty staging file in dir for sessionID's export and
-// returns its path. The caller must remove it unless it installs it.
-func stageExportPath(dir, sessionID string) (string, error) {
-	file, err := os.CreateTemp(dir, exportStagePrefix+sessionID+"-*")
-	if err != nil {
-		return "", fmt.Errorf("failed to create export staging file: %w", err)
+// stageExportPath creates an empty staging file for sessionID's export under
+// dirName inside root, and returns its name relative to root. The caller must
+// remove it unless it installs it.
+//
+// os.Root has no CreateTemp, so the unique suffix is drawn here and the file is
+// created with O_EXCL: a collision retries rather than truncating a concurrent
+// export's staging file.
+func stageExportPath(root *os.Root, dirName, sessionID string) (string, error) {
+	var suffix [8]byte
+	for range stageNameAttempts {
+		if _, err := rand.Read(suffix[:]); err != nil {
+			return "", fmt.Errorf("failed to create export staging file: %w", err)
+		}
+		name := dirName + "/" + exportStagePrefix + sessionID + "-" + hex.EncodeToString(suffix[:])
+		file, err := root.OpenFile(name, os.O_RDWR|os.O_CREATE|os.O_EXCL, 0o600)
+		if errors.Is(err, fs.ErrExist) {
+			continue
+		}
+		if err != nil {
+			return "", fmt.Errorf("failed to create export staging file: %w", err)
+		}
+		if err := file.Close(); err != nil {
+			_ = root.Remove(name) //nolint:errcheck // best-effort cleanup of a staging file we failed to open
+			return "", fmt.Errorf("failed to create export staging file: %w", err)
+		}
+		return name, nil
 	}
-	if err := file.Close(); err != nil {
-		_ = os.Remove(file.Name())
-		return "", fmt.Errorf("failed to create export staging file: %w", err)
-	}
-	return file.Name(), nil
+	return "", fmt.Errorf("failed to create export staging file: exhausted %d name attempts", stageNameAttempts)
 }
+
+// stageNameAttempts bounds the O_EXCL retry loop in stageExportPath.
+const stageNameAttempts = 100
 
 // renameOverExisting moves staged onto dest, replacing it, and fsyncs dest's
 // directory so the replacement survives a crash.
@@ -47,11 +70,11 @@ func stageExportPath(dir, sessionID string) (string, error) {
 // in-place write would have succeeded. Readers of a transcript hold it briefly, so
 // a bounded retry covers the realistic case; a reader that holds it longer gets a
 // clear error and a preserved staging file rather than a lost transcript.
-func renameOverExisting(staged, dest string) error {
+func renameOverExisting(root *os.Root, staged, dest string) error {
 	var err error
 	for range renameRetries {
-		if err = os.Rename(staged, dest); err == nil {
-			syncDir(filepath.Dir(dest))
+		if err = root.Rename(staged, dest); err == nil {
+			syncDir(root, path.Dir(dest))
 			return nil
 		}
 		if !isRenameContention(err) {
@@ -59,15 +82,15 @@ func renameOverExisting(staged, dest string) error {
 		}
 		time.Sleep(renameBackoff)
 	}
-	return fmt.Errorf("%w (another process may be reading %s)", err, filepath.Base(dest))
+	return fmt.Errorf("%w (another process may be reading %s)", err, path.Base(dest))
 }
 
 // syncDir flushes a directory entry so a completed rename is not lost by a crash.
 // Best-effort: directory fsync is not supported everywhere (notably Windows), and
 // failing to durably record an export is not worth failing the export over.
-func syncDir(dir string) {
+func syncDir(root *os.Root, dirName string) {
 	// Same shape as the directory fsync in jsonutil.WriteFileAtomic.
-	if d, err := os.Open(dir); err == nil { //nolint:gosec // G304: dir is the .entire/tmp path the caller just wrote into, not user input
+	if d, err := root.Open(dirName); err == nil {
 		_ = d.Sync() //nolint:errcheck // best-effort directory fsync; failure does not roll back the rename
 		_ = d.Close()
 	}

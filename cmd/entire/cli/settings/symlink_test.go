@@ -207,36 +207,6 @@ func TestLoad_RealSettingsFilesStillLoad(t *testing.T) {
 	}
 }
 
-// The pre-open Lstat and the open are separate syscalls. Model a replacement
-// between them deterministically by validating a descriptor for one file
-// against the path of another; the production path must reject this rather
-// than read from the descriptor.
-func TestValidateOpenedFile_RejectsReplacedEntry(t *testing.T) {
-	t.Parallel()
-
-	dir := t.TempDir()
-	settingsPath := filepath.Join(dir, "settings.json")
-	plantedPath := filepath.Join(dir, "planted.json")
-	if err := os.WriteFile(settingsPath, []byte(`{"enabled":true}`), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(plantedPath, []byte(`{"enabled":false}`), 0o600); err != nil {
-		t.Fatal(err)
-	}
-
-	root, err := os.OpenRoot(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer root.Close()
-
-	planted, err := root.Open("planted.json")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer planted.Close()
-
-	if err := validateOpenedFile(root, "settings.json", settingsPath, planted); err == nil {
-		t.Fatal("validateOpenedFile accepted a descriptor for a replacement file")
-	}
-}
+// The Lstat/Open race that used to be modelled here is now covered where the
+// check lives: osroot.TestValidateOpenedFile_RejectsReplacedEntry. readConfinedIn
+// delegates to osroot.ReadFileNoFollow rather than carrying a second copy of it.

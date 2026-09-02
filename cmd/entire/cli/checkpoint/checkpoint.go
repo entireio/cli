@@ -89,11 +89,12 @@ type WriteEphemeralOptions struct {
 	// DeletedFiles are files that have been deleted (relative paths)
 	DeletedFiles []string
 
-	// MetadataDir is the relative path to the metadata directory
+	// MetadataDir is the repo-relative path to the metadata directory
+	// (.entire/metadata/<session>). It doubles as the git tree path the
+	// directory's files land at, and as the name the .entire root reads them
+	// through — there is deliberately no absolute counterpart, because two
+	// spellings of one directory is how they come to disagree.
 	MetadataDir string
-
-	// MetadataDirAbs is the absolute path to the metadata directory
-	MetadataDirAbs string
 
 	// CommitMessage is the commit subject line
 	CommitMessage string

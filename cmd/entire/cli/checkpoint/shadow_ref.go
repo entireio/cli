@@ -6,11 +6,12 @@ import (
 	"fmt"
 	"math/rand/v2"
 	"os"
-	"path/filepath"
 	"strings"
 	"time"
 
+	"github.com/entireio/cli/cmd/entire/cli/gitdir"
 	"github.com/entireio/cli/cmd/entire/cli/internal/flock"
+	"github.com/entireio/cli/cmd/entire/cli/osroot"
 
 	"github.com/go-git/go-git/v6/plumbing"
 )
@@ -80,14 +81,20 @@ func shadowRefBackoff(ctx context.Context, attempt int) error {
 // files live in <git-common-dir>/entire-shadow-locks/ so they don't pollute
 // the session-state directory. Branch names are slash-escaped because the
 // shadow-branch convention "entire/<hash>" would otherwise nest directories.
-func shadowBranchLockPath(commonDir, branchName string) (string, error) {
-	lockDir := filepath.Join(commonDir, "entire-shadow-locks")
-	if err := os.MkdirAll(lockDir, 0o750); err != nil {
-		return "", fmt.Errorf("create shadow lock directory: %w", err)
+func shadowBranchLock(commonDir, branchName string) (*os.Root, string, error) {
+	root, err := gitdir.OpenAt(commonDir)
+	if err != nil {
+		return nil, "", fmt.Errorf("open git common dir: %w", err)
+	}
+	if err := osroot.MkdirAllNoSymlink(root, shadowLockDirName, 0o750); err != nil {
+		return nil, "", fmt.Errorf("create shadow lock directory: %w", err)
 	}
 	safe := strings.ReplaceAll(branchName, "/", "_")
-	return filepath.Join(lockDir, safe+".lock"), nil
+	return root, shadowLockDirName + "/" + safe + ".lock", nil
 }
+
+// shadowLockDirName is the shadow-branch lock directory inside the git common dir.
+const shadowLockDirName = "entire-shadow-locks"
 
 // withShadowBranchFlock acquires the per-shadow-branch flock, runs fn, and
 // releases the flock. Serializes all WriteTemporary callers that target the
@@ -97,11 +104,11 @@ func shadowBranchLockPath(commonDir, branchName string) (string, error) {
 // commonDir is the git common directory (from s.repoDirs); it locates the
 // lock file independently of the process cwd.
 func withShadowBranchFlock(commonDir, branchName string, fn func() error) error {
-	path, err := shadowBranchLockPath(commonDir, branchName)
+	root, name, err := shadowBranchLock(commonDir, branchName)
 	if err != nil {
 		return err
 	}
-	release, err := flock.Acquire(path)
+	release, err := flock.AcquireIn(root, name)
 	if err != nil {
 		return fmt.Errorf("acquire shadow flock %s: %w", branchName, err)
 	}
@@ -119,5 +126,14 @@ func tryDeleteLooseObject(commonDir string, hash plumbing.Hash) {
 	if len(h) < 3 {
 		return
 	}
-	_ = os.Remove(filepath.Join(commonDir, "objects", h[:2], h[2:]))
+	// Through the common dir's root like everything else in this file: a delete
+	// is the operation least worth leaving on a joined path, and the shadow
+	// flock beside it already resolves its name inside this same root. The hash
+	// is hex, so nothing here can traverse today; the root is what keeps that
+	// true without depending on it.
+	root, err := gitdir.OpenAt(commonDir)
+	if err != nil {
+		return
+	}
+	_ = osroot.RemoveNoSymlinks(root, "objects/"+h[:2]+"/"+h[2:]) //nolint:errcheck // best-effort; see doc comment
 }

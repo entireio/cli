@@ -12,7 +12,9 @@ import (
 	"github.com/go-git/go-git/v6"
 	"github.com/go-git/go-git/v6/plumbing"
 
+	"github.com/entireio/cli/cmd/entire/cli/gitdir"
 	"github.com/entireio/cli/cmd/entire/cli/internal/flock"
+	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
 )
 
 // Push-discovery queue file names, kept in the git common dir so every worktree
@@ -25,6 +27,20 @@ const (
 	pushQueueLockName = "entire-checkpoint-push-queue.lock"
 )
 
+// lock opens the common dir's root and takes the queue lock inside it,
+// returning the root so the caller's reads and writes use the same handle.
+func (q *PushQueue) lock() (*os.Root, func(), error) {
+	root, err := q.root()
+	if err != nil {
+		return nil, nil, fmt.Errorf("open git common dir: %w", err)
+	}
+	release, err := flock.AcquireIn(root, pushQueueLockName)
+	if err != nil {
+		return nil, nil, fmt.Errorf("lock push queue: %w", err)
+	}
+	return root, release, nil
+}
+
 // pushQueueEntry is one JSONL record: a checkpoint ref awaiting push.
 type pushQueueEntry struct {
 	Ref string `json:"ref"`
@@ -36,6 +52,12 @@ type pushQueueEntry struct {
 // Duplicates are tolerated on disk and collapsed by Drain.
 type PushQueue struct {
 	dir string
+}
+
+// root returns the shared *os.Root over the git common dir the queue lives in.
+// Every read, write, lock and rename below is a name inside it.
+func (q *PushQueue) root() (*os.Root, error) {
+	return gitdir.OpenAt(q.dir) //nolint:wrapcheck // gitdir names the directory; the caller adds the queue context
 }
 
 // NewPushQueue returns the push queue rooted at gitCommonDir.
@@ -53,16 +75,15 @@ func PushQueueForRepo(ctx context.Context, repo *git.Repository) (*PushQueue, er
 }
 
 func (q *PushQueue) queuePath() string { return filepath.Join(q.dir, pushQueueFileName) }
-func (q *PushQueue) lockPath() string  { return filepath.Join(q.dir, pushQueueLockName) }
 
 // Enqueue appends a ref to the queue. It is safe to enqueue a ref already
 // present (or already pushed): Drain collapses duplicates and the batch push is
 // idempotent. Enqueue takes the lock so concurrent writers never interleave a
 // partial line.
 func (q *PushQueue) Enqueue(ref plumbing.ReferenceName) error {
-	release, err := flock.Acquire(q.lockPath())
+	root, release, err := q.lock()
 	if err != nil {
-		return fmt.Errorf("lock push queue: %w", err)
+		return err
 	}
 	defer release()
 
@@ -70,7 +91,7 @@ func (q *PushQueue) Enqueue(ref plumbing.ReferenceName) error {
 	if err != nil {
 		return fmt.Errorf("encode push queue entry: %w", err)
 	}
-	f, err := os.OpenFile(q.queuePath(), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+	f, err := root.OpenFile(pushQueueFileName, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 	if err != nil {
 		return fmt.Errorf("open push queue: %w", err)
 	}
@@ -92,18 +113,18 @@ func (q *PushQueue) Enqueue(ref plumbing.ReferenceName) error {
 // compaction point (e.g. a long-lived session that keeps re-enqueuing the same
 // checkpoint ref but never pushes).
 func (q *PushQueue) Drain() ([]plumbing.ReferenceName, error) {
-	release, err := flock.Acquire(q.lockPath())
+	root, release, err := q.lock()
 	if err != nil {
-		return nil, fmt.Errorf("lock push queue: %w", err)
+		return nil, err
 	}
 	defer release()
 
-	refs, rawLines, err := q.readLocked()
+	refs, rawLines, err := q.readLocked(root)
 	if err != nil {
 		return nil, err
 	}
 	if rawLines > len(refs) {
-		if err := q.rewriteLocked(refs); err != nil {
+		if err := q.rewriteLocked(root, refs); err != nil {
 			return nil, err
 		}
 	}
@@ -115,13 +136,13 @@ func (q *PushQueue) Drain() ([]plumbing.ReferenceName, error) {
 // compacts redundant lines in place) — for counters/status displays that must
 // observe the queue without owning a push. A missing queue file yields no refs.
 func (q *PushQueue) Peek() ([]plumbing.ReferenceName, error) {
-	release, err := flock.Acquire(q.lockPath())
+	root, release, err := q.lock()
 	if err != nil {
-		return nil, fmt.Errorf("lock push queue: %w", err)
+		return nil, err
 	}
 	defer release()
 
-	refs, _, err := q.readLocked()
+	refs, _, err := q.readLocked(root)
 	return refs, err
 }
 
@@ -132,13 +153,13 @@ func (q *PushQueue) Remove(refs []plumbing.ReferenceName) error {
 	if len(refs) == 0 {
 		return nil
 	}
-	release, err := flock.Acquire(q.lockPath())
+	root, release, err := q.lock()
 	if err != nil {
-		return fmt.Errorf("lock push queue: %w", err)
+		return err
 	}
 	defer release()
 
-	current, _, err := q.readLocked()
+	current, _, err := q.readLocked(root)
 	if err != nil {
 		return err
 	}
@@ -153,16 +174,16 @@ func (q *PushQueue) Remove(refs []plumbing.ReferenceName) error {
 		}
 		kept = append(kept, r)
 	}
-	return q.rewriteLocked(kept)
+	return q.rewriteLocked(root, kept)
 }
 
 // rewriteLocked replaces the queue file with exactly refs (de-duplicated, one
 // line each), or removes the file when refs is empty so a clean repo has no
 // stray queue. The caller must hold the lock. The write is atomic (temp file +
 // rename) so a concurrent reader never sees a half-written queue.
-func (q *PushQueue) rewriteLocked(refs []plumbing.ReferenceName) error {
+func (q *PushQueue) rewriteLocked(root *os.Root, refs []plumbing.ReferenceName) error {
 	if len(refs) == 0 {
-		if err := os.Remove(q.queuePath()); err != nil && !os.IsNotExist(err) {
+		if err := root.Remove(pushQueueFileName); err != nil && !os.IsNotExist(err) {
 			return fmt.Errorf("remove empty push queue: %w", err)
 		}
 		return nil
@@ -176,7 +197,7 @@ func (q *PushQueue) rewriteLocked(refs []plumbing.ReferenceName) error {
 		buf.Write(line)
 		buf.WriteByte('\n')
 	}
-	if err := writeFileAtomicInDir(q.dir, q.queuePath(), buf.Bytes()); err != nil {
+	if err := writeQueueAtomic(root, buf.Bytes()); err != nil {
 		return fmt.Errorf("rewrite push queue: %w", err)
 	}
 	return nil
@@ -190,8 +211,8 @@ func (q *PushQueue) rewriteLocked(refs []plumbing.ReferenceName) error {
 // malformed records), so callers can detect when the file holds more than the
 // de-duplicated set and is worth compacting: rawLines > len(refs) exactly when
 // there were redundant lines.
-func (q *PushQueue) readLocked() (refs []plumbing.ReferenceName, rawLines int, err error) {
-	f, err := os.Open(q.queuePath())
+func (q *PushQueue) readLocked(root *os.Root) (refs []plumbing.ReferenceName, rawLines int, err error) {
+	f, err := root.Open(pushQueueFileName)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, 0, nil
@@ -225,15 +246,14 @@ func (q *PushQueue) readLocked() (refs []plumbing.ReferenceName, rawLines int, e
 	return refs, rawLines, nil
 }
 
-// writeFileAtomicInDir writes data to a temp file in dir and renames it over
-// path, so a reader (under the lock) never sees a half-written queue.
-func writeFileAtomicInDir(dir, path string, data []byte) error {
-	tmp, err := os.CreateTemp(dir, pushQueueFileName+".*")
+// writeQueueAtomic writes data to a temp file inside root and renames it over
+// the queue file, so a reader (under the lock) never sees a half-written queue.
+func writeQueueAtomic(root *os.Root, data []byte) error {
+	tmp, tmpName, err := jsonutil.CreateTempIn(root, pushQueueFileName)
 	if err != nil {
 		return fmt.Errorf("create temp push queue: %w", err)
 	}
-	tmpName := tmp.Name()
-	defer os.Remove(tmpName)
+	defer root.Remove(tmpName) //nolint:errcheck // best-effort cleanup; a successful rename already consumed it
 	if _, err := tmp.Write(data); err != nil {
 		_ = tmp.Close()
 		return fmt.Errorf("write temp push queue: %w", err)
@@ -241,7 +261,7 @@ func writeFileAtomicInDir(dir, path string, data []byte) error {
 	if err := tmp.Close(); err != nil {
 		return fmt.Errorf("close temp push queue: %w", err)
 	}
-	if err := os.Rename(tmpName, path); err != nil {
+	if err := root.Rename(tmpName, pushQueueFileName); err != nil {
 		return fmt.Errorf("rename temp push queue: %w", err)
 	}
 	return nil

@@ -4,13 +4,16 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
+	"github.com/entireio/cli/cmd/entire/cli/osroot"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
@@ -716,7 +719,7 @@ func TestRunCleanAllWithItems_PartialFailure(t *testing.T) {
 	}
 
 	cmd, stdout, stderr := newTestCleanCmd(t)
-	err := runCleanAllWithItems(cmd.Context(), cmd, true, false, items, nil)
+	err := runCleanAllWithItems(cmd.Context(), cmd, true, false, items, nil, nil, nil)
 
 	if err == nil {
 		t.Fatal("runCleanAllWithItems() should return error when items fail to delete")
@@ -750,7 +753,7 @@ func TestRunCleanAllWithItems_AllFailures(t *testing.T) {
 	}
 
 	cmd, stdout, stderr := newTestCleanCmd(t)
-	err := runCleanAllWithItems(cmd.Context(), cmd, true, false, items, nil)
+	err := runCleanAllWithItems(cmd.Context(), cmd, true, false, items, nil, nil, nil)
 
 	if err == nil {
 		t.Fatal("runCleanAllWithItems() should return error when items fail to delete")
@@ -774,7 +777,7 @@ func TestRunCleanAllWithItems_NoItems(t *testing.T) {
 	setupCleanTestRepo(t)
 
 	cmd, stdout, _ := newTestCleanCmd(t)
-	err := runCleanAllWithItems(cmd.Context(), cmd, false, false, []strategy.CleanupItem{}, nil)
+	err := runCleanAllWithItems(cmd.Context(), cmd, false, false, []strategy.CleanupItem{}, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("runCleanAllWithItems() error = %v", err)
 	}
@@ -795,7 +798,7 @@ func TestRunCleanAllWithItems_MixedTypes_Preview(t *testing.T) {
 	}
 
 	cmd, stdout, _ := newTestCleanCmd(t)
-	err := runCleanAllWithItems(cmd.Context(), cmd, false, true, items, nil)
+	err := runCleanAllWithItems(cmd.Context(), cmd, false, true, items, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("runCleanAllWithItems() error = %v", err)
 	}
@@ -864,4 +867,105 @@ func TestDeleteTempFiles_ToleratesVanishedFile(t *testing.T) {
 	if len(deleted) != 1 || deleted[0] != "present.json" {
 		t.Errorf("deleted = %v, want [present.json]", deleted)
 	}
+}
+
+// .entire/tmp is where deleteTempFiles unlinks names it found on a previous
+// walk, so a link swapped in at the directory must be refused rather than
+// deleted through. os.Root stops only the links that leave the repository, and
+// this one does not have to.
+func TestDeleteTempFiles_RefusesASymlinkedTmpDirectory(t *testing.T) {
+	if runtime.GOOS == windowsGOOS {
+		t.Skip("symlink creation is not generally available on Windows")
+	}
+	setupCleanTestRepo(t)
+	ctx := context.Background()
+
+	entireDirAbs, err := paths.AbsPath(ctx, ".entire")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(entireDirAbs, 0o750); err != nil {
+		t.Fatal(err)
+	}
+
+	// The victim lives inside the repository, so nothing here escapes the root.
+	victimDir := filepath.Join(entireDirAbs, "victim")
+	if err := os.MkdirAll(victimDir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	victim := filepath.Join(victimDir, "keep.json")
+	if err := os.WriteFile(victim, []byte(`{"keep":true}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("victim", filepath.Join(entireDirAbs, "tmp")); err != nil {
+		t.Skipf("symlink not supported: %v", err)
+	}
+
+	deleted, failed := deleteTempFiles(ctx, []string{"keep.json"})
+
+	if len(deleted) != 0 {
+		t.Errorf("deleted = %v, want none: the delete must not follow the link", deleted)
+	}
+	if len(failed) != 1 {
+		t.Fatalf("failed = %+v, want exactly one refusal", failed)
+	}
+	if !errors.Is(failed[0].Err, osroot.ErrSymlinkedPath) {
+		t.Errorf("failed[0].Err = %v, want %v", failed[0].Err, osroot.ErrSymlinkedPath)
+	}
+	if _, err := os.Lstat(victim); err != nil {
+		t.Errorf("the link target must survive: %v", err)
+	}
+}
+
+// A failed listing does not abort the command, which means the summary is the
+// only place a caller learns the list was not complete. The warning goes to
+// stderr and the counts go to stdout, so stdout has to say it too.
+func TestRunCleanAllWithItems_NamesTheScansThatFailed(t *testing.T) {
+	t.Run("with nothing else to clean", func(t *testing.T) {
+		cmd, stdout, _ := newTestCleanCmd(t)
+
+		err := runCleanAllWithItems(cmd.Context(), cmd, true, false,
+			[]strategy.CleanupItem{}, nil, nil, []string{"stray agent temp files"})
+		if err != nil {
+			t.Fatalf("runCleanAllWithItems() error = %v", err)
+		}
+
+		out := stdout.String()
+		if !strings.Contains(out, "No items to clean up.") {
+			t.Errorf("stdout should still report what was found, got:\n%s", out)
+		}
+		if !strings.Contains(out, "Could not scan stray agent temp files") {
+			t.Errorf("stdout should name the failed scan, got:\n%s", out)
+		}
+	})
+
+	t.Run("in the preview", func(t *testing.T) {
+		cmd, stdout, _ := newTestCleanCmd(t)
+
+		err := runCleanAllWithItems(cmd.Context(), cmd, false, true,
+			[]strategy.CleanupItem{}, []string{"a.json"}, nil,
+			[]string{"temp files", "stray agent temp files"})
+		if err != nil {
+			t.Fatalf("runCleanAllWithItems() error = %v", err)
+		}
+
+		out := stdout.String()
+		if !strings.Contains(out, "Could not scan temp files or stray agent temp files") {
+			t.Errorf("preview should name both failed scans, got:\n%s", out)
+		}
+	})
+
+	t.Run("and stays quiet when every scan worked", func(t *testing.T) {
+		cmd, stdout, _ := newTestCleanCmd(t)
+
+		err := runCleanAllWithItems(cmd.Context(), cmd, true, false,
+			[]strategy.CleanupItem{}, nil, nil, nil)
+		if err != nil {
+			t.Fatalf("runCleanAllWithItems() error = %v", err)
+		}
+
+		if strings.Contains(stdout.String(), "Could not scan") {
+			t.Errorf("a complete scan must not print the note, got:\n%s", stdout.String())
+		}
+	})
 }

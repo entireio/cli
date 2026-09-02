@@ -169,9 +169,9 @@ func (c *ClaudeCodeAgent) WriteSession(_ context.Context, session *agent.AgentSe
 		return errors.New("session has no native data to write")
 	}
 
-	// Write the raw JSONL data
-	if err := os.WriteFile(session.SessionRef, session.NativeData, 0o600); err != nil {
-		return fmt.Errorf("failed to write transcript: %w", err)
+	// Write the raw JSONL data through Claude Code's own session store.
+	if err := agent.WriteSessionFile(c, session, session.NativeData, 0o600); err != nil {
+		return fmt.Errorf("write transcript: %w", err)
 	}
 
 	return nil

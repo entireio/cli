@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -94,6 +95,7 @@ type fakeCellCore struct {
 	// to the requested repo rather than merely returning whatever fixture was
 	// configured regardless of what was asked.
 	lastListReposParams coreapi.ListReposParams
+	mu                  sync.Mutex
 }
 
 // waitIfBlocking simulates a core that accepts the connection and then stalls.
@@ -120,7 +122,9 @@ func (f *fakeCellCore) ListClusters(context.Context) (*coreapi.ListClustersOutpu
 }
 
 func (f *fakeCellCore) ListRepos(ctx context.Context, params coreapi.ListReposParams) (*coreapi.ListReposOutputBody, error) {
+	f.mu.Lock()
 	f.lastListReposParams = params
+	f.mu.Unlock()
 	if err := f.waitIfBlocking(ctx); err != nil {
 		return nil, err
 	}

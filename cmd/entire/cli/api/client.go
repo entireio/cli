@@ -278,16 +278,20 @@ func DecodeJSON(resp *http.Response, dest any) error {
 
 // ErrorResponse represents a standard API error response. Older endpoints
 // return {"error":"message"}; newer endpoints return
-// {"error":{"code":"...","message":"...",...}}.
+// {"error":{"code":"...","message":"...",...}}; entire-api cells proxied
+// through the gateway return huma's {"title":..,"status":..,"detail":"message"}.
 type ErrorResponse struct {
-	Error any `json:"error"`
+	Error  any    `json:"error"`
+	Detail string `json:"detail"`
 }
 
-// Message extracts the human-readable error message from either envelope shape.
+// Message extracts the human-readable error message from any envelope shape.
 func (e ErrorResponse) Message() string {
 	switch v := e.Error.(type) {
 	case string:
-		return strings.TrimSpace(v)
+		if message := strings.TrimSpace(v); message != "" {
+			return message
+		}
 	case map[string]any:
 		if message, ok := v["message"].(string); ok && strings.TrimSpace(message) != "" {
 			return strings.TrimSpace(message)
@@ -296,7 +300,7 @@ func (e ErrorResponse) Message() string {
 			return strings.TrimSpace(code)
 		}
 	}
-	return ""
+	return strings.TrimSpace(e.Detail)
 }
 
 // HTTPError is returned by CheckResponse for non-2xx responses. Callers can use

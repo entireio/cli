@@ -297,6 +297,46 @@ func TestNewCommand_FreshRunWritesManifest(t *testing.T) {
 	}
 }
 
+// TestNewCommand_FreshRunWarnsSandboxBypass verifies that an ordinary
+// investigate run (no --issue-link, so confirmUntrustedIssueSeed's own
+// stronger warning never fires) still tells the operator that the agents
+// it is about to spawn run with sandbox/approval checks disabled. Before
+// this fix, that fact was silent for every run except the --issue-link
+// case -- a plain `entire investigate "..."` on a freshly cloned,
+// not-yet-reviewed repo gave no signal that the spawned agent could
+// execute arbitrary commands unsandboxed.
+func TestNewCommand_FreshRunWarnsSandboxBypass(t *testing.T) {
+	setupInvestigateRepo(t)
+
+	if err := saveInvestigateSettings(&settings.InvestigateConfig{
+		Agents:   []string{"stub-agent"},
+		MaxTurns: 1,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	_, runFn := captureLoopRun()
+	deps := newTestDeps(t, []types.AgentName{"stub-agent"}, []string{"stub-agent"})
+	deps.LoopRun = runFn
+
+	cmd := investigate.NewCommand(deps)
+	out := &bytes.Buffer{}
+	errBuf := &bytes.Buffer{}
+	cmd.SetOut(out)
+	cmd.SetErr(errBuf)
+	cmd.SetArgs([]string{seedArg(t, "test investigation")})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("execute: %v\nstderr: %s", err, errBuf.String())
+	}
+
+	if !strings.Contains(errBuf.String(), "sandbox and approval") {
+		t.Errorf("expected a sandbox-bypass notice on stderr for a plain (non --issue-link) run, got:\n%s", errBuf.String())
+	}
+	if !strings.Contains(errBuf.String(), "bypassPermissions") || !strings.Contains(errBuf.String(), "dangerously-bypass-approvals-and-sandbox") {
+		t.Errorf("expected the notice to name both agents' actual bypass flags, got:\n%s", errBuf.String())
+	}
+}
+
 // TestNewCommand_FreshRunPausedKeepsPerRunDir verifies that resumable
 // outcomes (Paused/Cancelled) leave the per-run directory in place so
 // `entire investigate --continue` has files to read, and the manifest

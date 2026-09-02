@@ -189,22 +189,9 @@ var errRepoNotOnboarded = errors.New("repo is not onboarded to Entire")
 // the repo name, and naming it here too is what produced the doubled
 // "resolve processing placement for X: X: repo is not onboarded" output.
 func resolveProcessingPlacement(ctx context.Context, c cellCoreClient, fullName string) (coreapi.RepoPlacement, error) {
-	out, err := c.ListRepos(ctx, coreapi.ListReposParams{Filter: coreapi.NewOptString(fullName)})
+	entry, err := lookupRepoIndexEntry(ctx, c, fullName)
 	if err != nil {
-		return coreapi.RepoPlacement{}, fmt.Errorf("list repos: %w", err)
-	}
-	if len(out.Repos) == 0 {
-		return coreapi.RepoPlacement{}, errRepoNotOnboarded
-	}
-	entry := out.Repos[0]
-	// Filter is documented as an exact-match lookup restricted to fullName, so
-	// beyond this identity check and the zero-length check above, Repos[0] is
-	// the only possible row. The check exists because that promise lives only
-	// in the OpenAPI doc, not in this code: if the control plane ever ignored
-	// or dropped Filter, entry could silently be an unrelated repo — exactly
-	// the wrong-region-success bug class this resolver exists to kill.
-	if !strings.EqualFold(strings.TrimSpace(entry.FullName), strings.TrimSpace(fullName)) {
-		return coreapi.RepoPlacement{}, fmt.Errorf("control plane returned %q for %s", entry.FullName, fullName)
+		return coreapi.RepoPlacement{}, err
 	}
 	// A Candidate row is a repo that exists on the forge and is visible to the
 	// caller but was never onboarded: no placements or primaries to resolve.
@@ -245,6 +232,32 @@ func resolveProcessingPlacement(ctx context.Context, c cellCoreClient, fullName 
 		return coreapi.RepoPlacement{}, fmt.Errorf("processing placement is %s", p.Status)
 	}
 	return p, nil
+}
+
+// lookupRepoIndexEntry is the exact-match repo-index lookup shared by every
+// resolver that starts from an owner/repo name. Zero rows is
+// errRepoNotOnboarded (see resolveProcessingPlacement for why that, not a
+// Candidate row, is the real-world "not onboarded" shape).
+//
+// Filter is documented as an exact-match lookup restricted to fullName, so
+// beyond the identity check and the zero-length check, Repos[0] is the only
+// possible row. The check exists because that promise lives only in the
+// OpenAPI doc, not in this code: if the control plane ever ignored or dropped
+// Filter, the entry could silently be an unrelated repo — exactly the
+// wrong-region-success bug class these resolvers exist to kill.
+func lookupRepoIndexEntry(ctx context.Context, c cellCoreClient, fullName string) (coreapi.RepoIndexEntry, error) {
+	out, err := c.ListRepos(ctx, coreapi.ListReposParams{Filter: coreapi.NewOptString(fullName)})
+	if err != nil {
+		return coreapi.RepoIndexEntry{}, fmt.Errorf("list repos: %w", err)
+	}
+	if len(out.Repos) == 0 {
+		return coreapi.RepoIndexEntry{}, errRepoNotOnboarded
+	}
+	entry := out.Repos[0]
+	if !strings.EqualFold(strings.TrimSpace(entry.FullName), strings.TrimSpace(fullName)) {
+		return coreapi.RepoIndexEntry{}, fmt.Errorf("control plane returned %q for %s", entry.FullName, fullName)
+	}
+	return entry, nil
 }
 
 // repoCellPlacement is a repo's processing placement: the id entire-api keys

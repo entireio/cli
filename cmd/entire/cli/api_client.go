@@ -11,14 +11,13 @@ import (
 )
 
 // NewAuthenticatedAPIClient creates an API client targeting api.BaseURL()
-// (the data API origin) carrying a token valid for that audience, minted by
-// exchanging the matching login context's JWT at its own core (see
-// auth.ResolveDataAPIToken).
+// (the data API origin) carrying the matching login context's account access
+// token (see auth.ResolveDataAPIToken).
 //
 // Pass insecureHTTP=true to allow plain HTTP base URLs for local
 // development. Only the data origin is checked here — the bearer travels
-// there on resource requests; the exchange leg is guarded by the
-// per-context token manager (https required outside loopback/opt-in).
+// there on resource requests; the refresh leg is guarded by the per-context
+// token manager (https required outside loopback/opt-in).
 func NewAuthenticatedAPIClient(ctx context.Context, insecureHTTP bool) (*api.Client, error) {
 	dataURL := api.BaseURL()
 	if insecureHTTP {
@@ -28,9 +27,8 @@ func NewAuthenticatedAPIClient(ctx context.Context, insecureHTTP bool) (*api.Cli
 	}
 
 	// ResolveDataAPIToken discovers which login context the data host trusts
-	// (via its /.well-known/entire-api.json) and exchanges that context's
-	// token for the advertised audience. It normalises dataURL to an origin
-	// internally.
+	// (via its /.well-known/entire-api.json) and returns that context's
+	// refreshed login JWT. It normalises dataURL to an origin internally.
 	token, err := auth.ResolveDataAPIToken(ctx, dataURL)
 	if err != nil {
 		if errors.Is(err, auth.ErrNotLoggedIn) {
