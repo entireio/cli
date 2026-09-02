@@ -980,26 +980,49 @@ func isSingleJSONValue(dec *json.Decoder) bool {
 // string replacements via the supplied per-leaf redactor. JSONLContent
 // passes String; the OPF-enabled flow passes a closure that combines the
 // regex layers with cached batched OPF spans.
+//
+// The walk also tracks toolPayload: whether the current position is inside
+// a tool call's own schema-controlled data (a "tool_use" block's "input",
+// or a "tool_result" block's "content"/"output"). Field names and shapes in
+// there come from whatever tool declared them — for an MCP tool, that's a
+// third party, not Entire's own transcript writer — so shouldSkipJSONLObject
+// (a whole-subtree skip keyed on a bare "type" value) is honored only
+// outside toolPayload: a tool argument or result deliberately shaped as
+// {"type":"base64", ...} would otherwise hide an arbitrarily large sibling
+// secret behind a single spoofed tag. Genuine externalized image assets
+// (pasted screenshots) are message content blocks, not tool call
+// input/output, so this does not affect that already-documented,
+// intentional skip (see docs/security-and-privacy.md).
+//
+// shouldSkipJSONLField's per-leaf skips (id/signature suffixes, path-family
+// exact matches) are deliberately NOT gated on toolPayload here: several of
+// them are load-bearing for real built-in tool calls (e.g. Read/Grep's own
+// "file_path"/"path" arguments live inside tool_use.input), and narrowing
+// them without full visibility into every supported agent's wire format
+// risks reintroducing the false positives they exist to avoid. Scoping
+// those more precisely is tracked as follow-up work.
 func collectJSONLReplacements(v any, redactor func(string) string) []jsonReplacement {
 	seen := make(map[string]bool)
 	var repls []jsonReplacement
-	var walk func(key string, credentialContext bool, v any)
-	walk = func(key string, credentialContext bool, v any) {
+	var walk func(key string, credentialContext, toolPayload bool, v any)
+	walk = func(key string, credentialContext, toolPayload bool, v any) {
 		switch val := v.(type) {
 		case map[string]any:
-			if shouldSkipJSONLObject(val) {
+			if !toolPayload && shouldSkipJSONLObject(val) {
 				return
 			}
 			childCredentialContext := credentialContext || isCredentialJSONObject(val)
+			blockType, _ := val["type"].(string)
 			for k, child := range val {
 				if shouldSkipJSONLField(k) {
 					continue
 				}
-				walk(k, childCredentialContext, child)
+				childToolPayload := toolPayload || isToolPayloadField(blockType, k)
+				walk(k, childCredentialContext, childToolPayload, child)
 			}
 		case []any:
 			for _, child := range val {
-				walk("", credentialContext, child)
+				walk("", credentialContext, toolPayload, child)
 			}
 		case string:
 			redacted := redactor(val)
@@ -1015,8 +1038,25 @@ func collectJSONLReplacements(v any, redactor func(string) string) []jsonReplace
 			}
 		}
 	}
-	walk("", false, v)
+	walk("", false, false, v)
 	return repls
+}
+
+// isToolPayloadField reports whether key, found on an object whose own
+// "type" field is blockType, is the field that carries a tool call's
+// schema-controlled data: "input" on a "tool_use" block, or "content"/
+// "output" on a "tool_result" block. Once true for an ancestor, the walk
+// keeps toolPayload true for every descendant (a tool's own nested
+// structures are still that tool's, not Entire's).
+func isToolPayloadField(blockType, key string) bool {
+	switch blockType {
+	case "tool_use":
+		return key == "input"
+	case "tool_result":
+		return key == "content" || key == "output"
+	default:
+		return false
+	}
 }
 
 // shouldSkipJSONLField returns true if a JSON key should be excluded from scanning/redaction.
