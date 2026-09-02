@@ -44,7 +44,8 @@ configure-strategy)
   # Only ignore test-specific dirs in root .gitignore
   printf ".claude-test/\n" >.gitignore
   git add .gitignore
-  "$BIN_PATH" enable --agent claude-code --strategy "$STRATEGY"
+  # manual-commit is the only strategy; enable no longer takes --strategy.
+  "$BIN_PATH" enable --agent claude-code
   git add .entire/settings.json .entire/.gitignore
   git add .claude 2>/dev/null || true
   git commit -m "Configure Entire with $STRATEGY strategy"
@@ -135,14 +136,24 @@ verify-shadow-branch)
   ;;
 
 verify-metadata-branch)
-  echo "==> Verifying metadata branch..."
+  echo "==> Verifying checkpoint storage..."
   cd "$REPO_DIR"
 
-  if git branch -a | grep "entire/checkpoints/v1"; then
-    echo "✓ Metadata branch exists"
+  # `enable` defaults to the git-refs backend: condensed checkpoints live
+  # under refs/entire/checkpoints/<shard>/<ULID>. The entire/checkpoints/v1
+  # branch is the git-branch backend, still valid when settings select it.
+  refs=$(git for-each-ref --format='%(refname)' 'refs/entire/checkpoints/*')
+  if [ -n "$refs" ]; then
+    echo "✓ Checkpoint refs exist (git-refs backend)"
+    echo "$refs" | head -5
+    first_ref=$(echo "$refs" | head -1)
+    git ls-tree -r "$first_ref" --name-only | head -10
+  elif git branch -a | grep "entire/checkpoints/v1"; then
+    echo "✓ Metadata branch exists (git-branch backend)"
     git show entire/checkpoints/v1 --stat | head -20
   else
-    echo "✗ Metadata branch not found"
+    echo "✗ No checkpoint storage found (neither refs/entire/checkpoints/* nor entire/checkpoints/v1)"
+    echo "  Checkpoints condense on user commits — run the commit-changes step first."
     exit 1
   fi
   ;;
@@ -163,6 +174,20 @@ create-changes)
 
   echo "Modified: app.js"
   echo "Created: extra.js"
+  ;;
+
+commit-changes)
+  echo "==> Committing session changes (triggers post-commit condensation)..."
+  cd "$REPO_DIR"
+
+  # The post-commit hook resolves `entire` from PATH; point it at BIN_PATH so
+  # condensation runs the binary under test, not an installed release.
+  mkdir -p "$REPO_DIR/.test-bin"
+  ln -sf "$BIN_PATH" "$REPO_DIR/.test-bin/entire"
+  git add -A
+  PATH="$REPO_DIR/.test-bin:$PATH" git commit -m "Session changes"
+
+  echo "Committed; checkpoints condense into storage on this commit"
   ;;
 
 cleanup)
@@ -193,7 +218,8 @@ info)
   echo "  verify-commit            - Verify active branch commit"
   echo "  verify-session-state     - Verify session state files"
   echo "  verify-shadow-branch     - Verify shadow branch exists"
-  echo "  verify-metadata-branch   - Verify metadata branch exists"
+  echo "  commit-changes           - Commit session changes (condenses checkpoints)"
+  echo "  verify-metadata-branch   - Verify checkpoint storage (refs or v1 branch)"
   echo "  list-pending-checkpoints - List pending (not yet condensed) checkpoints"
   echo "  create-changes           - Create changes on top of the checkpoint"
   echo "  cleanup                  - Clean up test environment"
