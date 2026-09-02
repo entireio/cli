@@ -227,10 +227,15 @@ func TestCreateAndAwaitMirror_SynchronousPhases(t *testing.T) {
 func TestRepoMirrorCreate_WaitTimeoutHelp(t *testing.T) {
 	t.Parallel()
 
+	// The two routes used to spend this flag differently — async wrapped the
+	// whole operation, sync bounded only the clone poll, leaving a hanging
+	// CreateMirror unbounded — and the help text described that split. The
+	// deadline now covers submission, placement, and clone on both, so the
+	// help promises one thing and the test pins that it still does.
 	flag := newRepoMirrorCreateCmd().Flags().Lookup("wait-timeout")
 	require.NotNil(t, flag)
-	require.Contains(t, flag.Usage, "Async mode applies one deadline to request submission, placement, and clone readiness")
-	require.Contains(t, flag.Usage, "synchronous mode applies it only to clone readiness")
+	require.Contains(t, flag.Usage, "covering submission, placement, and the initial clone on both routes")
+	require.NotContains(t, flag.Usage, "only to clone readiness")
 }
 
 // TestReportOneShotMirror exercises the one-shot create's presentation across
