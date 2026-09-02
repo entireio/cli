@@ -191,7 +191,11 @@ func reportSearchSkillScaffold(w io.Writer, ag agent.Agent, result managedScaffo
 // protected agent root do not — and that asymmetry is accepted rather than
 // papered over: adding .agents (a shared, user-authored skills directory) to
 // ProtectedDirs would hide the user's own skills from checkpoints repo-wide.
-func searchSkillTemplate(agentName types.AgentName) (string, []byte, bool) {
+// searchSkillTemplatePath is where the search skill goes for an agent, or "" for
+// one that gets none. Split out from searchSkillTemplate so a caller that wants
+// only the location — doctor's symlink scan asks for nineteen of these — does
+// not trim and copy a multi-KB template body to get it.
+func searchSkillTemplatePath(agentName types.AgentName) string {
 	var root string
 	switch agentName {
 	case agent.AgentNameClaudeCode:
@@ -211,9 +215,16 @@ func searchSkillTemplate(agentName types.AgentName) (string, []byte, bool) {
 	case agent.AgentNamePi:
 		root = ".pi"
 	default:
+		return ""
+	}
+	return filepath.Join(root, "skills", strategy.EntireSearchSubagentName, "SKILL.md")
+}
+
+func searchSkillTemplate(agentName types.AgentName) (string, []byte, bool) {
+	relPath := searchSkillTemplatePath(agentName)
+	if relPath == "" {
 		return "", nil, false
 	}
-	relPath := filepath.Join(root, "skills", strategy.EntireSearchSubagentName, "SKILL.md")
 	return relPath, []byte(strings.TrimSpace(searchSkillTemplateContent) + "\n"), true
 }
 

@@ -22,6 +22,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
+	"github.com/entireio/cli/cmd/entire/cli/worktreedir"
 
 	"github.com/go-git/go-git/v6"
 	"github.com/go-git/go-git/v6/plumbing"
@@ -1679,4 +1680,81 @@ func TestCheckAgentDirSymlinks_SilentWhenClean(t *testing.T) {
 		assert.Empty(t, stdout.String(),
 			"a shared skill symlinked into place is a real setup and none of Entire's business")
 	})
+}
+
+// TestScanForSymlinkedComponent_RegularFileWhereDirectoryBelongs pins the split
+// between BROKEN and NOT READABLE. A regular file at `.claude` used to arrive
+// here as componentScanUnreadable, so doctor answered "check the ownership and
+// permissions" for a condition only replacing the path fixes — the else-branch
+// pattern the .entire scan separates two error values to avoid.
+func TestScanForSymlinkedComponent_RegularFileWhereDirectoryBelongs(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, ".claude"), []byte("not a dir"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(osroot.ResetShared)
+	root, err := worktreedir.OpenAt(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	name, outcome := scanForSymlinkedComponent(root, ".claude/settings.json")
+	if outcome != componentScanWrongType {
+		t.Errorf("outcome = %v, want componentScanWrongType", outcome)
+	}
+	if name != ".claude" {
+		t.Errorf("name = %q, want .claude — the component to replace, not the leaf", name)
+	}
+}
+
+// TestCheckAgentDirSymlinks_ReportsWrongTypedComponent checks the remedy the
+// user actually reads, not just the classification.
+func TestCheckAgentDirSymlinks_ReportsWrongTypedComponent(t *testing.T) {
+	dir := setupGitRepoForPhaseTest(t)
+	t.Chdir(dir)
+	paths.ClearWorktreeRootCache()
+	t.Cleanup(paths.ClearWorktreeRootCache)
+	t.Cleanup(osroot.ResetShared)
+
+	if err := os.WriteFile(filepath.Join(dir, ".claude"), []byte("not a dir"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd, stdout := newTestCmd(t)
+	checkAgentDirSymlinks(cmd)
+
+	got := stdout.String()
+	if !strings.Contains(got, "BROKEN") {
+		t.Errorf("output should report BROKEN, got:\n%s", got)
+	}
+	if !strings.Contains(got, "replace each path above with a real directory") {
+		t.Errorf("output should name the replace remedy, got:\n%s", got)
+	}
+	if strings.Contains(got, "ownership and permissions") {
+		t.Errorf("output must not offer the permissions remedy for a wrong-typed path, got:\n%s", got)
+	}
+}
+
+// TestAgentSymlinkCheckPaths_CoversLegacySubagentDir keeps .claude/agents/ in
+// the scan. removeLegacySearchSubagent deletes through it with
+// osroot.LstatNoSymlinks, which refuses a symlinked parent, so a link there is
+// refused at enable and has to be diagnosable. .codex/agents and .gemini/agents
+// were only ever covered as a side effect of the agent-help template living
+// under them.
+func TestAgentSymlinkCheckPaths_CoversLegacySubagentDir(t *testing.T) {
+	t.Parallel()
+
+	candidates := agentSymlinkCheckPaths()
+	var found bool
+	for _, c := range candidates {
+		if strings.HasPrefix(c, ".claude/agents/") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("no candidate under .claude/agents/; got %v", candidates)
+	}
 }

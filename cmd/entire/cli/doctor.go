@@ -774,10 +774,19 @@ func checkAgentDirSymlinks(cmd *cobra.Command) {
 	}
 	root, err := worktreedir.OpenAt(worktreeRoot)
 	if err != nil {
+		// Reported, not swallowed, for the same reason a single unreadable
+		// component is: a worktree root that will not open is a state where
+		// every hook install also fails, so printing nothing here would hand
+		// back a clean bill of health on a repo where nothing can be installed.
+		fmt.Fprintln(w, "Agent config directories: NOT CHECKED")
+		fmt.Fprintf(w, "  %v\n", err)
+		fmt.Fprintln(w, "  Entire could not open the worktree root, so it cannot say whether the")
+		fmt.Fprintln(w, "  paths it installs hooks and skills under are real directories.")
+		fmt.Fprintln(w, "  Fix: check the ownership and permissions of the repository root.")
 		return
 	}
 
-	var links, unreadable []string
+	var links, unreadable, wrongType []string
 	reported := make(map[string]struct{})
 	for _, candidate := range agentSymlinkCheckPaths() {
 		name, outcome := scanForSymlinkedComponent(root, candidate)
@@ -790,11 +799,16 @@ func checkAgentDirSymlinks(cmd *cobra.Command) {
 			continue
 		}
 		reported[name] = struct{}{}
-		if outcome == componentScanUnreadable {
+		switch outcome {
+		case componentScanUnreadable:
 			unreadable = append(unreadable, name)
-			continue
+		case componentScanWrongType:
+			wrongType = append(wrongType, name)
+		case componentScanLinked:
+			links = append(links, name)
+		case componentScanClean:
+			// Filtered out above; listed so a new outcome fails the build here.
 		}
-		links = append(links, name)
 	}
 
 	if len(links) > 0 {
@@ -812,6 +826,25 @@ func checkAgentDirSymlinks(cmd *cobra.Command) {
 		fmt.Fprintln(w, "  Fix: replace each path above with a real directory or file. If it is")
 		fmt.Fprintln(w, "  tracked in git, `git rm --cached` it first, and add it to .gitignore so it")
 		fmt.Fprintln(w, "  does not come back.")
+	}
+
+	// A regular file where a directory belongs gets its own heading, because the
+	// fix is to replace the path and no amount of chmod reaches it. Same split
+	// the .entire scan makes between ErrEntireDirNotDirectory and
+	// ErrEntireDirUnreadable, for the same reason.
+	if len(wrongType) > 0 {
+		fmt.Fprintln(w, "Agent config directories: BROKEN")
+		for i, name := range wrongType {
+			if i == symlinkReportLimit {
+				fmt.Fprintf(w, "  ... and %d more\n", len(wrongType)-symlinkReportLimit)
+				break
+			}
+			fmt.Fprintf(w, "  %s is a file, but Entire needs a directory there\n", name)
+		}
+		fmt.Fprintln(w, "  Entire cannot create the hooks and skills that belong under these paths,")
+		fmt.Fprintln(w, "  so `entire status` reports them as absent rather than as blocked.")
+		fmt.Fprintln(w, "  Fix: replace each path above with a real directory. If it is tracked in")
+		fmt.Fprintln(w, "  git, `git rm --cached` it first.")
 	}
 
 	// Separate from the links, and reported rather than swallowed: "we could not
@@ -846,11 +879,17 @@ const (
 	// componentScanUnreadable: the named component could not be statted, so
 	// nothing is known about it.
 	componentScanUnreadable
+	// componentScanWrongType: the named component exists as a regular file where
+	// a directory has to be. Separate from componentScanUnreadable because the
+	// remedies are different things — replace the path versus fix its ownership
+	// — and separate from componentScanLinked because the path to name and the
+	// thing to put back are both different.
+	componentScanWrongType
 )
 
 // agentSymlinkCheckPaths returns the worktree-relative paths Entire creates or
 // writes through on behalf of an agent, sorted and deduplicated. Each is a full
-// path rather than a directory, because firstSymlinkedComponent examines every
+// path rather than a directory, because scanForSymlinkedComponent examines every
 // component of what it is given and the leaf is refused too: HookConfigFile
 // reads and writes through ReadFileNoFollow / a pinned-parent rename, and
 // writeManagedScaffold does the same, so a symlinked .claude/settings.json is
@@ -866,10 +905,18 @@ const (
 // the `.pi/extensions` and `.pi/extensions/entire` that Entire creates below it
 // are not, and a symlink at either produced no output at all until the config
 // paths were added here. And it is too broad — `.vogon` and an external
-// plugin's directories are in it while Entire writes nothing into them, so
-// reporting a link there would contradict the rule this list follows. Every
+// plugin's directories are in it while Entire writes nothing into them. Every
 // top-level agent directory Entire does write to is already covered, as a
 // component of the config or scaffold path underneath it.
+//
+// Not gated on the agent being configured, which is a deliberate call rather
+// than an oversight. Two of these trees are shared and user-owned — `.github`
+// (Copilot CLI's hook config) and `.agents` (Codex's documented skills path) —
+// so a monorepo that symlinks either is told about it even though it may never
+// enable those agents. That is noise, and it is the lesser fault: gating on
+// installation would have to ask whether hooks are installed, and that question
+// is answered by reading through the very config a symlink hides, so the check
+// would fall silent in exactly the case it exists for.
 func agentSymlinkCheckPaths() []string {
 	seen := make(map[string]struct{})
 	var out []string
@@ -889,12 +936,15 @@ func agentSymlinkCheckPaths() []string {
 		add(relPath)
 	}
 	for _, name := range agent.List() {
-		if relPath, _, ok := searchSkillTemplate(name); ok {
-			add(relPath)
-		}
-		if relPath, _, ok := agentHelpSkillTemplate(name); ok {
-			add(relPath)
-		}
+		add(searchSkillTemplatePath(name))
+		add(agentHelpSkillTemplatePath(name))
+		// The pre-skill subagent Entire scaffolded and now deletes. Uninstall
+		// goes through osroot.LstatNoSymlinks, which refuses a symlinked parent,
+		// so .claude/agents/ has to be here or a link there is refused with
+		// nothing said about it. .codex/agents and .gemini/agents were already
+		// covered, but only as a side effect of the agent-help template living
+		// under them.
+		add(legacySearchSubagentPath(name))
 	}
 
 	slices.Sort(out)
@@ -928,6 +978,17 @@ func scanForSymlinkedComponent(root *os.Root, name string) (string, componentSca
 		}
 		if info.Mode()&os.ModeSymlink != 0 {
 			return prefix, componentScanLinked
+		}
+		// A regular file with components still to go is a different fault from
+		// an unreadable one, and it is identified here from the mode rather than
+		// from the ENOTDIR the next Lstat would return: Type() == 0 is a regular
+		// file positively, where matching an errno would also have to be right
+		// about which errno each platform picks. fs.ModeIrregular is left out of
+		// this test on purpose, the same way the .entire scan tolerates it —
+		// Windows lands directory junctions and cloud placeholders on that bit,
+		// and both are traversable.
+		if info.Mode().Type() == 0 && i < len(components)-1 {
+			return prefix, componentScanWrongType
 		}
 	}
 	return "", componentScanClean
