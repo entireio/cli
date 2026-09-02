@@ -91,15 +91,23 @@ func resolveRepoCellTarget(ctx context.Context, fullName, ulid string) (*auth.Ce
 		return target, nil
 	}
 
-	owner, repo, ok := strings.Cut(strings.TrimSpace(fullName), "/")
-	if !ok || owner == "" || repo == "" {
-		return nil, fmt.Errorf("invalid repo %q: expected owner/repo", fullName)
-	}
-	placement, err := resolveRepoCellPlacement(ctx, owner, repo)
+	placement, err := resolveRepoCellPlacementByFullName(ctx, fullName)
 	if err != nil {
 		return nil, err
 	}
 	return placement.Target, nil
+}
+
+// resolveRepoCellPlacementByFullName parses an owner/repo name and resolves
+// the processing placement. Keeping this boundary shared ensures callers that
+// need both the cell and repo ID make exactly the same placement choice as
+// callers that need only the cell.
+func resolveRepoCellPlacementByFullName(ctx context.Context, fullName string) (repoCellPlacement, error) {
+	owner, repo, ok := strings.Cut(strings.TrimSpace(fullName), "/")
+	if !ok || owner == "" || repo == "" {
+		return repoCellPlacement{}, fmt.Errorf("invalid repo %q: expected owner/repo", fullName)
+	}
+	return resolveRepoCellPlacement(ctx, owner, repo)
 }
 
 // cellTargetForClusterHost maps a known cluster host to a cell apiUrl +

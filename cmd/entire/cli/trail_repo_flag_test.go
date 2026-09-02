@@ -76,15 +76,18 @@ func TestRunAuthenticatedTrailAPIRoutesByRepo(t *testing.T) {
 	// newTrailAPIClient is a package seam, so this test must not run in parallel.
 	previous := newTrailAPIClient
 	var gotFullName string
-	newTrailAPIClient = func(_ context.Context, _ bool, fullName string) (*api.Client, error) {
+	newTrailAPIClient = func(_ context.Context, _ bool, fullName string) (*api.Client, string, error) {
 		gotFullName = fullName
-		return api.NewClientWithBaseURL("token", "https://cell.example"), nil
+		return api.NewClientWithBaseURL("token", "https://cell.example"), trailTestRepoID, nil
 	}
 	t.Cleanup(func() { newTrailAPIClient = previous })
 
 	called := false
-	err := runAuthenticatedTrailAPI(t.Context(), io.Discard, false, "gh/acme/app", func(_ context.Context, _ *api.Client) error {
+	err := runAuthenticatedTrailAPIWithRepoID(t.Context(), io.Discard, false, "gh/acme/app", func(_ context.Context, _ *api.Client, repoID string) error {
 		called = true
+		if repoID != trailTestRepoID {
+			t.Fatalf("repoID=%q, want %s", repoID, trailTestRepoID)
+		}
 		return nil
 	})
 	if err != nil {

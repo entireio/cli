@@ -38,6 +38,7 @@ import (
 const (
 	trailListTestAuthorAlice = "alice"
 	trailListTestAuthorBob   = "bob"
+	trailTestRepoID          = "repo-id"
 	// trailTestBasePath is the trails endpoint for the gh/acme/repo fixture.
 	trailTestBasePath = "/api/v1/trails/gh/acme/repo"
 	// trailTestListBody is the stand-in list-resource body used across the
@@ -206,8 +207,9 @@ func TestRunTrailCreateInteractiveBranchlessSkipsBranchPrompt(t *testing.T) {
 func TestRunTrailCreateBranchlessHappyPath(t *testing.T) {
 	// No t.Parallel: uses t.Chdir plus auth/tokenstore package-level test seams.
 	prevTrailClient := newTrailAPIClient
-	newTrailAPIClient = func(ctx context.Context, insecureHTTP bool, _ string) (*api.Client, error) {
-		return NewAuthenticatedAPIClient(ctx, insecureHTTP)
+	newTrailAPIClient = func(ctx context.Context, insecureHTTP bool, _ string) (*api.Client, string, error) {
+		client, err := NewAuthenticatedAPIClient(ctx, insecureHTTP)
+		return client, trailTestRepoID, err
 	}
 	t.Cleanup(func() { newTrailAPIClient = prevTrailClient })
 	var gotCreate map[string]any
@@ -385,8 +387,9 @@ func gitBranchExistsTrailTest(t *testing.T, repoDir, branch string) bool {
 func TestRunTrailListAll_PrintsLoginHintWhenNotLoggedIn(t *testing.T) {
 	// No t.Parallel: SetResolveContextForAPIForTest and
 	prevTrailClient := newTrailAPIClient
-	newTrailAPIClient = func(ctx context.Context, insecureHTTP bool, _ string) (*api.Client, error) {
-		return NewAuthenticatedAPIClient(ctx, insecureHTTP)
+	newTrailAPIClient = func(ctx context.Context, insecureHTTP bool, _ string) (*api.Client, string, error) {
+		client, err := NewAuthenticatedAPIClient(ctx, insecureHTTP)
+		return client, trailTestRepoID, err
 	}
 	t.Cleanup(func() { newTrailAPIClient = prevTrailClient })
 	//
@@ -492,6 +495,30 @@ func TestTrailsBasePath(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestTrailListBasePath(t *testing.T) {
+	t.Parallel()
+
+	t.Run("GitHub keeps host-addressed route", func(t *testing.T) {
+		t.Parallel()
+		got, err := trailListBasePath("gh", "acme", "repo", "placement-id")
+		require.NoError(t, err)
+		require.Equal(t, "/api/v1/trails/gh/acme/repo", got)
+	})
+
+	t.Run("Entire-native uses repo ID route", func(t *testing.T) {
+		t.Parallel()
+		got, err := trailListBasePath("et", "acme", "repo", "01ARZ3NDEKTSV4RRFFQ69G5FAV")
+		require.NoError(t, err)
+		require.Equal(t, "/api/v1/repos/01ARZ3NDEKTSV4RRFFQ69G5FAV/trails", got)
+	})
+
+	t.Run("Entire-native requires repo ID", func(t *testing.T) {
+		t.Parallel()
+		_, err := trailListBasePath("et", "acme", "repo", "")
+		require.EqualError(t, err, "cannot list trails for an Entire-native repo without its repo ID")
+	})
 }
 
 func TestTrailNumberPath(t *testing.T) {
@@ -1016,7 +1043,7 @@ func TestTrailListPageQueryCapsPageSizeAtServerMax(t *testing.T) {
 func TestListTrailResourcesRejectsNonPositiveLimit(t *testing.T) {
 	t.Parallel()
 	for _, limit := range []int{0, -1} {
-		_, _, err := listTrailResources(t.Context(), nil, "gh", "acme", "repo", nil, "", limit)
+		_, _, err := listTrailResources(t.Context(), nil, trailsBasePath("gh", "acme", "repo"), nil, "", limit)
 		if err == nil || err.Error() != "limit must be greater than 0" {
 			t.Fatalf("limit %d error = %v, want limit validation error", limit, err)
 		}
@@ -1034,7 +1061,7 @@ func TestRunTrailListAllPrintsNoServerLimitNote(t *testing.T) {
 
 	client := api.NewClientWithBaseURL("tok", srv.URL)
 	var out bytes.Buffer
-	err := runTrailListAllWithClient(t.Context(), &out, client, trailListOptions{
+	err := runTrailListAllWithClient(t.Context(), &out, client, "", trailListOptions{
 		Repo: "gh/acme/repo", Limit: 500,
 	}, []trail.Status{trail.StatusOpen})
 	if err != nil {
@@ -1049,6 +1076,24 @@ func TestRunTrailListAllPrintsNoServerLimitNote(t *testing.T) {
 	if strings.Contains(out.String(), "feature/former") {
 		t.Fatalf("human output contains original branch:\n%s", out.String())
 	}
+}
+
+func TestRunTrailListAllWithClientNativeUsesRepoIDRoute(t *testing.T) {
+	t.Parallel()
+
+	var gotPath string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		_, _ = fmt.Fprint(w, `{"items":[],"totalCount":0}`)
+	}))
+	defer srv.Close()
+
+	client := api.NewClientWithBaseURL("tok", srv.URL)
+	err := runTrailListAllWithClient(t.Context(), io.Discard, client, "01ARZ3NDEKTSV4RRFFQ69G5FAV", trailListOptions{
+		Repo: "entire://aws-us-east-2.entire.io/et/entirehq/marvin", Limit: 10,
+	}, []trail.Status{trail.StatusOpen})
+	require.NoError(t, err)
+	require.Equal(t, "/api/v1/repos/01ARZ3NDEKTSV4RRFFQ69G5FAV/trails", gotPath)
 }
 
 func TestListTrailResourcesStopsWhenAuthorLimitIsSatisfied(t *testing.T) {
@@ -1078,7 +1123,7 @@ func TestListTrailResourcesStopsWhenAuthorLimitIsSatisfied(t *testing.T) {
 	defer srv.Close()
 	client := api.NewClientWithBaseURL("tok", srv.URL)
 
-	items, total, err := listTrailResources(t.Context(), client, "gh", "acme", "repo", nil, login, 5)
+	items, total, err := listTrailResources(t.Context(), client, trailsBasePath("gh", "acme", "repo"), nil, login, 5)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1657,7 +1702,7 @@ func TestRunTrailListAndShowJSONPreserveBranchState(t *testing.T) {
 			client := api.NewClientWithBaseURL("tok", srv.URL)
 
 			var listOut bytes.Buffer
-			err := runTrailListAllWithClient(t.Context(), &listOut, client, trailListOptions{
+			err := runTrailListAllWithClient(t.Context(), &listOut, client, "", trailListOptions{
 				Repo: "gh/acme/repo", Limit: 10, JSON: true,
 			}, nil)
 			require.NoError(t, err)

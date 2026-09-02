@@ -292,7 +292,8 @@ func refreshTrailsEnabledCacheIfStaleForScope(ctx context.Context, scope trailEn
 // callers (COR-666), so probing it via the generic client silently misreads a
 // supported repo as disabled.
 var trailRefreshAPIClient = func(ctx context.Context, insecureHTTP bool, fullName string) (*api.Client, error) {
-	return newTrailAPIClient(ctx, insecureHTTP, fullName)
+	client, _, err := newTrailAPIClient(ctx, insecureHTTP, fullName)
+	return client, err
 }
 
 // trailsCellClient resolves the entire-api cell client for ownerRepo via
@@ -556,15 +557,24 @@ func noteTrailCommandEnablement(ctx context.Context, client *api.Client, command
 // local clone's enablement cache is skipped because the result belongs to a
 // different repository.
 func runAuthenticatedTrailAPI(ctx context.Context, errW io.Writer, insecureHTTP bool, repoOverride string, fn func(context.Context, *api.Client) error) error {
+	return runAuthenticatedTrailAPIWithRepoID(ctx, errW, insecureHTTP, repoOverride, func(ctx context.Context, client *api.Client, _ string) error {
+		return fn(ctx, client)
+	})
+}
+
+// runAuthenticatedTrailAPIWithRepoID also exposes the processing placement ID
+// to repo-addressed read callers. Most trail operations remain host-addressed
+// and should use runAuthenticatedTrailAPI instead.
+func runAuthenticatedTrailAPIWithRepoID(ctx context.Context, errW io.Writer, insecureHTTP bool, repoOverride string, fn func(context.Context, *api.Client, string) error) error {
 	_, owner, repo, err := resolveTrailRepoOrRemote(ctx, repoOverride)
 	if err != nil {
 		return err
 	}
-	client, err := newTrailAPIClient(ctx, insecureHTTP, owner+"/"+repo)
+	client, repoID, err := newTrailAPIClient(ctx, insecureHTTP, owner+"/"+repo)
 	if err != nil {
 		return renderDataAPIAuthError(ctx, errW, owner+"/"+repo, err)
 	}
-	err = fn(ctx, client)
+	err = fn(ctx, client, repoID)
 	if repoOverride == "" {
 		noteTrailCommandEnablement(ctx, client, err)
 	}

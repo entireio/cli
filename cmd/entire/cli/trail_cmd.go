@@ -490,8 +490,8 @@ func runTrailListAll(ctx context.Context, w, errW io.Writer, opts trailListOptio
 	if err != nil {
 		return err
 	}
-	return runAuthenticatedTrailAPI(ctx, errW, opts.InsecureHTTP, opts.Repo, func(ctx context.Context, client *api.Client) error {
-		return runTrailListAllWithClient(ctx, w, client, opts, statusFilters)
+	return runAuthenticatedTrailAPIWithRepoID(ctx, errW, opts.InsecureHTTP, opts.Repo, func(ctx context.Context, client *api.Client, repoID string) error {
+		return runTrailListAllWithClient(ctx, w, client, repoID, opts, statusFilters)
 	})
 }
 
@@ -502,7 +502,7 @@ func validateTrailListOptions(opts trailListOptions) ([]trail.Status, error) {
 	return parseTrailStatusFilter(opts.Status)
 }
 
-func runTrailListAllWithClient(ctx context.Context, w io.Writer, client *api.Client, opts trailListOptions, statusFilters []trail.Status) error {
+func runTrailListAllWithClient(ctx context.Context, w io.Writer, client *api.Client, repoID string, opts trailListOptions, statusFilters []trail.Status) error {
 	authorFilter := opts.Author
 	currentUserLogin := ""
 	if authorFilter == trailListAuthorMe {
@@ -523,7 +523,11 @@ func runTrailListAllWithClient(ctx context.Context, w io.Writer, client *api.Cli
 	// many pages as needed for --limit. Author login is filtered client-side:
 	// the new backend's author query is account-ID based, while the CLI's public
 	// flag has always accepted GitHub logins.
-	resources, totalMatched, err := listTrailResources(ctx, client, forge, owner, repo, statusFilters, authorFilter, opts.Limit)
+	basePath, err := trailListBasePath(forge, owner, repo, repoID)
+	if err != nil {
+		return err
+	}
+	resources, totalMatched, err := listTrailResources(ctx, client, basePath, statusFilters, authorFilter, opts.Limit)
 	if err != nil {
 		return err
 	}
@@ -561,7 +565,7 @@ func runTrailListAllWithClient(ctx context.Context, w io.Writer, client *api.Cli
 	return nil
 }
 
-func listTrailResources(ctx context.Context, client *api.Client, forge, owner, repo string, statuses []trail.Status, author string, limit int) ([]api.TrailResource, int, error) {
+func listTrailResources(ctx context.Context, client *api.Client, basePath string, statuses []trail.Status, author string, limit int) ([]api.TrailResource, int, error) {
 	if limit <= 0 {
 		return nil, 0, errors.New("limit must be greater than 0")
 	}
@@ -574,7 +578,7 @@ func listTrailResources(ctx context.Context, client *api.Client, forge, owner, r
 		if author == "" && limit-len(items) < pageSize {
 			pageSize = limit - len(items)
 		}
-		resp, err := client.Get(ctx, trailsBasePath(forge, owner, repo)+trailListPageQuery(statuses, pageSize, pageToken))
+		resp, err := client.Get(ctx, basePath+trailListPageQuery(statuses, pageSize, pageToken))
 		if err != nil {
 			return nil, 0, fmt.Errorf("failed to list trails: %w", err)
 		}
@@ -1007,7 +1011,7 @@ func runTrailCreate(cmd *cobra.Command, title, body, base, branch, statusStr, ty
 	if err != nil {
 		return err
 	}
-	client, err := newTrailAPIClient(ctx, trailInsecureHTTP(cmd), owner+"/"+repoName)
+	client, _, err := newTrailAPIClient(ctx, trailInsecureHTTP(cmd), owner+"/"+repoName)
 	if err != nil {
 		return renderDataAPIAuthError(ctx, cmd.ErrOrStderr(), owner+"/"+repoName, err)
 	}
@@ -2179,6 +2183,21 @@ func findTrail(ctx context.Context, client *api.Client, forge, owner, repo strin
 // (e.g., "/api/v1/trails/gh/org/repo").
 func trailsBasePath(forge, owner, repo string) string {
 	return fmt.Sprintf("/api/v1/trails/%s/%s/%s", url.PathEscape(forge), url.PathEscape(owner), url.PathEscape(repo))
+}
+
+// trailListBasePath selects the repo-addressed read route for Entire-native
+// repositories. The host-addressed API deliberately cannot resolve et repos by
+// name because the cell's full_name index has no forge discriminator; the
+// opaque placement ID is unambiguous. GitHub repos retain the legacy route.
+func trailListBasePath(forge, owner, repo, repoID string) (string, error) {
+	if forge != nativeCloneForge {
+		return trailsBasePath(forge, owner, repo), nil
+	}
+	repoID = strings.TrimSpace(repoID)
+	if repoID == "" {
+		return "", errors.New("cannot list trails for an Entire-native repo without its repo ID")
+	}
+	return "/api/v1/repos/" + url.PathEscape(repoID) + "/trails", nil
 }
 
 // trailNumberPath returns the single-trail API path keyed by integer trail

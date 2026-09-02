@@ -296,12 +296,16 @@ func gatherCheckpoints(ctx context.Context) string {
 
 func gatherTrails(ctx context.Context, errW io.Writer, limit int, insecureHTTP bool) string {
 	var out strings.Builder
-	err := runAuthenticatedTrailAPI(ctx, errW, insecureHTTP, "", func(ctx context.Context, client *api.Client) error {
+	err := runAuthenticatedTrailAPIWithRepoID(ctx, errW, insecureHTTP, "", func(ctx context.Context, client *api.Client, repoID string) error {
 		forge, owner, repo, err := resolveTrailRemote(ctx)
 		if err != nil {
 			return err
 		}
-		resources, _, err := listTrailResources(ctx, client, forge, owner, repo, nil, "", limit)
+		basePath, err := trailListBasePath(forge, owner, repo, repoID)
+		if err != nil {
+			return err
+		}
+		resources, _, err := listTrailResources(ctx, client, basePath, nil, "", limit)
 		if err != nil {
 			return err
 		}
