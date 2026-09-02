@@ -1118,6 +1118,12 @@ func TestPostCommit_ActiveSession_CarryForward_PartialCommit(t *testing.T) {
 	assert.Equal(t, 0, state.CheckpointTranscriptStart,
 		"carry-forward should reset CheckpointTranscriptStart to 0 for full transcript reprocessing")
 
+	// The token window must NOT follow the transcript reset: the two transcript
+	// lines were condensed into the commit's checkpoint, so the next checkpoint's
+	// token_usage starts after them (see advanceTranscriptWindows).
+	assert.Equal(t, 2, state.TokenTranscriptStart,
+		"carry-forward must leave TokenTranscriptStart at the condensed transcript end")
+
 	// Verify LastCheckpointID was cleared (next commit generates fresh ID)
 	assert.Empty(t, state.LastCheckpointID,
 		"carry-forward should clear LastCheckpointID")
@@ -2655,4 +2661,69 @@ func runEndedLingeringRecordNotCondensed(t *testing.T, s *ManualCommitStrategy, 
 		"BaseCommit must not move for an ended session on an unrelated commit")
 	assert.Len(t, state.TaskRecords, 1,
 		"the lingering record must remain untouched by an unrelated commit")
+}
+
+// TestHandleTurnEnd_MidTurnCommit_KeepsTokenWindow locks the offset split at
+// the turn-end advance after a complete mid-turn commit.
+//
+// Condensation writes the checkpoint's token_usage over
+// [TokenTranscriptStart, N] and finalizeAllTurnCheckpoints then rewrites that
+// checkpoint with the full transcript only — no token recompute. If the turn-end
+// advance moved BOTH offsets to the turn's end M, the tokens recorded in
+// (N, M] (tool results, token counts, task_complete — for Codex the turn's whole
+// accounting) would belong to no checkpoint: the finalized one measured up to N,
+// and the next one starts after M. Only the stored-transcript offset may move.
+func TestHandleTurnEnd_MidTurnCommit_KeepsTokenWindow(t *testing.T) {
+	dir := setupGitRepo(t)
+	t.Chdir(dir)
+
+	repo, err := git.PlainOpen(dir)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = repo.Close() })
+
+	s := &ManualCommitStrategy{}
+	sessionID := "test-turn-end-token-window"
+
+	setupSessionWithCheckpoint(t, s, repo, dir, sessionID)
+
+	state, err := s.loadSessionState(context.Background(), sessionID)
+	require.NoError(t, err)
+	state.Phase = session.PhaseActive
+	state.AgentType = agent.AgentTypeClaudeCode
+	require.NoError(t, s.saveSessionState(context.Background(), state))
+
+	// Mid-turn commit: condensation advances both offsets to the transcript
+	// end as it stood at commit time.
+	commitWithCheckpointTrailer(t, repo, dir, "a1b2c3d4e5f6")
+	require.NoError(t, s.PostCommit(context.Background()))
+
+	state, err = s.loadSessionState(context.Background(), sessionID)
+	require.NoError(t, err)
+	require.NotEmpty(t, state.TurnCheckpointIDs,
+		"mid-turn commit should leave a checkpoint to finalize at turn end")
+	require.Empty(t, state.FilesTouched,
+		"a complete mid-turn commit leaves no uncommitted work (the carry-forward guard)")
+	tokenStartAtCommit := state.TokenTranscriptStart
+	require.Positive(t, tokenStartAtCommit,
+		"condensation should have advanced the token window past the condensed content")
+
+	// The agent keeps writing after the commit: this tail carries the turn's
+	// remaining token accounting and was never condensed.
+	tailTranscript := testTranscriptPromptResponse +
+		`{"type":"human","message":{"content":"and now the tail"}}` + "\n" +
+		`{"type":"assistant","message":{"content":"tail response"}}` + "\n"
+	transcriptPath := filepath.Join(dir, ".entire", "metadata", sessionID, "full_transcript.jsonl")
+	require.NoError(t, os.MkdirAll(filepath.Dir(transcriptPath), 0o755))
+	require.NoError(t, os.WriteFile(transcriptPath, []byte(tailTranscript), 0o644))
+	state.TranscriptPath = transcriptPath
+	require.NoError(t, s.saveSessionState(context.Background(), state))
+
+	require.NoError(t, s.HandleTurnEnd(context.Background(), state))
+
+	assert.Greater(t, state.CheckpointTranscriptStart, tokenStartAtCommit,
+		"the stored-transcript offset must advance to the turn end so the next "+
+			"checkpoint's transcript does not re-include condensed content")
+	assert.Equal(t, tokenStartAtCommit, state.TokenTranscriptStart,
+		"the token window must stay where condensation left it: the tail's tokens "+
+			"were not counted into the finalized checkpoint, so they belong to the next one")
 }

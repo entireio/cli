@@ -450,3 +450,22 @@ func TestDetectPresence_WithPiDir(t *testing.T) {
 		t.Error("DetectPresence should be true when .pi/ exists in repo")
 	}
 }
+
+// Pi records the 1-hour-TTL part of cache writes (cacheWrite1h) on Anthropic
+// providers; it is a subset of cacheWrite. Pi records no thinking-token count.
+func TestCalculateTokenUsage_CacheWrite1hSubset(t *testing.T) {
+	t.Parallel()
+	data := []byte(`{"type":"session","id":"s","timestamp":"2026-08-01T00:00:00Z"}
+{"type":"message","id":"m1","parentId":null,"timestamp":"2026-08-01T00:00:01Z","message":{"role":"assistant","provider":"anthropic","model":"claude-opus-4-8","content":[{"type":"text","text":"ok"}],"usage":{"input":10,"output":20,"cacheRead":100,"cacheWrite":50,"cacheWrite1h":50}}}
+`)
+	usage, err := (&PiAgent{}).CalculateTokenUsage(data, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if usage.CacheCreationTokens != 50 || usage.CacheCreation1hTokens != 50 {
+		t.Errorf("cache write %d / 1h %d, want 50 / 50", usage.CacheCreationTokens, usage.CacheCreation1hTokens)
+	}
+	if usage.ThinkingTokens != 0 {
+		t.Errorf("Pi records no thinking count; got %d", usage.ThinkingTokens)
+	}
+}

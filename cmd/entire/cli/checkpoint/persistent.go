@@ -727,6 +727,7 @@ func (s *treeWriter) writeSessionToSubdirectory(ctx context.Context, opts WriteO
 		TurnID:                      opts.TurnID,
 		TranscriptIdentifierAtStart: opts.TranscriptIdentifierAtStart,
 		CheckpointTranscriptStart:   opts.CheckpointTranscriptStart,
+		TokenTranscriptStart:        opts.TokenTranscriptStart,
 		TranscriptLinesAtStart:      opts.CheckpointTranscriptStart, // Deprecated: kept for backward compat
 		CompactTranscriptStart:      compactTranscriptStart,
 		TokenUsage:                  opts.TokenUsage,
@@ -779,10 +780,15 @@ func (s *treeWriter) writeCheckpointSummary(opts WriteOptions, basePath string, 
 	// session package imports checkpoint, so we can't reference its constant.
 	imported := opts.Kind == "imported"
 	commitSHA := opts.CommitSHA
+	// Carried out of the block below so the stamping policy can see it: a
+	// checkpoint that already holds rows from a legacy CLI keeps its legacy
+	// version (see ResolveTokenUsageVersion).
+	existingTokenUsageVersion := 0
 	rootMetadataPath := checkpointSubtreePath(basePath, paths.MetadataFileName)
 	if entry, exists := entries[rootMetadataPath]; exists {
 		existingSummary, readErr := s.readSummaryFromBlob(entry.Hash)
 		if readErr == nil {
+			existingTokenUsageVersion = existingSummary.TokenUsageVersion
 			if combinedAttribution == nil {
 				combinedAttribution = existingSummary.CombinedAttribution
 			}
@@ -818,6 +824,7 @@ func (s *treeWriter) writeCheckpointSummary(opts WriteOptions, basePath string, 
 		HasReview:           hasReview,
 		HasInvestigation:    hasInvestigation,
 		Imported:            imported,
+		TokenUsageVersion:   ResolveTokenUsageVersion(existingTokenUsageVersion, len(sessions) == 1),
 	}
 
 	metadataJSON, err := jsonutil.MarshalIndentWithNewline(summary, "", "  ")

@@ -268,8 +268,9 @@ func TestSessionStateBackfillTokenUsage_CopilotUsesZeroInputSessionAggregate(t *
 	require.Zero(t, checkpointUsage.InputTokens)
 	require.Equal(t, 25, checkpointUsage.OutputTokens)
 
-	backfillUsage := sessionStateBackfillTokenUsage(context.Background(), ag, agent.AgentTypeCopilotCLI, transcript, checkpointUsage)
+	backfillUsage, sessionWide := sessionStateBackfillTokenUsage(context.Background(), ag, agent.AgentTypeCopilotCLI, transcript, checkpointUsage)
 	require.NotNil(t, backfillUsage)
+	require.True(t, sessionWide, "the Copilot full-transcript read covers the whole session")
 	require.Zero(t, backfillUsage.InputTokens)
 	require.Equal(t, 50, backfillUsage.OutputTokens)
 	require.Equal(t, 20, backfillUsage.CacheReadTokens)
@@ -1184,4 +1185,78 @@ func TestCheckpointStepCount(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestApplyBackfilledSessionTokenUsage_KeepsSessionAccumulator locks the
+// boundary between the two token scopes at condensation time.
+//
+// state.TokenUsage is the session-wide accumulator SaveStep grows (see
+// accumulateTokenUsage) and entire status reads. checkpointUsage is the
+// per-checkpoint delta written to metadata. Adopting the delta as the session
+// total replaces "everything this session spent" with "what the last checkpoint
+// spent" — the session total then shrinks on every condensation.
+func TestApplyBackfilledSessionTokenUsage_KeepsSessionAccumulator(t *testing.T) {
+	t.Parallel()
+
+	ag, err := agent.GetByAgentType(agent.AgentTypeClaudeCode)
+	require.NoError(t, err)
+
+	state := &SessionState{
+		SessionID:  "keeps-accumulator",
+		AgentType:  agent.AgentTypeClaudeCode,
+		TokenUsage: &agent.TokenUsage{InputTokens: 1000, OutputTokens: 400, APICallCount: 12},
+	}
+	checkpointUsage := &agent.TokenUsage{InputTokens: 100, OutputTokens: 40, APICallCount: 2}
+
+	applyBackfilledSessionTokenUsage(context.Background(), ag, state, nil, checkpointUsage)
+
+	require.NotNil(t, state.TokenUsage)
+	assert.Equal(t, 1000, state.TokenUsage.InputTokens,
+		"the session accumulator must survive condensation, not be replaced by the checkpoint delta")
+	assert.Equal(t, 400, state.TokenUsage.OutputTokens)
+	assert.Equal(t, 12, state.TokenUsage.APICallCount)
+}
+
+// Copilot CLI's checkpoint fallback (used when the full-transcript read yields
+// nothing) is still checkpoint-scoped, so it may not replace an accumulator
+// either — only the session-wide read at branch one may.
+func TestApplyBackfilledSessionTokenUsage_CopilotFallbackKeepsAccumulator(t *testing.T) {
+	t.Parallel()
+
+	ag, err := agent.GetByAgentType(agent.AgentTypeCopilotCLI)
+	require.NoError(t, err)
+
+	state := &SessionState{
+		SessionID:  "copilot-fallback",
+		AgentType:  agent.AgentTypeCopilotCLI,
+		TokenUsage: &agent.TokenUsage{InputTokens: 900, OutputTokens: 300},
+	}
+	checkpointUsage := &agent.TokenUsage{InputTokens: 90, OutputTokens: 30}
+
+	// Empty transcript: the session-wide read cannot run, so the fallback applies.
+	applyBackfilledSessionTokenUsage(context.Background(), ag, state, nil, checkpointUsage)
+
+	require.NotNil(t, state.TokenUsage)
+	assert.Equal(t, 900, state.TokenUsage.InputTokens,
+		"the checkpoint fallback is not session-wide, so it must not replace the accumulator")
+	assert.Equal(t, 300, state.TokenUsage.OutputTokens)
+}
+
+// TestApplyBackfilledSessionTokenUsage_FillsEmptyAccumulator keeps the delta
+// usable as a last resort: a session whose hooks never reported per-step usage
+// has no accumulator to protect, so the checkpoint value is better than nothing.
+func TestApplyBackfilledSessionTokenUsage_FillsEmptyAccumulator(t *testing.T) {
+	t.Parallel()
+
+	ag, err := agent.GetByAgentType(agent.AgentTypeClaudeCode)
+	require.NoError(t, err)
+
+	state := &SessionState{SessionID: "fills-empty", AgentType: agent.AgentTypeClaudeCode}
+	checkpointUsage := &agent.TokenUsage{InputTokens: 100, OutputTokens: 40}
+
+	applyBackfilledSessionTokenUsage(context.Background(), ag, state, nil, checkpointUsage)
+
+	require.NotNil(t, state.TokenUsage)
+	assert.Equal(t, 100, state.TokenUsage.InputTokens)
+	assert.Equal(t, 40, state.TokenUsage.OutputTokens)
 }

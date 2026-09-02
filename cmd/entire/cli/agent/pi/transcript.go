@@ -31,6 +31,7 @@ func (a *PiAgent) CalculateTokenUsage(transcriptData []byte, fromOffset int) (*a
 		usage.OutputTokens += entry.Message.Usage.Output
 		usage.CacheReadTokens += entry.Message.Usage.CacheRead
 		usage.CacheCreationTokens += entry.Message.Usage.CacheWrite
+		usage.CacheCreation1hTokens += entry.Message.Usage.CacheWrite1h
 		usage.APICallCount++
 	})
 	if err != nil {

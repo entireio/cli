@@ -227,6 +227,22 @@ type State struct {
 	// for checkpoint condensation: "everything since last checkpoint".
 	CheckpointTranscriptStart int `json:"checkpoint_transcript_start,omitempty"`
 
+	// TokenTranscriptStart is the transcript offset where the current checkpoint's
+	// token window began. It advances with CheckpointTranscriptStart after every
+	// condensation, but unlike it is NOT reset by carryForwardToNewShadowBranch:
+	// that reset exists so a post-partial-commit checkpoint's transcript is
+	// self-contained, and computing token_usage from the same offset re-reported
+	// the whole session's tokens on every such checkpoint (53% of non-first
+	// checkpoints in this repo's history were cumulative). Transcript scope and
+	// token scope are therefore tracked separately; checkpoint token_usage is
+	// always "since the previous checkpoint".
+	TokenTranscriptStart int `json:"token_transcript_start,omitempty"`
+	// TokenWindowInitialized records that TokenTranscriptStart is maintained by
+	// the CLI that wrote this file, so a zero value means "the window starts at
+	// line 0" rather than "this file predates the field". omitempty keeps it out
+	// of legacy files, which is exactly the signal NormalizeAfterLoad needs.
+	TokenWindowInitialized bool `json:"token_window_initialized,omitempty"`
+
 	// CheckpointTranscriptSize is the byte size of the transcript at last condensation.
 	// Used for fast "has new content?" checks in PostCommit: compare the git blob size
 	// against this value without reading the full transcript content.
@@ -636,6 +652,23 @@ func (s *State) NormalizeAfterLoad(ctx context.Context) {
 			s.CheckpointTranscriptStart = s.TranscriptLinesAtStart
 		}
 	}
+	// TokenTranscriptStart was added after CheckpointTranscriptStart. A state file
+	// written before it exists has token scope == transcript scope, except when a
+	// carry-forward has just reset the transcript offset — which cannot be told
+	// apart from "never condensed", so that one checkpoint stays cumulative.
+	//
+	// Gated on TokenWindowInitialized: a zero offset written deliberately by a
+	// CLI that maintains the window must survive. The turn-end advance after a
+	// mid-turn commit moves only CheckpointTranscriptStart, so a session whose
+	// token window legitimately still starts at line 0 loads in exactly the
+	// shape this migration keys on — re-coupling it there would drop the tail's
+	// tokens from every later checkpoint.
+	if !s.TokenWindowInitialized && s.TokenTranscriptStart == 0 && s.CheckpointTranscriptStart > 0 {
+		s.TokenTranscriptStart = s.CheckpointTranscriptStart
+	}
+	// Either the value was already maintained or the migration above has just
+	// resolved it; from here on it is known either way.
+	s.TokenWindowInitialized = true
 	// Clear deprecated fields so they aren't re-persisted.
 	// Note: this is a one-way migration. If the state is re-saved, older CLI versions
 	// will see 0 for these fields and fall back to scoping from the transcript start.
@@ -994,6 +1027,10 @@ func (s *StateStore) Load(ctx context.Context, sessionID string) (*State, error)
 // Save saves the session state atomically.
 func (s *StateStore) Save(ctx context.Context, state *State) error {
 	_ = ctx // Reserved for future use
+
+	// Everything this CLI persists carries a meaningful token window, including
+	// a deliberate 0 (see TokenWindowInitialized and NormalizeAfterLoad).
+	state.TokenWindowInitialized = true
 
 	// Validate session ID to prevent path traversal
 	if err := validation.ValidateSessionID(state.SessionID); err != nil {

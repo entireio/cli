@@ -172,6 +172,14 @@ type WriteOptions struct {
 	// Transcript position at checkpoint start - tracks what was added during this checkpoint
 	TranscriptIdentifierAtStart string // Last identifier when checkpoint started (UUID for Claude, message ID for Gemini)
 	CheckpointTranscriptStart   int    // Transcript line offset at start of this checkpoint's data
+	// TokenTranscriptStart is the transcript offset where this checkpoint's
+	// token_usage window began (SessionState.TokenTranscriptStart). It equals
+	// CheckpointTranscriptStart except where the two windows diverge: a
+	// carry-forward resets the transcript offset to 0 (leaving it below this
+	// one) and the turn-end advance after a mid-turn commit pushes it above
+	// this one. Readers slicing the stored transcript for per-checkpoint token
+	// attribution must use this one.
+	TokenTranscriptStart int
 
 	// CheckpointTranscriptStart is written to both Metadata.CheckpointTranscriptStart
 	// and the deprecated Metadata.TranscriptLinesAtStart for backward compatibility.
@@ -423,6 +431,16 @@ type Metadata struct {
 	// Transcript position at checkpoint start - tracks what was added during this checkpoint
 	TranscriptIdentifierAtStart string `json:"transcript_identifier_at_start,omitempty"` // Last identifier when checkpoint started (UUID for Claude, message ID for Gemini)
 	CheckpointTranscriptStart   int    `json:"checkpoint_transcript_start,omitempty"`    // Raw transcript (full.jsonl) line offset at start of this checkpoint's data
+	// TokenTranscriptStart is the raw transcript offset where this checkpoint's
+	// token_usage window begins. Differs from CheckpointTranscriptStart after a
+	// carry-forward (which resets the transcript offset to 0 so the stored
+	// transcript is self-contained, but leaves the token window alone).
+	//
+	// Written only by CLIs that stamp token_usage_version >= 2, but its presence
+	// is not a version marker: omitempty also drops it at offset 0, so a
+	// session's first checkpoint omits it on v2 too. Absent decodes as 0, which
+	// is the correct window start in exactly those cases.
+	TokenTranscriptStart int `json:"token_transcript_start,omitempty"`
 
 	// Deprecated: Use CheckpointTranscriptStart instead. Written for backward compatibility with older CLI versions.
 	TranscriptLinesAtStart int `json:"transcript_lines_at_start,omitempty"`
@@ -579,6 +597,54 @@ type CheckpointSummary struct {
 	// agent history (a session with Kind == "imported"): read-only and
 	// commit-less.
 	Imported bool `json:"imported,omitempty"`
+
+	// TokenUsageVersion states how every session's token_usage in this
+	// checkpoint was scoped and what it carries. TokenUsageVersionDelta means:
+	// a per-checkpoint delta (tokens since the previous checkpoint of that
+	// session, scoped by SessionState.TokenTranscriptStart — never the
+	// session's running total), with the subset fields thinking_tokens and
+	// cache_creation_1h_tokens populated where the agent records them.
+	//
+	// Absent (0) marks a legacy checkpoint: its token_usage may be either a
+	// delta or, on a non-first checkpoint whose checkpoint_transcript_start is
+	// 0/absent, the session's cumulative total. Readers summing across legacy
+	// checkpoints must dedupe per session (keep the latest cumulative snapshot,
+	// add only later deltas), must not read missing subset fields as zero, and
+	// must not key on cli_version, which is "dev" on most rows.
+	TokenUsageVersion int `json:"token_usage_version,omitempty"`
+}
+
+// TokenUsageVersionDelta is the TokenUsageVersion written since token scope was
+// split from transcript scope and the subset fields were added (v0.11).
+const TokenUsageVersionDelta = 2
+
+// ResolveTokenUsageVersion decides the TokenUsageVersion to stamp when writing
+// a checkpoint summary.
+//
+// The field sits on the summary but describes a per-session property: it tells
+// readers that every session's token_usage in this checkpoint is a
+// per-checkpoint delta. A single write only ever produces a delta-scoped row
+// for the one session it writes, so a checkpoint that still carries rows from a
+// legacy (pre-delta) CLI must keep its legacy value. Stamping the delta version
+// over them — which a CLI upgrade between two writes to the same checkpoint
+// would otherwise do — makes readers treat session-cumulative rows as deltas
+// and skip the per-session dedupe those rows still need.
+//
+// existingVersion is the version already on the summary (0 when the checkpoint
+// is new or predates the field). writesEverySession reports whether the write
+// leaves the checkpoint holding only the session it just wrote, so that no
+// older row survives it.
+//
+// When older rows do survive, the summary reports the weakest guarantee across
+// them: the existing version, floored at what this writer itself produces. A
+// legacy 0 therefore stays 0, and a hypothetical future version is reported as
+// TokenUsageVersionDelta rather than claiming that scope for the row just
+// written.
+func ResolveTokenUsageVersion(existingVersion int, writesEverySession bool) int {
+	if writesEverySession {
+		return TokenUsageVersionDelta
+	}
+	return min(existingVersion, TokenUsageVersionDelta)
 }
 
 // SessionMetrics contains hook-provided session metrics from agents that report

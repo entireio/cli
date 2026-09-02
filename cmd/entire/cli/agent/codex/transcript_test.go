@@ -430,3 +430,28 @@ func TestSanitizePortableTranscript_IdempotentBytes(t *testing.T) {
 		t.Errorf("not byte-idempotent:\n once=%s\ntwice=%s", once, twice)
 	}
 }
+
+// Codex reports reasoning_output_tokens as a subset of output_tokens; it is
+// recorded as ThinkingTokens (delta-scoped like the other fields).
+func TestCalculateTokenUsage_ReasoningRecordedAsThinking(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "rollout.jsonl")
+	data := `{"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":1000,"cached_input_tokens":800,"output_tokens":100,"reasoning_output_tokens":40,"total_tokens":1100}}}}
+{"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":3000,"cached_input_tokens":2500,"output_tokens":300,"reasoning_output_tokens":130,"total_tokens":3300}}}}
+`
+	if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	usage, err := (&CodexAgent{}).CalculateTokenUsage(raw, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if usage == nil || usage.OutputTokens != 300 || usage.ThinkingTokens != 130 {
+		t.Fatalf("output/thinking = %+v, want 300 / 130", usage)
+	}
+}

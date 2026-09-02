@@ -913,3 +913,126 @@ func TestStripSystemReminders(t *testing.T) {
 // Compile-time interface checks are in transcript.go.
 // Verify the unused import guard by referencing the agent package.
 var _ = agent.AgentNameOpenCode
+
+// OpenCode's tokens.total tells us whether reasoning was already counted inside
+// output. Both shapes occur in this repo's committed history (2026-08-27):
+//
+//	7,456 assistant messages: total = input + output + reasoning + cache.read + cache.write
+//	2,991 assistant messages: total = input + output + cache.read + cache.write
+//
+// Billed output must include reasoning exactly once either way.
+func openCodeExportWithTokens(tokens string) []byte {
+	return []byte(`{
+  "info": {"id": "ses_1", "title": "t"},
+  "messages": [
+    {"info": {"id": "m1", "role": "user", "time": {"created": 1}}, "parts": [{"type": "text", "text": "hi"}]},
+    {"info": {"id": "m2", "role": "assistant", "time": {"created": 2}, "tokens": ` + tokens + `}, "parts": [{"type": "text", "text": "ok"}]}
+  ]
+}`)
+}
+
+func TestCalculateTokenUsage_ReasoningExcludedFromOutput(t *testing.T) {
+	t.Parallel()
+	ag := &OpenCodeAgent{}
+
+	// total 1000 = 500 in + 100 out + 300 reasoning + 80 read + 20 write → reasoning is NOT in output
+	usage, err := ag.CalculateTokenUsage(openCodeExportWithTokens(
+		`{"input": 500, "output": 100, "reasoning": 300, "cache": {"read": 80, "write": 20}, "total": 1000}`), 0)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	require.NotNil(t, usage)
+	if usage.OutputTokens != 400 {
+		t.Errorf("OutputTokens = %d, want 400 (output 100 + reasoning 300)", usage.OutputTokens)
+	}
+	if sum := usage.InputTokens + usage.OutputTokens + usage.CacheReadTokens + usage.CacheCreationTokens; sum != 1000 {
+		t.Errorf("sum of classes = %d, want OpenCode total 1000", sum)
+	}
+}
+
+func TestCalculateTokenUsage_ReasoningIncludedInOutput(t *testing.T) {
+	t.Parallel()
+	ag := &OpenCodeAgent{}
+
+	// total 700 = 500 in + 100 out + 80 read + 20 write → reasoning (300) is already inside output
+	usage, err := ag.CalculateTokenUsage(openCodeExportWithTokens(
+		`{"input": 500, "output": 100, "reasoning": 300, "cache": {"read": 80, "write": 20}, "total": 700}`), 0)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	require.NotNil(t, usage)
+	if usage.OutputTokens != 100 {
+		t.Errorf("OutputTokens = %d, want 100 (reasoning already counted in output)", usage.OutputTokens)
+	}
+	if sum := usage.InputTokens + usage.OutputTokens + usage.CacheReadTokens + usage.CacheCreationTokens; sum != 700 {
+		t.Errorf("sum of classes = %d, want OpenCode total 700", sum)
+	}
+}
+
+func TestCalculateTokenUsage_ReasoningRecordedAsThinking(t *testing.T) {
+	t.Parallel()
+	usage, err := (&OpenCodeAgent{}).CalculateTokenUsage(openCodeExportWithTokens(
+		`{"input": 500, "output": 100, "reasoning": 300, "cache": {"read": 80, "write": 20}, "total": 1000}`), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	require.NotNil(t, usage)
+	if usage.ThinkingTokens != 300 || usage.OutputTokens != 400 {
+		t.Errorf("thinking %d output %d, want 300 / 400", usage.ThinkingTokens, usage.OutputTokens)
+	}
+}
+
+// ThinkingTokens is documented as a subset of OutputTokens — readers derive
+// non-thinking output as output minus thinking, which goes negative if thinking
+// can exceed it. BilledOutput only folds reasoning into output when the total
+// identity confirms reasoning is billed separately; a message with no total
+// cannot confirm it, so the reasoning we report must not outrun the output we
+// actually counted.
+func TestCalculateTokenUsage_ThinkingNeverExceedsOutput(t *testing.T) {
+	t.Parallel()
+
+	transcript := []byte(`{
+		"info": {"id": "ses_1"},
+		"messages": [
+			{"info": {"id": "m1", "role": "assistant",
+			  "tokens": {"input": 100, "output": 10, "reasoning": 50,
+			             "cache": {"read": 0, "write": 0}}},
+			 "parts": []}
+		]
+	}`)
+
+	a := &OpenCodeAgent{}
+	usage, err := a.CalculateTokenUsage(transcript, 0)
+	require.NoError(t, err)
+	require.NotNil(t, usage)
+
+	require.Equal(t, 10, usage.OutputTokens,
+		"with no total to confirm the shape, only the reported output is billed")
+	require.LessOrEqual(t, usage.ThinkingTokens, usage.OutputTokens,
+		"thinking tokens must stay a subset of the output tokens counted")
+}
+
+// When the total identity confirms reasoning is billed outside output, both the
+// billed output and the full reasoning are recorded, and the subset holds.
+func TestCalculateTokenUsage_ReasoningOutsideOutputIsCountedInFull(t *testing.T) {
+	t.Parallel()
+
+	transcript := []byte(`{
+		"info": {"id": "ses_2"},
+		"messages": [
+			{"info": {"id": "m1", "role": "assistant",
+			  "tokens": {"input": 100, "output": 10, "reasoning": 50, "total": 160,
+			             "cache": {"read": 0, "write": 0}}},
+			 "parts": []}
+		]
+	}`)
+
+	a := &OpenCodeAgent{}
+	usage, err := a.CalculateTokenUsage(transcript, 0)
+	require.NoError(t, err)
+	require.NotNil(t, usage)
+
+	require.Equal(t, 60, usage.OutputTokens, "reasoning is billed at the output rate")
+	require.Equal(t, 50, usage.ThinkingTokens)
+	require.LessOrEqual(t, usage.ThinkingTokens, usage.OutputTokens)
+}

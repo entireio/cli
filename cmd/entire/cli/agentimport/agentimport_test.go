@@ -723,3 +723,63 @@ func TestRun_CancellationStopsRefsBackedImport(t *testing.T) {
 		t.Fatalf("wrote %d checkpoints after cancellation, want 1 (the in-flight turn)", len(infos))
 	}
 }
+
+// TestRun_ImportedTurnRecordsItsTokenWindow proves each imported turn says
+// where its token_usage was measured from.
+//
+// Every turn of a session stores the same whole-session transcript, and
+// turn.Tokens is a per-turn delta over [LineStart, LineEnd). The written
+// checkpoint stamps token_usage_version 2, so a reader attributing its tokens
+// slices the stored transcript at token_transcript_start. Leaving that at 0 on
+// a non-first turn would make the reader recompute the session's cumulative
+// total — the over-report the token window exists to prevent.
+func TestRun_ImportedTurnRecordsItsTokenWindow(t *testing.T) {
+	t.Parallel()
+	repo, repoDir := initRepoWithCommit(t)
+	head, err := repo.Head()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	claudeDir := t.TempDir()
+	content := strings.Join([]string{
+		`{"type":"user","uuid":"u1","timestamp":"2026-06-20T00:00:00Z","message":{"role":"user","content":"first"}}`,
+		`{"type":"assistant","uuid":"a1","message":{"id":"m1","model":"claude-x","content":[{"type":"text","text":"ok"}],"usage":{"input_tokens":10,"output_tokens":5}}}`,
+		`{"type":"user","uuid":"u2","timestamp":"2026-06-20T00:01:00Z","message":{"role":"user","content":"second"}}`,
+		`{"type":"assistant","uuid":"a2","message":{"id":"m2","model":"claude-x","content":[{"type":"text","text":"done"}],"usage":{"input_tokens":20,"output_tokens":7}}}`,
+	}, "\n") + "\n"
+	if err := os.WriteFile(filepath.Join(claudeDir, "sess-window.jsonl"), []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	res, err := Run(context.Background(), repo, claudeImporter{}, Options{
+		RepoRoot: repoDir, OverridePath: claudeDir,
+		Now:           time.Date(2026, 6, 25, 0, 0, 0, 0, time.UTC),
+		LinkCommitSHA: head.Hash().String(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.TurnsImported != 2 {
+		t.Fatalf("want 2 imported, got %+v", res)
+	}
+
+	stores, err := cp.Open(context.Background(), repo, cp.OpenOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	md2, err := stores.Persistent.ReadSessionMetadata(context.Background(),
+		DeriveCheckpointID("sess-window", "u2"), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if md2.CheckpointTranscriptStart == 0 {
+		t.Fatalf("second turn should start past line 0, got %d", md2.CheckpointTranscriptStart)
+	}
+	if md2.TokenTranscriptStart != md2.CheckpointTranscriptStart {
+		t.Errorf("token window = %d, want the turn's own start %d: an import has no "+
+			"carry-forward, so the two windows coincide",
+			md2.TokenTranscriptStart, md2.CheckpointTranscriptStart)
+	}
+}

@@ -767,6 +767,7 @@ func buildCondensationWriteOptions(
 		TurnID:                      state.TurnID,
 		TranscriptIdentifierAtStart: state.TranscriptIdentifierAtStart,
 		CheckpointTranscriptStart:   state.CheckpointTranscriptStart,
+		TokenTranscriptStart:        state.TokenTranscriptStart,
 		TokenUsage:                  sessionData.TokenUsage,
 		SkillEvents:                 skillEvents,
 		SessionMetrics:              buildSessionMetrics(state),
@@ -946,7 +947,7 @@ func (s *ManualCommitStrategy) extractOrCreateSessionData(ctx context.Context, r
 	case hasShadowBranch:
 		// Shadow branch exists (from SaveStep commits) — extract transcript and
 		// metadata from the branch tree, preferring the live transcript if fresher.
-		data, err := s.extractSessionData(ctx, repo, shadowHash, state.SessionID, state.FilesTouched, state.AgentType, state.TranscriptPath, state.CheckpointTranscriptStart, state.Phase.IsActive())
+		data, err := s.extractSessionData(ctx, repo, shadowHash, state.SessionID, state.FilesTouched, state.AgentType, state.TranscriptPath, state.TokenTranscriptStart, state.Phase.IsActive())
 		if err != nil {
 			return nil, fmt.Errorf("failed to extract session data: %w", err)
 		}
@@ -1119,7 +1120,7 @@ func hasTokenUsageData(usage *agent.TokenUsage) bool {
 		return false
 	}
 
-	if usage.InputTokens > 0 || usage.CacheCreationTokens > 0 || usage.CacheReadTokens > 0 || usage.OutputTokens > 0 || usage.APICallCount > 0 {
+	if hasSessionTotalTokenUsage(usage) {
 		return true
 	}
 
@@ -1166,33 +1167,57 @@ func withSubagentTokensFrom(usage, src *agent.TokenUsage) *agent.TokenUsage {
 // which copies so the cumulative is never mixed into checkpointUsage (the
 // checkpoint-scoped value written to metadata).
 func applyBackfilledSessionTokenUsage(ctx context.Context, ag agent.Agent, state *SessionState, transcript []byte, checkpointUsage *agent.TokenUsage) {
-	backfillUsage := sessionStateBackfillTokenUsage(ctx, ag, state.AgentType, transcript, checkpointUsage)
+	backfillUsage, sessionWide := sessionStateBackfillTokenUsage(ctx, ag, state.AgentType, transcript, checkpointUsage)
 	if backfillUsage == nil {
+		return
+	}
+	// Only a genuinely session-wide recompute may replace the accumulator.
+	// The other sources are the checkpoint-scoped delta (token_usage_version 2),
+	// which is a fraction of the session — adopting it as the session total makes
+	// entire status report the last checkpoint's spend instead of the session's.
+	// It stays usable as a last resort for a session whose hooks never reported
+	// per-step usage, so there is no accumulator to lose.
+	if !sessionWide && hasSessionTotalTokenUsage(state.TokenUsage) {
 		return
 	}
 	state.TokenUsage = withSubagentTokensFrom(backfillUsage, state.TokenUsage)
 }
 
+// hasSessionTotalTokenUsage reports whether usage already carries a session
+// total of its own. Deliberately ignores SubagentTokens: that field is a
+// cumulative snapshot maintained separately (see withSubagentTokensFrom), so a
+// state carrying only subagent tokens has no session total to protect.
+func hasSessionTotalTokenUsage(usage *agent.TokenUsage) bool {
+	if usage == nil {
+		return false
+	}
+	return usage.InputTokens > 0 || usage.CacheCreationTokens > 0 ||
+		usage.CacheReadTokens > 0 || usage.OutputTokens > 0 || usage.APICallCount > 0
+}
+
 // sessionStateBackfillTokenUsage returns the best session-level token usage to
-// persist in session state after condensation.
-func sessionStateBackfillTokenUsage(ctx context.Context, ag agent.Agent, agentType types.AgentType, transcript []byte, checkpointUsage *agent.TokenUsage) *agent.TokenUsage {
+// persist in session state after condensation, and whether that value actually
+// covers the whole session. Only the Copilot CLI full-transcript read is
+// session-wide; the checkpoint fallbacks are per-checkpoint deltas that callers
+// must not adopt over an existing session total.
+func sessionStateBackfillTokenUsage(ctx context.Context, ag agent.Agent, agentType types.AgentType, transcript []byte, checkpointUsage *agent.TokenUsage) (usage *agent.TokenUsage, sessionWide bool) {
 	if agentType == agent.AgentTypeCopilotCLI && len(transcript) > 0 {
 		fullSessionUsage := agent.CalculateTokenUsage(ctx, ag, transcript, 0, "")
 		if hasTokenUsageData(fullSessionUsage) {
-			return fullSessionUsage
+			return fullSessionUsage, true
 		}
 		logging.Debug(ctx, "copilot-cli: full-session token read produced no data, falling back to checkpoint usage")
 	}
 
 	if agentType == agent.AgentTypeCopilotCLI && hasTokenUsageData(checkpointUsage) {
-		return checkpointUsage
+		return checkpointUsage, false
 	}
 
 	if checkpointUsage != nil && checkpointUsage.InputTokens > 0 {
-		return checkpointUsage
+		return checkpointUsage, false
 	}
 
-	return nil
+	return nil, false
 }
 
 // sessionStateBackfillModel extracts the LLM model from the transcript for
@@ -1392,8 +1417,12 @@ func committedFilesExcludingMetadata(committedFiles map[string]struct{}) []strin
 // liveTranscriptPath, when non-empty and readable, is preferred over the shadow branch copy.
 // This handles the case where SaveStep was skipped (no code changes) but the transcript
 // continued growing — the shadow branch copy would be stale.
-// checkpointTranscriptStart is the line offset (Claude) or message index (Gemini) where the current checkpoint began.
-func (s *ManualCommitStrategy) extractSessionData(ctx context.Context, repo *git.Repository, shadowRef plumbing.Hash, sessionID string, filesTouched []string, agentType types.AgentType, liveTranscriptPath string, checkpointTranscriptStart int, isActive bool) (*ExtractedSessionData, error) {
+// tokenTranscriptStart is the line offset (Claude) or message index (Gemini) where this checkpoint's token window
+// began. It equals state.CheckpointTranscriptStart except where the two windows diverge (see
+// advanceTranscriptWindows): a carry-forward resets the transcript offset to 0, leaving it below the token
+// offset, and the turn-end advance after a mid-turn commit pushes the transcript offset above it. The stored
+// transcript itself is always the full file, so both offsets index the same bytes.
+func (s *ManualCommitStrategy) extractSessionData(ctx context.Context, repo *git.Repository, shadowRef plumbing.Hash, sessionID string, filesTouched []string, agentType types.AgentType, liveTranscriptPath string, tokenTranscriptStart int, isActive bool) (*ExtractedSessionData, error) {
 	ag, _ := agent.GetByAgentType(agentType) //nolint:errcheck // ag may be nil for unknown agent types; callers use type assertions so nil is safe
 	commit, err := repo.CommitObject(shadowRef)
 	if err != nil {
@@ -1468,7 +1497,7 @@ func (s *ManualCommitStrategy) extractSessionData(ctx context.Context, repo *git
 		// cumulative snapshot needing the same rescoping SaveStep already did.
 		// CondenseSession fills the already-rescoped window total in instead;
 		// see withSubagentTokensFrom.
-		data.TokenUsage = agent.CalculateTokenUsage(ctx, ag, data.Transcript, checkpointTranscriptStart, "")
+		data.TokenUsage = agent.CalculateTokenUsage(ctx, ag, data.Transcript, tokenTranscriptStart, "")
 		data.SkillEvents = agent.ExtractSkillEvents(ctx, ag, data.Transcript, 0)
 	}
 
@@ -1514,7 +1543,7 @@ func (s *ManualCommitStrategy) extractSessionDataFromLiveTranscript(ctx context.
 		// for the cleanup reason: this is the live mid-turn path, where the subagent
 		// transcripts are still on disk. It is the one place the gap noted on
 		// withSubagentTokensFrom could be closed by reading them.
-		data.TokenUsage = agent.CalculateTokenUsage(ctx, ag, data.Transcript, state.CheckpointTranscriptStart, "")
+		data.TokenUsage = agent.CalculateTokenUsage(ctx, ag, data.Transcript, state.TokenTranscriptStart, "")
 		data.SkillEvents = agent.ExtractSkillEvents(ctx, ag, data.Transcript, 0)
 	}
 
@@ -1720,7 +1749,7 @@ func (s *ManualCommitStrategy) CondenseSessionByID(ctx context.Context, sessionI
 		)
 
 		resetCheckpointWindow(state)
-		state.CheckpointTranscriptStart = result.TotalTranscriptLines
+		advanceTranscriptWindows(state, result.TotalTranscriptLines)
 		state.CheckpointTranscriptSize = result.TranscriptSizeBaseline
 		state.Phase = session.PhaseIdle
 		state.LastCheckpointID = result.CheckpointID
@@ -1895,7 +1924,7 @@ func (s *ManualCommitStrategy) CondenseAndMarkFullyCondensed(ctx context.Context
 		}
 
 		resetCheckpointWindow(state)
-		state.CheckpointTranscriptStart = result.TotalTranscriptLines
+		advanceTranscriptWindows(state, result.TotalTranscriptLines)
 		state.LastCheckpointID = result.CheckpointID
 		state.LastCheckpointCommitHash = state.BaseCommit
 		state.RealignAttributionBase(state.BaseCommit)

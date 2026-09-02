@@ -579,14 +579,36 @@ failed or skipped regeneration **drops** the prior `transcript.jsonl` and clears
   "token_usage": {
     "input_tokens": 1500,
     "cache_creation_tokens": 200,
+    "cache_creation_1h_tokens": 200,
     "cache_read_tokens": 800,
     "output_tokens": 500,
+    "thinking_tokens": 120,
     "api_call_count": 3
-  }
+  },
+  "token_usage_version": 2
 }
 ```
 
 `checkpoints_count` in the root summary is the aggregate displayed "steps" count: the sum of per-session prompt-window counts. Despite the historical name, it is not a count of checkpoint records.
+
+#### `token_usage` contract (for CLI readers and the web)
+
+`token_usage` (root and per-session) is **this checkpoint's delta** — the API calls since the previous checkpoint of the same session — never the session's running total. Its scope is `SessionState.TokenTranscriptStart`, which advances with `CheckpointTranscriptStart` at every condensation and diverges from it in exactly two places, both moving only the transcript offset: carry-forward after a partial commit resets it to 0 (so the stored transcript is self-contained while the tokens stay a delta), and the turn-end advance after a complete mid-turn commit moves it to the turn's end (the tail past the commit was never condensed into that checkpoint's `token_usage`, so its tokens belong to the next checkpoint). Checkpoints written before the two offsets were split (CLI ≤ 0.10.x) computed tokens from the transcript offset, so a non-first checkpoint with `checkpoint_transcript_start` 0/absent may carry the session's cumulative total; readers summing across checkpoints must dedupe those per session (keep the latest cumulative snapshot, add only later deltas).
+
+**Fields.** The four classes — `input_tokens` (fresh, uncached), `cache_creation_tokens`, `cache_read_tokens`, `output_tokens` — are disjoint and sum to what the provider billed; every agent parser normalises to this (Gemini's `cached` ⊂ `input` and `thoughts` ∉ `output`, Codex's `cached_input_tokens` ⊂ `input_tokens`, OpenCode's version-dependent `reasoning` placement — see `docs/architecture/agent-guide.md`). Two further fields are **subsets, not classes**, so the four-class sum is unchanged by them:
+
+| field | subset of | source (read verbatim from the agent, never inferred) |
+|---|---|---|
+| `thinking_tokens` | `output_tokens` | Claude Code `output_tokens_details.thinking_tokens`; Codex `reasoning_output_tokens`; OpenCode `tokens.reasoning`; Gemini `tokens.thoughts`. Not recorded by Pi or Cursor, nor by Claude Code transcripts before Aug 2026. |
+| `cache_creation_1h_tokens` | `cache_creation_tokens` | Claude Code `cache_creation.ephemeral_1h_input_tokens`; Pi `usage.cacheWrite1h`. Anthropic only. The 1-hour TTL is priced 2× input, the 5-minute TTL (the remainder) 1.25×. |
+
+`subagent_tokens` nests the same shape, plus `model` — the model the subagents ran on when it was one model (cleared when mixed) — so their cost can be weighted separately from the parent session's `model`.
+
+**Reading rules.**
+- **Absence is "not recorded", never zero.** Both subset fields are `omitempty`, and legacy checkpoints predate them. Show *not recorded*; never include unknown rows in an average of the known ones; never price a legacy Anthropic cache write (its TTL is unknown — do not blend).
+- **`token_usage_version` (root) = 2** means every session's `token_usage` in the checkpoint is a per-checkpoint delta carrying the subset fields where recorded, and each session entry records `token_transcript_start` — the `full.jsonl` offset where that delta begins. Presence is not a version marker: the field is omitted at offset 0, so a session's first checkpoint omits it on v2 as well; absent means 0. It differs from `checkpoint_transcript_start` after a carry-forward (which resets the transcript offset to 0 for a self-contained transcript but not the token window); slice the stored transcript at `token_transcript_start`, never at `checkpoint_transcript_start`, when attributing this checkpoint's tokens. **Absent** means legacy — but at the *checkpoint* level, not necessarily per row: a checkpoint keeps its legacy version while any pre-delta session row survives in it, so a row added later by a current CLI is delta-scoped and carries its own `token_transcript_start` inside a checkpoint whose root version is still absent. Prefer a row's own `token_transcript_start` when it is present; fall back to the legacy rule only for rows without one. Under that rule a non-first checkpoint whose `checkpoint_transcript_start` is 0/absent may hold the session's cumulative total. Sum legacy rows per `session_id` as: latest cumulative snapshot + deltas recorded after it; drop earlier rows. Do not key on `cli_version` — it is `"dev"` on most rows.
+- **Weight cost per model, never per session default.** Use the session's `model` for the top-level entry, `subagent_tokens.model` for the nested one, and when a model is missing (57% of 2026 H1 Claude rows) report volume only.
+- The stored `full.jsonl` is the agent's own transcript, so a reader that needs a subset field on a legacy checkpoint can recompute it from the same agent-written fields; the CLI does this for single-checkpoint views.
 
 **Session-level metadata.json (`Metadata`, abbreviated):**
 ```json
