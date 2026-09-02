@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/entireio/cli/cmd/entire/cli/api"
 	"github.com/entireio/cli/cmd/entire/cli/osroot"
@@ -193,7 +194,14 @@ func readCapped(repoRoot, name string, maxLen int) (string, bool) {
 	}
 	s := string(data)
 	if len(s) > maxLen {
-		s = s[:maxLen] + "\n…(truncated)…"
+		// maxLen is a byte budget, and s[:maxLen] can land inside a multi-byte
+		// rune, which would put an invalid UTF-8 sequence in the prompt this
+		// feeds. Back up to the last rune boundary at or below the cap.
+		cut := maxLen
+		for cut > 0 && !utf8.ValidString(s[:cut]) {
+			cut--
+		}
+		s = s[:cut] + "\n…(truncated)…"
 	}
 	return s, true
 }
