@@ -24,28 +24,36 @@ func TestParseExplainRepoFlag(t *testing.T) {
 	t.Parallel()
 
 	for _, tc := range []struct {
-		name, in, owner, repo, wantErr string
+		name, in, forge, owner, repo, wantErr string
 	}{
-		{name: "owner/name", in: "acme/widgets", owner: "acme", repo: "widgets"},
-		{name: "gh prefixed", in: "gh/acme/widgets", owner: "acme", repo: "widgets"},
-		{name: "leading slash", in: "/gh/acme/widgets", owner: "acme", repo: "widgets"},
-		{name: "lowercased", in: "ACME/Widgets", owner: "acme", repo: "widgets"},
-		{name: "surrounding space", in: "  acme/widgets  ", owner: "acme", repo: "widgets"},
+		{name: "owner/name", in: "acme/widgets", forge: "gh", owner: "acme", repo: "widgets"},
+		{name: "gh prefixed", in: "gh/acme/widgets", forge: "gh", owner: "acme", repo: "widgets"},
+		{name: "leading slash", in: "/gh/acme/widgets", forge: "gh", owner: "acme", repo: "widgets"},
+		{name: "lowercased", in: "ACME/Widgets", forge: "gh", owner: "acme", repo: "widgets"},
+		{name: "surrounding space", in: "  acme/widgets  ", forge: "gh", owner: "acme", repo: "widgets"},
+		{name: "native", in: "et/Acme/Widgets", forge: "et", owner: "acme", repo: "widgets"},
+		{name: "native leading slash", in: "/et/acme/widgets", forge: "et", owner: "acme", repo: "widgets"},
+		{name: "native clone url", in: "entire://aws-us-east-2.entire.io/et/Acme/Widgets", forge: "et", owner: "acme", repo: "widgets"},
 		{name: "empty", in: "", wantErr: "--repo requires a value"},
 		{name: "bare word", in: "widgets", wantErr: "expected owner/name"},
 		// A repo ID is rejected rather than guessed at: the control plane and
 		// the search index expose different identifiers for a repository.
 		{name: "bare ulid", in: "01KVBJCWYA4YW6J5M9GP655HZ9", wantErr: "expected owner/name"},
-		{name: "clone url", in: "https://github.com/acme/widgets", wantErr: "invalid --repo"},
+		{name: "github clone url", in: "https://github.com/acme/widgets", wantErr: "invalid --repo"},
+		{name: "mirror clone url", in: "entire://aws-us-east-2.entire.io/gh/acme/widgets", wantErr: "invalid --repo"},
+		{name: "native clone url without host", in: "entire:///et/acme/widgets", wantErr: "invalid --repo"},
+		{name: "malformed native path", in: "et/acme/widgets/extra", wantErr: "invalid --repo"},
+		{name: "malformed native clone url", in: "entire://aws-us-east-2.entire.io/et/acme/widgets/extra", wantErr: "invalid --repo"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			owner, repo, err := parseExplainRepoFlag(tc.in)
+			forge, owner, repo, err := parseExplainRepoFlag(tc.in)
 			if tc.wantErr != "" {
 				require.ErrorContains(t, err, tc.wantErr)
 				return
 			}
 			require.NoError(t, err)
+			assert.Equal(t, tc.forge, forge)
 			assert.Equal(t, tc.owner, owner)
 			assert.Equal(t, tc.repo, repo)
 		})
@@ -73,21 +81,27 @@ func TestExplainRepoIsCurrent(t *testing.T) {
 	ctx := context.Background()
 
 	setOrigin(t, "git@github.com:acme/widgets.git")
-	assert.True(t, explainRepoIsCurrent(ctx, "acme", "widgets"))
-	assert.True(t, explainRepoIsCurrent(ctx, "ACME", "Widgets"), "comparison is case-insensitive")
-	assert.False(t, explainRepoIsCurrent(ctx, "acme", "other"))
+	assert.True(t, explainRepoIsCurrent(ctx, "gh", "acme", "widgets"))
+	assert.True(t, explainRepoIsCurrent(ctx, "GH", "ACME", "Widgets"), "comparison is case-insensitive")
+	assert.False(t, explainRepoIsCurrent(ctx, "gh", "acme", "other"))
 
 	setOrigin(t, "https://github.com/acme/widgets")
-	assert.True(t, explainRepoIsCurrent(ctx, "acme", "widgets"))
+	assert.True(t, explainRepoIsCurrent(ctx, "gh", "acme", "widgets"))
 
 	// entire:// mirror URLs carry the forge in the path.
 	setOrigin(t, "entire://aws-us-east-2.entire.io/gh/acme/widgets")
-	assert.True(t, explainRepoIsCurrent(ctx, "acme", "widgets"))
+	assert.True(t, explainRepoIsCurrent(ctx, "gh", "acme", "widgets"))
+	assert.False(t, explainRepoIsCurrent(ctx, "et", "acme", "widgets"), "same-named native repo is distinct")
 
-	// --repo is GitHub-scoped, so a non-GitHub origin with a coincidentally
-	// matching owner/name must not count as the current repo.
+	// Entire-native origins match only the native forge-qualified ref.
+	setOrigin(t, "entire://aws-us-east-2.entire.io/et/acme/widgets")
+	assert.True(t, explainRepoIsCurrent(ctx, "et", "acme", "widgets"))
+	assert.False(t, explainRepoIsCurrent(ctx, "gh", "acme", "widgets"), "same-named GitHub repo is distinct")
+
+	// A non-GitHub origin with a coincidentally matching owner/name must not
+	// count as the current GitHub repo.
 	setOrigin(t, "git@gitlab.com:acme/widgets.git")
-	assert.False(t, explainRepoIsCurrent(ctx, "acme", "widgets"))
+	assert.False(t, explainRepoIsCurrent(ctx, "gh", "acme", "widgets"))
 }
 
 // --- render paths -----------------------------------------------------
@@ -168,8 +182,8 @@ func withStubCrossRepoReader(t *testing.T, stub crossRepoReader) *string {
 	t.Helper()
 	var asked string
 	prev := newCrossRepoReader
-	newCrossRepoReader = func(_ context.Context, _ bool, owner, repo string) (crossRepoReader, error) {
-		asked = owner + "/" + repo
+	newCrossRepoReader = func(_ context.Context, _ bool, forge, owner, repo string) (crossRepoReader, error) {
+		asked = forge + "/" + owner + "/" + repo
 		return stub, nil
 	}
 	t.Cleanup(func() { newCrossRepoReader = prev })
@@ -189,7 +203,7 @@ func TestRunCrossRepoExplain_Prose(t *testing.T) {
 		noPager:      true,
 	}))
 
-	assert.Equal(t, "acme/widgets", *asked)
+	assert.Equal(t, "gh/acme/widgets", *asked)
 	got := out.String()
 	assert.Contains(t, got, testAPICheckpointID.String())
 	assert.Contains(t, got, "Foreign Author", "the cell's author must render without a local commit")
@@ -208,7 +222,7 @@ func TestRunCrossRepoExplain_JSON(t *testing.T) {
 		sessionIndex: -1,
 		json:         true,
 	}))
-	assert.Equal(t, "acme/widgets", *asked)
+	assert.Equal(t, "gh/acme/widgets", *asked)
 
 	var envelope struct {
 		CheckpointID string `json:"checkpoint_id"`
@@ -219,6 +233,19 @@ func TestRunCrossRepoExplain_JSON(t *testing.T) {
 	assert.Equal(t, testAPICheckpointID.String(), envelope.CheckpointID)
 	assert.Equal(t, 2, envelope.SessionCount)
 	assert.False(t, envelope.Partial, "a complete read must not be flagged partial")
+}
+
+func TestRunCrossRepoExplain_NativeRepoThreadsForge(t *testing.T) {
+	asked := withStubCrossRepoReader(t, &stubCrossRepoReader{sessions: 1})
+
+	var out, errOut bytes.Buffer
+	require.NoError(t, runCrossRepoExplain(context.Background(), &out, &errOut, crossRepoExplainOptions{
+		repoFlag:     "entire://aws-us-east-2.entire.io/et/acme/widgets",
+		target:       testAPICheckpointID.String(),
+		sessionIndex: -1,
+		json:         true,
+	}))
+	assert.Equal(t, "et/acme/widgets", *asked)
 }
 
 // A session whose metadata can't be read must produce the same partial-export
@@ -343,6 +370,17 @@ func TestExplainCmd_RepoFlagValidation(t *testing.T) {
 			assert.Contains(t, err.Error(), tc.wantErr)
 		})
 	}
+}
+
+func TestExplainCmd_RepoFlagHelpIncludesNativeForms(t *testing.T) {
+	t.Parallel()
+
+	cmd := newExplainCmd()
+	repoFlag := cmd.Flags().Lookup("repo")
+	require.NotNil(t, repoFlag)
+	assert.Contains(t, repoFlag.Usage, "et/project/repo")
+	assert.Contains(t, repoFlag.Usage, "entire://<host>/et/<project>/<repo>")
+	assert.Contains(t, cmd.Long, "--repo et/project/repo")
 }
 
 // Bugbot (PR #1942): the default no-summary hint tells the reader to run

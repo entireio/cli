@@ -179,7 +179,7 @@ func withFakeCellCore(t *testing.T, f *fakeCellCore) {
 	})
 }
 
-func TestResolveTrailRepoCellPlacement_NativeDoesNotSelectSameNamedGitHubMirror(t *testing.T) {
+func TestResolveForgeRepoCellPlacement_NativeDoesNotSelectSameNamedGitHubMirror(t *testing.T) {
 	const (
 		projectID  = "01NATIVEPROJECT00000000000"
 		nativeID   = "01NATIVEREPOSITORY00000000"
@@ -203,7 +203,7 @@ func TestResolveTrailRepoCellPlacement_NativeDoesNotSelectSameNamedGitHubMirror(
 			placementFixture{id: legacyGHID, slug: usClusterSlug})),
 	})
 
-	got, err := resolveTrailRepoCellPlacement(t.Context(), nativeCloneForge, "entirehq", "marvin")
+	got, err := resolveForgeRepoCellPlacement(t.Context(), nativeCloneForge, "entirehq", "marvin")
 	if err != nil {
 		t.Fatal(err)
 	}
