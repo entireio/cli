@@ -27,6 +27,19 @@ import (
 // the checkpoint hosting provider — same string, unrelated concern.)
 const providerGitHub = "github"
 
+// projectRefClient and repoRefClient are the narrow control-plane surfaces the
+// name resolvers need. Keeping the helpers on interfaces lets repo-scoped
+// callers resolve a native /et/<project>/<repo> identity with the same client
+// they use to locate its home cell.
+type projectRefClient interface {
+	ListProjects(ctx context.Context, params coreapi.ListProjectsParams) (*coreapi.ListProjectsOutputBody, error)
+}
+
+type repoRefClient interface {
+	projectRefClient
+	ListProjectRepos(ctx context.Context, params coreapi.ListProjectReposParams) (*coreapi.ListProjectReposOutputBody, error)
+}
+
 // looksLikeULID reports whether s has the shape of a ULID: 26 characters drawn
 // from Crockford base32 (digits plus uppercase letters, excluding I, L, O, U).
 // The check is shape-only and case-insensitive on the alphabet; it never hits
@@ -158,7 +171,7 @@ func parseQualifiedHandle(ref string) (provider, handle string, err error) {
 // ULID is returned unchanged; a name is resolved via the server's
 // case-insensitive by-name lookup (the same call `entire project list --name`
 // uses). Project names are globally unique, so a name maps to at most one project.
-func resolveProjectRef(ctx context.Context, c *coreapi.Client, ref string) (string, error) {
+func resolveProjectRef(ctx context.Context, c projectRefClient, ref string) (string, error) {
 	if looksLikeULID(ref) {
 		return ref, nil
 	}
@@ -167,7 +180,7 @@ func resolveProjectRef(ctx context.Context, c *coreapi.Client, ref string) (stri
 		if isCoreNotFound(err) {
 			return "", noProjectNamedErr(ref)
 		}
-		return "", err
+		return "", fmt.Errorf("list projects: %w", err)
 	}
 	project, ok := out.Project.Get()
 	if !ok {
@@ -183,7 +196,7 @@ func resolveProjectRef(ctx context.Context, c *coreapi.Client, ref string) (stri
 // org/project endpoints, a name-filtered list returns the single match under the
 // response's singular `repo` field (the plural `repos` is only populated for an
 // unfiltered page) — reading `repos` here was the COR-699 bug.
-func resolveRepoRef(ctx context.Context, c *coreapi.Client, ref, projectRef string) (string, error) {
+func resolveRepoRef(ctx context.Context, c repoRefClient, ref, projectRef string) (string, error) {
 	if looksLikeULID(ref) {
 		return ref, nil
 	}
@@ -199,7 +212,7 @@ func resolveRepoRef(ctx context.Context, c *coreapi.Client, ref, projectRef stri
 		if isCoreNotFound(err) {
 			return "", noRepoNamedErr(ref)
 		}
-		return "", err
+		return "", fmt.Errorf("list project repos: %w", err)
 	}
 	repo, ok := out.Repo.Get()
 	if !ok {

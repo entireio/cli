@@ -291,8 +291,8 @@ func refreshTrailsEnabledCacheIfStaleForScope(ctx context.Context, scope trailEn
 // data-API/BFF client: the BFF does not proxy /api/v1/trails/... for bearer
 // callers (COR-666), so probing it via the generic client silently misreads a
 // supported repo as disabled.
-var trailRefreshAPIClient = func(ctx context.Context, insecureHTTP bool, fullName string) (*api.Client, error) {
-	client, _, err := newTrailAPIClient(ctx, insecureHTTP, fullName)
+var trailRefreshAPIClient = func(ctx context.Context, insecureHTTP bool, forge, owner, repo string) (*api.Client, error) {
+	client, _, err := newTrailAPIClient(ctx, insecureHTTP, forge, owner, repo)
 	return client, err
 }
 
@@ -311,8 +311,8 @@ var trailRefreshAPIClient = func(ctx context.Context, insecureHTTP bool, fullNam
 // a caller can log it without having to know which of the two it got. When
 // notOnboarded is true, err is the sentinel-wrapping error, kept for logging;
 // callers must act on notOnboarded, not propagate err.
-func trailsCellClient(ctx context.Context, insecureHTTP bool, ownerRepo string) (client *api.Client, notOnboarded bool, err error) {
-	client, err = trailRefreshAPIClient(ctx, insecureHTTP, ownerRepo)
+func trailsCellClient(ctx context.Context, insecureHTTP bool, forge, owner, repo string) (client *api.Client, notOnboarded bool, err error) {
+	client, err = trailRefreshAPIClient(ctx, insecureHTTP, forge, owner, repo)
 	switch {
 	case err == nil:
 		return client, false, nil
@@ -353,7 +353,7 @@ func runTrailEnablementRefresh(ctx context.Context) error {
 		}
 		return nil
 	}
-	client, notOnboarded, err := trailsCellClient(ctx, false, scope.Owner+"/"+scope.Repo)
+	client, notOnboarded, err := trailsCellClient(ctx, false, scope.Forge, scope.Owner, scope.Repo)
 	if notOnboarded {
 		// A definitive, permanent negative: without this, every SessionStart
 		// re-forks a refresh child for this repo forever (see
@@ -566,11 +566,11 @@ func runAuthenticatedTrailAPI(ctx context.Context, errW io.Writer, insecureHTTP 
 // to repo-addressed read callers. Most trail operations remain host-addressed
 // and should use runAuthenticatedTrailAPI instead.
 func runAuthenticatedTrailAPIWithRepoID(ctx context.Context, errW io.Writer, insecureHTTP bool, repoOverride string, fn func(context.Context, *api.Client, string) error) error {
-	_, owner, repo, err := resolveTrailRepoOrRemote(ctx, repoOverride)
+	forge, owner, repo, err := resolveTrailRepoOrRemote(ctx, repoOverride)
 	if err != nil {
 		return err
 	}
-	client, repoID, err := newTrailAPIClient(ctx, insecureHTTP, owner+"/"+repo)
+	client, repoID, err := newTrailAPIClient(ctx, insecureHTTP, forge, owner, repo)
 	if err != nil {
 		return renderDataAPIAuthError(ctx, errW, owner+"/"+repo, err)
 	}

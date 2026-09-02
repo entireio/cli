@@ -74,11 +74,11 @@ func NewAuthenticatedEntireAPICellClient(ctx context.Context, insecureHTTP bool,
 	return auth.NewEntireAPICellClient(ctx, insecureHTTP, target) //nolint:wrapcheck // pass through contextual auth errors
 }
 
-// newTrailAPIClient dials the entire-api cell that owns the repository and
-// returns the processing placement ID used by repo-addressed trail reads. It is
-// a package seam so tests can substitute a client pointed at a stub server.
-var newTrailAPIClient = func(ctx context.Context, insecureHTTP bool, fullName string) (*api.Client, string, error) {
-	placement, err := resolveRepoCellPlacementByFullName(ctx, fullName)
+// newTrailAPIClient dials the entire-api cell that owns the forge-qualified
+// repository and returns its repo_id for repo-addressed trail reads. It is a
+// package seam so tests can substitute a client pointed at a stub server.
+var newTrailAPIClient = func(ctx context.Context, insecureHTTP bool, forge, owner, repo string) (*api.Client, string, error) {
+	placement, err := resolveTrailRepoCellPlacement(ctx, forge, owner, repo)
 	if err != nil {
 		return nil, "", err
 	}

@@ -27,10 +27,10 @@ func TestProbeAndCacheTrailsEnablement_RoutesThroughRepoCell(t *testing.T) {
 	t.Chdir(t.TempDir())
 
 	previous := trailRefreshAPIClient
-	var gotFullName string
+	var gotForge, gotOwner, gotRepo string
 	wantErr := errors.New("cell client unavailable")
-	trailRefreshAPIClient = func(_ context.Context, _ bool, fullName string) (*api.Client, error) {
-		gotFullName = fullName
+	trailRefreshAPIClient = func(_ context.Context, _ bool, forge, owner, repo string) (*api.Client, error) {
+		gotForge, gotOwner, gotRepo = forge, owner, repo
 		return nil, wantErr
 	}
 	t.Cleanup(func() { trailRefreshAPIClient = previous })
@@ -38,8 +38,8 @@ func TestProbeAndCacheTrailsEnablement_RoutesThroughRepoCell(t *testing.T) {
 	info := &gitremote.Info{Forge: "gh", Owner: "acme", Repo: "widget"}
 	probeAndCacheTrailsEnablement(t.Context(), false, info)
 
-	if gotFullName != testTrailCellRoutedFullName {
-		t.Fatalf("trailRefreshAPIClient fullName = %q, want %s", gotFullName, testTrailCellRoutedFullName)
+	if gotForge+"/"+gotOwner+"/"+gotRepo != "gh/acme/widget" {
+		t.Fatalf("trailRefreshAPIClient repo = (%q,%q,%q), want (gh,acme,widget)", gotForge, gotOwner, gotRepo)
 	}
 }
 
@@ -58,7 +58,7 @@ func TestProbeAndCacheTrailsEnablement_CachesEnabledDecision(t *testing.T) {
 	t.Cleanup(srv.Close)
 
 	previous := trailRefreshAPIClient
-	trailRefreshAPIClient = func(_ context.Context, _ bool, _ string) (*api.Client, error) {
+	trailRefreshAPIClient = func(_ context.Context, _ bool, _, _, _ string) (*api.Client, error) {
 		return api.NewClientWithBaseURL("tok", srv.URL), nil
 	}
 	t.Cleanup(func() { trailRefreshAPIClient = previous })
@@ -93,7 +93,7 @@ func TestProbeAndCacheTrailsEnablement_NotOnboardedSavesDisabledCache(t *testing
 	t.Chdir(repoDir)
 
 	previous := trailRefreshAPIClient
-	trailRefreshAPIClient = func(context.Context, bool, string) (*api.Client, error) {
+	trailRefreshAPIClient = func(context.Context, bool, string, string, string) (*api.Client, error) {
 		return nil, fmt.Errorf("resolve the Entire cell for acme/widget: %w", errRepoNotOnboarded)
 	}
 	t.Cleanup(func() { trailRefreshAPIClient = previous })
@@ -125,7 +125,7 @@ func TestProbeAndCacheTrailsEnablement_AppliesItsOwnBudget(t *testing.T) {
 	previous := trailRefreshAPIClient
 	var deadline time.Time
 	var hasDeadline bool
-	trailRefreshAPIClient = func(ctx context.Context, _ bool, _ string) (*api.Client, error) {
+	trailRefreshAPIClient = func(ctx context.Context, _ bool, _, _, _ string) (*api.Client, error) {
 		deadline, hasDeadline = ctx.Deadline()
 		return nil, errors.New("stop before any network call")
 	}
@@ -157,7 +157,7 @@ func TestProbeAndCacheTrailsEnablement_CachesEvenWhenTheParentIsDone(t *testing.
 	t.Chdir(repoDir)
 
 	previous := trailRefreshAPIClient
-	trailRefreshAPIClient = func(context.Context, bool, string) (*api.Client, error) {
+	trailRefreshAPIClient = func(context.Context, bool, string, string, string) (*api.Client, error) {
 		return nil, fmt.Errorf("resolve the Entire cell for acme/widget: %w", errRepoNotOnboarded)
 	}
 	t.Cleanup(func() { trailRefreshAPIClient = previous })

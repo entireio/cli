@@ -1011,7 +1011,7 @@ func runTrailCreate(cmd *cobra.Command, title, body, base, branch, statusStr, ty
 	if err != nil {
 		return err
 	}
-	client, _, err := newTrailAPIClient(ctx, trailInsecureHTTP(cmd), owner+"/"+repoName)
+	client, _, err := newTrailAPIClient(ctx, trailInsecureHTTP(cmd), forge, owner, repoName)
 	if err != nil {
 		return renderDataAPIAuthError(ctx, cmd.ErrOrStderr(), owner+"/"+repoName, err)
 	}

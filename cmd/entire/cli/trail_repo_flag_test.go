@@ -72,18 +72,18 @@ func TestResolveTrailRepoOrRemote_OverrideSkipsGit(t *testing.T) {
 	}
 }
 
-func TestRunAuthenticatedTrailAPIRoutesByRepo(t *testing.T) {
+func TestRunAuthenticatedTrailAPIRoutesByForgeQualifiedRepo(t *testing.T) {
 	// newTrailAPIClient is a package seam, so this test must not run in parallel.
 	previous := newTrailAPIClient
-	var gotFullName string
-	newTrailAPIClient = func(_ context.Context, _ bool, fullName string) (*api.Client, string, error) {
-		gotFullName = fullName
+	var gotForge, gotOwner, gotRepo string
+	newTrailAPIClient = func(_ context.Context, _ bool, forge, owner, repo string) (*api.Client, string, error) {
+		gotForge, gotOwner, gotRepo = forge, owner, repo
 		return api.NewClientWithBaseURL("token", "https://cell.example"), trailTestRepoID, nil
 	}
 	t.Cleanup(func() { newTrailAPIClient = previous })
 
 	called := false
-	err := runAuthenticatedTrailAPIWithRepoID(t.Context(), io.Discard, false, "gh/acme/app", func(_ context.Context, _ *api.Client, repoID string) error {
+	err := runAuthenticatedTrailAPIWithRepoID(t.Context(), io.Discard, false, "entire://cell.example/et/acme/app", func(_ context.Context, _ *api.Client, repoID string) error {
 		called = true
 		if repoID != trailTestRepoID {
 			t.Fatalf("repoID=%q, want %s", repoID, trailTestRepoID)
@@ -93,8 +93,8 @@ func TestRunAuthenticatedTrailAPIRoutesByRepo(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !called || gotFullName != "acme/app" {
-		t.Fatalf("called=%v fullName=%q, want true and acme/app", called, gotFullName)
+	if !called || strings.Join([]string{gotForge, gotOwner, gotRepo}, "/") != "et/acme/app" {
+		t.Fatalf("called=%v repo=(%q,%q,%q), want true and (et,acme,app)", called, gotForge, gotOwner, gotRepo)
 	}
 }
 

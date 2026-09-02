@@ -207,7 +207,7 @@ func TestRunTrailCreateInteractiveBranchlessSkipsBranchPrompt(t *testing.T) {
 func TestRunTrailCreateBranchlessHappyPath(t *testing.T) {
 	// No t.Parallel: uses t.Chdir plus auth/tokenstore package-level test seams.
 	prevTrailClient := newTrailAPIClient
-	newTrailAPIClient = func(ctx context.Context, insecureHTTP bool, _ string) (*api.Client, string, error) {
+	newTrailAPIClient = func(ctx context.Context, insecureHTTP bool, _, _, _ string) (*api.Client, string, error) {
 		client, err := NewAuthenticatedAPIClient(ctx, insecureHTTP)
 		return client, trailTestRepoID, err
 	}
@@ -387,7 +387,7 @@ func gitBranchExistsTrailTest(t *testing.T, repoDir, branch string) bool {
 func TestRunTrailListAll_PrintsLoginHintWhenNotLoggedIn(t *testing.T) {
 	// No t.Parallel: SetResolveContextForAPIForTest and
 	prevTrailClient := newTrailAPIClient
-	newTrailAPIClient = func(ctx context.Context, insecureHTTP bool, _ string) (*api.Client, string, error) {
+	newTrailAPIClient = func(ctx context.Context, insecureHTTP bool, _, _, _ string) (*api.Client, string, error) {
 		client, err := NewAuthenticatedAPIClient(ctx, insecureHTTP)
 		return client, trailTestRepoID, err
 	}

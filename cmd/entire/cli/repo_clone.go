@@ -96,20 +96,34 @@ func parseNativeCloneRef(ref string) (project, repo string, ok bool) {
 	return segs[0], segs[1], true
 }
 
-// resolveNativeCloneURL resolves an Entire-native repo (by project and repo
-// name) to its entire:// clone URL: name → ULID via the project-scoped lookup,
-// then GetRepo — the one call that returns both clusterHost and path. The URL
-// is the server's own coordinates via repoRemoteURL, never synthesized from
-// the user's ref (note: no .git suffix — the server strips it for /gh/ paths
-// only, so a /et/ path with it would 404).
-func resolveNativeCloneURL(ctx context.Context, c *coreapi.Client, project, repoName string) (string, error) {
+type nativeRepoResolverClient interface {
+	repoRefClient
+	GetRepo(ctx context.Context, params coreapi.GetRepoParams) (*coreapi.Repo, error)
+}
+
+// resolveNativeRepo performs the canonical /et/<project>/<repo> identity
+// lookup shared by clone and repo-scoped data commands.
+func resolveNativeRepo(ctx context.Context, c nativeRepoResolverClient, project, repoName string) (*coreapi.Repo, error) {
 	repoID, err := resolveRepoRef(ctx, c, repoName, project)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	repo, err := c.GetRepo(ctx, coreapi.GetRepoParams{RepoId: repoID})
 	if err != nil {
-		return "", fmt.Errorf("get repo: %w", err)
+		return nil, fmt.Errorf("get repo: %w", err)
+	}
+	return repo, nil
+}
+
+// resolveNativeCloneURL resolves an Entire-native repo (by project and repo
+// name) to its entire:// clone URL. The URL is the server's own coordinates
+// via repoRemoteURL, never synthesized from the user's ref (note: no .git
+// suffix — the server strips it for /gh/ paths only, so a /et/ path with it
+// would 404).
+func resolveNativeCloneURL(ctx context.Context, c *coreapi.Client, project, repoName string) (string, error) {
+	repo, err := resolveNativeRepo(ctx, c, project, repoName)
+	if err != nil {
+		return "", err
 	}
 	cloneURL := repoRemoteURL(*repo)
 	if cloneURL == "" {
