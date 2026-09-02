@@ -142,7 +142,9 @@ verify-metadata-branch)
   # `enable` defaults to the git-refs backend: condensed checkpoints live
   # under refs/entire/checkpoints/<shard>/<ULID>. The entire/checkpoints/v1
   # branch is the git-branch backend, still valid when settings select it.
-  refs=$(git for-each-ref --format='%(refname)' 'refs/entire/checkpoints/*')
+  # Prefix form, no glob: the refs sit two levels deep and for-each-ref's
+  # '*' does not cross '/', so 'refs/entire/checkpoints/*' matches nothing.
+  refs=$(git for-each-ref --format='%(refname)' 'refs/entire/checkpoints')
   if [ -n "$refs" ]; then
     echo "✓ Checkpoint refs exist (git-refs backend)"
     echo "$refs" | head -5
