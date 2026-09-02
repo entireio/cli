@@ -2384,9 +2384,12 @@ func worktreeFileName(worktreeRoot string, root *os.Root, name string) (string, 
 			// A dangling link reads as absent, which is what os.Stat gave before.
 			return "", false, nil
 		}
-		// The original error names the refusal; the resolve failure only says
-		// the fallback did not apply.
-		return "", false, fmt.Errorf("check %s: %w", name, err)
+		// The root's refusal stays the wrapped cause: that is the condition the
+		// user has to act on ("path escapes from parent"), while resolveErr only
+		// says the fallback did not apply. It is still worth carrying, since a
+		// resolve that failed for its own reason — a permission denied part-way
+		// down the link chain — is otherwise invisible.
+		return "", false, fmt.Errorf("check %s: %w (resolving the link: %w)", name, err, resolveErr)
 	}
 	if _, err := root.Stat(resolved); err != nil {
 		if os.IsNotExist(err) {

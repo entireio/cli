@@ -113,3 +113,28 @@ func TestReadCapped_MissingFile(t *testing.T) {
 		t.Error("readCapped() on a missing file should report not-ok")
 	}
 }
+
+// TestReadCapped_KeepsContentOfANonUTF8File is the other half of the boundary
+// fix. Scanning back for a valid prefix unconditionally walks to 0 on a doc that
+// is not UTF-8 at all — every prefix is invalid and "" is not — so the caller
+// got the truncation marker and none of the content. Invalidity our cut did not
+// cause is the file's own, and the under-cap path passes those bytes through
+// too.
+func TestReadCapped_KeepsContentOfANonUTF8File(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	// 0xE9 is "é" in latin-1 and invalid on its own in UTF-8.
+	body := append([]byte{0xE9}, []byte(strings.Repeat("resume of the project. ", 20))...)
+	if err := os.WriteFile(filepath.Join(dir, "CLAUDE.md"), body, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	got, ok := readCapped(dir, "CLAUDE.md", 40)
+	if !ok {
+		t.Fatal("readCapped() not ok")
+	}
+	if !strings.Contains(got, "resume of the project") {
+		t.Errorf("readCapped() dropped the file's content: %q", got)
+	}
+}

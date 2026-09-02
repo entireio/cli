@@ -1694,7 +1694,10 @@ func TestScanForSymlinkedComponent_RegularFileWhereDirectoryBelongs(t *testing.T
 	if err := os.WriteFile(filepath.Join(dir, ".claude"), []byte("not a dir"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(osroot.ResetShared)
+	// No osroot.ResetShared here, unlike the t.Chdir tests below: the registry
+	// is process-global and closing it mid-run breaks any test running in
+	// parallel — it took out readCapped's, which opens a root of its own. A
+	// registry entry for a unique temp dir needs no cleanup.
 	root, err := worktreedir.OpenAt(dir)
 	if err != nil {
 		t.Fatal(err)
