@@ -4144,7 +4144,7 @@ func TestCondenseSession_TokenWindowSurvivesCarryForward(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "code.go"), []byte("package main // v2"), 0o644))
 	step := StepContext{
 		SessionID: sessionID, ModifiedFiles: []string{"code.go"}, NewFiles: []string{}, DeletedFiles: []string{},
-		MetadataDir: metadataDir, MetadataDirAbs: metadataDirAbs, CommitMessage: "Checkpoint 1",
+		MetadataDir: metadataDir, CommitMessage: "Checkpoint 1",
 		AuthorName: "Test", AuthorEmail: "test@test.com", AgentType: agent.AgentTypeClaudeCode,
 	}
 	require.NoError(t, s.SaveStep(context.Background(), step))
