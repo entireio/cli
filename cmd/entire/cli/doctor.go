@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"log/slog"
 	"os"
 	"path"
@@ -729,17 +730,27 @@ func checkEntireDirSymlinks(cmd *cobra.Command) {
 	}
 
 	fmt.Fprintf(w, "%s contents: SYMLINKS PRESENT\n", paths.EntireDir)
-	for i, name := range links {
-		if i == symlinkReportLimit {
-			fmt.Fprintf(w, "  ... and %d more\n", len(links)-symlinkReportLimit)
-			break
-		}
-		fmt.Fprintf(w, "  %s -> %s\n", path.Join(paths.EntireDir, name), readlinkOrUnknownIn(root, name))
-	}
+	printCappedList(w, links, func(name string) string {
+		return path.Join(paths.EntireDir, name) + " -> " + readlinkOrUnknownIn(root, name)
+	})
 	fmt.Fprintln(w, "  Entire will not create or write through a symlinked directory here, so")
 	fmt.Fprintln(w, "  anything that belongs under one of these paths is not being captured.")
 	fmt.Fprintln(w, "  Fix: replace each path above with a real directory. If it is tracked in git,")
 	fmt.Fprintln(w, "  `git rm --cached` it first, and add it to .gitignore so it does not come back.")
+}
+
+// printCappedList prints one indented line per name via render, replacing the
+// tail past symlinkReportLimit with a count. Four call sites had this loop
+// inline, differing only in the item line, so the off-by-one truncation
+// contract was written out four times.
+func printCappedList(w io.Writer, names []string, render func(string) string) {
+	for i, name := range names {
+		if i == symlinkReportLimit {
+			fmt.Fprintf(w, "  ... and %d more\n", len(names)-symlinkReportLimit)
+			return
+		}
+		fmt.Fprintf(w, "  %s\n", render(name))
+	}
 }
 
 // checkAgentDirSymlinks reports a symlink at any directory component Entire
@@ -813,13 +824,9 @@ func checkAgentDirSymlinks(cmd *cobra.Command) {
 
 	if len(links) > 0 {
 		fmt.Fprintln(w, "Agent config directories: SYMLINKS PRESENT")
-		for i, name := range links {
-			if i == symlinkReportLimit {
-				fmt.Fprintf(w, "  ... and %d more\n", len(links)-symlinkReportLimit)
-				break
-			}
-			fmt.Fprintf(w, "  %s -> %s\n", name, readlinkOrUnknownIn(root, name))
-		}
+		printCappedList(w, links, func(name string) string {
+			return name + " -> " + readlinkOrUnknownIn(root, name)
+		})
 		fmt.Fprintln(w, "  Entire will not create or write through a symlinked path here, so the")
 		fmt.Fprintln(w, "  hooks and skills that belong under these paths are not installed, and")
 		fmt.Fprintln(w, "  `entire status` reports them as absent rather than as blocked.")
@@ -834,13 +841,9 @@ func checkAgentDirSymlinks(cmd *cobra.Command) {
 	// ErrEntireDirUnreadable, for the same reason.
 	if len(wrongType) > 0 {
 		fmt.Fprintln(w, "Agent config directories: BROKEN")
-		for i, name := range wrongType {
-			if i == symlinkReportLimit {
-				fmt.Fprintf(w, "  ... and %d more\n", len(wrongType)-symlinkReportLimit)
-				break
-			}
-			fmt.Fprintf(w, "  %s is a file, but Entire needs a directory there\n", name)
-		}
+		printCappedList(w, wrongType, func(name string) string {
+			return name + " is not a directory, but Entire needs one there"
+		})
 		fmt.Fprintln(w, "  Entire cannot create the hooks and skills that belong under these paths,")
 		fmt.Fprintln(w, "  so `entire status` reports them as absent rather than as blocked.")
 		fmt.Fprintln(w, "  Fix: replace each path above with a real directory. If it is tracked in")
@@ -853,13 +856,7 @@ func checkAgentDirSymlinks(cmd *cobra.Command) {
 	// install and a doctor that says nothing.
 	if len(unreadable) > 0 {
 		fmt.Fprintln(w, "Agent config directories: NOT READABLE")
-		for i, name := range unreadable {
-			if i == symlinkReportLimit {
-				fmt.Fprintf(w, "  ... and %d more\n", len(unreadable)-symlinkReportLimit)
-				break
-			}
-			fmt.Fprintf(w, "  %s\n", name)
-		}
+		printCappedList(w, unreadable, func(name string) string { return name })
 		fmt.Fprintln(w, "  Entire could not tell whether these paths are real directories, so it")
 		fmt.Fprintln(w, "  cannot say whether hooks and skills can be installed under them.")
 		fmt.Fprintln(w, "  Fix: check the ownership and permissions of each path above.")
@@ -979,19 +976,34 @@ func scanForSymlinkedComponent(root *os.Root, name string) (string, componentSca
 		if info.Mode()&os.ModeSymlink != 0 {
 			return prefix, componentScanLinked
 		}
-		// A regular file with components still to go is a different fault from
-		// an unreadable one, and it is identified here from the mode rather than
-		// from the ENOTDIR the next Lstat would return: Type() == 0 is a regular
-		// file positively, where matching an errno would also have to be right
-		// about which errno each platform picks. fs.ModeIrregular is left out of
-		// this test on purpose, the same way the .entire scan tolerates it —
-		// Windows lands directory junctions and cloud placeholders on that bit,
-		// and both are traversable.
-		if info.Mode().Type() == 0 && i < len(components)-1 {
+		// A component with more path still to go has to be a directory. Stated
+		// as an allowlist of the traversable shapes, not as a test for a regular
+		// file: the .entire scan's doc spends a paragraph on why an allowlist a
+		// rejected type can enter by setting an extra bit is not an allowlist,
+		// and the narrower version here missed a FIFO, socket or device node at
+		// `.claude` entirely — os.Root and every hook install fail on one, and
+		// doctor printed nothing.
+		//
+		// Identified from the mode rather than from the ENOTDIR the next Lstat
+		// would return, which would mean being right about which errno each
+		// platform picks. fs.ModeIrregular is tolerated the way the .entire scan
+		// tolerates it: Windows maps directory junctions and cloud placeholders
+		// onto that bit and both are traversable, and a junction arrives as bare
+		// ModeIrregular (a name-surrogate reparse tag withholds ModeDir) while a
+		// placeholder directory arrives as ModeDir|ModeIrregular.
+		if prefix != name && !traversableComponent(info.Mode()) {
 			return prefix, componentScanWrongType
 		}
 	}
 	return "", componentScanClean
+}
+
+// traversableComponent reports whether mode can hold a path below it: a real
+// directory, or one of the two shapes Windows expresses with fs.ModeIrregular.
+// See scanForSymlinkedComponent for why that bit is tolerated.
+func traversableComponent(mode fs.FileMode) bool {
+	t := mode.Type()
+	return t == fs.ModeDir || t == fs.ModeIrregular || t == fs.ModeDir|fs.ModeIrregular
 }
 
 // readlinkOrUnknown renders a symlink's target for a diagnostic, never failing:

@@ -4,9 +4,10 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/entireio/cli/cmd/entire/cli/testutil"
 )
 
 func openRoot(t *testing.T, dir string) *os.Root {
@@ -119,9 +120,7 @@ func TestLoadIn(t *testing.T) {
 func TestLoadIn_AbsoluteInRepoSymlink(t *testing.T) {
 	t.Parallel()
 
-	if runtime.GOOS == "windows" {
-		t.Skip("symlink creation needs elevation on Windows")
-	}
+	testutil.SkipWithoutSymlinks(t)
 
 	dir := t.TempDir()
 	shared := filepath.Join(dir, "shared")

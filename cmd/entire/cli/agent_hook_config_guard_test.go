@@ -45,9 +45,7 @@ func TestAllHookConfigRelPaths_CoversEveryWorktreeConfigAgent(t *testing.T) {
 
 	dir := strings.TrimSpace(string(repoRoot))
 	callers := agentPackagesMatching(t, dir, "agent.OpenHookConfig(")
-	require.NotEmpty(t, callers, "the detection pattern has gone stale and must be re-pointed")
 	locators := agentPackagesMatching(t, dir, ") HookConfigRelPath() string {")
-	require.NotEmpty(t, locators, "the detection pattern has gone stale and must be re-pointed")
 
 	// Sets, not counts. len(declared) == len(callers) passed whenever an added
 	// omission was offset by a removal in the same change — the failure this
@@ -55,7 +53,7 @@ func TestAllHookConfigRelPaths_CoversEveryWorktreeConfigAgent(t *testing.T) {
 	// diagnosis goes quiet — and failed on an agent whose call happens to sit in
 	// a sub-package, which is no defect at all. Both sides are package
 	// directories, so they are directly comparable.
-	require.Equal(t, sortedPackageDirs(locators), sortedPackageDirs(callers),
+	require.Equal(t, locators, callers,
 		"the agent packages calling agent.OpenHookConfig and those implementing\n"+
 			"agent.HookConfigRelPath must be the same set. An agent that opens its\n"+
 			"hook config without declaring where it lives leaves the directories\n"+
@@ -70,9 +68,11 @@ func TestAllHookConfigRelPaths_CoversEveryWorktreeConfigAgent(t *testing.T) {
 		len(locators), len(agent.AllHookConfigRelPaths()), strings.Join(agent.AllHookConfigRelPaths(), ", "))
 }
 
-// agentPackagesMatching returns the agent package directories whose non-test
-// sources contain needle.
-func agentPackagesMatching(t *testing.T, repoRoot, needle string) map[string]struct{} {
+// agentPackagesMatching returns the sorted, deduplicated agent package
+// directories whose non-test sources contain needle, asserting that the pattern
+// still matches something — a re-worded signature would otherwise turn this
+// guard into a comparison of two empty sets.
+func agentPackagesMatching(t *testing.T, repoRoot, needle string) []string {
 	t.Helper()
 	grep := exec.Command("git", "grep", "-l", "--fixed-strings", "--", //nolint:noctx // guard test, no cancellation needed
 		needle, "--", ":(glob)cmd/entire/cli/agent/**/*.go")
@@ -85,21 +85,16 @@ func agentPackagesMatching(t *testing.T, repoRoot, needle string) map[string]str
 	out, err := grep.Output()
 	require.NoError(t, err, "no agent source matches %q, which cannot be right", needle)
 
-	pkgs := make(map[string]struct{})
+	var pkgs []string
 	for line := range strings.SplitSeq(strings.TrimSpace(string(out)), "\n") {
 		if line == "" || strings.HasSuffix(line, "_test.go") {
 			continue
 		}
-		pkgs[path.Dir(line)] = struct{}{}
+		if dir := path.Dir(line); !slices.Contains(pkgs, dir) {
+			pkgs = append(pkgs, dir)
+		}
 	}
+	slices.Sort(pkgs)
+	require.NotEmpty(t, pkgs, "the detection pattern %q has gone stale and must be re-pointed", needle)
 	return pkgs
-}
-
-func sortedPackageDirs(m map[string]struct{}) []string {
-	out := make([]string, 0, len(m))
-	for k := range m {
-		out = append(out, k)
-	}
-	slices.Sort(out)
-	return out
 }

@@ -196,26 +196,23 @@ func readCapped(repoRoot, name string, maxLen int) (string, bool) {
 	if len(s) > maxLen {
 		// maxLen is a byte budget, and s[:maxLen] can land inside a multi-byte
 		// rune, which would put an invalid UTF-8 sequence in the prompt this
-		// feeds. Back up to the nearest boundary below the cap — but at most
-		// UTFMax-1 bytes, which is the most a partial trailing rune can be
-		// short.
+		// feeds. A continuation byte at the cut is exactly what "we cut
+		// mid-rune" means, so back off the continuation bytes — at most
+		// UTFMax-1 of them, which is the furthest a rune's start can be.
 		//
-		// The bound is what keeps this from deleting the file. Scanning back
-		// unconditionally walks to 0 on a doc that is not UTF-8 at all (a
-		// latin-1 README), since every prefix of it is invalid and the empty
-		// string is not — so the caller got the truncation marker and none of
-		// the content. Invalidity that our cut did not cause is the file's own,
-		// and passing those bytes through is what the under-cap path above does
-		// with them too.
+		// Asking RuneStart rather than "is s[:cut] valid UTF-8?" is what keeps
+		// this local to the cut. Validating the prefix walks the whole 6KB, and
+		// answering "no" for a doc that is not UTF-8 at all (a latin-1 README)
+		// sent an earlier revision scanning back to 0 — every prefix invalid,
+		// the empty string valid — so the caller got the truncation marker and
+		// none of the content. Invalidity our cut did not cause is the file's
+		// own, and the under-cap path above passes those bytes through too.
 		cut := maxLen
 		for range utf8.UTFMax - 1 {
-			if utf8.ValidString(s[:cut]) {
+			if utf8.RuneStart(s[cut]) {
 				break
 			}
 			cut--
-		}
-		if !utf8.ValidString(s[:cut]) {
-			cut = maxLen
 		}
 		s = s[:cut] + "\n…(truncated)…"
 	}

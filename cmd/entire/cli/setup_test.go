@@ -5206,102 +5206,118 @@ func TestConfigureCmd_SummarizeProvider_ExternalLocalOnlyRepo_GrantSurvives(t *t
 	}
 }
 
-// TestWorktreeFileName_FollowsAnAbsoluteInRepoLink is the regression this helper
-// exists for: `vercel.json -> /abs/path/inside/repo/shared/vercel.json` was
-// reported by os.Root as "path escapes from parent", which is not
-// os.ErrNotExist, so Vercel detection printed a note and skipped — silently
-// dropping the feature for a monorepo setup that worked before the anchor.
-func TestWorktreeFileName_FollowsAnAbsoluteInRepoLink(t *testing.T) {
+// TestWorktreeFileName covers the four shapes vercel.json can arrive in. The
+// absolute-in-repo row is the regression the helper exists for: os.Root reports
+// `vercel.json -> /abs/path/inside/repo/shared/vercel.json` as "path escapes
+// from parent", which is not os.ErrNotExist, so detection printed a note and
+// skipped — silently dropping the feature for a monorepo setup that worked
+// before the anchor went in.
+//
+// The same four cases are asserted one layer down in
+// worktreedir.TestNameFollowingLinks; this table is the caller's view of them.
+func TestWorktreeFileName(t *testing.T) {
 	t.Parallel()
 
-	if runtime.GOOS == windowsGOOS {
-		t.Skip("symlink creation needs elevation on Windows")
-	}
+	const name = "vercel.json"
+	for _, tc := range []struct {
+		desc      string
+		link      func(t *testing.T, dir string) // nil: a real file, no link
+		wantName  string
+		wantFound bool
+		wantErr   bool
+	}{
+		{
+			desc:      "a real file is read by its own name",
+			wantName:  name,
+			wantFound: true,
+		},
+		{
+			desc: "an absolute link inside the worktree resolves to its target",
+			link: func(t *testing.T, dir string) {
+				linkTo(t, dir, filepath.Join(dir, "shared", name))
+			},
+			wantName:  "shared/vercel.json",
+			wantFound: true,
+		},
+		{
+			// os.Root follows a RELATIVE link that stays inside it, so the fast
+			// path succeeds and the original name is what to read by. Only an
+			// absolute target reaches the resolve, which is the whole asymmetry
+			// this helper exists for.
+			desc: "a relative link inside the worktree needs no resolving",
+			link: func(t *testing.T, dir string) {
+				linkTo(t, dir, filepath.Join("shared", name))
+			},
+			wantName:  name,
+			wantFound: true,
+		},
+		{
+			desc: "a link out of the worktree is refused, not followed",
+			link: func(t *testing.T, dir string) {
+				outside := filepath.Join(t.TempDir(), name)
+				if err := os.WriteFile(outside, []byte("{}"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+				linkTo(t, dir, outside)
+			},
+			wantErr: true,
+		},
+		{
+			desc: "a dangling link reads as absent, as os.Stat gave before",
+			link: func(t *testing.T, dir string) {
+				linkTo(t, dir, filepath.Join(dir, "missing.json"))
+			},
+		},
+		{
+			desc: "an absent file reads as absent",
+			link: func(*testing.T, string) {}, // no file at all
+		},
+	} {
+		t.Run(tc.desc, func(t *testing.T) {
+			t.Parallel()
 
-	dir := t.TempDir()
-	shared := filepath.Join(dir, "shared")
-	if err := os.MkdirAll(shared, 0o755); err != nil {
-		t.Fatal(err)
+			dir := t.TempDir()
+			shared := filepath.Join(dir, "shared")
+			if err := os.MkdirAll(shared, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(shared, name), []byte("{}"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if tc.link == nil {
+				if err := os.WriteFile(filepath.Join(dir, name), []byte("{}"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				tc.link(t, dir)
+			}
+
+			root, err := os.OpenRoot(dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer root.Close()
+
+			gotName, gotFound, gotErr := worktreeFileName(dir, root, name)
+			if (gotErr != nil) != tc.wantErr {
+				t.Fatalf("worktreeFileName() error = %v, wantErr %v", gotErr, tc.wantErr)
+			}
+			if gotFound != tc.wantFound {
+				t.Errorf("worktreeFileName() found = %v, want %v", gotFound, tc.wantFound)
+			}
+			if gotName != tc.wantName {
+				t.Errorf("worktreeFileName() = %q, want %q", gotName, tc.wantName)
+			}
+		})
 	}
-	target := filepath.Join(shared, "vercel.json")
-	if err := os.WriteFile(target, []byte("{}"), 0o644); err != nil {
-		t.Fatal(err)
-	}
+}
+
+// linkTo symlinks the vercel.json under test inside dir to target, skipping
+// where symlinks need privileges.
+func linkTo(t *testing.T, dir, target string) {
+	t.Helper()
+	testutil.SkipWithoutSymlinks(t)
 	if err := os.Symlink(target, filepath.Join(dir, "vercel.json")); err != nil {
 		t.Fatal(err)
-	}
-
-	root, err := os.OpenRoot(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer root.Close()
-
-	name, found, err := worktreeFileName(dir, root, "vercel.json")
-	if err != nil {
-		t.Fatalf("worktreeFileName() error = %v", err)
-	}
-	if !found {
-		t.Fatal("an absolute link resolving inside the worktree must be found")
-	}
-	if name != "shared/vercel.json" {
-		t.Errorf("worktreeFileName() = %q, want shared/vercel.json — the name the read goes through", name)
-	}
-}
-
-// A link leaving the worktree stays refused — that is the property the anchor is
-// there for, and the fallback must not soften it.
-func TestWorktreeFileName_RefusesALinkOutOfTheWorktree(t *testing.T) {
-	t.Parallel()
-
-	if runtime.GOOS == windowsGOOS {
-		t.Skip("symlink creation needs elevation on Windows")
-	}
-
-	dir := t.TempDir()
-	outside := t.TempDir()
-	away := filepath.Join(outside, "vercel.json")
-	if err := os.WriteFile(away, []byte("{}"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Symlink(away, filepath.Join(dir, "vercel.json")); err != nil {
-		t.Fatal(err)
-	}
-
-	root, err := os.OpenRoot(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer root.Close()
-
-	if _, found, err := worktreeFileName(dir, root, "vercel.json"); err == nil || found {
-		t.Errorf("worktreeFileName() = found %v, err %v; want a link out of the worktree reported", found, err)
-	}
-}
-
-// A plain missing file and a dangling link both read as absent, which is what
-// os.Stat gave before the anchor went in.
-func TestWorktreeFileName_AbsentAndDanglingReadAsAbsent(t *testing.T) {
-	t.Parallel()
-
-	dir := t.TempDir()
-	root, err := os.OpenRoot(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer root.Close()
-
-	if _, found, err := worktreeFileName(dir, root, "vercel.json"); err != nil || found {
-		t.Errorf("worktreeFileName() on a missing file = found %v, err %v; want absent", found, err)
-	}
-
-	if runtime.GOOS == windowsGOOS {
-		return
-	}
-	if err := os.Symlink(filepath.Join(dir, "missing.json"), filepath.Join(dir, "vercel.json")); err != nil {
-		t.Fatal(err)
-	}
-	if _, found, err := worktreeFileName(dir, root, "vercel.json"); err != nil || found {
-		t.Errorf("worktreeFileName() on a dangling link = found %v, err %v; want absent", found, err)
 	}
 }

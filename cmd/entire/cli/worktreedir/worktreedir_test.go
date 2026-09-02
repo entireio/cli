@@ -5,6 +5,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/entireio/cli/cmd/entire/cli/testutil"
 )
 
 func TestName(t *testing.T) {
@@ -100,8 +102,9 @@ func TestNameFollowingLinks(t *testing.T) {
 	t.Run("absolute link inside the worktree resolves to its target", func(t *testing.T) {
 		t.Parallel()
 		link := filepath.Join(root, "abs.json")
+		testutil.SkipWithoutSymlinks(t)
 		if err := os.Symlink(target, link); err != nil {
-			t.Skipf("symlink unsupported: %v", err)
+			t.Fatal(err)
 		}
 		got, err := NameFollowingLinks(root, "abs.json")
 		if err != nil {
@@ -115,8 +118,9 @@ func TestNameFollowingLinks(t *testing.T) {
 	t.Run("relative link inside the worktree resolves too", func(t *testing.T) {
 		t.Parallel()
 		link := filepath.Join(root, "rel.json")
+		testutil.SkipWithoutSymlinks(t)
 		if err := os.Symlink(filepath.Join("shared", "vercel.json"), link); err != nil {
-			t.Skipf("symlink unsupported: %v", err)
+			t.Fatal(err)
 		}
 		got, err := NameFollowingLinks(root, "rel.json")
 		if err != nil {
@@ -135,8 +139,9 @@ func TestNameFollowingLinks(t *testing.T) {
 			t.Fatal(err)
 		}
 		link := filepath.Join(root, "away.json")
+		testutil.SkipWithoutSymlinks(t)
 		if err := os.Symlink(away, link); err != nil {
-			t.Skipf("symlink unsupported: %v", err)
+			t.Fatal(err)
 		}
 		if got, err := NameFollowingLinks(root, "away.json"); err == nil {
 			t.Errorf("NameFollowingLinks() = %q, want error for a link out of the worktree", got)
@@ -146,8 +151,9 @@ func TestNameFollowingLinks(t *testing.T) {
 	t.Run("dangling link reports not-exist", func(t *testing.T) {
 		t.Parallel()
 		link := filepath.Join(root, "dangling.json")
+		testutil.SkipWithoutSymlinks(t)
 		if err := os.Symlink(filepath.Join(root, "missing.json"), link); err != nil {
-			t.Skipf("symlink unsupported: %v", err)
+			t.Fatal(err)
 		}
 		_, err := NameFollowingLinks(root, "dangling.json")
 		if !errors.Is(err, os.ErrNotExist) {

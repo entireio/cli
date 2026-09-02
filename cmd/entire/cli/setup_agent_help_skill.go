@@ -93,7 +93,7 @@ func reportAgentHelpSkillScaffold(w io.Writer, ag agent.Agent, result managedSca
 func agentHelpSkillTemplatePath(agentName types.AgentName) string {
 	switch agentName {
 	case agent.AgentNameClaudeCode:
-		return filepath.Join(".claude", "skills", "entire", "SKILL.md")
+		return filepath.Join(claudeDirName, "skills", "entire", "SKILL.md")
 	case agent.AgentNameCodex:
 		return filepath.Join(".codex", "agents", "entire.toml")
 	case agent.AgentNameGemini:
@@ -104,10 +104,9 @@ func agentHelpSkillTemplatePath(agentName types.AgentName) string {
 }
 
 func agentHelpSkillTemplate(agentName types.AgentName) (string, []byte, bool) {
-	relPath := agentHelpSkillTemplatePath(agentName)
-	if relPath == "" {
-		return "", nil, false
-	}
+	// One switch, so a fourth agent cannot get a path with no body or a body
+	// with no path — which is the failure splitting the path out would otherwise
+	// introduce.
 	var content string
 	switch agentName {
 	case agent.AgentNameClaudeCode:
@@ -119,7 +118,7 @@ func agentHelpSkillTemplate(agentName types.AgentName) (string, []byte, bool) {
 	default:
 		return "", nil, false
 	}
-	return relPath, []byte(strings.TrimSpace(content) + "\n"), true
+	return agentHelpSkillTemplatePath(agentName), []byte(strings.TrimSpace(content) + "\n"), true
 }
 
 // agentHelpSkillBody is the shared, format-agnostic instruction body for the

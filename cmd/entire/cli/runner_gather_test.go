@@ -6,8 +6,6 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 	"unicode/utf8"
@@ -69,9 +67,7 @@ func TestReadCapped_TruncatesOnARuneBoundary(t *testing.T) {
 	dir := t.TempDir()
 	// "é" is two bytes, so an odd cap always lands mid-rune.
 	body := strings.Repeat("é", 100)
-	if err := os.WriteFile(filepath.Join(dir, "CLAUDE.md"), []byte(body), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	testutil.WriteFile(t, dir, "CLAUDE.md", body)
 
 	for _, cap := range []int{1, 7, 21, 99} {
 		got, ok := readCapped(dir, "CLAUDE.md", cap)
@@ -92,9 +88,7 @@ func TestReadCapped_ReturnsShortFilesWhole(t *testing.T) {
 	t.Parallel()
 
 	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, "README.md"), []byte("héllo"), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	testutil.WriteFile(t, dir, "README.md", "héllo")
 
 	got, ok := readCapped(dir, "README.md", 100)
 	if !ok {
@@ -125,10 +119,10 @@ func TestReadCapped_KeepsContentOfANonUTF8File(t *testing.T) {
 
 	dir := t.TempDir()
 	// 0xE9 is "é" in latin-1 and invalid on its own in UTF-8.
-	body := append([]byte{0xE9}, []byte(strings.Repeat("resume of the project. ", 20))...)
-	if err := os.WriteFile(filepath.Join(dir, "CLAUDE.md"), body, 0o644); err != nil {
-		t.Fatal(err)
-	}
+	// 0xE9 is "é" in latin-1 and invalid on its own in UTF-8. Go strings hold
+	// arbitrary bytes, so testutil.WriteFile carries it fine.
+	body := string(append([]byte{0xE9}, []byte(strings.Repeat("resume of the project. ", 20))...))
+	testutil.WriteFile(t, dir, "CLAUDE.md", body)
 
 	got, ok := readCapped(dir, "CLAUDE.md", 40)
 	if !ok {
@@ -136,5 +130,26 @@ func TestReadCapped_KeepsContentOfANonUTF8File(t *testing.T) {
 	}
 	if !strings.Contains(got, "resume of the project") {
 		t.Errorf("readCapped() dropped the file's content: %q", got)
+	}
+}
+
+// TestReadCapped_FileStartingMidRune is the floor on the boundary backup. The
+// loop walks back at most UTFMax-1 continuation bytes, so a file that opens
+// with them cannot drive the cut to zero and lose its content.
+func TestReadCapped_FileStartingMidRune(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	// Nothing but continuation bytes: every position looks mid-rune.
+	body := strings.Repeat("\x80", 200)
+	testutil.WriteFile(t, dir, "CLAUDE.md", body)
+
+	got, ok := readCapped(dir, "CLAUDE.md", 40)
+	if !ok {
+		t.Fatal("readCapped() not ok")
+	}
+	content := strings.TrimSuffix(got, "\n…(truncated)…")
+	if len(content) < 40-(utf8.UTFMax-1) {
+		t.Errorf("readCapped() kept only %d bytes; the backup must be bounded", len(content))
 	}
 }

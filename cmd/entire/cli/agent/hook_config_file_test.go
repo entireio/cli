@@ -3,21 +3,20 @@ package agent_test
 import (
 	"os"
 	"path/filepath"
-	"runtime"
 	"testing"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/osroot"
+	"github.com/entireio/cli/cmd/entire/cli/testutil"
 	"github.com/stretchr/testify/require"
 )
 
-// skipWithoutSymlinks skips a test that needs to create one. On Windows that
-// takes elevation or developer mode, neither of which CI has.
+// skipWithoutSymlinks skips a test that needs to create one. Kept as a
+// package-local name for its callers; the condition lives in testutil so every
+// package that needs it says the same thing.
 func skipWithoutSymlinks(t *testing.T) {
 	t.Helper()
-	if runtime.GOOS == "windows" {
-		t.Skip("symlink creation needs elevation on Windows")
-	}
+	testutil.SkipWithoutSymlinks(t)
 }
 
 func TestHookConfig_ReadWriteRemoveRoundTrip(t *testing.T) {

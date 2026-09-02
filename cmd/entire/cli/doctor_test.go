@@ -3,11 +3,13 @@ package cli
 import (
 	"bytes"
 	"context"
+	"io/fs"
 	"log/slog"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -1279,7 +1281,7 @@ func TestCheckHookDrift_ClaudeCodeWarnsWhenOutdated(t *testing.T) {
 	dir := setupGitRepoForPhaseTest(t)
 	t.Chdir(dir)
 
-	claudeDir := filepath.Join(dir, ".claude")
+	claudeDir := filepath.Join(dir, claudeDirName)
 	require.NoError(t, os.MkdirAll(claudeDir, 0o750))
 	stale := `{
   "hooks": {
@@ -1491,7 +1493,7 @@ func TestCheckAgentDirSymlinks_ReportsSymlinkedAgentDir(t *testing.T) {
 	t.Cleanup(osroot.ResetShared)
 
 	elsewhere := t.TempDir()
-	if err := os.Symlink(elsewhere, filepath.Join(dir, ".claude")); err != nil {
+	if err := os.Symlink(elsewhere, filepath.Join(dir, claudeDirName)); err != nil {
 		t.Skipf("symlink not supported: %v", err)
 	}
 
@@ -1513,7 +1515,7 @@ func TestCheckAgentDirSymlinks_ReportsSymlinkedScaffoldParent(t *testing.T) {
 	t.Cleanup(paths.ClearWorktreeRootCache)
 	t.Cleanup(osroot.ResetShared)
 
-	require.NoError(t, os.MkdirAll(filepath.Join(dir, ".claude"), 0o750))
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, claudeDirName), 0o750))
 	if err := os.Symlink(t.TempDir(), filepath.Join(dir, ".claude", "skills")); err != nil {
 		t.Skipf("symlink not supported: %v", err)
 	}
@@ -1567,7 +1569,7 @@ func TestCheckAgentDirSymlinks_ReportsSymlinkedConfigFile(t *testing.T) {
 	t.Cleanup(paths.ClearWorktreeRootCache)
 	t.Cleanup(osroot.ResetShared)
 
-	require.NoError(t, os.MkdirAll(filepath.Join(dir, ".claude"), 0o750))
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, claudeDirName), 0o750))
 	if err := os.Symlink(filepath.Join(t.TempDir(), "settings.json"), filepath.Join(dir, ".claude", "settings.json")); err != nil {
 		t.Skipf("symlink not supported: %v", err)
 	}
@@ -1600,7 +1602,7 @@ func TestCheckAgentDirSymlinks_NamesTheOutermostLinkOnce(t *testing.T) {
 	t.Cleanup(paths.ClearWorktreeRootCache)
 	t.Cleanup(osroot.ResetShared)
 
-	if err := os.Symlink(t.TempDir(), filepath.Join(dir, ".claude")); err != nil {
+	if err := os.Symlink(t.TempDir(), filepath.Join(dir, claudeDirName)); err != nil {
 		t.Skipf("symlink not supported: %v", err)
 	}
 
@@ -1624,7 +1626,7 @@ func TestCheckAgentDirSymlinks_ReportsAnUnreadableComponent(t *testing.T) {
 	t.Cleanup(paths.ClearWorktreeRootCache)
 	t.Cleanup(osroot.ResetShared)
 
-	claude := filepath.Join(dir, ".claude")
+	claude := filepath.Join(dir, claudeDirName)
 	require.NoError(t, os.MkdirAll(filepath.Join(claude, "skills"), 0o750))
 	require.NoError(t, os.Chmod(claude, 0o000))
 	t.Cleanup(func() { _ = os.Chmod(claude, 0o750) }) //nolint:errcheck // best-effort restore so t.TempDir can clean up
@@ -1691,7 +1693,7 @@ func TestScanForSymlinkedComponent_RegularFileWhereDirectoryBelongs(t *testing.T
 	t.Parallel()
 
 	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, ".claude"), []byte("not a dir"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, claudeDirName), []byte("not a dir"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	// No osroot.ResetShared here, unlike the t.Chdir tests below: the registry
@@ -1703,12 +1705,12 @@ func TestScanForSymlinkedComponent_RegularFileWhereDirectoryBelongs(t *testing.T
 		t.Fatal(err)
 	}
 
-	name, outcome := scanForSymlinkedComponent(root, ".claude/settings.json")
+	name, outcome := scanForSymlinkedComponent(root, claudeDirName+"/settings.json")
 	if outcome != componentScanWrongType {
 		t.Errorf("outcome = %v, want componentScanWrongType", outcome)
 	}
-	if name != ".claude" {
-		t.Errorf("name = %q, want .claude — the component to replace, not the leaf", name)
+	if name != claudeDirName {
+		t.Errorf("name = %q, want %s — the component to replace, not the leaf", name, claudeDirName)
 	}
 }
 
@@ -1721,7 +1723,7 @@ func TestCheckAgentDirSymlinks_ReportsWrongTypedComponent(t *testing.T) {
 	t.Cleanup(paths.ClearWorktreeRootCache)
 	t.Cleanup(osroot.ResetShared)
 
-	if err := os.WriteFile(filepath.Join(dir, ".claude"), []byte("not a dir"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, claudeDirName), []byte("not a dir"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1759,5 +1761,79 @@ func TestAgentSymlinkCheckPaths_CoversLegacySubagentDir(t *testing.T) {
 	}
 	if !found {
 		t.Errorf("no candidate under .claude/agents/; got %v", candidates)
+	}
+}
+
+// TestScanForSymlinkedComponent_NonTraversableComponent pins the allowlist. An
+// earlier revision tested only for a regular file, so a FIFO, socket or device
+// node where a directory belongs came back clean and doctor printed nothing —
+// while os.Root and every hook install fail on it.
+func TestScanForSymlinkedComponent_NonTraversableComponent(t *testing.T) {
+	t.Parallel()
+
+	if runtime.GOOS == windowsGOOS {
+		t.Skip("mkfifo is not available on Windows")
+	}
+
+	dir := t.TempDir()
+	if err := syscall.Mkfifo(filepath.Join(dir, claudeDirName), 0o600); err != nil {
+		t.Skipf("mkfifo unsupported: %v", err)
+	}
+	root, err := worktreedir.OpenAt(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	name, outcome := scanForSymlinkedComponent(root, claudeDirName+"/settings.json")
+	if outcome != componentScanWrongType {
+		t.Errorf("outcome = %v, want componentScanWrongType for a FIFO", outcome)
+	}
+	if name != claudeDirName {
+		t.Errorf("name = %q, want %s", name, claudeDirName)
+	}
+}
+
+// A real directory is traversable and reports clean, so the allowlist has not
+// become a blanket rejection.
+func TestScanForSymlinkedComponent_DirectoryIsClean(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, claudeDirName), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	root, err := worktreedir.OpenAt(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if name, outcome := scanForSymlinkedComponent(root, claudeDirName+"/settings.json"); outcome != componentScanClean {
+		t.Errorf("outcome = %v (%q), want componentScanClean", outcome, name)
+	}
+}
+
+// TestTraversableComponent pins each mode combination, including the Windows
+// shapes that must not be rejected: a bare fs.ModeIrregular is how Go reports a
+// directory junction, and ModeDir|ModeIrregular a cloud placeholder directory.
+func TestTraversableComponent(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		mode fs.FileMode
+		want bool
+	}{
+		{fs.ModeDir, true},
+		{fs.ModeIrregular, true},
+		{fs.ModeDir | fs.ModeIrregular, true},
+		{0, false},
+		{fs.ModeNamedPipe, false},
+		{fs.ModeSocket, false},
+		{fs.ModeDevice, false},
+		{fs.ModeDevice | fs.ModeCharDevice, false},
+		{fs.ModeSymlink, false},
+	} {
+		if got := traversableComponent(tc.mode); got != tc.want {
+			t.Errorf("traversableComponent(%v) = %v, want %v", tc.mode, got, tc.want)
+		}
 	}
 }
