@@ -2412,11 +2412,13 @@ func fetchBranchFromRemote(ctx context.Context, remote, branchName string) error
 }
 
 // pushBranchToRemote pushes a branch to remote, which callers resolve through
-// resolveTrailPushRemote rather than assuming "origin".
+// resolveTrailPushRemote rather than assuming "origin". This must run Git's
+// pre-push hooks: Entire's hook publishes any checkpoint data that was captured
+// before the trail branch was created.
 func pushBranchToRemote(ctx context.Context, remote, branchName string) error {
 	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "git", "push", "--no-verify", "-u", remote, branchName)
+	cmd := exec.CommandContext(ctx, "git", "push", "-u", remote, branchName)
 	if output, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("%s: %w", strings.TrimSpace(string(output)), err)
 	}

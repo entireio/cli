@@ -2764,6 +2764,32 @@ func TestResolveTrailPushRemote(t *testing.T) {
 	}
 }
 
+// TestPrepareTrailCreateBranchRunsPrePushHook guards checkpoint publication:
+// trail creation must push like a user would, without bypassing Entire's hook.
+func TestPrepareTrailCreateBranchRunsPrePushHook(t *testing.T) {
+	localDir, originDir, repo := initTrailCleanupRepo(t)
+	defer repo.Close()
+	t.Chdir(localDir)
+
+	hooksDir := filepath.Join(localDir, ".git", "hooks")
+	require.NoError(t, os.MkdirAll(hooksDir, 0o755))
+	require.NoError(t, os.WriteFile(
+		filepath.Join(hooksDir, "pre-push"),
+		[]byte("#!/bin/sh\nprintf '%s\\n' \"$1\" > \"$(git rev-parse --git-dir)/trail-create-pre-push-ran\"\n"),
+		0o755,
+	))
+
+	const branch = "feature/checkpoint-sync"
+	var out, errOut bytes.Buffer
+	_, err := prepareTrailCreateBranch(context.Background(), &out, &errOut, repo, "origin", branch, "main", false)
+
+	require.NoError(t, err, "stderr: %s", errOut.String())
+	require.True(t, gitBranchExistsTrailTest(t, originDir, branch), "branch missing from remote")
+	hookRemote, err := os.ReadFile(filepath.Join(localDir, ".git", "trail-create-pre-push-ran"))
+	require.NoError(t, err, "trail create branch push bypassed the pre-push hook")
+	require.Equal(t, "origin\n", string(hookRemote))
+}
+
 // TestPrepareTrailCreateBranchPushesToDeclaredRemote is the end-to-end shape of
 // the bug: origin exists and is a perfectly good remote, but the branch's
 // declared push destination is a different one. The branch must arrive there and
