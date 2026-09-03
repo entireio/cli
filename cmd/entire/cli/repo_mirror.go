@@ -1318,7 +1318,7 @@ func parseMirrorCloneURL(raw string) (clusterHost, provider, owner, repo string,
 	// Trim a trailing .git so a URL pasted from `git remote -v` resolves the
 	// same as the bare clone URL (matching gitremote.ParseURL). GitHub repo
 	// names can contain dots, so only the suffix is trimmed, not all dots.
-	repo = strings.ToLower(strings.TrimSuffix(parts[2], ".git"))
+	repo = strings.ToLower(strings.TrimSuffix(parts[2], gitDirSuffix))
 	return u.Host, string(coreapi.CreateMirrorInputBodyProviderGithub), strings.ToLower(parts[1]), repo, nil
 }
 

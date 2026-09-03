@@ -1476,11 +1476,11 @@ func (s *ManualCommitStrategy) postCommitProcessSessionLocked(
 			s.carryForwardToNewShadowBranch(ctx, repo, state, remainingFiles)
 		}
 
-		// Clear filesystem prompt.txt only when ALL files are committed.
-		// If carry-forward files remain, the prompt must persist so the next
-		// condensation (triggered by the next commit) can read it.
+		// Release the staged prompt.txt and full.jsonl only when ALL files are
+		// committed. If carry-forward files remain they must persist, so the
+		// next condensation (triggered by the next commit) can still read them.
 		if len(state.FilesTouched) == 0 {
-			clearFilesystemPrompt(ctx, state.SessionID)
+			clearFilesystemStagedFiles(ctx, state.SessionID)
 		}
 	}
 	carryForwardSpan.End()

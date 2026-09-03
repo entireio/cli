@@ -130,14 +130,15 @@ func TestAgentHookInstallation(t *testing.T) {
 			t.Error("settings.json was not created")
 		}
 
-		// Verify permissions.deny contains metadata deny rule
+		// The metadata deny rule is retired: setup must not install one.
+		// See agent.MetadataDenyRule.
 		data, err := os.ReadFile(settingsPath)
 		if err != nil {
 			t.Fatalf("failed to read settings.json: %v", err)
 		}
 		content := string(data)
-		if !strings.Contains(content, "Read(./.entire/metadata/**)") {
-			t.Error("settings.json should contain permissions.deny rule for .entire/metadata/**")
+		if strings.Contains(content, "Read(./.entire/metadata/**)") {
+			t.Error("settings.json should not contain a permissions.deny rule for .entire/metadata/**")
 		}
 	})
 
@@ -803,9 +804,10 @@ func testFactoryAIDroidInstallsAllHooks(t *testing.T) {
 		t.Error("settings.json should contain PreCompact hook")
 	}
 
-	// Verify permissions.deny contains metadata deny rule
-	if !strings.Contains(content, "Read(./.entire/metadata/**)") {
-		t.Error("settings.json should contain permissions.deny rule for .entire/metadata/**")
+	// The metadata deny rule is retired: setup must not install one.
+	// See agent.MetadataDenyRule.
+	if strings.Contains(content, "Read(./.entire/metadata/**)") {
+		t.Error("settings.json should not contain a permissions.deny rule for .entire/metadata/**")
 	}
 }
 

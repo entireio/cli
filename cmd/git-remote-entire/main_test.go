@@ -242,6 +242,28 @@ func TestMissingClusterHostMessage(t *testing.T) {
 			contains:    []string{`fatal: missing host in URL "entire://gh/owner/repo/extra"`},
 			notContains: []string{"entire repo clone"},
 		},
+		{
+			// The native forge token is recognized in the host slot too, so it
+			// gets the actionable message rather than an attempt to dial a
+			// cluster literally named "et" — and its segments are labelled
+			// <project>/<repo>, which is what /et/ paths actually take.
+			name:   "native forge in host slot is actionable",
+			rawURL: "entire://et/paul/dogbark",
+			contains: []string{
+				`("et" is a forge id, not a host)`,
+				"entire://<cluster-host>/et/<project>/<repo>",
+				"entire repo clone /et/paul/dogbark",
+			},
+			notContains: []string{"<owner>/<repo>"},
+		},
+		{
+			name:   "native forge with empty host is actionable",
+			rawURL: "entire:///et/paul/dogbark",
+			contains: []string{
+				"entire://<cluster-host>/et/<project>/<repo>",
+				"entire repo clone /et/paul/dogbark",
+			},
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

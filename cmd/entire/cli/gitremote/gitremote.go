@@ -58,13 +58,49 @@ var forgeToHost = func() map[string]string {
 	return m
 }()
 
-// IsSupportedForge reports whether forge is a known short forge id (e.g. "gh")
-// understood by the trails API. It rejects forge hostnames ("github.com") and
-// any other unrecognized value, so callers parsing a bare forge/owner/repo
-// triple can fail clearly instead of forwarding a malformed forge to the API.
-func IsSupportedForge(forge string) bool {
-	_, ok := forgeToHost[forge]
+// pathForges are the forge tokens Entire uses in an entire:// URL path
+// (`entire://<cluster-host>/<forge>/…`), mapped to the placeholder spelling of
+// the two segments that follow — a mirror is addressed by owner, a native repo
+// by project.
+//
+// Deliberately NOT derived from forgeToHost, which answers a different
+// question: that map is upstream git hosts, and a native repo has no upstream
+// host at all, which is exactly why "et" is absent there and present here.
+// Conflating the two is what made `entire://et/<project>/<repo>` try to dial a
+// cluster named "et" while `entire://gh/…` got an actionable message.
+//
+// The legacy "/git/" prefix is excluded on purpose: rows stamped with it are
+// addressed internally by ULID and `entire repo clone` does not accept a /git/
+// ref, so admitting it would have callers suggest a command that then fails.
+var pathForges = map[string]string{
+	"gh": "<owner>/<repo>",
+	"et": "<project>/<repo>",
+}
+
+// IsForgePathToken reports whether forge is one of the forge tokens Entire uses
+// in an entire:// path ("gh", "et"). It rejects forge hostnames ("github.com")
+// and any other unrecognized value, so a caller parsing a bare
+// forge/owner/repo triple can fail clearly instead of forwarding a malformed
+// forge, and a caller holding a URL can tell a forge id typed in the
+// cluster-host slot apart from a real host.
+//
+// The name says syntax deliberately: this is NOT a capability check, and it
+// once was one (it read the upstream-host map, so it answered `{gh}`). Widening
+// it to the real path tokens is what a URL needs, but it means a caller after a
+// capability has to narrow afterwards — the trail API takes `et` in a path and
+// resolves only `gh`, so `entire trail` refuses it separately
+// (errTrailsNativeUnsupported). A caller that skips that step gets a token this
+// says yes to and an API that 404s.
+func IsForgePathToken(forge string) bool {
+	_, ok := pathForges[forge]
 	return ok
+}
+
+// ForgePathLabels returns the placeholder spelling of the two path segments
+// that follow forge in an entire:// URL, for error messages. Empty for a forge
+// IsForgePathToken rejects.
+func ForgePathLabels(forge string) string {
+	return pathForges[forge]
 }
 
 // CanonicalHost returns the canonical public host of the upstream forge.
