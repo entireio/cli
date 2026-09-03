@@ -163,7 +163,7 @@ func newRepoCloneCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "clone <repo> [target-dir]",
 		Short: "Clone an Entire repository",
-		Long: "Clone an Entire-native repo by its `/et/<project>/<repo>` ref," +
+		Long: "Clone an Entire-native repo by its `/et/<project>/<repo>` ref, " +
 			"a GitHub mirror by its `/gh/<owner>/<repo>` " +
 			"ref, or a full `entire://` clone URL.\n\n" +
 			"A native ref resolves the repo's home cluster and clones from there " +
