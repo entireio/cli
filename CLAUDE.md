@@ -87,8 +87,8 @@ the commands are always runnable in every build.
   non-interactively it repoints `--remote` directly. Both `use` and `clone`
   choose a placement through the shared `selectPlacement` picker. `clone`
   accepts a native `/et/<project>/<repo>` ref. Both segments must also
-  match the server's name charsets, so `git@github.com:foo/bar` is not a
-  shorthand), a mirror `/gh/<owner>/<repo>` ref, or a full `entire://` URL
+  match the server's name charsets, so inputs like `git@github.com:foo/bar` are not
+  misinterpreted as native refs. It also accepts a mirror `/gh/<owner>/<repo>` ref, or a full `entire://` URL
   passed through verbatim. A ref matching none of these gets a targeted error
   (`invalidCloneRefError`): a GitHub URL is pointed at its `/gh/` form, a
   malformed `gh/` ref keeps the mirror parser's reason, anything else lists
