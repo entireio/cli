@@ -183,12 +183,12 @@ func newRepoCloneCmd() *cobra.Command {
 			"A full `entire://` URL already names the cluster, so it's passed straight " +
 			"through to `git clone` with no lookup (and --cluster is ignored). The " +
 			"optional [target-dir] is passed through to `git clone` either way.",
-		Example: "  entire clone /et/project/example\n" +
-			"  entire clone project/example\n" +
-			"  entire clone /gh/entirehq/entire-api\n" +
-			"  entire clone /gh/entirehq/entire-api ./entire-api\n" +
-			"  entire clone /gh/entirehq/entire-api --cluster aws-us-east-2.entire.io\n" +
-			"  entire clone entire://aws-us-east-2.entire.io/gh/entirehq/entire-api",
+		Example: "  entire repo clone /et/project/example\n" +
+			"  entire repo clone project/example\n" +
+			"  entire repo clone /gh/entirehq/entire-api\n" +
+			"  entire repo clone /gh/entirehq/entire-api ./entire-api\n" +
+			"  entire repo clone /gh/entirehq/entire-api --cluster aws-us-east-2.entire.io\n" +
+			"  entire repo clone entire://aws-us-east-2.entire.io/gh/entirehq/entire-api",
 		Args: cobra.RangeArgs(1, 2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cmd.SilenceUsage = true
@@ -293,18 +293,6 @@ func newRepoCloneCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&cluster, "cluster", "", "Cluster host to clone from when the repo is mirrored on more than one (may belong to another auth context)")
-	return cmd
-}
-
-// newTopLevelCloneCmd is the top-level `entire clone` — the same command as
-// `entire repo clone`, registered at root (like `search`). Registered under the
-// `repo` group it inherits the control-plane persistent flags from
-// addControlPlaneFlags; at top level there is no such parent, so the flags are
-// added here (insecureHTTPRequested fails soft when the flag is undefined,
-// which would silently drop --insecure-http-auth).
-func newTopLevelCloneCmd() *cobra.Command {
-	cmd := newRepoCloneCmd()
-	addControlPlaneFlags(cmd)
 	return cmd
 }
 

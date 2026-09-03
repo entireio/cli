@@ -300,7 +300,6 @@ func TestRoot_VisibleCommandsAreGrouped(t *testing.T) {
 		"org":        groupControlPlane,
 		"project":    groupControlPlane,
 		"repo":       groupControlPlane,
-		"clone":      groupControlPlane,
 		"grant":      groupControlPlane,
 		"api":        groupControlPlane,
 	}
