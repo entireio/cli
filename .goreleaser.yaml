@@ -202,7 +202,13 @@ homebrew_casks:
         - fish
     conflicts:
       - cask: entire
-    skip_upload: "{{ if not .Prerelease }}true{{ end }}"
+    # Nightly-tags only, not "any prerelease". `not .Prerelease` skipped just
+    # stable, so a second prerelease channel (-dev., published on every merge to
+    # main) would have overwritten this externally-consumed cask many times a day
+    # and quietly turned `brew install --cask entire@nightly` into a main tracker.
+    # Verified with goreleaser 2.17.1 that `contains` renders here and
+    # distinguishes the two tag shapes.
+    skip_upload: '{{ if not (contains .Prerelease "nightly") }}true{{ end }}'
 
 announce:
   discord:

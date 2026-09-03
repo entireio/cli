@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+#MISE description="Install the dev build (current main) to dogfood it"
+
+set -eu
+
+# The dev channel is one release that tracks main, rebuilt on every merge that
+# passes tests, so this installs current main through the same path users install
+# through — which is the point. Hooks name the `entire` binary and resolve it via
+# PATH, so whatever this installs is what your hooks run.
+#
+# Use dev:publish instead when you want to dogfood YOUR working tree rather than
+# main; that builds from source and does not touch the release channels.
+exec "$(git rev-parse --show-toplevel)"/scripts/install.sh --channel dev

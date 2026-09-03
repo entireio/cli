@@ -42,10 +42,13 @@ error() {
 
 usage() {
     cat <<EOF
-Usage: install.sh [--channel stable|nightly]
+Usage: install.sh [--channel stable|nightly|dev]
 
 Options:
   --channel   Release channel to install (default: stable)
+                stable  latest release
+                nightly latest nightly prerelease
+                dev     current main (rebuilt on every merge that passes tests)
   -h, --help  Show this help message
 EOF
 }
@@ -112,10 +115,32 @@ get_latest_stable_version() {
     echo "$version"
 }
 
+get_latest_dev_version() {
+    # The dev channel keeps exactly one release, replaced on every merge to main
+    # that passes tests, so there is nothing to disambiguate. Matching '-dev.'
+    # rather than bare 'dev' keeps this from colliding with anything else in a tag
+    # name, and cannot match a nightly tag.
+    local url="https://api.github.com/repos/${GITHUB_REPO}/releases?per_page=100"
+    local version
+    # `|| true`: install.sh runs with `set -euo pipefail`, so a grep that matches
+    # nothing would abort here instead of reaching the empty-version check below,
+    # replacing a clear message with a bare non-zero exit.
+    version=$(fetch_github_json "$url" | grep '"tag_name"' | grep -- '-dev\.' | head -n 1 | sed -E 's/.*"tag_name": *"v?([^"]+)".*/\1/' || true)
+
+    if [[ -z "$version" ]]; then
+        error "Failed to fetch the latest dev version from GitHub. Please check your internet connection."
+    fi
+
+    echo "$version"
+}
+
 get_latest_nightly_version() {
     local url="https://api.github.com/repos/${GITHUB_REPO}/releases?per_page=20"
     local version
-    version=$(fetch_github_json "$url" | grep '"tag_name"' | grep 'nightly' | head -n 1 | sed -E 's/.*"tag_name": *"v?([^"]+)".*/\1/')
+    # Same as the dev lookup: keep the pipeline non-fatal so the check below
+    # reports the failure. (Pre-existing; fixed alongside because the two
+    # channels share the shape.)
+    version=$(fetch_github_json "$url" | grep '"tag_name"' | grep 'nightly' | head -n 1 | sed -E 's/.*"tag_name": *"v?([^"]+)".*/\1/' || true)
 
     if [[ -z "$version" ]]; then
         error "Failed to fetch latest nightly version from GitHub. Please check your internet connection."
@@ -178,9 +203,9 @@ main() {
     fi
 
     case "$channel" in
-        stable|nightly) ;;
+        stable|nightly|dev) ;;
         *)
-            error "Unsupported channel: ${channel}. Expected 'stable' or 'nightly'."
+            error "Unsupported channel: ${channel}. Expected 'stable', 'nightly' or 'dev'."
             ;;
     esac
 
@@ -193,11 +218,11 @@ main() {
     info "Detected platform: ${os}/${arch}"
 
     info "Fetching latest ${channel} version..."
-    if [[ "$channel" == "nightly" ]]; then
-        version=$(get_latest_nightly_version)
-    else
-        version=$(get_latest_stable_version)
-    fi
+    case "$channel" in
+        nightly) version=$(get_latest_nightly_version) ;;
+        dev)     version=$(get_latest_dev_version) ;;
+        *)       version=$(get_latest_stable_version) ;;
+    esac
     # Strip leading 'v' if present
     version="${version#v}"
     info "Installing version: ${version}"

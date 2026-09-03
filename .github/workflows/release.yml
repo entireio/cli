@@ -67,16 +67,31 @@ jobs:
             exit 1
           fi
 
-      - name: Generate nightly release notes
+      - name: Generate prerelease notes
         if: steps.release-type.outputs.prerelease == 'true'
         run: |
-          LAST_NIGHTLY=$(git tag -l 'v*-nightly.*' --sort=-creatordate | grep -v "^${RELEASE_TAG}$" | head -1)
-          if [ -n "$LAST_NIGHTLY" ]; then
-            BASE_TAG="$LAST_NIGHTLY"
+          # Two prerelease channels share this step, so label and diff base come
+          # from the tag rather than being hardcoded: a dev release titled
+          # "Nightly Build", diffed against the last nightly, would misdescribe
+          # both what it is and what changed.
+          case "$RELEASE_TAG" in
+            *-dev.*) CHANNEL_LABEL="Dev Build"; TAG_GLOB='v*-dev.*' ;;
+            *)       CHANNEL_LABEL="Nightly Build"; TAG_GLOB='v*-nightly.*' ;;
+          esac
+          # `|| true`: with the runner's default `bash -eo pipefail`, grep exits 1
+          # when it filters everything out, killing the step before the fallback
+          # below. That is the normal case for the dev channel, whose superseded
+          # tags are deleted — so the tag being released is usually the only one
+          # matching the glob.
+          LAST_IN_CHANNEL=$(git tag -l "$TAG_GLOB" --sort=-creatordate | grep -v "^${RELEASE_TAG}$" | head -1 || true)
+          if [ -n "$LAST_IN_CHANNEL" ]; then
+            BASE_TAG="$LAST_IN_CHANNEL"
           else
+            # First build in this channel, or — for dev, whose superseded tags are
+            # deleted — the usual case. Fall back to the latest stable tag.
             BASE_TAG=$(git describe --tags --abbrev=0 --match 'v[0-9]*' --exclude '*-*' HEAD 2>/dev/null || echo "")
           fi
-          echo "## Nightly Build (${RELEASE_TAG})" > "$RUNNER_TEMP/release_notes.md"
+          echo "## ${CHANNEL_LABEL} (${RELEASE_TAG})" > "$RUNNER_TEMP/release_notes.md"
           echo "" >> "$RUNNER_TEMP/release_notes.md"
           if [ -n "$BASE_TAG" ]; then
             echo "Changes since ${BASE_TAG}:" >> "$RUNNER_TEMP/release_notes.md"
