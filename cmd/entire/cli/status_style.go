@@ -95,16 +95,37 @@ func getTerminalWidth(w io.Writer) int {
 }
 
 // formatTokenCount formats a token count for display.
-// 0 → "0", 500 → "500", 1200 → "1.2k", 14300 → "14.3k"
+// 0 → "0", 500 → "500", 1200 → "1.2k", 14300 → "14.3k", 286344584 → "286.3M"
+//
+// Scaling past "k" is load-bearing rather than cosmetic: a long session's cache
+// reads run to hundreds of millions, and a single unit rendered them as
+// "286344.6k" — nine characters whose magnitude a reader has to count digits to
+// recover, in the one column a token report exists to communicate.
 func formatTokenCount(n int) string {
 	if n < 1000 {
 		return strconv.Itoa(n)
 	}
-	f := float64(n) / 1000.0
-	s := fmt.Sprintf("%.1f", f)
-	// Remove trailing ".0" for clean display (e.g., 1000 → "1k" not "1.0k")
-	s = strings.TrimSuffix(s, ".0")
-	return s + "k"
+	units := []struct {
+		div    float64
+		suffix string
+	}{
+		{1e3, "k"},
+		{1e6, "M"},
+		{1e9, "B"},
+	}
+	for i, u := range units {
+		scaled := float64(n) / u.div
+		// Promote when rounding to one decimal would print a four-digit
+		// mantissa, so 999,999 reads "1M" and never "1000k". The last unit
+		// has nothing to promote to and takes whatever magnitude is left.
+		if scaled < 999.95 || i == len(units)-1 {
+			s := fmt.Sprintf("%.1f", scaled)
+			// Remove trailing ".0" for clean display (e.g., 1000 → "1k" not "1.0k")
+			s = strings.TrimSuffix(s, ".0")
+			return s + u.suffix
+		}
+	}
+	return strconv.Itoa(n)
 }
 
 // totalTokens recursively sums all token fields including subagent tokens.
