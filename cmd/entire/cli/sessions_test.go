@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -2009,6 +2010,114 @@ func TestCheckpointTokensCmd_TextOutputWithRealCheckpointShape(t *testing.T) {
 	if tokenUsageIndex > recommendationsIndex {
 		t.Fatalf("expected token usage before recommendations, got:\n%s", out)
 	}
+}
+
+// The priced path had no command-level coverage: the cost column was asserted
+// only against writeCheckpointTokenClasses directly, and no checkpoint in this
+// repo's own history is priceable (every one predates the cache-write TTL
+// split), so nothing exercised metadata -> report -> render with a model
+// recorded. This drives it through the real command and asserts the acceptance
+// criterion on the rendered figures, not on the struct behind them.
+func TestCheckpointTokensCmd_PricedCheckpointRendersCostSharesSummingTo100(t *testing.T) {
+	repo, _ := runExplainAutoTestRepo(t)
+	ctx := context.Background()
+	cpID := id.MustCheckpointID("cafebeefbeef")
+	if err := checkpoint.NewGitStore(repo, checkpoint.DefaultV1Refs()).Write(ctx, checkpoint.Session{
+		CheckpointID: cpID,
+		SessionID:    "checkpoint-token-priced",
+		Strategy:     strategy.StrategyNameManualCommit,
+		Branch:       "e2e-triage-fix",
+		Agent:        testAgentClaude,
+		Model:        "claude-sonnet-4.6",
+		Transcript:   redact.AlreadyRedacted([]byte(`{"type":"user","message":{"content":[{"type":"text","text":"price this"}]}}` + "\n")),
+		AuthorName:   "Test",
+		AuthorEmail:  "test@example.com",
+		TokenUsage: &agent.TokenUsage{
+			Model:                 "claude-sonnet-4.6",
+			InputTokens:           42000,
+			CacheCreationTokens:   118000,
+			CacheCreation1hTokens: 22000,
+			CacheReadTokens:       240000,
+			OutputTokens:          11000,
+			ThinkingTokens:        4000,
+			APICallCount:          37,
+		},
+	}); err != nil {
+		t.Fatalf("WriteCommitted() error = %v", err)
+	}
+
+	cmd := newCheckpointGroupCmd()
+	var stdout bytes.Buffer
+	cmd.SetOut(&stdout)
+	cmd.SetArgs([]string{"tokens", "cafebeef"})
+	if err := cmd.ExecuteContext(ctx); err != nil {
+		t.Fatalf("expected no error, got: %v", err)
+	}
+	out := stdout.String()
+
+	if !strings.Contains(out, "How it was billed") {
+		t.Fatalf("expected the billed breakdown, got:\n%s", out)
+	}
+	if strings.Contains(out, "Cost share omitted") {
+		t.Fatalf("a checkpoint with a known model must be priced, got:\n%s", out)
+	}
+
+	volume, cost := parseBilledShares(t, out)
+	if volume != 100 {
+		t.Errorf("rendered volume shares sum to %d%%, want 100%%\n%s", volume, out)
+	}
+	if cost != 100 {
+		t.Errorf("rendered cost shares sum to %d%%, want 100%%\n%s", cost, out)
+	}
+}
+
+// parseBilledShares reads the volume and cost percentages back out of the
+// rendered "How it was billed" table, so the assertion is on what a user sees
+// rather than on the numbers the renderer was handed.
+func parseBilledShares(t *testing.T, out string) (volume, cost int) {
+	t.Helper()
+
+	for _, line := range strings.Split(out, "\n") {
+		trimmed := strings.TrimSpace(line)
+		var matched bool
+		for _, label := range []string{"Fresh input", "Cache write", "Cache read", "Output"} {
+			if strings.HasPrefix(trimmed, label) {
+				trimmed = strings.TrimSpace(strings.TrimPrefix(trimmed, label))
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			continue
+		}
+		// Drop any trailing subset note, e.g. "(1h TTL 22k)".
+		if i := strings.Index(trimmed, "("); i >= 0 {
+			trimmed = trimmed[:i]
+		}
+		fields := strings.Fields(trimmed)
+		var pcts []int
+		for _, f := range fields {
+			if !strings.HasSuffix(f, "%") {
+				continue
+			}
+			raw := strings.TrimSuffix(f, "%")
+			if raw == "<1" {
+				pcts = append(pcts, 0)
+				continue
+			}
+			n, err := strconv.Atoi(raw)
+			if err != nil {
+				t.Fatalf("unparseable percentage %q in row %q", f, line)
+			}
+			pcts = append(pcts, n)
+		}
+		if len(pcts) != 2 {
+			t.Fatalf("expected a volume and a cost percentage in row %q, got %v", line, pcts)
+		}
+		volume += pcts[0]
+		cost += pcts[1]
+	}
+	return volume, cost
 }
 
 func TestCheckpointTokensCmd_AgentBriefGivesOperationalBudget(t *testing.T) {
