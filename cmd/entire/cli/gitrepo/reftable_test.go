@@ -678,9 +678,21 @@ func TestRepoUsesReftable_Detection(t *testing.T) {
 	t.Parallel()
 
 	reftableRepo, _ := initReftableRepo(t, "a.txt", "a\n")
-	require.True(t, repoUsesReftable(filepath.Join(reftableRepo, ".git"), filepath.Join(reftableRepo, ".git")))
+	usesReftable, err := inspectRepoUsesReftable(filepath.Join(reftableRepo, ".git"), filepath.Join(reftableRepo, ".git"))
+	require.NoError(t, err)
+	require.True(t, usesReftable)
 
 	filesRepo := t.TempDir()
 	require.NoError(t, os.MkdirAll(filepath.Join(filesRepo, ".git", "refs"), 0o755))
-	require.False(t, repoUsesReftable(filepath.Join(filesRepo, ".git"), filepath.Join(filesRepo, ".git")))
+	usesReftable, err = inspectRepoUsesReftable(filepath.Join(filesRepo, ".git"), filepath.Join(filesRepo, ".git"))
+	require.NoError(t, err)
+	require.False(t, usesReftable)
+}
+
+func TestInspectRepoUsesReftable_ReportsInspectionFailure(t *testing.T) {
+	t.Parallel()
+
+	usesReftable, err := inspectRepoUsesReftable("invalid\x00gitdir", "")
+	require.ErrorContains(t, err, "inspect reftable directory")
+	require.False(t, usesReftable)
 }

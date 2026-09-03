@@ -3,6 +3,7 @@ package gitrepo
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -223,14 +224,16 @@ func TestHasObjectAlternates(t *testing.T) {
 		repoDir := t.TempDir()
 		_ = initRepoWithFile(t, repoDir, "root.txt", "root\n")
 
-		hasAlternates, err := hasObjectAlternates(repoDir)
+		metadata, err := ResolveWorktreeMetadata(repoDir)
+		require.NoError(t, err)
+		hasAlternates, err := hasObjectAlternates(metadata)
 		require.NoError(t, err)
 		require.False(t, hasAlternates)
 
 		alternateDir := t.TempDir()
 		writeAlternates(t, repoDir, []string{filepath.Join(alternateDir, gitDir, "objects")})
 
-		hasAlternates, err = hasObjectAlternates(repoDir)
+		hasAlternates, err = hasObjectAlternates(metadata)
 		require.NoError(t, err)
 		require.True(t, hasAlternates)
 	})
@@ -253,9 +256,137 @@ func TestHasObjectAlternates(t *testing.T) {
 		require.NoError(t, os.MkdirAll(infoDir, 0o755))
 		require.NoError(t, os.WriteFile(filepath.Join(infoDir, "alternates"), []byte(alternateDir+"\n"), 0o644))
 
-		hasAlternates, err := hasObjectAlternates(worktreeDir)
+		metadata, err := ResolveWorktreeMetadata(worktreeDir)
+		require.NoError(t, err)
+		hasAlternates, err := hasObjectAlternates(metadata)
 		require.NoError(t, err)
 		require.True(t, hasAlternates)
+	})
+}
+
+func TestOpenPath_DoesNotDowngradeMalformedWorktreeMetadata(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	writeMetadataFile(t, filepath.Join(root, gitDir), "gitdir: missing\n")
+
+	repo, err := OpenPath(root)
+	require.ErrorContains(t, err, "resolve worktree metadata")
+	require.ErrorContains(t, err, "inspect Git directory")
+	require.Nil(t, repo)
+}
+
+func TestOpenPath_DoesNotDowngradeDanglingGitSymlink(t *testing.T) {
+	t.Parallel()
+	if runtime.GOOS == windowsOS {
+		t.Skip("symlink creation requires privileges on some Windows builders")
+	}
+
+	root := filepath.Join(t.TempDir(), "bare.git")
+	runMetadataGit(t, filepath.Dir(root), "init", "--bare", root)
+	require.NoError(t, os.Symlink("missing", filepath.Join(root, gitDir)))
+
+	repo, err := OpenPath(root)
+	require.ErrorContains(t, err, "resolve worktree metadata")
+	require.ErrorContains(t, err, "inspect .git entry")
+	require.Nil(t, repo)
+}
+
+func TestOpenPath_SeparatesBareRepositoriesFromWorktreeMetadata(t *testing.T) {
+	t.Parallel()
+
+	t.Run("bare repository", func(t *testing.T) {
+		t.Parallel()
+		root := filepath.Join(t.TempDir(), "bare.git")
+		runMetadataGit(t, filepath.Dir(root), "init", "--bare", root)
+
+		repo, err := OpenPath(root)
+		require.NoError(t, err)
+		require.NoError(t, repo.Close())
+	})
+
+	t.Run("bare repository without core.bare", func(t *testing.T) {
+		t.Parallel()
+		// git decides bareness from the directory's shape, not from core.bare,
+		// and leaves the key unset in ordinary bare clones. Requiring it here
+		// rejected repositories git opens without complaint.
+		root := filepath.Join(t.TempDir(), "bare.git")
+		runMetadataGit(t, filepath.Dir(root), "init", "--bare", root)
+		runMetadataGit(t, root, "config", "--unset", "core.bare")
+
+		repo, err := OpenPath(root)
+		require.NoError(t, err)
+		require.NoError(t, repo.Close())
+	})
+
+	t.Run("separate Git directory is not a bare repository", func(t *testing.T) {
+		t.Parallel()
+		tmp := t.TempDir()
+		root := filepath.Join(tmp, "checkout")
+		storage := filepath.Join(tmp, "storage")
+		runMetadataGit(t, tmp, "init", "--separate-git-dir", storage, root)
+
+		worktreeRepo, err := OpenPath(root)
+		require.NoError(t, err)
+		require.NoError(t, worktreeRepo.Close())
+
+		storageRepo, err := OpenPath(storage)
+		require.ErrorContains(t, err, "is not a bare repository")
+		require.Nil(t, storageRepo)
+	})
+}
+
+func TestOpenPath_DoesNotDowngradeSpecializedStorageFailures(t *testing.T) {
+	t.Parallel()
+
+	t.Run("alternates inspection failure", func(t *testing.T) {
+		t.Parallel()
+		if runtime.GOOS == windowsOS {
+			t.Skip("symlink creation requires privileges on some Windows builders")
+		}
+		root := filepath.Join(t.TempDir(), "repo")
+		initMetadataRepo(t, root)
+		runMetadataGit(t, root, "config", "core.repositoryformatversion", "1")
+		runMetadataGit(t, root, "config", "extensions.unsupported", "true")
+		infoDir := filepath.Join(root, gitDir, "objects", "info")
+		require.NoError(t, os.RemoveAll(infoDir))
+		require.NoError(t, os.Symlink("info", infoDir))
+
+		repo, err := OpenPath(root)
+		require.ErrorContains(t, err, "inspect repository after specialized open failed")
+		require.ErrorContains(t, err, "inspect alternates file")
+		require.Nil(t, repo)
+	})
+
+	t.Run("dangling alternates symlink", func(t *testing.T) {
+		t.Parallel()
+		if runtime.GOOS == windowsOS {
+			t.Skip("symlink creation requires privileges on some Windows builders")
+		}
+		root := filepath.Join(t.TempDir(), "repo")
+		initMetadataRepo(t, root)
+		runMetadataGit(t, root, "config", "core.repositoryformatversion", "1")
+		runMetadataGit(t, root, "config", "extensions.unsupported", "true")
+		alternates := filepath.Join(root, gitDir, "objects", "info", "alternates")
+		require.NoError(t, os.Symlink("missing", alternates))
+
+		repo, err := OpenPath(root)
+		require.ErrorContains(t, err, "inspect repository after specialized open failed")
+		require.ErrorContains(t, err, "inspect alternates file")
+		require.Nil(t, repo)
+	})
+
+	t.Run("reftable open failure", func(t *testing.T) {
+		t.Parallel()
+		root := filepath.Join(t.TempDir(), "repo")
+		initMetadataRepo(t, root)
+		runMetadataGit(t, root, "config", "core.repositoryformatversion", "1")
+		runMetadataGit(t, root, "config", "extensions.unsupported", "true")
+		require.NoError(t, os.Mkdir(filepath.Join(root, gitDir, "reftable"), 0o750))
+
+		repo, err := OpenPath(root)
+		require.ErrorContains(t, err, "failed to open repository with specialized storage")
+		require.Nil(t, repo)
 	})
 }
 
