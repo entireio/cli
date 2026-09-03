@@ -869,7 +869,7 @@ func verifyAgentsLaunchable(ctx context.Context, agents []string, deps Deps) err
 			return fmt.Errorf("agent %q is not launchable (spawner missing)", name)
 		}
 		if _, ok := installedSet[name]; !ok {
-			return fmt.Errorf("agent %q is not launchable (run `entire configure --agent %s` first)", name, name)
+			return fmt.Errorf("agent %q is not launchable (run `entire agent add %s` first)", name, name)
 		}
 	}
 	return nil
