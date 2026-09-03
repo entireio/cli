@@ -32,7 +32,6 @@ const mirrorCreateConcurrency = 8
 const (
 	mirrorStatusReady      = "ready"      // clone landed, ready to use
 	mirrorStatusRegistered = "registered" // placement created, clone in progress (--no-wait)
-	mirrorStatusEmpty      = "empty"      // upstream has no commits, nothing to clone
 	mirrorStatusSuspended  = "suspended"  // placement exists but the cluster won't serve it
 	mirrorStatusFailed     = "failed"     // initial clone reached the terminal failed status
 	mirrorStatusTimedOut   = "timed out"  // clone didn't finish within --wait-timeout
@@ -588,11 +587,7 @@ func createOneMirror(ctx context.Context, t mirrorTarget, c *coreapi.Client, cli
 	}
 
 	if !outcome.polled {
-		if outcome.created.Empty { //nolint:staticcheck // CreatedMirror.Empty deprecated by /repos spec bump; create-flow cleanup tracked separately
-			res.status = mirrorStatusEmpty
-		} else {
-			res.status = mirrorStatusRegistered
-		}
+		res.status = mirrorStatusRegistered
 		report(res.status, true, true)
 		return res
 	}

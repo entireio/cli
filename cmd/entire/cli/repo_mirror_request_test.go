@@ -61,13 +61,12 @@ func TestCreateAndAwaitMirror_AsyncSuccess(t *testing.T) {
 
 		var phases []mirrorCreatePhase
 		outcome, err := createAndAwaitMirror(t.Context(), client, "owner", "repo", "cluster", mirrorCreateOptions{
-			async: true, timeout: time.Second,
+			timeout: time.Second,
 			onPhase: func(phase mirrorCreatePhase) { phases = append(phases, phase) },
 		})
 		require.NoError(t, err)
 		require.Equal(t, "mirror-1", outcome.created.MirrorId)
 		require.False(t, outcome.created.Created)
-		require.True(t, outcome.createdStateUnknown)
 		require.Equal(t, coreapi.MirrorStatusReady, outcome.status)
 		require.Equal(t, []mirrorCreatePhase{mirrorCreatePhaseQueued, mirrorCreatePhasePlacing, mirrorCreatePhaseCloning}, phases)
 		require.Equal(t, []string{
@@ -94,7 +93,7 @@ func TestCreateAndAwaitMirror_AsyncSuccess(t *testing.T) {
 		})
 
 		outcome, err := createAndAwaitMirror(t.Context(), client, "owner", "repo", "cluster", mirrorCreateOptions{
-			async: true, noWait: true, timeout: time.Second,
+			noWait: true, timeout: time.Second,
 		})
 		require.NoError(t, err)
 		require.Equal(t, "mirror-1", outcome.created.MirrorId)
@@ -138,7 +137,7 @@ func TestCreateAndAwaitMirror_AsyncFailures(t *testing.T) {
 		})
 
 		outcome, err := createAndAwaitMirror(t.Context(), client, "owner", "repo", "cluster", mirrorCreateOptions{
-			async: true, timeout: time.Second,
+			timeout: time.Second,
 		})
 		require.Error(t, err)
 		require.Nil(t, outcome.created)
@@ -175,7 +174,7 @@ func TestCreateAndAwaitMirror_AsyncFailures(t *testing.T) {
 			})
 
 			_, err := createAndAwaitMirror(t.Context(), client, "owner", "repo", "cluster", mirrorCreateOptions{
-				async: true, timeout: time.Second,
+				timeout: time.Second,
 			})
 			require.ErrorContains(t, err, tt.want)
 			if tt.wantDetail != "" {
@@ -208,7 +207,7 @@ func TestCreateAndAwaitMirror_AsyncFailures(t *testing.T) {
 		})
 
 		_, err := createAndAwaitMirror(t.Context(), client, "owner", "repo", "cluster", mirrorCreateOptions{
-			async: true, noWait: true, timeout: time.Second,
+			noWait: true, timeout: time.Second,
 		})
 		require.NoError(t, err)
 		require.Equal(t, 3, polls)
@@ -226,7 +225,7 @@ func TestCreateAndAwaitMirror_AsyncFailures(t *testing.T) {
 		})
 
 		_, err := createAndAwaitMirror(t.Context(), client, "owner", "repo", "cluster", mirrorCreateOptions{
-			async: true, noWait: true, timeout: time.Second,
+			noWait: true, timeout: time.Second,
 		})
 		require.ErrorContains(t, err, "poll mirror request")
 		require.Equal(t, maxConsecutivePollErrors, polls)
@@ -246,7 +245,7 @@ func TestCreateAndAwaitMirror_AsyncLocationValidation(t *testing.T) {
 			})
 
 			_, err := createAndAwaitMirror(t.Context(), client, "owner", "repo", "cluster", mirrorCreateOptions{
-				async: true, timeout: time.Second,
+				timeout: time.Second,
 			})
 			require.ErrorContains(t, err, "Location")
 		})
@@ -263,7 +262,7 @@ func TestCreateAndAwaitMirror_AsyncTimeout(t *testing.T) {
 		})
 
 		_, err := createAndAwaitMirror(t.Context(), client, "owner", "repo", "cluster", mirrorCreateOptions{
-			async: true, timeout: 10 * time.Millisecond,
+			timeout: 10 * time.Millisecond,
 		})
 		require.ErrorContains(t, err, "timed out submitting mirror request")
 		require.NotContains(t, err.Error(), "waiting for mirror placement")
@@ -283,7 +282,7 @@ func TestCreateAndAwaitMirror_AsyncTimeout(t *testing.T) {
 		})
 
 		_, err := createAndAwaitMirror(t.Context(), client, "owner", "repo", "cluster", mirrorCreateOptions{
-			async: true, timeout: 10 * time.Millisecond,
+			timeout: 10 * time.Millisecond,
 		})
 		require.ErrorContains(t, err, "timed out waiting for initial clone")
 	})
@@ -301,7 +300,7 @@ func TestCreateAndAwaitMirror_AsyncTimeout(t *testing.T) {
 		})
 
 		_, err := createAndAwaitMirror(t.Context(), client, "owner", "repo", "cluster", mirrorCreateOptions{
-			async: true, timeout: 10 * time.Millisecond,
+			timeout: 10 * time.Millisecond,
 		})
 		require.ErrorContains(t, err, "timed out waiting for mirror placement")
 	})
@@ -349,7 +348,7 @@ func TestCreateAndAwaitMirror_AsyncCrossJurisdiction(t *testing.T) {
 		require.NoError(t, err)
 
 		outcome, err := createAndAwaitMirror(t.Context(), client, "owner", "repo", "cluster", mirrorCreateOptions{
-			async: true, noWait: true, timeout: time.Second,
+			noWait: true, timeout: time.Second,
 		})
 		require.NoError(t, err)
 		require.Equal(t, "mirror-1", outcome.created.MirrorId)
@@ -380,11 +379,11 @@ func TestCreateAndAwaitMirror_AsyncResubmission(t *testing.T) {
 		})
 
 		_, err := createAndAwaitMirror(t.Context(), client, "owner", "repo", "cluster", mirrorCreateOptions{
-			async: true, noWait: true, timeout: time.Second,
+			noWait: true, timeout: time.Second,
 		})
 		require.Error(t, err)
 		outcome, err := createAndAwaitMirror(t.Context(), client, "owner", "repo", "cluster", mirrorCreateOptions{
-			async: true, noWait: true, timeout: time.Second,
+			noWait: true, timeout: time.Second,
 		})
 		require.NoError(t, err)
 		require.Equal(t, "mirror-1", outcome.created.MirrorId)
@@ -423,7 +422,7 @@ func TestCreateAndAwaitMirror_AsyncCancellation(t *testing.T) {
 			result := make(chan error, 1)
 			go func() {
 				_, err := createAndAwaitMirror(ctx, client, "owner", "repo", "cluster", mirrorCreateOptions{
-					async: true, timeout: time.Second,
+					timeout: time.Second,
 				})
 				result <- err
 			}()
@@ -479,23 +478,30 @@ func TestRepoMirrorCreate_AsyncDefaultWhenSettingsFail(t *testing.T) {
 	require.Equal(t, []string{mirrorRequestsAPIPath, mirrorRequestPath(), mirrorRequestPath()}, paths)
 }
 
-func TestRepoMirrorCreate_SynchronousOptOut(t *testing.T) {
+func TestRepoMirrorCreate_LegacyAsyncSettingIsIgnored(t *testing.T) {
+	useFastMirrorPolling(t)
+
 	setupTestRepo(t)
 	writeSettings(t, `{"async_mirror_requests":false}`)
 
+	requestPolls := 0
 	var paths []string
 	client := newMirrorRequestClient(t, func(w http.ResponseWriter, r *http.Request) {
 		paths = append(paths, r.URL.Path)
-		if r.Method != http.MethodPost || r.URL.Path != mirrorsAPIPath {
+		switch r.URL.Path {
+		case mirrorRequestsAPIPath:
+			writeAcceptedMirrorRequest(t, w)
+		case mirrorRequestPath():
+			requestPolls++
+			if requestPolls == 1 {
+				writeJSONResponse(t, w, http.StatusOK, &coreapi.MirrorRequest{RequestId: testMirrorRequestID, Status: coreapi.MirrorRequestStatusProcessing})
+				return
+			}
+			writeSuccessfulMirrorRequest(t, w)
+		default:
 			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
 			w.WriteHeader(http.StatusNotFound)
-			return
 		}
-		writeJSONResponse(t, w, http.StatusCreated, &coreapi.CreatedMirror{
-			Created:   true,
-			MirrorId:  "mirror-1",
-			MirrorUrl: "entire://cluster/gh/owner/repo",
-		})
 	})
 	previousClient := clusterCoreClient
 	clusterCoreClient = func(context.Context, string) (*coreapi.Client, error) { return client, nil }
@@ -507,9 +513,9 @@ func TestRepoMirrorCreate_SynchronousOptOut(t *testing.T) {
 	cmd.SetErr(&bytes.Buffer{})
 	cmd.SetArgs([]string{"mirror", "create", "--no-wait", "github.com/owner/repo", "aws-us-east-2.entire.io"})
 	require.NoError(t, cmd.ExecuteContext(t.Context()))
-	require.Contains(t, stdout.String(), "Registered mirror mirror-1")
-	require.Contains(t, stdout.String(), "entire://cluster/gh/owner/repo")
-	require.Equal(t, []string{mirrorsAPIPath}, paths)
+	require.Contains(t, stdout.String(), "Mirror placed at entire://cluster/gh/owner/repo")
+	require.Contains(t, stdout.String(), "Mirror ID: mirror-1")
+	require.Equal(t, []string{mirrorRequestsAPIPath, mirrorRequestPath(), mirrorRequestPath()}, paths)
 }
 
 func TestCreateOneMirror_AsyncProgress(t *testing.T) {
@@ -536,7 +542,7 @@ func TestCreateOneMirror_AsyncProgress(t *testing.T) {
 
 	var progress []string
 	target := mirrorTarget{owner: "owner", repo: "repo", region: regionChoice{host: "cluster"}}
-	result := createOneMirror(t.Context(), target, client, nil, mirrorCreateOptions{async: true, timeout: time.Second},
+	result := createOneMirror(t.Context(), target, client, nil, mirrorCreateOptions{timeout: time.Second},
 		func(status string, _ bool, _ bool) { progress = append(progress, status) })
 	require.NoError(t, result.err)
 	require.Equal(t, mirrorStatusReady, result.status)
@@ -598,7 +604,7 @@ func TestCreateMirrors_AsyncKeepsConcurrencyAndFailuresIndependent(t *testing.T)
 
 	resultsCh := make(chan []mirrorResult, 1)
 	go func() {
-		resultsCh <- createMirrors(t.Context(), &bytes.Buffer{}, targets, mirrorCreateOptions{async: true, noWait: true, timeout: time.Second})
+		resultsCh <- createMirrors(t.Context(), &bytes.Buffer{}, targets, mirrorCreateOptions{noWait: true, timeout: time.Second})
 	}()
 	<-reachedLimit
 	time.Sleep(20 * time.Millisecond)
