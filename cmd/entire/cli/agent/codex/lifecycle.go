@@ -295,13 +295,18 @@ func (c *CodexAgent) parseTurnEnd(ctx context.Context, stdin io.Reader) (*agent.
 }
 
 func isRootTurnRollout(ctx context.Context, path string) bool {
-	switch classifyRollout(path) {
+	classification := classifyRolloutDetailed(path)
+	switch classification.Classification {
 	case rolloutRoot:
 		return true
 	case rolloutChild:
+		logging.Debug(ctx, "codex: skipped root lifecycle mutation for child rollout", slog.String("path", path))
 		return false
 	case rolloutUnknown:
-		logging.Warn(ctx, "codex: skipped turn lifecycle event for unclassified rollout", slog.String("path", path))
+		logging.Warn(ctx, "codex: skipped turn lifecycle event because rollout ownership is unverified",
+			slog.String("category", string(classification.Issue)),
+			slog.String("detail", classification.Detail),
+			slog.String("path", path))
 		return false
 	}
 	return false

@@ -1169,6 +1169,13 @@ func finalizeCodexObservedAtSessionEnd(ctx context.Context, sessionID string) {
 					if record.CompletedAt.IsZero() {
 						record.CompletedAt = time.Now()
 					}
+					// refreshCodexInventory accepts this path only after loading the
+					// rollout and matching session_meta.id to AgentID. Carry that
+					// verified path into the durable task record even when this
+					// fallback has no exact terminal file/token snapshot.
+					if entry.ResolvedTranscriptPath != "" {
+						record.DeclaredTranscriptPath = entry.ResolvedTranscriptPath
+					}
 					record.Files = nil
 					record.TokenUsage = nil
 					break

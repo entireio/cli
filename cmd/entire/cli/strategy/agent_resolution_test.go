@@ -3,13 +3,16 @@ package strategy
 import (
 	"context"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
+	"github.com/entireio/cli/cmd/entire/cli/session"
 
 	// Register agents so AgentForTranscriptPath can resolve them.
 	_ "github.com/entireio/cli/cmd/entire/cli/agent/claudecode"
+	_ "github.com/entireio/cli/cmd/entire/cli/agent/codex"
 	_ "github.com/entireio/cli/cmd/entire/cli/agent/cursor"
 
 	"github.com/stretchr/testify/assert"
@@ -31,6 +34,150 @@ func withClaudeSessionDir(t *testing.T) string {
 	sessionDir := filepath.Join(t.TempDir(), "claude-projects")
 	t.Setenv("ENTIRE_TEST_CLAUDE_PROJECT_DIR", sessionDir)
 	return filepath.Join(sessionDir, "abc-123.jsonl")
+}
+
+func withCodexSessionDir(t *testing.T) string {
+	t.Helper()
+	sessionDir := filepath.Join(t.TempDir(), "codex-sessions")
+	t.Setenv("ENTIRE_TEST_CODEX_SESSION_DIR", sessionDir)
+	return filepath.Join(sessionDir, "2026", "09", "02", "rollout.jsonl")
+}
+
+func TestInitializeSession_CodexCorrection_CleanKnownOwner(t *testing.T) {
+	dir := setupGitRepo(t)
+	t.Chdir(dir)
+	codexTranscript := withCodexSessionDir(t)
+
+	ctx := context.Background()
+	sessionID := "codex-clean-known"
+	s := &ManualCommitStrategy{}
+	require.NoError(t, s.InitializeSession(ctx, sessionID, agent.AgentTypeClaudeCode, "", "first", ""))
+	require.NoError(t, s.InitializeSession(ctx, sessionID, agent.AgentTypeCodex, codexTranscript, "second", ""))
+
+	state, err := s.loadSessionState(ctx, sessionID)
+	require.NoError(t, err)
+	assertCleanCodexCorrection(t, state)
+}
+
+func TestInitializeSession_CodexCorrection_CleanUnknownOwner(t *testing.T) {
+	dir := setupGitRepo(t)
+	t.Chdir(dir)
+	codexTranscript := withCodexSessionDir(t)
+
+	ctx := context.Background()
+	sessionID := "codex-clean-unknown"
+	s := &ManualCommitStrategy{}
+	require.NoError(t, s.InitializeSession(ctx, sessionID, agent.AgentTypeClaudeCode, "", "first", ""))
+	state, err := s.loadSessionState(ctx, sessionID)
+	require.NoError(t, err)
+	state.AgentType = ""
+	require.NoError(t, s.saveSessionState(ctx, state))
+
+	require.NoError(t, s.InitializeSession(ctx, sessionID, agent.AgentTypeCodex, codexTranscript, "second", ""))
+	state, err = s.loadSessionState(ctx, sessionID)
+	require.NoError(t, err)
+	assertCleanCodexCorrection(t, state)
+}
+
+func TestInitializeSession_CodexCorrection_DirtyEvidence(t *testing.T) {
+	incomplete := false
+	tests := []struct {
+		name  string
+		dirty func(*SessionState)
+	}{
+		{"inventory", func(s *SessionState) { s.SubagentInventory = []session.SubagentInventoryEntry{{AgentID: "child"}} }},
+		{"task record", func(s *SessionState) {
+			s.TaskRecords = []session.TaskRecord{{ToolUseID: "task", AgentID: "child-from-task"}}
+		}},
+		{"ledger", func(s *SessionState) { s.SubagentLedgerVersion = 4 }},
+		{"session child total", func(s *SessionState) { s.TokenUsage = &agent.TokenUsage{SubagentTokens: &agent.TokenUsage{}} }},
+		{"checkpoint child total", func(s *SessionState) { s.CheckpointTokenUsage = &agent.TokenUsage{SubagentTokens: &agent.TokenUsage{}} }},
+		{"baseline", func(s *SessionState) { s.SubagentTokensBaseline = &agent.TokenUsage{} }},
+		{"inventory incomplete", func(s *SessionState) { s.SubagentInventoryComplete = &incomplete }},
+		{"baseline incomplete", func(s *SessionState) { s.SubagentTokensBaselineComplete = &incomplete }},
+		{"session usage incomplete", func(s *SessionState) { s.TokenUsage = &agent.TokenUsage{SubagentTokensComplete: &incomplete} }},
+		{"checkpoint usage incomplete", func(s *SessionState) { s.CheckpointTokenUsage = &agent.TokenUsage{SubagentTokensComplete: &incomplete} }},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := setupGitRepo(t)
+			t.Chdir(dir)
+			codexTranscript := withCodexSessionDir(t)
+			ctx := context.Background()
+			sessionID := "codex-dirty-" + strings.ReplaceAll(tt.name, " ", "-")
+			s := &ManualCommitStrategy{}
+			require.NoError(t, s.InitializeSession(ctx, sessionID, agent.AgentTypeClaudeCode, "", "first", ""))
+			state, err := s.loadSessionState(ctx, sessionID)
+			require.NoError(t, err)
+			tt.dirty(state)
+			require.NoError(t, s.saveSessionState(ctx, state))
+
+			require.NoError(t, s.InitializeSession(ctx, sessionID, agent.AgentTypeCodex, codexTranscript, "second", ""))
+			state, err = s.loadSessionState(ctx, sessionID)
+			require.NoError(t, err)
+			require.Equal(t, agent.AgentTypeCodex, state.AgentType)
+			require.NotNil(t, state.SubagentInventoryComplete)
+			require.False(t, *state.SubagentInventoryComplete)
+			require.NotNil(t, state.SubagentTokensBaselineComplete)
+			require.False(t, *state.SubagentTokensBaselineComplete)
+			require.NotNil(t, state.TokenUsage)
+			require.Nil(t, state.TokenUsage.SubagentTokens)
+			require.NotNil(t, state.TokenUsage.SubagentTokensComplete)
+			require.False(t, *state.TokenUsage.SubagentTokensComplete)
+			require.NotNil(t, state.CheckpointTokenUsage)
+			require.Nil(t, state.CheckpointTokenUsage.SubagentTokens)
+			require.NotNil(t, state.CheckpointTokenUsage.SubagentTokensComplete)
+			require.False(t, *state.CheckpointTokenUsage.SubagentTokensComplete)
+			require.Nil(t, state.SubagentTokensBaseline)
+			if tt.name == "task record" {
+				require.NotNil(t, state.FindSubagentInventory("child-from-task"))
+			}
+		})
+	}
+}
+
+func TestInitializeSession_CodexCallerWithoutTranscriptDoesNotMigrateAccounting(t *testing.T) {
+	dir := setupGitRepo(t)
+	t.Chdir(dir)
+
+	ctx := context.Background()
+	sessionID := "codex-unproven-owner"
+	s := &ManualCommitStrategy{}
+	require.NoError(t, s.InitializeSession(ctx, sessionID, agent.AgentTypeClaudeCode, "", "first", ""))
+	state, err := s.loadSessionState(ctx, sessionID)
+	require.NoError(t, err)
+	state.AgentType = ""
+	state.SubagentTokensBaseline = &agent.TokenUsage{InputTokens: 7}
+	require.NoError(t, s.saveSessionState(ctx, state))
+
+	require.NoError(t, s.InitializeSession(ctx, sessionID, agent.AgentTypeCodex, "", "second", ""))
+	state, err = s.loadSessionState(ctx, sessionID)
+	require.NoError(t, err)
+	require.Equal(t, agent.AgentTypeCodex, state.AgentType)
+	require.NotNil(t, state.SubagentTokensBaseline)
+	require.Equal(t, 7, state.SubagentTokensBaseline.InputTokens,
+		"the firing hook alone must not rewrite legacy accounting evidence")
+}
+
+func assertCleanCodexCorrection(t *testing.T, state *SessionState) {
+	t.Helper()
+	require.Equal(t, agent.AgentTypeCodex, state.AgentType)
+	require.Empty(t, state.SubagentInventory)
+	require.Zero(t, state.SubagentLedgerVersion)
+	require.Nil(t, state.SubagentTokensBaseline)
+	require.NotNil(t, state.SubagentInventoryComplete)
+	require.True(t, *state.SubagentInventoryComplete)
+	require.NotNil(t, state.SubagentTokensBaselineComplete)
+	require.True(t, *state.SubagentTokensBaselineComplete)
+	require.NotNil(t, state.TokenUsage)
+	require.Nil(t, state.TokenUsage.SubagentTokens)
+	require.NotNil(t, state.TokenUsage.SubagentTokensComplete)
+	require.True(t, *state.TokenUsage.SubagentTokensComplete)
+	require.NotNil(t, state.CheckpointTokenUsage)
+	require.Nil(t, state.CheckpointTokenUsage.SubagentTokens)
+	require.NotNil(t, state.CheckpointTokenUsage.SubagentTokensComplete)
+	require.True(t, *state.CheckpointTokenUsage.SubagentTokensComplete)
 }
 
 func TestResolveSessionAgentType_TranscriptPathBeatsHook(t *testing.T) {

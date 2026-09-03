@@ -3,6 +3,7 @@ package codex
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -89,6 +90,21 @@ const (
 	rolloutChild
 )
 
+type rolloutClassificationIssue string
+
+const (
+	rolloutIssueNullPath           rolloutClassificationIssue = "null_transcript_path"
+	rolloutIssueUnreadable         rolloutClassificationIssue = "unreadable_transcript"
+	rolloutIssueMalformedMetadata  rolloutClassificationIssue = "malformed_session_metadata"
+	rolloutIssueUnclassifiedSource rolloutClassificationIssue = "unclassified_source"
+)
+
+type rolloutClassificationResult struct {
+	Classification rolloutClassification
+	Issue          rolloutClassificationIssue
+	Detail         string
+}
+
 // sessionMetaPayload is the payload for type="session_meta" lines.
 type sessionMetaPayload struct {
 	ID           string          `json:"id"`
@@ -101,49 +117,64 @@ type sessionMetaPayload struct {
 // rollouts identify root and child threads with thread_source; older rollouts
 // encode their source as either a recognized root string or source.subagent.
 func classifyRollout(path string) rolloutClassification {
+	return classifyRolloutDetailed(path).Classification
+}
+
+func classifyRolloutDetailed(path string) rolloutClassificationResult {
 	if path == "" {
-		return rolloutUnknown
+		return rolloutClassificationResult{Classification: rolloutUnknown, Issue: rolloutIssueNullPath}
 	}
 
 	file, err := os.Open(path) //nolint:gosec // Path comes from agent hook input
 	if err != nil {
-		return rolloutUnknown
+		return rolloutClassificationResult{Classification: rolloutUnknown, Issue: rolloutIssueUnreadable, Detail: "open"}
 	}
 	defer file.Close()
 
 	lineData, err := bufio.NewReader(file).ReadBytes('\n')
 	if err != nil && !errors.Is(err, io.EOF) {
-		return rolloutUnknown
+		return rolloutClassificationResult{Classification: rolloutUnknown, Issue: rolloutIssueUnreadable, Detail: "read"}
 	}
 
 	var line rolloutLine
-	if json.Unmarshal(lineData, &line) != nil || line.Type != rolloutLineTypeSessionMeta {
-		return rolloutUnknown
+	if json.Unmarshal(lineData, &line) != nil {
+		return rolloutClassificationResult{Classification: rolloutUnknown, Issue: rolloutIssueMalformedMetadata, Detail: "first_record_json"}
+	}
+	if line.Type != rolloutLineTypeSessionMeta {
+		return rolloutClassificationResult{Classification: rolloutUnknown, Issue: rolloutIssueMalformedMetadata, Detail: "first_record_type"}
 	}
 
 	var meta sessionMetaPayload
 	if json.Unmarshal(line.Payload, &meta) != nil {
-		return rolloutUnknown
+		return rolloutClassificationResult{Classification: rolloutUnknown, Issue: rolloutIssueMalformedMetadata, Detail: "session_meta_payload"}
 	}
 
 	switch meta.ThreadSource {
 	case "user":
-		return rolloutRoot
+		return rolloutClassificationResult{Classification: rolloutRoot}
 	case "subagent":
-		return rolloutChild
+		return rolloutClassificationResult{Classification: rolloutChild}
 	case "":
 		// Fall through to the legacy source encoding.
 	default:
-		return rolloutUnknown
+		return rolloutClassificationResult{
+			Classification: rolloutUnknown,
+			Issue:          rolloutIssueUnclassifiedSource,
+			Detail:         safeRolloutSource(meta.ThreadSource),
+		}
 	}
 
 	var source string
 	if json.Unmarshal(meta.Source, &source) == nil {
 		switch source {
 		case "startup", "resume", "clear", "compact", "cli", codexExecCommand, "vscode", "mcp":
-			return rolloutRoot
+			return rolloutClassificationResult{Classification: rolloutRoot}
 		default:
-			return rolloutUnknown
+			return rolloutClassificationResult{
+				Classification: rolloutUnknown,
+				Issue:          rolloutIssueUnclassifiedSource,
+				Detail:         safeRolloutSource(source),
+			}
 		}
 	}
 
@@ -153,10 +184,19 @@ func classifyRollout(path string) rolloutClassification {
 	if json.Unmarshal(meta.Source, &structuredSource) == nil &&
 		len(structuredSource.Subagent) > 0 &&
 		!bytes.Equal(structuredSource.Subagent, []byte("null")) {
-		return rolloutChild
+		return rolloutClassificationResult{Classification: rolloutChild}
 	}
 
-	return rolloutUnknown
+	return rolloutClassificationResult{Classification: rolloutUnknown, Issue: rolloutIssueUnclassifiedSource, Detail: "missing_or_structured_legacy_source"}
+}
+
+func safeRolloutSource(source string) string {
+	const maxSourceRunes = 128
+	runes := []rune(strings.ToValidUTF8(source, "�"))
+	if len(runes) > maxSourceRunes {
+		runes = runes[:maxSourceRunes]
+	}
+	return string(runes)
 }
 
 // responseItemPayload is the payload for type="response_item" lines.
@@ -560,7 +600,7 @@ func terminalTurnIDs(data []byte) []string {
 // ExtractWithSubagentInventory gathers evidence only for refs supplied by the
 // caller's authoritative ledger. It never discovers children from transcript
 // text, filenames, timestamps, or token-count events.
-func (c *CodexAgent) ExtractWithSubagentInventory(parent []byte, fromOffset int, refs []agent.SubagentReference) (agent.InventoryExtraction, error) {
+func (c *CodexAgent) ExtractWithSubagentInventory(ctx context.Context, parent []byte, fromOffset int, refs []agent.SubagentReference) (agent.InventoryExtraction, error) {
 	result := agent.InventoryExtraction{ModifiedFiles: extractFilesFromData(parent, fromOffset)}
 	parentUsage, err := c.CalculateTokenUsage(parent, fromOffset)
 	if err != nil {
@@ -571,13 +611,16 @@ func (c *CodexAgent) ExtractWithSubagentInventory(parent []byte, fromOffset int,
 	resolved := make([]loadedRollout, len(refs))
 	unresolvedIDs := make(map[string]struct{})
 	for index, ref := range refs {
-		if loaded, ok := c.loadDirectRollout(ref); ok {
+		if loaded, ok := c.loadDirectRollout(ctx, ref); ok {
 			resolved[index] = loaded
 		} else if ref.AgentID != "" {
 			unresolvedIDs[ref.AgentID] = struct{}{}
 		}
 	}
-	fallback := c.scanFallbackRollouts(unresolvedIDs)
+	fallback, fallbackErr := c.scanFallbackRollouts(ctx, unresolvedIDs)
+	if fallbackErr != nil {
+		fallback = nil
+	}
 	for index, ref := range refs {
 		if resolved[index].Path == "" {
 			resolved[index] = fallback[ref.AgentID]

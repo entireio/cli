@@ -143,7 +143,7 @@ type mockInventoryAgent struct {
 
 var _ agent.InventoryAwareExtractor = (*mockInventoryAgent)(nil)
 
-func (m *mockInventoryAgent) ExtractWithSubagentInventory(_ []byte, _ int, _ []agent.SubagentReference) (agent.InventoryExtraction, error) {
+func (m *mockInventoryAgent) ExtractWithSubagentInventory(_ context.Context, _ []byte, _ int, _ []agent.SubagentReference) (agent.InventoryExtraction, error) {
 	if m.beforeReturn != nil {
 		m.beforeReturn()
 	}
@@ -223,9 +223,10 @@ func TestFinalizeCodexObservedAtSessionEnd_MultiTurnChildClearsStaleEvidence(t *
 		StartedAt: time.Now(),
 		Phase:     session.PhaseActive,
 		SubagentInventory: []session.SubagentInventoryEntry{{
-			AgentID:          agentID,
-			ObservedTurnIDs:  []string{"turn-1", "turn-2"},
-			FinalizedTurnIDs: []string{"turn-1"},
+			AgentID:                agentID,
+			ResolvedTranscriptPath: "/tmp/verified-child-1.jsonl",
+			ObservedTurnIDs:        []string{"turn-1", "turn-2"},
+			FinalizedTurnIDs:       []string{"turn-1"},
 		}},
 		TaskRecords: []session.TaskRecord{{
 			ToolUseID:   agentID,
@@ -246,6 +247,8 @@ func TestFinalizeCodexObservedAtSessionEnd_MultiTurnChildClearsStaleEvidence(t *
 	assert.Equal(t, completedAt, record.CompletedAt, "force-closing a later turn must not complete the task twice")
 	assert.Empty(t, record.Files, "files from an earlier turn are not exact evidence for an unresolved later turn")
 	assert.Nil(t, record.TokenUsage, "tokens from an earlier turn are not exact evidence for an unresolved later turn")
+	assert.Equal(t, "/tmp/verified-child-1.jsonl", record.DeclaredTranscriptPath,
+		"force-closing must retain the inventory's exact-ID-verified rollout path for condensation")
 	assert.Contains(t, state.FindSubagentInventory(agentID).FinalizedTurnIDs, "turn-2")
 }
 

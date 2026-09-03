@@ -15,7 +15,7 @@ func ExtractWithSubagentInventory(ctx context.Context, ag Agent, transcriptData 
 	if !ok {
 		return InventoryExtraction{}, false
 	}
-	extraction, err := extractor.ExtractWithSubagentInventory(transcriptData, transcriptLinesAtStart, refs)
+	extraction, err := extractor.ExtractWithSubagentInventory(ctx, transcriptData, transcriptLinesAtStart, refs)
 	if err != nil {
 		logging.Debug(ctx, "failed inventory-aware token extraction", slog.String("error", err.Error()))
 		return InventoryExtraction{}, false

@@ -338,7 +338,7 @@ type InventoryExtraction struct {
 type InventoryAwareExtractor interface {
 	Agent
 
-	ExtractWithSubagentInventory(parent []byte, fromOffset int, refs []SubagentReference) (InventoryExtraction, error)
+	ExtractWithSubagentInventory(ctx context.Context, parent []byte, fromOffset int, refs []SubagentReference) (InventoryExtraction, error)
 }
 
 // ModelExtractor extracts the LLM model identifier from a transcript for agents

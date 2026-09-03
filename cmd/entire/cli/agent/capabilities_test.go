@@ -79,7 +79,7 @@ func (m *mockFullAgent) PrepareTranscript(context.Context, string) error { retur
 func (m *mockFullAgent) CalculateTokenUsage([]byte, int) (*TokenUsage, error) { return nil, nil } //nolint:nilnil // test mock
 
 // InventoryAwareExtractor is built-in only and deliberately has no DeclaredCaps bit.
-func (m *mockFullAgent) ExtractWithSubagentInventory([]byte, int, []SubagentReference) (InventoryExtraction, error) {
+func (m *mockFullAgent) ExtractWithSubagentInventory(context.Context, []byte, int, []SubagentReference) (InventoryExtraction, error) {
 	return InventoryExtraction{}, nil
 }
 

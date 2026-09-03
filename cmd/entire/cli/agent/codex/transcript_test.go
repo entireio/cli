@@ -92,6 +92,43 @@ func TestClassifyRollout(t *testing.T) {
 	})
 }
 
+func TestClassifyRolloutDetailed_ExplainsFailClosedResult(t *testing.T) {
+	t.Parallel()
+
+	t.Run("null transcript path", func(t *testing.T) {
+		t.Parallel()
+		got := classifyRolloutDetailed("")
+		require.Equal(t, rolloutUnknown, got.Classification)
+		require.Equal(t, rolloutIssueNullPath, got.Issue)
+	})
+
+	t.Run("unreadable transcript", func(t *testing.T) {
+		t.Parallel()
+		got := classifyRolloutDetailed(filepath.Join(t.TempDir(), "missing.jsonl"))
+		require.Equal(t, rolloutUnknown, got.Classification)
+		require.Equal(t, rolloutIssueUnreadable, got.Issue)
+	})
+
+	t.Run("malformed metadata", func(t *testing.T) {
+		t.Parallel()
+		path := filepath.Join(t.TempDir(), "rollout.jsonl")
+		require.NoError(t, os.WriteFile(path, []byte(`{"type":"session_meta","payload":`), 0o600))
+		got := classifyRolloutDetailed(path)
+		require.Equal(t, rolloutUnknown, got.Classification)
+		require.Equal(t, rolloutIssueMalformedMetadata, got.Issue)
+	})
+
+	t.Run("future source", func(t *testing.T) {
+		t.Parallel()
+		path := filepath.Join(t.TempDir(), "rollout.jsonl")
+		require.NoError(t, os.WriteFile(path, []byte(`{"type":"session_meta","payload":{"thread_source":"future-source"}}`), 0o600))
+		got := classifyRolloutDetailed(path)
+		require.Equal(t, rolloutUnknown, got.Classification)
+		require.Equal(t, rolloutIssueUnclassifiedSource, got.Issue)
+		require.Equal(t, "future-source", got.Detail)
+	})
+}
+
 func TestGetTranscriptPosition(t *testing.T) {
 	t.Parallel()
 	ag := &CodexAgent{}

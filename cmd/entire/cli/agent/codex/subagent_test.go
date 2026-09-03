@@ -1,6 +1,7 @@
 package codex
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"io/fs"
@@ -8,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/stretchr/testify/require"
@@ -261,7 +263,7 @@ func TestSubagentInventory_CollectsExactEvidenceAndDoesNotPartialAggregate(t *te
 	})
 	parent := rolloutData(t, "parent", []json.RawMessage{patchEvent("parent.txt")})
 
-	result, err := ag.ExtractWithSubagentInventory(parent, 0, []agent.SubagentReference{
+	result, err := ag.ExtractWithSubagentInventory(t.Context(), parent, 0, []agent.SubagentReference{
 		{AgentID: "one", DeclaredTranscriptPath: childOne},
 		{AgentID: "two", ResolvedTranscriptPath: childTwo},
 	})
@@ -299,7 +301,7 @@ func TestSubagentInventory_AggregatesOnlyCompleteExactChildren(t *testing.T) {
 		tokenCountEvent(map[string]any{"total_token_usage": map[string]any{"input_tokens": 10, "cached_input_tokens": 3, "output_tokens": 5}}),
 	})
 
-	result, err := ag.ExtractWithSubagentInventory(nil, 0, []agent.SubagentReference{
+	result, err := ag.ExtractWithSubagentInventory(t.Context(), nil, 0, []agent.SubagentReference{
 		{AgentID: "first", DeclaredTranscriptPath: first},
 		{AgentID: "second", ResolvedTranscriptPath: second},
 	})
@@ -334,7 +336,7 @@ func TestSubagentInventory_EmptyInventoryIsExactWithoutChildTotal(t *testing.T) 
 			return filepath.WalkDir(root, visit)
 		},
 	}
-	result, err := ag.ExtractWithSubagentInventory(nil, 0, nil)
+	result, err := ag.ExtractWithSubagentInventory(t.Context(), nil, 0, nil)
 	require.NoError(t, err)
 	require.Zero(t, walks, "an exact empty inventory has no unresolved child and must not scan rollout archives")
 	require.Empty(t, result.Children)
@@ -356,7 +358,7 @@ func TestSubagentInventory_UnresolvedChildPreventsPartialAggregate(t *testing.T)
 		tokenCountEvent(map[string]any{"total_token_usage": map[string]any{"input_tokens": 2, "cached_input_tokens": 1, "output_tokens": 1}}),
 	})
 
-	result, err := ag.ExtractWithSubagentInventory(nil, 0, []agent.SubagentReference{
+	result, err := ag.ExtractWithSubagentInventory(t.Context(), nil, 0, []agent.SubagentReference{
 		{AgentID: "available", DeclaredTranscriptPath: available},
 		{AgentID: "missing"},
 	})
@@ -393,7 +395,7 @@ func TestSubagentInventory_LoaderFailureFailsClosedBeforeResolution(t *testing.T
 		},
 	}
 
-	result, err := ag.ExtractWithSubagentInventory(nil, 0, []agent.SubagentReference{{
+	result, err := ag.ExtractWithSubagentInventory(t.Context(), nil, 0, []agent.SubagentReference{{
 		AgentID:                "child",
 		DeclaredTranscriptPath: path,
 	}})
@@ -423,7 +425,7 @@ func TestSubagentInventory_RevalidatesInjectedRolloutBytes(t *testing.T) {
 		},
 	}
 
-	result, err := ag.ExtractWithSubagentInventory(nil, 0, []agent.SubagentReference{{
+	result, err := ag.ExtractWithSubagentInventory(t.Context(), nil, 0, []agent.SubagentReference{{
 		AgentID:                "child",
 		DeclaredTranscriptPath: path,
 	}})
@@ -450,7 +452,7 @@ func TestSubagentInventory_BatchesFallbackTraversal(t *testing.T) {
 		},
 	}
 
-	result, err := ag.ExtractWithSubagentInventory(nil, 0, []agent.SubagentReference{{AgentID: "first"}, {AgentID: "second"}})
+	result, err := ag.ExtractWithSubagentInventory(t.Context(), nil, 0, []agent.SubagentReference{{AgentID: "first"}, {AgentID: "second"}})
 	require.NoError(t, err)
 	require.Equal(t, 2, walks, "one traversal per configured root, not per child")
 	require.Equal(t, []string{"first", "second"}, []string{result.Children[0].AgentID, result.Children[1].AgentID})
@@ -471,11 +473,167 @@ func TestSubagentInventory_FallbackTraversalFailureDiscardsMatches(t *testing.T)
 		},
 	}
 
-	result, err := ag.ExtractWithSubagentInventory(nil, 0, []agent.SubagentReference{{AgentID: "child"}})
+	result, err := ag.ExtractWithSubagentInventory(t.Context(), nil, 0, []agent.SubagentReference{{AgentID: "child"}})
 	require.NoError(t, err)
 	require.Empty(t, result.Children[0].ResolvedPath)
 	require.False(t, *result.TokenUsage.SubagentTokensComplete)
 	require.Nil(t, result.TokenUsage.SubagentTokens)
+}
+
+func TestRolloutScanLimits_Defaults(t *testing.T) {
+	t.Parallel()
+
+	require.Equal(t, 500*time.Millisecond, defaultRolloutScanLimits.timeout)
+	require.Equal(t, 20_000, defaultRolloutScanLimits.candidateLimit)
+	require.Equal(t, int64(64<<10), defaultRolloutScanLimits.metadataByteLimit)
+	require.Equal(t, int64(128<<20), defaultRolloutScanLimits.bodyByteLimit)
+	require.Equal(t, int64(256<<20), defaultRolloutScanLimits.aggregateByteLimit)
+	require.Equal(t, 128, defaultRolloutScanLimits.readDirBatch)
+}
+
+func TestRolloutScanBudget_DefaultBoundaries(t *testing.T) {
+	t.Parallel()
+
+	start := time.Unix(1, 0)
+	now := start
+	limits := defaultRolloutScanLimits
+	limits.now = func() time.Time { return now }
+
+	candidates := newRolloutScanBudget(t.Context(), limits)
+	for range limits.candidateLimit {
+		require.NoError(t, candidates.observeCandidate())
+	}
+	require.ErrorIs(t, candidates.observeCandidate(), errRolloutScanBudget)
+
+	bytes := newRolloutScanBudget(t.Context(), limits)
+	require.NoError(t, bytes.observeBytes(limits.aggregateByteLimit))
+	require.ErrorIs(t, bytes.observeBytes(1), errRolloutScanBudget)
+
+	deadline := newRolloutScanBudget(t.Context(), limits)
+	now = start.Add(limits.timeout - time.Nanosecond)
+	require.NoError(t, deadline.check())
+	now = start.Add(limits.timeout)
+	require.ErrorIs(t, deadline.check(), errRolloutScanBudget)
+}
+
+func TestSubagentInventory_FallbackReadsOnlyMetadataForUnrelatedRollouts(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	unrelated := writeRollout(t, root, "unrelated.jsonl", "unrelated", nil)
+	require.NoError(t, os.WriteFile(unrelated, append(mustReadFile(t, unrelated), []byte(strings.Repeat("x", 1<<20))...), 0o600))
+	writeRollout(t, root, "wanted.jsonl", "wanted", []json.RawMessage{
+		tokenCountEvent(map[string]any{"total_token_usage": map[string]any{"input_tokens": 2, "cached_input_tokens": 0, "output_tokens": 1}}),
+	})
+
+	readByPath := make(map[string]int64)
+	ag := &CodexAgent{
+		RolloutRoots: []string{root},
+		observeRolloutRead: func(path string, n int) {
+			readByPath[path] += int64(n)
+		},
+	}
+	result, err := ag.ExtractWithSubagentInventory(t.Context(), nil, 0, []agent.SubagentReference{{AgentID: "wanted"}})
+	require.NoError(t, err)
+	require.True(t, *result.TokenUsage.SubagentTokensComplete)
+	require.Less(t, readByPath[unrelated], int64(4<<10), "unrelated rollout must not be read beyond its metadata prefix")
+}
+
+func TestRolloutScanLimits_FailClosed(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name   string
+		limits rolloutScanLimits
+		setup  func(*testing.T, string)
+		refs   []agent.SubagentReference
+	}{
+		{
+			name:   "candidate count",
+			limits: testRolloutScanLimits(1, 64<<10, 128<<20, 256<<20),
+			setup: func(t *testing.T, root string) {
+				writeRollout(t, root, "one.jsonl", "one", nil)
+				writeRollout(t, root, "two.jsonl", "two", nil)
+			},
+			refs: []agent.SubagentReference{{AgentID: "one"}, {AgentID: "two"}},
+		},
+		{
+			name:   "metadata bytes",
+			limits: testRolloutScanLimits(10, 8, 128<<20, 256<<20),
+			setup: func(t *testing.T, root string) {
+				writeRollout(t, root, "child.jsonl", "child", nil)
+			},
+			refs: []agent.SubagentReference{{AgentID: "child"}},
+		},
+		{
+			name:   "body bytes",
+			limits: testRolloutScanLimits(10, 64<<10, 80, 256<<20),
+			setup: func(t *testing.T, root string) {
+				writeRollout(t, root, "child.jsonl", "child", []json.RawMessage{patchEvent("child.txt")})
+			},
+			refs: []agent.SubagentReference{{AgentID: "child"}},
+		},
+		{
+			name:   "aggregate bytes",
+			limits: testRolloutScanLimits(10, 64<<10, 1<<20, 120),
+			setup: func(t *testing.T, root string) {
+				writeRollout(t, root, "one.jsonl", "one", []json.RawMessage{patchEvent("one.txt")})
+				writeRollout(t, root, "two.jsonl", "two", []json.RawMessage{patchEvent("two.txt")})
+			},
+			refs: []agent.SubagentReference{{AgentID: "one"}, {AgentID: "two"}},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			root := t.TempDir()
+			tt.setup(t, root)
+			ag := &CodexAgent{RolloutRoots: []string{root}, scanLimits: &tt.limits}
+			result, err := ag.ExtractWithSubagentInventory(t.Context(), nil, 0, tt.refs)
+			require.NoError(t, err)
+			require.NotNil(t, result.TokenUsage)
+			require.Nil(t, result.TokenUsage.SubagentTokens)
+			require.NotNil(t, result.TokenUsage.SubagentTokensComplete)
+			require.False(t, *result.TokenUsage.SubagentTokensComplete)
+			for _, child := range result.Children {
+				require.Empty(t, child.ResolvedPath, "a scan breach must discard all partial fallback matches")
+			}
+		})
+	}
+}
+
+func TestSubagentInventory_IncrementalCancellation(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	writeRollout(t, root, "child.jsonl", "child", nil)
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	ag := &CodexAgent{RolloutRoots: []string{root}}
+	result, err := ag.ExtractWithSubagentInventory(ctx, nil, 0, []agent.SubagentReference{{AgentID: "child"}})
+	require.NoError(t, err)
+	require.False(t, *result.TokenUsage.SubagentTokensComplete)
+	require.Empty(t, result.Children[0].ResolvedPath)
+}
+
+func testRolloutScanLimits(candidateLimit int, metadata, body, aggregate int64) rolloutScanLimits {
+	return rolloutScanLimits{
+		timeout:            time.Hour,
+		candidateLimit:     candidateLimit,
+		metadataByteLimit:  metadata,
+		bodyByteLimit:      body,
+		aggregateByteLimit: aggregate,
+		readDirBatch:       2,
+		now:                time.Now,
+	}
+}
+
+func mustReadFile(t *testing.T, path string) []byte {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	require.NoError(t, err)
+	return data
 }
 
 func writeRollout(t *testing.T, root, name, id string, events []json.RawMessage) string {

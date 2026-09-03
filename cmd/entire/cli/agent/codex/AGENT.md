@@ -311,7 +311,8 @@ The `systemMessage` field can be used to display messages to the user via the ag
 - The `transcript_path` field in hook payloads provides the exact path
 - Format: JSONL (line-delimited JSON)
 - Session ID extraction: `session_id` field from hook payload (UUID format)
-- Transcript may be null in `--ephemeral` mode
+- Transcript may be null in `--ephemeral` mode; root ownership cannot be
+  verified, so Entire skips turn lifecycle mutation and checkpoint capture.
 
 **Note:** Codex's primary storage is SQLite (`~/.codex/state`), but the JSONL rollout file is the file-based transcript we can read. The `transcript_path` in hook payloads points to this file.
 
@@ -341,7 +342,15 @@ The `systemMessage` field can be used to display messages to the user via the ag
 - **SessionEnd must be trusted before it fires:** Codex silently skips hooks with no `trusted_hash` entry in the user's `config.toml`. Existing users have trusted the four older events but not `session_end`, so the hook does nothing until they approve it via `/hooks` inside Codex. `HookTrustGaps` and `InspectHookConfig(...).Missing` both cover `session_end`, so `entire doctor` and the SessionStart banner say so — without that it would fail silently. The e2e suite pre-trusts hooks by generating the same hashes itself (`e2e/agents/codex_trust.go`), so **an event added to `managedHooks` must also be added to `codexHookEventLabels`, the `codexHookEvents` struct, and the `codexEventGroups` switch there** — all three, or it is installed but inert for every e2e run; `TestCodexHookTrustState_CoversEveryInstalledEvent` fails when they drift.
 - **A pre-SessionEnd install still counts as installed:** `AreHooksInstalled` gates on the core events only, so adding an event does not retroactively drop Codex out of `entire status` and the agent pickers for everyone who enabled it earlier. The stale install is reported as drift through `InspectHookConfig(...).Missing` instead, with `entire enable` as the fix.
 - **`reason` carries no information:** always `"other"`, so a session ended by `/clear` is indistinguishable from one ended by quitting.
-- **Transcript may be null:** In `--ephemeral` mode, `transcript_path` is null. The integration handles this gracefully.
+- **Transcript may be null:** In `--ephemeral` mode, `transcript_path` is null.
+  Entire fails closed: it emits a categorized diagnostic and skips TurnStart /
+  TurnEnd state mutation and checkpoint capture because the root rollout cannot
+  be verified. Ephemeral Codex sessions therefore are not tracked.
+- **Unreadable, malformed, or future rollout metadata also fails closed:** the
+  turn hook emits a diagnostic categorized as `unreadable_transcript`,
+  `malformed_session_metadata`, or `unclassified_source`, then performs no root
+  lifecycle mutation. This prevents a child or unknown future rollout shape
+  from being attributed to the root session.
 - **No hooks fire under `-s read-only`:** verified against 0.147.0 — a `codex exec -s read-only` run produces no hook invocations at all, so no session is tracked. `-s workspace-write` fires the full set.
 - **Subagent identity fields are inverted from their names:** `SubagentStart` / `SubagentStop` (schemas at `codex-rs/hooks/schema/generated/subagent-{start,stop}.command.input.schema.json`) send `session_id` = the identity shared by the root thread *and every descendant*, i.e. the user's session, which maps straight to Entire's SessionID; `agent_id` = the subagent thread's own id. Codex sends no `tool_use_id`, so `agent_id` doubles as Entire's ToolUseID — it is the only value correlating a start with its stop, and Entire keys pre-task state and the task metadata directory on it. Getting this backwards attributes subagent work to a session Entire has never seen.
 - **`SubagentStop` is provisional, not authoritative completion.** It carries two transcripts: `transcript_path` is the *parent* rollout and `agent_transcript_path` the child rollout. Entire retains the child identity and declared path, then accepts a rollout only after its first `session_meta.id` exactly matches `agent_id`, it is a regular file, and the same verified bytes are analyzed. A hook-supplied filename is never trusted by itself.
