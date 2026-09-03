@@ -126,7 +126,7 @@ func resolveNativeCloneURL(ctx context.Context, c *coreapi.Client, project, repo
 var mirrorCloneRefPrefixRe = regexp.MustCompile(`^/?gh/`)
 
 // cloneRefShapes lists every ref shape `repo clone` accepts, for error text.
-const cloneRefShapes = "/et/<project>/<repo>, <project>/<repo>, /gh/<owner>/<repo>, or a full entire:// URL"
+const cloneRefShapes = "/et/<project>/<repo>, /gh/<owner>/<repo>, or a full entire:// URL"
 
 // invalidCloneRefError explains why ref matched none of the clone grammars.
 // A GitHub URL gets pointed at the `/gh/` form it should have been; a `gh/`
