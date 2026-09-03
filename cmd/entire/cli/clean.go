@@ -14,6 +14,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/entiredir"
+	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/osroot"
@@ -166,12 +167,12 @@ func previewCurrentHead(ctx context.Context, w io.Writer) error {
 	if err != nil {
 		return fmt.Errorf("failed to get worktree path: %w", err)
 	}
-	worktreeID, err := paths.GetWorktreeID(worktreePath)
+	metadata, err := gitrepo.ResolveWorktreeMetadata(worktreePath)
 	if err != nil {
 		return fmt.Errorf("failed to get worktree ID: %w", err)
 	}
 
-	shadowBranchName := checkpoint.ShadowBranchNameForCommit(head.Hash().String(), worktreeID)
+	shadowBranchName := checkpoint.ShadowBranchNameForCommit(head.Hash().String(), metadata.WorktreeID)
 
 	// Check if shadow branch exists
 	refName := plumbing.NewBranchReferenceName(shadowBranchName)

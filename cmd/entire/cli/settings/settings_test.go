@@ -14,7 +14,6 @@ import (
 	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/paths"
-	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 )
 
@@ -1238,7 +1237,6 @@ func TestLoad_AppliesClonePreferencesBeforeLocalSettings(t *testing.T) {
 	tmp := t.TempDir()
 	testutil.InitRepo(t, tmp)
 	t.Chdir(tmp)
-	session.ClearGitCommonDirCache()
 
 	entireDir := filepath.Join(tmp, ".entire")
 	if err := os.MkdirAll(entireDir, 0o750); err != nil {

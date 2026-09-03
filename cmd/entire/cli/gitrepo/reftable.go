@@ -38,7 +38,7 @@ const reftableGitTimeout = 30 * time.Second
 // `git refs migrate --ref-format=reftable`. Checking the directory avoids
 // parsing config and works for linked worktrees, where the shared stack lives
 // under the common git dir.
-func repoUsesReftable(dotGitPath, commonGitPath string) bool {
+func inspectRepoUsesReftable(dotGitPath, commonGitPath string) (bool, error) {
 	candidates := []string{filepath.Join(dotGitPath, "reftable")}
 	if commonGitPath != "" && commonGitPath != dotGitPath {
 		candidates = append(candidates, filepath.Join(commonGitPath, "reftable"))
@@ -48,11 +48,18 @@ func repoUsesReftable(dotGitPath, commonGitPath string) bool {
 		// symlink in its place is not a genuine reftable stack. Lstat inspects
 		// the entry itself rather than following the link, so a symlink reports
 		// IsDir()==false and is correctly not treated as a reftable repository.
-		if info, err := os.Lstat(dir); err == nil && info.IsDir() {
-			return true
+		info, err := os.Lstat(dir)
+		if err == nil {
+			if info.IsDir() {
+				return true, nil
+			}
+			continue
+		}
+		if !errors.Is(err, os.ErrNotExist) {
+			return false, fmt.Errorf("inspect reftable directory %s: %w", dir, err)
 		}
 	}
-	return false
+	return false, nil
 }
 
 // reftableStorer adapts a filesystem-backed go-git storage so it can open and

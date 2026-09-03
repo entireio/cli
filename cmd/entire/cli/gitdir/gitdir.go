@@ -18,9 +18,8 @@
 //     explaining that an unvalidated ID would be a path-traversal sink feeding
 //     os.RemoveAll. A root makes that structural instead of a precondition each
 //     caller has to keep honouring.
-//   - One directory handle per clone. The resolver shells out to git; before
-//     this package, strategy.GetGitCommonDir did so on *every* call with no
-//     cache at all, on hook paths.
+//   - One directory handle per clone. gitrepo owns physical metadata
+//     resolution; this package owns confined access to the resolved directory.
 //
 // Unlike .entire there is no create/no-create split: the common dir is the
 // repository, so it always exists by the time anything here is called. What
@@ -33,90 +32,26 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
-	"strings"
-	"sync"
 
+	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/entireio/cli/cmd/entire/cli/osroot"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 )
 
-var (
-	// resolveMu guards the resolved-path cache, which is keyed by the working
-	// directory the answer was derived in (see CommonDir).
-	resolveMu     sync.RWMutex
-	cachedDir     string
-	cachedFromCwd string
-)
-
-// CommonDir returns the absolute path of the git common directory, caching the
-// result per working directory.
-//
-// Absolute is the load-bearing word. `git rev-parse --git-common-dir` answers
-// relative to the process's directory — from a subdirectory it returns
-// "../../../.git" — and the two implementations this replaced passed that
-// straight through, so every path built on it was only valid while the process
-// stayed put. Resolving it once here means a stored lock path or queue path
-// still names the same file later, and it is what lets Open hold a handle
-// rather than re-resolving a string.
-func CommonDir(ctx context.Context) (string, error) {
-	cwd, err := os.Getwd() //nolint:forbidigo // cache key, and the base the git answer is relative to
+// OpenForCurrentWorktree returns the shared root over the current worktree's
+// common Git directory. It deliberately resolves on-disk worktree metadata;
+// Git environment overrides do not replace that metadata.
+func OpenForCurrentWorktree(ctx context.Context) (*os.Root, error) {
+	worktreeRoot, err := paths.WorktreeRoot(ctx)
 	if err != nil {
-		cwd = ""
+		return nil, fmt.Errorf("resolve worktree root: %w", err)
 	}
-
-	resolveMu.RLock()
-	if cachedDir != "" && cachedFromCwd == cwd {
-		cached := cachedDir
-		resolveMu.RUnlock()
-		return cached, nil
-	}
-	resolveMu.RUnlock()
-
-	// The environment is deliberately inherited rather than scrubbed with
-	// gitrepo.EnvWithoutRepoOverrides. The rule that exists for cmd.Dir/-C
-	// subprocesses is about not silently operating on the hook's repo when the
-	// caller meant a different one; here the hook's repo IS the target, so a
-	// GIT_DIR git exported to us is the right answer, not contamination.
-	cmd := exec.CommandContext(ctx, "git", "rev-parse", "--git-common-dir")
-	cmd.Dir = "."
-	output, err := cmd.Output()
+	metadata, err := gitrepo.ResolveWorktreeMetadata(worktreeRoot)
 	if err != nil {
-		return "", fmt.Errorf("failed to get git common dir: %w", err)
+		return nil, fmt.Errorf("resolve worktree metadata: %w", err)
 	}
-
-	dir, err := filepath.Abs(strings.TrimSpace(string(output)))
-	if err != nil {
-		return "", fmt.Errorf("resolve git common dir: %w", err)
-	}
-
-	resolveMu.Lock()
-	cachedDir = dir
-	cachedFromCwd = cwd
-	resolveMu.Unlock()
-
-	return dir, nil
-}
-
-// ClearCache forgets the resolved path. Tests that change directory call it;
-// production does not need to, because the cache is keyed by cwd.
-func ClearCache() {
-	resolveMu.Lock()
-	cachedDir = ""
-	cachedFromCwd = ""
-	resolveMu.Unlock()
-}
-
-// Open returns the shared *os.Root over the git common directory. The returned
-// root is owned by this package and shared with every other caller; do not
-// close it.
-func Open(ctx context.Context) (*os.Root, error) {
-	dir, err := CommonDir(ctx)
-	if err != nil {
-		return nil, err
-	}
-	return OpenAt(dir)
+	return OpenAt(metadata.CommonDir)
 }
 
 // OpenAt is Open for an explicit git directory — the common dir for callers that
@@ -146,39 +81,6 @@ func OpenAt(commonDir string) (*os.Root, error) {
 // clears those too.
 func Reset() {
 	osroot.ResetShared()
-	ClearCache()
-}
-
-// CommonDirForWorktree returns the absolute git common directory for the
-// repository at worktreeRoot, independent of the process's working directory.
-//
-// Callers acting on a repo passed as an argument (agent import, session adopt)
-// must use this rather than CommonDir: the cwd-resolved form answers for
-// whatever repo the process happens to be running in, which is how test
-// fixtures once leaked session state into a developer's real
-// .git/entire-sessions and hijacked commit linking.
-//
-// Not cached: the per-cwd cache CommonDir keeps would be wrong here, since the
-// answer varies with the argument rather than with the process.
-func CommonDirForWorktree(ctx context.Context, worktreeRoot string) (string, error) {
-	// An empty root would silently degrade to the process cwd (cmd.Dir = ""),
-	// reproducing exactly the accidental-repo leak this exists to prevent.
-	if worktreeRoot == "" {
-		return "", errors.New("gitdir: worktree root required to resolve a git common dir")
-	}
-	cmd := exec.CommandContext(ctx, "git", "rev-parse", "--git-common-dir")
-	cmd.Dir = worktreeRoot
-	output, err := cmd.Output()
-	if err != nil {
-		return "", fmt.Errorf("resolve git common dir for %s: %w", worktreeRoot, err)
-	}
-	// git answers relative to cmd.Dir, so this resolves against worktreeRoot and
-	// never against the process's own directory.
-	dir := strings.TrimSpace(string(output))
-	if !filepath.IsAbs(dir) {
-		dir = filepath.Join(worktreeRoot, dir)
-	}
-	return filepath.Clean(dir), nil
 }
 
 // OpenPathIn returns the shared root for commonDir together with absPath's name

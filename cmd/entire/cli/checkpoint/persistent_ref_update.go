@@ -7,11 +7,13 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"strings"
 
+	"github.com/entireio/cli/cmd/entire/cli/gitdir"
+	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/entireio/cli/cmd/entire/cli/internal/flock"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
+	"github.com/entireio/cli/cmd/entire/cli/osroot"
 
 	"github.com/go-git/go-git/v6"
 	"github.com/go-git/go-git/v6/plumbing"
@@ -19,7 +21,7 @@ import (
 
 type persistentRefBuilder func() (newHash, expectedHash plumbing.Hash, err error)
 
-func repositoryDirs(ctx context.Context, repo *git.Repository) (worktreeRoot, commonDir string, err error) {
+func repositoryDirs(_ context.Context, repo *git.Repository) (worktreeRoot, commonDir string, err error) {
 	wt, err := repo.Worktree()
 	if err != nil {
 		return "", "", fmt.Errorf("open worktree: %w", err)
@@ -28,11 +30,11 @@ func repositoryDirs(ctx context.Context, repo *git.Repository) (worktreeRoot, co
 	if worktreeRoot == "" {
 		return "", "", errors.New("repository worktree filesystem has no root path")
 	}
-	commonDir, err = resolveGitCommonDir(ctx, repo)
+	metadata, err := gitrepo.ResolveWorktreeMetadata(worktreeRoot)
 	if err != nil {
-		return "", "", err
+		return "", "", fmt.Errorf("resolve repository metadata: %w", err)
 	}
-	return worktreeRoot, commonDir, nil
+	return worktreeRoot, metadata.CommonDir, nil
 }
 
 // casUpdateRef atomically updates refName through native Git's lock protocol.
@@ -59,21 +61,25 @@ func casUpdateRef(ctx context.Context, repoRoot string, refName plumbing.Referen
 	return fmt.Errorf("git update-ref %s: %s: %w", refName, strings.TrimSpace(out), err)
 }
 
-func persistentRefLockPath(commonDir string, refName plumbing.ReferenceName) (string, error) {
-	lockDir := filepath.Join(commonDir, "entire-persistent-ref-locks")
-	if err := os.MkdirAll(lockDir, 0o750); err != nil {
-		return "", fmt.Errorf("create persistent ref lock directory: %w", err)
+func persistentRefLock(commonDir string, refName plumbing.ReferenceName) (*os.Root, string, error) {
+	root, err := gitdir.OpenAt(commonDir)
+	if err != nil {
+		return nil, "", fmt.Errorf("open git common dir: %w", err)
+	}
+	const lockDir = "entire-persistent-ref-locks"
+	if err := osroot.MkdirAllNoSymlink(root, lockDir, 0o750); err != nil {
+		return nil, "", fmt.Errorf("create persistent ref lock directory: %w", err)
 	}
 	safe := strings.NewReplacer("/", "_", "\\", "_", ":", "_").Replace(refName.String())
-	return filepath.Join(lockDir, safe+".lock"), nil
+	return root, lockDir + "/" + safe + ".lock", nil
 }
 
 func withPersistentRefFlock(ctx context.Context, commonDir string, refName plumbing.ReferenceName, fn func() error) error {
-	path, err := persistentRefLockPath(commonDir, refName)
+	root, name, err := persistentRefLock(commonDir, refName)
 	if err != nil {
 		return err
 	}
-	release, err := flock.AcquireContext(ctx, path)
+	release, err := flock.AcquireContextIn(ctx, root, name)
 	if err != nil {
 		return fmt.Errorf("acquire persistent ref flock %s: %w", refName, err)
 	}

@@ -438,8 +438,8 @@ func reconcileWorktreePathForResumedTurn(ctx context.Context, state *SessionStat
 	// Only repoint onto another main worktree. Resuming into a linked worktree
 	// would reintroduce the WorktreeID/WorktreePath disalignment from the other
 	// direction, so leave those alone.
-	currentWorktreeID, err := paths.GetWorktreeID(current)
-	if err != nil || currentWorktreeID != "" {
+	currentMetadata, err := gitrepo.ResolveWorktreeMetadata(current)
+	if err != nil || currentMetadata.WorktreeID != "" {
 		return
 	}
 
@@ -644,7 +644,7 @@ func (s *ManualCommitStrategy) initializeSession(ctx context.Context, repo *git.
 	}
 
 	// Get worktree ID for shadow branch naming
-	worktreeID, err := paths.GetWorktreeID(worktreePath)
+	metadata, err := gitrepo.ResolveWorktreeMetadata(worktreePath)
 	if err != nil {
 		return fmt.Errorf("failed to get worktree ID: %w", err)
 	}
@@ -671,7 +671,7 @@ func (s *ManualCommitStrategy) initializeSession(ctx context.Context, repo *git.
 		BaseCommit:            headHash,
 		AttributionBaseCommit: headHash,
 		WorktreePath:          worktreePath,
-		WorktreeID:            worktreeID,
+		WorktreeID:            metadata.WorktreeID,
 		StartedAt:             now,
 		LastInteractionTime:   &now,
 		TurnID:                turnID.String(),

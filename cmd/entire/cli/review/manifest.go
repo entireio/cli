@@ -15,6 +15,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	agenttypes "github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/gitdir"
+	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/osroot"
@@ -770,11 +771,11 @@ func localReviewManifestStore(ctx context.Context) (*os.Root, string, error) {
 	if err != nil {
 		return nil, "", fmt.Errorf("resolve worktree root: %w", err)
 	}
-	commonDir, err := gitdir.CommonDirForWorktree(ctx, worktreeRoot)
+	metadata, err := gitrepo.ResolveWorktreeMetadata(worktreeRoot)
 	if err != nil {
 		return nil, "", fmt.Errorf("resolve git common dir: %w", err)
 	}
-	root, err := gitdir.OpenAt(commonDir)
+	root, err := gitdir.OpenAt(metadata.CommonDir)
 	if err != nil {
 		return nil, "", fmt.Errorf("open git common dir: %w", err)
 	}

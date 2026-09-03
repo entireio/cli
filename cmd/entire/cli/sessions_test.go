@@ -44,7 +44,6 @@ func setupStopTestRepo(t *testing.T) {
 	testutil.GitCommit(t, tmpDir, "init")
 	t.Chdir(tmpDir)
 	paths.ClearWorktreeRootCache()
-	session.ClearGitCommonDirCache()
 }
 
 // makeSessionState returns a minimal SessionState suitable for test setup.
@@ -437,7 +436,6 @@ func TestStopCmd_NotGitRepo(t *testing.T) {
 	tmpDir := t.TempDir()
 	t.Chdir(tmpDir)
 	paths.ClearWorktreeRootCache()
-	session.ClearGitCommonDirCache()
 
 	cmd := newSessionsCmd()
 	var stdout, stderr bytes.Buffer
@@ -808,7 +806,6 @@ func TestListCmd_NotGitRepo(t *testing.T) {
 	tmpDir := t.TempDir()
 	t.Chdir(tmpDir)
 	paths.ClearWorktreeRootCache()
-	session.ClearGitCommonDirCache()
 
 	cmd := newSessionsCmd()
 	var stdout bytes.Buffer
@@ -3248,7 +3245,6 @@ func TestInfoCmd_NotGitRepo(t *testing.T) {
 	tmpDir := t.TempDir()
 	t.Chdir(tmpDir)
 	paths.ClearWorktreeRootCache()
-	session.ClearGitCommonDirCache()
 
 	cmd := newSessionsCmd()
 	var stdout, stderr bytes.Buffer

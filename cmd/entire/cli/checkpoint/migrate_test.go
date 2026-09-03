@@ -217,11 +217,14 @@ func TestMigrateBranchToRefs_IdempotentRerunDoesNotUpdateRef(t *testing.T) {
 				t.Helper()
 				_, commonDir, err := repositoryDirs(t.Context(), repo)
 				require.NoError(t, err)
-				lockPath, err := persistentRefLockPath(commonDir, refName)
+				root, lockName, err := persistentRefLock(commonDir, refName)
 				require.NoError(t, err)
-				release, err := flock.Acquire(lockPath)
+				release, err := flock.AcquireIn(root, lockName)
 				require.NoError(t, err)
-				t.Cleanup(release)
+				t.Cleanup(func() {
+					release()
+					require.NoError(t, root.Close())
+				})
 			},
 		},
 		{

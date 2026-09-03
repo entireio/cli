@@ -3,13 +3,37 @@ package checkpoint
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/entireio/cli/cmd/entire/cli/osroot"
 
 	"github.com/go-git/go-git/v6/plumbing"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func TestPushQueue_RejectsSymlinkedQueue(t *testing.T) {
+	t.Parallel()
+	if runtime.GOOS == windowsOS {
+		t.Skip("symlink creation requires privileges on some Windows builders")
+	}
+
+	dir := t.TempDir()
+	target := filepath.Join(dir, "config")
+	require.NoError(t, os.WriteFile(target, []byte("unchanged"), 0o600))
+	require.NoError(t, os.Symlink("config", filepath.Join(dir, pushQueueFileName)))
+	q := NewPushQueue(dir)
+
+	err := q.Enqueue(mustRefName(t, "a1b2c3d4e5f6"))
+	require.ErrorIs(t, err, osroot.ErrSymlinkedPath)
+	_, err = q.Drain()
+	require.ErrorIs(t, err, osroot.ErrSymlinkedPath)
+	data, err := os.ReadFile(target)
+	require.NoError(t, err)
+	require.Equal(t, "unchanged", string(data))
+}
 
 func TestPushQueue_EnqueueDrainRemove(t *testing.T) {
 	t.Parallel()

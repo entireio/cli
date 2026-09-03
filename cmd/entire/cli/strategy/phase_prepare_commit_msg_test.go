@@ -11,6 +11,7 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
+	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/trailers"
@@ -154,8 +155,9 @@ func TestPrepareCommitMsg_StaleTaskRecordOnly_NoTrailerButStillCondensable(t *te
 	s := &ManualCommitStrategy{}
 	worktreePath, err := paths.WorktreeRoot(ctx)
 	require.NoError(t, err)
-	worktreeID, err := paths.GetWorktreeID(worktreePath)
+	metadata, err := gitrepo.ResolveWorktreeMetadata(worktreePath)
 	require.NoError(t, err)
+	worktreeID := metadata.WorktreeID
 	head, err := repo.Head()
 	require.NoError(t, err)
 

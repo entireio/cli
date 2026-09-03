@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -18,6 +19,26 @@ import (
 	"github.com/go-git/go-git/v6"
 	"github.com/stretchr/testify/require"
 )
+
+func TestRedactCache_RejectsUnexpectedOrSymlinkedPrefixFile(t *testing.T) {
+	t.Parallel()
+	if runtime.GOOS == windowsOS {
+		t.Skip("symlink creation requires privileges on some Windows builders")
+	}
+
+	cache := newRedactCache(t.TempDir())
+	require.NotNil(t, cache)
+	treePath := "transcript.jsonl"
+	_, err := cache.readPrefix(nil, treePath, &redactPrefixEntry{RedactedFile: "other.prefix"}, 0)
+	require.ErrorContains(t, err, "unexpected prefix file")
+
+	targetName := cache.name + "/planted"
+	require.NoError(t, osroot.WriteFile(cache.root, targetName, []byte("planted"), 0o600))
+	prefixName := prefixFileName(treePath)
+	require.NoError(t, os.Symlink("planted", filepath.Join(cache.dir, prefixName)))
+	_, err = cache.readPrefix(nil, treePath, &redactPrefixEntry{RedactedFile: prefixName}, 0)
+	require.ErrorIs(t, err, osroot.ErrSymlinkedPath)
+}
 
 // transcriptLines builds JSONL lines that all contain redactable material, so
 // any splicing bug shows up as a content difference rather than passing by luck.

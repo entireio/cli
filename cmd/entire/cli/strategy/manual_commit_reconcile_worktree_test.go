@@ -5,7 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/entireio/cli/cmd/entire/cli/paths"
+	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 	"github.com/stretchr/testify/require"
 )
@@ -71,8 +71,9 @@ func TestReconcileWorktreePathForResumedTurn_LeavesLinkedWorktreeSessionUntouche
 	linkedDir := filepath.Join(mainDir, ".worktrees", "feature")
 	createSessionMatchWorktree(t, mainDir, linkedDir, "feature")
 
-	linkedID, err := paths.GetWorktreeID(linkedDir)
+	metadata, err := gitrepo.ResolveWorktreeMetadata(linkedDir)
 	require.NoError(t, err)
+	linkedID := metadata.WorktreeID
 	require.NotEmpty(t, linkedID, "linked worktree must have a non-empty WorktreeID")
 
 	state := &SessionState{

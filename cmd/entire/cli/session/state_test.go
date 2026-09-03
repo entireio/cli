@@ -35,8 +35,6 @@ func TestNewStateStore_AllowsTempRepoUnderGoTest(t *testing.T) {
 	dir := t.TempDir()
 	testutil.InitRepo(t, dir)
 	t.Chdir(dir)
-	ClearGitCommonDirCache()
-	t.Cleanup(ClearGitCommonDirCache)
 
 	store, err := NewStateStore(context.Background())
 	require.NoError(t, err)
@@ -74,6 +72,23 @@ func TestNewStateStoreForWorktree_RefusesUnisolatedAndEmptyRoots(t *testing.T) {
 
 	_, err = NewStateStoreForWorktree(context.Background(), "")
 	require.Error(t, err, "an empty root silently resolves from CWD — the exact leak shape")
+}
+
+func TestNewStateStoreForWorktree_ObservesMetadataRepair(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	testutil.InitRepo(t, dir)
+	commonFile := filepath.Join(dir, ".git", "commondir")
+	require.NoError(t, os.WriteFile(commonFile, []byte("missing\n"), 0o600))
+
+	store, err := NewStateStoreForWorktree(context.Background(), dir)
+	require.ErrorContains(t, err, "resolve git common dir")
+	require.Nil(t, store)
+
+	require.NoError(t, os.Remove(commonFile))
+	store, err = NewStateStoreForWorktree(context.Background(), dir)
+	require.NoError(t, err, "a metadata repair must be observed without clearing a cache")
+	require.NotNil(t, store)
 }
 
 func TestState_CondensationAttemptLifecycle(t *testing.T) {
@@ -629,109 +644,6 @@ func TestStateStore_List_EmptyDir(t *testing.T) {
 	states, err := store.List(context.Background())
 	require.NoError(t, err)
 	assert.Empty(t, states)
-}
-
-// initTestRepo creates a temp dir with a git repo and chdirs into it.
-// Cannot use t.Parallel() because of t.Chdir.
-func initTestRepo(t *testing.T) string {
-	t.Helper()
-	dir := t.TempDir()
-	// Resolve symlinks (macOS /var -> /private/var)
-	if resolved, err := filepath.EvalSymlinks(dir); err == nil {
-		dir = resolved
-	}
-	testutil.InitRepo(t, dir)
-	t.Chdir(dir)
-	ClearGitCommonDirCache()
-	return dir
-}
-
-func TestGetGitCommonDir_ReturnsValidPath(t *testing.T) {
-	dir := initTestRepo(t)
-
-	commonDir, err := GetGitCommonDir(context.Background())
-	require.NoError(t, err)
-
-	// Absolute by contract: `git rev-parse --git-common-dir` answers relative to
-	// cwd, and every path built on the result would otherwise stop being valid
-	// as soon as anything changed directory.
-	assert.True(t, filepath.IsAbs(commonDir), "common dir must be absolute, got %q", commonDir)
-	assert.Equal(t, filepath.Join(dir, ".git"), commonDir)
-
-	// The path should actually exist
-	info, err := os.Stat(commonDir)
-	require.NoError(t, err)
-	assert.True(t, info.IsDir())
-}
-
-func TestGetGitCommonDir_CachesResult(t *testing.T) {
-	initTestRepo(t)
-
-	// First call populates cache
-	first, err := GetGitCommonDir(context.Background())
-	require.NoError(t, err)
-
-	// Second call should return the same result (from cache)
-	second, err := GetGitCommonDir(context.Background())
-	require.NoError(t, err)
-
-	assert.Equal(t, first, second)
-}
-
-func TestGetGitCommonDir_ClearCache(t *testing.T) {
-	initTestRepo(t)
-
-	first, err := GetGitCommonDir(context.Background())
-	require.NoError(t, err)
-
-	ClearGitCommonDirCache()
-	second, err := GetGitCommonDir(context.Background())
-	require.NoError(t, err)
-	assert.Equal(t, first, second)
-}
-
-func TestGetGitCommonDir_InvalidatesOnCwdChange(t *testing.T) {
-	// Create two separate repos
-	dir1 := t.TempDir()
-	if resolved, err := filepath.EvalSymlinks(dir1); err == nil {
-		dir1 = resolved
-	}
-	testutil.InitRepo(t, dir1)
-
-	dir2 := t.TempDir()
-	if resolved, err := filepath.EvalSymlinks(dir2); err == nil {
-		dir2 = resolved
-	}
-	testutil.InitRepo(t, dir2)
-
-	ClearGitCommonDirCache()
-
-	// Populate cache from dir1
-	t.Chdir(dir1)
-	first, err := GetGitCommonDir(context.Background())
-	require.NoError(t, err)
-	absFirst, err := filepath.Abs(first)
-	require.NoError(t, err)
-	assert.Equal(t, filepath.Join(dir1, ".git"), absFirst)
-
-	// Change to dir2 — cache should miss and resolve to dir2's .git
-	t.Chdir(dir2)
-	second, err := GetGitCommonDir(context.Background())
-	require.NoError(t, err)
-	absSecond, err := filepath.Abs(second)
-	require.NoError(t, err)
-	assert.Equal(t, filepath.Join(dir2, ".git"), absSecond)
-
-	assert.NotEqual(t, absFirst, absSecond)
-}
-
-func TestGetGitCommonDir_ErrorOutsideRepo(t *testing.T) {
-	dir := t.TempDir()
-	t.Chdir(dir)
-	ClearGitCommonDirCache()
-
-	_, err := GetGitCommonDir(context.Background())
-	assert.Error(t, err)
 }
 
 func TestState_KindRoundTrip(t *testing.T) {

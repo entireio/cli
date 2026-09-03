@@ -472,7 +472,7 @@ func discoverLocalRepoRoots(ctx context.Context, currentRepo string) []string {
 				continue
 			}
 			candidate := filepath.Join(parent, entry.Name())
-			if _, statErr := os.Stat(filepath.Join(candidate, ".git")); statErr != nil {
+			if _, metadataErr := gitrepo.ResolveWorktreeMetadata(candidate); metadataErr != nil {
 				continue
 			}
 			candidates = append(candidates, candidate)

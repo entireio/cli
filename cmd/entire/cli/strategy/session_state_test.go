@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sync"
 	"testing"
 	"time"
@@ -19,6 +20,58 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func TestSessionStateLockPaths_DeduplicatePhysicalAliases(t *testing.T) {
+	t.Parallel()
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink creation requires privileges on some Windows builders")
+	}
+
+	commonDir := filepath.Join(t.TempDir(), "common")
+	require.NoError(t, os.MkdirAll(commonDir, 0o750))
+	alias := filepath.Join(t.TempDir(), "common-alias")
+	require.NoError(t, os.Symlink(commonDir, alias))
+
+	lockPaths, err := sessionStateLockPaths("physical-alias-session", []string{alias, commonDir})
+	require.NoError(t, err)
+	require.Len(t, lockPaths, 1)
+	physicalCommonDir, err := filepath.EvalSymlinks(commonDir)
+	require.NoError(t, err)
+	require.Equal(t, filepath.Join(physicalCommonDir, "entire-session-locks", "physical-alias-session.lock"), lockPaths[0])
+}
+
+func TestWithSessionStateLocks_DeduplicatesPhysicalAliasesBeforeAcquire(t *testing.T) {
+	t.Parallel()
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink creation requires privileges on some Windows builders")
+	}
+
+	commonDir := filepath.Join(t.TempDir(), "common")
+	require.NoError(t, os.MkdirAll(commonDir, 0o750))
+	alias := filepath.Join(t.TempDir(), "common-alias")
+	require.NoError(t, os.Symlink(commonDir, alias))
+
+	done := make(chan error, 1)
+	go func() {
+		done <- WithSessionStateLocks(context.Background(), "physical-alias-session", []string{alias, commonDir}, func() error {
+			return nil
+		})
+	}()
+
+	select {
+	case err := <-done:
+		require.NoError(t, err)
+	case <-time.After(2 * time.Second):
+		t.Fatal("lock acquisition tried to take the same physical lock twice")
+	}
+}
+
+func TestSessionStateLockPaths_RejectsUnresolvedIdentity(t *testing.T) {
+	t.Parallel()
+
+	_, err := sessionStateLockPaths("missing-common-dir", []string{filepath.Join(t.TempDir(), "missing")})
+	require.ErrorContains(t, err, "resolve physical git common dir")
+}
 
 // TestLoadSessionState_PackageLevel tests the package-level LoadSessionState function.
 func TestLoadSessionState_PackageLevel(t *testing.T) {

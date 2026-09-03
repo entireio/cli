@@ -2,11 +2,46 @@ package investigate
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
+
+	"github.com/entireio/cli/cmd/entire/cli/osroot"
 )
+
+func TestStateStore_RemoveRunRejectsSymlinkedStoreDirectory(t *testing.T) {
+	t.Parallel()
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink creation requires privileges on some Windows builders")
+	}
+
+	parent := t.TempDir()
+	outside := t.TempDir()
+	runID := "fedcba987654"
+	runDir := filepath.Join(outside, runID)
+	if err := os.MkdirAll(runDir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	marker := filepath.Join(runDir, "keep")
+	if err := os.WriteFile(marker, []byte("keep"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(parent, InvestigationsDirName)); err != nil {
+		t.Fatal(err)
+	}
+
+	store := NewStateStoreWithDir(filepath.Join(parent, InvestigationsDirName))
+	err := store.RemoveRun(runID)
+	if !errors.Is(err, osroot.ErrSymlinkedPath) {
+		t.Fatalf("RemoveRun() error = %v, want %v", err, osroot.ErrSymlinkedPath)
+	}
+	if _, err := os.Stat(marker); err != nil {
+		t.Fatalf("outside marker was removed: %v", err)
+	}
+}
 
 func TestStateStore_SaveLoadRoundTrip(t *testing.T) {
 	t.Parallel()

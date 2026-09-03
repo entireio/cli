@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"path/filepath"
 	"strings"
 	"time"
 
@@ -16,6 +15,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/execx"
 	"github.com/entireio/cli/cmd/entire/cli/gitdir"
 	"github.com/entireio/cli/cmd/entire/cli/gitremote"
+	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/entireio/cli/cmd/entire/cli/internal/flock"
 	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
@@ -126,29 +126,29 @@ func trailEnablementRepoKey(forge, owner, repo string) string {
 }
 
 func saveTrailEnablementScopeHint(ctx context.Context, sessionID string, scope trailEnablementScope) error {
-	path, err := trailEnablementScopeHintPath(ctx, sessionID)
+	root, name, err := trailEnablementScopeHintStore(ctx, sessionID)
 	if err != nil {
 		return err
 	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
+	if err := osroot.MkdirAllNoSymlink(root, session.SessionStateDirName, 0o750); err != nil {
 		return fmt.Errorf("create session state dir: %w", err)
 	}
 	data, err := jsonutil.MarshalIndentWithNewline(scope, "", "  ")
 	if err != nil {
 		return fmt.Errorf("marshal trail scope hint: %w", err)
 	}
-	if err := jsonutil.WriteFileAtomic(path, data, 0o600); err != nil {
+	if err := jsonutil.WriteFileAtomicIn(root, name, data, 0o600); err != nil {
 		return fmt.Errorf("write trail scope hint: %w", err)
 	}
 	return nil
 }
 
 func loadTrailEnablementScopeHint(ctx context.Context, sessionID string) (trailEnablementScope, bool, error) {
-	path, err := trailEnablementScopeHintPath(ctx, sessionID)
+	root, name, err := trailEnablementScopeHintStore(ctx, sessionID)
 	if err != nil {
 		return trailEnablementScope{}, false, err
 	}
-	data, err := os.ReadFile(path) //nolint:gosec // path is derived from validated session ID
+	data, err := osroot.ReadFileNoFollow(root, name)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return trailEnablementScope{}, false, nil
@@ -162,15 +162,23 @@ func loadTrailEnablementScopeHint(ctx context.Context, sessionID string) (trailE
 	return scope, true, nil
 }
 
-func trailEnablementScopeHintPath(ctx context.Context, sessionID string) (string, error) {
+func trailEnablementScopeHintStore(ctx context.Context, sessionID string) (*os.Root, string, error) {
 	if err := validation.ValidateSessionID(sessionID); err != nil {
-		return "", fmt.Errorf("invalid session ID: %w", err)
+		return nil, "", fmt.Errorf("invalid session ID: %w", err)
 	}
-	commonDir, err := session.GetGitCommonDir(ctx)
+	worktreeRoot, err := paths.WorktreeRoot(ctx)
 	if err != nil {
-		return "", fmt.Errorf("resolve git common dir: %w", err)
+		return nil, "", fmt.Errorf("resolve worktree root: %w", err)
 	}
-	return filepath.Join(commonDir, session.SessionStateDirName, sessionID+".trail-scope.json"), nil
+	metadata, err := gitrepo.ResolveWorktreeMetadata(worktreeRoot)
+	if err != nil {
+		return nil, "", fmt.Errorf("resolve git common dir: %w", err)
+	}
+	root, err := gitdir.OpenAt(metadata.CommonDir)
+	if err != nil {
+		return nil, "", fmt.Errorf("open git common dir: %w", err)
+	}
+	return root, session.SessionStateDirName + "/" + sessionID + ".trail-scope.json", nil
 }
 
 func saveTrailsEnabledForRepo(ctx context.Context, enabled bool) error {
@@ -203,13 +211,10 @@ func saveTrailsEnabledForRemote(ctx context.Context, forge, owner, repo string, 
 // the outlives-the-deadline guarantee lives at this one point rather than at
 // each call site.
 //
-// The write is not purely local: ClonePreferencesPath resolves the git common
-// dir with `git rev-parse` under the passed ctx (session.getGitCommonDir). So a
-// refresh that answers the question at 2.9s of a 3s budget could then fail to
-// STORE the answer, leaving the cache "unknown" — precisely the state the
-// callers' branches exist to escape, and the one that makes SessionStart
-// re-fork a refresh child on every invocation. Losing the answer is strictly
-// worse than spending a few extra milliseconds past the deadline to keep it.
+// A refresh that answers the question at 2.9s of a 3s budget must still store
+// the answer after its deadline expires. ModifyClonePreferences may need to
+// discover the current worktree before its locked write, so cancellation here
+// would leave the cache "unknown" and make SessionStart repeatedly refresh it.
 func saveTrailsEnabledForScope(ctx context.Context, scope trailEnablementScope, enabled bool, checkedAt time.Time) error {
 	ctx = context.WithoutCancel(ctx)
 	enabledCopy := enabled
@@ -418,8 +423,8 @@ func spawnDetachedTrailEnablementRefresh(ctx context.Context) {
 	if err != nil {
 		return
 	}
-	if commonDir, err := session.GetGitCommonDir(ctx); err == nil &&
-		trailRefreshRecentlySpawned(commonDir, time.Now()) {
+	if metadata, metadataErr := gitrepo.ResolveWorktreeMetadata(worktreeRoot); metadataErr == nil &&
+		trailRefreshRecentlySpawned(metadata.CommonDir, time.Now()) {
 		return
 	}
 	trailRefreshSpawn(worktreeRoot)

@@ -14,6 +14,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
+	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
@@ -70,7 +71,6 @@ func TestCommitHookPerformance(t *testing.T) {
 			dir := localClone(t, cacheDir)
 			t.Chdir(dir)
 			paths.ClearWorktreeRootCache()
-			session.ClearGitCommonDirCache()
 
 			// Seed 200 branches + pack refs for realistic ref scanning overhead.
 			seedBranches(t, dir, 200)
@@ -94,7 +94,6 @@ func TestCommitHookPerformance(t *testing.T) {
 			// Simulate TTY path with commit_linking=always.
 			t.Setenv("ENTIRE_TEST_TTY", "1")
 			paths.ClearWorktreeRootCache()
-			session.ClearGitCommonDirCache()
 
 			commitMsgFile := filepath.Join(dir, ".git", "COMMIT_EDITMSG")
 			if err := os.WriteFile(commitMsgFile, []byte("implement feature\n"), 0o644); err != nil {
@@ -130,7 +129,6 @@ func TestCommitHookPerformance(t *testing.T) {
 
 			// Time PostCommit.
 			paths.ClearWorktreeRootCache()
-			session.ClearGitCommonDirCache()
 
 			s2 := &ManualCommitStrategy{}
 			postStart := time.Now()
@@ -408,10 +406,11 @@ func seedHookPerfSessions(t *testing.T, dir string, baseCommits []string, ended,
 
 	headCommit := baseCommits[0] // HEAD is always first
 
-	worktreeID, err := paths.GetWorktreeID(dir)
+	metadata, err := gitrepo.ResolveWorktreeMetadata(dir)
 	if err != nil {
 		t.Fatalf("worktree ID: %v", err)
 	}
+	worktreeID := metadata.WorktreeID
 
 	stateDir := filepath.Join(dir, ".git", session.SessionStateDirName)
 	if err := os.MkdirAll(stateDir, 0o755); err != nil {

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"maps"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"slices"
@@ -16,6 +17,7 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
+	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
@@ -79,7 +81,10 @@ func runAdopt(ctx context.Context, w io.Writer, sessionID string, opts adoptOpti
 	if err != nil {
 		return fmt.Errorf("open current session store: %w", err)
 	}
-	sameSessionStore := sameAdoptStore(sourceCommonDir, targetCommonDir)
+	sameSessionStore, err := sameAdoptStore(sourceCommonDir, targetCommonDir)
+	if err != nil {
+		return fmt.Errorf("compare source and target session stores: %w", err)
+	}
 	if sameSessionStore && sameAdoptPath(sourceWorktree, targetWorktree) {
 		return errors.New("source and target are the same worktree; no session adoption is needed")
 	}
@@ -132,9 +137,10 @@ func adoptFromExternalSessionStore(
 	sessionID string,
 	opts adoptOptions,
 ) (*session.State, []string, error) {
-	sourceWorktreeID, worktreeIDErr := paths.GetWorktreeID(sourceWorktree)
-	if worktreeIDErr != nil {
-		sourceWorktreeID = ""
+	sourceMetadata, metadataErr := gitrepo.ResolveWorktreeMetadata(sourceWorktree)
+	sourceWorktreeID := ""
+	if metadataErr == nil {
+		sourceWorktreeID = sourceMetadata.WorktreeID
 	}
 
 	var adopted *session.State
@@ -222,9 +228,10 @@ func adoptFromSameSessionStore(ctx context.Context, sourceWorktree string, sourc
 		return nil, nil, fmt.Errorf("session %s is already tracked in this repo; rerun with --force to replace it", sourceState.SessionID)
 	}
 
-	sourceWorktreeID, worktreeIDErr := paths.GetWorktreeID(sourceWorktree)
-	if worktreeIDErr != nil {
-		sourceWorktreeID = ""
+	sourceMetadata, metadataErr := gitrepo.ResolveWorktreeMetadata(sourceWorktree)
+	sourceWorktreeID := ""
+	if metadataErr == nil {
+		sourceWorktreeID = sourceMetadata.WorktreeID
 	}
 
 	var adopted *session.State
@@ -284,6 +291,7 @@ func stateStoreForWorktree(ctx context.Context, worktreePath string) (*session.S
 	}
 
 	cmd := exec.CommandContext(ctx, "git", "-C", absWorktree, "rev-parse", "--show-toplevel", "--git-common-dir")
+	cmd.Env = gitrepo.EnvWithoutRepoOverrides()
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	output, err := cmd.Output()
@@ -310,9 +318,10 @@ func stateStoreForWorktree(ctx context.Context, worktreePath string) (*session.S
 }
 
 func selectAdoptSourceSession(ctx context.Context, store *session.StateStore, sourceWorktree, sessionID string) (*session.State, error) {
-	sourceWorktreeID, worktreeIDErr := paths.GetWorktreeID(sourceWorktree)
-	if worktreeIDErr != nil {
-		sourceWorktreeID = ""
+	sourceMetadata, metadataErr := gitrepo.ResolveWorktreeMetadata(sourceWorktree)
+	sourceWorktreeID := ""
+	if metadataErr == nil {
+		sourceWorktreeID = sourceMetadata.WorktreeID
 	}
 	if sessionID != "" {
 		sourceState, err := store.Load(ctx, sessionID)
@@ -428,7 +437,7 @@ func buildAdoptedSessionState(ctx context.Context, source *session.State) (*sess
 	if err != nil {
 		return nil, nil, fmt.Errorf("resolve current worktree root: %w", err)
 	}
-	worktreeID, err := paths.GetWorktreeID(worktreeRoot)
+	metadata, err := gitrepo.ResolveWorktreeMetadata(worktreeRoot)
 	if err != nil {
 		return nil, nil, fmt.Errorf("resolve current worktree ID: %w", err)
 	}
@@ -457,7 +466,7 @@ func buildAdoptedSessionState(ctx context.Context, source *session.State) (*sess
 	adopted.BaseCommit = head.Hash().String()
 	adopted.RealignAttributionBase(head.Hash().String())
 	adopted.WorktreePath = worktreeRoot
-	adopted.WorktreeID = worktreeID
+	adopted.WorktreeID = metadata.WorktreeID
 	adopted.AdoptedIntoWorktreePath = ""
 	adopted.AdoptedIntoWorktreeID = ""
 	adopted.Branch = branch
@@ -573,8 +582,19 @@ func sameAdoptPath(a, b string) bool {
 	return canonicalAdoptPath(a) == canonicalAdoptPath(b)
 }
 
-func sameAdoptStore(a, b string) bool {
-	return canonicalAdoptPath(a) == canonicalAdoptPath(b)
+func sameAdoptStore(a, b string) (bool, error) {
+	aInfo, err := os.Stat(a)
+	if err != nil {
+		return false, fmt.Errorf("inspect source git common dir %s: %w", a, err)
+	}
+	bInfo, err := os.Stat(b)
+	if err != nil {
+		return false, fmt.Errorf("inspect target git common dir %s: %w", b, err)
+	}
+	if !aInfo.IsDir() || !bInfo.IsDir() {
+		return false, errors.New("git common dir is not a directory")
+	}
+	return os.SameFile(aInfo, bInfo), nil
 }
 
 func canonicalAdoptPath(path string) string {

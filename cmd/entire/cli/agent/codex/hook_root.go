@@ -77,23 +77,14 @@ func resolveHookDiscovery(worktreeRoot string) HookDiscovery {
 		worktreeRoot: worktreeRoot,
 	}
 	root := worktreeRoot
-	dotGitPath, err := gitrepo.ResolveDotGitPath(worktreeRoot)
+	metadata, err := gitrepo.ResolveWorktreeMetadata(worktreeRoot)
 	if err != nil {
 		return unresolvedHookDiscoveryAt(worktreeRoot, "Git layout could not be resolved: "+err.Error())
 	}
-	commonGitPath, err := gitrepo.ResolveCommonGitPath(dotGitPath)
-	if err != nil {
-		return unresolvedHookDiscoveryAt(worktreeRoot, "Git common directory could not be resolved: "+err.Error())
-	}
-	worktreeID, worktreeIDErr := paths.GetWorktreeID(worktreeRoot)
-	if commonGitPath == "" {
-		commonGitPath = dotGitPath
-		if worktreeIDErr == nil && worktreeID != "" {
-			commonGitPath = filepath.Dir(filepath.Dir(dotGitPath))
-		}
-	}
+	dotGitPath := metadata.GitDir
+	commonGitPath := metadata.CommonDir
 
-	if worktreeIDErr == nil && worktreeID != "" &&
+	if metadata.WorktreeID != "" &&
 		!isSubmoduleGitDir(dotGitPath) &&
 		linkedWorktreeRegistrationMatches(dotGitPath, worktreeRoot) {
 		candidate := filepath.Dir(commonGitPath)
@@ -137,11 +128,11 @@ func linkedWorktreeRegistrationMatches(dotGitPath, worktreeRoot string) bool {
 }
 
 func rootOwnsGitDir(root, commonGitPath string) bool {
-	resolved, err := gitrepo.ResolveDotGitPath(root)
+	metadata, err := gitrepo.ResolveWorktreeMetadata(root)
 	if err != nil {
 		return false
 	}
-	resolved, err = canonicalPath(resolved)
+	resolved, err := canonicalPath(metadata.GitDir)
 	if err != nil {
 		return false
 	}

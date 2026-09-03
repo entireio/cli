@@ -827,7 +827,7 @@ func warnStaleEndedSessions(ctx context.Context, count int) {
 }
 
 func warnStaleEndedSessionsTo(ctx context.Context, count int, w io.Writer) {
-	root, err := gitdir.Open(ctx)
+	root, err := gitdir.OpenForCurrentWorktree(ctx)
 	if err != nil {
 		return // fail-open
 	}

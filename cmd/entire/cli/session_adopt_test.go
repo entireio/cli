@@ -14,8 +14,8 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
+	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/entireio/cli/cmd/entire/cli/internal/flock"
-	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/proclive"
 	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
@@ -1368,14 +1368,16 @@ func TestSessionAdopt_FiltersSharedSourceStoreByFromWorktree(t *testing.T) {
 	})
 	targetRepo := setupAdoptRepo(t)
 
-	sourceWorktreeID, err := paths.GetWorktreeID(sourceRepo)
+	sourceMetadata, err := gitrepo.ResolveWorktreeMetadata(sourceRepo)
 	if err != nil {
 		t.Fatal(err)
 	}
-	siblingWorktreeID, err := paths.GetWorktreeID(siblingWorktree)
+	sourceWorktreeID := sourceMetadata.WorktreeID
+	siblingMetadata, err := gitrepo.ResolveWorktreeMetadata(siblingWorktree)
 	if err != nil {
 		t.Fatal(err)
 	}
+	siblingWorktreeID := siblingMetadata.WorktreeID
 
 	lastInteraction := time.Now().Add(-1 * time.Minute)
 	sourceStore := session.NewStateStoreWithDir(filepath.Join(sourceRepo, ".git", session.SessionStateDirName))
@@ -1550,7 +1552,11 @@ func TestSameAdoptStoreCanonicalizesGitCommonDirSymlinks(t *testing.T) {
 		t.Skipf("symlinks unavailable: %v", err)
 	}
 
-	if !sameAdoptStore(commonDirLink, realCommonDir) {
+	sameStore, err := sameAdoptStore(commonDirLink, realCommonDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !sameStore {
 		t.Fatalf("sameAdoptStore(%q, %q) = false, want true", commonDirLink, realCommonDir)
 	}
 }
@@ -1568,14 +1574,16 @@ func TestSessionAdopt_SameStoreReloadsSourceStateUnderLock(t *testing.T) {
 		runAdoptGit(t, sourceRepo, "worktree", "remove", targetWorktree, "--force")
 	})
 
-	sourceWorktreeID, err := paths.GetWorktreeID(sourceRepo)
+	sourceMetadata, err := gitrepo.ResolveWorktreeMetadata(sourceRepo)
 	if err != nil {
 		t.Fatal(err)
 	}
-	targetWorktreeID, err := paths.GetWorktreeID(targetWorktree)
+	sourceWorktreeID := sourceMetadata.WorktreeID
+	targetMetadata, err := gitrepo.ResolveWorktreeMetadata(targetWorktree)
 	if err != nil {
 		t.Fatal(err)
 	}
+	targetWorktreeID := targetMetadata.WorktreeID
 
 	sessionID := "test-adopt-same-store-reload"
 	lastInteraction := time.Now().Add(-1 * time.Minute)
@@ -1661,14 +1669,16 @@ func TestSessionAdopt_MovesSameStoreSessionIntoCurrentWorktree(t *testing.T) {
 		runAdoptGit(t, sourceRepo, "worktree", "remove", targetWorktree, "--force")
 	})
 
-	sourceWorktreeID, err := paths.GetWorktreeID(sourceRepo)
+	sourceMetadata, err := gitrepo.ResolveWorktreeMetadata(sourceRepo)
 	if err != nil {
 		t.Fatal(err)
 	}
-	targetWorktreeID, err := paths.GetWorktreeID(targetWorktree)
+	sourceWorktreeID := sourceMetadata.WorktreeID
+	targetMetadata, err := gitrepo.ResolveWorktreeMetadata(targetWorktree)
 	if err != nil {
 		t.Fatal(err)
 	}
+	targetWorktreeID := targetMetadata.WorktreeID
 
 	sessionID := "test-adopt-same-store"
 	lastInteraction := time.Now().Add(-1 * time.Minute)

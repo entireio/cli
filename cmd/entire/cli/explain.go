@@ -24,6 +24,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/remote"
+	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/entireio/cli/cmd/entire/cli/interactive"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/palette"
@@ -2400,11 +2401,11 @@ func getCurrentWorktreeHash(ctx context.Context) string {
 	if err != nil {
 		return ""
 	}
-	worktreeID, err := paths.GetWorktreeID(repoRoot)
+	metadata, err := gitrepo.ResolveWorktreeMetadata(repoRoot)
 	if err != nil {
 		return ""
 	}
-	return checkpoint.HashWorktreeID(worktreeID)
+	return checkpoint.HashWorktreeID(metadata.WorktreeID)
 }
 
 // computeReachableFromMain returns a set of commit hashes on the main/default branch's first-parent chain.

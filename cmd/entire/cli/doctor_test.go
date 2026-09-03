@@ -1012,7 +1012,6 @@ func TestCheckCodexHookTrust_BareWorktreeReportsActiveRootHooks(t *testing.T) {
 	require.NoError(t, err)
 	t.Chdir(linkedRoot)
 	paths.ClearWorktreeRootCache()
-	session.ClearGitCommonDirCache()
 	t.Setenv("CODEX_HOME", filepath.Join(tmp, "codex-home"))
 
 	cmd, stdout := newTestCmd(t)

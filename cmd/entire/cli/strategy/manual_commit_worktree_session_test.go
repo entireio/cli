@@ -12,6 +12,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/entireio/cli/cmd/entire/cli/entiredir"
+	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
@@ -408,9 +409,9 @@ func saveSessionMatchState(ctx context.Context, t *testing.T, s *ManualCommitStr
 	state.Phase = session.PhaseActive
 	state.BaseCommit = testutil.GetHeadHash(t, repoDir)
 	if state.WorktreeID == "" && state.WorktreePath != "" {
-		worktreeID, err := paths.GetWorktreeID(state.WorktreePath)
+		metadata, err := gitrepo.ResolveWorktreeMetadata(state.WorktreePath)
 		require.NoError(t, err)
-		state.WorktreeID = worktreeID
+		state.WorktreeID = metadata.WorktreeID
 	}
 	require.NoError(t, s.saveSessionState(ctx, state))
 }
@@ -448,5 +449,4 @@ func resolvedTempDir(t *testing.T) string {
 
 func clearSessionMatchCaches() {
 	paths.ClearWorktreeRootCache()
-	session.ClearGitCommonDirCache()
 }

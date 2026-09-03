@@ -40,7 +40,7 @@ type capturedSyncRemotesFile struct {
 // the root buys uniformity here rather than protection from a crafted name —
 // which is the point: one way to reach .git means no call site to audit.
 func capturedSyncRemotesRoot(ctx context.Context) (*os.Root, error) {
-	return gitdir.Open(ctx) //nolint:wrapcheck // gitdir already names the directory and the failure
+	return gitdir.OpenForCurrentWorktree(ctx) //nolint:wrapcheck // gitdir already names the directory and the failure
 }
 
 // loadCapturedSyncRemotes reads the captured election. Fail-soft: a missing,

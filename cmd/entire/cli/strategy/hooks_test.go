@@ -11,11 +11,10 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 )
-
-const goosWindows = "windows"
 
 // clearGlobalHooksPath overrides any global core.hooksPath setting so that
 // test repos use their default .git/hooks directory. Setting the local value
@@ -46,10 +45,11 @@ func TestGetGitDirInPath_RegularRepo(t *testing.T) {
 
 	testutil.RunGit(t, tmpDir, "init")
 
-	result, err := getGitDirInPath(context.Background(), tmpDir)
+	metadata, err := gitrepo.ResolveWorktreeMetadata(tmpDir)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
+	result := metadata.GitDir
 
 	expected := filepath.Join(tmpDir, ".git")
 
@@ -105,10 +105,11 @@ func TestGetGitDirInPath_Worktree(t *testing.T) {
 	testutil.RunGit(t, mainRepo, "worktree", "add", worktreeDir, "-b", "feature")
 
 	// Test that getGitDirInPath works in the worktree
-	result, err := getGitDirInPath(context.Background(), worktreeDir)
+	metadata, err := gitrepo.ResolveWorktreeMetadata(worktreeDir)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
+	result := metadata.GitDir
 
 	// Resolve symlinks for comparison (macOS /var -> /private/var)
 	resultResolved, err := filepath.EvalSymlinks(result)
@@ -131,14 +132,9 @@ func TestGetGitDirInPath_NotARepo(t *testing.T) {
 
 	tmpDir := t.TempDir()
 
-	_, err := getGitDirInPath(context.Background(), tmpDir)
+	_, err := gitrepo.ResolveWorktreeMetadata(tmpDir)
 	if err == nil {
 		t.Fatal("expected error for non-repo directory, got nil")
-	}
-
-	expectedMsg := "not a git repository"
-	if err.Error() != expectedMsg {
-		t.Errorf("expected error message %q, got %q", expectedMsg, err.Error())
 	}
 }
 

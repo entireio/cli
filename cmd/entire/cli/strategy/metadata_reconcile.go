@@ -8,13 +8,13 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/gitdir"
+	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/osroot"
 
@@ -359,22 +359,12 @@ func collectCommitChain(repo *git.Repository, tip plumbing.Hash, shallow map[plu
 
 // loadShallowHashes returns the commit hashes listed in the repository's
 // shallow file, or an empty map if the repository is not shallow.
-func loadShallowHashes(ctx context.Context, repoPath string) (map[plumbing.Hash]bool, error) {
-	cmd := exec.CommandContext(ctx, "git", "rev-parse", "--git-common-dir")
-	cmd.Dir = repoPath
-	out, err := cmd.Output()
+func loadShallowHashes(_ context.Context, repoPath string) (map[plumbing.Hash]bool, error) {
+	metadata, err := gitrepo.ResolveWorktreeMetadata(repoPath)
 	if err != nil {
-		return nil, fmt.Errorf("git rev-parse --git-common-dir: %w", err)
+		return nil, fmt.Errorf("resolve git common dir: %w", err)
 	}
-	gitDir := strings.TrimSpace(string(out))
-	if !filepath.IsAbs(gitDir) {
-		gitDir = filepath.Join(repoPath, gitDir)
-	}
-	// Through the common dir's root like every other read there. "shallow" is a
-	// fixed name and gitDir came from git's own --git-common-dir, so nothing here
-	// can traverse today; the root is what keeps that true without depending on
-	// it, and it shares the one handle per clone.
-	root, err := gitdir.OpenAt(gitDir)
+	root, err := gitdir.OpenAt(metadata.CommonDir)
 	if err != nil {
 		return nil, fmt.Errorf("open git common dir: %w", err)
 	}

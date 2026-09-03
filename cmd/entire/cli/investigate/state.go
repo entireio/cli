@@ -13,10 +13,11 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
 	"github.com/entireio/cli/cmd/entire/cli/gitdir"
+	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
 	"github.com/entireio/cli/cmd/entire/cli/osroot"
+	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/provenance"
-	"github.com/entireio/cli/cmd/entire/cli/session"
 )
 
 // InvestigationsDirName is the directory name (under git common dir) where
@@ -105,16 +106,19 @@ type StateStore struct {
 }
 
 // NewStateStore creates a StateStore rooted at
-// <git-common-dir>/entire-investigations. Resolves the common dir via
-// session.GetGitCommonDir, so this requires a git repository context.
+// <git-common-dir>/entire-investigations.
 func NewStateStore(ctx context.Context) (*StateStore, error) {
-	commonDir, err := session.GetGitCommonDir(ctx)
+	worktreeRoot, err := paths.WorktreeRoot(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("get worktree root: %w", err)
+	}
+	metadata, err := gitrepo.ResolveWorktreeMetadata(worktreeRoot)
 	if err != nil {
 		return nil, fmt.Errorf("get git common dir: %w", err)
 	}
 	return &StateStore{
-		dir:     filepath.Join(commonDir, InvestigationsDirName),
-		parent:  commonDir,
+		dir:     filepath.Join(metadata.CommonDir, InvestigationsDirName),
+		parent:  metadata.CommonDir,
 		dirName: InvestigationsDirName,
 	}, nil
 }
@@ -311,7 +315,15 @@ func (s *StateStore) RemoveRun(runID string) error {
 		}
 		return fmt.Errorf("open investigation store: %w", err)
 	}
-	if err := root.RemoveAll(s.name(runID)); err != nil {
+	parent, leaf, closeParent, err := osroot.OpenParentNoSymlinks(root, s.name(runID))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("open run directory parent: %w", err)
+	}
+	defer closeParent()
+	if err := parent.RemoveAll(leaf); err != nil {
 		return fmt.Errorf("remove run directory: %w", err)
 	}
 	return nil

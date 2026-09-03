@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 
+	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 
 	"github.com/go-git/go-git/v6/plumbing"
@@ -30,13 +31,13 @@ func (s *ManualCommitStrategy) Reset(ctx context.Context, w, errW io.Writer) err
 	if err != nil {
 		return fmt.Errorf("failed to get worktree path: %w", err)
 	}
-	worktreeID, err := paths.GetWorktreeID(worktreePath)
+	metadata, err := gitrepo.ResolveWorktreeMetadata(worktreePath)
 	if err != nil {
 		return fmt.Errorf("failed to get worktree ID: %w", err)
 	}
 
 	// Get shadow branch name for current HEAD
-	shadowBranchName := getShadowBranchNameForCommit(head.Hash().String(), worktreeID)
+	shadowBranchName := getShadowBranchNameForCommit(head.Hash().String(), metadata.WorktreeID)
 
 	// Check if shadow branch exists
 	refName := plumbing.NewBranchReferenceName(shadowBranchName)

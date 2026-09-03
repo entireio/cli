@@ -9,6 +9,7 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	_ "github.com/entireio/cli/cmd/entire/cli/agent/claudecode" // Register Claude Code agent for transcript analysis
+	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
 
@@ -50,8 +51,9 @@ func TestSessionHasNewContentFromLiveTranscript_NormalizesAbsolutePaths(t *testi
 	// path in its transcript, so we must too.
 	worktreePath, err := paths.WorktreeRoot(context.Background())
 	require.NoError(t, err)
-	worktreeID, err := paths.GetWorktreeID(worktreePath)
+	metadata, err := gitrepo.ResolveWorktreeMetadata(worktreePath)
 	require.NoError(t, err)
+	worktreeID := metadata.WorktreeID
 
 	// Create a transcript file that references the file by absolute path
 	// (this is what Claude Code does — tool_use Write has absolute file_path)
@@ -147,8 +149,9 @@ func TestSessionHasNewContentFromLiveTranscript_IncludesSubagentFiles(t *testing
 	// path in its transcript, so we must too.
 	worktreePath, err := paths.WorktreeRoot(context.Background())
 	require.NoError(t, err)
-	worktreeID, err := paths.GetWorktreeID(worktreePath)
+	metadata, err := gitrepo.ResolveWorktreeMetadata(worktreePath)
 	require.NoError(t, err)
+	worktreeID := metadata.WorktreeID
 
 	// Create a main transcript that ONLY has a Task tool call — no direct Write/Edit.
 	// The assistant invokes Task, and the user line returns the tool_result with agentId.

@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -13,8 +14,10 @@ import (
 	"github.com/go-git/go-git/v6/plumbing"
 
 	"github.com/entireio/cli/cmd/entire/cli/gitdir"
+	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/entireio/cli/cmd/entire/cli/internal/flock"
 	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
+	"github.com/entireio/cli/cmd/entire/cli/osroot"
 )
 
 // Push-discovery queue file names, kept in the git common dir so every worktree
@@ -66,12 +69,20 @@ func NewPushQueue(gitCommonDir string) *PushQueue {
 }
 
 // PushQueueForRepo resolves the git common dir for repo and returns its queue.
-func PushQueueForRepo(ctx context.Context, repo *git.Repository) (*PushQueue, error) {
-	dir, err := resolveGitCommonDir(ctx, repo)
+func PushQueueForRepo(_ context.Context, repo *git.Repository) (*PushQueue, error) {
+	worktree, err := repo.Worktree()
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("open worktree for push queue: %w", err)
 	}
-	return NewPushQueue(dir), nil
+	root := worktree.Filesystem().Root()
+	if root == "" {
+		return nil, errors.New("resolve worktree root for push queue")
+	}
+	metadata, err := gitrepo.ResolveWorktreeMetadata(root)
+	if err != nil {
+		return nil, fmt.Errorf("resolve git common dir for push queue: %w", err)
+	}
+	return NewPushQueue(metadata.CommonDir), nil
 }
 
 func (q *PushQueue) queuePath() string { return filepath.Join(q.dir, pushQueueFileName) }
@@ -91,7 +102,7 @@ func (q *PushQueue) Enqueue(ref plumbing.ReferenceName) error {
 	if err != nil {
 		return fmt.Errorf("encode push queue entry: %w", err)
 	}
-	f, err := root.OpenFile(pushQueueFileName, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+	f, err := osroot.OpenFileNoFollow(root, pushQueueFileName, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 	if err != nil {
 		return fmt.Errorf("open push queue: %w", err)
 	}
@@ -212,7 +223,7 @@ func (q *PushQueue) rewriteLocked(root *os.Root, refs []plumbing.ReferenceName) 
 // de-duplicated set and is worth compacting: rawLines > len(refs) exactly when
 // there were redundant lines.
 func (q *PushQueue) readLocked(root *os.Root) (refs []plumbing.ReferenceName, rawLines int, err error) {
-	f, err := root.Open(pushQueueFileName)
+	f, err := osroot.OpenNoFollow(root, pushQueueFileName)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, 0, nil

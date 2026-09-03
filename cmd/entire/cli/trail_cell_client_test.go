@@ -65,11 +65,8 @@ func TestTrailsCellClient_Contract(t *testing.T) {
 }
 
 // A spent refresh deadline must not cost us the answer it just bought.
-// saveTrailsEnabledForScope resolves the git common dir with `git rev-parse`
-// under the passed ctx, so before this guarantee moved into the single writer a
-// refresh that answered at 2.9s of its 3s budget could fail to record the
-// result — leaving the cache "unknown" and re-forking a refresh child on every
-// SessionStart, the exact outcome the not-onboarded branch exists to prevent.
+// The preference writer may still need context-aware worktree discovery before
+// its locked write, so an expired refresh context must be detached here.
 // Not parallel: changes the process working directory and env.
 func TestSaveTrailsEnabledForScope_SurvivesASpentDeadline(t *testing.T) {
 	t.Setenv("ENTIRE_CONFIG_DIR", t.TempDir())

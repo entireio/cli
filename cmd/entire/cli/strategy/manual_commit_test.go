@@ -14,6 +14,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
+	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
@@ -1574,10 +1575,11 @@ func TestShadowStrategy_PostRewrite_MigratesExistingShadowBranch(t *testing.T) {
 	if err != nil {
 		t.Fatalf("WorktreeRoot() error = %v", err)
 	}
-	worktreeID, err := paths.GetWorktreeID(worktreePath)
+	metadata, err := gitrepo.ResolveWorktreeMetadata(worktreePath)
 	if err != nil {
-		t.Fatalf("GetWorktreeID() error = %v", err)
+		t.Fatalf("ResolveWorktreeMetadata() error = %v", err)
 	}
+	worktreeID := metadata.WorktreeID
 
 	oldShadowBranch := checkpoint.ShadowBranchNameForCommit(oldBaseCommit, worktreeID)
 	newShadowBranch := checkpoint.ShadowBranchNameForCommit(newBaseCommit, worktreeID)

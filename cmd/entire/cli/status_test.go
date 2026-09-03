@@ -97,31 +97,8 @@ func TestResolveWorktreeBranch_DetachedHEAD(t *testing.T) {
 }
 
 func TestResolveWorktreeBranch_WorktreeGitFile(t *testing.T) {
-	// Simulate a worktree where .git is a file pointing to a gitdir
-	dir := t.TempDir()
-	if resolved, err := filepath.EvalSymlinks(dir); err == nil {
-		dir = resolved
-	}
-
-	// Create a fake gitdir with a HEAD file
-	gitdir := filepath.Join(dir, "fake-gitdir")
-	if err := os.MkdirAll(gitdir, 0o755); err != nil {
-		t.Fatalf("mkdir gitdir: %v", err)
-	}
-	headPath := filepath.Join(gitdir, "HEAD")
-	if err := os.WriteFile(headPath, []byte("ref: refs/heads/feature-branch\n"), 0o644); err != nil {
-		t.Fatalf("write HEAD: %v", err)
-	}
-
-	// Create a worktree-style .git file
-	worktreeDir := filepath.Join(dir, "worktree")
-	if err := os.MkdirAll(worktreeDir, 0o755); err != nil {
-		t.Fatalf("mkdir worktree: %v", err)
-	}
-	gitFile := filepath.Join(worktreeDir, ".git")
-	if err := os.WriteFile(gitFile, []byte("gitdir: "+gitdir+"\n"), 0o644); err != nil {
-		t.Fatalf("write .git file: %v", err)
-	}
+	t.Parallel()
+	worktreeDir := createStatusLinkedWorktree(t, "feature-branch")
 
 	branch := resolveWorktreeBranch(context.Background(), worktreeDir)
 	if branch != "feature-branch" {
@@ -130,30 +107,22 @@ func TestResolveWorktreeBranch_WorktreeGitFile(t *testing.T) {
 }
 
 func TestResolveWorktreeBranch_WorktreeRelativePath(t *testing.T) {
-	// Simulate a worktree where .git file uses a relative gitdir path
-	dir := t.TempDir()
-	if resolved, err := filepath.EvalSymlinks(dir); err == nil {
-		dir = resolved
-	}
-
-	// Create the main .git dir structure
-	mainGitDir := filepath.Join(dir, "main-repo", ".git", "worktrees", "wt1")
-	if err := os.MkdirAll(mainGitDir, 0o755); err != nil {
-		t.Fatalf("mkdir: %v", err)
-	}
-	headPath := filepath.Join(mainGitDir, "HEAD")
-	if err := os.WriteFile(headPath, []byte("ref: refs/heads/develop\n"), 0o644); err != nil {
-		t.Fatalf("write HEAD: %v", err)
-	}
-
-	// Create worktree directory with relative .git file
-	worktreeDir := filepath.Join(dir, "main-repo", "worktrees-dir", "wt1")
-	if err := os.MkdirAll(worktreeDir, 0o755); err != nil {
-		t.Fatalf("mkdir worktree: %v", err)
-	}
-	// Relative path from worktree to the gitdir
-	relPath := filepath.Join("..", "..", ".git", "worktrees", "wt1")
+	t.Parallel()
+	worktreeDir := createStatusLinkedWorktree(t, "develop")
 	gitFile := filepath.Join(worktreeDir, ".git")
+	content, err := os.ReadFile(gitFile)
+	if err != nil {
+		t.Fatalf("read .git file: %v", err)
+	}
+	gitdir := strings.TrimSpace(strings.TrimPrefix(string(content), "gitdir: "))
+	physicalWorktreeDir, err := filepath.EvalSymlinks(worktreeDir)
+	if err != nil {
+		t.Fatalf("resolve worktree path: %v", err)
+	}
+	relPath, err := filepath.Rel(physicalWorktreeDir, gitdir)
+	if err != nil {
+		t.Fatalf("make gitdir relative: %v", err)
+	}
 	if err := os.WriteFile(gitFile, []byte("gitdir: "+relPath+"\n"), 0o644); err != nil {
 		t.Fatalf("write .git file: %v", err)
 	}
@@ -162,6 +131,19 @@ func TestResolveWorktreeBranch_WorktreeRelativePath(t *testing.T) {
 	if branch != "develop" {
 		t.Errorf("resolveWorktreeBranch() = %q, want %q", branch, "develop")
 	}
+}
+
+func createStatusLinkedWorktree(t *testing.T, branch string) string {
+	t.Helper()
+	tmp := t.TempDir()
+	mainRoot := filepath.Join(tmp, "main")
+	worktreeRoot := filepath.Join(tmp, "worktree")
+	testutil.InitRepo(t, mainRoot)
+	testutil.WriteFile(t, mainRoot, "initial.txt", "initial\n")
+	testutil.GitAdd(t, mainRoot, "initial.txt")
+	testutil.GitCommit(t, mainRoot, "initial")
+	testutil.RunGit(t, mainRoot, "worktree", "add", "-b", branch, worktreeRoot)
+	return worktreeRoot
 }
 
 func TestResolveWorktreeBranch_NonExistentPath(t *testing.T) {

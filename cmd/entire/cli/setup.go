@@ -2872,7 +2872,7 @@ func removeAllSessionStates(ctx context.Context) (int, error) {
 	// state directory rather than inside it (see strategy.stateLockPath) so
 	// session-listing code doesn't have to filter them out. Best-effort:
 	// failing here doesn't undo the state-file removal.
-	if root, rootErr := gitdir.Open(ctx); rootErr == nil {
+	if root, rootErr := gitdir.OpenForCurrentWorktree(ctx); rootErr == nil {
 		_ = root.RemoveAll(strategy.SessionLockDirName) //nolint:errcheck // best-effort sweep; see the comment above
 	}
 

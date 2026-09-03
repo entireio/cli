@@ -3,6 +3,9 @@ package checkpoint
 import (
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 
@@ -12,7 +15,34 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/entireio/cli/cmd/entire/cli/internal/flock"
+	"github.com/entireio/cli/cmd/entire/cli/osroot"
 )
+
+func TestPersistentRefLock_RejectsSymlinkedLockFile(t *testing.T) {
+	t.Parallel()
+	if runtime.GOOS == windowsOS {
+		t.Skip("symlink creation requires privileges on some Windows builders")
+	}
+
+	repo, _ := setupBranchTestRepo(t)
+	refName := plumbing.ReferenceName("refs/entire/test-symlink")
+	_, commonDir, err := repositoryDirs(context.Background(), repo)
+	require.NoError(t, err)
+	_, lockName, err := persistentRefLock(commonDir, refName)
+	require.NoError(t, err)
+	target := filepath.Join(commonDir, "config")
+	before, err := os.ReadFile(target)
+	require.NoError(t, err)
+	require.NoError(t, os.Symlink("../config", filepath.Join(commonDir, filepath.FromSlash(lockName))))
+
+	err = withPersistentRefFlock(context.Background(), commonDir, refName, func() error {
+		return nil
+	})
+	require.ErrorIs(t, err, osroot.ErrSymlinkedPath)
+	after, err := os.ReadFile(target)
+	require.NoError(t, err)
+	require.Equal(t, before, after)
+}
 
 func TestUpdatePersistentRef_StopsWaitingWhenContextDeadlineExpires(t *testing.T) {
 	t.Parallel()
@@ -21,9 +51,9 @@ func TestUpdatePersistentRef_StopsWaitingWhenContextDeadlineExpires(t *testing.T
 
 	_, commonDir, err := repositoryDirs(context.Background(), repo)
 	require.NoError(t, err)
-	lockPath, err := persistentRefLockPath(commonDir, refName)
+	root, lockName, err := persistentRefLock(commonDir, refName)
 	require.NoError(t, err)
-	release, err := flock.Acquire(lockPath)
+	release, err := flock.AcquireIn(root, lockName)
 	require.NoError(t, err)
 	t.Cleanup(release)
 

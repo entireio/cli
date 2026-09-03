@@ -19,6 +19,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
+	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
@@ -184,9 +185,9 @@ func NewBenchRepo(b *testing.B, opts RepoOpts) *BenchRepo {
 	}
 
 	// Determine worktree ID
-	wtID, err := paths.GetWorktreeID(dir)
+	metadata, err := gitrepo.ResolveWorktreeMetadata(dir)
 	if err == nil {
-		br.WorktreeID = wtID
+		br.WorktreeID = metadata.WorktreeID
 	}
 
 	return br

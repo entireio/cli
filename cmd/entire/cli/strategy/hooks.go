@@ -12,12 +12,15 @@ import (
 	"sync"
 	"syscall"
 
+	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
+	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
 )
 
 // Hook marker used to identify Entire CLI hooks
 const entireHookMarker = "Entire CLI hooks"
 
+const goosWindows = "windows"
 const backupSuffix = ".pre-entire"
 const chainComment = "# Chain: run pre-existing hook"
 const missingEntireGitHookWarning = "[entire] Entire CLI is enabled but not installed or not on PATH. Skipping Entire Git hook; continuing. Installation guide: https://docs.entire.io/cli/installation#installation-methods"
@@ -37,11 +40,17 @@ type hookSpec struct {
 	content string
 }
 
-// GetGitDir returns the actual git directory path by delegating to git itself.
-// This handles both regular repositories and worktrees, and inherits git's
-// security validation for gitdir references.
+// GetGitDir returns the validated per-worktree Git directory.
 func GetGitDir(ctx context.Context) (string, error) {
-	return getGitDirInPath(ctx, ".")
+	worktreeRoot, err := paths.WorktreeRoot(ctx)
+	if err != nil {
+		return "", errors.New("not a git repository")
+	}
+	metadata, err := gitrepo.ResolveWorktreeMetadata(worktreeRoot)
+	if err != nil {
+		return "", errors.New("not a git repository")
+	}
+	return metadata.GitDir, nil
 }
 
 // hooksDirCache caches the hooks directory to avoid repeated git subprocess spawns.
@@ -90,27 +99,6 @@ func ClearHooksDirCache() {
 	hooksDirCache = ""
 	hooksDirCacheDir = ""
 	hooksDirMu.Unlock()
-}
-
-// getGitDirInPath returns the git directory for a repository at the given path.
-// It delegates to `git rev-parse --git-dir` to leverage git's own validation.
-func getGitDirInPath(ctx context.Context, dir string) (string, error) {
-	cmd := exec.CommandContext(ctx, "git", "rev-parse", "--git-dir")
-	cmd.Dir = dir
-	output, err := cmd.Output()
-	if err != nil {
-		return "", errors.New("not a git repository")
-	}
-
-	gitDir := strings.TrimSpace(string(output))
-
-	// git rev-parse --git-dir returns relative paths from the working directory,
-	// so we need to make it absolute if it isn't already
-	if !filepath.IsAbs(gitDir) {
-		gitDir = filepath.Join(dir, gitDir)
-	}
-
-	return filepath.Clean(gitDir), nil
 }
 
 // getHooksDirInPath returns the active hooks directory for a repository at the given path.
@@ -613,7 +601,7 @@ func hookCmdPrefix(absolutePath bool) (string, error) {
 func resolveHookExePath(exe string, evalSymlinks func(string) (string, error), goos string) (string, error) {
 	resolved, err := evalSymlinks(exe)
 	if err != nil {
-		if goos == "windows" {
+		if goos == goosWindows {
 			return exe, nil
 		}
 		return "", fmt.Errorf("--absolute-git-hook-path: failed to resolve symlinks for %s: %w", exe, err)

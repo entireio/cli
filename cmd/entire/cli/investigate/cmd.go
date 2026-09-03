@@ -17,10 +17,10 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
 	"github.com/entireio/cli/cmd/entire/cli/gitexec"
+	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/entireio/cli/cmd/entire/cli/interactive"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
-	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
 )
 
@@ -739,11 +739,11 @@ func runFresh(ctx context.Context, cmd *cobra.Command, args []string, f runFlags
 		fmt.Fprintln(cmd.ErrOrStderr(), sandboxBypassNotice)
 	}
 
-	commonDir, err := session.GetGitCommonDir(ctx)
+	metadata, err := gitrepo.ResolveWorktreeMetadata(worktreeRoot)
 	if err != nil {
 		return fmt.Errorf("resolve git common dir: %w", err)
 	}
-	findingsDoc := resolveDocPaths(commonDir, runID)
+	findingsDoc := resolveDocPaths(metadata.CommonDir, runID)
 
 	bres, err := Bootstrap(ctx, BootstrapInput{
 		SeedDoc:        seedDoc,

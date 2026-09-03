@@ -18,6 +18,7 @@ import (
 	"github.com/go-git/go-git/v6/plumbing/format/gitignore"
 
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/remote"
+	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/entireio/cli/cmd/entire/cli/interactive"
 	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
 	"github.com/entireio/cli/cmd/entire/cli/osroot"
@@ -55,26 +56,43 @@ func sanitizeTrailWorktreeName(branch string) string {
 	return name
 }
 
-// gitCommonDirForTrailWorktree returns the absolute git common dir, which is
-// the main repo's .git directory even when run from a linked worktree.
-// session.GetGitCommonDir is not reused here because it returns relative
-// rev-parse results as-is; this feature needs an absolute path for the
-// worktree location and the printed cd hint.
+// gitCommonDirForTrailWorktree returns the absolute git common dir used to
+// derive the worktree location and printed cd hint.
 func gitCommonDirForTrailWorktree(ctx context.Context) (string, error) {
-	cmd := exec.CommandContext(ctx, "git", "rev-parse", "--git-common-dir")
-	output, err := cmd.Output()
+	worktreeRoot, err := paths.WorktreeRoot(ctx)
 	if err != nil {
-		return "", gitOutputError("failed to get git common dir", err)
+		return "", fmt.Errorf("failed to get worktree root: %w", err)
 	}
-	gitDir := strings.TrimSpace(string(output))
-	if !filepath.IsAbs(gitDir) {
-		cwd, wdErr := os.Getwd() //nolint:forbidigo // must resolve relative git common dir in cwd context
-		if wdErr != nil {
-			return "", fmt.Errorf("failed to get current directory: %w", wdErr)
-		}
-		gitDir = filepath.Join(cwd, gitDir)
+	metadata, err := gitrepo.ResolveWorktreeMetadata(lexicalWorktreeRoot(worktreeRoot))
+	if err != nil {
+		return "", fmt.Errorf("failed to get git common dir: %w", err)
 	}
-	return filepath.Clean(gitDir), nil
+	return metadata.CommonDir, nil
+}
+
+func lexicalWorktreeRoot(worktreeRoot string) string {
+	cwd, err := os.Getwd() //nolint:forbidigo // preserve the caller-visible spelling used in printed worktree paths.
+	if err != nil {
+		return worktreeRoot
+	}
+	physicalRoot, err := filepath.EvalSymlinks(worktreeRoot)
+	if err != nil {
+		return worktreeRoot
+	}
+	physicalCWD, err := filepath.EvalSymlinks(cwd)
+	if err != nil {
+		return worktreeRoot
+	}
+	rel, err := filepath.Rel(physicalRoot, physicalCWD)
+	if err != nil || !filepath.IsLocal(rel) {
+		return worktreeRoot
+	}
+
+	lexicalRoot := cwd
+	for part := rel; part != "."; part = filepath.Dir(part) {
+		lexicalRoot = filepath.Dir(lexicalRoot)
+	}
+	return lexicalRoot
 }
 
 func trailWorktreeBaseRoot(ctx context.Context) (string, error) {
@@ -453,6 +471,7 @@ func validateTrailWorktreeReuse(ctx context.Context, path, branch string) error 
 	}
 
 	showCommon := exec.CommandContext(ctx, "git", "-C", path, "rev-parse", "--git-common-dir")
+	showCommon.Env = gitrepo.EnvWithoutRepoOverrides()
 	output, err = showCommon.Output()
 	if err != nil {
 		return err //nolint:wrapcheck // caller reports a prune hint, not this low-level probe

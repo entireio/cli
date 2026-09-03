@@ -626,38 +626,14 @@ func writeActiveSessions(ctx context.Context, w io.Writer, sty statusStyles) {
 	fmt.Fprintln(w)
 }
 
-// resolveWorktreeBranch resolves the current branch for a worktree path
-// by reading the HEAD ref directly from the filesystem
+// resolveWorktreeBranch resolves the current branch for a worktree path by
+// reading its per-worktree HEAD directly from the filesystem.
 func resolveWorktreeBranch(ctx context.Context, worktreePath string) string {
-	gitPath := filepath.Join(worktreePath, ".git")
-
-	fi, err := os.Stat(gitPath)
+	metadata, err := gitrepo.ResolveWorktreeMetadata(worktreePath)
 	if err != nil {
 		return ""
 	}
-
-	var headPath string
-	if fi.IsDir() {
-		// Regular repo: .git is a directory
-		headPath = filepath.Join(gitPath, "HEAD")
-	} else {
-		// Worktree: .git is a file containing "gitdir: <path>"
-		data, err := os.ReadFile(gitPath) //nolint:gosec // path derived from known worktree dir
-		if err != nil {
-			return ""
-		}
-		content := strings.TrimSpace(string(data))
-		if !strings.HasPrefix(content, "gitdir: ") {
-			return ""
-		}
-		gitdirPath := strings.TrimPrefix(content, "gitdir: ")
-		if !filepath.IsAbs(gitdirPath) {
-			gitdirPath = filepath.Join(worktreePath, gitdirPath)
-		}
-		headPath = filepath.Join(gitdirPath, "HEAD")
-	}
-
-	data, err := os.ReadFile(headPath) //nolint:gosec // path constructed from .git/HEAD
+	data, err := os.ReadFile(filepath.Join(metadata.GitDir, "HEAD"))
 	if err != nil {
 		return ""
 	}
