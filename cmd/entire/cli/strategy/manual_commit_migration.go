@@ -10,7 +10,6 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/trailers"
 
 	"github.com/go-git/go-git/v6"
-	"github.com/go-git/go-git/v6/plumbing"
 )
 
 // migrateShadowBranchIfNeeded checks if HEAD has changed since the session started
@@ -115,33 +114,32 @@ func (s *ManualCommitStrategy) migrateShadowBranchToBaseCommit(ctx context.Conte
 		return true, nil
 	}
 
-	oldRefName := plumbing.NewBranchReferenceName(oldShadowBranch)
-	oldRef, err := repo.Reference(oldRefName, true)
+	// The rename below touches the same refs writeCheckpoint/writeTask do
+	// (checkpoint/ephemeral.go), so it must go through the same
+	// flock+CAS discipline those use rather than the unlocked go-git
+	// read/SetReference/CLI-delete this function used to do directly --
+	// two sessions sharing this worktree's shadow branch (a documented,
+	// supported configuration) could otherwise race a concurrent
+	// checkpoint write against this migration and silently lose or
+	// clobber committed checkpoint data. See MigrateShadowBranchRef's
+	// doc comment for the locking/CAS shape.
+	commonDir, err := GetGitCommonDir(ctx)
 	if err != nil {
-		// Old shadow branch doesn't exist - just update state.BaseCommit
-		// This can happen if this is the first checkpoint after HEAD changed
-		state.BaseCommit = newBaseCommit
-		logging.Info(logging.WithComponent(ctx, "migration"), "updated session base commit",
-			slog.String("new_base", newBaseCommit[:7]))
-		return true, nil //nolint:nilerr // err is "reference not found" which is fine - just need to update state
+		return false, fmt.Errorf("resolve git common dir for shadow branch migration: %w", err)
 	}
-
-	// Old shadow branch exists - move it to new base commit
-	newRefName := plumbing.NewBranchReferenceName(newShadowBranch)
-
-	// Create new reference pointing to same commit as old shadow branch
-	newRef := plumbing.NewHashReference(newRefName, oldRef.Hash())
-	if err := repo.Storer.SetReference(newRef); err != nil {
-		return false, fmt.Errorf("failed to create new shadow branch %s: %w", newShadowBranch, err)
-	}
-
-	// Delete old reference via CLI (go-git v5's RemoveReference doesn't persist with packed refs/worktrees)
 	logCtx := logging.WithComponent(ctx, "migration")
-	if err := DeleteBranchCLI(ctx, oldShadowBranch); err != nil {
-		// Non-fatal: log but continue - the important thing is the new branch exists
-		logging.Warn(logCtx, "failed to remove old shadow branch",
-			slog.String("shadow_branch", oldShadowBranch),
-			slog.String("error", err.Error()))
+	migrated, err := checkpoint.MigrateShadowBranchRef(ctx, state.WorktreePath, commonDir, oldShadowBranch, newShadowBranch)
+	if err != nil {
+		return false, fmt.Errorf("migrate shadow branch %s -> %s: %w", oldShadowBranch, newShadowBranch, err)
+	}
+	if !migrated {
+		// Old branch didn't exist (first checkpoint after HEAD changed) or a
+		// concurrent writer already migrated it -- either way state still
+		// advances to the new base commit below.
+		logging.Info(logCtx, "updated session base commit",
+			slog.String("new_base", newBaseCommit[:7]))
+		state.BaseCommit = newBaseCommit
+		return true, nil
 	}
 
 	logging.Info(logCtx, "moved shadow branch (HEAD changed during session)",

@@ -59,6 +59,27 @@ func casUpdateRef(ctx context.Context, repoRoot string, refName plumbing.Referen
 	return fmt.Errorf("git update-ref %s: %s: %w", refName, strings.TrimSpace(out), err)
 }
 
+// casDeleteRef atomically deletes refName through native Git's lock protocol,
+// via `git update-ref -d <ref> <old>`. The delete only succeeds if the ref
+// currently points at expectedHash; otherwise it returns ErrShadowRefBusy so
+// the caller can decide whether that's a benign race (someone else already
+// moved or removed it) or a real conflict.
+func casDeleteRef(ctx context.Context, repoRoot string, refName plumbing.ReferenceName, expectedHash plumbing.Hash) error {
+	cmd := exec.CommandContext(ctx, "git", "update-ref", "-d", refName.String(), expectedHash.String())
+	cmd.Dir = repoRoot
+	cmd.Env = append(os.Environ(), "LC_ALL=C", "LANG=C")
+	output, err := cmd.CombinedOutput()
+	if err == nil {
+		return nil
+	}
+
+	out := string(output)
+	if strings.Contains(out, "cannot lock ref") || strings.Contains(out, "but expected") {
+		return ErrShadowRefBusy
+	}
+	return fmt.Errorf("git update-ref -d %s: %s: %w", refName, strings.TrimSpace(out), err)
+}
+
 func persistentRefLockPath(commonDir string, refName plumbing.ReferenceName) (string, error) {
 	lockDir := filepath.Join(commonDir, "entire-persistent-ref-locks")
 	if err := os.MkdirAll(lockDir, 0o750); err != nil {

@@ -4,13 +4,16 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"math/rand/v2"
 	"os"
+	"os/exec"
 	"strings"
 	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/gitdir"
 	"github.com/entireio/cli/cmd/entire/cli/internal/flock"
+	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/osroot"
 
 	"github.com/go-git/go-git/v6/plumbing"
@@ -114,6 +117,123 @@ func withShadowBranchFlock(commonDir, branchName string, fn func() error) error 
 	}
 	defer release()
 	return fn()
+}
+
+// readRefHash resolves refName's current commit via a native git subprocess.
+// Returns (hash, false, nil) when the ref doesn't exist -- not an error, since
+// "old shadow branch is already gone" is a normal, expected outcome for
+// MigrateShadowBranchRef's caller.
+func readRefHash(ctx context.Context, repoRoot string, refName plumbing.ReferenceName) (plumbing.Hash, bool, error) {
+	cmd := exec.CommandContext(ctx, "git", "rev-parse", "--verify", refName.String())
+	cmd.Dir = repoRoot
+	cmd.Env = append(os.Environ(), "LC_ALL=C", "LANG=C")
+	out, err := cmd.Output()
+	if err != nil {
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) {
+			return plumbing.ZeroHash, false, nil
+		}
+		return plumbing.ZeroHash, false, fmt.Errorf("git rev-parse --verify %s: %w", refName, err)
+	}
+	return plumbing.NewHash(strings.TrimSpace(string(out))), true, nil
+}
+
+// MigrateShadowBranchRef atomically renames a shadow branch from oldBranch to
+// newBranch (both refs/heads branch names, not full ref names), used when a
+// session's shadow branch needs to move to a new base-commit-derived name
+// (see migrateShadowBranchToBaseCommit in the strategy package).
+//
+// This shares the exact locking/CAS discipline writeCheckpoint/writeTask use
+// (withShadowBranchFlock + casUpdateShadowBranchRef) rather than the
+// unlocked go-git Reference/SetReference/CLI-delete sequence this replaced:
+// two sessions can legitimately share one worktree's shadow branch (a
+// documented, supported configuration -- main agent + Task-tool subagent is
+// the common case), and a checkpoint write racing an unlocked migration
+// could silently orphan or overwrite committed checkpoint data. Both branch
+// names are locked (in a stable, name-sorted order, so two migrations that
+// happen to touch the same pair of branches from opposite directions can't
+// deadlock) before either ref is touched.
+//
+// Returns (migrated, err). migrated is false with a nil error when there was
+// nothing to do: the old branch no longer exists (first checkpoint after
+// HEAD changed, or a concurrent migration already moved it), or the new
+// branch already exists pointing at different content than the old one (a
+// concurrent writer got there first -- left alone rather than clobbered).
+func MigrateShadowBranchRef(ctx context.Context, repoRoot, commonDir, oldBranch, newBranch string) (bool, error) {
+	first, second := oldBranch, newBranch
+	if second < first {
+		first, second = second, first
+	}
+	var migrated bool
+	err := withShadowBranchFlock(commonDir, first, func() error {
+		return withShadowBranchFlock(commonDir, second, func() error {
+			m, innerErr := migrateShadowBranchRefLocked(ctx, repoRoot, oldBranch, newBranch)
+			migrated = m
+			return innerErr
+		})
+	})
+	return migrated, err
+}
+
+// migrateShadowBranchRefLocked performs the actual rename. Callers must hold
+// both branches' flocks (see MigrateShadowBranchRef).
+func migrateShadowBranchRefLocked(ctx context.Context, repoRoot, oldBranch, newBranch string) (bool, error) {
+	oldRefName := plumbing.NewBranchReferenceName(oldBranch)
+	newRefName := plumbing.NewBranchReferenceName(newBranch)
+
+	oldHash, exists, err := readRefHash(ctx, repoRoot, oldRefName)
+	if err != nil {
+		return false, fmt.Errorf("read old shadow branch %s: %w", oldBranch, err)
+	}
+	if !exists {
+		return false, nil
+	}
+
+	newHash, newExists, err := readRefHash(ctx, repoRoot, newRefName)
+	if err != nil {
+		return false, fmt.Errorf("read new shadow branch %s: %w", newBranch, err)
+	}
+	if newExists {
+		if newHash != oldHash {
+			// A concurrent writer already created the destination with
+			// different content; leave both alone rather than guess which
+			// should win.
+			return false, nil
+		}
+		// Destination already carries the old branch's content (a concurrent
+		// migration finished the create half already) -- finish the cleanup
+		// if the old ref is still exactly what we just read.
+		if delErr := casDeleteRef(ctx, repoRoot, oldRefName, oldHash); delErr != nil && !errors.Is(delErr, ErrShadowRefBusy) {
+			return true, fmt.Errorf("delete already-migrated old shadow branch %s: %w", oldBranch, delErr)
+		}
+		return true, nil
+	}
+
+	if err := casUpdateShadowBranchRef(ctx, repoRoot, newBranch, oldHash, plumbing.ZeroHash); err != nil {
+		if errors.Is(err, ErrShadowRefBusy) {
+			// Someone else created newBranch between our read above and now.
+			return false, nil
+		}
+		return false, fmt.Errorf("create new shadow branch %s: %w", newBranch, err)
+	}
+
+	if err := casDeleteRef(ctx, repoRoot, oldRefName, oldHash); err != nil {
+		if errors.Is(err, ErrShadowRefBusy) {
+			// oldBranch moved since we read it -- a concurrent legitimate
+			// writer (e.g. writeCheckpoint) advanced it after our read but
+			// before our delete. newBranch already carries the content we
+			// migrated; leave oldBranch for its own writer to retry its CAS
+			// against (it will see the ref moved and follow its normal
+			// retry path -- see casUpdateShadowBranchRef's callers).
+			logging.Warn(logging.WithComponent(ctx, "checkpoint"),
+				"shadow branch migration: old ref moved before delete, leaving in place",
+				slog.String("old_branch", oldBranch), slog.String("new_branch", newBranch))
+			return true, nil
+		}
+		return false, fmt.Errorf("delete old shadow branch %s: %w", oldBranch, err)
+	}
+
+	return true, nil
 }
 
 // tryDeleteLooseObject best-effort removes a loose object file. Used to
