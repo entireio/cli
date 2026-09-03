@@ -72,16 +72,15 @@ var (
 	nativeRepoRe    = regexp.MustCompile(`^[A-Za-z0-9.-]+$`)
 )
 
-// parseNativeCloneRef turns a native clone ref — `/et/<project>/<repo>` or the
-// `<project>/<repo>` shorthand, leading slash optional — into its project and
-// repo names. Not a match (ok == false) is not an error: the caller falls
-// through to the mirror grammar. The `gh`/`et` forge tokens are never valid
-// project names (3–32 chars server-side), so a two-segment ref starting with
-// one is a malformed forge ref, not a shorthand, and is rejected here so the
-// mirror parser can name the expected shape. Segments must match the server's
-// name charsets: without that, any "x/y" — `git@github.com:foo/bar` included —
-// parsed as a shorthand and produced a control-plane lookup error instead of a
-// hint about the accepted shapes.
+// parseNativeCloneRef turns a native clone ref `/et/<project>/<repo>` into its
+// project and repo names. Not a match (ok == false) is not an error: the caller
+// falls through to the mirror grammar. The `gh`/`et` forge tokens are never
+// valid project names (3–32 chars server-side), so a two-segment ref starting
+// with one is a malformed forge ref, not a shorthand, and is rejected here so
+// the mirror parser can name the expected shape. Segments must match the
+// server's name charsets: without that, any "x/y" — `git@github.com:foo/bar`
+// included — parsed as a shorthand and produced a control-plane lookup error
+// instead of a hint about the accepted shapes.
 func parseNativeCloneRef(ref string) (project, repo string, ok bool) {
 	segs := strings.Split(strings.TrimPrefix(strings.TrimSpace(ref), "/"), "/")
 	if segs[0] != nativeCloneForge {
