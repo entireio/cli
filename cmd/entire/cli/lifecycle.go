@@ -938,7 +938,7 @@ func handleLifecycleTurnEnd(ctx context.Context, ag agent.Agent, event *agent.Ev
 	// no-files gate: a read-only child can finish without producing a shadow
 	// checkpoint, but its exact availability still must replace stale coverage.
 	var codexInventoryUsage *agent.TokenUsage
-	var codexLedgerVersion uint64
+	var codexLedgerVersion *uint64
 	if ag.Type() == agent.AgentTypeCodex {
 		inventoryOffset := 0
 		if preState != nil {
@@ -1192,10 +1192,10 @@ func finalizeCodexObservedAtSessionEnd(ctx context.Context, sessionID string) {
 // potentially slow filesystem analysis outside its lock, then applies only
 // path enrichment and terminal evidence if no new child observation raced it.
 // It never manufactures an exact-empty result for an unknown/legacy ledger.
-func refreshCodexInventory(ctx context.Context, ag agent.Agent, sessionID string, parent []byte, fromOffset int) (*agent.TokenUsage, uint64) {
+func refreshCodexInventory(ctx context.Context, ag agent.Agent, sessionID string, parent []byte, fromOffset int) (*agent.TokenUsage, *uint64) {
 	state, err := strategy.LoadSessionState(ctx, sessionID)
 	if err != nil || state == nil || state.SubagentInventoryComplete == nil {
-		return nil, 0
+		return nil, nil
 	}
 	refs := make([]agent.SubagentReference, 0, len(state.SubagentInventory))
 	for _, entry := range state.SubagentInventory {
@@ -1204,7 +1204,7 @@ func refreshCodexInventory(ctx context.Context, ag agent.Agent, sessionID string
 	version := state.SubagentLedgerVersion
 	extraction, ok := agent.ExtractWithSubagentInventory(ctx, ag, parent, fromOffset, refs)
 	if !ok {
-		return nil, version
+		return nil, &version
 	}
 
 	usage := extraction.TokenUsage
@@ -1259,7 +1259,7 @@ func refreshCodexInventory(ctx context.Context, ag agent.Agent, sessionID string
 	}); err != nil && !errors.Is(err, strategy.ErrStateNotFound) {
 		logging.Debug(ctx, "failed to persist codex inventory evidence", slog.String("error", err.Error()))
 	}
-	return usage, version
+	return usage, &version
 }
 
 // processStart approximates when this hook process began. Package

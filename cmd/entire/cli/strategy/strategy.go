@@ -163,8 +163,9 @@ type StepContext struct {
 	TokenUsage *agent.TokenUsage
 
 	// SubagentLedgerVersion is the authoritative inventory version observed
-	// while token evidence was extracted. Zero means no inventory snapshot.
-	SubagentLedgerVersion uint64
+	// while token evidence was extracted. nil means no inventory snapshot;
+	// a pointer to zero is a valid snapshot before the first child is observed.
+	SubagentLedgerVersion *uint64
 }
 
 // TaskStepContext contains all information needed for saving a task step checkpoint.

@@ -46,11 +46,7 @@ func (s *ManualCommitStrategy) SaveStep(ctx context.Context, step StepContext) e
 	}
 
 	mutErr := MutateSessionState(ctx, sessionID, func(state *SessionState) error {
-		if step.SubagentLedgerVersion != 0 && state.SubagentLedgerVersion != step.SubagentLedgerVersion && step.TokenUsage != nil {
-			// Keep valid main-agent deltas but never persist a child aggregate
-			// computed against an older authoritative inventory.
-			step.TokenUsage = types.WithClearedSubagentTokens(step.TokenUsage, false)
-		}
+		invalidateStaleSubagentSnapshot(&step, state)
 		_, migrateSpan := perf.Start(ctx, "migrate_shadow_branch")
 		if _, _, err := s.migrateShadowBranchIfNeeded(ctx, repo, state); err != nil {
 			migrateSpan.RecordError(err)
@@ -198,6 +194,16 @@ func (s *ManualCommitStrategy) SaveStep(ctx context.Context, step StepContext) e
 		return nil
 	}
 	return mutErr
+}
+
+func invalidateStaleSubagentSnapshot(step *StepContext, state *SessionState) {
+	if step.SubagentLedgerVersion == nil || step.TokenUsage == nil ||
+		state.SubagentLedgerVersion == *step.SubagentLedgerVersion {
+		return
+	}
+	// Keep valid main-agent deltas but never persist a child aggregate
+	// computed against an older authoritative inventory.
+	step.TokenUsage = types.WithClearedSubagentTokens(step.TokenUsage, false)
 }
 
 // ensureSessionInitialized creates the session state file if it doesn't yet

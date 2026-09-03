@@ -73,6 +73,28 @@ func TestAccumulateTokenUsage_ExplicitEmptyReplacesPriorChildTotal(t *testing.T)
 	require.True(t, *got.SubagentTokensComplete)
 }
 
+func TestInvalidateStaleSubagentSnapshot_ZeroVersion(t *testing.T) {
+	t.Parallel()
+	complete := true
+	zero := uint64(0)
+	step := StepContext{
+		SubagentLedgerVersion: &zero,
+		TokenUsage: &agent.TokenUsage{
+			InputTokens:            11,
+			SubagentTokens:         &agent.TokenUsage{InputTokens: 7},
+			SubagentTokensComplete: &complete,
+		},
+	}
+
+	invalidateStaleSubagentSnapshot(&step, &SessionState{SubagentLedgerVersion: 1})
+
+	require.NotNil(t, step.TokenUsage)
+	require.Equal(t, 11, step.TokenUsage.InputTokens, "main-agent evidence must survive invalidation")
+	require.Nil(t, step.TokenUsage.SubagentTokens)
+	require.NotNil(t, step.TokenUsage.SubagentTokensComplete)
+	require.False(t, *step.TokenUsage.SubagentTokensComplete)
+}
+
 // TestSaveStep_SubagentTokensNotDoubleCountedAcrossCheckpoints exercises the
 // real SaveStep path for both Claude Code and Factory AI Droid (the two
 // agents whose CalculateTotalTokenUsage implementations discover subagent IDs

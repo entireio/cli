@@ -1030,6 +1030,26 @@ func TestState_LiveTaskRecords(t *testing.T) {
 func TestState_SubagentInventoryLedger(t *testing.T) {
 	t.Parallel()
 
+	stopFirst := &State{}
+	if !stopFirst.RecordSubagentStop("child-stop-first", "turn-stop-first") {
+		t.Fatal("stop-before-start observation must be recorded")
+	}
+	record := stopFirst.FindTaskRecord("child-stop-first")
+	require.NotNil(t, record, "a stop-before-start observation must preserve pending task content")
+	assert.Equal(t, "child-stop-first", record.AgentID)
+	assert.True(t, stopFirst.HasTaskContent())
+	startedAt := time.Now().UTC()
+	assert.False(t, stopFirst.EnsureTaskRecord(TaskRecord{
+		ToolUseID:       "child-stop-first",
+		AgentID:         "child-stop-first",
+		StartedAt:       startedAt,
+		SubagentType:    "default",
+		TaskDescription: "late start metadata",
+	}), "the late start must enrich, not replace, the pending record")
+	assert.Equal(t, startedAt, record.StartedAt)
+	assert.Equal(t, "default", record.SubagentType)
+	assert.Equal(t, "late start metadata", record.TaskDescription)
+
 	complete := true
 	state := &State{
 		TokenUsage:           &agent.TokenUsage{InputTokens: 5, SubagentTokens: &agent.TokenUsage{InputTokens: 3}, SubagentTokensComplete: &complete},

@@ -194,7 +194,8 @@ func TestRefreshCodexInventory_MultiTurnChildRefreshesCompletedTaskRecord(t *tes
 	}
 
 	_, version := refreshCodexInventory(ctx, ag, sessionID, nil, 0)
-	require.Equal(t, uint64(2), version)
+	require.NotNil(t, version)
+	require.Equal(t, uint64(2), *version)
 
 	state, err := strategy.LoadSessionState(ctx, sessionID)
 	require.NoError(t, err)
@@ -283,7 +284,8 @@ func TestRefreshCodexInventory_UsesCurrentCompletenessWhenPersistingUsage(t *tes
 	}
 
 	usage, version := refreshCodexInventory(ctx, ag, sessionID, nil, 0)
-	assert.Equal(t, uint64(2), version)
+	require.NotNil(t, version)
+	assert.Equal(t, uint64(2), *version)
 	require.NotNil(t, usage)
 	require.NotNil(t, usage.SubagentTokensComplete)
 	assert.False(t, *usage.SubagentTokensComplete)

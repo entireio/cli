@@ -522,9 +522,28 @@ func (s *State) AddTaskRecord(task TaskRecord) {
 }
 
 // EnsureTaskRecord adds a follow-up record only after an earlier completed
-// record was materialized and removed. Existing unmaterialized content wins.
+// record was materialized and removed. Existing unmaterialized content wins,
+// but missing launch metadata is enriched for stop-before-start delivery.
 func (s *State) EnsureTaskRecord(task TaskRecord) bool {
-	if task.ToolUseID == "" || s.FindTaskRecord(task.ToolUseID) != nil {
+	if task.ToolUseID == "" {
+		return false
+	}
+	if existing := s.FindTaskRecord(task.ToolUseID); existing != nil {
+		if existing.AgentID == "" {
+			existing.AgentID = task.AgentID
+		}
+		if existing.StartedAt.IsZero() {
+			existing.StartedAt = task.StartedAt
+		}
+		if existing.SubagentType == "" {
+			existing.SubagentType = task.SubagentType
+		}
+		if existing.TaskDescription == "" {
+			existing.TaskDescription = task.TaskDescription
+		}
+		if existing.DeclaredTranscriptPath == "" {
+			existing.DeclaredTranscriptPath = task.DeclaredTranscriptPath
+		}
 		return false
 	}
 	s.AddTaskRecord(task)
@@ -566,9 +585,14 @@ func (s *State) RegisterSubagent(agentID, turnID string) bool {
 }
 
 // RecordSubagentStop records a provisional stop. Stops can arrive before
-// starts, so observing the child and turn happens in this same mutation.
+// starts, so the same mutation also preserves a pending task record. A late
+// start enriches that placeholder through EnsureTaskRecord.
 func (s *State) RecordSubagentStop(agentID, turnID string) bool {
-	return s.RegisterSubagent(agentID, turnID)
+	newObservation := s.RegisterSubagent(agentID, turnID)
+	if newObservation {
+		s.EnsureTaskRecord(TaskRecord{ToolUseID: agentID, AgentID: agentID})
+	}
+	return newObservation
 }
 
 // UpdateSubagentTranscriptPaths enriches an already-observed child's path
