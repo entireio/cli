@@ -86,9 +86,7 @@ the commands are always runnable in every build.
   (preserving the old URL under `--upstream`) or add a separate one;
   non-interactively it repoints `--remote` directly. Both `use` and `clone`
   choose a placement through the shared `selectPlacement` picker. `clone`
-  accepts a native `/et/<project>/<repo>` ref (or the `<project>/<repo>`
-  shorthand — the `gh`/`et` forge tokens can never be project names, which are
-  3+ chars server-side, so the grammar is unambiguous; both segments must also
+  accepts a native `/et/<project>/<repo>` ref. Both segments must also
   match the server's name charsets, so `git@github.com:foo/bar` is not a
   shorthand), a mirror `/gh/<owner>/<repo>` ref, or a full `entire://` URL
   passed through verbatim. A ref matching none of these gets a targeted error
