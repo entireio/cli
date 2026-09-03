@@ -184,9 +184,7 @@ func tokenClassShares(usage *types.TokenUsage, weights tokenWeights, ttlKnown bo
 		CacheWrite1h: flat.CacheCreation1hTokens,
 		Family:       weights.Family,
 	}
-	shares.Total = saturatingIntAdd(flat.InputTokens, flat.CacheCreationTokens)
-	shares.Total = saturatingIntAdd(shares.Total, flat.CacheReadTokens)
-	shares.Total = saturatingIntAdd(shares.Total, flat.OutputTokens)
+	shares.Total = sumTokenClasses(flat)
 	if shares.Total <= 0 {
 		return tokenClassBreakdown{}, false
 	}
@@ -235,6 +233,16 @@ func tokenClassShares(usage *types.TokenUsage, weights tokenWeights, ttlKnown bo
 	shares.CacheRead.VolumePercent = volumePercents[2]
 	shares.Output.VolumePercent = volumePercents[3]
 	return shares, true
+}
+
+// sumTokenClasses adds the four billing classes with saturating arithmetic. It
+// is the single definition of "the total" for anything that also prints the
+// classes: a total from a different walk than the classes is a report showing
+// two answers under one label.
+func sumTokenClasses(flat types.TokenUsage) int {
+	total := saturatingIntAdd(flat.InputTokens, flat.CacheCreationTokens)
+	total = saturatingIntAdd(total, flat.CacheReadTokens)
+	return saturatingIntAdd(total, flat.OutputTokens)
 }
 
 // flattenTokenUsageForClasses folds nested subagent usage into one flat total,

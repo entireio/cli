@@ -226,6 +226,27 @@ func TestTokenClassShares_HostileNegativeCountsAreClamped(t *testing.T) {
 	}
 }
 
+// Total and the four class figures must come from the same walk. The classes
+// are bounded and clamped; totalTokens is neither, so a chain deeper than
+// MaxSubagentDepth (or carrying negatives) made this struct's own parts stop
+// summing to its own total — the "two answers under one label" bug again.
+func TestBuildSessionTokensUsage_TotalAgreesWithClassesOnHostileChain(t *testing.T) {
+	t.Parallel()
+
+	var head *types.TokenUsage
+	for range types.MaxSubagentDepth + 5 {
+		head = &types.TokenUsage{InputTokens: 10, OutputTokens: 5, SubagentTokens: head}
+	}
+
+	got := buildSessionTokensUsage(head)
+	if got == nil {
+		t.Fatal("expected usage")
+	}
+	if sum := got.Input + got.CacheRead + got.CacheWrite + got.Output; sum != got.Total {
+		t.Errorf("classes sum to %d but Total is %d; they must come from the same walk", sum, got.Total)
+	}
+}
+
 // The flatten loop walks a chain from checkpoint metadata, which anyone with
 // push access can write. types.AddTokenUsage stops at MaxSubagentDepth; this
 // walk has to stop there too, or a hostile chain is unbounded work.
