@@ -40,16 +40,17 @@ func TestPrintTrailThreadDetail_ShowsMessageIDs(t *testing.T) {
 
 func TestTrailThreadPathBuilders(t *testing.T) {
 	t.Parallel()
-	if got := trailThreadsPath("gh", "acme", "widgets", 7); !strings.HasSuffix(got, "/7/threads") {
+	const basePath = "/api/v1/repos/native-repo-id/trails"
+	if got := trailThreadsPath(basePath, 7); got != basePath+"/7/threads" {
 		t.Errorf("threads path = %q", got)
 	}
-	if got := trailThreadPath("gh", "acme", "widgets", 7, "th1"); !strings.HasSuffix(got, "/7/threads/th1") {
+	if got := trailThreadPath(basePath, 7, "th1"); got != basePath+"/7/threads/th1" {
 		t.Errorf("thread path = %q", got)
 	}
-	if got := trailThreadMessagesPath("gh", "acme", "widgets", 7, "th1"); !strings.HasSuffix(got, "/threads/th1/messages") {
+	if got := trailThreadMessagesPath(basePath, 7, "th1"); got != basePath+"/7/threads/th1/messages" {
 		t.Errorf("messages path = %q", got)
 	}
-	if got := trailThreadMessagePath("gh", "acme", "widgets", 7, "th1", "m1"); !strings.HasSuffix(got, "/threads/th1/messages/m1") {
+	if got := trailThreadMessagePath(basePath, 7, "th1", "m1"); got != basePath+"/7/threads/th1/messages/m1" {
 		t.Errorf("message path = %q", got)
 	}
 }

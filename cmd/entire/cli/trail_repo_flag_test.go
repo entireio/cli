@@ -13,17 +13,16 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 )
 
-// TestTrailForgeRefusalCoversBothEntryPoints is the F1 regression: a forge
-// reaches the trail API two ways — named in --repo, or inferred from origin —
-// and only the argument was gated, so a developer standing in a native clone
-// got the existence-hiding 404 the check exists to prevent. The inferred path
-// is the common one.
+// TestTrailNativeForgeCoversBothEntryPoints ensures a native repo reaches the
+// repo-ID-addressed trail path whether it is named in --repo or inferred from
+// origin. The inferred path is the common one.
 //
 // Not parallel: chdirs into a temp repo.
-func TestTrailForgeRefusalCoversBothEntryPoints(t *testing.T) {
+func TestTrailNativeForgeCoversBothEntryPoints(t *testing.T) {
 	t.Run("named in --repo", func(t *testing.T) {
-		_, _, _, err := parseTrailRepoArg("et/paul/dogbark")
-		require.ErrorIs(t, err, errTrailsNativeUnsupported)
+		forge, owner, repo, err := parseTrailRepoArg("et/paul/dogbark")
+		require.NoError(t, err)
+		require.Equal(t, []string{"et", "paul", "dogbark"}, []string{forge, owner, repo})
 	})
 
 	t.Run("inferred from a native origin remote", func(t *testing.T) {
@@ -31,8 +30,9 @@ func TestTrailForgeRefusalCoversBothEntryPoints(t *testing.T) {
 		testutil.InitRepo(t, dir)
 		testutil.RunGit(t, dir, "remote", "add", "origin", "entire://aws-us-east-2.entire.io/et/paul/dogbark")
 		t.Chdir(dir)
-		_, _, _, err := resolveTrailRemote(t.Context())
-		require.ErrorIs(t, err, errTrailsNativeUnsupported)
+		forge, owner, repo, err := resolveTrailRemote(t.Context())
+		require.NoError(t, err)
+		require.Equal(t, []string{"et", "paul", "dogbark"}, []string{forge, owner, repo})
 	})
 
 	t.Run("a mirror origin remote still resolves", func(t *testing.T) {
@@ -46,35 +46,6 @@ func TestTrailForgeRefusalCoversBothEntryPoints(t *testing.T) {
 		require.Equal(t, "entireio", owner)
 		require.Equal(t, "cli", repo)
 	})
-}
-
-// TestParseTrailRepoArg_NativeForgeReason pins WHY a native ref is refused.
-// Before this, `et` fell into the unknown-forge branch and was answered with
-// `"et" is not a supported forge id` plus a suggested github.com URL for a
-// repo that does not live on GitHub — two false statements. The reason is the
-// trails API's, not the forge token's.
-func TestParseTrailRepoArg_NativeForgeReason(t *testing.T) {
-	t.Parallel()
-	for _, raw := range []string{"et/paul/dogbark", "entire://host/et/paul/dogbark"} {
-		t.Run(raw, func(t *testing.T) {
-			t.Parallel()
-			_, _, _, err := parseTrailRepoArg(raw)
-			if err == nil {
-				t.Fatalf("parseTrailRepoArg(%q): want error", raw)
-			}
-			msg := err.Error()
-			for _, want := range []string{"Entire-native", "gh/<owner>/<repo>"} {
-				if !strings.Contains(msg, want) {
-					t.Errorf("parseTrailRepoArg(%q) = %q, missing %q", raw, msg, want)
-				}
-			}
-			for _, unwanted := range []string{"not a supported forge id", "https://github.com/paul/dogbark"} {
-				if strings.Contains(msg, unwanted) {
-					t.Errorf("parseTrailRepoArg(%q) = %q, should not contain %q", raw, msg, unwanted)
-				}
-			}
-		})
-	}
 }
 
 func TestParseTrailRepoArg(t *testing.T) {
@@ -102,11 +73,8 @@ func TestParseTrailRepoArg(t *testing.T) {
 		{name: "bare host instead of forge id", raw: "github.com/acme/app", wantErr: true},
 		{name: "bare unsupported forge host", raw: "gitlab.com/acme/app", wantErr: true},
 		{name: "unknown short forge id", raw: "zz/acme/app", wantErr: true},
-		// `et` IS a forge token (gitremote.IsForgePathToken) and entire-api's
-		// validTrailsHosts admits it, but resolvableTrailsHosts is {gh} alone,
-		// so it can only ever 404 — both spellings are refused locally instead.
-		{name: "native forge is refused", raw: "et/paul/dogbark", wantErr: true},
-		{name: "native forge in a URL is refused too", raw: "entire://host/et/paul/dogbark", wantErr: true},
+		{name: "native forge", raw: "et/paul/dogbark", wantForge: "et", wantOwner: "paul", wantRepo: "dogbark"},
+		{name: "native forge in a URL", raw: "entire://host/et/paul/dogbark", wantForge: "et", wantOwner: "paul", wantRepo: "dogbark"},
 	}
 
 	for _, tt := range tests {
@@ -144,26 +112,29 @@ func TestResolveTrailRepoOrRemote_OverrideSkipsGit(t *testing.T) {
 	}
 }
 
-func TestRunAuthenticatedTrailAPIRoutesByRepo(t *testing.T) {
+func TestRunAuthenticatedTrailAPIRoutesByForgeQualifiedRepo(t *testing.T) {
 	// newTrailAPIClient is a package seam, so this test must not run in parallel.
 	previous := newTrailAPIClient
-	var gotFullName string
-	newTrailAPIClient = func(_ context.Context, _ bool, fullName string) (*api.Client, error) {
-		gotFullName = fullName
-		return api.NewClientWithBaseURL("token", "https://cell.example"), nil
+	var gotForge, gotOwner, gotRepo string
+	newTrailAPIClient = func(_ context.Context, _ bool, forge, owner, repo string) (*api.Client, string, error) {
+		gotForge, gotOwner, gotRepo = forge, owner, repo
+		return api.NewClientWithBaseURL("token", "https://cell.example"), trailTestRepoID, nil
 	}
 	t.Cleanup(func() { newTrailAPIClient = previous })
 
 	called := false
-	err := runAuthenticatedTrailAPI(t.Context(), io.Discard, false, "gh/acme/app", func(_ context.Context, _ *api.Client) error {
+	err := runAuthenticatedTrailAPI(t.Context(), io.Discard, false, "entire://cell.example/et/acme/app", func(_ context.Context, _ *api.Client, repoID string) error {
 		called = true
+		if repoID != trailTestRepoID {
+			t.Fatalf("repoID=%q, want %s", repoID, trailTestRepoID)
+		}
 		return nil
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !called || gotFullName != "acme/app" {
-		t.Fatalf("called=%v fullName=%q, want true and acme/app", called, gotFullName)
+	if !called || strings.Join([]string{gotForge, gotOwner, gotRepo}, "/") != "et/acme/app" {
+		t.Fatalf("called=%v repo=(%q,%q,%q), want true and (et,acme,app)", called, gotForge, gotOwner, gotRepo)
 	}
 }
 
