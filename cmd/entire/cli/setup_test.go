@@ -47,11 +47,20 @@ func setupTestDir(t *testing.T) string {
 	return tmpDir
 }
 
-// setupTestRepo creates a temp directory with a git repo initialized.
-func setupTestRepo(t *testing.T) {
+// setupTestRepo creates a temp directory with a git repo initialized, chdirs
+// into it, and returns its path. Callers that only need the chdir can ignore the
+// result.
+//
+// Prefer this over setupTestDir for anything that resolves a worktree root.
+// setupTestDir leaves the directory repository-less, and paths.WorktreeRoot
+// fails there — which used to be papered over by callers falling back to
+// os.Getwd(). Those fallbacks are gone, because a fallback that exists for the
+// tests is a fallback shipping to users.
+func setupTestRepo(t *testing.T) string {
 	t.Helper()
 	tmpDir := setupTestDir(t)
 	testutil.InitRepo(t, tmpDir)
+	return tmpDir
 }
 
 // writeSettings writes settings content to the settings file.
@@ -1177,16 +1186,11 @@ func TestRunEnable_LocalScope_PreservesLocalOnlyFields(t *testing.T) {
 }
 
 func TestDetermineSettingsTarget_ExplicitLocalFlag(t *testing.T) {
-	tmpDir := t.TempDir()
-
-	// Create settings.json
-	settingsPath := filepath.Join(tmpDir, paths.SettingsFileName)
-	if err := os.WriteFile(settingsPath, []byte(`{}`), 0o644); err != nil {
-		t.Fatalf("Failed to create settings file: %v", err)
-	}
+	setupTestRepo(t)
+	writeSettings(t, `{}`)
 
 	// With --local flag, should always use local
-	useLocal, showNotification := determineSettingsTarget(tmpDir, true, false)
+	useLocal, showNotification := determineSettingsTarget(context.Background(), true, false)
 	if !useLocal {
 		t.Error("determineSettingsTarget() should return useLocal=true with --local flag")
 	}
@@ -1196,16 +1200,11 @@ func TestDetermineSettingsTarget_ExplicitLocalFlag(t *testing.T) {
 }
 
 func TestDetermineSettingsTarget_ExplicitProjectFlag(t *testing.T) {
-	tmpDir := t.TempDir()
-
-	// Create settings.json
-	settingsPath := filepath.Join(tmpDir, paths.SettingsFileName)
-	if err := os.WriteFile(settingsPath, []byte(`{}`), 0o644); err != nil {
-		t.Fatalf("Failed to create settings file: %v", err)
-	}
+	setupTestRepo(t)
+	writeSettings(t, `{}`)
 
 	// With --project flag, should always use project
-	useLocal, showNotification := determineSettingsTarget(tmpDir, false, true)
+	useLocal, showNotification := determineSettingsTarget(context.Background(), false, true)
 	if useLocal {
 		t.Error("determineSettingsTarget() should return useLocal=false with --project flag")
 	}
@@ -1215,16 +1214,11 @@ func TestDetermineSettingsTarget_ExplicitProjectFlag(t *testing.T) {
 }
 
 func TestDetermineSettingsTarget_SettingsExists_NoFlags(t *testing.T) {
-	tmpDir := t.TempDir()
-
-	// Create settings.json
-	settingsPath := filepath.Join(tmpDir, paths.SettingsFileName)
-	if err := os.WriteFile(settingsPath, []byte(`{}`), 0o644); err != nil {
-		t.Fatalf("Failed to create settings file: %v", err)
-	}
+	setupTestRepo(t)
+	writeSettings(t, `{}`)
 
 	// Without flags, should auto-redirect to local with notification
-	useLocal, showNotification := determineSettingsTarget(tmpDir, false, false)
+	useLocal, showNotification := determineSettingsTarget(context.Background(), false, false)
 	if !useLocal {
 		t.Error("determineSettingsTarget() should return useLocal=true when settings.json exists")
 	}
@@ -1234,12 +1228,12 @@ func TestDetermineSettingsTarget_SettingsExists_NoFlags(t *testing.T) {
 }
 
 func TestDetermineSettingsTarget_SettingsNotExists_NoFlags(t *testing.T) {
-	tmpDir := t.TempDir()
+	setupTestRepo(t)
 
 	// No settings.json exists
 
 	// Should use project settings (create new)
-	useLocal, showNotification := determineSettingsTarget(tmpDir, false, false)
+	useLocal, showNotification := determineSettingsTarget(context.Background(), false, false)
 	if useLocal {
 		t.Error("determineSettingsTarget() should return useLocal=false when settings.json doesn't exist")
 	}

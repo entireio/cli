@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"os"
 	"os/exec"
 	"strings"
 	"time"
@@ -872,7 +871,7 @@ func resolveAndValidateTranscript(ctx context.Context, sessionID string, ag agen
 	// in-progress writes, but can't conjure a file that was never started.
 	// This avoids agents like Cursor polling for 3s on non-existent files
 	// during auto-detection.
-	if _, statErr := os.Stat(transcriptPath); statErr == nil {
+	if _, statErr := agent.StatTranscriptFile(transcriptPath); statErr == nil {
 		if preparer, ok := agent.AsTranscriptPreparer(ag); ok {
 			if prepErr := preparer.PrepareTranscript(ctx, transcriptPath); prepErr != nil {
 				logging.Debug(ctx, "PrepareTranscript failed (best-effort)", "error", prepErr)

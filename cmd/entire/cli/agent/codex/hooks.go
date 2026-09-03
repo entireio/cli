@@ -14,6 +14,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
+	"github.com/entireio/cli/cmd/entire/cli/osroot"
 )
 
 // HooksFileName is the hooks config file used by Codex.
@@ -102,8 +103,11 @@ func (c *CodexAgent) InstallHooks(ctx context.Context, force bool) (int, error) 
 	if err := validateMutableHookTarget(worktreeHooks); err != nil {
 		return 0, err
 	}
-	hooksPath := worktreeHooks.Path()
-	existingData, exists, err := readHooksFileForMutation(hooksPath)
+	cfg, err := worktreeHooks.hookConfig()
+	if err != nil {
+		return 0, err
+	}
+	existingData, exists, err := readHooksFileForMutation(cfg)
 	if err != nil {
 		return 0, err
 	}
@@ -158,9 +162,6 @@ func (c *CodexAgent) InstallHooks(ctx context.Context, force bool) (int, error) 
 		return 0, fmt.Errorf("failed to marshal hooks: %w", err)
 	}
 	topLevel["hooks"] = hooksJSON
-	if err := os.MkdirAll(filepath.Dir(hooksPath), 0o750); err != nil {
-		return 0, fmt.Errorf("failed to create .codex directory: %w", err)
-	}
 	if err := validateMutableHookTarget(worktreeHooks); err != nil {
 		return 0, err
 	}
@@ -168,8 +169,10 @@ func (c *CodexAgent) InstallHooks(ctx context.Context, force bool) (int, error) 
 	if err != nil {
 		return 0, fmt.Errorf("failed to marshal hooks.json: %w", err)
 	}
-	if err := os.WriteFile(hooksPath, output, 0o600); err != nil {
-		return 0, fmt.Errorf("failed to write hooks.json: %w", err)
+	// Write creates .codex with MkdirAllNoSymlink, anchored on the worktree
+	// root rather than on .codex itself.
+	if err := cfg.Write(output, 0o600); err != nil {
+		return 0, err //nolint:wrapcheck // agent.HookConfigFile already names the file in its error
 	}
 
 	// No .codex/config.toml is written: hooks are enabled by default in
@@ -189,8 +192,11 @@ func (c *CodexAgent) UninstallHooks(ctx context.Context) error {
 	if err := validateMutableHookTarget(worktreeHooks); err != nil {
 		return err
 	}
-	hooksPath := worktreeHooks.Path()
-	data, exists, err := readHooksFileForMutation(hooksPath)
+	cfg, err := worktreeHooks.hookConfig()
+	if err != nil {
+		return err
+	}
+	data, exists, err := readHooksFileForMutation(cfg)
 	if err != nil {
 		// readHooksFileForMutation reports an absent file as !exists with no
 		// error, so a real read failure never masquerades as "nothing to
@@ -236,10 +242,7 @@ func (c *CodexAgent) UninstallHooks(ctx context.Context) error {
 	if err := validateMutableHookTarget(worktreeHooks); err != nil {
 		return err
 	}
-	if err := os.WriteFile(hooksPath, output, 0o600); err != nil {
-		return fmt.Errorf("failed to write hooks.json: %w", err)
-	}
-	return nil
+	return cfg.Write(output, 0o600) //nolint:wrapcheck // agent.HookConfigFile already names the file in its error
 }
 
 // AreHooksInstalled reports whether Codex is wired up to Entire in this repo.
@@ -268,7 +271,11 @@ func (c *CodexAgent) AreHooksInstalled(ctx context.Context) (bool, error) {
 		logging.Warn(ctx, "codex: hooks path is not usable", "path", hooksPath, "err", err)
 		return false, err
 	}
-	data, exists, err := readHooksFileForMutation(hooksPath)
+	cfg, err := worktreeHooks.hookConfig()
+	if err != nil {
+		return false, err
+	}
+	data, exists, err := readHooksFileForMutation(cfg)
 	if err != nil {
 		logging.Warn(ctx, "codex: failed to read hooks file", "path", hooksPath, "err", err)
 		return false, err
@@ -512,36 +519,50 @@ func inspectHookConfigAt(ctx context.Context, path string) HookConfigInspection 
 	return inspection
 }
 
+// hooksDocumentRoot opens the project root containing path and returns
+// path's name inside it.
+//
+// path is always <project-root>/.codex/hooks.json — built that way by every
+// caller from a resolved root — so the root is recovered by removing exactly
+// that known suffix rather than by taking filepath.Dir. The difference matters:
+// Dir() would anchor inside `.codex`, which is the component that needs
+// containing. A path that does not have the expected shape is refused rather
+// than opened somewhere else.
+func hooksDocumentRoot(path string) (*os.Root, string, error) {
+	name := filepath.Join(".codex", HooksFileName)
+	if !strings.HasSuffix(path, string(filepath.Separator)+name) {
+		return nil, "", fmt.Errorf("codex hooks path %q is not a .codex/%s", path, HooksFileName)
+	}
+	projectRoot := strings.TrimSuffix(path, string(filepath.Separator)+name)
+	cfg, err := agent.OpenHookConfig(projectRoot, ".codex/"+HooksFileName)
+	if err != nil {
+		return nil, "", err //nolint:wrapcheck // caller names the path it asked about
+	}
+	root, rootName := cfg.Root()
+	return root, rootName, nil
+}
+
 func readHooksDocument(path string) (*hooksDocument, error) {
 	document := &hooksDocument{
 		topLevel: make(map[string]json.RawMessage),
 		rawHooks: make(map[string]json.RawMessage),
 	}
-	root, err := os.OpenRoot(filepath.Dir(path))
+	// Anchored on the project root, with ".codex/hooks.json" as the name
+	// inside it — not on filepath.Dir(path), which would put `.codex` ABOVE the
+	// root and leave the containment covering only the final component. A root
+	// is only as trustworthy as the directory it is opened on, and `.codex`
+	// arrives with the checkout.
+	root, name, err := hooksDocumentRoot(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return document, nil
 	}
 	if err != nil {
 		return nil, fmt.Errorf("open Codex project directory for %q: %w", path, err)
 	}
-	defer root.Close()
-
-	name := filepath.Base(path)
-	before, err := root.Stat(name)
+	file, err := osroot.OpenNoFollow(root, name)
 	if errors.Is(err, os.ErrNotExist) {
 		return document, nil
 	}
-	if err != nil {
-		return nil, fmt.Errorf("inspect Codex hooks file %q: %w", path, err)
-	}
-	if !before.Mode().IsRegular() {
-		return nil, fmt.Errorf("codex hooks path %q is not a regular file", path)
-	}
-	if before.Size() > maxHooksFileBytes {
-		return nil, fmt.Errorf("codex hooks file %q exceeds %d bytes", path, maxHooksFileBytes)
-	}
-
-	file, err := root.Open(name)
 	if err != nil {
 		return nil, fmt.Errorf("open Codex hooks file %q: %w", path, err)
 	}
@@ -551,8 +572,11 @@ func readHooksDocument(path string) (*hooksDocument, error) {
 	if err != nil {
 		return nil, fmt.Errorf("inspect opened Codex hooks file %q: %w", path, err)
 	}
-	if !opened.Mode().IsRegular() || !os.SameFile(before, opened) {
-		return nil, fmt.Errorf("codex hooks file %q changed while opening", path)
+	if !opened.Mode().IsRegular() {
+		return nil, fmt.Errorf("codex hooks path %q is not a regular file", path)
+	}
+	if opened.Size() > maxHooksFileBytes {
+		return nil, fmt.Errorf("codex hooks file %q exceeds %d bytes", path, maxHooksFileBytes)
 	}
 	data, err := io.ReadAll(io.LimitReader(file, maxHooksFileBytes+1))
 	if err != nil {
@@ -560,13 +584,6 @@ func readHooksDocument(path string) (*hooksDocument, error) {
 	}
 	if len(data) > maxHooksFileBytes {
 		return nil, fmt.Errorf("codex hooks file %q exceeds %d bytes", path, maxHooksFileBytes)
-	}
-	after, err := root.Stat(name)
-	if err != nil {
-		return nil, fmt.Errorf("reinspect Codex hooks file %q: %w", path, err)
-	}
-	if !after.Mode().IsRegular() || !os.SameFile(before, after) {
-		return nil, fmt.Errorf("codex hooks file %q changed while reading", path)
 	}
 	document.exists = true
 	if err := json.Unmarshal(data, &document.topLevel); err != nil {
@@ -586,22 +603,37 @@ func readHooksDocument(path string) (*hooksDocument, error) {
 	return document, nil
 }
 
-func readHooksFileForMutation(path string) ([]byte, bool, error) {
-	file, err := os.Open(path) //nolint:gosec // path is validated against the current worktree
+func readHooksFileForMutation(cfg *agent.HookConfigFile) ([]byte, bool, error) {
+	// Bounded before the read rather than measured after it, matching
+	// readHooksDocument above. cfg.Read is an unbounded io.ReadAll, and
+	// .codex/hooks.json arrives with the checkout, so a large committed file
+	// was read into memory in full before the size was ever checked.
+	root, name := cfg.Root()
+	file, err := osroot.OpenNoFollow(root, name)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, false, nil
 	}
 	if err != nil {
-		return nil, false, fmt.Errorf("read Codex hooks file %q: %w", path, err)
+		return nil, false, fmt.Errorf("open Codex hooks file %q: %w", cfg.Path(), err)
 	}
 	defer file.Close()
 
+	opened, err := file.Stat()
+	if err != nil {
+		return nil, false, fmt.Errorf("inspect opened Codex hooks file %q: %w", cfg.Path(), err)
+	}
+	if !opened.Mode().IsRegular() {
+		return nil, false, fmt.Errorf("codex hooks path %q is not a regular file", cfg.Path())
+	}
+	if opened.Size() > maxHooksFileBytes {
+		return nil, false, fmt.Errorf("codex hooks file %q exceeds %d bytes", cfg.Path(), maxHooksFileBytes)
+	}
 	data, err := io.ReadAll(io.LimitReader(file, maxHooksFileBytes+1))
 	if err != nil {
-		return nil, false, fmt.Errorf("read Codex hooks file %q: %w", path, err)
+		return nil, false, fmt.Errorf("read Codex hooks file %q: %w", cfg.Path(), err)
 	}
 	if len(data) > maxHooksFileBytes {
-		return nil, false, fmt.Errorf("codex hooks file %q exceeds %d bytes", path, maxHooksFileBytes)
+		return nil, false, fmt.Errorf("codex hooks file %q exceeds %d bytes", cfg.Path(), maxHooksFileBytes)
 	}
 	return data, true, nil
 }

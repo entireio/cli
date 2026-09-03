@@ -8,7 +8,7 @@ authenticate as* for every upstream call. The goal is one mental model:
 > **is** a core — use the active context's core directly — or it is a
 > **resource server** that advertises which cores it trusts via a
 > `/.well-known` blob, so the CLI picks the context whose core is trusted and
-> exchanges that context's token for the resource.
+> presents that context's token to the resource.
 
 There is no separate "auth system" per service. There is one identity model
 (`contexts.json`, keyed on `CoreURL`) and a set of resource servers that
@@ -20,7 +20,7 @@ accept a core's JWTs.
 |---|---|---|---|
 | **Core** — IdP **and** control-plane API, co-located | `entire-core`, per region (`us.auth.entire.io`, `eu.auth.entire.io`), fronted by the apex `auth.entire.io` | `org` / `repo` / `project` / `grant`, `auth *`, `login` | none needed — the host *is* the core |
 | **Resource: git cluster** | `entire-server` / `entiredb` | `git-remote-entire` (clone/push) | `/.well-known/entire-cluster.json` → `core_urls` |
-| **Resource: web/data API** | `entire.io` (`partial.to`) | `activity` / `search` / `trail` / `dispatch` | `/.well-known/entire-api.json` → `trusted_issuers` (audience = the host origin) |
+| **Resource: web/data API** | `entire.io` (`partial.to`) | `activity` / `search` / `trail` / `dispatch` | `/.well-known/entire-api.json` → `trusted_issuers` (bearer = the context's login JWT) |
 
 `contexts.json` (`$ENTIRE_CONFIG_DIR/contexts.json`, shared with entiredb's
 CLIs) stores each login as `{Name, CoreURL, Handle, KeychainService}` plus a
@@ -113,15 +113,15 @@ The CLI reads **only `trusted_issuers`** — exactly the way the git path reads 
 cluster's `core_urls`. `issuer`, `audience`, and `jwks_uris` are advertised but
 ignored on decode (see the audience note below).
 
-> **Audience = the data host origin.** entire.io's `ENTIRE_CORE_JWT_AUDIENCE` is
-> `https://entire.io` (prod) / `https://partial.to` (staging) — the data host's
-> own base URI, on both environments. The token manager already defaults the RFC
-> 8693 audience to the resource origin it's exchanging for, so dialing
-> `https://entire.io` produces `aud = https://entire.io` with no special
-> handling. The CLI therefore **derives** the audience from the host it's already
-> dialing rather than reading the advertised `audience` field. (This trades away
-> the "server changes audience without a CLI release" flexibility — acceptable
-> because `aud == base URI` is a hard requirement on both environments.)
+> **The bearer is the login JWT, not an exchange.** Since COR-1095 the data
+> host (gateway) and the entire-api cells accept the context's login JWT — the
+> *account access token* (`scope` includes `entire:session`, `aud` = its own
+> core) — directly; the gateway mints per-jurisdiction cell tokens from it
+> itself. The CLI previously exchanged the login JWT (RFC 8693) for a narrower
+> `entire:api-access` token with `aud` = the data host origin; cell-backed
+> gateway routes can no longer serve that shape (the gateway would have to
+> re-exchange it at core, which refuses a non-session subject), so the exchange
+> was retired. The advertised `audience` field is therefore unused.
 
 Because the only field the CLI consumes is the trusted-issuer list — which *is*
 a set of core URLs — the data-API discovery cache is literally the git cluster's
@@ -138,9 +138,9 @@ Resolution (`auth.ResolveDataAPIToken`):
    error. So `ENTIRE_API_BASE_URL=https://partial.to entire activity` needs
    `entire auth use staging` first — the target host never selects the identity
    for you.
-3. Exchange that context's login JWT at **its** core for the data host origin
-   (`auth.NewRefreshingResourceProvider`, keyed on `c.CoreURL` like the
-   control-plane provider; the token manager sets `aud` = that origin).
+3. Return that context's login JWT, silently re-minted from the stored refresh
+   token when near expiry (`auth.RefreshedLoginToken`, keyed on `c.CoreURL`
+   like the control-plane provider).
 4. **No fallback**: a host that doesn't advertise discovery (404 / unreachable /
    503 / malformed) with no cache entry is an error naming the host — without
    the well-known we can't know which login servers it trusts. A *reachable*
@@ -152,7 +152,7 @@ The selection rule differs from the control plane (where the active context is
 the active context is used only when the host trusts its core.
 
 Key files: `cmd/entire/cli/auth/data_api.go` (`ResolveDataAPIToken`),
-`cmd/entire/cli/auth/refresh.go` (`NewRefreshingResourceProvider`),
+`cmd/entire/cli/auth/refresh.go` (`RefreshedLoginToken`),
 `internal/entireclient/clusterdiscovery/api_discovery.go` (`DiscoverAPI`,
 `ResolveContextForAPI`, sharing `requireActiveContext` *and* the cores cache with
 the cluster path), `internal/entireclient/discovery/cluster_cores.go`

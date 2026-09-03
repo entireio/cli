@@ -41,32 +41,34 @@ func SetResolveContextForAPIForTest(t interface{ Helper() }, fn resolveContextFu
 	return func() { resolveContextForAPI = prev }
 }
 
-// ResolveDataAPIToken returns a bearer for the data API at dataBaseURL.
+// ResolveDataAPIToken returns the bearer for the data plane at dataBaseURL:
+// the active context's refreshed login JWT — the account access token (scope
+// entire:session) that the entire.io gateway and the entire-api cells accept
+// directly, and that the gateway uses to mint per-jurisdiction cell tokens
+// itself (COR-1095).
 //
-// It dials the API's /.well-known/entire-api.json to learn which login
-// server(s) the API trusts and which audience to exchange for, requires the
-// ACTIVE auth context to be issued by one of those servers, and exchanges that
-// context's login JWT for the advertised audience at that context's core.
+// It used to return an RFC 8693 exchange of that JWT for the data host's
+// audience (a narrower entire:api-access token). Cell-backed gateway routes
+// can no longer serve that shape: the gateway had to re-exchange it at
+// entire-core to reach a cell, and core refuses a non-session subject — which
+// is how every released CLI's `entire dispatch` 502'd from 2026-08-20.
 //
-// Pointing the CLI at another environment therefore takes two steps, because
-// the acting identity is never inferred from the target host:
+// Discovery is unchanged and remains the only path: the host's
+// /.well-known/entire-api.json names the login servers it trusts, and the
+// ACTIVE auth context must be issued by one of them. Pointing the CLI at
+// another environment therefore still takes two steps, because the acting
+// identity is never inferred from the target host:
 //
 //	entire auth use staging
 //	ENTIRE_API_BASE_URL=https://partial.to entire activity
 //
-// An earlier revision skipped the first line by falling back to whichever saved
-// login the host happened to trust. That made an env var silently change which
-// account a command ran as, which is exactly the ambiguity the single active
-// context exists to remove; a wrong-context run now fails with a message naming
-// the logins that would work (see clusterdiscovery.requireActiveContext).
-//
-// Discovery is the only path: an API host that doesn't advertise
-// /.well-known/entire-api.json (unreachable / 404 / 503 / malformed) is an
-// error — without it we can't know which login servers the host trusts, and
-// guessing risks exchanging a token at a core the host doesn't accept.
+// A host that doesn't advertise discovery (unreachable / 404 / 503 /
+// malformed) is an error — without it we can't know which login servers the
+// host trusts, and guessing risks presenting a token to a host that doesn't
+// accept that core (see clusterdiscovery.requireActiveContext).
 //
 // Callers that honour --insecure-http-auth must call EnableInsecureHTTP before
-// invoking this (as they already do); the per-context exchange reads that
+// invoking this (as they already do); the per-context refresh reads that
 // global opt-in.
 func ResolveDataAPIToken(ctx context.Context, dataBaseURL string) (string, error) {
 	dataOrigin := api.OriginOnly(dataBaseURL)
@@ -87,14 +89,7 @@ func ResolveDataAPIToken(ctx context.Context, dataBaseURL string) (string, error
 		return "", err
 	}
 
-	// Exchange for the data host origin; the token manager derives the RFC 8693
-	// audience from it, which is the aud the API requires (aud == base URI).
-	allowInsecure := insecureHTTPEnabled() || isLoopbackHTTP(selected.CoreURL)
-	provider, err := NewRefreshingResourceProvider(selected, dataOrigin, nil, allowInsecure)
-	if err != nil {
-		return "", err
-	}
-	return provider(ctx)
+	return RefreshedLoginToken(ctx, selected)
 }
 
 type dataAPIHTTPDiscoveryTransport struct {

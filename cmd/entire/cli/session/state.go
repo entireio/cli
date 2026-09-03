@@ -7,16 +7,15 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
+	"github.com/entireio/cli/cmd/entire/cli/gitdir"
 	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/osroot"
@@ -847,23 +846,54 @@ func (s *State) IsStale() bool {
 // Use StateStore directly in strategies for performance-critical state operations.
 // Use the Sessions interface (when implemented) for high-level session management.
 type StateStore struct {
-	// stateDir is the directory where session state files are stored
+	// stateDir is the absolute directory session state files live in. It is kept
+	// for messages and for the go-test isolation guard; every read and write
+	// goes through the root below instead.
 	stateDir string
+
+	// parent is the git common directory stateDir sits in, and dirName is
+	// stateDir's name within it. All I/O is a name inside parent's shared
+	// *os.Root, so a session ID that escaped validation still cannot escape
+	// .git — see the gitdir package for why that is structural here rather than
+	// a precondition each method re-checks.
+	//
+	// Under test, NewStateStoreWithDir supplies a temp directory as a stand-in
+	// for the common dir; the shape is identical.
+	parent  string
+	dirName string
+}
+
+// newStateStoreAt builds a store for the state directory inside commonDir.
+func newStateStoreAt(commonDir string) *StateStore {
+	return &StateStore{
+		stateDir: filepath.Join(commonDir, SessionStateDirName),
+		parent:   commonDir,
+		dirName:  SessionStateDirName,
+	}
+}
+
+// dirRoot returns the shared root the state directory is a name inside. gitdir
+// memoizes per directory, so this is a map lookup rather than an open.
+func (s *StateStore) dirRoot() (*os.Root, error) {
+	return gitdir.OpenAt(s.parent) //nolint:wrapcheck // gitdir names the directory and returns a missing one unwrapped for os.IsNotExist
+}
+
+// name renders a file in the state directory as a name relative to dirRoot.
+func (s *StateStore) name(file string) string {
+	return s.dirName + "/" + file
 }
 
 // NewStateStore creates a new state store.
 // Uses the git common dir to store session state (shared across worktrees).
 func NewStateStore(ctx context.Context) (*StateStore, error) {
-	commonDir, err := getGitCommonDir(ctx)
+	commonDir, err := gitdir.CommonDir(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get git common dir: %w", err)
 	}
 	if err := ensureTestIsolatedStateDir(commonDir); err != nil {
 		return nil, err
 	}
-	return &StateStore{
-		stateDir: filepath.Join(commonDir, SessionStateDirName),
-	}, nil
+	return newStateStoreAt(commonDir), nil
 }
 
 // NewStateStoreForWorktree returns the state store for the repository at
@@ -879,15 +909,9 @@ func NewStateStoreForWorktree(ctx context.Context, worktreeRoot string) (*StateS
 	if worktreeRoot == "" {
 		return nil, errors.New("worktree root required to scope the session state store")
 	}
-	cmd := exec.CommandContext(ctx, "git", "rev-parse", "--git-common-dir")
-	cmd.Dir = worktreeRoot
-	output, err := cmd.Output()
+	commonDir, err := gitdir.CommonDirForWorktree(ctx, worktreeRoot)
 	if err != nil {
 		return nil, fmt.Errorf("resolve git common dir for %s: %w", worktreeRoot, err)
-	}
-	commonDir := strings.TrimSpace(string(output))
-	if !filepath.IsAbs(commonDir) {
-		commonDir = filepath.Join(worktreeRoot, commonDir)
 	}
 	// Same go-test guard as NewStateStore: an explicit root computed from the
 	// process CWD in a non-isolated test is just as accidental as the CWD
@@ -895,9 +919,7 @@ func NewStateStoreForWorktree(ctx context.Context, worktreeRoot string) (*StateS
 	if err := ensureTestIsolatedStateDir(commonDir); err != nil {
 		return nil, err
 	}
-	return &StateStore{
-		stateDir: filepath.Join(filepath.Clean(commonDir), SessionStateDirName),
-	}, nil
+	return newStateStoreAt(commonDir), nil
 }
 
 // ensureTestIsolatedStateDir fails loud when `go test` code reaches a
@@ -950,7 +972,11 @@ func underTempRoot(path string) bool {
 // NewStateStoreWithDir creates a new state store with a custom directory.
 // This is useful for testing.
 func NewStateStoreWithDir(stateDir string) *StateStore {
-	return &StateStore{stateDir: stateDir}
+	return &StateStore{
+		stateDir: stateDir,
+		parent:   filepath.Dir(stateDir),
+		dirName:  filepath.Base(stateDir),
+	}
 }
 
 // Load loads the session state for the given session ID.
@@ -962,17 +988,17 @@ func (s *StateStore) Load(ctx context.Context, sessionID string) (*State, error)
 		return nil, fmt.Errorf("invalid session ID: %w", err)
 	}
 
-	root, err := os.OpenRoot(s.stateDir)
+	root, err := s.dirRoot()
 	if os.IsNotExist(err) {
+		// The directory the state dir would live in does not exist, so neither
+		// does the session. Same contract as a missing state file.
 		return nil, nil //nolint:nilnil // nil,nil indicates session not found (expected case)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("failed to open session state directory: %w", err)
 	}
-	defer root.Close()
 
-	fileName := sessionID + ".json"
-	data, err := osroot.ReadFile(root, fileName)
+	data, err := osroot.ReadFileNoFollow(root, s.name(sessionID+".json"))
 	if os.IsNotExist(err) {
 		return nil, nil //nolint:nilnil // nil,nil indicates session not found (expected case)
 	}
@@ -1011,53 +1037,26 @@ func (s *StateStore) Save(ctx context.Context, state *State) error {
 		return fmt.Errorf("invalid session ID: %w", err)
 	}
 
-	if err := os.MkdirAll(s.stateDir, 0o750); err != nil {
-		return fmt.Errorf("failed to create session state directory: %w", err)
-	}
-
-	// Scope the final rename to an os.Root so the session-ID-derived destination
-	// cannot escape the state directory even if validation were ever bypassed
-	// (defense in depth; the ID is already validated above).
-	root, err := os.OpenRoot(s.stateDir)
+	// Every path below is a name inside the git common dir's shared root, so the
+	// session-ID-derived destination cannot escape .git even if validation were
+	// ever bypassed (defense in depth; the ID is already validated above).
+	root, err := s.dirRoot()
 	if err != nil {
 		return fmt.Errorf("failed to open session state directory: %w", err)
 	}
-	defer root.Close()
+	if err := osroot.MkdirAllNoSymlink(root, s.dirName, 0o750); err != nil {
+		return fmt.Errorf("failed to create session state directory: %w", err)
+	}
 
 	data, err := jsonutil.MarshalIndentWithNewline(state, "", "  ")
 	if err != nil {
 		return fmt.Errorf("failed to marshal session state: %w", err)
 	}
 
-	fileName := state.SessionID + ".json"
-
-	// Use a unique temp file per save. Concurrent hook processes can write the
-	// same session ID, so a fixed "<session>.json.tmp" path can corrupt JSON.
-	tmpFile, err := os.CreateTemp(s.stateDir, fileName+".*.tmp")
-	if err != nil {
-		return fmt.Errorf("failed to create temporary session state file: %w", err)
+	fileName := s.name(state.SessionID + ".json")
+	if err := jsonutil.WriteFileAtomicIn(root, fileName, data, 0o600); err != nil {
+		return fmt.Errorf("failed to write session state file: %w", err)
 	}
-	tmpFileName := tmpFile.Name()
-	removeTmp := true
-	defer func() {
-		if removeTmp {
-			_ = os.Remove(tmpFileName)
-		}
-	}()
-
-	if _, err := tmpFile.Write(data); err != nil {
-		_ = tmpFile.Close()
-		return fmt.Errorf("failed to write session state: %w", err)
-	}
-	if err := tmpFile.Close(); err != nil {
-		return fmt.Errorf("failed to close session state file: %w", err)
-	}
-
-	// Atomic rename into the validated final path, via os.Root.
-	if err := root.Rename(filepath.Base(tmpFileName), fileName); err != nil {
-		return fmt.Errorf("failed to rename session state file: %w", err)
-	}
-	removeTmp = false
 	return nil
 }
 
@@ -1075,27 +1074,26 @@ func (s *StateStore) Clear(ctx context.Context, sessionID string) error {
 	// session ID is user-controlled, and a glob pattern would let metacharacters
 	// match and delete other sessions' files. os.Root ensures traversal-resistant
 	// removal.
-	matches := matchSessionFiles(s.stateDir, sessionID)
-	if len(matches) > 0 {
-		root, rootErr := os.OpenRoot(s.stateDir)
-		if rootErr != nil {
-			return fmt.Errorf("failed to open session state directory for cleanup: %w", rootErr)
-		}
-		defer root.Close()
-		for _, name := range matches {
-			_ = osroot.Remove(root, name) //nolint:errcheck // best-effort cleanup
-		}
+	root, err := s.dirRoot()
+	if os.IsNotExist(err) {
+		return nil // nothing to clear
+	}
+	if err != nil {
+		return fmt.Errorf("failed to open session state directory for cleanup: %w", err)
+	}
+	for _, name := range s.matchSessionFiles(root, sessionID) {
+		_ = osroot.RemoveNoSymlinks(root, s.name(name)) //nolint:errcheck // best-effort cleanup
 	}
 
 	return nil
 }
 
-// matchSessionFiles returns the names (not paths) of files in dir that belong to
-// the given session ID — i.e. "<sessionID>.<ext>". It uses literal prefix
-// matching, never glob patterns, so a session ID containing glob metacharacters
-// cannot match unrelated files.
-func matchSessionFiles(dir, sessionID string) []string {
-	entries, err := os.ReadDir(dir)
+// matchSessionFiles returns the names (not paths) of files in the state
+// directory that belong to the given session ID — i.e. "<sessionID>.<ext>". It
+// uses literal prefix matching, never glob patterns, so a session ID containing
+// glob metacharacters cannot match unrelated files.
+func (s *StateStore) matchSessionFiles(root *os.Root, sessionID string) []string {
+	entries, err := osroot.ReadDirNoSymlinks(root, s.dirName)
 	if err != nil {
 		return nil // missing/unreadable dir => nothing to clear
 	}
@@ -1112,7 +1110,11 @@ func matchSessionFiles(dir, sessionID string) []string {
 // RemoveAll removes the entire session state directory.
 // This is used during uninstall to completely remove all session state.
 func (s *StateStore) RemoveAll() error {
-	if err := os.RemoveAll(s.stateDir); err != nil {
+	root, err := s.dirRoot()
+	if err != nil {
+		return fmt.Errorf("failed to open session state directory: %w", err)
+	}
+	if err := root.RemoveAll(s.dirName); err != nil {
 		return fmt.Errorf("failed to remove session state directory: %w", err)
 	}
 	return nil
@@ -1120,7 +1122,11 @@ func (s *StateStore) RemoveAll() error {
 
 // List returns all session states.
 func (s *StateStore) List(ctx context.Context) ([]*State, error) {
-	entries, err := os.ReadDir(s.stateDir)
+	root, err := s.dirRoot()
+	if err != nil {
+		return nil, fmt.Errorf("failed to open session state directory: %w", err)
+	}
+	entries, err := osroot.ReadDirNoSymlinks(root, s.dirName)
 	if os.IsNotExist(err) {
 		return nil, nil
 	}
@@ -1151,72 +1157,21 @@ func (s *StateStore) List(ctx context.Context) ([]*State, error) {
 	return states, nil
 }
 
-// gitCommonDirCache caches the git common dir to avoid repeated subprocess calls.
-// Keyed by working directory to handle directory changes (same pattern as paths.WorktreeRoot).
-var (
-	gitCommonDirMu       sync.RWMutex
-	gitCommonDirCache    string
-	gitCommonDirCacheDir string
-)
-
 // ClearGitCommonDirCache clears the cached git common dir.
 // Useful for testing when changing directories.
 func ClearGitCommonDirCache() {
-	gitCommonDirMu.Lock()
-	gitCommonDirCache = ""
-	gitCommonDirCacheDir = ""
-	gitCommonDirMu.Unlock()
+	gitdir.ClearCache()
 }
 
 // GetGitCommonDir returns the .git common directory for the current working
-// directory. In a regular checkout this is .git/; in a worktree, it's the
-// main repo's .git/ (not .git/worktrees/<name>/). Result is cached per
-// working directory. This is a public wrapper around the package-internal
-// helper for callers outside this package.
+// directory, absolute. In a regular checkout this is .git/; in a worktree, it's
+// the main repo's .git/ (not .git/worktrees/<name>/). Result is cached per
+// working directory.
+//
+// The resolution lives in gitdir, which also owns the *os.Root over the same
+// directory — this stays as the name 19 call sites already import. It used to be
+// one of two hand-rolled copies of the same git subprocess, the other in
+// strategy with no cache at all.
 func GetGitCommonDir(ctx context.Context) (string, error) {
-	return getGitCommonDir(ctx)
-}
-
-// getGitCommonDir returns the path to the shared git directory.
-// In a regular checkout, this is .git/
-// In a worktree, this is the main repo's .git/ (not .git/worktrees/<name>/)
-// The result is cached per working directory.
-func getGitCommonDir(ctx context.Context) (string, error) {
-	cwd, err := os.Getwd() //nolint:forbidigo // used for cache key, not git-relative paths
-	if err != nil {
-		cwd = ""
-	}
-
-	// Check cache with read lock first
-	gitCommonDirMu.RLock()
-	if gitCommonDirCache != "" && gitCommonDirCacheDir == cwd {
-		cached := gitCommonDirCache
-		gitCommonDirMu.RUnlock()
-		return cached, nil
-	}
-	gitCommonDirMu.RUnlock()
-
-	// Cache miss — resolve via git subprocess
-	cmd := exec.CommandContext(ctx, "git", "rev-parse", "--git-common-dir")
-	cmd.Dir = "."
-	output, err := cmd.Output()
-	if err != nil {
-		return "", fmt.Errorf("failed to get git common dir: %w", err)
-	}
-
-	commonDir := strings.TrimSpace(string(output))
-
-	// git rev-parse --git-common-dir returns relative paths from the working directory,
-	// so we need to make it absolute if it isn't already
-	if !filepath.IsAbs(commonDir) {
-		commonDir = filepath.Join(".", commonDir)
-	}
-	commonDir = filepath.Clean(commonDir)
-
-	gitCommonDirMu.Lock()
-	gitCommonDirCache = commonDir
-	gitCommonDirCacheDir = cwd
-	gitCommonDirMu.Unlock()
-
-	return commonDir, nil
+	return gitdir.CommonDir(ctx) //nolint:wrapcheck // gitdir already names the failure and the command it ran
 }

@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
+	"github.com/entireio/cli/cmd/entire/cli/entiredir"
 	"github.com/entireio/cli/cmd/entire/cli/interactive"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 
@@ -150,7 +151,7 @@ func runRunnerSetup(ctx context.Context, w, errW io.Writer, opts runnerSetupOpti
 		return nil
 	}
 
-	return applyTuneWithAgent(ctx, w, errW, runners, prompt, created, opts.debugDir)
+	return applyTuneWithAgent(ctx, w, errW, repoRoot, runners, prompt, created, opts.debugDir)
 }
 
 // writeTuneDebug best-effort writes content to <dir>/<name> for debugging,
@@ -173,7 +174,12 @@ func writeTuneDebug(errW io.Writer, dir, name, content string) {
 // surgically rewrites each runner file's prompt.template in place. createdIDs
 // are runners onboarding just scaffolded from defaults; any of those left
 // un-tailored is flagged so it isn't committed as if it were repo-specific.
-func applyTuneWithAgent(ctx context.Context, w, errW io.Writer, runners []tuneRunner, prompt string, createdIDs []string, debugDir string) error {
+func applyTuneWithAgent(ctx context.Context, w, errW io.Writer, repoRoot string, runners []tuneRunner, prompt string, createdIDs []string, debugDir string) error {
+	root, err := entiredir.OpenAt(repoRoot)
+	if err != nil {
+		return fmt.Errorf("open %s: %w", paths.EntireDir, err)
+	}
+
 	// Reuse the summary-provider resolution (selection + persistence), but pull
 	// the raw TextGenerator rather than provider.Generator: the latter is a
 	// summarize.Generator that turns a transcript Input into a checkpoint
@@ -237,7 +243,7 @@ func applyTuneWithAgent(ctx context.Context, w, errW io.Writer, runners []tuneRu
 		if bytes.Equal(newRaw, r.Raw) {
 			continue // model returned the current template verbatim — benign no-op
 		}
-		if err := os.WriteFile(r.Path, newRaw, 0o644); err != nil { //nolint:gosec // runner configs are repo-committed, world-readable config
+		if err := entiredir.WriteFile(root, r.Name, newRaw, 0o644); err != nil {
 			return fmt.Errorf("writing %s: %w", r.Path, err)
 		}
 		fmt.Fprintf(w, "updated %s\n", filepath.Base(r.Path))

@@ -231,30 +231,65 @@ func TestRunShow_PrintsFindingsContentWhenEmbedded(t *testing.T) {
 	}
 }
 
-func TestRunShow_FallsBackToFindingsDocOnDisk(t *testing.T) {
+func TestRunShow_FallsBackToPerRunFindingsOnDisk(t *testing.T) {
 	t.Parallel()
 
 	dir := t.TempDir()
 	store := NewLocalManifestStoreWithDir(dir)
+	stateStore := NewStateStoreWithDir(dir)
 
-	findingsPath := filepath.Join(dir, "findings.md")
+	const runID = "abcdef012345"
 	body := "## Resumable run\n\nPartial progress only.\n"
-	if err := os.WriteFile(findingsPath, []byte(body), 0o600); err != nil {
+	if err := stateStore.WriteFindings(runID, []byte(body)); err != nil {
 		t.Fatalf("write findings: %v", err)
 	}
 
 	t1 := time.Date(2026, 5, 1, 10, 0, 0, 0, time.UTC)
 	// FindingsContent is empty (paused/cancelled run) — disk read must succeed.
-	writeShowManifest(t, store, "abcdef012345", "paused topic", t1, "paused",
-		findingsPath, "", nil)
+	writeShowManifest(t, store, runID, "paused topic", t1, "paused",
+		stateStore.FindingsPath(runID), "", nil)
 
 	var out bytes.Buffer
-	err := RunShow(context.Background(), ShowInput{Out: &out}, ShowDeps{ManifestStore: store})
+	err := RunShow(context.Background(), ShowInput{Out: &out},
+		ShowDeps{ManifestStore: store, StateStore: stateStore})
 	if err != nil {
 		t.Fatalf("RunShow: %v", err)
 	}
 	if !strings.Contains(out.String(), "Partial progress only.") {
 		t.Errorf("expected on-disk findings body, got: %q", out.String())
+	}
+}
+
+// The manifest's FindingsDoc is data read off disk, so it must not decide which
+// file gets printed. A manifest pointing somewhere else entirely renders the
+// same as one with no findings at all.
+func TestRunShow_IgnoresFindingsDocPointingOutsideTheStore(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	store := NewLocalManifestStoreWithDir(dir)
+	stateStore := NewStateStoreWithDir(dir)
+
+	elsewhere := filepath.Join(t.TempDir(), "planted.md")
+	if err := os.WriteFile(elsewhere, []byte("SECRET FROM ELSEWHERE\n"), 0o600); err != nil {
+		t.Fatalf("write planted file: %v", err)
+	}
+
+	t1 := time.Date(2026, 5, 1, 10, 0, 0, 0, time.UTC)
+	writeShowManifest(t, store, "abcdef012345", "paused topic", t1, "paused",
+		elsewhere, "", nil)
+
+	var out bytes.Buffer
+	err := RunShow(context.Background(), ShowInput{Out: &out},
+		ShowDeps{ManifestStore: store, StateStore: stateStore})
+	if err != nil {
+		t.Fatalf("RunShow: %v", err)
+	}
+	if strings.Contains(out.String(), "SECRET FROM ELSEWHERE") {
+		t.Errorf("a manifest chose which file to print:\n%s", out.String())
+	}
+	if !strings.Contains(out.String(), "No findings content available") {
+		t.Errorf("expected the no-findings block, got: %q", out.String())
 	}
 }
 

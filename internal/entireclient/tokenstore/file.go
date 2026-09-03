@@ -12,6 +12,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
+	"github.com/entireio/cli/cmd/entire/cli/osroot"
 	"github.com/gofrs/flock"
 
 	"github.com/entireio/cli/internal/entireclient/userdirs"
@@ -29,6 +31,12 @@ var loosePermsWarnW io.Writer = os.Stderr
 // fileStore persists credentials as a JSON file on disk.
 // The file format is: { "service": { "user": "password" } }
 type fileStore struct {
+	// path is the absolute token file, named by the caller (see dir for why
+	// that matters). It is kept for the warning messages that name it and for
+	// the flock; every read and write goes through a root over its directory
+	// instead, because this file holds bearer tokens and a root is what keeps a
+	// symlink swapped in between resolution and open from redirecting the write
+	// somewhere else in the user's home.
 	path string
 	// ownsDir reports whether filepath.Dir(path) is a directory Entire
 	// chose — the per-user config dir it shares with contexts.json — as
@@ -46,6 +54,42 @@ type fileStore struct {
 	// caller of load (Get/Set/Delete) holds; tests that call load directly
 	// are single-goroutine.
 	warnedLoosePerms bool
+}
+
+// dir returns the root over the token file's directory and the file's name
+// inside it, creating the directory. 0o700 because it holds bearer tokens.
+//
+// This is the one anchor in the codebase deliberately taken from
+// filepath.Dir of its own target, and the reason is that there is no other
+// candidate: f.path is a path the CALLER named — $ENTIRE_TOKEN_STORE_PATH, or
+// the file a test passes to UseFileBackendForTesting — so its directory is the
+// caller's choice too, and there is no separate trusted base to anchor on. Every
+// other root in Entire is anchored on a directory a resolver produced
+// (worktreedir, gitdir, entiredir, userdirs), and anchoring those on Dir of the
+// target would put the components the resolver produced ABOVE the root, where
+// containment reaches nothing. That is not the situation here.
+//
+// What the root still buys, given a single-component name, is that an ESCAPING
+// symlink at the token file is refused rather than followed, and that the write
+// cannot be redirected between resolution and open. Both matter for a file
+// holding bearer tokens.
+//
+// The directory is created from the outside because it is the root itself; the
+// lock file below is likewise path-based, since gofrs/flock takes a path and its
+// name is a fixed suffix rather than anything derived.
+func (f *fileStore) dir() (*os.Root, string, error) {
+	abs, err := filepath.Abs(f.path)
+	if err != nil {
+		return nil, "", fmt.Errorf("resolving token store path: %w", err)
+	}
+	if err := f.ensureDir(); err != nil {
+		return nil, "", err
+	}
+	root, err := osroot.Shared(filepath.Dir(abs))
+	if err != nil {
+		return nil, "", fmt.Errorf("opening token store directory: %w", err)
+	}
+	return root, filepath.Base(abs), nil
 }
 
 // withFileLock runs fn while holding an exclusive flock on f.path + ".lock".
@@ -104,13 +148,17 @@ func (f *fileStore) load() (map[string]map[string]string, error) {
 	// Files written by save() are always 0600, so this only fires on files
 	// created or chmod-ed outside this store. Windows has no unix permission
 	// bits — Go reports synthetic modes there — so the check is unix-only.
+	root, name, err := f.dir()
+	if err != nil {
+		return nil, err
+	}
 	if runtime.GOOS != goosWindows && !f.warnedLoosePerms {
-		if info, statErr := os.Stat(f.path); statErr == nil && info.Mode().Perm()&0o077 != 0 {
+		if info, statErr := root.Stat(name); statErr == nil && info.Mode().Perm()&0o077 != 0 {
 			f.warnedLoosePerms = true
 			fmt.Fprintf(loosePermsWarnW, "Warning: token store %s is accessible by group/others (mode %04o) and holds bearer tokens; run: chmod 0600 %s\n", f.path, info.Mode().Perm(), f.path)
 		}
 	}
-	data, err := os.ReadFile(f.path)
+	data, err := osroot.ReadFileNoFollow(root, name)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return make(map[string]map[string]string), nil
@@ -131,13 +179,16 @@ func (f *fileStore) save(store map[string]map[string]string) error {
 	if err != nil {
 		return fmt.Errorf("marshaling token store: %w", err)
 	}
-	tmp, err := os.CreateTemp(filepath.Dir(f.path), ".tokens-*.tmp")
+	root, name, err := f.dir()
+	if err != nil {
+		return err
+	}
+	tmp, tmpName, err := jsonutil.CreateTempIn(root, name)
 	if err != nil {
 		return fmt.Errorf("creating temp token store: %w", err)
 	}
-	tmpName := tmp.Name()
 	// Clean up the temp file on any error path.
-	defer func() { _ = os.Remove(tmpName) }()
+	defer func() { _ = root.Remove(tmpName) }() //nolint:errcheck // best-effort cleanup; a successful rename already consumed it
 	if _, err := tmp.Write(data); err != nil {
 		_ = tmp.Close()
 		return fmt.Errorf("writing temp token store: %w", err)
@@ -149,7 +200,7 @@ func (f *fileStore) save(store map[string]map[string]string) error {
 	if err := tmp.Close(); err != nil {
 		return fmt.Errorf("closing temp token store: %w", err)
 	}
-	if err := os.Rename(tmpName, f.path); err != nil {
+	if err := root.Rename(tmpName, name); err != nil {
 		return fmt.Errorf("renaming token store: %w", err)
 	}
 	return nil

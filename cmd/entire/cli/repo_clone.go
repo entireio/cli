@@ -58,6 +58,98 @@ func mirrorCloneURL(host, owner, repo string) string {
 	return fmt.Sprintf("%s%s/gh/%s/%s", entireCloneURLScheme, host, owner, repo)
 }
 
+// nativeCloneForge is the path token of Entire-native repos in entire:// clone
+// URLs (`/et/<project>/<repo>`), mirroring the server's repourls.URLPathPrefix.
+const nativeCloneForge = "et"
+
+// nativeProjectRe / nativeRepoRe are the server's project- and repo-name
+// charsets (entiredb core/resource/project_name.go: letters, digits, '-', plus
+// '.' for repos; lookups fold case, so uppercase is accepted here). Length and
+// edge-character rules are left to the server — this check only has to tell a
+// native ref apart from things that are not one.
+var (
+	nativeProjectRe = regexp.MustCompile(`^[A-Za-z0-9-]+$`)
+	nativeRepoRe    = regexp.MustCompile(`^[A-Za-z0-9.-]+$`)
+)
+
+// parseNativeCloneRef turns a native clone ref — `/et/<project>/<repo>` or the
+// `<project>/<repo>` shorthand, leading slash optional — into its project and
+// repo names. Not a match (ok == false) is not an error: the caller falls
+// through to the mirror grammar. The `gh`/`et` forge tokens are never valid
+// project names (3–32 chars server-side), so a two-segment ref starting with
+// one is a malformed forge ref, not a shorthand, and is rejected here so the
+// mirror parser can name the expected shape. Segments must match the server's
+// name charsets: without that, any "x/y" — `git@github.com:foo/bar` included —
+// parsed as a shorthand and produced a control-plane lookup error instead of a
+// hint about the accepted shapes.
+func parseNativeCloneRef(ref string) (project, repo string, ok bool) {
+	segs := strings.Split(strings.TrimPrefix(strings.TrimSpace(ref), "/"), "/")
+	if len(segs) == 3 && segs[0] == nativeCloneForge {
+		segs = segs[1:]
+	}
+	if len(segs) != 2 || !nativeProjectRe.MatchString(segs[0]) || !nativeRepoRe.MatchString(segs[1]) {
+		return "", "", false
+	}
+	if segs[0] == nativeCloneForge || segs[0] == "gh" {
+		return "", "", false
+	}
+	return segs[0], segs[1], true
+}
+
+// resolveNativeCloneURL resolves an Entire-native repo (by project and repo
+// name) to its entire:// clone URL: name → ULID via the project-scoped lookup,
+// then GetRepo — the one call that returns both clusterHost and path. The URL
+// is the server's own coordinates via repoRemoteURL, never synthesized from
+// the user's ref (note: no .git suffix — the server strips it for /gh/ paths
+// only, so a /et/ path with it would 404).
+func resolveNativeCloneURL(ctx context.Context, c *coreapi.Client, project, repoName string) (string, error) {
+	repoID, err := resolveRepoRef(ctx, c, repoName, project)
+	if err != nil {
+		return "", err
+	}
+	repo, err := c.GetRepo(ctx, coreapi.GetRepoParams{RepoId: repoID})
+	if err != nil {
+		return "", fmt.Errorf("get repo: %w", err)
+	}
+	cloneURL := repoRemoteURL(*repo)
+	if cloneURL == "" {
+		return "", fmt.Errorf("repo %s/%s has no clone URL yet (still provisioning?)", project, repoName)
+	}
+	// The host is server-provided but interpolated into the entire:// clone URL,
+	// so apply the same anti-token-leak guard as the mirror path (see the
+	// validateClusterHost call on the /gh/ branch).
+	if err := validateClusterHost(repo.ClusterHost.Or("")); err != nil {
+		return "", fmt.Errorf("repo has an invalid cluster host %q: %w", repo.ClusterHost.Or(""), err)
+	}
+	return cloneURL, nil
+}
+
+// mirrorCloneRefPrefixRe matches the `gh/` forge token (leading slash optional)
+// that says the user meant a mirror ref, so a malformed one gets an error about
+// its owner/repo rather than a list of every shape `repo clone` accepts.
+var mirrorCloneRefPrefixRe = regexp.MustCompile(`^/?gh/`)
+
+// cloneRefShapes lists every ref shape `repo clone` accepts, for error text.
+const cloneRefShapes = "/et/<project>/<repo>, <project>/<repo>, /gh/<owner>/<repo>, or a full entire:// URL"
+
+// invalidCloneRefError explains why ref matched none of the clone grammars.
+// A GitHub URL gets pointed at the `/gh/` form it should have been; a `gh/`
+// ref that the mirror parser rejected keeps the parser's reason (bad owner or
+// repo charset, dot-only repo, missing segment), and anything else gets the
+// list of accepted shapes.
+func invalidCloneRefError(ref string, mirrorErr error) error {
+	// Hosted forms only: bare `x/y` is what the native shorthand already
+	// rejected, and a truncated `gh/foo` would otherwise read as owner "gh".
+	// The parser's dot-only guard also keeps `foo/..` out of the hint.
+	if owner, repo, err := parseHostedGitHubURL(ref); err == nil {
+		return fmt.Errorf("invalid <repo> %q: pass GitHub mirrors as /gh/%s/%s", ref, owner, repo)
+	}
+	if mirrorCloneRefPrefixRe.MatchString(ref) {
+		return fmt.Errorf("invalid <repo> %q: %w", ref, mirrorErr)
+	}
+	return fmt.Errorf("invalid <repo> %q: expected %s", ref, cloneRefShapes)
+}
+
 // parseMirrorCloneRef turns a clone ref like `/gh/entirehq/entire-api` into the
 // API provider ("github") and the lowercased owner/repo. The `gh` token is the
 // path provider used in entire:// clone URLs; it maps to the "github" upstream
@@ -65,7 +157,7 @@ func mirrorCloneURL(host, owner, repo string) string {
 func parseMirrorCloneRef(ref string) (provider, owner, repo string, err error) {
 	m := mirrorCloneRefRe.FindStringSubmatch(strings.TrimSpace(ref))
 	if m == nil {
-		return "", "", "", fmt.Errorf("expected gh/<owner>/<repo> (leading slash optional), got %q", ref)
+		return "", "", "", fmt.Errorf("expected gh/<owner>/<repo> (leading slash optional; owner: letters, digits, '-'; repo: letters, digits, '.', '_', '-'), got %q", ref)
 	}
 	owner, repo = strings.ToLower(m[1]), strings.ToLower(m[2])
 	if gitHubDotOnlyRe.MatchString(repo) {
@@ -78,9 +170,12 @@ func newRepoCloneCmd() *cobra.Command {
 	var cluster string
 	cmd := &cobra.Command{
 		Use:   "clone <repo> [target-dir]",
-		Short: "Clone a mirrored repository",
-		Long: "Clone a GitHub mirror by its `/gh/<owner>/<repo>` ref, or by a full " +
-			"`entire://<cluster>/gh/<owner>/<repo>` clone URL.\n\n" +
+		Short: "Clone an Entire repository",
+		Long: "Clone an Entire-native repo by its `/et/<project>/<repo>` ref (or the " +
+			"`<project>/<repo>` shorthand), a GitHub mirror by its `/gh/<owner>/<repo>` " +
+			"ref, or a full `entire://` clone URL.\n\n" +
+			"A native ref resolves the repo's home cluster and clones from there " +
+			"(--cluster doesn't apply).\n\n" +
 			"With a `/gh/<owner>/<repo>` ref, looks up where the repo is mirrored: if " +
 			"it's on a single cluster, clones it directly; if it's mirrored on more " +
 			"than one, prompts you to pick which to clone from (or pass --cluster to " +
@@ -88,7 +183,9 @@ func newRepoCloneCmd() *cobra.Command {
 			"A full `entire://` URL already names the cluster, so it's passed straight " +
 			"through to `git clone` with no lookup (and --cluster is ignored). The " +
 			"optional [target-dir] is passed through to `git clone` either way.",
-		Example: "  entire repo clone /gh/entirehq/entire-api\n" +
+		Example: "  entire repo clone /et/project/example\n" +
+			"  entire repo clone project/example\n" +
+			"  entire repo clone /gh/entirehq/entire-api\n" +
 			"  entire repo clone /gh/entirehq/entire-api ./entire-api\n" +
 			"  entire repo clone /gh/entirehq/entire-api --cluster aws-us-east-2.entire.io\n" +
 			"  entire repo clone entire://aws-us-east-2.entire.io/gh/entirehq/entire-api",
@@ -117,11 +214,32 @@ func newRepoCloneCmd() *cobra.Command {
 				return runGitClone(cmd.Context(), cmd, ref, targetDir)
 			}
 
+			// Native ref: resolve the repo's home cluster via the active-context
+			// control plane and clone from there. A native repo lives on exactly
+			// one home cluster, so --cluster has nothing to choose between.
+			if project, repoName, ok := parseNativeCloneRef(ref); ok {
+				if cluster != "" {
+					return fmt.Errorf("--cluster applies to /gh/ mirror refs; %s/%s is cloned from its home cluster", project, repoName)
+				}
+				var cloneURL string
+				if err := runCore(cmd, func(ctx context.Context, c *coreapi.Client) error {
+					url, err := resolveNativeCloneURL(ctx, c, project, repoName)
+					if err != nil {
+						return err
+					}
+					cloneURL = url
+					return nil
+				}); err != nil {
+					return err
+				}
+				return runGitClone(cmd.Context(), cmd, cloneURL, targetDir)
+			}
+
 			// provider is always "github" for the /gh/ shorthand; the pull-gated
 			// resolver pins the provider itself, so it's not threaded through.
 			_, owner, repo, err := parseMirrorCloneRef(ref)
 			if err != nil {
-				return fmt.Errorf("invalid <repo>: %w", err)
+				return invalidCloneRefError(ref, err)
 			}
 
 			var placements []coreapi.ResolvedPlacement

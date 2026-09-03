@@ -42,7 +42,13 @@ func GeneratedHookFileState(path, marker, render string) HookConfigState {
 	if err != nil {
 		return HooksAbsent
 	}
-	content := string(data)
+	return generatedStateFromContent(string(data), marker, render)
+}
+
+// generatedStateFromContent is GeneratedHookFileState once the bytes are in
+// hand, shared with HookConfigFile.GeneratedState, which reads them through a
+// root instead of through a path.
+func generatedStateFromContent(content, marker, render string) HookConfigState {
 	if !strings.Contains(content, marker) {
 		return HooksAbsent
 	}

@@ -10,6 +10,7 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
+	"github.com/entireio/cli/cmd/entire/cli/entiredir"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
@@ -36,7 +37,7 @@ func TestWithHookSession_StampsMostRecentSession(t *testing.T) {
 
 	// Stand in for the root prerun, which is now the only thing that opens the
 	// log sink.
-	l, err := logging.New(logging.Config{Dir: filepath.Join(entireDir, "logs")})
+	l, err := logging.New(logging.Config{Root: entiredir.OpenerAt(tmpDir), Dir: logging.LogsName})
 	if err != nil {
 		t.Fatalf("logging.New() error = %v", err)
 	}

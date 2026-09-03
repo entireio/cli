@@ -824,13 +824,11 @@ func TestHandleLifecycleTurnEnd_EmptyRepository(t *testing.T) {
 	tmpDir := t.TempDir()
 	t.Chdir(tmpDir)
 
-	// Initialize an empty git repo (no commits)
-	if err := os.MkdirAll(".git/objects", 0o755); err != nil {
-		t.Fatalf("Failed to create .git: %v", err)
-	}
-	if err := os.WriteFile(".git/HEAD", []byte("ref: refs/heads/main\n"), 0o644); err != nil {
-		t.Fatalf("Failed to create HEAD: %v", err)
-	}
+	// Initialize an empty git repo (no commits). This must be a real init: a
+	// hand-built .git/{objects,HEAD} has no refs/, which git rejects outright
+	// ("not a git repository"), so the empty-repository guard below would never
+	// be reached and the test would pin the wrong path.
+	testutil.InitRepo(t, tmpDir)
 	paths.ClearWorktreeRootCache()
 
 	// Create a transcript file
@@ -3675,7 +3673,6 @@ func TestHandleLifecycleSubagentEnd_SubagentStop_TranscriptOnlyBeforeFirstSaveSt
 		NewFiles:                 []string{},
 		DeletedFiles:             []string{},
 		MetadataDir:              metadataDir,
-		MetadataDirAbs:           metadataDirAbs,
 		CommitMessage:            "Checkpoint 1",
 		AuthorName:               "Test",
 		AuthorEmail:              "test@test.com",

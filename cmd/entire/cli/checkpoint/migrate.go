@@ -46,6 +46,17 @@ type MigrateResult struct {
 // run still gets pushed. This function does not push. When dryRun is true it
 // reports what would change without writing or enqueuing anything.
 func MigrateBranchToRefs(ctx context.Context, repo *git.Repository, dryRun bool) (MigrateResult, error) {
+	return migrateBranchToRefs(ctx, repo, dryRun, updatePersistentRef)
+}
+
+type persistentRefUpdater func(context.Context, *git.Repository, plumbing.ReferenceName, persistentRefBuilder) error
+
+func migrateBranchToRefs(
+	ctx context.Context,
+	repo *git.Repository,
+	dryRun bool,
+	updateRef persistentRefUpdater,
+) (MigrateResult, error) {
 	var result MigrateResult
 
 	branch := NewGitStore(repo, DefaultV1Refs())
@@ -81,18 +92,18 @@ func MigrateBranchToRefs(ctx context.Context, repo *git.Repository, dryRun bool)
 			return fmt.Errorf("ref name for checkpoint %s: %w", cid, err)
 		}
 
-		if dryRun {
-			parent, _, err := refsStore.refBase(cid)
-			switch {
-			case err == nil:
-				// parent is the ref tip, or zero when the ref is absent.
-			case errors.Is(err, plumbing.ErrObjectNotFound):
-				parent = plumbing.ZeroHash
-			default:
-				return fmt.Errorf("resolve existing ref for checkpoint %s: %w", cid, err)
-			}
-			alreadyImported := treeInRefHistory(repo, parent, migratedTree)
+		parent, _, err := refsStore.refBase(cid)
+		switch {
+		case err == nil:
+			// parent is the ref tip, or zero when the ref is absent.
+		case errors.Is(err, plumbing.ErrObjectNotFound):
+			parent = plumbing.ZeroHash
+		default:
+			return fmt.Errorf("resolve existing ref for checkpoint %s: %w", cid, err)
+		}
+		alreadyImported := treeInRefHistory(repo, parent, migratedTree)
 
+		if dryRun {
 			// Report only what a real run would newly write; an already-imported
 			// checkpoint is a skip, not a would-migrate. No refs or objects are
 			// enqueued or written on this path.
@@ -103,9 +114,16 @@ func MigrateBranchToRefs(ctx context.Context, repo *git.Repository, dryRun bool)
 			}
 			return nil
 		}
+		if alreadyImported {
+			if err := queue.Enqueue(refName); err != nil {
+				return fmt.Errorf("enqueue checkpoint %s for push: %w", cid, err)
+			}
+			result.Skipped++
+			return nil
+		}
 
 		migrated := false
-		if err := updatePersistentRef(ctx, repo, refName, func() (plumbing.Hash, plumbing.Hash, error) {
+		if err := updateRef(ctx, repo, refName, func() (plumbing.Hash, plumbing.Hash, error) {
 			// Re-read the parent and idempotency state on every CAS retry so a
 			// migration commit never overwrites a concurrently advanced ref.
 			parent, _, baseErr := refsStore.refBase(cid)

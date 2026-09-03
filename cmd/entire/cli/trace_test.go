@@ -103,21 +103,28 @@ func TestCollectTraceEntries(t *testing.T) {
 	}
 	fixtureContent := strings.Join(fixtureLines, "\n") + "\n"
 
-	writeFixture := func(t *testing.T) string {
+	// writeFixture returns the fixture's root and its name within it, the pair
+	// the reader takes in production (the shared .entire root plus a name).
+	writeFixture := func(t *testing.T) (*os.Root, string) {
 		t.Helper()
 		dir := t.TempDir()
-		p := filepath.Join(dir, "trace.jsonl")
-		if err := os.WriteFile(p, []byte(fixtureContent), 0o644); err != nil {
+		const name = "trace.jsonl"
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(fixtureContent), 0o644); err != nil {
 			t.Fatalf("failed to write fixture: %v", err)
 		}
-		return p
+		root, err := os.OpenRoot(dir)
+		if err != nil {
+			t.Fatalf("os.OpenRoot(%s): %v", dir, err)
+		}
+		t.Cleanup(func() { _ = root.Close() })
+		return root, name
 	}
 
 	t.Run("last 2 entries", func(t *testing.T) {
 		t.Parallel()
-		logFile := writeFixture(t)
+		root, logFile := writeFixture(t)
 
-		entries, err := collectTraceEntries(logFile, 2, "", false)
+		entries, err := collectTraceEntries(root, logFile, 2, "", false)
 		if err != nil {
 			t.Fatalf("collectTraceEntries returned error: %v", err)
 		}
@@ -143,9 +150,9 @@ func TestCollectTraceEntries(t *testing.T) {
 
 	t.Run("filter by hook type", func(t *testing.T) {
 		t.Parallel()
-		logFile := writeFixture(t)
+		root, logFile := writeFixture(t)
 
-		entries, err := collectTraceEntries(logFile, 10, testOpPostCommit, false)
+		entries, err := collectTraceEntries(root, logFile, 10, testOpPostCommit, false)
 		if err != nil {
 			t.Fatalf("collectTraceEntries returned error: %v", err)
 		}
@@ -161,7 +168,13 @@ func TestCollectTraceEntries(t *testing.T) {
 	t.Run("file not found returns empty", func(t *testing.T) {
 		t.Parallel()
 
-		entries, err := collectTraceEntries("/nonexistent/path/trace.jsonl", 10, "", false)
+		root, err := os.OpenRoot(t.TempDir())
+		if err != nil {
+			t.Fatalf("os.OpenRoot: %v", err)
+		}
+		t.Cleanup(func() { _ = root.Close() })
+
+		entries, err := collectTraceEntries(root, "nonexistent/trace.jsonl", 10, "", false)
 		if err != nil {
 			t.Fatalf("expected nil error for missing file, got %v", err)
 		}

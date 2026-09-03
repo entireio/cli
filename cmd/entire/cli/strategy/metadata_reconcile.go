@@ -14,7 +14,9 @@ import (
 	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
+	"github.com/entireio/cli/cmd/entire/cli/gitdir"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
+	"github.com/entireio/cli/cmd/entire/cli/osroot"
 
 	"github.com/go-git/go-git/v6"
 	"github.com/go-git/go-git/v6/plumbing"
@@ -368,8 +370,15 @@ func loadShallowHashes(ctx context.Context, repoPath string) (map[plumbing.Hash]
 	if !filepath.IsAbs(gitDir) {
 		gitDir = filepath.Join(repoPath, gitDir)
 	}
-	// Path is constructed from git's own --git-common-dir output, not user input.
-	data, err := os.ReadFile(filepath.Join(gitDir, "shallow")) //nolint:gosec // see comment above
+	// Through the common dir's root like every other read there. "shallow" is a
+	// fixed name and gitDir came from git's own --git-common-dir, so nothing here
+	// can traverse today; the root is what keeps that true without depending on
+	// it, and it shares the one handle per clone.
+	root, err := gitdir.OpenAt(gitDir)
+	if err != nil {
+		return nil, fmt.Errorf("open git common dir: %w", err)
+	}
+	data, err := osroot.ReadFileNoFollow(root, "shallow")
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return map[plumbing.Hash]bool{}, nil

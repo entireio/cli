@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -17,12 +18,15 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
+	"github.com/entireio/cli/cmd/entire/cli/entiredir"
 	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
+	"github.com/entireio/cli/cmd/entire/cli/osroot"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/trailers"
 	"github.com/entireio/cli/cmd/entire/cli/validation"
+	"github.com/entireio/cli/cmd/entire/cli/worktreedir"
 	"github.com/entireio/cli/redact"
 
 	"github.com/go-git/go-git/v6"
@@ -128,7 +132,7 @@ func (s *ephemeralStore) writeCheckpoint(ctx context.Context, opts WriteEphemera
 				}
 			}
 
-			treeHash, tErr := s.buildTreeWithChanges(ctx, baseTreeHash, allFiles, allDeletedFiles, opts.MetadataDir, opts.MetadataDirAbs)
+			treeHash, tErr := s.buildTreeWithChanges(ctx, baseTreeHash, allFiles, allDeletedFiles, opts.MetadataDir)
 			if tErr != nil {
 				return fmt.Errorf("failed to build tree: %w", tErr)
 			}
@@ -316,7 +320,7 @@ func (s *ephemeralStore) writeTask(ctx context.Context, opts WriteEphemeralTaskO
 				return fmt.Errorf("failed to get shadow branch: %w", gErr)
 			}
 
-			newTreeHash, tErr := s.buildTreeWithChanges(ctx, baseTreeHash, allFiles, opts.DeletedFiles, "", "")
+			newTreeHash, tErr := s.buildTreeWithChanges(ctx, baseTreeHash, allFiles, opts.DeletedFiles, "")
 			if tErr != nil {
 				return fmt.Errorf("failed to build tree: %w", tErr)
 			}
@@ -410,7 +414,7 @@ func (s *ephemeralStore) addTaskMetadataToTree(ctx context.Context, baseTreeHash
 
 		// Add session transcript (with chunking support for large transcripts)
 		if opts.TranscriptPath != "" {
-			if transcriptContent, readErr := os.ReadFile(opts.TranscriptPath); readErr == nil {
+			if transcriptContent, readErr := agent.ReadTranscriptFile(opts.TranscriptPath); readErr == nil {
 				agentType := agent.DetectAgentTypeFromContent(transcriptContent)
 
 				// Chunk if necessary
@@ -443,7 +447,7 @@ func (s *ephemeralStore) addTaskMetadataToTree(ctx context.Context, baseTreeHash
 
 		// Add subagent transcript if available
 		if opts.SubagentTranscriptPath != "" && opts.AgentID != "" {
-			agentContent, readErr := os.ReadFile(opts.SubagentTranscriptPath)
+			agentContent, readErr := agent.ReadTranscriptFile(opts.SubagentTranscriptPath)
 			agentContent, tooLarge := prepareSubagentTranscript(ctx, opts.Agent, opts.SubagentTranscriptPath, agentContent)
 			if readErr == nil && !tooLarge {
 				// Try JSONL-aware redaction first; fall back to plain string redaction
@@ -782,15 +786,24 @@ func (s *ephemeralStore) buildTreeWithChanges(
 	ctx context.Context,
 	baseTreeHash plumbing.Hash,
 	modifiedFiles, deletedFiles []string,
-	metadataDir, metadataDirAbs string,
+	metadataDir string,
 ) (plumbing.Hash, error) {
-	// Get worktree root for resolving file paths
-	// This is critical because fileExists() and createBlobFromFile() use os.Stat()
-	// which resolves relative to CWD. The modifiedFiles are repo-relative paths,
-	// so we must resolve them against repo root, not CWD.
+	// Get the worktree root: modifiedFiles are repo-relative paths, and resolving
+	// them against the process's directory instead would read the wrong files
+	// whenever an agent runs from a subdirectory. The root opened below is what
+	// makes that structural rather than a rule each read has to follow.
 	repoRoot, err := paths.WorktreeRoot(ctx)
 	if err != nil {
 		return plumbing.ZeroHash, fmt.Errorf("failed to get worktree root: %w", err)
+	}
+
+	// One root over the worktree for every file read below. The names come from
+	// git status, which validation already constrains to repo-relative paths;
+	// the root is the layer underneath that, so a name that slipped through
+	// cannot reach outside the repository.
+	worktreeRoot, err := worktreedir.OpenAt(repoRoot)
+	if err != nil {
+		return plumbing.ZeroHash, fmt.Errorf("failed to open worktree root: %w", err)
 	}
 
 	// Build list of tree changes
@@ -814,14 +827,15 @@ func (s *ephemeralStore) buildTreeWithChanges(
 			continue
 		}
 
-		absPath := filepath.Join(repoRoot, filepath.FromSlash(relPath))
-		if !fileExists(absPath) {
+		// relPath is a slash-separated repo-relative git path, which is already
+		// the coordinate the worktree root reads names in.
+		if !fileExistsIn(worktreeRoot, relPath) {
 			// File disappeared since detection — treat as deletion
 			changes = append(changes, TreeChange{Path: relPath, Entry: nil})
 			continue
 		}
 
-		blobHash, mode, blobErr := createBlobFromFile(s.repo, absPath)
+		blobHash, mode, blobErr := createBlobFromFile(s.repo, worktreeRoot, relPath)
 		if blobErr != nil {
 			// Skip files that can't be staged (may have been deleted since detection)
 			continue
@@ -836,13 +850,16 @@ func (s *ephemeralStore) buildTreeWithChanges(
 		})
 	}
 
-	// Metadata directory files
-	if metadataDir != "" && metadataDirAbs != "" {
+	// Metadata directory files. metadataDir is the repo-relative git tree path
+	// (.entire/metadata/<session>); the walk itself goes through the shared
+	// .entire root, so a symlink planted in the metadata tree cannot redirect a
+	// read out of it.
+	if metadataDir != "" {
 		metadataRel, relErr := normalizeRepoRelativeTreePath(repoRoot, metadataDir)
 		if relErr != nil {
 			logInvalidGitTreePath(ctx, "add metadata directory", metadataDir, relErr)
 		} else {
-			metaChanges, metaErr := addDirectoryToChanges(ctx, s.repo, repoRedactCache(ctx, s.repo), metadataDirAbs, metadataRel)
+			metaChanges, metaErr := addMetadataDirToChanges(ctx, s.repo, repoRedactCache(ctx, s.repo), repoRoot, metadataDir, metadataRel)
 			if metaErr != nil {
 				return plumbing.ZeroHash, fmt.Errorf("failed to add metadata directory: %w", metaErr)
 			}
@@ -884,15 +901,24 @@ func FlattenTree(repo *git.Repository, tree *object.Tree, prefix string, entries
 	return nil
 }
 
-// fileExists checks if a file exists at the given path.
-func fileExists(path string) bool {
-	_, err := os.Lstat(path)
+// fileExistsIn reports whether name exists inside root. Lstat, not Stat: a
+// dangling symlink is still an entry the caller must decide about rather than
+// treat as a deletion.
+func fileExistsIn(root *os.Root, name string) bool {
+	_, err := osroot.LstatNoSymlinks(root, name)
 	return err == nil
 }
 
-// createBlobFromFile creates a blob object from a file in the working directory.
-func createBlobFromFile(repo *git.Repository, filePath string) (plumbing.Hash, filemode.FileMode, error) {
-	info, err := os.Lstat(filePath)
+// createBlobFromFile creates a blob object from a file in the working directory,
+// named inside the worktree root.
+func createBlobFromFile(repo *git.Repository, root *os.Root, name string) (plumbing.Hash, filemode.FileMode, error) {
+	parent, leaf, closeParent, err := osroot.OpenParentNoSymlinks(root, name)
+	if err != nil {
+		return plumbing.ZeroHash, 0, fmt.Errorf("failed to open file parent: %w", err)
+	}
+	defer closeParent()
+
+	info, err := parent.Lstat(leaf)
 	if err != nil {
 		return plumbing.ZeroHash, 0, fmt.Errorf("failed to stat file: %w", err)
 	}
@@ -908,13 +934,25 @@ func createBlobFromFile(repo *git.Repository, filePath string) (plumbing.Hash, f
 	// Read file contents
 	var content []byte
 	if mode == filemode.Symlink {
-		target, readErr := os.Readlink(filePath)
+		// A symlink is committed as its target text, so it is read rather than
+		// followed — which is also why the root's refusal to follow one out of
+		// the worktree does not apply here.
+		target, readErr := parent.Readlink(leaf)
 		if readErr != nil {
 			return plumbing.ZeroHash, 0, fmt.Errorf("failed to read symlink: %w", readErr)
 		}
 		content = []byte(target)
 	} else {
-		content, err = os.ReadFile(filePath) //nolint:gosec // filePath comes from walking the repository
+		// osroot, not entiredir: root here is the WORKTREE root, and entiredir
+		// owns .entire. Reading a user's working file through the .entire
+		// helper binds it to that directory's policy, so a later change there
+		// would silently change how the user's own files are checkpointed.
+		//
+		// NoFollow is still the right variant. The symlink case is handled
+		// above from the Lstat, so reaching this branch on a link means the
+		// entry changed underneath us, and following it would store some other
+		// file's contents under this name.
+		content, err = osroot.ReadFileNoFollow(parent, leaf)
 		if err != nil {
 			return plumbing.ZeroHash, 0, fmt.Errorf("failed to read file: %w", err)
 		}
@@ -953,41 +991,63 @@ type treeNode struct {
 	files   []object.TreeEntry   // files in this directory
 }
 
-// addDirectoryToChanges walks a filesystem directory and returns TreeChange entries
-// for each file, suitable for use with ApplyTreeChanges.
-// dirPathAbs is the absolute filesystem path; dirPathRel is the git tree-relative path.
-func addDirectoryToChanges(ctx context.Context, repo *git.Repository, cache *redactCache, dirPathAbs, dirPathRel string) ([]TreeChange, error) {
+// addMetadataDirToChanges walks a session's metadata directory under .entire and
+// returns TreeChange entries for each file, suitable for use with
+// ApplyTreeChanges. metadataDir is the repo-relative path
+// (.entire/metadata/<session>) and dirPathRel is the git tree-relative path it
+// lands at.
+//
+// The walk is confined to the shared .entire root rather than driven from an
+// absolute path, so a symlink under the metadata directory cannot be followed
+// out of .entire and captured into git history. A missing directory is an error
+// here, as it was before: the caller only names one it just wrote.
+func addMetadataDirToChanges(ctx context.Context, repo *git.Repository, cache *redactCache, worktreeRoot, metadataDir, dirPathRel string) ([]TreeChange, error) {
+	root, err := entiredir.OpenAtForRead(worktreeRoot)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open %s: %w", paths.EntireDir, err)
+	}
+	dirName, err := entiredir.Name(metadataDir)
+	if err != nil {
+		return nil, fmt.Errorf("failed to resolve metadata directory: %w", err)
+	}
+	return addDirectoryToChanges(ctx, repo, cache, root, dirName, dirPathRel)
+}
+
+// addDirectoryToChanges walks dirName within root and returns TreeChange entries
+// for each file. dirPathRel is the git tree-relative path the directory lands at.
+func addDirectoryToChanges(ctx context.Context, repo *git.Repository, cache *redactCache, root *os.Root, dirName, dirPathRel string) ([]TreeChange, error) {
 	var changes []TreeChange
-	err := filepath.Walk(dirPathAbs, func(path string, info os.FileInfo, err error) error {
+	// WalkDirNoSymlinks, not fs.WalkDir: it refuses a symlink at the walk root
+	// as well as beneath it. fs.WalkDir stats its root (following a link) and
+	// only lstats what is below, so the symlink guard this callback used to
+	// carry never applied to dirName itself — a symlinked
+	// .entire/metadata/<session> was descended into and its target's contents
+	// redacted, committed, and pushed. Refusing beats the old skip for the
+	// entries too: silently dropping them writes a checkpoint that is missing
+	// session content with nobody told.
+	err := osroot.WalkDirNoSymlinks(root, dirName, func(name string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
 
-		// Skip symlinks to prevent reading files outside the metadata directory.
-		// A symlink could point to sensitive files (e.g., /etc/passwd) which would
-		// then be captured in the checkpoint and stored in git history.
-		// NOTE: filepath.Walk uses os.Stat (follows symlinks), so info.Mode() never
-		// reports ModeSymlink. We use os.Lstat to check the entry itself.
-		// This check MUST come before IsDir() because Walk follows symlinked
-		// directories and would recurse into them otherwise.
-		linfo, lstatErr := os.Lstat(path)
-		if lstatErr != nil {
-			return fmt.Errorf("failed to lstat %s: %w", path, lstatErr)
-		}
-		if linfo.Mode()&os.ModeSymlink != 0 {
-			if info.IsDir() {
-				return filepath.SkipDir
-			}
+		if d.IsDir() {
 			return nil
 		}
 
-		if info.IsDir() {
+		// Skip the residue of an interrupted atomic write. jsonutil.CreateTempIn
+		// places its temp file beside its target, and this directory is walked
+		// wholesale into the checkpoint tree, so an orphan left by a hook that
+		// was killed mid-write would otherwise be redacted, committed, and
+		// pushed on every checkpoint from then on. Worse, a name like
+		// "full.jsonl.<hex>.tmp" is read back as a transcript CHUNK by
+		// readTranscriptFromTree whenever the hex happens to start with a digit.
+		if jsonutil.IsTempName(d.Name()) {
 			return nil
 		}
 
-		relWithinDir, relErr := filepath.Rel(dirPathAbs, path)
+		relWithinDir, relErr := filepath.Rel(dirName, name)
 		if relErr != nil {
-			return fmt.Errorf("failed to get relative path for %s: %w", path, relErr)
+			return fmt.Errorf("failed to get relative path for %s: %w", name, relErr)
 		}
 		if paths.IsRelativeTraversal(relWithinDir) {
 			return fmt.Errorf("path traversal detected: %s", relWithinDir)
@@ -995,9 +1055,9 @@ func addDirectoryToChanges(ctx context.Context, repo *git.Repository, cache *red
 
 		treePath := filepath.ToSlash(filepath.Join(dirPathRel, relWithinDir))
 
-		blobHash, mode, blobErr := createRedactedBlobFromFile(ctx, repo, cache, path, treePath)
+		blobHash, mode, blobErr := createRedactedBlobFromFile(ctx, repo, cache, root, name, treePath)
 		if blobErr != nil {
-			return fmt.Errorf("failed to create blob for %s: %w", path, blobErr)
+			return fmt.Errorf("failed to create blob for %s: %w", name, blobErr)
 		}
 		changes = append(changes, TreeChange{
 			Path:  treePath,
@@ -1006,7 +1066,7 @@ func addDirectoryToChanges(ctx context.Context, repo *git.Repository, cache *red
 		return nil
 	})
 	if err != nil {
-		return nil, fmt.Errorf("failed to walk directory %s: %w", dirPathAbs, err)
+		return nil, fmt.Errorf("failed to walk directory %s: %w", dirName, err)
 	}
 	return changes, nil
 }

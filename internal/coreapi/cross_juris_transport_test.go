@@ -174,6 +174,35 @@ func TestRoundTripper_421FollowsToHomeCore(t *testing.T) {
 	}
 }
 
+func TestRoundTripper_421CanonicalizesMirrorRequestLocation(t *testing.T) {
+	t.Parallel()
+	homeCore := newCrossJurisTestServer(t, func(s *crossJurisTestServer, w http.ResponseWriter, r *http.Request) {
+		s.record(r)
+		w.Header().Set("Location", "/api/v1/mirror-requests/67b477f3-97b7-4dfe-90c4-6365dbebd5bf")
+		w.WriteHeader(http.StatusAccepted)
+	})
+	wrongCore := newCrossJurisTestServer(t, func(s *crossJurisTestServer, w http.ResponseWriter, r *http.Request) {
+		s.record(r)
+		w.WriteHeader(http.StatusMisdirectedRequest)
+		w.Write([]byte(`{"home_core_url":"` + homeCore.srv.URL + `"}`)) //nolint:errcheck // test
+	})
+	wrongCore.peers = []string{homeCore.srv.URL}
+
+	client := &http.Client{Transport: transportFor(t)}
+	req, _ := http.NewRequestWithContext(t.Context(), http.MethodPost, wrongCore.srv.URL+"/api/v1/mirror-requests", strings.NewReader(`{}`)) //nolint:errcheck // test
+	req.Header.Set("Authorization", "Bearer user-jwt")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	want := homeCore.srv.URL + "/api/v1/mirror-requests/67b477f3-97b7-4dfe-90c4-6365dbebd5bf"
+	if got := resp.Header.Get("Location"); got != want {
+		t.Fatalf("Location = %q, want %q", got, want)
+	}
+}
+
 // TestRoundTripper_421ThenBareUnauthorizedProactiveExchange is the
 // production path: after following a 421, the home core can't verify the
 // foreign-region login JWT's signature and returns a BARE 401 (no hint).

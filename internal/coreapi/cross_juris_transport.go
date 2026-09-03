@@ -301,7 +301,21 @@ func (t *crossJurisRoundTripper) send(req *http.Request, body []byte, originalAu
 		req.Header.Set("Authorization", "Bearer "+exchanged)
 		return t.send(req, body, originalAuth, budget)
 	}
+	canonicalizeMirrorRequestLocation(req, resp)
 	return resp, nil
+}
+
+func canonicalizeMirrorRequestLocation(req *http.Request, resp *http.Response) {
+	if resp.StatusCode != http.StatusAccepted || req.URL.Path != apiBasePath+"/mirror-requests" {
+		return
+	}
+	location, err := url.Parse(resp.Header.Get("Location"))
+	if err != nil || location.Path == "" {
+		return
+	}
+	location.Scheme = req.URL.Scheme
+	location.Host = req.URL.Host
+	resp.Header.Set("Location", location.String())
 }
 
 // followMisdirected reads the 421 envelope and constructs a fresh

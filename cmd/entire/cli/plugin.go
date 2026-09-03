@@ -126,9 +126,25 @@ func resolvePlugin(rootCmd *cobra.Command, args []string) (binPath string, plugi
 // given name. Only meaningful after exec.LookPath has already failed —
 // indicates the file exists but lacks the executable bit (or the
 // equivalent platform-specific accessibility).
+//
+// Only ABSOLUTE PATH entries are scanned. A relative entry (including bare
+// "." and the empty string, which POSIX treats as the current directory) is
+// skipped outright, even if it points at a real, inaccessible file. That
+// mirrors exec.LookPath's own refusal: when LookPath finds a binary via a
+// relative PATH entry it deliberately returns exec.ErrDot rather than
+// resolving it — the fix for the classic "dot in PATH" RCE class, where a
+// planted binary in an untrusted working directory silently executes with
+// the user's privileges. LookPath's error does not distinguish ErrDot from
+// a genuine "exists but not executable" case, so if this function re-walked
+// relative entries too, it would blindly re-find and return the exact
+// binary LookPath just correctly refused — and the caller (runPlugin) execs
+// it via a path that contains a separator, which bypasses Go's exec.Command
+// ErrDot re-check (that only fires for a bare name with no separator). Do
+// not remove this filter without also making resolvePlugin ErrDot-aware
+// some other way.
 func findInaccessiblePlugin(filename string) (string, bool) {
 	for _, dir := range filepath.SplitList(os.Getenv("PATH")) {
-		if dir == "" {
+		if dir == "" || !filepath.IsAbs(dir) {
 			continue
 		}
 		candidate := filepath.Join(dir, filename)

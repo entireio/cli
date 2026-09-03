@@ -11,6 +11,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -21,8 +22,10 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
+	"github.com/entireio/cli/cmd/entire/cli/entiredir"
 	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
+	"github.com/entireio/cli/cmd/entire/cli/osroot"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/provenance"
 	"github.com/entireio/cli/cmd/entire/cli/review"
@@ -591,18 +594,18 @@ func handleLifecycleTurnStart(ctx context.Context, ag agent.Agent, event *agent.
 	// mid-turn commits (before SaveStep writes it to the shadow branch).
 	// Prompts are separated by "\n\n---\n\n" to support multiple turns.
 	if event.Prompt != "" {
-		sessionDir := paths.SessionMetadataDirFromSessionID(sessionID)
-		if sessionDirAbs, absErr := paths.AbsPath(ctx, sessionDir); absErr == nil {
-			if mkErr := os.MkdirAll(sessionDirAbs, 0o750); mkErr == nil {
-				promptPath := filepath.Join(sessionDirAbs, paths.PromptFileName)
-				existing, readErr := os.ReadFile(promptPath) //nolint:gosec // session metadata path
+		sessionName := sessionMetadataName(sessionID)
+		if root, rootErr := entiredir.Open(ctx); rootErr == nil {
+			if mkErr := osroot.MkdirAllNoSymlink(root, sessionName, 0o750); mkErr == nil {
+				promptName := sessionName + "/" + paths.PromptFileName
+				existing, readErr := entiredir.ReadFile(root, promptName)
 				var content string
 				if readErr == nil && len(existing) > 0 {
 					content = string(existing) + "\n\n---\n\n" + event.Prompt
 				} else {
 					content = event.Prompt
 				}
-				if writeErr := os.WriteFile(promptPath, []byte(content), 0o600); writeErr != nil { //nolint:gosec // path from internal metadata, not user input
+				if writeErr := entiredir.WriteFile(root, promptName, []byte(content), 0o600); writeErr != nil {
 					logging.Warn(logCtx, "failed to write prompt.txt",
 						slog.String("error", writeErr.Error()))
 				}
@@ -745,12 +748,18 @@ func handleLifecycleTurnEnd(ctx context.Context, ag agent.Agent, event *agent.Ev
 
 	// Create session metadata directory
 	_, copySpan := perf.Start(ctx, "copy_transcript")
+	// sessionDir is the repo-relative path that ends up in commit trailers and
+	// in the checkpoint tree; sessionName is the same directory addressed from
+	// the .entire root, which is what every read and write below uses.
 	sessionDir := paths.SessionMetadataDirFromSessionID(sessionID)
-	sessionDirAbs, err := paths.AbsPath(ctx, sessionDir)
+	sessionName := sessionMetadataName(sessionID)
+	entireRoot, err := entiredir.Open(ctx)
 	if err != nil {
-		sessionDirAbs = sessionDir
+		copySpan.RecordError(err)
+		copySpan.End()
+		return fmt.Errorf("failed to open %s: %w", paths.EntireDir, err)
 	}
-	if err := os.MkdirAll(sessionDirAbs, 0o750); err != nil {
+	if err := osroot.MkdirAllNoSymlink(entireRoot, sessionName, 0o750); err != nil {
 		copySpan.RecordError(err)
 		copySpan.End()
 		return fmt.Errorf("failed to create session directory: %w", err)
@@ -767,8 +776,8 @@ func handleLifecycleTurnEnd(ctx context.Context, ag agent.Agent, event *agent.Ev
 	// redacts on every Stop. See agent.TranscriptSanitizer for why order matters.
 	// The agent's own rollout is untouched.
 	storedTranscript := agent.SanitizeTranscriptForStorage(ag, transcriptData)
-	logFile := filepath.Join(sessionDirAbs, paths.TranscriptFileName)
-	if err := os.WriteFile(logFile, storedTranscript, 0o600); err != nil {
+	logFile := sessionName + "/" + paths.TranscriptFileName
+	if err := entiredir.WriteFile(entireRoot, logFile, storedTranscript, 0o600); err != nil {
 		copySpan.RecordError(err)
 		copySpan.End()
 		return fmt.Errorf("failed to write transcript: %w", err)
@@ -796,9 +805,9 @@ func handleLifecycleTurnEnd(ctx context.Context, ag agent.Agent, event *agent.Ev
 	// there genuinely were no prompts. We track whether backfill occurred so we can
 	// update session state after SaveStep (which may reinitialize state).
 	var backfilledPrompt string
-	promptPath := filepath.Join(sessionDirAbs, paths.PromptFileName)
-	existingPrompt, readPromptErr := os.ReadFile(promptPath) //nolint:gosec // file content is safe session metadata
-	if readPromptErr != nil && !os.IsNotExist(readPromptErr) {
+	promptName := sessionName + "/" + paths.PromptFileName
+	existingPrompt, readPromptErr := entiredir.ReadFile(entireRoot, promptName)
+	if readPromptErr != nil && !errors.Is(readPromptErr, fs.ErrNotExist) {
 		logging.Warn(logCtx, "failed to read prompt.txt, skipping backfill",
 			slog.String("error", readPromptErr.Error()))
 	} else if len(existingPrompt) == 0 {
@@ -809,7 +818,7 @@ func handleLifecycleTurnEnd(ctx context.Context, ag agent.Agent, event *agent.Ev
 					slog.String("error", extractErr.Error()))
 			} else if len(prompts) > 0 {
 				content := strings.Join(prompts, "\n\n---\n\n")
-				if writeErr := os.WriteFile(promptPath, []byte(content), 0o600); writeErr != nil {
+				if writeErr := entiredir.WriteFile(entireRoot, promptName, []byte(content), 0o600); writeErr != nil {
 					logging.Warn(logCtx, "failed to backfill prompt.txt from transcript",
 						slog.String("error", writeErr.Error()))
 				} else {
@@ -1003,7 +1012,6 @@ func handleLifecycleTurnEnd(ctx context.Context, ag agent.Agent, event *agent.Ev
 		NewFiles:                 relNewFiles,
 		DeletedFiles:             relDeletedFiles,
 		MetadataDir:              sessionDir,
-		MetadataDirAbs:           sessionDirAbs,
 		CommitMessage:            commitMessage,
 		TranscriptPath:           transcriptRef,
 		AuthorName:               author.Name,

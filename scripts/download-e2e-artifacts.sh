@@ -89,7 +89,7 @@ cd - >/dev/null
 
 # --- Write run metadata ---
 
-agents_found=$(cd "$dest" && ls -d */ 2>/dev/null | tr -d '/' | tr '\n' ', ' | sed 's/,$//')
+agents_found=$(cd "$dest" && find . -maxdepth 1 -mindepth 1 -type d -exec basename {} \; 2>/dev/null | sort | tr '\n' ',' | sed 's/,$//')
 
 cat > "$dest/.run-info.json" <<EOF
 {
@@ -97,7 +97,7 @@ cat > "$dest/.run-info.json" <<EOF
   "run_url": "$run_url",
   "commit": "$commit",
   "downloaded_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
-  "agents": "$(echo "$agents_found" | sed 's/"/\\"/g')"
+  "agents": "${agents_found//\"/\\\"}"
 }
 EOF
 

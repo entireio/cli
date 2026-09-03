@@ -7,14 +7,20 @@ import (
 	"io"
 	"io/fs"
 	"os"
+	"slices"
 	"strings"
 
 	"charm.land/huh/v2"
+	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
+	"github.com/entireio/cli/cmd/entire/cli/entiredir"
+	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
+	"github.com/entireio/cli/cmd/entire/cli/osroot"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
+	"github.com/entireio/cli/cmd/entire/cli/worktreedir"
 	"github.com/go-git/go-git/v6/plumbing"
 	"github.com/spf13/cobra"
 )
@@ -266,12 +272,41 @@ func runCleanAll(ctx context.Context, cmd *cobra.Command, force, dryRun bool) er
 		return fmt.Errorf("failed to list items: %w", err)
 	}
 
+	// Either temp-file scan may fail without stopping the command, so each one
+	// that does is named for the summary. Warning on stderr is not enough on its
+	// own: the counts and the "Deleted N items" line go to stdout, and a reader
+	// of stdout alone would take an incomplete list for a complete one.
+	var unscanned []string
+
 	tempFiles, err := listAllTempFiles(ctx)
 	if err != nil {
 		fmt.Fprintf(cmd.ErrOrStderr(), "Warning: failed to list temp files: %v\n", err)
+		unscanned = append(unscanned, "temp files")
 	}
 
-	return runCleanAllWithItems(ctx, cmd, force, dryRun, items, tempFiles)
+	orphanTemps, err := listOrphanAgentTemps(ctx)
+	if err != nil {
+		// Warn and continue, like listAllTempFiles above. A permission or
+		// transient error scanning agent config dirs is not a reason to throw
+		// away the shadow branches, session states and checkpoints already
+		// computed for deletion.
+		fmt.Fprintf(cmd.ErrOrStderr(), "Warning: failed to list orphan agent temp files: %v\n", err)
+		unscanned = append(unscanned, "stray agent temp files")
+	}
+
+	return runCleanAllWithItems(ctx, cmd, force, dryRun, items, tempFiles, orphanTemps, unscanned)
+}
+
+// printUnscannedNote names the inputs whose listing failed, so a summary of
+// what was found is never mistaken for a summary of what is there. The command
+// still succeeds: the scans that did work were cleaned, which is the whole
+// reason a failed listing does not abort.
+func printUnscannedNote(w io.Writer, unscanned []string) {
+	if len(unscanned) == 0 {
+		return
+	}
+	fmt.Fprintf(w, "\nCould not scan %s, so this may be incomplete. See the warnings above.\n",
+		strings.Join(unscanned, " or "))
 }
 
 // printSection prints a titled list of items if the slice is non-empty.
@@ -299,12 +334,13 @@ func printResultSection(w io.Writer, title string, items []string) {
 
 // runCleanAllWithItems is the core logic for cleaning all items.
 // Separated for testability — tests pass a cmd without a TTY and use force or dryRun to avoid prompts.
-func runCleanAllWithItems(ctx context.Context, cmd *cobra.Command, force, dryRun bool, items []strategy.CleanupItem, tempFiles []string) error {
+func runCleanAllWithItems(ctx context.Context, cmd *cobra.Command, force, dryRun bool, items []strategy.CleanupItem, tempFiles, orphanTemps, unscanned []string) error {
 	w := cmd.OutOrStdout()
 	errW := cmd.ErrOrStderr()
 	// Handle no items case
-	if len(items) == 0 && len(tempFiles) == 0 {
+	if len(items) == 0 && len(tempFiles) == 0 && len(orphanTemps) == 0 {
 		fmt.Fprintln(w, "No items to clean up.")
+		printUnscannedNote(w, unscanned)
 		return nil
 	}
 
@@ -325,7 +361,7 @@ func runCleanAllWithItems(ctx context.Context, cmd *cobra.Command, force, dryRun
 
 	// Show preview when not in force mode
 	if !force || dryRun {
-		totalItems := len(items) + len(tempFiles)
+		totalItems := len(items) + len(tempFiles) + len(orphanTemps)
 		fmt.Fprintf(w, "Found %d %s to clean:\n\n", totalItems, itemWord(totalItems))
 
 		printSection(w, "Shadow branches", cleanupItemIDs(branches))
@@ -333,6 +369,8 @@ func runCleanAllWithItems(ctx context.Context, cmd *cobra.Command, force, dryRun
 		printSection(w, "Checkpoint metadata", cleanupItemIDs(checkpoints))
 		printSection(w, "Redaction cache", cleanupItemIDs(redactCaches))
 		printSection(w, "Temp files", tempFiles)
+		printSection(w, "Stray agent temp files", orphanTemps)
+		printUnscannedNote(w, unscanned)
 
 		if dryRun {
 			fmt.Fprintln(w, "Run without --dry-run to delete these items.")
@@ -367,6 +405,8 @@ func runCleanAllWithItems(ctx context.Context, cmd *cobra.Command, force, dryRun
 
 	// Delete temp files
 	deletedTempFiles, failedTempFiles := deleteTempFiles(ctx, tempFiles)
+	deletedOrphans, failedOrphans := deleteOrphanAgentTemps(ctx, orphanTemps)
+	failedTempFiles = append(failedTempFiles, failedOrphans...)
 
 	// Report results
 	totalDeleted := len(result.ShadowBranches) + len(result.SessionStates) + len(result.Checkpoints) + len(deletedTempFiles)
@@ -380,7 +420,9 @@ func runCleanAllWithItems(ctx context.Context, cmd *cobra.Command, force, dryRun
 		printResultSection(w, "Checkpoints", result.Checkpoints)
 
 		printResultSection(w, "Temp files", deletedTempFiles)
+		printResultSection(w, "Stray agent temp files", deletedOrphans)
 	}
+	printUnscannedNote(w, unscanned)
 
 	if totalFailed > 0 {
 		fmt.Fprintf(errW, "\nFailed to delete %d %s:\n", totalFailed, itemWord(totalFailed))
@@ -411,24 +453,100 @@ func cleanupItemIDs(items []strategy.CleanupItem) []string {
 	return ids
 }
 
+// listOrphanAgentTemps returns the leftover atomic-write temp files under the
+// agent configuration directories in the working tree, as worktree-relative
+// names.
+//
+// Entire writes those files atomically (agent.HookConfigFile.Write and
+// writeManagedScaffold), and jsonutil.CreateTempIn places its temp beside the
+// target. A process killed between the create and the rename therefore leaves
+// one behind, and unlike the temps under .entire/tmp nothing else ever looks
+// there, so it stays until a human notices.
+//
+// It is worth sweeping rather than ignoring because a leftover does not just
+// waste bytes: Entire diffs untracked files across a turn, so a stray
+// .claude/settings.json.<hex>.tmp is picked up as a file that turn created and
+// captured into the next checkpoint. The window that creates one is small — a
+// few tens of microseconds since the atomic writers stopped fsyncing — but the
+// result is permanent, which is the half that matters.
+//
+// A directory that is missing, or that a repository replaced with a symlink, is
+// skipped rather than failing the clean: this is a tidy-up, and doctor is what
+// reports a symlinked agent directory.
+func listOrphanAgentTemps(ctx context.Context) ([]string, error) {
+	worktreeRoot, err := paths.WorktreeRoot(ctx)
+	if err != nil {
+		if errors.Is(err, paths.ErrNotARepository) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("resolve worktree root: %w", err)
+	}
+	root, err := worktreedir.OpenAt(worktreeRoot)
+	if err != nil {
+		return nil, fmt.Errorf("open worktree root: %w", err)
+	}
+
+	var found []string
+	for _, dir := range agent.AllProtectedDirs() {
+		walkErr := osroot.WalkDirNoSymlinks(root, dir, func(name string, d fs.DirEntry, err error) error {
+			if err != nil {
+				return err
+			}
+			if !d.IsDir() && jsonutil.IsTempName(d.Name()) {
+				found = append(found, name)
+			}
+			return nil
+		})
+		if walkErr != nil && !errors.Is(walkErr, fs.ErrNotExist) && !errors.Is(walkErr, osroot.ErrSymlinkedPath) {
+			return nil, fmt.Errorf("scan %s for stray temp files: %w", dir, walkErr)
+		}
+	}
+	slices.Sort(found)
+	return found, nil
+}
+
+// deleteOrphanAgentTemps removes the files listOrphanAgentTemps found, through
+// the worktree root so a name cannot leave it.
+func deleteOrphanAgentTemps(ctx context.Context, names []string) (deleted []string, failed []TempFileDeleteError) {
+	if len(names) == 0 {
+		return nil, nil
+	}
+	worktreeRoot, err := paths.WorktreeRoot(ctx)
+	if err == nil {
+		var root *os.Root
+		if root, err = worktreedir.OpenAt(worktreeRoot); err == nil {
+			for _, name := range names {
+				if rmErr := osroot.RemoveNoSymlinks(root, name); rmErr != nil {
+					failed = append(failed, TempFileDeleteError{File: name, Err: rmErr})
+					continue
+				}
+				deleted = append(deleted, name)
+			}
+			return deleted, failed
+		}
+	}
+	for _, name := range names {
+		failed = append(failed, TempFileDeleteError{File: name, Err: err})
+	}
+	return nil, failed
+}
+
 // listAllTempFiles returns all files in .entire/tmp/ without filtering.
 // Used by --all since those sessions are being deleted anyway.
 func listAllTempFiles(ctx context.Context) ([]string, error) {
-	absDir, err := paths.AbsPath(ctx, paths.EntireTmpDir)
+	root, err := entiredir.OpenForRead(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("failed to resolve temp dir: %w", err)
-	}
-	root, err := os.OpenRoot(absDir)
-	if err != nil {
-		if os.IsNotExist(err) {
+		if errors.Is(err, fs.ErrNotExist) {
 			return nil, nil
 		}
-		return nil, fmt.Errorf("failed to open root: %w", err)
+		return nil, fmt.Errorf("failed to open temp dir: %w", err)
 	}
-	defer root.Close()
 
 	var files []string
-	err = fs.WalkDir(root.FS(), ".", func(_ string, d fs.DirEntry, err error) error {
+	// A symlinked .entire/tmp (or a link inside it) would make the deletion
+	// that follows this listing land somewhere Entire does not own, so refuse
+	// rather than enumerate.
+	err = osroot.WalkDirNoSymlinks(root, entireTmpName, func(_ string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
@@ -438,7 +556,7 @@ func listAllTempFiles(ctx context.Context) ([]string, error) {
 		files = append(files, d.Name())
 		return nil
 	})
-	if os.IsNotExist(err) {
+	if errors.Is(err, fs.ErrNotExist) {
 		return nil, nil
 	}
 	if err != nil {
@@ -457,24 +575,16 @@ type TempFileDeleteError struct {
 // Uses os.Root to ensure deletions are confined to the temp directory.
 // Returns successfully deleted files and any failures with their error reasons.
 func deleteTempFiles(ctx context.Context, files []string) (deleted []string, failed []TempFileDeleteError) {
-	absDir, err := paths.AbsPath(ctx, paths.EntireTmpDir)
+	root, err := entiredir.OpenForRead(ctx)
 	if err != nil {
 		for _, file := range files {
 			failed = append(failed, TempFileDeleteError{File: file, Err: err})
 		}
 		return nil, failed
 	}
-	root, err := os.OpenRoot(absDir)
-	if err != nil {
-		for _, file := range files {
-			failed = append(failed, TempFileDeleteError{File: file, Err: err})
-		}
-		return nil, failed
-	}
-	defer root.Close()
 
 	for _, file := range files {
-		err := root.Remove(file)
+		err := removeTempFileNoSymlinks(root, file)
 		switch {
 		case err == nil:
 			deleted = append(deleted, file)
@@ -489,6 +599,26 @@ func deleteTempFiles(ctx context.Context, files []string) (deleted []string, fai
 		}
 	}
 	return deleted, failed
+}
+
+// removeTempFileNoSymlinks removes .entire/tmp/<file>, refusing a symlink in
+// any parent component the way deleteOrphanAgentTemps and state.go's
+// cleanupTmpStateFile already do for this same shape — os.Root refuses a link
+// that escapes the root but follows one that stays inside it, so a swapped
+// .entire/tmp would otherwise be deleted through rather than refused.
+//
+// It is deliberately not osroot.RemoveNoSymlinks: that reports a missing file
+// as success, and the caller distinguishes "already gone" (a transient export
+// staged and renamed away mid-walk) from "deleted", so the ENOENT has to
+// survive. Removing the leaf unlinks a symlink rather than following it, so
+// only the parents need the no-symlink walk.
+func removeTempFileNoSymlinks(root *os.Root, file string) error {
+	parent, leaf, closeParent, err := osroot.OpenParentNoSymlinks(root, entireTmpName+"/"+file)
+	if err != nil {
+		return err //nolint:wrapcheck // caller classifies with os.IsNotExist
+	}
+	defer closeParent()
+	return parent.Remove(leaf) //nolint:wrapcheck // caller classifies with os.IsNotExist
 }
 
 // activeSessionsOnCurrentHead returns sessions on the current HEAD

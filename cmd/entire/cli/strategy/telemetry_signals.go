@@ -267,20 +267,24 @@ func skipHeredocBody(cmd string, i int, delim string) int {
 	return i
 }
 
-// EntireSearchSubagentName is the subagent name setup_search_skill.go (package
-// cli) scaffolds into .claude/agents/entire-search.md (and the Codex/Gemini
-// equivalents). Exported so the installer and its tests pin their scaffolded
-// paths and template bodies against the value this probe matches — strategy
-// cannot import cli, so the constant lives here and cli reaches down. Renaming
-// the scaffolded subagent without updating this constant silently makes the
-// probe report "did not search" for every session that adopted the feature.
+// EntireSearchSubagentName is the search skill name setup_search_skill.go
+// (package cli) scaffolds into <agent>/skills/entire-search/SKILL.md for every
+// agent. Exported so the installer and its tests pin their scaffolded paths
+// and template bodies against the value this probe matches — strategy cannot
+// import cli, so the constant lives here and cli reaches down.
 //
-// Matching the dispatch is not a nicety, it is the primary path. A session that
-// consults search the way Entire ships it dispatches this subagent, and the
-// subagent's own `entire search` Bash call is written to a SEPARATE transcript
-// file that condensation never reads. Match only shell commands and the probe
-// reports "did not search" for exactly the sessions that adopted the feature —
-// a false negative aimed at the users we most want to count.
+// The subagent-dispatch match below exists for the artifact this feature
+// shipped as before it became a skill: a dispatchable subagent under this
+// name (.claude/agents/entire-search.md and Codex/Gemini equivalents). Those
+// installs linger — the installer only removes them on the next
+// --search-skill run — and a subagent's own `entire search` Bash call is
+// written to a SEPARATE transcript file that condensation never reads, so
+// dropping the dispatch match reports "did not search" for exactly the
+// sessions still on the old artifact. Skill-based sessions run the command in
+// the main transcript and surface through the command match instead — but
+// only where the command match runs at all: ScanToolInvocations requires
+// ToolInvocationScanner, which Claude Code alone implements, so the other
+// agents' sessions report searchSourceUnsupported regardless of skill use.
 const EntireSearchSubagentName = "entire-search"
 
 // detectSearchUsage reports whether the session consulted Entire's history

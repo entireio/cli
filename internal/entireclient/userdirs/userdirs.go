@@ -19,6 +19,7 @@ import (
 	"path/filepath"
 	"runtime"
 
+	"github.com/entireio/cli/cmd/entire/cli/osroot"
 	"github.com/entireio/cli/internal/testdirs"
 )
 
@@ -88,4 +89,66 @@ func EnsurePrivateDir(dir string) error {
 		return fmt.Errorf("tighten %s: %w", dir, err)
 	}
 	return nil
+}
+
+// ConfigRoot returns the shared *os.Root over the per-user config directory,
+// creating the directory if it does not exist. ConfigRootForRead is the same
+// without creation.
+//
+// Every read and write of contexts.json, version_check.json, and the
+// file-backed token store goes through this rather than through a path joined
+// onto Config(). The names inside are fixed today, but the point of the root is
+// that they do not have to stay that way: a future context name, cluster slug,
+// or token key that reaches a filename cannot escape the directory, and a
+// symlink swapped in between resolution and open surfaces as an error rather
+// than a redirected write to somewhere in the user's home.
+//
+// The create/no-create split matters here for the same reason it does for
+// .entire: a command that only looks for a saved login must not leave an
+// ~/.config/entire behind on a machine that has never used one.
+func ConfigRoot() (*os.Root, error) {
+	return openUserRoot(Config(), true)
+}
+
+// ConfigRootForRead is ConfigRoot without creating the directory. A missing
+// directory is reported unwrapped, so callers classify it with os.IsNotExist.
+func ConfigRootForRead() (*os.Root, error) {
+	return openUserRoot(Config(), false)
+}
+
+// CacheRoot returns the shared *os.Root over the per-user cache directory,
+// creating it. CacheRootForRead is the same without creation.
+func CacheRoot() (*os.Root, error) {
+	return openUserRoot(Cache(), true)
+}
+
+// CacheRootForRead is CacheRoot without creating the directory.
+func CacheRootForRead() (*os.Root, error) {
+	return openUserRoot(Cache(), false)
+}
+
+// openUserRoot absolutizes dir before handing it to the shared registry.
+//
+// Config and Cache can both return a RELATIVE path: when os.UserHomeDir fails
+// they fall back to "." and "" respectively, which join to ".config/entire" and
+// ".cache/entire". A relative root would then mean a different directory
+// depending on where the process happened to be — the same failure the repo
+// anchors exist to remove — so it is resolved once, here.
+func openUserRoot(dir string, create bool) (*os.Root, error) {
+	abs, err := filepath.Abs(dir)
+	if err != nil {
+		return nil, fmt.Errorf("resolve %s: %w", dir, err)
+	}
+	if create {
+		// EnsurePrivateDir, not os.MkdirAll(abs, 0o700): these directories hold
+		// login tokens, and MkdirAll is a no-op on a path that already exists,
+		// so whichever caller created the directory first would fix its mode
+		// permanently. Routing creation through here means every consumer of a
+		// root inherits the tightening instead of each one having to remember
+		// to ask for it.
+		if err := EnsurePrivateDir(abs); err != nil {
+			return nil, err
+		}
+	}
+	return osroot.Shared(abs) //nolint:wrapcheck // Shared names the directory and returns a missing one unwrapped
 }

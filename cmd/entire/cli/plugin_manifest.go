@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
+	"github.com/entireio/cli/cmd/entire/cli/osroot"
 	"golang.org/x/mod/semver"
 	"gopkg.in/yaml.v3"
 )
@@ -43,6 +44,29 @@ const (
 // silently truncating when the file is larger. os.ReadFile has no ceiling: it
 // sizes its buffer from the file and reads to EOF, so every caller inherits
 // whatever is on disk.
+// pluginPkgName renders a plugin's pkg directory as a name inside pluginRoot.
+// The name is validated first, as PluginPkgDir does, but the root is what makes
+// that validation a defence rather than the only one.
+func pluginPkgName(name string) (string, error) {
+	if err := validatePluginName(name); err != nil {
+		return "", err
+	}
+	return pluginManagedPkgSubdir + "/" + name, nil
+}
+
+// readFileLimitedIn is readFileLimited for a name inside root.
+func readFileLimitedIn(root *os.Root, name string, limit int64) ([]byte, error) {
+	f, err := osroot.OpenNoFollow(root, name)
+	if err != nil {
+		// Returned bare so callers can still test it with errors.Is against
+		// os.ErrNotExist — LoadPluginManifest depends on that to report an
+		// absent manifest as (nil, nil) rather than a failure.
+		return nil, err //nolint:wrapcheck // see above
+	}
+	defer f.Close()
+	return readWithinLimit(f, limit)
+}
+
 func readFileLimited(path string, limit int64) ([]byte, error) {
 	f, err := os.Open(path) //nolint:gosec // paths here are inside the managed plugin tree or our cache
 	if err != nil {
@@ -225,7 +249,15 @@ func EnsurePluginPkgDir(name string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if err := os.MkdirAll(dir, 0o750); err != nil {
+	name, err = pluginPkgName(name)
+	if err != nil {
+		return "", err
+	}
+	root, err := pluginRoot(true)
+	if err != nil {
+		return "", err
+	}
+	if err := osroot.MkdirAllNoSymlink(root, name, 0o750); err != nil {
 		return "", fmt.Errorf("create plugin pkg dir: %w", err)
 	}
 	return dir, nil
@@ -234,11 +266,18 @@ func EnsurePluginPkgDir(name string) (string, error) {
 // LoadPluginManifest reads the manifest for name. Returns (nil, nil) when
 // the plugin has no manifest — local-dev installs and raw-PATH plugins.
 func LoadPluginManifest(name string) (*PluginManifest, error) {
-	dir, err := PluginPkgDir(name)
+	pkgName, err := pluginPkgName(name)
 	if err != nil {
 		return nil, err
 	}
-	data, err := readFileLimited(filepath.Join(dir, pluginManifestFileName), maxPluginManifestSize)
+	root, err := pluginRoot(false)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, nil //nolint:nilnil // no managed tree => no manifest
+		}
+		return nil, err
+	}
+	data, err := readFileLimitedIn(root, pkgName+"/"+pluginManifestFileName, maxPluginManifestSize)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return nil, nil //nolint:nilnil // no-manifest signal
@@ -284,7 +323,15 @@ func ListPluginManifests() ([]*PluginManifest, error) {
 	if err != nil {
 		return nil, err
 	}
-	entries, err := os.ReadDir(filepath.Join(parent, pluginManagedPkgSubdir))
+	_ = parent // resolved above so a broken plugin dir still reports one error
+	root, err := pluginRoot(false)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	entries, err := osroot.ReadDirNoSymlinks(root, pluginManagedPkgSubdir)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return nil, nil
@@ -309,11 +356,18 @@ func ListPluginManifests() ([]*PluginManifest, error) {
 // RemovePluginPkg deletes the plugin's pkg dir (binary + manifest).
 // Missing dir is not an error — local-dev installs never had one.
 func RemovePluginPkg(name string) error {
-	dir, err := PluginPkgDir(name)
+	name, err := pluginPkgName(name)
 	if err != nil {
 		return err
 	}
-	if err := os.RemoveAll(dir); err != nil {
+	root, err := pluginRoot(false)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil // nothing to remove
+		}
+		return err
+	}
+	if err := root.RemoveAll(name); err != nil {
 		return fmt.Errorf("remove plugin pkg dir: %w", err)
 	}
 	return nil

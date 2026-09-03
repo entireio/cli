@@ -4,24 +4,32 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
-	"os"
 	"path/filepath"
 	"sort"
 	"strings"
 
+	"github.com/entireio/cli/cmd/entire/cli/entiredir"
+	"github.com/entireio/cli/cmd/entire/cli/osroot"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 )
 
-// runnersDir is the canonical location of the trail runner configs for a repo.
+// runnersName is the runner-config directory relative to the .entire root, which
+// is how it is read and written. runnersDir is the same directory as an absolute
+// path, for messages and for the glob in ensureRunnersPresent.
+const runnersName = "runners"
+
 func runnersDir(repoRoot string) string {
-	return filepath.Join(repoRoot, paths.EntireDir, "runners")
+	return filepath.Join(repoRoot, paths.EntireDir, runnersName)
 }
 
 // tuneRunner is one .entire/runners/*.json file loaded for tuning. Raw holds
-// the verbatim file bytes (used for surgical template replacement); Template is
-// the current prompt.template extracted for display in the prompt.
+// the verbatim file bytes (used for surgical template replacement); Name is the
+// file relative to the .entire root, which is how it is read back and rewritten;
+// Path is the same file absolute, for messages. Template is the current
+// prompt.template extracted for display in the prompt.
 type tuneRunner struct {
 	ID       string
+	Name     string
 	Path     string
 	Raw      []byte
 	Template string
@@ -33,7 +41,11 @@ type tuneRunner struct {
 // or the filter matches nothing.
 func loadTuneRunners(repoRoot, filter string) ([]tuneRunner, error) {
 	dir := runnersDir(repoRoot)
-	entries, err := os.ReadDir(dir)
+	root, err := entiredir.OpenAtForRead(repoRoot)
+	if err != nil {
+		return nil, fmt.Errorf("reading %s: %w", dir, err)
+	}
+	entries, err := osroot.ReadDirNoSymlinks(root, runnersName)
 	if err != nil {
 		return nil, fmt.Errorf("reading %s: %w", dir, err)
 	}
@@ -43,8 +55,9 @@ func loadTuneRunners(repoRoot, filter string) ([]tuneRunner, error) {
 		if e.IsDir() || !strings.HasSuffix(e.Name(), ".json") {
 			continue
 		}
+		name := runnersName + "/" + e.Name()
 		path := filepath.Join(dir, e.Name())
-		raw, err := os.ReadFile(path) //nolint:gosec // path is derived from repo root + dir listing
+		raw, err := entiredir.ReadFile(root, name)
 		if err != nil {
 			return nil, fmt.Errorf("reading %s: %w", path, err)
 		}
@@ -62,6 +75,7 @@ func loadTuneRunners(repoRoot, filter string) ([]tuneRunner, error) {
 		}
 		runners = append(runners, tuneRunner{
 			ID:       doc.ID,
+			Name:     name,
 			Path:     path,
 			Raw:      raw,
 			Template: doc.Prompt.Template,

@@ -11,6 +11,21 @@ import (
 	"strings"
 )
 
+// rejectCrossHostRedirect stops a redirect chain from leaving the host the
+// request was sent to. Mirrors cmd/entire/cli/api.rejectCrossHostRedirect —
+// duplicated rather than imported to avoid a dependency from this
+// low-level package onto the CLI's api package. Same-host redirects (e.g.
+// a trailing-slash normalize) still follow, up to Go's usual 10-hop cap.
+func rejectCrossHostRedirect(req *http.Request, via []*http.Request) error {
+	if len(via) >= 10 {
+		return errors.New("stopped after 10 redirects")
+	}
+	if len(via) > 0 && !strings.EqualFold(req.URL.Host, via[0].URL.Host) {
+		return fmt.Errorf("refusing redirect to a different host (%s -> %s): the OAuth token request body must not leave its origin", via[0].URL.Host, req.URL.Host)
+	}
+	return nil
+}
+
 // RFC 8693 grant + token-type URNs. Re-export the literals so callers
 // composing /oauth/token forms don't keep parallel copies. Lifted out
 // of core/repoadmin and core/api during COR-337 cleanup.
@@ -107,7 +122,22 @@ func PostOAuthToken(ctx context.Context, httpClient *http.Client, coreURL string
 		req.SetBasicAuth(url.QueryEscape(clientID), url.QueryEscape(clientSecret))
 	}
 
-	resp, err := httpClient.Do(req)
+	// The form body (subject_token, and for password-style exchanges the
+	// caller's credentials) must never follow a redirect to a different
+	// host: Go's default client only strips sensitive *headers* on a
+	// cross-host redirect (net/http's shouldCopyHeaderOnRedirect), and
+	// copies the request body unconditionally — a POST body is not
+	// protected the way a bearer header is. Guard here, once, for every
+	// caller, rather than requiring each constructed *http.Client to set
+	// its own CheckRedirect. The guard is applied to a shallow copy so a
+	// client instance callers may share elsewhere is not mutated; note
+	// that it does take precedence over any CheckRedirect the caller had
+	// set, for the duration of this request. No caller sets one today,
+	// and a caller that needs a different policy here should be given a
+	// same-host-preserving hook rather than having this guard removed.
+	guarded := *httpClient
+	guarded.CheckRedirect = rejectCrossHostRedirect
+	resp, err := guarded.Do(req)
 	if err != nil {
 		return "", 0, fmt.Errorf("token request: %w", err)
 	}

@@ -30,11 +30,20 @@ func resolveTranscriptPath(ctx context.Context, sessionID string, agent agentpkg
 		return "", fmt.Errorf("failed to get worktree root: %w", err)
 	}
 
-	sessionDir, err := agent.GetSessionDir(repoRoot)
+	// Through the agent's session store rather than a bare join: SessionFile
+	// converts the agent's own layout back into a name inside the store and
+	// rejects a session ID that walked out of it. ValidateSessionID above is the
+	// first gate; this is the one that does not depend on every future caller
+	// remembering it.
+	store, err := agentpkg.OpenSessionStore(agent, repoRoot)
 	if err != nil {
 		return "", fmt.Errorf("failed to get agent session directory: %w", err)
 	}
-	return agent.ResolveSessionFile(sessionDir, sessionID), nil
+	_, absPath, err := store.SessionFile(sessionID)
+	if err != nil {
+		return "", fmt.Errorf("resolve transcript path: %w", err)
+	}
+	return absPath, nil
 }
 
 // searchTranscriptInProjectDirs searches for a session transcript across an agent's
@@ -78,9 +87,21 @@ func searchTranscriptInProjectDirs(sessionID string, ag agentpkg.Agent) (string,
 		if depth > maxExtraDepth {
 			return filepath.SkipDir
 		}
-		candidate := ag.ResolveSessionFile(path, sessionID)
-		if _, statErr := os.Stat(candidate); statErr == nil {
-			found = candidate
+		// Each candidate project directory is its own store: the search is
+		// exactly the case where sessionID must not be trusted to stay inside
+		// the directory being probed.
+		store, storeErr := agentpkg.OpenSessionStoreAt(ag, path)
+		if storeErr != nil {
+			return nil //nolint:nilerr // an unusable candidate directory is skipped, not fatal to the search
+		}
+		name, absPath, resolveErr := store.SessionFile(sessionID)
+		if resolveErr != nil {
+			// The ID does not resolve inside this candidate — the next one may
+			// still hold the session, so keep walking.
+			return nil //nolint:nilerr // see comment
+		}
+		if store.Exists(name) {
+			found = absPath
 			return filepath.SkipAll
 		}
 		return nil
