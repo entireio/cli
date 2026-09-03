@@ -184,7 +184,9 @@ func tokenClassShares(usage *types.TokenUsage, weights tokenWeights, ttlKnown bo
 		CacheWrite1h: flat.CacheCreation1hTokens,
 		Family:       weights.Family,
 	}
-	shares.Total = flat.InputTokens + flat.CacheCreationTokens + flat.CacheReadTokens + flat.OutputTokens
+	shares.Total = saturatingIntAdd(flat.InputTokens, flat.CacheCreationTokens)
+	shares.Total = saturatingIntAdd(shares.Total, flat.CacheReadTokens)
+	shares.Total = saturatingIntAdd(shares.Total, flat.OutputTokens)
 	if shares.Total <= 0 {
 		return tokenClassBreakdown{}, false
 	}
@@ -235,19 +237,22 @@ func tokenClassShares(usage *types.TokenUsage, weights tokenWeights, ttlKnown bo
 	return shares, true
 }
 
-// flattenTokenUsageForClasses folds nested subagent usage into one flat total
-// and clamps every field at zero. Checkpoint metadata lives on a branch anyone
-// with push access can write, and a negative count would render as a negative
-// percentage; the depth bound comes from types.AddTokenUsage.
+// flattenTokenUsageForClasses folds nested subagent usage into one flat total,
+// clamping every field at zero and saturating every sum. Checkpoint metadata
+// lives on a branch anyone with push access can write, so this walk applies
+// types.MaxSubagentDepth itself rather than relying on whoever built the chain:
+// a negative count, a wrapped sum, or an unbounded chain each reach the report
+// as a nonsense percentage.
 func flattenTokenUsageForClasses(usage *types.TokenUsage) types.TokenUsage {
 	var flat types.TokenUsage
-	for u := usage; u != nil; u = u.SubagentTokens {
-		flat.InputTokens += max(u.InputTokens, 0)
-		flat.CacheCreationTokens += max(u.CacheCreationTokens, 0)
-		flat.CacheCreation1hTokens += max(u.CacheCreation1hTokens, 0)
-		flat.CacheReadTokens += max(u.CacheReadTokens, 0)
-		flat.OutputTokens += max(u.OutputTokens, 0)
-		flat.ThinkingTokens += max(u.ThinkingTokens, 0)
+	u := usage
+	for depth := 0; u != nil && depth < types.MaxSubagentDepth; u, depth = u.SubagentTokens, depth+1 {
+		flat.InputTokens = saturatingIntAdd(flat.InputTokens, max(u.InputTokens, 0))
+		flat.CacheCreationTokens = saturatingIntAdd(flat.CacheCreationTokens, max(u.CacheCreationTokens, 0))
+		flat.CacheCreation1hTokens = saturatingIntAdd(flat.CacheCreation1hTokens, max(u.CacheCreation1hTokens, 0))
+		flat.CacheReadTokens = saturatingIntAdd(flat.CacheReadTokens, max(u.CacheReadTokens, 0))
+		flat.OutputTokens = saturatingIntAdd(flat.OutputTokens, max(u.OutputTokens, 0))
+		flat.ThinkingTokens = saturatingIntAdd(flat.ThinkingTokens, max(u.ThinkingTokens, 0))
 	}
 	return flat
 }

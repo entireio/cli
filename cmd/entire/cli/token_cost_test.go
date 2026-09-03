@@ -226,6 +226,46 @@ func TestTokenClassShares_HostileNegativeCountsAreClamped(t *testing.T) {
 	}
 }
 
+// The flatten loop walks a chain from checkpoint metadata, which anyone with
+// push access can write. types.AddTokenUsage stops at MaxSubagentDepth; this
+// walk has to stop there too, or a hostile chain is unbounded work.
+func TestFlattenTokenUsageForClasses_StopsAtMaxSubagentDepth(t *testing.T) {
+	t.Parallel()
+
+	var head *types.TokenUsage
+	for range types.MaxSubagentDepth + 4 {
+		head = &types.TokenUsage{InputTokens: 1, SubagentTokens: head}
+	}
+
+	if got := flattenTokenUsageForClasses(head).InputTokens; got != types.MaxSubagentDepth {
+		t.Errorf("flattened input = %d, want %d (the depth bound)", got, types.MaxSubagentDepth)
+	}
+}
+
+// Counts are clamped at zero per node, but the sums were not: a chain of large
+// values wrapped negative and surfaced as negative percentages.
+func TestTokenClassShares_HostileTotalsSaturate(t *testing.T) {
+	t.Parallel()
+
+	maxInt := int(^uint(0) >> 1)
+	usage := &types.TokenUsage{
+		InputTokens:     maxInt,
+		CacheReadTokens: maxInt,
+		SubagentTokens:  &types.TokenUsage{OutputTokens: maxInt},
+	}
+
+	shares, ok := tokenClassShares(usage, tokenWeights{}, false)
+	if !ok {
+		t.Fatal("expected shares")
+	}
+	// Asserting the saturated value, not merely "positive": three maxInt
+	// addends wrap back around to maxInt-2, which is positive and so slips
+	// past a sign check while still being a nonsense total.
+	if shares.Total != maxInt {
+		t.Errorf("total = %d, want %d (saturated)", shares.Total, maxInt)
+	}
+}
+
 // Subagent usage is nested. The section above this one totals with recursion,
 // so these classes must too or one report shows two different totals.
 func TestTokenClassShares_FlattensSubagentUsage(t *testing.T) {
