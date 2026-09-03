@@ -1304,7 +1304,7 @@ func recordInFlightTaskLaunch(logCtx context.Context, event *agent.Event) error 
 			AgentID:         event.SubagentID,
 			StartedAt:       time.Now(),
 			SubagentType:    event.SubagentType,
-			TaskDescription: event.TaskDescription,
+			TaskDescription: strategy.SanitizeSubjectContent(event.TaskDescription),
 		})
 		return nil
 	})
@@ -1662,7 +1662,7 @@ func completeSubagentTaskRecord(logCtx context.Context, ag agent.Agent, event *a
 		AgentID:                event.SubagentID,
 		StartedAt:              time.Now(),
 		SubagentType:           event.SubagentType,
-		TaskDescription:        event.TaskDescription,
+		TaskDescription:        strategy.SanitizeSubjectContent(event.TaskDescription),
 		DeclaredTranscriptPath: subagentTranscriptPath,
 		Files:                  files,
 		TokenUsage:             event.TokenUsage,
@@ -1848,7 +1848,7 @@ func saveSubagentSessionTaskStep(ctx context.Context, step subagentSessionStep) 
 		AgentID:                step.sessionID,
 		StartedAt:              time.Now(),
 		SubagentType:           step.link.SubagentType,
-		TaskDescription:        step.link.TaskDescription,
+		TaskDescription:        strategy.SanitizeSubjectContent(step.link.TaskDescription),
 		DeclaredTranscriptPath: step.transcriptRef,
 		Files:                  files,
 	}); err != nil {

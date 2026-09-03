@@ -349,7 +349,7 @@ func launchStubTaskRecord(rec session.TaskRecord) session.TaskRecord {
 		AgentID:         rec.AgentID,
 		StartedAt:       rec.StartedAt,
 		SubagentType:    rec.SubagentType,
-		TaskDescription: rec.TaskDescription,
+		TaskDescription: SanitizeSubjectContent(rec.TaskDescription),
 	}
 }
 

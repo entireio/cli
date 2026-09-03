@@ -3,14 +3,116 @@ package strategy
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/entireio/cli/cmd/entire/cli/stringutil"
+	"github.com/entireio/cli/redact"
 )
 
 // MaxDescriptionLength is the maximum length for descriptions in commit messages
 // before truncation occurs.
 const MaxDescriptionLength = 60
+
+// maxSubjectRedactionInput bounds how much agent-supplied text is fed to the
+// redaction pipeline before truncation. Sources like Codex's
+// last_assistant_message are whole model replies, so redacting them in full
+// would put an unbounded cost on a hook path. The bound is far above
+// MaxDescriptionLength, so any secret that could still be visible after
+// truncation is inside the window; everything past it is dropped by
+// TruncateDescription regardless.
+const maxSubjectRedactionInput = 4096
+
+// omittedSubjectLabel is returned when agent-supplied text exceeds the redaction
+// window. Truncating before redact would let a secret straddling the boundary
+// leak its prefix; failing closed is safer than a partial scan.
+const omittedSubjectLabel = "[agent description omitted]"
+
+// SanitizeSubjectContent prepares agent-supplied text for use inside a
+// single-line Git commit subject.
+//
+// Model output reaches commit subjects verbatim (a subagent's task description,
+// a TodoWrite item), so this is the boundary where two guarantees have to hold:
+//
+//  1. Detected secrets are replaced before anything is written to Git. A reply
+//     that opens with a credential copied out of tool output would otherwise
+//     become an unredacted Git object.
+//  2. The subject renders as inert text. JSON strings may legally carry NUL,
+//     ESC, C1/DEL, and Unicode bidi/format controls, which survive whitespace
+//     collapsing and can make `git log`, rewind output, and terminal UIs
+//     display something other than what was committed.
+//
+// Redaction runs on inputs up to maxSubjectRedactionInput runes. Inputs larger
+// than that fail closed to omittedSubjectLabel so a secret straddling the
+// boundary cannot leak a prefix that truncation would have cut mid-match.
+func SanitizeSubjectContent(s string) string {
+	if utf8.RuneCountInString(s) > maxSubjectRedactionInput {
+		return omittedSubjectLabel
+	}
+	s = stripSubjectControls(s)
+	if s == "" {
+		return ""
+	}
+	s = redact.String(s)
+	if utf8.RuneCountInString(s) > maxSubjectRedactionInput {
+		return omittedSubjectLabel
+	}
+	// Redaction placeholders are plain text, but a custom rule's replacement is
+	// caller-supplied, so re-run the control strip rather than trust it.
+	return stripSubjectControls(s)
+}
+
+// SanitizeTaskDescription redacts secrets and strips unsafe controls from task
+// descriptions persisted in checkpoint metadata. Unlike SanitizeSubjectContent
+// it does not apply commit-subject length limits — task.json is not a subject.
+func SanitizeTaskDescription(s string) string {
+	if utf8.RuneCountInString(s) > maxSubjectRedactionInput {
+		return omittedSubjectLabel
+	}
+	s = stripSubjectControls(s)
+	if s == "" {
+		return ""
+	}
+	s = redact.String(s)
+	if utf8.RuneCountInString(s) > maxSubjectRedactionInput {
+		return omittedSubjectLabel
+	}
+	return stripSubjectControls(s)
+}
+
+// stripSubjectControls removes characters that must never reach a commit
+// subject and folds every whitespace run into a single space, preserving normal
+// Unicode (including non-Latin scripts and emoji) otherwise.
+//
+// Dropped: C0 controls, DEL, C1 controls, and Unicode format characters
+// (category Cf — the bidi overrides and isolates, plus zero-width joiners).
+// Invalid UTF-8 is dropped too, since Git subjects must be well-formed text.
+func stripSubjectControls(s string) string {
+	var b strings.Builder
+	b.Grow(len(s))
+	pendingSpace := false
+	for _, r := range s {
+		switch {
+		case r == utf8.RuneError:
+			// Either invalid UTF-8 or a literal U+FFFD; neither belongs here.
+			continue
+		case unicode.IsSpace(r):
+			// Covers tab/newline plus U+2028/U+2029, which render as breaks.
+			// Leading whitespace is dropped by never arming before the first rune.
+			pendingSpace = b.Len() > 0
+		case unicode.IsControl(r) || unicode.Is(unicode.Cf, r):
+			continue
+		default:
+			if pendingSpace {
+				b.WriteRune(' ')
+				pendingSpace = false
+			}
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
+}
 
 // TruncateDescription truncates a string to maxLen runes, adding "..." if truncated.
 // Uses rune-based slicing to avoid splitting multi-byte UTF-8 characters.
@@ -44,6 +146,12 @@ func FormatSubagentRunningMessage(agentType, description, toolUseID string) stri
 
 // formatSubagentMessage is a shared helper for start/end messages.
 func formatSubagentMessage(verb, agentType, description, toolUseID string) string {
+	// Both fields are agent-supplied and land in a commit subject verbatim.
+	// The description carries model output, so it also needs redaction; the
+	// agent type is a label, and redacting it would mangle legitimate names.
+	agentType = stripSubjectControls(agentType)
+	description = SanitizeSubjectContent(description)
+
 	// Both empty - fall back to simple format
 	if agentType == "" && description == "" {
 		return "Task: " + toolUseID
@@ -70,6 +178,8 @@ func formatSubagentMessage(verb, agentType, description, toolUseID string) strin
 //
 // If todoContent is empty, falls back to: "Checkpoint #<sequence>: <tool-use-id>"
 func FormatIncrementalMessage(todoContent string, sequence int, toolUseID string) string {
+	// Todo content is model output on its way into a commit subject.
+	todoContent = SanitizeSubjectContent(todoContent)
 	if todoContent == "" {
 		return fmt.Sprintf("Checkpoint #%d: %s", sequence, toolUseID)
 	}

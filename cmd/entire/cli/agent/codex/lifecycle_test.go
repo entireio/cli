@@ -165,6 +165,77 @@ func TestParseHookEvent_Stop(t *testing.T) {
 	require.Equal(t, "test-uuid", event.SessionID)
 	require.Equal(t, "/tmp/rollout.jsonl", event.SessionRef)
 	require.Equal(t, "gpt-4.1", event.Model)
+	require.Equal(t, "Done creating file.", event.TaskDescription)
+}
+
+// TestParseHookEvent_Stop_NullLastAssistantMessage covers Codex sending a null
+// last_assistant_message: TaskDescription must stay empty, not become "null".
+func TestParseHookEvent_Stop_NullLastAssistantMessage(t *testing.T) {
+	t.Parallel()
+	ag := &CodexAgent{}
+	input := `{
+		"session_id": "test-uuid",
+		"turn_id": "turn-123",
+		"transcript_path": "/tmp/rollout.jsonl",
+		"cwd": "/tmp/testrepo",
+		"hook_event_name": "Stop",
+		"model": "gpt-4.1",
+		"permission_mode": "default",
+		"stop_hook_active": true,
+		"last_assistant_message": null
+	}`
+
+	event, err := ag.ParseHookEvent(context.Background(), HookNameStop, strings.NewReader(input))
+	require.NoError(t, err)
+	require.NotNil(t, event)
+	require.Empty(t, event.TaskDescription)
+}
+
+// TestParseHookEvent_Stop_BlankLastAssistantMessage covers a whitespace-only
+// message: TaskDescription must be trimmed to empty, not leak whitespace.
+func TestParseHookEvent_Stop_BlankLastAssistantMessage(t *testing.T) {
+	t.Parallel()
+	ag := &CodexAgent{}
+	input := `{
+		"session_id": "test-uuid",
+		"turn_id": "turn-1",
+		"transcript_path": "/tmp/rollout.jsonl",
+		"cwd": "/tmp/testrepo",
+		"hook_event_name": "Stop",
+		"model": "gpt-4.1",
+		"permission_mode": "auto",
+		"stop_hook_active": false,
+		"last_assistant_message": "   \n\t  "
+	}`
+
+	event, err := ag.ParseHookEvent(context.Background(), HookNameStop, strings.NewReader(input))
+	require.NoError(t, err)
+	require.NotNil(t, event)
+	require.Empty(t, event.TaskDescription)
+}
+
+// TestParseHookEvent_Stop_MultilineLastAssistantMessage covers a message with
+// internal newlines/tabs: TaskDescription must collapse to a single line so it
+// stays safe to use as a commit subject (via strategy.FormatSubagentEndMessage).
+func TestParseHookEvent_Stop_MultilineLastAssistantMessage(t *testing.T) {
+	t.Parallel()
+	ag := &CodexAgent{}
+	input := `{
+		"session_id": "test-uuid",
+		"turn_id": "turn-1",
+		"transcript_path": "/tmp/rollout.jsonl",
+		"cwd": "/tmp/testrepo",
+		"hook_event_name": "Stop",
+		"model": "gpt-4.1",
+		"permission_mode": "auto",
+		"stop_hook_active": false,
+		"last_assistant_message": "  Fixed the bug.\n\nRan  the\ttests.  "
+	}`
+
+	event, err := ag.ParseHookEvent(context.Background(), HookNameStop, strings.NewReader(input))
+	require.NoError(t, err)
+	require.NotNil(t, event)
+	require.Equal(t, "Fixed the bug. Ran the tests.", event.TaskDescription)
 }
 
 func TestParseHookEvent_PreToolUse_ReturnsNil(t *testing.T) {
@@ -385,6 +456,7 @@ func TestParseHookEvent_SubagentStop(t *testing.T) {
 	require.Equal(t, "/rollouts/root-session-1.jsonl", ev.SessionRef, "the PARENT rollout")
 	require.Equal(t, "/rollouts/"+testCodexAgentID+".jsonl", ev.SubagentTranscriptPath,
 		"the subagent's own rollout")
+	require.Equal(t, "done", ev.TaskDescription)
 }
 
 // TestParseHookEvent_SubagentStop_NullTranscripts covers the nullable fields: Codex
@@ -412,4 +484,5 @@ func TestParseHookEvent_SubagentStop_NullTranscripts(t *testing.T) {
 	require.NotNil(t, ev)
 	require.Empty(t, ev.SessionRef, "a null transcript_path must not become \"null\"")
 	require.Empty(t, ev.SubagentTranscriptPath, "a null agent_transcript_path must not become \"null\"")
+	require.Empty(t, ev.TaskDescription, "a null last_assistant_message must not become \"null\"")
 }

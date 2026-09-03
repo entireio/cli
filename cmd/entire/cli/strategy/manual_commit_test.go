@@ -4101,3 +4101,18 @@ func TestMarshalPromptAttributionsIncludingPending(t *testing.T) {
 		})
 	}
 }
+
+func TestLaunchStubTaskRecord_SanitizesTaskDescription(t *testing.T) {
+	const secret = "ghp_1234567890abcdefghijklmnopqrstuvwx"
+	got := launchStubTaskRecord(session.TaskRecord{
+		ToolUseID:       "toolu_test",
+		AgentID:         "agent1",
+		TaskDescription: secret + " is the key I used",
+	})
+	if strings.Contains(got.TaskDescription, secret[:6]) {
+		t.Errorf("task description persisted to session state must be redacted, got %q", got.TaskDescription)
+	}
+	if !strings.Contains(got.TaskDescription, "REDACTED") {
+		t.Errorf("task description should contain REDACTED placeholder, got %q", got.TaskDescription)
+	}
+}
