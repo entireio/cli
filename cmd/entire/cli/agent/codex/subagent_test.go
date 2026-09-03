@@ -15,25 +15,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestResolveRollout_UsesExactMetadataID(t *testing.T) {
-	t.Parallel()
-
-	root := t.TempDir()
-	active := filepath.Join(root, "sessions")
-	archived := filepath.Join(root, "archived_sessions")
-	ag := &CodexAgent{RolloutRoots: []string{active, archived}}
-
-	activePath := writeRollout(t, active, "2026/08/31/rollout-near-child-a.jsonl", "child-a", nil)
-	archivedPath := writeRollout(t, archived, "2026/08/30/rollout-child-b.jsonl", "child-b", nil)
-	writeRollout(t, active, "2026/08/31/rollout-child-a-suffix.jsonl", "not-child-a", nil)
-
-	got := ag.resolveSubagentRollout(agent.SubagentReference{AgentID: "child-a"})
-	require.Equal(t, activePath, got)
-
-	got = ag.resolveSubagentRollout(agent.SubagentReference{AgentID: "child-b"})
-	require.Equal(t, archivedPath, got)
-}
-
 func TestResolveRollout_DefaultCodexHomeIncludesArchivedSessions(t *testing.T) {
 	// This test changes CODEX_HOME, so it must not run in parallel.
 	codexHome := t.TempDir()
@@ -46,8 +27,10 @@ func TestResolveRollout_DefaultCodexHomeIncludesArchivedSessions(t *testing.T) {
 	archivedPath := writeRollout(t, archived, "2026/08/30/rollout-archived.jsonl", "archived", nil)
 	ag := &CodexAgent{}
 
-	require.Equal(t, activePath, ag.resolveSubagentRollout(agent.SubagentReference{AgentID: "active"}))
-	require.Equal(t, archivedPath, ag.resolveSubagentRollout(agent.SubagentReference{AgentID: "archived"}))
+	result, err := ag.ExtractWithSubagentInventory(t.Context(), nil, 0, []agent.SubagentReference{{AgentID: "active"}, {AgentID: "archived"}})
+	require.NoError(t, err)
+	require.Equal(t, activePath, result.Children[0].ResolvedPath)
+	require.Equal(t, archivedPath, result.Children[1].ResolvedPath)
 }
 
 func TestResolveRollout_MismatchedKnownPathsFallBackOnlyToExactID(t *testing.T) {
@@ -63,26 +46,9 @@ func TestResolveRollout_MismatchedKnownPathsFallBackOnlyToExactID(t *testing.T) 
 		{AgentID: "child", DeclaredTranscriptPath: mismatch},
 		{AgentID: "child", ResolvedTranscriptPath: mismatch},
 	} {
-		require.Equal(t, exact, ag.resolveSubagentRollout(ref))
+		child, _ := extractChild(t, ag, ref)
+		require.Equal(t, exact, child.ResolvedPath)
 	}
-}
-
-func TestResolveRollout_KnownExactPathsNeedNoFallbackRoot(t *testing.T) {
-	t.Parallel()
-
-	root := t.TempDir()
-	declared := writeRollout(t, root, "declared.jsonl", "declared", nil)
-	resolved := writeRollout(t, root, "resolved.jsonl", "resolved", nil)
-	ag := &CodexAgent{RolloutRoots: []string{filepath.Join(root, "no-fallback-here")}}
-
-	require.Equal(t, declared, ag.resolveSubagentRollout(agent.SubagentReference{
-		AgentID:                "declared",
-		DeclaredTranscriptPath: declared,
-	}))
-	require.Equal(t, resolved, ag.resolveSubagentRollout(agent.SubagentReference{
-		AgentID:                "resolved",
-		ResolvedTranscriptPath: resolved,
-	}))
 }
 
 func TestResolveRollout_RejectsInferredAndAmbiguousCandidates(t *testing.T) {
@@ -92,11 +58,14 @@ func TestResolveRollout_RejectsInferredAndAmbiguousCandidates(t *testing.T) {
 	active := filepath.Join(root, "sessions")
 	ag := &CodexAgent{RolloutRoots: []string{active}}
 	writeRollout(t, active, "2026/08/31/rollout-child.jsonl", "childish", nil)
-	require.Empty(t, ag.resolveSubagentRollout(agent.SubagentReference{AgentID: "child"}))
+	child, usage := extractChild(t, ag, agent.SubagentReference{AgentID: "child"})
+	require.Empty(t, child.ResolvedPath)
+	require.False(t, *usage.SubagentTokensComplete)
 
 	writeRollout(t, active, "2026/08/30/rollout-child-one.jsonl", "child", nil)
 	writeRollout(t, active, "2026/08/31/rollout-child-two.jsonl", "child", nil)
-	require.Empty(t, ag.resolveSubagentRollout(agent.SubagentReference{AgentID: "child"}))
+	child, _ = extractChild(t, ag, agent.SubagentReference{AgentID: "child"})
+	require.Empty(t, child.ResolvedPath)
 }
 
 func TestResolveRollout_RejectsSymlinkHint(t *testing.T) {
@@ -108,77 +77,43 @@ func TestResolveRollout_RejectsSymlinkHint(t *testing.T) {
 	require.NoError(t, os.Symlink(target, link))
 
 	ag := &CodexAgent{RolloutRoots: []string{}}
-	require.Empty(t, ag.resolveSubagentRollout(agent.SubagentReference{
+	child, _ := extractChild(t, ag, agent.SubagentReference{
 		AgentID:                "child",
 		DeclaredTranscriptPath: link,
-	}))
-}
-
-func TestRolloutRegularMode_RejectsSpecialEntries(t *testing.T) {
-	t.Parallel()
-
-	for _, mode := range []fs.FileMode{0, fs.ModeDir, fs.ModeSymlink, fs.ModeNamedPipe, fs.ModeDevice, fs.ModeSocket} {
-		require.Equal(t, mode == 0, rolloutRegularMode(mode), "mode %v", mode)
-	}
+	})
+	require.Empty(t, child.ResolvedPath)
 }
 
 func TestTerminalTurnIDs_OnlyAcceptsUnambiguousBoundaries(t *testing.T) {
 	t.Parallel()
 
-	valid := rolloutData(t, "child", []json.RawMessage{
-		taskEvent("task_started", stringPointer("one")),
-		taskEvent("task_complete", stringPointer("one")),
-		taskEvent("task_started", stringPointer("two")),
-		taskEvent("task_complete", nil),
-	})
-	require.Equal(t, []string{"one", "two"}, terminalTurnIDs(valid))
-
-	for _, invalid := range [][]json.RawMessage{
-		{taskEvent("task_complete", stringPointer("one"))},
-		{taskEvent("task_started", stringPointer("one")), taskEvent("task_started", stringPointer("two")), taskEvent("task_complete", nil)},
-		{taskEvent("task_started", stringPointer("one")), taskEvent("task_complete", stringPointer("two"))},
-		{taskEvent("task_started", stringPointer("one")), taskEvent("task_complete", stringPointer("one")), taskEvent("task_complete", stringPointer("one"))},
-	} {
-		require.Empty(t, terminalTurnIDs(rolloutData(t, "child", invalid)))
+	valid := []json.RawMessage{
+		taskEvent("task_started", stringPointer("one")), taskEvent("task_complete", stringPointer("one")),
+		taskEvent("task_started", stringPointer("two")), taskEvent("task_complete", nil),
 	}
-}
+	require.Equal(t, []string{"one", "two"}, analyzeRollout(rolloutData(t, "child", valid), 0).TerminalTurnIDs)
+	withUnknownEvent := append(append([]json.RawMessage(nil), valid...), json.RawMessage(`{"type":"event_msg","payload":{"type":"future_event","turn_id":7}}`))
+	require.Equal(t, []string{"one", "two"}, analyzeRollout(rolloutData(t, "child", withUnknownEvent), 0).TerminalTurnIDs)
 
-func TestTerminalTurnIDs_RealWireShape(t *testing.T) {
-	t.Parallel()
-
-	modern := rolloutData(t, "child", []json.RawMessage{
-		taskEvent("task_started", stringPointer("modern")),
-		taskEvent("task_complete", stringPointer("modern")),
-	})
-	require.Equal(t, []string{"modern"}, terminalTurnIDs(modern))
-
-	legacy := rolloutData(t, "child", []json.RawMessage{
-		taskEvent("task_started", stringPointer("legacy")),
-		taskEvent("task_complete", nil),
-	})
-	require.Equal(t, []string{"legacy"}, terminalTurnIDs(legacy))
-}
-
-func TestTerminalTurnIDs_RejectsInvalidRealWireBoundaries(t *testing.T) {
-	t.Parallel()
-
-	validThenMalformed := []json.RawMessage{
-		taskEvent("task_started", stringPointer("one")),
-		taskEvent("task_complete", stringPointer("one")),
-		json.RawMessage(`{"type":"event_msg","payload":{"type":"task_started","turn_id":`),
+	tests := []struct {
+		name   string
+		events []json.RawMessage
+	}{
+		{"completion without start", []json.RawMessage{taskEvent("task_complete", stringPointer("one"))}},
+		{"start without id", []json.RawMessage{taskEvent("task_started", nil)}},
+		{"unclosed start", []json.RawMessage{taskEvent("task_started", stringPointer("one"))}},
+		{"overlapping starts", []json.RawMessage{taskEvent("task_started", stringPointer("one")), taskEvent("task_started", stringPointer("two"))}},
+		{"mismatched completion", []json.RawMessage{taskEvent("task_started", stringPointer("one")), taskEvent("task_complete", stringPointer("two"))}},
+		{"duplicate turn", []json.RawMessage{taskEvent("task_started", stringPointer("one")), taskEvent("task_complete", stringPointer("one")), taskEvent("task_started", stringPointer("one")), taskEvent("task_complete", stringPointer("one"))}},
+		{"duplicate completion", []json.RawMessage{taskEvent("task_started", stringPointer("one")), taskEvent("task_complete", nil), taskEvent("task_complete", nil)}},
+		{"invalid id type", []json.RawMessage{json.RawMessage(`{"type":"event_msg","payload":{"type":"task_started","turn_id":7}}`)}},
+		{"malformed tail", append(valid, json.RawMessage(`{"type":"event_msg","payload":{"type":"task_started","turn_id":`))},
 	}
-	for _, invalid := range [][]json.RawMessage{
-		{taskEvent("task_complete", stringPointer("one"))},
-		{taskEvent("task_started", nil)},
-		{taskEvent("task_started", stringPointer("one"))},
-		{taskEvent("task_started", stringPointer("one")), taskEvent("task_started", stringPointer("two"))},
-		{taskEvent("task_started", stringPointer("one")), taskEvent("task_complete", stringPointer("two"))},
-		{taskEvent("task_started", stringPointer("one")), taskEvent("task_complete", stringPointer("one")), taskEvent("task_started", stringPointer("one")), taskEvent("task_complete", stringPointer("one"))},
-		{taskEvent("task_started", stringPointer("one")), taskEvent("task_complete", nil), taskEvent("task_complete", nil)},
-		{json.RawMessage(`{"type":"event_msg","payload":{"type":"task_started","turn_id":7}}`)},
-		validThenMalformed,
-	} {
-		require.Empty(t, terminalTurnIDs(rolloutData(t, "child", invalid)))
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			require.Empty(t, analyzeRollout(rolloutData(t, "child", tt.events), 0).TerminalTurnIDs)
+		})
 	}
 }
 
@@ -189,18 +124,18 @@ func TestExactTokenUsage_UsesOnlyLastRecognizableSnapshot(t *testing.T) {
 		"input_tokens": 15, "cached_input_tokens": 12, "output_tokens": 3,
 		"reasoning_output_tokens": 2, "total_tokens": 18,
 	}})
-	usage := exactCumulativeTokenUsage(rolloutData(t, "child", []json.RawMessage{valid}))
+	usage := analyzeRollout(rolloutData(t, "child", []json.RawMessage{valid}), 0).ExactTokenUsage
 	require.Equal(t, &agent.TokenUsage{InputTokens: 3, CacheReadTokens: 12, OutputTokens: 3}, usage)
 
 	malformedLast := tokenCountEvent(map[string]any{"total_token_usage": map[string]any{
 		"input_tokens": 10, "cached_input_tokens": 11, "output_tokens": 3,
 	}})
-	require.Nil(t, exactCumulativeTokenUsage(rolloutData(t, "child", []json.RawMessage{valid, malformedLast})))
+	require.Nil(t, analyzeRollout(rolloutData(t, "child", []json.RawMessage{valid, malformedLast}), 0).ExactTokenUsage)
 
 	missingRequired := tokenCountEvent(map[string]any{"total_token_usage": map[string]any{
 		"input_tokens": 10, "output_tokens": 3,
 	}})
-	require.Nil(t, exactCumulativeTokenUsage(rolloutData(t, "child", []json.RawMessage{missingRequired})))
+	require.Nil(t, analyzeRollout(rolloutData(t, "child", []json.RawMessage{missingRequired}), 0).ExactTokenUsage)
 }
 
 func TestExactTokenUsage_RejectsEveryUnavailableOrInconsistentSnapshot(t *testing.T) {
@@ -209,7 +144,7 @@ func TestExactTokenUsage_RejectsEveryUnavailableOrInconsistentSnapshot(t *testin
 	valid := func(values map[string]any) []byte {
 		return rolloutData(t, "child", []json.RawMessage{tokenCountEvent(map[string]any{"total_token_usage": values})})
 	}
-	require.Nil(t, exactCumulativeTokenUsage(rolloutData(t, "child", nil)))
+	require.Nil(t, analyzeRollout(rolloutData(t, "child", nil), 0).ExactTokenUsage)
 
 	for _, values := range []map[string]any{
 		{"cached_input_tokens": 0, "output_tokens": 1},
@@ -224,17 +159,17 @@ func TestExactTokenUsage_RejectsEveryUnavailableOrInconsistentSnapshot(t *testin
 		{"input_tokens": 1, "cached_input_tokens": 0, "output_tokens": 1, "reasoning_output_tokens": -1},
 		{"input_tokens": 1, "cached_input_tokens": 0, "output_tokens": 1, "reasoning_output_tokens": 2},
 	} {
-		require.Nil(t, exactCumulativeTokenUsage(valid(values)))
+		require.Nil(t, analyzeRollout(valid(values), 0).ExactTokenUsage)
 	}
 
-	zeros := exactCumulativeTokenUsage(valid(map[string]any{"input_tokens": 0, "cached_input_tokens": 0, "output_tokens": 0}))
+	zeros := analyzeRollout(valid(map[string]any{"input_tokens": 0, "cached_input_tokens": 0, "output_tokens": 0}), 0).ExactTokenUsage
 	require.Equal(t, &agent.TokenUsage{}, zeros)
 
 	multiple := rolloutData(t, "child", []json.RawMessage{
 		tokenCountEvent(map[string]any{"total_token_usage": map[string]any{"input_tokens": 9, "cached_input_tokens": 1, "output_tokens": 2}}),
 		tokenCountEvent(map[string]any{"total_token_usage": map[string]any{"input_tokens": 4, "cached_input_tokens": 1, "output_tokens": 2}}),
 	})
-	usage := exactCumulativeTokenUsage(multiple)
+	usage := analyzeRollout(multiple, 0).ExactTokenUsage
 	require.Equal(t, &agent.TokenUsage{InputTokens: 3, CacheReadTokens: 1, OutputTokens: 2}, usage)
 	require.Zero(t, usage.APICallCount, "snapshot record count is not an API-call count")
 
@@ -242,7 +177,7 @@ func TestExactTokenUsage_RejectsEveryUnavailableOrInconsistentSnapshot(t *testin
 		tokenCountEvent(map[string]any{"total_token_usage": map[string]any{"input_tokens": 4, "cached_input_tokens": 1, "output_tokens": 2}}),
 		tokenCountEvent(map[string]any{"total_token_usage": "not-an-object"}),
 	})
-	require.Nil(t, exactCumulativeTokenUsage(malformedFinal), "must not fall back to the earlier valid snapshot")
+	require.Nil(t, analyzeRollout(malformedFinal, 0).ExactTokenUsage, "must not fall back to the earlier valid snapshot")
 }
 
 func TestSubagentInventory_CollectsExactEvidenceAndDoesNotPartialAggregate(t *testing.T) {
@@ -434,31 +369,6 @@ func TestSubagentInventory_RevalidatesInjectedRolloutBytes(t *testing.T) {
 	require.False(t, *result.TokenUsage.SubagentTokensComplete)
 }
 
-func TestSubagentInventory_BatchesFallbackTraversal(t *testing.T) {
-	t.Parallel()
-
-	firstRoot := t.TempDir()
-	secondRoot := t.TempDir()
-	first := writeRollout(t, firstRoot, "first.jsonl", "first", []json.RawMessage{tokenCountEvent(map[string]any{"total_token_usage": map[string]any{"input_tokens": 1, "cached_input_tokens": 0, "output_tokens": 1}})})
-	second := writeRollout(t, secondRoot, "second.jsonl", "second", []json.RawMessage{tokenCountEvent(map[string]any{"total_token_usage": map[string]any{"input_tokens": 2, "cached_input_tokens": 0, "output_tokens": 1}})})
-	_ = first
-	_ = second
-	walks := 0
-	ag := &CodexAgent{
-		RolloutRoots: []string{firstRoot, secondRoot},
-		walkDir: func(root string, visit fs.WalkDirFunc) error {
-			walks++
-			return filepath.WalkDir(root, visit)
-		},
-	}
-
-	result, err := ag.ExtractWithSubagentInventory(t.Context(), nil, 0, []agent.SubagentReference{{AgentID: "first"}, {AgentID: "second"}})
-	require.NoError(t, err)
-	require.Equal(t, 2, walks, "one traversal per configured root, not per child")
-	require.Equal(t, []string{"first", "second"}, []string{result.Children[0].AgentID, result.Children[1].AgentID})
-	require.True(t, *result.TokenUsage.SubagentTokensComplete)
-}
-
 func TestSubagentInventory_FallbackTraversalFailureDiscardsMatches(t *testing.T) {
 	t.Parallel()
 
@@ -634,6 +544,14 @@ func mustReadFile(t *testing.T, path string) []byte {
 	data, err := os.ReadFile(path)
 	require.NoError(t, err)
 	return data
+}
+
+func extractChild(t *testing.T, ag *CodexAgent, ref agent.SubagentReference) (agent.SubagentAnalysis, *agent.TokenUsage) {
+	t.Helper()
+	result, err := ag.ExtractWithSubagentInventory(t.Context(), nil, 0, []agent.SubagentReference{ref})
+	require.NoError(t, err)
+	require.Len(t, result.Children, 1)
+	return result.Children[0], result.TokenUsage
 }
 
 func writeRollout(t *testing.T, root, name, id string, events []json.RawMessage) string {

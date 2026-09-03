@@ -1039,10 +1039,7 @@ func TestState_SubagentInventoryLedger(t *testing.T) {
 		t.Fatal("first child observation must be recorded")
 	}
 	assert.Equal(t, uint64(1), state.SubagentLedgerVersion)
-	assert.Nil(t, state.TokenUsage.SubagentTokens)
-	assert.False(t, *state.TokenUsage.SubagentTokensComplete)
-	assert.Nil(t, state.CheckpointTokenUsage.SubagentTokens)
-	assert.False(t, *state.CheckpointTokenUsage.SubagentTokensComplete)
+	assertIncompleteSubagentUsage(t, state)
 
 	// A later exact extraction may have refreshed both aggregates. Duplicate
 	// observations and path-only enrichment must preserve that fresh coverage.
@@ -1052,84 +1049,64 @@ func TestState_SubagentInventoryLedger(t *testing.T) {
 	state.CheckpointTokenUsage.SubagentTokens = &agent.TokenUsage{OutputTokens: 13}
 	state.CheckpointTokenUsage.SubagentTokensComplete = &refreshedComplete
 	versionBeforeDuplicate := state.SubagentLedgerVersion
-	totalBeforeDuplicate := state.TokenUsage.SubagentTokens
-	checkpointTotalBeforeDuplicate := state.CheckpointTokenUsage.SubagentTokens
-	coverageBeforeDuplicate := *state.TokenUsage.SubagentTokensComplete
-	checkpointCoverageBeforeDuplicate := *state.CheckpointTokenUsage.SubagentTokensComplete
 	if state.RegisterSubagent("child-1", "turn-1") {
 		t.Fatal("duplicate agent/turn observation must be a true no-op")
 	}
 	assert.Equal(t, versionBeforeDuplicate, state.SubagentLedgerVersion)
-	assert.Same(t, totalBeforeDuplicate, state.TokenUsage.SubagentTokens)
-	assert.Same(t, checkpointTotalBeforeDuplicate, state.CheckpointTokenUsage.SubagentTokens)
-	assert.Equal(t, coverageBeforeDuplicate, *state.TokenUsage.SubagentTokensComplete)
-	assert.Equal(t, checkpointCoverageBeforeDuplicate, *state.CheckpointTokenUsage.SubagentTokensComplete)
+	assertCompleteSubagentUsage(t, state, 21, 13)
 	versionBeforePathEnrichment := state.SubagentLedgerVersion
-	totalBeforePathEnrichment := state.TokenUsage.SubagentTokens
-	checkpointTotalBeforePathEnrichment := state.CheckpointTokenUsage.SubagentTokens
-	coverageBeforePathEnrichment := *state.TokenUsage.SubagentTokensComplete
-	checkpointCoverageBeforePathEnrichment := *state.CheckpointTokenUsage.SubagentTokensComplete
 	assert.True(t, state.UpdateSubagentTranscriptPaths("child-1", "/tmp/declared.jsonl", "/tmp/resolved.jsonl"))
 	assert.Equal(t, versionBeforePathEnrichment, state.SubagentLedgerVersion, "path enrichment must not churn the ledger generation")
-	assert.Same(t, totalBeforePathEnrichment, state.TokenUsage.SubagentTokens)
-	assert.Same(t, checkpointTotalBeforePathEnrichment, state.CheckpointTokenUsage.SubagentTokens)
-	assert.Equal(t, coverageBeforePathEnrichment, *state.TokenUsage.SubagentTokensComplete)
-	assert.Equal(t, checkpointCoverageBeforePathEnrichment, *state.CheckpointTokenUsage.SubagentTokensComplete)
+	assertCompleteSubagentUsage(t, state, 21, 13)
 
-	stopObservedAt := time.Now().UTC().Truncate(time.Second)
-	stopCandidate := SubagentStopCandidate{ObservedAt: stopObservedAt, StopHookActive: true}
-	if !state.RecordSubagentStop("child-1", "turn-2", stopCandidate) {
+	if !state.RecordSubagentStop("child-1", "turn-2") {
 		t.Fatal("stop-first new turn must be recorded")
 	}
 	assert.Equal(t, uint64(2), state.SubagentLedgerVersion)
-	assert.Nil(t, state.TokenUsage.SubagentTokens, "new child turn must invalidate refreshed session totals")
-	require.NotNil(t, state.TokenUsage.SubagentTokensComplete)
-	assert.False(t, *state.TokenUsage.SubagentTokensComplete)
-	assert.Nil(t, state.CheckpointTokenUsage.SubagentTokens, "new child turn must invalidate refreshed checkpoint totals")
-	require.NotNil(t, state.CheckpointTokenUsage.SubagentTokensComplete)
-	assert.False(t, *state.CheckpointTokenUsage.SubagentTokensComplete)
+	assertIncompleteSubagentUsage(t, state)
 	entry := state.FindSubagentInventory("child-1")
 	require.NotNil(t, entry)
-	require.Contains(t, entry.PendingStops, "turn-2")
+	require.Contains(t, entry.ObservedTurnIDs, "turn-2")
+	require.NotContains(t, entry.FinalizedTurnIDs, "turn-2")
 
-	// A stop retry may carry richer metadata. Both a true duplicate and the
-	// metadata refresh must leave already-calculated token coverage intact.
+	// A stop retry must leave already-calculated token coverage intact.
 	stopRefreshComplete := true
 	state.TokenUsage.SubagentTokens = &agent.TokenUsage{InputTokens: 34}
 	state.TokenUsage.SubagentTokensComplete = &stopRefreshComplete
 	state.CheckpointTokenUsage.SubagentTokens = &agent.TokenUsage{OutputTokens: 21}
 	state.CheckpointTokenUsage.SubagentTokensComplete = &stopRefreshComplete
 	versionBeforeStopRefresh := state.SubagentLedgerVersion
-	totalBeforeStopRefresh := state.TokenUsage.SubagentTokens
-	checkpointTotalBeforeStopRefresh := state.CheckpointTokenUsage.SubagentTokens
-	coverageBeforeStopRefresh := *state.TokenUsage.SubagentTokensComplete
-	checkpointCoverageBeforeStopRefresh := *state.CheckpointTokenUsage.SubagentTokensComplete
-	assert.False(t, state.RecordSubagentStop("child-1", "turn-2", stopCandidate), "exact duplicate stop must be a no-op")
+	assert.False(t, state.RecordSubagentStop("child-1", "turn-2"), "duplicate stop must be a no-op")
 	assert.Equal(t, versionBeforeStopRefresh, state.SubagentLedgerVersion)
-	assert.Same(t, totalBeforeStopRefresh, state.TokenUsage.SubagentTokens)
-	assert.Same(t, checkpointTotalBeforeStopRefresh, state.CheckpointTokenUsage.SubagentTokens)
-	assert.Equal(t, coverageBeforeStopRefresh, *state.TokenUsage.SubagentTokensComplete)
-	assert.Equal(t, checkpointCoverageBeforeStopRefresh, *state.CheckpointTokenUsage.SubagentTokensComplete)
+	assertCompleteSubagentUsage(t, state, 34, 21)
 
-	refreshedCandidate := SubagentStopCandidate{ObservedAt: stopObservedAt.Add(time.Second), StopHookActive: false}
-	assert.True(t, state.RecordSubagentStop("child-1", "turn-2", refreshedCandidate), "changed stop metadata must upsert")
-	assert.Equal(t, refreshedCandidate, entry.PendingStops["turn-2"])
-	assert.Equal(t, versionBeforeStopRefresh, state.SubagentLedgerVersion)
-	assert.Same(t, totalBeforeStopRefresh, state.TokenUsage.SubagentTokens)
-	assert.Same(t, checkpointTotalBeforeStopRefresh, state.CheckpointTokenUsage.SubagentTokens)
-	assert.Equal(t, coverageBeforeStopRefresh, *state.TokenUsage.SubagentTokensComplete)
-	assert.Equal(t, checkpointCoverageBeforeStopRefresh, *state.CheckpointTokenUsage.SubagentTokensComplete)
-
-	state.RecordSubagentStop("child-1", "turn-3", SubagentStopCandidate{ObservedAt: time.Now()})
-	require.Len(t, entry.PendingStops, 2, "several pending stops must coexist")
+	state.RecordSubagentStop("child-1", "turn-3")
+	require.Contains(t, entry.ObservedTurnIDs, "turn-3", "several pending turns must coexist")
 	if !state.FinalizeSubagentTurn("child-1", "turn-2") {
 		t.Fatal("pending turn must finalize")
 	}
-	assert.NotContains(t, entry.PendingStops, "turn-2")
 	assert.Contains(t, entry.FinalizedTurnIDs, "turn-2")
 	if state.FinalizeSubagentTurn("child-1", "turn-2") {
 		t.Fatal("finalized turn must be exactly once")
 	}
+}
+
+func assertIncompleteSubagentUsage(t *testing.T, state *State) {
+	t.Helper()
+	for _, usage := range []*agent.TokenUsage{state.TokenUsage, state.CheckpointTokenUsage} {
+		require.NotNil(t, usage)
+		assert.Nil(t, usage.SubagentTokens)
+		require.NotNil(t, usage.SubagentTokensComplete)
+		assert.False(t, *usage.SubagentTokensComplete)
+	}
+}
+
+func assertCompleteSubagentUsage(t *testing.T, state *State, sessionInput, checkpointOutput int) {
+	t.Helper()
+	assert.Equal(t, &agent.TokenUsage{InputTokens: sessionInput}, state.TokenUsage.SubagentTokens)
+	assert.Equal(t, &agent.TokenUsage{OutputTokens: checkpointOutput}, state.CheckpointTokenUsage.SubagentTokens)
+	assert.True(t, *state.TokenUsage.SubagentTokensComplete)
+	assert.True(t, *state.CheckpointTokenUsage.SubagentTokensComplete)
 }
 
 func TestState_SubagentInventoryRoundTripAndTaskRecordRecovery(t *testing.T) {
@@ -1146,7 +1123,6 @@ func TestState_SubagentInventoryRoundTripAndTaskRecordRecovery(t *testing.T) {
 			DeclaredTranscriptPath: "/tmp/child.jsonl",
 			ResolvedTranscriptPath: "/tmp/resolved.jsonl",
 			ObservedTurnIDs:        []string{"turn-1"},
-			PendingStops:           map[string]SubagentStopCandidate{"turn-1": {ObservedAt: now, StopHookActive: true}},
 			FinalizedTurnIDs:       []string{"turn-0"},
 		}},
 	}
@@ -1159,17 +1135,7 @@ func TestState_SubagentInventoryRoundTripAndTaskRecordRecovery(t *testing.T) {
 	require.NotNil(t, got.SubagentTokensBaselineComplete)
 	assert.True(t, *got.SubagentTokensBaselineComplete)
 	assert.Equal(t, uint64(7), got.SubagentLedgerVersion)
-	require.Len(t, got.SubagentInventory, 1)
-	entry := got.SubagentInventory[0]
-	assert.Equal(t, "child-1", entry.AgentID)
-	assert.Equal(t, "/tmp/child.jsonl", entry.DeclaredTranscriptPath)
-	assert.Equal(t, "/tmp/resolved.jsonl", entry.ResolvedTranscriptPath)
-	assert.Equal(t, []string{"turn-1"}, entry.ObservedTurnIDs)
-	require.Contains(t, entry.PendingStops, "turn-1")
-	pending := entry.PendingStops["turn-1"]
-	assert.True(t, now.Equal(pending.ObservedAt))
-	assert.True(t, pending.StopHookActive)
-	assert.Equal(t, []string{"turn-0"}, entry.FinalizedTurnIDs)
+	assert.Equal(t, state.SubagentInventory, got.SubagentInventory)
 
 	materialized := TaskRecord{ToolUseID: "child-1", AgentID: "child-1", StartedAt: now, CompletedAt: now}
 	got.AddTaskRecord(materialized)
@@ -1192,10 +1158,7 @@ func TestState_NormalizeAfterLoad_CodexInventoryMigration(t *testing.T) {
 	assert.False(t, *legacy.SubagentInventoryComplete)
 	require.NotNil(t, legacy.SubagentTokensBaselineComplete)
 	assert.False(t, *legacy.SubagentTokensBaselineComplete)
-	assert.Nil(t, legacy.TokenUsage.SubagentTokens)
-	assert.False(t, *legacy.TokenUsage.SubagentTokensComplete)
-	assert.Nil(t, legacy.CheckpointTokenUsage.SubagentTokens)
-	assert.False(t, *legacy.CheckpointTokenUsage.SubagentTokensComplete)
+	assertIncompleteSubagentUsage(t, legacy)
 	require.Len(t, legacy.SubagentInventory, 1)
 	assert.Equal(t, "child-1", legacy.SubagentInventory[0].AgentID)
 

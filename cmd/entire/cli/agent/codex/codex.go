@@ -132,61 +132,77 @@ func (b *rolloutScanBudget) observeBytes(count int64) error {
 	return nil
 }
 
-func rolloutRegularMode(mode fs.FileMode) bool {
-	return mode.Type() == 0
-}
-
-//nolint:unused // Companion for readSessionMetaID's retained direct-path helper.
-func readRegularRollout(path string) (loadedRollout, error) {
-	return readRegularRolloutContext(context.Background(), path, rolloutBodyByteLimit, nil)
-}
-
 func readRegularRolloutContext(ctx context.Context, path string, byteLimit int64, observe func(string, int)) (loadedRollout, error) {
 	info, err := os.Lstat(path)
 	if err != nil {
 		return loadedRollout{}, fmt.Errorf("lstat rollout: %w", err)
 	}
-	if !rolloutRegularMode(info.Mode()) {
+	if !info.Mode().IsRegular() {
 		return loadedRollout{}, errors.New("rollout is not a regular file")
 	}
-	file, err := os.Open(path) //nolint:gosec // Lstat above rejects known special entries; Stat below verifies the opened descriptor.
+	file, opened, err := openRolloutFile(path, info)
 	if err != nil {
-		return loadedRollout{}, fmt.Errorf("open rollout: %w", err)
+		return loadedRollout{}, err
 	}
 	defer file.Close()
-	opened, err := file.Stat()
-	if err != nil {
-		return loadedRollout{}, fmt.Errorf("stat opened rollout: %w", err)
-	}
-	if !rolloutRegularMode(opened.Mode()) || !os.SameFile(info, opened) {
-		return loadedRollout{}, errors.New("rollout changed or is not a regular file")
-	}
 	if opened.Size() > byteLimit {
 		return loadedRollout{}, fmt.Errorf("rollout size %d exceeds limit %d", opened.Size(), byteLimit)
 	}
-	data, err := readRolloutBody(ctx, file, path, byteLimit, observe)
+	data, err := readRolloutBody(file, rolloutReadOptions{
+		path: path, byteLimit: byteLimit, check: ctx.Err, observe: observe,
+		limitErr: fmt.Errorf("rollout exceeds byte limit %d", byteLimit),
+	})
 	if err != nil {
 		return loadedRollout{}, fmt.Errorf("read rollout: %w", err)
 	}
 	return loadedRollout{Path: path, Data: data}, nil
 }
 
-func readRolloutBody(ctx context.Context, file *os.File, path string, byteLimit int64, observe func(string, int)) ([]byte, error) {
+func openRolloutFile(path string, before fs.FileInfo) (*os.File, fs.FileInfo, error) {
+	file, err := os.Open(path) //nolint:gosec // Caller rejects special entries; descriptor Stat verifies the opened file.
+	if err != nil {
+		return nil, nil, fmt.Errorf("open rollout: %w", err)
+	}
+	opened, err := file.Stat()
+	if err != nil {
+		_ = file.Close()
+		return nil, nil, fmt.Errorf("stat opened rollout: %w", err)
+	}
+	if !opened.Mode().IsRegular() || !os.SameFile(before, opened) {
+		_ = file.Close()
+		return nil, nil, errors.New("rollout changed or is not a regular file")
+	}
+	return file, opened, nil
+}
+
+type rolloutReadOptions struct {
+	path      string
+	byteLimit int64
+	check     func() error
+	account   func(int64) error
+	observe   func(string, int)
+	limitErr  error
+}
+
+func readRolloutBody(file *os.File, opts rolloutReadOptions) ([]byte, error) {
 	data := make([]byte, 0)
 	buffer := make([]byte, rolloutBodyReadChunk)
-	var readBytes int64
 	for {
-		if err := ctx.Err(); err != nil {
-			return nil, fmt.Errorf("read rollout canceled: %w", err)
+		if err := opts.check(); err != nil {
+			return nil, err
 		}
 		n, err := file.Read(buffer)
 		if n > 0 {
-			if observe != nil {
-				observe(path, n)
+			if opts.account != nil {
+				if accountErr := opts.account(int64(n)); accountErr != nil {
+					return nil, accountErr
+				}
 			}
-			readBytes += int64(n)
-			if readBytes > byteLimit {
-				return nil, fmt.Errorf("rollout exceeds byte limit %d", byteLimit)
+			if opts.observe != nil {
+				opts.observe(opts.path, n)
+			}
+			if int64(len(data)+n) > opts.byteLimit {
+				return nil, opts.limitErr
 			}
 			data = append(data, buffer[:n]...)
 		}
@@ -337,7 +353,7 @@ func (c *CodexAgent) inspectFallbackCandidate(
 	if err != nil {
 		return "", loadedRollout{}, fmt.Errorf("lstat rollout candidate: %w", err)
 	}
-	if !rolloutRegularMode(info.Mode()) {
+	if !info.Mode().IsRegular() {
 		return "", loadedRollout{}, nil
 	}
 
@@ -368,18 +384,11 @@ func (c *CodexAgent) inspectFallbackCandidate(
 		return id, loaded, nil
 	}
 
-	file, err := os.Open(path) //nolint:gosec // Lstat and descriptor Stat below enforce a regular unchanged file
+	file, opened, err := openRolloutFile(path, info)
 	if err != nil {
-		return "", loadedRollout{}, fmt.Errorf("open rollout candidate: %w", err)
+		return "", loadedRollout{}, err
 	}
 	defer file.Close()
-	opened, err := file.Stat()
-	if err != nil {
-		return "", loadedRollout{}, fmt.Errorf("stat opened rollout candidate: %w", err)
-	}
-	if !rolloutRegularMode(opened.Mode()) || !os.SameFile(info, opened) {
-		return "", loadedRollout{}, errors.New("rollout candidate changed or is not a regular file")
-	}
 
 	metadata, err := c.readFallbackMetadata(file, path, budget)
 	if err != nil {
@@ -401,7 +410,10 @@ func (c *CodexAgent) inspectFallbackCandidate(
 	if _, err := file.Seek(0, io.SeekStart); err != nil {
 		return "", loadedRollout{}, fmt.Errorf("seek rollout candidate: %w", err)
 	}
-	data, err := c.readFallbackBody(file, path, budget)
+	data, err := readRolloutBody(file, rolloutReadOptions{
+		path: path, byteLimit: budget.limits.bodyByteLimit, check: budget.check,
+		account: budget.observeBytes, observe: c.observeRolloutRead, limitErr: errRolloutScanBudget,
+	})
 	if err != nil {
 		return "", loadedRollout{}, err
 	}
@@ -452,35 +464,6 @@ func (c *CodexAgent) readFallbackMetadata(file *os.File, path string, budget *ro
 		}
 		if err != nil {
 			return nil, fmt.Errorf("read rollout metadata: %w", err)
-		}
-	}
-}
-
-func (c *CodexAgent) readFallbackBody(file *os.File, path string, budget *rolloutScanBudget) ([]byte, error) {
-	data := make([]byte, 0)
-	buffer := make([]byte, rolloutBodyReadChunk)
-	for {
-		if err := budget.check(); err != nil {
-			return nil, err
-		}
-		n, err := file.Read(buffer)
-		if n > 0 {
-			if budgetErr := budget.observeBytes(int64(n)); budgetErr != nil {
-				return nil, budgetErr
-			}
-			if c.observeRolloutRead != nil {
-				c.observeRolloutRead(path, n)
-			}
-			if int64(len(data)+n) > budget.limits.bodyByteLimit {
-				return nil, errRolloutScanBudget
-			}
-			data = append(data, buffer[:n]...)
-		}
-		if errors.Is(err, io.EOF) {
-			return data, nil
-		}
-		if err != nil {
-			return nil, fmt.Errorf("read fallback rollout body: %w", err)
 		}
 	}
 }
@@ -543,26 +526,6 @@ func (c *CodexAgent) scanFallbackRollouts(ctx context.Context, agentIDs map[stri
 		}
 	}
 	return resolved, nil
-}
-
-// resolveSubagentRollout is the path-only compatibility wrapper used by
-// callers that need only discovery. Inventory extraction uses the verified
-// bytes returned by the same load operation instead.
-func (c *CodexAgent) resolveSubagentRollout(ref agent.SubagentReference) string {
-	if ref.AgentID == "" {
-		return ""
-	}
-	if loaded, ok := c.loadDirectRollout(context.Background(), ref); ok {
-		return loaded.Path
-	}
-	fallback, err := c.scanFallbackRollouts(context.Background(), map[string]struct{}{ref.AgentID: {}})
-	if err != nil {
-		return ""
-	}
-	if loaded, ok := fallback[ref.AgentID]; ok {
-		return loaded.Path
-	}
-	return ""
 }
 
 // NewCodexAgent creates a new Codex agent instance.

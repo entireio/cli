@@ -437,18 +437,12 @@ type State struct {
 	SubagentInventoryComplete *bool `json:"subagent_inventory_complete,omitempty"`
 }
 
-type SubagentStopCandidate struct {
-	ObservedAt     time.Time `json:"observed_at"`
-	StopHookActive bool      `json:"stop_hook_active,omitempty"`
-}
-
 type SubagentInventoryEntry struct {
-	AgentID                string                           `json:"agent_id"`
-	DeclaredTranscriptPath string                           `json:"declared_transcript_path,omitempty"`
-	ResolvedTranscriptPath string                           `json:"resolved_transcript_path,omitempty"`
-	ObservedTurnIDs        []string                         `json:"observed_turn_ids,omitempty"`
-	PendingStops           map[string]SubagentStopCandidate `json:"pending_stops,omitempty"`
-	FinalizedTurnIDs       []string                         `json:"finalized_turn_ids,omitempty"`
+	AgentID                string   `json:"agent_id"`
+	DeclaredTranscriptPath string   `json:"declared_transcript_path,omitempty"`
+	ResolvedTranscriptPath string   `json:"resolved_transcript_path,omitempty"`
+	ObservedTurnIDs        []string `json:"observed_turn_ids,omitempty"`
+	FinalizedTurnIDs       []string `json:"finalized_turn_ids,omitempty"`
 }
 
 // TaskRecord is the durable pointer ledger entry for a subagent dispatched by
@@ -573,27 +567,8 @@ func (s *State) RegisterSubagent(agentID, turnID string) bool {
 
 // RecordSubagentStop records a provisional stop. Stops can arrive before
 // starts, so observing the child and turn happens in this same mutation.
-func (s *State) RecordSubagentStop(agentID, turnID string, candidate SubagentStopCandidate) bool {
-	observed := s.RegisterSubagent(agentID, turnID)
-	if agentID == "" || turnID == "" {
-		return observed
-	}
-	entry := s.FindSubagentInventory(agentID)
-	if entry == nil || containsString(entry.FinalizedTurnIDs, turnID) {
-		return observed
-	}
-	if entry.PendingStops == nil {
-		entry.PendingStops = make(map[string]SubagentStopCandidate)
-	}
-	if existing, exists := entry.PendingStops[turnID]; exists {
-		if existing == candidate {
-			return observed
-		}
-		entry.PendingStops[turnID] = candidate
-		return true
-	}
-	entry.PendingStops[turnID] = candidate
-	return true
+func (s *State) RecordSubagentStop(agentID, turnID string) bool {
+	return s.RegisterSubagent(agentID, turnID)
 }
 
 // UpdateSubagentTranscriptPaths enriches an already-observed child's path
@@ -616,8 +591,7 @@ func (s *State) UpdateSubagentTranscriptPaths(agentID, declaredPath, resolvedPat
 	return changed
 }
 
-// FinalizeSubagentTurn moves an observed turn out of PendingStops and into the
-// finalized set atomically. A finalized turn is never finalized twice.
+// FinalizeSubagentTurn marks an observed turn finalized exactly once.
 func (s *State) FinalizeSubagentTurn(agentID, turnID string) bool {
 	if agentID == "" || turnID == "" {
 		return false
@@ -626,7 +600,6 @@ func (s *State) FinalizeSubagentTurn(agentID, turnID string) bool {
 	if entry == nil || !containsString(entry.ObservedTurnIDs, turnID) || containsString(entry.FinalizedTurnIDs, turnID) {
 		return false
 	}
-	delete(entry.PendingStops, turnID)
 	entry.FinalizedTurnIDs = append(entry.FinalizedTurnIDs, turnID)
 	return true
 }

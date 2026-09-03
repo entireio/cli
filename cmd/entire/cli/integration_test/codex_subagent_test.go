@@ -8,7 +8,6 @@ import (
 	"testing"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
-	"github.com/entireio/cli/cmd/entire/cli/agent/codex"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/stretchr/testify/require"
@@ -51,10 +50,6 @@ func TestCodexSubagent_StoresDeclaredSubagentTranscript(t *testing.T) {
 			`{"type":"response_item","payload":{"type":"custom_tool_call","status":"completed","name":"apply_patch","input":"*** Begin Patch\n*** Add File: `+editedFile+`\n+red\n*** End Patch"}}`+"\n"+
 			`{"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":10,"cached_input_tokens":2,"output_tokens":3}}}}`+"\n"+
 			`{"type":"event_msg","payload":{"type":"task_complete","turn_id":"turn-1"}}`+"\n"), 0o600))
-	probe, err := (&codex.CodexAgent{RolloutRoots: []string{}}).ExtractWithSubagentInventory(t.Context(), nil, 0, []agent.SubagentReference{{AgentID: agentID, DeclaredTranscriptPath: subagentRollout}})
-	require.NoError(t, err)
-	require.Equal(t, []string{"turn-1"}, probe.Children[0].TerminalTurnIDs)
-
 	hook := codexHooker(t, env.RepoDir, sessionID, parentRollout)
 	hook("subagent-start", map[string]any{
 		"hook_event_name": "SubagentStart",

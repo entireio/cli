@@ -114,9 +114,6 @@ type Event struct {
 	// SubagentID identifies the subagent instance (for SubagentEnd events).
 	SubagentID string
 
-	// StopHookActive reports whether the agent's Stop hook remains active.
-	StopHookActive bool
-
 	// ProvisionalSubagentStop is true when a subagent-stop event may arrive
 	// before the root rollout has reached its final state.
 	ProvisionalSubagentStop bool

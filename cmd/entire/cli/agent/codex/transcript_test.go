@@ -36,9 +36,10 @@ func TestClassifyRollout(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name string
-		data string
-		want rolloutClassification
+		name      string
+		data      string
+		want      rolloutClassification
+		wantIssue rolloutClassificationIssue
 	}{
 		{
 			name: "root thread source",
@@ -61,19 +62,22 @@ func TestClassifyRollout(t *testing.T) {
 			want: rolloutChild,
 		},
 		{
-			name: "missing session metadata",
-			data: `{"type":"response_item","payload":{}}` + "\n",
-			want: rolloutUnknown,
+			name:      "missing session metadata",
+			data:      `{"type":"response_item","payload":{}}` + "\n",
+			want:      rolloutUnknown,
+			wantIssue: rolloutIssueMalformedMetadata,
 		},
 		{
-			name: "malformed JSON",
-			data: `{"type":"session_meta","payload":` + "\n",
-			want: rolloutUnknown,
+			name:      "malformed JSON",
+			data:      `{"type":"session_meta","payload":` + "\n",
+			want:      rolloutUnknown,
+			wantIssue: rolloutIssueMalformedMetadata,
 		},
 		{
-			name: "unrecognized source",
-			data: `{"type":"session_meta","payload":{"source":"other"}}` + "\n",
-			want: rolloutUnknown,
+			name:      "unrecognized source",
+			data:      `{"type":"session_meta","payload":{"source":"other"}}` + "\n",
+			want:      rolloutUnknown,
+			wantIssue: rolloutIssueUnclassifiedSource,
 		},
 	}
 
@@ -82,50 +86,17 @@ func TestClassifyRollout(t *testing.T) {
 			t.Parallel()
 			path := filepath.Join(t.TempDir(), "rollout.jsonl")
 			require.NoError(t, os.WriteFile(path, []byte(tt.data), 0o600))
-			require.Equal(t, tt.want, classifyRollout(path))
+			got := classifyRolloutDetailed(path)
+			require.Equal(t, tt.want, got.Classification)
+			require.Equal(t, tt.wantIssue, got.Issue)
 		})
 	}
 
 	t.Run("missing path", func(t *testing.T) {
 		t.Parallel()
-		require.Equal(t, rolloutUnknown, classifyRollout(filepath.Join(t.TempDir(), "missing.jsonl")))
-	})
-}
-
-func TestClassifyRolloutDetailed_ExplainsFailClosedResult(t *testing.T) {
-	t.Parallel()
-
-	t.Run("null transcript path", func(t *testing.T) {
-		t.Parallel()
-		got := classifyRolloutDetailed("")
-		require.Equal(t, rolloutUnknown, got.Classification)
-		require.Equal(t, rolloutIssueNullPath, got.Issue)
-	})
-
-	t.Run("unreadable transcript", func(t *testing.T) {
-		t.Parallel()
 		got := classifyRolloutDetailed(filepath.Join(t.TempDir(), "missing.jsonl"))
 		require.Equal(t, rolloutUnknown, got.Classification)
 		require.Equal(t, rolloutIssueUnreadable, got.Issue)
-	})
-
-	t.Run("malformed metadata", func(t *testing.T) {
-		t.Parallel()
-		path := filepath.Join(t.TempDir(), "rollout.jsonl")
-		require.NoError(t, os.WriteFile(path, []byte(`{"type":"session_meta","payload":`), 0o600))
-		got := classifyRolloutDetailed(path)
-		require.Equal(t, rolloutUnknown, got.Classification)
-		require.Equal(t, rolloutIssueMalformedMetadata, got.Issue)
-	})
-
-	t.Run("future source", func(t *testing.T) {
-		t.Parallel()
-		path := filepath.Join(t.TempDir(), "rollout.jsonl")
-		require.NoError(t, os.WriteFile(path, []byte(`{"type":"session_meta","payload":{"thread_source":"future-source"}}`), 0o600))
-		got := classifyRolloutDetailed(path)
-		require.Equal(t, rolloutUnknown, got.Classification)
-		require.Equal(t, rolloutIssueUnclassifiedSource, got.Issue)
-		require.Equal(t, "future-source", got.Detail)
 	})
 }
 

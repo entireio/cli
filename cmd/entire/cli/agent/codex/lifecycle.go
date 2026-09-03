@@ -175,7 +175,6 @@ func (c *CodexAgent) parseSubagentStop(stdin io.Reader) (*agent.Event, error) {
 		ToolUseID:               raw.AgentID,
 		TurnID:                  raw.TurnID,
 		SubagentID:              raw.AgentID,
-		StopHookActive:          raw.StopHookActive,
 		ProvisionalSubagentStop: true,
 		SubagentType:            raw.AgentType,
 		SubagentTranscriptPath:  derefString(raw.AgentTranscriptPath),

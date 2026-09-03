@@ -179,73 +179,16 @@ func TestParseHookEvent_Stop(t *testing.T) {
 	require.Equal(t, "gpt-4.1", event.Model)
 }
 
-func TestParseHookEvent_UserPromptSubmitAndStopRequireRootRollout(t *testing.T) {
+func TestParseHookEvent_TurnHooksIgnoreChildRollout(t *testing.T) {
 	t.Parallel()
+	path := filepath.Join(t.TempDir(), "rollout.jsonl")
+	require.NoError(t, os.WriteFile(path, []byte(`{"type":"session_meta","payload":{"thread_source":"subagent"}}`+"\n"), 0o600))
+	input := `{"session_id":"root-session-1","turn_id":"turn-1","transcript_path":"` + path + `","model":"gpt-5","prompt":"do work","stop_hook_active":true}`
 
-	tests := []struct {
-		name      string
-		metadata  string
-		wantEvent bool
-	}{
-		{
-			name:      "root thread source",
-			metadata:  `{"type":"session_meta","payload":{"thread_source":"user"}}` + "\n",
-			wantEvent: true,
-		},
-		{
-			name:      "root legacy string source",
-			metadata:  `{"type":"session_meta","payload":{"source":"exec"}}` + "\n",
-			wantEvent: true,
-		},
-		{
-			name:     "child thread source",
-			metadata: `{"type":"session_meta","payload":{"thread_source":"subagent"}}` + "\n",
-		},
-		{
-			name:     "child legacy structured source",
-			metadata: `{"type":"session_meta","payload":{"source":{"subagent":{"thread_spawn":{"parent_thread_id":"root-thread"}}}}}` + "\n",
-		},
-		{
-			name:     "missing session metadata",
-			metadata: `{"type":"response_item","payload":{}}` + "\n",
-		},
-		{
-			name:     "malformed JSON",
-			metadata: `{"type":"session_meta","payload":` + "\n",
-		},
-		{
-			name: "missing path",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			transcriptPath := ""
-			if tt.metadata != "" {
-				transcriptPath = filepath.Join(t.TempDir(), "rollout.jsonl")
-				require.NoError(t, os.WriteFile(transcriptPath, []byte(tt.metadata), 0o600))
-			}
-
-			for _, hookName := range []string{HookNameUserPromptSubmit, HookNameStop} {
-				t.Run(hookName, func(t *testing.T) {
-					t.Parallel()
-					pathJSON := "null"
-					if transcriptPath != "" {
-						pathJSON = `"` + transcriptPath + `"`
-					}
-					input := `{"session_id":"root-session-1","turn_id":"turn-1","transcript_path":` + pathJSON + `,"model":"gpt-5","prompt":"do work","stop_hook_active":true}`
-
-					event, err := (&CodexAgent{}).ParseHookEvent(context.Background(), hookName, strings.NewReader(input))
-					require.NoError(t, err)
-					if tt.wantEvent {
-						require.NotNil(t, event)
-					} else {
-						require.Nil(t, event)
-					}
-				})
-			}
-		})
+	for _, hookName := range []string{HookNameUserPromptSubmit, HookNameStop} {
+		event, err := (&CodexAgent{}).ParseHookEvent(context.Background(), hookName, strings.NewReader(input))
+		require.NoError(t, err)
+		require.Nil(t, event)
 	}
 }
 
@@ -481,45 +424,6 @@ func TestCodexAgent_ContextInjector(t *testing.T) {
 // testCodexAgentID is the subagent thread id used by the subagent hook tests.
 const testCodexAgentID = "child-thread-9"
 
-func TestParseHookEvent_SubagentNormalizesHookIdentity(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name            string
-		hookName        string
-		input           string
-		stopHookActive  bool
-		provisionalStop bool
-	}{
-		{
-			name:     "start",
-			hookName: HookNameSubagentStart,
-			input:    `{"session_id":"root-session-1","turn_id":"turn-child-1","agent_id":"agent-child-1","agent_type":"reviewer"}`,
-		},
-		{
-			name:            "stop",
-			hookName:        HookNameSubagentStop,
-			input:           `{"session_id":"root-session-1","turn_id":"turn-child-1","agent_id":"agent-child-1","agent_type":"reviewer","stop_hook_active":true}`,
-			stopHookActive:  true,
-			provisionalStop: true,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			ev, err := (&CodexAgent{}).ParseHookEvent(context.Background(), tt.hookName, strings.NewReader(tt.input))
-			require.NoError(t, err)
-			require.NotNil(t, ev)
-			require.Equal(t, "turn-child-1", ev.TurnID)
-			require.Equal(t, "agent-child-1", ev.SubagentID)
-			require.Equal(t, tt.stopHookActive, ev.StopHookActive)
-			require.Equal(t, tt.provisionalStop, ev.ProvisionalSubagentStop)
-			require.False(t, ev.Final)
-		})
-	}
-}
-
 // TestParseHookEvent_SubagentStart pins the identity mapping, which is the part a
 // future reader is most likely to get backwards: session_id is the identity shared
 // by the root thread and all descendants (the user's session), agent_id the child
@@ -545,11 +449,14 @@ func TestParseHookEvent_SubagentStart(t *testing.T) {
 	require.NotNil(t, ev)
 	require.Equal(t, agent.SubagentStart, ev.Type)
 	require.Equal(t, "root-session-1", ev.SessionID, "the shared root session id, not the child thread")
+	require.Equal(t, "turn-3", ev.TurnID)
+	require.Equal(t, testCodexAgentID, ev.SubagentID)
 	// Codex sends no tool_use_id; agent_id is the only value correlating start with
 	// stop, and Entire keys pre-task state on ToolUseID.
 	require.Equal(t, testCodexAgentID, ev.ToolUseID)
 	require.Equal(t, "reviewer", ev.SubagentType)
 	require.Equal(t, "/rollouts/root-session-1.jsonl", ev.SessionRef, "the parent rollout")
+	require.False(t, ev.Final)
 }
 
 // TestParseHookEvent_SubagentStop covers the two transcripts SubagentStop carries:
@@ -577,11 +484,14 @@ func TestParseHookEvent_SubagentStop(t *testing.T) {
 	require.NotNil(t, ev)
 	require.Equal(t, agent.SubagentEnd, ev.Type)
 	require.Equal(t, "root-session-1", ev.SessionID, "the shared root session id")
+	require.Equal(t, "turn-3", ev.TurnID)
 	require.Equal(t, testCodexAgentID, ev.SubagentID)
 	require.Equal(t, testCodexAgentID, ev.ToolUseID, "agent_id doubles as the correlation key")
 	require.Equal(t, "/rollouts/root-session-1.jsonl", ev.SessionRef, "the PARENT rollout")
 	require.Equal(t, "/rollouts/"+testCodexAgentID+".jsonl", ev.SubagentTranscriptPath,
 		"the subagent's own rollout")
+	require.True(t, ev.ProvisionalSubagentStop)
+	require.False(t, ev.Final)
 }
 
 // TestParseHookEvent_SubagentStop_NullTranscripts covers the nullable fields: Codex

@@ -51,11 +51,8 @@ func TestCodexInventoryInitialization(t *testing.T) {
 	incomplete := false
 	pendingAt := time.Now().UTC().Truncate(time.Second)
 	partialInventory := []session.SubagentInventoryEntry{{
-		AgentID:         "child-observed-before-parent",
-		ObservedTurnIDs: []string{"turn-pending", "turn-finalized"},
-		PendingStops: map[string]session.SubagentStopCandidate{
-			"turn-pending": {ObservedAt: pendingAt, StopHookActive: true},
-		},
+		AgentID:          "child-observed-before-parent",
+		ObservedTurnIDs:  []string{"turn-pending", "turn-finalized"},
 		FinalizedTurnIDs: []string{"turn-finalized"},
 	}}
 	partialTokenUsage := &agent.TokenUsage{InputTokens: 100, SubagentTokens: &agent.TokenUsage{InputTokens: 60}, SubagentTokensComplete: &incomplete}
@@ -78,44 +75,18 @@ func TestCodexInventoryInitialization(t *testing.T) {
 		SubagentTokensBaseline:         partialBaseline,
 		TaskRecords:                    partialRecords,
 	}))
-	beforeRepair, err := s.loadSessionState(context.Background(), "codex-inventory-partial")
-	require.NoError(t, err)
-	assert.Empty(t, beforeRepair.BaseCommit)
-	require.NotNil(t, beforeRepair.SubagentInventoryComplete)
-	assert.False(t, *beforeRepair.SubagentInventoryComplete)
-	assert.Equal(t, uint64(9), beforeRepair.SubagentLedgerVersion)
-	require.Len(t, beforeRepair.SubagentInventory, 1)
 	require.NoError(t, s.initializeSession(context.Background(), repo, "codex-inventory-partial", agent.AgentTypeCodex, "", "", ""))
 	partial, err := s.loadSessionState(context.Background(), "codex-inventory-partial")
 	require.NoError(t, err)
-	require.NotNil(t, partial.SubagentInventoryComplete)
 	assert.False(t, *partial.SubagentInventoryComplete, "partial-state repair must not promote unknown inventory coverage")
-	require.NotNil(t, partial.SubagentTokensBaselineComplete)
 	assert.False(t, *partial.SubagentTokensBaselineComplete)
 	assert.Equal(t, uint64(9), partial.SubagentLedgerVersion)
-	require.Len(t, partial.SubagentInventory, 1)
-	entry := partial.SubagentInventory[0]
-	assert.Equal(t, "child-observed-before-parent", entry.AgentID)
-	assert.Equal(t, []string{"turn-pending", "turn-finalized"}, entry.ObservedTurnIDs)
-	require.Contains(t, entry.PendingStops, "turn-pending")
-	assert.True(t, pendingAt.Equal(entry.PendingStops["turn-pending"].ObservedAt))
-	assert.True(t, entry.PendingStops["turn-pending"].StopHookActive)
-	assert.Equal(t, []string{"turn-finalized"}, entry.FinalizedTurnIDs)
+	assert.Equal(t, partialInventory, partial.SubagentInventory)
 	assert.True(t, partial.HasTaskContent(), "repair must retain both live and completed-unmaterialized task content")
-	require.Len(t, partial.TaskRecords, 2)
-	assert.Equal(t, "child-live", partial.TaskRecords[0].ToolUseID)
-	assert.True(t, partial.TaskRecords[1].CompletedAt.Equal(pendingAt.Add(time.Second)))
-	require.NotNil(t, partial.TokenUsage)
-	assert.Equal(t, 100, partial.TokenUsage.InputTokens)
-	require.NotNil(t, partial.TokenUsage.SubagentTokens)
-	assert.Equal(t, 60, partial.TokenUsage.SubagentTokens.InputTokens)
-	require.NotNil(t, partial.CheckpointTokenUsage)
-	assert.Equal(t, 50, partial.CheckpointTokenUsage.OutputTokens)
-	require.NotNil(t, partial.CheckpointTokenUsage.SubagentTokens)
-	assert.Equal(t, 30, partial.CheckpointTokenUsage.SubagentTokens.OutputTokens)
-	require.NotNil(t, partial.SubagentTokensBaseline)
-	require.NotNil(t, partial.SubagentTokensBaseline.SubagentTokens)
-	assert.Equal(t, 40, partial.SubagentTokensBaseline.SubagentTokens.InputTokens)
+	assert.Equal(t, partialRecords, partial.TaskRecords)
+	assert.Equal(t, partialTokenUsage, partial.TokenUsage)
+	assert.Equal(t, partialCheckpointUsage, partial.CheckpointTokenUsage)
+	assert.Equal(t, partialBaseline, partial.SubagentTokensBaseline)
 }
 
 // testTranscriptPromptResponse is a minimal transcript used across strategy tests.

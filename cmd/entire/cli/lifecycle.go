@@ -1434,7 +1434,7 @@ func handleLifecycleSubagentEnd(ctx context.Context, ag agent.Agent, event *agen
 		// still be changing. Record only the observation for later transcript
 		// reconciliation; do not capture the parent worktree or mark a task done.
 		err := strategy.MutateSessionState(logCtx, event.SessionID, func(state *strategy.SessionState) error {
-			state.RecordSubagentStop(event.SubagentID, event.TurnID, session.SubagentStopCandidate{ObservedAt: time.Now(), StopHookActive: event.StopHookActive})
+			state.RecordSubagentStop(event.SubagentID, event.TurnID)
 			state.UpdateSubagentTranscriptPaths(event.SubagentID, event.SubagentTranscriptPath, "")
 			return nil
 		})
