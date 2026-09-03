@@ -14,6 +14,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/entireio/auth-go/sts"
+
 	"github.com/entireio/cli/cmd/entire/cli/api"
 	"github.com/entireio/cli/cmd/entire/cli/versioninfo"
 	"github.com/entireio/cli/internal/entireclient/clusterdiscovery"
@@ -676,18 +678,53 @@ func resolveCellAPIBaseURL(ctx context.Context, coreURL, loginJWT, jurisdiction 
 	return strings.TrimRight(chosen.APIURL, "/"), nil
 }
 
+// exchangeJurisdictionToken mints the jurisdictional identity token for a
+// cell, trading the login JWT for one pinned to audience.
+//
+// It runs through auth-go's sts client rather than a hand-rolled POST so the
+// CLI has exactly one RFC 8693 implementation: the cross-jurisdiction
+// transport in internal/coreapi already uses it, and the duplicate this
+// replaced had drifted — it never picked up auth-go's terminal-escape
+// sanitisation of the server-supplied error code and description, and it was
+// the CLI's only exchange whose cross-host redirect guard lived in the CLI
+// rather than in the library.
+//
+// Only httpClient's Transport carries over. Its Client.Timeout does not:
+// sts applies the same budget through context.WithTimeout, which (unlike
+// Client.Timeout) does not cancel the body read that happens after the
+// response returns.
+//
+// subject_token_type is access_token, not JWT — the login token is presented
+// to entire-core as an access token, which is what the form this replaced
+// sent and what the server matches on.
 func exchangeJurisdictionToken(ctx context.Context, coreURL, loginJWT, audience string, httpClient *http.Client) (string, error) {
 	if coreURL == "" {
 		return "", errors.New("no entire-core URL configured for jurisdiction token exchange")
 	}
-	form := httputil.TokenExchangeForm(loginJWT, audience, JurisdictionIdentityScope)
-
-	token, _, err := httputil.PostOAuthToken(ctx, httpClient, coreURL, form)
+	var transport http.RoundTripper
+	if httpClient != nil {
+		transport = httpClient.Transport
+	}
+	client := &sts.Client{
+		Transport:         transport,
+		BaseURL:           coreURL,
+		Path:              oauthTokenPath,
+		AllowInsecureHTTP: shouldUsePlainHTTPDiscovery(coreURL),
+		RequestTimeout:    cellDataAPITimeout,
+	}
+	ts, err := client.Exchange(ctx, sts.ExchangeRequest{
+		SubjectToken:       loginJWT,
+		SubjectTokenType:   sts.SubjectTokenTypeAccessToken,
+		RequestedTokenType: sts.SubjectTokenTypeAccessToken,
+		Audience:           audience,
+		Scope:              JurisdictionIdentityScope,
+		ClientID:           httputil.OAuthClientID,
+	})
 	if err != nil {
 		return "", fmt.Errorf("post token exchange: %w", err)
 	}
-	if strings.TrimSpace(token) == "" {
+	if strings.TrimSpace(ts.AccessToken) == "" {
 		return "", errors.New("token exchange returned an empty access token")
 	}
-	return token, nil
+	return ts.AccessToken, nil
 }
