@@ -224,6 +224,42 @@ func TestWriteCheckpointTokenClasses_Priced(t *testing.T) {
 	}
 }
 
+// "<1%" means "rounds below one percent". On a family that does not bill cache
+// writes at all (openai-6x/8x, the Gemini families) a cache-write class carries
+// tokens whose true cost share is exactly zero, and printing "<1%" there claims
+// a cost the provider never charges.
+func TestWriteCheckpointTokenClasses_ZeroCostClassIsNotUnderOnePercent(t *testing.T) {
+	t.Parallel()
+
+	// gpt-5.5 -> priceFamilyOpenAI6x, which defines no CacheWrite weights.
+	report := classesReportFor(t, "Codex", "gpt-5.5", checkpoint.TokenUsageVersionDelta,
+		&agent.TokenUsage{
+			InputTokens: 40000, CacheCreationTokens: 90000,
+			CacheReadTokens: 200000, OutputTokens: 9000,
+		})
+
+	if !report.Classes.Priced {
+		t.Fatalf("expected a priced breakdown for gpt-5.5, got reason %q", report.Classes.UnpricedReason)
+	}
+	if got := report.Classes.CacheWrite.Tokens; got == 0 {
+		t.Fatal("test needs cache-write tokens present for the distinction to matter")
+	}
+
+	var buf bytes.Buffer
+	writeCheckpointTokenClasses(&buf, report.Classes)
+	for _, line := range strings.Split(buf.String(), "\n") {
+		if !strings.Contains(line, "Cache write") {
+			continue
+		}
+		if strings.Contains(line, "<1%") {
+			t.Errorf("cache write costs exactly nothing on this family; row must not say \"<1%%\":\n%s", line)
+		}
+		if !strings.Contains(line, "0%") {
+			t.Errorf("expected an explicit 0%% cost share, got:\n%s", line)
+		}
+	}
+}
+
 // Without a verified ratio row the cost column must not appear at all — an
 // empty or zeroed column reads as "this cost nothing".
 func TestWriteCheckpointTokenClasses_UnpricedOmitsCostColumn(t *testing.T) {

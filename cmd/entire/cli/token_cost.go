@@ -128,6 +128,13 @@ type tokenClassShare struct {
 	Tokens        int `json:"tokens"`
 	VolumePercent int `json:"volume_percent"`
 	CostPercent   int `json:"cost_percent"`
+	// CostZero distinguishes "this class costs exactly nothing on this
+	// provider's price sheet" from "its share rounds below one percent", which
+	// a CostPercent of 0 cannot express on its own. Several families bill no
+	// cache writes at all (openai-6x/8x, the Gemini rows), so a class with real
+	// tokens can be genuinely free. Meaningful only when the breakdown is
+	// Priced.
+	CostZero bool `json:"cost_zero,omitempty"`
 }
 
 // tokenClassBreakdown is the four-class breakdown of a checkpoint's usage. The
@@ -222,10 +229,10 @@ func tokenClassShares(usage *types.TokenUsage, weights tokenWeights, ttlKnown bo
 			break
 		}
 		shares.Priced = true
-		shares.Input.CostPercent = costPercents[0]
-		shares.CacheWrite.CostPercent = costPercents[1]
-		shares.CacheRead.CostPercent = costPercents[2]
-		shares.Output.CostPercent = costPercents[3]
+		shares.Input.CostPercent, shares.Input.CostZero = costPercents[0], costs[0] == 0
+		shares.CacheWrite.CostPercent, shares.CacheWrite.CostZero = costPercents[1], costs[1] == 0
+		shares.CacheRead.CostPercent, shares.CacheRead.CostZero = costPercents[2], costs[2] == 0
+		shares.Output.CostPercent, shares.Output.CostZero = costPercents[3], costs[3] == 0
 	}
 
 	shares.Input.VolumePercent = volumePercents[0]

@@ -670,7 +670,7 @@ func writeCheckpointTokenClasses(w io.Writer, classes *tokenClassBreakdown) {
 		if classes.Priced {
 			fmt.Fprintf(w, "  %-14s %10s %8s %7s", row.label,
 				formatTokenCount(row.share.Tokens), formatSharePercent(row.share.Tokens, row.share.VolumePercent),
-				formatSharePercent(row.share.Tokens, row.share.CostPercent))
+				formatCostSharePercent(row.share))
 		} else {
 			fmt.Fprintf(w, "  %-14s %10s %8s", row.label,
 				formatTokenCount(row.share.Tokens), formatSharePercent(row.share.Tokens, row.share.VolumePercent))
@@ -700,6 +700,18 @@ func formatSharePercent(tokens, percent int) string {
 		return "<1%"
 	}
 	return fmt.Sprintf("%d%%", percent)
+}
+
+// formatCostSharePercent renders a cost share. It differs from the volume
+// column in one case: a class the provider does not bill at all prints "0%",
+// not "<1%". "<1%" promises a small cost; several families bill no cache writes
+// whatsoever, and claiming a fraction of a percent there is a number the user
+// is never charged.
+func formatCostSharePercent(share tokenClassShare) string {
+	if share.CostZero {
+		return "0%"
+	}
+	return formatSharePercent(share.Tokens, share.CostPercent)
 }
 
 // subsetNote renders a subset figure alongside its parent class, or "" when the
