@@ -424,6 +424,73 @@ func TestRoundTripper_RejectsOffOrigin401ExchangeURL(t *testing.T) {
 	}
 }
 
+// TestRoundTripper_RejectsRedirectedExchangePOST is the sibling of
+// TestRoundTripper_RejectsOffOrigin401ExchangeURL, for the case that check
+// cannot see. There, the hint names a foreign host and validateExchangeURL
+// refuses it up front. Here the hint is impeccable — same origin as the 401,
+// https-or-loopback, path exactly /oauth/token — and the origin's OWN
+// /oauth/token then answers 307 pointing elsewhere. Validation has already
+// passed by that point, so the only thing standing between the user's login
+// JWT and the redirect target is the exchange client's redirect policy.
+//
+// This is exercised at the coreapi layer on purpose. The guard itself lives in
+// auth-go, but the CLI reached it only for as long as coreapi kept routing the
+// exchange through a guarded client: the guard was added to
+// httputil.PostOAuthToken in #2224, and #2235 moved this path off that helper
+// twelve hours later, unnoticed, because #2224's regression test sits in
+// httputil and kept passing. A test anchored where the CLI actually makes the
+// call is what notices.
+func TestRoundTripper_RejectsRedirectedExchangePOST(t *testing.T) {
+	t.Parallel()
+	attackerSawJWT := atomic.Bool{}
+	attacker := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := r.ParseForm(); err == nil && r.PostForm.Get("subject_token") == "user-jwt" {
+			attackerSawJWT.Store(true)
+		}
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"access_token":"attacker-issued","expires_in":300}`)) //nolint:errcheck // test
+	}))
+	t.Cleanup(attacker.Close)
+
+	api := newCrossJurisTestServer(t, func(s *crossJurisTestServer, w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == crossjuris.TokenPath {
+			// An open redirect or a misconfigured proxy in front of a core
+			// the caller legitimately dials.
+			http.Redirect(w, r, attacker.URL+crossjuris.TokenPath, http.StatusTemporaryRedirect)
+			return
+		}
+		s.record(r)
+		w.WriteHeader(http.StatusUnauthorized)
+		w.Write([]byte(`{"error":"cross_juris_token_required","token_exchange_url":"` + s.srv.URL + crossjuris.TokenPath + `","audience":"` + s.srv.URL + `"}`)) //nolint:errcheck // test
+	})
+
+	client := &http.Client{Transport: transportFor(t)}
+	req, _ := http.NewRequestWithContext(context.Background(), http.MethodGet, api.srv.URL+"/api/v1/me", nil) //nolint:errcheck // test
+	req.Header.Set("Authorization", "Bearer user-jwt")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	// Leak first: it is this test's headline claim, and t.Fatal below would
+	// abort before it was ever evaluated.
+	if attackerSawJWT.Load() {
+		t.Errorf("REGRESSION: the login JWT reached the redirect target")
+	}
+	// A refused exchange surfaces the server's original 401 untouched.
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("got %d, want the original 401 passed through", resp.StatusCode)
+	}
+	// The attacker's access_token must not have been presented to the core.
+	for _, auth := range api.auths.snapshot() {
+		if auth == "Bearer attacker-issued" {
+			t.Errorf("REGRESSION: an attacker-issued token was presented to the core")
+		}
+	}
+}
+
 // TestRoundTripper_BodyReplayedOnRetry: a retried request replays its body.
 func TestRoundTripper_BodyReplayedOnRetry(t *testing.T) {
 	t.Parallel()
