@@ -236,16 +236,24 @@ func buildSessionTokensUsage(usage *agent.TokenUsage) *sessionTokensUsage {
 	if usage == nil {
 		return nil
 	}
-	total := totalTokens(usage)
+	// Total and the class figures come from one walk. flattenTokenUsageForClasses
+	// folds subagent usage in, bounded at types.MaxSubagentDepth and clamped at
+	// zero per field; totalTokens is neither, so deriving Total from it left this
+	// struct's own parts not summing to its own total on a chain that was deeper
+	// than the bound or carried negatives — two different answers under one label,
+	// which is the bug the flattening exists to fix. Subagent usage stays
+	// separately visible as SubagentTotal.
+	flat := flattenTokenUsageForClasses(usage)
+	total := sumTokenClasses(flat)
 	if total == 0 && usage.APICallCount == 0 {
 		return nil
 	}
 	return &sessionTokensUsage{
 		Total:         total,
-		Input:         usage.InputTokens,
-		CacheRead:     usage.CacheReadTokens,
-		CacheWrite:    usage.CacheCreationTokens,
-		Output:        usage.OutputTokens,
+		Input:         flat.InputTokens,
+		CacheRead:     flat.CacheReadTokens,
+		CacheWrite:    flat.CacheCreationTokens,
+		Output:        flat.OutputTokens,
 		APICalls:      usage.APICallCount,
 		SubagentTotal: totalTokens(usage.SubagentTokens),
 	}

@@ -121,3 +121,33 @@ func TestAddTokenUsage_ModelKeptWhenSameClearedWhenMixed(t *testing.T) {
 		t.Errorf("copy of one operand must keep Model, got %q", got.Model)
 	}
 }
+
+// clampAdd guards the positive edge because token counts only grow, but
+// checkpoint metadata is writable by anyone with push access: a hostile pair of
+// negatives underflowed and wrapped back to a large positive, which is the same
+// nonsense figure in a report that the positive guard exists to prevent.
+func TestClampAddSaturatesOnUnderflow(t *testing.T) {
+	t.Parallel()
+
+	const maxInt = int(^uint(0) >> 1)
+	const minInt = -maxInt - 1
+
+	for _, tc := range []struct {
+		name string
+		a, b int
+		want int
+	}{
+		{"negative underflow saturates", minInt, -1, minInt},
+		{"two large negatives saturate", minInt, minInt, minInt},
+		{"positive overflow still saturates", maxInt, 1, maxInt},
+		{"ordinary addition is untouched", 1000, 337, 1337},
+		{"mixed signs are untouched", -500, 1000, 500},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := clampAdd(tc.a, tc.b); got != tc.want {
+				t.Errorf("clampAdd(%d, %d) = %d, want %d", tc.a, tc.b, got, tc.want)
+			}
+		})
+	}
+}

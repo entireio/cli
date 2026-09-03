@@ -9,22 +9,27 @@ import (
 	"strings"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
+	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
 	"github.com/spf13/cobra"
 )
 
 type checkpointTokensReport struct {
-	CheckpointID    string                        `json:"checkpoint_id"`
-	SessionCount    int                           `json:"session_count"`
-	SessionID       string                        `json:"session_id,omitempty"`
-	Agent           string                        `json:"agent,omitempty"`
-	Agents          []string                      `json:"agents,omitempty"`
-	Model           string                        `json:"model,omitempty"`
-	Models          []string                      `json:"models,omitempty"`
-	Branch          string                        `json:"branch,omitempty"`
-	Source          string                        `json:"source"`
-	Tokens          *sessionTokensUsage           `json:"tokens,omitempty"`
+	CheckpointID string              `json:"checkpoint_id"`
+	SessionCount int                 `json:"session_count"`
+	SessionID    string              `json:"session_id,omitempty"`
+	Agent        string              `json:"agent,omitempty"`
+	Agents       []string            `json:"agents,omitempty"`
+	Model        string              `json:"model,omitempty"`
+	Models       []string            `json:"models,omitempty"`
+	Branch       string              `json:"branch,omitempty"`
+	Source       string              `json:"source"`
+	Tokens       *sessionTokensUsage `json:"tokens,omitempty"`
+	// Classes is the billing-class breakdown — volume and, where a verified
+	// ratio row applies, cost share per class. Present for every agent that
+	// recorded any usage, including ones whose transcripts cannot be attributed.
+	Classes         *tokenClassBreakdown          `json:"classes,omitempty"`
 	Context         *sessionTokensContext         `json:"context,omitempty"`
 	Contributors    []sessionTokensContributor    `json:"contributors,omitempty"`
 	Recommendations []sessionTokensRecommendation `json:"recommendations,omitempty"`
@@ -216,6 +221,15 @@ func buildCheckpointTokensReport(cpID id.CheckpointID, summary *checkpoint.Check
 	usage := checkpointTokenUsage(summary, metas, metadataWarnings > 0)
 	if tokens := buildSessionTokensUsage(usage); tokens != nil {
 		report.Tokens = tokens
+		weights, unpricedReason := checkpointTokenWeights(metas, metadataWarnings)
+		if classes, ok := tokenClassShares(usage, weights, checkpointTokenTTLKnown(summary)); ok {
+			// tokenClassShares only sees empty weights, so it names the generic
+			// reason; the caller is the one that knows which case it was.
+			if !classes.Priced && unpricedReason != "" {
+				classes.UnpricedReason = unpricedReason
+			}
+			report.Classes = &classes
+		}
 		if tokens.SubagentTotal > 0 {
 			report.Contributors = append(report.Contributors, sessionTokensContributor{
 				Kind:       "subagents",
@@ -293,6 +307,84 @@ func buildCheckpointTokensReport(cpID id.CheckpointID, summary *checkpoint.Check
 	return report
 }
 
+// checkpointTokenWeights resolves the price ratios that apply to a whole
+// checkpoint. Every session must carry a model and they must all resolve to the
+// same ratio row: a cost column that silently covers three of five sessions is
+// worse than no cost column, so any gap or disagreement yields zero weights and
+// the report shows volume only.
+//
+// metadataWarnings gates the whole thing. When a session blob fails to read,
+// checkpointTokenUsage falls back to the root summary's total — which covers
+// every session — while metas holds only the ones that read. Pricing that total
+// against the models we happened to be able to read would apply, say, Anthropic
+// ratios to a total containing Codex sessions. Unreadable metadata means
+// unpriced.
+// The second return value is the specific reason the weights came back empty,
+// or "" when the generic "no verified ratios for this model" is the true one.
+// Only this function can tell the cases apart: an unrecognised model really has
+// no ratio row, but models that each have one and disagree are a different fact,
+// and telling the user their model is unpriceable when it is not contradicts the
+// rule that a withheld-cost reason must be true of the case it names.
+func checkpointTokenWeights(metas []*checkpoint.Metadata, metadataWarnings int) (tokenWeights, string) {
+	if metadataWarnings > 0 {
+		return tokenWeights{}, ""
+	}
+	var resolved tokenWeights
+	for _, meta := range metas {
+		if meta == nil {
+			return tokenWeights{}, ""
+		}
+		weights, ok := tokenWeightsForModel(meta.Model)
+		if !ok {
+			return tokenWeights{}, ""
+		}
+		if resolved.Family == "" {
+			resolved = weights
+		} else if resolved.Family != weights.Family {
+			return tokenWeights{}, unpricedMixedModels
+		}
+		// A subagent billed by another provider is the same fact as two
+		// sessions disagreeing — different ratios inside one checkpoint — so it
+		// takes the same reason rather than the false generic one.
+		if !subagentModelsMatch(meta.TokenUsage, resolved.Family) {
+			return tokenWeights{}, unpricedMixedModels
+		}
+	}
+	return resolved, ""
+}
+
+// subagentModelsMatch reports whether every subagent entry that records a model
+// belongs to family. Subagent tokens are flattened into the classes, so an entry
+// billed at another provider's ratios would be costed at its parent's rate while
+// the report claims the whole total is priced — #2155 records Model on these
+// entries precisely so that cannot be assumed away.
+//
+// An entry with no recorded model inherits the parent's family rather than
+// unpricing the checkpoint: absence is the norm, and for a single-provider agent
+// the parent is the best available evidence. That inference is wrong only for an
+// agent that mixes providers within one session (Pi), and only when it also
+// fails to record the subagent's model.
+func subagentModelsMatch(usage *agent.TokenUsage, family string) bool {
+	for u := usage; u != nil; u = u.SubagentTokens {
+		if u.Model == "" {
+			continue
+		}
+		weights, ok := tokenWeightsForModel(u.Model)
+		if !ok || weights.Family != family {
+			return false
+		}
+	}
+	return true
+}
+
+// checkpointTokenTTLKnown reports whether an absent 1-hour cache-write figure
+// can be trusted to mean zero. It can on token_usage_version 2 checkpoints,
+// where the field is written whenever the agent records it; on a legacy
+// checkpoint absence means "not recorded" and the split is unknowable.
+func checkpointTokenTTLKnown(summary *checkpoint.CheckpointSummary) bool {
+	return summary != nil && summary.TokenUsageVersion >= checkpoint.TokenUsageVersionDelta
+}
+
 func checkpointAgentLabels(metas []*checkpoint.Metadata) []string {
 	labels := make([]string, 0, len(metas))
 	seen := make(map[string]struct{}, len(metas))
@@ -357,27 +449,13 @@ func checkpointTokenUsage(summary *checkpoint.CheckpointSummary, metas []*checkp
 	return sessionUsage
 }
 
+// addCheckpointTokenUsage sums two checkpoints' usage through the single
+// token-summing primitive. It previously copied five fields by hand, which
+// silently dropped ThinkingTokens, CacheCreation1hTokens and Model — exactly
+// the failure CLAUDE.md warns against ("a field-by-field copy is how the
+// nested total came to be dropped in the first place").
 func addCheckpointTokenUsage(a, b *agent.TokenUsage) *agent.TokenUsage {
-	if a == nil && b == nil {
-		return nil
-	}
-	result := &agent.TokenUsage{}
-	if a != nil {
-		result.InputTokens = a.InputTokens
-		result.CacheCreationTokens = a.CacheCreationTokens
-		result.CacheReadTokens = a.CacheReadTokens
-		result.OutputTokens = a.OutputTokens
-		result.APICallCount = a.APICallCount
-	}
-	if b != nil {
-		result.InputTokens = saturatingIntAdd(result.InputTokens, b.InputTokens)
-		result.CacheCreationTokens = saturatingIntAdd(result.CacheCreationTokens, b.CacheCreationTokens)
-		result.CacheReadTokens = saturatingIntAdd(result.CacheReadTokens, b.CacheReadTokens)
-		result.OutputTokens = saturatingIntAdd(result.OutputTokens, b.OutputTokens)
-		result.APICallCount = saturatingIntAdd(result.APICallCount, b.APICallCount)
-	}
-	result.SubagentTokens = addCheckpointTokenUsage(tokenUsageSubagents(a), tokenUsageSubagents(b))
-	return result
+	return types.AddTokenUsage(a, b)
 }
 
 func saturatingIntAdd(a, b int) int {
@@ -390,13 +468,6 @@ func saturatingIntAdd(a, b int) int {
 		return minValue
 	}
 	return a + b
-}
-
-func tokenUsageSubagents(usage *agent.TokenUsage) *agent.TokenUsage {
-	if usage == nil {
-		return nil
-	}
-	return usage.SubagentTokens
 }
 
 func tokenPluralSuffix(count int) string {
@@ -575,12 +646,96 @@ func writeCheckpointTokensText(w io.Writer, report checkpointTokensReport) {
 	}
 
 	writeTokenUsageSection(w, report.Tokens)
+	writeCheckpointTokenClasses(w, report.Classes)
 	writeCheckpointTokenComparison(w, report.Comparison)
 	if len(report.Recommendations) > 0 {
 		writeTokenRecommendations(w, report.Recommendations)
 	}
 	writeTokenContributors(w, report.Contributors, report.Context)
 	writeTokenLimitations(w, report.Limitations)
+}
+
+// writeCheckpointTokenClasses renders the billing-class breakdown. The cost
+// column is present only when the classes are priced: an empty or zeroed cost
+// column would read as "this cost nothing" rather than "we cannot say".
+func writeCheckpointTokenClasses(w io.Writer, classes *tokenClassBreakdown) {
+	if classes == nil {
+		return
+	}
+
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, "How it was billed")
+	if classes.Priced {
+		fmt.Fprintf(w, "  %-14s %10s %8s %7s\n", "", "tokens", "volume", "cost")
+	} else {
+		fmt.Fprintf(w, "  %-14s %10s %8s\n", "", "tokens", "volume")
+	}
+
+	rows := []struct {
+		label string
+		share tokenClassShare
+		note  string
+	}{
+		{"Fresh input", classes.Input, ""},
+		{"Cache write", classes.CacheWrite, subsetNote("1h TTL", classes.CacheWrite1h)},
+		{"Cache read", classes.CacheRead, ""},
+		{"Output", classes.Output, subsetNote("thinking", classes.Thinking)},
+	}
+	for _, row := range rows {
+		if classes.Priced {
+			fmt.Fprintf(w, "  %-14s %10s %8s %7s", row.label,
+				formatTokenCount(row.share.Tokens), formatSharePercent(row.share.Tokens, row.share.VolumePercent),
+				formatCostSharePercent(row.share))
+		} else {
+			fmt.Fprintf(w, "  %-14s %10s %8s", row.label,
+				formatTokenCount(row.share.Tokens), formatSharePercent(row.share.Tokens, row.share.VolumePercent))
+		}
+		if row.note != "" {
+			fmt.Fprintf(w, "  %s", row.note)
+		}
+		fmt.Fprintln(w)
+	}
+	fmt.Fprintf(w, "  %-14s %10s\n", "Total", formatTokenCount(classes.Total))
+
+	if !classes.Priced {
+		reason := classes.UnpricedReason
+		if reason == "" {
+			reason = unpricedNoModel
+		}
+		fmt.Fprintf(w, "  Cost share omitted: %s.\n", reason)
+	}
+}
+
+// formatSharePercent renders a whole-percent share. A class with tokens in it
+// but a share that rounds to zero prints "<1%" rather than "0%": a row showing
+// 274.8k tokens beside "0%" reads as broken even though it is arithmetically
+// right. A genuinely empty class still prints "0%".
+func formatSharePercent(tokens, percent int) string {
+	if percent == 0 && tokens > 0 {
+		return "<1%"
+	}
+	return fmt.Sprintf("%d%%", percent)
+}
+
+// formatCostSharePercent renders a cost share. It differs from the volume
+// column in one case: a class the provider does not bill at all prints "0%",
+// not "<1%". "<1%" promises a small cost; several families bill no cache writes
+// whatsoever, and claiming a fraction of a percent there is a number the user
+// is never charged.
+func formatCostSharePercent(share tokenClassShare) string {
+	if share.CostZero {
+		return "0%"
+	}
+	return formatSharePercent(share.Tokens, share.CostPercent)
+}
+
+// subsetNote renders a subset figure alongside its parent class, or "" when the
+// agent recorded none. Subsets are part of their class, never added to the total.
+func subsetNote(label string, tokens int) string {
+	if tokens <= 0 {
+		return ""
+	}
+	return fmt.Sprintf("(%s %s)", label, formatTokenCount(tokens))
 }
 
 func writeCheckpointTokensAgentBrief(w io.Writer, report checkpointTokensReport) {

@@ -76,13 +76,13 @@ func addTokenUsageAtDepth(a, b *TokenUsage, depth int) *TokenUsage {
 		aSub = a.SubagentTokens
 	}
 	if b != nil {
-		sum.InputTokens += b.InputTokens
-		sum.CacheCreationTokens += b.CacheCreationTokens
-		sum.CacheReadTokens += b.CacheReadTokens
-		sum.OutputTokens += b.OutputTokens
-		sum.APICallCount += b.APICallCount
-		sum.ThinkingTokens += b.ThinkingTokens
-		sum.CacheCreation1hTokens += b.CacheCreation1hTokens
+		sum.InputTokens = clampAdd(sum.InputTokens, b.InputTokens)
+		sum.CacheCreationTokens = clampAdd(sum.CacheCreationTokens, b.CacheCreationTokens)
+		sum.CacheReadTokens = clampAdd(sum.CacheReadTokens, b.CacheReadTokens)
+		sum.OutputTokens = clampAdd(sum.OutputTokens, b.OutputTokens)
+		sum.APICallCount = clampAdd(sum.APICallCount, b.APICallCount)
+		sum.ThinkingTokens = clampAdd(sum.ThinkingTokens, b.ThinkingTokens)
+		sum.CacheCreation1hTokens = clampAdd(sum.CacheCreation1hTokens, b.CacheCreation1hTokens)
 		sum.Model = mergeModel(sum.Model, b.Model)
 		bSub = b.SubagentTokens
 	}
@@ -91,6 +91,25 @@ func addTokenUsageAtDepth(a, b *TokenUsage, depth int) *TokenUsage {
 	}
 	sum.SubagentTokens = addTokenUsageAtDepth(aSub, bSub, depth+1)
 	return sum
+}
+
+// clampAdd returns a+b, saturating at the int limits rather than wrapping.
+// Token counts never approach either edge in practice, but checkpoint metadata
+// is writable by anyone with push access, and a wrapped total renders as a
+// negative or absurd figure in a user-facing report — so both directions
+// degrade to "impossibly large"/"impossibly small" instead. Guarding only the
+// positive edge left the negative one wrapping the other way: minInt + -1 came
+// back as maxInt. Mirrors saturatingIntAdd in the cli package.
+func clampAdd(a, b int) int {
+	const maxInt = int(^uint(0) >> 1)
+	const minInt = -maxInt - 1
+	if b > 0 && a > maxInt-b {
+		return maxInt
+	}
+	if b < 0 && a < minInt-b {
+		return minInt
+	}
+	return a + b
 }
 
 // SubtractTokenUsage returns a-b, recursing into subagent usage and clamping

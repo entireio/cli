@@ -857,6 +857,15 @@ func TestFormatTokenCount(t *testing.T) {
 		{4800, "4.8k"},
 		{14300, "14.3k"},
 		{100000, "100k"},
+		{999499, "999.5k"},
+		// Carry rather than print a four-digit mantissa ("1000k").
+		{999999, "1M"},
+		{1000000, "1M"},
+		{1234567, "1.2M"},
+		{286344584, "286.3M"},
+		{999999999, "1B"},
+		{1000000000, "1B"},
+		{2500000000, "2.5B"},
 	}
 
 	for _, tt := range tests {

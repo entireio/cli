@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -1062,10 +1063,14 @@ func TestTokensCmd_TextOutputWithRecommendations(t *testing.T) {
 		"Model:   claude-opus-4-6[1m]",
 		"Status:  active",
 		"Total:  13.6k tokens",
-		"Input: 1k",
+		// Class figures include subagent usage, like Total always has. Before
+		// that fix these read 1k / 10k / 500 / 100 — top-level only — so the
+		// parts did not sum to the 13.6k total printed directly above them.
+		// (The subagent recorded input and output only, so cache read is unchanged.)
+		"Input: 2k",
 		"Cache read: 10k",
 		"Cache write: 500",
-		"Output: 100",
+		"Output: 1.1k",
 		"API calls: 6",
 		"Subagents: 2k tokens",
 		"Context pressure: 85% of 10k tokens",
@@ -1367,7 +1372,7 @@ func TestTokensCmd_AgentBriefPrioritizesNextAction(t *testing.T) {
 	checks := []string{
 		"Session token brief",
 		"Session: test-tokens-brief",
-		"Token usage: 6213.6k total; 97.4% cache/context replay; 70 API calls.",
+		"Token usage: 6.2M total; 97.4% cache/context replay; 70 API calls.",
 		"Next best action:",
 		"Use at most 3 batched reads before answering.",
 		"Continue only if a named file or test can change the verdict; otherwise answer now.",
@@ -1790,8 +1795,8 @@ func TestTokensCmd_PrioritizesContextReplayHotspot(t *testing.T) {
 		"Large context was replayed across 70 API calls",
 		"Compact or restart after summarizing this investigation",
 		"Token usage",
-		"Total:  6213.6k tokens",
-		"Cache read: 6052.4k",
+		"Total:  6.2M tokens",
+		"Cache read: 6.1M",
 	}
 	for _, check := range checks {
 		if !strings.Contains(out, check) {
@@ -1988,8 +1993,8 @@ func TestCheckpointTokensCmd_TextOutputWithRealCheckpointShape(t *testing.T) {
 		"Cache/context replay is 97.4% of token volume",
 		"Large context was replayed across 70 API calls",
 		"Token usage",
-		"Total:  6213.6k tokens",
-		"Cache read: 6052.4k",
+		"Total:  6.2M tokens",
+		"Cache read: 6.1M",
 	}
 	for _, check := range checks {
 		if !strings.Contains(out, check) {
@@ -2005,6 +2010,114 @@ func TestCheckpointTokensCmd_TextOutputWithRealCheckpointShape(t *testing.T) {
 	if tokenUsageIndex > recommendationsIndex {
 		t.Fatalf("expected token usage before recommendations, got:\n%s", out)
 	}
+}
+
+// The priced path had no command-level coverage: the cost column was asserted
+// only against writeCheckpointTokenClasses directly, and no checkpoint in this
+// repo's own history is priceable (every one predates the cache-write TTL
+// split), so nothing exercised metadata -> report -> render with a model
+// recorded. This drives it through the real command and asserts the acceptance
+// criterion on the rendered figures, not on the struct behind them.
+func TestCheckpointTokensCmd_PricedCheckpointRendersCostSharesSummingTo100(t *testing.T) {
+	repo, _ := runExplainAutoTestRepo(t)
+	ctx := context.Background()
+	cpID := id.MustCheckpointID("cafebeefbeef")
+	if err := checkpoint.NewGitStore(repo, checkpoint.DefaultV1Refs()).Write(ctx, checkpoint.Session{
+		CheckpointID: cpID,
+		SessionID:    "checkpoint-token-priced",
+		Strategy:     strategy.StrategyNameManualCommit,
+		Branch:       "e2e-triage-fix",
+		Agent:        testAgentClaude,
+		Model:        "claude-sonnet-4.6",
+		Transcript:   redact.AlreadyRedacted([]byte(`{"type":"user","message":{"content":[{"type":"text","text":"price this"}]}}` + "\n")),
+		AuthorName:   "Test",
+		AuthorEmail:  "test@example.com",
+		TokenUsage: &agent.TokenUsage{
+			Model:                 "claude-sonnet-4.6",
+			InputTokens:           42000,
+			CacheCreationTokens:   118000,
+			CacheCreation1hTokens: 22000,
+			CacheReadTokens:       240000,
+			OutputTokens:          11000,
+			ThinkingTokens:        4000,
+			APICallCount:          37,
+		},
+	}); err != nil {
+		t.Fatalf("WriteCommitted() error = %v", err)
+	}
+
+	cmd := newCheckpointGroupCmd()
+	var stdout bytes.Buffer
+	cmd.SetOut(&stdout)
+	cmd.SetArgs([]string{"tokens", "cafebeef"})
+	if err := cmd.ExecuteContext(ctx); err != nil {
+		t.Fatalf("expected no error, got: %v", err)
+	}
+	out := stdout.String()
+
+	if !strings.Contains(out, "How it was billed") {
+		t.Fatalf("expected the billed breakdown, got:\n%s", out)
+	}
+	if strings.Contains(out, "Cost share omitted") {
+		t.Fatalf("a checkpoint with a known model must be priced, got:\n%s", out)
+	}
+
+	volume, cost := parseBilledShares(t, out)
+	if volume != 100 {
+		t.Errorf("rendered volume shares sum to %d%%, want 100%%\n%s", volume, out)
+	}
+	if cost != 100 {
+		t.Errorf("rendered cost shares sum to %d%%, want 100%%\n%s", cost, out)
+	}
+}
+
+// parseBilledShares reads the volume and cost percentages back out of the
+// rendered "How it was billed" table, so the assertion is on what a user sees
+// rather than on the numbers the renderer was handed.
+func parseBilledShares(t *testing.T, out string) (volume, cost int) {
+	t.Helper()
+
+	for _, line := range strings.Split(out, "\n") {
+		trimmed := strings.TrimSpace(line)
+		var matched bool
+		for _, label := range []string{"Fresh input", "Cache write", "Cache read", "Output"} {
+			if strings.HasPrefix(trimmed, label) {
+				trimmed = strings.TrimSpace(strings.TrimPrefix(trimmed, label))
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			continue
+		}
+		// Drop any trailing subset note, e.g. "(1h TTL 22k)".
+		if i := strings.Index(trimmed, "("); i >= 0 {
+			trimmed = trimmed[:i]
+		}
+		fields := strings.Fields(trimmed)
+		var pcts []int
+		for _, f := range fields {
+			if !strings.HasSuffix(f, "%") {
+				continue
+			}
+			raw := strings.TrimSuffix(f, "%")
+			if raw == "<1" {
+				pcts = append(pcts, 0)
+				continue
+			}
+			n, err := strconv.Atoi(raw)
+			if err != nil {
+				t.Fatalf("unparseable percentage %q in row %q", f, line)
+			}
+			pcts = append(pcts, n)
+		}
+		if len(pcts) != 2 {
+			t.Fatalf("expected a volume and a cost percentage in row %q, got %v", line, pcts)
+		}
+		volume += pcts[0]
+		cost += pcts[1]
+	}
+	return volume, cost
 }
 
 func TestCheckpointTokensCmd_AgentBriefGivesOperationalBudget(t *testing.T) {
@@ -2044,7 +2157,7 @@ func TestCheckpointTokensCmd_AgentBriefGivesOperationalBudget(t *testing.T) {
 	checks := []string{
 		"Checkpoint token brief",
 		"Checkpoint: b1efbeefcafe",
-		"Token usage: 6213.6k total; 97.4% cache/context replay; 70 API calls.",
+		"Token usage: 6.2M total; 97.4% cache/context replay; 70 API calls.",
 		"Next best action:",
 		"Use at most 3 batched reads before answering.",
 		"Continue only if a named file or test can change the verdict; otherwise answer now.",
@@ -2160,8 +2273,9 @@ func TestCheckpointTokensCmd_TextOutputWithMultipleSessionsUsesAggregateScope(t 
 		"Agents:     Claude Code, Gemini CLI",
 		"Branch:     multi-session-branch",
 		"Total:  4.5k tokens",
-		"Input: 1.5k",
-		"Output: 500",
+		// Includes subagent usage, matching the Total printed directly above it.
+		"Input: 3.5k",
+		"Output: 1k",
 		"API calls: 3",
 		"Subagents: 2.5k tokens",
 	}
@@ -2461,7 +2575,7 @@ func TestCheckpointTokensCmd_TextOutputWithComparison(t *testing.T) {
 		"Comparison",
 		"Baseline: aaa111bbb222",
 		"Caveat: Total tokens include cache/context replay; use the cache/context replay delta below before treating total direction as work saved or added.",
-		"Total tokens: down 50.5% (1010k -> 500k)",
+		"Total tokens: down 50.5% (1M -> 500k)",
 		"Input: down 25% (200k -> 150k)",
 		"Cache/context replay: down 60% (750k -> 300k)",
 		"Cache write: down 50% (50k -> 25k)",
