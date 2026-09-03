@@ -84,16 +84,13 @@ var (
 // hint about the accepted shapes.
 func parseNativeCloneRef(ref string) (project, repo string, ok bool) {
 	segs := strings.Split(strings.TrimPrefix(strings.TrimSpace(ref), "/"), "/")
-	if len(segs) == 3 && segs[0] == nativeCloneForge {
-		segs = segs[1:]
-	}
-	if len(segs) != 2 || !nativeProjectRe.MatchString(segs[0]) || !nativeRepoRe.MatchString(segs[1]) {
+	if segs[0] != nativeCloneForge {
 		return "", "", false
 	}
-	if segs[0] == nativeCloneForge || segs[0] == "gh" {
+	if len(segs) != 3 || !nativeProjectRe.MatchString(segs[1]) || !nativeRepoRe.MatchString(segs[2]) {
 		return "", "", false
 	}
-	return segs[0], segs[1], true
+	return segs[1], segs[2], true
 }
 
 // resolveNativeCloneURL resolves an Entire-native repo (by project and repo
