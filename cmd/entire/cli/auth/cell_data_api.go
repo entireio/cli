@@ -20,7 +20,6 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/versioninfo"
 	"github.com/entireio/cli/internal/entireclient/clusterdiscovery"
 	"github.com/entireio/cli/internal/entireclient/contexts"
-	"github.com/entireio/cli/internal/entireclient/httputil"
 	"github.com/entireio/cli/internal/entireclient/userdirs"
 )
 
@@ -187,7 +186,7 @@ func JurisdictionToken(ctx context.Context, insecureHTTP bool, jurisdiction stri
 	}
 
 	audience := jurisdictionAudience(j, subject.dataOrigin, subject.discoveredCore)
-	token, err := exchangeJurisdictionToken(ctx, coreURL, subject.loginJWT, audience, subject.httpClient)
+	token, err := exchangeJurisdictionToken(ctx, coreURL, subject.loginJWT, audience, subject.httpClient.Transport)
 	if err != nil {
 		return "", fmt.Errorf("exchange jurisdictional identity token: %w", err)
 	}
@@ -689,21 +688,18 @@ func resolveCellAPIBaseURL(ctx context.Context, coreURL, loginJWT, jurisdiction 
 // the CLI's only exchange whose cross-host redirect guard lived in the CLI
 // rather than in the library.
 //
-// Only httpClient's Transport carries over. Its Client.Timeout does not:
-// sts applies the same budget through context.WithTimeout, which (unlike
-// Client.Timeout) does not cancel the body read that happens after the
-// response returns.
+// It takes the transport rather than the caller's *http.Client because the
+// transport (and so the connection pool) is the only part that carries over.
+// The client's Timeout deliberately does not: sts applies the same budget
+// through context.WithTimeout, which unlike Client.Timeout does not cancel
+// the body read that happens after the response returns.
 //
 // subject_token_type is access_token, not JWT — the login token is presented
 // to entire-core as an access token, which is what the form this replaced
 // sent and what the server matches on.
-func exchangeJurisdictionToken(ctx context.Context, coreURL, loginJWT, audience string, httpClient *http.Client) (string, error) {
+func exchangeJurisdictionToken(ctx context.Context, coreURL, loginJWT, audience string, transport http.RoundTripper) (string, error) {
 	if coreURL == "" {
 		return "", errors.New("no entire-core URL configured for jurisdiction token exchange")
-	}
-	var transport http.RoundTripper
-	if httpClient != nil {
-		transport = httpClient.Transport
 	}
 	client := &sts.Client{
 		Transport:         transport,
@@ -718,7 +714,7 @@ func exchangeJurisdictionToken(ctx context.Context, coreURL, loginJWT, audience 
 		RequestedTokenType: sts.SubjectTokenTypeAccessToken,
 		Audience:           audience,
 		Scope:              JurisdictionIdentityScope,
-		ClientID:           httputil.OAuthClientID,
+		ClientID:           oauthClientID,
 	})
 	if err != nil {
 		return "", fmt.Errorf("post token exchange: %w", err)

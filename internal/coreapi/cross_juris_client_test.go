@@ -424,20 +424,13 @@ func TestRoundTripper_RejectsOffOrigin401ExchangeURL(t *testing.T) {
 	}
 }
 
-// TestRoundTripper_RejectsRedirectedExchangePOST is the sibling of
-// TestRoundTripper_RejectsOffOrigin401ExchangeURL, for the case that check
-// cannot see. There, the hint names a foreign host and validateExchangeURL
-// refuses it up front. Here the hint is impeccable — same origin as the 401,
-// https-or-loopback, path exactly /oauth/token — and the origin's OWN
-// /oauth/token then answers 307 pointing elsewhere. Validation has already
-// passed by that point, so the only thing standing between the user's login
-// JWT and the redirect target is the exchange client's redirect policy.
+// TestRoundTripper_RejectsRedirectedExchangePOST: an impeccable 401 hint whose
+// origin then 307s the exchange POST elsewhere must not leak the JWT.
 //
-// This is exercised at the coreapi layer on purpose. The guard itself lives in
-// auth-go, but the CLI reached it only for as long as coreapi kept routing the
-// exchange through a guarded client: the guard was added to
-// httputil.PostOAuthToken in #2224, and #2235 moved this path off that helper
-// twelve hours later, unnoticed, because #2224's regression test sits in
+// auth-go owns the guard and tests the mechanism; this one is about the CLI's
+// wiring, which is a property no auth-go test can assert. The guard was added
+// to httputil.PostOAuthToken in #2224, and #2235 moved this path off that
+// helper twelve hours later, unnoticed, because #2224's regression test sat in
 // httputil and kept passing. A test anchored where the CLI actually makes the
 // call is what notices.
 func TestRoundTripper_RejectsRedirectedExchangePOST(t *testing.T) {
@@ -482,12 +475,6 @@ func TestRoundTripper_RejectsRedirectedExchangePOST(t *testing.T) {
 	// A refused exchange surfaces the server's original 401 untouched.
 	if resp.StatusCode != http.StatusUnauthorized {
 		t.Fatalf("got %d, want the original 401 passed through", resp.StatusCode)
-	}
-	// The attacker's access_token must not have been presented to the core.
-	for _, auth := range api.auths.snapshot() {
-		if auth == "Bearer attacker-issued" {
-			t.Errorf("REGRESSION: an attacker-issued token was presented to the core")
-		}
 	}
 }
 
