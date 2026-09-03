@@ -151,10 +151,6 @@ type EntireSettings struct {
 	// plugins (entire-agent-* binaries on $PATH). Defaults to false.
 	ExternalAgents bool `json:"external_agents,omitempty"`
 
-	// AsyncMirrorRequests selects the mirror creation route.
-	// nil/true = async request route (default), false = synchronous route.
-	AsyncMirrorRequests *bool `json:"async_mirror_requests,omitempty"`
-
 	// SummaryGeneration stores provider preferences for explain --generate.
 	// This is separate from strategy_options.summarize, which controls
 	// checkpoint auto-summarize behavior.
@@ -843,9 +839,7 @@ func ModifyClonePreferences(ctx context.Context, fn func(*ClonePreferences) erro
 // Use this when you have settings content from a non-file source (e.g., git show).
 func LoadFromBytes(data []byte) (*EntireSettings, error) {
 	s := &EntireSettings{Enabled: true}
-	dec := json.NewDecoder(bytes.NewReader(data))
-	dec.DisallowUnknownFields()
-	if err := dec.Decode(s); err != nil {
+	if err := decodeEntireSettings(data, s); err != nil {
 		return nil, fmt.Errorf("parsing settings: %w", err)
 	}
 	if s.Redaction != nil {
@@ -854,6 +848,23 @@ func LoadFromBytes(data []byte) (*EntireSettings, error) {
 		}
 	}
 	return s, nil
+}
+
+// settingsDecodeCompat accepts retired top-level keys without keeping them in
+// EntireSettings or weakening strict decoding for genuinely unknown settings.
+type settingsDecodeCompat struct {
+	*EntireSettings
+
+	RemovedAsyncMirrorRequests json.RawMessage `json:"async_mirror_requests"`
+}
+
+func decodeEntireSettings(data []byte, settings *EntireSettings) error {
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&settingsDecodeCompat{EntireSettings: settings}); err != nil {
+		return fmt.Errorf("decode settings: %w", err)
+	}
+	return nil
 }
 
 // readConfined reads filePath through an os.Root, refusing outright to read it
@@ -1036,9 +1047,7 @@ func loadFromFile(filePath string) (*EntireSettings, error) {
 		return nil, fmt.Errorf("%w", err)
 	}
 
-	dec := json.NewDecoder(bytes.NewReader(data))
-	dec.DisallowUnknownFields()
-	if err := dec.Decode(settings); err != nil {
+	if err := decodeEntireSettings(data, settings); err != nil {
 		return nil, fmt.Errorf("parsing settings file: %w", err)
 	}
 
@@ -1210,10 +1219,8 @@ func applyClonePreferences(settings *EntireSettings, prefs *ClonePreferences) {
 // project-level review configuration.
 func mergeJSON(settings *EntireSettings, data []byte) error {
 	// Validate that there are no unknown keys using strict decoding.
-	dec := json.NewDecoder(bytes.NewReader(data))
-	dec.DisallowUnknownFields()
 	var temp EntireSettings
-	if err := dec.Decode(&temp); err != nil {
+	if err := decodeEntireSettings(data, &temp); err != nil {
 		return fmt.Errorf("parsing JSON: %w", err)
 	}
 
@@ -1296,9 +1303,6 @@ func mergeScalarFields(settings *EntireSettings, raw map[string]json.RawMessage)
 		return err
 	}
 	if err := mergeRawBool(raw, "external_agents", &settings.ExternalAgents); err != nil {
-		return err
-	}
-	if err := mergeRawBoolPtr(raw, "async_mirror_requests", &settings.AsyncMirrorRequests); err != nil {
 		return err
 	}
 	if err := mergeRawBool(raw, "vercel", &settings.Vercel); err != nil {
@@ -1930,11 +1934,6 @@ func IsExternalAgentsEnabled(ctx context.Context) bool {
 		return false
 	}
 	return s.ExternalAgents
-}
-
-// IsAsyncMirrorRequestsEnabled reports whether mirror creation uses the async request route.
-func (s *EntireSettings) IsAsyncMirrorRequestsEnabled() bool {
-	return s.AsyncMirrorRequests == nil || *s.AsyncMirrorRequests
 }
 
 // IsSignCheckpointCommitsEnabled returns true if checkpoint commits should be signed.

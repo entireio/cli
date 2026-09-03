@@ -638,64 +638,53 @@ func TestLoad_MergesLocalOverrides(t *testing.T) {
 	}
 }
 
-func TestLoad_AsyncMirrorRequestsUsesLayeredSettings(t *testing.T) {
+func TestLoad_LegacyAsyncMirrorRequestsIsIgnored(t *testing.T) {
 	tests := []struct {
 		name  string
 		base  string
 		local string
-		want  bool
 	}{
-		{name: "unset", base: `{"enabled": true}`, want: true},
-		{name: "project setting enabled", base: `{"async_mirror_requests": true}`, want: true},
-		{name: "project setting disabled", base: `{"async_mirror_requests": false}`},
-		{name: "local setting enabled", base: `{"enabled": true}`, local: `{"async_mirror_requests": true}`, want: true},
-		{name: "local false", base: `{"async_mirror_requests": true}`, local: `{"async_mirror_requests": false}`},
+		{name: "project setting", base: `{"enabled":true,"async_mirror_requests":false}`},
+		{name: "local setting", base: `{"enabled":true}`, local: `{"async_mirror_requests":true}`},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			setupSettingsDir(t, tt.base, tt.local)
 
-			got, err := Load(context.Background())
+			_, err := Load(context.Background())
 			if err != nil {
 				t.Fatalf("Load() error = %v", err)
 			}
-			if got.IsAsyncMirrorRequestsEnabled() != tt.want {
-				t.Fatalf("IsAsyncMirrorRequestsEnabled() = %v, want %v", got.IsAsyncMirrorRequestsEnabled(), tt.want)
+
+			base, err := os.ReadFile(EntireSettingsFile)
+			if err != nil {
+				t.Fatalf("ReadFile(%s) error = %v", EntireSettingsFile, err)
+			}
+			if string(base) != tt.base {
+				t.Fatalf("Load() rewrote project settings to %q, want %q", base, tt.base)
+			}
+			if tt.local != "" {
+				local, err := os.ReadFile(EntireSettingsLocalFile)
+				if err != nil {
+					t.Fatalf("ReadFile(%s) error = %v", EntireSettingsLocalFile, err)
+				}
+				if string(local) != tt.local {
+					t.Fatalf("Load() rewrote local settings to %q, want %q", local, tt.local)
+				}
 			}
 		})
 	}
 }
 
-func TestSave_PreservesAsyncMirrorRequestsPresence(t *testing.T) {
-	tests := []struct {
-		name  string
-		input string
-		want  string
-	}{
-		{name: "unset", input: `{"enabled": true}`, want: ""},
-		{name: "enabled", input: `{"enabled": true, "async_mirror_requests": true}`, want: "true"},
-		{name: "disabled", input: `{"enabled": true, "async_mirror_requests": false}`, want: "false"},
+func TestLoadFromBytes_LegacyAsyncMirrorRequestsIsIgnored(t *testing.T) {
+	t.Parallel()
+
+	settings, err := LoadFromBytes([]byte(`{"enabled":true,"async_mirror_requests":false}`))
+	if err != nil {
+		t.Fatalf("LoadFromBytes() error = %v", err)
 	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			setupSettingsDir(t, tt.input, "")
-
-			individual, err := LoadFromFile(EntireSettingsFile)
-			if err != nil {
-				t.Fatalf("LoadFromFile() error = %v", err)
-			}
-			if err := Save(context.Background(), individual); err != nil {
-				t.Fatalf("Save() error = %v", err)
-			}
-
-			_, raw, _, err := LoadProjectRaw(context.Background())
-			if err != nil {
-				t.Fatalf("LoadProjectRaw() error = %v", err)
-			}
-			if got := string(raw["async_mirror_requests"]); got != tt.want {
-				t.Fatalf("saved async_mirror_requests = %q, want %q", got, tt.want)
-			}
-		})
+	if !settings.Enabled {
+		t.Fatal("Enabled = false, want true")
 	}
 }
 
