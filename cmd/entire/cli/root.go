@@ -40,7 +40,6 @@ Environment Variables:
 const (
 	groupSetup        = "setup"
 	groupSessions     = "sessions"
-	groupRepos        = "repositories"
 	groupAccount      = "account"
 	groupControlPlane = "controlplane"
 )
@@ -162,7 +161,6 @@ func NewRootCmd() *cobra.Command {
 	cmd.AddGroup(
 		&cobra.Group{ID: groupSetup, Title: "Entire Setup:"},
 		&cobra.Group{ID: groupSessions, Title: "Sessions & Checkpoints:"},
-		&cobra.Group{ID: groupRepos, Title: "Repositories:"},
 		&cobra.Group{ID: groupAccount, Title: "Account:"},
 		&cobra.Group{ID: groupControlPlane, Title: "Control Plane:"},
 	)
@@ -198,10 +196,10 @@ func NewRootCmd() *cobra.Command {
 	cmd.AddCommand(inGroup(newDispatchCmd(), groupSessions))
 	cmd.AddCommand(inGroup(newActivityCmd(), groupSessions))
 	cmd.AddCommand(inGroup(newRecapCmd(), groupSessions))
-	cmd.AddCommand(exemptFromEntireDirCheck(inGroup(newAPICmd(), groupControlPlane)))    // authenticated passthrough to core/cell APIs
-	cmd.AddCommand(newAgentHelpCmd(cmd))                                                 // visible: agents on transports without context injection discover it via `entire help`
-	cmd.AddCommand(inGroup(newSearchCmd(), groupSessions))                               // 'search' — canonical top-level spelling; 'checkpoint search' stays a working alias
-	cmd.AddCommand(exemptFromEntireDirCheck(inGroup(newTopLevelCloneCmd(), groupRepos))) // 'clone' — canonical top-level spelling; 'repo clone' stays a working alias
+	cmd.AddCommand(exemptFromEntireDirCheck(inGroup(newAPICmd(), groupControlPlane)))           // authenticated passthrough to core/cell APIs
+	cmd.AddCommand(newAgentHelpCmd(cmd))                                                        // visible: agents on transports without context injection discover it via `entire help`
+	cmd.AddCommand(inGroup(newSearchCmd(), groupSessions))                                      // 'search' — canonical top-level spelling; 'checkpoint search' stays a working alias
+	cmd.AddCommand(exemptFromEntireDirCheck(inGroup(newTopLevelCloneCmd(), groupControlPlane))) // 'clone' — canonical top-level spelling; 'repo clone' stays a working alias
 
 	// Experimental labs commands (listed via `entire labs`; not deprecation shortcuts).
 	experimental.Register(cmd, newExpertsCmd()) // 'experts' (experimental); agent/workflow provenance

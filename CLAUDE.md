@@ -114,9 +114,8 @@ Top-level lifecycle and standalone commands: `enable`, `disable`, `status`,
 `configure`, `agent-help`, `api`, `search`, `clone`. `search` is the canonical
 spelling (visible in every build, grouped with Sessions & Checkpoints);
 `checkpoint search` stays a working alias of the same command. `clone` is
-likewise the canonical top-level spelling (in its own Repositories group —
-it's a git content operation, deliberately out of the `repo` group's
-control-plane scope); `repo clone` stays a working alias of the same command.
+likewise the canonical top-level spelling (grouped with Control Plane);
+`repo clone` stays a working alias of the same command.
 
 `api` is an authenticated passthrough to Entire's HTTP APIs (gh-style): it
 attaches the right bearer and dials the right host so callers don't plumb auth
