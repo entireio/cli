@@ -93,14 +93,21 @@ func addTokenUsageAtDepth(a, b *TokenUsage, depth int) *TokenUsage {
 	return sum
 }
 
-// clampAdd returns a+b, saturating at the maximum int rather than wrapping.
-// Token counts never approach it in practice, but a wrapped total would render
-// as a negative or absurd figure in a user-facing report, so overflow degrades
-// to "impossibly large" instead.
+// clampAdd returns a+b, saturating at the int limits rather than wrapping.
+// Token counts never approach either edge in practice, but checkpoint metadata
+// is writable by anyone with push access, and a wrapped total renders as a
+// negative or absurd figure in a user-facing report — so both directions
+// degrade to "impossibly large"/"impossibly small" instead. Guarding only the
+// positive edge left the negative one wrapping the other way: minInt + -1 came
+// back as maxInt. Mirrors saturatingIntAdd in the cli package.
 func clampAdd(a, b int) int {
 	const maxInt = int(^uint(0) >> 1)
-	if a > 0 && b > maxInt-a {
+	const minInt = -maxInt - 1
+	if b > 0 && a > maxInt-b {
 		return maxInt
+	}
+	if b < 0 && a < minInt-b {
+		return minInt
 	}
 	return a + b
 }
