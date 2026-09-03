@@ -162,6 +162,11 @@ func TestCheckpointTokensReport_Classes_MixedModelsAreUnpriced(t *testing.T) {
 	if report.Classes.Priced {
 		t.Error("two different models cannot share one ratio row; cost must be omitted")
 	}
+	// Both models are individually priceable, so "no verified price ratios for
+	// this checkpoint's model" is false. The reason must name the real case.
+	if got := report.Classes.UnpricedReason; got != unpricedMixedModels {
+		t.Errorf("reason = %q, want %q", got, unpricedMixedModels)
+	}
 }
 
 // A checkpoint that recorded nothing must keep saying so, not render zeros.
@@ -366,8 +371,13 @@ func TestCheckpointTokensReport_Classes_SameModelMultiSessionStaysPriced(t *test
 func TestCheckpointTokenWeights_NilMetaIsUnpriced(t *testing.T) {
 	t.Parallel()
 
-	if w := checkpointTokenWeights([]*checkpoint.Metadata{nil}, 0); w.Family != "" {
+	w, reason := checkpointTokenWeights([]*checkpoint.Metadata{nil}, 0)
+	if w.Family != "" {
 		t.Errorf("a nil session metadata must yield no weights, got %q", w.Family)
+	}
+	// Unreadable metadata is not a mixed-model case; it takes the generic reason.
+	if reason != "" {
+		t.Errorf("reason = %q, want the generic one (empty)", reason)
 	}
 }
 

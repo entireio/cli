@@ -221,7 +221,13 @@ func buildCheckpointTokensReport(cpID id.CheckpointID, summary *checkpoint.Check
 	usage := checkpointTokenUsage(summary, metas, metadataWarnings > 0)
 	if tokens := buildSessionTokensUsage(usage); tokens != nil {
 		report.Tokens = tokens
-		if classes, ok := tokenClassShares(usage, checkpointTokenWeights(metas, metadataWarnings), checkpointTokenTTLKnown(summary)); ok {
+		weights, unpricedReason := checkpointTokenWeights(metas, metadataWarnings)
+		if classes, ok := tokenClassShares(usage, weights, checkpointTokenTTLKnown(summary)); ok {
+			// tokenClassShares only sees empty weights, so it names the generic
+			// reason; the caller is the one that knows which case it was.
+			if !classes.Priced && unpricedReason != "" {
+				classes.UnpricedReason = unpricedReason
+			}
 			report.Classes = &classes
 		}
 		if tokens.SubagentTotal > 0 {
@@ -313,29 +319,38 @@ func buildCheckpointTokensReport(cpID id.CheckpointID, summary *checkpoint.Check
 // against the models we happened to be able to read would apply, say, Anthropic
 // ratios to a total containing Codex sessions. Unreadable metadata means
 // unpriced.
-func checkpointTokenWeights(metas []*checkpoint.Metadata, metadataWarnings int) tokenWeights {
+// The second return value is the specific reason the weights came back empty,
+// or "" when the generic "no verified ratios for this model" is the true one.
+// Only this function can tell the cases apart: an unrecognised model really has
+// no ratio row, but models that each have one and disagree are a different fact,
+// and telling the user their model is unpriceable when it is not contradicts the
+// rule that a withheld-cost reason must be true of the case it names.
+func checkpointTokenWeights(metas []*checkpoint.Metadata, metadataWarnings int) (tokenWeights, string) {
 	if metadataWarnings > 0 {
-		return tokenWeights{}
+		return tokenWeights{}, ""
 	}
 	var resolved tokenWeights
 	for _, meta := range metas {
 		if meta == nil {
-			return tokenWeights{}
+			return tokenWeights{}, ""
 		}
 		weights, ok := tokenWeightsForModel(meta.Model)
 		if !ok {
-			return tokenWeights{}
+			return tokenWeights{}, ""
 		}
 		if resolved.Family == "" {
 			resolved = weights
 		} else if resolved.Family != weights.Family {
-			return tokenWeights{}
+			return tokenWeights{}, unpricedMixedModels
 		}
+		// A subagent billed by another provider is the same fact as two
+		// sessions disagreeing — different ratios inside one checkpoint — so it
+		// takes the same reason rather than the false generic one.
 		if !subagentModelsMatch(meta.TokenUsage, resolved.Family) {
-			return tokenWeights{}
+			return tokenWeights{}, unpricedMixedModels
 		}
 	}
-	return resolved
+	return resolved, ""
 }
 
 // subagentModelsMatch reports whether every subagent entry that records a model
