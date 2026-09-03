@@ -1219,6 +1219,7 @@ func refreshCodexInventory(ctx context.Context, ag agent.Agent, sessionID string
 			usage = types.WithClearedSubagentTokens(usage, false)
 		}
 		for _, child := range extraction.Children {
+			childFiles := FilterAndNormalizePaths(child.ModifiedFiles, current.WorktreePath)
 			current.UpdateSubagentTranscriptPaths(child.AgentID, "", child.ResolvedPath)
 			for _, turnID := range child.TerminalTurnIDs {
 				if !current.FinalizeSubagentTurn(child.AgentID, turnID) {
@@ -1232,12 +1233,12 @@ func refreshCodexInventory(ctx context.Context, ag agent.Agent, sessionID string
 					if record.CompletedAt.IsZero() {
 						record.CompletedAt = time.Now()
 					}
-					record.Files = child.ModifiedFiles
+					record.Files = childFiles
 					record.DeclaredTranscriptPath = child.ResolvedPath
 					// nil is evidence too: a newer terminal snapshot without exact
 					// usage must clear, never preserve, an earlier total.
 					record.TokenUsage = child.TokenUsage
-					current.FilesTouched = mergeUnique(current.FilesTouched, child.ModifiedFiles)
+					current.FilesTouched = mergeUnique(current.FilesTouched, childFiles)
 					break
 				}
 			}

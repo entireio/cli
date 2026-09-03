@@ -117,6 +117,40 @@ func TestTerminalTurnIDs_OnlyAcceptsUnambiguousBoundaries(t *testing.T) {
 	}
 }
 
+func TestAnalyzeRollout_PaginatedSubagentIgnoresInheritedParentHistory(t *testing.T) {
+	t.Parallel()
+
+	lines := []map[string]any{
+		{
+			"ordinal": 0,
+			"type":    "session_meta",
+			"payload": map[string]any{
+				"id":                             "child",
+				"thread_source":                  "subagent",
+				"subagent_history_start_ordinal": 10,
+			},
+		},
+		{"ordinal": 2, "type": "event_msg", "payload": map[string]any{"type": "task_started", "turn_id": "parent-turn"}},
+		{"ordinal": 3, "type": "event_msg", "payload": map[string]any{"type": "item_completed", "item": map[string]any{"type": "FileChange", "status": "completed", "changes": map[string]any{"/repo/parent.txt": map[string]any{"type": "update"}}}}},
+		{"ordinal": 4, "type": "event_msg", "payload": map[string]any{"type": "token_count", "info": map[string]any{"total_token_usage": map[string]any{"input_tokens": 99, "cached_input_tokens": 50, "output_tokens": 9}}}},
+		{"ordinal": 11, "type": "event_msg", "payload": map[string]any{"type": "task_started", "turn_id": "child-turn"}},
+		{"ordinal": 12, "type": "event_msg", "payload": map[string]any{"type": "item_completed", "item": map[string]any{"type": "FileChange", "status": "completed", "changes": map[string]any{"/repo/child.txt": map[string]any{"type": "update"}}}}},
+		{"ordinal": 13, "type": "event_msg", "payload": map[string]any{"type": "token_count", "info": map[string]any{"total_token_usage": map[string]any{"input_tokens": 5, "cached_input_tokens": 2, "output_tokens": 1}}}},
+		{"ordinal": 14, "type": "event_msg", "payload": map[string]any{"type": "task_complete", "turn_id": "child-turn"}},
+	}
+	encoded := make([][]byte, 0, len(lines))
+	for _, line := range lines {
+		data, err := json.Marshal(line)
+		require.NoError(t, err)
+		encoded = append(encoded, data)
+	}
+
+	result := analyzeRollout(append([]byte(joinLines(encoded)), '\n'), 0)
+	require.Equal(t, []string{"/repo/child.txt"}, result.ModifiedFiles)
+	require.Equal(t, []string{"child-turn"}, result.TerminalTurnIDs)
+	require.Equal(t, &agent.TokenUsage{InputTokens: 3, CacheReadTokens: 2, OutputTokens: 1}, result.ExactTokenUsage)
+}
+
 func TestExactTokenUsage_UsesOnlyLastRecognizableSnapshot(t *testing.T) {
 	t.Parallel()
 

@@ -52,6 +52,7 @@ func sessionMetaID(data []byte) (string, error) {
 // rolloutLine is the top-level JSONL line structure in Codex rollout files.
 type rolloutLine struct {
 	Timestamp string          `json:"timestamp"`
+	Ordinal   *int            `json:"ordinal,omitempty"`
 	Type      string          `json:"type"` // "session_meta", "response_item", "event_msg", "turn_context"
 	Payload   json.RawMessage `json:"payload"`
 }
@@ -91,10 +92,11 @@ type rolloutClassificationResult struct {
 
 // sessionMetaPayload is the payload for type="session_meta" lines.
 type sessionMetaPayload struct {
-	ID           string          `json:"id"`
-	Timestamp    string          `json:"timestamp"`
-	ThreadSource string          `json:"thread_source"`
-	Source       json.RawMessage `json:"source"`
+	ID                          string          `json:"id"`
+	Timestamp                   string          `json:"timestamp"`
+	ThreadSource                string          `json:"thread_source"`
+	Source                      json.RawMessage `json:"source"`
+	SubagentHistoryStartOrdinal *int            `json:"subagent_history_start_ordinal,omitempty"`
 }
 
 // classifyRolloutDetailed reads only the rollout's session_meta record. Newer
@@ -198,6 +200,13 @@ type eventMsgPayload struct {
 	Type   string          `json:"type"` // "token_count", "task_started", "user_message", "agent_message", "task_complete"
 	TurnID *string         `json:"turn_id,omitempty"`
 	Info   json.RawMessage `json:"info,omitempty"`
+	Item   json.RawMessage `json:"item,omitempty"`
+}
+
+type fileChangeItem struct {
+	Type    string                     `json:"type"`
+	Status  string                     `json:"status"`
+	Changes map[string]json.RawMessage `json:"changes"`
 }
 
 // tokenCountInfo contains token usage data from event_msg.token_count.
@@ -478,17 +487,41 @@ type rolloutAnalysis struct {
 func analyzeRollout(data []byte, fromOffset int) rolloutAnalysis {
 	var result rolloutAnalysis
 	terminalValid := true
+	scopeValid := true
 	openTurn := ""
 	seenTurns := make(map[string]struct{})
 	seenFiles := make(map[string]struct{})
 	var lastTokenInfo json.RawMessage
 	foundToken := false
+	lines := splitJSONL(data)
+	var localStartOrdinal *int
+	if len(lines) > 0 {
+		var first rolloutLine
+		if json.Unmarshal(lines[0], &first) == nil && first.Type == rolloutLineTypeSessionMeta {
+			var meta sessionMetaPayload
+			if json.Unmarshal(first.Payload, &meta) == nil && meta.SubagentHistoryStartOrdinal != nil && *meta.SubagentHistoryStartOrdinal >= 0 {
+				localStartOrdinal = meta.SubagentHistoryStartOrdinal
+			}
+		}
+	}
 
-	for index, lineData := range splitJSONL(data) {
+	for index, lineData := range lines {
 		var line rolloutLine
 		if json.Unmarshal(lineData, &line) != nil {
 			terminalValid = false
+			if localStartOrdinal != nil {
+				scopeValid = false
+			}
 			continue
+		}
+		if localStartOrdinal != nil {
+			if line.Ordinal == nil {
+				scopeValid = false
+				continue
+			}
+			if *line.Ordinal < *localStartOrdinal {
+				continue
+			}
 		}
 		if index+1 > fromOffset {
 			for _, file := range extractFilesFromParsedLine(line) {
@@ -543,6 +576,9 @@ func analyzeRollout(data []byte, fromOffset int) rolloutAnalysis {
 			openTurn = ""
 		}
 	}
+	if !scopeValid {
+		return rolloutAnalysis{}
+	}
 	if !terminalValid || openTurn != "" {
 		result.TerminalTurnIDs = nil
 	}
@@ -553,14 +589,33 @@ func analyzeRollout(data []byte, fromOffset int) rolloutAnalysis {
 }
 
 func extractFilesFromParsedLine(line rolloutLine) []string {
-	if line.Type != rolloutLineTypeResponseItem {
+	switch line.Type {
+	case rolloutLineTypeResponseItem:
+		var payload responseItemPayload
+		if json.Unmarshal(line.Payload, &payload) != nil || payload.Type != "custom_tool_call" || payload.Name != "apply_patch" {
+			return nil
+		}
+		return extractFilesFromApplyPatch(payload.Input)
+	case rolloutLineTypeEventMsg:
+		var event eventMsgPayload
+		if json.Unmarshal(line.Payload, &event) != nil || event.Type != "item_completed" {
+			return nil
+		}
+		var item fileChangeItem
+		if json.Unmarshal(event.Item, &item) != nil || item.Type != "FileChange" || item.Status != "completed" {
+			return nil
+		}
+		files := make([]string, 0, len(item.Changes))
+		for path := range item.Changes {
+			if path != "" {
+				files = append(files, path)
+			}
+		}
+		sort.Strings(files)
+		return files
+	default:
 		return nil
 	}
-	var payload responseItemPayload
-	if json.Unmarshal(line.Payload, &payload) != nil || payload.Type != "custom_tool_call" || payload.Name != "apply_patch" {
-		return nil
-	}
-	return extractFilesFromApplyPatch(payload.Input)
 }
 
 func exactUsageFromInfo(lastInfo json.RawMessage) *agent.TokenUsage {

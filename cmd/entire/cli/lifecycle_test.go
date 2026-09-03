@@ -158,10 +158,13 @@ func TestRefreshCodexInventory_MultiTurnChildRefreshesCompletedTaskRecord(t *tes
 		sessionID = "codex-multi-turn-child"
 		agentID   = "child-1"
 	)
+	repoRoot, err := os.Getwd()
+	require.NoError(t, err)
 	completedAt := time.Now().UTC().Truncate(time.Microsecond)
 	complete := true
 	require.NoError(t, strategy.SaveSessionState(ctx, &strategy.SessionState{
 		SessionID:                 sessionID,
+		WorktreePath:              repoRoot,
 		StartedAt:                 time.Now(),
 		Phase:                     session.PhaseActive,
 		SubagentInventoryComplete: &complete,
@@ -187,7 +190,7 @@ func TestRefreshCodexInventory_MultiTurnChildRefreshesCompletedTaskRecord(t *tes
 		extraction: agent.InventoryExtraction{Children: []agent.SubagentAnalysis{{
 			AgentID:         agentID,
 			ResolvedPath:    "/tmp/child-1.jsonl",
-			ModifiedFiles:   []string{"first.go", "second.go"},
+			ModifiedFiles:   []string{filepath.Join(repoRoot, "first.go"), filepath.Join(repoRoot, "second.go")},
 			TokenUsage:      &agent.TokenUsage{InputTokens: 25},
 			TerminalTurnIDs: []string{"turn-2"},
 		}}},
