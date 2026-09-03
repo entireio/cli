@@ -296,7 +296,12 @@ func newRepoCloneCmd() *cobra.Command {
 	return cmd
 }
 
-// `repo clone`, registered at root.
+// newTopLevelCloneCmd is the top-level `entire clone` — the same command as
+// `entire repo clone`, registered at root (like `search`). Registered under the
+// `repo` group it inherits the control-plane persistent flags from
+// addControlPlaneFlags; at top level there is no such parent, so the flags are
+// added here (insecureHTTPRequested fails soft when the flag is undefined,
+// which would silently drop --insecure-http-auth).
 func newTopLevelCloneCmd() *cobra.Command {
 	cmd := newRepoCloneCmd()
 	addControlPlaneFlags(cmd)
