@@ -638,56 +638,6 @@ func TestLoad_MergesLocalOverrides(t *testing.T) {
 	}
 }
 
-func TestLoad_LegacyAsyncMirrorRequestsIsIgnored(t *testing.T) {
-	tests := []struct {
-		name  string
-		base  string
-		local string
-	}{
-		{name: "project setting", base: `{"enabled":true,"async_mirror_requests":false}`},
-		{name: "local setting", base: `{"enabled":true}`, local: `{"async_mirror_requests":true}`},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			setupSettingsDir(t, tt.base, tt.local)
-
-			_, err := Load(context.Background())
-			if err != nil {
-				t.Fatalf("Load() error = %v", err)
-			}
-
-			base, err := os.ReadFile(EntireSettingsFile)
-			if err != nil {
-				t.Fatalf("ReadFile(%s) error = %v", EntireSettingsFile, err)
-			}
-			if string(base) != tt.base {
-				t.Fatalf("Load() rewrote project settings to %q, want %q", base, tt.base)
-			}
-			if tt.local != "" {
-				local, err := os.ReadFile(EntireSettingsLocalFile)
-				if err != nil {
-					t.Fatalf("ReadFile(%s) error = %v", EntireSettingsLocalFile, err)
-				}
-				if string(local) != tt.local {
-					t.Fatalf("Load() rewrote local settings to %q, want %q", local, tt.local)
-				}
-			}
-		})
-	}
-}
-
-func TestLoadFromBytes_LegacyAsyncMirrorRequestsIsIgnored(t *testing.T) {
-	t.Parallel()
-
-	settings, err := LoadFromBytes([]byte(`{"enabled":true,"async_mirror_requests":false}`))
-	if err != nil {
-		t.Fatalf("LoadFromBytes() error = %v", err)
-	}
-	if !settings.Enabled {
-		t.Fatal("Enabled = false, want true")
-	}
-}
-
 func TestMergeJSON_ExternalAgents(t *testing.T) {
 	tmpDir := t.TempDir()
 

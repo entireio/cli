@@ -478,46 +478,6 @@ func TestRepoMirrorCreate_AsyncDefaultWhenSettingsFail(t *testing.T) {
 	require.Equal(t, []string{mirrorRequestsAPIPath, mirrorRequestPath(), mirrorRequestPath()}, paths)
 }
 
-func TestRepoMirrorCreate_LegacyAsyncSettingIsIgnored(t *testing.T) {
-	useFastMirrorPolling(t)
-
-	setupTestRepo(t)
-	writeSettings(t, `{"async_mirror_requests":false}`)
-
-	requestPolls := 0
-	var paths []string
-	client := newMirrorRequestClient(t, func(w http.ResponseWriter, r *http.Request) {
-		paths = append(paths, r.URL.Path)
-		switch r.URL.Path {
-		case mirrorRequestsAPIPath:
-			writeAcceptedMirrorRequest(t, w)
-		case mirrorRequestPath():
-			requestPolls++
-			if requestPolls == 1 {
-				writeJSONResponse(t, w, http.StatusOK, &coreapi.MirrorRequest{RequestId: testMirrorRequestID, Status: coreapi.MirrorRequestStatusProcessing})
-				return
-			}
-			writeSuccessfulMirrorRequest(t, w)
-		default:
-			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
-			w.WriteHeader(http.StatusNotFound)
-		}
-	})
-	previousClient := clusterCoreClient
-	clusterCoreClient = func(context.Context, string) (*coreapi.Client, error) { return client, nil }
-	t.Cleanup(func() { clusterCoreClient = previousClient })
-
-	cmd := newRepoCmd()
-	var stdout bytes.Buffer
-	cmd.SetOut(&stdout)
-	cmd.SetErr(&bytes.Buffer{})
-	cmd.SetArgs([]string{"mirror", "create", "--no-wait", "github.com/owner/repo", "aws-us-east-2.entire.io"})
-	require.NoError(t, cmd.ExecuteContext(t.Context()))
-	require.Contains(t, stdout.String(), "Mirror placed at entire://cluster/gh/owner/repo")
-	require.Contains(t, stdout.String(), "Mirror ID: mirror-1")
-	require.Equal(t, []string{mirrorRequestsAPIPath, mirrorRequestPath(), mirrorRequestPath()}, paths)
-}
-
 func TestCreateOneMirror_AsyncProgress(t *testing.T) {
 	useFastMirrorPolling(t)
 

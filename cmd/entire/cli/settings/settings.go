@@ -839,7 +839,9 @@ func ModifyClonePreferences(ctx context.Context, fn func(*ClonePreferences) erro
 // Use this when you have settings content from a non-file source (e.g., git show).
 func LoadFromBytes(data []byte) (*EntireSettings, error) {
 	s := &EntireSettings{Enabled: true}
-	if err := decodeEntireSettings(data, s); err != nil {
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(s); err != nil {
 		return nil, fmt.Errorf("parsing settings: %w", err)
 	}
 	if s.Redaction != nil {
@@ -848,23 +850,6 @@ func LoadFromBytes(data []byte) (*EntireSettings, error) {
 		}
 	}
 	return s, nil
-}
-
-// settingsDecodeCompat accepts retired top-level keys without keeping them in
-// EntireSettings or weakening strict decoding for genuinely unknown settings.
-type settingsDecodeCompat struct {
-	*EntireSettings
-
-	RemovedAsyncMirrorRequests json.RawMessage `json:"async_mirror_requests"`
-}
-
-func decodeEntireSettings(data []byte, settings *EntireSettings) error {
-	dec := json.NewDecoder(bytes.NewReader(data))
-	dec.DisallowUnknownFields()
-	if err := dec.Decode(&settingsDecodeCompat{EntireSettings: settings}); err != nil {
-		return fmt.Errorf("decode settings: %w", err)
-	}
-	return nil
 }
 
 // readConfined reads filePath through an os.Root, refusing outright to read it
@@ -1047,7 +1032,9 @@ func loadFromFile(filePath string) (*EntireSettings, error) {
 		return nil, fmt.Errorf("%w", err)
 	}
 
-	if err := decodeEntireSettings(data, settings); err != nil {
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(settings); err != nil {
 		return nil, fmt.Errorf("parsing settings file: %w", err)
 	}
 
@@ -1219,8 +1206,10 @@ func applyClonePreferences(settings *EntireSettings, prefs *ClonePreferences) {
 // project-level review configuration.
 func mergeJSON(settings *EntireSettings, data []byte) error {
 	// Validate that there are no unknown keys using strict decoding.
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.DisallowUnknownFields()
 	var temp EntireSettings
-	if err := decodeEntireSettings(data, &temp); err != nil {
+	if err := dec.Decode(&temp); err != nil {
 		return fmt.Errorf("parsing JSON: %w", err)
 	}
 
