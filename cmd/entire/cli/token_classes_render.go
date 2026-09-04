@@ -61,7 +61,17 @@ func writeTokenClasses(w io.Writer, classes *tokenClassBreakdown, subagentTotal 
 	// entry: one figure under two labels is the duplication this block exists
 	// to remove. Silent at zero, which cannot distinguish "none spawned" from
 	// "spawned but not captured".
-	if subagentTotal > 0 && classes.Total > 0 {
+	//
+	// Silent, too, when the figure exceeds the total it claims to be part of.
+	// The two numbers come from walks with different bounds: the classes are
+	// flattened at types.MaxSubagentDepth, while SubagentTotal comes from
+	// totalTokens, which is unbounded. Bounding that walk is on the plan's
+	// known-bugs list and deliberately not done here, so until the two agree a
+	// deep enough chain can produce a subagent figure larger than the Total
+	// printed directly above it. "Of the total, subagents used" more than the
+	// total is a report contradicting itself; printing nothing is the only
+	// statement that stays true.
+	if subagentTotal > 0 && classes.Total > 0 && subagentTotal <= classes.Total {
 		fmt.Fprintf(w, "  %-30s %10s %8s\n", "Of the total, subagents used",
 			formatTokenCount(subagentTotal),
 			formatSharePercent(subagentTotal, roundedPercent(subagentTotal, classes.Total)))

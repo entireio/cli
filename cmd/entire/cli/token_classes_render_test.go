@@ -255,3 +255,28 @@ func TestFormatSharePercent(t *testing.T) {
 		}
 	}
 }
+
+// The subagent figure and the class figures come from walks with different
+// bounds: the classes are flattened at types.MaxSubagentDepth, while
+// SubagentTotal comes from totalTokens, which is unbounded (deliberately still
+// unbounded — bounding it is on the plan's known-bugs list). On a chain deeper
+// than the bound the subagent figure can therefore exceed the Total printed
+// directly above it, and "of the total, subagents used" more than the total is
+// a report contradicting itself. Print nothing rather than a share that cannot
+// be true.
+func TestWriteTokenClasses_SubagentShareSilentWhenItExceedsTheTotal(t *testing.T) {
+	t.Parallel()
+
+	classes := &tokenClassBreakdown{
+		Input: tokenClassShare{Tokens: 1000, VolumePercent: 100},
+		Total: 1000,
+	}
+
+	var buf bytes.Buffer
+	writeTokenClasses(&buf, classes, 1500)
+	out := buf.String()
+
+	if strings.Contains(out, "subagents used") {
+		t.Errorf("a subagent figure larger than the total is not a share of it; print nothing:\n%s", out)
+	}
+}
