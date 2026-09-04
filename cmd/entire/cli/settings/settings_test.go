@@ -590,9 +590,16 @@ func TestLoad_ExternalAgentsField(t *testing.T) {
 		t.Fatalf("failed to create .entire directory: %v", err)
 	}
 
+	// The local file, not settings.json: external_agents grants execution of
+	// entire-agent-* binaries on $PATH, so it is honored only from an
+	// untracked local override. See enforceExternalAgentsTrust.
 	settingsFile := filepath.Join(entireDir, "settings.json")
-	if err := os.WriteFile(settingsFile, []byte(`{"enabled": true, "external_agents": true}`), 0o644); err != nil {
+	if err := os.WriteFile(settingsFile, []byte(`{"enabled": true}`), 0o644); err != nil {
 		t.Fatalf("failed to write settings file: %v", err)
+	}
+	localFile := filepath.Join(entireDir, "settings.local.json")
+	if err := os.WriteFile(localFile, []byte(`{"external_agents": true}`), 0o644); err != nil {
+		t.Fatalf("failed to write local settings file: %v", err)
 	}
 
 	testutil.InitRepo(t, tmpDir)

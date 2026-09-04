@@ -108,7 +108,7 @@ func (s *ephemeralStore) writeCheckpoint(ctx context.Context, opts WriteEphemera
 
 	commitMsg := trailers.FormatShadowCommit(opts.CommitMessage, opts.MetadataDir, opts.SessionID)
 
-	repoRoot, commonDir, err := s.repoDirs(ctx)
+	repoRoot, commonDir, err := s.repoDirs()
 	if err != nil {
 		return WriteEphemeralResult{}, fmt.Errorf("failed to resolve repo dirs: %w", err)
 	}
@@ -310,7 +310,7 @@ func (s *ephemeralStore) writeTask(ctx context.Context, opts WriteEphemeralTaskO
 	candidateFiles = append(candidateFiles, opts.NewFiles...)
 	allFiles := filterGitIgnoredFiles(ctx, s.repo, candidateFiles)
 
-	repoRoot, commonDir, err := s.repoDirs(ctx)
+	repoRoot, commonDir, err := s.repoDirs()
 	if err != nil {
 		return plumbing.ZeroHash, fmt.Errorf("failed to resolve repo dirs: %w", err)
 	}
@@ -862,7 +862,7 @@ func (s *ephemeralStore) buildTreeWithChanges(
 		if relErr != nil {
 			logInvalidGitTreePath(ctx, "add metadata directory", metadataDir, relErr)
 		} else {
-			metaChanges, metaErr := addMetadataDirToChanges(ctx, s.repo, repoRedactCache(ctx, s.repo), metadataDir, metadataRel)
+			metaChanges, metaErr := addMetadataDirToChanges(ctx, s.repo, repoRedactCache(s.repo), metadataDir, metadataRel)
 			if metaErr != nil {
 				return plumbing.ZeroHash, fmt.Errorf("failed to add metadata directory: %w", metaErr)
 			}

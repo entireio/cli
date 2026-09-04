@@ -233,6 +233,16 @@ func TestClearSessionStateWithProgress_RefusesReentrantClear(t *testing.T) {
 		t.Fatal("deadlock: the clear ran on a goroutine that did not hold the gate, so it blocked on its own parent's flock")
 	}
 
+	// The clear's result arrives from INSIDE the mutation, so the frame is
+	// still open when the receive above unblocks: it has yet to save and drop
+	// the flock. Reporting the frame's own error from its goroutine and
+	// returning here raced that save against this test's cleanups -- t.Chdir
+	// restores the cwd and t.TempDir deletes the repo, so the save resolves a
+	// different git dir (in CI, the real checkout, which the state store's
+	// test-isolation guard then refuses) and fails. The t.Errorf that reported
+	// it landed on a completed test, which panics the whole package run rather
+	// than failing this one test. Join the frame here instead, and assert on
+	// its error from the test goroutine.
 	select {
 	case err := <-frameDone:
 		if err != nil {

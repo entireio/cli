@@ -38,7 +38,6 @@ func TestGitMetadataTraversalHasCanonicalOwner(t *testing.T) {
 	allowedMetadataQueries := map[guardMetadataQuery]string{
 		{source: "binding/resolve.go:runRevParse", flag: "--git-common-dir"}:                            "binding discovers clone identity from arbitrary evidence paths",
 		{source: "binding/resolve.go:runRevParse", flag: "--show-toplevel"}:                             "binding discovers the owning worktree from arbitrary evidence paths",
-		{source: "checkpoint/git_common_dir.go:resolveGitCommonDir", flag: "--git-common-dir"}:          "checkpoint migrates in the checkpoint split",
 		{source: "dispatch/mode_local.go:resolveRepoRoots", flag: "--show-toplevel"}:                    "local dispatch resolves explicit repository candidates",
 		{source: "dispatch_wizard.go:resolveGitTopLevel", flag: "--show-toplevel"}:                      "dispatch discovery resolves explicit repository candidates",
 		{source: "gitdir/gitdir.go:CommonDir", flag: "--git-common-dir"}:                                "session removes the current-worktree resolver in the session split",

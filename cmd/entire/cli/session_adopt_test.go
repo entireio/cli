@@ -973,6 +973,7 @@ func TestSessionAdopt_ResetsSourceCheckpointWindow(t *testing.T) {
 		},
 		LastCheckpointCommitHash: "source-commit",
 		CheckpointTokenUsage:     &agent.TokenUsage{InputTokens: 100, OutputTokens: 25, APICallCount: 1},
+		CheckpointTokensFiltered: true,
 		UntrackedFilesAtStart:    []string{"source-only.txt"},
 		PromptWindowBase:         3,
 		PromptWindowResetPending: true,
@@ -1055,6 +1056,9 @@ func TestSessionAdopt_ResetsSourceCheckpointWindow(t *testing.T) {
 	}
 	if adopted.CheckpointTokenUsage != nil {
 		t.Fatalf("CheckpointTokenUsage = %#v, want nil for first target checkpoint", adopted.CheckpointTokenUsage)
+	}
+	if adopted.CheckpointTokensFiltered {
+		t.Fatal("CheckpointTokensFiltered = true, want false for first target checkpoint")
 	}
 
 	commitMsgFile := filepath.Join(targetRepo, "COMMIT_EDITMSG")

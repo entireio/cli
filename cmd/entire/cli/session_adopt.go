@@ -514,6 +514,7 @@ func resetSessionStateForTarget(state *session.State, target sessionTargetSnapsh
 	state.ClearCondensationAttempt()
 	state.LastCheckpointCommitHash = ""
 	state.CheckpointTokenUsage = nil
+	state.CheckpointTokensFiltered = false
 	// The cloned TokenUsage carries the source session's cumulative subagent
 	// total. Re-baseline it so the first target checkpoint counts only growth
 	// after replication/adoption.

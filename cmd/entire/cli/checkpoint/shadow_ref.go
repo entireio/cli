@@ -35,8 +35,8 @@ const shadowRefMaxJitter = 8 * time.Millisecond
 // repository. Callers use the worktree root as cmd.Dir for git invocations
 // and the common dir to locate filesystem paths (lock files, loose objects)
 // — both without depending on the process cwd.
-func (s *ephemeralStore) repoDirs(ctx context.Context) (worktreeRoot, commonDir string, err error) {
-	return repositoryDirs(ctx, s.repo)
+func (s *ephemeralStore) repoDirs() (worktreeRoot, commonDir string, err error) {
+	return repositoryDirs(s.repo)
 }
 
 // casUpdateShadowBranchRef atomically updates a shadow branch ref via
