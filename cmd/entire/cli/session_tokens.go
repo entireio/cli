@@ -189,21 +189,6 @@ func buildSessionTokensReport(state *strategy.SessionState, status string) sessi
 
 	if tokens := buildSessionTokensUsage(state.TokenUsage); tokens != nil {
 		report.Tokens = tokens
-		weights, unpricedReason := tokenWeightsForSession(state.ModelName, state.TokenUsage)
-		// ttlKnown is unconditionally true here: live state is this binary's own
-		// struct, and CacheCreation1hTokens is written whenever the agent records
-		// it, so an absent 1-hour figure means zero. The version gate on the
-		// checkpoint side exists only because checkpoints written before that
-		// field existed cannot be told apart from ones with no 1-hour writes —
-		// a live session has no version to be legacy at.
-		if classes, ok := tokenClassShares(state.TokenUsage, weights, true); ok {
-			// tokenClassShares only sees empty weights, so it names the generic
-			// reason; the caller is the one that knows which case it was.
-			if !classes.Priced && unpricedReason != "" {
-				classes.UnpricedReason = unpricedReason
-			}
-			report.Classes = &classes
-		}
 		if tokens.SubagentTotal > 0 {
 			report.Contributors = append(report.Contributors, sessionTokensContributor{
 				Kind:       "subagents",
@@ -221,6 +206,18 @@ func buildSessionTokensReport(state *strategy.SessionState, status string) sessi
 			Message:  "Token usage is unavailable for this session; the agent may not expose token data yet, or no checkpoint has captured it.",
 			Signals:  []string{"missing_token_usage"},
 		})
+	}
+
+	if state.TokenUsage != nil {
+		weights, unpricedReason := tokenWeightsForSession(state.ModelName, state.TokenUsage)
+		if classes, ok := tokenClassShares(state.TokenUsage, weights, sessionTokenTTLKnown()); ok {
+			// tokenClassShares sees only empty weights and names the generic
+			// reason; the resolver is the one that knows which case it was.
+			if !classes.Priced && unpricedReason != "" {
+				classes.UnpricedReason = unpricedReason
+			}
+			report.Classes = &classes
+		}
 	}
 
 	if contextInfo := buildSessionTokensContext(state.ContextTokens, state.ContextWindowSize); contextInfo != nil {
@@ -250,6 +247,16 @@ func buildSessionTokensReport(state *strategy.SessionState, status string) sessi
 		CheckpointCount: state.StepCount,
 	})...)
 	return report
+}
+
+// sessionTokenTTLKnown reports whether an absent 1-hour cache-write figure can
+// be trusted to mean zero on live state. It can: the figure is written by the
+// same binary now reading it, whenever the agent reports it, so absence means
+// the agent reported none — not "this CLI did not record it". A checkpoint
+// cannot assume that, which is what checkpointTokenTTLKnown's version check is
+// for.
+func sessionTokenTTLKnown() bool {
+	return true
 }
 
 func buildSessionTokensUsage(usage *agent.TokenUsage) *sessionTokensUsage {

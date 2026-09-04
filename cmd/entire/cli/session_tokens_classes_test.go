@@ -206,19 +206,36 @@ func liveSessionFor(t *testing.T, model string, usage *agent.TokenUsage) *strate
 	}
 }
 
-// The point of the feature: a live session on a model we have ratios for gets
-// the same volume-and-cost table `checkpoint tokens` shows.
-func TestSessionTokensReport_Classes_PricedWhenModelKnown(t *testing.T) {
+func TestSessionTokenTTLKnown_IsTrueForLiveState(t *testing.T) {
 	t.Parallel()
 
-	report := buildSessionTokensReport(liveSessionFor(t, "claude-sonnet-4.6",
-		&agent.TokenUsage{InputTokens: 1000, CacheCreationTokens: 2000, CacheReadTokens: 6000, OutputTokens: 1000}), "idle")
+	if !sessionTokenTTLKnown() {
+		t.Error("live state is written by the running binary, which records the 1h split whenever the agent reports it, so absence means zero")
+	}
+}
+
+// The point of the feature: a live session on a model we have ratios for gets
+// the same volume-and-cost table `checkpoint tokens` shows.
+func TestBuildSessionTokensReport_PricedClassesForKnownModel(t *testing.T) {
+	t.Parallel()
+
+	state := &strategy.SessionState{
+		SessionID: "live-priced",
+		AgentType: "Claude Code",
+		ModelName: "claude-sonnet-4.6",
+		TokenUsage: &agent.TokenUsage{
+			InputTokens: 42000, CacheCreationTokens: 118000, CacheCreation1hTokens: 22000,
+			CacheReadTokens: 240000, OutputTokens: 11000, ThinkingTokens: 4000, APICallCount: 37,
+		},
+	}
+
+	report := buildSessionTokensReport(state, "active")
 
 	if report.Classes == nil {
-		t.Fatal("a live session with usage must carry a class breakdown")
+		t.Fatal("a live session with usage must get a breakdown")
 	}
 	if !report.Classes.Priced {
-		t.Errorf("a known model must be priced, reason was %q", report.Classes.UnpricedReason)
+		t.Fatalf("claude-sonnet-4.6 has verified ratios; reason was %q", report.Classes.UnpricedReason)
 	}
 	vol := report.Classes.Input.VolumePercent + report.Classes.CacheWrite.VolumePercent +
 		report.Classes.CacheRead.VolumePercent + report.Classes.Output.VolumePercent
@@ -339,14 +356,37 @@ func TestSessionTokensText_RendersTheBillingTable(t *testing.T) {
 	}
 }
 
-// A session with no usage at all reports no table rather than four zeros, which
-// would read as a free session.
-func TestSessionTokensReport_Classes_AbsentWhenNoUsage(t *testing.T) {
+// A model-less session still gets volume shares; only cost is withheld.
+func TestBuildSessionTokensReport_UnpricedWithoutModel(t *testing.T) {
 	t.Parallel()
 
-	report := buildSessionTokensReport(liveSessionFor(t, "claude-sonnet-4.6", nil), "idle")
+	state := &strategy.SessionState{
+		SessionID:  "live-nomodel",
+		AgentType:  "Cursor",
+		TokenUsage: &agent.TokenUsage{InputTokens: 1000, CacheReadTokens: 3000},
+	}
+
+	report := buildSessionTokensReport(state, "active")
+
+	if report.Classes == nil {
+		t.Fatal("a model-less session still gets volume shares")
+	}
+	if report.Classes.Priced {
+		t.Error("no model means no verified ratios; cost must be withheld")
+	}
+	if report.Classes.UnpricedReason != unpricedNoModel {
+		t.Errorf("reason = %q, want %q", report.Classes.UnpricedReason, unpricedNoModel)
+	}
+}
+
+// A session with no usage at all reports no table rather than four zeros, which
+// would read as a free session.
+func TestBuildSessionTokensReport_NoClassesWithoutUsage(t *testing.T) {
+	t.Parallel()
+
+	report := buildSessionTokensReport(&strategy.SessionState{SessionID: "empty", AgentType: "Cursor"}, "active")
 	if report.Classes != nil {
-		t.Errorf("no usage must yield no breakdown, got %+v", report.Classes)
+		t.Error("no recorded usage must produce no breakdown")
 	}
 }
 
