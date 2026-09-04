@@ -69,7 +69,7 @@ func TestAddTokenUsage(t *testing.T) {
 	}
 }
 
-func TestAddTokenUsage_ExplicitIncompleteDominatesComplete(t *testing.T) {
+func TestAddTokenUsage_CompletenessCombination(t *testing.T) {
 	t.Parallel()
 
 	complete := true
@@ -81,6 +81,16 @@ func TestAddTokenUsage_ExplicitIncompleteDominatesComplete(t *testing.T) {
 		got := AddTokenUsage(operands[0], operands[1])
 		if got.SubagentTokensComplete == nil || *got.SubagentTokensComplete {
 			t.Fatalf("AddTokenUsage(%v, %v) completeness = %v, want false", *operands[0].SubagentTokensComplete, *operands[1].SubagentTokensComplete, got.SubagentTokensComplete)
+		}
+	}
+
+	unknown := &TokenUsage{}
+	for _, operands := range [][2]*TokenUsage{
+		{{SubagentTokensComplete: &complete}, unknown},
+		{unknown, {SubagentTokensComplete: &complete}},
+	} {
+		if got := AddTokenUsage(operands[0], operands[1]); got.SubagentTokensComplete != nil {
+			t.Fatalf("AddTokenUsage with unknown coverage = %v, want nil", *got.SubagentTokensComplete)
 		}
 	}
 }

@@ -89,18 +89,26 @@ func addTokenUsageAtDepth(a, b *TokenUsage, depth int) *TokenUsage {
 }
 
 func tokenCompleteness(a, b *TokenUsage) *bool {
-	seen := false
+	seenComplete := false
+	seenUnknown := false
 	for _, usage := range []*TokenUsage{a, b} {
-		if usage == nil || usage.SubagentTokensComplete == nil {
+		if usage == nil {
 			continue
 		}
-		seen = true
+		if usage.SubagentTokensComplete == nil {
+			seenUnknown = true
+			continue
+		}
 		if !*usage.SubagentTokensComplete {
 			incomplete := false
 			return &incomplete
 		}
+		seenComplete = true
 	}
-	if seen {
+	if seenUnknown {
+		return nil
+	}
+	if seenComplete {
 		complete := true
 		return &complete
 	}

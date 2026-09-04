@@ -65,8 +65,8 @@ const (
 )
 
 // rolloutClassification identifies whether a rollout belongs to a root thread
-// or a child thread. Lifecycle hooks mutate the root session, so uncertainty is
-// intentionally distinct from root and must not be treated as a root rollout.
+// or a child thread. Uncertainty remains distinct so callers can diagnose it;
+// root lifecycle hooks preserve their event unless the rollout is a confirmed child.
 type rolloutClassification uint8
 
 const (

@@ -192,7 +192,7 @@ func TestParseHookEvent_TurnHooksIgnoreChildRollout(t *testing.T) {
 	}
 }
 
-func TestParseHookEvent_UnknownTurnRolloutWritesCategorizedDiagnostic(t *testing.T) {
+func TestParseHookEvent_UnknownTurnRolloutPreservesRootLifecycle(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
@@ -250,15 +250,24 @@ func TestParseHookEvent_UnknownTurnRolloutWritesCategorizedDiagnostic(t *testing
 			ctx := logging.WithLogger(context.Background(), logger)
 			input := `{"session_id":"root-session-1","turn_id":"turn-1","transcript_path":` + pathJSON + `,"model":"gpt-5","prompt":"do work"}`
 
-			event, err := (&CodexAgent{}).ParseHookEvent(ctx, HookNameUserPromptSubmit, strings.NewReader(input))
-			require.NoError(t, err)
-			require.Nil(t, event)
+			for _, hook := range []struct {
+				name string
+				want agent.EventType
+			}{
+				{HookNameUserPromptSubmit, agent.TurnStart},
+				{HookNameStop, agent.TurnEnd},
+			} {
+				event, err := (&CodexAgent{}).ParseHookEvent(ctx, hook.name, strings.NewReader(input))
+				require.NoError(t, err)
+				require.NotNil(t, event)
+				require.Equal(t, hook.want, event.Type)
+			}
 			require.NoError(t, logger.Close())
 
 			logData, err := os.ReadFile(filepath.Join(logDir, "entire.log"))
 			require.NoError(t, err)
 			logText := string(logData)
-			require.Contains(t, logText, "codex: skipped turn lifecycle event because rollout ownership is unverified")
+			require.Contains(t, logText, "codex: preserved root lifecycle event because rollout ownership is unverified")
 			require.Contains(t, logText, string(tt.category))
 			require.Contains(t, logText, tt.detail)
 			if rolloutPath != "" {
