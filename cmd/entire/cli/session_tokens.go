@@ -7,6 +7,7 @@ import (
 	"io"
 	"math/bits"
 	"strings"
+	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
@@ -14,12 +15,21 @@ import (
 )
 
 type sessionTokensReport struct {
-	SessionID       string                        `json:"session_id"`
-	Agent           string                        `json:"agent"`
-	Model           string                        `json:"model,omitempty"`
-	Status          string                        `json:"status"`
-	Source          string                        `json:"source"`
-	Tokens          *sessionTokensUsage           `json:"tokens,omitempty"`
+	SessionID string `json:"session_id"`
+	Agent     string `json:"agent"`
+	Model     string `json:"model,omitempty"`
+	Status    string `json:"status"`
+	// Duration is how long the session has been worked on, as an interaction
+	// span rather than elapsed wall-clock. Empty when no interaction has been
+	// recorded.
+	Duration string              `json:"duration,omitempty"`
+	Source   string              `json:"source"`
+	Tokens   *sessionTokensUsage `json:"tokens,omitempty"`
+	// Classes is the billing-class breakdown — volume and, where a verified
+	// ratio row applies, cost share per class. Built from the same resolver and
+	// rendered by the same writer as `checkpoint tokens`, so a live session and
+	// its own committed checkpoint cannot show different tables.
+	Classes         *tokenClassBreakdown          `json:"classes,omitempty"`
 	Context         *sessionTokensContext         `json:"context,omitempty"`
 	Contributors    []sessionTokensContributor    `json:"contributors,omitempty"`
 	Recommendations []sessionTokensRecommendation `json:"recommendations,omitempty"`
@@ -179,6 +189,7 @@ func buildSessionTokensReport(state *strategy.SessionState, status string) sessi
 		Agent:     agentLabel,
 		Model:     state.ModelName,
 		Status:    status,
+		Duration:  sessionTokensDuration(state),
 		Source:    "session_state",
 	}
 
@@ -201,6 +212,18 @@ func buildSessionTokensReport(state *strategy.SessionState, status string) sessi
 			Message:  "Token usage is unavailable for this session; the agent may not expose token data yet, or no checkpoint has captured it.",
 			Signals:  []string{"missing_token_usage"},
 		})
+	}
+
+	if state.TokenUsage != nil {
+		weights, unpricedReason := tokenWeightsForSession(state.ModelName, state.TokenUsage)
+		if classes, ok := tokenClassShares(state.TokenUsage, weights, sessionTokenTTLKnown()); ok {
+			// tokenClassShares sees only empty weights and names the generic
+			// reason; the resolver is the one that knows which case it was.
+			if !classes.Priced && unpricedReason != "" {
+				classes.UnpricedReason = unpricedReason
+			}
+			report.Classes = &classes
+		}
 	}
 
 	if contextInfo := buildSessionTokensContext(state.ContextTokens, state.ContextWindowSize); contextInfo != nil {
@@ -232,6 +255,68 @@ func buildSessionTokensReport(state *strategy.SessionState, status string) sessi
 	return report
 }
 
+// sessionTokensDuration reports how long the session has been worked on, as the
+// span between its first and last recorded interaction. Elapsed wall-clock
+// would count a session left open overnight as a twelve-hour session; a token
+// report is about work done, not calendar time. Empty when no interaction has
+// been recorded — "0m" would claim a measurement that was never taken.
+func sessionTokensDuration(state *strategy.SessionState) string {
+	if state == nil || state.LastInteractionTime == nil {
+		return ""
+	}
+	span := state.LastInteractionTime.Sub(state.StartedAt)
+	// Below a second there is no work span to report, and "0s so far" is the
+	// same false claim as the "0m" this function exists to avoid: it states a
+	// duration of zero for a session that has been worked on. Found by running
+	// the command against a real session whose first turn ended immediately —
+	// every unit test here uses a synthetic multi-hour span.
+	if span < time.Second {
+		return ""
+	}
+	// "so far" claims the work is ongoing, which is true of a live session and
+	// false of a finished one — and this command is run against both
+	// (sessionPhaseLabel reports "ended" off the same state). An ended
+	// session's span is final, so it gets the bare figure.
+	if state.EndedAt != nil {
+		return formatDurationShort(span)
+	}
+	return formatDurationShort(span) + " so far"
+}
+
+// formatDurationShort renders a work span as "2h 14m", "14m" or "45s". Package
+// cli has no helper for this shape: formatRelativeDuration (status.go) appends
+// "ago", and formatSummaryDuration (explain.go) returns Duration.String(),
+// which prints "2h14m0s".
+//
+// Units below the leading one are dropped once minutes are on the clock —
+// seconds are noise beside hours of work — and a whole number of hours prints
+// "3h", not "3h 0m".
+func formatDurationShort(d time.Duration) string {
+	switch {
+	case d >= time.Hour:
+		hours := int(d / time.Hour)
+		minutes := int((d % time.Hour) / time.Minute)
+		if minutes == 0 {
+			return fmt.Sprintf("%dh", hours)
+		}
+		return fmt.Sprintf("%dh %dm", hours, minutes)
+	case d >= time.Minute:
+		return fmt.Sprintf("%dm", int(d/time.Minute))
+	default:
+		return fmt.Sprintf("%ds", int(d/time.Second))
+	}
+}
+
+// sessionTokenTTLKnown reports whether an absent 1-hour cache-write figure can
+// be trusted to mean zero on live state. It can: the figure is written by the
+// same binary now reading it, whenever the agent reports it, so absence means
+// the agent reported none — not "this CLI did not record it". A checkpoint
+// cannot assume that, which is what checkpointTokenTTLKnown's version check is
+// for.
+func sessionTokenTTLKnown() bool {
+	return true
+}
+
 func buildSessionTokensUsage(usage *agent.TokenUsage) *sessionTokensUsage {
 	if usage == nil {
 		return nil
@@ -257,6 +342,15 @@ func buildSessionTokensUsage(usage *agent.TokenUsage) *sessionTokensUsage {
 		APICalls:      usage.APICallCount,
 		SubagentTotal: totalTokens(usage.SubagentTokens),
 	}
+}
+
+// subagentTotalOf reads the subagent figure off a usage block, tolerating the
+// nil that means "no usage recorded at all".
+func subagentTotalOf(tokens *sessionTokensUsage) int {
+	if tokens == nil {
+		return 0
+	}
+	return tokens.SubagentTotal
 }
 
 func topLevelSessionTokenTotal(tokens *sessionTokensUsage) int {
@@ -450,8 +544,12 @@ func writeSessionTokensText(w io.Writer, report sessionTokensReport) {
 		fmt.Fprintf(w, "Model:   %s\n", report.Model)
 	}
 	fmt.Fprintf(w, "Status:  %s\n", report.Status)
+	if report.Duration != "" {
+		fmt.Fprintf(w, "Duration: %s\n", report.Duration)
+	}
 
 	writeTokenUsageSection(w, report.Tokens)
+	writeTokenClasses(w, report.Classes, subagentTotalOf(report.Tokens))
 	if len(report.Recommendations) > 0 {
 		writeTokenRecommendations(w, report.Recommendations)
 	}
@@ -611,22 +709,42 @@ func writeTokenUsageSectionWithTitle(w io.Writer, title string, tokens *sessionT
 }
 
 func writeTokenContributors(w io.Writer, contributors []sessionTokensContributor, contextInfo *sessionTokensContext) {
-	if len(contributors) > 0 {
-		fmt.Fprintln(w)
-		fmt.Fprintln(w, "Likely contributors")
-		for _, contributor := range contributors {
-			switch contributor.Kind {
-			case "subagents":
-				fmt.Fprintf(w, "- %s: %s tokens\n", contributor.Label, formatTokenCount(contributor.Tokens))
-			case "context_pressure":
-				if contextInfo != nil {
-					fmt.Fprintf(w, "- %s: %d%% of %s tokens\n", contributor.Label, contextInfo.Percent, formatTokenCount(contextInfo.WindowSize))
-				}
-			default:
-				fmt.Fprintf(w, "- %s\n", contributor.Label)
+	lines := contributorLines(contributors, contextInfo)
+	if len(lines) == 0 {
+		return
+	}
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, "Likely contributors")
+	for _, line := range lines {
+		fmt.Fprintf(w, "- %s\n", line)
+	}
+}
+
+// contributorLines renders the contributor lines, so that the section header
+// and its body come from one pass. The guard used to be len(contributors) > 0,
+// which counted entries that render nothing: context_pressure has always been
+// silent without a context block, and the subagents entry became silent when
+// its figure moved into the billed block (it stays in the report for --json).
+// A session with subagent usage, no context data and no skill events therefore
+// printed the "Likely contributors" header with nothing under it. Building the
+// lines first makes the header impossible to disagree with its own body.
+func contributorLines(contributors []sessionTokensContributor, contextInfo *sessionTokensContext) []string {
+	lines := make([]string, 0, len(contributors))
+	for _, contributor := range contributors {
+		switch contributor.Kind {
+		case "subagents":
+			// Rendered inside the billed block, with its share of the total.
+			// The report entry stays for --json (Decision 3); only the text moves.
+		case "context_pressure":
+			if contextInfo != nil {
+				lines = append(lines, fmt.Sprintf("%s: %d%% of %s tokens",
+					contributor.Label, contextInfo.Percent, formatTokenCount(contextInfo.WindowSize)))
 			}
+		default:
+			lines = append(lines, contributor.Label)
 		}
 	}
+	return lines
 }
 
 func writeTokenLimitations(w io.Writer, limitations []string) {

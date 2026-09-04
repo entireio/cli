@@ -320,61 +320,61 @@ func buildCheckpointTokensReport(cpID id.CheckpointID, summary *checkpoint.Check
 // ratios to a total containing Codex sessions. Unreadable metadata means
 // unpriced.
 // The second return value is the specific reason the weights came back empty,
-// or "" when the generic "no verified ratios for this model" is the true one.
-// Only this function can tell the cases apart: an unrecognised model really has
-// no ratio row, but models that each have one and disagree are a different fact,
-// and telling the user their model is unpriceable when it is not contradicts the
-// rule that a withheld-cost reason must be true of the case it names.
+// or "" when the generic unpricedNoModel is the true one — referenced by name
+// rather than quoted, so a reworded constant cannot leave this comment stale.
+//
+// The per-session pricing decision itself is tokenWeightsForSession, shared
+// with `session tokens`. What stays here is checkpoint-only: the
+// metadataWarnings gate, the nil-meta guard, and the cross-session family
+// comparison (a live session has exactly one session to compare).
+//
+// The reason describes the whole set, so unpriced sessions are collected rather
+// than returned from as soon as one is seen. Returning eagerly made the reason
+// depend on iteration order — three sessions on claude, an unknown model and
+// gpt reported differing ratios or no ratios purely by position — and it could
+// not tell "no session has a ratio row", where unpricedNoModel is true, from
+// "only some do", where it is false. Precedence, applied to the set:
+//
+//  1. two recognised families that disagree (unpricedMixedModels): true
+//     regardless of what any other session carries
+//  2. a specific per-session reason, e.g. a subagent's
+//  3. some sessions priceable and some not (unpricedSomeTokensNoRatios)
+//  4. none priceable, where the generic reason is the accurate one
 func checkpointTokenWeights(metas []*checkpoint.Metadata, metadataWarnings int) (tokenWeights, string) {
 	if metadataWarnings > 0 {
 		return tokenWeights{}, ""
 	}
 	var resolved tokenWeights
+	var anyWithoutRatios bool
+	var sessionReason string
 	for _, meta := range metas {
 		if meta == nil {
 			return tokenWeights{}, ""
 		}
-		weights, ok := tokenWeightsForModel(meta.Model)
-		if !ok {
-			return tokenWeights{}, ""
+		weights, reason := tokenWeightsForSession(meta.Model, meta.TokenUsage)
+		if weights.Family == "" {
+			if reason == "" {
+				anyWithoutRatios = true
+			} else if sessionReason == "" {
+				sessionReason = reason
+			}
+			continue
 		}
 		if resolved.Family == "" {
 			resolved = weights
 		} else if resolved.Family != weights.Family {
 			return tokenWeights{}, unpricedMixedModels
 		}
-		// A subagent billed by another provider is the same fact as two
-		// sessions disagreeing — different ratios inside one checkpoint — so it
-		// takes the same reason rather than the false generic one.
-		if !subagentModelsMatch(meta.TokenUsage, resolved.Family) {
-			return tokenWeights{}, unpricedMixedModels
-		}
+	}
+	switch {
+	case sessionReason != "":
+		return tokenWeights{}, sessionReason
+	case anyWithoutRatios && resolved.Family != "":
+		return tokenWeights{}, unpricedSomeTokensNoRatios
+	case anyWithoutRatios:
+		return tokenWeights{}, ""
 	}
 	return resolved, ""
-}
-
-// subagentModelsMatch reports whether every subagent entry that records a model
-// belongs to family. Subagent tokens are flattened into the classes, so an entry
-// billed at another provider's ratios would be costed at its parent's rate while
-// the report claims the whole total is priced — #2155 records Model on these
-// entries precisely so that cannot be assumed away.
-//
-// An entry with no recorded model inherits the parent's family rather than
-// unpricing the checkpoint: absence is the norm, and for a single-provider agent
-// the parent is the best available evidence. That inference is wrong only for an
-// agent that mixes providers within one session (Pi), and only when it also
-// fails to record the subagent's model.
-func subagentModelsMatch(usage *agent.TokenUsage, family string) bool {
-	for u := usage; u != nil; u = u.SubagentTokens {
-		if u.Model == "" {
-			continue
-		}
-		weights, ok := tokenWeightsForModel(u.Model)
-		if !ok || weights.Family != family {
-			return false
-		}
-	}
-	return true
 }
 
 // checkpointTokenTTLKnown reports whether an absent 1-hour cache-write figure
@@ -646,96 +646,13 @@ func writeCheckpointTokensText(w io.Writer, report checkpointTokensReport) {
 	}
 
 	writeTokenUsageSection(w, report.Tokens)
-	writeCheckpointTokenClasses(w, report.Classes)
+	writeTokenClasses(w, report.Classes, subagentTotalOf(report.Tokens))
 	writeCheckpointTokenComparison(w, report.Comparison)
 	if len(report.Recommendations) > 0 {
 		writeTokenRecommendations(w, report.Recommendations)
 	}
 	writeTokenContributors(w, report.Contributors, report.Context)
 	writeTokenLimitations(w, report.Limitations)
-}
-
-// writeCheckpointTokenClasses renders the billing-class breakdown. The cost
-// column is present only when the classes are priced: an empty or zeroed cost
-// column would read as "this cost nothing" rather than "we cannot say".
-func writeCheckpointTokenClasses(w io.Writer, classes *tokenClassBreakdown) {
-	if classes == nil {
-		return
-	}
-
-	fmt.Fprintln(w)
-	fmt.Fprintln(w, "How it was billed")
-	if classes.Priced {
-		fmt.Fprintf(w, "  %-14s %10s %8s %7s\n", "", "tokens", "volume", "cost")
-	} else {
-		fmt.Fprintf(w, "  %-14s %10s %8s\n", "", "tokens", "volume")
-	}
-
-	rows := []struct {
-		label string
-		share tokenClassShare
-		note  string
-	}{
-		{"Fresh input", classes.Input, ""},
-		{"Cache write", classes.CacheWrite, subsetNote("1h TTL", classes.CacheWrite1h)},
-		{"Cache read", classes.CacheRead, ""},
-		{"Output", classes.Output, subsetNote("thinking", classes.Thinking)},
-	}
-	for _, row := range rows {
-		if classes.Priced {
-			fmt.Fprintf(w, "  %-14s %10s %8s %7s", row.label,
-				formatTokenCount(row.share.Tokens), formatSharePercent(row.share.Tokens, row.share.VolumePercent),
-				formatCostSharePercent(row.share))
-		} else {
-			fmt.Fprintf(w, "  %-14s %10s %8s", row.label,
-				formatTokenCount(row.share.Tokens), formatSharePercent(row.share.Tokens, row.share.VolumePercent))
-		}
-		if row.note != "" {
-			fmt.Fprintf(w, "  %s", row.note)
-		}
-		fmt.Fprintln(w)
-	}
-	fmt.Fprintf(w, "  %-14s %10s\n", "Total", formatTokenCount(classes.Total))
-
-	if !classes.Priced {
-		reason := classes.UnpricedReason
-		if reason == "" {
-			reason = unpricedNoModel
-		}
-		fmt.Fprintf(w, "  Cost share omitted: %s.\n", reason)
-	}
-}
-
-// formatSharePercent renders a whole-percent share. A class with tokens in it
-// but a share that rounds to zero prints "<1%" rather than "0%": a row showing
-// 274.8k tokens beside "0%" reads as broken even though it is arithmetically
-// right. A genuinely empty class still prints "0%".
-func formatSharePercent(tokens, percent int) string {
-	if percent == 0 && tokens > 0 {
-		return "<1%"
-	}
-	return fmt.Sprintf("%d%%", percent)
-}
-
-// formatCostSharePercent renders a cost share. It differs from the volume
-// column in one case: a class the provider does not bill at all prints "0%",
-// not "<1%". "<1%" promises a small cost; several families bill no cache writes
-// whatsoever, and claiming a fraction of a percent there is a number the user
-// is never charged.
-func formatCostSharePercent(share tokenClassShare) string {
-	if share.CostZero {
-		return "0%"
-	}
-	return formatSharePercent(share.Tokens, share.CostPercent)
-}
-
-// subsetNote renders a subset figure alongside its parent class, or "" when the
-// agent recorded none. Subsets are part of their class, never added to the total.
-func subsetNote(label string, tokens int) string {
-	if tokens <= 0 {
-		return ""
-	}
-	return fmt.Sprintf("(%s %s)", label, formatTokenCount(tokens))
 }
 
 func writeCheckpointTokensAgentBrief(w io.Writer, report checkpointTokensReport) {
@@ -768,9 +685,15 @@ func checkpointAgentBriefNextAction(report checkpointTokensReport) string {
 	return "Continue normally; no high-signal token optimization is available from this checkpoint."
 }
 
+// checkpointAgentBriefSessionReport bridges a checkpoint report into the shared
+// brief helpers. Classes is carried even though no brief helper reads it yet:
+// both report types now have the field, so dropping it here would be invisible
+// until someone makes --agent-brief class-aware, at which point the checkpoint
+// brief would silently reason from nil while the session brief saw real data.
 func checkpointAgentBriefSessionReport(report checkpointTokensReport) sessionTokensReport {
 	return sessionTokensReport{
 		Tokens:          report.Tokens,
+		Classes:         report.Classes,
 		Context:         report.Context,
 		Recommendations: report.Recommendations,
 		Limitations:     report.Limitations,

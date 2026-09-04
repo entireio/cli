@@ -1072,7 +1072,9 @@ func TestTokensCmd_TextOutputWithRecommendations(t *testing.T) {
 		"Cache write: 500",
 		"Output: 1.1k",
 		"API calls: 6",
-		"Subagents: 2k tokens",
+		// Moved out of "Likely contributors" and into the billed block, where it
+		// carries its share of the total it is a part of.
+		"Of the total, subagents used",
 		"Context pressure: 85% of 10k tokens",
 		"Recommendations",
 		"Scope subagent tasks tightly",
@@ -2013,7 +2015,7 @@ func TestCheckpointTokensCmd_TextOutputWithRealCheckpointShape(t *testing.T) {
 }
 
 // The priced path had no command-level coverage: the cost column was asserted
-// only against writeCheckpointTokenClasses directly, and no checkpoint in this
+// only against writeTokenClasses directly, and no checkpoint in this
 // repo's own history is priceable (every one predates the cache-write TTL
 // split), so nothing exercised metadata -> report -> render with a model
 // recorded. This drives it through the real command and asserts the acceptance
@@ -2277,7 +2279,8 @@ func TestCheckpointTokensCmd_TextOutputWithMultipleSessionsUsesAggregateScope(t 
 		"Input: 3.5k",
 		"Output: 1k",
 		"API calls: 3",
-		"Subagents: 2.5k tokens",
+		// Both commands render the figure through the shared block now.
+		"Of the total, subagents used",
 	}
 	for _, check := range checks {
 		if !strings.Contains(out, check) {
