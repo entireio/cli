@@ -578,3 +578,29 @@ func TestSessionTokensDuration_EmptyForSubSecondSpan(t *testing.T) {
 		t.Errorf("duration = %q, want empty: a sub-second span has no duration worth stating", got)
 	}
 }
+
+// "so far" says the work is ongoing. `session tokens` is run against ended
+// sessions too, where that is simply untrue — the span is final, not partial.
+func TestSessionTokensDuration_NoSoFarOnceTheSessionEnded(t *testing.T) {
+	t.Parallel()
+
+	start := time.Now().Add(-6 * time.Hour)
+	last := start.Add(2*time.Hour + 14*time.Minute)
+	ended := last.Add(time.Minute)
+	state := &strategy.SessionState{
+		SessionID:           "ended-duration",
+		AgentType:           "Claude Code",
+		StartedAt:           start,
+		LastInteractionTime: &last,
+		EndedAt:             &ended,
+		TokenUsage:          &agent.TokenUsage{InputTokens: 100},
+	}
+
+	got := sessionTokensDuration(state)
+	if strings.Contains(got, "so far") {
+		t.Errorf("duration = %q; an ended session's span is final, not ongoing", got)
+	}
+	if got != "2h 14m" {
+		t.Errorf("duration = %q, want %q", got, "2h 14m")
+	}
+}

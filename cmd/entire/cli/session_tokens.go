@@ -273,6 +273,13 @@ func sessionTokensDuration(state *strategy.SessionState) string {
 	if span < time.Second {
 		return ""
 	}
+	// "so far" claims the work is ongoing, which is true of a live session and
+	// false of a finished one — and this command is run against both
+	// (sessionPhaseLabel reports "ended" off the same state). An ended
+	// session's span is final, so it gets the bare figure.
+	if state.EndedAt != nil {
+		return formatDurationShort(span)
+	}
 	return formatDurationShort(span) + " so far"
 }
 
