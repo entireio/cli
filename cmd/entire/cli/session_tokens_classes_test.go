@@ -9,6 +9,11 @@ import (
 // The renderer prints these verbatim on both commands, so a reason that says
 // "checkpoint" is a false statement on `session tokens`. Only the TTL reason is
 // legitimately checkpoint-specific: live state always knows the split.
+//
+// Honest limitation: this is a per-member list of the known unpriced*
+// constants. Despite the plural, unqualified test name, it is not exhaustive —
+// a fifth unpriced* constant added later would not be covered here
+// automatically.
 func TestUnpricedReasons_AreScopeNeutral(t *testing.T) {
 	t.Parallel()
 
@@ -36,11 +41,12 @@ func TestUnpricedReasons_AreScopeNeutral(t *testing.T) {
 	}
 }
 
-// TestWriteTokenClasses_UnpricedReasonIsScopeNeutral asserts on what the
-// renderer actually prints, not on the constant behind it — the rendered line
-// is the artifact the "each reason must be true of the case it names" rule is
-// about. It also covers writeTokenClasses' empty-UnpricedReason fallback to
-// unpricedNoModel, which nothing exercised before this test.
+// TestWriteTokenClasses_UnpricedReasonIsScopeNeutral covers two things the
+// constant-only test above cannot: writeTokenClasses' empty-UnpricedReason
+// fallback to unpricedNoModel, and that the scope-word scan below covers the
+// whole rendered block rather than just the omitted-cost line — asserting the
+// known reasons come through the renderer unchanged is otherwise plumbing
+// already covered by the constant comparisons elsewhere.
 //
 // Honest limitation: this is still a per-member list of the known unpriced*
 // constants plus the fallback case. A fifth unpriced* constant added later
@@ -57,6 +63,13 @@ func TestWriteTokenClasses_UnpricedReasonIsScopeNeutral(t *testing.T) {
 		{"no model", unpricedNoModel, unpricedNoModel, false},
 		{"mixed models", unpricedMixedModels, unpricedMixedModels, false},
 		{"no cost", unpricedNoCost, unpricedNoCost, false},
+		// Priced==false with an empty UnpricedReason is currently unreachable in
+		// production: tokenClassShares sets a reason on every unpriced branch,
+		// and the checkpoint path only ever overwrites a non-empty one. This
+		// subtest is defensive coverage of writeTokenClasses' fallback, not a
+		// reachable case today — Task 4 adds the second construction site where
+		// an empty reason could first appear for real. Keep this subtest even
+		// though nothing currently produces its input.
 		{"empty reason falls back to no-model", "", unpricedNoModel, false},
 		{"unknown TTL", unpricedUnknownTTL, unpricedUnknownTTL, true},
 	}
@@ -82,15 +95,12 @@ func TestWriteTokenClasses_UnpricedReasonIsScopeNeutral(t *testing.T) {
 			}
 
 			if tc.checkpointOK {
-				if !strings.Contains(out, "checkpoint") {
-					t.Errorf("the TTL reason is checkpoint-specific by construction; expected %q, got:\n%s", "checkpoint", buf.String())
-				}
 				return
 			}
 
 			for _, presumed := range []string{"checkpoint", "sessions"} {
 				if strings.Contains(out, presumed) {
-					t.Errorf("rendered line must not say %q, got:\n%s", presumed, buf.String())
+					t.Errorf("rendered block must not say %q, got:\n%s", presumed, buf.String())
 				}
 			}
 		})

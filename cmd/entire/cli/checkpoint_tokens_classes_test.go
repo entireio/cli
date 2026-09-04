@@ -162,8 +162,8 @@ func TestCheckpointTokensReport_Classes_MixedModelsAreUnpriced(t *testing.T) {
 	if report.Classes.Priced {
 		t.Error("two different models cannot share one ratio row; cost must be omitted")
 	}
-	// Both models are individually priceable, so "no verified price ratios for
-	// this model" is false. The reason must name the real case.
+	// Both models are individually priceable, so "no model with verified price
+	// ratios" is false. The reason must name the real case.
 	if got := report.Classes.UnpricedReason; got != unpricedMixedModels {
 		t.Errorf("reason = %q, want %q", got, unpricedMixedModels)
 	}
@@ -286,7 +286,7 @@ func TestWriteTokenClasses_UnpricedOmitsCostColumn(t *testing.T) {
 	if !strings.Contains(header, "volume") {
 		t.Errorf("unpriced breakdown must still show volume, header was %q\n%s", header, out)
 	}
-	if !strings.Contains(out, "no verified price ratios") {
+	if !strings.Contains(out, unpricedNoModel) {
 		t.Errorf("unpriced breakdown must say why cost is missing\n%s", out)
 	}
 }
@@ -392,7 +392,7 @@ func TestWriteTokenClasses_StatesTheRealReason(t *testing.T) {
 	writeTokenClasses(&buf, report.Classes)
 	out := buf.String()
 
-	if strings.Contains(out, "no verified price ratios") {
+	if strings.Contains(out, unpricedNoModel) {
 		t.Errorf("a legacy Anthropic checkpoint has ratios; the reason must be the TTL split\n%s", out)
 	}
 	if !strings.Contains(out, "TTL") {

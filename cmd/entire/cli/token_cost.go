@@ -112,12 +112,16 @@ func tokenWeightsForModel(model string) (tokenWeights, bool) {
 
 // Reasons cost can be withheld. The report prints these verbatim, so each one
 // must be true of the case it names — a report that misstates why it withheld a
-// number is the same class of error as withholding the wrong one.
+// number is the same class of error as withholding the wrong one. Because this
+// renderer is shared by `checkpoint tokens` and `session tokens`, a reason must
+// also not name one command's scope: unpricedUnknownTTL is the single
+// deliberate exception, since only a committed checkpoint can predate the
+// cache-write TTL field — live state always knows the split.
 const (
-	unpricedNoModel     = "no verified price ratios for this model"
+	unpricedNoModel     = "no model with verified price ratios"
 	unpricedMixedModels = "these tokens span models with different price ratios"
 	unpricedUnknownTTL  = "this checkpoint predates the cache-write TTL split, which changes the rate"
-	unpricedNoCost      = "this provider bills none of these classes"
+	unpricedNoCost      = "this provider bills none of these tokens"
 )
 
 // tokenClassShare is one billing class's contribution to a checkpoint.
