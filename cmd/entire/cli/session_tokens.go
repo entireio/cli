@@ -7,6 +7,7 @@ import (
 	"io"
 	"math/bits"
 	"strings"
+	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
@@ -14,12 +15,16 @@ import (
 )
 
 type sessionTokensReport struct {
-	SessionID string              `json:"session_id"`
-	Agent     string              `json:"agent"`
-	Model     string              `json:"model,omitempty"`
-	Status    string              `json:"status"`
-	Source    string              `json:"source"`
-	Tokens    *sessionTokensUsage `json:"tokens,omitempty"`
+	SessionID string `json:"session_id"`
+	Agent     string `json:"agent"`
+	Model     string `json:"model,omitempty"`
+	Status    string `json:"status"`
+	// Duration is how long the session has been worked on, as an interaction
+	// span rather than elapsed wall-clock. Empty when no interaction has been
+	// recorded.
+	Duration string              `json:"duration,omitempty"`
+	Source   string              `json:"source"`
+	Tokens   *sessionTokensUsage `json:"tokens,omitempty"`
 	// Classes is the billing-class breakdown — volume and, where a verified
 	// ratio row applies, cost share per class. Built from the same resolver and
 	// rendered by the same writer as `checkpoint tokens`, so a live session and
@@ -184,6 +189,7 @@ func buildSessionTokensReport(state *strategy.SessionState, status string) sessi
 		Agent:     agentLabel,
 		Model:     state.ModelName,
 		Status:    status,
+		Duration:  sessionTokensDuration(state),
 		Source:    "session_state",
 	}
 
@@ -247,6 +253,46 @@ func buildSessionTokensReport(state *strategy.SessionState, status string) sessi
 		CheckpointCount: state.StepCount,
 	})...)
 	return report
+}
+
+// sessionTokensDuration reports how long the session has been worked on, as the
+// span between its first and last recorded interaction. Elapsed wall-clock
+// would count a session left open overnight as a twelve-hour session; a token
+// report is about work done, not calendar time. Empty when no interaction has
+// been recorded — "0m" would claim a measurement that was never taken.
+func sessionTokensDuration(state *strategy.SessionState) string {
+	if state == nil || state.LastInteractionTime == nil {
+		return ""
+	}
+	span := state.LastInteractionTime.Sub(state.StartedAt)
+	if span <= 0 {
+		return ""
+	}
+	return formatDurationShort(span) + " so far"
+}
+
+// formatDurationShort renders a work span as "2h 14m", "14m" or "45s". Package
+// cli has no helper for this shape: formatRelativeDuration (status.go) appends
+// "ago", and formatSummaryDuration (explain.go) returns Duration.String(),
+// which prints "2h14m0s".
+//
+// Units below the leading one are dropped once minutes are on the clock —
+// seconds are noise beside hours of work — and a whole number of hours prints
+// "3h", not "3h 0m".
+func formatDurationShort(d time.Duration) string {
+	switch {
+	case d >= time.Hour:
+		hours := int(d / time.Hour)
+		minutes := int((d % time.Hour) / time.Minute)
+		if minutes == 0 {
+			return fmt.Sprintf("%dh", hours)
+		}
+		return fmt.Sprintf("%dh %dm", hours, minutes)
+	case d >= time.Minute:
+		return fmt.Sprintf("%dm", int(d/time.Minute))
+	default:
+		return fmt.Sprintf("%ds", int(d/time.Second))
+	}
 }
 
 // sessionTokenTTLKnown reports whether an absent 1-hour cache-write figure can
@@ -486,6 +532,9 @@ func writeSessionTokensText(w io.Writer, report sessionTokensReport) {
 		fmt.Fprintf(w, "Model:   %s\n", report.Model)
 	}
 	fmt.Fprintf(w, "Status:  %s\n", report.Status)
+	if report.Duration != "" {
+		fmt.Fprintf(w, "Duration: %s\n", report.Duration)
+	}
 
 	writeTokenUsageSection(w, report.Tokens)
 	writeTokenClasses(w, report.Classes, subagentTotalOf(report.Tokens))

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
@@ -456,5 +457,85 @@ func TestWriteTokenContributors_RendersWhenSomethingIsVisible(t *testing.T) {
 	}
 	if strings.Contains(out, "Subagents") {
 		t.Errorf("the subagents figure moved into the billed block, got:\n%s", out)
+	}
+}
+
+func TestSessionTokensDuration_UsesInteractionSpan(t *testing.T) {
+	t.Parallel()
+
+	start := time.Now().Add(-6 * time.Hour)
+	last := start.Add(2*time.Hour + 14*time.Minute)
+	state := &strategy.SessionState{
+		SessionID:           "live-duration",
+		AgentType:           "Claude Code",
+		StartedAt:           start,
+		LastInteractionTime: &last,
+		TokenUsage:          &agent.TokenUsage{InputTokens: 100},
+	}
+
+	// 6h elapsed, 2h14m of interaction: a token report is about work done.
+	if got := sessionTokensDuration(state); got != "2h 14m so far" {
+		t.Errorf("duration = %q, want %q", got, "2h 14m so far")
+	}
+}
+
+func TestSessionTokensDuration_EmptyWithoutInteraction(t *testing.T) {
+	t.Parallel()
+
+	state := &strategy.SessionState{
+		SessionID:  "live-nointeraction",
+		AgentType:  "Claude Code",
+		StartedAt:  time.Now().Add(-3 * time.Hour),
+		TokenUsage: &agent.TokenUsage{InputTokens: 100},
+	}
+
+	// Not "0m", and not the 3h of elapsed time — neither is a measure of work.
+	if got := sessionTokensDuration(state); got != "" {
+		t.Errorf("duration = %q, want empty when no interaction was recorded", got)
+	}
+}
+
+func TestFormatDurationShort(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		in   time.Duration
+		want string
+	}{
+		{2*time.Hour + 14*time.Minute, "2h 14m"},
+		{14 * time.Minute, "14m"},
+		{45 * time.Second, "45s"},
+		// A whole number of hours drops the minutes rather than saying "3h 0m".
+		{3 * time.Hour, "3h"},
+		// Seconds are noise once minutes are on the clock.
+		{time.Hour + 30*time.Minute + 20*time.Second, "1h 30m"},
+		{5*time.Minute + 40*time.Second, "5m"},
+	}
+	for _, tc := range cases {
+		if got := formatDurationShort(tc.in); got != tc.want {
+			t.Errorf("formatDurationShort(%s) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
+// The line reaches the user, and says "so far" because the session is live.
+func TestSessionTokensText_RendersDuration(t *testing.T) {
+	t.Parallel()
+
+	start := time.Now().Add(-4 * time.Hour)
+	last := start.Add(90 * time.Minute)
+	state := &strategy.SessionState{
+		SessionID:           "live-duration-text",
+		AgentType:           "Claude Code",
+		ModelName:           "claude-sonnet-4.6",
+		StartedAt:           start,
+		LastInteractionTime: &last,
+		TokenUsage:          &agent.TokenUsage{InputTokens: 1000, OutputTokens: 100},
+	}
+
+	var buf bytes.Buffer
+	writeSessionTokensText(&buf, buildSessionTokensReport(state, "active"))
+	if out := buf.String(); !strings.Contains(out, "Duration: 1h 30m so far") {
+		t.Errorf("expected the duration line, got:\n%s", out)
 	}
 }
