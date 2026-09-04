@@ -9,7 +9,7 @@ import (
 	"testing"
 )
 
-// autoUpdateFixture wires the test seams for MaybeAutoUpdate.
+// autoUpdateFixture wires the test seams for maybeAutoUpdate.
 type autoUpdateFixture struct {
 	installCalls int
 	installErr   error
@@ -120,7 +120,7 @@ func TestMaybeAutoUpdate_KillSwitch(t *testing.T) {
 	t.Setenv(envKillSwitch, "1")
 
 	var buf bytes.Buffer
-	MaybeAutoUpdate(context.Background(), &buf, "1.0.0", "v2.0.0")
+	maybeAutoUpdate(context.Background(), &buf, "1.0.0", "v2.0.0")
 
 	if f.installCalls != 0 {
 		t.Errorf("installer called with kill-switch set")
@@ -131,11 +131,11 @@ func TestMaybeAutoUpdate_KillSwitch(t *testing.T) {
 func TestMaybeAutoUpdate_NoTTY(t *testing.T) {
 	f := newAutoUpdateFixture(t)
 	useBrewExecutable(t)
-	// No TTY → MaybeAutoUpdate must print the manual hint instead of prompting.
+	// No TTY → maybeAutoUpdate must print the manual hint instead of prompting.
 	t.Setenv("ENTIRE_TEST_TTY", "0")
 
 	var buf bytes.Buffer
-	MaybeAutoUpdate(context.Background(), &buf, "1.0.0", "v2.0.0")
+	maybeAutoUpdate(context.Background(), &buf, "1.0.0", "v2.0.0")
 
 	if f.installCalls != 0 {
 		t.Errorf("installer called without TTY")
@@ -151,7 +151,7 @@ func TestMaybeAutoUpdate_CIEnv(t *testing.T) {
 	t.Setenv("CI", "true")
 
 	var buf bytes.Buffer
-	MaybeAutoUpdate(context.Background(), &buf, "1.0.0", "v2.0.0")
+	maybeAutoUpdate(context.Background(), &buf, "1.0.0", "v2.0.0")
 
 	if f.installCalls != 0 {
 		t.Errorf("installer called on CI (CI=true)")
@@ -165,7 +165,7 @@ func TestMaybeAutoUpdate_NonTerminalWriter(t *testing.T) {
 	isTerminalOut = func(_ io.Writer) bool { return false }
 
 	var buf bytes.Buffer
-	MaybeAutoUpdate(context.Background(), &buf, "1.0.0", "v2.0.0")
+	maybeAutoUpdate(context.Background(), &buf, "1.0.0", "v2.0.0")
 
 	if f.installCalls != 0 {
 		t.Errorf("installer called with non-terminal output writer")
@@ -209,7 +209,7 @@ func TestMaybeAutoUpdate_WindowsUnknownInstallerNoAutoRun(t *testing.T) {
 			t.Cleanup(func() { goos = origGOOS })
 
 			var buf bytes.Buffer
-			action := MaybeAutoUpdate(context.Background(), &buf, tt.currentVersion, "v2.0.0")
+			action := maybeAutoUpdate(context.Background(), &buf, tt.currentVersion, "v2.0.0")
 
 			if f.installCalls != 0 {
 				t.Errorf("installer was auto-run on Windows + unknown install manager")
@@ -279,7 +279,7 @@ func TestMaybeAutoUpdate_WindowsNeverAutoRuns(t *testing.T) {
 			t.Cleanup(func() { goos = origGOOS })
 
 			var buf bytes.Buffer
-			action := MaybeAutoUpdate(context.Background(), &buf, "1.0.0", "v2.0.0")
+			action := maybeAutoUpdate(context.Background(), &buf, "1.0.0", "v2.0.0")
 
 			if f.installCalls != 0 {
 				t.Fatalf("installer must not auto-run on Windows; calls=%d", f.installCalls)
@@ -306,7 +306,7 @@ func TestMaybeAutoUpdate_UserDeclines(t *testing.T) {
 	f.chooseValue = autoUpdateActionSkip
 
 	var buf bytes.Buffer
-	action := MaybeAutoUpdate(context.Background(), &buf, "1.0.0", "v2.0.0")
+	action := maybeAutoUpdate(context.Background(), &buf, "1.0.0", "v2.0.0")
 
 	if f.installCalls != 0 {
 		t.Errorf("installer called after user declined")
@@ -321,7 +321,7 @@ func TestMaybeAutoUpdate_HappyPath(t *testing.T) {
 	useBrewExecutable(t)
 
 	var buf bytes.Buffer
-	action := MaybeAutoUpdate(context.Background(), &buf, "1.0.0", "v2.0.0")
+	action := maybeAutoUpdate(context.Background(), &buf, "1.0.0", "v2.0.0")
 
 	if f.installCalls != 1 {
 		t.Fatalf("installer called %d times, want 1", f.installCalls)
@@ -343,7 +343,7 @@ func TestMaybeAutoUpdate_InstallerFailurePrintedToUser(t *testing.T) {
 	f.installErr = errors.New("boom")
 
 	var buf bytes.Buffer
-	MaybeAutoUpdate(context.Background(), &buf, "1.0.0", "v2.0.0")
+	maybeAutoUpdate(context.Background(), &buf, "1.0.0", "v2.0.0")
 
 	if f.installCalls != 1 {
 		t.Fatalf("installer called %d times, want 1", f.installCalls)
@@ -395,7 +395,7 @@ func TestMaybeAutoUpdate_AllInstallers_PromptReceivesCorrectCommand(t *testing.T
 			f.chooseValue = autoUpdateActionSkipUntilNextVersion
 
 			var buf bytes.Buffer
-			action := MaybeAutoUpdate(context.Background(), &buf, "1.0.0", "v2.0.0")
+			action := maybeAutoUpdate(context.Background(), &buf, "1.0.0", "v2.0.0")
 
 			if f.installCalls != 0 {
 				t.Errorf("installer called after skip-until-next-version")
@@ -418,7 +418,7 @@ func TestMaybeAutoUpdate_AllInstallers_HappyPathRunsInstaller(t *testing.T) {
 			tt.setup(t)
 
 			var buf bytes.Buffer
-			action := MaybeAutoUpdate(context.Background(), &buf, "1.0.0", "v2.0.0")
+			action := maybeAutoUpdate(context.Background(), &buf, "1.0.0", "v2.0.0")
 
 			if f.installCalls != 1 {
 				t.Fatalf("installer called %d times, want 1", f.installCalls)
@@ -445,7 +445,7 @@ func TestMaybeAutoUpdate_AllInstallers_KillSwitchPrintsManualHint(t *testing.T) 
 			t.Setenv(envKillSwitch, "1")
 
 			var buf bytes.Buffer
-			MaybeAutoUpdate(context.Background(), &buf, "1.0.0", "v2.0.0")
+			maybeAutoUpdate(context.Background(), &buf, "1.0.0", "v2.0.0")
 
 			if f.installCalls != 0 {
 				t.Errorf("installer called with kill-switch set")
@@ -464,7 +464,7 @@ func TestMaybeAutoUpdate_AllInstallers_UserSkips(t *testing.T) {
 			f.chooseValue = autoUpdateActionSkip
 
 			var buf bytes.Buffer
-			action := MaybeAutoUpdate(context.Background(), &buf, "1.0.0", "v2.0.0")
+			action := maybeAutoUpdate(context.Background(), &buf, "1.0.0", "v2.0.0")
 
 			if f.installCalls != 0 {
 				t.Errorf("installer called after user chose skip")

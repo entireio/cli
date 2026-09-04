@@ -90,7 +90,7 @@ func CheckAndNotify(ctx context.Context, w io.Writer, currentVersion string) {
 			return
 		}
 
-		action := MaybeAutoUpdate(ctx, w, currentVersion, latestVersion)
+		action := maybeAutoUpdate(ctx, w, currentVersion, latestVersion)
 		if action == autoUpdateActionSkipUntilNextVersion {
 			cache.SkippedVersion = versionCacheKey(latestVersion)
 			if saveErr := saveCache(cache); saveErr != nil {

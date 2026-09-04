@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 
 	"charm.land/huh/v2"
 
@@ -39,7 +38,7 @@ var (
 	isTerminalOut                = interactive.IsTerminalWriter
 )
 
-// MaybeAutoUpdate prints an update notification and offers an interactive
+// maybeAutoUpdate prints an update notification and offers an interactive
 // upgrade. Silent on every failure path — it must never interrupt the CLI.
 //
 // The same 3-option prompt (update / skip / skip until next version) is
@@ -58,9 +57,9 @@ var (
 // command is printed so the user still learns what to run manually.
 //
 // On Windows the installer is never auto-run (a running entire.exe cannot
-// replace itself). Scoop, mise, and install.ps1 commands are printed for
-// the user to run after entire has exited.
-func MaybeAutoUpdate(ctx context.Context, w io.Writer, currentVersion, latestVersion string) AutoUpdateAction {
+// replace itself), so scoop, mise, and install.ps1 commands are printed
+// for the user to run once entire has exited.
+func maybeAutoUpdate(ctx context.Context, w io.Writer, currentVersion, latestVersion string) AutoUpdateAction {
 	cmdStr := UpdateCommandForCurrentBinary(currentVersion)
 
 	// Windows can't replace a running executable, so no installer can update
@@ -133,27 +132,4 @@ func realChooseUpdate(ctx context.Context, currentVersion, latestVersion, cmdStr
 		return autoUpdateActionSkip, fmt.Errorf("update prompt: %w", err)
 	}
 	return action, nil
-}
-
-// realRunInstaller shells out to the installer command, streaming stdin/stdout/stderr
-// so password prompts and progress output reach the user. In practice it only
-// ever runs the POSIX installers (brew, mise, curl): MaybeAutoUpdate returns
-// before reaching here on Windows, so the cmd.exe branch below is unreachable
-// today. It is kept as cover for Windows print-only being lifted later, and
-// reads the same `goos` seam MaybeAutoUpdate does so a test can drive both
-// consistently.
-func realRunInstaller(ctx context.Context, cmdStr string) error {
-	var c *exec.Cmd
-	if goos == goosWindows {
-		c = exec.CommandContext(ctx, "cmd", "/C", cmdStr)
-	} else {
-		c = exec.CommandContext(ctx, "sh", "-c", cmdStr)
-	}
-	c.Stdin = os.Stdin
-	c.Stdout = os.Stdout
-	c.Stderr = os.Stderr
-	if err := c.Run(); err != nil {
-		return fmt.Errorf("installer exited: %w", err)
-	}
-	return nil
 }
