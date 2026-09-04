@@ -65,7 +65,7 @@ func TestMaybeAutoUpdate_WindowsNeverAutoRuns(t *testing.T) {
 
 			out := buf.String()
 			assertPrintOnly(t, f, action, out, tt.wantCmd)
-			if !strings.Contains(out, "when entire is not running") {
+			if !strings.Contains(out, "in PowerShell when entire is not running") {
 				t.Errorf("missing Windows manual-run hint: %q", out)
 			}
 			if strings.Contains(out, "curl -fsSL") {

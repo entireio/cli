@@ -15,8 +15,8 @@ func foldPathCase(p string) string { return strings.ToLower(p) }
 
 // Windows install.ps1 one-liners from the README. Printed, never auto-run.
 const (
-	windowsInstallCmd        = "irm https://raw.githubusercontent.com/entireio/cli/main/scripts/install.ps1 -UseBasicParsing | iex"
-	windowsInstallNightlyCmd = "& ([scriptblock]::Create((irm https://raw.githubusercontent.com/entireio/cli/main/scripts/install.ps1 -UseBasicParsing))) -Channel nightly"
+	windowsInstallCmd        = "irm https://entire.io/install.ps1 -UseBasicParsing | iex"
+	windowsInstallNightlyCmd = "& ([scriptblock]::Create((irm https://entire.io/install.ps1 -UseBasicParsing))) -Channel nightly"
 )
 
 // scoopConfigPath is Scoop's config.json, which records relocated install roots.

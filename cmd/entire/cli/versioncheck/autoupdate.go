@@ -75,7 +75,7 @@ func maybeAutoUpdate(ctx context.Context, w io.Writer, currentVersion, latestVer
 	// there is no prompt to choose from, so there is no choice to remember.
 	if !installerAutoRuns {
 		printNotification(w, currentVersion, latestVersion)
-		fmt.Fprintf(w, "To update, run the following when entire is not running:\n  %s\n", cmdStr)
+		fmt.Fprintf(w, "To update, run the following in PowerShell when entire is not running:\n  %s\n", cmdStr)
 		return autoUpdateActionSkip
 	}
 
