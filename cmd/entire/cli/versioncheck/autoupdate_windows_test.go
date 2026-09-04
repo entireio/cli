@@ -7,7 +7,7 @@ import (
 	"testing"
 )
 
-func TestRealRunInstaller_NotImplemented(t *testing.T) {
+func TestRealRunInstaller_WindowsNotImplemented(t *testing.T) {
 	t.Parallel()
 	err := realRunInstaller(context.Background(), "echo hi")
 	want := "auto-update is not implemented on Windows"
