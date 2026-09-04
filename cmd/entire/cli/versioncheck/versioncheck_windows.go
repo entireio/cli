@@ -19,12 +19,7 @@ const (
 	windowsInstallNightlyCmd = "& ([scriptblock]::Create((irm https://raw.githubusercontent.com/entireio/cli/main/scripts/install.ps1 -UseBasicParsing))) -Channel nightly"
 )
 
-// scoopAppName returns the Scoop app directory the running binary lives under
-// — the path segment after `/scoop/apps/` (e.g. "cli" or "entire") — or ""
-// when the binary is not a Scoop install. This is the durable signal for the
-// pre-rename package: a binary running from the `cli` app dir must migrate to
-// `entire` regardless of its version (the fix ships in a final `cli` release,
-// so the migrating binary's version is already past the rename).
+// scoopConfigPath is Scoop's config.json, which records relocated install roots.
 func scoopConfigPath() string {
 	if xdg := os.Getenv("XDG_CONFIG_HOME"); xdg != "" {
 		return filepath.Join(xdg, "scoop", "config.json")
@@ -46,7 +41,7 @@ func readScoopConfig() scoopConfigFile {
 	if path == "" {
 		return scoopConfigFile{}
 	}
-	data, err := os.ReadFile(path)
+	data, err := os.ReadFile(path) //nolint:gosec // fixed per-user config location, not user input
 	if err != nil {
 		return scoopConfigFile{}
 	}
@@ -79,6 +74,12 @@ func firstPathSegment(rest string) string {
 	return app
 }
 
+// scoopAppName returns the Scoop app directory the running binary lives under
+// — the path segment after `/scoop/apps/` (e.g. "cli" or "entire") — or ""
+// when the binary is not a Scoop install. This is the durable signal for the
+// pre-rename package: a binary running from the `cli` app dir must migrate to
+// `entire` regardless of its version (the fix ships in a final `cli` release,
+// so the migrating binary's version is already past the rename).
 func scoopAppName() string {
 	normalized, err := normalizedExecPath()
 	if err != nil {
@@ -87,9 +88,6 @@ func scoopAppName() string {
 	for _, raw := range scoopRoots() {
 		root := normalizeInstallRoot(raw)
 		if root == "" || !hasNormalizedRootPrefix(normalized, root) {
-			continue
-		}
-		if len(normalized) < len(root) {
 			continue
 		}
 		return firstPathSegment(normalized[len(root):])
@@ -139,7 +137,6 @@ func scoopUpgradeCommand(_, _ string) string {
 }
 
 var scoopProbe = installProbe{
-	name:    installManagerScoop,
 	roots:   scoopRoots,
 	markers: []string{"/scoop/apps/"},
 	command: scoopUpgradeCommand,

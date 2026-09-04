@@ -22,6 +22,8 @@ const scoopEntireVersionedExecutablePath = `C:\Users\test\scoop\apps\entire\0.10
 const windowsLocalBinPath = `C:\Users\test\.local\bin\entire.exe`
 const windowsProgramFilesPath = `C:\Program Files\Entire\entire.exe`
 
+const scoopUpdateCmd = "scoop update entire/entire"
+
 // TestWindowsScoopAppName pins the signal the rename migration keys off. The ""
 // results matter most: they are what keeps the `== "cli"` comparison in
 // UpdateCommandForCurrentBinary from misfiring on a non-Scoop binary that happens to live in a
@@ -88,13 +90,13 @@ func TestWindowsUpdateCommandForCurrentBinary(t *testing.T) {
 			name:           "scoop entire app updates in place",
 			currentVersion: "1.0.0",
 			execPath:       func() (string, error) { return scoopEntireExecutablePath, nil },
-			want:           "scoop update entire/entire",
+			want:           scoopUpdateCmd,
 		},
 		{
 			name:           "scoop entire versioned path updates in place",
 			currentVersion: "1.0.0",
 			execPath:       func() (string, error) { return scoopEntireVersionedExecutablePath, nil },
-			want:           "scoop update entire/entire",
+			want:           scoopUpdateCmd,
 		},
 		{
 			name:           "scoop cli app routes through package rename regardless of version",
@@ -151,8 +153,8 @@ func TestWindowsScoopRelocatedSCOOPEnv(t *testing.T) {
 	t.Setenv("SCOOP", `D:\tools`)
 	withWindowsExecPath(t, `D:\tools\apps\entire\current\entire.exe`)
 
-	if got := UpdateCommandForCurrentBinary("1.0.0"); got != "scoop update entire/entire" {
-		t.Errorf("UpdateCommandForCurrentBinary() = %q, want scoop update entire/entire", got)
+	if got := UpdateCommandForCurrentBinary("1.0.0"); got != scoopUpdateCmd {
+		t.Errorf("UpdateCommandForCurrentBinary() = %q, want %q", got, scoopUpdateCmd)
 	}
 }
 
@@ -172,8 +174,8 @@ func TestWindowsScoopRelocatedSCOOPGlobal(t *testing.T) {
 	t.Setenv("SCOOP_GLOBAL", `D:\g`)
 	withWindowsExecPath(t, `D:\g\apps\entire\current\entire.exe`)
 
-	if got := UpdateCommandForCurrentBinary("1.0.0"); got != "scoop update entire/entire" {
-		t.Errorf("UpdateCommandForCurrentBinary() = %q, want scoop update entire/entire", got)
+	if got := UpdateCommandForCurrentBinary("1.0.0"); got != scoopUpdateCmd {
+		t.Errorf("UpdateCommandForCurrentBinary() = %q, want %q", got, scoopUpdateCmd)
 	}
 }
 
@@ -188,8 +190,8 @@ func TestWindowsScoopRelocatedConfigRootPath(t *testing.T) {
 	}
 	withWindowsExecPath(t, `D:\from-config\apps\entire\current\entire.exe`)
 
-	if got := UpdateCommandForCurrentBinary("1.0.0"); got != "scoop update entire/entire" {
-		t.Errorf("UpdateCommandForCurrentBinary() = %q, want scoop update entire/entire", got)
+	if got := UpdateCommandForCurrentBinary("1.0.0"); got != scoopUpdateCmd {
+		t.Errorf("UpdateCommandForCurrentBinary() = %q, want %q", got, scoopUpdateCmd)
 	}
 }
 
@@ -198,8 +200,8 @@ func TestWindowsScoopRelocatedCaseInsensitive(t *testing.T) {
 	t.Setenv("SCOOP", `d:\Tools`)
 	withWindowsExecPath(t, `D:\tools\apps\entire\current\entire.exe`)
 
-	if got := UpdateCommandForCurrentBinary("1.0.0"); got != "scoop update entire/entire" {
-		t.Errorf("UpdateCommandForCurrentBinary() = %q, want scoop update entire/entire", got)
+	if got := UpdateCommandForCurrentBinary("1.0.0"); got != scoopUpdateCmd {
+		t.Errorf("UpdateCommandForCurrentBinary() = %q, want %q", got, scoopUpdateCmd)
 	}
 }
 
@@ -207,8 +209,8 @@ func TestWindowsScoopDefaultMarkerStillMatches(t *testing.T) {
 	isolateWindowsScoopConfig(t)
 	withWindowsExecPath(t, `C:\Users\x\scoop\apps\entire\current\entire.exe`)
 
-	if got := UpdateCommandForCurrentBinary("1.0.0"); got != "scoop update entire/entire" {
-		t.Errorf("UpdateCommandForCurrentBinary() = %q, want scoop update entire/entire", got)
+	if got := UpdateCommandForCurrentBinary("1.0.0"); got != scoopUpdateCmd {
+		t.Errorf("UpdateCommandForCurrentBinary() = %q, want %q", got, scoopUpdateCmd)
 	}
 }
 

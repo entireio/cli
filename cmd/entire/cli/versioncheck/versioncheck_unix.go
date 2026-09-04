@@ -15,8 +15,9 @@ func brewUpgradeCommand(_ string, currentVersion string) string {
 	return "brew upgrade --yes entire"
 }
 
+func noInstallRoots() []string { return nil }
+
 var brewProbe = installProbe{
-	name:  installManagerBrew,
 	roots: noInstallRoots,
 	markers: []string{
 		"/Caskroom/",

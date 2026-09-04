@@ -29,9 +29,6 @@ const goosWindows = "windows"
 var goos = runtime.GOOS
 
 const (
-	installManagerBrew    = "brew"
-	installManagerMise    = "mise"
-	installManagerScoop   = "scoop"
 	installChannelStable  = "stable"
 	installChannelNightly = "nightly"
 )
@@ -373,13 +370,10 @@ const downloadsURL = "https://github.com/entireio/cli/releases"
 // and returns the command that upgrades it. roots are env/config install
 // prefixes (relocated dirs); markers cover default layouts.
 type installProbe struct {
-	name    string
 	roots   func() []string
 	markers []string
 	command func(execPath, currentVersion string) string
 }
-
-func noInstallRoots() []string { return nil }
 
 func miseRoots() []string {
 	if d := os.Getenv("MISE_INSTALLS_DIR"); d != "" {
@@ -432,7 +426,6 @@ func miseUpgradeCommand(_, _ string) string {
 }
 
 var miseProbe = installProbe{
-	name:    installManagerMise,
 	roots:   miseRoots,
 	markers: []string{"/mise/installs/"},
 	command: miseUpgradeCommand,
