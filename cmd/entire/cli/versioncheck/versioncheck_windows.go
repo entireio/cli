@@ -137,7 +137,8 @@ var installProbes = []installProbe{scoopProbe, miseProbe}
 
 // fallbackInstallCommand names the running binary's directory with
 // -InstallDir so install.ps1 replaces it in place instead of taking its
-// Scoop-first default; an explicit -InstallDir opts out of Scoop there.
+// Scoop-first default (an explicit -InstallDir opts out of Scoop there), and
+// passes -NoPathUpdate so an update never rewrites the user PATH.
 func fallbackInstallCommand(execPath, currentVersion string) string {
 	cmd := windowsInstallCmd
 	if isNightly(currentVersion) {
@@ -147,7 +148,7 @@ func fallbackInstallCommand(execPath, currentVersion string) string {
 		// Single quotes are literal in PowerShell (double quotes would expand
 		// $name and treat backticks as escapes); only a quote needs doubling.
 		dir := strings.ReplaceAll(filepath.Dir(execPath), "'", "''")
-		cmd += " -InstallDir '" + dir + "'"
+		cmd += " -InstallDir '" + dir + "' -NoPathUpdate"
 	}
 	return cmd
 }

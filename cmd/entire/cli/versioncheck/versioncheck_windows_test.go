@@ -67,7 +67,7 @@ func TestWindowsUpdateCommandForCurrentBinary(t *testing.T) {
 			name:           "non-scoop path in a cli directory uses install.ps1",
 			currentVersion: "1.0.0",
 			execPath:       `C:\tools\cli\entire.exe`,
-			want:           windowsInstallCmd + ` -InstallDir 'C:\tools\cli'`,
+			want:           windowsInstallCmd + ` -InstallDir 'C:\tools\cli' -NoPathUpdate`,
 		},
 		{
 			name:           "mise default layout uses mise upgrade",
@@ -79,19 +79,19 @@ func TestWindowsUpdateCommandForCurrentBinary(t *testing.T) {
 			name:           "windows unknown path stable uses install.ps1",
 			currentVersion: "1.0.0",
 			execPath:       windowsLocalBinPath,
-			want:           windowsInstallCmd + ` -InstallDir 'C:\Users\test\.local\bin'`,
+			want:           windowsInstallCmd + ` -InstallDir 'C:\Users\test\.local\bin' -NoPathUpdate`,
 		},
 		{
 			name:           "install dir with $ and a quote is passed literally",
 			currentVersion: "1.0.0",
 			execPath:       `C:\Users\$victor's\bin\entire.exe`,
-			want:           windowsInstallCmd + ` -InstallDir 'C:\Users\$victor''s\bin'`,
+			want:           windowsInstallCmd + ` -InstallDir 'C:\Users\$victor''s\bin' -NoPathUpdate`,
 		},
 		{
 			name:           "windows unknown path nightly uses install.ps1 -Channel nightly",
 			currentVersion: "1.0.1-nightly.202604101200.abc1234",
 			execPath:       windowsLocalBinPath,
-			want:           windowsInstallCmd + ` -Channel nightly -InstallDir 'C:\Users\test\.local\bin'`,
+			want:           windowsInstallCmd + ` -Channel nightly -InstallDir 'C:\Users\test\.local\bin' -NoPathUpdate`,
 		},
 	}
 
