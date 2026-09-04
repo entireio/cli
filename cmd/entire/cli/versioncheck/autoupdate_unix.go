@@ -10,10 +10,7 @@ import (
 )
 
 // installerAutoRuns: the installer may replace the running binary in place.
-const (
-	installerAutoRuns  = true
-	manualRunQualifier = ""
-)
+const installerAutoRuns = true
 
 // realRunInstaller shells out to the installer command, streaming stdin/stdout/stderr
 // so password prompts and progress output reach the user.

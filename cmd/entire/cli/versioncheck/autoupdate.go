@@ -73,9 +73,15 @@ func maybeAutoUpdate(ctx context.Context, w io.Writer, currentVersion, latestVer
 	// suppress a specific version: the nudge returns every 24h until they
 	// update. That is deliberate while the Scoop rename migration is live —
 	// there is no prompt to choose from, so there is no choice to remember.
-	if !installerAutoRuns || os.Getenv(envKillSwitch) != "" || !interactive.CanPromptInteractively() || !isTerminalOut(w) {
+	if !installerAutoRuns {
 		printNotification(w, currentVersion, latestVersion)
-		fmt.Fprintf(w, "To update, run%s:\n  %s\n", manualRunQualifier, cmdStr)
+		fmt.Fprintf(w, "To update, run the following when entire is not running:\n  %s\n", cmdStr)
+		return autoUpdateActionSkip
+	}
+
+	if os.Getenv(envKillSwitch) != "" || !interactive.CanPromptInteractively() || !isTerminalOut(w) {
+		printNotification(w, currentVersion, latestVersion)
+		fmt.Fprintf(w, "To update, run:\n  %s\n", cmdStr)
 		return autoUpdateActionSkip
 	}
 
