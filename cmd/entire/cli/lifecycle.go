@@ -122,6 +122,16 @@ func DispatchLifecycleEvent(ctx context.Context, ag agent.Agent, event *agent.Ev
 	}
 }
 
+// retiredDenyRuleWarning is appended to the session-start banner for a repo
+// whose agent permission config still carries the retired metadata deny rule.
+// It reports and points at the fix; it does not repair. See the call site below
+// for why nothing on the hook path writes that file.
+//
+// Deliberately short: it shares the banner with the agent-help pointer and any
+// concurrent-session count.
+const retiredDenyRuleWarning = "\n  A retired Entire permission rule in this repo is causing repeated" +
+	"\n  approval prompts. Run 'entire doctor' to remove it."
+
 // handleLifecycleSessionStart handles session start: shows banner, checks concurrent sessions,
 // fires state machine transition.
 func handleLifecycleSessionStart(ctx context.Context, ag agent.Agent, event *agent.Event) error {
@@ -194,6 +204,18 @@ func handleLifecycleSessionStart(ctx context.Context, ag agent.Agent, event *age
 		if warning := codexSessionStartWarning(inspectCodexSessionStartHookIssue(ctx)); warning != "" {
 			message += " " + warning
 		}
+	}
+
+	// A repo enabled by an older CLI still carries the retired metadata deny
+	// rule, which makes ordinary commands need manual approval (see
+	// agent.MetadataDenyRule). Report it here and nowhere else on the hook path:
+	// the agent's settings file is normally tracked in git, so a hook that
+	// repaired it would dirty the worktree unprompted and could land the edit in
+	// the user's next checkpoint commit. `entire doctor` does the removal,
+	// because that is the user asking. Read-only, once per session, and only for
+	// the two agents whose config can hold the rule at all.
+	if agent.HasRetiredMetadataDenyRule(ctx, ag) {
+		message += retiredDenyRuleWarning
 	}
 
 	// Output informational message if the agent supports hook responses.

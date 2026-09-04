@@ -117,7 +117,12 @@ func clientFromEnvToken() (*Client, bool, error) {
 // NewForCluster.
 func clientForTarget(target auth.ControlPlaneTarget) (*Client, error) {
 	src := &providerSource{provide: target.TokenSource}
-	client, err := NewClient(strings.TrimRight(target.CoreURL, "/")+apiBasePath, src, WithClient(newCrossJurisHTTPClient()))
+	base := strings.TrimRight(target.CoreURL, "/")
+	httpClient, err := newCrossJurisHTTPClient(base)
+	if err != nil {
+		return nil, fmt.Errorf("build cross-juris HTTP client: %w", err)
+	}
+	client, err := NewClient(base+apiBasePath, src, WithClient(httpClient))
 	if err != nil {
 		return nil, fmt.Errorf("build Entire API client: %w", err)
 	}
@@ -145,7 +150,11 @@ func (c *Client) CoreOrigin() string {
 // this token for that core's audience (see newCrossJurisHTTPClient).
 func NewWithBearer(coreBaseURL, token string) (*Client, error) {
 	base := strings.TrimRight(coreBaseURL, "/")
-	client, err := NewClient(base+apiBasePath, staticBearer{token: token}, WithClient(newCrossJurisHTTPClient()))
+	httpClient, err := newCrossJurisHTTPClient(base)
+	if err != nil {
+		return nil, fmt.Errorf("build cross-juris HTTP client: %w", err)
+	}
+	client, err := NewClient(base+apiBasePath, staticBearer{token: token}, WithClient(httpClient))
 	if err != nil {
 		return nil, fmt.Errorf("build Entire API client: %w", err)
 	}

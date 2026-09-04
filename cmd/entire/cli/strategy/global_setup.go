@@ -2,12 +2,14 @@ package strategy
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
 
+	"github.com/entireio/cli/cmd/entire/cli/entiredir"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
@@ -79,8 +81,18 @@ func MaybeEnsureGlobalSetup(ctx context.Context) {
 		}
 	}
 
-	stamp := filepath.Join(policy.RuntimeRoot(), primaryRefStamp)
-	if _, err := os.Stat(stamp); err == nil {
+	runtimeRoot, rootErr := entiredir.OpenForRead(ctx)
+	if rootErr == nil {
+		if _, err := entiredir.ReadFile(runtimeRoot, primaryRefStamp); err == nil {
+			return
+		} else if !errors.Is(err, os.ErrNotExist) {
+			logging.Debug(logCtx, "global lazy setup: primary-ref stamp unavailable",
+				slog.String("error", err.Error()))
+			return
+		}
+	} else if !errors.Is(rootErr, os.ErrNotExist) {
+		logging.Debug(logCtx, "global lazy setup: runtime root unavailable",
+			slog.String("error", rootErr.Error()))
 		return
 	}
 	repo, openErr := OpenRepository(ctx)
@@ -95,8 +107,9 @@ func MaybeEnsureGlobalSetup(ctx context.Context) {
 			slog.String("error", err.Error()))
 		return
 	}
-	if err := os.MkdirAll(filepath.Dir(stamp), 0o700); err == nil {
-		_ = os.WriteFile(stamp, nil, 0o600) //nolint:errcheck // a missing stamp only costs a repeat ensure next hook
+	runtimeRoot, rootErr = entiredir.Open(ctx)
+	if rootErr == nil {
+		_ = entiredir.WriteFile(runtimeRoot, primaryRefStamp, nil, 0o600) //nolint:errcheck // a missing stamp only costs a repeat ensure next hook
 	}
 	logging.Debug(logCtx, "global lazy setup completed")
 }

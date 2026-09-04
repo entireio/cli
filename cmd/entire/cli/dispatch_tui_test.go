@@ -188,3 +188,17 @@ func TestDefaultRunInteractiveDispatch_ClearsLoadingCardBeforeReturn(t *testing.
 		t.Fatalf("expected loading card cleanup escape sequences, got %q", out.String())
 	}
 }
+
+func TestDispatchStatusDetails_Jurisdiction(t *testing.T) {
+	t.Parallel()
+
+	details := dispatchStatusDetails(dispatchpkg.Options{Mode: dispatchpkg.ModeServer, Since: "7d", Jurisdiction: "eu"})
+	if got := details[len(details)-1]; got != "Jurisdiction: eu" {
+		t.Fatalf("expected jurisdiction detail last, got %v", details)
+	}
+	for _, line := range dispatchStatusDetails(dispatchpkg.Options{Mode: dispatchpkg.ModeServer, Since: "7d"}) {
+		if strings.HasPrefix(line, "Jurisdiction") {
+			t.Fatalf("home default must not render a jurisdiction line, got %q", line)
+		}
+	}
+}

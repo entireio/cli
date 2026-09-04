@@ -14,83 +14,80 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent/testutil"
 )
 
-// metadataDenyRuleTest is the rule that blocks Claude from reading Entire metadata
-const metadataDenyRuleTest = "Read(./.entire/metadata/**)"
-
-func TestInstallHooks_PermissionsDeny_FreshInstall(t *testing.T) {
+// TestInstallHooks_DoesNotAddDenyRule pins the retirement: a fresh install must
+// leave no metadata deny rule behind. See agent.MetadataDenyRule for why.
+func TestInstallHooks_DoesNotAddDenyRule(t *testing.T) {
 	tempDir := t.TempDir()
 	t.Chdir(tempDir)
 
-	agent := &ClaudeCodeAgent{}
-	_, err := agent.InstallHooks(context.Background(), false)
-	if err != nil {
+	a := &ClaudeCodeAgent{}
+	if _, err := a.InstallHooks(context.Background(), false); err != nil {
 		t.Fatalf("InstallHooks() error = %v", err)
 	}
 
 	perms := readPermissions(t, tempDir)
-
-	// Verify permissions.deny contains our rule
-	if !containsRule(perms.Deny, metadataDenyRuleTest) {
-		t.Errorf("permissions.deny = %v, want to contain %q", perms.Deny, metadataDenyRuleTest)
+	if containsRule(perms.Deny, agentpkg.MetadataDenyRule) {
+		t.Errorf("permissions.deny = %v, want no metadata deny rule", perms.Deny)
 	}
 }
 
-func TestInstallHooks_PermissionsDeny_Idempotent(t *testing.T) {
+// TestInstallHooks_RemovesStaleDenyRule is the migration that heals an existing
+// repo: a config written by an older CLI still carries the rule, and a plain
+// `entire enable` (no --force) has to drop it. Removal is what makes the write
+// happen at all, so the second install must also leave it gone rather than
+// re-adding it.
+func TestInstallHooks_RemovesStaleDenyRule(t *testing.T) {
 	tempDir := t.TempDir()
 	t.Chdir(tempDir)
 
-	agent := &ClaudeCodeAgent{}
-	// First install
-	_, err := agent.InstallHooks(context.Background(), false)
-	if err != nil {
-		t.Fatalf("first InstallHooks() error = %v", err)
-	}
-
-	// Second install
-	_, err = agent.InstallHooks(context.Background(), false)
-	if err != nil {
-		t.Fatalf("second InstallHooks() error = %v", err)
-	}
-
-	perms := readPermissions(t, tempDir)
-
-	// Count occurrences of our rule
-	count := 0
-	for _, rule := range perms.Deny {
-		if rule == metadataDenyRuleTest {
-			count++
-		}
-	}
-	if count != 1 {
-		t.Errorf("permissions.deny contains %d copies of rule, want 1", count)
-	}
-}
-
-func TestInstallHooks_PermissionsDeny_PreservesUserRules(t *testing.T) {
-	tempDir := t.TempDir()
-	t.Chdir(tempDir)
-
-	// Create settings.json with existing user deny rule
 	writeSettingsFile(t, tempDir, `{
   "permissions": {
-    "deny": ["Bash(rm -rf *)"]
+    "deny": ["`+agentpkg.MetadataDenyRule+`"]
   }
 }`)
 
-	agent := &ClaudeCodeAgent{}
-	_, err := agent.InstallHooks(context.Background(), false)
-	if err != nil {
+	a := &ClaudeCodeAgent{}
+	if _, err := a.InstallHooks(context.Background(), false); err != nil {
+		t.Fatalf("first InstallHooks() error = %v", err)
+	}
+	if perms := readPermissions(t, tempDir); containsRule(perms.Deny, agentpkg.MetadataDenyRule) {
+		t.Fatalf("permissions.deny = %v, want the stale rule removed", perms.Deny)
+	}
+
+	if _, err := a.InstallHooks(context.Background(), false); err != nil {
+		t.Fatalf("second InstallHooks() error = %v", err)
+	}
+	if perms := readPermissions(t, tempDir); containsRule(perms.Deny, agentpkg.MetadataDenyRule) {
+		t.Errorf("permissions.deny = %v, want it to stay removed", perms.Deny)
+	}
+}
+
+// TestInstallHooks_RemovesOnlyOurDenyRule is the safety half of the migration:
+// removal is keyed on the exact rule string Entire wrote, so a user's own deny
+// rules survive untouched.
+func TestInstallHooks_RemovesOnlyOurDenyRule(t *testing.T) {
+	tempDir := t.TempDir()
+	t.Chdir(tempDir)
+
+	writeSettingsFile(t, tempDir, `{
+  "permissions": {
+    "deny": ["Bash(rm -rf *)", "`+agentpkg.MetadataDenyRule+`", "Read(./.env)"]
+  }
+}`)
+
+	a := &ClaudeCodeAgent{}
+	if _, err := a.InstallHooks(context.Background(), false); err != nil {
 		t.Fatalf("InstallHooks() error = %v", err)
 	}
 
 	perms := readPermissions(t, tempDir)
-
-	// Verify both rules exist
-	if !containsRule(perms.Deny, "Bash(rm -rf *)") {
-		t.Errorf("permissions.deny = %v, want to contain user rule", perms.Deny)
+	for _, want := range []string{"Bash(rm -rf *)", "Read(./.env)"} {
+		if !containsRule(perms.Deny, want) {
+			t.Errorf("permissions.deny = %v, want to still contain user rule %q", perms.Deny, want)
+		}
 	}
-	if !containsRule(perms.Deny, metadataDenyRuleTest) {
-		t.Errorf("permissions.deny = %v, want to contain Entire rule", perms.Deny)
+	if containsRule(perms.Deny, agentpkg.MetadataDenyRule) {
+		t.Errorf("permissions.deny = %v, want the Entire rule removed", perms.Deny)
 	}
 }
 
@@ -125,28 +122,28 @@ func TestInstallHooks_PermissionsDeny_PreservesAllowRules(t *testing.T) {
 	}
 }
 
-func TestInstallHooks_PermissionsDeny_SkipsExistingRule(t *testing.T) {
+// TestInstallHooks_DropsEmptyDenyArray covers the config Entire fully owned: with
+// its only rule removed, `deny` is deleted rather than left as an empty array.
+func TestInstallHooks_DropsEmptyDenyArray(t *testing.T) {
 	tempDir := t.TempDir()
 	t.Chdir(tempDir)
 
-	// Create settings.json with the rule already present
 	writeSettingsFile(t, tempDir, `{
   "permissions": {
-    "deny": ["Read(./.entire/metadata/**)"]
+    "deny": ["`+agentpkg.MetadataDenyRule+`"]
   }
 }`)
 
-	agent := &ClaudeCodeAgent{}
-	_, err := agent.InstallHooks(context.Background(), false)
-	if err != nil {
+	a := &ClaudeCodeAgent{}
+	if _, err := a.InstallHooks(context.Background(), false); err != nil {
 		t.Fatalf("InstallHooks() error = %v", err)
 	}
 
-	perms := readPermissions(t, tempDir)
-
-	// Should still have exactly 1 rule
-	if len(perms.Deny) != 1 {
-		t.Errorf("permissions.deny = %v, want exactly 1 rule", perms.Deny)
+	// nil means the key is gone; "deny": [] would unmarshal to a non-nil empty
+	// slice. An absent permissions block leaves the struct zero-valued, which is
+	// also correct here.
+	if perms := readPermissions(t, tempDir); perms.Deny != nil {
+		t.Errorf("permissions.deny should be dropped once empty, got %v", perms.Deny)
 	}
 }
 
@@ -205,13 +202,17 @@ func TestInstallHooks_PermissionsDeny_PreservesUnknownFields(t *testing.T) {
 		t.Errorf("permissions.ask = %v, want [Write(**), Bash(*)]", askRules)
 	}
 
-	// Verify the deny rule was added
-	var denyRules []string
-	if err := json.Unmarshal(rawPermissions["deny"], &denyRules); err != nil {
-		t.Fatalf("failed to parse permissions.deny: %v", err)
-	}
-	if !containsRule(denyRules, metadataDenyRuleTest) {
-		t.Errorf("permissions.deny = %v, want to contain %q", denyRules, metadataDenyRuleTest)
+	// The deny rule is no longer added. The seed carried no `deny` key, so the
+	// key staying absent is the expected outcome — install must not create one
+	// just to hold a rule it no longer writes.
+	if denyRaw, present := rawPermissions["deny"]; present {
+		var denyRules []string
+		if err := json.Unmarshal(denyRaw, &denyRules); err != nil {
+			t.Fatalf("failed to parse permissions.deny: %v", err)
+		}
+		if containsRule(denyRules, agentpkg.MetadataDenyRule) {
+			t.Errorf("permissions.deny = %v, want no metadata deny rule", denyRules)
+		}
 	}
 
 	// Verify "allow" is preserved
@@ -389,29 +390,21 @@ func TestUninstallHooks_RemovesDenyRule(t *testing.T) {
 	tempDir := t.TempDir()
 	t.Chdir(tempDir)
 
+	// Install no longer adds the rule, so stand in for a config written by an
+	// older CLI: uninstall still has to clean it up.
+	writeSettingsFile(t, tempDir, `{
+  "permissions": {
+    "deny": ["`+agentpkg.MetadataDenyRule+`"]
+  }
+}`)
+
 	agent := &ClaudeCodeAgent{}
-
-	// First install (which adds the deny rule)
-	_, err := agent.InstallHooks(context.Background(), false)
-	if err != nil {
-		t.Fatalf("InstallHooks() error = %v", err)
-	}
-
-	// Verify deny rule was added
-	perms := readPermissions(t, tempDir)
-	if !containsRule(perms.Deny, metadataDenyRuleTest) {
-		t.Fatal("deny rule should be present after install")
-	}
-
-	// Uninstall
-	err = agent.UninstallHooks(context.Background())
-	if err != nil {
+	if err := agent.UninstallHooks(context.Background()); err != nil {
 		t.Fatalf("UninstallHooks() error = %v", err)
 	}
 
-	// Verify deny rule was removed
-	perms = readPermissions(t, tempDir)
-	if containsRule(perms.Deny, metadataDenyRuleTest) {
+	perms := readPermissions(t, tempDir)
+	if containsRule(perms.Deny, agentpkg.MetadataDenyRule) {
 		t.Error("deny rule should be removed after uninstall")
 	}
 }
@@ -448,7 +441,7 @@ func TestUninstallHooks_PreservesUserDenyRules(t *testing.T) {
 	}
 
 	// Verify entire deny rule is removed
-	if containsRule(perms.Deny, metadataDenyRuleTest) {
+	if containsRule(perms.Deny, agentpkg.MetadataDenyRule) {
 		t.Errorf("entire deny rule should be removed, got: %v", perms.Deny)
 	}
 }
@@ -1167,4 +1160,101 @@ func hooksInstalledNow(t *testing.T, ag interface {
 		t.Fatalf("AreHooksInstalled() error = %v", err)
 	}
 	return installed
+}
+
+// TestPermissionConfigOwner_RepairsRetiredDenyRule exercises the shared repair
+// path end to end through the real agent: the capability wiring, the read, the
+// removal, and the write-back. This is what `entire doctor` calls, and it is a
+// separate path from InstallHooks (a user who already enabled Entire has no
+// reason to run enable again).
+func TestPermissionConfigOwner_RepairsRetiredDenyRule(t *testing.T) {
+	tempDir := t.TempDir()
+	t.Chdir(tempDir)
+
+	writeSettingsFile(t, tempDir, `{
+  "permissions": {
+    "allow": ["Read(**)"],
+    "deny": ["Bash(rm -rf *)", "`+agentpkg.MetadataDenyRule+`"]
+  }
+}`)
+
+	a := &ClaudeCodeAgent{}
+	ctx := context.Background()
+
+	if !agentpkg.HasRetiredMetadataDenyRule(ctx, a) {
+		t.Fatal("HasRetiredMetadataDenyRule = false, want true before repair")
+	}
+
+	changed, err := agentpkg.RepairRetiredMetadataDenyRule(ctx, a)
+	if err != nil {
+		t.Fatalf("RepairRetiredMetadataDenyRule() error = %v", err)
+	}
+	if !changed {
+		t.Error("RepairRetiredMetadataDenyRule() changed = false, want true")
+	}
+
+	perms := readPermissions(t, tempDir)
+	if containsRule(perms.Deny, agentpkg.MetadataDenyRule) {
+		t.Errorf("permissions.deny = %v, want the retired rule removed", perms.Deny)
+	}
+	if !containsRule(perms.Deny, "Bash(rm -rf *)") {
+		t.Errorf("permissions.deny = %v, want the user rule preserved", perms.Deny)
+	}
+	if !containsRule(perms.Allow, "Read(**)") {
+		t.Errorf("permissions.allow = %v, want it preserved", perms.Allow)
+	}
+
+	// Idempotent: doctor runs repeatedly, and the second run must report no
+	// change rather than rewriting the file every time.
+	if agentpkg.HasRetiredMetadataDenyRule(ctx, a) {
+		t.Error("HasRetiredMetadataDenyRule = true after repair")
+	}
+	changed, err = agentpkg.RepairRetiredMetadataDenyRule(ctx, a)
+	if err != nil {
+		t.Fatalf("second RepairRetiredMetadataDenyRule() error = %v", err)
+	}
+	if changed {
+		t.Error("second RepairRetiredMetadataDenyRule() changed = true, want false")
+	}
+}
+
+// TestPermissionConfigOwner_NoConfigFile: doctor runs in repos where the agent
+// was never set up. Absent must read as "nothing to report", not an error.
+func TestPermissionConfigOwner_NoConfigFile(t *testing.T) {
+	tempDir := t.TempDir()
+	t.Chdir(tempDir)
+
+	a := &ClaudeCodeAgent{}
+	ctx := context.Background()
+
+	if agentpkg.HasRetiredMetadataDenyRule(ctx, a) {
+		t.Error("HasRetiredMetadataDenyRule = true with no settings file")
+	}
+	changed, err := agentpkg.RepairRetiredMetadataDenyRule(ctx, a)
+	if err != nil {
+		t.Errorf("RepairRetiredMetadataDenyRule() error = %v, want nil", err)
+	}
+	if changed {
+		t.Error("RepairRetiredMetadataDenyRule() changed = true with no settings file")
+	}
+}
+
+// TestPermissionConfigOwner_UnparseableConfig splits the two contracts: the
+// detector stays quiet (diagnostics must not accuse on a failed read) while the
+// repair reports, because in doctor an unparseable config is the answer.
+func TestPermissionConfigOwner_UnparseableConfig(t *testing.T) {
+	tempDir := t.TempDir()
+	t.Chdir(tempDir)
+
+	writeSettingsFile(t, tempDir, `{not json`)
+
+	a := &ClaudeCodeAgent{}
+	ctx := context.Background()
+
+	if agentpkg.HasRetiredMetadataDenyRule(ctx, a) {
+		t.Error("HasRetiredMetadataDenyRule = true on an unparseable config")
+	}
+	if _, err := agentpkg.RepairRetiredMetadataDenyRule(ctx, a); err == nil {
+		t.Error("RepairRetiredMetadataDenyRule() error = nil, want a parse error")
+	}
 }

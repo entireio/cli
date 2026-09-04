@@ -63,8 +63,8 @@ func postReviewToTrail(ctx context.Context, out io.Writer, profileName, verdict 
 		fmt.Fprintln(out, "Nothing to report, so nothing was posted to the trail.")
 		return nil
 	}
-	return runAuthenticatedTrailAPI(ctx, out, false, "", func(ctx context.Context, client *api.Client) error {
-		target, err := resolveTrailReviewTarget(ctx, client, "", "", "")
+	return runAuthenticatedTrailAPI(ctx, out, false, "", func(ctx context.Context, client *api.Client, repoID string) error {
+		target, err := resolveTrailReviewTarget(ctx, client, repoID, "", "", "")
 		if err != nil {
 			return err
 		}

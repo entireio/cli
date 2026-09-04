@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"sync/atomic"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -49,6 +50,54 @@ func TestPostOAuthToken_LiftsAndPercentEncodesClientCreds(t *testing.T) {
 
 	assert.Empty(t, gotForm.Get("client_id"), "client_id must be dropped from the body once lifted into Basic")
 	assert.Empty(t, gotForm.Get("client_secret"), "client_secret must be dropped from the body")
+}
+
+// TestPostOAuthToken_RefusesCrossHostRedirect proves the subject_token (the
+// caller's login JWT) never reaches a different host, even when the origin
+// server issues a 307/308 redirect. Go's default client only strips
+// sensitive *headers* on a cross-host redirect (shouldCopyHeaderOnRedirect in
+// net/http) — the POST body, where subject_token actually lives, is copied
+// unconditionally. This is a genuine two-server reproduction: origin
+// redirects to attacker, and the test fails if attacker ever sees the token.
+func TestPostOAuthToken_RefusesCrossHostRedirect(t *testing.T) {
+	t.Parallel()
+
+	const secretSubjectToken = "super-secret-login-jwt"
+
+	// atomic.Bool because the write happens on the attacker server's
+	// handler goroutine and the read below happens on the test goroutine.
+	// The handler never runs while the guard works, so this does not race
+	// in practice — it is atomic so that a future regression is reported
+	// as a failed assertion rather than as a data race.
+	var attackerSawToken atomic.Bool
+	attacker := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = r.ParseForm() //nolint:errcheck // test stub
+		if r.PostForm.Get("subject_token") == secretSubjectToken {
+			attackerSawToken.Store(true)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"access_token":"stolen","expires_in":900}`)) //nolint:errcheck // test stub
+	}))
+	defer attacker.Close()
+
+	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, attacker.URL+"/oauth/token", http.StatusTemporaryRedirect)
+	}))
+	defer origin.Close()
+
+	form := url.Values{}
+	form.Set("grant_type", GrantTypeTokenExchange)
+	form.Set("subject_token", secretSubjectToken)
+
+	_, _, err := PostOAuthToken(context.Background(), origin.Client(), origin.URL, form)
+
+	// The leak check comes first, deliberately. It is the assertion that
+	// pins this test's headline claim, and require.Error below aborts the
+	// test — so with the two in the other order any regression failed on
+	// the error assertion alone and never evaluated whether the token had
+	// actually reached the attacker.
+	assert.False(t, attackerSawToken.Load(), "subject_token must never reach a host other than the one the caller targeted")
+	require.Error(t, err, "a cross-host redirect must be refused, not silently followed")
 }
 
 // TestPostOAuthToken_ErrorCode pins that a non-200 response surfaces as

@@ -19,8 +19,9 @@ import (
 
 // Ensure ClaudeCodeAgent implements HookSupport
 var (
-	_ agent.HookSupport   = (*ClaudeCodeAgent)(nil)
-	_ agent.HookFreshness = (*ClaudeCodeAgent)(nil)
+	_ agent.HookSupport           = (*ClaudeCodeAgent)(nil)
+	_ agent.HookFreshness         = (*ClaudeCodeAgent)(nil)
+	_ agent.PermissionConfigOwner = (*ClaudeCodeAgent)(nil)
 )
 
 // Claude Code hook names - these become subcommands under `entire hooks claude-code`
@@ -56,9 +57,6 @@ const (
 // ClaudeSettingsFileName is the settings file used by Claude Code.
 // This is Claude-specific and not shared with other agents.
 const ClaudeSettingsFileName = "settings.json"
-
-// metadataDenyRule blocks Claude from reading Entire session metadata
-const metadataDenyRule = "Read(./.entire/metadata/**)"
 
 // hookSettingsIO abstracts where a hook install reads and writes its settings
 // file. Repo scope uses agent.HookConfigFile: the path lives in the working
@@ -208,31 +206,10 @@ func readClaudeRawSettings(file hookSettingsIO, projectScope bool) (rawSettings,
 	return rawSettings, rawHooks, rawPermissions, nil
 }
 
-// ensureMetadataDenyRule adds the repo-scoped metadata deny rule to
-// rawPermissions when absent, reporting whether it changed anything.
-func ensureMetadataDenyRule(rawPermissions map[string]json.RawMessage, settingsPath string) (bool, error) {
-	var denyRules []string
-	if denyRaw, ok := rawPermissions["deny"]; ok {
-		if err := json.Unmarshal(denyRaw, &denyRules); err != nil {
-			return false, fmt.Errorf("failed to parse permissions.deny in %s: %w", settingsPath, err)
-		}
-	}
-	if slices.Contains(denyRules, metadataDenyRule) {
-		return false, nil
-	}
-	denyRules = append(denyRules, metadataDenyRule)
-	denyJSON, err := json.Marshal(denyRules)
-	if err != nil {
-		return false, fmt.Errorf("failed to marshal permissions.deny: %w", err)
-	}
-	rawPermissions["deny"] = denyJSON
-	return true, nil
-}
-
 // installHooksToFile installs Entire's Claude Code hooks into the settings
-// file at settingsPath. projectScope additionally maintains the repo-scoped
-// permissions.deny rule; the user-level install (InstallUserHooks) passes
-// false so it only ever touches the hooks section of ~/.claude/settings.json.
+// file at settingsPath. projectScope additionally removes Entire's retired
+// repo-scoped permissions.deny rule; the user-level install (InstallUserHooks)
+// passes false so it only ever touches the hooks section of ~/.claude/settings.json.
 // repaired reports a user-scope rewrite that normalized pre-existing Entire
 // entries (rather than a pure add or a no-op), so the caller can report the
 // repair instead of "already installed".
@@ -322,13 +299,13 @@ func installHooksToFile(file hookSettingsIO, force, projectScope bool) (count in
 		*matchers = ensureHook(*matchers, checks[spec.section], spec.matcher, spec.productionCommand())
 	}
 
-	// Add permissions.deny rule if not present (repo scope only: the rule is
-	// repo-relative and user-level installs must not modify user permissions).
+	// A normal repo-scoped enable also removes Entire's retired metadata deny
+	// rule. User-level installs must not modify user permissions.
 	permissionsChanged := false
 	if projectScope {
-		changed, err := ensureMetadataDenyRule(rawPermissions, settingsPath)
+		changed, err := agent.RemoveMetadataDenyRule(rawPermissions)
 		if err != nil {
-			return 0, false, err
+			return 0, false, fmt.Errorf("failed to update permissions in %s: %w", settingsPath, err)
 		}
 		permissionsChanged = changed
 	}
@@ -355,13 +332,18 @@ func installHooksToFile(file hookSettingsIO, force, projectScope bool) (count in
 	}
 	rawSettings["hooks"] = hooksJSON
 
-	// Marshal permissions and update raw settings (repo scope only)
+	// Removing the retired rule can empty permissions. Delete that empty block
+	// rather than leaving noise Entire introduced in the tracked settings file.
 	if projectScope {
-		permJSON, err := jsonutil.MarshalWithNoHTMLEscape(rawPermissions)
-		if err != nil {
-			return 0, false, fmt.Errorf("failed to marshal permissions: %w", err)
+		if len(rawPermissions) == 0 {
+			delete(rawSettings, "permissions")
+		} else {
+			permJSON, err := jsonutil.MarshalWithNoHTMLEscape(rawPermissions)
+			if err != nil {
+				return 0, false, fmt.Errorf("failed to marshal permissions: %w", err)
+			}
+			rawSettings["permissions"] = permJSON
 		}
-		rawSettings["permissions"] = permJSON
 	}
 
 	output, err := jsonutil.MarshalIndentWithNewline(rawSettings, "", "  ")
@@ -473,27 +455,10 @@ func uninstallHooksFromFile(file hookSettingsIO, projectScope bool) error {
 	}
 
 	if rawPermissions != nil {
-		if denyRaw, ok := rawPermissions["deny"]; ok {
-			var denyRules []string
-			if err := json.Unmarshal(denyRaw, &denyRules); err == nil {
-				// Filter out the metadata deny rule
-				filteredRules := make([]string, 0, len(denyRules))
-				for _, rule := range denyRules {
-					if rule != metadataDenyRule {
-						filteredRules = append(filteredRules, rule)
-					}
-				}
-				if len(filteredRules) > 0 {
-					denyJSON, err := json.Marshal(filteredRules)
-					if err == nil {
-						rawPermissions["deny"] = denyJSON
-					}
-				} else {
-					// Remove empty deny array
-					delete(rawPermissions, "deny")
-				}
-			}
-		}
+		// Same removal InstallHooks now performs; a marshal failure here leaves
+		// the rule in place, which uninstall reports through the write below
+		// rather than aborting the rest of the hook removal.
+		_, _ = agent.RemoveMetadataDenyRule(rawPermissions) //nolint:errcheck // best-effort during uninstall; hook removal must still complete
 
 		// If permissions is empty, remove it entirely
 		if len(rawPermissions) > 0 {
@@ -806,4 +771,11 @@ func removeEntireHooksCounting(matchers []ClaudeHookMatcher) ([]ClaudeHookMatche
 		}
 	}
 	return result, removed
+}
+
+// PermissionConfig implements agent.PermissionConfigOwner so the shared
+// retired-deny-rule diagnostics and repair can reach .claude/settings.json
+// without knowing Claude Code's layout.
+func (c *ClaudeCodeAgent) PermissionConfig(ctx context.Context) (*agent.HookConfigFile, error) {
+	return claudeHookConfig(ctx)
 }

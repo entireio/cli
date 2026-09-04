@@ -296,12 +296,16 @@ func gatherCheckpoints(ctx context.Context) string {
 
 func gatherTrails(ctx context.Context, errW io.Writer, limit int, insecureHTTP bool) string {
 	var out strings.Builder
-	err := runAuthenticatedTrailAPI(ctx, errW, insecureHTTP, "", func(ctx context.Context, client *api.Client) error {
+	err := runAuthenticatedTrailAPI(ctx, errW, insecureHTTP, "", func(ctx context.Context, client *api.Client, repoID string) error {
 		forge, owner, repo, err := resolveTrailRemote(ctx)
 		if err != nil {
 			return err
 		}
-		resources, _, err := listTrailResources(ctx, client, forge, owner, repo, nil, "", limit)
+		basePath, err := trailRepoBasePath(forge, owner, repo, repoID)
+		if err != nil {
+			return err
+		}
+		resources, _, err := listTrailResources(ctx, client, basePath, nil, "", limit)
 		if err != nil {
 			return err
 		}
@@ -322,7 +326,7 @@ func gatherTrails(ctx context.Context, errW io.Writer, limit int, insecureHTTP b
 			scanned = scanned[:tuneMaxTrailsForFindings]
 		}
 		for i := range scanned {
-			client.SetTrailRoute(scanned[i].ID, trailNumberPath(forge, owner, repo, scanned[i].Number))
+			client.SetTrailRoute(scanned[i].ID, trailNumberPathForBase(basePath, scanned[i].Number))
 			comments, err := fetchAllTrailReviewComments(ctx, client, scanned[i].ID, trailReviewSummaryOptions())
 			if err != nil {
 				fetchFailures++

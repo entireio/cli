@@ -36,9 +36,10 @@ func TestBuildApprovalRequestApproveAllowsEmptyMessage(t *testing.T) {
 
 func TestTrailApprovalsPath(t *testing.T) {
 	t.Parallel()
-	got := trailApprovalsPath("gh", "acme", "widgets", 7)
-	if !strings.HasSuffix(got, "/7/approvals") {
-		t.Fatalf("path = %q, want .../7/approvals suffix", got)
+	const basePath = "/api/v1/repos/native-repo-id/trails"
+	got := trailApprovalsPath(basePath, 7)
+	if got != basePath+"/7/approvals" {
+		t.Fatalf("path = %q, want %q", got, basePath+"/7/approvals")
 	}
 }
 

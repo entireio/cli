@@ -138,6 +138,35 @@ func TestCleanupPushedShadowBranches_MixedBranchesPartialDelete(t *testing.T) {
 	require.False(t, env.branchExists(deletable))
 }
 
+// TestCleanupPushedShadowBranches_HumanBranch_Survives is a genuine
+// reproduction of the naming-collision hazard: a branch named
+// "entire/abc1234" -- the bare, unsuffixed form a human could plausibly
+// create by hand (short-SHA branch naming is an ordinary convention, and
+// this exact fixture shape is used elsewhere in this package's own tests,
+// e.g. TestDeleteShadowBranch in manual_commit_test.go) -- must survive the
+// automatic, unattended post-push cleanup, because nothing proves Entire
+// created it. Before the fix, this branch matched shadowBranchPattern (the
+// broad name-shape check the auto-delete path used to trust directly), had
+// no session-state entry to protect it, and was force-deleted with no
+// confirmation.
+func TestCleanupPushedShadowBranches_HumanBranch_Survives(t *testing.T) {
+	env := newShadowCleanupEnv(t)
+	const humanBranch = "entire/abc1234"
+	require.NoError(t, env.repo.Storer.SetReference(
+		plumbing.NewHashReference(plumbing.NewBranchReferenceName(humanBranch), env.baseHash)))
+	// Also plant a genuine, auto-deletable shadow branch (orphaned, no
+	// session state) so the test proves the human branch is protected
+	// *specifically*, not that cleanup simply did nothing.
+	realShadow := env.addShadowBranch(env.baseHash.String(), "wt1")
+
+	deleted, err := CleanupPushedShadowBranches(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, 1, deleted, "only the genuine (worktree-suffixed) shadow branch should be deleted")
+	require.True(t, env.branchExists(humanBranch),
+		"a bare entire/<hex> branch with no ownership proof must survive automatic cleanup")
+	require.False(t, env.branchExists(realShadow))
+}
+
 // No shadow branches → no-op, no error.
 func TestCleanupPushedShadowBranches_NoBranches_NoOp(t *testing.T) {
 	env := newShadowCleanupEnv(t)

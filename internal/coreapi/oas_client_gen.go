@@ -57,6 +57,13 @@ type Invoker interface {
 	//
 	// POST /mirrors
 	CreateMirror(ctx context.Context, request *CreateMirrorInputBody) (*CreatedMirror, error)
+	// CreateMirrorRequest invokes createMirrorRequest operation.
+	//
+	// A validation failure may be reported synchronously at submission or as a terminal state on the
+	// request; clients must handle both.
+	//
+	// POST /mirror-requests
+	CreateMirrorRequest(ctx context.Context, request *CreateMirrorRequestInputBody) (*MirrorRequestHeaders, error)
 	// CreateOrg invokes createOrg operation.
 	//
 	// Create organization.
@@ -153,6 +160,12 @@ type Invoker interface {
 	//
 	// GET /mirrors/{mirrorId}
 	GetMirror(ctx context.Context, params GetMirrorParams) (*Mirror, error)
+	// GetMirrorRequest invokes getMirrorRequest operation.
+	//
+	// Unknown failure codes must be treated as a generic terminal failure.
+	//
+	// GET /mirror-requests/{requestId}
+	GetMirrorRequest(ctx context.Context, params GetMirrorRequestParams) (*MirrorRequest, error)
 	// GetOnboardingStatus invokes getOnboardingStatus operation.
 	//
 	// Report whether the calling account still needs to complete onboarding.
@@ -983,6 +996,92 @@ func (c *Client) sendCreateMirror(ctx context.Context, request *CreateMirrorInpu
 	defer body.Close()
 
 	result, err := decodeCreateMirrorResponse(resp)
+	if err != nil {
+		return res, errors.Wrap(err, "decode response")
+	}
+
+	return result, nil
+}
+
+// CreateMirrorRequest invokes createMirrorRequest operation.
+//
+// A validation failure may be reported synchronously at submission or as a terminal state on the
+// request; clients must handle both.
+//
+// POST /mirror-requests
+func (c *Client) CreateMirrorRequest(ctx context.Context, request *CreateMirrorRequestInputBody) (*MirrorRequestHeaders, error) {
+	res, err := c.sendCreateMirrorRequest(ctx, request)
+	return res, err
+}
+
+func (c *Client) sendCreateMirrorRequest(ctx context.Context, request *CreateMirrorRequestInputBody) (res *MirrorRequestHeaders, err error) {
+
+	u := uri.Clone(c.requestURL(ctx))
+	var pathParts [1]string
+	pathParts[0] = "/mirror-requests"
+	uri.AddPathParts(u, pathParts[:]...)
+
+	r, err := ht.NewRequest(ctx, "POST", u)
+	if err != nil {
+		return res, errors.Wrap(err, "create request")
+	}
+	if err := encodeCreateMirrorRequestRequest(request, r); err != nil {
+		return res, errors.Wrap(err, "encode request")
+	}
+
+	{
+		type bitset = [1]uint8
+		var satisfied bitset
+		{
+
+			switch err := c.securityBearerAuth(ctx, CreateMirrorRequestOperation, r); {
+			case err == nil: // if NO error
+				satisfied[0] |= 1 << 0
+			case errors.Is(err, ogenerrors.ErrSkipClientSecurity):
+				// Skip this security.
+			default:
+				return res, errors.Wrap(err, "security \"BearerAuth\"")
+			}
+		}
+		{
+
+			switch err := c.securitySessionAuth(ctx, CreateMirrorRequestOperation, r); {
+			case err == nil: // if NO error
+				satisfied[0] |= 1 << 1
+			case errors.Is(err, ogenerrors.ErrSkipClientSecurity):
+				// Skip this security.
+			default:
+				return res, errors.Wrap(err, "security \"SessionAuth\"")
+			}
+		}
+
+		if ok := func() bool {
+		nextRequirement:
+			for _, requirement := range []bitset{
+				{0b00000001},
+				{0b00000010},
+			} {
+				for i, mask := range requirement {
+					if satisfied[i]&mask != mask {
+						continue nextRequirement
+					}
+				}
+				return true
+			}
+			return false
+		}(); !ok {
+			return res, ogenerrors.ErrSecurityRequirementIsNotSatisfied
+		}
+	}
+
+	resp, err := c.cfg.Client.Do(r)
+	if err != nil {
+		return res, errors.Wrap(err, "do request")
+	}
+	body := resp.Body
+	defer body.Close()
+
+	result, err := decodeCreateMirrorRequestResponse(resp)
 	if err != nil {
 		return res, errors.Wrap(err, "decode response")
 	}
@@ -2572,6 +2671,106 @@ func (c *Client) sendGetMirror(ctx context.Context, params GetMirrorParams) (res
 	defer body.Close()
 
 	result, err := decodeGetMirrorResponse(resp)
+	if err != nil {
+		return res, errors.Wrap(err, "decode response")
+	}
+
+	return result, nil
+}
+
+// GetMirrorRequest invokes getMirrorRequest operation.
+//
+// Unknown failure codes must be treated as a generic terminal failure.
+//
+// GET /mirror-requests/{requestId}
+func (c *Client) GetMirrorRequest(ctx context.Context, params GetMirrorRequestParams) (*MirrorRequest, error) {
+	res, err := c.sendGetMirrorRequest(ctx, params)
+	return res, err
+}
+
+func (c *Client) sendGetMirrorRequest(ctx context.Context, params GetMirrorRequestParams) (res *MirrorRequest, err error) {
+
+	u := uri.Clone(c.requestURL(ctx))
+	var pathParts [2]string
+	pathParts[0] = "/mirror-requests/"
+	{
+		// Encode "requestId" parameter.
+		e := uri.NewPathEncoder(uri.PathEncoderConfig{
+			Param:   "requestId",
+			Style:   uri.PathStyleSimple,
+			Explode: false,
+		})
+		if err := func() error {
+			return e.EncodeValue(conv.UUIDToString(params.RequestId))
+		}(); err != nil {
+			return res, errors.Wrap(err, "encode path")
+		}
+		encoded, err := e.Result()
+		if err != nil {
+			return res, errors.Wrap(err, "encode path")
+		}
+		pathParts[1] = encoded
+	}
+	uri.AddPathParts(u, pathParts[:]...)
+
+	r, err := ht.NewRequest(ctx, "GET", u)
+	if err != nil {
+		return res, errors.Wrap(err, "create request")
+	}
+
+	{
+		type bitset = [1]uint8
+		var satisfied bitset
+		{
+
+			switch err := c.securityBearerAuth(ctx, GetMirrorRequestOperation, r); {
+			case err == nil: // if NO error
+				satisfied[0] |= 1 << 0
+			case errors.Is(err, ogenerrors.ErrSkipClientSecurity):
+				// Skip this security.
+			default:
+				return res, errors.Wrap(err, "security \"BearerAuth\"")
+			}
+		}
+		{
+
+			switch err := c.securitySessionAuth(ctx, GetMirrorRequestOperation, r); {
+			case err == nil: // if NO error
+				satisfied[0] |= 1 << 1
+			case errors.Is(err, ogenerrors.ErrSkipClientSecurity):
+				// Skip this security.
+			default:
+				return res, errors.Wrap(err, "security \"SessionAuth\"")
+			}
+		}
+
+		if ok := func() bool {
+		nextRequirement:
+			for _, requirement := range []bitset{
+				{0b00000001},
+				{0b00000010},
+			} {
+				for i, mask := range requirement {
+					if satisfied[i]&mask != mask {
+						continue nextRequirement
+					}
+				}
+				return true
+			}
+			return false
+		}(); !ok {
+			return res, ogenerrors.ErrSecurityRequirementIsNotSatisfied
+		}
+	}
+
+	resp, err := c.cfg.Client.Do(r)
+	if err != nil {
+		return res, errors.Wrap(err, "do request")
+	}
+	body := resp.Body
+	defer body.Close()
+
+	result, err := decodeGetMirrorRequestResponse(resp)
 	if err != nil {
 		return res, errors.Wrap(err, "decode response")
 	}
