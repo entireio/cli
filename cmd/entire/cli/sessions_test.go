@@ -2013,7 +2013,7 @@ func TestCheckpointTokensCmd_TextOutputWithRealCheckpointShape(t *testing.T) {
 }
 
 // The priced path had no command-level coverage: the cost column was asserted
-// only against writeCheckpointTokenClasses directly, and no checkpoint in this
+// only against writeTokenClasses directly, and no checkpoint in this
 // repo's own history is priceable (every one predates the cache-write TTL
 // split), so nothing exercised metadata -> report -> render with a model
 // recorded. This drives it through the real command and asserts the acceptance

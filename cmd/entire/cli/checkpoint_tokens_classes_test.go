@@ -209,7 +209,7 @@ func TestCheckpointTokensReport_Classes_CarrySubsets(t *testing.T) {
 }
 
 // The breakdown must render for a human, not just in --json.
-func TestWriteCheckpointTokenClasses_Priced(t *testing.T) {
+func TestWriteTokenClasses_Priced(t *testing.T) {
 	t.Parallel()
 
 	report := classesReportFor(t, "Claude Code", "claude-sonnet-4.6", checkpoint.TokenUsageVersionDelta,
@@ -219,7 +219,7 @@ func TestWriteCheckpointTokenClasses_Priced(t *testing.T) {
 		})
 
 	var buf bytes.Buffer
-	writeCheckpointTokenClasses(&buf, report.Classes)
+	writeTokenClasses(&buf, report.Classes)
 	out := buf.String()
 
 	for _, want := range []string{"How it was billed", "Fresh input", "Cache write", "Cache read", "Output", "cost", "1h TTL", "thinking"} {
@@ -233,7 +233,7 @@ func TestWriteCheckpointTokenClasses_Priced(t *testing.T) {
 // writes at all (openai-6x/8x, the Gemini families) a cache-write class carries
 // tokens whose true cost share is exactly zero, and printing "<1%" there claims
 // a cost the provider never charges.
-func TestWriteCheckpointTokenClasses_ZeroCostClassIsNotUnderOnePercent(t *testing.T) {
+func TestWriteTokenClasses_ZeroCostClassIsNotUnderOnePercent(t *testing.T) {
 	t.Parallel()
 
 	// gpt-5.5 -> priceFamilyOpenAI6x, which defines no CacheWrite weights.
@@ -251,7 +251,7 @@ func TestWriteCheckpointTokenClasses_ZeroCostClassIsNotUnderOnePercent(t *testin
 	}
 
 	var buf bytes.Buffer
-	writeCheckpointTokenClasses(&buf, report.Classes)
+	writeTokenClasses(&buf, report.Classes)
 	for _, line := range strings.Split(buf.String(), "\n") {
 		if !strings.Contains(line, "Cache write") {
 			continue
@@ -267,14 +267,14 @@ func TestWriteCheckpointTokenClasses_ZeroCostClassIsNotUnderOnePercent(t *testin
 
 // Without a verified ratio row the cost column must not appear at all — an
 // empty or zeroed column reads as "this cost nothing".
-func TestWriteCheckpointTokenClasses_UnpricedOmitsCostColumn(t *testing.T) {
+func TestWriteTokenClasses_UnpricedOmitsCostColumn(t *testing.T) {
 	t.Parallel()
 
 	report := classesReportFor(t, "Cursor", "", checkpoint.TokenUsageVersionDelta,
 		&agent.TokenUsage{InputTokens: 1000, CacheReadTokens: 3000})
 
 	var buf bytes.Buffer
-	writeCheckpointTokenClasses(&buf, report.Classes)
+	writeTokenClasses(&buf, report.Classes)
 	out := buf.String()
 
 	// Assert on the header row: a substring check for "cost" would pass merely
@@ -292,11 +292,11 @@ func TestWriteCheckpointTokenClasses_UnpricedOmitsCostColumn(t *testing.T) {
 }
 
 // Nothing recorded renders nothing rather than an empty table.
-func TestWriteCheckpointTokenClasses_NilRendersNothing(t *testing.T) {
+func TestWriteTokenClasses_NilRendersNothing(t *testing.T) {
 	t.Parallel()
 
 	var buf bytes.Buffer
-	writeCheckpointTokenClasses(&buf, nil)
+	writeTokenClasses(&buf, nil)
 	if buf.Len() != 0 {
 		t.Errorf("nil breakdown must render nothing, got %q", buf.String())
 	}
@@ -382,14 +382,14 @@ func TestCheckpointTokenWeights_NilMetaIsUnpriced(t *testing.T) {
 }
 
 // The withheld reason must name the real cause, not default to "no ratios".
-func TestWriteCheckpointTokenClasses_StatesTheRealReason(t *testing.T) {
+func TestWriteTokenClasses_StatesTheRealReason(t *testing.T) {
 	t.Parallel()
 
 	report := classesReportFor(t, "Claude Code", "claude-sonnet-4.6", 0,
 		&agent.TokenUsage{InputTokens: 1000, CacheCreationTokens: 2000, OutputTokens: 100})
 
 	var buf bytes.Buffer
-	writeCheckpointTokenClasses(&buf, report.Classes)
+	writeTokenClasses(&buf, report.Classes)
 	out := buf.String()
 
 	if strings.Contains(out, "no verified price ratios") {
