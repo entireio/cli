@@ -42,7 +42,7 @@ func TestResolveRunnerSetupMode_FlagPrecedence(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			got, err := resolveRunnerSetupMode(io.Discard, tt.opts, false)
+			got, err := resolveRunnerSetupMode(context.Background(), io.Discard, tt.opts, false)
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
@@ -60,7 +60,7 @@ func TestResolveRunnerSetupMode_NonInteractiveNeedsAnAction(t *testing.T) {
 	t.Parallel()
 
 	// interactive.CanPromptInteractively() is false under `go test`.
-	_, err := resolveRunnerSetupMode(io.Discard, runnerSetupOptions{}, false)
+	_, err := resolveRunnerSetupMode(context.Background(), io.Discard, runnerSetupOptions{}, false)
 	if err == nil {
 		t.Fatal("expected an error when no terminal and no action flag")
 	}
@@ -404,5 +404,32 @@ func TestClassifyTuneProposals(t *testing.T) {
 	}
 	if doc.ID != risk.ID || doc.Output.ResultType == "" {
 		t.Errorf("rewrite lost structural fields: id=%q result_type=%q", doc.ID, doc.Output.ResultType)
+	}
+}
+
+// TestRunRunnerSetup_BadGatherFlagsWriteNothing pins that a usage error leaves
+// the repo alone. The gather flags are validated for the modes that read them,
+// but ahead of the scaffold — validating after it meant `-y --limit 0` on a
+// fresh repo created .entire/runners and then failed.
+func TestRunRunnerSetup_BadGatherFlagsWriteNothing(t *testing.T) {
+	repoRoot := newRunnerSetupRepo(t)
+	stubUnavailableSummaryProvider(t)
+
+	for _, tc := range []struct {
+		name string
+		opts runnerSetupOptions
+	}{
+		{"yes with a bad limit", runnerSetupOptions{assumeYes: true, limit: 0}},
+		{"yes with bad sources", runnerSetupOptions{assumeYes: true, limit: 1, sources: []string{"nope"}}},
+		{"print-prompt with a bad limit", runnerSetupOptions{printPrompt: true, limit: -1}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := runRunnerSetup(context.Background(), io.Discard, io.Discard, tc.opts); err == nil {
+				t.Fatal("expected a usage error")
+			}
+			if written := runnerFiles(t, repoRoot); len(written) != 0 {
+				t.Errorf("a usage error wrote %d runner file(s); it must write none", len(written))
+			}
+		})
 	}
 }

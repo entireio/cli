@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"path/filepath"
@@ -75,7 +76,7 @@ func runnerConfigsExist(repoRoot string) bool {
 // tailored to this repo — and it is asked once, whether or not the repo already
 // has runners, so that the answer settles both creating and tailoring.
 // Cancelling the form yields setupModeNone, which authorizes nothing.
-func chooseRunnerSetupAction(errW io.Writer, haveRunners bool) (runnerSetupMode, error) {
+func chooseRunnerSetupAction(ctx context.Context, errW io.Writer, haveRunners bool) (runnerSetupMode, error) {
 	title := "Runners are already configured for this repo. Tailor them to this repo now?"
 	adaptLabel := "Tailor them to this repo"
 	keepLabel := "Leave them as they are"
@@ -102,7 +103,9 @@ func chooseRunnerSetupAction(errW io.Writer, haveRunners bool) (runnerSetupMode,
 				Value(&mode),
 		),
 	)
-	if err := form.Run(); err != nil {
+	// RunWithContext, not Run: the command's context must be able to abort the
+	// form, and it is what puts context.Canceled in reach of the handler.
+	if err := form.RunWithContext(ctx); err != nil {
 		return setupModeNone, handleFormCancellation(errW, "Runner setup", err)
 	}
 	return mode, nil

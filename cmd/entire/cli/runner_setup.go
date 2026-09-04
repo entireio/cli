@@ -57,6 +57,18 @@ func (m runnerSetupMode) writesRunnerFiles() bool {
 	return false
 }
 
+// gathersSignal reports whether this mode reads repository signal, and so
+// whether --sources and --limit apply to it at all.
+func (m runnerSetupMode) gathersSignal() bool {
+	switch m {
+	case setupModeAdapt, setupModePrintPrompt, setupModeDryRun:
+		return true
+	case setupModeDefaults, setupModeNone:
+		return false
+	}
+	return false
+}
+
 // needsProvider reports whether this mode calls the summary provider, so the
 // caller can resolve it before spending seconds gathering signal for it.
 func (m runnerSetupMode) needsProvider() bool {
@@ -155,12 +167,25 @@ func runRunnerSetup(ctx context.Context, w, errW io.Writer, opts runnerSetupOpti
 	}
 
 	haveRunners := runnerConfigsExist(repoRoot)
-	mode, err := resolveRunnerSetupMode(errW, opts, haveRunners)
+	mode, err := resolveRunnerSetupMode(ctx, errW, opts, haveRunners)
 	if err != nil {
 		return err
 	}
 	if mode == setupModeNone {
 		return nil // picker cancelled; handleFormCancellation already said so
+	}
+
+	// --sources and --limit only steer the gather, so they are validated for
+	// the modes that gather and not for --defaults-only, which reads neither.
+	// Before the scaffold, though: a usage error must not leave files behind.
+	var src tuneSources
+	if mode.gathersSignal() {
+		if src, err = parseTuneSources(opts.sources); err != nil {
+			return err
+		}
+		if opts.limit <= 0 {
+			return errors.New(runnerSetupLimitErrorMessage)
+		}
 	}
 
 	// Choosing a mode was the consent for creating the runner files.
@@ -178,17 +203,6 @@ func runRunnerSetup(ctx context.Context, w, errW io.Writer, opts runnerSetupOpti
 		}
 		reportCreatedDefaults(errW, len(created), mode)
 		return nil
-	}
-
-	// --sources and --limit only steer the gather, so they are validated here
-	// rather than up front: --defaults-only reads neither and must not be
-	// rejected for them.
-	src, err := parseTuneSources(opts.sources)
-	if err != nil {
-		return err
-	}
-	if opts.limit <= 0 {
-		return errors.New(runnerSetupLimitErrorMessage)
 	}
 
 	// Resolved before the gather: resolution can fail outright, or stop to ask
@@ -269,7 +283,7 @@ func reportCreatedDefaults(errW io.Writer, n int, mode runnerSetupMode) {
 // place consent is taken. An explicit mode flag wins, --yes means the full
 // action, a terminal is asked, and a non-interactive caller that named nothing
 // is told which flag to pass rather than being given half the job.
-func resolveRunnerSetupMode(errW io.Writer, opts runnerSetupOptions, haveRunners bool) (runnerSetupMode, error) {
+func resolveRunnerSetupMode(ctx context.Context, errW io.Writer, opts runnerSetupOptions, haveRunners bool) (runnerSetupMode, error) {
 	switch {
 	case opts.dryRun:
 		return setupModeDryRun, nil
@@ -280,7 +294,7 @@ func resolveRunnerSetupMode(errW io.Writer, opts runnerSetupOptions, haveRunners
 	case opts.assumeYes:
 		return setupModeAdapt, nil
 	case interactive.CanPromptInteractively():
-		return chooseRunnerSetupAction(errW, haveRunners)
+		return chooseRunnerSetupAction(ctx, errW, haveRunners)
 	default:
 		return setupModeNone, errors.New("no terminal to ask what setup should do: pass --yes (create the default runners and tailor them), --defaults-only, --print-prompt, or --dry-run — see --help")
 	}
