@@ -552,8 +552,8 @@ func createMirrors(ctx context.Context, errW io.Writer, targets []mirrorTarget, 
 	return results
 }
 
-// createOneMirror registers a single (repo, region) mirror and, unless noWait
-// or the upstream is empty, waits for its initial clone. It never returns an
+// createOneMirror registers a single (repo, region) mirror and, unless noWait,
+// waits for its initial clone. It never returns an
 // error: every outcome is folded into the mirrorResult so a single failure
 // can't sink the batch. report (may be nil) is called as the mirror moves
 // through its phases so the caller can render live progress; the final call has
@@ -576,15 +576,6 @@ func createOneMirror(ctx context.Context, t mirrorTarget, c *coreapi.Client, cli
 		return res
 	}
 	res.cloneURL = outcome.created.MirrorUrl
-
-	if outcome.created.Suspended {
-		// An admin suspended this existing placement, so it won't be served.
-		// Surface it as a distinct status and set an error so the batch exits
-		// non-zero, matching the one-shot: a suspended mirror isn't a success.
-		res.status, res.err = mirrorStatusSuspended, errors.New("suspended by an admin; won't be usable")
-		report(mirrorStatusSuspended, true, false)
-		return res
-	}
 
 	if !outcome.polled {
 		res.status = mirrorStatusRegistered
