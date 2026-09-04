@@ -134,7 +134,11 @@ func (r *apiCheckpointReader) Read(ctx context.Context, checkpointID id.Checkpoi
 	// second one behind the first one's JSON field would quietly mislead every
 	// consumer of `explain --json`.
 	return &checkpoint.CheckpointSummary{
-		CheckpointID:     checkpointID,
+		// The server's own checkpointId, not the requested param: loadDetail has
+		// already verified the two agree, but sourcing this from info keeps a
+		// future regression in that check from silently papering over a real
+		// mismatch by relabeling foreign data with the id the caller asked for.
+		CheckpointID:     id.CheckpointID(info.CheckpointID),
 		Strategy:         "manual-commit",
 		CommitSHA:        info.CommitSha,
 		CheckpointsCount: info.TotalSteps,
@@ -229,7 +233,8 @@ func (r *apiCheckpointReader) ReadSessionMetadataAndPrompts(ctx context.Context,
 	s := info.Sessions[sessionIndex]
 
 	meta := &checkpoint.Metadata{
-		CheckpointID:     checkpointID,
+		// The server's own checkpointId — see the matching comment in Read().
+		CheckpointID:     id.CheckpointID(info.CheckpointID),
 		SessionID:        s.SessionID,
 		Strategy:         "manual-commit",
 		CreatedAt:        parseAPITime(s.CreatedAt, info.CreatedAt),
@@ -358,6 +363,14 @@ func (r *apiCheckpointReader) loadDetail(ctx context.Context, checkpointID id.Ch
 	if env.Checkpoint == nil {
 		return nil, fmt.Errorf("checkpoint %s is not available for %s (the server returned no checkpoint)", checkpointID, r.ownerRepo)
 	}
+	// Identity first, ahead of every content-based check below: a
+	// wrong-repo or wrong-checkpoint response that also happens to trip one
+	// of those (zero sessions, say) would otherwise be reported as a fact
+	// about the checkpoint the caller asked for -- "checkpoint X in Y has no
+	// sessions" when the server never answered about X in Y at all.
+	if err := r.verifyResponseIdentity(checkpointID, env); err != nil {
+		return nil, err
+	}
 	if len(env.Checkpoint.Sessions) == 0 {
 		return nil, fmt.Errorf("checkpoint %s in %s has no sessions to explain", checkpointID, r.ownerRepo)
 	}
@@ -365,6 +378,53 @@ func (r *apiCheckpointReader) loadDetail(ctx context.Context, checkpointID id.Ch
 	r.detail = env.Checkpoint
 	r.detailID = checkpointID
 	return r.detail, nil
+}
+
+// verifyResponseIdentity checks the envelope's own identity fields
+// (repo_full_name, checkpointId) against what was actually requested, before
+// the response is cached or rendered. This is the content-layer equivalent of
+// cell_target.go's resolveProcessingPlacement self-check at the routing
+// layer: a cell that answers with the wrong repo's or wrong checkpoint's data
+// — a server bug, a cache-key collision, an authz bug scoping by checkpoint ID
+// without cross-checking repo ownership — must produce an error here, not a
+// "successful" read of foreign private transcript/session data silently
+// labeled as belonging to the repo the caller asked about.
+func (r *apiCheckpointReader) verifyResponseIdentity(checkpointID id.CheckpointID, env apiCheckpointEnvelope) error {
+	// Byte equality, NOT EqualFold. Case is load-bearing for a checkpoint
+	// ID because the two kinds have opposite canonical spellings: a legacy
+	// ID is 12 LOWERCASE hex (id.Pattern) and a ULID is canonical
+	// UPPERCASE (isULID requires ulid.ParseStrict(s).String() == s). So a
+	// fold would accept a non-canonical spelling of a real ID and then --
+	// because CheckpointID below is sourced from the server's value -- mint
+	// an id.CheckpointID that id.Validate itself rejects. An honest server
+	// echoes the ID it was asked for, byte for byte; anything else is the
+	// mismatch this function exists to catch.
+	if got := env.Checkpoint.CheckpointID; got != checkpointID.String() {
+		return fmt.Errorf("checkpoint identity mismatch: requested checkpoint %s from %s, but the server returned checkpoint %q; refusing to display possibly-mismatched data (this looks like a server-side bug, please report it)",
+			checkpointID, r.ownerRepo, got)
+	}
+	// repo_full_name is REQUIRED, not best-effort. It is the only field that
+	// ties the response to the repo that was asked about: checkpointId alone
+	// proves nothing, since any response -- including one carrying another
+	// repo's private transcripts -- satisfies it by echoing the ID it was
+	// handed. Tolerating an empty value therefore let the verified party opt
+	// out of its own verification, which is not verification. Every 200 from
+	// a real cell carries it (checked against aws-us-east-2: "entireio/cli").
+	if env.RepoFullName == "" {
+		return fmt.Errorf("checkpoint identity unverifiable: requested checkpoint %s from %s, but the server returned no repo_full_name to confirm which repo answered; refusing to display possibly-mismatched data (this looks like a server-side bug, please report it)",
+			checkpointID, r.ownerRepo)
+	}
+	// entire-api (repoFullNameOr) legitimately falls back to echoing the bare
+	// repo ULID when the repo's metadata has not resolved a display name yet,
+	// so either form is an honest claim to be the requested repo. EqualFold is
+	// right for ownerRepo -- forge owner/repo names are case-insensitive -- and
+	// the repo ULID is compared byte-for-byte, canonical uppercase like any
+	// other ULID.
+	if got := env.RepoFullName; !strings.EqualFold(got, r.ownerRepo) && got != r.repoID {
+		return fmt.Errorf("checkpoint identity mismatch: requested checkpoint %s from %s, but the server returned data for repo %q; refusing to display possibly-mismatched data (this looks like a server-side bug, please report it)",
+			checkpointID, r.ownerRepo, got)
+	}
+	return nil
 }
 
 // parseAPITime parses the first parseable RFC3339 timestamp from the given

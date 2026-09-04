@@ -203,7 +203,7 @@ Otherwise, <trail> may be a trail number, id, or branch in the target repo.`,
 
 // runTrailShow shows one trail, defaulting to the current branch's trail.
 func runTrailShow(ctx context.Context, w, errW io.Writer, opts trailShowOptions) error {
-	return runAuthenticatedTrailAPIWithRepoID(ctx, errW, opts.InsecureHTTP, opts.Repo, func(ctx context.Context, client *api.Client, repoID string) error {
+	return runAuthenticatedTrailAPI(ctx, errW, opts.InsecureHTTP, opts.Repo, func(ctx context.Context, client *api.Client, repoID string) error {
 		forge, owner, repo, err := resolveTrailRepoOrRemote(ctx, opts.Repo)
 		if err != nil {
 			return err
@@ -284,14 +284,10 @@ func runTrailShowWithClientAtPath(ctx context.Context, w, errW io.Writer, client
 	return nil
 }
 
-// resolveTrailBySelector resolves a trail by an optional selector (trail
+// resolveTrailBySelectorAtPath resolves a trail by an optional selector (trail
 // number, id, or branch). An empty selector falls back to the current branch's
 // trail. It returns an actionable error (never a nil trail with a nil error)
 // when nothing matches, so callers can rely on a non-nil result.
-func resolveTrailBySelector(ctx context.Context, client *api.Client, forge, owner, repo, selector, branchOverride string) (*api.TrailResource, error) {
-	return resolveTrailBySelectorAtPath(ctx, client, trailsBasePath(forge, owner, repo), forge, owner, repo, selector, branchOverride)
-}
-
 func resolveTrailBySelectorAtPath(ctx context.Context, client *api.Client, basePath, forge, owner, repo, selector, branchOverride string) (*api.TrailResource, error) {
 	selector = strings.TrimSpace(selector)
 	if selector == "" {
@@ -436,16 +432,12 @@ func trailWebURL(base, forge, owner, repo string, number int) string {
 	return strings.TrimRight(base, "/") + "/" + forge + "/" + owner + "/" + repo + "/trails/" + strconv.Itoa(number)
 }
 
-// fetchTrailDescription fetches a trail's rendered description text
+// fetchTrailDescriptionAtPath fetches a trail's rendered description text
 // (`trail.body_document.text_snapshot`) and its etag, which the list endpoint
 // omits, by integer number. It returns only the description and etag — the
 // list result already supplies the metadata — and decodes only the fields it
 // needs, so it is unaffected by the shape of sibling fields like
 // `checkpoints`/`thread`.
-func fetchTrailDescription(ctx context.Context, client *api.Client, forge, owner, repo string, number int) (string, string, error) {
-	return fetchTrailDescriptionAtPath(ctx, client, trailsBasePath(forge, owner, repo), number)
-}
-
 func fetchTrailDescriptionAtPath(ctx context.Context, client *api.Client, basePath string, number int) (string, string, error) {
 	resp, err := client.Get(ctx, trailNumberPathForBase(basePath, number))
 	if err != nil {
@@ -502,7 +494,7 @@ func runTrailListAll(ctx context.Context, w, errW io.Writer, opts trailListOptio
 	if err != nil {
 		return err
 	}
-	return runAuthenticatedTrailAPIWithRepoID(ctx, errW, opts.InsecureHTTP, opts.Repo, func(ctx context.Context, client *api.Client, repoID string) error {
+	return runAuthenticatedTrailAPI(ctx, errW, opts.InsecureHTTP, opts.Repo, func(ctx context.Context, client *api.Client, repoID string) error {
 		return runTrailListAllWithClient(ctx, w, client, repoID, opts, statusFilters)
 	})
 }
@@ -1023,9 +1015,13 @@ func runTrailCreate(cmd *cobra.Command, title, body, base, branch, statusStr, ty
 	if err != nil {
 		return err
 	}
-	client, _, err := newTrailAPIClient(ctx, trailInsecureHTTP(cmd), forge, owner, repoName)
+	client, repoID, err := newTrailAPIClient(ctx, trailInsecureHTTP(cmd), forge, owner, repoName)
 	if err != nil {
 		return renderDataAPIAuthError(ctx, cmd.ErrOrStderr(), owner+"/"+repoName, err)
+	}
+	basePath, err := trailRepoBasePath(forge, owner, repoName, repoID)
+	if err != nil {
+		return err
 	}
 
 	pushRemote, err := resolveTrailPushRemote(ctx, branch)
@@ -1038,7 +1034,7 @@ func runTrailCreate(cmd *cobra.Command, title, body, base, branch, statusStr, ty
 		return err
 	}
 
-	createResp, err := postTrailCreate(ctx, client, forge, owner, repoName, title, body, branch, base, statusStr, strings.TrimSpace(typeStr), strings.TrimSpace(priorityStr), assignees)
+	createResp, err := postTrailCreate(ctx, client, basePath, forge, owner, repoName, title, body, branch, base, statusStr, strings.TrimSpace(typeStr), strings.TrimSpace(priorityStr), assignees)
 	if err != nil {
 		cleanupCreatedTrailBranch(ctx, repo, pushRemote, branch, branchState.LocalCreated, branchState.RemotePushed, errW)
 		return err
@@ -1171,9 +1167,9 @@ func ensureTrailCreateBranchExists(ctx context.Context, w io.Writer, repo *git.R
 	return nil
 }
 
-func postTrailCreate(ctx context.Context, client *api.Client, forge, owner, repoName, title, body, branch, base, statusStr, typeStr, priorityStr string, assignees []string) (api.TrailCreateResponse, error) {
+func postTrailCreate(ctx context.Context, client *api.Client, basePath, forge, owner, repoName, title, body, branch, base, statusStr, typeStr, priorityStr string, assignees []string) (api.TrailCreateResponse, error) {
 	createReq := newTrailCreateRequest(title, body, branch, base, statusStr, typeStr, priorityStr, assignees)
-	resp, err := client.Post(ctx, trailsBasePath(forge, owner, repoName), createReq)
+	resp, err := client.Post(ctx, basePath, createReq)
 	if err != nil {
 		noteTrailCommandEnablement(ctx, client, err)
 		return api.TrailCreateResponse{}, fmt.Errorf("failed to create trail: %w", err)
@@ -1339,7 +1335,7 @@ type trailUpdateInputs struct {
 }
 
 func runTrailUpdate(ctx context.Context, w, errW io.Writer, insecureHTTP bool, inputs trailUpdateInputs) error {
-	return runAuthenticatedTrailAPIWithRepoID(ctx, errW, insecureHTTP, inputs.Repo, func(ctx context.Context, client *api.Client, repoID string) error {
+	return runAuthenticatedTrailAPI(ctx, errW, insecureHTTP, inputs.Repo, func(ctx context.Context, client *api.Client, repoID string) error {
 		forge, owner, repoName, err := resolveTrailRepoOrRemote(ctx, inputs.Repo)
 		if err != nil {
 			return err
@@ -1783,13 +1779,17 @@ type trailCheckoutOptions struct {
 func runTrailCheckout(ctx context.Context, w, errW io.Writer, insecureHTTP bool, selector string, opts trailCheckoutOptions) error {
 	// checkout rejects --repo (it operates on the local clone), so the enablement
 	// cache always tracks the local origin here.
-	return runAuthenticatedTrailAPI(ctx, errW, insecureHTTP, "", func(ctx context.Context, client *api.Client) error {
+	return runAuthenticatedTrailAPI(ctx, errW, insecureHTTP, "", func(ctx context.Context, client *api.Client, repoID string) error {
 		forge, owner, repo, err := resolveTrailRemote(ctx)
 		if err != nil {
 			return err
 		}
+		basePath, err := trailRepoBasePath(forge, owner, repo, repoID)
+		if err != nil {
+			return err
+		}
 
-		found, err := resolveTrailBySelector(ctx, client, forge, owner, repo, selector, "")
+		found, err := resolveTrailBySelectorAtPath(ctx, client, basePath, forge, owner, repo, selector, "")
 		if err != nil {
 			return err
 		}
@@ -1896,7 +1896,7 @@ func runTrailDelete(cmd *cobra.Command, number int, branch string, force bool) e
 	ctx := cmd.Context()
 	w := cmd.OutOrStdout()
 
-	return runAuthenticatedTrailAPIWithRepoID(ctx, cmd.ErrOrStderr(), trailInsecureHTTP(cmd), trailRepoFlag(cmd), func(ctx context.Context, client *api.Client, repoID string) error {
+	return runAuthenticatedTrailAPI(ctx, cmd.ErrOrStderr(), trailInsecureHTTP(cmd), trailRepoFlag(cmd), func(ctx context.Context, client *api.Client, repoID string) error {
 		forge, owner, repo, err := resolveTrailRepoOrRemote(ctx, trailRepoFlag(cmd))
 		if err != nil {
 			return err
@@ -1950,12 +1950,8 @@ func runTrailDelete(cmd *cobra.Command, number int, branch string, force bool) e
 	})
 }
 
-// deleteTrailByNumber deletes a trail; entire-api answers 204 No Content, so any
-// 2xx is a successful delete and the body is not read.
-func deleteTrailByNumber(ctx context.Context, client *api.Client, forge, owner, repo string, number int) error {
-	return deleteTrailByNumberAtPath(ctx, client, trailsBasePath(forge, owner, repo), number)
-}
-
+// deleteTrailByNumberAtPath deletes a trail; entire-api answers 204 No Content,
+// so any 2xx is a successful delete and the body is not read.
 func deleteTrailByNumberAtPath(ctx context.Context, client *api.Client, basePath string, number int) error {
 	resp, err := client.Delete(ctx, trailNumberPathForBase(basePath, number))
 	if err != nil {
@@ -2102,11 +2098,6 @@ func runTrailCreateInteractive(title, body, branch, statusStr *string, noBranch 
 	return nil
 }
 
-// findTrailByBranch looks up a trail by branch name via the list API.
-func findTrailBySelector(ctx context.Context, client *api.Client, forge, owner, repo, selector string) (*api.TrailResource, error) {
-	return findTrailBySelectorAtPath(ctx, client, trailsBasePath(forge, owner, repo), selector)
-}
-
 func findTrailBySelectorAtPath(ctx context.Context, client *api.Client, basePath, selector string) (*api.TrailResource, error) {
 	selector = strings.TrimSpace(selector)
 	if selector == "" {
@@ -2131,22 +2122,15 @@ func parseTrailNumberSelector(selector string) (int, bool) {
 	return n, true
 }
 
-func findTrailByBranch(ctx context.Context, client *api.Client, forge, owner, repo, branch string) (*api.TrailResource, error) {
-	return findTrailByBranchAtPath(ctx, client, trailsBasePath(forge, owner, repo), branch)
-}
-
+// findTrailByBranchAtPath looks up a trail by branch name via the list API.
 func findTrailByBranchAtPath(ctx context.Context, client *api.Client, basePath, branch string) (*api.TrailResource, error) {
 	return findTrailAtPath(ctx, client, basePath, func(t api.TrailResource) bool {
 		return t.Branch == branch
 	})
 }
 
-// findTrailByNumber looks up a trail by numeric identifier through entire-api's
-// direct number route, so it never has to scan the list pages.
-func findTrailByNumber(ctx context.Context, client *api.Client, forge, owner, repo string, number int) (*api.TrailResource, error) {
-	return findTrailByNumberAtPath(ctx, client, trailsBasePath(forge, owner, repo), number)
-}
-
+// findTrailByNumberAtPath looks up a trail by numeric identifier through
+// entire-api's direct number route, so it never has to scan the list pages.
 func findTrailByNumberAtPath(ctx context.Context, client *api.Client, basePath string, number int) (*api.TrailResource, error) {
 	resp, err := client.Get(ctx, trailNumberPathForBase(basePath, number))
 	if err != nil {
@@ -2236,13 +2220,9 @@ func trailRepoBasePath(forge, owner, repo, repoID string) (string, error) {
 	return "/api/v1/repos/" + url.PathEscape(repoID) + "/trails", nil
 }
 
-// trailNumberPath returns the single-trail API path keyed by integer trail
-// number (e.g. "/api/v1/trails/gh/acme/repo/575"). The server validates an
-// integer here and rejects the trail UUID, so callers must pass Number, not ID.
-func trailNumberPath(forge, owner, repo string, number int) string {
-	return trailNumberPathForBase(trailsBasePath(forge, owner, repo), number)
-}
-
+// trailNumberPathForBase returns the single-trail API path keyed by integer
+// trail number. The server validates an integer here and rejects the trail UUID,
+// so callers must pass Number, not ID.
 func trailNumberPathForBase(basePath string, number int) string {
 	return basePath + "/" + strconv.Itoa(number)
 }
@@ -2253,18 +2233,17 @@ func trailBodyPathForBase(basePath string, number int) string {
 	return trailNumberPathForBase(basePath, number) + "/body"
 }
 
-// resolveTrailRemote resolves the origin remote and ensures the forge is
-// known to the trails API. Without this guard, an unmapped host (e.g.
-// gitlab.com, or a misconfigured entire:// URL with no forge prefix)
-// produces a malformed `/api/v1/trails//owner/repo` path that the server
-// rejects with an opaque error instead of a clear "unsupported forge" one.
+// resolveTrailRemote resolves the origin remote and ensures the forge is known
+// to the trails API. Without this guard, an unmapped host (e.g. gitlab.com, or
+// a misconfigured entire:// URL with no forge prefix) cannot select a valid
+// repo-scoped trail route and would fail later with an opaque API error.
 func resolveTrailRemote(ctx context.Context) (forge, owner, repo string, err error) {
 	forge, owner, repo, err = gitremote.ResolveRemoteRepo(ctx, "origin")
 	if err != nil {
 		return "", "", "", fmt.Errorf("failed to resolve repository: %w", err)
 	}
 	if forge == "" {
-		return "", "", "", errors.New("origin remote is not on a forge supported by Entire trails (supported: github.com)")
+		return "", "", "", errors.New("origin remote is not on a forge supported by Entire trails (supported: github.com and Entire-native remotes)")
 	}
 	return forge, owner, repo, nil
 }
@@ -2334,6 +2313,13 @@ func resolveTrailPushRemote(ctx context.Context, branch string) (string, error) 
 // as well as a full clone URL (https://, git@, or entire://) that gitremote
 // can parse. A trailing ".git" on the repo is stripped.
 func parseTrailRepoArg(raw string) (forge, owner, repo string, err error) {
+	return parseTrailRepoShape(raw)
+}
+
+// parseTrailRepoShape parses the two spellings --repo accepts — a bare
+// forge/owner/repo triple, or a clone URL — without judging whether trails can
+// act on the forge it found.
+func parseTrailRepoShape(raw string) (forge, owner, repo string, err error) {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
 		return "", "", "", errors.New("empty --repo value")
@@ -2348,17 +2334,17 @@ func parseTrailRepoArg(raw string) (forge, owner, repo string, err error) {
 		// parts[0] must be a short forge id ("gh"), not a hostname. A host-like
 		// value (github.com/acme/app) would otherwise be forwarded verbatim and
 		// the server would reject the malformed path with an opaque error.
-		if !gitremote.IsSupportedForge(parts[0]) {
+		if !gitremote.IsForgePathToken(parts[0]) {
 			return "", "", "", fmt.Errorf("invalid --repo %q: %q is not a supported forge id (use a forge id like \"gh\", or pass a clone URL such as https://github.com/%s/%s)", raw, parts[0], parts[1], parts[2])
 		}
-		return parts[0], parts[1], strings.TrimSuffix(parts[2], ".git"), nil
+		return parts[0], parts[1], strings.TrimSuffix(parts[2], gitDirSuffix), nil
 	}
 	info, perr := gitremote.ParseURL(raw)
 	if perr != nil {
 		return "", "", "", fmt.Errorf("invalid --repo %q: %w", raw, perr)
 	}
 	if info.Forge == "" {
-		return "", "", "", fmt.Errorf("invalid --repo %q: unsupported forge host (supported: github.com)", raw)
+		return "", "", "", fmt.Errorf("invalid --repo %q: unsupported forge host (supported: github.com and Entire-native remotes)", raw)
 	}
 	return info.Forge, info.Owner, info.Repo, nil
 }

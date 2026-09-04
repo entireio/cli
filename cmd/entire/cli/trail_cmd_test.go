@@ -59,6 +59,30 @@ func TestNewTrailCreateRequestUsesLinkBranchAction(t *testing.T) {
 	}, req)
 }
 
+// Not parallel: changes the process working directory for the enablement-cache write.
+func TestPostTrailCreateUsesNativeRepoBasePath(t *testing.T) {
+	const basePath = "/api/v1/repos/native-repo-id/trails"
+
+	repoDir := t.TempDir()
+	testutil.InitRepo(t, repoDir)
+	t.Chdir(repoDir)
+
+	var gotMethod, gotPath string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotMethod, gotPath = r.Method, r.URL.Path
+		if err := json.NewEncoder(w).Encode(api.TrailCreateResponse{Trail: api.TrailResource{ID: "native-trail", Number: 4}}); err != nil {
+			t.Errorf("encode trail create response: %v", err)
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	_, err := postTrailCreate(t.Context(), api.NewClientWithBaseURL("token", srv.URL), basePath,
+		"et", "entirehq", "marvin", "Native trail", "", "feature/native", "main", "open", "", "", nil)
+	require.NoError(t, err)
+	require.Equal(t, http.MethodPost, gotMethod)
+	require.Equal(t, basePath, gotPath)
+}
+
 func TestNewTrailCreateRequestCanBeBranchless(t *testing.T) {
 	req := newTrailCreateRequest("title", "body", "", "main", "open", "", "", nil)
 
@@ -530,7 +554,7 @@ func TestTrailPathsFromNativeRepoBase(t *testing.T) {
 
 func TestTrailNumberPath(t *testing.T) {
 	t.Parallel()
-	got := trailNumberPath("gh", "acme", "repo", 575)
+	got := trailNumberPathForBase(trailsBasePath("gh", "acme", "repo"), 575)
 	want := "/api/v1/trails/gh/acme/repo/575"
 	if got != want {
 		t.Fatalf("trailNumberPath = %q, want %q", got, want)
@@ -647,7 +671,7 @@ func TestFetchTrailDescription_ReadsNestedBodyDocument(t *testing.T) {
 	defer srv.Close()
 
 	client := api.NewClientWithBaseURL("tok", srv.URL)
-	bodyText, _, err := fetchTrailDescription(t.Context(), client, "gh", "acme", "repo", 777)
+	bodyText, _, err := fetchTrailDescriptionAtPath(t.Context(), client, trailsBasePath("gh", "acme", "repo"), 777)
 	if err != nil {
 		t.Fatalf("fetchTrailDescription: %v", err)
 	}
@@ -869,7 +893,7 @@ func TestDeleteTrailByNumber(t *testing.T) {
 		defer srv.Close()
 
 		client := api.NewClientWithBaseURL("tok", srv.URL)
-		if err := deleteTrailByNumber(t.Context(), client, "gh", "acme", "repo", 575); err != nil {
+		if err := deleteTrailByNumberAtPath(t.Context(), client, trailsBasePath("gh", "acme", "repo"), 575); err != nil {
 			t.Fatalf("deleteTrailByNumber: %v", err)
 		}
 		if gotMethod != http.MethodDelete {
@@ -907,7 +931,7 @@ func TestDeleteTrailByNumber(t *testing.T) {
 		defer srv.Close()
 
 		client := api.NewClientWithBaseURL("tok", srv.URL)
-		if err := deleteTrailByNumber(t.Context(), client, "gh", "acme", "repo", 999); err == nil {
+		if err := deleteTrailByNumberAtPath(t.Context(), client, trailsBasePath("gh", "acme", "repo"), 999); err == nil {
 			t.Fatal("expected error for 404, got nil")
 		}
 	})
@@ -1184,7 +1208,7 @@ func TestFindTrailByNumberUsesDirectEntireAPIRoute(t *testing.T) {
 	defer srv.Close()
 
 	client := api.NewClientWithBaseURL("tok", srv.URL)
-	found, err := findTrailByNumber(t.Context(), client, "gh", "acme", "repo", trailNumber)
+	found, err := findTrailByNumberAtPath(t.Context(), client, trailsBasePath("gh", "acme", "repo"), trailNumber)
 	if err != nil {
 		t.Fatalf("findTrailByNumber: %v", err)
 	}
@@ -1237,7 +1261,7 @@ func TestFindTrailByNumberTreatsIdentitylessBodyAsNotFound(t *testing.T) {
 			}))
 			defer srv.Close()
 
-			found, err := findTrailByNumber(t.Context(), api.NewClientWithBaseURL("tok", srv.URL), "gh", "acme", "repo", 575)
+			found, err := findTrailByNumberAtPath(t.Context(), api.NewClientWithBaseURL("tok", srv.URL), trailsBasePath("gh", "acme", "repo"), 575)
 			if err != nil {
 				t.Fatalf("findTrailByNumber: %v", err)
 			}
@@ -1275,7 +1299,7 @@ func TestFindTrailPaginatesPastServerMax(t *testing.T) {
 	defer srv.Close()
 
 	client := api.NewClientWithBaseURL("tok", srv.URL)
-	found, err := findTrailByBranch(context.Background(), client, "gh", "acme", "repo", "target")
+	found, err := findTrailByBranchAtPath(context.Background(), client, trailsBasePath("gh", "acme", "repo"), "target")
 	if err != nil {
 		t.Fatalf("findTrailByBranch: %v", err)
 	}
@@ -1314,7 +1338,7 @@ func TestFindTrailPaginatesToTheEndOfItsBudget(t *testing.T) {
 	defer srv.Close()
 
 	client := api.NewClientWithBaseURL("tok", srv.URL)
-	found, err := findTrailByBranch(t.Context(), client, "gh", "acme", "repo", "target")
+	found, err := findTrailByBranchAtPath(t.Context(), client, trailsBasePath("gh", "acme", "repo"), "target")
 	if err != nil {
 		t.Fatalf("findTrailByBranch: %v", err)
 	}
@@ -1343,7 +1367,7 @@ func TestFindTrailStopsWhenServerRepeatsUnpaginatedFullPage(t *testing.T) {
 	defer srv.Close()
 
 	client := api.NewClientWithBaseURL("tok", srv.URL)
-	found, err := findTrailByBranch(context.Background(), client, "gh", "acme", "repo", "target")
+	found, err := findTrailByBranchAtPath(context.Background(), client, trailsBasePath("gh", "acme", "repo"), "target")
 	if err != nil {
 		t.Fatalf("findTrailByBranch: %v", err)
 	}
@@ -1373,7 +1397,7 @@ func TestFindTrailStopsAtMaxPagesWithoutTotal(t *testing.T) {
 	defer srv.Close()
 
 	client := api.NewClientWithBaseURL("tok", srv.URL)
-	found, err := findTrailByBranch(context.Background(), client, "gh", "acme", "repo", "target")
+	found, err := findTrailByBranchAtPath(context.Background(), client, trailsBasePath("gh", "acme", "repo"), "target")
 	if err != nil {
 		t.Fatalf("findTrailByBranch: %v", err)
 	}

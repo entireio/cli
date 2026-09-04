@@ -553,19 +553,11 @@ func noteTrailCommandEnablement(ctx context.Context, client *api.Client, command
 }
 
 // runAuthenticatedTrailAPI runs fn against the entire-api cell that owns the
-// target repository. repoOverride is the raw --repo flag: when non-empty the
-// local clone's enablement cache is skipped because the result belongs to a
-// different repository.
-func runAuthenticatedTrailAPI(ctx context.Context, errW io.Writer, insecureHTTP bool, repoOverride string, fn func(context.Context, *api.Client) error) error {
-	return runAuthenticatedTrailAPIWithRepoID(ctx, errW, insecureHTTP, repoOverride, func(ctx context.Context, client *api.Client, _ string) error {
-		return fn(ctx, client)
-	})
-}
-
-// runAuthenticatedTrailAPIWithRepoID also exposes the processing placement ID
-// to repo-addressed read callers. Most trail operations remain host-addressed
-// and should use runAuthenticatedTrailAPI instead.
-func runAuthenticatedTrailAPIWithRepoID(ctx context.Context, errW io.Writer, insecureHTTP bool, repoOverride string, fn func(context.Context, *api.Client, string) error) error {
+// target repository and exposes the repo ID needed to address native trail
+// routes. repoOverride is the raw --repo flag: when non-empty the local clone's
+// enablement cache is skipped because the result belongs to a different
+// repository.
+func runAuthenticatedTrailAPI(ctx context.Context, errW io.Writer, insecureHTTP bool, repoOverride string, fn func(context.Context, *api.Client, string) error) error {
 	forge, owner, repo, err := resolveTrailRepoOrRemote(ctx, repoOverride)
 	if err != nil {
 		return err

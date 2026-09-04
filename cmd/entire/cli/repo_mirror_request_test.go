@@ -436,11 +436,11 @@ func TestCreateAndAwaitMirror_AsyncCancellation(t *testing.T) {
 	}
 }
 
-func TestRepoMirrorCreate_AsyncSetting(t *testing.T) {
+func TestRepoMirrorCreate_AsyncDefaultWhenSettingsFail(t *testing.T) {
 	useFastMirrorPolling(t)
 
 	setupTestRepo(t)
-	writeSettings(t, `{"async_mirror_requests":true}`)
+	writeSettings(t, `{`)
 
 	requestPolls := 0
 	var paths []string
@@ -477,6 +477,39 @@ func TestRepoMirrorCreate_AsyncSetting(t *testing.T) {
 	require.Contains(t, stderr.String(), "Queued mirror owner/repo")
 	require.Contains(t, stderr.String(), "Placing mirror owner/repo")
 	require.Equal(t, []string{mirrorRequestsAPIPath, mirrorRequestPath(), mirrorRequestPath()}, paths)
+}
+
+func TestRepoMirrorCreate_SynchronousOptOut(t *testing.T) {
+	setupTestRepo(t)
+	writeSettings(t, `{"async_mirror_requests":false}`)
+
+	var paths []string
+	client := newMirrorRequestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		paths = append(paths, r.URL.Path)
+		if r.Method != http.MethodPost || r.URL.Path != mirrorsAPIPath {
+			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		writeJSONResponse(t, w, http.StatusCreated, &coreapi.CreatedMirror{
+			Created:   true,
+			MirrorId:  "mirror-1",
+			MirrorUrl: "entire://cluster/gh/owner/repo",
+		})
+	})
+	previousClient := clusterCoreClient
+	clusterCoreClient = func(context.Context, string) (*coreapi.Client, error) { return client, nil }
+	t.Cleanup(func() { clusterCoreClient = previousClient })
+
+	cmd := newRepoCmd()
+	var stdout bytes.Buffer
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&bytes.Buffer{})
+	cmd.SetArgs([]string{"mirror", "create", "--no-wait", "github.com/owner/repo", "aws-us-east-2.entire.io"})
+	require.NoError(t, cmd.ExecuteContext(t.Context()))
+	require.Contains(t, stdout.String(), "Registered mirror mirror-1")
+	require.Contains(t, stdout.String(), "entire://cluster/gh/owner/repo")
+	require.Equal(t, []string{mirrorsAPIPath}, paths)
 }
 
 func TestCreateOneMirror_AsyncProgress(t *testing.T) {

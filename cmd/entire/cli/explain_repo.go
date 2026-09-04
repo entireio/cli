@@ -107,18 +107,18 @@ func parseExplainRepoFlag(value string) (forge, owner, repo string, err error) {
 		if parseErr != nil || info.Protocol != gitremote.ProtocolEntire || info.Host == "" || info.Forge != nativeCloneForge {
 			return "", "", "", fmt.Errorf("invalid --repo %q: expected %s", gitremote.RedactURL(v), explainRepoFlagShapes)
 		}
-		project, repoName, ok := parseNativeCloneRef(nativeCloneForge + "/" + info.Owner + "/" + info.Repo)
-		if !ok {
-			return "", "", "", fmt.Errorf("invalid --repo %q: expected %s", gitremote.RedactURL(v), explainRepoFlagShapes)
+		project, repoName, nativeErr := parseNativeCloneRef(nativeCloneForge + "/" + info.Owner + "/" + info.Repo)
+		if nativeErr != nil {
+			return "", "", "", fmt.Errorf("invalid --repo %q: expected %s: %w", gitremote.RedactURL(v), explainRepoFlagShapes, nativeErr)
 		}
 		return nativeCloneForge, strings.ToLower(project), strings.ToLower(repoName), nil
 	}
 
 	ref := strings.TrimPrefix(v, "/")
 	if strings.HasPrefix(ref, nativeCloneForge+"/") {
-		project, repoName, ok := parseNativeCloneRef(ref)
-		if !ok {
-			return "", "", "", fmt.Errorf("invalid --repo %q: expected %s", value, explainRepoFlagShapes)
+		project, repoName, nativeErr := parseNativeCloneRef(ref)
+		if nativeErr != nil {
+			return "", "", "", fmt.Errorf("invalid --repo %q: expected %s: %w", value, explainRepoFlagShapes, nativeErr)
 		}
 		return nativeCloneForge, strings.ToLower(project), strings.ToLower(repoName), nil
 	}

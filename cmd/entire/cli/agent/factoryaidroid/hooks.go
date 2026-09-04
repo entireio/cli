@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"slices"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
@@ -15,7 +14,10 @@ import (
 )
 
 // Ensure FactoryAIDroidAgent implements HookSupport
-var _ agent.HookSupport = (*FactoryAIDroidAgent)(nil)
+var (
+	_ agent.HookSupport           = (*FactoryAIDroidAgent)(nil)
+	_ agent.PermissionConfigOwner = (*FactoryAIDroidAgent)(nil)
+)
 
 // Factory AI Droid hook names - these become subcommands under `entire hooks factoryai-droid`
 const (
@@ -33,9 +35,6 @@ const (
 // FactorySettingsFileName is the settings file used by Factory AI Droid.
 // This is Factory-specific and not shared with other agents.
 const FactorySettingsFileName = "settings.json"
-
-// metadataDenyRule blocks Factory Droid from reading Entire session metadata
-const metadataDenyRule = "Read(./.entire/metadata/**)"
 
 // factoryHookConfig returns .factory/settings.json for the current worktree,
 // opened through the worktree's root. That directory lives in the working tree,
@@ -191,22 +190,12 @@ func (f *FactoryAIDroidAgent) InstallHooks(ctx context.Context, force bool) (int
 		count++
 	}
 
-	// Add permissions.deny rule if not present
-	permissionsChanged := false
-	var denyRules []string
-	if denyRaw, ok := rawPermissions["deny"]; ok {
-		if err := json.Unmarshal(denyRaw, &denyRules); err != nil {
-			return 0, fmt.Errorf("failed to parse permissions.deny in settings.json: %w", err)
-		}
-	}
-	if !slices.Contains(denyRules, metadataDenyRule) {
-		denyRules = append(denyRules, metadataDenyRule)
-		denyJSON, err := json.Marshal(denyRules)
-		if err != nil {
-			return 0, fmt.Errorf("failed to marshal permissions.deny: %w", err)
-		}
-		rawPermissions["deny"] = denyJSON
-		permissionsChanged = true
+	// Unconditional, like the stale-hook migration above: a plain
+	// `entire enable` must drop the retired metadata deny rule, not just
+	// --force. See agent.MetadataDenyRule for why it is retired.
+	permissionsChanged, err := agent.RemoveMetadataDenyRule(rawPermissions)
+	if err != nil {
+		return 0, fmt.Errorf("failed to update permissions in %s: %w", cfg.Path(), err)
 	}
 
 	// staleDropped forces a write even when nothing was added: a file holding
@@ -232,12 +221,17 @@ func (f *FactoryAIDroidAgent) InstallHooks(ctx context.Context, force bool) (int
 	}
 	rawSettings["hooks"] = hooksJSON
 
-	// Marshal permissions and update raw settings
-	permJSON, err := jsonutil.MarshalWithNoHTMLEscape(rawPermissions)
-	if err != nil {
-		return 0, fmt.Errorf("failed to marshal permissions: %w", err)
+	// An emptied permissions block is deleted, not written back as {} — see the
+	// same branch in claudecode's writeClaudeSettingsFile.
+	if len(rawPermissions) == 0 {
+		delete(rawSettings, "permissions")
+	} else {
+		permJSON, permErr := jsonutil.MarshalWithNoHTMLEscape(rawPermissions)
+		if permErr != nil {
+			return 0, fmt.Errorf("failed to marshal permissions: %w", permErr)
+		}
+		rawSettings["permissions"] = permJSON
 	}
-	rawSettings["permissions"] = permJSON
 
 	// Write back to file
 	output, err := jsonutil.MarshalIndentWithNewline(rawSettings, "", "  ")
@@ -346,27 +340,9 @@ func (f *FactoryAIDroidAgent) UninstallHooks(ctx context.Context) error {
 	}
 
 	if rawPermissions != nil {
-		if denyRaw, ok := rawPermissions["deny"]; ok {
-			var denyRules []string
-			if err := json.Unmarshal(denyRaw, &denyRules); err == nil {
-				// Filter out the metadata deny rule
-				filteredRules := make([]string, 0, len(denyRules))
-				for _, rule := range denyRules {
-					if rule != metadataDenyRule {
-						filteredRules = append(filteredRules, rule)
-					}
-				}
-				if len(filteredRules) > 0 {
-					denyJSON, err := json.Marshal(filteredRules)
-					if err == nil {
-						rawPermissions["deny"] = denyJSON
-					}
-				} else {
-					// Remove empty deny array
-					delete(rawPermissions, "deny")
-				}
-			}
-		}
+		// Same removal InstallHooks now performs; best-effort so a marshal
+		// failure cannot abort the rest of the hook removal.
+		_, _ = agent.RemoveMetadataDenyRule(rawPermissions) //nolint:errcheck // best-effort during uninstall
 
 		// If permissions is empty, remove it entirely
 		if len(rawPermissions) > 0 {
@@ -518,4 +494,11 @@ func hookEntryCommand(e FactoryHookEntry) string { return e.Command }
 func removeEntireHooks(matchers []FactoryHookMatcher) []FactoryHookMatcher {
 	out, _ := dropStaleEntireHooks(matchers)
 	return out
+}
+
+// PermissionConfig implements agent.PermissionConfigOwner so the shared
+// retired-deny-rule diagnostics and repair can reach .factory/settings.json
+// without knowing Factory Droid's layout.
+func (f *FactoryAIDroidAgent) PermissionConfig(ctx context.Context) (*agent.HookConfigFile, error) {
+	return factoryHookConfig(ctx)
 }

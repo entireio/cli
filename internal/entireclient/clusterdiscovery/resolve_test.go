@@ -1,10 +1,13 @@
 package clusterdiscovery
 
 import (
+	"bytes"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -56,12 +59,11 @@ func TestResolve_ActiveContextWinsWhenEligible(t *testing.T) {
 	assert.Equal(t, "bob@eu", c.Name, "active eligible context must win over other same-core accounts")
 }
 
-// TestResolve_UnrelatedActiveContextErrorsNamingEligibleLogin: the active
-// context is on an unrelated core while exactly one saved context is eligible.
-// The old resolver silently used that sole eligible context; we now refuse to
-// substitute an identity the user didn't select, and name it instead so the
-// switch is one obvious command.
-func TestResolve_UnrelatedActiveContextErrorsNamingEligibleLogin(t *testing.T) {
+// TestResolve_UnrelatedActiveContextUsesSoleEligibleLogin: the active context is
+// on an unrelated core while exactly one saved context is eligible, so that one
+// is used. Someone holding logins in two federations can clone from either
+// without first retargeting every shell on the machine with `auth use`.
+func TestResolve_UnrelatedActiveContextUsesSoleEligibleLogin(t *testing.T) {
 	t.Parallel()
 	srv := httptest.NewServer(coresHandler(t, nil, "https://eu.auth.entire.io"))
 	defer srv.Close()
@@ -75,22 +77,15 @@ func TestResolve_UnrelatedActiveContextErrorsNamingEligibleLogin(t *testing.T) {
 		},
 	}))
 
-	_, err := ResolveContextForCluster(t.Context(), configDir, t.TempDir(), "aws-eu-central-1.entire.io", hostPinningClient(t, srv), t.Logf)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "does not accept your active login")
-	assert.Contains(t, err.Error(), `"paul@unrelated"`, "the message must name the active login, or the mismatch is invisible")
-	assert.Contains(t, err.Error(), "https://eu.auth.partial.to", "and the core it belongs to")
-	assert.Contains(t, err.Error(), "prod-eu", "and the saved login that would work")
-	assert.Contains(t, err.Error(), "entire auth use")
-	// A local switch is the fix here, so don't send the user through a login flow.
-	assert.NotContains(t, err.Error(), "entire login")
+	c, err := ResolveContextForCluster(t.Context(), configDir, t.TempDir(), "aws-eu-central-1.entire.io", hostPinningClient(t, srv), t.Logf)
+	require.NoError(t, err)
+	assert.Equal(t, "prod-eu", c.Name, "the sole login the cluster trusts is the only possible answer")
 }
 
-// TestResolve_UnrelatedActiveContextNamesAllEligibleLogins: what used to be the
-// "ambiguous" case is now the same case as a single candidate — the resolver
-// never picks, so two eligible contexts are simply two names to offer. Sorted,
-// so the message is stable across saves.
-func TestResolve_UnrelatedActiveContextNamesAllEligibleLogins(t *testing.T) {
+// TestResolve_SeveralEligibleLoginsAreAmbiguous: auto-selection settles a single
+// candidate only. With two, picking one would make the acting identity depend on
+// what else happens to be stored, so the resolver names both, sorted, and stops.
+func TestResolve_SeveralEligibleLoginsAreAmbiguous(t *testing.T) {
 	t.Parallel()
 	srv := httptest.NewServer(coresHandler(t, nil, "https://core-us.entire.io"))
 	defer srv.Close()
@@ -107,6 +102,7 @@ func TestResolve_UnrelatedActiveContextNamesAllEligibleLogins(t *testing.T) {
 
 	_, err := ResolveContextForCluster(t.Context(), configDir, t.TempDir(), "cluster1.entire.io", hostPinningClient(t, srv), t.Logf)
 	require.Error(t, err)
+	assert.Contains(t, err.Error(), "multiple login contexts can authenticate against cluster cluster1.entire.io")
 	assert.Contains(t, err.Error(), "admin@core-us, alice@core-us", "candidates must be listed in sorted order")
 	assert.Contains(t, err.Error(), "entire auth use")
 }
@@ -243,10 +239,10 @@ func TestResolve_NoActiveContextReturnsLoginHint(t *testing.T) {
 	assert.NotContains(t, err.Error(), "does not accept your active login")
 }
 
-// TestResolve_DanglingCurrentContextIsNotAnIdentity: current_context naming a
-// context that no longer exists must not resolve to some other saved login. The
-// saved login is offered, not used.
-func TestResolve_DanglingCurrentContextIsNotAnIdentity(t *testing.T) {
+// TestResolve_DanglingCurrentContextFallsBackToSoleEligibleLogin: current_context
+// naming a context that no longer exists is not an identity, so selection falls
+// through to the sole saved login the cluster trusts rather than dead-ending.
+func TestResolve_DanglingCurrentContextFallsBackToSoleEligibleLogin(t *testing.T) {
 	t.Parallel()
 	srv := httptest.NewServer(coresHandler(t, nil, "https://eu.auth.entire.io"))
 	defer srv.Close()
@@ -259,10 +255,9 @@ func TestResolve_DanglingCurrentContextIsNotAnIdentity(t *testing.T) {
 		},
 	}))
 
-	_, err := ResolveContextForCluster(t.Context(), configDir, t.TempDir(), "aws-eu-central-1.entire.io", hostPinningClient(t, srv), t.Logf)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "prod-eu", "offer the eligible login")
-	assert.Contains(t, err.Error(), "entire auth use")
+	c, err := ResolveContextForCluster(t.Context(), configDir, t.TempDir(), "aws-eu-central-1.entire.io", hostPinningClient(t, srv), t.Logf)
+	require.NoError(t, err)
+	assert.Equal(t, "prod-eu", c.Name)
 }
 
 // TestResolve_ContextWithoutCoreURLIsNeverEligible: a context carrying no
@@ -281,7 +276,7 @@ func TestResolve_ContextWithoutCoreURLIsNeverEligible(t *testing.T) {
 		CurrentContext: "blank",
 		Contexts:       []*contexts.Context{{Name: "blank", Handle: "paul", KeychainService: "kc:blank"}},
 	}
-	_, err := requireActiveContext(f, "cluster c.entire.io", loginTargets{coreURLs: []string{""}}, t.Logf)
+	_, err := selectLoginContext(f, "cluster c.entire.io", "c.entire.io", loginTargets{coreURLs: []string{""}}, t.Logf)
 	require.Error(t, err)
 	assert.NotContains(t, err.Error(), "These saved logins can authenticate it",
 		"a context rejected by the accept check must not be offered as a candidate")
@@ -297,7 +292,7 @@ func TestResolve_EligibilityIgnoresWhitespaceAndTrailingSlash(t *testing.T) {
 		CurrentContext: "eu",
 		Contexts:       []*contexts.Context{{Name: "eu", CoreURL: "https://eu.auth.entire.io", Handle: "paul", KeychainService: "kc:eu"}},
 	}
-	c, err := requireActiveContext(f, "cluster c.entire.io", loginTargets{coreURLs: []string{" https://eu.auth.entire.io/ "}}, t.Logf)
+	c, err := selectLoginContext(f, "cluster c.entire.io", "c.entire.io", loginTargets{coreURLs: []string{" https://eu.auth.entire.io/ "}}, t.Logf)
 	require.NoError(t, err)
 	assert.Equal(t, "eu", c.Name)
 }
@@ -629,9 +624,13 @@ func TestResolve_ContextOverrideSelectsWithoutMutatingState(t *testing.T) {
 		"an override must not persist; that is what distinguishes it from `auth use`")
 }
 
-// TestResolve_IneligibleOverrideBlamesTheFlagNotTheStoredDefault: when the
-// explicitly named context isn't trusted, telling the user to run `auth use`
-// sends them to change the wrong thing — the flag would still override it.
+// TestResolve_IneligibleOverrideBlamesTheFlagNotTheStoredDefault: an explicitly
+// named context the resource rejects is a hard error, never a fall-through to
+// the sole eligible login — the user asked for that identity by name, so acting
+// as another behind their back is the failure the override exists to prevent.
+//
+// And telling them to run `auth use` sends them to change the wrong thing: the
+// flag would still override it on the next run.
 func TestResolve_IneligibleOverrideBlamesTheFlagNotTheStoredDefault(t *testing.T) {
 	srv := httptest.NewServer(coresHandler(t, nil, "https://eu.auth.entire.io"))
 	defer srv.Close()
@@ -647,7 +646,7 @@ func TestResolve_IneligibleOverrideBlamesTheFlagNotTheStoredDefault(t *testing.T
 
 	contexts.SetFlagOverrideForTest(t, "staging")
 	_, err := ResolveContextForCluster(t.Context(), configDir, t.TempDir(), "aws-eu-central-1.entire.io", hostPinningClient(t, srv), t.Logf)
-	require.Error(t, err)
+	require.Error(t, err, "prod-eu is the sole eligible login, and must still not be substituted")
 	assert.Contains(t, err.Error(), "the login selected by --context")
 	assert.Contains(t, err.Error(), "prod-eu", "offer the login that would work")
 	assert.Contains(t, err.Error(), "--context <context>")
@@ -684,9 +683,8 @@ func TestResolve_UnknownOverrideFailsBeforeEligibility(t *testing.T) {
 // git-remote-entire during `git push`, where a panic is the worst outcome
 // available.
 //
-// The failure path is the exposed one: eligibleContexts walks every stored entry
-// to build the candidate list, so the nil is reached even though no context can
-// possibly match.
+// eligibleContexts walks every stored entry to build the candidate list, so the
+// nil is reached both when nothing can match and when the real entry is picked.
 func TestResolve_NilStoredContextDoesNotPanic(t *testing.T) {
 	t.Parallel()
 	f := &contexts.File{
@@ -698,14 +696,14 @@ func TestResolve_NilStoredContextDoesNotPanic(t *testing.T) {
 	}
 
 	// Empty coreURLs is the case the old loop shape never dereferenced at all.
-	_, err := requireActiveContext(f, "cluster c.entire.io", loginTargets{}, t.Logf)
+	_, err := selectLoginContext(f, "cluster c.entire.io", "c.entire.io", loginTargets{}, t.Logf)
 	require.Error(t, err)
 
 	// And with a matching core, the nil entry must be skipped while the real one
-	// is still offered.
-	_, err = requireActiveContext(f, "cluster c.entire.io", loginTargets{coreURLs: []string{"https://eu.auth.entire.io"}}, t.Logf)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "prod-eu", "the valid entry is still a candidate")
+	// is auto-selected.
+	c, err := selectLoginContext(f, "cluster c.entire.io", "c.entire.io", loginTargets{coreURLs: []string{"https://eu.auth.entire.io"}}, t.Logf)
+	require.NoError(t, err)
+	assert.Equal(t, "prod-eu", c.Name, "the valid entry is still the sole candidate")
 }
 
 // A nil entry must also not panic the selection itself, which resolves through
@@ -719,7 +717,211 @@ func TestResolve_NilStoredContextIsSelectable(t *testing.T) {
 			{Name: "prod-eu", CoreURL: "https://eu.auth.entire.io", Handle: "paul", KeychainService: "kc:prod"},
 		},
 	}
-	c, err := requireActiveContext(f, "cluster c.entire.io", loginTargets{coreURLs: []string{"https://eu.auth.entire.io"}}, t.Logf)
+	c, err := selectLoginContext(f, "cluster c.entire.io", "c.entire.io", loginTargets{coreURLs: []string{"https://eu.auth.entire.io"}}, t.Logf)
 	require.NoError(t, err)
 	assert.Equal(t, "prod-eu", c.Name)
+}
+
+// captureAutoSelectNotice redirects the auto-selection notice into a buffer for
+// one test. Callers MUST NOT call t.Parallel: the writer is package-global.
+func captureAutoSelectNotice(t *testing.T) *bytes.Buffer {
+	t.Helper()
+	var buf bytes.Buffer
+	prev := autoSelectNoticeW
+	autoSelectNoticeW = &buf
+	t.Cleanup(func() { autoSelectNoticeW = prev })
+	return &buf
+}
+
+// TestResolve_AutoSelectionIsAnnounced: acting as a login the user did not
+// choose is exactly the surprise the tier was removed over, so it is never
+// silent. The identity the user did choose is not announced — that is the
+// expected case, and a line on every command would be noise.
+//
+// Swaps the package-global writer, so no t.Parallel.
+func TestResolve_AutoSelectionIsAnnounced(t *testing.T) {
+	srv := httptest.NewServer(coresHandler(t, nil, "https://eu.auth.entire.io"))
+	defer srv.Close()
+
+	configDir := t.TempDir()
+	require.NoError(t, contexts.Save(configDir, &contexts.File{
+		CurrentContext: "paul@unrelated",
+		Contexts: []*contexts.Context{
+			{Name: "paul@unrelated", CoreURL: "https://eu.auth.partial.to", Handle: "paul", KeychainService: "kc:unrelated"},
+			{Name: "prod-eu", CoreURL: "https://eu.auth.entire.io", Handle: "paul", KeychainService: "kc:prod"},
+		},
+	}))
+
+	buf := captureAutoSelectNotice(t)
+	c, err := ResolveContextForCluster(t.Context(), configDir, t.TempDir(), "aws-eu-central-1.entire.io", hostPinningClient(t, srv), t.Logf)
+	require.NoError(t, err)
+	assert.Equal(t, "prod-eu", c.Name)
+	assert.Equal(t, "Using context 'prod-eu'.\n", buf.String())
+
+	// The stored default now fits, so nothing is auto-selected and nothing is said.
+	require.NoError(t, contexts.Save(configDir, &contexts.File{
+		CurrentContext: "prod-eu",
+		Contexts: []*contexts.Context{
+			{Name: "paul@unrelated", CoreURL: "https://eu.auth.partial.to", Handle: "paul", KeychainService: "kc:unrelated"},
+			{Name: "prod-eu", CoreURL: "https://eu.auth.entire.io", Handle: "paul", KeychainService: "kc:prod"},
+		},
+	}))
+	buf.Reset()
+	_, err = ResolveContextForCluster(t.Context(), configDir, t.TempDir(), "aws-eu-central-1.entire.io", hostPinningClient(t, srv), t.Logf)
+	require.NoError(t, err)
+	assert.Empty(t, buf.String(), "the active context acting is not news")
+}
+
+// TestResolve_ExplicitSelectionIsNotAnnounced: the user named the identity on
+// this very command, so repeating it back is noise — and nothing was chosen for
+// them, which is the only thing the notice reports.
+//
+// Swaps the process-wide override and the package-global writer, so no t.Parallel.
+func TestResolve_ExplicitSelectionIsNotAnnounced(t *testing.T) {
+	srv := httptest.NewServer(coresHandler(t, nil, "https://eu.auth.entire.io"))
+	defer srv.Close()
+
+	configDir := t.TempDir()
+	require.NoError(t, contexts.Save(configDir, &contexts.File{
+		CurrentContext: "paul@unrelated",
+		Contexts: []*contexts.Context{
+			{Name: "paul@unrelated", CoreURL: "https://eu.auth.partial.to", Handle: "paul", KeychainService: "kc:unrelated"},
+			{Name: "prod-eu", CoreURL: "https://eu.auth.entire.io", Handle: "paul", KeychainService: "kc:prod"},
+		},
+	}))
+
+	buf := captureAutoSelectNotice(t)
+	contexts.SetFlagOverrideForTest(t, "prod-eu")
+	c, err := ResolveContextForCluster(t.Context(), configDir, t.TempDir(), "aws-eu-central-1.entire.io", hostPinningClient(t, srv), t.Logf)
+	require.NoError(t, err)
+	assert.Equal(t, "prod-eu", c.Name)
+	assert.Empty(t, buf.String())
+}
+
+// TestResolve_NoNoticeOnFailure: an error already explains itself, and a
+// "Using context" line above one would name a login that never acted.
+//
+// Swaps the package-global writer, so no t.Parallel.
+func TestResolve_NoNoticeOnFailure(t *testing.T) {
+	srv := httptest.NewServer(coresHandler(t, nil, "https://core-us.entire.io"))
+	defer srv.Close()
+
+	configDir := t.TempDir()
+	require.NoError(t, contexts.Save(configDir, &contexts.File{
+		CurrentContext: "paul@unrelated",
+		Contexts: []*contexts.Context{
+			{Name: "alice@core-us", CoreURL: "https://core-us.entire.io", Handle: "alice", KeychainService: "kc:alice"},
+			{Name: "admin@core-us", CoreURL: "https://core-us.entire.io", Handle: "admin", KeychainService: "kc:admin"},
+			{Name: "paul@unrelated", CoreURL: "https://eu.auth.partial.to", Handle: "paul", KeychainService: "kc:unrelated"},
+		},
+	}))
+
+	buf := captureAutoSelectNotice(t)
+	_, err := ResolveContextForCluster(t.Context(), configDir, t.TempDir(), "cluster1.entire.io", hostPinningClient(t, srv), t.Logf)
+	require.Error(t, err)
+	assert.Empty(t, buf.String())
+}
+
+// TestAutoSelectNoticeWriter_DefaultsToStderr: the notice must never reach
+// stdout, which carries the git remote-helper protocol inside
+// git-remote-entire. Changing the default to io.Discard would delete the
+// feature in production while the suite above stays green.
+//
+// Pinned by descriptor rather than pointer equality with os.Stderr: under
+// `go test -json` the testing package replaces the os.Stderr variable after
+// package init, so the value captured at init no longer compares equal even
+// though it is the process's real stderr. A buffer still fails this.
+//
+// Not parallel: reads the package-global writer that the tests above swap.
+func TestAutoSelectNoticeWriter_DefaultsToStderr(t *testing.T) {
+	f, ok := autoSelectNoticeW.(*os.File)
+	if !ok || f.Fd() != uintptr(syscall.Stderr) {
+		t.Fatalf("autoSelectNoticeW default = %T, want the process stderr", autoSelectNoticeW)
+	}
+}
+
+// TestResolve_AutoSelectionOnlyForEntireSites: a self-hosted cluster passes the
+// same-site gate (auth.acme.com is acme.com's own), and a single saved acme.com
+// login is eligible — but acme.com is not a site we choose credentials for
+// unasked. The user is told which login works and switches explicitly; the
+// stored default and --context are unaffected.
+//
+// Swaps the process-wide override and the package-global writer, so no
+// t.Parallel.
+func TestResolve_AutoSelectionOnlyForEntireSites(t *testing.T) {
+	srv := httptest.NewServer(coresHandler(t, nil, "https://auth.acme.com"))
+	defer srv.Close()
+
+	configDir := t.TempDir()
+	require.NoError(t, contexts.Save(configDir, &contexts.File{
+		CurrentContext: "prod",
+		Contexts: []*contexts.Context{
+			{Name: "prod", CoreURL: "https://eu.auth.entire.io", Handle: "paul", KeychainService: "kc:prod"},
+			{Name: "acme", CoreURL: "https://auth.acme.com", Handle: "paul", KeychainService: "kc:acme"},
+		},
+	}))
+
+	buf := captureAutoSelectNotice(t)
+	_, err := ResolveContextForCluster(t.Context(), configDir, t.TempDir(), "git.acme.com", hostPinningClient(t, srv), t.Logf)
+	require.Error(t, err, "acme is the sole eligible login, and must still not be chosen unasked")
+	assert.Contains(t, err.Error(), `cluster git.acme.com does not accept your active login "prod"`)
+	assert.Contains(t, err.Error(), "These saved logins can authenticate it: acme")
+	assert.Contains(t, err.Error(), "entire auth use")
+	assert.Empty(t, buf.String(), "nothing was selected, so nothing is announced")
+
+	// Named explicitly, the same login works — the allowlist gates only the
+	// choice made for the user, never the one they made.
+	contexts.SetFlagOverrideForTest(t, "acme")
+	c, err := ResolveContextForCluster(t.Context(), configDir, t.TempDir(), "git.acme.com", hostPinningClient(t, srv), t.Logf)
+	require.NoError(t, err)
+	assert.Equal(t, "acme", c.Name)
+	assert.Empty(t, buf.String())
+}
+
+// TestResolve_AutoSelectionFiresForEachEntireSite: the three federations on the
+// allowlist, including the motivating case (active login on entire.io, cluster
+// on partial.to) and local dev on a port.
+//
+// Swaps the package-global writer, so no t.Parallel.
+func TestResolve_AutoSelectionFiresForEachEntireSite(t *testing.T) {
+	cases := []struct {
+		clusterHost, core, want string
+	}{
+		{"royalcanin.partial.to", "https://eu.auth.partial.to", "eu-staging"},
+		{"aws-eu-central-1.entire.io", "https://eu.auth.entire.io", "prod-eu"},
+		{"localhost:8080", "http://localhost:9000", "dev"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.clusterHost, func(t *testing.T) {
+			srv := httptest.NewServer(coresHandler(t, nil, tc.core))
+			defer srv.Close()
+
+			configDir := t.TempDir()
+			require.NoError(t, contexts.Save(configDir, &contexts.File{
+				CurrentContext: "au",
+				Contexts: []*contexts.Context{
+					{Name: "au", CoreURL: "https://au.auth.entire.io", Handle: "paul", KeychainService: "kc:au"},
+					{Name: "eu-staging", CoreURL: "https://eu.auth.partial.to", Handle: "paul", KeychainService: "kc:eu-staging"},
+					{Name: "prod-eu", CoreURL: "https://eu.auth.entire.io", Handle: "paul", KeychainService: "kc:prod-eu"},
+					{Name: "dev", CoreURL: "http://localhost:9000", Handle: "paul", KeychainService: "kc:dev"},
+				},
+			}))
+
+			buf := captureAutoSelectNotice(t)
+			c, err := ResolveContextForCluster(t.Context(), configDir, t.TempDir(), tc.clusterHost, hostPinningClient(t, srv), t.Logf)
+			require.NoError(t, err)
+			assert.Equal(t, tc.want, c.Name)
+			assert.Equal(t, "Using context '"+tc.want+"'.\n", buf.String())
+		})
+	}
+}
+
+func TestAutoSelectAllowed(t *testing.T) {
+	t.Parallel()
+	for _, host := range []string{"aws-eu-central-1.entire.io", "royalcanin.partial.to", "localhost", "localhost:8080", "Entire.IO"} {
+		assert.True(t, autoSelectAllowed(host), host)
+	}
+	for _, host := range []string{"git.acme.com", "entire.io.evil.com", "127.0.0.1", "notentire.io", "partial.to.attacker.net"} {
+		assert.False(t, autoSelectAllowed(host), host)
+	}
 }

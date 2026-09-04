@@ -215,6 +215,63 @@ func TestResolveForgeRepoCellPlacement_NativeDoesNotSelectSameNamedGitHubMirror(
 	}
 }
 
+func TestResolveNativeRepoCellPlacement_ClassifiesDefinitiveMisses(t *testing.T) {
+	const (
+		projectID = "01NATIVEPROJECT00000000000"
+		repoID    = "01NATIVEREPOSITORY00000000"
+	)
+	project := &coreapi.ListProjectsOutputBody{Project: coreapi.NewOptProject(coreapi.Project{ID: projectID, Name: "entirehq"})}
+	projectRepo := &coreapi.ListProjectReposOutputBody{Repo: coreapi.NewOptRepo(coreapi.Repo{ID: repoID, Name: "marvin", OwningProjectId: projectID})}
+
+	tests := []struct {
+		name               string
+		core               *fakeCellCore
+		wantNotOnboarded   bool
+		wantMessageSnippet string
+	}{
+		{
+			name:               "project does not exist",
+			core:               &fakeCellCore{},
+			wantNotOnboarded:   true,
+			wantMessageSnippet: "no project named",
+		},
+		{
+			name:               "repo does not exist in project",
+			core:               &fakeCellCore{projects: project},
+			wantNotOnboarded:   true,
+			wantMessageSnippet: "no repo named",
+		},
+		{
+			name:               "repo has no cluster host",
+			core:               &fakeCellCore{projects: project, projectRepos: projectRepo, repo: &coreapi.Repo{ID: repoID, Name: "marvin", OwningProjectId: projectID}},
+			wantNotOnboarded:   true,
+			wantMessageSnippet: "repo has no cluster host",
+		},
+		{
+			name:               "control plane failure remains retryable",
+			core:               &fakeCellCore{projectsErr: errors.New("core unavailable")},
+			wantNotOnboarded:   false,
+			wantMessageSnippet: "core unavailable",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			withFakeCellCore(t, tt.core)
+			_, err := resolveNativeRepoCellPlacement(t.Context(), "entirehq", "marvin")
+			if err == nil {
+				t.Fatal("expected an error")
+			}
+			if got := errors.Is(err, errRepoNotOnboarded); got != tt.wantNotOnboarded {
+				t.Fatalf("errors.Is(err, errRepoNotOnboarded) = %v, want %v (err: %v)", got, tt.wantNotOnboarded, err)
+			}
+			if !strings.Contains(err.Error(), tt.wantMessageSnippet) {
+				t.Fatalf("error = %q, want substring %q", err, tt.wantMessageSnippet)
+			}
+		})
+	}
+}
+
 // euClusters is keyed by PublicUrl host, the join the ULID path uses
 // (cellTargetForClusterHost / matchClusterByHost).
 func euClusters() []coreapi.Cluster {

@@ -60,15 +60,18 @@ func TestSetupFactoryAIHooks_AddsAllRequiredHooks(t *testing.T) {
 		t.Error("PreCompact hook should exist")
 	}
 
-	// Verify permissions.deny contains metadata deny rule
+	// The metadata deny rule is retired: setup must not install one. It made a
+	// recursive read anywhere under the repo root need manual approval, and it
+	// guarded a staging buffer whose durable copy lives in the checkpoint tree.
+	// See agent.MetadataDenyRule.
 	settingsPath := filepath.Join(env.RepoDir, ".factory", factoryaidroid.FactorySettingsFileName)
 	data, err := os.ReadFile(settingsPath)
 	if err != nil {
 		t.Fatalf("failed to read settings.json: %v", err)
 	}
 	content := string(data)
-	if !strings.Contains(content, "Read(./.entire/metadata/**)") {
-		t.Error("settings.json should contain permissions.deny rule for .entire/metadata/**")
+	if strings.Contains(content, "Read(./.entire/metadata/**)") {
+		t.Error("settings.json should not contain a permissions.deny rule for .entire/metadata/**")
 	}
 }
 

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"path"
 	"path/filepath"
@@ -154,6 +155,10 @@ func runSessionsFix(cmd *cobra.Command, force bool) error {
 
 	// Agent-specific: Claude Code hook config drift.
 	checkHookDrift(cmd)
+
+	// Retired permission rule that makes ordinary commands need approval.
+	// Fixes rather than only reporting: what it removes is a rule Entire wrote.
+	checkRetiredDenyRule(cmd)
 
 	// Where checkpoints land, when the repo's remotes make that ambiguous.
 	printCheckpointDestinationNote(ctx, cmd.OutOrStdout(), "Checkpoint destination: REVIEW")
@@ -412,7 +417,7 @@ func promptSessionAction(ss stuckSession) (string, error) {
 // discardSession removes session state and cleans up the shadow branch.
 func discardSession(ctx context.Context, ss stuckSession, _ *git.Repository, errW io.Writer) error {
 	// Clear session state file
-	if err := strategy.ClearSessionState(ctx, ss.State.SessionID); err != nil {
+	if err := strategy.ClearSessionStateWithProgress(ctx, ss.State.SessionID, errW, strategy.SessionLockNoticeDelay); err != nil {
 		return fmt.Errorf("failed to clear session state: %w", err)
 	}
 
@@ -815,6 +820,59 @@ func checkHookDrift(cmd *cobra.Command) {
 			fmt.Fprintln(w, "  The installed hook config no longer matches what this CLI writes,")
 			fmt.Fprintln(w, "  so some or all hooks may silently not fire.")
 			fmt.Fprintln(w, "  Run `entire enable --force` to update it.")
+		}
+	}
+}
+
+// checkRetiredDenyRule finds and removes the retired metadata deny rule from
+// any installed agent's permission config. See agent.MetadataDenyRule for why
+// the rule went; the short version is that it made a recursive read anywhere
+// under the repo root need manual approval, which defeats unattended permission
+// modes, and it guarded a staging buffer rather than the durable copy.
+//
+// This is the one doctor check that repairs without asking, and the reason is
+// ownership: it deletes only a rule byte-identical to the string Entire itself
+// wrote, so nothing the user chose is touched. `entire enable` performs the same
+// removal; this exists because a user who has already enabled Entire has no
+// reason to run enable again, and the prompts give them no clue what to do.
+//
+// The config is usually tracked in git (a committed .claude/settings.json is the
+// normal setup), so the change shows up in `git status`. That is deliberately
+// left visible rather than hidden: the message says the file changed so the user
+// can commit or revert it.
+func checkRetiredDenyRule(cmd *cobra.Command) {
+	ctx := cmd.Context()
+	w := cmd.OutOrStdout()
+	for _, name := range GetAgentsWithHooksInstalled(ctx) {
+		ag, err := agent.Get(name)
+		if err != nil {
+			continue
+		}
+		// One pass: Repair reports whether it found the rule, so a separate
+		// detect call would only read and parse the same file twice.
+		//
+		// A repair error is logged rather than printed. An agent whose config
+		// will not parse never reaches here — AreHooksInstalled fails on it, so
+		// GetAgentsWithHooksInstalled leaves it out — which leaves only write
+		// failures, and printing "stale rule" for those would name the wrong
+		// problem. (That a broken config goes unreported at all is a separate,
+		// pre-existing gap: agentHookState.unchecked has no consumer.)
+		changed, repairErr := agent.RepairRetiredMetadataDenyRule(ctx, ag)
+		if repairErr != nil {
+			logging.Warn(ctx, "could not remove retired deny rule",
+				slog.String("agent", string(ag.Type())),
+				slog.String("error", repairErr.Error()))
+			continue
+		}
+		if changed {
+			displayName := string(ag.Type())
+			fmt.Fprintf(w, "%s permissions: STALE RULE\n", displayName)
+			fmt.Fprintf(w, "  A retired Entire deny rule (%s) was still present.\n", agent.MetadataDenyRule)
+			fmt.Fprintln(w, "  It makes ordinary commands (a recursive grep from the repo root, or any")
+			fmt.Fprintln(w, "  command naming that path) need manual approval, and it no longer protects")
+			fmt.Fprintln(w, "  anything: the file it guarded is removed once a session is condensed.")
+			fmt.Fprintln(w, "  ✓ Fixed: rule removed (your other deny rules are untouched).")
+			fmt.Fprintln(w, "  The settings file changed — commit or revert it as you prefer.")
 		}
 	}
 }

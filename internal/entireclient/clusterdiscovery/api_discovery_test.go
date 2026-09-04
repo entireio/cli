@@ -168,11 +168,10 @@ func TestResolveContextForAPI(t *testing.T) {
 		assert.Equal(t, "me@us-partial", c.Name)
 	})
 
-	// The `ENTIRE_API_BASE_URL=https://partial.to entire activity` case. It used
-	// to resolve silently to the sole eligible staging login; an env var
-	// changing which account a command runs as is the ambiguity the active
-	// context exists to remove, so it is now an error that names the switch.
-	t.Run("unrelated active context errors naming the eligible login", func(t *testing.T) {
+	// The `ENTIRE_API_BASE_URL=https://partial.to entire activity` case: the
+	// active login is on a core this host doesn't trust, and exactly one saved
+	// login is, so that one acts.
+	t.Run("unrelated active context falls back to the sole eligible login", func(t *testing.T) {
 		t.Parallel()
 		srv := httptest.NewServer(apiHandler(t, "https://us.auth.partial.to", "https://eu.auth.partial.to"))
 		defer srv.Close()
@@ -186,11 +185,9 @@ func TestResolveContextForAPI(t *testing.T) {
 			},
 		}))
 
-		_, err := ResolveContextForAPI(t.Context(), configDir, t.TempDir(), "partial.to", hostPinningClient(t, srv), t.Logf)
-		require.Error(t, err)
-		assert.Contains(t, err.Error(), "API host partial.to does not accept your active login")
-		assert.Contains(t, err.Error(), "me@staging", "name the login that would work")
-		assert.Contains(t, err.Error(), "entire auth use")
+		c, err := ResolveContextForAPI(t.Context(), configDir, t.TempDir(), "partial.to", hostPinningClient(t, srv), t.Logf)
+		require.NoError(t, err)
+		assert.Equal(t, "me@staging", c.Name)
 	})
 
 	t.Run("no eligible context → login hint naming the API host's servers", func(t *testing.T) {
@@ -213,9 +210,9 @@ func TestResolveContextForAPI(t *testing.T) {
 		assert.Contains(t, err.Error(), "entire login --server")
 	})
 
-	// Two eligible contexts are no longer "ambiguous" — the resolver never
-	// picks, so both are simply offered, sorted.
-	t.Run("several eligible contexts are all offered", func(t *testing.T) {
+	// Two eligible contexts leave nothing to auto-select: the resolver refuses to
+	// guess which account acts, and names both, sorted.
+	t.Run("several eligible contexts are ambiguous", func(t *testing.T) {
 		t.Parallel()
 		srv := httptest.NewServer(apiHandler(t, "https://us.auth.partial.to"))
 		defer srv.Close()
@@ -232,7 +229,7 @@ func TestResolveContextForAPI(t *testing.T) {
 
 		_, err := ResolveContextForAPI(t.Context(), configDir, t.TempDir(), "partial.to", hostPinningClient(t, srv), t.Logf)
 		require.Error(t, err)
-		assert.Contains(t, err.Error(), "API host partial.to")
+		assert.Contains(t, err.Error(), "multiple login contexts can authenticate against API host partial.to")
 		assert.Contains(t, err.Error(), "alice@partial, bob@partial", "sorted, not in stored order")
 	})
 

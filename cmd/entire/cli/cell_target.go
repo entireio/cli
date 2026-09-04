@@ -197,6 +197,13 @@ func cellTargetFromCluster(cluster coreapi.Cluster) (*auth.CellTarget, error) {
 // consumer caches under a TTL, so a completed onboarding self-heals.
 var errRepoNotOnboarded = errors.New("repo is not onboarded to Entire")
 
+// repoNotOnboardedError tags a definitive repository-placement miss without
+// replacing its actionable user-facing message.
+type repoNotOnboardedError struct{ inner error }
+
+func (e *repoNotOnboardedError) Error() string   { return e.inner.Error() }
+func (e *repoNotOnboardedError) Unwrap() []error { return []error{e.inner, errRepoNotOnboarded} }
+
 // resolveProcessingPlacement resolves fullName's PROCESSING placement — the
 // placement id and cell entire-api and the control plane treat as
 // authoritative for repo-scoped data (trails, experts, checkpoint/explain),
@@ -316,6 +323,9 @@ func resolveNativeRepoCellPlacement(ctx context.Context, project, repoName strin
 	}
 	repo, err := resolveNativeRepo(ctx, c, project, repoName)
 	if err != nil {
+		if errors.Is(err, errNamedRefNotFound) {
+			err = &repoNotOnboardedError{inner: err}
+		}
 		return repoCellPlacement{}, cellPlacementError(ctx, project+"/"+repoName, fmt.Errorf("resolve native repo %s/%s: %w", project, repoName, err))
 	}
 	repoID := strings.TrimSpace(repo.ID)
@@ -324,7 +334,7 @@ func resolveNativeRepoCellPlacement(ctx context.Context, project, repoName strin
 	}
 	clusterHost := strings.TrimSpace(repo.ClusterHost.Or(""))
 	if clusterHost == "" {
-		return repoCellPlacement{}, fmt.Errorf("resolve the Entire cell for %s/%s: repo has no cluster host", project, repoName)
+		return repoCellPlacement{}, &repoNotOnboardedError{inner: fmt.Errorf("resolve the Entire cell for %s/%s: repo has no cluster host", project, repoName)}
 	}
 	target, err := cellTargetForClusterHost(ctx, c, clusterHost)
 	if err != nil {
@@ -346,9 +356,11 @@ func resolveNativeRepoCellPlacement(ctx context.Context, project, repoName strin
 // resolveRepoCellTarget's owner/repo path delegates to this function and
 // discards RepoID, rather than the two duplicating the same resolution body:
 // the two functions exist separately only because their callers need
-// different return shapes for the same lookup — this one also needs the
-// placement id (repo_id), which resolveRepoCellTarget has no caller for and
-// so doesn't return — not because the resolution logic itself differs.
+// different return shapes for the same lookup. Some owner/repo callers only
+// need the cell (resolveRepoCellTarget's own callers) and go through that
+// thinner wrapper; others — explain --repo, experts --repo — also need the
+// placement id (repo_id) and call this one directly instead of re-deriving it
+// a second way.
 func resolveRepoCellPlacement(ctx context.Context, owner, repo string) (repoCellPlacement, error) {
 	ctx, cancel := context.WithTimeout(ctx, requiredCellResolveTimeout)
 	defer cancel()

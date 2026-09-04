@@ -225,12 +225,21 @@ func noOrgNamedErr(name string) error {
 	return fmt.Errorf("no org named %q (run `entire org list` to see names, or pass a ULID)", name)
 }
 
+var errNamedRefNotFound = errors.New("named reference not found")
+
+// namedRefNotFoundError preserves the actionable user-facing message while
+// allowing repository-routing callers to classify a definitive lookup miss.
+type namedRefNotFoundError struct{ message string }
+
+func (e *namedRefNotFoundError) Error() string { return e.message }
+func (e *namedRefNotFoundError) Unwrap() error { return errNamedRefNotFound }
+
 func noProjectNamedErr(name string) error {
-	return fmt.Errorf("no project named %q (run `entire project list` to see names, or pass a ULID)", name)
+	return &namedRefNotFoundError{message: fmt.Sprintf("no project named %q (run `entire project list` to see names, or pass a ULID)", name)}
 }
 
 func noRepoNamedErr(name string) error {
-	return fmt.Errorf("no repo named %q in that project (run `entire repo list <project>` to see names, or pass a ULID)", name)
+	return &namedRefNotFoundError{message: fmt.Sprintf("no repo named %q in that project (run `entire repo list <project>` to see names, or pass a ULID)", name)}
 }
 
 // resolvedRefLabel formats a reference for a success message so it always

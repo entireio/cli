@@ -224,6 +224,15 @@ func TestCreateAndAwaitMirror_SynchronousPhases(t *testing.T) {
 	})
 }
 
+func TestRepoMirrorCreate_WaitTimeoutHelp(t *testing.T) {
+	t.Parallel()
+
+	flag := newRepoMirrorCreateCmd().Flags().Lookup("wait-timeout")
+	require.NotNil(t, flag)
+	require.Contains(t, flag.Usage, "Async mode applies one deadline to request submission, placement, and clone readiness")
+	require.Contains(t, flag.Usage, "synchronous mode applies it only to clone readiness")
+}
+
 // TestReportOneShotMirror exercises the one-shot create's presentation across
 // the shared lifecycle outcomes — the branching finishMirrorCreate used to own,
 // now driven by mirrorCreateOutcome (and shared with the wizard).
@@ -1061,6 +1070,42 @@ func TestRepoMirrorList_FilterSort(t *testing.T) {
 		stdout, _ := runMirrorList(t, "--sort", "access")
 		requireOrder(t, stdout, "acme/admin-repo", "acme/read-repo")
 	})
+}
+
+// TestParseHostedGitHubURL pins the one distinction between the two GitHub
+// parsers: parseGitHubURL accepts an unqualified `owner/repo` (its callers took
+// a GitHub argument and nothing else), while parseHostedGitHubURL requires the
+// host to be named, because its caller must not attribute a forge-less pair to
+// GitHub — `repo clone` offers such a pair both readings instead.
+func TestParseHostedGitHubURL(t *testing.T) {
+	t.Parallel()
+	hosted := []string{
+		"https://github.com/acme/app",
+		"https://github.com/acme/app.git",
+		"git@github.com:acme/app",
+		"git@github.com:acme/app.git",
+		"github.com/acme/app",
+		"github.com/acme/app.git",
+	}
+	for _, raw := range hosted {
+		owner, repo, err := parseHostedGitHubURL(raw)
+		require.NoErrorf(t, err, "parseHostedGitHubURL(%q)", raw)
+		require.Equal(t, "acme", owner)
+		require.Equal(t, "app", repo)
+	}
+
+	// An unqualified pair names no forge; parseGitHubURL still takes it.
+	_, _, err := parseHostedGitHubURL("acme/app")
+	require.Error(t, err)
+	owner, repo, err := parseGitHubURL("acme/app")
+	require.NoError(t, err)
+	require.Equal(t, "acme", owner)
+	require.Equal(t, "app", repo)
+
+	// The dot-only guard applies to the host-qualified form too, so a
+	// `github.com/owner/..` ref is not attributed to GitHub either.
+	_, _, err = parseHostedGitHubURL("github.com/acme/..")
+	require.Error(t, err)
 }
 
 // TestParseGitHubURL is ported from entiredb's cmd/entire-repo/cli

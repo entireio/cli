@@ -86,22 +86,69 @@ the commands are always runnable in every build.
   (preserving the old URL under `--upstream`) or add a separate one;
   non-interactively it repoints `--remote` directly. Both `use` and `clone`
   choose a placement through the shared `selectPlacement` picker. `clone`
-  accepts a native `/et/<project>/<repo>` ref (or the `<project>/<repo>`
-  shorthand — the `gh`/`et` forge tokens can never be project names, which are
-  3+ chars server-side, so the grammar is unambiguous; both segments must also
-  match the server's name charsets, so `git@github.com:foo/bar` is not a
-  shorthand), a mirror `/gh/<owner>/<repo>` ref, or a full `entire://` URL
-  passed through verbatim. A ref matching none of these gets a targeted error
-  (`invalidCloneRefError`): a GitHub URL is pointed at its `/gh/` form, a
-  malformed `gh/` ref keeps the mirror parser's reason, anything else lists
-  the accepted shapes.
+  accepts a native `/et/<project>/<repo>` ref, a mirror `/gh/<owner>/<repo>`
+  ref, or a full `entire://` URL passed through verbatim. **Every ref names its
+  forge**: the leading token alone decides which grammar is tried, and the bare
+  `<project>/<repo>` shorthand was removed because both forges take that shape
+  and nothing in it says which was meant (#2252).
+  Requiring the prefix is a **namesquatting** guard, not tidiness: without it,
+  whichever namespace the CLI defaulted to could shadow the other, and
+  `TestCloneRefAlwaysRequiresItsForgePrefix` pins that no forge-less pair
+  resolves in either parser or in the command. It holds only for *intent* —
+  lookups are already unambiguous because native rows are stored prefixed in the
+  same `full_name` index (`et/<project>/<repo>`), which is why the bare-pair
+  `--repo` filters on `search`/`experts`/`explain` cannot cross namespaces
+  either.
+  Native names are validated client-side against the server's own rules
+  (`nativeProjectRe`/`nativeRepoRe`, mirroring `normalizeName` in entiredb
+  `core/resource/project_name.go`); those bounds are server parity only and buy
+  a local error instead of a control-plane round trip, so a failure is phrased
+  as what the server accepts rather than as a rule of ours — drift is
+  one-directional and only a *looser* server would make us wrong. A ref matching
+  no grammar gets a targeted error (`invalidCloneRefError`) in descending
+  confidence: a ref naming `github.com` is pointed at its `/gh/` form, a ref
+  that declared a forge token keeps its own parser's reason, a bare pair is
+  offered the forge-qualified readings that would actually parse
+  (`bareRefSuggestions`), and anything left lists the accepted shapes.
   A native ref resolves project → repo ULID → `GetRepo`, whose response is the
   only one carrying both `clusterHost` and `path`, and clones
-  `entire://<clusterHost><path>` from the repo's home cluster (no `.git`
-  suffix — the server strips it for `/gh/` paths only; `--cluster` is
+  `entire://<clusterHost><path>` from the repo's home cluster (`--cluster` is
   rejected on native refs).
+  A trailing `.git` is never part of a repo name, on **either** backend
+  (`gitDirSuffix` documents the mechanics): every ref parser drops it and `repo
+  create` refuses a name ending in it. This is a deliberate client-side
+  narrowing — GitHub rejects such a name outright, but the server accepts a
+  native `foo.git` (interior dot, same rule that makes `entire-trails.el` legal)
+  and strips the suffix for `/gh/` paths only. `gitremote.splitOwnerRepo` trims
+  unconditionally when reading a remote back, so such a repo is unaddressable by
+  name once cloned regardless; dropping it everywhere makes the CLI agree with
+  itself instead of leaving `repo clone` the one path that keeps it. Escape
+  hatches: the repo's ULID, or a full `entire://` URL. Two consequences worth
+  knowing — a `foo.git` created through the API or web UI *aliases* onto `foo`
+  in `resolveRepoRef`, and the durable fix is a server-side rule in
+  `normalizeName`, not this check.
 - `grant`: manage access grants and org membership — `org`, `project`, and `repo`
   each support `add` / `list` / `remove`
+
+Forge tokens (`gh`, `et`) are the path segments of an `entire://` URL, and
+`gitremote.pathForges` owns the *set* — `IsForgePathToken` answers "is this a
+forge token", `ForgePathLabels` gives the placeholder spelling of the segments
+after it (`<owner>/<repo>` vs `<project>/<repo>`) so messages read correctly for
+both. The token strings are still spelled in a dozen call sites; only the set
+lives in one place. It is deliberately **not** `hostToForge`, which maps an
+*upstream* git host to its id: a native repo has no upstream host, so `et` is
+absent there, and conflating the two made `entire://et/<project>/<repo>` dial a
+cluster named `et` while `entire://gh/...` got an actionable message.
+`CanonicalHost` still reads `forgeToHost`, so a native remote falls back to its
+cluster host rather than inventing a forge host. The legacy `/git/` prefix is
+excluded because `repo clone` cannot act on such a ref.
+
+**Being a forge token says nothing about which APIs accept it** — the name says
+syntax on purpose. Trails are the current example: entire-api takes `et` in the
+path but cannot resolve it, so `entire trail` refuses it locally with the real
+reason (`errTrailsNativeUnsupported`). That refusal has to cover *both* ways a
+forge reaches the API — named in `--repo` and inferred from the origin remote —
+and the inferred one is the common path.
 
 Experimental commands (gated by the build-time visibility flag above — visible
 and grouped under "Experimental commands:" in developer/nightly builds, hidden
@@ -1211,10 +1258,12 @@ therefore has exactly three routing shapes, mirroring the entire.io BFF:
   suspended processing placement, control-plane error, timeout) returns an
   error instead of falling back to home-jurisdiction routing — a wrong-region
   "success" is worse than a command failure for repo-scoped data. Used by
-  trails and experts (`NewAuthenticatedEntireAPICellClient` in
-  `api_client.go`). `resolveRepoCellPlacement` performs the same lookup for
-  callers that also need the placement's id (repo_id) alongside its cell —
-  used by cross-repo checkpoint reads (`explain --repo`, `explain_repo.go`).
+  trails (`NewAuthenticatedEntireAPICellClient` in `api_client.go`) and by
+  `experts --repo <ulid>`. `resolveRepoCellPlacement` performs the same lookup
+  for callers that also need the placement's id (repo_id) alongside its cell —
+  used by cross-repo checkpoint reads (`explain --repo`, `explain_repo.go`) and
+  by `experts --repo owner/repo`, which sends that placement id to entire-api
+  instead of re-deriving it from a data-plane repo listing.
 - **User-scoped `/me` → home cell, never fan out**:
   `auth.NewEntireAPICellClient(ctx, insecure, nil)` routes by the
   `home_jurisdiction` JWT claim; activity/recap use it with a data-API

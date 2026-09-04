@@ -17,8 +17,9 @@ import (
 
 // Ensure ClaudeCodeAgent implements HookSupport
 var (
-	_ agent.HookSupport   = (*ClaudeCodeAgent)(nil)
-	_ agent.HookFreshness = (*ClaudeCodeAgent)(nil)
+	_ agent.HookSupport           = (*ClaudeCodeAgent)(nil)
+	_ agent.HookFreshness         = (*ClaudeCodeAgent)(nil)
+	_ agent.PermissionConfigOwner = (*ClaudeCodeAgent)(nil)
 )
 
 // Claude Code hook names - these become subcommands under `entire hooks claude-code`
@@ -55,9 +56,6 @@ const (
 // This is Claude-specific and not shared with other agents.
 const ClaudeSettingsFileName = "settings.json"
 
-// metadataDenyRule blocks Claude from reading Entire session metadata
-const metadataDenyRule = "Read(./.entire/metadata/**)"
-
 // InstallHooks installs Claude Code hooks in .claude/settings.json.
 // If force is true, removes existing Entire hooks before installing.
 // Returns the number of hooks installed.
@@ -76,9 +74,13 @@ func (c *ClaudeCodeAgent) InstallHooks(ctx context.Context, force bool) (int, er
 
 	count, staleDropped := installHookEntries(rawHooks, force)
 
-	permissionsChanged, err := applyMetadataDenyRule(rawPermissions)
+	// Unconditional, like the stale-hook migration in installHookEntries: a
+	// plain `entire enable` must drop the retired metadata deny rule, not just
+	// --force. See agent.MetadataDenyRule for why it is retired. Removing it is
+	// the whole reason a normal enable still touches permissions.
+	permissionsChanged, err := agent.RemoveMetadataDenyRule(rawPermissions)
 	if err != nil {
-		return 0, err
+		return 0, fmt.Errorf("failed to update permissions in %s: %w", cfg.Path(), err)
 	}
 
 	// staleDropped forces a write even when nothing was added: a file holding
@@ -254,28 +256,6 @@ func installHookEntries(rawHooks map[string]json.RawMessage, force bool) (count 
 	return count, staleDropped
 }
 
-// applyMetadataDenyRule adds the Entire metadata deny rule to rawPermissions
-// if it isn't already present, mutating rawPermissions["deny"] in place.
-// Returns whether anything changed.
-func applyMetadataDenyRule(rawPermissions map[string]json.RawMessage) (bool, error) {
-	var denyRules []string
-	if denyRaw, ok := rawPermissions["deny"]; ok {
-		if err := json.Unmarshal(denyRaw, &denyRules); err != nil {
-			return false, fmt.Errorf("failed to parse permissions.deny in settings.json: %w", err)
-		}
-	}
-	if slices.Contains(denyRules, metadataDenyRule) {
-		return false, nil
-	}
-	denyRules = append(denyRules, metadataDenyRule)
-	denyJSON, err := json.Marshal(denyRules)
-	if err != nil {
-		return false, fmt.Errorf("failed to marshal permissions.deny: %w", err)
-	}
-	rawPermissions["deny"] = denyJSON
-	return true, nil
-}
-
 // writeClaudeSettingsFile marshals rawHooks and rawPermissions into
 // rawSettings and writes the result through cfg, creating the parent .claude
 // directory if needed.
@@ -286,11 +266,19 @@ func writeClaudeSettingsFile(cfg *agent.HookConfigFile, rawSettings, rawHooks, r
 	}
 	rawSettings["hooks"] = hooksJSON
 
-	permJSON, err := jsonutil.MarshalWithNoHTMLEscape(rawPermissions)
-	if err != nil {
-		return fmt.Errorf("failed to marshal permissions: %w", err)
+	// An emptied permissions block is deleted, not written back as {}. Removing
+	// the retired deny rule can empty it, and leaving "permissions": {} behind
+	// in a tracked settings file is noise Entire put there. UninstallHooks and
+	// agent.RepairRetiredMetadataDenyRule both do the same.
+	if len(rawPermissions) == 0 {
+		delete(rawSettings, "permissions")
+	} else {
+		permJSON, err := jsonutil.MarshalWithNoHTMLEscape(rawPermissions)
+		if err != nil {
+			return fmt.Errorf("failed to marshal permissions: %w", err)
+		}
+		rawSettings["permissions"] = permJSON
 	}
-	rawSettings["permissions"] = permJSON
 
 	output, err := jsonutil.MarshalIndentWithNewline(rawSettings, "", "  ")
 	if err != nil {
@@ -397,27 +385,10 @@ func (c *ClaudeCodeAgent) UninstallHooks(ctx context.Context) error {
 	}
 
 	if rawPermissions != nil {
-		if denyRaw, ok := rawPermissions["deny"]; ok {
-			var denyRules []string
-			if err := json.Unmarshal(denyRaw, &denyRules); err == nil {
-				// Filter out the metadata deny rule
-				filteredRules := make([]string, 0, len(denyRules))
-				for _, rule := range denyRules {
-					if rule != metadataDenyRule {
-						filteredRules = append(filteredRules, rule)
-					}
-				}
-				if len(filteredRules) > 0 {
-					denyJSON, err := json.Marshal(filteredRules)
-					if err == nil {
-						rawPermissions["deny"] = denyJSON
-					}
-				} else {
-					// Remove empty deny array
-					delete(rawPermissions, "deny")
-				}
-			}
-		}
+		// Same removal InstallHooks now performs; a marshal failure here leaves
+		// the rule in place, which uninstall reports through the write below
+		// rather than aborting the rest of the hook removal.
+		_, _ = agent.RemoveMetadataDenyRule(rawPermissions) //nolint:errcheck // best-effort during uninstall; hook removal must still complete
 
 		// If permissions is empty, remove it entirely
 		if len(rawPermissions) > 0 {
@@ -707,4 +678,11 @@ func removeEntireHooks(matchers []ClaudeHookMatcher) []ClaudeHookMatcher {
 func removeEntireHooksFromMatchers(matchers []ClaudeHookMatcher) []ClaudeHookMatcher {
 	// Same logic as removeEntireHooks - both work on the same structure
 	return removeEntireHooks(matchers)
+}
+
+// PermissionConfig implements agent.PermissionConfigOwner so the shared
+// retired-deny-rule diagnostics and repair can reach .claude/settings.json
+// without knowing Claude Code's layout.
+func (c *ClaudeCodeAgent) PermissionConfig(ctx context.Context) (*agent.HookConfigFile, error) {
+	return claudeHookConfig(ctx)
 }
