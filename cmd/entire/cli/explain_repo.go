@@ -85,13 +85,12 @@ type crossRepoExplainOptions struct {
 	insecureHTTP bool
 }
 
-const explainRepoFlagShapes = "owner/name, gh/owner/name, et/project/repo, or an entire://<host>/et/<project>/<repo> clone URL"
+const explainRepoFlagShapes = "gh/owner/name, et/project/repo, or a full entire://<host>/{gh|et}/... clone URL"
 
-// parseExplainRepoFlag parses `--repo`. GitHub repositories accept owner/name
-// and gh/owner/name; Entire-native repositories accept et/project/repo and a
-// full entire://.../et/project/repo clone URL. Leading slashes are optional on
-// path refs. Returns lowercased coordinates, as the control plane persists
-// them.
+// parseExplainRepoFlag parses `--repo`. Every accepted form states its forge:
+// gh/owner/repo or et/project/repo, including as the path of a full entire://
+// clone URL. Leading slashes are optional on path refs. Returns lowercased
+// coordinates, as the control plane persists them.
 //
 // A bare repo ID is deliberately not accepted: the control plane and the search
 // index expose different identifiers for a repository, and guessing which space
@@ -104,44 +103,49 @@ func parseExplainRepoFlag(value string) (forge, owner, repo string, err error) {
 
 	if isEntireCloneURL(v) {
 		info, parseErr := gitremote.ParseURL(v)
-		if parseErr != nil || info.Protocol != gitremote.ProtocolEntire || info.Host == "" || info.Forge != nativeCloneForge {
+		if parseErr != nil || info.Protocol != gitremote.ProtocolEntire || info.Host == "" {
 			return "", "", "", fmt.Errorf("invalid --repo %q: expected %s", gitremote.RedactURL(v), explainRepoFlagShapes)
 		}
-		project, repoName, nativeErr := parseNativeCloneRef(nativeCloneForge + "/" + info.Owner + "/" + info.Repo)
-		if nativeErr != nil {
-			return "", "", "", fmt.Errorf("invalid --repo %q: expected %s: %w", gitremote.RedactURL(v), explainRepoFlagShapes, nativeErr)
+		ref := info.Forge + "/" + info.Owner + "/" + info.Repo
+		switch info.Forge {
+		case nativeCloneForge:
+			project, repoName, nativeErr := parseNativeCloneRef(ref)
+			if nativeErr != nil {
+				return "", "", "", fmt.Errorf("invalid --repo %q: expected %s: %w", gitremote.RedactURL(v), explainRepoFlagShapes, nativeErr)
+			}
+			return nativeCloneForge, strings.ToLower(project), strings.ToLower(repoName), nil
+		case mirrorCloneForge:
+			_, owner, repoName, mirrorErr := parseMirrorCloneRef(ref)
+			if mirrorErr != nil {
+				return "", "", "", fmt.Errorf("invalid --repo %q: expected %s: %w", gitremote.RedactURL(v), explainRepoFlagShapes, mirrorErr)
+			}
+			return mirrorCloneForge, owner, repoName, nil
+		default:
+			return "", "", "", fmt.Errorf("invalid --repo %q: unsupported forge %q; expected %s", gitremote.RedactURL(v), info.Forge, explainRepoFlagShapes)
 		}
-		return nativeCloneForge, strings.ToLower(project), strings.ToLower(repoName), nil
 	}
 
 	ref := strings.TrimPrefix(v, "/")
-	if strings.HasPrefix(ref, nativeCloneForge+"/") {
+	switch {
+	case strings.HasPrefix(ref, nativeCloneForge+"/"):
 		project, repoName, nativeErr := parseNativeCloneRef(ref)
 		if nativeErr != nil {
 			return "", "", "", fmt.Errorf("invalid --repo %q: expected %s: %w", value, explainRepoFlagShapes, nativeErr)
 		}
 		return nativeCloneForge, strings.ToLower(project), strings.ToLower(repoName), nil
+	case strings.HasPrefix(ref, mirrorCloneForge+"/"):
+		_, owner, repo, mirrorErr := parseMirrorCloneRef(ref)
+		if mirrorErr != nil {
+			return "", "", "", fmt.Errorf("invalid --repo %q: expected %s: %w", value, explainRepoFlagShapes, mirrorErr)
+		}
+		return mirrorCloneForge, owner, repo, nil
+	default:
+		return "", "", "", fmt.Errorf("invalid --repo %q: forge prefix is required; expected %s", value, explainRepoFlagShapes)
 	}
-	if !strings.Contains(ref, "/") {
-		return "", "", "", fmt.Errorf("invalid --repo %q: expected %s", value, explainRepoFlagShapes)
-	}
-	// Normalize to the gh/owner/name clone-ref shape so the mirror parser's
-	// GitHub charset validation applies to both accepted GitHub forms.
-	if !strings.HasPrefix(ref, "gh/") {
-		ref = "gh/" + ref
-	}
-	_, owner, repo, err = parseMirrorCloneRef(ref)
-	if err != nil {
-		return "", "", "", fmt.Errorf("invalid --repo %q: expected %s: %w", value, explainRepoFlagShapes, err)
-	}
-	return "gh", owner, repo, nil
 }
 
 func explainRepoRef(forge, owner, repo string) string {
-	if forge == nativeCloneForge {
-		return forge + "/" + owner + "/" + repo
-	}
-	return owner + "/" + repo
+	return forge + "/" + owner + "/" + repo
 }
 
 // explainRepoTargetsCurrentRepo reports whether the --repo value names the repo

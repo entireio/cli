@@ -26,21 +26,23 @@ func TestParseExplainRepoFlag(t *testing.T) {
 	for _, tc := range []struct {
 		name, in, forge, owner, repo, wantErr string
 	}{
-		{name: "owner/name", in: "acme/widgets", forge: "gh", owner: "acme", repo: "widgets"},
 		{name: "gh prefixed", in: "gh/acme/widgets", forge: "gh", owner: "acme", repo: "widgets"},
 		{name: "leading slash", in: "/gh/acme/widgets", forge: "gh", owner: "acme", repo: "widgets"},
-		{name: "lowercased", in: "ACME/Widgets", forge: "gh", owner: "acme", repo: "widgets"},
-		{name: "surrounding space", in: "  acme/widgets  ", forge: "gh", owner: "acme", repo: "widgets"},
+		{name: "lowercased", in: "gh/ACME/Widgets", forge: "gh", owner: "acme", repo: "widgets"},
+		{name: "surrounding space", in: "  gh/acme/widgets  ", forge: "gh", owner: "acme", repo: "widgets"},
 		{name: "native", in: "et/Acme/Widgets", forge: "et", owner: "acme", repo: "widgets"},
 		{name: "native leading slash", in: "/et/acme/widgets", forge: "et", owner: "acme", repo: "widgets"},
 		{name: "native clone url", in: "entire://aws-us-east-2.entire.io/et/Acme/Widgets", forge: "et", owner: "acme", repo: "widgets"},
+		{name: "mirror clone url", in: "entire://aws-us-east-2.entire.io/gh/Acme/Widgets", forge: "gh", owner: "acme", repo: "widgets"},
 		{name: "empty", in: "", wantErr: "--repo requires a value"},
-		{name: "bare word", in: "widgets", wantErr: "expected owner/name"},
+		{name: "missing forge", in: "acme/widgets", wantErr: "forge prefix is required"},
+		{name: "bare word", in: "widgets", wantErr: "forge prefix is required"},
 		// A repo ID is rejected rather than guessed at: the control plane and
 		// the search index expose different identifiers for a repository.
-		{name: "bare ulid", in: "01KVBJCWYA4YW6J5M9GP655HZ9", wantErr: "expected owner/name"},
+		{name: "bare ulid", in: "01KVBJCWYA4YW6J5M9GP655HZ9", wantErr: "forge prefix is required"},
 		{name: "github clone url", in: "https://github.com/acme/widgets", wantErr: "invalid --repo"},
-		{name: "mirror clone url", in: "entire://aws-us-east-2.entire.io/gh/acme/widgets", wantErr: "invalid --repo"},
+		{name: "unsupported forge path", in: "gl/acme/widgets", wantErr: "forge prefix is required"},
+		{name: "unsupported forge clone url", in: "entire://aws-us-east-2.entire.io/gl/acme/widgets", wantErr: "unsupported forge"},
 		{name: "native clone url without host", in: "entire:///et/acme/widgets", wantErr: "invalid --repo"},
 		{name: "malformed native path", in: "et/acme/widgets/extra", wantErr: "invalid --repo"},
 		{name: "malformed native clone url", in: "entire://aws-us-east-2.entire.io/et/acme/widgets/extra", wantErr: "invalid --repo"},
@@ -196,7 +198,7 @@ func TestRunCrossRepoExplain_Prose(t *testing.T) {
 
 	var out, errOut bytes.Buffer
 	require.NoError(t, runCrossRepoExplain(context.Background(), &out, &errOut, crossRepoExplainOptions{
-		repoFlag:     "acme/widgets",
+		repoFlag:     "gh/acme/widgets",
 		target:       testAPICheckpointID.String(),
 		sessionIndex: -1,
 		verbose:      true,
@@ -217,7 +219,7 @@ func TestRunCrossRepoExplain_JSON(t *testing.T) {
 
 	var out, errOut bytes.Buffer
 	require.NoError(t, runCrossRepoExplain(context.Background(), &out, &errOut, crossRepoExplainOptions{
-		repoFlag:     "acme/widgets",
+		repoFlag:     "gh/acme/widgets",
 		target:       testAPICheckpointID.String(),
 		sessionIndex: -1,
 		json:         true,
@@ -256,7 +258,7 @@ func TestRunCrossRepoExplain_JSONPartialFailsHard(t *testing.T) {
 
 	var out, errOut bytes.Buffer
 	err := runCrossRepoExplain(context.Background(), &out, &errOut, crossRepoExplainOptions{
-		repoFlag:     "acme/widgets",
+		repoFlag:     "gh/acme/widgets",
 		target:       testAPICheckpointID.String(),
 		sessionIndex: -1,
 		json:         true,
@@ -276,7 +278,7 @@ func TestRunCrossRepoExplain_TranscriptWritesBytesVerbatim(t *testing.T) {
 
 	var out, errOut bytes.Buffer
 	require.NoError(t, runCrossRepoExplain(context.Background(), &out, &errOut, crossRepoExplainOptions{
-		repoFlag:      "acme/widgets",
+		repoFlag:      "gh/acme/widgets",
 		target:        testAPICheckpointID.String(),
 		sessionIndex:  -1,
 		rawTranscript: true,
@@ -289,7 +291,7 @@ func TestRunCrossRepoExplain_EmptyTranscriptIsAnError(t *testing.T) {
 
 	var out, errOut bytes.Buffer
 	err := runCrossRepoExplain(context.Background(), &out, &errOut, crossRepoExplainOptions{
-		repoFlag:     "acme/widgets",
+		repoFlag:     "gh/acme/widgets",
 		target:       testAPICheckpointID.String(),
 		sessionIndex: -1,
 		transcript:   true,
@@ -303,7 +305,7 @@ func TestRunCrossRepoExplain_RejectsPrefix(t *testing.T) {
 	withStubCrossRepoReader(t, &stubCrossRepoReader{})
 
 	err := runCrossRepoExplain(context.Background(), io.Discard, io.Discard, crossRepoExplainOptions{
-		repoFlag:     "acme/widgets",
+		repoFlag:     "gh/acme/widgets",
 		target:       "01KXGT",
 		sessionIndex: -1,
 	})
@@ -330,27 +332,32 @@ func TestExplainCmd_RepoFlagValidation(t *testing.T) {
 	}{
 		{
 			name:    "repo without a checkpoint",
-			args:    []string{"checkpoint", "explain", "--repo", "acme/widgets"},
+			args:    []string{"checkpoint", "explain", "--repo", "gh/acme/widgets"},
 			wantErr: "--repo requires a checkpoint ID",
 		},
 		{
+			name:    "repo without a forge",
+			args:    []string{"checkpoint", "explain", testAPICheckpointID.String(), "--repo", "acme/widgets"},
+			wantErr: "forge prefix is required",
+		},
+		{
 			name:    "repo with commit",
-			args:    []string{"checkpoint", "explain", "--repo", "acme/widgets", "--commit", "HEAD"},
+			args:    []string{"checkpoint", "explain", "--repo", "gh/acme/widgets", "--commit", "HEAD"},
 			wantErr: "[repo commit]",
 		},
 		{
 			name:    "repo with generate",
-			args:    []string{"checkpoint", "explain", "abc", "--repo", "acme/widgets", "--generate"},
+			args:    []string{"checkpoint", "explain", "abc", "--repo", "gh/acme/widgets", "--generate"},
 			wantErr: "[repo generate]",
 		},
 		{
 			name:    "repo with session filter",
-			args:    []string{"checkpoint", "explain", "abc", "--repo", "acme/widgets", "--session", "s1"},
+			args:    []string{"checkpoint", "explain", "abc", "--repo", "gh/acme/widgets", "--session", "s1"},
 			wantErr: "[repo session]",
 		},
 		{
 			name:    "repo with search-all",
-			args:    []string{"checkpoint", "explain", "abc", "--repo", "acme/widgets", "--search-all"},
+			args:    []string{"checkpoint", "explain", "abc", "--repo", "gh/acme/widgets", "--search-all"},
 			wantErr: "[repo search-all]",
 		},
 		{
@@ -379,8 +386,9 @@ func TestExplainCmd_RepoFlagHelpIncludesNativeForms(t *testing.T) {
 	repoFlag := cmd.Flags().Lookup("repo")
 	require.NotNil(t, repoFlag)
 	assert.Contains(t, repoFlag.Usage, "et/project/repo")
-	assert.Contains(t, repoFlag.Usage, "entire://<host>/et/<project>/<repo>")
+	assert.Contains(t, repoFlag.Usage, "gh/owner/name")
 	assert.Contains(t, cmd.Long, "--repo et/project/repo")
+	assert.Contains(t, cmd.Long, "--repo gh/owner/name")
 }
 
 // Bugbot (PR #1942): the default no-summary hint tells the reader to run
@@ -394,7 +402,7 @@ func TestRunCrossRepoExplain_NoDeadGenerateHint(t *testing.T) {
 
 	var out, errOut bytes.Buffer
 	require.NoError(t, runCrossRepoExplain(context.Background(), &out, &errOut, crossRepoExplainOptions{
-		repoFlag:     "acme/widgets",
+		repoFlag:     "gh/acme/widgets",
 		target:       testAPICheckpointID.String(),
 		sessionIndex: -1,
 		verbose:      true,
@@ -403,7 +411,7 @@ func TestRunCrossRepoExplain_NoDeadGenerateHint(t *testing.T) {
 
 	got := out.String()
 	assert.NotContains(t, got, "--generate", "must not advertise a flag that --repo rejects")
-	assert.Contains(t, got, "repo that owns it (acme/widgets)")
+	assert.Contains(t, got, "repo that owns it (gh/acme/widgets)")
 }
 
 // The local path keeps its hint: the fix must be scoped to cross-repo reads.
@@ -425,9 +433,9 @@ func TestCrossRepoReadSource(t *testing.T) {
 	_, ok := crossRepoReadSource(context.Background())
 	assert.False(t, ok, "an unmarked context is a local read")
 
-	src, ok := crossRepoReadSource(withCrossRepoRead(context.Background(), "acme/widgets"))
+	src, ok := crossRepoReadSource(withCrossRepoRead(context.Background(), "gh/acme/widgets"))
 	assert.True(t, ok)
-	assert.Equal(t, "acme/widgets", src)
+	assert.Equal(t, "gh/acme/widgets", src)
 
 	_, ok = crossRepoReadSource(withCrossRepoRead(context.Background(), ""))
 	assert.False(t, ok, "an empty repo name must not count as a cross-repo read")

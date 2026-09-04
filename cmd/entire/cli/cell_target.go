@@ -303,10 +303,14 @@ type repoCellPlacement struct {
 // /gh/<owner>/<repo> can have the same two trailing path segments but are
 // different repositories with different repo IDs and, potentially, cells.
 func resolveForgeRepoCellPlacement(ctx context.Context, forge, owner, repo string) (repoCellPlacement, error) {
-	if forge == nativeCloneForge {
+	switch forge {
+	case nativeCloneForge:
 		return resolveNativeRepoCellPlacement(ctx, owner, repo)
+	case mirrorCloneForge:
+		return resolveRepoCellPlacement(ctx, owner, repo)
+	default:
+		return repoCellPlacement{}, fmt.Errorf("resolve repo %s/%s: unsupported forge %q (supported: %s, %s)", owner, repo, forge, mirrorCloneForge, nativeCloneForge)
 	}
-	return resolveRepoCellPlacement(ctx, owner, repo)
 }
 
 // resolveNativeRepoCellPlacement resolves /et/<project>/<repo> through the

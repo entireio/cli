@@ -258,7 +258,7 @@ Viewing specific items:
   entire checkpoint explain --commit <ref>        Force interpretation as commit ref
 
 Checkpoints in another repo:
-  entire checkpoint explain <id> --repo owner/name
+  entire checkpoint explain <id> --repo gh/owner/name
   entire checkpoint explain <id> --repo et/project/repo
                  Explain a checkpoint owned by another repository — the
                  drill-down for a cross-repo 'entire search' hit. Reads it from

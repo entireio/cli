@@ -215,6 +215,21 @@ func TestResolveForgeRepoCellPlacement_NativeDoesNotSelectSameNamedGitHubMirror(
 	}
 }
 
+func TestResolveForgeRepoCellPlacement_RequiresSupportedForge(t *testing.T) {
+	t.Parallel()
+
+	for _, forge := range []string{"", "github", "entire", "gl"} {
+		t.Run(forge, func(t *testing.T) {
+			t.Parallel()
+
+			_, err := resolveForgeRepoCellPlacement(t.Context(), forge, "acme", "widgets")
+			if err == nil || !strings.Contains(err.Error(), "unsupported forge") {
+				t.Fatalf("resolveForgeRepoCellPlacement(%q) error = %v, want unsupported forge", forge, err)
+			}
+		})
+	}
+}
+
 func TestResolveNativeRepoCellPlacement_ClassifiesDefinitiveMisses(t *testing.T) {
 	const (
 		projectID = "01NATIVEPROJECT00000000000"
