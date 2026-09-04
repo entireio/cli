@@ -4,7 +4,6 @@ package versioncheck
 
 import (
 	"encoding/json"
-	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -145,7 +144,10 @@ func fallbackInstallCommand(execPath, currentVersion string) string {
 		cmd += " -Channel nightly"
 	}
 	if execPath != "" {
-		cmd += fmt.Sprintf(` -InstallDir "%s"`, filepath.Dir(execPath))
+		// Single quotes are literal in PowerShell (double quotes would expand
+		// $name and treat backticks as escapes); only a quote needs doubling.
+		dir := strings.ReplaceAll(filepath.Dir(execPath), "'", "''")
+		cmd += " -InstallDir '" + dir + "'"
 	}
 	return cmd
 }
