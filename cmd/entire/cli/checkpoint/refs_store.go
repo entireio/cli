@@ -204,11 +204,10 @@ func (s *gitRefsStore) refTip(cid id.CheckpointID, ref *plumbing.Reference) (plu
 // push-discovery mechanism there is — see the
 // pushQueueFileName doc. A ref that misses the queue is never pushed, and the
 // writers above are idempotent, so a re-run skips it as already-present and
-// never re-enqueues it: it stays local-only forever. Resolving the queue shells
-// out to `git rev-parse --git-common-dir`, which fails instantly on a canceled
-// ctx, so honoring cancellation here would drop the bookkeeping for a write
-// that already happened. This local, sub-millisecond step therefore completes
-// even during shutdown (a second Ctrl-C still force-quits the process).
+// never re-enqueues it: it stays local-only forever. Queue resolution is now a
+// context-free metadata read, but stripping cancellation here keeps the whole
+// post-ref bookkeeping boundary explicit and prevents a future queue operation
+// from dropping a write that already happened.
 func (s *gitRefsStore) enqueueForPush(ctx context.Context, refName plumbing.ReferenceName) {
 	q, err := PushQueueForRepo(context.WithoutCancel(ctx), s.repo)
 	if err != nil {

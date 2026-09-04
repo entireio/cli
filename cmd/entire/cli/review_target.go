@@ -36,8 +36,12 @@ func prepareReviewTarget(ctx context.Context, out, errOut io.Writer, selector st
 		if normalizeErr != nil {
 			return cliReview.TargetWorktree{}, normalizeErr
 		}
-		err = runAuthenticatedTrailAPI(ctx, errOut, false, "", func(ctx context.Context, client *api.Client) error {
-			found, findErr := resolveTrailBySelector(ctx, client, forge, owner, repo, normalized, "")
+		err = runAuthenticatedTrailAPI(ctx, errOut, false, "", func(ctx context.Context, client *api.Client, repoID string) error {
+			basePath, pathErr := trailRepoBasePath(forge, owner, repo, repoID)
+			if pathErr != nil {
+				return pathErr
+			}
+			found, findErr := resolveTrailBySelectorAtPath(ctx, client, basePath, forge, owner, repo, normalized, "")
 			if findErr != nil {
 				return findErr
 			}

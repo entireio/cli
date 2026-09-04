@@ -61,7 +61,11 @@ detect_os() {
             echo "linux"
             ;;
         mingw*|msys*|cygwin*)
-            error "install.sh does not support Windows, you can install the Entire CLI using scoop:
+            error "install.sh does not support Windows. Run this from PowerShell 5.1 or later:
+
+    irm https://entire.io/install.ps1 -UseBasicParsing | iex
+
+  Or install the Entire CLI using Scoop:
 
     scoop install entire/entire
 

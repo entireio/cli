@@ -139,6 +139,14 @@ func runStatusDetailed(ctx context.Context, w io.Writer, sty statusStyles, setti
 		fmt.Fprintln(w, formatSettingsStatus("Project", projectSettings, sty))
 	}
 
+	// An external_agents grant the loader refused. The user can see the
+	// setting in their file and has no other way to learn it is inert:
+	// discovery simply does not run, and the agent never appears.
+	if reason, rejected := effectiveSettings.ExternalAgentsRejection(); rejected {
+		fmt.Fprintf(w, "  external_agents is ignored: %s\n  move it to %s, and keep that file out of version control\n",
+			reason, settings.EntireSettingsLocalFile)
+	}
+
 	// Show local settings if it exists. LoadFromFile is ungated, so this
 	// renders the file's own contents — say so when the loader ignored them,
 	// or the display contradicts the settings actually in effect.

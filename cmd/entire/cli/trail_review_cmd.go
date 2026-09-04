@@ -488,10 +488,10 @@ func authenticatedTrailReviewTarget(cmd *cobra.Command, selector string) (*api.C
 	}
 	var target trailReviewTarget
 	var resolvedClient *api.Client
-	err := runAuthenticatedTrailAPI(cmd.Context(), cmd.ErrOrStderr(), trailInsecureHTTP(cmd), repoOverride, func(ctx context.Context, client *api.Client) error {
+	err := runAuthenticatedTrailAPI(cmd.Context(), cmd.ErrOrStderr(), trailInsecureHTTP(cmd), repoOverride, func(ctx context.Context, client *api.Client, repoID string) error {
 		var err error
 		resolvedClient = client
-		target, err = resolveTrailReviewTarget(ctx, client, selector, repoOverride, branchOverride)
+		target, err = resolveTrailReviewTarget(ctx, client, repoID, selector, repoOverride, branchOverride)
 		return err
 	})
 	if err != nil {
@@ -500,8 +500,12 @@ func authenticatedTrailReviewTarget(cmd *cobra.Command, selector string) (*api.C
 	return resolvedClient, target, nil
 }
 
-func resolveTrailReviewTarget(ctx context.Context, client *api.Client, selector, repoOverride, branchOverride string) (trailReviewTarget, error) {
+func resolveTrailReviewTarget(ctx context.Context, client *api.Client, repoID, selector, repoOverride, branchOverride string) (trailReviewTarget, error) {
 	host, owner, repo, err := resolveTrailRepoOrRemote(ctx, repoOverride)
+	if err != nil {
+		return trailReviewTarget{}, err
+	}
+	basePath, err := trailRepoBasePath(host, owner, repo, repoID)
 	if err != nil {
 		return trailReviewTarget{}, err
 	}
@@ -509,7 +513,7 @@ func resolveTrailReviewTarget(ctx context.Context, client *api.Client, selector,
 	selector = strings.TrimSpace(selector)
 	var found *api.TrailResource
 	if selector != "" {
-		found, err = findTrailBySelector(ctx, client, host, owner, repo, selector)
+		found, err = findTrailBySelectorAtPath(ctx, client, basePath, selector)
 		if err != nil {
 			return trailReviewTarget{}, err
 		}
@@ -521,7 +525,7 @@ func resolveTrailReviewTarget(ctx context.Context, client *api.Client, selector,
 		if branchErr != nil {
 			return trailReviewTarget{}, fmt.Errorf("%w: no trail selector given and current branch is unknown: %w\nhint: run 'entire trail list --status any' or pass --trail <number|id|branch>", errTrailReviewDefaultTargetNotFound, branchErr)
 		}
-		found, err = findTrailByBranch(ctx, client, host, owner, repo, branch)
+		found, err = findTrailByBranchAtPath(ctx, client, basePath, branch)
 		if err != nil {
 			return trailReviewTarget{}, err
 		}
@@ -539,7 +543,7 @@ func resolveTrailReviewTarget(ctx context.Context, client *api.Client, selector,
 	// public routes are repo/number addressed. Register that translation once
 	// when the target is resolved so findings, snapshots, and SSE all hit the
 	// owning cell's native route.
-	client.SetTrailRoute(found.ID, trailNumberPath(host, owner, repo, found.Number))
+	client.SetTrailRoute(found.ID, trailNumberPathForBase(basePath, found.Number))
 	return trailReviewTarget{Host: host, Owner: owner, Repo: repo, Trail: *found}, nil
 }
 

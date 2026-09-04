@@ -48,6 +48,28 @@ const (
 	pluginManagedSubDir = "plugins"
 )
 
+// requireAbsPluginParent rejects a non-absolute directory override.
+//
+// A relative value resolves against the process's working directory at
+// startup — typically inside the user's repository — which is the wrong place
+// for managed plugin storage, and it is storage whose bin subdirectory main.go
+// prepends to $PATH. Every override reaching pluginParentDir gets this check,
+// not just ENTIRE_PLUGIN_DIR: XDG_DATA_HOME and LOCALAPPDATA were joined
+// unchecked and left for osroot (which refuses the root open) and for main.go
+// (which restores $PATH) to notice. Those backstops hold today, but they state
+// the invariant two layers away from where it is decided, and each answers a
+// question of its own rather than this one.
+//
+// Rejecting is louder than falling through to the platform default: a
+// misconfigured override is a user error worth surfacing, not something to
+// paper over with a different directory than the one they asked for.
+func requireAbsPluginParent(name, value string) error {
+	if !filepath.IsAbs(value) {
+		return fmt.Errorf("%s must be an absolute path, got %q", name, value)
+	}
+	return nil
+}
+
 // pluginParentDir returns the per-user directory that holds the managed
 // plugin storage. Resolution, in order:
 //
@@ -63,20 +85,17 @@ const (
 // degenerate environment with $LOCALAPPDATA or $XDG_DATA_HOME but no home
 // still returns a usable path.
 func pluginParentDir() (string, error) {
-	// ENTIRE_PLUGIN_DIR must be absolute. A relative value would resolve
-	// against the user's CWD at startup — typically inside their repo —
-	// which is the wrong place for managed plugin storage. Reject loudly
-	// rather than silently falling through to the platform default, since
-	// a misconfigured override is almost certainly a user error worth
-	// surfacing.
 	if v := os.Getenv(pluginEnvPluginDir); v != "" {
-		if !filepath.IsAbs(v) {
-			return "", fmt.Errorf("%s must be an absolute path, got %q", pluginEnvPluginDir, v)
+		if err := requireAbsPluginParent(pluginEnvPluginDir, v); err != nil {
+			return "", err
 		}
 		return v, nil
 	}
 	if runtime.GOOS == windowsGOOS {
 		if appData := os.Getenv("LOCALAPPDATA"); appData != "" {
+			if err := requireAbsPluginParent("LOCALAPPDATA", appData); err != nil {
+				return "", err
+			}
 			return filepath.Join(appData, pluginManagedTopDir, pluginManagedSubDir), nil
 		}
 		home, err := os.UserHomeDir()
@@ -86,6 +105,9 @@ func pluginParentDir() (string, error) {
 		return filepath.Join(home, "AppData", "Local", pluginManagedTopDir, pluginManagedSubDir), nil
 	}
 	if v := os.Getenv("XDG_DATA_HOME"); v != "" {
+		if err := requireAbsPluginParent("XDG_DATA_HOME", v); err != nil {
+			return "", err
+		}
 		return filepath.Join(v, pluginManagedTopDir, pluginManagedSubDir), nil
 	}
 	home, err := os.UserHomeDir()

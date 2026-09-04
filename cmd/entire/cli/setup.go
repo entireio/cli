@@ -207,8 +207,12 @@ func updateSummaryGenerationSettings(ctx context.Context, w io.Writer, provider,
 	}
 
 	if provider != "" {
-		// Make external agents on $PATH resolvable for --summarize-provider.
-		external.DiscoverAndRegisterAlways(ctx)
+		// Make the NAMED external agent resolvable for --summarize-provider.
+		// Named, not the whole sweep: the user identified one provider, and a
+		// full scan would execute every entire-agent-* binary on $PATH in a
+		// repo that may never have opted into external agents. The named
+		// lookup returns immediately when the provider is a built-in.
+		discoverNamedExternalAgent(ctx, types.AgentName(provider))
 	}
 
 	targetFile, configDisplay := settingsTargetFile(ctx, opts.UseLocalSettings, opts.UseProjectSettings)
@@ -225,15 +229,13 @@ func updateSummaryGenerationSettings(ctx context.Context, w io.Writer, provider,
 		s.SummaryGeneration = &settings.SummaryGenerationSettings{}
 	}
 
+	grantExternalAgents := false
 	if provider != "" {
 		if err := validateSummaryProvider(provider); err != nil {
 			return err
 		}
 		if ag, getErr := getSummaryAgent(types.AgentName(provider)); getErr == nil && external.IsExternal(ag) {
-			if !s.ExternalAgents {
-				s.ExternalAgents = true
-				fmt.Fprintln(w, externalAgentsAutoEnabledNotice)
-			}
+			grantExternalAgents = !settings.IsExternalAgentsEnabled(ctx)
 		}
 	}
 	if model != "" && provider == "" && s.SummaryGeneration.Provider == "" {
@@ -256,6 +258,23 @@ func updateSummaryGenerationSettings(ctx context.Context, w io.Writer, provider,
 		if err := SaveEntireSettings(ctx, s); err != nil {
 			return fmt.Errorf("failed to save settings: %w", err)
 		}
+	}
+
+	// After the save above, never before, and never onto s. The grant is a raw
+	// read-modify-write of the local file, because the loader honors it only
+	// from there (see enableExternalAgentsLocally) and s may be headed for the
+	// project file. When the target IS the local file, the two writes touch the
+	// same file: granting first meant the struct save rewrote it from an s
+	// whose ExternalAgents is still false, and the field is omitempty, so the
+	// key was dropped rather than written back. The user was told external
+	// agents were on while the next load did not honor them. The other three
+	// grant sites in this file order it this way for the same reason.
+	if grantExternalAgents {
+		grant, err := enableExternalAgentsLocally(ctx)
+		if err != nil {
+			return err
+		}
+		reportExternalAgentsGrant(w, grant)
 	}
 
 	fmt.Fprintf(w, "✓ Settings updated (%s)\n", configDisplay)
@@ -472,9 +491,15 @@ func runManageAgents(ctx context.Context, w io.Writer, opts EnableOptions, selec
 	if selectFn == nil && !interactive.CanPromptInteractively() {
 		if opts.SearchSkill || opts.AgentHelpSkill {
 			if len(installedNames) > 0 {
-				external.DiscoverAndRegisterAlways(ctx)
+				// Named lookups over the agents already installed here, not a
+				// full sweep: this branch is non-interactive, so there is no
+				// picker to populate and no reason to execute binaries for
+				// agents this repo never enabled. Each call is a no-op for a
+				// built-in, and errors are dropped — applyAgentChanges reports
+				// an agent it cannot resolve.
 				selectedAgentNames := make([]string, 0, len(installedNames))
 				for _, name := range installedNames {
+					discoverNamedExternalAgent(ctx, name)
 					selectedAgentNames = append(selectedAgentNames, string(name))
 				}
 				return applyAgentChanges(ctx, w, selectedAgentNames, installedNames, opts)
@@ -636,22 +661,17 @@ func applyAgentChanges(ctx context.Context, w io.Writer, selectedAgentNames []st
 	}
 
 	// Auto-enable external_agents setting if any new agent is external.
+	// Always into the local file, whatever opts said about the rest of this
+	// write: the loader honors the grant nowhere else. See
+	// enableExternalAgentsLocally.
 	for _, ag := range append(successfullyAddedAgents, successfullyReinstalledAgents...) {
 		if external.IsExternal(ag) {
-			s, loadErr := LoadEntireSettings(ctx)
-			if loadErr != nil {
-				s = &EntireSettings{}
-			}
-			if !s.ExternalAgents {
-				s.ExternalAgents = true
-				var saveErr error
-				if opts.UseLocalSettings {
-					saveErr = SaveEntireSettingsLocal(ctx, s)
-				} else {
-					saveErr = SaveEntireSettings(ctx, s)
-				}
+			if !settings.IsExternalAgentsEnabled(ctx) {
+				grant, saveErr := enableExternalAgentsLocally(ctx)
 				if saveErr != nil {
-					errs = append(errs, fmt.Errorf("failed to save external_agents setting: %w", saveErr))
+					errs = append(errs, saveErr)
+				} else {
+					warnIneffectiveExternalAgentsGrant(w, grant)
 				}
 			}
 			break
@@ -875,10 +895,17 @@ for you and (optionally) create a matching GitHub repository via the gh CLI.`,
 				return err
 			}
 
-			// Discover external agent plugins early so --agent can find them.
-			// Use DiscoverAndRegisterAlways so that --agent works on fresh repos
-			// where the external_agents setting hasn't been persisted yet.
-			external.DiscoverAndRegisterAlways(ctx)
+			// Discover the external agent --agent names, so it works on fresh
+			// repos where the external_agents setting has not been persisted
+			// yet. Only that one: without --agent this falls through to
+			// runEnableOnConfiguredRepo or runSetupFlow, which each run the
+			// full ungated scan for the agent picker they show. Scanning here
+			// too would execute every entire-agent-* binary on $PATH for a
+			// bare `entire enable`. The error is dropped so an unresolvable
+			// name is reported by the agent.Get below, in the user's terms.
+			if agentName != "" {
+				discoverNamedExternalAgent(ctx, types.AgentName(agentName))
+			}
 
 			// Non-interactive mode if --agent flag is provided
 			if cmd.Flags().Changed(agentFlagName) && agentName == "" {
@@ -1057,7 +1084,7 @@ func probeAndCacheTrailsEnablement(ctx context.Context, insecureHTTPAuth bool, i
 	probeCtx, cancel := context.WithTimeout(ctx, enableTrailsProbeBudget)
 	defer cancel()
 
-	client, notOnboarded, err := trailsCellClient(probeCtx, insecureHTTPAuth, info.Owner+"/"+info.Repo)
+	client, notOnboarded, err := trailsCellClient(probeCtx, insecureHTTPAuth, info.Forge, info.Owner, info.Repo)
 	if notOnboarded {
 		if saveErr := saveTrailsEnabledForRemote(ctx, info.Forge, info.Owner, info.Repo, false); saveErr != nil {
 			logging.Debug(ctx, "failed to cache trails enablement", "error", saveErr)
@@ -1277,10 +1304,13 @@ func runEnableInteractive(ctx context.Context, w io.Writer, agents []agent.Agent
 		settings.AbsoluteGitHookPath = true
 	}
 
-	// Auto-enable external_agents if any selected agent is external.
+	// Auto-enable external_agents if any selected agent is external. Deferred
+	// to a separate local-file write below rather than set on this struct,
+	// which may be headed for the project file where the grant is inert.
+	externalAgentSelected := false
 	for _, ag := range agents {
 		if external.IsExternal(ag) {
-			settings.ExternalAgents = true
+			externalAgentSelected = true
 			break
 		}
 	}
@@ -1311,6 +1341,16 @@ func runEnableInteractive(ctx context.Context, w io.Writer, agents []agent.Agent
 	}
 	if err := saveSettings(); err != nil {
 		return fmt.Errorf("failed to save settings: %w", err)
+	}
+
+	// Written separately from the target above: the grant is honored only
+	// from the local file, and the target here may be the project one.
+	if externalAgentSelected {
+		grant, err := enableExternalAgentsLocally(ctx)
+		if err != nil {
+			return err
+		}
+		warnIneffectiveExternalAgentsGrant(w, grant)
 	}
 
 	// Use settings values (merged from existing config + flags) for hook installation
@@ -1974,11 +2014,6 @@ func setupAgentHooksNonInteractive(ctx context.Context, w io.Writer, ag agent.Ag
 		targetSettings.AbsoluteGitHookPath = true
 	}
 
-	// Auto-enable external_agents setting if the agent is external.
-	if external.IsExternal(ag) {
-		targetSettings.ExternalAgents = true
-	}
-
 	opts.applyStrategyOptions(targetSettings)
 
 	// Checkpoint storage backend: an explicit --checkpoint-backend wins; first
@@ -2000,6 +2035,18 @@ func setupAgentHooksNonInteractive(ctx context.Context, w io.Writer, ag agent.Ag
 
 	if err := saveEnabledState(ctx, targetSettings, targetFile == EntireSettingsFile); err != nil {
 		return fmt.Errorf("failed to save settings: %w", err)
+	}
+
+	// Auto-enable external_agents if the agent is external. A separate write,
+	// after the one above and never onto targetSettings, because the loader
+	// honors the grant only from the local file and this target may be the
+	// project one. See enableExternalAgentsLocally.
+	if external.IsExternal(ag) {
+		grant, err := enableExternalAgentsLocally(ctx)
+		if err != nil {
+			return err
+		}
+		warnIneffectiveExternalAgentsGrant(w, grant)
 	}
 
 	// Hook installation decisions need the merged view across both settings
@@ -2310,26 +2357,32 @@ func promptTelemetryConsent(settings *EntireSettings, telemetryFlag bool) error 
 func maybePromptVercelDeploymentDisable(ctx context.Context, w io.Writer, targetFile string, promptFn func() (bool, error)) (bool, error) {
 	repoRoot, rootErr := paths.WorktreeRoot(ctx)
 	if rootErr == nil {
-		vercelJSONPath := filepath.Join(repoRoot, "vercel.json")
+		// Through the worktree's root: these are working-tree files, so they
+		// arrive by clone, and a joined path handed to os.Stat/os.ReadFile
+		// resolves wherever a checked-in symlink points. In-repo links are
+		// still followed, which is what a monorepo's shared vercel.json needs.
+		worktree, err := worktreedir.OpenAt(repoRoot)
+		if err != nil {
+			fmt.Fprintf(w, "Note: Skipping Vercel deployment update: could not open the worktree: %v\n", err)
+			return false, nil
+		}
+
 		hasVercelJSON := false
-		if _, err := os.Stat(vercelJSONPath); err == nil {
+		if _, err := worktree.Stat(vercelconfig.FileName); err == nil {
 			hasVercelJSON = true
 		} else if !os.IsNotExist(err) {
-			fmt.Fprintf(w, "Note: Skipping Vercel deployment update: could not check vercel.json: %v\n", err)
+			fmt.Fprintf(w, "Note: Skipping Vercel deployment update: could not check %s: %v\n", vercelconfig.FileName, err)
 			return false, nil
 		}
 
 		hasVercelProject := hasVercelJSON
 		if !hasVercelProject {
-			for _, path := range []string{
-				filepath.Join(repoRoot, ".vercel"),
-				filepath.Join(repoRoot, "vercel.ts"),
-			} {
-				if _, err := os.Stat(path); err == nil {
+			for _, name := range []string{".vercel", "vercel.ts"} {
+				if _, err := worktree.Stat(name); err == nil {
 					hasVercelProject = true
 					break
 				} else if !os.IsNotExist(err) {
-					fmt.Fprintf(w, "Note: Skipping Vercel deployment update: could not check %s: %v\n", path, err)
+					fmt.Fprintf(w, "Note: Skipping Vercel deployment update: could not check %s: %v\n", name, err)
 					return false, nil
 				}
 			}
@@ -2353,7 +2406,7 @@ func maybePromptVercelDeploymentDisable(ctx context.Context, w io.Writer, target
 			return false, nil
 		}
 
-		if config, alreadyDisabled, loadErr := vercelconfig.Load(vercelJSONPath); loadErr == nil &&
+		if config, alreadyDisabled, loadErr := vercelconfig.LoadIn(worktree, vercelconfig.FileName); loadErr == nil &&
 			config != nil && alreadyDisabled {
 			targetSettings.Vercel = true
 			if err := saveSettingsToTarget(ctx, targetSettings, targetFile); err != nil {
