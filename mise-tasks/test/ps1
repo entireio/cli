@@ -1,0 +1,11 @@
+#!/bin/sh
+#MISE description="Run the PowerShell installer tests and linter (skips when pwsh is absent)"
+
+# Probe with a real invocation, not just `command -v`: a mise shim for pwsh can
+# exist on PATH while no version is activated, and then fails on every call.
+if ! command -v pwsh >/dev/null 2>&1 || ! pwsh -NoProfile -NonInteractive -Command 'exit 0' >/dev/null 2>&1; then
+  echo "test:ps1: pwsh not available, skipping" >&2
+  exit 0
+fi
+
+exec pwsh -NoProfile -NonInteractive -File scripts/test/run.ps1

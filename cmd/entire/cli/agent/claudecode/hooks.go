@@ -18,6 +18,7 @@ import (
 // Ensure ClaudeCodeAgent implements HookSupport
 var (
 	_ agent.HookSupport           = (*ClaudeCodeAgent)(nil)
+	_ agent.HookConfigLocator     = (*ClaudeCodeAgent)(nil)
 	_ agent.HookFreshness         = (*ClaudeCodeAgent)(nil)
 	_ agent.PermissionConfigOwner = (*ClaudeCodeAgent)(nil)
 )
@@ -107,7 +108,7 @@ func claudeHookConfig(ctx context.Context) (*agent.HookConfigFile, error) {
 	if err != nil {
 		return nil, err
 	}
-	return agent.OpenHookConfig(repoRoot, ".claude/"+ClaudeSettingsFileName) //nolint:wrapcheck // agent.HookConfigFile already names the file in its error
+	return agent.OpenHookConfig(repoRoot, (&ClaudeCodeAgent{}).HookConfigRelPath()) //nolint:wrapcheck // agent.HookConfigFile already names the file in its error
 }
 
 // resolveInstallRepoRoot locates the repo root InstallHooks writes under,
@@ -686,3 +687,6 @@ func removeEntireHooksFromMatchers(matchers []ClaudeHookMatcher) []ClaudeHookMat
 func (c *ClaudeCodeAgent) PermissionConfig(ctx context.Context) (*agent.HookConfigFile, error) {
 	return claudeHookConfig(ctx)
 }
+
+// HookConfigRelPath implements agent.HookConfigLocator.
+func (c *ClaudeCodeAgent) HookConfigRelPath() string { return ".claude/" + ClaudeSettingsFileName }

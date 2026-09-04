@@ -62,6 +62,15 @@ func TestParseExplainRepoFlag(t *testing.T) {
 	}
 }
 
+func TestExplainRepoRefKeepsExplicitForgeSeparateFromAPIIdentity(t *testing.T) {
+	t.Parallel()
+
+	assert.Equal(t, "gh/acme/widgets", explainRepoRef(mirrorCloneForge, "acme", "widgets"))
+	assert.Equal(t, "acme/widgets", explainRepoFullName(mirrorCloneForge, "acme", "widgets"))
+	assert.Equal(t, "et/acme/widgets", explainRepoRef(nativeCloneForge, "acme", "widgets"))
+	assert.Equal(t, "et/acme/widgets", explainRepoFullName(nativeCloneForge, "acme", "widgets"))
+}
+
 // TestExplainRepoIsCurrent checks same-repo detection against the origin URL.
 // Not parallel: uses t.Chdir.
 func TestExplainRepoIsCurrent(t *testing.T) {
@@ -387,6 +396,8 @@ func TestExplainCmd_RepoFlagHelpIncludesNativeForms(t *testing.T) {
 	require.NotNil(t, repoFlag)
 	assert.Contains(t, repoFlag.Usage, "et/project/repo")
 	assert.Contains(t, repoFlag.Usage, "gh/owner/name")
+	assert.Contains(t, repoFlag.Usage, "entire://<host>/gh/<owner>/<repo>")
+	assert.Contains(t, repoFlag.Usage, "entire://<host>/et/<project>/<repo>")
 	assert.Contains(t, cmd.Long, "--repo et/project/repo")
 	assert.Contains(t, cmd.Long, "--repo gh/owner/name")
 }

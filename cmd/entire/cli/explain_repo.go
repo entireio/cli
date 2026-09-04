@@ -44,7 +44,7 @@ var newCrossRepoReader = func(ctx context.Context, insecureHTTP bool, forge, own
 		// errors (login hint, discovery guidance); surface them verbatim.
 		return nil, err //nolint:wrapcheck // pass through contextual auth errors
 	}
-	return newAPICheckpointReader(client, placement.RepoID, repoRef), nil
+	return newAPICheckpointReader(client, placement.RepoID, repoRef, explainRepoFullName(forge, owner, repo)), nil
 }
 
 // crossRepoReadKey marks a context as rendering a checkpoint read from another
@@ -85,7 +85,7 @@ type crossRepoExplainOptions struct {
 	insecureHTTP bool
 }
 
-const explainRepoFlagShapes = "gh/owner/name, et/project/repo, or a full entire://<host>/{gh|et}/... clone URL"
+const explainRepoFlagShapes = "gh/owner/name, et/project/repo, entire://<host>/gh/<owner>/<repo>, or entire://<host>/et/<project>/<repo>"
 
 // parseExplainRepoFlag parses `--repo`. Every accepted form states its forge:
 // gh/owner/repo or et/project/repo, including as the path of a full entire://
@@ -146,6 +146,17 @@ func parseExplainRepoFlag(value string) (forge, owner, repo string, err error) {
 
 func explainRepoRef(forge, owner, repo string) string {
 	return forge + "/" + owner + "/" + repo
+}
+
+func explainRepoFullName(forge, owner, repo string) string {
+	// This is the identity spelling returned by entire-api's repo_full_name,
+	// not an attempt to recover a missing provider. The parser has already
+	// required forge explicitly. GitHub mirror rows retain their legacy
+	// owner/repo full_name; native rows are namespaced by et/.
+	if forge == nativeCloneForge {
+		return forge + "/" + owner + "/" + repo
+	}
+	return owner + "/" + repo
 }
 
 // explainRepoTargetsCurrentRepo reports whether the --repo value names the repo

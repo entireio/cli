@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 
+	git "github.com/go-git/go-git/v6"
 	"github.com/spf13/cobra"
 
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
@@ -97,31 +99,59 @@ next push once the git-refs store is the configured primary.`,
 				return nil
 			}
 
-			pushed, pushDisabled, err := strategy.PushQueuedCheckpointRefs(ctx, repo, pushRemote)
-			if err != nil {
-				if errors.Is(err, context.Canceled) {
-					return NewSilentError(err)
-				}
-				return fmt.Errorf("push migrated refs: %w", err)
-			}
-			switch {
-			case pushDisabled:
-				// Confirmed, but checkpoint pushing is disabled in settings, so
-				// nothing went to the remote. The refs stay queued locally.
-				fmt.Fprintln(out, "Checkpoint pushing is disabled in settings; refs stay queued for the next push.")
-			case pushed == 0:
-				// Enabled, but the queue was already empty — e.g. a concurrent
-				// git push flushed the just-migrated refs while we prompted.
-				fmt.Fprintln(out, "No queued refs to push (they may have already been pushed).")
-			default:
-				fmt.Fprintf(out, "Pushed %d checkpoint ref(s).\n", pushed)
-			}
-			return nil
+			return pushMigratedRefs(ctx, out, repo, pushRemote)
 		},
 	}
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "Report what would be migrated without writing refs")
 	cmd.Flags().StringVar(&remote, "remote", "", "Remote to push migrated refs to (default: the checkpoint sync remote)")
 	return cmd
+}
+
+// pushMigratedRefs configures redaction, flushes the queued checkpoint refs and
+// reports the outcome.
+//
+// It owns the redaction step rather than a PreRunE because the OPF gate inside
+// the push reads process-global config that only EnsureRedactionConfigured
+// sets, and an unconfigured one reads as "OPF off" and waves un-OPF'd
+// checkpoint content through. Doing it here rather than up-front keeps the
+// precondition on the one path that has it: --dry-run, an already-primary
+// store, and a run with nothing migrated all return above without ever
+// consulting redaction settings, so they must not fail on them. It also means
+// the guarantee does not depend on where a parent command happens to configure
+// redaction — cobra does not inherit PreRunE, and doctor's lives on its own.
+func pushMigratedRefs(ctx context.Context, out io.Writer, repo *git.Repository, pushRemote string) error {
+	if err := strategy.EnsureRedactionConfigured(ctx); err != nil {
+		return fmt.Errorf("configure redaction before pushing: %w", err)
+	}
+
+	pushed, pushDisabled, err := strategy.PushQueuedCheckpointRefs(ctx, repo, pushRemote)
+	if err != nil {
+		if errors.Is(err, context.Canceled) {
+			return NewSilentError(err)
+		}
+		// Ctrl-C at the OPF prompt is the same gesture as declining the push
+		// prompt, and lands in the same place: nothing shipped, refs still
+		// queued. confirmDoctorFix reports that as a clean decline, so this
+		// must not report it as a failure.
+		if errors.Is(err, strategy.ErrOPFAbortedByUser) {
+			fmt.Fprintln(out, "OPF cancelled; refs stay queued for the next push.")
+			return nil
+		}
+		return fmt.Errorf("push migrated refs: %w", err)
+	}
+	switch {
+	case pushDisabled:
+		// Confirmed, but checkpoint pushing is disabled in settings, so nothing
+		// went to the remote. The refs stay queued locally.
+		fmt.Fprintln(out, "Checkpoint pushing is disabled in settings; refs stay queued for the next push.")
+	case pushed == 0:
+		// Enabled, but the queue was already empty — e.g. a concurrent git push
+		// flushed the just-migrated refs while we prompted.
+		fmt.Fprintln(out, "No queued refs to push (they may have already been pushed).")
+	default:
+		fmt.Fprintf(out, "Pushed %d checkpoint ref(s).\n", pushed)
+	}
+	return nil
 }
 
 // resolveMigratePushRemote picks the remote migrated refs push to: the
