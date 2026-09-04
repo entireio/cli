@@ -14,6 +14,7 @@ import (
 // Compile-time interface assertions.
 var (
 	_ agent.HookSupport              = (*CodexAgent)(nil)
+	_ agent.HookConfigLocator        = (*CodexAgent)(nil)
 	_ agent.HookFreshness            = (*CodexAgent)(nil)
 	_ agent.EffectiveHookDiagnostics = (*CodexAgent)(nil)
 	_ agent.HookResponseWriter       = (*CodexAgent)(nil)

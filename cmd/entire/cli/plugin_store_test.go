@@ -540,3 +540,23 @@ func TestInstallPluginFromPath_AtomicForceReplace(t *testing.T) { //nolint:paral
 		t.Errorf("dest missing after force replace: %v", err)
 	}
 }
+
+// TestPluginParentDir_RejectsRelativePlatformOverride pins the invariant at
+// the place it is defined. ENTIRE_PLUGIN_DIR has always been checked; the
+// platform variables were joined unchecked and left to osroot and to main.go's
+// PATH restore to notice. Downstream backstops answer a different question and
+// answer it far from the cause.
+func TestPluginParentDir_RejectsRelativePlatformOverride(t *testing.T) { //nolint:paralleltest // mutates env
+	t.Setenv(pluginEnvPluginDir, "")
+	varName := "XDG_DATA_HOME"
+	if runtime.GOOS == windowsGOOS {
+		varName = "LOCALAPPDATA"
+	}
+	for _, value := range []string{"data-relative", "."} {
+		t.Setenv(varName, value)
+		got, err := pluginParentDir()
+		if err == nil {
+			t.Errorf("pluginParentDir with %s=%q = %q, nil error; want error", varName, value, got)
+		}
+	}
+}

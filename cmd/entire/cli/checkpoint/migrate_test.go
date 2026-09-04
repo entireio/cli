@@ -215,11 +215,11 @@ func TestMigrateBranchToRefs_IdempotentRerunDoesNotUpdateRef(t *testing.T) {
 			name: "persistent ref flock held",
 			block: func(t *testing.T, repo *git.Repository, refName plumbing.ReferenceName) {
 				t.Helper()
-				_, commonDir, err := repositoryDirs(t.Context(), repo)
+				_, commonDir, err := repositoryDirs(repo)
 				require.NoError(t, err)
-				lockPath, err := persistentRefLockPath(commonDir, refName)
+				lockRoot, lockName, err := persistentRefLock(commonDir, refName)
 				require.NoError(t, err)
-				release, err := flock.Acquire(lockPath)
+				release, err := flock.AcquireIn(lockRoot, lockName)
 				require.NoError(t, err)
 				t.Cleanup(release)
 			},
@@ -228,7 +228,7 @@ func TestMigrateBranchToRefs_IdempotentRerunDoesNotUpdateRef(t *testing.T) {
 			name: "native git ref lock held",
 			block: func(t *testing.T, repo *git.Repository, refName plumbing.ReferenceName) {
 				t.Helper()
-				_, commonDir, err := repositoryDirs(t.Context(), repo)
+				_, commonDir, err := repositoryDirs(repo)
 				require.NoError(t, err)
 				lockPath := filepath.Join(commonDir, filepath.FromSlash(refName.String())+".lock")
 				require.NoError(t, os.MkdirAll(filepath.Dir(lockPath), 0o750))

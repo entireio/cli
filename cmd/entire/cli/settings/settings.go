@@ -82,6 +82,12 @@ type EntireSettings struct {
 	// Unexported so it never serializes. Surfaced via LocalLayerRejection.
 	localLayerRejection string
 
+	// externalAgentsRejection records why an external_agents grant was
+	// dropped by the trust gate, for the consumer to report. Unexported so it
+	// never serializes — a rejected grant must not be written back to disk as
+	// if the user had turned it off. See enforceExternalAgentsTrust.
+	externalAgentsRejection string
+
 	// Enabled indicates whether Entire is active. When false, CLI commands
 	// show a disabled message and hooks exit silently. Defaults to true.
 	Enabled bool `json:"enabled"`
@@ -149,6 +155,13 @@ type EntireSettings struct {
 
 	// ExternalAgents enables discovery and registration of external agent
 	// plugins (entire-agent-* binaries on $PATH). Defaults to false.
+	//
+	// Discovery executes what it finds, so Load() honors a true value only
+	// when it is developer-owned — set in an untracked
+	// .entire/settings.local.json — and resets it to false otherwise. See
+	// enforceExternalAgentsTrust. Readers that obtain settings by any route
+	// other than Load() (LoadFromFile, LoadFromBytes) get the ungated value
+	// and must not scan $PATH on it.
 	ExternalAgents bool `json:"external_agents,omitempty"`
 
 	// SummaryGeneration stores provider preferences for explain --generate.
@@ -508,6 +521,17 @@ func (s *EntireSettings) LocalLayerRejection() string {
 	return s.localLayerRejection
 }
 
+// ExternalAgentsRejection reports why Load dropped an external_agents grant as
+// untrusted, and whether a rejection happened. Callers that would otherwise
+// scan $PATH should surface it — it is the only signal that a setting the user
+// can see in their settings file is not in effect.
+func (s *EntireSettings) ExternalAgentsRejection() (reason string, rejected bool) {
+	if s == nil || s.externalAgentsRejection == "" {
+		return "", false
+	}
+	return s.externalAgentsRejection, true
+}
+
 // InvestigateConfig returns the configured investigate config. Returns nil
 // when no configuration is present; callers should check IsZero (or guard
 // for nil) to decide whether configuration is present.
@@ -671,8 +695,11 @@ func loadMergedSettings(ctx context.Context, settingsFileAbs, preferencesFileAbs
 	}
 
 	// openai_privacy_filter.command is executed, so it is honored only from a
-	// local file positively verified as this developer's own.
+	// local file positively verified as this developer's own. external_agents
+	// grants execution of every entire-agent-* binary on $PATH, so it gets the
+	// same gate.
 	enforceOPFCommandTrust(ctx, settings, localSettingsFileAbs, localData)
+	enforceExternalAgentsTrust(ctx, settings, localSettingsFileAbs, localData)
 
 	// Re-validate after merge. Individual files are validated by loadFromFile,
 	// but mergeJSON patches fields independently and can produce combinations

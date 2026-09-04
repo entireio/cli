@@ -66,10 +66,10 @@ func NewPushQueue(gitCommonDir string) *PushQueue {
 }
 
 // PushQueueForRepo resolves the git common dir for repo and returns its queue.
-func PushQueueForRepo(ctx context.Context, repo *git.Repository) (*PushQueue, error) {
-	dir, err := resolveGitCommonDir(ctx, repo)
+func PushQueueForRepo(_ context.Context, repo *git.Repository) (*PushQueue, error) {
+	_, dir, err := repositoryDirs(repo)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("resolve git common dir for push queue: %w", err)
 	}
 	return NewPushQueue(dir), nil
 }

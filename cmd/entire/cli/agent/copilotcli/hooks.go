@@ -44,7 +44,7 @@ func copilotHookConfig(ctx context.Context) (*agent.HookConfigFile, error) {
 		// chose rather than one derived from anything read off disk.
 		worktreeRoot = "."
 	}
-	return agent.OpenHookConfig(worktreeRoot, hooksDir+"/"+HooksFileName) //nolint:wrapcheck // agent.HookConfigFile already names the file in its error
+	return agent.OpenHookConfig(worktreeRoot, (&CopilotCLIAgent{}).HookConfigRelPath()) //nolint:wrapcheck // agent.HookConfigFile already names the file in its error
 }
 
 // InstallHooks installs Copilot CLI hooks in .github/hooks/entire.json.
@@ -358,3 +358,6 @@ func removeEntireHooks(entries []CopilotHookEntry) []CopilotHookEntry {
 	}
 	return result
 }
+
+// HookConfigRelPath implements agent.HookConfigLocator.
+func (c *CopilotCLIAgent) HookConfigRelPath() string { return hooksDir + "/" + HooksFileName }

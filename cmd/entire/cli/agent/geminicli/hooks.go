@@ -17,7 +17,10 @@ import (
 )
 
 // Ensure GeminiCLIAgent implements HookSupport
-var _ agent.HookSupport = (*GeminiCLIAgent)(nil)
+var (
+	_ agent.HookSupport       = (*GeminiCLIAgent)(nil)
+	_ agent.HookConfigLocator = (*GeminiCLIAgent)(nil)
+)
 
 // Gemini CLI hook names - these become subcommands under `entire hooks gemini`
 const (
@@ -55,7 +58,7 @@ func geminiHookConfig(ctx context.Context) (*agent.HookConfigFile, error) {
 			return nil, fmt.Errorf("failed to get current directory: %w", err)
 		}
 	}
-	return agent.OpenHookConfig(repoRoot, ".gemini/"+GeminiSettingsFileName) //nolint:wrapcheck // agent.HookConfigFile already names the file in its error
+	return agent.OpenHookConfig(repoRoot, (&GeminiCLIAgent{}).HookConfigRelPath()) //nolint:wrapcheck // agent.HookConfigFile already names the file in its error
 }
 
 // InstallHooks installs Gemini CLI hooks in .gemini/settings.json.
@@ -542,3 +545,6 @@ func removeEntireHooks(matchers []GeminiHookMatcher) []GeminiHookMatcher {
 	}
 	return result
 }
+
+// HookConfigRelPath implements agent.HookConfigLocator.
+func (g *GeminiCLIAgent) HookConfigRelPath() string { return ".gemini/" + GeminiSettingsFileName }

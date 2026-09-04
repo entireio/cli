@@ -113,7 +113,14 @@ func TestBuildSummaryGenerator_ExternalProvider(t *testing.T) { //nolint:paralle
 	require.NoError(t, os.MkdirAll(filepath.Join(dir, ".entire"), 0o755))
 	require.NoError(t, os.WriteFile(
 		filepath.Join(dir, ".entire", "settings.json"),
-		[]byte(`{"enabled":true,"external_agents":true,"summary_generation":{"provider":"`+provider+`","model":"test-model"}}`),
+		[]byte(`{"enabled":true,"summary_generation":{"provider":"`+provider+`","model":"test-model"}}`),
+		0o644,
+	))
+	// external_agents lives in the local file: it grants execution of
+	// entire-agent-* binaries on $PATH, so the loader honors it only there.
+	require.NoError(t, os.WriteFile(
+		filepath.Join(dir, ".entire", "settings.local.json"),
+		[]byte(`{"external_agents":true}`),
 		0o644,
 	))
 
