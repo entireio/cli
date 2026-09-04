@@ -320,11 +320,13 @@ func buildCheckpointTokensReport(cpID id.CheckpointID, summary *checkpoint.Check
 // ratios to a total containing Codex sessions. Unreadable metadata means
 // unpriced.
 // The second return value is the specific reason the weights came back empty,
-// or "" when the generic "no verified ratios for this model" is the true one.
-// Only this function can tell the cases apart: an unrecognised model really has
-// no ratio row, but models that each have one and disagree are a different fact,
-// and telling the user their model is unpriceable when it is not contradicts the
-// rule that a withheld-cost reason must be true of the case it names.
+// or "" when the generic unpricedNoModel is the true one — referenced by name
+// rather than quoted, so a reworded constant cannot leave this comment stale.
+//
+// The per-session pricing decision itself is tokenWeightsForSession, shared
+// with `session tokens`. What stays here is checkpoint-only: the
+// metadataWarnings gate, the nil-meta guard, and the cross-session family
+// comparison (a live session has exactly one session to compare).
 func checkpointTokenWeights(metas []*checkpoint.Metadata, metadataWarnings int) (tokenWeights, string) {
 	if metadataWarnings > 0 {
 		return tokenWeights{}, ""
@@ -334,47 +336,17 @@ func checkpointTokenWeights(metas []*checkpoint.Metadata, metadataWarnings int) 
 		if meta == nil {
 			return tokenWeights{}, ""
 		}
-		weights, ok := tokenWeightsForModel(meta.Model)
-		if !ok {
-			return tokenWeights{}, ""
+		weights, reason := tokenWeightsForSession(meta.Model, meta.TokenUsage)
+		if weights.Family == "" {
+			return tokenWeights{}, reason
 		}
 		if resolved.Family == "" {
 			resolved = weights
 		} else if resolved.Family != weights.Family {
 			return tokenWeights{}, unpricedMixedModels
 		}
-		// A subagent billed by another provider is the same fact as two
-		// sessions disagreeing — different ratios inside one checkpoint — so it
-		// takes the same reason rather than the false generic one.
-		if !subagentModelsMatch(meta.TokenUsage, resolved.Family) {
-			return tokenWeights{}, unpricedMixedModels
-		}
 	}
 	return resolved, ""
-}
-
-// subagentModelsMatch reports whether every subagent entry that records a model
-// belongs to family. Subagent tokens are flattened into the classes, so an entry
-// billed at another provider's ratios would be costed at its parent's rate while
-// the report claims the whole total is priced — #2155 records Model on these
-// entries precisely so that cannot be assumed away.
-//
-// An entry with no recorded model inherits the parent's family rather than
-// unpricing the checkpoint: absence is the norm, and for a single-provider agent
-// the parent is the best available evidence. That inference is wrong only for an
-// agent that mixes providers within one session (Pi), and only when it also
-// fails to record the subagent's model.
-func subagentModelsMatch(usage *agent.TokenUsage, family string) bool {
-	for u := usage; u != nil; u = u.SubagentTokens {
-		if u.Model == "" {
-			continue
-		}
-		weights, ok := tokenWeightsForModel(u.Model)
-		if !ok || weights.Family != family {
-			return false
-		}
-	}
-	return true
 }
 
 // checkpointTokenTTLKnown reports whether an absent 1-hour cache-write figure

@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"strings"
 	"testing"
+
+	"github.com/entireio/cli/cmd/entire/cli/agent"
 )
 
 // The renderer prints these verbatim on both commands, so a reason that says
@@ -104,5 +106,56 @@ func TestWriteTokenClasses_UnpricedReasonIsScopeNeutral(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// A subagent on another provider must unprice a live session exactly as it
+// unprices a checkpoint: subagent tokens are folded into the classes, so
+// pricing them at the parent's ratio would be a wrong number under Priced:true.
+func TestSessionTokenWeights_SubagentOnAnotherProviderIsUnpriced(t *testing.T) {
+	t.Parallel()
+
+	usage := &agent.TokenUsage{
+		InputTokens: 1000, OutputTokens: 100,
+		SubagentTokens: &agent.TokenUsage{InputTokens: 500, OutputTokens: 50, Model: "gpt-5.3-codex"},
+	}
+
+	weights, reason := tokenWeightsForSession("claude-sonnet-4.6", usage)
+	if weights.Family != "" {
+		t.Errorf("family = %q, want empty (unpriced)", weights.Family)
+	}
+	if reason != unpricedMixedModels {
+		t.Errorf("reason = %q, want %q", reason, unpricedMixedModels)
+	}
+}
+
+func TestSessionTokenWeights_SubagentInSameFamilyStaysPriced(t *testing.T) {
+	t.Parallel()
+
+	usage := &agent.TokenUsage{
+		InputTokens: 1000, OutputTokens: 100,
+		SubagentTokens: &agent.TokenUsage{InputTokens: 500, OutputTokens: 50, Model: "claude-haiku-4-5"},
+	}
+
+	weights, reason := tokenWeightsForSession("claude-sonnet-4.6", usage)
+	if weights.Family == "" {
+		t.Errorf("same family must stay priced; reason was %q", reason)
+	}
+	if reason != "" {
+		t.Errorf("a priced result carries no reason, got %q", reason)
+	}
+}
+
+// An unrecognised model has genuinely no ratio row: that is the generic reason,
+// not the mixed-models one.
+func TestSessionTokenWeights_UnknownModelTakesTheGenericReason(t *testing.T) {
+	t.Parallel()
+
+	weights, reason := tokenWeightsForSession("some-unknown-model", &agent.TokenUsage{InputTokens: 100})
+	if weights.Family != "" {
+		t.Errorf("family = %q, want empty", weights.Family)
+	}
+	if reason != "" {
+		t.Errorf("reason = %q, want empty so the generic one is used", reason)
 	}
 }

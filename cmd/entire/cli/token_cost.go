@@ -110,6 +110,54 @@ func tokenWeightsForModel(model string) (tokenWeights, bool) {
 	return priceFamilyWeights[family], true
 }
 
+// tokenWeightsForSession resolves the price weights for one session's usage,
+// returning the specific withheld-cost reason when it cannot ("" when the
+// generic no-ratios reason is the true one).
+//
+// It is the single pricing decision behind both commands. `checkpoint tokens`
+// reaches it once per session in a multi-session checkpoint; `session tokens`
+// reaches it once for the live session. Keeping one function means the two
+// cannot disagree about the same data — a live session and its own committed
+// checkpoint showing a cost column in one and withholding it in the other is a
+// contradiction a user cannot resolve.
+func tokenWeightsForSession(model string, usage *types.TokenUsage) (tokenWeights, string) {
+	weights, ok := tokenWeightsForModel(model)
+	if !ok {
+		return tokenWeights{}, ""
+	}
+	if !subagentModelsMatch(usage, weights.Family) {
+		// A subagent billed by another provider is the same fact as two
+		// sessions disagreeing — different ratios inside one report — so it
+		// takes the same reason rather than the false generic one.
+		return tokenWeights{}, unpricedMixedModels
+	}
+	return weights, ""
+}
+
+// subagentModelsMatch reports whether every subagent entry that records a model
+// belongs to family. Subagent tokens are flattened into the classes, so an entry
+// billed at another provider's ratios would be costed at its parent's rate while
+// the report claims the whole total is priced — #2155 records Model on these
+// entries precisely so that cannot be assumed away.
+//
+// An entry with no recorded model inherits the parent's family rather than
+// unpricing the report: absence is the norm, and for a single-provider agent
+// the parent is the best available evidence. That inference is wrong only for an
+// agent that mixes providers within one session (Pi), and only when it also
+// fails to record the subagent's model.
+func subagentModelsMatch(usage *types.TokenUsage, family string) bool {
+	for u := usage; u != nil; u = u.SubagentTokens {
+		if u.Model == "" {
+			continue
+		}
+		weights, ok := tokenWeightsForModel(u.Model)
+		if !ok || weights.Family != family {
+			return false
+		}
+	}
+	return true
+}
+
 // Reasons cost can be withheld. The report prints these verbatim, so each one
 // must be true of the case it names — a report that misstates why it withheld a
 // number is the same class of error as withholding the wrong one. Because this
