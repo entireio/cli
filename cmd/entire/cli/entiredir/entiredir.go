@@ -259,17 +259,12 @@ func open(worktreeRoot string, create bool) (*os.Root, error) {
 // entry point funnels here so the create/no-create split stays in a single
 // branch; osroot.Shared owns the open-at-most-once part.
 func openDir(dir string, create bool) (*os.Root, error) {
+	if anchorDir, name, ok := splitRuntimeRoot(dir); ok {
+		return openDescendant(anchorDir, name, dir, create)
+	}
+
 	parentDir := filepath.Dir(dir)
 	name := filepath.Base(dir)
-	if create {
-		// The worktree layout's parent (the worktree root) always exists; the
-		// routed global layout's parent is <git-common-dir>/entire/worktree —
-		// Entire-owned constant components under a base git itself reported —
-		// and is created here exactly as the lazy global setup does.
-		if err := os.MkdirAll(parentDir, dirPerm); err != nil {
-			return nil, fmt.Errorf("create %s: %w", parentDir, err)
-		}
-	}
 	parent, err := osroot.Shared(parentDir)
 	if err != nil {
 		return nil, err //nolint:wrapcheck // Shared names the directory, and returns a missing one unwrapped for errors.Is
@@ -280,6 +275,55 @@ func openDir(dir string, create bool) (*os.Root, error) {
 		}
 	}
 	return osroot.SharedChild(parent, dir, name) //nolint:wrapcheck // preserves missing-path classification
+}
+
+// splitRuntimeRoot recognizes the one routed layout whose parent directories
+// do not already exist. It returns a name relative to the git common dir so
+// creation can remain anchored there instead of following an absolute-path
+// symlink planted at an Entire-owned component.
+func splitRuntimeRoot(dir string) (anchorDir, name string, ok bool) {
+	cleaned := filepath.Clean(dir)
+	key := filepath.Base(cleaned)
+	if !isWorktreeKey(key) {
+		return "", "", false
+	}
+
+	registry := strings.Split(repopolicy.WorktreeRegistryRelative, "/")
+	cursor := filepath.Dir(cleaned)
+	for i := len(registry) - 1; i >= 0; i-- {
+		if filepath.Base(cursor) != registry[i] {
+			return "", "", false
+		}
+		cursor = filepath.Dir(cursor)
+	}
+	rel := filepath.Join(filepath.FromSlash(repopolicy.WorktreeRegistryRelative), key)
+	if filepath.Join(cursor, rel) != cleaned {
+		return "", "", false
+	}
+	return cursor, filepath.ToSlash(rel), true
+}
+
+func openDescendant(anchorDir, name, dir string, create bool) (*os.Root, error) {
+	root, err := osroot.Shared(anchorDir)
+	if err != nil {
+		return nil, fmt.Errorf("open runtime anchor %s: %w", anchorDir, err)
+	}
+	if create {
+		if err := osroot.MkdirAllNoSymlink(root, name, dirPerm); err != nil {
+			return nil, fmt.Errorf("create %s: %w", dir, err)
+		}
+	}
+
+	current := root
+	currentDir := anchorDir
+	for _, component := range strings.Split(name, "/") {
+		currentDir = filepath.Join(currentDir, component)
+		current, err = osroot.SharedChild(current, currentDir, component)
+		if err != nil {
+			return nil, fmt.Errorf("open runtime directory %s: %w", currentDir, err)
+		}
+	}
+	return current, nil
 }
 
 // splitRuntime is Split for the global tier's routed runtime layout:

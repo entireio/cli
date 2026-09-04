@@ -9,6 +9,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/entiredir"
 	"github.com/entireio/cli/cmd/entire/cli/osroot"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
+	"github.com/entireio/cli/cmd/entire/cli/settings/repopolicy"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 	"github.com/stretchr/testify/require"
 )
@@ -117,6 +118,66 @@ func TestOpenAt_RejectsSymlinkedEntireDirectory(t *testing.T) {
 	entries, err := os.ReadDir(outside)
 	require.NoError(t, err)
 	require.Empty(t, entries, "opening .entire must not create files through its symlink")
+}
+
+func TestOpen_GlobalRuntimeRejectsSymlinkBelowGitCommonDir(t *testing.T) {
+	// No t.Parallel: t.Chdir and process-global path/root caches.
+	worktree := t.TempDir()
+	testutil.InitRepo(t, worktree)
+	t.Chdir(worktree)
+	paths.ClearWorktreeRootCache()
+	t.Cleanup(paths.ClearWorktreeRootCache)
+	t.Cleanup(entiredir.Reset)
+
+	resolvedWorktree, err := paths.WorktreeRoot(t.Context())
+	require.NoError(t, err)
+	gitCommonDir := filepath.Join(resolvedWorktree, ".git")
+	outside := t.TempDir()
+	if err := os.Symlink(outside, filepath.Join(gitCommonDir, "entire")); err != nil {
+		t.Skipf("symlink not supported: %v", err)
+	}
+
+	ctx := repopolicy.WithRepoPolicy(t.Context(), repopolicy.RepoPolicy{
+		Active:           true,
+		ActivationSource: repopolicy.ActivationGlobal,
+		WorktreeRoot:     resolvedWorktree,
+		GitCommonDir:     gitCommonDir,
+		WorktreeKey:      "0123456789abcdef",
+	})
+	_, err = entiredir.Open(ctx)
+	require.ErrorIs(t, err, osroot.ErrSymlinkedPath)
+
+	entries, err := os.ReadDir(outside)
+	require.NoError(t, err)
+	require.Empty(t, entries, "the routed runtime must not be created through a planted symlink")
+}
+
+func TestOpen_GlobalRuntimeCreatesBelowGitCommonDir(t *testing.T) {
+	// No t.Parallel: t.Chdir and process-global path/root caches.
+	worktree := t.TempDir()
+	testutil.InitRepo(t, worktree)
+	t.Chdir(worktree)
+	paths.ClearWorktreeRootCache()
+	t.Cleanup(paths.ClearWorktreeRootCache)
+	t.Cleanup(entiredir.Reset)
+
+	resolvedWorktree, err := paths.WorktreeRoot(t.Context())
+	require.NoError(t, err)
+	gitCommonDir := filepath.Join(resolvedWorktree, ".git")
+	ctx := repopolicy.WithRepoPolicy(t.Context(), repopolicy.RepoPolicy{
+		Active:           true,
+		ActivationSource: repopolicy.ActivationGlobal,
+		WorktreeRoot:     resolvedWorktree,
+		GitCommonDir:     gitCommonDir,
+		WorktreeKey:      "0123456789abcdef",
+	})
+
+	root, err := entiredir.Open(ctx)
+	require.NoError(t, err)
+	require.NoError(t, entiredir.WriteFile(root, "marker", []byte("ok"), 0o600))
+	got, err := os.ReadFile(filepath.Join(gitCommonDir, "entire", "worktree", "0123456789abcdef", "marker"))
+	require.NoError(t, err)
+	require.Equal(t, "ok", string(got))
 }
 
 func TestWriteFile_ReplacesLeafSymlinkWithoutFollowingIt(t *testing.T) {

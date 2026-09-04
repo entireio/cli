@@ -12,6 +12,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	cpkg "github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
+	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 	"github.com/go-git/go-git/v6"
@@ -573,7 +574,9 @@ func TestSaveStep_TokensAttributedElsewhereKeepSessionTotal(t *testing.T) {
 	metadataDir := ".entire/metadata/" + sessionID
 	metadataDirAbs := filepath.Join(dir, metadataDir)
 	require.NoError(t, os.MkdirAll(metadataDirAbs, 0o755))
-	require.NoError(t, os.WriteFile(filepath.Join(metadataDirAbs, paths.TranscriptFileName), []byte(`{"type":"human","message":{"content":"test"}}`+"\n"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(metadataDirAbs, paths.TranscriptFileName), []byte(`{"type":"human","message":{"content":"test"}}
+{"type":"assistant","uuid":"a1","message":{"id":"m1","usage":{"input_tokens":300,"output_tokens":150}}}
+`), 0o644))
 
 	// SubagentTokens is a cumulative-since-session-start snapshot, so each
 	// step carries the running total as CalculateTotalTokenUsage would.
@@ -604,8 +607,23 @@ func TestSaveStep_TokensAttributedElsewhereKeepSessionTotal(t *testing.T) {
 	require.Equal(t, 300, state.TokenUsage.InputTokens, "session total counts every turn")
 	require.Equal(t, 900, state.TokenUsage.SubagentTokens.InputTokens, "session-wide subagent total is the latest cumulative")
 	require.NotNil(t, state.CheckpointTokenUsage)
+	require.True(t, state.CheckpointTokensFiltered)
 	require.Equal(t, 200, state.CheckpointTokenUsage.InputTokens, "checkpoint delta skips the turn attributed to another repo")
 	require.NotNil(t, state.CheckpointTokenUsage.SubagentTokens)
 	require.Equal(t, 600, state.CheckpointTokenUsage.SubagentTokens.InputTokens,
 		"the 300 subagent tokens spent on the attributed-elsewhere turn must not land in this repo's checkpoint, before or after it")
+
+	require.NoError(t, s.CondenseSessionByID(ctx, sessionID))
+	condensed, err := s.loadSessionState(ctx, sessionID)
+	require.NoError(t, err)
+	require.False(t, condensed.CheckpointTokensFiltered, "condensation resets the checkpoint window marker")
+	repo, err := gitrepo.OpenPath(dir)
+	require.NoError(t, err)
+	summary := readCommittedSummary(t, repo, condensed.LastCheckpointID)
+	require.NotNil(t, summary.TokenUsage)
+	require.Equal(t, 200, summary.TokenUsage.InputTokens,
+		"condensation must not restore the transcript's attributed-elsewhere turn")
+	require.Equal(t, 100, summary.TokenUsage.OutputTokens)
+	require.NotNil(t, summary.TokenUsage.SubagentTokens)
+	require.Equal(t, 600, summary.TokenUsage.SubagentTokens.InputTokens)
 }

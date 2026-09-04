@@ -97,6 +97,20 @@ func TestMaybeEnsureGlobalSetup_ProbeErrorWritesNothing(t *testing.T) {
 	require.True(t, os.IsNotExist(err))
 }
 
+func TestMaybeEnsureGlobalSetup_RejectsSymlinkedRuntimeParent(t *testing.T) {
+	dir := newGloballyTrackedRepo(t)
+	outside := t.TempDir()
+	if err := os.Symlink(outside, filepath.Join(dir, ".git", "entire")); err != nil {
+		t.Skipf("symlink not supported: %v", err)
+	}
+
+	MaybeEnsureGlobalSetup(t.Context())
+
+	entries, err := os.ReadDir(outside)
+	require.NoError(t, err)
+	require.Empty(t, entries, "the primary-ref stamp must not be written through a planted symlink")
+}
+
 func TestMaybeEnsureGlobalSetup_NoopForRepoEnabledRepo(t *testing.T) {
 	dir := newGloballyTrackedRepo(t)
 	writeEnabledRepoSettings(t, dir)

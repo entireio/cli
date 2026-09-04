@@ -127,6 +127,7 @@ func (s *ManualCommitStrategy) SaveStep(ctx context.Context, step StepContext) e
 			}
 			state.TokenUsage = accumulateTokenUsage(state.TokenUsage, step.TokenUsage)
 			if step.TokensAttributedElsewhere {
+				state.CheckpointTokensFiltered = true
 				// This turn's share belongs on another repo's checkpoint: the
 				// main-agent delta is simply not added to the pending
 				// checkpoint, and the growth of the cumulative subagent
@@ -514,6 +515,7 @@ func accumulateTokenUsage(existing, incoming *agent.TokenUsage) *agent.TokenUsag
 func resetCheckpointWindow(state *SessionState) {
 	state.StepCount = 0
 	state.CheckpointTokenUsage = nil
+	state.CheckpointTokensFiltered = false
 	state.ClearCondensationAttempt()
 	state.RebaselineSubagentTokens()
 	removeCompletedTaskRecords(state)

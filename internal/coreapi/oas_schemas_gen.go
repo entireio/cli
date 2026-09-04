@@ -9,6 +9,7 @@ import (
 
 	"github.com/go-faster/errors"
 	"github.com/go-faster/jx"
+	"github.com/google/uuid"
 )
 
 func (s *ErrorModelStatusCode) Error() string {
@@ -1115,6 +1116,123 @@ func (s *CreateMirrorInputBodyProvider) UnmarshalText(data []byte) error {
 	switch CreateMirrorInputBodyProvider(data) {
 	case CreateMirrorInputBodyProviderGithub:
 		*s = CreateMirrorInputBodyProviderGithub
+		return nil
+	default:
+		return errors.Errorf("invalid value: %q", data)
+	}
+}
+
+// Ref: #/components/schemas/CreateMirrorRequestInputBody
+type CreateMirrorRequestInputBody struct {
+	// A URL to the JSON Schema for this object.
+	Schema OptURI `json:"$schema"`
+	// Destination cluster, as either a bare DNS host or the publicUrl returned by GET /api/v1/clusters.
+	ClusterHost     string                               `json:"clusterHost"`
+	Owner           string                               `json:"owner"`
+	Provider        CreateMirrorRequestInputBodyProvider `json:"provider"`
+	Repo            string                               `json:"repo"`
+	AdditionalProps CreateMirrorRequestInputBodyAdditional
+}
+
+// GetSchema returns the value of Schema.
+func (s *CreateMirrorRequestInputBody) GetSchema() OptURI {
+	return s.Schema
+}
+
+// GetClusterHost returns the value of ClusterHost.
+func (s *CreateMirrorRequestInputBody) GetClusterHost() string {
+	return s.ClusterHost
+}
+
+// GetOwner returns the value of Owner.
+func (s *CreateMirrorRequestInputBody) GetOwner() string {
+	return s.Owner
+}
+
+// GetProvider returns the value of Provider.
+func (s *CreateMirrorRequestInputBody) GetProvider() CreateMirrorRequestInputBodyProvider {
+	return s.Provider
+}
+
+// GetRepo returns the value of Repo.
+func (s *CreateMirrorRequestInputBody) GetRepo() string {
+	return s.Repo
+}
+
+// GetAdditionalProps returns the value of AdditionalProps.
+func (s *CreateMirrorRequestInputBody) GetAdditionalProps() CreateMirrorRequestInputBodyAdditional {
+	return s.AdditionalProps
+}
+
+// SetSchema sets the value of Schema.
+func (s *CreateMirrorRequestInputBody) SetSchema(val OptURI) {
+	s.Schema = val
+}
+
+// SetClusterHost sets the value of ClusterHost.
+func (s *CreateMirrorRequestInputBody) SetClusterHost(val string) {
+	s.ClusterHost = val
+}
+
+// SetOwner sets the value of Owner.
+func (s *CreateMirrorRequestInputBody) SetOwner(val string) {
+	s.Owner = val
+}
+
+// SetProvider sets the value of Provider.
+func (s *CreateMirrorRequestInputBody) SetProvider(val CreateMirrorRequestInputBodyProvider) {
+	s.Provider = val
+}
+
+// SetRepo sets the value of Repo.
+func (s *CreateMirrorRequestInputBody) SetRepo(val string) {
+	s.Repo = val
+}
+
+// SetAdditionalProps sets the value of AdditionalProps.
+func (s *CreateMirrorRequestInputBody) SetAdditionalProps(val CreateMirrorRequestInputBodyAdditional) {
+	s.AdditionalProps = val
+}
+
+type CreateMirrorRequestInputBodyAdditional map[string]jx.Raw
+
+func (s *CreateMirrorRequestInputBodyAdditional) init() CreateMirrorRequestInputBodyAdditional {
+	m := *s
+	if m == nil {
+		m = map[string]jx.Raw{}
+		*s = m
+	}
+	return m
+}
+
+type CreateMirrorRequestInputBodyProvider string
+
+const (
+	CreateMirrorRequestInputBodyProviderGithub CreateMirrorRequestInputBodyProvider = "github"
+)
+
+// AllValues returns all CreateMirrorRequestInputBodyProvider values.
+func (CreateMirrorRequestInputBodyProvider) AllValues() []CreateMirrorRequestInputBodyProvider {
+	return []CreateMirrorRequestInputBodyProvider{
+		CreateMirrorRequestInputBodyProviderGithub,
+	}
+}
+
+// MarshalText implements encoding.TextMarshaler.
+func (s CreateMirrorRequestInputBodyProvider) MarshalText() ([]byte, error) {
+	switch s {
+	case CreateMirrorRequestInputBodyProviderGithub:
+		return []byte(s), nil
+	default:
+		return nil, errors.Errorf("invalid value: %q", s)
+	}
+}
+
+// UnmarshalText implements encoding.TextUnmarshaler.
+func (s *CreateMirrorRequestInputBodyProvider) UnmarshalText(data []byte) error {
+	switch CreateMirrorRequestInputBodyProvider(data) {
+	case CreateMirrorRequestInputBodyProviderGithub:
+		*s = CreateMirrorRequestInputBodyProviderGithub
 		return nil
 	default:
 		return errors.Errorf("invalid value: %q", data)
@@ -6076,6 +6194,289 @@ func (s *MirrorCollaboratorAdditional) init() MirrorCollaboratorAdditional {
 	return m
 }
 
+// Ref: #/components/schemas/MirrorRequest
+type MirrorRequest struct {
+	// A URL to the JSON Schema for this object.
+	Schema          OptURI                  `json:"$schema"`
+	Failure         OptMirrorRequestFailure `json:"failure"`
+	RequestId       uuid.UUID               `json:"requestId"`
+	Result          OptMirrorRequestResult  `json:"result"`
+	Status          MirrorRequestStatus     `json:"status"`
+	AdditionalProps MirrorRequestAdditional
+}
+
+// GetSchema returns the value of Schema.
+func (s *MirrorRequest) GetSchema() OptURI {
+	return s.Schema
+}
+
+// GetFailure returns the value of Failure.
+func (s *MirrorRequest) GetFailure() OptMirrorRequestFailure {
+	return s.Failure
+}
+
+// GetRequestId returns the value of RequestId.
+func (s *MirrorRequest) GetRequestId() uuid.UUID {
+	return s.RequestId
+}
+
+// GetResult returns the value of Result.
+func (s *MirrorRequest) GetResult() OptMirrorRequestResult {
+	return s.Result
+}
+
+// GetStatus returns the value of Status.
+func (s *MirrorRequest) GetStatus() MirrorRequestStatus {
+	return s.Status
+}
+
+// GetAdditionalProps returns the value of AdditionalProps.
+func (s *MirrorRequest) GetAdditionalProps() MirrorRequestAdditional {
+	return s.AdditionalProps
+}
+
+// SetSchema sets the value of Schema.
+func (s *MirrorRequest) SetSchema(val OptURI) {
+	s.Schema = val
+}
+
+// SetFailure sets the value of Failure.
+func (s *MirrorRequest) SetFailure(val OptMirrorRequestFailure) {
+	s.Failure = val
+}
+
+// SetRequestId sets the value of RequestId.
+func (s *MirrorRequest) SetRequestId(val uuid.UUID) {
+	s.RequestId = val
+}
+
+// SetResult sets the value of Result.
+func (s *MirrorRequest) SetResult(val OptMirrorRequestResult) {
+	s.Result = val
+}
+
+// SetStatus sets the value of Status.
+func (s *MirrorRequest) SetStatus(val MirrorRequestStatus) {
+	s.Status = val
+}
+
+// SetAdditionalProps sets the value of AdditionalProps.
+func (s *MirrorRequest) SetAdditionalProps(val MirrorRequestAdditional) {
+	s.AdditionalProps = val
+}
+
+type MirrorRequestAdditional map[string]jx.Raw
+
+func (s *MirrorRequestAdditional) init() MirrorRequestAdditional {
+	m := *s
+	if m == nil {
+		m = map[string]jx.Raw{}
+		*s = m
+	}
+	return m
+}
+
+// Ref: #/components/schemas/MirrorRequestFailure
+type MirrorRequestFailure struct {
+	// Stable machine-readable failure code.
+	Code    string `json:"code"`
+	Message string `json:"message"`
+	// Whether submitting a new request may succeed without changing its inputs.
+	Retryable       bool `json:"retryable"`
+	AdditionalProps MirrorRequestFailureAdditional
+}
+
+// GetCode returns the value of Code.
+func (s *MirrorRequestFailure) GetCode() string {
+	return s.Code
+}
+
+// GetMessage returns the value of Message.
+func (s *MirrorRequestFailure) GetMessage() string {
+	return s.Message
+}
+
+// GetRetryable returns the value of Retryable.
+func (s *MirrorRequestFailure) GetRetryable() bool {
+	return s.Retryable
+}
+
+// GetAdditionalProps returns the value of AdditionalProps.
+func (s *MirrorRequestFailure) GetAdditionalProps() MirrorRequestFailureAdditional {
+	return s.AdditionalProps
+}
+
+// SetCode sets the value of Code.
+func (s *MirrorRequestFailure) SetCode(val string) {
+	s.Code = val
+}
+
+// SetMessage sets the value of Message.
+func (s *MirrorRequestFailure) SetMessage(val string) {
+	s.Message = val
+}
+
+// SetRetryable sets the value of Retryable.
+func (s *MirrorRequestFailure) SetRetryable(val bool) {
+	s.Retryable = val
+}
+
+// SetAdditionalProps sets the value of AdditionalProps.
+func (s *MirrorRequestFailure) SetAdditionalProps(val MirrorRequestFailureAdditional) {
+	s.AdditionalProps = val
+}
+
+type MirrorRequestFailureAdditional map[string]jx.Raw
+
+func (s *MirrorRequestFailureAdditional) init() MirrorRequestFailureAdditional {
+	m := *s
+	if m == nil {
+		m = map[string]jx.Raw{}
+		*s = m
+	}
+	return m
+}
+
+// MirrorRequestHeaders wraps MirrorRequest with response headers.
+type MirrorRequestHeaders struct {
+	Location OptString
+	Response MirrorRequest
+}
+
+// GetLocation returns the value of Location.
+func (s *MirrorRequestHeaders) GetLocation() OptString {
+	return s.Location
+}
+
+// GetResponse returns the value of Response.
+func (s *MirrorRequestHeaders) GetResponse() MirrorRequest {
+	return s.Response
+}
+
+// SetLocation sets the value of Location.
+func (s *MirrorRequestHeaders) SetLocation(val OptString) {
+	s.Location = val
+}
+
+// SetResponse sets the value of Response.
+func (s *MirrorRequestHeaders) SetResponse(val MirrorRequest) {
+	s.Response = val
+}
+
+// Ref: #/components/schemas/MirrorRequestResult
+type MirrorRequestResult struct {
+	MirrorId        string `json:"mirrorId"`
+	MirrorUrl       string `json:"mirrorUrl"`
+	PublicUrl       string `json:"publicUrl"`
+	AdditionalProps MirrorRequestResultAdditional
+}
+
+// GetMirrorId returns the value of MirrorId.
+func (s *MirrorRequestResult) GetMirrorId() string {
+	return s.MirrorId
+}
+
+// GetMirrorUrl returns the value of MirrorUrl.
+func (s *MirrorRequestResult) GetMirrorUrl() string {
+	return s.MirrorUrl
+}
+
+// GetPublicUrl returns the value of PublicUrl.
+func (s *MirrorRequestResult) GetPublicUrl() string {
+	return s.PublicUrl
+}
+
+// GetAdditionalProps returns the value of AdditionalProps.
+func (s *MirrorRequestResult) GetAdditionalProps() MirrorRequestResultAdditional {
+	return s.AdditionalProps
+}
+
+// SetMirrorId sets the value of MirrorId.
+func (s *MirrorRequestResult) SetMirrorId(val string) {
+	s.MirrorId = val
+}
+
+// SetMirrorUrl sets the value of MirrorUrl.
+func (s *MirrorRequestResult) SetMirrorUrl(val string) {
+	s.MirrorUrl = val
+}
+
+// SetPublicUrl sets the value of PublicUrl.
+func (s *MirrorRequestResult) SetPublicUrl(val string) {
+	s.PublicUrl = val
+}
+
+// SetAdditionalProps sets the value of AdditionalProps.
+func (s *MirrorRequestResult) SetAdditionalProps(val MirrorRequestResultAdditional) {
+	s.AdditionalProps = val
+}
+
+type MirrorRequestResultAdditional map[string]jx.Raw
+
+func (s *MirrorRequestResultAdditional) init() MirrorRequestResultAdditional {
+	m := *s
+	if m == nil {
+		m = map[string]jx.Raw{}
+		*s = m
+	}
+	return m
+}
+
+type MirrorRequestStatus string
+
+const (
+	MirrorRequestStatusPending    MirrorRequestStatus = "pending"
+	MirrorRequestStatusProcessing MirrorRequestStatus = "processing"
+	MirrorRequestStatusSucceeded  MirrorRequestStatus = "succeeded"
+	MirrorRequestStatusFailed     MirrorRequestStatus = "failed"
+)
+
+// AllValues returns all MirrorRequestStatus values.
+func (MirrorRequestStatus) AllValues() []MirrorRequestStatus {
+	return []MirrorRequestStatus{
+		MirrorRequestStatusPending,
+		MirrorRequestStatusProcessing,
+		MirrorRequestStatusSucceeded,
+		MirrorRequestStatusFailed,
+	}
+}
+
+// MarshalText implements encoding.TextMarshaler.
+func (s MirrorRequestStatus) MarshalText() ([]byte, error) {
+	switch s {
+	case MirrorRequestStatusPending:
+		return []byte(s), nil
+	case MirrorRequestStatusProcessing:
+		return []byte(s), nil
+	case MirrorRequestStatusSucceeded:
+		return []byte(s), nil
+	case MirrorRequestStatusFailed:
+		return []byte(s), nil
+	default:
+		return nil, errors.Errorf("invalid value: %q", s)
+	}
+}
+
+// UnmarshalText implements encoding.TextUnmarshaler.
+func (s *MirrorRequestStatus) UnmarshalText(data []byte) error {
+	switch MirrorRequestStatus(data) {
+	case MirrorRequestStatusPending:
+		*s = MirrorRequestStatusPending
+		return nil
+	case MirrorRequestStatusProcessing:
+		*s = MirrorRequestStatusProcessing
+		return nil
+	case MirrorRequestStatusSucceeded:
+		*s = MirrorRequestStatusSucceeded
+		return nil
+	case MirrorRequestStatusFailed:
+		*s = MirrorRequestStatusFailed
+		return nil
+	default:
+		return errors.Errorf("invalid value: %q", data)
+	}
+}
+
 // Clone lifecycle: processing (cloning), ready (clonable), failed (initial clone failed), or
 // suspended.
 type MirrorStatus string
@@ -6979,6 +7380,98 @@ func (o OptMeRegionalUnavailable) Get() (v MeRegionalUnavailable, ok bool) {
 
 // Or returns value if set, or given parameter if does not.
 func (o OptMeRegionalUnavailable) Or(d MeRegionalUnavailable) MeRegionalUnavailable {
+	if v, ok := o.Get(); ok {
+		return v
+	}
+	return d
+}
+
+// NewOptMirrorRequestFailure returns new OptMirrorRequestFailure with value set to v.
+func NewOptMirrorRequestFailure(v MirrorRequestFailure) OptMirrorRequestFailure {
+	return OptMirrorRequestFailure{
+		Value: v,
+		Set:   true,
+	}
+}
+
+// OptMirrorRequestFailure is optional MirrorRequestFailure.
+type OptMirrorRequestFailure struct {
+	Value MirrorRequestFailure
+	Set   bool
+}
+
+// IsSet returns true if OptMirrorRequestFailure was set.
+func (o OptMirrorRequestFailure) IsSet() bool { return o.Set }
+
+// Reset unsets value.
+func (o *OptMirrorRequestFailure) Reset() {
+	var v MirrorRequestFailure
+	o.Value = v
+	o.Set = false
+}
+
+// SetTo sets value to v.
+func (o *OptMirrorRequestFailure) SetTo(v MirrorRequestFailure) {
+	o.Set = true
+	o.Value = v
+}
+
+// Get returns value and boolean that denotes whether value was set.
+func (o OptMirrorRequestFailure) Get() (v MirrorRequestFailure, ok bool) {
+	if !o.Set {
+		return v, false
+	}
+	return o.Value, true
+}
+
+// Or returns value if set, or given parameter if does not.
+func (o OptMirrorRequestFailure) Or(d MirrorRequestFailure) MirrorRequestFailure {
+	if v, ok := o.Get(); ok {
+		return v
+	}
+	return d
+}
+
+// NewOptMirrorRequestResult returns new OptMirrorRequestResult with value set to v.
+func NewOptMirrorRequestResult(v MirrorRequestResult) OptMirrorRequestResult {
+	return OptMirrorRequestResult{
+		Value: v,
+		Set:   true,
+	}
+}
+
+// OptMirrorRequestResult is optional MirrorRequestResult.
+type OptMirrorRequestResult struct {
+	Value MirrorRequestResult
+	Set   bool
+}
+
+// IsSet returns true if OptMirrorRequestResult was set.
+func (o OptMirrorRequestResult) IsSet() bool { return o.Set }
+
+// Reset unsets value.
+func (o *OptMirrorRequestResult) Reset() {
+	var v MirrorRequestResult
+	o.Value = v
+	o.Set = false
+}
+
+// SetTo sets value to v.
+func (o *OptMirrorRequestResult) SetTo(v MirrorRequestResult) {
+	o.Set = true
+	o.Value = v
+}
+
+// Get returns value and boolean that denotes whether value was set.
+func (o OptMirrorRequestResult) Get() (v MirrorRequestResult, ok bool) {
+	if !o.Set {
+		return v, false
+	}
+	return o.Value, true
+}
+
+// Or returns value if set, or given parameter if does not.
+func (o OptMirrorRequestResult) Or(d MirrorRequestResult) MirrorRequestResult {
 	if v, ok := o.Get(); ok {
 		return v
 	}

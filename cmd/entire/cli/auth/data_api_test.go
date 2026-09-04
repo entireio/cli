@@ -6,13 +6,10 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
-	"net/url"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
-
-	"github.com/entireio/auth-go/sts"
 
 	"github.com/entireio/cli/internal/entireclient/clusterdiscovery"
 	"github.com/entireio/cli/internal/entireclient/contexts"
@@ -70,32 +67,19 @@ func TestResolveDataAPIToken_SurfacesSelectionError(t *testing.T) {
 	}
 }
 
-// The success path: discovery picks a context, and the provider exchanges that
-// context's login JWT at its core for an audience equal to the data host
-// origin (the aud the API requires), returning the exchanged token. The
-// audience is derived from the resource origin by the token manager, not read
-// from discovery.
-func TestResolveDataAPIToken_ExchangesForDataHostOrigin(t *testing.T) {
+// The success path: discovery picks a context and its refreshed login JWT is
+// the bearer — no RFC 8693 exchange. The core would be asked to exchange if we
+// still did; make any request to it fail the test.
+func TestResolveDataAPIToken_ReturnsLoginJWTWithoutExchange(t *testing.T) {
 	t.Setenv("ENTIRE_CONFIG_DIR", t.TempDir())
 	restore := tokenstore.UseFileBackendForTesting(filepath.Join(t.TempDir(), "tokens.json"))
 	t.Cleanup(restore)
 
-	const dataOrigin = "https://data.example"
-	const wantAudience = "https://data.example"
-
-	var gotAudience, gotResource, gotGrant string
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_ = r.ParseForm() //nolint:errcheck // test handler
-		gotGrant = r.FormValue("grant_type")
-		gotAudience = r.FormValue("audience")
-		gotResource = r.FormValue("resource")
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = fmt.Fprint(w, `{"access_token":"exchanged-token","token_type":"Bearer","expires_in":3600}`)
+	srv := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		t.Errorf("unexpected core request %s %s: the login JWT is the bearer, nothing to exchange", r.Method, r.URL.Path)
 	}))
 	defer srv.Close()
 
-	// Seed a fresh login JWT for a context whose core is the STS server, so the
-	// provider needs no refresh and goes straight to the exchange.
 	svc := tokenstore.CoreKeyringService(srv.URL)
 	jwt := makeJWT(t, fmt.Sprintf(`{"iss":%q,"handle":"me","exp":%d}`, srv.URL, time.Now().Add(2*time.Hour).Unix()))
 	if err := tokenstore.Set(svc, "me", tokenstore.EncodeTokenWithExpiration(jwt, 7200)); err != nil {
@@ -107,22 +91,12 @@ func TestResolveDataAPIToken_ExchangesForDataHostOrigin(t *testing.T) {
 		return ctxObj, nil
 	})
 
-	// allowInsecure flows from the loopback http core (srv.URL) automatically.
-	token, err := ResolveDataAPIToken(context.Background(), dataOrigin)
+	token, err := ResolveDataAPIToken(context.Background(), "https://data.example")
 	if err != nil {
 		t.Fatalf("ResolveDataAPIToken: %v", err)
 	}
-	if token != "exchanged-token" {
-		t.Fatalf("token = %q, want the exchanged token", token)
-	}
-	if gotGrant != sts.GrantTypeTokenExchange {
-		t.Fatalf("grant_type = %q, want token-exchange", gotGrant)
-	}
-	if gotAudience != wantAudience {
-		t.Fatalf("audience = %q, want the data host origin %q (derived from the resource)", gotAudience, wantAudience)
-	}
-	if want := mustOrigin(t, dataOrigin); gotResource != want {
-		t.Fatalf("resource = %q, want the data origin %q", gotResource, want)
+	if token != jwt {
+		t.Fatal("token must be the stored login JWT, verbatim")
 	}
 }
 
@@ -131,12 +105,8 @@ func TestResolveDataAPIToken_UsesPlainHTTPDiscoveryForLoopbackDataOrigin(t *test
 	restore := tokenstore.UseFileBackendForTesting(filepath.Join(t.TempDir(), "tokens.json"))
 	t.Cleanup(restore)
 
-	var gotAudience string
-	coreSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_ = r.ParseForm() //nolint:errcheck // test handler
-		gotAudience = r.FormValue("audience")
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = fmt.Fprint(w, `{"access_token":"loopback-exchanged-token","token_type":"Bearer","expires_in":3600}`)
+	coreSrv := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		t.Errorf("unexpected core request %s %s", r.Method, r.URL.Path)
 	}))
 	defer coreSrv.Close()
 
@@ -175,48 +145,28 @@ func TestResolveDataAPIToken_UsesPlainHTTPDiscoveryForLoopbackDataOrigin(t *test
 	if err != nil {
 		t.Fatalf("ResolveDataAPIToken: %v", err)
 	}
-	if token != "loopback-exchanged-token" {
-		t.Fatalf("token = %q, want the exchanged loopback token", token)
-	}
-	if gotAudience != mustOrigin(t, dataSrv.URL) {
-		t.Fatalf("audience = %q, want loopback data origin %q", gotAudience, mustOrigin(t, dataSrv.URL))
+	if token != jwt {
+		t.Fatal("token must be the stored login JWT, verbatim")
 	}
 }
 
-func TestNewRefreshingResourceProvider_Validation(t *testing.T) {
-	t.Parallel()
-	if _, err := NewRefreshingResourceProvider(nil, "https://data.example", nil, false); err == nil {
-		t.Fatal("want error for nil context")
-	}
-	if _, err := NewRefreshingResourceProvider(&contexts.Context{Name: "x", CoreURL: "https://core.example"}, "https://data.example", nil, false); err == nil {
-		t.Fatal("want error for a context with no keychain slot")
-	}
-}
-
-// When the selected context has no stored token, the provider's error must
-// still unwrap to ErrNotLoggedIn so callers (NewAuthenticatedAPIClient, search,
-// dispatch) that branch on errors.Is render their login guidance — the
-// regression the PR review flagged on the discovery path.
-func TestNewRefreshingResourceProvider_NotLoggedInPreservesSentinel(t *testing.T) {
+// A context that exists and has a keychain slot but no stored token must
+// surface an error unwrapping to ErrNotLoggedIn, so every ResolveDataAPIToken
+// caller (activity, search, recap, dispatch) renders its `entire login`
+// guidance instead of a raw failure. Re-pins the coverage that lived on the
+// deleted exchange provider.
+func TestResolveDataAPIToken_NotLoggedInPreservesSentinel(t *testing.T) {
+	t.Setenv("ENTIRE_CONFIG_DIR", t.TempDir())
 	restore := tokenstore.UseFileBackendForTesting(filepath.Join(t.TempDir(), "tokens.json"))
 	t.Cleanup(restore)
 
-	c := &contexts.Context{Name: "me@core", CoreURL: "https://core.example", Handle: "me", KeychainService: "kc:me"}
-	provider, err := NewRefreshingResourceProvider(c, "https://data.example", nil, false)
-	if err != nil {
-		t.Fatalf("NewRefreshingResourceProvider: %v", err)
-	}
-	_, err = provider(context.Background())
-	if !errors.Is(err, ErrNotLoggedIn) {
-		t.Fatalf("provider error must unwrap to ErrNotLoggedIn, got %v", err)
-	}
-}
+	ctxObj := &contexts.Context{Name: "me@core", CoreURL: "https://core.example", Handle: "me", KeychainService: "kc:me"}
+	stubResolveContextForAPI(t, func(context.Context, string, string, string, *http.Client, clusterdiscovery.DebugFunc) (*contexts.Context, error) {
+		return ctxObj, nil
+	})
 
-func mustOrigin(t *testing.T, raw string) string {
-	t.Helper()
-	u, err := url.Parse(raw)
-	if err != nil {
-		t.Fatalf("parse %q: %v", raw, err)
+	_, err := ResolveDataAPIToken(context.Background(), "https://data.example")
+	if !errors.Is(err, ErrNotLoggedIn) {
+		t.Fatalf("error must unwrap to ErrNotLoggedIn, got %v", err)
 	}
-	return u.Scheme + "://" + u.Host
 }

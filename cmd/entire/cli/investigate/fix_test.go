@@ -3,7 +3,7 @@ package investigate
 import (
 	"bytes"
 	"context"
-	"errors"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -169,19 +169,15 @@ func TestRunFix_ComposesPromptBody(t *testing.T) {
 	dir := t.TempDir()
 	findings := "## Finding 1\n\nThe checkout button times out after 30s.\n"
 	store := NewLocalManifestStoreWithDir(dir)
+	stateStore := NewStateStoreWithDir(t.TempDir())
 	now := time.Date(2026, 5, 8, 12, 0, 0, 0, time.UTC)
-	// Absolute sentinel — readDocOrWarn rejects relative paths.
-	findingsPath := filepath.Join(dir, "findings-sentinel.md")
-	writeFixManifest(t, store, "abcdef012345", "Why is checkout flaky?", now,
-		findingsPath,
-	)
-
-	read := func(name string) ([]byte, error) {
-		if name == findingsPath {
-			return []byte(findings), nil
-		}
-		t.Fatalf("unexpected ReadFile path: %q", name)
-		return nil, errors.New("unreachable")
+	const runID = "abcdef012345"
+	// FindingsDoc is display-only now (see manifest.go) — RunFix resolves
+	// findings by RunID through the state store, never by following this
+	// path. Point it at an arbitrary path to prove that.
+	writeFixManifest(t, store, runID, "Why is checkout flaky?", now, "/nonexistent/decoy-path.md")
+	if err := stateStore.WriteFindings(runID, []byte(findings)); err != nil {
+		t.Fatalf("WriteFindings: %v", err)
 	}
 
 	var rec fixLaunchRecord
@@ -189,9 +185,9 @@ func TestRunFix_ComposesPromptBody(t *testing.T) {
 		FixInput{Out: &bytes.Buffer{}},
 		FixDeps{
 			ManifestStore: store,
+			StateStore:    stateStore,
 			FixAgent:      "test-agent",
 			Launch:        stubLaunch(&rec),
-			ReadFile:      read,
 		},
 	)
 	if err != nil {
@@ -217,16 +213,66 @@ func TestRunFix_ComposesPromptBody(t *testing.T) {
 	}
 }
 
+// TestRunFix_IgnoresFindingsDoc_ArbitraryFileRead is a genuine reproduction
+// of the vulnerability this fix closes: manifest.FindingsDoc is untrusted
+// data decoded from a JSON file on disk (see manifest.go's doc comment) --
+// whoever writes the manifest could previously point it at any absolute
+// path on the filesystem (a private SSH key, another repo's secrets) and
+// have its raw bytes read into the fix agent's launch prompt. RunFix must
+// resolve findings by RunID through the state store only, never by
+// following FindingsDoc directly.
+func TestRunFix_IgnoresFindingsDoc_ArbitraryFileRead(t *testing.T) {
+	t.Parallel()
+
+	// A file outside anything RunFix should ever touch, containing a
+	// marker that must never reach the launched agent's prompt.
+	decoyDir := t.TempDir()
+	decoyPath := decoyDir + "/not-a-findings-doc-secret.txt"
+	if err := os.WriteFile(decoyPath, []byte("SHOULD-NOT-BE-READ-INTO-PROMPT"), 0o600); err != nil {
+		t.Fatalf("write decoy file: %v", err)
+	}
+
+	store := NewLocalManifestStoreWithDir(t.TempDir())
+	stateStore := NewStateStoreWithDir(t.TempDir())
+	now := time.Date(2026, 5, 8, 12, 0, 0, 0, time.UTC)
+	const runID = "abcdef012345"
+	// The manifest names the decoy file as its findings doc. No content is
+	// written into the state store for this run — the vulnerable pre-fix
+	// path would fall back to reading FindingsDoc directly.
+	writeFixManifest(t, store, runID, "topic", now, decoyPath)
+
+	var rec fixLaunchRecord
+	err := RunFix(context.Background(),
+		FixInput{Out: &bytes.Buffer{}},
+		FixDeps{
+			ManifestStore: store,
+			StateStore:    stateStore,
+			Launch:        stubLaunch(&rec),
+		},
+	)
+	if err != nil {
+		t.Fatalf("RunFix: %v", err)
+	}
+	if !rec.called {
+		t.Fatal("Launch was not called")
+	}
+	if strings.Contains(rec.prompt, "SHOULD-NOT-BE-READ-INTO-PROMPT") {
+		t.Fatalf("decoy file content leaked into the fix agent's prompt via FindingsDoc: %q", rec.prompt)
+	}
+	if !strings.Contains(rec.prompt, "(no findings recorded)") {
+		t.Errorf("prompt should note absent findings (no state-store entry for this run), got: %q", rec.prompt)
+	}
+}
+
 func TestRunFix_TolerateMissingDocs(t *testing.T) {
 	t.Parallel()
 
 	dir := t.TempDir()
 	store := NewLocalManifestStoreWithDir(dir)
+	stateStore := NewStateStoreWithDir(t.TempDir())
 	now := time.Date(2026, 5, 8, 12, 0, 0, 0, time.UTC)
-	// Manifest references a findings file that does not exist in dir.
-	writeFixManifest(t, store, "abcdef012345", "topic", now,
-		filepath.Join(dir, "missing-findings.md"),
-	)
+	// No findings written to the state store for this run.
+	writeFixManifest(t, store, "abcdef012345", "topic", now, "")
 
 	var rec fixLaunchRecord
 	var errBuf bytes.Buffer
@@ -234,6 +280,7 @@ func TestRunFix_TolerateMissingDocs(t *testing.T) {
 		FixInput{Out: &bytes.Buffer{}, ErrOut: &errBuf},
 		FixDeps{
 			ManifestStore: store,
+			StateStore:    stateStore,
 			Launch:        stubLaunch(&rec),
 		},
 	)
@@ -245,9 +292,6 @@ func TestRunFix_TolerateMissingDocs(t *testing.T) {
 	}
 	if !strings.Contains(rec.prompt, "(no findings recorded)") {
 		t.Errorf("prompt should note absent findings: %q", rec.prompt)
-	}
-	if !strings.Contains(errBuf.String(), "warning: could not read") {
-		t.Errorf("expected warnings about missing docs, got: %q", errBuf.String())
 	}
 }
 

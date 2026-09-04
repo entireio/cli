@@ -106,12 +106,13 @@ func (s contextTokenStore) DeleteTokens(string) error {
 	return nil
 }
 
-// newContextTokenManager builds the per-context auth-go tokenmanager that both
-// NewRefreshingLoginProvider and NewRefreshingResourceProvider sit on. Keying
-// Issuer on c.CoreURL is the whole point: store reads, the refresh grant, and
-// the STS exchange all target that context's core, so a multi-core user's
-// credentials never travel to (or get keyed under) a host the context
-// doesn't belong to.
+// newContextTokenManager builds the per-context auth-go tokenmanager that
+// NewRefreshingLoginProvider sits on. Keying Issuer on c.CoreURL is the whole
+// point: store reads and the refresh grant target that context's core, so a
+// multi-core user's credentials never travel to (or get keyed under) a host
+// the context doesn't belong to. No RFC 8693 exchange runs through it any
+// more — data-plane bearers are the login JWT itself (ResolveDataAPIToken) and
+// jurisdiction tokens are minted via httputil.PostOAuthToken.
 //
 // transport carries the caller's TLS configuration; allowInsecureHTTP permits
 // an http:// core/resource for loopback/dev.
@@ -125,7 +126,6 @@ func newContextTokenManager(c *contexts.Context, transport http.RoundTripper, al
 	mgr, err := tokenmanager.New(tokenmanager.Config{
 		Issuer:            strings.TrimRight(c.CoreURL, "/"),
 		ClientID:          oauthClientID,
-		STSPath:           oauthSTSPath,
 		RefreshPath:       oauthTokenPath,
 		Store:             contextTokenStore{service: c.KeychainService, handle: c.Handle},
 		Transport:         transport,
@@ -330,38 +330,4 @@ func RefreshedLoginToken(ctx context.Context, c *contexts.Context) (string, erro
 		return "", err
 	}
 	return provider(ctx)
-}
-
-// NewRefreshingResourceProvider returns a provider that mints a bearer valid
-// for resourceOrigin, by exchanging context c's login JWT at c's own core (RFC
-// 8693). It is NewRefreshingLoginProvider's sibling for resource servers: where
-// that returns the bare login JWT (the control plane / cluster cases, where the
-// host is the core), this performs the token exchange the data API requires.
-//
-// Both the silent login-JWT re-mint and the exchange run through the shared
-// per-context tokenmanager (newContextTokenManager). resourceOrigin must
-// already be origin-only (no path). No audience is passed: the token manager
-// defaults the RFC 8693 audience to the resource origin, which is exactly what
-// the data API requires (aud == its base URI), so the audience is derived from
-// the host being dialed rather than read from discovery. Exchanged tokens are
-// cached in-process by the tokenmanager for the life of this process.
-//
-// transport carries the caller's TLS configuration; allowInsecureHTTP permits
-// an http:// core/resource for loopback/dev.
-func NewRefreshingResourceProvider(c *contexts.Context, resourceOrigin string, transport http.RoundTripper, allowInsecureHTTP bool) (func(context.Context) (string, error), error) {
-	mgr, err := newContextTokenManager(c, transport, allowInsecureHTTP)
-	if err != nil {
-		return nil, err
-	}
-	req := tokenmanager.TokenRequest{Resource: resourceOrigin}
-	return func(ctx context.Context) (string, error) {
-		tok, err := mgr.Token(ctx, req)
-		if mapped := contextAuthError(c, err); mapped != nil {
-			return "", mapped
-		}
-		if err != nil {
-			return "", fmt.Errorf("exchange token for %s: %w", resourceOrigin, err)
-		}
-		return tok, nil
-	}, nil
 }

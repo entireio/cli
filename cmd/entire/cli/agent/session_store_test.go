@@ -142,8 +142,6 @@ func TestWriteSessionFile_RequiresASessionRef(t *testing.T) {
 // because the registry is shared, os.OpenRoot then failed for .entire and the
 // git common dir too.
 func TestSessionStore_ProbingManyDirectoriesRetainsNoDescriptors(t *testing.T) {
-	t.Parallel()
-
 	countFDs := func() int {
 		entries, err := os.ReadDir("/proc/self/fd")
 		if err != nil {

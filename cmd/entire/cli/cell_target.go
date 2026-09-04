@@ -42,9 +42,20 @@ type cellCoreClient interface {
 	ListRepos(ctx context.Context, params coreapi.ListReposParams) (*coreapi.ListReposOutputBody, error)
 }
 
+type nativeRepoCellCoreClient interface {
+	nativeRepoResolverClient
+	ListClusters(ctx context.Context) (*coreapi.ListClustersOutputBody, error)
+	ListRepos(ctx context.Context, params coreapi.ListReposParams) (*coreapi.ListReposOutputBody, error)
+}
+
 // newCellCoreClient builds the control-plane client used for cell resolution.
 // Swapped in tests.
 var newCellCoreClient = func() (cellCoreClient, error) { return coreapi.New() }
+
+// newNativeRepoCellCoreClient adds the project-scoped name lookup surface
+// needed for /et/ repository identities. Kept separate from cellCoreClient so
+// cached GitHub index clients do not need unrelated native lookup methods.
+var newNativeRepoCellCoreClient = func() (nativeRepoCellCoreClient, error) { return coreapi.New() }
 
 // resolveRepoCellTarget resolves the entire-api cell that HOSTS the given
 // repo, plus that cell's jurisdiction, so a repo-scoped call (trails, experts)
@@ -91,15 +102,23 @@ func resolveRepoCellTarget(ctx context.Context, fullName, ulid string) (*auth.Ce
 		return target, nil
 	}
 
-	owner, repo, ok := strings.Cut(strings.TrimSpace(fullName), "/")
-	if !ok || owner == "" || repo == "" {
-		return nil, fmt.Errorf("invalid repo %q: expected owner/repo", fullName)
-	}
-	placement, err := resolveRepoCellPlacement(ctx, owner, repo)
+	placement, err := resolveRepoCellPlacementByFullName(ctx, fullName)
 	if err != nil {
 		return nil, err
 	}
 	return placement.Target, nil
+}
+
+// resolveRepoCellPlacementByFullName parses an owner/repo name and resolves
+// the processing placement. Keeping this boundary shared ensures callers that
+// need both the cell and repo ID make exactly the same placement choice as
+// callers that need only the cell.
+func resolveRepoCellPlacementByFullName(ctx context.Context, fullName string) (repoCellPlacement, error) {
+	owner, repo, ok := strings.Cut(strings.TrimSpace(fullName), "/")
+	if !ok || owner == "" || repo == "" {
+		return repoCellPlacement{}, fmt.Errorf("invalid repo %q: expected owner/repo", fullName)
+	}
+	return resolveRepoCellPlacement(ctx, owner, repo)
 }
 
 // cellTargetForClusterHost maps a known cluster host to a cell apiUrl +
@@ -178,6 +197,13 @@ func cellTargetFromCluster(cluster coreapi.Cluster) (*auth.CellTarget, error) {
 // consumer caches under a TTL, so a completed onboarding self-heals.
 var errRepoNotOnboarded = errors.New("repo is not onboarded to Entire")
 
+// repoNotOnboardedError tags a definitive repository-placement miss without
+// replacing its actionable user-facing message.
+type repoNotOnboardedError struct{ inner error }
+
+func (e *repoNotOnboardedError) Error() string   { return e.inner.Error() }
+func (e *repoNotOnboardedError) Unwrap() []error { return []error{e.inner, errRepoNotOnboarded} }
+
 // resolveProcessingPlacement resolves fullName's PROCESSING placement — the
 // placement id and cell entire-api and the control plane treat as
 // authoritative for repo-scoped data (trails, experts, checkpoint/explain),
@@ -189,22 +215,9 @@ var errRepoNotOnboarded = errors.New("repo is not onboarded to Entire")
 // the repo name, and naming it here too is what produced the doubled
 // "resolve processing placement for X: X: repo is not onboarded" output.
 func resolveProcessingPlacement(ctx context.Context, c cellCoreClient, fullName string) (coreapi.RepoPlacement, error) {
-	out, err := c.ListRepos(ctx, coreapi.ListReposParams{Filter: coreapi.NewOptString(fullName)})
+	entry, err := lookupRepoIndexEntry(ctx, c, fullName)
 	if err != nil {
-		return coreapi.RepoPlacement{}, fmt.Errorf("list repos: %w", err)
-	}
-	if len(out.Repos) == 0 {
-		return coreapi.RepoPlacement{}, errRepoNotOnboarded
-	}
-	entry := out.Repos[0]
-	// Filter is documented as an exact-match lookup restricted to fullName, so
-	// beyond this identity check and the zero-length check above, Repos[0] is
-	// the only possible row. The check exists because that promise lives only
-	// in the OpenAPI doc, not in this code: if the control plane ever ignored
-	// or dropped Filter, entry could silently be an unrelated repo — exactly
-	// the wrong-region-success bug class this resolver exists to kill.
-	if !strings.EqualFold(strings.TrimSpace(entry.FullName), strings.TrimSpace(fullName)) {
-		return coreapi.RepoPlacement{}, fmt.Errorf("control plane returned %q for %s", entry.FullName, fullName)
+		return coreapi.RepoPlacement{}, err
 	}
 	// A Candidate row is a repo that exists on the forge and is visible to the
 	// caller but was never onboarded: no placements or primaries to resolve.
@@ -247,16 +260,87 @@ func resolveProcessingPlacement(ctx context.Context, c cellCoreClient, fullName 
 	return p, nil
 }
 
-// repoCellPlacement is a repo's processing placement: the id entire-api keys
-// repo-scoped routes on, paired with the cell that actually holds it.
+// lookupRepoIndexEntry is the exact-match repo-index lookup shared by every
+// resolver that starts from an owner/repo name. Zero rows is
+// errRepoNotOnboarded (see resolveProcessingPlacement for why that, not a
+// Candidate row, is the real-world "not onboarded" shape).
+//
+// Filter is documented as an exact-match lookup restricted to fullName, so
+// beyond the identity check and the zero-length check, Repos[0] is the only
+// possible row. The check exists because that promise lives only in the
+// OpenAPI doc, not in this code: if the control plane ever ignored or dropped
+// Filter, the entry could silently be an unrelated repo — exactly the
+// wrong-region-success bug class these resolvers exist to kill.
+func lookupRepoIndexEntry(ctx context.Context, c cellCoreClient, fullName string) (coreapi.RepoIndexEntry, error) {
+	out, err := c.ListRepos(ctx, coreapi.ListReposParams{Filter: coreapi.NewOptString(fullName)})
+	if err != nil {
+		return coreapi.RepoIndexEntry{}, fmt.Errorf("list repos: %w", err)
+	}
+	if len(out.Repos) == 0 {
+		return coreapi.RepoIndexEntry{}, errRepoNotOnboarded
+	}
+	entry := out.Repos[0]
+	if !strings.EqualFold(strings.TrimSpace(entry.FullName), strings.TrimSpace(fullName)) {
+		return coreapi.RepoIndexEntry{}, fmt.Errorf("control plane returned %q for %s", entry.FullName, fullName)
+	}
+	return entry, nil
+}
+
+// repoCellPlacement is the identity entire-api keys repo-scoped routes on,
+// paired with the cell that actually holds it. For a GitHub mirror RepoID is
+// the processing placement ID; for an Entire-native repo it is core Repo.ID.
 type repoCellPlacement struct {
-	// RepoID is the placement id (coreapi.RepoPlacement.ID), which entire-api
-	// uses as its repo_id — verified identical to the id the old
-	// mirrors-based lookup used (coreapi.Mirror.MirrorId) for the same
-	// placement.
+	// RepoID is the value entire-api uses as repo_id. For GitHub mirrors this is
+	// coreapi.RepoPlacement.ID (verified identical to the legacy
+	// coreapi.Mirror.MirrorId); for native repos it is coreapi.Repo.ID.
 	RepoID string
-	// Target is the cell hosting THIS placement.
+	// Target is the cell hosting this repo identity.
 	Target *auth.CellTarget
+}
+
+// resolveTrailRepoCellPlacement keeps the forge namespace in repository
+// identity resolution. A native /et/<project>/<repo> and a legacy
+// /gh/<owner>/<repo> can have the same two trailing path segments but are
+// different repositories with different repo IDs and, potentially, cells.
+func resolveTrailRepoCellPlacement(ctx context.Context, forge, owner, repo string) (repoCellPlacement, error) {
+	if forge == nativeCloneForge {
+		return resolveNativeRepoCellPlacement(ctx, owner, repo)
+	}
+	return resolveRepoCellPlacement(ctx, owner, repo)
+}
+
+// resolveNativeRepoCellPlacement resolves /et/<project>/<repo> through the
+// native project-scoped repo lookup, then maps the repo's home cluster to its
+// entire-api cell. It deliberately never consults the forge-blind repos index:
+// that index can select a same-named /gh/ mirror instead.
+func resolveNativeRepoCellPlacement(ctx context.Context, project, repoName string) (repoCellPlacement, error) {
+	ctx, cancel := context.WithTimeout(ctx, requiredCellResolveTimeout)
+	defer cancel()
+
+	c, err := newNativeRepoCellCoreClient()
+	if err != nil {
+		return repoCellPlacement{}, fmt.Errorf("control plane unavailable: %w", err)
+	}
+	repo, err := resolveNativeRepo(ctx, c, project, repoName)
+	if err != nil {
+		if errors.Is(err, errNamedRefNotFound) {
+			err = &repoNotOnboardedError{inner: err}
+		}
+		return repoCellPlacement{}, cellPlacementError(ctx, project+"/"+repoName, fmt.Errorf("resolve native repo %s/%s: %w", project, repoName, err))
+	}
+	repoID := strings.TrimSpace(repo.ID)
+	if repoID == "" {
+		return repoCellPlacement{}, fmt.Errorf("resolve native repo %s/%s: repo has no id", project, repoName)
+	}
+	clusterHost := strings.TrimSpace(repo.ClusterHost.Or(""))
+	if clusterHost == "" {
+		return repoCellPlacement{}, &repoNotOnboardedError{inner: fmt.Errorf("resolve the Entire cell for %s/%s: repo has no cluster host", project, repoName)}
+	}
+	target, err := cellTargetForClusterHost(ctx, c, clusterHost)
+	if err != nil {
+		return repoCellPlacement{}, cellPlacementError(ctx, repoID, fmt.Errorf("resolve the Entire cell for %s/%s: %w", project, repoName, err))
+	}
+	return repoCellPlacement{RepoID: repoID, Target: target}, nil
 }
 
 // resolveRepoCellPlacement resolves a GitHub repo to its processing
@@ -272,9 +356,11 @@ type repoCellPlacement struct {
 // resolveRepoCellTarget's owner/repo path delegates to this function and
 // discards RepoID, rather than the two duplicating the same resolution body:
 // the two functions exist separately only because their callers need
-// different return shapes for the same lookup — this one also needs the
-// placement id (repo_id), which resolveRepoCellTarget has no caller for and
-// so doesn't return — not because the resolution logic itself differs.
+// different return shapes for the same lookup. Some owner/repo callers only
+// need the cell (resolveRepoCellTarget's own callers) and go through that
+// thinner wrapper; others — explain --repo, experts --repo — also need the
+// placement id (repo_id) and call this one directly instead of re-deriving it
+// a second way.
 func resolveRepoCellPlacement(ctx context.Context, owner, repo string) (repoCellPlacement, error) {
 	ctx, cancel := context.WithTimeout(ctx, requiredCellResolveTimeout)
 	defer cancel()

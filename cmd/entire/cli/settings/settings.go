@@ -152,6 +152,10 @@ type EntireSettings struct {
 	// plugins (entire-agent-* binaries on $PATH). Defaults to false.
 	ExternalAgents bool `json:"external_agents,omitempty"`
 
+	// AsyncMirrorRequests selects the mirror creation route.
+	// nil/true = async request route (default), false = synchronous route.
+	AsyncMirrorRequests *bool `json:"async_mirror_requests,omitempty"`
+
 	// SummaryGeneration stores provider preferences for explain --generate.
 	// This is separate from strategy_options.summarize, which controls
 	// checkpoint auto-summarize behavior.
@@ -1325,6 +1329,9 @@ func mergeScalarFields(settings *EntireSettings, raw map[string]json.RawMessage)
 	if err := mergeRawBool(raw, "external_agents", &settings.ExternalAgents); err != nil {
 		return err
 	}
+	if err := mergeRawBoolPtr(raw, "async_mirror_requests", &settings.AsyncMirrorRequests); err != nil {
+		return err
+	}
 	if err := mergeRawBool(raw, "vercel", &settings.Vercel); err != nil {
 		return err
 	}
@@ -1973,6 +1980,11 @@ func IsExternalAgentsEnabled(ctx context.Context) bool {
 		return false
 	}
 	return s.ExternalAgents
+}
+
+// IsAsyncMirrorRequestsEnabled reports whether mirror creation uses the async request route.
+func (s *EntireSettings) IsAsyncMirrorRequestsEnabled() bool {
+	return s.AsyncMirrorRequests == nil || *s.AsyncMirrorRequests
 }
 
 // IsSignCheckpointCommitsEnabled returns true if checkpoint commits should be signed.

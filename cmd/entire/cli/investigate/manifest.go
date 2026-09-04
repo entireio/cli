@@ -48,12 +48,15 @@ type LocalManifest struct {
 
 	// FindingsDoc is the absolute path to the findings document the run
 	// produced. Always absolute — callers (writeRunManifest in particular)
-	// must resolve repo-relative paths before populating this field, since
-	// `entire investigate show` / `fix` read it back via os.ReadFile and
-	// do not perform their own resolution. The on-disk file is removed for
-	// terminal outcomes (Quorum/Stalled) once FindingsContent has been
-	// captured — the path remains here for resumable runs (Paused /
-	// Cancelled) where the file still lives in the per-run directory.
+	// must resolve repo-relative paths before populating this field. It is
+	// display-only (printed by `entire investigate --findings`): `show` and
+	// `fix` never read it back directly, since it is untrusted data decoded
+	// from a JSON file on disk — both instead resolve RunID (the validated
+	// part of the manifest) as a name inside the investigation store via
+	// ReadRunFindings. The on-disk file is removed for terminal outcomes
+	// (Quorum/Stalled) once FindingsContent has been captured — the path
+	// remains here for resumable runs (Paused/Cancelled) where the file
+	// still lives in the per-run directory.
 	FindingsDoc string `json:"findings_doc,omitempty"`
 
 	// FindingsContent embeds the final findings.md content as of run

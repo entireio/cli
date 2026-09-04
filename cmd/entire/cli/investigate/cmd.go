@@ -206,6 +206,14 @@ func newFixSubcommand(deps Deps) *cobra.Command {
 			if err != nil {
 				return fmt.Errorf("open manifest store: %w", err)
 			}
+			// Soft: a store that fails to open still lets the fix agent
+			// launch, just without a findings section — RunFix falls back
+			// to resolving one itself if this is left nil.
+			stateStore, stateErr := NewStateStore(ctx)
+			if stateErr != nil {
+				logging.Debug(ctx, "investigate fix: open run state store",
+					slog.String("err", stateErr.Error()))
+			}
 			runID := ""
 			if len(args) == 1 {
 				runID = args[0]
@@ -220,6 +228,7 @@ func newFixSubcommand(deps Deps) *cobra.Command {
 				ErrOut: cmd.ErrOrStderr(),
 			}, FixDeps{
 				ManifestStore: store,
+				StateStore:    stateStore,
 				Launch:        launch,
 			})
 			// Ctrl+C in the spawned fix agent surfaces as a wrapped
@@ -373,6 +382,27 @@ func runInvestigate(ctx context.Context, cmd *cobra.Command, args []string, f ru
 	return runFresh(ctx, cmd, args, f, deps)
 }
 
+// sandboxBypassNotice is printed once per investigate run (fresh or
+// resumed) that reaches agent spawn without going through the stronger,
+// blocking confirmUntrustedIssueSeed gate. Every agent this package spawns
+// runs with sandbox and approval checks unconditionally disabled --
+// Claude Code's --permission-mode bypassPermissions and Codex's
+// --dangerously-bypass-approvals-and-sandbox are not conditioned on
+// --issue-link or any other flag. Only the launched agent's own prompt
+// text discourages destructive actions; nothing else restricts what it
+// can execute, including reading and acting on content in the repository
+// itself (a cloned, not-yet-reviewed repo is investigate's documented use
+// case). This is non-blocking by design -- unlike confirmUntrustedIssueSeed,
+// which gates the highest-risk case (remote-attacker-controlled seed
+// content) behind an interactive confirmation or an explicit
+// --allow-untrusted-seed opt-in for automation, this banner exists so the
+// operator is not left with zero signal about the ordinary case, without
+// adding a confirmation prompt to entire investigate's routine use.
+const sandboxBypassNotice = "Note: entire investigate spawns AI agents with sandbox and approval " +
+	"checks disabled (Claude Code: --permission-mode bypassPermissions; " +
+	"Codex: --dangerously-bypass-approvals-and-sandbox). Only the agent's " +
+	"own prompt restricts destructive actions."
+
 // errUntrustedSeedRefused is returned when a non-interactive --issue-link run
 // is blocked because --allow-untrusted-seed was not passed. Surfaced as a
 // SilentError by the caller (a custom message is already printed to stderr).
@@ -504,6 +534,7 @@ func runContinue(ctx context.Context, cmd *cobra.Command, f runFlags, deps Deps)
 		fmt.Fprintln(cmd.ErrOrStderr(), err.Error())
 		return wrapSilent(silentErr, err)
 	}
+	fmt.Fprintln(cmd.ErrOrStderr(), sandboxBypassNotice)
 
 	// Resume reuses the originally selected agents — the multipicker does
 	// NOT reopen on --continue; persisted state already captures intent.
@@ -704,6 +735,8 @@ func runFresh(ctx context.Context, cmd *cobra.Command, args []string, f runFlags
 		if !ok {
 			return nil
 		}
+	} else {
+		fmt.Fprintln(cmd.ErrOrStderr(), sandboxBypassNotice)
 	}
 
 	commonDir, err := session.GetGitCommonDir(ctx)

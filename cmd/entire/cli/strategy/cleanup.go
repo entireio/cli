@@ -60,18 +60,87 @@ type CleanupResult struct {
 //
 // The pattern requires at least 7 hex characters for the commit, optionally followed
 // by a dash and exactly 6 hex characters for the worktree hash.
+//
+// This pattern is name-shape ONLY -- matching it is not proof Entire created the
+// branch. In particular the "old format" half (bare "entire/<hex>", no worktree
+// suffix) is also a plausible human branch-naming convention (e.g. tracking a
+// short commit SHA), and nothing here is namespace-reserved. Use this broad
+// pattern only for listing/reporting paths that a human confirms before any
+// deletion happens (ListShadowBranches, ListAllItems, `entire clean --all`'s
+// interactive picker). For unattended, no-confirmation deletion, use
+// isAutoDeletableShadowBranch instead -- see its doc comment.
 var shadowBranchPattern = regexp.MustCompile(`^entire/[0-9a-fA-F]{7,}(-[0-9a-fA-F]{6})?$`)
+
+// autoDeletableShadowBranchPattern is the SAME pattern with the worktree-hash
+// suffix made mandatory rather than optional. Every shadow branch this
+// codebase actually creates today goes through checkpoint.ShadowBranchNameForCommit
+// (aliased here as getShadowBranchNameForCommit), which always appends
+// "-<6-hex worktree hash>" -- even for the main worktree, since
+// checkpoint.HashWorktreeID hashes the empty string to a real 6-hex value
+// rather than an empty one. So a branch in this shape is not just
+// name-plausible: it is the exact, unspoofable-in-practice output shape of
+// the one function in this codebase that mints shadow branches, which is why
+// it is safe to treat as positive-enough proof of Entire ownership for a
+// path that deletes with no human in the loop. The bare "entire/<hex>" form
+// (no dash) is deliberately excluded here even though it is Entire's own
+// legacy naming from before the worktree-hash suffix was introduced --
+// see isAutoDeletableShadowBranch's doc comment for why.
+var autoDeletableShadowBranchPattern = regexp.MustCompile(`^entire/[0-9a-fA-F]{7,}-[0-9a-fA-F]{6}$`)
 
 // IsShadowBranch returns true if the branch name matches the shadow branch pattern.
 // Shadow branches have the format "entire/<commit-hash>-<worktree-hash>" where the
 // commit hash is at least 7 hex characters and worktree hash is 6 hex characters.
 // The "entire/checkpoints/v1" branch is NOT a shadow branch.
+//
+// This is a name-shape check, not an ownership check -- see the shadowBranchPattern
+// doc comment. Do not use it to gate unattended deletion; use
+// isAutoDeletableShadowBranch for that.
 func IsShadowBranch(branchName string) bool {
 	// Explicitly exclude metadata and trails branches
 	if branchName == paths.MetadataBranchName || branchName == paths.TrailsBranchName {
 		return false
 	}
 	return shadowBranchPattern.MatchString(branchName)
+}
+
+// isAutoDeletableShadowBranch returns true only for the strict, worktree-suffixed
+// shadow branch shape that checkpoint.ShadowBranchNameForCommit always produces.
+//
+// It exists to close a real branch-deletion hazard: CleanupPushedShadowBranches
+// runs unattended after every successful push, with no confirmation, and
+// previously trusted the broad shadowBranchPattern above -- which also matches
+// a bare "entire/1234567"-style branch a human could plausibly create by hand
+// (short-SHA branch naming is a common convention, and Entire reserves no
+// documented namespace). That branch has no session-state entry to protect it
+// and would be silently, permanently force-deleted on the next push.
+//
+// The worktree-suffixed form is a much stronger ownership signal: every current
+// code path that mints a shadow branch goes through
+// checkpoint.ShadowBranchNameForCommit, which always appends the worktree-hash
+// suffix (HashWorktreeID hashes even an empty worktree ID to a real 6-hex
+// value, so there is no "main worktree, no suffix" case). A human branch would
+// have to coincidentally match "entire/<7+ hex>-<exactly 6 hex>" AND not be
+// referenced by any session state to be at risk here -- a collision far less
+// plausible than the bare-hex case.
+//
+// The bare, unsuffixed "entire/<hex>" form is Entire's OLD format, from before
+// the worktree-hash suffix existed, and genuinely-old repos may still carry
+// leftover branches in that shape. Excluding it from auto-delete eligibility
+// does not orphan cleanup of those, though: nothing in this codebase can ever
+// protect a bare-format branch (protectedShadowBranchForSession only ever
+// computes the new suffixed name), so a genuine old-format Entire branch has
+// been unconditionally eligible for automatic deletion on every push for as
+// long as this pattern existed -- restricting auto-delete here does not change
+// whether they get caught, it removes a class of user branches that should
+// never have been eligible in the first place. Old-format branches remain
+// listed and deletable through the interactive `entire clean --all` path
+// (ListShadowBranches / ListAllItems keep using the broader shadowBranchPattern),
+// where a human sees the branch name and confirms before anything is deleted.
+func isAutoDeletableShadowBranch(branchName string) bool {
+	if branchName == paths.MetadataBranchName || branchName == paths.TrailsBranchName {
+		return false
+	}
+	return autoDeletableShadowBranchPattern.MatchString(branchName)
 }
 
 // ListShadowBranches returns all shadow branches in the repository.
@@ -178,6 +247,15 @@ func CleanupPushedShadowBranches(ctx context.Context) (int, error) {
 
 	toDelete := map[string]plumbing.Hash{}
 	for b, hash := range branchHeads {
+		// Only the strict, worktree-suffixed shape is eligible for
+		// unattended deletion -- see isAutoDeletableShadowBranch's doc
+		// comment. A branch matching only the broader shadowBranchPattern
+		// (e.g. a human's own "entire/1234567"-style branch) is left alone
+		// here entirely; it never even reaches the deleted/failed counts
+		// below.
+		if !isAutoDeletableShadowBranch(b) {
+			continue
+		}
 		if !protected[b] {
 			toDelete[b] = hash
 		}
@@ -199,12 +277,18 @@ func CleanupPushedShadowBranches(ctx context.Context) (int, error) {
 // DeleteShadowBranchesIfUnchanged deletes shadow branches only if each branch
 // still points at the hash observed by the caller. This avoids deleting a
 // branch that another session advanced after cleanup's initial scan.
+//
+// Callers performing unattended deletion (CleanupPushedShadowBranches) should
+// already have filtered to isAutoDeletableShadowBranch before calling this --
+// the same check is repeated here as a second, independent gate rather than
+// relying solely on the caller's filtering, since this function is the one
+// place that actually deletes a ref with no human confirmation.
 func DeleteShadowBranchesIfUnchanged(ctx context.Context, branches map[string]plumbing.Hash) (deleted []string, failed []string) {
 	if len(branches) == 0 {
 		return []string{}, []string{}
 	}
 	for branch, expected := range branches {
-		if !IsShadowBranch(branch) || expected.IsZero() {
+		if !isAutoDeletableShadowBranch(branch) || expected.IsZero() {
 			failed = append(failed, branch)
 			continue
 		}

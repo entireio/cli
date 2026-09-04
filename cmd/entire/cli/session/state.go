@@ -332,6 +332,13 @@ type State struct {
 	// This is checkpoint-scoped; TokenUsage remains the session-wide total.
 	CheckpointTokenUsage *agent.TokenUsage `json:"checkpoint_token_usage,omitempty"`
 
+	// CheckpointTokensFiltered records that at least one turn in the current
+	// checkpoint window was attributed to another repository. Condensation must
+	// then trust CheckpointTokenUsage instead of recomputing the whole window
+	// from the shared transcript, which would put the filtered turn back and
+	// double-count a cross-repo session.
+	CheckpointTokensFiltered bool `json:"checkpoint_tokens_filtered,omitempty"`
+
 	// SubagentTokensBaseline is a snapshot of TokenUsage.SubagentTokens captured
 	// at the last condensation reset. Subagent token usage is always re-read
 	// from the start of each subagent transcript (agent IDs are discovered from

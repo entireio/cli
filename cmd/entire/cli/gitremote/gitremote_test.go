@@ -271,3 +271,41 @@ func TestResolveRemoteRepo_MissingRemote(t *testing.T) {
 	_, _, _, err := ResolveRemoteRepo(context.Background(), "origin")
 	assert.Error(t, err)
 }
+
+// TestIsForgePathToken pins the forge-token set and, more importantly, the two
+// deliberate boundaries around it. `et` belongs because it is a real entire://
+// path segment — leaving it out is what made a native URL try to dial a cluster
+// named "et" — while the legacy `git` prefix stays out because `entire repo
+// clone` cannot act on a /git/ ref, and hostnames stay out because a caller
+// parsing forge/owner/repo needs them to fail.
+func TestIsForgePathToken(t *testing.T) {
+	t.Parallel()
+	for _, forge := range []string{"gh", "et"} {
+		assert.True(t, IsForgePathToken(forge), "%q should be a path forge", forge)
+		assert.NotEmpty(t, ForgePathLabels(forge), "%q should label its path segments", forge)
+	}
+	for _, forge := range []string{"git", "github.com", "gitlab.com", "gl", "GH", "", "/gh"} {
+		assert.False(t, IsForgePathToken(forge), "%q should not be a path forge", forge)
+		assert.Empty(t, ForgePathLabels(forge), "%q should have no labels", forge)
+	}
+}
+
+// TestForgePathLabelsNameTheRightSegments guards the reason the labels exist:
+// a mirror is addressed by owner and a native repo by project, so the two
+// forges must not share a spelling.
+func TestForgePathLabelsNameTheRightSegments(t *testing.T) {
+	t.Parallel()
+	assert.Equal(t, "<owner>/<repo>", ForgePathLabels("gh"))
+	assert.Equal(t, "<project>/<repo>", ForgePathLabels("et"))
+}
+
+// TestCanonicalHostIgnoresPathForges keeps the two forge maps apart: pathForges
+// gained "et", but a native repo has no upstream forge host, so CanonicalHost
+// must still fall back to the cluster host rather than invent one.
+func TestCanonicalHostIgnoresPathForges(t *testing.T) {
+	t.Parallel()
+	native := &Info{Host: "aws-us-east-2.entire.io", Forge: "et", Owner: "paul", Repo: "dogbark"}
+	assert.Equal(t, "aws-us-east-2.entire.io", native.CanonicalHost())
+	mirror := &Info{Host: "aws-us-east-2.entire.io", Forge: "gh", Owner: "entireio", Repo: "cli"}
+	assert.Equal(t, "github.com", mirror.CanonicalHost())
+}

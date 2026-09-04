@@ -15,6 +15,7 @@ import (
 
 	"charm.land/lipgloss/v2"
 	"github.com/entireio/cli/cmd/entire/cli/api"
+	"github.com/entireio/cli/cmd/entire/cli/auth"
 	"github.com/entireio/cli/cmd/entire/cli/gitremote"
 	"github.com/entireio/cli/cmd/entire/cli/interactive"
 	"github.com/entireio/cli/cmd/entire/cli/palette"
@@ -23,20 +24,20 @@ import (
 )
 
 type expertsAPIClient interface {
-	Get(ctx context.Context, path string) (*http.Response, error)
 	Post(ctx context.Context, path string, body any) (*http.Response, error)
 }
 
-// newExpertsAPIClient builds the entire-api cell client. fullName (owner/repo)
-// or ulid identifies the repo so the client can route to the cell that hosts
-// it; one of them is required (see NewAuthenticatedEntireAPICellClient).
-var newExpertsAPIClient = func(ctx context.Context, insecureHTTP bool, fullName, ulid string) (expertsAPIClient, error) {
-	return NewAuthenticatedEntireAPICellClient(ctx, insecureHTTP, fullName, ulid)
+// newExpertsAPIClient builds the entire-api cell client for target, the cell
+// hosting the repo's processing placement (resolved by the caller via
+// resolveRepoCellPlacement for owner/repo, or resolveRepoCellTarget for a
+// ULID). A seam so tests can substitute a stub without a live cell.
+var newExpertsAPIClient = func(ctx context.Context, insecureHTTP bool, target *auth.CellTarget) (expertsAPIClient, error) {
+	return auth.NewEntireAPICellClient(ctx, insecureHTTP, target)
 }
 
 func setExpertsClientFactoryForTest(
 	t interface{ Helper() },
-	fn func(context.Context, bool, string, string) (expertsAPIClient, error),
+	fn func(context.Context, bool, *auth.CellTarget) (expertsAPIClient, error),
 ) func() {
 	t.Helper()
 	prev := newExpertsAPIClient
@@ -55,9 +56,11 @@ type expertsFlags struct {
 }
 
 const (
-	expertsDefaultLimit  = 8
-	expertsMaxLimit      = 20
-	expertsReposListPath = "/api/v1/repos"
+	expertsDefaultLimit = 8
+	expertsMaxLimit     = 20
+	// expertsAPIReposPath is the entire-api route prefix for the repo-scoped
+	// experts POST route (see expertsAPIPath).
+	expertsAPIReposPath = "/api/v1/repos"
 )
 
 // expertLocalScopeResult is the outcome of interpreting a scope argument as a
@@ -223,11 +226,14 @@ func runExperts(ctx context.Context, out, errOut io.Writer, args []string, f *ex
 	}
 
 	// The data API (entire-api) is repo-ULID keyed. --repo may be a ULID (used
-	// directly) or an owner/repo, which we resolve to its ULID after the client
-	// exists (via the caller's accessible-repo list). With no --repo we derive
-	// owner/repo from the git origin.
+	// directly) or an owner/repo, which the control plane resolves to its
+	// processing placement id below, before the cell client is built. With no
+	// --repo we derive owner/repo from the git origin.
 	repoOverride := strings.TrimSpace(f.repo)
 	repoIsULID := looksLikeULID(repoOverride)
+	if repoIsULID {
+		repoOverride = strings.ToUpper(repoOverride) // canonicalize casing before it becomes a path segment
+	}
 	var repoFullName string
 	if !repoIsULID {
 		var err error
@@ -279,34 +285,44 @@ func runExperts(ctx context.Context, out, errOut io.Writer, args []string, f *ex
 		}
 	}
 
-	// Identify the repo for cell routing: a ULID goes on the ulid arg, an
-	// owner/repo on the fullName arg. The client uses whichever is set to reach
-	// the cell that hosts the repo's processing placement.
-	cellFullName, cellULID := "", ""
+	// Resolve the repo id and its cell together, from one placement: entire-api
+	// is keyed on the processing placement's id, which is only resolvable by
+	// the cell hosting that placement, so the id and the cell must come from
+	// the same lookup (see resolveRepoCellPlacement's doc comment).
+	var repoID string
+	var target *auth.CellTarget
 	if repoIsULID {
-		cellULID = repoOverride
-	} else {
-		cellFullName = repoFullName
-	}
-	client, err := newExpertsAPIClient(ctx, f.insecureHTTP, cellFullName, cellULID)
-	if err != nil {
-		// Not-onboarded is the most common way cell resolution fails, and its
-		// raw chain is internal resolution steps; render it like the trail
-		// commands do instead of burying it under another wrap. cellFullName is
-		// "" for the ULID form, where renderRepoNotOnboarded falls back to
-		// naming no repo.
-		if rendered := renderRepoNotOnboarded(errOut, cellFullName, err); rendered != nil {
-			return rendered
+		repoID = repoOverride
+		var err error
+		target, err = resolveRepoCellTarget(ctx, "", repoOverride)
+		if err != nil {
+			// renderRepoNotOnboarded falls back to naming no repo when the
+			// ULID form has no owner/repo to show.
+			if rendered := renderRepoNotOnboarded(errOut, "", err); rendered != nil {
+				return rendered
+			}
+			return fmt.Errorf("resolve experts cell: %w", err)
 		}
-		return fmt.Errorf("create experts API client: %w", err)
+	} else {
+		// resolveExpertsRepo already validated repoFullName as "owner/repo".
+		owner, repo, _ := strings.Cut(repoFullName, "/")
+		placement, err := resolveRepoCellPlacement(ctx, owner, repo)
+		if err != nil {
+			// Not-onboarded is the most common way cell resolution fails, and
+			// its raw chain is internal resolution steps; render it like the
+			// trail commands do instead of burying it under another wrap.
+			if rendered := renderRepoNotOnboarded(errOut, repoFullName, err); rendered != nil {
+				return rendered
+			}
+			return fmt.Errorf("resolve experts cell: %w", err)
+		}
+		repoID = placement.RepoID
+		target = placement.Target
 	}
 
-	repoID := repoOverride
-	if !repoIsULID {
-		repoID, err = resolveExpertsRepoID(ctx, client, repoFullName)
-		if err != nil {
-			return err
-		}
+	client, err := newExpertsAPIClient(ctx, f.insecureHTTP, target)
+	if err != nil {
+		return fmt.Errorf("create experts API client: %w", err)
 	}
 
 	resp, err := client.Post(ctx, expertsAPIPath(repoID), req)
@@ -388,65 +404,11 @@ func parseExpertsRepo(value string) (string, error) {
 	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
 		return "", fmt.Errorf("invalid --repo %q (use owner/repo)", value)
 	}
-	return parts[0] + "/" + strings.TrimSuffix(parts[1], ".git"), nil
+	return parts[0] + "/" + strings.TrimSuffix(parts[1], gitDirSuffix), nil
 }
 
 func expertsAPIPath(repoID string) string {
-	return expertsReposListPath + "/" + url.PathEscape(repoID) + "/experts"
-}
-
-// resolveExpertsRepoID maps an owner/repo to its repo ULID for the entire-api
-// data plane, which is ULID-keyed. It reads the caller's accessible-repo list
-// (GET /api/v1/repos) and matches on full name — an authz-safe resolution (the
-// list only contains repos the caller can read, so it never reveals a repo they
-// can't see). A ULID is passed straight through by the caller, so this is only
-// hit for the owner/repo form.
-func resolveExpertsRepoID(ctx context.Context, client expertsAPIClient, fullName string) (string, error) {
-	repos, err := listExpertsAccessibleRepos(ctx, client)
-	if err != nil {
-		return "", err
-	}
-	want := strings.ToLower(fullName)
-	for _, r := range repos {
-		if r.ID != "" && strings.ToLower(r.FullName) == want {
-			return r.ID, nil
-		}
-	}
-	return "", fmt.Errorf("repo %q was not found on the entire-api cell this command reached. It may be homed in another Entire region (cross-region experts routing may be incomplete), not onboarded to Entire, or outside your access", fullName)
-}
-
-type expertsRepoListItem struct {
-	ID       string `json:"id"`
-	FullName string `json:"full_name"`
-}
-
-// listExpertsAccessibleRepos returns every repo the caller can read on this data
-// API. entire-api's GET /repos currently returns the full SpiceDB-filtered set in
-// one response (no page_token), but the loop is forward-compatible if pagination
-// is added — same pattern as fetchAllPages in core list commands.
-func listExpertsAccessibleRepos(ctx context.Context, client expertsAPIClient) ([]expertsRepoListItem, error) {
-	return fetchAllPages(ctx, func(ctx context.Context, cursor string) ([]expertsRepoListItem, string, error) {
-		path := expertsReposListPath
-		if cursor != "" {
-			path += "?" + url.Values{"page_token": {cursor}}.Encode()
-		}
-		resp, err := client.Get(ctx, path)
-		if err != nil {
-			return nil, "", fmt.Errorf("list repos: %w", err)
-		}
-		defer resp.Body.Close()
-		if err := api.CheckResponse(resp); err != nil {
-			return nil, "", fmt.Errorf("list repos: %w", err)
-		}
-		var body struct {
-			Repos         []expertsRepoListItem `json:"repos"`
-			NextPageToken string                `json:"next_page_token,omitempty"`
-		}
-		if err := api.DecodeJSON(resp, &body); err != nil {
-			return nil, "", fmt.Errorf("decode repos: %w", err)
-		}
-		return body.Repos, body.NextPageToken, nil
-	})
+	return expertsAPIReposPath + "/" + url.PathEscape(repoID) + "/experts"
 }
 
 // expertsWebBaseURL is the origin used to build user-facing session links.
