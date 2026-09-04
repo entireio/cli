@@ -2,23 +2,17 @@
 
 package versioncheck
 
-import "strings"
-
-func hasNormalizedRootPrefix(path, root string) bool {
-	return strings.HasPrefix(path, root)
-}
+// foldPathCase is the identity on unix: paths compare case-sensitively.
+func foldPathCase(p string) string { return p }
 
 func brewUpgradeCommand(_ string, currentVersion string) string {
-	if releaseChannel(currentVersion) == installChannelNightly {
+	if isNightly(currentVersion) {
 		return "brew upgrade --yes entire@nightly"
 	}
 	return "brew upgrade --yes entire"
 }
 
-func noInstallRoots() []string { return nil }
-
 var brewProbe = installProbe{
-	roots: noInstallRoots,
 	markers: []string{
 		"/Caskroom/",
 		"/opt/homebrew/",
@@ -31,7 +25,7 @@ var brewProbe = installProbe{
 var installProbes = []installProbe{brewProbe, miseProbe}
 
 func fallbackInstallCommand(currentVersion string) string {
-	if releaseChannel(currentVersion) == installChannelNightly {
+	if isNightly(currentVersion) {
 		return "curl -fsSL https://entire.io/install.sh | bash -s -- --channel nightly"
 	}
 	return "curl -fsSL https://entire.io/install.sh | bash"

@@ -10,6 +10,9 @@ import (
 	"testing"
 )
 
+// plainBinPath is a POSIX install under no recognized install manager.
+const plainBinPath = "/usr/local/bin/entire"
+
 func TestUpdateCommandForCurrentBinary_Unix(t *testing.T) {
 	tests := []struct {
 		name           string
@@ -63,9 +66,7 @@ func TestUpdateCommandForCurrentBinary_Unix(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			original := executablePath
-			executablePath = tt.execPath
-			t.Cleanup(func() { executablePath = original })
+			setExecutable(t, tt.execPath)
 
 			if got := UpdateCommandForCurrentBinary(tt.currentVersion); got != tt.want {
 				t.Errorf("UpdateCommandForCurrentBinary() = %q, want %q", got, tt.want)
@@ -107,9 +108,7 @@ func TestUnixMiseRootSymlink(t *testing.T) {
 	if err := os.WriteFile(execPath, []byte{}, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	orig := executablePath
-	executablePath = func() (string, error) { return execPath, nil }
-	t.Cleanup(func() { executablePath = orig })
+	setExecutablePath(t, execPath)
 
 	if got := UpdateCommandForCurrentBinary("1.0.0"); got != miseUpgradeCmd {
 		t.Errorf("UpdateCommandForCurrentBinary() = %q, want %q", got, miseUpgradeCmd)

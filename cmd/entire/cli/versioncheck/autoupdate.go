@@ -43,7 +43,7 @@ var (
 //
 // The same 3-option prompt (update / skip / skip until next version) is
 // shown for every install manager that supports auto-installation
-// (brew, mise, scoop, curl-bash). The only thing that varies between
+// (brew, mise, curl-bash). The only thing that varies between
 // installers is the shell command interpolated into option 1.
 //
 // If the installer command fails, a hint with the exact command is
@@ -73,15 +73,9 @@ func maybeAutoUpdate(ctx context.Context, w io.Writer, currentVersion, latestVer
 	// suppress a specific version: the nudge returns every 24h until they
 	// update. That is deliberate while the Scoop rename migration is live —
 	// there is no prompt to choose from, so there is no choice to remember.
-	if goos == goosWindows {
+	if !installerAutoRuns || os.Getenv(envKillSwitch) != "" || !interactive.CanPromptInteractively() || !isTerminalOut(w) {
 		printNotification(w, currentVersion, latestVersion)
-		fmt.Fprintf(w, "To update, run the following when entire is not running:\n  %s\n", cmdStr)
-		return autoUpdateActionSkip
-	}
-
-	if os.Getenv(envKillSwitch) != "" || !interactive.CanPromptInteractively() || !isTerminalOut(w) {
-		printNotification(w, currentVersion, latestVersion)
-		fmt.Fprintf(w, "To update, run:\n  %s\n", cmdStr)
+		fmt.Fprintf(w, "To update, run%s:\n  %s\n", manualRunQualifier, cmdStr)
 		return autoUpdateActionSkip
 	}
 

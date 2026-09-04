@@ -7,6 +7,13 @@ import (
 	"errors"
 )
 
+// installerAutoRuns is false on Windows: a running entire.exe cannot replace
+// itself, so the command is printed for the user to run after entire exits.
+const (
+	installerAutoRuns  = false
+	manualRunQualifier = " the following when entire is not running"
+)
+
 // realRunInstaller is not implemented on Windows. maybeAutoUpdate never
 // reaches here: a running entire.exe cannot replace itself, so Windows
 // prints the command and returns. Do not implement this with cmd.exe —

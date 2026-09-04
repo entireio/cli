@@ -347,38 +347,11 @@ func TestParseGitHubRelease(t *testing.T) {
 // it without tripping goconst on repeated string literals.
 const brewUpgradeCmd = "brew upgrade --yes entire"
 
-// plainBinPath is a POSIX install under no recognized install manager.
-const plainBinPath = "/usr/local/bin/entire"
+// brewCaskPath is a brew-installed binary; tests that do not care about the
+// install manager use it.
+const brewCaskPath = "/opt/homebrew/Caskroom/entire/1.0.0/entire"
 
 const miseExecutablePath = "/home/user/.local/share/mise/installs/entire/1.0.0/bin/entire"
-
-func TestUpdateCommandForCurrentBinary(t *testing.T) {
-	tests := []struct {
-		name           string
-		currentVersion string
-		execPath       func() (string, error)
-		want           string
-	}{
-		{
-			name:           "mise path",
-			currentVersion: "1.0.0",
-			execPath:       func() (string, error) { return miseExecutablePath, nil },
-			want:           miseUpgradeCmd,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			original := executablePath
-			executablePath = tt.execPath
-			t.Cleanup(func() { executablePath = original })
-
-			if got := UpdateCommandForCurrentBinary(tt.currentVersion); got != tt.want {
-				t.Errorf("UpdateCommandForCurrentBinary() = %q, want %q", got, tt.want)
-			}
-		})
-	}
-}
 
 func relocatedTestRoot(elem string) string {
 	if runtime.GOOS == "windows" {
@@ -387,47 +360,43 @@ func relocatedTestRoot(elem string) string {
 	return "/" + elem
 }
 
-func TestUpdateCommandForCurrentBinary_MiseRelocatedInstallsDir(t *testing.T) {
-	root := relocatedTestRoot("srv/tools")
-	t.Setenv("MISE_INSTALLS_DIR", root)
-	t.Setenv("MISE_DATA_DIR", "")
-	orig := executablePath
-	executablePath = func() (string, error) {
-		return filepath.Join(root, "entire", "1.0.0", "bin", "entire"), nil
+// TestUpdateCommandForCurrentBinary_MiseRoots covers mise detection through
+// the env-relocated roots and the default marker.
+func TestUpdateCommandForCurrentBinary_MiseRoots(t *testing.T) {
+	installsDir := relocatedTestRoot("srv/tools")
+	dataDir := relocatedTestRoot("srv/mise")
+	tests := []struct {
+		name        string
+		installsDir string
+		dataDir     string
+		execPath    string
+	}{
+		{
+			name:        "MISE_INSTALLS_DIR",
+			installsDir: installsDir,
+			execPath:    filepath.Join(installsDir, "entire", "1.0.0", "bin", "entire"),
+		},
+		{
+			name:     "MISE_DATA_DIR",
+			dataDir:  dataDir,
+			execPath: filepath.Join(dataDir, "installs", "entire", "1.0.0", "bin", "entire"),
+		},
+		{
+			name:     "default marker",
+			execPath: miseExecutablePath,
+		},
 	}
-	t.Cleanup(func() { executablePath = orig })
 
-	if got := UpdateCommandForCurrentBinary("1.0.0"); got != miseUpgradeCmd {
-		t.Errorf("UpdateCommandForCurrentBinary() = %q, want %q", got, miseUpgradeCmd)
-	}
-}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("MISE_INSTALLS_DIR", tt.installsDir)
+			t.Setenv("MISE_DATA_DIR", tt.dataDir)
+			setExecutablePath(t, tt.execPath)
 
-func TestUpdateCommandForCurrentBinary_MiseRelocatedDataDir(t *testing.T) {
-	root := relocatedTestRoot("srv/mise")
-	t.Setenv("MISE_INSTALLS_DIR", "")
-	t.Setenv("MISE_DATA_DIR", root)
-	orig := executablePath
-	executablePath = func() (string, error) {
-		return filepath.Join(root, "installs", "entire", "1.0.0", "bin", "entire"), nil
-	}
-	t.Cleanup(func() { executablePath = orig })
-
-	if got := UpdateCommandForCurrentBinary("1.0.0"); got != miseUpgradeCmd {
-		t.Errorf("UpdateCommandForCurrentBinary() = %q, want %q", got, miseUpgradeCmd)
-	}
-}
-
-func TestUpdateCommandForCurrentBinary_MiseDefaultMarkerStillMatches(t *testing.T) {
-	t.Setenv("MISE_INSTALLS_DIR", "")
-	t.Setenv("MISE_DATA_DIR", "")
-	orig := executablePath
-	executablePath = func() (string, error) {
-		return miseExecutablePath, nil
-	}
-	t.Cleanup(func() { executablePath = orig })
-
-	if got := UpdateCommandForCurrentBinary("1.0.0"); got != miseUpgradeCmd {
-		t.Errorf("UpdateCommandForCurrentBinary() = %q, want %q", got, miseUpgradeCmd)
+			if got := UpdateCommandForCurrentBinary("1.0.0"); got != miseUpgradeCmd {
+				t.Errorf("UpdateCommandForCurrentBinary() = %q, want %q", got, miseUpgradeCmd)
+			}
+		})
 	}
 }
 
@@ -549,7 +518,7 @@ func TestCheckAndNotify_BrewSkipUntilNextVersionCachesLatest(t *testing.T) {
 	server := newVersionServer(t, "v2.0.0")
 	cmd, _ := setupCheckAndNotifyTest(t, server.URL)
 	f := newAutoUpdateFixture(t)
-	useBrewExecutable(t)
+	setExecutablePath(t, brewCaskPath)
 	f.chooseValue = autoUpdateActionSkipUntilNextVersion
 
 	CheckAndNotify(context.Background(), cmd.OutOrStdout(), "1.0.0")
@@ -576,7 +545,7 @@ func TestCheckAndNotify_MiseSkipUntilNextVersionCachesLatest(t *testing.T) {
 	server := newVersionServer(t, "v2.0.0")
 	cmd, _ := setupCheckAndNotifyTest(t, server.URL)
 	f := newAutoUpdateFixture(t)
-	useMiseExecutable(t)
+	setExecutablePath(t, miseExecutablePath)
 	f.chooseValue = autoUpdateActionSkipUntilNextVersion
 
 	CheckAndNotify(context.Background(), cmd.OutOrStdout(), "1.0.0")
@@ -600,7 +569,7 @@ func TestCheckAndNotify_SkipsVersionMarkedSkipped(t *testing.T) {
 	server := newVersionServer(t, "v2.0.0")
 	cmd, buf := setupCheckAndNotifyTest(t, server.URL)
 	f := newAutoUpdateFixture(t)
-	useBrewExecutable(t)
+	setExecutablePath(t, brewCaskPath)
 	seedVersionCache(t, &VersionCache{
 		LastCheckTime:  time.Now().Add(-checkInterval - time.Minute),
 		SkippedVersion: "v2.0.0",
@@ -634,7 +603,7 @@ func TestCheckAndNotify_InstallerFailureKeepsCacheFresh(t *testing.T) {
 	// Simulate an interactive user who accepts the upgrade prompt, and an
 	// installer that fails (e.g. brew upgrade blew up mid-run).
 	t.Setenv("ENTIRE_TEST_TTY", "1")
-	useBrewExecutable(t)
+	setExecutablePath(t, brewCaskPath)
 
 	origChoose := chooseUpdate
 	chooseUpdate = func(_ context.Context, _, _, _ string) (AutoUpdateAction, error) {

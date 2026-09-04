@@ -9,9 +9,9 @@ import (
 	"strings"
 )
 
-func hasNormalizedRootPrefix(path, root string) bool {
-	return strings.HasPrefix(strings.ToLower(path), strings.ToLower(root))
-}
+// foldPathCase lowercases: Windows paths compare case-insensitively, and the
+// markers below are already lowercase.
+func foldPathCase(p string) string { return strings.ToLower(p) }
 
 // Windows install.ps1 one-liners from the README. Printed, never auto-run.
 const (
@@ -53,55 +53,28 @@ func readScoopConfig() scoopConfigFile {
 }
 
 func scoopRoots() []string {
+	cfg := readScoopConfig()
 	var roots []string
-	for _, r := range []string{os.Getenv("SCOOP"), os.Getenv("SCOOP_GLOBAL")} {
+	for _, r := range []string{os.Getenv("SCOOP"), os.Getenv("SCOOP_GLOBAL"), cfg.RootPath, cfg.GlobalPath} {
 		if r != "" {
 			roots = append(roots, filepath.Join(r, "apps"))
 		}
 	}
-	cfg := readScoopConfig()
-	if cfg.RootPath != "" {
-		roots = append(roots, filepath.Join(cfg.RootPath, "apps"))
-	}
-	if cfg.GlobalPath != "" {
-		roots = append(roots, filepath.Join(cfg.GlobalPath, "apps"))
-	}
 	return roots
 }
 
-func firstPathSegment(rest string) string {
+// scoopAppName returns the Scoop app directory from a path relative to the
+// Scoop apps root (e.g. "cli" from "cli/current/entire.exe"). This is the
+// durable signal for the pre-rename package: a binary running from the `cli`
+// app dir must migrate to `entire` regardless of its version (the fix ships in
+// a final `cli` release, so the migrating binary's version is already past the
+// rename).
+func scoopAppName(rest string) string {
 	app, _, _ := strings.Cut(rest, "/")
 	return app
 }
 
-// scoopAppName returns the Scoop app directory the running binary lives under
-// — the path segment after `/scoop/apps/` (e.g. "cli" or "entire") — or ""
-// when the binary is not a Scoop install. This is the durable signal for the
-// pre-rename package: a binary running from the `cli` app dir must migrate to
-// `entire` regardless of its version (the fix ships in a final `cli` release,
-// so the migrating binary's version is already past the rename).
-func scoopAppName() string {
-	normalized, err := normalizedExecPath()
-	if err != nil {
-		return ""
-	}
-	for _, raw := range scoopRoots() {
-		root := normalizeInstallRoot(raw)
-		if root == "" || !hasNormalizedRootPrefix(normalized, root) {
-			continue
-		}
-		return firstPathSegment(normalized[len(root):])
-	}
-	_, rest, ok := strings.Cut(normalized, "/scoop/apps/")
-	if !ok {
-		return ""
-	}
-	// Cut returns the whole string when the separator is absent, so this covers
-	// both `.../scoop/apps/cli/current/entire.exe` and a bare app segment.
-	return firstPathSegment(rest)
-}
-
-func scoopUpgradeCommand(_, _ string) string {
+func scoopUpgradeCommand(rest, _ string) string {
 	// The Scoop package was renamed from `cli` to `entire`. A binary still
 	// running from the old `cli` app dir can never cross the rename with a
 	// plain `scoop update entire/cli`, so migrate it: install the new
@@ -130,7 +103,7 @@ func scoopUpgradeCommand(_, _ string) string {
 	// still fail with "couldn't find manifest", and the README migration
 	// section names `scoop update` as the retry. Binaries already on the
 	// `entire` app just update in place.
-	if scoopAppName() == "cli" {
+	if scoopAppName(rest) == "cli" {
 		return `cmd.exe /D /C "scoop install entire/entire && scoop uninstall entire/cli && scoop reset entire"`
 	}
 	return "scoop update entire/entire"
@@ -145,7 +118,7 @@ var scoopProbe = installProbe{
 var installProbes = []installProbe{scoopProbe, miseProbe}
 
 func fallbackInstallCommand(currentVersion string) string {
-	if releaseChannel(currentVersion) == installChannelNightly {
+	if isNightly(currentVersion) {
 		return windowsInstallNightlyCmd
 	}
 	return windowsInstallCmd

@@ -9,7 +9,6 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"time"
 
@@ -20,17 +19,6 @@ import (
 	"github.com/entireio/cli/internal/entireclient/userdirs"
 	"golang.org/x/mod/module"
 	"golang.org/x/mod/semver"
-)
-
-const goosWindows = "windows"
-
-// goos is a test seam for runtime.GOOS so the Windows-specific auto-install
-// gating can be exercised from a non-Windows host.
-var goos = runtime.GOOS
-
-const (
-	installChannelStable  = "stable"
-	installChannelNightly = "nightly"
 )
 
 // CheckAndNotify performs a version check and notifies the user if a newer version is available.
@@ -341,26 +329,25 @@ func releaseNotesURL(version string) string {
 // It's a variable so tests can override it.
 var executablePath = os.Executable
 
-func releaseChannel(version string) string {
-	if isNightly(version) {
-		return installChannelNightly
+// normalizePath returns p with symlinks resolved (best-effort), separators as
+// forward slashes, and case folded where the OS compares paths
+// case-insensitively (foldPathCase). Every install-path comparison in this
+// package is a plain prefix or substring test on this form.
+func normalizePath(p string) string {
+	resolved, err := filepath.EvalSymlinks(p)
+	if err != nil {
+		resolved = p
 	}
-	return installChannelStable
+	return foldPathCase(strings.ReplaceAll(filepath.ToSlash(resolved), "\\", "/"))
 }
 
-// normalizedExecPath returns the running binary's real path with all separators
-// normalized to forward slashes (symlinks resolved, best-effort). Both the
-// install-manager detection and the Scoop app-dir lookup key off this form.
+// normalizedExecPath returns the running binary's path in normalizePath form.
 func normalizedExecPath() (string, error) {
 	execPath, err := executablePath()
 	if err != nil {
 		return "", err
 	}
-	realPath, err := filepath.EvalSymlinks(execPath)
-	if err != nil {
-		realPath = execPath
-	}
-	return strings.ReplaceAll(filepath.ToSlash(realPath), "\\", "/"), nil
+	return normalizePath(execPath), nil
 }
 
 // downloadsURL is the GitHub releases page, used for release-notes links.
@@ -368,11 +355,12 @@ const downloadsURL = "https://github.com/entireio/cli/releases"
 
 // installProbe identifies one install manager from the running binary's path
 // and returns the command that upgrades it. roots are env/config install
-// prefixes (relocated dirs); markers cover default layouts.
+// prefixes (relocated dirs, optional); markers cover default layouts. command
+// receives the exec path relative to the matched root or marker.
 type installProbe struct {
 	roots   func() []string
 	markers []string
-	command func(execPath, currentVersion string) string
+	command func(rest, currentVersion string) string
 }
 
 func miseRoots() []string {
@@ -385,38 +373,37 @@ func miseRoots() []string {
 	return nil
 }
 
-// normalizeInstallRoot Clean+EvalSymlinks+ToSlash a root and ensures a trailing
-// slash. Relative values are ignored. EvalSymlinks is best-effort so a root
-// that does not exist on disk still matches by cleaned prefix.
+// normalizeInstallRoot returns an absolute root in normalizePath form with a
+// trailing slash, or "" for empty/relative values. A root that does not exist
+// on disk still matches by cleaned prefix.
 func normalizeInstallRoot(root string) string {
 	if root == "" || !filepath.IsAbs(root) {
 		return ""
 	}
-	cleaned := filepath.Clean(root)
-	resolved, err := filepath.EvalSymlinks(cleaned)
-	if err != nil {
-		resolved = cleaned
-	}
-	n := strings.ReplaceAll(filepath.ToSlash(resolved), "\\", "/")
+	n := normalizePath(filepath.Clean(root))
 	if !strings.HasSuffix(n, "/") {
 		n += "/"
 	}
 	return n
 }
 
-func (p installProbe) matches(execPath string) bool {
-	for _, raw := range p.roots() {
-		root := normalizeInstallRoot(raw)
-		if root != "" && hasNormalizedRootPrefix(execPath, root) {
-			return true
+// locate reports whether execPath is under one of the probe's roots or
+// markers and returns the remainder of the path after the match.
+func (p installProbe) locate(execPath string) (string, bool) {
+	if p.roots != nil {
+		for _, raw := range p.roots() {
+			root := normalizeInstallRoot(raw)
+			if root != "" && strings.HasPrefix(execPath, root) {
+				return execPath[len(root):], true
+			}
 		}
 	}
 	for _, m := range p.markers {
-		if strings.Contains(execPath, m) {
-			return true
+		if i := strings.Index(execPath, m); i >= 0 {
+			return execPath[i+len(m):], true
 		}
 	}
-	return false
+	return "", false
 }
 
 const miseUpgradeCmd = "mise upgrade entire"
@@ -435,11 +422,12 @@ var miseProbe = installProbe{
 // binary, based on how it was installed.
 func UpdateCommandForCurrentBinary(currentVersion string) string {
 	path, err := normalizedExecPath()
-	if err == nil {
-		for _, p := range installProbes {
-			if p.matches(path) {
-				return p.command(path, currentVersion)
-			}
+	if err != nil {
+		return fallbackInstallCommand(currentVersion)
+	}
+	for _, p := range installProbes {
+		if rest, ok := p.locate(path); ok {
+			return p.command(rest, currentVersion)
 		}
 	}
 	return fallbackInstallCommand(currentVersion)
