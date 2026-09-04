@@ -9,6 +9,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -25,6 +26,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/cmd/entire/cli/settings/repopolicy"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
+	"github.com/entireio/cli/cmd/entire/cli/worktreedir"
 
 	"github.com/go-git/go-git/v6"
 	"github.com/go-git/go-git/v6/plumbing"
@@ -146,6 +148,7 @@ func runSessionsFix(cmd *cobra.Command, force bool) error {
 	// Before checkLogSink, because a symlinked .entire/logs is one of the reasons
 	// that check fires and this one names the cause.
 	checkEntireDirSymlinks(cmd)
+	checkAgentDirSymlinks(cmd)
 
 	// Before the remaining checks, because it is the channel they and every
 	// other command write their diagnostics to: if this is broken, an empty
@@ -742,6 +745,197 @@ func checkEntireDirSymlinks(cmd *cobra.Command) {
 	fmt.Fprintln(w, "  anything that belongs under one of these paths is not being captured.")
 	fmt.Fprintln(w, "  Fix: replace each path above with a real directory. If it is tracked in git,")
 	fmt.Fprintln(w, "  `git rm --cached` it first, and add it to .gitignore so it does not come back.")
+}
+
+// checkAgentDirSymlinks reports a symlink at any directory component Entire
+// creates or writes through for an agent: the agents' own config directories
+// (.claude, .codex, .cursor, .gemini, .factory, .opencode, .pi, .github/hooks)
+// and the managed skill scaffolds' parents (.claude/skills, .codex/agents, ...).
+//
+// The condition is otherwise invisible after the fact. `entire enable` fails
+// loudly on it (agent.HookConfigFile and writeManagedScaffold both create
+// through osroot.MkdirAllNoSymlink), but once the repo is enabled
+// HookConfigFile.Exists() deliberately reports a symlinked parent as absent —
+// so `entire status` shows the hooks missing without saying why, and
+// `entire clean` skips the directory on the stated grounds that doctor is what
+// reports a symlinked agent directory. Until this check, nothing did.
+//
+// Unlike .entire, these trees are the agent's and largely the user's, so this
+// examines only the components Entire itself creates and writes through, rather
+// than listing every symlink beneath them the way checkEntireDirSymlinks does.
+// A `.claude/skills/my-own -> ../../shared/skills/my-own` is a real setup and
+// none of Entire's business; reporting it would train the user to ignore this
+// section.
+//
+// Read-only. The fix means deciding what to do with whatever the link pointed
+// at, which is not doctor's call.
+func checkAgentDirSymlinks(cmd *cobra.Command) {
+	ctx := cmd.Context()
+	w := cmd.OutOrStdout()
+
+	worktreeRoot, err := paths.WorktreeRoot(ctx)
+	if err != nil {
+		return // no repository: nothing to check
+	}
+	root, err := worktreedir.OpenAt(worktreeRoot)
+	if err != nil {
+		return
+	}
+
+	var links, unreadable []string
+	reported := make(map[string]struct{})
+	for _, candidate := range agentSymlinkCheckPaths() {
+		name, outcome := scanForSymlinkedComponent(root, candidate)
+		if outcome == componentScanClean {
+			continue
+		}
+		// Several candidates share a prefix (.claude, .claude/settings.json), so
+		// a symlinked .claude would otherwise be named once per candidate.
+		if _, dup := reported[name]; dup {
+			continue
+		}
+		reported[name] = struct{}{}
+		if outcome == componentScanUnreadable {
+			unreadable = append(unreadable, name)
+			continue
+		}
+		links = append(links, name)
+	}
+
+	if len(links) > 0 {
+		fmt.Fprintln(w, "Agent config directories: SYMLINKS PRESENT")
+		for i, name := range links {
+			if i == symlinkReportLimit {
+				fmt.Fprintf(w, "  ... and %d more\n", len(links)-symlinkReportLimit)
+				break
+			}
+			fmt.Fprintf(w, "  %s -> %s\n", name, readlinkOrUnknownIn(root, name))
+		}
+		fmt.Fprintln(w, "  Entire will not create or write through a symlinked path here, so the")
+		fmt.Fprintln(w, "  hooks and skills that belong under these paths are not installed, and")
+		fmt.Fprintln(w, "  `entire status` reports them as absent rather than as blocked.")
+		fmt.Fprintln(w, "  Fix: replace each path above with a real directory or file. If it is")
+		fmt.Fprintln(w, "  tracked in git, `git rm --cached` it first, and add it to .gitignore so it")
+		fmt.Fprintln(w, "  does not come back.")
+	}
+
+	// Separate from the links, and reported rather than swallowed: "we could not
+	// find out" is not "there is nothing here". Entire's own write will fail on
+	// the same path, so a silent scan would leave the user with hooks that never
+	// install and a doctor that says nothing.
+	if len(unreadable) > 0 {
+		fmt.Fprintln(w, "Agent config directories: NOT READABLE")
+		for i, name := range unreadable {
+			if i == symlinkReportLimit {
+				fmt.Fprintf(w, "  ... and %d more\n", len(unreadable)-symlinkReportLimit)
+				break
+			}
+			fmt.Fprintf(w, "  %s\n", name)
+		}
+		fmt.Fprintln(w, "  Entire could not tell whether these paths are real directories, so it")
+		fmt.Fprintln(w, "  cannot say whether hooks and skills can be installed under them.")
+		fmt.Fprintln(w, "  Fix: check the ownership and permissions of each path above.")
+	}
+}
+
+// componentScanOutcome is what scanForSymlinkedComponent found.
+type componentScanOutcome int
+
+const (
+	// componentScanClean: every component that exists is a real file or
+	// directory. A component that is simply absent lands here too — an agent
+	// Entire was never enabled for has no directory, and that is not a fault.
+	componentScanClean componentScanOutcome = iota
+	// componentScanLinked: the named component is a symlink.
+	componentScanLinked
+	// componentScanUnreadable: the named component could not be statted, so
+	// nothing is known about it.
+	componentScanUnreadable
+)
+
+// agentSymlinkCheckPaths returns the worktree-relative paths Entire creates or
+// writes through on behalf of an agent, sorted and deduplicated. Each is a full
+// path rather than a directory, because firstSymlinkedComponent examines every
+// component of what it is given and the leaf is refused too: HookConfigFile
+// reads and writes through ReadFileNoFollow / a pinned-parent rename, and
+// writeManagedScaffold does the same, so a symlinked .claude/settings.json is
+// as broken as a symlinked .claude.
+//
+// Two sources, both read from the registry rather than from a list kept here,
+// so a newly integrated agent is covered without anyone remembering this
+// function: the hook-config paths (agent.HookConfigLocator) and the scaffold
+// templates.
+//
+// Deliberately NOT agent.ProtectedDirs(). That names what the AGENT owns, which
+// is a different set in both directions. It is too narrow — `.pi` is there but
+// the `.pi/extensions` and `.pi/extensions/entire` that Entire creates below it
+// are not, and a symlink at either produced no output at all until the config
+// paths were added here. And it is too broad — `.vogon` and an external
+// plugin's directories are in it while Entire writes nothing into them, so
+// reporting a link there would contradict the rule this list follows. Every
+// top-level agent directory Entire does write to is already covered, as a
+// component of the config or scaffold path underneath it.
+func agentSymlinkCheckPaths() []string {
+	seen := make(map[string]struct{})
+	var out []string
+	add := func(p string) {
+		p = filepath.ToSlash(p)
+		if p == "" || p == "." || p == "/" {
+			return
+		}
+		if _, ok := seen[p]; ok {
+			return
+		}
+		seen[p] = struct{}{}
+		out = append(out, p)
+	}
+
+	for _, relPath := range agent.AllHookConfigRelPaths() {
+		add(relPath)
+	}
+	for _, name := range agent.List() {
+		if relPath, _, ok := searchSkillTemplate(name); ok {
+			add(relPath)
+		}
+		if relPath, _, ok := agentHelpSkillTemplate(name); ok {
+			add(relPath)
+		}
+	}
+
+	slices.Sort(out)
+	return out
+}
+
+// scanForSymlinkedComponent walks name one component at a time and reports the
+// shortest prefix that is a symlink, or that could not be statted at all.
+//
+// Prefixes are examined shortest first so the walk stops at a link before it
+// would resolve anything through it, which is both the correct answer to report
+// (the outermost link is the one to replace) and the reason a plain root.Lstat
+// of the full name is not enough: that call follows an in-root parent link and
+// reports the far end's mode.
+//
+// A component that does not exist ends the walk clean — an absent .claude is
+// not a misconfiguration — but every OTHER stat error is reported, matching
+// checkEntireDirSymlinks' NOT READABLE arm. Treating them alike would answer
+// "we could not find out" with "everything is fine", on exactly the paths
+// Entire is about to try to write to.
+func scanForSymlinkedComponent(root *os.Root, name string) (string, componentScanOutcome) {
+	components := strings.Split(name, "/")
+	for i := range components {
+		prefix := strings.Join(components[:i+1], "/")
+		info, err := root.Lstat(prefix)
+		if os.IsNotExist(err) {
+			return "", componentScanClean
+		}
+		if err != nil {
+			return prefix, componentScanUnreadable
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			return prefix, componentScanLinked
+		}
+	}
+	return "", componentScanClean
 }
 
 // readlinkOrUnknown renders a symlink's target for a diagnostic, never failing:

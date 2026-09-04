@@ -16,6 +16,7 @@ import (
 // Ensure FactoryAIDroidAgent implements HookSupport
 var (
 	_ agent.HookSupport           = (*FactoryAIDroidAgent)(nil)
+	_ agent.HookConfigLocator     = (*FactoryAIDroidAgent)(nil)
 	_ agent.PermissionConfigOwner = (*FactoryAIDroidAgent)(nil)
 )
 
@@ -54,7 +55,7 @@ func factoryHookConfig(ctx context.Context) (*agent.HookConfigFile, error) {
 			return nil, fmt.Errorf("failed to get current directory: %w", err)
 		}
 	}
-	return agent.OpenHookConfig(repoRoot, ".factory/"+FactorySettingsFileName) //nolint:wrapcheck // agent.HookConfigFile already names the file in its error
+	return agent.OpenHookConfig(repoRoot, (&FactoryAIDroidAgent{}).HookConfigRelPath()) //nolint:wrapcheck // agent.HookConfigFile already names the file in its error
 }
 
 // InstallHooks installs Factory AI Droid hooks in .factory/settings.json.
@@ -501,4 +502,9 @@ func removeEntireHooks(matchers []FactoryHookMatcher) []FactoryHookMatcher {
 // without knowing Factory Droid's layout.
 func (f *FactoryAIDroidAgent) PermissionConfig(ctx context.Context) (*agent.HookConfigFile, error) {
 	return factoryHookConfig(ctx)
+}
+
+// HookConfigRelPath implements agent.HookConfigLocator.
+func (f *FactoryAIDroidAgent) HookConfigRelPath() string {
+	return ".factory/" + FactorySettingsFileName
 }

@@ -7,11 +7,12 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"strings"
 
+	"github.com/entireio/cli/cmd/entire/cli/gitdir"
 	"github.com/entireio/cli/cmd/entire/cli/internal/flock"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
+	"github.com/entireio/cli/cmd/entire/cli/osroot"
 
 	"github.com/go-git/go-git/v6"
 	"github.com/go-git/go-git/v6/plumbing"
@@ -59,21 +60,38 @@ func casUpdateRef(ctx context.Context, repoRoot string, refName plumbing.Referen
 	return fmt.Errorf("git update-ref %s: %s: %w", refName, strings.TrimSpace(out), err)
 }
 
-func persistentRefLockPath(commonDir string, refName plumbing.ReferenceName) (string, error) {
-	lockDir := filepath.Join(commonDir, "entire-persistent-ref-locks")
-	if err := os.MkdirAll(lockDir, 0o750); err != nil {
-		return "", fmt.Errorf("create persistent ref lock directory: %w", err)
+// persistentRefLockDirName is the persistent-ref lock directory inside the git
+// common dir, alongside shadowLockDirName.
+const persistentRefLockDirName = "entire-persistent-ref-locks"
+
+// persistentRefLock returns the git common dir's root and the per-ref lock
+// file's name inside it, mirroring shadowBranchLock. Ref names are escaped
+// because "refs/entire/checkpoints/v1" would otherwise nest directories.
+//
+// Through the root like every other .git-resident lock: this was the last one
+// still opening by path, and flock's os.OpenFile(path, O_RDWR|O_CREATE) follows
+// a symlink at the lock path. Git will not check a path out into .git, so this
+// is defence in depth rather than a reachable escape — but it is the reason
+// openLockFileIn exists, and leaving one caller outside it is how the next one
+// gets written that way too.
+func persistentRefLock(commonDir string, refName plumbing.ReferenceName) (*os.Root, string, error) {
+	root, err := gitdir.OpenAt(commonDir)
+	if err != nil {
+		return nil, "", fmt.Errorf("open git common dir: %w", err)
+	}
+	if err := osroot.MkdirAllNoSymlink(root, persistentRefLockDirName, 0o750); err != nil {
+		return nil, "", fmt.Errorf("create persistent ref lock directory: %w", err)
 	}
 	safe := strings.NewReplacer("/", "_", "\\", "_", ":", "_").Replace(refName.String())
-	return filepath.Join(lockDir, safe+".lock"), nil
+	return root, persistentRefLockDirName + "/" + safe + ".lock", nil
 }
 
 func withPersistentRefFlock(ctx context.Context, commonDir string, refName plumbing.ReferenceName, fn func() error) error {
-	path, err := persistentRefLockPath(commonDir, refName)
+	root, name, err := persistentRefLock(commonDir, refName)
 	if err != nil {
 		return err
 	}
-	release, err := flock.AcquireContext(ctx, path)
+	release, err := flock.AcquireContextIn(ctx, root, name)
 	if err != nil {
 		return fmt.Errorf("acquire persistent ref flock %s: %w", refName, err)
 	}
