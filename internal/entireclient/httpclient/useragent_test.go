@@ -6,6 +6,18 @@ import (
 	"testing"
 )
 
+// These tests each run t.Parallel() and each stand up their own httptest
+// server, so their UserAgentTransport must wrap that server's OWN transport
+// (srv.Client().Transport) rather than the process-global
+// http.DefaultTransport. Sharing the global means sharing its idle-connection
+// pool: one test's t.Cleanup(srv.Close) then tears down a pooled connection
+// another test is mid-request on, which surfaces as
+//
+//	Do: ... transport connection broken: http: CloseIdleConnections called
+//
+// on a test that did nothing wrong. That flake was observed twice on CI in
+// two days, in both cases on a PR touching nothing in this package.
+
 func TestUserAgentTransport_SetsHeader(t *testing.T) {
 	t.Parallel()
 
@@ -18,7 +30,7 @@ func TestUserAgentTransport_SetsHeader(t *testing.T) {
 
 	client := &http.Client{
 		Transport: &UserAgentTransport{
-			Next: http.DefaultTransport,
+			Next: srv.Client().Transport,
 			UA:   "test-binary/1.2.3",
 		},
 	}
@@ -49,7 +61,7 @@ func TestUserAgentTransport_OverwritesCallerHeader(t *testing.T) {
 
 	client := &http.Client{
 		Transport: &UserAgentTransport{
-			Next: http.DefaultTransport,
+			Next: srv.Client().Transport,
 			UA:   "wrapper-set",
 		},
 	}
@@ -79,7 +91,7 @@ func TestUserAgentTransport_DoesNotMutateCallerRequest(t *testing.T) {
 
 	client := &http.Client{
 		Transport: &UserAgentTransport{
-			Next: http.DefaultTransport,
+			Next: srv.Client().Transport,
 			UA:   "wrapper-set",
 		},
 	}

@@ -58,7 +58,9 @@ func (s *ManualCommitStrategy) Reset(ctx context.Context, w, errW io.Writer) err
 	// Clear all sessions for this commit
 	clearedSessions := make([]string, 0)
 	for _, state := range sessions {
-		if err := s.clearSessionState(ctx, state.SessionID); err != nil {
+		if err := withLockWaitNotice(state.SessionID, errW, SessionLockNoticeDelay, func() error {
+			return s.clearSessionState(ctx, state.SessionID)
+		}); err != nil {
 			fmt.Fprintf(errW, "Warning: failed to clear session state for %s: %v\n", state.SessionID, err)
 		} else {
 			clearedSessions = append(clearedSessions, state.SessionID)
@@ -95,8 +97,11 @@ func (s *ManualCommitStrategy) ResetSession(ctx context.Context, w, errW io.Writ
 		return fmt.Errorf("session not found: %s", sessionID)
 	}
 
-	// Clear the session state file
-	if err := s.clearSessionState(ctx, sessionID); err != nil {
+	// Clear the session state file. Reset is interactive and takes the same
+	// unbounded gate doctor does, so it gets the same lock-wait notice.
+	if err := withLockWaitNotice(sessionID, errW, SessionLockNoticeDelay, func() error {
+		return s.clearSessionState(ctx, sessionID)
+	}); err != nil {
 		return fmt.Errorf("failed to clear session state: %w", err)
 	}
 	fmt.Fprintf(w, "✓ Cleared session state for %s\n", sessionID)

@@ -484,15 +484,18 @@ func newRepoMirrorCreateCmd() *cobra.Command {
 			"as soon as the placement is registered. Idempotent on " +
 			"(upstream, cluster). When the cluster-host is omitted, an " +
 			"interactive terminal offers the available clusters as a picker; " +
-			"non-interactive runs default to " + defaultClusterHost + ".",
+			"non-interactive runs default to " + defaultClusterHost + ".\n\n" +
+			"Mirror creation uses the asynchronous request route by default. Set " +
+			"async_mirror_requests to false in the layered settings to use the " +
+			"synchronous route.",
 		Example: "  entire repo mirror create\n" +
 			"  entire repo mirror create github.com/octocat/hello-world\n" +
 			"  entire repo mirror create github.com/octocat/hello-world aws-us-east-2.entire.io",
 		Args: cobra.RangeArgs(0, 2),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			opts := mirrorCreateOptions{noWait: noWait, timeout: waitTimeout}
+			opts := mirrorCreateOptions{async: true, noWait: noWait, timeout: waitTimeout}
 			if settings, err := LoadEntireSettings(cmd.Context()); err == nil {
-				opts.async = settings.AsyncMirrorRequests
+				opts.async = settings.IsAsyncMirrorRequestsEnabled()
 			}
 			if len(args) == 0 {
 				return runMirrorCreateWizard(cmd, opts)
@@ -537,7 +540,7 @@ func newRepoMirrorCreateCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().BoolVar(&noWait, "no-wait", false, "Return once the placement is registered, without waiting for the initial clone")
-	cmd.Flags().DurationVar(&waitTimeout, "wait-timeout", 30*time.Minute, "How long to wait for mirror creation to finish")
+	cmd.Flags().DurationVar(&waitTimeout, "wait-timeout", 30*time.Minute, "How long to wait. Async mode applies one deadline to request submission, placement, and clone readiness; synchronous mode applies it only to clone readiness")
 	return cmd
 }
 

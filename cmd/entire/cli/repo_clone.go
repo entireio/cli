@@ -137,6 +137,25 @@ func parseNativeCloneRef(ref string) (project, repo string, err error) {
 	return project, repo, nil
 }
 
+type nativeRepoResolverClient interface {
+	repoRefClient
+	GetRepo(ctx context.Context, params coreapi.GetRepoParams) (*coreapi.Repo, error)
+}
+
+// resolveNativeRepo performs the canonical /et/<project>/<repo> identity
+// lookup shared by clone and repo-scoped data commands.
+func resolveNativeRepo(ctx context.Context, c nativeRepoResolverClient, project, repoName string) (*coreapi.Repo, error) {
+	repoID, err := resolveRepoRef(ctx, c, repoName, project)
+	if err != nil {
+		return nil, err
+	}
+	repo, err := c.GetRepo(ctx, coreapi.GetRepoParams{RepoId: repoID})
+	if err != nil {
+		return nil, fmt.Errorf("get repo: %w", err)
+	}
+	return repo, nil
+}
+
 // resolveNativeCloneURL resolves an Entire-native repo (by project and repo
 // name) to its entire:// clone URL: name → ULID via the project-scoped lookup,
 // then GetRepo — the one call that returns both clusterHost and path. The URL
@@ -144,13 +163,9 @@ func parseNativeCloneRef(ref string) (project, repo string, err error) {
 // user's ref. repoName arrives with any `.git` suffix already dropped by the
 // parser (see gitDirSuffix).
 func resolveNativeCloneURL(ctx context.Context, c *coreapi.Client, project, repoName string) (string, error) {
-	repoID, err := resolveRepoRef(ctx, c, repoName, project)
+	repo, err := resolveNativeRepo(ctx, c, project, repoName)
 	if err != nil {
 		return "", err
-	}
-	repo, err := c.GetRepo(ctx, coreapi.GetRepoParams{RepoId: repoID})
-	if err != nil {
-		return "", fmt.Errorf("get repo: %w", err)
 	}
 	cloneURL := repoRemoteURL(*repo)
 	if cloneURL == "" {

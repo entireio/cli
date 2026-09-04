@@ -224,6 +224,15 @@ func TestCreateAndAwaitMirror_SynchronousPhases(t *testing.T) {
 	})
 }
 
+func TestRepoMirrorCreate_WaitTimeoutHelp(t *testing.T) {
+	t.Parallel()
+
+	flag := newRepoMirrorCreateCmd().Flags().Lookup("wait-timeout")
+	require.NotNil(t, flag)
+	require.Contains(t, flag.Usage, "Async mode applies one deadline to request submission, placement, and clone readiness")
+	require.Contains(t, flag.Usage, "synchronous mode applies it only to clone readiness")
+}
+
 // TestReportOneShotMirror exercises the one-shot create's presentation across
 // the shared lifecycle outcomes — the branching finishMirrorCreate used to own,
 // now driven by mirrorCreateOutcome (and shared with the wizard).

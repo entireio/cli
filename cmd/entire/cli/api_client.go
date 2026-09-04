@@ -72,17 +72,22 @@ func NewAuthenticatedEntireAPICellClient(ctx context.Context, insecureHTTP bool,
 	return auth.NewEntireAPICellClient(ctx, insecureHTTP, target) //nolint:wrapcheck // pass through contextual auth errors
 }
 
-// newTrailAPIClient dials the entire-api cell that owns the repository. It is a
+// newTrailAPIClient dials the entire-api cell that owns the forge-qualified
+// repository and returns its repo_id for repo-addressed trail reads. It is a
 // package seam so tests can substitute a client pointed at a stub server.
-var newTrailAPIClient = func(ctx context.Context, insecureHTTP bool, fullName string) (*api.Client, error) {
-	client, err := NewAuthenticatedEntireAPICellClient(ctx, insecureHTTP, fullName)
+var newTrailAPIClient = func(ctx context.Context, insecureHTTP bool, forge, owner, repo string) (*api.Client, string, error) {
+	placement, err := resolveTrailRepoCellPlacement(ctx, forge, owner, repo)
+	if err != nil {
+		return nil, "", err
+	}
+	client, err := auth.NewEntireAPICellClient(ctx, insecureHTTP, placement.Target)
 	if errors.Is(err, clusterdiscovery.ErrNoAuthContext) {
 		// Preserve cluster discovery's detailed host/context hint while restoring
 		// the sentinel trail commands use for the standard login UX.
-		return nil, fmt.Errorf("%w: %w", auth.ErrNotLoggedIn, err)
+		return nil, "", fmt.Errorf("%w: %w", auth.ErrNotLoggedIn, err)
 	}
 	if err != nil {
-		return nil, err
+		return nil, "", err //nolint:wrapcheck // auth client returns contextual, user-facing errors
 	}
-	return client, nil
+	return client, placement.RepoID, nil
 }

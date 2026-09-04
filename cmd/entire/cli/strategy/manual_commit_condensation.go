@@ -1728,7 +1728,7 @@ func (s *ManualCommitStrategy) CondenseSessionByID(ctx context.Context, sessionI
 	}
 
 	var shadowBranchName string
-	var clearAfter bool
+	var cleared bool
 	var newSkillEvents []agent.SkillEvent
 	mutErr := MutateSessionStateOnSaved(ctx, sessionID, func(state *SessionState) error {
 		if state.PendingCondensationID() != checkpointID {
@@ -1746,7 +1746,24 @@ func (s *ManualCommitStrategy) CondenseSessionByID(ctx context.Context, sessionI
 				slog.String("session_id", sessionID),
 				slog.String("shadow_branch", shadowBranchName),
 			)
-			clearAfter = true
+			// Clear while still holding this session's gate (we're inside
+			// the locked mutation closure), not after releasing it: a
+			// concurrent, properly-locked write (e.g. a PostToolUse hook
+			// for this same session) landing in an unlocked gap between
+			// this decision and the actual delete would otherwise be
+			// silently destroyed. See clearSessionState's doc comment.
+			//
+			// This is the ONLY correct way to clear from inside a frame, and
+			// it works only because of the ErrMutationSkip below: the delete
+			// sticks because the frame does not save. The gate alone would
+			// not be enough -- a saving frame writes the state back out and
+			// the clear vanishes, which is why the exported
+			// ClearSessionState refuses to run reentrantly rather than
+			// appearing to succeed.
+			if clearErr := s.clearSessionStateLocked(ctx, sessionID); clearErr != nil {
+				return fmt.Errorf("failed to clear session state: %w", clearErr)
+			}
+			cleared = true
 			return ErrMutationSkip
 		}
 
@@ -1798,10 +1815,10 @@ func (s *ManualCommitStrategy) CondenseSessionByID(ctx context.Context, sessionI
 		return mutErr
 	}
 
-	if clearAfter {
-		if err := s.clearSessionState(ctx, sessionID); err != nil {
-			return fmt.Errorf("failed to clear session state: %w", err)
-		}
+	if cleared {
+		// Already cleared inside the locked mutation closure above -- see
+		// its comment for why this must not happen a second time (or
+		// outside the lock).
 		return nil
 	}
 

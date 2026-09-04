@@ -5,6 +5,31 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.10.5] - 2026-09-03
+
+### Changed
+
+- Mirror creation goes through the control plane's async request routes by default, reporting queued, placing, and cloning progress instead of holding one request open for the whole placement; the `async_mirror_requests` setting it shipped behind in 0.10.4 now defaults on. Opt out with `"async_mirror_requests": false`. In async mode `--wait-timeout` is one deadline across submission, placement, and clone readiness, not clone readiness alone ([#2246](https://github.com/entireio/cli/pull/2246))
+- Entire no longer installs a `Read(./.entire/metadata/**)` deny rule into Claude Code's or Factory Droid's permission config, so agents in auto mode stop prompting for permission on ordinary commands. A deny rule is a hard block auto mode's classifier cannot get past, and it matched on the path being named rather than on anything being read, so a recursive grep from the repo root needed hand approval. `entire enable` clears one an older CLI left behind and `entire doctor` repairs it ([#2258](https://github.com/entireio/cli/pull/2258))
+- `entire experts --repo <owner>/<repo>` takes the repo id from the placement lookup that already chose its cell, and now tells "not onboarded" apart from "processing placement failed or suspended" instead of guessing at three causes ([#2222](https://github.com/entireio/cli/pull/2222))
+
+### Fixed
+
+- A session's `full.jsonl` is released from `.entire/metadata` once its content has been condensed into a checkpoint. Nothing ever emptied that staging buffer, so transcripts accumulated in the worktree forever after being committed and pushed — 460 MB across 392 session directories in one checkout. Existing files are not reclaimed automatically ([#2258](https://github.com/entireio/cli/pull/2258))
+- `git clone entire://<cluster>/…` works again when your active login is on a different federation and exactly one saved login can authenticate that cluster; the CLI uses it and names it on stderr. `--context` and `$ENTIRE_CONTEXT` are unchanged ([#2248](https://github.com/entireio/cli/pull/2248))
+- `entire doctor` says it is waiting for a session lock instead of stalling with no output ([#2232](https://github.com/entireio/cli/pull/2232))
+
+### Security
+
+- A cluster's `/.well-known/entire-cluster.json` can no longer advertise login servers outside its own registrable domain. That document decides which saved login's JWT is sent to the host as a bearer, so a hostile cluster naming `foo.auth.entire.io` in `core_urls` was handed a real entire.io token — through `--context`, the active context, and `ENTIRE_TOKEN` alike. Choosing a login *for* you is additionally limited to Entire's own sites ([#2248](https://github.com/entireio/cli/pull/2248))
+- `entire checkpoint explain --repo <owner>/<name>` verifies a cell's response is for the repo and checkpoint that were requested before caching or rendering it, and labels the result with the server's own checkpoint ID. A wrong-repo or wrong-checkpoint response would otherwise have rendered as belonging to the repo you asked about ([#2225](https://github.com/entireio/cli/pull/2225))
+- Clearing a session's state file takes the same per-session gate every other write to that file takes. A concurrent, properly locked write landing between the "safe to clear" decision and the delete was destroyed silently ([#2232](https://github.com/entireio/cli/pull/2232))
+- `docs/security-and-privacy.md` discloses what happens to a pasted image: no redaction pass reads image content, there is no OCR or vision scan, and the outcome is per-agent — unredacted inline base64 on Claude Code, destroyed by the entropy layer on Codex, not stored at all on Cursor ([#2227](https://github.com/entireio/cli/pull/2227))
+
+### Housekeeping
+
+- The cross-jurisdiction HTTP transport (421 follow plus RFC 8693 token exchange) moves to `entireio/auth-go`'s `crossjuris` package, shared with entiredb and entire-ci ([#2235](https://github.com/entireio/cli/pull/2235))
+
 ## [0.10.4] - 2026-09-02
 
 ### Added

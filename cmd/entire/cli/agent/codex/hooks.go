@@ -534,7 +534,7 @@ func hooksDocumentRoot(path string) (*os.Root, string, error) {
 		return nil, "", fmt.Errorf("codex hooks path %q is not a .codex/%s", path, HooksFileName)
 	}
 	projectRoot := strings.TrimSuffix(path, string(filepath.Separator)+name)
-	cfg, err := agent.OpenHookConfig(projectRoot, ".codex/"+HooksFileName)
+	cfg, err := agent.OpenHookConfig(projectRoot, (&CodexAgent{}).HookConfigRelPath())
 	if err != nil {
 		return nil, "", err //nolint:wrapcheck // caller names the path it asked about
 	}
@@ -790,3 +790,6 @@ func removeEntireHooks(groups []MatcherGroup) []MatcherGroup {
 	}
 	return result
 }
+
+// HookConfigRelPath implements agent.HookConfigLocator.
+func (c *CodexAgent) HookConfigRelPath() string { return ".codex/" + HooksFileName }

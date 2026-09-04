@@ -13,8 +13,8 @@ import (
 )
 
 // trailApprovalsPath builds the approvals collection path for a trail number.
-func trailApprovalsPath(forge, owner, repo string, number int) string {
-	return trailNumberPath(forge, owner, repo, number) + "/approvals"
+func trailApprovalsPath(basePath string, number int) string {
+	return trailNumberPathForBase(basePath, number) + "/approvals"
 }
 
 // buildApprovalRequest validates and constructs an approval request. A
@@ -32,19 +32,15 @@ func buildApprovalRequest(event, message string) (api.TrailApprovalRequest, erro
 // the current branch (or --branch), and requires it to have a number (the
 // number-keyed subresource endpoints — approvals, threads — reject a trail
 // without one).
-func resolveNumberedTrail(ctx context.Context, client *api.Client, repoOverride, selector, branch string) (*api.TrailResource, string, string, string, error) {
-	forge, owner, repoName, err := resolveTrailRepoOrRemote(ctx, repoOverride)
+func resolveNumberedTrailAtPath(ctx context.Context, client *api.Client, basePath, forge, owner, repoName, selector, branch string) (*api.TrailResource, error) {
+	found, err := resolveTrailBySelectorAtPath(ctx, client, basePath, forge, owner, repoName, selector, branch)
 	if err != nil {
-		return nil, "", "", "", err
-	}
-	found, err := resolveTrailBySelector(ctx, client, forge, owner, repoName, selector, branch)
-	if err != nil {
-		return nil, "", "", "", err
+		return nil, err
 	}
 	if found.Number <= 0 {
-		return nil, "", "", "", errors.New("trail has no number yet")
+		return nil, errors.New("trail has no number yet")
 	}
-	return found, forge, owner, repoName, nil
+	return found, nil
 }
 
 // selectorFromArgs returns the first positional arg, mirroring `trail show`.
@@ -64,12 +60,20 @@ func submitTrailApproval(ctx context.Context, w, errW io.Writer, insecureHTTP bo
 		return err
 	}
 	// Auth/not-logged-in messages go to stderr; w carries command output only.
-	return runAuthenticatedTrailAPI(ctx, errW, insecureHTTP, repoOverride, func(ctx context.Context, client *api.Client) error {
-		found, forge, owner, repoName, err := resolveNumberedTrail(ctx, client, repoOverride, selector, branch)
+	return runAuthenticatedTrailAPI(ctx, errW, insecureHTTP, repoOverride, func(ctx context.Context, client *api.Client, repoID string) error {
+		forge, owner, repoName, err := resolveTrailRepoOrRemote(ctx, repoOverride)
 		if err != nil {
 			return err
 		}
-		resp, err := client.Post(ctx, trailApprovalsPath(forge, owner, repoName, found.Number), req)
+		basePath, err := trailRepoBasePath(forge, owner, repoName, repoID)
+		if err != nil {
+			return err
+		}
+		found, err := resolveNumberedTrailAtPath(ctx, client, basePath, forge, owner, repoName, selector, branch)
+		if err != nil {
+			return err
+		}
+		resp, err := client.Post(ctx, trailApprovalsPath(basePath, found.Number), req)
 		if err != nil {
 			return fmt.Errorf("failed to submit approval: %w", err)
 		}
@@ -157,12 +161,20 @@ func runTrailApprovals(ctx context.Context, w, errW io.Writer, insecureHTTP bool
 		return errors.New("pass a trail selector or --branch, not both")
 	}
 	// Auth/not-logged-in messages go to stderr; w carries command output only.
-	return runAuthenticatedTrailAPI(ctx, errW, insecureHTTP, repoOverride, func(ctx context.Context, client *api.Client) error {
-		found, forge, owner, repoName, err := resolveNumberedTrail(ctx, client, repoOverride, selector, branch)
+	return runAuthenticatedTrailAPI(ctx, errW, insecureHTTP, repoOverride, func(ctx context.Context, client *api.Client, repoID string) error {
+		forge, owner, repoName, err := resolveTrailRepoOrRemote(ctx, repoOverride)
 		if err != nil {
 			return err
 		}
-		resp, err := client.Get(ctx, trailApprovalsPath(forge, owner, repoName, found.Number))
+		basePath, err := trailRepoBasePath(forge, owner, repoName, repoID)
+		if err != nil {
+			return err
+		}
+		found, err := resolveNumberedTrailAtPath(ctx, client, basePath, forge, owner, repoName, selector, branch)
+		if err != nil {
+			return err
+		}
+		resp, err := client.Get(ctx, trailApprovalsPath(basePath, found.Number))
 		if err != nil {
 			return fmt.Errorf("failed to list approvals: %w", err)
 		}
