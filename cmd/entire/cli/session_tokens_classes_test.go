@@ -6,6 +6,9 @@ import (
 	"testing"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
+	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
+	"github.com/entireio/cli/cmd/entire/cli/session"
+	"github.com/entireio/cli/cmd/entire/cli/strategy"
 )
 
 // The renderer prints these verbatim on both commands, so a reason that says
@@ -185,5 +188,163 @@ func TestSessionTokenWeights_SubagentWithNoRatiosIsNotAMixedModelsCase(t *testin
 	}
 	if reason != unpricedSubagentNoRatios {
 		t.Errorf("reason = %q, want %q", reason, unpricedSubagentNoRatios)
+	}
+}
+
+// liveSessionFor builds a live session state with the given model and usage.
+// Live state is the current binary's own struct, so unlike a committed
+// checkpoint it has no version to be legacy at.
+func liveSessionFor(t *testing.T, model string, usage *agent.TokenUsage) *strategy.SessionState {
+	t.Helper()
+	return &strategy.SessionState{
+		SessionID:  "s1",
+		AgentType:  "Claude Code",
+		ModelName:  model,
+		Phase:      session.PhaseIdle,
+		TokenUsage: usage,
+	}
+}
+
+// The point of the feature: a live session on a model we have ratios for gets
+// the same volume-and-cost table `checkpoint tokens` shows.
+func TestSessionTokensReport_Classes_PricedWhenModelKnown(t *testing.T) {
+	t.Parallel()
+
+	report := buildSessionTokensReport(liveSessionFor(t, "claude-sonnet-4.6",
+		&agent.TokenUsage{InputTokens: 1000, CacheCreationTokens: 2000, CacheReadTokens: 6000, OutputTokens: 1000}), "idle")
+
+	if report.Classes == nil {
+		t.Fatal("a live session with usage must carry a class breakdown")
+	}
+	if !report.Classes.Priced {
+		t.Errorf("a known model must be priced, reason was %q", report.Classes.UnpricedReason)
+	}
+	vol := report.Classes.Input.VolumePercent + report.Classes.CacheWrite.VolumePercent +
+		report.Classes.CacheRead.VolumePercent + report.Classes.Output.VolumePercent
+	if vol != 100 {
+		t.Errorf("volume shares sum to %d, want 100", vol)
+	}
+	cost := report.Classes.Input.CostPercent + report.Classes.CacheWrite.CostPercent +
+		report.Classes.CacheRead.CostPercent + report.Classes.Output.CostPercent
+	if cost != 100 {
+		t.Errorf("cost shares sum to %d, want 100", cost)
+	}
+}
+
+// The whole reason Task 3 extracted one resolver: the same usage on the same
+// model must get the same pricing verdict from both commands. A live session and
+// its own committed checkpoint disagreeing about whether cost is showable is a
+// contradiction the user cannot resolve.
+//
+// The checkpoint side is pinned to TokenUsageVersionDelta because that is the
+// version the current binary writes — a legacy checkpoint is a genuinely
+// different fact (see the TTL test below), not a parity break.
+func TestSessionTokensReport_Classes_AgreeWithCheckpointForSameData(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name  string
+		model string
+		usage *agent.TokenUsage
+	}{
+		{"priced", "claude-sonnet-4.6", &agent.TokenUsage{InputTokens: 1000, CacheCreationTokens: 2000, CacheReadTokens: 6000, OutputTokens: 1000}},
+		{"unknown model", "some-unknown-model", &agent.TokenUsage{InputTokens: 1000, OutputTokens: 100}},
+		{"subagent on another provider", "claude-sonnet-4.6", &agent.TokenUsage{
+			InputTokens: 1000, OutputTokens: 100,
+			SubagentTokens: &agent.TokenUsage{Model: "gpt-5.3-codex", InputTokens: 500, OutputTokens: 50},
+		}},
+		{"subagent with no ratios", "claude-sonnet-4.6", &agent.TokenUsage{
+			InputTokens: 1000, OutputTokens: 100,
+			SubagentTokens: &agent.TokenUsage{Model: "some-unknown-model", InputTokens: 500, OutputTokens: 50},
+		}},
+		{"subagent in the same family", "claude-sonnet-4.6", &agent.TokenUsage{
+			InputTokens: 1000, OutputTokens: 100,
+			SubagentTokens: &agent.TokenUsage{Model: "claude-haiku-4.5", InputTokens: 500, OutputTokens: 50},
+		}},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			live := buildSessionTokensReport(liveSessionFor(t, tc.model, tc.usage), "idle")
+			committed := classesReportFor(t, "Claude Code", tc.model, checkpoint.TokenUsageVersionDelta, tc.usage)
+
+			if live.Classes == nil || committed.Classes == nil {
+				t.Fatalf("both commands must report classes: live=%v committed=%v", live.Classes, committed.Classes)
+			}
+			if live.Classes.Priced != committed.Classes.Priced {
+				t.Errorf("priced disagrees: live=%v committed=%v", live.Classes.Priced, committed.Classes.Priced)
+			}
+			if live.Classes.UnpricedReason != committed.Classes.UnpricedReason {
+				t.Errorf("withheld reason disagrees:\n live      = %q\n committed = %q",
+					live.Classes.UnpricedReason, committed.Classes.UnpricedReason)
+			}
+			if live.Classes.Family != committed.Classes.Family {
+				t.Errorf("family disagrees: live=%q committed=%q", live.Classes.Family, committed.Classes.Family)
+			}
+			if live.Classes.Total != committed.Classes.Total {
+				t.Errorf("total disagrees: live=%d committed=%d", live.Classes.Total, committed.Classes.Total)
+			}
+		})
+	}
+}
+
+// Live state is the current binary's own struct: CacheCreation1hTokens is
+// written whenever the agent records it, so its absence means zero rather than
+// "not recorded". The TTL reason is checkpoint-only by construction, and a live
+// session must never print it — that is the one place the two commands are
+// deliberately allowed to differ on the same-looking data.
+func TestSessionTokensReport_Classes_NeverWithholdsForUnknownTTL(t *testing.T) {
+	t.Parallel()
+
+	usage := &agent.TokenUsage{InputTokens: 1000, CacheCreationTokens: 2000, OutputTokens: 100}
+
+	live := buildSessionTokensReport(liveSessionFor(t, "claude-sonnet-4.6", usage), "idle")
+	if live.Classes == nil {
+		t.Fatal("expected a breakdown")
+	}
+	if live.Classes.UnpricedReason == unpricedUnknownTTL {
+		t.Error("live state always knows the TTL split; the checkpoint-only TTL reason must never appear")
+	}
+	if !live.Classes.Priced {
+		t.Errorf("cache writes with no 1h figure mean zero on live state, so this must stay priced; got %q",
+			live.Classes.UnpricedReason)
+	}
+
+	// The same bytes in a legacy checkpoint genuinely are unknowable, so the
+	// divergence is a real difference in the data, not an inconsistency.
+	legacy := classesReportFor(t, "Claude Code", "claude-sonnet-4.6", 0, usage)
+	if legacy.Classes.Priced {
+		t.Error("a legacy checkpoint cannot know the TTL split and must stay unpriced")
+	}
+}
+
+// The table has to actually reach the user, not just the struct.
+func TestSessionTokensText_RendersTheBillingTable(t *testing.T) {
+	t.Parallel()
+
+	report := buildSessionTokensReport(liveSessionFor(t, "claude-sonnet-4.6",
+		&agent.TokenUsage{InputTokens: 1000, CacheCreationTokens: 2000, CacheReadTokens: 6000, OutputTokens: 1000}), "idle")
+
+	var buf bytes.Buffer
+	writeSessionTokensText(&buf, report)
+	out := buf.String()
+
+	for _, want := range []string{"How it was billed", "Fresh input", "Cache write", "Cache read", "Output", "cost"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("session tokens output missing %q:\n%s", want, out)
+		}
+	}
+}
+
+// A session with no usage at all reports no table rather than four zeros, which
+// would read as a free session.
+func TestSessionTokensReport_Classes_AbsentWhenNoUsage(t *testing.T) {
+	t.Parallel()
+
+	report := buildSessionTokensReport(liveSessionFor(t, "claude-sonnet-4.6", nil), "idle")
+	if report.Classes != nil {
+		t.Errorf("no usage must yield no breakdown, got %+v", report.Classes)
 	}
 }

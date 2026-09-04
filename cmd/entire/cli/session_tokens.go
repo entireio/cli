@@ -14,12 +14,17 @@ import (
 )
 
 type sessionTokensReport struct {
-	SessionID       string                        `json:"session_id"`
-	Agent           string                        `json:"agent"`
-	Model           string                        `json:"model,omitempty"`
-	Status          string                        `json:"status"`
-	Source          string                        `json:"source"`
-	Tokens          *sessionTokensUsage           `json:"tokens,omitempty"`
+	SessionID string              `json:"session_id"`
+	Agent     string              `json:"agent"`
+	Model     string              `json:"model,omitempty"`
+	Status    string              `json:"status"`
+	Source    string              `json:"source"`
+	Tokens    *sessionTokensUsage `json:"tokens,omitempty"`
+	// Classes is the billing-class breakdown — volume and, where a verified
+	// ratio row applies, cost share per class. Built from the same resolver and
+	// rendered by the same writer as `checkpoint tokens`, so a live session and
+	// its own committed checkpoint cannot show different tables.
+	Classes         *tokenClassBreakdown          `json:"classes,omitempty"`
 	Context         *sessionTokensContext         `json:"context,omitempty"`
 	Contributors    []sessionTokensContributor    `json:"contributors,omitempty"`
 	Recommendations []sessionTokensRecommendation `json:"recommendations,omitempty"`
@@ -184,6 +189,21 @@ func buildSessionTokensReport(state *strategy.SessionState, status string) sessi
 
 	if tokens := buildSessionTokensUsage(state.TokenUsage); tokens != nil {
 		report.Tokens = tokens
+		weights, unpricedReason := tokenWeightsForSession(state.ModelName, state.TokenUsage)
+		// ttlKnown is unconditionally true here: live state is this binary's own
+		// struct, and CacheCreation1hTokens is written whenever the agent records
+		// it, so an absent 1-hour figure means zero. The version gate on the
+		// checkpoint side exists only because checkpoints written before that
+		// field existed cannot be told apart from ones with no 1-hour writes —
+		// a live session has no version to be legacy at.
+		if classes, ok := tokenClassShares(state.TokenUsage, weights, true); ok {
+			// tokenClassShares only sees empty weights, so it names the generic
+			// reason; the caller is the one that knows which case it was.
+			if !classes.Priced && unpricedReason != "" {
+				classes.UnpricedReason = unpricedReason
+			}
+			report.Classes = &classes
+		}
 		if tokens.SubagentTotal > 0 {
 			report.Contributors = append(report.Contributors, sessionTokensContributor{
 				Kind:       "subagents",
@@ -452,6 +472,7 @@ func writeSessionTokensText(w io.Writer, report sessionTokensReport) {
 	fmt.Fprintf(w, "Status:  %s\n", report.Status)
 
 	writeTokenUsageSection(w, report.Tokens)
+	writeTokenClasses(w, report.Classes)
 	if len(report.Recommendations) > 0 {
 		writeTokenRecommendations(w, report.Recommendations)
 	}
