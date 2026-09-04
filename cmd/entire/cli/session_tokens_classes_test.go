@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
-	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
@@ -309,32 +308,8 @@ func TestBuildSessionTokensReport_NoClassesWithoutUsage(t *testing.T) {
 	}
 }
 
-// The pricing walk and the walk that actually sums the classes must agree about
-// how deep they look. flattenTokenUsageForClasses stops at MaxSubagentDepth, so
-// an entry past that bound contributes no tokens to the table — unpricing the
-// whole report over a model whose tokens were never counted withholds cost for
-// a reason that is not in the numbers shown.
-func TestSubagentPricingReason_IgnoresEntriesPastTheDepthBound(t *testing.T) {
-	t.Parallel()
-
-	// A chain longer than the bound, with the offending model only at the tail.
-	head := &agent.TokenUsage{InputTokens: 1000, OutputTokens: 100}
-	tail := head
-	for range types.MaxSubagentDepth + 4 {
-		tail.SubagentTokens = &agent.TokenUsage{InputTokens: 1, OutputTokens: 1}
-		tail = tail.SubagentTokens
-	}
-	tail.Model = "gpt-5.3-codex"
-
-	weights, reason := tokenWeightsForSession("claude-sonnet-4.6", head)
-	if weights.Family == "" {
-		t.Errorf("an entry past MaxSubagentDepth contributes no tokens and must not unprice; reason %q", reason)
-	}
-}
-
-// The bound must not become a way to smuggle mispriced tokens in: an entry
-// inside the bound still unprices.
-func TestSubagentPricingReason_StillCatchesEntriesInsideTheDepthBound(t *testing.T) {
+// A subagent on another provider unprices, at any depth the walk reaches.
+func TestSubagentPricingReason_CatchesAnotherProvider(t *testing.T) {
 	t.Parallel()
 
 	usage := &agent.TokenUsage{

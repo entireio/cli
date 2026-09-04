@@ -151,14 +151,15 @@ func tokenWeightsForSession(model string, usage *types.TokenUsage) (tokenWeights
 // agent that mixes providers within one session (Pi), and only when it also
 // fails to record the subagent's model.
 //
-// The walk stops at types.MaxSubagentDepth, matching
-// flattenTokenUsageForClasses. The two must agree: an entry past the bound
-// contributes no tokens to the table, so withholding cost over its model would
-// state a reason that is not in the numbers shown. Unpricing is the safe
-// direction, but "safe" is not the same as "true".
+// The walk is deliberately unbounded, unlike flattenTokenUsageForClasses, which
+// stops at types.MaxSubagentDepth. The two disagreeing means an entry past that
+// bound contributes no tokens to the table yet can still withhold cost — safe
+// (it withholds rather than misprices) but not true. Bounding it is deferred to
+// the incremental plan's known-bugs list, where it lands together with
+// SubagentTotal's unbounded totalTokens walk and the un-audited exactPercents
+// math; splitting one of the three into this PR would fragment that follow-up.
 func subagentPricingReason(usage *types.TokenUsage, family string) string {
-	u := usage
-	for depth := 0; u != nil && depth < types.MaxSubagentDepth; u, depth = u.SubagentTokens, depth+1 {
+	for u := usage; u != nil; u = u.SubagentTokens {
 		if u.Model == "" {
 			continue
 		}
