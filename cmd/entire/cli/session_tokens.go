@@ -286,6 +286,15 @@ func buildSessionTokensUsage(usage *agent.TokenUsage) *sessionTokensUsage {
 	}
 }
 
+// subagentTotalOf reads the subagent figure off a usage block, tolerating the
+// nil that means "no usage recorded at all".
+func subagentTotalOf(tokens *sessionTokensUsage) int {
+	if tokens == nil {
+		return 0
+	}
+	return tokens.SubagentTotal
+}
+
 func topLevelSessionTokenTotal(tokens *sessionTokensUsage) int {
 	if tokens == nil {
 		return 0
@@ -479,7 +488,7 @@ func writeSessionTokensText(w io.Writer, report sessionTokensReport) {
 	fmt.Fprintf(w, "Status:  %s\n", report.Status)
 
 	writeTokenUsageSection(w, report.Tokens)
-	writeTokenClasses(w, report.Classes)
+	writeTokenClasses(w, report.Classes, subagentTotalOf(report.Tokens))
 	if len(report.Recommendations) > 0 {
 		writeTokenRecommendations(w, report.Recommendations)
 	}
@@ -639,22 +648,42 @@ func writeTokenUsageSectionWithTitle(w io.Writer, title string, tokens *sessionT
 }
 
 func writeTokenContributors(w io.Writer, contributors []sessionTokensContributor, contextInfo *sessionTokensContext) {
-	if len(contributors) > 0 {
-		fmt.Fprintln(w)
-		fmt.Fprintln(w, "Likely contributors")
-		for _, contributor := range contributors {
-			switch contributor.Kind {
-			case "subagents":
-				fmt.Fprintf(w, "- %s: %s tokens\n", contributor.Label, formatTokenCount(contributor.Tokens))
-			case "context_pressure":
-				if contextInfo != nil {
-					fmt.Fprintf(w, "- %s: %d%% of %s tokens\n", contributor.Label, contextInfo.Percent, formatTokenCount(contextInfo.WindowSize))
-				}
-			default:
-				fmt.Fprintf(w, "- %s\n", contributor.Label)
+	lines := contributorLines(contributors, contextInfo)
+	if len(lines) == 0 {
+		return
+	}
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, "Likely contributors")
+	for _, line := range lines {
+		fmt.Fprintf(w, "- %s\n", line)
+	}
+}
+
+// contributorLines renders the contributor lines, so that the section header
+// and its body come from one pass. The guard used to be len(contributors) > 0,
+// which counted entries that render nothing: context_pressure has always been
+// silent without a context block, and the subagents entry became silent when
+// its figure moved into the billed block (it stays in the report for --json).
+// A session with subagent usage, no context data and no skill events therefore
+// printed the "Likely contributors" header with nothing under it. Building the
+// lines first makes the header impossible to disagree with its own body.
+func contributorLines(contributors []sessionTokensContributor, contextInfo *sessionTokensContext) []string {
+	lines := make([]string, 0, len(contributors))
+	for _, contributor := range contributors {
+		switch contributor.Kind {
+		case "subagents":
+			// Rendered inside the billed block, with its share of the total.
+			// The report entry stays for --json (Decision 3); only the text moves.
+		case "context_pressure":
+			if contextInfo != nil {
+				lines = append(lines, fmt.Sprintf("%s: %d%% of %s tokens",
+					contributor.Label, contextInfo.Percent, formatTokenCount(contextInfo.WindowSize)))
 			}
+		default:
+			lines = append(lines, contributor.Label)
 		}
 	}
+	return lines
 }
 
 func writeTokenLimitations(w io.Writer, limitations []string) {

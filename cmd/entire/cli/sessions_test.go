@@ -1072,7 +1072,9 @@ func TestTokensCmd_TextOutputWithRecommendations(t *testing.T) {
 		"Cache write: 500",
 		"Output: 1.1k",
 		"API calls: 6",
-		"Subagents: 2k tokens",
+		// Moved out of "Likely contributors" and into the billed block, where it
+		// carries its share of the total it is a part of.
+		"Of the total, subagents used",
 		"Context pressure: 85% of 10k tokens",
 		"Recommendations",
 		"Scope subagent tasks tightly",
@@ -2277,7 +2279,8 @@ func TestCheckpointTokensCmd_TextOutputWithMultipleSessionsUsesAggregateScope(t 
 		"Input: 3.5k",
 		"Output: 1k",
 		"API calls: 3",
-		"Subagents: 2.5k tokens",
+		// Both commands render the figure through the shared block now.
+		"Of the total, subagents used",
 	}
 	for _, check := range checks {
 		if !strings.Contains(out, check) {

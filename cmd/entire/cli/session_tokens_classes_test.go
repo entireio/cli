@@ -94,7 +94,7 @@ func TestWriteTokenClasses_UnpricedReasonIsScopeNeutral(t *testing.T) {
 			}
 
 			var buf bytes.Buffer
-			writeTokenClasses(&buf, classes)
+			writeTokenClasses(&buf, classes, 0)
 			out := strings.ToLower(buf.String())
 
 			wantLine := "cost share omitted: " + strings.ToLower(tc.wantReason)
@@ -444,5 +444,136 @@ func TestCheckpointAgentBriefSessionReport_CarriesClasses(t *testing.T) {
 
 	if bridged := checkpointAgentBriefSessionReport(report); bridged.Classes != report.Classes {
 		t.Error("the bridge must carry Classes; dropping it is invisible until the brief becomes class-aware")
+	}
+}
+
+func TestWriteTokenClasses_SubagentShareShownWhenNonZero(t *testing.T) {
+	t.Parallel()
+
+	classes := &tokenClassBreakdown{
+		Input:     tokenClassShare{Tokens: 42000, VolumePercent: 10},
+		CacheRead: tokenClassShare{Tokens: 240000, VolumePercent: 58},
+		Total:     411000,
+	}
+
+	var buf bytes.Buffer
+	writeTokenClasses(&buf, classes, 54000)
+	out := buf.String()
+
+	if !strings.Contains(out, "Of the total, subagents used") {
+		t.Errorf("expected the subagent line, got:\n%s", out)
+	}
+	if !strings.Contains(out, "54k") {
+		t.Errorf("expected 54k (formatTokenCount trims the .0), got:\n%s", out)
+	}
+	if !strings.Contains(out, "13%") {
+		t.Errorf("54000/411000 rounds to 13%%, got:\n%s", out)
+	}
+}
+
+// Absent subagent tokens cannot distinguish "none spawned" from "spawned but
+// not captured" in a metadata-only layer, so claiming either is unprovable —
+// and it would be noise on the majority of sessions that spawned none.
+func TestWriteTokenClasses_SubagentShareSilentWhenZero(t *testing.T) {
+	t.Parallel()
+
+	classes := &tokenClassBreakdown{Input: tokenClassShare{Tokens: 1000, VolumePercent: 100}, Total: 1000}
+
+	var buf bytes.Buffer
+	writeTokenClasses(&buf, classes, 0)
+
+	if strings.Contains(buf.String(), "subagents") {
+		t.Errorf("zero subagent tokens must print nothing about subagents, got:\n%s", buf.String())
+	}
+}
+
+// The figure appears once. It used to be a "Likely contributors" entry as well.
+func TestSessionTokens_SubagentFigureAppearsOnlyOnce(t *testing.T) {
+	t.Parallel()
+
+	state := &strategy.SessionState{
+		// The ID deliberately avoids the substring being counted below: the
+		// plan's own fixture used "live-subagents", which the Count picked up
+		// off the "Session:" line and reported as a duplicate figure.
+		SessionID: "live-with-helpers",
+		AgentType: "Claude Code",
+		ModelName: "claude-sonnet-4.6",
+		TokenUsage: &agent.TokenUsage{
+			InputTokens: 42000, CacheReadTokens: 240000, OutputTokens: 11000,
+			SubagentTokens: &agent.TokenUsage{InputTokens: 30000, OutputTokens: 24000},
+		},
+	}
+
+	var buf bytes.Buffer
+	writeSessionTokensText(&buf, buildSessionTokensReport(state, "active"))
+	out := buf.String()
+
+	// "ubagents" (plural) and not "ubagent": with this fixture the
+	// subagent-heavy recommendation also fires and says "Scope subagent tasks
+	// tightly…" — singular. Matching the plural counts the figure's labels only.
+	// Do not "fix" this to "ubagent"; it will start counting the advice line.
+	if n := strings.Count(out, "ubagents"); n != 1 {
+		t.Errorf("the subagent figure must appear exactly once in the text, found %d mentions:\n%s", n, out)
+	}
+}
+
+// Decision 3: the subagents contributor stays in the report for --json even
+// though the text now renders the figure inside the billed block. Removing it
+// would delete an element from an array PR 1 shipped.
+func TestBuildSessionTokensReport_KeepsSubagentContributorForJSON(t *testing.T) {
+	t.Parallel()
+
+	state := &strategy.SessionState{
+		SessionID: "json-contributor", AgentType: "Claude Code",
+		TokenUsage: &agent.TokenUsage{
+			InputTokens:    1000,
+			SubagentTokens: &agent.TokenUsage{InputTokens: 500},
+		},
+	}
+
+	report := buildSessionTokensReport(state, "active")
+	for _, c := range report.Contributors {
+		if c.Kind == "subagents" {
+			return
+		}
+	}
+	t.Error("the subagents contributor must stay in the report; --json consumers read it")
+}
+
+// The "Likely contributors" section must not print a header with nothing under
+// it. Both silent kinds are present here — a subagents entry (its figure now
+// lives in the billed block) and a context_pressure entry with no context
+// block — which is exactly the combination the old len(contributors) > 0 guard
+// let through.
+func TestWriteTokenContributors_NoBareHeaderWhenEverythingIsSilent(t *testing.T) {
+	t.Parallel()
+
+	var buf bytes.Buffer
+	writeTokenContributors(&buf, []sessionTokensContributor{
+		{Kind: "subagents", Label: "Subagents", Tokens: 54000},
+		{Kind: "context_pressure", Label: "Context pressure"},
+	}, nil)
+
+	if buf.Len() != 0 {
+		t.Errorf("contributors that all render nothing must print no section at all, got:\n%s", buf.String())
+	}
+}
+
+// …but a section with anything real to say still renders.
+func TestWriteTokenContributors_RendersWhenSomethingIsVisible(t *testing.T) {
+	t.Parallel()
+
+	var buf bytes.Buffer
+	writeTokenContributors(&buf, []sessionTokensContributor{
+		{Kind: "subagents", Label: "Subagents", Tokens: 54000},
+		{Kind: "skills", Label: "Skills/slash commands: brainstorm"},
+	}, nil)
+
+	out := buf.String()
+	if !strings.Contains(out, "Likely contributors") || !strings.Contains(out, "brainstorm") {
+		t.Errorf("a visible contributor must still render its section, got:\n%s", out)
+	}
+	if strings.Contains(out, "Subagents") {
+		t.Errorf("the subagents figure moved into the billed block, got:\n%s", out)
 	}
 }

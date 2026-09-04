@@ -13,7 +13,11 @@ import (
 // writeTokenClasses renders the billing-class breakdown. The cost
 // column is present only when the classes are priced: an empty or zeroed cost
 // column would read as "this cost nothing" rather than "we cannot say".
-func writeTokenClasses(w io.Writer, classes *tokenClassBreakdown) {
+//
+// subagentTotal is passed in rather than read off the breakdown because it is
+// not a billing class: subagent tokens are already folded into the four
+// classes, and this line states what share of that same total they were.
+func writeTokenClasses(w io.Writer, classes *tokenClassBreakdown, subagentTotal int) {
 	if classes == nil {
 		return
 	}
@@ -21,9 +25,9 @@ func writeTokenClasses(w io.Writer, classes *tokenClassBreakdown) {
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "How it was billed")
 	if classes.Priced {
-		fmt.Fprintf(w, "  %-14s %10s %8s %7s\n", "", "tokens", "volume", "cost")
+		fmt.Fprintf(w, "  %-30s %10s %8s %7s\n", "", "tokens", "volume", "cost")
 	} else {
-		fmt.Fprintf(w, "  %-14s %10s %8s\n", "", "tokens", "volume")
+		fmt.Fprintf(w, "  %-30s %10s %8s\n", "", "tokens", "volume")
 	}
 
 	rows := []struct {
@@ -38,11 +42,11 @@ func writeTokenClasses(w io.Writer, classes *tokenClassBreakdown) {
 	}
 	for _, row := range rows {
 		if classes.Priced {
-			fmt.Fprintf(w, "  %-14s %10s %8s %7s", row.label,
+			fmt.Fprintf(w, "  %-30s %10s %8s %7s", row.label,
 				formatTokenCount(row.share.Tokens), formatSharePercent(row.share.Tokens, row.share.VolumePercent),
 				formatCostSharePercent(row.share))
 		} else {
-			fmt.Fprintf(w, "  %-14s %10s %8s", row.label,
+			fmt.Fprintf(w, "  %-30s %10s %8s", row.label,
 				formatTokenCount(row.share.Tokens), formatSharePercent(row.share.Tokens, row.share.VolumePercent))
 		}
 		if row.note != "" {
@@ -50,7 +54,18 @@ func writeTokenClasses(w io.Writer, classes *tokenClassBreakdown) {
 		}
 		fmt.Fprintln(w)
 	}
-	fmt.Fprintf(w, "  %-14s %10s\n", "Total", formatTokenCount(classes.Total))
+	fmt.Fprintf(w, "  %-30s %10s\n", "Total", formatTokenCount(classes.Total))
+
+	// Inside the block, immediately after Total, because it is a statement
+	// about that total — and once, rather than also as a "Likely contributors"
+	// entry: one figure under two labels is the duplication this block exists
+	// to remove. Silent at zero, which cannot distinguish "none spawned" from
+	// "spawned but not captured".
+	if subagentTotal > 0 && classes.Total > 0 {
+		fmt.Fprintf(w, "  %-30s %10s %8s\n", "Of the total, subagents used",
+			formatTokenCount(subagentTotal),
+			formatSharePercent(subagentTotal, roundedPercent(subagentTotal, classes.Total)))
+	}
 
 	if !classes.Priced {
 		reason := classes.UnpricedReason

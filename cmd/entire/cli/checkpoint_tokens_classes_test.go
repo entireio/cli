@@ -219,7 +219,7 @@ func TestWriteTokenClasses_Priced(t *testing.T) {
 		})
 
 	var buf bytes.Buffer
-	writeTokenClasses(&buf, report.Classes)
+	writeTokenClasses(&buf, report.Classes, 0)
 	out := buf.String()
 
 	for _, want := range []string{"How it was billed", "Fresh input", "Cache write", "Cache read", "Output", "cost", "1h TTL", "thinking"} {
@@ -251,7 +251,7 @@ func TestWriteTokenClasses_ZeroCostClassIsNotUnderOnePercent(t *testing.T) {
 	}
 
 	var buf bytes.Buffer
-	writeTokenClasses(&buf, report.Classes)
+	writeTokenClasses(&buf, report.Classes, 0)
 	for _, line := range strings.Split(buf.String(), "\n") {
 		if !strings.Contains(line, "Cache write") {
 			continue
@@ -274,7 +274,7 @@ func TestWriteTokenClasses_UnpricedOmitsCostColumn(t *testing.T) {
 		&agent.TokenUsage{InputTokens: 1000, CacheReadTokens: 3000})
 
 	var buf bytes.Buffer
-	writeTokenClasses(&buf, report.Classes)
+	writeTokenClasses(&buf, report.Classes, 0)
 	out := buf.String()
 
 	// Assert on the header row: a substring check for "cost" would pass merely
@@ -296,7 +296,7 @@ func TestWriteTokenClasses_NilRendersNothing(t *testing.T) {
 	t.Parallel()
 
 	var buf bytes.Buffer
-	writeTokenClasses(&buf, nil)
+	writeTokenClasses(&buf, nil, 0)
 	if buf.Len() != 0 {
 		t.Errorf("nil breakdown must render nothing, got %q", buf.String())
 	}
@@ -389,7 +389,7 @@ func TestWriteTokenClasses_StatesTheRealReason(t *testing.T) {
 		&agent.TokenUsage{InputTokens: 1000, CacheCreationTokens: 2000, OutputTokens: 100})
 
 	var buf bytes.Buffer
-	writeTokenClasses(&buf, report.Classes)
+	writeTokenClasses(&buf, report.Classes, 0)
 	out := buf.String()
 
 	if strings.Contains(out, unpricedNoModel) {

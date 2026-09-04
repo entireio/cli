@@ -646,7 +646,7 @@ func writeCheckpointTokensText(w io.Writer, report checkpointTokensReport) {
 	}
 
 	writeTokenUsageSection(w, report.Tokens)
-	writeTokenClasses(w, report.Classes)
+	writeTokenClasses(w, report.Classes, subagentTotalOf(report.Tokens))
 	writeCheckpointTokenComparison(w, report.Comparison)
 	if len(report.Recommendations) > 0 {
 		writeTokenRecommendations(w, report.Recommendations)
