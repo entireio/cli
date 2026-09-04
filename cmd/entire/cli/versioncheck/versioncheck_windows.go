@@ -4,6 +4,7 @@ package versioncheck
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -13,10 +14,14 @@ import (
 // markers below are already lowercase.
 func foldPathCase(p string) string { return strings.ToLower(p) }
 
-// windowsInstallCmd is the README install.ps1 one-liner in its scriptblock
-// form, which is the only shape that can bind arguments. Printed, never
-// auto-run.
-const windowsInstallCmd = "& ([scriptblock]::Create((irm https://entire.io/install.ps1 -UseBasicParsing)))"
+// Windows install.ps1 one-liners, in the README's shapes. Printed, never
+// auto-run. windowsInstallCmd is the bare stable form; arguments go through
+// windowsInstallWithArgs, the iex "& {...}" form that can bind them.
+const (
+	windowsInstallURL      = "https://entire.io/install.ps1"
+	windowsInstallCmd      = "irm " + windowsInstallURL + " | iex"
+	windowsInstallWithArgs = `iex "& {$(irm ` + windowsInstallURL + `)} %s"`
+)
 
 // scoopConfigPath is Scoop's config.json, which records relocated install roots.
 func scoopConfigPath() string {
@@ -140,15 +145,24 @@ var installProbes = []installProbe{scoopProbe, miseProbe}
 // Scoop-first default (an explicit -InstallDir opts out of Scoop there), and
 // passes -NoPathUpdate so an update never rewrites the user PATH.
 func fallbackInstallCommand(execPath, currentVersion string) string {
-	cmd := windowsInstallCmd
+	var args []string
 	if isNightly(currentVersion) {
-		cmd += " -Channel nightly"
+		args = append(args, "-Channel nightly")
 	}
 	if execPath != "" {
-		// Single quotes are literal in PowerShell (double quotes would expand
-		// $name and treat backticks as escapes); only a quote needs doubling.
-		dir := strings.ReplaceAll(filepath.Dir(execPath), "'", "''")
-		cmd += " -InstallDir '" + dir + "' -NoPathUpdate"
+		args = append(args, "-InstallDir '"+quoteInsideDoubleQuoted(filepath.Dir(execPath))+"' -NoPathUpdate")
 	}
-	return cmd
+	if len(args) == 0 {
+		return windowsInstallCmd
+	}
+	return fmt.Sprintf(windowsInstallWithArgs, strings.Join(args, " "))
+}
+
+// quoteInsideDoubleQuoted prepares a path for a single-quoted literal that
+// itself sits inside a PowerShell double-quoted string. The outer string
+// still expands $name and treats a backtick as an escape, so both are
+// backtick-escaped; the inner single-quote literal needs a quote doubled.
+func quoteInsideDoubleQuoted(p string) string {
+	r := strings.NewReplacer("`", "``", "$", "`$", "'", "''")
+	return r.Replace(p)
 }

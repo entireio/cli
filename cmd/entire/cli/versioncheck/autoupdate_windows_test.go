@@ -45,13 +45,13 @@ func TestMaybeAutoUpdate_WindowsNeverAutoRuns(t *testing.T) {
 			name:           "unknown stable prints install.ps1",
 			execPath:       windowsProgramFilesPath,
 			currentVersion: "1.0.0",
-			wantCmd:        windowsInstallCmd + ` -InstallDir 'C:\Program Files\Entire' -NoPathUpdate`,
+			wantCmd:        `iex "& {$(irm https://entire.io/install.ps1)} -InstallDir 'C:\Program Files\Entire' -NoPathUpdate"`,
 		},
 		{
 			name:           "unknown nightly prints install.ps1 -Channel nightly",
 			execPath:       windowsLocalBinPath,
 			currentVersion: "1.0.1-nightly.202604101200.abc1234",
-			wantCmd:        windowsInstallCmd + ` -Channel nightly -InstallDir 'C:\Users\test\.local\bin' -NoPathUpdate`,
+			wantCmd:        `iex "& {$(irm https://entire.io/install.ps1)} -Channel nightly -InstallDir 'C:\Users\test\.local\bin' -NoPathUpdate"`,
 		},
 	}
 
