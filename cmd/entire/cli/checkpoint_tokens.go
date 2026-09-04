@@ -327,24 +327,52 @@ func buildCheckpointTokensReport(cpID id.CheckpointID, summary *checkpoint.Check
 // with `session tokens`. What stays here is checkpoint-only: the
 // metadataWarnings gate, the nil-meta guard, and the cross-session family
 // comparison (a live session has exactly one session to compare).
+//
+// The reason describes the whole set, so unpriced sessions are collected rather
+// than returned from as soon as one is seen. Returning eagerly made the reason
+// depend on iteration order — three sessions on claude, an unknown model and
+// gpt reported differing ratios or no ratios purely by position — and it could
+// not tell "no session has a ratio row", where unpricedNoModel is true, from
+// "only some do", where it is false. Precedence, applied to the set:
+//
+//  1. two recognised families that disagree (unpricedMixedModels): true
+//     regardless of what any other session carries
+//  2. a specific per-session reason, e.g. a subagent's
+//  3. some sessions priceable and some not (unpricedSomeTokensNoRatios)
+//  4. none priceable, where the generic reason is the accurate one
 func checkpointTokenWeights(metas []*checkpoint.Metadata, metadataWarnings int) (tokenWeights, string) {
 	if metadataWarnings > 0 {
 		return tokenWeights{}, ""
 	}
 	var resolved tokenWeights
+	var anyWithoutRatios bool
+	var sessionReason string
 	for _, meta := range metas {
 		if meta == nil {
 			return tokenWeights{}, ""
 		}
 		weights, reason := tokenWeightsForSession(meta.Model, meta.TokenUsage)
 		if weights.Family == "" {
-			return tokenWeights{}, reason
+			if reason == "" {
+				anyWithoutRatios = true
+			} else if sessionReason == "" {
+				sessionReason = reason
+			}
+			continue
 		}
 		if resolved.Family == "" {
 			resolved = weights
 		} else if resolved.Family != weights.Family {
 			return tokenWeights{}, unpricedMixedModels
 		}
+	}
+	switch {
+	case sessionReason != "":
+		return tokenWeights{}, sessionReason
+	case anyWithoutRatios && resolved.Family != "":
+		return tokenWeights{}, unpricedSomeTokensNoRatios
+	case anyWithoutRatios:
+		return tokenWeights{}, ""
 	}
 	return resolved, ""
 }

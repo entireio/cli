@@ -523,3 +523,92 @@ func TestFormatSharePercent(t *testing.T) {
 		}
 	}
 }
+
+// checkpointWeightsFor resolves weights for a set of (model, usage) sessions.
+func checkpointWeightsFor(t *testing.T, sessions ...*checkpoint.Metadata) (tokenWeights, string) {
+	t.Helper()
+	return checkpointTokenWeights(sessions, 0)
+}
+
+func sessionMeta(id, model string) *checkpoint.Metadata {
+	return &checkpoint.Metadata{SessionID: id, Agent: "Claude Code", Model: model,
+		TokenUsage: &agent.TokenUsage{InputTokens: 1000, OutputTokens: 100}}
+}
+
+// The generic reason claims no model here has verified ratios. With one session
+// that is true; with two sessions where only one model is unrecognised it is
+// false, and it is the same error Part B fixed for subagents: a withheld-cost
+// reason stating something untrue of the data.
+//
+// Order-independent, because the reason describes the set, not the iteration.
+func TestCheckpointTokenWeights_PartlyUnknownModelsDoNotClaimNoneArePriced(t *testing.T) {
+	t.Parallel()
+
+	known := sessionMeta("s1", "claude-sonnet-4.6")
+	unknown := sessionMeta("s2", "some-unknown-model")
+
+	for _, tc := range []struct {
+		name  string
+		metas []*checkpoint.Metadata
+	}{
+		{"known first", []*checkpoint.Metadata{known, unknown}},
+		{"unknown first", []*checkpoint.Metadata{unknown, known}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			weights, reason := checkpointWeightsFor(t, tc.metas...)
+			if weights.Family != "" {
+				t.Errorf("a session with no ratios must unprice the checkpoint, got %q", weights.Family)
+			}
+			if reason == "" {
+				t.Errorf("the generic reason claims nothing here is priceable, but %q is; want %q",
+					known.Model, unpricedSomeTokensNoRatios)
+			}
+			if reason != unpricedSomeTokensNoRatios {
+				t.Errorf("reason = %q, want %q", reason, unpricedSomeTokensNoRatios)
+			}
+		})
+	}
+}
+
+// When no session has a ratio row, the generic reason is the true one and must
+// still be used — the fix above must not swallow the case it was written for.
+func TestCheckpointTokenWeights_AllUnknownModelsKeepTheGenericReason(t *testing.T) {
+	t.Parallel()
+
+	weights, reason := checkpointWeightsFor(t, sessionMeta("s1", "some-unknown-model"), sessionMeta("s2", "another-unknown"))
+	if weights.Family != "" {
+		t.Errorf("family = %q, want empty", weights.Family)
+	}
+	if reason != "" {
+		t.Errorf("reason = %q, want empty so the generic no-ratios reason is used", reason)
+	}
+}
+
+// Two recognised models in different families is a different fact from a model
+// with no row, and it must win: it is true regardless of the third session.
+func TestCheckpointTokenWeights_DifferingFamiliesOutrankAnUnknownModel(t *testing.T) {
+	t.Parallel()
+
+	anthropic := sessionMeta("s1", "claude-sonnet-4.6")
+	openai := sessionMeta("s2", "gpt-5.3-codex")
+	unknown := sessionMeta("s3", "some-unknown-model")
+
+	for _, tc := range []struct {
+		name  string
+		metas []*checkpoint.Metadata
+	}{
+		{"unknown last", []*checkpoint.Metadata{anthropic, openai, unknown}},
+		{"unknown between", []*checkpoint.Metadata{anthropic, unknown, openai}},
+		{"unknown first", []*checkpoint.Metadata{unknown, anthropic, openai}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			if _, reason := checkpointWeightsFor(t, tc.metas...); reason != unpricedMixedModels {
+				t.Errorf("reason = %q, want %q", reason, unpricedMixedModels)
+			}
+		})
+	}
+}

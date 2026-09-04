@@ -142,7 +142,7 @@ func tokenWeightsForSession(model string, usage *types.TokenUsage) (tokenWeights
 // inconsistent are two different facts, and the report prints the reason
 // verbatim: a recognised model in another family really does mean differing
 // ratios (unpricedMixedModels), while an unrecognised one means there are no
-// ratios for those tokens at all (unpricedSubagentNoRatios). One bool made both
+// ratios for those tokens at all (unpricedSomeTokensNoRatios). One bool made both
 // print the mixed-models line, which is false of the second.
 //
 // An entry with no recorded model inherits the parent's family rather than
@@ -165,7 +165,7 @@ func subagentPricingReason(usage *types.TokenUsage, family string) string {
 		weights, ok := tokenWeightsForModel(u.Model)
 		switch {
 		case !ok:
-			return unpricedSubagentNoRatios
+			return unpricedSomeTokensNoRatios
 		case weights.Family != family:
 			return unpricedMixedModels
 		}
@@ -183,16 +183,19 @@ func subagentPricingReason(usage *types.TokenUsage, family string) string {
 const (
 	unpricedNoModel     = "no model with verified price ratios"
 	unpricedMixedModels = "these tokens span models with different price ratios"
-	// unpricedSubagentNoRatios is the "no row at all" half of what the subagent
-	// guard used to fold into unpricedMixedModels. A subagent model we do not
-	// recognise has no ratios to differ from, so claiming differing ratios is
-	// false; so is unpricedNoModel, because the parent model does have a row.
-	// It says "some of these tokens" rather than naming subagents: the reason is
-	// printed to a user who did not ask about the mechanism, and it stays true
-	// however the tokens were nested.
-	unpricedSubagentNoRatios = "some of these tokens were billed by a model with no verified price ratios"
-	unpricedUnknownTTL       = "this checkpoint predates the cache-write TTL split, which changes the rate"
-	unpricedNoCost           = "this provider bills none of these tokens"
+	// unpricedSomeTokensNoRatios covers "part of this report was billed by a
+	// model with no ratio row, and part was not". Neither neighbour is true of
+	// it: unpricedMixedModels claims differing ratios when there are none to
+	// differ from, and unpricedNoModel claims nothing here is priceable when
+	// something demonstrably is.
+	//
+	// Two callers, which is why it names neither a subagent nor a session: a
+	// subagent entry on an unrecognised model, and a multi-session checkpoint
+	// where only some sessions' models are recognised. "Some of these tokens"
+	// is true of both and needs no mechanism the user did not ask about.
+	unpricedSomeTokensNoRatios = "some of these tokens were billed by a model with no verified price ratios"
+	unpricedUnknownTTL         = "this checkpoint predates the cache-write TTL split, which changes the rate"
+	unpricedNoCost             = "this provider bills none of these tokens"
 )
 
 // tokenClassShare is one billing class's contribution to a checkpoint.

@@ -32,7 +32,7 @@ func TestUnpricedReasons_AreScopeNeutral(t *testing.T) {
 	}{
 		{"no model", unpricedNoModel},
 		{"mixed models", unpricedMixedModels},
-		{"subagent with no ratios", unpricedSubagentNoRatios},
+		{"subagent with no ratios", unpricedSomeTokensNoRatios},
 		{"no cost", unpricedNoCost},
 	}
 	for _, tc := range cases {
@@ -69,7 +69,7 @@ func TestWriteTokenClasses_UnpricedReasonIsScopeNeutral(t *testing.T) {
 	}{
 		{"no model", unpricedNoModel, unpricedNoModel, false},
 		{"mixed models", unpricedMixedModels, unpricedMixedModels, false},
-		{"subagent with no ratios", unpricedSubagentNoRatios, unpricedSubagentNoRatios, false},
+		{"subagent with no ratios", unpricedSomeTokensNoRatios, unpricedSomeTokensNoRatios, false},
 		{"no cost", unpricedNoCost, unpricedNoCost, false},
 		// Priced==false with an empty UnpricedReason is currently unreachable in
 		// production: tokenClassShares sets a reason on every unpriced branch,
@@ -187,8 +187,8 @@ func TestSessionTokenWeights_SubagentWithNoRatiosIsNotAMixedModelsCase(t *testin
 	if reason == unpricedMixedModels {
 		t.Error("an unrecognised subagent model has no ratios to differ from; that is not the mixed-models case")
 	}
-	if reason != unpricedSubagentNoRatios {
-		t.Errorf("reason = %q, want %q", reason, unpricedSubagentNoRatios)
+	if reason != unpricedSomeTokensNoRatios {
+		t.Errorf("reason = %q, want %q", reason, unpricedSomeTokensNoRatios)
 	}
 }
 
