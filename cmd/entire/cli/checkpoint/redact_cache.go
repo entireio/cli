@@ -145,11 +145,8 @@ func newRedactCache(gitCommonDir string) *redactCache {
 // repoRedactCache resolves the prefix cache for repo, or nil when the git common
 // directory is unavailable (a bare repository, for instance). Nil disables
 // incremental reuse without failing the write.
-//
-// resolveGitCommonDir memoizes per worktree and the sibling shadow-branch and
-// push-queue writes already warm it, so this is cheap to call per checkpoint.
-func repoRedactCache(ctx context.Context, repo *git.Repository) *redactCache {
-	dir, err := resolveGitCommonDir(ctx, repo)
+func repoRedactCache(repo *git.Repository) *redactCache {
+	_, dir, err := repositoryDirs(repo)
 	if err != nil {
 		return nil
 	}
@@ -514,13 +511,13 @@ func RedactTranscriptCached(
 	treePath := transcriptCacheKey(sessionID)
 
 	// Resolve the cache only for content that could actually use it: a small or
-	// non-line-delimited payload would otherwise pay the git-common-dir lookup
-	// (a subprocess on first call in the process) for nothing.
+	// non-line-delimited payload should not pay even the filesystem metadata
+	// lookup.
 	if !incrementalRedactionCandidate(content, treePath) {
 		return redactor(ctx, content)
 	}
 
-	cache := repoRedactCache(ctx, repo)
+	cache := repoRedactCache(repo)
 	result, err := redactIncrementally(ctx, repo, cache, content, treePath,
 		func(ctx context.Context, b []byte) ([]byte, error) {
 			out, redErr := redactor(ctx, b)

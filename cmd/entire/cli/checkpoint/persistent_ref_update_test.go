@@ -19,7 +19,7 @@ func TestUpdatePersistentRef_StopsWaitingWhenContextDeadlineExpires(t *testing.T
 	repo, _ := setupBranchTestRepo(t)
 	refName := plumbing.ReferenceName("refs/entire/test-deadline")
 
-	_, commonDir, err := repositoryDirs(context.Background(), repo)
+	_, commonDir, err := repositoryDirs(repo)
 	require.NoError(t, err)
 	lockRoot, lockName, err := persistentRefLock(commonDir, refName)
 	require.NoError(t, err)
@@ -45,7 +45,7 @@ func TestUpdatePersistentRef_RebuildsAfterCASConflict(t *testing.T) {
 	repo, initial := setupBranchTestRepo(t)
 	refName := plumbing.ReferenceName("refs/entire/test-cas")
 	require.NoError(t, repo.Storer.SetReference(plumbing.NewHashReference(refName, initial)))
-	repoRoot, _, err := repositoryDirs(ctx, repo)
+	repoRoot, _, err := repositoryDirs(repo)
 	require.NoError(t, err)
 
 	var (
@@ -117,7 +117,7 @@ func TestUpdatePersistentRef_NoOpConflictKeepsExistingCommit(t *testing.T) {
 	repo, initial := setupBranchTestRepo(t)
 	refName := plumbing.ReferenceName("refs/entire/test-cas-noop")
 	require.NoError(t, repo.Storer.SetReference(plumbing.NewHashReference(refName, initial)))
-	repoRoot, _, err := repositoryDirs(ctx, repo)
+	repoRoot, _, err := repositoryDirs(repo)
 	require.NoError(t, err)
 
 	calls := 0

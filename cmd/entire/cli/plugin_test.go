@@ -308,3 +308,23 @@ func equalStrings(a, b []string) bool {
 	}
 	return true
 }
+
+// TestFindInaccessiblePlugin_SkipsRelativePATHEntry pins that the fallback
+// scan honours the same absolute-only rule as every other $PATH scanner: a
+// file in a repository the user happens to be standing in is not a plugin.
+func TestFindInaccessiblePlugin_SkipsRelativePATHEntry(t *testing.T) {
+	dir := t.TempDir()
+	t.Chdir(dir)
+	relDir := "planted"
+	if err := os.MkdirAll(filepath.Join(dir, relDir), 0o755); err != nil {
+		t.Fatalf("create planted dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, relDir, "entire-planted"), []byte("#!/bin/sh\n"), 0o644); err != nil {
+		t.Fatalf("write planted file: %v", err)
+	}
+	t.Setenv("PATH", relDir)
+
+	if got, found := findInaccessiblePlugin("entire-planted"); found {
+		t.Errorf("findInaccessiblePlugin found %q via a relative $PATH entry, want no match", got)
+	}
+}

@@ -35,7 +35,6 @@ func TestGitMetadataTraversalHasCanonicalOwner(t *testing.T) {
 		"settings/opf_command_trust.go:probeLocalSettingsIsVersioned": "settings policy rejects a nested repository rooted at .entire",
 	}
 	allowedMetadataQueries := map[guardMetadataQuery]string{
-		{source: "checkpoint/git_common_dir.go:resolveGitCommonDir", flag: "--git-common-dir"}:          "checkpoint migrates in the checkpoint split",
 		{source: "dispatch/mode_local.go:resolveRepoRoots", flag: "--show-toplevel"}:                    "local dispatch resolves explicit repository candidates",
 		{source: "dispatch_wizard.go:resolveGitTopLevel", flag: "--show-toplevel"}:                      "dispatch discovery resolves explicit repository candidates",
 		{source: "gitdir/gitdir.go:CommonDir", flag: "--git-common-dir"}:                                "session removes the current-worktree resolver in the session split",

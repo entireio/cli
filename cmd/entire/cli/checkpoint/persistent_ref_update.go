@@ -20,22 +20,6 @@ import (
 
 type persistentRefBuilder func() (newHash, expectedHash plumbing.Hash, err error)
 
-func repositoryDirs(ctx context.Context, repo *git.Repository) (worktreeRoot, commonDir string, err error) {
-	wt, err := repo.Worktree()
-	if err != nil {
-		return "", "", fmt.Errorf("open worktree: %w", err)
-	}
-	worktreeRoot = wt.Filesystem().Root()
-	if worktreeRoot == "" {
-		return "", "", errors.New("repository worktree filesystem has no root path")
-	}
-	commonDir, err = resolveGitCommonDir(ctx, repo)
-	if err != nil {
-		return "", "", err
-	}
-	return worktreeRoot, commonDir, nil
-}
-
 // casUpdateRef atomically updates refName through native Git's lock protocol.
 // Pass ZeroHash as expectedHash to require that the ref does not exist.
 func casUpdateRef(ctx context.Context, repoRoot string, refName plumbing.ReferenceName, newHash, expectedHash plumbing.Hash) error {
@@ -103,7 +87,7 @@ func withPersistentRefFlock(ctx context.Context, commonDir string, refName plumb
 // retry for native Git or other external writers. build runs again after every
 // conflict, so each retry reconstructs its tree and commit from the fresh tip.
 func updatePersistentRef(ctx context.Context, repo *git.Repository, refName plumbing.ReferenceName, build persistentRefBuilder) error {
-	repoRoot, commonDir, err := repositoryDirs(ctx, repo)
+	repoRoot, commonDir, err := repositoryDirs(repo)
 	if err != nil {
 		return fmt.Errorf("resolve repository directories: %w", err)
 	}
