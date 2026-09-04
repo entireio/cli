@@ -21,9 +21,9 @@ func TestUpdatePersistentRef_StopsWaitingWhenContextDeadlineExpires(t *testing.T
 
 	_, commonDir, err := repositoryDirs(context.Background(), repo)
 	require.NoError(t, err)
-	lockPath, err := persistentRefLockPath(commonDir, refName)
+	lockRoot, lockName, err := persistentRefLock(commonDir, refName)
 	require.NoError(t, err)
-	release, err := flock.Acquire(lockPath)
+	release, err := flock.AcquireIn(lockRoot, lockName)
 	require.NoError(t, err)
 	t.Cleanup(release)
 

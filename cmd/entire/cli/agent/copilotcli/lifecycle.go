@@ -23,7 +23,10 @@ func isSubagentSessionID(sessionID string) bool {
 }
 
 // Ensure CopilotCLIAgent implements HookSupport at compile time.
-var _ agent.HookSupport = (*CopilotCLIAgent)(nil)
+var (
+	_ agent.HookSupport       = (*CopilotCLIAgent)(nil)
+	_ agent.HookConfigLocator = (*CopilotCLIAgent)(nil)
+)
 
 // Copilot CLI hook names - these become subcommands under `entire hooks copilot-cli`
 const (

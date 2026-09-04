@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
@@ -16,8 +15,9 @@ import (
 
 // Compile-time interface assertions
 var (
-	_ agent.HookSupport   = (*PiAgent)(nil)
-	_ agent.HookFreshness = (*PiAgent)(nil)
+	_ agent.HookSupport       = (*PiAgent)(nil)
+	_ agent.HookConfigLocator = (*PiAgent)(nil)
+	_ agent.HookFreshness     = (*PiAgent)(nil)
 )
 
 //go:embed entire_extension.ts
@@ -47,17 +47,28 @@ const (
 	piNestedEnvVar = "ENTIRE_PI_NESTED"
 )
 
-func extensionPath(ctx context.Context) (string, error) {
+// extensionConfig returns .pi/extensions/entire/index.ts for the current
+// worktree, opened through the worktree's root so the extension directory is
+// created, read, and removed as a name inside the repository rather than
+// through whatever a checked-in `.pi` symlink points at.
+//
+// Pi was the last registered agent still joining its path onto the repo root
+// and handing the result to os.ReadFile / os.MkdirAll / os.WriteFile /
+// os.RemoveAll. That is worse here than for the agents whose config is a
+// settings file, because pi is auto-detected: DetectPresence stats `.pi`, which
+// follows the link, so a repository shipping one had `entire enable` install
+// through it without the user ever naming pi.
+func extensionConfig(ctx context.Context) (*agent.HookConfigFile, error) {
 	root, err := paths.WorktreeRoot(ctx)
 	if err != nil {
 		// Fall back to CWD for tests run outside a git repo.
 		//nolint:forbidigo // explicit fallback when WorktreeRoot fails
 		root, err = os.Getwd()
 		if err != nil {
-			return "", fmt.Errorf("resolve repo root: %w", err)
+			return nil, fmt.Errorf("resolve repo root: %w", err)
 		}
 	}
-	return filepath.Join(root, extensionDirName, extensionFileName), nil
+	return agent.OpenHookConfig(root, (&PiAgent{}).HookConfigRelPath()) //nolint:wrapcheck // agent.HookConfigFile already names the file in its error
 }
 
 // renderExtension returns the extension file content, substituting the entire
@@ -76,45 +87,40 @@ func renderExtension() string {
 // true — this protects user-authored extensions that happen to live at
 // .pi/extensions/entire/index.ts.
 func (a *PiAgent) InstallHooks(ctx context.Context, force bool) (int, error) {
-	path, err := extensionPath(ctx)
+	cfg, err := extensionConfig(ctx)
 	if err != nil {
 		return 0, err
 	}
 	content := renderExtension()
 
 	if !force {
-		//nolint:gosec // path constructed from validated repo root
-		existing, readErr := os.ReadFile(path)
+		existing, readErr := cfg.Read()
 		switch {
 		case readErr == nil && string(existing) == content:
 			return 0, nil // already up-to-date
 		case readErr == nil && !strings.Contains(string(existing), entireMarker):
-			return 0, fmt.Errorf("refusing to overwrite foreign file at %s; remove it or pass --force", path)
+			return 0, fmt.Errorf("refusing to overwrite foreign file at %s; remove it or pass --force", cfg.Path())
 		}
 	}
 
-	//nolint:gosec // G301: pi reads the directory; standard 0755 permissions
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return 0, fmt.Errorf("create extension dir: %w", err)
-	}
-	//nolint:gosec // G306: pi reads the file; standard 0644 permissions
-	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
-		return 0, fmt.Errorf("write extension: %w", err)
+	// Write creates .pi/extensions/entire with MkdirAllNoSymlink. 0644 because
+	// pi reads the extension itself.
+	if err := cfg.Write([]byte(content), 0o644); err != nil {
+		return 0, err //nolint:wrapcheck // agent.HookConfigFile already names the file in its error
 	}
 	return 1, nil
 }
 
 // UninstallHooks removes the entire pi extension directory (if present).
 func (a *PiAgent) UninstallHooks(ctx context.Context) error {
-	path, err := extensionPath(ctx)
+	cfg, err := extensionConfig(ctx)
 	if err != nil {
 		return err
 	}
-	dir := filepath.Dir(path)
-	if err := os.RemoveAll(dir); err != nil {
-		return fmt.Errorf("remove pi extension dir: %w", err)
-	}
-	return nil
+	// The directory, not just the file: pi discovers extensions by directory, so
+	// an empty .pi/extensions/entire left behind is a half-uninstalled
+	// extension. See HookConfigFile.RemoveDir for why no other agent does this.
+	return cfg.RemoveDir() //nolint:wrapcheck // agent.HookConfigFile already names the directory in its error
 }
 
 // AreHooksInstalled returns true when the extension file exists and is
@@ -126,19 +132,18 @@ func (a *PiAgent) UninstallHooks(ctx context.Context) error {
 // "we could not tell" and "there are none" are different things to a caller
 // deciding whether hooks can be left alone.
 func (a *PiAgent) AreHooksInstalled(ctx context.Context) (bool, error) {
-	path, err := extensionPath(ctx)
+	cfg, err := extensionConfig(ctx)
 	if err != nil {
 		logging.Warn(ctx, "pi: failed to resolve extension path", "err", err)
 		return false, err
 	}
-	//nolint:gosec // path from validated repo root
-	data, err := os.ReadFile(path)
+	data, err := cfg.Read()
 	if errors.Is(err, os.ErrNotExist) {
 		return false, nil
 	}
 	if err != nil {
-		logging.Warn(ctx, "pi: failed to read extension file", "path", path, "err", err)
-		return false, fmt.Errorf("read %s: %w", path, err)
+		logging.Warn(ctx, "pi: failed to read extension file", "path", cfg.Path(), "err", err)
+		return false, fmt.Errorf("read %s: %w", cfg.Path(), err)
 	}
 	return strings.Contains(string(data), entireMarker), nil
 }
@@ -155,12 +160,15 @@ func (a *PiAgent) AreHooksInstalled(ctx context.Context) (bool, error) {
 // fireHook swallows every error by design, so broken hooks are silent. Without
 // this check a stale committed extension reads as healthy forever.
 func (a *PiAgent) CheckHookConfig(ctx context.Context) agent.HookConfigState {
-	path, err := extensionPath(ctx)
+	cfg, err := extensionConfig(ctx)
 	if err != nil {
 		return agent.HooksAbsent
 	}
 	// Only the binary render counts as current. An extension left behind by
 	// local-dev mode still carries entireMarker, so it reads as ours but
 	// outdated and gets rewritten rather than being trusted as up to date.
-	return agent.GeneratedHookFileState(path, entireMarker, renderExtension())
+	return cfg.GeneratedState(entireMarker, renderExtension())
 }
+
+// HookConfigRelPath implements agent.HookConfigLocator.
+func (a *PiAgent) HookConfigRelPath() string { return extensionDirName + "/" + extensionFileName }

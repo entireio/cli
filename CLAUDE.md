@@ -780,7 +780,7 @@ to `os.ReadFile`/`os.WriteFile`/`os.MkdirAll`/`os.ReadDir`/`filepath.Walk`.**
 | `.entire` | `entiredir` | worktree root (`paths.WorktreeRoot`), cwd only when there is provably no repo |
 | git common dir | `gitdir` | `git rev-parse --git-common-dir`, absolutized |
 | the working tree | `worktreedir` | worktree root |
-| an agent's hook config | `agent.HookConfigFile` | worktree root (`.claude/`, `.cursor/`, `.gemini/`, `.github/hooks/`, `.factory/`, `.codex/`, `.opencode/plugin/`) |
+| an agent's hook config | `agent.HookConfigFile` | worktree root (`.claude/`, `.cursor/`, `.gemini/`, `.github/hooks/`, `.factory/`, `.codex/`, `.opencode/plugins/`, `.pi/extensions/entire/`) |
 | an agent's session store | `agent.SessionStore` | the agent's own `GetSessionDir` |
 | per-user config / cache | `userdirs.ConfigRoot` / `CacheRoot` | `$ENTIRE_CONFIG_DIR` else `~/.config/entire`; `$XDG_CACHE_HOME/entire` else `~/.cache/entire` |
 | managed plugin tree | `pluginRoot` (`plugin_store.go`) | `pluginParentDir()` — `$ENTIRE_PLUGIN_DIR`, `%LOCALAPPDATA%`, or `$XDG_DATA_HOME` |
@@ -893,7 +893,12 @@ comments at each site say which case applies:
   symlink that *escapes* a root but follows one pointing elsewhere *inside* it,
   and an escaping one otherwise fails later with an opaque errno far from the
   cause. `entire doctor` reports what is already there
-  (`checkEntireDirSymlinks`). `.entire` **itself is refused too**: `entiredir`
+  (`checkEntireDirSymlinks` for `.entire`, `checkAgentDirSymlinks` for every path
+  Entire creates or writes on an agent's behalf — derived from
+  `agent.HookConfigLocator` and the scaffold templates, deliberately not from
+  `ProtectedDirs`, which both misses the levels Entire creates under an agent's
+  directory and includes directories it never writes to). `.entire` **itself is
+  refused too**: `entiredir`
   opens it as a checked child of the worktree root (`osroot.SharedChild`), which
   `Lstat`s before and `SameFile`s after. An earlier revision allowed it on the
   grounds that `os.OpenRoot` follows a symlinked root and an existing setup
@@ -904,13 +909,28 @@ comments at each site say which case applies:
   stopped rather than that the setup is fine.
   The agent hook-config directories get the same treatment via
   `agent.HookConfigFile`: a symlinked `.claude` / `.cursor` / `.gemini` /
-  `.codex` is refused at the create, because a working tree arrives by clone and
-  `entire enable` must not create directories and write JSON through a link the
-  repository supplied. The config FILE may still be a symlink — pointing
-  `.claude/settings.json` at a dotfile repo is a real setup — with one behaviour
-  change worth knowing: an **absolute** link there no longer resolves, since
-  `os.Root` refuses absolute symlinks unconditionally. A relative one inside the
-  worktree still works.
+  `.codex` / `.pi` is refused at the create, because a working tree arrives by
+  clone and `entire enable` must not create directories and write JSON through a
+  link the repository supplied. Pi was the last agent still joining its path onto
+  the repo root and calling `os.ReadFile` / `os.MkdirAll` / `os.WriteFile` /
+  `os.RemoveAll` on the result, which was worse there than for the settings-file
+  agents because pi is **auto-detected**: `DetectPresence` stats `.pi`, which
+  follows the link, so a repository shipping one had `entire enable` install
+  through it — and uninstall `RemoveAll` through it — without the user ever
+  naming pi. Its uninstall is also the one caller of
+  `HookConfigFile.RemoveDir`, because pi discovers extensions by directory, so
+  removing only the file would leave a half-uninstalled extension behind.
+
+  The config FILE is refused too, not just its parents: the merge READ would
+  otherwise pull the link target's contents into
+  what Entire then writes, and the write is a rename, which replaces the link
+  with a regular file rather than following it. Both happen silently, so
+  refusing is the legible version of the same outcome. Pointing
+  `.claude/settings.json` at a dotfile repo is still a real setup — it just has
+  to stay out of the repository (`git rm --cached` plus a .gitignore entry),
+  which is what makes it the developer's rather than the checkout's.
+  `checkAgentDirSymlinks` reports every one of these paths, so the condition is
+  named rather than showing up as hooks that mysteriously will not install.
 
   **A symlinked agent DIRECTORY is refused by every operation, not just the ones
   that create.** `os.Root` blocks a link that escapes the worktree and follows
