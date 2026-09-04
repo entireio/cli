@@ -19,6 +19,10 @@ const scoopEntireVersionedExecutablePath = `C:\Users\test\scoop\apps\entire\0.10
 // windowsLocalBinPath is a direct install.ps1 destination. windowsProgramFilesPath
 // is an unknown Windows path that matches none of the install-manager prefixes.
 const windowsLocalBinPath = `C:\Users\test\.local\bin\entire.exe`
+
+// windowsMiseExecutablePath is mise's default Windows layout; the mixed case
+// and backslashes exercise the normalization the marker match relies on.
+const windowsMiseExecutablePath = `C:\Users\test\AppData\Local\mise\installs\entire\1.0.0\bin\entire.exe`
 const windowsProgramFilesPath = `C:\Program Files\Entire\entire.exe`
 
 const scoopUpdateCmd = "scoop update entire/entire"
@@ -63,6 +67,12 @@ func TestWindowsUpdateCommandForCurrentBinary(t *testing.T) {
 			currentVersion: "1.0.0",
 			execPath:       `C:\tools\cli\entire.exe`,
 			want:           windowsInstallCmd,
+		},
+		{
+			name:           "mise default layout uses mise upgrade",
+			currentVersion: "1.0.0",
+			execPath:       windowsMiseExecutablePath,
+			want:           miseUpgradeCmd,
 		},
 		{
 			name:           "windows unknown path stable uses install.ps1",

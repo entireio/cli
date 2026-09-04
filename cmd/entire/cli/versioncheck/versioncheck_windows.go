@@ -75,7 +75,10 @@ const scoopAppsMarker = "/scoop/apps/"
 func scoopAppName(execPath string) string {
 	for _, raw := range scoopRoots() {
 		root := normalizeInstallRoot(raw)
-		if below, ok := strings.CutPrefix(execPath, root); ok && root != "" {
+		if root == "" {
+			continue
+		}
+		if below, ok := strings.CutPrefix(execPath, root); ok {
 			return firstPathSegment(below)
 		}
 	}

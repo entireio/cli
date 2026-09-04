@@ -37,7 +37,7 @@ func TestMaybeAutoUpdate_WindowsNeverAutoRuns(t *testing.T) {
 		},
 		{
 			name:           "mise prints mise upgrade",
-			execPath:       miseExecutablePath,
+			execPath:       windowsMiseExecutablePath,
 			currentVersion: "1.0.0",
 			wantCmd:        miseUpgradeCmd,
 		},
