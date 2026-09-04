@@ -125,37 +125,45 @@ func tokenWeightsForSession(model string, usage *types.TokenUsage) (tokenWeights
 	if !ok {
 		return tokenWeights{}, ""
 	}
-	if !subagentModelsMatch(usage, weights.Family) {
-		// A subagent billed by another provider is the same fact as two
-		// sessions disagreeing — different ratios inside one report — so it
-		// takes the same reason rather than the false generic one.
-		return tokenWeights{}, unpricedMixedModels
+	if reason := subagentPricingReason(usage, weights.Family); reason != "" {
+		return tokenWeights{}, reason
 	}
 	return weights, ""
 }
 
-// subagentModelsMatch reports whether every subagent entry that records a model
-// belongs to family. Subagent tokens are flattened into the classes, so an entry
-// billed at another provider's ratios would be costed at its parent's rate while
-// the report claims the whole total is priced — #2155 records Model on these
-// entries precisely so that cannot be assumed away.
+// subagentPricingReason reports why family's ratios cannot price this usage's
+// subagent entries, or "" when every entry that records a model is consistent
+// with family. Subagent tokens are flattened into the classes, so an entry
+// billed at other ratios would be costed at its parent's rate while the report
+// claims the whole total is priced — #2155 records Model on these entries
+// precisely so that cannot be assumed away.
+//
+// It returns a reason rather than a bool because the two ways an entry can be
+// inconsistent are two different facts, and the report prints the reason
+// verbatim: a recognised model in another family really does mean differing
+// ratios (unpricedMixedModels), while an unrecognised one means there are no
+// ratios for those tokens at all (unpricedSubagentNoRatios). One bool made both
+// print the mixed-models line, which is false of the second.
 //
 // An entry with no recorded model inherits the parent's family rather than
 // unpricing the report: absence is the norm, and for a single-provider agent
 // the parent is the best available evidence. That inference is wrong only for an
 // agent that mixes providers within one session (Pi), and only when it also
 // fails to record the subagent's model.
-func subagentModelsMatch(usage *types.TokenUsage, family string) bool {
+func subagentPricingReason(usage *types.TokenUsage, family string) string {
 	for u := usage; u != nil; u = u.SubagentTokens {
 		if u.Model == "" {
 			continue
 		}
 		weights, ok := tokenWeightsForModel(u.Model)
-		if !ok || weights.Family != family {
-			return false
+		switch {
+		case !ok:
+			return unpricedSubagentNoRatios
+		case weights.Family != family:
+			return unpricedMixedModels
 		}
 	}
-	return true
+	return ""
 }
 
 // Reasons cost can be withheld. The report prints these verbatim, so each one
@@ -168,8 +176,16 @@ func subagentModelsMatch(usage *types.TokenUsage, family string) bool {
 const (
 	unpricedNoModel     = "no model with verified price ratios"
 	unpricedMixedModels = "these tokens span models with different price ratios"
-	unpricedUnknownTTL  = "this checkpoint predates the cache-write TTL split, which changes the rate"
-	unpricedNoCost      = "this provider bills none of these tokens"
+	// unpricedSubagentNoRatios is the "no row at all" half of what the subagent
+	// guard used to fold into unpricedMixedModels. A subagent model we do not
+	// recognise has no ratios to differ from, so claiming differing ratios is
+	// false; so is unpricedNoModel, because the parent model does have a row.
+	// It says "some of these tokens" rather than naming subagents: the reason is
+	// printed to a user who did not ask about the mechanism, and it stays true
+	// however the tokens were nested.
+	unpricedSubagentNoRatios = "some of these tokens were billed by a model with no verified price ratios"
+	unpricedUnknownTTL       = "this checkpoint predates the cache-write TTL split, which changes the rate"
+	unpricedNoCost           = "this provider bills none of these tokens"
 )
 
 // tokenClassShare is one billing class's contribution to a checkpoint.

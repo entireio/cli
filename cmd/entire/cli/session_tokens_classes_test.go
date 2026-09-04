@@ -28,6 +28,7 @@ func TestUnpricedReasons_AreScopeNeutral(t *testing.T) {
 	}{
 		{"no model", unpricedNoModel},
 		{"mixed models", unpricedMixedModels},
+		{"subagent with no ratios", unpricedSubagentNoRatios},
 		{"no cost", unpricedNoCost},
 	}
 	for _, tc := range cases {
@@ -64,6 +65,7 @@ func TestWriteTokenClasses_UnpricedReasonIsScopeNeutral(t *testing.T) {
 	}{
 		{"no model", unpricedNoModel, unpricedNoModel, false},
 		{"mixed models", unpricedMixedModels, unpricedMixedModels, false},
+		{"subagent with no ratios", unpricedSubagentNoRatios, unpricedSubagentNoRatios, false},
 		{"no cost", unpricedNoCost, unpricedNoCost, false},
 		// Priced==false with an empty UnpricedReason is currently unreachable in
 		// production: tokenClassShares sets a reason on every unpriced branch,
@@ -157,5 +159,31 @@ func TestSessionTokenWeights_UnknownModelTakesTheGenericReason(t *testing.T) {
 	}
 	if reason != "" {
 		t.Errorf("reason = %q, want empty so the generic one is used", reason)
+	}
+}
+
+// A subagent whose model we do not recognise is a different fact from two
+// recognised models with differing ratios, and neither existing reason is true
+// of it: unpricedMixedModels claims differing ratios when there are none to
+// differ from, and unpricedNoModel claims nothing here has verified ratios when
+// the parent model does. Hence its own reason. The subagent guard used to
+// collapse both cases into one bool and print the mixed-models line for each.
+func TestSessionTokenWeights_SubagentWithNoRatiosIsNotAMixedModelsCase(t *testing.T) {
+	t.Parallel()
+
+	usage := &agent.TokenUsage{
+		InputTokens: 1000, OutputTokens: 100,
+		SubagentTokens: &agent.TokenUsage{InputTokens: 500, OutputTokens: 50, Model: "some-unknown-model"},
+	}
+
+	weights, reason := tokenWeightsForSession("claude-sonnet-4.6", usage)
+	if weights.Family != "" {
+		t.Errorf("family = %q, want empty (unpriced)", weights.Family)
+	}
+	if reason == unpricedMixedModels {
+		t.Error("an unrecognised subagent model has no ratios to differ from; that is not the mixed-models case")
+	}
+	if reason != unpricedSubagentNoRatios {
+		t.Errorf("reason = %q, want %q", reason, unpricedSubagentNoRatios)
 	}
 }
