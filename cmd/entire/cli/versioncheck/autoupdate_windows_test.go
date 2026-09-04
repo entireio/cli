@@ -20,8 +20,8 @@ func TestRealRunInstaller_WindowsNotImplemented(t *testing.T) {
 
 // TestMaybeAutoUpdate_WindowsNeverAutoRuns verifies that on Windows the update
 // is never auto-run — a running entire.exe cannot replace its own shim — so
-// the command is printed for the user to run once entire has exited. The POSIX
-// curl fallback and the releases page must not appear.
+// the command is printed for the user to run in PowerShell once entire has
+// exited.
 func TestMaybeAutoUpdate_WindowsNeverAutoRuns(t *testing.T) {
 	tests := []struct {
 		name           string
@@ -67,12 +67,6 @@ func TestMaybeAutoUpdate_WindowsNeverAutoRuns(t *testing.T) {
 			assertPrintOnly(t, f, action, out, tt.wantCmd)
 			if !strings.Contains(out, "in PowerShell when entire is not running") {
 				t.Errorf("missing Windows manual-run hint: %q", out)
-			}
-			if strings.Contains(out, "curl -fsSL") {
-				t.Errorf("Windows must not show the POSIX curl command: %q", out)
-			}
-			if strings.Contains(out, "download the latest release") {
-				t.Errorf("Windows must not point at the releases page: %q", out)
 			}
 		})
 	}

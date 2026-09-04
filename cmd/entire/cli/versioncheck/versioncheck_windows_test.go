@@ -192,9 +192,11 @@ func TestWindowsScoopDefaultMarkerStillMatches(t *testing.T) {
 }
 
 func TestWindowsCommandsNeverNamePOSIXInstallers(t *testing.T) {
+	t.Parallel()
 	versions := []string{"1.0.0", "1.0.1-nightly.202604101200.abc1234"}
 	for _, version := range versions {
 		t.Run(version, func(t *testing.T) {
+			t.Parallel()
 			for _, p := range installProbes {
 				assertNoPOSIXInstallerNames(t, p.command(`C:\x`, version))
 			}
