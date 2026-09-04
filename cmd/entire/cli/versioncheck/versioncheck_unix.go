@@ -24,7 +24,7 @@ var brewProbe = installProbe{
 
 var installProbes = []installProbe{brewProbe, miseProbe}
 
-func fallbackInstallCommand(currentVersion string) string {
+func fallbackInstallCommand(_, currentVersion string) string {
 	if isNightly(currentVersion) {
 		return "curl -fsSL https://entire.io/install.sh | bash -s -- --channel nightly"
 	}

@@ -4,6 +4,7 @@ package versioncheck
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -13,11 +14,10 @@ import (
 // markers below are already lowercase.
 func foldPathCase(p string) string { return strings.ToLower(p) }
 
-// Windows install.ps1 one-liners from the README. Printed, never auto-run.
-const (
-	windowsInstallCmd        = "irm https://entire.io/install.ps1 -UseBasicParsing | iex"
-	windowsInstallNightlyCmd = "& ([scriptblock]::Create((irm https://entire.io/install.ps1 -UseBasicParsing))) -Channel nightly"
-)
+// windowsInstallCmd is the README install.ps1 one-liner in its scriptblock
+// form, which is the only shape that can bind arguments. Printed, never
+// auto-run.
+const windowsInstallCmd = "& ([scriptblock]::Create((irm https://entire.io/install.ps1 -UseBasicParsing)))"
 
 // scoopConfigPath is Scoop's config.json, which records relocated install roots.
 func scoopConfigPath() string {
@@ -136,9 +136,16 @@ var scoopProbe = installProbe{
 
 var installProbes = []installProbe{scoopProbe, miseProbe}
 
-func fallbackInstallCommand(currentVersion string) string {
+// fallbackInstallCommand names the running binary's directory with
+// -InstallDir so install.ps1 replaces it in place instead of taking its
+// Scoop-first default; an explicit -InstallDir opts out of Scoop there.
+func fallbackInstallCommand(execPath, currentVersion string) string {
+	cmd := windowsInstallCmd
 	if isNightly(currentVersion) {
-		return windowsInstallNightlyCmd
+		cmd += " -Channel nightly"
 	}
-	return windowsInstallCmd
+	if execPath != "" {
+		cmd += fmt.Sprintf(` -InstallDir "%s"`, filepath.Dir(execPath))
+	}
+	return cmd
 }

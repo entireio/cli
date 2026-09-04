@@ -3,6 +3,7 @@
 package versioncheck
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -66,7 +67,7 @@ func TestWindowsUpdateCommandForCurrentBinary(t *testing.T) {
 			name:           "non-scoop path in a cli directory uses install.ps1",
 			currentVersion: "1.0.0",
 			execPath:       `C:\tools\cli\entire.exe`,
-			want:           windowsInstallCmd,
+			want:           windowsInstallCmd + ` -InstallDir "C:\tools\cli"`,
 		},
 		{
 			name:           "mise default layout uses mise upgrade",
@@ -78,13 +79,13 @@ func TestWindowsUpdateCommandForCurrentBinary(t *testing.T) {
 			name:           "windows unknown path stable uses install.ps1",
 			currentVersion: "1.0.0",
 			execPath:       windowsLocalBinPath,
-			want:           windowsInstallCmd,
+			want:           windowsInstallCmd + ` -InstallDir "C:\Users\test\.local\bin"`,
 		},
 		{
 			name:           "windows unknown path nightly uses install.ps1 -Channel nightly",
 			currentVersion: "1.0.1-nightly.202604101200.abc1234",
 			execPath:       windowsLocalBinPath,
-			want:           windowsInstallNightlyCmd,
+			want:           windowsInstallCmd + ` -Channel nightly -InstallDir "C:\Users\test\.local\bin"`,
 		},
 	}
 
@@ -96,6 +97,16 @@ func TestWindowsUpdateCommandForCurrentBinary(t *testing.T) {
 				t.Errorf("UpdateCommandForCurrentBinary() = %q, want %q", got, tt.want)
 			}
 		})
+	}
+}
+
+// Without an exec path there is no directory to name, so the hint falls back
+// to the bare one-liner and install.ps1 keeps its own default.
+func TestWindowsUpdateCommandWithoutExecPathOmitsInstallDir(t *testing.T) {
+	setExecutable(t, func() (string, error) { return "", errors.New("not found") })
+
+	if got := UpdateCommandForCurrentBinary("1.0.0"); got != windowsInstallCmd {
+		t.Errorf("UpdateCommandForCurrentBinary() = %q, want %q", got, windowsInstallCmd)
 	}
 }
 
@@ -181,7 +192,7 @@ func TestWindowsCommandsNeverNamePOSIXInstallers(t *testing.T) {
 			for _, p := range installProbes {
 				assertNoPOSIXInstallerNames(t, p.command(`C:\x`, version))
 			}
-			assertNoPOSIXInstallerNames(t, fallbackInstallCommand(version))
+			assertNoPOSIXInstallerNames(t, fallbackInstallCommand(`C:\x\entire.exe`, version))
 		})
 	}
 }

@@ -341,15 +341,6 @@ func normalizePath(p string) string {
 	return foldPathCase(strings.ReplaceAll(filepath.ToSlash(resolved), "\\", "/"))
 }
 
-// normalizedExecPath returns the running binary's path in normalizePath form.
-func normalizedExecPath() (string, error) {
-	execPath, err := executablePath()
-	if err != nil {
-		return "", err
-	}
-	return normalizePath(execPath), nil
-}
-
 // downloadsURL is the GitHub releases page, used for release-notes links.
 const downloadsURL = "https://github.com/entireio/cli/releases"
 
@@ -416,17 +407,21 @@ var miseProbe = installProbe{
 
 // UpdateCommandForCurrentBinary returns the shell command that updates this
 // binary, based on how it was installed.
+//
+// The fallback receives the exec path as the OS reports it (not normalized),
+// so the Windows installer hint can name the directory the binary lives in.
 func UpdateCommandForCurrentBinary(currentVersion string) string {
-	path, err := normalizedExecPath()
+	execPath, err := executablePath()
 	if err != nil {
-		return fallbackInstallCommand(currentVersion)
+		return fallbackInstallCommand("", currentVersion)
 	}
+	normalized := normalizePath(execPath)
 	for _, p := range installProbes {
-		if p.matches(path) {
-			return p.command(path, currentVersion)
+		if p.matches(normalized) {
+			return p.command(normalized, currentVersion)
 		}
 	}
-	return fallbackInstallCommand(currentVersion)
+	return fallbackInstallCommand(execPath, currentVersion)
 }
 
 // printNotification prints the version update notification to the user.

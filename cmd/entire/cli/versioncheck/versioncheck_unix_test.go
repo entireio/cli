@@ -84,7 +84,7 @@ func TestUnixCommandsNeverNameWindowsInstallers(t *testing.T) {
 			for _, p := range installProbes {
 				assertNoWindowsInstallerNames(t, p.command("/x", version))
 			}
-			assertNoWindowsInstallerNames(t, fallbackInstallCommand(version))
+			assertNoWindowsInstallerNames(t, fallbackInstallCommand("/x/entire", version))
 		})
 	}
 }
