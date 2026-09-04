@@ -4,6 +4,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/entireio/cli/cmd/entire/cli/entiredir"
@@ -285,6 +286,12 @@ func TestSplit(t *testing.T) {
 	require.True(t, ok)
 	require.Equal(t, paths.EntireDir, dir)
 	require.Equal(t, "tmp/pre-prompt-x.json", name)
+
+	runtimeDir := filepath.Join(base, repopolicy.WorktreeRegistryRelative, strings.Repeat("a", repopolicy.RuntimeKeyLength))
+	dir, name, ok = entiredir.Split(filepath.Join(runtimeDir, "tmp", "transcript.jsonl"))
+	require.True(t, ok)
+	require.Equal(t, runtimeDir, dir)
+	require.Equal(t, "tmp/transcript.jsonl", name)
 
 	// A bare name with no .entire component is not claimed.
 	_, _, ok = entiredir.Split("settings.json")

@@ -25,9 +25,10 @@ const (
 type trustChoice string
 
 const (
-	trustChoiceYes    trustChoice = "yes"
-	trustChoiceNotNow trustChoice = "not_now"
-	trustChoiceAlways trustChoice = "always"
+	trustChoiceYes     trustChoice = "yes"
+	trustChoiceNotNow  trustChoice = "not_now"
+	trustChoiceAlways  trustChoice = "always"
+	trustChoiceDefault             = trustChoiceNotNow
 )
 
 // resolveTrustDecision holds without prompting when there is no user to ask,
@@ -97,9 +98,9 @@ func askTrustPrompt(ctx context.Context) (trustChoice, error) {
 			yesLabel = fmt.Sprintf("Yes — sync this repo's checkpoints to %s (this folder only)", id.RemoteName)
 		}
 	}
-	// Start unset so accessible mode cannot turn an empty/default submission
-	// into consent. Only one of the explicit option values grants anything.
-	choice := trustChoice("")
+	// Huh highlights the option matching Value, so seed the privacy-preserving
+	// answer. Pressing Enter on an unexpected pre-push prompt must hold egress.
+	choice := trustChoiceDefault
 	form := uiform.New(
 		huh.NewGroup(
 			huh.NewSelect[trustChoice]().

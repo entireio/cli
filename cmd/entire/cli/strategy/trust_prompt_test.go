@@ -79,3 +79,12 @@ func TestResolveTrustDecision(t *testing.T) {
 		})
 	}
 }
+
+func TestTrustPromptDefaultHolds(t *testing.T) {
+	t.Parallel()
+
+	require.Equal(t, trustChoiceNotNow, trustChoiceDefault)
+	var warnings bytes.Buffer
+	require.Equal(t, TrustHeld, applyTrustChoice(t.Context(), trustChoiceDefault, &warnings))
+	require.Empty(t, warnings.String())
+}

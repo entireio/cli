@@ -390,8 +390,10 @@ func OpenPathForRead(p string) (root *os.Root, name string, err error) {
 	return openPath(p, false)
 }
 
-// Split splits a path that lies under a .entire directory into that directory
-// and the name of the path within it. It is lexical: the path is cleaned and the
+// Split splits a path that lies under an Entire-managed runtime directory into
+// that directory and the name of the path within it. It recognizes both the
+// worktree's literal .entire directory and the global tier's routed runtime
+// layout. It is lexical: for the literal layout, the path is cleaned and the
 // innermost ".entire" component wins, which is the directory that actually
 // contains the file if a repo is ever checked out inside another repo's .entire.
 //
@@ -400,6 +402,13 @@ func OpenPathForRead(p string) (root *os.Root, name string, err error) {
 // through. The walk is component-by-component with filepath rather than a split
 // on separators so a Windows volume name survives being rejoined.
 func Split(p string) (entireDir, name string, ok bool) {
+	if entireDir, name, ok = splitEntire(p); ok {
+		return entireDir, name, true
+	}
+	return splitRuntime(p)
+}
+
+func splitEntire(p string) (entireDir, name string, ok bool) {
 	cleaned := filepath.Clean(p)
 	rest := cleaned
 	for {
@@ -429,9 +438,6 @@ func Split(p string) (entireDir, name string, ok bool) {
 
 func openPath(p string, create bool) (*os.Root, string, error) {
 	dir, name, ok := Split(p)
-	if !ok {
-		dir, name, ok = splitRuntime(p)
-	}
 	if !ok {
 		return nil, "", fmt.Errorf("%q is not under a %s directory", p, paths.EntireDir)
 	}
