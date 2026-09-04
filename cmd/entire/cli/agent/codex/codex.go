@@ -125,7 +125,7 @@ func (b *rolloutScanBudget) observeCandidate() error {
 }
 
 func (b *rolloutScanBudget) observeBytes(count int64) error {
-	if count < 0 || count > b.limits.aggregateByteLimit-b.aggregateBytes {
+	if count < 0 || count > b.limits.aggregateByteLimit || b.aggregateBytes > b.limits.aggregateByteLimit-count {
 		return fmt.Errorf("aggregate rollout byte limit %d exceeded: %w", b.limits.aggregateByteLimit, errRolloutScanBudget)
 	}
 	b.aggregateBytes += count
