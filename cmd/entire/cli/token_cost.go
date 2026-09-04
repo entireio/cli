@@ -150,8 +150,15 @@ func tokenWeightsForSession(model string, usage *types.TokenUsage) (tokenWeights
 // the parent is the best available evidence. That inference is wrong only for an
 // agent that mixes providers within one session (Pi), and only when it also
 // fails to record the subagent's model.
+//
+// The walk stops at types.MaxSubagentDepth, matching
+// flattenTokenUsageForClasses. The two must agree: an entry past the bound
+// contributes no tokens to the table, so withholding cost over its model would
+// state a reason that is not in the numbers shown. Unpricing is the safe
+// direction, but "safe" is not the same as "true".
 func subagentPricingReason(usage *types.TokenUsage, family string) string {
-	for u := usage; u != nil; u = u.SubagentTokens {
+	u := usage
+	for depth := 0; u != nil && depth < types.MaxSubagentDepth; u, depth = u.SubagentTokens, depth+1 {
 		if u.Model == "" {
 			continue
 		}

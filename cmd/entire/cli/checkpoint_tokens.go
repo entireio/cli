@@ -657,9 +657,15 @@ func checkpointAgentBriefNextAction(report checkpointTokensReport) string {
 	return "Continue normally; no high-signal token optimization is available from this checkpoint."
 }
 
+// checkpointAgentBriefSessionReport bridges a checkpoint report into the shared
+// brief helpers. Classes is carried even though no brief helper reads it yet:
+// both report types now have the field, so dropping it here would be invisible
+// until someone makes --agent-brief class-aware, at which point the checkpoint
+// brief would silently reason from nil while the session brief saw real data.
 func checkpointAgentBriefSessionReport(report checkpointTokensReport) sessionTokensReport {
 	return sessionTokensReport{
 		Tokens:          report.Tokens,
+		Classes:         report.Classes,
 		Context:         report.Context,
 		Recommendations: report.Recommendations,
 		Limitations:     report.Limitations,

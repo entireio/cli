@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
+	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
@@ -346,5 +347,62 @@ func TestSessionTokensReport_Classes_AbsentWhenNoUsage(t *testing.T) {
 	report := buildSessionTokensReport(liveSessionFor(t, "claude-sonnet-4.6", nil), "idle")
 	if report.Classes != nil {
 		t.Errorf("no usage must yield no breakdown, got %+v", report.Classes)
+	}
+}
+
+// The pricing walk and the walk that actually sums the classes must agree about
+// how deep they look. flattenTokenUsageForClasses stops at MaxSubagentDepth, so
+// an entry past that bound contributes no tokens to the table — unpricing the
+// whole report over a model whose tokens were never counted withholds cost for
+// a reason that is not in the numbers shown.
+func TestSubagentPricingReason_IgnoresEntriesPastTheDepthBound(t *testing.T) {
+	t.Parallel()
+
+	// A chain longer than the bound, with the offending model only at the tail.
+	head := &agent.TokenUsage{InputTokens: 1000, OutputTokens: 100}
+	tail := head
+	for range types.MaxSubagentDepth + 4 {
+		tail.SubagentTokens = &agent.TokenUsage{InputTokens: 1, OutputTokens: 1}
+		tail = tail.SubagentTokens
+	}
+	tail.Model = "gpt-5.3-codex"
+
+	weights, reason := tokenWeightsForSession("claude-sonnet-4.6", head)
+	if weights.Family == "" {
+		t.Errorf("an entry past MaxSubagentDepth contributes no tokens and must not unprice; reason %q", reason)
+	}
+}
+
+// The bound must not become a way to smuggle mispriced tokens in: an entry
+// inside the bound still unprices.
+func TestSubagentPricingReason_StillCatchesEntriesInsideTheDepthBound(t *testing.T) {
+	t.Parallel()
+
+	usage := &agent.TokenUsage{
+		InputTokens: 1000, OutputTokens: 100,
+		SubagentTokens: &agent.TokenUsage{Model: "gpt-5.3-codex", InputTokens: 500, OutputTokens: 50},
+	}
+
+	if weights, _ := tokenWeightsForSession("claude-sonnet-4.6", usage); weights.Family != "" {
+		t.Error("a subagent inside the depth bound is counted in the classes and must still unprice")
+	}
+}
+
+// checkpointAgentBriefSessionReport bridges a checkpoint report into the shared
+// brief helpers. Nothing in the brief reads Classes today, so a dropped field is
+// invisible — which is exactly why it should be carried: the day someone makes
+// --agent-brief class-aware, the checkpoint brief would silently see nil while
+// the session brief saw real data.
+func TestCheckpointAgentBriefSessionReport_CarriesClasses(t *testing.T) {
+	t.Parallel()
+
+	report := classesReportFor(t, "Claude Code", "claude-sonnet-4.6", checkpoint.TokenUsageVersionDelta,
+		&agent.TokenUsage{InputTokens: 1000, CacheReadTokens: 6000, OutputTokens: 1000})
+	if report.Classes == nil {
+		t.Fatal("fixture must produce classes")
+	}
+
+	if bridged := checkpointAgentBriefSessionReport(report); bridged.Classes != report.Classes {
+		t.Error("the bridge must carry Classes; dropping it is invisible until the brief becomes class-aware")
 	}
 }
