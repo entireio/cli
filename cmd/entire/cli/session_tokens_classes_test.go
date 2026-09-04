@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bytes"
+	"context"
 	"strings"
 	"testing"
 	"time"
@@ -537,5 +538,68 @@ func TestSessionTokensText_RendersDuration(t *testing.T) {
 	writeSessionTokensText(&buf, buildSessionTokensReport(state, "active"))
 	if out := buf.String(); !strings.Contains(out, "Duration: 1h 30m so far") {
 		t.Errorf("expected the duration line, got:\n%s", out)
+	}
+}
+
+// PR 1's lesson: its headline cost column had never rendered outside a unit
+// test until it was driven by hand. This asserts the acceptance criterion on
+// what a user actually sees, by parsing the percentages back out of the
+// rendered table.
+//
+// No t.Parallel(): setupStopTestRepo calls t.Chdir.
+func TestSessionTokensCmd_RendersBilledBlockFromLiveState(t *testing.T) {
+	setupStopTestRepo(t)
+
+	state := makeSessionState("cmd-billed", session.PhaseActive)
+	state.AgentType = testAgentClaude
+	state.ModelName = "claude-sonnet-4.6"
+	state.TokenUsage = &agent.TokenUsage{
+		InputTokens: 42000, CacheCreationTokens: 118000, CacheCreation1hTokens: 22000,
+		CacheReadTokens: 240000, OutputTokens: 11000, ThinkingTokens: 4000, APICallCount: 37,
+	}
+	if err := strategy.SaveSessionState(context.Background(), state); err != nil {
+		t.Fatalf("SaveSessionState() error = %v", err)
+	}
+
+	cmd := newTokensCmd()
+	var stdout bytes.Buffer
+	cmd.SetOut(&stdout)
+	cmd.SetArgs([]string{"cmd-billed"}) // positional: Use is "tokens [session-id]"; there is no --session flag
+	if err := cmd.ExecuteContext(context.Background()); err != nil {
+		t.Fatalf("expected no error, got: %v", err)
+	}
+
+	out := stdout.String()
+	if !strings.Contains(out, "How it was billed") {
+		t.Fatalf("expected the billed breakdown, got:\n%s", out)
+	}
+	volume, cost := parseBilledShares(t, out)
+	if volume != 100 {
+		t.Errorf("volume shares sum to %d%%, want 100%%\n%s", volume, out)
+	}
+	if cost != 100 {
+		t.Errorf("cost shares sum to %d%%, want 100%%\n%s", cost, out)
+	}
+}
+
+// A turn that ends in under a second is a real case (a one-line prompt), and
+// "0s so far" states a duration of zero for a session that was worked on —
+// the same false claim as the "0m" the empty-string rule exists to avoid.
+// Found by running the command for real; every other duration test here uses a
+// synthetic multi-hour span.
+func TestSessionTokensDuration_EmptyForSubSecondSpan(t *testing.T) {
+	t.Parallel()
+
+	start := time.Now()
+	last := start.Add(400 * time.Millisecond)
+	state := &strategy.SessionState{
+		SessionID:           "live-instant",
+		AgentType:           "Claude Code",
+		StartedAt:           start,
+		LastInteractionTime: &last,
+	}
+
+	if got := sessionTokensDuration(state); got != "" {
+		t.Errorf("duration = %q, want empty: a sub-second span has no duration worth stating", got)
 	}
 }

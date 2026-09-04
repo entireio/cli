@@ -265,7 +265,12 @@ func sessionTokensDuration(state *strategy.SessionState) string {
 		return ""
 	}
 	span := state.LastInteractionTime.Sub(state.StartedAt)
-	if span <= 0 {
+	// Below a second there is no work span to report, and "0s so far" is the
+	// same false claim as the "0m" this function exists to avoid: it states a
+	// duration of zero for a session that has been worked on. Found by running
+	// the command against a real session whose first turn ended immediately —
+	// every unit test here uses a synthetic multi-hour span.
+	if span < time.Second {
 		return ""
 	}
 	return formatDurationShort(span) + " so far"
