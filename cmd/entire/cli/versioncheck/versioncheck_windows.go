@@ -63,18 +63,34 @@ func scoopRoots() []string {
 	return roots
 }
 
-// scoopAppName returns the Scoop app directory from a path relative to the
-// Scoop apps root (e.g. "cli" from "cli/current/entire.exe"). This is the
+// scoopAppsMarker is the default Scoop layout; scoopRoots covers relocations.
+const scoopAppsMarker = "/scoop/apps/"
+
+// scoopAppName returns the Scoop app directory the binary runs from ("cli" or
+// "entire"), or "" when execPath is not under a Scoop apps root. This is the
 // durable signal for the pre-rename package: a binary running from the `cli`
 // app dir must migrate to `entire` regardless of its version (the fix ships in
 // a final `cli` release, so the migrating binary's version is already past the
 // rename).
-func scoopAppName(rest string) string {
-	app, _, _ := strings.Cut(rest, "/")
+func scoopAppName(execPath string) string {
+	for _, raw := range scoopRoots() {
+		root := normalizeInstallRoot(raw)
+		if below, ok := strings.CutPrefix(execPath, root); ok && root != "" {
+			return firstPathSegment(below)
+		}
+	}
+	if _, below, ok := strings.Cut(execPath, scoopAppsMarker); ok {
+		return firstPathSegment(below)
+	}
+	return ""
+}
+
+func firstPathSegment(p string) string {
+	app, _, _ := strings.Cut(p, "/")
 	return app
 }
 
-func scoopUpgradeCommand(rest, _ string) string {
+func scoopUpgradeCommand(execPath, _ string) string {
 	// The Scoop package was renamed from `cli` to `entire`. A binary still
 	// running from the old `cli` app dir can never cross the rename with a
 	// plain `scoop update entire/cli`, so migrate it: install the new
@@ -103,7 +119,7 @@ func scoopUpgradeCommand(rest, _ string) string {
 	// still fail with "couldn't find manifest", and the README migration
 	// section names `scoop update` as the retry. Binaries already on the
 	// `entire` app just update in place.
-	if scoopAppName(rest) == "cli" {
+	if scoopAppName(execPath) == "cli" {
 		return `cmd.exe /D /C "scoop install entire/entire && scoop uninstall entire/cli && scoop reset entire"`
 	}
 	return "scoop update entire/entire"
@@ -111,7 +127,7 @@ func scoopUpgradeCommand(rest, _ string) string {
 
 var scoopProbe = installProbe{
 	roots:   scoopRoots,
-	markers: []string{"/scoop/apps/"},
+	markers: []string{scoopAppsMarker},
 	command: scoopUpgradeCommand,
 }
 

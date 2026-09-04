@@ -355,12 +355,11 @@ const downloadsURL = "https://github.com/entireio/cli/releases"
 
 // installProbe identifies one install manager from the running binary's path
 // and returns the command that upgrades it. roots are env/config install
-// prefixes (relocated dirs, optional); markers cover default layouts. command
-// receives the exec path relative to the matched root or marker.
+// prefixes (relocated dirs, optional); markers cover default layouts.
 type installProbe struct {
 	roots   func() []string
 	markers []string
-	command func(rest, currentVersion string) string
+	command func(execPath, currentVersion string) string
 }
 
 func miseRoots() []string {
@@ -387,23 +386,20 @@ func normalizeInstallRoot(root string) string {
 	return n
 }
 
-// locate reports whether execPath is under one of the probe's roots or
-// markers and returns the remainder of the path after the match.
-func (p installProbe) locate(execPath string) (string, bool) {
+func (p installProbe) matches(execPath string) bool {
 	if p.roots != nil {
 		for _, raw := range p.roots() {
-			root := normalizeInstallRoot(raw)
-			if root != "" && strings.HasPrefix(execPath, root) {
-				return execPath[len(root):], true
+			if root := normalizeInstallRoot(raw); root != "" && strings.HasPrefix(execPath, root) {
+				return true
 			}
 		}
 	}
-	for _, m := range p.markers {
-		if i := strings.Index(execPath, m); i >= 0 {
-			return execPath[i+len(m):], true
+	for _, marker := range p.markers {
+		if strings.Contains(execPath, marker) {
+			return true
 		}
 	}
-	return "", false
+	return false
 }
 
 const miseUpgradeCmd = "mise upgrade entire"
@@ -426,8 +422,8 @@ func UpdateCommandForCurrentBinary(currentVersion string) string {
 		return fallbackInstallCommand(currentVersion)
 	}
 	for _, p := range installProbes {
-		if rest, ok := p.locate(path); ok {
-			return p.command(rest, currentVersion)
+		if p.matches(path) {
+			return p.command(path, currentVersion)
 		}
 	}
 	return fallbackInstallCommand(currentVersion)
