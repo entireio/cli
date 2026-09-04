@@ -370,8 +370,8 @@ func normalizedExecPath() (string, error) {
 const downloadsURL = "https://github.com/entireio/cli/releases"
 
 // installProbe identifies one install manager from the running binary's path
-// and returns the command that upgrades it. roots is unused until relocated
-// install dirs are honored; matches is marker-only.
+// and returns the command that upgrades it. roots are env/config install
+// prefixes (relocated dirs); markers cover default layouts.
 type installProbe struct {
 	name    string
 	roots   func() []string
@@ -381,7 +381,42 @@ type installProbe struct {
 
 func noInstallRoots() []string { return nil }
 
+func miseRoots() []string {
+	if d := os.Getenv("MISE_INSTALLS_DIR"); d != "" {
+		return []string{d}
+	}
+	if d := os.Getenv("MISE_DATA_DIR"); d != "" {
+		return []string{filepath.Join(d, "installs")}
+	}
+	return nil
+}
+
+// normalizeInstallRoot Clean+EvalSymlinks+ToSlash a root and ensures a trailing
+// slash. Relative values are ignored. EvalSymlinks is best-effort so a root
+// that does not exist on disk still matches by cleaned prefix.
+func normalizeInstallRoot(root string) string {
+	if root == "" || !filepath.IsAbs(root) {
+		return ""
+	}
+	cleaned := filepath.Clean(root)
+	resolved, err := filepath.EvalSymlinks(cleaned)
+	if err != nil {
+		resolved = cleaned
+	}
+	n := strings.ReplaceAll(filepath.ToSlash(resolved), "\\", "/")
+	if !strings.HasSuffix(n, "/") {
+		n += "/"
+	}
+	return n
+}
+
 func (p installProbe) matches(execPath string) bool {
+	for _, raw := range p.roots() {
+		root := normalizeInstallRoot(raw)
+		if root != "" && hasNormalizedRootPrefix(execPath, root) {
+			return true
+		}
+	}
 	for _, m := range p.markers {
 		if strings.Contains(execPath, m) {
 			return true
@@ -390,13 +425,15 @@ func (p installProbe) matches(execPath string) bool {
 	return false
 }
 
+const miseUpgradeCmd = "mise upgrade entire"
+
 func miseUpgradeCommand(_, _ string) string {
-	return "mise upgrade entire"
+	return miseUpgradeCmd
 }
 
 var miseProbe = installProbe{
 	name:    installManagerMise,
-	roots:   noInstallRoots,
+	roots:   miseRoots,
 	markers: []string{"/mise/installs/"},
 	command: miseUpgradeCommand,
 }

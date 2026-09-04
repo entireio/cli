@@ -189,8 +189,8 @@ func TestMaybeAutoUpdate_WindowsNeverAutoRuns(t *testing.T) {
 	if !strings.Contains(out, "when entire is not running") {
 		t.Errorf("missing Windows manual-run hint: %q", out)
 	}
-	if !strings.Contains(out, "  mise upgrade entire") {
-		t.Errorf("manual hint missing command %q: %q", "mise upgrade entire", out)
+	if !strings.Contains(out, "  "+miseUpgradeCmd) {
+		t.Errorf("manual hint missing command %q: %q", miseUpgradeCmd, out)
 	}
 }
 
@@ -270,7 +270,7 @@ func nonWindowsAutoInstallers() []installerCase {
 	// TestMaybeAutoUpdate_WindowsNeverAutoRuns.
 	return []installerCase{
 		{name: "brew", setup: useBrewExecutable, wantCmd: brewUpgradeCmd},
-		{name: "mise", setup: useMiseExecutable, wantCmd: "mise upgrade entire"},
+		{name: "mise", setup: useMiseExecutable, wantCmd: miseUpgradeCmd},
 		{name: "unknown_curl_bash", setup: useUnknownExecutable, wantCmd: "curl -fsSL https://entire.io/install.sh | bash"},
 	}
 }

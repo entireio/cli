@@ -2,6 +2,12 @@
 
 package versioncheck
 
+import "strings"
+
+func hasNormalizedRootPrefix(path, root string) bool {
+	return strings.HasPrefix(path, root)
+}
+
 func brewUpgradeCommand(_ string, currentVersion string) string {
 	if releaseChannel(currentVersion) == installChannelNightly {
 		return "brew upgrade --yes entire@nightly"

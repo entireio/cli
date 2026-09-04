@@ -4,6 +4,8 @@ package versioncheck
 
 import (
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -124,6 +126,89 @@ func TestWindowsUpdateCommandForCurrentBinary(t *testing.T) {
 				t.Errorf("UpdateCommandForCurrentBinary() = %q, want %q", got, tt.want)
 			}
 		})
+	}
+}
+
+func isolateWindowsScoopConfig(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", dir)
+	t.Setenv("USERPROFILE", dir)
+	t.Setenv("SCOOP", "")
+	t.Setenv("SCOOP_GLOBAL", "")
+	return dir
+}
+
+func withWindowsExecPath(t *testing.T, path string) {
+	t.Helper()
+	orig := executablePath
+	executablePath = func() (string, error) { return path, nil }
+	t.Cleanup(func() { executablePath = orig })
+}
+
+func TestWindowsScoopRelocatedSCOOPEnv(t *testing.T) {
+	isolateWindowsScoopConfig(t)
+	t.Setenv("SCOOP", `D:\tools`)
+	withWindowsExecPath(t, `D:\tools\apps\entire\current\entire.exe`)
+
+	if got := UpdateCommandForCurrentBinary("1.0.0"); got != "scoop update entire/entire" {
+		t.Errorf("UpdateCommandForCurrentBinary() = %q, want scoop update entire/entire", got)
+	}
+}
+
+func TestWindowsScoopRelocatedSCOOPEnvCLIAppMigrates(t *testing.T) {
+	isolateWindowsScoopConfig(t)
+	t.Setenv("SCOOP", `D:\tools`)
+	withWindowsExecPath(t, `D:\tools\apps\cli\current\entire.exe`)
+
+	want := `cmd.exe /D /C "scoop install entire/entire && scoop uninstall entire/cli && scoop reset entire"`
+	if got := UpdateCommandForCurrentBinary("1.0.0"); got != want {
+		t.Errorf("UpdateCommandForCurrentBinary() = %q, want %q", got, want)
+	}
+}
+
+func TestWindowsScoopRelocatedSCOOPGlobal(t *testing.T) {
+	isolateWindowsScoopConfig(t)
+	t.Setenv("SCOOP_GLOBAL", `D:\g`)
+	withWindowsExecPath(t, `D:\g\apps\entire\current\entire.exe`)
+
+	if got := UpdateCommandForCurrentBinary("1.0.0"); got != "scoop update entire/entire" {
+		t.Errorf("UpdateCommandForCurrentBinary() = %q, want scoop update entire/entire", got)
+	}
+}
+
+func TestWindowsScoopRelocatedConfigRootPath(t *testing.T) {
+	dir := isolateWindowsScoopConfig(t)
+	cfgDir := filepath.Join(dir, "scoop")
+	if err := os.MkdirAll(cfgDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cfgDir, "config.json"), []byte(`{"root_path":"D:\\from-config"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	withWindowsExecPath(t, `D:\from-config\apps\entire\current\entire.exe`)
+
+	if got := UpdateCommandForCurrentBinary("1.0.0"); got != "scoop update entire/entire" {
+		t.Errorf("UpdateCommandForCurrentBinary() = %q, want scoop update entire/entire", got)
+	}
+}
+
+func TestWindowsScoopRelocatedCaseInsensitive(t *testing.T) {
+	isolateWindowsScoopConfig(t)
+	t.Setenv("SCOOP", `d:\Tools`)
+	withWindowsExecPath(t, `D:\tools\apps\entire\current\entire.exe`)
+
+	if got := UpdateCommandForCurrentBinary("1.0.0"); got != "scoop update entire/entire" {
+		t.Errorf("UpdateCommandForCurrentBinary() = %q, want scoop update entire/entire", got)
+	}
+}
+
+func TestWindowsScoopDefaultMarkerStillMatches(t *testing.T) {
+	isolateWindowsScoopConfig(t)
+	withWindowsExecPath(t, `C:\Users\x\scoop\apps\entire\current\entire.exe`)
+
+	if got := UpdateCommandForCurrentBinary("1.0.0"); got != "scoop update entire/entire" {
+		t.Errorf("UpdateCommandForCurrentBinary() = %q, want scoop update entire/entire", got)
 	}
 }
 

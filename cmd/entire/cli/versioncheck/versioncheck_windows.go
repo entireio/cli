@@ -2,7 +2,16 @@
 
 package versioncheck
 
-import "strings"
+import (
+	"encoding/json"
+	"os"
+	"path/filepath"
+	"strings"
+)
+
+func hasNormalizedRootPrefix(path, root string) bool {
+	return strings.HasPrefix(strings.ToLower(path), strings.ToLower(root))
+}
 
 // Windows install.ps1 one-liners from the README. Printed, never auto-run.
 const (
@@ -16,10 +25,74 @@ const (
 // pre-rename package: a binary running from the `cli` app dir must migrate to
 // `entire` regardless of its version (the fix ships in a final `cli` release,
 // so the migrating binary's version is already past the rename).
+func scoopConfigPath() string {
+	if xdg := os.Getenv("XDG_CONFIG_HOME"); xdg != "" {
+		return filepath.Join(xdg, "scoop", "config.json")
+	}
+	profile := os.Getenv("USERPROFILE")
+	if profile == "" {
+		return ""
+	}
+	return filepath.Join(profile, ".config", "scoop", "config.json")
+}
+
+type scoopConfigFile struct {
+	RootPath   string `json:"root_path"`
+	GlobalPath string `json:"global_path"`
+}
+
+func readScoopConfig() scoopConfigFile {
+	path := scoopConfigPath()
+	if path == "" {
+		return scoopConfigFile{}
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return scoopConfigFile{}
+	}
+	var cfg scoopConfigFile
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		return scoopConfigFile{}
+	}
+	return cfg
+}
+
+func scoopRoots() []string {
+	var roots []string
+	for _, r := range []string{os.Getenv("SCOOP"), os.Getenv("SCOOP_GLOBAL")} {
+		if r != "" {
+			roots = append(roots, filepath.Join(r, "apps"))
+		}
+	}
+	cfg := readScoopConfig()
+	if cfg.RootPath != "" {
+		roots = append(roots, filepath.Join(cfg.RootPath, "apps"))
+	}
+	if cfg.GlobalPath != "" {
+		roots = append(roots, filepath.Join(cfg.GlobalPath, "apps"))
+	}
+	return roots
+}
+
+func firstPathSegment(rest string) string {
+	app, _, _ := strings.Cut(rest, "/")
+	return app
+}
+
 func scoopAppName() string {
 	normalized, err := normalizedExecPath()
 	if err != nil {
 		return ""
+	}
+	for _, raw := range scoopRoots() {
+		root := normalizeInstallRoot(raw)
+		if root == "" || !hasNormalizedRootPrefix(normalized, root) {
+			continue
+		}
+		if len(normalized) < len(root) {
+			continue
+		}
+		return firstPathSegment(normalized[len(root):])
 	}
 	_, rest, ok := strings.Cut(normalized, "/scoop/apps/")
 	if !ok {
@@ -27,8 +100,7 @@ func scoopAppName() string {
 	}
 	// Cut returns the whole string when the separator is absent, so this covers
 	// both `.../scoop/apps/cli/current/entire.exe` and a bare app segment.
-	app, _, _ := strings.Cut(rest, "/")
-	return app
+	return firstPathSegment(rest)
 }
 
 func scoopUpgradeCommand(_, _ string) string {
@@ -68,7 +140,7 @@ func scoopUpgradeCommand(_, _ string) string {
 
 var scoopProbe = installProbe{
 	name:    installManagerScoop,
-	roots:   noInstallRoots,
+	roots:   scoopRoots,
 	markers: []string{"/scoop/apps/"},
 	command: scoopUpgradeCommand,
 }

@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -362,7 +363,7 @@ func TestUpdateCommandForCurrentBinary(t *testing.T) {
 			name:           "mise path",
 			currentVersion: "1.0.0",
 			execPath:       func() (string, error) { return miseExecutablePath, nil },
-			want:           "mise upgrade entire",
+			want:           miseUpgradeCmd,
 		},
 	}
 
@@ -376,6 +377,57 @@ func TestUpdateCommandForCurrentBinary(t *testing.T) {
 				t.Errorf("UpdateCommandForCurrentBinary() = %q, want %q", got, tt.want)
 			}
 		})
+	}
+}
+
+func relocatedTestRoot(elem string) string {
+	if runtime.GOOS == "windows" {
+		return `D:\` + elem
+	}
+	return "/" + elem
+}
+
+func TestUpdateCommandForCurrentBinary_MiseRelocatedInstallsDir(t *testing.T) {
+	root := relocatedTestRoot("srv/tools")
+	t.Setenv("MISE_INSTALLS_DIR", root)
+	t.Setenv("MISE_DATA_DIR", "")
+	orig := executablePath
+	executablePath = func() (string, error) {
+		return filepath.Join(root, "entire", "1.0.0", "bin", "entire"), nil
+	}
+	t.Cleanup(func() { executablePath = orig })
+
+	if got := UpdateCommandForCurrentBinary("1.0.0"); got != miseUpgradeCmd {
+		t.Errorf("UpdateCommandForCurrentBinary() = %q, want %q", got, miseUpgradeCmd)
+	}
+}
+
+func TestUpdateCommandForCurrentBinary_MiseRelocatedDataDir(t *testing.T) {
+	root := relocatedTestRoot("srv/mise")
+	t.Setenv("MISE_INSTALLS_DIR", "")
+	t.Setenv("MISE_DATA_DIR", root)
+	orig := executablePath
+	executablePath = func() (string, error) {
+		return filepath.Join(root, "installs", "entire", "1.0.0", "bin", "entire"), nil
+	}
+	t.Cleanup(func() { executablePath = orig })
+
+	if got := UpdateCommandForCurrentBinary("1.0.0"); got != miseUpgradeCmd {
+		t.Errorf("UpdateCommandForCurrentBinary() = %q, want %q", got, miseUpgradeCmd)
+	}
+}
+
+func TestUpdateCommandForCurrentBinary_MiseDefaultMarkerStillMatches(t *testing.T) {
+	t.Setenv("MISE_INSTALLS_DIR", "")
+	t.Setenv("MISE_DATA_DIR", "")
+	orig := executablePath
+	executablePath = func() (string, error) {
+		return miseExecutablePath, nil
+	}
+	t.Cleanup(func() { executablePath = orig })
+
+	if got := UpdateCommandForCurrentBinary("1.0.0"); got != miseUpgradeCmd {
+		t.Errorf("UpdateCommandForCurrentBinary() = %q, want %q", got, miseUpgradeCmd)
 	}
 }
 
@@ -539,8 +591,8 @@ func TestCheckAndNotify_MiseSkipUntilNextVersionCachesLatest(t *testing.T) {
 	if cache.SkippedVersion != "v2.0.0" {
 		t.Errorf("SkippedVersion = %q, want v2.0.0", cache.SkippedVersion)
 	}
-	if f.lastCmdStr != "mise upgrade entire" {
-		t.Errorf("prompt got cmd %q, want mise upgrade entire", f.lastCmdStr)
+	if f.lastCmdStr != miseUpgradeCmd {
+		t.Errorf("prompt got cmd %q, want %q", f.lastCmdStr, miseUpgradeCmd)
 	}
 }
 

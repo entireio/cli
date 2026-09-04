@@ -4,6 +4,8 @@ package versioncheck
 
 import (
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -83,6 +85,34 @@ func TestUnixCommandsNeverNameWindowsInstallers(t *testing.T) {
 			}
 			assertNoWindowsInstallerNames(t, fallbackInstallCommand(version))
 		})
+	}
+}
+
+func TestUnixMiseRootSymlink(t *testing.T) {
+	tmp := t.TempDir()
+	realDir := filepath.Join(tmp, "real")
+	link := filepath.Join(tmp, "link")
+	if err := os.MkdirAll(realDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(realDir, link); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("MISE_INSTALLS_DIR", link)
+	t.Setenv("MISE_DATA_DIR", "")
+	execPath := filepath.Join(realDir, "entire", "1.0.0", "bin", "entire")
+	if err := os.MkdirAll(filepath.Dir(execPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(execPath, []byte{}, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	orig := executablePath
+	executablePath = func() (string, error) { return execPath, nil }
+	t.Cleanup(func() { executablePath = orig })
+
+	if got := UpdateCommandForCurrentBinary("1.0.0"); got != miseUpgradeCmd {
+		t.Errorf("UpdateCommandForCurrentBinary() = %q, want %q", got, miseUpgradeCmd)
 	}
 }
 
