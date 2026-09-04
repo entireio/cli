@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
@@ -356,5 +357,41 @@ func TestTokenClassShares_UnpricedReasonsAreSpecific(t *testing.T) {
 	legacyTTL, _ := tokenClassShares(&types.TokenUsage{InputTokens: 100, CacheCreationTokens: 100}, anthropic, false)
 	if legacyTTL.UnpricedReason != unpricedUnknownTTL {
 		t.Errorf("legacy-TTL reason = %q, want %q — it must not claim the model has no ratios", legacyTTL.UnpricedReason, unpricedUnknownTTL)
+	}
+}
+
+// The renderer prints these verbatim on both commands, so a reason that says
+// "checkpoint" is a false statement on `session tokens`. Only the TTL reason is
+// legitimately checkpoint-specific: live state always knows the split.
+//
+// Honest limitation: this is a per-member list of the known unpriced*
+// constants. Despite the plural, unqualified test name, it is not exhaustive —
+// a fifth unpriced* constant added later would not be covered here
+// automatically.
+func TestUnpricedReasons_AreScopeNeutral(t *testing.T) {
+	t.Parallel()
+
+	// Any noun that presumes one command's scope is a false statement on the
+	// other. "checkpoint" was the original slip; "sessions" (plural) is the one
+	// the obvious reword introduces, since session tokens has exactly one.
+	cases := []struct {
+		name   string
+		reason string
+	}{
+		{"no model", unpricedNoModel},
+		{"mixed models", unpricedMixedModels},
+		{"subagent with no ratios", unpricedSomeTokensNoRatios},
+		{"no cost", unpricedNoCost},
+	}
+	for _, tc := range cases {
+		for _, presumed := range []string{"checkpoint", "sessions"} {
+			if strings.Contains(tc.reason, presumed) {
+				t.Errorf("%s reason is printed by both commands and must not say %q: %q", tc.name, presumed, tc.reason)
+			}
+		}
+	}
+
+	if !strings.Contains(unpricedUnknownTTL, "checkpoint") {
+		t.Error("the TTL reason is checkpoint-only by construction (live state always knows the split) and should keep saying so")
 	}
 }

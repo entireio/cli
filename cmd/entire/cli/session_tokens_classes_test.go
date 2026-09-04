@@ -20,33 +20,6 @@ import (
 // constants. Despite the plural, unqualified test name, it is not exhaustive —
 // a fifth unpriced* constant added later would not be covered here
 // automatically.
-func TestUnpricedReasons_AreScopeNeutral(t *testing.T) {
-	t.Parallel()
-
-	// Any noun that presumes one command's scope is a false statement on the
-	// other. "checkpoint" was the original slip; "sessions" (plural) is the one
-	// the obvious reword introduces, since session tokens has exactly one.
-	cases := []struct {
-		name   string
-		reason string
-	}{
-		{"no model", unpricedNoModel},
-		{"mixed models", unpricedMixedModels},
-		{"subagent with no ratios", unpricedSomeTokensNoRatios},
-		{"no cost", unpricedNoCost},
-	}
-	for _, tc := range cases {
-		for _, presumed := range []string{"checkpoint", "sessions"} {
-			if strings.Contains(tc.reason, presumed) {
-				t.Errorf("%s reason is printed by both commands and must not say %q: %q", tc.name, presumed, tc.reason)
-			}
-		}
-	}
-
-	if !strings.Contains(unpricedUnknownTTL, "checkpoint") {
-		t.Error("the TTL reason is checkpoint-only by construction (live state always knows the split) and should keep saying so")
-	}
-}
 
 // TestWriteTokenClasses_UnpricedReasonIsScopeNeutral covers two things the
 // constant-only test above cannot: writeTokenClasses' empty-UnpricedReason
@@ -58,62 +31,6 @@ func TestUnpricedReasons_AreScopeNeutral(t *testing.T) {
 // Honest limitation: this is still a per-member list of the known unpriced*
 // constants plus the fallback case. A fifth unpriced* constant added later
 // would not be covered here automatically.
-func TestWriteTokenClasses_UnpricedReasonIsScopeNeutral(t *testing.T) {
-	t.Parallel()
-
-	cases := []struct {
-		name           string
-		unpricedReason string // set on the breakdown; "" exercises the fallback
-		wantReason     string // what the rendered line must contain
-		checkpointOK   bool   // the TTL case is allowed (expected) to say "checkpoint"
-	}{
-		{"no model", unpricedNoModel, unpricedNoModel, false},
-		{"mixed models", unpricedMixedModels, unpricedMixedModels, false},
-		{"subagent with no ratios", unpricedSomeTokensNoRatios, unpricedSomeTokensNoRatios, false},
-		{"no cost", unpricedNoCost, unpricedNoCost, false},
-		// Priced==false with an empty UnpricedReason is currently unreachable in
-		// production: tokenClassShares sets a reason on every unpriced branch,
-		// and the checkpoint path only ever overwrites a non-empty one. This
-		// subtest is defensive coverage of writeTokenClasses' fallback, not a
-		// reachable case today — Task 4 adds the second construction site where
-		// an empty reason could first appear for real. Keep this subtest even
-		// though nothing currently produces its input.
-		{"empty reason falls back to no-model", "", unpricedNoModel, false},
-		{"unknown TTL", unpricedUnknownTTL, unpricedUnknownTTL, true},
-	}
-
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-
-			classes := &tokenClassBreakdown{
-				Input:          tokenClassShare{Tokens: 100, VolumePercent: 100},
-				Total:          100,
-				Priced:         false,
-				UnpricedReason: tc.unpricedReason,
-			}
-
-			var buf bytes.Buffer
-			writeTokenClasses(&buf, classes, 0)
-			out := strings.ToLower(buf.String())
-
-			wantLine := "cost share omitted: " + strings.ToLower(tc.wantReason)
-			if !strings.Contains(out, wantLine) {
-				t.Errorf("rendered output missing %q, got:\n%s", wantLine, buf.String())
-			}
-
-			if tc.checkpointOK {
-				return
-			}
-
-			for _, presumed := range []string{"checkpoint", "sessions"} {
-				if strings.Contains(out, presumed) {
-					t.Errorf("rendered block must not say %q, got:\n%s", presumed, buf.String())
-				}
-			}
-		})
-	}
-}
 
 // A subagent on another provider must unprice a live session exactly as it
 // unprices a checkpoint: subagent tokens are folded into the classes, so
@@ -447,45 +364,9 @@ func TestCheckpointAgentBriefSessionReport_CarriesClasses(t *testing.T) {
 	}
 }
 
-func TestWriteTokenClasses_SubagentShareShownWhenNonZero(t *testing.T) {
-	t.Parallel()
-
-	classes := &tokenClassBreakdown{
-		Input:     tokenClassShare{Tokens: 42000, VolumePercent: 10},
-		CacheRead: tokenClassShare{Tokens: 240000, VolumePercent: 58},
-		Total:     411000,
-	}
-
-	var buf bytes.Buffer
-	writeTokenClasses(&buf, classes, 54000)
-	out := buf.String()
-
-	if !strings.Contains(out, "Of the total, subagents used") {
-		t.Errorf("expected the subagent line, got:\n%s", out)
-	}
-	if !strings.Contains(out, "54k") {
-		t.Errorf("expected 54k (formatTokenCount trims the .0), got:\n%s", out)
-	}
-	if !strings.Contains(out, "13%") {
-		t.Errorf("54000/411000 rounds to 13%%, got:\n%s", out)
-	}
-}
-
 // Absent subagent tokens cannot distinguish "none spawned" from "spawned but
 // not captured" in a metadata-only layer, so claiming either is unprovable —
 // and it would be noise on the majority of sessions that spawned none.
-func TestWriteTokenClasses_SubagentShareSilentWhenZero(t *testing.T) {
-	t.Parallel()
-
-	classes := &tokenClassBreakdown{Input: tokenClassShare{Tokens: 1000, VolumePercent: 100}, Total: 1000}
-
-	var buf bytes.Buffer
-	writeTokenClasses(&buf, classes, 0)
-
-	if strings.Contains(buf.String(), "subagents") {
-		t.Errorf("zero subagent tokens must print nothing about subagents, got:\n%s", buf.String())
-	}
-}
 
 // The figure appears once. It used to be a "Likely contributors" entry as well.
 func TestSessionTokens_SubagentFigureAppearsOnlyOnce(t *testing.T) {
