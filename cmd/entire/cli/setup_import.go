@@ -293,6 +293,9 @@ func runSelectedImports(ctx context.Context, w io.Writer, repoRoot string, selec
 	// Enable often runs before the user has logged in; surface once that a
 	// logged-out import stays local and won't reach the dashboard (issue #1773).
 	warnIfImportNotSynced(w, importedLocalHistory)
+	// When it runs logged in, push what was just imported: enable creates no
+	// commit either, so nothing else would trigger the pre-push hook (#1773).
+	syncImportedCheckpoints(ctx, w, repo, "")
 }
 
 // pluralSessions renders a session count with correct pluralization.

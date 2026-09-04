@@ -82,7 +82,7 @@ next push once the git-refs store is the configured primary.`,
 				return nil
 			}
 
-			pushRemote, err := resolveMigratePushRemote(ctx, remote)
+			pushRemote, err := resolveCheckpointPushRemote(ctx, remote)
 			if err != nil {
 				return err
 			}
@@ -124,11 +124,14 @@ next push once the git-refs store is the configured primary.`,
 	return cmd
 }
 
-// resolveMigratePushRemote picks the remote migrated refs push to: the
-// explicit --remote value if given, else the elected checkpoint sync
-// remote. Fail-closed (spec: non-hook drain paths): a misconfigured
+// resolveCheckpointPushRemote picks the remote a foreground checkpoint push
+// targets: the explicit --remote value if given, else the elected checkpoint
+// sync remote. Fail-closed (spec: non-hook drain paths): a misconfigured
 // checkpoint_push_remote is an error, never a fallback to origin.
-func resolveMigratePushRemote(ctx context.Context, explicit string) (string, error) {
+//
+// Shared by every non-hook path that drains the push queue — the checkpoint
+// migration command and the post-import sync (see syncImportedCheckpoints).
+func resolveCheckpointPushRemote(ctx context.Context, explicit string) (string, error) {
 	if explicit != "" {
 		return explicit, nil
 	}

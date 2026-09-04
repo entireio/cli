@@ -23,7 +23,7 @@ func TestResolveMigratePushRemote_ExplicitValueReturnedVerbatim(t *testing.T) {
 	testutil.GitCommit(t, tmpDir, "init")
 	t.Chdir(tmpDir)
 
-	got, err := resolveMigratePushRemote(context.Background(), "explicit-remote")
+	got, err := resolveCheckpointPushRemote(context.Background(), "explicit-remote")
 	require.NoError(t, err)
 	assert.Equal(t, "explicit-remote", got)
 }
@@ -40,7 +40,7 @@ func TestResolveMigratePushRemote_EmptyUsesConfiguredSetting(t *testing.T) {
 	testutil.WriteCheckpointPushRemoteSetting(t, tmpDir, "private")
 	t.Chdir(tmpDir)
 
-	got, err := resolveMigratePushRemote(context.Background(), "")
+	got, err := resolveCheckpointPushRemote(context.Background(), "")
 	require.NoError(t, err)
 	assert.Equal(t, "private", got)
 }
@@ -56,7 +56,7 @@ func TestResolveMigratePushRemote_EmptyDefaultsToOrigin(t *testing.T) {
 	testutil.AddRemote(t, tmpDir, "publish", "https://example.com/publish.git")
 	t.Chdir(tmpDir)
 
-	got, err := resolveMigratePushRemote(context.Background(), "")
+	got, err := resolveCheckpointPushRemote(context.Background(), "")
 	require.NoError(t, err)
 	assert.Equal(t, "origin", got)
 }
@@ -72,7 +72,7 @@ func TestResolveMigratePushRemote_MisconfiguredSettingFailsClosed(t *testing.T) 
 	testutil.WriteCheckpointPushRemoteSetting(t, tmpDir, "gone")
 	t.Chdir(tmpDir)
 
-	got, err := resolveMigratePushRemote(context.Background(), "")
+	got, err := resolveCheckpointPushRemote(context.Background(), "")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "checkpoint_push_remote")
 	assert.Empty(t, got)
@@ -87,7 +87,7 @@ func TestResolveMigratePushRemote_EmptyNoRemotesErrors(t *testing.T) {
 	testutil.GitCommit(t, tmpDir, "init")
 	t.Chdir(tmpDir)
 
-	got, err := resolveMigratePushRemote(context.Background(), "")
+	got, err := resolveCheckpointPushRemote(context.Background(), "")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "--remote")
 	assert.Empty(t, got)
