@@ -213,13 +213,12 @@ func TestClearSessionStateWithProgress_RefusesReentrantClear(t *testing.T) {
 
 	var errBuf syncBuffer
 	returned := make(chan error, 1)
+	frameDone := make(chan error, 1)
 	go func() {
-		if err := MutateSessionState(ctx, sessionID, func(*SessionState) error {
+		frameDone <- MutateSessionState(ctx, sessionID, func(*SessionState) error {
 			returned <- ClearSessionStateWithProgress(ctx, sessionID, &errBuf, 20*time.Millisecond)
 			return nil
-		}); err != nil {
-			t.Errorf("MutateSessionState: %v", err)
-		}
+		})
 	}()
 
 	select {
@@ -232,6 +231,15 @@ func TestClearSessionStateWithProgress_RefusesReentrantClear(t *testing.T) {
 		}
 	case <-time.After(15 * time.Second):
 		t.Fatal("deadlock: the clear ran on a goroutine that did not hold the gate, so it blocked on its own parent's flock")
+	}
+
+	select {
+	case err := <-frameDone:
+		if err != nil {
+			t.Fatalf("MutateSessionState: %v", err)
+		}
+	case <-time.After(15 * time.Second):
+		t.Fatal("MutateSessionState never returned after the refused clear")
 	}
 
 	// And it must not have claimed someone else held the lock.
