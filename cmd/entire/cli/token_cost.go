@@ -115,9 +115,9 @@ func tokenWeightsForModel(model string) (tokenWeights, bool) {
 // number is the same class of error as withholding the wrong one.
 const (
 	unpricedNoModel     = "no verified price ratios for this model"
-	unpricedMixedModels = "more than one model's price ratios apply here"
+	unpricedMixedModels = "these tokens span models with different price ratios"
 	unpricedUnknownTTL  = "this checkpoint predates the cache-write TTL split, which changes the rate"
-	unpricedNoCost      = "no priced tokens in these classes"
+	unpricedNoCost      = "this provider bills none of these classes"
 )
 
 // tokenClassShare is one billing class's contribution to a checkpoint.

@@ -163,7 +163,7 @@ func TestCheckpointTokensReport_Classes_MixedModelsAreUnpriced(t *testing.T) {
 		t.Error("two different models cannot share one ratio row; cost must be omitted")
 	}
 	// Both models are individually priceable, so "no verified price ratios for
-	// this checkpoint's model" is false. The reason must name the real case.
+	// this model" is false. The reason must name the real case.
 	if got := report.Classes.UnpricedReason; got != unpricedMixedModels {
 		t.Errorf("reason = %q, want %q", got, unpricedMixedModels)
 	}

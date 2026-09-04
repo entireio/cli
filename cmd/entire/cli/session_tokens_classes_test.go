@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bytes"
 	"strings"
 	"testing"
 )
@@ -14,19 +15,84 @@ func TestUnpricedReasons_AreScopeNeutral(t *testing.T) {
 	// Any noun that presumes one command's scope is a false statement on the
 	// other. "checkpoint" was the original slip; "sessions" (plural) is the one
 	// the obvious reword introduces, since session tokens has exactly one.
-	for name, reason := range map[string]string{
-		"no model":     unpricedNoModel,
-		"mixed models": unpricedMixedModels,
-		"no cost":      unpricedNoCost,
-	} {
+	cases := []struct {
+		name   string
+		reason string
+	}{
+		{"no model", unpricedNoModel},
+		{"mixed models", unpricedMixedModels},
+		{"no cost", unpricedNoCost},
+	}
+	for _, tc := range cases {
 		for _, presumed := range []string{"checkpoint", "sessions"} {
-			if strings.Contains(reason, presumed) {
-				t.Errorf("%s reason is printed by both commands and must not say %q: %q", name, presumed, reason)
+			if strings.Contains(tc.reason, presumed) {
+				t.Errorf("%s reason is printed by both commands and must not say %q: %q", tc.name, presumed, tc.reason)
 			}
 		}
 	}
 
 	if !strings.Contains(unpricedUnknownTTL, "checkpoint") {
 		t.Error("the TTL reason is checkpoint-only by construction (live state always knows the split) and should keep saying so")
+	}
+}
+
+// TestWriteTokenClasses_UnpricedReasonIsScopeNeutral asserts on what the
+// renderer actually prints, not on the constant behind it — the rendered line
+// is the artifact the "each reason must be true of the case it names" rule is
+// about. It also covers writeTokenClasses' empty-UnpricedReason fallback to
+// unpricedNoModel, which nothing exercised before this test.
+//
+// Honest limitation: this is still a per-member list of the known unpriced*
+// constants plus the fallback case. A fifth unpriced* constant added later
+// would not be covered here automatically.
+func TestWriteTokenClasses_UnpricedReasonIsScopeNeutral(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name           string
+		unpricedReason string // set on the breakdown; "" exercises the fallback
+		wantReason     string // what the rendered line must contain
+		checkpointOK   bool   // the TTL case is allowed (expected) to say "checkpoint"
+	}{
+		{"no model", unpricedNoModel, unpricedNoModel, false},
+		{"mixed models", unpricedMixedModels, unpricedMixedModels, false},
+		{"no cost", unpricedNoCost, unpricedNoCost, false},
+		{"empty reason falls back to no-model", "", unpricedNoModel, false},
+		{"unknown TTL", unpricedUnknownTTL, unpricedUnknownTTL, true},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			classes := &tokenClassBreakdown{
+				Input:          tokenClassShare{Tokens: 100, VolumePercent: 100},
+				Total:          100,
+				Priced:         false,
+				UnpricedReason: tc.unpricedReason,
+			}
+
+			var buf bytes.Buffer
+			writeTokenClasses(&buf, classes)
+			out := strings.ToLower(buf.String())
+
+			wantLine := "cost share omitted: " + strings.ToLower(tc.wantReason)
+			if !strings.Contains(out, wantLine) {
+				t.Errorf("rendered output missing %q, got:\n%s", wantLine, buf.String())
+			}
+
+			if tc.checkpointOK {
+				if !strings.Contains(out, "checkpoint") {
+					t.Errorf("the TTL reason is checkpoint-specific by construction; expected %q, got:\n%s", "checkpoint", buf.String())
+				}
+				return
+			}
+
+			for _, presumed := range []string{"checkpoint", "sessions"} {
+				if strings.Contains(out, presumed) {
+					t.Errorf("rendered line must not say %q, got:\n%s", presumed, buf.String())
+				}
+			}
+		})
 	}
 }
