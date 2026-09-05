@@ -818,6 +818,31 @@ func TestRunCleanAllWithItems_MixedTypes_Preview(t *testing.T) {
 	}
 }
 
+func TestRunCleanAllWithItems_RefLock_Preview(t *testing.T) {
+	setupCleanTestRepo(t)
+
+	items := []strategy.CleanupItem{
+		{Type: strategy.CleanupTypeRefLock, ID: "entire-persistent-ref-locks", Reason: "clean all"},
+	}
+
+	cmd, stdout, _ := newTestCleanCmd(t)
+	err := runCleanAllWithItems(cmd.Context(), cmd, false, true, items, nil, nil, nil)
+	if err != nil {
+		t.Fatalf("runCleanAllWithItems() error = %v", err)
+	}
+
+	output := stdout.String()
+	if !strings.Contains(output, "Lock directories") {
+		t.Errorf("Expected 'Lock directories' section, got: %s", output)
+	}
+	if !strings.Contains(output, "entire-persistent-ref-locks") {
+		t.Errorf("Expected the lock directory name in the preview, got: %s", output)
+	}
+	if !strings.Contains(output, "Found 1 item to clean") {
+		t.Errorf("Expected 'Found 1 item to clean', got: %s", output)
+	}
+}
+
 // --- Flag validation tests ---
 
 func TestCleanCmd_MutuallyExclusiveFlags(t *testing.T) {

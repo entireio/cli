@@ -39,6 +39,71 @@ func TestAcquireIn_CreatesTheLockFileAndReleases(t *testing.T) {
 	release()
 }
 
+func TestTryAcquireIn_TakesAnUncontendedLock(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	root, err := os.OpenRoot(dir) //nolint:noinlineerr // test fixture: the root's base is the temp dir itself
+	if err != nil {
+		t.Fatalf("OpenRoot() error = %v", err)
+	}
+	t.Cleanup(func() { _ = root.Close() })
+
+	release, ok, err := TryAcquireIn(root, "state.lock")
+	if err != nil {
+		t.Fatalf("TryAcquireIn() error = %v", err)
+	}
+	if !ok {
+		t.Fatal("TryAcquireIn() ok = false, want true for an uncontended lock")
+	}
+	release()
+
+	if _, err := os.Lstat(filepath.Join(dir, "state.lock")); err != nil {
+		t.Fatalf("lock file should exist after acquire: %v", err)
+	}
+}
+
+// TryAcquireIn must report a held lock immediately rather than queueing behind
+// it -- that is the whole reason it exists. flock is per-open-file-description,
+// so a second open in this same process contends exactly as another process
+// would (see openlock.go).
+func TestTryAcquireIn_ReportsAHeldLockWithoutBlocking(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	root, err := os.OpenRoot(dir) //nolint:noinlineerr // test fixture: the root's base is the temp dir itself
+	if err != nil {
+		t.Fatalf("OpenRoot() error = %v", err)
+	}
+	t.Cleanup(func() { _ = root.Close() })
+
+	held, err := AcquireIn(root, "state.lock")
+	if err != nil {
+		t.Fatalf("AcquireIn() error = %v", err)
+	}
+
+	release, ok, err := TryAcquireIn(root, "state.lock")
+	if err != nil {
+		t.Fatalf("TryAcquireIn() error = %v, want nil for a held lock", err)
+	}
+	if ok {
+		release()
+		held()
+		t.Fatal("TryAcquireIn() ok = true, want false while the lock is held")
+	}
+
+	held() // drop it; the next probe must now succeed
+
+	release, ok, err = TryAcquireIn(root, "state.lock")
+	if err != nil {
+		t.Fatalf("TryAcquireIn() after release error = %v", err)
+	}
+	if !ok {
+		t.Fatal("TryAcquireIn() ok = false after the holder released")
+	}
+	release()
+}
+
 // A lock file is opened O_RDWR and its contents are immaterial, so following a
 // link here would not leak anything by itself. It is refused because os.Root
 // stops only the links that escape it, and every other opener in this tree

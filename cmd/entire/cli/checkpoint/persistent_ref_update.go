@@ -44,9 +44,12 @@ func casUpdateRef(ctx context.Context, repoRoot string, refName plumbing.Referen
 	return fmt.Errorf("git update-ref %s: %s: %w", refName, strings.TrimSpace(out), err)
 }
 
-// persistentRefLockDirName is the persistent-ref lock directory inside the git
-// common dir, alongside shadowLockDirName.
-const persistentRefLockDirName = "entire-persistent-ref-locks"
+// PersistentRefLockDirName is the persistent-ref lock directory inside the git
+// common dir, alongside ShadowLockDirName. Under the git-refs backend this
+// accrues one file per checkpoint ref and nothing supersedes them, so it is
+// exported for `entire clean` to reclaim: a file is safe to remove once no
+// process holds its flock, and the next ref update recreates it.
+const PersistentRefLockDirName = "entire-persistent-ref-locks"
 
 // persistentRefLock returns the git common dir's root and the per-ref lock
 // file's name inside it, mirroring shadowBranchLock. Ref names are escaped
@@ -63,11 +66,11 @@ func persistentRefLock(commonDir string, refName plumbing.ReferenceName) (*os.Ro
 	if err != nil {
 		return nil, "", fmt.Errorf("open git common dir: %w", err)
 	}
-	if err := osroot.MkdirAllNoSymlink(root, persistentRefLockDirName, 0o750); err != nil {
+	if err := osroot.MkdirAllNoSymlink(root, PersistentRefLockDirName, 0o750); err != nil {
 		return nil, "", fmt.Errorf("create persistent ref lock directory: %w", err)
 	}
 	safe := strings.NewReplacer("/", "_", "\\", "_", ":", "_").Replace(refName.String())
-	return root, persistentRefLockDirName + "/" + safe + ".lock", nil
+	return root, PersistentRefLockDirName + "/" + safe + ".lock", nil
 }
 
 func withPersistentRefFlock(ctx context.Context, commonDir string, refName plumbing.ReferenceName, fn func() error) error {

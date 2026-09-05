@@ -63,6 +63,22 @@ func AcquireContextIn(ctx context.Context, root *os.Root, name string) (release 
 	return lockFile(ctx, f)
 }
 
+// tryLockFile takes a single non-blocking LOCK_EX and never waits. EWOULDBLOCK
+// means another open file description holds the lock (ok=false, err=nil); any
+// other flock error is a real failure. On success the returned release closes
+// the file, which drops the lock.
+func tryLockFile(f *os.File) (release func(), ok bool, err error) {
+	lockErr := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB) //nolint:gosec // file descriptors are non-negative; standard Go pattern for syscall.Flock
+	if lockErr == nil {
+		return func() { _ = f.Close() }, true, nil
+	}
+	_ = f.Close()
+	if errors.Is(lockErr, syscall.EWOULDBLOCK) {
+		return nil, false, nil
+	}
+	return nil, false, fmt.Errorf("flock: %w", lockErr)
+}
+
 // lockFile holds the locking logic shared by the path- and root-based entry
 // points, which differ only in how the file was opened.
 func lockFile(ctx context.Context, f *os.File) (release func(), err error) {

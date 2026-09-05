@@ -2,6 +2,7 @@ package flock
 
 import (
 	"errors"
+	"fmt"
 	"io/fs"
 	"os"
 
@@ -43,6 +44,25 @@ import (
 // is here so that stays true if a worktree-anchored caller is ever added, since
 // the worktree is the one tree a checkout does control. It keeps the two-step
 // split intact, so the macOS behaviour above is unaffected.
+// TryAcquireIn attempts a single non-blocking exclusive lock on the file named
+// by name inside root, creating it if needed. It never waits: ok reports
+// whether the lock was taken. When ok is true the caller owns the lock and must
+// call release exactly once; when ok is false another holder has it and release
+// is nil. A non-nil err means the attempt could not be made at all -- the file
+// could not be opened, or the lock syscall failed for a reason other than
+// contention -- and is distinct from an uncontended miss.
+//
+// It exists for reapers that must only probe a lock, never queue behind it:
+// `entire clean` removing stale <git-common-dir>/entire-*-locks/ files, where a
+// held lock means "leave it" rather than "wait".
+func TryAcquireIn(root *os.Root, name string) (release func(), ok bool, err error) {
+	f, err := openLockFileIn(root, name)
+	if err != nil {
+		return nil, false, fmt.Errorf("open flock: %w", err)
+	}
+	return tryLockFile(f)
+}
+
 func openLockFileIn(root *os.Root, name string) (*os.File, error) {
 	var err error
 	for range 3 {

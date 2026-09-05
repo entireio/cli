@@ -53,6 +53,27 @@ func AcquireContextIn(ctx context.Context, root *os.Root, name string) (release 
 	return lockFile(ctx, f)
 }
 
+// tryLockFile takes a single fail-immediately exclusive lock and never waits. A
+// held lock is reported as ERROR_LOCK_VIOLATION / ERROR_IO_PENDING (ok=false,
+// err=nil), mirroring the unix EWOULDBLOCK case; any other error is a real
+// failure. On success the returned release unlocks and closes the file.
+func tryLockFile(f *os.File) (release func(), ok bool, err error) {
+	overlapped := new(windows.Overlapped)
+	lockErr := windows.LockFileEx(windows.Handle(f.Fd()),
+		windows.LOCKFILE_EXCLUSIVE_LOCK|windows.LOCKFILE_FAIL_IMMEDIATELY, 0, 1, 0, overlapped)
+	if lockErr == nil {
+		return func() {
+			_ = windows.UnlockFileEx(windows.Handle(f.Fd()), 0, 1, 0, overlapped)
+			_ = f.Close()
+		}, true, nil
+	}
+	_ = f.Close()
+	if errors.Is(lockErr, windows.ERROR_LOCK_VIOLATION) || errors.Is(lockErr, windows.ERROR_IO_PENDING) {
+		return nil, false, nil
+	}
+	return nil, false, fmt.Errorf("lock flock: %w", lockErr)
+}
+
 // lockFile holds the locking logic shared by the path- and root-based entry
 // points, which differ only in how the file was opened.
 func lockFile(ctx context.Context, f *os.File) (release func(), err error) {
