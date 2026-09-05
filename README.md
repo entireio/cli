@@ -501,6 +501,8 @@ Personal overrides, gitignored by default:
 }
 ```
 
+A personal `entire disable` (or `entire enable`) applies to every [worktree](#git-worktrees) of your clone, not just the one you run it in: the choice is mirrored into the git common dir so a new `git worktree add` stays disabled instead of coming back enabled from the committed `settings.json`. A worktree you individually re-enable through its own `settings.local.json` keeps that answer.
+
 ### Configuration Options
 
 | Option                                    | Values                                       | Description                                                                       |

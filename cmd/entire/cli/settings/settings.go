@@ -206,6 +206,15 @@ type EntireSettings struct {
 // same clone see the same preferences. Not committed because the file lives
 // inside .git/.
 type ClonePreferences struct {
+	// Enabled mirrors a personal `entire disable` / `entire enable` (local
+	// scope) choice into the git common dir so it applies to every worktree of
+	// this clone; settings.local.json is per-worktree, so an opt-out written
+	// only there is lost when `git worktree add` creates a checkout without it.
+	// It merges between settings.json and settings.local.json (see Load), so a
+	// worktree re-enabled through its own local file keeps that answer. Pointer
+	// shape distinguishes "no personal choice" (nil) from an explicit false.
+	Enabled *bool `json:"enabled,omitempty"`
+
 	ReviewProfiles       map[string]ReviewProfileConfig `json:"review_profiles,omitempty"`
 	ReviewDefaultProfile string                         `json:"review_default_profile,omitempty"`
 
@@ -1216,6 +1225,11 @@ func clonePreferencesRoot(filePath string) (*os.Root, string, error) {
 func applyClonePreferences(settings *EntireSettings, prefs *ClonePreferences) {
 	if prefs == nil {
 		return
+	}
+	// Clone-wide choice overrides the committed default; settings.local.json
+	// (applied after this in Load) still wins for a worktree with its own value.
+	if prefs.Enabled != nil {
+		settings.Enabled = *prefs.Enabled
 	}
 	if prefs.ReviewProfiles != nil {
 		settings.ReviewProfiles = mergeReviewProfiles(settings.ReviewProfiles, prefs.ReviewProfiles)
