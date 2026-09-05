@@ -7,6 +7,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -19,8 +20,8 @@ func TestAcquireRevalidatesReplacedLockFileInode(t *testing.T) {
 		func(time.Duration) (func(), error) {
 			return Acquire(path)
 		},
-		func() error {
-			return os.Remove(path)
+		func() (func(), error) {
+			return installLockedReplacement(path)
 		},
 	)
 }
@@ -42,8 +43,8 @@ func TestAcquireContextRevalidatesReplacedLockFileInode(t *testing.T) {
 				cancel()
 			}, nil
 		},
-		func() error {
-			return os.Remove(path)
+		func() (func(), error) {
+			return installLockedReplacement(path)
 		},
 	)
 }
@@ -63,8 +64,8 @@ func TestAcquireInRevalidatesReplacedLockFileInode(t *testing.T) {
 		func(time.Duration) (func(), error) {
 			return AcquireIn(root, name)
 		},
-		func() error {
-			return os.Remove(filepath.Join(dir, name))
+		func() (func(), error) {
+			return installLockedReplacement(filepath.Join(dir, name))
 		},
 	)
 }
@@ -93,8 +94,8 @@ func TestAcquireContextInRevalidatesReplacedLockFileInode(t *testing.T) {
 				cancel()
 			}, nil
 		},
-		func() error {
-			return os.Remove(filepath.Join(dir, name))
+		func() (func(), error) {
+			return installLockedReplacement(filepath.Join(dir, name))
 		},
 	)
 }
@@ -126,6 +127,32 @@ func TestLockFileStaleInodeRetryHonorsContextDeadline(t *testing.T) {
 	}
 }
 
+// installLockedReplacement unlinks whatever lock file is at path and installs a
+// fresh one, already flocked, in a single rename.
+//
+// The obvious version of this - unlink, then acquire - is racy against the
+// polling acquire paths. Their next poll re-opens with O_CREATE, so the waiter
+// under test can create the replacement itself, lock it, revalidate it clean
+// and return holding it, leaving the caller here to block on that inode until
+// its own deadline. Renaming an already-locked file over the name leaves no
+// moment at which the name exists unlocked, so the waiter can only ever find it
+// held.
+func installLockedReplacement(path string) (release func(), err error) {
+	f, err := os.OpenFile(path+".replacement", os.O_RDWR|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return nil, err
+	}
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil {
+		_ = f.Close()
+		return nil, err
+	}
+	if err := os.Rename(path+".replacement", path); err != nil {
+		_ = f.Close()
+		return nil, err
+	}
+	return func() { _ = f.Close() }, nil
+}
+
 func openPathLockFile(t *testing.T, path string) func() (*os.File, error) {
 	t.Helper()
 
@@ -134,7 +161,7 @@ func openPathLockFile(t *testing.T, path string) func() (*os.File, error) {
 	}
 }
 
-func testRevalidatesReplacedLockFileInode(t *testing.T, acquire func(time.Duration) (func(), error), removeLockFile func() error) {
+func testRevalidatesReplacedLockFileInode(t *testing.T, acquire func(time.Duration) (func(), error), replaceLockFile func() (func(), error)) {
 	t.Helper()
 
 	releaseOld, err := acquire(2 * time.Second)
@@ -154,13 +181,9 @@ func testRevalidatesReplacedLockFileInode(t *testing.T, acquire func(time.Durati
 	}()
 
 	time.Sleep(50 * time.Millisecond)
-	if err := removeLockFile(); err != nil {
-		t.Fatalf("remove old lock path: %v", err)
-	}
-
-	releaseNew, err := acquire(2 * time.Second)
+	releaseNew, err := replaceLockFile()
 	if err != nil {
-		t.Fatalf("Acquire new lock: %v", err)
+		t.Fatalf("replace lock file: %v", err)
 	}
 
 	releaseOld()
