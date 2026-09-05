@@ -2,6 +2,7 @@ package strategy
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -14,6 +15,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
 	"github.com/entireio/cli/cmd/entire/cli/gitdir"
+	"github.com/entireio/cli/cmd/entire/cli/internal/flock"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
@@ -33,6 +35,7 @@ const (
 	// Purely derived data -- it is rebuilt on the next checkpoint -- so it is
 	// removed wholesale rather than per entry.
 	CleanupTypeRedactCache CleanupType = "redact-cache"
+	CleanupTypeLockFile    CleanupType = "lock-file"
 )
 
 // CleanupItem represents an item that can be cleaned up.
@@ -45,6 +48,7 @@ type CleanupItem struct {
 // CleanupResult contains the results of a cleanup operation.
 type CleanupResult struct {
 	RedactCaches      []string // Deleted redaction prefix cache directories
+	LockFiles         []string // Deleted stale lock files
 	ShadowBranches    []string // Deleted shadow branches
 	SessionStates     []string // Deleted session state files
 	Checkpoints       []string // Deleted checkpoint metadata
@@ -52,6 +56,8 @@ type CleanupResult struct {
 	FailedStates      []string // Session states that failed to delete
 	FailedCheckpoints []string // Checkpoints that failed to delete
 	FailedRedactCache []string // Redaction caches that failed to delete
+	FailedLockFiles   []string // Lock files that failed to delete
+	SkippedLockFiles  []string // Lock files preserved because they are actively held
 }
 
 // shadowBranchPattern matches shadow branch names in both old and new formats:
@@ -86,6 +92,13 @@ var shadowBranchPattern = regexp.MustCompile(`^entire/[0-9a-fA-F]{7,}(-[0-9a-fA-
 // legacy naming from before the worktree-hash suffix was introduced --
 // see isAutoDeletableShadowBranch's doc comment for why.
 var autoDeletableShadowBranchPattern = regexp.MustCompile(`^entire/[0-9a-fA-F]{7,}-[0-9a-fA-F]{6}$`)
+
+var cleanupLockDirs = []string{
+	"entire-shadow-locks",
+	"entire-persistent-ref-locks",
+}
+
+var errCleanupLockHeld = errors.New("cleanup lock held")
 
 // IsShadowBranch returns true if the branch name matches the shadow branch pattern.
 // Shadow branches have the format "entire/<commit-hash>-<worktree-hash>" where the
@@ -536,6 +549,18 @@ func ListAllItems(ctx context.Context) ([]CleanupItem, error) {
 		}
 	}
 
+	lockFiles, err := listCleanupLockFiles(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("listing lock files: %w", err)
+	}
+	for _, lockFile := range lockFiles {
+		cleanupItems = append(cleanupItems, CleanupItem{
+			Type:   CleanupTypeLockFile,
+			ID:     lockFile,
+			Reason: "clean all",
+		})
+	}
+
 	return cleanupItems, nil
 }
 
@@ -547,6 +572,37 @@ func redactCacheDir(ctx context.Context) (string, error) {
 		return "", fmt.Errorf("resolve git common dir: %w", err)
 	}
 	return filepath.Join(commonDir, checkpoint.RedactCacheDirName), nil
+}
+
+func listCleanupLockFiles(ctx context.Context) ([]string, error) {
+	commonDir, err := session.GetGitCommonDir(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("resolve git common dir: %w", err)
+	}
+
+	var lockFiles []string
+	for _, dirName := range cleanupLockDirs {
+		dir := filepath.Join(commonDir, dirName)
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			if os.IsNotExist(err) {
+				continue
+			}
+			logging.Debug(ctx, "skipping unreadable lock directory",
+				slog.String("dir", dirName),
+				slog.String("error", err.Error()),
+			)
+			continue
+		}
+		for _, entry := range entries {
+			if entry.IsDir() {
+				continue
+			}
+			lockFiles = append(lockFiles, filepath.Join(dirName, entry.Name()))
+		}
+	}
+	sort.Strings(lockFiles)
+	return lockFiles, nil
 }
 
 // DeleteAllCleanupItems deletes all specified cleanup items.
@@ -562,7 +618,7 @@ func DeleteAllCleanupItems(ctx context.Context, items []CleanupItem) (*CleanupRe
 	}
 
 	// Group items by type
-	var branches, states, checkpoints, redactCaches []string
+	var branches, states, checkpoints, redactCaches, lockFiles []string
 	for _, item := range items {
 		switch item.Type {
 		case CleanupTypeShadowBranch:
@@ -573,6 +629,8 @@ func DeleteAllCleanupItems(ctx context.Context, items []CleanupItem) (*CleanupRe
 			redactCaches = append(redactCaches, item.ID)
 		case CleanupTypeCheckpoint:
 			checkpoints = append(checkpoints, item.ID)
+		case CleanupTypeLockFile:
+			lockFiles = append(lockFiles, item.ID)
 		}
 	}
 
@@ -672,17 +730,54 @@ func DeleteAllCleanupItems(ctx context.Context, items []CleanupItem) (*CleanupRe
 		}
 	}
 
+	if len(lockFiles) > 0 {
+		deleted, skipped, failed, err := deleteCleanupLockFiles(ctx, lockFiles)
+		if err != nil {
+			return result, err
+		}
+		result.LockFiles = deleted
+		result.SkippedLockFiles = skipped
+		result.FailedLockFiles = failed
+
+		for _, id := range deleted {
+			logging.Info(logCtx, "deleted lock file",
+				slog.String("type", string(CleanupTypeLockFile)),
+				slog.String("id", id),
+				slog.String("reason", reasonMap[id]),
+			)
+		}
+		for _, id := range skipped {
+			logging.Info(logCtx, "skipped active lock file",
+				slog.String("type", string(CleanupTypeLockFile)),
+				slog.String("id", id),
+				slog.String("reason", reasonMap[id]),
+			)
+		}
+		for _, id := range failed {
+			logging.Warn(logCtx, "failed to delete lock file",
+				slog.String("type", string(CleanupTypeLockFile)),
+				slog.String("id", id),
+				slog.String("reason", reasonMap[id]),
+			)
+		}
+	}
+
 	// Log summary
-	totalDeleted := len(result.ShadowBranches) + len(result.SessionStates) + len(result.Checkpoints)
-	totalFailed := len(result.FailedBranches) + len(result.FailedStates) + len(result.FailedCheckpoints)
+	totalDeleted := len(result.ShadowBranches) + len(result.SessionStates) + len(result.Checkpoints) + len(result.RedactCaches) + len(result.LockFiles)
+	totalFailed := len(result.FailedBranches) + len(result.FailedStates) + len(result.FailedCheckpoints) + len(result.FailedRedactCache) + len(result.FailedLockFiles)
 	if totalDeleted > 0 || totalFailed > 0 {
 		logging.Info(logCtx, "cleanup completed",
 			slog.Int("deleted_branches", len(result.ShadowBranches)),
 			slog.Int("deleted_session_states", len(result.SessionStates)),
 			slog.Int("deleted_checkpoints", len(result.Checkpoints)),
+			slog.Int("deleted_redact_caches", len(result.RedactCaches)),
+			slog.Int("deleted_lock_files", len(result.LockFiles)),
+			slog.Int("skipped_lock_files", len(result.SkippedLockFiles)),
 			slog.Int("failed_branches", len(result.FailedBranches)),
 			slog.Int("failed_session_states", len(result.FailedStates)),
 			slog.Int("failed_checkpoints", len(result.FailedCheckpoints)),
+			slog.Int("failed_redact_caches", len(result.FailedRedactCache)),
+			slog.Int("failed_lock_files", len(result.FailedLockFiles)),
 		)
 	}
 
@@ -705,4 +800,66 @@ func deleteRedactCache(ctx context.Context) error {
 		return fmt.Errorf("remove redaction cache %s: %w", dir, err)
 	}
 	return nil
+}
+
+func deleteCleanupLockFiles(ctx context.Context, lockFiles []string) (deleted []string, skipped []string, failed []string, err error) {
+	commonDir, err := session.GetGitCommonDir(ctx)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("resolve git common dir: %w", err)
+	}
+
+	for _, lockFile := range lockFiles {
+		if !isCleanupLockFileID(lockFile) {
+			failed = append(failed, lockFile)
+			continue
+		}
+
+		path := filepath.Join(commonDir, lockFile)
+		release, err := tryAcquireCleanupLock(ctx, path)
+		if err != nil {
+			if errors.Is(err, errCleanupLockHeld) {
+				skipped = append(skipped, lockFile)
+				continue
+			}
+			failed = append(failed, lockFile)
+			continue
+		}
+		removeErr := removeAcquiredCleanupLockFile(path, release)
+		if removeErr != nil {
+			if os.IsNotExist(removeErr) {
+				deleted = append(deleted, lockFile)
+				continue
+			}
+			failed = append(failed, lockFile)
+			continue
+		}
+		deleted = append(deleted, lockFile)
+	}
+	return deleted, skipped, failed, nil
+}
+
+func isCleanupLockFileID(lockFile string) bool {
+	cleaned := filepath.Clean(lockFile)
+	if cleaned != lockFile || filepath.IsAbs(lockFile) {
+		return false
+	}
+	for _, dirName := range cleanupLockDirs {
+		if filepath.Dir(lockFile) == dirName && filepath.Base(lockFile) != "." {
+			return true
+		}
+	}
+	return false
+}
+
+func tryAcquireCleanupLock(ctx context.Context, path string) (func(), error) {
+	lockCtx, cancel := context.WithTimeout(ctx, 0)
+	defer cancel()
+	release, err := flock.AcquireContext(lockCtx, path)
+	if err != nil {
+		if errors.Is(err, context.DeadlineExceeded) {
+			return nil, errCleanupLockHeld
+		}
+		return nil, fmt.Errorf("acquire cleanup lock: %w", err)
+	}
+	return release, nil
 }
