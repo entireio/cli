@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	checkpointID "github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
+	"github.com/entireio/cli/cmd/entire/cli/stringutil"
 )
 
 // Trailer key constants used in commit messages.
@@ -65,11 +66,25 @@ const (
 )
 
 // Pre-compiled regexes for trailer parsing.
+//
+// Every pattern is anchored to the start of a line ((?m)^, past any indent). A
+// git trailer is a line, not a substring: without the anchor these matched a
+// trailer key anywhere inside a line, so prose or a flattened subject that
+// merely mentions "Entire-Session: x" was parsed as the commit's session. Since
+// the parsers take the FIRST match in the message and the subject precedes the
+// trailer block, an unanchored match also outranked the real trailer.
+//
+// The leading [ \t]* is required, not a loosening: `git merge --squash` nests
+// each original commit message inside "Squashed commit of the following:" and
+// indents it by four spaces, so a genuine checkpoint trailer arrives indented.
+// Requiring the key to START its line is what blocks the forgery; permitting
+// the indent git itself writes does not weaken that, because the untrusted
+// subject is flattened onto one line and so can never begin a line of its own.
 var (
-	metadataTrailerRegex     = regexp.MustCompile(MetadataTrailerKey + `:\s*(.+)`)
-	taskMetadataTrailerRegex = regexp.MustCompile(MetadataTaskTrailerKey + `:\s*(.+)`)
-	sessionTrailerRegex      = regexp.MustCompile(SessionTrailerKey + `:\s*(.+)`)
-	checkpointTrailerRegex   = regexp.MustCompile(CheckpointTrailerKey + `:\s*(` + checkpointID.CheckpointPattern + `)(?:\s|$)`)
+	metadataTrailerRegex     = regexp.MustCompile(`(?m)^[ \t]*` + MetadataTrailerKey + `:\s*(.+)`)
+	taskMetadataTrailerRegex = regexp.MustCompile(`(?m)^[ \t]*` + MetadataTaskTrailerKey + `:\s*(.+)`)
+	sessionTrailerRegex      = regexp.MustCompile(`(?m)^[ \t]*` + SessionTrailerKey + `:\s*(.+)`)
+	checkpointTrailerRegex   = regexp.MustCompile(`(?m)^[ \t]*` + CheckpointTrailerKey + `:\s*(` + checkpointID.CheckpointPattern + `)(?:\s|$)`)
 )
 
 // ParseMetadata extracts metadata dir from commit message.
@@ -153,14 +168,36 @@ func FormatSourceRef(branch, commitHash string) string {
 	return fmt.Sprintf("%s@%s", branch, shortHash)
 }
 
+// flattenSubject collapses a shadow-commit subject onto one line.
+//
+// The parsers in this package scan the WHOLE commit message and take the first
+// match (ParseSession, ParseMetadata, ParseTaskMetadata, ParseCheckpoint), so a
+// newline in the subject is enough to place a forged trailer line ABOVE the real
+// trailer block and win. The subject is built from text Entire does not control
+// — a TodoWrite item the model wrote, or the session's first prompt — and that
+// text is steerable by anything the agent read into its context, including a
+// file in the repository it is working on.
+//
+// A shadow-commit subject is single-line by construction at every call site, so
+// collapsing is lossless for legitimate input and removes the injection point
+// for the rest. Applied to the trailer VALUES too: a value carrying a newline
+// would splice an extra trailer line into the block just as effectively.
+func flattenSubject(s string) string {
+	return stringutil.CollapseWhitespace(s)
+}
+
 // FormatShadowCommit creates a commit message for manual-commit strategy checkpoints.
 // Includes Entire-Metadata, Entire-Session, and Entire-Strategy trailers.
+//
+// The subject and the trailer values are flattened onto single lines so the
+// trailers this function writes are the ones the parsers will find. See
+// flattenSubject.
 func FormatShadowCommit(message, metadataDir, sessionID string) string {
 	var sb strings.Builder
-	sb.WriteString(message)
+	sb.WriteString(flattenSubject(message))
 	sb.WriteString("\n\n")
-	fmt.Fprintf(&sb, "%s: %s\n", MetadataTrailerKey, metadataDir)
-	fmt.Fprintf(&sb, "%s: %s\n", SessionTrailerKey, sessionID)
+	fmt.Fprintf(&sb, "%s: %s\n", MetadataTrailerKey, flattenSubject(metadataDir))
+	fmt.Fprintf(&sb, "%s: %s\n", SessionTrailerKey, flattenSubject(sessionID))
 	fmt.Fprintf(&sb, "%s: %s\n", StrategyTrailerKey, "manual-commit")
 	return sb.String()
 }
@@ -169,10 +206,10 @@ func FormatShadowCommit(message, metadataDir, sessionID string) string {
 // Includes Entire-Metadata-Task, Entire-Session, and Entire-Strategy trailers.
 func FormatShadowTaskCommit(message, taskMetadataDir, sessionID string) string {
 	var sb strings.Builder
-	sb.WriteString(message)
+	sb.WriteString(flattenSubject(message))
 	sb.WriteString("\n\n")
-	fmt.Fprintf(&sb, "%s: %s\n", MetadataTaskTrailerKey, taskMetadataDir)
-	fmt.Fprintf(&sb, "%s: %s\n", SessionTrailerKey, sessionID)
+	fmt.Fprintf(&sb, "%s: %s\n", MetadataTaskTrailerKey, flattenSubject(taskMetadataDir))
+	fmt.Fprintf(&sb, "%s: %s\n", SessionTrailerKey, flattenSubject(sessionID))
 	fmt.Fprintf(&sb, "%s: %s\n", StrategyTrailerKey, "manual-commit")
 	return sb.String()
 }
