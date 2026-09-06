@@ -305,6 +305,48 @@ fixture's prompt or transcript phrases.
 **96 tests pass: the 75 that existed before the curveball, unchanged, plus 21
 new ones.**
 
+### Final semantic diff of the submitted implementation
+
+The third required Graph action, run against the submitted code rather than a
+description of it:
+
+```bash
+entire graph diff --repo . --base 768bc9283 --head HEAD --json
+```
+
+**80 entity changes across 9 files** — 66 added, 10 body-changed, 4
+signature-changed:
+
+| File | Entity changes | Status |
+| --- | --- | --- |
+| `tools/checkpoint_lens/tests/test_privacy_boundary.py` | 40 | added |
+| `tools/checkpoint_lens/databricks.py` | 10 | modified |
+| `tools/checkpoint_lens/cli.py` | 8 | modified |
+| `tools/checkpoint_lens/completeness.py` | 8 | added |
+| `BUILDATHON.md` | 5 | modified |
+| `tools/checkpoint_lens/html.py` | 3 | modified |
+| `tools/checkpoint_lens/models.py` / `reader.py` / `report.py` | 2 each | modified |
+
+Graph flags four signature changes carrying dependents, and each is a
+deliberate part of the fix rather than collateral:
+
+| Signature change | Dependents | Why |
+| --- | --- | --- |
+| `DatabricksSync._insert` | 2 | dropped the `ncols` argument; the column count now comes from `EGRESS_COLUMNS`, so the row width cannot disagree with the schema |
+| `html.render_handoff` | 8 | takes the completeness verdict so the banner can lead the document |
+| `html.render_drift` | 1 | same |
+| `report.render_decisions` | 3 | takes `transcript_available`, so an empty result can say *why* it is empty |
+
+That is the whole point of an entity-level diff over a text diff: it names the
+four call contracts a reviewer must check, out of ~860 changed lines, and it
+confirms nothing was **removed** — no existing caller lost a function.
+
+Verified against source, not taken on trust: the graph's own `changes[]`
+payload is nested under `files[]`, and a first parse against a top-level
+`changes` key returned **0 entity changes** — which reads exactly like "this
+change touched nothing". Same failure shape as the three silent interface
+defects found before noon, caught the same way.
+
 ## Checkpoint links and what each checkpoint proves
 
 Checkpoints are on the `RV/Entire_Trunk` branch of the fork, pushed to the
@@ -318,10 +360,22 @@ Read any of them with `entire checkpoint explain <id>`.
 | `01M1TM6ZCD0CP72K2HW6S945KY` | `6ca259776` | Hygiene: committed bytecode removed. Shows up later as noise in the file-churn aggregate — an honest artefact of our own history. |
 | `01M1TM9WCDTJJBYQNFEDCBJ04N` | `dda47c39a` | **Graph evidence + a real bug.** The silent `graph commit` interface defect, found by verification rather than assumption. |
 | `01M1TNJQEJTDEK7Y6MSGR5KBBQ` | `c1e0521a0` | `drift`, `assess`, Databricks sync, 40 tests. Two further silent graph-interface bugs found and fixed. |
+| `01M1TQF2VBAQ9ZKJJZDD6YGJJH` | `e4ad10bc6` | Drift as a CI gate (`--fail-on-open`) and adjudicated verification in `assess`. |
+| `01M1TQGCCBZX7GPKX5JD9MN2ZT` | `768bc9283` | **Milestone 3 — the last stable state before the Curveball response.** The baseline every post-noon claim is measured against. |
 
 The milestone-2 checkpoint is the one worth opening: it records a *rejected*
 option (installing Go) with the reasoning, which is precisely the context git
 alone cannot preserve.
+
+**Milestones 3 and 4 — the Curveball response and the final verification — are
+commits `79d0fa43a` and later on this branch.** Their full narrative is in the
+commit messages, which is where every checkpoint in this project takes its
+text from. Stated plainly rather than glossed: at the time of writing those
+commits do not yet have their own `refs/entire/checkpoints/**` entry, because
+the coding-agent session that produced them had not reached a `Stop` boundary
+when they were made, so the shadow branch held no un-condensed content for
+post-commit to condense. This is Entire's documented fail-open path — the work
+is committed, pushed and reproducible; only the checkpoint ref lags.
 
 ## Setup, run and test instructions
 
