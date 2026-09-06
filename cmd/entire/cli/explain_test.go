@@ -5266,7 +5266,7 @@ func TestFormatCheckpointOutput_NoCommitsOnBranch(t *testing.T) {
 	}
 }
 
-func TestGetAssociatedCommits_SearchAllFindsMergedBranchCommits(t *testing.T) {
+func TestGetAssociatedCommits_FindsMergedBranchCommits(t *testing.T) {
 	// Regression test: --search-all should find checkpoint commits that live on
 	// a feature branch merged into main via a true merge commit. These commits
 	// are on the second parent of the merge, so first-parent-only traversal
@@ -5358,14 +5358,18 @@ func TestGetAssociatedCommits_SearchAllFindsMergedBranchCommits(t *testing.T) {
 		t.Fatalf("failed to set HEAD: %v", err)
 	}
 
-	// Without --search-all (first-parent only): should NOT find the feature commit
-	// because it's on the second parent of the merge
+	// Without --search-all: the branch-scoped walk still follows merge commits'
+	// second parents (pruning only the default branch's own history), so the
+	// feature commit merged in here is found. This is the issue #931 fix — a
+	// first-parent-only walk used to miss it and drop the merged reference.
+	// The remaining difference from --search-all is the depth bound and the
+	// default-branch-history pruning, not merge awareness.
 	commits, err := getAssociatedCommits(context.Background(), repo, checkpointID, false)
 	if err != nil {
 		t.Fatalf("getAssociatedCommits error: %v", err)
 	}
-	if len(commits) != 0 {
-		t.Errorf("expected 0 commits without --search-all (first-parent only), got %d", len(commits))
+	if len(commits) != 1 {
+		t.Errorf("expected 1 commit for merged feature checkpoint without --search-all, got %d", len(commits))
 	}
 
 	// With --search-all (full DAG walk): SHOULD find the feature commit
@@ -5491,6 +5495,644 @@ func TestGetBranchCheckpoints_DefaultBranchFindsMergedCheckpoints(t *testing.T) 
 	}
 	if !found {
 		t.Errorf("expected to find checkpoint %s from merged feature branch on default branch, got %d points: %v", cpID, len(points), points)
+	}
+}
+
+func TestGetBranchCheckpoints_NonDefaultTargetFindsMergedCheckpoints(t *testing.T) {
+	// Regression test for issue #931: merging a feature branch into a NON-default
+	// target branch (e.g. "release") via a merge commit puts the feature's
+	// checkpoint commits on the merge's second parent. First-parent-only
+	// traversal — used for every branch that is not the repo default — missed
+	// them, so the merged session references vanished from the target branch.
+	// The default-branch DAG walk added earlier only covered the default branch.
+	//
+	// It also asserts the exclusion invariant still holds: a checkpoint that
+	// lives only on the default branch is NOT surfaced on the target branch.
+	tmpDir := t.TempDir()
+	t.Chdir(tmpDir)
+
+	testutil.InitRepo(t, tmpDir)
+	repo, err := git.PlainOpen(tmpDir)
+	if err != nil {
+		t.Fatalf("failed to open git repo: %v", err)
+	}
+
+	w, err := repo.Worktree()
+	if err != nil {
+		t.Fatalf("failed to get worktree: %v", err)
+	}
+
+	// Initial commit on master (the default branch — InitRepo uses master).
+	testFile := filepath.Join(tmpDir, "test.txt")
+	if err := os.WriteFile(testFile, []byte("initial"), 0o644); err != nil {
+		t.Fatalf("failed to write file: %v", err)
+	}
+	if _, err := w.Add("test.txt"); err != nil {
+		t.Fatalf("failed to add file: %v", err)
+	}
+	masterBase, err := w.Commit("initial commit", &git.CommitOptions{
+		Author: &object.Signature{Name: "Test", Email: "test@example.com", When: time.Now().Add(-5 * time.Hour)},
+	})
+	if err != nil {
+		t.Fatalf("failed to create initial commit: %v", err)
+	}
+
+	// A checkpoint that lives only on master (must NOT leak onto the target).
+	cpMaster := id.MustCheckpointID("aa5700000001")
+	if err := os.WriteFile(testFile, []byte("master work"), 0o644); err != nil {
+		t.Fatalf("failed to write file: %v", err)
+	}
+	if _, err := w.Add("test.txt"); err != nil {
+		t.Fatalf("failed to add file: %v", err)
+	}
+	masterTip, err := w.Commit(trailers.FormatCheckpoint("master: work", cpMaster), &git.CommitOptions{
+		Author: &object.Signature{Name: "Main Dev", Email: "main@example.com", When: time.Now().Add(-4 * time.Hour)},
+	})
+	if err != nil {
+		t.Fatalf("failed to create master checkpoint commit: %v", err)
+	}
+
+	// Feature branch off the base with its own checkpoint.
+	featureBranch := plumbing.NewBranchReferenceName("feature/x")
+	if err := w.Checkout(&git.CheckoutOptions{Hash: masterBase, Branch: featureBranch, Create: true}); err != nil {
+		t.Fatalf("failed to create feature branch: %v", err)
+	}
+	cpFeature := id.MustCheckpointID("fea700000002")
+	if err := os.WriteFile(testFile, []byte("feature work"), 0o644); err != nil {
+		t.Fatalf("failed to write file: %v", err)
+	}
+	if _, err := w.Add("test.txt"); err != nil {
+		t.Fatalf("failed to add file: %v", err)
+	}
+	featureCommit, err := w.Commit(trailers.FormatCheckpoint("feat: add feature", cpFeature), &git.CommitOptions{
+		Author: &object.Signature{Name: "Feature Dev", Email: "dev@example.com", When: time.Now().Add(-3 * time.Hour)},
+	})
+	if err != nil {
+		t.Fatalf("failed to create feature commit: %v", err)
+	}
+	featureObj, err := repo.CommitObject(featureCommit)
+	if err != nil {
+		t.Fatalf("failed to get feature commit: %v", err)
+	}
+	featureTree, err := featureObj.Tree()
+	if err != nil {
+		t.Fatalf("failed to get feature tree: %v", err)
+	}
+
+	// Create the non-default target branch "release" at master's tip, then merge
+	// the feature branch into it: first parent = release tip (master), second
+	// parent = feature. Anchoring release at masterTip makes master's own
+	// checkpoint cpMaster a genuine first-parent ancestor of release, so the
+	// "must NOT leak" assertion below actually exercises the prune: without it,
+	// the walk would descend through masterTip and surface cpMaster.
+	mergeHash := createMergeCommit(t, repo, masterTip, featureCommit, featureTree.Hash, "Merge feature/x into release")
+	releaseBranch := plumbing.NewBranchReferenceName("release")
+	if err := repo.Storer.SetReference(plumbing.NewHashReference(releaseBranch, mergeHash)); err != nil {
+		t.Fatalf("failed to set release ref: %v", err)
+	}
+	if err := repo.Storer.SetReference(plumbing.NewSymbolicReference("HEAD", releaseBranch)); err != nil {
+		t.Fatalf("failed to point HEAD at release: %v", err)
+	}
+
+	// Sanity: we must be on a non-default branch for this test to be meaningful.
+	if isOnDefault, cur := strategy.IsOnDefaultBranch(repo); isOnDefault {
+		t.Fatalf("test setup invalid: expected to be on a non-default branch, got default branch %q", cur)
+	}
+
+	// Write committed checkpoint metadata for both checkpoints.
+	store := checkpoint.NewGitStore(repo, checkpoint.DefaultV1Refs())
+	for _, cp := range []id.CheckpointID{cpFeature, cpMaster} {
+		if err := store.Write(context.Background(), checkpoint.Session{
+			CheckpointID: cp,
+			SessionID:    "test-session-" + cp.String(),
+			Strategy:     "manual-commit",
+			FilesTouched: []string{"test.txt"},
+			Prompts:      []string{"work"},
+		}); err != nil {
+			t.Fatalf("failed to write committed checkpoint %s: %v", cp, err)
+		}
+	}
+
+	points, _, err := getBranchCheckpoints(context.Background(), repo, 100)
+	if err != nil {
+		t.Fatalf("getBranchCheckpoints error: %v", err)
+	}
+
+	var foundFeature, foundMaster bool
+	for _, p := range points {
+		if p.CheckpointID == cpFeature {
+			foundFeature = true
+		}
+		if p.CheckpointID == cpMaster {
+			foundMaster = true
+		}
+	}
+	if !foundFeature {
+		t.Errorf("expected feature checkpoint %s (merged into non-default target) to be found, got %d points: %v", cpFeature, len(points), points)
+	}
+	if foundMaster {
+		t.Errorf("master-only checkpoint %s must not leak onto the non-default target branch", cpMaster)
+	}
+}
+
+// createNaryMergeCommit builds a merge commit with an arbitrary number of
+// parents (>= 2), used to model octopus merges in tests. The first parent is
+// the target branch's own tip; the remaining parents are the merged-in heads.
+func createNaryMergeCommit(t *testing.T, repo *git.Repository, treeHash plumbing.Hash, message string, parents ...plumbing.Hash) plumbing.Hash {
+	t.Helper()
+	if len(parents) < 2 {
+		t.Fatalf("createNaryMergeCommit needs >= 2 parents, got %d", len(parents))
+	}
+	sig := object.Signature{Name: "Test", Email: "test@example.com", When: time.Now()}
+	commit := object.Commit{
+		Author:       sig,
+		Committer:    sig,
+		Message:      message,
+		TreeHash:     treeHash,
+		ParentHashes: parents,
+	}
+	obj := repo.Storer.NewEncodedObject()
+	if err := commit.Encode(obj); err != nil {
+		t.Fatalf("failed to encode n-ary merge commit: %v", err)
+	}
+	hash, err := repo.Storer.SetEncodedObject(obj)
+	if err != nil {
+		t.Fatalf("failed to store n-ary merge commit: %v", err)
+	}
+	return hash
+}
+
+// writeCommittedCheckpointsForTest writes minimal committed checkpoint metadata
+// (entire/checkpoints/v1) for each id so getBranchCheckpoints can surface them.
+// Every id passed here is a valid committed checkpoint; whether it appears in
+// the result is therefore decided purely by commit-graph reachability, which is
+// exactly what the traversal-scoping tests need to assert.
+func writeCommittedCheckpointsForTest(t *testing.T, repo *git.Repository, ids ...id.CheckpointID) {
+	t.Helper()
+	store := checkpoint.NewGitStore(repo, checkpoint.DefaultV1Refs())
+	for _, cp := range ids {
+		if err := store.Write(context.Background(), checkpoint.Session{
+			CheckpointID: cp,
+			SessionID:    "test-session-" + cp.String(),
+			Strategy:     "manual-commit",
+			FilesTouched: []string{"test.txt"},
+			Prompts:      []string{"work"},
+		}); err != nil {
+			t.Fatalf("failed to write committed checkpoint %s: %v", cp, err)
+		}
+	}
+}
+
+// setBranchHead points branch at tip and checks out HEAD to it (symbolic).
+func setBranchHead(t *testing.T, repo *git.Repository, branch string, tip plumbing.Hash) {
+	t.Helper()
+	ref := plumbing.NewBranchReferenceName(branch)
+	if err := repo.Storer.SetReference(plumbing.NewHashReference(ref, tip)); err != nil {
+		t.Fatalf("failed to set %s ref: %v", branch, err)
+	}
+	if err := repo.Storer.SetReference(plumbing.NewSymbolicReference("HEAD", ref)); err != nil {
+		t.Fatalf("failed to point HEAD at %s: %v", branch, err)
+	}
+}
+
+// collectCheckpointIDs indexes rewind points by checkpoint ID for membership
+// assertions.
+func collectCheckpointIDs(points []strategy.RewindPoint) map[id.CheckpointID]bool {
+	found := make(map[id.CheckpointID]bool, len(points))
+	for _, p := range points {
+		found[p.CheckpointID] = true
+	}
+	return found
+}
+
+// newMasterWithCheckpoint creates the initial commit and a second commit that
+// carries cpMaster, repoints refs/heads/master at the second commit, and returns
+// the base commit, the master tip, and the shared base tree hash. Reusing a
+// single tree across the whole graph is fine — checkpoint scanning only reads
+// commit messages and the parent DAG, never tree contents.
+func newMasterWithCheckpoint(t *testing.T, repo *git.Repository, w *git.Worktree, dir string, cpMaster id.CheckpointID) (base, masterTip, baseTree plumbing.Hash) {
+	t.Helper()
+	testFile := filepath.Join(dir, "test.txt")
+	if err := os.WriteFile(testFile, []byte("initial"), 0o644); err != nil {
+		t.Fatalf("failed to write file: %v", err)
+	}
+	if _, err := w.Add("test.txt"); err != nil {
+		t.Fatalf("failed to add file: %v", err)
+	}
+	base, err := w.Commit("initial commit", &git.CommitOptions{
+		Author: &object.Signature{Name: "Test", Email: "test@example.com", When: time.Now().Add(-5 * time.Hour)},
+	})
+	if err != nil {
+		t.Fatalf("failed to create initial commit: %v", err)
+	}
+	baseObj, err := repo.CommitObject(base)
+	if err != nil {
+		t.Fatalf("failed to get base commit: %v", err)
+	}
+	tree, err := baseObj.Tree()
+	if err != nil {
+		t.Fatalf("failed to get base tree: %v", err)
+	}
+	masterTip = createCommitWithTree(t, repo, tree.Hash, []plumbing.Hash{base}, trailers.FormatCheckpoint("master: work", cpMaster))
+	if err := repo.Storer.SetReference(plumbing.NewHashReference(plumbing.NewBranchReferenceName("master"), masterTip)); err != nil {
+		t.Fatalf("failed to advance master ref: %v", err)
+	}
+	return base, masterTip, tree.Hash
+}
+
+func TestGetBranchCheckpoints_MainMergedIntoFeatureExcludesMainCheckpoint(t *testing.T) {
+	// Invariant guard for the issue #931 fix: merging the DEFAULT branch INTO a
+	// feature branch must NOT surface the default branch's own checkpoints. Those
+	// commits live on the merge's second parent and become ancestors of the
+	// feature branch, so a naive "follow every parent" walk would leak them.
+	// walkBranchOwnCommits prunes everything reachable from the default branch, so
+	// cpMaster is excluded while the feature's own checkpoint is still found.
+	// (Deleting the prune makes cpMaster leak — the mutation this locks down.)
+	tmpDir := t.TempDir()
+	t.Chdir(tmpDir)
+	testutil.InitRepo(t, tmpDir)
+	repo, err := git.PlainOpen(tmpDir)
+	if err != nil {
+		t.Fatalf("failed to open git repo: %v", err)
+	}
+	w, err := repo.Worktree()
+	if err != nil {
+		t.Fatalf("failed to get worktree: %v", err)
+	}
+
+	cpMaster := id.MustCheckpointID("aa5700000001")
+	cpFeature := id.MustCheckpointID("fea700000002")
+	masterBase, masterTip, baseTree := newMasterWithCheckpoint(t, repo, w, tmpDir, cpMaster)
+
+	// Feature branches off the base with its own checkpoint, then merges master
+	// IN: first parent = feature tip, second parent = master tip.
+	featureCommit := createCommitWithTree(t, repo, baseTree, []plumbing.Hash{masterBase}, trailers.FormatCheckpoint("feat: work", cpFeature))
+	mergeHash := createMergeCommit(t, repo, featureCommit, masterTip, baseTree, "Merge branch 'master' into feature/x")
+	setBranchHead(t, repo, "feature/x", mergeHash)
+
+	if isOnDefault, cur := strategy.IsOnDefaultBranch(repo); isOnDefault {
+		t.Fatalf("test setup invalid: expected a non-default branch, got default branch %q", cur)
+	}
+
+	writeCommittedCheckpointsForTest(t, repo, cpMaster, cpFeature)
+
+	points, _, err := getBranchCheckpoints(context.Background(), repo, 100)
+	if err != nil {
+		t.Fatalf("getBranchCheckpoints error: %v", err)
+	}
+	found := collectCheckpointIDs(points)
+	if !found[cpFeature] {
+		t.Errorf("expected feature checkpoint %s to be found, got %d points: %v", cpFeature, len(points), points)
+	}
+	if found[cpMaster] {
+		t.Errorf("default-branch checkpoint %s must not leak onto a feature branch after merging the default branch in", cpMaster)
+	}
+}
+
+func TestGetBranchCheckpoints_OctopusMergeIntoNonDefaultTarget(t *testing.T) {
+	// Adversarial graph: an octopus merge (three feature parents) into a
+	// non-default target branch. Every merged feature's checkpoint must be
+	// discovered — the walk follows all parents, not just the first two — while
+	// the default branch's own checkpoint stays excluded.
+	tmpDir := t.TempDir()
+	t.Chdir(tmpDir)
+	testutil.InitRepo(t, tmpDir)
+	repo, err := git.PlainOpen(tmpDir)
+	if err != nil {
+		t.Fatalf("failed to open git repo: %v", err)
+	}
+	w, err := repo.Worktree()
+	if err != nil {
+		t.Fatalf("failed to get worktree: %v", err)
+	}
+
+	cpMaster := id.MustCheckpointID("aa5700000001")
+	cp1 := id.MustCheckpointID("f00100000001")
+	cp2 := id.MustCheckpointID("f00200000002")
+	cp3 := id.MustCheckpointID("f00300000003")
+	masterBase, masterTip, baseTree := newMasterWithCheckpoint(t, repo, w, tmpDir, cpMaster)
+
+	f1 := createCommitWithTree(t, repo, baseTree, []plumbing.Hash{masterBase}, trailers.FormatCheckpoint("feat 1", cp1))
+	f2 := createCommitWithTree(t, repo, baseTree, []plumbing.Hash{masterBase}, trailers.FormatCheckpoint("feat 2", cp2))
+	f3 := createCommitWithTree(t, repo, baseTree, []plumbing.Hash{masterBase}, trailers.FormatCheckpoint("feat 3", cp3))
+
+	// Octopus merge into "release": first parent = release tip (master), then the
+	// three feature heads.
+	octopus := createNaryMergeCommit(t, repo, baseTree, "Octopus merge feat 1,2,3 into release", masterTip, f1, f2, f3)
+	setBranchHead(t, repo, "release", octopus)
+
+	if isOnDefault, cur := strategy.IsOnDefaultBranch(repo); isOnDefault {
+		t.Fatalf("test setup invalid: expected a non-default branch, got default branch %q", cur)
+	}
+
+	writeCommittedCheckpointsForTest(t, repo, cpMaster, cp1, cp2, cp3)
+
+	points, _, err := getBranchCheckpoints(context.Background(), repo, 100)
+	if err != nil {
+		t.Fatalf("getBranchCheckpoints error: %v", err)
+	}
+	found := collectCheckpointIDs(points)
+	for _, cp := range []id.CheckpointID{cp1, cp2, cp3} {
+		if !found[cp] {
+			t.Errorf("expected octopus-merged checkpoint %s to be found, got %d points: %v", cp, len(points), points)
+		}
+	}
+	if found[cpMaster] {
+		t.Errorf("default-branch checkpoint %s must not leak onto the octopus target branch", cpMaster)
+	}
+}
+
+func TestGetBranchCheckpoints_NestedMergeIntoNonDefaultTarget(t *testing.T) {
+	// Adversarial graph: nested merges. A sub-feature is merged into feature A,
+	// and feature A is then merged into a non-default "release" target. Both the
+	// feature-A checkpoint and the transitively-merged sub-feature checkpoint must
+	// be discovered (a first-parent-only walk would miss the sub-feature), while
+	// the default branch's own checkpoint stays excluded.
+	tmpDir := t.TempDir()
+	t.Chdir(tmpDir)
+	testutil.InitRepo(t, tmpDir)
+	repo, err := git.PlainOpen(tmpDir)
+	if err != nil {
+		t.Fatalf("failed to open git repo: %v", err)
+	}
+	w, err := repo.Worktree()
+	if err != nil {
+		t.Fatalf("failed to get worktree: %v", err)
+	}
+
+	cpMaster := id.MustCheckpointID("aa5700000001")
+	cpFeatureA := id.MustCheckpointID("aaa000000002")
+	cpSub := id.MustCheckpointID("b0b000000003")
+	masterBase, masterTip, baseTree := newMasterWithCheckpoint(t, repo, w, tmpDir, cpMaster)
+
+	// Sub-feature and feature A both branch off the base.
+	subFeature := createCommitWithTree(t, repo, baseTree, []plumbing.Hash{masterBase}, trailers.FormatCheckpoint("sub-feature", cpSub))
+	featureA := createCommitWithTree(t, repo, baseTree, []plumbing.Hash{masterBase}, trailers.FormatCheckpoint("feature A", cpFeatureA))
+
+	// Feature A merges the sub-feature in (first parent = A, second parent = sub).
+	mergeAsub := createMergeCommit(t, repo, featureA, subFeature, baseTree, "Merge sub-feature into feature A")
+	// Release merges feature A in (first parent = release tip (master), second =
+	// feature A's merge commit).
+	releaseMerge := createMergeCommit(t, repo, masterTip, mergeAsub, baseTree, "Merge feature A into release")
+	setBranchHead(t, repo, "release", releaseMerge)
+
+	if isOnDefault, cur := strategy.IsOnDefaultBranch(repo); isOnDefault {
+		t.Fatalf("test setup invalid: expected a non-default branch, got default branch %q", cur)
+	}
+
+	writeCommittedCheckpointsForTest(t, repo, cpMaster, cpFeatureA, cpSub)
+
+	points, _, err := getBranchCheckpoints(context.Background(), repo, 100)
+	if err != nil {
+		t.Fatalf("getBranchCheckpoints error: %v", err)
+	}
+	found := collectCheckpointIDs(points)
+	if !found[cpFeatureA] {
+		t.Errorf("expected feature-A checkpoint %s to be found, got %d points: %v", cpFeatureA, len(points), points)
+	}
+	if !found[cpSub] {
+		t.Errorf("expected transitively-merged sub-feature checkpoint %s to be found, got %d points: %v", cpSub, len(points), points)
+	}
+	if found[cpMaster] {
+		t.Errorf("default-branch checkpoint %s must not leak onto the nested-merge target branch", cpMaster)
+	}
+}
+
+// createCommitWithTreeAt is createCommitWithTree with an explicit commit time.
+// Git stores commit timestamps at 1-second resolution, so tests that exercise the
+// commit-date frontier must space their commits seconds apart rather than relying
+// on time.Now() (which ties for commits built in the same second).
+func createCommitWithTreeAt(t *testing.T, repo *git.Repository, treeHash plumbing.Hash, parents []plumbing.Hash, message string, when time.Time) plumbing.Hash {
+	t.Helper()
+	sig := object.Signature{Name: "Test", Email: "test@example.com", When: when}
+	commit := object.Commit{Author: sig, Committer: sig, Message: message, TreeHash: treeHash, ParentHashes: parents}
+	obj := repo.Storer.NewEncodedObject()
+	if err := commit.Encode(obj); err != nil {
+		t.Fatalf("failed to encode commit: %v", err)
+	}
+	hash, err := repo.Storer.SetEncodedObject(obj)
+	if err != nil {
+		t.Fatalf("failed to store commit: %v", err)
+	}
+	return hash
+}
+
+func TestGetBranchCheckpoints_DeepHistoryDoesNotLeakMainCheckpoint(t *testing.T) {
+	// The shared-with-main test must still exclude main's history when main's
+	// first-parent chain is longer than the scan bound. A branch that merged main
+	// in long ago — with main since advanced past the bound — has the merged-in
+	// former-main-tip fall outside the scanned set; the commit-date frontier
+	// fail-safe (it is older than the oldest scanned main commit) must still prune
+	// it, so main's older checkpoints do not leak onto the branch, while the
+	// branch's own (newer) checkpoint is still shown.
+	//
+	// Commit times are explicit and seconds apart because git stores timestamps at
+	// 1-second resolution: mainOld is old, the branch commit is recent, and main's
+	// filler commits sit between them so the scan frontier lands between the two.
+	tmpDir := t.TempDir()
+	t.Chdir(tmpDir)
+	testutil.InitRepo(t, tmpDir)
+	repo, err := git.PlainOpen(tmpDir)
+	if err != nil {
+		t.Fatalf("failed to open git repo: %v", err)
+	}
+	w, err := repo.Worktree()
+	if err != nil {
+		t.Fatalf("failed to get worktree: %v", err)
+	}
+
+	base := time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC)
+
+	testFile := filepath.Join(tmpDir, "test.txt")
+	if err := os.WriteFile(testFile, []byte("initial"), 0o644); err != nil {
+		t.Fatalf("failed to write file: %v", err)
+	}
+	if _, err := w.Add("test.txt"); err != nil {
+		t.Fatalf("failed to add file: %v", err)
+	}
+	masterBase, err := w.Commit("initial commit", &git.CommitOptions{
+		Author: &object.Signature{Name: "Test", Email: "test@example.com", When: base},
+	})
+	if err != nil {
+		t.Fatalf("failed to create initial commit: %v", err)
+	}
+	baseObj, err := repo.CommitObject(masterBase)
+	if err != nil {
+		t.Fatalf("failed to get base commit: %v", err)
+	}
+	tree, err := baseObj.Tree()
+	if err != nil {
+		t.Fatalf("failed to get base tree: %v", err)
+	}
+
+	cpMainOld := id.MustCheckpointID("aa5700000001")
+	cpFeature := id.MustCheckpointID("fea700000002")
+
+	// An OLD main tip carrying a checkpoint (t = base + 1h).
+	mainOldTime := base.Add(1 * time.Hour)
+	mainOld := createCommitWithTreeAt(t, repo, tree.Hash, []plumbing.Hash{masterBase}, trailers.FormatCheckpoint("main: old work", cpMainOld), mainOldTime)
+
+	// Advance master past the scan bound. Fillers sit in the MIDDLE (t = base+2h),
+	// so the scan frontier (some filler) is newer than mainOld and older than the
+	// branch commit.
+	fillerTime := base.Add(2 * time.Hour)
+	prev := mainOld
+	for range mainSpineScanLimit + 5 {
+		prev = createCommitWithTreeAt(t, repo, tree.Hash, []plumbing.Hash{prev}, "main: filler", fillerTime)
+	}
+	masterHead := prev
+	if err := repo.Storer.SetReference(plumbing.NewHashReference(plumbing.NewBranchReferenceName("master"), masterHead)); err != nil {
+		t.Fatalf("failed to advance master ref: %v", err)
+	}
+
+	// Feature branches from the base with a RECENT checkpoint (t = base+3h), then
+	// merges the OLD main tip in (first parent = feature, second parent = mainOld).
+	featureTime := base.Add(3 * time.Hour)
+	featureCommit := createCommitWithTreeAt(t, repo, tree.Hash, []plumbing.Hash{masterBase}, trailers.FormatCheckpoint("feat: work", cpFeature), featureTime)
+	mergeHash := createCommitWithTreeAt(t, repo, tree.Hash, []plumbing.Hash{featureCommit, mainOld}, "Merge old main into feature", featureTime)
+	setBranchHead(t, repo, "feature/x", mergeHash)
+	if isOnDefault, cur := strategy.IsOnDefaultBranch(repo); isOnDefault {
+		t.Fatalf("test setup invalid: expected a non-default branch, got default branch %q", cur)
+	}
+
+	writeCommittedCheckpointsForTest(t, repo, cpMainOld, cpFeature)
+
+	points, _, err := getBranchCheckpoints(context.Background(), repo, 100)
+	if err != nil {
+		t.Fatalf("getBranchCheckpoints error: %v", err)
+	}
+	found := collectCheckpointIDs(points)
+	if !found[cpFeature] {
+		t.Errorf("expected feature checkpoint %s to be found, got %d points: %v", cpFeature, len(points), points)
+	}
+	if found[cpMainOld] {
+		t.Errorf("old default-branch checkpoint %s (merged in beyond the scan bound) must not leak onto the feature branch", cpMainOld)
+	}
+}
+
+func TestComputeReachableFromMain_ScanIsBounded(t *testing.T) {
+	// The default-branch first-parent scan must be bounded by mainSpineScanLimit
+	// regardless of how long main is — otherwise checkpoint list/explain would do
+	// an unbounded O(main) traversal on every call on a repo with a long history.
+	tmpDir := t.TempDir()
+	t.Chdir(tmpDir)
+	testutil.InitRepo(t, tmpDir)
+	repo, err := git.PlainOpen(tmpDir)
+	if err != nil {
+		t.Fatalf("failed to open git repo: %v", err)
+	}
+	w, err := repo.Worktree()
+	if err != nil {
+		t.Fatalf("failed to get worktree: %v", err)
+	}
+
+	base := time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC)
+	testFile := filepath.Join(tmpDir, "test.txt")
+	if err := os.WriteFile(testFile, []byte("initial"), 0o644); err != nil {
+		t.Fatalf("failed to write file: %v", err)
+	}
+	if _, err := w.Add("test.txt"); err != nil {
+		t.Fatalf("failed to add file: %v", err)
+	}
+	masterBase, err := w.Commit("initial commit", &git.CommitOptions{
+		Author: &object.Signature{Name: "Test", Email: "test@example.com", When: base},
+	})
+	if err != nil {
+		t.Fatalf("failed to create initial commit: %v", err)
+	}
+	baseObj, err := repo.CommitObject(masterBase)
+	if err != nil {
+		t.Fatalf("failed to get base commit: %v", err)
+	}
+	tree, err := baseObj.Tree()
+	if err != nil {
+		t.Fatalf("failed to get base tree: %v", err)
+	}
+
+	// Main much longer than the bound.
+	prev := masterBase
+	total := mainSpineScanLimit + 50
+	for i := range total {
+		prev = createCommitWithTreeAt(t, repo, tree.Hash, []plumbing.Hash{prev}, "main: filler", base.Add(time.Duration(i)*time.Second))
+	}
+	if err := repo.Storer.SetReference(plumbing.NewHashReference(plumbing.NewBranchReferenceName("master"), prev)); err != nil {
+		t.Fatalf("failed to advance master ref: %v", err)
+	}
+	// A feature branch so computeReachableFromMain does not short-circuit on default.
+	featureCommit := createCommitWithTreeAt(t, repo, tree.Hash, []plumbing.Hash{masterBase}, "feature work", base.Add(time.Duration(total+10)*time.Second))
+	setBranchHead(t, repo, "feature/x", featureCommit)
+
+	reach := computeReachableFromMain(context.Background(), repo)
+	if got := len(reach.onSpine); got > mainSpineScanLimit {
+		t.Errorf("scanned %d main commits, want at most mainSpineScanLimit=%d (scan must be bounded)", got, mainSpineScanLimit)
+	}
+	if reach.reachedRoot {
+		t.Errorf("expected reachedRoot=false when main (%d commits) exceeds the scan bound", total+1)
+	}
+}
+
+func TestGetBranchCheckpoints_ComputesReachabilityOncePerCall(t *testing.T) {
+	// The main first-parent scan must run once per getBranchCheckpoints call, not
+	// once per checkpoint — otherwise the bounded-but-nontrivial scan would be
+	// multiplied by the number of checkpoints on the branch.
+	//
+	// Not parallel: it reads a process-global call counter.
+	tmpDir := t.TempDir()
+	t.Chdir(tmpDir)
+	testutil.InitRepo(t, tmpDir)
+	repo, err := git.PlainOpen(tmpDir)
+	if err != nil {
+		t.Fatalf("failed to open git repo: %v", err)
+	}
+	w, err := repo.Worktree()
+	if err != nil {
+		t.Fatalf("failed to get worktree: %v", err)
+	}
+
+	base := time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC)
+	testFile := filepath.Join(tmpDir, "test.txt")
+	if err := os.WriteFile(testFile, []byte("initial"), 0o644); err != nil {
+		t.Fatalf("failed to write file: %v", err)
+	}
+	if _, err := w.Add("test.txt"); err != nil {
+		t.Fatalf("failed to add file: %v", err)
+	}
+	masterBase, err := w.Commit("initial commit", &git.CommitOptions{
+		Author: &object.Signature{Name: "Test", Email: "test@example.com", When: base},
+	})
+	if err != nil {
+		t.Fatalf("failed to create initial commit: %v", err)
+	}
+	baseObj, err := repo.CommitObject(masterBase)
+	if err != nil {
+		t.Fatalf("failed to get base commit: %v", err)
+	}
+	tree, err := baseObj.Tree()
+	if err != nil {
+		t.Fatalf("failed to get base tree: %v", err)
+	}
+
+	// A feature branch with several committed checkpoints.
+	featureBranch := plumbing.NewBranchReferenceName("feature/x")
+	if err := w.Checkout(&git.CheckoutOptions{Hash: masterBase, Branch: featureBranch, Create: true}); err != nil {
+		t.Fatalf("failed to create feature branch: %v", err)
+	}
+	var ids []id.CheckpointID
+	prev := masterBase
+	for i, s := range []string{"a11100000001", "b22200000002", "c33300000003"} {
+		cp := id.MustCheckpointID(s)
+		ids = append(ids, cp)
+		prev = createCommitWithTreeAt(t, repo, tree.Hash, []plumbing.Hash{prev}, trailers.FormatCheckpoint("feat", cp), base.Add(time.Duration(i+1)*time.Minute))
+	}
+	setBranchHead(t, repo, "feature/x", prev)
+	writeCommittedCheckpointsForTest(t, repo, ids...)
+
+	before := computeReachableFromMainCalls.Load()
+	if _, _, err := getBranchCheckpoints(context.Background(), repo, 100); err != nil {
+		t.Fatalf("getBranchCheckpoints error: %v", err)
+	}
+	if delta := computeReachableFromMainCalls.Load() - before; delta != 1 {
+		t.Errorf("computeReachableFromMain ran %d times for one getBranchCheckpoints call over %d checkpoints; want exactly 1", delta, len(ids))
 	}
 }
 

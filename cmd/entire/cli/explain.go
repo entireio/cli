@@ -13,6 +13,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
@@ -1832,17 +1833,14 @@ func getAssociatedCommits(ctx context.Context, repo *git.Repository, checkpointI
 			return nil
 		})
 	} else {
-		// First-parent walk with depth limit and branch filtering.
-		// Avoids walking into main's history through merge commit parents.
-		reachableFromMain := computeReachableFromMain(ctx, repo)
+		// Branch-scoped walk of this branch's own history — first-parent spine
+		// plus any side branch merged into it — excluding the default branch's
+		// history. Follows merge commits' second parents so a checkpoint on a
+		// feature branch merged INTO this branch is still found (issue #931); a
+		// first-parent-only walk would miss it.
+		mainReach := computeReachableFromMain(ctx, repo)
 
-		err = walkFirstParentCommits(ctx, repo, head.Hash(), commitScanLimit, func(c *object.Commit) error {
-			// Once we hit a commit reachable from main on the first-parent chain,
-			// all earlier ancestors are also shared-with-main, so stop scanning.
-			if reachableFromMain[c.Hash] {
-				return errStopIteration
-			}
-
+		err = walkBranchOwnCommits(ctx, repo, head.Hash(), mainReach, commitScanLimit, func(c *object.Commit) error {
 			cpID, found := trailers.ParseCheckpoint(c.Message)
 			if found && cpID.String() == targetID {
 				collectCommit(c)
@@ -2407,16 +2405,75 @@ func getCurrentWorktreeHash(ctx context.Context) string {
 	return checkpoint.HashWorktreeID(worktreeID)
 }
 
-// computeReachableFromMain returns a set of commit hashes on the main/default branch's first-parent chain.
-// On the default branch itself, returns an empty map (no filtering needed).
-// Only first-parent commits are included — commits from side branches merged into main are excluded,
-// since those could be feature branch commits that shouldn't be filtered out.
-func computeReachableFromMain(ctx context.Context, repo *git.Repository) map[plumbing.Hash]bool {
-	reachableFromMain := make(map[plumbing.Hash]bool)
+// mainSpineScanLimit bounds how many commits of the default branch's first-parent
+// chain computeReachableFromMain scans. It caps the read-path cost: an unbounded
+// scan is multiple seconds on a repo whose main has tens of thousands of commits,
+// and this runs synchronously on every checkpoint list/explain. Beyond this many
+// commits the shared-with-main test falls back to a commit-date frontier
+// (see mainReachability.sharedWithMain), so main's older history is still excluded.
+const mainSpineScanLimit = strategy.MaxCommitTraversalDepth
+
+// computeReachableFromMainCalls counts computeReachableFromMain invocations. Tests
+// use it to assert the scan runs once per command (not once per checkpoint).
+var computeReachableFromMainCalls atomic.Int64
+
+// mainReachability answers "is this commit shared with the default branch's own
+// (first-parent) history?" — the pruning test used by walkBranchOwnCommits.
+//
+// onSpine holds the default branch's first-parent commits up to mainSpineScanLimit.
+// Only first-parent commits are included — commits from side branches merged into
+// main are deliberately excluded, so a feature merged into main and then contained
+// by another branch still shows its checkpoints there.
+//
+// When the scan hit the limit before reaching main's root (reachedRoot == false),
+// onSpine is incomplete, so any commit at or before the oldest scanned main commit
+// (frontierTime) is treated as shared. This is the fail-safe for the deep-history
+// case: a former main tip merged into the branch beyond the scanned window is older
+// than the frontier and is pruned, so main's older checkpoints never leak — at the
+// cost of possibly hiding a branch-unique commit older than the frontier (the safe
+// direction). It mirrors the commit-date boundary git's own rev-list uses to
+// compute `main..HEAD`.
+type mainReachability struct {
+	onSpine      map[plumbing.Hash]bool
+	reachedRoot  bool
+	frontierTime time.Time // committer time of the oldest scanned main commit; used only when !reachedRoot
+}
+
+// sharedWithMain reports whether commit h belongs to the default branch's history
+// and must therefore be excluded from the current branch's own commits.
+func (m *mainReachability) sharedWithMain(repo *git.Repository, h plumbing.Hash) bool {
+	if m.onSpine[h] {
+		return true
+	}
+	if m.reachedRoot {
+		return false
+	}
+	// The first-parent scan was truncated at mainSpineScanLimit. Fall back to the
+	// commit-date frontier: treat anything at or before the oldest scanned main
+	// commit as main's history (fail-safe — exclude rather than risk leaking).
+	c, err := repo.CommitObject(h)
+	if err != nil {
+		return false // cannot classify; let the caller's own load surface the error
+	}
+	return !c.Committer.When.After(m.frontierTime)
+}
+
+// computeReachableFromMain builds the shared-with-main test for the current branch.
+// On the default branch it returns an empty reachability (nothing is shared).
+//
+// It scans the default branch's first-parent chain up to mainSpineScanLimit
+// commits (not to the root). The bound caps the read-path cost; when it is hit
+// before main's root, the returned mainReachability falls back to a commit-date
+// frontier (see sharedWithMain) so main's older history is still excluded — closing
+// the deep-history leak without an unbounded walk.
+func computeReachableFromMain(ctx context.Context, repo *git.Repository) *mainReachability {
+	computeReachableFromMainCalls.Add(1)
+
+	m := &mainReachability{onSpine: make(map[plumbing.Hash]bool), reachedRoot: true}
 
 	isOnDefault, _ := strategy.IsOnDefaultBranch(repo)
 	if isOnDefault {
-		return reachableFromMain // No filtering needed on default branch
+		return m // No filtering needed on default branch
 	}
 
 	// Resolve main branch hash
@@ -2434,16 +2491,28 @@ func computeReachableFromMain(ctx context.Context, repo *git.Repository) map[plu
 		mainBranchHash = strategy.GetMainBranchHash(repo)
 	}
 	if mainBranchHash == plumbing.ZeroHash {
-		return reachableFromMain
+		return m
 	}
 
-	// Walk main's first-parent chain to build the set
-	_ = walkFirstParentCommits(ctx, repo, mainBranchHash, strategy.MaxCommitTraversalDepth, func(c *object.Commit) error { //nolint:errcheck // Best-effort
-		reachableFromMain[c.Hash] = true
+	// Scan main's first-parent chain up to the bound, recording the oldest commit
+	// seen so sharedWithMain can fall back to a commit-date frontier if truncated.
+	var last *object.Commit
+	scanned := 0
+	_ = walkFirstParentCommits(ctx, repo, mainBranchHash, mainSpineScanLimit, func(c *object.Commit) error { //nolint:errcheck // Best-effort
+		m.onSpine[c.Hash] = true
+		last = c
+		scanned++
 		return nil
 	})
 
-	return reachableFromMain
+	// If we stopped because we hit the limit (not the root), the scan is
+	// incomplete: record the frontier for the commit-date fail-safe.
+	if last != nil && scanned >= mainSpineScanLimit && last.NumParents() > 0 {
+		m.reachedRoot = false
+		m.frontierTime = last.Committer.When
+	}
+
+	return m
 }
 
 // walkFirstParentCommits walks the first-parent chain starting from `from`,
@@ -2478,6 +2547,81 @@ func walkFirstParentCommits(ctx context.Context, repo *git.Repository, from plum
 		current, err = current.Parent(0)
 		if err != nil {
 			return fmt.Errorf("failed to load first parent of commit %s: %w", parentHash, err)
+		}
+	}
+	return nil
+}
+
+// walkBranchOwnCommits walks the commits that belong to the current branch's own
+// history — the branch's first-parent spine PLUS any side branch merged into it
+// (via a merge commit's second+ parents) — while excluding the default branch's
+// own first-parent spine (see mainReachability; this is not the full set of
+// commits reachable from the default branch's DAG). It calls fn for each such
+// commit, visiting each at most once.
+//
+// A commit reach.sharedWithMain reports true for is treated as on main's spine:
+// it is neither visited nor traversed through, so the walk stops at main's
+// first-parent spine and never descends into it. This is the property that a
+// full repo.Log() DAG walk lacked (it walked into main's entire history through
+// merge commits and hit the scan limit before older checkpoints were found —
+// see git history for getBranchCheckpoints).
+//
+// Unlike a first-parent-only walk, this follows every parent that is not shared
+// with main, so checkpoints on a feature branch that was merged INTO this branch
+// (living on a merge commit's second parent) are discovered. A first-parent-only
+// walk misses them entirely, which caused merged session references to vanish
+// from any non-default target branch (issue #931).
+//
+// The walk visits at most `limit` commits (0 = no limit). fn may return
+// errStopIteration to end the walk early.
+func walkBranchOwnCommits(
+	ctx context.Context,
+	repo *git.Repository,
+	from plumbing.Hash,
+	reach *mainReachability,
+	limit int,
+	fn func(*object.Commit) error,
+) error {
+	// If HEAD itself is shared with main there is no branch-unique history.
+	if reach.sharedWithMain(repo, from) {
+		return nil
+	}
+
+	visited := map[plumbing.Hash]struct{}{from: {}}
+	queue := []plumbing.Hash{from}
+
+	for count := 0; len(queue) > 0 && (limit <= 0 || count < limit); count++ {
+		if err := ctx.Err(); err != nil {
+			return err //nolint:wrapcheck // Propagating context cancellation
+		}
+
+		hash := queue[0]
+		queue = queue[1:]
+
+		current, err := repo.CommitObject(hash)
+		if err != nil {
+			return fmt.Errorf("failed to get commit %s: %w", hash, err)
+		}
+
+		if err := fn(current); err != nil {
+			if errors.Is(err, errStopIteration) {
+				return nil
+			}
+			return err
+		}
+
+		// Enqueue every parent that is not already seen and not shared with
+		// main. Pruning at reach.sharedWithMain keeps the walk on this branch's
+		// own history and stops it at the merge base with the default branch.
+		for _, parent := range current.ParentHashes {
+			if _, seen := visited[parent]; seen {
+				continue
+			}
+			if reach.sharedWithMain(repo, parent) {
+				continue
+			}
+			visited[parent] = struct{}{}
+			queue = append(queue, parent)
 		}
 	}
 	return nil
@@ -2614,16 +2758,15 @@ func getBranchCheckpoints(ctx context.Context, repo *git.Repository, limit int) 
 			return nil
 		})
 	} else {
-		// On feature branches, use first-parent walk with branch filtering.
-		// This avoids walking into main's full history through merge commit parents.
-		reachableFromMain := computeReachableFromMain(ctx, repo)
+		// On non-default branches, walk this branch's own history — its
+		// first-parent spine plus any side branches merged into it — while
+		// excluding the default branch's history. A first-parent-only walk
+		// misses checkpoints from a feature branch merged INTO this branch (they
+		// live on a merge commit's second parent), which dropped merged session
+		// references from non-default target branches (issue #931).
+		mainReach := computeReachableFromMain(ctx, repo)
 
-		err = walkFirstParentCommits(ctx, repo, head.Hash(), commitScanLimit, func(c *object.Commit) error {
-			// Once we hit a commit reachable from main on the first-parent chain,
-			// all earlier ancestors are also shared-with-main, so stop scanning.
-			if reachableFromMain[c.Hash] {
-				return errStopIteration
-			}
+		err = walkBranchOwnCommits(ctx, repo, head.Hash(), mainReach, commitScanLimit, func(c *object.Commit) error {
 			collectCheckpoint(c)
 			return nil
 		})
@@ -2823,6 +2966,15 @@ func getReachableTemporaryCheckpoints(ctx context.Context, repo *git.Repository,
 // isShadowBranchReachable checks if a shadow branch's base commit is reachable from HEAD.
 // For default branches, all shadow branches are considered reachable.
 // For feature branches, we check if any commit with the base commit prefix is in HEAD's history.
+//
+// NOTE: This is a first-parent-only walk. It is the ephemeral/shadow counterpart of
+// the committed-checkpoint read path and is NOT merge-aware: a shadow branch whose
+// base entered history via a merge's second parent is not found, and (conversely) it
+// does not exclude the default branch's own history. Making it merge-aware without
+// regressing the common "checkout -b then start coding" workflow needs session-origin
+// metadata that isn't persisted today — tracked as a follow-up (see #1730). This
+// function is intentionally left at its pre-existing behavior; issue #931 is a
+// committed-checkpoint read-path bug (see getBranchCheckpoints / walkBranchOwnCommits).
 func isShadowBranchReachable(ctx context.Context, repo *git.Repository, baseCommit string, headHash plumbing.Hash, isOnDefault bool) bool {
 	// For default branch: all shadow branches are potentially relevant
 	if isOnDefault {
