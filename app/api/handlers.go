@@ -49,7 +49,7 @@ func DefaultServerDependencies() *ServerDependencies {
 		CheckpointProvider: providers.NewDevCheckpointProvider(),
 		GraphProvider:      providers.NewDevGraphProvider(),
 		GitHubProvider:     providers.NewDevGitHubProvider(),
-		RepoAnalyzer:       devAnalyzer,
+		RepoAnalyzer:       providers.NewLiveRepositoryAnalyzer(),
 		ReqAnalyzer:        devAnalyzer,
 	}
 }
@@ -84,7 +84,7 @@ func (h *APIHandler) RepositoriesHandler(w http.ResponseWriter, r *http.Request)
 
 	if path == "" {
 		// GET /api/repositories
-		repo, err := h.deps.RepoAnalyzer.AnalyzeRepository(r.Context(), ".")
+		repo, err := h.deps.RepoAnalyzer.AnalyzeRepository(r.Context(), ".", false)
 		if err != nil {
 			slog.Error("Failed to analyze repository", "error", err)
 			WriteAPIError(w, http.StatusInternalServerError, "REPOSITORY_ANALYSIS_FAILED", err.Error())
@@ -99,7 +99,7 @@ func (h *APIHandler) RepositoriesHandler(w http.ResponseWriter, r *http.Request)
 
 	if len(parts) == 1 {
 		// GET /api/repositories/:id
-		repo, err := h.deps.RepoAnalyzer.AnalyzeRepository(r.Context(), ".")
+		repo, err := h.deps.RepoAnalyzer.AnalyzeRepository(r.Context(), ".", false)
 		if err != nil {
 			slog.Error("Failed to fetch repository info", "repoID", repoID, "error", err)
 			WriteAPIError(w, http.StatusNotFound, "REPOSITORY_NOT_FOUND", "Repository was not found")
@@ -121,6 +121,19 @@ func (h *APIHandler) RepositoriesHandler(w http.ResponseWriter, r *http.Request)
 			return
 		}
 		json.NewEncoder(w).Encode(cps)
+	case "analyze":
+		if r.Method == http.MethodPost {
+			// POST /api/repositories/:id/analyze
+			repo, err := h.deps.RepoAnalyzer.AnalyzeRepository(r.Context(), ".", true)
+			if err != nil {
+				slog.Error("Failed to force analyze repository", "repoID", repoID, "error", err)
+				WriteAPIError(w, http.StatusInternalServerError, "REPOSITORY_ANALYSIS_FAILED", err.Error())
+				return
+			}
+			json.NewEncoder(w).Encode(repo)
+		} else {
+			WriteAPIError(w, http.StatusMethodNotAllowed, "METHOD_NOT_ALLOWED", "Only POST is allowed")
+		}
 	case "requirements":
 		// GET /api/repositories/:id/requirements
 		reqs, err := h.deps.ReqAnalyzer.AnalyzeRequirements(r.Context(), repoID)
