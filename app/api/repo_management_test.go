@@ -94,3 +94,25 @@ func TestSelectAndActiveRepositoryAPI(t *testing.T) {
 		t.Errorf("expected 200 OK for repo status, got %d", recStatus.Code)
 	}
 }
+
+func TestAnalyzeRepositoryAPI(t *testing.T) {
+	handler := NewAPIHandler(nil)
+
+	reqAnalyze := httptest.NewRequest("POST", "/api/repositories/repo-kaushalk123-cli-btw/analyze", nil)
+	recAnalyze := httptest.NewRecorder()
+
+	handler.RepositoriesHandler(recAnalyze, reqAnalyze)
+
+	if recAnalyze.Code != http.StatusOK {
+		t.Errorf("expected HTTP 200 OK for repo analyze, got %d. Body: %s", recAnalyze.Code, recAnalyze.Body.String())
+	}
+
+	var res map[string]interface{}
+	if err := json.Unmarshal(recAnalyze.Body.Bytes(), &res); err != nil {
+		t.Fatalf("failed to parse JSON response: %v", err)
+	}
+
+	if res["architecture"] == nil {
+		t.Errorf("expected architecture key in analyzed repository response")
+	}
+}

@@ -52,9 +52,8 @@ func DefaultServerDependencies() *ServerDependencies {
 	devAnalyzer := providers.NewDevAnalyzer()
 	cpProvider := providers.NewDevCheckpointProvider()
 	return &ServerDependencies{
-		CheckpointProvider: cpProvider,
 		RepoManager:        providers.NewMemoryRepoManager(),
-		CheckpointProvider: providers.NewDevCheckpointProvider(),
+		CheckpointProvider: cpProvider,
 		GraphProvider:      providers.NewDevGraphProvider(),
 		GitHubProvider:     providers.NewDevGitHubProvider(),
 		RepoAnalyzer:       providers.NewLiveRepositoryAnalyzer(),
@@ -285,20 +284,25 @@ func (h *APIHandler) RepositoriesHandler(w http.ResponseWriter, r *http.Request)
 			WriteAPIError(w, http.StatusInternalServerError, "CHECKPOINT_FETCH_FAILED", err.Error())
 			return
 		}
-		sanitized := h.deps.Sanitizer.SanitizeCheckpoints(cps)
-		json.NewEncoder(w).Encode(sanitized)
+		if h.deps.Sanitizer != nil {
+			cps = h.deps.Sanitizer.SanitizeCheckpoints(cps)
+		}
 		json.NewEncoder(w).Encode(cps)
 
 	case "analyze":
 		if r.Method == http.MethodPost {
 			// POST /api/repositories/:id/analyze
-			repo, err := h.deps.RepoAnalyzer.AnalyzeRepository(r.Context(), ".", true)
+			localPath := "."
+			if repo, err := h.deps.RepoManager.GetRepository(r.Context(), repoID); err == nil && repo.LocalPath != "" {
+				localPath = repo.LocalPath
+			}
+			analyzedRepo, err := h.deps.RepoAnalyzer.AnalyzeRepository(r.Context(), localPath, true)
 			if err != nil {
 				slog.Error("Failed to force analyze repository", "repoID", repoID, "error", err)
 				WriteAPIError(w, http.StatusInternalServerError, "REPOSITORY_ANALYSIS_FAILED", err.Error())
 				return
 			}
-			json.NewEncoder(w).Encode(repo)
+			json.NewEncoder(w).Encode(analyzedRepo)
 		} else {
 			WriteAPIError(w, http.StatusMethodNotAllowed, "METHOD_NOT_ALLOWED", "Only POST is allowed")
 		}
