@@ -17,6 +17,7 @@ type agentCheckOrchestrationOptions struct {
 
 	ResolveCheckpoint   agentCheckCheckpointResolver
 	BuildContext        agentCheckContextBuilder
+	Evaluate            agentCheckEvaluationFunc
 	RunVerification     agentCheckVerificationFunc
 	PersistVerification agentCheckVerificationPersistenceFunc
 	VerificationOptions agentCheckVerificationOptions
@@ -25,12 +26,15 @@ type agentCheckOrchestrationOptions struct {
 type agentCheckOrchestrationResult struct {
 	CheckpointID     id.CheckpointID
 	Context          *contextpkg.Context
+	Evaluation       contextpkg.EvaluationResult
+	Render           contextpkg.RenderResult
 	Verification     agentCheckVerificationEvidence
 	VerificationPath string
 }
 
 type agentCheckCheckpointResolver func(context.Context, io.Writer, agentCheckTargetSpec) (id.CheckpointID, error)
 type agentCheckContextBuilder func(context.Context, id.CheckpointID, contextpkg.RepositoryBuildOptions) (*contextpkg.Context, error)
+type agentCheckEvaluationFunc func(contextpkg.Context) contextpkg.EvaluationResult
 type agentCheckVerificationFunc func(context.Context, agentCheckVerificationOptions) agentCheckVerificationEvidence
 type agentCheckVerificationPersistenceFunc func(string, id.CheckpointID, agentCheckVerificationEvidence) (string, error)
 
@@ -42,6 +46,10 @@ func runAgentCheckOrchestration(ctx context.Context, opts agentCheckOrchestratio
 	buildContext := opts.BuildContext
 	if buildContext == nil {
 		buildContext = contextpkg.BuildFromRepository
+	}
+	evaluate := opts.Evaluate
+	if evaluate == nil {
+		evaluate = contextpkg.Evaluate
 	}
 	runVerification := opts.RunVerification
 	if runVerification == nil {
@@ -70,6 +78,8 @@ func runAgentCheckOrchestration(ctx context.Context, opts agentCheckOrchestratio
 		return agentCheckOrchestrationResult{}, fmt.Errorf("agentcheck orchestration: build context: %w", err)
 	}
 
+	evaluation := evaluate(*acContext)
+
 	verificationOpts := opts.VerificationOptions
 	verificationOpts.RepoRoot = repoRoot
 	verification := runVerification(ctx, verificationOpts)
@@ -82,6 +92,8 @@ func runAgentCheckOrchestration(ctx context.Context, opts agentCheckOrchestratio
 	return agentCheckOrchestrationResult{
 		CheckpointID:     cpID,
 		Context:          acContext,
+		Evaluation:       evaluation,
+		Render:           mapAgentCheckEvaluationToRender(cpID, evaluation, verification),
 		Verification:     verification,
 		VerificationPath: verificationPath,
 	}, nil

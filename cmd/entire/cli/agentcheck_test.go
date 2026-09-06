@@ -137,7 +137,7 @@ func TestAgentCheckOpen_ExistingReportPrintsPath(t *testing.T) {
 	requireNoFabricatedAgentCheckResult(t, out)
 }
 
-func TestAgentCheckBase_NoBundleDoesNotFabricateResult(t *testing.T) {
+func TestAgentCheckBase_EvaluatesRendersAndPersistsVerification(t *testing.T) {
 	cpID := setupAgentCheckCheckpoint(t)
 
 	var stdout, stderr bytes.Buffer
@@ -148,8 +148,15 @@ func TestAgentCheckBase_NoBundleDoesNotFabricateResult(t *testing.T) {
 
 	require.NoError(t, cmd.ExecuteContext(context.Background()))
 	out := stdout.String()
-	require.Contains(t, out, "AgentCheck evaluation is not connected yet.")
-	requireNoFabricatedAgentCheckResult(t, out)
+	require.Contains(t, out, "AgentCheck")
+	require.Contains(t, out, "Checkpoint: "+cpID.String())
+	require.Contains(t, out, "Verdict:    TRUSTED")
+	require.Contains(t, out, "Summary:")
+	require.Contains(t, out, "Verification:")
+
+	repoRoot, err := agentCheckTestRepoRoot()
+	require.NoError(t, err)
+	require.FileExists(t, filepath.Join(repoRoot, agentCheckDirName, agentCheckReportsName, cpID.String(), agentCheckVerificationEvidenceName))
 }
 
 func setupAgentCheckCheckpoint(t *testing.T) id.CheckpointID {

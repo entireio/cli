@@ -18,6 +18,7 @@ import (
 func TestAgentCheckOrchestrationBuildsContextRunsVerificationAndPersists(t *testing.T) {
 	cpID := setupAgentCheckOrchestrationRepo(t)
 	var buildCalled bool
+	var evaluateCalled bool
 	var verificationCalled bool
 
 	result, err := runAgentCheckOrchestration(context.Background(), agentCheckOrchestrationOptions{
@@ -33,6 +34,14 @@ func TestAgentCheckOrchestrationBuildsContextRunsVerificationAndPersists(t *test
 			require.Nil(t, opts.Graph)
 			return &contextpkg.Context{CheckpointID: got}, nil
 		},
+		Evaluate: func(ctx contextpkg.Context) contextpkg.EvaluationResult {
+			evaluateCalled = true
+			require.Equal(t, cpID, ctx.CheckpointID)
+			return contextpkg.EvaluationResult{
+				Verdict: contextpkg.Verdict(contextpkg.VerdictTrusted),
+				Summary: "All evidence matched.",
+			}
+		},
 		RunVerification: func(_ context.Context, opts agentCheckVerificationOptions) agentCheckVerificationEvidence {
 			verificationCalled = true
 			require.NotEmpty(t, opts.RepoRoot)
@@ -42,10 +51,14 @@ func TestAgentCheckOrchestrationBuildsContextRunsVerificationAndPersists(t *test
 
 	require.NoError(t, err)
 	require.True(t, buildCalled)
+	require.True(t, evaluateCalled)
 	require.True(t, verificationCalled)
 	require.Equal(t, cpID, result.CheckpointID)
 	require.NotNil(t, result.Context)
 	require.Equal(t, cpID, result.Context.CheckpointID)
+	require.Equal(t, contextpkg.Verdict(contextpkg.VerdictTrusted), result.Evaluation.Verdict)
+	require.Equal(t, contextpkg.VerdictTrusted, result.Render.Verdict)
+	require.NotNil(t, result.Render.Verification)
 	require.Equal(t, agentCheckVerificationSuccess, result.Verification.Status)
 	require.Equal(t, filepath.Join(agentCheckDirName, agentCheckReportsName, cpID.String(), agentCheckVerificationEvidenceName), agentCheckRelativePath(t, result.VerificationPath))
 

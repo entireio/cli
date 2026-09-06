@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	contextpkg "github.com/entireio/cli/cmd/entire/cli/agentcheck"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/spf13/cobra"
@@ -32,17 +33,19 @@ type agentCheckEvidenceStatus struct {
 func newAgentCheckCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "agentcheck [checkpoint-id | commit-sha]",
-		Short: "Inspect AgentCheck evidence for an Entire checkpoint",
+		Short: "Evaluate AgentCheck evidence for an Entire checkpoint",
 		Long: `AgentCheck evaluates evidence from an Entire checkpoint.
 
-The evaluation pipeline is not connected yet. This command currently reports
-whether a read-only AgentCheck evidence bundle already exists for a resolved
-checkpoint. It does not generate verdicts, trust scores, findings, reports, or
-verification output.`,
+The command builds AgentCheck context from Entire checkpoint evidence, runs the
+deterministic evaluator, renders the result, and records repository verification
+evidence for the resolved checkpoint.`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			target := agentCheckTarget(args)
-			status, ok, err := resolveAgentCheckEvidenceStatus(cmd.Context(), cmd.ErrOrStderr(), target)
+			result, err := runAgentCheckOrchestration(cmd.Context(), agentCheckOrchestrationOptions{
+				Target: target,
+				ErrW:   cmd.ErrOrStderr(),
+			})
 			if err != nil {
 				cmd.SilenceUsage = true
 				if target.defaultHead && isNoAgentCheckCheckpointTarget(err) {
@@ -53,12 +56,7 @@ verification output.`,
 				}
 				return err
 			}
-			if !ok || !status.BundleExists {
-				writeAgentCheckNotConnected(cmd.OutOrStdout(), status)
-				return nil
-			}
-			writeAgentCheckEvidenceStatus(cmd.OutOrStdout(), status)
-			return nil
+			return contextpkg.Render(cmd.OutOrStdout(), result.Render)
 		},
 	}
 
