@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net/url"
 	"regexp"
 	"strings"
 	"time"
@@ -91,12 +90,32 @@ func matchGitHubURL(rawURL string, res ...*regexp.Regexp) (owner, repo string, e
 	return "", "", fmt.Errorf("not a recognized GitHub URL: %s", rawURL)
 }
 
-// mirrorPollInterval is the cadence for placement and clone-status polls.
+// mirrorPollInterval is the cadence between placement and clone-status polls.
+// A package var (not const) so tests can shorten it.
 var mirrorPollInterval = 2 * time.Second
 
-// maxConsecutivePollErrors keeps both poll phases bounded. In the clone phase,
-// 15 attempts at the two-second cadence preserve the accepted ~30s tolerance
-// for a newly placed mirror to become visible.
+// maxConsecutivePollErrors bounds how many back-to-back poll failures a wait
+// tolerates before giving up. Both phases share the budget, for two different
+// reasons.
+//
+// The clone wait has two failure modes: a brief network/API glitch during a
+// long clone, and — the common one — the stale-read window right after create,
+// where the control plane returns 404 "mirror not found" because the
+// just-written repo#list grant / placement row isn't yet visible to the
+// region's minimize_latency + follower reads (~4.8s nominal, but it spikes
+// under concurrent multi-region creates). At the 2s cadence, 15 tolerated
+// errors ≈ 30s — enough to ride out that window, while a genuinely persistent
+// error (deleted mirror, revoked auth) still surfaces well before the 30m
+// --wait-timeout. This is a stopgap: the durable fix is server-side, making
+// GetMirror check the grant fully-consistent and read the row from the CRDB
+// leaseholder so a fresh mirror is visible on the first poll.
+//
+// The placement wait reuses the number rather than tuning a second one. Its
+// failure profile is different — the request row is written before the 202
+// returns, so it has no equivalent stale-read window and only transient
+// control-plane errors land here — but ~30s of tolerance is comfortably inside
+// the same --wait-timeout. Split the constant rather than re-tuning it if the
+// two phases ever need different budgets.
 const maxConsecutivePollErrors = 15
 
 var (
@@ -118,16 +137,40 @@ type mirrorRequestGetter interface {
 	GetMirrorRequest(ctx context.Context, params coreapi.GetMirrorRequestParams) (*coreapi.MirrorRequest, error)
 }
 
-func awaitMirrorPlacement(ctx context.Context, c mirrorRequestGetter, initial coreapi.MirrorRequest, location string, onStatus func(coreapi.MirrorRequestStatus)) (*coreapi.CreatedMirror, error) {
-	serverURL, requestID, err := mirrorRequestPollTarget(location)
-	if err != nil {
-		return nil, err
-	}
-	if serverURL != nil {
-		ctx = coreapi.WithServerURL(ctx, serverURL)
-	}
-	if initial.RequestId != requestID {
-		return nil, fmt.Errorf("mirror request Location identifies %s but response identifies %s", requestID, initial.RequestId)
+// awaitMirrorPlacement polls a submitted mirror request until it reaches a
+// terminal status, returning the placement it produced. It returns:
+//
+//   - the placed mirror       when the request succeeded
+//   - a failure error         when the request reached "failed" (see
+//     mirrorRequestFailureError for how the server's code/message render)
+//   - a timeout/transport err when the wait deadline passed, or polls kept
+//     erroring past maxConsecutivePollErrors
+//
+// The request id comes from the 202 body's required requestId, never from the
+// Location header. Two reasons, both load-bearing:
+//
+// Location is an optional response header in the spec, so requiring it would
+// fail a create whose body already reports a succeeded placement — and the
+// body is what GetMirrorRequest needs anyway (the id alone addresses it).
+//
+// More importantly, the header's HOST must never become a poll target.
+// Re-pointing the client's base URL at a server-named origin would send the
+// control-plane bearer there, which is precisely what the cross-juris
+// transport's federation-manifest check exists to prevent. Polling therefore
+// stays on the client's configured base URL and lets the cross-jurisdiction
+// transport handle a 421 to the home core on every tick (see
+// internal/coreapi/cross_juris_client.go, which wires up the shared
+// auth-go/crossjuris follower). That also keeps the wait recoverable for its
+// whole duration: the home core answers a foreign-region login JWT with a bare
+// 401, and the follower treats that as an exchange trigger only on a hop it
+// reached by following a 421. Short-circuiting straight to the home core skips
+// the redirect, so it works only until the exchanged token leaves the
+// transport's cache and then fails unrecoverably — strictly worse than not
+// optimising at all.
+func awaitMirrorPlacement(ctx context.Context, c mirrorRequestGetter, initial coreapi.MirrorRequest, onStatus func(coreapi.MirrorRequestStatus)) (*coreapi.CreatedMirror, error) {
+	requestID := initial.RequestId
+	if requestID == uuid.Nil {
+		return nil, errors.New("mirror request response is missing a request id")
 	}
 
 	ticker := time.NewTicker(mirrorPollInterval)
@@ -154,6 +197,15 @@ func awaitMirrorPlacement(ctx context.Context, c mirrorRequestGetter, initial co
 			return nil, mirrorRequestFailureError(*request)
 		case coreapi.MirrorRequestStatusPending, coreapi.MirrorRequestStatusProcessing:
 		default:
+			// Defensive only, and deliberately kept: MirrorRequestStatus is a
+			// generated CLOSED enum, so a status this CLI doesn't know fails in
+			// MirrorRequestStatus.UnmarshalText and surfaces as a decode error
+			// from the GetMirrorRequest below — retried, then reported — rather
+			// than reaching here. That means a server-side status addition is
+			// NOT handled the way the operation's contract asks (unknown values
+			// treated as generic terminal states); honouring it needs the enum
+			// generated open, which is a spec change. Until then this branch
+			// only fires if the generator's output changes shape.
 			return nil, fmt.Errorf("mirror request returned unknown status %q", request.Status)
 		}
 
@@ -182,39 +234,27 @@ func awaitMirrorPlacement(ctx context.Context, c mirrorRequestGetter, initial co
 	}
 }
 
-func mirrorRequestPollTarget(location string) (*url.URL, uuid.UUID, error) {
-	if strings.TrimSpace(location) == "" {
-		return nil, uuid.Nil, errors.New("mirror request response is missing Location")
-	}
-	locationURL, err := url.Parse(location)
-	if err != nil || locationURL.User != nil || locationURL.RawQuery != "" || locationURL.Fragment != "" {
-		return nil, uuid.Nil, fmt.Errorf("invalid mirror request Location %q", location)
-	}
-	const prefix = "/api/v1/mirror-requests/"
-	requestIDText, ok := strings.CutPrefix(locationURL.Path, prefix)
-	if !ok || requestIDText == "" || strings.Contains(requestIDText, "/") {
-		return nil, uuid.Nil, fmt.Errorf("invalid mirror request Location %q", location)
-	}
-	requestID, err := uuid.Parse(requestIDText)
-	if err != nil {
-		return nil, uuid.Nil, fmt.Errorf("invalid mirror request Location %q: %w", location, err)
-	}
-	if locationURL.IsAbs() {
-		if locationURL.Scheme != "https" && locationURL.Scheme != "http" {
-			return nil, uuid.Nil, fmt.Errorf("invalid mirror request Location %q", location)
-		}
-		return &url.URL{Scheme: locationURL.Scheme, Host: locationURL.Host, Path: "/api/v1"}, requestID, nil
-	}
-	if locationURL.Host != "" {
-		return nil, uuid.Nil, fmt.Errorf("invalid mirror request Location %q", location)
-	}
-	return nil, requestID, nil
-}
+// mirrorPlacementFailedError reports a mirror request that reached the
+// terminal "failed" status. It is distinguishable from a timeout or an
+// exhausted poll budget because nothing is left in flight: the server is done
+// with this request, so callers must not invite the user to wait for it or
+// describe it as still progressing. Retry advice, where retrying is the
+// remedy, is already part of the message.
+type mirrorPlacementFailedError struct{ msg string }
 
+func (e *mirrorPlacementFailedError) Error() string { return e.msg }
+
+// mirrorRequestFailureError renders a terminal "failed" mirror request as a
+// user-facing error. The failure code is a free-form string in the contract,
+// which explicitly asks callers to treat an unknown code as a generic terminal
+// failure — so an unrecognised code still produces a usable message (quoting
+// the code and the server's own text) rather than being dropped. Retryable
+// failures say so, since the command is idempotent on (upstream, cluster) and
+// re-running it is the whole remedy.
 func mirrorRequestFailureError(request coreapi.MirrorRequest) error {
 	failure, ok := request.Failure.Get()
 	if !ok {
-		return errors.New("mirror placement failed without failure details")
+		return &mirrorPlacementFailedError{msg: "mirror placement failed without failure details"}
 	}
 
 	known := false
@@ -233,7 +273,7 @@ func mirrorRequestFailureError(request coreapi.MirrorRequest) error {
 	if failure.Retryable {
 		message += "; retry this command"
 	}
-	return errors.New(message)
+	return &mirrorPlacementFailedError{msg: message}
 }
 
 // awaitMirrorReady polls the control plane for a mirror's clone lifecycle until

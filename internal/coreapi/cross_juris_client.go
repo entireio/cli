@@ -36,9 +36,17 @@ func newCrossJurisHTTPClient(coreURL string) (*http.Client, error) {
 	return &http.Client{Transport: rt}, nil
 }
 
-// newCrossJurisRoundTripper stacks the coreapi transport chain over base:
-// the shared crossjuris follower, then the CLI-specific Location
-// canonicalizer on the outside so it sees the replayed request.
+// newCrossJurisRoundTripper builds the coreapi transport over base: the
+// shared crossjuris follower, and nothing else.
+//
+// It used to stack a CLI-specific canonicalizer on the outside, rewriting the
+// Location a 202 from POST /api/v1/mirror-requests carries onto the origin
+// that answered. Nothing reads that header any more — the async mirror-create
+// poll is driven by the 202 body's requestId and stays on the client's own
+// base URL (see awaitMirrorPlacement) — so the rewrite was maintaining a
+// header no caller consumed, over a value the server supplies. Reviving it
+// means giving a server-named host a say in where the control-plane bearer is
+// sent, which is what the follower's federation check exists to gate.
 func newCrossJurisRoundTripper(base http.RoundTripper, allowInsecureHTTP bool) (http.RoundTripper, error) {
 	inner, err := crossjuris.New(crossjuris.Config{
 		Base:              base,
@@ -49,7 +57,7 @@ func newCrossJurisRoundTripper(base http.RoundTripper, allowInsecureHTTP bool) (
 	if err != nil {
 		return nil, fmt.Errorf("cross-juris transport: %w", err)
 	}
-	return mirrorLocationCanonicalizer{next: inner}, nil
+	return inner, nil
 }
 
 // debugf writes ENTIRE_DEBUG-gated trace lines for the transport. The
@@ -61,42 +69,6 @@ func debugf(format string, args ...any) {
 		return
 	}
 	fmt.Fprintf(os.Stderr, "[entire] cross-juris transport: "+format+"\n", args...)
-}
-
-// mirrorLocationCanonicalizer rewrites the Location a 202 from
-// POST /api/v1/mirror-requests carries onto the origin that actually
-// answered. The home core emits a relative or self-rooted Location; after
-// a 421 follow that is a different host than the caller dialled, so the
-// scheme and host come from resp.Request — the replayed request — not
-// from the caller's.
-type mirrorLocationCanonicalizer struct {
-	next http.RoundTripper
-}
-
-func (c mirrorLocationCanonicalizer) RoundTrip(req *http.Request) (*http.Response, error) {
-	resp, err := c.next.RoundTrip(req)
-	if err != nil {
-		return nil, err //nolint:wrapcheck // http.Client already names method and URL
-	}
-	canonicalizeMirrorRequestLocation(req, resp)
-	return resp, nil
-}
-
-func canonicalizeMirrorRequestLocation(req *http.Request, resp *http.Response) {
-	answered := resp.Request
-	if answered == nil {
-		answered = req
-	}
-	if resp.StatusCode != http.StatusAccepted || answered.URL.Path != apiBasePath+"/mirror-requests" {
-		return
-	}
-	location, err := url.Parse(resp.Header.Get("Location"))
-	if err != nil || location.Path == "" {
-		return
-	}
-	location.Scheme = answered.URL.Scheme
-	location.Host = answered.URL.Host
-	resp.Header.Set("Location", location.String())
 }
 
 // isLoopbackHTTP reports whether rawURL is http:// at a loopback host.

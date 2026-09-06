@@ -572,8 +572,17 @@ func createOneMirror(ctx context.Context, t mirrorTarget, c *coreapi.Client, cli
 	opts.onPhase = func(phase mirrorCreatePhase) { report(string(phase), false, false) }
 	outcome, err := createAndAwaitMirror(ctx, c, t.owner, t.repo, t.region.host, opts)
 	if outcome.created == nil {
-		res.status, res.err = mirrorStatusError, renderCoreError(err)
-		report(mirrorStatusError, true, false)
+		// A deadline can expire before there is any placement to report — on
+		// the async route the whole placement wait sits here. Classify it as
+		// timed-out rather than error, so the batch table doesn't render the
+		// same user-visible condition two ways depending on which side of the
+		// placement/clone boundary the single --wait-timeout ran out on.
+		if errors.Is(err, context.DeadlineExceeded) {
+			res.status, res.err = mirrorStatusTimedOut, err
+		} else {
+			res.status, res.err = mirrorStatusError, renderCoreError(err)
+		}
+		report(res.status, true, false)
 		return res
 	}
 	res.cloneURL = outcome.created.MirrorUrl
