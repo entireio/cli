@@ -3,21 +3,20 @@ package agent_test
 import (
 	"os"
 	"path/filepath"
-	"runtime"
 	"testing"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/osroot"
+	"github.com/entireio/cli/cmd/entire/cli/testutil"
 	"github.com/stretchr/testify/require"
 )
 
-// skipWithoutSymlinks skips a test that needs to create one. On Windows that
-// takes elevation or developer mode, neither of which CI has.
+// skipWithoutSymlinks skips a test that needs to create one. Kept as a
+// package-local name for its callers; the condition lives in testutil so every
+// package that needs it says the same thing.
 func skipWithoutSymlinks(t *testing.T) {
 	t.Helper()
-	if runtime.GOOS == "windows" {
-		t.Skip("symlink creation needs elevation on Windows")
-	}
+	testutil.SkipWithoutSymlinks(t)
 }
 
 func TestHookConfig_ReadWriteRemoveRoundTrip(t *testing.T) {
@@ -178,4 +177,65 @@ func TestHookConfigFile_RefusesASymlinkedFileAtTheLeaf(t *testing.T) {
 	data, err := os.ReadFile(filepath.Join(worktree, "dotfiles.json"))
 	require.NoError(t, err)
 	require.JSONEq(t, `{"from":"dotfiles"}`, string(data))
+}
+
+// TestHookConfigFile_RemoveDirRefusesAnAgentsOwnDirectory covers the guard the
+// doc comment used to describe and nothing enforced. Only pi calls RemoveDir
+// today; the hazard is the next agent integration copying the call, where
+// `path.Dir(".claude/settings.json")` is `.claude` and the uninstall would take
+// the user's hand-written settings, subagents and skills with it.
+func TestHookConfigFile_RemoveDirRefusesAnAgentsOwnDirectory(t *testing.T) {
+	t.Parallel()
+
+	for _, relPath := range []string{
+		".claude/settings.json",
+		".cursor/hooks.json",
+		".codex/hooks.json",
+	} {
+		t.Run(relPath, func(t *testing.T) {
+			t.Parallel()
+
+			worktree := t.TempDir()
+			cfg, err := agent.OpenHookConfig(worktree, relPath)
+			require.NoError(t, err)
+			require.NoError(t, cfg.Write([]byte("{}"), 0o600))
+
+			// Something of the user's, beside Entire's file in the same directory.
+			userFile := filepath.Join(filepath.Dir(cfg.Path()), "mine.json")
+			require.NoError(t, os.WriteFile(userFile, []byte("{}"), 0o600))
+
+			require.Error(t, cfg.RemoveDir(), "RemoveDir must refuse an agent's own directory")
+			require.FileExists(t, userFile, "the user's own config must survive")
+		})
+	}
+}
+
+// The case RemoveDir does exist for: a directory Entire created to hold one
+// generated file, which pi discovers by directory rather than by filename.
+func TestHookConfigFile_RemoveDirAcceptsADirectoryEntireCreated(t *testing.T) {
+	t.Parallel()
+
+	worktree := t.TempDir()
+	cfg, err := agent.OpenHookConfig(worktree, ".pi/extensions/entire/index.ts")
+	require.NoError(t, err)
+	require.NoError(t, cfg.Write([]byte("export {}"), 0o644))
+
+	require.NoError(t, cfg.RemoveDir())
+	require.NoDirExists(t, filepath.Join(worktree, ".pi", "extensions", "entire"))
+	require.DirExists(t, filepath.Join(worktree, ".pi", "extensions"),
+		"only the directory holding the generated file goes")
+}
+
+// RemoveDir on a file sitting directly at the worktree root would make the
+// directory to delete the repository.
+func TestHookConfigFile_RemoveDirRefusesTheWorktreeRoot(t *testing.T) {
+	t.Parallel()
+
+	worktree := t.TempDir()
+	cfg, err := agent.OpenHookConfig(worktree, "hooks.json")
+	require.NoError(t, err)
+	require.NoError(t, cfg.Write([]byte("{}"), 0o600))
+
+	require.Error(t, cfg.RemoveDir())
+	require.DirExists(t, worktree)
 }

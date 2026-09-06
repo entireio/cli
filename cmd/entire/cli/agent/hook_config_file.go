@@ -128,7 +128,7 @@ func (f *HookConfigFile) Exists() bool {
 func (f *HookConfigFile) Write(data []byte, perm os.FileMode) error {
 	if dir := path.Dir(f.name); dir != "." {
 		if err := osroot.MkdirAllNoSymlink(f.root, dir, 0o750); err != nil {
-			return fmt.Errorf("create %s: %w", path.Dir(f.path), err)
+			return fmt.Errorf("create %s: %w", filepath.Dir(f.path), err)
 		}
 	}
 	if info, err := osroot.LstatNoSymlinks(f.root, f.name); err == nil && info.Mode()&os.ModeSymlink != 0 {
@@ -164,18 +164,39 @@ func (f *HookConfigFile) Remove() error {
 // correct uninstall and taking the parent would delete the user's own config
 // with it.
 //
-// Refuses to act when the file sits directly at the worktree root, which would
-// make the directory to delete the repository.
+// Enforced rather than described, because "every other agent must not call
+// this" was a comment and nothing else, and the call it guards is a recursive
+// delete. The precondition is stated positively: the directory has to be one
+// ENTIRE named, which is the only kind it created to hold a generated file.
+//
+// A blocklist of the agents' own directories was the obvious alternative and is
+// not sound. AllProtectedDirs() holds `.opencode` and `.github/hooks` but not
+// `.opencode/plugins`, `.pi/extensions` or `.github`, so deriving the target
+// with path.Dir and checking it against that list still permits
+// RemoveAll(".opencode/plugins") — the user's other OpenCode plugins — for any
+// future agent whose config sits one level deeper than its root. Every agent
+// root and every shared intermediate fails the name test instead, and pi's
+// `.pi/extensions/entire` passes it because Entire is what created it.
 func (f *HookConfigFile) RemoveDir() error {
 	dir := path.Dir(f.name)
 	if dir == "." {
 		return fmt.Errorf("remove %s: refusing to remove the worktree root", filepath.Dir(f.path))
+	}
+	if path.Base(dir) != entireOwnedDirName {
+		return fmt.Errorf("remove %s: refusing to remove %q, which Entire did not create; "+
+			"RemoveDir is only for a directory named %q that holds one generated file",
+			filepath.Dir(f.path), path.Base(dir), entireOwnedDirName)
 	}
 	if err := osroot.RemoveAllNoSymlinks(f.root, dir); err != nil {
 		return fmt.Errorf("remove %s: %w", filepath.Dir(f.path), err)
 	}
 	return nil
 }
+
+// entireOwnedDirName is the directory name Entire uses when it has to create a
+// directory of its own inside a tree an agent owns (`.pi/extensions/entire`).
+// RemoveDir keys its refusal on it.
+const entireOwnedDirName = "entire"
 
 // Root exposes the underlying root and the file's name inside it, for the
 // callers that need a descriptor rather than the bytes. Both are Codex, which
@@ -188,8 +209,11 @@ func (f *HookConfigFile) RemoveDir() error {
 // Root.Open, which is what Read does for them.
 func (f *HookConfigFile) Root() (*os.Root, string) { return f.root, f.name }
 
-// GeneratedState is GeneratedHookFileState for a file read through this root.
-// See that function for what marker and render mean.
+// GeneratedState reports whether a generated hook file is absent, current or
+// outdated, for the agents whose whole integration is one file Entire writes
+// (Pi, OpenCode). marker is the Entire-managed sentinel that identifies the file
+// as ours rather than the user's; render is what the current template would
+// write, compared against the file's contents to tell current from outdated.
 func (f *HookConfigFile) GeneratedState(marker, render string) HookConfigState {
 	data, err := f.Read()
 	if err != nil {

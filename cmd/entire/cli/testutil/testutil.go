@@ -5,6 +5,7 @@ package testutil
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 
@@ -56,6 +57,19 @@ func InitRepo(t *testing.T, repoDir string) {
 
 	if err := repo.SetConfig(cfg); err != nil {
 		t.Fatalf("failed to set repo config: %v", err)
+	}
+}
+
+// SkipWithoutSymlinks skips a test that needs to create a symlink. On Windows
+// that takes elevation or developer mode, neither of which CI has.
+//
+// Here rather than per-package because six copies in three different wordings
+// had accumulated across cli, agent, worktreedir and vercelconfig tests, so
+// there was nowhere to make the change when a runner does gain the privilege.
+func SkipWithoutSymlinks(t *testing.T) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink creation needs elevation on Windows")
 	}
 }
 

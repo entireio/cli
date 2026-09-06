@@ -401,10 +401,9 @@ func RemoveAllNoSymlinks(root *os.Root, name string) error {
 		return err
 	}
 	defer closeParent()
-	if err := parent.RemoveAll(leaf); err != nil {
-		return fmt.Errorf("remove %s: %w", name, err)
-	}
-	return nil
+	// Unwrapped, like RemoveNoSymlinks directly above: the one caller already
+	// names the directory, and wrapping here put it in the message twice.
+	return parent.RemoveAll(leaf) //nolint:wrapcheck // see comment
 }
 
 // WalkDirNoSymlinks walks dir within root, refusing a symlink anywhere it goes:

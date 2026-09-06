@@ -79,11 +79,15 @@ const maxConfigBytes = 1 << 20
 // LoadIn reads the Vercel config file named inside root, if present.
 //
 // Through the worktree's root rather than a path joined onto the repo root:
-// vercel.json is a working-tree file, so it arrives by clone. A symlink that
-// stays inside the repository is still followed — pointing vercel.json at a
-// monorepo's shared config is a real setup, and this file is the user's, not
-// Entire's — while one leaving the worktree is refused, which is the property
-// the worktreedir anchor exists to give.
+// vercel.json is a working-tree file, so it arrives by clone. A link leaving the
+// worktree is refused, which is the property the worktreedir anchor exists to
+// give.
+//
+// Following an in-repo link is the CALLER's job, and it has to be: os.Root
+// refuses an absolute symlink target even when it resolves inside the root, so
+// name is expected to be one the caller already resolved (see setup.go's
+// worktreeFileName). Passing the raw file name still works for the ordinary
+// case of a real file or a relative link.
 func LoadIn(root *os.Root, name string) (map[string]any, bool, error) {
 	f, err := root.Open(name)
 	if err != nil {

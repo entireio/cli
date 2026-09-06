@@ -3,11 +3,13 @@ package cli
 import (
 	"bytes"
 	"context"
+	"io/fs"
 	"log/slog"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -22,6 +24,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
+	"github.com/entireio/cli/cmd/entire/cli/worktreedir"
 
 	"github.com/go-git/go-git/v6"
 	"github.com/go-git/go-git/v6/plumbing"
@@ -1278,7 +1281,7 @@ func TestCheckHookDrift_ClaudeCodeWarnsWhenOutdated(t *testing.T) {
 	dir := setupGitRepoForPhaseTest(t)
 	t.Chdir(dir)
 
-	claudeDir := filepath.Join(dir, ".claude")
+	claudeDir := filepath.Join(dir, claudeDirName)
 	require.NoError(t, os.MkdirAll(claudeDir, 0o750))
 	stale := `{
   "hooks": {
@@ -1490,7 +1493,7 @@ func TestCheckAgentDirSymlinks_ReportsSymlinkedAgentDir(t *testing.T) {
 	t.Cleanup(osroot.ResetShared)
 
 	elsewhere := t.TempDir()
-	if err := os.Symlink(elsewhere, filepath.Join(dir, ".claude")); err != nil {
+	if err := os.Symlink(elsewhere, filepath.Join(dir, claudeDirName)); err != nil {
 		t.Skipf("symlink not supported: %v", err)
 	}
 
@@ -1512,7 +1515,7 @@ func TestCheckAgentDirSymlinks_ReportsSymlinkedScaffoldParent(t *testing.T) {
 	t.Cleanup(paths.ClearWorktreeRootCache)
 	t.Cleanup(osroot.ResetShared)
 
-	require.NoError(t, os.MkdirAll(filepath.Join(dir, ".claude"), 0o750))
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, claudeDirName), 0o750))
 	if err := os.Symlink(t.TempDir(), filepath.Join(dir, ".claude", "skills")); err != nil {
 		t.Skipf("symlink not supported: %v", err)
 	}
@@ -1566,7 +1569,7 @@ func TestCheckAgentDirSymlinks_ReportsSymlinkedConfigFile(t *testing.T) {
 	t.Cleanup(paths.ClearWorktreeRootCache)
 	t.Cleanup(osroot.ResetShared)
 
-	require.NoError(t, os.MkdirAll(filepath.Join(dir, ".claude"), 0o750))
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, claudeDirName), 0o750))
 	if err := os.Symlink(filepath.Join(t.TempDir(), "settings.json"), filepath.Join(dir, ".claude", "settings.json")); err != nil {
 		t.Skipf("symlink not supported: %v", err)
 	}
@@ -1599,7 +1602,7 @@ func TestCheckAgentDirSymlinks_NamesTheOutermostLinkOnce(t *testing.T) {
 	t.Cleanup(paths.ClearWorktreeRootCache)
 	t.Cleanup(osroot.ResetShared)
 
-	if err := os.Symlink(t.TempDir(), filepath.Join(dir, ".claude")); err != nil {
+	if err := os.Symlink(t.TempDir(), filepath.Join(dir, claudeDirName)); err != nil {
 		t.Skipf("symlink not supported: %v", err)
 	}
 
@@ -1623,7 +1626,7 @@ func TestCheckAgentDirSymlinks_ReportsAnUnreadableComponent(t *testing.T) {
 	t.Cleanup(paths.ClearWorktreeRootCache)
 	t.Cleanup(osroot.ResetShared)
 
-	claude := filepath.Join(dir, ".claude")
+	claude := filepath.Join(dir, claudeDirName)
 	require.NoError(t, os.MkdirAll(filepath.Join(claude, "skills"), 0o750))
 	require.NoError(t, os.Chmod(claude, 0o000))
 	t.Cleanup(func() { _ = os.Chmod(claude, 0o750) }) //nolint:errcheck // best-effort restore so t.TempDir can clean up
@@ -1679,4 +1682,158 @@ func TestCheckAgentDirSymlinks_SilentWhenClean(t *testing.T) {
 		assert.Empty(t, stdout.String(),
 			"a shared skill symlinked into place is a real setup and none of Entire's business")
 	})
+}
+
+// TestScanForSymlinkedComponent_RegularFileWhereDirectoryBelongs pins the split
+// between BROKEN and NOT READABLE. A regular file at `.claude` used to arrive
+// here as componentScanUnreadable, so doctor answered "check the ownership and
+// permissions" for a condition only replacing the path fixes — the else-branch
+// pattern the .entire scan separates two error values to avoid.
+func TestScanForSymlinkedComponent_RegularFileWhereDirectoryBelongs(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, claudeDirName), []byte("not a dir"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// No osroot.ResetShared here, unlike the t.Chdir tests below: the registry
+	// is process-global and closing it mid-run breaks any test running in
+	// parallel — it took out readCapped's, which opens a root of its own. A
+	// registry entry for a unique temp dir needs no cleanup.
+	root, err := worktreedir.OpenAt(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	name, outcome := scanForSymlinkedComponent(root, claudeDirName+"/settings.json")
+	if outcome != componentScanWrongType {
+		t.Errorf("outcome = %v, want componentScanWrongType", outcome)
+	}
+	if name != claudeDirName {
+		t.Errorf("name = %q, want %s — the component to replace, not the leaf", name, claudeDirName)
+	}
+}
+
+// TestCheckAgentDirSymlinks_ReportsWrongTypedComponent checks the remedy the
+// user actually reads, not just the classification.
+func TestCheckAgentDirSymlinks_ReportsWrongTypedComponent(t *testing.T) {
+	dir := setupGitRepoForPhaseTest(t)
+	t.Chdir(dir)
+	paths.ClearWorktreeRootCache()
+	t.Cleanup(paths.ClearWorktreeRootCache)
+	t.Cleanup(osroot.ResetShared)
+
+	if err := os.WriteFile(filepath.Join(dir, claudeDirName), []byte("not a dir"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd, stdout := newTestCmd(t)
+	checkAgentDirSymlinks(cmd)
+
+	got := stdout.String()
+	if !strings.Contains(got, "BROKEN") {
+		t.Errorf("output should report BROKEN, got:\n%s", got)
+	}
+	if !strings.Contains(got, "replace each path above with a real directory") {
+		t.Errorf("output should name the replace remedy, got:\n%s", got)
+	}
+	if strings.Contains(got, "ownership and permissions") {
+		t.Errorf("output must not offer the permissions remedy for a wrong-typed path, got:\n%s", got)
+	}
+}
+
+// TestAgentSymlinkCheckPaths_CoversLegacySubagentDir keeps .claude/agents/ in
+// the scan. removeLegacySearchSubagent deletes through it with
+// osroot.LstatNoSymlinks, which refuses a symlinked parent, so a link there is
+// refused at enable and has to be diagnosable. .codex/agents and .gemini/agents
+// were only ever covered as a side effect of the agent-help template living
+// under them.
+func TestAgentSymlinkCheckPaths_CoversLegacySubagentDir(t *testing.T) {
+	t.Parallel()
+
+	candidates := agentSymlinkCheckPaths()
+	var found bool
+	for _, c := range candidates {
+		if strings.HasPrefix(c, ".claude/agents/") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("no candidate under .claude/agents/; got %v", candidates)
+	}
+}
+
+// TestScanForSymlinkedComponent_NonTraversableComponent pins the allowlist. An
+// earlier revision tested only for a regular file, so a FIFO, socket or device
+// node where a directory belongs came back clean and doctor printed nothing —
+// while os.Root and every hook install fail on it.
+func TestScanForSymlinkedComponent_NonTraversableComponent(t *testing.T) {
+	t.Parallel()
+
+	if runtime.GOOS == windowsGOOS {
+		t.Skip("mkfifo is not available on Windows")
+	}
+
+	dir := t.TempDir()
+	if err := syscall.Mkfifo(filepath.Join(dir, claudeDirName), 0o600); err != nil {
+		t.Skipf("mkfifo unsupported: %v", err)
+	}
+	root, err := worktreedir.OpenAt(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	name, outcome := scanForSymlinkedComponent(root, claudeDirName+"/settings.json")
+	if outcome != componentScanWrongType {
+		t.Errorf("outcome = %v, want componentScanWrongType for a FIFO", outcome)
+	}
+	if name != claudeDirName {
+		t.Errorf("name = %q, want %s", name, claudeDirName)
+	}
+}
+
+// A real directory is traversable and reports clean, so the allowlist has not
+// become a blanket rejection.
+func TestScanForSymlinkedComponent_DirectoryIsClean(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, claudeDirName), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	root, err := worktreedir.OpenAt(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if name, outcome := scanForSymlinkedComponent(root, claudeDirName+"/settings.json"); outcome != componentScanClean {
+		t.Errorf("outcome = %v (%q), want componentScanClean", outcome, name)
+	}
+}
+
+// TestTraversableComponent pins each mode combination, including the Windows
+// shapes that must not be rejected: a bare fs.ModeIrregular is how Go reports a
+// directory junction, and ModeDir|ModeIrregular a cloud placeholder directory.
+func TestTraversableComponent(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		mode fs.FileMode
+		want bool
+	}{
+		{fs.ModeDir, true},
+		{fs.ModeIrregular, true},
+		{fs.ModeDir | fs.ModeIrregular, true},
+		{0, false},
+		{fs.ModeNamedPipe, false},
+		{fs.ModeSocket, false},
+		{fs.ModeDevice, false},
+		{fs.ModeDevice | fs.ModeCharDevice, false},
+		{fs.ModeSymlink, false},
+	} {
+		if got := traversableComponent(tc.mode); got != tc.want {
+			t.Errorf("traversableComponent(%v) = %v, want %v", tc.mode, got, tc.want)
+		}
+	}
 }

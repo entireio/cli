@@ -86,17 +86,39 @@ func reportAgentHelpSkillScaffold(w io.Writer, ag agent.Agent, result managedSca
 	}
 }
 
-func agentHelpSkillTemplate(agentName types.AgentName) (string, []byte, bool) {
+// agentHelpSkillTemplatePath is where the agent-help skill goes for an agent, or
+// "" for one that gets none. Split out from agentHelpSkillTemplate for the same
+// reason as searchSkillTemplatePath: doctor's symlink scan wants the path, not
+// the file.
+func agentHelpSkillTemplatePath(agentName types.AgentName) string {
 	switch agentName {
 	case agent.AgentNameClaudeCode:
-		return filepath.Join(".claude", "skills", "entire", "SKILL.md"), []byte(strings.TrimSpace(claudeAgentHelpSkillTemplate) + "\n"), true
+		return filepath.Join(claudeDirName, "skills", "entire", "SKILL.md")
 	case agent.AgentNameCodex:
-		return filepath.Join(".codex", "agents", "entire.toml"), []byte(strings.TrimSpace(codexAgentHelpSkillTemplate) + "\n"), true
+		return filepath.Join(".codex", "agents", "entire.toml")
 	case agent.AgentNameGemini:
-		return filepath.Join(".gemini", "agents", "entire.md"), []byte(strings.TrimSpace(geminiAgentHelpSkillTemplate) + "\n"), true
+		return filepath.Join(".gemini", "agents", "entire.md")
+	default:
+		return ""
+	}
+}
+
+func agentHelpSkillTemplate(agentName types.AgentName) (string, []byte, bool) {
+	// One switch, so a fourth agent cannot get a path with no body or a body
+	// with no path — which is the failure splitting the path out would otherwise
+	// introduce.
+	var content string
+	switch agentName {
+	case agent.AgentNameClaudeCode:
+		content = claudeAgentHelpSkillTemplate
+	case agent.AgentNameCodex:
+		content = codexAgentHelpSkillTemplate
+	case agent.AgentNameGemini:
+		content = geminiAgentHelpSkillTemplate
 	default:
 		return "", nil, false
 	}
+	return agentHelpSkillTemplatePath(agentName), []byte(strings.TrimSpace(content) + "\n"), true
 }
 
 // agentHelpSkillBody is the shared, format-agnostic instruction body for the
