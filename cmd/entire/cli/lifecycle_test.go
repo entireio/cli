@@ -3063,6 +3063,369 @@ func setupSubagentEndTestRepo(t *testing.T) (repoDir, headHash string) {
 	return tmpDir, testutil.GetHeadHash(t, tmpDir)
 }
 
+// TestHandleLifecycleSubagentEnd_ResolvesMissingToolUseIDViaTaskDescription
+// reproduces Cursor's real subagentStop payload, which carries no subagent_id
+// (confirmed against Cursor's hooks documentation — only subagentStart has
+// one). Without ResolvePreTaskToolUseID, event.ToolUseID stays "", so
+// LoadPreTaskState/SaveTaskStep/CleanupPreTaskState all key off an empty
+// string: the real pre-task-<id>.json file is orphaned, and a second parallel
+// subagent's file would collide on the same empty key.
+//
+// This drives the full path through DispatchLifecycleEvent, not just the
+// resolver in isolation, so it also pins that the resolved ID actually reaches
+// event.ToolUseID/SubagentID before the pre-task-state lookup.
+func TestHandleLifecycleSubagentEnd_ResolvesMissingToolUseIDViaTaskDescription(t *testing.T) {
+	// NOT parallel: uses t.Chdir, like TestDispatchLifecycleEvent_RoutesToCorrectHandler.
+	tmpDir, _ := setupSubagentEndTestRepo(t)
+
+	ctx := context.Background()
+
+	// Two subagents were started in parallel, each capturing its own pre-task
+	// file at SubagentStart (which, unlike Cursor's subagentStop, does carry an
+	// ID) with a distinct task description.
+	const otherToolUseID = "toolu_other"
+	if err := CapturePreTaskStateWithMeta(ctx, otherToolUseID, "unrelated task"); err != nil {
+		t.Fatalf("CapturePreTaskStateWithMeta(other) error = %v", err)
+	}
+	const wantToolUseID = "toolu_target"
+	const wantDescription = "write release notes"
+	if err := CapturePreTaskStateWithMeta(ctx, wantToolUseID, wantDescription); err != nil {
+		t.Fatalf("CapturePreTaskStateWithMeta(target) error = %v", err)
+	}
+
+	// The target subagent's file change, detected via git status since the
+	// mock agent has no transcript analyzer.
+	testutil.WriteFile(t, tmpDir, "docs/release.md", "release notes")
+
+	transcriptPath := filepath.Join(tmpDir, "main.jsonl")
+	if err := os.WriteFile(transcriptPath, nil, 0o644); err != nil {
+		t.Fatalf("write transcript: %v", err)
+	}
+
+	ag := newMockAgent()
+	event := &agent.Event{
+		Type:            agent.SubagentEnd,
+		SessionID:       "test-session",
+		SessionRef:      transcriptPath,
+		ToolUseID:       "", // Cursor's real subagentStop payload: no subagent_id
+		TaskDescription: wantDescription,
+		Timestamp:       time.Now(),
+	}
+
+	if err := DispatchLifecycleEvent(ctx, ag, event); err != nil {
+		t.Fatalf("DispatchLifecycleEvent(SubagentEnd) error = %v", err)
+	}
+
+	if event.ToolUseID != wantToolUseID {
+		t.Errorf("event.ToolUseID = %q, want %q (resolved via task description)", event.ToolUseID, wantToolUseID)
+	}
+	if event.SubagentID != wantToolUseID {
+		t.Errorf("event.SubagentID = %q, want %q (backfilled from resolved tool_use_id)", event.SubagentID, wantToolUseID)
+	}
+
+	// The resolved subagent's own pre-task file must be cleaned up by
+	// CleanupPreTaskState, keyed by the resolved (not empty) ID.
+	if _, err := os.Stat(preTaskStateFile(ctx, wantToolUseID)); !os.IsNotExist(err) {
+		t.Errorf("pre-task file for resolved tool_use_id %q should be cleaned up, stat err = %v", wantToolUseID, err)
+	}
+	// The unrelated parallel subagent's pre-task file must survive untouched —
+	// this is the "orphans real pre-task files" / "parallel Stops collide on
+	// empty key" failure mode the fix prevents.
+	if _, err := os.Stat(preTaskStateFile(ctx, otherToolUseID)); err != nil {
+		t.Errorf("unrelated pre-task file for %q must NOT be removed, stat err = %v", otherToolUseID, err)
+	}
+}
+
+// TestHandleLifecycleSubagentEnd_ConcurrentCleanupBetweenResolveAndLoadSkipsCheckpoint
+// simulates a second, concurrent SubagentEnd (e.g. a sibling subagent racing
+// through the same ambiguous "single active pre-task file" fallback, or a
+// duplicate hook delivery for the same subagent) whose CleanupPreTaskState
+// deletes the just-resolved pre-task file in the window between this
+// handler's own ResolvePreTaskToolUseID call and its LoadPreTaskState call.
+//
+// Without the resolvedAmbiguously guard, this falls through to
+// DetectFileChanges(ctx, nil), which treats every untracked file as new and
+// mints a spurious checkpoint out of files this subagent never touched. The
+// fix must instead skip the checkpoint entirely: there is no reliable
+// baseline once the pre-task state has vanished after an ambiguous resolve.
+func TestHandleLifecycleSubagentEnd_ConcurrentCleanupBetweenResolveAndLoadSkipsCheckpoint(t *testing.T) {
+	// NOT parallel: uses t.Chdir and a package-level test seam.
+	tmpDir := t.TempDir()
+	testutil.InitRepo(t, tmpDir)
+	testutil.WriteFile(t, tmpDir, "init.txt", "init")
+	testutil.GitAdd(t, tmpDir, "init.txt")
+	testutil.GitCommit(t, tmpDir, "init")
+	t.Chdir(tmpDir)
+
+	ctx := context.Background()
+
+	const toolUseID = "toolu_target"
+	if err := CapturePreTaskStateWithMeta(ctx, toolUseID, ""); err != nil {
+		t.Fatalf("CapturePreTaskStateWithMeta() error = %v", err)
+	}
+
+	// A file that pre-existed as untracked before this subagent ran. If the
+	// bug reappears, DetectFileChanges(ctx, nil) would wrongly report this as
+	// a new file and the checkpoint would go through.
+	testutil.WriteFile(t, tmpDir, "unrelated-untracked.txt", "pre-existing, not this subagent's work")
+
+	prevHook := afterAmbiguousSubagentEndResolve
+	t.Cleanup(func() { afterAmbiguousSubagentEndResolve = prevHook })
+	var hookCalled bool
+	afterAmbiguousSubagentEndResolve = func(resolvedAmbiguously bool, resolvedID string) {
+		hookCalled = true
+		if !resolvedAmbiguously || resolvedID != toolUseID {
+			t.Errorf("hook saw (resolvedAmbiguously=%v, id=%q), want (true, %q)", resolvedAmbiguously, resolvedID, toolUseID)
+		}
+		// Simulate the concurrent sibling's CleanupPreTaskState winning the race.
+		if err := CleanupPreTaskState(ctx, resolvedID); err != nil {
+			t.Fatalf("simulated concurrent cleanup failed: %v", err)
+		}
+	}
+
+	transcriptPath := filepath.Join(tmpDir, "main.jsonl")
+	if err := os.WriteFile(transcriptPath, nil, 0o644); err != nil {
+		t.Fatalf("write transcript: %v", err)
+	}
+
+	ag := newMockAgent()
+	event := &agent.Event{
+		Type:       agent.SubagentEnd,
+		SessionID:  "test-session",
+		SessionRef: transcriptPath,
+		ToolUseID:  "", // ambiguous resolve path, like Cursor's real subagentStop payload
+		Timestamp:  time.Now(),
+	}
+
+	if err := DispatchLifecycleEvent(ctx, ag, event); err != nil {
+		t.Fatalf("DispatchLifecycleEvent(SubagentEnd) error = %v", err)
+	}
+	if !hookCalled {
+		t.Fatal("test seam hook was never invoked; resolvedAmbiguously path did not run")
+	}
+
+	// No checkpoint (shadow branch) should have been created for this task: the
+	// handler must have skipped rather than minting a spurious one out of a
+	// pre-existing untracked file it never touched.
+	out, err := exec.CommandContext(ctx, "git", "branch", "--list", "entire/*").Output()
+	if err != nil {
+		t.Fatalf("git branch --list failed: %v", err)
+	}
+	if branches := strings.TrimSpace(string(out)); branches != "" {
+		t.Errorf("expected no shadow checkpoint branch after a vanished pre-task state, got: %s", branches)
+	}
+}
+
+// TestHandleLifecycleSubagentEnd_SingleActiveFallbackCleansPreTaskAfterSuccessfulCapture
+// is the counterpart to TestHandleLifecycleSubagentEnd_NoChangesKeepsUncorroboratedPreTaskState:
+// when the single-active-file fallback (no ID, no description) successfully
+// completes a task record, the consumed pre-task baseline must be removed so
+// ResolvePreTaskToolUseID does not keep naming a stale file.
+func TestHandleLifecycleSubagentEnd_SingleActiveFallbackCleansPreTaskAfterSuccessfulCapture(t *testing.T) {
+	// NOT parallel: uses t.Chdir.
+	tmpDir := t.TempDir()
+	testutil.InitRepo(t, tmpDir)
+	testutil.WriteFile(t, tmpDir, "init.txt", "init")
+	testutil.GitAdd(t, tmpDir, "init.txt")
+	testutil.GitCommit(t, tmpDir, "init")
+	t.Chdir(tmpDir)
+
+	ctx := context.Background()
+
+	const toolUseID = "toolu_only"
+	if err := CapturePreTaskStateWithMeta(ctx, toolUseID, ""); err != nil {
+		t.Fatalf("CapturePreTaskStateWithMeta() error = %v", err)
+	}
+
+	testutil.WriteFile(t, tmpDir, "docs/release.md", "release notes")
+
+	transcriptPath := filepath.Join(t.TempDir(), "main.jsonl")
+	if err := os.WriteFile(transcriptPath, nil, 0o644); err != nil {
+		t.Fatalf("write transcript: %v", err)
+	}
+
+	ag := newMockAgent()
+	event := &agent.Event{
+		Type:       agent.SubagentEnd,
+		SessionID:  "test-session",
+		SessionRef: transcriptPath,
+		ToolUseID:  "", // no ID and no description: single-active-file fallback
+		Timestamp:  time.Now(),
+	}
+
+	if err := DispatchLifecycleEvent(ctx, ag, event); err != nil {
+		t.Fatalf("DispatchLifecycleEvent(SubagentEnd) error = %v", err)
+	}
+	if event.ToolUseID != toolUseID {
+		t.Fatalf("event.ToolUseID = %q, want %q (single-active-file fallback)", event.ToolUseID, toolUseID)
+	}
+	if _, err := os.Stat(preTaskStateFile(ctx, toolUseID)); !os.IsNotExist(err) {
+		t.Errorf("pre-task file for %q should be cleaned up after successful capture, stat err = %v", toolUseID, err)
+	}
+}
+
+// TestHandleLifecycleSubagentEnd_NoChangesKeepsUncorroboratedPreTaskState pins
+// the other half of the ambiguous-resolve contract. The vanished-state guard
+// covers preState == nil; this covers preState != nil with no file changes,
+// where the handler used to delete the pre-task file it had only guessed at.
+//
+// The single-active-file fallback (no ID and no description) names the one
+// active file, which here belongs to a sibling that is still running and has
+// not written anything yet. Deleting it would make the sibling's own
+// SubagentEnd hit the vanished-state guard and drop a real checkpoint, so the
+// file must survive.
+func TestHandleLifecycleSubagentEnd_NoChangesKeepsUncorroboratedPreTaskState(t *testing.T) {
+	// NOT parallel: uses t.Chdir.
+	tmpDir := t.TempDir()
+	testutil.InitRepo(t, tmpDir)
+	testutil.WriteFile(t, tmpDir, "init.txt", "init")
+	testutil.GitAdd(t, tmpDir, "init.txt")
+	testutil.GitCommit(t, tmpDir, "init")
+	t.Chdir(tmpDir)
+
+	ctx := context.Background()
+
+	// The still-running sibling's baseline, captured at its SubagentStart. It
+	// is the only active pre-task file, so the fallback will name it.
+	const siblingToolUseID = "toolu_sibling"
+	if err := CapturePreTaskStateWithMeta(ctx, siblingToolUseID, ""); err != nil {
+		t.Fatalf("CapturePreTaskStateWithMeta() error = %v", err)
+	}
+
+	// The transcript lives outside the repo: inside it, it would itself be an
+	// untracked new file and the handler would take the checkpoint path instead
+	// of the "no file changes detected" path this test is about.
+	transcriptPath := filepath.Join(t.TempDir(), "main.jsonl")
+	if err := os.WriteFile(transcriptPath, nil, 0o644); err != nil {
+		t.Fatalf("write transcript: %v", err)
+	}
+
+	ag := newMockAgent()
+	event := &agent.Event{
+		Type:       agent.SubagentEnd,
+		SessionID:  "test-session",
+		SessionRef: transcriptPath,
+		ToolUseID:  "", // no ID and no description: single-active-file fallback
+		Timestamp:  time.Now(),
+	}
+
+	if err := DispatchLifecycleEvent(ctx, ag, event); err != nil {
+		t.Fatalf("DispatchLifecycleEvent(SubagentEnd) error = %v", err)
+	}
+
+	// Nothing changed, so no checkpoint should exist — this is the no-changes
+	// path, not the post-SaveTaskStep cleanup.
+	out, err := exec.CommandContext(ctx, "git", "branch", "--list", "entire/*").Output()
+	if err != nil {
+		t.Fatalf("git branch --list failed: %v", err)
+	}
+	if branches := strings.TrimSpace(string(out)); branches != "" {
+		t.Fatalf("expected no shadow checkpoint branch with no file changes, got: %s", branches)
+	}
+	if _, err := os.Stat(preTaskStateFile(ctx, siblingToolUseID)); err != nil {
+		t.Errorf("pre-task file for %q must survive an uncorroborated no-changes resolve, stat err = %v", siblingToolUseID, err)
+	}
+}
+
+// TestHandleLifecycleSubagentEnd_SubagentStop_KeepsUncorroboratedPreTaskState
+// pins the Final-path twin of TestHandleLifecycleSubagentEnd_NoChangesKeepsUncorroboratedPreTaskState.
+// When SubagentStop arrives with an empty tool_use_id (Claude Code's anticipated
+// payload shape) and no task description, the single-active-file fallback names
+// the one pre-task file — which may belong to a still-running sibling. The
+// ambiguousWithoutDescription early exit must not delete that baseline.
+func TestHandleLifecycleSubagentEnd_SubagentStop_KeepsUncorroboratedPreTaskState(t *testing.T) {
+	repoDir, headHash := setupSubagentEndTestRepo(t)
+	ctx := context.Background()
+	sessionID := "subagent-stop-ambiguous-session"
+
+	const siblingToolUseID = "toolu_sibling"
+	if err := CapturePreTaskStateWithMeta(ctx, siblingToolUseID, ""); err != nil {
+		t.Fatalf("CapturePreTaskStateWithMeta() error = %v", err)
+	}
+
+	saveInFlightSession(ctx, t, sessionID, headHash, session.TaskRecord{
+		ToolUseID: siblingToolUseID,
+		AgentID:   "agent-sibling",
+		StartedAt: time.Now(),
+	})
+
+	mainTranscriptPath, _ := writeSubagentTranscripts(t, "agent-sibling")
+	ag := newMockAgent()
+	event := finalSubagentEvent(sessionID, "", "") // empty ID: single-active-file fallback
+	event.SessionRef = mainTranscriptPath
+
+	if err := handleLifecycleSubagentEnd(ctx, ag, event); err != nil {
+		t.Fatalf("handleLifecycleSubagentEnd(SubagentStop) error = %v", err)
+	}
+
+	if _, err := os.Stat(preTaskStateFile(ctx, siblingToolUseID)); err != nil {
+		t.Errorf("pre-task file for %q must survive an uncorroborated SubagentStop resolve, stat err = %v", siblingToolUseID, err)
+	}
+
+	// No checkpoint should have been written from this misattributed stop.
+	shadowBranch := checkpoint.ShadowBranchNameForCommit(headHash, "")
+	if testutil.BranchExists(t, repoDir, shadowBranch) {
+		t.Error("expected no shadow checkpoint branch after ambiguous SubagentStop skip")
+	}
+}
+
+// TestHandleLifecycleSubagentEnd_NoChangesCleansDescriptionMatchedPreTaskState
+// is the counterpart: a description-corroborated resolve is evidence that the
+// pre-task file really is this subagent's, so the no-changes path must still
+// clean it up. Skipping cleanup here would leak a file on Cursor's designed
+// path and break the single-active-file fallback for every later subagent.
+func TestHandleLifecycleSubagentEnd_NoChangesCleansDescriptionMatchedPreTaskState(t *testing.T) {
+	// NOT parallel: uses t.Chdir.
+	tmpDir := t.TempDir()
+	testutil.InitRepo(t, tmpDir)
+	testutil.WriteFile(t, tmpDir, "init.txt", "init")
+	testutil.GitAdd(t, tmpDir, "init.txt")
+	testutil.GitCommit(t, tmpDir, "init")
+	t.Chdir(tmpDir)
+
+	ctx := context.Background()
+
+	const toolUseID = "toolu_target"
+	const description = "review the changelog"
+	if err := CapturePreTaskStateWithMeta(ctx, toolUseID, description); err != nil {
+		t.Fatalf("CapturePreTaskStateWithMeta() error = %v", err)
+	}
+
+	// Outside the repo, so it is not itself an untracked change — see the
+	// sibling test above.
+	transcriptPath := filepath.Join(t.TempDir(), "main.jsonl")
+	if err := os.WriteFile(transcriptPath, nil, 0o644); err != nil {
+		t.Fatalf("write transcript: %v", err)
+	}
+
+	ag := newMockAgent()
+	event := &agent.Event{
+		Type:            agent.SubagentEnd,
+		SessionID:       "test-session",
+		SessionRef:      transcriptPath,
+		ToolUseID:       "", // Cursor's real subagentStop payload: no subagent_id
+		TaskDescription: description,
+		Timestamp:       time.Now(),
+	}
+
+	if err := DispatchLifecycleEvent(ctx, ag, event); err != nil {
+		t.Fatalf("DispatchLifecycleEvent(SubagentEnd) error = %v", err)
+	}
+
+	// No checkpoint was minted (nothing changed), so this must be the no-changes
+	// cleanup rather than the post-SaveTaskStep one.
+	out, err := exec.CommandContext(ctx, "git", "branch", "--list", "entire/*").Output()
+	if err != nil {
+		t.Fatalf("git branch --list failed: %v", err)
+	}
+	if branches := strings.TrimSpace(string(out)); branches != "" {
+		t.Fatalf("expected no shadow checkpoint branch with no file changes, got: %s", branches)
+	}
+	if _, err := os.Stat(preTaskStateFile(ctx, toolUseID)); !os.IsNotExist(err) {
+		t.Errorf("description-matched pre-task file for %q should still be cleaned up with no changes, stat err = %v", toolUseID, err)
+	}
+}
+
 // readShadowBranchFile reads the file at treePath from the tree at the tip of
 // branchName, returning (content, true) if found or ("", false) otherwise
 // (branch missing or file missing at that path).
