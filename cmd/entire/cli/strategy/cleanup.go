@@ -2,7 +2,9 @@ package strategy
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -14,7 +16,9 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
 	"github.com/entireio/cli/cmd/entire/cli/gitdir"
+	"github.com/entireio/cli/cmd/entire/cli/internal/flock"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
+	"github.com/entireio/cli/cmd/entire/cli/osroot"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
 
@@ -33,6 +37,10 @@ const (
 	// Purely derived data -- it is rebuilt on the next checkpoint -- so it is
 	// removed wholesale rather than per entry.
 	CleanupTypeRedactCache CleanupType = "redact-cache"
+	// CleanupTypeRefLock is a git-common-dir lock directory (entire-*-locks/).
+	// Its entries are advisory flock files that nothing else reclaims; cleanup
+	// removes the ones no live process holds and leaves the rest.
+	CleanupTypeRefLock CleanupType = "ref-lock"
 )
 
 // CleanupItem represents an item that can be cleaned up.
@@ -48,10 +56,12 @@ type CleanupResult struct {
 	ShadowBranches    []string // Deleted shadow branches
 	SessionStates     []string // Deleted session state files
 	Checkpoints       []string // Deleted checkpoint metadata
+	RefLocks          []string // Reaped lock directories (entire-*-locks/)
 	FailedBranches    []string // Shadow branches that failed to delete
 	FailedStates      []string // Session states that failed to delete
 	FailedCheckpoints []string // Checkpoints that failed to delete
 	FailedRedactCache []string // Redaction caches that failed to delete
+	FailedRefLocks    []string // Lock directories that could not be read
 }
 
 // shadowBranchPattern matches shadow branch names in both old and new formats:
@@ -536,7 +546,105 @@ func ListAllItems(ctx context.Context) ([]CleanupItem, error) {
 		}
 	}
 
+	// The git-common-dir lock directories accrue one advisory flock file per ref
+	// or shadow branch and nothing else reclaims them -- entire-persistent-ref-locks
+	// grows monotonically under the git-refs backend. List a directory only when
+	// it exists and holds at least one entry; the deleter removes just the files
+	// no process is currently holding.
+	if root, gitErr := gitdir.Open(ctx); gitErr == nil {
+		for _, dir := range lockDirNames() {
+			entries, readErr := osroot.ReadDirNoSymlinks(root, dir)
+			if readErr != nil || len(entries) == 0 {
+				continue
+			}
+			cleanupItems = append(cleanupItems, CleanupItem{
+				Type:   CleanupTypeRefLock,
+				ID:     dir,
+				Reason: "clean all",
+			})
+		}
+	}
+
 	return cleanupItems, nil
+}
+
+// lockDirNames are the git-common-dir lock directories whose per-file flock
+// files nothing else reclaims. A file is safe to remove once no live process
+// holds its flock, and the directory's creator recreates it on the next write.
+func lockDirNames() []string {
+	return []string{
+		checkpoint.PersistentRefLockDirName,
+		checkpoint.ShadowLockDirName,
+	}
+}
+
+// reapLockDirs removes the advisory flock files that no process is holding from
+// each named git-common-dir lock directory, and the directory itself once it is
+// empty. A directory is reported reaped when its pass completed (whether or not
+// some files were held back) or was already gone, and failed when the git
+// common dir or the directory listing could not be read.
+//
+// A file whose flock is currently held -- a live process mid-write -- is left
+// in place. The removal holds the flock across the unlink so no new holder can
+// slip in first; the residual window (a process that opened the path just
+// before the unlink can lock a stale inode while a newcomer locks a fresh one)
+// is inherent to unlinking a lock file and is bounded by this running only
+// under the explicitly user-invoked `entire clean --all`.
+func reapLockDirs(ctx context.Context, dirs []string) (reaped, failed []string) {
+	root, gitErr := gitdir.Open(ctx)
+	if gitErr != nil {
+		return nil, dirs
+	}
+	logCtx := logging.WithComponent(ctx, "cleanup")
+
+	for _, dir := range dirs {
+		entries, readErr := osroot.ReadDirNoSymlinks(root, dir)
+		if errors.Is(readErr, fs.ErrNotExist) {
+			reaped = append(reaped, dir)
+			continue
+		}
+		if readErr != nil {
+			failed = append(failed, dir)
+			continue
+		}
+
+		var removed, held int
+		for _, e := range entries {
+			if e.IsDir() || !strings.HasSuffix(e.Name(), ".lock") {
+				held++ // an unexpected entry: keep the directory
+				continue
+			}
+			name := dir + "/" + e.Name()
+			release, ok, tryErr := flock.TryAcquireIn(root, name)
+			if tryErr != nil || !ok {
+				held++
+				continue
+			}
+			rmErr := osroot.RemoveNoSymlinks(root, name)
+			release()
+			if rmErr != nil {
+				held++
+				continue
+			}
+			removed++
+		}
+
+		// Drop the directory only when it is now empty. Remove (not RemoveAll)
+		// fails closed on a non-empty directory, so the guard is belt-and-braces;
+		// a failure here is not worth failing the reap over.
+		if held == 0 {
+			if rmErr := osroot.Remove(root, dir); rmErr != nil {
+				logging.Debug(logCtx, "could not remove emptied lock directory",
+					slog.String("dir", dir), slog.String("error", rmErr.Error()))
+			}
+		}
+		logging.Debug(logCtx, "reaped lock directory",
+			slog.String("dir", dir),
+			slog.Int("removed", removed),
+			slog.Int("held", held))
+		reaped = append(reaped, dir)
+	}
+	return reaped, failed
 }
 
 // redactCacheDir resolves the redaction prefix cache directory, or "" when the
@@ -562,7 +670,7 @@ func DeleteAllCleanupItems(ctx context.Context, items []CleanupItem) (*CleanupRe
 	}
 
 	// Group items by type
-	var branches, states, checkpoints, redactCaches []string
+	var branches, states, checkpoints, redactCaches, refLocks []string
 	for _, item := range items {
 		switch item.Type {
 		case CleanupTypeShadowBranch:
@@ -571,6 +679,8 @@ func DeleteAllCleanupItems(ctx context.Context, items []CleanupItem) (*CleanupRe
 			states = append(states, item.ID)
 		case CleanupTypeRedactCache:
 			redactCaches = append(redactCaches, item.ID)
+		case CleanupTypeRefLock:
+			refLocks = append(refLocks, item.ID)
 		case CleanupTypeCheckpoint:
 			checkpoints = append(checkpoints, item.ID)
 		}
@@ -588,6 +698,27 @@ func DeleteAllCleanupItems(ctx context.Context, items []CleanupItem) (*CleanupRe
 			result.RedactCaches = redactCaches
 			logging.Info(logCtx, "deleted redaction cache",
 				slog.String("type", string(CleanupTypeRedactCache)))
+		}
+	}
+
+	// Reap the unheld flock files in each listed lock directory. A held lock
+	// means a live process is mid-write, so that file stays; like the redaction
+	// cache, a listing failure is recorded but never blocks the rest.
+	if len(refLocks) > 0 {
+		reaped, failed := reapLockDirs(ctx, refLocks)
+		result.RefLocks = reaped
+		result.FailedRefLocks = failed
+		for _, id := range reaped {
+			logging.Info(logCtx, "reaped lock directory",
+				slog.String("type", string(CleanupTypeRefLock)),
+				slog.String("id", id),
+				slog.String("reason", reasonMap[id]))
+		}
+		for _, id := range failed {
+			logging.Warn(logCtx, "failed to reap lock directory",
+				slog.String("type", string(CleanupTypeRefLock)),
+				slog.String("id", id),
+				slog.String("reason", reasonMap[id]))
 		}
 	}
 
@@ -673,16 +804,18 @@ func DeleteAllCleanupItems(ctx context.Context, items []CleanupItem) (*CleanupRe
 	}
 
 	// Log summary
-	totalDeleted := len(result.ShadowBranches) + len(result.SessionStates) + len(result.Checkpoints)
-	totalFailed := len(result.FailedBranches) + len(result.FailedStates) + len(result.FailedCheckpoints)
+	totalDeleted := len(result.ShadowBranches) + len(result.SessionStates) + len(result.Checkpoints) + len(result.RefLocks)
+	totalFailed := len(result.FailedBranches) + len(result.FailedStates) + len(result.FailedCheckpoints) + len(result.FailedRefLocks)
 	if totalDeleted > 0 || totalFailed > 0 {
 		logging.Info(logCtx, "cleanup completed",
 			slog.Int("deleted_branches", len(result.ShadowBranches)),
 			slog.Int("deleted_session_states", len(result.SessionStates)),
 			slog.Int("deleted_checkpoints", len(result.Checkpoints)),
+			slog.Int("reaped_lock_dirs", len(result.RefLocks)),
 			slog.Int("failed_branches", len(result.FailedBranches)),
 			slog.Int("failed_session_states", len(result.FailedStates)),
 			slog.Int("failed_checkpoints", len(result.FailedCheckpoints)),
+			slog.Int("failed_lock_dirs", len(result.FailedRefLocks)),
 		)
 	}
 
