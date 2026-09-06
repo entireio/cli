@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"runtime"
 
+	"github.com/entireio/cli/cmd/entire/cli/audit"
 	"github.com/entireio/cli/cmd/entire/cli/experimental"
 	"github.com/entireio/cli/cmd/entire/cli/investigate"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
@@ -196,6 +197,7 @@ func NewRootCmd() *cobra.Command {
 	cmd.AddCommand(inGroup(newDispatchCmd(), groupSessions))
 	cmd.AddCommand(inGroup(newActivityCmd(), groupSessions))
 	cmd.AddCommand(inGroup(newRecapCmd(), groupSessions))
+	cmd.AddCommand(inGroup(audit.NewCmd(), groupSessions))
 	cmd.AddCommand(exemptFromEntireDirCheck(inGroup(newAPICmd(), groupControlPlane))) // authenticated passthrough to core/cell APIs
 	cmd.AddCommand(newAgentHelpCmd(cmd))                                              // visible: agents on transports without context injection discover it via `entire help`
 	cmd.AddCommand(inGroup(newSearchCmd(), groupSessions))                            // 'search' — canonical top-level spelling; 'checkpoint search' stays a working alias
