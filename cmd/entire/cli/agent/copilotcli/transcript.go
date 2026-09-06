@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"regexp"
+	"strings"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
@@ -37,12 +39,36 @@ const (
 
 // userMessageData is the data payload for user.message events.
 // IMPORTANT: The field is "content", not "message" — verified from real Copilot JSONL.
+// TransformedContent carries the same user text wrapped with Copilot's own
+// injected context (a <current_datetime> block and, in some sessions, a
+// <reminder> block). Some Copilot CLI sessions emit an empty "content" with
+// the real text only in "transformedContent" — see
+// https://github.com/entireio/cli/issues/1070.
 type userMessageData struct {
-	Content string `json:"content"`
+	Content            string `json:"content"`
+	TransformedContent string `json:"transformedContent"`
 }
 
+// assistantMessageData is the data payload for assistant.message events.
+// ReasoningText carries the model's reasoning-summary text. Some Copilot CLI
+// sessions emit an empty "content" with the real displayable text only in
+// "reasoningText" — see https://github.com/entireio/cli/issues/1070.
 type assistantMessageData struct {
-	Content string `json:"content"`
+	Content       string `json:"content"`
+	ReasoningText string `json:"reasoningText"`
+}
+
+// copilotWrapperNoiseRe matches the <current_datetime>...</current_datetime>
+// and <reminder>...</reminder> blocks Copilot CLI injects around the user's
+// literal input in transformedContent. These are Copilot-internal context,
+// never something the user typed, so they are stripped before the fallback
+// content is used as a displayable prompt.
+var copilotWrapperNoiseRe = regexp.MustCompile(`(?s)<current_datetime>.*?</current_datetime>|<reminder>.*?</reminder>`)
+
+// stripCopilotWrapperNoise removes Copilot CLI's injected wrapper blocks from
+// transformedContent and trims the whitespace left behind.
+func stripCopilotWrapperNoise(s string) string {
+	return strings.TrimSpace(copilotWrapperNoiseRe.ReplaceAllString(s, ""))
 }
 
 // modelChangeData is the data payload for session.model_change events.
@@ -148,6 +174,8 @@ func extractModifiedFilesFromEvents(events []copilotEvent) []string {
 }
 
 // extractPromptsFromEvents collects content from user.message events.
+// Falls back to transformedContent (with Copilot's injected wrapper noise
+// stripped) when content is empty — see https://github.com/entireio/cli/issues/1070.
 func extractPromptsFromEvents(events []copilotEvent) []string {
 	var prompts []string
 
@@ -161,8 +189,13 @@ func extractPromptsFromEvents(events []copilotEvent) []string {
 			continue
 		}
 
-		if data.Content != "" {
-			prompts = append(prompts, data.Content)
+		content := data.Content
+		if content == "" {
+			content = stripCopilotWrapperNoise(data.TransformedContent)
+		}
+
+		if content != "" {
+			prompts = append(prompts, content)
 		}
 	}
 
@@ -191,10 +224,16 @@ func lastEventField[T any](events []copilotEvent, eventType string, extract func
 	return ""
 }
 
-// extractSummaryFromEvents returns the content of the last assistant.message event.
+// extractSummaryFromEvents returns the content of the last assistant.message
+// event, falling back to reasoningText when content is empty — see
+// https://github.com/entireio/cli/issues/1070.
 func extractSummaryFromEvents(events []copilotEvent) string {
-	return lastEventField(events, eventTypeAssistantMsg,
-		func(d assistantMessageData) string { return d.Content })
+	return lastEventField(events, eventTypeAssistantMsg, func(d assistantMessageData) string {
+		if d.Content != "" {
+			return d.Content
+		}
+		return d.ReasoningText
+	})
 }
 
 // extractModelFromEvents returns the model from transcript events.

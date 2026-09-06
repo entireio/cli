@@ -591,6 +591,104 @@ func TestExtractModelFromTranscript_MultipleModelChanges(t *testing.T) {
 	}
 }
 
+// --- Empty-content fallback tests (issue #1070) ---
+//
+// Real Copilot CLI transcripts sometimes carry an empty primary "content"
+// field on user.message/assistant.message events, with the actual
+// displayable text only in "transformedContent"/"reasoningText". These
+// fixture lines are lifted verbatim (or minimally adapted per the bug
+// report's exact scenario) from a real captured Copilot CLI transcript at
+// cmd/entire/cli/transcript/compact/testdata/copilot_full.jsonl.
+
+// realAssistantMessageEmptyContentWithReasoningText is copied verbatim from
+// cmd/entire/cli/transcript/compact/testdata/copilot_full.jsonl line 7 — a
+// real Copilot CLI event where data.content == "" but data.reasoningText
+// carries the assistant's actual text.
+const realAssistantMessageEmptyContentWithReasoningText = `{"type":"assistant.message","data":{"messageId":"c1034751-6d32-4f2d-9e58-c45256f6ff36","content":"","toolRequests":[{"toolCallId":"tooluse_gL87PW7YXBczERPrjWHDL7","name":"report_intent","arguments":{"intent":"Creating test-copilot dir"},"type":"function"}],"interactionId":"66af33da-0016-4501-af7f-8794b02deebe","reasoningOpaque":"REDACTED","reasoningText":"Simple task - create a directory and an markdown file inside it.","outputTokens":166},"id":"114790bb-2a27-4401-8fa0-6f55dd6b00b7","timestamp":"2026-04-07T21:07:54.868Z","parentId":"79c3da58-60c4-484d-a9b3-c051ba17ff72"}`
+
+// realUserMessageEmptyContentWithTransformedContent adapts the real event at
+// copilot_full.jsonl line 5 to the exact scenario the bug report describes:
+// data.content == "" with the real text (plus Copilot's injected
+// <current_datetime>/<reminder> wrapper noise) only in
+// data.transformedContent. Schema and wrapper text are unmodified from the
+// real capture; only "content" was blanked to reproduce the reported bug.
+const realUserMessageEmptyContentWithTransformedContent = `{"type":"user.message","data":{"content":"","transformedContent":"<current_datetime>2026-04-07T21:07:50.689Z</current_datetime>\n\nCreate a dir that is called \"test-copilot\" and make an md file stating the dir is for testing copilot\n\n<reminder>\n<sql_tables>No tables currently exist. Default tables (todos, todo_deps) will be created automatically when you first use the SQL tool.</sql_tables>\n</reminder>","attachments":[],"interactionId":"66af33da-0016-4501-af7f-8794b02deebe"},"id":"a1dd969c-0848-4ab4-8580-5b9a89944113","timestamp":"2026-04-07T21:07:50.689Z","parentId":"6fa871dd-d972-4543-a7e0-edca28cf3ee0"}`
+
+func TestExtractPromptsFromEvents_FallsBackToTransformedContent(t *testing.T) {
+	t.Parallel()
+
+	content := realUserMessageEmptyContentWithTransformedContent + "\n"
+	events, err := parseEventsFromBytes([]byte(content))
+	if err != nil {
+		t.Fatalf("unexpected parse error: %v", err)
+	}
+
+	prompts := extractPromptsFromEvents(events)
+	t.Logf("extractPromptsFromEvents() real output: %#v", prompts)
+
+	want := "Create a dir that is called \"test-copilot\" and make an md file stating the dir is for testing copilot"
+	if len(prompts) != 1 {
+		t.Fatalf("expected 1 recovered prompt from transformedContent fallback, got %d: %#v", len(prompts), prompts)
+	}
+	if prompts[0] != want {
+		t.Errorf("prompts[0] = %q, want %q (wrapper noise must be stripped)", prompts[0], want)
+	}
+}
+
+func TestExtractPromptsFromEvents_RegressionNormalContentUnaffected(t *testing.T) {
+	t.Parallel()
+
+	// Regression guard: a normally-populated content field must still be
+	// used as-is and must NOT be affected by the transformedContent fallback
+	// path, even when transformedContent is also present (as real Copilot
+	// CLI events always send it).
+	line := `{"type":"user.message","data":{"content":"hello","transformedContent":"<current_datetime>2026-04-07T21:07:50.689Z</current_datetime>\n\nhello","attachments":[]},"id":"1","timestamp":"2026-03-03T00:00:00Z","parentId":""}`
+	events, err := parseEventsFromBytes([]byte(line + "\n"))
+	if err != nil {
+		t.Fatalf("unexpected parse error: %v", err)
+	}
+
+	prompts := extractPromptsFromEvents(events)
+	if len(prompts) != 1 || prompts[0] != "hello" {
+		t.Fatalf("expected unchanged prompt %q, got %#v", "hello", prompts)
+	}
+}
+
+func TestExtractSummaryFromEvents_FallsBackToReasoningText(t *testing.T) {
+	t.Parallel()
+
+	content := realAssistantMessageEmptyContentWithReasoningText + "\n"
+	events, err := parseEventsFromBytes([]byte(content))
+	if err != nil {
+		t.Fatalf("unexpected parse error: %v", err)
+	}
+
+	summary := extractSummaryFromEvents(events)
+	t.Logf("extractSummaryFromEvents() real output: %q", summary)
+
+	want := "Simple task - create a directory and an markdown file inside it."
+	if summary != want {
+		t.Errorf("extractSummaryFromEvents() = %q, want %q (reasoningText fallback)", summary, want)
+	}
+}
+
+func TestExtractSummaryFromEvents_RegressionContentTakesPrecedenceOverReasoningText(t *testing.T) {
+	t.Parallel()
+
+	// Regression guard: when content IS populated, it must still win over
+	// reasoningText, even if both are present.
+	line := `{"type":"assistant.message","data":{"content":"Done!","reasoningText":"internal reasoning, should not surface"},"id":"1","timestamp":"2026-03-03T00:00:00Z","parentId":""}`
+	events, err := parseEventsFromBytes([]byte(line + "\n"))
+	if err != nil {
+		t.Fatalf("unexpected parse error: %v", err)
+	}
+
+	summary := extractSummaryFromEvents(events)
+	if summary != "Done!" {
+		t.Errorf("extractSummaryFromEvents() = %q, want %q (content takes precedence)", summary, "Done!")
+	}
+}
+
 func TestExtractModelFromEvents(t *testing.T) {
 	t.Parallel()
 

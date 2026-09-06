@@ -129,8 +129,8 @@ Position = line count (JSONL format). Use `agent.ChunkJSONL()` / `agent.Reassemb
 The `TranscriptAnalyzer` interface is implemented for Copilot CLI, providing:
 - `GetTranscriptPosition` — counts JSONL lines (lightweight, no JSON parsing)
 - `ExtractModifiedFilesFromOffset` — collects `filePaths` from `tool.execution_complete` events after a given line offset
-- `ExtractPrompts` — collects `content` from `user.message` events
-- `ExtractSummary` — returns the `content` of the last `assistant.message` event
+- `ExtractPrompts` — collects `content` from `user.message` events, falling back to `transformedContent` (with injected `<current_datetime>`/`<reminder>` wrapper blocks stripped) when `content` is empty (some sessions emit it empty — issue #1070)
+- `ExtractSummary` — returns the `content` of the last `assistant.message` event, falling back to `reasoningText` when `content` is empty (issue #1070)
 
 ## Session State Directory
 
