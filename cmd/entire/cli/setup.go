@@ -1227,8 +1227,13 @@ func runEnableOnConfiguredRepo(ctx context.Context, cmd *cobra.Command, opts Ena
 	// with an explicit --project, so `enable` could not recover that split
 	// state. Only short-circuit when the merged view is enabled AND the target
 	// file is not itself explicitly disabled.
+	//
+	// A clone-wide disable is treated the same way: a worktree whose own local
+	// file says enabled reports enabled in the merge while the clone mirror
+	// still says disabled, so not short-circuiting lets runEnable re-sync the
+	// mirror and recover the clone.
 	enabled, err := IsEnabled(ctx)
-	if err == nil && enabled && !scopeExplicitlyDisabled(ctx, useProject) {
+	if err == nil && enabled && !scopeExplicitlyDisabled(ctx, useProject) && !cloneMirrorDisabled(ctx) {
 		if !usedSetupFlow {
 			fmt.Fprintln(w, "Entire is already enabled.")
 		}
@@ -1525,6 +1530,12 @@ func runDisable(ctx context.Context, w io.Writer, useProjectSettings bool) error
 // view, so a stale local "enabled": false would otherwise keep the repo
 // disabled after a project-scope re-enable.
 //
+// A local-scope write also mirrors the choice into clone preferences (git
+// common dir) so a personal opt-out survives `git worktree add`; the local file
+// alone is per-worktree. A project-scope write re-syncs that mirror only when it
+// already exists, on the same rule as the project -> local sync. See
+// ClonePreferences.Enabled for the merge position.
+//
 // This is the canonical explanation of the merged-vs-scoped write rule that the
 // whole enable/disable surface follows; other sites point here.
 //
@@ -1549,10 +1560,56 @@ func setEnabledFlag(ctx context.Context, enabled, useProjectSettings bool) error
 				return fmt.Errorf("failed to save local settings: %w", err)
 			}
 		}
+		// Re-sync the clone mirror only when it already exists, so a clone that
+		// never chose locally keeps the committed file as its only source.
+		if cloneEnabledMirror(ctx) != nil {
+			if err := setCloneEnabledMirror(ctx, enabled); err != nil {
+				return err
+			}
+		}
 	} else {
 		if err := setEnabledRaw(ctx, settings.LoadLocalRaw, settings.SaveLocalRaw, enabled); err != nil {
 			return fmt.Errorf("failed to save local settings: %w", err)
 		}
+		// Mirror the personal choice so it spans every worktree of this clone.
+		if err := setCloneEnabledMirror(ctx, enabled); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// cloneEnabledMirror returns this clone's mirrored enable/disable choice from
+// clone preferences, or nil when the clone never made one.
+func cloneEnabledMirror(ctx context.Context) *bool {
+	prefs, err := settings.LoadClonePreferences(ctx)
+	if err != nil {
+		return nil
+	}
+	return prefs.Enabled
+}
+
+// cloneMirrorDisabled reports whether the mirror explicitly says disabled. A
+// missing mirror (nil) is not disabled: the committed settings.json governs.
+func cloneMirrorDisabled(ctx context.Context) bool {
+	m := cloneEnabledMirror(ctx)
+	return m != nil && !*m
+}
+
+// setCloneEnabledMirror records the choice in clone preferences so it applies to
+// every worktree. Outside a git repo there is no common dir and nothing to span,
+// so it skips rather than fails — a write error in a real repo still propagates.
+func setCloneEnabledMirror(ctx context.Context, enabled bool) error {
+	if _, err := settings.ClonePreferencesPath(ctx); err != nil {
+		logging.Debug(ctx, "clone preferences path unresolved; skipping enabled mirror", "error", err)
+		return nil
+	}
+	enabledCopy := enabled
+	if err := settings.ModifyClonePreferences(ctx, func(prefs *settings.ClonePreferences) error {
+		prefs.Enabled = &enabledCopy
+		return nil
+	}); err != nil {
+		return fmt.Errorf("failed to save clone preferences: %w", err)
 	}
 	return nil
 }

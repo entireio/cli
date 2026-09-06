@@ -1298,6 +1298,75 @@ func TestLoad_AppliesClonePreferencesBeforeLocalSettings(t *testing.T) {
 	}
 }
 
+func TestLoad_ClonePreferencesEnabledOverridesProject(t *testing.T) {
+	// The clone-wide "enabled" mirror (git common dir) sits between the
+	// committed settings.json and the per-worktree settings.local.json, so a
+	// personal `entire disable` disables the committed default while a worktree
+	// that re-enabled through its own local file keeps that answer.
+	tests := []struct {
+		name        string
+		preferences string // clone preferences JSON, "" to omit the file
+		local       string // settings.local.json, "" to omit the file
+		wantEnabled bool
+	}{
+		{
+			name:        "clone mirror disables committed default",
+			preferences: `{"enabled": false}`,
+			wantEnabled: false,
+		},
+		{
+			name:        "local re-enable overrides clone mirror",
+			preferences: `{"enabled": false}`,
+			local:       `{"enabled": true}`,
+			wantEnabled: true,
+		},
+		{
+			name:        "no mirror keeps committed default",
+			preferences: `{"review_fix_agent": "clone-agent"}`,
+			wantEnabled: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tmp := t.TempDir()
+			testutil.InitRepo(t, tmp)
+			t.Chdir(tmp)
+			session.ClearGitCommonDirCache()
+
+			entireDir := filepath.Join(tmp, ".entire")
+			if err := os.MkdirAll(entireDir, 0o750); err != nil {
+				t.Fatalf("mkdir .entire: %v", err)
+			}
+			if err := os.WriteFile(filepath.Join(entireDir, "settings.json"), []byte(`{"enabled": true}`), 0o600); err != nil {
+				t.Fatalf("write project settings: %v", err)
+			}
+
+			if tt.preferences != "" {
+				preferencesDir := filepath.Join(tmp, ".git", "entire")
+				if err := os.MkdirAll(preferencesDir, 0o750); err != nil {
+					t.Fatalf("mkdir preferences dir: %v", err)
+				}
+				if err := os.WriteFile(filepath.Join(preferencesDir, "preferences.json"), []byte(tt.preferences), 0o600); err != nil {
+					t.Fatalf("write preferences: %v", err)
+				}
+			}
+			if tt.local != "" {
+				if err := os.WriteFile(filepath.Join(entireDir, "settings.local.json"), []byte(tt.local), 0o600); err != nil {
+					t.Fatalf("write local settings: %v", err)
+				}
+			}
+
+			s, err := Load(context.Background())
+			if err != nil {
+				t.Fatalf("Load: %v", err)
+			}
+			if s.Enabled != tt.wantEnabled {
+				t.Fatalf("Enabled = %v, want %v", s.Enabled, tt.wantEnabled)
+			}
+		})
+	}
+}
+
 func TestReviewConfig_IsZero(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
