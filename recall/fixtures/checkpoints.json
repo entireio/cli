@@ -1,0 +1,111 @@
+[
+  {
+    "checkpoint_id": "a1b2c3d4e5f6",
+    "commit_sha": "9f2c1ab",
+    "commit_message": "feat: add retry wrapper around dispatch client",
+    "agent": "claude-code",
+    "files": [
+      "internal/dispatch/client.go",
+      "internal/dispatch/retry.go"
+    ],
+    "session": [
+      {
+        "role": "user",
+        "text": "Add a retry wrapper around the dispatch client. Three attempts, exponential backoff. Keep it isolated to the dispatch package so nothing else is affected."
+      },
+      {
+        "role": "assistant",
+        "text": "Adding retry.go with a 3-attempt exponential backoff. This is contained within internal/dispatch and does not touch callers."
+      }
+    ],
+    "diff": [
+      "+func (c *Client) withRetry(ctx context.Context, fn func() error) error {",
+      "+  maxAttempts := 3",
+      "+  backoff := 100 * time.Millisecond",
+      "+  for attempt := 0; attempt < maxAttempts; attempt++ {",
+      "+    if err := fn(); err == nil { return nil }",
+      "+    time.Sleep(backoff); backoff *= 2",
+      "+  }",
+      "+  return ErrRetriesExhausted"
+    ]
+  },
+  {
+    "checkpoint_id": "b2c3d4e5f6a1",
+    "commit_sha": "3ee7d90",
+    "commit_message": "fix: propagate retry deadline through hook runner",
+    "agent": "claude-code",
+    "files": [
+      "internal/dispatch/retry.go",
+      "internal/hooks/runner.go",
+      "internal/telemetry/emit.go"
+    ],
+    "session": [
+      {
+        "role": "user",
+        "text": "The hook runner is timing out. Make the retry deadline visible to it."
+      },
+      {
+        "role": "assistant",
+        "text": "Threaded the deadline into hooks/runner.go and emitted it from telemetry/emit.go."
+      }
+    ],
+    "diff": [
+      "+func (r *Runner) SetDeadline(d time.Duration) { r.retryDeadline = d }",
+      "+  emit.Gauge(\"hook.retry_deadline_ms\", deadline.Milliseconds())",
+      "-  timeout := defaultTimeout",
+      "+  timeout := r.retryDeadline"
+    ]
+  },
+  {
+    "checkpoint_id": "c3d4e5f6a1b2",
+    "commit_sha": "77b4102",
+    "commit_message": "chore: drop retry wrapper, move to caller-side backoff",
+    "agent": "codex",
+    "files": [
+      "internal/dispatch/retry.go",
+      "internal/dispatch/client.go"
+    ],
+    "session": [
+      {
+        "role": "user",
+        "text": "Remove the retry wrapper. We decided backoff belongs at the caller, not the client."
+      },
+      {
+        "role": "assistant",
+        "text": "Deleted retry.go and removed the wrapper from client.go. Callers must now implement their own backoff."
+      }
+    ],
+    "diff": [
+      "-func (c *Client) withRetry(ctx context.Context, fn func() error) error {",
+      "-  maxAttempts := 3",
+      "-  backoff := 100 * time.Millisecond",
+      "+// callers are responsible for their own backoff"
+    ]
+  },
+  {
+    "checkpoint_id": "d4e5f6a1b2c3",
+    "commit_sha": "5c81f33",
+    "commit_message": "feat: empty-repo guard in dispatch generation",
+    "agent": "claude-code",
+    "files": [
+      "internal/dispatch/generate.go"
+    ],
+    "session": [
+      {
+        "role": "user",
+        "text": "Guard dispatch generation against empty repositories. Also handle the detached HEAD case while you are in there."
+      },
+      {
+        "role": "assistant",
+        "text": "Added the empty-repo guard in generate.go. Detached HEAD not covered yet."
+      }
+    ],
+    "diff": [
+      "+  if len(refs) == 0 {",
+      "+    return nil, ErrEmptyRepository",
+      "+  }",
+      "+// guard against repositories with no commits yet",
+      "+  head, err := repo.Head(); if err != nil { return nil, err }"
+    ]
+  }
+]
