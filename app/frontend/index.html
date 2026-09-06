@@ -25,6 +25,9 @@
                 <button class="nav-item active" data-tab="overview">
                     <span class="icon">📊</span> Overview & Workspace
                 </button>
+                <button class="nav-item" data-tab="intelligence">
+                    <span class="icon">⚡</span> Checkpoint Intelligence
+                </button>
                 <button class="nav-item" data-tab="architecture">
                     <span class="icon">🏗️</span> Architecture
                 </button>
@@ -110,6 +113,27 @@
                         <h3>Active Repository Details</h3>
                         <div class="details-grid" id="repo-details">
                             <div class="spinner">Loading repository baseline...</div>
+                        </div>
+                    </div>
+                </section>
+
+                <!-- Tab: Checkpoint Intelligence HERO View -->
+                <section id="tab-intelligence" class="tab-pane">
+                    <div class="card glass hero-intel-card">
+                        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px;">
+                            <div>
+                                <h3 style="margin: 0;">Checkpoint Intelligence Engine</h3>
+                                <p style="margin-top: 4px; color: var(--text-secondary); font-size: 0.9rem;">Synthesizing Entire Checkpoints, Git commits, source tree diffs, unit tests, and structural graph evidence</p>
+                            </div>
+                            <div class="commit-selector-box">
+                                <label style="font-size: 0.85rem; color: var(--text-secondary); margin-right: 8px;">Select Commit / Checkpoint:</label>
+                                <select id="intel-commit-select" style="padding: 6px 12px; border-radius: 4px; background: rgba(30, 41, 59, 0.8); color: var(--text-primary); border: 1px solid var(--border-color);">
+                                    <option value="">Loading history...</option>
+                                </select>
+                            </div>
+                        </div>
+                        <div id="intelligence-hero-content">
+                            <div class="spinner">Generating evidence-oriented Checkpoint Intelligence...</div>
                         </div>
                     </div>
                 </section>
