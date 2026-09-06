@@ -23,7 +23,10 @@
 
             <nav class="nav-menu">
                 <button class="nav-item active" data-tab="overview">
-                    <span class="icon">📊</span> Overview & Score
+                    <span class="icon">📊</span> Overview & Workspace
+                </button>
+                <button class="nav-item" data-tab="architecture">
+                    <span class="icon">🏗️</span> Architecture
                 </button>
                 <button class="nav-item" data-tab="checkpoints">
                     <span class="icon">🔖</span> Entire Checkpoints
@@ -52,14 +55,15 @@
         <main class="main-content">
             <header class="top-header">
                 <div class="header-title">
-                    <h1 id="page-title">Release Readiness Overview</h1>
+                    <h1 id="page-title">Workspace Repository Overview</h1>
                     <p class="subtitle">Preserving intent, structural graph evidence, and risk analysis across checkpoints</p>
                 </div>
                 <div class="repo-selector">
-                    <span class="label">Repository:</span>
+                    <span class="label">Active Workspace:</span>
                     <select id="repo-select">
-                        <option value="repo-cli-btw">KAUSHALK123/cli_BTW</option>
+                        <option value="">Loading repositories...</option>
                     </select>
+                    <button class="btn btn-primary" id="btn-open-add-modal">+ Add Repository</button>
                 </div>
             </header>
 
@@ -93,10 +97,32 @@
                         </div>
                     </div>
 
+                    <!-- Integration Readiness Section -->
                     <div class="card glass margin-top">
-                        <h3>Repository Intelligence Baseline</h3>
+                        <h3>Integration & Readiness Status</h3>
+                        <div class="readiness-grid" id="integration-status-grid">
+                            <div class="spinner">Checking integration readiness...</div>
+                        </div>
+                    </div>
+
+                    <!-- Repository Baseline Card -->
+                    <div class="card glass margin-top">
+                        <h3>Active Repository Details</h3>
                         <div class="details-grid" id="repo-details">
                             <div class="spinner">Loading repository baseline...</div>
+                        </div>
+                    </div>
+                </section>
+
+                <!-- Tab: Architecture -->
+                <section id="tab-architecture" class="tab-pane">
+                    <div class="card glass">
+                        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px;">
+                            <h3 style="margin: 0;">Repository Architecture Summary</h3>
+                            <button id="regenerate-arch-btn" style="padding: 8px 16px; border-radius: 4px; background: var(--accent-blue); color: white; border: none; cursor: pointer;">Regenerate</button>
+                        </div>
+                        <div id="architecture-content">
+                            <div class="spinner">Loading architecture analysis...</div>
                         </div>
                     </div>
                 </section>
@@ -168,6 +194,32 @@
                 </section>
             </div>
         </main>
+    </div>
+
+    <!-- Add Repository Modal -->
+    <div class="modal-overlay" id="add-repo-modal">
+        <div class="modal-box glass">
+            <div class="modal-header">
+                <h3>Add New GitHub Repository</h3>
+                <button class="close-btn" id="btn-close-modal">&times;</button>
+            </div>
+            <form id="add-repo-form">
+                <div class="form-group">
+                    <label for="repo-url-input">GitHub Repository URL / Name</label>
+                    <input type="text" id="repo-url-input" placeholder="e.g. https://github.com/owner/repo or owner/repo" required>
+                    <span class="hint">Accepts GitHub HTTPS, SSH, or owner/repo shorthand</span>
+                </div>
+                <div class="form-group">
+                    <label for="local-path-input">Local Path (Optional)</label>
+                    <input type="text" id="local-path-input" placeholder="e.g. . or d:\projects\repo">
+                </div>
+                <div class="error-banner" id="modal-error" style="display:none;"></div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" id="btn-cancel-modal">Cancel</button>
+                    <button type="submit" class="btn btn-primary">Add Repository</button>
+                </div>
+            </form>
+        </div>
     </div>
 
     <script src="app.js"></script>
