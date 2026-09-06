@@ -1,0 +1,283 @@
+name: Nightly Install Smoke
+
+# Every other E2E workflow tests a binary built from source in the same
+# checkout. This one installs the *published* nightly the way a user would
+# (brew / curl / PowerShell), points the existing E2E harness at that installed
+# binary via E2E_ENTIRE_BIN, and runs a single smoke test per agent on each OS.
+#
+# It answers one question: does the shipped nightly build still checkpoint real
+# agent work on Linux, macOS and Windows?
+
+on:
+  schedule:
+    # 3h after nightly.yml cuts the tag at 06:00 UTC, so release.yml has
+    # published the artifacts this workflow installs.
+    - cron: "0 9 * * *"
+  workflow_dispatch:
+    inputs:
+      test:
+        description: "Test name filter (regex)"
+        required: false
+        default: "TestMultiSessionSequential"
+
+concurrency:
+  group: nightly-install-smoke
+  cancel-in-progress: true
+
+jobs:
+  smoke:
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      actions: read
+      # Needed by the copilot-cli leg. GitHub does not allow matrix expressions
+      # in `permissions:`, so the scope is granted to every OS leg's
+      # GITHUB_TOKEN. The token is only ever placed in an environment a copilot
+      # process can see by the dedicated copilot step below, and checkout runs
+      # with persist-credentials: false so it is not left in .git/config.
+      copilot-requests: write
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+
+    steps:
+      # ----------------------------------------------------------------------
+      # 1. Install the published nightly CLI. No checkout yet: the ref we check
+      #    out is derived from the version of the binary installed here.
+      # ----------------------------------------------------------------------
+      - name: Install nightly CLI (Linux)
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          set -euo pipefail
+          curl -fsSL https://entire.io/install.sh | bash -s -- --channel nightly
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Install nightly CLI (macOS)
+        if: matrix.os == 'macos-latest'
+        run: |
+          set -euo pipefail
+          brew tap entireio/tap
+          brew trust entireio/tap
+          brew install --cask entire@nightly
+
+      # There is no nightly channel for Windows today: the Scoop bucket ships
+      # stable only and install.ps1 is not published yet. This step is written
+      # as if it were; the Windows leg stays red until someone hosts it.
+      - name: Install nightly CLI (Windows)
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: |
+          # irm | iex cannot take arguments, hence the scriptblock form.
+          & ([scriptblock]::Create((irm https://entire.io/install.ps1))) -Channel nightly
+          "$env:USERPROFILE\.local\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
+      # ----------------------------------------------------------------------
+      # 2. Pin the checkout to the tag that produced the installed binary, so
+      #    the harness and the CLI under test come from one commit.
+      # ----------------------------------------------------------------------
+      - name: Resolve nightly tag and binary path (Unix)
+        if: matrix.os != 'windows-latest'
+        run: |
+          set -euo pipefail
+          entire version
+          version=$(entire version | head -1 | awk '{print $3}')
+          tag="v$version"
+          # Fail closed. A stable or unparseable version means the install
+          # resolved the wrong channel; silently testing main instead would
+          # hide exactly the skew this pin exists to remove.
+          case "$tag" in
+            v*-nightly.*) ;;
+            *) echo "expected a v*-nightly.* version, got '$tag'" >&2; exit 1 ;;
+          esac
+          {
+            echo "NIGHTLY_TAG=$tag"
+            echo "E2E_ENTIRE_BIN=$(command -v entire)"
+          } >> "$GITHUB_ENV"
+
+      - name: Resolve nightly tag and binary path (Windows)
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          entire version
+          $version = (entire version | Select-Object -First 1).Split(" ")[2]
+          $tag = "v$version"
+          if ($tag -notlike "v*-nightly.*") {
+            Write-Error "expected a v*-nightly.* version, got '$tag'"
+          }
+          "NIGHTLY_TAG=$tag" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "E2E_ENTIRE_BIN=$((Get-Command entire).Source)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Checkout the nightly tag
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.NIGHTLY_TAG }}
+          # Don't persist the (copilot-scoped) GITHUB_TOKEN in .git/config,
+          # where an agent process running in the checkout could read it.
+          persist-credentials: false
+
+      - name: Setup mise
+        uses: jdx/mise-action@f10502fc09dadecfefb962fff68ce77213930204 # v4
+
+      # ----------------------------------------------------------------------
+      # 3. Test dependencies. tmux is a hard preflight requirement of the e2e
+      #    TestMain on every non-Windows OS, even for headless tests.
+      # ----------------------------------------------------------------------
+      - name: Install tmux (Linux)
+        if: matrix.os == 'ubuntu-latest'
+        run: sudo apt-get update && sudo apt-get install -y tmux
+
+      - name: Install tmux (macOS)
+        if: matrix.os == 'macos-latest'
+        run: brew install tmux
+
+      # ----------------------------------------------------------------------
+      # 4. Agents. The per-OS list is limited to agents that actually install
+      #    on that OS.
+      #
+      #    Excluded everywhere:
+      #      gemini-cli   — since 0.57.0 it forces core.hooksPath='' on shell
+      #                     commands, so no checkpoint is ever recorded (same
+      #                     exclusion e2e.yml documents).
+      #      pi           — no CI installer.
+      #      vogon        — built in-tree, not a shipped agent.
+      #      roger-roger  — deterministic protocol fixture; only exercises the
+      #                     external-agent tests, not this smoke test.
+      # ----------------------------------------------------------------------
+      - name: Install agent CLIs (Unix)
+        if: matrix.os != 'windows-latest'
+        run: |
+          set -euo pipefail
+          curl -fsSL https://claude.ai/install.sh | bash
+          curl -fsSL https://opencode.ai/install | bash
+          curl https://cursor.com/install -fsS | bash
+          curl -fsSL https://app.factory.ai/cli | sh
+          npm install -g @openai/codex @github/copilot
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          echo "AGENTS=claude-code opencode codex cursor-cli factoryai-droid copilot-cli" >> "$GITHUB_ENV"
+
+      # cursor-cli drives every prompt through tmux and factoryai-droid has no
+      # Windows installer, so neither is in the Windows list.
+      - name: Install agent CLIs (Windows)
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          irm https://claude.ai/install.ps1 | iex
+          "$env:USERPROFILE\.local\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          npm install -g @openai/codex @github/copilot
+          "AGENTS=claude-code codex copilot-cli" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      # ----------------------------------------------------------------------
+      # 5. Run the smoke test once per agent, sequentially. Each agent gets its
+      #    own artifact dir — the mise task derives a single timestamped one
+      #    otherwise and later agents would overwrite earlier reports.
+      #
+      #    E2E_ENTIRE_BIN (set above) is what makes this test the *installed*
+      #    nightly: mise-tasks/test/e2e/_default skips `mise run build` when it
+      #    is already set, and TestMain puts that binary's directory on PATH so
+      #    the git and agent hooks resolve to it too.
+      #
+      #    copilot-cli runs in its own step below so that the GitHub token it
+      #    needs never appears in the environment of the other agents.
+      # ----------------------------------------------------------------------
+      - name: Run smoke test per agent
+        shell: bash
+        env:
+          TEST_FILTER: ${{ github.event.inputs.test || 'TestMultiSessionSequential' }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          CURSOR_API_KEY: ${{ secrets.CURSOR_API_KEY }}
+          FACTORY_API_KEY: ${{ secrets.FACTORY_API_KEY }}
+          E2E_CODEX_MODEL: gpt-5.4-mini
+        run: |
+          set -uo pipefail
+          mkdir -p e2e/artifacts
+          : > e2e/artifacts/results.txt
+          for agent in $AGENTS; do
+            [ "$agent" = "copilot-cli" ] && continue
+            echo "::group::$agent"
+            # A failed bootstrap counts as a failed agent, not a skipped one.
+            go run ./e2e/bootstrap "$agent" &&
+              E2E_ARTIFACT_DIR="$PWD/e2e/artifacts/$agent" \
+                mise run test:e2e --agent "$agent" "$TEST_FILTER"
+            echo "$agent $?" >> e2e/artifacts/results.txt
+            echo "::endgroup::"
+          done
+
+      - name: Run smoke test for copilot-cli
+        if: contains(env.AGENTS, 'copilot-cli')
+        shell: bash
+        env:
+          TEST_FILTER: ${{ github.event.inputs.test || 'TestMultiSessionSequential' }}
+          COPILOT_GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -uo pipefail
+          mkdir -p e2e/artifacts
+          go run ./e2e/bootstrap copilot-cli &&
+            E2E_ARTIFACT_DIR="$PWD/e2e/artifacts/copilot-cli" \
+              mise run test:e2e --agent copilot-cli "$TEST_FILTER"
+          echo "copilot-cli $?" >> e2e/artifacts/results.txt
+
+      - name: Summarize
+        if: always()
+        shell: bash
+        run: |
+          set -uo pipefail
+          failed=0
+          # Absent when the job failed before any agent ran (e.g. install).
+          [ -f e2e/artifacts/results.txt ] || { echo "no agent ran" >> "$GITHUB_STEP_SUMMARY"; exit 1; }
+          {
+            echo "### ${{ matrix.os }} — \`${NIGHTLY_TAG:-unknown}\`"
+            echo ""
+            echo "| agent | result |"
+            echo "| --- | --- |"
+          } >> "$GITHUB_STEP_SUMMARY"
+          while read -r agent rc; do
+            [ -z "$agent" ] && continue
+            if [ "$rc" = "0" ]; then
+              echo "| $agent | ✅ pass |" >> "$GITHUB_STEP_SUMMARY"
+            else
+              echo "| $agent | ❌ fail (exit $rc) |" >> "$GITHUB_STEP_SUMMARY"
+              failed=1
+            fi
+          done < e2e/artifacts/results.txt
+          exit "$failed"
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: nightly-smoke-${{ matrix.os }}
+          path: e2e/artifacts/
+          retention-days: 7
+
+  notify-slack:
+    runs-on: ubuntu-latest
+    needs: [smoke]
+    if: ${{ always() && needs.smoke.result == 'failure' && github.event_name == 'schedule' }}
+    steps:
+      - name: Notify Slack of nightly smoke failure
+        uses: slackapi/slack-github-action@dcb1066f776dd043e64d0e8ba94ca15cc7e1875d # v4.0.0
+        with:
+          webhook: ${{ secrets.E2E_SLACK_WEBHOOK_URL }}
+          webhook-type: incoming-webhook
+          payload: |
+            {
+              "attachments": [
+                {
+                  "color": "#d50200",
+                  "blocks": [
+                    {
+                      "type": "section",
+                      "text": {
+                        "type": "mrkdwn",
+                        "text": ":red_circle: *Nightly install smoke failed* — the published nightly CLI did not pass the checkpoint smoke test on at least one OS.\n\n<${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|View run details>"
+                      }
+                    }
+                  ]
+                }
+              ]
+            }
