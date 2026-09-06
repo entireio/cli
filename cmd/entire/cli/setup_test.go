@@ -2190,7 +2190,10 @@ func TestShellCompletionTarget(t *testing.T) {
 	tests := []struct {
 		name             string
 		shell            string
+		installerShell   string
+		installerPathDir string
 		createBashProf   bool
+		useXDGConfigHome bool
 		wantShell        string
 		wantRCBase       string // basename of rc file
 		wantCompletion   string
@@ -2226,6 +2229,23 @@ func TestShellCompletionTarget(t *testing.T) {
 			wantCompletion: "entire completion fish | source",
 		},
 		{
+			name:             "fish_xdg_config_home",
+			shell:            "/usr/bin/fish",
+			useXDGConfigHome: true,
+			wantShell:        "Fish",
+			wantRCBase:       filepath.Join("fish", "config.fish"),
+			wantCompletion:   "entire completion fish | source",
+		},
+		{
+			name:             "installer_shell_overrides_login_shell",
+			shell:            "/bin/zsh",
+			installerShell:   "fish",
+			installerPathDir: "/Users/Example User/.local/bin",
+			wantShell:        "Fish",
+			wantRCBase:       filepath.Join(".config", "fish", "config.fish"),
+			wantCompletion:   `env PATH='/Users/Example User/.local/bin':"$PATH" entire completion fish | source`,
+		},
+		{
 			name:             "empty_shell",
 			shell:            "",
 			wantErrUnsupport: true,
@@ -2237,6 +2257,15 @@ func TestShellCompletionTarget(t *testing.T) {
 			home := t.TempDir()
 			t.Setenv("HOME", home)
 			t.Setenv("SHELL", tt.shell)
+			t.Setenv(installerShellEnv, tt.installerShell)
+			t.Setenv(installerPathDirEnv, tt.installerPathDir)
+			t.Setenv("XDG_CONFIG_HOME", "")
+
+			configRoot := home
+			if tt.useXDGConfigHome {
+				configRoot = filepath.Join(home, "xdg-config")
+				t.Setenv("XDG_CONFIG_HOME", configRoot)
+			}
 
 			if tt.createBashProf {
 				if err := os.WriteFile(filepath.Join(home, ".bash_profile"), []byte(""), 0o644); err != nil {
@@ -2258,12 +2287,34 @@ func TestShellCompletionTarget(t *testing.T) {
 			if shellName != tt.wantShell {
 				t.Errorf("shellName = %q, want %q", shellName, tt.wantShell)
 			}
-			wantRC := filepath.Join(home, tt.wantRCBase)
+			wantRC := filepath.Join(configRoot, tt.wantRCBase)
 			if rcFile != wantRC {
 				t.Errorf("rcFile = %q, want %q", rcFile, wantRC)
 			}
 			if completion != tt.wantCompletion {
 				t.Errorf("completion = %q, want %q", completion, tt.wantCompletion)
+			}
+		})
+	}
+}
+
+func TestQuoteShellWord(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name  string
+		value string
+		want  string
+	}{
+		{name: "spaces", value: "/Users/Example User/.local/bin", want: "'/Users/Example User/.local/bin'"},
+		{name: "single_quote", value: "/Users/O'Brien/.local/bin", want: "'/Users/O'\\''Brien/.local/bin'"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := quoteShellWord(tt.value); got != tt.want {
+				t.Fatalf("quoteShellWord(%q) = %q, want %q", tt.value, got, tt.want)
 			}
 		})
 	}

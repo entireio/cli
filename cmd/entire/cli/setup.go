@@ -2199,6 +2199,11 @@ const shellCompletionComment = "# Entire CLI shell completion"
 // errUnsupportedShell is returned when the user's shell is not supported for completion.
 var errUnsupportedShell = errors.New("unsupported shell")
 
+const (
+	installerShellEnv   = "ENTIRE_INSTALLER_SHELL"
+	installerPathDirEnv = "ENTIRE_INSTALLER_PATH_DIR"
+)
+
 // shellCompletionTarget returns the rc file path and completion lines for the
 // user's current shell.
 func shellCompletionTarget() (shellName, rcFile, completionLine string, err error) {
@@ -2207,12 +2212,25 @@ func shellCompletionTarget() (shellName, rcFile, completionLine string, err erro
 		return "", "", "", fmt.Errorf("cannot determine home directory: %w", err)
 	}
 
-	shell := os.Getenv("SHELL")
+	shell := os.Getenv(installerShellEnv)
+	if shell == "" {
+		shell = os.Getenv("SHELL")
+	}
+
+	completionCommand := "entire"
+	if installDir := os.Getenv(installerPathDirEnv); installDir != "" {
+		// The first shell startup can encounter the completion line before the
+		// user-added PATH line. Keep their existing PATH and prepend the install
+		// directory only for completion generation. This syntax works in Bash,
+		// Zsh, and Fish.
+		completionCommand = fmt.Sprintf("env PATH=%s:\"$PATH\" entire", quoteShellWord(installDir))
+	}
+
 	switch {
 	case strings.Contains(shell, "zsh"):
 		return "Zsh",
 			filepath.Join(home, ".zshrc"),
-			"autoload -Uz compinit && compinit && source <(entire completion zsh)",
+			fmt.Sprintf("autoload -Uz compinit && compinit && source <(%s completion zsh)", completionCommand),
 			nil
 	case strings.Contains(shell, "bash"):
 		bashRC := filepath.Join(home, ".bashrc")
@@ -2221,16 +2239,25 @@ func shellCompletionTarget() (shellName, rcFile, completionLine string, err erro
 		}
 		return "Bash",
 			bashRC,
-			"source <(entire completion bash)",
+			fmt.Sprintf("source <(%s completion bash)", completionCommand),
 			nil
 	case strings.Contains(shell, "fish"):
+		configHome := os.Getenv("XDG_CONFIG_HOME")
+		if configHome == "" {
+			configHome = filepath.Join(home, ".config")
+		}
 		return "Fish",
-			filepath.Join(home, ".config", "fish", "config.fish"),
-			"entire completion fish | source",
+			filepath.Join(configHome, "fish", "config.fish"),
+			completionCommand + " completion fish | source",
 			nil
 	default:
 		return "", "", "", errUnsupportedShell
 	}
+}
+
+// quoteShellWord returns a single shell word that is safe in Bash, Zsh, and Fish.
+func quoteShellWord(value string) string {
+	return "'" + strings.ReplaceAll(value, "'", "'\\''") + "'"
 }
 
 // promptShellCompletion offers to add shell completion to the user's rc file.
@@ -2277,7 +2304,11 @@ func promptShellCompletion(w io.Writer) error {
 	}
 
 	fmt.Fprintf(w, "✓ Shell completion added to %s\n", rcFile)
-	fmt.Fprintln(w, "  Restart your shell to activate")
+	if os.Getenv(installerPathDirEnv) != "" {
+		fmt.Fprintln(w, "  Complete the installer's PATH setup, then restart your shell to activate")
+	} else {
+		fmt.Fprintln(w, "  Restart your shell to activate")
+	}
 
 	return nil
 }
