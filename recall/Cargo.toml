@@ -1,0 +1,9 @@
+[package]
+name = "recall"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+fluctlightdb = { git = "https://github.com/voxmastery/FluctlightDB", version = "0.5.21" }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"

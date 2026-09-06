@@ -643,7 +643,6 @@ type stubCommittedReader struct {
 	err      error                              // err returned for indexes not in contents
 }
 
-//nolint:unparam // test stub; signature matches CheckpointReader.Read.
 func (s *stubCommittedReader) Read(_ context.Context, _ id.CheckpointID) (*checkpoint.CheckpointSummary, error) {
 	return s.summary, nil
 }
