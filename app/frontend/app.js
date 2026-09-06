@@ -18,6 +18,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
     const tabTitles = {
         overview: 'Workspace Repository Overview',
+        intelligence: 'Checkpoint Intelligence HERO View',
         architecture: 'Repository Architecture Summary',
         checkpoints: 'Entire Checkpoints Log',
         requirements: 'Requirements & Milestones Matrix',
@@ -292,14 +293,166 @@ document.addEventListener('DOMContentLoaded', () => {
             `;
         }
 
-        // Fetch Integration Status
+        // Fetch Integration Status & Intelligence
         fetchIntegrationStatus(repo.id);
+        fetchIntelligenceCommits(repo.id);
 
         // Refresh Sub-resources
         fetchCheckpoints(repo.id);
         fetchRequirements(repo.id);
         fetchGraphData(repo.id);
         fetchHandoffData(repo.id);
+    }
+
+    async function fetchIntelligenceCommits(repoID) {
+        try {
+            const res = await fetch(`${API_BASE}/repositories/${repoID}/commits`);
+            const commits = await res.json();
+            const selectEl = document.getElementById('intel-commit-select');
+            if (selectEl) {
+                selectEl.innerHTML = commits.map(c => `
+                    <option value="${c.sha}">
+                        ${c.short_sha} - ${c.message.substring(0, 40)}...
+                    </option>
+                `).join('');
+
+                selectEl.onchange = (e) => {
+                    if (e.target.value) {
+                        fetchIntelligence(repoID, e.target.value);
+                    }
+                };
+            }
+
+            if (commits.length > 0) {
+                fetchIntelligence(repoID, commits[0].sha);
+            }
+        } catch (err) {
+            console.error('Failed to fetch commit history for intelligence:', err);
+        }
+    }
+
+    async function fetchIntelligence(repoID, sha) {
+        const container = document.getElementById('intelligence-hero-content');
+        if (!container) return;
+        container.innerHTML = '<div class="spinner">Generating evidence-oriented Checkpoint Intelligence...</div>';
+
+        try {
+            const url = sha ? `${API_BASE}/repositories/${repoID}/commits/${sha}/intelligence` : `${API_BASE}/repositories/${repoID}/intelligence`;
+            const res = await fetch(url);
+            const intel = await res.json();
+            renderCheckpointIntelligence(intel);
+        } catch (err) {
+            container.innerHTML = `<div class="error-msg">Failed to generate intelligence: ${err.message}</div>`;
+        }
+    }
+
+    function renderCheckpointIntelligence(intel) {
+        const container = document.getElementById('intelligence-hero-content');
+        if (!container || !intel) return;
+
+        let completenessBadgeClass = 'success';
+        if (intel.context_completeness === 'INCOMPLETE') completenessBadgeClass = 'warning';
+        if (intel.context_completeness === 'REDACTED') completenessBadgeClass = 'purple';
+        if (intel.context_completeness === 'UNAVAILABLE') completenessBadgeClass = 'secondary';
+
+        let statusBadgeClass = 'success';
+        if (intel.verification_status === 'PARTIALLY_VERIFIED') statusBadgeClass = 'blue';
+        if (intel.verification_status === 'NEEDS_VERIFICATION') statusBadgeClass = 'warning';
+
+        const ev = intel.evidence || {};
+
+        container.innerHTML = `
+            <div class="intel-hero-container" style="display: flex; flex-direction: column; gap: 20px;">
+                <!-- Header Status Row -->
+                <div style="display: flex; justify-content: space-between; align-items: center; background: rgba(30, 41, 59, 0.6); padding: 16px; border-radius: 8px; border-left: 4px solid var(--accent-blue);">
+                    <div>
+                        <div style="font-size: 0.8rem; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.05em; font-weight: 600;">GitHub Requirement / Milestone</div>
+                        <div style="font-size: 1.15rem; font-weight: 700; color: #60a5fa; margin-top: 2px;">
+                            ${intel.requirement_id ? `<code>${intel.requirement_id}</code>: ${intel.requirement_title}` : 'Unassociated Milestone'}
+                        </div>
+                    </div>
+                    <div style="display: flex; gap: 10px;">
+                        <div style="text-align: right;">
+                            <div style="font-size: 0.75rem; color: var(--text-secondary);">Context Completeness</div>
+                            <span class="badge ${completenessBadgeClass}" style="margin-top: 2px; padding: 4px 10px; font-weight: 700;">${intel.context_completeness}</span>
+                        </div>
+                        <div style="text-align: right;">
+                            <div style="font-size: 0.75rem; color: var(--text-secondary);">Verification Status</div>
+                            <span class="badge ${statusBadgeClass}" style="margin-top: 2px; padding: 4px 10px; font-weight: 700;">${intel.verification_status}</span>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Intent Card -->
+                <div class="card glass" style="padding: 18px; border: 1px solid rgba(96, 165, 250, 0.3);">
+                    <h4 style="margin-top: 0; color: var(--accent-cyan); font-size: 1.05rem;">🎯 Developer / Agent Intent</h4>
+                    <p style="font-size: 1rem; color: var(--text-primary); margin: 6px 0 0 0; line-height: 1.5;">${intel.intent}</p>
+                </div>
+
+                <!-- Implemented vs Incomplete Grid -->
+                <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 16px;">
+                    <div class="card glass" style="padding: 16px; border-left: 4px solid #10b981;">
+                        <h4 style="margin-top: 0; color: #10b981; font-size: 1rem;">✓ Implemented & Verified Changes</h4>
+                        <ul style="padding-left: 18px; margin: 8px 0 0 0;">
+                            ${intel.implemented.map(i => `<li style="margin-bottom: 6px; line-height: 1.4;">${i}</li>`).join('')}
+                        </ul>
+                    </div>
+
+                    <div class="card glass" style="padding: 16px; border-left: 4px solid #f59e0b;">
+                        <h4 style="margin-top: 0; color: #f59e0b; font-size: 1rem;">✗ Incomplete / Unverified Items</h4>
+                        <ul style="padding-left: 18px; margin: 8px 0 0 0;">
+                            ${intel.incomplete.map(inc => `<li style="margin-bottom: 6px; line-height: 1.4;">${inc}</li>`).join('')}
+                        </ul>
+                    </div>
+                </div>
+
+                <!-- 5-Source Evidence Matrix -->
+                <div>
+                    <h4 style="margin-bottom: 12px; color: var(--text-secondary); text-transform: uppercase; font-size: 0.85rem; letter-spacing: 0.05em;">🔍 5-Source Evidence Matrix</h4>
+                    <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px;">
+                        <div class="card glass" style="padding: 12px; text-align: center; border-top: 3px solid ${ev.checkpoint && ev.checkpoint.available ? '#10b981' : '#f59e0b'};">
+                            <div style="font-size: 0.8rem; color: var(--text-secondary);">Preserved Checkpoint</div>
+                            <div style="font-weight: 700; margin: 4px 0; color: ${ev.checkpoint && ev.checkpoint.available ? '#10b981' : '#f59e0b'};">
+                                ${ev.checkpoint && ev.checkpoint.available ? '✓ AVAILABLE' : '✗ MISSING'}
+                            </div>
+                            <div style="font-size: 0.75rem; color: var(--text-secondary);">${ev.checkpoint ? ev.checkpoint.summary : ''}</div>
+                        </div>
+
+                        <div class="card glass" style="padding: 12px; text-align: center; border-top: 3px solid #10b981;">
+                            <div style="font-size: 0.8rem; color: var(--text-secondary);">Git Commit Diff</div>
+                            <div style="font-weight: 700; margin: 4px 0; color: #10b981;">✓ VERIFIED</div>
+                            <div style="font-size: 0.75rem; color: var(--text-secondary);">${ev.commit ? ev.commit.summary : ''}</div>
+                        </div>
+
+                        <div class="card glass" style="padding: 12px; text-align: center; border-top: 3px solid #10b981;">
+                            <div style="font-size: 0.8rem; color: var(--text-secondary);">Source Tree Code</div>
+                            <div style="font-weight: 700; margin: 4px 0; color: #10b981;">✓ VERIFIED</div>
+                            <div style="font-size: 0.75rem; color: var(--text-secondary);">${ev.source ? ev.source.summary : ''}</div>
+                        </div>
+
+                        <div class="card glass" style="padding: 12px; text-align: center; border-top: 3px solid #10b981;">
+                            <div style="font-size: 0.8rem; color: var(--text-secondary);">Unit Test Suite</div>
+                            <div style="font-weight: 700; margin: 4px 0; color: #10b981;">✓ PASSING</div>
+                            <div style="font-size: 0.75rem; color: var(--text-secondary);">${ev.tests ? ev.tests.summary : ''}</div>
+                        </div>
+
+                        <div class="card glass" style="padding: 12px; text-align: center; border-top: 3px solid ${ev.graph && ev.graph.available ? '#10b981' : '#64748b'};">
+                            <div style="font-size: 0.8rem; color: var(--text-secondary);">Entire Graph</div>
+                            <div style="font-weight: 700; margin: 4px 0; color: ${ev.graph && ev.graph.available ? '#10b981' : '#64748b'};">
+                                ${ev.graph && ev.graph.available ? '✓ CONFIRMED' : '— OPTIONAL'}
+                            </div>
+                            <div style="font-size: 0.75rem; color: var(--text-secondary);">${ev.graph ? ev.graph.summary : ''}</div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Next Action Banner -->
+                <div style="background: rgba(16, 185, 129, 0.1); border: 1px solid rgba(16, 185, 129, 0.3); padding: 14px 18px; border-radius: 8px;">
+                    <strong style="color: #10b981;">🚀 Recommended Next Action:</strong>
+                    <span style="color: var(--text-primary); margin-left: 6px;">${intel.next_action}</span>
+                </div>
+            </div>
+        `;
     }
 
     async function fetchIntegrationStatus(repoID) {

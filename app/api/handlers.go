@@ -45,21 +45,28 @@ type ServerDependencies struct {
 	ReqAnalyzer        providers.RequirementAnalyzer
 	CommitProvider     providers.CommitProvider
 	Sanitizer          *privacy.PrivacySanitizer
+	IntelligenceEngine providers.CheckpointIntelligenceEngine
 }
 
 // DefaultServerDependencies instantiates the development dependencies.
 func DefaultServerDependencies() *ServerDependencies {
 	devAnalyzer := providers.NewDevAnalyzer()
 	cpProvider := providers.NewDevCheckpointProvider()
+	graphProvider := providers.NewDevGraphProvider()
+	commitProvider := providers.NewDevCommitProvider(cpProvider)
+	sanitizer := privacy.NewPrivacySanitizer()
+	intelEngine := providers.NewLiveIntelligenceEngine(commitProvider, cpProvider, devAnalyzer, graphProvider, sanitizer)
+
 	return &ServerDependencies{
 		RepoManager:        providers.NewMemoryRepoManager(),
 		CheckpointProvider: cpProvider,
-		GraphProvider:      providers.NewDevGraphProvider(),
+		GraphProvider:      graphProvider,
 		GitHubProvider:     providers.NewDevGitHubProvider(),
 		RepoAnalyzer:       providers.NewLiveRepositoryAnalyzer(),
 		ReqAnalyzer:        devAnalyzer,
-		CommitProvider:     providers.NewDevCommitProvider(cpProvider),
-		Sanitizer:          privacy.NewPrivacySanitizer(),
+		CommitProvider:     commitProvider,
+		Sanitizer:          sanitizer,
+		IntelligenceEngine: intelEngine,
 	}
 }
 
@@ -226,7 +233,7 @@ func (h *APIHandler) RepositoriesHandler(w http.ResponseWriter, r *http.Request)
 	subResource := parts[1]
 	switch subResource {
 	case "commits":
-		// GET /api/repositories/:id/commits or /api/repositories/:id/commits/:sha/context
+		// GET /api/repositories/:id/commits or /api/repositories/:id/commits/:sha/context or /api/repositories/:id/commits/:sha/intelligence
 		if len(parts) == 2 {
 			commits, err := h.deps.CommitProvider.GetRecentCommits(r.Context(), repoID, 10)
 			if err != nil {
@@ -237,6 +244,16 @@ func (h *APIHandler) RepositoriesHandler(w http.ResponseWriter, r *http.Request)
 			return
 		}
 		sha := parts[2]
+		if len(parts) == 4 && parts[3] == "intelligence" {
+			intel, err := h.deps.IntelligenceEngine.GenerateIntelligence(r.Context(), repoID, sha)
+			if err != nil {
+				slog.Error("Failed to generate intelligence", "repoID", repoID, "sha", sha, "error", err)
+				WriteAPIError(w, http.StatusInternalServerError, "INTELLIGENCE_GENERATION_FAILED", err.Error())
+				return
+			}
+			json.NewEncoder(w).Encode(intel)
+			return
+		}
 		if len(parts) == 3 || (len(parts) == 4 && parts[3] == "context") {
 			devCtx, err := h.deps.CommitProvider.GetCommitDevelopmentContext(r.Context(), repoID, sha)
 			if err != nil {
@@ -250,6 +267,21 @@ func (h *APIHandler) RepositoriesHandler(w http.ResponseWriter, r *http.Request)
 			return
 		}
 		http.NotFound(w, r)
+
+	case "intelligence":
+		// GET /api/repositories/:id/intelligence (fetches intelligence for most recent commit)
+		commits, err := h.deps.CommitProvider.GetRecentCommits(r.Context(), repoID, 1)
+		if err != nil || len(commits) == 0 {
+			WriteAPIError(w, http.StatusNotFound, "NO_COMMITS_FOUND", "No commits found for repository")
+			return
+		}
+		intel, err := h.deps.IntelligenceEngine.GenerateIntelligence(r.Context(), repoID, commits[0].SHA)
+		if err != nil {
+			WriteAPIError(w, http.StatusInternalServerError, "INTELLIGENCE_GENERATION_FAILED", err.Error())
+			return
+		}
+		json.NewEncoder(w).Encode(intel)
+
 	case "select":
 		// POST /api/repositories/:id/select
 		if r.Method != http.MethodPost {
