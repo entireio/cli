@@ -56,7 +56,21 @@ func (c *CursorAgent) Description() string {
 
 func (c *CursorAgent) IsPreview() bool { return true }
 
-// DetectPresence checks if Cursor is configured in the repository.
+// DetectPresence checks whether Cursor is used for this repository.
+//
+// Two signals, because a repo-local check alone is structurally biased against
+// Cursor. Every other agent keeps its per-project config in the repo (.claude,
+// .codex, .gemini), so "does <repo>/.<agent> exist" is a fair test for them.
+// Cursor does not: project rules are optional, and its actual per-project state
+// lives in ~/.cursor/projects/<sanitized-repo-path>. A repo driven daily from
+// Cursor therefore reported "not present", and since `entire enable` enables
+// only detected agents when non-interactive and pre-selects only detected ones
+// on first run (see selectAgents in setup.go), Cursor silently ended up with no
+// hooks installed while enable still reported success.
+//
+// The home-dir signal deliberately accepts a false positive — a repo opened in
+// Cursor once and never used with its agent — because that installs hooks that
+// simply never fire, whereas a false negative captures nothing and says nothing.
 func (c *CursorAgent) DetectPresence(ctx context.Context) (bool, error) {
 	worktreeRoot, err := paths.WorktreeRoot(ctx)
 	if err != nil {
@@ -65,6 +79,16 @@ func (c *CursorAgent) DetectPresence(ctx context.Context) (bool, error) {
 
 	cursorDir := filepath.Join(worktreeRoot, ".cursor")
 	if _, err := os.Stat(cursorDir); err == nil {
+		return true, nil
+	}
+
+	// Cursor's own per-project state directory, keyed by the repo path.
+	projectDir, err := c.projectStateDir(worktreeRoot)
+	if err != nil {
+		// No resolvable home dir is not an error here, just no second signal.
+		return false, nil //nolint:nilerr // detection is best-effort
+	}
+	if info, err := os.Stat(projectDir); err == nil && info.IsDir() {
 		return true, nil
 	}
 	return false, nil
@@ -102,13 +126,23 @@ func (c *CursorAgent) GetSessionDir(repoPath string) (string, error) {
 		return override, nil
 	}
 
+	projectDir, err := c.projectStateDir(repoPath)
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(projectDir, "agent-transcripts"), nil
+}
+
+// projectStateDir returns Cursor's per-project state directory for repoPath:
+// ~/.cursor/projects/<sanitized-repo-path>. Both GetSessionDir (which appends
+// agent-transcripts) and DetectPresence resolve it through here so the two can
+// never disagree about where Cursor keeps a repo's state.
+func (c *CursorAgent) projectStateDir(repoPath string) (string, error) {
 	homeDir, err := os.UserHomeDir()
 	if err != nil {
 		return "", fmt.Errorf("failed to get home directory: %w", err)
 	}
-
-	projectDir := sanitizePathForCursor(repoPath)
-	return filepath.Join(homeDir, ".cursor", "projects", projectDir, "agent-transcripts"), nil
+	return filepath.Join(homeDir, ".cursor", "projects", sanitizePathForCursor(repoPath)), nil
 }
 
 // GetSessionBaseDir returns the base directory containing per-project session subdirectories.
