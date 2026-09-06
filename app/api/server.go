@@ -46,6 +46,8 @@ func NewServer(cfg *config.Config, deps *ServerDependencies) *Server {
 
 	// API Endpoints
 	mux.HandleFunc("/api/health", apiHandler.HealthHandler)
+	mux.HandleFunc("/api/readiness", apiHandler.ReadinessHandler)
+	mux.HandleFunc("/api/enable", apiHandler.EnableHandler)
 	mux.HandleFunc("/api/repositories", apiHandler.RepositoriesHandler)
 	mux.HandleFunc("/api/repositories/", apiHandler.RepositoriesHandler)
 
