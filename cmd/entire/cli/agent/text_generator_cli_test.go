@@ -178,7 +178,7 @@ func TestRunIsolatedTextGeneratorCLI_ReturnsOnDeadlineWithPipeHoldingGrandchild(
 
 	runner := func(ctx context.Context, _ string, _ ...string) *exec.Cmd {
 		// `sleep 60 &` backgrounds a grandchild holding stdout; `wait` keeps the
-		// shell alive so only a group-wide kill (or the WaitDelay backstop) ends both.
+		// shell alive so only a group-wide kill ends both.
 		return exec.CommandContext(ctx, "/bin/sh", "-c", "sleep 60 & echo ready; wait")
 	}
 
@@ -196,7 +196,9 @@ func TestRunIsolatedTextGeneratorCLI_ReturnsOnDeadlineWithPipeHoldingGrandchild(
 		if !errors.Is(err, context.DeadlineExceeded) {
 			t.Fatalf("expected context.DeadlineExceeded, got %v", err)
 		}
-	case <-time.After(execx.KillWaitDelay + 5*time.Second):
+	// Stay strictly below KillWaitDelay: that backstop force-closes the pipes on
+	// its own, so a looser deadline here would pass even if the group-kill regressed.
+	case <-time.After(execx.KillWaitDelay / 2):
 		t.Fatal("RunIsolatedTextGeneratorCLI hung past the deadline: a grandchild held the output pipe open")
 	}
 }

@@ -174,10 +174,7 @@ func (c *ClaudeCodeAgent) GenerateText(ctx context.Context, prompt string, model
 
 	cmd := commandRunner(ctx, claudePath, buildGenerateArgs(model, settingsPath)...)
 
-	// Isolate from the user's git repo to prevent recursive hook triggers
-	// and index pollution (matches agent.RunIsolatedTextGeneratorCLI behavior).
-	cmd.Dir = os.TempDir()
-	cmd.Env = agent.StripGitEnv(os.Environ())
+	agent.PrepareIsolatedCLICmd(cmd)
 	cmd.Stdin = strings.NewReader(prompt)
 
 	var stdout, stderr bytes.Buffer

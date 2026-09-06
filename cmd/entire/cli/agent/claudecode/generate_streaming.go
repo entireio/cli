@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"os"
 	"os/exec"
 	"strings"
 
@@ -52,8 +51,9 @@ func (c *ClaudeCodeAgent) GenerateTextStreaming(
 
 	cmd := commandRunner(ctx, "claude", buildStreamingGenerateArgs(model, settingsPath)...)
 
-	cmd.Dir = os.TempDir()
-	cmd.Env = agent.StripGitEnv(os.Environ())
+	// Bounds the drain below as well as Wait: a grandchild holding stdout would
+	// otherwise outlive the direct child and block it past the ctx deadline.
+	agent.PrepareIsolatedCLICmd(cmd)
 	cmd.Stdin = strings.NewReader(prompt)
 
 	stdout, err := cmd.StdoutPipe()
