@@ -103,14 +103,22 @@ class GraphClient:
         return self._run(["graph", "capabilities", "--json"])
 
     def search(self, query: str, profile: str = "full", limit: int = 10) -> GraphResult:
+        """Ranked code regions for a plain-language query.
+
+        The result-count flag is ``--top-k`` (not ``--limit``); the wrong
+        spelling makes the plugin fail and every requirement then reports
+        UNVERIFIED, which is indistinguishable at a glance from a genuinely
+        unanswerable query.
+        """
         return self._run(
             [
                 "graph", "search",
                 "--repo", self.repo,
                 "--profile", profile,
                 "--query", query,
-                "--limit", str(limit),
+                "--top-k", str(limit),
                 "--format", "json",
+                "--max-context-bytes", "4096",
             ]
         )
 

@@ -190,6 +190,58 @@ def render_graph_evidence(title: str, command: str, body: list[str], ok: bool, e
     return lines
 
 
+def render_drift_findings(findings: list[Any]) -> list[str]:
+    """Requirements from the plan, grouped by verdict.
+
+    Open items come first: the whole reason to run drift is to see what is not
+    done, so the report must not bury it under what is.
+    """
+    from .requirements import IMPLEMENTED, MISSING, PARTIAL, UNVERIFIED, VERDICT_NOTE
+
+    lines = [section("PLAN vs IMPLEMENTATION")]
+    if not findings:
+        lines.append("  No requirement-shaped statements found in the baseline")
+        lines.append("  checkpoint's intent. Drift needs a plan to compare against.")
+        return lines
+
+    counts: dict[str, int] = {}
+    for f in findings:
+        counts[f.verdict] = counts.get(f.verdict, 0) + 1
+    total = len(findings)
+    done = counts.get(IMPLEMENTED, 0)
+    lines.append(
+        "  %d requirement(s) extracted from the plan - %d implemented, "
+        "%d partial, %d missing, %d unverified"
+        % (
+            total,
+            done,
+            counts.get(PARTIAL, 0),
+            counts.get(MISSING, 0),
+            counts.get(UNVERIFIED, 0),
+        )
+    )
+    lines.append("  coverage: %.0f%%" % (100.0 * done / total if total else 0.0))
+
+    for verdict in (MISSING, PARTIAL, UNVERIFIED, IMPLEMENTED):
+        group = [f for f in findings if f.verdict == verdict]
+        if not group:
+            continue
+        lines.append("")
+        lines.append("  %s (%d) - %s" % (verdict, len(group), VERDICT_NOTE[verdict]))
+        for f in group:
+            lines.append(
+                textwrap.fill(
+                    " ".join(f.requirement.text.split()),
+                    width=WIDTH,
+                    initial_indent="    - ",
+                    subsequent_indent="      ",
+                )
+            )
+            if f.evidence:
+                lines.append("      evidence: " + "; ".join(f.evidence[:2])[: WIDTH - 16])
+    return lines
+
+
 def footer(notes: list[str]) -> list[str]:
     lines = ["", rule("=")]
     for n in notes:
