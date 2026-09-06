@@ -3401,7 +3401,7 @@ func TestFormatBranchCheckpoints_BasicOutput(t *testing.T) {
 		},
 	}
 
-	output := formatBranchCheckpoints(io.Discard, "feature/my-branch", points, "")
+	output := formatBranchCheckpoints(io.Discard, "feature/my-branch", points, "", false)
 
 	// Should show branch name
 	if !strings.Contains(output, "feature/my-branch") {
@@ -3454,7 +3454,7 @@ func TestFormatBranchCheckpoints_GroupedByCheckpointID(t *testing.T) {
 		},
 	}
 
-	output := formatBranchCheckpoints(io.Discard, "main", points, "")
+	output := formatBranchCheckpoints(io.Discard, "main", points, "", false)
 
 	// Should group by checkpoint ID - check for checkpoint headers (identity bullet)
 	if !strings.Contains(output, "● chk111111111") {
@@ -3481,7 +3481,7 @@ func TestFormatBranchCheckpoints_GroupedByCheckpointID(t *testing.T) {
 }
 
 func TestFormatBranchCheckpoints_NoCheckpoints(t *testing.T) {
-	output := formatBranchCheckpoints(io.Discard, "feature/empty-branch", nil, "")
+	output := formatBranchCheckpoints(io.Discard, "feature/empty-branch", nil, "", false)
 
 	// Should show branch name
 	if !strings.Contains(output, "feature/empty-branch") {
@@ -3507,7 +3507,7 @@ func TestFormatBranchCheckpoints_ShowsSessionInfo(t *testing.T) {
 		},
 	}
 
-	output := formatBranchCheckpoints(io.Discard, "main", points, "")
+	output := formatBranchCheckpoints(io.Discard, "main", points, "", false)
 
 	// Should show session prompt
 	if !strings.Contains(output, "This is my test prompt") {
@@ -3536,7 +3536,7 @@ func TestFormatBranchCheckpoints_ShowsTemporaryIndicator(t *testing.T) {
 		},
 	}
 
-	output := formatBranchCheckpoints(io.Discard, "main", points, "")
+	output := formatBranchCheckpoints(io.Discard, "main", points, "", false)
 
 	// Should indicate temporary (non-committed) checkpoints with [temporary]
 	if !strings.Contains(output, "[temporary]") {
@@ -3567,7 +3567,7 @@ func TestFormatBranchCheckpoints_ShowsTaskCheckpoints(t *testing.T) {
 		},
 	}
 
-	output := formatBranchCheckpoints(io.Discard, "main", points, "")
+	output := formatBranchCheckpoints(io.Discard, "main", points, "", false)
 
 	// Should indicate task checkpoint
 	if !strings.Contains(output, "[Task]") && !strings.Contains(output, "task") {
@@ -3631,7 +3631,7 @@ func TestFormatBranchCheckpoints_TruncatesLongMessages(t *testing.T) {
 		},
 	}
 
-	output := formatBranchCheckpoints(io.Discard, "main", points, "")
+	output := formatBranchCheckpoints(io.Discard, "main", points, "", false)
 
 	// Output should not contain the full 200 character message
 	if strings.Contains(output, longMessage) {
@@ -4315,7 +4315,7 @@ func TestFormatBranchCheckpoints_SessionFilter(t *testing.T) {
 	}
 
 	t.Run("no filter shows all checkpoints", func(t *testing.T) {
-		output := formatBranchCheckpoints(io.Discard, "main", points, "")
+		output := formatBranchCheckpoints(io.Discard, "main", points, "", false)
 
 		// Should show all checkpoints (new metadata-row shape)
 		if !strings.Contains(output, "checkpoints  3") {
@@ -4331,7 +4331,7 @@ func TestFormatBranchCheckpoints_SessionFilter(t *testing.T) {
 	})
 
 	t.Run("filter by exact session ID", func(t *testing.T) {
-		output := formatBranchCheckpoints(io.Discard, "main", points, "2026-01-22-session-alpha")
+		output := formatBranchCheckpoints(io.Discard, "main", points, "2026-01-22-session-alpha", false)
 
 		// Should show only alpha checkpoints (2 of them)
 		if !strings.Contains(output, "checkpoints  2") {
@@ -4351,7 +4351,7 @@ func TestFormatBranchCheckpoints_SessionFilter(t *testing.T) {
 	})
 
 	t.Run("filter by session ID prefix", func(t *testing.T) {
-		output := formatBranchCheckpoints(io.Discard, "main", points, "2026-01-22-session-b")
+		output := formatBranchCheckpoints(io.Discard, "main", points, "2026-01-22-session-b", false)
 
 		// Should show only beta checkpoint (1)
 		if !strings.Contains(output, "checkpoints  1") {
@@ -4363,7 +4363,7 @@ func TestFormatBranchCheckpoints_SessionFilter(t *testing.T) {
 	})
 
 	t.Run("filter with no matches", func(t *testing.T) {
-		output := formatBranchCheckpoints(io.Discard, "main", points, "nonexistent-session")
+		output := formatBranchCheckpoints(io.Discard, "main", points, "nonexistent-session", false)
 
 		// Should show 0 checkpoints
 		if !strings.Contains(output, "checkpoints  0") {
@@ -4388,7 +4388,7 @@ func TestFormatBranchCheckpoints_SessionFilter(t *testing.T) {
 				SessionIDs:   []string{"2026-01-22-session-alpha", "2026-01-22-session-beta"},
 			},
 		}
-		output := formatBranchCheckpoints(io.Discard, "main", multi, "2026-01-22-session-alpha")
+		output := formatBranchCheckpoints(io.Discard, "main", multi, "2026-01-22-session-alpha", false)
 		if !strings.Contains(output, "checkpoints  1") {
 			t.Errorf("expected archived contributor to match session filter, got:\n%s", output)
 		}
@@ -4408,7 +4408,7 @@ func TestFormatBranchCheckpoints_SessionFilter(t *testing.T) {
 				SessionID:    "",
 			},
 		}
-		output := formatBranchCheckpoints(io.Discard, "main", stub, "2026-01-22-session-alpha")
+		output := formatBranchCheckpoints(io.Discard, "main", stub, "2026-01-22-session-alpha", false)
 		if !strings.Contains(output, "checkpoints  0") {
 			t.Errorf("empty SessionID stub must not match a session filter, got:\n%s", output)
 		}
@@ -5970,6 +5970,104 @@ func TestGetBranchCheckpoints_TruncationSignal(t *testing.T) {
 		require.NoError(t, err)
 		require.False(t, truncated)
 	})
+}
+
+// TestGetBranchCheckpoints_TruncatedScanQualifiesZeroMessage reproduces
+// entireio/cli#2089: `checkpoint explain --session <id>` reported an
+// unqualified "No checkpoints found on this branch." even when the checkpoint
+// existed but the default scan limit truncated before reaching it. This
+// drives the real scan function (getBranchCheckpoints) and the real
+// formatter (formatBranchCheckpoints) end to end against a fixture repo with
+// enough real committed checkpoints that a small limit truncates before the
+// oldest (target) session, while a larger limit finds it.
+func TestGetBranchCheckpoints_TruncatedScanQualifiesZeroMessage(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Chdir(tmpDir)
+
+	testutil.InitRepo(t, tmpDir)
+	testutil.WriteFile(t, tmpDir, "test.txt", "initial")
+	testutil.GitAdd(t, tmpDir, "test.txt")
+	testutil.GitCommit(t, tmpDir, "initial commit")
+
+	repo, err := git.PlainOpen(tmpDir)
+	require.NoError(t, err)
+
+	// Five committed checkpoints, one per session, oldest first.
+	store := checkpoint.NewGitStore(repo, checkpoint.DefaultV1Refs())
+	const total = 5
+	cpIDs := []string{"aa11aa11aa11", "bb22bb22bb22", "cc33cc33cc33", "dd44dd44dd44", "ee55ee55ee55"}
+	targetSession := "session-0" // oldest session; falls outside a small truncated scan window
+	for i := range total {
+		cpID := id.MustCheckpointID(cpIDs[i])
+		require.NoError(t, store.Write(context.Background(), checkpoint.Session{
+			CheckpointID: cpID,
+			SessionID:    fmt.Sprintf("session-%d", i),
+			Strategy:     "manual-commit",
+			Prompts:      []string{fmt.Sprintf("prompt %d", i)},
+		}))
+		testutil.WriteFile(t, tmpDir, "test.txt", fmt.Sprintf("change %d", i))
+		testutil.GitAdd(t, tmpDir, "test.txt")
+		testutil.GitCommit(t, tmpDir, trailers.FormatCheckpoint(fmt.Sprintf("checkpoint %d", i), cpID))
+	}
+
+	ctx := context.Background()
+
+	// A small limit truncates the scan before it reaches session-0's
+	// checkpoint: points are sorted most-recent-first and capped to the
+	// limit, so the oldest session is silently dropped from the window.
+	const smallLimit = 2
+	smallPoints, smallTruncated, err := getBranchCheckpoints(ctx, repo, smallLimit)
+	require.NoError(t, err)
+	require.True(t, smallTruncated, "small limit must hit the scan budget")
+
+	out := formatBranchCheckpoints(io.Discard, "main", smallPoints, targetSession, smallTruncated)
+	t.Logf("small-limit (--session %s, limit=%d) output:\n%s", targetSession, smallLimit, out)
+
+	require.Contains(t, out, "checkpoints  0")
+	require.NotContains(t, out, "No checkpoints found on this branch.",
+		"a truncated scan must not claim the branch has no checkpoints at all")
+	require.Contains(t, out, fmt.Sprintf("first %d checkpoints scanned", smallLimit),
+		"the qualified message must name how many checkpoints were actually scanned")
+	require.Contains(t, out, "--limit", "the message must point at how to search further")
+
+	// A limit covering the whole history finds the target session's
+	// checkpoint and reports no truncation.
+	const largeLimit = total + 10
+	largePoints, largeTruncated, err := getBranchCheckpoints(ctx, repo, largeLimit)
+	require.NoError(t, err)
+	require.False(t, largeTruncated)
+
+	outLarge := formatBranchCheckpoints(io.Discard, "main", largePoints, targetSession, largeTruncated)
+	t.Logf("large-limit (--session %s, limit=%d) output:\n%s", targetSession, largeLimit, outLarge)
+
+	require.Contains(t, outLarge, "checkpoints  1")
+	require.Contains(t, outLarge, "prompt 0")
+}
+
+// TestFormatBranchCheckpoints_GenuineZeroStaysUnqualified guards the other
+// direction of the entireio/cli#2089 fix: a session filter matching nothing,
+// where the scan was NOT truncated (a genuinely empty result), must keep the
+// plain "No checkpoints found" wording with no truncation caveat.
+func TestFormatBranchCheckpoints_GenuineZeroStaysUnqualified(t *testing.T) {
+	t.Parallel()
+	now := time.Now()
+	points := []strategy.PendingCheckpoint{
+		{
+			ID:           "abc123def456",
+			Message:      "Only checkpoint",
+			Date:         now,
+			CheckpointID: "chk123456789",
+			SessionID:    "2026-01-22-session-1",
+		},
+	}
+
+	out := formatBranchCheckpoints(io.Discard, "main", points, "nonexistent-session", false)
+	t.Logf("genuine-zero (untruncated) output:\n%s", out)
+
+	require.Contains(t, out, "checkpoints  0")
+	require.Contains(t, out, "No checkpoints found on this branch.")
+	require.NotContains(t, out, "scan limit",
+		"an honest empty result must not be qualified with a truncation caveat")
 }
 
 // setupExplainBranchViewRepo initializes a repo with one commit and an .entire
