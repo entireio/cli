@@ -930,6 +930,7 @@ func handleLifecycleTurnEnd(ctx context.Context, ag agent.Agent, event *agent.Ev
 	// persisted at turn end reflects the whole turn, not just this walk.
 	captureDegraded := preState != nil && preState.UntrackedScanSkipped
 	changes, err := DetectFileChanges(ctx, preUntrackedFiles)
+	excludeUnchangedTracked(ctx, changes, preState.trackedBaseline())
 	if err != nil {
 		captureDegraded = captureDegraded || errors.Is(err, gitrepo.ErrStatusBudgetExceeded)
 		logStatusDegrade(logCtx, "failed to compute file changes", err)
@@ -1620,6 +1621,7 @@ func completeSubagentTaskRecord(logCtx context.Context, ag agent.Agent, event *a
 		}
 		var changesErr error
 		changes, changesErr = DetectFileChanges(logCtx, preUntrackedFiles)
+		excludeUnchangedTracked(logCtx, changes, preState.trackedBaseline())
 		if changesErr != nil {
 			logStatusDegrade(logCtx, "failed to compute file changes", changesErr)
 		}

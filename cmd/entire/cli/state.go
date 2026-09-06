@@ -2,13 +2,16 @@ package cli
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"log/slog"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -21,15 +24,17 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
 	"github.com/entireio/cli/cmd/entire/cli/validation"
+	"github.com/entireio/cli/cmd/entire/cli/worktreedir"
 
 	"github.com/go-git/go-git/v6"
 )
 
 // PrePromptState stores the state captured before a user prompt
 type PrePromptState struct {
-	SessionID      string   `json:"session_id"`
-	Timestamp      string   `json:"timestamp"`
-	UntrackedFiles []string `json:"untracked_files"`
+	SessionID       string            `json:"session_id"`
+	Timestamp       string            `json:"timestamp"`
+	UntrackedFiles  []string          `json:"untracked_files"`
+	TrackedBaseline map[string]string `json:"tracked_baseline"`
 
 	// UntrackedScanSkipped records that the pre-prompt untracked scan failed
 	// (e.g. the status walk breached its wall-clock budget). Turn-end must
@@ -145,6 +150,7 @@ func CapturePrePromptState(ctx context.Context, ag agent.Agent, sessionID, sessi
 		SessionID:            sessionID,
 		Timestamp:            time.Now().UTC().Format(time.RFC3339),
 		UntrackedFiles:       untrackedFiles,
+		TrackedBaseline:      captureTrackedBaseline(ctx),
 		UntrackedScanSkipped: scanSkipped,
 		TranscriptOffset:     transcriptOffset,
 	}
@@ -523,9 +529,10 @@ func getUntrackedFilesForState(ctx context.Context) ([]string, error) {
 
 // PreTaskState stores the state captured before a task execution
 type PreTaskState struct {
-	ToolUseID      string   `json:"tool_use_id"`
-	Timestamp      string   `json:"timestamp"`
-	UntrackedFiles []string `json:"untracked_files"`
+	ToolUseID       string            `json:"tool_use_id"`
+	Timestamp       string            `json:"timestamp"`
+	UntrackedFiles  []string          `json:"untracked_files"`
+	TrackedBaseline map[string]string `json:"tracked_baseline"`
 
 	// UntrackedScanSkipped mirrors PrePromptState.UntrackedScanSkipped for the
 	// subagent path: when set, subagent-end must skip new-file detection.
@@ -571,6 +578,7 @@ func CapturePreTaskState(ctx context.Context, toolUseID string) error {
 		ToolUseID:            toolUseID,
 		Timestamp:            time.Now().UTC().Format(time.RFC3339),
 		UntrackedFiles:       untrackedFiles,
+		TrackedBaseline:      captureTrackedBaseline(ctx),
 		UntrackedScanSkipped: scanSkipped,
 	}
 
@@ -714,4 +722,97 @@ func GetNextCheckpointSequence(ctx context.Context, sessionID, taskToolUseID str
 	}
 
 	return count + 1
+}
+
+func trackedFingerprints(ctx context.Context, files []string) map[string]string {
+	result := make(map[string]string, len(files))
+	root, err := worktreedir.Open(ctx)
+	if err != nil {
+		return result
+	}
+	for _, name := range files {
+		if ctx.Err() != nil {
+			break
+		}
+		info, err := root.Lstat(name)
+		if errors.Is(err, fs.ErrNotExist) {
+			result[name] = "missing"
+			continue
+		}
+		if err != nil {
+			continue
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			target, err := root.Readlink(name)
+			if err == nil {
+				result[name] = "link:" + target
+			}
+			continue
+		}
+		if !info.Mode().IsRegular() {
+			continue
+		}
+		f, err := osroot.OpenNoFollow(root, name)
+		if err != nil {
+			continue
+		}
+		hash := sha256.New()
+		_, err = io.Copy(hash, f)
+		_ = f.Close()
+		if err == nil {
+			result[name] = fmt.Sprintf("%o:%x", info.Mode().Perm()&0o111, hash.Sum(nil))
+		}
+	}
+	return result
+}
+
+func captureTrackedBaseline(ctx context.Context) map[string]string {
+	changes, err := DetectFileChanges(ctx, []string{})
+	if err != nil {
+		return nil
+	}
+	files := append(slices.Clone(changes.Modified), changes.Deleted...)
+	fingerprints := trackedFingerprints(ctx, files)
+	for _, name := range files {
+		if _, ok := fingerprints[name]; !ok {
+			fingerprints[name] = "unknown"
+		}
+	}
+	return fingerprints
+}
+
+func excludeUnchangedTracked(ctx context.Context, changes *FileChanges, baseline map[string]string) {
+	if changes == nil {
+		return
+	}
+	if baseline == nil {
+		changes.Modified = nil
+		changes.Deleted = nil
+		return
+	}
+	current := trackedFingerprints(ctx, append(slices.Clone(changes.Modified), changes.Deleted...))
+	unchanged := func(name string) bool {
+		before, existed := baseline[name]
+		if !existed {
+			return false
+		}
+		after, readable := current[name]
+		return !readable || before == "unknown" || before == after
+	}
+	changes.Modified = slices.DeleteFunc(changes.Modified, unchanged)
+	changes.Deleted = slices.DeleteFunc(changes.Deleted, unchanged)
+}
+
+func (s *PrePromptState) trackedBaseline() map[string]string {
+	if s == nil {
+		return nil
+	}
+	return s.TrackedBaseline
+}
+
+func (s *PreTaskState) trackedBaseline() map[string]string {
+	if s == nil {
+		return nil
+	}
+	return s.TrackedBaseline
 }
