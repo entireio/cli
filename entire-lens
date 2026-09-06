@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# Entire external-command shim: `entire lens ...` resolves to `entire-lens`
+# on PATH via the CLI's kubectl-style external-command lookup.
+exec python -m tools.checkpoint_lens.cli "$@"
