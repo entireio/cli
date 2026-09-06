@@ -474,6 +474,18 @@ When duplication is found:
 2. If not, consider extracting the duplicated logic to a shared helper
 3. If duplication is intentional (e.g., test setup), add a `//nolint:dupl` comment with explanation
 
+## Tests and Comments
+
+- Tests are not required merely because production code changed. Add or modify tests only when they protect meaningful observable behavior, a non-trivial invariant or boundary, or a concrete regression.
+- Before adding a test, identify the realistic regression it would catch and why existing coverage would not catch it. If the only rationale is coverage, symmetry, or "the code changed," omit the test.
+- Do not add tombstone tests whose only purpose is to assert that removed code, routes, fields, or features remain absent. Negative tests are appropriate when the failure or absence is itself a current API, security, or persistence contract.
+- Avoid tests that merely mirror literal values, declarative mappings, obvious control flow, or implementation details. For diagnostics and other structured user-visible output, prefer the repository's established UI, snapshot, or integration coverage over redundant partial-string assertions.
+- Prefer extending an existing test at the appropriate behavior boundary over adding a new test file, fixture, helper, or test-only abstraction. Do not build test infrastructure that is more complex or brittle than the behavior under test.
+- When fixing a real bug, add focused regression coverage at the level where the bug was observed when practical.
+- Do not add comments or doc comments that merely restate the code, symbol name, test name, file or module purpose, or obvious control flow. Prefer clearer naming and structure.
+- Comments should explain non-obvious rationale, invariants, safety constraints, compatibility requirements, external quirks, or why an apparently simpler alternative is incorrect. Keep them accurate and remove them when they no longer add information.
+- When public API documentation is required, document the contract, semantics, errors, invariants, or useful examples rather than paraphrasing the signature.
+
 ## Code Patterns
 
 ### Error Handling
