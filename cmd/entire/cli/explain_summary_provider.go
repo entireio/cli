@@ -9,6 +9,7 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/external"
+	"github.com/entireio/cli/cmd/entire/cli/agent/orcarouter"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/interactive"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
@@ -204,6 +205,12 @@ func isSummaryProviderAvailable(name types.AgentName, ag agent.Agent) bool {
 	if external.IsExternal(ag) {
 		_, ok := agent.AsTextGenerator(ag)
 		return ok
+	}
+	// HTTP-based providers have no CLI binary to look up on PATH. OrcaRouter is
+	// available when its API key is present in the environment, which is the
+	// same prerequisite its text generator authenticates with.
+	if name == orcarouter.AgentNameOrcaRouter {
+		return orcarouter.APIKey() != ""
 	}
 	return isSummaryCLIAvailable(name)
 }
