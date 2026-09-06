@@ -22,13 +22,13 @@ const (
 // It deliberately has no prompt, transcript, patch, arbitrary JSON, or raw
 // command-output fields.
 type SanitizedEvidence struct {
-	CheckpointID  string            `json:"checkpoint_id"`
-	ContextStatus ContextStatus     `json:"context_status"`
-	Requirements  []Requirement     `json:"requirements"`
-	ChangedFiles  []string          `json:"changed_files"`
+	CheckpointID  string             `json:"checkpoint_id"`
+	ContextStatus ContextStatus      `json:"context_status"`
+	Requirements  []Requirement      `json:"requirements"`
+	ChangedFiles  []string           `json:"changed_files"`
 	Structural    StructuralEvidence `json:"structural_evidence"`
-	Graph         GraphEvidence     `json:"graph_evidence"`
-	Tests         []TestEvidence    `json:"tests"`
+	Graph         GraphEvidence      `json:"graph_evidence"`
+	Tests         []TestEvidence     `json:"tests"`
 }
 
 type Requirement struct {
@@ -40,7 +40,7 @@ type StructuralEvidence struct {
 }
 
 type GraphEvidence struct {
-	Available bool     `json:"available"`
+	Available  bool     `json:"available"`
 	References []string `json:"references"`
 }
 
