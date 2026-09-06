@@ -372,10 +372,10 @@ using `entire` for real while tests run.
   `tokenstore.UseFileBackendForTesting(...)`.
 - **Spawned binaries are NOT covered**: `testing.Testing()` is false in a
   subprocess. The integration and e2e TestMains set `ENTIRE_CONFIG_DIR`,
-  `XDG_CACHE_HOME`, `ENTIRE_TOKEN_STORE=file`, `ENTIRE_TOKEN_STORE_PATH`, and
-  `ENTIRE_TEST_AUTH_STORE_FILE` process-wide so every spawned `entire` (and
-  every agent-invoked hook) inherits isolation. Any new harness that spawns
-  the real binary must do the same.
+  `XDG_CACHE_HOME`, `ENTIRE_AUTH_LOCK_DIR`, `ENTIRE_TOKEN_STORE=file`,
+  `ENTIRE_TOKEN_STORE_PATH`, and `ENTIRE_TEST_AUTH_STORE_FILE` process-wide so
+  every spawned `entire` (and every agent-invoked hook) inherits isolation.
+  Any new harness that spawns the real binary must do the same.
 - **Legacy auth store**: `auth.NewStore()` talks straight to the zalando
   keyring; packages whose tests can reach it need `keyring.MockInit()` in
   `TestMain` (see `cmd/entire/cli/global_test.go`) — the `testdirs` fallback

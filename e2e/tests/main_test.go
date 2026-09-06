@@ -34,13 +34,14 @@ func TestMain(m *testing.M) {
 	os.Setenv("ENTIRE_TOKEN_STORE", "file")
 	os.Setenv("ENTIRE_TOKEN_STORE_PATH", filepath.Join(runDir, "e2e-tokenstore.json"))
 
-	// Same for the CLI's config and cache directories: contexts.json,
-	// version_check.json, and the discovery caches must never resolve to the
-	// developer's real ~/.config/entire or ~/.cache/entire from a spawned
-	// binary (testing.Testing() is false there, so the internal/testdirs
-	// fallback cannot protect it).
+	// Same for the CLI's config, cache, and auth lock directories: contexts.json,
+	// version_check.json, discovery caches, and auth-go lock files must never
+	// resolve to the developer's real ~/.config/entire or ~/.cache/entire from
+	// a spawned binary. testing.Testing() is false there, so the
+	// internal/testdirs fallback cannot protect it.
 	os.Setenv("ENTIRE_CONFIG_DIR", filepath.Join(runDir, "entire-config"))
 	os.Setenv("XDG_CACHE_HOME", filepath.Join(runDir, "entire-cache"))
+	os.Setenv("ENTIRE_AUTH_LOCK_DIR", filepath.Join(runDir, "auth-locks"))
 
 	// Select the checkpoint storage backend for the whole suite. E2E_CHECKPOINT_STORE
 	// (e.g. "git-refs") maps to the ENTIRE_CHECKPOINTS_PRIMARY override the spawned

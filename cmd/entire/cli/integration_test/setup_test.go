@@ -29,11 +29,11 @@ func TestMain(m *testing.M) {
 	}
 
 	// Route every spawned CLI away from the developer's real ~/.config/entire
-	// (contexts.json, version_check.json), ~/.cache/entire (discovery caches),
-	// and OS keychain. testing.Testing() is false in the subprocess, so the
-	// internal/testdirs fallback cannot protect it — isolation must come from
-	// the environment, which children inherit because all integration env
-	// building starts from os.Environ() (testutil.GitIsolatedEnv).
+	// (contexts.json, version_check.json), ~/.cache/entire (discovery caches and
+	// auth-go locks), and OS keychain. testing.Testing() is false in the
+	// subprocess, so the internal/testdirs fallback cannot protect it —
+	// isolation must come from the environment, which children inherit because
+	// all integration env building starts from os.Environ() (testutil.GitIsolatedEnv).
 	//
 	// GIT_TERMINAL_PROMPT=0 and ENTIRE_TEST_GIT_HERMETIC form the hermeticity
 	// tripwire: the latter makes GitIsolatedEnv's global git config route HTTPS
@@ -44,6 +44,7 @@ func TestMain(m *testing.M) {
 	// inherited GIT_CONFIG_* env; it proxies transport only (not url.insteadOf, which
 	// would corrupt origin-URL forge detection) and leaves loopback servers untouched.
 	isolation := map[string]string{
+		"ENTIRE_AUTH_LOCK_DIR":        filepath.Join(tmpDir, "auth-locks"),
 		"ENTIRE_CONFIG_DIR":           filepath.Join(tmpDir, "entire-config"),
 		"XDG_CACHE_HOME":              filepath.Join(tmpDir, "entire-cache"),
 		"ENTIRE_TOKEN_STORE":          "file",
