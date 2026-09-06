@@ -382,9 +382,11 @@ type cellClientBuilder interface {
 	ClientFor(ctx context.Context, target *auth.CellTarget) (*api.Client, error)
 }
 
-// newCellClientBuilder builds the per-operation cell client factory: the
-// subject is resolved once and identity tokens are minted once per
-// jurisdiction, however many cells the fan-out touches. Swapped in tests.
+// newCellClientBuilder builds the per-operation cell client factory: the login
+// subject is resolved (and refreshed) once, however many cells the fan-out
+// touches, and every cell client carries that login JWT directly — the
+// per-jurisdiction identity-token exchange this used to do was removed in
+// 3df7ea461. Swapped in tests.
 var newCellClientBuilder = func(ctx context.Context, insecureHTTP bool) (cellClientBuilder, error) {
 	return auth.NewEntireAPICellClientFactory(ctx, insecureHTTP)
 }
