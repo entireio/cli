@@ -19,3 +19,9 @@ The JSON Schema is `cmd/entire/cli/review/intentlens/audit.schema.json`. `ParseA
 ## Integration boundary
 
 `entire review audit --file <path>` (or `--file -`) accepts the same audit JSON a future backend/Gemini structured-output integration will provide. `--demo` uses deterministic synthetic files in `cmd/entire/cli/review/intentlens/testdata`; it does not call Gemini or a backend and visibly labels that fact.
+
+## Current handoff status
+
+The `audit-ui` work contains the audit schema, Gemini evaluator interface, prompts, parser/semantic validation, terminal renderer, tests, fixtures, and the development-only `entire review audit --demo` preview. The demo path uses bundled synthetic data only; it is not production evidence and does not prove that Gemini or backend collection is live.
+
+The production command is `entire checkpoint audit <checkpoint-id>`. Checkpoint command registration and real evidence-collector wiring are owned by a follow-up handoff.
