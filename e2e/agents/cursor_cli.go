@@ -103,7 +103,26 @@ func (a *CursorCLI) RunPrompt(ctx context.Context, dir string, prompt string, op
 		o(cfg)
 	}
 
-	timeout := 90 * time.Second
+	// E2E_TIMEOUT is documented as the per-prompt timeout for every agent, but
+	// this runner never read it — only the hardcoded default and a per-test
+	// override applied. That made the Cursor leg impossible to widen from the
+	// environment, which matters more here than for other agents: with no
+	// --model flag the account's Auto routing picks the model, so turn duration
+	// varies per run and a fixed 90s ceiling tears down tmux mid-turn. The
+	// `stop` hook then never fires and the checkpoint is silently absent.
+	// Mirrors the precedence in opencode.go: default < E2E_TIMEOUT < per-test.
+	// 90s was the original default and no longer matches current Cursor: with
+	// Auto routing a single turn measured 188s locally, and CI's cursor-cli leg
+	// fails en masse on exactly this ceiling (~10 tests, all "timed out waiting
+	// for \"Add a follow-up\" after 1m29.99s"). 4m is ~2x the observed turn.
+	// The cost of a too-high default is only paid when an agent genuinely hangs.
+	timeout := 4 * time.Minute
+	if envTimeout := os.Getenv("E2E_TIMEOUT"); envTimeout != "" {
+		if parsed, err := time.ParseDuration(envTimeout); err == nil {
+			timeout = parsed
+		}
+	}
+	// Per-prompt timeout is the most specific override.
 	if cfg.PromptTimeout > 0 {
 		timeout = cfg.PromptTimeout
 	}
