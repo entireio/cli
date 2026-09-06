@@ -16,9 +16,11 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
 	"github.com/entireio/cli/cmd/entire/cli/gitdir"
+	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/osroot"
+	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/proclive"
 	"github.com/entireio/cli/cmd/entire/cli/validation"
 )
@@ -853,14 +855,11 @@ func (s *StateStore) name(file string) string {
 // NewStateStore creates a new state store.
 // Uses the git common dir to store session state (shared across worktrees).
 func NewStateStore(ctx context.Context) (*StateStore, error) {
-	commonDir, err := gitdir.CommonDir(ctx)
+	worktreeRoot, err := paths.WorktreeRoot(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get git common dir: %w", err)
+		return nil, fmt.Errorf("resolve worktree root for session state: %w", err)
 	}
-	if err := ensureTestIsolatedStateDir(commonDir); err != nil {
-		return nil, err
-	}
-	return newStateStoreAt(commonDir), nil
+	return NewStateStoreForWorktree(ctx, worktreeRoot)
 }
 
 // NewStateStoreForWorktree returns the state store for the repository at
@@ -869,24 +868,18 @@ func NewStateStore(ctx context.Context) (*StateStore, error) {
 // the CWD-resolved NewStateStore writes session state into whatever repo the
 // process happens to run in, which is how test fixtures once leaked into a
 // developer's real .git/entire-sessions and hijacked commit linking.
-func NewStateStoreForWorktree(ctx context.Context, worktreeRoot string) (*StateStore, error) {
-	// An empty root would silently degrade to the process CWD (cmd.Dir = ""),
-	// reproducing exactly the accidental-repo leak this constructor exists to
-	// prevent.
+func NewStateStoreForWorktree(_ context.Context, worktreeRoot string) (*StateStore, error) {
 	if worktreeRoot == "" {
 		return nil, errors.New("worktree root required to scope the session state store")
 	}
-	commonDir, err := gitdir.CommonDirForWorktree(ctx, worktreeRoot)
+	metadata, err := gitrepo.ResolveWorktreeMetadata(worktreeRoot)
 	if err != nil {
 		return nil, fmt.Errorf("resolve git common dir for %s: %w", worktreeRoot, err)
 	}
-	// Same go-test guard as NewStateStore: an explicit root computed from the
-	// process CWD in a non-isolated test is just as accidental as the CWD
-	// itself.
-	if err := ensureTestIsolatedStateDir(commonDir); err != nil {
+	if err := ensureTestIsolatedStateDir(metadata.CommonDir); err != nil {
 		return nil, err
 	}
-	return newStateStoreAt(commonDir), nil
+	return newStateStoreAt(metadata.CommonDir), nil
 }
 
 // ensureTestIsolatedStateDir fails loud when `go test` code reaches a
@@ -900,11 +893,6 @@ func NewStateStoreForWorktree(ctx context.Context, worktreeRoot string) (*StateS
 func ensureTestIsolatedStateDir(commonDir string) error {
 	if !testing.Testing() {
 		return nil
-	}
-	// getGitCommonDir can return a cwd-relative ".git"; the temp-root
-	// comparison needs the absolute location.
-	if abs, err := filepath.Abs(commonDir); err == nil {
-		commonDir = abs
 	}
 	if underTempRoot(commonDir) {
 		return nil
