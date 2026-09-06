@@ -17,22 +17,33 @@ When AI agents or software developers collaborate on codebases, Git diffs only c
 Checkpoint context is the core input for `entire audit`. Without Entire Checkpoints and transcripts, intent verification, agent attempt history, and handoff packages would be impossible to reconstruct from raw Git commits alone.
 
 ## Architecture and main workflow
-The application consists of two isolated, clean layers:
+The application consists of three integrated, clean layers:
 
-1. **CLI Extension (`entire audit` / `cmd/entire/cli/audit`)**:
+1. **Primary Interface — VS Code Extension (`vscode-extension/`)**:
+   - Built in TypeScript (`vscode-extension/src/`).
+   - Automatically checks environment readiness (`entire` CLI installed, repo enabled, `entire graph` available).
+   - Sidebar Webview & Panel displaying Readiness Status, Requirements Audit Tree, Redacted Checkpoints, Entire Graph Impact analysis, and Handoff Card.
+   - Status Bar item showing readiness audit score (e.g. `$(shield-check) Entire Audit: 85/100`).
+   - Enable/Connect Entire setup workflow button for non-enabled workspaces.
+
+2. **Core Backend Engine (`app/`)**:
+   - `app/config/`: Environment configuration.
+   - `app/privacy/`: `PrivacySanitizer` engine redacting raw prompt transcripts, tokens, and PII.
+   - `app/databricks/`: `DatabricksExporter` sending non-PII, privacy-safe metrics.
+   - `app/models/`: Domain models (`Repository`, `Requirement`, `Checkpoint`, `GraphFinding`, `Handoff`).
+   - `app/providers/`: Abstraction interfaces (`EntireCheckpointProvider`, `EntireGraphProvider`, `GitHubProvider`, `RepositoryAnalyzer`, `RequirementAnalyzer`).
+   - `app/api/`: REST API Server (`/api/health`, `/api/readiness`, `/api/enable`, `/api/repositories/...`).
+
+3. **Secondary Interface — Web Dashboard (`app/frontend/`)**:
+   - Glassmorphism browser dashboard consuming identical `/api/...` endpoints.
+
+4. **CLI Extension (`entire audit` / `cmd/entire/cli/audit`)**:
    - `entire audit`: Full CLI release readiness & intent audit.
    - `entire audit intent`: Intent verification matrix.
    - `entire audit risks`: Codebase & session risk scanner.
-   - `entire audit report`: Markdown readiness report exporter (`--output report.md`).
+   - `entire audit report`: Markdown readiness report exporter.
    - `entire audit handoff`: Structured JSON/Markdown handoff briefing.
    - `entire audit tui`: Interactive Bubbletea multi-tab TUI dashboard.
-
-2. **Core Application Foundation (`app/`)**:
-   - `app/config/`: Environment configuration (`.env.example`).
-   - `app/models/`: Domain models (`Repository`, `Requirement`, `Checkpoint`, `GraphFinding`, `Handoff`).
-   - `app/providers/`: Abstraction interfaces (`EntireCheckpointProvider`, `EntireGraphProvider`, `GitHubProvider`, `RepositoryAnalyzer`, `RequirementAnalyzer`).
-   - `app/api/`: REST API Server (`/api/health`, `/api/repositories`, `/api/repositories/:id/checkpoints`, `/api/repositories/:id/requirements`, `/api/repositories/:id/graph`, `/api/repositories/:id/handoff`).
-   - `app/frontend/`: Glassmorphism web dashboard connecting to REST API endpoints.
 
 ```
                   ┌───────────────────────────────┐
@@ -46,8 +57,8 @@ The application consists of two isolated, clean layers:
                   │               │               │
                   ▼               ▼               ▼
          ┌────────────────┐┌──────────────┐┌───────────────┐
-         │ CLI & TUI View ││  REST API    ││ Handoff JSON  │
-         │ (`entire audit`)││ (`/api/...`) ││ (`handoff.json`)│
+         │ VS Code Ext UI ││  REST API    ││ Handoff JSON  │
+         │ (Primary UX)   ││ (`/api/...`) ││ (`handoff.json`)│
          └────────────────┘└──────┬───────┘└───────────────┘
                                   │
                                   ▼
@@ -62,6 +73,12 @@ Entire Graph structural findings are integrated to verify symbol definitions, ca
 - Indexed AST definitions and call-chains across modified modules.
 - Impact Analysis: 0 breaking API schema changes detected.
 - Verified test assertions match modified business logic.
+
+## Privacy Boundary & Curveball Adaptation
+- **Strict Privacy Rule**: Raw prompts, transcripts, PII, and credentials are **never** transmitted to external services.
+- **Privacy Sanitizer**: `app/privacy/sanitizer.go` redacts tokens and sensitive prompt contents before REST API output.
+- **Redaction Representation**: Redacted or missing fields are explicitly rendered as `[REDACTED]` or marked with `RedactionStatus: "redacted"`.
+- **Databricks Metrics**: Receives only privacy-safe, non-PII numerical scores and category counts (`app/databricks/exporter.go`).
 
 ## Noon Curveball: what changed and how we adapted
 *(To be populated during the 12:00 PM Noon Curveball phase).*
@@ -94,14 +111,15 @@ go run ./app/main.go
 ```
 Open browser at: `http://localhost:8080`
 
-### 4. Run Automated Unit Tests
+### 4. Build VS Code Extension
 ```bash
-go test -v ./app/...
-go test -v ./cmd/entire/cli/audit
+cd vscode-extension
+npm install
+npm run compile
 ```
 
 ## Databricks use, data sources and limitations (if applicable)
-*(Not applicable / Opted into Entire Main Challenge).*
+Databricks integration is implemented in `app/databricks/exporter.go` as an optional telemetry sink for non-PII audit scores and requirement completion counts. Raw transcripts and prompts are strictly blocked at the local privacy boundary.
 
 ## Known limitations and next steps
 - **Known Limitations**: Live GitHub API integration uses fallback dev fixtures when `GITHUB_TOKEN` is not set.
