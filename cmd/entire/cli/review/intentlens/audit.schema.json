@@ -1,0 +1,49 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://entire.io/schemas/intentlens-audit.schema.json",
+  "title": "IntentLens Audit",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["summary", "requirements"],
+  "properties": {
+    "summary": { "type": "string", "minLength": 1 },
+    "requirements": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/requirement" }
+    }
+  },
+  "$defs": {
+    "requirement": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "requirement", "status", "confidence", "evidence", "recommendation"],
+      "properties": {
+        "id": { "type": "string", "pattern": "^R[1-9][0-9]*$" },
+        "requirement": { "type": "string", "minLength": 1 },
+        "status": { "enum": ["IMPLEMENTED", "INCOMPLETE", "UNCERTAIN"] },
+        "confidence": { "type": "number", "minimum": 0, "maximum": 1 },
+        "evidence": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/evidence" }
+        },
+        "recommendation": { "type": "string" }
+      }
+    },
+    "evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "explanation"],
+      "properties": {
+        "type": { "enum": ["checkpoint", "code", "git_diff", "graph", "test"] },
+        "explanation": { "type": "string", "minLength": 1 },
+        "file": { "type": "string", "minLength": 1 },
+        "symbol": { "type": "string", "minLength": 1 },
+        "reference": { "type": "string", "minLength": 1 },
+        "test_name": { "type": "string", "minLength": 1 },
+        "result": { "type": "string", "minLength": 1 }
+      }
+    }
+  }
+}
