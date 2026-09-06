@@ -131,13 +131,14 @@ func TestDetectSearchUsage_MixedTranscriptFindsTheInvocation(t *testing.T) {
 // fabricated data point indistinguishable in aggregate from a real miss.
 //
 // These agents are unprobeable because no ToolInvocationScanner walker exists
-// for them yet — not because one is impossible. Cursor in particular shares
-// the tool_use JSONL shape and could implement one; see the interface doc in
-// agent/tool_invocations.go for what blocks it.
+// for them yet — not because one is impossible. Cursor used to be on this list
+// and no longer is: it shares the tool_use JSONL shape, and once its
+// shell-command input key was confirmed it got a walker. See the interface doc
+// in agent/tool_invocations.go for what implementing another one takes.
 func TestDetectSearchUsage_UnprobeableAgentsReportUnsupported(t *testing.T) {
 	t.Parallel()
 
-	for _, agentType := range []types.AgentType{agent.AgentTypeCursor, agent.AgentTypePi, agent.AgentTypeCopilotCLI} {
+	for _, agentType := range []types.AgentType{agent.AgentTypePi, agent.AgentTypeCopilotCLI} {
 		t.Run(string(agentType), func(t *testing.T) {
 			t.Parallel()
 			ag, err := agent.GetByAgentType(agentType)
@@ -149,6 +150,40 @@ func TestDetectSearchUsage_UnprobeableAgentsReportUnsupported(t *testing.T) {
 				t.Errorf("detectSearchUsage(%s) = %+v, want %+v", agentType, got, want)
 			}
 		})
+	}
+}
+
+// cursorShellSearch is a Cursor-shaped assistant line: the envelope is keyed
+// "role" rather than "type", and the shell tool is Shell rather than Bash. The
+// command key is the same, which is what lets one ToolInvocation shape serve
+// both agents.
+const cursorShellSearch = `{"role":"assistant","message":{"content":[{"type":"tool_use","name":"Shell","input":{"command":"entire search \"retry backoff\" --json"}}]}}
+`
+
+// TestDetectSearchUsage_CursorReportsCommand is the end-to-end half of Cursor
+// gaining a walker: the probe must now return a measured verdict for a Cursor
+// session instead of "cannot tell". Asserting it here rather than only in the
+// cursor package is deliberate — this is the seam where a Cursor transcript
+// meets the matcher, and where an envelope-normalization regression would show
+// up as a confident, wrong `none`.
+func TestDetectSearchUsage_CursorReportsCommand(t *testing.T) {
+	t.Parallel()
+
+	ag, err := agent.GetByAgentType(agent.AgentTypeCursor)
+	if err != nil {
+		t.Fatalf("GetByAgentType(cursor) error: %v", err)
+	}
+
+	want := searchProbe{used: true, source: searchSourceCommand}
+	if got := detectSearchUsage(ag, []byte(cursorShellSearch)); got != want {
+		t.Errorf("detectSearchUsage(cursor, shell search) = %+v, want %+v", got, want)
+	}
+
+	// And the negative direction: a measured "did not search", not unsupported.
+	unrelated := `{"role":"assistant","message":{"content":[{"type":"tool_use","name":"Shell","input":{"command":"git status --short"}}]}}` + "\n"
+	wantNone := searchProbe{used: false, source: searchSourceNone}
+	if got := detectSearchUsage(ag, []byte(unrelated)); got != wantNone {
+		t.Errorf("detectSearchUsage(cursor, unrelated shell) = %+v, want %+v", got, wantNone)
 	}
 }
 
