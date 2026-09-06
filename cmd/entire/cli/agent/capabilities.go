@@ -16,11 +16,24 @@ type CapabilityDeclarer interface {
 // JSON tags match the external agent protocol schema so external.InfoResponse
 // can deserialize directly into this type.
 //
-// Not every optional interface appears here: built-in-only capabilities that
-// have no external-protocol equivalent (SessionBaseDirProvider, ModelExtractor,
-// SkillEventExtractor, TranscriptSanitizer, TranscriptFetcher) are intentionally
-// excluded — their As* helpers resolve by type assertion alone (see
-// builtinCapability), with no DeclaredCaps gate.
+// Not every optional interface appears here. These capabilities intentionally
+// have no external-protocol declaration:
+//
+//   - ContextInjector
+//   - EffectiveHookDiagnostics
+//   - HookFreshness
+//   - ModelExtractor
+//   - ModelLister
+//   - SessionBaseDirProvider
+//   - SessionEndBudgeter
+//   - SidecarImageProvider
+//   - SkillEventExtractor
+//   - SubagentSessionResolver
+//   - ToolInvocationScanner
+//   - TranscriptFetcher
+//   - TranscriptSanitizer
+//
+// Their As* helpers resolve through builtinCapability with no DeclaredCaps gate.
 type DeclaredCaps struct {
 	Hooks                  bool `json:"hooks"`
 	TranscriptAnalyzer     bool `json:"transcript_analyzer"`
@@ -98,11 +111,7 @@ func AsTranscriptPreparer(ag Agent) (TranscriptPreparer, bool) {
 // capture from a store outside the transcript, e.g. Cursor's SQLite blob store),
 // so it resolves by type assertion alone with no DeclaredCaps gate.
 func AsSidecarImageProvider(ag Agent) (SidecarImageProvider, bool) {
-	if ag == nil {
-		return nil, false
-	}
-	p, ok := ag.(SidecarImageProvider)
-	return p, ok
+	return builtinCapability[SidecarImageProvider](ag)
 }
 
 // AsTranscriptSanitizer returns the agent as TranscriptSanitizer if it implements
@@ -157,17 +166,9 @@ func AsTextGenerator(ag Agent) (TextGenerator, bool) {
 // AsStreamingTextGenerator returns the agent as StreamingTextGenerator if it both
 // implements the interface and (for CapabilityDeclarer agents) has declared the capability.
 func AsStreamingTextGenerator(ag Agent) (StreamingTextGenerator, bool) {
-	if ag == nil {
-		return nil, false
-	}
-	stg, ok := ag.(StreamingTextGenerator)
-	if !ok {
-		return nil, false
-	}
-	if cd, ok := ag.(CapabilityDeclarer); ok {
-		return stg, cd.DeclaredCapabilities().StreamingTextGenerator
-	}
-	return stg, true
+	return declaredCapability[StreamingTextGenerator](ag, func(c DeclaredCaps) bool {
+		return c.StreamingTextGenerator
+	})
 }
 
 // AsTranscriptCompactor returns the agent as TranscriptCompactor if it both
