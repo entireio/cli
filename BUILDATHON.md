@@ -45,6 +45,13 @@ The application consists of three integrated, clean layers:
    - `entire audit handoff`: Structured JSON/Markdown handoff briefing.
    - `entire audit tui`: Interactive Bubbletea multi-tab TUI dashboard.
 
+2. **Core Application Foundation (`app/`)**:
+   - `app/config/`: Environment configuration (`.env.example`).
+   - `app/models/`: Domain models (`Repository`, `Requirement`, `Checkpoint`, `GraphFinding`, `Handoff`).
+   - `app/providers/`: Abstraction interfaces (`EntireCheckpointProvider`, `EntireGraphProvider`, `GitHubProvider`, `RepositoryAnalyzer`, `RequirementAnalyzer`).
+   - `app/api/`: REST API Server (`/api/health`, `/api/repositories`, `/api/repositories/:id/checkpoints`, `/api/repositories/:id/requirements`, `/api/repositories/:id/graph`, `/api/repositories/:id/handoff`) with standardized error payloads and `slog` request logging.
+   - `app/frontend/`: Glassmorphism web dashboard shell connecting to REST API endpoints.
+
 ```
                   ┌───────────────────────────────┐
                   │    Entire Checkpoints & Graph │
@@ -101,18 +108,38 @@ Entire Graph structural findings are integrated to verify symbol definitions, ca
 
 ## Setup, run and test instructions
 
-### 1. Build the Entire CLI with Audit Capabilities
+### 1. Prerequisites
+- **Go**: Version 1.26 or higher
+- **Git**: Installed and configured
+
+### 2. Installation & Compilation
 ```bash
+# Build the Entire CLI binary with native audit capabilities
 go build -o entire.exe ./cmd/entire
 ```
 
-### 2. Run Entire Audit Commands
+### 3. Environment Configuration
+Copy `.env.example` to configure server port and optional integration tokens:
+```bash
+cp .env.example .env
+```
+
+### 4. Running the Application Server & Frontend Dashboard
+```bash
+# Start backend server (serves REST API & static Web Dashboard)
+go run ./app/main.go
+```
+- **REST API Base**: `http://localhost:8080/api/health`
+- **Web Dashboard**: `http://localhost:8080/`
+
+### 5. Running CLI & TUI Audit Tools
 ```bash
 ./entire.exe audit
 ./entire.exe audit intent
 ./entire.exe audit risks
 ./entire.exe audit report --output RELEASE_READINESS.md
 ./entire.exe audit handoff --json
+./entire.exe audit tui
 ```
 
 ### 3. Run Backend Server & Dashboard
@@ -126,11 +153,29 @@ Open browser at: `http://localhost:8080`
 cd vscode-extension
 npm install
 npm run compile
+### 6. Executing Automated Tests
+```bash
+# Run backend foundation tests
+go test -v ./app/...
+
+# Run audit engine tests
+go test -v ./cmd/entire/cli/audit
+```
+
+## API Standardized Error Format
+All REST API error responses adhere to the unified format:
+```json
+{
+  "error": {
+    "code": "REPOSITORY_NOT_FOUND",
+    "message": "Repository was not found"
+  }
+}
 ```
 
 ## Databricks use, data sources and limitations (if applicable)
 Databricks integration is implemented in `app/databricks/exporter.go` as an optional telemetry sink for non-PII audit scores and requirement completion counts. Raw transcripts and prompts are strictly blocked at the local privacy boundary.
 
 ## Known limitations and next steps
-- **Known Limitations**: Live GitHub API integration uses fallback dev fixtures when `GITHUB_TOKEN` is not set.
+- **Known Limitations**: GitHub API client uses dev fixtures when `GITHUB_TOKEN` is unconfigured.
 - **Next Steps**: Expand agent transcript sentiment analysis and add webhook notification triggers for CI/CD pipelines.
