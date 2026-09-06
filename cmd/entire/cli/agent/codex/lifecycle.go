@@ -5,10 +5,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
+	"github.com/entireio/cli/cmd/entire/cli/logging"
 )
 
 // Compile-time interface assertions.
@@ -110,16 +112,16 @@ func (c *CodexAgent) SessionEndBudget() time.Duration { return sessionEndBudget 
 
 // ParseHookEvent translates a Codex hook into a normalized lifecycle Event.
 // Returns nil if the hook has no lifecycle significance.
-func (c *CodexAgent) ParseHookEvent(_ context.Context, hookName string, stdin io.Reader) (*agent.Event, error) {
+func (c *CodexAgent) ParseHookEvent(ctx context.Context, hookName string, stdin io.Reader) (*agent.Event, error) {
 	switch hookName {
 	case HookNameSessionStart:
 		return c.parseSessionInfoEvent(stdin, agent.SessionStart)
 	case HookNameSessionEnd:
 		return c.parseSessionInfoEvent(stdin, agent.SessionEnd)
 	case HookNameUserPromptSubmit:
-		return c.parseTurnStart(stdin)
+		return c.parseTurnStart(ctx, stdin)
 	case HookNameStop:
-		return c.parseTurnEnd(stdin)
+		return c.parseTurnEnd(ctx, stdin)
 	case HookNamePreToolUse:
 		// PreToolUse has no lifecycle significance — pass through
 		return nil, nil //nolint:nilnil // nil event = no lifecycle action
@@ -151,6 +153,8 @@ func (c *CodexAgent) parseSubagentStart(stdin io.Reader) (*agent.Event, error) {
 		SessionID:    raw.SessionID,
 		SessionRef:   derefString(raw.TranscriptPath),
 		ToolUseID:    raw.AgentID,
+		TurnID:       raw.TurnID,
+		SubagentID:   raw.AgentID,
 		SubagentType: raw.AgentType,
 		Model:        raw.Model,
 		Timestamp:    time.Now(),
@@ -166,15 +170,17 @@ func (c *CodexAgent) parseSubagentStop(stdin io.Reader) (*agent.Event, error) {
 		return nil, err
 	}
 	return &agent.Event{
-		Type:                   agent.SubagentEnd,
-		SessionID:              raw.SessionID,
-		SessionRef:             derefString(raw.TranscriptPath),
-		ToolUseID:              raw.AgentID,
-		SubagentID:             raw.AgentID,
-		SubagentType:           raw.AgentType,
-		SubagentTranscriptPath: derefString(raw.AgentTranscriptPath),
-		Model:                  raw.Model,
-		Timestamp:              time.Now(),
+		Type:                    agent.SubagentEnd,
+		SessionID:               raw.SessionID,
+		SessionRef:              derefString(raw.TranscriptPath),
+		ToolUseID:               raw.AgentID,
+		TurnID:                  raw.TurnID,
+		SubagentID:              raw.AgentID,
+		ProvisionalSubagentStop: true,
+		SubagentType:            raw.AgentType,
+		SubagentTranscriptPath:  derefString(raw.AgentTranscriptPath),
+		Model:                   raw.Model,
+		Timestamp:               time.Now(),
 	}, nil
 }
 
@@ -197,10 +203,13 @@ func (c *CodexAgent) parseSessionInfoEvent(stdin io.Reader, eventType agent.Even
 	}, nil
 }
 
-func (c *CodexAgent) parseTurnStart(stdin io.Reader) (*agent.Event, error) {
+func (c *CodexAgent) parseTurnStart(ctx context.Context, stdin io.Reader) (*agent.Event, error) {
 	raw, err := agent.ReadAndParseHookInput[userPromptSubmitRaw](stdin)
 	if err != nil {
 		return nil, err
+	}
+	if !isRootTurnRollout(ctx, derefString(raw.TranscriptPath)) {
+		return nil, nil //nolint:nilnil // only confirmed child rollouts are skipped
 	}
 	return &agent.Event{
 		Type:       agent.TurnStart,
@@ -268,10 +277,13 @@ func isApplyPatchTool(name string) bool {
 	}
 }
 
-func (c *CodexAgent) parseTurnEnd(stdin io.Reader) (*agent.Event, error) {
+func (c *CodexAgent) parseTurnEnd(ctx context.Context, stdin io.Reader) (*agent.Event, error) {
 	raw, err := agent.ReadAndParseHookInput[stopRaw](stdin)
 	if err != nil {
 		return nil, err
+	}
+	if !isRootTurnRollout(ctx, derefString(raw.TranscriptPath)) {
+		return nil, nil //nolint:nilnil // only confirmed child rollouts are skipped
 	}
 	return &agent.Event{
 		Type:       agent.TurnEnd,
@@ -280,4 +292,22 @@ func (c *CodexAgent) parseTurnEnd(stdin io.Reader) (*agent.Event, error) {
 		Model:      raw.Model,
 		Timestamp:  time.Now(),
 	}, nil
+}
+
+func isRootTurnRollout(ctx context.Context, path string) bool {
+	classification := classifyRolloutDetailed(path)
+	switch classification.Classification {
+	case rolloutRoot:
+		return true
+	case rolloutChild:
+		logging.Debug(ctx, "codex: skipped root lifecycle mutation for child rollout", slog.String("path", path))
+		return false
+	case rolloutUnknown:
+		logging.Warn(ctx, "codex: preserved root lifecycle event because rollout ownership is unverified",
+			slog.String("category", string(classification.Issue)),
+			slog.String("detail", classification.Detail),
+			slog.String("path", path))
+		return true
+	}
+	return false
 }

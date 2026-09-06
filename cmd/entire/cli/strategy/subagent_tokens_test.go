@@ -51,6 +51,50 @@ func TestAccumulateTokenUsage_SubagentTokensReplacedNotSummed(t *testing.T) {
 	require.Equal(t, 250, existing.SubagentTokens.OutputTokens, "SubagentTokens must be replaced, not summed")
 }
 
+func TestAccumulateTokenUsage_ExplicitIncompleteClearsPriorChildTotal(t *testing.T) {
+	t.Parallel()
+	complete := true
+	incomplete := false
+	existing := &agent.TokenUsage{InputTokens: 3, SubagentTokens: &agent.TokenUsage{InputTokens: 9}, SubagentTokensComplete: &complete}
+	got := accumulateTokenUsage(existing, &agent.TokenUsage{OutputTokens: 4, SubagentTokensComplete: &incomplete})
+	require.Nil(t, got.SubagentTokens)
+	require.NotNil(t, got.SubagentTokensComplete)
+	require.False(t, *got.SubagentTokensComplete)
+	require.Equal(t, 3, got.InputTokens)
+	require.Equal(t, 4, got.OutputTokens)
+}
+
+func TestAccumulateTokenUsage_ExplicitEmptyReplacesPriorChildTotal(t *testing.T) {
+	t.Parallel()
+	complete := true
+	got := accumulateTokenUsage(&agent.TokenUsage{SubagentTokens: &agent.TokenUsage{InputTokens: 9}}, &agent.TokenUsage{SubagentTokensComplete: &complete})
+	require.Nil(t, got.SubagentTokens)
+	require.NotNil(t, got.SubagentTokensComplete)
+	require.True(t, *got.SubagentTokensComplete)
+}
+
+func TestInvalidateStaleSubagentSnapshot_ZeroVersion(t *testing.T) {
+	t.Parallel()
+	complete := true
+	zero := uint64(0)
+	step := StepContext{
+		SubagentLedgerVersion: &zero,
+		TokenUsage: &agent.TokenUsage{
+			InputTokens:            11,
+			SubagentTokens:         &agent.TokenUsage{InputTokens: 7},
+			SubagentTokensComplete: &complete,
+		},
+	}
+
+	invalidateStaleSubagentSnapshot(&step, &SessionState{SubagentLedgerVersion: 1})
+
+	require.NotNil(t, step.TokenUsage)
+	require.Equal(t, 11, step.TokenUsage.InputTokens, "main-agent evidence must survive invalidation")
+	require.Nil(t, step.TokenUsage.SubagentTokens)
+	require.NotNil(t, step.TokenUsage.SubagentTokensComplete)
+	require.False(t, *step.TokenUsage.SubagentTokensComplete)
+}
+
 // TestSaveStep_SubagentTokensNotDoubleCountedAcrossCheckpoints exercises the
 // real SaveStep path for both Claude Code and Factory AI Droid (the two
 // agents whose CalculateTotalTokenUsage implementations discover subagent IDs

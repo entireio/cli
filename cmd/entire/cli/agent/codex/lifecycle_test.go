@@ -2,15 +2,25 @@ package codex
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
+	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/stretchr/testify/require"
 )
 
 const testRolloutPath = "/Users/test/.codex/rollouts/01/01/rollout-20260324-550e8400.jsonl"
+
+func writeRootRollout(t *testing.T) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "rollout.jsonl")
+	require.NoError(t, os.WriteFile(path, []byte(`{"type":"session_meta","payload":{"thread_source":"user"}}`+"\n"), 0o600))
+	return path
+}
 
 // SessionStart and SessionEnd share one parser, so they are covered together.
 // SessionEnd (Codex 0.146+) is what finally lets a quit Codex session be
@@ -122,10 +132,11 @@ func TestCodexAgent_SessionEndBudgetFitsConfiguredTimeout(t *testing.T) {
 func TestParseHookEvent_UserPromptSubmit(t *testing.T) {
 	t.Parallel()
 	ag := &CodexAgent{}
+	rolloutPath := writeRootRollout(t)
 	input := `{
 		"session_id": "test-uuid",
 		"turn_id": "turn-123",
-		"transcript_path": "/tmp/rollout.jsonl",
+		"transcript_path": "` + rolloutPath + `",
 		"cwd": "/tmp/testrepo",
 		"hook_event_name": "UserPromptSubmit",
 		"model": "gpt-4.1",
@@ -138,7 +149,7 @@ func TestParseHookEvent_UserPromptSubmit(t *testing.T) {
 	require.NotNil(t, event)
 	require.Equal(t, agent.TurnStart, event.Type)
 	require.Equal(t, "test-uuid", event.SessionID)
-	require.Equal(t, "/tmp/rollout.jsonl", event.SessionRef)
+	require.Equal(t, rolloutPath, event.SessionRef)
 	require.Equal(t, "Create a hello.txt file", event.Prompt)
 	require.Equal(t, "gpt-4.1", event.Model)
 }
@@ -146,10 +157,11 @@ func TestParseHookEvent_UserPromptSubmit(t *testing.T) {
 func TestParseHookEvent_Stop(t *testing.T) {
 	t.Parallel()
 	ag := &CodexAgent{}
+	rolloutPath := writeRootRollout(t)
 	input := `{
 		"session_id": "test-uuid",
 		"turn_id": "turn-123",
-		"transcript_path": "/tmp/rollout.jsonl",
+		"transcript_path": "` + rolloutPath + `",
 		"cwd": "/tmp/testrepo",
 		"hook_event_name": "Stop",
 		"model": "gpt-4.1",
@@ -163,8 +175,106 @@ func TestParseHookEvent_Stop(t *testing.T) {
 	require.NotNil(t, event)
 	require.Equal(t, agent.TurnEnd, event.Type)
 	require.Equal(t, "test-uuid", event.SessionID)
-	require.Equal(t, "/tmp/rollout.jsonl", event.SessionRef)
+	require.Equal(t, rolloutPath, event.SessionRef)
 	require.Equal(t, "gpt-4.1", event.Model)
+}
+
+func TestParseHookEvent_TurnHooksIgnoreChildRollout(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "rollout.jsonl")
+	require.NoError(t, os.WriteFile(path, []byte(`{"type":"session_meta","payload":{"thread_source":"subagent"}}`+"\n"), 0o600))
+	input := `{"session_id":"root-session-1","turn_id":"turn-1","transcript_path":"` + path + `","model":"gpt-5","prompt":"do work","stop_hook_active":true}`
+
+	for _, hookName := range []string{HookNameUserPromptSubmit, HookNameStop} {
+		event, err := (&CodexAgent{}).ParseHookEvent(context.Background(), hookName, strings.NewReader(input))
+		require.NoError(t, err)
+		require.Nil(t, event)
+	}
+}
+
+func TestParseHookEvent_UnknownTurnRolloutPreservesRootLifecycle(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		path     func(*testing.T) string
+		category rolloutClassificationIssue
+		detail   string
+	}{
+		{
+			name:     "null transcript path",
+			path:     func(*testing.T) string { return "" },
+			category: rolloutIssueNullPath,
+		},
+		{
+			name: "unreadable transcript",
+			path: func(t *testing.T) string {
+				return filepath.Join(t.TempDir(), "missing.jsonl")
+			},
+			category: rolloutIssueUnreadable,
+			detail:   "open",
+		},
+		{
+			name: "malformed metadata",
+			path: func(t *testing.T) string {
+				path := filepath.Join(t.TempDir(), "rollout.jsonl")
+				require.NoError(t, os.WriteFile(path, []byte(`{"type":"session_meta","payload":`), 0o600))
+				return path
+			},
+			category: rolloutIssueMalformedMetadata,
+			detail:   "first_record_json",
+		},
+		{
+			name: "future source",
+			path: func(t *testing.T) string {
+				path := filepath.Join(t.TempDir(), "rollout.jsonl")
+				require.NoError(t, os.WriteFile(path, []byte(`{"type":"session_meta","payload":{"source":"future-source"}}`+"\n"), 0o600))
+				return path
+			},
+			category: rolloutIssueUnclassifiedSource,
+			detail:   "future-source",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			rolloutPath := tt.path(t)
+			pathJSON := "null"
+			if rolloutPath != "" {
+				pathJSON = `"` + rolloutPath + `"`
+			}
+			logDir := t.TempDir()
+			logger, err := logging.New(logging.Config{Dir: logDir})
+			require.NoError(t, err)
+			ctx := logging.WithLogger(context.Background(), logger)
+			input := `{"session_id":"root-session-1","turn_id":"turn-1","transcript_path":` + pathJSON + `,"model":"gpt-5","prompt":"do work"}`
+
+			for _, hook := range []struct {
+				name string
+				want agent.EventType
+			}{
+				{HookNameUserPromptSubmit, agent.TurnStart},
+				{HookNameStop, agent.TurnEnd},
+			} {
+				event, err := (&CodexAgent{}).ParseHookEvent(ctx, hook.name, strings.NewReader(input))
+				require.NoError(t, err)
+				require.NotNil(t, event)
+				require.Equal(t, hook.want, event.Type)
+			}
+			require.NoError(t, logger.Close())
+
+			logData, err := os.ReadFile(filepath.Join(logDir, "entire.log"))
+			require.NoError(t, err)
+			logText := string(logData)
+			require.Contains(t, logText, "codex: preserved root lifecycle event because rollout ownership is unverified")
+			require.Contains(t, logText, string(tt.category))
+			require.Contains(t, logText, tt.detail)
+			if rolloutPath != "" {
+				require.Contains(t, logText, rolloutPath)
+			}
+		})
+	}
 }
 
 func TestParseHookEvent_PreToolUse_ReturnsNil(t *testing.T) {
@@ -348,11 +458,14 @@ func TestParseHookEvent_SubagentStart(t *testing.T) {
 	require.NotNil(t, ev)
 	require.Equal(t, agent.SubagentStart, ev.Type)
 	require.Equal(t, "root-session-1", ev.SessionID, "the shared root session id, not the child thread")
+	require.Equal(t, "turn-3", ev.TurnID)
+	require.Equal(t, testCodexAgentID, ev.SubagentID)
 	// Codex sends no tool_use_id; agent_id is the only value correlating start with
 	// stop, and Entire keys pre-task state on ToolUseID.
 	require.Equal(t, testCodexAgentID, ev.ToolUseID)
 	require.Equal(t, "reviewer", ev.SubagentType)
 	require.Equal(t, "/rollouts/root-session-1.jsonl", ev.SessionRef, "the parent rollout")
+	require.False(t, ev.Final)
 }
 
 // TestParseHookEvent_SubagentStop covers the two transcripts SubagentStop carries:
@@ -380,11 +493,14 @@ func TestParseHookEvent_SubagentStop(t *testing.T) {
 	require.NotNil(t, ev)
 	require.Equal(t, agent.SubagentEnd, ev.Type)
 	require.Equal(t, "root-session-1", ev.SessionID, "the shared root session id")
+	require.Equal(t, "turn-3", ev.TurnID)
 	require.Equal(t, testCodexAgentID, ev.SubagentID)
 	require.Equal(t, testCodexAgentID, ev.ToolUseID, "agent_id doubles as the correlation key")
 	require.Equal(t, "/rollouts/root-session-1.jsonl", ev.SessionRef, "the PARENT rollout")
 	require.Equal(t, "/rollouts/"+testCodexAgentID+".jsonl", ev.SubagentTranscriptPath,
 		"the subagent's own rollout")
+	require.True(t, ev.ProvisionalSubagentStop)
+	require.False(t, ev.Final)
 }
 
 // TestParseHookEvent_SubagentStop_NullTranscripts covers the nullable fields: Codex

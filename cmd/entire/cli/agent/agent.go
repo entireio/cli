@@ -304,6 +304,43 @@ type TokenCalculator interface {
 	CalculateTokenUsage(transcriptData []byte, fromOffset int) (*TokenUsage, error)
 }
 
+// SubagentReference is the authoritative record of one spawned agent supplied
+// by the session ledger. Transcript paths are hints only: implementations must
+// verify that a path's native metadata identifies this exact AgentID.
+type SubagentReference struct {
+	AgentID                string
+	DeclaredTranscriptPath string
+	ResolvedTranscriptPath string
+}
+
+// SubagentAnalysis is the exact evidence available for one supplied subagent.
+// TokenUsage is nil when its cumulative native usage cannot be read exactly.
+type SubagentAnalysis struct {
+	AgentID         string
+	ResolvedPath    string
+	ModifiedFiles   []string
+	TokenUsage      *TokenUsage
+	TerminalTurnIDs []string
+}
+
+// InventoryExtraction contains parent evidence plus analysis of the supplied
+// authoritative child inventory. TokenUsage records parent usage and, when
+// complete, its exact cumulative child aggregate in SubagentTokens.
+type InventoryExtraction struct {
+	ModifiedFiles []string
+	TokenUsage    *TokenUsage
+	Children      []SubagentAnalysis
+}
+
+// InventoryAwareExtractor analyzes only an already-authoritative inventory of
+// children. It is intentionally built-in only: external agents have no
+// equivalent protocol capability yet.
+type InventoryAwareExtractor interface {
+	Agent
+
+	ExtractWithSubagentInventory(ctx context.Context, parent []byte, fromOffset int, refs []SubagentReference) (InventoryExtraction, error)
+}
+
 // ModelExtractor extracts the LLM model identifier from a transcript for agents
 // that do not report the model through lifecycle hooks. Pi, for example, records
 // the model on every assistant message (message.model) but its hook events carry

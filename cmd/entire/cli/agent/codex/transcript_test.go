@@ -32,6 +32,74 @@ func writeSampleRollout(t *testing.T) string {
 	return path
 }
 
+func TestClassifyRollout(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		data      string
+		want      rolloutClassification
+		wantIssue rolloutClassificationIssue
+	}{
+		{
+			name: "root thread source",
+			data: `{"type":"session_meta","payload":{"thread_source":"user"}}` + "\n",
+			want: rolloutRoot,
+		},
+		{
+			name: "root legacy string source",
+			data: `{"type":"session_meta","payload":{"source":"exec"}}` + "\n",
+			want: rolloutRoot,
+		},
+		{
+			name: "child thread source",
+			data: `{"type":"session_meta","payload":{"thread_source":"subagent"}}` + "\n",
+			want: rolloutChild,
+		},
+		{
+			name: "child legacy structured source",
+			data: `{"type":"session_meta","payload":{"source":{"subagent":{"thread_spawn":{"parent_thread_id":"root-thread"}}}}}` + "\n",
+			want: rolloutChild,
+		},
+		{
+			name:      "missing session metadata",
+			data:      `{"type":"response_item","payload":{}}` + "\n",
+			want:      rolloutUnknown,
+			wantIssue: rolloutIssueMalformedMetadata,
+		},
+		{
+			name:      "malformed JSON",
+			data:      `{"type":"session_meta","payload":` + "\n",
+			want:      rolloutUnknown,
+			wantIssue: rolloutIssueMalformedMetadata,
+		},
+		{
+			name:      "unrecognized source",
+			data:      `{"type":"session_meta","payload":{"source":"other"}}` + "\n",
+			want:      rolloutUnknown,
+			wantIssue: rolloutIssueUnclassifiedSource,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			path := filepath.Join(t.TempDir(), "rollout.jsonl")
+			require.NoError(t, os.WriteFile(path, []byte(tt.data), 0o600))
+			got := classifyRolloutDetailed(path)
+			require.Equal(t, tt.want, got.Classification)
+			require.Equal(t, tt.wantIssue, got.Issue)
+		})
+	}
+
+	t.Run("missing path", func(t *testing.T) {
+		t.Parallel()
+		got := classifyRolloutDetailed(filepath.Join(t.TempDir(), "missing.jsonl"))
+		require.Equal(t, rolloutUnknown, got.Classification)
+		require.Equal(t, rolloutIssueUnreadable, got.Issue)
+	})
+}
+
 func TestGetTranscriptPosition(t *testing.T) {
 	t.Parallel()
 	ag := &CodexAgent{}

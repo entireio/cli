@@ -134,6 +134,174 @@ func (m *mockAnalyzerAgent) ExtractModifiedFilesFromOffset(_ string, _ int) ([]s
 	return m.analyzerFiles, 0, nil
 }
 
+type mockInventoryAgent struct {
+	*mockLifecycleAgent
+
+	extraction   agent.InventoryExtraction
+	beforeReturn func()
+}
+
+var _ agent.InventoryAwareExtractor = (*mockInventoryAgent)(nil)
+
+func (m *mockInventoryAgent) ExtractWithSubagentInventory(_ context.Context, _ []byte, _ int, _ []agent.SubagentReference) (agent.InventoryExtraction, error) {
+	if m.beforeReturn != nil {
+		m.beforeReturn()
+	}
+	return m.extraction, nil
+}
+
+func TestRefreshCodexInventory_MultiTurnChildRefreshesCompletedTaskRecord(t *testing.T) {
+	// NOT parallel: setupStopTestRepo changes the process working directory.
+	setupStopTestRepo(t)
+	ctx := context.Background()
+	const (
+		sessionID = "codex-multi-turn-child"
+		agentID   = "child-1"
+	)
+	repoRoot, err := os.Getwd()
+	require.NoError(t, err)
+	completedAt := time.Now().UTC().Truncate(time.Microsecond)
+	complete := true
+	require.NoError(t, strategy.SaveSessionState(ctx, &strategy.SessionState{
+		SessionID:                 sessionID,
+		WorktreePath:              repoRoot,
+		StartedAt:                 time.Now(),
+		Phase:                     session.PhaseActive,
+		SubagentInventoryComplete: &complete,
+		SubagentLedgerVersion:     2,
+		SubagentInventory: []session.SubagentInventoryEntry{{
+			AgentID:          agentID,
+			ObservedTurnIDs:  []string{"turn-1", "turn-2"},
+			FinalizedTurnIDs: []string{"turn-1"},
+		}},
+		TaskRecords: []session.TaskRecord{{
+			ToolUseID:   agentID,
+			AgentID:     agentID,
+			StartedAt:   completedAt.Add(-time.Minute),
+			CompletedAt: completedAt,
+			Files:       []string{"first.go"},
+			TokenUsage:  &agent.TokenUsage{InputTokens: 10},
+		}},
+		FilesTouched: []string{"first.go"},
+	}))
+
+	ag := &mockInventoryAgent{
+		mockLifecycleAgent: newMockAgent(),
+		extraction: agent.InventoryExtraction{Children: []agent.SubagentAnalysis{{
+			AgentID:         agentID,
+			ResolvedPath:    "/tmp/child-1.jsonl",
+			ModifiedFiles:   []string{filepath.Join(repoRoot, "first.go"), filepath.Join(repoRoot, "second.go")},
+			TokenUsage:      &agent.TokenUsage{InputTokens: 25},
+			TerminalTurnIDs: []string{"turn-2"},
+		}}},
+	}
+
+	_, version := refreshCodexInventory(ctx, ag, sessionID, nil, 0)
+	require.NotNil(t, version)
+	require.Equal(t, uint64(2), *version)
+
+	state, err := strategy.LoadSessionState(ctx, sessionID)
+	require.NoError(t, err)
+	record := state.FindTaskRecord(agentID)
+	require.NotNil(t, record)
+	assert.Equal(t, completedAt, record.CompletedAt, "a later terminal turn updates evidence without completing the task twice")
+	assert.Equal(t, []string{"first.go", "second.go"}, record.Files)
+	require.NotNil(t, record.TokenUsage)
+	assert.Equal(t, 25, record.TokenUsage.InputTokens)
+	assert.Equal(t, "/tmp/child-1.jsonl", record.DeclaredTranscriptPath)
+	assert.ElementsMatch(t, []string{"first.go", "second.go"}, state.FilesTouched)
+	assert.Contains(t, state.FindSubagentInventory(agentID).FinalizedTurnIDs, "turn-2")
+}
+
+func TestFinalizeCodexObservedAtSessionEnd_MultiTurnChildClearsStaleEvidence(t *testing.T) {
+	// NOT parallel: setupStopTestRepo changes the process working directory.
+	setupStopTestRepo(t)
+	ctx := context.Background()
+	const (
+		sessionID = "codex-session-end-multi-turn-child"
+		agentID   = "child-1"
+	)
+	completedAt := time.Now().UTC().Truncate(time.Microsecond)
+	require.NoError(t, strategy.SaveSessionState(ctx, &strategy.SessionState{
+		SessionID: sessionID,
+		StartedAt: time.Now(),
+		Phase:     session.PhaseActive,
+		SubagentInventory: []session.SubagentInventoryEntry{{
+			AgentID:                agentID,
+			ResolvedTranscriptPath: "/tmp/verified-child-1.jsonl",
+			ObservedTurnIDs:        []string{"turn-1", "turn-2"},
+			FinalizedTurnIDs:       []string{"turn-1"},
+		}},
+		TaskRecords: []session.TaskRecord{{
+			ToolUseID:   agentID,
+			AgentID:     agentID,
+			StartedAt:   completedAt.Add(-time.Minute),
+			CompletedAt: completedAt,
+			Files:       []string{"first.go"},
+			TokenUsage:  &agent.TokenUsage{InputTokens: 10},
+		}},
+	}))
+
+	finalizeCodexObservedAtSessionEnd(ctx, sessionID)
+
+	state, err := strategy.LoadSessionState(ctx, sessionID)
+	require.NoError(t, err)
+	record := state.FindTaskRecord(agentID)
+	require.NotNil(t, record)
+	assert.Equal(t, completedAt, record.CompletedAt, "force-closing a later turn must not complete the task twice")
+	assert.Empty(t, record.Files, "files from an earlier turn are not exact evidence for an unresolved later turn")
+	assert.Nil(t, record.TokenUsage, "tokens from an earlier turn are not exact evidence for an unresolved later turn")
+	assert.Equal(t, "/tmp/verified-child-1.jsonl", record.DeclaredTranscriptPath,
+		"force-closing must retain the inventory's exact-ID-verified rollout path for condensation")
+	assert.Contains(t, state.FindSubagentInventory(agentID).FinalizedTurnIDs, "turn-2")
+}
+
+func TestRefreshCodexInventory_UsesCurrentCompletenessWhenPersistingUsage(t *testing.T) {
+	// NOT parallel: setupStopTestRepo changes the process working directory.
+	setupStopTestRepo(t)
+	ctx := context.Background()
+	const sessionID = "codex-completeness-race"
+	complete := true
+	require.NoError(t, strategy.SaveSessionState(ctx, &strategy.SessionState{
+		SessionID:                 sessionID,
+		StartedAt:                 time.Now(),
+		Phase:                     session.PhaseActive,
+		SubagentInventoryComplete: &complete,
+		SubagentLedgerVersion:     2,
+	}))
+
+	extractedComplete := true
+	ag := &mockInventoryAgent{
+		mockLifecycleAgent: newMockAgent(),
+		extraction: agent.InventoryExtraction{TokenUsage: &agent.TokenUsage{
+			SubagentTokens:         &agent.TokenUsage{InputTokens: 25},
+			SubagentTokensComplete: &extractedComplete,
+		}},
+		beforeReturn: func() {
+			require.NoError(t, strategy.MutateSessionState(ctx, sessionID, func(state *strategy.SessionState) error {
+				incomplete := false
+				state.SubagentInventoryComplete = &incomplete
+				return nil
+			}))
+		},
+	}
+
+	usage, version := refreshCodexInventory(ctx, ag, sessionID, nil, 0)
+	require.NotNil(t, version)
+	assert.Equal(t, uint64(2), *version)
+	require.NotNil(t, usage)
+	require.NotNil(t, usage.SubagentTokensComplete)
+	assert.False(t, *usage.SubagentTokensComplete)
+	assert.Nil(t, usage.SubagentTokens)
+
+	state, err := strategy.LoadSessionState(ctx, sessionID)
+	require.NoError(t, err)
+	require.NotNil(t, state.TokenUsage)
+	require.NotNil(t, state.TokenUsage.SubagentTokensComplete)
+	assert.False(t, *state.TokenUsage.SubagentTokensComplete)
+	assert.Nil(t, state.TokenUsage.SubagentTokens)
+}
+
 // --- DispatchLifecycleEvent tests ---
 
 func TestDispatchLifecycleEvent_NilAgent(t *testing.T) {

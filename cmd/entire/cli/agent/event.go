@@ -108,8 +108,15 @@ type Event struct {
 	// ToolUseID identifies the tool invocation (for SubagentStart/SubagentEnd events).
 	ToolUseID string
 
+	// TurnID identifies the agent turn that produced the event.
+	TurnID string
+
 	// SubagentID identifies the subagent instance (for SubagentEnd events).
 	SubagentID string
+
+	// ProvisionalSubagentStop is true when a subagent-stop event may arrive
+	// before the root rollout has reached its final state.
+	ProvisionalSubagentStop bool
 
 	// Final is true only for events that represent true completion of a
 	// subagent (Claude Code's SubagentStop), never for the launch-time
