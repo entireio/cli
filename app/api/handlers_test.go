@@ -1,4 +1,4 @@
-package api_test
+package api
 
 import (
 	"encoding/json"
@@ -6,12 +6,11 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/entireio/cli/app/api"
 	"github.com/entireio/cli/app/models"
 )
 
 func TestHealthHandler(t *testing.T) {
-	handler := api.NewAPIHandler(nil)
+	handler := NewAPIHandler(nil)
 	req := httptest.NewRequest("GET", "/api/health", nil)
 	w := httptest.NewRecorder()
 
@@ -23,7 +22,7 @@ func TestHealthHandler(t *testing.T) {
 }
 
 func TestCommitsHandler_List(t *testing.T) {
-	handler := api.NewAPIHandler(nil)
+	handler := NewAPIHandler(nil)
 	req := httptest.NewRequest("GET", "/api/repositories/repo-cli-btw/commits", nil)
 	w := httptest.NewRecorder()
 
@@ -44,7 +43,7 @@ func TestCommitsHandler_List(t *testing.T) {
 }
 
 func TestCommitsHandler_Context_Available(t *testing.T) {
-	handler := api.NewAPIHandler(nil)
+	handler := NewAPIHandler(nil)
 	req := httptest.NewRequest("GET", "/api/repositories/repo-cli-btw/commits/3dbdf8b83c39/context", nil)
 	w := httptest.NewRecorder()
 
@@ -69,7 +68,7 @@ func TestCommitsHandler_Context_Available(t *testing.T) {
 }
 
 func TestCommitsHandler_Context_Unavailable(t *testing.T) {
-	handler := api.NewAPIHandler(nil)
+	handler := NewAPIHandler(nil)
 	req := httptest.NewRequest("GET", "/api/repositories/repo-cli-btw/commits/a1b2c3d4e5f6/context", nil)
 	w := httptest.NewRecorder()
 
@@ -94,6 +93,9 @@ func TestCommitsHandler_Context_Unavailable(t *testing.T) {
 
 	if devCtx.MissingContextReason == "" {
 		t.Errorf("Expected explicit missing context reason")
+	}
+}
+
 func TestRepositoriesHandler(t *testing.T) {
 	handler := NewAPIHandler(nil)
 

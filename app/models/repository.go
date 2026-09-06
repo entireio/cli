@@ -42,14 +42,16 @@ type Repository struct {
 
 // RepositoryArchitecture holds the detected architectural summary of a repository.
 type RepositoryArchitecture struct {
-	Directories    []string `json:"directories"`
-	ImportantFiles []string `json:"important_files"`
-	EntryPoints    []string `json:"entry_points"`
-	Components     []string `json:"components"`
-	APIRoutes      []string `json:"api_routes"`
-	TechStack      []string `json:"tech_stack"`
-	ConfigFiles    []string `json:"config_files"`
-	TestStructure  []string `json:"test_structure"`
-	InferredInfo   []string `json:"inferred_info"` // Clearly labeled inferred information
-	UnknownInfo    []string `json:"unknown_info"`  // Clearly labeled unknown information
+	Summary        string    `json:"summary"`
+	Directories    []string  `json:"directories"`
+	ImportantFiles []string  `json:"important_files"`
+	EntryPoints    []string  `json:"entry_points"`
+	Components     []string  `json:"components"`
+	APIRoutes      []string  `json:"api_routes"`
+	TechStack      []string  `json:"tech_stack"`
+	ConfigFiles    []string  `json:"config_files"`
+	TestStructure  []string  `json:"test_structure"`
+	InferredInfo   []string  `json:"inferred_info"` // Clearly labeled inferred information
+	UnknownInfo    []string  `json:"unknown_info"`  // Clearly labeled unknown information
+	LastAnalyzedAt time.Time `json:"last_analyzed_at"`
 }
