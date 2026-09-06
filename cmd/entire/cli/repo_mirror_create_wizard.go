@@ -32,7 +32,6 @@ const mirrorCreateConcurrency = 8
 const (
 	mirrorStatusReady      = "ready"      // clone landed, ready to use
 	mirrorStatusRegistered = "registered" // placement created, clone in progress (--no-wait)
-	mirrorStatusEmpty      = "empty"      // upstream has no commits, nothing to clone
 	mirrorStatusSuspended  = "suspended"  // placement exists but the cluster won't serve it
 	mirrorStatusFailed     = "failed"     // initial clone reached the terminal failed status
 	mirrorStatusTimedOut   = "timed out"  // clone didn't finish within --wait-timeout
@@ -553,8 +552,8 @@ func createMirrors(ctx context.Context, errW io.Writer, targets []mirrorTarget, 
 	return results
 }
 
-// createOneMirror registers a single (repo, region) mirror and, unless noWait
-// or the upstream is empty, waits for its initial clone. It never returns an
+// createOneMirror registers a single (repo, region) mirror and, unless noWait,
+// waits for its initial clone. It never returns an
 // error: every outcome is folded into the mirrorResult so a single failure
 // can't sink the batch. report (may be nil) is called as the mirror moves
 // through its phases so the caller can render live progress; the final call has
@@ -578,21 +577,8 @@ func createOneMirror(ctx context.Context, t mirrorTarget, c *coreapi.Client, cli
 	}
 	res.cloneURL = outcome.created.MirrorUrl
 
-	if outcome.created.Suspended {
-		// An admin suspended this existing placement, so it won't be served.
-		// Surface it as a distinct status and set an error so the batch exits
-		// non-zero, matching the one-shot: a suspended mirror isn't a success.
-		res.status, res.err = mirrorStatusSuspended, errors.New("suspended by an admin; won't be usable")
-		report(mirrorStatusSuspended, true, false)
-		return res
-	}
-
 	if !outcome.polled {
-		if outcome.created.Empty { //nolint:staticcheck // CreatedMirror.Empty deprecated by /repos spec bump; create-flow cleanup tracked separately
-			res.status = mirrorStatusEmpty
-		} else {
-			res.status = mirrorStatusRegistered
-		}
+		res.status = mirrorStatusRegistered
 		report(res.status, true, true)
 		return res
 	}
