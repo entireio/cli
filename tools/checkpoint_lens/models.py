@@ -16,6 +16,7 @@ from typing import Any
 # rule: label synthetic or derived content).
 INTENT_FROM_SUMMARY = "checkpoint_summary"
 INTENT_FROM_FIRST_PROMPT = "first_user_prompt"
+INTENT_FROM_TRANSCRIPT = "first_user_message_in_transcript"
 INTENT_UNAVAILABLE = "unavailable"
 
 

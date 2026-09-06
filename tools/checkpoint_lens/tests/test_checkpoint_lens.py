@@ -367,5 +367,33 @@ class TestReaderAgainstThisRepo(unittest.TestCase):
         self.assertTrue(commit_files.issubset(set(rec.files_touched)))
 
 
+class TestIntentProvenanceIsComplete(unittest.TestCase):
+    """Guard for a real bug: reader.py grew a third intent source and
+    report.intent_provenance did not know it, so a successfully recovered
+    intent rendered as 'unavailable' - the opposite of the truth."""
+
+    def test_every_intent_source_has_provenance_text(self):
+        from tools.checkpoint_lens import models
+        from tools.checkpoint_lens.report import intent_provenance
+
+        sources = [
+            v for k, v in vars(models).items()
+            if k.startswith("INTENT_") and isinstance(v, str)
+        ]
+        self.assertGreaterEqual(len(sources), 3)
+        for src in sources:
+            text = intent_provenance(src)
+            if src == models.INTENT_UNAVAILABLE:
+                continue
+            self.assertNotIn(
+                "unavailable", text.lower(),
+                "intent source %r renders as unavailable" % src,
+            )
+
+    def test_unknown_source_still_degrades_safely(self):
+        from tools.checkpoint_lens.report import intent_provenance
+        self.assertIn("unavailable", intent_provenance("something_new").lower())
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

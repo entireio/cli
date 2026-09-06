@@ -24,6 +24,7 @@ from typing import Any, Iterable
 from .models import (
     INTENT_FROM_FIRST_PROMPT,
     INTENT_FROM_SUMMARY,
+    INTENT_FROM_TRANSCRIPT,
     INTENT_UNAVAILABLE,
     Attribution,
     CheckpointRecord,
@@ -242,6 +243,13 @@ class CheckpointReader:
         # fall back to the first substantive user prompt. Which source was used
         # is recorded and always rendered, so a reader can tell recovered
         # context from derived context.
+        transcript = self._blob(
+            tree, entry.get("compact_transcript") or ("/%d/transcript.jsonl" % idx)
+        )
+        if transcript:
+            sess.transcript_available = True
+            sess.decisions = extract_decisions(transcript)
+
         summary = meta.get("summary")
         summary = summary if isinstance(summary, dict) else {}
         if summary.get("intent"):
@@ -250,15 +258,20 @@ class CheckpointReader:
         elif sess.prompts:
             sess.intent = self._pick_intent(sess.prompts)
             sess.intent_source = INTENT_FROM_FIRST_PROMPT
+        elif transcript:
+            # Not every checkpoint carries a prompt.txt - observed on real data,
+            # where the root manifest records "prompt": "" and the file is
+            # absent from the tree. The transcript still holds the user's own
+            # words, so recover intent from the first user message rather than
+            # reporting no intent at all.
+            recovered = first_user_message(transcript)
+            if recovered:
+                sess.intent = recovered
+                sess.intent_source = INTENT_FROM_TRANSCRIPT
+            else:
+                sess.intent_source = INTENT_UNAVAILABLE
         else:
             sess.intent_source = INTENT_UNAVAILABLE
-
-        transcript = self._blob(
-            tree, entry.get("compact_transcript") or ("/%d/transcript.jsonl" % idx)
-        )
-        if transcript:
-            sess.transcript_available = True
-            sess.decisions = extract_decisions(transcript)
         return sess
 
     @staticmethod
@@ -290,6 +303,27 @@ def _iter_text(transcript: str) -> Iterable[tuple[str, str]]:
             for item in content:
                 if isinstance(item, dict) and isinstance(item.get("text"), str):
                     yield speaker, item["text"]
+
+
+def first_user_message(transcript: str, min_len: int = 40) -> str:
+    """The first substantive user message in a compact transcript.
+
+    Third-choice intent source, used when a checkpoint has no prompt.txt at
+    all. Short operational messages are skipped for the same reason
+    ``_pick_intent`` skips them: they are commands, not intent.
+    """
+    fallback = ""
+    for speaker, text in _iter_text(transcript):
+        if speaker != "user":
+            continue
+        cleaned = text.strip()
+        if not cleaned:
+            continue
+        if not fallback:
+            fallback = cleaned
+        if len(cleaned) >= min_len:
+            return cleaned
+    return fallback
 
 
 def extract_decisions(transcript: str) -> list[Decision]:
