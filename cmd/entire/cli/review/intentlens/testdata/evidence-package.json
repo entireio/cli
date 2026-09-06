@@ -1,0 +1,28 @@
+{
+  "fixture_metadata": {
+    "synthetic": true,
+    "label": "Synthetic IntentLens demo evidence; no live Gemini request was made"
+  },
+  "developer_intent": "Add password login, lock login after five failures, and preserve existing sessions after password changes.",
+  "atomic_requirements": [
+    {"id": "R1", "requirement": "Users can log in with a valid email and password."},
+    {"id": "R2", "requirement": "Login is locked after five failed attempts."},
+    {"id": "R3", "requirement": "Existing sessions remain valid after a password change."}
+  ],
+  "checkpoint_evidence": [
+    {"reference": "synthetic-checkpoint-001", "explanation": "The synthetic checkpoint records the three requirements above."}
+  ],
+  "source_code_evidence": [
+    {"file": "demo/auth/login.go", "symbol": "Login", "explanation": "Synthetic source evidence shows credential verification is called by Login."}
+  ],
+  "git_diff_evidence": [
+    {"file": "demo/auth/routes.go", "explanation": "Synthetic diff evidence connects the login route to Login but does not add rate-limit middleware."}
+  ],
+  "graph_findings": [
+    {"reference": "route:/login -> Login", "explanation": "Synthetic graph evidence connects the route to Login."},
+    {"reference": "rateLimit -> (unconnected)", "explanation": "Synthetic graph evidence shows rateLimit is not connected to the login route."}
+  ],
+  "test_results": [
+    {"test_name": "TestLoginValidCredentials", "result": "passed", "explanation": "Synthetic test result verifies valid login."}
+  ]
+}
