@@ -467,6 +467,10 @@ func InstallGitHook(ctx context.Context, silent, absolutePath bool) (int, error)
 		}
 	}
 
+	if err := ensureLefthookSafetyNet(ctx, cmdPrefix); err != nil {
+		return installedCount, fmt.Errorf("failed to install Lefthook safety net: %w", err)
+	}
+
 	if !silent {
 		fmt.Println("✓ Installed git hooks (prepare-commit-msg, commit-msg, post-commit, pre-push)")
 		fmt.Println("  Hooks delegate to the current strategy at runtime")
@@ -531,6 +535,10 @@ func RemoveGitHook(ctx context.Context) (int, error) {
 				}
 			}
 		}
+	}
+
+	if err := removeLefthookSafetyNet(ctx); err != nil {
+		removeErrors = append(removeErrors, fmt.Sprintf("remove Lefthook safety net: %v", err))
 	}
 
 	if len(removeErrors) > 0 {
