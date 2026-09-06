@@ -14,6 +14,15 @@ const (
 	CategoryBoundaryViolation FindingCategory = "boundary_violation"
 	CategoryScopeCreep        FindingCategory = "scope_creep"
 	CategoryIntentDeviation   FindingCategory = "intent_deviation"
+
+	CategoryUnnecessaryAbstraction     FindingCategory = "unnecessary_abstraction"
+	CategoryDuplication                FindingCategory = "duplication"
+	CategoryUnnecessaryDependency      FindingCategory = "unnecessary_dependency"
+	CategoryUnnecessaryFile            FindingCategory = "unnecessary_file"
+	CategoryDeadCode                   FindingCategory = "dead_code"
+	CategoryReinventedRepositoryUtil   FindingCategory = "reinvented_repository_utility"
+	CategoryUnrelatedRefactor          FindingCategory = "unrelated_refactor"
+	CategoryDisproportionateComplexity FindingCategory = "disproportionate_complexity"
 )
 
 type Severity string
@@ -78,6 +87,11 @@ type changedPath struct {
 	Source string
 }
 
+type diffEvidence struct {
+	Text       string
+	AddedLines []string
+}
+
 // EvaluateIntentBoundary evaluates explicit intent and boundary evidence in an
 // AgentCheck context. It does not call Git, read storage, run verification, or
 // infer intent from commit messages.
@@ -118,6 +132,27 @@ func EvaluateIntentBoundary(ctx Context) EvaluationResult {
 	for _, change := range materialScopeCreep(requirements, changes) {
 		findings = append(findings, scopeCreep(requirements, change))
 	}
+
+	sortFindings(findings)
+	return EvaluationResult{
+		Verdict:  DetermineVerdict(findings),
+		Summary:  evaluationSummary(findings),
+		Findings: findings,
+	}
+}
+
+// EvaluateCodeQualityBloat evaluates deterministic quality and bloat evidence
+// already present in an AgentCheck context. It does not inspect repository
+// storage, execute Git, run verification, or require Graph.
+func EvaluateCodeQualityBloat(ctx Context) EvaluationResult {
+	statements := collectIntentStatements(ctx)
+	requirements := extractRequirements(statements)
+	changes := collectChangedPaths(ctx)
+	diff := diffEvidence{Text: strings.TrimSpace(ctx.Git.Diff), AddedLines: addedDiffLines(ctx.Git.Diff)}
+
+	var findings []Finding
+	findings = append(findings, graphQualityFindings(ctx.Graph)...)
+	findings = append(findings, diffQualityFindings(statements, requirements, changes, diff, ctx.Graph)...)
 
 	sortFindings(findings)
 	return EvaluationResult{
@@ -301,6 +336,297 @@ func materialScopeCreep(requirements []requirement, changes []changedPath) []cha
 	return outOfScope
 }
 
+func diffQualityFindings(statements []intentStatement, requirements []requirement, changes []changedPath, diff diffEvidence, graph GraphContext) []Finding {
+	if len(changes) == 0 && diff.Text == "" {
+		return nil
+	}
+
+	var findings []Finding
+	if hasMinimalIntent(statements) {
+		if line, ok := introducedAbstraction(diff.AddedLines); ok {
+			if graphEvidence, supported := graphSupportsAbstractionConcern(graph); supported {
+				findings = append(findings, unnecessaryAbstraction(line, statements, graphEvidence))
+			}
+		}
+		if dep, ok := introducedDependency(changes, diff.AddedLines); ok && !intentMentions(statements, dep.Name) {
+			if graphEvidence, supported := graphSupportsDependencyConcern(graph, dep.Name); supported {
+				findings = append(findings, unnecessaryDependency(dep, statements, graphEvidence))
+			}
+		}
+		for _, change := range unnecessaryFiles(requirements, changes) {
+			findings = append(findings, unnecessaryFile(change, requirements))
+		}
+		if line, ok := disproportionateComplexityLine(diff.AddedLines); ok {
+			findings = append(findings, disproportionateComplexity(line, statements))
+		}
+	}
+
+	for _, change := range unrelatedRefactors(requirements, changes, graph) {
+		findings = append(findings, unrelatedRefactor(change, requirements, graphEvidenceForPath(graph, change.Path)))
+	}
+	return findings
+}
+
+func graphQualityFindings(graph GraphContext) []Finding {
+	if !graph.Available {
+		return nil
+	}
+	var findings []Finding
+	for _, evidence := range graph.Evidence {
+		if !graphEvidenceIntroduced(evidence) {
+			continue
+		}
+		category, ok := graphQualityCategory(evidence)
+		if !ok {
+			continue
+		}
+		findings = append(findings, graphQualityFinding(category, evidence))
+	}
+	return findings
+}
+
+func graphEvidenceIntroduced(evidence GraphEvidence) bool {
+	text := strings.ToLower(strings.TrimSpace(evidence.Kind + " " + evidence.Detail))
+	return containsAny(text, "added", "adds", "introduced", "introduces", "new ", "current change")
+}
+
+func graphQualityCategory(evidence GraphEvidence) (FindingCategory, bool) {
+	text := strings.ToLower(strings.TrimSpace(evidence.Kind + " " + evidence.Detail))
+	switch {
+	case containsAny(text, "duplicate", "duplicated"):
+		return CategoryDuplication, true
+	case containsAny(text, "reinvent", "existing utility", "repository utility"):
+		return CategoryReinventedRepositoryUtil, true
+	case containsAny(text, "dead code", "unused", "unreachable"):
+		return CategoryDeadCode, true
+	case containsAny(text, "disproportionate", "unnecessary complexity", "overly complex"):
+		return CategoryDisproportionateComplexity, true
+	default:
+		return "", false
+	}
+}
+
+func addedDiffLines(diff string) []string {
+	var out []string
+	for _, line := range strings.Split(diff, "\n") {
+		if strings.HasPrefix(line, "+++") || !strings.HasPrefix(line, "+") {
+			continue
+		}
+		trimmed := strings.TrimSpace(strings.TrimPrefix(line, "+"))
+		if trimmed != "" {
+			out = append(out, trimmed)
+		}
+	}
+	return out
+}
+
+func hasMinimalIntent(statements []intentStatement) bool {
+	for _, statement := range statements {
+		text := strings.ToLower(statement.Text)
+		if containsAny(text, "minimal", "simple", "small", "straightforward", "only") {
+			return true
+		}
+	}
+	return false
+}
+
+func introducedAbstraction(lines []string) (string, bool) {
+	for _, line := range lines {
+		lower := strings.ToLower(line)
+		switch {
+		case strings.Contains(lower, " interface"):
+			return line, true
+		case strings.Contains(lower, "factory") || strings.Contains(lower, "manager") || strings.Contains(lower, "provider"):
+			return line, true
+		}
+	}
+	return "", false
+}
+
+type dependencyEvidence struct {
+	Name string
+	Line string
+	Path string
+}
+
+func introducedDependency(changes []changedPath, lines []string) (dependencyEvidence, bool) {
+	dependencyFile := ""
+	for _, change := range changes {
+		if isDependencyManifest(change.Path) {
+			dependencyFile = change.Path
+			break
+		}
+	}
+	if dependencyFile == "" {
+		return dependencyEvidence{}, false
+	}
+	for _, line := range lines {
+		if dep, ok := dependencyName(line); ok {
+			return dependencyEvidence{Name: dep, Line: line, Path: dependencyFile}, true
+		}
+	}
+	return dependencyEvidence{}, false
+}
+
+func dependencyName(line string) (string, bool) {
+	trimmed := strings.TrimSpace(line)
+	fields := strings.Fields(trimmed)
+	if strings.HasPrefix(trimmed, "require ") && len(fields) >= 2 {
+		return fields[1], true
+	}
+	if strings.HasPrefix(trimmed, "github.com/") || strings.HasPrefix(trimmed, "golang.org/") {
+		if len(fields) >= 1 {
+			return fields[0], true
+		}
+	}
+	if strings.HasPrefix(trimmed, "\"") && strings.Contains(trimmed, "\":") {
+		parts := strings.SplitN(strings.TrimPrefix(trimmed, "\""), "\":", 2)
+		if parts[0] != "" {
+			return parts[0], true
+		}
+	}
+	return "", false
+}
+
+func isDependencyManifest(path string) bool {
+	lower := strings.ToLower(path)
+	return lower == "go.mod" || lower == "go.sum" || strings.HasSuffix(lower, "/go.mod") ||
+		strings.HasSuffix(lower, "/go.sum") || lower == "package.json" || strings.HasSuffix(lower, "/package.json")
+}
+
+func disproportionateComplexityLine(lines []string) (string, bool) {
+	var hasInterface, hasFactory, hasRegistry bool
+	first := ""
+	for _, line := range lines {
+		lower := strings.ToLower(line)
+		if strings.Contains(lower, " interface") {
+			hasInterface = true
+			first = firstNonEmpty(first, line)
+		}
+		if strings.Contains(lower, "factory") || strings.Contains(lower, "builder") {
+			hasFactory = true
+			first = firstNonEmpty(first, line)
+		}
+		if strings.Contains(lower, "registry") || strings.Contains(lower, "plugin") {
+			hasRegistry = true
+			first = firstNonEmpty(first, line)
+		}
+	}
+	return first, hasInterface && hasFactory && hasRegistry
+}
+
+func graphSupportsDependencyConcern(graph GraphContext, dependency string) (GraphEvidence, bool) {
+	if !graph.Available {
+		return GraphEvidence{}, false
+	}
+	dependency = strings.ToLower(dependency)
+	for _, evidence := range graph.Evidence {
+		if !graphEvidenceIntroduced(evidence) {
+			continue
+		}
+		text := strings.ToLower(evidence.Kind + " " + evidence.Detail + " " + strings.Join(evidence.Paths, " "))
+		if containsAny(text, "unnecessary dependency", "unused dependency") && strings.Contains(text, dependency) {
+			return evidence, true
+		}
+	}
+	return GraphEvidence{}, false
+}
+
+func graphSupportsAbstractionConcern(graph GraphContext) (GraphEvidence, bool) {
+	if !graph.Available {
+		return GraphEvidence{}, false
+	}
+	for _, evidence := range graph.Evidence {
+		if !graphEvidenceIntroduced(evidence) {
+			continue
+		}
+		text := strings.ToLower(evidence.Kind + " " + evidence.Detail)
+		if containsAny(text, "unnecessary abstraction", "single implementation", "no reuse") {
+			return evidence, true
+		}
+	}
+	return GraphEvidence{}, false
+}
+
+func unnecessaryFiles(requirements []requirement, changes []changedPath) []changedPath {
+	if len(requirements) == 0 {
+		return nil
+	}
+	var out []changedPath
+	for _, change := range changes {
+		if !isAdded(change.Status) || pathMatchesAnyRequirement(change.Path, requirements) {
+			continue
+		}
+		lower := strings.ToLower(change.Path)
+		if containsAny(lower, "demo", "example", "playground", "scratch", "tmp") {
+			out = append(out, change)
+		}
+	}
+	return out
+}
+
+func unrelatedRefactors(requirements []requirement, changes []changedPath, graph GraphContext) []changedPath {
+	if len(requirements) == 0 || len(changes) < 2 || !graph.Available {
+		return nil
+	}
+	hasInScope := false
+	for _, change := range changes {
+		if pathMatchesAnyRequirement(change.Path, requirements) {
+			hasInScope = true
+			break
+		}
+	}
+	if !hasInScope {
+		return nil
+	}
+	var out []changedPath
+	for _, change := range changes {
+		if isAdded(change.Status) || pathMatchesAnyRequirement(change.Path, requirements) {
+			continue
+		}
+		if (strings.EqualFold(change.Status, "M") || strings.EqualFold(change.Status, "R")) && graphEvidenceForPath(graph, change.Path) != nil {
+			out = append(out, change)
+		}
+	}
+	return out
+}
+
+func graphEvidenceForPath(graph GraphContext, path string) *GraphEvidence {
+	if !graph.Available {
+		return nil
+	}
+	for i := range graph.Evidence {
+		evidence := graph.Evidence[i]
+		if !graphEvidenceIntroduced(evidence) {
+			continue
+		}
+		text := strings.ToLower(evidence.Kind + " " + evidence.Detail)
+		if !containsAny(text, "unrelated refactor") {
+			continue
+		}
+		for _, evidencePath := range evidence.Paths {
+			if evidencePath == path {
+				return &evidence
+			}
+		}
+	}
+	return nil
+}
+
+func isAdded(status string) bool {
+	return strings.EqualFold(strings.TrimSpace(status), "A")
+}
+
+func intentMentions(statements []intentStatement, term string) bool {
+	termTokens := significantTokens(term)
+	for _, statement := range statements {
+		if tokenMatchCount(significantTokens(statement.Text), termTokens) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
 func hasImplementationEvidence(changes []changedPath, diffText string) bool {
 	return len(changes) > 0 || strings.TrimSpace(diffText) != ""
 }
@@ -401,6 +727,160 @@ func intentDeviation(scope onlyScope, change changedPath) Finding {
 	}
 }
 
+func unnecessaryAbstraction(line string, statements []intentStatement, graphEvidence GraphEvidence) Finding {
+	return Finding{
+		Category:    CategoryUnnecessaryAbstraction,
+		Severity:    Severity(SeverityMedium),
+		Title:       "Unnecessary abstraction",
+		Description: "The task asks for a minimal/simple change, and repository evidence identifies a newly introduced abstraction with no demonstrated reuse.",
+		Evidence: []FindingEvidence{
+			intentEvidence(firstMinimalStatement(statements)),
+			{Kind: "diff_added_line", Reference: "Git.Diff", Detail: line},
+			graphFindingEvidence(graphEvidence),
+		},
+		Confidence:     ConfidenceMedium,
+		Recommendation: "Prefer the direct implementation unless another caller or implementation justifies the abstraction.",
+	}
+}
+
+func unnecessaryDependency(dep dependencyEvidence, statements []intentStatement, graphEvidence GraphEvidence) Finding {
+	return Finding{
+		Category:    CategoryUnnecessaryDependency,
+		Severity:    Severity(SeverityMedium),
+		Title:       "Unnecessary dependency",
+		Description: "The diff introduces a dependency that is not mentioned by the task intent for a minimal/simple change.",
+		Evidence: []FindingEvidence{
+			intentEvidence(firstStatement(statements)),
+			{Kind: "changed_file", Reference: "dependency_manifest", Detail: dep.Path},
+			{Kind: "diff_added_line", Reference: "Git.Diff", Detail: dep.Line},
+			graphFindingEvidence(graphEvidence),
+		},
+		Confidence:     ConfidenceMedium,
+		Recommendation: "Remove the dependency or document why it is necessary for the requested task.",
+	}
+}
+
+func unnecessaryFile(change changedPath, requirements []requirement) Finding {
+	return Finding{
+		Category:    CategoryUnnecessaryFile,
+		Severity:    Severity(SeverityLow),
+		Title:       "Unnecessary file",
+		Description: "A newly added demo/example/scratch file is outside the explicit task evidence.",
+		Evidence: []FindingEvidence{
+			intentEvidence(requirements[0].Statement),
+			changeEvidence(change),
+		},
+		Confidence:     ConfidenceMedium,
+		Recommendation: "Remove the file unless it is required for the requested implementation.",
+	}
+}
+
+func unrelatedRefactor(change changedPath, requirements []requirement, graphEvidence *GraphEvidence) Finding {
+	evidence := []FindingEvidence{intentEvidence(requirements[0].Statement), changeEvidence(change)}
+	if graphEvidence != nil {
+		evidence = append(evidence, graphFindingEvidence(*graphEvidence))
+	}
+	return Finding{
+		Category:       CategoryUnrelatedRefactor,
+		Severity:       Severity(SeverityMedium),
+		Title:          "Unrelated refactor",
+		Description:    "An existing file outside the explicit task scope was modified, with repository evidence identifying it as an unrelated refactor.",
+		Evidence:       evidence,
+		Confidence:     ConfidenceMedium,
+		Recommendation: "Separate unrelated cleanup from the requested task or explain why it is required.",
+	}
+}
+
+func disproportionateComplexity(line string, statements []intentStatement) Finding {
+	return Finding{
+		Category:    CategoryDisproportionateComplexity,
+		Severity:    Severity(SeverityHigh),
+		Title:       "Disproportionate complexity",
+		Description: "The diff combines abstraction, factory/builder, and registry/plugin mechanics for a task described as minimal/simple.",
+		Evidence: []FindingEvidence{
+			intentEvidence(firstMinimalStatement(statements)),
+			{Kind: "diff_added_line", Reference: "Git.Diff", Detail: line},
+		},
+		Confidence:     ConfidenceMedium,
+		Recommendation: "Collapse unnecessary layers until the implementation is proportional to the task.",
+	}
+}
+
+func graphQualityFinding(category FindingCategory, evidence GraphEvidence) Finding {
+	return Finding{
+		Category:       category,
+		Severity:       graphFindingSeverity(category),
+		Title:          graphFindingTitle(category),
+		Description:    "Repository structural evidence indicates a quality or bloat concern introduced by the change.",
+		Evidence:       []FindingEvidence{graphFindingEvidence(evidence)},
+		Confidence:     ConfidenceMedium,
+		Recommendation: graphFindingRecommendation(category),
+	}
+}
+
+func graphFindingSeverity(category FindingCategory) Severity {
+	switch category {
+	case CategoryDeadCode, CategoryDuplication, CategoryReinventedRepositoryUtil:
+		return Severity(SeverityHigh)
+	default:
+		return Severity(SeverityMedium)
+	}
+}
+
+func graphFindingTitle(category FindingCategory) string {
+	switch category {
+	case CategoryDuplication:
+		return "Duplicated implementation"
+	case CategoryReinventedRepositoryUtil:
+		return "Reinvented repository utility"
+	case CategoryDeadCode:
+		return "Dead code"
+	case CategoryUnnecessaryDependency:
+		return "Unnecessary dependency"
+	case CategoryUnrelatedRefactor:
+		return "Unrelated refactor"
+	case CategoryUnnecessaryAbstraction:
+		return "Unnecessary abstraction"
+	case CategoryDisproportionateComplexity:
+		return "Disproportionate complexity"
+	default:
+		return "Code quality concern"
+	}
+}
+
+func graphFindingRecommendation(category FindingCategory) string {
+	switch category {
+	case CategoryDuplication:
+		return "Reuse the existing implementation or remove the duplicate."
+	case CategoryReinventedRepositoryUtil:
+		return "Use the existing repository utility instead of maintaining a parallel helper."
+	case CategoryDeadCode:
+		return "Remove the unused code or connect it through a tested call path."
+	case CategoryUnnecessaryDependency:
+		return "Remove the dependency or document why it is necessary for the requested task."
+	case CategoryUnrelatedRefactor:
+		return "Separate unrelated cleanup from the requested task or explain why it is required."
+	default:
+		return "Simplify the change or add evidence that the extra structure is necessary."
+	}
+}
+
+func graphFindingEvidence(evidence GraphEvidence) FindingEvidence {
+	detail := strings.TrimSpace(evidence.Detail)
+	if detail == "" {
+		detail = strings.TrimSpace(evidence.Symbol)
+	}
+	if len(evidence.Paths) > 0 {
+		pathDetail := strings.Join(evidence.Paths, ", ")
+		if detail != "" {
+			detail += " | paths: " + pathDetail
+		} else {
+			detail = pathDetail
+		}
+	}
+	return FindingEvidence{Kind: "graph", Reference: strings.TrimSpace(evidence.Kind), Detail: detail}
+}
+
 func intentEvidence(statement intentStatement) FindingEvidence {
 	return FindingEvidence{Kind: "intent", Reference: statement.Source, Detail: statement.Text}
 }
@@ -418,6 +898,25 @@ func firstChanges(changes []changedPath, limit int) []changedPath {
 		return changes
 	}
 	return changes[:limit]
+}
+
+func firstStatement(statements []intentStatement) intentStatement {
+	for _, statement := range statements {
+		if strings.TrimSpace(statement.Text) != "" {
+			return statement
+		}
+	}
+	return intentStatement{Source: "DeveloperPrompt"}
+}
+
+func firstMinimalStatement(statements []intentStatement) intentStatement {
+	for _, statement := range statements {
+		text := strings.ToLower(statement.Text)
+		if containsAny(text, "minimal", "simple", "small", "straightforward", "only") {
+			return statement
+		}
+	}
+	return firstStatement(statements)
 }
 
 func evaluationSummary(findings []Finding) string {
@@ -495,6 +994,13 @@ func appendUnique(tokens []string, extra ...string) []string {
 		}
 	}
 	return tokens
+}
+
+func firstNonEmpty(existing, candidate string) string {
+	if existing != "" {
+		return existing
+	}
+	return candidate
 }
 
 func isStopToken(token string) bool {

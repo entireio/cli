@@ -226,6 +226,308 @@ func TestDetermineVerdict(t *testing.T) {
 	}
 }
 
+func TestEvaluateCodeQualityBloat(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name          string
+		ctx           Context
+		wantVerdict   Verdict
+		wantCategory  FindingCategory
+		wantEvidence  []string
+		wantNoFinding bool
+	}{
+		{
+			name: "simple necessary implementation has no bloat finding",
+			ctx: Context{
+				DeveloperPrompt: "Implement Google OAuth login. Keep the implementation minimal.",
+				ChangedFiles:    []FileChange{{Path: "internal/auth/google_oauth.go", Status: "A"}},
+				Git:             GitEvidence{Diff: "+func GoogleOAuthLogin() error { return nil }"},
+			},
+			wantVerdict:   Verdict(VerdictTrusted),
+			wantNoFinding: true,
+		},
+		{
+			name: "unnecessary abstraction for minimal task",
+			ctx: Context{
+				DeveloperPrompt: "Implement Google OAuth login. Keep the implementation minimal.",
+				ChangedFiles:    []FileChange{{Path: "internal/auth/google_oauth.go", Status: "A"}},
+				Git:             GitEvidence{Diff: "+type OAuthProvider interface { Login() error }"},
+				Graph: GraphContext{
+					Available: true,
+					Evidence: []GraphEvidence{{
+						Kind:   "abstraction",
+						Paths:  []string{"internal/auth/google_oauth.go"},
+						Detail: "current change introduced unnecessary abstraction with no reuse",
+					}},
+				},
+			},
+			wantVerdict:  Verdict(VerdictReviewRequired),
+			wantCategory: CategoryUnnecessaryAbstraction,
+			wantEvidence: []string{"Keep the implementation minimal", "OAuthProvider interface", "no reuse"},
+		},
+		{
+			name: "duplicate implementation from graph evidence",
+			ctx: Context{
+				DeveloperPrompt: "Implement Google OAuth login.",
+				ChangedFiles:    []FileChange{{Path: "internal/auth/google_oauth.go", Status: "A"}},
+				Graph: GraphContext{
+					Available: true,
+					Evidence: []GraphEvidence{{
+						Kind:   "duplicate",
+						Paths:  []string{"internal/auth/google_oauth.go", "internal/auth/oauth.go"},
+						Detail: "new GoogleOAuth helper duplicates existing OAuth helper",
+					}},
+				},
+			},
+			wantVerdict:  Verdict(VerdictReviewRequired),
+			wantCategory: CategoryDuplication,
+			wantEvidence: []string{"duplicates existing OAuth helper", "internal/auth/oauth.go"},
+		},
+		{
+			name: "reinvented repository utility from graph evidence",
+			ctx: Context{
+				DeveloperPrompt: "Normalize checkpoint paths.",
+				ChangedFiles:    []FileChange{{Path: "cmd/entire/cli/agentcheck/path.go", Status: "A"}},
+				Graph: GraphContext{
+					Available: true,
+					Evidence: []GraphEvidence{{
+						Kind:   "utility",
+						Paths:  []string{"cmd/entire/cli/agentcheck/path.go", "cmd/entire/cli/paths"},
+						Detail: "new helper reinvents existing utility paths.WorktreeRoot",
+					}},
+				},
+			},
+			wantVerdict:  Verdict(VerdictReviewRequired),
+			wantCategory: CategoryReinventedRepositoryUtil,
+			wantEvidence: []string{"reinvents existing utility", "cmd/entire/cli/paths"},
+		},
+		{
+			name: "unnecessary dependency when minimal task evidence supports it",
+			ctx: Context{
+				DeveloperPrompt: "Implement title trim. Keep implementation minimal.",
+				ChangedFiles: []FileChange{
+					{Path: "go.mod", Status: "M"},
+					{Path: "internal/title/trim.go", Status: "A"},
+				},
+				Git: GitEvidence{Diff: "+\tgithub.com/samber/lo v1.0.0"},
+				Graph: GraphContext{
+					Available: true,
+					Evidence: []GraphEvidence{{
+						Kind:   "dependency",
+						Paths:  []string{"go.mod"},
+						Detail: "current change introduced unused dependency github.com/samber/lo",
+					}},
+				},
+			},
+			wantVerdict:  Verdict(VerdictReviewRequired),
+			wantCategory: CategoryUnnecessaryDependency,
+			wantEvidence: []string{"github.com/samber/lo", "go.mod", "unused dependency"},
+		},
+		{
+			name: "unnecessary file outside minimal task",
+			ctx: Context{
+				DeveloperPrompt: "Implement Google OAuth login. Keep implementation minimal.",
+				ChangedFiles: []FileChange{
+					{Path: "internal/auth/google_oauth.go", Status: "A"},
+					{Path: "examples/playground.go", Status: "A"},
+				},
+			},
+			wantVerdict:  Verdict(VerdictReviewRequired),
+			wantCategory: CategoryUnnecessaryFile,
+			wantEvidence: []string{"Implement Google OAuth login", "examples/playground.go"},
+		},
+		{
+			name: "unrelated refactor outside task scope",
+			ctx: Context{
+				DeveloperPrompt: "Implement Google OAuth login.",
+				ChangedFiles: []FileChange{
+					{Path: "internal/auth/google_oauth.go", Status: "A"},
+					{Path: "internal/billing/invoice.go", Status: "M"},
+				},
+				Graph: GraphContext{
+					Available: true,
+					Evidence: []GraphEvidence{{
+						Kind:   "refactor",
+						Paths:  []string{"internal/billing/invoice.go"},
+						Detail: "current change introduced unrelated refactor in billing",
+					}},
+				},
+			},
+			wantVerdict:  Verdict(VerdictReviewRequired),
+			wantCategory: CategoryUnrelatedRefactor,
+			wantEvidence: []string{"Implement Google OAuth login", "internal/billing/invoice.go", "unrelated refactor"},
+		},
+		{
+			name: "dead code from graph evidence",
+			ctx: Context{
+				DeveloperPrompt: "Implement Google OAuth login.",
+				ChangedFiles:    []FileChange{{Path: "internal/auth/google_oauth.go", Status: "A"}},
+				Graph: GraphContext{
+					Available: true,
+					Evidence: []GraphEvidence{{
+						Kind:   "dead_code",
+						Paths:  []string{"internal/auth/google_oauth.go"},
+						Detail: "new function unused by any call path",
+					}},
+				},
+			},
+			wantVerdict:  Verdict(VerdictReviewRequired),
+			wantCategory: CategoryDeadCode,
+			wantEvidence: []string{"unused by any call path", "internal/auth/google_oauth.go"},
+		},
+		{
+			name: "disproportionate complexity for minimal task",
+			ctx: Context{
+				DeveloperPrompt: "Implement title trim. Keep it simple.",
+				ChangedFiles:    []FileChange{{Path: "internal/title/trim.go", Status: "A"}},
+				Git: GitEvidence{Diff: strings.Join([]string{
+					"+type TrimProvider interface { Trim(string) string }",
+					"+type TrimFactory struct{}",
+					"+var trimRegistry = map[string]TrimProvider{}",
+				}, "\n")},
+			},
+			wantVerdict:  Verdict(VerdictReviewRequired),
+			wantCategory: CategoryDisproportionateComplexity,
+			wantEvidence: []string{"Keep it simple", "TrimProvider interface"},
+		},
+		{
+			name: "line count alone does not create finding",
+			ctx: Context{
+				DeveloperPrompt: "Implement generated lookup table. Keep implementation minimal.",
+				ChangedFiles:    []FileChange{{Path: "internal/lookup/table.go", Status: "A"}},
+				Git:             GitEvidence{Diff: largePlainDiff()},
+			},
+			wantVerdict:   Verdict(VerdictTrusted),
+			wantNoFinding: true,
+		},
+		{
+			name: "new file is not inherently unnecessary",
+			ctx: Context{
+				DeveloperPrompt: "Implement Google OAuth login.",
+				ChangedFiles:    []FileChange{{Path: "internal/auth/google_oauth.go", Status: "A"}},
+			},
+			wantVerdict:   Verdict(VerdictTrusted),
+			wantNoFinding: true,
+		},
+		{
+			name: "new dependency is not inherently unnecessary",
+			ctx: Context{
+				DeveloperPrompt: "Implement OAuth login. Keep implementation minimal.",
+				ChangedFiles:    []FileChange{{Path: "go.mod", Status: "M"}},
+				Git:             GitEvidence{Diff: "+\tgithub.com/coreos/go-oidc/v3 v3.0.0"},
+			},
+			wantVerdict:   Verdict(VerdictTrusted),
+			wantNoFinding: true,
+		},
+		{
+			name: "new abstraction is not inherently unnecessary",
+			ctx: Context{
+				DeveloperPrompt: "Support multiple OAuth providers.",
+				ChangedFiles:    []FileChange{{Path: "internal/auth/oauth_provider.go", Status: "A"}},
+				Git:             GitEvidence{Diff: "+type OAuthProvider interface { Login() error }"},
+			},
+			wantVerdict:   Verdict(VerdictTrusted),
+			wantNoFinding: true,
+		},
+		{
+			name: "minimal task with abstraction but insufficient evidence is not enough",
+			ctx: Context{
+				DeveloperPrompt: "Implement Google OAuth login. Keep implementation minimal.",
+				ChangedFiles:    []FileChange{{Path: "internal/auth/oauth_provider.go", Status: "A"}},
+				Git:             GitEvidence{Diff: "+type OAuthProvider interface { Login() error }"},
+			},
+			wantVerdict:   Verdict(VerdictTrusted),
+			wantNoFinding: true,
+		},
+		{
+			name: "required refactor is not unrelated",
+			ctx: Context{
+				DeveloperPrompt: "Refactor authentication for Google OAuth login.",
+				ChangedFiles: []FileChange{
+					{Path: "internal/auth/google_oauth.go", Status: "A"},
+					{Path: "internal/auth/session.go", Status: "M"},
+				},
+			},
+			wantVerdict:   Verdict(VerdictTrusted),
+			wantNoFinding: true,
+		},
+		{
+			name: "modified out of scope file without graph support is not unrelated refactor",
+			ctx: Context{
+				DeveloperPrompt: "Implement Google OAuth login.",
+				ChangedFiles: []FileChange{
+					{Path: "internal/auth/google_oauth.go", Status: "A"},
+					{Path: "internal/billing/invoice.go", Status: "M"},
+				},
+			},
+			wantVerdict:   Verdict(VerdictTrusted),
+			wantNoFinding: true,
+		},
+		{
+			name: "existing repository complexity is not blamed",
+			ctx: Context{
+				DeveloperPrompt: "Implement Google OAuth login.",
+				ChangedFiles:    []FileChange{{Path: "internal/auth/google_oauth.go", Status: "A"}},
+				Graph: GraphContext{
+					Available: true,
+					Evidence: []GraphEvidence{{
+						Kind:   "complexity",
+						Paths:  []string{"internal/legacy/auth.go"},
+						Detail: "pre-existing auth registry is overly complex",
+					}},
+				},
+			},
+			wantVerdict:   Verdict(VerdictTrusted),
+			wantNoFinding: true,
+		},
+		{
+			name: "missing evidence does not fabricate quality finding",
+			ctx: Context{
+				DeveloperPrompt: "Implement Google OAuth login. Keep implementation minimal.",
+			},
+			wantVerdict:   Verdict(VerdictTrusted),
+			wantNoFinding: true,
+		},
+		{
+			name: "graph unavailable still works",
+			ctx: Context{
+				DeveloperPrompt: "Implement Google OAuth login. Keep implementation minimal.",
+				ChangedFiles:    []FileChange{{Path: "internal/auth/google_oauth.go", Status: "A"}},
+				Graph:           GraphContext{Available: false, UnavailableReason: "graph disabled"},
+			},
+			wantVerdict:   Verdict(VerdictTrusted),
+			wantNoFinding: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			got := EvaluateCodeQualityBloat(tt.ctx)
+			if got.Verdict != tt.wantVerdict {
+				t.Fatalf("EvaluateCodeQualityBloat() verdict = %q, want %q; findings = %#v", got.Verdict, tt.wantVerdict, got.Findings)
+			}
+			if tt.wantNoFinding {
+				if len(got.Findings) != 0 {
+					t.Fatalf("EvaluateCodeQualityBloat() findings = %#v, want none", got.Findings)
+				}
+				return
+			}
+			finding := findCategory(got.Findings, tt.wantCategory)
+			if finding == nil {
+				t.Fatalf("EvaluateCodeQualityBloat() findings = %#v, want category %q", got.Findings, tt.wantCategory)
+			}
+			for _, want := range tt.wantEvidence {
+				if !findingHasEvidence(*finding, want) {
+					t.Fatalf("finding evidence = %#v, want detail containing %q", finding.Evidence, want)
+				}
+			}
+		})
+	}
+}
+
 func findCategory(findings []Finding, category FindingCategory) *Finding {
 	for i := range findings {
 		if findings[i].Category == category {
@@ -242,4 +544,12 @@ func findingHasEvidence(finding Finding, want string) bool {
 		}
 	}
 	return false
+}
+
+func largePlainDiff() string {
+	lines := make([]string, 0, 80)
+	for i := 0; i < 80; i++ {
+		lines = append(lines, "+lookupEntry")
+	}
+	return strings.Join(lines, "\n")
 }
