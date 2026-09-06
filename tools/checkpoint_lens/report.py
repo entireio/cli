@@ -87,8 +87,61 @@ def intent_provenance(source: str) -> str:
     }.get(source, "unavailable - no prompt, summary or transcript in this checkpoint")
 
 
-def render_decisions(decisions: list[Decision], limit: int = 12) -> list[str]:
-    """Group decisions by kind, most consequential first."""
+def render_completeness(comp: Any) -> list[str]:
+    """THE single authoritative statement of how complete this view is.
+
+    Rendered directly under the header, before any finding, in every report.
+    It is deliberately the first thing a reader meets: a completeness note
+    placed after the conclusions arrives too late to change how they are read.
+
+    Every input is listed with its status, including the ones that were fine.
+    Reporting only failures makes a short list ambiguous - the reader cannot
+    tell an input that passed from one nobody checked.
+    """
+    lines = [section("CONTEXT COMPLETENESS")]
+    total = len(comp.inputs)
+    if comp.is_complete:
+        lines.append("  CONTEXT: COMPLETE - all %d inputs were readable." % total)
+    else:
+        lines.append(
+            "  CONTEXT: PARTIAL - %d of %d inputs are missing or redacted."
+            % (len(comp.degraded), total)
+        )
+        lines.append("  Everything below is reconstructed from the rest.")
+    lines.append("")
+    for i in comp.inputs:
+        label = {"available": "ok         ", "missing": "UNAVAILABLE", "redacted": "REDACTED   "}.get(
+            i.status, i.status
+        )
+        head = "  [%s] %s" % (label, i.name)
+        if i.detail:
+            lines.append(head + ":")
+            lines.append(wrap(i.detail, indent="      "))
+        else:
+            lines.append(head)
+    if not comp.is_complete:
+        lines.append("")
+        lines.append(
+            wrap(
+                "Read every section below as a floor, not a ceiling. Where an "
+                "input is missing, the absence of a finding is not evidence "
+                "that there is nothing to find.",
+                indent="  ",
+            )
+        )
+    return lines
+
+
+def render_decisions(
+    decisions: list[Decision], limit: int = 12, transcript_available: bool = True
+) -> list[str]:
+    """Group decisions by kind, most consequential first.
+
+    ``transcript_available`` exists so an empty result can say WHY it is
+    empty. "Nothing was found" and "there was nothing to search" produced
+    identical output before, in the section this product's central claim rests
+    on.
+    """
     lines: list[str] = []
     by_kind: dict[str, list[Decision]] = {}
     for d in decisions:
@@ -121,7 +174,11 @@ def render_decisions(decisions: list[Decision], limit: int = 12) -> list[str]:
         if shown >= limit:
             break
     if not lines:
-        lines.append("  (no decision context recovered from this transcript)")
+        if transcript_available:
+            lines.append("  (transcript was read; no decisions matched)")
+        else:
+            lines.append("  (NO TRANSCRIPT to read - this is not the same as")
+            lines.append("   'no decisions were made'. See CONTEXT COMPLETENESS.)")
     remaining = len(decisions) - shown
     if remaining > 0:
         lines.append("")

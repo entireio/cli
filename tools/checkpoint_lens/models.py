@@ -7,8 +7,23 @@ lets the same record be rendered locally and aggregated across sessions.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field, asdict
 from typing import Any
+
+
+# Entire's own redaction pipeline replaces a detected secret with this marker
+# before the transcript is ever committed, so it is what a redacted checkpoint
+# actually looks like on disk. Both the egress layer and the completeness
+# banner need to recognise it: text carrying the marker is content we do NOT
+# have, and rendering it as though it were recovered content is the exact
+# "incomplete presented as complete" failure this tool exists to prevent.
+REDACTION_MARKER = re.compile(r"(?:\[)?\bREDACTED\b(?:\])?")
+
+
+def has_redaction_marker(text: str) -> bool:
+    """True when Entire's redaction pipeline removed content from this text."""
+    return bool(text) and bool(REDACTION_MARKER.search(text))
 
 
 # How a session's "stated intent" was obtained. Surfaced in every report so a
@@ -122,7 +137,16 @@ class SessionRecord:
     decisions: list[Decision] = field(default_factory=list)
     token_usage: TokenUsage = field(default_factory=TokenUsage)
     attribution: Attribution = field(default_factory=Attribution)
+    # Which of this session's inputs were actually readable. These exist so
+    # that "we read it and there was nothing" and "we could not read it" are
+    # different states everywhere downstream. Before they existed, an absent
+    # metadata blob became an empty dict and rendered as `0 turns / unknown
+    # agent`, which is a confident-looking answer to a question we had not
+    # asked anything about.
+    metadata_available: bool = False
+    prompt_available: bool = False
     transcript_available: bool = False
+    redacted_content: bool = False
 
     def to_row(self) -> dict[str, Any]:
         """Flatten to one Delta-table row. Nested structs are flattened because

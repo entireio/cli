@@ -8,6 +8,11 @@ when the network, the Databricks warehouse, or the graph plugin does not.
 Anything that could not be computed is rendered as an explicit "unavailable"
 panel rather than being omitted, because a silently missing section reads as a
 clean bill of health.
+
+Above all of that sits ONE completeness banner, the same verdict the terminal
+prints, placed before the stat grid. The per-panel notes say which piece is
+missing; the banner is the single thing a reader cannot miss, and it is what
+stops a partial reconstruction from being read as a full one.
 """
 
 from __future__ import annotations
@@ -76,6 +81,20 @@ td.num{text-align:right;font-variant-numeric:tabular-nums}
 .warn{border-left:3px solid var(--risk);background:var(--panel);padding:12px 14px;
   border-radius:0 6px 6px 0;margin:10px 0;font-size:13.5px}
 .na{color:var(--muted);font-style:italic}
+.banner{border:2px solid var(--decision);border-radius:8px;padding:14px 16px;
+  margin:0 0 24px;background:var(--panel)}
+.banner.partial{border-color:var(--risk)}
+.banner .verdict-line{font-size:16px;font-weight:700;letter-spacing:-.01em;margin-bottom:4px}
+.banner.partial .verdict-line{color:var(--risk)}
+.banner .lede{font-size:13px;color:var(--muted);margin-bottom:10px}
+.banner ul{list-style:none;padding:0;margin:0}
+.banner li{font-size:13px;padding:3px 0;display:flex;gap:8px;align-items:baseline}
+.banner .st{flex:0 0 92px;font-size:10.5px;font-weight:700;letter-spacing:.06em;
+  text-transform:uppercase;font-family:ui-monospace,monospace}
+.banner .st-available{color:var(--decision)}
+.banner .st-missing{color:var(--blocker)}
+.banner .st-redacted{color:var(--risk)}
+.banner .why{color:var(--muted)}
 footer{margin-top:44px;padding-top:16px;border-top:1px solid var(--line);
   font-size:12px;color:var(--muted)}
 .scroll{overflow-x:auto}
@@ -161,12 +180,52 @@ def _trend_svg(rows: list[dict[str, Any]]) -> str:
     )
 
 
+def _completeness_banner(comp: Any) -> str:
+    """The same single verdict the terminal prints, first in the document.
+
+    It sits above the stat grid on purpose: those big numbers are the most
+    confident-looking thing on the page, and a reader must know what they are
+    computed from before reading them.
+    """
+    if comp is None:
+        return ""
+    cls = "banner" if comp.is_complete else "banner partial"
+    parts = ['<div class="%s">' % cls]
+    if comp.is_complete:
+        parts.append(
+            '<div class="verdict-line">Context: COMPLETE</div>'
+            '<div class="lede">All %d inputs behind this report were readable.</div>'
+            % len(comp.inputs)
+        )
+    else:
+        parts.append(
+            '<div class="verdict-line">Context: PARTIAL</div>'
+            '<div class="lede">%d of %d inputs are missing or redacted. Everything '
+            "below is reconstructed from the rest, and the absence of a finding "
+            "is not evidence that there is nothing to find.</div>"
+            % (len(comp.degraded), len(comp.inputs))
+        )
+    parts.append("<ul>")
+    for i in comp.inputs:
+        label = {"available": "ok", "missing": "unavailable", "redacted": "redacted"}.get(
+            i.status, i.status
+        )
+        why = (" &mdash; " + esc(i.detail)) if i.detail else ""
+        parts.append(
+            '<li><span class="st st-%s">%s</span><span>%s<span class="why">%s</span></span></li>'
+            % (esc(i.status), esc(label), esc(i.name), why)
+        )
+    parts.append("</ul></div>")
+    return "".join(parts)
+
+
 def render_handoff(
     rec: CheckpointRecord,
     history: list[CheckpointRecord],
     warnings: list[str],
     graph_lines: list[str] | None = None,
     aggregates: dict[str, Any] | None = None,
+    comp: Any = None,
 ) -> str:
     agg = aggregates or {}
     sess = rec.sessions[0] if rec.sessions else None
@@ -177,6 +236,8 @@ def render_handoff(
         '<div class="sub">%s &middot; %s &middot; branch <code>%s</code></div></header>'
         % (esc(rec.checkpoint_id), esc(rec.created_at or "unknown time"), esc(rec.branch or "?"))
     )
+
+    parts.append(_completeness_banner(comp))
 
     parts.append('<div class="grid">')
     parts.append(_stat(len(rec.files_touched), "files touched"))
@@ -251,6 +312,7 @@ def render_drift(
     entity_changes: list[Any],
     diff_command: str,
     warnings: list[str],
+    comp: Any = None,
 ) -> str:
     from .requirements import IMPLEMENTED, MISSING, PARTIAL, UNVERIFIED, VERDICT_NOTE
 
@@ -264,6 +326,8 @@ def render_drift(
     parts.append("<header><h1>Checkpoint Lens &mdash; Drift Report</h1>")
     parts.append('<div class="sub">Plan <code>%s</code> &rarr; current <code>%s</code></div></header>'
                  % (esc(baseline.checkpoint_id), esc(head.checkpoint_id)))
+
+    parts.append(_completeness_banner(comp))
 
     parts.append('<div class="grid">')
     parts.append(_stat("%.0f%%" % (100.0 * done / total), "requirement coverage"))

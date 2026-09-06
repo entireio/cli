@@ -157,13 +157,143 @@ than an empty section.
 
 ## Noon Curveball: what changed and how we adapted
 
-> **Not yet received at the time of writing.** The curveball is revealed at
-> 12:00 IST. This section will record: the constraint, the assumption it broke,
-> the Graph impact analysis run before touching the affected area, the change
-> made, and the test that proves the new behaviour.
+**The constraint: PRIVACY BOUNDARY.** Raw prompts and transcripts must not be
+sent to a new external service; the product must keep working when sensitive
+fields are redacted or unavailable; and it must never present incomplete
+context as complete.
 
 The pre-noon stable state is checkpoint `01M1TM6JKPX4MV0DV829FQ77GA`
 (commit `9ee636fe1`).
+
+### Two assumptions it invalidated
+
+**1. Truncation was treated as de-identification. It is not.** `DatabricksSync`
+capped free text at 800 characters (`MAX_TEXT`) and the module docstring
+offered that as the safeguard. A prompt cut at 800 characters is still 800
+characters of the user's own words. The live warehouse proved it: four of the
+eight `sessions.intent` rows were *exactly* 800 characters — truncated
+mid-sentence, de-identified not at all — and they carried absolute local
+filesystem paths from the developer's own machine, which are not reproduced
+here for the same reason they should not have been uploaded.
+`decisions.text` held a further 37 rows of verbatim transcript and commit prose.
+
+**2. The earlier credential check was assumed complete. It was not.**
+Checkpoints `01M1TQ2SJR65VG107JGSEQ9MTA` (`79743a332`) and
+`01M1TQGCCBZX7GPKX5JD9MN2ZT` (`768bc9283`) both record that pasted Databricks
+credentials were verified absent from every checkpoint, tracked file, the git
+history and the generated HTML. That is true of the **PAT** — Entire's own
+redaction pipeline caught it. It is not true of the **workspace URL, the org ID
+`o=...`, and the warehouse HTTP path**, which sat unredacted in the stated
+intent of four checkpoints and were uploaded through the very `intent` column
+this fix removes. The infrastructure identifiers of the warehouse were being
+stored inside that warehouse. The check verified the token and generalised to
+"credentials"; the gap was in the generalisation, not the search.
+
+### The Graph analysis that scoped the fix
+
+Run before any edit. `entire graph capabilities --json` reports every
+`features_requiring_network_access` false, so the Graph plugin is local-only
+and not an egress path. `entire graph impact --symbol DatabricksSync._connect`
+then returned the complete egress closure — 2 direct callers (`sync` for
+writes, `_query` for reads), 4 transitive, 1 callee (`databricks.sql.connect`)
+— proving `databricks.py` holds the only socket in the product. A source sweep
+for `requests|urllib|http|socket|connect(` agreed.
+
+One honest limit, recorded because the project's own discipline demands it:
+`impact --symbol SessionRecord.to_row` reported **only a test caller**. The
+real call site is `databricks.py` inside `for s in rec.sessions`, which the
+Python resolver cannot type through the loop. Graph narrowed the search
+correctly and its caller list was incomplete; the edge was confirmed by reading
+the source. Evidence, not an oracle.
+
+### What changed
+
+The decisive finding was that **no aggregate ever read either column**:
+`open_items_trend` groups on `kind`, `file_churn` on `file_path`, and
+`SQL_COVERAGE` tests `intent_source`, never `intent`. The two raw-text columns
+were written and never queried, so removing them cost zero analytic capability.
+
+* `sessions.intent` and `decisions.text` are gone. In their place:
+  `intent_len`, `intent_word_count`, `intent_digest`, `intent_redacted`, and
+  the same four for decisions, plus `confidence`.
+* `derive_signals()` is the single chokepoint that turns text into those
+  signals and discards the text. The digest is salted per repository for domain
+  separation; it is documented as a join key, **not** an anonymisation
+  primitive, because short low-entropy text is guessable from any hash. What
+  makes this safe is that the plaintext never leaves the machine.
+* `assert_egress_safe()` validates every outgoing row against `EGRESS_COLUMNS`
+  immediately before the INSERT, so a future column cannot quietly reintroduce
+  prose. A test asserts the DDL and the spec cannot drift apart.
+* `entire lens sync --dry-run` prints the exact outgoing rows and connects to
+  nothing — auditable without credentials. It calls the same `build_rows` the
+  real sync does, so it cannot describe a payload other than the one sent.
+* **Data already sent was purged**, not just stopped: `sync --purge` drops the
+  three tables (DROP, not DELETE — DELETE leaves the columns in place and the
+  rows reachable through Delta time travel) and recreates them on the text-free
+  schema. Verified afterwards by `DESCRIBE TABLE`: no `intent` or `text` column
+  exists in any of the three. Residual stated honestly: Unity Catalog keeps a
+  7-day `UNDROP TABLE` window, which is an admin action, not something the CLI
+  can reach.
+
+**Deliberate scope decision:** `file_path`, `branch`, `session_id`, `agent`,
+`model`, `linked_commit` and token counts still leave the machine. They are
+checkpoint metadata, not prompt or transcript content, and `file_churn` is
+unbuildable without `file_path`. Hashing them would buy little and would make
+the hotspot ranking unreadable. Stated here so it can be revisited rather than
+discovered.
+
+### Complete vs incomplete: one signal, not five
+
+The tool already reported degraded inputs — a warnings block, a "graph
+unavailable" line, a "Databricks unavailable" line, an intent-provenance label.
+Five signals, each true, each local to its own section, **none at the top**, and
+none covering a missing transcript, an absent `metadata.json`, or content
+Entire had already redacted. A reader who stopped before the warnings block
+read a partial reconstruction as a complete one.
+
+`completeness.py` now computes ONE verdict from all eight inputs, rendered
+first in the terminal report, first in the HTML report (above the stat grid,
+because those numbers are the most confident-looking thing on the page), and
+emitted as a machine-readable `completeness` object in every `--json` payload.
+
+Three consequences worth naming:
+
+* **Redaction is a third state.** Not "available", not "missing": the
+  checkpoint is intact and some of what it described is gone. It is reported as
+  `REDACTED` and counts as partial. Running against this repo's own checkpoints
+  now correctly reports PARTIAL — Entire redacted a token in them.
+* **"Not consulted" is not "fine".** `--no-graph` / `--no-databricks` degrade
+  the verdict rather than silently counting as healthy.
+* **`drift --fail-on-open` warns when it gates on partial context.** A gate
+  that goes green on context it could not fully read converts "we do not know"
+  into "we checked".
+
+And the sharpest instance, fixed: `render_decisions` printed
+`(no decision context recovered from this transcript)` whether the transcript
+was read and held nothing, or was missing, or was fully redacted — identical
+output for three different truths, in the section the product's central claim
+rests on. Those are now three different sentences.
+
+### The test
+
+`tools/checkpoint_lens/tests/test_privacy_boundary.py` — 21 tests over a
+**synthetic** checkpoint fixture, labelled as synthetic in the module
+docstring, the class name (`SyntheticCheckpointRepo`) and the commit that
+introduced it. It builds a real git repository with real
+`refs/entire/checkpoints/**` refs carrying four shapes: healthy, redacted
+(REDACTED markers), starved (no `prompt.txt`, no transcript), and no
+`metadata.json` at all. The redaction case also occurs in this repo's genuine
+checkpoints; the missing-field cases do not, and a test that only runs where
+the defect happens to exist is not a test.
+
+It asserts that degraded checkpoints still produce useful output, that a
+redacted checkpoint can never report COMPLETE, that missing metadata does not
+render as zero, and that the real outgoing rows — obtained from
+`DatabricksSync.build_rows`, the actual sync path — contain none of the
+fixture's prompt or transcript phrases.
+
+**96 tests pass: the 75 that existed before the curveball, unchanged, plus 21
+new ones.**
 
 ## Checkpoint links and what each checkpoint proves
 

@@ -28,6 +28,7 @@ from .databricks import DatabricksSync
 from .entities import parse_entity_changes, risky, touched_paths
 from .models import CheckpointRecord
 from .reader import CheckpointReader
+from . import completeness
 from . import html as htmlreport
 from . import report
 from . import requirements
@@ -66,6 +67,34 @@ def _load(args: argparse.Namespace) -> tuple[CheckpointReader, list[CheckpointRe
     return reader, records
 
 
+
+def _databricks_reason(args: argparse.Namespace) -> str | None:
+    """The Databricks availability reason, or None when it was not consulted.
+
+    None and "" are different answers and the banner treats them differently:
+    "" means we asked and it is up, None means nobody asked.
+    """
+    if getattr(args, "no_databricks", False):
+        return None
+    return DatabricksSync(args.repo).unavailable_reason()
+
+
+def _completeness(
+    args: argparse.Namespace,
+    rec: CheckpointRecord,
+    reader: CheckpointReader,
+    graph_ok: bool | None,
+    graph_detail: str = "",
+) -> Any:
+    return completeness.assess(
+        rec,
+        warnings=reader.warnings,
+        graph_ok=graph_ok,
+        graph_detail=graph_detail,
+        databricks_reason=_databricks_reason(args),
+    )
+
+
 def _select(records: list[CheckpointRecord], wanted: str | None) -> CheckpointRecord:
     if not wanted:
         return records[-1]
@@ -86,8 +115,15 @@ def cmd_handoff(args: argparse.Namespace) -> int:
     reader, records = _load(args)
     rec = _select(records, args.checkpoint)
 
+    # Resolved before anything is rendered: the banner has to lead the report,
+    # so its inputs must be known before the first line is emitted.
+    graph = GraphClient(args.repo)
+    graph_ok = None if args.no_graph else graph.available()
+    comp = _completeness(args, rec, reader, graph_ok)
+
     if args.json:
         payload: dict[str, Any] = {
+            "completeness": comp.to_dict(),
             "checkpoint": rec.to_dict(),
             "warnings": reader.warnings,
             "history_length": len(records),
@@ -103,6 +139,7 @@ def cmd_handoff(args: argparse.Namespace) -> int:
     lines.append(
         "  what was intended, what was decided, and what is still open."
     )
+    lines.extend(report.render_completeness(comp))
     lines.extend(report.render_checkpoint_summary(rec))
     lines.extend(report.render_intent(rec))
     lines.extend(report.render_sessions(rec))
@@ -110,7 +147,13 @@ def cmd_handoff(args: argparse.Namespace) -> int:
     lines.append(report.section("DECISIONS, RISKS AND OPEN QUESTIONS"))
     lines.append("  Recovered verbatim - never paraphrased or generated.")
     lines.append("")
-    lines.extend(report.render_decisions(rec.all_decisions(), limit=args.limit))
+    lines.extend(
+        report.render_decisions(
+            rec.all_decisions(),
+            limit=args.limit,
+            transcript_available=any(s.transcript_available for s in rec.sessions),
+        )
+    )
 
     lines.extend(report.render_files(rec))
 
@@ -151,7 +194,7 @@ def cmd_handoff(args: argparse.Namespace) -> int:
         _write_html(
             args.html,
             htmlreport.render_handoff(
-                rec, records, reader.warnings, graph_lines, agg
+                rec, records, reader.warnings, graph_lines, agg, comp
             ),
         )
     return 0
@@ -292,10 +335,26 @@ def cmd_drift(args: argparse.Namespace) -> int:
         if diff_res.ok:
             entity_changes = parse_entity_changes(diff_res.data)
 
+    # Drift compares two checkpoints, so its context is only as complete as
+    # the WEAKER of the two. Assessing the baseline alone would let a fully
+    # readable head hide a baseline whose plan we could not actually read -
+    # and the plan is the half the whole comparison rests on.
+    # None means "not consulted"; False means "asked and it could not answer".
+    # The banner phrases those differently, so the distinction has to survive
+    # the call rather than collapsing into a bare bool.
+    graph_state = None if args.no_graph else graph_ok
+    comp = _completeness(
+        args, baseline, reader, graph_state, "entire graph did not answer"
+    )
+    head_comp = _completeness(args, head, reader, graph_state, "entire graph did not answer")
+    if len(head_comp.degraded) > len(comp.degraded):
+        comp = head_comp
+
     if args.json:
         print(
             json.dumps(
                 {
+                    "completeness": comp.to_dict(),
                     "baseline_checkpoint": baseline.checkpoint_id,
                     "head_checkpoint": head.checkpoint_id,
                     "findings": [
@@ -325,6 +384,7 @@ def cmd_drift(args: argparse.Namespace) -> int:
     lines.append("  Current (head)  : %s" % head.checkpoint_id)
     lines.append("                    %s" % (head.linked_subject or "(unlinked)"))
 
+    lines.extend(report.render_completeness(comp))
     lines.extend(report.render_drift_findings(findings))
 
     lines.append(report.section("ENTITY-LEVEL CHANGE SINCE THE PLAN"))
@@ -364,6 +424,15 @@ def cmd_drift(args: argparse.Namespace) -> int:
     _emit(lines)
 
     open_items = [f for f in findings if f.is_open]
+    if args.fail_on_open and not comp.is_complete:
+        # A gate that goes green on context it could not fully read is worse
+        # than no gate: it converts "we do not know" into "we checked".
+        sys.stderr.write(
+            "\ndrift gate ran on PARTIAL context (%d of %d inputs missing or "
+            "redacted). A green result here means 'no drift found in what was "
+            "readable', not 'no drift'.\n"
+            % (len(comp.degraded), len(comp.inputs))
+        )
     if args.fail_on_open and open_items:
         sys.stderr.write(
             "\ndrift gate FAILED: %d of %d stated requirement(s) have no "
@@ -380,6 +449,7 @@ def cmd_drift(args: argparse.Namespace) -> int:
                 entity_changes,
                 diff_res.command_str if diff_res else "",
                 reader.warnings,
+                comp,
             ),
         )
     # Non-zero lets drift run as a release gate in CI: "did we build what the
@@ -461,10 +531,27 @@ def cmd_assess(args: argparse.Namespace) -> int:
     planned = set(rec.files_touched) if rec else set()
     unplanned = sorted(changed_paths - planned) if planned else []
 
+    comp = (
+        _completeness(args, rec, reader, None if args.no_graph else graph_ok)
+        if rec is not None
+        else None
+    )
+
     if args.json:
         print(
             json.dumps(
                 {
+                    "completeness": comp.to_dict() if comp else {
+                        "verdict": "PARTIAL",
+                        "is_complete": False,
+                        "inputs": [
+                            {
+                                "name": "checkpoint context",
+                                "status": "missing",
+                                "detail": "this commit has no checkpoint to read",
+                            }
+                        ],
+                    },
                     "commit": resolved or target,
                     "checkpoint": rec.checkpoint_id if rec else None,
                     "checkpoint_relation": nearest_note,
@@ -491,6 +578,7 @@ def cmd_assess(args: argparse.Namespace) -> int:
         return 1
 
     lines.append("  checkpoint: %s (%s)" % (rec.checkpoint_id, nearest_note))
+    lines.extend(report.render_completeness(comp))
     lines.extend(report.render_intent(rec))
 
     lines.append(report.section("WHAT THIS CHANGE ACTUALLY DID (ENTITY-LEVEL)"))
@@ -660,13 +748,65 @@ def _databricks_section(args: argparse.Namespace, headline_only: bool = False) -
     return lines
 
 
+def _egress_manifest(sync: DatabricksSync, records: list[CheckpointRecord]) -> list[str]:
+    """Print exactly what a sync would send, having sent nothing.
+
+    Built from `DatabricksSync.build_rows` - the same function the real sync
+    uses - so this is the outgoing payload rather than a description of it.
+    Anyone can audit the egress boundary without credentials, without a
+    warehouse, and without trusting this file.
+    """
+    from .databricks import EGRESS_COLUMNS
+
+    built = sync.build_rows(records)
+    lines = [report.section("EGRESS MANIFEST (DRY RUN - NOTHING WAS SENT)")]
+    lines.append("  Only derived signals leave this machine: counts, kinds,")
+    lines.append("  enums, salted digests and identifiers. No prompt text and")
+    lines.append("  no transcript text, at any length.")
+    for table, rows in built.items():
+        cols = EGRESS_COLUMNS[table]
+        lines.append("")
+        lines.append("  %s - %d row(s), %d column(s)" % (table, len(rows), len(cols)))
+        lines.append("    columns: " + ", ".join(c for c, _ in cols))
+        if rows:
+            lines.append("    example row (real, from this repo):")
+            for (col, kind), value in zip(cols, rows[0]):
+                lines.append("      %-22s %-6s %r" % (col, kind, value))
+    lines.append("")
+    lines.append("  Verified by assert_egress_safe: every value above matches")
+    lines.append("  its declared kind. A free-text value would have raised.")
+    return lines
+
+
 def cmd_sync(args: argparse.Namespace) -> int:
     reader, records = _load(args)
     sync = DatabricksSync(args.repo)
+
+    if args.dry_run:
+        # Deliberately ahead of the availability check: auditing what WOULD be
+        # sent must not require the ability to send it.
+        _emit(_egress_manifest(sync, records))
+        return 0
+
     reason = sync.unavailable_reason()
     if reason:
         sys.stderr.write("Databricks unavailable: " + reason + "\n")
         return 2
+
+    if args.purge:
+        # Erasing data already sent is part of fixing a leak, not a separate
+        # nicety: stopping future writes leaves the old rows sitting there.
+        sys.stdout.write("Purging externally held checkpoint data:\n")
+        for statement in sync.purge_statements():
+            sys.stdout.write("  " + statement + "\n")
+        res = sync.purge()
+        if not res.ok:
+            sys.stderr.write("purge failed: " + res.error + "\n")
+            return 1
+        sys.stdout.write(
+            "Dropped %d table(s). Re-creating on the text-free schema...\n"
+            % len(res.detail)
+        )
 
     if not args.query_only:
         res = sync.sync(records)
@@ -754,6 +894,14 @@ def build_parser() -> argparse.ArgumentParser:
     y = sub.add_parser("sync", help="push checkpoint records to Databricks and read aggregates back")
     common(y)
     y.add_argument("--query-only", action="store_true", help="do not write; only read aggregates")
+    y.add_argument(
+        "--dry-run", action="store_true",
+        help="print the exact rows a sync would send and exit; connects to nothing",
+    )
+    y.add_argument(
+        "--purge", action="store_true",
+        help="drop the remote tables before syncing (erases previously sent data)",
+    )
     y.add_argument("--no-databricks", action="store_true", help=argparse.SUPPRESS)
     y.set_defaults(func=cmd_sync)
 

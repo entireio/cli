@@ -22,6 +22,7 @@ import subprocess
 from typing import Any, Iterable
 
 from .models import (
+    has_redaction_marker,
     INTENT_FROM_FIRST_PROMPT,
     INTENT_FROM_SUMMARY,
     INTENT_FROM_TRANSCRIPT,
@@ -318,13 +319,23 @@ class CheckpointReader:
     ) -> SessionRecord:
         meta_raw = self._blob(tree, entry.get("metadata") or ("/%d/metadata.json" % idx))
         meta: dict[str, Any] = {}
+        metadata_available = False
         if meta_raw:
             try:
                 meta = json.loads(meta_raw)
+                metadata_available = True
             except json.JSONDecodeError as exc:
                 self._warnings.append(
                     "session %d of %s has unreadable metadata: %s" % (idx, cid, exc)
                 )
+        else:
+            # Silently defaulting here is how an absent blob used to render as
+            # a real session with zero turns. Say it instead.
+            self._warnings.append(
+                "session %d of %s has no readable metadata.json - "
+                "agent, model, turn and token figures are unavailable, not zero"
+                % (idx, cid)
+            )
 
         metrics = meta.get("session_metrics") or {}
         sess = SessionRecord(
@@ -340,10 +351,12 @@ class CheckpointReader:
             files_touched=list(meta.get("files_touched") or []),
             token_usage=TokenUsage.from_dict(meta.get("token_usage")),
             attribution=Attribution.from_dict(meta.get("initial_attribution")),
+            metadata_available=metadata_available,
         )
 
         prompt_raw = self._blob(tree, entry.get("prompt") or ("/%d/prompt.txt" % idx))
         if prompt_raw:
+            sess.prompt_available = True
             sess.prompts = [
                 p.strip() for p in PROMPT_SEPARATOR.split(prompt_raw) if p.strip()
             ]
@@ -358,6 +371,20 @@ class CheckpointReader:
         )
         if transcript:
             sess.transcript_available = True
+        else:
+            self._warnings.append(
+                "session %d of %s has no readable transcript - decisions, "
+                "risks and open questions could not be recovered at all" % (idx, cid)
+            )
+
+        # Entire redacts secrets before a transcript is ever committed, so a
+        # checkpoint can be present, readable, and still missing content. That
+        # is a third state between "have it" and "do not have it", and the
+        # completeness banner reports it as such.
+        sess.redacted_content = any(
+            has_redaction_marker(chunk)
+            for chunk in (transcript or "", prompt_raw or "")
+        )
 
         # Extraction needs the prompts (to suppress echoes) and the commit
         # message (the highest-authority decision source), so it runs only once
