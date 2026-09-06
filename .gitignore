@@ -79,3 +79,6 @@ tools/**/__pycache__/
 # Databricks credentials - MUST NEVER be committed
 .databricks.local.json
 .env.databricks
+
+# Checkpoint Lens verification baseline (machine-specific)
+.entire/lens-verify-baseline.json

@@ -363,6 +363,13 @@ def cmd_drift(args: argparse.Namespace) -> int:
     )
     _emit(lines)
 
+    open_items = [f for f in findings if f.is_open]
+    if args.fail_on_open and open_items:
+        sys.stderr.write(
+            "\ndrift gate FAILED: %d of %d stated requirement(s) have no "
+            "complete implementation evidence.\n" % (len(open_items), len(findings))
+        )
+
     if args.html:
         _write_html(
             args.html,
@@ -375,6 +382,10 @@ def cmd_drift(args: argparse.Namespace) -> int:
                 reader.warnings,
             ),
         )
+    # Non-zero lets drift run as a release gate in CI: "did we build what the
+    # plan said we would?" fails the pipeline the same way a red test does.
+    if args.fail_on_open and open_items:
+        return 1
     return 0
 
 
@@ -519,9 +530,46 @@ def cmd_assess(args: argparse.Namespace) -> int:
     else:
         lines.append("  Every changed file appears in the checkpoint's file list.")
 
+    if args.verify:
+        lines.extend(_verify_section(args, graph))
+
     lines.extend(report.render_warnings(reader.warnings))
     _emit(lines)
     return 0
+
+
+def _verify_section(args: argparse.Namespace, graph: GraphClient) -> list[str]:
+    """Run the project's tests and report an adjudicated verdict.
+
+    An assessment that says what changed but not whether it still works is
+    half an answer. This is the half that survives a reviewer asking "and did
+    you run it?".
+    """
+    lines = [report.section("VERIFICATION")]
+    if args.no_graph or not graph.available():
+        lines.append("  graph unavailable - cannot adjudicate a test run.")
+        return lines
+    res, recorded = graph.verify(args.verify, args.verify_baseline)
+    lines.append("  evidence command (rerun to verify):")
+    lines.append("    $ " + res.command_str)
+    lines.append("")
+    if not res.ok:
+        lines.append("  verification FAILED to run: " + (res.error or "unknown")[:300])
+        lines.append("  NOTE: a verifier that did not run is not a passing test.")
+        return lines
+    if recorded:
+        lines.append("  BASELINE RECORDED (%s)." % args.verify_baseline)
+        lines.append("  This run is a STATE, not a delta: it says which tests pass")
+        lines.append("  now, not which ones this change broke. Re-run after an edit")
+        lines.append("  to get a before/after verdict.")
+        lines.append("")
+    body = (res.text or "").strip()
+    if body:
+        for line in body.splitlines()[:20]:
+            lines.append("  " + line)
+    else:
+        lines.append("  (verifier returned no output)")
+    return lines
 
 
 def _resolve_rev(repo: str, rev: str) -> str:
@@ -682,6 +730,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="graph parsing depth; 'full' is slower but resolves call graphs",
     )
     d.add_argument("--jobs", type=int, default=6, help="concurrent graph searches")
+    d.add_argument(
+        "--fail-on-open", action="store_true",
+        help="exit non-zero if any stated requirement is unimplemented (CI gate)",
+    )
     d.add_argument("--no-databricks", action="store_true", help="skip Databricks")
     d.set_defaults(func=cmd_drift)
 
@@ -689,6 +741,14 @@ def build_parser() -> argparse.ArgumentParser:
     common(a)
     a.add_argument("commitish", help="commit to assess (sha, tag, HEAD~1, ...)")
     a.add_argument("--no-databricks", action="store_true", help="skip Databricks")
+    a.add_argument(
+        "--verify", metavar="TEST_CMD",
+        help="run this test command and report an adjudicated pass/fail verdict",
+    )
+    a.add_argument(
+        "--verify-baseline", metavar="PATH", default=".entire/lens-verify-baseline.json",
+        help="baseline file for adjudicated verification (recorded if absent)",
+    )
     a.set_defaults(func=cmd_assess)
 
     y = sub.add_parser("sync", help="push checkpoint records to Databricks and read aggregates back")

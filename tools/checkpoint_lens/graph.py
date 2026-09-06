@@ -14,6 +14,7 @@ Two rules this module enforces, both from the Graph operating guide:
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 from dataclasses import dataclass, field
@@ -181,6 +182,38 @@ class GraphClient:
         return self._run(
             ["graph", "checkpoint", "--repo", self.repo, "--id", checkpoint_id, "--format", "json"]
         )
+
+    def verify(
+        self, test_command: str, baseline: str, timeout: int = 900
+    ) -> tuple[GraphResult, bool]:
+        """Run a test command and return an adjudicated verdict.
+
+        Deliberately uses ``entire graph verify`` rather than running the tests
+        ourselves: it reports *which tests changed state* - newly passing,
+        newly failing, or already failing beforehand - instead of dumping
+        runner output. That distinction is the whole point when the question is
+        "does this change break anything", because a test that was already red
+        is not evidence against this change.
+
+        The verifier requires a baseline. When none exists yet this records one
+        and returns ``recorded=True``: the result is then a *state*, not a
+        delta, and the caller must say so rather than presenting a first run as
+        proof that nothing regressed.
+        """
+        flag = "--pre-edit-baseline" if os.path.isfile(baseline) else "--record-baseline"
+        previous, self.timeout = self.timeout, timeout
+        try:
+            res = self._run(
+                [
+                    "graph", "verify",
+                    "--repo", self.repo,
+                    "--test", test_command,
+                    flag, baseline,
+                ]
+            )
+        finally:
+            self.timeout = previous
+        return res, flag == "--record-baseline"
 
 
 def _names(payload: dict[str, Any], *keys: str) -> list[str]:
