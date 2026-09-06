@@ -395,6 +395,11 @@ func (s *ManualCommitStrategy) PrepareCommitMsg(ctx context.Context, commitMsgFi
 			slog.String("strategy", "manual-commit"),
 			slog.String("source", source),
 		)
+		if err == nil {
+			// Only warn on a proven-empty listing, not on a listing error —
+			// we can't claim "no session" when we don't actually know.
+			s.warnIfAgentCommitHasNoSession(ctx)
+		}
 		return nil
 	}
 	findSessionsSpan.End()
@@ -845,6 +850,98 @@ func warnStaleEndedSessionsTo(ctx context.Context, count int, w io.Writer) {
 		"\nentire: %d ended session(s) are accumulating and slowing down commits.\n"+
 			"Run 'entire doctor' to condense them and restore commit performance.\n\n",
 		count,
+	)
+}
+
+// agentCommitNoSessionWarnInterval/File rate-limit the warning below the same
+// way staleEndedSessionWarnInterval/File do: a sentinel file's mtime under
+// entire-sessions/, shared across worktrees (session state already is), so
+// the warning re-appears at most once per window rather than on every commit
+// while the underlying cause (e.g. an agent session started outside any
+// worktree) persists.
+const (
+	agentCommitNoSessionWarnInterval = 24 * time.Hour
+	agentCommitNoSessionWarnFile     = ".warn-agent-no-session"
+)
+
+// warnIfAgentCommitHasNoSession prints a rate-limited, visible warning when a
+// coding agent appears to be driving this commit but no session anywhere in
+// the repository (any worktree) has recorded recent activity — the "this
+// commit will not be linked to any session" case from issue #1965. It is
+// called from PrepareCommitMsg's "no active sessions" branch, which is the
+// exact point where the only trace of the condition used to be a debug-only
+// log line no normal user would ever see.
+//
+// The condition is deliberately cause-agnostic. "Agent committing, nothing
+// recorded" is reachable many ways — the agent session started outside this
+// worktree (e.g. a bare-clone layout's shared root), the git hooks are
+// registered but the entire binary they invoke fails to parse this repo's
+// settings, hook config drifted out of the agent's own settings file, or
+// session state was wiped mid-conversation by `entire clean` — and at the
+// moment of the commit this hook already has everything needed to notice the
+// shared symptom without having to diagnose which cause produced it.
+//
+// Firing requires all three, each independently necessary:
+//
+//  1. An agent env marker is present (interactive.HasAgentEnvMarker). A human
+//     typing `git commit` with no agent involved never warns — this is the
+//     line between "Entire enabled but no session recording" (worth a
+//     warning) and "no agent running at all" (indistinguishable from an
+//     ordinary human commit, and must stay silent).
+//  2. No session anywhere in the repository shows recent activity
+//     (isRecentInteraction against LastInteractionTime). The caller already
+//     knows sessions matched to *this* worktree/identity came up empty; this
+//     re-checks the full listing because a live session in a sibling
+//     worktree (task fan-out, an isolated review checkout, an agent cd-ing
+//     between worktrees) is a deliberate, healthy shape — `entire session
+//     adopt` already covers moving it — and warning there would mostly nag
+//     power users rather than catch a real miss.
+//  3. Not rate-limited (see the sentinel-file constants above), fail-open on
+//     any file error exactly like warnStaleEndedSessions.
+//
+// settings.IsSetUpAndEnabled is intentionally NOT re-checked here: the sole
+// caller reaches this strategy method through the `entire hooks git` command
+// tree, which already refuses to invoke any hook handler at all when Entire
+// is not set up and enabled for the repo (hooks_git_cmd.go's
+// PersistentPreRun sets gitHooksDisabled and returns before RunE). A
+// disabled or never-configured repo therefore never reaches this function.
+func (s *ManualCommitStrategy) warnIfAgentCommitHasNoSession(ctx context.Context) {
+	s.warnIfAgentCommitHasNoSessionTo(ctx, stderrWriter)
+}
+
+func (s *ManualCommitStrategy) warnIfAgentCommitHasNoSessionTo(ctx context.Context, w io.Writer) {
+	if !interactive.HasAgentEnvMarker() {
+		return
+	}
+
+	states, err := s.listAllSessionStates(ctx)
+	if err != nil {
+		return // fail-open: couldn't prove "no session", so don't claim it
+	}
+	for _, state := range states {
+		if isRecentInteraction(state.LastInteractionTime) {
+			return // a session is live somewhere in the repo — stay quiet
+		}
+	}
+
+	root, err := gitdir.Open(ctx)
+	if err != nil {
+		return // fail-open
+	}
+	warnFile := session.SessionStateDirName + "/" + agentCommitNoSessionWarnFile
+	if info, statErr := root.Lstat(warnFile); statErr == nil {
+		if time.Since(info.ModTime()) < agentCommitNoSessionWarnInterval {
+			return // rate-limited
+		}
+	}
+	//nolint:errcheck // Best-effort warning — fail-open if file ops fail
+	_ = osroot.MkdirAllNoSymlink(root, session.SessionStateDirName, 0o750)
+	//nolint:errcheck // Best-effort sentinel file write
+	_ = jsonutil.WriteFileAtomicIn(root, warnFile, []byte{}, 0o644)
+	fmt.Fprint(w,
+		"\nentire: warning: a commit was made but no active Entire session was found — "+
+			"this commit will not be linked to any session.\n"+
+			"Run 'entire doctor' if this is unexpected.\n\n",
 	)
 }
 
