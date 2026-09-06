@@ -1,0 +1,1 @@
+{"checkpoint_id":"01TEST","files_touched":["old.go"],"sessions":[{"index":0,"session_id":"session-1"},{"index":1,"session_id":"session-2","files_touched":["new.go"]}]}

@@ -1,0 +1,8 @@
+diff --git a/new.go b/new.go
+index 1111111..2222222 100644
+--- a/new.go
++++ b/new.go
+@@ -0,0 +1,3 @@
++package new
++
++func Added() {}
