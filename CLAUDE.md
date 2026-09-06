@@ -47,8 +47,9 @@ the commands are always runnable in every build.
   worktree and resets target-local checkpoint bookkeeping so future commits link
   to the adopted session from the new location.
 - `checkpoint` (aliases: `cp`, `checkpoints`): `list`, `explain`, `tokens`, `search`.
-  `explain` also takes `--repo <owner/name>`, the drill-down for a cross-repo
-  `search` hit: it reads the checkpoint from that repo's entire-api cell over
+  `explain` also takes a forge-qualified `--repo` (`gh/<owner>/<name>` or
+  `et/<project>/<name>`), the drill-down for a cross-repo `search` hit: it
+  reads the checkpoint from that repo's entire-api cell over
   HTTP (`/repos/{repo_id}/checkpoints/{id}` plus `.../transcript/raw`) rather
   than fetching git objects, so a foreign checkpoint never enters this repo's
   object store, ref namespace, or `tokens profile`. It needs a full checkpoint

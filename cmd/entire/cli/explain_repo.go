@@ -3,7 +3,6 @@ package cli
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"strings"
@@ -25,17 +24,17 @@ type crossRepoReader interface {
 	checkpointCommit(ctx context.Context, checkpointID id.CheckpointID) ([]associatedCommit, error)
 }
 
-// newCrossRepoReader builds the API-backed reader for owner/repo. Injectable so
-// tests can substitute a fake cell (see explain_repo_test.go).
-var newCrossRepoReader = func(ctx context.Context, insecureHTTP bool, owner, repo string) (crossRepoReader, error) {
-	ownerRepo := owner + "/" + repo
+// newCrossRepoReader builds the API-backed reader for a forge-qualified repo.
+// Injectable so tests can substitute a fake cell (see explain_repo_test.go).
+var newCrossRepoReader = func(ctx context.Context, insecureHTTP bool, forge, owner, repo string) (crossRepoReader, error) {
+	repoRef := explainRepoRef(forge, owner, repo)
 	// Resolve the repo_id and the cell together, from one placement: a mirror id
-	// is only resolvable by the cell holding that placement, so a
-	// separately-chosen cell (the caller's home cell, for a multi-region repo)
-	// would be asked about an id it has never seen and answer 404.
-	placement, err := resolveRepoCellPlacement(ctx, owner, repo)
+	// or native repo id is only resolvable by the cell holding that repository,
+	// so a separately-chosen cell (the caller's home cell, for a multi-region
+	// repo) would be asked about an id it has never seen and answer 404.
+	placement, err := resolveForgeRepoCellPlacement(ctx, forge, owner, repo)
 	if err != nil {
-		// Not wrapped with ownerRepo: resolveRepoCellPlacement already names it,
+		// Not wrapped with repoRef: the placement resolver already names it,
 		// and adding it here is what made this path print the repo twice.
 		return nil, err
 	}
@@ -45,7 +44,7 @@ var newCrossRepoReader = func(ctx context.Context, insecureHTTP bool, owner, rep
 		// errors (login hint, discovery guidance); surface them verbatim.
 		return nil, err //nolint:wrapcheck // pass through contextual auth errors
 	}
-	return newAPICheckpointReader(client, placement.RepoID, ownerRepo), nil
+	return newAPICheckpointReader(client, placement.RepoID, repoRef, explainRepoFullName(forge, owner, repo)), nil
 }
 
 // crossRepoReadKey marks a context as rendering a checkpoint read from another
@@ -86,33 +85,78 @@ type crossRepoExplainOptions struct {
 	insecureHTTP bool
 }
 
-// parseExplainRepoFlag parses `--repo`. Accepted shapes are `owner/name` and
-// `gh/owner/name` (leading slash optional), matching the `repo` field of
-// `entire search` results, which is where a cross-repo checkpoint ID comes
-// from. Returns lowercased coordinates, as the control plane persists them.
+const explainRepoFlagShapes = "gh/owner/name, et/project/repo, entire://<host>/gh/<owner>/<repo>, or entire://<host>/et/<project>/<repo>"
+
+// parseExplainRepoFlag parses `--repo`. Every accepted form states its forge:
+// gh/owner/repo or et/project/repo, including as the path of a full entire://
+// clone URL. Leading slashes are optional on path refs. Returns lowercased
+// coordinates, as the control plane persists them.
 //
 // A bare repo ID is deliberately not accepted: the control plane and the search
 // index expose different identifiers for a repository, and guessing which space
 // an opaque ID belongs to would key the cell lookup off the wrong one.
-func parseExplainRepoFlag(value string) (owner, repo string, err error) {
+func parseExplainRepoFlag(value string) (forge, owner, repo string, err error) {
 	v := strings.TrimSpace(value)
 	if v == "" {
-		return "", "", errors.New("--repo requires a value: owner/name or gh/owner/name")
+		return "", "", "", fmt.Errorf("--repo requires a value: %s", explainRepoFlagShapes)
 	}
-	if !strings.Contains(v, "/") {
-		return "", "", fmt.Errorf("invalid --repo %q: expected owner/name or gh/owner/name", value)
+
+	if isEntireCloneURL(v) {
+		info, parseErr := gitremote.ParseURL(v)
+		if parseErr != nil || info.Protocol != gitremote.ProtocolEntire || info.Host == "" {
+			return "", "", "", fmt.Errorf("invalid --repo %q: expected %s", gitremote.RedactURL(v), explainRepoFlagShapes)
+		}
+		ref := info.Forge + "/" + info.Owner + "/" + info.Repo
+		switch info.Forge {
+		case nativeCloneForge:
+			project, repoName, nativeErr := parseNativeCloneRef(ref)
+			if nativeErr != nil {
+				return "", "", "", fmt.Errorf("invalid --repo %q: expected %s: %w", gitremote.RedactURL(v), explainRepoFlagShapes, nativeErr)
+			}
+			return nativeCloneForge, strings.ToLower(project), strings.ToLower(repoName), nil
+		case mirrorCloneForge:
+			_, owner, repoName, mirrorErr := parseMirrorCloneRef(ref)
+			if mirrorErr != nil {
+				return "", "", "", fmt.Errorf("invalid --repo %q: expected %s: %w", gitremote.RedactURL(v), explainRepoFlagShapes, mirrorErr)
+			}
+			return mirrorCloneForge, owner, repoName, nil
+		default:
+			return "", "", "", fmt.Errorf("invalid --repo %q: unsupported forge %q; expected %s", gitremote.RedactURL(v), info.Forge, explainRepoFlagShapes)
+		}
 	}
-	// Normalize to the gh/owner/name clone-ref shape so the mirror parser's
-	// GitHub charset validation applies to both accepted forms.
+
 	ref := strings.TrimPrefix(v, "/")
-	if !strings.HasPrefix(ref, "gh/") {
-		ref = "gh/" + ref
+	switch {
+	case strings.HasPrefix(ref, nativeCloneForge+"/"):
+		project, repoName, nativeErr := parseNativeCloneRef(ref)
+		if nativeErr != nil {
+			return "", "", "", fmt.Errorf("invalid --repo %q: expected %s: %w", value, explainRepoFlagShapes, nativeErr)
+		}
+		return nativeCloneForge, strings.ToLower(project), strings.ToLower(repoName), nil
+	case strings.HasPrefix(ref, mirrorCloneForge+"/"):
+		_, owner, repo, mirrorErr := parseMirrorCloneRef(ref)
+		if mirrorErr != nil {
+			return "", "", "", fmt.Errorf("invalid --repo %q: expected %s: %w", value, explainRepoFlagShapes, mirrorErr)
+		}
+		return mirrorCloneForge, owner, repo, nil
+	default:
+		return "", "", "", fmt.Errorf("invalid --repo %q: forge prefix is required; expected %s", value, explainRepoFlagShapes)
 	}
-	_, owner, repo, err = parseMirrorCloneRef(ref)
-	if err != nil {
-		return "", "", fmt.Errorf("invalid --repo %q: expected owner/name or gh/owner/name: %w", value, err)
+}
+
+func explainRepoRef(forge, owner, repo string) string {
+	return forge + "/" + owner + "/" + repo
+}
+
+func explainRepoFullName(forge, owner, repo string) string {
+	// This is the identity spelling returned by entire-api's repo_full_name,
+	// not an attempt to recover a missing provider. The parser has already
+	// required forge explicitly. GitHub mirror rows retain their legacy
+	// owner/repo full_name; native rows are namespaced by et/.
+	if forge == nativeCloneForge {
+		return forge + "/" + owner + "/" + repo
 	}
-	return owner, repo, nil
+	return owner + "/" + repo
 }
 
 // explainRepoTargetsCurrentRepo reports whether the --repo value names the repo
@@ -120,25 +164,25 @@ func parseExplainRepoFlag(value string) (owner, repo string, err error) {
 // runs and reports the parse error, rather than silently falling through to the
 // local path.
 func explainRepoTargetsCurrentRepo(ctx context.Context, repoFlag string) bool {
-	owner, repo, err := parseExplainRepoFlag(repoFlag)
+	forge, owner, repo, err := parseExplainRepoFlag(repoFlag)
 	if err != nil {
 		return false
 	}
-	return explainRepoIsCurrent(ctx, owner, repo)
+	return explainRepoIsCurrent(ctx, forge, owner, repo)
 }
 
-// explainRepoIsCurrent reports whether owner/repo names the same repository as
-// the cwd worktree's origin remote (which handles ssh, https, and entire://
-// mirror URL forms). --repo is GitHub-scoped, so a non-GitHub origin with a
-// coincidentally matching owner/name must not match. Best-effort: any lookup or
-// parse failure returns false and the cross-repo path runs.
+// explainRepoIsCurrent reports whether forge/owner/repo names the same
+// repository as the cwd worktree's origin remote (which handles ssh, https,
+// and entire:// URL forms). The forge comparison prevents same-named native
+// and GitHub repositories from matching. Best-effort: any lookup or parse
+// failure returns false and the cross-repo path runs.
 //
 // When it does match, explain falls through to the local path — which is both
 // faster and strictly more capable, since it can read checkpoints that have not
 // been pushed yet.
-func explainRepoIsCurrent(ctx context.Context, owner, repo string) bool {
+func explainRepoIsCurrent(ctx context.Context, forge, owner, repo string) bool {
 	curForge, curOwner, curRepo, err := gitremote.ResolveRemoteRepo(ctx, "origin")
-	if err != nil || curForge != "gh" {
+	if err != nil || !strings.EqualFold(curForge, forge) {
 		return false
 	}
 	return strings.EqualFold(curOwner, owner) && strings.EqualFold(curRepo, repo)
@@ -152,11 +196,11 @@ func explainRepoIsCurrent(ctx context.Context, owner, repo string) bool {
 // The output modes reuse the same renderers as the local path, so a foreign
 // checkpoint prints identically to a local one.
 func runCrossRepoExplain(ctx context.Context, w, errW io.Writer, opts crossRepoExplainOptions) error {
-	owner, repoName, err := parseExplainRepoFlag(opts.repoFlag)
+	forge, owner, repoName, err := parseExplainRepoFlag(opts.repoFlag)
 	if err != nil {
 		return err
 	}
-	ownerRepo := owner + "/" + repoName
+	repoRef := explainRepoRef(forge, owner, repoName)
 
 	// A prefix can't be resolved without listing the foreign repo's
 	// checkpoints, which is `entire search`'s job, so cross-repo needs the
@@ -166,18 +210,18 @@ func runCrossRepoExplain(ctx context.Context, w, errW io.Writer, opts crossRepoE
 		return fmt.Errorf("--repo requires a full checkpoint ID (12-char hex or 26-char ULID); a prefix cannot be resolved in another repo: %w", err)
 	}
 
-	reader, err := newCrossRepoReader(ctx, opts.insecureHTTP, owner, repoName)
+	reader, err := newCrossRepoReader(ctx, opts.insecureHTTP, forge, owner, repoName)
 	if err != nil {
-		if rendered := renderRepoNotOnboarded(errW, ownerRepo, err); rendered != nil {
+		if rendered := renderRepoNotOnboarded(errW, repoRef, err); rendered != nil {
 			return rendered
 		}
 		return err
 	}
 	// Marked for the renderers: a foreign checkpoint cannot be written to, so
 	// they must not offer actions that only work in the owning repo.
-	ctx = withCrossRepoRead(ctx, ownerRepo)
+	ctx = withCrossRepoRead(ctx, repoRef)
 
-	stop := startSpinner(errW, fmt.Sprintf("Reading checkpoint %s from %s", cid, ownerRepo))
+	stop := startSpinner(errW, fmt.Sprintf("Reading checkpoint %s from %s", cid, repoRef))
 	// Read directly rather than through checkpoint.ReadCheckpoint: the helper
 	// prefixes "read persistent checkpoint:", which buries the reader's
 	// already-user-facing message (e.g. the not-pushed-yet guidance) behind
@@ -189,7 +233,7 @@ func runCrossRepoExplain(ctx context.Context, w, errW io.Writer, opts crossRepoE
 	}
 	if summary == nil {
 		stop(false)
-		return fmt.Errorf("checkpoint %s is not available for %s", cid, ownerRepo)
+		return fmt.Errorf("checkpoint %s is not available for %s", cid, repoRef)
 	}
 
 	switch {
@@ -204,7 +248,7 @@ func runCrossRepoExplain(ctx context.Context, w, errW io.Writer, opts crossRepoE
 		// succeeded and then contradicts it.
 		if len(content.Transcript) == 0 {
 			stop(false)
-			return fmt.Errorf("checkpoint %s in %s has no transcript", cid, ownerRepo)
+			return fmt.Errorf("checkpoint %s in %s has no transcript", cid, repoRef)
 		}
 		stop(true)
 		if _, err := w.Write(content.Transcript); err != nil {
