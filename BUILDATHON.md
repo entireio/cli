@@ -75,6 +75,16 @@ The application consists of three integrated, clean layers:
                          └─────────────────┘
 ```
 
+## Commit & Development Context Navigation
+- **Git to Checkpoint Data Pipeline**: Maps Git commits to corresponding Entire Checkpoint sessions (`app/models/commit.go`, `app/providers/commit_provider.go`).
+- **REST API Contracts**:
+  - `GET /api/repositories/:id/commits`: Retrieves recent Git commit history with SHA, Author, Message, Timestamp, and Changed Files.
+  - `GET /api/repositories/:id/commits/:sha/context`: Retrieves detailed `CommitDevelopmentContext` mapping Git commit to sanitized Entire Checkpoint context.
+- **Explicit Context Distinction**:
+  - `AVAILABLE`: Commit has an associated Entire Checkpoint (`[Entire Checkpoint Available]`).
+  - `UNAVAILABLE`: Commit has no Checkpoint context (`[Git-Only / Checkpoint Unavailable]`).
+  - Missing or incomplete Checkpoints explicitly return `MissingContextReason` instead of fabricating data.
+
 ## Entire Graph findings and verification
 Entire Graph structural findings are integrated to verify symbol definitions, call relationships, and semantic diff impact:
 - Indexed AST definitions and call-chains across modified modules.

@@ -50,10 +50,11 @@ export class CheckpointSidebarViewProvider implements vscode.WebviewViewProvider
             const readiness = await this._apiClient.getReadiness();
             const reqs = await this._apiClient.getRequirements();
             const checkpoints = await this._apiClient.getCheckpoints();
+            const commits = await this._apiClient.getCommits();
             const graph = await this._apiClient.getGraphFindings();
             const handoff = await this._apiClient.getHandoff();
 
-            this._view.webview.html = this.getHtmlForWebview(readiness, reqs, checkpoints, graph, handoff);
+            this._view.webview.html = this.getHtmlForWebview(readiness, reqs, checkpoints, commits, graph, handoff);
         } catch (error) {
             this._view.webview.html = `
                 <!DOCTYPE html>
@@ -68,7 +69,7 @@ export class CheckpointSidebarViewProvider implements vscode.WebviewViewProvider
         }
     }
 
-    private getHtmlForWebview(readiness: any, reqs: any[], checkpoints: any[], graph: any[], handoff: any): string {
+    private getHtmlForWebview(readiness: any, reqs: any[], checkpoints: any[], commits: any[], graph: any[], handoff: any): string {
         const reqRows = reqs.map(r => `
             <div style="background: var(--vscode-sideBar-background); border: 1px solid var(--vscode-widget-border); padding: 8px; margin-bottom: 8px; border-radius: 4px;">
                 <div style="display: flex; justify-content: space-between; font-weight: bold;">
@@ -78,6 +79,25 @@ export class CheckpointSidebarViewProvider implements vscode.WebviewViewProvider
                 <div style="font-size: 0.85em; color: var(--vscode-descriptionForeground); margin-top: 4px;">${r.description}</div>
             </div>
         `).join('');
+
+        const commitRows = commits.map(c => {
+            const hasCp = checkpoints.some(cp => cp.commit_ref === c.short_sha || cp.commit_ref === c.sha);
+            const statusBadge = hasCp 
+                ? '<span style="color: #4CAF50; font-size: 0.75em; font-weight: bold;">[Entire Checkpoint Available]</span>' 
+                : '<span style="color: #888; font-size: 0.75em;">[Git-Only / Checkpoint Unavailable]</span>';
+            return `
+                <div style="padding: 8px 0; border-bottom: 1px dashed var(--vscode-widget-border); font-size: 0.85em;">
+                    <div style="display: flex; justify-content: space-between;">
+                        <strong><code>${c.short_sha}</code></strong>
+                        ${statusBadge}
+                    </div>
+                    <div>${c.message}</div>
+                    <div style="font-size: 0.8em; color: var(--vscode-descriptionForeground); margin-top: 2px;">
+                        By ${c.author_name} &bull; ${c.files_changed ? c.files_changed.length : 0} files changed
+                    </div>
+                </div>
+            `;
+        }).join('');
 
         const cpRows = checkpoints.map(cp => `
             <div style="padding: 6px 0; border-bottom: 1px dashed var(--vscode-widget-border); font-size: 0.85em;">
@@ -111,6 +131,11 @@ export class CheckpointSidebarViewProvider implements vscode.WebviewViewProvider
                         Privacy Redaction: Active
                     </div>
                     ${!readiness.entire_enabled ? '<button onclick="post(\'enable\')">Enable Entire Checkpoints</button>' : ''}
+                </div>
+
+                <h4>Commits & Development History</h4>
+                <div class="card">
+                    ${commitRows}
                 </div>
 
                 <h4>Requirements Audit</h4>
