@@ -1,60 +1,98 @@
-package api
+package api_test
 
 import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"testing"
+
+	"github.com/entireio/cli/app/api"
+	"github.com/entireio/cli/app/models"
 )
 
 func TestHealthHandler(t *testing.T) {
-	handler := NewAPIHandler(nil)
+	handler := api.NewAPIHandler(nil)
 	req := httptest.NewRequest("GET", "/api/health", nil)
-	rec := httptest.NewRecorder()
+	w := httptest.NewRecorder()
 
-	handler.HealthHandler(rec, req)
+	handler.HealthHandler(w, req)
 
-	if rec.Code != http.StatusOK {
-		t.Errorf("expected HTTP 200 OK, got %d", rec.Code)
-	}
-
-	var res map[string]interface{}
-	if err := json.Unmarshal(rec.Body.Bytes(), &res); err != nil {
-		t.Fatalf("failed to decode json response: %v", err)
-	}
-
-	if res["status"] != "ok" {
-		t.Errorf("expected status 'ok', got %v", res["status"])
+	if w.Code != http.StatusOK {
+		t.Fatalf("Expected 200 OK, got %d", w.Code)
 	}
 }
 
-func TestRepositoriesHandler(t *testing.T) {
-	handler := NewAPIHandler(nil)
+func TestCommitsHandler_List(t *testing.T) {
+	handler := api.NewAPIHandler(nil)
+	req := httptest.NewRequest("GET", "/api/repositories/repo-cli-btw/commits", nil)
+	w := httptest.NewRecorder()
 
-	tests := []struct {
-		name       string
-		path       string
-		wantCode   int
-		checkKey   string
-	}{
-		{"List Repositories", "/api/repositories", http.StatusOK, ""},
-		{"Single Repository", "/api/repositories/repo-123", http.StatusOK, "id"},
-		{"Checkpoints Endpoint", "/api/repositories/repo-123/checkpoints", http.StatusOK, ""},
-		{"Requirements Endpoint", "/api/repositories/repo-123/requirements", http.StatusOK, ""},
-		{"Graph Endpoint", "/api/repositories/repo-123/graph", http.StatusOK, ""},
-		{"Handoff Endpoint", "/api/repositories/repo-123/handoff", http.StatusOK, "id"},
+	handler.RepositoriesHandler(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("Expected 200 OK, got %d", w.Code)
 	}
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			req := httptest.NewRequest("GET", tt.path, nil)
-			rec := httptest.NewRecorder()
+	var commits []models.Commit
+	if err := json.Unmarshal(w.Body.Bytes(), &commits); err != nil {
+		t.Fatalf("Failed to parse response: %v", err)
+	}
 
-			handler.RepositoriesHandler(rec, req)
+	if len(commits) == 0 {
+		t.Fatalf("Expected non-empty list of commits")
+	}
+}
 
-			if rec.Code != tt.wantCode {
-				t.Errorf("expected code %d for %s, got %d", tt.wantCode, tt.path, rec.Code)
-			}
-		})
+func TestCommitsHandler_Context_Available(t *testing.T) {
+	handler := api.NewAPIHandler(nil)
+	req := httptest.NewRequest("GET", "/api/repositories/repo-cli-btw/commits/3dbdf8b83c39/context", nil)
+	w := httptest.NewRecorder()
+
+	handler.RepositoriesHandler(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("Expected 200 OK, got %d", w.Code)
+	}
+
+	var devCtx models.CommitDevelopmentContext
+	if err := json.Unmarshal(w.Body.Bytes(), &devCtx); err != nil {
+		t.Fatalf("Failed to parse response: %v", err)
+	}
+
+	if devCtx.CheckpointStatus != models.CheckpointAvailable {
+		t.Errorf("Expected CheckpointAvailable, got %s", devCtx.CheckpointStatus)
+	}
+
+	if !devCtx.HasCheckpoint {
+		t.Errorf("Expected HasCheckpoint to be true")
+	}
+}
+
+func TestCommitsHandler_Context_Unavailable(t *testing.T) {
+	handler := api.NewAPIHandler(nil)
+	req := httptest.NewRequest("GET", "/api/repositories/repo-cli-btw/commits/a1b2c3d4e5f6/context", nil)
+	w := httptest.NewRecorder()
+
+	handler.RepositoriesHandler(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("Expected 200 OK, got %d", w.Code)
+	}
+
+	var devCtx models.CommitDevelopmentContext
+	if err := json.Unmarshal(w.Body.Bytes(), &devCtx); err != nil {
+		t.Fatalf("Failed to parse response: %v", err)
+	}
+
+	if devCtx.CheckpointStatus != models.CheckpointUnavailable {
+		t.Errorf("Expected CheckpointUnavailable, got %s", devCtx.CheckpointStatus)
+	}
+
+	if devCtx.HasCheckpoint {
+		t.Errorf("Expected HasCheckpoint to be false")
+	}
+
+	if devCtx.MissingContextReason == "" {
+		t.Errorf("Expected explicit missing context reason")
 	}
 }

@@ -36,6 +36,27 @@ export interface GraphFindingItem {
     verification_status: string;
 }
 
+export interface CommitItem {
+    sha: string;
+    short_sha: string;
+    message: string;
+    author_name: string;
+    author_email: string;
+    timestamp: string;
+    files_changed: string[];
+    additions: number;
+    deletions: number;
+}
+
+export interface CommitDevelopmentContextItem {
+    commit: CommitItem;
+    checkpoint_status: string; // "AVAILABLE" | "INCOMPLETE" | "UNAVAILABLE"
+    checkpoint?: CheckpointItem;
+    has_checkpoint: boolean;
+    missing_context_reason?: string;
+    source: string;
+}
+
 export interface HandoffItem {
     id: string;
     original_intent: string;
@@ -58,6 +79,14 @@ export class CheckpointApiClient {
 
     public async getCheckpoints(repoId: string = 'repo-cli-btw'): Promise<CheckpointItem[]> {
         return this.fetchJson<CheckpointItem[]>(`/api/repositories/${repoId}/checkpoints`);
+    }
+
+    public async getCommits(repoId: string = 'repo-cli-btw'): Promise<CommitItem[]> {
+        return this.fetchJson<CommitItem[]>(`/api/repositories/${repoId}/commits`);
+    }
+
+    public async getCommitContext(sha: string, repoId: string = 'repo-cli-btw'): Promise<CommitDevelopmentContextItem> {
+        return this.fetchJson<CommitDevelopmentContextItem>(`/api/repositories/${repoId}/commits/${sha}/context`);
     }
 
     public async getRequirements(repoId: string = 'repo-cli-btw'): Promise<RequirementItem[]> {

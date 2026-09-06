@@ -17,18 +17,21 @@ type ServerDependencies struct {
 	GitHubProvider     providers.GitHubProvider
 	RepoAnalyzer       providers.RepositoryAnalyzer
 	ReqAnalyzer        providers.RequirementAnalyzer
+	CommitProvider     providers.CommitProvider
 	Sanitizer          *privacy.PrivacySanitizer
 }
 
 // DefaultServerDependencies instantiates the development dependencies.
 func DefaultServerDependencies() *ServerDependencies {
 	devAnalyzer := providers.NewDevAnalyzer()
+	cpProvider := providers.NewDevCheckpointProvider()
 	return &ServerDependencies{
-		CheckpointProvider: providers.NewDevCheckpointProvider(),
+		CheckpointProvider: cpProvider,
 		GraphProvider:      providers.NewDevGraphProvider(),
 		GitHubProvider:     providers.NewDevGitHubProvider(),
 		RepoAnalyzer:       devAnalyzer,
 		ReqAnalyzer:        devAnalyzer,
+		CommitProvider:     providers.NewDevCommitProvider(cpProvider),
 		Sanitizer:          privacy.NewPrivacySanitizer(),
 	}
 }
@@ -113,6 +116,31 @@ func (h *APIHandler) RepositoriesHandler(w http.ResponseWriter, r *http.Request)
 
 	subResource := parts[1]
 	switch subResource {
+	case "commits":
+		// GET /api/repositories/:id/commits or /api/repositories/:id/commits/:sha/context
+		if len(parts) == 2 {
+			commits, err := h.deps.CommitProvider.GetRecentCommits(r.Context(), repoID, 10)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			json.NewEncoder(w).Encode(commits)
+			return
+		}
+		sha := parts[2]
+		if len(parts) == 3 || (len(parts) == 4 && parts[3] == "context") {
+			devCtx, err := h.deps.CommitProvider.GetCommitDevelopmentContext(r.Context(), repoID, sha)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusNotFound)
+				return
+			}
+			if devCtx.Checkpoint != nil {
+				devCtx.Checkpoint = h.deps.Sanitizer.SanitizeCheckpoint(devCtx.Checkpoint)
+			}
+			json.NewEncoder(w).Encode(devCtx)
+			return
+		}
+		http.NotFound(w, r)
 	case "checkpoints":
 		// GET /api/repositories/:id/checkpoints
 		cps, err := h.deps.CheckpointProvider.GetCheckpoints(r.Context(), repoID)
