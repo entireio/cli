@@ -194,6 +194,14 @@ func TestExtractSessionIDFromPath(t *testing.T) {
 		"abc-123.jsonl":                             "abc-123",
 		"/tmp/no-underscore-here.jsonl":             "no-underscore-here",
 		"/path/with/multiple_under_scores_id.jsonl": "id",
+		// Pi subagent shape (issue #1870): every subagent leaf is literally
+		// named session.jsonl, so identity comes from the directory segments
+		// above it, not the basename.
+		"/root/2026-07-29T00-36-01-991Z_019fab4c-c147-7b3a-8cc9-9ebd7224663b/71e7c5e8/run-0/session.jsonl": "019fab4c-c147-7b3a-8cc9-9ebd7224663b_71e7c5e8_run-0",
+		"/root/2026-07-29T00-36-01-991Z_019fab4c-c147-7b3a-8cc9-9ebd7224663b/716671d6/run-2/session.jsonl": "019fab4c-c147-7b3a-8cc9-9ebd7224663b_716671d6_run-2",
+		// Too shallow to disambiguate — falls back to the pre-fix basename
+		// behavior rather than inventing an ID from nothing.
+		"session.jsonl": "session",
 	}
 	for in, want := range cases {
 		if got := extractSessionIDFromPath(in); got != want {
@@ -450,4 +458,95 @@ func TestParseHookEvent_SessionlessPayloadIsSkipped(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestPiSubagentTranscriptsDoNotCollide reproduces GitHub issue #1870: two
+// distinct Pi subagent runs under the same parent session used to both
+// resolve to the literal session ID "session" (the fixed leaf name Pi gives
+// every subagent transcript: .../<subagentID>/run-<n>/session.jsonl), so
+// their staged captures collided on one destination file and the second
+// write clobbered the first — a checkpoint could end up storing a
+// completely different subagent's transcript than the one it was supposedly
+// capturing. This drives the real production entry point
+// (PiAgent.ParseHookEvent -> extractSessionIDFromPath -> captureTranscript),
+// not a hand-mocked struct, against a realistic on-disk fixture matching the
+// tree from the issue's "Observed" section, and asserts each subagent run
+// now gets its own session ID and its own independently recoverable
+// transcript.
+func TestPiSubagentTranscriptsDoNotCollide(t *testing.T) {
+	// Cannot use t.Parallel — t.Chdir.
+	dir := t.TempDir()
+	t.Chdir(dir)
+
+	// Realistic Pi on-disk layout for one parent session with two live
+	// subagent runs:
+	//   .../2026-07-29T00-36-01-991Z_019fab4c-c147-7b3a-8cc9-9ebd7224663b/
+	//     71e7c5e8/run-0/session.jsonl
+	//     716671d6/run-0/session.jsonl
+	parentDir := filepath.Join(dir, "pi-sessions",
+		"2026-07-29T00-36-01-991Z_019fab4c-c147-7b3a-8cc9-9ebd7224663b")
+	pathA := filepath.Join(parentDir, "71e7c5e8", "run-0", "session.jsonl")
+	pathB := filepath.Join(parentDir, "716671d6", "run-0", "session.jsonl")
+
+	contentA := []byte(`{"type":"message","role":"assistant","content":"subagent A: reviewed auth.go"}` + "\n")
+	contentB := []byte(`{"type":"message","role":"assistant","content":"subagent B: reviewed billing.go"}` + "\n")
+
+	for path, content := range map[string][]byte{pathA: contentA, pathB: contentB} {
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, content, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	a := &PiAgent{}
+	ctx := context.Background()
+
+	payload := func(sessionFile string) string {
+		return `{"type":"agent_end","session_file":"` + filepath.ToSlash(sessionFile) + `"}`
+	}
+
+	evA, err := a.ParseHookEvent(ctx, HookNameAgentEnd, strings.NewReader(payload(pathA)))
+	if err != nil {
+		t.Fatalf("ParseHookEvent(A): %v", err)
+	}
+	evB, err := a.ParseHookEvent(ctx, HookNameAgentEnd, strings.NewReader(payload(pathB)))
+	if err != nil {
+		t.Fatalf("ParseHookEvent(B): %v", err)
+	}
+
+	t.Logf("subagent A -> SessionID=%q SessionRef=%q", evA.SessionID, evA.SessionRef)
+	t.Logf("subagent B -> SessionID=%q SessionRef=%q", evB.SessionID, evB.SessionRef)
+
+	if evA.SessionID == "" || evB.SessionID == "" {
+		t.Fatalf("expected non-empty session IDs, got %q and %q", evA.SessionID, evB.SessionID)
+	}
+	if evA.SessionID == evB.SessionID {
+		t.Fatalf("subagent runs collided on session ID %q (issue #1870)", evA.SessionID)
+	}
+	if evA.SessionRef == "" || evB.SessionRef == "" {
+		t.Fatalf("expected non-empty staged destinations, got %q and %q", evA.SessionRef, evB.SessionRef)
+	}
+	if evA.SessionRef == evB.SessionRef {
+		t.Fatalf("subagent runs staged to the same destination %q (issue #1870)", evA.SessionRef)
+	}
+
+	gotA, err := os.ReadFile(evA.SessionRef)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(gotA) != string(contentA) {
+		t.Fatalf("subagent A's staged file = %q, want %q", gotA, contentA)
+	}
+
+	gotB, err := os.ReadFile(evB.SessionRef)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(gotB) != string(contentB) {
+		t.Fatalf("subagent B's staged file = %q, want %q", gotB, contentB)
+	}
+
+	t.Logf("FIXED: subagent A's transcript (%s) and subagent B's transcript (%s) are both independently recoverable", evA.SessionRef, evB.SessionRef)
 }
