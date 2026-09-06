@@ -2,6 +2,55 @@
 
 This repo contains the CLI for Entire.
 
+## Project Context for This Build (Buildathon 2026)
+
+**This fork of `entireio/cli` is not being used for Entire CLI contribution work.**
+It is the base for a BTW Buildathon 2026 (Track 1 — "Build a Checkpoint-Native
+Developer Experience") submission by a solo developer. We are not modifying the
+core CLI as an end in itself; we are building a new tool *on top* of it that
+consumes Entire's own data — this repo's own Entire Checkpoints (the
+`entire/checkpoints/v1` branch) and its Entire Graph.
+
+**What we're building — "Checkpoint Resume & Drift Assistant":** three CLI
+subcommands over one shared core.
+
+- `entire resume` *(must-have)* — reconstructs a stopped/handed-off session's
+  context (stated intent, decisions, files touched) from the checkpoint
+  narrative, adds a Graph impact / blast-radius section for the files and
+  symbols the last session touched, and surfaces one Databricks aggregate
+  (e.g. requirement-coverage %). Renders to the terminal and to a single
+  self-contained HTML report.
+- `entire drift` *(must-have)* — compares the original plan captured in the
+  first checkpoint against current code state using entity-level
+  `entire graph diff` (not raw text diff), and lists unfinished or dropped
+  requirements.
+- `entire assess <commit-ish>` *(stretch goal, only if time remains)* — scopes
+  Graph impact analysis to one commit and cross-references it against the
+  nearest checkpoint's stated intent.
+
+**Shared core:** a **CheckpointReader** (parses `entire/checkpoints/v1` into
+structured per-session records: id, timestamps, prompt/decision text, files
+touched, stated intent), a **GraphClient** (thin wrapper over `entire graph
+search` / `diff` / `impact` output), and a **DatabricksSync** layer that pushes
+parsed records into a single Delta table queried back for trend/aggregate
+analysis.
+
+**Read [`BUILDATHON_HANDOFF.md`](BUILDATHON_HANDOFF.md) in the repo root first**
+for the complete picture: event rules and timeline, the required checkpoint
+milestones and Graph-evidence obligations, the judging rubric, Databricks
+constraints and the "meaningful use" bar, and every strategic decision and open
+question from planning.
+
+**How to read the rest of this file:** everything below is the upstream Entire
+CLI's own contributor and build documentation. Follow it only where it is
+directly relevant to using `entire` and `entire graph` *as a tool consumer* —
+command behavior and flags, checkpoint/branch and metadata layout, Graph usage,
+settings semantics, session-strategy internals we need to parse. The parts about
+modifying, testing, linting, and releasing the core CLI itself (`mise run
+check`, the pre-commit checklist, E2E agent suites, Go style rules, CI
+enforcement) do **not** govern this build unless we end up patching CLI
+internals directly, in which case they apply to that change only.
+
 ## Architecture
 
 - CLI built with github.com/spf13/cobra and github.com/charmbracelet/huh
@@ -1599,3 +1648,10 @@ if err := form.Run(); err != nil { ... }
 - Always use the accessibility helpers for any `huh` forms/prompts
 - Test new interactive features with `ACCESSIBLE=1` to ensure they work
 - The accessible mode is documented in `--help` output
+
+<!-- entire-graph:begin -->
+This repo has the entire-graph code graph installed. Before exploring code with
+grep/find/whole-file reads, read .entire/graph-agent.md — resolution-first guidance
+for using graph retrieval, focused source inspection, and verification.
+@.entire/graph-agent.md
+<!-- entire-graph:end -->
