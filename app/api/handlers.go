@@ -2,12 +2,36 @@ package api
 
 import (
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"strings"
 	"time"
 
 	"github.com/entireio/cli/app/providers"
 )
+
+// APIErrorBody holds the structured error details.
+type APIErrorBody struct {
+	Code    string `json:"code"`
+	Message string `json:"message"`
+}
+
+// APIErrorResponse defines the standardized API error payload format.
+type APIErrorResponse struct {
+	Error APIErrorBody `json:"error"`
+}
+
+// WriteAPIError responds with a standardized JSON API error.
+func WriteAPIError(w http.ResponseWriter, status int, code, message string) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	json.NewEncoder(w).Encode(APIErrorResponse{
+		Error: APIErrorBody{
+			Code:    code,
+			Message: message,
+		},
+	})
+}
 
 // ServerDependencies encapsulates all provider interfaces required by the API layer.
 type ServerDependencies struct {
@@ -62,7 +86,8 @@ func (h *APIHandler) RepositoriesHandler(w http.ResponseWriter, r *http.Request)
 		// GET /api/repositories
 		repo, err := h.deps.RepoAnalyzer.AnalyzeRepository(r.Context(), ".")
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			slog.Error("Failed to analyze repository", "error", err)
+			WriteAPIError(w, http.StatusInternalServerError, "REPOSITORY_ANALYSIS_FAILED", err.Error())
 			return
 		}
 		json.NewEncoder(w).Encode([]interface{}{repo})
@@ -76,7 +101,8 @@ func (h *APIHandler) RepositoriesHandler(w http.ResponseWriter, r *http.Request)
 		// GET /api/repositories/:id
 		repo, err := h.deps.RepoAnalyzer.AnalyzeRepository(r.Context(), ".")
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			slog.Error("Failed to fetch repository info", "repoID", repoID, "error", err)
+			WriteAPIError(w, http.StatusNotFound, "REPOSITORY_NOT_FOUND", "Repository was not found")
 			return
 		}
 		repo.ID = repoID
@@ -90,7 +116,8 @@ func (h *APIHandler) RepositoriesHandler(w http.ResponseWriter, r *http.Request)
 		// GET /api/repositories/:id/checkpoints
 		cps, err := h.deps.CheckpointProvider.GetCheckpoints(r.Context(), repoID)
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			slog.Error("Failed to fetch checkpoints", "repoID", repoID, "error", err)
+			WriteAPIError(w, http.StatusInternalServerError, "CHECKPOINT_FETCH_FAILED", err.Error())
 			return
 		}
 		json.NewEncoder(w).Encode(cps)
@@ -98,7 +125,8 @@ func (h *APIHandler) RepositoriesHandler(w http.ResponseWriter, r *http.Request)
 		// GET /api/repositories/:id/requirements
 		reqs, err := h.deps.ReqAnalyzer.AnalyzeRequirements(r.Context(), repoID)
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			slog.Error("Failed to analyze requirements", "repoID", repoID, "error", err)
+			WriteAPIError(w, http.StatusInternalServerError, "REQUIREMENTS_ANALYSIS_FAILED", err.Error())
 			return
 		}
 		json.NewEncoder(w).Encode(reqs)
@@ -106,7 +134,8 @@ func (h *APIHandler) RepositoriesHandler(w http.ResponseWriter, r *http.Request)
 		// GET /api/repositories/:id/graph
 		findings, err := h.deps.GraphProvider.GetGraphFindings(r.Context(), repoID)
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			slog.Error("Failed to fetch graph findings", "repoID", repoID, "error", err)
+			WriteAPIError(w, http.StatusInternalServerError, "GRAPH_QUERY_FAILED", err.Error())
 			return
 		}
 		json.NewEncoder(w).Encode(findings)
@@ -114,11 +143,12 @@ func (h *APIHandler) RepositoriesHandler(w http.ResponseWriter, r *http.Request)
 		// GET /api/repositories/:id/handoff
 		handoff, err := h.deps.ReqAnalyzer.GetHandoff(r.Context(), repoID)
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			slog.Error("Failed to generate handoff", "repoID", repoID, "error", err)
+			WriteAPIError(w, http.StatusInternalServerError, "HANDOFF_GENERATION_FAILED", err.Error())
 			return
 		}
 		json.NewEncoder(w).Encode(handoff)
 	default:
-		http.NotFound(w, r)
+		WriteAPIError(w, http.StatusNotFound, "ENDPOINT_NOT_FOUND", "The requested API endpoint was not found")
 	}
 }
