@@ -96,6 +96,34 @@ func TestJSONLBytes_WithSecret(t *testing.T) {
 	}
 }
 
+func TestJSONLBytes_CodexInputImage_PreservesBase64(t *testing.T) {
+	// Codex embeds images as "type":"input_image" with a data URL. Before the
+	// fix, shouldSkipJSONLObject only matched "image"-prefixed types, so this
+	// high-entropy base64 payload was silently destroyed into "REDACTED".
+	input := []byte(`{"type":"input_image","image_url":"data:image/png;base64,` + highEntropySecret + `"}`)
+	result, err := JSONLBytes(input)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if string(result.Bytes()) != string(input) {
+		t.Errorf("expected input_image payload unchanged, got %q", result.Bytes())
+	}
+	if strings.Contains(string(result.Bytes()), RedactedPlaceholder) {
+		t.Errorf("expected no redaction of input_image payload, got %q", result.Bytes())
+	}
+}
+
+func TestJSONLBytes_ClaudeImage_StillPreserved(t *testing.T) {
+	input := []byte(`{"type":"image","source":{"data":"` + highEntropySecret + `"}}`)
+	result, err := JSONLBytes(input)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if string(result.Bytes()) != string(input) {
+		t.Errorf("expected image payload unchanged, got %q", result.Bytes())
+	}
+}
+
 func TestRedactedBytes_Bytes(t *testing.T) {
 	t.Parallel()
 	input := []byte(`{"type":"text","content":"hello"}`)
@@ -1251,6 +1279,26 @@ func TestShouldSkipJSONLObject(t *testing.T) {
 			name: "base64 type is skipped",
 			obj:  map[string]any{"type": "base64"},
 			want: true,
+		},
+		{
+			name: "input_image type is skipped",
+			obj:  map[string]any{"type": "input_image", "image_url": "data:image/png;base64,abc"},
+			want: true,
+		},
+		{
+			name: "output_image type is skipped",
+			obj:  map[string]any{"type": "output_image"},
+			want: true,
+		},
+		{
+			name: "docker_image type is NOT skipped (only exact Codex image types match)",
+			obj:  map[string]any{"type": "docker_image", "url": "https://token@registry"},
+			want: false,
+		},
+		{
+			name: "container_image type is NOT skipped",
+			obj:  map[string]any{"type": "container_image"},
+			want: false,
 		},
 	}
 	for _, tt := range tests {
