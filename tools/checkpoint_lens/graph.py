@@ -140,10 +140,21 @@ class GraphClient:
             summary.callers = []
         return summary
 
-    def commit_entities(self, commitish: str) -> GraphResult:
-        """Entity-level change list for a commit vs its first parent."""
+    def commit_entities(self, commitish: str, max_seconds: int = 120) -> GraphResult:
+        """Entity-level change list for a commit vs its first parent.
+
+        Note the interface: ``rev`` is positional and the flag is ``--json``
+        (not ``--commit``/``--format``). Passing the wrong spelling makes the
+        plugin exit 0 with "commit accepts at most one revision" on stdout,
+        which is why every result here is shape-checked rather than trusted.
+        """
         return self._run(
-            ["graph", "commit", "--repo", self.repo, "--commit", commitish, "--format", "json"]
+            [
+                "graph", "commit", commitish,
+                "--repo", self.repo,
+                "--max-seconds", str(max_seconds),
+                "--json",
+            ]
         )
 
     def diff(self, base: str, head: str) -> GraphResult:

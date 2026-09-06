@@ -23,6 +23,7 @@ from typing import Any
 
 from . import __version__
 from .graph import GraphClient
+from .entities import parse_entity_changes, risky, touched_paths
 from .models import CheckpointRecord
 from .reader import CheckpointReader
 from . import report
@@ -165,15 +166,31 @@ def _graph_blast_radius(repo: str, rec: CheckpointRecord) -> list[str]:
     res = graph.commit_entities(target)
     body: list[str] = []
     if res.ok:
-        entities = _entity_names(res.data)
-        if entities:
-            body.append("  Entities this checkpoint's commit changed:")
-            for name in entities[:15]:
-                body.append("    - " + name)
-            if len(entities) > 15:
-                body.append("    ... %d more" % (len(entities) - 15))
+        changes = parse_entity_changes(res.data)
+        if changes:
+            paths = touched_paths(changes)
+            body.append(
+                "  %d entity change(s) across %d file(s):"
+                % (len(changes), len(paths))
+            )
+            for c in changes[:15]:
+                suffix = ""
+                if c.dependents_count:
+                    suffix = "  <- %d dependent(s)" % c.dependents_count
+                body.append("    - %-46s %s%s" % (c.label[:46], c.path, suffix))
+            if len(changes) > 15:
+                body.append("    ... %d more" % (len(changes) - 15))
+            danger = risky(changes)
+            if danger:
+                body.append("")
+                body.append("  HIGH-RISK (signature/removal with dependents):")
+                for c in danger[:5]:
+                    body.append(
+                        "    ! %s in %s (%d dependents)"
+                        % (c.label, c.path, c.dependents_count)
+                    )
         elif res.text.strip():
-            for line in res.text.strip().splitlines()[:15]:
+            for line in res.text.strip().splitlines()[:12]:
                 body.append("  " + line)
     return report.render_graph_evidence(
         "GRAPH IMPACT (BLAST RADIUS)",
@@ -182,28 +199,6 @@ def _graph_blast_radius(repo: str, rec: CheckpointRecord) -> list[str]:
         ok=res.ok,
         error=res.error,
     )
-
-
-def _entity_names(data: Any) -> list[str]:
-    """Pull entity names out of a graph commit/diff payload, tolerating the
-    couple of shapes the plugin emits."""
-    if not isinstance(data, dict):
-        return []
-    out: list[str] = []
-    for key in ("entities", "changes", "changed", "symbols"):
-        items = data.get(key)
-        if isinstance(items, list):
-            for item in items:
-                if isinstance(item, str):
-                    out.append(item)
-                elif isinstance(item, dict):
-                    name = item.get("symbol") or item.get("name") or item.get("path")
-                    kind = item.get("change") or item.get("kind") or ""
-                    if name:
-                        out.append(("%s [%s]" % (name, kind)) if kind else str(name))
-            if out:
-                return out
-    return out
 
 
 # --------------------------------------------------------------------------
