@@ -30,6 +30,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/provenance"
 	"github.com/entireio/cli/cmd/entire/cli/review"
 	"github.com/entireio/cli/cmd/entire/cli/session"
+	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
 	"github.com/entireio/cli/cmd/entire/cli/validation"
 	"github.com/entireio/cli/perf"
@@ -230,7 +231,7 @@ func handleLifecycleSessionStart(ctx context.Context, ag agent.Agent, event *age
 	// Apply any agent-supplied ResponseMessage override, then append the
 	// agent-help banner pointer so it survives the override — banner-only agents
 	// (Factory Droid) have no other in-session channel for it.
-	message = finalizeSessionStartBanner(message, event.ResponseMessage, ag.Name())
+	message = finalizeSessionStartBanner(message, event.ResponseMessage, globalTrustBannerSuffix(ctx, ag.Name()), ag.Name())
 	if writer, ok := agent.AsHookResponseWriter(ag); ok {
 		bannerFirst, bErr := strategy.ClaimSessionStartBanner(ctx, event.SessionID)
 		if bErr != nil {
@@ -305,6 +306,32 @@ func sessionStartMessage(agentName types.AgentName, emptyRepo bool) string {
 	return "\n\nEntire CLI will link this conversation to your next commit."
 }
 
+// globalTrustBannerSuffix returns the trust banner line. Two states earn one:
+// a held repo (settings.CheckpointEgressHeld — with the tier on that is any
+// active repo not yet trusted, a repo-enabled one included), and a globally
+// tracked repo that will sync only because trust_all is on — the user never
+// chose that for this repo, so it must not be captured AND synced in silence.
+// Per-repo consent (trusted_origins/paths, a repo the user enabled) and a
+// tier that is off stay silent. Codex banners are single-line, so the suffix
+// joins with a space there.
+func globalTrustBannerSuffix(ctx context.Context, agentName types.AgentName) string {
+	var notice string
+	switch {
+	case settings.CheckpointEgressHeld(ctx):
+		// "checkpoint sync remote", not "origin": sync targets the elected remote.
+		notice = "Entire is capturing this repo locally. Checkpoints aren't synced yet — run `entire trust` to sync them to your checkpoint sync remote."
+	case settings.GloballyTrackedUnderTrustAll(ctx):
+		notice = "Entire is capturing this repo (global tracking) and will sync its checkpoints on your next push because trust_all is on in " +
+			settings.UserSettingsPath() + ". Add this repo to exclude_paths there to opt it out."
+	default:
+		return ""
+	}
+	if agentName == agent.AgentNameCodex {
+		return " " + notice
+	}
+	return "\n  " + notice
+}
+
 // agentHelpBannerSuffix returns the SessionStart banner suffix that points an
 // agent at `entire agent-help`. It targets Factory AI Droid, which is banner-only
 // — no model-context injection and no agent-help skill file — so the SessionStart
@@ -320,15 +347,14 @@ func agentHelpBannerSuffix(agentName types.AgentName) string {
 }
 
 // finalizeSessionStartBanner applies an agent-supplied ResponseMessage override
-// (if any) and THEN appends the agent-help banner pointer, so the pointer
-// survives even when the agent supplies its own banner text. Order matters: a
-// ResponseMessage override replaces the assembled message wholesale, so the
-// pointer must be appended after it, not before.
-func finalizeSessionStartBanner(message, responseMessage string, agentName types.AgentName) string {
+// (if any) and THEN appends the consent and agent-help suffixes, so neither is
+// erased by custom agent banner text. Order matters: a ResponseMessage override
+// replaces the assembled message wholesale, so durable suffixes come afterward.
+func finalizeSessionStartBanner(message, responseMessage, trustSuffix string, agentName types.AgentName) string {
 	if responseMessage != "" {
 		message = responseMessage
 	}
-	return message + agentHelpBannerSuffix(agentName)
+	return message + trustSuffix + agentHelpBannerSuffix(agentName)
 }
 
 // handleLifecycleModelUpdate persists the model name for the current session.
@@ -596,8 +622,15 @@ func handleLifecycleTurnStart(ctx context.Context, ag agent.Agent, event *agent.
 	// EnsureEntireGitignore can append to the tracked .entire/.gitignore, so run
 	// it before CapturePrePromptState: the snapshot should describe the tree the
 	// agent starts from, not one setup is about to change.
+	//
+	// EnsureSetupForHook (not EnsureSetup): a repo with no repo-level setup —
+	// reachable here only via the user-global tier — must never receive
+	// worktree writes like .entire/.gitignore; it gets the invisible
+	// MaybeEnsureGlobalSetup instead, which never creates worktree files (it
+	// even skips hook installation when core.hooksPath resolves inside the
+	// worktree).
 	_, setupSpan := perf.Start(ctx, "ensure_setup")
-	if err := strategy.EnsureSetup(ctx); err != nil {
+	if err := strategy.EnsureSetupForHook(ctx); err != nil {
 		logging.Warn(logCtx, "failed to ensure strategy setup",
 			slog.String("error", err.Error()))
 	}
@@ -607,8 +640,19 @@ func handleLifecycleTurnStart(ctx context.Context, ag agent.Agent, event *agent.
 	_, captureSpan := perf.Start(ctx, "capture_pre_prompt_state")
 	if err := CapturePrePromptState(ctx, ag, sessionID, event.SessionRef); err != nil {
 		captureSpan.RecordError(err)
-		captureSpan.End()
-		return err
+		if !paths.IsUnroutableRuntimePath(err) {
+			captureSpan.End()
+			return err
+		}
+		// Tier-owned repo, git-side location unresolvable: per the sentinel's
+		// contract every consumer SKIPS — returning the error would fail the
+		// user's agent turn (non-zero hook exit) every TurnStart for a
+		// machine-wide feature they never repo-enabled. The pre-state capture
+		// is skipped this turn, so turn-end has no untracked-file/transcript
+		// baseline; hook logging is live here, so this Warn is the visible
+		// record of the lost baseline.
+		logging.Warn(logCtx, "skipping pre-prompt state capture: runtime path unroutable for globally tracked repo",
+			slog.String("error", err.Error()))
 	}
 	captureSpan.End()
 
@@ -776,6 +820,19 @@ func handleLifecycleTurnEnd(ctx context.Context, ag agent.Agent, event *agent.Ev
 	sessionDir := paths.SessionMetadataDirFromSessionID(sessionID)
 	sessionName := sessionMetadataName(sessionID)
 	entireRoot, err := entiredir.Open(ctx)
+	if paths.IsUnroutableRuntimePath(err) {
+		// Tier-owned repo, git-side location unresolvable: per the sentinel's
+		// contract every consumer SKIPS — returning an error here would fail
+		// the user's agent turn (non-zero hook exit) every turn-end for a
+		// machine-wide feature they never repo-enabled. Hook logging is
+		// initialized on both routes by this point, so this Warn is the live,
+		// visible record of the lost capture.
+		logging.Warn(logCtx, "skipping checkpoint capture: runtime path unroutable for globally tracked repo",
+			slog.String("error", err.Error()))
+		copySpan.RecordError(err)
+		copySpan.End()
+		return nil
+	}
 	if err != nil {
 		copySpan.RecordError(err)
 		copySpan.End()
@@ -1249,6 +1306,14 @@ func handleLifecycleSubagentStart(ctx context.Context, ag agent.Agent, event *ag
 
 	// Capture pre-task state
 	if err := CapturePreTaskState(ctx, event.ToolUseID); err != nil {
+		if paths.IsUnroutableRuntimePath(err) {
+			// Same skip contract as TurnStart above: unroutable in a
+			// tier-owned repo must not fail the hook — the pre-task baseline
+			// is skipped for this task.
+			logging.Warn(logCtx, "skipping pre-task state capture: runtime path unroutable for globally tracked repo",
+				slog.String("error", err.Error()))
+			return nil
+		}
 		return fmt.Errorf("failed to capture pre-task state: %w", err)
 	}
 

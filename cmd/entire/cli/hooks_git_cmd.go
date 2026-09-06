@@ -12,7 +12,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/entireio/cli/cmd/entire/cli/interactive"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
-	"github.com/entireio/cli/cmd/entire/cli/settings"
+	"github.com/entireio/cli/cmd/entire/cli/settings/repopolicy"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
 	"github.com/entireio/cli/cmd/entire/cli/telemetry"
 	"github.com/entireio/cli/cmd/entire/cli/versioncheck"
@@ -127,10 +127,10 @@ func (g *gitHookContext) skipUnreadableCheckpointPolicy(err error) bool {
 // scanning session state on every command, and configures redaction. Returns
 // the context to pass down with cmd.SetContext.
 //
-// Every caller must gate on settings.IsSetUpAndEnabled first — it scans session
-// state and loads redactors, neither of which may touch a repo that never
-// enabled Entire. The check is not repeated here: it costs an uncached
-// settings.Load, and this runs on the per-commit and per-turn paths.
+// Every caller must gate on the prepared repository policy first — it scans session
+// state and loads redactors, neither of which may touch a repo Entire is not
+// active in. The check is not repeated here: it costs an uncached
+// settings, and this runs on the per-commit and per-turn paths.
 func withHookSession(ctx context.Context) context.Context {
 	ctx = logging.WithSessionID(ctx, strategy.FindMostRecentSession(ctx))
 
@@ -161,13 +161,28 @@ func newHooksGitCmd() *cobra.Command {
 		Hidden: true, // Internal command, not for direct user use
 		PersistentPreRun: func(cmd *cobra.Command, _ []string) {
 			ctx := cmd.Context()
-			// Check if Entire is set up and enabled before doing any work.
-			// This prevents global git hooks from doing anything in repos where
-			// Entire was never enabled or has been disabled.
-			if !settings.IsSetUpAndEnabled(ctx) {
+			gitHooksDisabled = false
+			// Check if Entire is active for this repo before doing any work.
+			// This prevents global git hooks from doing anything in repos
+			// where Entire was never enabled (repo-level or via the
+			// user-global tier) or has been disabled.
+			policyCtx, policy, policyErr := prepareHookPolicy(ctx)
+			if policyErr != nil {
+				logging.Debug(ctx, "repository policy unavailable; skipping git hook",
+					slog.String("error", policyErr.Error()))
 				gitHooksDisabled = true
 				return
 			}
+			if !policy.Active {
+				gitHooksDisabled = true
+				return
+			}
+			ctx = repopolicy.WithRepoPolicy(policyCtx, policy)
+			// Lazy invisible setup for globally tracked repos — the git-hook
+			// half of the trigger (agent hooks run it in executeAgentHook).
+			// Cheap no-op once the clone preferences file records setup as
+			// complete for this worktree.
+			strategy.MaybeEnsureGlobalSetup(ctx)
 			// Discover external agent plugins so GetByAgentType works correctly
 			// during condensation (e.g. post-commit). Without this, external agents
 			// registered in the hook phase cannot be resolved here, causing token
@@ -182,13 +197,21 @@ func newHooksGitCmd() *cobra.Command {
 		},
 	}
 
-	cmd.AddCommand(newHooksGitPrepareCommitMsgCmd())
-	cmd.AddCommand(newHooksGitCommitMsgCmd())
-	cmd.AddCommand(newHooksGitPostCommitCmd())
-	cmd.AddCommand(newHooksGitPostRewriteCmd())
-	cmd.AddCommand(newHooksGitPrePushCmd())
+	addGitHooks(cmd,
+		newHooksGitPrepareCommitMsgCmd(),
+		newHooksGitCommitMsgCmd(),
+		newHooksGitPostCommitCmd(),
+		newHooksGitPostRewriteCmd(),
+		newHooksGitPrePushCmd(),
+	)
 
 	return cmd
+}
+
+func addGitHooks(parent *cobra.Command, children ...*cobra.Command) {
+	for _, child := range children {
+		parent.AddCommand(child)
+	}
 }
 
 func newHooksGitPrepareCommitMsgCmd() *cobra.Command {

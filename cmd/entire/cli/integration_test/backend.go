@@ -72,7 +72,7 @@ func checkpointRefName(checkpointID string) string {
 func (env *TestEnv) CheckpointsPresentLocally() bool {
 	env.T.Helper()
 	if env.usingGitRefs() {
-		return anyRefUnderPrefix(env.T, env.RepoDir, checkpointRefPrefix)
+		return anyRefUnderPrefix(env.T, env.RepoDir)
 	}
 	return env.BranchExists(paths.MetadataBranchName)
 }
@@ -83,7 +83,7 @@ func (env *TestEnv) CheckpointsPresentLocally() bool {
 func (env *TestEnv) CheckpointsPresentOnRemote(bareDir string) bool {
 	env.T.Helper()
 	if env.usingGitRefs() {
-		return anyRefUnderPrefix(env.T, bareDir, checkpointRefPrefix)
+		return anyRefUnderPrefix(env.T, bareDir)
 	}
 	return env.BranchExistsOnRemote(bareDir, paths.MetadataBranchName)
 }
@@ -123,10 +123,11 @@ func (env *TestEnv) RemoteCheckpointState(bareDir string) string {
 	return strings.Join(lines, "\n")
 }
 
-// anyRefUnderPrefix reports whether the repo at dir has any ref under prefix.
-func anyRefUnderPrefix(t *testing.T, dir, prefix string) bool {
+// anyRefUnderPrefix reports whether the repo at dir has any checkpoint ref
+// (refs/entire/checkpoints/*).
+func anyRefUnderPrefix(t *testing.T, dir string) bool {
 	t.Helper()
-	cmd := exec.CommandContext(t.Context(), "git", "for-each-ref", "--format=%(refname)", prefix)
+	cmd := exec.CommandContext(t.Context(), "git", "for-each-ref", "--format=%(refname)", checkpointRefPrefix)
 	cmd.Dir = dir
 	cmd.Env = testutil.GitIsolatedEnv()
 	out, err := cmd.Output()
@@ -135,7 +136,7 @@ func anyRefUnderPrefix(t *testing.T, dir, prefix string) bool {
 		// "no refs" would make a "should NOT exist" assertion pass vacuously
 		// (same reasoning as RemoteCheckpointState). An absent prefix is not
 		// an error — for-each-ref exits 0 with empty output.
-		t.Fatalf("anyRefUnderPrefix: git for-each-ref %s in %s failed: %v", prefix, dir, err)
+		t.Fatalf("anyRefUnderPrefix: git for-each-ref %s in %s failed: %v", checkpointRefPrefix, dir, err)
 	}
 	return strings.TrimSpace(string(out)) != ""
 }

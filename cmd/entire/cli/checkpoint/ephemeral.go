@@ -2,8 +2,6 @@ package checkpoint
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -44,14 +42,19 @@ const (
 	ShadowBranchHashLength = 7
 
 	// WorktreeIDHashLength is the number of hex characters used for worktree ID hash.
-	WorktreeIDHashLength = 6
+	// Permanent alias of paths.WorktreeIDHashLength for package locality —
+	// checkpoint callers read the shadow-branch naming constants from this
+	// block; do not "clean it up" back to a direct paths reference.
+	WorktreeIDHashLength = paths.WorktreeIDHashLength
 )
 
 // HashWorktreeID returns a short hash of the worktree identifier.
-// Used to create unique shadow branch names per worktree.
+// Used to create unique shadow branch names per worktree. Permanent alias
+// for package locality: the derivation lives in paths (which this package
+// imports) so invisible routing shares the exact same per-worktree
+// namespace key, while checkpoint callers keep a local name.
 func HashWorktreeID(worktreeID string) string {
-	h := sha256.Sum256([]byte(worktreeID))
-	return hex.EncodeToString(h[:])[:WorktreeIDHashLength]
+	return paths.HashWorktreeID(worktreeID)
 }
 
 // writeCheckpoint writes a temporary checkpoint to a shadow branch.
@@ -859,7 +862,7 @@ func (s *ephemeralStore) buildTreeWithChanges(
 		if relErr != nil {
 			logInvalidGitTreePath(ctx, "add metadata directory", metadataDir, relErr)
 		} else {
-			metaChanges, metaErr := addMetadataDirToChanges(ctx, s.repo, repoRedactCache(s.repo), repoRoot, metadataDir, metadataRel)
+			metaChanges, metaErr := addMetadataDirToChanges(ctx, s.repo, repoRedactCache(s.repo), metadataDir, metadataRel)
 			if metaErr != nil {
 				return plumbing.ZeroHash, fmt.Errorf("failed to add metadata directory: %w", metaErr)
 			}
@@ -999,10 +1002,12 @@ type treeNode struct {
 //
 // The walk is confined to the shared .entire root rather than driven from an
 // absolute path, so a symlink under the metadata directory cannot be followed
-// out of .entire and captured into git history. A missing directory is an error
+// out of .entire and captured into git history. The root is the ROUTED runtime
+// base: a globally tracked repo keeps its metadata under the git common dir,
+// which is where the caller just wrote it. A missing directory is an error
 // here, as it was before: the caller only names one it just wrote.
-func addMetadataDirToChanges(ctx context.Context, repo *git.Repository, cache *redactCache, worktreeRoot, metadataDir, dirPathRel string) ([]TreeChange, error) {
-	root, err := entiredir.OpenAtForRead(worktreeRoot)
+func addMetadataDirToChanges(ctx context.Context, repo *git.Repository, cache *redactCache, metadataDir, dirPathRel string) ([]TreeChange, error) {
+	root, err := entiredir.OpenForRead(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open %s: %w", paths.EntireDir, err)
 	}

@@ -24,6 +24,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
+	"github.com/entireio/cli/cmd/entire/cli/settings/repopolicy"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
 	"github.com/entireio/cli/cmd/entire/cli/worktreedir"
 
@@ -159,6 +160,10 @@ func runSessionsFix(cmd *cobra.Command, force bool) error {
 
 	// Agent-specific: Claude Code hook config drift.
 	checkHookDrift(cmd)
+
+	// Global tracking tier: user-level agent hook coverage and this clone's
+	// lazy-setup state.
+	checkGlobalTracking(cmd)
 
 	// Retired permission rule that makes ordinary commands need approval.
 	// Fixes rather than only reporting: what it removes is a rule Entire wrote.
@@ -1160,6 +1165,158 @@ func writeCodexHookStatus(w io.Writer, diagnostics codex.HookDiagnostics, active
 		fmt.Fprintln(w, "  Open /hooks inside Codex to approve them.")
 	case len(diagnostics.Trust.Declared) > 0:
 		fmt.Fprintln(w, "✓ Codex hook approval records: PRESENT")
+	}
+}
+
+// checkGlobalTracking runs the global-mode diagnostics. Read-only except for
+// check 5's drift shape, which marks the per-worktree Git-hook component stale:
+//
+//  1. The user-global settings file exists but cannot be read or parsed —
+//     global tracking is silently off machine-wide (fail closed). This is
+//     the one failure hook Debug logs can never surface: on the hook paths
+//     logging.Init runs only after the gate that reads this file has already
+//     failed.
+//  2. Global tracking is on but user-level agent hooks are missing for an
+//     agent that supports them — report-only: globalPostRun installs them
+//     for agents present on this machine right after doctor, and agents that
+//     are not detected are listed as informational. An agent whose config
+//     cannot be READ gets its own warning: it is unverified, not missing.
+//  3. Unusable exclude patterns (relative, unsupported ~user form, invalid
+//     glob) — under the fail-closed rule each one deactivates the tier in
+//     every repo it is checked against.
+//  4. exclude_origins is configured and this repo's origin is present but
+//     cannot be normalized to host/owner/repo — informational: the tier
+//     stays off in this repo (fail closed).
+//  5. This repo is globally tracked but its git hooks are absent. Three
+//     shapes: a worktree-resident core.hooksPath makes the absence deliberate
+//     (the lazy setup never writes into the worktree), so doctor explains
+//     that hook capture requires repo-level enable; a probe ERROR is reported
+//     as unverified; anything else is drift the next hook activity repairs by
+//     itself — MaybeEnsureGlobalSetup re-checks hook presence every time, so
+//     doctor only reports and never writes.
+//
+// All checks except 1 stay silent while the global tier is unconfigured or off.
+func checkGlobalTracking(cmd *cobra.Command) {
+	ctx := cmd.Context()
+	w := cmd.OutOrStdout()
+	us, err := settings.LoadUserSettings(ctx)
+	if err != nil {
+		fmt.Fprintln(w, "Global tracking: USER SETTINGS UNREADABLE")
+		fmt.Fprintf(w, "  %s cannot be read or parsed: %v\n", settings.UserSettingsPath(), err)
+		fmt.Fprintln(w, "  Global tracking is silently off machine-wide (fail closed), and hook debug logs")
+		fmt.Fprintln(w, "  cannot report it: hook logging starts only after this file has gated the hook off.")
+		fmt.Fprintln(w, "  Fix the JSON by hand or remove the file (an unknown key means a newer entire wrote it — upgrade instead).")
+		return
+	}
+	if !us.GlobalEnabled() {
+		return
+	}
+	// Diagnostics classify repository policy once and keep the snapshot
+	// read-only. Repair paths below remain separately confirmation-gated.
+	if _, repoErr := paths.WorktreeRoot(ctx); repoErr == nil {
+		policy, policyErr := repopolicy.ClassifyRepoPolicy(ctx)
+		if policyErr == nil {
+			ctx = repopolicy.WithRepoPolicy(ctx, policy)
+			cmd.SetContext(ctx)
+		}
+	}
+
+	var present, absent, unverifiable []string
+	supports, _ := agent.UserHookSupports()
+	for _, ua := range supports {
+		installed, hookErr := ua.Support.AreUserHooksInstalled(ctx)
+		switch {
+		case hookErr != nil:
+			unverifiable = append(unverifiable, fmt.Sprintf("%s (%v)", ua.Name, hookErr))
+		case installed:
+		case userHookAgentPresent(ua.Name):
+			present = append(present, string(ua.Name))
+		default:
+			absent = append(absent, string(ua.Name))
+		}
+	}
+	if len(present) == 0 && len(absent) == 0 && len(unverifiable) == 0 {
+		fmt.Fprintln(w, "✓ Global tracking: user-level agent hooks OK")
+	}
+	// Report-only: globalPostRun runs after doctor and installs the hooks for
+	// present agents itself, so a confirm prompt here would only be overridden.
+	if len(present) > 0 {
+		fmt.Fprintln(w, "Global tracking: USER-LEVEL AGENT HOOKS MISSING")
+		fmt.Fprintf(w, "  Global tracking is on, but user-level hooks are not installed for: %s\n", strings.Join(present, ", "))
+		fmt.Fprintln(w, "  They are installed automatically by the next `entire` command (including this one).")
+	}
+	if len(absent) > 0 {
+		fmt.Fprintln(w, "Global tracking: agents not detected on this machine (informational)")
+		fmt.Fprintf(w, "  %s: hooks are installed once the agent is.\n", strings.Join(absent, ", "))
+	}
+	if len(unverifiable) > 0 {
+		fmt.Fprintln(w, "Global tracking: USER-LEVEL AGENT HOOKS UNVERIFIABLE")
+		fmt.Fprintln(w, "  Could not read the user-level hook config for:")
+		for _, u := range unverifiable {
+			fmt.Fprintf(w, "    - %s\n", u)
+		}
+		fmt.Fprintf(w, "  Fix the named files, then repair Entire's user-level hook entries or disable global tracking in %s.\n", settings.UserSettingsPath())
+	}
+
+	// us was loaded (and the tier confirmed enabled) at the top of this
+	// function; the pure validators take it directly instead of re-reading
+	// the settings file per check.
+	if problems := settings.ValidateGlobalPatterns(us.Global); len(problems) > 0 {
+		fmt.Fprintln(w, "Global tracking: UNUSABLE SETTINGS ENTRIES")
+		fmt.Fprintln(w, "  Exclude entries fail closed: each deactivates global tracking in every repo it is checked against.")
+		fmt.Fprintln(w, "  trusted_paths entries are skipped: an unusable one never grants checkpoint sync.")
+		for _, p := range problems {
+			fmt.Fprintf(w, "    - %s\n", p)
+		}
+		fmt.Fprintf(w, "  Fix the listed entries in %s: use absolute or ~/ paths and valid doublestar globs.\n", settings.UserSettingsPath())
+	}
+
+	if bad := settings.UnnormalizableOrigins(ctx, us.Global); len(bad) > 0 {
+		fmt.Fprintln(w, "Global tracking: origin not checkable in this repo (informational)")
+		fmt.Fprintln(w, "  exclude_origins is configured, but this repo's origin cannot be normalized to host/owner/repo:")
+		for _, o := range bad {
+			fmt.Fprintf(w, "    - %s\n", o)
+		}
+		fmt.Fprintln(w, "  Global tracking stays off in this repo (fail closed).")
+	}
+
+	// Untrusted enrolled repo: informational, never a failure — the hold is
+	// the intended state until the user opts in.
+	if settings.CheckpointEgressHeld(ctx) {
+		fmt.Fprintln(w, "Global tracking: checkpoint sync held in this repo (informational)")
+		switch n := heldCheckpointCount(ctx); {
+		case n == 1:
+			fmt.Fprintln(w, "  This repo is tracked but not trusted; 1 checkpoint is held locally.")
+		case n > 1:
+			fmt.Fprintf(w, "  This repo is tracked but not trusted; %d checkpoints are held locally.\n", n)
+		default:
+			fmt.Fprintln(w, "  This repo is tracked but not trusted.")
+		}
+		fmt.Fprintln(w, "  This is intended until you opt in; run `entire trust` to sync.")
+	}
+
+	// Globally tracked here but the git hooks are gone: either deliberate
+	// (worktree-resident core.hooksPath) or drift the next hook activity
+	// repairs on its own — MaybeEnsureGlobalSetup re-checks hook presence
+	// every time. Report; never write.
+	policy, ok := repopolicy.RepoPolicyFromContext(ctx)
+	if !ok || !policy.Active || policy.ActivationSource != repopolicy.ActivationGlobal || strategy.IsGitHookInstalled(ctx) {
+		return
+	}
+	resident, hooksDir, resErr := strategy.HooksDirIsWorktreeResident(ctx)
+	switch {
+	case resErr != nil:
+		fmt.Fprintln(w, "Globally tracked clone: GIT HOOK STATE UNVERIFIED")
+		fmt.Fprintf(w, "  Could not resolve this clone's hooks directory: %v\n", resErr)
+	case resident:
+		fmt.Fprintln(w, "Globally tracked clone: GIT HOOKS SKIPPED (core.hooksPath inside the worktree)")
+		fmt.Fprintf(w, "  core.hooksPath resolves to %s, inside this worktree; global tracking never\n", hooksDir)
+		fmt.Fprintln(w, "  writes worktree files, so its git hooks were deliberately not installed.")
+		fmt.Fprintln(w, "  Agent-side session capture still works; commit-time checkpoint trailers do not.")
+		fmt.Fprintln(w, "  For hook capture, enable Entire in this repo: 'entire enable', or point core.hooksPath back at .git/hooks.")
+	default:
+		fmt.Fprintln(w, "Globally tracked clone: git hooks not installed yet")
+		fmt.Fprintln(w, "  They are installed by the next agent session or git hook activity in this repo.")
 	}
 }
 

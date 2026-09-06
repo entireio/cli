@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 
@@ -28,11 +30,11 @@ const (
 	HookNameSessionStart     = "session-start"
 	HookNameSessionEnd       = "session-end"
 	HookNameStop             = "stop"
+	HookNameSubagentStop     = "subagent-stop"
 	HookNameUserPromptSubmit = "user-prompt-submit"
 	HookNamePreTask          = "pre-task"
 	HookNamePostTask         = "post-task"
 	HookNamePostTodo         = "post-todo"
-	HookNameSubagentStop     = "subagent-stop"
 )
 
 // Claude Code tool-name matchers for Entire's PreToolUse/PostToolUse hooks.
@@ -57,102 +59,145 @@ const (
 // This is Claude-specific and not shared with other agents.
 const ClaudeSettingsFileName = "settings.json"
 
-// InstallHooks installs Claude Code hooks in .claude/settings.json.
-// If force is true, removes existing Entire hooks before installing.
-// Returns the number of hooks installed.
-//
-// Split into per-phase helpers below; see each helper's doc.
-func (c *ClaudeCodeAgent) InstallHooks(ctx context.Context, force bool) (int, error) {
-	cfg, err := claudeHookConfig(ctx)
-	if err != nil {
-		return 0, err
+// hookSettingsIO abstracts where a hook install reads and writes its settings
+// file. Repo scope uses agent.HookConfigFile: the path lives in the working
+// tree, which arrives by clone, so a checked-in symlink at .claude must be
+// refused rather than followed. User scope (~/.claude) is the opposite case —
+// dotfile managers legitimately symlink it — so it follows symlinks
+// (jsonutil.WriteFileAtomicFollowingSymlinks) under the user-hook lock.
+type hookSettingsIO interface {
+	Read() ([]byte, error)
+	Write(data []byte, perm os.FileMode) error
+	Path() string
+}
+
+// userSettingsIO is the user-scope implementation of hookSettingsIO.
+type userSettingsIO struct{ path string }
+
+func (u userSettingsIO) Path() string { return u.path }
+
+func (u userSettingsIO) Read() ([]byte, error) {
+	return os.ReadFile(u.path) //nolint:wrapcheck // fixed user-level settings location; callers name the file
+}
+
+func (u userSettingsIO) Write(data []byte, perm os.FileMode) error {
+	if err := os.MkdirAll(filepath.Dir(u.path), 0o750); err != nil {
+		return fmt.Errorf("create %s: %w", filepath.Dir(u.path), err)
 	}
-
-	rawSettings, rawHooks, rawPermissions, err := loadRawClaudeSettingsForInstall(cfg)
-	if err != nil {
-		return 0, err
-	}
-
-	count, staleDropped := installHookEntries(rawHooks, force)
-
-	// Unconditional, like the stale-hook migration in installHookEntries: a
-	// plain `entire enable` must drop the retired metadata deny rule, not just
-	// --force. See agent.MetadataDenyRule for why it is retired. Removing it is
-	// the whole reason a normal enable still touches permissions.
-	permissionsChanged, err := agent.RemoveMetadataDenyRule(rawPermissions)
-	if err != nil {
-		return 0, fmt.Errorf("failed to update permissions in %s: %w", cfg.Path(), err)
-	}
-
-	// staleDropped forces a write even when nothing was added: a file holding
-	// both a stale and a current hook adds nothing, and returning early here
-	// would leave the stale hook on disk.
-	if count == 0 && !permissionsChanged && !staleDropped {
-		return 0, nil // All hooks and permissions already installed
-	}
-
-	if err := writeClaudeSettingsFile(cfg, rawSettings, rawHooks, rawPermissions); err != nil {
-		return 0, err
-	}
-
-	return count, nil
+	return jsonutil.WriteFileAtomicFollowingSymlinks(u.path, data, perm) //nolint:wrapcheck // callers name the file
 }
 
 // claudeHookConfig returns .claude/settings.json for the current worktree,
-// opened through the worktree's root. Every read, write and removal of that
-// file goes through it: the path lives in the working tree, which arrives by
-// clone, so a checked-in symlink at `.claude` must not be a directory Entire
-// creates and writes through.
+// opened through the worktree's root. Every repo-scope read, write and removal
+// of that file goes through it: the path lives in the working tree, which
+// arrives by clone, so a checked-in symlink at `.claude` must not be a
+// directory Entire creates and writes through.
 func claudeHookConfig(ctx context.Context) (*agent.HookConfigFile, error) {
-	repoRoot, err := resolveInstallRepoRoot(ctx)
+	repoRoot, err := paths.WorktreeRoot(ctx)
 	if err != nil {
-		return nil, err
+		// Fallback to CWD if not in a git repo (e.g., during tests)
+		repoRoot, err = os.Getwd() //nolint:forbidigo // Intentional fallback when WorktreeRoot() fails (tests run outside git repos)
+		if err != nil {
+			return nil, fmt.Errorf("failed to get current directory: %w", err)
+		}
 	}
 	return agent.OpenHookConfig(repoRoot, (&ClaudeCodeAgent{}).HookConfigRelPath()) //nolint:wrapcheck // agent.HookConfigFile already names the file in its error
 }
 
-// resolveInstallRepoRoot locates the repo root InstallHooks writes under,
-// falling back to CWD when not in a git repo (e.g. during tests).
-func resolveInstallRepoRoot(ctx context.Context) (string, error) {
-	// Use repo root instead of CWD to find .claude directory
-	// This ensures hooks are installed correctly when run from a subdirectory
-	repoRoot, err := paths.WorktreeRoot(ctx)
-	if err == nil {
-		return repoRoot, nil
-	}
-	repoRoot, err = os.Getwd() //nolint:forbidigo // Intentional fallback when WorktreeRoot() fails (tests run outside git repos)
-	if err != nil {
-		return "", fmt.Errorf("failed to get current directory: %w", err)
-	}
-	return repoRoot, nil
+// entireClaudeHookCount is the number of hook entries a full install writes
+// (SessionStart, SessionEnd, Stop, SubagentStop, UserPromptSubmit, PreToolUse[Agent],
+// PostToolUse[Agent], PostToolUse[TaskCreate|TaskUpdate]).
+const entireClaudeHookCount = 8
+
+// claudeHookSpec is the single inventory entry used by repo/user install and
+// user-hook completeness checks. Claude's native matcher model stays typed;
+// only the shared orchestration is declarative.
+type claudeHookSpec struct {
+	section  string
+	matcher  string
+	hookName string
+	warnWrap bool
 }
 
-// loadRawClaudeSettingsForInstall reads cfg (if present) and returns
-// its top-level fields as raw JSON maps, ready for InstallHooks to mutate.
-// rawHooks and rawPermissions are always non-nil (empty maps when absent) so
-// callers never need a nil check before indexing them.
-func loadRawClaudeSettingsForInstall(cfg *agent.HookConfigFile) (rawSettings, rawHooks, rawPermissions map[string]json.RawMessage, err error) {
-	existingData, readErr := cfg.Read()
-	if readErr == nil {
+var claudeHookSpecs = []claudeHookSpec{
+	{section: "SessionStart", hookName: HookNameSessionStart, warnWrap: true},
+	{section: "SessionEnd", hookName: HookNameSessionEnd},
+	{section: "Stop", hookName: HookNameStop},
+	{section: "SubagentStop", hookName: HookNameSubagentStop},
+	{section: "UserPromptSubmit", hookName: HookNameUserPromptSubmit},
+	{section: "PreToolUse", matcher: subagentToolMatcher, hookName: HookNamePreTask},
+	{section: "PostToolUse", matcher: subagentToolMatcher, hookName: HookNamePostTask},
+	{section: "PostToolUse", matcher: taskToolMatcher, hookName: HookNamePostTodo},
+}
+
+func (s claudeHookSpec) productionCommand() string {
+	cmd := "entire hooks claude-code " + s.hookName
+	if s.warnWrap {
+		return agent.WrapProductionJSONWarningHookCommand(cmd, agent.WarningFormatMultiLine)
+	}
+	return agent.WrapProductionSilentHookCommand(cmd)
+}
+
+func (h *ClaudeHooks) hookSections() map[string]*[]ClaudeHookMatcher {
+	return map[string]*[]ClaudeHookMatcher{
+		"SessionStart":     &h.SessionStart,
+		"SessionEnd":       &h.SessionEnd,
+		"Stop":             &h.Stop,
+		"SubagentStop":     &h.SubagentStop,
+		"UserPromptSubmit": &h.UserPromptSubmit,
+		"PreToolUse":       &h.PreToolUse,
+		"PostToolUse":      &h.PostToolUse,
+	}
+}
+
+func newClaudeHookSections() map[string]*[]ClaudeHookMatcher {
+	return (&ClaudeHooks{}).hookSections()
+}
+
+// InstallHooks installs Claude Code hooks in .claude/settings.json.
+// If force is true, removes existing Entire hooks before installing.
+// Returns the number of hooks installed.
+func (c *ClaudeCodeAgent) InstallHooks(ctx context.Context, force bool) (int, error) {
+	// Use repo root instead of CWD to find .claude directory
+	// This ensures hooks are installed correctly when run from a subdirectory
+	cfg, err := claudeHookConfig(ctx)
+	if err != nil {
+		return 0, err
+	}
+	count, _, err := installHooksToFile(cfg, force, true)
+	return count, err
+}
+
+// readClaudeRawSettings reads and shallow-parses the settings file for a
+// hook install. projectScope controls whether the permissions section is
+// parsed: a user-scope install must neither parse nor fail on it — whatever
+// value is there (even a non-object) round-trips verbatim. Only a genuinely
+// missing file means "start fresh"; any other read failure (permissions, I/O)
+// aborts, because proceeding would replace the user's whole settings file
+// with an Entire-only one.
+func readClaudeRawSettings(file hookSettingsIO, projectScope bool) (rawSettings, rawHooks, rawPermissions map[string]json.RawMessage, err error) {
+	settingsPath := file.Path()
+	existingData, readErr := file.Read()
+	switch {
+	case readErr == nil:
 		if err := json.Unmarshal(existingData, &rawSettings); err != nil {
-			return nil, nil, nil, fmt.Errorf("failed to parse existing settings.json: %w", err)
+			return nil, nil, nil, fmt.Errorf("failed to parse existing %s: %w", settingsPath, err)
 		}
-		// rawHooks preserves unknown hook types (e.g., "Notification")
 		if hooksRaw, ok := rawSettings["hooks"]; ok {
 			if err := json.Unmarshal(hooksRaw, &rawHooks); err != nil {
-				return nil, nil, nil, fmt.Errorf("failed to parse hooks in settings.json: %w", err)
+				return nil, nil, nil, fmt.Errorf("failed to parse hooks in %s: %w", settingsPath, err)
 			}
 		}
-		// rawPermissions preserves unknown permission fields (e.g., "ask")
-		if permRaw, ok := rawSettings["permissions"]; ok {
+		if permRaw, ok := rawSettings["permissions"]; ok && projectScope {
 			if err := json.Unmarshal(permRaw, &rawPermissions); err != nil {
-				return nil, nil, nil, fmt.Errorf("failed to parse permissions in settings.json: %w", err)
+				return nil, nil, nil, fmt.Errorf("failed to parse permissions in %s: %w", settingsPath, err)
 			}
 		}
-	} else {
+	case errors.Is(readErr, fs.ErrNotExist):
 		rawSettings = make(map[string]json.RawMessage)
+	default:
+		return nil, nil, nil, fmt.Errorf("failed to read %s: %w", settingsPath, readErr)
 	}
-
 	if rawHooks == nil {
 		rawHooks = make(map[string]json.RawMessage)
 	}
@@ -162,142 +207,181 @@ func loadRawClaudeSettingsForInstall(cfg *agent.HookConfigFile) (rawSettings, ra
 	return rawSettings, rawHooks, rawPermissions, nil
 }
 
-// installHookEntries mutates rawHooks in place to ensure every Entire hook is
-// present, migrating stale entries (from older CLI versions or, when force is
-// set, any current Entire hook) first. Returns the number of hooks newly
-// added and whether any stale entry was dropped (see the staleDropped comment
-// at its InstallHooks call site for why that forces a write on its own).
-func installHookEntries(rawHooks map[string]json.RawMessage, force bool) (count int, staleDropped bool) {
-	var preToolUse, postToolUse []ClaudeHookMatcher
-	parseHookType(rawHooks, "PreToolUse", &preToolUse)
-	parseHookType(rawHooks, "PostToolUse", &postToolUse)
-
-	// The "simple" hook types all share one shape: a single Entire command
-	// under an empty-string matcher, no tool-use targeting. Handling them
-	// data-driven (rather than one parse/strip/add/marshal block per type)
-	// keeps this function's complexity from growing linearly with each new
-	// simple hook type Entire registers.
-	simpleHooks := []struct {
-		hookType string
-		command  string
-	}{
-		{"SessionStart", agent.WrapProductionJSONWarningHookCommand("entire hooks claude-code session-start", agent.WarningFormatMultiLine)},
-		{"SessionEnd", agent.WrapProductionSilentHookCommand("entire hooks claude-code session-end")},
-		{"Stop", agent.WrapProductionSilentHookCommand("entire hooks claude-code stop")},
-		{"SubagentStop", agent.WrapProductionSilentHookCommand("entire hooks claude-code subagent-stop")},
-		{"UserPromptSubmit", agent.WrapProductionSilentHookCommand("entire hooks claude-code user-prompt-submit")},
-	}
-	simpleMatchers := make(map[string][]ClaudeHookMatcher, len(simpleHooks))
-	for _, h := range simpleHooks {
-		var m []ClaudeHookMatcher
-		parseHookType(rawHooks, h.hookType, &m)
-		simpleMatchers[h.hookType] = m
+// installHooksToFile installs Entire's Claude Code hooks into the settings
+// file at settingsPath. projectScope additionally removes Entire's retired
+// repo-scoped permissions.deny rule; the user-level install (InstallUserHooks)
+// passes false so it only ever touches the hooks section of ~/.claude/settings.json.
+// repaired reports a user-scope rewrite that normalized pre-existing Entire
+// entries (rather than a pure add or a no-op), so the caller can report the
+// repair instead of "already installed".
+func installHooksToFile(file hookSettingsIO, force, projectScope bool) (count int, repaired bool, err error) {
+	settingsPath := file.Path()
+	rawSettings, rawHooks, rawPermissions, err := readClaudeRawSettings(file, projectScope)
+	if err != nil {
+		return 0, false, err
 	}
 
-	// If force is true, remove all existing Entire hooks first
-	if force {
-		for _, h := range simpleHooks {
-			simpleMatchers[h.hookType] = removeEntireHooks(simpleMatchers[h.hookType])
+	sections := newClaudeHookSections()
+	if err := parseHookSections(rawHooks, settingsPath, sections); err != nil {
+		return 0, false, err
+	}
+
+	// Presence checks run against these pre-removal snapshots so a user-scope
+	// repair pass (below) does not defeat the idempotency accounting.
+	checks := make(map[string][]ClaudeHookMatcher, len(sections))
+	for section, matchers := range sections {
+		checks[section] = *matchers
+	}
+
+	// force removes all existing Entire hooks before reinstalling (mode
+	// switch). The user-scope install ALWAYS runs this remove-ours-then-re-add
+	// pass: hookCommandExists is an exact-string compare, so a pre-existing
+	// Entire hook in a different command form (bare, legacy go-run) would
+	// otherwise gain a second entry and double-fire machine-wide. removedOurs
+	// counts the removed entries so an already-correct file is left untouched.
+	userScope := !projectScope
+	removedOurs := 0
+	if force || userScope {
+		for _, matchers := range sections {
+			out, n := removeEntireHooksCounting(*matchers)
+			removedOurs += n
+			*matchers = out
 		}
-		preToolUse = removeEntireHooksFromMatchers(preToolUse)
-		postToolUse = removeEntireHooksFromMatchers(postToolUse)
 	}
-
-	// Define tool-use hook commands (the simple hooks' commands live in
-	// simpleHooks above).
-	preTaskCmd := agent.WrapProductionSilentHookCommand("entire hooks claude-code pre-task")
-	postTaskCmd := agent.WrapProductionSilentHookCommand("entire hooks claude-code post-task")
-	postTodoCmd := agent.WrapProductionSilentHookCommand("entire hooks claude-code post-todo")
 
 	// Drop Entire hooks left by older versions before adding the current ones,
 	// so a stale command (e.g. the removed local-dev launcher, which ran a
 	// script inside the working tree) does not survive alongside them.
 	// Unconditional: a plain `entire enable` must migrate too, not just --force.
-	drop := func(matchers []ClaudeHookMatcher, want ...string) []ClaudeHookMatcher {
-		out, dropped := dropStaleEntireHooks(matchers, want...)
-		if dropped {
-			staleDropped = true
+	staleDropped := false
+	if !force && !userScope {
+		wanted := make(map[string][]string, len(sections))
+		for _, spec := range claudeHookSpecs {
+			wanted[spec.section] = append(wanted[spec.section], spec.productionCommand())
 		}
-		return out
+		for section, matchers := range sections {
+			out, dropped := dropStaleEntireHooks(*matchers, wanted[section]...)
+			if dropped {
+				staleDropped = true
+			}
+			*matchers = out
+		}
 	}
-	for _, h := range simpleHooks {
-		simpleMatchers[h.hookType] = drop(simpleMatchers[h.hookType], h.command)
-	}
-	preToolUse = drop(preToolUse, preTaskCmd)
-	postToolUse = drop(postToolUse, postTaskCmd, postTodoCmd)
 
-	// Add hooks if they don't exist
-	for _, h := range simpleHooks {
-		m := simpleMatchers[h.hookType]
-		if !hookCommandExists(m, h.command) {
-			simpleMatchers[h.hookType] = addHookToMatcher(m, "", h.command)
+	// ensureHook counts a hook as newly installed when its exact command was
+	// absent from the pre-removal snapshot (force counts everything: it always
+	// reinstalls), and adds the entry unless a plain repo-scope install found
+	// it already present. After a removal pass (force or user scope) every
+	// Entire entry is gone from the working slices, so the add must not be
+	// gated on the presence check. Sharing one snapshot across calls cannot
+	// overcount: every call checks a distinct (matcher, command) pair — the
+	// two PostToolUse entries included.
+	addAll := force || userScope
+	ensureHook := func(matchers, check []ClaudeHookMatcher, matcherName, cmd string) []ClaudeHookMatcher {
+		var present bool
+		if !force {
+			if matcherName == "" {
+				present = hookCommandExists(check, cmd)
+			} else {
+				present = hookCommandExistsWithMatcher(check, matcherName, cmd)
+			}
+		}
+		if !present {
 			count++
 		}
-	}
-	if !hookCommandExistsWithMatcher(preToolUse, subagentToolMatcher, preTaskCmd) {
-		preToolUse = addHookToMatcher(preToolUse, subagentToolMatcher, preTaskCmd)
-		count++
-	}
-	if !hookCommandExistsWithMatcher(postToolUse, subagentToolMatcher, postTaskCmd) {
-		postToolUse = addHookToMatcher(postToolUse, subagentToolMatcher, postTaskCmd)
-		count++
-	}
-	if !hookCommandExistsWithMatcher(postToolUse, taskToolMatcher, postTodoCmd) {
-		postToolUse = addHookToMatcher(postToolUse, taskToolMatcher, postTodoCmd)
-		count++
+		if present && !addAll {
+			return matchers
+		}
+		return addHookToMatcher(matchers, matcherName, cmd)
 	}
 
-	// Marshal modified hook types back to rawHooks
-	for _, h := range simpleHooks {
-		marshalHookType(rawHooks, h.hookType, simpleMatchers[h.hookType])
+	for _, spec := range claudeHookSpecs {
+		matchers := sections[spec.section]
+		*matchers = ensureHook(*matchers, checks[spec.section], spec.matcher, spec.productionCommand())
 	}
-	marshalHookType(rawHooks, "PreToolUse", preToolUse)
-	marshalHookType(rawHooks, "PostToolUse", postToolUse)
 
-	return count, staleDropped
-}
+	// A normal repo-scoped enable also removes Entire's retired metadata deny
+	// rule. User-level installs must not modify user permissions.
+	permissionsChanged := false
+	if projectScope {
+		changed, err := agent.RemoveMetadataDenyRule(rawPermissions)
+		if err != nil {
+			return 0, false, fmt.Errorf("failed to update permissions in %s: %w", settingsPath, err)
+		}
+		permissionsChanged = changed
+	}
 
-// writeClaudeSettingsFile marshals rawHooks and rawPermissions into
-// rawSettings and writes the result through cfg, creating the parent .claude
-// directory if needed.
-func writeClaudeSettingsFile(cfg *agent.HookConfigFile, rawSettings, rawHooks, rawPermissions map[string]json.RawMessage) error {
+	// All hooks and permissions already installed. Two repair signals also
+	// force a write: staleDropped (a stale command was pruned, so returning
+	// early would leave it on disk) and, for the user scope, a removal pass
+	// that took away more than the add pass restores (removedOurs !=
+	// entireClaudeHookCount means duplicates or alternate-form entries were
+	// repaired away).
+	if count == 0 && !permissionsChanged && !staleDropped &&
+		(!userScope || removedOurs == entireClaudeHookCount) {
+		return 0, false, nil
+	}
+
+	for section, matchers := range sections {
+		marshalHookType(rawHooks, section, *matchers)
+	}
+
+	// Marshal hooks and update raw settings
 	hooksJSON, err := jsonutil.MarshalWithNoHTMLEscape(rawHooks)
 	if err != nil {
-		return fmt.Errorf("failed to marshal hooks: %w", err)
+		return 0, false, fmt.Errorf("failed to marshal hooks: %w", err)
 	}
 	rawSettings["hooks"] = hooksJSON
 
-	// An emptied permissions block is deleted, not written back as {}. Removing
-	// the retired deny rule can empty it, and leaving "permissions": {} behind
-	// in a tracked settings file is noise Entire put there. UninstallHooks and
-	// agent.RepairRetiredMetadataDenyRule both do the same.
-	if len(rawPermissions) == 0 {
-		delete(rawSettings, "permissions")
-	} else {
-		permJSON, err := jsonutil.MarshalWithNoHTMLEscape(rawPermissions)
-		if err != nil {
-			return fmt.Errorf("failed to marshal permissions: %w", err)
+	// Removing the retired rule can empty permissions. Delete that empty block
+	// rather than leaving noise Entire introduced in the tracked settings file.
+	if projectScope {
+		if len(rawPermissions) == 0 {
+			delete(rawSettings, "permissions")
+		} else {
+			permJSON, err := jsonutil.MarshalWithNoHTMLEscape(rawPermissions)
+			if err != nil {
+				return 0, false, fmt.Errorf("failed to marshal permissions: %w", err)
+			}
+			rawSettings["permissions"] = permJSON
 		}
-		rawSettings["permissions"] = permJSON
 	}
 
 	output, err := jsonutil.MarshalIndentWithNewline(rawSettings, "", "  ")
 	if err != nil {
-		return fmt.Errorf("failed to marshal settings: %w", err)
+		return 0, false, fmt.Errorf("failed to marshal settings: %w", err)
 	}
 
-	// Write creates .claude with MkdirAllNoSymlink, so a checked-in symlink
-	// there is refused by name rather than followed.
-	return cfg.Write(output, 0o600) //nolint:wrapcheck // agent.HookConfigFile already names the file in its error
+	// Repo scope creates .claude with MkdirAllNoSymlink inside the write, so a
+	// checked-in symlink there is refused by name rather than followed; user
+	// scope follows dotfile-manager symlinks instead (see hookSettingsIO).
+	if err := file.Write(output, 0o600); err != nil {
+		return 0, false, fmt.Errorf("failed to write %s: %w", settingsPath, err)
+	}
+
+	// A user-scope write that stripped pre-existing Entire entries is a repair
+	// (partial, duplicate, or alternate-form install normalized), not a pure
+	// add: the file the user had was changed beyond appending new hooks.
+	return count, userScope && removedOurs > 0, nil
 }
 
-// parseHookType parses a specific hook type from rawHooks into the target slice.
-// Silently ignores parse errors (leaves target unchanged).
-func parseHookType(rawHooks map[string]json.RawMessage, hookType string, target *[]ClaudeHookMatcher) {
-	if data, ok := rawHooks[hookType]; ok {
-		//nolint:errcheck,gosec // Intentionally ignoring parse errors - leave target as nil/empty
-		json.Unmarshal(data, target)
+// parseHookSections parses the hook types Entire manages out of rawHooks. A
+// section that exists but does not parse as []ClaudeHookMatcher aborts with
+// an error naming the section and file: these sections get rewritten on the
+// way out, so an unparseable one cannot round-trip verbatim — silently
+// treating it as empty would clobber it on install and delete it on
+// uninstall.
+func parseHookSections(rawHooks map[string]json.RawMessage, settingsPath string, sections map[string]*[]ClaudeHookMatcher) error {
+	for hookType, target := range sections {
+		data, ok := rawHooks[hookType]
+		if !ok {
+			continue
+		}
+		if err := json.Unmarshal(data, target); err != nil {
+			return fmt.Errorf("hooks.%s in %s has an unexpected shape (fix or remove that section): %w", hookType, settingsPath, err)
+		}
 	}
+	return nil
 }
 
 // marshalHookType marshals a hook type back to rawHooks.
@@ -320,65 +404,51 @@ func (c *ClaudeCodeAgent) UninstallHooks(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	data, err := cfg.Read()
+	return uninstallHooksFromFile(cfg, true)
+}
+
+// uninstallHooksFromFile removes Entire hooks (and only Entire hooks) from
+// the settings file at settingsPath. projectScope additionally removes the
+// repo-scoped permissions.deny rule; the user-level uninstall passes false.
+func uninstallHooksFromFile(file hookSettingsIO, projectScope bool) error {
+	settingsPath := file.Path()
+	data, err := file.Read()
 	if err != nil {
-		// Same split AreHooksInstalled makes: an absent file is an answer, an
-		// unreadable one is not. Collapsing both to "nothing to uninstall" leaves
-		// the hooks on disk and reports success, which is what uninstall is
-		// supposed to stop doing.
-		if errors.Is(err, os.ErrNotExist) {
-			return nil
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil // No settings file means nothing to uninstall
 		}
-		return fmt.Errorf("read %s: %w", cfg.Path(), err)
+		return fmt.Errorf("failed to read %s: %w", settingsPath, err)
 	}
 
 	var rawSettings map[string]json.RawMessage
 	if err := json.Unmarshal(data, &rawSettings); err != nil {
-		return fmt.Errorf("failed to parse settings.json: %w", err)
+		return fmt.Errorf("failed to parse %s: %w", settingsPath, err)
 	}
 
-	// rawHooks preserves unknown hook types (e.g., "Notification")
+	// rawHooks preserves unknown hook types (e.g., "Notification").
 	var rawHooks map[string]json.RawMessage
 	if hooksRaw, ok := rawSettings["hooks"]; ok {
 		if err := json.Unmarshal(hooksRaw, &rawHooks); err != nil {
-			return fmt.Errorf("failed to parse hooks: %w", err)
+			return fmt.Errorf("failed to parse hooks in %s: %w", settingsPath, err)
 		}
 	}
 	if rawHooks == nil {
 		rawHooks = make(map[string]json.RawMessage)
 	}
 
-	// Parse only the hook types we need to modify
-	var sessionStart, sessionEnd, stop, subagentStop, userPromptSubmit, preToolUse, postToolUse []ClaudeHookMatcher
-	parseHookType(rawHooks, "SessionStart", &sessionStart)
-	parseHookType(rawHooks, "SessionEnd", &sessionEnd)
-	parseHookType(rawHooks, "Stop", &stop)
-	parseHookType(rawHooks, "SubagentStop", &subagentStop)
-	parseHookType(rawHooks, "UserPromptSubmit", &userPromptSubmit)
-	parseHookType(rawHooks, "PreToolUse", &preToolUse)
-	parseHookType(rawHooks, "PostToolUse", &postToolUse)
+	sections := newClaudeHookSections()
+	if err := parseHookSections(rawHooks, settingsPath, sections); err != nil {
+		return err
+	}
+	for section, matchers := range sections {
+		*matchers = removeEntireHooks(*matchers)
+		marshalHookType(rawHooks, section, *matchers)
+	}
 
-	// Remove Entire hooks from all hook types
-	sessionStart = removeEntireHooks(sessionStart)
-	sessionEnd = removeEntireHooks(sessionEnd)
-	stop = removeEntireHooks(stop)
-	subagentStop = removeEntireHooks(subagentStop)
-	userPromptSubmit = removeEntireHooks(userPromptSubmit)
-	preToolUse = removeEntireHooksFromMatchers(preToolUse)
-	postToolUse = removeEntireHooksFromMatchers(postToolUse)
-
-	// Marshal modified hook types back to rawHooks
-	marshalHookType(rawHooks, "SessionStart", sessionStart)
-	marshalHookType(rawHooks, "SessionEnd", sessionEnd)
-	marshalHookType(rawHooks, "Stop", stop)
-	marshalHookType(rawHooks, "SubagentStop", subagentStop)
-	marshalHookType(rawHooks, "UserPromptSubmit", userPromptSubmit)
-	marshalHookType(rawHooks, "PreToolUse", preToolUse)
-	marshalHookType(rawHooks, "PostToolUse", postToolUse)
-
-	// Also remove the metadata deny rule from permissions
+	// Also remove the metadata deny rule from permissions (repo scope only:
+	// user-level installs never wrote it, so leave user permissions alone).
 	var rawPermissions map[string]json.RawMessage
-	if permRaw, ok := rawSettings["permissions"]; ok {
+	if permRaw, ok := rawSettings["permissions"]; ok && projectScope {
 		if err := json.Unmarshal(permRaw, &rawPermissions); err != nil {
 			// If parsing fails, just skip permissions cleanup
 			rawPermissions = nil
@@ -418,42 +488,52 @@ func (c *ClaudeCodeAgent) UninstallHooks(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("failed to marshal settings: %w", err)
 	}
-	return cfg.Write(output, 0o600) //nolint:wrapcheck // agent.HookConfigFile already names the file in its error
+	if err := file.Write(output, 0o600); err != nil {
+		return fmt.Errorf("failed to write %s: %w", settingsPath, err)
+	}
+	return nil
 }
 
 // loadClaudeSettings reads and parses .claude/settings.json from the repo root.
-// A missing file returns the zero settings and no error — that is the answer
-// "nothing configured". An unreadable or malformed file returns an error: the
-// answer could not be read, which is a different thing.
+// Returns ok=false when the file is missing or unparseable.
+// loadClaudeSettings reads the repo-scope settings through the worktree root.
+// A missing file yields empty settings; an unreadable or unparseable one is an
+// error (and a Warn — "not installed" and "cannot tell" must not collapse).
 func loadClaudeSettings(ctx context.Context) (ClaudeSettings, error) {
 	cfg, err := claudeHookConfig(ctx)
 	if err != nil {
 		return ClaudeSettings{}, err
 	}
-	data, err := cfg.Read()
-	// No settings file means no hooks, which is an answer; anything else means we
-	// could not read the answer.
-	if errors.Is(err, os.ErrNotExist) {
+	settings, err := loadClaudeSettingsFile(cfg)
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
 		return ClaudeSettings{}, nil
-	}
-	if err != nil {
-		logging.Warn(ctx, "claude-code: failed to read settings file", "path", cfg.Path(), "err", err)
-		return ClaudeSettings{}, fmt.Errorf("read %s: %w", cfg.Path(), err)
-	}
-
-	var settings ClaudeSettings
-	if err := json.Unmarshal(data, &settings); err != nil {
-		logging.Warn(ctx, "claude-code: failed to parse settings file", "path", cfg.Path(), "err", err)
-		return ClaudeSettings{}, fmt.Errorf("parse %s: %w", cfg.Path(), err)
+	case err != nil:
+		logging.Warn(ctx, "claude-code: failed to load settings file", "path", cfg.Path(), "err", err)
+		return ClaudeSettings{}, err
 	}
 	return settings, nil
 }
 
-// AreHooksInstalled checks if Entire hooks are installed.
-//
-// A missing settings file is an answer — no hooks — while an unreadable or
-// malformed one is an error: "we could not tell" and "there are none" are
-// different things to a caller deciding whether hooks can be left alone.
+// loadClaudeSettingsFile reads and parses a Claude Code settings file. A
+// missing file is an fs.ErrNotExist error; callers that need to distinguish
+// "not installed" from "cannot tell" (a real read or parse failure) branch on
+// errors.Is.
+func loadClaudeSettingsFile(file hookSettingsIO) (ClaudeSettings, error) {
+	data, err := file.Read()
+	if err != nil {
+		return ClaudeSettings{}, fmt.Errorf("read %s: %w", file.Path(), err)
+	}
+
+	var settings ClaudeSettings
+	if err := json.Unmarshal(data, &settings); err != nil {
+		return ClaudeSettings{}, fmt.Errorf("parse %s: %w", file.Path(), err)
+	}
+	return settings, nil
+}
+
+// AreHooksInstalled reports whether Entire hooks are installed; an unreadable
+// or malformed settings file is an error, not "not installed".
 func (c *ClaudeCodeAgent) AreHooksInstalled(ctx context.Context) (bool, error) {
 	settings, err := loadClaudeSettings(ctx)
 	if err != nil {
@@ -497,21 +577,15 @@ func (c *ClaudeCodeAgent) CheckHookConfig(ctx context.Context) agent.HookConfigS
 // tool-use matchers does not carry its Entire hook.
 func CheckHookConfig(ctx context.Context) HookConfigState {
 	settings, err := loadClaudeSettings(ctx)
-	// An unreadable or malformed settings file collapses to HooksAbsent
-	// deliberately. This is a coarse three-state diagnostic for `entire status`
-	// and `entire doctor`, and no caller here acts on "could not tell" —
-	// AreHooksInstalled is the API that propagates that distinction to callers
-	// which must (e.g. uninstall deciding whether hooks can be left alone).
-	// loadClaudeSettings has already logged the failure.
 	if err != nil || !hasEntireHook(settings.Hooks.Stop) {
 		return HooksAbsent
 	}
 	subagentTools := splitMatcherTools(subagentToolMatcher)
 	taskTools := splitMatcherTools(taskToolMatcher)
-	if !hasEntireHookCoveringTools(settings.Hooks.PreToolUse, subagentTools) ||
+	if !hasEntireHook(settings.Hooks.SubagentStop) ||
+		!hasEntireHookCoveringTools(settings.Hooks.PreToolUse, subagentTools) ||
 		!hasEntireHookCoveringTools(settings.Hooks.PostToolUse, subagentTools) ||
-		!hasEntireHookCoveringTools(settings.Hooks.PostToolUse, taskTools) ||
-		!hasEntireHook(settings.Hooks.SubagentStop) {
+		!hasEntireHookCoveringTools(settings.Hooks.PostToolUse, taskTools) {
 		return HooksOutdated
 	}
 	return HooksCurrent
@@ -674,11 +748,30 @@ func removeEntireHooks(matchers []ClaudeHookMatcher) []ClaudeHookMatcher {
 	return out
 }
 
-// removeEntireHooksFromMatchers removes Entire hooks from tool-use matchers (PreToolUse, PostToolUse)
-// This handles the nested structure where hooks are grouped by tool matcher (e.g., "Agent", "TaskCreate|TaskUpdate")
-func removeEntireHooksFromMatchers(matchers []ClaudeHookMatcher) []ClaudeHookMatcher {
-	// Same logic as removeEntireHooks - both work on the same structure
-	return removeEntireHooks(matchers)
+// removeEntireHooksCounting is removeEntireHooks plus the number of entries
+// removed, so the user-scope repair pass can tell an already-correct file
+// (exactly the expected entries removed and re-added) from one that needed
+// duplicate or alternate-form entries stripped. Duplicate IDENTICAL entries are
+// why this cannot be expressed as dropStaleEntireHooks: that helper keeps every
+// wanted command, however many copies there are.
+func removeEntireHooksCounting(matchers []ClaudeHookMatcher) ([]ClaudeHookMatcher, int) {
+	result := make([]ClaudeHookMatcher, 0, len(matchers))
+	removed := 0
+	for _, matcher := range matchers {
+		kept := make([]ClaudeHookEntry, 0, len(matcher.Hooks))
+		for _, hook := range matcher.Hooks {
+			if isEntireHook(hook.Command) {
+				removed++
+				continue
+			}
+			kept = append(kept, hook)
+		}
+		if len(kept) > 0 {
+			matcher.Hooks = kept
+			result = append(result, matcher)
+		}
+	}
+	return result, removed
 }
 
 // PermissionConfig implements agent.PermissionConfigOwner so the shared

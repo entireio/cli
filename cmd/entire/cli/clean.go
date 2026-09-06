@@ -279,7 +279,7 @@ func runCleanAll(ctx context.Context, cmd *cobra.Command, force, dryRun bool) er
 	var unscanned []string
 
 	tempFiles, err := listAllTempFiles(ctx)
-	if err != nil {
+	if err != nil && !paths.IsUnroutableRuntimePath(err) {
 		fmt.Fprintf(cmd.ErrOrStderr(), "Warning: failed to list temp files: %v\n", err)
 		unscanned = append(unscanned, "temp files")
 	}

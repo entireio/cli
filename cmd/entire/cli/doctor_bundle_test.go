@@ -3,13 +3,17 @@ package cli
 import (
 	"archive/zip"
 	"context"
+	"errors"
+	"github.com/entireio/cli/cmd/entire/cli/entiredir"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/entireio/cli/cmd/entire/cli/logging"
+	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 )
 
@@ -35,7 +39,7 @@ func TestWriteDoctorBundle_ContainsExpectedEntries(t *testing.T) {
 	}
 
 	out := filepath.Join(dir, "bundle.zip")
-	if err := writeDoctorBundle(context.Background(), dir, out, false); err != nil {
+	if err := writeDoctorBundle(context.Background(), dir, mustOpenEntireAt(t, dir), out, false); err != nil {
 		t.Fatalf("writeDoctorBundle: %v", err)
 	}
 	info, err := os.Stat(out)
@@ -88,7 +92,7 @@ func TestWriteDoctorBundle_CapturesEntireRefs(t *testing.T) {
 	runDoctorBundleGit(t, dir, "update-ref", "refs/heads/entire/checkpoints/v1", "HEAD")
 
 	out := filepath.Join(dir, "bundle.zip")
-	if err := writeDoctorBundle(context.Background(), dir, out, false); err != nil {
+	if err := writeDoctorBundle(context.Background(), dir, mustOpenEntireAt(t, dir), out, false); err != nil {
 		t.Fatalf("writeDoctorBundle: %v", err)
 	}
 
@@ -106,7 +110,7 @@ func TestWriteDoctorBundle_RedactsCredentialedRemote(t *testing.T) {
 	runDoctorBundleGit(t, dir, "remote", "add", "origin", "https://user:s3cr3tTOKEN12345@example.com/owner/repo.git")
 
 	out := filepath.Join(dir, "bundle.zip")
-	if err := writeDoctorBundle(context.Background(), dir, out, false); err != nil {
+	if err := writeDoctorBundle(context.Background(), dir, mustOpenEntireAt(t, dir), out, false); err != nil {
 		t.Fatalf("writeDoctorBundle: %v", err)
 	}
 
@@ -123,7 +127,7 @@ func TestWriteDoctorBundle_OmitsAbsentLogsDirectory(t *testing.T) {
 	testutil.InitRepo(t, dir)
 
 	out := filepath.Join(dir, "bundle.zip")
-	if err := writeDoctorBundle(context.Background(), dir, out, false); err != nil {
+	if err := writeDoctorBundle(context.Background(), dir, mustOpenEntireAt(t, dir), out, false); err != nil {
 		t.Fatalf("writeDoctorBundle: %v", err)
 	}
 
@@ -200,7 +204,7 @@ func TestWriteDoctorBundle_RedactsLogContents(t *testing.T) {
 	}
 
 	out := filepath.Join(dir, "bundle.zip")
-	if err := writeDoctorBundle(context.Background(), dir, out, false); err != nil {
+	if err := writeDoctorBundle(context.Background(), dir, mustOpenEntireAt(t, dir), out, false); err != nil {
 		t.Fatalf("writeDoctorBundle: %v", err)
 	}
 
@@ -233,7 +237,7 @@ func TestWriteDoctorBundle_RedactsSettings(t *testing.T) {
 	}
 
 	out := filepath.Join(dir, "bundle.zip")
-	if err := writeDoctorBundle(context.Background(), dir, out, false); err != nil {
+	if err := writeDoctorBundle(context.Background(), dir, mustOpenEntireAt(t, dir), out, false); err != nil {
 		t.Fatalf("writeDoctorBundle: %v", err)
 	}
 
@@ -262,7 +266,7 @@ func TestWriteDoctorBundle_RawSkipsRedaction(t *testing.T) {
 	}
 
 	out := filepath.Join(dir, "bundle.zip")
-	if err := writeDoctorBundle(context.Background(), dir, out, true); err != nil {
+	if err := writeDoctorBundle(context.Background(), dir, mustOpenEntireAt(t, dir), out, true); err != nil {
 		t.Fatalf("writeDoctorBundle raw: %v", err)
 	}
 
@@ -281,6 +285,52 @@ func TestDoctorBundleCmd_HelpAdvertisesRedaction(t *testing.T) {
 		if !strings.Contains(help, want) {
 			t.Errorf("doctor bundle help text missing %q. Help:\n%s", want, help)
 		}
+	}
+}
+
+// TestDoctorBundleCmd_IncludesRoutedLogsInGloballyTrackedRepo pins that
+// `entire doctor bundle` collects logs through paths.AbsPath: in a globally
+// tracked repo the logs live under the git common dir, and a worktree-only
+// join would silently produce a bundle without logs for exactly these repos.
+// No t.Parallel: the fixture uses t.Chdir and t.Setenv.
+func TestDoctorBundleCmd_IncludesRoutedLogsInGloballyTrackedRepo(t *testing.T) {
+	dir := t.TempDir()
+	if resolved, err := filepath.EvalSymlinks(dir); err == nil {
+		dir = resolved
+	}
+	testutil.InitRepo(t, dir)
+	t.Chdir(dir)
+	configDir := t.TempDir()
+	t.Setenv("ENTIRE_CONFIG_DIR", configDir)
+	if err := os.WriteFile(filepath.Join(configDir, "settings.json"), []byte(`{"global":{"enabled":true}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	paths.ClearWorktreeRootCache()
+	t.Cleanup(func() {
+		paths.ClearWorktreeRootCache()
+	})
+	logPath, err := paths.AbsPath(t.Context(), filepath.Join(logging.LogsDir, "entire.log"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(logPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(logPath, []byte("routed-log-line-doctor-bundle\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	outZip := filepath.Join(t.TempDir(), "bundle.zip")
+	cmd := newDoctorBundleCmd()
+	cmd.SetOut(io.Discard)
+	cmd.SetErr(io.Discard)
+	cmd.SetArgs([]string{"--out", outZip})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("doctor bundle: %v", err)
+	}
+
+	if got := readZipEntry(t, outZip, "logs/entire.log"); !strings.Contains(got, "routed-log-line-doctor-bundle") {
+		t.Fatalf("bundle logs/entire.log missing routed log line, got: %q", got)
 	}
 }
 
@@ -318,4 +368,18 @@ func TestDoctorBundleCmd_StderrBannerNamesMode(t *testing.T) {
 			}
 		})
 	}
+}
+
+// mustOpenEntireAt opens the fixture's .entire root the way the command opens
+// the routed runtime root; a fixture without one contributes nil, as prod does.
+func mustOpenEntireAt(t *testing.T, dir string) *os.Root {
+	t.Helper()
+	root, err := entiredir.OpenAtForRead(dir)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	return root
 }

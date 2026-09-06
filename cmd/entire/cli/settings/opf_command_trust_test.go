@@ -11,6 +11,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
+	"github.com/entireio/cli/cmd/entire/cli/internal/gitpath"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 )
 
@@ -559,5 +561,119 @@ func TestPathIsVersioned_Win32TrailingCharVariantsAreTracked(t *testing.T) {
 			require.NoError(t, err)
 			assert.True(t, got, "a Win32-equivalent committed name must count as tracked")
 		})
+	}
+}
+
+// A tracked `.entire` SYMLINK to a tracked directory defeats the index probe:
+// the literal path .entire/settings.local.json is absent from the index while
+// os.ReadFile follows the link into committed content. That is exactly how a
+// fresh clone could ship an executable OPF command, so a symlinked component
+// is never locally owned.
+func TestOPFCommandTrust_SymlinkedEntireDirIsIgnored(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	testutil.InitRepo(t, root)
+	payload := filepath.Join(root, "payload")
+	require.NoError(t, os.MkdirAll(payload, 0o755))
+	writeSettingsFile(t, filepath.Join(payload, "settings.json"), opfSettings(""))
+	writeSettingsFile(t, filepath.Join(payload, "settings.local.json"), localOPFSettings(attackerCommand))
+	require.NoError(t, os.Symlink("payload", filepath.Join(root, ".entire")))
+	testutil.RunGit(t, root, "add", "-A")
+	testutil.RunGit(t, root, "commit", "-m", "ship a symlinked .entire")
+
+	project := filepath.Join(root, EntireSettingsFile)
+	local := filepath.Join(root, EntireSettingsLocalFile)
+	// The rooted loader refuses to read through a symlinked .entire at all
+	// (fail closed): the attacker's command never even loads. Guarded
+	// commands are refused earlier by checkEntireDirBeforeRun; this pins the
+	// loader's own behavior for the paths that reach it directly.
+	_, err := loadMergedSettings(t.Context(), project, "", local)
+	require.Error(t, err, "a symlinked .entire is repository content; loading through it must fail closed")
+	assert.Contains(t, err.Error(), "symlink")
+}
+
+// A submodule mounted at `.entire` is a real directory — the symlink probe
+// passes — whose contents the superproject records only as a gitlink named
+// `.entire`: the local file's own path appears in neither the index nor HEAD,
+// and go-git reports the gitlink's tree as ErrDirectoryNotFound. It is
+// repository content all the same: `git clone --recurse-submodules` delivers
+// the settings file and the binary it points at together.
+func TestOPFCommandTrust_SubmoduleAtEntireDirIsIgnored(t *testing.T) {
+	t.Parallel()
+	payload := t.TempDir()
+	testutil.InitRepo(t, payload)
+	writeSettingsFile(t, filepath.Join(payload, "settings.json"), opfSettings(""))
+	writeSettingsFile(t, filepath.Join(payload, "settings.local.json"), localOPFSettings(attackerCommand))
+	testutil.RunGit(t, payload, "add", "-A")
+	testutil.RunGit(t, payload, "commit", "-m", "payload")
+
+	root := t.TempDir()
+	testutil.InitRepo(t, root)
+	testutil.RunGit(t, root, "-c", "protocol.file.allow=always", "submodule", "add", payload, ".entire")
+	testutil.RunGit(t, root, "commit", "-m", "ship .entire as a submodule")
+	require.FileExists(t, filepath.Join(root, EntireSettingsLocalFile), "the clone materialized the payload")
+
+	project := filepath.Join(root, EntireSettingsFile)
+	local := filepath.Join(root, EntireSettingsLocalFile)
+	assert.Empty(t, loadedOPF(t, project, local).Command,
+		"a command reached through a submodule at .entire is repository content, not the developer's")
+
+	// The HEAD-side check must hold on its own too (the index and the
+	// on-disk .entire/.git are the other two tells).
+	repo, err := gitrepo.OpenPath(root)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = repo.Close() })
+	head, err := repo.Head()
+	require.NoError(t, err)
+	commit, err := repo.CommitObject(head.Hash())
+	require.NoError(t, err)
+	tree, err := commit.Tree()
+	require.NoError(t, err)
+	versioned, err := treeHasPathFold(tree, strings.Split(EntireSettingsLocalFile, "/"))
+	require.NoError(t, err)
+	assert.True(t, versioned, "a gitlink at .entire in HEAD is versioned content")
+}
+
+// The binary's location is a gate of its own: an executable inside the
+// worktree is deliverable through the repository whatever made the settings
+// file look locally owned, so it is never run — even from a genuinely
+// untracked local file. exec.ErrDot does not help here (a command containing a
+// separator never consults $PATH).
+func TestOPFCommandTrust_CommandInsideWorktreeIsRejected(t *testing.T) {
+	t.Parallel()
+	root, project, local := newOPFRepo(t)
+	writeSettingsFile(t, project, opfSettings(""))
+	for _, cmd := range []string{"./.entire/opf", ".entire/opf", "tools/opf", filepath.ToSlash(filepath.Join(root, "tools", "opf"))} {
+		writeSettingsFile(t, local, localOPFSettings(cmd))
+		assert.Empty(t, loadedOPF(t, project, local).Command, "command %q resolves inside the worktree", cmd)
+	}
+	writeSettingsFile(t, local, localOPFSettings(trustedCommand))
+	assert.Equal(t, trustedCommand, loadedOPF(t, project, local).Command, "an absolute path outside the repo is still honored")
+	writeSettingsFile(t, local, localOPFSettings("opf-custom"))
+	assert.Equal(t, "opf-custom", loadedOPF(t, project, local).Command, "a bare $PATH name is still honored")
+}
+
+// The containment check must use the same path equivalence as the exact-root
+// match: on a case-insensitive filesystem `/Repo/tool` is inside `/repo`, and
+// a byte-wise prefix would let a repository-delivered binary through.
+func TestPathUnderRoot_MatchesEquivalentPrefix(t *testing.T) {
+	t.Parallel()
+	sep := string(filepath.Separator)
+	root := filepath.Join(sep+"repo", "work")
+	if !pathUnderRoot(filepath.Join(root, "bin", "tool"), root) {
+		t.Fatal("child path must be under root")
+	}
+	if pathUnderRoot(root, root) {
+		t.Fatal("the root itself is not strictly under root")
+	}
+	if pathUnderRoot(root+"2"+sep+"tool", root) {
+		t.Fatal("a sibling sharing the prefix is not under root")
+	}
+	if !pathUnderRoot(filepath.Join(root, "tool"), root+sep) {
+		t.Fatal("a trailing separator on root must not matter")
+	}
+	folded := filepath.Join(sep+"Repo", "Work", "tool")
+	if got, want := pathUnderRoot(folded, root), gitpath.Equivalent(sep+"Repo"+sep+"Work", root); got != want {
+		t.Fatalf("case-folded child: pathUnderRoot = %v, want the platform equivalence %v", got, want)
 	}
 }

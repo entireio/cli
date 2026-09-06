@@ -119,6 +119,9 @@ linters:
         - pattern: '^.*\.(Print|Println|Printf)$'
           msg: "cobra's Print* writes to OutOrStderr (stderr in production); use fmt.Fprint*(cmd.OutOrStdout(), ...)"
           pkg: 'github\.com/spf13/cobra'
+        - pattern: '^settings\.(IsSetUpAndEnabled|IsSetUpAtRoot)$'
+          msg: "a repo is active when its own settings enable it OR global tracking covers it; this checks only the first half. Use settings.IsActiveForRepo(WithReason) (current repo) or settings.IsActiveAtRoot (another root), which compute that OR with the veto, tracked-local-file and exclusion rules"
+          pkg: 'github\.com/entireio/cli/cmd/entire/cli/settings$'
     govet:
       enable-all: true
       disable:

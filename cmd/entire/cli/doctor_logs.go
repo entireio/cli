@@ -30,22 +30,31 @@ func newDoctorLogsCmd() *cobra.Command {
 By default, prints the last 100 lines. Use --tail N to change.
 Use --follow to stream new lines as they are written (Ctrl+C to exit).`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			repoRoot, err := paths.WorktreeRoot(cmd.Context())
+			// AbsPath (not a bare WorktreeRoot join): globally tracked
+			// repos route .entire/logs under the git common dir.
+			logFile, err := paths.AbsPath(cmd.Context(), filepath.Join(logging.LogsDir, "entire.log"))
 			if err != nil {
 				cmd.SilenceUsage = true
+				// A routing failure happens inside a valid git repo —
+				// "not a git repository" would misdiagnose it.
+				if paths.IsUnroutableRuntimePath(err) {
+					return fmt.Errorf("logs unavailable: %w", err)
+				}
 				return errors.New("not a git repository")
 			}
-			logFile := filepath.Join(repoRoot, logging.LogsDir, logging.LogFileName)
-			root, err := entiredir.OpenAtForRead(repoRoot)
-			if err == nil {
-				_, err = root.Lstat(logging.LogName)
+			// The root is the ROUTED runtime base (a globally tracked repo
+			// keeps its log under the git common dir); logFile above is the
+			// same location as an absolute path, for the messages.
+			root, rootErr := entiredir.OpenForRead(cmd.Context())
+			if rootErr == nil {
+				_, rootErr = root.Lstat(logging.LogName)
 			}
-			if errors.Is(err, fs.ErrNotExist) {
+			if errors.Is(rootErr, fs.ErrNotExist) {
 				fmt.Fprintf(cmd.OutOrStdout(), "No log file at %s yet.\n", logFile)
 				return nil
 			}
-			if err != nil {
-				return fmt.Errorf("access log file: %w", err)
+			if rootErr != nil {
+				return fmt.Errorf("access log file: %w", rootErr)
 			}
 			if err := printTail(cmd.OutOrStdout(), root, logging.LogName, tail); err != nil {
 				return err

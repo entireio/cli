@@ -26,6 +26,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/osroot"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
+	"github.com/entireio/cli/cmd/entire/cli/settings/repopolicy"
 	"github.com/entireio/cli/redact"
 )
 
@@ -790,6 +791,10 @@ func loadRaw(ctx context.Context, file, label string) (path string, raw map[stri
 	if err != nil {
 		return "", nil, false, fmt.Errorf("resolve %s settings path: %w", label, err)
 	}
+	return loadRawPath(path, label)
+}
+
+func loadRawPath(path, label string) (string, map[string]json.RawMessage, bool, error) {
 	data, readErr := readConfined(path)
 	if readErr != nil {
 		if errors.Is(readErr, fs.ErrNotExist) {
@@ -797,7 +802,7 @@ func loadRaw(ctx context.Context, file, label string) (path string, raw map[stri
 		}
 		return path, nil, false, fmt.Errorf("reading %s settings: %w", label, readErr)
 	}
-	raw = map[string]json.RawMessage{}
+	raw := map[string]json.RawMessage{}
 	if err := json.Unmarshal(data, &raw); err != nil {
 		return path, nil, true, fmt.Errorf("parsing %s settings: %w", label, err)
 	}
@@ -863,7 +868,7 @@ func ModifyClonePreferences(ctx context.Context, fn func(*ClonePreferences) erro
 	if err != nil {
 		return err
 	}
-	return modifyClonePreferencesFile(path, fn)
+	return modifyClonePreferencesFile(ctx, path, fn)
 }
 
 // LoadFromBytes parses settings from raw JSON bytes without merging local overrides.
@@ -1053,16 +1058,18 @@ func writeClonePreferencesAtomic(filePath string, data []byte, perm fs.FileMode)
 // loadFromFile loads settings from a specific file path.
 // Returns default settings if the file doesn't exist.
 func loadFromFile(filePath string) (*EntireSettings, error) {
-	settings := &EntireSettings{Enabled: true}
-
 	data, err := readConfined(filePath)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
-			return settings, nil
+			return &EntireSettings{Enabled: true}, nil
 		}
 		return nil, fmt.Errorf("%w", err)
 	}
+	return loadSettingsData(data)
+}
 
+func loadSettingsData(data []byte) (*EntireSettings, error) {
+	settings := &EntireSettings{Enabled: true}
 	dec := json.NewDecoder(bytes.NewReader(data))
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(settings); err != nil {
@@ -1110,10 +1117,15 @@ func loadClonePreferencesFromFile(filePath string) (*ClonePreferences, error) {
 	// EntireSettings stays strict because it's committed and team-edited,
 	// where unknown keys usually mean typos worth surfacing immediately.
 	if err := json.Unmarshal(data, prefs); err != nil {
-		return nil, fmt.Errorf("parsing preferences file: %w", err)
+		return nil, fmt.Errorf("%w: %w", errCorruptClonePreferences, err)
 	}
 	return prefs, nil
 }
+
+// errCorruptClonePreferences marks a clone preferences file whose JSON cannot
+// be parsed — as opposed to an I/O failure reading it. ModifyClonePreferences
+// recreates such a file; see modifyClonePreferencesFile.
+var errCorruptClonePreferences = errors.New("parsing preferences file")
 
 func saveClonePreferencesToFile(prefs *ClonePreferences, filePath string) error {
 	if prefs == nil {
@@ -1153,7 +1165,7 @@ func mergeReviewProfiles(base, src map[string]ReviewProfileConfig) map[string]Re
 	return out
 }
 
-func modifyClonePreferencesFile(filePath string, fn func(*ClonePreferences) error) error {
+func modifyClonePreferencesFile(ctx context.Context, filePath string, fn func(*ClonePreferences) error) error {
 	// Clone preferences live in the git common dir, not under .entire, so the
 	// directory and lock go through gitdir's root for that clone. Resolving from
 	// the file's own path keeps the ClonePreferencesPath API unchanged.
@@ -1174,7 +1186,26 @@ func modifyClonePreferencesFile(filePath string, fn func(*ClonePreferences) erro
 
 	prefs, err := loadClonePreferencesFromFile(filePath)
 	if err != nil {
-		return err
+		if !errors.Is(err, errCorruptClonePreferences) {
+			return err
+		}
+		// Corrupt JSON: the file is already unreadable for every consumer, so
+		// nothing is lost by starting fresh. Recreating it here (under the
+		// flock held above) is what keeps one bad write from permanently
+		// wedging every future read-modify-write — e.g. the lazy global
+		// setup's completion marker. The bad bytes are set aside rather than
+		// overwritten, and the reset is logged, so the loss of whatever the
+		// file held (trail context, setup markers) is diagnosable.
+		aside := fmt.Sprintf("%s.corrupt-%d", filePath, time.Now().UnixNano())
+		if renameErr := os.Rename(filePath, aside); renameErr != nil && !errors.Is(renameErr, fs.ErrNotExist) {
+			return fmt.Errorf("setting aside corrupt preferences file: %w", renameErr)
+		}
+		logging.Warn(ctx, "clone preferences file was corrupt; reset to empty",
+			slog.String("path", filePath),
+			slog.String("preserved_as", aside),
+			slog.String("error", err.Error()),
+		)
+		prefs = &ClonePreferences{}
 	}
 	if err := fn(prefs); err != nil {
 		return err
@@ -1728,26 +1759,45 @@ func entireFileExists(ctx context.Context, name string) bool {
 	return err == nil
 }
 
-// IsSetUpAndEnabled returns true if Entire is both set up and enabled.
-// "Set up" spans either scope — .entire/settings.json OR
-// .entire/settings.local.json — so it must check IsSetUpAny, not IsSetUp.
-// `entire enable --local` writes only settings.local.json and never creates the
-// base file; gating on the base file alone would treat such a local-only repo
-// as inactive and make every hook a silent no-op, dropping all checkpoint
-// capture for that documented workflow. The IsSetUpAny guard is still required
-// so a never-enabled repo (no settings file in any scope) is not treated as
-// enabled by Load's default Enabled: true. Any settings read error is treated
-// as disabled (fail closed).
-// Use this for hooks that should be no-ops when Entire is not active.
-func IsSetUpAndEnabled(ctx context.Context) bool {
-	if !IsSetUpAny(ctx) {
-		return false
+// RepoActivationConfigured reports whether the repository's own settings
+// files express repo-level activation (see repopolicy.ReadRepoActivation).
+// A malformed settings file, or one whose effective schema fails Load (e.g.
+// both secret scanners disabled), is an error so setup and consent flows
+// fail closed rather than treating invalid configuration as intent.
+func RepoActivationConfigured(ctx context.Context) (bool, error) {
+	root, err := paths.WorktreeRoot(ctx)
+	if err != nil {
+		return false, err //nolint:wrapcheck // paths error already names the failure
 	}
-	s, err := Load(ctx)
+	activation, err := repopolicy.ReadRepoActivation(ctx, root)
+	if err != nil {
+		return false, fmt.Errorf("reading repo activation settings: %w", err)
+	}
+	if !activation.Configured {
+		return false, nil
+	}
+	if _, err := Load(ctx); err != nil {
+		return false, fmt.Errorf("validating repo activation settings: %w", err)
+	}
+	return true, nil
+}
+
+// IsSetUpAndEnabled reports repo-level activation: a project settings.json
+// (default enabled) or a settings.local.json carrying an explicit "enabled"
+// key, with the local value winning. Any read error, and any settings file
+// the full loader rejects (ErrScannerConfig, unknown keys), is disabled —
+// fail closed.
+func IsSetUpAndEnabled(ctx context.Context) bool {
+	root, err := paths.WorktreeRoot(ctx)
 	if err != nil {
 		return false
 	}
-	return s.Enabled
+	activation, err := repopolicy.ReadRepoActivation(ctx, root)
+	if err != nil || !activation.Configured || !activation.Enabled {
+		return false
+	}
+	_, err = Load(ctx)
+	return err == nil
 }
 
 // IsFilteredFetchesEnabled checks if filtered fetches should be used.

@@ -26,6 +26,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
+	"github.com/entireio/cli/cmd/entire/cli/settings/repopolicy"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
 	"github.com/entireio/cli/cmd/entire/cli/uiform"
 	"github.com/entireio/cli/cmd/entire/cli/vercelconfig"
@@ -44,7 +45,8 @@ const (
 
 // Flag names used across setup commands.
 const (
-	agentFlagName            = "agent"
+	agentIdentifier          = "agent"
+	agentFlagName            = agentIdentifier
 	flagCheckpointRemote     = "checkpoint-remote"
 	flagCheckpointBackend    = "checkpoint-backend"
 	flagSkipPushSessions     = "skip-push-sessions"
@@ -753,7 +755,7 @@ Examples:
 				return nil
 			}
 
-			if !settings.IsSetUpAny(ctx) {
+			if !repoActivationConfiguredOrUnreadable(ctx) {
 				cmd.SilenceUsage = true
 				fmt.Fprintln(cmd.ErrOrStderr(), "Entire is not configured in this repository yet. Run 'entire enable' first.")
 				return NewSilentError(errors.New("entire not configured"))
@@ -941,7 +943,7 @@ for you and (optionally) create a matching GitHub repository via the gh CLI.`,
 
 			// Any setup-mutating flags should behave like `configure` on repos that
 			// are already set up. Bare `enable` remains the lightweight re-enable path.
-			if settings.IsSetUpAny(ctx) {
+			if repoActivationConfiguredOrUnreadable(ctx) {
 				return runEnableOnConfiguredRepo(ctx, cmd, opts)
 			}
 
@@ -950,37 +952,9 @@ for you and (optionally) create a matching GitHub repository via the gh CLI.`,
 		},
 	}
 
-	cmd.Flags().BoolVar(&ignoreUntracked, "ignore-untracked", false, "Commit all new files without tracking pre-existing untracked files")
-	cmd.Flags().MarkHidden("ignore-untracked") //nolint:errcheck,gosec // flag is defined above
-	cmd.Flags().BoolVar(&opts.UseLocalSettings, "local", false, "Write settings to .entire/settings.local.json instead of .entire/settings.json")
-	cmd.Flags().BoolVar(&opts.UseProjectSettings, "project", false, "Write settings to .entire/settings.json even if it already exists")
-	cmd.Flags().StringVar(&agentName, agentFlagName, "", "Agent to set up hooks for (e.g., "+strings.Join(agent.StringList(), ", ")+"; external agents on $PATH are also available). Enables non-interactive mode.")
-	cmd.Flags().BoolVarP(&opts.ForceHooks, flagForce, "f", false, "Force reinstall hooks (removes existing Entire hooks first)")
-	cmd.Flags().BoolVar(&opts.SkipPushSessions, flagSkipPushSessions, false, "Disable automatic pushing of session logs on git push")
-	cmd.Flags().StringVar(&opts.CheckpointRemote, flagCheckpointRemote, "", "Checkpoint remote in provider:owner/repo format (e.g., github:org/checkpoints-repo)")
-	cmd.Flags().StringVar(&opts.CheckpointBackend, flagCheckpointBackend, "", checkpointBackendFlagUsage)
-	cmd.Flags().BoolVar(&opts.Telemetry, flagTelemetry, true, "Enable anonymous usage analytics")
-	cmd.Flags().BoolVar(&opts.AbsoluteGitHookPath, flagAbsoluteGitHookPath, false, "Embed full binary path in git hooks (for GUI git clients that don't source shell profiles)")
-	cmd.Flags().BoolVar(&opts.SearchSkill, flagSearchSkill, false, "Install the optional Entire search skill for selected agent(s)")
-	cmd.Flags().BoolVar(&opts.AgentHelpSkill, flagAgentHelpSkill, false, "Install the stable Entire agent-help skill (points agents at `entire agent-help`) for selected agent(s)")
-	cmd.Flags().BoolVarP(&opts.Yes, "yes", "y", false, "Accept all defaults without prompting (in a non-repo directory: init git, create private GitHub repo, commit, and push; then enable all agents and accept telemetry). Does not import existing agent history — see --"+flagImportHistory)
-	cmd.Flags().BoolVar(&opts.ImportHistory, flagImportHistory, false, importHistoryFlagUsage)
+	addEnableCmdFlags(cmd, &opts, &ignoreUntracked, &agentName)
 	addInsecureHTTPAuthFlag(cmd, &insecureHTTPAuth)
-
-	// Bootstrap flags for non-git-repo folders.
-	cmd.Flags().BoolVar(&bootstrapOpts.InitRepo, "init-repo", false, "If not a git repo, initialize one non-interactively")
-	cmd.Flags().BoolVar(&bootstrapOpts.NoInitRepo, "no-init-repo", false, "If not a git repo, exit instead of prompting to initialize one")
-	cmd.Flags().StringVar(&bootstrapOpts.RepoName, "repo-name", "", "GitHub repository name for the new repo (used when bootstrapping)")
-	cmd.Flags().StringVar(&bootstrapOpts.RepoOwner, "repo-owner", "", "GitHub user or organization login for the new repo")
-	cmd.Flags().StringVar(&bootstrapOpts.RepoVisibility, "repo-visibility", "", "GitHub repository visibility: public, private, or internal")
-	cmd.Flags().BoolVar(&bootstrapOpts.NoGitHub, "no-github", false, "Initialize local git repo only; skip creating a GitHub remote")
-	cmd.Flags().BoolVar(&bootstrapOpts.Push, "push", false, "When bootstrapping a new repo, push the initial commit to the created GitHub remote (implies creating the remote; without it the repo is created but not pushed)")
-	cmd.Flags().StringVar(&bootstrapOpts.InitialCommitMessage, "initial-commit-message", "", "Commit message for the initial commit when bootstrapping a new repo")
-	cmd.Flags().BoolVar(&bootstrapOpts.SkipInitialCommit, "skip-initial-commit", false, "Don't create the initial commit when bootstrapping a new repo")
-	cmd.MarkFlagsMutuallyExclusive("init-repo", "no-init-repo")
-	cmd.MarkFlagsMutuallyExclusive("initial-commit-message", "skip-initial-commit")
-	cmd.MarkFlagsMutuallyExclusive("push", "no-github")
-	cmd.MarkFlagsMutuallyExclusive("push", "skip-initial-commit")
+	addEnableBootstrapFlags(cmd, &bootstrapOpts)
 
 	// Provide a helpful error when --agent is used without a value
 	defaultFlagErr := cmd.FlagErrorFunc()
@@ -994,6 +968,43 @@ for you and (optionally) create a matching GitHub repository via the gh CLI.`,
 	})
 
 	return cmd
+}
+
+// addEnableCmdFlags registers the non-bootstrap `entire enable` flags.
+func addEnableCmdFlags(cmd *cobra.Command, opts *EnableOptions, ignoreUntracked *bool, agentName *string) {
+	cmd.Flags().BoolVar(ignoreUntracked, "ignore-untracked", false, "Commit all new files without tracking pre-existing untracked files")
+	cmd.Flags().MarkHidden("ignore-untracked") //nolint:errcheck,gosec // flag is defined above
+	cmd.Flags().BoolVar(&opts.UseLocalSettings, "local", false, "Write settings to .entire/settings.local.json instead of .entire/settings.json")
+	cmd.Flags().BoolVar(&opts.UseProjectSettings, "project", false, "Write settings to .entire/settings.json even if it already exists")
+	cmd.Flags().StringVar(agentName, agentFlagName, "", "Agent to set up hooks for (e.g., "+strings.Join(agent.StringList(), ", ")+"; external agents on $PATH are also available). Enables non-interactive mode.")
+	cmd.Flags().BoolVarP(&opts.ForceHooks, flagForce, "f", false, "Force reinstall hooks (removes existing Entire hooks first)")
+	cmd.Flags().BoolVar(&opts.SkipPushSessions, flagSkipPushSessions, false, "Disable automatic pushing of session logs on git push")
+	cmd.Flags().StringVar(&opts.CheckpointRemote, flagCheckpointRemote, "", "Checkpoint remote in provider:owner/repo format (e.g., github:org/checkpoints-repo)")
+	cmd.Flags().StringVar(&opts.CheckpointBackend, flagCheckpointBackend, "", "Checkpoint storage backend: refs (one git ref per checkpoint; recommended) or branch (shared entire/checkpoints/v1 branch)")
+	cmd.Flags().BoolVar(&opts.Telemetry, flagTelemetry, true, "Enable anonymous usage analytics")
+	cmd.Flags().BoolVar(&opts.AbsoluteGitHookPath, flagAbsoluteGitHookPath, false, "Embed full binary path in git hooks (for GUI git clients that don't source shell profiles)")
+	cmd.Flags().BoolVar(&opts.SearchSkill, flagSearchSkill, false, "Install the optional Entire search skill for selected agent(s)")
+	cmd.Flags().BoolVar(&opts.AgentHelpSkill, flagAgentHelpSkill, false, "Install the stable Entire agent-help skill (points agents at `entire agent-help`) for selected agent(s)")
+	cmd.Flags().BoolVarP(&opts.Yes, "yes", "y", false, "Accept all defaults without prompting (in a non-repo directory: init git, create private GitHub repo, commit, and push; then enable all agents and accept telemetry). Does not import existing agent history — see --"+flagImportHistory)
+	cmd.Flags().BoolVar(&opts.ImportHistory, flagImportHistory, false, importHistoryFlagUsage)
+}
+
+// addEnableBootstrapFlags registers the enable flags for bootstrapping a git
+// repository (and optional GitHub remote) in a non-repo folder.
+func addEnableBootstrapFlags(cmd *cobra.Command, bootstrapOpts *GitHubBootstrapOptions) {
+	cmd.Flags().BoolVar(&bootstrapOpts.InitRepo, "init-repo", false, "If not a git repo, initialize one non-interactively")
+	cmd.Flags().BoolVar(&bootstrapOpts.NoInitRepo, "no-init-repo", false, "If not a git repo, exit instead of prompting to initialize one")
+	cmd.Flags().StringVar(&bootstrapOpts.RepoName, "repo-name", "", "GitHub repository name for the new repo (used when bootstrapping)")
+	cmd.Flags().StringVar(&bootstrapOpts.RepoOwner, "repo-owner", "", "GitHub user or organization login for the new repo")
+	cmd.Flags().StringVar(&bootstrapOpts.RepoVisibility, "repo-visibility", "", "GitHub repository visibility: public, private, or internal")
+	cmd.Flags().BoolVar(&bootstrapOpts.NoGitHub, "no-github", false, "Initialize local git repo only; skip creating a GitHub remote")
+	cmd.Flags().BoolVar(&bootstrapOpts.Push, "push", false, "When bootstrapping a new repo, push the initial commit to the created GitHub remote (implies creating the remote; without it the repo is created but not pushed)")
+	cmd.Flags().StringVar(&bootstrapOpts.InitialCommitMessage, "initial-commit-message", "", "Commit message for the initial commit when bootstrapping a new repo")
+	cmd.Flags().BoolVar(&bootstrapOpts.SkipInitialCommit, "skip-initial-commit", false, "Don't create the initial commit when bootstrapping a new repo")
+	cmd.MarkFlagsMutuallyExclusive("init-repo", "no-init-repo")
+	cmd.MarkFlagsMutuallyExclusive("initial-commit-message", "skip-initial-commit")
+	cmd.MarkFlagsMutuallyExclusive("push", "no-github")
+	cmd.MarkFlagsMutuallyExclusive("push", "skip-initial-commit")
 }
 
 // reportRepoEnabled records the `entire enable` against the backend so the web
@@ -1263,11 +1274,20 @@ func scopeExplicitlyDisabled(ctx context.Context, useProject bool) bool {
 	return !enabled
 }
 
+// repoActivationConfiguredOrUnreadable distinguishes an explicit repo-level
+// activation choice from settings files created by unrelated features. A read
+// error returns true so setup flows fail closed and never overwrite malformed
+// configuration as though the repository were fresh.
+func repoActivationConfiguredOrUnreadable(ctx context.Context) bool {
+	configured, err := settings.RepoActivationConfigured(ctx)
+	return err != nil || configured
+}
+
 func runEnableInteractive(ctx context.Context, w io.Writer, agents []agent.Agent, opts EnableOptions) error {
 	// Capture first-run status before we write any settings: setupEntireDirectory
 	// and saveSettings below make IsSetUpAny report true. maybeOfferSessionImport
 	// uses this so the import offer only fires on the very first enable.
-	firstRun := !settings.IsSetUpAny(ctx)
+	firstRun := !repoActivationConfiguredOrUnreadable(ctx)
 
 	// Uninstall hooks for agents that were previously active but are no longer selected
 	if err := uninstallDeselectedAgentHooks(ctx, w, agents); err != nil {
@@ -1394,6 +1414,8 @@ func runEnableInteractive(ctx context.Context, w io.Writer, agents []agent.Agent
 	if err := saveSettings(); err != nil {
 		return fmt.Errorf("failed to save settings: %w", err)
 	}
+	recordEnableTrust(ctx, w)
+	noteExcludedAfterEnable(ctx, w)
 
 	// Explicit, user-initiated setup: allow EnsurePrimaryRef to fetch a
 	// missing primary metadata ref from a configured checkpoint_remote
@@ -1480,10 +1502,60 @@ func runEnable(ctx context.Context, w io.Writer, useProjectSettings bool) error 
 	if err := setEnabledFlag(ctx, true, useProjectSettings); err != nil {
 		return err
 	}
+	recordEnableTrust(ctx, w)
+	noteExcludedAfterEnable(ctx, w)
 
 	fmt.Fprintln(w, "Entire is now enabled.")
 	printEnabledStatus(ctx, w)
 	return nil
+}
+
+// noteExcludedAfterEnable tells the user when the repo they just enabled is
+// carved out by their own exclude lists: the (committed) settings.json is
+// repository content and does not outrank them, so Entire stays inactive here
+// until the entry goes — or this clone's own settings.local.json says enabled.
+func noteExcludedAfterEnable(ctx context.Context, w io.Writer) {
+	active, reason := settings.IsActiveForRepoWithReason(ctx)
+	if active || reason != settings.InactiveReasonGlobalExcluded {
+		return
+	}
+	fmt.Fprintf(w, "Note: this repo matches an exclude list in %s, so global tracking keeps it inactive here despite the repo-level setup. Remove that entry, or run `entire enable --local` so this clone's own settings.local.json enables it.\n",
+		settings.UserSettingsPath())
+}
+
+// recordEnableTrust records checkpoint-sync consent for the repo the user just
+// enabled — `entire enable` is the explicit act consent stands for. It is
+// gated on the repo actually being active: CheckpointEgressAllowed is also
+// false for a repo the user's exclude lists (or a local enabled:false veto)
+// keep inactive, and writing a machine-wide trust entry there would
+// pre-consent a repo the user never saw sync — the exact case
+// refuseTrustWhenInactive exists to stop for `entire trust`. Those repos get
+// noteExcludedAfterEnable instead.
+func recordEnableTrust(ctx context.Context, w io.Writer) {
+	us, err := settings.LoadUserSettings(ctx)
+	if err != nil || !us.GlobalEnabled() {
+		return
+	}
+	if active, _ := settings.IsActiveForRepoWithReason(ctx); !active {
+		return
+	}
+	if settings.CheckpointEgressAllowed(ctx) {
+		return // already trusted (trust_all or an existing entry): nothing to record
+	}
+	id, err := settings.TrustCurrentRepo(ctx)
+	if err != nil {
+		fmt.Fprintf(w, "Note: could not record checkpoint-sync trust for this repo (%v); run 'entire trust' or answer the prompt on your next push.\n", err)
+		return
+	}
+	if !settings.CheckpointEgressAllowed(ctx) {
+		fmt.Fprintf(w, "Warning: trust for %s was written to %s, but checkpoint sync is still held — check that file's trust entries.\n", id.DisplayScope(), settings.UserSettingsPath())
+		return
+	}
+	if id.RemoteName != "" {
+		fmt.Fprintf(w, "✓ Trusted %s for checkpoint sync to %s (global tracking is on)\n", id.DisplayScope(), id.RemoteName)
+		return
+	}
+	fmt.Fprintf(w, "✓ Trusted %s for checkpoint sync (global tracking is on)\n", id.DisplayScope())
 }
 
 // runDisable flips the enabled flag to false in the resolved settings scope.
@@ -1508,6 +1580,18 @@ func runDisable(ctx context.Context, w io.Writer, useProjectSettings bool) error
 	if useProjectSettings {
 		targetFile = settings.EntireSettingsFile
 		configDisplay = configDisplayProject
+	}
+
+	// A repo tracked only by the global tier has no repo-level setup to
+	// disable, and a bare disable's local veto file would be the first worktree
+	// footprint the tier ever leaves — the machine-local off-switch is the user
+	// settings file, so point there and write nothing. --project is different:
+	// the committed enabled:false is the team-wide opt-out and must be written.
+	if policy, err := repopolicy.ClassifyRepoPolicy(ctx); err == nil && !useProjectSettings && policy.ActivationSource == repopolicy.ActivationGlobal {
+		fmt.Fprintln(w, "This repo has no repo-level Entire setup; it is tracked by global tracking.")
+		fmt.Fprintf(w, "To stop tracking it, add %s to exclude_paths in %s (or set global.enabled to false).\n", policy.WorktreeRoot, settings.UserSettingsPath())
+		fmt.Fprintln(w, "Nothing was written.")
+		return nil
 	}
 
 	if err := setEnabledFlag(ctx, false, targetFile == settings.EntireSettingsFile); err != nil {
@@ -1616,32 +1700,35 @@ func runRemoveAgent(ctx context.Context, w io.Writer, name string) error {
 		printWrongAgentError(w, name)
 		return NewSilentError(errors.New("wrong agent name"))
 	}
-
 	hookAgent, ok := agent.AsHookSupport(ag)
 	if !ok {
-		return fmt.Errorf("agent %s does not support hooks", name)
+		return fmt.Errorf("agent %s does not support hooks", ag.Name())
 	}
+	return removeRepoAgentHooks(ctx, w, ag, hookAgent)
+}
 
+// removeRepoAgentHooks removes one agent's repo-level hooks.
+func removeRepoAgentHooks(ctx context.Context, w io.Writer, ag agent.Agent, hookAgent agent.HookSupport) error {
 	// Fail rather than uninstall blind: this path targets one agent the user
 	// named, so they can fix what broke the check (an unreadable or malformed
 	// config file — a missing one cleanly reports "not installed") and re-run.
 	installed, err := hookAgent.AreHooksInstalled(ctx)
 	if err != nil {
 		logging.Debug(ctx, "hooks-installed check failed, not removing",
-			"agent", name, "error", err)
-		return fmt.Errorf("failed to remove %s hooks: %w", ag.Type(), err)
+			"agent", hookAgent.Type(), "error", err)
+		return fmt.Errorf("failed to remove %s hooks: %w", hookAgent.Type(), err)
 	}
 	if !installed {
-		fmt.Fprintf(w, "%s hooks are not installed.\n", ag.Type())
+		fmt.Fprintf(w, "%s hooks are not installed.\n", hookAgent.Type())
 		return nil
 	}
 
 	if err := hookAgent.UninstallHooks(ctx); err != nil {
-		return fmt.Errorf("failed to remove %s hooks: %w", ag.Type(), err)
+		return fmt.Errorf("failed to remove %s hooks: %w", hookAgent.Type(), err)
 	}
 	warnCodexHooksAfterRemoval(ctx, w, ag)
 
-	fmt.Fprintf(w, "Removed %s hooks.\n", ag.Type())
+	fmt.Fprintf(w, "Removed %s hooks.\n", hookAgent.Type())
 	return nil
 }
 
@@ -1955,7 +2042,7 @@ func printWrongAgentError(w io.Writer, name string) {
 func setupAgentHooksNonInteractive(ctx context.Context, w io.Writer, ag agent.Agent, opts EnableOptions) error {
 	// Capture first-run status before setupEntireDirectory/saveEnabledState make
 	// IsSetUpAny report true, so the import offer fires only on first enable.
-	firstRun := !settings.IsSetUpAny(ctx)
+	firstRun := !repoActivationConfiguredOrUnreadable(ctx)
 
 	agentName := ag.Name()
 	// Check if agent supports hooks
@@ -2036,6 +2123,8 @@ func setupAgentHooksNonInteractive(ctx context.Context, w io.Writer, ag agent.Ag
 	if err := saveEnabledState(ctx, targetSettings, targetFile == EntireSettingsFile); err != nil {
 		return fmt.Errorf("failed to save settings: %w", err)
 	}
+	recordEnableTrust(ctx, w)
+	noteExcludedAfterEnable(ctx, w)
 
 	// Auto-enable external_agents if the agent is external. A separate write,
 	// after the one above and never onto targetSettings, because the loader
@@ -2185,6 +2274,7 @@ func newCurlBashPostInstallCmd() *cobra.Command {
 		Hidden: true,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			w := cmd.OutOrStdout()
+			globalPostRun(cmd.Context(), w) // hidden command: the root post-run skips it, and the installer is when a fresh global user needs hooks (w is stdout here — intended)
 			if err := promptShellCompletion(w); err != nil {
 				fmt.Fprintf(w, "Note: Shell completion setup skipped: %v\n", err)
 			}
@@ -2491,6 +2581,20 @@ func runUninstall(ctx context.Context, w, errW io.Writer, force bool) error {
 	// executing entire-agent-* binaries on $PATH even in repos that never
 	// enabled them.
 	external.DiscoverAndRegisterAlways(ctx)
+	// A globally tracked repo keeps its runtime data under .git/ — captured
+	// sessions that may never have synced. Disclose and remove it too.
+	// Leftover global-mode runtime data is located from the repository's
+	// IDENTITY, not its current policy: the tier may since have been turned
+	// off, or this repo excluded, and uninstall must still remove what a
+	// globally tracked period left under .git.
+	var globalRuntimeRoot string
+	if repository, err := repopolicy.ResolveRepository(ctx); err == nil {
+		if candidate := repository.GlobalRuntimeRoot(); candidate != "" {
+			if _, statErr := os.Stat(candidate); statErr == nil {
+				globalRuntimeRoot = candidate
+			}
+		}
+	}
 
 	// Gather counts for display
 	sessionStateCount := countSessionStates(ctx)
@@ -2511,7 +2615,7 @@ func runUninstall(ctx context.Context, w, errW io.Writer, force bool) error {
 	// the same as cleanly reporting none — fall through so the removal below
 	// reports it with its remedy, and the run exits non-zero rather than
 	// asserting an absence it could not verify.
-	if !entireDirExists && !gitHooksInstalled && sessionStateCount == 0 &&
+	if !entireDirExists && globalRuntimeRoot == "" && !gitHooksInstalled && sessionStateCount == 0 &&
 		shadowBranchCount == 0 && len(agHookState.installed) == 0 &&
 		len(agHookState.unchecked) == 0 {
 		fmt.Fprintln(w, "Entire is not installed in this repository.")
@@ -2526,6 +2630,7 @@ func runUninstall(ctx context.Context, w, errW io.Writer, force bool) error {
 			sessionStateCount: sessionStateCount,
 			shadowBranchCount: shadowBranchCount,
 			hookState:         agHookState,
+			globalRuntimeRoot: globalRuntimeRoot,
 		})
 		if err != nil {
 			return err
@@ -2546,6 +2651,7 @@ func runUninstall(ctx context.Context, w, errW io.Writer, force bool) error {
 	ok = uninstallGitHooks(ctx, p) && ok
 	ok = uninstallSessionStates(ctx, p) && ok
 	ok = uninstallEntireDir(ctx, p, entireDirExists) && ok
+	ok = uninstallGlobalRuntime(p, globalRuntimeRoot) && ok
 	ok = uninstallShadowBranches(ctx, p) && ok
 
 	p.blank()
@@ -2553,9 +2659,29 @@ func runUninstall(ctx context.Context, w, errW io.Writer, force bool) error {
 		p.failureVerdict("Uninstall did not complete — see the warnings above.")
 		return NewSilentError(errors.New("uninstall did not complete"))
 	}
+	if settings.GlobalTierEnabled(ctx) {
+		fmt.Fprintf(w, "\nNote: global tracking is on (%s). The next agent session here will track this repo again\n  unless you add it to exclude_paths there. Any checkpoint-sync trust recorded for this repo stays\n  in that file too; `entire trust --revoke` withdraws it.\n", settings.UserSettingsPath())
+	}
 	p.successVerdict("Entire has been removed from this repository.")
 	p.farewell()
 	return nil
+}
+
+// uninstallGlobalRuntime removes a globally tracked repo's runtime data under
+// .git — captured sessions that may never have synced; the summary disclosed
+// it — and reports what it did. Located from the repository's identity, not
+// its current policy (see uninstallSummary.globalRuntimeRoot).
+func uninstallGlobalRuntime(p *uninstallPrinter, globalRuntimeRoot string) bool {
+	if globalRuntimeRoot == "" {
+		return true
+	}
+	if err := os.RemoveAll(globalRuntimeRoot); err != nil {
+		p.stepFailed("Failed to remove global-mode runtime data")
+		p.warnUnder("failed to remove global-mode runtime data: %v", err)
+		return false
+	}
+	p.step("Removed global-mode runtime data")
+	return true
 }
 
 // uninstallGitHooks removes Entire's git hooks and reports what it did.
@@ -2630,7 +2756,13 @@ func uninstallShadowBranches(ctx context.Context, p *uninstallPrinter) bool {
 // uninstallSummary is what runUninstall found to remove, carried to the
 // confirmation prompt so the user approves exactly the scope that was detected.
 type uninstallSummary struct {
-	entireDirExists   bool
+	entireDirExists bool
+	// globalRuntimeRoot is the repo's global-mode runtime directory under
+	// .git when one exists — locally captured sessions from a globally
+	// tracked period that may never have synced. Located from the repo's
+	// IDENTITY, not its current policy, so it is disclosed and removed even
+	// after the tier was turned off or the repo excluded.
+	globalRuntimeRoot string
 	gitHooksInstalled bool
 	sessionStateCount int
 	shadowBranchCount int
@@ -2664,6 +2796,9 @@ func confirmUninstall(p *uninstallPrinter, summary uninstallSummary) (bool, erro
 	}
 	if summary.entireDirExists {
 		rows = append(rows, explainRow{Label: ".entire/", Value: "settings, logs, metadata"})
+	}
+	if summary.globalRuntimeRoot != "" {
+		rows = append(rows, explainRow{Label: "global runtime", Value: summary.globalRuntimeRoot + " — locally captured sessions that may never have synced"})
 	}
 	fmt.Fprint(p.w, p.out.metadataRows(rows))
 	p.blank()

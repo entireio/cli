@@ -149,8 +149,10 @@ func captureEligible(ctx context.Context, pushRemote string) (previouslyElected 
 		return "", false
 	}
 	switch elected.Source {
-	case SyncRemoteSourceConfig, SyncRemoteSourceObserved:
-		// An explicit override, or a capture already in force: nothing to displace.
+	case SyncRemoteSourceConfig, SyncRemoteSourceObserved, SyncRemoteSourceOverride:
+		// An explicit setting, a capture already in force, or a per-operation
+		// override (`entire trust --remote`, never reached from a pre-push):
+		// nothing to displace.
 		return "", false
 	case SyncRemoteSourceDefault, SyncRemoteSourceSole, SyncRemoteSourceFirst:
 		// Exactly the tiers a capture may displace. Enumerated rather than left to

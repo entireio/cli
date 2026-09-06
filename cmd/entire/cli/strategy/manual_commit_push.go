@@ -17,6 +17,7 @@ import (
 	checkpointremote "github.com/entireio/cli/cmd/entire/cli/checkpoint/remote"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
+	"github.com/entireio/cli/cmd/entire/cli/settings/repopolicy"
 	"github.com/entireio/cli/perf"
 	"github.com/entireio/cli/redact"
 )
@@ -32,6 +33,10 @@ import (
 var ErrOPFAbortedByUser = errors.New("OPF prompt aborted by user; push cancelled")
 
 var opfPrePushProgressWriter io.Writer = os.Stderr
+
+// resolveTrustDecisionFn is a test seam over the trust prompt (same pattern
+// as stderrWriter).
+var resolveTrustDecisionFn = resolveTrustDecisionForPrePush
 
 // PrePush is called by the git pre-push hook before pushing to a remote.
 // It pushes each ref in refs.Push alongside the user's push.
@@ -51,6 +56,108 @@ func (s *ManualCommitStrategy) PrePush(ctx context.Context, remote string) error
 // metadata before the user's first normal branch is published.
 func (s *ManualCommitStrategy) PrePushFromGitHook(ctx context.Context, remote string) error {
 	return s.prePush(ctx, remote, true)
+}
+
+// gateCheckpointEgress is the pre-push consent gate. An already-trusted repo
+// passes with ctx unchanged and pays nothing — the pending-checkpoint count
+// runs only behind a closed gate, so a repo-enabled repo with the tier off
+// (main's whole population) or a trusted one keeps main's pre-push flow,
+// including on the dedicated-remote and refs backends where the count is
+// approximate or unavailable. With the gate closed, a push that has no Entire
+// data to send asks no question. Otherwise the user is asked (TTY only; see
+// resolveTrustDecisionForPrePush) and, when they grant, the stale hook-start
+// policy snapshot on ctx is replaced by a fresh classification — rechecking
+// through the pre-write snapshot would keep the gate closed for the rest of
+// this same push. Every hold prints exactly one stderr line and returns false;
+// none of them fails the user's own push.
+func gateCheckpointEgress(ctx context.Context, remote, pendingCapture string) (context.Context, bool) {
+	if settings.CheckpointEgressAllowed(ctx) {
+		return ctx, true
+	}
+	pendingCheckpoints, pendingErr := CountUnpushedCheckpoints(ctx, remote)
+	if pendingErr != nil {
+		// Holding is the only safe answer — checkpoint egress must never make
+		// the user's branch push fail or consume Git's stdin — but a silent
+		// hold would look identical to "nothing to send".
+		logging.Warn(ctx, "could not determine pending checkpoints; holding checkpoint sync",
+			slog.String("error", pendingErr.Error()),
+		)
+		fmt.Fprintln(stderrWriter, "Entire: checkpoint sync held — could not count this repo's pending checkpoints; see .entire/logs. Run `entire trust` to sync without this check.")
+		return ctx, false
+	}
+	if pendingCheckpoints == 0 {
+		return ctx, false
+	}
+	decision, decisionErr := resolveTrustDecisionFn(ctx, stderrWriter)
+	if decisionErr != nil {
+		logging.Warn(ctx, "trust pre-push prompt failed; holding checkpoint sync",
+			slog.String("error", decisionErr.Error()),
+		)
+	}
+	if decisionErr != nil || decision != TrustGranted {
+		if pendingCapture != "" {
+			// The elected remote changes only once checkpoints land here, so a
+			// plain `entire trust` would record consent for the OLD remote and
+			// this push would hold again. Name the destination and the flag.
+			fmt.Fprintf(stderrWriter, "Entire: checkpoint sync held — this repo isn't trusted for %s yet. Sessions are captured locally; run `entire trust --remote %s` to sync them there.\n", pendingCapture, pendingCapture)
+			return ctx, false
+		}
+		fmt.Fprintln(stderrWriter, "Entire: checkpoint sync held — this repo isn't trusted yet. Sessions are captured locally; run `entire trust` to sync them to your checkpoint sync remote.")
+		return ctx, false
+	}
+	policy, policyErr := repopolicy.ClassifyRepoPolicy(ctx)
+	if policyErr != nil {
+		logging.Warn(ctx, "could not reclassify repository after saving trust; holding checkpoint sync",
+			slog.String("error", policyErr.Error()),
+		)
+		fmt.Fprintln(stderrWriter, "Warning: trust was saved but repository policy could not be refreshed; checkpoint sync skipped for this push (details in .entire/logs; the next push retries).")
+		return ctx, false
+	}
+	// Every hold returns the caller's ORIGINAL ctx: the fresh policy is handed
+	// back only with an open gate, so no hold can leave a context on which
+	// CheckpointEgressAllowed answers differently from the decision made here.
+	freshCtx := repopolicy.WithRepoPolicy(ctx, policy)
+	if !settings.CheckpointEgressAllowed(freshCtx) {
+		// The write succeeded but the fresh classification still holds —
+		// e.g. the consent key the prompt recorded is not the one the
+		// election now resolves to. Log what the gate saw so the mismatch
+		// is diagnosable from .entire/logs rather than only the warning.
+		logging.Warn(ctx, "trust saved but checkpoint egress still held after reclassification",
+			slog.Bool("active", policy.Active),
+			slog.String("trust_reason", string(policy.Trust.Reason)),
+			slog.String("trust_source", string(policy.Trust.Source)),
+			slog.String("sync_remote", policy.Trust.Identity.RemoteName),
+			slog.Any("origin_keys", policy.Trust.Identity.OriginKeys),
+			slog.String("path_key", policy.Trust.Identity.Path))
+		fmt.Fprintln(stderrWriter, "Warning: trust was saved but the gate still holds; checkpoint sync skipped for this push.")
+		return ctx, false
+	}
+	return freshCtx, true
+}
+
+// policyForPendingCapture re-derives the repository policy when this push is
+// about to elect pendingCapture as the checkpoint sync remote: the push carries
+// checkpoints THERE, so the consent gate must be asked about that destination,
+// not the remote the hook-start snapshot was keyed on (resolveTrustSyncRemote
+// honors the pending election). Returns false — after one stderr line — when
+// the policy cannot be derived: never let the old destination's consent cover a
+// new one. On that failure the ORIGINAL ctx is handed back, still carrying the
+// hook-start snapshot, and the caller stops the checkpoint push outright — no
+// code path consults that snapshot for the pending remote. A no-capture push
+// returns ctx unchanged.
+func policyForPendingCapture(ctx context.Context, pendingCapture string) (context.Context, bool) {
+	if pendingCapture == "" {
+		return ctx, true
+	}
+	pendingCtx := withPendingSyncRemote(ctx, pendingCapture)
+	policy, err := repopolicy.ClassifyRepoPolicy(pendingCtx)
+	if err != nil {
+		logging.Warn(ctx, "could not classify repository for the pending checkpoint sync remote; holding checkpoint sync",
+			slog.String("remote", pendingCapture), slog.String("error", err.Error()))
+		fmt.Fprintf(stderrWriter, "Entire: checkpoint sync held — could not verify trust for %s; run `entire trust --remote %s` after this push.\n", pendingCapture, pendingCapture)
+		return ctx, false
+	}
+	return repopolicy.WithRepoPolicy(pendingCtx, policy), true
 }
 
 func (s *ManualCommitStrategy) prePush(ctx context.Context, remote string, protectFirstUserBranch bool) error {
@@ -104,6 +211,20 @@ func (s *ManualCommitStrategy) prePush(ctx context.Context, remote string, prote
 			hintGatedCheckpointSync(ctx, ps.remote)
 			return nil
 		}
+	}
+
+	var pendingOK bool
+	if ctx, pendingOK = policyForPendingCapture(ctx, pendingCapture); !pendingOK {
+		return nil
+	}
+
+	// Egress trust gate, above both backend branches: a globally enrolled repo
+	// syncs only after the user trusts it once. A hold pairs with exactly one
+	// stderr explanation and never fails the user's own push; a trusted repo
+	// passes straight through to main's flow.
+	var egressOK bool
+	if ctx, egressOK = gateCheckpointEgress(ctx, ps.remote, pendingCapture); !egressOK {
+		return nil
 	}
 
 	// git-refs primary: push the per-checkpoint refs recorded in the push queue
@@ -465,6 +586,24 @@ func PushQueuedCheckpointRefs(ctx context.Context, repo *git.Repository, remote 
 	ps := resolvePushSettings(ctx, remote)
 	if ps.pushDisabled {
 		return 0, true, nil
+	}
+	// Second egress entry point (bypasses prePush): same trust gate, no
+	// prompt; refs stay queued for after `entire trust`. The caller names the
+	// push target (`doctor migrate --remote` may pick a remote other than the
+	// election), so consent is evaluated for THAT remote — a trusted election
+	// must not let refs leave for a destination the user never consented to.
+	if isConfiguredRemote(ctx, ps.remote) {
+		var policyOK bool
+		if ctx, policyOK = policyForPendingCapture(ctx, ps.remote); !policyOK {
+			return 0, false, fmt.Errorf("checkpoint sync is held — could not verify trust for %s; refs stay queued", ps.remote)
+		}
+		if !settings.CheckpointEgressAllowed(ctx) {
+			return 0, false, fmt.Errorf("checkpoint sync is held — this repo isn't trusted for %s yet; refs stay queued — run `entire trust --remote %s` first", ps.remote, ps.remote)
+		}
+	} else if !settings.CheckpointEgressAllowed(ctx) {
+		// A raw URL or path target has no remote identity of its own; the
+		// election's consent is the only one there is.
+		return 0, false, errors.New("checkpoint sync is held — this repo isn't trusted yet; refs stay queued — run `entire trust` first")
 	}
 	syncCheckpointPolicyForPrePush(ctx, repo, ps)
 	if !checkpointPolicyAllowsGitHook(ctx, repo) {

@@ -38,6 +38,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
 	"github.com/entireio/cli/cmd/entire/cli/osroot"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
+	"github.com/entireio/cli/cmd/entire/cli/settings/repopolicy"
 )
 
 // dirPerm is the mode .entire is created with. It matches the mode the
@@ -63,21 +64,21 @@ func WriteFile(root *os.Root, name string, data []byte, perm os.FileMode) error 
 // The returned root is owned by this package and shared with every other
 // caller. Do not close it.
 func Open(ctx context.Context) (*os.Root, error) {
-	worktreeRoot, err := anchor(ctx)
+	base, err := runtimeBase(ctx)
 	if err != nil {
 		return nil, err
 	}
-	return OpenAt(worktreeRoot)
+	return openDir(base, true)
 }
 
 // OpenForRead is Open without creating .entire. A missing directory is
 // reported as fs.ErrNotExist, which callers classify with errors.Is.
 func OpenForRead(ctx context.Context) (*os.Root, error) {
-	worktreeRoot, err := anchor(ctx)
+	base, err := runtimeBase(ctx)
 	if err != nil {
 		return nil, err
 	}
-	return OpenAtForRead(worktreeRoot)
+	return openDir(base, false)
 }
 
 // OpenAt is Open for an explicit worktree root, for the callers that already
@@ -94,8 +95,16 @@ func OpenAtForRead(worktreeRoot string) (*os.Root, error) {
 // Opener returns a thunk that calls Open when invoked, for consumers that are
 // handed their storage up front but must not touch the disk until they first
 // write (see logging.Config.Root).
+// The base is resolved eagerly, when the thunk is built: resolution can
+// classify the repository policy, and doing that lazily inside the logger's
+// first write would let a log line emitted DURING classification re-enter the
+// opener. The thunk itself still touches the disk only when first invoked.
 func Opener(ctx context.Context) func() (*os.Root, error) {
-	return func() (*os.Root, error) { return Open(ctx) }
+	base, err := runtimeBase(ctx)
+	if err != nil {
+		return func() (*os.Root, error) { return nil, err }
+	}
+	return func() (*os.Root, error) { return openDir(base, true) }
 }
 
 // OpenerAt returns a thunk that calls OpenAt when invoked.
@@ -107,11 +116,7 @@ func OpenerAt(worktreeRoot string) func() (*os.Root, error) {
 // It is for messages and for the few consumers that must hand a path to an
 // external process; it is not an invitation to do I/O on the result.
 func Path(ctx context.Context) (string, error) {
-	worktreeRoot, err := anchor(ctx)
-	if err != nil {
-		return "", err
-	}
-	return filepath.Join(worktreeRoot, paths.EntireDir), nil
+	return runtimeBase(ctx)
 }
 
 // Reset closes and forgets every cached root. Call it after deleting .entire:
@@ -193,14 +198,50 @@ func anchor(ctx context.Context) (string, error) {
 // that print it — so those resolve through this package's anchor rather than
 // paths.AbsPath, whose relative fallback is the thing anchor exists to avoid.
 func PathTo(ctx context.Context, repoRelPath string) (string, error) {
-	if _, err := Name(repoRelPath); err != nil {
+	name, err := Name(repoRelPath)
+	if err != nil {
 		return "", err
+	}
+	// Runtime-class paths follow the routed base (a globally tracked repo
+	// keeps them under the git common dir); config-class paths — the settings
+	// files this function mostly serves — are repository content and stay at
+	// the worktree anchor whatever the activation tier.
+	if paths.IsRuntimeDataPath(repoRelPath) {
+		base, baseErr := runtimeBase(ctx)
+		if baseErr != nil {
+			return "", baseErr
+		}
+		return filepath.Join(base, filepath.FromSlash(name)), nil
 	}
 	worktreeRoot, err := anchor(ctx)
 	if err != nil {
 		return "", err
 	}
 	return filepath.Join(worktreeRoot, filepath.FromSlash(repoRelPath)), nil
+}
+
+// runtimeBase resolves the directory that plays the role of ".entire" for
+// this process: <worktree>/.entire under repo-level activation, the git
+// common dir's per-worktree runtime root when the global tier owns the repo
+// (paths.RuntimeDirBase), and — outside any repository — anchor's cwd
+// fallback, which `entire enable` needs before git init. A tier-owned repo
+// whose git-side location cannot be resolved fails closed
+// (paths.ErrUnroutableRuntimePath): routing uncertainty must never turn into
+// worktree writes in a repo the tier keeps invisible.
+func runtimeBase(ctx context.Context) (string, error) {
+	base, err := paths.RuntimeDirBase(ctx)
+	switch {
+	case err == nil:
+		return base, nil
+	case errors.Is(err, paths.ErrNotARepository):
+	default:
+		return "", fmt.Errorf("resolve %s location: %w", paths.EntireDir, err)
+	}
+	cwd, cwdErr := os.Getwd() //nolint:forbidigo // no repository here; see anchor's doc comment
+	if cwdErr != nil {
+		return "", fmt.Errorf("resolve %s location: %w", paths.EntireDir, cwdErr)
+	}
+	return filepath.Join(cwd, paths.EntireDir), nil // entire-join-ok: this package IS the routing owner; the cwd fallback is the documented non-repo anchor
 }
 
 func open(worktreeRoot string, create bool) (*os.Root, error) {
@@ -211,13 +252,17 @@ func open(worktreeRoot string, create bool) (*os.Root, error) {
 	if err != nil {
 		return nil, fmt.Errorf("resolve %s: %w", worktreeRoot, err)
 	}
-	return openDir(filepath.Join(abs, paths.EntireDir), create)
+	return openDir(filepath.Join(abs, paths.EntireDir), create) // entire-join-ok: OpenAt is the explicit-root (non-routed) entry point; routed callers use Open(ctx)
 }
 
 // openDir is the one place a *os.Root over a .entire directory is created. Every
 // entry point funnels here so the create/no-create split stays in a single
 // branch; osroot.Shared owns the open-at-most-once part.
 func openDir(dir string, create bool) (*os.Root, error) {
+	if anchorDir, name, ok := splitRuntimeRoot(dir); ok {
+		return openDescendant(anchorDir, name, dir, create)
+	}
+
 	parentDir := filepath.Dir(dir)
 	name := filepath.Base(dir)
 	parent, err := osroot.Shared(parentDir)
@@ -230,6 +275,100 @@ func openDir(dir string, create bool) (*os.Root, error) {
 		}
 	}
 	return osroot.SharedChild(parent, dir, name) //nolint:wrapcheck // preserves missing-path classification
+}
+
+// splitRuntimeRoot recognizes the one routed layout whose parent directories
+// do not already exist. It returns a name relative to the git common dir so
+// creation can remain anchored there instead of following an absolute-path
+// symlink planted at an Entire-owned component.
+func splitRuntimeRoot(dir string) (anchorDir, name string, ok bool) {
+	cleaned := filepath.Clean(dir)
+	key := filepath.Base(cleaned)
+	if !isWorktreeKey(key) {
+		return "", "", false
+	}
+
+	registry := strings.Split(repopolicy.WorktreeRegistryRelative, "/")
+	cursor := filepath.Dir(cleaned)
+	for i := len(registry) - 1; i >= 0; i-- {
+		if filepath.Base(cursor) != registry[i] {
+			return "", "", false
+		}
+		cursor = filepath.Dir(cursor)
+	}
+	rel := filepath.Join(filepath.FromSlash(repopolicy.WorktreeRegistryRelative), key)
+	if filepath.Join(cursor, rel) != cleaned {
+		return "", "", false
+	}
+	return cursor, filepath.ToSlash(rel), true
+}
+
+func openDescendant(anchorDir, name, dir string, create bool) (*os.Root, error) {
+	root, err := osroot.Shared(anchorDir)
+	if err != nil {
+		return nil, fmt.Errorf("open runtime anchor %s: %w", anchorDir, err)
+	}
+	if create {
+		if err := osroot.MkdirAllNoSymlink(root, name, dirPerm); err != nil {
+			return nil, fmt.Errorf("create %s: %w", dir, err)
+		}
+	}
+
+	current := root
+	currentDir := anchorDir
+	for _, component := range strings.Split(name, "/") {
+		currentDir = filepath.Join(currentDir, component)
+		current, err = osroot.SharedChild(current, currentDir, component)
+		if err != nil {
+			return nil, fmt.Errorf("open runtime directory %s: %w", currentDir, err)
+		}
+	}
+	return current, nil
+}
+
+// splitRuntime is Split for the global tier's routed runtime layout:
+// <git-common-dir>/entire/worktree/<worktree-key>/<name>. The key is the
+// fixed-length hex hash worktreeid produces; matching the three-element shape
+// keeps this from firing on user paths that merely contain "entire".
+func splitRuntime(p string) (base, name string, ok bool) {
+	cleaned := filepath.Clean(p)
+	elems := strings.Split(filepath.ToSlash(cleaned), "/")
+	registry := strings.Split(repopolicy.WorktreeRegistryRelative, "/")
+	for i := 0; i+len(registry) < len(elems)-1; i++ {
+		match := true
+		for j, r := range registry {
+			if elems[i+j] != r {
+				match = false
+				break
+			}
+		}
+		if !match {
+			continue
+		}
+		key := elems[i+len(registry)]
+		if !isWorktreeKey(key) {
+			continue
+		}
+		baseElems := i + len(registry) + 1
+		if baseElems >= len(elems) {
+			return "", "", false // the runtime root itself, not a file within it
+		}
+		return filepath.FromSlash(strings.Join(elems[:baseElems], "/")),
+			strings.Join(elems[baseElems:], "/"), true
+	}
+	return "", "", false
+}
+
+func isWorktreeKey(s string) bool {
+	if len(s) != repopolicy.RuntimeKeyLength {
+		return false
+	}
+	for _, r := range s {
+		if (r < '0' || r > '9') && (r < 'a' || r > 'f') {
+			return false
+		}
+	}
+	return true
 }
 
 // OpenPath returns the shared root for the .entire directory containing p,
@@ -251,8 +390,10 @@ func OpenPathForRead(p string) (root *os.Root, name string, err error) {
 	return openPath(p, false)
 }
 
-// Split splits a path that lies under a .entire directory into that directory
-// and the name of the path within it. It is lexical: the path is cleaned and the
+// Split splits a path that lies under an Entire-managed runtime directory into
+// that directory and the name of the path within it. It recognizes both the
+// worktree's literal .entire directory and the global tier's routed runtime
+// layout. It is lexical: for the literal layout, the path is cleaned and the
 // innermost ".entire" component wins, which is the directory that actually
 // contains the file if a repo is ever checked out inside another repo's .entire.
 //
@@ -261,6 +402,13 @@ func OpenPathForRead(p string) (root *os.Root, name string, err error) {
 // through. The walk is component-by-component with filepath rather than a split
 // on separators so a Windows volume name survives being rejoined.
 func Split(p string) (entireDir, name string, ok bool) {
+	if entireDir, name, ok = splitEntire(p); ok {
+		return entireDir, name, true
+	}
+	return splitRuntime(p)
+}
+
+func splitEntire(p string) (entireDir, name string, ok bool) {
 	cleaned := filepath.Clean(p)
 	rest := cleaned
 	for {

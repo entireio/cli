@@ -49,7 +49,10 @@ Examples:
 
 func runAgentMenu(ctx context.Context, w io.Writer) error {
 	opts := EnableOptions{Telemetry: true}
-	if settings.IsSetUpAny(ctx) {
+	// Repo-level setup routes to management; so does a repo the global tier
+	// already captures — it has no settings files, but it is not "not set
+	// up", and the wizard would write a redundant .entire/settings.json.
+	if settings.IsSetUpAny(ctx) || settings.IsActiveForRepo(ctx) {
 		return runManageAgents(ctx, w, opts, nil)
 	}
 	return runSetupFlow(ctx, w, opts)

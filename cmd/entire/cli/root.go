@@ -109,7 +109,11 @@ func NewRootCmd() *cobra.Command {
 			if !safe {
 				return nil
 			}
-			if !settings.IsSetUpAny(cmd.Context()) {
+			// IsActiveForRepo, not IsSetUpAny: a globally tracked repo has no
+			// repo-level settings but must still get a logger — entiredir
+			// routes its runtime base under the git common dir, so this
+			// creates nothing in the worktree.
+			if !settings.IsActiveForRepo(cmd.Context()) {
 				return nil
 			}
 			ensureLogger(cmd)
@@ -138,6 +142,11 @@ func NewRootCmd() *cobra.Command {
 				telemetry.TrackCommandDetached(cmd, agentStr, settings.Enabled, versioninfo.Version)
 			}
 
+			// Global tier: one-time detection warn plus user-hook
+			// reconciliation; the hidden-command walk above scopes it to
+			// foreground commands.
+			globalPostRun(cmd.Context(), cmd.ErrOrStderr())
+
 			// Version check and notification (synchronous with 2s timeout)
 			// Runs AFTER command completes to avoid interfering with interactive modes.
 			// Stderr, never stdout: this hook also fires after --json commands whose
@@ -147,9 +156,24 @@ func NewRootCmd() *cobra.Command {
 		},
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			ctx := cmd.Context()
-			// If we're in a git repo but Entire isn't set up yet, start the setup flow
-			if _, err := paths.WorktreeRoot(ctx); err == nil && !settings.IsSetUpAny(ctx) {
-				return runSetupFlow(ctx, cmd.OutOrStdout(), EnableOptions{})
+			// If we're in a git repo Entire isn't active in — no repo-level
+			// setup AND the global tier affirmatively not enabled — start the
+			// setup flow. A globally-tracked repo must not be funneled into
+			// repo-level setup: completing it writes .entire/settings.json,
+			// which permanently pins the repo out of the global tier (exclude
+			// lists stop applying to it). The enabled BIT gates here, not
+			// The activation gate's fail-closed answer reads "tier off"
+			// for an unusable config too, and at THIS call site that answer
+			// would run the wizard and pin the repo — the opposite of failing
+			// safe. An unreadable file is surfaced instead of acted on.
+			if _, err := paths.WorktreeRoot(ctx); err == nil && !repoActivationConfiguredOrUnreadable(ctx) {
+				us, loadErr := settings.LoadUserSettings(ctx)
+				switch {
+				case loadErr != nil:
+					fmt.Fprintf(cmd.ErrOrStderr(), "Warning: the user-global settings file cannot be read (%v).\nGlobal tracking is off machine-wide until it is fixed; run 'entire enable' to set this repo up explicitly.\n", loadErr)
+				case us.Global == nil || !us.Global.Enabled:
+					return runSetupFlow(ctx, cmd.OutOrStdout(), EnableOptions{})
+				}
 			}
 			return cmd.Help()
 		},
@@ -188,6 +212,7 @@ func NewRootCmd() *cobra.Command {
 	cmd.AddCommand(inGroup(newEnableCmd(), groupSetup))
 	cmd.AddCommand(inGroup(newDisableCmd(), groupSetup))
 	cmd.AddCommand(inGroup(newStatusCmd(), groupSetup))
+	experimental.Register(cmd, newTrustCmd()) // 'trust' (experimental soft launch); per-repo checkpoint egress consent for global mode
 	experimental.Register(cmd, newBlameCmd()) // 'blame' (experimental)
 	experimental.Register(cmd, newWhyCmd())   // 'why' (experimental)
 	cmd.AddCommand(exemptFromEntireDirCheck(inGroup(newLoginCmd(), groupAccount)))

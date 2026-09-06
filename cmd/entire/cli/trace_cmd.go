@@ -59,18 +59,15 @@ Examples:
 				last = summaryDefaultLast
 			}
 
-			repoRoot, err := paths.WorktreeRoot(cmd.Context())
-			if err != nil {
-				cmd.SilenceUsage = true
-				fmt.Fprintln(cmd.ErrOrStderr(), "Not a git repository. Please run from within a git repository.")
-				return NewSilentError(fmt.Errorf("not a git repository: %w", err))
-			}
+			// The root below is the ROUTED runtime base: globally tracked
+			// repos keep .entire/logs under the git common dir. A routing
+			// failure (unroutable tier-owned repo) surfaces as the open error.
 
 			// A repo with no .entire has no log, which is the same "no traces
 			// yet" outcome as an absent log file — render an empty result
 			// rather than an error.
 			var entries []traceEntry
-			root, err := entiredir.OpenAtForRead(repoRoot)
+			root, err := entiredir.OpenForRead(cmd.Context())
 			switch {
 			case errors.Is(err, fs.ErrNotExist):
 			case err != nil:

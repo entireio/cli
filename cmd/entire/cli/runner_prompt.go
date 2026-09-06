@@ -19,7 +19,7 @@ import (
 const runnersName = "runners"
 
 func runnersDir(repoRoot string) string {
-	return filepath.Join(repoRoot, paths.EntireDir, runnersName)
+	return filepath.Join(repoRoot, paths.EntireDir, runnersName) // entire-join-ok: repo-level runner config, config-class not runtime
 }
 
 // tuneRunner is one .entire/runners/*.json file loaded for tuning. Raw holds

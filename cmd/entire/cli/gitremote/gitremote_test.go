@@ -2,13 +2,28 @@ package gitremote
 
 import (
 	"context"
+	"os/exec"
 	"testing"
-
-	"github.com/entireio/cli/cmd/entire/cli/testutil"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+// initTestRepo initializes a git repo without importing testutil: this test
+// lives in package gitremote, which testutil reaches transitively (testutil →
+// gitrepo → paths → repopolicy → gitremote), so importing it here is a cycle.
+func initTestRepo(t *testing.T, dir string) {
+	t.Helper()
+	for _, args := range [][]string{
+		{"init"},
+		{"config", "user.name", "Entire Test"},
+		{"config", "user.email", "test@entire.invalid"},
+	} {
+		cmd := exec.CommandContext(t.Context(), "git", args...)
+		cmd.Dir = dir
+		require.NoError(t, cmd.Run(), "git %v", args)
+	}
+}
 
 func TestParseURL(t *testing.T) {
 	t.Parallel()
@@ -230,9 +245,11 @@ func TestResolveRemoteRepo(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			repoDir := t.TempDir()
-			testutil.InitRepo(t, repoDir)
+			initTestRepo(t, repoDir)
 
-			testutil.RunGit(t, repoDir, "remote", "add", "origin", tt.originURL)
+			cmd := exec.CommandContext(ctx, "git", "remote", "add", "origin", tt.originURL)
+			cmd.Dir = repoDir
+			require.NoError(t, cmd.Run())
 
 			t.Chdir(repoDir)
 
@@ -248,7 +265,7 @@ func TestResolveRemoteRepo(t *testing.T) {
 // Not parallel: uses t.Chdir()
 func TestResolveRemoteRepo_MissingRemote(t *testing.T) {
 	repoDir := t.TempDir()
-	testutil.InitRepo(t, repoDir)
+	initTestRepo(t, repoDir)
 	t.Chdir(repoDir)
 
 	_, _, _, err := ResolveRemoteRepo(context.Background(), "origin")

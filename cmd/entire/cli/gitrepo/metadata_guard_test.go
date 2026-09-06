@@ -20,23 +20,29 @@ func TestGitMetadataTraversalHasCanonicalOwner(t *testing.T) {
 	t.Parallel()
 
 	legacyTraversalOwners := map[string]string{
-		"gitrepo/repository.go:resolveDotGitPath":    "Codex still uses the exported legacy resolver until the remaining-consumer split",
-		"gitrepo/repository.go:resolveCommonGitPath": "Codex still uses the exported legacy resolver until the remaining-consumer split",
-		"paths/worktree.go:GetWorktreeID":            "worktree-ID consumers migrate with session and the remaining consumers",
-		"status.go:resolveWorktreeBranch":            "status migrates with the remaining consumers",
+		"gitrepo/repository.go:resolveDotGitPath":            "Codex still uses the exported legacy resolver until the remaining-consumer split",
+		"gitrepo/repository.go:resolveCommonGitPath":         "Codex still uses the exported legacy resolver until the remaining-consumer split",
+		"internal/worktreeid/worktreeid.go:Get":              "global runtime namespacing cannot import gitrepo through paths without a dependency cycle",
+		"internal/worktreeid/worktreeid.go:isLinkedAdminDir": "global runtime namespacing cannot import gitrepo through paths without a dependency cycle",
+		"internal/worktreeid/worktreeid.go:isMainGitDir":     "global runtime namespacing cannot import gitrepo through paths without a dependency cycle",
+		"status.go:resolveWorktreeBranch":                    "status migrates with the remaining consumers",
 	}
 	policyDotGitInspections := map[string]string{
-		"agent/codex/hook_root.go:hasDotGitEntry":   "Codex policy checks whether a candidate checkout owns a .git entry",
-		"dispatch_wizard.go:discoverLocalRepoRoots": "dispatch discovery filters sibling repository candidates",
-		"gitrepo/status.go:insideNestedCheckout":    "status walking stops at nested checkout boundaries",
-		"plugin_index.go:SyncPluginIndex":           "plugin index sync checks whether Entire's cache directory contains its clone",
+		"agent/codex/hook_root.go:hasDotGitEntry":                     "Codex policy checks whether a candidate checkout owns a .git entry",
+		"dispatch_wizard.go:discoverLocalRepoRoots":                   "dispatch discovery filters sibling repository candidates",
+		"gitrepo/status.go:insideNestedCheckout":                      "status walking stops at nested checkout boundaries",
+		"plugin_index.go:SyncPluginIndex":                             "plugin index sync checks whether Entire's cache directory contains its clone",
+		"settings/opf_command_trust.go:probeLocalSettingsIsVersioned": "settings policy rejects a nested repository rooted at .entire",
 	}
 	allowedMetadataQueries := map[guardMetadataQuery]string{
 		{source: "dispatch/mode_local.go:resolveRepoRoots", flag: "--show-toplevel"}:                    "local dispatch resolves explicit repository candidates",
 		{source: "dispatch_wizard.go:resolveGitTopLevel", flag: "--show-toplevel"}:                      "dispatch discovery resolves explicit repository candidates",
 		{source: "gitdir/gitdir.go:CommonDir", flag: "--git-common-dir"}:                                "session removes the current-worktree resolver in the session split",
 		{source: "gitdir/gitdir.go:CommonDirForWorktree", flag: "--git-common-dir"}:                     "session removes the explicit-worktree resolver in the session split",
+		{source: "gitremote/gitremote.go:isGitRepoDir", flag: "--git-dir"}:                              "semantic repository-presence probe after an unset config lookup",
 		{source: "paths/paths.go:resolveWorktreeRoot", flag: "--show-toplevel"}:                         "worktree-root discovery remains separate from explicit-root metadata resolution",
+		{source: "settings/repopolicy/repository.go:ResolveRepositoryAt", flag: "--git-common-dir"}:     "global policy resolver cannot import gitrepo through paths without a dependency cycle",
+		{source: "settings/repopolicy/repository.go:ResolveRepositoryAt", flag: "--show-toplevel"}:      "global policy discovers a root from an arbitrary candidate directory",
 		{source: "session_adopt.go:stateStoreForWorktree", flag: "--git-common-dir"}:                    "adoption validates an arbitrary source repository in the session split",
 		{source: "session_adopt.go:stateStoreForWorktree", flag: "--show-toplevel"}:                     "adoption validates an arbitrary source repository in the session split",
 		{source: "settings/settings.go:clonePreferencesPathForWorktreeRoot", flag: "--git-common-dir"}:  "settings migrates with the remaining consumers",

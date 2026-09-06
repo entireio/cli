@@ -14,10 +14,11 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
+	"github.com/entireio/cli/cmd/entire/cli/strategy"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
+	"github.com/entireio/cli/redact"
 
 	"github.com/go-git/go-git/v6"
-	"github.com/spf13/cobra"
 )
 
 // TestWithHookSession_StampsMostRecentSession pins the one thing the hook path
@@ -58,13 +59,12 @@ func TestWithHookSession_StampsMostRecentSession(t *testing.T) {
 	}
 }
 
-// TestHookPreRuns_GateSkipsRepo covers the gate each hook pre-run applies before
-// calling withHookSession, which scans session state and loads redactors: a repo
-// Entire never set up, and one where it is disabled, must come back with the
-// context untouched. The gate lives at the call sites — withHookSession itself
-// does not repeat it, because that costs an uncached settings.Load on the
-// per-commit and per-turn paths.
-func TestHookPreRuns_GateSkipsRepo(t *testing.T) {
+// TestGitHookPreRun_GateSkipsRepo covers the Git-hook pre-run gate before
+// withHookSession scans state and loads redactors. Agent hooks perform the same
+// gate and stamping inside executeAgentHook after establishing the repository
+// policy route; their disabled/global behavior is covered in
+// hook_registry_test.go.
+func TestGitHookPreRun_GateSkipsRepo(t *testing.T) {
 	tests := []struct {
 		name     string
 		settings string
@@ -90,20 +90,116 @@ func TestHookPreRuns_GateSkipsRepo(t *testing.T) {
 				}
 			}
 
-			// Drive the real pre-runs. A gated pre-run returns before
-			// SetContext, so the command's context is still the one we handed it.
-			for name, hookCmd := range map[string]*cobra.Command{
-				"git hooks":   newHooksGitCmd(),
-				"agent hooks": agentHooksCmd(t, testAgentName),
-			} {
-				base := context.Background()
-				hookCmd.SetContext(base)
-				hookCmd.PersistentPreRun(hookCmd, nil)
-				if hookCmd.Context() != base {
-					t.Errorf("%s pre-run derived a context in a repo it must skip", name)
-				}
+			hookCmd := newHooksGitCmd()
+			base := context.Background()
+			hookCmd.SetContext(base)
+			hookCmd.PersistentPreRun(hookCmd, nil)
+			if hookCmd.Context() != base {
+				t.Error("git hook pre-run derived a context in a repo it must skip")
 			}
 		})
+	}
+}
+
+// TestGitHookPreRun_ProceedUnderGlobalMode is the positive mirror: with no
+// repo-level setup, the user-global tier still enables Git-hook session
+// stamping and invisible log routing.
+func TestGitHookPreRun_ProceedUnderGlobalMode(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Chdir(tmpDir)
+	testutil.InitRepo(t, tmpDir)
+
+	// No .entire/settings.json — the tier alone must activate the gates.
+	cfgDir := t.TempDir()
+	t.Setenv("ENTIRE_CONFIG_DIR", cfgDir)
+	if err := os.WriteFile(filepath.Join(cfgDir, "settings.json"), []byte(`{"global":{"enabled":true}}`), 0o600); err != nil {
+		t.Fatalf("failed to write user-global settings file: %v", err)
+	}
+
+	hookCmd := newHooksGitCmd()
+	base := context.Background()
+	hookCmd.SetContext(base)
+	hookCmd.PersistentPreRun(hookCmd, nil)
+	if hookCmd.Context() == base {
+		t.Error("git hook pre-run skipped a globally-tracked repo")
+	}
+
+	// Log routing stays invisible: the resolved logs dir lives under the git
+	// common dir, and nothing lands in the worktree.
+	logsDir, err := paths.AbsPath(context.Background(), logging.LogsDir)
+	if err != nil {
+		t.Fatalf("resolve logs dir: %v", err)
+	}
+	canonicalTmpDir, err := filepath.EvalSymlinks(tmpDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantPrefix := filepath.Join(canonicalTmpDir, ".git", "entire", "worktree") + string(filepath.Separator)
+	if !strings.HasPrefix(logsDir, wantPrefix) {
+		t.Errorf("logs dir = %q, want it under %q", logsDir, wantPrefix)
+	}
+	if _, err := os.Stat(filepath.Join(tmpDir, ".entire")); !os.IsNotExist(err) {
+		t.Errorf("global mode must not create a worktree .entire directory (err=%v)", err)
+	}
+}
+
+// TestWithHookSession_ConfiguresRedactionUnderGlobalMode pins the privacy
+// half of the global-mode gate: the hook path must call
+// strategy.EnsureRedactionConfigured for globally-tracked repos, so redaction
+// inputs that exist in the repo without any repo-level setup — committed
+// .entire/redactors/ rule packs, which stay worktree-resolved under invisible
+// routing — still apply before any checkpoint write. Deleting the
+// EnsureRedactionConfigured call in withHookSession must fail this test.
+func TestWithHookSession_ConfiguresRedactionUnderGlobalMode(t *testing.T) {
+	tmpDir := t.TempDir()
+	testutil.InitRepo(t, tmpDir)
+	t.Chdir(tmpDir)
+
+	// No repo-level setup (no settings files) — enable the user-global tier
+	// in an isolated config dir.
+	cfgDir := t.TempDir()
+	t.Setenv("ENTIRE_CONFIG_DIR", cfgDir)
+	if err := os.WriteFile(filepath.Join(cfgDir, "settings.json"), []byte(`{"global":{"enabled":true}}`), 0o644); err != nil {
+		t.Fatalf("failed to write user-global settings file: %v", err)
+	}
+
+	paths.ClearWorktreeRootCache()
+	session.ClearGitCommonDirCache()
+	t.Cleanup(func() {
+		paths.ClearWorktreeRootCache()
+		session.ClearGitCommonDirCache()
+	})
+
+	// A committed redactor pack is repo content the user put there, not
+	// Entire runtime data — a globally-tracked repo can carry one without
+	// pinning routing to the worktree (only the settings files do that), so
+	// EnsureRedactionConfigured must pick it up under global mode too.
+	const canary = "entire-global-redaction-canary"
+	packPath := filepath.Join(tmpDir, ".entire", "redactors", "canary.yaml")
+	if err := os.MkdirAll(filepath.Dir(packPath), 0o755); err != nil {
+		t.Fatalf("failed to create redactors dir: %v", err)
+	}
+	pack := "name: canary\nversion: \"1\"\nrules:\n  - id: global-canary\n    regex: " + canary + "\n"
+	if err := os.WriteFile(packPath, []byte(pack), 0o644); err != nil {
+		t.Fatalf("failed to write redactor pack: %v", err)
+	}
+
+	// Start from an unconfigured redact package: drop any rules an earlier
+	// test configured, and re-arm the strategy once-guard so this
+	// withHookSession call performs the configuration pass itself.
+	redact.ConfigureCustomRules(redact.CustomRulesConfig{})
+	strategy.ResetRedactionConfiguredForTest()
+	t.Cleanup(func() { redact.ConfigureCustomRules(redact.CustomRulesConfig{}) })
+
+	input := "before " + canary + " after"
+	if got := redact.String(input); got != input {
+		t.Fatalf("precondition: canary must survive redaction before configuration, got %q", got)
+	}
+
+	withHookSession(context.Background())
+
+	if got := redact.String(input); strings.Contains(got, canary) {
+		t.Errorf("withHookSession under global mode must configure redaction (strategy.EnsureRedactionConfigured): canary survived redact.String, got %q", got)
 	}
 }
 
@@ -306,16 +402,56 @@ func TestGitHookPolicySkipsWhenRepoCannotOpen(t *testing.T) {
 	}
 }
 
-// agentHooksCmd returns the hooks subcommand for one agent, whose pre-run is the
-// call site that used to rely on withHookSession's own gate.
-func agentHooksCmd(t *testing.T, agentName string) *cobra.Command {
-	t.Helper()
-
-	for _, sub := range newHooksCmd().Commands() {
-		if sub.Use == agentName {
-			return sub
-		}
+// TestHooksGitCmd_PersistentPreRun_GlobalMode pins the git-hook entry gate
+// on the user-global tier — the third of the three gates that switched to
+// settings.IsActiveForRepo. A repo with no repo-level setup keeps hooks
+// enabled when global mode is on; a globally excluded repo disables them.
+func TestHooksGitCmd_PersistentPreRun_GlobalMode(t *testing.T) {
+	setupRepo := func(t *testing.T) (repoDir, cfgDir string) {
+		t.Helper()
+		repoDir = t.TempDir()
+		testutil.InitRepo(t, repoDir)
+		t.Chdir(repoDir)
+		paths.ClearWorktreeRootCache()
+		session.ClearGitCommonDirCache()
+		gitHooksDisabled = false
+		t.Cleanup(func() { gitHooksDisabled = false })
+		cfgDir = t.TempDir()
+		t.Setenv("ENTIRE_CONFIG_DIR", cfgDir)
+		return repoDir, cfgDir
 	}
-	t.Fatalf("no hooks subcommand for %q", agentName)
-	return nil
+	runPreRun := func(t *testing.T) {
+		t.Helper()
+		cmd := newHooksGitCmd()
+		cmd.SetContext(context.Background())
+		cmd.PersistentPreRun(cmd, []string{"post-commit"})
+	}
+
+	t.Run("global on keeps hooks enabled", func(t *testing.T) {
+		_, cfgDir := setupRepo(t)
+		if err := os.WriteFile(filepath.Join(cfgDir, "settings.json"),
+			[]byte(`{"global":{"enabled":true}}`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		runPreRun(t)
+		if gitHooksDisabled {
+			t.Fatal("git hooks must stay enabled under the user-global tier")
+		}
+	})
+
+	t.Run("globally excluded repo disables hooks", func(t *testing.T) {
+		repoDir, cfgDir := setupRepo(t)
+		resolved, err := filepath.EvalSymlinks(repoDir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(cfgDir, "settings.json"),
+			[]byte(`{"global":{"enabled":true,"exclude_paths":["`+filepath.ToSlash(resolved)+`"]}}`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		runPreRun(t)
+		if !gitHooksDisabled {
+			t.Fatal("a globally excluded repo must disable git hooks")
+		}
+	})
 }

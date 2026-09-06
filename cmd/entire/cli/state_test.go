@@ -9,11 +9,40 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/agent/claudecode"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
+	"github.com/entireio/cli/cmd/entire/cli/strategy"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 	"github.com/go-git/go-git/v6"
 	"github.com/go-git/go-git/v6/plumbing/object"
 	"github.com/stretchr/testify/require"
 )
+
+func TestGetNextCheckpointSequence_CanceledContextDoesNotReadRelativeFallback(t *testing.T) {
+	repoDir := t.TempDir()
+	testutil.InitRepo(t, repoDir)
+	t.Chdir(repoDir)
+	paths.ClearWorktreeRootCache()
+	t.Cleanup(func() {
+		paths.ClearWorktreeRootCache()
+	})
+
+	configDir := t.TempDir()
+	t.Setenv("ENTIRE_CONFIG_DIR", configDir)
+	require.NoError(t, os.WriteFile(filepath.Join(configDir, "settings.json"), []byte(`{"global":{"enabled":true}}`), 0o600))
+	_, err := paths.WorktreeRoot(t.Context()) // prime so cancellation reaches invisible routing
+	require.NoError(t, err)
+
+	sessionID := "canceled-sequence-session"
+	toolUseID := "toolu_canceled_sequence"
+	relDir := filepath.Join(strategy.TaskMetadataDir(paths.SessionMetadataDirFromSessionID(sessionID), toolUseID), "checkpoints")
+	require.NoError(t, os.MkdirAll(relDir, 0o750))
+	require.NoError(t, os.WriteFile(filepath.Join(relDir, "1.json"), []byte("{}"), 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(relDir, "2.json"), []byte("{}"), 0o600))
+
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	require.Equal(t, 1, GetNextCheckpointSequence(ctx, sessionID, toolUseID),
+		"cancellation must not fall back to the populated cwd-relative directory")
+}
 
 // prePromptStateFile returns the absolute path to the pre-prompt state file for a session.
 // Test-only helper; production code constructs the filename inline.
