@@ -34,6 +34,8 @@ const (
 	ConfidenceMedium Confidence = "medium"
 )
 
+const graphDefaultRecommendation = "Simplify the change or add evidence that the extra structure is necessary."
+
 type Verdict string
 
 // EvaluationResult is Teammate B's small result contract for deterministic
@@ -210,6 +212,15 @@ func assessIntent(findings []Finding) Assessment {
 			boundaries++
 		case CategoryScopeCreep, CategoryIntentDeviation:
 			deviations++
+		case CategoryUnnecessaryAbstraction,
+			CategoryDuplication,
+			CategoryUnnecessaryDependency,
+			CategoryUnnecessaryFile,
+			CategoryDeadCode,
+			CategoryReinventedRepositoryUtil,
+			CategoryUnrelatedRefactor,
+			CategoryDisproportionateComplexity:
+			continue
 		}
 	}
 	switch {
@@ -255,6 +266,11 @@ func isQualityCategory(category FindingCategory) bool {
 		CategoryUnrelatedRefactor,
 		CategoryDisproportionateComplexity:
 		return true
+	case CategoryRequirementMiss,
+		CategoryBoundaryViolation,
+		CategoryScopeCreep,
+		CategoryIntentDeviation:
+		return false
 	default:
 		return false
 	}
@@ -908,6 +924,17 @@ func graphFindingSeverity(category FindingCategory) Severity {
 	switch category {
 	case CategoryDeadCode, CategoryDuplication, CategoryReinventedRepositoryUtil:
 		return Severity(SeverityHigh)
+	case CategoryUnnecessaryAbstraction,
+		CategoryUnnecessaryDependency,
+		CategoryUnnecessaryFile,
+		CategoryUnrelatedRefactor,
+		CategoryDisproportionateComplexity:
+		return Severity(SeverityMedium)
+	case CategoryRequirementMiss,
+		CategoryBoundaryViolation,
+		CategoryScopeCreep,
+		CategoryIntentDeviation:
+		return Severity(SeverityMedium)
 	default:
 		return Severity(SeverityMedium)
 	}
@@ -929,6 +956,12 @@ func graphFindingTitle(category FindingCategory) string {
 		return "Unnecessary abstraction"
 	case CategoryDisproportionateComplexity:
 		return "Disproportionate complexity"
+	case CategoryRequirementMiss,
+		CategoryBoundaryViolation,
+		CategoryScopeCreep,
+		CategoryIntentDeviation,
+		CategoryUnnecessaryFile:
+		return "Code quality concern"
 	default:
 		return "Code quality concern"
 	}
@@ -946,8 +979,17 @@ func graphFindingRecommendation(category FindingCategory) string {
 		return "Remove the dependency or document why it is necessary for the requested task."
 	case CategoryUnrelatedRefactor:
 		return "Separate unrelated cleanup from the requested task or explain why it is required."
+	case CategoryUnnecessaryAbstraction,
+		CategoryUnnecessaryFile,
+		CategoryDisproportionateComplexity:
+		return graphDefaultRecommendation
+	case CategoryRequirementMiss,
+		CategoryBoundaryViolation,
+		CategoryScopeCreep,
+		CategoryIntentDeviation:
+		return graphDefaultRecommendation
 	default:
-		return "Simplify the change or add evidence that the extra structure is necessary."
+		return graphDefaultRecommendation
 	}
 }
 

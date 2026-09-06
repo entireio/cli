@@ -313,7 +313,7 @@ func findAssociatedCommits(ctx context.Context, repo *git.Repository, checkpoint
 	defer iter.Close()
 	err = iter.ForEach(func(commit *object.Commit) error {
 		if err := ctx.Err(); err != nil {
-			return err
+			return fmt.Errorf("agentcheck context: git log canceled: %w", err)
 		}
 		for _, cpID := range trailers.ParseAllCheckpoints(commit.Message) {
 			if cpID == checkpointID && !seen[commit.Hash.String()] {
@@ -325,7 +325,7 @@ func findAssociatedCommits(ctx context.Context, repo *git.Repository, checkpoint
 		return nil
 	})
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("iterate git log: %w", err)
 	}
 	return result, nil
 }

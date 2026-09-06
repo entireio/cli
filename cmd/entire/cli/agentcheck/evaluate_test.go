@@ -236,7 +236,7 @@ func TestDetermineVerdict(t *testing.T) {
 	}
 }
 
-func TestEvaluateCodeQualityBloat(t *testing.T) {
+func TestEvaluateCodeQualityBloat(t *testing.T) { //nolint:maintidx // Table-driven coverage intentionally exercises every B2 detector and false-positive guard.
 	t.Parallel()
 
 	tests := []struct {
@@ -886,7 +886,7 @@ func findingHasEvidence(finding Finding, want string) bool {
 
 func largePlainDiff() string {
 	lines := make([]string, 0, 80)
-	for i := 0; i < 80; i++ {
+	for range 80 {
 		lines = append(lines, "+lookupEntry")
 	}
 	return strings.Join(lines, "\n")

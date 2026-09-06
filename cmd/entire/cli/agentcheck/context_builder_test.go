@@ -289,10 +289,7 @@ func testReader() fakeReader {
 
 func repoWithCheckpointCommit(t *testing.T, cpID id.CheckpointID) (string, *git.Repository) {
 	t.Helper()
-	dir, err := os.MkdirTemp("", t.Name())
-	if err != nil {
-		t.Fatal(err)
-	}
+	dir := t.TempDir()
 	runGit(t, dir, "init")
 	runGit(t, dir, "config", "user.name", "Test User")
 	runGit(t, dir, "config", "user.email", "test@example.com")
@@ -315,14 +312,13 @@ func repoWithCheckpointCommit(t *testing.T, cpID id.CheckpointID) (string, *git.
 		_ = repo.Close()
 		runtime.GC()
 		debug.FreeOSMemory()
-		_ = os.RemoveAll(dir)
 	})
 	return dir, repo
 }
 
 func runGit(t *testing.T, dir string, args ...string) {
 	t.Helper()
-	cmd := exec.Command("git", args...)
+	cmd := exec.CommandContext(context.Background(), "git", args...)
 	cmd.Dir = dir
 	output, err := cmd.CombinedOutput()
 	if err != nil {
