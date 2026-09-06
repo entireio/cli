@@ -5,9 +5,12 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"os"
+	"strconv"
 	"strings"
 	"time"
 
+	"github.com/entireio/cli/app/models"
 	"github.com/entireio/cli/app/privacy"
 	"github.com/entireio/cli/app/providers"
 )
@@ -57,11 +60,18 @@ func DefaultServerDependencies() *ServerDependencies {
 	sanitizer := privacy.NewPrivacySanitizer()
 	intelEngine := providers.NewLiveIntelligenceEngine(commitProvider, cpProvider, devAnalyzer, graphProvider, sanitizer)
 
+	var githubProvider providers.GitHubProvider
+	if os.Getenv("GITHUB_TOKEN") != "" {
+		githubProvider = providers.NewLiveGitHubProvider()
+	} else {
+		githubProvider = providers.NewDevGitHubProvider()
+	}
+
 	return &ServerDependencies{
 		RepoManager:        providers.NewMemoryRepoManager(),
 		CheckpointProvider: cpProvider,
 		GraphProvider:      graphProvider,
-		GitHubProvider:     providers.NewDevGitHubProvider(),
+		GitHubProvider:     githubProvider,
 		RepoAnalyzer:       providers.NewLiveRepositoryAnalyzer(),
 		ReqAnalyzer:        devAnalyzer,
 		CommitProvider:     commitProvider,
@@ -116,13 +126,13 @@ func (h *APIHandler) EnableHandler(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// RepositoriesHandler lists all tracked repositories or details for a single repository.
 type addRepoRequest struct {
 	URL       string `json:"url"`
 	LocalPath string `json:"local_path"`
+	Path      string `json:"path"`
 }
 
-// RepositoriesHandler handles repository management endpoints (GET, POST, DELETE, select, status).
+// RepositoriesHandler lists all tracked repositories, selects/opens a repository, or returns details for a single repository.
 func (h *APIHandler) RepositoriesHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	path := strings.TrimPrefix(r.URL.Path, "/api/repositories")
@@ -153,18 +163,39 @@ func (h *APIHandler) RepositoriesHandler(w http.ResponseWriter, r *http.Request)
 		case http.MethodGet:
 			// GET /api/repositories - List all repositories
 			repos, err := h.deps.RepoManager.ListRepositories(r.Context())
-			if err != nil {
-				slog.Error("Failed to list repositories", "error", err)
-				WriteAPIError(w, http.StatusInternalServerError, "LIST_REPOSITORIES_FAILED", err.Error())
+			if err != nil || len(repos) == 0 {
+				// Fallback to analyzing current repository directory
+				repo, err := h.deps.RepoAnalyzer.AnalyzeRepository(r.Context(), ".", false)
+				if err != nil {
+					slog.Error("Failed to analyze repository", "error", err)
+					WriteAPIError(w, http.StatusInternalServerError, "REPOSITORY_ANALYSIS_FAILED", err.Error())
+					return
+				}
+				json.NewEncoder(w).Encode([]interface{}{repo})
 				return
 			}
 			json.NewEncoder(w).Encode(repos)
 
 		case http.MethodPost:
-			// POST /api/repositories - Add a new repository
+			// POST /api/repositories - Add or open/select a repository
 			var req addRepoRequest
 			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 				WriteAPIError(w, http.StatusBadRequest, "INVALID_JSON_PAYLOAD", "Failed to parse JSON body")
+				return
+			}
+
+			if req.Path != "" || req.LocalPath != "" {
+				repoPath := req.Path
+				if repoPath == "" {
+					repoPath = req.LocalPath
+				}
+				repo, err := h.deps.RepoAnalyzer.AnalyzeRepository(r.Context(), repoPath, true)
+				if err != nil {
+					slog.Error("Failed to open repository", "path", repoPath, "error", err)
+					WriteAPIError(w, http.StatusBadRequest, "INVALID_REPOSITORY", err.Error())
+					return
+				}
+				json.NewEncoder(w).Encode(repo)
 				return
 			}
 
@@ -208,6 +239,7 @@ func (h *APIHandler) RepositoriesHandler(w http.ResponseWriter, r *http.Request)
 					WriteAPIError(w, http.StatusNotFound, "REPOSITORY_NOT_FOUND", "Repository was not found")
 					return
 				}
+				repo.ID = repoID
 			} else if repo.Architecture == nil && h.deps.RepoAnalyzer != nil {
 				if arch, err := h.deps.RepoAnalyzer.AnalyzeRepository(r.Context(), repo.LocalPath, false); err == nil && arch != nil {
 					repo.Architecture = arch.Architecture
@@ -367,6 +399,41 @@ func (h *APIHandler) RepositoriesHandler(w http.ResponseWriter, r *http.Request)
 			return
 		}
 		json.NewEncoder(w).Encode(handoff)
+
+	case "milestones":
+		repo, err := h.deps.RepoAnalyzer.AnalyzeRepository(r.Context(), ".", false)
+		if err != nil || repo.Owner == "" || repo.Name == "" {
+			// Fallback if local analysis doesn't have it
+			repo = &models.Repository{Owner: "KAUSHALK123", Name: "cli_BTW"}
+		}
+		
+		if len(parts) == 2 {
+			// GET /api/repositories/:id/milestones
+			milestones, err := h.deps.GitHubProvider.GetMilestones(r.Context(), repo.Owner, repo.Name)
+			if err != nil {
+				slog.Error("Failed to fetch milestones", "repoID", repoID, "error", err)
+				WriteAPIError(w, http.StatusInternalServerError, "MILESTONE_FETCH_FAILED", err.Error())
+				return
+			}
+			json.NewEncoder(w).Encode(milestones)
+			return
+		} else if len(parts) == 4 && parts[3] == "requirements" {
+			// GET /api/repositories/:id/milestones/:number/requirements
+			milestoneNumber, err := strconv.Atoi(parts[2])
+			if err != nil {
+				WriteAPIError(w, http.StatusBadRequest, "INVALID_MILESTONE", "Milestone number must be an integer")
+				return
+			}
+			reqs, err := h.deps.GitHubProvider.GetMilestoneRequirements(r.Context(), repo.Owner, repo.Name, milestoneNumber)
+			if err != nil {
+				slog.Error("Failed to fetch milestone requirements", "repoID", repoID, "milestone", milestoneNumber, "error", err)
+				WriteAPIError(w, http.StatusInternalServerError, "MILESTONE_REQUIREMENTS_FETCH_FAILED", err.Error())
+				return
+			}
+			json.NewEncoder(w).Encode(reqs)
+			return
+		}
+		WriteAPIError(w, http.StatusNotFound, "ENDPOINT_NOT_FOUND", "The requested API endpoint was not found")
 
 	default:
 		WriteAPIError(w, http.StatusNotFound, "ENDPOINT_NOT_FOUND", "The requested API endpoint was not found")

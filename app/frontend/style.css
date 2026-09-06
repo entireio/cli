@@ -444,3 +444,17 @@ body {
 .status-badge.needs_verification { background: rgba(59, 130, 246, 0.2); color: var(--accent-blue); }
 
 .margin-top { margin-top: 24px; }
+.margin-bottom { margin-bottom: 24px; }
+
+.alert-banner {
+    padding: 12px 16px;
+    border-radius: 8px;
+    font-size: 13px;
+    margin-top: 12px;
+}
+.alert-banner.warning {
+    background: rgba(245, 158, 11, 0.15);
+    border: 1px solid rgba(245, 158, 11, 0.3);
+    color: #fde68a;
+}
+

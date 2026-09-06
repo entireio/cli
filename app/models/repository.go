@@ -13,6 +13,27 @@ const (
 	StatusFailed     RepositoryStatusValue = "failed"
 )
 
+// ReadinessStatus represents the readiness status of an integration (Git, GitHub, Entire, Entire Graph).
+type ReadinessStatus string
+
+const (
+	StatusDetected ReadinessStatus = "detected"
+	StatusMissing  ReadinessStatus = "missing"
+	StatusError    ReadinessStatus = "error"
+)
+
+// RepositoryReadiness tracks verified readiness for all 4 key integrations.
+type RepositoryReadiness struct {
+	Git                ReadinessStatus `json:"git"`
+	GitDetails         string          `json:"git_details,omitempty"`
+	GitHub             ReadinessStatus `json:"github"`
+	GitHubDetails      string          `json:"github_details,omitempty"`
+	Entire             ReadinessStatus `json:"entire"`
+	EntireDetails      string          `json:"entire_details,omitempty"`
+	EntireGraph        ReadinessStatus `json:"entire_graph"`
+	EntireGraphDetails string          `json:"entire_graph_details,omitempty"`
+}
+
 // IntegrationStatus holds readiness information for Git, GitHub, Entire, and Entire Graph.
 type IntegrationStatus struct {
 	GitStatus     RepositoryStatusValue `json:"git_status"`
@@ -25,7 +46,7 @@ type IntegrationStatus struct {
 	GraphMessage  string                `json:"graph_message"`
 }
 
-// Repository represents a git code repository managed in the workspace.
+// Repository represents a git code repository managed by Entire Checkpoint Intelligence.
 type Repository struct {
 	ID            string                  `json:"id"`
 	Name          string                  `json:"name"`
@@ -38,6 +59,7 @@ type Repository struct {
 	CreatedAt     time.Time               `json:"created_at"`
 	Status        IntegrationStatus       `json:"status"`
 	Architecture  *RepositoryArchitecture `json:"architecture,omitempty"`
+	Readiness     *RepositoryReadiness    `json:"readiness,omitempty"`
 }
 
 // RepositoryArchitecture holds the detected architectural summary of a repository.

@@ -1,61 +1,44 @@
 {
-  "name": "checkpoint-intelligence",
-  "displayName": "Checkpoint Intelligence",
-  "description": "Checkpoint-native developer intelligence, requirement auditing, and release readiness for Entire CLI & Graph",
+  "name": "entire-checkpoint-intelligence",
+  "displayName": "Entire Checkpoint Intelligence",
+  "description": "VS Code Extension providing Repository -> GitHub Milestone -> Requirement Workflow & Audit Dashboard",
   "version": "1.0.0",
-  "publisher": "entire-btw",
+  "publisher": "entireio",
   "engines": {
     "vscode": "^1.75.0"
   },
   "categories": [
     "Other"
   ],
+  "main": "./extension.js",
   "activationEvents": [
+    "onView:entire-requirements-view",
     "onStartupFinished"
   ],
-  "main": "./out/extension.js",
   "contributes": {
     "viewsContainers": {
       "activitybar": [
         {
-          "id": "checkpoint-intelligence-container",
-          "title": "Checkpoint Intelligence",
-          "icon": "$(shield-check)"
+          "id": "entire-intelligence-sidebar",
+          "title": "Entire Intelligence",
+          "icon": "$(shield)"
         }
       ]
     },
     "views": {
-      "checkpoint-intelligence-container": [
+      "entire-intelligence-sidebar": [
         {
-          "type": "webview",
-          "id": "checkpoint-intelligence-sidebar",
-          "name": "Audit & Handoff Dashboard"
+          "id": "entire-requirements-view",
+          "name": "GitHub Requirement Workflow",
+          "type": "webview"
         }
       ]
     },
     "commands": [
       {
-        "command": "entire.audit.run",
-        "title": "Checkpoint Intelligence: Refresh Audit",
-        "icon": "$(refresh)"
-      },
-      {
-        "command": "entire.audit.enable",
-        "title": "Checkpoint Intelligence: Connect/Enable Entire"
-      },
-      {
-        "command": "entire.audit.openDashboard",
-        "title": "Checkpoint Intelligence: Open Web Dashboard"
+        "command": "entire.openRequirementsView",
+        "title": "Entire Intelligence: Open Requirement Workflow"
       }
     ]
-  },
-  "scripts": {
-    "vscode:prepublish": "tsc -p ./",
-    "compile": "tsc -p ./"
-  },
-  "devDependencies": {
-    "@types/node": "^16.11.7",
-    "@types/vscode": "^1.75.0",
-    "typescript": "^4.9.4"
   }
 }

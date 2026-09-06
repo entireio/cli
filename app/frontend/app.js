@@ -126,7 +126,7 @@ document.addEventListener('DOMContentLoaded', () => {
             const res = await fetch(`${API_BASE}/repositories`);
             const repos = await res.json();
 
-            if (repoSelect) {
+            if (repoSelect && repos && repos.length > 0) {
                 repoSelect.innerHTML = repos.map(r => `
                     <option value="${r.id}" ${r.is_active ? 'selected' : ''}>
                         ${r.owner}/${r.name}
@@ -134,7 +134,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 `).join('');
             }
 
-            const activeRepo = repos.find(r => r.is_active) || repos[0];
+            const activeRepo = (repos && repos.find(r => r.is_active)) || (repos && repos[0]);
             if (activeRepo) {
                 currentRepoID = activeRepo.id;
                 renderActiveRepoWorkspace(activeRepo);
@@ -171,93 +171,31 @@ document.addEventListener('DOMContentLoaded', () => {
 
         let html = '';
 
-        // Summary Banner
-        if (arch.summary) {
-            const timeStr = arch.last_analyzed_at ? new Date(arch.last_analyzed_at).toLocaleString() : 'Recently';
-            html += `
-                <div class="arch-summary-banner" style="background: rgba(30, 41, 59, 0.6); padding: 16px; border-radius: 8px; margin-bottom: 20px; border-left: 4px solid var(--accent-blue);">
-                    <div style="font-weight: 600; font-size: 1.05rem; margin-bottom: 4px;">Architecture Summary</div>
-                    <div style="color: var(--text-secondary);">${arch.summary}</div>
-                    <div style="margin-top: 8px; font-size: 0.8rem; color: #94a3b8;">Last Analyzed: ${timeStr}</div>
-                </div>
-            `;
-        }
-
-        // Tech Stack
         if (arch.tech_stack && arch.tech_stack.length > 0) {
-            html += `
-                <div style="margin-bottom: 20px;">
-                    <h4 style="margin-bottom: 8px; color: var(--text-secondary); text-transform: uppercase; font-size: 0.8rem; letter-spacing: 0.05em;">Technology Stack & Environment</h4>
-                    <div style="display: flex; gap: 8px; flex-wrap: wrap;">
-                        ${arch.tech_stack.map(t => `<span class="badge" style="background: rgba(56, 189, 248, 0.15); color: #38bdf8; border: 1px solid rgba(56, 189, 248, 0.3); font-weight: 500; padding: 4px 10px; border-radius: 4px; font-size: 0.85rem;">${t}</span>`).join('')}
-                    </div>
-                </div>
-            `;
+            html += `<h4>Technology Stack</h4><p>${arch.tech_stack.map(t => `<span class="badge" style="background: var(--accent-cyan); color: #000;">${t}</span>`).join(' ')}</p>`;
         }
 
-        // 4-Column Grid for Architecture Details
-        html += `<div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 16px; margin-bottom: 24px;">`;
+        if (arch.entry_points && arch.entry_points.length > 0) {
+            html += `<h4>Entry Points</h4><ul>${arch.entry_points.map(e => `<li><code>${e}</code></li>`).join('')}</ul>`;
+        }
 
-        // Entry Points & Components
-        html += `
-            <div class="card glass" style="padding: 16px;">
-                <h4 style="margin-top:0; color: #60a5fa; font-size: 0.95rem;">🚀 Entry Points & Core Modules</h4>
-                ${arch.entry_points && arch.entry_points.length > 0 ? `<ul style="padding-left: 18px; margin-bottom: 12px;">${arch.entry_points.map(e => `<li><code>${e}</code></li>`).join('')}</ul>` : '<p style="font-size:0.85rem; color:#94a3b8;">No direct entry points detected</p>'}
-                <div style="font-size: 0.85rem; font-weight: 600; color: var(--text-secondary); margin-top: 12px;">Modules / Components (${arch.components ? arch.components.length : 0})</div>
-                ${arch.components && arch.components.length > 0 ? `<ul style="padding-left: 18px; margin-top: 4px;">${arch.components.map(c => `<li><code>${c}</code></li>`).join('')}</ul>` : '<p style="font-size:0.85rem; color:#94a3b8;">No top-level component dirs</p>'}
-            </div>
-        `;
-
-        // API Routes
-        html += `
-            <div class="card glass" style="padding: 16px;">
-                <h4 style="margin-top:0; color: #34d399; font-size: 0.95rem;">🔌 Detected APIs & Endpoints (${arch.api_routes ? arch.api_routes.length : 0})</h4>
-                ${arch.api_routes && arch.api_routes.length > 0 ? `<ul style="padding-left: 18px; max-height: 180px; overflow-y: auto;">${arch.api_routes.map(r => `<li><code>${r}</code></li>`).join('')}</ul>` : '<p style="font-size:0.85rem; color:#94a3b8;">No API routes statically detected</p>'}
-            </div>
-        `;
-
-        // Important Files & Configs
-        html += `
-            <div class="card glass" style="padding: 16px;">
-                <h4 style="margin-top:0; color: #f43f5e; font-size: 0.95rem;">📄 Configurations & Key Files</h4>
-                ${arch.config_files && arch.config_files.length > 0 ? `<ul style="padding-left: 18px; max-height: 180px; overflow-y: auto;">${arch.config_files.map(f => `<li><code>${f}</code></li>`).join('')}</ul>` : '<p style="font-size:0.85rem; color:#94a3b8;">No config files detected</p>'}
-            </div>
-        `;
-
-        // Test Structure
-        html += `
-            <div class="card glass" style="padding: 16px;">
-                <h4 style="margin-top:0; color: #a78bfa; font-size: 0.95rem;">🧪 Test Suite Structure (${arch.test_structure ? arch.test_structure.length : 0})</h4>
-                ${arch.test_structure && arch.test_structure.length > 0 ? `<ul style="padding-left: 18px; max-height: 180px; overflow-y: auto;">${arch.test_structure.map(t => `<li><code>${t}</code></li>`).join('')}</ul>` : '<p style="font-size:0.85rem; color:#94a3b8;">No test files detected</p>'}
-            </div>
-        `;
-
-        html += `</div>`; // End Grid
-
-        // Inferred vs Unknown Info
-        html += `<div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 16px;">`;
+        if (arch.components && arch.components.length > 0) {
+            html += `<h4>Components / Modules</h4><ul>${arch.components.map(c => `<li><code>${c}</code></li>`).join('')}</ul>`;
+        }
+        
+        if (arch.important_files && arch.important_files.length > 0) {
+            html += `<h4>Important Files</h4><ul>${arch.important_files.map(f => `<li><code>${f}</code></li>`).join('')}</ul>`;
+        }
 
         if (arch.inferred_info && arch.inferred_info.length > 0) {
-            html += `
-                <div class="card glass" style="padding: 16px; border-left: 4px solid #c084fc;">
-                    <h4 style="margin-top:0; color: #c084fc; font-size: 0.95rem;">🔮 Inferred Architectural Information</h4>
-                    <ul style="padding-left: 18px; margin: 0;">${arch.inferred_info.map(i => `<li style="margin-bottom: 6px;">${i}</li>`).join('')}</ul>
-                </div>
-            `;
+            html += `<h4><span style="color: #a855f7;">🔮 Inferred Information</span></h4><ul>${arch.inferred_info.map(i => `<li>${i}</li>`).join('')}</ul>`;
         }
 
         if (arch.unknown_info && arch.unknown_info.length > 0) {
-            html += `
-                <div class="card glass" style="padding: 16px; border-left: 4px solid #fb923c;">
-                    <h4 style="margin-top:0; color: #fb923c; font-size: 0.95rem;">⚠️ Unknown / Unverified Information</h4>
-                    <ul style="padding-left: 18px; margin: 0;">${arch.unknown_info.map(u => `<li style="margin-bottom: 6px;">${u}</li>`).join('')}</ul>
-                </div>
-            `;
+            html += `<h4><span style="color: #f97316;">⚠️ Unknown Information</span></h4><ul>${arch.unknown_info.map(u => `<li>${u}</li>`).join('')}</ul>`;
         }
 
-        html += `</div>`;
-
-        container.innerHTML = html;
+        container.innerHTML = html || '<p>Architecture analysis yielded no specific components.</p>';
     }
 
     const regenBtn = document.getElementById('regenerate-arch-btn');
@@ -267,7 +205,7 @@ document.addEventListener('DOMContentLoaded', () => {
             container.innerHTML = '<div class="spinner">Regenerating codebase architecture analysis...</div>';
             regenBtn.disabled = true;
             try {
-                const targetID = currentRepoID || 'repo-kaushalk123-cli-btw';
+                const targetID = currentRepoID || 'repo-cli-btw';
                 const res = await fetch(`${API_BASE}/repositories/${targetID}/analyze`, { method: 'POST' });
                 const repo = await res.json();
                 renderArchitecture(repo.architecture);
@@ -280,16 +218,30 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     async function renderActiveRepoWorkspace(repo) {
-        // Details Card
         const detailsContainer = document.getElementById('repo-details');
         if (detailsContainer) {
+            let readinessHtml = '';
+            if (repo.readiness) {
+                readinessHtml = `
+                    <div style="grid-column: 1 / -1; margin-top: 12px;">
+                        <strong>Integration Readiness:</strong>
+                        <div style="display: flex; gap: 12px; margin-top: 6px; flex-wrap: wrap;">
+                            <span class="badge" style="background: ${repo.readiness.git === 'detected' ? 'rgba(16,185,129,0.2)' : 'rgba(239,68,68,0.2)'}; color: ${repo.readiness.git === 'detected' ? '#10b981' : '#f87171'};">Git: ${repo.readiness.git.toUpperCase()}</span>
+                            <span class="badge" style="background: ${repo.readiness.github === 'detected' ? 'rgba(16,185,129,0.2)' : 'rgba(239,68,68,0.2)'}; color: ${repo.readiness.github === 'detected' ? '#10b981' : '#f87171'};">GitHub: ${repo.readiness.github.toUpperCase()}</span>
+                            <span class="badge" style="background: ${repo.readiness.entire === 'detected' ? 'rgba(16,185,129,0.2)' : 'rgba(239,68,68,0.2)'}; color: ${repo.readiness.entire === 'detected' ? '#10b981' : '#f87171'};">Entire: ${repo.readiness.entire.toUpperCase()}</span>
+                            <span class="badge" style="background: ${repo.readiness.entire_graph === 'detected' ? 'rgba(16,185,129,0.2)' : 'rgba(239,68,68,0.2)'}; color: ${repo.readiness.entire_graph === 'detected' ? '#10b981' : '#f87171'};">Entire Graph: ${repo.readiness.entire_graph.toUpperCase()}</span>
+                        </div>
+                    </div>
+                `;
+            }
+
             detailsContainer.innerHTML = `
                 <div><strong>Repository Name:</strong> ${repo.name}</div>
                 <div><strong>Owner:</strong> ${repo.owner}</div>
-                <div><strong>GitHub URL:</strong> <a href="${repo.url}" target="_blank" style="color:#60a5fa;">${repo.url}</a></div>
                 <div><strong>Default Branch:</strong> <code>${repo.default_branch}</code></div>
-                <div><strong>Local Workspace Path:</strong> <code>${repo.local_path}</code></div>
+                <div><strong>Local Path:</strong> <code>${repo.local_path}</code></div>
                 <div><strong>Description:</strong> ${repo.description}</div>
+                ${readinessHtml}
             `;
         }
 
@@ -299,7 +251,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
         // Refresh Sub-resources
         fetchCheckpoints(repo.id);
-        fetchRequirements(repo.id);
+        fetchMilestones(repo.id);
         fetchGraphData(repo.id);
         fetchHandoffData(repo.id);
     }
@@ -458,6 +410,7 @@ document.addEventListener('DOMContentLoaded', () => {
     async function fetchIntegrationStatus(repoID) {
         try {
             const res = await fetch(`${API_BASE}/repositories/${repoID}/status`);
+            if (!res.ok) return;
             const status = await res.json();
             const grid = document.getElementById('integration-status-grid');
             if (grid) {
@@ -499,7 +452,8 @@ document.addEventListener('DOMContentLoaded', () => {
 
     async function fetchCheckpoints(repoID) {
         try {
-            const res = await fetch(`${API_BASE}/repositories/${repoID}/checkpoints`);
+            const id = repoID || 'repo-cli-btw';
+            const res = await fetch(`${API_BASE}/repositories/${id}/checkpoints`);
             const cps = await res.json();
             const tbody = document.getElementById('checkpoints-table-body');
             const countEl = document.getElementById('checkpoint-count');
@@ -521,18 +475,100 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     }
 
+    async function fetchMilestones(repoID) {
+        const select = document.getElementById('milestone-select');
+        const banner = document.getElementById('github-status-banner');
+        const id = repoID || 'repo-cli-btw';
+
+        if (!select) return;
+
+        try {
+            const res = await fetch(`${API_BASE}/repositories/${id}/milestones`);
+            if (!res.ok) {
+                const errData = await res.json().catch(() => ({}));
+                showGitHubWarning(banner, errData.error ? errData.error.message : 'GitHub API unavailable. Using development milestones.');
+            } else {
+                if (banner) banner.style.display = 'none';
+            }
+
+            const milestones = await res.json();
+            if (milestones && milestones.length > 0) {
+                select.innerHTML = milestones.map(m => `
+                    <option value="${m.number}">${m.title} (${m.open_issues} open / ${m.closed_issues} closed)</option>
+                `).join('');
+
+                fetchRequirementsForMilestone(id, milestones[0].number);
+            } else {
+                select.innerHTML = '<option value="">No milestones found</option>';
+                fetchRequirements(id);
+            }
+        } catch (err) {
+            console.warn('Failed to fetch milestones:', err);
+            showGitHubWarning(banner, 'GitHub connection offline or rate-limited. Falling back to local repository matrix.');
+            fetchRequirements(id);
+        }
+
+        select.replaceWith(select.cloneNode(true));
+        const newSelect = document.getElementById('milestone-select');
+        newSelect.addEventListener('change', (e) => {
+            if (e.target.value) {
+                fetchRequirementsForMilestone(id, parseInt(e.target.value, 10));
+            }
+        });
+    }
+
+    function showGitHubWarning(bannerEl, msg) {
+        if (!bannerEl) return;
+        bannerEl.style.display = 'block';
+        bannerEl.className = 'alert-banner warning';
+        bannerEl.innerHTML = `⚠️ <strong>GitHub Notice:</strong> ${msg}`;
+    }
+
+    async function fetchRequirementsForMilestone(repoID, milestoneNum) {
+        const tbody = document.getElementById('requirements-table-body');
+        if (tbody) tbody.innerHTML = '<tr><td colspan="5" class="text-center"><div class="spinner">Loading milestone issues...</div></td></tr>';
+
+        try {
+            const res = await fetch(`${API_BASE}/repositories/${repoID}/milestones/${milestoneNum}/requirements`);
+            if (!res.ok) {
+                fetchRequirements(repoID);
+                return;
+            }
+            const reqs = await res.json();
+            if (tbody) {
+                if (reqs.length === 0) {
+                    tbody.innerHTML = '<tr><td colspan="5" class="text-center">No issues found for this milestone.</td></tr>';
+                    return;
+                }
+                tbody.innerHTML = reqs.map(r => `
+                    <tr>
+                        <td><code>#${r.github_issue_ref || r.id}</code></td>
+                        <td><strong>${r.title}</strong><br><small style="color: var(--text-secondary);">${r.description || 'No description'}</small></td>
+                        <td><span class="badge" style="background: rgba(56, 189, 248, 0.2); color: var(--accent-cyan);">${r.milestone || 'Milestone #' + milestoneNum}</span></td>
+                        <td><span class="status-badge ${r.status}">${r.status.toUpperCase()} (${r.state || 'active'})</span></td>
+                        <td>${r.verification_evidence || 'Preserved from GitHub issue metadata'}</td>
+                    </tr>
+                `).join('');
+            }
+        } catch (err) {
+            console.error('Failed to fetch requirements for milestone:', err);
+            fetchRequirements(repoID);
+        }
+    }
+
     async function fetchRequirements(repoID) {
         try {
-            const res = await fetch(`${API_BASE}/repositories/${repoID}/requirements`);
+            const id = repoID || 'repo-cli-btw';
+            const res = await fetch(`${API_BASE}/repositories/${id}/requirements`);
             const reqs = await res.json();
             const tbody = document.getElementById('requirements-table-body');
             if (tbody) {
                 tbody.innerHTML = reqs.map(r => `
                     <tr>
-                        <td><code>${r.id}</code></td>
-                        <td><strong>${r.title}</strong><br><small>${r.description}</small></td>
+                        <td><code>#${r.id}</code></td>
+                        <td><strong>${r.title}</strong><br><small style="color: var(--text-secondary);">${r.description}</small></td>
+                        <td><span class="badge" style="background: rgba(168, 85, 247, 0.2); color: #c084fc;">Local Requirement</span></td>
                         <td><span class="status-badge ${r.status}">${r.status.toUpperCase()}</span></td>
-                        <td>${r.related_checkpoints.map(c => `<code>${c}</code>`).join(', ')}</td>
                         <td>${r.verification_evidence}</td>
                     </tr>
                 `).join('');
@@ -544,7 +580,8 @@ document.addEventListener('DOMContentLoaded', () => {
 
     async function fetchGraphData(repoID) {
         try {
-            const res = await fetch(`${API_BASE}/repositories/${repoID}/graph`);
+            const id = repoID || 'repo-cli-btw';
+            const res = await fetch(`${API_BASE}/repositories/${id}/graph`);
             const findings = await res.json();
             const container = document.getElementById('graph-findings-list');
             if (container) {
@@ -564,7 +601,8 @@ document.addEventListener('DOMContentLoaded', () => {
 
     async function fetchHandoffData(repoID) {
         try {
-            const res = await fetch(`${API_BASE}/repositories/${repoID}/handoff`);
+            const id = repoID || 'repo-cli-btw';
+            const res = await fetch(`${API_BASE}/repositories/${id}/handoff`);
             const h = await res.json();
             const container = document.getElementById('handoff-content');
             if (container) {

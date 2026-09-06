@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/entireio/cli/app/models"
@@ -110,6 +111,8 @@ func TestRepositoriesHandler(t *testing.T) {
 		{"Requirements Endpoint", "/api/repositories/repo-kaushalk123-cli-btw/requirements", http.StatusOK},
 		{"Graph Endpoint", "/api/repositories/repo-kaushalk123-cli-btw/graph", http.StatusOK},
 		{"Handoff Endpoint", "/api/repositories/repo-kaushalk123-cli-btw/handoff", http.StatusOK},
+		{"Milestones Endpoint", "/api/repositories/repo-kaushalk123-cli-btw/milestones", http.StatusOK},
+		{"Milestone Requirements Endpoint", "/api/repositories/repo-kaushalk123-cli-btw/milestones/1/requirements", http.StatusOK},
 	}
 
 	for _, tt := range tests {
@@ -123,6 +126,32 @@ func TestRepositoriesHandler(t *testing.T) {
 				t.Errorf("expected code %d for %s, got %d", tt.wantCode, tt.path, rec.Code)
 			}
 		})
+	}
+}
+
+func TestSelectRepositoryHandler(t *testing.T) {
+	handler := NewAPIHandler(nil)
+
+	// Test invalid path payload
+	body := strings.NewReader(`{"path": ""}`)
+	req := httptest.NewRequest("POST", "/api/repositories", body)
+	rec := httptest.NewRecorder()
+
+	handler.RepositoriesHandler(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("expected 400 Bad Request for empty path, got %d", rec.Code)
+	}
+
+	// Test valid path
+	bodyValid := strings.NewReader(`{"path": "."}`)
+	reqValid := httptest.NewRequest("POST", "/api/repositories", bodyValid)
+	recValid := httptest.NewRecorder()
+
+	handler.RepositoriesHandler(recValid, reqValid)
+
+	if recValid.Code != http.StatusOK {
+		t.Errorf("expected 200 OK for valid path '.', got %d", recValid.Code)
 	}
 }
 

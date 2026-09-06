@@ -176,16 +176,32 @@
 
                 <!-- Tab 3: Requirements -->
                 <section id="tab-requirements" class="tab-pane">
+                    <div class="card glass margin-bottom">
+                        <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 12px;">
+                            <div>
+                                <h3 style="margin: 0;">GitHub Milestone Requirements Workflow</h3>
+                                <p style="color: var(--text-secondary); margin: 4px 0 0 0; font-size: 0.9em;">Convert GitHub milestones & issues into actionable Checkpoint Intelligence requirements</p>
+                            </div>
+                            <div style="display: flex; gap: 8px; align-items: center;">
+                                <label for="milestone-select" style="font-weight: 500;">Select Milestone:</label>
+                                <select id="milestone-select" style="padding: 8px 12px; border-radius: 6px; background: rgba(30,41,59,0.9); color: white; border: 1px solid var(--border-light);">
+                                    <option value="">Loading milestones...</option>
+                                </select>
+                            </div>
+                        </div>
+                        <div id="github-status-banner" style="margin-top: 12px; display: none;"></div>
+                    </div>
+
                     <div class="card glass">
                         <h3>Requirement & Milestone Verification Matrix</h3>
                         <div class="table-container">
                             <table class="data-table">
                                 <thead>
                                     <tr>
-                                        <th>ID</th>
+                                        <th>Ref #</th>
                                         <th>Title & Goal</th>
-                                        <th>Status</th>
-                                        <th>Related Checkpoints</th>
+                                        <th>Milestone</th>
+                                        <th>State / Status</th>
                                         <th>Verification Evidence</th>
                                     </tr>
                                 </thead>
