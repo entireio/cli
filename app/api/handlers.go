@@ -52,7 +52,7 @@ func DefaultServerDependencies() *ServerDependencies {
 		CheckpointProvider: providers.NewDevCheckpointProvider(),
 		GraphProvider:      providers.NewDevGraphProvider(),
 		GitHubProvider:     providers.NewDevGitHubProvider(),
-		RepoAnalyzer:       devAnalyzer,
+		RepoAnalyzer:       providers.NewLiveRepositoryAnalyzer(),
 		ReqAnalyzer:        devAnalyzer,
 	}
 }
@@ -100,6 +100,11 @@ func (h *APIHandler) RepositoriesHandler(w http.ResponseWriter, r *http.Request)
 		if err != nil {
 			WriteAPIError(w, http.StatusNotFound, "NO_ACTIVE_REPOSITORY", "No active repository selected")
 			return
+		}
+		if active.Architecture == nil && h.deps.RepoAnalyzer != nil {
+			if arch, err := h.deps.RepoAnalyzer.AnalyzeRepository(r.Context(), active.LocalPath, false); err == nil && arch != nil {
+				active.Architecture = arch.Architecture
+			}
 		}
 		json.NewEncoder(w).Encode(active)
 		return
@@ -158,8 +163,17 @@ func (h *APIHandler) RepositoriesHandler(w http.ResponseWriter, r *http.Request)
 			// GET /api/repositories/:id
 			repo, err := h.deps.RepoManager.GetRepository(r.Context(), repoID)
 			if err != nil {
-				WriteAPIError(w, http.StatusNotFound, "REPOSITORY_NOT_FOUND", "Repository was not found")
-				return
+				// Fallback to analyzing repo directory if repoID isn't in MemoryRepoManager yet
+				repo, err = h.deps.RepoAnalyzer.AnalyzeRepository(r.Context(), ".", false)
+				if err != nil {
+					slog.Error("Failed to fetch repository info", "repoID", repoID, "error", err)
+					WriteAPIError(w, http.StatusNotFound, "REPOSITORY_NOT_FOUND", "Repository was not found")
+					return
+				}
+			} else if repo.Architecture == nil && h.deps.RepoAnalyzer != nil {
+				if arch, err := h.deps.RepoAnalyzer.AnalyzeRepository(r.Context(), repo.LocalPath, false); err == nil && arch != nil {
+					repo.Architecture = arch.Architecture
+				}
 			}
 			json.NewEncoder(w).Encode(repo)
 
@@ -216,6 +230,19 @@ func (h *APIHandler) RepositoriesHandler(w http.ResponseWriter, r *http.Request)
 		}
 		json.NewEncoder(w).Encode(cps)
 
+	case "analyze":
+		if r.Method == http.MethodPost {
+			// POST /api/repositories/:id/analyze
+			repo, err := h.deps.RepoAnalyzer.AnalyzeRepository(r.Context(), ".", true)
+			if err != nil {
+				slog.Error("Failed to force analyze repository", "repoID", repoID, "error", err)
+				WriteAPIError(w, http.StatusInternalServerError, "REPOSITORY_ANALYSIS_FAILED", err.Error())
+				return
+			}
+			json.NewEncoder(w).Encode(repo)
+		} else {
+			WriteAPIError(w, http.StatusMethodNotAllowed, "METHOD_NOT_ALLOWED", "Only POST is allowed")
+		}
 	case "requirements":
 		// GET /api/repositories/:id/requirements
 		reqs, err := h.deps.ReqAnalyzer.AnalyzeRequirements(r.Context(), repoID)

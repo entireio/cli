@@ -18,6 +18,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
     const tabTitles = {
         overview: 'Workspace Repository Overview',
+        architecture: 'Repository Architecture Summary',
         checkpoints: 'Entire Checkpoints Log',
         requirements: 'Requirements & Milestones Matrix',
         graph: 'Entire Graph Structural Impact Analysis',
@@ -136,6 +137,9 @@ document.addEventListener('DOMContentLoaded', () => {
             if (activeRepo) {
                 currentRepoID = activeRepo.id;
                 renderActiveRepoWorkspace(activeRepo);
+                if (activeRepo.architecture) {
+                    renderArchitecture(activeRepo.architecture);
+                }
             }
         } catch (err) {
             console.error('Failed to list repositories:', err);
@@ -154,6 +158,62 @@ document.addEventListener('DOMContentLoaded', () => {
         } catch (err) {
             console.error('Failed to select repository:', err);
         }
+    }
+
+    function renderArchitecture(arch) {
+        const container = document.getElementById('architecture-content');
+        if (!container) return;
+        if (!arch) {
+            container.innerHTML = '<p>No architecture data available.</p>';
+            return;
+        }
+
+        let html = '';
+
+        if (arch.tech_stack && arch.tech_stack.length > 0) {
+            html += `<h4>Technology Stack</h4><p>${arch.tech_stack.map(t => `<span class="badge" style="background: var(--accent-cyan); color: #000;">${t}</span>`).join(' ')}</p>`;
+        }
+
+        if (arch.entry_points && arch.entry_points.length > 0) {
+            html += `<h4>Entry Points</h4><ul>${arch.entry_points.map(e => `<li><code>${e}</code></li>`).join('')}</ul>`;
+        }
+
+        if (arch.components && arch.components.length > 0) {
+            html += `<h4>Components / Modules</h4><ul>${arch.components.map(c => `<li><code>${c}</code></li>`).join('')}</ul>`;
+        }
+        
+        if (arch.important_files && arch.important_files.length > 0) {
+            html += `<h4>Important Files</h4><ul>${arch.important_files.map(f => `<li><code>${f}</code></li>`).join('')}</ul>`;
+        }
+
+        if (arch.inferred_info && arch.inferred_info.length > 0) {
+            html += `<h4><span style="color: #a855f7;">🔮 Inferred Information</span></h4><ul>${arch.inferred_info.map(i => `<li>${i}</li>`).join('')}</ul>`;
+        }
+
+        if (arch.unknown_info && arch.unknown_info.length > 0) {
+            html += `<h4><span style="color: #f97316;">⚠️ Unknown Information</span></h4><ul>${arch.unknown_info.map(u => `<li>${u}</li>`).join('')}</ul>`;
+        }
+
+        container.innerHTML = html || '<p>Architecture analysis yielded no specific components.</p>';
+    }
+
+    const regenBtn = document.getElementById('regenerate-arch-btn');
+    if (regenBtn) {
+        regenBtn.addEventListener('click', async () => {
+            const container = document.getElementById('architecture-content');
+            container.innerHTML = '<div class="spinner">Regenerating analysis...</div>';
+            regenBtn.disabled = true;
+            try {
+                const targetID = currentRepoID || 'repo-kaushalk123-cli-btw';
+                const res = await fetch(`${API_BASE}/repositories/${targetID}/analyze`, { method: 'POST' });
+                const repo = await res.json();
+                renderArchitecture(repo.architecture);
+            } catch(e) {
+                container.innerHTML = `<p style="color:red">Failed to regenerate: ${e.message}</p>`;
+            } finally {
+                regenBtn.disabled = false;
+            }
+        });
     }
 
     async function renderActiveRepoWorkspace(repo) {

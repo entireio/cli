@@ -25,6 +25,9 @@
                 <button class="nav-item active" data-tab="overview">
                     <span class="icon">📊</span> Overview & Workspace
                 </button>
+                <button class="nav-item" data-tab="architecture">
+                    <span class="icon">🏗️</span> Architecture
+                </button>
                 <button class="nav-item" data-tab="checkpoints">
                     <span class="icon">🔖</span> Entire Checkpoints
                 </button>
@@ -107,6 +110,19 @@
                         <h3>Active Repository Details</h3>
                         <div class="details-grid" id="repo-details">
                             <div class="spinner">Loading repository baseline...</div>
+                        </div>
+                    </div>
+                </section>
+
+                <!-- Tab: Architecture -->
+                <section id="tab-architecture" class="tab-pane">
+                    <div class="card glass">
+                        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px;">
+                            <h3 style="margin: 0;">Repository Architecture Summary</h3>
+                            <button id="regenerate-arch-btn" style="padding: 8px 16px; border-radius: 4px; background: var(--accent-blue); color: white; border: none; cursor: pointer;">Regenerate</button>
+                        </div>
+                        <div id="architecture-content">
+                            <div class="spinner">Loading architecture analysis...</div>
                         </div>
                     </div>
                 </section>
