@@ -235,6 +235,16 @@ were written and never queried, so removing them cost zero analytic capability.
   7-day `UNDROP TABLE` window, which is an admin action, not something the CLI
   can reach.
 
+**Post-purge verification, reproducible by a judge with warehouse access.**
+`DESCRIBE TABLE workspace.checkpoint_lens.checkpoint_sessions` returns 27
+columns, `checkpoint_files` 4, and `checkpoint_decisions` 10, with no `intent`
+and no `text` column among them. Where 800 characters of a user prompt used to
+sit, a row now reads `intent_len 2224 | intent_word_count 336 | intent_digest
+91c4421e423b89a5 | intent_redacted False` — the length is reported honestly,
+and the words are not there to report. The aggregates still answer: 10
+checkpoints, 42 decisions, 43 file rows, a 7-point unresolved-context trend,
+and a churn ranking whose top entries are real source files.
+
 **Deliberate scope decision:** `file_path`, `branch`, `session_id`, `agent`,
 `model`, `linked_commit` and token counts still leave the machine. They are
 checkpoint metadata, not prompt or transcript content, and `file_churn` is
