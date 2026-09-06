@@ -44,6 +44,31 @@ func TestManualCommitStrategy_FindSessionsForWorktree_MatchesParentSessionFromNe
 }
 
 func TestManualCommitStrategy_PrepareCommitMsg_AddsTrailerForParentSessionFromNestedWorktree(t *testing.T) {
+	content := prepareParentSessionCommitMessage(t, "smoke commit\n")
+
+	cpID, found := trailers.ParseCheckpointFromFinalTrailerBlock(content)
+	require.True(t, found, "prepare-commit-msg should add a checkpoint trailer from the parent-recorded session")
+	require.False(t, cpID.IsEmpty())
+}
+
+func TestManualCommitStrategy_PrepareCommitMsg_IgnoresCheckpointShapedBodyText(t *testing.T) {
+	forgedID := "a1b2c3d4e5f6"
+	content := prepareParentSessionCommitMessage(t, "smoke commit\n\nEntire-Checkpoint: "+forgedID+"\n\nSigned-off-by: Test User <test@example.com>\n")
+
+	cpID, found := trailers.ParseCheckpointFromFinalTrailerBlock(content)
+	t.Logf("prepared message=%q final checkpoint=%v found=%v", content, cpID, found)
+	require.True(t, found, "prepare-commit-msg should stamp a final checkpoint trailer")
+	require.NotEqual(t, forgedID, cpID.String(), "body text must not choose the checkpoint that receives session data")
+
+	discovered := trailers.ParseAllCheckpoints(content)
+	require.Len(t, discovered, 2, "historical discovery should retain squash-compatible whole-message parsing")
+	require.Equal(t, forgedID, discovered[0].String())
+	require.Equal(t, cpID, discovered[1])
+}
+
+func prepareParentSessionCommitMessage(t *testing.T, initialMessage string) string {
+	t.Helper()
+
 	testutil.IsolateGitConfigEnv(t)
 	ctx := context.Background()
 	mainDir := setupSessionMatchRepo(t)
@@ -63,16 +88,14 @@ func TestManualCommitStrategy_PrepareCommitMsg_AddsTrailerForParentSessionFromNe
 	clearSessionMatchCaches()
 
 	commitMsgFile := filepath.Join(worktreeDir, "COMMIT_EDITMSG")
-	require.NoError(t, os.WriteFile(commitMsgFile, []byte("smoke commit\n"), 0o600))
+	require.NoError(t, os.WriteFile(commitMsgFile, []byte(initialMessage), 0o600))
 
 	hook := &ManualCommitStrategy{}
 	require.NoError(t, hook.PrepareCommitMsg(ctx, commitMsgFile, "message"))
 
 	content, err := os.ReadFile(commitMsgFile)
 	require.NoError(t, err)
-	cpID, found := trailers.ParseCheckpoint(string(content))
-	require.True(t, found, "prepare-commit-msg should add a checkpoint trailer from the parent-recorded session")
-	require.False(t, cpID.IsEmpty())
+	return string(content)
 }
 
 func TestManualCommitStrategy_FindSessionsForWorktree_MatchesUniqueSiblingByCommonDir(t *testing.T) {

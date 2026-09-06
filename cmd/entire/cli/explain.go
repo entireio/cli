@@ -614,7 +614,7 @@ func runExplainAuto(ctx context.Context, w, errW io.Writer, target string, noPag
 	if commitErr != nil {
 		return fmt.Errorf("failed to get commit %s: %w", abbreviateCommitHash(lookup.repo, hash), commitErr)
 	}
-	cpID, hasCheckpoint := trailers.ParseCheckpoint(commit.Message)
+	cpID, hasCheckpoint := parseCheckpointForExplainCommit(commit.Message, generate)
 	if !hasCheckpoint {
 		// Side-effect modes must error — silently succeeding would leave
 		// scripts unable to distinguish "done" from "didn't happen".
@@ -2990,8 +2990,10 @@ func runExplainCommit(ctx context.Context, w, errW io.Writer, commitRef string, 
 		return fmt.Errorf("failed to get commit: %w", err)
 	}
 
-	// Extract Entire-Checkpoint trailer
-	checkpointID, hasCheckpoint := trailers.ParseCheckpoint(commit.Message)
+	// Generating a summary mutates checkpoint storage, so it requires an
+	// authorizing trailer in Git's final trailer block. Read-only explanation
+	// keeps whole-message discovery for squash-merge history.
+	checkpointID, hasCheckpoint := parseCheckpointForExplainCommit(commit.Message, generate)
 	if !hasCheckpoint {
 		// Side-effect modes must error so scripts can distinguish "done"
 		// from "didn't happen"; read-only modes print a friendly message.
@@ -3005,6 +3007,13 @@ func runExplainCommit(ctx context.Context, w, errW io.Writer, commitRef string, 
 	// Delegate to checkpoint detail view, forwarding the full flag set so
 	// --generate / --raw-transcript / --force work via --commit as well.
 	return runExplainCheckpoint(ctx, w, errW, checkpointID.String(), noPager, verbose, full, rawTranscript, generate, force, searchAll, summaryTimeoutSeconds)
+}
+
+func parseCheckpointForExplainCommit(message string, generate bool) (id.CheckpointID, bool) {
+	if generate {
+		return trailers.ParseCheckpointFromFinalTrailerBlock(message)
+	}
+	return trailers.ParseCheckpoint(message)
 }
 
 // pagerLookupEnv is overridable for tests so pager env-gate behavior can be
