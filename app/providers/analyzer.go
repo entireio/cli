@@ -8,7 +8,7 @@ import (
 
 // RepositoryAnalyzer defines the interface for local repository structure analysis.
 type RepositoryAnalyzer interface {
-	AnalyzeRepository(ctx context.Context, localPath string) (*models.Repository, error)
+	AnalyzeRepository(ctx context.Context, localPath string, forceRefresh bool) (*models.Repository, error)
 }
 
 // RequirementAnalyzer defines the interface for evaluating requirements completion against checkpoints.
@@ -25,7 +25,7 @@ func NewDevAnalyzer() *DevAnalyzer {
 	return &DevAnalyzer{}
 }
 
-func (a *DevAnalyzer) AnalyzeRepository(ctx context.Context, localPath string) (*models.Repository, error) {
+func (a *DevAnalyzer) AnalyzeRepository(ctx context.Context, localPath string, forceRefresh bool) (*models.Repository, error) {
 	return &models.Repository{
 		ID:            "repo-cli-btw",
 		Name:          "cli_BTW",
