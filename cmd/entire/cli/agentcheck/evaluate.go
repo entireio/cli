@@ -39,9 +39,16 @@ type Verdict string
 // EvaluationResult is Teammate B's small result contract for deterministic
 // AgentCheck evaluation. It is intentionally independent from Entire internals.
 type EvaluationResult struct {
-	Verdict  Verdict
-	Summary  string
-	Findings []Finding
+	Verdict           Verdict
+	Summary           string
+	Findings          []Finding
+	IntentAssessment  Assessment
+	QualityAssessment Assessment
+}
+
+type Assessment struct {
+	Status  string
+	Summary string
 }
 
 type Finding struct {
@@ -135,9 +142,10 @@ func EvaluateIntentBoundary(ctx Context) EvaluationResult {
 
 	sortFindings(findings)
 	return EvaluationResult{
-		Verdict:  DetermineVerdict(findings),
-		Summary:  evaluationSummary(findings),
-		Findings: findings,
+		Verdict:          DetermineVerdict(findings),
+		Summary:          evaluationSummary(findings),
+		Findings:         findings,
+		IntentAssessment: assessIntent(findings),
 	}
 }
 
@@ -156,9 +164,29 @@ func EvaluateCodeQualityBloat(ctx Context) EvaluationResult {
 
 	sortFindings(findings)
 	return EvaluationResult{
-		Verdict:  DetermineVerdict(findings),
-		Summary:  evaluationSummary(findings),
-		Findings: findings,
+		Verdict:           DetermineVerdict(findings),
+		Summary:           evaluationSummary(findings),
+		Findings:          findings,
+		QualityAssessment: assessQuality(findings),
+	}
+}
+
+// Evaluate runs the B-owned deterministic AgentCheck evaluation pipeline.
+func Evaluate(ctx Context) EvaluationResult {
+	intent := EvaluateIntentBoundary(ctx)
+	quality := EvaluateCodeQualityBloat(ctx)
+
+	findings := make([]Finding, 0, len(intent.Findings)+len(quality.Findings))
+	findings = append(findings, intent.Findings...)
+	findings = append(findings, quality.Findings...)
+	sortFindings(findings)
+
+	return EvaluationResult{
+		Verdict:           DetermineVerdict(findings),
+		Summary:           evaluationSummary(findings),
+		Findings:          findings,
+		IntentAssessment:  assessIntent(findings),
+		QualityAssessment: assessQuality(findings),
 	}
 }
 
@@ -166,12 +194,70 @@ func DetermineVerdict(findings []Finding) Verdict {
 	if len(findings) == 0 {
 		return Verdict(VerdictTrusted)
 	}
-	for _, finding := range findings {
-		if finding.Category == CategoryBoundaryViolation && strings.EqualFold(string(finding.Severity), SeverityCritical) {
-			return Verdict(VerdictFail)
-		}
+	if hasCriticalBoundary(findings) {
+		return Verdict(VerdictFail)
 	}
 	return Verdict(VerdictReviewRequired)
+}
+
+func assessIntent(findings []Finding) Assessment {
+	var misses, boundaries, deviations int
+	for _, finding := range findings {
+		switch finding.Category {
+		case CategoryRequirementMiss:
+			misses++
+		case CategoryBoundaryViolation:
+			boundaries++
+		case CategoryScopeCreep, CategoryIntentDeviation:
+			deviations++
+		}
+	}
+	switch {
+	case hasCriticalBoundary(findings):
+		return Assessment{Status: "failed", Summary: "Explicit boundary violation found."}
+	case misses > 0 || boundaries > 0 || deviations > 0:
+		return Assessment{Status: "needs_review", Summary: fmt.Sprintf("Intent findings: %d requirement miss(es), %d boundary violation(s), %d scope/intent deviation(s).", misses, boundaries, deviations)}
+	default:
+		return Assessment{Status: "clear", Summary: "No deterministic intent or boundary findings were found."}
+	}
+}
+
+func assessQuality(findings []Finding) Assessment {
+	count := 0
+	for _, finding := range findings {
+		if isQualityCategory(finding.Category) {
+			count++
+		}
+	}
+	if count == 0 {
+		return Assessment{Status: "clear", Summary: "No deterministic code quality or bloat findings were found."}
+	}
+	return Assessment{Status: "needs_review", Summary: fmt.Sprintf("Quality findings: %d material code quality or bloat concern(s).", count)}
+}
+
+func hasCriticalBoundary(findings []Finding) bool {
+	for _, finding := range findings {
+		if finding.Category == CategoryBoundaryViolation && strings.EqualFold(string(finding.Severity), SeverityCritical) {
+			return true
+		}
+	}
+	return false
+}
+
+func isQualityCategory(category FindingCategory) bool {
+	switch category {
+	case CategoryUnnecessaryAbstraction,
+		CategoryDuplication,
+		CategoryUnnecessaryDependency,
+		CategoryUnnecessaryFile,
+		CategoryDeadCode,
+		CategoryReinventedRepositoryUtil,
+		CategoryUnrelatedRefactor,
+		CategoryDisproportionateComplexity:
+		return true
+	default:
+		return false
+	}
 }
 
 func collectIntentStatements(ctx Context) []intentStatement {

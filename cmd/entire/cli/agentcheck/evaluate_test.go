@@ -1,6 +1,7 @@
 package agentcheck
 
 import (
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -202,6 +203,14 @@ func TestDetermineVerdict(t *testing.T) {
 			findings: []Finding{{
 				Category: CategoryScopeCreep,
 				Severity: Severity(SeverityMedium),
+			}},
+			want: Verdict(VerdictReviewRequired),
+		},
+		{
+			name: "low severity material finding needs review",
+			findings: []Finding{{
+				Category: CategoryUnnecessaryFile,
+				Severity: Severity(SeverityLow),
 			}},
 			want: Verdict(VerdictReviewRequired),
 		},
@@ -528,6 +537,223 @@ func TestEvaluateCodeQualityBloat(t *testing.T) {
 	}
 }
 
+func TestEvaluate(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name              string
+		ctx               Context
+		wantVerdict       Verdict
+		wantCategories    []FindingCategory
+		wantIntentStatus  string
+		wantQualityStatus string
+		wantEvidence      []string
+	}{
+		{
+			name:              "no findings trusted",
+			ctx:               Context{DeveloperPrompt: "Implement Google OAuth login.", ChangedFiles: []FileChange{{Path: "internal/auth/google_oauth.go", Status: "A"}}},
+			wantVerdict:       Verdict(VerdictTrusted),
+			wantCategories:    []FindingCategory{},
+			wantIntentStatus:  "clear",
+			wantQualityStatus: "clear",
+		},
+		{
+			name: "material quality finding needs review",
+			ctx: Context{
+				DeveloperPrompt: "Implement Google OAuth login.",
+				ChangedFiles:    []FileChange{{Path: "internal/auth/google_oauth.go", Status: "A"}},
+				Graph: GraphContext{
+					Available: true,
+					Evidence: []GraphEvidence{{
+						Kind:   "duplicate",
+						Paths:  []string{"internal/auth/google_oauth.go", "internal/auth/oauth.go"},
+						Detail: "new GoogleOAuth helper duplicates existing OAuth helper",
+					}},
+				},
+			},
+			wantVerdict:       Verdict(VerdictReviewRequired),
+			wantCategories:    []FindingCategory{CategoryDuplication},
+			wantIntentStatus:  "clear",
+			wantQualityStatus: "needs_review",
+			wantEvidence:      []string{"duplicates existing OAuth helper", "internal/auth/oauth.go"},
+		},
+		{
+			name: "major requirement miss needs review",
+			ctx: Context{
+				DeveloperPrompt: "Implement password reset email.",
+				ChangedFiles:    []FileChange{{Path: "docs/release-notes.md", Status: "M"}},
+			},
+			wantVerdict:       Verdict(VerdictReviewRequired),
+			wantCategories:    []FindingCategory{CategoryRequirementMiss},
+			wantIntentStatus:  "needs_review",
+			wantQualityStatus: "clear",
+			wantEvidence:      []string{"Implement password reset email", "docs/release-notes.md"},
+		},
+		{
+			name: "critical boundary violation fails",
+			ctx: Context{
+				DeveloperPrompt: "Implement Google OAuth login.\nPreserve existing authentication.\nDo NOT modify the database schema.\nKeep the implementation minimal.",
+				ChangedFiles:    []FileChange{{Path: "migrations/004_google_oauth.sql", Status: "A"}},
+			},
+			wantVerdict:       Verdict(VerdictFail),
+			wantCategories:    []FindingCategory{CategoryBoundaryViolation},
+			wantIntentStatus:  "failed",
+			wantQualityStatus: "clear",
+			wantEvidence:      []string{"Do NOT modify the database schema", "migrations/004_google_oauth.sql"},
+		},
+		{
+			name: "critical boundary violation plus quality remains fail",
+			ctx: Context{
+				DeveloperPrompt: "Implement Google OAuth login.\nDo NOT modify the database schema.\nKeep the implementation minimal.",
+				ChangedFiles:    []FileChange{{Path: "migrations/004_google_oauth.sql", Status: "A"}},
+				Graph: GraphContext{
+					Available: true,
+					Evidence: []GraphEvidence{{
+						Kind:   "duplicate",
+						Paths:  []string{"migrations/004_google_oauth.sql", "migrations/001_auth.sql"},
+						Detail: "current change duplicates existing migration helper",
+					}},
+				},
+			},
+			wantVerdict:       Verdict(VerdictFail),
+			wantCategories:    []FindingCategory{CategoryBoundaryViolation, CategoryDuplication},
+			wantIntentStatus:  "failed",
+			wantQualityStatus: "needs_review",
+			wantEvidence:      []string{"Do NOT modify the database schema", "duplicates existing migration helper"},
+		},
+		{
+			name: "b1 and b2 findings aggregate into one result",
+			ctx: Context{
+				DeveloperPrompt: "Implement Google OAuth login.",
+				ChangedFiles: []FileChange{
+					{Path: "internal/auth/google_oauth.go", Status: "A"},
+					{Path: "internal/billing/invoice.go", Status: "M"},
+				},
+				Graph: GraphContext{
+					Available: true,
+					Evidence: []GraphEvidence{{
+						Kind:   "refactor",
+						Paths:  []string{"internal/billing/invoice.go"},
+						Detail: "current change introduced unrelated refactor in billing",
+					}},
+				},
+			},
+			wantVerdict:       Verdict(VerdictReviewRequired),
+			wantCategories:    []FindingCategory{CategoryScopeCreep, CategoryUnrelatedRefactor},
+			wantIntentStatus:  "needs_review",
+			wantQualityStatus: "needs_review",
+			wantEvidence:      []string{"internal/billing/invoice.go", "unrelated refactor"},
+		},
+		{
+			name:              "empty context is safe",
+			ctx:               Context{},
+			wantVerdict:       Verdict(VerdictTrusted),
+			wantCategories:    []FindingCategory{},
+			wantIntentStatus:  "clear",
+			wantQualityStatus: "clear",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			got := Evaluate(tt.ctx)
+			if got.Verdict != tt.wantVerdict {
+				t.Fatalf("Evaluate() verdict = %q, want %q; findings = %#v", got.Verdict, tt.wantVerdict, got.Findings)
+			}
+			if got.IntentAssessment.Status != tt.wantIntentStatus {
+				t.Fatalf("Evaluate() intent status = %q, want %q", got.IntentAssessment.Status, tt.wantIntentStatus)
+			}
+			if got.QualityAssessment.Status != tt.wantQualityStatus {
+				t.Fatalf("Evaluate() quality status = %q, want %q", got.QualityAssessment.Status, tt.wantQualityStatus)
+			}
+			if gotCategories := findingCategories(got.Findings); !reflect.DeepEqual(gotCategories, tt.wantCategories) {
+				t.Fatalf("Evaluate() categories = %#v, want %#v; findings = %#v", gotCategories, tt.wantCategories, got.Findings)
+			}
+			for _, want := range tt.wantEvidence {
+				if !resultHasEvidence(got, want) {
+					t.Fatalf("Evaluate() findings = %#v, want evidence containing %q", got.Findings, want)
+				}
+			}
+		})
+	}
+}
+
+func TestEvaluateOrdersFindingsDeterministically(t *testing.T) {
+	t.Parallel()
+
+	ctx := Context{
+		DeveloperPrompt: "Only update documentation. Keep it simple.",
+		ChangedFiles: []FileChange{
+			{Path: "internal/title/trim.go", Status: "A"},
+		},
+		Git: GitEvidence{Diff: strings.Join([]string{
+			"+type TrimProvider interface { Trim(string) string }",
+			"+type TrimFactory struct{}",
+			"+var trimRegistry = map[string]TrimProvider{}",
+		}, "\n")},
+		Graph: GraphContext{
+			Available: true,
+			Evidence: []GraphEvidence{
+				{Kind: "utility", Paths: []string{"internal/title/trim.go", "cmd/entire/cli/textutil"}, Detail: "new helper reinvents existing utility textutil.Trim"},
+				{Kind: "dead_code", Paths: []string{"internal/title/trim.go"}, Detail: "current change introduced unused helper"},
+				{Kind: "duplicate", Paths: []string{"internal/title/trim.go", "cmd/entire/cli/textutil"}, Detail: "current change duplicates existing trim helper"},
+			},
+		},
+	}
+
+	got := Evaluate(ctx)
+	want := []FindingCategory{
+		CategoryDeadCode,
+		CategoryDisproportionateComplexity,
+		CategoryDuplication,
+		CategoryIntentDeviation,
+		CategoryReinventedRepositoryUtil,
+	}
+	if gotCategories := findingCategories(got.Findings); !reflect.DeepEqual(gotCategories, want) {
+		t.Fatalf("Evaluate() categories = %#v, want %#v; findings = %#v", gotCategories, want, got.Findings)
+	}
+}
+
+func TestEvaluateDoesNotFabricateEvidence(t *testing.T) {
+	t.Parallel()
+
+	got := Evaluate(Context{DeveloperPrompt: "Implement Google OAuth login."})
+	if got.Verdict != Verdict(VerdictTrusted) {
+		t.Fatalf("Evaluate() verdict = %q, want TRUSTED", got.Verdict)
+	}
+	if len(got.Findings) != 0 {
+		t.Fatalf("Evaluate() findings = %#v, want none", got.Findings)
+	}
+	if resultHasEvidence(got, "checkpoint") || resultHasEvidence(got, "verification") || resultHasEvidence(got, "graph") {
+		t.Fatalf("Evaluate() fabricated evidence in %#v", got.Findings)
+	}
+}
+
+func TestEvaluateIsDeterministic(t *testing.T) {
+	t.Parallel()
+
+	ctx := Context{
+		DeveloperPrompt: "Implement Google OAuth login.\nDo NOT modify the database schema.\nKeep implementation minimal.",
+		ChangedFiles:    []FileChange{{Path: "migrations/004_google_oauth.sql", Status: "A"}},
+		Graph: GraphContext{
+			Available: true,
+			Evidence: []GraphEvidence{{
+				Kind:   "duplicate",
+				Paths:  []string{"migrations/004_google_oauth.sql", "migrations/001_auth.sql"},
+				Detail: "current change duplicates existing migration helper",
+			}},
+		},
+	}
+
+	first := Evaluate(ctx)
+	second := Evaluate(ctx)
+	if !reflect.DeepEqual(first, second) {
+		t.Fatalf("Evaluate() not deterministic:\nfirst:  %#v\nsecond: %#v", first, second)
+	}
+}
+
 func findCategory(findings []Finding, category FindingCategory) *Finding {
 	for i := range findings {
 		if findings[i].Category == category {
@@ -535,6 +761,23 @@ func findCategory(findings []Finding, category FindingCategory) *Finding {
 		}
 	}
 	return nil
+}
+
+func findingCategories(findings []Finding) []FindingCategory {
+	categories := make([]FindingCategory, 0, len(findings))
+	for _, finding := range findings {
+		categories = append(categories, finding.Category)
+	}
+	return categories
+}
+
+func resultHasEvidence(result EvaluationResult, want string) bool {
+	for _, finding := range result.Findings {
+		if findingHasEvidence(finding, want) {
+			return true
+		}
+	}
+	return false
 }
 
 func findingHasEvidence(finding Finding, want string) bool {
