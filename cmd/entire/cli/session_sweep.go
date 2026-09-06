@@ -43,8 +43,12 @@ func isSweepableZombie(st *session.State, now time.Time) bool {
 	if !st.IsEnded() {
 		return st.OwnerExited()
 	}
-	if st.Phase != session.PhaseEnded || st.FullyCondensed ||
-		(st.StepCount <= 0 && !st.HasTaskContent()) {
+	// Reaching here means IsEnded() — Phase is ENDED, or EndedAt is stamped
+	// while Phase says otherwise. That second shape is real (State.IsEnded:
+	// "a legacy record, or a partial write"), and re-testing Phase here would
+	// drop it: finalizeExitedSessions already skips it because OwnerExited is
+	// false once IsEnded, so a Phase test here would leave it owned by nobody.
+	if st.FullyCondensed || (st.StepCount <= 0 && !st.HasTaskContent()) {
 		return false
 	}
 	ref := st.EndedAt
@@ -114,12 +118,12 @@ func runSessionSweep(ctx context.Context) error {
 
 	now := time.Now()
 	for _, st := range states {
-		// ENDED-only here: non-ended zombies were finalizeExitedSessions' job
+		// Ended-only here: non-ended zombies were finalizeExitedSessions' job
 		// above. isSweepableZombie returns true for a non-ended dead-owner
-		// session (its finalize failed above), so this phase check is what
-		// keeps those out of the condense path — and skips their pointless
-		// re-load.
-		if st.Phase != session.PhaseEnded || !isSweepableZombie(st, now) {
+		// session (its finalize failed above), so this check is what keeps
+		// those out of the condense path — and skips their pointless re-load.
+		// IsEnded, not Phase: see isSweepableZombie on the half-ended shape.
+		if !st.IsEnded() || !isSweepableZombie(st, now) {
 			continue
 		}
 		// Re-load and re-check right before acting: the snapshot may be stale
@@ -135,7 +139,7 @@ func runSessionSweep(ctx context.Context) error {
 		if fresh == nil {
 			continue // benign: state removed/cleaned up between list and load
 		}
-		if fresh.Phase != session.PhaseEnded || !isSweepableZombie(fresh, now) {
+		if !fresh.IsEnded() || !isSweepableZombie(fresh, now) {
 			continue
 		}
 		if !strategy.IsCondensableEndedSession(repo, fresh) {

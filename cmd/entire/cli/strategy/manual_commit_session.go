@@ -16,7 +16,6 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
-	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/versioninfo"
 
 	"github.com/go-git/go-git/v6"
@@ -179,7 +178,11 @@ func (s *ManualCommitStrategy) listAllSessionStates(ctx context.Context) ([]*Ses
 // Used by the PostCommit stale-session warning and the background zombie
 // sweep.
 func IsCondensableEndedSession(repo *git.Repository, state *SessionState) bool {
-	if state.Phase != session.PhaseEnded || state.FullyCondensed ||
+	// IsEnded, not Phase == PhaseEnded: a state can carry EndedAt without the
+	// phase (State.IsEnded: "a legacy record, or a partial write"), and such a
+	// session holds uncondensed content just the same. Testing Phase here made
+	// the sweep's nomination and its condense gate disagree on that shape.
+	if !state.IsEnded() || state.FullyCondensed ||
 		(state.StepCount <= 0 && !state.HasTaskContent()) {
 		return false
 	}
