@@ -13,6 +13,8 @@ import (
 	"os"
 	"syscall"
 	"time"
+
+	"github.com/entireio/cli/cmd/entire/cli/osroot"
 )
 
 // pollInterval is how often the bounded AcquireContext path retries a
@@ -22,8 +24,8 @@ const pollInterval = 25 * time.Millisecond
 // Acquire takes an exclusive advisory lock on path, creating the file if
 // needed. The returned release closes the file, which drops the flock.
 // Callers must invoke release exactly once. The lock file persists between
-// runs — flock state is held by the file descriptor, not by the inode on
-// disk — so the lockfile contents are immaterial.
+// runs - flock state is held by the file descriptor, not by the inode on
+// disk - so the lockfile contents are immaterial.
 //
 // Acquire blocks indefinitely until the lock is available. Use AcquireContext
 // with a deadline to bound the wait.
@@ -39,11 +41,15 @@ func Acquire(path string) (release func(), err error) {
 // (turn-start) bound their wait and degrade gracefully instead of stalling
 // behind a long-running lock holder (e.g. checkpoint condensation).
 func AcquireContext(ctx context.Context, path string) (release func(), err error) {
-	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0o600) //nolint:gosec // caller is responsible for path validation
-	if err != nil {
-		return nil, fmt.Errorf("open flock: %w", err)
-	}
-	return lockFile(ctx, f)
+	return lockFile(ctx, func() (*os.File, error) {
+		f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0o600) //nolint:gosec // caller is responsible for path validation
+		if err != nil {
+			return nil, err //nolint:wrapcheck // lockFile wraps opener errors once
+		}
+		return f, nil
+	}, func(f *os.File) (bool, error) {
+		return holdsCurrentPathInode(f, path)
+	})
 }
 
 // AcquireIn is Acquire for a lock file named inside root. It is the form the
@@ -56,11 +62,11 @@ func AcquireIn(root *os.Root, name string) (release func(), err error) {
 
 // AcquireContextIn is AcquireContext for a lock file named inside root.
 func AcquireContextIn(ctx context.Context, root *os.Root, name string) (release func(), err error) {
-	f, err := openLockFileIn(root, name)
-	if err != nil {
-		return nil, fmt.Errorf("open flock: %w", err)
-	}
-	return lockFile(ctx, f)
+	return lockFile(ctx, func() (*os.File, error) {
+		return openLockFileIn(root, name)
+	}, func(f *os.File) (bool, error) {
+		return holdsCurrentRootInode(f, root, name)
+	})
 }
 
 // tryLockFile takes a single non-blocking LOCK_EX and never waits. EWOULDBLOCK
@@ -80,38 +86,110 @@ func tryLockFile(f *os.File) (release func(), ok bool, err error) {
 }
 
 // lockFile holds the locking logic shared by the path- and root-based entry
-// points, which differ only in how the file was opened.
-func lockFile(ctx context.Context, f *os.File) (release func(), err error) {
-	// Fast path: no deadline -> block in the kernel exactly like the historical
-	// Acquire. This preserves behavior (and efficiency) for callers that must
-	// wait as long as it takes, such as turn-end checkpoint condensation.
+// points, which differ only in how the file is opened and revalidated.
+func lockFile(ctx context.Context, open func() (*os.File, error), holdsCurrent func(*os.File) (bool, error)) (release func(), err error) {
 	if _, hasDeadline := ctx.Deadline(); !hasDeadline {
-		if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil { //nolint:gosec // file descriptors are non-negative; standard Go pattern for syscall.Flock
+		for range 3 {
+			f, err := open()
+			if err != nil {
+				return nil, fmt.Errorf("open flock: %w", err)
+			}
+			if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil { //nolint:gosec // file descriptors are non-negative; standard Go pattern for syscall.Flock
+				_ = f.Close()
+				return nil, fmt.Errorf("flock: %w", err)
+			}
+			current, err := holdsCurrent(f)
+			if err != nil {
+				_ = f.Close()
+				return nil, err
+			}
+			if current {
+				return func() { _ = f.Close() }, nil
+			}
 			_ = f.Close()
-			return nil, fmt.Errorf("flock: %w", err)
 		}
-		return func() { _ = f.Close() }, nil
+		return nil, errors.New("flock path changed while acquiring lock")
 	}
 
-	// Bounded path: poll a non-blocking lock until acquired or ctx is done.
+	staleInodeRetries := 0
 	for {
+		f, err := open()
+		if err != nil {
+			return nil, fmt.Errorf("open flock: %w", err)
+		}
 		lockErr := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB) //nolint:gosec // see above
 		if lockErr == nil {
-			return func() { _ = f.Close() }, nil
-		}
-		if !errors.Is(lockErr, syscall.EWOULDBLOCK) {
+			current, err := holdsCurrent(f)
+			if err != nil {
+				_ = f.Close()
+				return nil, err
+			}
+			if current {
+				return func() { _ = f.Close() }, nil
+			}
 			_ = f.Close()
-			return nil, fmt.Errorf("flock: %w", lockErr)
-		}
-		if err := ctx.Err(); err != nil {
+			staleInodeRetries++
+			if staleInodeRetries >= 3 {
+				return nil, errors.New("flock path changed while acquiring lock")
+			}
+		} else {
 			_ = f.Close()
-			return nil, fmt.Errorf("flock: %w", err)
+			if !errors.Is(lockErr, syscall.EWOULDBLOCK) {
+				return nil, fmt.Errorf("flock: %w", lockErr)
+			}
 		}
-		select {
-		case <-ctx.Done():
-			_ = f.Close()
-			return nil, fmt.Errorf("flock: %w", ctx.Err())
-		case <-time.After(pollInterval):
+		if err := waitForRetry(ctx); err != nil {
+			return nil, err
 		}
 	}
+}
+
+func waitForRetry(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("flock: %w", err)
+	}
+	select {
+	case <-ctx.Done():
+		return fmt.Errorf("flock: %w", ctx.Err())
+	case <-time.After(pollInterval):
+		return nil
+	}
+}
+
+func holdsCurrentPathInode(f *os.File, path string) (bool, error) {
+	pathInfo, err := os.Stat(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, fmt.Errorf("stat flock path: %w", err)
+	}
+	return sameInode(f, pathInfo, "path")
+}
+
+func holdsCurrentRootInode(f *os.File, root *os.Root, name string) (bool, error) {
+	pathInfo, err := osroot.LstatNoSymlinks(root, name)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, fmt.Errorf("stat flock root path: %w", err)
+	}
+	return sameInode(f, pathInfo, "root path")
+}
+
+func sameInode(f *os.File, pathInfo os.FileInfo, label string) (bool, error) {
+	heldInfo, err := f.Stat()
+	if err != nil {
+		return false, fmt.Errorf("stat flock fd: %w", err)
+	}
+	held, ok := heldInfo.Sys().(*syscall.Stat_t)
+	if !ok {
+		return false, fmt.Errorf("stat flock fd: unexpected stat type %T", heldInfo.Sys())
+	}
+	current, ok := pathInfo.Sys().(*syscall.Stat_t)
+	if !ok {
+		return false, fmt.Errorf("stat flock %s: unexpected stat type %T", label, pathInfo.Sys())
+	}
+	return held.Dev == current.Dev && held.Ino == current.Ino, nil
 }

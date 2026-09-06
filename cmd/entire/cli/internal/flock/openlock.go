@@ -31,9 +31,15 @@ import (
 // Splitting create-or-open into an exclusive create plus a plain open avoids
 // the broken path entirely, and is deterministic rather than a retry: measured
 // 0 failures in 6000 racing opens where the single-call form failed 4806 times.
-// The loop covers only the vanishingly rare case of the file being removed
-// between the two steps. Lock files are never unlinked (see ClearSessionState),
-// so in practice it runs once.
+// The loop covers two events, which are the same event seen a moment apart:
+// the file removed between the two steps, and the file replaced between an
+// open and its post-open validation (osroot.ErrReplacedDuringOpen). In both,
+// the name stopped pointing at the file we were opening. Neither is fatal
+// here, because the caller wants whichever file now holds the name, and
+// AcquireContextIn revalidates the inode after locking it anyway.
+//
+// No caller unlinks a lock file today (see ClearSessionState), so in practice
+// the loop runs once.
 //
 // Both steps go through osroot.OpenFileNoFollow rather than root.OpenFile. An
 // os.Root refuses a symlink that escapes it but follows one pointing elsewhere
@@ -71,6 +77,11 @@ func openLockFileIn(root *os.Root, name string) (*os.File, error) {
 		if err == nil {
 			return f, nil
 		}
+		if errors.Is(err, osroot.ErrReplacedDuringOpen) {
+			// Replaced between the open and its validation; retry against
+			// whatever now holds the name.
+			continue
+		}
 		if !errors.Is(err, fs.ErrExist) {
 			return nil, err //nolint:wrapcheck // AcquireContextIn wraps this; wrapping twice would bury the cause
 		}
@@ -78,6 +89,9 @@ func openLockFileIn(root *os.Root, name string) (*os.File, error) {
 		f, err = osroot.OpenFileNoFollow(root, name, os.O_RDWR, 0)
 		if err == nil {
 			return f, nil
+		}
+		if errors.Is(err, osroot.ErrReplacedDuringOpen) {
+			continue
 		}
 		if !errors.Is(err, fs.ErrNotExist) {
 			return nil, err //nolint:wrapcheck // AcquireContextIn wraps this; wrapping twice would bury the cause
