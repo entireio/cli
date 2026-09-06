@@ -5,7 +5,8 @@
 `entire lens` turns the context inside real Entire Checkpoints — stated intent,
 decisions, rejected options, open questions, attribution — into four working
 developer workflows: hand off, review against intent, list unfinished
-requirements, and assess a single change.
+requirements, and assess a single change — and it can **fail a build** when the
+implementation has drifted from the plan.
 
 ## Problem, intended user and why it matters
 
@@ -92,6 +93,20 @@ drift apart.
    plan never mentioned.
 4. `entire lens sync` — push records to Databricks, read cross-session
    aggregates back.
+
+**The capability that makes this more than a report generator:**
+`entire lens drift --fail-on-open` exits non-zero when a requirement stated in
+the plan has no implementation evidence. "Did we build what we said we would
+build?" becomes a pipeline gate, failing the same way a red test does.
+`entire lens assess <commit> --verify "<test cmd>"` closes the other half:
+it runs the tests through `entire graph verify`, which reports *which tests
+changed state* rather than dumping runner output — so a test that was already
+failing is not counted as evidence against the change under review.
+
+Both `handoff` and `drift` accept `--html PATH` and emit a single
+self-contained file — no server, no CDN, no external fonts — which is the
+fallback when live infrastructure fails during a demo. Samples are committed
+under `docs/demo/`.
 
 ## Entire Graph findings and verification
 
@@ -251,6 +266,27 @@ columns (`intent`, decision `text`) are the author's and the agent's own prose,
 truncated to 800 characters before upload — these tables exist for aggregation,
 not to rehost transcripts. Credentials are gitignored and never committed.
 
+**Two data-quality decisions that materially change the numbers**, both worth
+inspecting:
+
+- *Decisions are attributed to the checkpoint where they FIRST appeared.*
+  Entire stores the whole compacted session in every checkpoint, so counting
+  raw occurrences made a single blocker look like it was raised again on every
+  later commit and turned the unresolved-items trend into a monotonically
+  increasing line. First-appearance attribution answers the question the trend
+  is actually asking — *when was this raised* — and is what makes a falling
+  line mean what a reader assumes it means.
+- *Build artefacts, vendored code and lockfiles are excluded from churn.* This
+  repository's own committed-then-deleted `__pycache__` sat at the top of a
+  ranking that is supposed to point a reviewer at risky source.
+
+**Credential handling, verified rather than asserted.** Databricks credentials
+were pasted into a working session during the build. They reached no
+checkpoint: Entire's own redaction pipeline caught the token (11 `REDACTED`
+markers in the transcript), and a scan of every checkpoint ref, every tracked
+file, the entire git history and the generated HTML found zero occurrences.
+The credentials file is untracked and gitignored.
+
 **Sync semantics.** Idempotent: a `DELETE` scoped to the repo key followed by
 batched inserts, so re-running after new checkpoints never double-counts, and
 one workspace can host several repos.
@@ -271,11 +307,16 @@ one workspace can host several repos.
 
 **Honest limitations:**
 
-1. **Decision extraction is a transparent keyword classifier, and it
-   over-matches.** It was chosen deliberately over an LLM call so output is
-   verbatim, auditable, offline and incapable of inventing a decision that was
-   never made — but some recovered "decisions" are restatements of the prompt
-   rather than genuine decisions. Precision work is the first thing to do next.
+1. **Decision extraction is a transparent classifier, not a language model.**
+   Chosen deliberately so output is verbatim, auditable, offline and incapable
+   of inventing a decision that was never made. It went through three rounds of
+   precision work against real output, each pinned by tests: prompt echoes are
+   suppressed (a decision is what the agent *concluded*, not what the user
+   *asked for*); markers must be predicated of the work rather than merely
+   mentioned (the word "risk" inside the column name "file-churn/risk score" is
+   not a risk); and causal prose is captured as `rationale`, which turns out to
+   be the most abundant form the "why" actually takes. It still cannot
+   recognise a decision stated in a form no marker covers.
 2. **`drift` verdicts are heuristic.** The score is the fraction of a
    requirement's keywords appearing in Graph search hits. `MISSING` means *no
    evidence was found* — a prompt to verify, not proof of absence — and the
