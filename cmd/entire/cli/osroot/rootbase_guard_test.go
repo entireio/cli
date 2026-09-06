@@ -78,15 +78,33 @@ func TestRootBasesAreTrusted(t *testing.T) {
 
 	var checked int
 	for _, opener := range rootOpeners {
-		grep := exec.Command("git", "grep", "-n", "--fixed-strings", "--", opener, "--", ":(glob)**/*.go") //nolint:noctx // guard test, no cancellation needed
+		// --no-color because this parses git's output: color.ui / color.grep
+		// set to `always` colorizes even into a pipe, and the escapes land
+		// inside the filename field, so every line below fails the .go suffix
+		// check and the guard reports itself stale on a perfectly good tree.
+		// That is not hypothetical -- it was read as a real staleness failure
+		// on main (#2248) before the cause was found.
+		grep := exec.Command("git", "grep", "-n", "--no-color", "--fixed-strings", "--", opener, "--", ":(glob)**/*.go") //nolint:noctx // guard test, no cancellation needed
 		grep.Dir = strings.TrimSpace(string(repoRoot))
 		out, grepErr := grep.Output()
 		if grepErr != nil {
 			t.Fatalf("git grep for %q found nothing, which cannot be right: %v", opener, grepErr)
 		}
 		for line := range strings.SplitSeq(strings.TrimSpace(string(out)), "\n") {
+			if line == "" {
+				continue
+			}
 			file, rest, ok := strings.Cut(line, ":")
-			if !ok || !strings.HasSuffix(file, ".go") || strings.HasSuffix(file, "_test.go") {
+			// The pathspec admits only *.go, so a first field that is not a
+			// .go path means the output is not `path:line:content` at all --
+			// a parse failure, which must not be mistaken for "found nothing".
+			if !ok || !strings.HasSuffix(file, ".go") {
+				t.Fatalf("cannot parse git grep output; expected `path:line:content`, got:\n  %s\n"+
+					"The filename field is unusable, so this test can prove nothing. "+
+					"Check whether git is colorizing into a pipe (color.ui or "+
+					"color.grep set to `always`).", line)
+			}
+			if strings.HasSuffix(file, "_test.go") {
 				continue
 			}
 			// The rule is about opening a root, not about naming one: doc
@@ -128,7 +146,7 @@ func TestRootBasesAreTrusted(t *testing.T) {
 func fileStillOpensARoot(t *testing.T, repoRoot, file string) bool {
 	t.Helper()
 	for _, opener := range rootOpeners {
-		grep := exec.Command("git", "grep", "-q", "--fixed-strings", "--", opener, "--", file) //nolint:noctx // guard test, no cancellation needed
+		grep := exec.Command("git", "grep", "-q", "--no-color", "--fixed-strings", "--", opener, "--", file) //nolint:noctx // guard test, no cancellation needed
 		grep.Dir = repoRoot
 		if grep.Run() == nil {
 			return true

@@ -1057,7 +1057,7 @@ func probeAndCacheTrailsEnablement(ctx context.Context, insecureHTTPAuth bool, i
 	probeCtx, cancel := context.WithTimeout(ctx, enableTrailsProbeBudget)
 	defer cancel()
 
-	client, notOnboarded, err := trailsCellClient(probeCtx, insecureHTTPAuth, info.Owner+"/"+info.Repo)
+	client, notOnboarded, err := trailsCellClient(probeCtx, insecureHTTPAuth, info.Forge, info.Owner, info.Repo)
 	if notOnboarded {
 		if saveErr := saveTrailsEnabledForRemote(ctx, info.Forge, info.Owner, info.Repo, false); saveErr != nil {
 			logging.Debug(ctx, "failed to cache trails enablement", "error", saveErr)
@@ -2310,26 +2310,32 @@ func promptTelemetryConsent(settings *EntireSettings, telemetryFlag bool) error 
 func maybePromptVercelDeploymentDisable(ctx context.Context, w io.Writer, targetFile string, promptFn func() (bool, error)) (bool, error) {
 	repoRoot, rootErr := paths.WorktreeRoot(ctx)
 	if rootErr == nil {
-		vercelJSONPath := filepath.Join(repoRoot, "vercel.json")
+		// Through the worktree's root: these are working-tree files, so they
+		// arrive by clone, and a joined path handed to os.Stat/os.ReadFile
+		// resolves wherever a checked-in symlink points. In-repo links are
+		// still followed, which is what a monorepo's shared vercel.json needs.
+		worktree, err := worktreedir.OpenAt(repoRoot)
+		if err != nil {
+			fmt.Fprintf(w, "Note: Skipping Vercel deployment update: could not open the worktree: %v\n", err)
+			return false, nil
+		}
+
 		hasVercelJSON := false
-		if _, err := os.Stat(vercelJSONPath); err == nil {
+		if _, err := worktree.Stat(vercelconfig.FileName); err == nil {
 			hasVercelJSON = true
 		} else if !os.IsNotExist(err) {
-			fmt.Fprintf(w, "Note: Skipping Vercel deployment update: could not check vercel.json: %v\n", err)
+			fmt.Fprintf(w, "Note: Skipping Vercel deployment update: could not check %s: %v\n", vercelconfig.FileName, err)
 			return false, nil
 		}
 
 		hasVercelProject := hasVercelJSON
 		if !hasVercelProject {
-			for _, path := range []string{
-				filepath.Join(repoRoot, ".vercel"),
-				filepath.Join(repoRoot, "vercel.ts"),
-			} {
-				if _, err := os.Stat(path); err == nil {
+			for _, name := range []string{".vercel", "vercel.ts"} {
+				if _, err := worktree.Stat(name); err == nil {
 					hasVercelProject = true
 					break
 				} else if !os.IsNotExist(err) {
-					fmt.Fprintf(w, "Note: Skipping Vercel deployment update: could not check %s: %v\n", path, err)
+					fmt.Fprintf(w, "Note: Skipping Vercel deployment update: could not check %s: %v\n", name, err)
 					return false, nil
 				}
 			}
@@ -2353,7 +2359,7 @@ func maybePromptVercelDeploymentDisable(ctx context.Context, w io.Writer, target
 			return false, nil
 		}
 
-		if config, alreadyDisabled, loadErr := vercelconfig.Load(vercelJSONPath); loadErr == nil &&
+		if config, alreadyDisabled, loadErr := vercelconfig.LoadIn(worktree, vercelconfig.FileName); loadErr == nil &&
 			config != nil && alreadyDisabled {
 			targetSettings.Vercel = true
 			if err := saveSettingsToTarget(ctx, targetSettings, targetFile); err != nil {

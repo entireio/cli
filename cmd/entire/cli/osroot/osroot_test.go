@@ -660,3 +660,73 @@ func TestSymlinkPaths_ReportsASymlinkedWalkRootRatherThanDescending(t *testing.T
 	require.NoError(t, err)
 	require.Equal(t, []string{"logs"}, found)
 }
+
+func TestRemoveAllNoSymlinks(t *testing.T) {
+	t.Parallel()
+
+	t.Run("removes a real tree", func(t *testing.T) {
+		t.Parallel()
+		base := t.TempDir()
+		require.NoError(t, os.MkdirAll(filepath.Join(base, "a", "b", "c"), 0o750))
+		require.NoError(t, os.WriteFile(filepath.Join(base, "a", "b", "c", "f"), []byte("x"), 0o600))
+		root, err := os.OpenRoot(base)
+		require.NoError(t, err)
+		defer root.Close()
+
+		require.NoError(t, osroot.RemoveAllNoSymlinks(root, "a/b"))
+		_, statErr := os.Stat(filepath.Join(base, "a", "b"))
+		assert.True(t, os.IsNotExist(statErr))
+		assert.DirExists(t, filepath.Join(base, "a"), "only the named subtree goes")
+	})
+
+	t.Run("a missing name is not an error", func(t *testing.T) {
+		t.Parallel()
+		base := t.TempDir()
+		root, err := os.OpenRoot(base)
+		require.NoError(t, err)
+		defer root.Close()
+
+		assert.NoError(t, osroot.RemoveAllNoSymlinks(root, "a/b"))
+	})
+
+	// The case os.Root.RemoveAll does not cover on its own: every component it
+	// examines is nominally inside the root, but the deletion lands wherever the
+	// parent link points.
+	t.Run("refuses a symlinked parent component", func(t *testing.T) {
+		t.Parallel()
+		base := t.TempDir()
+		outside := t.TempDir()
+		victim := filepath.Join(outside, "extensions", "entire")
+		require.NoError(t, os.MkdirAll(victim, 0o750))
+		if err := os.Symlink(outside, filepath.Join(base, "link")); err != nil {
+			t.Skipf("symlink not supported: %v", err)
+		}
+		root, err := os.OpenRoot(base)
+		require.NoError(t, err)
+		defer root.Close()
+
+		err = osroot.RemoveAllNoSymlinks(root, "link/extensions/entire")
+		require.ErrorIs(t, err, osroot.ErrSymlinkedPath)
+		assert.DirExists(t, victim, "the deletion must not reach through the link")
+	})
+
+	// A link at the leaf costs the link, not the tree at the far end, which is
+	// os.RemoveAll's behaviour too.
+	t.Run("unlinks a symlinked leaf without following it", func(t *testing.T) {
+		t.Parallel()
+		base := t.TempDir()
+		outside := t.TempDir()
+		require.NoError(t, os.WriteFile(filepath.Join(outside, "keep"), []byte("x"), 0o600))
+		if err := os.Symlink(outside, filepath.Join(base, "leaf")); err != nil {
+			t.Skipf("symlink not supported: %v", err)
+		}
+		root, err := os.OpenRoot(base)
+		require.NoError(t, err)
+		defer root.Close()
+
+		require.NoError(t, osroot.RemoveAllNoSymlinks(root, "leaf"))
+		_, statErr := os.Lstat(filepath.Join(base, "leaf"))
+		assert.True(t, os.IsNotExist(statErr), "the link is gone")
+		assert.FileExists(t, filepath.Join(outside, "keep"), "its target is not")
+	})
+}

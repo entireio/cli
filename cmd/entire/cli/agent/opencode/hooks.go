@@ -14,8 +14,9 @@ import (
 
 // Compile-time interface assertions
 var (
-	_ agent.HookSupport   = (*OpenCodeAgent)(nil)
-	_ agent.HookFreshness = (*OpenCodeAgent)(nil)
+	_ agent.HookSupport       = (*OpenCodeAgent)(nil)
+	_ agent.HookConfigLocator = (*OpenCodeAgent)(nil)
+	_ agent.HookFreshness     = (*OpenCodeAgent)(nil)
 )
 
 const (
@@ -43,7 +44,7 @@ func pluginConfig(ctx context.Context) (*agent.HookConfigFile, error) {
 			return nil, fmt.Errorf("failed to get current directory: %w", err)
 		}
 	}
-	return agent.OpenHookConfig(repoRoot, ".opencode/"+pluginDirName+"/"+pluginFileName) //nolint:wrapcheck // agent.HookConfigFile already names the file in its error
+	return agent.OpenHookConfig(repoRoot, (&OpenCodeAgent{}).HookConfigRelPath()) //nolint:wrapcheck // agent.HookConfigFile already names the file in its error
 }
 
 // renderPlugin returns the plugin file content. The template names the "entire"
@@ -151,4 +152,9 @@ func (a *OpenCodeAgent) GetSupportedHooks() []agent.HookType {
 		agent.HookUserPromptSubmit,
 		agent.HookStop,
 	}
+}
+
+// HookConfigRelPath implements agent.HookConfigLocator.
+func (a *OpenCodeAgent) HookConfigRelPath() string {
+	return ".opencode/" + pluginDirName + "/" + pluginFileName
 }

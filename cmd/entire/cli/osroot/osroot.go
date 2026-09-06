@@ -368,6 +368,35 @@ func RemoveNoSymlinks(root *os.Root, name string) error {
 	return Remove(parent, leaf)
 }
 
+// RemoveAllNoSymlinks removes name and everything beneath it, rejecting a
+// symlink in every parent directory component. A missing name is not an error.
+//
+// os.Root.RemoveAll on its own is not enough, and the reason is the same one
+// that makes OpenChild necessary next to a bare Root.OpenRoot: it refuses a
+// symlink that would take the descent OUT of the root, and it unlinks a
+// symlinked leaf rather than deleting whatever is at the far end, but it says
+// nothing about the components ABOVE the leaf. A repository shipping
+// `.pi -> /home/victim/notes` therefore had `.pi/extensions/entire` removed
+// from inside /home/victim, with every component Root examined still nominally
+// inside the worktree.
+//
+// The leaf is unlinked rather than followed, which is os.RemoveAll's behaviour
+// too, so a symlink there costs the link and not its target.
+func RemoveAllNoSymlinks(root *os.Root, name string) error {
+	parent, leaf, closeParent, err := OpenParentNoSymlinks(root, name)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	defer closeParent()
+	if err := parent.RemoveAll(leaf); err != nil {
+		return fmt.Errorf("remove %s: %w", name, err)
+	}
+	return nil
+}
+
 // WalkDirNoSymlinks walks dir within root, refusing a symlink anywhere it goes:
 // at the walk root, and at every entry beneath it.
 //

@@ -41,7 +41,6 @@ var entireDirCheckExemptions = map[string]string{
 	"entire org":        "control-plane only",
 	"entire project":    "control-plane only",
 	"entire repo":       "control-plane only; git content operations are out of scope",
-	"entire clone":      "clones into a new directory; runs outside any repo",
 	"entire grant":      "control-plane only",
 	"entire api":        "authenticated passthrough; no local state",
 	"entire plugin":     "managed installs live under the per-user dirs",

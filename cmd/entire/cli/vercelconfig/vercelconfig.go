@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"sort"
 	"sync"
@@ -70,15 +71,35 @@ func ResetSettingsCache() {
 	cachedSettingsMu.Unlock()
 }
 
-// Load reads a Vercel config file if present.
-func Load(path string) (map[string]any, bool, error) {
-	//nolint:gosec // path is provided by repository-local callers and intentionally supports arbitrary locations in tests
-	data, err := os.ReadFile(path)
+// maxConfigBytes bounds the vercel.json read. The file arrives with the
+// checkout, so its size is not ours to trust, and everything downstream of the
+// parse collapses to a single bool.
+const maxConfigBytes = 1 << 20
+
+// LoadIn reads the Vercel config file named inside root, if present.
+//
+// Through the worktree's root rather than a path joined onto the repo root:
+// vercel.json is a working-tree file, so it arrives by clone. A symlink that
+// stays inside the repository is still followed — pointing vercel.json at a
+// monorepo's shared config is a real setup, and this file is the user's, not
+// Entire's — while one leaving the worktree is refused, which is the property
+// the worktreedir anchor exists to give.
+func LoadIn(root *os.Root, name string) (map[string]any, bool, error) {
+	f, err := root.Open(name)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return make(map[string]any), false, nil
 		}
 		return nil, false, fmt.Errorf("read %s: %w", FileName, err)
+	}
+	defer f.Close()
+
+	data, err := io.ReadAll(io.LimitReader(f, maxConfigBytes+1))
+	if err != nil {
+		return nil, false, fmt.Errorf("read %s: %w", FileName, err)
+	}
+	if len(data) > maxConfigBytes {
+		return nil, false, fmt.Errorf("%s exceeds %d bytes", FileName, maxConfigBytes)
 	}
 
 	var config map[string]any

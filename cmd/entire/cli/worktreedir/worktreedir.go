@@ -62,7 +62,22 @@ func OpenAt(worktreeRoot string) (*os.Root, error) {
 // absolute ones from them; this is the single conversion back, so callers stop
 // joining a root path onto a git path and reading the result.
 func Name(worktreeRoot, p string) (string, error) {
-	if !filepath.IsAbs(p) {
+	// VolumeName alongside IsAbs, the pairing SessionStore.Name,
+	// validation.ValidateSessionID and gitrepo's alternates checks already use.
+	// A Windows drive-relative path like "C:foo" contains no separator and IsAbs
+	// reports false, so it would otherwise be taken as a name inside the
+	// worktree — while filepath.Join drops the base directory when the appended
+	// element carries a volume. Sending it down the absolute branch makes
+	// filepath.Rel reject it across volumes, which is the answer this
+	// containment check exists to give. No-op on Unix, where VolumeName is
+	// always empty.
+	//
+	// Go's os.Root rejects such a name one layer down (every name goes through
+	// filepathlite.IsLocal), so this is not a reachable escape today. It is
+	// closed anyway because Name exists to answer "is this inside the worktree?"
+	// independently of the caller, and readWorktreeFileSafely feeds it paths
+	// that arrive from the API.
+	if !filepath.IsAbs(p) && filepath.VolumeName(p) == "" {
 		cleaned := filepath.ToSlash(filepath.Clean(filepath.FromSlash(p)))
 		if cleaned == "." || paths.IsRelativeTraversal(cleaned) {
 			return "", fmt.Errorf("%q does not name a file in the worktree", p)

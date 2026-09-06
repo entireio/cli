@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -689,6 +690,16 @@ func MutateSessionStateOnSaved(ctx context.Context, sessionID string, fn func(*S
 // acquireSessionGate takes the per-process gate (in-memory) and, on the
 // outermost call, the cross-process flock. Returns isOuter=true on the
 // outermost call so MutateSessionState knows whether to load/save.
+//
+// Reentrancy is keyed on the GOROUTINE, via goroutineID(): the gate counts as
+// held only for the goroutine that took it. That makes ownership implicit, so
+// moving a gated operation onto another goroutine silently defeats every
+// reentrancy check built on isOuter -- the new goroutine sees an unheld gate,
+// takes the isOuter path, and blocks in flock.AcquireIn on the flock its own
+// parent holds. If the parent is waiting for it, that is a permanent deadlock
+// rather than a slow path. withLockWaitNotice shipped exactly that bug and is
+// why it now runs its callback on the caller's goroutine and gives the timer
+// the new one. Wrap the WAITING, never the locking.
 func acquireSessionGate(ctx context.Context, sessionID string) (gate *sessionGate, isOuter bool, release func(), err error) {
 	val, _ := sessionMutationGate.LoadOrStore(sessionID, &sessionGate{})
 	gate, ok := val.(*sessionGate)
@@ -888,13 +899,110 @@ func stateLockInCommonDir(commonDir, sessionID string) (stateLock, error) {
 	}, nil
 }
 
+// SessionLockNoticeDelay is how long a user-facing clear waits before telling
+// the user it is blocked on a session's state lock. Short enough that a real
+// stall is announced promptly, long enough that the uncontended case -- the
+// common one -- stays silent.
+const SessionLockNoticeDelay = time.Second
+
+// withLockWaitNotice runs doClear, announcing on errW if it has not returned
+// within notifyAfter.
+//
+// The wait itself is deliberate and must not be shortened: the clear takes the
+// same gate every mutation of that state uses, because deleting the file out
+// from under an in-flight write destroys it. But the acquire is unbounded --
+// only the TurnStart hook opts into a deadline, via WithSessionLockWait -- and
+// a checkpoint condensation holds that lock while it rewrites a multi-MB
+// transcript, observed at ~30s on large sessions (see the note on the lock
+// above). The commands that reach this are interactive and are run precisely
+// when other sessions are live, so without a notice a correct 30-second wait
+// is indistinguishable from a hang, and the natural response to a hang is to
+// kill it -- which is how you get a half-finished discard.
+//
+// It lives here, next to the lock, rather than at one command's call site, so
+// every user-facing clear gets it: `entire doctor`, `entire reset`, and
+// `entire reset <session>`.
+//
+// doClear runs on the CALLER's goroutine and the timer gets the new one --
+// never the other way around. acquireSessionGate keys reentrancy on goroutine
+// ID, so running doClear on a child would make the gate look unheld: the
+// reentrancy refusal in ClearSessionState would not fire, and the child would
+// instead block in flock.AcquireIn on the flock its own parent holds while the
+// parent blocked waiting for the child. That deadlocked after printing the
+// notice below, pointing the user at a condensation that does not exist.
+func withLockWaitNotice(sessionID string, errW io.Writer, notifyAfter time.Duration, doClear func() error) error {
+	stop := make(chan struct{})
+	noticed := make(chan struct{})
+	go func() {
+		defer close(noticed)
+		select {
+		case <-stop:
+		case <-time.After(notifyAfter):
+			if errW != nil {
+				fmt.Fprintf(errW, "Waiting for session %s to release its state lock "+
+					"(a checkpoint condensation can hold it for ~30s; Ctrl-C twice to force quit)...\n", sessionID)
+			}
+		}
+	}()
+
+	err := doClear()
+
+	// Stop the timer and wait for it to finish before returning, so the
+	// notice can never land on errW after the caller has moved on to its own
+	// output (Reset prints a per-session line straight after this returns).
+	close(stop)
+	<-noticed
+	return err
+}
+
+// ClearSessionStateWithProgress is ClearSessionState with the shared lock-wait
+// notice on errW. This is what user-facing commands should call; the bare
+// ClearSessionState stays for callers with nowhere to print.
+func ClearSessionStateWithProgress(ctx context.Context, sessionID string, errW io.Writer, notifyAfter time.Duration) error {
+	return withLockWaitNotice(sessionID, errW, notifyAfter, func() error {
+		return ClearSessionState(ctx, sessionID)
+	})
+}
+
 // ClearSessionState removes the session state file for the given session ID.
+//
+// It takes sessionID's gate first, for the same reason
+// (*ManualCommitStrategy).clearSessionState does: this deletes the file that
+// every other mutation of this state writes under MutateSessionState's
+// per-session lock, so an unlocked delete landing mid-mutation destroys the
+// write that was in flight, with nothing surfacing the loss. This is the
+// implementation `entire doctor` reaches (doctor.go's discardSession) -- a
+// separate one from the strategy method, and the command most likely to be
+// run while other sessions are live -- so gating the strategy method alone
+// left the race open exactly where it mattered most.
+//
+// Calling it from inside a MutateSessionState frame for the same session is
+// refused rather than tolerated. Holding the gate makes the delete safe, not
+// effective: when the frame's closure returns, MutateSessionState writes the
+// state back out, so the file is resurrected and the caller still sees a nil
+// error -- `entire doctor` would report a session discarded and the session
+// would reappear. Clear from inside an active closure with
+// (*ManualCommitStrategy).clearSessionStateLocked instead, and return
+// ErrMutationSkip so the frame does not save (see CondenseSessionByID's
+// clear path, the one caller that legitimately does this).
+//
+// The wait is not cancellable. With no WithSessionLockWait deadline on ctx,
+// acquireSessionGate falls through to the ctx-free flock.AcquireIn, so ctx
+// cancellation -- a first Ctrl-C included -- does not abort a blocked
+// acquire; only the force-quit path in main.go escapes. ctx is still honored
+// for everything else here. Adding a timeout via ctx alone would silently do
+// nothing; it would have to go through WithSessionLockWait.
 func ClearSessionState(ctx context.Context, sessionID string) error {
 	// Validate session ID to prevent path traversal
 	if err := validation.ValidateSessionID(sessionID); err != nil {
 		return fmt.Errorf("invalid session ID: %w", err)
 	}
 
+	// Resolve the state directory BEFORE taking the gate. Acquiring creates a
+	// per-session lock file that is deliberately never unlinked (see the note
+	// at the end of this function), so doing it first left a permanent lock
+	// behind for a session that had no state to clear, and turned a read-only
+	// git dir from a silent nil into a per-session failure.
 	root, err := openSessionStateRootForRead(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to open session state directory for cleanup: %w", err)
@@ -903,6 +1011,17 @@ func ClearSessionState(ctx context.Context, sessionID string) error {
 		return nil // no state directory => nothing to clear
 	}
 	defer root.Close()
+
+	_, isOuter, release, err := acquireSessionGate(ctx, sessionID)
+	if err != nil {
+		return err
+	}
+	defer release()
+	if !isOuter {
+		return fmt.Errorf("ClearSessionState: session %s is being mutated on this goroutine; "+
+			"clearing here would be undone when that mutation saves -- use clearSessionStateLocked "+
+			"inside the closure and return ErrMutationSkip", sessionID)
+	}
 
 	// Remove all files for this session (state .json, .model hint, any future
 	// hint files). Match by literal prefix rather than filepath.Glob: the
