@@ -3,9 +3,11 @@ package api
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/entireio/cli/app/config"
 )
@@ -15,6 +17,19 @@ type Server struct {
 	cfg        *config.Config
 	deps       *ServerDependencies
 	httpServer *http.Server
+}
+
+// loggingMiddleware wraps an http.Handler to provide structured request logging.
+func loggingMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		start := time.Now()
+		next.ServeHTTP(w, r)
+		slog.Info("HTTP Request",
+			"method", r.Method,
+			"path", r.URL.Path,
+			"duration_ms", time.Since(start).Milliseconds(),
+		)
+	})
 }
 
 // NewServer constructs a new API Server.
@@ -44,7 +59,7 @@ func NewServer(cfg *config.Config, deps *ServerDependencies) *Server {
 	addr := fmt.Sprintf("%s:%s", cfg.ServerHost, cfg.ServerPort)
 	srv := &http.Server{
 		Addr:    addr,
-		Handler: mux,
+		Handler: loggingMiddleware(mux),
 	}
 
 	return &Server{
