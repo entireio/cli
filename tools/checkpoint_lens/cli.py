@@ -28,6 +28,7 @@ from .databricks import DatabricksSync
 from .entities import parse_entity_changes, risky, touched_paths
 from .models import CheckpointRecord
 from .reader import CheckpointReader
+from . import html as htmlreport
 from . import report
 from . import requirements
 
@@ -107,15 +108,17 @@ def cmd_handoff(args: argparse.Namespace) -> int:
     lines.extend(report.render_sessions(rec))
 
     lines.append(report.section("DECISIONS, RISKS AND OPEN QUESTIONS"))
-    lines.append("  Recovered verbatim from the session transcript.")
+    lines.append("  Recovered verbatim - never paraphrased or generated.")
     lines.append("")
     lines.extend(report.render_decisions(rec.all_decisions(), limit=args.limit))
 
     lines.extend(report.render_files(rec))
 
     # Graph blast radius over the files this session actually touched.
+    graph_lines: list[str] = []
     if not args.no_graph:
-        lines.extend(_graph_blast_radius(args.repo, rec))
+        graph_lines = _graph_blast_radius(args.repo, rec)
+        lines.extend(graph_lines)
 
     if len(records) > 1:
         lines.append(report.section("SESSION HISTORY"))
@@ -129,6 +132,7 @@ def cmd_handoff(args: argparse.Namespace) -> int:
                 )
             )
 
+    lines.extend(_databricks_section(args, headline_only=True))
     lines.extend(report.render_warnings(reader.warnings))
     lines.extend(
         report.footer(
@@ -141,7 +145,36 @@ def cmd_handoff(args: argparse.Namespace) -> int:
         )
     )
     _emit(lines)
+
+    if args.html:
+        agg = _aggregates_for_html(args)
+        _write_html(
+            args.html,
+            htmlreport.render_handoff(
+                rec, records, reader.warnings, graph_lines, agg
+            ),
+        )
     return 0
+
+
+def _aggregates_for_html(args: argparse.Namespace) -> dict[str, Any]:
+    """Trend rows for the HTML chart, or the reason there are none."""
+    if getattr(args, "no_databricks", False):
+        return {"unavailable": "skipped with --no-databricks"}
+    sync = DatabricksSync(args.repo)
+    reason = sync.unavailable_reason()
+    if reason:
+        return {"unavailable": reason}
+    trend = sync.open_items_trend()
+    if not trend.ok:
+        return {"unavailable": trend.error[:200]}
+    return {"trend": trend.rows}
+
+
+def _write_html(path: str, markup: str) -> None:
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write(markup)
+    sys.stdout.write("\nHTML report written to %s\n" % path)
 
 
 def _graph_blast_radius(repo: str, rec: CheckpointRecord) -> list[str]:
@@ -329,6 +362,19 @@ def cmd_drift(args: argparse.Namespace) -> int:
         )
     )
     _emit(lines)
+
+    if args.html:
+        _write_html(
+            args.html,
+            htmlreport.render_drift(
+                baseline,
+                head,
+                findings,
+                entity_changes,
+                diff_res.command_str if diff_res else "",
+                reader.warnings,
+            ),
+        )
     return 0
 
 
@@ -611,6 +657,10 @@ def build_parser() -> argparse.ArgumentParser:
     sub = p.add_subparsers(dest="command", required=True)
 
     def common(sp: argparse.ArgumentParser) -> None:
+        sp.add_argument(
+            "--html", metavar="PATH",
+            help="also write a self-contained HTML report to PATH",
+        )
         sp.add_argument("--repo", default=".", help="repository to read (default: .)")
         sp.add_argument("--json", action="store_true", help="emit structured JSON")
         sp.add_argument(

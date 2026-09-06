@@ -73,15 +73,35 @@ class Attribution:
         )
 
 
+# Where a recovered decision came from, in descending order of authority. A
+# commit message is a deliberate, edited record; transcript prose is a
+# by-product of working. Both are verbatim, but they are not equally reliable,
+# and the report says which is which.
+SOURCE_SUMMARY = "checkpoint_summary"
+SOURCE_COMMIT = "commit_message"
+SOURCE_TRANSCRIPT = "transcript"
+
+SOURCE_CONFIDENCE = {
+    SOURCE_SUMMARY: "high",
+    SOURCE_COMMIT: "high",
+    SOURCE_TRANSCRIPT: "medium",
+}
+
+
 @dataclass
 class Decision:
     """A decision, rejected option, assumption, risk or blocker recovered from
-    the session transcript. `kind` is the classifier; `text` is verbatim agent
-    or user prose, never paraphrased, so a reader can audit it."""
+    a checkpoint. `kind` is the classifier; `text` is verbatim prose, never
+    paraphrased, so a reader can audit it against the source."""
 
     kind: str
     text: str
     speaker: str = "assistant"
+    source: str = SOURCE_TRANSCRIPT
+
+    @property
+    def confidence(self) -> str:
+        return SOURCE_CONFIDENCE.get(self.source, "medium")
 
 
 @dataclass

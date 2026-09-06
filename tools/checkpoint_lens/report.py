@@ -22,7 +22,21 @@ WIDTH = 78
 
 # Decision kinds worth pulling to the top of a handoff, in priority order:
 # what would bite the next person first.
-PRIORITY_KINDS = ["blocker", "open_question", "risk", "rejected", "assumption", "decision"]
+PRIORITY_KINDS = [
+    "blocker",
+    "open_question",
+    "risk",
+    "rejected",
+    "decision",
+    "assumption",
+    "rationale",
+]
+
+SOURCE_LABEL = {
+    "commit_message": "commit message",
+    "transcript": "session transcript",
+    "checkpoint_summary": "checkpoint summary (generated)",
+}
 
 KIND_LABEL = {
     "blocker": "BLOCKER",
@@ -31,6 +45,7 @@ KIND_LABEL = {
     "rejected": "REJECTED",
     "assumption": "ASSUMED",
     "decision": "DECIDED",
+    "rationale": "WHY",
 }
 
 
@@ -94,6 +109,13 @@ def render_decisions(decisions: list[Decision], limit: int = 12) -> list[str]:
                     initial_indent=label,
                     subsequent_indent=" " * len(label),
                 )
+            )
+            # Provenance per item: a commit message is an edited record, a
+            # transcript line is a by-product of working. Both are verbatim,
+            # neither is paraphrased, but they are not equally authoritative.
+            lines.append(
+                "%s(source: %s, confidence: %s)"
+                % (" " * len(label), SOURCE_LABEL.get(d.source, d.source), d.confidence)
             )
             shown += 1
         if shown >= limit:

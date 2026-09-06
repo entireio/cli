@@ -29,6 +29,8 @@ from .models import (
     Attribution,
     CheckpointRecord,
     Decision,
+    SOURCE_COMMIT,
+    SOURCE_TRANSCRIPT,
     SessionRecord,
     TokenUsage,
 )
@@ -39,14 +41,105 @@ PROMPT_SEPARATOR = re.compile(r"\n-{3,}\n")
 
 # Markers that classify a line of transcript prose as decision context. This is
 # the difference between "what changed" (git) and "why it changed" (checkpoint).
-DECISION_MARKERS: list[tuple[str, tuple[str, ...]]] = [
-    ("blocker", ("blocker", "blocked", "cannot proceed", "does not exist", "hit a blocker")),
-    ("risk", ("risk", "danger", "unsafe", "could break", "regression", "fragile")),
-    ("rejected", ("instead of", "rather than", "rejected", "ruled out", "decided against", "not going to")),
-    ("assumption", ("assume", "assuming", "assumption", "presumably")),
-    ("decision", ("decided", "decision", "chose", "choosing", "we will use", "going with", "opted")),
-    ("open_question", ("open question", "unresolved", "still need", "tbd", "to be decided", "not yet confirmed")),
+# Order is significant: the first matching kind wins, so the most specific
+# and most consequential classifications are tried first.
+#
+# "instead of" and "rather than" are deliberately NOT rejection markers. They
+# are ordinary English connectives that appear in most technical prose, and
+# including them classified plain statements of fact as rejected options. A
+# rejection has to be stated as one.
+# Each kind is a regex requiring the marker to be *predicated of this work*,
+# not merely mentioned.
+#
+# Substring matching on bare nouns was tried first and does not work: "risk"
+# matched "file-churn/risk score" (a column name), and "abandoned" matched a
+# sentence *defining* what checkpoints preserve ("what was attempted and
+# abandoned"). Both were reported as findings about the project. A marker has
+# to appear as a claim - "we abandoned", "the risk is" - to count.
+DECISION_MARKERS: list[tuple[str, "re.Pattern[str]"]] = [
+    (
+        "blocker",
+        re.compile(
+            r"\b(hit a blocker|blocked on|is a blocker|blocker:|cannot proceed|"
+            r"could not proceed|is not possible|does not exist in this repo)\b",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        "rejected",
+        re.compile(
+            r"\b(reject(s|ed|ing)?|ruled out|decided against|abandoned|discarded|"
+            r"(we|i) are not going to)\b",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        "decision",
+        re.compile(
+            r"\b((we|i) decided|decided to|(we|i) chose|chose to|opted (for|to)|"
+            r"going with|(we|i) will use|settled on|the decision (is|was)|"
+            # Engineering prose states decisions passively as often as it states
+            # them agentively: "deliberately a transparent classifier", "chosen
+            # over an LLM call", "in favour of Python". Requiring "we decided"
+            # alone missed most real decisions in commit messages.
+            r"deliberately|by design|on purpose|chosen over|in favou?r of|"
+            r"we prefer|is preferred over)\b",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        "risk",
+        re.compile(
+            r"\b(the risk (is|here|being)|risks? that|at risk of|is risky|"
+            r"could break|would break|regression|is unsafe|is fragile|"
+            r"is dangerous|biggest .{0,20}risk|quality risk)\b",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        "open_question",
+        re.compile(
+            r"\b(still unresolved|remains unresolved|remains open|still needs? to|"
+            r"not yet decided|not yet confirmed|to be decided|still not sure|"
+            r"undecided|open question:|not yet implemented|still missing)\b",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        "assumption",
+        re.compile(
+            r"\b((we|i) assume|assuming that|the assumption (is|was)|presumably|"
+            r"on the assumption)\b",
+            re.IGNORECASE,
+        ),
+    ),
+    # Last, so any more specific kind wins. This is the catch-all for stated
+    # *reasoning* - the causal prose that says why something is the way it is.
+    # It is the single most abundant form the "why" actually takes in commit
+    # messages and agent explanations ("chosen so that ...", "idempotent, so
+    # re-running never double-counts"), and omitting it lost most of the
+    # product's own subject matter.
+    (
+        "rationale",
+        re.compile(
+            r"\b(because|so that|the reason|which is why|on the grounds that|"
+            r"rather than|instead of|in order to|otherwise)\b",
+            re.IGNORECASE,
+        ),
+    ),
 ]
+
+# A line that is mostly capitals is a section heading, not a sentence. Commit
+# messages in this project use them freely, and they classified as findings.
+def _is_heading(sentence: str) -> bool:
+    letters = [c for c in sentence if c.isalpha()]
+    if len(letters) < 8:
+        return False
+    upper = sum(1 for c in letters if c.isupper())
+    return upper / len(letters) > 0.7
+
+# Markdown emphasis and inline-code fences are noise in a terminal report.
+MARKUP = re.compile(r"\*\*|__|`")
 
 MIN_DECISION_LEN = 30
 MAX_DECISION_LEN = 400
@@ -184,8 +277,11 @@ class CheckpointReader:
             token_usage=TokenUsage.from_dict(root.get("token_usage")),
         )
 
+        commit_message = self.commit_message(linked_sha) if linked_sha else ""
         for idx, entry in enumerate(root.get("sessions") or []):
-            rec.sessions.append(self._read_session(tree, cid, idx, entry))
+            rec.sessions.append(
+                self._read_session(tree, cid, idx, entry, commit_message)
+            )
         if rec.sessions:
             rec.created_at = rec.sessions[0].created_at
 
@@ -197,6 +293,14 @@ class CheckpointReader:
             rec.files_touched = sorted(union)
         return rec
 
+    def commit_message(self, sha: str) -> str:
+        """Full commit message. A deliberate, edited record of what was decided
+        - the highest-authority decision source available."""
+        try:
+            return self._git("log", "-1", "--format=%B", sha)
+        except GitError:
+            return ""
+
     def commit_files(self, sha: str) -> list[str]:
         try:
             out = self._git("show", "--pretty=format:", "--name-only", sha)
@@ -205,7 +309,12 @@ class CheckpointReader:
         return [line.strip() for line in out.splitlines() if line.strip()]
 
     def _read_session(
-        self, tree: str, cid: str, idx: int, entry: dict[str, Any]
+        self,
+        tree: str,
+        cid: str,
+        idx: int,
+        entry: dict[str, Any],
+        commit_message: str = "",
     ) -> SessionRecord:
         meta_raw = self._blob(tree, entry.get("metadata") or ("/%d/metadata.json" % idx))
         meta: dict[str, Any] = {}
@@ -239,6 +348,7 @@ class CheckpointReader:
                 p.strip() for p in PROMPT_SEPARATOR.split(prompt_raw) if p.strip()
             ]
 
+
         # Intent: prefer a generated checkpoint summary when one exists, else
         # fall back to the first substantive user prompt. Which source was used
         # is recorded and always rendered, so a reader can tell recovered
@@ -248,7 +358,14 @@ class CheckpointReader:
         )
         if transcript:
             sess.transcript_available = True
-            sess.decisions = extract_decisions(transcript)
+
+        # Extraction needs the prompts (to suppress echoes) and the commit
+        # message (the highest-authority decision source), so it runs only once
+        # both are known.
+        if transcript or commit_message:
+            sess.decisions = extract_decisions(
+                transcript or "", prompts=sess.prompts, commit_message=commit_message
+            )
 
         summary = meta.get("summary")
         summary = summary if isinstance(summary, dict) else {}
@@ -326,27 +443,189 @@ def first_user_message(transcript: str, min_len: int = 40) -> str:
     return fallback
 
 
-def extract_decisions(transcript: str) -> list[Decision]:
-    """Recover decisions, rejected options, assumptions, risks and open
-    questions from transcript prose.
+def attribute_to_first_appearance(
+    records: list[CheckpointRecord],
+) -> dict[str, list[Decision]]:
+    """Attribute each decision to the checkpoint where it FIRST appeared.
 
-    Deliberately a transparent keyword classifier rather than an LLM call: the
-    output is verbatim source text a reviewer can audit, it needs no network,
-    and it cannot invent a decision that was never made.
+    Entire stores the *whole* compacted session in every checkpoint, not just
+    that checkpoint's slice, so a decision recorded at checkpoint 2 is still
+    present in the transcript of checkpoints 3..n. Counting raw occurrences
+    therefore makes every item look like it was raised again on every commit,
+    and any "unresolved items over time" trend becomes monotonically
+    increasing noise.
+
+    Attributing to first appearance answers the question the trend is actually
+    asking - *when was this raised* - and makes a falling line mean what a
+    reader assumes it means.
+
+    Returns checkpoint_id -> decisions first seen at that checkpoint. Records
+    must be in chronological order (ULID sort, which
+    :meth:`CheckpointReader.list_refs` guarantees).
+    """
+    seen: set[str] = set()
+    out: dict[str, list[Decision]] = {}
+    for rec in records:
+        fresh: list[Decision] = []
+        for d in rec.all_decisions():
+            key = _normalize(d.text)[:120]
+            if key and key not in seen:
+                seen.add(key)
+                fresh.append(d)
+        out[rec.checkpoint_id] = fresh
+    return out
+
+
+def _normalize(text: str) -> str:
+    """Lowercase, drop punctuation, collapse whitespace.
+
+    Collapsing is load-bearing, not cosmetic: this string is the deduplication
+    key, and without it "the backend!" and "the backend" differ only by a
+    trailing space and are counted as two distinct decisions.
+    """
+    return " ".join(re.sub(r"[^a-z0-9 ]+", " ", text.lower()).split())
+
+
+def _tokens(text: str) -> set[str]:
+    return {t for t in _normalize(text).split() if len(t) > 2}
+
+
+class EchoFilter:
+    """Rejects sentences that merely repeat what the user asked for.
+
+    This is the difference between a decision and a restatement. The agent
+    quoting the task back ("commit everything with a substantive message",
+    "open questions we still need to decide") trips every keyword a real
+    decision would, so without this filter the highest-value section of the
+    report fills up with the prompt it was given.
+
+    A sentence is an echo when it appears in the prompt text verbatim, or when
+    most of its distinctive words do. The threshold is deliberately high: it is
+    worse to drop a real decision than to keep a borderline one, so only strong
+    overlap is suppressed.
+    """
+
+    OVERLAP_THRESHOLD = 0.6
+
+    def __init__(self, prompts: list[str] | None) -> None:
+        joined = "\n".join(prompts or [])
+        self._normalized = _normalize(joined)
+        self._sentences = [
+            _tokens(s)
+            for s in re.split(r"(?<=[.!?])\s+|\n", joined)
+            if len(s.strip()) >= MIN_DECISION_LEN
+        ]
+
+    def is_echo(self, sentence: str) -> bool:
+        if not self._normalized:
+            return False
+        norm = _normalize(sentence).strip()
+        if not norm:
+            return True
+        if norm in self._normalized:
+            return True
+        toks = _tokens(sentence)
+        if not toks:
+            return True
+        for prompt_toks in self._sentences:
+            if not prompt_toks:
+                continue
+            overlap = len(toks & prompt_toks) / len(toks)
+            if overlap >= self.OVERLAP_THRESHOLD:
+                return True
+        return False
+
+
+def _classify_sentence(sentence: str) -> str | None:
+    for kind, pattern in DECISION_MARKERS:
+        if pattern.search(sentence):
+            return kind
+    return None
+
+
+def _sentences_of(text: str) -> Iterable[str]:
+    """Yield whole sentences from prose that may be hard-wrapped.
+
+    Agent and commit-message prose is wrapped at ~80 columns, so splitting on
+    every newline severs sentences mid-clause and the report then shows
+    fragments that begin in the middle ("dangerous half of the bug, since
+    ..."). Paragraphs are unwrapped first - blank lines and list bullets are
+    real boundaries, a bare newline is not - and only then split on sentence
+    punctuation.
+    """
+    for block in re.split(r"\n\s*\n|\n(?=\s*[-*+]\s)|\n(?=\s*\d+[.)]\s)", text):
+        unwrapped = " ".join(block.split())
+        if not unwrapped:
+            continue
+        for raw in re.split(r"(?<=[.!?])\s+", unwrapped):
+            cleaned = MARKUP.sub("", raw).strip().lstrip("-*#>| ").strip()
+            if cleaned:
+                yield cleaned
+
+
+def extract_decisions(
+    transcript: str,
+    prompts: list[str] | None = None,
+    commit_message: str = "",
+) -> list[Decision]:
+    """Recover decisions, rejected options, assumptions, risks and open
+    questions from a checkpoint.
+
+    Deliberately a transparent classifier rather than an LLM call: the output is
+    verbatim source text a reviewer can audit, it needs no network, and it
+    cannot invent a decision that was never made.
+
+    Three things keep the signal-to-noise usable, and all three were added
+    after reading real output that was mostly noise:
+
+    * Only the *assistant* speaks decisions. A user turn is a request.
+    * Sentences echoing the prompt are dropped (see :class:`EchoFilter`).
+    * Questions are dropped - asking something is not deciding it.
+
+    The commit message is mined first and ranked highest: it is a deliberate,
+    edited record of what was decided, whereas transcript prose is a by-product
+    of doing the work.
     """
     found: list[Decision] = []
     seen: set[str] = set()
-    for speaker, text in _iter_text(transcript):
-        for raw in re.split(r"(?<=[.!?])\s+|\n", text):
-            s = raw.strip().lstrip("-*# ").strip()
+
+    def add(kind: str, text: str, speaker: str, source: str) -> None:
+        key = _normalize(text)[:120]
+        if key and key not in seen:
+            seen.add(key)
+            found.append(
+                Decision(kind=kind, text=text, speaker=speaker, source=source)
+            )
+
+    # 1. Commit message body - highest authority.
+    if commit_message:
+        body = commit_message.split("\n", 1)[1] if "\n" in commit_message else ""
+        for s in _sentences_of(body):
             if not (MIN_DECISION_LEN <= len(s) <= MAX_DECISION_LEN):
                 continue
-            low = s.lower()
-            for kind, markers in DECISION_MARKERS:
-                if any(m in low for m in markers):
-                    key = s[:120].lower()
-                    if key not in seen:
-                        seen.add(key)
-                        found.append(Decision(kind=kind, text=s, speaker=speaker))
-                    break
+            if s.startswith("Co-Authored-By:") or s.startswith("Entire-Checkpoint:"):
+                continue
+            if _is_heading(s):
+                continue
+            kind = _classify_sentence(s)
+            if kind:
+                add(kind, s, "commit", SOURCE_COMMIT)
+
+    # 2. Assistant transcript prose - the fallback, echo-filtered.
+    echo = EchoFilter(prompts)
+    for speaker, text in _iter_text(transcript):
+        if speaker != "assistant":
+            continue
+        for s in _sentences_of(text):
+            if not (MIN_DECISION_LEN <= len(s) <= MAX_DECISION_LEN):
+                continue
+            if s.endswith("?") or _is_heading(s):
+                continue
+            kind = _classify_sentence(s)
+            if not kind:
+                continue
+            if echo.is_echo(s):
+                continue
+            add(kind, s, speaker, SOURCE_TRANSCRIPT)
+
     return found

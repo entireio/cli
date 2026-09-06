@@ -38,10 +38,12 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from dataclasses import dataclass, field
 from typing import Any, Iterable
 
 from .models import CheckpointRecord
+from .reader import attribute_to_first_appearance
 
 CONFIG_FILENAME = ".databricks.local.json"
 
@@ -51,6 +53,24 @@ DEFAULT_SCHEMA = "checkpoint_lens"
 # Free-text is truncated before it leaves the machine: these tables exist for
 # aggregation, not for rehosting transcripts.
 MAX_TEXT = 800
+
+# Build artefacts, vendored code and lockfiles are not authored work. They
+# churn constantly and would otherwise dominate a hotspot ranking that is
+# supposed to point a reviewer at risky *source*. Our own history contains a
+# committed-then-deleted __pycache__, which sat at the top of the ranking until
+# this filter existed.
+GENERATED_PATH = re.compile(
+    r"(^|/)(__pycache__|node_modules|\.venv|venv|dist|build|vendor|target|"
+    r"\.mypy_cache|\.pytest_cache|coverage)(/|$)"
+    r"|\.(pyc|pyo|class|o|so|dll|exe|lock|min\.js|map)$"
+    r"|(^|/)(package-lock\.json|yarn\.lock|go\.sum|poetry\.lock)$",
+    re.IGNORECASE,
+)
+
+
+def is_generated_path(path: str) -> bool:
+    """True for build output, vendored code and lockfiles."""
+    return bool(GENERATED_PATH.search(path.replace("\\", "/")))
 
 
 @dataclass
@@ -162,7 +182,7 @@ CREATE TABLE IF NOT EXISTS {t} (
   checkpoint_id STRING,
   created_at    STRING,
   kind          STRING,
-  speaker       STRING,
+  source        STRING,
   text          STRING,
   repo          STRING
 ) USING DELTA
@@ -199,19 +219,24 @@ ORDER BY checkpoints_touching DESC, f.file_path
 LIMIT 15
 """
 
-# Headline coverage number surfaced by handoff and drift.
+# Headline coverage numbers surfaced by handoff and drift.
+#
+# decisions_captured counts rows in the decisions table, NOT SUM(decision_count)
+# from the sessions table. The two disagree on purpose: decision_count is the
+# raw per-session count, while the decisions table is deduplicated to first
+# appearance. Reporting the raw sum next to a deduplicated table showed a
+# headline number no query against the data could reproduce.
 SQL_COVERAGE = """
 SELECT
-  COUNT(DISTINCT s.checkpoint_id)                          AS checkpoints,
-  SUM(s.decision_count)                                    AS decisions_captured,
-  ROUND(AVG(s.agent_percentage), 1)                        AS avg_agent_pct,
-  SUM(s.total_lines_changed)                               AS lines_changed,
-  SUM(s.total_tokens)                                      AS tokens,
-  ROUND(
-    100.0 * SUM(CASE WHEN s.intent_source <> 'unavailable' THEN 1 ELSE 0 END)
-    / NULLIF(COUNT(*), 0), 1)                              AS intent_coverage_pct
-FROM {sessions} s
-WHERE s.repo = ?
+  (SELECT COUNT(DISTINCT checkpoint_id) FROM {sessions} WHERE repo = ?) AS checkpoints,
+  (SELECT COUNT(*) FROM {decisions} WHERE repo = ?)                     AS decisions_captured,
+  (SELECT ROUND(AVG(agent_percentage), 1) FROM {sessions} WHERE repo = ?) AS avg_agent_pct,
+  (SELECT SUM(total_lines_changed) FROM {sessions} WHERE repo = ?)      AS lines_changed,
+  (SELECT SUM(total_tokens) FROM {sessions} WHERE repo = ?)             AS tokens,
+  (SELECT ROUND(
+      100.0 * SUM(CASE WHEN intent_source <> 'unavailable' THEN 1 ELSE 0 END)
+      / NULLIF(COUNT(*), 0), 1)
+   FROM {sessions} WHERE repo = ?)                                      AS intent_coverage_pct
 """
 
 
@@ -292,18 +317,28 @@ class DatabricksSync:
                     file_rows: list[list[Any]] = []
                     decision_rows: list[list[Any]] = []
 
+                    # Attribute each decision to the checkpoint where it FIRST
+                    # appeared. Entire stores the whole compacted session in
+                    # every checkpoint, so raw occurrences would count one
+                    # blocker once per later commit and make the trend
+                    # monotonically increasing - the opposite of what it is
+                    # meant to show.
+                    first_seen = attribute_to_first_appearance(records)
+
                     for rec in records:
                         for path in rec.files_touched:
+                            if is_generated_path(path):
+                                continue
                             file_rows.append(
                                 [rec.checkpoint_id, rec.created_at, path, self._repo_key]
                             )
-                        for d in rec.all_decisions():
+                        for d in first_seen.get(rec.checkpoint_id, []):
                             decision_rows.append(
                                 [
                                     rec.checkpoint_id,
                                     rec.created_at,
                                     d.kind,
-                                    d.speaker,
+                                    d.source,
                                     d.text[:MAX_TEXT],
                                     self._repo_key,
                                 ]
@@ -375,14 +410,14 @@ class DatabricksSync:
 
     # ---------------- read ----------------
 
-    def _query(self, name: str, sql: str) -> AggregateResult:
+    def _query(self, name: str, sql: str, params: int = 1) -> AggregateResult:
         reason = self.unavailable_reason()
         if reason:
             return AggregateResult(name=name, ok=False, error=reason, sql=sql)
         try:
             with self._connect() as conn:
                 with conn.cursor() as cur:
-                    cur.execute(sql, [self._repo_key])
+                    cur.execute(sql, [self._repo_key] * params)
                     cols = [d[0] for d in cur.description]
                     rows = [dict(zip(cols, r)) for r in cur.fetchall()]
             return AggregateResult(name=name, ok=True, rows=rows, sql=sql)
@@ -392,8 +427,14 @@ class DatabricksSync:
             )
 
     def coverage(self) -> AggregateResult:
+        # Six scalar subqueries, so six bound repo parameters.
         return self._query(
-            "coverage", SQL_COVERAGE.format(sessions=self.config.table("checkpoint_sessions"))
+            "coverage",
+            SQL_COVERAGE.format(
+                sessions=self.config.table("checkpoint_sessions"),
+                decisions=self.config.table("checkpoint_decisions"),
+            ),
+            params=6,
         )
 
     def open_items_trend(self) -> AggregateResult:
