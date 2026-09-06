@@ -37,11 +37,11 @@ func TestRepositoriesHandler(t *testing.T) {
 		wantCode int
 	}{
 		{"List Repositories", "/api/repositories", http.StatusOK},
-		{"Single Repository", "/api/repositories/repo-123", http.StatusOK},
-		{"Checkpoints Endpoint", "/api/repositories/repo-123/checkpoints", http.StatusOK},
-		{"Requirements Endpoint", "/api/repositories/repo-123/requirements", http.StatusOK},
-		{"Graph Endpoint", "/api/repositories/repo-123/graph", http.StatusOK},
-		{"Handoff Endpoint", "/api/repositories/repo-123/handoff", http.StatusOK},
+		{"Single Repository", "/api/repositories/repo-kaushalk123-cli-btw", http.StatusOK},
+		{"Checkpoints Endpoint", "/api/repositories/repo-kaushalk123-cli-btw/checkpoints", http.StatusOK},
+		{"Requirements Endpoint", "/api/repositories/repo-kaushalk123-cli-btw/requirements", http.StatusOK},
+		{"Graph Endpoint", "/api/repositories/repo-kaushalk123-cli-btw/graph", http.StatusOK},
+		{"Handoff Endpoint", "/api/repositories/repo-kaushalk123-cli-btw/handoff", http.StatusOK},
 	}
 
 	for _, tt := range tests {
