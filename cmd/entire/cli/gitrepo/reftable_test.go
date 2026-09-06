@@ -240,12 +240,19 @@ func TestGitPlumbingEnv_ForcesCLocale(t *testing.T) {
 	t.Setenv("LANG", "de_DE.UTF-8")
 	t.Setenv("LC_ALL", "de_DE.UTF-8")
 	t.Setenv("LC_MESSAGES", "fr_FR.UTF-8")
+	t.Setenv("GIT_DIR", "/wrong/repo/.git")
+	t.Setenv("GIT_WORK_TREE", "/wrong/repo")
+	t.Setenv("GIT_INDEX_FILE", "/wrong/repo/index")
 
 	env := gitPlumbingEnv()
 	for key, want := range map[string]string{"LC_ALL": "C", "LANG": "C", "GIT_TERMINAL_PROMPT": "0"} {
 		got, found := lastEnvValue(env, key)
 		require.Truef(t, found, "%s must be set", key)
 		require.Equalf(t, want, got, "effective %s must be forced regardless of the caller's environment", key)
+	}
+	for _, key := range []string{"GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE"} {
+		_, found := lastEnvValue(env, key)
+		require.Falsef(t, found, "%s must not override the repository selected by the command", key)
 	}
 }
 
