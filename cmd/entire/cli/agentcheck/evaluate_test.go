@@ -1,6 +1,7 @@
 package agentcheck
 
 import (
+	"context"
 	"reflect"
 	"strings"
 	"testing"
@@ -751,6 +752,100 @@ func TestEvaluateIsDeterministic(t *testing.T) {
 	second := Evaluate(ctx)
 	if !reflect.DeepEqual(first, second) {
 		t.Fatalf("Evaluate() not deterministic:\nfirst:  %#v\nsecond: %#v", first, second)
+	}
+}
+
+func TestEvaluateFromBuiltContext(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name           string
+		prompt         string
+		filesTouched   []string
+		graph          GraphContext
+		wantVerdict    Verdict
+		wantCategory   FindingCategory
+		wantNoFindings bool
+		wantEvidence   []string
+	}{
+		{
+			name: "critical boundary violation fails",
+			prompt: strings.Join([]string{
+				"Implement Google OAuth login.",
+				"Preserve existing authentication.",
+				"Do NOT modify the database schema.",
+				"Keep the implementation minimal.",
+			}, "\n"),
+			filesTouched: []string{"migrations/004_google_oauth.sql"},
+			wantVerdict:  Verdict(VerdictFail),
+			wantCategory: CategoryBoundaryViolation,
+			wantEvidence: []string{"Do NOT modify the database schema", "migrations/004_google_oauth.sql"},
+		},
+		{
+			name:           "trusted compliant implementation",
+			prompt:         "Implement Google OAuth login.",
+			filesTouched:   []string{"internal/auth/google_oauth.go"},
+			wantVerdict:    Verdict(VerdictTrusted),
+			wantNoFindings: true,
+		},
+		{
+			name:         "quality finding needs review",
+			prompt:       "Implement Google OAuth login.",
+			filesTouched: []string{"internal/auth/google_oauth.go"},
+			graph: GraphContext{
+				Available: true,
+				Evidence: []GraphEvidence{{
+					Kind:   "duplicate",
+					Paths:  []string{"internal/auth/google_oauth.go", "internal/auth/oauth.go"},
+					Detail: "current change duplicates existing OAuth helper",
+				}},
+			},
+			wantVerdict:  Verdict(VerdictReviewRequired),
+			wantCategory: CategoryDuplication,
+			wantEvidence: []string{"internal/auth/oauth.go", "duplicates existing OAuth helper"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			reader := testReader()
+			reader.summary.FilesTouched = tt.filesTouched
+			reader.summary.Sessions = reader.summary.Sessions[:1]
+			reader.sessions = reader.sessions[:1]
+			reader.sessions[0].Prompts = tt.prompt
+			reader.sessions[0].Metadata.FilesTouched = tt.filesTouched
+
+			builder := Builder{Reader: reader}
+			if tt.graph.Available || len(tt.graph.Evidence) > 0 {
+				builder.Graph = fakeGraph{ctx: tt.graph}
+			}
+
+			ctx, err := builder.Build(context.Background(), testCheckpointID)
+			if err != nil {
+				t.Fatalf("Build() error = %v", err)
+			}
+			got := Evaluate(*ctx)
+			if got.Verdict != tt.wantVerdict {
+				t.Fatalf("Evaluate() verdict = %q, want %q; findings = %#v", got.Verdict, tt.wantVerdict, got.Findings)
+			}
+			if tt.wantNoFindings {
+				if len(got.Findings) != 0 {
+					t.Fatalf("Evaluate() findings = %#v, want none", got.Findings)
+				}
+				return
+			}
+			finding := findCategory(got.Findings, tt.wantCategory)
+			if finding == nil {
+				t.Fatalf("Evaluate() findings = %#v, want category %q", got.Findings, tt.wantCategory)
+			}
+			for _, want := range tt.wantEvidence {
+				if !findingHasEvidence(*finding, want) {
+					t.Fatalf("finding evidence = %#v, want detail containing %q", finding.Evidence, want)
+				}
+			}
+		})
 	}
 }
 
