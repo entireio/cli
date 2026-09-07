@@ -8,6 +8,7 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -579,6 +580,10 @@ func handleLifecycleTurnStart(ctx context.Context, ag agent.Agent, event *agent.
 	if err := validation.ValidateSessionID(sessionID); err != nil {
 		return fmt.Errorf("invalid %s event: %w", event.Type, err)
 	}
+	// A Stop after an interrupted TurnStart must never reuse the prior turn's boundary.
+	if err := CleanupPrePromptState(ctx, sessionID); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("invalidate previous pre-prompt state: %w", err)
+	}
 
 	// Bound every session-state lock acquisition on the TurnStart path so a
 	// background lock holder can't stall the user's prompt (see the const doc).
@@ -721,6 +726,10 @@ func handleLifecycleTurnEnd(ctx context.Context, ag agent.Agent, event *agent.Ev
 	if sessionID == "" {
 		sessionID = unknownSessionID
 	}
+	repeatableTurnEnd := false
+	if repeatable, ok := agent.AsRepeatableTurnEnd(ag); ok {
+		repeatableTurnEnd = repeatable.TurnEndMayRepeat()
+	}
 
 	// Fill model from hint file if the agent didn't provide it on this hook
 	if event.Model == "" && sessionID != unknownSessionID {
@@ -736,20 +745,59 @@ func handleLifecycleTurnEnd(ctx context.Context, ag agent.Agent, event *agent.Ev
 		return errors.New("transcript file not specified")
 	}
 
-	// If agent implements TranscriptPreparer, materialize the transcript file.
-	// This must run BEFORE fileExists: agents like OpenCode lazily fetch transcripts
-	// via `opencode export`, so the file doesn't exist until PrepareTranscript creates it.
-	// Claude Code's PrepareTranscript just flushes (always succeeds). Agents without
-	// TranscriptPreparer (Gemini, Droid) are unaffected.
+	// A capturer makes readiness and reading one ownership transfer. On success,
+	// every Stop consumer below must use the returned bytes and position rather
+	// than reopen transcriptRef. On failure, return before copying the transcript,
+	// transitioning the session, or finalizing provisional checkpoints.
+	//
+	// Claude's final response is scoped to the current turn, so modern capture
+	// also requires the boundary recorded at TurnStart. The explicit captured bit,
+	// not a positive offset, proves that boundary was measured: zero is valid for
+	// the first turn. Without it, an identical response from an earlier turn could
+	// satisfy readiness.
 	_, prepareSpan := perf.Start(ctx, "prepare_and_validate_transcript")
-	if preparer, ok := agent.AsTranscriptPreparer(ag); ok {
-		if err := preparer.PrepareTranscript(ctx, transcriptRef); err != nil {
+	var preState *PrePromptState
+	var capturedTranscript *agent.TranscriptSnapshot
+	if capturer, ok := agent.AsTranscriptCapturer(ag); ok {
+		var loadErr error
+		preState, loadErr = LoadPrePromptState(ctx, sessionID)
+		if loadErr != nil {
+			logging.Warn(logCtx, "failed to load pre-prompt state",
+				slog.String("error", loadErr.Error()))
+		}
+		if event.FinalResponse != nil && *event.FinalResponse != "" &&
+			(preState == nil || !preState.TranscriptPositionCaptured) {
+			err := fmt.Errorf("%w: final response supplied without a turn-start transcript position", agent.ErrTranscriptNotReady)
+			prepareSpan.RecordError(err)
+			prepareSpan.End()
+			return err
+		}
+
+		startPosition := 0
+		if preState != nil {
+			startPosition = preState.TranscriptOffset
+		}
+		snapshot, captureErr := capturer.CaptureTranscript(ctx, agent.TranscriptCaptureRequest{
+			SessionRef:    transcriptRef,
+			StartPosition: startPosition,
+			FinalResponse: event.FinalResponse,
+		})
+		if captureErr != nil {
+			prepareSpan.RecordError(captureErr)
+			prepareSpan.End()
+			return fmt.Errorf("capture transcript: %w", captureErr)
+		}
+		capturedTranscript = &snapshot
+	} else if preparer, ok := agent.AsTranscriptPreparer(ag); ok {
+		// Non-capturing agents retain prepare-then-read behavior. OpenCode needs
+		// preparation to materialize its lazy transcript export.
+		if prepareErr := preparer.PrepareTranscript(ctx, transcriptRef); prepareErr != nil {
 			logging.Warn(logCtx, "failed to prepare transcript",
-				slog.String("error", err.Error()))
+				slog.String("error", prepareErr.Error()))
 		}
 	}
 
-	if !fileExists(transcriptRef) {
+	if capturedTranscript == nil && !fileExists(transcriptRef) {
 		prepareSpan.RecordError(fmt.Errorf("transcript file not found: %s", transcriptRef))
 		prepareSpan.End()
 		return fmt.Errorf("transcript file not found: %s", transcriptRef)
@@ -788,16 +836,26 @@ func handleLifecycleTurnEnd(ctx context.Context, ag agent.Agent, event *agent.Ev
 	}
 
 	// Copy transcript to session directory
-	transcriptData, err := ag.ReadTranscript(transcriptRef)
-	if err != nil {
-		copySpan.RecordError(err)
-		copySpan.End()
-		return fmt.Errorf("failed to read transcript: %w", err)
+	var transcriptData []byte
+	if capturedTranscript != nil {
+		transcriptData = capturedTranscript.Data
+	} else {
+		transcriptData, err = ag.ReadTranscript(transcriptRef)
+		if err != nil {
+			copySpan.RecordError(err)
+			copySpan.End()
+			return fmt.Errorf("failed to read transcript: %w", err)
+		}
 	}
 	// Sanitize before writing: this copy is what the shadow-branch walk blobs and
 	// redacts on every Stop. See agent.TranscriptSanitizer for why order matters.
 	// The agent's own rollout is untouched.
-	storedTranscript := agent.SanitizeTranscriptForStorage(ag, transcriptData)
+	storageInput := transcriptData
+	if capturedTranscript != nil {
+		// Snapshot bytes stay immutable while storage sanitizers run.
+		storageInput = bytes.Clone(transcriptData)
+	}
+	storedTranscript := agent.SanitizeTranscriptForStorage(ag, storageInput)
 	logFile := sessionName + "/" + paths.TranscriptFileName
 	if err := entiredir.WriteFile(entireRoot, logFile, storedTranscript, 0o600); err != nil {
 		copySpan.RecordError(err)
@@ -810,14 +868,17 @@ func handleLifecycleTurnEnd(ctx context.Context, ag agent.Agent, event *agent.Ev
 		slog.Int("stored_bytes", len(storedTranscript)))
 	copySpan.End()
 
-	// Load pre-prompt state (captured on TurnStart)
 	_, extractSpan := perf.Start(ctx, "extract_metadata")
-	preState, err := LoadPrePromptState(ctx, sessionID)
-	if err != nil {
-		logging.Warn(logCtx, "failed to load pre-prompt state",
-			slog.String("error", err.Error()))
+	if capturedTranscript == nil {
+		// Preserve the original non-capturing order: prepare and copy first,
+		// then load the turn-start state used by metadata extraction.
+		var loadErr error
+		preState, loadErr = LoadPrePromptState(ctx, sessionID)
+		if loadErr != nil {
+			logging.Warn(logCtx, "failed to load pre-prompt state",
+				slog.String("error", loadErr.Error()))
+		}
 	}
-
 	// Determine transcript offset
 	transcriptOffset := resolveTranscriptOffset(ctx, preState, sessionID)
 
@@ -834,31 +895,47 @@ func handleLifecycleTurnEnd(ctx context.Context, ag agent.Agent, event *agent.Ev
 			slog.String("error", readPromptErr.Error()))
 	} else if len(existingPrompt) == 0 {
 		if extractor, ok := agent.AsPromptExtractor(ag); ok {
-			prompts, extractErr := extractor.ExtractPrompts(transcriptRef, transcriptOffset)
-			if extractErr != nil {
-				logging.Warn(logCtx, "failed to extract prompts from transcript",
-					slog.String("error", extractErr.Error()))
-			} else if len(prompts) > 0 {
-				content := strings.Join(prompts, "\n\n---\n\n")
-				if writeErr := entiredir.WriteFile(entireRoot, promptName, []byte(content), 0o600); writeErr != nil {
-					logging.Warn(logCtx, "failed to backfill prompt.txt from transcript",
-						slog.String("error", writeErr.Error()))
-				} else {
-					logging.Debug(logCtx, "backfilled prompt.txt from transcript",
-						slog.Int("prompt_count", len(prompts)))
-					backfilledPrompt = prompts[len(prompts)-1]
+			// A captured Stop cannot use a path-only extractor: reopening the
+			// producer-owned file would discard the capture guarantee. Claude
+			// records prompt.txt at TurnStart, so it does not need this fallback.
+			if capturedTranscript == nil {
+				prompts, extractErr := extractor.ExtractPrompts(transcriptRef, transcriptOffset)
+				if extractErr != nil {
+					logging.Warn(logCtx, "failed to extract prompts from transcript",
+						slog.String("error", extractErr.Error()))
+				} else if len(prompts) > 0 {
+					content := strings.Join(prompts, "\n\n---\n\n")
+					if writeErr := entiredir.WriteFile(entireRoot, promptName, []byte(content), 0o600); writeErr != nil {
+						logging.Warn(logCtx, "failed to backfill prompt.txt from transcript",
+							slog.String("error", writeErr.Error()))
+					} else {
+						logging.Debug(logCtx, "backfilled prompt.txt from transcript",
+							slog.Int("prompt_count", len(prompts)))
+						backfilledPrompt = prompts[len(prompts)-1]
+					}
 				}
 			}
 		}
 	}
 
-	// Compute subagents directory for agents that support subagent extraction.
+	// The source path remains authoritative for locating separate subagent files;
+	// those bytes are outside the captured main transcript.
 	subagentsDir := paths.SubagentsDir(filepath.Dir(transcriptRef), event.SessionID)
 
 	// Extract metadata via agent interface (modified files)
 	var modifiedFiles []string
+	var analyzedTokenUsage *agent.TokenUsage
 
-	if analyzer, ok := agent.AsTranscriptAnalyzer(ag); ok {
+	if turnAnalyzer, ok := agent.AsTranscriptTurnAnalyzer(ag); ok && capturedTranscript != nil {
+		analysis, analysisErr := turnAnalyzer.AnalyzeTranscriptTurn(transcriptData, transcriptOffset, subagentsDir)
+		if analysisErr != nil {
+			logging.Warn(logCtx, "failed to analyze captured transcript",
+				slog.String("error", analysisErr.Error()))
+		} else {
+			modifiedFiles = analysis.ModifiedFiles
+			analyzedTokenUsage = analysis.TokenUsage
+		}
+	} else if analyzer, ok := agent.AsTranscriptAnalyzer(ag); ok {
 		// Extract modified files - prefer SubagentAwareExtractor if available to include subagent files
 		if subagentExtractor, subOk := agent.AsSubagentAwareExtractor(ag); subOk {
 			if files, fileErr := subagentExtractor.ExtractAllModifiedFiles(transcriptData, transcriptOffset, subagentsDir); fileErr != nil {
@@ -867,7 +944,9 @@ func handleLifecycleTurnEnd(ctx context.Context, ag agent.Agent, event *agent.Ev
 			} else {
 				modifiedFiles = files
 			}
-		} else {
+		} else if capturedTranscript == nil {
+			// Path-only analysis remains available to non-capturing agents. A
+			// captured Stop may use only the byte-based analyzer above.
 			// Fall back to basic extraction (main transcript only)
 			if files, _, fileErr := analyzer.ExtractModifiedFilesFromOffset(transcriptRef, transcriptOffset); fileErr != nil {
 				logging.Warn(logCtx, "failed to extract modified files",
@@ -970,10 +1049,12 @@ func handleLifecycleTurnEnd(ctx context.Context, ag agent.Agent, event *agent.Ev
 	if totalChanges == 0 {
 		logging.Info(logCtx, "no files modified during session, skipping checkpoint")
 		recordCaptureDegraded(ctx, sessionID, captureDegraded)
-		transitionSessionTurnEnd(ctx, sessionID, event)
-		if cleanupErr := CleanupPrePromptState(ctx, sessionID); cleanupErr != nil {
-			logging.Warn(logCtx, "failed to cleanup pre-prompt state",
-				slog.String("error", cleanupErr.Error()))
+		transitionSessionTurnEnd(ctx, sessionID, event, capturedTranscript, repeatableTurnEnd)
+		if !repeatableTurnEnd {
+			if cleanupErr := CleanupPrePromptState(ctx, sessionID); cleanupErr != nil {
+				logging.Warn(logCtx, "failed to cleanup pre-prompt state",
+					slog.String("error", cleanupErr.Error()))
+			}
 		}
 		return nil
 	}
@@ -1024,10 +1105,15 @@ func handleLifecycleTurnEnd(ctx context.Context, ag agent.Agent, event *agent.Ev
 	// to include subagent tokens.
 	tokenUsage := event.TokenUsage
 	if tokenUsage == nil {
-		tokenUsage = agent.CalculateTokenUsage(ctx, ag, transcriptData, transcriptLinesAtStart, subagentsDir)
+		tokenUsage = analyzedTokenUsage
+		if tokenUsage == nil {
+			tokenUsage = agent.CalculateTokenUsage(ctx, ag, transcriptData, transcriptLinesAtStart, subagentsDir)
+		}
 	}
 
-	// Build fully-populated step context and delegate to strategy
+	// Persist the producer path as the session reference for future turns. This
+	// Stop's finalization receives capturedTranscript separately and must not read
+	// the path through StepContext or SessionState.
 	stepCtx := strategy.StepContext{
 		SessionID:                sessionID,
 		ModifiedFiles:            relModifiedFiles,
@@ -1064,10 +1150,12 @@ func handleLifecycleTurnEnd(ctx context.Context, ag agent.Agent, event *agent.Ev
 			}
 		}
 		recordCaptureDegraded(ctx, sessionID, degraded)
-		transitionSessionTurnEnd(ctx, sessionID, event)
-		if cleanupErr := CleanupPrePromptState(ctx, sessionID); cleanupErr != nil {
-			logging.Warn(logCtx, "failed to cleanup pre-prompt state",
-				slog.String("error", cleanupErr.Error()))
+		transitionSessionTurnEnd(ctx, sessionID, event, capturedTranscript, repeatableTurnEnd)
+		if !repeatableTurnEnd {
+			if cleanupErr := CleanupPrePromptState(ctx, sessionID); cleanupErr != nil {
+				logging.Warn(logCtx, "failed to cleanup pre-prompt state",
+					slog.String("error", cleanupErr.Error()))
+			}
 		}
 	}
 
@@ -1147,13 +1235,64 @@ func handleLifecycleSessionEnd(ctx context.Context, ag agent.Agent, event *agent
 	// sets no budget, and for agents that do, bounding the final captures
 	// against the same deadline is a known follow-up.
 	completeLiveTaskRecords(ctx, ag, event.SessionID, event.SessionRef)
+	refreshPendingTurnAtSessionEnd(ctx, ag, event)
 
 	if _, err := endSessionNow(ctx, event, event.SessionID, nil, sessionEndCondenseDeadline(ag), endedNow); err != nil {
 		logging.Warn(logCtx, "failed to mark session ended",
 			slog.String("error", err.Error()))
 	}
+	if repeatable, ok := agent.AsRepeatableTurnEnd(ag); ok && repeatable.TurnEndMayRepeat() {
+		if cleanupErr := CleanupPrePromptState(ctx, event.SessionID); cleanupErr != nil {
+			logging.Warn(logCtx, "failed to cleanup repeatable turn boundary at session end",
+				slog.String("error", cleanupErr.Error()))
+		}
+	}
 
 	return nil
+}
+
+func refreshPendingTurnAtSessionEnd(ctx context.Context, ag agent.Agent, event *agent.Event) {
+	if repeatable, ok := agent.AsRepeatableTurnEnd(ag); !ok || !repeatable.TurnEndMayRepeat() {
+		return
+	}
+
+	transcriptRef := event.SessionRef
+	mutErr := strategy.MutateSessionState(ctx, event.SessionID, func(state *strategy.SessionState) error {
+		if !state.TurnEndPending {
+			return strategy.ErrMutationSkip
+		}
+		state.TurnEndRefreshRequired = true
+		if transcriptRef == "" {
+			transcriptRef = state.TranscriptPath
+		}
+		return nil
+	})
+	if errors.Is(mutErr, strategy.ErrStateNotFound) || errors.Is(mutErr, strategy.ErrMutationSkip) {
+		return
+	}
+	logCtx := logging.WithAgent(logging.WithComponent(ctx, "lifecycle"), ag.Name())
+	if mutErr != nil {
+		logging.Warn(logCtx, "failed to mark pending turn for session-end refresh",
+			slog.String("session_id", event.SessionID),
+			slog.String("error", mutErr.Error()))
+		return
+	}
+	if transcriptRef == "" {
+		logging.Warn(logCtx, "cannot refresh pending turn at session end without a transcript",
+			slog.String("session_id", event.SessionID))
+		return
+	}
+
+	turnEnd := *event
+	turnEnd.Type = agent.TurnEnd
+	turnEnd.SessionRef = transcriptRef
+	turnEnd.FinalResponse = nil
+	turnEnd.FinalResponsePresent = false
+	if err := handleLifecycleTurnEnd(ctx, ag, &turnEnd); err != nil {
+		logging.Warn(logCtx, "failed to refresh pending turn at session end",
+			slog.String("session_id", event.SessionID),
+			slog.String("error", err.Error()))
+	}
 }
 
 // processStart approximates when this hook process began. Package
@@ -1879,7 +2018,7 @@ func saveSubagentSessionTaskStep(ctx context.Context, step subagentSessionStep) 
 
 	// Retire the subagent's own session the same way an ordinary turn-end does,
 	// so its phase and pre-prompt state do not linger as an active session.
-	transitionSessionTurnEnd(ctx, step.sessionID, step.event)
+	transitionSessionTurnEnd(ctx, step.sessionID, step.event, nil, false)
 	if cleanupErr := CleanupPrePromptState(ctx, step.sessionID); cleanupErr != nil {
 		logging.Warn(logCtx, "failed to cleanup pre-prompt state",
 			slog.String("error", cleanupErr.Error()))
@@ -1893,7 +2032,7 @@ func saveSubagentSessionTaskStep(ctx context.Context, step subagentSessionStep) 
 // Prefers pre-prompt state, falls back to session state.
 func resolveTranscriptOffset(ctx context.Context, preState *PrePromptState, sessionID string) int {
 	logCtx := logging.WithComponent(ctx, "lifecycle")
-	if preState != nil && preState.TranscriptOffset > 0 {
+	if preState != nil && (preState.TranscriptPositionCaptured || preState.TranscriptOffset > 0) {
 		logging.Debug(logCtx, "pre-prompt state found, parsing transcript from offset",
 			slog.Int("offset", preState.TranscriptOffset))
 		return preState.TranscriptOffset
@@ -1939,11 +2078,14 @@ func recordCaptureDegraded(ctx context.Context, sessionID string, degraded bool)
 }
 
 // transitionSessionTurnEnd transitions the session phase to IDLE and dispatches turn-end actions.
-func transitionSessionTurnEnd(ctx context.Context, sessionID string, event *agent.Event) {
+// Passing the capture explicitly prevents finalization and position advancement
+// for this Stop from falling back to SessionState.TranscriptPath.
+func transitionSessionTurnEnd(ctx context.Context, sessionID string, event *agent.Event, capturedTranscript *agent.TranscriptSnapshot, repeatable bool) {
 	logCtx := logging.WithComponent(ctx, "lifecycle")
 	var appendedSkillEvents []agent.SkillEvent
 	mutErr := strategy.MutateSessionStateOnSaved(ctx, sessionID, func(state *strategy.SessionState) error {
 		appendedSkillEvents = persistEventMetadataToState(event, state)
+		state.TurnEndPending = repeatable
 		if err := strategy.TransitionAndLog(ctx, state, session.EventTurnEnd, session.TransitionContext{}, session.NoOpActionHandler{}); err != nil {
 			logging.Warn(logCtx, "turn-end transition failed",
 				slog.String("error", err.Error()))
@@ -1957,7 +2099,7 @@ func transitionSessionTurnEnd(ctx context.Context, sessionID string, event *agen
 		// and appends the new ones to state.SkillEvents — snapshot its growth
 		// so those events reach telemetry alongside the hook-provided ones.
 		skillEventsBefore := len(state.SkillEvents)
-		if err := strat.HandleTurnEnd(ctx, state); err != nil {
+		if err := strat.HandleTurnEnd(ctx, state, capturedTranscript); err != nil {
 			logging.Warn(logCtx, "turn-end action dispatch failed",
 				slog.String("error", err.Error()))
 		}
@@ -2043,6 +2185,7 @@ func markSessionEnded(ctx context.Context, event *agent.Event, sessionID string,
 				slog.String("error", transErr.Error()))
 		}
 		state.EndedAt = &endedAt
+		sealPendingTurnAtSessionEnd(state)
 		if prepareErr := strategy.PrepareSessionEndCondensation(ctx, state); prepareErr != nil {
 			logging.Warn(logging.WithComponent(ctx, "lifecycle"), "failed to prepare session-end condensation",
 				slog.String("session_id", sessionID),
@@ -2060,6 +2203,13 @@ func markSessionEnded(ctx context.Context, event *agent.Event, sessionID string,
 		return false, fmt.Errorf("failed to save session state: %w", mutErr)
 	}
 	return ended, nil
+}
+
+func sealPendingTurnAtSessionEnd(state *strategy.SessionState) {
+	if state.TurnEndPending && !state.TurnEndRefreshRequired {
+		state.TurnCheckpointIDs = nil
+	}
+	state.TurnEndPending = false
 }
 
 // logFileChanges logs the files modified, created, and deleted during a session.
@@ -2093,7 +2243,7 @@ func persistEventMetadataToState(event *agent.Event, state *strategy.SessionStat
 		if event.TurnCount > state.SessionTurnCount {
 			state.SessionTurnCount = event.TurnCount
 		}
-	} else if event.Type == agent.TurnEnd {
+	} else if event.Type == agent.TurnEnd && !state.TurnEndPending {
 		state.SessionTurnCount++
 	}
 	// Deferred checkpoint-window reset: the first time the turn count actually

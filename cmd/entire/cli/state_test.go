@@ -101,6 +101,7 @@ func TestPrePromptState_BackwardCompat_LastTranscriptLineCount(t *testing.T) {
 	if state.TranscriptOffset != 42 {
 		t.Errorf("TranscriptOffset = %d, want 42 (migrated from last_transcript_line_count)", state.TranscriptOffset)
 	}
+	require.True(t, state.TranscriptPositionCaptured, "positive legacy positions are known to have been measured")
 	if state.LastTranscriptLineCount != 0 {
 		t.Errorf("LastTranscriptLineCount = %d, want 0 (should be cleared after migration)", state.LastTranscriptLineCount)
 	}
@@ -363,8 +364,8 @@ func setupTestRepoWithTranscript(t *testing.T, transcriptContent string, transcr
 		t.Fatalf("Failed to create tmp dir: %v", err)
 	}
 
-	// Create transcript file if content provided
-	if transcriptContent != "" {
+	// Create transcript file when a name is provided, including an empty transcript.
+	if transcriptName != "" {
 		transcriptPath = filepath.Join(tmpDir, transcriptName)
 		if err := os.WriteFile(transcriptPath, []byte(transcriptContent), 0o644); err != nil {
 			t.Fatalf("Failed to create transcript file: %v", err)
@@ -403,6 +404,7 @@ func TestPrePromptState_WithTranscriptPosition(t *testing.T) {
 	if state.TranscriptOffset != 3 {
 		t.Errorf("TranscriptOffset = %d, want 3", state.TranscriptOffset)
 	}
+	require.True(t, state.TranscriptPositionCaptured)
 
 	// Cleanup
 	if err := CleanupPrePromptState(context.Background(), sessionID); err != nil {
@@ -435,11 +437,55 @@ func TestPrePromptState_WithEmptyTranscriptPath(t *testing.T) {
 	if state.TranscriptOffset != 0 {
 		t.Errorf("TranscriptOffset = %d, want 0", state.TranscriptOffset)
 	}
+	require.False(t, state.TranscriptPositionCaptured)
 
 	// Cleanup
 	if err := CleanupPrePromptState(context.Background(), sessionID); err != nil {
 		t.Errorf("CleanupPrePromptState() error = %v", err)
 	}
+}
+
+func TestPrePromptState_TracksMeasuredZeroPosition(t *testing.T) {
+	transcriptPath := setupTestRepoWithTranscript(t, "", "transcript.jsonl")
+	ag := claudecode.NewClaudeCodeAgent()
+	const sessionID = "test-session-measured-zero"
+
+	require.NoError(t, CapturePrePromptState(context.Background(), ag, sessionID, transcriptPath))
+	state, err := LoadPrePromptState(context.Background(), sessionID)
+	require.NoError(t, err)
+	require.NotNil(t, state)
+	require.Zero(t, state.TranscriptOffset)
+	require.True(t, state.TranscriptPositionCaptured)
+}
+
+func TestPrePromptState_MissingTranscriptPositionIsUnmeasured(t *testing.T) {
+	setupTestRepoWithTranscript(t, "", "")
+	transcriptPath := filepath.Join(t.TempDir(), "missing.jsonl")
+	ag := claudecode.NewClaudeCodeAgent()
+	const sessionID = "test-session-missing-transcript"
+
+	require.NoError(t, CapturePrePromptState(context.Background(), ag, sessionID, transcriptPath))
+	state, err := LoadPrePromptState(context.Background(), sessionID)
+	require.NoError(t, err)
+	require.NotNil(t, state)
+	require.Zero(t, state.TranscriptOffset)
+	require.False(t, state.TranscriptPositionCaptured)
+}
+
+func TestPrePromptState_NonCapturerKeepsLegacyStateShape(t *testing.T) {
+	transcriptPath := setupTestRepoWithTranscript(t, "{}\n", "transcript.jsonl")
+	ag := &mockAnalyzerAgent{mockLifecycleAgent: newMockAgent()}
+	const sessionID = "test-session-non-capturer"
+
+	require.NoError(t, CapturePrePromptState(context.Background(), ag, sessionID, transcriptPath))
+	state, err := LoadPrePromptState(context.Background(), sessionID)
+	require.NoError(t, err)
+	require.NotNil(t, state)
+	require.False(t, state.TranscriptPositionCaptured)
+
+	data, err := os.ReadFile(prePromptStateFile(context.Background(), sessionID))
+	require.NoError(t, err)
+	require.NotContains(t, string(data), "transcript_position_captured")
 }
 
 func TestPrePromptState_WithSummaryOnlyTranscript(t *testing.T) {

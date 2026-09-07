@@ -196,7 +196,7 @@ func SanitizePathForClaude(path string) string {
 // Claude Code uses JSONL format, so position is the number of lines.
 // This is a lightweight operation that only counts lines without parsing JSON.
 // Uses bufio.Reader to handle arbitrarily long lines (no size limit).
-// Returns 0 if the file doesn't exist or is empty.
+// Returns 0 for an empty file. A missing file is not a measured position.
 func (c *ClaudeCodeAgent) GetTranscriptPosition(path string) (int, error) {
 	if path == "" {
 		return 0, nil
@@ -205,7 +205,7 @@ func (c *ClaudeCodeAgent) GetTranscriptPosition(path string) (int, error) {
 	file, err := os.Open(path) //nolint:gosec // Path comes from Claude Code transcript location
 	if err != nil {
 		if os.IsNotExist(err) {
-			return 0, nil
+			return 0, fmt.Errorf("%w: transcript file does not exist", agent.ErrTranscriptNotReady)
 		}
 		return 0, fmt.Errorf("failed to open transcript file: %w", err)
 	}

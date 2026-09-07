@@ -2036,8 +2036,8 @@ func setupAttachTestRepo(t *testing.T) {
 }
 
 // setupClaudeTranscript creates a fake Claude transcript file.
-// The file's mtime is backdated so that waitForTranscriptFlush treats it as
-// stale and skips the 3-second poll loop.
+// The file's mtime is backdated so readiness returns immediately; attach treats
+// preparation as best-effort and can still consume the known test transcript.
 func setupClaudeTranscript(t *testing.T, sessionID, content string) {
 	t.Helper()
 	claudeDir := t.TempDir()

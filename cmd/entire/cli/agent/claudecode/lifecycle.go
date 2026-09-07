@@ -8,7 +8,6 @@ import (
 	"log/slog"
 	"os"
 	"slices"
-	"strings"
 	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
@@ -19,6 +18,9 @@ import (
 // Compile-time interface assertions for new interfaces.
 var (
 	_ agent.TranscriptAnalyzer     = (*ClaudeCodeAgent)(nil)
+	_ agent.TranscriptCapturer     = (*ClaudeCodeAgent)(nil)
+	_ agent.TranscriptTurnAnalyzer = (*ClaudeCodeAgent)(nil)
+	_ agent.RepeatableTurnEnd      = (*ClaudeCodeAgent)(nil)
 	_ agent.TranscriptPreparer     = (*ClaudeCodeAgent)(nil)
 	_ agent.TokenCalculator        = (*ClaudeCodeAgent)(nil)
 	_ agent.ModelExtractor         = (*ClaudeCodeAgent)(nil)
@@ -28,6 +30,11 @@ var (
 	_ agent.HookResponseWriter     = (*ClaudeCodeAgent)(nil)
 	_ agent.ContextInjector        = (*ClaudeCodeAgent)(nil)
 )
+
+// TurnEndMayRepeat reports Claude Code's Stop-hook continuation contract: a
+// blocking Stop hook can make Claude continue and later emit another Stop
+// without another UserPromptSubmit event.
+func (c *ClaudeCodeAgent) TurnEndMayRepeat() bool { return true }
 
 // WriteHookResponse outputs a JSON hook response to stdout.
 // Claude Code reads this JSON and displays the systemMessage to the user.
@@ -105,11 +112,57 @@ func (c *ClaudeCodeAgent) ReadTranscript(sessionRef string) ([]byte, error) {
 	return data, nil
 }
 
-// PrepareTranscript waits for Claude Code's async transcript flush to complete.
-// Claude writes a hook_progress sentinel entry after flushing all pending writes.
+// PrepareTranscript retains best-effort readiness waiting for non-Stop call sites.
 func (c *ClaudeCodeAgent) PrepareTranscript(ctx context.Context, sessionRef string) error {
-	waitForTranscriptFlush(ctx, sessionRef, time.Now())
+	waitForTranscriptQuiet(ctx, sessionRef)
 	return nil
+}
+
+func waitForTranscriptQuiet(ctx context.Context, transcriptPath string) {
+	logCtx := logging.WithComponent(ctx, "agent.claudecode")
+	info, err := os.Stat(transcriptPath)
+	if err != nil {
+		return
+	}
+	if age := time.Since(info.ModTime()); age > defaultStaleThreshold {
+		logging.Debug(logCtx, "transcript file is stale, skipping readiness wait",
+			slog.Duration("file_age", age))
+		return
+	}
+
+	timeout := time.NewTimer(defaultMaxWait)
+	defer timeout.Stop()
+	ticker := time.NewTicker(defaultPollInterval)
+	defer ticker.Stop()
+	lastSize := int64(-1)
+	var stableSince time.Time
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-timeout.C:
+			logging.Warn(logCtx, "transcript flush not settled within timeout, proceeding",
+				slog.Duration("timeout", defaultMaxWait))
+			return
+		case <-ticker.C:
+			current, statErr := os.Stat(transcriptPath)
+			if statErr != nil {
+				continue
+			}
+			if current.Size() != lastSize {
+				lastSize = current.Size()
+				stableSince = time.Now()
+				continue
+			}
+			if time.Since(stableSince) >= defaultQuietWindow {
+				logging.Debug(logCtx, "transcript settled through quiet window, proceeding",
+					slog.Duration("quiet_window", defaultQuietWindow),
+					slog.Int64("size", current.Size()))
+				return
+			}
+		}
+	}
 }
 
 // CalculateTokenUsage computes token usage from the transcript starting at the given line offset.
@@ -126,13 +179,19 @@ func (c *ClaudeCodeAgent) parseSessionInfoEvent(stdin io.Reader, eventType agent
 	if err != nil {
 		return nil, err
 	}
-	return &agent.Event{
+	event := &agent.Event{
 		Type:       eventType,
 		SessionID:  raw.SessionID,
 		SessionRef: raw.TranscriptPath,
 		Model:      raw.Model,
 		Timestamp:  time.Now(),
-	}, nil
+	}
+	if eventType == agent.TurnEnd {
+		event.FinalResponse = raw.LastAssistantMessage.value
+		event.FinalResponsePresent = raw.LastAssistantMessage.present
+		event.StopHookActive = raw.StopHookActive
+	}
+	return event, nil
 }
 
 func (c *ClaudeCodeAgent) parseTurnStart(stdin io.Reader) (*agent.Event, error) {
@@ -247,158 +306,4 @@ func (c *ClaudeCodeAgent) parseSubagentStop(ctx context.Context, stdin io.Reader
 		Final:                  true,
 		Timestamp:              time.Now(),
 	}, nil
-}
-
-// --- Transcript flush sentinel ---
-
-// stopHookSentinel is the string that appears in Claude Code's hook_progress
-// entry when the stop hook has been invoked, indicating the transcript is fully flushed.
-const stopHookSentinel = "hooks claude-code stop"
-
-// waitForTranscriptFlush waits until Claude Code's async transcript writes have
-// settled before turn-end reads the file. It returns as soon as EITHER the stop
-// hook sentinel appears OR the file size has held steady for a full quiet
-// window, and gives up after maxWait as a safety bound.
-//
-// The stop-hook sentinel ("hooks claude-code stop" hook_progress entry) is the
-// authoritative completion signal and the primary fast-path — when present it
-// means the transcript is fully flushed and we return at once. But it is not
-// reliably present while this hook runs: Claude persists it around the hook
-// boundary, so a poll loop inside the stop hook often never observes it and
-// would otherwise burn the full maxWait on every healthy turn-end.
-//
-// Settle-on-stability is therefore the fallback. It is only a heuristic proxy
-// for completion, not a completion signal, so we require the size to hold steady
-// across a wall-clock quietWindow (not just a poll or two) before trusting it.
-// A shorter window risks a brief mid-write pause — a GC pause, disk contention,
-// or a large tool-result flushed as several writes — being mistaken for a
-// finished transcript, causing turn-end to read a TRUNCATED transcript that then
-// gets condensed and pushed. Any observed growth resets the window, so a
-// transcript still being written with sub-second pauses keeps waiting up to
-// maxWait, while a genuinely settled file still returns well under it.
-func waitForTranscriptFlush(ctx context.Context, transcriptPath string, hookStartTime time.Time) {
-	const (
-		maxWait      = 3 * time.Second
-		pollInterval = 50 * time.Millisecond
-		tailBytes    = 4096
-		maxSkew      = 2 * time.Second
-		// quietWindow is how long the transcript size must hold steady before
-		// settle-on-stability is trusted. It must comfortably exceed a plausible
-		// mid-write pause so a brief stall is not mistaken for completion, while
-		// still returning well under maxWait on a genuinely settled file.
-		quietWindow = 500 * time.Millisecond
-	)
-
-	logCtx := logging.WithComponent(ctx, "agent.claudecode")
-
-	// Fast path: skip the poll loop when the sentinel can't possibly appear.
-	// - File doesn't exist: nothing to poll.
-	// - File is stale (unmodified for 2+ min): agent isn't running anymore.
-	//   This avoids 3s timeouts per stale "active" session (e.g., agent crashed
-	//   without firing stop hook).
-	const staleThreshold = 2 * time.Minute
-	info, err := os.Stat(transcriptPath)
-	if err != nil {
-		// Most likely the file doesn't exist; other errors (permission, etc.)
-		// would also prevent polling, so skip the wait either way.
-		return
-	}
-	fileAge := time.Since(info.ModTime())
-	if fileAge > staleThreshold {
-		logging.Debug(logCtx, "transcript file is stale, skipping sentinel wait",
-			slog.Duration("file_age", fileAge),
-		)
-		return
-	}
-
-	deadline := time.Now().Add(maxWait)
-	lastSize := int64(-1)
-	var stableSince time.Time
-	for time.Now().Before(deadline) {
-		// Authoritative fast-path: the stop-hook sentinel means the transcript is
-		// fully flushed, so return immediately without waiting out the window.
-		if checkStopSentinel(transcriptPath, tailBytes, hookStartTime, maxSkew) {
-			logging.Debug(logCtx, "transcript flush sentinel found",
-				slog.Duration("wait", time.Since(hookStartTime)),
-			)
-			return
-		}
-
-		// Settle-on-stability fallback: trust the file only once its size has held
-		// steady for the full quietWindow. Any growth resets the window, so a
-		// sub-second pause mid-write keeps us waiting rather than returning on a
-		// truncated transcript.
-		if fi, statErr := os.Stat(transcriptPath); statErr == nil {
-			switch {
-			case fi.Size() != lastSize:
-				lastSize = fi.Size()
-				stableSince = time.Now()
-			case time.Since(stableSince) >= quietWindow:
-				logging.Debug(logCtx, "transcript settled (size stable through quiet window), proceeding",
-					slog.Duration("wait", time.Since(hookStartTime)),
-					slog.Duration("quiet_window", quietWindow),
-					slog.Int64("size", fi.Size()),
-				)
-				return
-			}
-		}
-
-		time.Sleep(pollInterval)
-	}
-	logging.Warn(logCtx, "transcript flush not settled within timeout, proceeding",
-		slog.Duration("timeout", maxWait),
-	)
-}
-
-// checkStopSentinel reads the tail of the transcript file and looks for the sentinel.
-func checkStopSentinel(path string, tailBytes int64, hookStartTime time.Time, maxSkew time.Duration) bool {
-	f, err := os.Open(path) //nolint:gosec // path comes from agent hook input
-	if err != nil {
-		return false
-	}
-	defer f.Close()
-
-	info, err := f.Stat()
-	if err != nil {
-		return false
-	}
-	offset := info.Size() - tailBytes
-	if offset < 0 {
-		offset = 0
-	}
-	buf := make([]byte, info.Size()-offset)
-	if _, err := f.ReadAt(buf, offset); err != nil {
-		return false
-	}
-
-	lines := strings.Split(string(buf), "\n")
-	for _, line := range lines {
-		line = strings.TrimSpace(line)
-		if line == "" || !strings.Contains(line, stopHookSentinel) {
-			continue
-		}
-
-		var entry struct {
-			Timestamp string `json:"timestamp"`
-		}
-		if json.Unmarshal([]byte(line), &entry) != nil || entry.Timestamp == "" {
-			continue
-		}
-		ts, err := time.Parse(time.RFC3339Nano, entry.Timestamp)
-		if err != nil {
-			ts, err = time.Parse(time.RFC3339, entry.Timestamp)
-			if err != nil {
-				continue
-			}
-		}
-		// Validate timestamp is within acceptable range:
-		// - Not too far in the past (before hook started minus skew)
-		// - Not too far in the future (after hook started plus skew)
-		lowerBound := hookStartTime.Add(-maxSkew)
-		upperBound := hookStartTime.Add(maxSkew)
-		if ts.After(lowerBound) && ts.Before(upperBound) {
-			return true
-		}
-	}
-	return false
 }

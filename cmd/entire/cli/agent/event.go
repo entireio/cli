@@ -102,6 +102,16 @@ type Event struct {
 	// and TurnStart/TurnEnd events when the agent provides model info.
 	Model string
 
+	// FinalResponse is producer-supplied evidence for the completed turn.
+	FinalResponse *string
+
+	// FinalResponsePresent distinguishes an omitted field from an explicit null.
+	FinalResponsePresent bool
+
+	// StopHookActive reports that this turn-end event followed a continuation
+	// requested by an earlier stop hook. It does not prove this event is final.
+	StopHookActive bool
+
 	// Timestamp is when the event occurred.
 	Timestamp time.Time
 

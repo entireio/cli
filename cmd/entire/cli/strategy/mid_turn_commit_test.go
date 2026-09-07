@@ -61,7 +61,7 @@ func TestSessionHasNewContentFromLiveTranscript_NormalizesAbsolutePaths(t *testi
 `
 	transcriptPath := filepath.Join(dir, "transcript.jsonl")
 	require.NoError(t, os.WriteFile(transcriptPath, []byte(transcriptContent), 0o644))
-	// Backdate so waitForTranscriptFlush treats it as stale and skips the 3s poll.
+	// Backdate so the best-effort readiness preparation skips the quiet wait.
 	stale := time.Now().Add(-3 * time.Minute)
 	require.NoError(t, os.Chtimes(transcriptPath, stale, stale))
 
@@ -161,7 +161,7 @@ func TestSessionHasNewContentFromLiveTranscript_IncludesSubagentFiles(t *testing
 `
 	transcriptPath := filepath.Join(transcriptDir, "transcript.jsonl")
 	require.NoError(t, os.WriteFile(transcriptPath, []byte(mainTranscript), 0o644))
-	// Backdate so waitForTranscriptFlush treats it as stale and skips the 3s poll.
+	// Backdate so the best-effort readiness preparation skips the quiet wait.
 	staleTime := time.Now().Add(-3 * time.Minute)
 	require.NoError(t, os.Chtimes(transcriptPath, staleTime, staleTime))
 

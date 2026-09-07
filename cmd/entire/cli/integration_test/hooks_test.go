@@ -35,9 +35,12 @@ func TestHookRunner_SimulateStop(t *testing.T) {
 	env := NewRepoWithCommit(t)
 	// Create a session
 	session := env.NewSession()
+	if err := session.TranscriptBuilder.WriteToFile(session.TranscriptPath); err != nil {
+		t.Fatalf("create empty transcript: %v", err)
+	}
 
-	// Simulate user prompt submit first
-	err := env.SimulateUserPromptSubmit(session.ID)
+	// Modern Stop evidence is scoped to the boundary captured at TurnStart.
+	err := env.SimulateUserPromptSubmitWithTranscriptPath(session.ID, session.TranscriptPath)
 	if err != nil {
 		t.Fatalf("SimulateUserPromptSubmit failed: %v", err)
 	}
@@ -51,7 +54,7 @@ func TestHookRunner_SimulateStop(t *testing.T) {
 	})
 
 	// Simulate stop
-	err = env.SimulateStop(session.ID, session.TranscriptPath)
+	err = env.SimulateStopWithFinalResponse(session.ID, session.TranscriptPath, "Done!")
 	if err != nil {
 		t.Fatalf("SimulateStop failed: %v", err)
 	}
