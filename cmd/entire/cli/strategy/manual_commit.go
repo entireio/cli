@@ -35,7 +35,20 @@ type ManualCommitStrategy struct {
 	// t.Parallel() makes a data race (CLAUDE.md: "Tests that modify
 	// process-global state cannot be parallelized").
 	blobFetchBudget time.Duration
+
+	// turnCheckpointFinalizeBudget bounds the whole turn-finalize pass. Zero
+	// means the production default.
+	turnCheckpointFinalizeBudget time.Duration
+
+	// checkpointRefFetcher overrides the hook ref fetcher in tests. Production
+	// uses remote.HookCheckpointRefFetcher.
+	checkpointRefFetcher checkpoint.RefFetchFunc
 }
+
+const (
+	standardTurnCheckpointFinalizeBudget    = 20 * time.Second
+	constrainedTurnCheckpointFinalizeBudget = 5 * time.Second
+)
 
 // getStateStore returns the session state store, initializing it lazily if needed.
 // Thread-safe via sync.Once.
@@ -105,8 +118,12 @@ func (s *ManualCommitStrategy) HasBlobFetcher() bool {
 // then reads its filtered-out metadata.json as absent, reporting a checkpoint
 // that exists as missing.
 func (s *ManualCommitStrategy) hookCheckpointStoreOptions(ctx context.Context) checkpoint.OpenOptions {
+	refFetcher := s.checkpointRefFetcher
+	if refFetcher == nil {
+		refFetcher = remote.HookCheckpointRefFetcher()
+	}
 	return checkpoint.OpenOptions{
-		RefFetcher:  remote.HookCheckpointRefFetcher(),
+		RefFetcher:  refFetcher,
 		BlobFetcher: s.hookBlobFetcher(),
 		ReadRemotes: CheckpointReadRemotes(ctx),
 	}

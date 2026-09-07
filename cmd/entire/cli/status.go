@@ -614,7 +614,7 @@ func writeActiveSessions(ctx context.Context, w io.Writer, sty statusStyles) {
 				fmt.Fprintf(w, "%s %s\n", sty.render(sty.yellow, "!"), sty.render(sty.yellow, warning))
 			}
 			if st.CaptureDegradedAt != nil {
-				warning := fmt.Sprintf("capture degraded %s: status scan over budget; new-file detection skipped (see 'entire doctor logs')",
+				warning := fmt.Sprintf("capture degraded %s: a capture operation exceeded its time budget (see 'entire doctor logs')",
 					timeAgo(*st.CaptureDegradedAt))
 				fmt.Fprintf(w, "%s %s\n", sty.render(sty.yellow, "!"), sty.render(sty.yellow, warning))
 			}
@@ -845,7 +845,7 @@ type sessionBriefJSON struct {
 	Model  string `json:"model,omitempty"`
 	Status string `json:"status"`
 	// CaptureDegraded reports that a session for this agent last turned with a
-	// status scan over budget, so new-file detection was skipped.
+	// capture operation over budget.
 	CaptureDegraded bool `json:"capture_degraded,omitempty"`
 }
 
