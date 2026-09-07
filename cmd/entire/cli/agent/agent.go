@@ -434,6 +434,34 @@ type SessionEndBudgeter interface {
 	SessionEndBudget() time.Duration
 }
 
+// HookTimeoutProvider is implemented by agents that need a hook event's
+// timeout to differ from the flat default DispatchLifecycleEvent otherwise
+// applies to every event (see HookTimeoutFor). SessionEndBudgeter above is
+// the existing precedent for this exact shape — a per-event override,
+// because only that one event's host enforces a hard budget of its own; this
+// generalizes the same idea from "one hard-coded event" to any event an
+// agent has real evidence for, instead of leaving every hook at one flat
+// number regardless of what it actually does (GitHub issue #2115).
+//
+// Codex is the motivating implementation: it already writes a different
+// declared timeout into .codex/hooks.json for its SessionEnd hook
+// (SessionEndTimeoutSec) than for every other event (defaultHookTimeoutSec).
+// HookTimeout exposes that same distinction through one generic interface so
+// it is resolved the same way (HookTimeoutFor) wherever a timeout decision is
+// made, rather than each agent package inventing its own lookup.
+type HookTimeoutProvider interface {
+	Agent
+
+	// HookTimeout returns the declared timeout for the named hook event, in
+	// the agent's own hook-verb spelling (e.g. Codex's HookNameSessionEnd,
+	// "session-end" — the same string ParseHookEvent and the `entire hooks
+	// <agent> <verb>` subcommand use, not a display name). A non-positive
+	// return means "no override for this event — use DefaultHookTimeout()."
+	// Implement an override only for events backed by real evidence; do not
+	// special-case every event just because the interface exists.
+	HookTimeout(hookName string) time.Duration
+}
+
 // RestoredSessionPathResolver is implemented by agents that need a
 // transcript-specific path when Entire reconstructs a session from checkpoint
 // metadata. This is used for restored sessions only; live sessions still use

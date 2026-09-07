@@ -20,6 +20,7 @@ var (
 	_ agent.HookResponseWriter       = (*CodexAgent)(nil)
 	_ agent.ContextInjector          = (*CodexAgent)(nil)
 	_ agent.SessionEndBudgeter       = (*CodexAgent)(nil)
+	_ agent.HookTimeoutProvider      = (*CodexAgent)(nil)
 )
 
 // OwnsEffectiveHookDiagnostics keeps Codex's discovered-file state out of the
@@ -107,6 +108,24 @@ const sessionEndBudget = 2 * time.Second
 // SessionEndBudget implements agent.SessionEndBudgeter. Codex runs SessionEnd
 // inside its shutdown sequence under a hard cap; see the interface docs.
 func (c *CodexAgent) SessionEndBudget() time.Duration { return sessionEndBudget }
+
+// HookTimeout implements agent.HookTimeoutProvider. SessionEnd is the one
+// event with an evidence-backed override today — Codex clamps it to
+// SessionEndTimeoutSec regardless of what hooks.json declares, so returning
+// anything else there would just be wrong. Every other event returns 0 (no
+// override): GitHub issues #1137 and #957 report Codex hooks repeatedly
+// hitting the flat 30s cap, but neither pins a specific replacement number,
+// and #2115's own proposed per-hook values are explicitly hedged ("one
+// developer's corpus... under-sampled"). Guessing a new number into
+// production is worse than leaving proven-safe events at
+// agent.DefaultHookTimeout() until a maintainer has real data to tune with —
+// this method is where that tuning lands once it exists.
+func (c *CodexAgent) HookTimeout(hookName string) time.Duration {
+	if hookName == HookNameSessionEnd {
+		return time.Duration(SessionEndTimeoutSec) * time.Second
+	}
+	return 0
+}
 
 // ParseHookEvent translates a Codex hook into a normalized lifecycle Event.
 // Returns nil if the hook has no lifecycle significance.

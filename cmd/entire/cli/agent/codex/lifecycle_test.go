@@ -119,6 +119,38 @@ func TestCodexAgent_SessionEndBudgetFitsConfiguredTimeout(t *testing.T) {
 		"budget must leave at least 1s for wrapper + binary startup, which Codex's clock counts and Entire's does not")
 }
 
+// TestCodexAgent_HookTimeoutHonorsSessionEndOverride pins the one
+// evidence-backed override this method makes: SessionEnd gets Codex's own
+// clamp (SessionEndTimeoutSec), never the flat default, and every other event
+// falls through to agent.DefaultHookTimeout() unchanged — see GitHub issues
+// #2115/#1137/#957 for why new numbers for the other events are deliberately
+// not guessed here.
+func TestCodexAgent_HookTimeoutHonorsSessionEndOverride(t *testing.T) {
+	t.Parallel()
+	ag := &CodexAgent{}
+
+	require.Equal(t, time.Duration(SessionEndTimeoutSec)*time.Second, ag.HookTimeout(HookNameSessionEnd))
+
+	for _, hookName := range []string{
+		HookNameSessionStart, HookNameUserPromptSubmit, HookNameStop,
+		HookNamePostToolUse, HookNameSubagentStart, HookNameSubagentStop,
+	} {
+		require.Zerof(t, ag.HookTimeout(hookName), "hook %q must have no override yet", hookName)
+	}
+}
+
+// TestDefaultHookTimeoutSecMatchesGenericDefault guards against the flat
+// default drifting apart across the two places it is spelled: the int
+// seconds value hooks.json needs (defaultHookTimeoutSec) and the
+// time.Duration the generic dispatch-time mechanism reads
+// (agent.DefaultHookTimeout()). They are independent literals on purpose
+// (different packages, different types) rather than one deriving the other,
+// so nothing enforces this except this test.
+func TestDefaultHookTimeoutSecMatchesGenericDefault(t *testing.T) {
+	t.Parallel()
+	require.Equal(t, defaultHookTimeoutSec, int(agent.DefaultHookTimeout()/time.Second))
+}
+
 func TestParseHookEvent_UserPromptSubmit(t *testing.T) {
 	t.Parallel()
 	ag := &CodexAgent{}

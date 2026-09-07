@@ -10,6 +10,7 @@ import (
 	"io"
 	"log/slog"
 	"strings"
+	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/claudecode"
@@ -91,6 +92,62 @@ func getHookType(hookName string) string {
 		return "tool"
 	default:
 		return "agent"
+	}
+}
+
+// ErrHookTimedOut reports that a hook handler was abandoned because it ran
+// past the timeout agent.HookTimeoutFor declared for it. Before this, that
+// declared value was purely nominal for every agent except Codex: nothing on
+// our side watched it, so a stuck or slow handler either ran unbounded
+// in-process or waited on an external host's own kill (Codex's hooks.json
+// timeout, which prints "hook timed out after Ns" itself — see GitHub
+// issues #1137/#957) with no record on our side of which case it was. This
+// gives every agent the same self-imposed backstop, and gives it a distinct,
+// logged failure mode rather than silence (#2115: "the cap is doing
+// telemetry's job").
+var ErrHookTimedOut = errors.New("hook exceeded its configured timeout")
+
+// runHookWithTimeout runs fn under the timeout agent.HookTimeoutFor resolves
+// for (ag, hookName), mirroring the goroutine/timer/select shape
+// gitrepo.StatusWithBudget already uses for the same kind of problem (a
+// blocking in-process call with no ctx-polling of its own). fn's goroutine is
+// not killed on timeout — a synchronous call cannot be forced to stop the way
+// an external host kills a subprocess — but this hook's own process is about
+// to exit right after its RunE returns, so an abandoned fn dies with it
+// moments later; returning early just stops this process from silently
+// absorbing a wait nothing is watching, and logs it distinctly so a stuck
+// hook leaves real evidence instead of nothing.
+func runHookWithTimeout(ctx context.Context, ag agent.Agent, hookName string, fn func() error) error {
+	timeout := agent.HookTimeoutFor(ag, hookName)
+	if timeout <= 0 {
+		return fn()
+	}
+
+	resultCh := make(chan error, 1)
+	start := time.Now()
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				resultCh <- fmt.Errorf("hook handler panicked: %v", r)
+			}
+		}()
+		resultCh <- fn()
+	}()
+
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	select {
+	case err := <-resultCh:
+		return err
+	case <-timer.C:
+		elapsed := time.Since(start).Round(time.Millisecond)
+		logging.Warn(logging.WithComponent(ctx, "hooks"),
+			"hook exceeded its configured timeout",
+			slog.String("hook", hookName),
+			slog.Duration("elapsed", elapsed),
+			slog.Duration("timeout", timeout))
+		return fmt.Errorf("hook %q abandoned after %s (timeout %s): %w",
+			hookName, elapsed, timeout, ErrHookTimedOut)
 	}
 }
 
@@ -207,10 +264,14 @@ func executeAgentHook(cmd *cobra.Command, agentName types.AgentName, hookName st
 
 	if event != nil {
 		// Lifecycle event — use the generic dispatcher
-		hookErr = DispatchLifecycleEvent(ctx, ag, event)
+		hookErr = runHookWithTimeout(ctx, ag, hookName, func() error {
+			return DispatchLifecycleEvent(ctx, ag, event)
+		})
 	} else if claudePostTodoCheckpointHook {
 		// PostTodo is Claude-specific: creates incremental checkpoints during subagent execution
-		hookErr = handleClaudeCodePostTodo(ctx)
+		hookErr = runHookWithTimeout(ctx, ag, hookName, func() error {
+			return handleClaudeCodePostTodo(ctx)
+		})
 	}
 	// Other pass-through hooks (nil event, no special handling) are no-ops
 
