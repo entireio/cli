@@ -1165,6 +1165,85 @@ without rewriting", which is false, and it would have grown the number of
 index-rewriting call sites from one to eleven. That is why the guard test exists
 rather than a comment.
 
+#### An Empty Index Is Not the Same as a Missing One
+
+**A missing `.git/index` must never be read as an empty index.** Git does
+exactly that — ENOENT, and only ENOENT, yields an empty in-core index — and
+go-git v6 does too (`storage/filesystem.IndexStorage.Index` returns a zero-entry
+index on `os.ErrNotExist`, in both its cache-stat and its file-open branch). That
+single conflation is what turns the race above into a commit that deletes every
+tracked file, with exit code 0 and no warning. Neither implementation will ever
+raise it for us, so `gitrepo.IndexRecordsNoEntries` (`gitrepo/emptyindex.go`) is
+the reader that keeps the two facts apart: a missing file comes back as
+`os.ErrNotExist`, and only a header that positively records zero entries comes
+back as empty. It reads the 12-byte header rather than decoding the index,
+because it runs on every commit, and it reports a split index (`link` extension,
+entries in `.git/sharedindex.<hash>`) as *not* empty.
+
+**Two guards ride on it, both read-only, neither able to fail a commit**
+(`warnOnEmptyIndexCommit` / `warnOnEmptyTreeCommit`, both in `hooks_git_cmd.go`):
+
+- `prepare-commit-msg` compares the index git is committing from — `$GIT_INDEX_FILE`,
+  which git exports to the commit hooks — against HEAD, and warns *before* the
+  commit object exists. By the time that hook runs the file is authoritative and
+  the check is free of any remaining TOCTOU. Git reads the index in
+  `prepare_index()` and **re-reads it after the `pre-commit` hook** — so a
+  `pre-commit` hook that stages a file does change the commit, and "read once
+  before any hook" is wrong — but from there on the commit's tree is written
+  from that in-core copy, and nothing after `prepare-commit-msg` can move it:
+  restoring a good index from a `commit-msg` hook was measured and the empty
+  tree was still committed. Measured values of `$GIT_INDEX_FILE`, identical in
+  `prepare-commit-msg` and `commit-msg`: `.git/index` (relative) for a plain
+  staged commit, `--amend`, and `--allow-empty`; `.git/index.lock` for
+  `commit -a`; `.git/next-index-<pid>.lock` for `commit -m msg -- <path>`; and
+  always **absolute** in a linked worktree, which is what makes the
+  relative-path join safe (a relative `.git/index` where `.git` is a *file*
+  never occurs). For an ordinary `git commit`, `prepare_index` has already
+  renamed its refreshed copy over `.git/index` by hook time, so comparing
+  `$GIT_INDEX_FILE` against `.git/index` proves nothing — HEAD and the worktree
+  are the comparison that works.
+- `post-commit` asks the same question of HEAD, and **returns before the strategy
+  runs at all**. That skip is the part that is not merely advisory: condensing
+  against such a commit deletes the shadow branch, marks the session condensed,
+  and advances `BaseCommit` onto a commit the user is about to remove with `git
+  reset --mixed HEAD~1`, so the recovery leaves the session's pending checkpoint
+  data consumed by a commit that no longer exists. Measured against the
+  unguarded binary through the real hook: `should_condense: true`, "session
+  condensed", "shadow branch deleted".
+
+**The signature is two facts together: the commit records no files, and the files
+it removes are still on disk.** Either alone is ordinary — someone who deletes
+every tracked file means it, and a repository can legitimately hold nothing. Only
+the pair says the index was read as empty when it was not. `git rm -r --cached .`
+followed by a commit produces the same pair and is warned about too; the message
+says so in its last line, and warning is all it does. The worktree probe is
+bounded (`hazardSurvivorScanLimit`) so it cannot scale with repository size on
+the per-commit path, and the tree names go through the `worktreedir` root because
+they may have come from a remote.
+
+Output goes to **stdout**: the installed `prepare-commit-msg` and `post-commit`
+hooks send stderr to `/dev/null` so a hook failure can never mix into a user's
+git output, and git neither reads nor interprets a git hook's stdout. Both hooks
+still record the hazard at ERROR in `.entire/logs`, for the case where there is
+no terminal at all.
+
+Detection is deliberately all this does. Entire cannot prevent the corruption —
+by the time any hook runs, git has already read the index — and the hooks are
+installed `2>/dev/null || true` precisely so Entire can never abort a user's
+commit. Reversing that contract is a product decision, not a bug fix. What these
+guards remove is the silence, and the second loss that silence used to cause.
+
+**Two known consequences, both deliberate.** `prepare-commit-msg` warns and
+*still stamps* the `Entire-Checkpoint` trailer, and `post-commit` then skips, so
+the empty-tree commit carries a checkpoint ID nothing condensed. On the
+prescribed recovery that commit disappears and the trailer with it; it only
+persists for a user who keeps the commit, and suppressing the stamp would mean
+making `PrepareCommitMsg` conditional on a hazard the user may be about to
+ignore. And the surviving-path probe stops after `hazardSurvivorScanLimit`
+entries in tree order, so a commit whose first 512 tracked paths are all absent
+from disk while a later one survives is not warned about — the bound is what
+keeps the probe off the critical path in a large repository.
+
 #### go-git v5 Bugs - Use CLI Instead
 
 **Do NOT use go-git v5 for `checkout` or `reset --hard` operations.**
