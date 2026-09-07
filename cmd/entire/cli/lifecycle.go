@@ -102,6 +102,8 @@ func DispatchLifecycleEvent(ctx context.Context, ag agent.Agent, event *agent.Ev
 		return handleLifecycleSessionStart(ctx, ag, event)
 	case agent.TurnStart:
 		return handleLifecycleTurnStart(ctx, ag, event)
+	case agent.PromptUpdate:
+		return handleLifecyclePromptUpdate(ctx, ag, event)
 	case agent.TurnEnd:
 		return handleLifecycleTurnEnd(ctx, ag, event)
 	case agent.Compaction:
@@ -612,27 +614,11 @@ func handleLifecycleTurnStart(ctx context.Context, ag agent.Agent, event *agent.
 	}
 	captureSpan.End()
 
-	// Append prompt to prompt.txt on filesystem so it's available for
-	// mid-turn commits (before SaveStep writes it to the shadow branch).
-	// Prompts are separated by "\n\n---\n\n" to support multiple turns.
-	if event.Prompt != "" {
-		sessionName := sessionMetadataName(sessionID)
-		if root, rootErr := entiredir.Open(ctx); rootErr == nil {
-			if mkErr := osroot.MkdirAllNoSymlink(root, sessionName, 0o750); mkErr == nil {
-				promptName := sessionName + "/" + paths.PromptFileName
-				existing, readErr := entiredir.ReadFile(root, promptName)
-				var content string
-				if readErr == nil && len(existing) > 0 {
-					content = string(existing) + "\n\n---\n\n" + event.Prompt
-				} else {
-					content = event.Prompt
-				}
-				if writeErr := entiredir.WriteFile(root, promptName, []byte(content), 0o600); writeErr != nil {
-					logging.Warn(logCtx, "failed to write prompt.txt",
-						slog.String("error", writeErr.Error()))
-				}
-			}
-		}
+	// Store the prompt before InitializeSession so a fast mid-turn commit can
+	// include it in the checkpoint's filesystem metadata.
+	if err := appendPromptToFile(ctx, sessionID, event.Prompt); err != nil {
+		logging.Warn(logCtx, "failed to write prompt.txt",
+			slog.String("error", err.Error()))
 	}
 
 	// Initialize session (setup already ran above, before the first status read)
@@ -666,19 +652,7 @@ func handleLifecycleTurnStart(ctx context.Context, ag agent.Agent, event *agent.
 		adoptReviewEnv(logCtx, state, string(ag.Name()))
 		adoptInvestigateEnv(logCtx, state, string(ag.Name()))
 
-		skillEventSource := *event
-		// Record a skill event for a leading "/<command>" in the raw prompt. Only
-		// once ownership is known — TurnStart bypasses the owner filter so
-		// InitializeSession can repair it — and never overriding native adapter events.
-		if state.AgentType == "" || state.AgentType == ag.Type() {
-			skillEventSource.SkillEvents = agent.AppendPromptSlashCommandSkillEvent(
-				skillEventSource.SkillEvents,
-				string(ag.Name()),
-				event.Prompt,
-				event.Timestamp,
-			)
-		}
-		appendedSkillEvents = appendEventSkillEventsToState(&skillEventSource, state)
+		appendedSkillEvents = appendPromptSkillEventToState(ag, event, state)
 		if state.Kind == before.Kind &&
 			state.ReviewPrompt == before.ReviewPrompt &&
 			slices.Equal(state.ReviewSkills, before.ReviewSkills) &&
@@ -2127,6 +2101,19 @@ func appendEventSkillEventsToState(event *agent.Event, state *strategy.SessionSt
 		return nil
 	}
 	return strategy.AppendNewSkillEvents(state, event.SkillEvents)
+}
+
+func appendPromptSkillEventToState(ag agent.Agent, event *agent.Event, state *strategy.SessionState) []agent.SkillEvent {
+	skillEventSource := *event
+	if state.AgentType == "" || state.AgentType == ag.Type() {
+		skillEventSource.SkillEvents = agent.AppendPromptSlashCommandSkillEvent(
+			skillEventSource.SkillEvents,
+			string(ag.Name()),
+			event.Prompt,
+			event.Timestamp,
+		)
+	}
+	return appendEventSkillEventsToState(&skillEventSource, state)
 }
 
 // envAdoptionSpec carries the kind-specific bits of env-driven session

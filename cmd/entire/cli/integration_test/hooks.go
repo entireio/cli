@@ -1018,6 +1018,17 @@ func (r *OpenCodeHookRunner) SimulateOpenCodeTurnStart(sessionID, _, prompt stri
 	return r.runOpenCodeHookWithInput("turn-start", input)
 }
 
+func (r *OpenCodeHookRunner) SimulateOpenCodePromptUpdate(sessionID, prompt string) error {
+	r.T.Helper()
+
+	input := map[string]string{
+		"session_id": sessionID,
+		"prompt":     prompt,
+	}
+
+	return r.runOpenCodeHookWithInput("prompt-update", input)
+}
+
 // SimulateOpenCodeTurnEnd simulates the turn-end hook for OpenCode.
 // This is equivalent to Claude Code's Stop hook.
 // Note: The plugin now sends only session_id. The Go handler calls `opencode export`
@@ -1184,6 +1195,12 @@ func (env *TestEnv) SimulateOpenCodeTurnStart(sessionID, transcriptPath, prompt 
 	env.T.Helper()
 	runner := NewOpenCodeHookRunner(env.RepoDir, env.OpenCodeProjectDir, env.T)
 	return runner.SimulateOpenCodeTurnStart(sessionID, transcriptPath, prompt)
+}
+
+func (env *TestEnv) SimulateOpenCodePromptUpdate(sessionID, prompt string) error {
+	env.T.Helper()
+	runner := NewOpenCodeHookRunner(env.RepoDir, env.OpenCodeProjectDir, env.T)
+	return runner.SimulateOpenCodePromptUpdate(sessionID, prompt)
 }
 
 // SimulateOpenCodeTurnEnd is a convenience method on TestEnv.

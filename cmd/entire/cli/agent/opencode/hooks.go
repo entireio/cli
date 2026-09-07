@@ -142,9 +142,9 @@ func (a *OpenCodeAgent) CheckHookConfig(ctx context.Context) agent.HookConfigSta
 //   - turn-start    → HookUserPromptSubmit (user prompt triggers a turn)
 //   - turn-end      → HookStop (agent response complete)
 //
-// Note: HookNames() returns 5 hooks (including "compaction"), but GetSupportedHooks()
-// returns only 4. The "compaction" hook is OpenCode-specific with no standard HookType
-// mapping — it is handled via ParseHookEvent but not advertised as a standard lifecycle event.
+// Note: HookNames() also includes "compaction" and "prompt-update", which have
+// no standard HookType mapping. ParseHookEvent handles both without advertising
+// them as standard lifecycle events.
 func (a *OpenCodeAgent) GetSupportedHooks() []agent.HookType {
 	return []agent.HookType{
 		agent.HookSessionStart,

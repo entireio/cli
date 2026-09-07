@@ -50,6 +50,10 @@ const (
 	// commit mid-turn (before TurnEnd fires) have no per-tool file accounting,
 	// and the carry-forward path falls back to whole-transcript extraction.
 	ToolUse
+
+	// PromptUpdate supplies prompt text that was unavailable when the turn
+	// started. It updates prompt storage without starting another logical turn.
+	PromptUpdate
 )
 
 // String returns a human-readable name for the event type.
@@ -73,6 +77,8 @@ func (e EventType) String() string {
 		return "ModelUpdate"
 	case ToolUse:
 		return "ToolUse"
+	case PromptUpdate:
+		return "PromptUpdate"
 	default:
 		return "Unknown"
 	}

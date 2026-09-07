@@ -720,6 +720,153 @@ func TestHandleLifecycleTurnStart_EmptySessionID(t *testing.T) {
 	}
 }
 
+func TestDispatchLifecyclePromptUpdate_AppendsWithoutChangingTurnState(t *testing.T) {
+	repoDir := t.TempDir()
+	testutil.InitRepo(t, repoDir)
+	t.Chdir(repoDir)
+
+	const sessionID = "prompt-update-append"
+	stateBefore := &strategy.SessionState{
+		SessionID:             sessionID,
+		StartedAt:             time.Now().Round(0),
+		Phase:                 session.PhaseActive,
+		TurnID:                "turn-before-repair",
+		LastPrompt:            "earlier prompt",
+		LastCheckpointID:      "abc123abc123",
+		TurnCheckpointIDs:     []string{"abc123abc123"},
+		AttributionBaseCommit: "base-before-repair",
+		PendingPromptAttribution: &strategy.PromptAttribution{
+			UserLinesAdded: 3,
+		},
+	}
+	require.NoError(t, strategy.SaveSessionState(context.Background(), stateBefore))
+
+	promptPath := filepath.Join(paths.SessionMetadataDirFromSessionID(sessionID), paths.PromptFileName)
+	testutil.WriteFile(t, repoDir, promptPath, "earlier prompt")
+
+	err := DispatchLifecycleEvent(context.Background(), newMockAgent(), &agent.Event{
+		Type:      agent.PromptUpdate,
+		SessionID: sessionID,
+		Prompt:    "late prompt",
+	})
+	require.NoError(t, err)
+
+	prompt, err := os.ReadFile(filepath.Join(repoDir, promptPath))
+	require.NoError(t, err)
+	require.Equal(t, "earlier prompt"+checkpoint.PromptSeparator+"late prompt", string(prompt))
+
+	stateAfter, err := strategy.LoadSessionState(context.Background(), sessionID)
+	require.NoError(t, err)
+	require.NotNil(t, stateAfter)
+	expectedState := *stateBefore
+	expectedState.LastPrompt = "late prompt"
+	require.Equal(t, &expectedState, stateAfter)
+}
+
+func TestDispatchLifecyclePromptUpdate_RecordsGenericSkillSlashEvent(t *testing.T) {
+	repoDir := t.TempDir()
+	testutil.InitRepo(t, repoDir)
+	t.Chdir(repoDir)
+
+	ag := newMockAgent()
+	const sessionID = "prompt-update-skill-event"
+	require.NoError(t, strategy.SaveSessionState(context.Background(), &strategy.SessionState{
+		SessionID: sessionID,
+		AgentType: ag.Type(),
+		StartedAt: time.Now().Round(0),
+		Phase:     session.PhaseActive,
+		TurnID:    "turn-before-prompt-repair",
+	}))
+
+	err := DispatchLifecycleEvent(context.Background(), ag, &agent.Event{
+		Type:      agent.PromptUpdate,
+		SessionID: sessionID,
+		Prompt:    "/skill:trigger-analysis inspect the implementation",
+		Timestamp: time.Date(2026, 5, 25, 12, 34, 56, 0, time.UTC),
+	})
+	require.NoError(t, err)
+
+	state, err := strategy.LoadSessionState(context.Background(), sessionID)
+	require.NoError(t, err)
+	require.NotNil(t, state)
+	require.Len(t, state.SkillEvents, 1)
+
+	skillEvent := state.SkillEvents[0]
+	require.Equal(t, agent.SkillEventTypePromptInvocation, skillEvent.EventType)
+	require.Equal(t, "trigger-analysis", skillEvent.Skill.Name)
+	require.Equal(t, string(ag.Name()), skillEvent.Source.Agent)
+	require.Equal(t, agent.SkillSignalPromptSlashCommand, skillEvent.Source.Signal)
+	require.Equal(t, "turn-before-prompt-repair", skillEvent.TurnID)
+	require.Equal(t, "2026-05-25T12:34:56Z", skillEvent.Timestamp)
+}
+
+func TestDispatchLifecyclePromptUpdate_WaitsForSessionLockAndPersistsPrompt(t *testing.T) {
+	repoDir := t.TempDir()
+	testutil.InitRepo(t, repoDir)
+	t.Chdir(repoDir)
+
+	ag := newMockAgent()
+	const sessionID = "prompt-update-lock-contention"
+	require.NoError(t, strategy.SaveSessionState(context.Background(), &strategy.SessionState{
+		SessionID: sessionID,
+		AgentType: ag.Type(),
+		StartedAt: time.Now().Round(0),
+		Phase:     session.PhaseActive,
+		TurnID:    "turn-under-condensation",
+	}))
+
+	lockHeld := make(chan struct{})
+	releaseLock := make(chan struct{})
+	holderDone := make(chan error, 1)
+	go func() {
+		holderDone <- strategy.MutateSessionState(context.Background(), sessionID, func(*strategy.SessionState) error {
+			close(lockHeld)
+			<-releaseLock
+			return strategy.ErrMutationSkip
+		})
+	}()
+	<-lockHeld
+
+	handlerDone := make(chan error, 1)
+	handlerStarted := make(chan struct{})
+	go func() {
+		close(handlerStarted)
+		handlerDone <- DispatchLifecycleEvent(context.Background(), ag, &agent.Event{
+			Type:      agent.PromptUpdate,
+			SessionID: sessionID,
+			Prompt:    "late prompt",
+		})
+	}()
+	<-handlerStarted
+
+	// The discarded-repair regression bounded this wait to two seconds.
+	select {
+	case err := <-handlerDone:
+		close(releaseLock)
+		require.NoError(t, <-holderDone)
+		t.Fatalf("prompt update returned before the session lock was released: %v", err)
+	case <-time.After(2250 * time.Millisecond):
+	}
+
+	close(releaseLock)
+	require.NoError(t, <-holderDone)
+	select {
+	case err := <-handlerDone:
+		require.NoError(t, err)
+	case <-time.After(time.Second):
+		t.Fatal("prompt update did not finish after the session lock was released")
+	}
+
+	state, err := strategy.LoadSessionState(context.Background(), sessionID)
+	require.NoError(t, err)
+	require.Equal(t, "late prompt", state.LastPrompt)
+
+	promptPath := filepath.Join(repoDir, paths.SessionMetadataDirFromSessionID(sessionID), paths.PromptFileName)
+	prompt, err := os.ReadFile(promptPath)
+	require.NoError(t, err)
+	require.Equal(t, "late prompt", string(prompt))
+}
+
 // --- handleLifecycleTurnEnd tests ---
 
 func TestHandleLifecycleTurnEnd_EmptyTranscriptRef(t *testing.T) {
@@ -1772,6 +1919,57 @@ func TestHandleLifecycleTurnEnd_BackfillsPromptFromTranscript(t *testing.T) {
 	if string(data) != "create a file called notes/deep.md" {
 		t.Errorf("expected backfilled prompt, got %q", string(data))
 	}
+}
+
+func TestDispatchLifecyclePromptUpdate_DoesNotDuplicateTurnEndBackfill(t *testing.T) {
+	// Cannot use t.Parallel() because we use t.Chdir()
+	tmpDir := t.TempDir()
+	testutil.InitRepo(t, tmpDir)
+	testutil.WriteFile(t, tmpDir, "init.txt", "init")
+	testutil.GitAdd(t, tmpDir, "init.txt")
+	testutil.GitCommit(t, tmpDir, "init")
+	t.Chdir(tmpDir)
+	paths.ClearWorktreeRootCache()
+
+	prompt := "/skill:trigger-analysis " + strings.Repeat("inspect the implementation ", session.MaxLastPromptRunes)
+	transcriptPath := filepath.Join(tmpDir, "transcript.jsonl")
+	require.NoError(t, os.WriteFile(transcriptPath, []byte(`{"type":"user","message":"test"}`+"\n"), 0o600))
+
+	const sessionID = "test-late-prompt-after-backfill"
+	ag := &mockPromptExtractorAgent{
+		mockLifecycleAgent: mockLifecycleAgent{
+			name:           "mock-prompt",
+			agentType:      "Mock Prompt Agent",
+			transcriptData: []byte(`{"type":"user","message":"test"}` + "\n"),
+		},
+		prompts: []string{prompt},
+	}
+	require.NoError(t, handleLifecycleTurnEnd(context.Background(), ag, &agent.Event{
+		Type:       agent.TurnEnd,
+		SessionID:  sessionID,
+		SessionRef: transcriptPath,
+		Timestamp:  time.Now(),
+	}))
+
+	require.NoError(t, DispatchLifecycleEvent(context.Background(), ag, &agent.Event{
+		Type:      agent.PromptUpdate,
+		SessionID: sessionID,
+		Prompt:    prompt,
+		Timestamp: time.Now(),
+	}))
+
+	sessionDirAbs, err := paths.AbsPath(context.Background(), paths.SessionMetadataDirFromSessionID(sessionID))
+	require.NoError(t, err)
+	storedPrompt, err := os.ReadFile(filepath.Join(sessionDirAbs, paths.PromptFileName))
+	require.NoError(t, err)
+	require.Equal(t, prompt, string(storedPrompt))
+
+	state, err := strategy.LoadSessionState(context.Background(), sessionID)
+	require.NoError(t, err)
+	require.Equal(t, session.TruncatePromptForStorage(prompt), state.LastPrompt)
+	require.NotEqual(t, prompt, state.LastPrompt)
+	require.Len(t, state.SkillEvents, 1)
+	require.Equal(t, "trigger-analysis", state.SkillEvents[0].Skill.Name)
 }
 
 func TestHandleLifecycleTurnEnd_NoBackfillWhenPromptFileHasContent(t *testing.T) {

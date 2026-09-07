@@ -13,6 +13,11 @@ type turnStartRaw struct {
 	Model     string `json:"model"`
 }
 
+type promptUpdateRaw struct {
+	SessionID string `json:"session_id"`
+	Prompt    string `json:"prompt"`
+}
+
 // turnEndRaw matches the JSON payload for turn-end (session idle).
 // Extends sessionInfoRaw with model info captured during the turn.
 type turnEndRaw struct {
