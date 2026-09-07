@@ -2935,7 +2935,7 @@ func runExplainBranchWithFilter(ctx context.Context, w, errW io.Writer, noPager 
 	}
 
 	// Format output
-	output := formatBranchCheckpoints(w, branchName, points, sessionFilter)
+	output := formatBranchCheckpoints(w, branchName, points, sessionFilter, truncated)
 
 	outputExplainContent(w, output, noPager)
 
@@ -3116,9 +3116,13 @@ const (
 // formatBranchCheckpoints formats checkpoint information for a branch.
 // Groups commits by checkpoint ID and shows the prompt for each checkpoint.
 // If sessionFilter is non-empty, only shows checkpoints matching that session ID (or prefix).
-func formatBranchCheckpoints(w io.Writer, branchName string, points []strategy.PendingCheckpoint, sessionFilter string) string {
+func formatBranchCheckpoints(w io.Writer, branchName string, points []strategy.PendingCheckpoint, sessionFilter string, truncated bool) string {
 	var sb strings.Builder
 	styles := newStatusStyles(w)
+
+	// Captured before session filtering narrows points, so the zero-result
+	// message below can name how many checkpoints were actually scanned.
+	scanned := len(points)
 
 	// Filter by session if specified (must happen before counting). Use the
 	// shared matcher so archived contributors in SessionIDs are considered —
@@ -3149,8 +3153,20 @@ func formatBranchCheckpoints(w io.Writer, branchName string, points []strategy.P
 	sb.WriteString("\n")
 
 	if len(groups) == 0 {
-		sb.WriteString("No checkpoints found on this branch.\n")
-		sb.WriteString("Checkpoints will appear here after you save changes during an agent session.\n")
+		if truncated {
+			// The scan hit its budget before (or without) finding a match, so
+			// this is an inconclusive result, not proof the branch has no
+			// checkpoints. Say so in the headline message itself: the note
+			// printed separately to stderr (see runExplainBranchWithFilter) is
+			// easy for a script or agent reading only stdout to miss entirely,
+			// which is exactly what misled entireio/cli#2089.
+			fmt.Fprintf(&sb,
+				"No checkpoints found in the first %d checkpoints scanned (scan limit reached — older checkpoints may exist).\n", scanned)
+			sb.WriteString("Run 'entire checkpoint explain --json --limit <N>' to search further.\n")
+		} else {
+			sb.WriteString("No checkpoints found on this branch.\n")
+			sb.WriteString("Checkpoints will appear here after you save changes during an agent session.\n")
+		}
 		return sb.String()
 	}
 
