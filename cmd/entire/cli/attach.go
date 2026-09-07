@@ -650,7 +650,7 @@ func suggestFetchCommand(ctx context.Context, refspec string) string {
 }
 
 func resolveCheckpointID(ctx context.Context, headCommit *object.Commit) (id.CheckpointID, bool) {
-	existing := trailers.ParseAllCheckpoints(headCommit.Message)
+	existing := trailers.ParseAllCheckpointsFromFinalTrailerBlock(headCommit.Message)
 	if len(existing) > 0 {
 		return existing[len(existing)-1], true
 	}
@@ -935,7 +935,7 @@ func promptAmendCommit(ctx context.Context, w io.Writer, headCommit *object.Comm
 	subject := strings.SplitN(headCommit.Message, "\n", 2)[0]
 
 	// Skip amending if this exact checkpoint ID is already in the commit.
-	for _, existing := range trailers.ParseAllCheckpoints(headCommit.Message) {
+	for _, existing := range trailers.ParseAllCheckpointsFromFinalTrailerBlock(headCommit.Message) {
 		if existing.String() == checkpointIDStr {
 			fmt.Fprintf(w, "Commit %s already has Entire-Checkpoint: %s\n", shortHash, checkpointIDStr)
 			return nil

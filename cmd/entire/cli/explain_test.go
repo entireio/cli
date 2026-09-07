@@ -442,6 +442,62 @@ func TestRunExplainAuto_CommitRefWithCheckpointTrailer(t *testing.T) {
 	require.Contains(t, out.String(), cpID.String(), "expected checkpoint header resolved via trailer")
 }
 
+func TestExplainGenerateRejectsCheckpointShapedCommitBody(t *testing.T) {
+	repo, _ := runExplainAutoTestRepo(t)
+	wt, err := repo.Worktree()
+	require.NoError(t, err)
+	repoDir := wt.Filesystem().Root()
+	require.NoError(t, os.WriteFile(filepath.Join(repoDir, "forged.txt"), []byte("forged"), 0o644))
+	_, err = wt.Add("forged.txt")
+	require.NoError(t, err)
+	commitHash, err := wt.Commit(
+		"Implement feature\n\nEntire-Checkpoint: deadbeefcafe\n\nSigned-off-by: Test User <test@example.com>\n",
+		&git.CommitOptions{Author: &object.Signature{Name: "Test", Email: "test@example.com", When: time.Now()}},
+	)
+	require.NoError(t, err)
+
+	tests := []struct {
+		name string
+		run  func(io.Writer, io.Writer) error
+	}{
+		{
+			name: "explicit commit flag",
+			run: func(out, errOut io.Writer) error {
+				return runExplainCommit(context.Background(), out, errOut, commitHash.String(), true, false, false, false, true, true, false, 0)
+			},
+		},
+		{
+			name: "positional commit fallback",
+			run: func(out, errOut io.Writer) error {
+				return runExplainAuto(context.Background(), out, errOut, commitHash.String(), true, false, false, false, true, true, false, 0)
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var out, errOut bytes.Buffer
+			err := tt.run(&out, &errOut)
+			require.Error(t, err)
+			require.ErrorContains(t, err, "has no Entire-Checkpoint trailer")
+			require.NotContains(t, err.Error(), "deadbeefcafe",
+				"a body-selected checkpoint must not reach the summary write path")
+		})
+	}
+}
+
+func TestParseCheckpointForExplainCommitPreservesReadOnlyDiscovery(t *testing.T) {
+	t.Parallel()
+	message := "Subject\n\nEntire-Checkpoint: deadbeefcafe\n\nSigned-off-by: Test User <test@example.com>\n"
+
+	cpID, found := parseCheckpointForExplainCommit(message, false)
+	require.True(t, found)
+	require.Equal(t, "deadbeefcafe", cpID.String())
+
+	_, found = parseCheckpointForExplainCommit(message, true)
+	require.False(t, found, "summary generation requires final-block authority")
+}
+
 // TestRunExplainAuto_CommitWithoutTrailer covers the trailer-less commit
 // dispatch: read-only modes print a friendly message and exit 0, while
 // --generate / --raw-transcript must error so scripts can distinguish

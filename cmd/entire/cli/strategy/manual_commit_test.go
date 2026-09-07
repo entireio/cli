@@ -890,7 +890,7 @@ func TestAddCheckpointTrailerWithComment_HasComment(t *testing.T) {
 	// Test that addCheckpointTrailerWithComment includes the explanatory comment
 	message := "Test commit message\n"
 
-	result := addCheckpointTrailerWithComment(message, testTrailerCheckpointID, "Claude Code", "add password hashing")
+	result := addCheckpointTrailerWithComment(message, testTrailerCheckpointID, "Claude Code", "add password hashing", "#")
 
 	// Should contain the trailer
 	if !strings.Contains(result, trailers.CheckpointTrailerKey+": "+testTrailerCheckpointID.String()) {
@@ -922,7 +922,7 @@ func TestAddCheckpointTrailerWithComment_NoPrompt(t *testing.T) {
 	// Test that addCheckpointTrailerWithComment works without a prompt
 	message := "Test commit message\n"
 
-	result := addCheckpointTrailerWithComment(message, testTrailerCheckpointID, "Claude Code", "")
+	result := addCheckpointTrailerWithComment(message, testTrailerCheckpointID, "Claude Code", "", "#")
 
 	// Should contain the trailer
 	if !strings.Contains(result, trailers.CheckpointTrailerKey+": "+testTrailerCheckpointID.String()) {
@@ -937,6 +937,77 @@ func TestAddCheckpointTrailerWithComment_NoPrompt(t *testing.T) {
 	// Should still contain the removal comment
 	if !strings.Contains(result, "# Remove the Entire-Checkpoint") {
 		t.Errorf("addCheckpointTrailerWithComment() should contain comment, got: %q", result)
+	}
+}
+
+func TestGitCommentPrefixUsesEffectiveRepositoryConfig(t *testing.T) {
+	dir := setupGitRepo(t)
+	t.Chdir(dir)
+	testutil.RunGit(t, dir, "config", "core.commentChar", ";")
+	require.Equal(t, ";", gitCommentPrefix(context.Background(), "Message\n"))
+	cpID, found := parseCheckpointFromCommitMessageFile(context.Background(),
+		"Message\n\nEntire-Checkpoint: a1b2c3d4e5f6\n; git status\n", "")
+	require.True(t, found)
+	require.Equal(t, "a1b2c3d4e5f6", cpID.String())
+
+	testutil.RunGit(t, dir, "config", "core.commentString", "//")
+	require.Equal(t, "//", gitCommentPrefix(context.Background(), "Message\n"),
+		"core.commentString takes precedence over core.commentChar")
+
+	result := addCheckpointTrailerWithComment("Message\n// git status\n", testTrailerCheckpointID, "Claude Code", "", "//")
+	require.Contains(t, result, "// Remove the Entire-Checkpoint")
+	require.NotContains(t, result, "# Remove the Entire-Checkpoint")
+}
+
+func TestGitCommentPrefixAutoAvoidsExistingLinePrefix(t *testing.T) {
+	dir := setupGitRepo(t)
+	t.Chdir(dir)
+	testutil.RunGit(t, dir, "config", "core.commentChar", "auto")
+
+	require.Equal(t, ";", gitCommentPrefix(context.Background(), "Message\n# user content\n"))
+}
+
+func TestCleanPreparedCommitMessageFollowsGitCommentCleanup(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name          string
+		message       string
+		source        string
+		commentPrefix string
+		wantFound     bool
+	}{
+		{
+			name:          "editor removes default comments",
+			message:       "Message\n\nEntire-Checkpoint: a1b2c3d4e5f6\n# Entire explanation\n\n# git status\n",
+			commentPrefix: "#",
+			wantFound:     true,
+		},
+		{
+			name:          "message source preserves hash content",
+			message:       "Message\n\nEntire-Checkpoint: a1b2c3d4e5f6\n# user content from -m or -F\n",
+			source:        "message",
+			commentPrefix: "#",
+			wantFound:     false,
+		},
+		{
+			name:          "editor removes configured comments",
+			message:       "Message\n\nEntire-Checkpoint: a1b2c3d4e5f6\n; Entire explanation\n\n; git status\n",
+			commentPrefix: ";",
+			wantFound:     true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			cleaned := cleanPreparedCommitMessage(tt.message, tt.source, tt.commentPrefix)
+			cpID, found := trailers.ParseCheckpointFromFinalTrailerBlock(cleaned)
+			require.Equal(t, tt.wantFound, found)
+			if tt.wantFound {
+				require.Equal(t, "a1b2c3d4e5f6", cpID.String())
+			}
+		})
 	}
 }
 
