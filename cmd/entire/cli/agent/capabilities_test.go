@@ -4,8 +4,10 @@ import (
 	"context"
 	"io"
 	"testing"
+	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
+	"github.com/stretchr/testify/require"
 )
 
 // --- Mock types for testing ---
@@ -123,6 +125,23 @@ type mockBuiltinPromptAgent struct {
 
 func (m *mockBuiltinPromptAgent) ExtractPrompts(string, int) ([]string, error) {
 	return []string{"test prompt"}, nil
+}
+
+// mockHookTimeoutAgent is a built-in agent that implements HookTimeoutProvider
+// but NOT CapabilityDeclarer, mirroring how CodexAgent implements it: an
+// override for one named event, zero (no override) for everything else.
+type mockHookTimeoutAgent struct {
+	mockBaseAgent
+
+	overrideEvent string
+	overrideValue time.Duration
+}
+
+func (m *mockHookTimeoutAgent) HookTimeout(hookName string) time.Duration {
+	if hookName == m.overrideEvent {
+		return m.overrideValue
+	}
+	return 0
 }
 
 // --- Tests ---
@@ -492,4 +511,72 @@ func TestAsStreamingTextGenerator(t *testing.T) {
 			t.Error("expected false when capability declared false")
 		}
 	})
+}
+
+func TestAsHookTimeoutProvider(t *testing.T) {
+	t.Parallel()
+
+	t.Run("not implemented", func(t *testing.T) {
+		t.Parallel()
+		_, ok := AsHookTimeoutProvider(&mockBaseAgent{})
+		if ok {
+			t.Error("expected false for agent not implementing HookTimeoutProvider")
+		}
+	})
+
+	t.Run("builtin agent", func(t *testing.T) {
+		t.Parallel()
+		ag := &mockHookTimeoutAgent{overrideEvent: "stop", overrideValue: 5 * time.Second}
+		htp, ok := AsHookTimeoutProvider(ag)
+		if !ok || htp == nil {
+			t.Error("expected true for built-in agent implementing HookTimeoutProvider")
+		}
+	})
+}
+
+// TestHookTimeoutFor is REQUIREMENT 2 from the differentiated-hook-timeout
+// task: an agent implementing HookTimeoutProvider gets its own declared value
+// honored for the event it overrides, and every other agent/event still
+// resolves to the flat default — proving the mechanism differentiates
+// without silently applying an override everywhere.
+//
+// Not parallel: it mutates the process-global default via
+// SetDefaultHookTimeoutForTesting.
+func TestHookTimeoutFor(t *testing.T) {
+	restore := SetDefaultHookTimeoutForTesting(7 * time.Second)
+	defer restore()
+
+	t.Run("agent without the capability always gets the default", func(t *testing.T) {
+		ag := &mockBaseAgent{}
+		require.Equal(t, DefaultHookTimeout(), HookTimeoutFor(ag, "stop"))
+		require.Equal(t, DefaultHookTimeout(), HookTimeoutFor(ag, "session-end"))
+	})
+
+	t.Run("agent with the capability gets its own value for the overridden event", func(t *testing.T) {
+		ag := &mockHookTimeoutAgent{overrideEvent: "session-end", overrideValue: 3 * time.Second}
+
+		require.Equal(t, 3*time.Second, HookTimeoutFor(ag, "session-end"),
+			"the overridden event must get the agent's own value, not the default")
+		require.Equal(t, DefaultHookTimeout(), HookTimeoutFor(ag, "stop"),
+			"an event the agent does not override must still fall back to the default")
+	})
+
+	t.Run("a non-positive override falls back to the default rather than disabling the timeout", func(t *testing.T) {
+		ag := &mockHookTimeoutAgent{overrideEvent: "stop", overrideValue: 0}
+		require.Equal(t, DefaultHookTimeout(), HookTimeoutFor(ag, "stop"))
+	})
+}
+
+// TestSetDefaultHookTimeoutForTesting pins the test seam DefaultHookTimeout
+// needs: production's flat default is 30s (matching Codex's own
+// defaultHookTimeoutSec), and nothing should have to wait out a real 30s to
+// exercise the timeout mechanism.
+func TestSetDefaultHookTimeoutForTesting(t *testing.T) {
+	require.Equal(t, 30*time.Second, DefaultHookTimeout(), "production default must stay 30s")
+
+	restore := SetDefaultHookTimeoutForTesting(50 * time.Millisecond)
+	require.Equal(t, 50*time.Millisecond, DefaultHookTimeout())
+
+	restore()
+	require.Equal(t, 30*time.Second, DefaultHookTimeout(), "restore must put the real default back")
 }

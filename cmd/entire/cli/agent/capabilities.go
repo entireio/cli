@@ -1,5 +1,7 @@
 package agent
 
+import "time"
+
 // CapabilityDeclarer is implemented by agents that declare their capabilities
 // at registration time (e.g., external plugin agents). The As* helper functions
 // below use this interface to gate capability access: an agent must both implement
@@ -244,4 +246,48 @@ func AsToolInvocationScanner(ag Agent) (ToolInvocationScanner, bool) {
 // field when an external agent has a host that clamps its session-end hook.
 func AsSessionEndBudgeter(ag Agent) (SessionEndBudgeter, bool) {
 	return builtinCapability[SessionEndBudgeter](ag)
+}
+
+// AsHookTimeoutProvider returns the agent as HookTimeoutProvider if it
+// implements the interface. Built-in only, matching AsSessionEndBudgeter
+// above: widen with a DeclaredCaps field if an external agent ever needs it.
+func AsHookTimeoutProvider(ag Agent) (HookTimeoutProvider, bool) {
+	return builtinCapability[HookTimeoutProvider](ag)
+}
+
+// defaultHookTimeout is the flat timeout applied to a hook event when no
+// agent overrides it (HookTimeoutFor). A var rather than a const so tests can
+// shrink it instead of waiting out a real 30s — see
+// SetDefaultHookTimeoutForTesting. 30s is the historical flat cap this
+// mechanism generalizes away from (GitHub issue #2115); it is left unchanged
+// as the default for every event with no evidence-backed override, matching
+// Codex's own defaultHookTimeoutSec (cmd/entire/cli/agent/codex/hooks.go).
+var defaultHookTimeout = 30 * time.Second //nolint:gochecknoglobals // overridable for testing, same pattern as external.defaultRunTimeout
+
+// DefaultHookTimeout returns the flat per-hook-event timeout applied when no
+// agent overrides it for the given event via HookTimeoutProvider.
+func DefaultHookTimeout() time.Duration { return defaultHookTimeout }
+
+// SetDefaultHookTimeoutForTesting overrides DefaultHookTimeout for the
+// duration of a test and returns a restore func. Callers must defer the
+// restore so the real 30s default is never left mutated across tests — this
+// is process-global state, so parallel tests must not call it concurrently.
+func SetDefaultHookTimeoutForTesting(d time.Duration) func() {
+	prev := defaultHookTimeout
+	defaultHookTimeout = d
+	return func() { defaultHookTimeout = prev }
+}
+
+// HookTimeoutFor resolves the timeout that should apply to hookName for ag:
+// ag's own HookTimeoutProvider override when it returns a positive duration,
+// else DefaultHookTimeout(). Callers should always resolve through this
+// rather than reading DefaultHookTimeout() directly, so an agent's override
+// is never accidentally bypassed.
+func HookTimeoutFor(ag Agent, hookName string) time.Duration {
+	if provider, ok := AsHookTimeoutProvider(ag); ok {
+		if d := provider.HookTimeout(hookName); d > 0 {
+			return d
+		}
+	}
+	return DefaultHookTimeout()
 }
