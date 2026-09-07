@@ -131,6 +131,14 @@ func fetchURLAuthoritative(ctx context.Context, opts ...FetchURLOptions) (string
 		return originURL, true, nil
 	}
 
+	if isGenericRemoteConfig(config) {
+		// Generic provider (settings.CheckpointProviderGit): the checkpoint
+		// remote names an explicit git URL rather than an owner/repo pair
+		// resolved against a provider's fixed host, so there is nothing to
+		// derive from origin's protocol/host — always fetch from it verbatim.
+		return config.URL, true, nil
+	}
+
 	if withToken {
 		host, ok := providerHost(config.Provider)
 		if ok {
@@ -247,11 +255,18 @@ func PushURL(ctx context.Context, pushRemoteName string) (string, bool, error) {
 			return "", false, fmt.Errorf("no push URL found: %w", fallbackErr)
 		}
 		logging.Warn(ctx, "checkpoint-remote: ignoring checkpoint_remote that appears to belong to another owner; pushing checkpoints to the push remote instead",
-			slog.String("checkpoint_repo", config.Repo),
+			slog.String("checkpoint_repo", config.Target()),
 			slog.String("reason", reason),
 			slog.String("hint", "if this checkpoint repo is yours, configure checkpoint_remote in .entire/settings.local.json"),
 		)
 		return fallbackURL, false, nil
+	}
+
+	if isGenericRemoteConfig(config) {
+		// Generic provider (settings.CheckpointProviderGit): push straight to
+		// the configured URL — no protocol/host derivation from the push
+		// remote applies, since the user supplied the exact destination.
+		return config.URL, true, nil
 	}
 
 	pushInfo, err := ParseURL(pushRemoteURL)
@@ -616,6 +631,16 @@ func deriveTokenOriginURL(originURL string) (string, bool) {
 		hostPort = info.HostPort()
 	}
 	return fmt.Sprintf("https://%s/%s/%s.git", hostPort, info.Owner, info.Repo), true
+}
+
+// isGenericRemoteConfig reports whether config names an explicit git remote
+// URL (settings.CheckpointProviderGit) rather than an owner/repo pair resolved
+// against a provider's fixed host. config.URL is populated only for that
+// provider — settings.GetCheckpointRemote never sets it for any other — so
+// checking it directly is equivalent to checking the provider string and
+// avoids duplicating the "git" literal here.
+func isGenericRemoteConfig(config *settings.CheckpointRemoteConfig) bool {
+	return config != nil && config.URL != ""
 }
 
 func providerHost(provider string) (string, bool) {

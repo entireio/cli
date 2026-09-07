@@ -84,6 +84,112 @@ func TestGetCheckpointRemote_RepoWithoutSlash(t *testing.T) {
 	assert.Nil(t, s.GetCheckpointRemote())
 }
 
+func TestGetCheckpointRemote_StructuredGenericGit(t *testing.T) {
+	t.Parallel()
+
+	s := &EntireSettings{
+		StrategyOptions: map[string]any{
+			"checkpoint_remote": map[string]any{
+				"provider": "git",
+				"url":      "https://vc.hub.msg.team/org/checkpoints-repo.git",
+			},
+		},
+	}
+	config := s.GetCheckpointRemote()
+	require.NotNil(t, config)
+	assert.Equal(t, "git", config.Provider)
+	assert.Equal(t, "https://vc.hub.msg.team/org/checkpoints-repo.git", config.URL)
+	assert.Empty(t, config.Repo)
+}
+
+func TestGetCheckpointRemote_GenericGitSSHURL(t *testing.T) {
+	t.Parallel()
+
+	s := &EntireSettings{
+		StrategyOptions: map[string]any{
+			"checkpoint_remote": map[string]any{
+				"provider": "git",
+				"url":      "git@git.example.com:org/checkpoints-repo.git",
+			},
+		},
+	}
+	config := s.GetCheckpointRemote()
+	require.NotNil(t, config)
+	assert.Equal(t, "git@git.example.com:org/checkpoints-repo.git", config.URL)
+}
+
+func TestGetCheckpointRemote_GenericGitMissingURL(t *testing.T) {
+	t.Parallel()
+
+	s := &EntireSettings{
+		StrategyOptions: map[string]any{
+			"checkpoint_remote": map[string]any{
+				"provider": "git",
+			},
+		},
+	}
+	assert.Nil(t, s.GetCheckpointRemote())
+}
+
+func TestGetCheckpointRemote_GenericGitInvalidURL(t *testing.T) {
+	t.Parallel()
+
+	tests := []string{
+		"",
+		"not a url",
+		"justahost", // no scheme, no owner/repo path
+		"https://",  // no host, no path
+	}
+	for _, rawURL := range tests {
+		t.Run(rawURL, func(t *testing.T) {
+			t.Parallel()
+			s := &EntireSettings{
+				StrategyOptions: map[string]any{
+					"checkpoint_remote": map[string]any{
+						"provider": "git",
+						"url":      rawURL,
+					},
+				},
+			}
+			assert.Nil(t, s.GetCheckpointRemote(), "url %q should be rejected", rawURL)
+		})
+	}
+}
+
+func TestGetCheckpointRemote_JSONRoundTrip_GenericGit(t *testing.T) {
+	tmpDir := t.TempDir()
+	entireDir := filepath.Join(tmpDir, ".entire")
+	require.NoError(t, os.MkdirAll(entireDir, 0o755))
+	testutil.InitRepo(t, tmpDir)
+
+	settingsJSON := `{
+		"enabled": true,
+		"strategy_options": {
+			"checkpoint_remote": {
+				"provider": "git",
+				"url": "https://vc.hub.msg.team/org/checkpoints-repo.git"
+			}
+		}
+	}`
+	require.NoError(t, os.WriteFile(filepath.Join(entireDir, "settings.json"), []byte(settingsJSON), 0o644))
+
+	t.Chdir(tmpDir)
+
+	s, err := Load(context.Background())
+	require.NoError(t, err)
+	config := s.GetCheckpointRemote()
+	require.NotNil(t, config)
+	assert.Equal(t, "git", config.Provider)
+	assert.Equal(t, "https://vc.hub.msg.team/org/checkpoints-repo.git", config.URL)
+}
+
+func TestCheckpointRemoteConfig_Target(t *testing.T) {
+	t.Parallel()
+
+	assert.Equal(t, "org/checkpoints", (&CheckpointRemoteConfig{Provider: "github", Repo: "org/checkpoints"}).Target())
+	assert.Equal(t, "https://git.example.com/org/checkpoints.git", (&CheckpointRemoteConfig{Provider: "git", URL: "https://git.example.com/org/checkpoints.git"}).Target())
+}
+
 func TestGetCheckpointRemote_LegacyStringIgnored(t *testing.T) {
 	t.Parallel()
 

@@ -1088,6 +1088,38 @@ func TestURLTargetsCheckpointRepo(t *testing.T) {
 	}
 }
 
+// TestURLTargetsCheckpointRepo_GenericGitProvider covers the generic
+// settings.CheckpointProviderGit provider (issue #2033): config carries an
+// explicit URL rather than an owner/repo pair, so the comparison must be an
+// exact URL match (modulo a trailing ".git") rather than an owner/repo one —
+// there is no owner/repo to compare, and remote.FetchURL/PushURL return the
+// configured URL verbatim for this provider (see remote.isGenericRemoteConfig).
+func TestURLTargetsCheckpointRepo_GenericGitProvider(t *testing.T) {
+	t.Parallel()
+
+	config := &settings.CheckpointRemoteConfig{Provider: "git", URL: "https://git.example.com/org/checkpoints-repo.git"}
+
+	tests := []struct {
+		name string
+		url  string
+		want bool
+	}{
+		{"exact match", "https://git.example.com/org/checkpoints-repo.git", true},
+		{"case-insensitive match", "HTTPS://GIT.EXAMPLE.COM/org/checkpoints-repo.git", true},
+		{"trailing .git normalized on both sides", "https://git.example.com/org/checkpoints-repo", true},
+		{"different host", "https://github.com/org/checkpoints-repo.git", false},
+		{"different path", "https://git.example.com/other/checkpoints-repo.git", false},
+		{"origin fallback (a completely different URL)", "https://github.com/acme/app.git", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			assert.Equal(t, tt.want, urlTargetsCheckpointRepo(tt.url, config))
+		})
+	}
+}
+
 // TestEnsurePrimaryRef_CheckpointRemoteTakesPrecedenceOverOrigin verifies issue
 // #1374: when a checkpoint_remote is configured, EnsurePrimaryRef adopts its branch
 // even when a stale origin/entire/checkpoints/v1 tracking ref is present. Origin is

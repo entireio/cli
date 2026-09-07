@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/entireio/cli/cmd/entire/cli/settings"
@@ -653,6 +654,172 @@ func TestPushURL_EntireOriginDerivesMirrorURL(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestGenericGitProvider_FetchAndPushURLResolveToConfiguredURL covers issue
+// #2033's core ask: a "git" provider checkpoint_remote naming an explicit
+// self-hosted-shaped URL (rather than github's owner/repo-against-a-fixed-host
+// shorthand) must resolve, via the real FetchURL/PushURL production code, to
+// exactly that URL — regardless of origin's own protocol/host, since there is
+// nothing to derive; the URL is already the destination.
+func TestGenericGitProvider_FetchAndPushURLResolveToConfiguredURL(t *testing.T) {
+	tests := []struct {
+		name       string
+		originURL  string
+		pushRemote string
+	}{
+		{
+			name:       "https origin, generic checkpoint url unaffected",
+			originURL:  "https://github.com/acme/app.git",
+			pushRemote: "origin",
+		},
+		{
+			name:       "ssh origin, generic checkpoint url still unaffected (no protocol derivation applies)",
+			originURL:  "git@github.com:acme/app.git",
+			pushRemote: "origin",
+		},
+		{
+			name:       "no origin at all, generic checkpoint url still resolves",
+			pushRemote: "upstream",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			checkpointRepoDir := t.TempDir()
+			initBareRepo(t, checkpointRepoDir)
+			checkpointURL := fileURL(checkpointRepoDir)
+
+			repoDir := t.TempDir()
+			testutil.InitRepo(t, repoDir)
+			if tt.originURL != "" {
+				runGit(t, repoDir, "remote", "add", "origin", tt.originURL)
+			}
+			if tt.pushRemote != "origin" {
+				// A distinct real bare repo as the push remote, so this case
+				// also covers "no origin remote at all" realistically rather
+				// than pushing to a URL that doesn't exist.
+				pushRemoteDir := t.TempDir()
+				initBareRepo(t, pushRemoteDir)
+				runGit(t, repoDir, "remote", "add", tt.pushRemote, fileURL(pushRemoteDir))
+			}
+
+			settingsJSON := `{"enabled":true,"strategy_options":{"checkpoint_remote":{"provider":"git","url":"` + checkpointURL + `"}}}`
+			writeSettings(t, repoDir, settingsJSON)
+			t.Chdir(repoDir)
+
+			gotFetch, err := FetchURL(context.Background())
+			if err != nil {
+				t.Fatalf("FetchURL() error = %v", err)
+			}
+			if gotFetch != checkpointURL {
+				t.Fatalf("FetchURL() = %q, want %q", gotFetch, checkpointURL)
+			}
+
+			gotPush, enabled, err := PushURL(context.Background(), tt.pushRemote)
+			if err != nil {
+				t.Fatalf("PushURL() error = %v", err)
+			}
+			if !enabled {
+				t.Fatal("PushURL() enabled = false, want true for a configured generic checkpoint remote")
+			}
+			if gotPush != checkpointURL {
+				t.Fatalf("PushURL() = %q, want %q", gotPush, checkpointURL)
+			}
+		})
+	}
+}
+
+// TestGenericGitProvider_RealPushFetchCycle is the strong-bonus case: it
+// doesn't stop at URL derivation — it runs a REAL `git push` to the URL
+// PushURL derives for a generic "git" provider checkpoint_remote (a real
+// local bare repo, not a mock), then a REAL `git fetch` of that same ref back
+// via the URL FetchURL derives, and asserts the fetched commit is byte-for-byte
+// the one pushed. This exercises the actual production PushURL/FetchURL
+// resolution feeding real git subprocesses, end to end.
+func TestGenericGitProvider_RealPushFetchCycle(t *testing.T) {
+	checkpointRepoDir := t.TempDir()
+	initBareRepo(t, checkpointRepoDir)
+	checkpointURL := fileURL(checkpointRepoDir)
+
+	repoDir := t.TempDir()
+	testutil.InitRepo(t, repoDir)
+	runGit(t, repoDir, "remote", "add", "origin", "https://github.com/acme/app.git")
+
+	settingsJSON := `{"enabled":true,"strategy_options":{"checkpoint_remote":{"provider":"git","url":"` + checkpointURL + `"}}}`
+	writeSettings(t, repoDir, settingsJSON)
+	t.Chdir(repoDir)
+
+	// Create a real commit to push — this stands in for a condensed
+	// checkpoint commit on entire/checkpoints/v1 in production.
+	if err := os.WriteFile(filepath.Join(repoDir, "checkpoint-payload.txt"), []byte("session transcript content\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	runGit(t, repoDir, "add", "checkpoint-payload.txt")
+	runGit(t, repoDir, "commit", "-m", "checkpoint commit")
+	localSHA := strings.TrimSpace(runGitOutput(t, repoDir, "rev-parse", "HEAD"))
+
+	// Resolve the push URL through the real production code path.
+	pushURL, enabled, err := PushURL(context.Background(), "origin")
+	if err != nil {
+		t.Fatalf("PushURL() error = %v", err)
+	}
+	if !enabled {
+		t.Fatal("PushURL() enabled = false, want true")
+	}
+	if pushURL != checkpointURL {
+		t.Fatalf("PushURL() = %q, want %q", pushURL, checkpointURL)
+	}
+
+	// Real push to the real bare repo at the resolved URL.
+	runGit(t, repoDir, "push", pushURL, "HEAD:refs/heads/entire/checkpoints/v1")
+
+	// Verify directly against the bare repo (independent of this package's
+	// own fetch code) that the exact commit landed.
+	remoteSHA := strings.TrimSpace(runGitOutput(t, checkpointRepoDir, "rev-parse", "refs/heads/entire/checkpoints/v1"))
+	if remoteSHA != localSHA {
+		t.Fatalf("pushed commit = %q, want %q", remoteSHA, localSHA)
+	}
+
+	// Now resolve the fetch URL through the real production code path (a
+	// fresh clone, simulating a machine that has never seen this checkpoint
+	// history) and fetch it back.
+	cloneDir := t.TempDir()
+	testutil.InitRepo(t, cloneDir)
+	runGit(t, cloneDir, "remote", "add", "origin", "https://github.com/acme/app.git")
+	writeSettings(t, cloneDir, settingsJSON)
+	t.Chdir(cloneDir)
+
+	fetchURL, err := FetchURL(context.Background())
+	if err != nil {
+		t.Fatalf("FetchURL() error = %v", err)
+	}
+	if fetchURL != checkpointURL {
+		t.Fatalf("FetchURL() = %q, want %q", fetchURL, checkpointURL)
+	}
+
+	runGit(t, cloneDir, "fetch", fetchURL, "refs/heads/entire/checkpoints/v1:refs/remotes/checkpoint/v1")
+	fetchedSHA := strings.TrimSpace(runGitOutput(t, cloneDir, "rev-parse", "refs/remotes/checkpoint/v1"))
+	if fetchedSHA != localSHA {
+		t.Fatalf("fetched commit = %q, want %q", fetchedSHA, localSHA)
+	}
+
+	// And the fetched blob content really is the pushed transcript payload.
+	out := runGitOutput(t, cloneDir, "show", "refs/remotes/checkpoint/v1:checkpoint-payload.txt")
+	if out != "session transcript content\n" {
+		t.Fatalf("fetched file content = %q, want %q", out, "session transcript content\n")
+	}
+}
+
+func runGitOutput(t *testing.T, dir string, args ...string) string {
+	t.Helper()
+	cmd := exec.CommandContext(context.Background(), "git", args...)
+	cmd.Dir = dir
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git %v failed: %v\nOutput: %s", args, err, out)
+	}
+	return string(out)
 }
 
 func TestPushURL_ErrorsWhenNoCheckpointRemoteAndOriginMissing(t *testing.T) {
