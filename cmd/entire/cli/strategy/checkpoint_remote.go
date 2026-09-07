@@ -94,7 +94,7 @@ func resolvePushSettings(ctx context.Context, pushRemoteName string) pushSetting
 	if err != nil {
 		logging.Warn(ctx, "checkpoint-remote: could not derive URL from push remote",
 			slog.String("remote", pushRemoteName),
-			slog.String("repo", config.Repo),
+			slog.String("repo", config.Target()),
 			slog.String("error", err.Error()),
 		)
 		return ps
@@ -296,19 +296,27 @@ func resolveCheckpointFetchURL(ctx context.Context, worktreeRoot string) (string
 	}
 	if !urlTargetsCheckpointRepo(url, config) {
 		logging.Debug(ctx, "checkpoint-remote: fetch URL did not resolve to the configured checkpoint repo; not adopting from origin",
-			slog.String("repo", config.Repo))
+			slog.String("repo", config.Target()))
 		return "", false
 	}
 	return url, true
 }
 
 // urlTargetsCheckpointRepo reports whether url points at the configured checkpoint
-// repository (host-agnostic, case-insensitive owner/repo match). It distinguishes a
-// derived checkpoint URL from remote.FetchURL's origin fallback, which targets the
-// origin repository instead. A same-repo checkpoint_remote (origin == checkpoint
-// repo) still matches, which is correct: adopting from that URL is adopting the
-// checkpoint repo.
+// repository. For the generic settings.CheckpointProviderGit provider, config has
+// no owner/repo to compare — remote.FetchURL/PushURL return config.URL verbatim
+// for that provider (see remote.isGenericRemoteConfig), so an exact URL match
+// (modulo a trailing ".git") is the correct — and only possible — comparison.
+// For owner/repo-shorthand providers this is a host-agnostic, case-insensitive
+// owner/repo match, distinguishing a derived checkpoint URL from
+// remote.FetchURL's origin fallback, which targets the origin repository
+// instead. A same-repo checkpoint_remote (origin == checkpoint repo) still
+// matches, which is correct: adopting from that URL is adopting the checkpoint
+// repo.
 func urlTargetsCheckpointRepo(url string, config *settings.CheckpointRemoteConfig) bool {
+	if config.URL != "" {
+		return strings.EqualFold(strings.TrimSuffix(url, ".git"), strings.TrimSuffix(config.URL, ".git"))
+	}
 	info, err := remote.ParseURL(url)
 	if err != nil || info.Owner == "" || info.Repo == "" {
 		return false

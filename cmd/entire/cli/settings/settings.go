@@ -20,6 +20,7 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/entiredir"
 	"github.com/entireio/cli/cmd/entire/cli/gitdir"
+	"github.com/entireio/cli/cmd/entire/cli/gitremote"
 	"github.com/entireio/cli/cmd/entire/cli/internal/flock"
 	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
@@ -1822,21 +1823,55 @@ func (s *EntireSettings) IsSummarizeEnabled() bool {
 	return enabled
 }
 
+// CheckpointProviderGit is the generic checkpoint_remote provider: instead of
+// an owner/repo pair resolved against a provider's hardcoded host (github,
+// gitlab), it carries an explicit git remote URL, so checkpoint storage can
+// target a self-hosted server (Gitea, GitLab CE/EE, a bare git repo over
+// SSH/HTTPS) rather than only github.com/gitlab.com. See setup.go's
+// checkpointProviderGit (the same string, kept as an independent constant
+// there per this repo's convention for provider identifiers, e.g.
+// resolveref.go's providerGitHub next to setup.go's checkpointProviderGitHub).
+const CheckpointProviderGit = "git"
+
 // CheckpointRemoteConfig holds the structured checkpoint remote configuration.
-// Stored in strategy_options.checkpoint_remote as {"provider": "github", "repo": "org/repo"}.
+// Stored in strategy_options.checkpoint_remote as either
+// {"provider": "github", "repo": "org/repo"} (owner/repo shorthand, resolved
+// against the provider's fixed host) or, for the generic CheckpointProviderGit
+// provider, {"provider": "git", "url": "https://git.example.com/org/repo.git"}
+// (an explicit remote URL, for self-hosted git servers).
 type CheckpointRemoteConfig struct {
-	Provider string // e.g., "github"
-	Repo     string // e.g., "org/checkpoints-repo"
+	Provider string // e.g., "github", "git"
+	Repo     string // e.g., "org/checkpoints-repo" (owner/repo-shorthand providers only)
+	URL      string // e.g., "https://git.example.com/org/checkpoints-repo.git" (CheckpointProviderGit only)
 }
 
 // Owner returns the owner portion of the repo field (before the slash).
-// Returns empty string if the repo field doesn't contain a slash.
+// Returns empty string if the repo field doesn't contain a slash — which is
+// always true for the generic CheckpointProviderGit provider, since it has no
+// Repo field at all (only URL). That deliberately matches how a malformed
+// owner/repo field is already handled: checkpointRemoteIsInherited treats an
+// undeterminable owner as "skip the ownership check" rather than blocking on
+// it, because comparing an owner across two potentially unrelated hosts (the
+// origin's forge vs. an arbitrary self-hosted checkpoint server) is not a
+// meaningful signal the way it is when both live on the same forge.
 func (c *CheckpointRemoteConfig) Owner() string {
 	parts := strings.SplitN(c.Repo, "/", 2)
 	if len(parts) < 2 {
 		return ""
 	}
 	return parts[0]
+}
+
+// Target returns the display-friendly checkpoint destination: Repo for
+// owner/repo-shorthand providers, or URL for the generic CheckpointProviderGit
+// provider's explicit remote URL. Used wherever the configured checkpoint
+// remote is shown to the user or logged, so a generic config never renders
+// as an empty string.
+func (c *CheckpointRemoteConfig) Target() string {
+	if c.Repo != "" {
+		return c.Repo
+	}
+	return c.URL
 }
 
 // HasCheckpointRemoteKey reports whether a checkpoint_remote entry exists in
@@ -1881,7 +1916,11 @@ func CheckpointRemoteIsLocalOnly(ctx context.Context) bool {
 }
 
 // GetCheckpointRemote returns the configured checkpoint remote.
-// Expects a structured object: {"provider": "github", "repo": "org/repo"}.
+// Expects a structured object: either {"provider": "github", "repo": "org/repo"}
+// (owner/repo shorthand), or, for CheckpointProviderGit, {"provider": "git",
+// "url": "https://git.example.com/org/repo.git"} (explicit remote URL,
+// validated the same way any other explicit git remote URL in this codebase
+// is: gitremote.ParseURL, the shared SSH/HTTPS remote-URL parser).
 // Returns nil if not configured, wrong type, or missing required fields.
 func (s *EntireSettings) GetCheckpointRemote() *CheckpointRemoteConfig {
 	if s.StrategyOptions == nil {
@@ -1896,8 +1935,21 @@ func (s *EntireSettings) GetCheckpointRemote() *CheckpointRemoteConfig {
 		return nil
 	}
 	provider, providerOK := m["provider"].(string)
+	if !providerOK || provider == "" {
+		return nil
+	}
+	if provider == CheckpointProviderGit {
+		rawURL, urlOK := m["url"].(string)
+		if !urlOK || rawURL == "" {
+			return nil
+		}
+		if _, err := gitremote.ParseURL(rawURL); err != nil {
+			return nil
+		}
+		return &CheckpointRemoteConfig{Provider: provider, URL: rawURL}
+	}
 	repo, repoOK := m["repo"].(string)
-	if !providerOK || !repoOK || provider == "" || repo == "" {
+	if !repoOK || repo == "" {
 		return nil
 	}
 	if !strings.Contains(repo, "/") {

@@ -58,6 +58,16 @@ const (
 	flagAgentHelpSkill       = "agent-help-skill"
 	flagImportHistory        = "import-history"
 	checkpointProviderGitHub = "github"
+	// checkpointProviderGit is the generic --checkpoint-remote provider: the
+	// value after the colon is a full git remote URL (e.g.
+	// git:https://git.example.com/org/checkpoints-repo.git) rather than an
+	// owner/repo pair resolved against a hardcoded host, so checkpoint storage
+	// can target a self-hosted git server (Gitea, GitLab CE/EE, a plain bare
+	// repo over SSH/HTTPS). Kept as its own constant, matching this repo's
+	// convention of one provider-identifier constant per file/concern rather
+	// than a shared enum (see settings.CheckpointProviderGit, the same string
+	// used by settings.GetCheckpointRemote).
+	checkpointProviderGit = "git"
 )
 
 // externalAgentsAutoEnabledNotice is printed when picking an external summary
@@ -103,17 +113,23 @@ func (opts *EnableOptions) applyStrategyOptions(settings *EntireSettings) {
 		settings.StrategyOptions["push_sessions"] = false
 	}
 	if opts.CheckpointRemote != "" {
-		provider, repo, err := parseCheckpointRemoteFlag(opts.CheckpointRemote)
+		provider, target, err := parseCheckpointRemoteFlag(opts.CheckpointRemote)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Warning: invalid --checkpoint-remote format: %v\n", err)
 		} else {
 			if settings.StrategyOptions == nil {
 				settings.StrategyOptions = make(map[string]interface{})
 			}
-			settings.StrategyOptions["checkpoint_remote"] = map[string]any{
-				"provider": provider,
-				"repo":     repo,
+			checkpointRemote := map[string]any{"provider": provider}
+			if provider == checkpointProviderGit {
+				// Generic provider: target is a full remote URL, stored under
+				// its own key so it's never mistaken for the owner/repo
+				// shorthand the other providers use.
+				checkpointRemote["url"] = target
+			} else {
+				checkpointRemote["repo"] = target
 			}
+			settings.StrategyOptions["checkpoint_remote"] = checkpointRemote
 		}
 	}
 }
@@ -388,30 +404,46 @@ func saveSettingsToTarget(ctx context.Context, s *EntireSettings, targetFile str
 	}
 }
 
-// parseCheckpointRemoteFlag parses a "provider:owner/repo" string into its components.
-// Supported providers: "github".
-func parseCheckpointRemoteFlag(value string) (provider, repo string, err error) {
+// parseCheckpointRemoteFlag parses a "provider:target" string into its
+// components. For checkpointProviderGitHub, target must be "owner/repo"
+// (e.g. github:org/checkpoints-repo). For checkpointProviderGit, target is an
+// explicit git remote URL (e.g. git:https://git.example.com/org/checkpoints-repo.git
+// or git:git@git.example.com:org/checkpoints-repo.git) — the shorthand for a
+// self-hosted git server (Gitea, GitLab CE/EE, a bare git repo over SSH/HTTPS)
+// that doesn't live on a provider with a hardcoded host.
+//
+// Splitting on the first colon only (strings.SplitN(value, ":", 2)) is what
+// makes this safe for a URL target: a git:// or https:// scheme separator, or
+// an SSH host:path separator, never gets mistaken for the provider delimiter.
+//
+// Supported providers: "github", "git".
+func parseCheckpointRemoteFlag(value string) (provider, target string, err error) {
 	parts := strings.SplitN(value, ":", 2)
 	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
-		return "", "", fmt.Errorf("expected format provider:owner/repo (e.g., github:org/checkpoints-repo), got %q", value)
+		return "", "", fmt.Errorf("expected format provider:owner/repo (e.g., github:org/checkpoints-repo) or %s:<url> (e.g., %s:https://git.example.com/org/checkpoints-repo.git), got %q", checkpointProviderGit, checkpointProviderGit, value)
 	}
 
 	provider = parts[0]
-	repo = parts[1]
+	target = parts[1]
 
 	switch provider {
 	case checkpointProviderGitHub:
-		// valid
+		repoParts := strings.SplitN(target, "/", 2)
+		if len(repoParts) != 2 || repoParts[0] == "" || repoParts[1] == "" {
+			return "", "", fmt.Errorf("repo must be in owner/name format, got %q", target)
+		}
+		return provider, target, nil
+	case checkpointProviderGit:
+		// Validated the same way any other explicit git remote URL in this
+		// codebase is validated (gitremote.ParseURL, the shared SSH/HTTPS
+		// remote-URL parser) rather than a bespoke check.
+		if _, parseErr := gitremote.ParseURL(target); parseErr != nil {
+			return "", "", fmt.Errorf("invalid %s remote URL %q: %w", checkpointProviderGit, target, parseErr)
+		}
+		return provider, target, nil
 	default:
-		return "", "", fmt.Errorf("unsupported provider %q (supported: %s)", provider, checkpointProviderGitHub)
+		return "", "", fmt.Errorf("unsupported provider %q (supported: %s, %s)", provider, checkpointProviderGitHub, checkpointProviderGit)
 	}
-
-	repoParts := strings.SplitN(repo, "/", 2)
-	if len(repoParts) != 2 || repoParts[0] == "" || repoParts[1] == "" {
-		return "", "", fmt.Errorf("repo must be in owner/name format, got %q", repo)
-	}
-
-	return provider, repo, nil
 }
 
 // runSetupFlow runs the first-time setup flow (agent selection + hooks + settings).
@@ -792,7 +824,7 @@ Examples:
 	cmd.Flags().BoolVar(&opts.UseProjectSettings, "project", false, "Write settings to .entire/settings.json even if it already exists")
 	cmd.Flags().BoolVarP(&opts.ForceHooks, flagForce, "f", false, "Reinstall the Entire git hook")
 	cmd.Flags().BoolVar(&opts.SkipPushSessions, flagSkipPushSessions, false, "Disable automatic pushing of session logs on git push")
-	cmd.Flags().StringVar(&opts.CheckpointRemote, flagCheckpointRemote, "", "Checkpoint remote in provider:owner/repo format (e.g., github:org/checkpoints-repo)")
+	cmd.Flags().StringVar(&opts.CheckpointRemote, flagCheckpointRemote, "", "Checkpoint remote in provider:owner/repo format (e.g., github:org/checkpoints-repo), or git:<url> for a self-hosted git server (e.g., git:https://git.example.com/org/checkpoints-repo.git)")
 	cmd.Flags().StringVar(&opts.CheckpointBackend, flagCheckpointBackend, "", checkpointBackendFlagUsage)
 	cmd.Flags().StringVar(&summarizeProvider, flagSummarizeAgent, "", "Set the provider used by explain --generate (e.g., claude-code, codex, gemini, pi, cursor, copilot-cli)")
 	cmd.Flags().StringVar(&summarizeModel, flagSummarizeModel, "", "Set the model hint used by explain --generate")
@@ -957,7 +989,7 @@ for you and (optionally) create a matching GitHub repository via the gh CLI.`,
 	cmd.Flags().StringVar(&agentName, agentFlagName, "", "Agent to set up hooks for (e.g., "+strings.Join(agent.StringList(), ", ")+"; external agents on $PATH are also available). Enables non-interactive mode.")
 	cmd.Flags().BoolVarP(&opts.ForceHooks, flagForce, "f", false, "Force reinstall hooks (removes existing Entire hooks first)")
 	cmd.Flags().BoolVar(&opts.SkipPushSessions, flagSkipPushSessions, false, "Disable automatic pushing of session logs on git push")
-	cmd.Flags().StringVar(&opts.CheckpointRemote, flagCheckpointRemote, "", "Checkpoint remote in provider:owner/repo format (e.g., github:org/checkpoints-repo)")
+	cmd.Flags().StringVar(&opts.CheckpointRemote, flagCheckpointRemote, "", "Checkpoint remote in provider:owner/repo format (e.g., github:org/checkpoints-repo), or git:<url> for a self-hosted git server (e.g., git:https://git.example.com/org/checkpoints-repo.git)")
 	cmd.Flags().StringVar(&opts.CheckpointBackend, flagCheckpointBackend, "", checkpointBackendFlagUsage)
 	cmd.Flags().BoolVar(&opts.Telemetry, flagTelemetry, true, "Enable anonymous usage analytics")
 	cmd.Flags().BoolVar(&opts.AbsoluteGitHookPath, flagAbsoluteGitHookPath, false, "Embed full binary path in git hooks (for GUI git clients that don't source shell profiles)")

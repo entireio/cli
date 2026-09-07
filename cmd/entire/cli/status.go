@@ -352,7 +352,7 @@ func computeCheckpointSyncInfo(ctx context.Context, s *EntireSettings) checkpoin
 	// PushURL differently than this elected-remote probe does.
 	if cr := s.GetCheckpointRemote(); cr != nil {
 		if _, enabled, purlErr := checkpointremote.PushURL(ctx, elected.Name); purlErr == nil && enabled {
-			info := checkpointSyncInfo{Remote: cr.Repo, Source: checkpointSyncSourceDedicated}
+			info := checkpointSyncInfo{Remote: cr.Target(), Source: checkpointSyncSourceDedicated}
 			// The unpushed counter is meaningful here only on the git-refs
 			// backend (push-queue length is local and accurate). The
 			// git-branch comparison is omitted: pushes to a raw URL update
