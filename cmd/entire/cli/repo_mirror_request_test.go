@@ -982,3 +982,49 @@ func TestReportOneShotMirror_TerminalFailureIsNotCalledInFlight(t *testing.T) {
 	require.Contains(t, timedOutErr.String(), testMirrorRequestID.String())
 	require.Contains(t, timedOutErr.String(), "may still be progressing")
 }
+
+// TestCreateAndAwaitMirror_EmptyUpstreamSuspensionReadIsBounded pins that the
+// empty-upstream suspension probe runs under --wait-timeout like every other
+// call in createAndAwaitMirror. It read the raw ctx, so it could hang past a
+// deadline the caller had set and the doc comment promised covered the whole
+// operation. The branch is reached only via the deprecated `empty` flag, which
+// the server no longer sets — hence the hand-built response.
+func TestCreateAndAwaitMirror_EmptyUpstreamSuspensionReadIsBounded(t *testing.T) {
+	blocked := make(chan struct{})
+	client := newMirrorRequestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/mirrors":
+			writeJSONResponse(t, w, http.StatusCreated, &coreapi.CreatedMirror{
+				Created: false, Empty: true, MirrorId: "mirror-1", MirrorUrl: "entire://cluster/gh/owner/repo",
+			})
+		case r.URL.Path == mirrorStatusAPIPath:
+			close(blocked)
+			<-r.Context().Done()
+		default:
+			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	})
+
+	type result struct {
+		outcome mirrorCreateOutcome
+		err     error
+	}
+	done := make(chan result, 1)
+	go func() {
+		outcome, err := createAndAwaitMirror(t.Context(), client, "owner", "repo", "cluster", mirrorCreateOptions{
+			timeout: 50 * time.Millisecond,
+		})
+		done <- result{outcome, err}
+	}()
+
+	<-blocked
+	select {
+	case got := <-done:
+		// The probe is best-effort: a read cut short by the deadline falls
+		// through to the benign "nothing to clone", it does not fail the create.
+		require.NoError(t, got.err)
+		require.NotNil(t, got.outcome.created)
+	case <-time.After(5 * time.Second):
+		t.Fatal("empty-upstream suspension read ignored --wait-timeout and hung")
+	}
+}

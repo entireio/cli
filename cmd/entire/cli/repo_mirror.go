@@ -748,7 +748,7 @@ func createAndAwaitMirror(ctx context.Context, c *coreapi.Client, owner, repo, c
 		// finishMirrorCreate behavior; the read is best-effort, so a transient
 		// GetMirror error just falls through to the benign "nothing to clone".
 		if !created.Created {
-			if m, gerr := c.GetMirror(ctx, coreapi.GetMirrorParams{MirrorId: created.MirrorId}); gerr == nil {
+			if m, gerr := c.GetMirror(waitCtx, coreapi.GetMirrorParams{MirrorId: created.MirrorId}); gerr == nil {
 				if s, ok := m.Status.Get(); ok && s == coreapi.MirrorStatusSuspended {
 					outcome.status = s
 					outcome.polled = true
@@ -786,8 +786,8 @@ func createAndAwaitMirror(ctx context.Context, c *coreapi.Client, owner, repo, c
 // Best-effort, matching the empty-upstream suspension probe in
 // createAndAwaitMirror: a transient GetMirror error leaves Suspended false
 // rather than failing a create that did succeed. The durable fix is
-// server-side — adding `suspended` to
-// MirrorRequestResult — after which this helper should go.
+// server-side — adding `suspended` to MirrorRequestResult — after which this
+// helper should go.
 func applyAsyncSuspension(ctx context.Context, c mirrorStatusGetter, created *coreapi.CreatedMirror) {
 	m, err := c.GetMirror(ctx, coreapi.GetMirrorParams{MirrorId: created.MirrorId})
 	if err != nil {
