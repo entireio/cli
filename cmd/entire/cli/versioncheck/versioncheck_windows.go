@@ -1,0 +1,168 @@
+//go:build windows
+
+package versioncheck
+
+import (
+	"encoding/json"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+)
+
+// foldPathCase lowercases: Windows paths compare case-insensitively, and the
+// markers below are already lowercase.
+func foldPathCase(p string) string { return strings.ToLower(p) }
+
+// Windows install.ps1 one-liners, in the README's shapes. Printed, never
+// auto-run. windowsInstallCmd is the bare stable form; arguments go through
+// windowsInstallWithArgs, the iex "& {...}" form that can bind them.
+const (
+	windowsInstallURL      = "https://entire.io/install.ps1"
+	windowsInstallCmd      = "irm " + windowsInstallURL + " | iex"
+	windowsInstallWithArgs = `iex "& {$(irm ` + windowsInstallURL + `)} %s"`
+)
+
+// scoopConfigPath is Scoop's config.json, which records relocated install roots.
+func scoopConfigPath() string {
+	if xdg := os.Getenv("XDG_CONFIG_HOME"); xdg != "" {
+		return filepath.Join(xdg, "scoop", "config.json")
+	}
+	profile := os.Getenv("USERPROFILE")
+	if profile == "" {
+		return ""
+	}
+	return filepath.Join(profile, ".config", "scoop", "config.json")
+}
+
+type scoopConfigFile struct {
+	RootPath   string `json:"root_path"`
+	GlobalPath string `json:"global_path"`
+}
+
+func readScoopConfig() scoopConfigFile {
+	path := scoopConfigPath()
+	if path == "" {
+		return scoopConfigFile{}
+	}
+	data, err := os.ReadFile(path) //nolint:gosec // fixed per-user config location, not user input
+	if err != nil {
+		return scoopConfigFile{}
+	}
+	var cfg scoopConfigFile
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		return scoopConfigFile{}
+	}
+	return cfg
+}
+
+func scoopRoots() []string {
+	cfg := readScoopConfig()
+	var roots []string
+	for _, r := range []string{os.Getenv("SCOOP"), os.Getenv("SCOOP_GLOBAL"), cfg.RootPath, cfg.GlobalPath} {
+		if r != "" {
+			roots = append(roots, filepath.Join(r, "apps"))
+		}
+	}
+	return roots
+}
+
+// scoopAppsMarker is the default Scoop layout; scoopRoots covers relocations.
+const scoopAppsMarker = "/scoop/apps/"
+
+// scoopAppName returns the Scoop app directory the binary runs from ("cli" or
+// "entire"), or "" when execPath is not under a Scoop apps root. This is the
+// durable signal for the pre-rename package: a binary running from the `cli`
+// app dir must migrate to `entire` regardless of its version (the fix ships in
+// a final `cli` release, so the migrating binary's version is already past the
+// rename).
+func scoopAppName(execPath string) string {
+	for _, raw := range scoopRoots() {
+		root := normalizeInstallRoot(raw)
+		if root == "" {
+			continue
+		}
+		if below, ok := strings.CutPrefix(execPath, root); ok {
+			return firstPathSegment(below)
+		}
+	}
+	if _, below, ok := strings.Cut(execPath, scoopAppsMarker); ok {
+		return firstPathSegment(below)
+	}
+	return ""
+}
+
+func firstPathSegment(p string) string {
+	app, _, _ := strings.Cut(p, "/")
+	return app
+}
+
+func scoopUpgradeCommand(execPath, _ string) string {
+	// The Scoop package was renamed from `cli` to `entire`. A binary still
+	// running from the old `cli` app dir can never cross the rename with a
+	// plain `scoop update entire/cli`, so migrate it: install the new
+	// `entire` package, remove the old `cli` package, then reset the shared
+	// shims. Both manifests declare `bin: [git-remote-entire.exe,
+	// entire.exe]`, so the two packages contend for the same shims. Current
+	// Scoop handles that itself: installing `entire` renames the displaced
+	// shim to `entire.shim.cli` (warn_on_overwrite) and uninstalling `cli`
+	// removes only that suffixed copy (rm_shim), leaving the active shims
+	// pointing at `entire`. The reset step is belt-and-braces for older
+	// Scoop versions that overwrote shims without that alt-file dance and
+	// would otherwise take `entire.exe` and the git remote helper with them.
+	//
+	// The Windows updater is print-only, so return a self-contained command
+	// users can paste into either cmd or PowerShell. Explicitly invoking
+	// cmd.exe makes `&&` portable across those shells and ensures uninstall
+	// only runs after install succeeds — a stale bucket or transient failure
+	// therefore never removes the working CLI. (The uninstall→reset link is
+	// weaker: `scoop uninstall` ends in an unconditional `exit 0`, so reset
+	// runs even when the uninstall skipped its work. That is harmless, since
+	// reset is a no-op on the Scoop versions that make it unnecessary.)
+	//
+	// `scoop install` also auto-refreshes the bucket when >3h stale
+	// (is_scoop_outdated), so the new manifest usually lands
+	// without an explicit refresh; a bucket clone older than that check can
+	// still fail with "couldn't find manifest", and the README migration
+	// section names `scoop update` as the retry. Binaries already on the
+	// `entire` app just update in place.
+	if scoopAppName(execPath) == "cli" {
+		return `cmd.exe /D /C "scoop install entire/entire && scoop uninstall entire/cli && scoop reset entire"`
+	}
+	return "scoop update entire/entire"
+}
+
+var scoopProbe = installProbe{
+	roots:   scoopRoots,
+	markers: []string{scoopAppsMarker},
+	command: scoopUpgradeCommand,
+}
+
+var installProbes = []installProbe{scoopProbe, miseProbe}
+
+// fallbackInstallCommand names the running binary's directory with
+// -InstallDir so install.ps1 replaces it in place instead of taking its
+// Scoop-first default (an explicit -InstallDir opts out of Scoop there), and
+// passes -NoPathUpdate so an update never rewrites the user PATH.
+func fallbackInstallCommand(execPath, currentVersion string) string {
+	var args []string
+	if isNightly(currentVersion) {
+		args = append(args, "-Channel nightly")
+	}
+	if execPath != "" {
+		args = append(args, "-InstallDir '"+quoteInsideDoubleQuoted(filepath.Dir(execPath))+"' -NoPathUpdate")
+	}
+	if len(args) == 0 {
+		return windowsInstallCmd
+	}
+	return fmt.Sprintf(windowsInstallWithArgs, strings.Join(args, " "))
+}
+
+// quoteInsideDoubleQuoted prepares a path for a single-quoted literal that
+// itself sits inside a PowerShell double-quoted string. The outer string
+// still expands $name and treats a backtick as an escape, so both are
+// backtick-escaped; the inner single-quote literal needs a quote doubled.
+func quoteInsideDoubleQuoted(p string) string {
+	r := strings.NewReplacer("`", "``", "$", "`$", "'", "''")
+	return r.Replace(p)
+}
