@@ -66,6 +66,9 @@ func warnOrLogCheckpointPolicyReadFailure(ctx context.Context, err error) {
 }
 
 func warnOrLogCheckpointPolicySyncFailure(ctx context.Context, err error) {
+	if reportHTTPCheckpointAuthFailure(err) {
+		return
+	}
 	if interactive.CanPromptInteractively() {
 		fmt.Fprintf(stderrWriter, "[entire] Could not refresh checkpoint policy: %v\n", err)
 		return

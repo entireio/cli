@@ -459,6 +459,19 @@ URL mode is exempt — it addresses a separate metadata store directly. `entire
 status` shows the sync destination and how many checkpoints have not reached
 it yet.
 
+**HTTPS authentication in hooks.** A PAT typed into the parent `git push`
+is not automatically available to Entire's separate, non-interactive Git
+processes; a Git credential helper can share it. Recognized missing-credential
+and rejected-authentication failures stop checkpoint push recovery rather than
+retrying every ref or fetching/replaying history. Checkpoints stay local (queued
+refs stay queued), and this failure does not block the user's code push. Policy
+refresh and both push backends share one per-process hint linking to
+https://docs.entire.io/troubleshooting/checkpoint-auth. The Git wrapper preserves
+a typed authentication cause without embedding potentially credential-bearing
+output in the error. Generic 403/404 and network errors are not classified as
+proof of authentication failure. See `checkpoint/remote/http_auth.go` and
+`strategy/checkpoint_auth.go`.
+
 A gated push is not fully silent: when checkpoints are waiting for the
 elected remote, the hook prints a two-line stderr hint naming the elected
 destination, the waiting count, and the `checkpoint_push_remote` setting
