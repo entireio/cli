@@ -44,10 +44,17 @@ type copilotLine struct {
 }
 
 type copilotAssistantData struct {
-	MessageID    string               `json:"messageId"`
-	Content      string               `json:"content"`
-	ToolReqs     []copilotToolRequest `json:"toolRequests"`
-	OutputTokens int                  `json:"outputTokens"`
+	MessageID string `json:"messageId"`
+	Content   string `json:"content"`
+	// ReasoningText carries the model's reasoning-summary text. Some Copilot
+	// CLI sessions emit an empty "content" with the only displayable text in
+	// "reasoningText" — same class of bug as
+	// https://github.com/entireio/cli/issues/1070, which fixed the CLI-side
+	// extraction path (cmd/entire/cli/agent/copilotcli/transcript.go); this is
+	// the compact-transcript-building pipeline's copy of that struct.
+	ReasoningText string               `json:"reasoningText"`
+	ToolReqs      []copilotToolRequest `json:"toolRequests"`
+	OutputTokens  int                  `json:"outputTokens"`
 }
 
 type copilotToolRequest struct {
@@ -149,11 +156,16 @@ func copilotAssistantLine(base transcriptLine, line copilotLine) *transcriptLine
 		return nil
 	}
 
+	text := data.Content
+	if text == "" {
+		text = data.ReasoningText
+	}
+
 	content := make([]map[string]json.RawMessage, 0, 1+len(data.ToolReqs))
-	if data.Content != "" {
+	if text != "" {
 		tb, err := json.Marshal(transcript.ContentTypeText)
 		if err == nil {
-			txt, err := json.Marshal(data.Content)
+			txt, err := json.Marshal(text)
 			if err == nil {
 				content = append(content, map[string]json.RawMessage{
 					"type": tb,
