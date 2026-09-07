@@ -102,7 +102,7 @@ func RunReviewGuidedSetup(
 
 	launchable := launchableInstalledAgentNames(installed, reviewerFor)
 	if len(launchable) == 0 {
-		return "", settings.ReviewProfileConfig{}, errors.New("no agents with review runner adapters and hooks installed; run `entire configure --agent claude-code`, `entire configure --agent codex`, `entire configure --agent gemini`, or `entire configure --agent pi`")
+		return "", settings.ReviewProfileConfig{}, errors.New("no agents with review runner adapters and hooks installed; run `entire agent add claude-code`, `entire agent add codex`, `entire agent add gemini`, or `entire agent add pi`")
 	}
 
 	profileName = strings.TrimSpace(profileName)
@@ -759,7 +759,7 @@ func RunReviewProfileConfigPicker(ctx context.Context, out io.Writer, getInstall
 	if len(installed) == 0 {
 		return errors.New(
 			"no agents with hooks installed; " +
-				"run 'entire configure --agent <name>' to install hooks for one, " +
+				"run 'entire agent add <name>' to install hooks for one, " +
 				"or 'entire enable' to set up the repo",
 		)
 	}
