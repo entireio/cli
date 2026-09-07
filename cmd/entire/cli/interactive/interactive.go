@@ -85,6 +85,30 @@ func isAgentSubprocessEnv() bool {
 		os.Getenv("GIT_TERMINAL_PROMPT") == "0"
 }
 
+// HasAgentEnvMarker reports whether the environment carries a marker set by a
+// known coding agent's own process. This answers a different question from
+// isAgentSubprocessEnv above: that one decides "can this process prompt on
+// its inherited TTY" (and so also honors GIT_TERMINAL_PROMPT=0, a caller
+// preference rather than an agent identity); this one decides "is a coding
+// agent actually driving this process", used where misidentifying a human's
+// own commit as agent-driven would be the worse mistake (issue #1965: warning
+// when a commit lands with no Entire session recording it).
+//
+//   - CLAUDECODE=1: Claude Code sets this in the environment of every command
+//     it runs.
+//   - GEMINI_CLI=1, COPILOT_CLI=1, PI_CODING_AGENT=true: see
+//     isAgentSubprocessEnv.
+//
+// Markers for other integrations (Cursor, Factory AI Droid, OpenCode, Codex)
+// are not yet verified here and are deliberately omitted rather than guessed:
+// omission means "not detected", not "definitely not an agent".
+func HasAgentEnvMarker() bool {
+	return os.Getenv("CLAUDECODE") != "" ||
+		os.Getenv("GEMINI_CLI") != "" ||
+		os.Getenv("COPILOT_CLI") != "" ||
+		os.Getenv("PI_CODING_AGENT") != ""
+}
+
 // IsTerminalReader reports whether r is an *os.File backed by a terminal.
 // It is useful when an explicitly interactive command needs to distinguish a
 // human at stdin from an agent process that merely inherited a controlling TTY.
