@@ -14,6 +14,25 @@ QyNTUxOQAAACB7ZlJ8tkWCKdRJRGF1BngP3bkNbz8bMF6Yl5xLJp9m1QAAAJj2M3UO9jN1
 DgAAAAtzc2gtZWQyNTUxOQAAACB7ZlJ8tkWCKdRJRGF1BngP3bkNbz8bMF6Yl5xLJp9m1QA
 AAEAGZmFrZS1rZXktZm9yLXJlZGFjdGlvbi1iZW5jaG1hcmstb25seQECAwQF`)
 
+// Repeated credentials can occur in captured tool output, such as request logs.
+// Each matching scanner finding must not trigger another whole-input scan for
+// all copies of the same secret.
+func BenchmarkRedactStringRepeatedSecret(b *testing.B) {
+	for _, repeats := range []int{1, 10, 100, 1000} {
+		b.Run(fmt.Sprintf("Occurrences%d", repeats), func(b *testing.B) {
+			input := strings.Repeat("request key=AKIAYRWQG5EJLPZLBYNP completed\n", repeats)
+			want := strings.Repeat("request key=REDACTED completed\n", repeats)
+			b.ReportAllocs()
+			b.SetBytes(int64(len(input)))
+			for b.Loop() {
+				if got := String(input); got != want {
+					b.Fatal("redacted output did not match expected request log")
+				}
+			}
+		})
+	}
+}
+
 // BenchmarkRedactJSONLBytes gives us a stable redaction performance baseline.
 //
 // To compare against a base ref:

@@ -213,6 +213,7 @@ func detectAllLayers(s string) []taggedRegion {
 	// via ConfigureScanners; betterleaks-only when unconfigured).
 	if getScanners().betterleaks {
 		if d := getDetector(); d != nil {
+			seenSecrets := make(map[string]struct{})
 			for _, f := range d.DetectString(s) {
 				// Placeholder-valued findings (changeme, secret_here, mask runs)
 				// stay visible — but only on an exact match: splitting a greedy
@@ -220,6 +221,13 @@ func detectAllLayers(s string) []taggedRegion {
 				if isPlaceholderSecretValue(f.Secret) {
 					continue
 				}
+				// A finding reports one occurrence, but the search below already
+				// covers every copy of its secret. Repeated findings must not
+				// rescan the input and accumulate quadratically many regions.
+				if _, seen := seenSecrets[f.Secret]; seen {
+					continue
+				}
+				seenSecrets[f.Secret] = struct{}{}
 				searchFrom := 0
 				for {
 					idx := strings.Index(s[searchFrom:], f.Secret)
