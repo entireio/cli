@@ -82,7 +82,7 @@ func newAttachCmd() *cobra.Command {
 		skillsFlag []string
 	)
 	cmd := &cobra.Command{
-		Use:   "attach <session-id>",
+		Use:   "attach [session-id]",
 		Short: "Attach an existing agent session",
 		Long: `Attach an existing agent session that wasn't captured by hooks.
 
@@ -103,9 +103,15 @@ external_agents in .entire/settings.local.json (that file only, and only
 when it is untracked). Run 'entire agent list' to see the full list.
 
 If --agent doesn't locate a transcript, Entire auto-detects the agent from
-the transcript and prints the detected agent name.`,
+the transcript and prints the detected agent name.
+
+Omitting <session-id> works for an agent that supports session discovery
+(currently OpenCode): Entire lists that agent's own untracked sessions scoped
+to this worktree — an interactive picker in a terminal, or a plain list to
+attach from directly otherwise. Other agents still require an explicit
+session ID.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if len(args) != 1 {
+			if len(args) > 1 {
 				return cmd.Help()
 			}
 			if checkDisabledGuard(cmd.Context(), cmd.OutOrStdout()) {
@@ -140,7 +146,25 @@ the transcript and prints the detected agent name.`,
 					opts.ReviewPromptOverride = marker.Prompt
 				}
 			}
-			err := runAttachSurfaceReviewErrors(cmd, args[0], types.AgentName(agentFlag), opts)
+
+			var sessionID string
+			if len(args) == 1 {
+				sessionID = args[0]
+			} else {
+				discovered, discErr := runAttachDiscoverSessionID(cmd, types.AgentName(agentFlag))
+				if discErr != nil {
+					return discErr
+				}
+				if discovered == "" {
+					// Nothing to attach: the discovery path already printed why
+					// (no untracked sessions, a non-interactive fallback list, or
+					// the user cancelled the picker).
+					return nil
+				}
+				sessionID = discovered
+			}
+
+			err := runAttachSurfaceReviewErrors(cmd, sessionID, types.AgentName(agentFlag), opts)
 			if err == nil && useMarker {
 				if clearErr := cliReview.ClearPendingReviewMarker(cmd.Context()); clearErr != nil {
 					logging.Debug(cmd.Context(), "clear pending review marker after attach", slog.String("error", clearErr.Error()))

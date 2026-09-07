@@ -3,6 +3,7 @@ package opencode
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -185,4 +186,94 @@ func runOpenCodeImport(ctx context.Context, exportFilePath string) error {
 	}
 
 	return nil
+}
+
+// nativeSessionListEntry mirrors one row of `opencode session list --format
+// json` (fields verified against OpenCode 1.18.16, per entireio/cli#1992):
+// session ID, title, working directory, and last-update time. UpdatedAt is
+// epoch milliseconds, matching SessionInfo's CreatedAt/UpdatedAt in the
+// export format.
+type nativeSessionListEntry struct {
+	ID        string `json:"id"`
+	Title     string `json:"title"`
+	Directory string `json:"directory"`
+	UpdatedAt int64  `json:"updatedAt"`
+}
+
+// runOpenCodeSessionList runs `opencode session list --format json` and
+// parses its output. This lists every session in OpenCode's own store
+// (untracked-by-Entire ones included), unscoped — callers filter to a
+// worktree themselves.
+//
+// Known caveat (entireio/cli#1992): on some OpenCode versions this command
+// can rewrite .opencode/package-lock.json as a side effect of enumerating
+// sessions (upstream tracked as anomalyco/opencode#37435 and its fix
+// anomalyco/opencode#37477). Entire runs the documented command as-is; it
+// does not itself guard against or detect that mutation.
+func runOpenCodeSessionList(ctx context.Context) ([]nativeSessionListEntry, error) {
+	ctx, cancel := context.WithTimeout(ctx, openCodeCommandTimeout)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, "opencode", "session", "list", "--format", "json")
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		return nil, classifyOpenCodeSessionListError(ctx, err, stderr.String())
+	}
+
+	var entries []nativeSessionListEntry
+	if err := json.Unmarshal(stdout.Bytes(), &entries); err != nil {
+		return nil, fmt.Errorf("failed to parse opencode session list output: %w", err)
+	}
+	return entries, nil
+}
+
+// openCodeSessionListError is the `opencode session list` counterpart of
+// openCodeExportError: a concise, display-safe message that still retains its
+// cause via Unwrap, so callers can errors.Is/As through it (e.g. to detect a
+// missing opencode binary) without parsing the message text.
+type openCodeSessionListError struct {
+	message string
+	cause   error
+}
+
+func (e *openCodeSessionListError) Error() string { return e.message }
+func (e *openCodeSessionListError) Unwrap() error { return e.cause }
+
+// classifyOpenCodeSessionListError turns a failed `opencode session list`
+// invocation into a concise, display-safe error, mirroring
+// classifyOpenCodeExportError's shape without the export-specific messages.
+func classifyOpenCodeSessionListError(ctx context.Context, err error, stderr string) error {
+	if errors.Is(ctx.Err(), context.Canceled) {
+		return context.Canceled
+	}
+	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		return &openCodeSessionListError{
+			message: fmt.Sprintf("OpenCode session list timed out after %s. Try again.", openCodeCommandTimeout),
+			cause:   context.DeadlineExceeded,
+		}
+	}
+
+	var execErr *exec.Error
+	if errors.As(err, &execErr) && errors.Is(execErr.Err, exec.ErrNotFound) {
+		return &openCodeSessionListError{
+			message: "OpenCode is not installed or is not available in PATH.",
+			cause:   err,
+		}
+	}
+	if errors.Is(err, os.ErrPermission) {
+		return &openCodeSessionListError{
+			message: "OpenCode could not be started because of insufficient permissions.",
+			cause:   err,
+		}
+	}
+
+	if detail := formatOpenCodeErrorDetail(stderr); detail != "" {
+		return &openCodeSessionListError{
+			message: "OpenCode could not list sessions: " + detail,
+			cause:   err,
+		}
+	}
+	return &openCodeSessionListError{message: "OpenCode could not list sessions.", cause: err}
 }
