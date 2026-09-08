@@ -90,7 +90,7 @@ func isManagedSearchSkill(data []byte) bool {
 func legacySearchSubagentPath(agentName types.AgentName) string {
 	switch agentName {
 	case agent.AgentNameClaudeCode:
-		return filepath.Join(".claude", "agents", strategy.EntireSearchSubagentName+".md")
+		return filepath.Join(claudeDirName, "agents", strategy.EntireSearchSubagentName+".md")
 	case agent.AgentNameCodex:
 		return filepath.Join(".codex", "agents", strategy.EntireSearchSubagentName+".toml")
 	case agent.AgentNameGemini:
@@ -168,9 +168,17 @@ func reportSearchSkillScaffold(w io.Writer, ag agent.Agent, result managedScaffo
 	}
 }
 
-// searchSkillTemplate maps each agent to its documented project-level Agent
-// Skills directory. Every agent shares one SKILL.md body; the skill directory
-// is named after strategy.EntireSearchSubagentName — the value the
+// claudeDirName is Claude Code's project directory. Named because the scaffold
+// path, the legacy subagent path and doctor's tests all reach for it.
+const claudeDirName = ".claude"
+
+// searchSkillTemplatePath maps each agent to its documented project-level
+// Agent Skills directory, or "" for one that gets no skill. Split out from
+// searchSkillTemplate so a caller that wants only the location — doctor's
+// symlink scan asks for one per agent — does not trim and copy a multi-KB
+// template body to get it.
+//
+// The skill directory is named after strategy.EntireSearchSubagentName — the value the
 // commit-condensed telemetry probe matches legacy subagent dispatches against
 // and the skill identity telemetry recognizes.
 // TestSearchSkillTemplates_NameMatchesTelemetryProbe pins that, so renaming
@@ -191,11 +199,11 @@ func reportSearchSkillScaffold(w io.Writer, ag agent.Agent, result managedScaffo
 // protected agent root do not — and that asymmetry is accepted rather than
 // papered over: adding .agents (a shared, user-authored skills directory) to
 // ProtectedDirs would hide the user's own skills from checkpoints repo-wide.
-func searchSkillTemplate(agentName types.AgentName) (string, []byte, bool) {
+func searchSkillTemplatePath(agentName types.AgentName) string {
 	var root string
 	switch agentName {
 	case agent.AgentNameClaudeCode:
-		root = ".claude"
+		root = claudeDirName
 	case agent.AgentNameCodex:
 		root = ".agents"
 	case agent.AgentNameCopilotCLI:
@@ -211,9 +219,18 @@ func searchSkillTemplate(agentName types.AgentName) (string, []byte, bool) {
 	case agent.AgentNamePi:
 		root = ".pi"
 	default:
+		return ""
+	}
+	return filepath.Join(root, "skills", strategy.EntireSearchSubagentName, "SKILL.md")
+}
+
+// searchSkillTemplate is searchSkillTemplatePath plus the SKILL.md body every
+// agent shares.
+func searchSkillTemplate(agentName types.AgentName) (string, []byte, bool) {
+	relPath := searchSkillTemplatePath(agentName)
+	if relPath == "" {
 		return "", nil, false
 	}
-	relPath := filepath.Join(root, "skills", strategy.EntireSearchSubagentName, "SKILL.md")
 	return relPath, []byte(strings.TrimSpace(searchSkillTemplateContent) + "\n"), true
 }
 

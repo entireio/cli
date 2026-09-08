@@ -9,14 +9,22 @@ import (
 	"github.com/go-git/go-git/v6"
 )
 
-func repositoryDirs(repo *git.Repository) (worktreeRoot, commonDir string, err error) {
+func repositoryRoot(repo *git.Repository) (string, error) {
 	worktree, err := repo.Worktree()
 	if err != nil {
-		return "", "", fmt.Errorf("open worktree: %w", err)
+		return "", fmt.Errorf("open worktree: %w", err)
 	}
-	worktreeRoot = worktree.Filesystem().Root()
+	worktreeRoot := worktree.Filesystem().Root()
 	if worktreeRoot == "" {
-		return "", "", errors.New("repository worktree filesystem has no root path")
+		return "", errors.New("repository worktree filesystem has no root path")
+	}
+	return worktreeRoot, nil
+}
+
+func repositoryDirs(repo *git.Repository) (worktreeRoot, commonDir string, err error) {
+	worktreeRoot, err = repositoryRoot(repo)
+	if err != nil {
+		return "", "", err
 	}
 	metadata, err := gitrepo.ResolveWorktreeMetadata(worktreeRoot)
 	if err != nil {

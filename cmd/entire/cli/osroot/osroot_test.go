@@ -1,6 +1,7 @@
 package osroot_test
 
 import (
+	"errors"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -729,4 +730,72 @@ func TestRemoveAllNoSymlinks(t *testing.T) {
 		assert.True(t, os.IsNotExist(statErr), "the link is gone")
 		assert.FileExists(t, filepath.Join(outside, "keep"), "its target is not")
 	})
+}
+
+// TestOpenNoFollow_RejectsDirectory pins the portable half of the non-regular
+// refusal. A directory used to open fine and fail a step later, inside the
+// caller's io.ReadAll, with a platform-dependent errno.
+func TestOpenNoFollow_RejectsDirectory(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "sub"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+
+	if _, err := osroot.OpenNoFollow(root, "sub"); !errors.Is(err, osroot.ErrNotRegularFile) {
+		t.Errorf("OpenNoFollow(dir) error = %v, want ErrNotRegularFile", err)
+	}
+	if _, err := osroot.ReadFileNoFollow(root, "sub"); !errors.Is(err, osroot.ErrNotRegularFile) {
+		t.Errorf("ReadFileNoFollow(dir) error = %v, want ErrNotRegularFile", err)
+	}
+}
+
+// A regular file is unaffected — the refusal must not have become a blanket one.
+func TestOpenNoFollow_AllowsRegularFile(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "f.json"), []byte(`{"a":1}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+
+	data, err := osroot.ReadFileNoFollow(root, "f.json")
+	if err != nil {
+		t.Fatalf("ReadFileNoFollow() error = %v", err)
+	}
+	if string(data) != `{"a":1}` {
+		t.Errorf("ReadFileNoFollow() = %q", data)
+	}
+}
+
+// A missing file must still classify as os.ErrNotExist, because callers use that
+// to tell "no config here" from "broken config here".
+func TestOpenNoFollow_MissingStaysNotExist(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+
+	_, err = osroot.ReadFileNoFollow(root, "absent.json")
+	if !os.IsNotExist(err) {
+		t.Errorf("ReadFileNoFollow(absent) error = %v, want os.IsNotExist", err)
+	}
+	if errors.Is(err, osroot.ErrNotRegularFile) {
+		t.Error("an absent file must not report ErrNotRegularFile")
+	}
 }

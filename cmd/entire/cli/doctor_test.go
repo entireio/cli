@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"io/fs"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -22,6 +23,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
+	"github.com/entireio/cli/cmd/entire/cli/worktreedir"
 
 	"github.com/go-git/go-git/v6"
 	"github.com/go-git/go-git/v6/plumbing"
@@ -1278,7 +1280,7 @@ func TestCheckHookDrift_ClaudeCodeWarnsWhenOutdated(t *testing.T) {
 	dir := setupGitRepoForPhaseTest(t)
 	t.Chdir(dir)
 
-	claudeDir := filepath.Join(dir, ".claude")
+	claudeDir := filepath.Join(dir, claudeDirName)
 	require.NoError(t, os.MkdirAll(claudeDir, 0o750))
 	stale := `{
   "hooks": {
@@ -1490,7 +1492,7 @@ func TestCheckAgentDirSymlinks_ReportsSymlinkedAgentDir(t *testing.T) {
 	t.Cleanup(osroot.ResetShared)
 
 	elsewhere := t.TempDir()
-	if err := os.Symlink(elsewhere, filepath.Join(dir, ".claude")); err != nil {
+	if err := os.Symlink(elsewhere, filepath.Join(dir, claudeDirName)); err != nil {
 		t.Skipf("symlink not supported: %v", err)
 	}
 
@@ -1512,8 +1514,8 @@ func TestCheckAgentDirSymlinks_ReportsSymlinkedScaffoldParent(t *testing.T) {
 	t.Cleanup(paths.ClearWorktreeRootCache)
 	t.Cleanup(osroot.ResetShared)
 
-	require.NoError(t, os.MkdirAll(filepath.Join(dir, ".claude"), 0o750))
-	if err := os.Symlink(t.TempDir(), filepath.Join(dir, ".claude", "skills")); err != nil {
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, claudeDirName), 0o750))
+	if err := os.Symlink(t.TempDir(), filepath.Join(dir, claudeDirName, "skills")); err != nil {
 		t.Skipf("symlink not supported: %v", err)
 	}
 
@@ -1566,8 +1568,8 @@ func TestCheckAgentDirSymlinks_ReportsSymlinkedConfigFile(t *testing.T) {
 	t.Cleanup(paths.ClearWorktreeRootCache)
 	t.Cleanup(osroot.ResetShared)
 
-	require.NoError(t, os.MkdirAll(filepath.Join(dir, ".claude"), 0o750))
-	if err := os.Symlink(filepath.Join(t.TempDir(), "settings.json"), filepath.Join(dir, ".claude", "settings.json")); err != nil {
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, claudeDirName), 0o750))
+	if err := os.Symlink(filepath.Join(t.TempDir(), "settings.json"), filepath.Join(dir, claudeDirName, "settings.json")); err != nil {
 		t.Skipf("symlink not supported: %v", err)
 	}
 
@@ -1599,7 +1601,7 @@ func TestCheckAgentDirSymlinks_NamesTheOutermostLinkOnce(t *testing.T) {
 	t.Cleanup(paths.ClearWorktreeRootCache)
 	t.Cleanup(osroot.ResetShared)
 
-	if err := os.Symlink(t.TempDir(), filepath.Join(dir, ".claude")); err != nil {
+	if err := os.Symlink(t.TempDir(), filepath.Join(dir, claudeDirName)); err != nil {
 		t.Skipf("symlink not supported: %v", err)
 	}
 
@@ -1623,7 +1625,7 @@ func TestCheckAgentDirSymlinks_ReportsAnUnreadableComponent(t *testing.T) {
 	t.Cleanup(paths.ClearWorktreeRootCache)
 	t.Cleanup(osroot.ResetShared)
 
-	claude := filepath.Join(dir, ".claude")
+	claude := filepath.Join(dir, claudeDirName)
 	require.NoError(t, os.MkdirAll(filepath.Join(claude, "skills"), 0o750))
 	require.NoError(t, os.Chmod(claude, 0o000))
 	t.Cleanup(func() { _ = os.Chmod(claude, 0o750) }) //nolint:errcheck // best-effort restore so t.TempDir can clean up
@@ -1668,9 +1670,9 @@ func TestCheckAgentDirSymlinks_SilentWhenClean(t *testing.T) {
 	})
 
 	t.Run("real directories and a user's own link inside one", func(t *testing.T) {
-		require.NoError(t, os.MkdirAll(filepath.Join(dir, ".claude", "skills"), 0o750))
-		require.NoError(t, os.WriteFile(filepath.Join(dir, ".claude", "settings.json"), []byte("{}"), 0o600))
-		if err := os.Symlink(t.TempDir(), filepath.Join(dir, ".claude", "skills", "my-own")); err != nil {
+		require.NoError(t, os.MkdirAll(filepath.Join(dir, claudeDirName, "skills"), 0o750))
+		require.NoError(t, os.WriteFile(filepath.Join(dir, claudeDirName, "settings.json"), []byte("{}"), 0o600))
+		if err := os.Symlink(t.TempDir(), filepath.Join(dir, claudeDirName, "skills", "my-own")); err != nil {
 			t.Skipf("symlink not supported: %v", err)
 		}
 
@@ -1679,4 +1681,133 @@ func TestCheckAgentDirSymlinks_SilentWhenClean(t *testing.T) {
 		assert.Empty(t, stdout.String(),
 			"a shared skill symlinked into place is a real setup and none of Entire's business")
 	})
+}
+
+// TestScanForSymlinkedComponent_RegularFileWhereDirectoryBelongs pins the split
+// between BROKEN and NOT READABLE. A regular file at `.claude` used to arrive
+// here as componentScanUnreadable, so doctor answered "check the ownership and
+// permissions" for a condition only replacing the path fixes — the else-branch
+// pattern the .entire scan separates two error values to avoid.
+func TestScanForSymlinkedComponent_RegularFileWhereDirectoryBelongs(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, claudeDirName), []byte("not a dir"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// No osroot.ResetShared here, unlike the t.Chdir tests below: the registry
+	// is process-global and closing it mid-run breaks any test running in
+	// parallel — it took out readCapped's, which opens a root of its own. A
+	// registry entry for a unique temp dir needs no cleanup.
+	root, err := worktreedir.OpenAt(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	name, outcome := scanForSymlinkedComponent(root, claudeDirName+"/settings.json")
+	if outcome != componentScanWrongType {
+		t.Errorf("outcome = %v, want componentScanWrongType", outcome)
+	}
+	if name != claudeDirName {
+		t.Errorf("name = %q, want %s — the component to replace, not the leaf", name, claudeDirName)
+	}
+}
+
+// TestCheckAgentDirSymlinks_ReportsWrongTypedComponent checks the remedy the
+// user actually reads, not just the classification.
+func TestCheckAgentDirSymlinks_ReportsWrongTypedComponent(t *testing.T) {
+	dir := setupGitRepoForPhaseTest(t)
+	t.Chdir(dir)
+	paths.ClearWorktreeRootCache()
+	t.Cleanup(paths.ClearWorktreeRootCache)
+	t.Cleanup(osroot.ResetShared)
+
+	if err := os.WriteFile(filepath.Join(dir, claudeDirName), []byte("not a dir"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd, stdout := newTestCmd(t)
+	checkAgentDirSymlinks(cmd)
+
+	got := stdout.String()
+	if !strings.Contains(got, "BROKEN") {
+		t.Errorf("output should report BROKEN, got:\n%s", got)
+	}
+	if !strings.Contains(got, "replace each path above with a real directory") {
+		t.Errorf("output should name the replace remedy, got:\n%s", got)
+	}
+	if strings.Contains(got, "ownership and permissions") {
+		t.Errorf("output must not offer the permissions remedy for a wrong-typed path, got:\n%s", got)
+	}
+}
+
+// TestAgentSymlinkCheckPaths_CoversLegacySubagentDir keeps .claude/agents/ in
+// the scan. removeLegacySearchSubagent deletes through it with
+// osroot.LstatNoSymlinks, which refuses a symlinked parent, so a link there is
+// refused at enable and has to be diagnosable. .codex/agents and .gemini/agents
+// were only ever covered as a side effect of the agent-help template living
+// under them.
+func TestAgentSymlinkCheckPaths_CoversLegacySubagentDir(t *testing.T) {
+	t.Parallel()
+
+	candidates := agentSymlinkCheckPaths()
+	var found bool
+	for _, c := range candidates {
+		if strings.HasPrefix(c, ".claude/agents/") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("no candidate under .claude/agents/; got %v", candidates)
+	}
+}
+
+// A real directory is traversable and reports clean, so the allowlist has not
+// become a blanket rejection.
+func TestScanForSymlinkedComponent_DirectoryIsClean(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, claudeDirName), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	root, err := worktreedir.OpenAt(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if name, outcome := scanForSymlinkedComponent(root, claudeDirName+"/settings.json"); outcome != componentScanClean {
+		t.Errorf("outcome = %v (%q), want componentScanClean", outcome, name)
+	}
+}
+
+// TestComponentHasExpectedShape pins each mode combination at both positions,
+// including the Windows shapes that must not be rejected: a bare
+// fs.ModeIrregular is how Go reports a directory junction, and
+// ModeDir|ModeIrregular a cloud placeholder directory.
+func TestComponentHasExpectedShape(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		mode                fs.FileMode
+		wantLeaf, wantInner bool
+	}{
+		{mode: fs.ModeDir, wantLeaf: false, wantInner: true},
+		{mode: fs.ModeIrregular, wantLeaf: true, wantInner: false},
+		{mode: fs.ModeDir | fs.ModeIrregular, wantLeaf: false, wantInner: true},
+		{mode: 0, wantLeaf: true, wantInner: false},
+		{mode: fs.ModeNamedPipe, wantLeaf: false, wantInner: false},
+		{mode: fs.ModeSocket, wantLeaf: false, wantInner: false},
+		{mode: fs.ModeDevice, wantLeaf: false, wantInner: false},
+		{mode: fs.ModeDevice | fs.ModeCharDevice, wantLeaf: false, wantInner: false},
+		{mode: fs.ModeSymlink, wantLeaf: false, wantInner: false},
+	} {
+		if got := componentHasExpectedShape(tc.mode, true); got != tc.wantLeaf {
+			t.Errorf("componentHasExpectedShape(%v, leaf) = %v, want %v", tc.mode, got, tc.wantLeaf)
+		}
+		if got := componentHasExpectedShape(tc.mode, false); got != tc.wantInner {
+			t.Errorf("componentHasExpectedShape(%v, inner) = %v, want %v", tc.mode, got, tc.wantInner)
+		}
+	}
 }
