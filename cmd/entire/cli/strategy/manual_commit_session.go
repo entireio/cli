@@ -438,8 +438,8 @@ func reconcileWorktreePathForResumedTurn(ctx context.Context, state *SessionStat
 	// Only repoint onto another main worktree. Resuming into a linked worktree
 	// would reintroduce the WorktreeID/WorktreePath disalignment from the other
 	// direction, so leave those alone.
-	currentWorktreeID, err := paths.GetWorktreeID(current)
-	if err != nil || currentWorktreeID != "" {
+	currentMetadata, err := gitrepo.ResolveWorktreeMetadata(current)
+	if err != nil || currentMetadata.WorktreeID != "" {
 		return
 	}
 
@@ -480,6 +480,7 @@ func gitCommonDirForWorktree(ctx context.Context, worktreePath string) (string, 
 		return "", errors.New("empty worktree path")
 	}
 
+	// Git must validate recorded session paths before they establish repository ownership.
 	cmd := exec.CommandContext(ctx, "git", "-C", worktreePath, "rev-parse", "--git-common-dir")
 	cmd.Env = gitrepo.EnvWithoutRepoOverrides()
 	output, err := cmd.Output()
@@ -495,10 +496,11 @@ func gitCommonDirForWorktree(ctx context.Context, worktreePath string) (string, 
 		commonDir = filepath.Join(worktreePath, commonDir)
 	}
 	commonDir = filepath.Clean(commonDir)
-	if resolved, err := filepath.EvalSymlinks(commonDir); err == nil {
-		commonDir = resolved
+	resolved, err := filepath.EvalSymlinks(commonDir)
+	if err != nil {
+		return "", fmt.Errorf("resolve git common dir identity for %s: %w", worktreePath, err)
 	}
-	return commonDir, nil
+	return resolved, nil
 }
 
 func isNestedWorktreeOfRecordedRepo(recordedWorktreePath, commitWorktreePath string) bool {
@@ -644,7 +646,7 @@ func (s *ManualCommitStrategy) initializeSession(ctx context.Context, repo *git.
 	}
 
 	// Get worktree ID for shadow branch naming
-	worktreeID, err := paths.GetWorktreeID(worktreePath)
+	metadata, err := gitrepo.ResolveWorktreeMetadata(worktreePath)
 	if err != nil {
 		return fmt.Errorf("failed to get worktree ID: %w", err)
 	}
@@ -671,7 +673,7 @@ func (s *ManualCommitStrategy) initializeSession(ctx context.Context, repo *git.
 		BaseCommit:            headHash,
 		AttributionBaseCommit: headHash,
 		WorktreePath:          worktreePath,
-		WorktreeID:            worktreeID,
+		WorktreeID:            metadata.WorktreeID,
 		StartedAt:             now,
 		LastInteractionTime:   &now,
 		TurnID:                turnID.String(),

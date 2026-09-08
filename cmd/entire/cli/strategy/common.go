@@ -23,6 +23,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/remote"
 	"github.com/entireio/cli/cmd/entire/cli/entiredir"
+	"github.com/entireio/cli/cmd/entire/cli/gitdir"
 	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/entireio/cli/cmd/entire/cli/interactive"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
@@ -1377,27 +1378,24 @@ func OpenRepository(ctx context.Context) (*git.Repository, error) {
 	return repo, nil
 }
 
-// GetGitCommonDir returns the path to the shared git directory.
-// In a regular checkout, this is .git/
-// In a worktree, this is the main repo's .git/ (not .git/worktrees/<name>/)
-// Uses git rev-parse --git-common-dir for reliable handling of worktrees.
-func GetGitCommonDir(ctx context.Context) (string, error) {
-	cmd := exec.CommandContext(ctx, "git", "rev-parse", "--git-common-dir")
-	cmd.Dir = "."
-	output, err := cmd.Output()
+// openGitCommonRoot anchors strategy storage on the current worktree's repository.
+func openGitCommonRoot(ctx context.Context) (*os.Root, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, fmt.Errorf("resolve git common dir: %w", err)
+	}
+	worktreeRoot, err := paths.WorktreeRoot(ctx)
 	if err != nil {
-		return "", fmt.Errorf("failed to get git common dir: %w", err)
+		return nil, fmt.Errorf("resolve worktree root: %w", err)
 	}
-
-	commonDir := strings.TrimSpace(string(output))
-
-	// git rev-parse --git-common-dir returns relative paths from the working directory,
-	// so we need to make it absolute if it isn't already
-	if !filepath.IsAbs(commonDir) {
-		commonDir = filepath.Join(".", commonDir)
+	metadata, err := gitrepo.ResolveWorktreeMetadata(worktreeRoot)
+	if err != nil {
+		return nil, fmt.Errorf("resolve git common dir: %w", err)
 	}
-
-	return filepath.Clean(commonDir), nil
+	root, err := gitdir.OpenAt(metadata.CommonDir)
+	if err != nil {
+		return nil, fmt.Errorf("open git common dir: %w", err)
+	}
+	return root, nil
 }
 
 // EnsureEntireGitignore ensures all required entries are in .entire/.gitignore
