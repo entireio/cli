@@ -105,6 +105,7 @@ var agentHelpClassification = map[string]agentHelpFacts{
 	"checkpoint list":    {agentHelpAudienceReadOnly, false},
 	"checkpoint search":  {agentHelpAudienceReadOnly, false},
 	"checkpoint tokens":  {agentHelpAudienceReadOnly, false},
+	"checkpoint audit":   {agentHelpAudienceReadOnly, false},
 	"checkpoint policy":  {agentHelpAudienceTaskDriven, false}, // "Inspect and update"
 
 	"session":         {agentHelpAudienceTaskDriven, true},

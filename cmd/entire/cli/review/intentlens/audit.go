@@ -174,7 +174,7 @@ func validateOptionalNonEmptyStrings(label string, object map[string]json.RawMes
 
 func requireKeys(label string, object map[string]json.RawMessage, keys ...string) error {
 	for _, key := range keys {
-		if _, ok := object[key]; !ok {
+		if value, ok := object[key]; !ok || bytes.Equal(bytes.TrimSpace(value), []byte("null")) {
 			return fmt.Errorf("%s is missing required property %q", label, key)
 		}
 	}

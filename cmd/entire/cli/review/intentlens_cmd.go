@@ -13,6 +13,7 @@ import (
 func newIntentLensAuditCommand() *cobra.Command {
 	var demo bool
 	var inputFile string
+	var requirementID string
 	cmd := &cobra.Command{
 		Use:   "audit",
 		Short: "Display a structured IntentLens audit result",
@@ -45,12 +46,26 @@ func newIntentLensAuditCommand() *cobra.Command {
 				}
 				return err
 			}
-			intentlens.Render(cmd.OutOrStdout(), intentlens.ViewState{Audit: &audit, Demo: demo})
+			if demo || requirementID != "" {
+				checkpointID, note := "", ""
+				if demo {
+					checkpointID, note = "synthetic-checkpoint-001", intentlens.DemoNotice
+				}
+				return intentlens.RenderDashboard(cmd.OutOrStdout(), intentlens.DashboardState{
+					Audit:         &audit,
+					CheckpointID:  checkpointID,
+					ContextStatus: intentlens.ContextComplete,
+					ContextNote:   note,
+					RequirementID: requirementID,
+				})
+			}
+			intentlens.Render(cmd.OutOrStdout(), intentlens.ViewState{Audit: &audit})
 			return nil
 		},
 	}
 	cmd.Flags().BoolVar(&demo, "demo", false, "display the bundled synthetic evidence fixture")
 	cmd.Flags().StringVar(&inputFile, "file", "", "read a validated audit JSON result from a file, or - for stdin")
+	cmd.Flags().StringVar(&requirementID, "requirement", "", "show full evidence and recommendation for one requirement ID, such as R2")
 	cmd.MarkFlagsMutuallyExclusive("demo", "file")
 	return cmd
 }

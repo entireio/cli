@@ -107,14 +107,14 @@ func TestEvidencePackageIsExplicitlySynthetic(t *testing.T) {
 
 func TestPromptsSeparateExtractionFromEvidenceEvaluation(t *testing.T) {
 	t.Parallel()
-	extraction := RequirementExtractionPrompt("Keep five retries.")
+	extraction := RequirementExtractionPrompt([]AtomicRequirement{{ID: "R1", Requirement: "Keep five retries."}})
 	for _, want := range []string{"Do not add unstated requirements", "do not evaluate implementation", "Return JSON only", "Keep five retries."} {
 		if !strings.Contains(extraction, want) {
 			t.Errorf("extraction prompt missing %q", want)
 		}
 	}
-	evaluation := EvidenceEvaluationPrompt([]byte("{\"synthetic\":true}"))
-	for _, want := range []string{"using only the supplied evidence package", "Confidence never replaces evidence", "Never invent files", "BEGIN JSON SCHEMA", "\"synthetic\":true"} {
+	evaluation := EvidenceEvaluationPrompt(verifiedInput(t))
+	for _, want := range []string{"using only the supplied evidence package", "Confidence never replaces evidence", "Never invent files", "BEGIN JSON SCHEMA", `"context":{"status":"COMPLETE"`} {
 		if !strings.Contains(evaluation, want) {
 			t.Errorf("evaluation prompt missing %q", want)
 		}
