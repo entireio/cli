@@ -3,6 +3,7 @@ package cli
 import (
 	"fmt"
 	"io"
+	"strings"
 
 	"github.com/entireio/cli/cmd/entire/cli/auth"
 	"github.com/entireio/cli/internal/entireclient/contexts"
@@ -36,7 +37,7 @@ func newAuthUseCmd() *cobra.Command {
 			"Activity/search/dispatch take their host from ENTIRE_API_BASE_URL; trail\n" +
 			"commands route to the repository's owning cell. The selected context\n" +
 			"supplies the identity.",
-		Args:              cobra.ExactArgs(1),
+		Args:              authUseArgs,
 		ValidArgsFunction: completeContextNames,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if err := auth.SetCurrentContext(args[0]); err != nil {
@@ -46,6 +47,36 @@ func newAuthUseCmd() *cobra.Command {
 			return nil
 		},
 	}
+}
+
+// authUseArgs validates `auth use <context>`, and treats the one mistake this
+// command's shape invites as its own case: `entire auth use --context NAME`.
+//
+// The two spellings mean nearly opposite things. `auth use` takes the context
+// as a positional and writes it to contexts.json for every later command,
+// while the global `--context` selects a login for the current invocation only
+// — and on `auth use` it selects nothing at all, since switching the active
+// context authenticates against nothing. So the flag reads like the obvious
+// way to name a context and is not: cobra binds NAME to the flag, no
+// positional is left, and cobra.ExactArgs(1) answers "accepts 1 arg(s),
+// received 0" about an argument the user plainly did type. Nothing is
+// switched, which the generic message also fails to say.
+//
+// The check is scoped to the zero-positional case on purpose. With a
+// positional present the flag is a harmless no-op, and rejecting it would
+// break anyone whose shell alias passes `--context` to every entire command.
+func authUseArgs(cmd *cobra.Command, args []string) error {
+	if len(args) == 0 {
+		if f := cmd.Flags().Lookup("context"); f != nil && f.Changed {
+			if name := strings.TrimSpace(f.Value.String()); name != "" {
+				return fmt.Errorf("--context %s acts as that login for one command; it does not switch the active context.\n"+
+					"To switch, name the context as an argument:\n\n  entire auth use %s", name, name)
+			}
+		}
+	}
+	// Cobra's arg-count message, returned verbatim: main.isPositionalArgError
+	// keys on its "arg(s)" to print this command's usage alongside it.
+	return cobra.ExactArgs(1)(cmd, args)
 }
 
 // completeContextNames is the ValidArgsFunction for commands taking a single

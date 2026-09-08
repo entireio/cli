@@ -301,3 +301,103 @@ func TestPromoteNextLogin(t *testing.T) {
 		t.Fatalf("expected a context to be promoted to current (current=%q, err=%v)", current, err)
 	}
 }
+
+// authUseTestRoot builds the smallest tree that reproduces the flag collision:
+// a root carrying the global --context flag, with `auth use` under it. It is
+// deliberately not NewRootCmd(), whose PersistentPreRunE would validate
+// .entire and open a logger for an argument-parsing test.
+//
+// Parsing --context writes contexts.SetFlagOverride process-wide, so callers
+// must not be parallel; SetFlagOverrideForTest restores the prior selection.
+func authUseTestRoot(t *testing.T) *cobra.Command {
+	t.Helper()
+	contexts.SetFlagOverrideForTest(t, "")
+
+	var out bytes.Buffer
+	root := &cobra.Command{Use: "entire", SilenceErrors: true, SilenceUsage: true}
+	addContextFlag(root)
+	authCmd := &cobra.Command{Use: "auth"}
+	authCmd.AddCommand(newAuthUseCmd())
+	root.AddCommand(authCmd)
+	root.SetOut(&out)
+	root.SetErr(&out)
+	return root
+}
+
+// TestAuthUse_ContextFlagInsteadOfArgument pins the fix for the misleading
+// error: `entire auth use --context NAME` binds NAME to the global --context
+// flag, leaving no positional, and cobra's ExactArgs(1) then reported
+// "accepts 1 arg(s), received 0" about an argument the user did type. The
+// message must name the flag, say it does not switch, and show the working
+// command.
+func TestAuthUse_ContextFlagInsteadOfArgument(t *testing.T) {
+	root := authUseTestRoot(t)
+	root.SetArgs([]string{"auth", "use", "--context", "eu.auth.entire.io"})
+
+	err := root.Execute()
+	if err == nil {
+		t.Fatal("expected an error: --context does not switch the active context")
+	}
+	msg := err.Error()
+	for _, want := range []string{"--context", "does not switch", "entire auth use eu.auth.entire.io"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("error message is missing %q:\n%s", want, msg)
+		}
+	}
+	// main.isPositionalArgError keys on "arg(s)" to decide whether to dump the
+	// command's usage. This message explains itself, so it must not match.
+	if strings.Contains(msg, "arg(s)") {
+		t.Errorf("message would be treated as a cobra arg-count error and buried under usage:\n%s", msg)
+	}
+}
+
+// TestAuthUse_MissingArgumentKeepsArgCountError pins the other half: with no
+// --context in play, a bare `entire auth use` is a plain arg-count mistake and
+// must keep cobra's message, so main.go still shows the command's usage.
+func TestAuthUse_MissingArgumentKeepsArgCountError(t *testing.T) {
+	root := authUseTestRoot(t)
+	root.SetArgs([]string{"auth", "use"})
+
+	err := root.Execute()
+	if err == nil {
+		t.Fatal("expected an error: auth use takes a context name")
+	}
+	if !strings.Contains(err.Error(), "arg(s)") {
+		t.Errorf("want cobra's arg-count error so usage is shown, got:\n%s", err)
+	}
+}
+
+// TestAuthUse_BlankContextFlagKeepsArgCountError covers `--context "  "`, which
+// names no context: there is nothing to suggest, so the generic arg-count
+// error is the honest answer.
+func TestAuthUse_BlankContextFlagKeepsArgCountError(t *testing.T) {
+	root := authUseTestRoot(t)
+	root.SetArgs([]string{"auth", "use", "--context", "  "})
+
+	err := root.Execute()
+	if err == nil {
+		t.Fatal("expected an error: auth use takes a context name")
+	}
+	if !strings.Contains(err.Error(), "arg(s)") {
+		t.Errorf("want cobra's arg-count error, got:\n%s", err)
+	}
+}
+
+// TestAuthUseArgs_AcceptsNamedContextAlongsideFlag pins that the new check is
+// scoped to the zero-positional case. `entire --context X auth use Y` still
+// validates: --context does nothing on a command that only writes
+// contexts.json, but rejecting it would break anyone whose shell alias always
+// passes it.
+func TestAuthUseArgs_AcceptsNamedContextAlongsideFlag(t *testing.T) {
+	root := authUseTestRoot(t)
+	use, _, err := root.Find([]string{"auth", "use"})
+	if err != nil {
+		t.Fatalf("find auth use: %v", err)
+	}
+	if err := use.ParseFlags([]string{"--context", "eu.auth.entire.io"}); err != nil {
+		t.Fatalf("parse flags: %v", err)
+	}
+	if err := use.Args(use, []string{"us.auth.entire.io"}); err != nil {
+		t.Errorf("want the named context accepted, got: %v", err)
+	}
+}
