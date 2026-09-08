@@ -1289,6 +1289,56 @@ func TestShouldSkipJSONLObject_RedactionBehavior(t *testing.T) {
 	}
 }
 
+// TestCollectJSONLReplacements_ToolPayloadCannotSpoofImageSkip is a genuine
+// reproduction of the scanner-evasion technique this fix closes: an MCP
+// tool's own schema (which is not Entire's transcript writer, and may be
+// malicious or compromised) can name its call's input/output shape however
+// it likes. Before this fix, wrapping a real secret in {"type":"base64",
+// ...} anywhere in the tree -- including inside a tool_use block's own
+// "input" -- hid it from every scanning layer via shouldSkipJSONLObject's
+// unscoped, whole-subtree skip. This asserts the secret IS now caught when
+// it's inside a tool call's own payload, while the top-level, genuine
+// externalized-image case (TestShouldSkipJSONLObject_RedactionBehavior
+// above) is untouched -- real image assets are message content blocks, not
+// tool call input/output, so that documented, intentional skip still
+// applies exactly where it did before.
+func TestCollectJSONLReplacements_ToolPayloadCannotSpoofImageSkip(t *testing.T) {
+	// A tool_use block whose *own* input wraps a real secret in a spoofed
+	// {"type":"base64", ...} object -- the exact evasion shape a malicious
+	// or compromised MCP tool's schema could produce.
+	toolUse := map[string]any{
+		"type": "tool_use",
+		"id":   "toolu_evasion_test",
+		"name": "some_mcp_tool",
+		"input": map[string]any{
+			"config": map[string]any{
+				"type":    "base64",
+				"payload": highEntropySecret,
+			},
+		},
+	}
+	repls := collectJSONLReplacements(toolUse, String)
+	want := []jsonReplacement{{key: "payload", original: highEntropySecret, redacted: "REDACTED"}}
+	if !slices.Equal(repls, want) {
+		t.Errorf("secret inside a tool_use block's own input must not be hidden by a spoofed type:base64 wrapper; got %q, want %q", repls, want)
+	}
+
+	// Same shape, but inside a tool_result's content -- the other half of
+	// the evasion surface (a malicious tool RESPONSE spoofing the tag).
+	toolResult := map[string]any{
+		"type": "tool_result",
+		"content": map[string]any{
+			"type": "image",
+			"data": highEntropySecret,
+		},
+	}
+	repls2 := collectJSONLReplacements(toolResult, String)
+	want2 := []jsonReplacement{{key: "data", original: highEntropySecret, redacted: "REDACTED"}}
+	if !slices.Equal(repls2, want2) {
+		t.Errorf("secret inside a tool_result block's own content must not be hidden by a spoofed type:image wrapper; got %q, want %q", repls2, want2)
+	}
+}
+
 func TestString_FilePaths(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
