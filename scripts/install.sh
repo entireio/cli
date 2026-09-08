@@ -129,12 +129,58 @@ CURL_DOWNLOAD_OPTS=(--connect-timeout 10 --speed-limit 1024 --speed-time 30)
 
 fetch_github_json() {
     local url="$1"
-    local curl_opts=(-fsSL "${CURL_METADATA_OPTS[@]}")
+    local curl_opts=(-sSL "${CURL_METADATA_OPTS[@]}")
+    local response http_status body github_message
+    local curl_error curl_error_message curl_exit
+
+    curl_opts+=(
+        -H "Accept: application/vnd.github+json"
+        -H "X-GitHub-Api-Version: 2026-03-10"
+    )
     if [[ -n "${GITHUB_TOKEN:-}" ]]; then
         curl_opts+=(-H "Authorization: Bearer ${GITHUB_TOKEN}")
     fi
 
-    curl "${curl_opts[@]}" "$url" 2>/dev/null
+    curl_error="$(mktemp)"
+    if response=$(curl "${curl_opts[@]}" -w $'\n%{http_code}' "$url" 2>"$curl_error"); then
+        rm -f "$curl_error"
+    else
+        curl_exit=$?
+        curl_error_message=$(<"$curl_error")
+        rm -f "$curl_error"
+        error "Request to the GitHub API failed (curl exit code ${curl_exit}): ${curl_error_message}"
+    fi
+
+    http_status="${response##*$'\n'}"
+    body="${response%$'\n'*}"
+    github_message="$(manifest_field "$body" message)"
+
+    case "$http_status" in
+        2??)
+            printf '%s\n' "$body"
+            ;;
+        401)
+            if [[ -n "${GITHUB_TOKEN:-}" ]]; then
+                error "GitHub rejected GITHUB_TOKEN. Check that it is valid, or unset GITHUB_TOKEN and rerun the installation."
+            fi
+            error "GitHub API request failed with HTTP 401 Unauthorized."
+            ;;
+        403|429)
+            if [[ -n "$github_message" ]]; then
+                error "GitHub API request failed with HTTP ${http_status}: ${github_message}"
+            fi
+            error "GitHub API request failed with HTTP ${http_status}."
+            ;;
+        5??)
+            error "GitHub API is temporarily unavailable (HTTP ${http_status}). Please try again later."
+            ;;
+        *)
+            if [[ -n "$github_message" ]]; then
+                error "GitHub API request failed with HTTP ${http_status}: ${github_message}"
+            fi
+            error "GitHub API request failed with HTTP ${http_status}."
+            ;;
+    esac
 }
 
 # release_origins prints the origins to try, in order. An explicit
@@ -260,6 +306,13 @@ resolve_version_from_github() {
         version="$(fetch_github_json "${GITHUB_API}/releases/latest" \
             | grep '"tag_name"' \
             | sed -E 's/.*"tag_name": *"v?([^"]+)".*/\1/' || true)"
+    fi
+
+    if [[ -z "$version" ]]; then
+        if [[ "$channel" == "nightly" ]]; then
+            error "GitHub returned an unexpected response without a nightly release tag."
+        fi
+        error "GitHub returned an unexpected response without a release tag."
     fi
 
     # Validated exactly like the release origin's answer. An origin we do not
