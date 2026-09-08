@@ -619,11 +619,11 @@ func (env *TestEnv) GetShadowBranchName() string {
 	env.T.Helper()
 
 	headHash := env.GetHeadHash()
-	worktreeID, err := paths.GetWorktreeID(env.RepoDir)
+	worktreeMetadata, err := gitrepo.ResolveWorktreeMetadata(env.RepoDir)
 	if err != nil {
 		env.T.Fatalf("failed to get worktree ID: %v", err)
 	}
-	return checkpoint.ShadowBranchNameForCommit(headHash, worktreeID)
+	return checkpoint.ShadowBranchNameForCommit(headHash, worktreeMetadata.WorktreeID)
 }
 
 // GetShadowBranchNameForCommit returns the worktree-specific shadow branch name for a given commit.
@@ -631,11 +631,11 @@ func (env *TestEnv) GetShadowBranchName() string {
 func (env *TestEnv) GetShadowBranchNameForCommit(commitHash string) string {
 	env.T.Helper()
 
-	worktreeID, err := paths.GetWorktreeID(env.RepoDir)
+	worktreeMetadata, err := gitrepo.ResolveWorktreeMetadata(env.RepoDir)
 	if err != nil {
 		env.T.Fatalf("failed to get worktree ID: %v", err)
 	}
-	return checkpoint.ShadowBranchNameForCommit(commitHash, worktreeID)
+	return checkpoint.ShadowBranchNameForCommit(commitHash, worktreeMetadata.WorktreeID)
 }
 
 // GetGitLog returns a list of commit hashes from HEAD.

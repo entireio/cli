@@ -788,7 +788,7 @@ to `os.ReadFile`/`os.WriteFile`/`os.MkdirAll`/`os.ReadDir`/`filepath.Walk`.**
 | Tree | Owner | Anchored on |
 | --- | --- | --- |
 | `.entire` | `entiredir` | worktree root (`paths.WorktreeRoot`), cwd only when there is provably no repo |
-| git common dir | `gitdir` | `git rev-parse --git-common-dir`, absolutized |
+| git common dir | `gitdir` | `gitrepo.ResolveWorktreeMetadata(worktreeRoot).CommonDir` |
 | the working tree | `worktreedir` | worktree root |
 | an agent's hook config | `agent.HookConfigFile` | worktree root (`.claude/`, `.cursor/`, `.gemini/`, `.github/hooks/`, `.factory/`, `.codex/`, `.opencode/plugins/`, `.pi/extensions/entire/`) |
 | an agent's session store | `agent.SessionStore` | the agent's own `GetSessionDir` |

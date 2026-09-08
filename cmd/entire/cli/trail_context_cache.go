@@ -16,6 +16,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/execx"
 	"github.com/entireio/cli/cmd/entire/cli/gitdir"
 	"github.com/entireio/cli/cmd/entire/cli/gitremote"
+	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/entireio/cli/cmd/entire/cli/internal/flock"
 	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
@@ -166,11 +167,15 @@ func trailEnablementScopeHintPath(ctx context.Context, sessionID string) (string
 	if err := validation.ValidateSessionID(sessionID); err != nil {
 		return "", fmt.Errorf("invalid session ID: %w", err)
 	}
-	commonDir, err := session.GetGitCommonDir(ctx)
+	worktreeRoot, err := paths.WorktreeRoot(ctx)
+	if err != nil {
+		return "", fmt.Errorf("resolve worktree root: %w", err)
+	}
+	metadata, err := gitrepo.ResolveWorktreeMetadata(worktreeRoot)
 	if err != nil {
 		return "", fmt.Errorf("resolve git common dir: %w", err)
 	}
-	return filepath.Join(commonDir, session.SessionStateDirName, sessionID+".trail-scope.json"), nil
+	return filepath.Join(metadata.CommonDir, session.SessionStateDirName, sessionID+".trail-scope.json"), nil
 }
 
 func saveTrailsEnabledForRepo(ctx context.Context, enabled bool) error {
@@ -419,8 +424,8 @@ func spawnDetachedTrailEnablementRefresh(ctx context.Context) {
 	if err != nil {
 		return
 	}
-	if commonDir, err := session.GetGitCommonDir(ctx); err == nil &&
-		trailRefreshRecentlySpawned(commonDir, time.Now()) {
+	if metadata, err := gitrepo.ResolveWorktreeMetadata(worktreeRoot); err == nil &&
+		trailRefreshRecentlySpawned(metadata.CommonDir, time.Now()) {
 		return
 	}
 	trailRefreshSpawn(worktreeRoot)

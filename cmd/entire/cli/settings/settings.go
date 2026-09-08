@@ -12,7 +12,6 @@ import (
 	"io/fs"
 	"log/slog"
 	"os"
-	"os/exec"
 	"path"
 	"path/filepath"
 	"strings"
@@ -20,12 +19,12 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/entiredir"
 	"github.com/entireio/cli/cmd/entire/cli/gitdir"
+	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/entireio/cli/cmd/entire/cli/internal/flock"
 	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/osroot"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
-	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/redact"
 )
 
@@ -641,7 +640,7 @@ func worktreeSettingsPaths(worktreeRoot string) (base, local string) {
 func loadForWorktreeRoot(ctx context.Context, worktreeRoot string) (*EntireSettings, error) {
 	settingsFileAbs, localSettingsFileAbs := worktreeSettingsPaths(worktreeRoot)
 	preferencesFileAbs := ""
-	if path, prefErr := clonePreferencesPathForWorktreeRoot(ctx, worktreeRoot); prefErr == nil {
+	if path, prefErr := clonePreferencesPathForWorktreeRoot(worktreeRoot); prefErr == nil {
 		preferencesFileAbs = path
 	} else {
 		logging.Debug(ctx, "clone preferences path unresolved; skipping preferences layer",
@@ -650,18 +649,12 @@ func loadForWorktreeRoot(ctx context.Context, worktreeRoot string) (*EntireSetti
 	return loadMergedSettings(ctx, settingsFileAbs, preferencesFileAbs, localSettingsFileAbs)
 }
 
-func clonePreferencesPathForWorktreeRoot(ctx context.Context, worktreeRoot string) (string, error) {
-	cmd := exec.CommandContext(ctx, "git", "-C", worktreeRoot, "rev-parse", "--git-common-dir")
-	output, err := cmd.Output()
+func clonePreferencesPathForWorktreeRoot(worktreeRoot string) (string, error) {
+	metadata, err := gitrepo.ResolveWorktreeMetadata(worktreeRoot)
 	if err != nil {
 		return "", fmt.Errorf("resolve git common dir: %w", err)
 	}
-
-	commonDir := strings.TrimSpace(string(output))
-	if !filepath.IsAbs(commonDir) {
-		commonDir = filepath.Join(worktreeRoot, commonDir)
-	}
-	return filepath.Join(filepath.Clean(commonDir), ClonePreferencesFile), nil
+	return filepath.Join(metadata.CommonDir, ClonePreferencesFile), nil
 }
 
 func loadMergedSettings(ctx context.Context, settingsFileAbs, preferencesFileAbs, localSettingsFileAbs string) (*EntireSettings, error) {
@@ -841,11 +834,11 @@ func saveRaw(filePath, label string, raw map[string]json.RawMessage) error {
 
 // ClonePreferencesPath returns the clone-local preferences path in the git common dir.
 func ClonePreferencesPath(ctx context.Context) (string, error) {
-	commonDir, err := session.GetGitCommonDir(ctx)
+	worktreeRoot, err := paths.WorktreeRoot(ctx)
 	if err != nil {
 		return "", fmt.Errorf("resolve git common dir: %w", err)
 	}
-	return filepath.Join(commonDir, ClonePreferencesFile), nil
+	return clonePreferencesPathForWorktreeRoot(worktreeRoot)
 }
 
 // LoadClonePreferences loads clone-local preferences from the git common dir.

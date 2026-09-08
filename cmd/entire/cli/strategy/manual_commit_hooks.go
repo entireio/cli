@@ -303,8 +303,7 @@ func isGitSequenceOperation(ctx context.Context) bool {
 		return false // Can't determine, assume not in sequence operation
 	}
 
-	// These markers live in the PER-WORKTREE git dir, not the common dir, which
-	// is why this opens gitDir rather than using gitdir.Open.
+	// Sequence markers belong to the per-worktree Git directory.
 	root, err := gitdir.OpenAt(gitDir)
 	if err != nil {
 		return false // Can't determine, assume not in sequence operation
@@ -827,7 +826,7 @@ func warnStaleEndedSessions(ctx context.Context, count int) {
 }
 
 func warnStaleEndedSessionsTo(ctx context.Context, count int, w io.Writer) {
-	root, err := gitdir.Open(ctx)
+	root, err := openGitCommonRoot(ctx)
 	if err != nil {
 		return // fail-open
 	}

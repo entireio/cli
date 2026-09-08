@@ -19,12 +19,6 @@ import (
 func TestGitMetadataTraversalHasCanonicalOwner(t *testing.T) {
 	t.Parallel()
 
-	legacyTraversalOwners := map[string]string{
-		"gitrepo/repository.go:resolveDotGitPath":    "Codex still uses the exported legacy resolver until the remaining-consumer split",
-		"gitrepo/repository.go:resolveCommonGitPath": "Codex still uses the exported legacy resolver until the remaining-consumer split",
-		"paths/worktree.go:GetWorktreeID":            "worktree-ID consumers migrate with session and the remaining consumers",
-		"status.go:resolveWorktreeBranch":            "status migrates with the remaining consumers",
-	}
 	policyDotGitInspections := map[string]string{
 		"agent/codex/hook_root.go:hasDotGitEntry":   "Codex policy checks whether a candidate checkout owns a .git entry",
 		"dispatch_wizard.go:discoverLocalRepoRoots": "dispatch discovery filters sibling repository candidates",
@@ -34,23 +28,12 @@ func TestGitMetadataTraversalHasCanonicalOwner(t *testing.T) {
 	allowedMetadataQueries := map[guardMetadataQuery]string{
 		{source: "dispatch/mode_local.go:resolveRepoRoots", flag: "--show-toplevel"}:                    "local dispatch resolves explicit repository candidates",
 		{source: "dispatch_wizard.go:resolveGitTopLevel", flag: "--show-toplevel"}:                      "dispatch discovery resolves explicit repository candidates",
-		{source: "gitdir/gitdir.go:CommonDir", flag: "--git-common-dir"}:                                "session removes the current-worktree resolver in the session split",
-		{source: "gitdir/gitdir.go:CommonDirForWorktree", flag: "--git-common-dir"}:                     "session removes the explicit-worktree resolver in the session split",
 		{source: "paths/paths.go:resolveWorktreeRoot", flag: "--show-toplevel"}:                         "worktree-root discovery remains separate from explicit-root metadata resolution",
-		{source: "session_adopt.go:stateStoreForWorktree", flag: "--git-common-dir"}:                    "adoption validates an arbitrary source repository in the session split",
-		{source: "session_adopt.go:stateStoreForWorktree", flag: "--show-toplevel"}:                     "adoption validates an arbitrary source repository in the session split",
-		{source: "settings/settings.go:clonePreferencesPathForWorktreeRoot", flag: "--git-common-dir"}:  "settings migrates with the remaining consumers",
-		{source: "strategy/common.go:GetGitCommonDir", flag: "--git-common-dir"}:                        "strategy migrates in the strategy-and-hooks split",
-		{source: "strategy/hooks.go:getGitDirInPath", flag: "--git-dir"}:                                "hook directory discovery migrates in the strategy-and-hooks split",
-		{source: "strategy/manual_commit_session.go:gitCommonDirForWorktree", flag: "--git-common-dir"}: "session routing migrates in the strategy-and-hooks split",
-		{source: "strategy/metadata_reconcile.go:loadShallowHashes", flag: "--git-common-dir"}:          "shallow metadata access migrates in the strategy-and-hooks split",
-		{source: "trail_checkout_worktree.go:gitCommonDirForTrailWorktree", flag: "--git-common-dir"}:   "trail storage paths migrate with the remaining consumers",
-		{source: "trail_checkout_worktree.go:validateTrailWorktreeReuse", flag: "--git-common-dir"}:     "trail reuse validation migrates with the remaining consumers",
-		{source: "trail_checkout_worktree.go:validateTrailWorktreeReuse", flag: "--show-toplevel"}:      "trail reuse validation migrates with the remaining consumers",
-	}
-	allowedLegacyResolverCalls := map[string]string{
-		"agent/codex/hook_root.go:resolveHookDiscovery": "Codex discovery migrates with the remaining consumers",
-		"agent/codex/hook_root.go:rootOwnsGitDir":       "Codex ownership policy migrates with the remaining consumers",
+		{source: "session_adopt.go:stateStoreForWorktree", flag: "--git-common-dir"}:                    "adoption validates an arbitrary user-supplied source repository",
+		{source: "session_adopt.go:stateStoreForWorktree", flag: "--show-toplevel"}:                     "adoption validates an arbitrary user-supplied source repository",
+		{source: "strategy/manual_commit_session.go:gitCommonDirForWorktree", flag: "--git-common-dir"}: "session routing validates repository ownership of recorded session paths",
+		{source: "trail_checkout_worktree.go:validateTrailWorktreeReuse", flag: "--git-common-dir"}:     "trail reuse validates an existing worktree and its repository before checkout",
+		{source: "trail_checkout_worktree.go:validateTrailWorktreeReuse", flag: "--show-toplevel"}:      "trail reuse validates an existing worktree and its repository before checkout",
 	}
 
 	_, thisFile, _, ok := runtime.Caller(0)
@@ -59,10 +42,8 @@ func TestGitMetadataTraversalHasCanonicalOwner(t *testing.T) {
 	}
 	repoRoot := filepath.Clean(filepath.Join(filepath.Dir(thisFile), "..", "..", "..", ".."))
 	policy := gitMetadataGuardPolicy{
-		legacyTraversalOwners:   legacyTraversalOwners,
 		policyDotGitInspections: policyDotGitInspections,
 		allowedMetadataQueries:  allowedMetadataQueries,
-		allowedLegacyCalls:      allowedLegacyResolverCalls,
 	}
 	result, err := scanGitMetadataSources(repoRoot, policy)
 	if err != nil {
@@ -74,10 +55,8 @@ func TestGitMetadataTraversalHasCanonicalOwner(t *testing.T) {
 	if result.canonicalTokens < 2 {
 		t.Fatal("guard found no canonical gitdir/commondir parser tokens")
 	}
-	assertGuardLedgerSeen(t, "legacy traversal owner", legacyTraversalOwners, result.legacyOwnersSeen)
-	assertGuardLedgerSeen(t, ".git policy inspection", policyDotGitInspections, result.policyInspectionsSeen)
-	assertMetadataQueryLedgerSeen(t, allowedMetadataQueries, result.metadataQueriesSeen)
-	assertGuardLedgerSeen(t, "legacy resolver call", allowedLegacyResolverCalls, result.legacyResolverCallsSeen)
+	assertGuardExceptionsSeen(t, ".git policy inspection", policyDotGitInspections, result.policyInspectionsSeen)
+	assertMetadataQueryExceptionsSeen(t, allowedMetadataQueries, result.metadataQueriesSeen)
 }
 
 type guardMetadataQuery struct {
@@ -86,19 +65,15 @@ type guardMetadataQuery struct {
 }
 
 type gitMetadataGuardPolicy struct {
-	legacyTraversalOwners   map[string]string
 	policyDotGitInspections map[string]string
 	allowedMetadataQueries  map[guardMetadataQuery]string
-	allowedLegacyCalls      map[string]string
 }
 
 type gitMetadataGuardResult struct {
-	canonicalTokens         int
-	legacyOwnersSeen        map[string]bool
-	policyInspectionsSeen   map[string]bool
-	metadataQueriesSeen     map[guardMetadataQuery]bool
-	legacyResolverCallsSeen map[string]bool
-	violations              []string
+	canonicalTokens       int
+	policyInspectionsSeen map[string]bool
+	metadataQueriesSeen   map[guardMetadataQuery]bool
+	violations            []string
 }
 
 func scanGitMetadataSources(repoRoot string, policy gitMetadataGuardPolicy) (gitMetadataGuardResult, error) {
@@ -108,10 +83,8 @@ func scanGitMetadataSources(repoRoot string, policy gitMetadataGuardPolicy) (git
 		return gitMetadataGuardResult{}, fmt.Errorf("collect guard packages: %w", err)
 	}
 	result := gitMetadataGuardResult{
-		legacyOwnersSeen:        map[string]bool{},
-		policyInspectionsSeen:   map[string]bool{},
-		metadataQueriesSeen:     map[guardMetadataQuery]bool{},
-		legacyResolverCallsSeen: map[string]bool{},
+		policyInspectionsSeen: map[string]bool{},
+		metadataQueriesSeen:   map[guardMetadataQuery]bool{},
 	}
 
 	for _, pkg := range packages {
@@ -127,7 +100,6 @@ func scanGitMetadataSources(repoRoot string, policy gitMetadataGuardPolicy) (git
 				}
 				key := guardSourceKey(rel, fn.Name.Name)
 				canonicalOwner := guardSourcePath(rel) == "gitrepo/metadata.go"
-				_, legacyOwner := policy.legacyTraversalOwners[key]
 				_, policyInspection := policy.policyDotGitInspections[key]
 
 				for _, value := range []string{"gitdir: ", "gitdir:", "commondir"} {
@@ -136,10 +108,6 @@ func scanGitMetadataSources(repoRoot string, policy gitMetadataGuardPolicy) (git
 					}
 					if canonicalOwner {
 						result.canonicalTokens++
-						continue
-					}
-					if legacyOwner {
-						result.legacyOwnersSeen[key] = true
 						continue
 					}
 					result.violations = append(result.violations, fmt.Sprintf("%s independently parses Git metadata token %q; use gitrepo.ResolveWorktreeMetadata", fset.Position(fn.Pos()), value))
@@ -163,17 +131,9 @@ func scanGitMetadataSources(repoRoot string, policy gitMetadataGuardPolicy) (git
 						return true
 					}
 					if isLegacyMetadataResolverCall(call, gitrepoImports, dotImportedGitrepo, samePackage) {
-						if _, allowed := policy.allowedLegacyCalls[key]; allowed {
-							result.legacyResolverCallsSeen[key] = true
-						} else {
-							result.violations = append(result.violations, fmt.Sprintf("%s calls a legacy Git metadata resolver; use gitrepo.ResolveWorktreeMetadata or document the migration exception", fset.Position(call.Pos())))
-						}
+						result.violations = append(result.violations, fmt.Sprintf("%s calls a removed Git metadata resolver; use gitrepo.ResolveWorktreeMetadata", fset.Position(call.Pos())))
 					}
 					if !valueResolver.contains(call, ".git") || !isFilesystemMetadataInspection(call) || canonicalOwner {
-						return true
-					}
-					if legacyOwner {
-						result.legacyOwnersSeen[key] = true
 						return true
 					}
 					if policyInspection {
@@ -468,20 +428,20 @@ func isLegacyMetadataResolverCall(call *ast.CallExpr, importNames map[string]boo
 	return ok && importNames[pkg.Name]
 }
 
-func assertGuardLedgerSeen(t *testing.T, label string, ledger map[string]string, seen map[string]bool) {
+func assertGuardExceptionsSeen(t *testing.T, label string, exceptions map[string]string, seen map[string]bool) {
 	t.Helper()
-	for key, reason := range ledger {
+	for key, reason := range exceptions {
 		if !seen[key] {
 			t.Errorf("documented %s %s (%s) no longer exists; remove or update the exception", label, key, reason)
 		}
 	}
 }
 
-func assertMetadataQueryLedgerSeen(t *testing.T, ledger map[guardMetadataQuery]string, seen map[guardMetadataQuery]bool) {
+func assertMetadataQueryExceptionsSeen(t *testing.T, exceptions map[guardMetadataQuery]string, seen map[guardMetadataQuery]bool) {
 	t.Helper()
-	for query, reason := range ledger {
+	for query, reason := range exceptions {
 		if !seen[query] {
-			t.Errorf("documented git metadata query %s %s (%s) no longer exists; remove or update the exception", query.source, query.flag, reason)
+			t.Errorf("documented git metadata query %s %s (%s) no longer exists; remove the exception", query.source, query.flag, reason)
 		}
 	}
 }

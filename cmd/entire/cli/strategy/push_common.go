@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/remote"
+	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/perf"
@@ -606,6 +607,7 @@ func getMergeBase(ctx context.Context, repoPath, hashA, hashB string) (plumbing.
 
 	cmd := exec.CommandContext(ctx, "git", "merge-base", hashA, hashB)
 	cmd.Dir = repoPath
+	cmd.Env = gitrepo.EnvWithoutRepoOverrides()
 	output, err := cmd.Output()
 	if err != nil {
 		var exitErr *exec.ExitError
@@ -633,6 +635,7 @@ func collectCommitsSince(ctx context.Context, repo *git.Repository, repoPath str
 	// non-first-parent history. Limit the replay set to non-merge commits.
 	cmd := exec.CommandContext(ctx, "git", "rev-list", "--reverse", "--topo-order", "--no-merges", exclude.String()+".."+tip.String())
 	cmd.Dir = repoPath
+	cmd.Env = gitrepo.EnvWithoutRepoOverrides()
 	output, err := cmd.Output()
 	if err != nil {
 		return nil, fmt.Errorf("git rev-list failed: %w", err)

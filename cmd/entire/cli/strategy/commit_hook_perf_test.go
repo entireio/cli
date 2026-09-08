@@ -12,8 +12,10 @@ import (
 	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
+	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
+	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
@@ -70,7 +72,6 @@ func TestCommitHookPerformance(t *testing.T) {
 			dir := localClone(t, cacheDir)
 			t.Chdir(dir)
 			paths.ClearWorktreeRootCache()
-			session.ClearGitCommonDirCache()
 
 			// Seed 200 branches + pack refs for realistic ref scanning overhead.
 			seedBranches(t, dir, 200)
@@ -94,7 +95,6 @@ func TestCommitHookPerformance(t *testing.T) {
 			// Simulate TTY path with commit_linking=always.
 			t.Setenv("ENTIRE_TEST_TTY", "1")
 			paths.ClearWorktreeRootCache()
-			session.ClearGitCommonDirCache()
 
 			commitMsgFile := filepath.Join(dir, ".git", "COMMIT_EDITMSG")
 			if err := os.WriteFile(commitMsgFile, []byte("implement feature\n"), 0o644); err != nil {
@@ -130,7 +130,6 @@ func TestCommitHookPerformance(t *testing.T) {
 
 			// Time PostCommit.
 			paths.ClearWorktreeRootCache()
-			session.ClearGitCommonDirCache()
 
 			s2 := &ManualCommitStrategy{}
 			postStart := time.Now()
@@ -373,7 +372,7 @@ var perfLargeFileSets = func() [][]string {
 	return sets
 }()
 
-// Sample prompts for varied FirstPrompt per session.
+// Sample prompts for varied LastPrompt per session.
 var perfPrompts = []string{
 	"implement the login feature",
 	"fix the bug in checkout flow",
@@ -408,7 +407,7 @@ func seedHookPerfSessions(t *testing.T, dir string, baseCommits []string, ended,
 
 	headCommit := baseCommits[0] // HEAD is always first
 
-	worktreeID, err := paths.GetWorktreeID(dir)
+	worktreeMetadata, err := gitrepo.ResolveWorktreeMetadata(dir)
 	if err != nil {
 		t.Fatalf("worktree ID: %v", err)
 	}
@@ -419,7 +418,7 @@ func seedHookPerfSessions(t *testing.T, dir string, baseCommits []string, ended,
 	}
 	store := session.NewStateStoreWithDir(stateDir)
 
-	agentTypes := []agent.AgentType{
+	agentTypes := []types.AgentType{
 		agent.AgentTypeClaudeCode,
 		agent.AgentTypeClaudeCode,
 		agent.AgentTypeClaudeCode,
@@ -453,7 +452,7 @@ func seedHookPerfSessions(t *testing.T, dir string, baseCommits []string, ended,
 		if openErr != nil {
 			t.Fatalf("open repo for shadow refs: %v", openErr)
 		}
-		shadowName := checkpoint.ShadowBranchNameForCommit(headCommit, worktreeID)
+		shadowName := checkpoint.ShadowBranchNameForCommit(headCommit, worktreeMetadata.WorktreeID)
 		ref, refErr := repo.Reference(plumbing.NewBranchReferenceName(shadowName), true)
 		if refErr != nil {
 			t.Fatalf("find template shadow branch %q: %v", shadowName, refErr)
@@ -466,7 +465,7 @@ func seedHookPerfSessions(t *testing.T, dir string, baseCommits []string, ended,
 			t.Fatalf("load template state: %v", loadErr)
 		}
 		tState.AgentType = agentTypes[0]
-		tState.FirstPrompt = perfPrompts[0]
+		tState.LastPrompt = perfPrompts[0]
 		tState.FilesTouched = perfLargeFileSets[0]
 		if saveErr := s.saveSessionState(ctx, tState); saveErr != nil {
 			t.Fatalf("save template state: %v", saveErr)
@@ -484,7 +483,7 @@ func seedHookPerfSessions(t *testing.T, dir string, baseCommits []string, ended,
 			// The hook code resolves this ref, gets the commit/tree, then
 			// checks for transcript or FilesTouched overlap — exercising
 			// the full expensive code path.
-			aliasName := checkpoint.ShadowBranchNameForCommit(base, worktreeID)
+			aliasName := checkpoint.ShadowBranchNameForCommit(base, worktreeMetadata.WorktreeID)
 			aliasRef := plumbing.NewHashReference(plumbing.NewBranchReferenceName(aliasName), shadowCommitHash)
 			if setErr := repo.Storer.SetReference(aliasRef); setErr != nil {
 				t.Fatalf("create shadow alias %d: %v", i, setErr)
@@ -496,7 +495,7 @@ func seedHookPerfSessions(t *testing.T, dir string, baseCommits []string, ended,
 				CLIVersion:   "dev",
 				BaseCommit:   base,
 				WorktreePath: dir,
-				WorktreeID:   worktreeID,
+				WorktreeID:   worktreeMetadata.WorktreeID,
 				Phase:        session.PhaseEnded,
 				StartedAt:    now.Add(-time.Duration(i+1) * time.Hour),
 				// No LastCheckpointID — exercises the expensive sessionHasNewContent path
@@ -504,7 +503,7 @@ func seedHookPerfSessions(t *testing.T, dir string, baseCommits []string, ended,
 				FilesTouched:        perfLargeFileSets[i%len(perfLargeFileSets)],
 				LastInteractionTime: &now,
 				AgentType:           agentTypes[i%len(agentTypes)],
-				FirstPrompt:         perfPrompts[i%len(perfPrompts)],
+				LastPrompt:          perfPrompts[i%len(perfPrompts)],
 			}
 			if saveErr := store.Save(ctx, state); saveErr != nil {
 				t.Fatalf("save ended-shadow state %d: %v", i, saveErr)
@@ -527,7 +526,7 @@ func seedHookPerfSessions(t *testing.T, dir string, baseCommits []string, ended,
 			CLIVersion:          "dev",
 			BaseCommit:          base,
 			WorktreePath:        dir,
-			WorktreeID:          worktreeID,
+			WorktreeID:          worktreeMetadata.WorktreeID,
 			Phase:               session.PhaseEnded,
 			StartedAt:           now.Add(-time.Duration(idx+1) * time.Hour),
 			LastCheckpointID:    cpID,
@@ -535,7 +534,7 @@ func seedHookPerfSessions(t *testing.T, dir string, baseCommits []string, ended,
 			FilesTouched:        perfLargeFileSets[idx%len(perfLargeFileSets)],
 			LastInteractionTime: &now,
 			AgentType:           agentTypes[idx%len(agentTypes)],
-			FirstPrompt:         perfPrompts[idx%len(perfPrompts)],
+			LastPrompt:          perfPrompts[idx%len(perfPrompts)],
 		}
 		if saveErr := store.Save(ctx, state); saveErr != nil {
 			t.Fatalf("save ended-committed state %d: %v", i, saveErr)
@@ -555,7 +554,7 @@ func seedHookPerfSessions(t *testing.T, dir string, baseCommits []string, ended,
 			t.Fatalf("load idle state %d: %v", i, loadErr)
 		}
 		state.AgentType = agentTypes[i%len(agentTypes)]
-		state.FirstPrompt = perfPrompts[i%len(perfPrompts)]
+		state.LastPrompt = perfPrompts[i%len(perfPrompts)]
 		state.StepCount = (i % 3) + 1
 		if saveErr := s.saveSessionState(ctx, state); saveErr != nil {
 			t.Fatalf("save idle state %d: %v", i, saveErr)
@@ -589,7 +588,7 @@ func seedHookPerfSessions(t *testing.T, dir string, baseCommits []string, ended,
 			t.Fatalf("load active state %d: %v", i, loadErr)
 		}
 		state.AgentType = agentTypes[i%len(agentTypes)]
-		state.FirstPrompt = prompt
+		state.LastPrompt = prompt
 		state.TranscriptPath = transcriptFile
 		if saveErr := s.saveSessionState(ctx, state); saveErr != nil {
 			t.Fatalf("save active state %d: %v", i, saveErr)

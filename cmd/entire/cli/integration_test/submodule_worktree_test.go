@@ -14,7 +14,7 @@ import (
 // TestSubmoduleWorktree_SessionCreatesCheckpoint is a full-flow regression test
 // for sessions run inside a git submodule: the working tree's .git is a FILE
 // pointing at the superproject's modules dir ("gitdir: ../.git/modules/<name>").
-// GetWorktreeID must recognize that layout; before it did, it returned
+// Worktree metadata must recognize that layout; otherwise resolution returns
 // "unexpected gitdir format", session initialization failed, and no checkpoint
 // was ever created for work done inside a submodule.
 //

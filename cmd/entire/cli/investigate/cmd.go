@@ -20,7 +20,6 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/interactive"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
-	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
 )
 
@@ -739,11 +738,11 @@ func runFresh(ctx context.Context, cmd *cobra.Command, args []string, f runFlags
 		fmt.Fprintln(cmd.ErrOrStderr(), sandboxBypassNotice)
 	}
 
-	commonDir, err := session.GetGitCommonDir(ctx)
+	bootstrapStore, err := NewStateStore(ctx)
 	if err != nil {
 		return fmt.Errorf("resolve git common dir: %w", err)
 	}
-	findingsDoc := resolveDocPaths(commonDir, runID)
+	findingsDoc := resolveDocPaths(bootstrapStore.parent, runID)
 
 	bres, err := Bootstrap(ctx, BootstrapInput{
 		SeedDoc:        seedDoc,
@@ -757,10 +756,6 @@ func runFresh(ctx context.Context, cmd *cobra.Command, args []string, f runFlags
 	// Bootstrap renders; the store writes. findingsDoc below is the same file,
 	// kept as a path only because the manifest records where it lives and the
 	// investigating agent is told where to edit.
-	bootstrapStore, err := NewStateStore(ctx)
-	if err != nil {
-		return fmt.Errorf("open run state store: %w", err)
-	}
 	if err := bootstrapStore.WriteFindings(runID, bres.Body); err != nil {
 		return fmt.Errorf("write findings doc: %w", err)
 	}

@@ -16,6 +16,7 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
+	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
@@ -132,9 +133,9 @@ func adoptFromExternalSessionStore(
 	sessionID string,
 	opts adoptOptions,
 ) (*session.State, []string, error) {
-	sourceWorktreeID, worktreeIDErr := paths.GetWorktreeID(sourceWorktree)
-	if worktreeIDErr != nil {
-		sourceWorktreeID = ""
+	sourceWorktreeID := ""
+	if metadata, err := gitrepo.ResolveWorktreeMetadata(sourceWorktree); err == nil {
+		sourceWorktreeID = metadata.WorktreeID
 	}
 
 	var adopted *session.State
@@ -222,9 +223,9 @@ func adoptFromSameSessionStore(ctx context.Context, sourceWorktree string, sourc
 		return nil, nil, fmt.Errorf("session %s is already tracked in this repo; rerun with --force to replace it", sourceState.SessionID)
 	}
 
-	sourceWorktreeID, worktreeIDErr := paths.GetWorktreeID(sourceWorktree)
-	if worktreeIDErr != nil {
-		sourceWorktreeID = ""
+	sourceWorktreeID := ""
+	if metadata, err := gitrepo.ResolveWorktreeMetadata(sourceWorktree); err == nil {
+		sourceWorktreeID = metadata.WorktreeID
 	}
 
 	var adopted *session.State
@@ -310,9 +311,9 @@ func stateStoreForWorktree(ctx context.Context, worktreePath string) (*session.S
 }
 
 func selectAdoptSourceSession(ctx context.Context, store *session.StateStore, sourceWorktree, sessionID string) (*session.State, error) {
-	sourceWorktreeID, worktreeIDErr := paths.GetWorktreeID(sourceWorktree)
-	if worktreeIDErr != nil {
-		sourceWorktreeID = ""
+	sourceWorktreeID := ""
+	if metadata, err := gitrepo.ResolveWorktreeMetadata(sourceWorktree); err == nil {
+		sourceWorktreeID = metadata.WorktreeID
 	}
 	if sessionID != "" {
 		sourceState, err := store.Load(ctx, sessionID)
@@ -428,7 +429,7 @@ func buildAdoptedSessionState(ctx context.Context, source *session.State) (*sess
 	if err != nil {
 		return nil, nil, fmt.Errorf("resolve current worktree root: %w", err)
 	}
-	worktreeID, err := paths.GetWorktreeID(worktreeRoot)
+	metadata, err := gitrepo.ResolveWorktreeMetadata(worktreeRoot)
 	if err != nil {
 		return nil, nil, fmt.Errorf("resolve current worktree ID: %w", err)
 	}
@@ -457,7 +458,7 @@ func buildAdoptedSessionState(ctx context.Context, source *session.State) (*sess
 	adopted.BaseCommit = head.Hash().String()
 	adopted.RealignAttributionBase(head.Hash().String())
 	adopted.WorktreePath = worktreeRoot
-	adopted.WorktreeID = worktreeID
+	adopted.WorktreeID = metadata.WorktreeID
 	adopted.AdoptedIntoWorktreePath = ""
 	adopted.AdoptedIntoWorktreeID = ""
 	adopted.Branch = branch

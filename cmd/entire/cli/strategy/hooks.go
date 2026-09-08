@@ -12,6 +12,8 @@ import (
 	"sync"
 	"syscall"
 
+	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
+	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
 )
 
@@ -37,11 +39,13 @@ type hookSpec struct {
 	content string
 }
 
-// GetGitDir returns the actual git directory path by delegating to git itself.
-// This handles both regular repositories and worktrees, and inherits git's
-// security validation for gitdir references.
+// GetGitDir returns the per-worktree Git directory for the current repository.
 func GetGitDir(ctx context.Context) (string, error) {
-	return getGitDirInPath(ctx, ".")
+	worktreeRoot, err := paths.WorktreeRoot(ctx)
+	if err != nil {
+		return "", errors.New("not a git repository")
+	}
+	return getGitDirInPath(ctx, worktreeRoot)
 }
 
 // hooksDirCache caches the hooks directory to avoid repeated git subprocess spawns.
@@ -70,7 +74,11 @@ func GetHooksDir(ctx context.Context) (string, error) {
 	}
 	hooksDirMu.RUnlock()
 
-	result, err := getHooksDirInPath(ctx, ".")
+	worktreeRoot, err := paths.WorktreeRoot(ctx)
+	if err != nil {
+		return "", errors.New("not a git repository")
+	}
+	result, err := getHooksDirInPath(ctx, worktreeRoot)
 	if err != nil {
 		return "", err
 	}
@@ -92,25 +100,16 @@ func ClearHooksDirCache() {
 	hooksDirMu.Unlock()
 }
 
-// getGitDirInPath returns the git directory for a repository at the given path.
-// It delegates to `git rev-parse --git-dir` to leverage git's own validation.
+// getGitDirInPath returns the Git directory for an explicit worktree root.
 func getGitDirInPath(ctx context.Context, dir string) (string, error) {
-	cmd := exec.CommandContext(ctx, "git", "rev-parse", "--git-dir")
-	cmd.Dir = dir
-	output, err := cmd.Output()
+	if ctx.Err() != nil {
+		return "", errors.New("not a git repository")
+	}
+	metadata, err := gitrepo.ResolveWorktreeMetadata(dir)
 	if err != nil {
 		return "", errors.New("not a git repository")
 	}
-
-	gitDir := strings.TrimSpace(string(output))
-
-	// git rev-parse --git-dir returns relative paths from the working directory,
-	// so we need to make it absolute if it isn't already
-	if !filepath.IsAbs(gitDir) {
-		gitDir = filepath.Join(dir, gitDir)
-	}
-
-	return filepath.Clean(gitDir), nil
+	return metadata.GitDir, nil
 }
 
 // getHooksDirInPath returns the active hooks directory for a repository at the given path.
@@ -120,6 +119,7 @@ func getGitDirInPath(ctx context.Context, dir string) (string, error) {
 func getHooksDirInPath(ctx context.Context, dir string) (string, error) {
 	cmd := exec.CommandContext(ctx, "git", "rev-parse", "--git-path", "hooks")
 	cmd.Dir = dir
+	cmd.Env = gitrepo.EnvWithoutRepoOverrides()
 	output, err := cmd.Output()
 	if err != nil {
 		return "", errors.New("not a git repository")

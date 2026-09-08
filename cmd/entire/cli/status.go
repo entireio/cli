@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"os"
 	"os/exec"
 	"path/filepath"
 	"sort"
@@ -16,8 +15,10 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	checkpointremote "github.com/entireio/cli/cmd/entire/cli/checkpoint/remote"
+	"github.com/entireio/cli/cmd/entire/cli/gitdir"
 	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
+	"github.com/entireio/cli/cmd/entire/cli/osroot"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
@@ -637,35 +638,15 @@ func writeActiveSessions(ctx context.Context, w io.Writer, sty statusStyles) {
 // resolveWorktreeBranch resolves the current branch for a worktree path
 // by reading the HEAD ref directly from the filesystem
 func resolveWorktreeBranch(ctx context.Context, worktreePath string) string {
-	gitPath := filepath.Join(worktreePath, ".git")
-
-	fi, err := os.Stat(gitPath)
+	metadata, err := gitrepo.ResolveWorktreeMetadata(worktreePath)
 	if err != nil {
 		return ""
 	}
-
-	var headPath string
-	if fi.IsDir() {
-		// Regular repo: .git is a directory
-		headPath = filepath.Join(gitPath, "HEAD")
-	} else {
-		// Worktree: .git is a file containing "gitdir: <path>"
-		data, err := os.ReadFile(gitPath) //nolint:gosec // path derived from known worktree dir
-		if err != nil {
-			return ""
-		}
-		content := strings.TrimSpace(string(data))
-		if !strings.HasPrefix(content, "gitdir: ") {
-			return ""
-		}
-		gitdirPath := strings.TrimPrefix(content, "gitdir: ")
-		if !filepath.IsAbs(gitdirPath) {
-			gitdirPath = filepath.Join(worktreePath, gitdirPath)
-		}
-		headPath = filepath.Join(gitdirPath, "HEAD")
+	root, err := gitdir.OpenAt(metadata.GitDir)
+	if err != nil {
+		return ""
 	}
-
-	data, err := os.ReadFile(headPath) //nolint:gosec // path constructed from .git/HEAD
+	data, err := osroot.ReadFile(root, "HEAD")
 	if err != nil {
 		return ""
 	}
