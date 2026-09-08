@@ -141,6 +141,11 @@ func TestWriteSessionFile_RequiresASessionRef(t *testing.T) {
 // measured — so a few hundred project directories reached RLIMIT_NOFILE, and
 // because the registry is shared, os.OpenRoot then failed for .entire and the
 // git common dir too.
+//
+// Deliberately NOT parallel, against the repo default: the assertion is a
+// before/after count of THIS PROCESS's open descriptors, which any concurrent
+// test opening a file or a root perturbs. Restoring t.Parallel() here for
+// convention's sake makes the count flaky rather than the test faster.
 func TestSessionStore_ProbingManyDirectoriesRetainsNoDescriptors(t *testing.T) {
 	countFDs := func() int {
 		entries, err := os.ReadDir("/proc/self/fd")
@@ -166,8 +171,9 @@ func TestSessionStore_ProbingManyDirectoriesRetainsNoDescriptors(t *testing.T) {
 		require.NoError(t, err)
 		store.Exists(name) // absent in every candidate, as in a real miss
 	}
-	// Some slack for anything the runtime opens concurrently; the regression
-	// this guards produced exactly `candidates` extra descriptors.
+	// Some slack for whatever the Go runtime itself opens (GC, netpoll) while
+	// this runs; the regression this guards produced exactly `candidates`
+	// extra descriptors, so the bar does not need to be tight.
 	require.Less(t, countFDs()-before, 16,
 		"probing %d candidate directories must not retain a descriptor per directory", candidates)
 }
