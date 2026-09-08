@@ -410,7 +410,7 @@ func TestWriteTokenContributors_NoBareHeaderWhenEverythingIsSilent(t *testing.T)
 	writeTokenContributors(&buf, []sessionTokensContributor{
 		{Kind: "subagents", Label: "Subagents", Tokens: 54000},
 		{Kind: "context_pressure", Label: "Context pressure"},
-	}, nil)
+	}, nil, true) // true: the billed block took the subagent figure
 
 	if buf.Len() != 0 {
 		t.Errorf("contributors that all render nothing must print no section at all, got:\n%s", buf.String())
@@ -425,7 +425,7 @@ func TestWriteTokenContributors_RendersWhenSomethingIsVisible(t *testing.T) {
 	writeTokenContributors(&buf, []sessionTokensContributor{
 		{Kind: "subagents", Label: "Subagents", Tokens: 54000},
 		{Kind: "skills", Label: "Skills/slash commands: brainstorm"},
-	}, nil)
+	}, nil, true) // true: the billed block took the subagent figure
 
 	out := buf.String()
 	if !strings.Contains(out, "Likely contributors") || !strings.Contains(out, "brainstorm") {
@@ -602,5 +602,55 @@ func TestSessionTokensDuration_NoSoFarOnceTheSessionEnded(t *testing.T) {
 	}
 	if got != "2h 14m" {
 		t.Errorf("duration = %q, want %q", got, "2h 14m")
+	}
+}
+
+// Decision 3 silenced the "Likely contributors" subagents entry because the
+// billed block carries the figure instead. But the block's line is itself
+// suppressed when it cannot state a share — no classes, a zero total, or a
+// figure larger than the total (reachable: SubagentTotal comes from an
+// unbounded walk while the classes are bounded at MaxSubagentDepth). In those
+// cases the figure must fall back to the contributor line, where it claims to
+// be a share of nothing. Never invisible: it was always visible before.
+func TestSessionTokensText_SubagentFigureNeverDisappears(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name  string
+		usage *agent.TokenUsage
+	}{
+		{
+			// Flattened classes total 1k; the unbounded SubagentTotal walk
+			// reaches deeper and reports more than the block can account for.
+			name: "figure exceeds the bounded class total",
+			usage: func() *agent.TokenUsage {
+				var head *agent.TokenUsage
+				for range 40 {
+					head = &agent.TokenUsage{InputTokens: 100, SubagentTokens: head}
+				}
+				return head
+			}(),
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			state := &strategy.SessionState{
+				SessionID: "fallback", AgentType: "Claude Code", TokenUsage: tc.usage,
+			}
+			report := buildSessionTokensReport(state, "active")
+
+			var buf bytes.Buffer
+			writeSessionTokensText(&buf, report)
+			out := strings.ToLower(buf.String())
+
+			// Assert on the FIGURE, not the word: a recommendation says
+			// "Scope subagent tasks tightly", so a substring check for
+			// "subagent" passes even when the number is nowhere to be seen.
+			want := formatTokenCount(subagentTotalOf(report.Tokens))
+			if !strings.Contains(out, strings.ToLower(want)) {
+				t.Errorf("subagent figure %q vanished from the text report:\n%s", want, buf.String())
+			}
+		})
 	}
 }

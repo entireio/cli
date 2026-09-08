@@ -71,7 +71,7 @@ func writeTokenClasses(w io.Writer, classes *tokenClassBreakdown, subagentTotal 
 	// printed directly above it. "Of the total, subagents used" more than the
 	// total is a report contradicting itself; printing nothing is the only
 	// statement that stays true.
-	if subagentTotal > 0 && classes.Total > 0 && subagentTotal <= classes.Total {
+	if subagentShareFitsBlock(classes, subagentTotal) {
 		fmt.Fprintf(w, "  %-30s %10s %8s\n", "Of the total, subagents used",
 			formatTokenCount(subagentTotal),
 			formatSharePercent(subagentTotal, roundedPercent(subagentTotal, classes.Total)))
@@ -84,6 +84,22 @@ func writeTokenClasses(w io.Writer, classes *tokenClassBreakdown, subagentTotal 
 		}
 		fmt.Fprintf(w, "  Cost share omitted: %s.\n", reason)
 	}
+}
+
+// subagentShareFitsBlock reports whether the billed block can state the
+// subagent figure as a share of its own total. Both renderers consult this one
+// predicate: the block prints the line when it holds, and the "Likely
+// contributors" section falls back to printing the bare figure when it does
+// not — so the figure is never invisible, and never presented as a share it
+// cannot support. Two places deciding this independently is how the figure
+// came to appear twice, and then not at all.
+//
+// It does not hold when there is no breakdown, when the total is zero, or when
+// the figure exceeds the total: SubagentTotal comes from an unbounded walk
+// while the classes are flattened at types.MaxSubagentDepth, so a deep enough
+// chain reports more subagent tokens than the block accounts for.
+func subagentShareFitsBlock(classes *tokenClassBreakdown, subagentTotal int) bool {
+	return classes != nil && subagentTotal > 0 && classes.Total > 0 && subagentTotal <= classes.Total
 }
 
 // formatSharePercent renders a whole-percent share. A class with tokens in it

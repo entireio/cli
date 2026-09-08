@@ -554,7 +554,8 @@ func writeSessionTokensText(w io.Writer, report sessionTokensReport) {
 		writeTokenRecommendations(w, report.Recommendations)
 	}
 
-	writeTokenContributors(w, report.Contributors, report.Context)
+	writeTokenContributors(w, report.Contributors, report.Context,
+		subagentShareFitsBlock(report.Classes, subagentTotalOf(report.Tokens)))
 	writeTokenLimitations(w, report.Limitations)
 }
 
@@ -708,8 +709,8 @@ func writeTokenUsageSectionWithTitle(w io.Writer, title string, tokens *sessionT
 	}
 }
 
-func writeTokenContributors(w io.Writer, contributors []sessionTokensContributor, contextInfo *sessionTokensContext) {
-	lines := contributorLines(contributors, contextInfo)
+func writeTokenContributors(w io.Writer, contributors []sessionTokensContributor, contextInfo *sessionTokensContext, subagentInBlock bool) {
+	lines := contributorLines(contributors, contextInfo, subagentInBlock)
 	if len(lines) == 0 {
 		return
 	}
@@ -728,13 +729,21 @@ func writeTokenContributors(w io.Writer, contributors []sessionTokensContributor
 // A session with subagent usage, no context data and no skill events therefore
 // printed the "Likely contributors" header with nothing under it. Building the
 // lines first makes the header impossible to disagree with its own body.
-func contributorLines(contributors []sessionTokensContributor, contextInfo *sessionTokensContext) []string {
+func contributorLines(contributors []sessionTokensContributor, contextInfo *sessionTokensContext, subagentInBlock bool) []string {
 	lines := make([]string, 0, len(contributors))
 	for _, contributor := range contributors {
 		switch contributor.Kind {
 		case "subagents":
-			// Rendered inside the billed block, with its share of the total.
-			// The report entry stays for --json (Decision 3); only the text moves.
+			// Normally rendered inside the billed block, with its share of the
+			// total (Decision 3) — the entry stays in the report for --json
+			// either way. But the block's line is suppressed when it cannot
+			// state a share, and the figure must not simply disappear from the
+			// text: it was always visible before the move. Fall back to the
+			// bare figure here, which claims to be a share of nothing.
+			if !subagentInBlock {
+				lines = append(lines, fmt.Sprintf("%s: %s tokens",
+					contributor.Label, formatTokenCount(contributor.Tokens)))
+			}
 		case "context_pressure":
 			if contextInfo != nil {
 				lines = append(lines, fmt.Sprintf("%s: %d%% of %s tokens",
