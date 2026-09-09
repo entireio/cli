@@ -106,6 +106,9 @@ var agentHelpClassification = map[string]agentHelpFacts{
 	"checkpoint search":  {agentHelpAudienceReadOnly, false},
 	"checkpoint tokens":  {agentHelpAudienceReadOnly, false},
 	"checkpoint policy":  {agentHelpAudienceTaskDriven, false}, // "Inspect and update"
+	// sync pushes transcripts to a remote, deletes refs from another, and
+	// writes settings: a decision for the human, never taken unprompted.
+	"checkpoint migrate": {agentHelpAudienceUserOwned, false},
 
 	"session":         {agentHelpAudienceTaskDriven, true},
 	"session current": {agentHelpAudienceReadOnly, false},
