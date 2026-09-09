@@ -88,8 +88,11 @@ func resolveCheckpointSummaryProvider(ctx context.Context, w io.Writer) (*checkp
 
 	if s.SummaryGeneration != nil && s.SummaryGeneration.Provider != "" {
 		providerName := types.AgentName(s.SummaryGeneration.Provider)
-		discoverSummaryProviderIfMissing(ctx, providerName)
+		blocked := discoverSummaryProviderIfMissing(ctx, providerName)
 		if err := ensureSummaryProviderPresent(ctx, providerName); err != nil {
+			if blocked {
+				return nil, fmt.Errorf("%w\nIf %s is an external plugin, enable external agents first: `entire agent` and pick it, or set \"external_agents\": true in .entire/settings.local.json", err, providerName)
+			}
 			return nil, err
 		}
 		return buildCheckpointSummaryProvider(providerName, s.SummaryGeneration.Model)
@@ -129,7 +132,9 @@ func resolveCheckpointSummaryProvider(ctx context.Context, w io.Writer) (*checkp
 }
 
 // discoverSummaryProviderIfMissing resolves a configured provider name that is
-// not registered yet.
+// not registered yet. It reports whether it declined to look because external
+// agents are not enabled, so the caller can say so rather than leaving the user
+// with "unknown summary provider" about a plugin that is installed.
 //
 // Named, never the sweep. The name arrives from summary_generation.provider,
 // which is honored from the COMMITTED .entire/settings.json, so routing it
@@ -139,21 +144,53 @@ func resolveCheckpointSummaryProvider(ctx context.Context, w io.Writer) (*checkp
 // lookup returns immediately for a built-in and touches exactly one binary
 // otherwise, so the ordinary case costs nothing either.
 //
-// The error is dropped for the reason discoverNamedExternalAgent gives: the
-// caller reports an unresolvable provider a few lines later, in terms of the
-// provider the user named rather than of the plugin protocol.
-func discoverSummaryProviderIfMissing(ctx context.Context, name types.AgentName) {
+// Named is not sufficient on its own, though, which is what the
+// external_agents check adds: one binary is still one binary, and the name
+// deciding WHICH one still came out of a tracked file. `{"summary_generation":
+// {"provider": "evil"}}` in a pull request is then enough to run
+// `entire-agent-evil info` on everyone who pulls it and runs `entire explain`,
+// with no prompt and no grant — the exact thing enforceExternalAgentsTrust
+// exists to prevent, reached by a path that never consults it.
+//
+// The gate lands only on the external case: the early return above covers every
+// registered agent, so a committed `"provider": "claude-code"` keeps working
+// with external agents off, as it must.
+//
+// The lighter gate rather than a third trust gate beside enforceOPFCommandTrust
+// and enforceExternalAgentsTrust. An enforceSummaryProviderTrust would let a
+// developer name an external provider in their own untracked
+// settings.local.json without granting the $PATH sweep, which is a real if
+// narrow want; it costs another settings-layer classification, another
+// rejection channel for `entire status` to surface, and another gate to keep in
+// step. It becomes worth writing when someone actually asks for that
+// combination -- until then, `entire agent` already offers the plugin, and
+// picking it there is what flips the grant.
+//
+// The discovery error is dropped for the reason discoverNamedExternalAgent
+// gives: the caller reports an unresolvable provider a few lines later, in
+// terms of the provider the user named rather than of the plugin protocol.
+func discoverSummaryProviderIfMissing(ctx context.Context, name types.AgentName) (blockedByExternalAgents bool) {
 	if _, err := getSummaryAgent(name); err == nil {
-		return
+		return false
+	}
+	if !settings.IsExternalAgentsEnabled(ctx) {
+		return true
 	}
 	//nolint:errcheck,gosec // see doc comment: ensureSummaryProviderPresent reports it
 	discoverNamedSummaryProvider(ctx, name)
+	return false
 }
+
+// errSelectionNotPersistable reports a selection that is correct for this run
+// and must not be written down. See persistSummaryProviderSelection.
+var errSelectionNotPersistable = errors.New("selection is valid for this run but would not resolve on the next one")
 
 // autoSelectSummaryProvider builds a provider for an auto-selected candidate
 // (single-installed or non-interactive-first-of-many) and persists the choice
 // so subsequent runs don't re-decide. Persistence failure is surfaced as a
 // warning — not an error — because the selection is still usable in-process.
+// An external provider chosen without a human is the one case that persists
+// nothing at all; see persistSummaryProviderSelection.
 func autoSelectSummaryProvider(ctx context.Context, w io.Writer, name types.AgentName, reason string, origin summarySelectionOrigin) (*checkpointSummaryProvider, error) {
 	logging.Info(ctx, reason, "provider", string(name))
 	provider, err := buildCheckpointSummaryProvider(name, "")
@@ -161,7 +198,15 @@ func autoSelectSummaryProvider(ctx context.Context, w io.Writer, name types.Agen
 		return nil, err
 	}
 	flagFlipped, saveErr := persistSummaryProviderSelection(ctx, provider.Name, provider.Model, origin)
-	if saveErr != nil {
+	switch {
+	case errors.Is(saveErr, errSelectionNotPersistable):
+		// Not a warning: nothing went wrong and the run is unaffected. Say what
+		// would make the choice stick, since re-selecting it on every run is the
+		// only symptom the user would otherwise see.
+		logging.Info(ctx, "not persisting auto-selected external summary provider without the external_agents grant",
+			"provider", string(provider.Name))
+		fmt.Fprintf(w, "Using %s for this run. To save it as the default, run `entire agent` and pick it: an external plugin needs the external_agents grant, and only your own selection can give it.\n", provider.DisplayName)
+	case saveErr != nil:
 		logging.Warn(ctx, "failed to save summary provider selection, continuing without persistence",
 			"error", saveErr.Error())
 		fmt.Fprintf(w, "Warning: could not save provider selection: %v\nUse `entire configure --summarize-provider %s` to set it manually.\n", saveErr, provider.Name)
@@ -316,17 +361,32 @@ func persistSummaryProviderSelection(ctx context.Context, provider types.AgentNa
 	}
 	s.SummaryGeneration.SetProvider(string(provider), model)
 
-	// Only a human's pick grants external_agents. The provider name is
-	// persisted either way — it decides nothing on its own, and it is what
-	// stops the next run re-deciding. An automatically chosen external
-	// provider keeps working without the grant, because
-	// discoverSummaryProviderIfMissing resolves a configured name through the
-	// named ungated lookup rather than through the sweep the grant enables.
-	if origin == selectionByUser {
-		if ag, getErr := getSummaryAgent(provider); getErr == nil && external.IsExternal(ag) && !s.ExternalAgents {
-			s.ExternalAgents = true
-			flagFlipped = true
+	// Only a human's pick grants external_agents: an automatic selection is no
+	// one's decision to widen a repo-wide execution grant.
+	//
+	// Which leaves the case this returns early on. An external provider chosen
+	// automatically cannot be persisted either, because the name alone no longer
+	// resolves. discoverSummaryProviderIfMissing gates the named lookup on the
+	// grant, so writing `provider: X` without it produces a configuration that
+	// fails on the very next run: Entire breaking itself with its own write. It
+	// did resolve ungated once, which is what the comment that used to sit here
+	// said. Gating that lookup closed a hole and invalidated the claim.
+	//
+	// Writing nothing is not a lost setting. The run in progress already has the
+	// agent registered from discoverSummaryProvidersAlways, so it completes, and
+	// the next run re-discovers and auto-selects the same provider by the same
+	// route. What is lost is only the shortcut of not re-deciding, against a
+	// stored value that would make the command fail.
+	//
+	// This is the rule enableExternalAgentsLocally already follows: do not report
+	// success for a write that cannot take effect. Persisting here is that same
+	// false claim written to disk instead of printed.
+	if ag, getErr := getSummaryAgent(provider); getErr == nil && external.IsExternal(ag) && !s.ExternalAgents {
+		if origin != selectionByUser {
+			return false, errSelectionNotPersistable
 		}
+		s.ExternalAgents = true
+		flagFlipped = true
 	}
 
 	if err := saveLocalSummarySettings(ctx, s); err != nil {

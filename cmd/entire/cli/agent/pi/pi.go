@@ -279,3 +279,10 @@ func (a *PiAgent) FormatResumeCommand(sessionID string) string {
 	}
 	return "pi --session " + id
 }
+
+// CallerSessionEnvVar names the variable holding the session ID Pi publishes
+// into the environment of the processes it spawns. Pi also publishes
+// PI_SESSION_FILE, the transcript path itself; the ID is preferred because
+// ResolveSessionFile derives the same path from it, keeping one resolution
+// point instead of two.
+func (a *PiAgent) CallerSessionEnvVar() string { return "PI_SESSION_ID" }

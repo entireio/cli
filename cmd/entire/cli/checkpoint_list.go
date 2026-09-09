@@ -4,12 +4,11 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"strings"
 	"time"
-	"unicode"
 
 	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
+	"github.com/entireio/cli/cmd/entire/cli/tuiutil"
 )
 
 // pendingCheckpointJSON is the machine-readable shape emitted by
@@ -124,7 +123,7 @@ func pendingCheckpointLabel(p strategy.PendingCheckpoint, hasMultipleSessions bo
 
 	sessionLabel := ""
 	if hasMultipleSessions && p.SessionPrompt != "" {
-		sessionLabel = fmt.Sprintf(" [%s]", sanitizeForTerminal(p.SessionPrompt))
+		sessionLabel = fmt.Sprintf(" [%s]", tuiutil.SanitizeTerminalLabel(p.SessionPrompt))
 	}
 
 	switch {
@@ -134,41 +133,12 @@ func pendingCheckpointLabel(p strategy.PendingCheckpoint, hasMultipleSessions bo
 		if len(shortID) >= 7 {
 			shortID = shortID[:7]
 		}
-		return fmt.Sprintf("%s (%s) %s%s", shortID, timestamp, sanitizeForTerminal(p.Message), sessionLabel)
+		return fmt.Sprintf("%s (%s) %s%s", shortID, timestamp, tuiutil.SanitizeTerminalLabel(p.Message), sessionLabel)
 	case p.IsTaskCheckpoint:
 		// Task checkpoint (uncommitted) - no sha shown
-		return fmt.Sprintf("        (%s) [Task] %s%s", timestamp, sanitizeForTerminal(p.Message), sessionLabel)
+		return fmt.Sprintf("        (%s) [Task] %s%s", timestamp, tuiutil.SanitizeTerminalLabel(p.Message), sessionLabel)
 	default:
 		// Shadow checkpoint (uncommitted) - no sha shown (internal commit)
-		return fmt.Sprintf("        (%s) %s%s", timestamp, sanitizeForTerminal(p.Message), sessionLabel)
+		return fmt.Sprintf("        (%s) %s%s", timestamp, tuiutil.SanitizeTerminalLabel(p.Message), sessionLabel)
 	}
-}
-
-// sanitizeForTerminal removes or replaces characters that cause rendering issues
-// in terminal UI components. This includes emojis with skin-tone modifiers and
-// other multi-codepoint characters that confuse width calculations.
-func sanitizeForTerminal(s string) string {
-	var result strings.Builder
-	result.Grow(len(s))
-
-	for _, r := range s {
-		// Skip emoji skin tone modifiers (U+1F3FB to U+1F3FF)
-		if r >= 0x1F3FB && r <= 0x1F3FF {
-			continue
-		}
-		// Skip zero-width joiners used in emoji sequences
-		if r == 0x200D {
-			continue
-		}
-		// Skip variation selectors (U+FE00 to U+FE0F)
-		if r >= 0xFE00 && r <= 0xFE0F {
-			continue
-		}
-		// Keep printable characters and common whitespace
-		if unicode.IsPrint(r) || r == '\t' || r == '\n' {
-			result.WriteRune(r)
-		}
-	}
-
-	return result.String()
 }

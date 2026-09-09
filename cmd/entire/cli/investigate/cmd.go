@@ -479,6 +479,19 @@ func runEdit(ctx context.Context, cmd *cobra.Command, deps Deps) error {
 	return nil
 }
 
+// notifyDroppedInvestigatePrompt reports an investigate.always_prompt that the
+// settings loader dropped as untrusted (see settings.enforceAgentPromptTrust).
+// Without the notice, a configured preamble that silently stops applying is
+// indistinguishable from one the user never wrote.
+func notifyDroppedInvestigatePrompt(w io.Writer, s *settings.EntireSettings) {
+	for _, rej := range s.AgentPromptRejections() {
+		if rej.Field != "investigate.always_prompt" {
+			continue
+		}
+		fmt.Fprintf(w, "Note: investigate.always_prompt is configured but not applied: %s. Set it in .entire/settings.local.json to use it.\n", rej.Reason)
+	}
+}
+
 // saveInvestigateConfig persists cfg into .entire/settings.local.json
 // (worktree-local, not committed). Other settings fields are preserved by
 // reading the local file first, mutating, and writing it back. The
@@ -578,6 +591,7 @@ func runContinue(ctx context.Context, cmd *cobra.Command, f runFlags, deps Deps)
 			"Warning: could not reload settings on --continue (%v). The configured "+
 				"investigate.always_prompt is not being applied to this resumed run.\n", sErr)
 	} else if s != nil && s.Investigate != nil {
+		notifyDroppedInvestigatePrompt(cmd.ErrOrStderr(), s)
 		alwaysPrompt = s.Investigate.AlwaysPrompt
 	}
 
@@ -651,6 +665,8 @@ func runFresh(ctx context.Context, cmd *cobra.Command, args []string, f runFlags
 		fmt.Fprintln(cmd.OutOrStdout())
 		fmt.Fprintln(cmd.OutOrStdout(), "Setup complete — running investigation now.")
 	}
+
+	notifyDroppedInvestigatePrompt(cmd.ErrOrStderr(), s)
 
 	agents, maxTurns, quorum, err := resolveRunConfig(s.Investigate, f)
 	if err != nil {

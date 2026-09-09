@@ -29,7 +29,13 @@ var caseInsensitivePaths = runtime.GOOS == "darwin" || runtime.GOOS == "windows"
 func UserSettingsPath() string {
 	path, err := resolveUserSettingsPath()
 	if err != nil {
-		return filepath.Join(userdirs.Config(), UserSettingsFileName)
+		configDir, checkedErr := userdirs.ConfigDirChecked()
+		if checkedErr != nil {
+			// Display the rejected value so the diagnostic points at what the
+			// user configured; I/O always uses resolveUserSettingsPath above.
+			return filepath.Join(configDir, UserSettingsFileName)
+		}
+		return filepath.Join(configDir, UserSettingsFileName)
 	}
 	return path
 }

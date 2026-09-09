@@ -5,6 +5,45 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.10.6] - 2026-09-07
+
+### Added
+
+- A Windows PowerShell installer, `scripts/install.ps1`, works under both Windows PowerShell 5.1 and PowerShell 7: `irm https://entire.io/install.ps1 | iex`. It resolves stable and nightly releases, verifies SHA-256 checksums, installs `entire.exe` and `git-remote-entire.exe`, and delegates to Scoop for stable installs when Scoop is on PATH. Update nudges now print that one-liner — naming the directory the running binary lives in, so the installer replaces it in place — instead of sending you to the GitHub releases page. Install detection is per-OS (brew and mise on unix, Scoop and mise on Windows) and honours relocated install roots ([#2152](https://github.com/entireio/cli/pull/2152), [#2217](https://github.com/entireio/cli/pull/2217))
+
+### Changed
+
+- Reworked `entire runner setup` flags and interaction flow. Interactive setup now asks whether to tailor runners or create generic defaults; `-y` selects tailoring, replacing the deprecated `--run`. `--print-prompt` preserves the previous default behavior, `--defaults-only` creates generic runners, and `--dry-run` previews tailoring without writing files. `--agent <name>` skips provider selection for this run without changing saved settings. Non-interactive use requires an explicit mode ([#2272](https://github.com/entireio/cli/pull/2272), [#2306](https://github.com/entireio/cli/pull/2306))
+
+### Fixed
+
+- `entire trail create` now runs pre-push hooks when pushing the trail branch, allowing existing checkpoints to sync through the normal push path. Hook output and prompts are streamed instead of buffered, so checkpoint sync failures and OPF prompts remain visible ([#2239](https://github.com/entireio/cli/pull/2239))
+- `entire trail` commands work against Entire-native repos. Trail resolution discarded the forge and looked up `<owner>/<repo>`, so a native `/et/<project>/<repo>` remote with a same-named legacy GitHub mirror — `entirehq/marvin` — returned the `/gh/` repo's trails. The `et` namespace is now preserved through resolution, native repos are addressed by repository ULID against their home cell, and `list`, `show`, `update`, `delete` and runner trail gathering all follow ([#2245](https://github.com/entireio/cli/pull/2245))
+- A named pipe where Entire expects a config file no longer hangs the process. `mkfifo .claude/settings.json` made `entire doctor` block in `openat` until SIGINT, because `open(2)` on a FIFO with no writer waits for one. Every no-follow read now refuses a non-regular leaf before opening it, which covers all nine agents, the plugin manifest, doctor's log readers and the settings loader ([#2308](https://github.com/entireio/cli/pull/2308))
+- `entire enable` no longer silently drops Vercel deployment blocking in a repo whose `vercel.json` is an absolute symlink into a monorepo's shared config. `os.Root` refuses an absolute link target unconditionally, even one landing inside the root, and the refusal is not "file not found" — so the check reported `path escapes from parent` and returned false ([#2290](https://github.com/entireio/cli/pull/2290))
+- A concurrent checkpoint write can no longer silently discard an OPF rewrite. The OPF paths used go-git's compare-and-swap, which does not take native Git's reference lock, so a native transaction landing afterwards overwrote the rewrite while both reported success. Ref updates now go through a native `git update-ref --stdin` transaction that holds the lock across the symbolic-ref check, with a bounded retry for transient lock contention and a terminal error for a genuine stale value ([#2211](https://github.com/entireio/cli/pull/2211))
+- Session and checkpoint file locks revalidate the locked file's inode after acquiring, and retry against the current file if the name has since been replaced ([#2273](https://github.com/entireio/cli/pull/2273))
+- `entire doctor` reports a regular file, FIFO, socket or device node where an agent directory belongs. It tested for a symlink and nothing else, so those came back clean while every hook install and `os.Root` open failed on them; a regular file at `.claude` was additionally reported as `NOT READABLE` with a permissions remedy that could not fix it. `.claude/agents/`, `.codex/agents` and `.gemini/agents` are also scanned now, and a worktree root that will not open is reported rather than passing silently ([#2220](https://github.com/entireio/cli/pull/2220), [#2290](https://github.com/entireio/cli/pull/2290))
+- The repo docs embedded into the tailoring prompt `entire runner setup` sends to the model are truncated on a rune boundary. The cap is a byte budget applied to text described in characters, so a doc whose 6000th byte landed inside a multi-byte rune put invalid UTF-8 into the prompt. A file that is not UTF-8 to begin with keeps its own bytes rather than being reduced to a truncation marker ([#2307](https://github.com/entireio/cli/pull/2307))
+
+### Security
+
+- The migration command's opt-in "Push N migrated checkpoint ref(s) now?" applies the OpenAI Privacy Filter. With `redaction.openai_privacy_filter.enabled` set, answering yes sent 8-layer content to the remote untagged — the skip outcome without the decision ever being resolved or surfaced, and the opposite safety to answering no, which left the refs queued for the next `git push`, where OPF does run ([#2236](https://github.com/entireio/cli/pull/2236))
+- `external_agents` joins `openai_privacy_filter.command` behind the settings trust gate: it is honored only from a verified-untracked `.entire/settings.local.json`, because it grants execution of every `entire-agent-*` binary on `$PATH` and a committed one-line JSON diff does not read as executable to a reviewer. Rejection is a downgrade with the reason surfaced by `entire status`, not a hard error. Every `$PATH` scanner now returns only absolute entries, and the external-agent runner refuses a non-absolute binary path before spawning — Go's own `ErrDot` protection does not reach a scanner that resolves by glob, and the scanner executes what it finds ([#2268](https://github.com/entireio/cli/pull/2268))
+- Pi's `.pi/extensions/entire/` is created, read, written and removed through the worktree anchor like the other eight agents, so a repository shipping a symlinked `.pi` no longer has `entire enable` install through it — and uninstall `RemoveAll` through it — without the user ever naming pi, which matters because pi is auto-detected. The uninstall guard is stated positively as "a directory Entire named" rather than as a blocklist, so an agent whose config sits one level below its root cannot reach `RemoveAll` on the user's own config ([#2220](https://github.com/entireio/cli/pull/2220), [#2290](https://github.com/entireio/cli/pull/2290))
+
+### Housekeeping
+
+- Physical git worktree metadata — git dir, common dir, worktree id — has one owner, `gitrepo.ResolveWorktreeMetadata`, resolved once per open and passed into repository storage, alternates inspection and reftable inspection. The checkpoint package's duplicate traversal, its `git rev-parse --git-common-dir` subprocess, and the mutex and cache compensating for it are deleted; inspection errors now reach the caller instead of reading as "feature absent" ([#2241](https://github.com/entireio/cli/pull/2241), [#2254](https://github.com/entireio/cli/pull/2254))
+- The `e2e-tests (opencode)` leg is green again and runs in 469s rather than timing out at 1266s. opencode forks a background 27-package plugin install for every `.opencode` directory it finds and then blocks on all of them with no timeout and no output, so each of the ~40 fresh test repos paid it — in-process via `@npmcli/arborist`, measured at 5m00.9s against `npm install`'s 3s for the identical tree. The tree is now built once and seeded into each repo, and opencode's own logs are collected into the artifacts, which is what made the diagnosis possible ([#2270](https://github.com/entireio/cli/pull/2270))
+- Test fixes for failures that named the wrong cause: a leaked goroutine in the reentrant-clear test panicked the whole `strategy` package run from a `t.Errorf` after completion; `TestRootBasesAreTrusted` accused its own detection pattern of going stale when git was configured to colorize into a pipe; the versioncheck probe tests read the host's mise and Scoop roots, and three unix-only tests were untagged. Brew-before-mise probe precedence is now pinned, since it decides whether a user with both installs is told to run `brew upgrade` ([#2266](https://github.com/entireio/cli/pull/2266), [#2309](https://github.com/entireio/cli/pull/2309), [#2311](https://github.com/entireio/cli/pull/2311))
+
+### Thanks
+
+Thanks to @MuskanPaliwal for serializing OPF ref updates against native git's reference lock, and for splitting git metadata resolution onto a single canonical owner!
+
+Thanks to @Rohitkanithi for the flock inode revalidation!
+
 ## [0.10.5] - 2026-09-03
 
 ### Changed

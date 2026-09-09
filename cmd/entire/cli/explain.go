@@ -34,6 +34,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/trailers"
 	"github.com/entireio/cli/cmd/entire/cli/transcript"
 	transcriptcompact "github.com/entireio/cli/cmd/entire/cli/transcript/compact"
+	"github.com/entireio/cli/cmd/entire/cli/tuiutil"
 	"github.com/entireio/cli/redact"
 
 	"charm.land/lipgloss/v2"
@@ -2040,9 +2041,17 @@ func buildAmbiguousCheckpointMatches(ids []id.CheckpointID, committed []checkpoi
 }
 
 // renderExplainBody routes a markdown body through the brand renderer when
-// the writer supports color, and returns the markdown source verbatim
-// otherwise. Single point of policy for every explain body section.
+// the writer supports color, and returns the markdown source otherwise.
+// Single point of policy for every explain body section.
+//
+// The body is built from stored checkpoint content (AI summaries, extracted
+// prompts, file lists), which is agent and user influenced, so it passes
+// through the shared terminal sanitizer here regardless of path: the
+// non-color return would otherwise hand raw escape sequences to the
+// terminal, and sanitizing before the markdown renderer means its output
+// cannot re-carry them either.
 func renderExplainBody(w io.Writer, md string) string {
+	md = tuiutil.SanitizeTerminalText(md)
 	if !shouldUseColor(w) {
 		return md
 	}
@@ -2086,17 +2095,10 @@ func formatCheckpointOutput(ctx context.Context, summary *checkpoint.CheckpointS
 		if verbose || full {
 			md += buildFilesMarkdown(meta.FilesTouched)
 		}
-		if shouldUseColor(w) {
-			rendered, err := defaultRenderTerminalMarkdown(w, md)
-			if err != nil {
-				logging.Debug(context.Background(), "explain markdown render failed", slog.String("error", err.Error()))
-				sb.WriteString(md)
-			} else {
-				sb.WriteString(rendered)
-			}
-		} else {
-			sb.WriteString(md)
-		}
+		// renderExplainBody rather than an inline color branch: it is the single
+		// point of policy for explain bodies, including the terminal sanitizer
+		// the stored (agent-authored) summary must pass through.
+		sb.WriteString(renderExplainBody(w, md))
 	} else {
 		intent := extractIntent(scopedPrompts, content.Prompts)
 
@@ -2164,7 +2166,7 @@ func appendTranscriptSection(sb *strings.Builder, verbose, full bool, fullTransc
 func formatTranscriptBytes(transcriptBytes []byte, fallback string, agentType types.AgentType) string {
 	if len(transcriptBytes) == 0 {
 		if fallback != "" {
-			return fallback + "\n"
+			return tuiutil.SanitizeTerminalText(fallback) + "\n"
 		}
 		return "  (none)\n"
 	}
@@ -2176,9 +2178,19 @@ func formatTranscriptBytes(transcriptBytes []byte, fallback string, agentType ty
 	}
 	if err != nil || len(condensed) == 0 {
 		if fallback != "" {
-			return fallback + "\n"
+			return tuiutil.SanitizeTerminalText(fallback) + "\n"
 		}
 		return "  (failed to parse transcript)\n"
+	}
+
+	// Transcript content is agent and user influenced, so it goes through the
+	// shared terminal sanitizer at this display boundary. The sanitization is
+	// deliberately not inside FormatCondensedTranscript, which also builds LLM
+	// prompt input where mutation is unwanted.
+	for i := range condensed {
+		condensed[i].Content = tuiutil.SanitizeTerminalText(condensed[i].Content)
+		condensed[i].ToolName = tuiutil.SanitizeTerminalText(condensed[i].ToolName)
+		condensed[i].ToolDetail = tuiutil.SanitizeTerminalText(condensed[i].ToolDetail)
 	}
 
 	input := summarize.Input{Transcript: condensed}

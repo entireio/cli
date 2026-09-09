@@ -15,6 +15,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
+	"github.com/entireio/cli/redact"
 )
 
 func TestWriteDoctorBundle_ContainsExpectedEntries(t *testing.T) {
@@ -382,4 +383,20 @@ func mustOpenEntireAt(t *testing.T, dir string) *os.Root {
 		t.Fatal(err)
 	}
 	return root
+}
+
+// Not parallel: WithScannerDegradedSole mutates process-global scanner state.
+// The bundle leaves the machine, so a JSON entry that redaction cannot certify
+// (scanner degraded, or a line it could not rewrite) must be withheld rather
+// than downgraded to the byte-level scrubber.
+func TestRedactBundleEntry_WithholdsJSONWhenScannerDegraded(t *testing.T) {
+	redact.WithScannerDegradedSole(t)
+
+	got := string(redactBundleEntry("entry.jsonl", []byte(`{"msg":"hello"}`)))
+	if !strings.Contains(got, "entry withheld") {
+		t.Fatalf("degraded-scanner JSON entry must be withheld, got %q", got)
+	}
+	if strings.Contains(got, "hello") {
+		t.Fatalf("withheld entry must not carry the original content, got %q", got)
+	}
 }

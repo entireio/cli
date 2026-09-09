@@ -25,8 +25,12 @@ import (
 // observed-off deletes the marker; the next observed-enabled command warns.
 const globalWarnMarkerName = "global_warn_ack"
 
-func globalWarnMarkerPath() string {
-	return filepath.Join(userdirs.Config(), globalWarnMarkerName)
+func globalWarnMarkerPath() (string, error) {
+	configDir, err := userdirs.ConfigDirChecked()
+	if err != nil {
+		return "", fmt.Errorf("resolve global warning directory: %w", err)
+	}
+	return filepath.Join(configDir, globalWarnMarkerName), nil
 }
 
 // globalPostRun is the root PersistentPostRun hook for the global tier: the
@@ -51,7 +55,12 @@ func globalPostRun(ctx context.Context, errW io.Writer) {
 // trust_all on while already enabled re-warns with the wider "captured AND
 // synced" copy instead of staying silent.
 func maybeWarnGlobalTracking(ctx context.Context, us *settings.UserSettings, errW io.Writer) {
-	acked, statErr := os.ReadFile(globalWarnMarkerPath())
+	markerPath, err := globalWarnMarkerPath()
+	if err != nil {
+		logging.Debug(ctx, "global warn marker path unavailable", slog.String("error", err.Error()))
+		return
+	}
+	acked, statErr := os.ReadFile(markerPath) //nolint:gosec // ConfigDirChecked validates the user-global root
 	markerPresent := statErr == nil
 	if statErr != nil && !errors.Is(statErr, fs.ErrNotExist) {
 		// Treated as marker-absent: can only over-warn, never suppress.
@@ -64,7 +73,7 @@ func maybeWarnGlobalTracking(ctx context.Context, us *settings.UserSettings, err
 		ackGlobalWarnMarker(ctx, generation)
 	case !us.GlobalEnabled() && markerPresent:
 		// Off-detection: a hand-edited disable still owes the held-data note.
-		if err := os.Remove(globalWarnMarkerPath()); err != nil {
+		if err := os.Remove(markerPath); err != nil {
 			return // marker survived; retry (and print) on a later command
 		}
 		fmt.Fprintln(errW, "Global tracking is off; locally captured checkpoints in untrusted repos will not sync.")
@@ -82,11 +91,16 @@ func globalWarnGeneration(us *settings.UserSettings) string {
 // ackGlobalWarnMarker records which enabled generation the detection warning
 // announced. Best-effort: a failed write only re-warns.
 func ackGlobalWarnMarker(ctx context.Context, generation string) {
-	if err := os.MkdirAll(userdirs.Config(), 0o700); err != nil {
+	markerPath, err := globalWarnMarkerPath()
+	if err != nil {
 		logging.Debug(ctx, "global warn marker not written", slog.String("error", err.Error()))
 		return
 	}
-	if err := os.WriteFile(globalWarnMarkerPath(), []byte(generation+"\n"), 0o600); err != nil {
+	if err := userdirs.EnsurePrivateDir(filepath.Dir(markerPath)); err != nil {
+		logging.Debug(ctx, "global warn marker not written", slog.String("error", err.Error()))
+		return
+	}
+	if err := os.WriteFile(markerPath, []byte(generation+"\n"), 0o600); err != nil {
 		logging.Debug(ctx, "global warn marker not written", slog.String("error", err.Error()))
 	}
 }

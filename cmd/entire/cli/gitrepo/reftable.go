@@ -166,7 +166,7 @@ func (s *reftableStorer) execGit(args ...string) (string, []byte, error) {
 // (os/exec keeps the last value for a duplicate key). Mirrors the sibling
 // shell-out in checkpoint/shadow_ref.go.
 func gitPlumbingEnv() []string {
-	return append(os.Environ(),
+	return append(EnvWithoutRepoOverrides(),
 		"GIT_TERMINAL_PROMPT=0",
 		"LC_ALL=C",
 		"LANG=C",
@@ -243,22 +243,10 @@ func (s *reftableStorer) CheckAndSetReference(newRef, old *plumbing.Reference) e
 	if err == nil {
 		return nil
 	}
-	if isRefCASConflict(stderr) {
+	if isRefCASConflict(newRef.Name(), stderr) {
 		return gogitstorage.ErrReferenceHasChanged
 	}
 	return fmt.Errorf("reftable CAS ref %s: %s: %w", newRef.Name(), strings.TrimSpace(string(stderr)), err)
-}
-
-// isRefCASConflict reports whether git update-ref stderr indicates a
-// compare-and-swap conflict: the stored value was not the expected old value
-// ("... is at X but expected Y"), or a create-if-absent update found the ref
-// already present ("reference already exists"). These are the only failures
-// that mean the reference changed concurrently. Object/name/lock/spawn errors
-// carry different messages and must not be misclassified as conflicts.
-func isRefCASConflict(stderr []byte) bool {
-	msg := strings.ToLower(string(stderr))
-	return strings.Contains(msg, "but expected") ||
-		strings.Contains(msg, "reference already exists")
 }
 
 // Reference returns the reference with the given name, preserving symbolic refs

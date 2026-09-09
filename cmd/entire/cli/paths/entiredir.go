@@ -78,7 +78,7 @@ func ValidateEntireDirAt(worktreeRoot string) error {
 	case err != nil:
 		return fmt.Errorf("%s %w: %w", path, ErrEntireDirUnreadable, err)
 	case !info.Mode().IsDir():
-		return fmt.Errorf("%s is %s, %w", path, describeMode(info.Mode()), ErrEntireDirNotDirectory)
+		return fmt.Errorf("%s is %s, %w", path, DescribeMode(info.Mode()), ErrEntireDirNotDirectory)
 	}
 
 	return validateEntireDirEntries(path)
@@ -202,7 +202,7 @@ func unsupportedEntryError(path string, mode fs.FileMode) error {
 	if mode&fs.ModeSymlink != 0 {
 		return SymlinkedEntryError(path)
 	}
-	return fmt.Errorf("%s is %s, %w", path, describeMode(mode), ErrEntireDirUnsupportedEntry)
+	return fmt.Errorf("%s is %s, %w", path, DescribeMode(mode), ErrEntireDirUnsupportedEntry)
 }
 
 // SymlinkedEntryError reports that path is a symbolic link, naming the target
@@ -266,7 +266,11 @@ func RequireEntireDir(ctx context.Context) error {
 // describeMode names what was found. The sentinel supplies the rest of the
 // sentence, so these read as the first half of "X is a symbolic link, not a
 // directory" or "X is a named pipe, not a regular file or directory".
-func describeMode(mode fs.FileMode) string {
+// DescribeMode names a file type for a diagnostic ("a named pipe"). Exported so
+// doctor's agent-path scan reports a wrong-typed component in the same words
+// this package's .entire scan uses, rather than growing a second vocabulary for
+// the same conditions.
+func DescribeMode(mode fs.FileMode) string {
 	switch {
 	case mode&fs.ModeSymlink != 0:
 		return "a symbolic link"
