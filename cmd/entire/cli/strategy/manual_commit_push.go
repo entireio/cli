@@ -170,6 +170,10 @@ func (s *ManualCommitStrategy) prePush(ctx context.Context, remote string, prote
 	if redact.OPFEnabled() {
 		decision, decisionErr := opfPrePushDecision(ctx)
 		if decisionErr != nil {
+			if ps.redirectedToSyncRemote() {
+				skipRedirectedCheckpointPush(ctx, ps, decisionErr)
+				return nil
+			}
 			logging.Warn(ctx, "OPF pre-push decision failed; aborting push",
 				slog.String("error", decisionErr.Error()),
 			)
@@ -192,9 +196,26 @@ func (s *ManualCommitStrategy) prePush(ctx context.Context, remote string, prote
 				)
 				return repoErr
 			}
-			if _, rewriteErr := RewriteUnpushedV1WithOPF(ctx, repo, ps.pushTarget()); rewriteErr != nil {
+			// Under the redirect the Entire remote has no v1 yet, so bounding
+			// the rewrite by its tip alone would count the whole local history
+			// as unpushed — BootstrapTooLargeError above the cap, a full-history
+			// rewrite below it. Commits already published to the remote the tier
+			// displaced are not unpushed; bound by that tip when the Entire
+			// remote has none.
+			var boundFallback string
+			if ps.redirectedToSyncRemote() {
+				boundFallback = LegacyCheckpointRemote(ctx)
+			}
+			if _, rewriteErr := rewriteUnpushedV1WithOPFBounded(ctx, repo, ps.pushTarget(), boundFallback); rewriteErr != nil {
 				opfSpan.RecordError(rewriteErr)
 				opfSpan.End()
+				if ps.redirectedToSyncRemote() {
+					// The user pushed code somewhere else; a failure in the
+					// checkpoint delivery we redirected must not abort that
+					// push. Fail closed by withholding the checkpoints instead.
+					skipRedirectedCheckpointPush(ctx, ps, rewriteErr)
+					return nil
+				}
 				logging.Warn(ctx, "OPF pre-push rewrite failed; aborting push",
 					slog.String("error", rewriteErr.Error()),
 				)
@@ -358,18 +379,34 @@ func warnOPFCheckpointRefsWithheld(ctx context.Context, err error) {
 //
 // A separate checkpoint remote is exempt: it is a dedicated metadata store, not
 // the repository the user pushes to.
+// skipRedirectedCheckpointPush withholds this push's checkpoint delivery to the
+// Entire remote after an OPF failure and lets the user's own push proceed. The
+// v1 path normally fails closed by aborting the push, but that is a push the
+// user aimed at the checkpoint destination; under the redirect they aimed
+// elsewhere, and our delivery must not veto it. The checkpoints stay local and
+// go with the next push, once the cause is fixed.
+func skipRedirectedCheckpointPush(ctx context.Context, ps pushSettings, cause error) {
+	logging.Warn(ctx, "OPF pre-push failed under the Entire redirect; checkpoints withheld, user push continues",
+		slog.String("checkpoint_sync_remote", ps.pushTarget()),
+		slog.String("error", cause.Error()))
+	fmt.Fprintf(stderrWriter,
+		"[entire] Checkpoints were not pushed to %q this time: %v. Your push continues; they go with the next push once this is fixed.\n",
+		ps.pushTarget(), cause)
+}
+
 func deferCheckpointPushOnEmptyRemote(ctx context.Context, ps pushSettings) bool {
 	if ps.hasCheckpointURL() {
 		return false
 	}
-	// A push redirected to the Entire remote (entire tier) is exempt for the
-	// same reason as the dedicated store: it is Entire's own, not the
-	// repository the user pushes to. Keying the defer on the Entire remote's
-	// tracking refs would defer v1 forever for a user who only ever pushes code
-	// to GitHub — no refs/remotes/<entire>/* is ever created by their pushes.
-	// This assumes the Entire server never adopts entire/checkpoints/v1 as a
-	// mirror's default branch.
-	if ps.redirectedToSyncRemote() {
+	// A push whose checkpoints land on the Entire remote (entire tier) is
+	// exempt for the same reason as the dedicated store: it is Entire's own,
+	// not the repository the user pushes to. That covers a redirected `git push
+	// origin` and a direct `git push entire` alike. Keying the defer on the
+	// Entire remote's tracking refs would defer v1 forever for a user who only
+	// ever pushes code to GitHub — no refs/remotes/<entire>/* is ever created by
+	// their pushes. This assumes the Entire server never adopts
+	// entire/checkpoints/v1 as a mirror's default branch.
+	if ps.targetsEntireRemote() {
 		return false
 	}
 

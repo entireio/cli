@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/entireio/cli/cmd/entire/cli/gitremote"
 	"github.com/entireio/cli/cmd/entire/cli/internal/flock"
 	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
@@ -49,10 +50,11 @@ func redirectToEntireSyncRemote(ctx context.Context, ps *pushSettings) (elected 
 	if err != nil || elected.Source != SyncRemoteSourceEntire {
 		return CheckpointSyncRemote{}, false
 	}
+	ps.entireTier = true
 	if elected.Name != ps.remote {
 		ps.syncRemote = elected.Name
 		logging.Debug(ctx, "checkpoint push redirected to the Entire remote",
-			slog.String("push_remote", ps.remote),
+			slog.String("push_remote", gitremote.RedactURLOrPath(ps.remote)),
 			slog.String("checkpoint_sync_remote", elected.Name))
 	}
 	return elected, true
@@ -197,7 +199,15 @@ func announceEntireSyncRemoteOnce(ctx context.Context, remoteName string) {
 	}
 
 	fmt.Fprintf(stderrWriter, "[entire] Checkpoints now sync to %q — your Entire remote.\n", remoteName)
+	// The displaced remote is named only while the backlog there is still
+	// unaccounted for; once the migration ledger says done or declined the
+	// line would be noise.
+	legacy := LegacyCheckpointRemote(ctx)
+	if legacy != "" && st.Migration == EntireSyncMigrationNone {
+		fmt.Fprintf(stderrWriter,
+			"[entire] Earlier checkpoints may still be on %q; they stay readable from there.\n", legacy)
+	}
 	logging.Info(ctx, "entire sync remote announced",
 		slog.String("remote", remoteName),
-		slog.String("legacy_remote", LegacyCheckpointRemote(ctx)))
+		slog.String("legacy_remote", legacy))
 }

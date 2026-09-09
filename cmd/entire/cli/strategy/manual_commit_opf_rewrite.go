@@ -258,6 +258,15 @@ const rawByteCapMultiplier = 100
 // privacy-critical failures — the pre-push hook propagates these so
 // git push aborts.
 func RewriteUnpushedV1WithOPF(ctx context.Context, repo *git.Repository, target string) (plumbing.Hash, error) {
+	return rewriteUnpushedV1WithOPFBounded(ctx, repo, target, "")
+}
+
+// rewriteUnpushedV1WithOPFBounded is RewriteUnpushedV1WithOPF with an optional
+// second bound: when target has no v1 yet and boundFallback names a configured
+// remote, that remote's v1 tip marks what is already published. The Entire
+// redirect uses it so commits the displaced remote already holds are not
+// re-treated as a bootstrap of the whole history.
+func rewriteUnpushedV1WithOPFBounded(ctx context.Context, repo *git.Repository, target, boundFallback string) (plumbing.Hash, error) {
 	localTip, err := readV1Tip(repo, plumbing.NewBranchReferenceName(paths.MetadataBranchName))
 	if err != nil {
 		return plumbing.ZeroHash, fmt.Errorf("read local v1: %w", err)
@@ -268,6 +277,17 @@ func RewriteUnpushedV1WithOPF(ctx context.Context, repo *git.Repository, target 
 	remoteTip, err := resolveRemoteV1Tip(ctx, repo, target)
 	if err != nil {
 		return plumbing.ZeroHash, fmt.Errorf("read remote v1: %w", err)
+	}
+	if remoteTip.IsZero() && boundFallback != "" && boundFallback != target {
+		remoteTip, err = resolveRemoteV1Tip(ctx, repo, boundFallback)
+		if err != nil {
+			return plumbing.ZeroHash, fmt.Errorf("read v1 on %s: %w", boundFallback, err)
+		}
+		if !remoteTip.IsZero() {
+			logging.Info(ctx, "OPF rewrite: target has no v1; bounding by the displaced remote",
+				slog.String("target", remote.RedactURLOrPath(target)),
+				slog.String("bound_remote", boundFallback))
+		}
 	}
 
 	if !remoteTip.IsZero() {

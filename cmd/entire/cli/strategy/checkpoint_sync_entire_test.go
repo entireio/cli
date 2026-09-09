@@ -112,7 +112,7 @@ func TestResolveCheckpointSyncRemote_EntireTier(t *testing.T) {
 		got, err := ResolveCheckpointSyncRemote(ctx)
 		require.NoError(t, err)
 		assert.Equal(t, CheckpointSyncRemote{Name: "origin", Source: SyncRemoteSourceDefault}, got)
-		assert.Empty(t, EntireRemotes(ctx))
+		assert.Empty(t, entireRemotes(ctx))
 	})
 
 	t.Run("a remote with a second non-entire url is not an Entire remote", func(t *testing.T) {
@@ -144,7 +144,7 @@ func TestReadRemotesInConfigOrder_RetainsURLs(t *testing.T) {
 		{Name: "entire", URLs: []string{testEntireURL}},
 	}, got)
 	assert.Equal(t, []string{"origin", "entire"}, configuredRemotesInConfigOrder(ctx))
-	assert.Equal(t, []string{"entire"}, EntireRemotes(ctx))
+	assert.Equal(t, []string{"entire"}, entireRemotes(ctx))
 	assert.Equal(t, "origin", LegacyCheckpointRemote(ctx))
 }
 
@@ -258,6 +258,7 @@ func TestRedirectToEntireSyncRemote(t *testing.T) {
 		assert.True(t, entireTier)
 		assert.Equal(t, "entire", elected.Name)
 		assert.False(t, ps.redirectedToSyncRemote())
+		assert.True(t, ps.targetsEntireRemote(), "the tier is in force even without a redirect")
 		assert.Equal(t, "entire", ps.pushTarget())
 	})
 
@@ -320,7 +321,10 @@ func TestDeferCheckpointPushOnEmptyRemote_SkippedWhenRedirected(t *testing.T) {
 	require.True(t, deferCheckpointPushOnEmptyRemote(ctx, pushSettings{remote: "origin"}))
 	// Redirected to the Entire remote: never defer — the user's code pushes
 	// would never create refs/remotes/entire/*, so the defer would be forever.
-	assert.False(t, deferCheckpointPushOnEmptyRemote(ctx, pushSettings{remote: "origin", syncRemote: "entire"}))
+	assert.False(t, deferCheckpointPushOnEmptyRemote(ctx, pushSettings{remote: "origin", syncRemote: "entire", entireTier: true}))
+	// Pushed straight to the Entire remote: same destination, same rule. The
+	// Entire remote is not the repository whose default branch we protect.
+	assert.False(t, deferCheckpointPushOnEmptyRemote(ctx, pushSettings{remote: "entire", entireTier: true}))
 }
 
 // Not parallel: uses t.Chdir()
@@ -337,7 +341,7 @@ func TestAnnounceEntireSyncRemoteOnce(t *testing.T) {
 
 		out := buf.String()
 		assert.Contains(t, out, `[entire] Checkpoints now sync to "entire" — your Entire remote.`)
-		assert.NotContains(t, out, "Earlier checkpoints", "no backlog pointer until the migration command exists")
+		assert.Contains(t, out, `[entire] Earlier checkpoints may still be on "origin"; they stay readable from there.`)
 		st, ok := LoadEntireSyncState(ctx)
 		require.True(t, ok)
 		assert.Equal(t, "entire", st.Remote)
@@ -471,5 +475,50 @@ func TestHintGatedCheckpointSync_SeveralEntireRemotes(t *testing.T) {
 		hintGatedCheckpointSync(ctx, "publish")
 
 		assert.Contains(t, buf.String(), "checkpoint_push_remote")
+	})
+}
+
+// The Entire tier displaces the default election. Whatever it displaced still
+// holds the checkpoints pushed before the Entire remote existed, so it must stay
+// on the read chain — origin is already a legacy tier, a sole or first remote
+// with another name was not.
+func TestCheckpointReadRemotes_EntireTierKeepsDisplacedRemote(t *testing.T) {
+	testutil.IsolateGitConfigEnv(t)
+	ctx := context.Background()
+	newRepo := func(t *testing.T) string {
+		t.Helper()
+		dir := t.TempDir()
+		testutil.InitRepo(t, dir)
+		testutil.WriteFile(t, dir, "f.txt", "init")
+		testutil.GitAdd(t, dir, "f.txt")
+		testutil.GitCommit(t, dir, "init")
+		return dir
+	}
+
+	t.Run("displaced origin: already the legacy tier", func(t *testing.T) {
+		dir := newEntireTestRepo(t)
+		t.Chdir(dir)
+		res := CheckpointReadRemotesWithElection(ctx)
+		assert.Equal(t, "entire", res.ElectedName)
+		assert.Equal(t, []string{"entire", "origin"}, res.Candidates)
+	})
+
+	t.Run("displaced sole remote stays readable", func(t *testing.T) {
+		dir := newRepo(t)
+		testutil.AddRemote(t, dir, "gh", "https://github.com/acme/app.git")
+		testutil.AddRemote(t, dir, "entire", testEntireURL)
+		t.Chdir(dir)
+		res := CheckpointReadRemotesWithElection(ctx)
+		assert.Equal(t, []string{"entire", "gh"}, res.Candidates)
+	})
+
+	t.Run("displaced first remote stays readable", func(t *testing.T) {
+		dir := newRepo(t)
+		testutil.AddRemote(t, dir, "upstream", "https://github.com/acme/app.git")
+		testutil.AddRemote(t, dir, "fork", "https://github.com/me/app.git")
+		testutil.AddRemote(t, dir, "entire", testEntireURL)
+		t.Chdir(dir)
+		res := CheckpointReadRemotesWithElection(ctx)
+		assert.Equal(t, []string{"entire", "upstream"}, res.Candidates)
 	})
 }
