@@ -35,6 +35,11 @@ type syncInventory struct {
 	Refs        []plumbing.ReferenceName
 	HasV1Branch bool
 	Err         error
+	// Hashes and V1Tip carry the listing's advertised hashes so the executor
+	// acts on the exact listing the user consented to, without a second
+	// ls-remote.
+	Hashes map[plumbing.ReferenceName]plumbing.Hash
+	V1Tip  plumbing.Hash
 }
 
 // holdsArtifacts reports whether the remote is known to hold checkpoint data.
@@ -130,7 +135,10 @@ type syncInputs struct {
 	LocalCheckpoints int
 	// LocalRefs are the local refs/entire/checkpoints/* names (empty on
 	// git-branch), used to decide whether the destination already has them all.
-	LocalRefs            []plumbing.ReferenceName
+	LocalRefs []plumbing.ReferenceName
+	// HasLocalV1 reports a local entire/checkpoints/v1 branch, whichever store
+	// is primary; it is what the conversion step converts.
+	HasLocalV1           bool
 	QueuedRefs           int
 	PushSessionsDisabled bool
 	Marker               syncMarkerState
@@ -176,6 +184,7 @@ type syncStep string
 
 const (
 	stepWriteDestination syncStep = "write_destination"
+	stepConvertV1        syncStep = "convert_v1"
 	stepConvertBackend   syncStep = "convert_backend"
 	stepHydrate          syncStep = "hydrate"
 	stepRequeue          syncStep = "requeue"
@@ -425,22 +434,39 @@ func planSteps(in syncInputs, plan *syncPlan) {
 	if len(plan.Sources) > 0 {
 		plan.Steps = append(plan.Steps, stepHydrate)
 	}
+	// A v1 branch is converted whenever one will exist locally after
+	// hydration — this clone's, or one an old remote holds — on either store,
+	// so the step is planned (and so listed by --dry-run and the confirmation)
+	// rather than discovered at run time.
+	if in.HasLocalV1 || anySourceHasV1(in, plan.Sources) {
+		plan.Steps = append(plan.Steps, stepConvertV1)
+	}
 	if !in.PrimaryIsRefs {
 		plan.Steps = append(plan.Steps, stepConvertBackend)
 	}
 	movesData := in.LocalCheckpoints > 0 || len(plan.Sources) > 0
 	if movesData {
-		if in.PrimaryIsRefs && in.LocalCheckpoints > 0 {
-			// Already-pushed refs left the queue; the conversion step enqueues
-			// on its own, so only git-refs repos need the requeue.
-			plan.Steps = append(plan.Steps, stepRequeue)
-		}
+		// Requeue whenever data moves: refs already pushed elsewhere have left
+		// the queue, and refs hydration is about to fetch are not in it yet.
+		// In a fresh clone nothing is local before hydration, so gating this
+		// on local checkpoints skipped the whole publish. Dedup is free.
+		plan.Steps = append(plan.Steps, stepRequeue)
 		plan.Steps = append(plan.Steps, stepPublish, stepVerify)
 	}
 	if len(plan.Sources) > 0 {
 		plan.Steps = append(plan.Steps, stepRemove)
 	}
 	plan.Steps = append(plan.Steps, stepRecordMarker)
+}
+
+// anySourceHasV1 reports whether one of the old remotes advertises a v1 branch.
+func anySourceHasV1(in syncInputs, sources []string) bool {
+	for _, name := range sources {
+		if r, ok := in.remote(name); ok && r.Inventory != nil && r.Inventory.HasV1Branch {
+			return true
+		}
+	}
+	return false
 }
 
 // destinationHoldsAllLocalRefs reports whether the destination's listing
@@ -472,7 +498,7 @@ func planState(in syncInputs, plan *syncPlan) {
 		// (e) Nothing anywhere yet: at most the destination is recorded.
 		plan.State = syncStateSetDestination
 		plan.Steps = slices.DeleteFunc(plan.Steps, func(s syncStep) bool {
-			return s == stepConvertBackend || s == stepPublish || s == stepVerify
+			return s == stepConvertV1 || s == stepConvertBackend || s == stepRequeue || s == stepPublish || s == stepVerify
 		})
 		if plan.WriteDestinationSetting {
 			plan.Reason = fmt.Sprintf("Checkpoints will sync to %s once recorded as %s in %s.", plan.Destination, syncSettingKey, syncLocalFile)
@@ -483,10 +509,16 @@ func planState(in syncInputs, plan *syncPlan) {
 		// (a)/(n) Everything is already where it belongs.
 		plan.State = syncStateAlreadyHome
 		plan.Steps = nil
-		if in.Marker == syncMarkerPending {
-			plan.Steps = []syncStep{stepRecordMarker}
-		}
 		plan.Reason = fmt.Sprintf("✓ Checkpoints live on %s. Nothing to do.", dest)
+		if in.Marker == syncMarkerPending {
+			// Recording the verdict is a write, so it needs the same consent as
+			// any other: --yes, or a human at the terminal who ran the command.
+			if in.Opts.Yes || in.Interactive {
+				plan.Steps = []syncStep{stepRecordMarker}
+			} else {
+				plan.Notes = append(plan.Notes, "Run "+syncCmd+" --yes to record this, so entire status stops suggesting it.")
+			}
+		}
 	case len(plan.Sources) == 0:
 		// (d) Local checkpoints that never left this clone.
 		plan.State = syncStatePublishOnly
@@ -501,6 +533,8 @@ func planState(in syncInputs, plan *syncPlan) {
 
 	if plan.hasStep(stepConvertBackend) {
 		plan.Reason = describeConversion(in.BackendEnvOverride) + " " + plan.Reason // (i)
+	} else if plan.hasStep(stepConvertV1) {
+		plan.Reason = "The " + syncV1BranchName + " branch is converted to refs first. " + plan.Reason
 	}
 	if in.PushSessionsDisabled && (plan.hasStep(stepPublish)) {
 		plan.Warn = true
@@ -528,7 +562,7 @@ func planState(in syncInputs, plan *syncPlan) {
 func describeConversion(envOverride bool) string {
 	if envOverride {
 		return "This repo still uses the shared " + syncV1BranchName + " branch. Each checkpoint will be converted to its own ref. " +
-			"ENTIRE_CHECKPOINTS_PRIMARY is set, so the backend is not written to settings."
+			"ENTIRE_CHECKPOINTS_PRIMARY is set, so the backend is not written to settings and the old " + syncV1BranchName + " branch is left in place."
 	}
 	return "This repo still uses the shared " + syncV1BranchName + " branch. Each checkpoint will be converted to its own ref and git-refs made the primary store (" + syncProjectFile + ")."
 }
@@ -605,27 +639,6 @@ func nextSyncCommand(plan syncPlan, in syncInputs) string {
 	return strings.Join(parts, " ")
 }
 
-// legacyElectedRemote is the remote the election would pick without the Entire
-// tier — origin, else the sole non-Entire remote, else the first in config
-// order — used to name "the old remote" in prose. "" when every remote is an
-// Entire remote.
-func legacyElectedRemote(in syncInputs) string {
-	var plain []string
-	for _, r := range in.Remotes {
-		if !r.IsEntire {
-			plain = append(plain, r.Name)
-		}
-	}
-	switch {
-	case len(plain) == 0:
-		return ""
-	case slices.Contains(plain, originRemoteName):
-		return originRemoteName
-	default:
-		return plain[0]
-	}
-}
-
 // --- Runtime copy (executor outcomes) ---
 
 // formatVerifyMissing is row (j): some refs did not arrive on the destination.
@@ -692,7 +705,7 @@ func formatRemovalPrompt(refs int, hasV1 bool, r syncRemoteInfo) string {
 // so the user is not asked once per step.
 func formatCombinedConfirm(in syncInputs, plan syncPlan) string {
 	var verbs []string
-	if plan.hasStep(stepConvertBackend) {
+	if plan.hasStep(stepConvertV1) {
 		verbs = append(verbs, "Convert to refs")
 	}
 	if plan.hasStep(stepHydrate) {
@@ -913,11 +926,13 @@ func renderDryRunSteps(w io.Writer, in syncInputs, plan syncPlan) {
 		switch step {
 		case stepWriteDestination:
 			fmt.Fprintf(w, "  Would record %s as %s in %s\n", plan.Destination, syncSettingKey, syncLocalFile)
+		case stepConvertV1:
+			fmt.Fprintf(w, "  Would convert %s to refs\n", countNoun(in.LocalCheckpoints, "checkpoint", "checkpoints"))
 		case stepConvertBackend:
 			if in.BackendEnvOverride {
-				fmt.Fprintf(w, "  Would convert %s to refs (backend not written: ENTIRE_CHECKPOINTS_PRIMARY is set)\n", countNoun(in.LocalCheckpoints, "checkpoint", "checkpoints"))
+				fmt.Fprintln(w, "  Would leave the store on git-branch (ENTIRE_CHECKPOINTS_PRIMARY is set) and keep the old "+syncV1BranchName+" branch")
 			} else {
-				fmt.Fprintf(w, "  Would convert %s to refs and set the backend to git-refs (%s)\n", countNoun(in.LocalCheckpoints, "checkpoint", "checkpoints"), syncProjectFile)
+				fmt.Fprintf(w, "  Would set the checkpoint store to git-refs (%s)\n", syncProjectFile)
 			}
 		case stepHydrate:
 			for _, name := range plan.Sources {
@@ -929,7 +944,7 @@ func renderDryRunSteps(w io.Writer, in syncInputs, plan syncPlan) {
 				fmt.Fprintf(w, "  Would fetch %s from %s\n", countNoun(n, "checkpoint ref", "checkpoint refs"), name)
 			}
 		case stepRequeue:
-			fmt.Fprintf(w, "  Would queue %s for push\n", countNoun(in.LocalCheckpoints, "checkpoint ref", "checkpoint refs"))
+			fmt.Fprintln(w, "  Would queue every local checkpoint ref for push")
 		case stepPublish:
 			fmt.Fprintf(w, "  Would push %s to %s\n", countNoun(in.LocalCheckpoints, "checkpoint ref", "checkpoint refs"), plan.Destination)
 		case stepVerify:
@@ -957,8 +972,13 @@ func renderSyncCelebration(w io.Writer, sty statusStyles, dest string, destIsEnt
 	fmt.Fprintln(w)
 	renderCheckpointValue(w, sty, v)
 	fmt.Fprintln(w)
-	fmt.Fprintf(w, "  From now on, every commit's session history syncs to %s automatically,\n", dest)
-	fmt.Fprintln(w, "  whichever remote you push your code to.")
+	if destIsEntire {
+		fmt.Fprintf(w, "  From now on, every commit's session history syncs to %s automatically,\n", dest)
+		fmt.Fprintln(w, "  whichever remote you push your code to.")
+	} else {
+		fmt.Fprintf(w, "  From now on, every commit's session history syncs to %s with your pushes to it.\n", dest)
+		fmt.Fprintln(w, "  A push to any other remote carries your code but no session history.")
+	}
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "  "+sty.render(sty.bold, "Next"))
 	fmt.Fprint(w, sty.metadataRowsWithWidth([]explainRow{

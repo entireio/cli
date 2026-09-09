@@ -240,8 +240,9 @@ func TestRunCheckpointMigrate_YesRemoveDeletesOnlyVerified(t *testing.T) {
 	require.NoError(t, err)
 
 	require.Len(t, fake.removed["origin"], 2, "both verified refs are deleted from origin")
-	assert.True(t, fake.removedV1["origin"], "the v1 branch goes too once every checkpoint is a ref")
-	assert.Contains(t, out, "Removed 2 checkpoint refs and entire/checkpoints/v1 from origin")
+	assert.False(t, fake.removedV1["origin"], "no v1 branch was converted in this clone, so the old one is not deleted")
+	assert.Contains(t, out, "Removed 2 checkpoint refs from origin")
+	assert.Contains(t, out, "entire/checkpoints/v1 branch stays on the old remote")
 	assert.NotContains(t, out, "Older copies stay")
 	assert.Contains(t, out, "Your checkpoints now live on Entire.")
 }
@@ -335,7 +336,8 @@ func TestRunCheckpointMigrate_InteractiveDeclineRecordsDeclined(t *testing.T) {
 	require.Len(t, prompts, 2, "one combined question, then one removal question: %v", prompts)
 	assert.Contains(t, prompts[0], "copy 2 checkpoints from origin to entire")
 	assert.Contains(t, prompts[0], "verify")
-	assert.Equal(t, "Delete 2 checkpoint refs and the entire/checkpoints/v1 branch from origin (github.com/acme/app)? Your code is untouched.", prompts[1])
+	assert.Equal(t, "Delete 2 checkpoint refs from origin (github.com/acme/app)? Your code is untouched.", prompts[1],
+		"no v1 branch was converted in this clone, so the prompt does not offer to delete the old one")
 	assert.False(t, fake.called("remove:"))
 	assert.Equal(t, []strategy.EntireSyncMigration{strategy.EntireSyncMigrationDone, strategy.EntireSyncMigrationDeclined}, fake.marks)
 	assert.Contains(t, out, "Older copies stay on origin")
@@ -391,8 +393,12 @@ func TestRunCheckpointMigrate_ToAlreadyElectedWritesNothing(t *testing.T) {
 func TestRunCheckpointMigrate_UnknownToIsAnError(t *testing.T) {
 	syncTestRepo(t, testSettingsEnabled)
 
-	_, err := runSync(t, checkpointMigrateOptions{To: "nowhere"})
+	out, err := runSync(t, checkpointMigrateOptions{To: "nowhere"})
 	require.Error(t, err)
+	var silent *SilentError
+	require.NotErrorAs(t, err, &silent, "a flag error must reach main, which prints it")
+	require.EqualError(t, err, `--to "nowhere" is not a configured git remote`)
+	assert.NotContains(t, out, "Checkpoint migration", "no half-rendered report before a flag error")
 }
 
 func TestRunCheckpointMigrate_InventoryErrorLeavesRemoteUntouched(t *testing.T) {
@@ -446,6 +452,54 @@ func TestRunCheckpointMigrate_AlreadyHomeReportsValue(t *testing.T) {
 	require.NoError(t, err)
 
 	assert.Contains(t, out, "Checkpoints live on entire (your Entire remote)")
-	assert.Equal(t, []strategy.EntireSyncMigration{strategy.EntireSyncMigrationDone}, fake.marks, "a repo that is already home records the ledger so status stops nudging")
+	assert.Empty(t, fake.marks, "a bare non-interactive run writes nothing, the ledger included")
+	assert.Contains(t, out, "entire checkpoint migrate --yes to record this")
 	assert.False(t, fake.called("publish:"))
+
+	out, err = runSync(t, checkpointMigrateOptions{Yes: true})
+	require.NoError(t, err)
+	assert.Equal(t, []strategy.EntireSyncMigration{strategy.EntireSyncMigrationDone}, fake.marks, "with consent the verdict is recorded so status stops nudging")
+	assert.NotContains(t, out, "--yes to record this")
+}
+
+func TestRunCheckpointMigrate_EnvPinnedBackendKeepsOldV1Branch(t *testing.T) {
+	fake, _ := syncTestRepo(t, testSettingsEnabled)
+	// The env override pins git-branch: the conversion runs, the settings are
+	// not written, and readers keep using the branch — so the old remote's v1
+	// branch must survive even with --remove.
+	t.Setenv(settings.EnvCheckpointsPrimary, checkpoint.BackendTypeGitBranch)
+
+	out, err := runSync(t, checkpointMigrateOptions{Yes: true, Remove: true})
+	require.NoError(t, err)
+
+	assert.True(t, fake.called("remove:origin"), "verified refs are still cleaned up")
+	assert.False(t, fake.removedV1["origin"], "the v1 branch stays while the store is git-branch")
+	assert.Contains(t, out, "ENTIRE_CHECKPOINTS_PRIMARY is set")
+	assert.Contains(t, out, "entire/checkpoints/v1 branch stays on the old remote")
+	raw, rerr := os.ReadFile(filepath.Join(".entire", "settings.json"))
+	require.NoError(t, rerr)
+	assert.NotContains(t, string(raw), "git-refs", "the backend must not be written under the override")
+}
+
+func TestRunCheckpointMigrate_FromNarrowsInventoryAndRemoval(t *testing.T) {
+	fake, head := syncTestRepo(t, testSettingsEnabled)
+	testutil.AddRemote(t, ".", "fork", "https://github.com/me/app.git")
+	strategy.InvalidateGitRemoteCache(context.Background())
+	fake.inventories["fork"] = strategy.CheckpointInventory{Refs: map[plumbing.ReferenceName]plumbing.Hash{"refs/entire/checkpoints/ef/0123456789ef": head}}
+
+	_, err := runSync(t, checkpointMigrateOptions{Yes: true, Remove: true, From: []string{"origin"}})
+	require.NoError(t, err)
+
+	assert.False(t, fake.called("inventory:fork"), "--from excludes fork, so it is never dialed")
+	assert.False(t, fake.called("remove:fork"))
+	assert.True(t, fake.called("remove:origin"))
+	// Each remote is listed exactly once: the plan and the execution act on
+	// the same listing.
+	listed := 0
+	for _, c := range fake.calls {
+		if c == "inventory:origin" {
+			listed++
+		}
+	}
+	assert.Equal(t, 1, listed, "calls: %v", fake.calls)
 }

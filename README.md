@@ -560,8 +560,8 @@ The Entire remote is the one exception to "only pushes that name the remote carr
 
 In order, skipping what is already done, it:
 
-1. Converts git-branch checkpoints to per-checkpoint refs and makes git-refs the primary store (this writes `.entire/settings.json`, which you should commit).
-2. Fetches checkpoint refs that exist only on the old remote.
+1. Fetches checkpoint refs and the `entire/checkpoints/v1` branch that exist only on the old remote.
+2. Converts git-branch checkpoints to per-checkpoint refs and makes git-refs the primary store (this writes `.entire/settings.json`, which you should commit).
 3. Pushes every checkpoint ref to the destination and verifies it arrived.
 4. With your consent, deletes the checkpoint refs and the `entire/checkpoints/v1` branch from the old remote. Your code is never touched.
 

@@ -23,7 +23,7 @@ func entireStatusRepo(t *testing.T) string {
 	testutil.GitAdd(t, dir, "README.md")
 	testutil.GitCommit(t, dir, "initial")
 	writeSettings(t, testSettingsEnabled)
-	testutil.AddRemote(t, dir, "origin", "https://github.com/acme/app.git")
+	testutil.AddRemote(t, dir, originRemoteName, "https://github.com/acme/app.git")
 	testutil.AddRemote(t, dir, "entire", "entire://cluster.test/gh/acme/app")
 	return dir
 }
@@ -110,6 +110,9 @@ func TestRunStatusJSON_CheckpointSync_Migration(t *testing.T) {
 	if got.CheckpointSyncMigration != checkpointSyncMigrationPending {
 		t.Errorf("checkpoint_sync_migration = %q, want pending", got.CheckpointSyncMigration)
 	}
+	if got.CheckpointSyncLegacyRemote != originRemoteName {
+		t.Errorf("checkpoint_sync_legacy_remote = %q, want origin", got.CheckpointSyncLegacyRemote)
+	}
 
 	writeEntireSyncLedger(t, "declined")
 	if got := decode(); got.CheckpointSyncMigration != checkpointSyncMigrationDeclined {
@@ -121,7 +124,7 @@ func TestRunStatusJSON_CheckpointSync_MigrationOmittedForOtherSources(t *testing
 	testutil.IsolateGitConfigEnv(t)
 	setupTestRepo(t)
 	writeSettings(t, testSettingsEnabled)
-	testutil.AddRemote(t, ".", "origin", "https://example.com/origin.git")
+	testutil.AddRemote(t, ".", originRemoteName, "https://example.com/origin.git")
 
 	var stdout bytes.Buffer
 	if err := runStatus(context.Background(), &stdout, false, true); err != nil {

@@ -481,7 +481,7 @@ func writeCheckpointSyncLines(ctx context.Context, b *strings.Builder, s *Entire
 }
 
 // formatCheckpointSyncNudge is the status-line pointer at `entire checkpoint
-// sync`, shared with doctor and the re-enable path so the three agree.
+// migrate`, shared with doctor and the re-enable path so the three agree.
 func formatCheckpointSyncNudge(legacyRemote string) string {
 	return "older checkpoints may still be on " + legacyRemote + " — run 'entire checkpoint migrate' to bring them over"
 }
@@ -889,6 +889,9 @@ type statusJSON struct {
 	// CheckpointSyncMigration is the `entire checkpoint migrate` ledger for an
 	// Entire-elected remote: pending|done|declined. Omitted for other sources.
 	CheckpointSyncMigration string `json:"checkpoint_sync_migration,omitempty"`
+	// CheckpointSyncLegacyRemote names the non-Entire remote older checkpoints
+	// may still be on, the one the text nudge names. Entire tier only.
+	CheckpointSyncLegacyRemote string `json:"checkpoint_sync_legacy_remote,omitempty"`
 	// SecretScanners lists the enabled engines when non-default; omitted when default.
 	SecretScanners []string `json:"secret_scanners,omitempty"`
 	Error          string   `json:"error,omitempty"`
@@ -978,6 +981,7 @@ func runStatusJSON(ctx context.Context, w io.Writer) error {
 		result.CheckpointSyncError = syncInfo.Err
 		result.UnpushedCheckpoints = syncInfo.Unpushed
 		result.CheckpointSyncMigration = syncInfo.Migration
+		result.CheckpointSyncLegacyRemote = syncInfo.LegacyRemote
 
 		if store, err := session.NewStateStore(ctx); err == nil {
 			if states, err := store.List(ctx); err == nil {

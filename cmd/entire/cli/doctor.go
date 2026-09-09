@@ -574,16 +574,20 @@ func checkCheckpointDestination(cmd *cobra.Command) {
 	w := cmd.OutOrStdout()
 	t := inspectRemoteTopology(ctx)
 	switch {
+	case t.ambiguous():
+		// Fan-out is reported even under the Entire tier (describe… says
+		// checkpoints do not follow it); the choice text only without one.
+		t.describeCheckpointDestination(w, "Checkpoint destination: REVIEW")
+		if t.entireElected == "" {
+			fmt.Fprintln(w, "  Run 'entire checkpoint migrate' to choose and move.")
+		}
 	case t.entireElected != "":
 		fmt.Fprintf(w, "✓ Checkpoint destination: %s (your Entire remote)\n", t.entireElected)
-		if checkpointSyncMigrationState(ctx) == checkpointSyncMigrationPending && localCheckpointsExist(ctx) {
-			if legacy := strategy.LegacyCheckpointRemote(ctx); legacy != "" {
-				fmt.Fprintf(w, "  Older checkpoints may still be on %s. Run 'entire checkpoint migrate' to bring them over.\n", legacy)
-			}
+	}
+	if t.entireElected != "" && checkpointSyncMigrationState(ctx) == checkpointSyncMigrationPending && localCheckpointsExist(ctx) {
+		if legacy := strategy.LegacyCheckpointRemote(ctx); legacy != "" {
+			fmt.Fprintf(w, "  Older checkpoints may still be on %s. Run 'entire checkpoint migrate' to bring them over.\n", legacy)
 		}
-	case t.ambiguous():
-		t.describeCheckpointDestination(w, "Checkpoint destination: REVIEW")
-		fmt.Fprintln(w, "  Run 'entire checkpoint migrate' to choose and move.")
 	}
 	// The ordinary single-remote repo says nothing: there is no choice to
 	// report, and doctor's output stays short for the common case.
