@@ -329,10 +329,10 @@ func entireRemotesOf(remotes []configuredRemote) []string {
 	return names
 }
 
-// entireRemotes lists the configured remotes whose every URL is entire://, in
+// EntireRemotes lists the configured remotes whose every URL is entire://, in
 // .git/config order. Read from raw config (insteadOf not expanded); see
 // configuredRemote. Empty when there are none or the read failed.
-func entireRemotes(ctx context.Context) []string {
+func EntireRemotes(ctx context.Context) []string {
 	return configuredEntireRemotes(ctx)
 }
 

@@ -112,7 +112,7 @@ func TestResolveCheckpointSyncRemote_EntireTier(t *testing.T) {
 		got, err := ResolveCheckpointSyncRemote(ctx)
 		require.NoError(t, err)
 		assert.Equal(t, CheckpointSyncRemote{Name: "origin", Source: SyncRemoteSourceDefault}, got)
-		assert.Empty(t, entireRemotes(ctx))
+		assert.Empty(t, EntireRemotes(ctx))
 	})
 
 	t.Run("a remote with a second non-entire url is not an Entire remote", func(t *testing.T) {
@@ -144,7 +144,7 @@ func TestReadRemotesInConfigOrder_RetainsURLs(t *testing.T) {
 		{Name: "entire", URLs: []string{testEntireURL}},
 	}, got)
 	assert.Equal(t, []string{"origin", "entire"}, configuredRemotesInConfigOrder(ctx))
-	assert.Equal(t, []string{"entire"}, entireRemotes(ctx))
+	assert.Equal(t, []string{"entire"}, EntireRemotes(ctx))
 	assert.Equal(t, "origin", LegacyCheckpointRemote(ctx))
 }
 
