@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	agentpkg "github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/testutil"
+	"github.com/entireio/cli/cmd/entire/cli/osroot"
 	"os"
 	"path/filepath"
 	"slices"
@@ -753,4 +754,123 @@ func hooksInstalledNow(t *testing.T, ag interface {
 		t.Fatalf("AreHooksInstalled() error = %v", err)
 	}
 	return installed
+}
+
+// droidWindowsHookCommands is what InstallHooks must write on a Windows host:
+// native cmd.exe wrappers, because droid's Windows build hands every hook
+// command to `%ComSpec% /d /s /c <command>`.
+func droidWindowsHookCommands() map[string]string {
+	return map[string]string{
+		"session-start":      agentpkg.WrapWindowsProductionSilentHookCommand("entire hooks factoryai-droid session-start"),
+		"session-end":        agentpkg.WrapWindowsProductionSilentHookCommand("entire hooks factoryai-droid session-end"),
+		"user-prompt-submit": agentpkg.WrapWindowsProductionSilentHookCommand("entire hooks factoryai-droid user-prompt-submit"),
+		"pre-tool-use":       agentpkg.WrapWindowsProductionSilentHookCommand("entire hooks factoryai-droid pre-tool-use"),
+		"post-tool-use":      agentpkg.WrapWindowsProductionSilentHookCommand("entire hooks factoryai-droid post-tool-use"),
+		"pre-compact":        agentpkg.WrapWindowsProductionSilentHookCommand("entire hooks factoryai-droid pre-compact"),
+		"stop":               agentpkg.WrapWindowsProductionPlainTextWarningHookCommand("entire hooks factoryai-droid stop", agentpkg.WarningFormatSingleLine),
+	}
+}
+
+func assertDroidWindowsHooks(t *testing.T, settings FactorySettings) {
+	t.Helper()
+	want := droidWindowsHookCommands()
+	assertFactoryHookExists(t, settings.Hooks.SessionStart, "", want["session-start"], "SessionStart")
+	assertFactoryHookExists(t, settings.Hooks.SessionStart, "", want["user-prompt-submit"], "SessionStart user-prompt-submit")
+	assertFactoryHookExists(t, settings.Hooks.SessionEnd, "", want["session-end"], "SessionEnd")
+	assertFactoryHookExists(t, settings.Hooks.Stop, "", want["stop"], "Stop")
+	assertFactoryHookExists(t, settings.Hooks.UserPromptSubmit, "", want["user-prompt-submit"], "UserPromptSubmit")
+	assertFactoryHookExists(t, settings.Hooks.PreToolUse, "Task", want["pre-tool-use"], "PreToolUse[Task]")
+	assertFactoryHookExists(t, settings.Hooks.PostToolUse, "Task", want["post-tool-use"], "PostToolUse[Task]")
+	assertFactoryHookExists(t, settings.Hooks.PreCompact, "", want["pre-compact"], "PreCompact")
+}
+
+// TestInstallHooks_WindowsUsesCmdWrappersDespiteWorkingSh pins that droid picks
+// the native cmd.exe wrappers on a Windows host even when a POSIX sh is
+// runnable there. The probe deliberately reports a working sh: droid's Windows
+// build never spawns sh for a hook, so its presence must not keep the sh
+// wrapper — which cmd.exe would cut apart at the first `>`, firing no hook at
+// all. Mutates the shared probe, so no t.Parallel().
+func TestInstallHooks_WindowsUsesCmdWrappersDespiteWorkingSh(t *testing.T) {
+	t.Cleanup(agentpkg.SetWindowsHookProbeForTesting("windows", func(context.Context, string) bool {
+		return true // a working sh, which must not change the decision
+	}))
+
+	tempDir := t.TempDir()
+	// Installing hooks anchors a process-wide os.Root on the worktree root
+	// (worktreedir.OpenAt -> osroot.Shared), which is never closed. Windows
+	// cannot remove a directory while a handle to it is open, so the registry
+	// must be closed before t.TempDir's RemoveAll — t.Cleanup is LIFO, and
+	// TempDir registered its removal first, so this runs before it.
+	t.Cleanup(osroot.ResetShared)
+	t.Chdir(tempDir)
+
+	ag := &FactoryAIDroidAgent{}
+	if _, err := ag.InstallHooks(context.Background(), false); err != nil {
+		t.Fatalf("InstallHooks() error = %v", err)
+	}
+
+	assertDroidWindowsHooks(t, readFactorySettings(t, tempDir))
+}
+
+// TestInstallHooks_WindowsMigratesShWrappers pins that a repo whose hooks were
+// installed from a non-Windows host is migrated to the cmd.exe wrappers by a
+// plain (non-force) reinstall, replacing the sh entries rather than leaving
+// both — two entries would fire the same hook twice. Mutates the shared probe,
+// so no t.Parallel().
+func TestInstallHooks_WindowsMigratesShWrappers(t *testing.T) {
+	goos := "linux"
+	t.Cleanup(agentpkg.SetWindowsHookProbeForTesting(goos, func(context.Context, string) bool {
+		return true
+	}))
+
+	tempDir := t.TempDir()
+	// See TestInstallHooks_WindowsUsesCmdWrappersDespiteWorkingSh for why the
+	// root registry is reset before t.TempDir removes the directory.
+	t.Cleanup(osroot.ResetShared)
+	t.Chdir(tempDir)
+
+	ag := &FactoryAIDroidAgent{}
+	if _, err := ag.InstallHooks(context.Background(), false); err != nil {
+		t.Fatalf("first InstallHooks() error = %v", err)
+	}
+	assertFactoryHookExists(t, readFactorySettings(t, tempDir).Hooks.Stop, "",
+		agentpkg.WrapProductionPlainTextWarningHookCommand("entire hooks factoryai-droid stop", agentpkg.WarningFormatSingleLine),
+		"sh-wrapped Stop hook")
+
+	goos = "windows"
+	restore := agentpkg.SetWindowsHookProbeForTesting(goos, func(context.Context, string) bool {
+		return true
+	})
+	t.Cleanup(restore)
+
+	if _, err := ag.InstallHooks(context.Background(), false); err != nil {
+		t.Fatalf("second InstallHooks() error = %v", err)
+	}
+
+	settings := readFactorySettings(t, tempDir)
+	assertDroidWindowsHooks(t, settings)
+
+	// SessionStart legitimately carries two Entire hooks (session-start and
+	// user-prompt-submit); every other type carries exactly one.
+	for _, tc := range []struct {
+		name     string
+		matchers []FactoryHookMatcher
+		want     int
+	}{
+		{"SessionStart", settings.Hooks.SessionStart, 2},
+		{"SessionEnd", settings.Hooks.SessionEnd, 1},
+		{"Stop", settings.Hooks.Stop, 1},
+		{"UserPromptSubmit", settings.Hooks.UserPromptSubmit, 1},
+		{"PreToolUse", settings.Hooks.PreToolUse, 1},
+		{"PostToolUse", settings.Hooks.PostToolUse, 1},
+		{"PreCompact", settings.Hooks.PreCompact, 1},
+	} {
+		got := 0
+		for _, m := range tc.matchers {
+			got += len(m.Hooks)
+		}
+		if got != tc.want {
+			t.Errorf("%s hook count = %d, want %d (stale sh entry left behind?)", tc.name, got, tc.want)
+		}
+	}
 }

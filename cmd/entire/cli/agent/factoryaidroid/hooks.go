@@ -123,14 +123,26 @@ func (f *FactoryAIDroidAgent) InstallHooks(ctx context.Context, force bool) (int
 		preCompact = removeEntireHooks(preCompact)
 	}
 
-	// Define hook commands
-	sessionStartCmd := agent.WrapProductionSilentHookCommand("entire hooks factoryai-droid session-start")
-	sessionEndCmd := agent.WrapProductionSilentHookCommand("entire hooks factoryai-droid session-end")
-	stopCmd := agent.WrapProductionPlainTextWarningHookCommand("entire hooks factoryai-droid stop", agent.WarningFormatSingleLine)
-	userPromptSubmitCmd := agent.WrapProductionSilentHookCommand("entire hooks factoryai-droid user-prompt-submit")
-	preTaskCmd := agent.WrapProductionSilentHookCommand("entire hooks factoryai-droid pre-tool-use")
-	postTaskCmd := agent.WrapProductionSilentHookCommand("entire hooks factoryai-droid post-tool-use")
-	preCompactCmd := agent.WrapProductionSilentHookCommand("entire hooks factoryai-droid pre-compact")
+	// Define hook commands.
+	//
+	// Droid's Windows build runs every hook command as an argument of cmd.exe,
+	// while its macOS/Linux build runs the same string under sh. cmd.exe reads
+	// the sh wrapper's `>` and `&` as its own redirections and separators, so
+	// the command is cut apart and no `entire hooks` process is ever created —
+	// the session never starts, so a commit produces no checkpoint and nothing
+	// says why.
+	//
+	// Unlike Codex and Cursor this is NOT gated on agent.UseWindowsProductionHooks:
+	// droid never hands a hook to sh on Windows, so whether a working sh exists
+	// there changes nothing. See agent.HookHostIsWindows.
+	useWindowsHooks := agent.HookHostIsWindows()
+	sessionStartCmd := agent.WrapProductionSilentHookCommandForOS("entire hooks factoryai-droid session-start", useWindowsHooks)
+	sessionEndCmd := agent.WrapProductionSilentHookCommandForOS("entire hooks factoryai-droid session-end", useWindowsHooks)
+	stopCmd := agent.WrapProductionPlainTextWarningHookCommandForOS("entire hooks factoryai-droid stop", agent.WarningFormatSingleLine, useWindowsHooks)
+	userPromptSubmitCmd := agent.WrapProductionSilentHookCommandForOS("entire hooks factoryai-droid user-prompt-submit", useWindowsHooks)
+	preTaskCmd := agent.WrapProductionSilentHookCommandForOS("entire hooks factoryai-droid pre-tool-use", useWindowsHooks)
+	postTaskCmd := agent.WrapProductionSilentHookCommandForOS("entire hooks factoryai-droid post-tool-use", useWindowsHooks)
+	preCompactCmd := agent.WrapProductionSilentHookCommandForOS("entire hooks factoryai-droid pre-compact", useWindowsHooks)
 
 	// Drop Entire hooks left by older versions before adding the current ones,
 	// so a stale command (e.g. the removed local-dev launcher) does not survive

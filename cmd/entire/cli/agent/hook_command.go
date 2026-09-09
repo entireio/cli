@@ -375,6 +375,26 @@ func defaultSHHookWrapperWorks(ctx context.Context, command string) bool {
 	return cmd.Run() == nil
 }
 
+// HookHostIsWindows reports whether hook commands will run on a Windows host,
+// without asking whether a POSIX sh is reachable there.
+//
+// It is the predicate for an agent that hands every hook command to cmd.exe on
+// Windows whatever else is installed. Factory Droid is one: its Windows build
+// runs each hook command as an argument of cmd.exe, while its macOS/Linux
+// build runs the same string under sh. For such an agent
+// UseWindowsProductionHooks answers the wrong question — its probe only
+// establishes that `sh -c 'exit 0'` runs, and that command carries no cmd.exe
+// metacharacters, so a host with Git Bash reports success while the real sh
+// wrapper, which is full of `>` and `&`, is still cut apart by cmd.exe before
+// any sh sees it.
+//
+// Agents that resolve a shell themselves (Codex, Cursor) keep
+// UseWindowsProductionHooks: for them a working sh really does mean the sh
+// wrapper runs.
+func HookHostIsWindows() bool {
+	return hookCommandOS == hookWrapperOSWindows
+}
+
 // WrapProductionSilentHookCommandForOS picks the sh-based or native Windows
 // silent wrapper based on useWindows (typically from UseWindowsProductionHooks).
 func WrapProductionSilentHookCommandForOS(command string, useWindows bool) string {
@@ -393,8 +413,18 @@ func WrapProductionJSONWarningHookCommandForOS(command string, format WarningFor
 	return WrapProductionJSONWarningHookCommand(command, format)
 }
 
+// WrapProductionPlainTextWarningHookCommandForOS picks the sh-based or native
+// Windows plain-text-warning wrapper based on useWindows.
+func WrapProductionPlainTextWarningHookCommandForOS(command string, format WarningFormat, useWindows bool) string {
+	if useWindows {
+		return WrapWindowsProductionPlainTextWarningHookCommand(command, format)
+	}
+	return WrapProductionPlainTextWarningHookCommand(command, format)
+}
+
 // SetWindowsHookProbeForTesting overrides the OS and sh-wrapper probe used by
-// UseWindowsProductionHooks and returns a restore function. Test-only.
+// UseWindowsProductionHooks and HookHostIsWindows, and returns a restore
+// function. Test-only.
 func SetWindowsHookProbeForTesting(goos string, works func(ctx context.Context, command string) bool) func() {
 	oldOS, oldProbe := hookCommandOS, shHookWrapperWorks
 	hookCommandOS = goos
