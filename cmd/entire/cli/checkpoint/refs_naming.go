@@ -58,3 +58,40 @@ func ParseRef(name plumbing.ReferenceName) (id.CheckpointID, bool) {
 	}
 	return cid, true
 }
+
+// ParseLsRemoteRefs extracts the checkpoint refs from `git ls-remote` output,
+// keyed by name with the advertised hash. Each line is "<hash>\t<refname>";
+// only refs under CheckpointRefPrefix are kept, so HEAD, branches and tags drop
+// out here. Checkpoint refs point at commits, so no peeled (`^{}`) lines appear
+// for them; an anomalous refs/entire/checkpoints/...^{} name is left to ParseRef
+// downstream (the "{}" shard never matches ShardFor). A line whose first field
+// is not a well-formed object hash is skipped.
+func ParseLsRemoteRefs(output []byte) map[plumbing.ReferenceName]plumbing.Hash {
+	refs := make(map[plumbing.ReferenceName]plumbing.Hash)
+	for _, line := range strings.Split(string(output), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 2 || !strings.HasPrefix(fields[1], CheckpointRefPrefix) {
+			continue
+		}
+		if !plumbing.IsHash(fields[0]) {
+			continue
+		}
+		refs[plumbing.ReferenceName(fields[1])] = plumbing.NewHash(fields[0])
+	}
+	return refs
+}
+
+// ParseCheckpointRefNames extracts the checkpoint ref names from `git
+// ls-remote` output, in the order listed. Same filter as ParseLsRemoteRefs
+// minus the hash; the store re-validates each name via ParseRef.
+func ParseCheckpointRefNames(output []byte) []plumbing.ReferenceName {
+	var names []plumbing.ReferenceName
+	for _, line := range strings.Split(string(output), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 2 || !strings.HasPrefix(fields[1], CheckpointRefPrefix) {
+			continue
+		}
+		names = append(names, plumbing.ReferenceName(fields[1]))
+	}
+	return names
+}

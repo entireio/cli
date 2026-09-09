@@ -55,16 +55,22 @@ func partitionLocalRefs(repo *git.Repository, refs []plumbing.ReferenceName) (ex
 // remote history with no signal. On rejection the whole push errors; the caller
 // retries the rejected refs individually with fetch+replay recovery
 // (pushCheckpointRefWithRecovery).
+//
+// "Single" is per chunk of refChunkSize: a refspec is ~110 bytes and a
+// requeued backlog of a few thousand refs overruns a single argv (256 KiB on
+// macOS), so the batch is split into consecutive pushes. A rejected chunk
+// errors out the same way an unchunked push did — the caller's per-ref
+// recovery loop handles what remains.
 func batchPushRefs(ctx context.Context, target string, refs []plumbing.ReferenceName) error {
-	if len(refs) == 0 {
-		return nil
-	}
-	refSpecs := make([]string, 0, len(refs))
-	for _, ref := range refs {
-		refSpecs = append(refSpecs, ref.String()+":"+ref.String())
-	}
-	if _, err := remote.PushWithOptions(ctx, remote.PushOptions{Remote: target, RefSpecs: refSpecs}); err != nil {
-		return fmt.Errorf("push %d checkpoint refs: %w", len(refs), err)
+	for start := 0; start < len(refs); start += refChunkSize {
+		chunk := refs[start:min(start+refChunkSize, len(refs))]
+		refSpecs := make([]string, 0, len(chunk))
+		for _, ref := range chunk {
+			refSpecs = append(refSpecs, ref.String()+":"+ref.String())
+		}
+		if _, err := remote.PushWithOptions(ctx, remote.PushOptions{Remote: target, RefSpecs: refSpecs}); err != nil {
+			return fmt.Errorf("push %d checkpoint refs: %w", len(chunk), err)
+		}
 	}
 	return nil
 }
