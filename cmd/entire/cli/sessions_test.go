@@ -1367,7 +1367,7 @@ func TestTokensCmd_AgentBriefPrioritizesNextAction(t *testing.T) {
 	checks := []string{
 		"Session token brief",
 		"Session: test-tokens-brief",
-		"Token usage: 6213.6k total; 97.4% cache/context replay; 70 API calls.",
+		"Token usage: 6.2M total; 97.4% cache/context replay; 70 API calls.",
 		"Next best action:",
 		"Use at most 3 batched reads before answering.",
 		"Continue only if a named file or test can change the verdict; otherwise answer now.",
@@ -1790,8 +1790,8 @@ func TestTokensCmd_PrioritizesContextReplayHotspot(t *testing.T) {
 		"Large context was replayed across 70 API calls",
 		"Compact or restart after summarizing this investigation",
 		"Token usage",
-		"Total:  6213.6k tokens",
-		"Cache read: 6052.4k",
+		"Total:  6.2M tokens",
+		"Cache read: 6.1M",
 	}
 	for _, check := range checks {
 		if !strings.Contains(out, check) {
@@ -1988,8 +1988,8 @@ func TestCheckpointTokensCmd_TextOutputWithRealCheckpointShape(t *testing.T) {
 		"Cache/context replay is 97.4% of token volume",
 		"Large context was replayed across 70 API calls",
 		"Token usage",
-		"Total:  6213.6k tokens",
-		"Cache read: 6052.4k",
+		"Total:  6.2M tokens",
+		"Cache read: 6.1M",
 	}
 	for _, check := range checks {
 		if !strings.Contains(out, check) {
@@ -2044,7 +2044,7 @@ func TestCheckpointTokensCmd_AgentBriefGivesOperationalBudget(t *testing.T) {
 	checks := []string{
 		"Checkpoint token brief",
 		"Checkpoint: b1efbeefcafe",
-		"Token usage: 6213.6k total; 97.4% cache/context replay; 70 API calls.",
+		"Token usage: 6.2M total; 97.4% cache/context replay; 70 API calls.",
 		"Next best action:",
 		"Use at most 3 batched reads before answering.",
 		"Continue only if a named file or test can change the verdict; otherwise answer now.",
@@ -2461,7 +2461,7 @@ func TestCheckpointTokensCmd_TextOutputWithComparison(t *testing.T) {
 		"Comparison",
 		"Baseline: aaa111bbb222",
 		"Caveat: Total tokens include cache/context replay; use the cache/context replay delta below before treating total direction as work saved or added.",
-		"Total tokens: down 50.5% (1010k -> 500k)",
+		"Total tokens: down 50.5% (1M -> 500k)",
 		"Input: down 25% (200k -> 150k)",
 		"Cache/context replay: down 60% (750k -> 300k)",
 		"Cache write: down 50% (50k -> 25k)",

@@ -95,16 +95,19 @@ func getTerminalWidth(w io.Writer) int {
 }
 
 // formatTokenCount formats a token count for display.
-// 0 → "0", 500 → "500", 1200 → "1.2k", 14300 → "14.3k"
+// 0 → "0", 500 → "500", 1200 → "1.2k", 14300 → "14.3k", 18400000 → "18.4M"
 func formatTokenCount(n int) string {
 	if n < 1000 {
 		return strconv.Itoa(n)
 	}
-	f := float64(n) / 1000.0
-	s := fmt.Sprintf("%.1f", f)
+	unit, divisor := "k", 1000.0
+	if n >= 1_000_000 {
+		unit, divisor = "M", 1_000_000.0
+	}
+	s := fmt.Sprintf("%.1f", float64(n)/divisor)
 	// Remove trailing ".0" for clean display (e.g., 1000 → "1k" not "1.0k")
 	s = strings.TrimSuffix(s, ".0")
-	return s + "k"
+	return s + unit
 }
 
 // totalTokens recursively sums all token fields including subagent tokens.
