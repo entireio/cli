@@ -231,7 +231,7 @@ func fetchCheckpointRefFrom(
 	s, loadErr := settings.Load(ctx)
 	if loadErr != nil || s.HasCheckpointRemoteKey() {
 		if loadErr == nil && s.GetCheckpointRemote() != nil && electionErr == nil && len(readRemotes) > 0 && readRemotes[0] != "" {
-			fetchCtx, cancel := context.WithTimeout(ctx, readFetchTimeout)
+			fetchCtx, cancel := context.WithTimeout(ctx, fetchTimeout)
 			defer cancel()
 			target, authoritative := checkpointFetchTargetFrom(fetchCtx, readRemotes[0])
 			return probeAndFetchCheckpointRef(fetchCtx, ref, target, authoritative)

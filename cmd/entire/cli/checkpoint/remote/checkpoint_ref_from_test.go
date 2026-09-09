@@ -315,3 +315,32 @@ func TestFetchCheckpointRefFrom_ConfiguredCancelledContextIsFailure(t *testing.T
 	require.Error(t, err)
 	require.NotErrorIs(t, err, plumbing.ErrReferenceNotFound)
 }
+
+func TestFetchCheckpointRefFrom_ConfiguredHonorsFetchTimeout(t *testing.T) {
+	_, ref, _, _ := dedicatedCandidatesFixture(t, true, false)
+	started := make(chan struct{}, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, request *http.Request) {
+		select {
+		case started <- struct{}{}:
+		default:
+		}
+		<-request.Context().Done()
+	}))
+	t.Cleanup(server.Close)
+	t.Setenv("CHECKPOINT_TEST_UPSTREAM", server.URL+"/repo.git")
+	t.Setenv("GIT_ALLOW_PROTOCOL", "file:http") // Only the mapped loopback fixture uses HTTP.
+
+	// The parent bounds a regression without waiting for the two-minute default.
+	// A correct per-fetch timeout returns while this parent is still live.
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	err := fetchCheckpointRefFrom(ctx, ref, []string{"fork", "origin"}, time.Second, ReadChainBudget, nil)
+	require.Error(t, err)
+	require.NotErrorIs(t, err, plumbing.ErrReferenceNotFound)
+	require.NoError(t, ctx.Err(), "configured fetch must honor its shorter per-fetch timeout")
+	select {
+	case <-started:
+	default:
+		t.Fatal("fetch must reach the stalled loopback remote before timing out")
+	}
+}
