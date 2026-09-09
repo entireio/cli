@@ -2,9 +2,13 @@ package remote
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"os/exec"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -167,4 +171,147 @@ func TestFetchCheckpointRefFrom_DedicatedCheckpointRemoteBypassesCandidates(t *t
 	require.Error(t, err)
 	require.NotErrorIs(t, err, plumbing.ErrReferenceNotFound,
 		"a checkpoint_remote key must keep dedicated-store semantics even when malformed")
+}
+
+// Forge identities must survive get-url so ownership checks see the real
+// topology. Only transport arguments are mapped to isolated bare repositories.
+func dedicatedCandidatesFixture(t *testing.T, refOnFork, refOnOrigin bool) (string, plumbing.ReferenceName, string, string) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("transport mapping uses a bash git wrapper")
+	}
+	workDir, ref, forkHash, originHash := candidatesFixture(t, refOnFork, refOnOrigin)
+	realGit, err := exec.LookPath("git")
+	require.NoError(t, err)
+	for _, remoteName := range []string{"upstream", "origin"} {
+		out, err := exec.CommandContext(t.Context(), realGit, "remote", "get-url", remoteName).Output()
+		require.NoError(t, err)
+		t.Setenv("CHECKPOINT_TEST_"+strings.ToUpper(remoteName), strings.TrimSpace(string(out)))
+	}
+	testutil.RunGit(t, workDir, "remote", "rename", "upstream", "fork")
+	testutil.RunGit(t, workDir, "remote", "set-url", "fork", "https://github.com/contributor/app.git")
+	testutil.RunGit(t, workDir, "remote", "set-url", "origin", "https://github.com/acme/app.git")
+	testutil.WriteFile(t, workDir, ".entire/settings.json", `{"enabled":true,"strategy_options":{"checkpoint_remote":{"provider":"github","repo":"acme/checkpoints"},"checkpoint_push_remote":"fork"}}`)
+	t.Setenv("CHECKPOINT_TEST_GIT", realGit)
+	t.Setenv("CHECKPOINT_TEST_DEDICATED", filepath.Join(workDir, "missing-dedicated"))
+	t.Setenv("GIT_ALLOW_PROTOCOL", "file")
+	t.Setenv(CheckpointTokenEnvVar, "")
+	binDir := t.TempDir()
+	testutil.WriteFile(t, binDir, "git", `#!/bin/bash
+args=("$@")
+for arg in "$@"; do
+  if [[ "$arg" == ls-remote || "$arg" == fetch ]]; then
+    for i in "${!args[@]}"; do
+      case "${args[$i]}" in
+        https://github.com/contributor/app.git) args[$i]="$CHECKPOINT_TEST_UPSTREAM" ;;
+        https://github.com/acme/app.git) args[$i]="$CHECKPOINT_TEST_ORIGIN" ;;
+        https://github.com/acme/checkpoints.git) args[$i]="$CHECKPOINT_TEST_DEDICATED" ;;
+      esac
+    done
+    break
+  fi
+done
+exec "$CHECKPOINT_TEST_GIT" "${args[@]}"
+`)
+	require.NoError(t, os.Chmod(filepath.Join(binDir, "git"), 0o755))
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	return workDir, ref, forkHash, originHash
+}
+
+func TestFetchCheckpointRefFrom_InheritedDedicatedUsesLeadCandidate(t *testing.T) {
+	workDir, ref, forkHash, _ := dedicatedCandidatesFixture(t, true, false)
+	require.NoError(t, FetchCheckpointRefFrom(t.Context(), ref, []string{"fork", "origin"}, nil))
+	require.Equal(t, forkHash, localRefHash(t, workDir, ref))
+}
+
+func TestFetchCheckpointRefFrom_AcceptedDedicatedRemainsAuthoritative(t *testing.T) {
+	for _, localOverride := range []bool{false, true} {
+		name := "same owner"
+		if localOverride {
+			name = "explicit local override"
+		}
+		t.Run(name, func(t *testing.T) {
+			workDir, ref, forkHash, dedicatedHash := dedicatedCandidatesFixture(t, true, true)
+			t.Setenv("CHECKPOINT_TEST_DEDICATED", os.Getenv("CHECKPOINT_TEST_ORIGIN"))
+			if localOverride {
+				testutil.WriteFile(t, workDir, ".entire/settings.local.json", `{"strategy_options":{"checkpoint_remote":{"provider":"github","repo":"acme/checkpoints"}}}`)
+			} else {
+				testutil.RunGit(t, workDir, "remote", "set-url", "fork", "https://github.com/acme/fork.git")
+			}
+			require.NoError(t, FetchCheckpointRefFrom(t.Context(), ref, []string{"fork", "origin"}, nil))
+			require.Equal(t, dedicatedHash, localRefHash(t, workDir, ref))
+			require.NotEqual(t, forkHash, localRefHash(t, workDir, ref))
+
+			missing := plumbing.ReferenceName("refs/entire/checkpoints/00/missing")
+			require.ErrorIs(t, FetchCheckpointRefFrom(t.Context(), missing, []string{"fork", "origin"}, nil), plumbing.ErrReferenceNotFound)
+		})
+	}
+}
+
+func TestFetchCheckpointRefFrom_InheritedDedicatedDoesNotRetry(t *testing.T) {
+	for _, transportFailure := range []bool{false, true} {
+		name := "missing ref is not authoritative absence"
+		if transportFailure {
+			name = "selected transport failure"
+		}
+		t.Run(name, func(t *testing.T) {
+			workDir, ref, _, _ := dedicatedCandidatesFixture(t, false, true)
+			if transportFailure {
+				t.Setenv("CHECKPOINT_TEST_UPSTREAM", filepath.Join(workDir, "unreachable-fork"))
+			}
+			err := FetchCheckpointRefFrom(t.Context(), ref, []string{"fork", "origin"}, nil)
+			require.Error(t, err)
+			require.NotErrorIs(t, err, plumbing.ErrReferenceNotFound)
+			_, err = exec.CommandContext(t.Context(), "git", "rev-parse", "--verify", ref.String()).Output()
+			require.Error(t, err, "origin must not install a ref after the selected fallback fails")
+		})
+	}
+}
+
+func TestFetchCheckpointRefFrom_DedicatedWithoutElectedLeadKeepsLegacyTarget(t *testing.T) {
+	for _, tt := range []struct {
+		name       string
+		candidates []string
+		election   error
+	}{
+		{name: "failed election", candidates: []string{"fork", "origin"}, election: errors.New("election failed")},
+		{name: "empty candidates"},
+		{name: "empty first candidate", candidates: []string{"", "fork", "origin"}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			workDir, ref, _, dedicatedHash := dedicatedCandidatesFixture(t, true, true)
+			t.Setenv("CHECKPOINT_TEST_DEDICATED", os.Getenv("CHECKPOINT_TEST_ORIGIN"))
+			require.NoError(t, FetchCheckpointRefFrom(t.Context(), ref, tt.candidates, tt.election))
+			require.Equal(t, dedicatedHash, localRefHash(t, workDir, ref))
+		})
+	}
+}
+
+func TestFetchCheckpointRefFrom_InvalidSettingsKeepsLegacyTarget(t *testing.T) {
+	for _, state := range []string{"malformed", "unreadable", "invalid checkpoint remote"} {
+		t.Run(state, func(t *testing.T) {
+			workDir, ref, _, originHash := dedicatedCandidatesFixture(t, true, true)
+			switch state {
+			case "malformed":
+				testutil.WriteFile(t, workDir, ".entire/settings.json", "{")
+			case "unreadable":
+				settingsPath := filepath.Join(workDir, ".entire/settings.json")
+				require.NoError(t, os.Remove(settingsPath))
+				require.NoError(t, os.Mkdir(settingsPath, 0o755))
+			case "invalid checkpoint remote":
+				testutil.WriteFile(t, workDir, ".entire/settings.json", `{"strategy_options":{"checkpoint_remote":42}}`)
+			}
+			require.NoError(t, FetchCheckpointRefFrom(t.Context(), ref, []string{"fork", "origin"}, nil))
+			require.Equal(t, originHash, localRefHash(t, workDir, ref))
+		})
+	}
+}
+
+func TestFetchCheckpointRefFrom_ConfiguredCancelledContextIsFailure(t *testing.T) {
+	_, ref, _, _ := dedicatedCandidatesFixture(t, true, true)
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	err := FetchCheckpointRefFrom(ctx, ref, []string{"fork", "origin"}, nil)
+	require.Error(t, err)
+	require.NotErrorIs(t, err, plumbing.ErrReferenceNotFound)
 }

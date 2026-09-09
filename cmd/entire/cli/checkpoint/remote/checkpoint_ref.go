@@ -205,10 +205,10 @@ func FetchCheckpointRef(ctx context.Context, ref plumbing.ReferenceName) error {
 // plumbing.ErrReferenceNotFound. A provably remoteless repository (below) also
 // wraps plumbing.ErrReferenceNotFound.
 //
-// A configured checkpoint_remote is a dedicated store with a single
-// authoritative target, so the chain does not apply and the legacy
-// single-target behavior is preserved; the same holds when settings cannot be
-// read (a configured checkpoint remote cannot be ruled out).
+// A configured checkpoint_remote keeps a single target, resolved with the
+// elected lead candidate so inherited settings use that candidate's fallback.
+// The legacy single-target behavior is preserved when the election or settings
+// cannot be read, or no valid dedicated configuration or lead is available.
 //
 // An empty chain classifies the ref as absent only on positive evidence on
 // every axis: a live caller context, readable settings without a
@@ -230,6 +230,12 @@ func fetchCheckpointRefFrom(
 ) error {
 	s, loadErr := settings.Load(ctx)
 	if loadErr != nil || s.HasCheckpointRemoteKey() {
+		if loadErr == nil && s.GetCheckpointRemote() != nil && electionErr == nil && len(readRemotes) > 0 && readRemotes[0] != "" {
+			fetchCtx, cancel := context.WithTimeout(ctx, readFetchTimeout)
+			defer cancel()
+			target, authoritative := checkpointFetchTargetFrom(fetchCtx, readRemotes[0])
+			return probeAndFetchCheckpointRef(fetchCtx, ref, target, authoritative)
+		}
 		return FetchCheckpointRef(ctx, ref)
 	}
 
