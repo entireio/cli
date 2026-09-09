@@ -42,6 +42,10 @@ type pushSettings struct {
 	checkpointURL string
 	// pushDisabled is true if push_sessions is explicitly set to false.
 	pushDisabled bool
+	// entireTier records that the Entire tier elected the destination: set
+	// whenever the elected sync remote is entire://, whether or not this push
+	// had to be redirected to reach it.
+	entireTier bool
 	// primaryIsRefs records whether the git-refs backend is the configured
 	// primary, resolved once here so the pre-push path does not re-read the
 	// checkpoints config (LoadCheckpointsConfig is uncached: two whole-file
@@ -73,6 +77,15 @@ func (ps *pushSettings) pushTarget() string {
 // the elected Entire remote rather than the remote the user pushed.
 func (ps *pushSettings) redirectedToSyncRemote() bool {
 	return ps.syncRemote != ""
+}
+
+// targetsEntireRemote reports whether checkpoint data for this push lands on
+// the elected Entire remote — redirected there, or pushed to it directly.
+// Decisions that hinge on "is the destination Entire's own store" (the
+// empty-remote defer) key on this, not on redirectedToSyncRemote, so a direct
+// `git push entire` gets the same treatment as a redirected `git push origin`.
+func (ps *pushSettings) targetsEntireRemote() bool {
+	return ps.entireTier
 }
 
 // hasCheckpointURL returns true if a dedicated checkpoint URL is configured.

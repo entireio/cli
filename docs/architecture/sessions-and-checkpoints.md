@@ -466,9 +466,15 @@ it yet.
 The Entire tier is the second exemption: when the elected remote is an
 `entire://` remote, every push — to any remote or raw URL — carries checkpoints
 to it by remote name (`pushSettings.syncRemote`), the gate and capture are
-skipped, and the git-branch empty-remote defer is skipped. The first delivery
-prints a one-line stderr notice, latched by `entire-checkpoint-sync-entire.json`
-in the git common dir.
+skipped, and the git-branch empty-remote defer is skipped. The remote the tier
+displaced (origin, else the sole, else the first non-Entire remote) is appended
+to the read chain so checkpoints pushed there earlier stay readable. Under a
+redirected push the git-branch OPF rewrite is bounded by that remote's v1 tip
+when the Entire remote has none, and an OPF failure withholds the checkpoints
+with a stderr line rather than aborting the user's push. The first delivery
+prints a two-line stderr notice (the Entire remote, and the displaced remote
+that may still hold earlier checkpoints), latched by
+`entire-checkpoint-sync-entire.json` in the git common dir.
 
 A gated push is not fully silent: when checkpoints are waiting for the
 elected remote, the hook prints a two-line stderr hint naming the elected

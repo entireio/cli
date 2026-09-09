@@ -1058,3 +1058,37 @@ func TestRewriteQueuedCheckpointRefsWithOPF_AncestryOverBootstrapLimit(t *testin
 	require.Equal(t, 1, tooLarge.Limit)
 	require.Equal(t, before, refHashes(t, repo, refs), "an over-limit ancestry must not move any ref")
 }
+
+// Under the Entire redirect the target has no v1 yet. Bounding by the remote
+// that held v1 until the tier displaced it keeps already-published commits out
+// of the "unpushed" set: no bootstrap cap, no re-rewrite of history the other
+// remote already has.
+func TestRewriteUnpushedV1WithOPFBounded_FallbackBoundSkipsPublished(t *testing.T) {
+	configureFakeOPF(t, &fakeOPFForRewrite{})
+	t.Setenv("ENTIRE_OPF_BOOTSTRAP_LIMIT", "2")
+
+	localDir := t.TempDir()
+	testutil.InitRepo(t, localDir)
+	repo, err := git.PlainOpen(localDir)
+	require.NoError(t, err)
+	tip := buildOrphanChain(t, repo, 3)
+
+	legacyDir := t.TempDir()
+	testutil.InitRepo(t, legacyDir)
+	entireDir := t.TempDir()
+	testutil.InitRepo(t, entireDir)
+	testutil.AddRemote(t, localDir, "legacy", legacyDir)
+	testutil.AddRemote(t, localDir, "entire", entireDir)
+	testutil.RunGit(t, localDir, "push", "-q", "legacy", "refs/heads/"+paths.MetadataBranchName)
+
+	// Bounded by the empty Entire remote alone, the whole chain is a bootstrap
+	// above the cap: this is the abort the redirect must not inherit.
+	_, err = RewriteUnpushedV1WithOPF(context.Background(), repo, "entire")
+	var tooLarge *BootstrapTooLargeError
+	require.ErrorAs(t, err, &tooLarge)
+
+	// With the displaced remote as the fallback bound nothing is unpushed.
+	got, err := rewriteUnpushedV1WithOPFBounded(context.Background(), repo, "entire", "legacy")
+	require.NoError(t, err)
+	assert.Equal(t, tip, got, "already-published history is left alone")
+}

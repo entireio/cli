@@ -430,6 +430,11 @@ func formatUnpushedCheckpointsLine(info checkpointSyncInfo) string {
 	if info.Source == checkpointSyncSourceDedicated {
 		return fmt.Sprintf("%d %s not yet pushed", info.Unpushed, noun)
 	}
+	if info.Source == string(strategy.SyncRemoteSourceEntire) {
+		// Under the Entire tier every push delivers, whichever remote it names.
+		return fmt.Sprintf("%d %s not yet on %s — %s with your next git push, to any remote",
+			info.Unpushed, noun, info.Remote, pronoun)
+	}
 	return fmt.Sprintf("%d %s not yet on %s — %s with your next 'git push %s'",
 		info.Unpushed, noun, info.Remote, pronoun, info.Remote)
 }

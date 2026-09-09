@@ -3,6 +3,7 @@ package strategy
 import (
 	"context"
 	"log/slog"
+	"slices"
 
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 )
@@ -10,7 +11,9 @@ import (
 // CheckpointReadRemotes returns the ordered, deduped remotes that checkpoint
 // READS consult: the elected sync remote first, then "origin" as the legacy
 // tier (pre-single-remote-sync checkpoints live there, and a fresh clone
-// may lack the local settings that elected a non-origin remote).
+// may lack the local settings that elected a non-origin remote), then — under
+// the Entire tier — the non-Entire remote that tier displaced, so checkpoints
+// pushed there before the Entire remote existed stay readable.
 //
 // Unlike the write-side election, this fails OPEN: on an election error
 // (misconfigured checkpoint_push_remote, unreadable settings) the chain is
@@ -69,6 +72,16 @@ func CheckpointReadRemotesWithElection(ctx context.Context) CheckpointReadResolu
 	}
 	if isConfiguredRemote(ctx, "origin") && (len(res.Candidates) == 0 || res.Candidates[0] != "origin") {
 		res.Candidates = append(res.Candidates, "origin")
+	}
+	// The Entire tier displaces whatever the default tiers would have elected —
+	// origin, else the sole remote, else the first. Origin is already a legacy
+	// tier above; a displaced "gh" or "upstream" would otherwise drop out of the
+	// read chain entirely and the checkpoints already pushed there would stop
+	// being found, with nothing deleted and nothing said. Keep it readable.
+	if err == nil && elected.Source == SyncRemoteSourceEntire {
+		if legacy := LegacyCheckpointRemote(ctx); legacy != "" && !slices.Contains(res.Candidates, legacy) {
+			res.Candidates = append(res.Candidates, legacy)
+		}
 	}
 	return res
 }

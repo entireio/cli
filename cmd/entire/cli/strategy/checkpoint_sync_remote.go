@@ -262,11 +262,19 @@ func waitingCheckpointCount(ctx context.Context, syncRemote string) (count int, 
 
 // configuredRemote is one remote's url/pushurl entries from .git/config, in
 // config order. URLs are the RAW configured values: `url.<base>.insteadOf`
-// rewrites are deliberately not applied, because the question these answer is
-// "what did the user configure", which is also what a transport helper is
-// dispatched on before any rewrite. (`git remote get-url` expands insteadOf and
-// so answers a different question; isConfiguredRemote uses that for
-// membership, and the two must stay separate.)
+// rewrites are deliberately not applied. Git applies those rewrites BEFORE
+// picking a transport, so a remote whose raw url is entire:// but is rewritten
+// to another scheme pushes to the rewritten target and the entire helper is
+// never invoked; classifying on the raw value therefore answers "which remote
+// did the user declare as their Entire remote", not "where do bytes go". That
+// is the intended question: insteadOf is user-local config the user wrote
+// themselves, never repo-supplied, so a declared Entire remote that the same
+// user redirects elsewhere is their own choice — and it is also what lets tests
+// stand in a file:// bare for an Entire remote. The removal engine reads the
+// EXPANDED push URL instead because it addresses a concrete destination for a
+// delete; the two halves ask different questions on purpose. (`git remote
+// get-url` expands insteadOf; isConfiguredRemote uses it for membership, and
+// the two must stay separate.)
 type configuredRemote struct {
 	Name string
 	// URLs holds every remote.<name>.url value; a remote with none is not
@@ -321,10 +329,10 @@ func entireRemotesOf(remotes []configuredRemote) []string {
 	return names
 }
 
-// EntireRemotes lists the configured remotes whose every URL is entire://, in
+// entireRemotes lists the configured remotes whose every URL is entire://, in
 // .git/config order. Read from raw config (insteadOf not expanded); see
 // configuredRemote. Empty when there are none or the read failed.
-func EntireRemotes(ctx context.Context) []string {
+func entireRemotes(ctx context.Context) []string {
 	return configuredEntireRemotes(ctx)
 }
 

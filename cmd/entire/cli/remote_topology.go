@@ -174,15 +174,20 @@ func (t remoteTopology) describeCheckpointDestination(w io.Writer, header string
 		fmt.Fprintf(w, "  Remote %q pushes to %d URLs:\n", d.name, len(d.pushURLs))
 		for i, u := range d.pushURLs {
 			marker := "  "
-			if i == 0 && t.primaryIsRefs {
+			if i == 0 && t.primaryIsRefs && t.entireElected == "" {
 				marker = "→ "
 			}
 			fmt.Fprintf(w, "    %s%s\n", marker, gitremote.RedactURLOrPath(u))
 		}
-		if t.primaryIsRefs {
+		switch {
+		case t.entireElected != "":
+			// The pre-push hook redirects checkpoints to the Entire remote, so
+			// this remote's fan-out carries code only.
+			fmt.Fprintln(w, "    Your code goes to every URL; checkpoints do not fan out with it.")
+		case t.primaryIsRefs:
 			fmt.Fprintln(w, "    Checkpoints go to the first URL only; the others receive your code but")
 			fmt.Fprintln(w, "    no session history. Clone that first repository to resume elsewhere.")
-		} else {
+		default:
 			fmt.Fprintln(w, "    Checkpoints are pushed to every URL. If one rejects them or is")
 			fmt.Fprintln(w, "    unreachable it is reported and left behind, and only the fetch URL is")
 			fmt.Fprintln(w, "    ever reconciled — so those URLs can fall permanently out of date.")

@@ -79,7 +79,10 @@ func TestDescribeCheckpointDestination_FanOutStillReported(t *testing.T) {
 	got := buf.String()
 	assert.Contains(t, got, "Header\n")
 	assert.Contains(t, got, `Remote "origin" pushes to 2 URLs:`)
-	assert.Contains(t, got, "→ https://github.com/o/r")
+	assert.Contains(t, got, "https://github.com/o/r")
+	assert.NotContains(t, got, "→ ", "no first-URL marker: checkpoints do not go to any of these URLs")
+	assert.Contains(t, got, "Your code goes to every URL; checkpoints do not fan out with it.")
+	assert.NotContains(t, got, "Checkpoints go to the first URL only", "that is the non-Entire story")
 	assert.Contains(t, got, "https://mirror.example/o/r", "credentials are redacted")
 	assert.NotContains(t, got, "user:pw")
 	assert.Contains(t, got, "  ✓ Checkpoints sync to entire (your Entire remote).\n")
@@ -92,6 +95,8 @@ func TestDescribeCheckpointDestination_FanOutStillReported(t *testing.T) {
 	topo.describeCheckpointDestination(&buf, "Header")
 	assert.Contains(t, buf.String(), "This repo has 2 remotes (entire, origin).")
 	assert.Contains(t, buf.String(), "set strategy_options.checkpoint_push_remote")
+	assert.Contains(t, buf.String(), "→ https://github.com/o/r")
+	assert.Contains(t, buf.String(), "Checkpoints go to the first URL only")
 }
 
 func TestRemoteTopology_PinnedRemoteDoesNotCount(t *testing.T) {

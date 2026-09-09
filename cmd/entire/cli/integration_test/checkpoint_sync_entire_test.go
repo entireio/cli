@@ -90,8 +90,8 @@ func TestCheckpointSyncRemote_EntireRemoteElected_PushToOriginCarriesCheckpoints
 		if !strings.Contains(out, `Checkpoints now sync to "entire"`) {
 			t.Errorf("first delivery should announce the Entire remote; output:\n%s", out)
 		}
-		if strings.Contains(out, "Earlier checkpoints") {
-			t.Errorf("no backlog pointer until the migration command exists; output:\n%s", out)
+		if !strings.Contains(out, `Earlier checkpoints may still be on "origin"; they stay readable from there.`) {
+			t.Errorf("first delivery should name the displaced remote; output:\n%s", out)
 		}
 		if !entireStateFileExists(t, env) {
 			t.Error("the announcement must be persisted so it happens once per clone")
