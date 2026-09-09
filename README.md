@@ -325,7 +325,7 @@ Descriptions below are the commands' own summaries. `entire help` always reflect
 | ----------------------------- | ---------------------------------------------------------------------------------------- |
 | `entire session`              | Manage agent sessions (`list`, `info`, `current`, `stop`, `attach`, `adopt`, `resume`, `tokens`) |
 | `entire session resume`       | Resume a stopped session — interactive picker, or by branch                               |
-| `entire checkpoint`           | Inspect and search checkpoints (`list`, `explain`, `tokens`, `search`)                    |
+| `entire checkpoint`           | Inspect and search checkpoints (`list`, `explain`, `tokens`, `search`, `migrate`)            |
 | `entire checkpoint explain`   | Explain a checkpoint, commit, or session                                                 |
 | `entire search`               | Search checkpoints, commits, and sessions using semantic and keyword matching            |
 | `entire activity`             | Show your activity overview                                                              |
@@ -514,7 +514,7 @@ Personal overrides, gitignored by default:
 | `sign_checkpoint_commits`                 | `true`, `false`                              | Sign checkpoint commits (default: on). See [checkpoint signing](docs/architecture/checkpoint-signing.md) |
 | `strategy_options.push_sessions`          | `true`, `false`                              | Auto-push checkpoint data on git push (default `true`)                            |
 | `strategy_options.checkpoint_remote`      | `{"provider": "github", "repo": "org/repo"}` | Push checkpoint data to a separate repo (see below)                               |
-| `strategy_options.checkpoint_push_remote` | remote name, e.g. `"upstream"`               | Pin which single remote carries checkpoint data (see below)                       |
+| `strategy_options.checkpoint_push_remote` | remote name, e.g. `"upstream"`               | Pin which single remote carries checkpoint data. Belongs in `.entire/settings.local.json` (per-clone); `entire checkpoint migrate --to <remote>` writes it for you (see below) |
 | `strategy_options.filtered_fetches`       | `true`, `false`                              | Use `--filter=blob:none` on checkpoint fetches                                    |
 | `strategy_options.summarize.enabled`      | `true`, `false`                              | Auto-generate AI summaries at commit time                                         |
 | `summary_generation.provider`             | e.g. `claude-code`, `codex`, `gemini`        | Which agent generates summaries (defaults to Claude)                              |
@@ -563,6 +563,19 @@ entire enable --yes --checkpoint-push-remote fork
 ```
 
 The remote must already exist, and this is also how to change the destination later or repair a saved selection that names a missing remote. An explicit flag pins the named remote, even if it is currently selected automatically. `--yes` alone does not change the checkpoint destination. The command confirms the destination when you chose one or when the saved one is unusable; otherwise it ends at `Ready.` Selecting a destination does not re-enable disabled checkpoint pushing, upload existing checkpoints immediately, or move or delete checkpoint history from other remotes.
+
+#### Moving checkpoints
+
+`entire checkpoint migrate` puts checkpoints where they belong and brings the backlog with them. Run bare it reports the plan: the destination (your Entire remote when you have one), what is stored locally, and which other remotes still hold checkpoint refs or the `entire/checkpoints/v1` branch. Interactively it then walks through the steps with confirmations; without a terminal it prints the exact command and changes nothing.
+
+In order, skipping what is already done, it:
+
+1. Converts git-branch checkpoints to per-checkpoint refs and makes git-refs the primary store (this writes `.entire/settings.json`, which you should commit).
+2. Fetches checkpoint refs that exist only on the old remote.
+3. Pushes every checkpoint ref to the destination and verifies it arrived.
+4. With your consent, deletes the checkpoint refs and the `entire/checkpoints/v1` branch from the old remote. Your code is never touched.
+
+Flags: `--to <remote>` picks the destination explicitly (recorded as `strategy_options.checkpoint_push_remote` in `.entire/settings.local.json`, and only when the election would not already pick it), `--from <remote>` narrows which old remotes to migrate from, `--yes` runs the non-destructive steps without prompting, `--remove` deletes from the old remote after verification (required for deletion when non-interactive; `--yes` never implies it), `--dry-run` reports without writing, `--json` emits the plan.
 
 If instead you want checkpoint data in a separate repo (e.g., a private repo for a public project), configure `checkpoint_remote` with a structured provider and repo. A dedicated `checkpoint_remote` is addressed directly and is exempt from the single-remote election above:
 

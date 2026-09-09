@@ -2294,10 +2294,10 @@ func TestRunStatus_PrintsBothReviewAndInvestigation(t *testing.T) {
 
 // --- Checkpoint sync visibility (single-remote gate observability) ---
 
-// originRemoteName is the primary remote these fixtures create. Named rather
-// than repeated: it is also the remote the checkpoint election defaults to and
-// the read chain's legacy tier, so the string carries meaning here.
-const originRemoteName = "origin"
+// The primary remote these fixtures create is originRemoteName, declared in
+// checkpoint_migrate_plan.go: it is also the remote the checkpoint election
+// defaults to and the read chain's legacy tier, so the string carries meaning
+// here and the production constant is the right one to name it.
 
 func TestRunStatus_CheckpointPushDisabled(t *testing.T) {
 	testCheckpointPushDisabledFork(t, false)

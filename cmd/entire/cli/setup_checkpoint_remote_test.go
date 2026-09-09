@@ -397,7 +397,7 @@ func TestEnableCheckpointPushRemote_FanoutRendering(t *testing.T) {
 	topology := remoteTopology{primaryIsRefs: true, destinations: []remoteDestination{{name: "fork", pushURLs: []string{"https://github.com/me/repo.git", "https://github.com/me/other.git"}}}}
 	var output bytes.Buffer
 	topology.describeCheckpointDestination(&output, "Destinations:")
-	require.Equal(t, "Destinations:\n  Remote \"fork\" pushes to 2 URLs:\n    → https://github.com/me/repo.git\n      https://github.com/me/other.git\n    Checkpoints go to the first URL only; the others receive your code but\n    no session history. Clone that first repository to resume elsewhere.\n  To pin one repository for checkpoints, set checkpoint_remote in\n  .entire/settings.json (or .entire/settings.local.json to keep it to this clone).\n", output.String())
+	require.Equal(t, "Destinations:\n  Remote \"fork\" pushes to 2 URLs:\n    → https://github.com/me/repo.git\n      https://github.com/me/other.git\n    Checkpoints go to the first URL only; the others receive your code but\n    no session history. Clone that first repository to resume elsewhere.\n  To choose the remote that carries checkpoints, run `entire checkpoint migrate --to <remote>`.\n  It records strategy_options.checkpoint_push_remote in .entire/settings.local.json;\n  that file is per-clone, so the remote name is never committed for teammates whose\n  clone lacks it. To keep checkpoints in a separate repository instead, see\n  checkpoint_remote in the README.\n", output.String())
 }
 
 func TestEnableCheckpointPushRemote_MixedDedicatedAlternatives(t *testing.T) {

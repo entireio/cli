@@ -69,7 +69,11 @@ Checks performed:
      'entire checkpoint explain --generate', 'entire dispatch' and
      'entire runner setup' fail. Reports the file to change; does not rewrite it.
 
-  6. Stuck sessions: sessions stuck in ACTIVE or ENDED phase that need cleanup.
+  6. Checkpoint destination: report where checkpoints sync — your Entire
+     remote when one is elected, or a choice still to make when several
+     remotes compete. The fix is 'entire checkpoint migrate'.
+
+  7. Stuck sessions: sessions stuck in ACTIVE or ENDED phase that need cleanup.
 
 A session is considered stuck if:
   - It is in ACTIVE phase with no interaction for over 1 hour
@@ -179,8 +183,10 @@ func runSessionsFix(cmd *cobra.Command, force bool) error {
 	// checks: it breaks three commands, not capture, so it is the milder fault.
 	checkSummaryProvider(cmd)
 
-	// Where checkpoints land, when the repo's remotes make that ambiguous.
-	printCheckpointDestinationNote(ctx, cmd.OutOrStdout(), "Checkpoint destination: REVIEW")
+	// Where checkpoints land: settled (an Entire remote or a single remote),
+	// or a choice the user has not made yet. Supersedes the bare topology note
+	// — it reports the settled case too, not only the ambiguous one.
+	checkCheckpointDestination(cmd)
 
 	// Stuck sessions
 	// Load all session states
@@ -572,6 +578,30 @@ func checkDisconnectedMetadata(cmd *cobra.Command, force bool) error {
 
 	fmt.Fprintln(w, "  ✓ Fixed: metadata branches reconciled")
 	return nil
+}
+
+// checkCheckpointDestination reports where checkpoints sync when that is worth
+// saying: an elected Entire remote, or a choice not yet made. Report-only: the fix is `entire checkpoint migrate`, which needs
+// the network and the user's consent to delete, so doctor names it rather than
+// running it. Local-only, like the rest of doctor.
+func checkCheckpointDestination(cmd *cobra.Command) {
+	ctx := cmd.Context()
+	w := cmd.OutOrStdout()
+	t := inspectRemoteTopology(ctx)
+	switch {
+	case t.entireElected != "":
+		fmt.Fprintf(w, "✓ Checkpoint destination: %s (your Entire remote)\n", t.entireElected)
+		if checkpointSyncMigrationState(ctx) == checkpointSyncMigrationPending && localCheckpointsExist(ctx) {
+			if legacy := strategy.LegacyCheckpointRemote(ctx); legacy != "" {
+				fmt.Fprintf(w, "  Older checkpoints may still be on %s. Run 'entire checkpoint migrate' to bring them over.\n", legacy)
+			}
+		}
+	case t.ambiguous():
+		t.describeCheckpointDestination(w, "Checkpoint destination: REVIEW")
+		fmt.Fprintln(w, "  Run 'entire checkpoint migrate' to choose and move.")
+	}
+	// The ordinary single-remote repo says nothing: there is no choice to
+	// report, and doctor's output stays short for the common case.
 }
 
 // confirmDoctorFix prompts to apply a doctor fix. Declining (which prints

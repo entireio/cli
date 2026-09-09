@@ -1455,7 +1455,30 @@ func printEnabledStatus(ctx context.Context, w io.Writer) {
 		fmt.Fprintf(w, "Agents: %s\n", strings.Join(displayNames, ", "))
 	}
 	fmt.Fprintln(w, "\nTo add more agents, run `entire agent add <name>`.")
+	// The wrapper carries main's gate: stay quiet when `entire enable` already
+	// put the same question to the user through the picker.
 	printSetupCheckpointDestinationNote(ctx, w)
+	printCheckpointSyncPointer(ctx, w)
+}
+
+// printCheckpointSyncPointer nudges an already-enabled repo toward
+// `entire checkpoint migrate` when its Entire remote is elected but older
+// checkpoints may still sit on the previous remote. Local-only: it reads the
+// election, the migration ledger, and local refs — never the network. A fresh
+// setup has no checkpoints to move, so the fresh-enable path does not call it.
+func printCheckpointSyncPointer(ctx context.Context, w io.Writer) {
+	elected, err := strategy.ResolveCheckpointSyncRemote(ctx)
+	if err != nil || elected.Source != strategy.SyncRemoteSourceEntire {
+		return
+	}
+	if checkpointSyncMigrationState(ctx) != checkpointSyncMigrationPending {
+		return
+	}
+	legacy := strategy.LegacyCheckpointRemote(ctx)
+	if legacy == "" || !localCheckpointsExist(ctx) {
+		return
+	}
+	fmt.Fprintf(w, "\nOlder checkpoints may still be on %s. Run 'entire checkpoint migrate' to bring them over.\n", legacy)
 }
 
 // resolveFirstRunCheckpointBackend decides the checkpoint storage backend
