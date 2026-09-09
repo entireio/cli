@@ -1,0 +1,179 @@
+can you find all the pr's that have been merged regarding pushing to remotes other than origin and how we handle that in the cli? there seems to be issues with how we handle this in terms of how checkpoints refs get pushed to remotes other than origin, when this is set in settings.json, the doctor warn, in entire status, and more. it seems it's not being respected in the settings when set, there might be disconnect in the status, etc. and shoudl be able to resolve properly. 
+
+can we take a look first at how it's set up in the cli?
+
+---
+
+Also, see this fix, https://github.com/entireio/cli/pull/2327
+
+---
+
+Also, someone else reported that the note for remotes was wrong and told the user to set a settings in settings.json is wrong and doesn't tell them to set checkpoint_push_remote but checkpoint_remote, which doesn't work. See the images on desktop remote_wrong and settings_remote. Also, when they ran entire status they got, failed to load settings: loading settings: reading settings file: parsing settings file: json: unknown field "checkpoint_remote"
+
+---
+
+so 2327 also takes care of working fix?
+
+---
+
+i meant wording fix
+
+---
+
+okay so what else needs fixing?
+
+---
+
+does 1 and 2 depend on 2327?
+
+---
+
+okay how would we do 2?
+
+---
+
+why do you need to create a resolver, when the remote should be consistent already
+
+---
+
+okay so do you want to trace those call sites now and identify the inconcistencies and whats causing the inacurracies
+
+---
+
+can you look at my config and status output because i think there is inconsistencies here too even where it says its pushing to remote when it shouldnt be
+
+---
+
+i dont want them pushed to a dedicated remote
+
+---
+
+okay now back to inconcsistencies and inaccuracies
+
+---
+
+so number 1 is just my config?
+
+---
+
+what is proper config? exist on both? only on entire?
+
+---
+
+okay then we should do this
+
+---
+
+okay sounds good, what do you need to do next to finish
+
+---
+
+repro first please
+
+---
+
+can you do more cases where origin isn't the selected remote, that's where most people run into issues
+
+---
+
+but it was giving wrong hint basically
+
+---
+
+okay now tell me which needs fixing now from teh tests you ran. and are there any other cases you missed?
+
+---
+
+do you want to try those first?
+
+---
+
+so now what are hte confirmed bugs
+
+---
+
+can you gives me user stories for each please
+
+---
+
+can you tell me current behavior and expetcted
+
+---
+
+are you sure this is expected for number 1? Any
+                      upstream history is treated separately as a read fallback.
+
+---
+
+checkpoints successfully pushed to the selected fork should
+  be discoverable and retrievable from that fork. - yes this should be fixed, and then what is the proposed solution narrowed
+
+---
+
+checkpoints successfully pushed to the selected fork should
+    be discoverable and retrievable from that fork. - yes this should be fixed, and then
+  what is the proposed solution narrowed based on the retrieved path that is identified causig this error
+
+---
+
+is this hte same behavior for when the checkpoint_push_remote changes?
+
+---
+
+can you compare the two with the fix?
+
+---
+
+and we are fixing the first scenario you listed? because are there issues with checkpoint_push_remote?
+
+---
+
+okay let's start with this then, how does this sound?
+
+---
+
+i think first we shouold write a plan, run reviwer on it first, create new branch for fix, etc.
+
+---
+
+can you giev me full path to plan with less command too pls
+
+---
+
+so you're saying that currently checkpoints being pushed to remote aren't being read by the checkpoints being pushed to remote and fork?
+
+---
+
+what's the difference between the inheritted checkpoint remote and just checkpoint remotw
+
+---
+
+so treats it as inheritted when its not?
+
+---
+
+can you show the user story again clearly
+
+---
+
+but if they;re pushed to the fork, this says that on another device this doesn't work?
+
+---
+
+is this niche case?
+
+---
+
+from the other issues listed, are there any others that are listed that fail/happen more often
+
+---
+
+okay should we fix this one first then?   Doctor warns despite explicit selection since the first is already fixed?
+
+---
+
+that's fine, it alreayd has fix in progress, so we should start with this one
+
+---
+
+did you test again the same scenario
