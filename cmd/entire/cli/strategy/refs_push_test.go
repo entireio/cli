@@ -2,6 +2,7 @@ package strategy
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -116,6 +117,37 @@ func TestBatchPushRefs_AllowsFastForward(t *testing.T) {
 	require.NoError(t, batchPushRefs(ctx, bareDir, refs[:1]), "fast-forward update should push without force")
 	assert.Equal(t, head2.Hash().String(), remoteRefHash(t, bareDir, refs[0]),
 		"remote ref should advance to the descendant commit")
+}
+
+// TestBatchPushRefs_ChunksLargeSets: a set larger than refChunkSize is pushed
+// in consecutive chunks and every ref lands — a requeued migration backlog must
+// not overrun a single argv.
+func TestBatchPushRefs_ChunksLargeSets(t *testing.T) {
+	workDir, bareDir, _ := setupRepoWithCheckpointRefs(t)
+	t.Chdir(workDir)
+	ctx := context.Background()
+
+	repo, err := git.PlainOpen(workDir)
+	require.NoError(t, err)
+	head, err := repo.Head()
+	require.NoError(t, err)
+
+	const count = 450
+	refs := make([]plumbing.ReferenceName, 0, count)
+	for i := range count {
+		ref := mustRefName(t, id.MustCheckpointID(fmt.Sprintf("%012x", 0x200000+i)))
+		require.NoError(t, repo.Storer.SetReference(plumbing.NewHashReference(ref, head.Hash())))
+		refs = append(refs, ref)
+	}
+	require.Greater(t, count, 2*refChunkSize, "the set must span more than two chunks")
+
+	require.NoError(t, batchPushRefs(ctx, bareDir, refs))
+
+	out := testutil.RunGit(t, bareDir, "for-each-ref", "--format=%(refname)", checkpoint.CheckpointRefPrefix)
+	landed := strings.Fields(out)
+	for _, ref := range refs {
+		assert.Contains(t, landed, ref.String())
+	}
 }
 
 // TestBatchPushRefs_RejectsNonFastForward: a divergent (non-descendant) update is

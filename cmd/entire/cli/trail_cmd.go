@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/api"
+	checkpointremote "github.com/entireio/cli/cmd/entire/cli/checkpoint/remote"
 	"github.com/entireio/cli/cmd/entire/cli/gitremote"
 	"github.com/entireio/cli/cmd/entire/cli/interactive"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
@@ -2587,16 +2588,14 @@ func remoteHasBranch(ctx context.Context, remote, branchName string) (bool, erro
 // publish, and running Entire's checkpoint sync (or the repo's own hooks) while
 // unwinding is work in the wrong direction on a path that is already handling
 // an error.
+//
+// A branch the remote no longer has is not an error: the retraction already
+// holds. remote.DeleteRefs reports that case as absent rather than failing.
 func deleteBranchFromRemote(ctx context.Context, remote, branchName string) error {
 	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "git", "push", "--no-verify", remote, "--delete", branchName)
-	if output, err := cmd.CombinedOutput(); err != nil {
-		outputText := strings.TrimSpace(string(output))
-		if strings.Contains(outputText, "remote ref does not exist") {
-			return nil
-		}
-		return fmt.Errorf("%s: %w", outputText, err)
+	if _, err := checkpointremote.DeleteRefs(ctx, remote, "", []string{branchName}); err != nil {
+		return fmt.Errorf("delete %s from %s: %w", branchName, remote, err)
 	}
 	return nil
 }

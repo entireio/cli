@@ -430,10 +430,17 @@ func PushWithOptions(ctx context.Context, opts PushOptions) (PushResult, error) 
 	if err != nil {
 		return PushResult{}, fmt.Errorf("resolve push target: %w", err)
 	}
+	return runPush(ctx, pushTarget, opts)
+}
 
+// runPush runs `git push --no-verify --porcelain <ExtraArgs> <target> <RefSpecs>`
+// against target exactly as given. PushWithOptions resolves the target first
+// (a remote name may become the dedicated checkpoint_remote URL); DeleteRefs
+// deliberately does not.
+func runPush(ctx context.Context, target string, opts PushOptions) (PushResult, error) {
 	args := []string{"push", "--no-verify", "--porcelain"}
 	args = append(args, opts.ExtraArgs...)
-	args = append(args, pushTarget)
+	args = append(args, target)
 	args = append(args, opts.RefSpecs...)
 
 	cmd := newCommand(ctx, args...)
@@ -446,6 +453,87 @@ func PushWithOptions(ctx context.Context, opts PushOptions) (PushResult, error) 
 		return PushResult{Output: string(output)}, fmt.Errorf("git push: %w", err)
 	}
 	return PushResult{Output: string(output)}, nil
+}
+
+// DeleteRefs deletes refs on target with `git push --no-verify --porcelain
+// --delete <target> <refs...>`, run in dir (the process cwd when empty). refs
+// may be full names (refs/entire/checkpoints/ab/…) or short branch names, which
+// git resolves against the remote. Refs the remote does not have are reported
+// in absent rather than failing the call, and are never passed to git.
+//
+// The remote is listed first (one ls-remote per call) because git's own
+// signal is inconsistent: a fully-qualified absent ref is "deleted" with exit
+// 0 and only a `remote: warning`, while an unmatched short name fails the whole
+// batch with "remote ref does not exist". Listing makes the accounting exact
+// either way and costs one round trip per chunk.
+//
+// The target is used verbatim — DeleteRefs does NOT run it through
+// resolvePushCommandTarget, which rewrites a remote NAME to the dedicated
+// checkpoint_remote URL when one is configured. A push that creates refs may
+// reasonably be redirected there; a delete must land exactly where the caller
+// pointed it, so callers that hold a remote name resolve it to a URL themselves.
+func DeleteRefs(ctx context.Context, target, dir string, refs []string) (absent []string, err error) {
+	if len(refs) == 0 {
+		return nil, nil
+	}
+	present, err := presentRemoteRefs(ctx, dir, target, refs)
+	if err != nil {
+		return nil, fmt.Errorf("list %s before deleting refs: %w", RedactURLOrPath(target), err)
+	}
+	var remaining []string
+	for _, ref := range refs {
+		if present[ref] {
+			remaining = append(remaining, ref)
+		} else {
+			absent = append(absent, ref)
+		}
+	}
+	if len(remaining) == 0 {
+		return absent, nil
+	}
+	if res, err := runPush(ctx, target, PushOptions{ExtraArgs: []string{"--delete"}, RefSpecs: remaining, Dir: dir}); err != nil {
+		return nil, deleteRefsError(target, res, err)
+	}
+	return absent, nil
+}
+
+// deleteRefsError attaches git's (redacted, whitespace-collapsed) output to a
+// failed delete so the caller sees the reason rather than "exit status 1".
+func deleteRefsError(target string, res PushResult, err error) error {
+	out := strings.TrimSpace(res.Output)
+	if out == "" {
+		return err
+	}
+	out = strings.ReplaceAll(out, target, RedactURLOrPath(target))
+	return fmt.Errorf("%w (%s)", err, strings.Join(strings.Fields(out), " "))
+}
+
+// presentRemoteRefs reports which of the requested refs target currently
+// advertises. A requested name matches an advertised ref when equal to it or
+// when the advertised ref ends in "/<name>" (a short branch name against
+// refs/heads/<name>).
+func presentRemoteRefs(ctx context.Context, dir, target string, refs []string) (map[string]bool, error) {
+	out, err := lsRemote(ctx, dir, target, refs...)
+	if err != nil {
+		return nil, err
+	}
+	var advertised []string
+	for _, line := range strings.Split(string(out), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) >= 2 {
+			advertised = append(advertised, fields[1])
+		}
+	}
+	present := make(map[string]bool, len(refs))
+	for _, ref := range refs {
+		for _, adv := range advertised {
+			if adv == ref || strings.HasSuffix(adv, "/"+ref) {
+				present[ref] = true
+				break
+			}
+		}
+	}
+	return present, nil
 }
 
 // LsRemoteInDir is like LsRemote but runs in a specific directory.
