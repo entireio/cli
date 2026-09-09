@@ -102,6 +102,41 @@ func (q *PushQueue) Enqueue(ref plumbing.ReferenceName) error {
 	return nil
 }
 
+// EnqueueAll appends every ref under one lock and one append, for callers that
+// requeue a whole backlog at once (a migration re-enqueuing thousands of refs).
+// Enqueue per ref takes the flock and reopens the file each time, which is fine
+// for one checkpoint and wasteful for thousands. Same duplicate tolerance as
+// Enqueue: Drain collapses repeats. An empty slice is a no-op.
+func (q *PushQueue) EnqueueAll(refs []plumbing.ReferenceName) error {
+	if len(refs) == 0 {
+		return nil
+	}
+	root, release, err := q.lock()
+	if err != nil {
+		return err
+	}
+	defer release()
+
+	var buf bytes.Buffer
+	for _, ref := range refs {
+		line, err := json.Marshal(pushQueueEntry{Ref: ref.String()})
+		if err != nil {
+			return fmt.Errorf("encode push queue entry: %w", err)
+		}
+		buf.Write(line)
+		buf.WriteByte('\n')
+	}
+	f, err := root.OpenFile(pushQueueFileName, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+	if err != nil {
+		return fmt.Errorf("open push queue: %w", err)
+	}
+	defer f.Close()
+	if _, err := f.Write(buf.Bytes()); err != nil {
+		return fmt.Errorf("append push queue entries: %w", err)
+	}
+	return nil
+}
+
 // Drain returns the de-duplicated refs currently queued, in first-seen order. It
 // does NOT remove them; call Remove after a confirmed push so a failed push
 // retries next time. A missing queue file yields no refs.

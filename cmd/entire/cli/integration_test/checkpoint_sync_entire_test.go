@@ -90,8 +90,8 @@ func TestCheckpointSyncRemote_EntireRemoteElected_PushToOriginCarriesCheckpoints
 		if !strings.Contains(out, `Checkpoints now sync to "entire"`) {
 			t.Errorf("first delivery should announce the Entire remote; output:\n%s", out)
 		}
-		if !strings.Contains(out, `Earlier checkpoints may still be on "origin"; they stay readable from there.`) {
-			t.Errorf("first delivery should name the displaced remote; output:\n%s", out)
+		if !strings.Contains(out, `Earlier checkpoints may still be on "origin". Run `+"`entire checkpoint migrate`"+` to move them.`) {
+			t.Errorf("first delivery should name the displaced remote and the command; output:\n%s", out)
 		}
 		if !entireStateFileExists(t, env) {
 			t.Error("the announcement must be persisted so it happens once per clone")
@@ -143,7 +143,7 @@ func TestCheckpointSyncRemote_EntireRemote_RawURLPushAlsoCarries(t *testing.T) {
 
 // TestCheckpointSyncRemote_TwoEntireRemotes_TierDoesNotApply: with several
 // Entire remotes the tier declines to guess, origin stays elected, and a push
-// to one of them is gated with a hint naming checkpoint_push_remote for it.
+// to one of them is gated with a hint naming `entire checkpoint migrate --to`.
 func TestCheckpointSyncRemote_TwoEntireRemotes_TierDoesNotApply(t *testing.T) {
 	t.Parallel()
 	ForEachBackend(t, func(t *testing.T, backend string) {
@@ -161,8 +161,8 @@ func TestCheckpointSyncRemote_TwoEntireRemotes_TierDoesNotApply(t *testing.T) {
 		if env.CheckpointsPresentOnRemote(bareA) {
 			t.Error("a non-elected Entire remote must not receive checkpoint data")
 		}
-		if !strings.Contains(out, `set strategy_options.checkpoint_push_remote to "entire-a"`) {
-			t.Errorf("gated push to one of several Entire remotes should name the setting; output:\n%s", out)
+		if !strings.Contains(out, `entire checkpoint migrate --to "entire-a"`) {
+			t.Errorf("gated push to one of several Entire remotes should name the command; output:\n%s", out)
 		}
 		if !strings.Contains(out, "2 Entire remotes") {
 			t.Errorf("hint should explain why the tier did not apply; output:\n%s", out)
@@ -208,7 +208,7 @@ func TestCheckpointSyncRemote_EntireRemote_GitBranchNoDeferOnEmptyEntireRemote(t
 
 // TestCheckpointSyncRemote_CapturedRemoteStillBeatsEntire documents the product
 // order: a capture already in force outranks the entire tier. Re-routing is
-// setting checkpoint_push_remote to the Entire remote explicitly.
+// `entire checkpoint migrate --to entire`, which writes the explicit setting.
 func TestCheckpointSyncRemote_CapturedRemoteStillBeatsEntire(t *testing.T) {
 	t.Parallel()
 	ForEachBackend(t, func(t *testing.T, backend string) {

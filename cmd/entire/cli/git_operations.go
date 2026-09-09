@@ -698,26 +698,10 @@ func listCheckpointRefsOnRemote(ctx context.Context, candidateTimeout time.Durat
 }
 
 // parseCheckpointRefNames extracts the checkpoint ref names from `git ls-remote`
-// output. Each line is "<hash>\t<refname>"; only refs under CheckpointRefPrefix
-// are kept (the store re-validates each via ParseRef). Checkpoint refs point at
-// commits so no peeled (`^{}`) lines appear for them; refs/tags peeled lines
-// lack the checkpoint prefix and drop out here; any anomalous
-// refs/entire/checkpoints/...^{} name is rejected by ParseRef downstream (the
-// "{}" shard never matches ShardFor).
+// output; see checkpoint.ParseCheckpointRefNames for the filter (the parser
+// lives there so the strategy migration engine can share it).
 func parseCheckpointRefNames(output []byte) []plumbing.ReferenceName {
-	var names []plumbing.ReferenceName
-	for _, line := range strings.Split(string(output), "\n") {
-		fields := strings.Fields(line)
-		if len(fields) < 2 {
-			continue
-		}
-		name := fields[1]
-		if !strings.HasPrefix(name, checkpoint.CheckpointRefPrefix) {
-			continue
-		}
-		names = append(names, plumbing.ReferenceName(name))
-	}
-	return names
+	return checkpoint.ParseCheckpointRefNames(output)
 }
 
 // FetchBlobsByHash fetches specific blob objects from the remote by their SHA-1 hashes.

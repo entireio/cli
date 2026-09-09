@@ -324,7 +324,23 @@ type checkpointSyncInfo struct {
 	// when none, when counting failed, or when the count would be a lie
 	// (dedicated URL mode on the git-branch backend).
 	Unpushed int
+	// Migration is the `entire checkpoint migrate` ledger state, meaningful only
+	// when Source is "entire": "pending" (never run), "done", or "declined".
+	// Empty for every other source so it drops out of JSON via omitempty.
+	Migration string
+	// LegacyRemote names the remote the Entire tier displaced — the recorded
+	// one (strategy.DisplacedCheckpointRemote), so it does not move when a
+	// remote is added later. Empty unless Source is "entire" and such a remote
+	// exists.
+	LegacyRemote string
 }
+
+// Values of checkpointSyncInfo.Migration / statusJSON.CheckpointSyncMigration.
+const (
+	checkpointSyncMigrationPending  = "pending"
+	checkpointSyncMigrationDone     = "done"
+	checkpointSyncMigrationDeclined = "declined"
+)
 
 func computeCheckpointSyncInfo(ctx context.Context, s *EntireSettings) checkpointSyncInfo {
 	elected, err := strategy.ResolveCheckpointSyncRemote(ctx)
@@ -365,11 +381,50 @@ func computeCheckpointSyncInfo(ctx context.Context, s *EntireSettings) checkpoin
 		}
 	}
 
-	return checkpointSyncInfo{
+	info := checkpointSyncInfo{
 		Remote:   elected.Name,
 		Source:   string(elected.Source),
 		Unpushed: countUnpushedCheckpointsForStatus(ctx, elected.Name),
 	}
+	if elected.Source == strategy.SyncRemoteSourceEntire {
+		info.Migration = checkpointSyncMigrationState(ctx)
+		info.LegacyRemote = strategy.DisplacedCheckpointRemote(ctx)
+	}
+	return info
+}
+
+// checkpointSyncMigrationState reads the persisted `entire checkpoint migrate`
+// ledger (git common dir, no network) and maps it onto the status vocabulary.
+func checkpointSyncMigrationState(ctx context.Context) string {
+	st, ok := strategy.LoadEntireSyncState(ctx)
+	if !ok {
+		return checkpointSyncMigrationPending
+	}
+	switch st.Migration {
+	case strategy.EntireSyncMigrationDone:
+		return checkpointSyncMigrationDone
+	case strategy.EntireSyncMigrationDeclined:
+		return checkpointSyncMigrationDeclined
+	case strategy.EntireSyncMigrationNone:
+		return checkpointSyncMigrationPending
+	}
+	return checkpointSyncMigrationPending
+}
+
+// localCheckpointsExist reports whether this clone holds any checkpoint
+// artifact — a per-checkpoint ref or the v1 branch — on either backend. One
+// `git for-each-ref`, no network.
+func localCheckpointsExist(ctx context.Context) bool {
+	root, err := paths.WorktreeRoot(ctx)
+	if err != nil {
+		return false
+	}
+	out, err := gitRunner(ctx, root, "for-each-ref", "--count=1",
+		checkpoint.CheckpointRefPrefix, "refs/heads/"+paths.MetadataBranchName)
+	if err != nil {
+		return false
+	}
+	return strings.TrimSpace(out) != ""
 }
 
 // countUnpushedCheckpointsForStatus counts best-effort: status must never fail
@@ -415,6 +470,20 @@ func writeCheckpointSyncLines(ctx context.Context, b *strings.Builder, s *Entire
 		b.WriteString("\n  ")
 		b.WriteString(sty.render(sty.dim, formatUnpushedCheckpointsLine(info)))
 	}
+	// Nudge toward `entire checkpoint migrate` once, network-free: only while the
+	// migration ledger says it has never run (or been declined), only when a
+	// non-Entire remote exists to hold older checkpoints, and only when this
+	// clone actually has checkpoints — a fresh repo has nothing to move.
+	if info.Migration == checkpointSyncMigrationPending && info.LegacyRemote != "" && localCheckpointsExist(ctx) {
+		b.WriteString("\n  ")
+		b.WriteString(sty.render(sty.dim, formatCheckpointSyncNudge(info.LegacyRemote)))
+	}
+}
+
+// formatCheckpointSyncNudge is the status-line pointer at `entire checkpoint
+// migrate`, shared with doctor and the re-enable path so the three agree.
+func formatCheckpointSyncNudge(legacyRemote string) string {
+	return "older checkpoints may still be on " + legacyRemote + " — run 'entire checkpoint migrate' to bring them over"
 }
 
 // formatUnpushedCheckpointsLine phrases the unpushed counter. Dedicated URL
@@ -817,6 +886,12 @@ type statusJSON struct {
 	CheckpointSyncRemoteSource string `json:"checkpoint_sync_remote_source,omitempty"` // config|observed|entire|default|sole|first|dedicated
 	CheckpointSyncError        string `json:"checkpoint_sync_error,omitempty"`         // fail-closed message
 	UnpushedCheckpoints        int    `json:"unpushed_checkpoints,omitempty"`
+	// CheckpointSyncMigration is the `entire checkpoint migrate` ledger for an
+	// Entire-elected remote: pending|done|declined. Omitted for other sources.
+	CheckpointSyncMigration string `json:"checkpoint_sync_migration,omitempty"`
+	// CheckpointSyncLegacyRemote names the non-Entire remote older checkpoints
+	// may still be on, the one the text nudge names. Entire tier only.
+	CheckpointSyncLegacyRemote string `json:"checkpoint_sync_legacy_remote,omitempty"`
 	// SecretScanners lists the enabled engines when non-default; omitted when default.
 	SecretScanners []string `json:"secret_scanners,omitempty"`
 	Error          string   `json:"error,omitempty"`
@@ -905,6 +980,8 @@ func runStatusJSON(ctx context.Context, w io.Writer) error {
 		result.CheckpointSyncRemoteSource = syncInfo.Source
 		result.CheckpointSyncError = syncInfo.Err
 		result.UnpushedCheckpoints = syncInfo.Unpushed
+		result.CheckpointSyncMigration = syncInfo.Migration
+		result.CheckpointSyncLegacyRemote = syncInfo.LegacyRemote
 
 		if store, err := session.NewStateStore(ctx); err == nil {
 			if states, err := store.List(ctx); err == nil {

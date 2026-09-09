@@ -9,7 +9,7 @@ import (
 )
 
 // newCheckpointGroupCmd builds the `entire checkpoint` parent command and
-// registers list/explain/tokens/search/resume as children.
+// registers list/explain/tokens/search/resume/migrate as children.
 func newCheckpointGroupCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:     "checkpoint",
@@ -22,12 +22,14 @@ Commands:
   explain  Explain a checkpoint, commit, or session
   tokens   Show token usage and optimization recommendations
   search   Search checkpoints (semantic + keyword)
+  migrate  Move this repo's checkpoints to a single remote (your Entire remote when you have one)
 
 Examples:
   entire checkpoint list
   entire checkpoint explain <id|sha>
   entire checkpoint tokens <id>
-  entire checkpoint search "fix login"`,
+  entire checkpoint search "fix login"
+  entire checkpoint migrate`,
 		PersistentPreRunE: func(cmd *cobra.Command, _ []string) error {
 			if _, err := paths.WorktreeRoot(cmd.Context()); err != nil {
 				return errors.New("not a git repository")
@@ -40,6 +42,7 @@ Examples:
 	cmd.AddCommand(newCheckpointResumeCmd())
 	cmd.AddCommand(newExplainCmd())
 	cmd.AddCommand(newCheckpointTokensCmd())
+	cmd.AddCommand(newCheckpointMigrateCmd())
 	experimental.Register(cmd, newCheckpointPolicyCmd()) // 'checkpoint policy' (experimental)
 	cmd.AddCommand(newCheckpointSearchCmd())
 

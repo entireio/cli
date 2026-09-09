@@ -109,7 +109,7 @@ func ResolveCheckpointSyncRemote(ctx context.Context) (CheckpointSyncRemote, err
 	// Entire tier: the one entire:// remote is where checkpoint data belongs.
 	// Placed below the explicit setting and the capture (both are decisions
 	// already made) and above the guesses. Ambiguous with two or more, so it
-	// falls through rather than pick one — an explicit checkpoint_push_remote is
+	// falls through rather than pick one — `entire checkpoint migrate --to` is
 	// the way to choose.
 	if entire := configuredEntireRemotes(ctx); len(entire) == 1 {
 		return CheckpointSyncRemote{Name: entire[0], Source: SyncRemoteSourceEntire}, nil
@@ -198,7 +198,7 @@ func hintGatedCheckpointSync(ctx context.Context, pushRemote string) {
 			"[entire] %d checkpoint(s) are waiting to sync to %q; this push to %q, one of this repo's %d Entire remotes, does not carry them.\n",
 			count, syncRemote.Name, pushRemote, len(entire))
 		fmt.Fprintf(stderrWriter,
-			"[entire] To make it the checkpoint sync remote, set strategy_options.checkpoint_push_remote to %q in .entire/settings.local.json.\n",
+			"[entire] Run `entire checkpoint migrate --to %q` to make it the checkpoint sync remote.\n",
 			pushRemote)
 		logging.Info(ctx, "gated checkpoint sync hint shown (several entire remotes)",
 			slog.Int("unpushed_checkpoints", count),
@@ -329,10 +329,10 @@ func entireRemotesOf(remotes []configuredRemote) []string {
 	return names
 }
 
-// entireRemotes lists the configured remotes whose every URL is entire://, in
+// EntireRemotes lists the configured remotes whose every URL is entire://, in
 // .git/config order. Read from raw config (insteadOf not expanded); see
 // configuredRemote. Empty when there are none or the read failed.
-func entireRemotes(ctx context.Context) []string {
+func EntireRemotes(ctx context.Context) []string {
 	return configuredEntireRemotes(ctx)
 }
 
@@ -341,7 +341,7 @@ func entireRemotes(ctx context.Context) []string {
 // the first in .git/config order — restricted to non-Entire remotes. It is the
 // remote most likely to hold checkpoints from before an Entire remote was
 // added, which is what the pre-push announcement and `entire status` name when
-// pointing at the backlog. Empty when every remote is Entire's or
+// pointing at `entire checkpoint migrate`. Empty when every remote is Entire's or
 // there are none.
 func LegacyCheckpointRemote(ctx context.Context) string {
 	legacy := nonEntireRemotes(ctx)

@@ -76,7 +76,7 @@ func TestResolveCheckpointSyncRemote_EntireTier(t *testing.T) {
 
 	t.Run("captured remote beats entire", func(t *testing.T) {
 		// Product order: a capture already in force is a decision already
-		// made. Setting checkpoint_push_remote to the Entire remote re-routes by writing the
+		// made. `entire checkpoint migrate --to entire` re-routes by writing the
 		// explicit setting, which outranks both.
 		dir := newEntireTestRepo(t)
 		t.Chdir(dir)
@@ -112,7 +112,7 @@ func TestResolveCheckpointSyncRemote_EntireTier(t *testing.T) {
 		got, err := ResolveCheckpointSyncRemote(ctx)
 		require.NoError(t, err)
 		assert.Equal(t, CheckpointSyncRemote{Name: "origin", Source: SyncRemoteSourceDefault}, got)
-		assert.Empty(t, entireRemotes(ctx))
+		assert.Empty(t, EntireRemotes(ctx))
 	})
 
 	t.Run("a remote with a second non-entire url is not an Entire remote", func(t *testing.T) {
@@ -144,7 +144,7 @@ func TestReadRemotesInConfigOrder_RetainsURLs(t *testing.T) {
 		{Name: "entire", URLs: []string{testEntireURL}},
 	}, got)
 	assert.Equal(t, []string{"origin", "entire"}, configuredRemotesInConfigOrder(ctx))
-	assert.Equal(t, []string{"entire"}, entireRemotes(ctx))
+	assert.Equal(t, []string{"entire"}, EntireRemotes(ctx))
 	assert.Equal(t, "origin", LegacyCheckpointRemote(ctx))
 }
 
@@ -342,7 +342,7 @@ func TestAnnounceEntireSyncRemoteOnce(t *testing.T) {
 
 		out := buf.String()
 		assert.Contains(t, out, `[entire] Checkpoints now sync to "entire" — your Entire remote.`)
-		assert.Contains(t, out, `[entire] Earlier checkpoints may still be on "origin"; they stay readable from there.`)
+		assert.Contains(t, out, `[entire] Earlier checkpoints may still be on "origin". Run `+"`entire checkpoint migrate`"+` to move them.`)
 		st, ok := LoadEntireSyncState(ctx)
 		require.True(t, ok)
 		assert.Equal(t, "entire", st.Remote)
@@ -439,7 +439,7 @@ func TestHintGatedCheckpointSync_SeveralEntireRemotes(t *testing.T) {
 		return dir
 	}
 
-	t.Run("push to one of several entire remotes names the setting for that remote", func(t *testing.T) {
+	t.Run("push to one of several entire remotes names checkpoint migrate --to", func(t *testing.T) {
 		dir := initRepo(t)
 		t.Chdir(dir)
 		buf := captureStderrWriter(t)
@@ -449,7 +449,9 @@ func TestHintGatedCheckpointSync_SeveralEntireRemotes(t *testing.T) {
 		out := buf.String()
 		assert.Contains(t, out, `"origin"`, "names the elected destination")
 		assert.Contains(t, out, "2 Entire remotes")
-		assert.Contains(t, out, `set strategy_options.checkpoint_push_remote to "entire-a" in .entire/settings.local.json`)
+		assert.Contains(t, out, "entire checkpoint migrate --to \"entire-a\"")
+		assert.NotContains(t, out, "checkpoint_push_remote",
+			"the command is the remedy; the setting is not the advice for an Entire remote")
 	})
 
 	t.Run("nothing waiting stays silent", func(t *testing.T) {

@@ -17,6 +17,7 @@ import (
 	"charm.land/lipgloss/v2"
 	"github.com/spf13/cobra"
 
+	"github.com/entireio/cli/cmd/entire/cli/gitremote"
 	"github.com/entireio/cli/internal/coreapi"
 )
 
@@ -1308,7 +1309,7 @@ func resolveMirrorRef(ctx context.Context, c *coreapi.Client, ref string) (strin
 // rejected at the boundary rather than flowing into the list filter.
 func parseMirrorCloneURL(raw string) (clusterHost, provider, owner, repo string, err error) {
 	u, perr := url.Parse(raw)
-	if perr != nil || u.Scheme != "entire" {
+	if perr != nil || u.Scheme != gitremote.ProtocolEntire {
 		return "", "", "", "", fmt.Errorf("%q is not an entire:// clone URL", raw)
 	}
 	parts := strings.Split(strings.Trim(u.Path, "/"), "/")

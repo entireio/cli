@@ -212,10 +212,11 @@ func (t remoteTopology) describeCheckpointDestination(w io.Writer, header string
 	// the per-clone local file. It is not checkpoint_remote, which names a
 	// separate {provider, repo} checkpoint repository and silently ignores a
 	// remote name; earlier copy sent people there.
-	fmt.Fprintln(w, "  To choose the remote that carries checkpoints, set strategy_options.checkpoint_push_remote")
-	fmt.Fprintln(w, "  to its name in .entire/settings.local.json; that file is per-clone, so the remote name is")
-	fmt.Fprintln(w, "  never committed for teammates whose clone lacks it. To keep checkpoints in a separate")
-	fmt.Fprintln(w, "  repository instead, see checkpoint_remote in the README.")
+	fmt.Fprintln(w, "  To choose the remote that carries checkpoints, run `entire checkpoint migrate --to <remote>`.")
+	fmt.Fprintln(w, "  It records strategy_options.checkpoint_push_remote in .entire/settings.local.json;")
+	fmt.Fprintln(w, "  that file is per-clone, so the remote name is never committed for teammates whose")
+	fmt.Fprintln(w, "  clone lacks it. To keep checkpoints in a separate repository instead, see")
+	fmt.Fprintln(w, "  checkpoint_remote in the README.")
 }
 
 // entireElectedLine is the positive statement shared by enable and doctor.

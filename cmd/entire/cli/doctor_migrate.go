@@ -35,7 +35,10 @@ to re-run after more branch activity.
 
 New refs are queued for push. Run interactively, it asks whether to push them
 now; non-interactively it never pushes — the refs stay queued and flush on the
-next push once the git-refs store is the configured primary.`,
+next push once the git-refs store is the configured primary.
+
+To also move checkpoints to a different remote and clean up the old one, use
+'entire checkpoint migrate', which runs this conversion as its first step.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			ctx := cmd.Context()
