@@ -44,7 +44,7 @@ type pushSettings struct {
 	pushDisabled bool
 	// entireTier records that the Entire tier elected the destination: set
 	// whenever the elected sync remote is entire://, whether or not this push
-	// had to be redirected to reach it.
+	// had to be redirected to reach it. Read through targetsEntireRemote.
 	entireTier bool
 	// primaryIsRefs records whether the git-refs backend is the configured
 	// primary, resolved once here so the pre-push path does not re-read the
@@ -73,17 +73,16 @@ func (ps *pushSettings) pushTarget() string {
 	return ps.remote
 }
 
-// redirectedToSyncRemote reports whether checkpoint data for this push goes to
-// the elected Entire remote rather than the remote the user pushed.
-func (ps *pushSettings) redirectedToSyncRemote() bool {
-	return ps.syncRemote != ""
-}
-
 // targetsEntireRemote reports whether checkpoint data for this push lands on
 // the elected Entire remote — redirected there, or pushed to it directly.
-// Decisions that hinge on "is the destination Entire's own store" (the
-// empty-remote defer) key on this, not on redirectedToSyncRemote, so a direct
-// `git push entire` gets the same treatment as a redirected `git push origin`.
+//
+// Every decision that hinges on "is the destination Entire's own store" keys on
+// this: the empty-remote defer, the OPF rewrite's fallback bound, and the OPF
+// withhold. Deliberately NOT "was this push redirected" (syncRemote != ""),
+// which is true only when the user named some other remote: the destination is
+// the same Entire remote either way, so gating on the redirect gave a direct
+// `git push entire` the untreated path — no fallback bound, and the abort the
+// bound exists to prevent.
 func (ps *pushSettings) targetsEntireRemote() bool {
 	return ps.entireTier
 }

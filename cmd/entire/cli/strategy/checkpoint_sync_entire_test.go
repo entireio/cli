@@ -257,7 +257,7 @@ func TestRedirectToEntireSyncRemote(t *testing.T) {
 
 		assert.True(t, entireTier)
 		assert.Equal(t, "entire", elected.Name)
-		assert.False(t, ps.redirectedToSyncRemote())
+		assert.Empty(t, ps.syncRemote, "no redirect needed: the push already names the destination")
 		assert.True(t, ps.targetsEntireRemote(), "the tier is in force even without a redirect")
 		assert.Equal(t, "entire", ps.pushTarget())
 	})
@@ -270,7 +270,8 @@ func TestRedirectToEntireSyncRemote(t *testing.T) {
 		_, entireTier := redirectToEntireSyncRemote(ctx, &ps)
 
 		assert.True(t, entireTier)
-		assert.True(t, ps.redirectedToSyncRemote())
+		assert.Equal(t, "entire", ps.syncRemote)
+		assert.True(t, ps.targetsEntireRemote())
 		assert.Equal(t, "entire", ps.pushTarget())
 		assert.Equal(t, "origin", ps.remote, "the remote the user pushed is kept for reference")
 	})
