@@ -467,8 +467,14 @@ The Entire tier is the second exemption: when the elected remote is an
 `entire://` remote, every push — to any remote or raw URL — carries checkpoints
 to it by remote name (`pushSettings.syncRemote`), the gate and capture are
 skipped, and the git-branch empty-remote defer is skipped. The remote the tier
-displaced (origin, else the sole, else the first non-Entire remote) is appended
-to the read chain so checkpoints pushed there earlier stay readable. Under a
+displaced is recorded once in the tier's state file (`displaced_remote`) at the
+first push under the tier, and every non-Entire remote — that one first — is
+appended to the read chain, so checkpoints pushed anywhere before the tier took
+over stay readable. The record matters because the live computation prefers
+`origin` unconditionally: adding an origin after the tier took over would swap a
+computed fallback from the remote that holds the checkpoints to a new empty one.
+`DisplacedCheckpointRemote` returns the recorded remote while it is still
+configured, else the live answer. Under a
 redirected push the git-branch OPF rewrite is bounded by that remote's v1 tip
 when the Entire remote has none, and an OPF failure withholds the checkpoints
 with a stderr line rather than aborting the user's push. The first delivery

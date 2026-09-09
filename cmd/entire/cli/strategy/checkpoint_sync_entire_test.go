@@ -500,7 +500,8 @@ func TestCheckpointReadRemotes_EntireTierKeepsDisplacedRemote(t *testing.T) {
 		t.Chdir(dir)
 		res := CheckpointReadRemotesWithElection(ctx)
 		assert.Equal(t, "entire", res.ElectedName)
-		assert.Equal(t, []string{"entire", "origin"}, res.Candidates)
+		// origin (the displaced one) then every other non-Entire remote.
+		assert.Equal(t, []string{"entire", "origin", "fork"}, res.Candidates)
 	})
 
 	t.Run("displaced sole remote stays readable", func(t *testing.T) {
@@ -519,6 +520,97 @@ func TestCheckpointReadRemotes_EntireTierKeepsDisplacedRemote(t *testing.T) {
 		testutil.AddRemote(t, dir, "entire", testEntireURL)
 		t.Chdir(dir)
 		res := CheckpointReadRemotesWithElection(ctx)
-		assert.Equal(t, []string{"entire", "upstream"}, res.Candidates)
+		// Every non-Entire remote is readable, displaced one first: any of them
+		// may hold checkpoints from before the tier took over.
+		assert.Equal(t, []string{"entire", "upstream", "fork"}, res.Candidates)
+	})
+
+	// The regression the recorded remote exists for. Checkpoints accumulate on
+	// a sole "gh"; the Entire remote displaces it; an origin is added later.
+	// The live answer prefers origin unconditionally, so a single computed
+	// fallback would swap to the new empty remote and drop the holder.
+	t.Run("an origin added after the tier does not displace the recorded holder", func(t *testing.T) {
+		dir := newRepo(t)
+		testutil.AddRemote(t, dir, "gh", "https://github.com/acme/app.git")
+		t.Chdir(dir)
+		require.Equal(t, "gh", LegacyCheckpointRemote(ctx), "step 1: gh is the sole remote and holds the checkpoints")
+
+		testutil.AddRemote(t, dir, "entire", testEntireURL)
+		InvalidateGitRemoteCache(ctx)
+		ps := pushSettings{remote: "gh"}
+		_, entireTier := redirectToEntireSyncRemote(ctx, &ps)
+		require.True(t, entireTier, "step 2: the tier takes over and records what it displaced")
+		st, ok := LoadEntireSyncState(ctx)
+		require.True(t, ok)
+		assert.Equal(t, "gh", st.DisplacedRemote)
+
+		testutil.AddRemote(t, dir, "origin", "https://github.com/acme/new.git")
+		InvalidateGitRemoteCache(ctx)
+		assert.Equal(t, "origin", LegacyCheckpointRemote(ctx), "the live answer moved")
+		assert.Equal(t, "gh", DisplacedCheckpointRemote(ctx), "the recorded answer did not")
+
+		res := CheckpointReadRemotesWithElection(ctx)
+		assert.Equal(t, []string{"entire", "origin", "gh"}, res.Candidates,
+			"gh still holds the old checkpoints and must stay in the chain")
+	})
+}
+
+// Not parallel: uses t.Chdir()
+func TestRecordDisplacedCheckpointRemote(t *testing.T) {
+	testutil.IsolateGitConfigEnv(t)
+	ctx := context.Background()
+
+	t.Run("write-once: a later live answer does not overwrite it", func(t *testing.T) {
+		dir := newEntireTestRepo(t)
+		t.Chdir(dir)
+		recordDisplacedCheckpointRemote(ctx)
+		st, ok := LoadEntireSyncState(ctx)
+		require.True(t, ok)
+		require.Equal(t, "origin", st.DisplacedRemote)
+
+		// Drop the holder: the fixture's other remote becomes what the live
+		// answer would pick. The record must not move.
+		testutil.RunGit(t, dir, "remote", "remove", "origin")
+		InvalidateGitRemoteCache(ctx)
+		recordDisplacedCheckpointRemote(ctx)
+		st, _ = LoadEntireSyncState(ctx)
+		assert.Equal(t, "origin", st.DisplacedRemote, "the recorded remote is written once")
+		// But it is gone from config, so the resolver falls back to the live
+		// answer rather than naming a remote nothing can read.
+		assert.Equal(t, "fork", DisplacedCheckpointRemote(ctx))
+	})
+
+	t.Run("nothing displaced when the Entire remote is the only one", func(t *testing.T) {
+		dir := t.TempDir()
+		testutil.InitRepo(t, dir)
+		testutil.WriteFile(t, dir, "f.txt", "init")
+		testutil.GitAdd(t, dir, "f.txt")
+		testutil.GitCommit(t, dir, "init")
+		testutil.AddRemote(t, dir, "entire", testEntireURL)
+		t.Chdir(dir)
+
+		recordDisplacedCheckpointRemote(ctx)
+		st, ok := LoadEntireSyncState(ctx)
+		if ok {
+			assert.Empty(t, st.DisplacedRemote)
+		}
+		assert.Empty(t, DisplacedCheckpointRemote(ctx))
+		res := CheckpointReadRemotesWithElection(ctx)
+		assert.Equal(t, []string{"entire"}, res.Candidates)
+	})
+
+	t.Run("the announcement names the recorded remote, not the live one", func(t *testing.T) {
+		dir := newEntireTestRepo(t)
+		t.Chdir(dir)
+		testutil.RunGit(t, dir, "remote", "rename", "origin", "gh")
+		InvalidateGitRemoteCache(ctx)
+		recordDisplacedCheckpointRemote(ctx)
+		testutil.AddRemote(t, dir, "origin", "https://github.com/acme/new.git")
+		InvalidateGitRemoteCache(ctx)
+
+		buf := captureStderrWriter(t)
+		announceEntireSyncRemoteOnce(ctx, "entire")
+		assert.Contains(t, buf.String(), `Earlier checkpoints may still be on "gh"`)
+		assert.NotContains(t, buf.String(), `on "origin"`)
 	})
 }

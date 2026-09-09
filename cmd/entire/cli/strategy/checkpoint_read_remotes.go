@@ -73,14 +73,23 @@ func CheckpointReadRemotesWithElection(ctx context.Context) CheckpointReadResolu
 	if isConfiguredRemote(ctx, "origin") && (len(res.Candidates) == 0 || res.Candidates[0] != "origin") {
 		res.Candidates = append(res.Candidates, "origin")
 	}
-	// The Entire tier displaces whatever the default tiers would have elected —
-	// origin, else the sole remote, else the first. Origin is already a legacy
-	// tier above; a displaced "gh" or "upstream" would otherwise drop out of the
-	// read chain entirely and the checkpoints already pushed there would stop
-	// being found, with nothing deleted and nothing said. Keep it readable.
+	// Under the Entire tier, every non-Entire remote may hold checkpoints from
+	// before the Entire remote existed: the tier displaced whichever one the
+	// default tiers elected, and nothing deleted what was already pushed there.
+	// The recorded displaced remote comes first (it is the one the tier actually
+	// took over from), then the rest in config order.
+	//
+	// All of them, not just that one: naming a single fallback means picking it,
+	// and any pick computed from the current remote set moves when the set does.
+	// A repo that accumulated checkpoints on "gh" and later gained an "origin"
+	// would see the single answer swap to the new, empty origin. Reads are
+	// best-effort and fail open per candidate, so listing every non-Entire
+	// remote costs a bounded probe and cannot lose a holder.
 	if err == nil && elected.Source == SyncRemoteSourceEntire {
-		if legacy := LegacyCheckpointRemote(ctx); legacy != "" && !slices.Contains(res.Candidates, legacy) {
-			res.Candidates = append(res.Candidates, legacy)
+		for _, name := range append([]string{DisplacedCheckpointRemote(ctx)}, nonEntireRemotes(ctx)...) {
+			if name != "" && !slices.Contains(res.Candidates, name) {
+				res.Candidates = append(res.Candidates, name)
+			}
 		}
 	}
 	return res

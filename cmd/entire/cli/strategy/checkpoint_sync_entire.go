@@ -51,6 +51,10 @@ func redirectToEntireSyncRemote(ctx context.Context, ps *pushSettings) (elected 
 		return CheckpointSyncRemote{}, false
 	}
 	ps.entireTier = true
+	// Record what the tier displaced the first time it is in force — before
+	// delivery, unlike the announcement, because "which remote did this tier
+	// displace" is true whether or not this push lands.
+	recordDisplacedCheckpointRemote(ctx)
 	if elected.Name != ps.remote {
 		ps.syncRemote = elected.Name
 		logging.Debug(ctx, "checkpoint push redirected to the Entire remote",
@@ -87,6 +91,14 @@ const (
 type EntireSyncState struct {
 	// Remote is the Entire remote checkpoints were first delivered to.
 	Remote string `json:"remote"`
+	// DisplacedRemote is the remote the Entire tier displaced: what the default
+	// tiers (origin, else the sole, else the first) elected at the moment the
+	// tier first took over, and therefore the remote holding whatever
+	// checkpoints predate the Entire remote. Recorded because the live answer
+	// MOVES when the remote set does — LegacyCheckpointRemote prefers origin
+	// unconditionally, so adding an origin afterwards would silently swap the
+	// answer from the remote that holds the checkpoints to a new empty one.
+	DisplacedRemote string `json:"displaced_remote,omitempty"`
 	// AnnouncedAt is when the first delivery was announced; zero until then.
 	AnnouncedAt time.Time `json:"announced_at,omitempty"`
 	// Migration is the checkpoint migration command's verdict on the pre-Entire backlog.
@@ -95,6 +107,68 @@ type EntireSyncState struct {
 	MigratedFrom string `json:"migrated_from,omitempty"`
 	// MigratedAt is when Migration was recorded.
 	MigratedAt time.Time `json:"migrated_at,omitempty"`
+}
+
+// recordDisplacedCheckpointRemote persists the remote the Entire tier
+// displaced, once per clone. Write-once: a later call with a different live
+// answer must not overwrite it, because the recorded name is the whole point —
+// it is the remote that actually holds the pre-Entire checkpoints, and the live
+// answer is only a guess about it that changes with the remote set.
+//
+// Fail-soft in both directions: an unwritable state file leaves the resolver on
+// the live answer, which is what it did before, and never fails a push.
+func recordDisplacedCheckpointRemote(ctx context.Context) {
+	if st, ok := LoadEntireSyncState(ctx); ok && st.DisplacedRemote != "" {
+		return // already recorded; cheap read, no lock
+	}
+	displaced := LegacyCheckpointRemote(ctx)
+	if displaced == "" {
+		return // nothing was displaced (the Entire remote is the only one)
+	}
+	release, err := lockEntireSyncState(ctx)
+	if err != nil {
+		logging.Debug(ctx, "cannot record the displaced checkpoint remote: lock failed",
+			slog.String("error", err.Error()))
+		return
+	}
+	defer release()
+	st, _ := LoadEntireSyncState(ctx)
+	if st.DisplacedRemote != "" {
+		return // another hook won the race
+	}
+	st.DisplacedRemote = displaced
+	if err := SaveEntireSyncState(ctx, st); err != nil {
+		logging.Debug(ctx, "cannot record the displaced checkpoint remote: write failed",
+			slog.String("remote", displaced),
+			slog.String("error", err.Error()))
+		return
+	}
+	logging.Info(ctx, "recorded the remote the Entire tier displaced",
+		slog.String("displaced_remote", displaced))
+}
+
+// DisplacedCheckpointRemote names the remote that holds checkpoints predating
+// the Entire remote: the recorded one while it is still configured, else the
+// live LegacyCheckpointRemote.
+//
+// Prefer this to LegacyCheckpointRemote everywhere the answer must stay put —
+// the read chain, the OPF rewrite bound, and every message that names "the old
+// remote". The live computation is only the bootstrap: it is correct until the
+// remote set changes, and wrong the moment an origin is added, since it prefers
+// origin unconditionally.
+//
+// The fallback also covers a recorded remote that was since renamed or removed:
+// there is nothing to read from it under that name any more, so the live answer
+// is the best available.
+func DisplacedCheckpointRemote(ctx context.Context) string {
+	if st, ok := LoadEntireSyncState(ctx); ok && st.DisplacedRemote != "" {
+		if isConfiguredRemote(ctx, st.DisplacedRemote) {
+			return st.DisplacedRemote
+		}
+		logging.Debug(ctx, "recorded displaced checkpoint remote is no longer configured; using the live answer",
+			slog.String("recorded", st.DisplacedRemote))
+	}
+	return LegacyCheckpointRemote(ctx)
 }
 
 // LoadEntireSyncState reads the state. Fail-soft: a missing, unreadable, or
@@ -202,7 +276,7 @@ func announceEntireSyncRemoteOnce(ctx context.Context, remoteName string) {
 	// The displaced remote is named only while the backlog there is still
 	// unaccounted for; once the migration ledger says done or declined the
 	// line would be noise.
-	legacy := LegacyCheckpointRemote(ctx)
+	legacy := DisplacedCheckpointRemote(ctx)
 	if legacy != "" && st.Migration == EntireSyncMigrationNone {
 		fmt.Fprintf(stderrWriter,
 			"[entire] Earlier checkpoints may still be on %q; they stay readable from there.\n", legacy)

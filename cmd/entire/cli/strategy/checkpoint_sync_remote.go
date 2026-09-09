@@ -344,14 +344,7 @@ func entireRemotes(ctx context.Context) []string {
 // pointing at the backlog. Empty when every remote is Entire's or
 // there are none.
 func LegacyCheckpointRemote(ctx context.Context) string {
-	remotes := cachedRemotesInConfigOrder(ctx, readRemotesInConfigOrder)
-	entire := entireRemotesOf(remotes)
-	var legacy []string
-	for _, r := range remotes {
-		if !slices.Contains(entire, r.Name) {
-			legacy = append(legacy, r.Name)
-		}
-	}
+	legacy := nonEntireRemotes(ctx)
 	switch {
 	case len(legacy) == 0:
 		return ""
@@ -360,6 +353,23 @@ func LegacyCheckpointRemote(ctx context.Context) string {
 	default:
 		return legacy[0]
 	}
+}
+
+// nonEntireRemotes lists the configured remotes that are not Entire remotes, in
+// .git/config order. Under the Entire tier these are exactly the remotes that
+// may still hold checkpoints from before it took over, which is why the read
+// chain consults all of them rather than one computed pick (see
+// CheckpointReadRemotesWithElection).
+func nonEntireRemotes(ctx context.Context) []string {
+	remotes := cachedRemotesInConfigOrder(ctx, readRemotesInConfigOrder)
+	entire := entireRemotesOf(remotes)
+	var legacy []string
+	for _, r := range remotes {
+		if !slices.Contains(entire, r.Name) {
+			legacy = append(legacy, r.Name)
+		}
+	}
+	return legacy
 }
 
 // readRemotesInConfigOrder lists remotes with their raw URLs, distinguishing
