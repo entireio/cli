@@ -585,7 +585,7 @@ func checkCheckpointDestination(cmd *cobra.Command) {
 		fmt.Fprintf(w, "✓ Checkpoint destination: %s (your Entire remote)\n", t.entireElected)
 	}
 	if t.entireElected != "" && checkpointSyncMigrationState(ctx) == checkpointSyncMigrationPending && localCheckpointsExist(ctx) {
-		if legacy := strategy.LegacyCheckpointRemote(ctx); legacy != "" {
+		if legacy := strategy.DisplacedCheckpointRemote(ctx); legacy != "" {
 			fmt.Fprintf(w, "  Older checkpoints may still be on %s. Run 'entire checkpoint migrate' to bring them over.\n", legacy)
 		}
 	}

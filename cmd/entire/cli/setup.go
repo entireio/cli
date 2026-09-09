@@ -1453,7 +1453,7 @@ func printCheckpointSyncPointer(ctx context.Context, w io.Writer) {
 	if checkpointSyncMigrationState(ctx) != checkpointSyncMigrationPending {
 		return
 	}
-	legacy := strategy.LegacyCheckpointRemote(ctx)
+	legacy := strategy.DisplacedCheckpointRemote(ctx)
 	if legacy == "" || !localCheckpointsExist(ctx) {
 		return
 	}

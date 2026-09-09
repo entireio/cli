@@ -328,10 +328,10 @@ type checkpointSyncInfo struct {
 	// when Source is "entire": "pending" (never run), "done", or "declined".
 	// Empty for every other source so it drops out of JSON via omitempty.
 	Migration string
-	// LegacyRemote names the non-Entire remote that would have been elected
-	// without the Entire tier (origin, else the sole, else the first) — the
-	// remote older checkpoints are most likely still on. Empty unless Source
-	// is "entire" and such a remote exists.
+	// LegacyRemote names the remote the Entire tier displaced — the recorded
+	// one (strategy.DisplacedCheckpointRemote), so it does not move when a
+	// remote is added later. Empty unless Source is "entire" and such a remote
+	// exists.
 	LegacyRemote string
 }
 
@@ -388,7 +388,7 @@ func computeCheckpointSyncInfo(ctx context.Context, s *EntireSettings) checkpoin
 	}
 	if elected.Source == strategy.SyncRemoteSourceEntire {
 		info.Migration = checkpointSyncMigrationState(ctx)
-		info.LegacyRemote = strategy.LegacyCheckpointRemote(ctx)
+		info.LegacyRemote = strategy.DisplacedCheckpointRemote(ctx)
 	}
 	return info
 }

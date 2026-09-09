@@ -134,3 +134,29 @@ func TestRunStatusJSON_CheckpointSync_MigrationOmittedForOtherSources(t *testing
 		t.Errorf("the ledger field belongs to the Entire tier only, got:\n%s", stdout.String())
 	}
 }
+
+// The nudge names the remote the tier displaced, from the record, so adding a
+// remote later cannot re-point it at an empty one.
+func TestRunStatus_CheckpointSyncNudge_NamesRecordedDisplacedRemote(t *testing.T) {
+	dir := entireStatusRepo(t)
+	testutil.RunGit(t, dir, "remote", "rename", originRemoteName, "gh")
+	addLocalCheckpointRef(t, dir)
+	// The tier recorded "gh" on its first push; an origin arrived afterwards.
+	if err := os.WriteFile(filepath.Join(".git", "entire-checkpoint-sync-entire.json"),
+		[]byte(`{"remote":"entire","displaced_remote":"gh"}`), 0o600); err != nil {
+		t.Fatalf("write ledger: %v", err)
+	}
+	testutil.AddRemote(t, dir, originRemoteName, "https://github.com/acme/new.git")
+
+	var stdout bytes.Buffer
+	if err := runStatus(context.Background(), &stdout, false, false); err != nil {
+		t.Fatalf("runStatus() error = %v", err)
+	}
+	out := stdout.String()
+	if !strings.Contains(out, "older checkpoints may still be on gh") {
+		t.Errorf("expected the recorded remote, got:\n%s", out)
+	}
+	if strings.Contains(out, "may still be on origin") {
+		t.Errorf("the live answer must not win, got:\n%s", out)
+	}
+}
