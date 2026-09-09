@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/entireio/cli/cmd/entire/cli/api"
 	"github.com/entireio/cli/cmd/entire/cli/osroot"
@@ -193,7 +194,37 @@ func readCapped(repoRoot, name string, maxLen int) (string, bool) {
 	}
 	s := string(data)
 	if len(s) > maxLen {
-		s = s[:maxLen] + "\n…(truncated)…"
+		// maxLen is a byte budget, and s[:maxLen] can land inside a multi-byte
+		// rune, which would put an invalid UTF-8 sequence in the prompt this
+		// feeds. A continuation byte at the cut is exactly what "we cut
+		// mid-rune" means, so back off the continuation bytes — at most
+		// UTFMax-1 of them, which is the furthest a rune's start can be.
+		//
+		// RuneStart at the cut rather than "is s[:cut] valid UTF-8?": the
+		// question is whether OUR cut split a rune, and validating the prefix
+		// answers a different one. It walks the whole 6KB, and it answers "no"
+		// for a doc that is not UTF-8 at all (a latin-1 README) — which, chased
+		// far enough, drops the file's content in favour of a bare truncation
+		// marker. Invalidity our cut did not cause is the file's own, and the
+		// under-cap path above passes those bytes through too.
+		//
+		// The floor is explicit rather than implied by an iteration count: a
+		// count alone underflows at maxLen=1 over a file of continuation bytes,
+		// where the third pass indexes s[-1].
+		cut := maxLen
+		for lo := max(0, maxLen-(utf8.UTFMax-1)); cut > lo; cut-- {
+			if utf8.RuneStart(s[cut]) {
+				break
+			}
+		}
+		if !utf8.RuneStart(s[cut]) {
+			// No rune start in the window, so the invalidity is the file's own
+			// and not something our cut introduced. Keep the bytes: dropping
+			// them is how an earlier revision handed the caller a truncation
+			// marker and no content.
+			cut = maxLen
+		}
+		s = s[:cut] + "\n…(truncated)…"
 	}
 	return s, true
 }

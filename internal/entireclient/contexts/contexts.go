@@ -73,6 +73,15 @@ const contextsFileName = "contexts.json"
 // The path is for messages and for the flock, which takes one. Reads and writes
 // go through configRoot.
 func FilePath(configDir string) (string, error) {
+	// Before EnsurePrivateDir, not after. configRoot refuses a relative
+	// directory, but it runs at the READ, several steps past this one: by then
+	// EnsurePrivateDir has created ./<value> relative to the working directory
+	// and lockFile has put a .lock inside it. Creating that directory is the
+	// exact mistake the check exists to prevent, so it cannot happen on the way
+	// to reporting it.
+	if err := userdirs.RequireAbsoluteOverride("config dir", configDir); err != nil {
+		return "", err //nolint:wrapcheck // the error already names the directory and its value
+	}
 	if err := userdirs.EnsurePrivateDir(configDir); err != nil {
 		return "", fmt.Errorf("create config dir: %w", err)
 	}
@@ -248,12 +257,17 @@ func lockFile(path string) (func(), error) {
 // every component the caller resolved above the root, so the root contains
 // exactly one fixed name and enforces nothing. The directory is what the caller
 // actually chose (userdirs.Config(), or $ENTIRE_CONFIG_DIR), so that is the base.
+//
+// A relative configDir is refused rather than absolutized. It arrives from
+// $ENTIRE_CONFIG_DIR (see userdirs.RequireAbsoluteOverride), and resolving it
+// against the working directory would put the login tokens in a different place
+// in every process — usually inside whatever repository the command was run
+// from. filepath.Abs used to launder exactly that into a plausible-looking path.
 func configRoot(configDir string) (*os.Root, string, error) {
-	abs, err := filepath.Abs(configDir)
-	if err != nil {
-		return nil, "", fmt.Errorf("resolve config dir: %w", err)
+	if err := userdirs.RequireAbsoluteOverride("config dir", configDir); err != nil {
+		return nil, "", err //nolint:wrapcheck // the error already names the directory and its value
 	}
-	root, err := osroot.Shared(abs)
+	root, err := osroot.Shared(configDir)
 	if err != nil {
 		return nil, "", fmt.Errorf("open config dir: %w", err)
 	}

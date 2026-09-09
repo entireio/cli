@@ -141,7 +141,11 @@ func TestPushPolicyRejectsNonFastForward(t *testing.T) {
 	require.ErrorContains(t, err, "push checkpoint policy")
 }
 
-func TestResolveTargetUsesConfiguredCheckpointRemoteWithOriginOwnerMismatch(t *testing.T) {
+// A committed checkpoint_remote owned by someone else arrived with the clone,
+// and policy resolution follows FetchURL's ownership rule: the policy ref is a
+// local ref updated from the resolved remote, so an inherited setting must not
+// select where it is populated from. Resolution falls back to origin.
+func TestResolveTargetFallsBackToOriginOnCheckpointRemoteOwnerMismatch(t *testing.T) {
 	localDir, _ := initPolicyRepoWithDir(t)
 	runPolicyGit(t, localDir, "remote", "add", "origin", "git@github.com:fork/cli.git")
 	require.NoError(t, os.MkdirAll(filepath.Join(localDir, ".entire"), 0o750))
@@ -160,7 +164,7 @@ func TestResolveTargetUsesConfiguredCheckpointRemoteWithOriginOwnerMismatch(t *t
 
 	target, err := checkpointpolicy.ResolveTarget(t.Context())
 	require.NoError(t, err)
-	require.Equal(t, "git@github.com:org/checkpoints.git", target.Remote)
+	require.Equal(t, "git@github.com:fork/cli.git", target.Remote)
 	wantDir, err := filepath.EvalSymlinks(localDir)
 	require.NoError(t, err)
 	gotDir, err := filepath.EvalSymlinks(target.Dir)

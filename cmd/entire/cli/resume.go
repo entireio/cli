@@ -774,7 +774,9 @@ func checkRemoteMetadata(
 	var checkpointURL string
 	var resolveErr error
 	if hasCheckpointRemote {
-		checkpointURL, resolveErr = remote.FetchURL(ctx)
+		// The elected remote joins FetchURL's ownership vote (see
+		// strategy.LeadCheckpointReadRemote); guarded by hasCheckpointRemote.
+		checkpointURL, resolveErr = remote.FetchURL(ctx, remote.FetchURLOptions{LeadReadRemote: strategy.LeadCheckpointReadRemote(ctx)})
 		if resolveErr == nil {
 			if fetchErr := strategy.FetchMetadataBranch(ctx, checkpointURL); fetchErr == nil {
 				freshRepo, freshErr := openRepository(ctx)

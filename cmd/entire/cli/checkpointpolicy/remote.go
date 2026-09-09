@@ -41,6 +41,14 @@ type RemoteState struct {
 	Hash   plumbing.Hash
 }
 
+// ResolveTarget resolves the policy sync target via remote.FetchURL.
+//
+// Accepted divergence: the ownership check inside FetchURL votes with origin
+// only here. This package cannot resolve the elected sync remote (strategy
+// imports checkpointpolicy, so importing back would cycle), which means the
+// fork-shaped topology that only the elected remote's owner exposes is not
+// detected on this path, unlike the strategy and cli fetch paths that pass
+// strategy.LeadCheckpointReadRemote.
 func ResolveTarget(ctx context.Context) (Target, error) {
 	dir, err := paths.WorktreeRoot(ctx)
 	if err != nil {

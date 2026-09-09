@@ -10,6 +10,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
+	"github.com/entireio/cli/cmd/entire/cli/versioncheck"
 	"github.com/spf13/cobra"
 )
 
@@ -184,4 +185,16 @@ func checkpointPolicyError(message string, err error) error {
 		return NewSilentError(wrapped)
 	}
 	return wrapped
+}
+
+// unsupportedCheckpointPolicyMessage renders the upgrade advice every caller in
+// this package wants: this binary's own update command, plus the shell that
+// command needs, since the message prints it for the user to run rather than
+// running it.
+func unsupportedCheckpointPolicyMessage(policy checkpointpolicy.Policy, currentVersion string) string {
+	return checkpointpolicy.UnsupportedPolicyMessage(
+		policy,
+		versioncheck.UpdateCommandForCurrentBinary(currentVersion),
+		versioncheck.UpdateCommandShell(),
+	)
 }

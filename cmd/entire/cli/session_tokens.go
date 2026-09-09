@@ -19,6 +19,7 @@ type sessionTokensReport struct {
 	Model           string                        `json:"model,omitempty"`
 	Status          string                        `json:"status"`
 	Source          string                        `json:"source"`
+	Resolution      strategy.SessionResolution    `json:"resolution,omitempty"`
 	Tokens          *sessionTokensUsage           `json:"tokens,omitempty"`
 	Context         *sessionTokensContext         `json:"context,omitempty"`
 	Contributors    []sessionTokensContributor    `json:"contributors,omitempty"`
@@ -87,10 +88,12 @@ func newTokensCmd() *cobra.Command {
 		Short: "Show token usage and optimization recommendations for a session",
 		Long: `Show token usage and optimization recommendations for a session.
 
-When no session ID is provided, Entire reports on the most recently active
-session, preferring the current worktree and falling back to the newest session
-if no state matches this worktree. The report uses token and context data Entire
-already captured for the session.
+When no session ID is provided, Entire identifies the caller using agent session
+IDs and process ancestry, falling back to the most recently active session in
+this worktree and then elsewhere in the repository. The report includes how the
+session was resolved; ambiguous and cross-worktree matches also warn on stderr.
+Use --current to select only the current worktree's most recent session.
+The report uses token and context data Entire already captured for the session.
 
 Use --agent-brief when an agent needs compact guidance for the next step, for
 example: "Use Entire token tracking to check how this session is doing and
@@ -120,11 +123,30 @@ optimize next steps."`,
 }
 
 func runSessionTokens(ctx context.Context, cmd *cobra.Command, sessionID string, current, jsonOutput, agentBrief bool) error {
+	resolution := strategy.ResolutionNone
 	if sessionID == "" {
+		// --current pins the answer to this worktree and nothing else, which
+		// is the one thing the resolver deliberately will not do: it prefers
+		// the caller's own session wherever that session lives. Keep the flag
+		// literal, and let the default path identify the caller.
 		if current {
 			sessionID = strategy.FindMostRecentSessionInCurrentWorktree(ctx)
+			resolution = strategy.ResolutionWorktree
 		} else {
-			sessionID = strategy.FindMostRecentSession(ctx)
+			resolved := strategy.ResolveCallerSession(ctx)
+			if resolved.Found() && !resolved.Tracked {
+				return reportUntrackedCallerSession(cmd, resolved, jsonOutput || agentBrief)
+			}
+			sessionID = resolved.SessionID
+			resolution = resolved.Resolution
+			if resolution == strategy.ResolutionCallerAmbiguous {
+				fmt.Fprintln(cmd.ErrOrStderr(),
+					"[entire] Caller session is ambiguous; these tokens may belong to another session. Confirm the session ID before acting on the recommendations.")
+			}
+			if resolved.Resolution == strategy.ResolutionOtherWorktree {
+				fmt.Fprintln(cmd.ErrOrStderr(),
+					"[entire] No session is recorded in this worktree; reporting the most recent one from elsewhere in this repository. It is not this command's caller.")
+			}
 		}
 		if sessionID == "" {
 			fmt.Fprintln(cmd.OutOrStdout(), "No active session found in this worktree.")
@@ -143,6 +165,7 @@ func runSessionTokens(ctx context.Context, cmd *cobra.Command, sessionID string,
 	}
 
 	report := buildSessionTokensReport(state, sessionPhaseLabel(state))
+	report.Resolution = resolution
 	if jsonOutput {
 		return printJSON(cmd.OutOrStdout(), report)
 	}
@@ -437,6 +460,9 @@ func writeSessionTokensText(w io.Writer, report sessionTokensReport) {
 	fmt.Fprintln(w, "Session tokens")
 	fmt.Fprintln(w)
 	fmt.Fprintf(w, "Session: %s\n", report.SessionID)
+	if report.Resolution != strategy.ResolutionNone {
+		fmt.Fprintf(w, "Resolved: %s\n", sessionResolutionLabel(report.Resolution))
+	}
 	fmt.Fprintf(w, "Agent:   %s\n", report.Agent)
 	if report.Model != "" {
 		fmt.Fprintf(w, "Model:   %s\n", report.Model)
@@ -455,6 +481,9 @@ func writeSessionTokensText(w io.Writer, report sessionTokensReport) {
 func writeSessionTokensAgentBrief(w io.Writer, report sessionTokensReport) {
 	fmt.Fprintln(w, "Session token brief")
 	fmt.Fprintf(w, "Session: %s\n", report.SessionID)
+	if report.Resolution != strategy.ResolutionNone {
+		fmt.Fprintf(w, "Resolved: %s\n", sessionResolutionLabel(report.Resolution))
+	}
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, agentBriefUsageLine(report.Tokens))
 	fmt.Fprintln(w)

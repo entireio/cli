@@ -78,13 +78,24 @@ func CanSatisfyPolicy(policy Policy) bool {
 	return !UnsupportedWrite(policy) && !RequiresUpgrade(policy)
 }
 
-func UnsupportedPolicyMessage(policy Policy, updateCommand string) string {
+// UnsupportedPolicyMessage renders the upgrade advice for a policy this CLI
+// cannot satisfy. commandShell names the shell updateCommand has to run in
+// (versioncheck.UpdateCommandShell), and is "" when any shell will do: the
+// command is printed for the user to paste, and on Windows it is a PowerShell
+// one-liner that misbehaves in cmd.exe or bash, so an unnamed shell is not
+// enough to act on.
+func UnsupportedPolicyMessage(policy Policy, updateCommand, commandShell string) string {
 	if CanSatisfyPolicy(policy) {
 		return ""
 	}
 
+	upgrade := "Upgrade Entire, then rerun the command:"
+	if commandShell != "" {
+		upgrade = fmt.Sprintf("Upgrade Entire by running the following in %s, then rerun the command:", commandShell)
+	}
+
 	var b strings.Builder
-	fmt.Fprintf(&b, "[entire] This repository requires checkpoint support newer than this Entire CLI.\n[entire] Upgrade Entire, then rerun the command:\n[entire]   %s\n", updateCommand)
+	fmt.Fprintf(&b, "[entire] This repository requires checkpoint support newer than this Entire CLI.\n[entire] %s\n[entire]   %s\n", upgrade, updateCommand)
 	details := unsupportedPolicyDetails(policy)
 	if len(details) == 0 {
 		return b.String()

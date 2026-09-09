@@ -1814,6 +1814,7 @@ func TestTokensCmd_PrioritizesContextReplayHotspot(t *testing.T) {
 
 func TestTokensCmd_DefaultsToCurrentSession(t *testing.T) {
 	setupStopTestRepo(t)
+	clearCallerSessionEnv(t)
 
 	ctx := context.Background()
 	repoRoot, err := paths.WorktreeRoot(ctx)
@@ -1859,6 +1860,7 @@ func TestTokensCmd_DefaultsToCurrentSession(t *testing.T) {
 
 func TestTokensCmd_CurrentDoesNotFallbackToOtherWorktree(t *testing.T) {
 	setupStopTestRepo(t)
+	clearCallerSessionEnv(t)
 
 	ctx := context.Background()
 	now := time.Now()
@@ -3343,5 +3345,50 @@ func TestSessionPhaseLabel(t *testing.T) {
 				t.Errorf("sessionPhaseLabel() = %q, want %q", got, tt.expected)
 			}
 		})
+	}
+}
+
+// A bare `session tokens` asks the same "which session am I" question as
+// `session current`, so it resolves the caller too: the agent's own session
+// wins over the most recently active one in the shared store.
+func TestTokensCmd_PrefersTheCallersSession(t *testing.T) {
+	setupStopTestRepo(t)
+	clearCallerSessionEnv(t)
+
+	ctx := context.Background()
+	now := time.Now()
+
+	mine := makeSessionState("test-tokens-caller", session.PhaseActive)
+	mine.WorktreePath = testOtherWorktreePath
+	older := now.Add(-2 * time.Hour)
+	mine.LastInteractionTime = &older
+	mine.TokenUsage = &agent.TokenUsage{InputTokens: 1200}
+
+	decoy := makeSessionState("test-tokens-decoy", session.PhaseActive)
+	decoy.WorktreePath = testOtherWorktreePath
+	decoy.LastInteractionTime = &now
+	decoy.TokenUsage = &agent.TokenUsage{InputTokens: 9999}
+
+	for _, s := range []*strategy.SessionState{mine, decoy} {
+		if err := strategy.SaveSessionState(ctx, s); err != nil {
+			t.Fatalf("SaveSessionState() error = %v", err)
+		}
+	}
+	t.Setenv("PI_SESSION_ID", mine.SessionID)
+
+	cmd := newTokensCmd()
+	var stdout bytes.Buffer
+	cmd.SetOut(&stdout)
+	cmd.SetArgs([]string{})
+	if err := cmd.ExecuteContext(ctx); err != nil {
+		t.Fatalf("expected no error, got: %v", err)
+	}
+
+	out := stdout.String()
+	if !strings.Contains(out, "Session: test-tokens-caller") {
+		t.Fatalf("expected the caller's session, got:\n%s", out)
+	}
+	if strings.Contains(out, "test-tokens-decoy") {
+		t.Fatalf("expected the more recent decoy session to be ignored, got:\n%s", out)
 	}
 }

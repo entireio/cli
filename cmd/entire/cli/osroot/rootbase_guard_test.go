@@ -4,6 +4,8 @@ import (
 	"os/exec"
 	"strings"
 	"testing"
+
+	"github.com/entireio/cli/cmd/entire/cli/testutil"
 )
 
 // rootOpeners cover both package-level os.OpenRoot and Root.OpenRoot, plus the
@@ -44,6 +46,8 @@ var allowedRootBases = map[string]string{
 	// Trees with their own resolver, anchored at the boundary between what
 	// Entire owns and what it does not.
 	"cmd/entire/cli/agent/session_store.go":      "the agent's own GetSessionDir (opened per operation, not memoized)",
+	"cmd/entire/cli/agent/vouched_dirs.go":       "worktree root, or a symlinked agent directory the user vouched for in settings.local.json, resolved",
+	"cmd/entire/cli/strategy/hooks.go":           "git rev-parse --git-path hooks; core.hooksPath can name a directory no other anchor covers",
 	"cmd/entire/cli/plugin_store.go":             "pluginParentDir()",
 	"cmd/entire/cli/plugin_index.go":             "the per-index cache dir, opened at the clone it contains",
 	"cmd/entire/cli/plugin_install_remote.go":    "a staging dir this process just created",
@@ -71,26 +75,17 @@ var allowedRootBases = map[string]string{
 func TestRootBasesAreTrusted(t *testing.T) {
 	t.Parallel()
 
-	repoRoot, err := exec.Command("git", "rev-parse", "--show-toplevel").Output() //nolint:noctx // guard test, no cancellation needed
-	if err != nil {
-		t.Skipf("not in a git checkout: %v", err)
+	repoRoot, ok := testutil.GitGrepGuardRepoRoot(t)
+	if !ok {
+		return
 	}
 
 	var checked int
 	for _, opener := range rootOpeners {
-		// --no-color because this parses git's output: color.ui / color.grep
-		// set to `always` colorizes even into a pipe, and the escapes land
-		// inside the filename field, so every line below fails the .go suffix
-		// check and the guard reports itself stale on a perfectly good tree.
-		// That is not hypothetical -- it was read as a real staleness failure
-		// on main (#2248) before the cause was found.
-		grep := exec.Command("git", "grep", "-n", "--no-color", "--fixed-strings", "--", opener, "--", ":(glob)**/*.go") //nolint:noctx // guard test, no cancellation needed
-		grep.Dir = strings.TrimSpace(string(repoRoot))
-		out, grepErr := grep.Output()
-		if grepErr != nil {
-			t.Fatalf("git grep for %q found nothing, which cannot be right: %v", opener, grepErr)
-		}
-		for line := range strings.SplitSeq(strings.TrimSpace(string(out)), "\n") {
+		// testutil.GitGrepGuard owns --untracked, --no-color and the repo-selector
+		// scrubbing, and explains why each is load-bearing for a guard like this.
+		out := testutil.GitGrepGuard(t, repoRoot, "-n", "--fixed-strings", "--", opener, "--", ":(glob)**/*.go")
+		for line := range strings.SplitSeq(strings.TrimSpace(out), "\n") {
 			if line == "" {
 				continue
 			}
@@ -134,7 +129,7 @@ func TestRootBasesAreTrusted(t *testing.T) {
 	}
 
 	for file := range allowedRootBases {
-		if !fileStillOpensARoot(t, strings.TrimSpace(string(repoRoot)), file) {
+		if !fileStillOpensARoot(t, repoRoot, file) {
 			t.Errorf("%s is in allowedRootBases but no longer opens a root; remove the entry", file)
 		}
 	}
@@ -146,8 +141,12 @@ func TestRootBasesAreTrusted(t *testing.T) {
 func fileStillOpensARoot(t *testing.T, repoRoot, file string) bool {
 	t.Helper()
 	for _, opener := range rootOpeners {
-		grep := exec.Command("git", "grep", "-q", "--no-color", "--fixed-strings", "--", opener, "--", file) //nolint:noctx // guard test, no cancellation needed
+		// -q, so this one cannot use GitGrepGuard: a miss is the expected answer
+		// here, not a stale pattern. The flags still have to match it, which is
+		// what makes the shared helper's doc comment the place they are explained.
+		grep := exec.Command("git", "grep", "-q", "--untracked", "--no-color", "--fixed-strings", "--", opener, "--", file) //nolint:noctx // guard test, no cancellation needed
 		grep.Dir = repoRoot
+		grep.Env = testutil.GuardGitEnv()
 		if grep.Run() == nil {
 			return true
 		}

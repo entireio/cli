@@ -143,3 +143,57 @@ func TestEnsurePrivateDir_PreservesOwnerBitsWhileTightening(t *testing.T) {
 		t.Errorf("mode = %04o, want 0500 (group/other cleared, owner untouched)", got)
 	}
 }
+
+// A relative override resolves against the working directory, so the same
+// environment names a different directory in every process. For the config
+// directory that directory holds bearer tokens, and it is usually inside
+// whatever repository the command was run from.
+func TestRequireAbsoluteOverride(t *testing.T) {
+	t.Parallel()
+
+	abs := "/tmp/absolute"
+	if runtime.GOOS == goosWindows {
+		abs = `C:\tmp\absolute`
+	}
+	if err := userdirs.RequireAbsoluteOverride("ENTIRE_CONFIG_DIR", abs); err != nil {
+		t.Errorf("RequireAbsoluteOverride(%q) = %v, want nil", abs, err)
+	}
+
+	for _, value := range []string{"relative/dir", ".", "", "./cfg"} {
+		err := userdirs.RequireAbsoluteOverride("ENTIRE_CONFIG_DIR", value)
+		if err == nil {
+			t.Errorf("RequireAbsoluteOverride(%q) = nil, want an error", value)
+			continue
+		}
+		// The name has to be the one the user can set, or the message tells
+		// them nothing actionable.
+		if !strings.Contains(err.Error(), "ENTIRE_CONFIG_DIR") {
+			t.Errorf("RequireAbsoluteOverride(%q) error = %q, want it to name the variable", value, err)
+		}
+	}
+}
+
+// The string forms cannot report, so the roots are where the refusal has to
+// land — and it must land before the directory is created, since creating one
+// under a cwd-relative path is the mistake being reported.
+func TestConfigRoot_RefusesRelativeOverride(t *testing.T) {
+	t.Setenv("ENTIRE_CONFIG_DIR", "relative-config")
+
+	if _, err := userdirs.ConfigRoot(); err == nil {
+		t.Fatal("ConfigRoot() = nil error, want a rejected override")
+	}
+	if _, err := os.Stat("relative-config"); err == nil {
+		t.Error("ConfigRoot() created the directory it was refusing")
+	}
+}
+
+func TestCacheRoot_RefusesRelativeOverride(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", "relative-cache")
+
+	if _, err := userdirs.CacheRoot(); err == nil {
+		t.Fatal("CacheRoot() = nil error, want a rejected override")
+	}
+	if _, err := os.Stat("relative-cache"); err == nil {
+		t.Error("CacheRoot() created the directory it was refusing")
+	}
+}
