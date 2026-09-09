@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
+	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
@@ -127,7 +128,7 @@ func liveSessionFor(t *testing.T, model string, usage *agent.TokenUsage) *strate
 func TestSessionTokenTTLKnown_IsTrueForLiveState(t *testing.T) {
 	t.Parallel()
 
-	if !sessionTokenTTLKnown() {
+	if !sessionTokenTTLKnown("Claude Code") {
 		t.Error("live state is written by the running binary, which records the 1h split whenever the agent reports it, so absence means zero")
 	}
 }
@@ -652,5 +653,67 @@ func TestSessionTokensText_SubagentFigureNeverDisappears(t *testing.T) {
 				t.Errorf("subagent figure %q vanished from the text report:\n%s", want, buf.String())
 			}
 		})
+	}
+}
+
+// sessionTokenTTLKnown used to return true unconditionally, on the reasoning
+// that the running binary just parsed the transcript so an absent 1-hour
+// figure means zero. That holds only for agents whose parser READS the field.
+// Claude Code and Pi do; Factory AI Droid reads cache_creation_input_tokens
+// and has no 1h field at all, so its CacheCreation1hTokens is always zero —
+// and treating that as "no 1-hour writes" prices every cache write at the 5m
+// rate (1.25x) when the real ones bill at 2x, silently understating cost.
+func TestSessionTokenTTLKnown_OnlyForAgentsThatRecordTheSplit(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		agent types.AgentType
+		want  bool
+	}{
+		{"Claude Code", true},
+		{"Pi", true},
+		{"Factory AI Droid", false},
+		{"Cursor", false},
+		{"", false},
+	} {
+		t.Run(string(tc.agent), func(t *testing.T) {
+			t.Parallel()
+			if got := sessionTokenTTLKnown(tc.agent); got != tc.want {
+				t.Errorf("sessionTokenTTLKnown(%q) = %v, want %v", tc.agent, got, tc.want)
+			}
+		})
+	}
+}
+
+// The consequence, end to end: an Anthropic-model session on an agent that
+// cannot report the TTL split must withhold cost rather than price the writes
+// at the cheaper rate.
+func TestBuildSessionTokensReport_UnpricedWhenAgentCannotReportTheTTLSplit(t *testing.T) {
+	t.Parallel()
+
+	usage := &agent.TokenUsage{
+		InputTokens: 10000, CacheCreationTokens: 50000, CacheReadTokens: 100000, OutputTokens: 5000,
+	}
+
+	droid := buildSessionTokensReport(&strategy.SessionState{
+		SessionID: "droid", AgentType: "Factory AI Droid",
+		ModelName: "claude-sonnet-4.6", TokenUsage: usage,
+	}, "active")
+	if droid.Classes == nil {
+		t.Fatal("volume shares are still expected")
+	}
+	if droid.Classes.Priced {
+		t.Error("an agent that cannot report the 1h split must not have its cache writes priced at the 5m rate")
+	}
+	if droid.Classes.UnpricedReason != unpricedUnknownTTL {
+		t.Errorf("reason = %q, want %q", droid.Classes.UnpricedReason, unpricedUnknownTTL)
+	}
+
+	claude := buildSessionTokensReport(&strategy.SessionState{
+		SessionID: "claude", AgentType: "Claude Code",
+		ModelName: "claude-sonnet-4.6", TokenUsage: usage,
+	}, "active")
+	if !claude.Classes.Priced {
+		t.Errorf("Claude Code records the split, so zero 1h writes means zero; reason was %q", claude.Classes.UnpricedReason)
 	}
 }

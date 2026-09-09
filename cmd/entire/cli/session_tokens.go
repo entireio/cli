@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
+	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
 	"github.com/spf13/cobra"
 )
@@ -216,7 +217,7 @@ func buildSessionTokensReport(state *strategy.SessionState, status string) sessi
 
 	if state.TokenUsage != nil {
 		weights, unpricedReason := tokenWeightsForSession(state.ModelName, state.TokenUsage)
-		if classes, ok := tokenClassShares(state.TokenUsage, weights, sessionTokenTTLKnown()); ok {
+		if classes, ok := tokenClassShares(state.TokenUsage, weights, sessionTokenTTLKnown(state.AgentType)); ok {
 			// tokenClassShares sees only empty weights and names the generic
 			// reason; the resolver is the one that knows which case it was.
 			if !classes.Priced && unpricedReason != "" {
@@ -308,13 +309,28 @@ func formatDurationShort(d time.Duration) string {
 }
 
 // sessionTokenTTLKnown reports whether an absent 1-hour cache-write figure can
-// be trusted to mean zero on live state. It can: the figure is written by the
-// same binary now reading it, whenever the agent reports it, so absence means
-// the agent reported none — not "this CLI did not record it". A checkpoint
-// cannot assume that, which is what checkpointTokenTTLKnown's version check is
-// for.
-func sessionTokenTTLKnown() bool {
-	return true
+// be trusted to mean zero on live state — which depends on the agent, not on
+// the CLI version a checkpoint was written by.
+//
+// An earlier version returned true unconditionally, reasoning that the figure
+// is written by the same binary now reading it, so absence means the provider
+// reported none. That holds only for a parser that READS the field. Claude
+// Code and Pi do; Factory AI Droid reads cache_creation_input_tokens and has no
+// 1-hour field at all, so its figure is always zero — and treating that as "no
+// 1-hour writes" prices every cache write at the 5-minute rate (1.25x) when the
+// real ones bill at 2x, silently understating cost. Agents declare the property
+// via agent.CacheWriteTTLRecorder; anything that does not is treated the way a
+// legacy checkpoint is, with cost withheld rather than guessed.
+func sessionTokenTTLKnown(agentType types.AgentType) bool {
+	if agentType == "" {
+		return false
+	}
+	ag, err := agent.GetByAgentType(agentType)
+	if err != nil {
+		return false
+	}
+	_, ok := agent.AsCacheWriteTTLRecorder(ag)
+	return ok
 }
 
 func buildSessionTokensUsage(usage *agent.TokenUsage) *sessionTokensUsage {
