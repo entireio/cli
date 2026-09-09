@@ -262,6 +262,9 @@ func runCheckpointMigrate(ctx context.Context, w, errW io.Writer, opts checkpoin
 			return chooseErr
 		}
 		if chosen == "" {
+			if len(plan.Candidates) > 0 && in.Interactive {
+				return finishAfterDeclinedChoice(w, sty, in, plan)
+			}
 			return finishReportOnly(w, sty, in, plan)
 		}
 		in.Opts.To = chosen
@@ -272,8 +275,10 @@ func runCheckpointMigrate(ctx context.Context, w, errW io.Writer, opts checkpoin
 		return finishReportOnly(w, sty, in, plan)
 	}
 
-	// Second pass: inventory every remote, then plan for real.
-	inventorySyncRemotes(ctx, eng, &in)
+	// Second pass: inventory the remotes the plan can involve, then plan for
+	// real. With --from, only the destination and the named remotes are
+	// listed; the user excluded the rest.
+	inventorySyncRemotes(ctx, eng, &in, plan.Destination)
 	plan = planCheckpointSync(in)
 
 	if in.Opts.JSON && !in.Opts.Yes {
@@ -282,6 +287,9 @@ func runCheckpointMigrate(ctx context.Context, w, errW io.Writer, opts checkpoin
 	if !in.Opts.JSON {
 		renderSyncHeader(w, sty, in, plan)
 		renderSyncReason(w, sty, plan)
+		if in.Opts.To != "" && !plan.WriteDestinationSetting && plan.Destination == in.Opts.To {
+			fmt.Fprintln(w, "  "+formatDestinationUnchanged(plan.Destination, plan.DestinationSource))
+		}
 	}
 	if plan.ExitError != nil {
 		return finishReportOnly(w, sty, in, plan)
@@ -335,10 +343,15 @@ func runCheckpointMigrate(ctx context.Context, w, errW io.Writer, opts checkpoin
 }
 
 // finishReportOnly renders a plan that will not be executed and returns its
-// exit error (nil for advisory states).
+// exit error (nil for advisory states). An ExitError with no Reason is a plain
+// flag error (unknown --to, --from naming the destination) and is returned
+// as-is so main prints it; every other exit error was already rendered.
 func finishReportOnly(w io.Writer, sty statusStyles, in syncInputs, plan syncPlan) error {
 	if in.Opts.JSON {
 		return errors.Join(writeSyncJSON(w, in, plan, nil), silentIfSet(plan.ExitError))
+	}
+	if plan.ExitError != nil && plan.Reason == "" {
+		return plan.ExitError
 	}
 	if plan.State == syncStateNoRemotes || plan.State == syncStateDedicatedRemote {
 		fmt.Fprintln(w, sty.render(sty.bold, "Checkpoint migration"))
@@ -348,6 +361,16 @@ func finishReportOnly(w io.Writer, sty statusStyles, in syncInputs, plan syncPla
 		renderSyncReason(w, sty, plan)
 		renderSyncNext(w, sty, plan)
 	}
+	return silentIfSet(plan.ExitError)
+}
+
+// finishAfterDeclinedChoice prints only the footer: the header and reason were
+// already rendered above the picker the user just declined.
+func finishAfterDeclinedChoice(w io.Writer, sty statusStyles, in syncInputs, plan syncPlan) error {
+	if in.Opts.JSON {
+		return finishReportOnly(w, sty, in, plan)
+	}
+	renderSyncNext(w, sty, plan)
 	return silentIfSet(plan.ExitError)
 }
 
@@ -477,6 +500,7 @@ func gatherLocalSyncInputs(ctx context.Context, eng syncEngine, repo *git.Reposi
 	}
 	in.LocalRefs = refs
 	in.LocalCheckpoints = len(refs)
+	in.HasLocalV1 = hasLocalV1Branch(ctx, repo)
 	if !in.PrimaryIsRefs {
 		// On git-branch the checkpoints live on the v1 branch; a dry-run
 		// conversion counts them without writing anything.
@@ -497,18 +521,40 @@ func gatherLocalSyncInputs(ctx context.Context, eng syncEngine, repo *git.Reposi
 	return in, nil
 }
 
-// inventorySyncRemotes lists every remote (one ls-remote each, bounded by the
-// engine's foreground budget). A failed listing is recorded on the remote so
-// the planner reports it and never removes from it.
-func inventorySyncRemotes(ctx context.Context, eng syncEngine, in *syncInputs) {
+// inventorySyncRemotes lists the remotes the plan can involve (one ls-remote
+// each, bounded by the engine's foreground budget) and keeps the advertised
+// hashes, so execution acts on the listing the user consented to rather than
+// dialing again. With --from, remotes the user excluded are not listed at
+// all. A failed listing is recorded on the remote so the planner reports it
+// and never removes from it.
+func inventorySyncRemotes(ctx context.Context, eng syncEngine, in *syncInputs, destination string) {
 	for i := range in.Remotes {
-		inv, err := eng.Inventory(ctx, in.Remotes[i].Name)
+		name := in.Remotes[i].Name
+		if len(in.Opts.From) > 0 && name != destination && !slices.Contains(in.Opts.From, name) {
+			continue
+		}
+		inv, err := eng.Inventory(ctx, name)
 		if err != nil {
 			in.Remotes[i].Inventory = &syncInventory{Err: err}
 			continue
 		}
-		in.Remotes[i].Inventory = &syncInventory{Refs: inv.RefNames(), HasV1Branch: !inv.V1Branch.IsZero()}
+		in.Remotes[i].Inventory = &syncInventory{
+			Refs:        inv.RefNames(),
+			HasV1Branch: !inv.V1Branch.IsZero(),
+			Hashes:      inv.Refs,
+			V1Tip:       inv.V1Branch,
+		}
 	}
+}
+
+// storedInventory rebuilds the engine's inventory for a remote from the
+// listing the planner used.
+func storedInventory(in syncInputs, name string) (strategy.CheckpointInventory, bool) {
+	r, ok := in.remote(name)
+	if !ok || r.Inventory == nil || r.Inventory.Err != nil {
+		return strategy.CheckpointInventory{}, false
+	}
+	return strategy.CheckpointInventory{Remote: name, Refs: r.Inventory.Hashes, V1Branch: r.Inventory.V1Tip}, true
 }
 
 // syncRun carries the state one execution threads through its steps.
@@ -526,10 +572,14 @@ type syncRun struct {
 	// remote that was not read in full.
 	sources     []string
 	inventories map[string]strategy.CheckpointInventory
-	// convertedAll reports that every v1 checkpoint became a ref, which is what
-	// makes deleting the old v1 branch safe.
-	convertedAll bool
-	verified     []plumbing.ReferenceName
+	// v1Converted reports that a local v1 branch was converted to refs in this
+	// run; storeIsRefs that git-refs is (now) the primary store. Deleting an
+	// old remote's v1 branch needs both: refs on the destination are what
+	// readers of a git-refs store see, and a git-branch reader would look for
+	// the branch this run never pushed.
+	v1Converted bool
+	storeIsRefs bool
+	verified    []plumbing.ReferenceName
 }
 
 func (r *syncRun) warn(lines ...string) {
@@ -546,10 +596,10 @@ func (r *syncRun) warn(lines ...string) {
 func executeSyncPlan(ctx context.Context, w, errW io.Writer, sty statusStyles, eng syncEngine, repo *git.Repository, in syncInputs, plan syncPlan) (*checkpointMigrateResult, error) {
 	r := &syncRun{
 		out: w, errW: errW, sty: sty, eng: eng, repo: repo, in: in, plan: plan,
-		res:          &checkpointMigrateResult{Fetched: map[string]int{}, Removed: map[string]int{}},
-		sources:      plan.Sources,
-		inventories:  map[string]strategy.CheckpointInventory{},
-		convertedAll: true,
+		res:         &checkpointMigrateResult{Fetched: map[string]int{}, Removed: map[string]int{}},
+		sources:     plan.Sources,
+		inventories: map[string]strategy.CheckpointInventory{},
+		storeIsRefs: in.PrimaryIsRefs,
 	}
 	quiet := in.Opts.JSON
 	if quiet {
@@ -615,9 +665,11 @@ func (r *syncRun) writeDestination(ctx context.Context) {
 func (r *syncRun) hydrateSources(ctx context.Context) {
 	var kept []string
 	for _, name := range r.plan.Sources {
-		inv, err := r.eng.Inventory(ctx, name)
-		if err != nil {
-			r.warn(formatHydrateFailed(name, err))
+		inv, ok := storedInventory(r.in, name)
+		if !ok {
+			// The planner only makes a source of a remote it listed; reaching
+			// here means the listing failed after all, so leave it alone.
+			r.warn(formatHydrateFailed(name, errors.New("remote was not listed")))
 			continue
 		}
 		r.inventories[name] = inv
@@ -643,7 +695,7 @@ func (r *syncRun) hydrateSources(ctx context.Context) {
 // convert turns a local v1 branch (any backend) into refs, then flips the
 // primary store when the plan asks for it.
 func (r *syncRun) convert(ctx context.Context) error {
-	if hasLocalV1Branch(ctx, r.repo) {
+	if r.plan.hasStep(stepConvertV1) && hasLocalV1Branch(ctx, r.repo) {
 		update, stop := startUpdatableSpinner(r.out, formatConvertStart(r.in.LocalCheckpoints))
 		mres, err := r.eng.Convert(ctx, r.repo, false)
 		if err != nil {
@@ -653,7 +705,7 @@ func (r *syncRun) convert(ctx context.Context) error {
 		update(formatConvertDone(len(mres.Migrated), mres.Skipped))
 		stop(true)
 		r.res.Converted = len(mres.Migrated)
-		r.convertedAll = mres.Total == len(mres.Migrated)+mres.Skipped
+		r.v1Converted = true
 	}
 	if !r.plan.hasStep(stepConvertBackend) {
 		return nil
@@ -666,6 +718,7 @@ func (r *syncRun) convert(ctx context.Context) error {
 		return printedError(r.errW, fmt.Errorf("set checkpoint backend: %w", err))
 	}
 	r.res.BackendSet = true
+	r.storeIsRefs = true
 	if target, _ := settingsTargetFile(ctx, false, false); target == settings.EntireSettingsFile {
 		fmt.Fprintln(r.out, r.sty.render(r.sty.dim, "  "+formatCommitSettingsHint()))
 	}
@@ -732,7 +785,13 @@ func (r *syncRun) verify(ctx context.Context) error {
 // own consent line. It returns the one-line note about copies that remain (or
 // "" when every source was cleaned) and an error when a deletion failed.
 func (r *syncRun) removeFromSources(ctx context.Context) (string, error) {
-	out, sty, eng, in, sources, inventories, verified, convertedAll, res := r.out, r.sty, r.eng, r.in, r.sources, r.inventories, r.verified, r.convertedAll, r.res
+	out, sty, eng, in, sources, inventories, verified, res := r.out, r.sty, r.eng, r.in, r.sources, r.inventories, r.verified, r.res
+	// The old v1 branch goes only when this run converted it to refs AND
+	// git-refs is the store readers will use; otherwise (ENTIRE_CHECKPOINTS_PRIMARY
+	// pinning git-branch, or no conversion) a git-branch reader would look for
+	// a branch the destination never received.
+	v1Deletable := r.v1Converted && r.storeIsRefs
+	v1Kept := false
 	isVerified := make(map[plumbing.ReferenceName]bool, len(verified))
 	for _, r := range verified {
 		isVerified[r] = true
@@ -748,7 +807,10 @@ func (r *syncRun) removeFromSources(ctx context.Context) (string, error) {
 			}
 		}
 		hasV1 := !inv.V1Branch.IsZero()
-		deleteV1 := hasV1 && convertedAll
+		deleteV1 := hasV1 && v1Deletable
+		if hasV1 && !deleteV1 {
+			v1Kept = true
+		}
 		if len(refs) == 0 && !deleteV1 {
 			remaining = append(remaining, name)
 			continue
@@ -796,6 +858,9 @@ func (r *syncRun) removeFromSources(ctx context.Context) (string, error) {
 	note := ""
 	if len(remaining) > 0 && firstErr == nil {
 		note = formatRemovalDeclined(strings.Join(remaining, ", "))
+	}
+	if v1Kept && firstErr == nil {
+		fmt.Fprintln(out, sty.render(sty.dim, "  The "+syncV1BranchName+" branch stays on the old remote: this repo still reads the git-branch store."))
 	}
 	return note, firstErr
 }

@@ -100,8 +100,13 @@ func formatTokenCount(n int) string {
 	if n < 1000 {
 		return strconv.Itoa(n)
 	}
+	// Pick the unit by what the rounded value reads as: 999,999 is "1M", not
+	// "1000k", and 2.1e9 is "2.1B", not "2100M".
 	unit, divisor := "k", 1000.0
-	if n >= 1_000_000 {
+	switch {
+	case n >= 999_950_000:
+		unit, divisor = "B", 1_000_000_000.0
+	case n >= 999_950:
 		unit, divisor = "M", 1_000_000.0
 	}
 	s := fmt.Sprintf("%.1f", float64(n)/divisor)

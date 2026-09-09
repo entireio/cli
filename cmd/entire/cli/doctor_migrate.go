@@ -123,31 +123,24 @@ To also move checkpoints to a different remote and clean up the old one, use
 // the guarantee does not depend on where a parent command happens to configure
 // redaction — cobra does not inherit PreRunE, and doctor's lives on its own.
 func pushMigratedRefs(ctx context.Context, out io.Writer, repo *git.Repository, pushRemote string) error {
-	_, err := pushQueuedCheckpointRefsReporting(ctx, out, repo, pushRemote)
-	return err
-}
-
-// pushQueuedCheckpointRefsReporting flushes the queued checkpoint refs to
-// pushRemote and prints the outcome, returning how many landed. Shared by
-// `doctor migrate-checkpoints` and `checkpoint migrate`, which both need the
-// redaction precondition and the same three-way report (disabled / already
-// empty / pushed). An OPF Ctrl-C reports as a clean decline (nothing shipped,
-// refs still queued) rather than an error, matching confirmDoctorFix.
-func pushQueuedCheckpointRefsReporting(ctx context.Context, out io.Writer, repo *git.Repository, pushRemote string) (int, error) {
 	if err := strategy.EnsureRedactionConfigured(ctx); err != nil {
-		return 0, fmt.Errorf("configure redaction before pushing: %w", err)
+		return fmt.Errorf("configure redaction before pushing: %w", err)
 	}
 
 	pushed, pushDisabled, err := strategy.PushQueuedCheckpointRefs(ctx, repo, pushRemote)
 	if err != nil {
 		if errors.Is(err, context.Canceled) {
-			return pushed, NewSilentError(err)
+			return NewSilentError(err)
 		}
+		// Ctrl-C at the OPF prompt is the same gesture as declining the push
+		// prompt, and lands in the same place: nothing shipped, refs still
+		// queued. confirmDoctorFix reports that as a clean decline, so this
+		// must not report it as a failure.
 		if errors.Is(err, strategy.ErrOPFAbortedByUser) {
 			fmt.Fprintln(out, "OPF cancelled; refs stay queued for the next push.")
-			return pushed, nil
+			return nil
 		}
-		return pushed, fmt.Errorf("push migrated refs: %w", err)
+		return fmt.Errorf("push migrated refs: %w", err)
 	}
 	switch {
 	case pushDisabled:
@@ -161,7 +154,7 @@ func pushQueuedCheckpointRefsReporting(ctx context.Context, out io.Writer, repo 
 	default:
 		fmt.Fprintf(out, "Pushed %d checkpoint ref(s).\n", pushed)
 	}
-	return pushed, nil
+	return nil
 }
 
 // resolveMigratePushRemote picks the remote migrated refs push to: the

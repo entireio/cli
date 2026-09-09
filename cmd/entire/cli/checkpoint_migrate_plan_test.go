@@ -177,13 +177,29 @@ func TestPlanCheckpointSync_Destinations(t *testing.T) {
 				in.Remotes[0].Inventory = emptyInventory()
 				in.Remotes[1].Inventory = &syncInventory{Refs: []plumbing.ReferenceName{planRefA, planRefB}}
 				in.QueuedRefs = 0
+				in.Opts.Yes = true
 				return in
 			}(),
 			check: func(t *testing.T, plan syncPlan) {
 				assert.Equal(t, syncStateAlreadyHome, plan.State)
 				assert.Equal(t, "✓ Checkpoints live on entire (your Entire remote). Nothing to do.", plan.Reason)
-				assert.Equal(t, []syncStep{stepRecordMarker}, plan.Steps)
+				assert.Equal(t, []syncStep{stepRecordMarker}, plan.Steps, "with --yes the verdict is recorded")
 				assert.Empty(t, plan.NextCommand, "a marker write alone is not a runnable plan")
+			},
+		},
+		{
+			name: "marker pending already home without consent writes nothing (n)",
+			in: func() syncInputs {
+				in := migrateInputs()
+				in.Remotes[0].Inventory = emptyInventory()
+				in.Remotes[1].Inventory = &syncInventory{Refs: []plumbing.ReferenceName{planRefA, planRefB}}
+				in.QueuedRefs = 0
+				return in
+			}(),
+			check: func(t *testing.T, plan syncPlan) {
+				assert.Equal(t, syncStateAlreadyHome, plan.State)
+				assert.Empty(t, plan.Steps, "a bare non-interactive run writes nothing, the ledger included")
+				assert.Contains(t, plan.Notes, "Run entire checkpoint migrate --yes to record this, so entire status stops suggesting it.")
 			},
 		},
 		{
@@ -229,8 +245,9 @@ func TestPlanCheckpointSync_Destinations(t *testing.T) {
 				assert.Equal(t, syncSourceEntire, plan.DestinationSource)
 				assert.False(t, plan.WriteDestinationSetting)
 				assert.Equal(t, []string{"origin"}, plan.Sources)
-				assert.Equal(t, []syncStep{stepHydrate, stepRequeue, stepPublish, stepVerify, stepRemove, stepRecordMarker}, plan.Steps)
-				assert.Equal(t, "origin (github.com/o/r) holds 128 checkpoint refs and the entire/checkpoints/v1 branch. "+
+				assert.Equal(t, []syncStep{stepHydrate, stepConvertV1, stepRequeue, stepPublish, stepVerify, stepRemove, stepRecordMarker}, plan.Steps)
+				assert.Equal(t, "The entire/checkpoints/v1 branch is converted to refs first. "+
+					"origin (github.com/o/r) holds 128 checkpoint refs and the entire/checkpoints/v1 branch. "+
 					"They will be copied to entire, verified, and — if you agree — removed from origin.", plan.Reason)
 				assert.Equal(t, "entire checkpoint migrate --yes", plan.NextCommand)
 				assert.Equal(t, []syncAdvice{
@@ -394,7 +411,7 @@ func TestPlanCheckpointSync_Migrations(t *testing.T) {
 			}(),
 			check: func(t *testing.T, plan syncPlan) {
 				assert.Equal(t, syncStateMigrate, plan.State)
-				assert.Equal(t, []syncStep{stepHydrate, stepConvertBackend, stepPublish, stepVerify, stepRemove, stepRecordMarker}, plan.Steps)
+				assert.Equal(t, []syncStep{stepHydrate, stepConvertV1, stepConvertBackend, stepRequeue, stepPublish, stepVerify, stepRemove, stepRecordMarker}, plan.Steps)
 				assert.True(t, strings.HasPrefix(plan.Reason, "This repo still uses the shared entire/checkpoints/v1 branch. Each checkpoint will be converted to its own ref and git-refs made the primary store (.entire/settings.json). "), plan.Reason)
 			},
 		},
@@ -407,7 +424,7 @@ func TestPlanCheckpointSync_Migrations(t *testing.T) {
 				return in
 			}(),
 			check: func(t *testing.T, plan syncPlan) {
-				assert.Contains(t, plan.Reason, "ENTIRE_CHECKPOINTS_PRIMARY is set, so the backend is not written to settings.")
+				assert.Contains(t, plan.Reason, "ENTIRE_CHECKPOINTS_PRIMARY is set, so the backend is not written to settings and the old entire/checkpoints/v1 branch is left in place.")
 				assert.True(t, plan.hasStep(stepConvertBackend))
 			},
 		},
@@ -524,28 +541,6 @@ func TestPlanCheckpointSync_Migrations(t *testing.T) {
 			},
 		},
 	})
-}
-
-func TestLegacyElectedRemote(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name    string
-		remotes []syncRemoteInfo
-		want    string
-	}{
-		{"origin wins", []syncRemoteInfo{{Name: "fork"}, {Name: "origin"}, {Name: testEntireRemote, IsEntire: true}}, "origin"},
-		{"sole plain remote", []syncRemoteInfo{{Name: testEntireRemote, IsEntire: true}, {Name: "fork"}}, "fork"},
-		{"first plain remote in config order", []syncRemoteInfo{{Name: "b"}, {Name: "a"}}, "b"},
-		{"only entire remotes", []syncRemoteInfo{{Name: testEntireRemote, IsEntire: true}}, ""},
-		{"none", nil, ""},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			assert.Equal(t, tt.want, legacyElectedRemote(syncInputs{Remotes: tt.remotes}))
-		})
-	}
 }
 
 func TestNextSyncCommand(t *testing.T) {
@@ -697,7 +692,7 @@ func TestRenderSyncReasonAndNext(t *testing.T) {
 	renderSyncReason(&buf, sty, plan)
 	renderSyncNext(&buf, sty, plan)
 	got := buf.String()
-	assert.Contains(t, got, "\n  origin (github.com/o/r) holds 128 checkpoint refs")
+	assert.Contains(t, got, "origin (github.com/o/r) holds 128 checkpoint refs")
 	assert.Contains(t, got, "\n  Nothing was changed. To run this plan:\n    entire checkpoint migrate --yes\n")
 	assert.Contains(t, got, "  To also delete the old copies from origin after verification:\n    entire checkpoint migrate --yes --remove\n")
 
@@ -718,14 +713,16 @@ func TestRenderDryRunSteps(t *testing.T) {
 	in.Opts.To = testEntireRemote
 	in.Elected = syncElection{Name: "origin", Source: syncSourceConfig}
 	plan := planCheckpointSync(in)
-	require.Equal(t, []syncStep{stepWriteDestination, stepHydrate, stepConvertBackend, stepPublish, stepVerify, stepRemove, stepRecordMarker}, plan.Steps)
+	require.Equal(t, []syncStep{stepWriteDestination, stepHydrate, stepConvertV1, stepConvertBackend, stepRequeue, stepPublish, stepVerify, stepRemove, stepRecordMarker}, plan.Steps)
 
 	var buf bytes.Buffer
 	renderDryRunSteps(&buf, in, plan)
 	assert.Equal(t, "\n"+
 		"  Would record entire as strategy_options.checkpoint_push_remote in .entire/settings.local.json\n"+
 		"  Would fetch 128 checkpoint refs from origin\n"+
-		"  Would convert 142 checkpoints to refs and set the backend to git-refs (.entire/settings.json)\n"+
+		"  Would convert 142 checkpoints to refs\n"+
+		"  Would set the checkpoint store to git-refs (.entire/settings.json)\n"+
+		"  Would queue every local checkpoint ref for push\n"+
 		"  Would push 142 checkpoint refs to entire\n"+
 		"  Would verify them on entire\n"+
 		"  Would delete 128 checkpoint refs and the entire/checkpoints/v1 branch from origin (github.com/o/r) only with --remove\n",
@@ -736,14 +733,26 @@ func TestRenderDryRunSteps(t *testing.T) {
 	plan = planCheckpointSync(in)
 	buf.Reset()
 	renderDryRunSteps(&buf, in, plan)
-	assert.Contains(t, buf.String(), "  Would convert 142 checkpoints to refs (backend not written: ENTIRE_CHECKPOINTS_PRIMARY is set)\n")
+	assert.Contains(t, buf.String(), "  Would leave the store on git-branch (ENTIRE_CHECKPOINTS_PRIMARY is set) and keep the old entire/checkpoints/v1 branch\n")
+	assert.NotContains(t, buf.String(), "Would convert", "no v1 anywhere once the old remote's inventory is empty")
 
 	in.PrimaryIsRefs = true
 	plan = planCheckpointSync(in)
 	buf.Reset()
 	renderDryRunSteps(&buf, in, plan)
-	assert.Contains(t, buf.String(), "  Would queue 142 checkpoint refs for push\n", "requeue shows when the store is already git-refs")
+	assert.Contains(t, buf.String(), "  Would queue every local checkpoint ref for push\n", "requeue is planned whenever data moves")
 	assert.NotContains(t, buf.String(), "Would convert")
+
+	// A git-refs repo with a leftover local v1 branch: the conversion is a
+	// listed step, not a surprise at run time.
+	in.HasLocalV1 = true
+	plan = planCheckpointSync(in)
+	buf.Reset()
+	renderDryRunSteps(&buf, in, plan)
+	assert.Contains(t, buf.String(), "  Would convert 142 checkpoints to refs\n")
+	assert.True(t, plan.hasStep(stepConvertV1))
+	assert.False(t, plan.hasStep(stepConvertBackend))
+	assert.True(t, strings.HasPrefix(plan.Reason, "The entire/checkpoints/v1 branch is converted to refs first. "), plan.Reason)
 }
 
 func TestRenderSyncCelebration(t *testing.T) {
@@ -766,7 +775,9 @@ func TestRenderSyncCelebration(t *testing.T) {
 	renderSyncCelebration(&buf, newStatusStyles(&buf), "fork", false, v, formatRemovalDeclined("origin"))
 	got = buf.String()
 	assert.True(t, strings.HasPrefix(got, "\n✓ Your checkpoints now live on fork.\n"), got)
-	assert.Contains(t, got, "syncs to fork automatically")
+	assert.Contains(t, got, "syncs to fork with your pushes to it.")
+	assert.Contains(t, got, "A push to any other remote carries your code but no session history.")
+	assert.NotContains(t, got, "whichever remote you push your code to")
 	assert.True(t, strings.HasSuffix(got, "\n  Older copies stay on origin. Remove them any time with:  entire checkpoint migrate --remove\n"), got)
 }
 
