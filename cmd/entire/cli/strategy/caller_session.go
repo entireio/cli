@@ -159,6 +159,106 @@ func ResolveCallerSession(ctx context.Context) ResolvedSession {
 	return ResolvedSession{Resolution: ResolutionNone}
 }
 
+// IdentifyCallerSession runs ONLY the identification tier, over this
+// repository's session states plus extra.
+//
+// Exported for `session adopt`, which must weigh another repository's sessions
+// as FIRST-CLASS candidates rather than as a fallback consulted after this
+// resolver has already answered. Using them as a fallback was a hole: an inner
+// agent that publishes no session ID forwards the OUTER agent's variable, so
+// the environment named the outer session, the caller matched it, and the
+// nearer inner owner sitting in the source store was never examined at all.
+// Ranking every candidate together is the only formulation that cannot be
+// short-circuited that way, and it is why adopt needs no ownership rule of its
+// own — the policy here is the whole policy.
+//
+// The worktree and other-worktree tiers are deliberately absent. They answer
+// "which session is current here?", which nothing acting on a session may use
+// — and feeding another repository's states into them would let the weakest
+// tier return a session from a different repository entirely. Callers that
+// want those tiers want ResolveCallerSession.
+//
+// ok is false only when nothing claimed us and no owner placed us, which is
+// the caller's cue that identification is unavailable rather than negative.
+func IdentifyCallerSession(ctx context.Context, extra []*SessionState) (ResolvedSession, bool) {
+	states, err := ListSessionStates(ctx)
+	if err != nil {
+		logging.Debug(logging.WithComponent(ctx, "session"),
+			"caller session identification: cannot list session states",
+			slog.String("error", err.Error()))
+		states = nil
+	}
+	return resolveCallerIdentity(ctx, mergeSessionStates(states, extra))
+}
+
+// mergeSessionStates combines this repository's listing with states a caller
+// supplied, and **the supplied state wins an ID collision**.
+//
+// Deduplication is not cosmetic: a same-store adoption (linked worktrees share
+// one session store) hands over a listing identical to this repository's own,
+// and a session counted twice would be weighed against itself.
+//
+// The precedence is not cosmetic either, and it is the opposite of what
+// keeping the local listing first would give you. Colliding IDs are a
+// SUPPORTED condition rather than a curiosity: `session adopt --force` exists
+// precisely to replace a state the target repository already holds for the
+// session being adopted, so on that path the local copy is by definition the
+// stale one and the supplied copy is the live session. Preferring the local
+// copy discarded the caller's better evidence in both directions — a
+// caller-owned source state shadowed by an ownerless leftover refused a
+// legitimate adoption, and a leftover that still carried an owner from a
+// previous adoption could authorize on evidence about a state nobody was
+// adopting.
+//
+// Stated generally, because a future caller will not be adopt: a caller that
+// hands over states has chosen them deliberately and knows more about them
+// than a directory listing does. Merging the two copies' evidence instead —
+// taking whichever has an owner, say — would be worse, since that is exactly
+// how a stale owner record gets combined with a live session.
+//
+// Result order is local-listing order with supplied copies substituted in
+// place, which no consumer depends on: resolveCallerIdentity ranks candidates
+// rather than trusting their order, and resolveUntrackedClaims orders by the
+// agent registry, not by this slice.
+func mergeSessionStates(states, extra []*SessionState) []*SessionState {
+	if len(extra) == 0 {
+		return states
+	}
+	supplied := make(map[string]*SessionState, len(extra))
+	for _, state := range extra {
+		if state != nil {
+			supplied[state.SessionID] = state
+		}
+	}
+
+	merged := make([]*SessionState, 0, len(states)+len(extra))
+	seen := make(map[string]struct{}, len(states)+len(extra))
+	take := func(state *SessionState) {
+		if state == nil {
+			return
+		}
+		if _, dup := seen[state.SessionID]; dup {
+			return
+		}
+		seen[state.SessionID] = struct{}{}
+		merged = append(merged, state)
+	}
+	for _, state := range states {
+		if state == nil {
+			continue
+		}
+		if replacement, ok := supplied[state.SessionID]; ok {
+			take(replacement)
+			continue
+		}
+		take(state)
+	}
+	for _, state := range extra {
+		take(state)
+	}
+	return merged
+}
+
 // callerCandidate is one session that might be running us, with the evidence
 // for it: whether the environment named it, and how near its owner process is
 // in our ancestry (-1 when it could not be placed there at all).

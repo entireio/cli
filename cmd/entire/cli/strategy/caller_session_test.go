@@ -2,6 +2,7 @@ package strategy
 
 import (
 	"context"
+	"slices"
 	"testing"
 	"time"
 
@@ -470,4 +471,120 @@ func TestResolveCallerSession_UnplacedClaimShadowsADistantAncestryWinner(t *test
 	if got.Resolution.IsCaller() {
 		t.Error("IsCaller() = true while an unplaced claim could be nearer")
 	}
+}
+
+// IdentifyCallerSession must run ONLY the identification tier. The worktree
+// and other-worktree tiers answer "which session is current here?", which
+// nothing acting on a session may use — and since this function is handed
+// ANOTHER repository's states, letting the weakest tier see them would let it
+// return a session from a different repository entirely.
+//
+// That is the original defect of this whole area, so it gets a test of its
+// own rather than relying on adopt's behaviour: a future simplification to
+// "ResolveCallerSession over the merged set" would reintroduce it silently.
+func TestIdentifyCallerSession_ExcludesTheWorktreeAndOtherWorktreeTiers(t *testing.T) {
+	clearCallerSessionEnv(t)
+	worktree := callerSessionRepo(t)
+
+	// A session recorded in THIS worktree with no owner and no env claim: the
+	// worktree tier would happily return it.
+	saveState(t, "local-session", worktree, time.Now())
+	foreign := &SessionState{
+		SessionID:    "foreign-repo-session",
+		BaseCommit:   "abc1234",
+		WorktreePath: "/some/other/repository",
+		Phase:        "idle",
+	}
+
+	// The plain resolver does fall back to it — that is the contrast.
+	if fallback := ResolveCallerSession(context.Background()); fallback.Resolution != ResolutionWorktree {
+		t.Fatalf("precondition: ResolveCallerSession resolution = %q, want %q",
+			fallback.Resolution, ResolutionWorktree)
+	}
+
+	resolved, ok := IdentifyCallerSession(context.Background(), []*SessionState{foreign})
+	if ok {
+		t.Errorf("IdentifyCallerSession returned %+v; identification must not fall back to a weak tier", resolved)
+	}
+	if resolved.Found() {
+		t.Errorf("IdentifyCallerSession named %q with nothing identifying the caller", resolved.SessionID)
+	}
+}
+
+func TestMergeSessionStates(t *testing.T) {
+	t.Parallel()
+
+	local := func(id string) *SessionState { return &SessionState{SessionID: id, LastPrompt: "local"} }
+	supplied := func(id string) *SessionState { return &SessionState{SessionID: id, LastPrompt: "supplied"} }
+
+	ids := func(states []*SessionState) []string {
+		out := make([]string, 0, len(states))
+		for _, state := range states {
+			out = append(out, state.SessionID)
+		}
+		return out
+	}
+	origins := func(states []*SessionState) map[string]string {
+		out := make(map[string]string, len(states))
+		for _, state := range states {
+			out[state.SessionID] = state.LastPrompt
+		}
+		return out
+	}
+
+	t.Run("no supplied states returns the listing unchanged", func(t *testing.T) {
+		t.Parallel()
+		states := []*SessionState{local("a"), local("b")}
+		got := mergeSessionStates(states, nil)
+		if !slices.Equal(ids(got), []string{"a", "b"}) {
+			t.Errorf("ids = %v, want [a b]", ids(got))
+		}
+	})
+
+	t.Run("a supplied state wins an ID collision", func(t *testing.T) {
+		t.Parallel()
+		got := mergeSessionStates([]*SessionState{local("a"), local("b")}, []*SessionState{supplied("b")})
+		if origin := origins(got)["b"]; origin != "supplied" {
+			t.Errorf("b came from %q, want the supplied copy — --force exists to replace the local one", origin)
+		}
+		if origin := origins(got)["a"]; origin != "local" {
+			t.Errorf("a came from %q, want the local copy left alone", origin)
+		}
+	})
+
+	t.Run("supplied states absent locally are added", func(t *testing.T) {
+		t.Parallel()
+		got := mergeSessionStates([]*SessionState{local("a")}, []*SessionState{supplied("z")})
+		if !slices.Equal(ids(got), []string{"a", "z"}) {
+			t.Errorf("ids = %v, want [a z]", ids(got))
+		}
+	})
+
+	// The case dedupe exists for: linked worktrees share one session store, so
+	// a same-store adoption hands over a listing identical to the local one. A
+	// session counted twice would be weighed against itself.
+	t.Run("an identical listing does not double-count", func(t *testing.T) {
+		t.Parallel()
+		states := []*SessionState{local("a"), local("b")}
+		got := mergeSessionStates(states, states)
+		if !slices.Equal(ids(got), []string{"a", "b"}) {
+			t.Errorf("ids = %v, want [a b] with no duplicates", ids(got))
+		}
+	})
+
+	t.Run("duplicates within the supplied listing collapse", func(t *testing.T) {
+		t.Parallel()
+		got := mergeSessionStates(nil, []*SessionState{supplied("a"), supplied("a")})
+		if !slices.Equal(ids(got), []string{"a"}) {
+			t.Errorf("ids = %v, want [a]", ids(got))
+		}
+	})
+
+	t.Run("nil entries are skipped from either side", func(t *testing.T) {
+		t.Parallel()
+		got := mergeSessionStates([]*SessionState{nil, local("a")}, []*SessionState{nil, supplied("z")})
+		if !slices.Equal(ids(got), []string{"a", "z"}) {
+			t.Errorf("ids = %v, want [a z]", ids(got))
+		}
+	})
 }
