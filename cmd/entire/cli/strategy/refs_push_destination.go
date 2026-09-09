@@ -107,13 +107,17 @@ func (d refsPushDestination) display() string {
 // a multi-URL remote — otherwise the choice is invisible and looks like the other
 // mirrors silently lost their checkpoints. Call it only when there are refs to
 // push, so a no-op push stays quiet.
+//
+// The remedy names checkpoint_push_remote (the remote picker) and the Entire
+// remote, NOT checkpoint_remote: that is the {provider, repo} dedicated-repo
+// object, and a remote name written under it is silently ignored.
 func (d refsPushDestination) warnIgnoredPushURLs(ctx context.Context) {
 	if d.ignoredPushURLs == 0 {
 		return
 	}
 	fmt.Fprintf(stderrWriter, "[entire] Checkpoints go to one repository: %s. %d other push URL(s) of this remote will not receive them.\n",
 		d.display(), d.ignoredPushURLs)
-	fmt.Fprintln(stderrWriter, "[entire] To store checkpoints in a specific repository instead, set checkpoint_remote in .entire/settings.json.")
+	fmt.Fprintln(stderrWriter, "[entire] To choose the destination, set strategy_options.checkpoint_push_remote to a remote whose single URL is the repository you want (.entire/settings.local.json), or add your Entire remote (entire://…) and checkpoints will sync there.")
 	logging.Info(ctx, "git-refs push: multi-URL remote, pushing checkpoint refs to the first push URL only",
 		slog.String("target", remote.RedactURLOrPath(d.target)),
 		slog.Int("ignored_push_urls", d.ignoredPushURLs),

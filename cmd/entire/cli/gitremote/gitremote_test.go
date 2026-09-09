@@ -292,3 +292,30 @@ func TestCanonicalHostIgnoresPathForges(t *testing.T) {
 	mirror := &Info{Host: "aws-us-east-2.entire.io", Forge: "gh", Owner: "entireio", Repo: "cli"}
 	assert.Equal(t, "github.com", mirror.CanonicalHost())
 }
+
+func TestIsEntireURL(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		url  string
+		want bool
+	}{
+		{"entire://aws-us-east-2.entire.io/gh/org/repo", true},
+		{"ENTIRE://cluster.test/et/project/repo", true},
+		{"  entire://cluster.test/gh/o/r  ", true},
+		// Transport dispatches on the scheme alone, so a path ParseURL rejects
+		// is still an entire:// remote.
+		{"entire://cluster.test", true},
+		{"https://github.com/org/repo.git", false},
+		{"git@github.com:org/repo.git", false},
+		{"entire:cluster.test/gh/o/r", false},
+		{"/srv/entire/repo.git", false},
+		{"", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.url, func(t *testing.T) {
+			t.Parallel()
+			assert.Equal(t, tt.want, IsEntireURL(tt.url))
+		})
+	}
+}

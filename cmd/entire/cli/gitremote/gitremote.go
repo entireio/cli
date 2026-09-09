@@ -21,6 +21,16 @@ const (
 	ProtocolEntire = "entire"
 )
 
+// IsEntireURL reports whether raw names Entire's git remote helper — an
+// entire:// URL. A scheme-prefix check rather than ParseURL on purpose: git
+// itself picks the helper from "<scheme>://", so a URL whose path ParseURL
+// cannot split into owner/repo is still an entire:// remote as far as
+// transport is concerned, and callers deciding "is this remote Entire's" must
+// agree with git, not with our owner/repo grammar.
+func IsEntireURL(raw string) bool {
+	return strings.HasPrefix(strings.ToLower(strings.TrimSpace(raw)), ProtocolEntire+"://")
+}
+
 // Info holds the parsed components of a git remote URL.
 // Host is the hostname only (never includes a port). Port is empty unless the
 // source URL specified an explicit non-default port. Callers that need the
