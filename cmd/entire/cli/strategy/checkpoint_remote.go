@@ -47,15 +47,32 @@ type pushSettings struct {
 	// checkpoints config (LoadCheckpointsConfig is uncached: two whole-file
 	// reads and JSON parses per call).
 	primaryIsRefs bool
+	// syncRemote, when set, is the elected entire:// checkpoint sync remote and
+	// differs from remote: this push was made to some other target, and the
+	// checkpoints ride to the Entire remote regardless (the entire tier behaves
+	// like the dedicated checkpoint_remote URL mode, but addressed by remote
+	// name so tracking refs and the fast-forward recovery keep working). Empty
+	// in every other topology. See redirectToEntireSyncRemote.
+	syncRemote string
 }
 
-// pushTarget returns the target to use for git push/fetch commands for checkpoint branches.
-// If a checkpoint URL is configured, returns that; otherwise returns the remote name.
+// pushTarget returns the target to use for git push/fetch commands for
+// checkpoint branches: the dedicated checkpoint URL when configured, else the
+// elected Entire remote this push was redirected to, else the remote pushed.
 func (ps *pushSettings) pushTarget() string {
 	if ps.checkpointURL != "" {
 		return ps.checkpointURL
 	}
+	if ps.syncRemote != "" {
+		return ps.syncRemote
+	}
 	return ps.remote
+}
+
+// redirectedToSyncRemote reports whether checkpoint data for this push goes to
+// the elected Entire remote rather than the remote the user pushed.
+func (ps *pushSettings) redirectedToSyncRemote() bool {
+	return ps.syncRemote != ""
 }
 
 // hasCheckpointURL returns true if a dedicated checkpoint URL is configured.

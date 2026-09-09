@@ -407,6 +407,8 @@ func writeCheckpointSyncLines(ctx context.Context, b *strings.Builder, s *Entire
 			b.WriteString(sty.render(sty.dim, " (set by checkpoint_push_remote)"))
 		case string(strategy.SyncRemoteSourceObserved):
 			b.WriteString(sty.render(sty.dim, " (follows your branch's push destination)"))
+		case string(strategy.SyncRemoteSourceEntire):
+			b.WriteString(sty.render(sty.dim, " (your Entire remote)"))
 		}
 	}
 	if info.Unpushed > 0 {
@@ -807,7 +809,7 @@ type statusJSON struct {
 	// org/repo slug in dedicated checkpoint_remote mode. Deliberately not named
 	// checkpoint_remote, which is the existing GitHub-coupled setting.
 	CheckpointSyncRemote       string `json:"checkpoint_sync_remote,omitempty"`
-	CheckpointSyncRemoteSource string `json:"checkpoint_sync_remote_source,omitempty"` // config|observed|default|sole|first|dedicated
+	CheckpointSyncRemoteSource string `json:"checkpoint_sync_remote_source,omitempty"` // config|observed|entire|default|sole|first|dedicated
 	CheckpointSyncError        string `json:"checkpoint_sync_error,omitempty"`         // fail-closed message
 	UnpushedCheckpoints        int    `json:"unpushed_checkpoints,omitempty"`
 	// SecretScanners lists the enabled engines when non-default; omitted when default.

@@ -25,8 +25,18 @@ func repoScopedCache(t *testing.T) context.Context {
 // okRead / okProbe are counting callbacks that succeed, for the memoization
 // assertions. Failure is covered separately by
 // TestGitRemoteCache_FailedReadsAreNotMemoized.
-func okRead(calls *int, names []string) func(context.Context) ([]string, error) {
-	return func(context.Context) ([]string, error) { *calls++; return names, nil }
+// remotesNamed builds a remote list with placeholder URLs, for callers that
+// only care about names and order.
+func remotesNamed(names ...string) []configuredRemote {
+	remotes := make([]configuredRemote, 0, len(names))
+	for _, n := range names {
+		remotes = append(remotes, configuredRemote{Name: n, URLs: []string{"https://example.com/" + n + ".git"}})
+	}
+	return remotes
+}
+
+func okRead(calls *int, remotes []configuredRemote) func(context.Context) ([]configuredRemote, error) {
+	return func(context.Context) ([]configuredRemote, error) { *calls++; return remotes, nil }
 }
 
 func okProbe(calls *int, got bool) func() (bool, error) {
@@ -45,15 +55,15 @@ func TestGitRemoteCache_FailedReadsAreNotMemoized(t *testing.T) {
 	boom := errors.New("git could not run")
 
 	listCalls := 0
-	flakyList := func(context.Context) ([]string, error) {
+	flakyList := func(context.Context) ([]configuredRemote, error) {
 		listCalls++
 		if listCalls == 1 {
 			return nil, boom
 		}
-		return []string{"origin"}, nil
+		return remotesNamed("origin"), nil
 	}
 	assert.Empty(t, cachedRemotesInConfigOrder(ctx, flakyList), "a failed read answers empty for this call")
-	assert.Equal(t, []string{"origin"}, cachedRemotesInConfigOrder(ctx, flakyList),
+	assert.Equal(t, remotesNamed("origin"), cachedRemotesInConfigOrder(ctx, flakyList),
 		"the failure must not be memoized; the next call retries and sees the real list")
 
 	probeCalls := 0
@@ -130,10 +140,10 @@ func TestGitRemoteCache_PartitionsByRepository(t *testing.T) {
 	assert.False(t, cachedIsConfiguredRemote(repoB, "origin", func() (bool, error) { return false, nil }),
 		"repo B must not inherit repo A's membership answer")
 
-	listA := func(context.Context) ([]string, error) { return []string{"origin"}, nil }
-	listB := func(context.Context) ([]string, error) { return []string{"fork", "upstream"}, nil }
-	assert.Equal(t, []string{"origin"}, cachedRemotesInConfigOrder(repoA, listA))
-	assert.Equal(t, []string{"fork", "upstream"}, cachedRemotesInConfigOrder(repoB, listB),
+	listA := func(context.Context) ([]configuredRemote, error) { return remotesNamed("origin"), nil }
+	listB := func(context.Context) ([]configuredRemote, error) { return remotesNamed("fork", "upstream"), nil }
+	assert.Equal(t, remotesNamed("origin"), cachedRemotesInConfigOrder(repoA, listA))
+	assert.Equal(t, remotesNamed("fork", "upstream"), cachedRemotesInConfigOrder(repoB, listB),
 		"repo B must not inherit repo A's remote list")
 
 	// Each repo still memoizes within itself.
@@ -166,18 +176,18 @@ func TestGitRemoteCache_CrossRepoReadsDoNotSerialize(t *testing.T) {
 	done := make(chan struct{}, 2)
 
 	go func() {
-		cachedRemotesInConfigOrder(repoA, func(context.Context) ([]string, error) {
+		cachedRemotesInConfigOrder(repoA, func(context.Context) ([]configuredRemote, error) {
 			close(aInside)
 			<-bStarted // A cannot finish until B is inside its own read
-			return []string{"origin"}, nil
+			return remotesNamed("origin"), nil
 		})
 		done <- struct{}{}
 	}()
 	go func() {
 		<-aInside // B starts only once A is demonstrably inside its read
-		cachedRemotesInConfigOrder(repoB, func(context.Context) ([]string, error) {
+		cachedRemotesInConfigOrder(repoB, func(context.Context) ([]configuredRemote, error) {
 			close(bStarted)
-			return []string{"fork"}, nil
+			return remotesNamed("fork"), nil
 		})
 		done <- struct{}{}
 	}()
@@ -209,7 +219,7 @@ func TestGitRemoteCache_Invalidate(t *testing.T) {
 	t.Parallel()
 
 	listCalls, probeCalls := 0, 0
-	read := okRead(&listCalls, []string{"origin"})
+	read := okRead(&listCalls, remotesNamed("origin"))
 	probe := okProbe(&probeCalls, true)
 	ctx := repoScopedCache(t)
 

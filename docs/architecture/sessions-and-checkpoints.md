@@ -425,9 +425,13 @@ sync remote, resolved in this order:
 2. The **captured** election, if its remote is still configured — fail-soft
    otherwise (capture is automatic state, so a renamed/removed remote falls
    through instead of disabling sync).
-3. `origin`, if configured.
-4. The sole configured remote.
-5. The first remote in `.git/config` order.
+3. The sole `entire://` remote, if exactly one is configured (source
+   `entire`). Detection reads raw `.git/config` URLs (`url` and `pushurl`;
+   every one must be `entire://`), so `insteadOf` rewrites do not hide it.
+   Two or more Entire remotes make the tier ambiguous and it does not apply.
+4. `origin`, if configured.
+5. The sole configured remote.
+6. The first remote in `.git/config` order.
 
 **Capture** is how the election follows the user's actual push habit with
 zero configuration: during pre-push, when the push target agrees with the
@@ -459,12 +463,21 @@ URL mode is exempt — it addresses a separate metadata store directly. `entire
 status` shows the sync destination and how many checkpoints have not reached
 it yet.
 
+The Entire tier is the second exemption: when the elected remote is an
+`entire://` remote, every push — to any remote or raw URL — carries checkpoints
+to it by remote name (`pushSettings.syncRemote`), the gate and capture are
+skipped, and the git-branch empty-remote defer is skipped. The first delivery
+prints a one-line stderr notice, latched by `entire-checkpoint-sync-entire.json`
+in the git common dir.
+
 A gated push is not fully silent: when checkpoints are waiting for the
 elected remote, the hook prints a two-line stderr hint naming the elected
 destination, the waiting count, and the `checkpoint_push_remote` setting
 (pointed at `.entire/settings.local.json` — a remote name is a per-clone
-fact) that re-routes sync to the remote being pushed. The hint stays quiet
-when the election was explicit (`checkpoint_push_remote` is already set),
+fact) that re-routes sync to the remote being pushed. When the push targets one
+of *several* Entire remotes (the tier did not apply), the hint names that
+setting for the remote just pushed. The hint stays quiet when the election was
+explicit (`checkpoint_push_remote` is already set),
 when the push target is a raw URL rather than a configured remote, when
 nothing is waiting, when the election failed (the fail-closed case logs a
 warning instead), and when the push target is not the branch's declared push
