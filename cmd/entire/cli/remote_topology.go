@@ -14,6 +14,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
+	"github.com/entireio/cli/cmd/entire/cli/strategy"
 )
 
 // Checkpoint destinations are unambiguous in the ordinary single-remote,
@@ -51,6 +52,9 @@ type remoteTopology struct {
 	// primaryIsRefs reports whether the git-refs backend is active, which
 	// decides what a fanning-out remote means for checkpoints.
 	primaryIsRefs bool
+	// explicitlySelected means a valid checkpoint_push_remote already settles
+	// the choice among remotes. Multiple push URLs may still need a warning.
+	explicitlySelected bool
 }
 
 // inspectRemoteTopology reads the repo's remotes and checkpoint configuration.
@@ -92,6 +96,9 @@ func inspectRemoteTopology(ctx context.Context) remoteTopology {
 	if cpCfg, err := settings.LoadCheckpointsConfig(ctx); err == nil {
 		t.primaryIsRefs = checkpoint.PrimaryIsRefs(cpCfg)
 	}
+	if elected, err := strategy.ResolveCheckpointSyncRemote(ctx); err == nil {
+		t.explicitlySelected = elected.Source == strategy.SyncRemoteSourceConfig
+	}
 
 	return t
 }
@@ -132,7 +139,7 @@ func (t remoteTopology) ambiguous() bool {
 			unpinned++
 		}
 	}
-	return unpinned > 1
+	return !t.explicitlySelected && unpinned > 1
 }
 
 // describeCheckpointDestination writes an explanation of where checkpoints go,
@@ -166,7 +173,7 @@ func (t remoteTopology) describeCheckpointDestination(w io.Writer, header string
 		}
 	}
 
-	if names := t.unpinnedNames(); len(names) > 1 {
+	if names := t.unpinnedNames(); !t.explicitlySelected && len(names) > 1 {
 		fmt.Fprintf(w, "  This repo has %d remotes (%s).\n", len(names), strings.Join(names, ", "))
 		fmt.Fprintln(w, "    Checkpoints sync to a single elected remote — not to whichever one you")
 		fmt.Fprintln(w, "    push to. A push to any other remote carries your code but no session")
