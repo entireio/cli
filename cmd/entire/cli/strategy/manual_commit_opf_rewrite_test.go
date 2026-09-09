@@ -1092,3 +1092,69 @@ func TestRewriteUnpushedV1WithOPFBounded_FallbackBoundSkipsPublished(t *testing.
 	require.NoError(t, err)
 	assert.Equal(t, tip, got, "already-published history is left alone")
 }
+
+// entireTierOPFRepo is a git-branch repo with local v1 history, an origin that
+// already holds it, and an Entire remote that does not — the shape where the
+// rewrite needs the displaced remote as its bound.
+func entireTierOPFRepo(t *testing.T, commits int) (repo *git.Repository, tip plumbing.Hash) {
+	t.Helper()
+	dir := t.TempDir()
+	testutil.InitRepo(t, dir)
+	repo, err := git.PlainOpen(dir)
+	require.NoError(t, err)
+	tip = buildOrphanChain(t, repo, commits)
+
+	originDir := t.TempDir()
+	testutil.InitRepo(t, originDir)
+	entireDir := t.TempDir()
+	testutil.InitRepo(t, entireDir)
+	testutil.AddRemote(t, dir, "origin", originDir)
+	testutil.AddRemote(t, dir, "entire", "entire://cluster.test/gh/acme/app")
+	testutil.RunGit(t, dir, "config", "--add", "url."+entireDir+".insteadOf", "entire://cluster.test/gh/acme/app")
+	testutil.RunGit(t, dir, "push", "-q", "origin", "refs/heads/"+paths.MetadataBranchName)
+
+	t.Chdir(dir)
+	paths.ClearWorktreeRootCache()
+	t.Cleanup(paths.ClearWorktreeRootCache)
+	return repo, tip
+}
+
+// A push aimed straight at the Entire remote gets the same treatment as one
+// redirected there: the destination is identical, so it needs the displaced
+// remote as the rewrite's bound. Gating that on "was this redirected" left this
+// push bounded by an empty remote, so the whole local history read as a
+// bootstrap and the push aborted above the cap.
+func TestPrePushFromGitHook_EntireTier_DirectPushGetsTheFallbackBound(t *testing.T) {
+	configureFakeOPF(t, &fakeOPFForRewrite{})
+	t.Setenv("ENTIRE_OPF_BOOTSTRAP_LIMIT", "2")
+	repo, tip := entireTierOPFRepo(t, 3)
+
+	require.NoError(t, NewManualCommitStrategy().PrePushFromGitHook(t.Context(), "entire"),
+		"a direct push must not abort: origin's v1 tip bounds the rewrite")
+
+	ref, err := repo.Reference(plumbing.NewBranchReferenceName(paths.MetadataBranchName), true)
+	require.NoError(t, err)
+	assert.Equal(t, tip, ref.Hash(), "nothing was unpushed, so the ref stays put")
+}
+
+// And when OPF genuinely cannot run, a direct push is withheld rather than
+// aborted — same as a redirected one. The user's push carries their code; our
+// checkpoint delivery failing must not veto it, and nothing un-OPF'd ships.
+func TestPrePushFromGitHook_EntireTier_DirectPushWithholdsInsteadOfAborting(t *testing.T) {
+	fake := &fakeOPFForRewrite{}
+	configureFakeOPFWithCategories(t, fake, map[string]bool{})
+	repo, tip := entireTierOPFRepo(t, 1)
+	buf := captureStderrWriter(t)
+
+	require.NoError(t, NewManualCommitStrategy().PrePushFromGitHook(t.Context(), "entire"),
+		"the checkpoints are withheld; the user's push proceeds")
+	assert.Contains(t, buf.String(), `Checkpoints were not pushed to "entire" this time`)
+	assert.Contains(t, buf.String(), "they go with the next push once this is fixed")
+
+	ref, err := repo.Reference(plumbing.NewBranchReferenceName(paths.MetadataBranchName), true)
+	require.NoError(t, err)
+	assert.Equal(t, tip, ref.Hash(), "withheld means nothing was rewritten either")
+	commit, err := repo.CommitObject(ref.Hash())
+	require.NoError(t, err)
+	assert.False(t, trailers.HasOPFApplied(commit.Message), "nothing un-OPF'd was stamped as OPF-applied")
+}

@@ -170,8 +170,8 @@ func (s *ManualCommitStrategy) prePush(ctx context.Context, remote string, prote
 	if redact.OPFEnabled() {
 		decision, decisionErr := opfPrePushDecision(ctx)
 		if decisionErr != nil {
-			if ps.redirectedToSyncRemote() {
-				skipRedirectedCheckpointPush(ctx, ps, decisionErr)
+			if ps.targetsEntireRemote() {
+				withholdEntireCheckpointPush(ctx, ps, decisionErr)
 				return nil
 			}
 			logging.Warn(ctx, "OPF pre-push decision failed; aborting push",
@@ -196,24 +196,26 @@ func (s *ManualCommitStrategy) prePush(ctx context.Context, remote string, prote
 				)
 				return repoErr
 			}
-			// Under the redirect the Entire remote has no v1 yet, so bounding
+			// Under the Entire tier the destination has no v1 yet, so bounding
 			// the rewrite by its tip alone would count the whole local history
 			// as unpushed — BootstrapTooLargeError above the cap, a full-history
 			// rewrite below it. Commits already published to the remote the tier
 			// displaced are not unpushed; bound by that tip when the Entire
 			// remote has none.
+			//
+			// Keyed on the tier, not on whether this push was redirected: the
+			// destination is the same Entire remote either way, so a direct
+			// `git push entire` has exactly the same missing v1 and needs the
+			// same bound.
 			var boundFallback string
-			if ps.redirectedToSyncRemote() {
+			if ps.targetsEntireRemote() {
 				boundFallback = DisplacedCheckpointRemote(ctx)
 			}
 			if _, rewriteErr := rewriteUnpushedV1WithOPFBounded(ctx, repo, ps.pushTarget(), boundFallback); rewriteErr != nil {
 				opfSpan.RecordError(rewriteErr)
 				opfSpan.End()
-				if ps.redirectedToSyncRemote() {
-					// The user pushed code somewhere else; a failure in the
-					// checkpoint delivery we redirected must not abort that
-					// push. Fail closed by withholding the checkpoints instead.
-					skipRedirectedCheckpointPush(ctx, ps, rewriteErr)
+				if ps.targetsEntireRemote() {
+					withholdEntireCheckpointPush(ctx, ps, rewriteErr)
 					return nil
 				}
 				logging.Warn(ctx, "OPF pre-push rewrite failed; aborting push",
@@ -379,14 +381,20 @@ func warnOPFCheckpointRefsWithheld(ctx context.Context, err error) {
 //
 // A separate checkpoint remote is exempt: it is a dedicated metadata store, not
 // the repository the user pushes to.
-// skipRedirectedCheckpointPush withholds this push's checkpoint delivery to the
-// Entire remote after an OPF failure and lets the user's own push proceed. The
-// v1 path normally fails closed by aborting the push, but that is a push the
-// user aimed at the checkpoint destination; under the redirect they aimed
-// elsewhere, and our delivery must not veto it. The checkpoints stay local and
-// go with the next push, once the cause is fixed.
-func skipRedirectedCheckpointPush(ctx context.Context, ps pushSettings, cause error) {
-	logging.Warn(ctx, "OPF pre-push failed under the Entire redirect; checkpoints withheld, user push continues",
+// withholdEntireCheckpointPush withholds this push's checkpoint delivery to the
+// Entire remote after an OPF failure and lets the user's own push proceed.
+//
+// Still fail-closed — nothing un-OPF'd ships, the checkpoints stay local and go
+// with the next push once the cause is fixed — but it does not also veto the
+// push the user typed. The v1 path's usual response is to abort, which is right
+// when the push IS the checkpoint delivery; under the tier it is not. Every
+// push carries checkpoints to the Entire remote, so the delivery is machinery
+// we attached rather than what the user aimed at, and whether the remote they
+// named happens to BE the Entire remote is incidental — that is why this is
+// keyed on the tier and not on the redirect. Same stance the git-refs backend
+// already takes for a failed OPF gate (see the OPF bullet in CLAUDE.md).
+func withholdEntireCheckpointPush(ctx context.Context, ps pushSettings, cause error) {
+	logging.Warn(ctx, "OPF pre-push failed under the Entire tier; checkpoints withheld, user push continues",
 		slog.String("checkpoint_sync_remote", ps.pushTarget()),
 		slog.String("error", cause.Error()))
 	fmt.Fprintf(stderrWriter,

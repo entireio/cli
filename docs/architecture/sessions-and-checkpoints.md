@@ -474,10 +474,13 @@ over stay readable. The record matters because the live computation prefers
 `origin` unconditionally: adding an origin after the tier took over would swap a
 computed fallback from the remote that holds the checkpoints to a new empty one.
 `DisplacedCheckpointRemote` returns the recorded remote while it is still
-configured, else the live answer. Under a
-redirected push the git-branch OPF rewrite is bounded by that remote's v1 tip
-when the Entire remote has none, and an OPF failure withholds the checkpoints
-with a stderr line rather than aborting the user's push. The first delivery
+configured, else the live answer. Under the
+tier the git-branch OPF rewrite is bounded by that remote's v1 tip when the
+Entire remote has none, and an OPF failure withholds the checkpoints with a
+stderr line rather than aborting the user's push. Both key on whether the
+destination is the Entire remote, not on whether the push was redirected there:
+a direct `git push entire` has the same empty destination and needs the same
+treatment. The first delivery
 prints a two-line stderr notice (the Entire remote, and the displaced remote
 that may still hold earlier checkpoints), latched by
 `entire-checkpoint-sync-entire.json` in the git common dir.
