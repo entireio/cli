@@ -4,11 +4,13 @@ package integration
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
 
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
+	"github.com/stretchr/testify/require"
 )
 
 func TestHookRunner_SimulateUserPromptSubmit(t *testing.T) {
@@ -321,6 +323,26 @@ func TestUserPromptSubmit_ReinstallsOverwrittenHooks(t *testing.T) {
 			t.Errorf("backup hook %s.pre-entire should exist", hookName)
 		}
 	}
+}
+
+func TestHookRepairWarningUsesAgentResponseAndFailsOpen(t *testing.T) {
+	t.Parallel()
+	env := NewRepoWithCommit(t)
+	require.NoError(t, os.WriteFile(filepath.Join(env.RepoDir, "lefthook.yml"), []byte("pre-commit: {}\n"), 0o644))
+	conflict := "pre-push:\n  scripts:\n    entire.sh:\n      runner: custom\n"
+	require.NoError(t, os.WriteFile(filepath.Join(env.RepoDir, "lefthook-local.yml"), []byte(conflict), 0o644))
+
+	input, err := json.Marshal(map[string]string{
+		"session_id": "hook-repair-warning", "transcript_path": "", "prompt": "private prompt text",
+	})
+	require.NoError(t, err)
+	runner := NewHookRunner(env.RepoDir, env.ClaudeProjectDir, t)
+	out := runner.runHookWithOutput("user-prompt-submit", input)
+	require.NoError(t, out.Err, string(out.Stderr))
+	require.Contains(t, string(out.Stdout), "Lefthook")
+	require.Contains(t, string(out.Stdout), "outdated")
+	require.Contains(t, string(out.Stdout), "entire doctor")
+	require.NotContains(t, string(out.Stdout), "private prompt text")
 }
 
 // TestUserPromptSubmit_ReinstallsDeletedHooks verifies that EnsureSetup reinstalls

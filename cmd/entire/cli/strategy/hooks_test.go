@@ -627,6 +627,40 @@ func TestCheckGitHookState(t *testing.T) {
 		}
 	})
 
+	t.Run("an exact generated chain is Current", func(t *testing.T) {
+		t.Parallel()
+		dir := t.TempDir()
+		writeCurrentManagedHooks(t, dir)
+		for _, spec := range buildHookSpecs(bareEntireHookCmd) {
+			if spec.name != "pre-push" {
+				continue
+			}
+			if err := os.WriteFile(filepath.Join(dir, spec.name), []byte(generateChainedContent(spec.content, spec.name)), 0o755); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if got := gitHookStateInHooksDir(dir); got != GitHooksCurrent {
+			t.Errorf("current generated chain = %v, want GitHooksCurrent", got)
+		}
+	})
+
+	t.Run("a generated-shaped arbitrary command is Outdated", func(t *testing.T) {
+		t.Parallel()
+		dir := t.TempDir()
+		writeCurrentManagedHooks(t, dir)
+		for _, spec := range buildHookSpecs("false") {
+			if spec.name != "pre-push" {
+				continue
+			}
+			if err := os.WriteFile(filepath.Join(dir, spec.name), []byte(spec.content), 0o755); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if got := gitHookStateInHooksDir(dir); got != GitHooksOutdated {
+			t.Errorf("arbitrary command wrapper = %v, want GitHooksOutdated", got)
+		}
+	})
+
 	t.Run("a single legacy hook makes the set Outdated", func(t *testing.T) {
 		t.Parallel()
 		for _, legacy := range []string{
@@ -646,15 +680,10 @@ func TestCheckGitHookState(t *testing.T) {
 	})
 }
 
-// TestCheckGitHookState_UserAdditionsAreNotDrift pins that a hook Entire
-// installed and the user then hand-edited is not classified as stale just because
-// one of their own lines mentions `go run` or the old launcher path.
-//
-// The classification decides whether EnsureSetup rewrites the file, and
-// InstallGitHook only backs up a hook that does NOT carry entireHookMarker — so a
-// hand-edited hook is overwritten with no backup. A whole-file substring match
-// would therefore silently discard the user's additions.
-func TestCheckGitHookState_UserAdditionsAreNotDrift(t *testing.T) {
+// TestCheckGitHookState_UserAdditionsAreDrift pins that only exact generated
+// wrappers count as current. User additions make an Entire-marked hook stale;
+// they must not make arbitrary marker-bearing content look executable.
+func TestCheckGitHookState_UserAdditionsAreDrift(t *testing.T) {
 	t.Parallel()
 
 	for _, userLine := range []string{
@@ -670,8 +699,8 @@ func TestCheckGitHookState_UserAdditionsAreNotDrift(t *testing.T) {
 				t.Fatal(err)
 			}
 		}
-		if got := gitHookStateInHooksDir(dir); got != GitHooksCurrent {
-			t.Errorf("a hook whose own Entire line is current must read Current despite the user line %q, got %v", userLine, got)
+		if got := gitHookStateInHooksDir(dir); got != GitHooksOutdated {
+			t.Errorf("a modified Entire hook with user line %q = %v, want GitHooksOutdated", userLine, got)
 		}
 	}
 }
@@ -700,9 +729,8 @@ func TestCheckGitHookState_LegacyEntireLineIsStillDrift(t *testing.T) {
 // installs. Tests that need a variant overwrite an individual hook afterwards.
 func writeCurrentManagedHooks(t *testing.T, dir string) {
 	t.Helper()
-	for _, hook := range gitHookNames {
-		content := "#!/bin/sh\n# " + entireHookMarker + "\nentire hooks git " + hook + "\n"
-		if err := os.WriteFile(filepath.Join(dir, hook), []byte(content), 0o755); err != nil {
+	for _, spec := range buildHookSpecs(bareEntireHookCmd) {
+		if err := os.WriteFile(filepath.Join(dir, spec.name), []byte(spec.content), 0o755); err != nil {
 			t.Fatal(err)
 		}
 	}

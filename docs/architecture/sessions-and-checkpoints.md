@@ -455,9 +455,51 @@ The pre-push hook carries checkpoint data only when the push targets the
 elected remote; pushes to any other remote or to a raw URL sync nothing, on
 both the git-branch and git-refs backends (git-refs leaves its push queue
 intact for the next elected-remote push). The dedicated `checkpoint_remote`
-URL mode is exempt — it addresses a separate metadata store directly. `entire
-status` shows the sync destination and how many checkpoints have not reached
-it yet.
+URL mode is exempt — it addresses a separate metadata store directly.
+
+`entire status` reports checkpoint storage and checkpoint sync separately.
+Storage is the effective local backend (`git-branch` or `git-refs`), while the
+sync destination is the elected Git remote or dedicated checkpoint repository;
+one does not override the other. Status describes that destination as active
+only when the Git-hook integration can currently deliver all five checkpoint
+hooks. Text reports blocked or degraded delivery in place, and JSON retains the
+configured destination fields while adding `checkpoint_storage_backend`,
+`checkpoint_sync_state` (`ready`, `degraded`, or `blocked`), and the typed
+`git_hooks` health object.
+
+### Git Hook Delivery and Lefthook
+
+Entire normally owns five native Git wrappers: `prepare-commit-msg`,
+`commit-msg`, `post-commit`, `post-rewrite`, and `pre-push`. Repositories with
+one unambiguous Lefthook main configuration instead receive a clone-local
+participant configuration:
+
+- `lefthook-local.yml` marks the YAML nodes Entire inserts while preserving
+  unrelated local entries and comments;
+- `.lefthook-local/<hook>/entire.sh` contains the generated hook scripts;
+- both paths are ignored through an exact Entire-owned block in
+  `.git/info/exclude`.
+
+Entire never edits the shared Lefthook configuration or runs `lefthook install`.
+Installation is transactional. Until a Lefthook refresh takes ownership of the
+live hooks, Entire keeps native bridge wrappers active; after refresh, Lefthook
+invokes the same clone-local scripts. Uninstall removes only exact
+ownership-marked nodes, scripts, and exclude lines. Ambiguous managers or local
+configuration fail closed without replacing the working integration.
+
+Hook health is shared by setup, lifecycle, doctor, and status. SessionStart
+separately includes unhealthy delivery in its startup banner. TurnStart attempts
+repair; a failed repair remains fail-open for the agent workflow but is reported
+through the agent's native hook-response protocol with an `entire doctor`
+action. For TurnStart repair warnings, a stable failure fingerprint prevents
+repetition within the session and permits a new warning when the condition
+changes. Generated scripts guard binary availability. Every clone-local
+Lefthook script prints a concise missing-binary warning and skips cleanly;
+capture hooks remain fail-open. Native wrappers retain their quieter legacy
+behavior, where only `commit-msg` prints the missing-binary warning. `pre-push`
+also skips cleanly when the binary is absent, but propagates a non-zero exit
+from an available `entire hooks git pre-push` invocation so its blocking
+semantics are retained.
 
 A gated push is not fully silent: when checkpoints are waiting for the
 elected remote, the hook prints a two-line stderr hint naming the elected
@@ -864,6 +906,16 @@ Multiple AI sessions can run concurrently on the same base commit:
 2. **Both proceed** - User can continue; checkpoints interleave on the same shadow branch
 3. **Identification** - Each checkpoint is tagged with its session ID; `checkpoint list --pending` shows the session prompt
 4. **Condensation** - On commit, all sessions are condensed together with archived subfolders
+
+`entire status` is a read-only observer of this state. It does not finalize a
+session, condense a transcript, or rewrite session files when the owning agent
+has exited; the dedicated sweeper and doctor own those mutations. Until that
+cleanup persists an ended phase, status keeps the session in `active_sessions`
+and derives the display state `exited`. Text and JSON use the same complete
+collection, including multiple sessions from the same agent, sorted by most
+recent activity and then session ID. JSON includes session and worktree IDs,
+worktree path, branch, and available start/last-active timestamps so entries
+remain distinguishable.
 
 ### Conflict Handling
 

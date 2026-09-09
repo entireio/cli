@@ -5,12 +5,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -22,12 +24,17 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
+	"github.com/entireio/cli/cmd/entire/cli/agent/claudecode"
+	"github.com/entireio/cli/cmd/entire/cli/agent/codex"
+	"github.com/entireio/cli/cmd/entire/cli/agent/geminicli"
 	"github.com/entireio/cli/cmd/entire/cli/agent/opencode"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/api"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
+	"github.com/entireio/cli/cmd/entire/cli/entiredir"
 	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/entireio/cli/cmd/entire/cli/investigate"
+	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/review"
 	"github.com/entireio/cli/cmd/entire/cli/session"
@@ -475,6 +482,231 @@ func newMockHookResponseAgent() *mockHookResponseAgent {
 			agentType: "Mock HRW Agent",
 		},
 	}
+}
+
+func TestLifecycleHookHealthWarningUsesStableFingerprintAndSafeCopy(t *testing.T) {
+	t.Parallel()
+	health := strategy.GitHookIntegrationHealth{
+		Mode: strategy.GitHookIntegrationLefthook, State: strategy.GitHookIntegrationError,
+		Manager: "Lefthook", ReasonCode: "owned_entry_conflict", Reason: "secret prompt and commit message",
+	}
+	warning := lifecycleHookHealthWarning(health)
+	require.Contains(t, warning, "Lefthook")
+	require.Contains(t, warning, "error")
+	require.Contains(t, warning, "entire doctor")
+	require.NotContains(t, warning, health.Reason)
+
+	first := lifecycleHookHealthFingerprint(health)
+	health.Reason = "different free-form copy"
+	require.Equal(t, first, lifecycleHookHealthFingerprint(health))
+	health.ReasonCode = "different_code"
+	require.NotEqual(t, first, lifecycleHookHealthFingerprint(health))
+}
+
+func TestLifecycleHookHealthRepairWarnsOnceThenAgainWhenFingerprintChanges(t *testing.T) {
+	setupStopTestRepo(t)
+	ctx := context.Background()
+	const sessionID = "hook-health-dedup"
+	ag := newMockHookResponseAgent()
+	repairs := 0
+	health := strategy.GitHookIntegrationHealth{
+		Mode: strategy.GitHookIntegrationLefthook, State: strategy.GitHookIntegrationError,
+		Manager: "Lefthook", ReasonCode: "conflict",
+	}
+	ops := lifecycleHookHealthOps{
+		repair: func(context.Context) error { repairs++; return errors.New("sensitive repair detail") },
+		check:  func(context.Context) strategy.GitHookIntegrationHealth { return health },
+	}
+	logCtx := logging.WithComponent(ctx, "test")
+
+	claim := repairLifecycleHookHealth(logCtx, ag, sessionID, ops)
+	require.Equal(t, 1, repairs)
+	require.Contains(t, claim.message, "entire doctor")
+	_, found, err := strategy.LoadHookHealthWarningHint(ctx, sessionID)
+	require.NoError(t, err)
+	require.True(t, found)
+
+	claim = repairLifecycleHookHealth(logCtx, ag, sessionID, ops)
+	require.Equal(t, 2, repairs, "repair is attempted on every turn")
+	require.Empty(t, claim.message, "same fingerprint is warned only once")
+
+	health.ReasonCode = "changed-conflict"
+	claim = repairLifecycleHookHealth(logCtx, ag, sessionID, ops)
+	require.Equal(t, 3, repairs)
+	require.Contains(t, claim.message, "entire doctor", "changed failures warn again")
+}
+
+func TestTurnStartHookHealthWarningMergesWithNativeContextAsOneJSONValue(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name string
+		ag   agent.Agent
+	}{
+		{name: "claude-code", ag: &claudecode.ClaudeCodeAgent{}},
+		{name: "codex", ag: &codex.CodexAgent{}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			injector, ok := agent.AsContextInjector(tc.ag)
+			require.True(t, ok)
+			payload, err := injector.RenderContextInjection(agent.ContextInjection{Text: "trail context"})
+			require.NoError(t, err)
+
+			combined, err := mergeTurnStartHookResponse(payload, "repair hooks")
+			require.NoError(t, err)
+			dec := json.NewDecoder(strings.NewReader(string(combined)))
+			var got struct {
+				SystemMessage      string `json:"systemMessage"`
+				HookSpecificOutput struct {
+					AdditionalContext string `json:"additionalContext"`
+				} `json:"hookSpecificOutput"`
+			}
+			require.NoError(t, dec.Decode(&got))
+			require.Equal(t, "repair hooks", got.SystemMessage)
+			require.Equal(t, "trail context", got.HookSpecificOutput.AdditionalContext)
+			var extra any
+			require.ErrorIs(t, dec.Decode(&extra), io.EOF, "stdout payload must contain exactly one JSON value")
+		})
+	}
+}
+
+func TestGeminiTurnStartHookHealthWarningUsesOnePlainTextResponseAndRetriesContext(t *testing.T) {
+	setupStopTestRepo(t)
+	const sessionID = "gemini-health-context-collision"
+	require.NoError(t, strategy.SaveSessionState(t.Context(), &strategy.SessionState{
+		SessionID: sessionID, BaseCommit: "abc", StartedAt: time.Now(), ContextInjectionDecided: true,
+	}))
+	event := &agent.Event{Type: agent.TurnStart, SessionID: sessionID}
+	ag := &geminicli.GeminiCLIAgent{}
+	payload, err := ag.RenderContextInjection(agent.ContextInjection{Text: "trail context"})
+	require.NoError(t, err)
+
+	out := captureLifecycleStdout(t, func() {
+		require.True(t, emitPreparedTurnStartOutput(t.Context(), ag, event, payload, "repair hooks"))
+	})
+	require.Equal(t, "repair hooks\n", out)
+	require.False(t, strings.HasPrefix(strings.TrimSpace(out), "{"), "Gemini JSON systemMessage double-displays")
+
+	state, err := strategy.LoadSessionState(t.Context(), sessionID)
+	require.NoError(t, err)
+	require.False(t, state.ContextInjectionDecided, "deferred additionalContext must retry on the next warning-free turn")
+}
+
+func captureLifecycleStdout(t *testing.T, fn func()) string {
+	t.Helper()
+	r, w, err := os.Pipe()
+	require.NoError(t, err)
+	original := os.Stdout
+	os.Stdout = w
+	done := make(chan []byte, 1)
+	go func() {
+		data, _ := io.ReadAll(r) //nolint:errcheck // assertion below checks emitted bytes
+		done <- data
+	}()
+	fn()
+	require.NoError(t, w.Close())
+	os.Stdout = original
+	data := <-done
+	require.NoError(t, r.Close())
+	return string(data)
+}
+
+func TestLifecycleHookHealthStructuredLogExcludesSensitiveDetails(t *testing.T) {
+	setupStopTestRepo(t)
+	repoDir, err := os.Getwd()
+	require.NoError(t, err)
+	logger, err := logging.New(logging.Config{Root: entiredir.OpenerAt(repoDir), Dir: logging.LogsName})
+	require.NoError(t, err)
+	ctx := logging.WithLogger(context.Background(), logger)
+	const secret = "prompt-content-commit-secret"
+	health := strategy.GitHookIntegrationHealth{
+		Mode: strategy.GitHookIntegrationLefthook, State: strategy.GitHookIntegrationError,
+		Manager: "Lefthook", ReasonCode: "conflict", Reason: "reason contains " + secret,
+	}
+	repairLifecycleHookHealth(logging.WithComponent(ctx, "test"), newMockHookResponseAgent(), "privacy-session", lifecycleHookHealthOps{
+		repair: func(context.Context) error { return errors.New("repair contains " + secret) },
+		check:  func(context.Context) strategy.GitHookIntegrationHealth { return health },
+	})
+	require.NoError(t, logger.Close())
+	data, err := os.ReadFile(filepath.Join(repoDir, logging.LogsDir, logging.LogFileName))
+	require.NoError(t, err)
+	require.NotContains(t, string(data), secret)
+	require.NotContains(t, string(data), health.Reason)
+	require.Contains(t, string(data), `"reason_code":"conflict"`)
+}
+
+func TestLifecycleHookHealthConcurrentTurnStartsReturnOneWarning(t *testing.T) {
+	setupStopTestRepo(t)
+	const sessionID = "hook-health-turn-start-race"
+	health := strategy.GitHookIntegrationHealth{
+		Mode: strategy.GitHookIntegrationLefthook, State: strategy.GitHookIntegrationError,
+		Manager: "Lefthook", ReasonCode: "conflict",
+	}
+	ops := lifecycleHookHealthOps{
+		repair: func(context.Context) error { return errors.New("still broken") },
+		check:  func(context.Context) strategy.GitHookIntegrationHealth { return health },
+	}
+	const callers = 12
+	start := make(chan struct{})
+	claims := make(chan lifecycleHookHealthClaim, callers)
+	var wg sync.WaitGroup
+	for range callers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			claims <- repairLifecycleHookHealth(context.Background(), newMockHookResponseAgent(), sessionID, ops)
+		}()
+	}
+	close(start)
+	wg.Wait()
+	close(claims)
+	warnings := 0
+	for claim := range claims {
+		if claim.message != "" {
+			warnings++
+		}
+	}
+	require.Equal(t, 1, warnings)
+}
+
+func TestLifecycleHookHealthHintPrecedesPersistedState(t *testing.T) {
+	setupStopTestRepo(t)
+	ctx := context.Background()
+	const sessionID = "hook-health-precedence"
+	require.NoError(t, strategy.SaveSessionState(ctx, &strategy.SessionState{
+		SessionID: sessionID, BaseCommit: "abc", StartedAt: time.Now(), LastHookHealthWarning: "state-value",
+	}))
+	const hint = `["lefthook","error","Lefthook","newer"]`
+	require.NoError(t, strategy.StoreHookHealthWarningHint(ctx, sessionID, hint))
+	claimed, err := strategy.ClaimHookHealthWarning(ctx, sessionID, hint)
+	require.NoError(t, err)
+	require.False(t, claimed, "pending hint takes precedence over the older persisted state")
+}
+
+func TestLifecycleSessionStartHookHealthWarningAndHealthySilence(t *testing.T) {
+	setupStopTestRepo(t)
+	ctx := context.Background()
+
+	unhealthy := newMockHookResponseAgent()
+	require.NoError(t, handleLifecycleSessionStart(ctx, unhealthy, &agent.Event{
+		Type: agent.SessionStart, SessionID: "hook-health-unhealthy", Timestamp: time.Now(),
+	}))
+	require.Contains(t, unhealthy.lastMessage, "entire doctor")
+	_, found, err := strategy.LoadHookHealthWarningHint(ctx, "hook-health-unhealthy")
+	require.NoError(t, err)
+	require.True(t, found, "emitted banner warning must persist its fingerprint hint")
+
+	_, err = strategy.EnsureGitHookIntegration(ctx, false)
+	require.NoError(t, err)
+	healthy := newMockHookResponseAgent()
+	require.NoError(t, handleLifecycleSessionStart(ctx, healthy, &agent.Event{
+		Type: agent.SessionStart, SessionID: "hook-health-healthy", Timestamp: time.Now(),
+	}))
+	require.NotContains(t, healthy.lastMessage, "Git hook integration")
+	_, found, err = strategy.LoadHookHealthWarningHint(ctx, "hook-health-healthy")
+	require.NoError(t, err)
+	require.False(t, found, "healthy banner must not create a warning hint")
 }
 
 // TestHandleLifecycleSessionStart_StoresAgentTypeHint verifies the

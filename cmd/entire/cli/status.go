@@ -91,15 +91,20 @@ func runStatus(ctx context.Context, w io.Writer, detailed, jsonOutput bool) erro
 		return runStatusDetailed(ctx, w, sty, settingsPath, localSettingsPath, projectExists, localExists)
 	}
 
-	// Short output: just show the effective/merged state
+	// Build the operational snapshot once, then render it. Text and JSON use
+	// this same constructor so health, storage, and destination cannot drift.
 	s, err := LoadEntireSettings(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to load settings: %w", err)
 	}
+	snapshot, err := buildStatusSnapshot(ctx, s)
+	if err != nil {
+		return err
+	}
 
-	fmt.Fprintln(w, formatSettingsStatusShort(ctx, s, sty))
+	fmt.Fprintln(w, formatSettingsStatusShort(ctx, snapshot, sty))
 	if s.Enabled {
-		writeActiveSessions(ctx, w, sty)
+		writeActiveSessionsSnapshot(ctx, w, sty, snapshot.Sessions)
 	}
 	writeAgentHelpHint(w, sty)
 
@@ -127,7 +132,11 @@ func runStatusDetailed(ctx context.Context, w io.Writer, sty statusStyles, setti
 	if err != nil {
 		return fmt.Errorf("failed to load settings: %w", err)
 	}
-	fmt.Fprintln(w, formatSettingsStatusShort(ctx, effectiveSettings, sty))
+	snapshot, err := buildStatusSnapshot(ctx, effectiveSettings)
+	if err != nil {
+		return err
+	}
+	fmt.Fprintln(w, formatSettingsStatusShort(ctx, snapshot, sty))
 	fmt.Fprintln(w) // blank line
 
 	// Show project settings if it exists
@@ -187,7 +196,7 @@ func runStatusDetailed(ctx context.Context, w io.Writer, sty statusStyles, setti
 	}
 
 	if effectiveSettings.Enabled {
-		writeActiveSessions(ctx, w, sty)
+		writeActiveSessionsSnapshot(ctx, w, sty, snapshot.Sessions)
 	}
 	writeAgentHelpHint(w, sty)
 
@@ -197,8 +206,9 @@ func runStatusDetailed(ctx context.Context, w io.Writer, sty statusStyles, setti
 // formatSettingsStatusShort formats a short settings status line.
 // Output format: "● Enabled · branch main" or "○ Disabled · branch main"
 // (the branch segment is appended whenever it can be resolved).
-func formatSettingsStatusShort(ctx context.Context, s *EntireSettings, sty statusStyles) string {
+func formatSettingsStatusShort(ctx context.Context, snapshot *statusSnapshot, sty statusStyles) string {
 	var b strings.Builder
+	s := snapshot.Settings
 
 	if s.Enabled {
 		b.WriteString(sty.render(sty.green, "●"))
@@ -247,7 +257,7 @@ func formatSettingsStatusShort(ctx context.Context, s *EntireSettings, sty statu
 	// Where checkpoint data syncs (the single elected remote), and how many
 	// checkpoints have not reached it yet. Local-only computation.
 	if s.Enabled {
-		writeCheckpointSyncLines(ctx, &b, s, sty)
+		writeCheckpointStatusLines(&b, snapshot, sty)
 	}
 
 	if s.Enabled {
@@ -353,7 +363,71 @@ type checkpointSyncInfo struct {
 	IgnoredReason string
 }
 
-func computeCheckpointSyncInfo(ctx context.Context, s *EntireSettings) checkpointSyncInfo {
+type statusSnapshot struct {
+	Settings                 *EntireSettings
+	GitHooks                 strategy.GitHookIntegrationHealth
+	CheckpointSync           checkpointSyncInfo
+	CheckpointSyncState      string
+	CheckpointStorageBackend string
+	Sessions                 []statusSession
+}
+
+const (
+	checkpointSyncStateReady    = "ready"
+	checkpointSyncStateDegraded = "degraded"
+	checkpointSyncStateBlocked  = "blocked"
+)
+
+func buildStatusSnapshot(ctx context.Context, s *EntireSettings) (*statusSnapshot, error) {
+	checkpointConfig, err := settings.LoadCheckpointsConfig(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to load checkpoint storage configuration: %w", err)
+	}
+	backend := checkpoint.BackendTypeGitBranch
+	if checkpointConfig != nil {
+		backend = checkpointConfig.Primary.Type
+	}
+	hooks := strategy.CheckGitHookIntegration(ctx)
+	syncInfo := computeCheckpointSyncInfo(ctx, s, backend)
+	sessions := collectStatusSessions(ctx)
+	return &statusSnapshot{
+		Settings:                 s,
+		GitHooks:                 hooks,
+		CheckpointSync:           syncInfo,
+		CheckpointSyncState:      checkpointSyncState(hooks.State, syncInfo.Err),
+		CheckpointStorageBackend: backend,
+		Sessions:                 sessions,
+	}, nil
+}
+
+func checkpointSyncState(hookState strategy.GitHookIntegrationState, syncErr string) string {
+	if syncErr != "" {
+		return checkpointSyncStateBlocked
+	}
+	switch hookState {
+	case strategy.GitHookIntegrationCurrent:
+		return checkpointSyncStateReady
+	case strategy.GitHookIntegrationDegraded:
+		return checkpointSyncStateDegraded
+	case strategy.GitHookIntegrationOutdated, strategy.GitHookIntegrationAbsent, strategy.GitHookIntegrationError:
+		return checkpointSyncStateBlocked
+	default:
+		return checkpointSyncStateBlocked
+	}
+}
+
+func checkpointStorageLabel(backend string) string {
+	switch backend {
+	case checkpoint.BackendTypeGitBranch:
+		return "Git branch"
+	case checkpoint.BackendTypeGitRefs:
+		return "Git refs"
+	default:
+		return backend
+	}
+}
+
+func computeCheckpointSyncInfo(ctx context.Context, s *EntireSettings, checkpointBackend string) checkpointSyncInfo {
 	elected, err := strategy.ResolveCheckpointSyncRemote(ctx)
 	if err != nil {
 		// Fail-closed: checkpoint_push_remote names a remote that does not
@@ -385,7 +459,7 @@ func computeCheckpointSyncInfo(ctx context.Context, s *EntireSettings) checkpoin
 			// git-branch comparison is omitted: pushes to a raw URL update
 			// no remote-tracking ref, so it would permanently read "all
 			// unpushed".
-			if cpCfg, cfgErr := settings.LoadCheckpointsConfig(ctx); cfgErr == nil && checkpoint.PrimaryIsRefs(cpCfg) {
+			if checkpointBackend == checkpoint.BackendTypeGitRefs {
 				info.Unpushed = countUnpushedCheckpointsForStatus(ctx, "")
 			}
 			return info
@@ -426,16 +500,64 @@ func countUnpushedCheckpointsForStatus(ctx context.Context, remoteName string) i
 	return n
 }
 
-// writeCheckpointSyncLines appends the checkpoint sync destination line (and
-// the unpushed counter, when non-zero) to the enabled status block. Rendered
-// whenever something resolved: an elected remote, a dedicated store, or the
-// fail-closed misconfiguration. No remotes configured -> no lines.
-func writeCheckpointSyncLines(ctx context.Context, b *strings.Builder, s *EntireSettings, sty statusStyles) {
-	info := computeCheckpointSyncInfo(ctx, s)
-	switch {
-	case info.Err != "":
+// writeCheckpointStatusLines appends the local checkpoint storage, Git-hook
+// health, sync readiness, and (when safe to claim) the destination and unpushed
+// counter to the enabled status block.
+func writeCheckpointStatusLines(b *strings.Builder, snapshot *statusSnapshot, sty statusStyles) {
+	info := snapshot.CheckpointSync
+	b.WriteString("\n")
+	b.WriteString(sty.render(sty.dim, "  Checkpoint storage · "))
+	b.WriteString(checkpointStorageLabel(snapshot.CheckpointStorageBackend))
+
+	b.WriteString("\n")
+	hookSummary := fmt.Sprintf("Git hooks · %s (%s)", snapshot.GitHooks.State, snapshot.GitHooks.Mode)
+	if snapshot.GitHooks.State == strategy.GitHookIntegrationCurrent {
+		b.WriteString(sty.render(sty.dim, "  "+hookSummary))
+	} else {
+		b.WriteString(sty.render(sty.yellow, "  ! "+hookSummary))
+		if snapshot.GitHooks.Reason != "" {
+			b.WriteString(": ")
+			b.WriteString(snapshot.GitHooks.Reason)
+		}
+	}
+
+	if info.Err != "" {
 		b.WriteString("\n")
 		b.WriteString(sty.render(sty.yellow, "  ! Checkpoints NOT syncing: "+info.Err))
+		if snapshot.GitHooks.State == strategy.GitHookIntegrationCurrent {
+			return
+		}
+	}
+	switch {
+	case snapshot.CheckpointSyncState == checkpointSyncStateBlocked:
+		b.WriteString("\n")
+		b.WriteString(sty.render(sty.yellow, "  ! Checkpoint sync blocked"))
+		if info.Remote != "" {
+			b.WriteString(": destination ")
+			b.WriteString(sty.render(sty.cyan, info.Remote))
+			b.WriteString(" is configured, but ")
+		} else {
+			b.WriteString(": ")
+		}
+		reason := snapshot.GitHooks.Reason
+		if reason == "" {
+			reason = fmt.Sprintf("Git hook integration is %s.", snapshot.GitHooks.State)
+		}
+		b.WriteString(reason)
+		b.WriteString(sty.render(sty.dim, " · run 'entire doctor'"))
+		return
+	case snapshot.CheckpointSyncState == checkpointSyncStateDegraded:
+		b.WriteString("\n")
+		b.WriteString(sty.render(sty.yellow, "  ! Checkpoint sync degraded"))
+		if info.Remote != "" {
+			b.WriteString(": currently configured for ")
+			b.WriteString(sty.render(sty.cyan, info.Remote))
+		}
+		if snapshot.GitHooks.Reason != "" {
+			b.WriteString("; ")
+			b.WriteString(snapshot.GitHooks.Reason)
+		}
+		return
 	case info.Remote == "":
 		return
 	case info.Source == checkpointSyncSourceDedicated:
@@ -501,50 +623,70 @@ func formatRelativeDuration(d time.Duration) string {
 	}
 }
 
-// worktreeGroup groups sessions by worktree path for display.
-type worktreeGroup struct {
-	path     string
-	branch   string
-	sessions []*session.State
-}
-
 const (
 	unknownPlaceholder  = "(unknown)"
 	detachedHEADDisplay = "HEAD"
 )
 
-// writeActiveSessions writes active session information grouped by worktree.
-func writeActiveSessions(ctx context.Context, w io.Writer, sty statusStyles) {
+type statusSession struct {
+	State        *session.State
+	WorktreePath string
+	Branch       string
+	LastActiveAt time.Time
+}
+
+func collectStatusSessions(ctx context.Context) []statusSession {
 	store, err := session.NewStateStore(ctx)
 	if err != nil {
-		return
+		return nil
 	}
-
-	states, err := store.List(ctx)
-	if err != nil || len(states) == 0 {
-		return
+	states, err := store.ListReadOnly(ctx)
+	if err != nil {
+		return nil
 	}
-
-	// Finalize any non-ended session whose agent process has exited without a
-	// SessionStop hook firing, so it doesn't linger as "active" until the
-	// inactivity timeout. The sweep marks them ended in place, so the filter
-	// below drops them.
-	if n := finalizeExitedSessions(ctx, states, time.Now().Add(interactiveSweepCondenseBudget)); n > 0 {
-		fmt.Fprintln(w, sty.render(sty.dim, fmt.Sprintf("Finalized %d exited session(s) (agent process gone).", n)))
-	}
-
-	// Filter to active sessions only, per session.State.IsEnded — the same rule
-	// `entire session stop` filters on, so status can't advertise a session that
-	// stop then refuses to list. EndedAt alone is not it: `entire session attach`
-	// sets Phase to ended without stamping EndedAt.
-	var active []*session.State
-	for _, s := range states {
-		if !s.IsEnded() {
-			active = append(active, s)
+	result := make([]statusSession, 0, len(states))
+	for _, state := range states {
+		if state.IsEnded() {
+			continue
 		}
+		worktreePath := state.WorktreePath
+		branch := state.Branch
+		if branch == "" && worktreePath != "" {
+			branch = resolveWorktreeBranch(ctx, worktreePath)
+		}
+		lastActive := state.StartedAt
+		if state.LastInteractionTime != nil {
+			lastActive = *state.LastInteractionTime
+		}
+		result = append(result, statusSession{
+			State:        state,
+			WorktreePath: worktreePath,
+			Branch:       branch,
+			LastActiveAt: lastActive,
+		})
 	}
-	if len(active) == 0 {
+	sort.Slice(result, func(i, j int) bool {
+		if !result[i].LastActiveAt.Equal(result[j].LastActiveAt) {
+			return result[i].LastActiveAt.After(result[j].LastActiveAt)
+		}
+		return result[i].State.SessionID < result[j].State.SessionID
+	})
+	return result
+}
+
+// writeActiveSessions retains the direct rendering seam used by focused tests.
+// Production status commands pass the already-collected snapshot instead.
+func writeActiveSessions(ctx context.Context, w io.Writer, sty statusStyles) {
+	writeActiveSessionsSnapshot(ctx, w, sty, collectStatusSessions(ctx))
+}
+
+func writeActiveSessionsSnapshot(ctx context.Context, w io.Writer, sty statusStyles, sessions []statusSession) {
+	if len(sessions) == 0 {
 		return
+	}
+	active := make([]*session.State, 0, len(sessions))
+	for _, item := range sessions {
+		active = append(active, item.State)
 	}
 
 	repoRoot, head, headErr := currentHeadLinkage(ctx)
@@ -553,121 +695,91 @@ func writeActiveSessions(ctx context.Context, w io.Writer, sty statusStyles) {
 		divergenceWarnings = computeSessionDivergenceWarnings(repoRoot, active, head)
 	}
 
-	// Group by worktree path
-	groups := make(map[string]*worktreeGroup)
-	for _, s := range active {
-		wp := s.WorktreePath
-		if wp == "" {
-			wp = unknownPlaceholder
-		}
-		g, ok := groups[wp]
-		if !ok {
-			g = &worktreeGroup{path: wp}
-			groups[wp] = g
-		}
-		g.sessions = append(g.sessions, s)
-	}
-
-	// Resolve branch names for each worktree (skip for unknown paths)
-	for _, g := range groups {
-		if g.path != unknownPlaceholder {
-			g.branch = resolveWorktreeBranch(ctx, g.path)
-		}
-	}
-
-	// Sort groups: alphabetical by path
-	sortedGroups := make([]*worktreeGroup, 0, len(groups))
-	for _, g := range groups {
-		sortedGroups = append(sortedGroups, g)
-	}
-	sort.Slice(sortedGroups, func(i, j int) bool {
-		return sortedGroups[i].path < sortedGroups[j].path
-	})
-
-	// Sort sessions within each group by StartedAt (newest first)
-	for _, g := range sortedGroups {
-		sort.Slice(g.sessions, func(i, j int) bool {
-			return g.sessions[i].StartedAt.After(g.sessions[j].StartedAt)
-		})
-	}
-
 	// Track aggregate totals
 	var totalSessions int
 
 	fmt.Fprintln(w)
 	printedHeader := false
-	for _, g := range sortedGroups {
+	for _, item := range sessions {
 		if !printedHeader {
 			fmt.Fprintln(w, sty.sectionRule("Active Sessions", sty.width))
 			fmt.Fprintln(w)
 			printedHeader = true
 		}
 
-		for _, st := range g.sessions {
-			totalSessions++
+		st := item.State
+		totalSessions++
 
-			agentLabel := string(st.AgentType)
-			if agentLabel == "" {
-				agentLabel = unknownPlaceholder
-			}
-
-			// Line 1: Agent (model) · sessionID
-			if st.ModelName != "" {
-				fmt.Fprintf(w, "%s %s %s %s\n",
-					sty.render(sty.agent, agentLabel),
-					sty.render(sty.dim, "("+st.ModelName+")"),
-					sty.render(sty.dim, "·"),
-					st.SessionID)
-			} else {
-				fmt.Fprintf(w, "%s %s %s\n",
-					sty.render(sty.agent, agentLabel),
-					sty.render(sty.dim, "·"),
-					st.SessionID)
-			}
-
-			// Line 2: > "first prompt" (chevron + quoted, truncated)
-			if st.LastPrompt != "" {
-				prompt := stringutil.TruncateRunes(st.LastPrompt, 60, "...")
-				fmt.Fprintf(w, "%s \"%s\"\n", sty.render(sty.dim, ">"), prompt)
-			}
-
-			// Line 3: stats line — started Xd ago · active now · files N · tokens X.Xk
-			var stats []string
-			stats = append(stats, "started "+timeAgo(st.StartedAt))
-
-			if st.LastInteractionTime != nil && st.LastInteractionTime.Sub(st.StartedAt) > time.Minute {
-				stats = append(stats, activeTimeDisplay(st.LastInteractionTime))
-			}
-
-			if t := totalTokens(st.TokenUsage); t > 0 {
-				stats = append(stats, "tokens "+formatTokenCount(t))
-			}
-
-			statsLine := strings.Join(stats, sty.render(sty.dim, " · "))
-			switch {
-			case st.OwnerExited():
-				// Agent process is gone but the session couldn't be finalized
-				// above (e.g. condense/transition error); flag it explicitly.
-				fmt.Fprintf(w, "%s %s %s\n", sty.render(sty.dim, statsLine),
-					sty.render(sty.dim, "·"),
-					sty.render(sty.yellow, "exited")+" (run 'entire doctor')")
-			case st.IsStuckActive():
-				fmt.Fprintf(w, "%s %s %s\n", sty.render(sty.dim, statsLine),
-					sty.render(sty.dim, "·"),
-					sty.render(sty.yellow, "stale")+" (run 'entire doctor')")
-			default:
-				fmt.Fprintln(w, sty.render(sty.dim, statsLine))
-			}
-			if warning := divergenceWarnings[st.SessionID]; warning != "" {
-				fmt.Fprintf(w, "%s %s\n", sty.render(sty.yellow, "!"), sty.render(sty.yellow, warning))
-			}
-			if st.CaptureDegradedAt != nil {
-				warning := fmt.Sprintf("capture degraded %s: status scan over budget; new-file detection skipped (see 'entire doctor logs')",
-					timeAgo(*st.CaptureDegradedAt))
-				fmt.Fprintf(w, "%s %s\n", sty.render(sty.yellow, "!"), sty.render(sty.yellow, warning))
-			}
-			fmt.Fprintln(w)
+		agentLabel := string(st.AgentType)
+		if agentLabel == "" {
+			agentLabel = unknownPlaceholder
 		}
+
+		// Line 1: Agent (model) · sessionID
+		if st.ModelName != "" {
+			fmt.Fprintf(w, "%s %s %s %s\n",
+				sty.render(sty.agent, agentLabel),
+				sty.render(sty.dim, "("+st.ModelName+")"),
+				sty.render(sty.dim, "·"),
+				st.SessionID)
+		} else {
+			fmt.Fprintf(w, "%s %s %s\n",
+				sty.render(sty.agent, agentLabel),
+				sty.render(sty.dim, "·"),
+				st.SessionID)
+		}
+		worktreePath := item.WorktreePath
+		if worktreePath == "" {
+			worktreePath = unknownPlaceholder
+		}
+		location := "worktree " + worktreePath
+		if item.Branch != "" {
+			location += " · branch " + item.Branch
+		}
+		fmt.Fprintln(w, sty.render(sty.dim, location))
+
+		// Line 2: > "first prompt" (chevron + quoted, truncated)
+		if st.LastPrompt != "" {
+			prompt := stringutil.TruncateRunes(st.LastPrompt, 60, "...")
+			fmt.Fprintf(w, "%s \"%s\"\n", sty.render(sty.dim, ">"), prompt)
+		}
+
+		// Line 3: stats line — started Xd ago · active now · files N · tokens X.Xk
+		var stats []string
+		stats = append(stats, "started "+timeAgo(st.StartedAt))
+
+		if st.LastInteractionTime != nil && st.LastInteractionTime.Sub(st.StartedAt) > time.Minute {
+			stats = append(stats, activeTimeDisplay(st.LastInteractionTime))
+		}
+
+		if t := totalTokens(st.TokenUsage); t > 0 {
+			stats = append(stats, "tokens "+formatTokenCount(t))
+		}
+
+		statsLine := strings.Join(stats, sty.render(sty.dim, " · "))
+		switch {
+		case st.OwnerExited():
+			// Agent process is gone but the session couldn't be finalized
+			// above (e.g. condense/transition error); flag it explicitly.
+			fmt.Fprintf(w, "%s %s %s\n", sty.render(sty.dim, statsLine),
+				sty.render(sty.dim, "·"),
+				sty.render(sty.yellow, "exited")+" (run 'entire doctor')")
+		case st.IsStuckActive():
+			fmt.Fprintf(w, "%s %s %s\n", sty.render(sty.dim, statsLine),
+				sty.render(sty.dim, "·"),
+				sty.render(sty.yellow, "stale")+" (run 'entire doctor')")
+		default:
+			fmt.Fprintln(w, sty.render(sty.dim, statsLine))
+		}
+		if warning := divergenceWarnings[st.SessionID]; warning != "" {
+			fmt.Fprintf(w, "%s %s\n", sty.render(sty.yellow, "!"), sty.render(sty.yellow, warning))
+		}
+		if st.CaptureDegradedAt != nil {
+			warning := fmt.Sprintf("capture degraded %s: status scan over budget; new-file detection skipped (see 'entire doctor logs')",
+				timeAgo(*st.CaptureDegradedAt))
+			fmt.Fprintf(w, "%s %s\n", sty.render(sty.yellow, "!"), sty.render(sty.yellow, warning))
+		}
+		fmt.Fprintln(w)
 	}
 
 	// Footer: horizontal rule + session count
@@ -854,10 +966,13 @@ type statusJSON struct {
 	// CheckpointSyncRemote is the elected checkpoint sync remote name, or the
 	// org/repo slug in dedicated checkpoint_remote mode. Deliberately not named
 	// checkpoint_remote, which is the existing GitHub-coupled setting.
-	CheckpointSyncRemote       string `json:"checkpoint_sync_remote,omitempty"`
-	CheckpointSyncRemoteSource string `json:"checkpoint_sync_remote_source,omitempty"` // config|observed|default|sole|first|dedicated
-	CheckpointSyncError        string `json:"checkpoint_sync_error,omitempty"`         // fail-closed message
-	UnpushedCheckpoints        int    `json:"unpushed_checkpoints,omitempty"`
+	CheckpointSyncRemote       string                            `json:"checkpoint_sync_remote,omitempty"`
+	CheckpointSyncRemoteSource string                            `json:"checkpoint_sync_remote_source,omitempty"` // config|observed|default|sole|first|dedicated
+	CheckpointSyncError        string                            `json:"checkpoint_sync_error,omitempty"`         // fail-closed message
+	CheckpointSyncState        string                            `json:"checkpoint_sync_state"`
+	GitHooks                   strategy.GitHookIntegrationHealth `json:"git_hooks"`
+	CheckpointStorageBackend   string                            `json:"checkpoint_storage_backend"`
+	UnpushedCheckpoints        int                               `json:"unpushed_checkpoints,omitempty"`
 	// CheckpointRemoteIgnored/-Reason report a configured checkpoint_remote the
 	// ownership check rejected as inherited with the clone (reads and pushes
 	// fall back to the elected remote). Mirrors the text path's warning line.
@@ -894,9 +1009,15 @@ func codexHooksStatusFromIssue(issue *codexHookIssue) *codexHooksStatusJSON {
 }
 
 type sessionBriefJSON struct {
-	Agent  string `json:"agent"`
-	Model  string `json:"model,omitempty"`
-	Status string `json:"status"`
+	Agent        string     `json:"agent"`
+	Model        string     `json:"model,omitempty"`
+	Status       string     `json:"status"`
+	SessionID    string     `json:"session_id"`
+	WorktreeID   string     `json:"worktree_id,omitempty"`
+	WorktreePath string     `json:"worktree_path,omitempty"`
+	Branch       string     `json:"branch,omitempty"`
+	StartedAt    *time.Time `json:"started_at,omitempty"`
+	LastActiveAt *time.Time `json:"last_active_at,omitempty"`
 	// CaptureDegraded reports that a session for this agent last turned with a
 	// status scan over budget, so new-file detection was skipped.
 	CaptureDegraded bool `json:"capture_degraded,omitempty"`
@@ -925,11 +1046,19 @@ func runStatusJSON(ctx context.Context, w io.Writer) error {
 		return writeJSON(statusJSON{Error: fmt.Sprintf("failed to load settings: %v", err)})
 	}
 
+	snapshot, err := buildStatusSnapshot(ctx, s)
+	if err != nil {
+		return writeJSON(statusJSON{Error: err.Error()})
+	}
+
 	result := statusJSON{
-		Enabled:        s.Enabled,
-		Agents:         []string{},
-		ActiveSessions: []sessionBriefJSON{},
-		AgentHelp:      agentHelpCommand,
+		Enabled:                  s.Enabled,
+		Agents:                   []string{},
+		ActiveSessions:           []sessionBriefJSON{},
+		AgentHelp:                agentHelpCommand,
+		CheckpointSyncState:      snapshot.CheckpointSyncState,
+		GitHooks:                 snapshot.GitHooks,
+		CheckpointStorageBackend: snapshot.CheckpointStorageBackend,
 	}
 
 	if s.Enabled {
@@ -944,9 +1073,9 @@ func runStatusJSON(ctx context.Context, w io.Writer) error {
 		}
 		result.CodexHooks = codexHooksStatusFromIssue(inspectCodexHookIssue(ctx))
 
-		// Same computation as the text path (writeCheckpointSyncLines);
-		// empty fields drop out via omitempty when nothing resolved.
-		syncInfo := computeCheckpointSyncInfo(ctx, s)
+		// Same snapshot as the text path; empty legacy destination fields drop
+		// out via omitempty when nothing resolved.
+		syncInfo := snapshot.CheckpointSync
 		result.CheckpointSyncRemote = syncInfo.Remote
 		result.CheckpointSyncRemoteSource = syncInfo.Source
 		result.CheckpointSyncError = syncInfo.Err
@@ -954,55 +1083,31 @@ func runStatusJSON(ctx context.Context, w io.Writer) error {
 		result.CheckpointRemoteIgnored = syncInfo.IgnoredRemote
 		result.CheckpointRemoteIgnoredReason = syncInfo.IgnoredReason
 
-		if store, err := session.NewStateStore(ctx); err == nil {
-			if states, err := store.List(ctx); err == nil {
-				// Finalize sessions whose agent has exited (matches the human
-				// status path) so --json doesn't leave them orphaned or
-				// report them under active_sessions.
-				finalizeExitedSessions(ctx, states, time.Now().Add(interactiveSweepCondenseBudget))
-				// Deduplicate by agent: one entry per agent, "active" wins over "idle".
-				type agentEntry struct {
-					brief    sessionBriefJSON
-					isActive bool
-				}
-				byAgent := make(map[string]*agentEntry)
-				for _, st := range states {
-					if st.IsEnded() {
-						continue
-					}
-					agent := string(st.AgentType)
-					if agent == "" {
-						agent = unknownPlaceholder
-					}
-					active := st.Phase == session.PhaseActive
-					if existing, ok := byAgent[agent]; ok {
-						if active && !existing.isActive {
-							existing.brief.Model = st.ModelName
-							existing.brief.Status = sessionStatusLabel(st)
-							existing.isActive = true
-						}
-						// Degradation is sticky across the dedupe: any degraded
-						// session for this agent must not be hidden by a healthy one.
-						existing.brief.CaptureDegraded = existing.brief.CaptureDegraded || st.CaptureDegradedAt != nil
-					} else {
-						byAgent[agent] = &agentEntry{
-							brief: sessionBriefJSON{
-								Agent:           agent,
-								Model:           st.ModelName,
-								Status:          sessionStatusLabel(st),
-								CaptureDegraded: st.CaptureDegradedAt != nil,
-							},
-							isActive: active,
-						}
-					}
-				}
-				for _, e := range byAgent {
-					result.ActiveSessions = append(result.ActiveSessions, e.brief)
-				}
-				sort.Slice(result.ActiveSessions, func(i, j int) bool {
-					return result.ActiveSessions[i].Agent < result.ActiveSessions[j].Agent
-				})
+		for _, item := range snapshot.Sessions {
+			st := item.State
+			agentName := string(st.AgentType)
+			if agentName == "" {
+				agentName = unknownPlaceholder
 			}
+			brief := sessionBriefJSON{
+				Agent:           agentName,
+				Model:           st.ModelName,
+				Status:          sessionStatusLabel(st),
+				SessionID:       st.SessionID,
+				WorktreeID:      st.WorktreeID,
+				WorktreePath:    item.WorktreePath,
+				Branch:          item.Branch,
+				CaptureDegraded: st.CaptureDegradedAt != nil,
+			}
+			if !st.StartedAt.IsZero() {
+				startedAt := st.StartedAt
+				brief.StartedAt = &startedAt
+			}
+			if !item.LastActiveAt.IsZero() {
+				lastActiveAt := item.LastActiveAt
+				brief.LastActiveAt = &lastActiveAt
+			}
+			result.ActiveSessions = append(result.ActiveSessions, brief)
 		}
 	}
 

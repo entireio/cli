@@ -55,14 +55,17 @@ func TestDetectHookManagers_Lefthook(t *testing.T) {
 	if len(managers) != 1 {
 		t.Fatalf("expected 1 manager, got %d", len(managers))
 	}
-	if managers[0].Name != "Lefthook" { //nolint:goconst // test assertion, not a magic string
+	if managers[0].Name != lefthookManagerName {
 		t.Errorf("expected Lefthook, got %s", managers[0].Name)
 	}
 	if managers[0].ConfigPath != "lefthook.yml" {
 		t.Errorf("expected lefthook.yml, got %s", managers[0].ConfigPath)
 	}
-	if managers[0].OverwritesHooks {
-		t.Error("Lefthook should have OverwritesHooks=false")
+	if !managers[0].OverwritesHooks {
+		t.Error("Lefthook should have OverwritesHooks=true")
+	}
+	if managers[0].IntegrationKind != hookManagerIntegrationLefthook {
+		t.Errorf("Lefthook integration kind = %q, want %q", managers[0].IntegrationKind, hookManagerIntegrationLefthook)
 	}
 }
 
@@ -78,7 +81,7 @@ func TestDetectHookManagers_LefthookDotPrefix(t *testing.T) {
 	if len(managers) != 1 {
 		t.Fatalf("expected 1 manager, got %d", len(managers))
 	}
-	if managers[0].Name != "Lefthook" {
+	if managers[0].Name != lefthookManagerName {
 		t.Errorf("expected Lefthook, got %s", managers[0].Name)
 	}
 	if managers[0].ConfigPath != ".lefthook.yml" {
@@ -98,7 +101,7 @@ func TestDetectHookManagers_LefthookToml(t *testing.T) {
 	if len(managers) != 1 {
 		t.Fatalf("expected 1 manager, got %d", len(managers))
 	}
-	if managers[0].Name != "Lefthook" {
+	if managers[0].Name != lefthookManagerName {
 		t.Errorf("expected Lefthook, got %s", managers[0].Name)
 	}
 	if managers[0].ConfigPath != "lefthook.toml" {
@@ -118,7 +121,7 @@ func TestDetectHookManagers_LefthookLocal(t *testing.T) {
 	if len(managers) != 1 {
 		t.Fatalf("expected 1 manager, got %d", len(managers))
 	}
-	if managers[0].Name != "Lefthook" {
+	if managers[0].Name != lefthookManagerName {
 		t.Errorf("expected Lefthook, got %s", managers[0].Name)
 	}
 	if managers[0].ConfigPath != "lefthook-local.yml" {
@@ -142,7 +145,7 @@ func TestDetectHookManagers_LefthookDedup(t *testing.T) {
 	if len(managers) != 1 {
 		t.Fatalf("expected 1 manager (dedup), got %d", len(managers))
 	}
-	if managers[0].Name != "Lefthook" {
+	if managers[0].Name != lefthookManagerName {
 		t.Errorf("expected Lefthook, got %s", managers[0].Name)
 	}
 }
@@ -314,7 +317,12 @@ func TestHookManagerWarning_Husky(t *testing.T) {
 	t.Parallel()
 
 	managers := []hookManager{
-		{Name: "Husky", ConfigPath: ".husky/", OverwritesHooks: true},
+		{
+			Name:            "Husky",
+			ConfigPath:      ".husky/",
+			OverwritesHooks: true,
+			IntegrationKind: hookManagerIntegrationHookDirectory,
+		},
 	}
 
 	warning := hookManagerWarning(managers, "entire")
@@ -352,14 +360,18 @@ func TestHookManagerWarning_GitHooksManager(t *testing.T) {
 	t.Parallel()
 
 	managers := []hookManager{
-		{Name: "Lefthook", ConfigPath: "lefthook.yml", OverwritesHooks: false},
+		{
+			Name:            lefthookManagerName,
+			ConfigPath:      "lefthook.yml",
+			OverwritesHooks: true,
+			IntegrationKind: hookManagerIntegrationLefthook,
+		},
 	}
 
 	warning := hookManagerWarning(managers, "entire")
 
-	// Category B: should be a Note, not a Warning
-	if !strings.Contains(warning, "Note: Lefthook detected") {
-		t.Error("warning should contain 'Note: Lefthook detected'")
+	if !strings.Contains(warning, "Warning: Lefthook detected") {
+		t.Error("warning should contain 'Warning: Lefthook detected'")
 	}
 	if !strings.Contains(warning, "run 'entire enable' to restore") {
 		t.Error("warning should mention running 'entire enable'")
@@ -367,7 +379,10 @@ func TestHookManagerWarning_GitHooksManager(t *testing.T) {
 
 	// Should NOT contain hook file copy-paste instructions
 	if strings.Contains(warning, "prepare-commit-msg:") {
-		t.Error("category B warning should not contain hook file instructions")
+		t.Error("Lefthook warning should not treat its config file as a hook directory")
+	}
+	if strings.Contains(warning, "lefthook.ymlprepare-commit-msg") {
+		t.Error("Lefthook config path must not be presented as a hook directory")
 	}
 }
 
@@ -389,7 +404,12 @@ func TestHookManagerWarning_AbsolutePathPrefix(t *testing.T) {
 	t.Parallel()
 
 	managers := []hookManager{
-		{Name: "Husky", ConfigPath: ".husky/", OverwritesHooks: true},
+		{
+			Name:            "Husky",
+			ConfigPath:      ".husky/",
+			OverwritesHooks: true,
+			IntegrationKind: hookManagerIntegrationHookDirectory,
+		},
 	}
 
 	// The prefix is whatever hookCmdPrefix resolved to — bare "entire" or, with
@@ -408,8 +428,18 @@ func TestHookManagerWarning_Multiple(t *testing.T) {
 	t.Parallel()
 
 	managers := []hookManager{
-		{Name: "Husky", ConfigPath: ".husky/", OverwritesHooks: true},
-		{Name: "Lefthook", ConfigPath: "lefthook.yml", OverwritesHooks: false},
+		{
+			Name:            "Husky",
+			ConfigPath:      ".husky/",
+			OverwritesHooks: true,
+			IntegrationKind: hookManagerIntegrationHookDirectory,
+		},
+		{
+			Name:            lefthookManagerName,
+			ConfigPath:      "lefthook.yml",
+			OverwritesHooks: true,
+			IntegrationKind: hookManagerIntegrationLefthook,
+		},
 	}
 
 	warning := hookManagerWarning(managers, "entire")
@@ -417,8 +447,8 @@ func TestHookManagerWarning_Multiple(t *testing.T) {
 	if !strings.Contains(warning, "Warning: Husky detected") {
 		t.Error("should contain Husky warning")
 	}
-	if !strings.Contains(warning, "Note: Lefthook detected") {
-		t.Error("should contain Lefthook note")
+	if !strings.Contains(warning, "Warning: Lefthook detected") {
+		t.Error("should contain Lefthook warning")
 	}
 }
 

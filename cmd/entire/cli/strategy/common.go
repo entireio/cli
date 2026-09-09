@@ -111,11 +111,11 @@ func EnsureSetup(ctx context.Context) error {
 		return fmt.Errorf("failed to ensure primary metadata ref: %w", err)
 	}
 
-	// Install generic hooks (they delegate to strategy at runtime)
-	if !IsGitHookInstalled(ctx) {
-		if _, err := ReinstallGitHooks(ctx); err != nil {
-			return fmt.Errorf("failed to install git hooks: %w", err)
-		}
+	// Install or heal the durable integration selected by the repository's hook
+	// manager. The coordinator is idempotent, so the hook hot path can repair a
+	// manager refresh immediately.
+	if _, err := EnsureGitHookIntegration(ctx, hookSettingsFromConfig(ctx)); err != nil {
+		return fmt.Errorf("failed to install git hooks: %w", err)
 	}
 	return nil
 }

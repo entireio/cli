@@ -13,11 +13,105 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/internal/flock"
+	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
 	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func TestHookHealthWarningHintStoreLoadTransfer(t *testing.T) {
+	dir := t.TempDir()
+	testutil.InitRepo(t, dir)
+	t.Chdir(dir)
+	const sessionID = "hook-health-hint"
+	const fingerprint = `["lefthook","error","Lefthook","conflict"]`
+
+	require.NoError(t, StoreHookHealthWarningHint(context.Background(), sessionID, fingerprint))
+	got, found, err := LoadHookHealthWarningHint(context.Background(), sessionID)
+	require.NoError(t, err)
+	require.True(t, found)
+	require.Equal(t, fingerprint, got)
+
+	require.NoError(t, SaveSessionState(context.Background(), &SessionState{SessionID: sessionID, BaseCommit: "abc", StartedAt: time.Now()}))
+	require.NoError(t, TransferHookHealthWarningHint(context.Background(), sessionID))
+	state, err := LoadSessionState(context.Background(), sessionID)
+	require.NoError(t, err)
+	require.Equal(t, fingerprint, state.LastHookHealthWarning)
+	_, found, err = LoadHookHealthWarningHint(context.Background(), sessionID)
+	require.NoError(t, err)
+	require.False(t, found, "transfer must atomically consume the hint after saving state")
+}
+
+func TestLoadHookHealthWarningHintRejectsCorruptValue(t *testing.T) {
+	dir := t.TempDir()
+	testutil.InitRepo(t, dir)
+	t.Chdir(dir)
+	root, err := openSessionStateRoot(context.Background())
+	require.NoError(t, err)
+	require.NoError(t, jsonutil.WriteFileAtomicIn(root, "corrupt-hook-health.hook-health", []byte("prompt text"), 0o600))
+	require.NoError(t, root.Close())
+
+	_, found, err := LoadHookHealthWarningHint(context.Background(), "corrupt-hook-health")
+	require.Error(t, err)
+	require.False(t, found)
+}
+
+func TestClaimHookHealthWarningConcurrentSingleWinner(t *testing.T) {
+	dir := t.TempDir()
+	testutil.InitRepo(t, dir)
+	t.Chdir(dir)
+	const sessionID = "hook-health-concurrent-claim"
+	const fingerprint = `["lefthook","error","Lefthook","conflict"]`
+
+	const callers = 16
+	start := make(chan struct{})
+	results := make(chan bool, callers)
+	errs := make(chan error, callers)
+	var wg sync.WaitGroup
+	for range callers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			claimed, err := ClaimHookHealthWarning(context.Background(), sessionID, fingerprint)
+			results <- claimed
+			errs <- err
+		}()
+	}
+	close(start)
+	wg.Wait()
+	close(results)
+	close(errs)
+
+	winners := 0
+	for claimed := range results {
+		if claimed {
+			winners++
+		}
+	}
+	for err := range errs {
+		require.NoError(t, err)
+	}
+	require.Equal(t, 1, winners, "fingerprint compare and claim must be atomic")
+}
+
+func TestRollbackHookHealthWarningClaimAllowsRetryAfterOutputFailure(t *testing.T) {
+	dir := t.TempDir()
+	testutil.InitRepo(t, dir)
+	t.Chdir(dir)
+	const sessionID = "hook-health-output-retry"
+	const fingerprint = `["native","error","","repair_failed"]`
+
+	claimed, err := ClaimHookHealthWarning(context.Background(), sessionID, fingerprint)
+	require.NoError(t, err)
+	require.True(t, claimed)
+	require.NoError(t, RollbackHookHealthWarningClaim(context.Background(), sessionID, fingerprint))
+
+	claimed, err = ClaimHookHealthWarning(context.Background(), sessionID, fingerprint)
+	require.NoError(t, err)
+	require.True(t, claimed, "a failed output must leave the warning retryable")
+}
 
 // TestLoadSessionState_PackageLevel tests the package-level LoadSessionState function.
 func TestLoadSessionState_PackageLevel(t *testing.T) {

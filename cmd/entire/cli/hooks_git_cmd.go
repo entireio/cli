@@ -300,9 +300,9 @@ func newHooksGitPostRewriteCmd() *cobra.Command {
 
 func newHooksGitPrePushCmd() *cobra.Command {
 	return &cobra.Command{
-		Use:   "pre-push <remote>",
+		Use:   "pre-push <remote> [remote-url]",
 		Short: "Handle pre-push git hook",
-		Args:  cobra.ExactArgs(1),
+		Args:  cobra.RangeArgs(1, 2),
 		// SilenceUsage/Errors so non-zero exits from privacy-critical
 		// failures (OPF rewrite errors) print only the error message,
 		// not cobra's usage banner. The error message itself already

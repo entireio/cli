@@ -45,16 +45,17 @@ var allowedRootBases = map[string]string{
 
 	// Trees with their own resolver, anchored at the boundary between what
 	// Entire owns and what it does not.
-	"cmd/entire/cli/agent/session_store.go":      "the agent's own GetSessionDir (opened per operation, not memoized)",
-	"cmd/entire/cli/agent/vouched_dirs.go":       "worktree root, or a symlinked agent directory the user vouched for in settings.local.json, resolved",
-	"cmd/entire/cli/strategy/hooks.go":           "git rev-parse --git-path hooks; core.hooksPath can name a directory no other anchor covers",
-	"cmd/entire/cli/plugin_store.go":             "pluginParentDir()",
-	"cmd/entire/cli/plugin_index.go":             "the per-index cache dir, opened at the clone it contains",
-	"cmd/entire/cli/plugin_install_remote.go":    "a staging dir this process just created",
-	"cmd/entire/cli/plugin_fetch.go":             "the staging dir its caller created",
-	"cmd/entire/cli/utils.go":                    "one of worktree root / home / temp, chosen by containment",
-	"internal/entireclient/contexts/contexts.go": "the caller's config dir, not the contexts file's parent",
-	"internal/entireclient/discovery/cache.go":   "the caller's cache dir, not the cache file's parent",
+	"cmd/entire/cli/agent/session_store.go":                   "the agent's own GetSessionDir (opened per operation, not memoized)",
+	"cmd/entire/cli/agent/vouched_dirs.go":                    "worktree root, or a symlinked agent directory the user vouched for in settings.local.json, resolved",
+	"cmd/entire/cli/strategy/hooks.go":                        "git rev-parse --git-path hooks; core.hooksPath can name a directory no other anchor covers",
+	"cmd/entire/cli/strategy/hook_integration_transaction.go": "the fixed filesystem volume root; core.hooksPath can resolve outside both the worktree and git common directory",
+	"cmd/entire/cli/plugin_store.go":                          "pluginParentDir()",
+	"cmd/entire/cli/plugin_index.go":                          "the per-index cache dir, opened at the clone it contains",
+	"cmd/entire/cli/plugin_install_remote.go":                 "a staging dir this process just created",
+	"cmd/entire/cli/plugin_fetch.go":                          "the staging dir its caller created",
+	"cmd/entire/cli/utils.go":                                 "one of worktree root / home / temp, chosen by containment",
+	"internal/entireclient/contexts/contexts.go":              "the caller's config dir, not the contexts file's parent",
+	"internal/entireclient/discovery/cache.go":                "the caller's cache dir, not the cache file's parent",
 
 	// The two deliberate exceptions, both on a path the CALLER named, where
 	// the file's parent IS the caller's choice and no other base exists. Each

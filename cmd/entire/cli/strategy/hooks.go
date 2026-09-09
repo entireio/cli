@@ -20,6 +20,7 @@ import (
 
 // Hook marker used to identify Entire CLI hooks
 const entireHookMarker = "Entire CLI hooks"
+const postRewriteHookName = "post-rewrite"
 
 // GitHookBackupSuffix is what InstallGitHook moves a pre-existing hook to
 // before writing its own. Exported so diagnostics elsewhere can name the file
@@ -414,7 +415,9 @@ const (
 	GitHooksOutdated
 )
 
-// CheckGitHookState reports the state of the active hooks directory.
+// CheckGitHookState reports the legacy native-hook state. Existing setup,
+// doctor, and removal callers stay native-only until their manager-aware
+// migration is wired separately.
 func CheckGitHookState(ctx context.Context) GitHookState {
 	hooksDir, err := GetHooksDir(ctx)
 	if err != nil {
@@ -423,14 +426,25 @@ func CheckGitHookState(ctx context.Context) GitHookState {
 	return gitHookStateInHooksDir(hooksDir)
 }
 
-// CheckGitHookStateInDir reports the state for a specific repo directory, for
-// callers that must not depend on the working directory.
+// CheckGitHookStateInDir reports the legacy native-hook state for repoDir.
 func CheckGitHookStateInDir(ctx context.Context, repoDir string) GitHookState {
 	hooksDir, err := getHooksDirInPath(ctx, repoDir)
 	if err != nil {
 		return GitHooksAbsent
 	}
 	return gitHookStateInHooksDir(hooksDir)
+}
+
+func legacyGitHookState(health GitHookIntegrationHealth) GitHookState {
+	switch health.State {
+	case GitHookIntegrationCurrent:
+		return GitHooksCurrent
+	case GitHookIntegrationOutdated:
+		return GitHooksOutdated
+	case GitHookIntegrationDegraded, GitHookIntegrationAbsent, GitHookIntegrationError:
+		return GitHooksAbsent
+	}
+	return GitHooksAbsent
 }
 
 // IsGitHookInstalled reports whether a CURRENT set of Entire git hooks is
@@ -454,32 +468,6 @@ func AnyGitHookInstalled(ctx context.Context) bool {
 	return CheckGitHookState(ctx) != GitHooksAbsent
 }
 
-// ReinstallGitHooks rewrites the managed git hooks using this repo's hook
-// settings — the same pair EnsureSetup runs, exported so callers outside this
-// package cannot open-code it and silently drop absolute_git_hook_path.
-func ReinstallGitHooks(ctx context.Context) (int, error) {
-	return InstallGitHook(ctx, true, hookSettingsFromConfig(ctx))
-}
-
-// legacyGitHookLaunchers are the markers of a git hook that runs Entire from the
-// working tree instead of the installed binary — the two shapes local-dev mode
-// wrote over time. Retained for DETECTION ONLY: a hook naming either must be
-// treated as needing reinstallation.
-//
-// Such a hook is actively broken, not merely outdated. It carries
-// entireHookMarker, so a marker-only check reports it as installed and nothing
-// ever replaces it. `scripts/entire-dev` no longer exists, and `go run` on a
-// single file cannot build a package split across several — so both fail, and a
-// repo-relative prefix gets no availability guard to swallow it. pre-push
-// deliberately propagates exit codes, so the older of these forms was one
-// missing `|| true` away from rejecting every `git push`.
-//
-// Matching these two rather than "anything unexpected" is deliberate: neither
-// can appear in a hook this version generates (which emits only bare `entire` or
-// a quoted absolute path), and they are the same forms the agents match in their
-// entireHookPrefixes.
-var legacyGitHookLaunchers = []string{"scripts/entire-dev", "go run "}
-
 // bareEntireHookCmd is the default hook command prefix: the entire binary
 // resolved through PATH at hook runtime.
 const bareEntireHookCmd = "entire"
@@ -489,13 +477,28 @@ const bareEntireHookCmd = "entire"
 // Current, which is what makes EnsureSetup reinstall it rather than leaving a
 // broken hook in place forever.
 func gitHookStateInHooksDir(hooksDir string) GitHookState {
+	state, err := inspectGitHookStateInHooksDir(hooksDir)
+	if err != nil {
+		return GitHooksAbsent
+	}
+	return state
+}
+
+// inspectGitHookStateInHooksDir preserves the legacy classification while also
+// returning failures that prevent the integration health API from making a
+// trustworthy assessment. Missing hooks are an inspected Absent state; other
+// read failures mean inspection itself failed.
+func inspectGitHookStateInHooksDir(hooksDir string) (GitHookState, error) {
 	// ForRemoval: this is a read, and reporting GitHooksAbsent for a symlinked
 	// hooks directory is what sent EnsureSetup to InstallGitHook on every agent
 	// turn, to fail on a refusal only `entire enable` should ever hit. Seeing
 	// through the link reports what is actually installed there.
 	root, err := hooksRootForRemoval(hooksDir)
 	if err != nil {
-		return GitHooksAbsent
+		if errors.Is(err, os.ErrNotExist) {
+			return GitHooksAbsent, nil
+		}
+		return GitHooksAbsent, err
 	}
 	outdated := false
 	for _, hook := range gitHookNames {
@@ -504,44 +507,62 @@ func gitHookStateInHooksDir(hooksDir string) GitHookState {
 		// InstallGitHook, which backs the link up and chains to it.
 		data, err := osroot.ReadFileNoFollow(root, hook)
 		if err != nil {
-			return GitHooksAbsent
+			if errors.Is(err, os.ErrNotExist) {
+				return GitHooksAbsent, nil
+			}
+			return GitHooksAbsent, fmt.Errorf("read Git hook %s: %w", filepath.Join(hooksDir, hook), err)
 		}
 		content := string(data)
 		if !strings.Contains(content, entireHookMarker) {
-			return GitHooksAbsent
+			return GitHooksAbsent, nil
 		}
-		if entireHookLineRunsFromWorkingTree(content) {
+		if !currentNativeHookContent(content, hook) {
 			outdated = true
 		}
 	}
 	if outdated {
-		return GitHooksOutdated
+		return GitHooksOutdated, nil
 	}
-	return GitHooksCurrent
+	return GitHooksCurrent, nil
 }
 
-// entireHookLineRunsFromWorkingTree reports whether the hook's OWN Entire
-// invocation names a legacy launcher.
-//
-// Scoped to the invocation line, not the whole file. A user may hand-edit a hook
-// Entire installed to append their own steps, and one of those steps containing
-// `go run ` must not make the file read as ours-but-stale: InstallGitHook only
-// backs up a hook that does NOT carry entireHookMarker, so a hand-edited hook is
-// rewritten with no backup and a false positive here would silently discard their
-// additions. Every generated invocation contains `hooks git `, so keying on that
-// line separates Entire's command from anything around it.
-func entireHookLineRunsFromWorkingTree(content string) bool {
+func currentNativeHookContent(content, hook string) bool {
+	commandNeedle := " hooks git " + hook
 	for line := range strings.SplitSeq(content, "\n") {
-		if !strings.Contains(line, "hooks git ") {
+		commandAt := strings.Index(line, commandNeedle)
+		if commandAt < 0 {
 			continue
 		}
-		for _, launcher := range legacyGitHookLaunchers {
-			if strings.Contains(line, launcher) {
-				return true
+		thenAt := strings.LastIndex(line[:commandAt], "then ")
+		if thenAt < 0 {
+			continue
+		}
+		cmdPrefix := line[thenAt+len("then ") : commandAt]
+		if !validNativeHookCommandPrefix(cmdPrefix) {
+			continue
+		}
+		for _, spec := range buildHookSpecs(cmdPrefix) {
+			if spec.name != hook {
+				continue
 			}
+			return content == spec.content || content == generateChainedContent(spec.content, hook)
 		}
 	}
 	return false
+}
+
+func validNativeHookCommandPrefix(prefix string) bool {
+	if prefix == bareEntireHookCmd {
+		return true
+	}
+	if len(prefix) < 2 || prefix[0] != '\'' || prefix[len(prefix)-1] != '\'' {
+		return false
+	}
+	path := strings.ReplaceAll(prefix[1:len(prefix)-1], `'"'"'`, `'`)
+	if shellQuote(path) != prefix {
+		return false
+	}
+	return filepath.IsAbs(path) || isWindowsAbsoluteHookCommand(prefix)
 }
 
 // buildHookSpecs returns the hook specifications for all managed hooks.
@@ -568,7 +589,7 @@ func buildHookSpecs(cmdPrefix string) []hookSpec {
 	// the user opted into by enabling OPF. Users hit by unrelated
 	// bugs can `ENTIRE_OPF=no git push` for a one-off bypass while
 	// the bug is fixed.
-	prePushCmd := gitHookCommand(cmdPrefix, `pre-push "$1"`, false)
+	prePushCmd := gitHookCommand(cmdPrefix, `pre-push "$1" "$2"`, false)
 
 	return []hookSpec{
 		{
@@ -858,7 +879,7 @@ func RemoveGitHook(ctx context.Context) (int, error) {
 // generateChainedContent appends a chain call to the base hook content,
 // so the pre-existing hook (backed up to .pre-entire) is called after our hook.
 func generateChainedContent(baseContent, hookName string) string {
-	if hookName == "post-rewrite" {
+	if hookName == postRewriteHookName {
 		return generatePostRewriteChainedContent(baseContent)
 	}
 

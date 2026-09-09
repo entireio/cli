@@ -217,6 +217,11 @@ type State struct {
 	// warning by `entire status`.
 	CaptureDegradedAt *time.Time `json:"capture_degraded_at,omitempty"`
 
+	// LastHookHealthWarning is the stable health fingerprint most recently
+	// shown to this session. Human-readable warning copy is deliberately not
+	// persisted so copy changes do not cause repeated warnings.
+	LastHookHealthWarning string `json:"last_hook_health_warning,omitempty"`
+
 	// StepCount is the number of checkpoints/steps created in this session.
 	// JSON tag kept as "checkpoint_count" for backward compatibility with existing state files.
 	StepCount int `json:"checkpoint_count"`
@@ -950,6 +955,12 @@ func NewStateStoreWithDir(stateDir string) *StateStore {
 // Returns (nil, nil) when session file doesn't exist or session is stale (not an error condition).
 // Stale sessions (ended longer than StaleSessionThreshold ago) are automatically deleted.
 func (s *StateStore) Load(ctx context.Context, sessionID string) (*State, error) {
+	return s.load(ctx, sessionID, true)
+}
+
+// load reads one session. When deleteStale is false, stale records are omitted
+// without performing the best-effort cleanup used by ordinary store reads.
+func (s *StateStore) load(ctx context.Context, sessionID string, deleteStale bool) (*State, error) {
 	// Validate session ID to prevent path traversal
 	if err := validation.ValidateSessionID(sessionID); err != nil {
 		return nil, fmt.Errorf("invalid session ID: %w", err)
@@ -980,6 +991,9 @@ func (s *StateStore) Load(ctx context.Context, sessionID string) (*State, error)
 	state.NormalizeAfterLoad(ctx)
 
 	if state.IsStale() {
+		if !deleteStale {
+			return &state, nil
+		}
 		logCtx := logging.WithComponent(ctx, "session")
 		logging.Debug(logCtx, "deleting stale session state",
 			slog.String("session_id", sessionID),
@@ -1085,6 +1099,17 @@ func (s *StateStore) RemoveAll() error {
 
 // List returns all session states.
 func (s *StateStore) List(ctx context.Context) ([]*State, error) {
+	return s.list(ctx, true)
+}
+
+// ListReadOnly returns every persisted session without deleting or hiding stale
+// records. Passive surfaces such as status derive display state without letting
+// observation change repository state.
+func (s *StateStore) ListReadOnly(ctx context.Context) ([]*State, error) {
+	return s.list(ctx, false)
+}
+
+func (s *StateStore) list(ctx context.Context, deleteStale bool) ([]*State, error) {
 	root, err := s.dirRoot()
 	if err != nil {
 		return nil, fmt.Errorf("failed to open session state directory: %w", err)
@@ -1107,7 +1132,7 @@ func (s *StateStore) List(ctx context.Context) ([]*State, error) {
 		}
 
 		sessionID := strings.TrimSuffix(entry.Name(), ".json")
-		state, err := s.Load(ctx, sessionID)
+		state, err := s.load(ctx, sessionID, deleteStale)
 		if err != nil {
 			continue // Skip corrupted state files
 		}

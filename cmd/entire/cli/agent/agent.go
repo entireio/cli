@@ -409,6 +409,25 @@ type HookResponseWriter interface {
 	WriteHookResponse(message string) error
 }
 
+// StandaloneHookResponseWriter identifies an agent whose user-visible hook
+// response cannot share the same native payload as model context injection.
+// The lifecycle dispatcher emits the warning through WriteHookResponse and
+// retries context injection on a later warning-free turn.
+type StandaloneHookResponseWriter interface {
+	HookResponseWriter
+	RequiresStandaloneHookResponse()
+}
+
+// AsStandaloneHookResponseWriter returns ag when its native protocol requires
+// a standalone user-visible hook response.
+func AsStandaloneHookResponseWriter(ag Agent) (StandaloneHookResponseWriter, bool) {
+	if ag == nil {
+		return nil, false
+	}
+	writer, ok := ag.(StandaloneHookResponseWriter)
+	return writer, ok
+}
+
 // SessionEndBudgeter is implemented by agents whose host enforces a hard
 // wall-clock budget on the session-end hook, because it runs inside the agent's
 // own shutdown sequence rather than between turns.

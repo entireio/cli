@@ -622,12 +622,13 @@ func checkGitHooks(cmd *cobra.Command, force bool) error {
 	ctx := cmd.Context()
 	w := cmd.OutOrStdout()
 
-	switch strategy.CheckGitHookState(ctx) {
-	case strategy.GitHooksCurrent:
+	health := strategy.CheckGitHookIntegration(ctx)
+	switch health.State {
+	case strategy.GitHookIntegrationCurrent:
 		fmt.Fprintln(w, "✓ Git hooks: OK")
 		return nil
 
-	case strategy.GitHooksAbsent:
+	case strategy.GitHookIntegrationAbsent:
 		// Missing hooks are only a problem where Entire was actually set up.
 		// doctor runs in any git repo, so treating this as actionable would let
 		// `entire doctor --force` install hooks into — and back up the existing
@@ -645,13 +646,17 @@ func checkGitHooks(cmd *cobra.Command, force bool) error {
 		fmt.Fprintln(w, "Git hooks: NOT INSTALLED")
 		fmt.Fprintln(w, "  Commits in this repository are not captured as checkpoints.")
 
-	case strategy.GitHooksOutdated:
-		// Actionable whatever the settings say: a hook carrying Entire's marker
-		// means this repo opted in at some point, and a stale one is actively
-		// broken rather than merely missing.
+	case strategy.GitHookIntegrationOutdated:
 		fmt.Fprintln(w, "Git hooks: OUT OF DATE")
-		fmt.Fprintln(w, "  A hook still runs Entire from the working tree instead of the installed")
-		fmt.Fprintln(w, "  binary. This can reject `git push`, because the path it names is gone.")
+		fmt.Fprintf(w, "  %s\n", health.Reason)
+
+	case strategy.GitHookIntegrationDegraded:
+		fmt.Fprintln(w, "Git hooks: DEGRADED")
+		fmt.Fprintf(w, "  %s\n", health.Reason)
+
+	case strategy.GitHookIntegrationError:
+		fmt.Fprintln(w, "Git hooks: ERROR")
+		fmt.Fprintf(w, "  %s\n", health.Reason)
 	}
 	fmt.Fprintln(w, "  Fix: reinstall the managed git hooks (any non-Entire hook is backed up).")
 
@@ -672,7 +677,11 @@ func checkGitHooks(cmd *cobra.Command, force bool) error {
 		}
 	}
 
-	if _, err := strategy.ReinstallGitHooks(ctx); err != nil {
+	hookSettings, err := settings.Load(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to load hook settings: %w", err)
+	}
+	if _, err := strategy.EnsureGitHookIntegration(ctx, hookSettings.AbsoluteGitHookPath); err != nil {
 		return fmt.Errorf("failed to reinstall git hooks: %w", err)
 	}
 	fmt.Fprintln(w, "  ✓ Fixed: git hooks reinstalled")

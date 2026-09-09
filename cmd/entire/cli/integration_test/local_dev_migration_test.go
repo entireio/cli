@@ -141,9 +141,20 @@ func pushWithHooksExpectingResult(env *TestEnv, remote, refSpec string) (string,
 
 	cmd := execx.NonInteractive(env.T.Context(), "git", "push", remote, refSpec)
 	cmd.Dir = env.RepoDir
-	cmd.Env = env.cliEnv()
+	cmd.Env = prependPath(env.cliEnv(), filepath.Dir(getTestBinary()))
 	out, err := cmd.CombinedOutput()
 	return string(out), err
+}
+
+func prependPath(env []string, dir string) []string {
+	result := append([]string(nil), env...)
+	for i, value := range result {
+		if strings.HasPrefix(value, "PATH=") {
+			result[i] = "PATH=" + dir + string(os.PathListSeparator) + strings.TrimPrefix(value, "PATH=")
+			return result
+		}
+	}
+	return append(result, "PATH="+dir)
 }
 
 // seedLegacyGitHooks writes every managed hook in a legacy shape, including

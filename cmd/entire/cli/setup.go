@@ -342,7 +342,7 @@ func updateGlobalSettings(ctx context.Context, cmd *cobra.Command, w io.Writer, 
 	}
 
 	if cmd.Flags().Changed(flagForce) || cmd.Flags().Changed(flagAbsoluteGitHookPath) {
-		if _, err := strategy.InstallGitHook(ctx, true, s.AbsoluteGitHookPath); err != nil {
+		if _, err := strategy.EnsureGitHookIntegration(ctx, s.AbsoluteGitHookPath); err != nil {
 			return fmt.Errorf("failed to reinstall git hook: %w", err)
 		}
 		strategy.CheckAndWarnHookManagers(ctx, w, s.AbsoluteGitHookPath)
@@ -1355,7 +1355,7 @@ func runEnableInteractive(ctx context.Context, w io.Writer, agents []agent.Agent
 
 	// Use settings values (merged from existing config + flags) for hook installation
 	// This ensures re-running `entire enable` without flags preserves existing settings
-	if _, err := strategy.InstallGitHook(ctx, true, settings.AbsoluteGitHookPath); err != nil {
+	if _, err := strategy.EnsureGitHookIntegration(ctx, settings.AbsoluteGitHookPath); err != nil {
 		return fmt.Errorf("failed to install git hooks: %w", err)
 	}
 	strategy.CheckAndWarnHookManagers(ctx, w, settings.AbsoluteGitHookPath)
@@ -2064,7 +2064,7 @@ func setupAgentHooksNonInteractive(ctx context.Context, w io.Writer, ag agent.Ag
 	}
 	hookAbsoluteGitHookPath := mergedSettings.AbsoluteGitHookPath || opts.AbsoluteGitHookPath
 
-	if _, err := strategy.InstallGitHook(ctx, true, hookAbsoluteGitHookPath); err != nil {
+	if _, err := strategy.EnsureGitHookIntegration(ctx, hookAbsoluteGitHookPath); err != nil {
 		return fmt.Errorf("failed to install git hooks: %w", err)
 	}
 	strategy.CheckAndWarnHookManagers(ctx, w, hookAbsoluteGitHookPath)
@@ -2556,10 +2556,10 @@ func runUninstall(ctx context.Context, w, errW io.Writer, force bool) error {
 	// Gather counts for display
 	sessionStateCount := countSessionStates(ctx)
 	shadowBranchCount := countShadowBranches(ctx)
-	// AnyGitHookInstalled, not IsGitHookInstalled: a hook left by an older
-	// version is stale but still ours, and uninstall must still offer to remove
-	// it rather than reporting that Entire is not installed here.
-	gitHooksInstalled := strategy.AnyGitHookInstalled(ctx)
+	// Inspect every supported integration, not only current native wrappers: a
+	// stale hook or Lefthook artifact is still ours, and uninstall must remain
+	// discoverable after a partial run has already removed .entire.
+	gitHooksInstalled := strategy.AnyGitHookIntegrationInstalled(ctx)
 	// One sweep, threaded onwards: each external plugin costs a subprocess to ask,
 	// and the removal below must act on exactly what the summary showed.
 	agHookState := getAgentHookState(ctx)
@@ -2623,7 +2623,7 @@ func runUninstall(ctx context.Context, w, errW io.Writer, force bool) error {
 // Failures render in the same shape as a failed agent-hook removal: a red ✗
 // headline naming the step, with the reason nested beneath it.
 func uninstallGitHooks(ctx context.Context, p *uninstallPrinter) bool {
-	removed, err := strategy.RemoveGitHook(ctx)
+	removed, err := strategy.RemoveGitHookIntegration(ctx)
 	if err != nil {
 		p.stepFailed("Failed to remove git hooks")
 		p.warnUnder("failed to remove git hooks: %v", err)

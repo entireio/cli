@@ -9,6 +9,7 @@ package cli
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -131,6 +132,90 @@ func DispatchLifecycleEvent(ctx context.Context, ag agent.Agent, event *agent.Ev
 const retiredDenyRuleWarning = "\n  A retired Entire permission rule in this repo is causing repeated" +
 	"\n  approval prompts. Run 'entire doctor' to remove it."
 
+type lifecycleHookHealthOps struct {
+	check  func(context.Context) strategy.GitHookIntegrationHealth
+	repair func(context.Context) error
+}
+
+type lifecycleHookHealthClaim struct {
+	message     string
+	fingerprint string
+	claimed     bool
+}
+
+var defaultLifecycleHookHealthOps = lifecycleHookHealthOps{
+	check:  strategy.CheckGitHookIntegration,
+	repair: strategy.EnsureSetup,
+}
+
+func lifecycleHookHealthFingerprint(health strategy.GitHookIntegrationHealth) string {
+	data, err := json.Marshal([4]string{string(health.Mode), string(health.State), health.Manager, health.ReasonCode})
+	if err != nil {
+		return "" // [4]string is always JSON-encodable; retain fail-open behavior if that changes.
+	}
+	return string(data)
+}
+
+func lifecycleHookHealthWarning(health strategy.GitHookIntegrationHealth) string {
+	if health.State == strategy.GitHookIntegrationCurrent {
+		return ""
+	}
+	owner := string(health.Mode)
+	if health.Manager != "" {
+		owner += "/" + health.Manager
+	}
+	return fmt.Sprintf("Entire's Git hook integration is %s (%s). Run 'entire doctor' to diagnose and repair it.", health.State, owner)
+}
+
+func repairLifecycleHookHealth(
+	ctx context.Context,
+	ag agent.Agent,
+	sessionID string,
+	ops lifecycleHookHealthOps,
+) lifecycleHookHealthClaim {
+	repairErr := ops.repair(ctx)
+	health := ops.check(ctx)
+	if repairErr != nil && health.State == strategy.GitHookIntegrationCurrent {
+		health.State = strategy.GitHookIntegrationError
+		health.ReasonCode = "hook_repair_failed"
+	}
+	if repairErr != nil || health.State != strategy.GitHookIntegrationCurrent {
+		// Do not log repairErr or health.Reason here: setup errors can include
+		// repository content. Stable classification fields are sufficient for
+		// diagnosis without leaking prompts, files, or commit messages.
+		logging.Warn(ctx, "git hook integration repair incomplete",
+			slog.String("session_id", sessionID),
+			slog.String("mode", string(health.Mode)),
+			slog.String("state", string(health.State)),
+			slog.String("manager", health.Manager),
+			slog.String("reason_code", health.ReasonCode))
+	}
+	warning := lifecycleHookHealthWarning(health)
+	if warning == "" {
+		return lifecycleHookHealthClaim{}
+	}
+	if _, ok := agent.AsHookResponseWriter(ag); !ok {
+		return lifecycleHookHealthClaim{}
+	}
+	fingerprint := lifecycleHookHealthFingerprint(health)
+	claimed, err := strategy.ClaimHookHealthWarning(ctx, sessionID, fingerprint)
+	if err != nil {
+		// Claim failures fail open: show the warning without persisting a
+		// suppression marker. A later turn can retry the atomic claim.
+		logging.Warn(ctx, "failed to claim hook health warning",
+			slog.String("session_id", sessionID),
+			slog.String("mode", string(health.Mode)),
+			slog.String("state", string(health.State)),
+			slog.String("manager", health.Manager),
+			slog.String("reason_code", health.ReasonCode))
+		return lifecycleHookHealthClaim{message: warning}
+	}
+	if !claimed {
+		return lifecycleHookHealthClaim{}
+	}
+	return lifecycleHookHealthClaim{message: warning, fingerprint: fingerprint, claimed: true}
+}
+
 // handleLifecycleSessionStart handles session start: shows banner, checks concurrent sessions,
 // fires state machine transition.
 func handleLifecycleSessionStart(ctx context.Context, ag agent.Agent, event *agent.Event) error {
@@ -231,6 +316,11 @@ func handleLifecycleSessionStart(ctx context.Context, ag agent.Agent, event *age
 	// agent-help banner pointer so it survives the override — banner-only agents
 	// (Factory Droid) have no other in-session channel for it.
 	message = finalizeSessionStartBanner(message, event.ResponseMessage, ag.Name())
+	hookHealth := defaultLifecycleHookHealthOps.check(ctx)
+	hookHealthWarning := lifecycleHookHealthWarning(hookHealth)
+	if hookHealthWarning != "" {
+		message += "\n  " + hookHealthWarning
+	}
 	if writer, ok := agent.AsHookResponseWriter(ag); ok {
 		bannerFirst, bErr := strategy.ClaimSessionStartBanner(ctx, event.SessionID)
 		if bErr != nil {
@@ -244,6 +334,16 @@ func handleLifecycleSessionStart(ctx context.Context, ag agent.Agent, event *age
 				hookResponseSpan.RecordError(err)
 				hookResponseSpan.End()
 				return fmt.Errorf("failed to write hook response: %w", err)
+			}
+			if hookHealthWarning != "" {
+				if err := strategy.StoreHookHealthWarningHint(ctx, event.SessionID, lifecycleHookHealthFingerprint(hookHealth)); err != nil {
+					logging.Warn(logCtx, "failed to store hook health warning hint",
+						slog.String("session_id", event.SessionID),
+						slog.String("mode", string(hookHealth.Mode)),
+						slog.String("state", string(hookHealth.State)),
+						slog.String("manager", hookHealth.Manager),
+						slog.String("reason_code", hookHealth.ReasonCode))
+				}
 			}
 		}
 	}
@@ -484,14 +584,12 @@ func entireTrailContextInjection(scope trailEnablementScope) string {
 	return b.String()
 }
 
-// emitContextInjection writes ag's native context-injection payload to stdout
-// when ag injects at event.Type, trails are enabled for the repo on the API,
-// and this session has not been injected yet. Best-effort: an injection failure
-// never fails the hook.
-func emitContextInjection(ctx context.Context, ag agent.Agent, event *agent.Event) {
+// renderContextInjection prepares ag's native context-injection payload when
+// trails are enabled and this session has not been injected yet.
+func renderContextInjection(ctx context.Context, ag agent.Agent, event *agent.Event) []byte {
 	injector, ok := agent.AsContextInjector(ag)
 	if !ok || injector.InjectionEvent() != event.Type || event.SessionID == "" {
-		return
+		return nil
 	}
 	logCtx := logging.WithAgent(logging.WithComponent(ctx, "lifecycle"), ag.Name())
 
@@ -500,7 +598,7 @@ func emitContextInjection(ctx context.Context, ag agent.Agent, event *agent.Even
 	if scopeErr != nil {
 		logging.Warn(logCtx, "failed to load trails scope hint",
 			slog.String("error", scopeErr.Error()))
-		return
+		return nil
 	}
 	decision := trailEnablementCacheUnknown
 	mutated := false
@@ -528,29 +626,109 @@ func emitContextInjection(ctx context.Context, ag agent.Agent, event *agent.Even
 	if mutErr != nil && !errors.Is(mutErr, strategy.ErrStateNotFound) {
 		logging.Warn(logCtx, "failed to record context injection decision",
 			slog.String("error", mutErr.Error()))
-		return
+		return nil
 	}
 	// Only proceed after the state mutation was persisted. If saving the updated
 	// state failed, mutErr was non-nil above and we returned without injecting,
 	// leaving a later turn free to retry safely.
 	won := mutErr == nil && mutated
 	if !won || decision != trailEnablementCacheEnabled {
-		return
+		return nil
 	}
 
 	payload, err := injector.RenderContextInjection(agent.ContextInjection{Text: entireTrailContextInjection(scope)})
 	if err != nil {
 		logging.Warn(logCtx, "failed to render context injection",
 			slog.String("error", err.Error()))
-		return
+		return nil
 	}
-	if len(payload) == 0 {
-		return
+	return payload
+}
+
+// mergeTurnStartHookResponse adds a user-visible systemMessage to a native
+// JSON context-injection payload. Claude Code and Codex require one JSON value
+// on stdout; emitting HookResponseWriter output separately would concatenate
+// two values and make the response invalid.
+func mergeTurnStartHookResponse(payload []byte, message string) ([]byte, error) {
+	var response map[string]json.RawMessage
+	if err := json.Unmarshal(payload, &response); err != nil {
+		return nil, fmt.Errorf("decode native hook response: %w", err)
 	}
-	if _, err := os.Stdout.Write(payload); err != nil {
+	encoded, err := json.Marshal(message)
+	if err != nil {
+		return nil, fmt.Errorf("encode hook warning: %w", err)
+	}
+	response["systemMessage"] = encoded
+	combined, err := json.Marshal(response)
+	if err != nil {
+		return nil, fmt.Errorf("encode combined hook response: %w", err)
+	}
+	return append(combined, '\n'), nil
+}
+
+// emitTurnStartOutput writes at most one native response. It returns whether
+// the hook-health warning reached stdout so callers can roll back a claim on
+// output failure.
+func emitTurnStartOutput(ctx context.Context, ag agent.Agent, event *agent.Event, warning string) bool {
+	payload := renderContextInjection(ctx, ag, event)
+	return emitPreparedTurnStartOutput(ctx, ag, event, payload, warning)
+}
+
+func emitPreparedTurnStartOutput(ctx context.Context, ag agent.Agent, event *agent.Event, payload []byte, warning string) bool {
+	logCtx := logging.WithAgent(logging.WithComponent(ctx, "lifecycle"), ag.Name())
+	if len(payload) > 0 && warning != "" {
+		if writer, standalone := agent.AsStandaloneHookResponseWriter(ag); standalone {
+			if err := writer.WriteHookResponse(warning); err != nil {
+				logging.Warn(logCtx, "failed to write standalone turn-start warning",
+					slog.String("session_id", event.SessionID))
+				return false
+			}
+			// Gemini cannot carry additionalContext beside its plain-text warning.
+			// Undo the decision claimed while rendering so a later warning-free
+			// turn can inject the context instead of losing it permanently.
+			if err := strategy.MutateSessionState(ctx, event.SessionID, func(state *strategy.SessionState) error {
+				if !state.ContextInjectionDecided {
+					return strategy.ErrMutationSkip
+				}
+				state.ContextInjectionDecided = false
+				return nil
+			}); err != nil && !errors.Is(err, strategy.ErrStateNotFound) {
+				logging.Warn(logCtx, "failed to defer context injection",
+					slog.String("session_id", event.SessionID))
+			}
+			return true
+		}
+		combined, err := mergeTurnStartHookResponse(payload, warning)
+		if err != nil {
+			logging.Warn(logCtx, "failed to combine turn-start hook response")
+			return false
+		}
+		if _, err := os.Stdout.Write(combined); err != nil {
+			logging.Warn(logCtx, "failed to write combined turn-start response")
+			return false
+		}
+		return true
+	}
+	if len(payload) > 0 {
+		if _, err := os.Stdout.Write(payload); err != nil {
+			logging.Warn(logCtx, "failed to write context injection",
+				slog.String("error", err.Error()))
+		}
+		return false
+	}
+	if warning == "" {
+		return false
+	}
+	writer, ok := agent.AsHookResponseWriter(ag)
+	if !ok {
+		return false
+	}
+	if err := writer.WriteHookResponse(warning); err != nil {
 		logging.Warn(logCtx, "failed to write context injection",
-			slog.String("error", err.Error()))
+			slog.String("session_id", event.SessionID))
+		return false
 	}
+	return true
 }
 
 // turnStartSessionLockWait bounds how long the TurnStart hook waits for the
@@ -597,10 +775,17 @@ func handleLifecycleTurnStart(ctx context.Context, ag agent.Agent, event *agent.
 	// it before CapturePrePromptState: the snapshot should describe the tree the
 	// agent starts from, not one setup is about to change.
 	_, setupSpan := perf.Start(ctx, "ensure_setup")
-	if err := strategy.EnsureSetup(ctx); err != nil {
-		logging.Warn(logCtx, "failed to ensure strategy setup",
-			slog.String("error", err.Error()))
-	}
+	hookHealthClaim := repairLifecycleHookHealth(logCtx, ag, sessionID, defaultLifecycleHookHealthOps)
+	hookHealthEmitted := false
+	defer func() {
+		if !hookHealthClaim.claimed || hookHealthEmitted {
+			return
+		}
+		if err := strategy.RollbackHookHealthWarningClaim(ctx, sessionID, hookHealthClaim.fingerprint); err != nil {
+			logging.Warn(logCtx, "failed to roll back hook health warning claim",
+				slog.String("session_id", sessionID))
+		}
+	}()
 	setupSpan.End()
 
 	// Capture pre-prompt state (including transcript position via TranscriptAnalyzer)
@@ -641,6 +826,10 @@ func handleLifecycleTurnStart(ctx context.Context, ag agent.Agent, event *agent.
 	if err := strat.InitializeSession(ctx, sessionID, ag.Type(), event.SessionRef, event.Prompt, event.Model); err != nil {
 		logging.Warn(logCtx, "failed to initialize session state",
 			slog.String("error", err.Error()))
+	}
+	if err := strategy.TransferHookHealthWarningHint(ctx, sessionID); err != nil && !errors.Is(err, strategy.ErrStateNotFound) {
+		logging.Warn(logCtx, "failed to transfer hook health warning hint",
+			slog.String("session_id", sessionID))
 	}
 
 	// Best-effort: adopt ENTIRE_REVIEW_* / ENTIRE_INVESTIGATE_* env vars set
@@ -699,7 +888,7 @@ func handleLifecycleTurnStart(ctx context.Context, ag agent.Agent, event *agent.
 
 	// Inject Entire's model-facing context (once per session) for agents whose
 	// transport supports it at TurnStart (e.g. Pi). Extension reads stdout.
-	emitContextInjection(ctx, ag, event)
+	hookHealthEmitted = emitTurnStartOutput(ctx, ag, event, hookHealthClaim.message)
 
 	return nil
 }

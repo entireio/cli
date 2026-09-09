@@ -13,10 +13,20 @@ import (
 
 // hookManager describes an external hook manager detected in a repository.
 type hookManager struct {
-	Name            string // "Husky", "Lefthook", "pre-commit", "Overcommit"
-	ConfigPath      string // relative path that triggered detection (e.g., ".husky/")
-	OverwritesHooks bool   // true if the tool will overwrite Entire's hooks on reinstall
+	Name            string                     // "Husky", "Lefthook", "pre-commit", "Overcommit"
+	ConfigPath      string                     // relative path that triggered detection (e.g., ".husky/")
+	OverwritesHooks bool                       // true if the tool will overwrite Entire's hooks on reinstall
+	IntegrationKind hookManagerIntegrationKind // how Entire can integrate with the manager
 }
+
+type hookManagerIntegrationKind string
+
+const (
+	hookManagerIntegrationNone          hookManagerIntegrationKind = ""
+	hookManagerIntegrationHookDirectory hookManagerIntegrationKind = "hook-directory"
+	hookManagerIntegrationLefthook      hookManagerIntegrationKind = "lefthook"
+	lefthookManagerName                                            = "Lefthook"
+)
 
 // detectHookManagers checks the repository root for known hook manager config
 // files/directories. Detection is filesystem-only (os.Stat, no file reads).
@@ -24,26 +34,28 @@ func detectHookManagers(repoRoot string) []hookManager {
 	var managers []hookManager
 
 	checks := []hookManager{
-		{"Husky", ".husky/", true},
-		{"pre-commit", ".pre-commit-config.yaml", false},
-		{"Overcommit", ".overcommit.yml", false},
+		{Name: "Husky", ConfigPath: ".husky/", OverwritesHooks: true, IntegrationKind: hookManagerIntegrationHookDirectory},
+		{Name: "pre-commit", ConfigPath: ".pre-commit-config.yaml", IntegrationKind: hookManagerIntegrationNone},
+		{Name: "Overcommit", ConfigPath: ".overcommit.yml", IntegrationKind: hookManagerIntegrationNone},
 	}
 
-	// Lefthook supports {.,}lefthook{,-local}.{yml,yaml,json,toml}
-	for _, prefix := range []string{"", "."} {
-		for _, variant := range []string{"", "-local"} {
-			for _, ext := range []string{"yml", "yaml", "json", "toml"} {
-				name := prefix + "lefthook" + variant + "." + ext
-				checks = append(checks, hookManager{"Lefthook", name, false})
-			}
-		}
+	// Lefthook supports root, dotted-root, and .config variants in YAML,
+	// JSON/JSONC, and TOML. Keep advisory detection broad even when the safe
+	// local integration rejects a format or location it cannot own.
+	for _, name := range append(append([]string{}, lefthookMainConfigNames...), lefthookLocalConfigNames...) {
+		checks = append(checks, hookManager{
+			Name:            lefthookManagerName,
+			ConfigPath:      name,
+			OverwritesHooks: true,
+			IntegrationKind: hookManagerIntegrationLefthook,
+		})
 	}
 
 	// hk supports {.config/,}hk{,.local}.pkl
 	for _, dir := range []string{"", ".config/"} {
 		for _, variant := range []string{"", ".local"} {
 			name := dir + "hk" + variant + ".pkl"
-			checks = append(checks, hookManager{"hk", name, false})
+			checks = append(checks, hookManager{Name: "hk", ConfigPath: name, IntegrationKind: hookManagerIntegrationNone})
 		}
 	}
 
@@ -77,6 +89,12 @@ func hookManagerWarning(managers []hookManager, cmdPrefix string) string {
 		if m.OverwritesHooks {
 			fmt.Fprintf(&b, "Warning: %s detected (%s)\n", m.Name, m.ConfigPath)
 			fmt.Fprintf(&b, "\n")
+			if m.IntegrationKind != hookManagerIntegrationHookDirectory {
+				fmt.Fprintf(&b, "  %s may overwrite hooks installed by Entire when it installs or refreshes hooks.\n", m.Name)
+				fmt.Fprintf(&b, "  If %s reinstalls hooks, run 'entire enable' to restore Entire's hooks.\n", m.Name)
+				fmt.Fprintf(&b, "\n")
+				continue
+			}
 			fmt.Fprintf(&b, "  %s may overwrite hooks installed by Entire on npm install.\n", m.Name)
 			fmt.Fprintf(&b, "  To make Entire hooks permanent, add these lines to your %s hook files:\n", m.Name)
 			fmt.Fprintf(&b, "\n")

@@ -44,6 +44,33 @@ func newTestCmd(t *testing.T) (*cobra.Command, *bytes.Buffer) {
 	return cmd, &stdout
 }
 
+func TestDoctorGitHooksUsesSharedDegradedHealth(t *testing.T) {
+	repoDir := setupTestRepo(t)
+	writeSettings(t, testSettingsEnabled)
+	_, err := strategy.EnsureGitHookIntegration(t.Context(), false)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(filepath.Join(repoDir, "lefthook.yml"), []byte("pre_commit: {}\n"), 0o644))
+	require.Equal(t, strategy.GitHookIntegrationDegraded, strategy.CheckGitHookIntegration(t.Context()).State)
+
+	cmd, stdout := newTestCmd(t)
+	require.NoError(t, checkGitHooks(cmd, false))
+	require.Contains(t, stdout.String(), "Git hooks: DEGRADED")
+	require.NotContains(t, stdout.String(), "Git hooks: OK")
+}
+
+func TestDoctorGitHooksOutdatedUsesManagerAwareReason(t *testing.T) {
+	repoDir := setupTestRepo(t)
+	writeSettings(t, testSettingsEnabled)
+	require.NoError(t, os.WriteFile(filepath.Join(repoDir, "lefthook.yml"), []byte("pre-commit: {}\n"), 0o644))
+	health := strategy.CheckGitHookIntegration(t.Context())
+	require.Equal(t, strategy.GitHookIntegrationOutdated, health.State)
+
+	cmd, stdout := newTestCmd(t)
+	require.NoError(t, checkGitHooks(cmd, false))
+	require.Contains(t, stdout.String(), health.Reason)
+	require.NotContains(t, stdout.String(), "working tree")
+}
+
 // testBaseCommit is a fake commit hash used across classifySession tests.
 const testBaseCommit = "abcdef1234567890abcdef1234567890abcdef12"
 

@@ -20,13 +20,16 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
+	"github.com/entireio/cli/cmd/entire/cli/proclive"
 	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
+	"github.com/entireio/cli/cmd/entire/cli/strategy"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 	"github.com/entireio/cli/redact"
 
 	"github.com/go-git/go-git/v6"
 	"github.com/go-git/go-git/v6/plumbing/object"
+	"github.com/stretchr/testify/require"
 )
 
 func TestResolveWorktreeBranch_RegularRepo(t *testing.T) {
@@ -1246,7 +1249,7 @@ func TestFormatSettingsStatusShort_Enabled(t *testing.T) {
 		Enabled: true,
 	}
 
-	result := formatSettingsStatusShort(context.Background(), s, sty)
+	result := formatSettingsStatusShort(context.Background(), &statusSnapshot{Settings: s}, sty)
 
 	if !strings.Contains(result, "●") {
 		t.Errorf("Enabled status should have green dot, got: %q", result)
@@ -1264,7 +1267,7 @@ func TestFormatSettingsStatusShort_Disabled(t *testing.T) {
 		Enabled: false,
 	}
 
-	result := formatSettingsStatusShort(context.Background(), s, sty)
+	result := formatSettingsStatusShort(context.Background(), &statusSnapshot{Settings: s}, sty)
 
 	if !strings.Contains(result, "○") {
 		t.Errorf("Disabled status should have open dot, got: %q", result)
@@ -2131,7 +2134,7 @@ func TestRunStatusJSON_WithActiveSessions(t *testing.T) {
 	}
 }
 
-func TestRunStatusJSON_DeduplicatesSessions(t *testing.T) {
+func TestRunStatusJSON_ReturnsEverySession(t *testing.T) {
 	setupTestRepo(t)
 	writeSettings(t, testSettingsEnabled)
 
@@ -2181,18 +2184,20 @@ func TestRunStatusJSON_DeduplicatesSessions(t *testing.T) {
 		t.Fatalf("json.Unmarshal() error = %v", err)
 	}
 
-	if len(result.ActiveSessions) != 1 {
-		t.Fatalf("Expected 1 deduplicated session, got %d", len(result.ActiveSessions))
+	if len(result.ActiveSessions) != 3 {
+		t.Fatalf("Expected all 3 sessions, got %d", len(result.ActiveSessions))
 	}
-	s := result.ActiveSessions[0]
-	if s.Agent != "Codex" {
-		t.Errorf("Expected agent='Codex', got %q", s.Agent)
-	}
-	if s.Status != "active" {
-		t.Errorf("Expected status='active' (active wins over idle), got %q", s.Status)
-	}
-	if s.Model != "codex-mini" {
-		t.Errorf("Expected model='codex-mini' from active session, got %q", s.Model)
+	for i, want := range []struct {
+		id, status, model string
+	}{
+		{id: "codex-active", status: "active", model: "codex-mini"},
+		{id: "codex-idle-2", status: "idle"},
+		{id: "codex-idle-1", status: "idle"},
+	} {
+		got := result.ActiveSessions[i]
+		if got.Agent != "Codex" || got.SessionID != want.id || got.Status != want.status || got.Model != want.model {
+			t.Errorf("active_sessions[%d] = %+v, want agent Codex, id/status/model %+v", i, got, want)
+		}
 	}
 }
 
@@ -2299,10 +2304,18 @@ func checkpointSyncTestCommit(t *testing.T, name, content string) string {
 	return testutil.GetHeadHash(t, ".")
 }
 
+func installStatusGitHooks(t *testing.T) {
+	t.Helper()
+	if _, err := strategy.EnsureGitHookIntegration(t.Context(), false); err != nil {
+		t.Fatalf("install status Git hooks: %v", err)
+	}
+}
+
 func TestRunStatus_CheckpointSyncDestination_Origin(t *testing.T) {
 	testutil.IsolateGitConfigEnv(t)
 	setupTestRepo(t)
 	writeSettings(t, testSettingsEnabled)
+	installStatusGitHooks(t)
 	testutil.AddRemote(t, ".", "origin", "https://example.com/origin.git")
 	testutil.AddRemote(t, ".", "publish", "https://example.com/publish.git")
 
@@ -2327,6 +2340,7 @@ func TestRunStatus_CheckpointSyncDestination_ConfigAnnotated(t *testing.T) {
 	testutil.IsolateGitConfigEnv(t)
 	setupTestRepo(t)
 	writeSettings(t, `{"enabled": true, "strategy_options": {"checkpoint_push_remote": "private"}}`)
+	installStatusGitHooks(t)
 	testutil.AddRemote(t, ".", "origin", "https://example.com/origin.git")
 	testutil.AddRemote(t, ".", "private", "https://example.com/private.git")
 
@@ -2345,6 +2359,7 @@ func TestRunStatus_CheckpointSyncDestination_CapturedAnnotated(t *testing.T) {
 	testutil.IsolateGitConfigEnv(t)
 	setupTestRepo(t)
 	writeSettings(t, testSettingsEnabled)
+	installStatusGitHooks(t)
 	testutil.AddRemote(t, ".", "origin", "https://example.com/origin.git")
 	testutil.AddRemote(t, ".", "fork", "https://example.com/fork.git")
 	// A captured election (evidence-elected by a past tracked push) must be
@@ -2422,6 +2437,7 @@ func TestRunStatus_CheckpointSyncCounter_GitBranchAhead(t *testing.T) {
 	testutil.IsolateGitConfigEnv(t)
 	setupTestRepo(t)
 	writeSettings(t, testSettingsEnabled)
+	installStatusGitHooks(t)
 	testutil.AddRemote(t, ".", "origin", "https://example.com/origin.git")
 	checkpointSyncTestCommit(t, "a.txt", "one")
 	second := checkpointSyncTestCommit(t, "b.txt", "two")
@@ -2444,6 +2460,7 @@ func TestRunStatus_CheckpointSyncCounterOmitted_WhenSynced(t *testing.T) {
 	testutil.IsolateGitConfigEnv(t)
 	setupTestRepo(t)
 	writeSettings(t, testSettingsEnabled)
+	installStatusGitHooks(t)
 	testutil.AddRemote(t, ".", "origin", "https://example.com/origin.git")
 	head := checkpointSyncTestCommit(t, "a.txt", "one")
 	testutil.GitUpdateRef(t, ".", "refs/heads/"+paths.MetadataBranchName, head)
@@ -2467,6 +2484,7 @@ func TestRunStatus_CheckpointSyncDedicated_GitBranch_NoCounter(t *testing.T) {
 	testutil.IsolateGitConfigEnv(t)
 	setupTestRepo(t)
 	writeSettings(t, `{"enabled": true, "strategy_options": {"checkpoint_remote": {"provider": "github", "repo": "org/checkpoints"}}}`)
+	installStatusGitHooks(t)
 	// Same owner ("org") as checkpoint_remote and a parseable GitHub URL, so
 	// PushURL derivation succeeds locally and dedicated mode is verified.
 	testutil.AddRemote(t, ".", "origin", "https://github.com/org/repo.git")
@@ -2494,6 +2512,7 @@ func TestRunStatus_CheckpointSyncDedicated_GitRefs_QueueCounter(t *testing.T) {
 	testutil.IsolateGitConfigEnv(t)
 	setupTestRepo(t)
 	writeSettings(t, `{"enabled": true, "strategy_options": {"checkpoint_remote": {"provider": "github", "repo": "org/checkpoints"}}, "checkpoints": {"primary": {"type": "git-refs"}}}`)
+	installStatusGitHooks(t)
 	testutil.AddRemote(t, ".", "origin", "https://github.com/org/repo.git")
 	checkpointSyncTestCommit(t, "a.txt", "one")
 
@@ -2545,11 +2564,11 @@ func TestRunStatusJSON_CheckpointSync_Elected(t *testing.T) {
 	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
 		t.Fatalf("json.Unmarshal() error = %v", err)
 	}
-	if result.CheckpointSyncRemote != "origin" {
-		t.Errorf("checkpoint_sync_remote = %q, want %q", result.CheckpointSyncRemote, "origin")
+	if result.CheckpointSyncRemote != defaultMirrorRemote {
+		t.Errorf("checkpoint_sync_remote = %q, want %q", result.CheckpointSyncRemote, defaultMirrorRemote)
 	}
-	if result.CheckpointSyncRemoteSource != "default" {
-		t.Errorf("checkpoint_sync_remote_source = %q, want %q", result.CheckpointSyncRemoteSource, "default")
+	if result.CheckpointSyncRemoteSource != string(strategy.SyncRemoteSourceDefault) {
+		t.Errorf("checkpoint_sync_remote_source = %q, want %q", result.CheckpointSyncRemoteSource, strategy.SyncRemoteSourceDefault)
 	}
 	if result.CheckpointSyncError != "" {
 		t.Errorf("checkpoint_sync_error should be empty, got %q", result.CheckpointSyncError)
@@ -2619,6 +2638,7 @@ func TestRunStatus_CheckpointSyncDedicated_IneligibleFallsBackToElected(t *testi
 	testutil.IsolateGitConfigEnv(t)
 	setupTestRepo(t)
 	writeSettings(t, `{"enabled": true, "strategy_options": {"checkpoint_remote": {"provider": "github", "repo": "org/checkpoints"}}}`)
+	installStatusGitHooks(t)
 	// Remote owner "other" != checkpoint_remote owner "org": fork detection
 	// rejects the dedicated store at push time.
 	testutil.AddRemote(t, ".", "origin", "https://github.com/other/repo.git")
@@ -2660,11 +2680,11 @@ func TestRunStatusJSON_CheckpointSync_DedicatedIneligible(t *testing.T) {
 	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
 		t.Fatalf("json.Unmarshal() error = %v", err)
 	}
-	if result.CheckpointSyncRemote != "origin" {
-		t.Errorf("checkpoint_sync_remote = %q, want the elected remote %q", result.CheckpointSyncRemote, "origin")
+	if result.CheckpointSyncRemote != defaultMirrorRemote {
+		t.Errorf("checkpoint_sync_remote = %q, want the elected remote %q", result.CheckpointSyncRemote, defaultMirrorRemote)
 	}
-	if result.CheckpointSyncRemoteSource != "default" {
-		t.Errorf("checkpoint_sync_remote_source = %q, want %q (not dedicated)", result.CheckpointSyncRemoteSource, "default")
+	if result.CheckpointSyncRemoteSource != string(strategy.SyncRemoteSourceDefault) {
+		t.Errorf("checkpoint_sync_remote_source = %q, want %q (not dedicated)", result.CheckpointSyncRemoteSource, strategy.SyncRemoteSourceDefault)
 	}
 	if result.CheckpointSyncError != "" {
 		t.Errorf("checkpoint_sync_error should be empty, got %q", result.CheckpointSyncError)
@@ -2724,5 +2744,440 @@ func TestRunStatusDetailed_ReportsRejectedExternalAgents(t *testing.T) { //nolin
 	}
 	if !strings.Contains(got, settings.EntireSettingsLocalFile) {
 		t.Errorf("status does not name where the setting must live:\n%s", got)
+	}
+}
+
+func TestStatusCheckpointSyncBlockedWhenGitHooksAbsent(t *testing.T) {
+	testutil.IsolateGitConfigEnv(t)
+	setupTestRepo(t)
+	writeSettings(t, testSettingsEnabled)
+	testutil.AddRemote(t, ".", "origin", "https://example.com/origin.git")
+
+	var textOut bytes.Buffer
+	if err := runStatus(context.Background(), &textOut, false, false); err != nil {
+		t.Fatalf("runStatus(text) error = %v", err)
+	}
+	text := textOut.String()
+	if strings.Contains(text, "Checkpoints sync to:") {
+		t.Fatalf("absent hooks must not promise active sync:\n%s", text)
+	}
+	for _, want := range []string{"Checkpoint sync blocked", "Git hooks", "not installed", "entire doctor"} {
+		if !strings.Contains(text, want) {
+			t.Errorf("blocked status missing %q:\n%s", want, text)
+		}
+	}
+
+	var jsonOut bytes.Buffer
+	if err := runStatus(context.Background(), &jsonOut, false, true); err != nil {
+		t.Fatalf("runStatus(json) error = %v", err)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(jsonOut.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got["checkpoint_sync_remote"] != defaultMirrorRemote || got["checkpoint_sync_remote_source"] != string(strategy.SyncRemoteSourceDefault) {
+		t.Errorf("legacy destination fields changed: %#v", got)
+	}
+	if got["checkpoint_sync_state"] != checkpointSyncStateBlocked {
+		t.Errorf("checkpoint_sync_state = %#v, want blocked", got["checkpoint_sync_state"])
+	}
+	hooks, ok := got["git_hooks"].(map[string]any)
+	if !ok || hooks["mode"] != "native" || hooks["state"] != "absent" {
+		t.Errorf("git_hooks = %#v, want native/absent", got["git_hooks"])
+	}
+}
+
+func TestStatusShowsSyncResolutionErrorAndBlockedHookHealth(t *testing.T) {
+	testutil.IsolateGitConfigEnv(t)
+	setupTestRepo(t)
+	writeSettings(t, `{"enabled":true,"strategy_options":{"checkpoint_push_remote":"missing"}}`)
+	testutil.AddRemote(t, ".", "origin", "https://example.com/origin.git")
+
+	var out bytes.Buffer
+	require.NoError(t, runStatus(t.Context(), &out, false, false))
+	text := out.String()
+	require.Contains(t, text, "Checkpoints NOT syncing")
+	require.Contains(t, text, "Checkpoint sync blocked")
+	require.Contains(t, text, "not installed")
+	require.Contains(t, text, "entire doctor")
+}
+
+func TestStatusJSONPreservesEmptyWorktreePath(t *testing.T) {
+	testutil.IsolateGitConfigEnv(t)
+	setupTestRepo(t)
+	writeSettings(t, testSettingsEnabled)
+	installStatusGitHooks(t)
+	store, err := session.NewStateStore(t.Context())
+	require.NoError(t, err)
+	require.NoError(t, store.Save(t.Context(), &session.State{
+		SessionID: "legacy-no-worktree", StartedAt: time.Now(), Phase: session.PhaseActive,
+	}))
+
+	var out bytes.Buffer
+	require.NoError(t, runStatus(t.Context(), &out, false, true))
+	var got statusJSON
+	require.NoError(t, json.Unmarshal(out.Bytes(), &got))
+	require.Len(t, got.ActiveSessions, 1)
+	require.Empty(t, got.ActiveSessions[0].WorktreePath)
+}
+
+func TestStatusCheckpointStorageAndDedicatedDestinationAreIndependent(t *testing.T) {
+	testutil.IsolateGitConfigEnv(t)
+	setupTestRepo(t)
+	writeSettings(t, `{"enabled":true,"strategy_options":{"checkpoint_remote":{"provider":"github","repo":"org/checkpoints"}},"checkpoints":{"primary":{"type":"git-refs"}}}`)
+	testutil.AddRemote(t, ".", "origin", "https://github.com/org/repo.git")
+	if _, err := strategy.EnsureGitHookIntegration(context.Background(), false); err != nil {
+		t.Fatal(err)
+	}
+
+	var textOut bytes.Buffer
+	if err := runStatus(context.Background(), &textOut, false, false); err != nil {
+		t.Fatal(err)
+	}
+	text := textOut.String()
+	if !strings.Contains(text, "Checkpoint storage") || !strings.Contains(text, "Git refs") {
+		t.Errorf("text missing effective storage backend:\n%s", text)
+	}
+	if !strings.Contains(text, "Checkpoints sync to: dedicated checkpoint remote (org/checkpoints)") {
+		t.Errorf("text missing independent dedicated destination:\n%s", text)
+	}
+
+	var jsonOut bytes.Buffer
+	if err := runStatus(context.Background(), &jsonOut, false, true); err != nil {
+		t.Fatal(err)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(jsonOut.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got["checkpoint_storage_backend"] != "git-refs" || got["checkpoint_sync_remote"] != "org/checkpoints" {
+		t.Errorf("storage and destination not reported independently: %#v", got)
+	}
+	if got["checkpoint_sync_state"] != checkpointSyncStateReady {
+		t.Errorf("checkpoint_sync_state = %#v, want ready", got["checkpoint_sync_state"])
+	}
+}
+
+func TestCheckpointSyncStateMapsGitHookHealth(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		state strategy.GitHookIntegrationState
+		want  string
+	}{
+		{state: strategy.GitHookIntegrationCurrent, want: checkpointSyncStateReady},
+		{state: strategy.GitHookIntegrationDegraded, want: checkpointSyncStateDegraded},
+		{state: strategy.GitHookIntegrationOutdated, want: checkpointSyncStateBlocked},
+		{state: strategy.GitHookIntegrationAbsent, want: checkpointSyncStateBlocked},
+		{state: strategy.GitHookIntegrationError, want: checkpointSyncStateBlocked},
+	}
+	for _, tt := range tests {
+		t.Run(string(tt.state), func(t *testing.T) {
+			t.Parallel()
+			if got := checkpointSyncState(tt.state, ""); got != tt.want {
+				t.Errorf("checkpointSyncState(%q) = %q, want %q", tt.state, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestStatusSnapshotMapsObservedGitHookHealth(t *testing.T) {
+	tests := []struct {
+		name       string
+		setupHooks func(t *testing.T, repoDir string)
+		wantHook   strategy.GitHookIntegrationState
+		wantSync   string
+	}{
+		{
+			name: "healthy native",
+			setupHooks: func(t *testing.T, _ string) {
+				installStatusGitHooks(t)
+			},
+			wantHook: strategy.GitHookIntegrationCurrent,
+			wantSync: checkpointSyncStateReady,
+		},
+		{
+			name: "working native bridge awaiting Lefthook migration",
+			setupHooks: func(t *testing.T, repoDir string) {
+				installStatusGitHooks(t)
+				if err := os.WriteFile(filepath.Join(repoDir, "lefthook.yml"), []byte("pre_commit: {}\n"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			},
+			wantHook: strategy.GitHookIntegrationDegraded,
+			wantSync: checkpointSyncStateDegraded,
+		},
+		{
+			name: "healthy Lefthook",
+			setupHooks: func(t *testing.T, repoDir string) {
+				if err := os.WriteFile(filepath.Join(repoDir, "lefthook.yml"), []byte("pre_commit: {}\n"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+				hooksDir := filepath.Join(repoDir, ".git", "hooks")
+				if err := os.MkdirAll(hooksDir, 0o755); err != nil {
+					t.Fatal(err)
+				}
+				for _, hook := range strategy.ManagedGitHookNames() {
+					if err := os.WriteFile(filepath.Join(hooksDir, hook), []byte(statusLefthookWrapper(hook)), 0o755); err != nil {
+						t.Fatal(err)
+					}
+				}
+				if _, err := strategy.EnsureGitHookIntegration(t.Context(), false); err != nil {
+					t.Fatal(err)
+				}
+			},
+			wantHook: strategy.GitHookIntegrationCurrent,
+			wantSync: checkpointSyncStateReady,
+		},
+		{
+			name: "Lefthook without durable artifacts",
+			setupHooks: func(t *testing.T, repoDir string) {
+				if err := os.WriteFile(filepath.Join(repoDir, "lefthook.yml"), []byte("pre_commit: {}\n"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			},
+			wantHook: strategy.GitHookIntegrationOutdated,
+			wantSync: checkpointSyncStateBlocked,
+		},
+		{
+			name: "Lefthook inspection error",
+			setupHooks: func(t *testing.T, repoDir string) {
+				if err := os.Mkdir(filepath.Join(repoDir, "lefthook.yml"), 0o755); err != nil {
+					t.Fatal(err)
+				}
+			},
+			wantHook: strategy.GitHookIntegrationError,
+			wantSync: checkpointSyncStateBlocked,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			testutil.IsolateGitConfigEnv(t)
+			repoDir := setupTestRepo(t)
+			writeSettings(t, testSettingsEnabled)
+			testutil.AddRemote(t, ".", "origin", "https://example.com/origin.git")
+			tt.setupHooks(t, repoDir)
+			s, err := LoadEntireSettings(t.Context())
+			if err != nil {
+				t.Fatal(err)
+			}
+			snapshot, err := buildStatusSnapshot(t.Context(), s)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if snapshot.GitHooks.State != tt.wantHook || snapshot.CheckpointSyncState != tt.wantSync {
+				t.Errorf("health/sync = %s/%s, want %s/%s", snapshot.GitHooks.State, snapshot.CheckpointSyncState, tt.wantHook, tt.wantSync)
+			}
+		})
+	}
+}
+
+func statusLefthookWrapper(hook string) string {
+	return "#!/bin/sh\n\n" +
+		"if [ \"$LEFTHOOK_VERBOSE\" = \"1\" -o \"$LEFTHOOK_VERBOSE\" = \"true\" ]; then\n  set -x\nfi\n\n" +
+		"if [ \"$LEFTHOOK\" = \"0\" ]; then\n  exit 0\nfi\n\n" +
+		"call_lefthook()\n{\n  lefthook \"$@\"\n}\n\n" +
+		"call_lefthook run \"" + hook + "\" \"$@\"\n"
+}
+
+func TestStatusCheckpointStorageUsesEffectiveLocalOverride(t *testing.T) {
+	testutil.IsolateGitConfigEnv(t)
+	setupTestRepo(t)
+	writeSettings(t, `{"enabled":true,"checkpoints":{"primary":{"type":"git-branch"}}}`)
+	if err := os.WriteFile(EntireSettingsLocalFile, []byte(`{"checkpoints":{"primary":{"type":"git-refs"}}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	installStatusGitHooks(t)
+
+	var textOut bytes.Buffer
+	if err := runStatus(context.Background(), &textOut, false, false); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(textOut.String(), "Checkpoint storage · Git refs") {
+		t.Errorf("text status did not use effective local backend override:\n%s", textOut.String())
+	}
+
+	var stdout bytes.Buffer
+	if err := runStatus(context.Background(), &stdout, false, true); err != nil {
+		t.Fatal(err)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got["checkpoint_storage_backend"] != "git-refs" {
+		t.Errorf("checkpoint_storage_backend = %#v, want effective local git-refs override", got["checkpoint_storage_backend"])
+	}
+}
+
+func TestStatusMultipleSessionsAreCompleteAndDeterministic(t *testing.T) {
+	testutil.IsolateGitConfigEnv(t)
+	repoDir := setupTestRepo(t)
+	writeSettings(t, testSettingsEnabled)
+	installStatusGitHooks(t)
+
+	store, err := session.NewStateStore(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	newest := time.Now().UTC().Add(-time.Minute)
+	oldest := newest.Add(-time.Minute)
+	states := []*session.State{
+		{SessionID: "same-b", WorktreeID: "wt-b", WorktreePath: filepath.Join(repoDir, "wt-b"), Branch: "feature-b", StartedAt: oldest.Add(-time.Hour), LastInteractionTime: &newest, Phase: session.PhaseActive, AgentType: agent.AgentTypeClaudeCode},
+		{SessionID: "other-c", WorktreeID: "wt-c", WorktreePath: filepath.Join(repoDir, "wt-c"), Branch: "feature-c", StartedAt: oldest.Add(-2 * time.Hour), LastInteractionTime: &oldest, Phase: session.PhaseIdle, AgentType: agent.AgentTypeCursor},
+		{SessionID: "same-a", WorktreeID: "wt-a", WorktreePath: filepath.Join(repoDir, "wt-a"), Branch: "feature-a", StartedAt: oldest.Add(-3 * time.Hour), LastInteractionTime: &newest, Phase: session.PhaseActive, AgentType: agent.AgentTypeClaudeCode},
+	}
+	for _, state := range states {
+		if err := store.Save(t.Context(), state); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	var textOut bytes.Buffer
+	if err := runStatus(t.Context(), &textOut, false, false); err != nil {
+		t.Fatal(err)
+	}
+	text := textOut.String()
+	indices := []int{strings.Index(text, "same-a"), strings.Index(text, "same-b"), strings.Index(text, "other-c")}
+	if indices[0] < 0 || indices[1] <= indices[0] || indices[2] <= indices[1] {
+		t.Fatalf("text sessions not sorted by last-active desc then ID asc: %v\n%s", indices, text)
+	}
+	for _, want := range []string{filepath.Join(repoDir, "wt-a"), filepath.Join(repoDir, "wt-b"), filepath.Join(repoDir, "wt-c"), "feature-a", "feature-b", "feature-c"} {
+		if !strings.Contains(text, want) {
+			t.Errorf("text status missing session worktree identity %q:\n%s", want, text)
+		}
+	}
+
+	var jsonOut bytes.Buffer
+	if err := runStatus(t.Context(), &jsonOut, false, true); err != nil {
+		t.Fatal(err)
+	}
+	var got struct {
+		ActiveSessions []struct {
+			SessionID    string     `json:"session_id"`
+			WorktreeID   string     `json:"worktree_id"`
+			WorktreePath string     `json:"worktree_path"`
+			Branch       string     `json:"branch"`
+			StartedAt    time.Time  `json:"started_at"`
+			LastActiveAt *time.Time `json:"last_active_at"`
+		} `json:"active_sessions"`
+	}
+	if err := json.Unmarshal(jsonOut.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if len(got.ActiveSessions) != 3 {
+		t.Fatalf("active_sessions length = %d, want 3: %s", len(got.ActiveSessions), jsonOut.String())
+	}
+	for i, want := range []string{"same-a", "same-b", "other-c"} {
+		if got.ActiveSessions[i].SessionID != want {
+			t.Fatalf("active_sessions[%d].session_id = %q, want %q", i, got.ActiveSessions[i].SessionID, want)
+		}
+		if got.ActiveSessions[i].WorktreeID == "" || got.ActiveSessions[i].WorktreePath == "" || got.ActiveSessions[i].Branch == "" || got.ActiveSessions[i].StartedAt.IsZero() || got.ActiveSessions[i].LastActiveAt == nil {
+			t.Errorf("active_sessions[%d] missing identity/timestamps: %+v", i, got.ActiveSessions[i])
+		}
+	}
+}
+
+func TestStatusReadOnlyKeepsDeadOwnerSessionAndArtifacts(t *testing.T) {
+	testutil.IsolateGitConfigEnv(t)
+	repoDir := setupTestRepo(t)
+	writeSettings(t, testSettingsEnabled)
+	installStatusGitHooks(t)
+
+	transcriptPath := filepath.Join(repoDir, "dead-owner-transcript.jsonl")
+	if err := os.WriteFile(transcriptPath, []byte("unchanged transcript\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store, err := session.NewStateStore(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	lastActive := time.Now().UTC().Add(-time.Minute)
+	state := &session.State{
+		SessionID: "dead-owner", WorktreeID: "main", WorktreePath: repoDir, Branch: "main",
+		StartedAt: lastActive.Add(-time.Hour), LastInteractionTime: &lastActive,
+		Phase: session.PhaseActive, AgentType: agent.AgentTypeClaudeCode,
+		Owner: &proclive.Identity{PID: os.Getpid(), Start: "not-this-process"}, TranscriptPath: transcriptPath,
+	}
+	if err := store.Save(t.Context(), state); err != nil {
+		t.Fatal(err)
+	}
+	staleEndedAt := time.Now().UTC().Add(-8 * 24 * time.Hour)
+	staleEnded := &session.State{
+		SessionID: "stale-ended", StartedAt: staleEndedAt, EndedAt: &staleEndedAt, Phase: session.PhaseEnded,
+	}
+	if err := store.Save(t.Context(), staleEnded); err != nil {
+		t.Fatal(err)
+	}
+	statePath := filepath.Join(repoDir, ".git", session.SessionStateDirName, state.SessionID+".json")
+	staleEndedPath := filepath.Join(repoDir, ".git", session.SessionStateDirName, staleEnded.SessionID+".json")
+	beforeStaleEnded, err := os.ReadFile(staleEndedPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	beforeState, err := os.ReadFile(statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	beforeStateInfo, err := os.Stat(statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	beforeTranscript, err := os.ReadFile(transcriptPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	beforeTranscriptInfo, err := os.Stat(transcriptPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var textOut, jsonOut bytes.Buffer
+	if err := runStatus(t.Context(), &textOut, false, false); err != nil {
+		t.Fatal(err)
+	}
+	if err := runStatus(t.Context(), &jsonOut, false, true); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(textOut.String(), "dead-owner") || !strings.Contains(textOut.String(), "exited") {
+		t.Fatalf("text status omitted derived exited session:\n%s", textOut.String())
+	}
+	var got struct {
+		ActiveSessions []sessionBriefJSON `json:"active_sessions"`
+	}
+	if err := json.Unmarshal(jsonOut.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if len(got.ActiveSessions) != 1 || got.ActiveSessions[0].SessionID != state.SessionID || got.ActiveSessions[0].Status != "exited" {
+		t.Fatalf("JSON status omitted derived exited session: %s", jsonOut.String())
+	}
+
+	afterState, err := os.ReadFile(statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	afterStateInfo, err := os.Stat(statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	afterTranscript, err := os.ReadFile(transcriptPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	afterTranscriptInfo, err := os.Stat(transcriptPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(beforeState, afterState) || !beforeStateInfo.ModTime().Equal(afterStateInfo.ModTime()) {
+		t.Error("status mutated dead-owner session state")
+	}
+	if !bytes.Equal(beforeTranscript, afterTranscript) || !beforeTranscriptInfo.ModTime().Equal(afterTranscriptInfo.ModTime()) {
+		t.Error("status mutated dead-owner transcript")
+	}
+	afterStaleEnded, err := os.ReadFile(staleEndedPath)
+	if err != nil {
+		t.Fatalf("status deleted stale ended session during a passive read: %v", err)
+	}
+	if !bytes.Equal(beforeStaleEnded, afterStaleEnded) {
+		t.Error("status mutated stale ended session state")
 	}
 }
