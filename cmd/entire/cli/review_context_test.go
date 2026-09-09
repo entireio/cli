@@ -315,12 +315,7 @@ func TestReviewCommandSmoke_BaseFlagThreadsThroughToPromptAndBanner(t *testing.T
 
 	// Create feat/parent at the current HEAD (which is feat/review's branch
 	// point). --base feat/parent will then be a valid override.
-	//nolint:noctx // test helper
-	branchCmd := exec.Command("git", "branch", "feat/parent")
-	branchCmd.Dir = repoRoot
-	if out, err := branchCmd.CombinedOutput(); err != nil {
-		t.Fatalf("create feat/parent: %v\n%s", err, out)
-	}
+	testutil.RunGit(t, repoRoot, "branch", "feat/parent")
 
 	// Add a commit on feat/review so the scope is non-empty.
 	commitReviewContextChange(t, repoRoot, "feature.go", "feat\n", "add feature", "")

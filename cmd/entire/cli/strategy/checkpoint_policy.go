@@ -99,7 +99,11 @@ func warnIfCheckpointPolicyNeedsUpgrade(ctx context.Context, policy checkpointpo
 }
 
 func warnOrLogCheckpointPolicyUpgrade(ctx context.Context, policy checkpointpolicy.Policy) {
-	warning := checkpointpolicy.UnsupportedPolicyMessage(policy, versioncheck.UpdateCommandForCurrentBinary(versioninfo.Version))
+	warning := checkpointpolicy.UnsupportedPolicyMessage(
+		policy,
+		versioncheck.UpdateCommandForCurrentBinary(versioninfo.Version),
+		versioncheck.UpdateCommandShell(),
+	)
 	if interactive.CanPromptInteractively() {
 		fmt.Fprint(stderrWriter, warning)
 		return

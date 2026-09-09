@@ -94,13 +94,13 @@ func TestClassifyOpenCodeExportError_Timeout(t *testing.T) {
 // in lifecycle_test.go, not here.
 func TestRunOpenCodeExportToFile_MissingBinary(t *testing.T) {
 	// No t.Parallel: t.Setenv.
-	dir := t.TempDir()
-	staged := filepath.Join(dir, ".export-ses_cached.json-1")
+	root := mustOpenRoot(t, t.TempDir())
+	const staged = ".export-ses_cached.json-1"
 
 	// Empty PATH makes the export fail deterministically without an opencode binary.
 	t.Setenv("PATH", "")
 
-	err := runOpenCodeExportToFile(context.Background(), "ses_cached", staged)
+	err := runOpenCodeExportToFile(context.Background(), root, "ses_cached", staged)
 	if err == nil {
 		t.Fatal("expected export to fail with no opencode on PATH")
 	}
@@ -114,7 +114,9 @@ func TestRunOpenCodeExportToFile_WritesStdoutToPath(t *testing.T) {
 		t.Skip("stub opencode is a shell script")
 	}
 	// No t.Parallel: t.Setenv.
-	staged := filepath.Join(t.TempDir(), ".export-ses_ok.json-1")
+	dir := t.TempDir()
+	root := mustOpenRoot(t, dir)
+	const staged = ".export-ses_ok.json-1"
 
 	const export = `{"info":{"id":"ses_ok"},"messages":[]}`
 	stubDir := t.TempDir()
@@ -124,11 +126,11 @@ func TestRunOpenCodeExportToFile_WritesStdoutToPath(t *testing.T) {
 	}
 	t.Setenv("PATH", stubDir)
 
-	if err := runOpenCodeExportToFile(context.Background(), "ses_ok", staged); err != nil {
+	if err := runOpenCodeExportToFile(context.Background(), root, "ses_ok", staged); err != nil {
 		t.Fatalf("runOpenCodeExportToFile failed: %v", err)
 	}
 
-	got, err := os.ReadFile(staged)
+	got, err := os.ReadFile(filepath.Join(dir, staged))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -141,26 +143,27 @@ func TestRenameOverExisting_ReplacesDestination(t *testing.T) {
 	t.Parallel()
 
 	dir := t.TempDir()
-	staged := filepath.Join(dir, ".export-ses_x.json-1")
-	dest := filepath.Join(dir, "ses_x.json")
-	if err := os.WriteFile(staged, []byte("fresh"), 0o600); err != nil {
+	root := mustOpenRoot(t, dir)
+	const staged = ".export-ses_x.json-1"
+	const dest = "ses_x.json"
+	if err := os.WriteFile(filepath.Join(dir, staged), []byte("fresh"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(dest, []byte("stale"), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, dest), []byte("stale"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
-	if err := renameOverExisting(staged, dest); err != nil {
+	if err := renameOverExisting(root, staged, dest); err != nil {
 		t.Fatalf("renameOverExisting failed: %v", err)
 	}
-	got, err := os.ReadFile(dest)
+	got, err := os.ReadFile(filepath.Join(dir, dest))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if string(got) != "fresh" {
 		t.Fatalf("destination = %q, want %q", string(got), "fresh")
 	}
-	if _, err := os.Stat(staged); !os.IsNotExist(err) {
+	if _, err := os.Stat(filepath.Join(dir, staged)); !os.IsNotExist(err) {
 		t.Errorf("staged file still present after rename: %v", err)
 	}
 }
@@ -183,4 +186,16 @@ func TestFormatOpenCodeErrorDetail_Truncates(t *testing.T) {
 	if detail != want {
 		t.Fatalf("formatOpenCodeErrorDetail = %q, want %q", detail, want)
 	}
+}
+
+// mustOpenRoot opens dir as an os.Root, standing in for the shared .entire root
+// the production callers pass.
+func mustOpenRoot(t *testing.T, dir string) *os.Root {
+	t.Helper()
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		t.Fatalf("os.OpenRoot(%s): %v", dir, err)
+	}
+	t.Cleanup(func() { _ = root.Close() })
+	return root
 }

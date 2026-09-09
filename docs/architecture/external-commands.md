@@ -264,7 +264,7 @@ Once allowlisted, `cli_plugin_executed` events for that command will flow throug
 | | External Commands | [Agent Protocol](external-agent-protocol.md) |
 |---|---|---|
 | **Binary name pattern** | `entire-<name>` | `entire-agent-<name>` |
-| **Discovery** | Lazy, on first non-built-in arg | Lazy at command entry, gated by `external_agents` setting (setup flows bypass the gate via `DiscoverAndRegisterAlways`) |
+| **Discovery** | Lazy, on first non-built-in arg | Lazy at command entry, gated by the `external_agents` setting, which is honored only from an untracked `.entire/settings.local.json` (setup flows bypass the gate via `DiscoverAndRegisterAlways` / `DiscoverAndRegisterNamedAlways`) |
 | **Communication** | Process exec; stdio passthrough | Subcommand protocol; JSON over stdin/stdout |
 | **Versioning** | None | `ENTIRE_PROTOCOL_VERSION` envelope |
 | **Lifecycle integration** | None | Full (sessions, checkpoints, hooks, transcripts) |

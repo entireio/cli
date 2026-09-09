@@ -32,7 +32,6 @@ const mirrorCreateConcurrency = 8
 const (
 	mirrorStatusReady      = "ready"      // clone landed, ready to use
 	mirrorStatusRegistered = "registered" // placement created, clone in progress (--no-wait)
-	mirrorStatusEmpty      = "empty"      // upstream has no commits, nothing to clone
 	mirrorStatusSuspended  = "suspended"  // placement exists but the cluster won't serve it
 	mirrorStatusFailed     = "failed"     // initial clone reached the terminal failed status
 	mirrorStatusTimedOut   = "timed out"  // clone didn't finish within --wait-timeout
@@ -45,7 +44,7 @@ const (
 type regionChoice struct {
 	slug         string
 	jurisdiction string
-	host         string // bare cluster host passed to CreateMirror / validateClusterHost
+	host         string // bare cluster host passed to mirror creation and validateClusterHost
 	isDefault    bool
 }
 
@@ -305,9 +304,8 @@ func mirrorCreateResultRow(r mirrorResult) []string {
 
 // runMirrorCreateWizard is the zero-argument `entire repo mirror create` flow:
 // verify auth, pick repos, pick regions, then create the cross-product of
-// mirrors in parallel and report the clone URLs. noWait/waitTimeout carry the
-// same meaning as the positional-arg create path.
-func runMirrorCreateWizard(cmd *cobra.Command, noWait bool, waitTimeout time.Duration) error {
+// mirrors in parallel and report the clone URLs.
+func runMirrorCreateWizard(cmd *cobra.Command, opts mirrorCreateOptions) error {
 	cmd.SilenceUsage = true
 	ctx := cmd.Context()
 	outW := cmd.OutOrStdout()
@@ -374,7 +372,7 @@ func runMirrorCreateWizard(cmd *cobra.Command, noWait bool, waitTimeout time.Dur
 
 	// --- create + poll ------------------------------------------------------
 	targets := mirrorTargets(selectedRepos, selectedRegions)
-	results := createMirrors(ctx, errW, targets, noWait, waitTimeout)
+	results := createMirrors(ctx, errW, targets, opts)
 
 	// A cancelled run (Ctrl+C) leaves in-flight mirrors looking like errors;
 	// exit quietly instead of reporting them as "N mirror(s) failed".
@@ -501,12 +499,12 @@ func pickRegions(ctx context.Context, w io.Writer, regions []regionChoice, juris
 	return chosen, nil
 }
 
-// createMirrors fans out CreateMirror (and the clone-readiness poll) across all
+// createMirrors fans out mirror creation (and the clone-readiness poll) across all
 // targets in parallel, returning one result per target in input order. One
 // cluster client is built per region and shared across that region's repos; a
 // region the active login can't reach fails every pair in that region rather
 // than aborting the whole run.
-func createMirrors(ctx context.Context, errW io.Writer, targets []mirrorTarget, noWait bool, waitTimeout time.Duration) []mirrorResult {
+func createMirrors(ctx context.Context, errW io.Writer, targets []mirrorTarget, opts mirrorCreateOptions) []mirrorResult {
 	// One client per distinct region, built once.
 	clientByHost := make(map[string]*coreapi.Client)
 	clientErrByHost := make(map[string]error)
@@ -517,7 +515,7 @@ func createMirrors(ctx context.Context, errW io.Writer, targets []mirrorTarget, 
 		if _, seen := clientErrByHost[t.region.host]; seen {
 			continue
 		}
-		c, err := coreapi.NewForCluster(ctx, t.region.host)
+		c, err := clusterCoreClient(ctx, t.region.host)
 		if err != nil {
 			clientErrByHost[t.region.host] = err
 		} else {
@@ -526,7 +524,7 @@ func createMirrors(ctx context.Context, errW io.Writer, targets []mirrorTarget, 
 	}
 
 	// Docker-pull-style live progress: one line per (repo, region), each
-	// updating independently as its CreateMirror + clone poll advance.
+	// updating independently as its create request and clone poll advance.
 	labels := make([]string, len(targets))
 	for i, t := range targets {
 		labels[i] = t.owner + "/" + t.repo + " @ " + t.region.host
@@ -539,7 +537,7 @@ func createMirrors(ctx context.Context, errW io.Writer, targets []mirrorTarget, 
 	g.SetLimit(mirrorCreateConcurrency)
 	for i, t := range targets {
 		g.Go(func() error {
-			results[i] = createOneMirror(ctx, t, clientByHost[t.region.host], clientErrByHost[t.region.host], noWait, waitTimeout,
+			results[i] = createOneMirror(ctx, t, clientByHost[t.region.host], clientErrByHost[t.region.host], opts,
 				func(status string, final, ok bool) { prog.set(i, status, final, ok) })
 			return nil
 		})
@@ -554,13 +552,13 @@ func createMirrors(ctx context.Context, errW io.Writer, targets []mirrorTarget, 
 	return results
 }
 
-// createOneMirror registers a single (repo, region) mirror and, unless noWait
-// or the upstream is empty, waits for its initial clone. It never returns an
+// createOneMirror registers a single (repo, region) mirror and, unless noWait,
+// waits for its initial clone. It never returns an
 // error: every outcome is folded into the mirrorResult so a single failure
 // can't sink the batch. report (may be nil) is called as the mirror moves
 // through its phases so the caller can render live progress; the final call has
 // final=true and ok set to whether it succeeded.
-func createOneMirror(ctx context.Context, t mirrorTarget, c *coreapi.Client, clientErr error, noWait bool, waitTimeout time.Duration, report func(status string, final, ok bool)) mirrorResult {
+func createOneMirror(ctx context.Context, t mirrorTarget, c *coreapi.Client, clientErr error, opts mirrorCreateOptions, report func(status string, final, ok bool)) mirrorResult {
 	if report == nil {
 		report = func(string, bool, bool) {}
 	}
@@ -570,12 +568,8 @@ func createOneMirror(ctx context.Context, t mirrorTarget, c *coreapi.Client, cli
 		report(mirrorStatusError, true, false)
 		return res
 	}
-	report("creating", false, false)
-	// Same create-then-wait path as the one-shot `repo mirror create <url>`
-	// (createAndAwaitMirror), so both report identical lifecycle states. The
-	// per-poll status drives this mirror's progress line.
-	outcome, err := createAndAwaitMirror(ctx, c, t.owner, t.repo, t.region.host, noWait, waitTimeout, nil,
-		func(s coreapi.MirrorStatus) { report(string(s), false, false) })
+	opts.onPhase = func(phase mirrorCreatePhase) { report(string(phase), false, false) }
+	outcome, err := createAndAwaitMirror(ctx, c, t.owner, t.repo, t.region.host, opts)
 	if outcome.created == nil {
 		res.status, res.err = mirrorStatusError, renderCoreError(err)
 		report(mirrorStatusError, true, false)
@@ -583,21 +577,8 @@ func createOneMirror(ctx context.Context, t mirrorTarget, c *coreapi.Client, cli
 	}
 	res.cloneURL = outcome.created.MirrorUrl
 
-	if outcome.created.Suspended {
-		// An admin suspended this existing placement, so it won't be served.
-		// Surface it as a distinct status and set an error so the batch exits
-		// non-zero, matching the one-shot: a suspended mirror isn't a success.
-		res.status, res.err = mirrorStatusSuspended, errors.New("suspended by an admin; won't be usable")
-		report(mirrorStatusSuspended, true, false)
-		return res
-	}
-
 	if !outcome.polled {
-		if outcome.created.Empty { //nolint:staticcheck // CreatedMirror.Empty deprecated by /repos spec bump; create-flow cleanup tracked separately
-			res.status = mirrorStatusEmpty
-		} else {
-			res.status = mirrorStatusRegistered
-		}
+		res.status = mirrorStatusRegistered
 		report(res.status, true, true)
 		return res
 	}

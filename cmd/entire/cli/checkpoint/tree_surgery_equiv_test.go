@@ -58,7 +58,7 @@ func TestBuildTreeWithChanges_AppliesModificationsDeletionsAndMetadata(t *testin
 	// Switch to repo dir so paths.WorktreeRoot() resolves correctly
 	t.Chdir(dir)
 
-	newHash, err := store.buildTreeWithChanges(context.Background(), baseTreeHash, modifiedFiles, deletedFiles, metadataDir, metadataDirAbs)
+	newHash, err := store.buildTreeWithChanges(context.Background(), baseTreeHash, modifiedFiles, deletedFiles, metadataDir)
 	if err != nil {
 		t.Fatalf("buildTreeWithChanges: %v", err)
 	}

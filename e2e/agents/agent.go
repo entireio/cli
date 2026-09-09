@@ -63,6 +63,17 @@ type ExternalAgent interface {
 	IsExternalAgent() bool
 }
 
+// RepoSeeder is implemented by an agent that needs files planted in a fresh
+// test repo before it first runs there. SetupRepo calls SeedRepo once the repo
+// exists and `entire enable` has written the agent's own config into it.
+//
+// Seeding is best-effort by contract: an agent that cannot seed should return
+// nil and leave the repo alone, so the tests degrade to whatever the agent does
+// for itself rather than failing on setup.
+type RepoSeeder interface {
+	SeedRepo(dir string) error
+}
+
 var registry []Agent
 var gates = map[string]chan struct{}{}
 

@@ -11,7 +11,7 @@ import (
 // containing path-traversal primitives are rejected before being used to build a
 // filesystem write path.
 //
-// Session IDs reaching the resume/rewind restore paths originate from checkpoint
+// Session IDs reaching the resume/log-restore paths originate from checkpoint
 // metadata stored on the shared entire/checkpoints/v1 branch, which an attacker
 // with push access can craft. Without validation, an absolute or "../"-laden
 // session ID escapes the agent session directory (and for agents like Pi/Codex
@@ -140,53 +140,4 @@ func TestResolveAgentTranscriptPath(t *testing.T) {
 			t.Errorf("ResolveAgentTranscriptPath() = %q, want empty", got)
 		}
 	})
-}
-
-func TestFindCheckpointUUID(t *testing.T) {
-	transcript := []transcriptLine{
-		{Type: "user", UUID: "u1", Message: []byte(`{"content":"First prompt"}`)},
-		{Type: "assistant", UUID: "a1", Message: []byte(`{"content":[{"type":"tool_use","id":"toolu_task1","name":"Task","input":{}}]}`)},
-		{Type: "user", UUID: "u2", Message: []byte(`{"content":[{"type":"tool_result","tool_use_id":"toolu_task1","content":"Task completed"}]}`)},
-		{Type: "assistant", UUID: "a2", Message: []byte(`{"content":[{"type":"text","text":"Done"}]}`)},
-		{Type: "assistant", UUID: "a3", Message: []byte(`{"content":[{"type":"tool_use","id":"toolu_task2","name":"Task","input":{}}]}`)},
-		{Type: "user", UUID: "u3", Message: []byte(`{"content":[{"type":"tool_result","tool_use_id":"toolu_task2","content":"Second task done"}]}`)},
-	}
-
-	tests := []struct {
-		name      string
-		toolUseID string
-		wantUUID  string
-		wantFound bool
-	}{
-		{
-			name:      "find first task result",
-			toolUseID: "toolu_task1",
-			wantUUID:  "u2",
-			wantFound: true,
-		},
-		{
-			name:      "find second task result",
-			toolUseID: "toolu_task2",
-			wantUUID:  "u3",
-			wantFound: true,
-		},
-		{
-			name:      "non-existent tool use ID",
-			toolUseID: "toolu_nonexistent",
-			wantUUID:  "",
-			wantFound: false,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			gotUUID, gotFound := FindCheckpointUUID(transcript, tt.toolUseID)
-			if gotFound != tt.wantFound {
-				t.Errorf("FindCheckpointUUID() found = %v, want %v", gotFound, tt.wantFound)
-			}
-			if gotUUID != tt.wantUUID {
-				t.Errorf("FindCheckpointUUID() uuid = %v, want %v", gotUUID, tt.wantUUID)
-			}
-		})
-	}
 }

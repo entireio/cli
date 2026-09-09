@@ -5,12 +5,12 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
-	"path/filepath"
 	"strings"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/external"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
+	"github.com/entireio/cli/cmd/entire/cli/entiredir"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
@@ -136,7 +136,7 @@ func ensureLogger(cmd *cobra.Command) {
 // only after every check that can still reject the invocation, so a rejected
 // enable that goes on to log leaves an untouched repo untouched.
 func newLogger(ctx context.Context) (*logging.Logger, error) {
-	root, err := paths.WorktreeRoot(ctx)
+	worktreeRoot, err := paths.WorktreeRoot(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("resolve worktree root: %w", err)
 	}
@@ -145,11 +145,12 @@ func newLogger(ctx context.Context) (*logging.Logger, error) {
 	// time we get here; this covers the callers that build a logger outside it
 	// (`enable`, the hook handlers) and the exempt commands, which run but must
 	// not create .entire/logs through a symlink someone else controls.
-	if err := paths.ValidateEntireDirAt(root); err != nil {
+	if err := paths.ValidateEntireDirAt(worktreeRoot); err != nil {
 		return nil, fmt.Errorf("refusing to open log sink: %w", err)
 	}
 	l, err := logging.New(logging.Config{
-		Dir:   filepath.Join(root, logging.LogsDir),
+		Root:  entiredir.OpenerAt(worktreeRoot),
+		Dir:   logging.LogsName,
 		Level: resolveLogLevel(ctx),
 	})
 	if err != nil {

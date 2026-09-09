@@ -195,7 +195,7 @@ for the implementation.
 
 ## Protected Directories
 
-- `.github` — contains hook configs (committed to repo, unlikely to be affected by rewind)
+- `.github/hooks` — the hook config directory; listed in `ProtectedDirs()`, so Entire filters it out of change tracking and checkpoints
 - No agent-specific repo directory to protect
 
 ## Subagent Lifecycle

@@ -3,10 +3,8 @@ package cli
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
-	"io/fs"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -77,16 +75,10 @@ func runStatus(ctx context.Context, w io.Writer, detailed, jsonOutput bool) erro
 	}
 
 	// Check which settings files exist
-	_, projectErr := os.Lstat(settingsPath)
-	if projectErr != nil && !errors.Is(projectErr, fs.ErrNotExist) {
-		return fmt.Errorf("cannot access project settings file: %w", projectErr)
+	projectExists, localExists, err := settings.FilesPresent(ctx)
+	if err != nil {
+		return err //nolint:wrapcheck // already contextual; a bare %w only changes the concrete type
 	}
-	_, localErr := os.Lstat(localSettingsPath)
-	if localErr != nil && !errors.Is(localErr, fs.ErrNotExist) {
-		return fmt.Errorf("cannot access local settings file: %w", localErr)
-	}
-	projectExists := projectErr == nil
-	localExists := localErr == nil
 
 	if !projectExists && !localExists {
 		fmt.Fprintln(w, "○ not set up (run `entire enable` to get started)")
@@ -145,6 +137,14 @@ func runStatusDetailed(ctx context.Context, w io.Writer, sty statusStyles, setti
 			return fmt.Errorf("failed to load project settings: %w", err)
 		}
 		fmt.Fprintln(w, formatSettingsStatus("Project", projectSettings, sty))
+	}
+
+	// An external_agents grant the loader refused. The user can see the
+	// setting in their file and has no other way to learn it is inert:
+	// discovery simply does not run, and the agent never appears.
+	if reason, rejected := effectiveSettings.ExternalAgentsRejection(); rejected {
+		fmt.Fprintf(w, "  external_agents is ignored: %s\n  move it to %s, and keep that file out of version control\n",
+			reason, settings.EntireSettingsLocalFile)
 	}
 
 	// Show local settings if it exists. LoadFromFile is ungated, so this
@@ -858,25 +858,12 @@ func runStatusJSON(ctx context.Context, w io.Writer) error {
 		return writeJSON(statusJSON{Error: "not a git repository"})
 	}
 
-	settingsPath, err := paths.AbsPath(ctx, EntireSettingsFile)
-	if err != nil {
-		settingsPath = EntireSettingsFile
-	}
-	localSettingsPath, err := paths.AbsPath(ctx, EntireSettingsLocalFile)
-	if err != nil {
-		localSettingsPath = EntireSettingsLocalFile
+	projectExists, localExists, presenceErr := settings.FilesPresent(ctx)
+	if presenceErr != nil {
+		return writeJSON(statusJSON{Error: presenceErr.Error()})
 	}
 
-	_, projectErr := os.Lstat(settingsPath)
-	if projectErr != nil && !errors.Is(projectErr, fs.ErrNotExist) {
-		return writeJSON(statusJSON{Error: fmt.Sprintf("cannot access project settings file: %v", projectErr)})
-	}
-	_, localErr := os.Lstat(localSettingsPath)
-	if localErr != nil && !errors.Is(localErr, fs.ErrNotExist) {
-		return writeJSON(statusJSON{Error: fmt.Sprintf("cannot access local settings file: %v", localErr)})
-	}
-
-	if projectErr != nil && localErr != nil {
+	if !projectExists && !localExists {
 		return writeJSON(statusJSON{Error: "not set up"})
 	}
 

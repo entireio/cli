@@ -1039,12 +1039,19 @@ func TestMutateSessionState_UnboundedByDefault(t *testing.T) {
 	require.NoError(t, err)
 
 	const holdFor = 400 * time.Millisecond
+	// start is captured BEFORE the holder goroutine launches, so it is always
+	// at or before the moment the sleep begins. Capturing it after the `go`
+	// statement made the assertion below depend on this goroutine reaching
+	// time.Now() before the new one reaches time.Sleep -- an ordering nothing
+	// guarantees. When it lost, the measured elapsed fell just under holdFor
+	// and the test failed with no real defect (seen on CI at 398.881573ms
+	// against a 400ms bound).
+	start := time.Now()
 	go func() {
 		time.Sleep(holdFor)
 		release()
 	}()
 
-	start := time.Now()
 	ran := false
 	// No WithSessionLockWait: must wait for the holder rather than time out.
 	err = MutateSessionState(ctx, sessionID, func(state *SessionState) error {
@@ -1057,4 +1064,66 @@ func TestMutateSessionState_UnboundedByDefault(t *testing.T) {
 	assert.True(t, ran, "unbounded mutation must eventually run")
 	assert.GreaterOrEqual(t, elapsed, holdFor,
 		"unbounded acquire should block until the holder releases, not time out")
+}
+
+// TestClearSessionState_PackageLevel_SerializesAgainstConcurrentMutation
+// covers the implementation `entire doctor` actually reaches
+// (doctor.go's discardSession -> strategy.ClearSessionState), which is a
+// different function from (*ManualCommitStrategy).clearSessionState and was
+// left ungated when that one was hardened -- so the race stayed open on the
+// command most likely to run while other sessions are live. Same shape as
+// the strategy-method test: a writer holds the real gate mid-mutation, and
+// the clear must block until it releases.
+func TestClearSessionState_PackageLevel_SerializesAgainstConcurrentMutation(t *testing.T) {
+	dir := t.TempDir()
+	testutil.InitRepo(t, dir)
+	t.Chdir(dir)
+
+	ctx := context.Background()
+	const sessionID = "pkg-clear-race-session"
+	if err := SaveSessionState(ctx, &SessionState{
+		SessionID:  sessionID,
+		BaseCommit: "abc123",
+		StartedAt:  time.Now(),
+	}); err != nil {
+		t.Fatalf("SaveSessionState: %v", err)
+	}
+
+	writerStarted := make(chan struct{})
+	writerMayFinish := make(chan struct{})
+	writerFinished := make(chan struct{})
+	go func() {
+		defer close(writerFinished)
+		if err := MutateSessionState(ctx, sessionID, func(state *SessionState) error {
+			close(writerStarted)
+			<-writerMayFinish
+			state.StepCount = 1
+			return nil
+		}); err != nil {
+			t.Errorf("MutateSessionState: %v", err)
+		}
+	}()
+	<-writerStarted // writer holds the gate now, mid-mutation
+
+	clearStarted := make(chan struct{})
+	clearReturned := make(chan struct{})
+	go func() {
+		defer close(clearReturned)
+		close(clearStarted)
+		if err := ClearSessionState(ctx, sessionID); err != nil {
+			t.Errorf("ClearSessionState: %v", err)
+		}
+	}()
+	<-clearStarted
+
+	select {
+	case <-clearReturned:
+		t.Fatal("package-level ClearSessionState returned while a concurrent MutateSessionState was still mid-mutation -- not serialized (this is doctor's path)")
+	case <-time.After(100 * time.Millisecond):
+		// Expected: still blocked on the gate.
+	}
+
+	close(writerMayFinish)
+	<-writerFinished
+	<-clearReturned
 }

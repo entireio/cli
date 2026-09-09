@@ -89,7 +89,6 @@ func (s *ManualCommitStrategy) SaveStep(ctx context.Context, step StepContext) e
 			NewFiles:          step.NewFiles,
 			DeletedFiles:      step.DeletedFiles,
 			MetadataDir:       step.MetadataDir,
-			MetadataDirAbs:    step.MetadataDirAbs,
 			CommitMessage:     step.CommitMessage,
 			AuthorName:        step.AuthorName,
 			AuthorEmail:       step.AuthorEmail,

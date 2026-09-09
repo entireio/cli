@@ -20,5 +20,4 @@ const (
 	oauthDeviceCodePath = "/device_authorization"
 	oauthAuthorizePath  = "/authorize"
 	oauthTokenPath      = "/oauth/token" //nolint:gosec // G101: an endpoint path, not a credential
-	oauthSTSPath        = "/oauth/token" //nolint:gosec // G101: an endpoint path, not a credential
 )

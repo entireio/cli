@@ -79,7 +79,7 @@ func TestAwaitMirrorReady(t *testing.T) {
 
 	t.Run("ready resolves with no error", func(t *testing.T) {
 		f := &fakeMirrorGetter{statuses: []coreapi.MirrorStatus{coreapi.MirrorStatusReady}}
-		status, err := awaitMirrorReady(ctx, f, "m", time.Second, nil)
+		status, err := awaitMirrorReady(ctx, f, "m", time.Second)
 		require.NoError(t, err)
 		require.Equal(t, coreapi.MirrorStatusReady, status)
 	})
@@ -88,7 +88,7 @@ func TestAwaitMirrorReady(t *testing.T) {
 		f := &fakeMirrorGetter{statuses: []coreapi.MirrorStatus{
 			coreapi.MirrorStatusProcessing, coreapi.MirrorStatusProcessing, coreapi.MirrorStatusReady,
 		}}
-		status, err := awaitMirrorReady(ctx, f, "m", time.Second, nil)
+		status, err := awaitMirrorReady(ctx, f, "m", time.Second)
 		require.NoError(t, err)
 		require.Equal(t, coreapi.MirrorStatusReady, status)
 		require.GreaterOrEqual(t, f.calls, 3)
@@ -96,162 +96,56 @@ func TestAwaitMirrorReady(t *testing.T) {
 
 	t.Run("failed returns errMirrorCloneFailed", func(t *testing.T) {
 		f := &fakeMirrorGetter{statuses: []coreapi.MirrorStatus{coreapi.MirrorStatusFailed}}
-		status, err := awaitMirrorReady(ctx, f, "m", time.Second, nil)
+		status, err := awaitMirrorReady(ctx, f, "m", time.Second)
 		require.ErrorIs(t, err, errMirrorCloneFailed)
 		require.Equal(t, coreapi.MirrorStatusFailed, status)
 	})
 
 	t.Run("suspended returns errMirrorSuspended", func(t *testing.T) {
 		f := &fakeMirrorGetter{statuses: []coreapi.MirrorStatus{coreapi.MirrorStatusSuspended}}
-		status, err := awaitMirrorReady(ctx, f, "m", time.Second, nil)
+		status, err := awaitMirrorReady(ctx, f, "m", time.Second)
 		require.ErrorIs(t, err, errMirrorSuspended)
 		require.Equal(t, coreapi.MirrorStatusSuspended, status)
 	})
 
 	t.Run("never-ready times out", func(t *testing.T) {
 		f := &fakeMirrorGetter{statuses: []coreapi.MirrorStatus{coreapi.MirrorStatusProcessing}}
-		_, err := awaitMirrorReady(ctx, f, "m", 20*time.Millisecond, nil)
+		_, err := awaitMirrorReady(ctx, f, "m", 20*time.Millisecond)
 		require.ErrorIs(t, err, context.DeadlineExceeded)
 	})
 
 	t.Run("transient errors are tolerated, then ready", func(t *testing.T) {
 		// Fewer consecutive errors than the cap, so the poll rides them out.
 		f := &fakeMirrorGetter{errsBefore: maxConsecutivePollErrors - 1, statuses: []coreapi.MirrorStatus{coreapi.MirrorStatusReady}}
-		status, err := awaitMirrorReady(ctx, f, "m", time.Second, nil)
+		status, err := awaitMirrorReady(ctx, f, "m", time.Second)
 		require.NoError(t, err)
 		require.Equal(t, coreapi.MirrorStatusReady, status)
 	})
 
 	t.Run("persistent errors give up after the cap", func(t *testing.T) {
 		f := &fakeMirrorGetter{err: errors.New("boom")}
-		_, err := awaitMirrorReady(ctx, f, "m", time.Second, nil)
+		_, err := awaitMirrorReady(ctx, f, "m", time.Second)
 		require.ErrorContains(t, err, "poll mirror status")
 		require.Equal(t, maxConsecutivePollErrors, f.calls, "should stop at the cap, not spin to the deadline")
 	})
 }
 
-// serveMirrorCreate stands up a control plane that answers POST /mirrors with
-// the given CreatedMirror (or a 500 when createErr) and GET /mirrors/{id} with
-// a Ready status, then points createAndAwaitMirror's client at it. It records
-// the ordered request paths so tests can assert create-before-poll sequencing.
-func serveMirrorCreate(t *testing.T, created *coreapi.CreatedMirror, createErr bool) (*coreapi.Client, *[]string) {
-	t.Helper()
-	var paths []string
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		paths = append(paths, r.URL.Path)
-		w.Header().Set("Content-Type", "application/json")
-		switch {
-		case r.Method == http.MethodPost && r.URL.Path == mirrorsAPIPath:
-			if createErr {
-				w.WriteHeader(http.StatusInternalServerError)
-				return
-			}
-			w.WriteHeader(http.StatusCreated)
-			if err := printJSON(w, created); err != nil {
-				t.Errorf("encode created response: %v", err)
-			}
-		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/api/v1/mirrors/"):
-			m := &coreapi.Mirror{}
-			m.Status = coreapi.NewOptMirrorStatus(coreapi.MirrorStatusReady)
-			if err := printJSON(w, m); err != nil {
-				t.Errorf("encode mirror response: %v", err)
-			}
-		default:
-			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
-			w.WriteHeader(http.StatusNotFound)
-		}
-	}))
-	t.Cleanup(srv.Close)
-	c, err := coreapi.NewWithBearer(srv.URL, "tok")
-	require.NoError(t, err)
-	return c, &paths
-}
+func TestRepoMirrorCreate_WaitTimeoutHelp(t *testing.T) {
+	t.Parallel()
 
-// TestCreateAndAwaitMirror_OnCreated pins the onCreated callback contract: it
-// delimits the placing vs cloning phases, so it must fire exactly once on
-// CreateMirror success (before any clone polling / onStatus), and never on a
-// CreateMirror error.
-//
-// Not parallel: shortens the package-level mirrorPollInterval.
-func TestCreateAndAwaitMirror_OnCreated(t *testing.T) {
-	prev := mirrorPollInterval
-	mirrorPollInterval = time.Millisecond
-	t.Cleanup(func() { mirrorPollInterval = prev })
-	ctx := t.Context()
-
-	mk := func() *coreapi.CreatedMirror {
-		return &coreapi.CreatedMirror{Created: true, MirrorId: "m1", MirrorUrl: "entire://c/gh/o/r"}
-	}
-
-	t.Run("fires once before onStatus on success", func(t *testing.T) {
-		c, _ := serveMirrorCreate(t, mk(), false)
-		var events []string
-		outcome, err := createAndAwaitMirror(ctx, c, "o", "r", "c", false, time.Second,
-			func(m *coreapi.CreatedMirror) {
-				require.Equal(t, "m1", m.MirrorId, "onCreated receives the create response")
-				events = append(events, "created")
-			},
-			func(coreapi.MirrorStatus) { events = append(events, "status") },
-		)
-		require.NoError(t, err)
-		require.Equal(t, coreapi.MirrorStatusReady, outcome.status)
-		require.NotEmpty(t, events)
-		require.Equal(t, "created", events[0], "onCreated must fire before any onStatus")
-		require.Equal(t, 1, countEq(events, "created"), "onCreated fires exactly once")
-	})
-
-	t.Run("does not fire on CreateMirror error", func(t *testing.T) {
-		c, _ := serveMirrorCreate(t, nil, true)
-		fired := 0
-		outcome, err := createAndAwaitMirror(ctx, c, "o", "r", "c", false, time.Second,
-			func(*coreapi.CreatedMirror) { fired++ }, nil)
-		require.Error(t, err)
-		require.Nil(t, outcome.created)
-		require.Zero(t, fired, "onCreated must not fire when create fails")
-	})
-
-	t.Run("fires once even with no-wait (no polling)", func(t *testing.T) {
-		c, paths := serveMirrorCreate(t, mk(), false)
-		fired := 0
-		_, err := createAndAwaitMirror(ctx, c, "o", "r", "c", true, time.Second,
-			func(*coreapi.CreatedMirror) { fired++ }, nil)
-		require.NoError(t, err)
-		require.Equal(t, 1, fired)
-		require.Equal(t, []string{mirrorsAPIPath}, *paths, "no-wait must not poll GetMirror")
-	})
-
-	t.Run("suspended placement short-circuits without polling or error", func(t *testing.T) {
-		suspended := &coreapi.CreatedMirror{MirrorId: "m1", MirrorUrl: "entire://c/gh/o/r", Suspended: true}
-		c, paths := serveMirrorCreate(t, suspended, false)
-		fired := 0
-		outcome, err := createAndAwaitMirror(ctx, c, "o", "r", "c", false, time.Second,
-			func(*coreapi.CreatedMirror) { fired++ }, nil)
-		require.NoError(t, err, "an admin-suspended placement is non-fatal")
-		require.Equal(t, 1, fired, "onCreated still fires for a suspended placement")
-		require.False(t, outcome.polled, "a suspended placement is never polled for readiness")
-		require.Equal(t, []string{mirrorsAPIPath}, *paths, "suspended must not poll GetMirror")
-	})
-}
-
-func countEq(xs []string, want string) int {
-	n := 0
-	for _, x := range xs {
-		if x == want {
-			n++
-		}
-	}
-	return n
+	flag := newRepoMirrorCreateCmd().Flags().Lookup("wait-timeout")
+	require.NotNil(t, flag)
+	require.Equal(t, "How long to wait for mirror request submission, placement, and clone readiness", flag.Usage)
 }
 
 // TestReportOneShotMirror exercises the one-shot create's presentation across
-// the shared lifecycle outcomes — the branching finishMirrorCreate used to own,
-// now driven by mirrorCreateOutcome (and shared with the wizard).
+// the shared lifecycle outcomes driven by mirrorCreateOutcome.
 func TestReportOneShotMirror(t *testing.T) {
 	t.Parallel()
 	const id = "01KS6KFJR2XS6PZ188MVYE07AN"
 	const mirrorURL = "entire://eu-west-1.entire.io/gh/octocat/hello-world"
-	mk := func(created, empty bool) *coreapi.CreatedMirror {
-		return &coreapi.CreatedMirror{Created: created, Empty: empty, MirrorId: id, MirrorUrl: mirrorURL}
+	mk := func() *coreapi.CreatedMirror {
+		return &coreapi.CreatedMirror{MirrorId: id, MirrorUrl: mirrorURL}
 	}
 
 	t.Run("create failure surfaces with nothing printed", func(t *testing.T) {
@@ -263,27 +157,20 @@ func TestReportOneShotMirror(t *testing.T) {
 		require.Empty(t, out.String())
 	})
 
-	t.Run("empty upstream prints nothing-to-clone", func(t *testing.T) {
-		t.Parallel()
-		var out, errW bytes.Buffer
-		err := reportOneShotMirror(&out, &errW, mirrorCreateOutcome{created: mk(true, true)}, nil)
-		require.NoError(t, err)
-		require.Contains(t, out.String(), "Registered mirror "+id)
-		require.Contains(t, out.String(), "nothing to clone")
-	})
-
 	t.Run("no-wait prints in-progress hint", func(t *testing.T) {
 		t.Parallel()
 		var out, errW bytes.Buffer
-		err := reportOneShotMirror(&out, &errW, mirrorCreateOutcome{created: mk(true, false)}, nil)
+		err := reportOneShotMirror(&out, &errW, mirrorCreateOutcome{created: mk()}, nil)
 		require.NoError(t, err)
+		require.Contains(t, out.String(), "Mirror placed at "+mirrorURL)
+		require.Contains(t, out.String(), "Mirror ID: "+id)
 		require.Contains(t, out.String(), "still be in progress")
 	})
 
 	t.Run("ready prints clone hint", func(t *testing.T) {
 		t.Parallel()
 		var out, errW bytes.Buffer
-		outcome := mirrorCreateOutcome{created: mk(true, false), status: coreapi.MirrorStatusReady, polled: true}
+		outcome := mirrorCreateOutcome{created: mk(), status: coreapi.MirrorStatusReady, polled: true}
 		err := reportOneShotMirror(&out, &errW, outcome, nil)
 		require.NoError(t, err)
 		require.Contains(t, out.String(), "git clone "+mirrorURL)
@@ -292,7 +179,7 @@ func TestReportOneShotMirror(t *testing.T) {
 	t.Run("suspended surfaces support guidance as SilentError", func(t *testing.T) {
 		t.Parallel()
 		var out, errW bytes.Buffer
-		outcome := mirrorCreateOutcome{created: mk(false, false), status: coreapi.MirrorStatusSuspended, polled: true}
+		outcome := mirrorCreateOutcome{created: mk(), status: coreapi.MirrorStatusSuspended, polled: true}
 		err := reportOneShotMirror(&out, &errW, outcome, errMirrorSuspended)
 		var silent *SilentError
 		require.ErrorAs(t, err, &silent)
@@ -301,24 +188,10 @@ func TestReportOneShotMirror(t *testing.T) {
 		require.NotContains(t, out.String(), "git clone")
 	})
 
-	t.Run("suspended placement warns after the placement and exits non-zero", func(t *testing.T) {
-		t.Parallel()
-		var out, errW bytes.Buffer
-		created := &coreapi.CreatedMirror{Created: false, MirrorId: id, MirrorUrl: mirrorURL, Suspended: true}
-		err := reportOneShotMirror(&out, &errW, mirrorCreateOutcome{created: created}, nil)
-		var silent *SilentError
-		require.ErrorAs(t, err, &silent, "a suspended re-create must exit non-zero")
-		require.ErrorIs(t, err, errMirrorSuspended)
-		require.Contains(t, out.String(), "Mirror exists ("+id, "the placement is still echoed")
-		require.Contains(t, errW.String(), "WARNING: this mirror has been suspended by an admin and won't be usable.")
-		require.NotContains(t, out.String(), "git clone")
-		require.NotContains(t, out.String(), "still be in progress")
-	})
-
 	t.Run("failed returns an error naming the mirror", func(t *testing.T) {
 		t.Parallel()
 		var out, errW bytes.Buffer
-		outcome := mirrorCreateOutcome{created: mk(true, false), status: coreapi.MirrorStatusFailed, polled: true}
+		outcome := mirrorCreateOutcome{created: mk(), status: coreapi.MirrorStatusFailed, polled: true}
 		err := reportOneShotMirror(&out, &errW, outcome, errMirrorCloneFailed)
 		require.Error(t, err)
 		require.Contains(t, err.Error(), id)
@@ -328,7 +201,7 @@ func TestReportOneShotMirror(t *testing.T) {
 		t.Parallel()
 		var out, errW bytes.Buffer
 		wantErr := errors.New("timed out waiting for initial clone")
-		outcome := mirrorCreateOutcome{created: mk(true, false), status: coreapi.MirrorStatusProcessing, polled: true}
+		outcome := mirrorCreateOutcome{created: mk(), status: coreapi.MirrorStatusProcessing, polled: true}
 		err := reportOneShotMirror(&out, &errW, outcome, wantErr)
 		require.ErrorIs(t, err, wantErr)
 	})
@@ -1063,6 +936,42 @@ func TestRepoMirrorList_FilterSort(t *testing.T) {
 		stdout, _ := runMirrorList(t, "--sort", "access")
 		requireOrder(t, stdout, "acme/admin-repo", "acme/read-repo")
 	})
+}
+
+// TestParseHostedGitHubURL pins the one distinction between the two GitHub
+// parsers: parseGitHubURL accepts an unqualified `owner/repo` (its callers took
+// a GitHub argument and nothing else), while parseHostedGitHubURL requires the
+// host to be named, because its caller must not attribute a forge-less pair to
+// GitHub — `repo clone` offers such a pair both readings instead.
+func TestParseHostedGitHubURL(t *testing.T) {
+	t.Parallel()
+	hosted := []string{
+		"https://github.com/acme/app",
+		"https://github.com/acme/app.git",
+		"git@github.com:acme/app",
+		"git@github.com:acme/app.git",
+		"github.com/acme/app",
+		"github.com/acme/app.git",
+	}
+	for _, raw := range hosted {
+		owner, repo, err := parseHostedGitHubURL(raw)
+		require.NoErrorf(t, err, "parseHostedGitHubURL(%q)", raw)
+		require.Equal(t, "acme", owner)
+		require.Equal(t, "app", repo)
+	}
+
+	// An unqualified pair names no forge; parseGitHubURL still takes it.
+	_, _, err := parseHostedGitHubURL("acme/app")
+	require.Error(t, err)
+	owner, repo, err := parseGitHubURL("acme/app")
+	require.NoError(t, err)
+	require.Equal(t, "acme", owner)
+	require.Equal(t, "app", repo)
+
+	// The dot-only guard applies to the host-qualified form too, so a
+	// `github.com/owner/..` ref is not attributed to GitHub either.
+	_, _, err = parseHostedGitHubURL("github.com/acme/..")
+	require.Error(t, err)
 }
 
 // TestParseGitHubURL is ported from entiredb's cmd/entire-repo/cli

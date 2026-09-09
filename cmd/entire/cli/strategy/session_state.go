@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -17,7 +18,9 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
+	"github.com/entireio/cli/cmd/entire/cli/gitdir"
 	"github.com/entireio/cli/cmd/entire/cli/internal/flock"
+	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/osroot"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
@@ -78,15 +81,21 @@ func getSessionStateDir(ctx context.Context) (string, error) {
 // validated) session ID; routing their writes through os.Root makes escaping
 // the directory impossible at the kernel level even if validation were bypassed.
 // Callers must Close the returned root.
+//
+// The root is derived from the git common dir's shared root with
+// Root.OpenRoot, not opened on an assembled path. That is what makes the
+// containment transitive: the state directory is proven to be a real directory
+// inside .git before anything is named within it, so neither the directory nor
+// the files under it can be redirected out of the clone.
 func openSessionStateRoot(ctx context.Context) (*os.Root, error) {
-	stateDir, err := getSessionStateDir(ctx)
+	commonRoot, err := gitdir.Open(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get session state directory: %w", err)
+		return nil, fmt.Errorf("failed to open git common dir: %w", err)
 	}
-	if err := os.MkdirAll(stateDir, 0o750); err != nil {
+	if err := osroot.MkdirAllNoSymlink(commonRoot, session.SessionStateDirName, 0o750); err != nil {
 		return nil, fmt.Errorf("failed to create session state directory: %w", err)
 	}
-	root, err := os.OpenRoot(stateDir)
+	root, err := osroot.OpenChild(commonRoot, session.SessionStateDirName)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open session state directory: %w", err)
 	}
@@ -96,12 +105,21 @@ func openSessionStateRoot(ctx context.Context) (*os.Root, error) {
 // openSessionStateRootForRead returns an os.Root scoped to the session state
 // directory without creating it. Returns (nil, nil) when the directory does not
 // exist, so read paths can treat a missing directory as "no hint".
+//
+// osroot.OpenChild, not commonRoot.OpenRoot: the write path above is protected
+// because MkdirAllNoSymlink refuses a symlinked entire-sessions before this
+// runs, but nothing precedes the read path. os.Root follows a symlink that stays
+// INSIDE the common dir, so a bare OpenRoot would read another directory's
+// session state as this repo's.
 func openSessionStateRootForRead(ctx context.Context) (*os.Root, error) {
-	stateDir, err := getSessionStateDir(ctx)
-	if err != nil {
-		return nil, err
+	commonRoot, err := gitdir.Open(ctx)
+	if os.IsNotExist(err) {
+		return nil, nil //nolint:nilnil // no common dir = no hint; callers handle nil root
 	}
-	root, err := os.OpenRoot(stateDir)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open git common dir: %w", err)
+	}
+	root, err := osroot.OpenChild(commonRoot, session.SessionStateDirName)
 	if os.IsNotExist(err) {
 		return nil, nil //nolint:nilnil // missing dir = no hint; callers handle nil root
 	}
@@ -300,7 +318,7 @@ func StoreModelHint(ctx context.Context, sessionID, model string) error {
 	}
 	defer root.Close()
 
-	if err := osroot.WriteFile(root, sessionID+".model", []byte(model), 0o600); err != nil {
+	if err := jsonutil.WriteFileAtomicIn(root, sessionID+".model", []byte(model), 0o600); err != nil {
 		return fmt.Errorf("failed to write model hint file: %w", err)
 	}
 	return nil
@@ -325,7 +343,7 @@ func LoadModelHint(ctx context.Context, sessionID string) string {
 	}
 	defer root.Close()
 
-	data, err := osroot.ReadFile(root, sessionID+".model")
+	data, err := osroot.ReadFileNoFollow(root, sessionID+".model")
 	if err != nil {
 		if !os.IsNotExist(err) {
 			logging.Warn(logging.WithComponent(ctx, "session"), "failed to read model hint file",
@@ -441,7 +459,7 @@ func LoadAgentTypeHint(ctx context.Context, sessionID string) types.AgentType {
 	}
 	defer root.Close()
 
-	data, err := osroot.ReadFile(root, sessionID+".agent")
+	data, err := osroot.ReadFileNoFollow(root, sessionID+".agent")
 	if err != nil {
 		if !os.IsNotExist(err) {
 			logging.Warn(logging.WithComponent(ctx, "session"), "failed to read agent hint file",
@@ -672,6 +690,16 @@ func MutateSessionStateOnSaved(ctx context.Context, sessionID string, fn func(*S
 // acquireSessionGate takes the per-process gate (in-memory) and, on the
 // outermost call, the cross-process flock. Returns isOuter=true on the
 // outermost call so MutateSessionState knows whether to load/save.
+//
+// Reentrancy is keyed on the GOROUTINE, via goroutineID(): the gate counts as
+// held only for the goroutine that took it. That makes ownership implicit, so
+// moving a gated operation onto another goroutine silently defeats every
+// reentrancy check built on isOuter -- the new goroutine sees an unheld gate,
+// takes the isOuter path, and blocks in flock.AcquireIn on the flock its own
+// parent holds. If the parent is waiting for it, that is a permanent deadlock
+// rather than a slow path. withLockWaitNotice shipped exactly that bug and is
+// why it now runs its callback on the caller's goroutine and gives the timer
+// the new one. Wrap the WAITING, never the locking.
 func acquireSessionGate(ctx context.Context, sessionID string) (gate *sessionGate, isOuter bool, release func(), err error) {
 	val, _ := sessionMutationGate.LoadOrStore(sessionID, &sessionGate{})
 	gate, ok := val.(*sessionGate)
@@ -692,7 +720,7 @@ func acquireSessionGate(ctx context.Context, sessionID string) (gate *sessionGat
 	}
 	gate.mu.Unlock()
 
-	lockPath, err := stateLockPath(ctx, sessionID)
+	lock, err := stateLockForSession(ctx, sessionID)
 	if err != nil {
 		return nil, false, nil, fmt.Errorf("resolve state lock path: %w", err)
 	}
@@ -704,10 +732,10 @@ func acquireSessionGate(ctx context.Context, sessionID string) (gate *sessionGat
 	var flockRel func()
 	if deadline, ok := sessionLockDeadlineFromContext(ctx); ok {
 		acqCtx, cancel := context.WithDeadline(ctx, deadline)
-		flockRel, err = flock.AcquireContext(acqCtx, lockPath)
+		flockRel, err = flock.AcquireContextIn(acqCtx, lock.root, lock.name)
 		cancel()
 	} else {
-		flockRel, err = flock.Acquire(lockPath)
+		flockRel, err = flock.AcquireIn(lock.root, lock.name)
 	}
 	if err != nil {
 		return nil, false, nil, fmt.Errorf("acquire state lock: %w", err)
@@ -738,33 +766,35 @@ func acquireSessionGate(ctx context.Context, sessionID string) (gate *sessionGat
 // dir, then runs fn. Lock paths are deduplicated and sorted so callers that
 // span repositories or worktrees can safely acquire more than one lock.
 func WithSessionStateLocks(ctx context.Context, sessionID string, commonDirs []string, fn func() error) error {
-	lockPaths := make([]string, 0, len(commonDirs))
+	locks := make([]stateLock, 0, len(commonDirs))
 	seen := make(map[string]struct{}, len(commonDirs))
 	for _, commonDir := range commonDirs {
-		lockPath, err := stateLockPathInCommonDir(commonDir, sessionID)
+		lock, err := stateLockInCommonDir(commonDir, sessionID)
 		if err != nil {
 			return err
 		}
-		if _, ok := seen[lockPath]; ok {
+		if _, ok := seen[lock.path]; ok {
 			continue
 		}
-		seen[lockPath] = struct{}{}
-		lockPaths = append(lockPaths, lockPath)
+		seen[lock.path] = struct{}{}
+		locks = append(locks, lock)
 	}
-	slices.Sort(lockPaths)
+	// Sorted by absolute path so callers spanning repositories acquire in a
+	// consistent order and cannot deadlock against each other.
+	slices.SortFunc(locks, func(a, b stateLock) int { return strings.Compare(a.path, b.path) })
 
-	releases := make([]func(), 0, len(lockPaths))
+	releases := make([]func(), 0, len(locks))
 	releaseAll := func() {
 		for i := len(releases) - 1; i >= 0; i-- {
 			releases[i]()
 		}
 	}
-	for _, lockPath := range lockPaths {
+	for _, lock := range locks {
 		if err := ctx.Err(); err != nil {
 			releaseAll()
 			return fmt.Errorf("session state lock canceled: %w", err)
 		}
-		release, err := flock.Acquire(lockPath)
+		release, err := flock.AcquireIn(lock.root, lock.name)
 		if err != nil {
 			releaseAll()
 			return fmt.Errorf("acquire session state lock: %w", err)
@@ -811,6 +841,20 @@ func RecordFilesTouched(ctx context.Context, sessionID string, modified, added, 
 	return err
 }
 
+// stateLock names a per-session lock file two ways: path, for dedup and for the
+// deterministic ordering WithSessionStateLocks needs across repositories, and
+// (root, name) for the acquire itself so the session-ID-derived name resolves
+// inside the git common dir rather than as an assembled string.
+type stateLock struct {
+	path string
+	root *os.Root
+	name string
+}
+
+// SessionLockDirName is the lock directory inside the git common dir. Exported
+// so uninstall can sweep it without re-spelling the name.
+const SessionLockDirName = "entire-session-locks"
+
 // stateLockPath returns the lock file path for a session. Lock files live in
 // .git/entire-session-locks/ (a sibling to entire-sessions/) so callers that
 // enumerate session state files don't have to filter lock entries. A
@@ -818,37 +862,165 @@ func RecordFilesTouched(ctx context.Context, sessionID string, modified, added, 
 // holder distinct from the data — Save's atomic-rename pattern would
 // otherwise unlink the inode the flock is held on.
 func stateLockPath(ctx context.Context, sessionID string) (string, error) {
-	commonDir, err := GetGitCommonDir(ctx)
+	lock, err := stateLockForSession(ctx, sessionID)
 	if err != nil {
 		return "", err
 	}
-	return stateLockPathInCommonDir(commonDir, sessionID)
+	return lock.path, nil
 }
 
-func stateLockPathInCommonDir(commonDir, sessionID string) (string, error) {
+func stateLockForSession(ctx context.Context, sessionID string) (stateLock, error) {
+	commonDir, err := gitdir.CommonDir(ctx)
+	if err != nil {
+		return stateLock{}, fmt.Errorf("resolve git common dir: %w", err)
+	}
+	return stateLockInCommonDir(commonDir, sessionID)
+}
+
+func stateLockInCommonDir(commonDir, sessionID string) (stateLock, error) {
 	if strings.TrimSpace(commonDir) == "" {
-		return "", errors.New("empty git common dir")
+		return stateLock{}, errors.New("empty git common dir")
 	}
 	if err := validation.ValidateSessionID(sessionID); err != nil {
-		return "", fmt.Errorf("invalid session ID: %w", err)
+		return stateLock{}, fmt.Errorf("invalid session ID: %w", err)
 	}
-	lockDir := filepath.Join(commonDir, "entire-session-locks")
-	if err := os.MkdirAll(lockDir, 0o750); err != nil {
-		return "", fmt.Errorf("create session lock directory: %w", err)
+	root, err := gitdir.OpenAt(commonDir)
+	if err != nil {
+		return stateLock{}, fmt.Errorf("open git common dir: %w", err)
 	}
-	return filepath.Join(lockDir, sessionID+".lock"), nil
+	if err := osroot.MkdirAllNoSymlink(root, SessionLockDirName, 0o750); err != nil {
+		return stateLock{}, fmt.Errorf("create session lock directory: %w", err)
+	}
+	name := SessionLockDirName + "/" + sessionID + ".lock"
+	return stateLock{
+		path: filepath.Join(commonDir, filepath.FromSlash(name)),
+		root: root,
+		name: name,
+	}, nil
+}
+
+// SessionLockNoticeDelay is how long a user-facing clear waits before telling
+// the user it is blocked on a session's state lock. Short enough that a real
+// stall is announced promptly, long enough that the uncontended case -- the
+// common one -- stays silent.
+const SessionLockNoticeDelay = time.Second
+
+// withLockWaitNotice runs doClear, announcing on errW if it has not returned
+// within notifyAfter.
+//
+// The wait itself is deliberate and must not be shortened: the clear takes the
+// same gate every mutation of that state uses, because deleting the file out
+// from under an in-flight write destroys it. But the acquire is unbounded --
+// only the TurnStart hook opts into a deadline, via WithSessionLockWait -- and
+// a checkpoint condensation holds that lock while it rewrites a multi-MB
+// transcript, observed at ~30s on large sessions (see the note on the lock
+// above). The commands that reach this are interactive and are run precisely
+// when other sessions are live, so without a notice a correct 30-second wait
+// is indistinguishable from a hang, and the natural response to a hang is to
+// kill it -- which is how you get a half-finished discard.
+//
+// It lives here, next to the lock, rather than at one command's call site, so
+// every user-facing clear gets it: `entire doctor`, `entire reset`, and
+// `entire reset <session>`.
+//
+// doClear runs on the CALLER's goroutine and the timer gets the new one --
+// never the other way around. acquireSessionGate keys reentrancy on goroutine
+// ID, so running doClear on a child would make the gate look unheld: the
+// reentrancy refusal in ClearSessionState would not fire, and the child would
+// instead block in flock.AcquireIn on the flock its own parent holds while the
+// parent blocked waiting for the child. That deadlocked after printing the
+// notice below, pointing the user at a condensation that does not exist.
+func withLockWaitNotice(sessionID string, errW io.Writer, notifyAfter time.Duration, doClear func() error) error {
+	stop := make(chan struct{})
+	noticed := make(chan struct{})
+	go func() {
+		defer close(noticed)
+		select {
+		case <-stop:
+		case <-time.After(notifyAfter):
+			if errW != nil {
+				fmt.Fprintf(errW, "Waiting for session %s to release its state lock "+
+					"(a checkpoint condensation can hold it for ~30s; Ctrl-C twice to force quit)...\n", sessionID)
+			}
+		}
+	}()
+
+	err := doClear()
+
+	// Stop the timer and wait for it to finish before returning, so the
+	// notice can never land on errW after the caller has moved on to its own
+	// output (Reset prints a per-session line straight after this returns).
+	close(stop)
+	<-noticed
+	return err
+}
+
+// ClearSessionStateWithProgress is ClearSessionState with the shared lock-wait
+// notice on errW. This is what user-facing commands should call; the bare
+// ClearSessionState stays for callers with nowhere to print.
+func ClearSessionStateWithProgress(ctx context.Context, sessionID string, errW io.Writer, notifyAfter time.Duration) error {
+	return withLockWaitNotice(sessionID, errW, notifyAfter, func() error {
+		return ClearSessionState(ctx, sessionID)
+	})
 }
 
 // ClearSessionState removes the session state file for the given session ID.
+//
+// It takes sessionID's gate first, for the same reason
+// (*ManualCommitStrategy).clearSessionState does: this deletes the file that
+// every other mutation of this state writes under MutateSessionState's
+// per-session lock, so an unlocked delete landing mid-mutation destroys the
+// write that was in flight, with nothing surfacing the loss. This is the
+// implementation `entire doctor` reaches (doctor.go's discardSession) -- a
+// separate one from the strategy method, and the command most likely to be
+// run while other sessions are live -- so gating the strategy method alone
+// left the race open exactly where it mattered most.
+//
+// Calling it from inside a MutateSessionState frame for the same session is
+// refused rather than tolerated. Holding the gate makes the delete safe, not
+// effective: when the frame's closure returns, MutateSessionState writes the
+// state back out, so the file is resurrected and the caller still sees a nil
+// error -- `entire doctor` would report a session discarded and the session
+// would reappear. Clear from inside an active closure with
+// (*ManualCommitStrategy).clearSessionStateLocked instead, and return
+// ErrMutationSkip so the frame does not save (see CondenseSessionByID's
+// clear path, the one caller that legitimately does this).
+//
+// The wait is not cancellable. With no WithSessionLockWait deadline on ctx,
+// acquireSessionGate falls through to the ctx-free flock.AcquireIn, so ctx
+// cancellation -- a first Ctrl-C included -- does not abort a blocked
+// acquire; only the force-quit path in main.go escapes. ctx is still honored
+// for everything else here. Adding a timeout via ctx alone would silently do
+// nothing; it would have to go through WithSessionLockWait.
 func ClearSessionState(ctx context.Context, sessionID string) error {
 	// Validate session ID to prevent path traversal
 	if err := validation.ValidateSessionID(sessionID); err != nil {
 		return fmt.Errorf("invalid session ID: %w", err)
 	}
 
-	stateDir, err := getSessionStateDir(ctx)
+	// Resolve the state directory BEFORE taking the gate. Acquiring creates a
+	// per-session lock file that is deliberately never unlinked (see the note
+	// at the end of this function), so doing it first left a permanent lock
+	// behind for a session that had no state to clear, and turned a read-only
+	// git dir from a silent nil into a per-session failure.
+	root, err := openSessionStateRootForRead(ctx)
 	if err != nil {
-		return fmt.Errorf("failed to get session state directory: %w", err)
+		return fmt.Errorf("failed to open session state directory for cleanup: %w", err)
+	}
+	if root == nil {
+		return nil // no state directory => nothing to clear
+	}
+	defer root.Close()
+
+	_, isOuter, release, err := acquireSessionGate(ctx, sessionID)
+	if err != nil {
+		return err
+	}
+	defer release()
+	if !isOuter {
+		return fmt.Errorf("ClearSessionState: session %s is being mutated on this goroutine; "+
+			"clearing here would be undone when that mutation saves -- use clearSessionStateLocked "+
+			"inside the closure and return ErrMutationSkip", sessionID)
 	}
 
 	// Remove all files for this session (state .json, .model hint, any future
@@ -857,21 +1029,10 @@ func ClearSessionState(ctx context.Context, sessionID string) error {
 	// match and delete other sessions' files. os.Root ensures traversal-resistant
 	// removal.
 	prefix := sessionID + "."
-	entries, _ := os.ReadDir(stateDir) //nolint:errcheck // best-effort cleanup; missing dir => nothing to clear
-	var matches []string
+	entries, _ := osroot.ReadDirNoSymlinks(root, ".") //nolint:errcheck // best-effort cleanup; missing dir => nothing to clear
 	for _, e := range entries {
 		if name := e.Name(); strings.HasPrefix(name, prefix) {
-			matches = append(matches, name)
-		}
-	}
-	if len(matches) > 0 {
-		root, rootErr := os.OpenRoot(stateDir)
-		if rootErr != nil {
-			return fmt.Errorf("failed to open session state directory for cleanup: %w", rootErr)
-		}
-		defer root.Close()
-		for _, name := range matches {
-			_ = osroot.Remove(root, name) //nolint:errcheck // best-effort cleanup
+			_ = osroot.RemoveNoSymlinks(root, name) //nolint:errcheck // best-effort cleanup
 		}
 	}
 

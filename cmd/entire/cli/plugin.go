@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent/external"
+	"github.com/entireio/cli/cmd/entire/cli/execx"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/telemetry"
@@ -126,13 +127,22 @@ func resolvePlugin(rootCmd *cobra.Command, args []string) (binPath string, plugi
 // given name. Only meaningful after exec.LookPath has already failed —
 // indicates the file exists but lacks the executable bit (or the
 // equivalent platform-specific accessibility).
+//
+// The scan goes through execx.PathScanDirs, not a bare split: the rule that
+// only absolute entries are scanned is shared with the external-agent
+// scanner, and two copies of it is how they drifted apart in the first place.
+// The rule matters especially here, because this function runs only after
+// LookPath has failed. LookPath's error does not distinguish exec.ErrDot (its
+// refusal to resolve a match found through a relative PATH entry) from a
+// genuine "exists but not executable", so a scan that re-walked relative
+// entries would blindly re-find the exact binary LookPath just correctly
+// refused. runPlugin then execs it via a path containing a separator, which
+// bypasses exec.Command's own ErrDot re-check, since that only fires for a
+// bare name with no separator.
 func findInaccessiblePlugin(filename string) (string, bool) {
-	for _, dir := range filepath.SplitList(os.Getenv("PATH")) {
-		if dir == "" {
-			continue
-		}
+	for _, dir := range execx.PathScanDirs() {
 		candidate := filepath.Join(dir, filename)
-		info, err := os.Stat(candidate) //nolint:gosec // PATH entries are user-trusted; scanning them is the point.
+		info, err := os.Stat(candidate)
 		if err != nil || info.IsDir() {
 			continue
 		}

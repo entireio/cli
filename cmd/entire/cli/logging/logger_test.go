@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -24,13 +25,26 @@ const (
 func newTestLogger(t *testing.T, level slog.Level) (*Logger, string) {
 	t.Helper()
 
-	dir := filepath.Join(t.TempDir(), LogsDir)
-	l, err := New(Config{Dir: dir, Level: level})
+	base := t.TempDir()
+	cfg := rootConfig(base, LogsDir)
+	cfg.Level = level
+	l, err := New(cfg)
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
 	t.Cleanup(func() { _ = l.Close() })
-	return l, filepath.Join(dir, logFileName)
+	return l, filepath.Join(base, LogsDir, LogFileName)
+}
+
+// rootConfig builds a Config rooted at base with the log directory named
+// relative to it, standing in for the .entire root the CLI passes. The opener is
+// called on the first line written, exactly as in production, so tests that
+// assert nothing is created up front still hold.
+func rootConfig(base, name string) Config {
+	return Config{
+		Root: func() (*os.Root, error) { return os.OpenRoot(base) },
+		Dir:  name,
+	}
 }
 
 // bufferLogger returns a Logger writing to buf, for assertions that need the
@@ -93,13 +107,14 @@ func TestParseLevel(t *testing.T) {
 func TestNew_CreatesFileOnFirstWrite(t *testing.T) {
 	t.Parallel()
 
-	dir := filepath.Join(t.TempDir(), "nested", LogsDir)
-	l, err := New(Config{Dir: dir})
+	base := t.TempDir()
+	const name = "nested/" + LogsDir
+	l, err := New(rootConfig(base, name))
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
 	defer func() { _ = l.Close() }()
-	path := filepath.Join(dir, logFileName)
+	path := filepath.Join(base, filepath.FromSlash(name), LogFileName)
 
 	if _, err := os.Stat(path); !os.IsNotExist(err) {
 		t.Errorf("New() created the log file before anything was logged (stat err = %v)", err)
@@ -114,10 +129,13 @@ func TestNew_CreatesFileOnFirstWrite(t *testing.T) {
 	}
 }
 
-func TestNew_RejectsEmptyDir(t *testing.T) {
+func TestNew_RejectsIncompleteConfig(t *testing.T) {
 	t.Parallel()
 
 	if _, err := New(Config{}); err == nil {
+		t.Error("New() with no Root = nil error, want an error")
+	}
+	if _, err := New(Config{Root: func() (*os.Root, error) { return nil, errors.ErrUnsupported }}); err == nil {
 		t.Error("New() with no Dir = nil error, want an error")
 	}
 }
@@ -128,11 +146,11 @@ func TestNew_RejectsEmptyDir(t *testing.T) {
 func TestLogger_UnusableDirDropsLinesAndCloseReports(t *testing.T) {
 	t.Parallel()
 
-	occupied := filepath.Join(t.TempDir(), "logs")
-	if err := os.WriteFile(occupied, []byte("not a directory"), 0o600); err != nil {
+	base := t.TempDir()
+	if err := os.WriteFile(filepath.Join(base, "logs"), []byte("not a directory"), 0o600); err != nil {
 		t.Fatalf("failed to write blocking file: %v", err)
 	}
-	l, err := New(Config{Dir: occupied})
+	l, err := New(rootConfig(base, "logs"))
 	if err != nil {
 		t.Fatalf("New() error = %v; an unusable dir must surface at Close, not here", err)
 	}
@@ -151,11 +169,11 @@ func TestLogger_UnusableDirDropsLinesAndCloseReports(t *testing.T) {
 func TestEnsureOpen_ReportsUnusableDir(t *testing.T) {
 	t.Parallel()
 
-	occupied := filepath.Join(t.TempDir(), "logs")
-	if err := os.WriteFile(occupied, []byte("not a directory"), 0o600); err != nil {
+	base := t.TempDir()
+	if err := os.WriteFile(filepath.Join(base, "logs"), []byte("not a directory"), 0o600); err != nil {
 		t.Fatalf("failed to write blocking file: %v", err)
 	}
-	l, err := New(Config{Dir: occupied})
+	l, err := New(rootConfig(base, "logs"))
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
@@ -183,8 +201,9 @@ func TestEnsureOpen_NilLoggerIsNotAnError(t *testing.T) {
 func TestEnsureOpen_IsIdempotentAndKeepsWriting(t *testing.T) {
 	t.Parallel()
 
-	dir := t.TempDir()
-	l, err := New(Config{Dir: dir})
+	base := t.TempDir()
+	dir := filepath.Join(base, "logs")
+	l, err := New(rootConfig(base, "logs"))
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
@@ -205,7 +224,7 @@ func TestEnsureOpen_IsIdempotentAndKeepsWriting(t *testing.T) {
 	if err := l.Close(); err != nil {
 		t.Fatalf("Close() error = %v", err)
 	}
-	content, err := os.ReadFile(filepath.Join(dir, logFileName))
+	content, err := os.ReadFile(filepath.Join(dir, LogFileName))
 	if err != nil {
 		t.Fatalf("read log: %v", err)
 	}
@@ -221,8 +240,9 @@ func TestEnsureOpen_IsIdempotentAndKeepsWriting(t *testing.T) {
 func TestEnsureOpen_CreatesTheFileBeforeAnyLine(t *testing.T) {
 	t.Parallel()
 
-	dir := t.TempDir()
-	l, err := New(Config{Dir: dir})
+	base := t.TempDir()
+	dir := filepath.Join(base, "logs")
+	l, err := New(rootConfig(base, "logs"))
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
@@ -231,7 +251,7 @@ func TestEnsureOpen_CreatesTheFileBeforeAnyLine(t *testing.T) {
 	if err := l.EnsureOpen(); err != nil {
 		t.Fatalf("EnsureOpen() error = %v", err)
 	}
-	if _, err := os.Stat(filepath.Join(dir, logFileName)); err != nil {
+	if _, err := os.Stat(filepath.Join(dir, LogFileName)); err != nil {
 		t.Errorf("EnsureOpen() did not create the log file: %v", err)
 	}
 }

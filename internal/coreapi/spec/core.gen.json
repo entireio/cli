@@ -379,6 +379,46 @@
         ],
         "type": "object"
       },
+      "CreateMirrorRequestInputBody": {
+        "additionalProperties": true,
+        "properties": {
+          "$schema": {
+            "description": "A URL to the JSON Schema for this object.",
+            "examples": [
+              "/api/v1/schemas/CreateMirrorRequestInputBody.json"
+            ],
+            "format": "uri",
+            "readOnly": true,
+            "type": "string"
+          },
+          "clusterHost": {
+            "description": "Destination cluster, as either a bare DNS host or the publicUrl returned by GET /api/v1/clusters.",
+            "minLength": 1,
+            "type": "string"
+          },
+          "owner": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "provider": {
+            "enum": [
+              "github"
+            ],
+            "type": "string"
+          },
+          "repo": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "provider",
+          "owner",
+          "repo",
+          "clusterHost"
+        ],
+        "type": "object"
+      },
       "CreateOrgInputBody": {
         "additionalProperties": true,
         "properties": {
@@ -2114,6 +2154,86 @@
         ],
         "type": "object"
       },
+      "MirrorRequest": {
+        "additionalProperties": true,
+        "properties": {
+          "$schema": {
+            "description": "A URL to the JSON Schema for this object.",
+            "examples": [
+              "/api/v1/schemas/MirrorRequest.json"
+            ],
+            "format": "uri",
+            "readOnly": true,
+            "type": "string"
+          },
+          "failure": {
+            "$ref": "#/components/schemas/MirrorRequestFailure"
+          },
+          "requestId": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "result": {
+            "$ref": "#/components/schemas/MirrorRequestResult"
+          },
+          "status": {
+            "enum": [
+              "pending",
+              "processing",
+              "succeeded",
+              "failed"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "requestId",
+          "status"
+        ],
+        "type": "object"
+      },
+      "MirrorRequestFailure": {
+        "additionalProperties": true,
+        "properties": {
+          "code": {
+            "description": "Stable machine-readable failure code.",
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "retryable": {
+            "description": "Whether submitting a new request may succeed without changing its inputs.",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "code",
+          "message",
+          "retryable"
+        ],
+        "type": "object"
+      },
+      "MirrorRequestResult": {
+        "additionalProperties": true,
+        "properties": {
+          "mirrorId": {
+            "type": "string"
+          },
+          "mirrorUrl": {
+            "type": "string"
+          },
+          "publicUrl": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "mirrorId",
+          "mirrorUrl",
+          "publicUrl"
+        ],
+        "type": "object"
+      },
       "OIDCProvider": {
         "additionalProperties": true,
         "properties": {
@@ -3485,6 +3605,114 @@
         "summary": "Record that the calling account completed web onboarding",
         "tags": [
           "identity"
+        ]
+      }
+    },
+    "/mirror-requests": {
+      "post": {
+        "description": "a validation failure may be reported synchronously at submission or as a terminal state on the request; clients must handle both.",
+        "operationId": "createMirrorRequest",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateMirrorRequestInputBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MirrorRequest"
+                }
+              }
+            },
+            "description": "Accepted",
+            "headers": {
+              "Location": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionAuth": []
+          }
+        ],
+        "summary": "Submit a mirror creation request",
+        "tags": [
+          "mirrors"
+        ]
+      }
+    },
+    "/mirror-requests/{requestId}": {
+      "get": {
+        "description": "unknown failure codes must be treated as a generic terminal failure.",
+        "operationId": "getMirrorRequest",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "requestId",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MirrorRequest"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionAuth": []
+          }
+        ],
+        "summary": "Get a mirror creation request",
+        "tags": [
+          "mirrors"
         ]
       }
     },

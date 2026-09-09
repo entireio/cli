@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -435,6 +436,30 @@ func (e *Agent) CalculateTotalTokenUsage(transcriptData []byte, fromOffset int, 
 // If stdin is non-nil it is piped to the process. On non-zero exit, stderr is
 // included in the returned error.
 func (e *Agent) run(ctx context.Context, stdin []byte, args ...string) ([]byte, error) {
+	// Every error below labels its message with the subcommand, args[0], so an
+	// empty slice panics on the way to reporting the real failure rather than
+	// returning it. run is variadic and New is exported, so the callers are not
+	// only this package's own.
+	if len(args) == 0 {
+		return nil, fmt.Errorf("refusing to run external agent binary %q: no subcommand given", e.binaryPath)
+	}
+
+	// binaryPath must be absolute, and the check belongs here rather than at
+	// the caller. run sets cmd.Dir to the worktree root below, and os/exec
+	// resolves a relative Path against Dir — so the file registerExternalAgent
+	// statted (relative to ITS working directory) is not necessarily the file
+	// that executes. Anchoring on an absolute path makes validation and
+	// execution name the same file.
+	//
+	// Go refuses only part of this on its own: exec.Command re-checks a
+	// separator-free name through LookPath and reports ErrDot, but a relative
+	// path WITH a separator ("./x", "sub/x") gets no such treatment. New is
+	// exported, so this is also the only guarantee a caller outside the
+	// scanner has.
+	if !filepath.IsAbs(e.binaryPath) {
+		return nil, fmt.Errorf("%s: refusing to run external agent binary %q: path is not absolute", args[0], e.binaryPath)
+	}
+
 	// Apply a default timeout when the caller hasn't set a deadline, so a hung
 	// external binary can't block the CLI (or git hooks) indefinitely.
 	if _, ok := ctx.Deadline(); !ok {

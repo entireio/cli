@@ -338,6 +338,66 @@ func TestWriteSession_NoNativeData(t *testing.T) {
 	}
 }
 
+// TestGetProjectHash_KnownAnswers pins GetProjectHash to fixed vectors.
+//
+// The value is an interop contract, not an internal detail: it names the
+// directory Gemini CLI itself creates (~/.gemini/tmp/<hash>/chats), computed
+// there by its own getProjectHash(). If our derivation drifts — a normalizing
+// filepath.Clean, a trailing separator, a prefix, a different encoding — we
+// read an empty directory and silently capture no Gemini sessions. Property
+// checks (deterministic, 64 hex chars, collision-free) all survive such a
+// change, so the only guard is a literal digest.
+//
+// Vectors are plain SHA-256 of the path bytes, hex-encoded; reproduce with:
+//
+//	printf %s '/Users/test/project' | shasum -a 256
+//
+// A failure here means either a real regression or a deliberate, verified
+// change on Gemini CLI's side — never a value to paste over from the output.
+func TestGetProjectHash_KnownAnswers(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name        string
+		projectRoot string
+		want        string
+	}{
+		{
+			name:        "posix path",
+			projectRoot: "/Users/test/project",
+			want:        "0654434d556baf695ffd946d23555e4f45e1ae867116ed11c5adca8fd5998a60",
+		},
+		{
+			name:        "sibling posix path",
+			projectRoot: "/Users/test/other",
+			want:        "4fd9d0d2d64802efa27aad63ba36371dc2435256f5c3973d797c705e215239f7",
+		},
+		{
+			// Guards against a normalizing prefix/suffix being introduced:
+			// the empty string must hash to SHA-256 of no bytes at all.
+			name:        "empty path",
+			projectRoot: "",
+			want:        "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+		},
+		{
+			// Guards against a trailing separator being appended.
+			name:        "single segment, no trailing separator",
+			projectRoot: "/repo",
+			want:        "816fc349d3faebf805d1bed70fce7e14754cad5251c77dda31c414ee961a0bdd",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := GetProjectHash(tt.projectRoot); got != tt.want {
+				t.Errorf("GetProjectHash(%q) = %q, want %q — this is Gemini CLI's session-directory name; a mismatch means Entire looks in the wrong directory and captures nothing",
+					tt.projectRoot, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestGetProjectHash(t *testing.T) {
 	t.Parallel()
 

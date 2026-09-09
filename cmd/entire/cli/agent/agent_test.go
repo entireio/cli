@@ -135,30 +135,6 @@ func TestHookTypeConstants(t *testing.T) {
 	}
 }
 
-func TestEntryTypeConstants(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		entryType EntryType
-		expected  string
-	}{
-		{EntryUser, "user"},
-		{EntryAssistant, "assistant"},
-		{EntryTool, "tool"},
-		{EntrySystem, "system"},
-	}
-
-	for _, tt := range tests {
-		t.Run(string(tt.entryType), func(t *testing.T) {
-			t.Parallel()
-
-			if string(tt.entryType) != tt.expected {
-				t.Errorf("expected %q, got %q", tt.expected, string(tt.entryType))
-			}
-		})
-	}
-}
-
 //nolint:govet // testing struct field assignment
 func TestHookInputStructure(t *testing.T) {
 	t.Parallel()

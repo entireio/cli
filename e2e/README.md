@@ -59,7 +59,8 @@ e2e/
 | `ANTHROPIC_API_KEY` | Required for Claude Code | — |
 | `GEMINI_API_KEY` | Required for Gemini CLI | — |
 | `OPENAI_API_KEY` | Required for Codex | — |
-| `COPILOT_GITHUB_TOKEN` | Required for Copilot CLI (or `gh auth login`) | — |
+| `COPILOT_GITHUB_TOKEN` | Required for Copilot CLI, unless a `copilot login` credential is already stored. `GH_TOKEN` and `GITHUB_TOKEN` also work — Copilot reads all three, in that order of precedence. A `gh auth login` alone is not enough: Copilot does not read gh's config. | — |
+| `E2E_KEEP_AGENT_HOME` | Set to `1` to preserve the isolated `COPILOT_HOME` a session ran under (holds Copilot's own logs) | unset |
 
 ## Debugging Failures
 

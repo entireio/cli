@@ -29,14 +29,7 @@ func runServer(ctx context.Context, opts Options) (*Dispatch, error) {
 		}
 	}
 
-	// Resolve a bearer scoped to the dispatch service host. In split-host
-	// deployments the tokenmanager runs an RFC 8693 exchange so the
-	// bearer carries the data-API audience rather than the auth-host
-	// one; single-host setups hit the same-host shortcut and return the
-	// core token unchanged. OriginOnly strips any path the operator may
-	// have included in ENTIRE_API_BASE_URL — tokenmanager validates
-	// Resource as a strict origin URL.
-	token, err := lookupResourceToken(ctx, api.OriginOnly(baseURL))
+	token, err := lookupResourceToken(ctx, baseURL)
 	if errors.Is(err, auth.ErrNotLoggedIn) {
 		return nil, errors.New("dispatch requires login — run `entire login`")
 	}
@@ -89,8 +82,17 @@ func runServer(ctx context.Context, opts Options) (*Dispatch, error) {
 		Generate: true,
 		Voice:    resolvedDispatchVoicePreference(opts.Voice),
 	}
-	response, err := cloud.CreateDispatch(ctx, reqBody)
+	response, err := cloud.CreateDispatch(ctx, reqBody, opts.Jurisdiction)
 	if err != nil {
+		// With no selector the home cell answered; say which one, from the
+		// token already in hand, so the hint can exclude it.
+		var notFound *RepoNotFoundError
+		if errors.As(err, &notFound) && notFound.Jurisdiction == "" {
+			notFound.Home, _ = auth.HomeJurisdictionFromLoginJWT(token) //nolint:errcheck // best-effort label on an error already being returned
+		}
+		return nil, err
+	}
+	if err := checkDispatchJurisdiction(opts.Jurisdiction, response.Jurisdiction); err != nil {
 		return nil, err
 	}
 
@@ -99,6 +101,27 @@ func runServer(ctx context.Context, opts Options) (*Dispatch, error) {
 		return nil, errDispatchMissingMarkdown
 	}
 	return dispatch, nil
+}
+
+// checkDispatchJurisdiction verifies the gateway generated the dispatch where
+// --jurisdiction asked. The gateway echoes `jurisdiction` whenever the caller
+// named one, so a missing echo means a gateway that ignored the selector and
+// routed home — and a different echo means another region entirely. Both fail:
+// a wrong-region result would be rendered labelled with a jurisdiction it did
+// not come from, which is worse than no result. No selector, no check.
+func checkDispatchJurisdiction(requested, stamped string) error {
+	requested = strings.TrimSpace(requested)
+	if requested == "" {
+		return nil
+	}
+	stamped = strings.ToLower(strings.TrimSpace(stamped))
+	switch {
+	case stamped == "":
+		return fmt.Errorf("the dispatch service ignored --jurisdiction %s (no jurisdiction in its response); it may predate jurisdiction-scoped dispatches — retry without the flag for a home dispatch", requested)
+	case stamped != requested:
+		return fmt.Errorf("dispatch was generated in jurisdiction %s, not the requested %s", strings.ToUpper(stamped), strings.ToUpper(requested))
+	}
+	return nil
 }
 
 func apiToDispatch(response *CreateDispatchResponse) *Dispatch {

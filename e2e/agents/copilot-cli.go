@@ -6,6 +6,9 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"regexp"
+	"runtime"
 	"strings"
 	"time"
 )
@@ -20,10 +23,28 @@ func init() {
 
 type CopilotCLI struct{}
 
+// copilotPromptPattern matches Copilot's idle input area. v1.0.81 removed the
+// bare "❯" marker in favour of a bordered box, leaving the footer hints row as
+// the only stable text to key on.
+//
+// That row is idle-only, which makes it a real readiness signal rather than
+// always-on chrome: in the v1.0.81 bundle the footer renders either the
+// activity indicator or the hints row and never both, so "← open sidebar"
+// disappears for the duration of a turn. (Read from the shipped bundle, not
+// observed live — and the indicator is suppressed under one condition that was
+// not traced, so treat it as strong evidence rather than a guarantee.)
+//
+// It says nothing about modals, though: a startup dialog or the session-restore
+// picker keeps the row while the agent is not accepting input, which is what
+// copilotPromptReady exists to reject.
+const copilotPromptPattern = `(?m:^[^\S\n]*❯[^\S\n]*$)|← open sidebar`
+
+var copilotPromptRegexp = regexp.MustCompile(copilotPromptPattern)
+
 func (c *CopilotCLI) Name() string               { return "copilot-cli" }
 func (c *CopilotCLI) Binary() string             { return "copilot" }
 func (c *CopilotCLI) EntireAgent() string        { return "copilot-cli" }
-func (c *CopilotCLI) PromptPattern() string      { return `❯` }
+func (c *CopilotCLI) PromptPattern() string      { return copilotPromptPattern }
 func (c *CopilotCLI) TimeoutMultiplier() float64 { return 1.5 }
 
 func (c *CopilotCLI) IsTransientError(out Output, err error) bool {
@@ -76,6 +97,9 @@ func (c *CopilotCLI) RunPrompt(ctx context.Context, dir string, prompt string, o
 	cmd.Stdin = nil
 	// GITHUB_COPILOT_PROMPT_MODE_REPO_HOOKS opts in to .github/hooks/*.json loading
 	// in -p mode; gated since Copilot 1.0.40 (2026-05-01).
+	// Unlike StartSession, this leaves the caller's COPILOT_HOME alone: the
+	// session collisions that forced interactive mode onto an isolated home
+	// come from the restore picker, which -p mode never shows.
 	cmd.Env = append(os.Environ(),
 		"ENTIRE_TEST_TTY=0",
 		"GITHUB_COPILOT_PROMPT_MODE_REPO_HOOKS=true",
@@ -293,20 +317,82 @@ func isStartupDialog(content string) bool {
 		strings.Contains(lower, "enter to select")
 }
 
+func copilotPromptReady(content string) bool {
+	if isStartupDialog(content) || strings.Contains(strings.ToLower(content), "choose which sessions to restore") {
+		return false
+	}
+	return copilotPromptRegexp.MatchString(content)
+}
+
+func resolveGHConfigDir(goos, home, explicit, xdgConfig, appData string) string {
+	if explicit != "" {
+		return explicit
+	}
+	if xdgConfig != "" {
+		return filepath.Join(xdgConfig, "gh")
+	}
+	if goos == "windows" && appData != "" {
+		return filepath.Join(appData, "GitHub CLI")
+	}
+	if home != "" {
+		return filepath.Join(home, ".config", "gh")
+	}
+	return ""
+}
+
+func currentGHConfigDir() string {
+	home, _ := os.UserHomeDir()
+	return resolveGHConfigDir(
+		runtime.GOOS,
+		home,
+		os.Getenv("GH_CONFIG_DIR"),
+		os.Getenv("XDG_CONFIG_HOME"),
+		os.Getenv("AppData"),
+	)
+}
+
 func (c *CopilotCLI) StartSession(ctx context.Context, dir string) (Session, error) {
 	bin, err := exec.LookPath(c.Binary())
 	if err != nil {
 		return nil, fmt.Errorf("agent binary not found: %w", err)
 	}
 
-	// Forward auth-related env vars into the tmux session. tmux starts a new
-	// shell that doesn't inherit Go's os.Environ(), so without this the
-	// session can lose both token-based auth and local gh/copilot login state.
-	var envArgs []string
-	for _, key := range []string{"COPILOT_GITHUB_TOKEN", "HOME", "TERM", "XDG_CONFIG_HOME", "GH_CONFIG_DIR"} {
+	// Give each interactive session its own Copilot state. Copilot stores all
+	// sessions under its home, so sharing one lets parallel tests see and
+	// attempt to restore one another's still-running sessions.
+	//
+	// COPILOT_HOME is Copilot's own documented override for that directory
+	// ("copilot help environment"), which is why it is used here in preference
+	// to replacing HOME: HOME also resolves ~/.gitconfig, ~/.ssh, tool caches
+	// and Entire's own ~/.config/entire for every hook the agent spawns, none
+	// of which this isolation is about. Entire's copilotcli.GetSessionDir
+	// honours COPILOT_HOME too, so the agent and the hooks agree on where the
+	// transcript lives.
+	sessionHome, err := os.MkdirTemp("", "copilot-e2e-home-*")
+	if err != nil {
+		return nil, fmt.Errorf("create isolated Copilot home: %w", err)
+	}
+
+	// Forward auth into the tmux session, which starts a new shell that does
+	// not inherit os.Environ(). Copilot accepts COPILOT_GITHUB_TOKEN, GH_TOKEN
+	// and GITHUB_TOKEN in that order of precedence, and an env token outranks
+	// any stored credential; CI sets the first, local runs may have any of them.
+	envArgs := []string{"COPILOT_HOME=" + sessionHome}
+	for _, key := range []string{
+		"COPILOT_GITHUB_TOKEN", "GH_TOKEN", "GITHUB_TOKEN",
+		"HOME", "TERM", "XDG_CONFIG_HOME",
+	} {
 		if v := os.Getenv(key); v != "" {
 			envArgs = append(envArgs, key+"="+v)
 		}
+	}
+	// Not a Copilot variable — it is absent from "copilot help environment",
+	// and Copilot's own auth never consults gh's config. It is forwarded for
+	// the processes Copilot spawns: the GitHub MCP server and any `gh` the
+	// agent runs as a tool.
+	ghConfigDir := currentGHConfigDir()
+	if ghConfigDir != "" {
+		envArgs = append(envArgs, "GH_CONFIG_DIR="+ghConfigDir)
 	}
 	args := append([]string{"env"}, envArgs...)
 	args = append(args, bin, "--model", "claude-haiku-4.5", "--allow-all")
@@ -316,20 +402,31 @@ func (c *CopilotCLI) StartSession(ctx context.Context, dir string) (Session, err
 	unset := []string{"CI", "GITHUB_ACTIONS", "ENTIRE_TEST_TTY"}
 	s, err := NewTmuxSession(name, dir, unset, args[0], args[1:]...)
 	if err != nil {
+		_ = os.RemoveAll(sessionHome)
 		return nil, err
 	}
+	// Copilot's own logs live in this home, so keep it when a run is being
+	// debugged: Close() runs from artifact cleanup, which does not know
+	// whether the test failed.
+	s.OnClose(func() {
+		if os.Getenv("E2E_KEEP_AGENT_HOME") != "" {
+			fmt.Fprintf(os.Stderr, "copilot session home retained: %s\n", sessionHome)
+			return
+		}
+		_ = os.RemoveAll(sessionHome)
+	})
 
-	// Dismiss startup dialogs (folder trust, etc.) then wait for the "❯" prompt.
+	// Dismiss startup dialogs (folder trust, etc.) then wait for the input prompt.
 	// Copilot CLI shows a "Confirm folder trust" dialog in interactive mode for
 	// new directories. "Yes" is pre-selected, so Enter dismisses it.
 	foundPrompt := false
 	for range 5 {
-		content, err := s.WaitFor(`(❯|(?i:enter to select))`, 30*time.Second)
+		content, err := s.WaitFor(`(?:`+c.PromptPattern()+`|(?i:enter to select))`, 30*time.Second)
 		if err != nil {
 			_ = s.Close()
 			return nil, fmt.Errorf("waiting for startup prompt: %w", err)
 		}
-		if strings.Contains(content, "❯") && !isStartupDialog(content) {
+		if copilotPromptReady(content) {
 			foundPrompt = true
 			break
 		}

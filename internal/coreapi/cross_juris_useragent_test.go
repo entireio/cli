@@ -8,6 +8,8 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/entireio/auth-go/crossjuris"
+
 	"github.com/entireio/cli/cmd/entire/cli/versioninfo"
 )
 
@@ -51,7 +53,7 @@ func TestNewCrossJurisHTTPClient_StampsUserAgentOnEveryHop(t *testing.T) {
 	ua := newUAByHop()
 
 	homeCore := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == oauthTokenPath {
+		if r.URL.Path == crossjuris.TokenPath {
 			ua.add("exchange", r)
 			w.WriteHeader(http.StatusOK)
 			w.Write([]byte(`{"access_token":"home-exchanged-jwt","token_type":"Bearer","expires_in":300}`)) //nolint:errcheck // test
@@ -69,7 +71,7 @@ func TestNewCrossJurisHTTPClient_StampsUserAgentOnEveryHop(t *testing.T) {
 	// The wrong core 421s to the home core, which makes the transport fetch
 	// the federation manifest before it will follow.
 	wrongCore := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == federationWellKnownPath {
+		if r.URL.Path == crossjuris.WellKnownPath {
 			ua.add("federation", r)
 			writeTestFederation(w, []string{homeCore.URL})
 			return
@@ -80,7 +82,10 @@ func TestNewCrossJurisHTTPClient_StampsUserAgentOnEveryHop(t *testing.T) {
 	}))
 	t.Cleanup(wrongCore.Close)
 
-	client := newCrossJurisHTTPClient()
+	client, err := newCrossJurisHTTPClient(wrongCore.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
 	req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, wrongCore.URL+"/api/v1/mirrors", strings.NewReader(`{}`))
 	if err != nil {
 		t.Fatal(err)

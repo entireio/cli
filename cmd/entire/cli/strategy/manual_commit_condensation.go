@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"os"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -20,7 +19,9 @@ import (
 	cpkg "github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
 	"github.com/entireio/cli/cmd/entire/cli/checkpointpolicy"
+	"github.com/entireio/cli/cmd/entire/cli/entiredir"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
+	"github.com/entireio/cli/cmd/entire/cli/osroot"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
@@ -448,7 +449,7 @@ func (s *ManualCommitStrategy) materializeTaskRecords(
 func readFirstTranscript(candidates []string) ([]byte, string, error) {
 	var lastErr error
 	for _, path := range candidates {
-		data, err := os.ReadFile(path) //nolint:gosec // path is agent-declared or resolved from session state, not user input
+		data, err := agent.ReadTranscriptFile(path)
 		if err == nil {
 			return data, path, nil
 		}
@@ -1419,7 +1420,7 @@ func (s *ManualCommitStrategy) extractSessionData(ctx context.Context, repo *git
 		if isActive {
 			prepareTranscriptIfNeeded(ctx, ag, liveTranscriptPath)
 		}
-		if liveData, readErr := os.ReadFile(liveTranscriptPath); readErr == nil && len(liveData) > 0 { //nolint:gosec // path from session state
+		if liveData, readErr := agent.ReadTranscriptFile(liveTranscriptPath); readErr == nil && len(liveData) > 0 {
 			fullTranscript = string(liveData)
 		}
 	}
@@ -1487,7 +1488,7 @@ func (s *ManualCommitStrategy) extractSessionDataFromLiveTranscript(ctx context.
 		return nil, resolveErr
 	}
 
-	liveData, err := os.ReadFile(transcriptPath) //nolint:gosec // path validated by resolveTranscriptPath
+	liveData, err := agent.ReadTranscriptFile(transcriptPath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read live transcript: %w", err)
 	}
@@ -1581,28 +1582,82 @@ func splitPromptContent(content string) []string {
 // This file is written at turn start and updated at each SaveStep, providing prompt data
 // even for mid-turn commits where the shadow branch may not have been updated.
 func readPromptsFromFilesystem(ctx context.Context, sessionID string) []string {
-	sessionDir := paths.SessionMetadataDirFromSessionID(sessionID)
-	sessionDirAbs, err := paths.AbsPath(ctx, sessionDir)
+	root, err := entiredir.OpenForRead(ctx)
 	if err != nil {
 		return nil
 	}
-	data, err := os.ReadFile(filepath.Join(sessionDirAbs, paths.PromptFileName)) //nolint:gosec // path from session ID
+	data, err := entiredir.ReadFile(root, sessionMetadataFileName(sessionID, paths.PromptFileName))
 	if err != nil || len(data) == 0 {
 		return nil
 	}
 	return splitPromptContent(string(data))
 }
 
-// clearFilesystemPrompt removes the filesystem prompt.txt for a session.
-// Called after condensation so subsequent checkpoints start fresh.
-func clearFilesystemPrompt(ctx context.Context, sessionID string) {
-	sessionDir := paths.SessionMetadataDirFromSessionID(sessionID)
-	sessionDirAbs, err := paths.AbsPath(ctx, sessionDir)
+// sessionMetadataFileName returns one of a session's staged metadata files
+// relative to the .entire root. Parameterized by filename because there are
+// several (prompt.txt, full.jsonl, and the legacy full.log) and the prefix
+// arithmetic should exist once.
+func sessionMetadataFileName(sessionID, name string) string {
+	return entiredir.MustName(paths.SessionMetadataDirFromSessionID(sessionID)) + "/" + name
+}
+
+// stagedSessionFiles are the files Entire writes into
+// .entire/metadata/<session>/ as a staging buffer for the checkpoint writer,
+// and releases together once that buffer has been consumed. full.log is the
+// legacy spelling of full.jsonl, written by older CLI versions and still read
+// as a fallback elsewhere.
+var stagedSessionFiles = []string{
+	paths.PromptFileName,
+	paths.TranscriptFileName,
+	paths.TranscriptFileNameLegacy,
+}
+
+// clearFilesystemStagedFiles releases a session's staged metadata files after
+// its work has been condensed into a checkpoint and no carry-forward files
+// remain. Best-effort throughout: a file left behind is overwritten or ignored
+// rather than breaking the next turn.
+//
+// Prompt and transcript are released together because they are one operation
+// under one condition, not two. The guard at the call site is shared for a real
+// reason: if carry-forward files remain, BOTH must survive so the next
+// condensation can read them, since nothing guarantees a Stop refreshes them
+// first.
+//
+// These files are a staging buffer, not a store. The transcript is rewritten
+// WHOLESALE from the agent's own transcript on every Stop (see the
+// copy_transcript span in lifecycle.go), and the only readers are the two
+// tree-building walks that run before this point — addDirectoryToChanges
+// (shadow) and copyEntireMetadataDir (v1). Every other reader of a session's
+// transcript goes through a git tree, not this file. So releasing them costs a
+// continuing session nothing: the next Stop recreates them.
+//
+// Without this, nothing ever removed the transcript. It stayed in the worktree
+// permanently after its content was already committed and pushed, growing to
+// hundreds of MB across a few hundred sessions.
+//
+// The incremental redaction cache is unaffected: it lives in the git common dir
+// and is keyed by prefix content hash, not by these paths' existence, so the
+// next Stop still redacts incrementally rather than from scratch.
+//
+// The session's metadata directory itself is left in place — the next Stop
+// writes into it.
+func clearFilesystemStagedFiles(ctx context.Context, sessionID string) {
+	root, err := entiredir.OpenForRead(ctx)
 	if err != nil {
 		return
 	}
-	promptPath := filepath.Join(sessionDirAbs, paths.PromptFileName)
-	_ = os.Remove(promptPath)
+	// Open the session directory once and remove leaves from it. The obvious
+	// osroot.RemoveNoSymlinks(root, <full path>) per file would re-resolve
+	// .entire/metadata and the session directory on every call, three times over
+	// on the PostCommit hook path.
+	dir, closeDir, err := osroot.OpenDirNoSymlinks(root, entiredir.MustName(paths.SessionMetadataDirFromSessionID(sessionID)))
+	if err != nil {
+		return
+	}
+	defer closeDir()
+	for _, name := range stagedSessionFiles {
+		_ = osroot.Remove(dir, name) //nolint:errcheck // best-effort; absence is the normal case for the legacy name
+	}
 }
 
 func ensureCondensationAttemptID(ctx context.Context, state *SessionState) (id.CheckpointID, bool, error) {
@@ -1673,7 +1728,7 @@ func (s *ManualCommitStrategy) CondenseSessionByID(ctx context.Context, sessionI
 	}
 
 	var shadowBranchName string
-	var clearAfter bool
+	var cleared bool
 	var newSkillEvents []agent.SkillEvent
 	mutErr := MutateSessionStateOnSaved(ctx, sessionID, func(state *SessionState) error {
 		if state.PendingCondensationID() != checkpointID {
@@ -1691,7 +1746,24 @@ func (s *ManualCommitStrategy) CondenseSessionByID(ctx context.Context, sessionI
 				slog.String("session_id", sessionID),
 				slog.String("shadow_branch", shadowBranchName),
 			)
-			clearAfter = true
+			// Clear while still holding this session's gate (we're inside
+			// the locked mutation closure), not after releasing it: a
+			// concurrent, properly-locked write (e.g. a PostToolUse hook
+			// for this same session) landing in an unlocked gap between
+			// this decision and the actual delete would otherwise be
+			// silently destroyed. See clearSessionState's doc comment.
+			//
+			// This is the ONLY correct way to clear from inside a frame, and
+			// it works only because of the ErrMutationSkip below: the delete
+			// sticks because the frame does not save. The gate alone would
+			// not be enough -- a saving frame writes the state back out and
+			// the clear vanishes, which is why the exported
+			// ClearSessionState refuses to run reentrantly rather than
+			// appearing to succeed.
+			if clearErr := s.clearSessionStateLocked(ctx, sessionID); clearErr != nil {
+				return fmt.Errorf("failed to clear session state: %w", clearErr)
+			}
+			cleared = true
 			return ErrMutationSkip
 		}
 
@@ -1743,10 +1815,10 @@ func (s *ManualCommitStrategy) CondenseSessionByID(ctx context.Context, sessionI
 		return mutErr
 	}
 
-	if clearAfter {
-		if err := s.clearSessionState(ctx, sessionID); err != nil {
-			return fmt.Errorf("failed to clear session state: %w", err)
-		}
+	if cleared {
+		// Already cleared inside the locked mutation closure above -- see
+		// its comment for why this must not happen a second time (or
+		// outside the lock).
 		return nil
 	}
 

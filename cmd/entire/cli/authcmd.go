@@ -66,7 +66,6 @@ func renderDataAPIAuthError(ctx context.Context, errW io.Writer, ownerRepo strin
 // onboarded": zero rows in the repos index also means the caller cannot SEE
 // the repo (where 'entire repo mirror create' would fail too), and a row whose
 // primaries name no processing placement can be a repo mid-onboarding.
-// resolveExpertsRepoID already words the equivalent case this way.
 func renderRepoNotOnboarded(errW io.Writer, ownerRepo string, err error) error {
 	if !errors.Is(err, errRepoNotOnboarded) {
 		return nil

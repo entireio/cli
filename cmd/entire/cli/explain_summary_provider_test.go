@@ -166,14 +166,14 @@ func TestResolveDispatchSummaryProvider_ExplicitCodexUsesDefaultModelWithoutPers
 	originalSave := saveLocalSummarySettings
 	originalGet := getSummaryAgent
 	originalCLI := isSummaryCLIAvailable
-	originalDiscover := discoverDispatchSummaryProvider
+	originalDiscover := discoverNamedSummaryProvider
 	t.Cleanup(func() {
 		loadSummarySettings = originalLoad
 		loadSummarySettingsFromFile = originalLoadFile
 		saveLocalSummarySettings = originalSave
 		getSummaryAgent = originalGet
 		isSummaryCLIAvailable = originalCLI
-		discoverDispatchSummaryProvider = originalDiscover
+		discoverNamedSummaryProvider = originalDiscover
 	})
 
 	loadSummarySettings = func(context.Context) (*settings.EntireSettings, error) {
@@ -197,7 +197,7 @@ func TestResolveDispatchSummaryProvider_ExplicitCodexUsesDefaultModelWithoutPers
 	isSummaryCLIAvailable = func(name types.AgentName) bool {
 		return name == agent.AgentNameCodex
 	}
-	discoverDispatchSummaryProvider = func(context.Context, types.AgentName) error {
+	discoverNamedSummaryProvider = func(context.Context, types.AgentName) error {
 		t.Fatal("registered explicit provider should not trigger external discovery")
 		return nil
 	}
@@ -346,16 +346,16 @@ func TestResolveDispatchSummaryProvider_PropagatesDiscoveryDeadline(t *testing.T
 	providerName := types.AgentName("external-discovery-deadline")
 
 	originalGet := getSummaryAgent
-	originalDiscover := discoverDispatchSummaryProvider
+	originalDiscover := discoverNamedSummaryProvider
 	t.Cleanup(func() {
 		getSummaryAgent = originalGet
-		discoverDispatchSummaryProvider = originalDiscover
+		discoverNamedSummaryProvider = originalDiscover
 	})
 
 	getSummaryAgent = func(types.AgentName) (agent.Agent, error) {
 		return nil, errors.New("not registered")
 	}
-	discoverDispatchSummaryProvider = func(context.Context, types.AgentName) error {
+	discoverNamedSummaryProvider = func(context.Context, types.AgentName) error {
 		return fmt.Errorf("discovering external agent %q: %w", providerName, context.DeadlineExceeded)
 	}
 
@@ -373,16 +373,16 @@ func TestResolveDispatchSummaryProvider_PropagatesDiscoveryCancellation(t *testi
 	providerName := types.AgentName("external-discovery-canceled")
 
 	originalGet := getSummaryAgent
-	originalDiscover := discoverDispatchSummaryProvider
+	originalDiscover := discoverNamedSummaryProvider
 	t.Cleanup(func() {
 		getSummaryAgent = originalGet
-		discoverDispatchSummaryProvider = originalDiscover
+		discoverNamedSummaryProvider = originalDiscover
 	})
 
 	getSummaryAgent = func(types.AgentName) (agent.Agent, error) {
 		return nil, errors.New("not registered")
 	}
-	discoverDispatchSummaryProvider = func(context.Context, types.AgentName) error {
+	discoverNamedSummaryProvider = func(context.Context, types.AgentName) error {
 		return fmt.Errorf("discovering external agent %q: %w", providerName, context.Canceled)
 	}
 
@@ -401,16 +401,16 @@ func TestResolveDispatchSummaryProvider_PropagatesInvalidExternalInfo(t *testing
 	infoErr := errors.New("invalid helper info")
 
 	originalGet := getSummaryAgent
-	originalDiscover := discoverDispatchSummaryProvider
+	originalDiscover := discoverNamedSummaryProvider
 	t.Cleanup(func() {
 		getSummaryAgent = originalGet
-		discoverDispatchSummaryProvider = originalDiscover
+		discoverNamedSummaryProvider = originalDiscover
 	})
 
 	getSummaryAgent = func(types.AgentName) (agent.Agent, error) {
 		return nil, errors.New("not registered")
 	}
-	discoverDispatchSummaryProvider = func(context.Context, types.AgentName) error {
+	discoverNamedSummaryProvider = func(context.Context, types.AgentName) error {
 		return fmt.Errorf("loading info for external agent %q: info: invalid JSON: %w", providerName, infoErr)
 	}
 
@@ -431,16 +431,16 @@ func TestResolveDispatchSummaryProvider_MissingExternalKeepsUnknownProviderError
 	providerName := types.AgentName("external-discovery-missing")
 
 	originalGet := getSummaryAgent
-	originalDiscover := discoverDispatchSummaryProvider
+	originalDiscover := discoverNamedSummaryProvider
 	t.Cleanup(func() {
 		getSummaryAgent = originalGet
-		discoverDispatchSummaryProvider = originalDiscover
+		discoverNamedSummaryProvider = originalDiscover
 	})
 
 	getSummaryAgent = func(types.AgentName) (agent.Agent, error) {
 		return nil, errors.New("not registered")
 	}
-	discoverDispatchSummaryProvider = func(context.Context, types.AgentName) error { return nil }
+	discoverNamedSummaryProvider = func(context.Context, types.AgentName) error { return nil }
 
 	_, err := resolveDispatchSummaryProvider(context.Background(), &bytes.Buffer{}, string(providerName))
 	if err == nil || !strings.Contains(err.Error(), "unknown summary provider") {
@@ -490,11 +490,11 @@ func TestResolveDispatchSummaryProvider_ExplicitValidationErrors(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			originalGet := getSummaryAgent
 			originalCLI := isSummaryCLIAvailable
-			originalDiscover := discoverDispatchSummaryProvider
+			originalDiscover := discoverNamedSummaryProvider
 			t.Cleanup(func() {
 				getSummaryAgent = originalGet
 				isSummaryCLIAvailable = originalCLI
-				discoverDispatchSummaryProvider = originalDiscover
+				discoverNamedSummaryProvider = originalDiscover
 			})
 
 			getSummaryAgent = func(types.AgentName) (agent.Agent, error) {
@@ -504,7 +504,7 @@ func TestResolveDispatchSummaryProvider_ExplicitValidationErrors(t *testing.T) {
 				return tt.agent, nil
 			}
 			isSummaryCLIAvailable = func(types.AgentName) bool { return tt.available }
-			discoverDispatchSummaryProvider = func(context.Context, types.AgentName) error { return nil }
+			discoverNamedSummaryProvider = func(context.Context, types.AgentName) error { return nil }
 
 			_, err := resolveDispatchSummaryProvider(context.Background(), &bytes.Buffer{}, tt.override)
 			if err == nil {
@@ -858,7 +858,7 @@ func TestPersistSummaryProviderSelection_ExternalFlipsFlagAndReturnsSignal(t *te
 	// Discover so getSummaryAgent returns a wrapped external (the type IsExternal recognizes).
 	discoverSummaryProvidersAlways(ctx)
 
-	flagFlipped, err := persistSummaryProviderSelection(ctx, types.AgentName(providerName), "")
+	flagFlipped, err := persistSummaryProviderSelection(ctx, types.AgentName(providerName), "", selectionByUser)
 	if err != nil {
 		t.Fatalf("persistSummaryProviderSelection() error = %v", err)
 	}
@@ -892,7 +892,7 @@ func TestPersistSummaryProviderSelection_BuiltInDoesNotFlipFlag(t *testing.T) {
 		t.Fatalf("write settings: %v", err)
 	}
 
-	flagFlipped, err := persistSummaryProviderSelection(ctx, agent.AgentNameClaudeCode, "")
+	flagFlipped, err := persistSummaryProviderSelection(ctx, agent.AgentNameClaudeCode, "", selectionByUser)
 	if err != nil {
 		t.Fatalf("persistSummaryProviderSelection() error = %v", err)
 	}
@@ -934,11 +934,136 @@ func TestPersistSummaryProviderSelection_ExternalAlreadyEnabledNoSignal(t *testi
 
 	discoverSummaryProvidersAlways(ctx)
 
-	flagFlipped, err := persistSummaryProviderSelection(ctx, types.AgentName(providerName), "")
+	flagFlipped, err := persistSummaryProviderSelection(ctx, types.AgentName(providerName), "", selectionByUser)
 	if err != nil {
 		t.Fatalf("persistSummaryProviderSelection() error = %v", err)
 	}
 	if flagFlipped {
 		t.Fatal("expected flagFlipped=false when external_agents was already enabled")
+	}
+}
+
+// TestResolveCheckpointSummaryProvider_ConfiguredProviderUsesNamedDiscovery
+// pins that a configured-but-unregistered provider is resolved by NAME rather
+// than by the ungated sweep.
+//
+// summary_generation.provider is honored from the committed
+// .entire/settings.json, so a name that arrives there must not be able to
+// trigger DiscoverAndRegisterAlways, which globs every absolute $PATH
+// directory and executes every entire-agent-* binary's "info" subcommand. The
+// named lookup returns immediately for a built-in and touches exactly one
+// binary otherwise.
+func TestResolveCheckpointSummaryProvider_ConfiguredProviderUsesNamedDiscovery(t *testing.T) {
+	// Cannot use t.Parallel(): mutates package-level resolution seams.
+	ctx := context.Background()
+	const configuredName = types.AgentName("external-configured-provider")
+	stub := &stubTextAgent{name: configuredName, kind: agent.AgentTypeClaudeCode}
+
+	originalLoad := loadSummarySettings
+	originalGet := getSummaryAgent
+	originalCLI := isSummaryCLIAvailable
+	originalSweep := discoverSummaryProvidersAlways
+	originalNamed := discoverNamedSummaryProvider
+	t.Cleanup(func() {
+		loadSummarySettings = originalLoad
+		getSummaryAgent = originalGet
+		isSummaryCLIAvailable = originalCLI
+		discoverSummaryProvidersAlways = originalSweep
+		discoverNamedSummaryProvider = originalNamed
+	})
+
+	loadSummarySettings = func(context.Context) (*settings.EntireSettings, error) {
+		return &settings.EntireSettings{SummaryGeneration: &settings.SummaryGenerationSettings{
+			Provider: string(configuredName),
+		}}, nil
+	}
+	// Unregistered until the named discovery runs, which is what makes
+	// discoverSummaryProviderIfMissing reach for discovery at all.
+	registered := false
+	getSummaryAgent = func(name types.AgentName) (agent.Agent, error) {
+		if !registered {
+			return nil, fmt.Errorf("agent %q not registered", name)
+		}
+		return stub, nil
+	}
+	isSummaryCLIAvailable = func(types.AgentName) bool { return true }
+	discoverSummaryProvidersAlways = func(context.Context) {
+		t.Fatal("a configured provider name must not trigger the ungated $PATH sweep")
+	}
+	namedCalls := 0
+	discoverNamedSummaryProvider = func(_ context.Context, name types.AgentName) error {
+		namedCalls++
+		if name != configuredName {
+			t.Fatalf("named discovery for %q, want %q", name, configuredName)
+		}
+		registered = true
+		return nil
+	}
+
+	provider, err := resolveCheckpointSummaryProvider(ctx, &bytes.Buffer{})
+	if err != nil {
+		t.Fatalf("resolveCheckpointSummaryProvider() error = %v", err)
+	}
+	if provider.Name != configuredName {
+		t.Fatalf("provider.Name = %q, want %q", provider.Name, configuredName)
+	}
+	if namedCalls != 1 {
+		t.Fatalf("named discovery called %d times, want exactly 1", namedCalls)
+	}
+}
+
+// TestPersistSummaryProviderSelection_AutoSelectDoesNotGrantExternalAgents
+// pins that the repo-wide external_agents grant needs a human.
+//
+// The non-interactive branches of resolveCheckpointSummaryProvider auto-select
+// (single candidate, or first-of-many with no TTY) and used to persist the
+// grant on the way through. That grant is not scoped to the chosen provider:
+// it turns on the $PATH sweep that runs every entire-agent-* binary from then
+// on, so it must not be minted by a code path where nobody chose anything. The
+// chosen provider still resolves on later runs without it, through the named
+// ungated lookup in discoverSummaryProviderIfMissing.
+func TestPersistSummaryProviderSelection_AutoSelectDoesNotGrantExternalAgents(t *testing.T) {
+	// Cannot use t.Parallel(): mutates the package-level agent registry via discovery.
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("sh not available")
+	}
+
+	ctx := context.Background()
+	tmpDir := t.TempDir()
+	testutil.InitRepo(t, tmpDir)
+	t.Chdir(tmpDir)
+
+	if err := os.MkdirAll(filepath.Join(tmpDir, ".entire"), 0o755); err != nil {
+		t.Fatalf("mkdir .entire: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(tmpDir, ".entire", "settings.json"), []byte(`{"enabled":true}`), 0o644); err != nil {
+		t.Fatalf("write settings: %v", err)
+	}
+
+	const providerName = "external-summary-autoselect"
+	externalDir := t.TempDir()
+	writeExternalSummaryAgentBinary(t, externalDir, providerName)
+	t.Setenv("PATH", externalDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	discoverSummaryProvidersAlways(ctx)
+
+	flagFlipped, err := persistSummaryProviderSelection(ctx, types.AgentName(providerName), "", selectionAutomatic)
+	if err != nil {
+		t.Fatalf("persistSummaryProviderSelection() error = %v", err)
+	}
+	if flagFlipped {
+		t.Error("an automatic selection must not flip external_agents")
+	}
+
+	s, err := settings.LoadFromFile(filepath.Join(tmpDir, ".entire", "settings.local.json"))
+	if err != nil {
+		t.Fatalf("LoadFromFile() error = %v", err)
+	}
+	if s.ExternalAgents {
+		t.Error("external_agents granted without a human choosing the provider")
+	}
+	// The provider choice itself is still worth persisting: it is what keeps
+	// the next run from re-deciding, and it grants nothing on its own.
+	if s.SummaryGeneration == nil || s.SummaryGeneration.Provider != providerName {
+		t.Fatalf("provider not persisted; got %+v", s.SummaryGeneration)
 	}
 }

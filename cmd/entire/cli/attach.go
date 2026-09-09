@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"os"
 	"os/exec"
 	"strings"
 	"time"
@@ -100,7 +99,8 @@ Pass --skills to declare which skills were actually run; omit to
 attach a review without a declared skills list.
 
 Works with any registered agent, including external agents enabled via
-external_agents in settings. Run 'entire agent list' to see the full list.
+external_agents in .entire/settings.local.json (that file only, and only
+when it is untracked). Run 'entire agent list' to see the full list.
 
 If --agent doesn't locate a transcript, Entire auto-detects the agent from
 the transcript and prints the detected agent name.`,
@@ -872,7 +872,7 @@ func resolveAndValidateTranscript(ctx context.Context, sessionID string, ag agen
 	// in-progress writes, but can't conjure a file that was never started.
 	// This avoids agents like Cursor polling for 3s on non-existent files
 	// during auto-detection.
-	if _, statErr := os.Stat(transcriptPath); statErr == nil {
+	if _, statErr := agent.StatTranscriptFile(transcriptPath); statErr == nil {
 		if preparer, ok := agent.AsTranscriptPreparer(ag); ok {
 			if prepErr := preparer.PrepareTranscript(ctx, transcriptPath); prepErr != nil {
 				logging.Debug(ctx, "PrepareTranscript failed (best-effort)", "error", prepErr)

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -17,6 +18,8 @@ import (
 	codexagent "github.com/entireio/cli/cmd/entire/cli/agent/codex"
 	"github.com/entireio/cli/cmd/entire/cli/agent/external"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
+	"github.com/entireio/cli/cmd/entire/cli/entiredir"
+	"github.com/entireio/cli/cmd/entire/cli/gitdir"
 	"github.com/entireio/cli/cmd/entire/cli/gitremote"
 	"github.com/entireio/cli/cmd/entire/cli/interactive"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
@@ -26,6 +29,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
 	"github.com/entireio/cli/cmd/entire/cli/uiform"
 	"github.com/entireio/cli/cmd/entire/cli/vercelconfig"
+	"github.com/entireio/cli/cmd/entire/cli/worktreedir"
 
 	"charm.land/huh/v2"
 	"github.com/spf13/cobra"
@@ -203,8 +207,12 @@ func updateSummaryGenerationSettings(ctx context.Context, w io.Writer, provider,
 	}
 
 	if provider != "" {
-		// Make external agents on $PATH resolvable for --summarize-provider.
-		external.DiscoverAndRegisterAlways(ctx)
+		// Make the NAMED external agent resolvable for --summarize-provider.
+		// Named, not the whole sweep: the user identified one provider, and a
+		// full scan would execute every entire-agent-* binary on $PATH in a
+		// repo that may never have opted into external agents. The named
+		// lookup returns immediately when the provider is a built-in.
+		discoverNamedExternalAgent(ctx, types.AgentName(provider))
 	}
 
 	targetFile, configDisplay := settingsTargetFile(ctx, opts.UseLocalSettings, opts.UseProjectSettings)
@@ -221,15 +229,13 @@ func updateSummaryGenerationSettings(ctx context.Context, w io.Writer, provider,
 		s.SummaryGeneration = &settings.SummaryGenerationSettings{}
 	}
 
+	grantExternalAgents := false
 	if provider != "" {
 		if err := validateSummaryProvider(provider); err != nil {
 			return err
 		}
 		if ag, getErr := getSummaryAgent(types.AgentName(provider)); getErr == nil && external.IsExternal(ag) {
-			if !s.ExternalAgents {
-				s.ExternalAgents = true
-				fmt.Fprintln(w, externalAgentsAutoEnabledNotice)
-			}
+			grantExternalAgents = !settings.IsExternalAgentsEnabled(ctx)
 		}
 	}
 	if model != "" && provider == "" && s.SummaryGeneration.Provider == "" {
@@ -252,6 +258,23 @@ func updateSummaryGenerationSettings(ctx context.Context, w io.Writer, provider,
 		if err := SaveEntireSettings(ctx, s); err != nil {
 			return fmt.Errorf("failed to save settings: %w", err)
 		}
+	}
+
+	// After the save above, never before, and never onto s. The grant is a raw
+	// read-modify-write of the local file, because the loader honors it only
+	// from there (see enableExternalAgentsLocally) and s may be headed for the
+	// project file. When the target IS the local file, the two writes touch the
+	// same file: granting first meant the struct save rewrote it from an s
+	// whose ExternalAgents is still false, and the field is omitempty, so the
+	// key was dropped rather than written back. The user was told external
+	// agents were on while the next load did not honor them. The other three
+	// grant sites in this file order it this way for the same reason.
+	if grantExternalAgents {
+		grant, err := enableExternalAgentsLocally(ctx)
+		if err != nil {
+			return err
+		}
+		reportExternalAgentsGrant(w, grant)
 	}
 
 	fmt.Fprintf(w, "✓ Settings updated (%s)\n", configDisplay)
@@ -343,17 +366,11 @@ func settingsTargetFile(ctx context.Context, useLocal, useProject bool) (string,
 
 	// No explicit flag — write to whichever file exists.
 	// Check project file first, then local.
-	projectAbs, err := paths.AbsPath(ctx, settings.EntireSettingsFile)
-	if err == nil {
-		if _, statErr := os.Lstat(projectAbs); statErr == nil {
-			return settings.EntireSettingsFile, configDisplayProject
-		}
+	if settings.IsSetUp(ctx) {
+		return settings.EntireSettingsFile, configDisplayProject
 	}
-	localAbs, err := paths.AbsPath(ctx, settings.EntireSettingsLocalFile)
-	if err == nil {
-		if _, statErr := os.Lstat(localAbs); statErr == nil {
-			return settings.EntireSettingsLocalFile, configDisplayLocal
-		}
+	if settings.IsSetUpLocal(ctx) {
+		return settings.EntireSettingsLocalFile, configDisplayLocal
 	}
 
 	// Neither exists — default to project
@@ -474,9 +491,15 @@ func runManageAgents(ctx context.Context, w io.Writer, opts EnableOptions, selec
 	if selectFn == nil && !interactive.CanPromptInteractively() {
 		if opts.SearchSkill || opts.AgentHelpSkill {
 			if len(installedNames) > 0 {
-				external.DiscoverAndRegisterAlways(ctx)
+				// Named lookups over the agents already installed here, not a
+				// full sweep: this branch is non-interactive, so there is no
+				// picker to populate and no reason to execute binaries for
+				// agents this repo never enabled. Each call is a no-op for a
+				// built-in, and errors are dropped — applyAgentChanges reports
+				// an agent it cannot resolve.
 				selectedAgentNames := make([]string, 0, len(installedNames))
 				for _, name := range installedNames {
+					discoverNamedExternalAgent(ctx, name)
 					selectedAgentNames = append(selectedAgentNames, string(name))
 				}
 				return applyAgentChanges(ctx, w, selectedAgentNames, installedNames, opts)
@@ -638,22 +661,17 @@ func applyAgentChanges(ctx context.Context, w io.Writer, selectedAgentNames []st
 	}
 
 	// Auto-enable external_agents setting if any new agent is external.
+	// Always into the local file, whatever opts said about the rest of this
+	// write: the loader honors the grant nowhere else. See
+	// enableExternalAgentsLocally.
 	for _, ag := range append(successfullyAddedAgents, successfullyReinstalledAgents...) {
 		if external.IsExternal(ag) {
-			s, loadErr := LoadEntireSettings(ctx)
-			if loadErr != nil {
-				s = &EntireSettings{}
-			}
-			if !s.ExternalAgents {
-				s.ExternalAgents = true
-				var saveErr error
-				if opts.UseLocalSettings {
-					saveErr = SaveEntireSettingsLocal(ctx, s)
-				} else {
-					saveErr = SaveEntireSettings(ctx, s)
-				}
+			if !settings.IsExternalAgentsEnabled(ctx) {
+				grant, saveErr := enableExternalAgentsLocally(ctx)
 				if saveErr != nil {
-					errs = append(errs, fmt.Errorf("failed to save external_agents setting: %w", saveErr))
+					errs = append(errs, saveErr)
+				} else {
+					warnIneffectiveExternalAgentsGrant(w, grant)
 				}
 			}
 			break
@@ -715,7 +733,7 @@ Examples:
   entire configure --absolute-git-hook-path       # Reinstall git hook with absolute path
   entire configure --force                        # Reinstall git hook
   entire configure --checkpoint-remote github:org/checkpoints
-  entire configure --checkpoint-backend refs      # Store each checkpoint as its own git ref
+  entire configure --checkpoint-backend refs      # Move a legacy repo to per-checkpoint git refs
   entire configure --summarize-provider claude-code
   entire configure --summarize-timeout-seconds 300   # 5m deadline for explain --generate`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
@@ -775,10 +793,10 @@ Examples:
 	cmd.Flags().BoolVarP(&opts.ForceHooks, flagForce, "f", false, "Reinstall the Entire git hook")
 	cmd.Flags().BoolVar(&opts.SkipPushSessions, flagSkipPushSessions, false, "Disable automatic pushing of session logs on git push")
 	cmd.Flags().StringVar(&opts.CheckpointRemote, flagCheckpointRemote, "", "Checkpoint remote in provider:owner/repo format (e.g., github:org/checkpoints-repo)")
-	cmd.Flags().StringVar(&opts.CheckpointBackend, flagCheckpointBackend, "", "Checkpoint storage backend: refs (one git ref per checkpoint; recommended) or branch (shared entire/checkpoints/v1 branch)")
+	cmd.Flags().StringVar(&opts.CheckpointBackend, flagCheckpointBackend, "", checkpointBackendFlagUsage)
 	cmd.Flags().StringVar(&summarizeProvider, flagSummarizeAgent, "", "Set the provider used by explain --generate (e.g., claude-code, codex, gemini, pi, cursor, copilot-cli)")
 	cmd.Flags().StringVar(&summarizeModel, flagSummarizeModel, "", "Set the model hint used by explain --generate")
-	cmd.Flags().IntVar(&summarizeTimeoutSeconds, flagSummarizeTimeout, 0, "Set the hard deadline (seconds) for explain --generate summary generation. 0 clears (falls back to 5m default).")
+	cmd.Flags().IntVar(&summarizeTimeoutSeconds, flagSummarizeTimeout, 0, "Set the hard deadline (seconds) for explain --generate summary generation. 0 clears the setting, leaving summary generation unbounded.")
 	cmd.Flags().BoolVar(&opts.Telemetry, flagTelemetry, true, "Enable anonymous usage analytics")
 	cmd.Flags().BoolVar(&opts.AbsoluteGitHookPath, flagAbsoluteGitHookPath, false, "Embed full binary path in git hooks (for GUI git clients that don't source shell profiles)")
 
@@ -877,10 +895,17 @@ for you and (optionally) create a matching GitHub repository via the gh CLI.`,
 				return err
 			}
 
-			// Discover external agent plugins early so --agent can find them.
-			// Use DiscoverAndRegisterAlways so that --agent works on fresh repos
-			// where the external_agents setting hasn't been persisted yet.
-			external.DiscoverAndRegisterAlways(ctx)
+			// Discover the external agent --agent names, so it works on fresh
+			// repos where the external_agents setting has not been persisted
+			// yet. Only that one: without --agent this falls through to
+			// runEnableOnConfiguredRepo or runSetupFlow, which each run the
+			// full ungated scan for the agent picker they show. Scanning here
+			// too would execute every entire-agent-* binary on $PATH for a
+			// bare `entire enable`. The error is dropped so an unresolvable
+			// name is reported by the agent.Get below, in the user's terms.
+			if agentName != "" {
+				discoverNamedExternalAgent(ctx, types.AgentName(agentName))
+			}
 
 			// Non-interactive mode if --agent flag is provided
 			if cmd.Flags().Changed(agentFlagName) && agentName == "" {
@@ -933,7 +958,7 @@ for you and (optionally) create a matching GitHub repository via the gh CLI.`,
 	cmd.Flags().BoolVarP(&opts.ForceHooks, flagForce, "f", false, "Force reinstall hooks (removes existing Entire hooks first)")
 	cmd.Flags().BoolVar(&opts.SkipPushSessions, flagSkipPushSessions, false, "Disable automatic pushing of session logs on git push")
 	cmd.Flags().StringVar(&opts.CheckpointRemote, flagCheckpointRemote, "", "Checkpoint remote in provider:owner/repo format (e.g., github:org/checkpoints-repo)")
-	cmd.Flags().StringVar(&opts.CheckpointBackend, flagCheckpointBackend, "", "Checkpoint storage backend: refs (one git ref per checkpoint; recommended) or branch (shared entire/checkpoints/v1 branch)")
+	cmd.Flags().StringVar(&opts.CheckpointBackend, flagCheckpointBackend, "", checkpointBackendFlagUsage)
 	cmd.Flags().BoolVar(&opts.Telemetry, flagTelemetry, true, "Enable anonymous usage analytics")
 	cmd.Flags().BoolVar(&opts.AbsoluteGitHookPath, flagAbsoluteGitHookPath, false, "Embed full binary path in git hooks (for GUI git clients that don't source shell profiles)")
 	cmd.Flags().BoolVar(&opts.SearchSkill, flagSearchSkill, false, "Install the optional Entire search skill for selected agent(s)")
@@ -1059,7 +1084,7 @@ func probeAndCacheTrailsEnablement(ctx context.Context, insecureHTTPAuth bool, i
 	probeCtx, cancel := context.WithTimeout(ctx, enableTrailsProbeBudget)
 	defer cancel()
 
-	client, notOnboarded, err := trailsCellClient(probeCtx, insecureHTTPAuth, info.Owner+"/"+info.Repo)
+	client, notOnboarded, err := trailsCellClient(probeCtx, insecureHTTPAuth, info.Forge, info.Owner, info.Repo)
 	if notOnboarded {
 		if saveErr := saveTrailsEnabledForRemote(ctx, info.Forge, info.Owner, info.Repo, false); saveErr != nil {
 			logging.Debug(ctx, "failed to cache trails enablement", "error", saveErr)
@@ -1279,10 +1304,13 @@ func runEnableInteractive(ctx context.Context, w io.Writer, agents []agent.Agent
 		settings.AbsoluteGitHookPath = true
 	}
 
-	// Auto-enable external_agents if any selected agent is external.
+	// Auto-enable external_agents if any selected agent is external. Deferred
+	// to a separate local-file write below rather than set on this struct,
+	// which may be headed for the project file where the grant is inert.
+	externalAgentSelected := false
 	for _, ag := range agents {
 		if external.IsExternal(ag) {
-			settings.ExternalAgents = true
+			externalAgentSelected = true
 			break
 		}
 	}
@@ -1296,11 +1324,7 @@ func runEnableInteractive(ctx context.Context, w io.Writer, agents []agent.Agent
 
 	// Determine which settings file to write to
 	// First run always creates settings.json (no prompt)
-	entireDirAbs, err := paths.AbsPath(ctx, paths.EntireDir)
-	if err != nil {
-		entireDirAbs = paths.EntireDir // Fallback to relative
-	}
-	shouldUseLocal, showNotification := determineSettingsTarget(entireDirAbs, opts.UseLocalSettings, opts.UseProjectSettings)
+	shouldUseLocal, showNotification := determineSettingsTarget(ctx, opts.UseLocalSettings, opts.UseProjectSettings)
 
 	if showNotification {
 		fmt.Fprintln(w, "Info: Project settings exist. Saving to settings.local.json instead.")
@@ -1317,6 +1341,16 @@ func runEnableInteractive(ctx context.Context, w io.Writer, agents []agent.Agent
 	}
 	if err := saveSettings(); err != nil {
 		return fmt.Errorf("failed to save settings: %w", err)
+	}
+
+	// Written separately from the target above: the grant is honored only
+	// from the local file, and the target here may be the project one.
+	if externalAgentSelected {
+		grant, err := enableExternalAgentsLocally(ctx)
+		if err != nil {
+			return err
+		}
+		warnIneffectiveExternalAgentsGrant(w, grant)
 	}
 
 	// Use settings values (merged from existing config + flags) for hook installation
@@ -1572,12 +1606,7 @@ func saveEnabledState(ctx context.Context, s *EntireSettings, useProjectSettings
 
 // localExists checks if settings.local.json exists.
 func localExists(ctx context.Context) bool {
-	localFile := settings.EntireSettingsLocalFile
-	if abs, err := paths.AbsPath(ctx, localFile); err == nil {
-		localFile = abs
-	}
-	_, err := os.Lstat(localFile)
-	return err == nil
+	return settings.IsSetUpLocal(ctx)
 }
 
 // runRemoveAgent removes hooks for a specific agent.
@@ -1985,11 +2014,6 @@ func setupAgentHooksNonInteractive(ctx context.Context, w io.Writer, ag agent.Ag
 		targetSettings.AbsoluteGitHookPath = true
 	}
 
-	// Auto-enable external_agents setting if the agent is external.
-	if external.IsExternal(ag) {
-		targetSettings.ExternalAgents = true
-	}
-
 	opts.applyStrategyOptions(targetSettings)
 
 	// Checkpoint storage backend: an explicit --checkpoint-backend wins; first
@@ -2011,6 +2035,18 @@ func setupAgentHooksNonInteractive(ctx context.Context, w io.Writer, ag agent.Ag
 
 	if err := saveEnabledState(ctx, targetSettings, targetFile == EntireSettingsFile); err != nil {
 		return fmt.Errorf("failed to save settings: %w", err)
+	}
+
+	// Auto-enable external_agents if the agent is external. A separate write,
+	// after the one above and never onto targetSettings, because the loader
+	// honors the grant only from the local file and this target may be the
+	// project one. See enableExternalAgentsLocally.
+	if external.IsExternal(ag) {
+		grant, err := enableExternalAgentsLocally(ctx)
+		if err != nil {
+			return err
+		}
+		warnIneffectiveExternalAgentsGrant(w, grant)
 	}
 
 	// Hook installation decisions need the merged view across both settings
@@ -2096,7 +2132,7 @@ func validateSetupFlags(useLocal, useProject bool) error {
 // - Whether settings.json already exists
 // - The --local and --project flags
 // Returns (useLocal, showNotification).
-func determineSettingsTarget(entireDir string, useLocal, useProject bool) (bool, bool) {
+func determineSettingsTarget(ctx context.Context, useLocal, useProject bool) (bool, bool) {
 	// Explicit --local flag always uses local settings
 	if useLocal {
 		return true, false
@@ -2108,8 +2144,7 @@ func determineSettingsTarget(entireDir string, useLocal, useProject bool) (bool,
 	}
 
 	// No flags specified - check if settings file exists
-	settingsPath := filepath.Join(entireDir, paths.SettingsFileName)
-	if _, err := os.Lstat(settingsPath); err == nil {
+	if settings.IsSetUp(ctx) {
 		// Settings file exists - auto-redirect to local with notification
 		return true, true
 	}
@@ -2121,21 +2156,17 @@ func determineSettingsTarget(entireDir string, useLocal, useProject bool) (bool,
 // setupEntireDirectory creates the .entire directory and gitignore.
 // Returns true if the directory was created, false if it already existed.
 func setupEntireDirectory(ctx context.Context) (bool, error) { //nolint:unparam // already present in codebase
-	// Get absolute path for the .entire directory
-	entireDirAbs, err := paths.AbsPath(ctx, paths.EntireDir)
-	if err != nil {
-		entireDirAbs = paths.EntireDir // Fallback to relative
+	// Determine whether creation is needed without creating on the read path.
+	_, readErr := entiredir.OpenForRead(ctx)
+	created := errors.Is(readErr, fs.ErrNotExist)
+	if readErr != nil && !created {
+		return false, fmt.Errorf("failed to inspect .entire directory: %w", readErr)
 	}
 
-	// Check if directory already exists
-	created := false
-	if _, err := os.Lstat(entireDirAbs); os.IsNotExist(err) {
-		created = true
-	}
-
-	// Create .entire directory
-	//nolint:gosec // G301: Project directory needs standard permissions for git
-	if err := os.MkdirAll(entireDirAbs, 0o755); err != nil {
+	// Open performs creation through the worktree root, so .entire itself is a
+	// checked child of the trusted anchor rather than an absolute path followed
+	// before os.Root takes effect.
+	if _, err := entiredir.Open(ctx); err != nil {
 		return false, fmt.Errorf("failed to create .entire directory: %w", err)
 	}
 
@@ -2323,30 +2354,97 @@ func promptTelemetryConsent(settings *EntireSettings, telemetryFlag bool) error 
 	return nil
 }
 
+// worktreeFileName reports the name to read a working-tree file by, following a
+// symlink whose target stays inside the worktree and refusing one that leaves
+// it. An empty name means the file is not there — a separate bool would be the
+// same fact twice, which is what the callers below test.
+//
+// The two-step exists because os.Root refuses an ABSOLUTE symlink target
+// unconditionally — including one resolving inside the root — with an error that
+// is not os.ErrNotExist. A repo pointing vercel.json at a monorepo's shared
+// config with an absolute link would therefore be reported as unreadable and
+// skipped, dropping the feature for a setup that worked before the anchor went
+// in. Resolving and re-checking containment is what actually delivers "follow a
+// link that stays inside, refuse one that leaves"; the retried read still goes
+// through the root at a worktree-relative name.
+//
+// Only for files that are the USER's. Entire's own trees refuse a link either
+// way and must keep using the root directly.
+func worktreeFileName(worktreeRoot string, root *os.Root, name string) (string, error) {
+	_, err := root.Stat(name)
+	if err == nil {
+		return name, nil
+	}
+	if os.IsNotExist(err) {
+		return "", nil
+	}
+
+	resolved, resolveErr := worktreedir.NameFollowingLinks(worktreeRoot, name)
+	switch {
+	case errors.Is(resolveErr, os.ErrNotExist):
+		// A dangling link reads as absent, which is what os.Stat gave before.
+		return "", nil
+	case resolveErr != nil:
+		// The root's refusal stays the wrapped cause: that is the condition the
+		// user has to act on ("path escapes from parent"), while resolveErr only
+		// says the fallback did not apply. It is still worth carrying, since a
+		// resolve that failed for its own reason — a permission denied part-way
+		// down the link chain — is otherwise invisible.
+		return "", fmt.Errorf("check %s: %w (resolving the link: %w)", name, err, resolveErr)
+	}
+	// EvalSymlinks stats every component, so a successful resolve already proved
+	// the target is there. This re-stat only closes the window between the two,
+	// and a failure in it is a race rather than a state worth reading as absent.
+	if _, err := root.Stat(resolved); err != nil {
+		return "", fmt.Errorf("check %s: %w", resolved, err)
+	}
+	return resolved, nil
+}
+
+// loadVercelConfigIfPresent reads the config only when there is one to read.
+// The project can be detected from `.vercel` or `vercel.ts` with no vercel.json
+// beside them, and an empty name is that case rather than a path to try.
+func loadVercelConfigIfPresent(root *os.Root, name string) (map[string]any, bool, error) {
+	if name == "" {
+		return nil, false, nil
+	}
+	return vercelconfig.LoadIn(root, name) //nolint:wrapcheck // the caller only tests for nil
+}
+
 func maybePromptVercelDeploymentDisable(ctx context.Context, w io.Writer, targetFile string, promptFn func() (bool, error)) (bool, error) {
 	repoRoot, rootErr := paths.WorktreeRoot(ctx)
 	if rootErr == nil {
-		vercelJSONPath := filepath.Join(repoRoot, "vercel.json")
-		hasVercelJSON := false
-		if _, err := os.Stat(vercelJSONPath); err == nil {
-			hasVercelJSON = true
-		} else if !os.IsNotExist(err) {
-			fmt.Fprintf(w, "Note: Skipping Vercel deployment update: could not check vercel.json: %v\n", err)
+		// Through the worktree's root: these are working-tree files, so they
+		// arrive by clone, and a joined path handed to os.Stat/os.ReadFile
+		// resolves wherever a checked-in symlink points. In-repo links are
+		// still followed, which is what a monorepo's shared vercel.json needs —
+		// see worktreeFileName for why the root alone does not give that.
+		worktree, err := worktreedir.OpenAt(repoRoot)
+		if err != nil {
+			fmt.Fprintf(w, "Note: Skipping Vercel deployment update: could not open the worktree: %v\n", err)
 			return false, nil
 		}
 
-		hasVercelProject := hasVercelJSON
+		// vercelJSONName is empty exactly when vercel.json is absent, so it is
+		// both the name to read by and the presence flag; a second bool would be
+		// the same fact twice.
+		vercelJSONName, err := worktreeFileName(repoRoot, worktree, vercelconfig.FileName)
+		if err != nil {
+			fmt.Fprintf(w, "Note: Skipping Vercel deployment update: could not check %s: %v\n", vercelconfig.FileName, err)
+			return false, nil
+		}
+
+		hasVercelProject := vercelJSONName != ""
 		if !hasVercelProject {
-			for _, path := range []string{
-				filepath.Join(repoRoot, ".vercel"),
-				filepath.Join(repoRoot, "vercel.ts"),
-			} {
-				if _, err := os.Stat(path); err == nil {
+			for _, name := range []string{".vercel", "vercel.ts"} {
+				found, statErr := worktreeFileName(repoRoot, worktree, name)
+				if statErr != nil {
+					fmt.Fprintf(w, "Note: Skipping Vercel deployment update: could not check %s: %v\n", name, statErr)
+					return false, nil
+				}
+				if found != "" {
 					hasVercelProject = true
 					break
-				} else if !os.IsNotExist(err) {
-					fmt.Fprintf(w, "Note: Skipping Vercel deployment update: could not check %s: %v\n", path, err)
-					return false, nil
 				}
 			}
 		}
@@ -2369,7 +2467,7 @@ func maybePromptVercelDeploymentDisable(ctx context.Context, w io.Writer, target
 			return false, nil
 		}
 
-		if config, alreadyDisabled, loadErr := vercelconfig.Load(vercelJSONPath); loadErr == nil &&
+		if config, alreadyDisabled, loadErr := loadVercelConfigIfPresent(worktree, vercelJSONName); loadErr == nil &&
 			config != nil && alreadyDisabled {
 			targetSettings.Vercel = true
 			if err := saveSettingsToTarget(ctx, targetSettings, targetFile); err != nil {
@@ -2682,11 +2780,7 @@ func countShadowBranches(ctx context.Context) int {
 
 // checkEntireDirExists checks if the .entire directory exists.
 func checkEntireDirExists(ctx context.Context) bool {
-	entireDirAbs, err := paths.AbsPath(ctx, paths.EntireDir)
-	if err != nil {
-		entireDirAbs = paths.EntireDir
-	}
-	_, err = os.Lstat(entireDirAbs)
+	_, err := entiredir.OpenForRead(ctx)
 	return err == nil
 }
 
@@ -2892,8 +2986,8 @@ func removeAllSessionStates(ctx context.Context) (int, error) {
 	// state directory rather than inside it (see strategy.stateLockPath) so
 	// session-listing code doesn't have to filter them out. Best-effort:
 	// failing here doesn't undo the state-file removal.
-	if commonDir, cdErr := strategy.GetGitCommonDir(ctx); cdErr == nil {
-		_ = os.RemoveAll(filepath.Join(commonDir, "entire-session-locks"))
+	if root, rootErr := gitdir.Open(ctx); rootErr == nil {
+		_ = root.RemoveAll(strategy.SessionLockDirName) //nolint:errcheck // best-effort sweep; see the comment above
 	}
 
 	return count, nil
@@ -2903,11 +2997,37 @@ func removeAllSessionStates(ctx context.Context) (int, error) {
 // wrapped: the caller's warning line already leads with "failed to remove
 // .entire directory", and os.RemoveAll errors carry the op and path.
 func removeEntireDirectory(ctx context.Context) error {
-	entireDirAbs, err := paths.AbsPath(ctx, paths.EntireDir)
-	if err != nil {
-		entireDirAbs = paths.EntireDir
+	worktreeRoot, err := paths.WorktreeRoot(ctx)
+	switch {
+	case err == nil:
+	case errors.Is(err, paths.ErrNotARepository):
+		// Uninstall is also supported in an uninitialized directory. Anchor that
+		// case to the absolute cwd once; never hand a relative .entire path to an
+		// os operation, where a later chdir could retarget it.
+		//
+		// The gate is the sentinel, exactly as entiredir.anchor gates its own
+		// fallback, and NOT any WorktreeRoot failure. ErrNotARepository means git
+		// ran and said there is no repository here. Everything else — git off
+		// $PATH, dubious ownership, a cancelled context — means "we could not
+		// find out", and this is the one caller where answering that with a
+		// guess deletes the user's data in whatever directory the process
+		// happens to be sitting in.
+		worktreeRoot, err = os.Getwd() //nolint:forbidigo // no repository here; see above
+		if err != nil {
+			return fmt.Errorf("resolve current directory: %w", err)
+		}
+	default:
+		return fmt.Errorf("resolve %s location: %w", paths.EntireDir, err)
 	}
-	return os.RemoveAll(entireDirAbs) //nolint:wrapcheck // caller's warning line already names the step; the os error carries op and path
+	// Drop any cached root before unlinking the directory it refers to. A root
+	// that outlives its directory still accepts writes, and they land on an
+	// unlinked inode nobody will ever read.
+	entiredir.Reset()
+	root, err := worktreedir.OpenAt(worktreeRoot)
+	if err != nil {
+		return err //nolint:wrapcheck // OpenAt names the directory it could not open
+	}
+	return root.RemoveAll(paths.EntireDir) //nolint:wrapcheck // caller names the directory; os error carries operation
 }
 
 // removeAllShadowBranches removes all shadow branches.

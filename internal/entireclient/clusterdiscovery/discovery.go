@@ -48,7 +48,9 @@ type Response struct {
 	//
 	// Never a member of CoreURLs, and never eligible to be: the apex issues
 	// no tokens, so no login can carry it as an issuer. It answers "what do
-	// I type", not "whose tokens are accepted".
+	// I type", not "whose tokens are accepted". For the same reason it is
+	// outside requireSameSiteIssuers' gate: no token is ever sent because
+	// of it, only a URL shown in a hint.
 	LoginURL string `json:"login_url"`
 }
 

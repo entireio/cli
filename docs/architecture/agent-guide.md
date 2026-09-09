@@ -24,7 +24,7 @@ Every agent must implement all 19 methods on the `Agent` interface:
 | | `Type()` | Display name for metadata (e.g., `"Claude Code"`) |
 | | `Description()` | Human-readable description for UI |
 | | `DetectPresence()` | Check if agent is configured in the repo |
-| | `ProtectedDirs()` | Directories to preserve during rewind |
+| | `ProtectedDirs()` | The agent's own dirs, excluded from tracked changes and checkpoints |
 | **Event Mapping** | `HookNames()` | Hook verbs that become CLI subcommands |
 | | `ParseHookEvent()` | **Core contribution surface** - translate native hooks to Events |
 | **Transcript** | `ReadTranscript()` | Read raw transcript bytes |

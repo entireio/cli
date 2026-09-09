@@ -11,6 +11,7 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
+	"github.com/entireio/cli/cmd/entire/cli/osroot"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -556,43 +557,66 @@ func TestStateStore_Clear_NonexistentDir(t *testing.T) {
 	assert.NoError(t, err)
 }
 
-func TestStateStore_SaveLoadClear_SymlinkedDir(t *testing.T) {
+// macOS resolves /tmp through a symlink to /private/tmp, so a t.TempDir() path
+// has a symlinked ANCESTOR. That must keep working: the state directory is a
+// name inside a root opened on its parent, and os.OpenRoot resolves the path it
+// is handed normally — the refusal below applies to components inside the root,
+// not to the path used to open it.
+func TestStateStore_SaveLoadClear_SymlinkedAncestor(t *testing.T) {
 	t.Parallel()
 
-	// Simulate macOS-style symlinked temp paths: create the real dir,
-	// then point a symlink at it, and use the symlink path as stateDir.
-	realDir := filepath.Join(t.TempDir(), "real-sessions")
-	require.NoError(t, os.MkdirAll(realDir, 0o750))
+	realParent := filepath.Join(t.TempDir(), "real-parent")
+	require.NoError(t, os.MkdirAll(realParent, 0o750))
 
-	linkParent := t.TempDir()
-	symlinkedDir := filepath.Join(linkParent, "linked-sessions")
-	require.NoError(t, os.Symlink(realDir, symlinkedDir))
+	linkedParent := filepath.Join(t.TempDir(), "linked-parent")
+	if err := os.Symlink(realParent, linkedParent); err != nil {
+		t.Skipf("symlink not supported: %v", err)
+	}
 
-	store := NewStateStoreWithDir(symlinkedDir)
+	store := NewStateStoreWithDir(filepath.Join(linkedParent, SessionStateDirName))
 	ctx := context.Background()
 
-	// Save through the symlinked path
-	state := &State{
-		SessionID:  "symlink-test",
-		BaseCommit: "abc123",
-		StartedAt:  time.Now(),
-	}
+	state := &State{SessionID: "symlink-test", BaseCommit: "abc123", StartedAt: time.Now()}
 	require.NoError(t, store.Save(ctx, state))
 
-	// Load should work through the symlink
 	loaded, err := store.Load(ctx, "symlink-test")
 	require.NoError(t, err)
 	require.NotNil(t, loaded)
 	assert.Equal(t, "symlink-test", loaded.SessionID)
 
-	// File should exist in the real directory
-	_, err = os.Stat(filepath.Join(realDir, "symlink-test.json"))
-	assert.NoError(t, err, "file should exist in the real directory behind the symlink")
+	_, err = os.Stat(filepath.Join(realParent, SessionStateDirName, "symlink-test.json"))
+	assert.NoError(t, err, "file should exist behind the symlinked ancestor")
 
-	// Clear should work through the symlink
 	require.NoError(t, store.Clear(ctx, "symlink-test"))
-	_, err = os.Stat(filepath.Join(realDir, "symlink-test.json"))
+	_, err = os.Stat(filepath.Join(realParent, SessionStateDirName, "symlink-test.json"))
 	assert.True(t, os.IsNotExist(err), "file should be removed after Clear")
+}
+
+// The state directory ITSELF being a symlink is refused, not followed. Entire
+// creates this directory; one that is a link is a directory it did not create
+// and cannot vouch for, and following it would put session state — which commit
+// linking depends on — somewhere outside the clone without anyone being told.
+// `entire doctor` reports it by name.
+func TestStateStore_Save_RefusesSymlinkedStateDir(t *testing.T) {
+	t.Parallel()
+
+	realDir := filepath.Join(t.TempDir(), "real-sessions")
+	require.NoError(t, os.MkdirAll(realDir, 0o750))
+
+	parent := t.TempDir()
+	if err := os.Symlink(realDir, filepath.Join(parent, SessionStateDirName)); err != nil {
+		t.Skipf("symlink not supported: %v", err)
+	}
+
+	store := NewStateStoreWithDir(filepath.Join(parent, SessionStateDirName))
+	err := store.Save(context.Background(), &State{
+		SessionID: "symlink-test", BaseCommit: "abc123", StartedAt: time.Now(),
+	})
+	require.ErrorIs(t, err, osroot.ErrSymlinkedPath)
+
+	entries, readErr := os.ReadDir(realDir)
+	require.NoError(t, readErr)
+	assert.Empty(t, entries, "nothing may be written through the link")
 }
 
 func TestStateStore_List_EmptyDir(t *testing.T) {
@@ -625,13 +649,14 @@ func initTestRepo(t *testing.T) string {
 func TestGetGitCommonDir_ReturnsValidPath(t *testing.T) {
 	dir := initTestRepo(t)
 
-	commonDir, err := getGitCommonDir(context.Background())
+	commonDir, err := GetGitCommonDir(context.Background())
 	require.NoError(t, err)
 
-	// getGitCommonDir returns a relative path from cwd; resolve it to absolute for comparison
-	absCommonDir, err := filepath.Abs(commonDir)
-	require.NoError(t, err)
-	assert.Equal(t, filepath.Join(dir, ".git"), absCommonDir)
+	// Absolute by contract: `git rev-parse --git-common-dir` answers relative to
+	// cwd, and every path built on the result would otherwise stop being valid
+	// as soon as anything changed directory.
+	assert.True(t, filepath.IsAbs(commonDir), "common dir must be absolute, got %q", commonDir)
+	assert.Equal(t, filepath.Join(dir, ".git"), commonDir)
 
 	// The path should actually exist
 	info, err := os.Stat(commonDir)
@@ -643,11 +668,11 @@ func TestGetGitCommonDir_CachesResult(t *testing.T) {
 	initTestRepo(t)
 
 	// First call populates cache
-	first, err := getGitCommonDir(context.Background())
+	first, err := GetGitCommonDir(context.Background())
 	require.NoError(t, err)
 
 	// Second call should return the same result (from cache)
-	second, err := getGitCommonDir(context.Background())
+	second, err := GetGitCommonDir(context.Background())
 	require.NoError(t, err)
 
 	assert.Equal(t, first, second)
@@ -656,11 +681,11 @@ func TestGetGitCommonDir_CachesResult(t *testing.T) {
 func TestGetGitCommonDir_ClearCache(t *testing.T) {
 	initTestRepo(t)
 
-	first, err := getGitCommonDir(context.Background())
+	first, err := GetGitCommonDir(context.Background())
 	require.NoError(t, err)
 
 	ClearGitCommonDirCache()
-	second, err := getGitCommonDir(context.Background())
+	second, err := GetGitCommonDir(context.Background())
 	require.NoError(t, err)
 	assert.Equal(t, first, second)
 }
@@ -683,7 +708,7 @@ func TestGetGitCommonDir_InvalidatesOnCwdChange(t *testing.T) {
 
 	// Populate cache from dir1
 	t.Chdir(dir1)
-	first, err := getGitCommonDir(context.Background())
+	first, err := GetGitCommonDir(context.Background())
 	require.NoError(t, err)
 	absFirst, err := filepath.Abs(first)
 	require.NoError(t, err)
@@ -691,7 +716,7 @@ func TestGetGitCommonDir_InvalidatesOnCwdChange(t *testing.T) {
 
 	// Change to dir2 — cache should miss and resolve to dir2's .git
 	t.Chdir(dir2)
-	second, err := getGitCommonDir(context.Background())
+	second, err := GetGitCommonDir(context.Background())
 	require.NoError(t, err)
 	absSecond, err := filepath.Abs(second)
 	require.NoError(t, err)
@@ -705,7 +730,7 @@ func TestGetGitCommonDir_ErrorOutsideRepo(t *testing.T) {
 	t.Chdir(dir)
 	ClearGitCommonDirCache()
 
-	_, err := getGitCommonDir(context.Background())
+	_, err := GetGitCommonDir(context.Background())
 	assert.Error(t, err)
 }
 

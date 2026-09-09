@@ -3,7 +3,6 @@
 package integration
 
 import (
-	"os/exec"
 	"strings"
 	"testing"
 
@@ -216,12 +215,7 @@ func TestCheckpointReadRemotes_ElectedUnreachableLegacyStillServes(t *testing.T)
 			},
 		})
 		// The elected remote goes dark: point it at a path that doesn't exist.
-		cmd := exec.CommandContext(t.Context(), "git", "remote", "set-url", "upstream", env.RepoDir+"/nonexistent-remote")
-		cmd.Dir = env.RepoDir
-		cmd.Env = testutil.GitIsolatedEnv()
-		if out, err := cmd.CombinedOutput(); err != nil {
-			t.Fatalf("git remote set-url: %v\n%s", err, out)
-		}
+		testutil.RunGit(t, env.RepoDir, "remote", "set-url", "upstream", env.RepoDir+"/nonexistent-remote")
 		env.setGitConfigBaseline()
 
 		wipeLocalCheckpointState(t, env)

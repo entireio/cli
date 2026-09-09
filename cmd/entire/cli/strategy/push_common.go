@@ -26,12 +26,14 @@ import (
 // those that don't (stale queue entries — e.g. a checkpoint ref deleted by
 // cleanup). Stale refs can never push, so callers drop them from the queue
 // rather than retrying them forever.
-func partitionLocalRefs(repo *git.Repository, refs []plumbing.ReferenceName) (existing, stale []plumbing.ReferenceName) {
+func partitionLocalRefs(repo *git.Repository, refs []plumbing.ReferenceName) (existing, stale []plumbing.ReferenceName, hashes map[string]plumbing.Hash) {
+	hashes = make(map[string]plumbing.Hash, len(refs))
 	for _, ref := range refs {
-		_, err := repo.Reference(ref, false)
+		local, err := repo.Reference(ref, false)
 		switch {
 		case err == nil:
 			existing = append(existing, ref)
+			hashes[ref.String()] = local.Hash()
 		case errors.Is(err, plumbing.ErrReferenceNotFound):
 			// Genuinely gone (e.g. deleted by cleanup) — never pushable, drop it.
 			stale = append(stale, ref)
@@ -41,7 +43,7 @@ func partitionLocalRefs(repo *git.Repository, refs []plumbing.ReferenceName) (ex
 			existing = append(existing, ref)
 		}
 	}
-	return existing, stale
+	return existing, stale, hashes
 }
 
 // batchPushRefs pushes all of refs to target in a single git push,

@@ -143,6 +143,18 @@ jobs:
             mise run test:e2e --agent ${{ matrix.agent }}
           fi
 
+      # opencode writes nothing to stdout or stderr while it stalls during
+      # startup, so a hung `opencode run` reaches us as an empty-output SIGKILL
+      # naming no cause — which is exactly how the 2026-09-03 red streak looked
+      # from the artifacts. Its own log dir is the only record of what it was
+      # waiting on, so fold it into the artifact tree. Best-effort: a leg that
+      # never got as far as writing logs must not fail here.
+      - name: Collect opencode logs
+        if: always() && matrix.agent == 'opencode'
+        run: |
+          mkdir -p e2e/artifacts/opencode-logs
+          cp -R "$HOME/.local/share/opencode/log/." e2e/artifacts/opencode-logs/ || true
+
       - name: Upload artifacts
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7

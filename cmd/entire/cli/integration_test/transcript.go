@@ -125,7 +125,7 @@ func (b *TranscriptBuilder) AddTaskToolUse(toolUseID, prompt string) string {
 }
 
 // AddTaskToolResult adds a tool result for a Task tool invocation.
-// The UUID of this message is used as the checkpoint UUID for rewind.
+// The UUID of this message is used as the checkpoint UUID.
 func (b *TranscriptBuilder) AddTaskToolResult(toolUseID, agentID string) string {
 	uuid := fmt.Sprintf("user-%d", len(b.messages)+1)
 

@@ -5,18 +5,28 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
+	"log/slog"
+	"os"
+	"path"
 	"path/filepath"
+	"slices"
+	"strings"
 	"time"
 
 	"charm.land/huh/v2"
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/codex"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
+	"github.com/entireio/cli/cmd/entire/cli/entiredir"
 	"github.com/entireio/cli/cmd/entire/cli/interactive"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
+	"github.com/entireio/cli/cmd/entire/cli/osroot"
+	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
+	"github.com/entireio/cli/cmd/entire/cli/worktreedir"
 
 	"github.com/go-git/go-git/v6"
 	"github.com/go-git/go-git/v6/plumbing"
@@ -135,6 +145,11 @@ func runSessionsFix(cmd *cobra.Command, force bool) error {
 		finalErr = NewSilentError(fmt.Errorf("git hook check failed: %w", hooksErr))
 	}
 
+	// Before checkLogSink, because a symlinked .entire/logs is one of the reasons
+	// that check fires and this one names the cause.
+	checkEntireDirSymlinks(cmd)
+	checkAgentDirSymlinks(cmd)
+
 	// Before the remaining checks, because it is the channel they and every
 	// other command write their diagnostics to: if this is broken, an empty
 	// entire.log is not evidence of a healthy repo.
@@ -145,6 +160,10 @@ func runSessionsFix(cmd *cobra.Command, force bool) error {
 
 	// Agent-specific: Claude Code hook config drift.
 	checkHookDrift(cmd)
+
+	// Retired permission rule that makes ordinary commands need approval.
+	// Fixes rather than only reporting: what it removes is a rule Entire wrote.
+	checkRetiredDenyRule(cmd)
 
 	// Where checkpoints land, when the repo's remotes make that ambiguous.
 	printCheckpointDestinationNote(ctx, cmd.OutOrStdout(), "Checkpoint destination: REVIEW")
@@ -403,7 +422,7 @@ func promptSessionAction(ss stuckSession) (string, error) {
 // discardSession removes session state and cleans up the shadow branch.
 func discardSession(ctx context.Context, ss stuckSession, _ *git.Repository, errW io.Writer) error {
 	// Clear session state file
-	if err := strategy.ClearSessionState(ctx, ss.State.SessionID); err != nil {
+	if err := strategy.ClearSessionStateWithProgress(ctx, ss.State.SessionID, errW, strategy.SessionLockNoticeDelay); err != nil {
 		return fmt.Errorf("failed to clear session state: %w", err)
 	}
 
@@ -656,6 +675,375 @@ func checkGitHooks(cmd *cobra.Command, force bool) error {
 	return nil
 }
 
+// symlinkReportLimit bounds the list checkEntireDirSymlinks prints. A repo with
+// more than a handful has one systematic cause, and the fix is the same for all
+// of them; the count tells the user there are more.
+const symlinkReportLimit = 10
+
+// checkEntireDirSymlinks reports symlinks inside .entire.
+//
+// Entire refuses to create or write through a symlinked directory there
+// (osroot.MkdirAllNoSymlink), so unlike most misconfigurations this one does not
+// degrade quietly in one place — it stops that whole subtree being written. A
+// symlinked .entire/metadata means no session metadata is captured, and a
+// symlinked .entire/logs means the very diagnostics that would explain it are
+// dropped, which is why this runs before checkLogSink.
+//
+// Read-only. The fix is to replace the link with a real directory, which means
+// deciding what to do with whatever the link pointed at — not something doctor
+// can take on the user's behalf.
+//
+// .entire itself used to be reported but not refused, on the grounds that
+// os.OpenRoot follows a symlinked root so an existing setup kept working. It no
+// longer does: entiredir opens .entire as a checked child of the worktree root
+// (osroot.SharedChild), which refuses a link. Doctor is exempt from the pre-run
+// guard precisely so it still runs and can say so, and it must not tell the user
+// their setup is fine when every other command will now stop.
+func checkEntireDirSymlinks(cmd *cobra.Command) {
+	ctx := cmd.Context()
+	w := cmd.OutOrStdout()
+
+	if dir, err := entiredir.Path(ctx); err == nil {
+		if info, lerr := os.Lstat(dir); lerr == nil && info.Mode()&os.ModeSymlink != 0 {
+			fmt.Fprintf(w, "%s: SYMLINK\n", paths.EntireDir)
+			fmt.Fprintf(w, "  %s -> %s\n", dir, readlinkOrUnknown(dir))
+			fmt.Fprintln(w, "  Entire refuses to read or write through this link, so every command")
+			fmt.Fprintln(w, "  other than doctor will stop until it is replaced with a real directory.")
+			fmt.Fprintln(w, "  Move the target's contents into place:")
+			fmt.Fprintf(w, "    rm %s && mv %s %s\n", dir, readlinkOrUnknown(dir), dir)
+		}
+	}
+
+	root, err := entiredir.OpenForRead(ctx)
+	if err != nil {
+		return // no .entire, or no repository: nothing to check
+	}
+
+	links, err := osroot.SymlinkPaths(root, ".")
+	if err != nil {
+		fmt.Fprintf(w, "%s contents: NOT READABLE\n", paths.EntireDir)
+		fmt.Fprintf(w, "  %v\n", err)
+		return
+	}
+	if len(links) == 0 {
+		return
+	}
+
+	fmt.Fprintf(w, "%s contents: SYMLINKS PRESENT\n", paths.EntireDir)
+	printCappedList(w, links, func(name string) string {
+		return path.Join(paths.EntireDir, name) + " -> " + readlinkOrUnknownIn(root, name)
+	})
+	fmt.Fprintln(w, "  Entire will not create or write through a symlinked directory here, so")
+	fmt.Fprintln(w, "  anything that belongs under one of these paths is not being captured.")
+	fmt.Fprintln(w, "  Fix: replace each path above with a real directory. If it is tracked in git,")
+	fmt.Fprintln(w, "  `git rm --cached` it first, and add it to .gitignore so it does not come back.")
+}
+
+// printCappedList prints one indented line per name via render, replacing the
+// tail past symlinkReportLimit with a count. Four call sites had this loop
+// inline, differing only in the item line, so the off-by-one truncation
+// contract was written out four times.
+func printCappedList(w io.Writer, names []string, render func(string) string) {
+	for i, name := range names {
+		if i == symlinkReportLimit {
+			fmt.Fprintf(w, "  ... and %d more\n", len(names)-symlinkReportLimit)
+			return
+		}
+		fmt.Fprintf(w, "  %s\n", render(name))
+	}
+}
+
+// checkAgentDirSymlinks reports a symlink at any directory component Entire
+// creates or writes through for an agent: the agents' own config directories
+// (.claude, .codex, .cursor, .gemini, .factory, .opencode, .pi, .github/hooks)
+// and the managed skill scaffolds' parents (.claude/skills, .codex/agents, ...).
+//
+// The condition is otherwise invisible after the fact. `entire enable` fails
+// loudly on it (agent.HookConfigFile and writeManagedScaffold both create
+// through osroot.MkdirAllNoSymlink), but once the repo is enabled
+// HookConfigFile.Exists() deliberately reports a symlinked parent as absent —
+// so `entire status` shows the hooks missing without saying why, and
+// `entire clean` skips the directory on the stated grounds that doctor is what
+// reports a symlinked agent directory. Until this check, nothing did.
+//
+// Unlike .entire, these trees are the agent's and largely the user's, so this
+// examines only the components Entire itself creates and writes through, rather
+// than listing every symlink beneath them the way checkEntireDirSymlinks does.
+// A `.claude/skills/my-own -> ../../shared/skills/my-own` is a real setup and
+// none of Entire's business; reporting it would train the user to ignore this
+// section.
+//
+// Read-only. The fix means deciding what to do with whatever the link pointed
+// at, which is not doctor's call.
+func checkAgentDirSymlinks(cmd *cobra.Command) {
+	ctx := cmd.Context()
+	w := cmd.OutOrStdout()
+
+	worktreeRoot, err := paths.WorktreeRoot(ctx)
+	if err != nil {
+		return // no repository: nothing to check
+	}
+	root, err := worktreedir.OpenAt(worktreeRoot)
+	if err != nil {
+		// Reported, not swallowed, for the same reason a single unreadable
+		// component is: a worktree root that will not open is a state where
+		// every hook install also fails, so printing nothing here would hand
+		// back a clean bill of health on a repo where nothing can be installed.
+		fmt.Fprintln(w, "Agent config directories: NOT CHECKED")
+		fmt.Fprintf(w, "  %v\n", err)
+		fmt.Fprintln(w, "  Entire could not open the worktree root, so it cannot say whether the")
+		fmt.Fprintln(w, "  paths it installs hooks and skills under are real directories.")
+		fmt.Fprintln(w, "  Fix: check the ownership and permissions of the repository root.")
+		return
+	}
+
+	var links, unreadable, wrongType []string
+	reported := make(map[string]struct{})
+	for _, candidate := range agentSymlinkCheckPaths() {
+		name, outcome := scanForSymlinkedComponent(root, candidate)
+		if outcome == componentScanClean {
+			continue
+		}
+		// Several candidates share a prefix (.claude, .claude/settings.json), so
+		// a symlinked .claude would otherwise be named once per candidate.
+		if _, dup := reported[name]; dup {
+			continue
+		}
+		reported[name] = struct{}{}
+		switch outcome {
+		case componentScanUnreadable:
+			unreadable = append(unreadable, name)
+		case componentScanWrongType:
+			wrongType = append(wrongType, name)
+		case componentScanLinked:
+			links = append(links, name)
+		case componentScanClean:
+			// Filtered out above; listed so a new outcome fails the build here.
+		}
+	}
+
+	if len(links) > 0 {
+		fmt.Fprintln(w, "Agent config directories: SYMLINKS PRESENT")
+		printCappedList(w, links, func(name string) string {
+			return name + " -> " + readlinkOrUnknownIn(root, name)
+		})
+		fmt.Fprintln(w, "  Entire will not create or write through a symlinked path here, so the")
+		fmt.Fprintln(w, "  hooks and skills that belong under these paths are not installed, and")
+		fmt.Fprintln(w, "  `entire status` reports them as absent rather than as blocked.")
+		fmt.Fprintln(w, "  Fix: replace each path above with a real directory or file. If it is")
+		fmt.Fprintln(w, "  tracked in git, `git rm --cached` it first, and add it to .gitignore so it")
+		fmt.Fprintln(w, "  does not come back.")
+	}
+
+	// A regular file where a directory belongs gets its own heading, because the
+	// fix is to replace the path and no amount of chmod reaches it. Same split
+	// the .entire scan makes between ErrEntireDirNotDirectory and
+	// ErrEntireDirUnreadable, for the same reason.
+	if len(wrongType) > 0 {
+		fmt.Fprintln(w, "Agent config directories: BROKEN")
+		printCappedList(w, wrongType, func(name string) string {
+			what := "of an unknown type"
+			if info, err := osroot.LstatNoSymlinks(root, name); err == nil {
+				what = paths.DescribeMode(info.Mode())
+			}
+			return fmt.Sprintf("%s is %s", name, what)
+		})
+		fmt.Fprintln(w, "  Entire cannot create the hooks and skills that belong under these paths,")
+		fmt.Fprintln(w, "  so `entire status` reports them as absent rather than as blocked.")
+		fmt.Fprintln(w, "  Fix: replace each path above with a real directory. If it is tracked in")
+		fmt.Fprintln(w, "  git, `git rm --cached` it first.")
+	}
+
+	// Separate from the links, and reported rather than swallowed: "we could not
+	// find out" is not "there is nothing here". Entire's own write will fail on
+	// the same path, so a silent scan would leave the user with hooks that never
+	// install and a doctor that says nothing.
+	if len(unreadable) > 0 {
+		fmt.Fprintln(w, "Agent config directories: NOT READABLE")
+		printCappedList(w, unreadable, func(name string) string { return name })
+		fmt.Fprintln(w, "  Entire could not tell whether these paths are real directories, so it")
+		fmt.Fprintln(w, "  cannot say whether hooks and skills can be installed under them.")
+		fmt.Fprintln(w, "  Fix: check the ownership and permissions of each path above.")
+	}
+}
+
+// componentScanOutcome is what scanForSymlinkedComponent found.
+type componentScanOutcome int
+
+const (
+	// componentScanClean: every component that exists is a real file or
+	// directory. A component that is simply absent lands here too — an agent
+	// Entire was never enabled for has no directory, and that is not a fault.
+	componentScanClean componentScanOutcome = iota
+	// componentScanLinked: the named component is a symlink.
+	componentScanLinked
+	// componentScanUnreadable: the named component could not be statted, so
+	// nothing is known about it.
+	componentScanUnreadable
+	// componentScanWrongType: the named component exists as a regular file where
+	// a directory has to be. Separate from componentScanUnreadable because the
+	// remedies are different things — replace the path versus fix its ownership
+	// — and separate from componentScanLinked because the path to name and the
+	// thing to put back are both different.
+	componentScanWrongType
+)
+
+// agentSymlinkCheckPaths returns the worktree-relative paths Entire creates or
+// writes through on behalf of an agent, sorted and deduplicated. Each is a full
+// path rather than a directory, because scanForSymlinkedComponent examines every
+// component of what it is given and the leaf is refused too — for a symlink and
+// for a wrong file type alike: HookConfigFile
+// reads and writes through ReadFileNoFollow / a pinned-parent rename, and
+// writeManagedScaffold does the same, so a symlinked .claude/settings.json is
+// as broken as a symlinked .claude.
+//
+// Two sources, both read from the registry rather than from a list kept here,
+// so a newly integrated agent is covered without anyone remembering this
+// function: the hook-config paths (agent.HookConfigLocator) and the scaffold
+// templates.
+//
+// Deliberately NOT agent.ProtectedDirs(). That names what the AGENT owns, which
+// is a different set in both directions. It is too narrow — `.pi` is there but
+// the `.pi/extensions` and `.pi/extensions/entire` that Entire creates below it
+// are not, and a symlink at either produced no output at all until the config
+// paths were added here. And it is too broad — `.vogon` and an external
+// plugin's directories are in it while Entire writes nothing into them. Every
+// top-level agent directory Entire does write to is already covered, as a
+// component of the config or scaffold path underneath it.
+//
+// Not gated on the agent being configured, which is a deliberate call rather
+// than an oversight. Two of these trees are shared and user-owned — `.github`
+// (Copilot CLI's hook config) and `.agents` (Codex's documented skills path) —
+// so a monorepo that symlinks either is told about it even though it may never
+// enable those agents. That is noise, and it is the lesser fault: gating on
+// installation would have to ask whether hooks are installed, and that question
+// is answered by reading through the very config a symlink hides, so the check
+// would fall silent in exactly the case it exists for.
+func agentSymlinkCheckPaths() []string {
+	seen := make(map[string]struct{})
+	var out []string
+	add := func(p string) {
+		p = filepath.ToSlash(p)
+		if p == "" || p == "." || p == "/" {
+			return
+		}
+		if _, ok := seen[p]; ok {
+			return
+		}
+		seen[p] = struct{}{}
+		out = append(out, p)
+	}
+
+	for _, relPath := range agent.AllHookConfigRelPaths() {
+		add(relPath)
+	}
+	for _, name := range agent.List() {
+		add(searchSkillTemplatePath(name))
+		add(agentHelpSkillTemplatePath(name))
+		// The pre-skill subagent Entire scaffolded and now deletes. Uninstall
+		// goes through osroot.LstatNoSymlinks, which refuses a symlinked parent,
+		// so .claude/agents/ has to be here or a link there is refused with
+		// nothing said about it. .codex/agents and .gemini/agents were already
+		// covered, but only as a side effect of the agent-help template living
+		// under them.
+		add(legacySearchSubagentPath(name))
+	}
+
+	slices.Sort(out)
+	return out
+}
+
+// scanForSymlinkedComponent walks name one component at a time and reports the
+// shortest prefix that is a symlink, or that could not be statted at all.
+//
+// Prefixes are examined shortest first so the walk stops at a link before it
+// would resolve anything through it, which is both the correct answer to report
+// (the outermost link is the one to replace) and the reason a plain root.Lstat
+// of the full name is not enough: that call follows an in-root parent link and
+// reports the far end's mode.
+//
+// A component that does not exist ends the walk clean — an absent .claude is
+// not a misconfiguration — but every OTHER stat error is reported, matching
+// checkEntireDirSymlinks' NOT READABLE arm. Treating them alike would answer
+// "we could not find out" with "everything is fine", on exactly the paths
+// Entire is about to try to write to.
+func scanForSymlinkedComponent(root *os.Root, name string) (string, componentScanOutcome) {
+	components := strings.Split(name, "/")
+	for i := range components {
+		prefix := strings.Join(components[:i+1], "/")
+		info, err := root.Lstat(prefix)
+		if os.IsNotExist(err) {
+			return "", componentScanClean
+		}
+		if err != nil {
+			return prefix, componentScanUnreadable
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			return prefix, componentScanLinked
+		}
+		// Every component's shape is checked, with the expectation depending on
+		// where it sits: a component with more path still to go has to be a
+		// directory, and the leaf has to be a regular file. Both are allowlists
+		// rather than tests for one rejected type — the .entire scan's doc spends
+		// a paragraph on why an allowlist a rejected type can enter by setting an
+		// extra bit is not an allowlist — and an earlier revision that only
+		// looked for a regular file at a non-leaf missed a FIFO, socket or device
+		// node entirely.
+		//
+		// The leaf matters as much as its parents, and for a worse reason: a FIFO
+		// at `.claude/settings.json` does not fail the read, it BLOCKS it. Every
+		// agent's config read goes through osroot.OpenNoFollow, whose open(2) has
+		// no O_NONBLOCK, so `entire doctor` hangs in openat until interrupted.
+		// Reporting it is all this scan can do; refusing to open one is
+		// OpenNoFollow's job.
+		//
+		// Identified from the mode rather than from the ENOTDIR the next Lstat
+		// would return, which would mean being right about which errno each
+		// platform picks. fs.ModeIrregular is tolerated the way the .entire scan
+		// tolerates it: Windows maps directory junctions and cloud placeholders
+		// onto that bit, a junction arriving as bare ModeIrregular (a
+		// name-surrogate reparse tag withholds ModeDir) and a placeholder
+		// directory as ModeDir|ModeIrregular.
+		if !componentHasExpectedShape(info.Mode(), prefix == name) {
+			return prefix, componentScanWrongType
+		}
+	}
+	return "", componentScanClean
+}
+
+// componentHasExpectedShape reports whether mode is what has to be at this
+// position: a regular file at the leaf, something a path can descend through
+// above it. fs.ModeIrregular is masked out of both tests rather than matched
+// against — see scanForSymlinkedComponent for why Windows makes that necessary,
+// and note it is why a bare ModeIrregular satisfies the leaf test as well as
+// the directory one.
+func componentHasExpectedShape(mode fs.FileMode, isLeaf bool) bool {
+	t := mode.Type() &^ fs.ModeIrregular
+	if isLeaf {
+		return t == 0
+	}
+	return t == fs.ModeDir
+}
+
+// readlinkOrUnknown renders a symlink's target for a diagnostic, never failing:
+// an unreadable link is still worth naming.
+func readlinkOrUnknown(name string) string {
+	target, err := os.Readlink(name)
+	if err != nil {
+		return "(unreadable)"
+	}
+	return target
+}
+
+// readlinkOrUnknownIn is readlinkOrUnknown for a name inside root.
+func readlinkOrUnknownIn(root *os.Root, name string) string {
+	target, err := root.Readlink(name)
+	if err != nil {
+		return "(unreadable)"
+	}
+	return target
+}
+
 // checkLogSink reports a .entire/logs Entire cannot write to.
 //
 // Every other diagnostic in the CLI is delivered by writing there, and that
@@ -719,6 +1107,59 @@ func checkHookDrift(cmd *cobra.Command) {
 			fmt.Fprintln(w, "  The installed hook config no longer matches what this CLI writes,")
 			fmt.Fprintln(w, "  so some or all hooks may silently not fire.")
 			fmt.Fprintln(w, "  Run `entire enable --force` to update it.")
+		}
+	}
+}
+
+// checkRetiredDenyRule finds and removes the retired metadata deny rule from
+// any installed agent's permission config. See agent.MetadataDenyRule for why
+// the rule went; the short version is that it made a recursive read anywhere
+// under the repo root need manual approval, which defeats unattended permission
+// modes, and it guarded a staging buffer rather than the durable copy.
+//
+// This is the one doctor check that repairs without asking, and the reason is
+// ownership: it deletes only a rule byte-identical to the string Entire itself
+// wrote, so nothing the user chose is touched. `entire enable` performs the same
+// removal; this exists because a user who has already enabled Entire has no
+// reason to run enable again, and the prompts give them no clue what to do.
+//
+// The config is usually tracked in git (a committed .claude/settings.json is the
+// normal setup), so the change shows up in `git status`. That is deliberately
+// left visible rather than hidden: the message says the file changed so the user
+// can commit or revert it.
+func checkRetiredDenyRule(cmd *cobra.Command) {
+	ctx := cmd.Context()
+	w := cmd.OutOrStdout()
+	for _, name := range GetAgentsWithHooksInstalled(ctx) {
+		ag, err := agent.Get(name)
+		if err != nil {
+			continue
+		}
+		// One pass: Repair reports whether it found the rule, so a separate
+		// detect call would only read and parse the same file twice.
+		//
+		// A repair error is logged rather than printed. An agent whose config
+		// will not parse never reaches here — AreHooksInstalled fails on it, so
+		// GetAgentsWithHooksInstalled leaves it out — which leaves only write
+		// failures, and printing "stale rule" for those would name the wrong
+		// problem. (That a broken config goes unreported at all is a separate,
+		// pre-existing gap: agentHookState.unchecked has no consumer.)
+		changed, repairErr := agent.RepairRetiredMetadataDenyRule(ctx, ag)
+		if repairErr != nil {
+			logging.Warn(ctx, "could not remove retired deny rule",
+				slog.String("agent", string(ag.Type())),
+				slog.String("error", repairErr.Error()))
+			continue
+		}
+		if changed {
+			displayName := string(ag.Type())
+			fmt.Fprintf(w, "%s permissions: STALE RULE\n", displayName)
+			fmt.Fprintf(w, "  A retired Entire deny rule (%s) was still present.\n", agent.MetadataDenyRule)
+			fmt.Fprintln(w, "  It makes ordinary commands (a recursive grep from the repo root, or any")
+			fmt.Fprintln(w, "  command naming that path) need manual approval, and it no longer protects")
+			fmt.Fprintln(w, "  anything: the file it guarded is removed once a session is condensed.")
+			fmt.Fprintln(w, "  ✓ Fixed: rule removed (your other deny rules are untouched).")
+			fmt.Fprintln(w, "  The settings file changed — commit or revert it as you prefer.")
 		}
 	}
 }

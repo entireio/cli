@@ -227,8 +227,8 @@ func (c *CursorAgent) WriteSession(_ context.Context, session *agent.AgentSessio
 		return errors.New("session has no native data to write")
 	}
 
-	if err := os.WriteFile(session.SessionRef, session.NativeData, 0o600); err != nil {
-		return fmt.Errorf("failed to write transcript: %w", err)
+	if err := agent.WriteSessionFile(c, session, session.NativeData, 0o600); err != nil {
+		return fmt.Errorf("write transcript: %w", err)
 	}
 
 	return nil

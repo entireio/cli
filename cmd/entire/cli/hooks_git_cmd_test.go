@@ -10,6 +10,7 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
+	"github.com/entireio/cli/cmd/entire/cli/entiredir"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
@@ -36,7 +37,7 @@ func TestWithHookSession_StampsMostRecentSession(t *testing.T) {
 
 	// Stand in for the root prerun, which is now the only thing that opens the
 	// log sink.
-	l, err := logging.New(logging.Config{Dir: filepath.Join(entireDir, "logs")})
+	l, err := logging.New(logging.Config{Root: entiredir.OpenerAt(tmpDir), Dir: logging.LogsName})
 	if err != nil {
 		t.Fatalf("logging.New() error = %v", err)
 	}
@@ -130,14 +131,20 @@ func TestHooksGitCmd_DiscoverExternalAgents_WhenEnabled(t *testing.T) {
 	// Reset global state before the test
 	gitHooksDisabled = false
 
-	// Create .entire/settings.json with enabled: true and external_agents: true
+	// Create .entire/settings.json with enabled: true, and external_agents in
+	// the local file — the only place the loader honors that grant, since it
+	// enables execution of entire-agent-* binaries found on $PATH.
 	entireDir := filepath.Join(tmpDir, paths.EntireDir)
 	if err := os.MkdirAll(entireDir, 0o755); err != nil {
 		t.Fatalf("failed to create .entire directory: %v", err)
 	}
 	settingsFile := filepath.Join(entireDir, "settings.json")
-	if err := os.WriteFile(settingsFile, []byte(`{"enabled":true,"external_agents":true}`), 0o644); err != nil {
+	if err := os.WriteFile(settingsFile, []byte(`{"enabled":true}`), 0o644); err != nil {
 		t.Fatalf("failed to write settings file: %v", err)
+	}
+	localSettingsFile := filepath.Join(entireDir, "settings.local.json")
+	if err := os.WriteFile(localSettingsFile, []byte(`{"external_agents":true}`), 0o644); err != nil {
+		t.Fatalf("failed to write local settings file: %v", err)
 	}
 
 	// Create a mock external agent binary in a temp PATH directory.

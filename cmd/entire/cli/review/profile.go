@@ -5,8 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"os"
-	"path/filepath"
 	"sort"
 	"strings"
 
@@ -568,16 +566,9 @@ func writeRawReviewProfiles(path string, raw map[string]json.RawMessage, profile
 		}
 		raw["review_default_profile"] = defJSON
 	}
-	// SaveProjectRaw writes the given path atomically (temp file + rename in the
-	// same dir) but does not create the directory, so ensure .entire/ exists
-	// for repos that haven't been enabled yet.
-	if dir := filepath.Dir(path); dir != "" {
-		if err := os.MkdirAll(dir, 0o750); err != nil {
-			return fmt.Errorf("create settings dir %s: %w", dir, err)
-		}
-	}
 	// SaveProjectRaw is path-generic despite the name, so it also serves the
-	// local settings file.
+	// local settings file. It writes through the shared .entire root and creates
+	// the directory, so a repo that has not been enabled yet needs nothing here.
 	if err := settings.SaveProjectRaw(path, raw); err != nil {
 		return fmt.Errorf("write %s: %w", path, err)
 	}

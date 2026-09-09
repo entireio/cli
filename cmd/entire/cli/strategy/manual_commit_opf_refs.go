@@ -81,7 +81,7 @@ func RewriteQueuedCheckpointRefsWithOPF(ctx context.Context, repo *git.Repositor
 	var rawBytesSoFar int
 	// Stale entries (refs no longer present locally) are skipped, not pruned:
 	// the queue belongs to the flush.
-	existing, _ := partitionLocalRefs(repo, queued)
+	existing, _, _ := partitionLocalRefs(repo, queued)
 	for _, refName := range existing {
 		ref, refErr := repo.Reference(refName, true)
 		if refErr != nil {
@@ -166,10 +166,7 @@ func RewriteQueuedCheckpointRefsWithOPF(ctx context.Context, repo *git.Repositor
 	// CAS each ref: a concurrent write that advanced a checkpoint ref during
 	// the rewrite must not be clobbered by our stale rebuild.
 	for i, pr := range pendings {
-		if err := repo.Storer.CheckAndSetReference(
-			plumbing.NewHashReference(pr.ref, rebuilt[i]),
-			plumbing.NewHashReference(pr.ref, pr.old),
-		); err != nil {
+		if err := checkpoint.CASPersistentRef(ctx, repo, pr.ref, rebuilt[i], pr.old); err != nil {
 			return fmt.Errorf("update checkpoint ref %s: %w", pr.ref, err)
 		}
 	}

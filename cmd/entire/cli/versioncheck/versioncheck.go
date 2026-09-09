@@ -9,30 +9,16 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"time"
 
+	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
+	"github.com/entireio/cli/cmd/entire/cli/osroot"
 	"github.com/entireio/cli/cmd/entire/cli/versioninfo"
 	"github.com/entireio/cli/internal/entireclient/userdirs"
 	"golang.org/x/mod/module"
 	"golang.org/x/mod/semver"
-)
-
-const goosWindows = "windows"
-
-// goos is a test seam for runtime.GOOS so the Windows-specific auto-install
-// gating can be exercised from a non-Windows host.
-var goos = runtime.GOOS
-
-const (
-	installManagerBrew    = "brew"
-	installManagerMise    = "mise"
-	installManagerScoop   = "scoop"
-	installManagerUnknown = "unknown"
-	installChannelStable  = "stable"
-	installChannelNightly = "nightly"
 )
 
 // CheckAndNotify performs a version check and notifies the user if a newer version is available.
@@ -88,7 +74,7 @@ func CheckAndNotify(ctx context.Context, w io.Writer, currentVersion string) {
 			return
 		}
 
-		action := MaybeAutoUpdate(ctx, w, currentVersion, latestVersion)
+		action := maybeAutoUpdate(ctx, w, currentVersion, latestVersion)
 		if action == autoUpdateActionSkipUntilNextVersion {
 			cache.SkippedVersion = versionCacheKey(latestVersion)
 			if saveErr := saveCache(cache); saveErr != nil {
@@ -108,30 +94,29 @@ func globalConfigDirPath() string {
 
 // ensureGlobalConfigDir creates the global config directory if it doesn't exist.
 //
-// It goes through userdirs.EnsurePrivateDir rather than MkdirAll because this
-// directory is shared with contexts.json and the file token store, both of
-// which hold bearer tokens. The version check runs from the root command's
-// PersistentPostRun, so on a fresh machine it is almost always what creates
-// the directory — before the first login ever runs. Creating it world-readable
-// here left it that way permanently, since the credential stores' own
-// MkdirAll(0700) cannot change the mode of a directory that already exists.
+// It goes through userdirs.ConfigRoot, whose create path is
+// userdirs.EnsurePrivateDir, rather than a bare MkdirAll: this directory is
+// shared with contexts.json and the file token store, both of which hold bearer
+// tokens. The version check runs from the root command's PersistentPostRun, so
+// on a fresh machine it is almost always what creates the directory, before the
+// first login ever runs. Creating it world-readable here left it that way
+// permanently, since MkdirAll cannot change the mode of a directory that
+// already exists.
 func ensureGlobalConfigDir() error {
-	if err := userdirs.EnsurePrivateDir(globalConfigDirPath()); err != nil {
+	if _, err := userdirs.ConfigRoot(); err != nil {
 		return fmt.Errorf("creating config directory: %w", err)
 	}
-
 	return nil
-}
-
-// cacheFilePath returns the full path to the version check cache file.
-func cacheFilePath() string {
-	return filepath.Join(globalConfigDirPath(), cacheFileName)
 }
 
 // loadCache loads the version check cache from disk.
 // Returns an error if the file doesn't exist or is corrupted.
 func loadCache() (*VersionCache, error) {
-	data, err := os.ReadFile(cacheFilePath())
+	root, err := userdirs.ConfigRootForRead()
+	if err != nil {
+		return nil, fmt.Errorf("reading cache file: %w", err)
+	}
+	data, err := osroot.ReadFileNoFollow(root, cacheFileName)
 	if err != nil {
 		return nil, fmt.Errorf("reading cache file: %w", err)
 	}
@@ -147,21 +132,23 @@ func loadCache() (*VersionCache, error) {
 // saveCache saves the version check cache to disk.
 // Uses atomic write semantics (write to temp file, then rename).
 func saveCache(cache *VersionCache) error {
-	filePath := cacheFilePath()
-
 	// Marshal to JSON
 	data, err := json.MarshalIndent(cache, "", "  ")
 	if err != nil {
 		return fmt.Errorf("marshaling cache: %w", err)
 	}
 
+	root, err := userdirs.ConfigRoot()
+	if err != nil {
+		return fmt.Errorf("opening config directory: %w", err)
+	}
+
 	// Write to temp file first (atomic write)
-	dir := filepath.Dir(filePath)
-	tmpFile, err := os.CreateTemp(dir, ".version_check_tmp_")
+	tmpFile, tmpName, err := jsonutil.CreateTempIn(root, cacheFileName)
 	if err != nil {
 		return fmt.Errorf("creating temp file: %w", err)
 	}
-	defer os.Remove(tmpFile.Name())
+	defer func() { _ = root.Remove(tmpName) }() //nolint:errcheck // best-effort; a successful rename already consumed it
 
 	if _, err := tmpFile.Write(data); err != nil {
 		_ = tmpFile.Close() // cleanup on error path
@@ -173,8 +160,7 @@ func saveCache(cache *VersionCache) error {
 	}
 
 	// Rename temp file to final location
-
-	if err := os.Rename(tmpFile.Name(), filePath); err != nil {
+	if err := root.Rename(tmpName, cacheFileName); err != nil {
 		return fmt.Errorf("renaming cache file: %w", err)
 	}
 
@@ -343,147 +329,107 @@ func releaseNotesURL(version string) string {
 // It's a variable so tests can override it.
 var executablePath = os.Executable
 
-func releaseChannel(version string) string {
-	if isNightly(version) {
-		return installChannelNightly
-	}
-	return installChannelStable
-}
-
-// normalizedExecPath returns the running binary's real path with all separators
-// normalized to forward slashes (symlinks resolved, best-effort). Both the
-// install-manager detection and the Scoop app-dir lookup key off this form.
-func normalizedExecPath() (string, error) {
-	execPath, err := executablePath()
+// normalizePath returns p with symlinks resolved (best-effort), separators as
+// forward slashes, and case folded where the OS compares paths
+// case-insensitively (foldPathCase). Every install-path comparison in this
+// package is a plain prefix or substring test on this form.
+func normalizePath(p string) string {
+	resolved, err := filepath.EvalSymlinks(p)
 	if err != nil {
-		return "", err
+		resolved = p
 	}
-	realPath, err := filepath.EvalSymlinks(execPath)
-	if err != nil {
-		realPath = execPath
-	}
-	return strings.ReplaceAll(filepath.ToSlash(realPath), "\\", "/"), nil
+	return foldPathCase(strings.ReplaceAll(filepath.ToSlash(resolved), "\\", "/"))
 }
 
-// scoopAppName returns the Scoop app directory the running binary lives under
-// — the path segment after `/scoop/apps/` (e.g. "cli" or "entire") — or ""
-// when the binary is not a Scoop install. This is the durable signal for the
-// pre-rename package: a binary running from the `cli` app dir must migrate to
-// `entire` regardless of its version (the fix ships in a final `cli` release,
-// so the migrating binary's version is already past the rename).
-func scoopAppName() string {
-	normalized, err := normalizedExecPath()
-	if err != nil {
-		return ""
-	}
-	_, rest, ok := strings.Cut(normalized, "/scoop/apps/")
-	if !ok {
-		return ""
-	}
-	// Cut returns the whole string when the separator is absent, so this covers
-	// both `.../scoop/apps/cli/current/entire.exe` and a bare app segment.
-	app, _, _ := strings.Cut(rest, "/")
-	return app
-}
-
-func installManagerForCurrentBinary() string {
-	normalizedPath, err := normalizedExecPath()
-	if err != nil {
-		return installManagerUnknown
-	}
-
-	switch {
-	case strings.Contains(normalizedPath, "/Cellar/") ||
-		strings.Contains(normalizedPath, "/opt/homebrew/") ||
-		strings.Contains(normalizedPath, "/linuxbrew/") ||
-		strings.Contains(normalizedPath, "/Caskroom/"):
-		return installManagerBrew
-	case strings.Contains(normalizedPath, "/mise/installs/"):
-		return installManagerMise
-	case strings.Contains(normalizedPath, "/scoop/apps/"):
-		return installManagerScoop
-	default:
-		return installManagerUnknown
-	}
-}
-
-// canAutoInstall reports whether updateCommand(currentVersion) is safe to
-// execute on the current OS. Returns false on Windows when the install
-// manager is unknown, because the POSIX curl-pipe-bash fallback can't run
-// from cmd.exe and there's no Windows-native installer to substitute.
-func canAutoInstall() bool {
-	if goos != goosWindows {
-		return true
-	}
-	switch installManagerForCurrentBinary() {
-	case installManagerScoop, installManagerMise:
-		return true
-	default:
-		return false
-	}
-}
-
-// downloadsURL is the public page users visit when we can't offer an
-// auto-installable command on their platform.
+// downloadsURL is the GitHub releases page, used for release-notes links.
 const downloadsURL = "https://github.com/entireio/cli/releases"
 
-// updateCommand returns the appropriate update instruction based on how the binary was installed.
-func updateCommand(currentVersion string) string {
-	switch installManagerForCurrentBinary() {
-	case installManagerBrew:
-		if releaseChannel(currentVersion) == installChannelNightly {
-			return "brew upgrade --yes entire@nightly"
-		}
-		return "brew upgrade --yes entire"
-	case installManagerMise:
-		return "mise upgrade entire"
-	case installManagerScoop:
-		// The Scoop package was renamed from `cli` to `entire`. A binary still
-		// running from the old `cli` app dir can never cross the rename with a
-		// plain `scoop update entire/cli`, so migrate it: install the new
-		// `entire` package, remove the old `cli` package, then reset the shared
-		// shims. Both manifests declare `bin: [git-remote-entire.exe,
-		// entire.exe]`, so the two packages contend for the same shims. Current
-		// Scoop handles that itself: installing `entire` renames the displaced
-		// shim to `entire.shim.cli` (warn_on_overwrite) and uninstalling `cli`
-		// removes only that suffixed copy (rm_shim), leaving the active shims
-		// pointing at `entire`. The reset step is belt-and-braces for older
-		// Scoop versions that overwrote shims without that alt-file dance and
-		// would otherwise take `entire.exe` and the git remote helper with them.
-		//
-		// The Windows updater is print-only, so return a self-contained command
-		// users can paste into either cmd or PowerShell. Explicitly invoking
-		// cmd.exe makes `&&` portable across those shells and ensures uninstall
-		// only runs after install succeeds — a stale bucket or transient failure
-		// therefore never removes the working CLI. (The uninstall→reset link is
-		// weaker: `scoop uninstall` ends in an unconditional `exit 0`, so reset
-		// runs even when the uninstall skipped its work. That is harmless, since
-		// reset is a no-op on the Scoop versions that make it unnecessary.)
-		//
-		// `scoop install` also auto-refreshes the bucket when >3h stale
-		// (is_scoop_outdated), so the new manifest usually lands
-		// without an explicit refresh; a bucket clone older than that check can
-		// still fail with "couldn't find manifest", and the README migration
-		// section names `scoop update` as the retry. Binaries already on the
-		// `entire` app just update in place.
-		if scoopAppName() == "cli" {
-			return `cmd.exe /D /C "scoop install entire/entire && scoop uninstall entire/cli && scoop reset entire"`
-		}
-		return "scoop update entire/entire"
-	}
-
-	if releaseChannel(currentVersion) == installChannelNightly {
-		return "curl -fsSL https://entire.io/install.sh | bash -s -- --channel nightly"
-	}
-	return "curl -fsSL https://entire.io/install.sh | bash"
+// installProbe identifies one install manager from the running binary's path
+// and returns the command that upgrades it. roots are env/config install
+// prefixes (relocated dirs, optional); markers cover default layouts.
+type installProbe struct {
+	roots   func() []string
+	markers []string
+	command func(execPath, currentVersion string) string
 }
 
+func miseRoots() []string {
+	if d := os.Getenv("MISE_INSTALLS_DIR"); d != "" {
+		return []string{d}
+	}
+	if d := os.Getenv("MISE_DATA_DIR"); d != "" {
+		return []string{filepath.Join(d, "installs")}
+	}
+	return nil
+}
+
+// normalizeInstallRoot returns an absolute root in normalizePath form with a
+// trailing slash, or "" for empty/relative values. A root that does not exist
+// on disk still matches by cleaned prefix.
+func normalizeInstallRoot(root string) string {
+	if root == "" || !filepath.IsAbs(root) {
+		return ""
+	}
+	n := normalizePath(filepath.Clean(root))
+	if !strings.HasSuffix(n, "/") {
+		n += "/"
+	}
+	return n
+}
+
+func (p installProbe) matches(execPath string) bool {
+	if p.roots != nil {
+		for _, raw := range p.roots() {
+			if root := normalizeInstallRoot(raw); root != "" && strings.HasPrefix(execPath, root) {
+				return true
+			}
+		}
+	}
+	for _, marker := range p.markers {
+		if strings.Contains(execPath, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+const miseUpgradeCmd = "mise upgrade entire"
+
+func miseUpgradeCommand(_, _ string) string {
+	return miseUpgradeCmd
+}
+
+var miseProbe = installProbe{
+	roots:   miseRoots,
+	markers: []string{"/mise/installs/"},
+	command: miseUpgradeCommand,
+}
+
+// UpdateCommandForCurrentBinary returns the shell command that updates this
+// binary, based on how it was installed.
+//
+// The fallback receives the exec path as the OS reports it (not normalized),
+// so the Windows installer hint can name the directory the binary lives in.
 func UpdateCommandForCurrentBinary(currentVersion string) string {
-	if !canAutoInstall() {
-		return downloadsURL
+	execPath, err := executablePath()
+	if err != nil {
+		return fallbackInstallCommand("", currentVersion)
 	}
-	return updateCommand(currentVersion)
+	normalized := normalizePath(execPath)
+	for _, p := range installProbes {
+		if p.matches(normalized) {
+			return p.command(normalized, currentVersion)
+		}
+	}
+	return fallbackInstallCommand(execPath, currentVersion)
 }
+
+// UpdateCommandShell names the shell UpdateCommandForCurrentBinary's command
+// has to run in, or "" when any shell will do. Callers that print the command
+// instead of running it need it: the Windows commands are PowerShell
+// one-liners, and pasting one into cmd.exe or bash either fails or, in bash's
+// case, expands part of the command before PowerShell sees it.
+func UpdateCommandShell() string { return updateCommandShell }
 
 // printNotification prints the version update notification to the user.
 func printNotification(w io.Writer, current, latest string) {

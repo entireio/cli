@@ -15,6 +15,7 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/internal/flock"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
+	"github.com/entireio/cli/cmd/entire/cli/osroot"
 	"github.com/entireio/cli/internal/entireclient/userdirs"
 )
 
@@ -202,15 +203,23 @@ func SyncPluginIndex(ctx context.Context, indexURL string, force bool) (*PluginI
 	}
 	defer release()
 
-	marker := filepath.Join(dir, pluginIndexSyncMarker)
+	// A root over the cache dir for the probes and the index read below. The
+	// directory is a git clone this process may be about to delete and recreate,
+	// so the root is dropped from the registry before that happens (see the
+	// !cloned branch) rather than kept across it.
+	cacheRoot, cacheRootErr := osroot.Shared(dir)
+
 	// Lstat, not Stat: this asks whether *our* cache dir contains a clone.
 	// Following a symlink would let a link pointing elsewhere answer yes.
-	_, statErr := os.Lstat(filepath.Join(dir, ".git"))
-	cloned := statErr == nil
+	cloned := false
+	if cacheRootErr == nil {
+		_, statErr := cacheRoot.Lstat(".git")
+		cloned = statErr == nil
+	}
 
 	fresh := false
 	if cloned && !force {
-		if info, err := os.Lstat(marker); err == nil {
+		if info, err := cacheRoot.Lstat(pluginIndexSyncMarker); err == nil {
 			// A negative age means the marker is dated in the future (clock
 			// rollback, restored backup, bad container clock). Treating that as
 			// fresh would freeze the catalog until someone ran `index update`
@@ -227,19 +236,22 @@ func SyncPluginIndex(ctx context.Context, indexURL string, force bool) (*PluginI
 		// without .git. git refuses to clone into a non-empty target, so
 		// without this sweep, discovery would stay wedged until the user
 		// cleared the cache by hand.
+		// Drop the cached root first: RemoveAll unlinks the directory it points
+		// at, and git clone recreates a different one.
+		osroot.Forget(dir)
 		if err := os.RemoveAll(dir); err != nil {
 			return nil, fmt.Errorf("clear stale index cache: %w", err)
 		}
 		if err := runGitDiscard(ctx, "clone", "--depth", "1", "--quiet", "--", indexURL, dir); err != nil {
 			return nil, fmt.Errorf("clone plugin index %s: %w", redactURL(indexURL), err)
 		}
-		touchFile(marker)
+		touchIndexMarker(dir)
 	case !fresh:
 		if err := refreshPluginIndexClone(ctx, dir); err != nil {
 			logging.Warn(ctx, "plugin index refresh failed; using cached copy",
 				slog.String("index", redactURL(indexURL)), slog.String("error", err.Error()))
 		} else {
-			touchFile(marker)
+			touchIndexMarker(dir)
 		}
 	}
 
@@ -258,12 +270,21 @@ func refreshPluginIndexClone(ctx context.Context, dir string) error {
 	return nil
 }
 
-func touchFile(path string) {
-	now := time.Now()
-	if err := os.Chtimes(path, now, now); err == nil {
+// touchIndexMarker stamps the freshness marker inside the cache dir. Best-effort:
+// a missing marker just means the next invocation re-syncs.
+//
+// The root is resolved here rather than passed in because the caller's may have
+// been dropped by the clone above.
+func touchIndexMarker(dir string) {
+	root, err := osroot.Shared(dir)
+	if err != nil {
 		return
 	}
-	if f, err := os.Create(path); err == nil { //nolint:gosec // marker file inside our cache dir
+	now := time.Now()
+	if err := root.Chtimes(pluginIndexSyncMarker, now, now); err == nil {
+		return
+	}
+	if f, err := root.Create(pluginIndexSyncMarker); err == nil {
 		_ = f.Close()
 	}
 }
@@ -272,7 +293,11 @@ func loadPluginIndexFromDir(ctx context.Context, dir, indexURL string) (*PluginI
 	// Bounded: the catalog is cloned from a remote repository, so its size is
 	// not ours to trust. A few hundred entries with descriptions is well under
 	// a megabyte.
-	data, err := readFileLimited(filepath.Join(dir, pluginIndexFileName), maxPluginIndexSize)
+	root, err := osroot.Shared(dir)
+	if err != nil {
+		return nil, fmt.Errorf("open index cache: %w", err)
+	}
+	data, err := readFileLimitedIn(root, pluginIndexFileName, maxPluginIndexSize)
 	if err != nil {
 		return nil, fmt.Errorf("plugin index %s has no readable %s: %w", redactURL(indexURL), pluginIndexFileName, err)
 	}

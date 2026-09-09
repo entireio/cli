@@ -7,7 +7,6 @@ import (
 	"strings"
 
 	"github.com/entireio/cli/cmd/entire/cli/checkpointpolicy"
-	"github.com/entireio/cli/cmd/entire/cli/versioncheck"
 	"github.com/entireio/cli/cmd/entire/cli/versioninfo"
 	"github.com/go-git/go-git/v6"
 )
@@ -35,10 +34,7 @@ func checkpointPolicyForCheckpointData(ctx context.Context, repo *git.Repository
 }
 
 func unsupportedCheckpointPolicyError(policy checkpointpolicy.Policy) error {
-	message := strings.TrimSpace(checkpointpolicy.UnsupportedPolicyMessage(
-		policy,
-		versioncheck.UpdateCommandForCurrentBinary(versioninfo.Version),
-	))
+	message := strings.TrimSpace(unsupportedCheckpointPolicyMessage(policy, versioninfo.Version))
 	return fmt.Errorf("%w:\n%s", errUnsupportedCheckpointPolicy, message)
 }
 

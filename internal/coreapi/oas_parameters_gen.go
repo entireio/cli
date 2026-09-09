@@ -2,6 +2,10 @@
 
 package coreapi
 
+import (
+	"github.com/google/uuid"
+)
+
 // AddOrgMemberParams is parameters of addOrgMember operation.
 type AddOrgMemberParams struct {
 	OrgId string
@@ -62,6 +66,11 @@ type DeleteServiceAccountParams struct {
 // GetMirrorParams is parameters of getMirror operation.
 type GetMirrorParams struct {
 	MirrorId string
+}
+
+// GetMirrorRequestParams is parameters of getMirrorRequest operation.
+type GetMirrorRequestParams struct {
+	RequestId uuid.UUID
 }
 
 // GetOrgParams is parameters of getOrg operation.

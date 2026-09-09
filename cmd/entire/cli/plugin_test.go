@@ -174,6 +174,52 @@ func TestResolvePlugin_PathTraversal(t *testing.T) {
 	}
 }
 
+// TestMaybeRunPlugin_RelativePathEntry_ErrDotNotBypassed reproduces the
+// concrete RCE precondition: $PATH contains a relative entry (a common shape
+// from direnv PATH_add, project-local bin/ wrappers, node_modules/.bin-style
+// patterns, or a literal "."), and the current directory contains a
+// repo-planted entire-<name> binary reachable through that relative entry.
+//
+// exec.LookPath deliberately refuses to resolve a binary found via a
+// relative PATH entry (returns exec.ErrDot) -- that refusal is Go's fix for
+// the classic "dot in PATH" RCE class. Before the fix, resolvePlugin's
+// fallback (findInaccessiblePlugin) re-walked the same PATH entries with a
+// plain os.Stat, blind to *why* LookPath failed, re-found the very file
+// LookPath just refused, and runPlugin executed it -- because the resolved
+// path contains a separator, Go's exec.Command does not re-apply the ErrDot
+// check for it. Net effect: a planted binary in an untrusted working
+// directory ran silently with the user's full privileges.
+func TestMaybeRunPlugin_RelativePathEntry_ErrDotNotBypassed(t *testing.T) { //nolint:paralleltest // mutates PATH and CWD via t.Setenv/t.Chdir
+	if runtime.GOOS == windowsGOOS {
+		t.Skip("PATH separator / ErrDot semantics are POSIX-specific")
+	}
+	root := t.TempDir()
+	binDir := filepath.Join(root, "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatalf("mkdir bin: %v", err)
+	}
+	// A real, executable, shebang'd binary -- not a mock -- planted under a
+	// RELATIVE subdirectory of what will become the current directory.
+	argFile := filepath.Join(root, "args.txt")
+	writePluginBinary(t, binDir, "entire-errdotcheck", argFile, 0)
+
+	origPath := os.Getenv("PATH")
+	t.Chdir(root)
+	// "bin" is relative: exactly the direnv PATH_add / project-local-bin
+	// shape the finding describes. This is a real os.Setenv the real
+	// exec.LookPath call inside resolvePlugin will observe.
+	t.Setenv("PATH", "bin"+string(os.PathListSeparator)+origPath)
+
+	handled, _ := MaybeRunPlugin(context.Background(), newTestRoot(), []string{"errdotcheck"})
+	if handled {
+		t.Fatal("a plugin reachable only via a RELATIVE PATH entry must not resolve/execute " +
+			"(this is the exec.ErrDot bypass / RCE the fix prevents)")
+	}
+	if _, err := os.Stat(argFile); err == nil {
+		t.Fatal("planted binary via relative PATH entry WAS EXECUTED -- RCE bypass of exec.ErrDot reproduced")
+	}
+}
+
 func TestRunPlugin_ExitCodePropagation(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
@@ -261,4 +307,24 @@ func equalStrings(a, b []string) bool {
 		}
 	}
 	return true
+}
+
+// TestFindInaccessiblePlugin_SkipsRelativePATHEntry pins that the fallback
+// scan honours the same absolute-only rule as every other $PATH scanner: a
+// file in a repository the user happens to be standing in is not a plugin.
+func TestFindInaccessiblePlugin_SkipsRelativePATHEntry(t *testing.T) {
+	dir := t.TempDir()
+	t.Chdir(dir)
+	relDir := "planted"
+	if err := os.MkdirAll(filepath.Join(dir, relDir), 0o755); err != nil {
+		t.Fatalf("create planted dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, relDir, "entire-planted"), []byte("#!/bin/sh\n"), 0o644); err != nil {
+		t.Fatalf("write planted file: %v", err)
+	}
+	t.Setenv("PATH", relDir)
+
+	if got, found := findInaccessiblePlugin("entire-planted"); found {
+		t.Errorf("findInaccessiblePlugin found %q via a relative $PATH entry, want no match", got)
+	}
 }

@@ -20,17 +20,33 @@ import (
 )
 
 var (
-	loadSummarySettings             = LoadEntireSettings
-	loadSummarySettingsFromFile     = settings.LoadFromFile
-	saveLocalSummarySettings        = SaveEntireSettingsLocal
-	getSummaryAgent                 = agent.Get
-	listRegisteredAgents            = agent.List
-	isSummaryCLIAvailable           = agent.IsSummaryCLIAvailable
-	discoverSummaryProviders        = external.DiscoverAndRegister
-	discoverSummaryProvidersAlways  = external.DiscoverAndRegisterAlways
-	discoverDispatchSummaryProvider = external.DiscoverAndRegisterNamedAlways
-	canPromptForSummaryProvider     = interactive.CanPromptInteractively
-	promptSummaryProvider           = promptForSummaryProvider
+	loadSummarySettings            = LoadEntireSettings
+	loadSummarySettingsFromFile    = settings.LoadFromFile
+	saveLocalSummarySettings       = SaveEntireSettingsLocal
+	getSummaryAgent                = agent.Get
+	listRegisteredAgents           = agent.List
+	isSummaryCLIAvailable          = agent.IsSummaryCLIAvailable
+	discoverSummaryProviders       = external.DiscoverAndRegister
+	discoverSummaryProvidersAlways = external.DiscoverAndRegisterAlways
+	discoverNamedSummaryProvider   = external.DiscoverAndRegisterNamedAlways
+	canPromptForSummaryProvider    = interactive.CanPromptInteractively
+	promptSummaryProvider          = promptForSummaryProvider
+)
+
+// summarySelectionOrigin records who chose a summary provider. It gates the
+// external_agents grant, which is repo-wide rather than scoped to the chosen
+// provider: it turns on the $PATH sweep that executes every entire-agent-*
+// binary from then on. Installing a plugin is consent to "this plugin exists",
+// and picking it in the prompt is consent to run plugins generally, but a code
+// path that selected the only candidate (or the first of several on a headless
+// run) has no such consent behind it.
+type summarySelectionOrigin int
+
+const (
+	// selectionAutomatic is a provider the resolver picked on its own.
+	selectionAutomatic summarySelectionOrigin = iota
+	// selectionByUser is a provider a human picked at the prompt.
+	selectionByUser
 )
 
 type checkpointSummaryProvider struct {
@@ -54,7 +70,7 @@ func resolveDispatchSummaryProvider(ctx context.Context, w io.Writer, override s
 
 	providerName := types.AgentName(override)
 	if _, err := getSummaryAgent(providerName); err != nil {
-		if err := discoverDispatchSummaryProvider(ctx, providerName); err != nil {
+		if err := discoverNamedSummaryProvider(ctx, providerName); err != nil {
 			return nil, err
 		}
 	}
@@ -81,9 +97,11 @@ func resolveCheckpointSummaryProvider(ctx context.Context, w io.Writer) (*checkp
 
 	// Use the always-variant so installed external plugins surface in the
 	// picker even when external_agents is currently off. Installation
-	// (placing entire-agent-* on $PATH) is the user's opt-in to "this
-	// plugin exists"; selecting it in the picker is when external_agents
-	// flips on (handled by persistSummaryProviderSelection).
+	// (placing entire-agent-* on $PATH) is the user's opt-in to "this plugin
+	// exists", and picking it at the prompt is the opt-in to running plugins
+	// generally, which is the only thing that flips external_agents. The
+	// non-interactive branches below reach this same list without a prompt, so
+	// they select a provider but grant nothing. See summarySelectionOrigin.
 	discoverSummaryProvidersAlways(ctx)
 	candidates := listEnabledSummaryProviders(ctx)
 
@@ -91,17 +109,17 @@ func resolveCheckpointSummaryProvider(ctx context.Context, w io.Writer) (*checkp
 	case 0:
 		return nil, errors.New("no summary-capable provider is available; install claude, codex, gemini, pi, cursor, or copilot, install an external entire-agent-* plugin that declares text_generator, or set summary_generation.provider in settings")
 	case 1:
-		return autoSelectSummaryProvider(ctx, w, candidates[0].Name, "non-interactive auto-select: single installed provider")
+		return autoSelectSummaryProvider(ctx, w, candidates[0].Name, "non-interactive auto-select: single installed provider", selectionAutomatic)
 	default:
 		if !canPromptForSummaryProvider() {
-			return autoSelectSummaryProvider(ctx, w, candidates[0].Name, "non-interactive auto-select: first detected of multiple")
+			return autoSelectSummaryProvider(ctx, w, candidates[0].Name, "non-interactive auto-select: first detected of multiple", selectionAutomatic)
 		}
 
 		selected, err := promptSummaryProvider(candidates)
 		if err != nil {
 			return nil, err
 		}
-		provider, err := autoSelectSummaryProvider(ctx, w, selected, "interactive prompt selection")
+		provider, err := autoSelectSummaryProvider(ctx, w, selected, "interactive prompt selection", selectionByUser)
 		if err != nil {
 			return nil, err
 		}
@@ -110,31 +128,50 @@ func resolveCheckpointSummaryProvider(ctx context.Context, w io.Writer) (*checkp
 	}
 }
 
+// discoverSummaryProviderIfMissing resolves a configured provider name that is
+// not registered yet.
+//
+// Named, never the sweep. The name arrives from summary_generation.provider,
+// which is honored from the COMMITTED .entire/settings.json, so routing it
+// through DiscoverAndRegisterAlways would let a pull request turn one settings
+// line into "glob every absolute $PATH directory and run every
+// entire-agent-* binary's info subcommand" on whoever pulls it. The named
+// lookup returns immediately for a built-in and touches exactly one binary
+// otherwise, so the ordinary case costs nothing either.
+//
+// The error is dropped for the reason discoverNamedExternalAgent gives: the
+// caller reports an unresolvable provider a few lines later, in terms of the
+// provider the user named rather than of the plugin protocol.
 func discoverSummaryProviderIfMissing(ctx context.Context, name types.AgentName) {
 	if _, err := getSummaryAgent(name); err == nil {
 		return
 	}
-	discoverSummaryProvidersAlways(ctx)
+	//nolint:errcheck,gosec // see doc comment: ensureSummaryProviderPresent reports it
+	discoverNamedSummaryProvider(ctx, name)
 }
 
 // autoSelectSummaryProvider builds a provider for an auto-selected candidate
 // (single-installed or non-interactive-first-of-many) and persists the choice
 // so subsequent runs don't re-decide. Persistence failure is surfaced as a
 // warning — not an error — because the selection is still usable in-process.
-func autoSelectSummaryProvider(ctx context.Context, w io.Writer, name types.AgentName, reason string) (*checkpointSummaryProvider, error) {
+func autoSelectSummaryProvider(ctx context.Context, w io.Writer, name types.AgentName, reason string, origin summarySelectionOrigin) (*checkpointSummaryProvider, error) {
 	logging.Info(ctx, reason, "provider", string(name))
 	provider, err := buildCheckpointSummaryProvider(name, "")
 	if err != nil {
 		return nil, err
 	}
-	flagFlipped, saveErr := persistSummaryProviderSelection(ctx, provider.Name, provider.Model)
+	flagFlipped, saveErr := persistSummaryProviderSelection(ctx, provider.Name, provider.Model, origin)
 	if saveErr != nil {
 		logging.Warn(ctx, "failed to save summary provider selection, continuing without persistence",
 			"error", saveErr.Error())
 		fmt.Fprintf(w, "Warning: could not save provider selection: %v\nUse `entire configure --summarize-provider %s` to set it manually.\n", saveErr, provider.Name)
 	}
+	// Verified, not assumed: persistSummaryProviderSelection writes the grant
+	// into settings.local.json, and a tracked one is dropped wholesale on the
+	// next load. Announcing the flip without reading it back is the same false
+	// claim enableExternalAgentsLocally now avoids.
 	if flagFlipped {
-		fmt.Fprintln(w, externalAgentsAutoEnabledNotice)
+		reportExternalAgentsGrant(w, verifyExternalAgentsGrant(ctx))
 	}
 	return provider, nil
 }
@@ -264,7 +301,7 @@ func validateSummaryProvider(provider string) error {
 // plugin can actually run; in that case it returns flagFlipped=true so the
 // caller can surface a one-time notice. The flag is written to local because
 // the provider choice is already machine-specific (depends on $PATH).
-func persistSummaryProviderSelection(ctx context.Context, provider types.AgentName, model string) (flagFlipped bool, err error) {
+func persistSummaryProviderSelection(ctx context.Context, provider types.AgentName, model string, origin summarySelectionOrigin) (flagFlipped bool, err error) {
 	targetFileAbs, err := paths.AbsPath(ctx, settings.EntireSettingsLocalFile)
 	if err != nil {
 		targetFileAbs = settings.EntireSettingsLocalFile
@@ -279,9 +316,17 @@ func persistSummaryProviderSelection(ctx context.Context, provider types.AgentNa
 	}
 	s.SummaryGeneration.SetProvider(string(provider), model)
 
-	if ag, getErr := getSummaryAgent(provider); getErr == nil && external.IsExternal(ag) && !s.ExternalAgents {
-		s.ExternalAgents = true
-		flagFlipped = true
+	// Only a human's pick grants external_agents. The provider name is
+	// persisted either way — it decides nothing on its own, and it is what
+	// stops the next run re-deciding. An automatically chosen external
+	// provider keeps working without the grant, because
+	// discoverSummaryProviderIfMissing resolves a configured name through the
+	// named ungated lookup rather than through the sweep the grant enables.
+	if origin == selectionByUser {
+		if ag, getErr := getSummaryAgent(provider); getErr == nil && external.IsExternal(ag) && !s.ExternalAgents {
+			s.ExternalAgents = true
+			flagFlipped = true
+		}
 	}
 
 	if err := saveLocalSummarySettings(ctx, s); err != nil {

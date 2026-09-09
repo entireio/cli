@@ -14,7 +14,6 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent/factoryaidroid"
 	"github.com/entireio/cli/cmd/entire/cli/agent/geminicli"
 	_ "github.com/entireio/cli/cmd/entire/cli/agent/opencode" // Register OpenCode agent
-	"github.com/entireio/cli/cmd/entire/cli/transcript"
 )
 
 // TestAgentDetection verifies agent detection and default behavior.
@@ -131,14 +130,15 @@ func TestAgentHookInstallation(t *testing.T) {
 			t.Error("settings.json was not created")
 		}
 
-		// Verify permissions.deny contains metadata deny rule
+		// The metadata deny rule is retired: setup must not install one.
+		// See agent.MetadataDenyRule.
 		data, err := os.ReadFile(settingsPath)
 		if err != nil {
 			t.Fatalf("failed to read settings.json: %v", err)
 		}
 		content := string(data)
-		if !strings.Contains(content, "Read(./.entire/metadata/**)") {
-			t.Error("settings.json should contain permissions.deny rule for .entire/metadata/**")
+		if strings.Contains(content, "Read(./.entire/metadata/**)") {
+			t.Error("settings.json should not contain a permissions.deny rule for .entire/metadata/**")
 		}
 	})
 
@@ -285,98 +285,6 @@ func TestAgentSessionOperations(t *testing.T) {
 		err = ag.WriteSession(context.Background(), session)
 		if err == nil {
 			t.Error("WriteSession() should reject session from different agent")
-		}
-	})
-}
-
-// TestClaudeCodeHelperMethods verifies Claude-specific helper methods.
-func TestClaudeCodeHelperMethods(t *testing.T) {
-	t.Parallel()
-
-	t.Run("TruncateAtUUID truncates transcript", func(t *testing.T) {
-		t.Parallel()
-		env := NewTestEnv(t)
-
-		transcriptPath := filepath.Join(env.RepoDir, "transcript.jsonl")
-		content := `{"type":"user","uuid":"u1","message":{"content":"first"}}
-{"type":"assistant","uuid":"a1","message":{"content":[]}}
-{"type":"user","uuid":"u2","message":{"content":"second"}}
-{"type":"assistant","uuid":"a2","message":{"content":[]}}
-`
-		if err := os.WriteFile(transcriptPath, []byte(content), 0o644); err != nil {
-			t.Fatalf("failed to write transcript: %v", err)
-		}
-
-		ag, err := agent.Get(agentClaudeCode)
-		if err != nil {
-			t.Fatalf("agent.Get(claude-code) error = %v", err)
-		}
-		ccAgent, ok := ag.(*claudecode.ClaudeCodeAgent)
-		if !ok {
-			t.Fatalf("ag is not *claudecode.ClaudeCodeAgent, got %T", ag)
-		}
-
-		session, err := ag.ReadSession(&agent.HookInput{
-			SessionID:  "test",
-			SessionRef: transcriptPath,
-		})
-		if err != nil {
-			t.Fatalf("ReadSession() error = %v", err)
-		}
-
-		truncated, err := ccAgent.TruncateAtUUID(session, "a1")
-		if err != nil {
-			t.Fatalf("TruncateAtUUID() error = %v", err)
-		}
-
-		// Parse the truncated native data to verify
-		lines, err := transcript.ParseFromBytes(truncated.NativeData)
-		if err != nil {
-			t.Fatalf("ParseFromBytes() error = %v", err)
-		}
-		if len(lines) != 2 {
-			t.Errorf("truncated transcript has %d lines, want 2", len(lines))
-		}
-		if lines[len(lines)-1].UUID != "a1" {
-			t.Errorf("last line UUID = %q, want %q", lines[len(lines)-1].UUID, "a1")
-		}
-	})
-
-	t.Run("FindCheckpointUUID finds tool result", func(t *testing.T) {
-		t.Parallel()
-		env := NewTestEnv(t)
-
-		transcriptPath := filepath.Join(env.RepoDir, "transcript.jsonl")
-		content := `{"type":"assistant","uuid":"a1","message":{"content":[{"type":"tool_use","id":"tool-123"}]}}
-{"type":"user","uuid":"u1","message":{"content":[{"type":"tool_result","tool_use_id":"tool-123"}]}}
-`
-		if err := os.WriteFile(transcriptPath, []byte(content), 0o644); err != nil {
-			t.Fatalf("failed to write transcript: %v", err)
-		}
-
-		ag, err := agent.Get(agentClaudeCode)
-		if err != nil {
-			t.Fatalf("agent.Get(claude-code) error = %v", err)
-		}
-		ccAgent, ok := ag.(*claudecode.ClaudeCodeAgent)
-		if !ok {
-			t.Fatalf("ag is not *claudecode.ClaudeCodeAgent, got %T", ag)
-		}
-
-		session, err := ag.ReadSession(&agent.HookInput{
-			SessionID:  "test",
-			SessionRef: transcriptPath,
-		})
-		if err != nil {
-			t.Fatalf("ReadSession() error = %v", err)
-		}
-
-		uuid, found := ccAgent.FindCheckpointUUID(session, "tool-123")
-		if !found {
-			t.Error("FindCheckpointUUID() found = false, want true")
-		}
-		if uuid != "u1" {
-			t.Errorf("FindCheckpointUUID() uuid = %q, want %q", uuid, "u1")
 		}
 	})
 }
@@ -896,9 +804,10 @@ func testFactoryAIDroidInstallsAllHooks(t *testing.T) {
 		t.Error("settings.json should contain PreCompact hook")
 	}
 
-	// Verify permissions.deny contains metadata deny rule
-	if !strings.Contains(content, "Read(./.entire/metadata/**)") {
-		t.Error("settings.json should contain permissions.deny rule for .entire/metadata/**")
+	// The metadata deny rule is retired: setup must not install one.
+	// See agent.MetadataDenyRule.
+	if strings.Contains(content, "Read(./.entire/metadata/**)") {
+		t.Error("settings.json should not contain a permissions.deny rule for .entire/metadata/**")
 	}
 }
 

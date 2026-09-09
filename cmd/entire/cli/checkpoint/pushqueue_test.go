@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/go-git/go-git/v6"
 	"github.com/go-git/go-git/v6/plumbing"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -145,15 +146,24 @@ func TestPushQueue_RemovePreservesLaterEntries(t *testing.T) {
 
 func TestPushQueue_RemovePreservesNewerSameRefEntry(t *testing.T) {
 	t.Parallel()
+	repo, err := git.PlainInit(t.TempDir(), false)
+	require.NoError(t, err)
 	q := NewPushQueue(t.TempDir())
+	q.repo = repo
 	ref := mustRefName(t, "a1b2c3d4e5f6")
+	firstHash := plumbing.NewHash(strings.Repeat("a", 40))
+	secondHash := plumbing.NewHash(strings.Repeat("b", 40))
+	require.NoError(t, repo.Storer.SetReference(plumbing.NewHashReference(ref, firstHash)))
 
 	// Simulate the same ref advancing and being enqueued during the push.
 	require.NoError(t, q.Enqueue(ref))
 	drained, err := q.Drain()
 	require.NoError(t, err)
+	require.Equal(t, []plumbing.ReferenceName{ref}, drained)
+	expected := map[string]plumbing.Hash{ref.String(): firstHash}
+	require.NoError(t, repo.Storer.SetReference(plumbing.NewHashReference(ref, secondHash)))
 	require.NoError(t, q.Enqueue(ref))
-	require.NoError(t, q.Remove(drained))
+	require.NoError(t, q.RemoveIfUnchanged(drained, expected))
 
 	remaining, err := q.Peek()
 	require.NoError(t, err)

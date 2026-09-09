@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
 	"slices"
 	"strings"
 
@@ -18,8 +17,10 @@ import (
 
 // Ensure ClaudeCodeAgent implements HookSupport
 var (
-	_ agent.HookSupport   = (*ClaudeCodeAgent)(nil)
-	_ agent.HookFreshness = (*ClaudeCodeAgent)(nil)
+	_ agent.HookSupport           = (*ClaudeCodeAgent)(nil)
+	_ agent.HookConfigLocator     = (*ClaudeCodeAgent)(nil)
+	_ agent.HookFreshness         = (*ClaudeCodeAgent)(nil)
+	_ agent.PermissionConfigOwner = (*ClaudeCodeAgent)(nil)
 )
 
 // Claude Code hook names - these become subcommands under `entire hooks claude-code`
@@ -56,31 +57,31 @@ const (
 // This is Claude-specific and not shared with other agents.
 const ClaudeSettingsFileName = "settings.json"
 
-// metadataDenyRule blocks Claude from reading Entire session metadata
-const metadataDenyRule = "Read(./.entire/metadata/**)"
-
 // InstallHooks installs Claude Code hooks in .claude/settings.json.
 // If force is true, removes existing Entire hooks before installing.
 // Returns the number of hooks installed.
 //
 // Split into per-phase helpers below; see each helper's doc.
 func (c *ClaudeCodeAgent) InstallHooks(ctx context.Context, force bool) (int, error) {
-	repoRoot, err := resolveInstallRepoRoot(ctx)
+	cfg, err := claudeHookConfig(ctx)
 	if err != nil {
 		return 0, err
 	}
-	settingsPath := filepath.Join(repoRoot, ".claude", ClaudeSettingsFileName)
 
-	rawSettings, rawHooks, rawPermissions, err := loadRawClaudeSettingsForInstall(settingsPath)
+	rawSettings, rawHooks, rawPermissions, err := loadRawClaudeSettingsForInstall(cfg)
 	if err != nil {
 		return 0, err
 	}
 
 	count, staleDropped := installHookEntries(rawHooks, force)
 
-	permissionsChanged, err := applyMetadataDenyRule(rawPermissions)
+	// Unconditional, like the stale-hook migration in installHookEntries: a
+	// plain `entire enable` must drop the retired metadata deny rule, not just
+	// --force. See agent.MetadataDenyRule for why it is retired. Removing it is
+	// the whole reason a normal enable still touches permissions.
+	permissionsChanged, err := agent.RemoveMetadataDenyRule(rawPermissions)
 	if err != nil {
-		return 0, err
+		return 0, fmt.Errorf("failed to update permissions in %s: %w", cfg.Path(), err)
 	}
 
 	// staleDropped forces a write even when nothing was added: a file holding
@@ -90,11 +91,24 @@ func (c *ClaudeCodeAgent) InstallHooks(ctx context.Context, force bool) (int, er
 		return 0, nil // All hooks and permissions already installed
 	}
 
-	if err := writeClaudeSettingsFile(settingsPath, rawSettings, rawHooks, rawPermissions); err != nil {
+	if err := writeClaudeSettingsFile(cfg, rawSettings, rawHooks, rawPermissions); err != nil {
 		return 0, err
 	}
 
 	return count, nil
+}
+
+// claudeHookConfig returns .claude/settings.json for the current worktree,
+// opened through the worktree's root. Every read, write and removal of that
+// file goes through it: the path lives in the working tree, which arrives by
+// clone, so a checked-in symlink at `.claude` must not be a directory Entire
+// creates and writes through.
+func claudeHookConfig(ctx context.Context) (*agent.HookConfigFile, error) {
+	repoRoot, err := resolveInstallRepoRoot(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return agent.OpenHookConfig(repoRoot, (&ClaudeCodeAgent{}).HookConfigRelPath()) //nolint:wrapcheck // agent.HookConfigFile already names the file in its error
 }
 
 // resolveInstallRepoRoot locates the repo root InstallHooks writes under,
@@ -113,12 +127,12 @@ func resolveInstallRepoRoot(ctx context.Context) (string, error) {
 	return repoRoot, nil
 }
 
-// loadRawClaudeSettingsForInstall reads settingsPath (if present) and returns
+// loadRawClaudeSettingsForInstall reads cfg (if present) and returns
 // its top-level fields as raw JSON maps, ready for InstallHooks to mutate.
 // rawHooks and rawPermissions are always non-nil (empty maps when absent) so
 // callers never need a nil check before indexing them.
-func loadRawClaudeSettingsForInstall(settingsPath string) (rawSettings, rawHooks, rawPermissions map[string]json.RawMessage, err error) {
-	existingData, readErr := os.ReadFile(settingsPath) //nolint:gosec // path is constructed from repo root + settings file name
+func loadRawClaudeSettingsForInstall(cfg *agent.HookConfigFile) (rawSettings, rawHooks, rawPermissions map[string]json.RawMessage, err error) {
+	existingData, readErr := cfg.Read()
 	if readErr == nil {
 		if err := json.Unmarshal(existingData, &rawSettings); err != nil {
 			return nil, nil, nil, fmt.Errorf("failed to parse existing settings.json: %w", err)
@@ -243,46 +257,28 @@ func installHookEntries(rawHooks map[string]json.RawMessage, force bool) (count 
 	return count, staleDropped
 }
 
-// applyMetadataDenyRule adds the Entire metadata deny rule to rawPermissions
-// if it isn't already present, mutating rawPermissions["deny"] in place.
-// Returns whether anything changed.
-func applyMetadataDenyRule(rawPermissions map[string]json.RawMessage) (bool, error) {
-	var denyRules []string
-	if denyRaw, ok := rawPermissions["deny"]; ok {
-		if err := json.Unmarshal(denyRaw, &denyRules); err != nil {
-			return false, fmt.Errorf("failed to parse permissions.deny in settings.json: %w", err)
-		}
-	}
-	if slices.Contains(denyRules, metadataDenyRule) {
-		return false, nil
-	}
-	denyRules = append(denyRules, metadataDenyRule)
-	denyJSON, err := json.Marshal(denyRules)
-	if err != nil {
-		return false, fmt.Errorf("failed to marshal permissions.deny: %w", err)
-	}
-	rawPermissions["deny"] = denyJSON
-	return true, nil
-}
-
 // writeClaudeSettingsFile marshals rawHooks and rawPermissions into
-// rawSettings and writes the result to settingsPath, creating the parent
-// .claude directory if needed.
-func writeClaudeSettingsFile(settingsPath string, rawSettings, rawHooks, rawPermissions map[string]json.RawMessage) error {
+// rawSettings and writes the result through cfg, creating the parent .claude
+// directory if needed.
+func writeClaudeSettingsFile(cfg *agent.HookConfigFile, rawSettings, rawHooks, rawPermissions map[string]json.RawMessage) error {
 	hooksJSON, err := jsonutil.MarshalWithNoHTMLEscape(rawHooks)
 	if err != nil {
 		return fmt.Errorf("failed to marshal hooks: %w", err)
 	}
 	rawSettings["hooks"] = hooksJSON
 
-	permJSON, err := jsonutil.MarshalWithNoHTMLEscape(rawPermissions)
-	if err != nil {
-		return fmt.Errorf("failed to marshal permissions: %w", err)
-	}
-	rawSettings["permissions"] = permJSON
-
-	if err := os.MkdirAll(filepath.Dir(settingsPath), 0o750); err != nil {
-		return fmt.Errorf("failed to create .claude directory: %w", err)
+	// An emptied permissions block is deleted, not written back as {}. Removing
+	// the retired deny rule can empty it, and leaving "permissions": {} behind
+	// in a tracked settings file is noise Entire put there. UninstallHooks and
+	// agent.RepairRetiredMetadataDenyRule both do the same.
+	if len(rawPermissions) == 0 {
+		delete(rawSettings, "permissions")
+	} else {
+		permJSON, err := jsonutil.MarshalWithNoHTMLEscape(rawPermissions)
+		if err != nil {
+			return fmt.Errorf("failed to marshal permissions: %w", err)
+		}
+		rawSettings["permissions"] = permJSON
 	}
 
 	output, err := jsonutil.MarshalIndentWithNewline(rawSettings, "", "  ")
@@ -290,11 +286,9 @@ func writeClaudeSettingsFile(settingsPath string, rawSettings, rawHooks, rawPerm
 		return fmt.Errorf("failed to marshal settings: %w", err)
 	}
 
-	if err := os.WriteFile(settingsPath, output, 0o600); err != nil {
-		return fmt.Errorf("failed to write settings.json: %w", err)
-	}
-
-	return nil
+	// Write creates .claude with MkdirAllNoSymlink, so a checked-in symlink
+	// there is refused by name rather than followed.
+	return cfg.Write(output, 0o600) //nolint:wrapcheck // agent.HookConfigFile already names the file in its error
 }
 
 // parseHookType parses a specific hook type from rawHooks into the target slice.
@@ -322,13 +316,11 @@ func marshalHookType(rawHooks map[string]json.RawMessage, hookType string, match
 
 // UninstallHooks removes Entire hooks from Claude Code settings.
 func (c *ClaudeCodeAgent) UninstallHooks(ctx context.Context) error {
-	// Use repo root to find .claude directory when run from a subdirectory
-	repoRoot, err := paths.WorktreeRoot(ctx)
+	cfg, err := claudeHookConfig(ctx)
 	if err != nil {
-		repoRoot = "." // Fallback to CWD if not in a git repo
+		return err
 	}
-	settingsPath := filepath.Join(repoRoot, ".claude", ClaudeSettingsFileName)
-	data, err := os.ReadFile(settingsPath) //nolint:gosec // path is constructed from repo root + fixed path
+	data, err := cfg.Read()
 	if err != nil {
 		// Same split AreHooksInstalled makes: an absent file is an answer, an
 		// unreadable one is not. Collapsing both to "nothing to uninstall" leaves
@@ -337,7 +329,7 @@ func (c *ClaudeCodeAgent) UninstallHooks(ctx context.Context) error {
 		if errors.Is(err, os.ErrNotExist) {
 			return nil
 		}
-		return fmt.Errorf("read %s: %w", settingsPath, err)
+		return fmt.Errorf("read %s: %w", cfg.Path(), err)
 	}
 
 	var rawSettings map[string]json.RawMessage
@@ -394,27 +386,10 @@ func (c *ClaudeCodeAgent) UninstallHooks(ctx context.Context) error {
 	}
 
 	if rawPermissions != nil {
-		if denyRaw, ok := rawPermissions["deny"]; ok {
-			var denyRules []string
-			if err := json.Unmarshal(denyRaw, &denyRules); err == nil {
-				// Filter out the metadata deny rule
-				filteredRules := make([]string, 0, len(denyRules))
-				for _, rule := range denyRules {
-					if rule != metadataDenyRule {
-						filteredRules = append(filteredRules, rule)
-					}
-				}
-				if len(filteredRules) > 0 {
-					denyJSON, err := json.Marshal(filteredRules)
-					if err == nil {
-						rawPermissions["deny"] = denyJSON
-					}
-				} else {
-					// Remove empty deny array
-					delete(rawPermissions, "deny")
-				}
-			}
-		}
+		// Same removal InstallHooks now performs; a marshal failure here leaves
+		// the rule in place, which uninstall reports through the write below
+		// rather than aborting the rest of the hook removal.
+		_, _ = agent.RemoveMetadataDenyRule(rawPermissions) //nolint:errcheck // best-effort during uninstall; hook removal must still complete
 
 		// If permissions is empty, remove it entirely
 		if len(rawPermissions) > 0 {
@@ -443,10 +418,7 @@ func (c *ClaudeCodeAgent) UninstallHooks(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("failed to marshal settings: %w", err)
 	}
-	if err := os.WriteFile(settingsPath, output, 0o600); err != nil {
-		return fmt.Errorf("failed to write settings.json: %w", err)
-	}
-	return nil
+	return cfg.Write(output, 0o600) //nolint:wrapcheck // agent.HookConfigFile already names the file in its error
 }
 
 // loadClaudeSettings reads and parses .claude/settings.json from the repo root.
@@ -454,27 +426,25 @@ func (c *ClaudeCodeAgent) UninstallHooks(ctx context.Context) error {
 // "nothing configured". An unreadable or malformed file returns an error: the
 // answer could not be read, which is a different thing.
 func loadClaudeSettings(ctx context.Context) (ClaudeSettings, error) {
-	// Use repo root to find .claude directory when run from a subdirectory
-	repoRoot, err := paths.WorktreeRoot(ctx)
+	cfg, err := claudeHookConfig(ctx)
 	if err != nil {
-		repoRoot = "." // Fallback to CWD if not in a git repo
+		return ClaudeSettings{}, err
 	}
-	settingsPath := filepath.Join(repoRoot, ".claude", ClaudeSettingsFileName)
-	data, err := os.ReadFile(settingsPath) //nolint:gosec // path is constructed from repo root + fixed path
+	data, err := cfg.Read()
 	// No settings file means no hooks, which is an answer; anything else means we
 	// could not read the answer.
 	if errors.Is(err, os.ErrNotExist) {
 		return ClaudeSettings{}, nil
 	}
 	if err != nil {
-		logging.Warn(ctx, "claude-code: failed to read settings file", "path", settingsPath, "err", err)
-		return ClaudeSettings{}, fmt.Errorf("read %s: %w", settingsPath, err)
+		logging.Warn(ctx, "claude-code: failed to read settings file", "path", cfg.Path(), "err", err)
+		return ClaudeSettings{}, fmt.Errorf("read %s: %w", cfg.Path(), err)
 	}
 
 	var settings ClaudeSettings
 	if err := json.Unmarshal(data, &settings); err != nil {
-		logging.Warn(ctx, "claude-code: failed to parse settings file", "path", settingsPath, "err", err)
-		return ClaudeSettings{}, fmt.Errorf("parse %s: %w", settingsPath, err)
+		logging.Warn(ctx, "claude-code: failed to parse settings file", "path", cfg.Path(), "err", err)
+		return ClaudeSettings{}, fmt.Errorf("parse %s: %w", cfg.Path(), err)
 	}
 	return settings, nil
 }
@@ -710,3 +680,13 @@ func removeEntireHooksFromMatchers(matchers []ClaudeHookMatcher) []ClaudeHookMat
 	// Same logic as removeEntireHooks - both work on the same structure
 	return removeEntireHooks(matchers)
 }
+
+// PermissionConfig implements agent.PermissionConfigOwner so the shared
+// retired-deny-rule diagnostics and repair can reach .claude/settings.json
+// without knowing Claude Code's layout.
+func (c *ClaudeCodeAgent) PermissionConfig(ctx context.Context) (*agent.HookConfigFile, error) {
+	return claudeHookConfig(ctx)
+}
+
+// HookConfigRelPath implements agent.HookConfigLocator.
+func (c *ClaudeCodeAgent) HookConfigRelPath() string { return ".claude/" + ClaudeSettingsFileName }

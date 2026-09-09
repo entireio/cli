@@ -61,11 +61,22 @@ var (
 	worktreeRootCacheDir string
 )
 
-// WorktreeRoot returns the git worktree root directory.
-// Uses 'git rev-parse --show-toplevel' which returns the working tree toplevel.
-// In a worktree this is the worktree root, not the main repository root.
-// The result is cached per working directory.
-// Returns an error if not inside a git repository.
+// WorktreeRoot returns the git worktree root directory — in a linked worktree
+// that worktree's root, not the main repository's. The result is cached per
+// working directory. Callers that need to distinguish "outside a repository"
+// from "could not find out" match ErrNotARepository; nothing else may be
+// read as the benign case.
+//
+// Everything Entire stores is located from this path — .entire via the entiredir
+// package, and the git common dir via gitdir — so a failure here used to be
+// papered over by callers falling back to a relative path, which then resolved
+// against wherever the process happened to be. From a subdirectory that silently
+// meant a second .entire beside the agent instead of the repository's one.
+//
+// The subprocess fails for more reasons than "no repository" — `git` off $PATH
+// is the common one — so those two outcomes are separated rather than merged:
+// only ErrNotARepository means "there is nothing here", and it is the only
+// failure any caller is allowed to answer with a directory of its own.
 func WorktreeRoot(ctx context.Context) (string, error) {
 	// Get current working directory to check cache validity
 	cwd, err := os.Getwd() //nolint:forbidigo // already present in codebase
@@ -82,7 +93,38 @@ func WorktreeRoot(ctx context.Context) (string, error) {
 	}
 	worktreeRootMu.RUnlock()
 
-	// Cache miss - get worktree root and update cache with write lock
+	root, err := resolveWorktreeRoot(ctx)
+	if err != nil {
+		return "", err
+	}
+
+	worktreeRootMu.Lock()
+	worktreeRootCache = root
+	worktreeRootCacheDir = cwd
+	worktreeRootMu.Unlock()
+
+	return root, nil
+}
+
+// resolveWorktreeRoot asks git, and treats every failure to get an answer as a
+// failure — it never substitutes a guess of its own.
+//
+// A walk up for a .git entry was tried here and removed. It looks like a free
+// improvement (it is the same search git performs, so it agrees with git
+// whenever both can run) but it is not, because it can only run in the cases
+// where git did NOT agree, and in every one of those git knew something the walk
+// cannot see: dubious ownership fires INSIDE a repository, so walking up finds
+// the .git git just refused and hands back a root the user's own git will not
+// use; a GIT_DIR pointing elsewhere makes the nearest .git the wrong answer, not
+// the right one. Refusing to run on a machine whose git is broken is the cheaper
+// mistake, and it is the rule RequireEntireDir already states.
+//
+// The one thing that must not happen is a failure here becoming a path anyway.
+// Callers used to fall back to a path relative to the current directory, which
+// from a subdirectory silently meant a second .entire beside the agent instead
+// of the repository's one. entiredir.anchor is the surviving fallback and it
+// fires only on the positive ErrNotARepository verdict below.
+func resolveWorktreeRoot(ctx context.Context) (string, error) {
 	cmd := exec.CommandContext(ctx, "git", "rev-parse", "--show-toplevel")
 	// Force C messages so classifyWorktreeRootError can recognise git's
 	// "not a repository" on a localized machine. Built by filtering rather than
@@ -90,6 +132,7 @@ func WorktreeRoot(ctx context.Context) (string, error) {
 	// first match on Unix, not the last. Everything else is inherited, so the
 	// GIT_DIR/GIT_WORK_TREE a hook exports still selects the worktree.
 	cmd.Env = envWithCMessages(os.Environ())
+
 	output, err := cmd.Output()
 	if err != nil {
 		return "", classifyWorktreeRootError(ctx, err)
@@ -102,12 +145,6 @@ func WorktreeRoot(ctx context.Context) (string, error) {
 	if root == "" {
 		return "", errors.New("git rev-parse --show-toplevel reported success but printed no path")
 	}
-
-	worktreeRootMu.Lock()
-	worktreeRootCache = root
-	worktreeRootCacheDir = cwd
-	worktreeRootMu.Unlock()
-
 	return root, nil
 }
 

@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
+	"github.com/entireio/cli/cmd/entire/cli/osroot"
 	"github.com/gofrs/flock"
 )
 
@@ -41,7 +43,7 @@ type RepoEntry struct {
 // does not exist. This is an unlocked read — fine for read-only callers; use
 // ModifyCache for read-modify-write sequences.
 func LoadCache(cacheDir string) (ClusterCache, error) {
-	return readCacheNoLock(filepath.Join(cacheDir, cacheFileName))
+	return readCacheNoLock(cacheFile{dir: cacheDir, name: cacheFileName})
 }
 
 // ModifyCache atomically applies fn to the node cache under a single
@@ -53,14 +55,14 @@ func ModifyCache(cacheDir string, fn func(ClusterCache) error) error {
 	return modifyCacheFile(cacheDir, cacheFileName, readCacheNoLock, writeCacheNoLock, fn)
 }
 
-func readCacheNoLock(path string) (ClusterCache, error) {
+func readCacheNoLock(f cacheFile) (ClusterCache, error) {
 	cache := make(ClusterCache)
-	err := loadCacheFile(path, &cache, func() ClusterCache { return make(ClusterCache) })
+	err := loadCacheFile(f, &cache, func() ClusterCache { return make(ClusterCache) })
 	return cache, err
 }
 
-func writeCacheNoLock(path string, cache ClusterCache) error {
-	return writeCacheFile(path, cache)
+func writeCacheNoLock(f cacheFile, cache ClusterCache) error {
+	return writeCacheFile(f, cache)
 }
 
 // --- shared cache-file primitives (used by every cache file in this
@@ -68,32 +70,32 @@ func writeCacheNoLock(path string, cache ClusterCache) error {
 
 // withCacheFileLock ensures cacheDir exists, takes the exclusive flock for
 // the named cache file, and runs fn with the file's path.
-func withCacheFileLock(cacheDir, fileName string, fn func(path string) error) error {
+func withCacheFileLock(cacheDir, fileName string, fn func(cacheFile) error) error {
 	if err := os.MkdirAll(cacheDir, 0700); err != nil {
 		return fmt.Errorf("create cache dir: %w", err)
 	}
-	path := filepath.Join(cacheDir, fileName)
-	unlock, err := lockCache(path)
+	f := cacheFile{dir: cacheDir, name: fileName}
+	unlock, err := lockCache(f.path())
 	if err != nil {
 		return err
 	}
 	defer unlock()
-	return fn(path)
+	return fn(f)
 }
 
 // modifyCacheFile runs a load → mutate → write cycle for one cache file with
 // the file's flock held throughout, so concurrent processes filling the same
 // entry don't clobber each other.
-func modifyCacheFile[T any](cacheDir, fileName string, read func(string) (T, error), write func(string, T) error, fn func(T) error) error {
-	return withCacheFileLock(cacheDir, fileName, func(path string) error {
-		c, err := read(path)
+func modifyCacheFile[T any](cacheDir, fileName string, read func(cacheFile) (T, error), write func(cacheFile, T) error, fn func(T) error) error {
+	return withCacheFileLock(cacheDir, fileName, func(f cacheFile) error {
+		c, err := read(f)
 		if err != nil {
 			return err
 		}
 		if err := fn(c); err != nil {
 			return err
 		}
-		return write(path, c)
+		return write(f, c)
 	})
 }
 
@@ -118,8 +120,8 @@ func lockCache(path string) (func(), error) {
 // callers. Returns an error only on a genuine read failure. Returning error
 // (rather than the cache value itself) keeps this generic helper off the
 // ireturn linter while still sharing the read/unmarshal logic across caches.
-func loadCacheFile[T any](path string, dst *T, newEmpty func() T) error {
-	data, exists, err := readCacheBytes(path)
+func loadCacheFile[T any](f cacheFile, dst *T, newEmpty func() T) error {
+	data, exists, err := readCacheBytes(f)
 	if err != nil {
 		return err
 	}
@@ -133,18 +135,68 @@ func loadCacheFile[T any](path string, dst *T, newEmpty func() T) error {
 }
 
 // writeCacheFile marshals v and writes it atomically (tmp + rename).
-func writeCacheFile[T any](path string, v T) error {
+func writeCacheFile[T any](f cacheFile, v T) error {
 	data, err := json.MarshalIndent(v, "", "  ")
 	if err != nil {
 		return fmt.Errorf("marshal cache: %w", err)
 	}
-	return writeCacheBytesAtomic(path, data)
+	return writeCacheBytesAtomic(f, data)
+}
+
+// cacheFile names one cache file by the DIRECTORY it lives in and its name
+// inside that directory, rather than by a joined path.
+//
+// The split is the point. Every read and write here goes through a root, and a
+// root anchored at filepath.Dir of the target contains exactly the one fixed
+// name it was handed — every component the caller resolved sits above it, so
+// the containment enforces nothing. Keeping the two apart means the base is
+// always the cache directory the caller chose ($XDG_CACHE_HOME/entire, or an
+// explicit one under test) and the name is always something this package owns.
+//
+// Cache file names are fixed today (nodes.json, cluster_cores.json,
+// api_discovery.json), but the entries inside them are keyed by cluster slug and
+// jurisdiction — the kind of value that becomes a filename the moment someone
+// shards the cache per cluster. The root means that change cannot reach outside
+// the cache directory.
+type cacheFile struct {
+	dir  string
+	name string
+}
+
+// path is the joined form, for the flock and for error text. Nothing does I/O
+// on it.
+func (f cacheFile) path() string { return filepath.Join(f.dir, f.name) }
+
+// root opens f.dir and returns f's name inside it.
+func (f cacheFile) root() (*os.Root, string, error) {
+	abs, err := filepath.Abs(f.dir)
+	if err != nil {
+		return nil, "", fmt.Errorf("resolve cache dir: %w", err)
+	}
+	root, err := osroot.Shared(abs)
+	if err != nil {
+		if os.IsNotExist(err) {
+			// Unwrapped so readCacheBytes can classify a cold cache.
+			return nil, "", err //nolint:wrapcheck // see comment
+		}
+		return nil, "", fmt.Errorf("open cache dir: %w", err)
+	}
+	return root, f.name, nil
 }
 
 // readCacheBytes returns the file contents and whether the file exists. A
 // missing file is (nil, false, nil); other read errors propagate.
-func readCacheBytes(path string) ([]byte, bool, error) {
-	data, err := os.ReadFile(path) // #nosec G304
+func readCacheBytes(f cacheFile) ([]byte, bool, error) {
+	root, name, err := f.root()
+	if err != nil {
+		if os.IsNotExist(err) {
+			// No cache directory means no cache, the same as no file. Callers
+			// treat both as a cold cache and refetch.
+			return nil, false, nil
+		}
+		return nil, false, err
+	}
+	data, err := osroot.ReadFileNoFollow(root, name)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, false, nil
@@ -156,14 +208,13 @@ func readCacheBytes(path string) ([]byte, bool, error) {
 
 // writeCacheBytesAtomic writes data via a tmp file + rename so a reader never
 // observes a half-written cache.
-func writeCacheBytesAtomic(path string, data []byte) error {
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0600); err != nil {
-		return fmt.Errorf("write cache tmp: %w", err)
+func writeCacheBytesAtomic(f cacheFile, data []byte) error {
+	root, name, err := f.root()
+	if err != nil {
+		return err
 	}
-	if err := os.Rename(tmp, path); err != nil {
-		os.Remove(tmp) //nolint:gosec // cleanup best-effort
-		return fmt.Errorf("rename cache: %w", err)
+	if err := jsonutil.WriteFileAtomicIn(root, name, data, 0o600); err != nil {
+		return fmt.Errorf("write cache: %w", err)
 	}
 	return nil
 }
