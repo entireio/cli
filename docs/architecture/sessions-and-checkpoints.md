@@ -482,17 +482,24 @@ destination is the Entire remote, not on whether the push was redirected there:
 a direct `git push entire` has the same empty destination and needs the same
 treatment. The first delivery
 prints a two-line stderr notice (the Entire remote, and the displaced remote
-that may still hold earlier checkpoints), latched by
-`entire-checkpoint-sync-entire.json` in the git common dir.
+that may still hold earlier checkpoints, pointing at `entire checkpoint
+migrate`), latched by `entire-checkpoint-sync-entire.json` in the git common
+dir; the same file records whether `entire checkpoint migrate` has moved (or
+the user declined to move) the backlog off the previous remote.
+`entire checkpoint migrate` is the migration: hydrate from the old remote into
+`refs/entire-sync-tmp/*` and promote via `SafelyAdvanceLocalRef`, convert a v1
+branch to refs, requeue every local checkpoint ref, publish through the OPF- and
+policy-gated queue flush, verify by ls-remote at the local hash, and delete from
+the old remote only what was verified (and only with consent).
 
 A gated push is not fully silent: when checkpoints are waiting for the
 elected remote, the hook prints a two-line stderr hint naming the elected
 destination, the waiting count, and the `checkpoint_push_remote` setting
 (pointed at `.entire/settings.local.json` — a remote name is a per-clone
-fact) that re-routes sync to the remote being pushed. When the push targets one
-of *several* Entire remotes (the tier did not apply), the hint names that
-setting for the remote just pushed. The hint stays quiet when the election was
-explicit (`checkpoint_push_remote` is already set),
+fact) that re-routes sync to the remote being pushed. When the push targets one of *several* Entire remotes (the tier did not
+apply), the hint instead names `entire checkpoint migrate --to <remote>`. The hint
+stays quiet when the election was explicit (`checkpoint_push_remote` is already
+set),
 when the push target is a raw URL rather than a configured remote, when
 nothing is waiting, when the election failed (the fail-closed case logs a
 warning instead), and when the push target is not the branch's declared push

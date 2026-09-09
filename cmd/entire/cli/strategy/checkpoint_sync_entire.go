@@ -26,8 +26,8 @@ import (
 // the tier flipped the election.
 //
 // This file holds the redirect, and the per-clone state that makes the first
-// delivery announce itself exactly once and records whether the checkpoint
-// migration command has moved the backlog over.
+// delivery announce itself exactly once and records whether
+// `entire checkpoint migrate` has moved the backlog over.
 
 // redirectToEntireSyncRemote applies the entire-tier push rule to ps: when no
 // dedicated checkpoint URL is in play and the election elected an entire://
@@ -73,8 +73,8 @@ const entireSyncStateFileName = "entire-checkpoint-sync-entire.json"
 // announced" and announce twice.
 const entireSyncStateLockName = "entire-checkpoint-sync-entire.lock"
 
-// EntireSyncMigration records whether the checkpoint migration command has dealt
-// with the checkpoints that predate the Entire remote.
+// EntireSyncMigration records whether `entire checkpoint migrate` has dealt with
+// the checkpoints that predate the Entire remote.
 type EntireSyncMigration string
 
 const (
@@ -101,7 +101,7 @@ type EntireSyncState struct {
 	DisplacedRemote string `json:"displaced_remote,omitempty"`
 	// AnnouncedAt is when the first delivery was announced; zero until then.
 	AnnouncedAt time.Time `json:"announced_at,omitempty"`
-	// Migration is the checkpoint migration command's verdict on the pre-Entire backlog.
+	// Migration is `entire checkpoint migrate`'s verdict on the pre-Entire backlog.
 	Migration EntireSyncMigration `json:"migration,omitempty"`
 	// MigratedFrom names the remote the backlog was moved from (or left on).
 	MigratedFrom string `json:"migrated_from,omitempty"`
@@ -209,7 +209,7 @@ func SaveEntireSyncState(ctx context.Context, st EntireSyncState) error {
 	return nil
 }
 
-// MarkEntireSyncMigration records the checkpoint migration command's verdict on the
+// MarkEntireSyncMigration records `entire checkpoint migrate`'s verdict on the
 // pre-Entire backlog — done or declined — and the remote it concerned, keeping
 // the announcement fields intact. Read-modify-write under the state lock.
 func MarkEntireSyncMigration(ctx context.Context, status EntireSyncMigration, from string) error {
@@ -279,7 +279,7 @@ func announceEntireSyncRemoteOnce(ctx context.Context, remoteName string) {
 	legacy := DisplacedCheckpointRemote(ctx)
 	if legacy != "" && st.Migration == EntireSyncMigrationNone {
 		fmt.Fprintf(stderrWriter,
-			"[entire] Earlier checkpoints may still be on %q; they stay readable from there.\n", legacy)
+			"[entire] Earlier checkpoints may still be on %q. Run `entire checkpoint migrate` to move them.\n", legacy)
 	}
 	logging.Info(ctx, "entire sync remote announced",
 		slog.String("remote", remoteName),

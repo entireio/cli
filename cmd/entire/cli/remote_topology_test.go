@@ -28,8 +28,9 @@ func TestDescribeCheckpointDestination_MultiRemoteNamesPushRemoteSetting(t *test
 
 	assert.Contains(t, got, "Header\n")
 	assert.Contains(t, got, "This repo has 2 remotes (fork, origin).")
-	assert.Contains(t, got, "set strategy_options.checkpoint_push_remote\n  to its name in .entire/settings.local.json")
-	assert.Contains(t, got, "see checkpoint_remote in the README.")
+	assert.Contains(t, got, "run `entire checkpoint migrate --to <remote>`")
+	assert.Contains(t, got, "strategy_options.checkpoint_push_remote in .entire/settings.local.json")
+	assert.Contains(t, got, "see\n  checkpoint_remote in the README.")
 	assert.NotContains(t, got, "set checkpoint_remote")
 	assert.NotContains(t, got, "To pin one repository")
 }
@@ -87,14 +88,14 @@ func TestDescribeCheckpointDestination_FanOutStillReported(t *testing.T) {
 	assert.NotContains(t, got, "user:pw")
 	assert.Contains(t, got, "  ✓ Checkpoints sync to entire (your Entire remote).\n")
 	assert.NotContains(t, got, "This repo has 2 remotes", "the multi-remote choice is settled by the Entire remote")
-	assert.NotContains(t, got, "set strategy_options.checkpoint_push_remote")
+	assert.NotContains(t, got, "checkpoint migrate --to")
 
 	// Without the election the fan-out block is followed by the picker advice.
 	topo.entireElected = ""
 	buf.Reset()
 	topo.describeCheckpointDestination(&buf, "Header")
 	assert.Contains(t, buf.String(), "This repo has 2 remotes (entire, origin).")
-	assert.Contains(t, buf.String(), "set strategy_options.checkpoint_push_remote")
+	assert.Contains(t, buf.String(), "entire checkpoint migrate --to <remote>")
 	assert.Contains(t, buf.String(), "→ https://github.com/o/r")
 	assert.Contains(t, buf.String(), "Checkpoints go to the first URL only")
 }
