@@ -204,7 +204,7 @@ func (s *ManualCommitStrategy) prePush(ctx context.Context, remote string, prote
 			// remote has none.
 			var boundFallback string
 			if ps.redirectedToSyncRemote() {
-				boundFallback = LegacyCheckpointRemote(ctx)
+				boundFallback = DisplacedCheckpointRemote(ctx)
 			}
 			if _, rewriteErr := rewriteUnpushedV1WithOPFBounded(ctx, repo, ps.pushTarget(), boundFallback); rewriteErr != nil {
 				opfSpan.RecordError(rewriteErr)
