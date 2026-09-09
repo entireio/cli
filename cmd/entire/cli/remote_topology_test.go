@@ -31,7 +31,11 @@ func TestCheckpointDestinationNote_ExplicitSelection(t *testing.T) {
 			testutil.GitCommit(t, dir, "init")
 			testutil.AddRemote(t, dir, "origin", "https://example.com/upstream/app.git")
 			testutil.AddRemote(t, dir, "fork", "https://example.com/contributor/app.git")
-			testutil.WriteCheckpointPushRemoteSetting(t, dir, tt.selected)
+			if tt.selected != "" {
+				testutil.WriteCheckpointPushRemoteSetting(t, dir, tt.selected)
+			} else {
+				testutil.WriteFile(t, dir, ".entire/settings.json", `{"enabled": true}`)
+			}
 			if tt.multipleURLs {
 				testutil.RunGit(t, dir, "remote", "set-url", "--add", "--push", "fork", "https://example.com/contributor/app.git")
 				testutil.RunGit(t, dir, "remote", "set-url", "--add", "--push", "fork", "https://example.com/contributor/backup.git")
