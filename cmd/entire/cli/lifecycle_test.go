@@ -536,6 +536,42 @@ func TestLifecycleHookHealthRepairWarnsOnceThenAgainWhenFingerprintChanges(t *te
 	require.Contains(t, claim.message, "entire doctor", "changed failures warn again")
 }
 
+func TestLifecycleHookHealthRecoveryClearsWarningSuppression(t *testing.T) {
+	setupStopTestRepo(t)
+	ctx := context.Background()
+	const sessionID = "hook-health-recovery"
+	const fingerprint = `["lefthook","error","Lefthook","conflict"]`
+	require.NoError(t, strategy.SaveSessionState(ctx, &strategy.SessionState{
+		SessionID: sessionID, BaseCommit: "abc", StartedAt: time.Now(), LastHookHealthWarning: fingerprint,
+	}))
+	require.NoError(t, strategy.StoreHookHealthWarningHint(ctx, sessionID, fingerprint))
+
+	health := strategy.GitHookIntegrationHealth{
+		Mode: strategy.GitHookIntegrationNative, State: strategy.GitHookIntegrationCurrent,
+	}
+	ops := lifecycleHookHealthOps{
+		repair: func(context.Context) error { return errors.New("unrelated setup failure") },
+		check:  func(context.Context) strategy.GitHookIntegrationHealth { return health },
+	}
+	claim := repairLifecycleHookHealth(ctx, newMockHookResponseAgent(), sessionID, ops)
+	require.Empty(t, claim.message, "current hooks must not be reported broken by an unrelated setup failure")
+
+	_, found, err := strategy.LoadHookHealthWarningHint(ctx, sessionID)
+	require.NoError(t, err)
+	require.False(t, found, "recovery must consume the pre-state warning hint")
+	state, err := strategy.LoadSessionState(ctx, sessionID)
+	require.NoError(t, err)
+	require.NotEqual(t, fingerprint, state.LastHookHealthWarning,
+		"recovery must replace the unhealthy durable warning suppression")
+
+	health = strategy.GitHookIntegrationHealth{
+		Mode: strategy.GitHookIntegrationLefthook, State: strategy.GitHookIntegrationError,
+		Manager: "Lefthook", ReasonCode: "conflict",
+	}
+	claim = repairLifecycleHookHealth(ctx, newMockHookResponseAgent(), sessionID, ops)
+	require.Contains(t, claim.message, "entire doctor", "the same failure must warn if it recurs after recovery")
+}
+
 func TestTurnStartHookHealthWarningMergesWithNativeContextAsOneJSONValue(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct {

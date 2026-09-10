@@ -43,6 +43,39 @@ func TestHookHealthWarningHintStoreLoadTransfer(t *testing.T) {
 	require.False(t, found, "transfer must atomically consume the hint after saving state")
 }
 
+func TestRecordHookHealthRecoveryLeavesFailOpenHintWhenStateIsUnreadable(t *testing.T) {
+	dir := t.TempDir()
+	testutil.InitRepo(t, dir)
+	t.Chdir(dir)
+	const sessionID = "hook-health-recovery-failure"
+	const unhealthy = `["lefthook","error","Lefthook","conflict"]`
+	const healthy = `["native","current","",""]`
+	require.NoError(t, SaveSessionState(context.Background(), &SessionState{
+		SessionID: sessionID, BaseCommit: "abc", StartedAt: time.Now(), LastHookHealthWarning: unhealthy,
+	}))
+	stateDir, err := getSessionStateDir(context.Background())
+	require.NoError(t, err)
+	statePath := filepath.Join(stateDir, sessionID+".json")
+	durableState, err := os.ReadFile(statePath)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(statePath, []byte("{"), 0o600))
+
+	require.Error(t, RecordHookHealthRecovery(context.Background(), sessionID, healthy))
+	got, found, err := LoadHookHealthWarningHint(context.Background(), sessionID)
+	require.NoError(t, err)
+	require.True(t, found, "the write-ahead recovery marker must survive a durable-state failure")
+	require.Equal(t, healthy, got)
+
+	claimed, err := ClaimHookHealthWarning(context.Background(), sessionID, unhealthy)
+	require.NoError(t, err)
+	require.True(t, claimed, "the same unhealthy fingerprint must warn after a partial recovery write")
+	require.NoError(t, os.WriteFile(statePath, durableState, 0o600), "model the transient state-read failure recovering")
+	require.NoError(t, RollbackHookHealthWarningClaim(context.Background(), sessionID, unhealthy))
+	claimed, err = ClaimHookHealthWarning(context.Background(), sessionID, unhealthy)
+	require.NoError(t, err)
+	require.True(t, claimed, "failed warning output must remain retryable over stale durable state")
+}
+
 func TestLoadHookHealthWarningHintRejectsCorruptValue(t *testing.T) {
 	dir := t.TempDir()
 	testutil.InitRepo(t, dir)

@@ -1,6 +1,7 @@
 package strategy
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"os"
@@ -8,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 )
 
@@ -303,6 +305,42 @@ func TestEnsureGitHookIntegration_SupportsDottedRootYAMLConfigs(t *testing.T) {
 			}
 			if got := CheckGitHookIntegration(t.Context()); got.Mode != GitHookIntegrationLefthook || got.State != GitHookIntegrationCurrent {
 				t.Errorf("health for %s = %+v, want current Lefthook", name, got)
+			}
+		})
+	}
+}
+
+func TestEnsureGitHookIntegration_UnsupportedLefthookLayoutKeepsNativeDelivery(t *testing.T) {
+	for _, configName := range []string{"lefthook.toml", "lefthook.jsonc", ".config/lefthook.yml"} {
+		t.Run(configName, func(t *testing.T) {
+			repoDir := t.TempDir()
+			testutil.InitRepo(t, repoDir)
+			clearGlobalHooksPath(t, repoDir)
+			configPath := filepath.Join(repoDir, configName)
+			if err := os.MkdirAll(filepath.Dir(configPath), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			original := []byte("user-owned config\n")
+			if err := os.WriteFile(configPath, original, 0o644); err != nil {
+				t.Fatal(err)
+			}
+			t.Chdir(repoDir)
+			paths.ClearWorktreeRootCache()
+			t.Cleanup(paths.ClearWorktreeRootCache)
+
+			if _, err := EnsureGitHookIntegration(t.Context(), false); err != nil {
+				t.Fatalf("EnsureGitHookIntegration() for %s error = %v", configName, err)
+			}
+			got := CheckGitHookIntegration(t.Context())
+			if got.Mode != GitHookIntegrationLefthook || got.State != GitHookIntegrationDegraded || got.ReasonCode != "lefthook_unsupported_native_bridge" {
+				t.Fatalf("health = %+v, want degraded unsupported-layout native bridge", got)
+			}
+			data, err := os.ReadFile(configPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Equal(data, original) {
+				t.Fatalf("unsupported config was modified: got %q, want %q", data, original)
 			}
 		})
 	}

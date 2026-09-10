@@ -316,6 +316,10 @@ func newHooksGitPrePushCmd() *cobra.Command {
 			}
 
 			remote := args[0]
+			// Git's hook ABI also supplies args[1], the URL for this invocation.
+			// Routing intentionally stays remote-name based: checkpoint ownership
+			// evaluates every configured push URL for that remote, and the
+			// git-branch backend follows Git's multi-push-URL fan-out semantics.
 
 			g := newGitHookContext(cmd.Context(), "pre-push")
 			defer g.span.End()

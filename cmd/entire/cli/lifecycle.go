@@ -175,15 +175,17 @@ func repairLifecycleHookHealth(
 ) lifecycleHookHealthClaim {
 	repairErr := ops.repair(ctx)
 	health := ops.check(ctx)
-	if repairErr != nil && health.State == strategy.GitHookIntegrationCurrent {
-		health.State = strategy.GitHookIntegrationError
-		health.ReasonCode = "hook_repair_failed"
+	if health.State == strategy.GitHookIntegrationCurrent {
+		if err := strategy.RecordHookHealthRecovery(ctx, sessionID, lifecycleHookHealthFingerprint(health)); err != nil && !errors.Is(err, strategy.ErrStateNotFound) {
+			logging.Warn(ctx, "failed to record recovered hook health warning",
+				slog.String("session_id", sessionID))
+		}
 	}
 	if repairErr != nil || health.State != strategy.GitHookIntegrationCurrent {
 		// Do not log repairErr or health.Reason here: setup errors can include
 		// repository content. Stable classification fields are sufficient for
 		// diagnosis without leaking prompts, files, or commit messages.
-		logging.Warn(ctx, "git hook integration repair incomplete",
+		logging.Warn(ctx, "lifecycle setup or git hook integration repair incomplete",
 			slog.String("session_id", sessionID),
 			slog.String("mode", string(health.Mode)),
 			slog.String("state", string(health.State)),

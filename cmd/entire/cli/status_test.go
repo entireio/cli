@@ -2630,6 +2630,24 @@ func TestRunStatusJSON_CheckpointSync_Dedicated(t *testing.T) {
 	}
 }
 
+func TestRunStatusJSON_CheckpointSync_DedicatedOverridesMissingElectedRemote(t *testing.T) {
+	testutil.IsolateGitConfigEnv(t)
+	setupTestRepo(t)
+	writeSettings(t, `{"enabled": true, "strategy_options": {"checkpoint_push_remote": "gone", "checkpoint_remote": {"provider": "github", "repo": "org/checkpoints"}}}`)
+	testutil.AddRemote(t, ".", "publish", "https://github.com/org/repo.git")
+	installStatusGitHooks(t)
+
+	var stdout bytes.Buffer
+	require.NoError(t, runStatus(context.Background(), &stdout, false, true))
+
+	var result statusJSON
+	require.NoError(t, json.Unmarshal(stdout.Bytes(), &result))
+	require.Equal(t, "org/checkpoints", result.CheckpointSyncRemote)
+	require.Equal(t, checkpointSyncSourceDedicated, result.CheckpointSyncRemoteSource)
+	require.Empty(t, result.CheckpointSyncError)
+	require.Equal(t, checkpointSyncStateReady, result.CheckpointSyncState)
+}
+
 // Dedicated mode is reported only when PushURL derivation succeeds (the same
 // condition the pre-push gate's exemption uses). An owner mismatch between the
 // elected remote and checkpoint_remote makes derivation fall back, so the next

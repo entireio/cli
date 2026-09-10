@@ -88,11 +88,11 @@ func detectHookManagersForIntegration(repoRoot string) ([]hookManager, error) {
 func validateLefthookMainConfig(root *os.Root, manager hookManager) error {
 	name := manager.ConfigPath
 	if strings.HasPrefix(name, ".") && name != ".lefthook.yml" && name != ".lefthook.yaml" {
-		return fmt.Errorf("safe Entire Lefthook integration inspection does not support config location %s", name)
+		return fmt.Errorf("%w: safe Entire Lefthook integration inspection does not support config location %s", errLefthookUnsupportedLayout, name)
 	}
 	ext := strings.ToLower(filepath.Ext(name))
 	if ext == ".toml" || ext == ".jsonc" {
-		return fmt.Errorf("lefthook config format %s is unsupported for safe source-directory inspection", ext)
+		return fmt.Errorf("%w: lefthook config format %s is unsupported for safe source-directory inspection", errLefthookUnsupportedLayout, ext)
 	}
 	data, err := osroot.ReadFileNoFollow(root, name)
 	if err != nil {

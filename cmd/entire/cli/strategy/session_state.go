@@ -346,6 +346,8 @@ func LoadModelHint(ctx context.Context, sessionID string) string {
 
 const hookHealthHintSuffix = ".hook-health"
 
+const hookHealthWarningRetryFingerprint = `["","","","retry"]`
+
 // StoreHookHealthWarningHint atomically records the warning fingerprint shown
 // before SessionState exists. The per-session gate serializes it with transfer.
 func StoreHookHealthWarningHint(ctx context.Context, sessionID, fingerprint string) error {
@@ -431,8 +433,10 @@ func ClaimHookHealthWarning(ctx context.Context, sessionID, fingerprint string) 
 }
 
 // RollbackHookHealthWarningClaim makes a claimed warning retryable when its
-// native hook response could not be emitted. It clears only an exact matching
-// claim, leaving any newer fingerprint untouched.
+// native hook response could not be emitted. It replaces only an exact matching
+// claim with a neutral marker, leaving any newer fingerprint untouched. The
+// marker keeps retry fail-open even when stale durable state contains the same
+// fingerprint as the warning whose output failed.
 func RollbackHookHealthWarningClaim(ctx context.Context, sessionID, fingerprint string) error {
 	if err := validation.ValidateSessionID(sessionID); err != nil {
 		return fmt.Errorf("invalid session ID: %w", err)
@@ -451,22 +455,14 @@ func RollbackHookHealthWarningClaim(ctx context.Context, sessionID, fingerprint 
 		if hint != fingerprint {
 			return nil
 		}
-		root, err := openSessionStateRootForRead(ctx)
-		if err != nil || root == nil {
-			return err
-		}
-		defer root.Close()
-		if err := osroot.RemoveNoSymlinks(root, sessionID+hookHealthHintSuffix); err != nil && !os.IsNotExist(err) {
-			return fmt.Errorf("rollback hook health warning hint: %w", err)
-		}
-		return nil
+		return writeHookHealthWarningHint(ctx, sessionID, hookHealthWarningRetryFingerprint)
 	}
 
 	state, err := LoadSessionState(ctx, sessionID)
 	if err != nil || state == nil || state.LastHookHealthWarning != fingerprint {
 		return err
 	}
-	state.LastHookHealthWarning = ""
+	state.LastHookHealthWarning = hookHealthWarningRetryFingerprint
 	return SaveSessionState(ctx, state)
 }
 
@@ -536,6 +532,46 @@ func TransferHookHealthWarningHint(ctx context.Context, sessionID string) error 
 	defer root.Close()
 	if err := osroot.RemoveNoSymlinks(root, sessionID+hookHealthHintSuffix); err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("consume hook health warning hint: %w", err)
+	}
+	return nil
+}
+
+// RecordHookHealthRecovery records a healthy fingerprint so the same unhealthy
+// fingerprint can warn again if it recurs. The hint is a write-ahead marker:
+// it is written before durable state and removed only after that save succeeds,
+// so a partial failure remains fail-open for the next unhealthy claim.
+func RecordHookHealthRecovery(ctx context.Context, sessionID, fingerprint string) error {
+	if err := validation.ValidateSessionID(sessionID); err != nil {
+		return fmt.Errorf("invalid session ID: %w", err)
+	}
+	if !validHookHealthWarningFingerprint(fingerprint) {
+		return errors.New("invalid hook health recovery fingerprint")
+	}
+	_, _, release, err := acquireSessionGate(ctx, sessionID)
+	if err != nil {
+		return err
+	}
+	defer release()
+
+	if err := writeHookHealthWarningHint(ctx, sessionID, fingerprint); err != nil {
+		return err
+	}
+
+	state, err := LoadSessionState(ctx, sessionID)
+	if err != nil || state == nil {
+		return err
+	}
+	state.LastHookHealthWarning = fingerprint
+	if err := SaveSessionState(ctx, state); err != nil {
+		return err
+	}
+	root, err := openSessionStateRootForRead(ctx)
+	if err != nil || root == nil {
+		return err
+	}
+	defer root.Close()
+	if err := osroot.RemoveNoSymlinks(root, sessionID+hookHealthHintSuffix); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("consume hook health recovery hint: %w", err)
 	}
 	return nil
 }

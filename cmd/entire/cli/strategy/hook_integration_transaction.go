@@ -121,7 +121,7 @@ func EnsureGitHookIntegration(ctx context.Context, absolutePath bool) (int, erro
 	if err != nil {
 		return 0, err
 	}
-	_, lefthook, err := selectLefthookIntegrationManager(managers)
+	manager, lefthook, err := selectLefthookIntegrationManager(managers)
 	if err != nil {
 		return 0, err
 	}
@@ -131,6 +131,27 @@ func EnsureGitHookIntegration(ctx context.Context, absolutePath bool) (int, erro
 	}
 	fail := func(primary error) (int, error) {
 		return 0, errors.Join(primary, restoreHookIntegrationSnapshots(snapshots))
+	}
+	if lefthook {
+		root, openErr := worktreedir.OpenAt(repoRoot)
+		if openErr != nil {
+			return fail(fmt.Errorf("open worktree for Lefthook validation: %w", openErr))
+		}
+		validationErr := validateLefthookMainConfig(root, manager)
+		if errors.Is(validationErr, errLefthookUnsupportedLayout) {
+			written, installErr := InstallGitHook(ctx, true, absolutePath)
+			if installErr != nil {
+				return fail(installErr)
+			}
+			health := CheckGitHookIntegration(ctx)
+			if health.Mode != GitHookIntegrationLefthook || health.State != GitHookIntegrationDegraded || health.ReasonCode != "lefthook_unsupported_native_bridge" {
+				return fail(fmt.Errorf("unsupported Lefthook native fallback verification failed: %s", health.Reason))
+			}
+			return written, nil
+		}
+		if validationErr != nil {
+			return fail(validationErr)
+		}
 	}
 
 	if !lefthook {
