@@ -1,6 +1,9 @@
 package claudecode
 
-import "encoding/json"
+import (
+	"encoding/json"
+	"fmt"
+)
 
 // ClaudeSettings represents the .claude/settings.json structure
 type ClaudeSettings struct {
@@ -36,9 +39,31 @@ type ClaudeHookEntry struct {
 // sessionInfoRaw is the JSON structure from SessionStart/SessionEnd/Stop hooks.
 // SessionStart includes a "model" field with the LLM model identifier.
 type sessionInfoRaw struct {
-	SessionID      string `json:"session_id"`
-	TranscriptPath string `json:"transcript_path"`
-	Model          string `json:"model,omitempty"`
+	SessionID            string         `json:"session_id"`
+	TranscriptPath       string         `json:"transcript_path"`
+	Model                string         `json:"model,omitempty"`
+	LastAssistantMessage optionalString `json:"last_assistant_message"`
+	StopHookActive       bool           `json:"stop_hook_active,omitempty"`
+}
+
+type optionalString struct {
+	value   *string
+	present bool
+}
+
+func (o *optionalString) UnmarshalJSON(data []byte) error {
+	o.present = true
+	if string(data) == "null" {
+		o.value = nil
+		return nil
+	}
+
+	var value string
+	if err := json.Unmarshal(data, &value); err != nil {
+		return fmt.Errorf("decode optional string: %w", err)
+	}
+	o.value = &value
+	return nil
 }
 
 // userPromptSubmitRaw is the JSON structure from UserPromptSubmit hooks.

@@ -11,6 +11,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
+	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
@@ -758,7 +759,7 @@ func TestTurnEnd_Active_NoActions(t *testing.T) {
 	require.NoError(t, err)
 
 	// Call HandleTurnEnd — should be a no-op (no TurnCheckpointIDs)
-	err = s.HandleTurnEnd(context.Background(), state)
+	err = s.HandleTurnEnd(context.Background(), state, nil)
 	require.NoError(t, err)
 
 	// Verify state is unchanged
@@ -1286,6 +1287,66 @@ func TestPostCommit_IdleSession_DoesNotRecordTurnCheckpointIDs(t *testing.T) {
 		"TurnCheckpointIDs should not be populated for IDLE sessions")
 }
 
+func TestShouldTrackTurnCheckpoint(t *testing.T) {
+	t.Parallel()
+
+	tests := map[string]struct {
+		state *SessionState
+		want  bool
+	}{
+		"active turn": {
+			state: &SessionState{Phase: session.PhaseActive},
+			want:  true,
+		},
+		"repeatable stop chain": {
+			state: &SessionState{Phase: session.PhaseIdle, TurnEndPending: true},
+			want:  true,
+		},
+		"ordinary idle session": {
+			state: &SessionState{Phase: session.PhaseIdle},
+		},
+	}
+
+	for name, tt := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			require.Equal(t, tt.want, shouldTrackTurnCheckpoint(tt.state))
+		})
+	}
+}
+
+func TestRecordTurnCheckpoint(t *testing.T) {
+	t.Parallel()
+
+	tests := map[string]struct {
+		state           *SessionState
+		wantIDs         []string
+		refreshRequired bool
+	}{
+		"active turn records checkpoint": {
+			state:   &SessionState{Phase: session.PhaseActive},
+			wantIDs: []string{"checkpoint"},
+		},
+		"repeatable continuation requires refresh": {
+			state:           &SessionState{Phase: session.PhaseIdle, TurnEndPending: true},
+			wantIDs:         []string{"checkpoint"},
+			refreshRequired: true,
+		},
+		"ordinary idle session ignores checkpoint": {
+			state: &SessionState{Phase: session.PhaseIdle},
+		},
+	}
+
+	for name, tt := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			recordTurnCheckpoint(tt.state, "checkpoint")
+			require.Equal(t, tt.wantIDs, tt.state.TurnCheckpointIDs)
+			require.Equal(t, tt.refreshRequired, tt.state.TurnEndRefreshRequired)
+		})
+	}
+}
+
 // TestHandleTurnEnd_PartialFailure verifies that HandleTurnEnd continues
 // processing remaining checkpoints when one UpdateCommitted call fails.
 // This locks the best-effort behavior: valid checkpoints get finalized even
@@ -1361,7 +1422,7 @@ func TestHandleTurnEnd_PartialFailure(t *testing.T) {
 	require.NoError(t, s.saveSessionState(context.Background(), state))
 
 	// Call HandleTurnEnd — should NOT return error (best-effort)
-	err = s.HandleTurnEnd(context.Background(), state)
+	err = s.HandleTurnEnd(context.Background(), state, nil)
 	require.NoError(t, err,
 		"HandleTurnEnd should return nil even with partial failures (best-effort)")
 
@@ -1423,7 +1484,7 @@ func TestFinalizeAllTurnCheckpoints_ScannerDegraded(t *testing.T) {
 
 	redact.WithScannerDegradedSole(t)
 
-	errCount := NewManualCommitStrategy().finalizeAllTurnCheckpoints(context.Background(), state)
+	errCount := NewManualCommitStrategy().finalizeAllTurnCheckpoints(context.Background(), state, nil)
 	require.Equal(t, 1, errCount)
 	require.Equal(t, []string{testTrailerCheckpointID.String()}, state.TurnCheckpointIDs,
 		"TurnCheckpointIDs must survive a degraded finalize so a later process retries")
@@ -1432,6 +1493,73 @@ func TestFinalizeAllTurnCheckpoints_ScannerDegraded(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "old transcript\n", string(content.Transcript),
 		"prior checkpoint transcript must stay intact when the finalize is skipped")
+}
+
+func TestHandleTurnEnd_UsesCapturedTranscriptAfterSourceMutation(t *testing.T) {
+	// Cannot use t.Parallel because repository resolution depends on t.Chdir.
+	workDir := setupGitRepo(t)
+	t.Chdir(workDir)
+	paths.ClearWorktreeRootCache()
+
+	repo, err := gitrepo.OpenPath(workDir)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = repo.Close() })
+
+	sessionID := "captured-turn-finalize"
+	store := checkpoint.NewGitStore(repo, checkpoint.DefaultV1Refs())
+	require.NoError(t, store.Write(context.Background(), checkpoint.Session{
+		CheckpointID: testTrailerCheckpointID,
+		SessionID:    sessionID,
+		Strategy:     StrategyNameManualCommit,
+		Transcript:   redact.AlreadyRedacted([]byte("provisional transcript\n")),
+		Prompts:      []string{"prompt"},
+		AuthorName:   "Test",
+		AuthorEmail:  "test@test.com",
+		Agent:        "Claude Code",
+	}))
+
+	metadataDir := filepath.Join(workDir, paths.SessionMetadataDirFromSessionID(sessionID))
+	require.NoError(t, os.MkdirAll(metadataDir, 0o755))
+	livePath := filepath.Join(metadataDir, paths.TranscriptFileName)
+	liveTranscript := []byte(`{"type":"assistant","message":{"content":"mutated live source"}}` + "\n")
+	require.NoError(t, os.WriteFile(livePath, liveTranscript, 0o600))
+
+	captured := []byte(`{"type":"user","message":{"content":"prompt"}}` + "\n" +
+		`{"type":"assistant","message":{"content":"captured response"}}` + "\n")
+	state := &SessionState{
+		SessionID:                 sessionID,
+		AgentType:                 "Claude Code",
+		TranscriptPath:            livePath,
+		CheckpointTranscriptStart: 1,
+		TurnCheckpointIDs:         []string{testTrailerCheckpointID.String()},
+		TurnEndPending:            true,
+	}
+
+	err = NewManualCommitStrategy().HandleTurnEnd(context.Background(), state, &agent.TranscriptSnapshot{
+		Data:     captured,
+		Position: 2,
+	})
+	require.NoError(t, err)
+	require.Equal(t, 2, state.CheckpointTranscriptStart)
+	require.Equal(t, []string{testTrailerCheckpointID.String()}, state.TurnCheckpointIDs)
+
+	content, err := store.ReadSessionContent(context.Background(), testTrailerCheckpointID, 0)
+	require.NoError(t, err)
+	require.Equal(t, captured, content.Transcript)
+	require.NotEqual(t, liveTranscript, content.Transcript)
+
+	continued := append([]byte(nil), captured...)
+	continued = append(continued, []byte(`{"type":"assistant","message":{"content":"continued response"}}`+"\n")...)
+	err = NewManualCommitStrategy().HandleTurnEnd(context.Background(), state, &agent.TranscriptSnapshot{
+		Data:     continued,
+		Position: 3,
+	})
+	require.NoError(t, err)
+	require.Equal(t, 3, state.CheckpointTranscriptStart)
+	require.Equal(t, []string{testTrailerCheckpointID.String()}, state.TurnCheckpointIDs)
+	content, err = store.ReadSessionContent(context.Background(), testTrailerCheckpointID, 0)
+	require.NoError(t, err)
+	require.Equal(t, continued, content.Transcript)
 }
 
 // setupSessionWithCheckpoint initializes a session and creates one checkpoint
@@ -1989,18 +2117,18 @@ func TestPostCommit_IdleSession_NoTranscriptFallbackForCarryForward(t *testing.T
 		"IDLE session should NOT be condensed via transcript fallback — only ACTIVE sessions get transcript extraction for carry-forward")
 }
 
-// TestPostCommit_NonActiveSession_SkipsSentinelWait is a regression test verifying
+// TestPostCommit_NonActiveSession_SkipsTranscriptReadinessWait is a regression test verifying
 // that PostCommit for an IDLE or ENDED session with AgentType=ClaudeCode and a
-// TranscriptPath completes quickly without hitting the 3s sentinel timeout in
-// PrepareTranscript. Both IDLE and ENDED sessions should skip the sentinel wait
+// TranscriptPath completes quickly without entering transcript readiness in
+// PrepareTranscript. Both IDLE and ENDED sessions should skip the readiness wait
 // since their transcripts are already fully flushed.
 //
 // Before the fix, the transcript extraction functions called PrepareTranscript
-// unconditionally, which triggered waitForTranscriptFlush (3s timeout) even for
+// unconditionally, which triggered its timeout even for
 // idle/ended sessions where the transcript was already fully flushed.
 //
 // After the fix, PrepareTranscript is only called when state.Phase.IsActive().
-func TestPostCommit_NonActiveSession_SkipsSentinelWait(t *testing.T) {
+func TestPostCommit_NonActiveSession_SkipsTranscriptReadinessWait(t *testing.T) {
 	tests := []struct {
 		name         string
 		phase        session.Phase
@@ -2008,8 +2136,8 @@ func TestPostCommit_NonActiveSession_SkipsSentinelWait(t *testing.T) {
 		sessionID    string
 		commitTrlSHA string
 	}{
-		{"idle", session.PhaseIdle, false, "test-idle-skip-sentinel", "a1a2a3a4a5a6"},
-		{"ended", session.PhaseEnded, true, "test-ended-skip-sentinel", "e1e2e3e4e5e6"},
+		{"idle", session.PhaseIdle, false, "test-idle-skip-readiness", "a1a2a3a4a5a6"},
+		{"ended", session.PhaseEnded, true, "test-ended-skip-readiness", "e1e2e3e4e5e6"},
 	}
 
 	for _, tt := range tests {
@@ -2027,7 +2155,7 @@ func TestPostCommit_NonActiveSession_SkipsSentinelWait(t *testing.T) {
 
 			// Set phase, AgentType=ClaudeCode, and TranscriptPath. Without
 			// TranscriptPath the PrepareTranscript code path is never reached;
-			// without AgentType=ClaudeCode the sentinel wait is not triggered.
+			// without AgentType=ClaudeCode the readiness wait is not triggered.
 			state, err := s.loadSessionState(context.Background(), tt.sessionID)
 			require.NoError(t, err)
 			state.Phase = tt.phase
@@ -2051,16 +2179,16 @@ func TestPostCommit_NonActiveSession_SkipsSentinelWait(t *testing.T) {
 			// Create a commit WITH the Entire-Checkpoint trailer
 			commitWithCheckpointTrailer(t, repo, dir, tt.commitTrlSHA)
 
-			// Time PostCommit — before the fix this would take ~3s+ due to sentinel timeout.
+			// Time PostCommit — before the fix this would take ~3s+ due to readiness timeout.
 			// Normal PostCommit for these tests runs in <500ms (git operations only).
 			start := time.Now()
 			err = s.PostCommit(context.Background())
 			elapsed := time.Since(start)
 			require.NoError(t, err)
 
-			// Assert it completes well under the 3s sentinel timeout.
+			// Assert it completes well under the 3s readiness timeout.
 			assert.Less(t, elapsed, 2*time.Second,
-				"%s session PostCommit should skip sentinel wait and complete in <2s, took %v", tt.name, elapsed)
+				"%s session PostCommit should skip readiness and complete in <2s, took %v", tt.name, elapsed)
 
 			// Verify condensation still happened correctly
 			sessionsRef, err := repo.Reference(plumbing.NewBranchReferenceName(paths.MetadataBranchName), true)

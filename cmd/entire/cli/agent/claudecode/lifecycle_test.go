@@ -1,17 +1,41 @@
 package claudecode
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/stretchr/testify/require"
 )
+
+const testFinalAssistantMessage = "Done."
+
+func TestCaptureTranscript_ReturnsOwnedValidatedBytes(t *testing.T) {
+	t.Parallel()
+
+	transcriptPath := filepath.Join(t.TempDir(), "transcript.jsonl")
+	want := []byte("{\"type\":\"user\",\"message\":{\"content\":\"fix it\"}}\n" +
+		"{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"Done.\"}]}}\n")
+	require.NoError(t, os.WriteFile(transcriptPath, want, 0o600))
+
+	finalResponse := testFinalAssistantMessage
+	snapshot, err := (&ClaudeCodeAgent{}).CaptureTranscript(context.Background(), agent.TranscriptCaptureRequest{
+		SessionRef:    transcriptPath,
+		StartPosition: 1,
+		FinalResponse: &finalResponse,
+	})
+	require.NoError(t, err)
+	require.Equal(t, want, snapshot.Data)
+	require.Equal(t, 2, snapshot.Position)
+
+	require.NoError(t, os.WriteFile(transcriptPath, []byte("replaced after capture\n"), 0o600))
+	require.True(t, bytes.Equal(want, snapshot.Data), "source mutation changed the owned snapshot")
+}
 
 func TestParseHookEvent_SessionStart(t *testing.T) {
 	t.Parallel()
@@ -134,6 +158,79 @@ func TestParseHookEvent_TurnEnd(t *testing.T) {
 	if event.SessionID != "sess-789" {
 		t.Errorf("expected session_id 'sess-789', got %q", event.SessionID)
 	}
+}
+
+func TestParseHookEvent_TurnEnd_PreservesStopHookActive(t *testing.T) {
+	t.Parallel()
+
+	input := `{"session_id":"session","transcript_path":"/tmp/stop.jsonl","stop_hook_active":true}`
+	event, err := (&ClaudeCodeAgent{}).ParseHookEvent(context.Background(), HookNameStop, strings.NewReader(input))
+	require.NoError(t, err)
+	require.True(t, event.StopHookActive)
+}
+
+func TestParseHookEvent_TurnEnd_PreservesFinalResponseFieldState(t *testing.T) {
+	t.Parallel()
+
+	tests := map[string]struct {
+		include     bool
+		value       any
+		wantPresent bool
+		wantValue   *string
+		wantError   bool
+	}{
+		"missing": {wantPresent: false},
+		"null": {
+			include:     true,
+			wantPresent: true,
+		},
+		"empty": {
+			include:     true,
+			value:       "",
+			wantPresent: true,
+			wantValue:   ptrTo(""),
+		},
+		"non-empty": {
+			include:     true,
+			value:       testFinalAssistantMessage,
+			wantPresent: true,
+			wantValue:   ptrTo(testFinalAssistantMessage),
+		},
+		"wrong type": {
+			include:   true,
+			value:     42,
+			wantError: true,
+		},
+	}
+
+	for name, tt := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			input := map[string]any{
+				"session_id":      "session",
+				"transcript_path": filepath.Join(t.TempDir(), "transcript.jsonl"),
+			}
+			if tt.include {
+				input["last_assistant_message"] = tt.value
+			}
+			payload, err := json.Marshal(input)
+			require.NoError(t, err)
+
+			event, err := (&ClaudeCodeAgent{}).ParseHookEvent(context.Background(), HookNameStop, strings.NewReader(string(payload)))
+			if tt.wantError {
+				require.Error(t, err)
+				return
+			}
+			require.NoError(t, err)
+			require.Equal(t, tt.wantPresent, event.FinalResponsePresent)
+			require.Equal(t, tt.wantValue, event.FinalResponse)
+		})
+	}
+}
+
+func ptrTo(value string) *string {
+	return &value
 }
 
 func TestParseHookEvent_TurnEnd_IncludesModel(t *testing.T) {
@@ -572,186 +669,6 @@ func TestReadAndParse_ExtraFields(t *testing.T) {
 	}
 	if result.SessionID != "test" {
 		t.Errorf("expected session_id 'test', got %q", result.SessionID)
-	}
-}
-
-func TestWaitForTranscriptFlush_StaleFile_SkipsWait(t *testing.T) {
-	t.Parallel()
-
-	// Create a transcript file and backdate its mtime to make it "stale"
-	transcriptFile := filepath.Join(t.TempDir(), "transcript.jsonl")
-	if err := os.WriteFile(transcriptFile, []byte(`{"type":"human"}`+"\n"), 0o644); err != nil {
-		t.Fatalf("failed to write transcript: %v", err)
-	}
-	staleTime := time.Now().Add(-10 * time.Minute)
-	if err := os.Chtimes(transcriptFile, staleTime, staleTime); err != nil {
-		t.Fatalf("failed to set mtime: %v", err)
-	}
-
-	// waitForTranscriptFlush should return almost instantly for stale files
-	// (not wait the full 3 seconds)
-	start := time.Now()
-	waitForTranscriptFlush(context.Background(), transcriptFile, time.Now())
-	elapsed := time.Since(start)
-
-	if elapsed > 500*time.Millisecond {
-		t.Errorf("expected fast return for stale transcript, but took %v", elapsed)
-	}
-}
-
-func TestWaitForTranscriptFlush_RecentStableFile_ReturnsFast(t *testing.T) {
-	t.Parallel()
-
-	// A recent transcript that has stopped growing (the healthy turn-end case:
-	// the assistant finished streaming). Even though the "hooks claude-code stop"
-	// sentinel is never present in the file, the wait must settle on size
-	// stability and return quickly instead of burning the full 3s maxWait.
-	transcriptFile := filepath.Join(t.TempDir(), "transcript.jsonl")
-	if err := os.WriteFile(transcriptFile, []byte(`{"type":"human"}`+"\n"), 0o644); err != nil {
-		t.Fatalf("failed to write transcript: %v", err)
-	}
-
-	start := time.Now()
-	waitForTranscriptFlush(context.Background(), transcriptFile, time.Now())
-	elapsed := time.Since(start)
-
-	// A stable file settles once its size has held steady for the quiet window
-	// (~500ms) — comfortably under the 3s cap that the old sentinel-only wait
-	// always hit.
-	if elapsed > 1500*time.Millisecond {
-		t.Errorf("expected fast return for a stable recent transcript, but took %v", elapsed)
-	}
-}
-
-func TestWaitForTranscriptFlush_GrowingFile_WaitsUntilSettled(t *testing.T) {
-	t.Parallel()
-
-	// A transcript that is still being written must NOT be treated as settled
-	// while it grows; the wait returns only after the writes stop.
-	transcriptFile := filepath.Join(t.TempDir(), "transcript.jsonl")
-	if err := os.WriteFile(transcriptFile, []byte(`{"type":"human"}`+"\n"), 0o644); err != nil {
-		t.Fatalf("failed to write transcript: %v", err)
-	}
-
-	const growFor = 600 * time.Millisecond
-	stop := make(chan struct{})
-	go func() {
-		f, err := os.OpenFile(transcriptFile, os.O_APPEND|os.O_WRONLY, 0o644)
-		if err != nil {
-			return
-		}
-		defer f.Close()
-		ticker := time.NewTicker(40 * time.Millisecond)
-		defer ticker.Stop()
-		deadline := time.Now().Add(growFor)
-		for {
-			select {
-			case <-stop:
-				return
-			case <-ticker.C:
-				if time.Now().After(deadline) {
-					return
-				}
-				if _, werr := f.WriteString(`{"type":"assistant"}` + "\n"); werr != nil {
-					return
-				}
-			}
-		}
-	}()
-
-	start := time.Now()
-	waitForTranscriptFlush(context.Background(), transcriptFile, time.Now())
-	elapsed := time.Since(start)
-	close(stop)
-
-	// It should keep waiting while the file grows (i.e. not return near-instantly),
-	// but still return once writes stop (bounded by the 3s cap).
-	if elapsed < 300*time.Millisecond {
-		t.Errorf("expected to keep waiting while transcript grew, returned after only %v", elapsed)
-	}
-	if elapsed > 3500*time.Millisecond {
-		t.Errorf("expected to return once settled/within cap, but took %v", elapsed)
-	}
-}
-
-func TestWaitForTranscriptFlush_BriefMidWritePause_NotDeclaredDoneEarly(t *testing.T) {
-	t.Parallel()
-
-	// A writer that stalls briefly mid-write (shorter than the quiet window) and
-	// then resumes must NOT be treated as settled during the lull. With a
-	// too-short stability check the ~300ms pause below would be mistaken for
-	// completion and turn-end would read a truncated transcript.
-	transcriptFile := filepath.Join(t.TempDir(), "transcript.jsonl")
-	if err := os.WriteFile(transcriptFile, []byte(`{"type":"human"}`+"\n"), 0o644); err != nil {
-		t.Fatalf("failed to write transcript: %v", err)
-	}
-
-	const (
-		pauseDur  = 300 * time.Millisecond // stable, but shorter than the 500ms quiet window
-		resumeDur = 200 * time.Millisecond // further writes after the pause
-	)
-
-	lastWrite := make(chan time.Time, 1)
-	go func() {
-		f, err := os.OpenFile(transcriptFile, os.O_APPEND|os.O_WRONLY, 0o644)
-		if err != nil {
-			lastWrite <- time.Now()
-			return
-		}
-		defer f.Close()
-
-		// Hold the file size steady for pauseDur — a brief mid-write stall.
-		time.Sleep(pauseDur)
-
-		// Resume writing; record when the final write lands.
-		ticker := time.NewTicker(40 * time.Millisecond)
-		defer ticker.Stop()
-		deadline := time.Now().Add(resumeDur)
-		last := time.Now()
-		for range ticker.C {
-			if time.Now().After(deadline) {
-				break
-			}
-			if _, werr := f.WriteString(`{"type":"assistant"}` + "\n"); werr != nil {
-				break
-			}
-			last = time.Now()
-		}
-		lastWrite <- last
-	}()
-
-	start := time.Now()
-	waitForTranscriptFlush(context.Background(), transcriptFile, time.Now())
-	returnedAt := time.Now()
-	elapsed := returnedAt.Sub(start)
-
-	final := <-lastWrite
-
-	// The wait must not have returned during the pause: a truncated early return
-	// would land near the old ~100ms stability window, before writing resumed.
-	if !returnedAt.After(final) {
-		t.Errorf("returned at %v before the writer's final write at %v (declared done during mid-write pause)",
-			returnedAt.Sub(start), final.Sub(start))
-	}
-	// Sanity: it keeps waiting past the pause, and still returns within the cap.
-	if elapsed < pauseDur {
-		t.Errorf("expected to keep waiting through the mid-write pause, returned after only %v", elapsed)
-	}
-	if elapsed > 3500*time.Millisecond {
-		t.Errorf("expected to return once settled/within cap, but took %v", elapsed)
-	}
-}
-
-func TestWaitForTranscriptFlush_NonexistentFile_ReturnsImmediately(t *testing.T) {
-	t.Parallel()
-
-	// File doesn't exist — os.Stat fails, return immediately (nothing to poll).
-	start := time.Now()
-	waitForTranscriptFlush(context.Background(), "/nonexistent/transcript.jsonl", time.Now())
-	elapsed := time.Since(start)
-
-	if elapsed > 500*time.Millisecond {
-		t.Errorf("expected immediate return for nonexistent file, but took %v", elapsed)
 	}
 }
 

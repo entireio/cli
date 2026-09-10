@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -174,9 +175,13 @@ func TestShadow_DeferredTranscriptFinalization(t *testing.T) {
 		t.Errorf("Expected IDLE phase after stop, got %s", state.Phase)
 	}
 
-	// TurnCheckpointIDs should be cleared after finalization
-	if len(state.TurnCheckpointIDs) != 0 {
-		t.Errorf("TurnCheckpointIDs should be cleared after finalization, got %v", state.TurnCheckpointIDs)
+	// Claude Stop can recur without another user prompt, so the finalized ID
+	// remains recoverable for a later Stop in the same logical turn.
+	if len(state.TurnCheckpointIDs) != 1 || state.TurnCheckpointIDs[0] != checkpointID {
+		t.Errorf("TurnCheckpointIDs should retain %s across repeatable Stops, got %v", checkpointID, state.TurnCheckpointIDs)
+	}
+	if !state.TurnEndPending {
+		t.Error("turn should remain refreshable after a repeatable Stop")
 	}
 
 	// Comprehensive checkpoint validation
@@ -192,6 +197,19 @@ func TestShadow_DeferredTranscriptFinalization(t *testing.T) {
 			"Done with both changes!",    // Final assistant message
 		},
 	})
+
+	// The next actual user prompt seals the prior Stop chain and starts a fresh
+	// turn, releasing its retained checkpoint IDs.
+	if err := env.SimulateUserPromptSubmitWithPromptAndTranscriptPath(sess.ID, "Start the next turn", sess.TranscriptPath); err != nil {
+		t.Fatalf("next user-prompt-submit failed: %v", err)
+	}
+	state, err = env.GetSessionState(sess.ID)
+	if err != nil {
+		t.Fatalf("GetSessionState after next prompt failed: %v", err)
+	}
+	if len(state.TurnCheckpointIDs) != 0 || state.TurnEndPending {
+		t.Errorf("next prompt should seal prior turn state, got IDs=%v pending=%t", state.TurnCheckpointIDs, state.TurnEndPending)
+	}
 
 	t.Log("DeferredTranscriptFinalization test completed successfully")
 }
@@ -649,9 +667,13 @@ func TestShadow_MultipleCommits_SameActiveTurn(t *testing.T) {
 		t.Errorf("Expected IDLE phase, got %s", state.Phase)
 	}
 
-	// TurnCheckpointIDs should be cleared after finalization
-	if len(state.TurnCheckpointIDs) != 0 {
-		t.Errorf("TurnCheckpointIDs should be cleared, got %v", state.TurnCheckpointIDs)
+	// Claude can continue after Stop, so retain the checkpoint IDs until the
+	// next prompt establishes that this turn is over.
+	if !slices.Equal(state.TurnCheckpointIDs, checkpointIDs) {
+		t.Errorf("TurnCheckpointIDs should remain available for a repeated Stop, got %v", state.TurnCheckpointIDs)
+	}
+	if !state.TurnEndPending {
+		t.Error("turn should remain pending after Claude Stop")
 	}
 
 	// Validate all 3 checkpoints with comprehensive checks
@@ -668,7 +690,7 @@ func TestShadow_MultipleCommits_SameActiveTurn(t *testing.T) {
 			ExpectedPrompts: []string{"Create files A, B, and C"},
 			ExpectedTranscriptContent: []string{
 				"Create files A, B, and C", // Initial prompt
-				finalMessage,               // Final message (added after stop)
+				finalMessage,               // Final message captured by Stop
 			},
 		})
 	}

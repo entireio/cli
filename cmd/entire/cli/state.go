@@ -44,6 +44,10 @@ type PrePromptState struct {
 	// Zero means not set or session just started.
 	TranscriptOffset int `json:"transcript_offset,omitempty"`
 
+	// TranscriptPositionCaptured distinguishes a measured zero position from
+	// the zero value left behind when position capture was unavailable or failed.
+	TranscriptPositionCaptured bool `json:"transcript_position_captured,omitempty"`
+
 	// LastTranscriptIdentifier is the agent-specific identifier at the transcript position.
 	// UUID for Claude Code, message ID for Gemini CLI. Optional metadata.
 	LastTranscriptIdentifier string `json:"last_transcript_identifier,omitempty"`
@@ -92,6 +96,11 @@ func (s *PrePromptState) normalizePrePromptState() {
 			s.TranscriptOffset = s.StartMessageIndex
 		}
 	}
+	// Older state files had no validity bit. A positive stored position could
+	// only have come from a successful measurement; an old zero is ambiguous.
+	if s.TranscriptOffset > 0 {
+		s.TranscriptPositionCaptured = true
+	}
 	s.StepTranscriptStart = 0
 	s.StartMessageIndex = 0
 }
@@ -103,8 +112,9 @@ const unknownSessionID = "unknown"
 // and saves them to a state file.
 //
 // The agent parameter is used to determine the transcript position via TranscriptAnalyzer.
-// If the agent does not implement TranscriptAnalyzer, the transcript offset will be 0.
-// The sessionRef parameter is optional — if empty, transcript position won't be captured.
+// TranscriptPositionCaptured distinguishes a measured zero from the default
+// zero used when the agent cannot provide a position. The sessionRef parameter
+// is optional — if empty, transcript position won't be captured.
 //
 // Works correctly from any subdirectory within the repository.
 func CapturePrePromptState(ctx context.Context, ag agent.Agent, sessionID, sessionRef string) error {
@@ -130,6 +140,7 @@ func CapturePrePromptState(ctx context.Context, ag agent.Agent, sessionID, sessi
 
 	// Get transcript position using TranscriptAnalyzer if available
 	var transcriptOffset int
+	var transcriptPositionCaptured bool
 	if analyzer, ok := agent.AsTranscriptAnalyzer(ag); ok && sessionRef != "" {
 		pos, posErr := analyzer.GetTranscriptPosition(sessionRef)
 		if posErr != nil {
@@ -137,16 +148,20 @@ func CapturePrePromptState(ctx context.Context, ag agent.Agent, sessionID, sessi
 				slog.String("error", posErr.Error()))
 		} else {
 			transcriptOffset = pos
+			// Only Stop capturers need to distinguish a measured zero from an
+			// unavailable position. Keep other agents' state representation unchanged.
+			_, transcriptPositionCaptured = agent.AsTranscriptCapturer(ag)
 		}
 	}
 
 	// Create state file using os.Root for traversal-resistant write
 	state := PrePromptState{
-		SessionID:            sessionID,
-		Timestamp:            time.Now().UTC().Format(time.RFC3339),
-		UntrackedFiles:       untrackedFiles,
-		UntrackedScanSkipped: scanSkipped,
-		TranscriptOffset:     transcriptOffset,
+		SessionID:                  sessionID,
+		Timestamp:                  time.Now().UTC().Format(time.RFC3339),
+		UntrackedFiles:             untrackedFiles,
+		UntrackedScanSkipped:       scanSkipped,
+		TranscriptOffset:           transcriptOffset,
+		TranscriptPositionCaptured: transcriptPositionCaptured,
 	}
 
 	data, err := jsonutil.MarshalIndentWithNewline(state, "", "  ")

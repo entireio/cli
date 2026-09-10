@@ -152,7 +152,7 @@ func TestFinalizeAllTurnCheckpointsSkipsUnsupportedPolicy(t *testing.T) {
 		TurnCheckpointIDs: []string{testTrailerCheckpointID.String()},
 	}
 
-	errCount := NewManualCommitStrategy().finalizeAllTurnCheckpoints(context.Background(), state)
+	errCount := NewManualCommitStrategy().finalizeAllTurnCheckpoints(context.Background(), state, nil)
 	require.Equal(t, 1, errCount)
 	require.Empty(t, state.TurnCheckpointIDs)
 }

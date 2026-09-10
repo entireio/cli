@@ -93,6 +93,24 @@ func AsTranscriptPreparer(ag Agent) (TranscriptPreparer, bool) {
 	return declaredCapability[TranscriptPreparer](ag, func(c DeclaredCaps) bool { return c.TranscriptPreparer })
 }
 
+// AsTranscriptCapturer returns the agent as TranscriptCapturer if it implements
+// the built-in-only Stop capture interface.
+func AsTranscriptCapturer(ag Agent) (TranscriptCapturer, bool) {
+	return builtinCapability[TranscriptCapturer](ag)
+}
+
+// AsTranscriptTurnAnalyzer returns the agent as TranscriptTurnAnalyzer when it
+// can derive all turn metadata from a captured transcript in one pass.
+func AsTranscriptTurnAnalyzer(ag Agent) (TranscriptTurnAnalyzer, bool) {
+	return builtinCapability[TranscriptTurnAnalyzer](ag)
+}
+
+// AsRepeatableTurnEnd returns the agent as RepeatableTurnEnd if its hook
+// protocol can continue an assistant turn after a turn-end event.
+func AsRepeatableTurnEnd(ag Agent) (RepeatableTurnEnd, bool) {
+	return builtinCapability[RepeatableTurnEnd](ag)
+}
+
 // AsSidecarImageProvider returns the agent as SidecarImageProvider if it
 // implements the interface. This is a best-effort, optional capability (image
 // capture from a store outside the transcript, e.g. Cursor's SQLite blob store),

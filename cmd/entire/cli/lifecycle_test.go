@@ -111,6 +111,7 @@ type mockAnalyzerAgent struct {
 
 	analyzerFiles []string
 	analyzerErr   error
+	positionErr   error
 
 	// onExtract, when set, is invoked from inside ExtractModifiedFilesFromOffset
 	// — i.e. mid-capture, after handleSubagentStopFinal has loaded its initial
@@ -122,7 +123,9 @@ type mockAnalyzerAgent struct {
 
 var _ agent.TranscriptAnalyzer = (*mockAnalyzerAgent)(nil)
 
-func (m *mockAnalyzerAgent) GetTranscriptPosition(_ string) (int, error) { return 0, nil }
+func (m *mockAnalyzerAgent) GetTranscriptPosition(_ string) (int, error) {
+	return 0, m.positionErr
+}
 
 func (m *mockAnalyzerAgent) ExtractModifiedFilesFromOffset(_ string, _ int) ([]string, int, error) {
 	if m.onExtract != nil {
@@ -767,6 +770,95 @@ type mockPreparerAgent struct {
 	mockLifecycleAgent
 
 	prepareTranscriptCalled bool
+	afterPrepare            func()
+}
+
+type mockPreparerAnalyzerAgent struct {
+	*mockPreparerAgent
+
+	extractedOffset int
+	analyzerFiles   []string
+	analyzerErr     error
+}
+
+type mockCapturerAgent struct {
+	mockLifecycleAgent
+
+	snapshot      agent.TranscriptSnapshot
+	captureErr    error
+	captureCalled bool
+	readCalled    bool
+	afterCapture  func()
+	requests      []agent.TranscriptCaptureRequest
+}
+
+var _ agent.TranscriptCapturer = (*mockCapturerAgent)(nil)
+
+func (m *mockCapturerAgent) CaptureTranscript(_ context.Context, request agent.TranscriptCaptureRequest) (agent.TranscriptSnapshot, error) {
+	m.captureCalled = true
+	m.requests = append(m.requests, request)
+	if m.captureErr != nil {
+		return agent.TranscriptSnapshot{}, m.captureErr
+	}
+	if m.afterCapture != nil {
+		m.afterCapture()
+	}
+	return m.snapshot, nil
+}
+
+type mockRepeatableCapturerAgent struct {
+	*mockCapturerAgent
+
+	position int
+}
+
+var (
+	_ agent.RepeatableTurnEnd  = (*mockRepeatableCapturerAgent)(nil)
+	_ agent.TranscriptAnalyzer = (*mockRepeatableCapturerAgent)(nil)
+)
+
+func (m *mockRepeatableCapturerAgent) TurnEndMayRepeat() bool { return true }
+
+func (m *mockRepeatableCapturerAgent) GetTranscriptPosition(string) (int, error) {
+	return m.position, nil
+}
+
+func (m *mockRepeatableCapturerAgent) ExtractModifiedFilesFromOffset(string, int) ([]string, int, error) {
+	return nil, m.position, nil
+}
+
+func (m *mockCapturerAgent) ReadTranscript(_ string) ([]byte, error) {
+	m.readCalled = true
+	return nil, errors.New("ReadTranscript must not reopen a captured source")
+}
+
+type blockingTurnStartCapturerAgent struct {
+	*mockLifecycleAgent
+
+	positionStarted chan struct{}
+	releasePosition chan struct{}
+}
+
+var (
+	_ agent.TranscriptAnalyzer = (*blockingTurnStartCapturerAgent)(nil)
+	_ agent.TranscriptCapturer = (*blockingTurnStartCapturerAgent)(nil)
+)
+
+func (m *blockingTurnStartCapturerAgent) GetTranscriptPosition(string) (int, error) {
+	close(m.positionStarted)
+	<-m.releasePosition
+	return 0, errors.New("position capture interrupted")
+}
+
+func (m *blockingTurnStartCapturerAgent) ExtractModifiedFilesFromOffset(string, int) ([]string, int, error) {
+	return nil, 0, nil
+}
+
+func (m *blockingTurnStartCapturerAgent) CaptureTranscript(
+	context.Context,
+	agent.TranscriptCaptureRequest,
+) (agent.TranscriptSnapshot, error) {
+	return agent.TranscriptSnapshot{}, nil
 }
 
 var _ agent.TranscriptPreparer = (*mockPreparerAgent)(nil)
@@ -777,7 +869,22 @@ func (m *mockPreparerAgent) PrepareTranscript(_ context.Context, sessionRef stri
 	if err := os.MkdirAll(filepath.Dir(sessionRef), 0o750); err != nil {
 		return err
 	}
-	return os.WriteFile(sessionRef, m.transcriptData, 0o600)
+	if err := os.WriteFile(sessionRef, m.transcriptData, 0o600); err != nil {
+		return err
+	}
+	if m.afterPrepare != nil {
+		m.afterPrepare()
+	}
+	return nil
+}
+
+func (m *mockPreparerAnalyzerAgent) GetTranscriptPosition(_ string) (int, error) {
+	return 0, nil
+}
+
+func (m *mockPreparerAnalyzerAgent) ExtractModifiedFilesFromOffset(_ string, offset int) ([]string, int, error) {
+	m.extractedOffset = offset
+	return m.analyzerFiles, offset, m.analyzerErr
 }
 
 func TestHandleLifecycleTurnEnd_PreparerCreatesFile(t *testing.T) {
@@ -817,6 +924,291 @@ func TestHandleLifecycleTurnEnd_PreparerCreatesFile(t *testing.T) {
 	if err != nil && strings.Contains(err.Error(), "transcript file not found") {
 		t.Errorf("handler failed with 'transcript file not found' — PrepareTranscript was not called before fileExists check: %v", err)
 	}
+}
+
+func TestHandleLifecycleTurnEnd_NonCapturerLoadsStateAfterPrepare(t *testing.T) {
+	// Cannot use t.Parallel() because repository resolution depends on t.Chdir.
+	workDir := t.TempDir()
+	testutil.InitRepo(t, workDir)
+	testutil.WriteFile(t, workDir, "README.md", "initial\n")
+	testutil.GitAdd(t, workDir, "README.md")
+	testutil.GitCommit(t, workDir, "initial")
+	t.Chdir(workDir)
+	paths.ClearWorktreeRootCache()
+
+	const sessionID = "non-capturer-prepare-order"
+	transcriptPath := filepath.Join(workDir, ".entire", "tmp", sessionID+".json")
+	require.NoError(t, os.MkdirAll(filepath.Dir(prePromptStateFile(context.Background(), sessionID)), 0o750))
+	require.NoError(t, os.WriteFile(prePromptStateFile(context.Background(), sessionID), []byte(
+		`{"session_id":"non-capturer-prepare-order","transcript_offset":1,"untracked_files":[]}`), 0o600))
+
+	preparer := &mockPreparerAgent{
+		mockLifecycleAgent: mockLifecycleAgent{
+			name:           "mock-preparer-analyzer",
+			agentType:      "Mock Preparer Analyzer Agent",
+			transcriptData: []byte(`{"type":"user","message":"test"}`),
+		},
+		afterPrepare: func() {
+			require.NoError(t, os.WriteFile(prePromptStateFile(context.Background(), sessionID), []byte(
+				`{"session_id":"non-capturer-prepare-order","transcript_offset":7,"untracked_files":[]}`), 0o600))
+		},
+	}
+	ag := &mockPreparerAnalyzerAgent{mockPreparerAgent: preparer}
+
+	err := handleLifecycleTurnEnd(context.Background(), ag, &agent.Event{
+		Type:       agent.TurnEnd,
+		SessionID:  sessionID,
+		SessionRef: transcriptPath,
+		Timestamp:  time.Now(),
+	})
+	require.NoError(t, err)
+	require.True(t, preparer.prepareTranscriptCalled)
+	require.Equal(t, 7, ag.extractedOffset)
+}
+
+func TestHandleLifecycleTurnEnd_CopiesCapturedBytesAfterSourceMutation(t *testing.T) {
+	// Cannot use t.Parallel because repository resolution depends on t.Chdir.
+	workDir := t.TempDir()
+	testutil.InitRepo(t, workDir)
+	testutil.WriteFile(t, workDir, "README.md", "initial\n")
+	testutil.GitAdd(t, workDir, "README.md")
+	testutil.GitCommit(t, workDir, "initial")
+	t.Chdir(workDir)
+	paths.ClearWorktreeRootCache()
+
+	sessionID := "captured-lifecycle-session"
+	transcriptPath := filepath.Join(t.TempDir(), "transcript.jsonl")
+	captured := []byte(`{"type":"assistant","message":{"content":"captured"}}` + "\n")
+	mutated := []byte(`{"type":"assistant","message":{"content":"mutated"}}` + "\n")
+	require.NoError(t, os.WriteFile(transcriptPath, captured, 0o600))
+
+	ag := &mockCapturerAgent{
+		mockLifecycleAgent: *newMockAgent(),
+		snapshot: agent.TranscriptSnapshot{
+			Data:     captured,
+			Position: 1,
+		},
+		afterCapture: func() {
+			require.NoError(t, os.WriteFile(transcriptPath, mutated, 0o600))
+		},
+	}
+	event := &agent.Event{
+		Type:       agent.TurnEnd,
+		SessionID:  sessionID,
+		SessionRef: transcriptPath,
+	}
+
+	require.NoError(t, handleLifecycleTurnEnd(context.Background(), ag, event))
+	require.True(t, ag.captureCalled)
+	require.False(t, ag.readCalled)
+
+	ownedPath := filepath.Join(workDir, paths.SessionMetadataDirFromSessionID(sessionID), paths.TranscriptFileName)
+	owned, err := os.ReadFile(ownedPath)
+	require.NoError(t, err)
+	require.Equal(t, captured, owned)
+	require.NotEqual(t, mutated, owned)
+}
+
+func TestHandleLifecycleTurnEnd_CaptureFailureConsumesNothing(t *testing.T) {
+	t.Parallel()
+
+	transcriptPath := filepath.Join(t.TempDir(), "transcript.jsonl")
+	require.NoError(t, os.WriteFile(transcriptPath, []byte(`{"type":"assistant"}`+"\n"), 0o600))
+	ag := &mockCapturerAgent{
+		mockLifecycleAgent: *newMockAgent(),
+		captureErr:         agent.ErrTranscriptNotReady,
+	}
+	event := &agent.Event{
+		Type:       agent.TurnEnd,
+		SessionID:  "capture-failure-session",
+		SessionRef: transcriptPath,
+	}
+
+	err := handleLifecycleTurnEnd(context.Background(), ag, event)
+	require.ErrorIs(t, err, agent.ErrTranscriptNotReady)
+	require.True(t, ag.captureCalled)
+	require.False(t, ag.readCalled)
+}
+
+func TestHandleLifecycleTurnEnd_ModernCaptureRequiresTurnStartPosition(t *testing.T) {
+	t.Parallel()
+
+	transcriptPath := filepath.Join(t.TempDir(), "transcript.jsonl")
+	require.NoError(t, os.WriteFile(transcriptPath, []byte(`{"type":"assistant"}`+"\n"), 0o600))
+	ag := &mockCapturerAgent{mockLifecycleAgent: *newMockAgent()}
+	finalResponse := "Done."
+	event := &agent.Event{
+		Type:          agent.TurnEnd,
+		SessionID:     "modern-capture-without-turn-start",
+		SessionRef:    transcriptPath,
+		FinalResponse: &finalResponse,
+	}
+
+	err := handleLifecycleTurnEnd(context.Background(), ag, event)
+	require.ErrorIs(t, err, agent.ErrTranscriptNotReady)
+	require.False(t, ag.captureCalled)
+	require.False(t, ag.readCalled)
+}
+
+func TestHandleLifecycleTurnEnd_ModernCaptureRejectsUnmeasuredTurnStartPosition(t *testing.T) {
+	// Cannot use t.Parallel because repository resolution depends on t.Chdir.
+	workDir := t.TempDir()
+	testutil.InitRepo(t, workDir)
+	t.Chdir(workDir)
+	paths.ClearWorktreeRootCache()
+
+	sessionID := "modern-capture-unmeasured-turn-start"
+	transcriptPath := filepath.Join(t.TempDir(), "transcript.jsonl")
+	require.NoError(t, os.WriteFile(transcriptPath, []byte(`{"type":"assistant"}`+"\n"), 0o600))
+	positionErr := errors.New("position unavailable")
+	startAgent := &mockAnalyzerAgent{
+		mockLifecycleAgent: newMockAgent(),
+		positionErr:        positionErr,
+	}
+	require.NoError(t, CapturePrePromptState(context.Background(), startAgent, sessionID, transcriptPath))
+
+	preState, err := LoadPrePromptState(context.Background(), sessionID)
+	require.NoError(t, err)
+	require.NotNil(t, preState)
+	require.Zero(t, preState.TranscriptOffset)
+	require.False(t, preState.TranscriptPositionCaptured)
+
+	capturer := &mockCapturerAgent{mockLifecycleAgent: *newMockAgent()}
+	finalResponse := "Done."
+	err = handleLifecycleTurnEnd(context.Background(), capturer, &agent.Event{
+		Type:          agent.TurnEnd,
+		SessionID:     sessionID,
+		SessionRef:    transcriptPath,
+		FinalResponse: &finalResponse,
+	})
+	require.ErrorIs(t, err, agent.ErrTranscriptNotReady)
+	require.False(t, capturer.captureCalled)
+	require.False(t, capturer.readCalled)
+}
+
+func TestHandleLifecycleTurnEnd_RepeatableStopsReuseTurnBoundary(t *testing.T) {
+	// Cannot use t.Parallel because repository resolution depends on t.Chdir.
+	workDir := t.TempDir()
+	testutil.InitRepo(t, workDir)
+	testutil.WriteFile(t, workDir, "README.md", "initial\n")
+	testutil.GitAdd(t, workDir, "README.md")
+	testutil.GitCommit(t, workDir, "initial")
+	t.Chdir(workDir)
+	paths.ClearWorktreeRootCache()
+
+	sessionID := "repeatable-stop-boundary"
+	transcriptPath := filepath.Join(t.TempDir(), "transcript.jsonl")
+	first := []byte(`{"type":"assistant","message":{"content":"First."}}` + "\n")
+	require.NoError(t, os.WriteFile(transcriptPath, first, 0o600))
+
+	ag := &mockRepeatableCapturerAgent{
+		mockCapturerAgent: &mockCapturerAgent{
+			mockLifecycleAgent: *newMockAgent(),
+			snapshot: agent.TranscriptSnapshot{
+				Data:     first,
+				Position: 1,
+			},
+		},
+	}
+	require.NoError(t, handleLifecycleTurnStart(context.Background(), ag, &agent.Event{
+		Type:       agent.TurnStart,
+		SessionID:  sessionID,
+		SessionRef: transcriptPath,
+		Prompt:     "start",
+	}))
+
+	firstResponse := "First."
+	require.NoError(t, handleLifecycleTurnEnd(context.Background(), ag, &agent.Event{
+		Type:          agent.TurnEnd,
+		SessionID:     sessionID,
+		SessionRef:    transcriptPath,
+		FinalResponse: &firstResponse,
+	}))
+
+	second := append([]byte(nil), first...)
+	second = append(second, []byte(`{"type":"assistant","message":{"content":"Second."}}`+"\n")...)
+	require.NoError(t, os.WriteFile(transcriptPath, second, 0o600))
+	ag.snapshot = agent.TranscriptSnapshot{Data: second, Position: 2}
+	secondResponse := "Second."
+	require.NoError(t, handleLifecycleTurnEnd(context.Background(), ag, &agent.Event{
+		Type:           agent.TurnEnd,
+		SessionID:      sessionID,
+		SessionRef:     transcriptPath,
+		FinalResponse:  &secondResponse,
+		StopHookActive: true,
+	}))
+
+	require.Len(t, ag.requests, 2)
+	require.Zero(t, ag.requests[0].StartPosition)
+	require.Zero(t, ag.requests[1].StartPosition)
+	preState, err := LoadPrePromptState(context.Background(), sessionID)
+	require.NoError(t, err)
+	require.NotNil(t, preState)
+
+	state, err := strategy.LoadSessionState(context.Background(), sessionID)
+	require.NoError(t, err)
+	require.True(t, state.TurnEndPending)
+	require.Equal(t, session.PhaseIdle, state.Phase)
+	require.Equal(t, 1, state.SessionTurnCount)
+
+	ag.position = 2
+	require.NoError(t, handleLifecycleTurnStart(context.Background(), ag, &agent.Event{
+		Type:       agent.TurnStart,
+		SessionID:  sessionID,
+		SessionRef: transcriptPath,
+		Prompt:     "next",
+	}))
+	preState, err = LoadPrePromptState(context.Background(), sessionID)
+	require.NoError(t, err)
+	require.Equal(t, 2, preState.TranscriptOffset)
+	state, err = strategy.LoadSessionState(context.Background(), sessionID)
+	require.NoError(t, err)
+	require.False(t, state.TurnEndPending)
+}
+
+func TestHandleLifecycleTurnStart_InvalidatesPreviousBoundaryBeforeCapture(t *testing.T) {
+	// Cannot use t.Parallel because repository resolution depends on t.Chdir.
+	workDir := t.TempDir()
+	testutil.InitRepo(t, workDir)
+	testutil.WriteFile(t, workDir, "README.md", "initial\n")
+	testutil.GitAdd(t, workDir, "README.md")
+	testutil.GitCommit(t, workDir, "initial")
+	t.Chdir(workDir)
+	paths.ClearWorktreeRootCache()
+
+	const sessionID = "turn-start-invalidates-stale-boundary"
+	statePath := prePromptStateFile(context.Background(), sessionID)
+	require.NoError(t, os.MkdirAll(filepath.Dir(statePath), 0o750))
+	require.NoError(t, os.WriteFile(statePath, []byte(
+		`{"session_id":"turn-start-invalidates-stale-boundary","transcript_offset":2,"transcript_position_captured":true,"untracked_files":[]}`), 0o600))
+
+	ag := &blockingTurnStartCapturerAgent{
+		mockLifecycleAgent: newMockAgent(),
+		positionStarted:    make(chan struct{}),
+		releasePosition:    make(chan struct{}),
+	}
+	done := make(chan error, 1)
+	go func() {
+		done <- handleLifecycleTurnStart(context.Background(), ag, &agent.Event{
+			Type:       agent.TurnStart,
+			SessionID:  sessionID,
+			SessionRef: filepath.Join(workDir, "transcript.jsonl"),
+			Prompt:     "repeat an earlier answer",
+		})
+	}()
+
+	select {
+	case <-ag.positionStarted:
+	case <-time.After(5 * time.Second):
+		close(ag.releasePosition)
+		t.Fatal("turn-start did not reach transcript position capture")
+	}
+	preState, err := LoadPrePromptState(context.Background(), sessionID)
+	require.NoError(t, err)
+	require.Nil(t, preState, "the previous turn's boundary must be gone while current capture is incomplete")
+
+	close(ag.releasePosition)
+	require.NoError(t, <-done)
 }
 
 func TestHandleLifecycleTurnEnd_EmptyRepository(t *testing.T) {
@@ -1278,6 +1670,35 @@ func TestHandleLifecycleSessionEnd_EmptySessionID(t *testing.T) {
 	}
 }
 
+func TestSealPendingTurnAtSessionEnd(t *testing.T) {
+	t.Parallel()
+
+	tests := map[string]struct {
+		refreshRequired bool
+		wantIDs         []string
+	}{
+		"successful refresh releases recovery IDs": {},
+		"required refresh preserves recovery IDs": {
+			refreshRequired: true,
+			wantIDs:         []string{"checkpoint"},
+		},
+	}
+
+	for name, tt := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			state := &strategy.SessionState{
+				TurnEndPending:         true,
+				TurnEndRefreshRequired: tt.refreshRequired,
+				TurnCheckpointIDs:      []string{"checkpoint"},
+			}
+			sealPendingTurnAtSessionEnd(state)
+			require.False(t, state.TurnEndPending)
+			require.Equal(t, tt.wantIDs, state.TurnCheckpointIDs)
+		})
+	}
+}
+
 // --- resolveTranscriptOffset tests ---
 
 func TestResolveTranscriptOffset_PrefersPrePromptState(t *testing.T) {
@@ -1315,6 +1736,30 @@ func TestResolveTranscriptOffset_ZeroOffsetInPrePromptState(t *testing.T) {
 	if offset != 0 {
 		t.Errorf("expected offset 0, got %d", offset)
 	}
+}
+
+func TestResolveTranscriptOffset_MeasuredZeroOverridesSessionState(t *testing.T) {
+	// Cannot use t.Parallel because repository resolution depends on t.Chdir.
+	workDir := t.TempDir()
+	testutil.InitRepo(t, workDir)
+	t.Chdir(workDir)
+	paths.ClearWorktreeRootCache()
+
+	const sessionID = "measured-zero-offset"
+	require.NoError(t, strategy.SaveSessionState(context.Background(), &strategy.SessionState{
+		SessionID:                 sessionID,
+		CheckpointTranscriptStart: 42,
+		StartedAt:                 time.Now(),
+	}))
+	saved, err := strategy.LoadSessionState(context.Background(), sessionID)
+	require.NoError(t, err)
+	require.NotNil(t, saved)
+	require.Equal(t, 42, saved.CheckpointTranscriptStart)
+
+	offset := resolveTranscriptOffset(context.Background(), &PrePromptState{
+		TranscriptPositionCaptured: true,
+	}, sessionID)
+	require.Zero(t, offset)
 }
 
 // --- Event type routing tests ---

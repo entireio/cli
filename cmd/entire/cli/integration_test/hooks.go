@@ -109,6 +109,19 @@ func (r *HookRunner) SimulateStop(sessionID, transcriptPath string) error {
 	return r.runHookWithInput("stop", input)
 }
 
+// SimulateStopWithFinalResponse simulates a modern Claude Code Stop payload.
+func (r *HookRunner) SimulateStopWithFinalResponse(sessionID, transcriptPath, finalResponse string) error {
+	r.T.Helper()
+
+	input := map[string]string{
+		"session_id":             sessionID,
+		"transcript_path":        transcriptPath,
+		"last_assistant_message": finalResponse,
+	}
+
+	return r.runHookWithInput("stop", input)
+}
+
 // SimulateSessionEnd simulates the Claude Code session-end hook.
 // This transitions a session from IDLE (or ACTIVE) to ENDED phase.
 func (r *HookRunner) SimulateSessionEnd(sessionID string) error {
@@ -424,6 +437,13 @@ func (env *TestEnv) SimulateStop(sessionID, transcriptPath string) error {
 	env.T.Helper()
 	runner := NewHookRunner(env.RepoDir, env.ClaudeProjectDir, env.T)
 	return runner.SimulateStop(sessionID, transcriptPath)
+}
+
+// SimulateStopWithFinalResponse is a convenience method on TestEnv.
+func (env *TestEnv) SimulateStopWithFinalResponse(sessionID, transcriptPath, finalResponse string) error {
+	env.T.Helper()
+	runner := NewHookRunner(env.RepoDir, env.ClaudeProjectDir, env.T)
+	return runner.SimulateStopWithFinalResponse(sessionID, transcriptPath, finalResponse)
 }
 
 // SimulateSessionEnd is a convenience method on TestEnv.
