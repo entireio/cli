@@ -524,6 +524,25 @@ func TestStateStore_List_SkipsMalformedState(t *testing.T) {
 	assert.Equal(t, valid.SessionID, states[0].SessionID)
 }
 
+// Not parallel: resets the process-global gitdir roots.
+func TestStateStore_ListStrict_RejectsMalformedState(t *testing.T) {
+	stateDir := filepath.Join(t.TempDir(), "entire-sessions")
+	t.Cleanup(gitdir.Reset)
+	require.NoError(t, os.MkdirAll(stateDir, 0o750))
+	store := NewStateStoreWithDir(stateDir)
+
+	require.NoError(t, os.WriteFile(
+		filepath.Join(stateDir, "malformed-session.json"),
+		[]byte(`{"session_id":`),
+		0o600,
+	))
+
+	states, err := store.ListStrict(context.Background())
+	require.Error(t, err)
+	assert.Nil(t, states)
+	assert.Contains(t, err.Error(), `failed to load session state "malformed-session"`)
+}
+
 func TestStateStore_Load_TraversalResistant(t *testing.T) {
 	t.Parallel()
 
