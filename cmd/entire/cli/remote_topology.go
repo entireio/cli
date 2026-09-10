@@ -52,12 +52,20 @@ type remoteTopology struct {
 	// primaryIsRefs reports whether the git-refs backend is active, which
 	// decides what a fanning-out remote means for checkpoints.
 	primaryIsRefs bool
-	// selected is the remote a valid checkpoint_push_remote settles on, empty
-	// when nothing explicit is configured. That remote's own push URLs may
-	// still need a warning.
+	// explicitRemote is the remote a valid checkpoint_push_remote settles on.
+	// Named for its provenance rather than for the election: every resolver
+	// tier elects a remote, but only this one is an explicit checkpoint
+	// destination choice, and that is what justifies suppressing the note.
+	// That remote's own push URLs may still need a warning.
+	//
+	// Empty when no valid explicit selection resolved, which is three states,
+	// not one: no setting at all; a setting naming a remote that is not
+	// configured (fail-closed — checkpoint sync is disabled entirely, and
+	// `entire status` reports that); or settings that could not be read.
+	//
 	// Observed elections deliberately retain the choice explanation: they are
 	// inferred from a past push, not an explicit checkpoint destination choice.
-	selected string
+	explicitRemote string
 }
 
 // inspectRemoteTopology reads the repo's remotes and checkpoint configuration.
@@ -100,7 +108,7 @@ func inspectRemoteTopology(ctx context.Context) remoteTopology {
 		t.primaryIsRefs = checkpoint.PrimaryIsRefs(cpCfg)
 	}
 	if elected, err := strategy.ResolveCheckpointSyncRemote(ctx); err == nil && elected.Source == strategy.SyncRemoteSourceConfig {
-		t.selected = elected.Name
+		t.explicitRemote = elected.Name
 	}
 
 	return t
@@ -142,13 +150,15 @@ func (t remoteTopology) ambiguous() bool {
 			unpinned++
 		}
 	}
-	return t.selected == "" && unpinned > 1
+	return t.explicitRemote == "" && unpinned > 1
 }
 
-// fanOutMatters excludes unselected remotes once checkpoint_push_remote settles
-// the destination: their push URLs carry code but no checkpoint data.
+// fanOutMatters excludes every remote but the explicit one once
+// checkpoint_push_remote settles the destination: the others' push URLs carry
+// code but no checkpoint data. A pinned remote fans out to nothing regardless,
+// so fansOut() is asked first.
 func (t remoteTopology) fanOutMatters(d remoteDestination) bool {
-	return d.fansOut() && (t.selected == "" || d.name == t.selected)
+	return d.fansOut() && (t.explicitRemote == "" || d.name == t.explicitRemote)
 }
 
 // describeCheckpointDestination writes an explanation of where checkpoints go,
@@ -182,7 +192,7 @@ func (t remoteTopology) describeCheckpointDestination(w io.Writer, header string
 		}
 	}
 
-	if names := t.unpinnedNames(); t.selected == "" && len(names) > 1 {
+	if names := t.unpinnedNames(); t.explicitRemote == "" && len(names) > 1 {
 		fmt.Fprintf(w, "  This repo has %d remotes (%s).\n", len(names), strings.Join(names, ", "))
 		fmt.Fprintln(w, "    Checkpoints sync to a single elected remote — not to whichever one you")
 		fmt.Fprintln(w, "    push to. A push to any other remote carries your code but no session")
