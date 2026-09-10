@@ -42,11 +42,10 @@ func TestHookOverwrite_LefthookRefreshKeepsCurrentCommitCovered(t *testing.T) {
 	env.GitAdd("fileB.go")
 	cmd := execx.NonInteractive(context.Background(), "git", "commit", "-m", "Add file B")
 	cmd.Dir = env.RepoDir
-	// A real Claude Code shell publishes its session ID to git and every hook
-	// below it. Keep this test focused on durable Lefthook delivery instead of
-	// relying on the platform-specific process-ancestry fallback to identify the
-	// simulated agent session.
-	cmd.Env = append(env.cliEnv(), "CLAUDE_CODE_SESSION_ID="+sess.ID)
+	// The runner may disable repository hooks globally with LEFTHOOK=0. This
+	// scenario specifically exercises an active Lefthook refresh, so declare
+	// that precondition instead of inheriting the runner's ambient opt-out.
+	cmd.Env = append(env.cliEnv(), "LEFTHOOK=1")
 	out, err := cmd.CombinedOutput()
 	require.NoError(t, err, "%s", out)
 
