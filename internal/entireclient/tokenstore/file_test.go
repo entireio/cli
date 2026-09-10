@@ -495,3 +495,127 @@ func TestResolveBackend_OwnsDirOnlyForTheDefaultPath(t *testing.T) {
 		t.Error("custom path: ownsDir = true, want false")
 	}
 }
+
+// The token store is the fourth consumer of userdirs.Config(), and the one with
+// no root to catch a rejected override: fileStore.dir anchors on the dirname of
+// its own path (permitted, since ENTIRE_TOKEN_STORE_PATH names a file the caller
+// chose) and reaches it through filepath.Abs, which launders a relative
+// ENTIRE_CONFIG_DIR into a plausible-looking path. Left unchecked, bearer tokens
+// landed at ./<value>/tokens.json — for a CLI run from a repository, inside the
+// repository.
+func TestFileBackendPath_RejectsRelativeConfigDirWithoutTouchingDisk(t *testing.T) {
+	t.Setenv(PathEnvVar, "")
+	t.Setenv("ENTIRE_CONFIG_DIR", "relative-config")
+	t.Chdir(t.TempDir())
+
+	path, err := fileBackendPathChecked()
+	if err == nil {
+		t.Fatalf("fileBackendPathChecked() = %q, nil; want a rejected override", path)
+	}
+	if !strings.Contains(err.Error(), "ENTIRE_CONFIG_DIR") {
+		t.Errorf("error = %q, want it to name the variable the user has to change", err)
+	}
+
+	// The carried error must stop every operation before it creates anything.
+	s := &fileStore{path: path, pathErr: err, ownsDir: true}
+	if _, getErr := s.Get("svc", "user"); getErr == nil {
+		t.Error("Get() succeeded against a rejected config dir")
+	}
+	if setErr := s.Set("svc", "user", "secret"); setErr == nil {
+		t.Error("Set() succeeded against a rejected config dir")
+	}
+	if _, statErr := os.Stat("relative-config"); statErr == nil {
+		t.Error("the store created the directory it was refusing")
+	}
+}
+
+// An explicit ENTIRE_TOKEN_STORE_PATH is deliberately not held to the rule: it
+// names a file the user chose, the same reasoning that exempts it from the
+// root-base rule in CLAUDE.md.
+func TestFileBackendPath_ExplicitPathIsNotHeldToTheAbsoluteRule(t *testing.T) {
+	t.Setenv("ENTIRE_CONFIG_DIR", "relative-config")
+	t.Setenv(PathEnvVar, "relative-tokens.json")
+
+	path, err := fileBackendPathChecked()
+	if err != nil {
+		t.Fatalf("fileBackendPathChecked() error = %v, want the caller's own path honored", err)
+	}
+	if path != "relative-tokens.json" {
+		t.Errorf("path = %q, want the value as given", path)
+	}
+}
+
+// probeSecret is the value the relative-config-dir tests round-trip.
+const probeSecret = "secret"
+
+// resetBackendForTesting forces the next Get/Set/Delete to re-resolve the
+// backend from the environment, which is what a fresh process does. The
+// package-level backend is memoized, so without this a test inherits whatever
+// an earlier one resolved.
+func resetBackendForTesting(t *testing.T) {
+	t.Helper()
+	reset := func() {
+		backendMu.Lock()
+		defer backendMu.Unlock()
+		backend = nil
+		resolved = false
+	}
+	reset()
+	t.Cleanup(reset)
+}
+
+// The check has to bite through the PUBLIC surface, not just the internal
+// resolver: Get/Set/Delete are what a command calls, and each of them creates
+// the directory, then a .lock, then the token file.
+//
+// The token store does open an os.Root — but on filepath.Dir of its own
+// absolutized path, one of the two bases CLAUDE.md permits to be derived, since
+// ENTIRE_TOKEN_STORE_PATH names a file the caller chose. That filepath.Abs is
+// exactly what stops the root from ever refusing a relative config dir: it
+// launders ./relative-config into a plausible absolute path first. Hence the
+// explicit check rather than relying on the root.
+func TestFileStore_PublicOpsRejectRelativeConfigDirWithoutSideEffects(t *testing.T) {
+	t.Setenv("ENTIRE_TOKEN_STORE", "file")
+	t.Setenv(PathEnvVar, "")
+	t.Setenv("ENTIRE_CONFIG_DIR", "relative-config")
+	cwd := t.TempDir()
+	t.Chdir(cwd)
+	resetBackendForTesting(t)
+
+	if err := Set("svc", "user", probeSecret); err == nil {
+		t.Error("Set() succeeded with a relative ENTIRE_CONFIG_DIR")
+	}
+	if _, err := Get("svc", "user"); err == nil {
+		t.Error("Get() succeeded with a relative ENTIRE_CONFIG_DIR")
+	}
+	if err := Delete("svc", "user"); err == nil {
+		t.Error("Delete() succeeded with a relative ENTIRE_CONFIG_DIR")
+	}
+
+	entries, readErr := os.ReadDir(cwd)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	for _, e := range entries {
+		t.Errorf("left %q behind in the working directory; bearer tokens must not land under the cwd", e.Name())
+	}
+}
+
+// An explicit ENTIRE_TOKEN_STORE_PATH is unchanged by the above: the user named
+// that file, which is the same reasoning that exempts it from the root-base
+// rule. A relative ENTIRE_CONFIG_DIR alongside it is simply irrelevant.
+func TestFileStore_ExplicitPathKeepsWorkingWithARelativeConfigDir(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("ENTIRE_TOKEN_STORE", "file")
+	t.Setenv("ENTIRE_CONFIG_DIR", "relative-config")
+	t.Setenv(PathEnvVar, filepath.Join(dir, "tokens.json"))
+	resetBackendForTesting(t)
+
+	if err := Set("svc", "user", probeSecret); err != nil {
+		t.Fatalf("Set() with an explicit path = %v", err)
+	}
+	got, err := Get("svc", "user")
+	if err != nil || got != probeSecret {
+		t.Fatalf("Get() = %q, %v; want the explicitly named file honored", got, err)
+	}
+}

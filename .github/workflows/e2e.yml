@@ -17,6 +17,11 @@ on:
           - copilot-cli
           - roger-roger
           - codex
+      test:
+        description: 'Test name filter (regex; empty runs the full suite)'
+        required: false
+        type: string
+        default: ''
   push:
     branches:
       - main
@@ -25,6 +30,10 @@ on:
 concurrency:
   group: e2e-tests
   cancel-in-progress: true
+
+# Deny by default: matrix-setup needs no token at all, and the three jobs that
+# do need one declare exactly what they use.
+permissions: {}
 
 jobs:
   # Build the matrix dynamically so workflow_dispatch can select a single agent.
@@ -123,6 +132,7 @@ jobs:
 
       - name: Run E2E Tests
         env:
+          TEST_FILTER: ${{ inputs.test }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
@@ -138,10 +148,22 @@ jobs:
         # task (`test:e2e`) would retry a real regression and mask it.
         run: |
           if [ "${{ matrix.agent }}" = "roger-roger" ]; then
-            mise run test:e2e:roger-roger TestExternalAgent
+            mise run test:e2e:roger-roger "${TEST_FILTER:-TestExternalAgent}"
           else
-            mise run test:e2e --agent ${{ matrix.agent }}
+            mise run test:e2e --agent ${{ matrix.agent }} "$TEST_FILTER"
           fi
+
+      # opencode writes nothing to stdout or stderr while it stalls during
+      # startup, so a hung `opencode run` reaches us as an empty-output SIGKILL
+      # naming no cause — which is exactly how the 2026-09-03 red streak looked
+      # from the artifacts. Its own log dir is the only record of what it was
+      # waiting on, so fold it into the artifact tree. Best-effort: a leg that
+      # never got as far as writing logs must not fail here.
+      - name: Collect opencode logs
+        if: always() && matrix.agent == 'opencode'
+        run: |
+          mkdir -p e2e/artifacts/opencode-logs
+          cp -R "$HOME/.local/share/opencode/log/." e2e/artifacts/opencode-logs/ || true
 
       - name: Upload artifacts
         if: always()
@@ -152,11 +174,18 @@ jobs:
           retention-days: 7
 
   e2e-windows:
+    if: inputs.agent == '' || inputs.agent == 'claude-code'
     uses: ./.github/workflows/e2e-windows.yml
+    permissions:
+      contents: read
+    with:
+      test: ${{ inputs.test }}
     secrets: inherit
 
   notify-slack:
     runs-on: ubuntu-latest
+    permissions:
+      actions: read
     needs: [e2e-tests, e2e-windows]
     if: ${{ always() && (needs.e2e-tests.result == 'failure' || needs.e2e-windows.result == 'failure') && github.event_name == 'push' }}
     steps:

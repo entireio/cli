@@ -23,7 +23,7 @@ import (
 // timeout only guards against a wedged git process.
 const reftableGitTimeout = 30 * time.Second
 
-// repoUsesReftable reports whether the repository at the given git directories
+// inspectRepoUsesReftable reports whether the repository at the given git directories
 // stores its references using the reftable backend rather than the classic
 // loose-files + packed-refs layout.
 //
@@ -38,7 +38,7 @@ const reftableGitTimeout = 30 * time.Second
 // `git refs migrate --ref-format=reftable`. Checking the directory avoids
 // parsing config and works for linked worktrees, where the shared stack lives
 // under the common git dir.
-func repoUsesReftable(dotGitPath, commonGitPath string) bool {
+func inspectRepoUsesReftable(dotGitPath, commonGitPath string) (bool, error) {
 	candidates := []string{filepath.Join(dotGitPath, "reftable")}
 	if commonGitPath != "" && commonGitPath != dotGitPath {
 		candidates = append(candidates, filepath.Join(commonGitPath, "reftable"))
@@ -48,11 +48,18 @@ func repoUsesReftable(dotGitPath, commonGitPath string) bool {
 		// symlink in its place is not a genuine reftable stack. Lstat inspects
 		// the entry itself rather than following the link, so a symlink reports
 		// IsDir()==false and is correctly not treated as a reftable repository.
-		if info, err := os.Lstat(dir); err == nil && info.IsDir() {
-			return true
+		info, err := os.Lstat(dir)
+		if err == nil {
+			if info.IsDir() {
+				return true, nil
+			}
+			continue
+		}
+		if !errors.Is(err, os.ErrNotExist) {
+			return false, fmt.Errorf("inspect reftable directory %s: %w", dir, err)
 		}
 	}
-	return false
+	return false, nil
 }
 
 // reftableStorer adapts a filesystem-backed go-git storage so it can open and
@@ -159,7 +166,7 @@ func (s *reftableStorer) execGit(args ...string) (string, []byte, error) {
 // (os/exec keeps the last value for a duplicate key). Mirrors the sibling
 // shell-out in checkpoint/shadow_ref.go.
 func gitPlumbingEnv() []string {
-	return append(os.Environ(),
+	return append(EnvWithoutRepoOverrides(),
 		"GIT_TERMINAL_PROMPT=0",
 		"LC_ALL=C",
 		"LANG=C",
@@ -236,22 +243,10 @@ func (s *reftableStorer) CheckAndSetReference(newRef, old *plumbing.Reference) e
 	if err == nil {
 		return nil
 	}
-	if isRefCASConflict(stderr) {
+	if isRefCASConflict(newRef.Name(), stderr) {
 		return gogitstorage.ErrReferenceHasChanged
 	}
 	return fmt.Errorf("reftable CAS ref %s: %s: %w", newRef.Name(), strings.TrimSpace(string(stderr)), err)
-}
-
-// isRefCASConflict reports whether git update-ref stderr indicates a
-// compare-and-swap conflict: the stored value was not the expected old value
-// ("... is at X but expected Y"), or a create-if-absent update found the ref
-// already present ("reference already exists"). These are the only failures
-// that mean the reference changed concurrently. Object/name/lock/spawn errors
-// carry different messages and must not be misclassified as conflicts.
-func isRefCASConflict(stderr []byte) bool {
-	msg := strings.ToLower(string(stderr))
-	return strings.Contains(msg, "but expected") ||
-		strings.Contains(msg, "reference already exists")
 }
 
 // Reference returns the reference with the given name, preserving symbolic refs

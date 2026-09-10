@@ -15,7 +15,8 @@ import (
 
 // Ensure CursorAgent implements HookSupport
 var (
-	_ agent.HookSupport = (*CursorAgent)(nil)
+	_ agent.HookSupport       = (*CursorAgent)(nil)
+	_ agent.HookConfigLocator = (*CursorAgent)(nil)
 )
 
 // Cursor hook names - these become subcommands under `entire hooks cursor`
@@ -58,7 +59,7 @@ func cursorHookConfig(ctx context.Context) (*agent.HookConfigFile, error) {
 		// chose rather than one derived from anything read off disk.
 		worktreeRoot = "."
 	}
-	return agent.OpenHookConfig(worktreeRoot, ".cursor/"+HooksFileName) //nolint:wrapcheck // agent.HookConfigFile already names the file in its error
+	return agent.OpenHookConfig(worktreeRoot, (&CursorAgent{}).HookConfigRelPath()) //nolint:wrapcheck // agent.HookConfigFile already names the file in its error
 }
 
 // InstallHooks installs Cursor hooks in .cursor/hooks.json.
@@ -406,3 +407,6 @@ func removeEntireHooks(entries []CursorHookEntry) []CursorHookEntry {
 	}
 	return result
 }
+
+// HookConfigRelPath implements agent.HookConfigLocator.
+func (c *CursorAgent) HookConfigRelPath() string { return ".cursor/" + HooksFileName }

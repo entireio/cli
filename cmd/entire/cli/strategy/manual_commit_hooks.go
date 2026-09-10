@@ -53,7 +53,8 @@ const (
 	ttyResultLinkAlways                  // Link and remember: add trailer + save "always" preference
 )
 
-// askConfirmTTY prompts the user via /dev/tty whether to link a commit to session context.
+// askConfirmTTY prompts via the controlling terminal whether to link a commit
+// to session context.
 // This requires a controlling terminal — callers must check
 // interactive.CanPromptInteractively() first and handle the no-TTY case
 // (agent subprocesses, CI) themselves.
@@ -71,10 +72,10 @@ func askConfirmTTY(header string, details []string, prompt string, defaultYes bo
 		return defaultResult
 	}
 
-	// Open /dev/tty for both reading and writing.
-	// This is the controlling terminal, which works even when stdin/stderr are redirected
-	// (e.g., human runs git commit -m where stdin is not a pipe).
-	tty, err := os.OpenFile("/dev/tty", os.O_RDWR, 0)
+	// Open the controlling terminal for both reading and writing. This works even
+	// when stdin/stderr are redirected (e.g., human runs git commit -m where
+	// stdin is not a pipe).
+	tty, err := interactive.OpenPromptTTY()
 	if err != nil {
 		return defaultResult
 	}
@@ -1476,11 +1477,11 @@ func (s *ManualCommitStrategy) postCommitProcessSessionLocked(
 			s.carryForwardToNewShadowBranch(ctx, repo, state, remainingFiles)
 		}
 
-		// Clear filesystem prompt.txt only when ALL files are committed.
-		// If carry-forward files remain, the prompt must persist so the next
-		// condensation (triggered by the next commit) can read it.
+		// Release the staged prompt.txt and full.jsonl only when ALL files are
+		// committed. If carry-forward files remain they must persist, so the
+		// next condensation (triggered by the next commit) can still read them.
 		if len(state.FilesTouched) == 0 {
-			clearFilesystemPrompt(ctx, state.SessionID)
+			clearFilesystemStagedFiles(ctx, state.SessionID)
 		}
 	}
 	carryForwardSpan.End()

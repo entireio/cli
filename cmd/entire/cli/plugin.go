@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent/external"
+	"github.com/entireio/cli/cmd/entire/cli/execx"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/telemetry"
@@ -127,28 +128,21 @@ func resolvePlugin(rootCmd *cobra.Command, args []string) (binPath string, plugi
 // indicates the file exists but lacks the executable bit (or the
 // equivalent platform-specific accessibility).
 //
-// Only ABSOLUTE PATH entries are scanned. A relative entry (including bare
-// "." and the empty string, which POSIX treats as the current directory) is
-// skipped outright, even if it points at a real, inaccessible file. That
-// mirrors exec.LookPath's own refusal: when LookPath finds a binary via a
-// relative PATH entry it deliberately returns exec.ErrDot rather than
-// resolving it — the fix for the classic "dot in PATH" RCE class, where a
-// planted binary in an untrusted working directory silently executes with
-// the user's privileges. LookPath's error does not distinguish ErrDot from
-// a genuine "exists but not executable" case, so if this function re-walked
-// relative entries too, it would blindly re-find and return the exact
-// binary LookPath just correctly refused — and the caller (runPlugin) execs
-// it via a path that contains a separator, which bypasses Go's exec.Command
-// ErrDot re-check (that only fires for a bare name with no separator). Do
-// not remove this filter without also making resolvePlugin ErrDot-aware
-// some other way.
+// The scan goes through execx.PathScanDirs, not a bare split: the rule that
+// only absolute entries are scanned is shared with the external-agent
+// scanner, and two copies of it is how they drifted apart in the first place.
+// The rule matters especially here, because this function runs only after
+// LookPath has failed. LookPath's error does not distinguish exec.ErrDot (its
+// refusal to resolve a match found through a relative PATH entry) from a
+// genuine "exists but not executable", so a scan that re-walked relative
+// entries would blindly re-find the exact binary LookPath just correctly
+// refused. runPlugin then execs it via a path containing a separator, which
+// bypasses exec.Command's own ErrDot re-check, since that only fires for a
+// bare name with no separator.
 func findInaccessiblePlugin(filename string) (string, bool) {
-	for _, dir := range filepath.SplitList(os.Getenv("PATH")) {
-		if dir == "" || !filepath.IsAbs(dir) {
-			continue
-		}
+	for _, dir := range execx.PathScanDirs() {
 		candidate := filepath.Join(dir, filename)
-		info, err := os.Stat(candidate) //nolint:gosec // PATH entries are user-trusted; scanning them is the point.
+		info, err := os.Stat(candidate)
 		if err != nil || info.IsDir() {
 			continue
 		}

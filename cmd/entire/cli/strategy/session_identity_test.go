@@ -501,3 +501,37 @@ func TestFindSessionsForCommitLinking_FallsBackToWorktree(t *testing.T) {
 	assert.Equal(t, "sess-here-fallback", got[0].SessionID,
 		"human commits (no agent ancestry) keep worktree matching")
 }
+
+// isNearerOwner is the shared comparator behind commit attribution and caller
+// resolution, and its contract covers input pairs neither caller produces
+// today. Pinned directly so it stays true for a future one.
+func TestIsNearerOwner_Contract(t *testing.T) {
+	older := time.Now().Add(-time.Hour)
+	newer := time.Now()
+	stale := &SessionState{SessionID: "stale", LastInteractionTime: &older}
+	fresh := &SessionState{SessionID: "fresh", LastInteractionTime: &newer}
+
+	cases := []struct {
+		name             string
+		depth, bestDepth int
+		state, best      *SessionState
+		want             bool
+	}{
+		{"placed beats unplaced", 3, -1, stale, fresh, true},
+		{"unplaced loses to placed", -1, 3, fresh, stale, false},
+		{"nearer wins", 0, 1, stale, fresh, true},
+		{"farther loses", 2, 1, fresh, stale, false},
+		{"equal depth breaks by recency", 1, 1, fresh, stale, true},
+		{"equal depth keeps the fresher incumbent", 1, 1, stale, fresh, false},
+		{"both unplaced break by recency", -1, -1, fresh, stale, true},
+		{"both unplaced keep the fresher incumbent", -1, -1, stale, fresh, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := isNearerOwner(c.depth, c.bestDepth, c.state, c.best); got != c.want {
+				t.Errorf("isNearerOwner(%d, %d, %s, %s) = %v, want %v",
+					c.depth, c.bestDepth, c.state.SessionID, c.best.SessionID, got, c.want)
+			}
+		})
+	}
+}

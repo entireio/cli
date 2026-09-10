@@ -14,6 +14,8 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
+	"github.com/entireio/cli/cmd/entire/cli/execx"
+	"github.com/entireio/cli/cmd/entire/cli/interactive"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
 )
@@ -37,11 +39,41 @@ var (
 // Errors during discovery are logged but do not prevent other agents from loading.
 // Discovery is skipped when the external_agents setting is not enabled.
 func DiscoverAndRegister(ctx context.Context) {
-	if !settings.IsExternalAgentsEnabled(ctx) {
+	// settings.Load directly rather than settings.IsExternalAgentsEnabled: the
+	// disabled path needs the same object again to report a refused grant, and
+	// Load is uncached and already runs several times per hook.
+	s, err := settings.Load(ctx)
+	if err != nil {
+		logging.Debug(ctx, "external agent discovery skipped (settings unreadable)",
+			slog.String("error", err.Error()))
+		return
+	}
+	if !s.ExternalAgents {
+		reportExternalAgentsRejection(ctx, s)
 		logging.Debug(ctx, "external agent discovery disabled (external_agents not enabled in settings)")
 		return
 	}
 	discoverAndRegister(ctx)
+}
+
+// reportExternalAgentsRejection tells the user when discovery is off because
+// the loader refused an external_agents grant rather than because they never
+// set one. The two look identical from here — no agent appears — and the fix
+// (move the setting into an untracked .entire/settings.local.json) is not
+// guessable from the symptom. The loader records rather than logs, so this is
+// the first place that can say anything.
+func reportExternalAgentsRejection(ctx context.Context, s *settings.EntireSettings) {
+	reason, rejected := s.ExternalAgentsRejection()
+	if !rejected {
+		return
+	}
+	logging.Warn(ctx, "ignoring external_agents",
+		slog.String("reason", reason),
+		slog.String("remediation", "set external_agents in "+settings.EntireSettingsLocalFile+", untracked"))
+	if interactive.IsTerminalWriter(os.Stderr) {
+		fmt.Fprintf(os.Stderr, "[entire] ignoring external_agents (%s); move it to %s and keep that file out of version control\n",
+			reason, settings.EntireSettingsLocalFile)
+	}
 }
 
 // DiscoverAndRegisterAlways is like DiscoverAndRegister but bypasses the
@@ -134,8 +166,14 @@ func discoverAndRegister(ctx context.Context) {
 	discoveryCtx, cancel := context.WithTimeout(ctx, discoveryTimeout)
 	defer cancel()
 
-	pathEnv := os.Getenv("PATH")
-	if pathEnv == "" {
+	// execx.PathScanDirs, not a bare $PATH split: this scanner resolves by
+	// filepath.Glob, so a match never passes through exec.LookPath (no ErrDot)
+	// and arrives with separators in it (so exec.Command's own re-check does
+	// not apply either). Dropping non-absolute entries at the source is the
+	// only thing standing between a file committed to the user's repository
+	// and a binary this function executes to ask for its info.
+	scanDirs := execx.PathScanDirs()
+	if len(scanDirs) == 0 {
 		return
 	}
 
@@ -146,7 +184,7 @@ func discoverAndRegister(ctx context.Context) {
 	}
 
 	seen := make(map[string]bool) // deduplicate binaries across PATH dirs
-	for _, dir := range filepath.SplitList(pathEnv) {
+	for _, dir := range scanDirs {
 		if discoveryCanceled(ctx, discoveryCtx) {
 			logging.Debug(ctx, "external agent discovery timed out")
 			return

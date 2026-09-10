@@ -65,7 +65,7 @@ func SetResolveContextForAPIForTest(t interface{ Helper() }, fn resolveContextFu
 // A host that doesn't advertise discovery (unreachable / 404 / 503 /
 // malformed) is an error — without it we can't know which login servers the
 // host trusts, and guessing risks presenting a token to a host that doesn't
-// accept that core (see clusterdiscovery.requireActiveContext).
+// accept that core (see clusterdiscovery.selectLoginContext).
 //
 // Callers that honour --insecure-http-auth must call EnableInsecureHTTP before
 // invoking this (as they already do); the per-context refresh reads that

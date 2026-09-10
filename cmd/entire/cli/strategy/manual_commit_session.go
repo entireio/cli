@@ -51,8 +51,17 @@ func (s *ManualCommitStrategy) saveSessionState(ctx context.Context, state *Sess
 	return nil
 }
 
-// clearSessionState clears session state using the StateStore.
-func (s *ManualCommitStrategy) clearSessionState(ctx context.Context, sessionID string) error {
+// clearSessionStateLocked clears session state using the StateStore. Callers
+// must already hold sessionID's gate -- either by having called
+// acquireSessionGate themselves, or by running inside a
+// MutateSessionState/MutateSessionStateOnSaved closure for the same session
+// (see CondenseSessionByID's clearAfter path, which clears while still
+// inside its own locked mutation rather than after releasing it). Calling
+// this without the gate held reintroduces the race clearSessionState exists
+// to close: a concurrent, properly-locked write landing in the gap between
+// a caller's "safe to clear" decision and the actual delete would be
+// silently destroyed.
+func (s *ManualCommitStrategy) clearSessionStateLocked(ctx context.Context, sessionID string) error {
 	store, err := s.getStateStore(ctx)
 	if err != nil {
 		return err
@@ -61,6 +70,38 @@ func (s *ManualCommitStrategy) clearSessionState(ctx context.Context, sessionID 
 		return fmt.Errorf("failed to clear session state: %w", err)
 	}
 	return nil
+}
+
+// clearSessionState clears session state using the StateStore, under
+// sessionID's gate -- the same per-session lock MutateSessionState uses for
+// every other mutation of this state. Without it, a concurrently-running,
+// properly-locked write (e.g. a PostToolUse hook for the same session)
+// landing in the gap between a caller's decision to clear and this call
+// actually clearing would be silently destroyed: the file the write just
+// produced gets deleted out from under it, with nothing surfacing the loss.
+// initializeSession documents and fixes the identical hazard class
+// elsewhere in this file ("take the gate, then re-check under lock");
+// this closes the same gap for the clear path.
+func (s *ManualCommitStrategy) clearSessionState(ctx context.Context, sessionID string) error {
+	if sessionID == "" {
+		return ErrStateNotFound
+	}
+	_, isOuter, release, err := acquireSessionGate(ctx, sessionID)
+	if err != nil {
+		return err
+	}
+	defer release()
+	if !isOuter {
+		// A MutateSessionState frame for this session is already active on
+		// this goroutine. Reaching clearSessionState reentrantly from
+		// inside one is not something any current caller does (they clear
+		// only after their own mutation closure has already returned and
+		// released) -- if that ever changes, call clearSessionStateLocked
+		// directly from inside the active closure instead, the way
+		// CondenseSessionByID's clearAfter path does.
+		return fmt.Errorf("clearSessionState: session %s gate already held by an active MutateSessionState frame on this goroutine", sessionID)
+	}
+	return s.clearSessionStateLocked(ctx, sessionID)
 }
 
 // listAllSessionStates returns all active session states.
@@ -540,12 +581,6 @@ func (s *ManualCommitStrategy) findSessionsForCommit(ctx context.Context, baseCo
 // Used by `entire clean` to find sessions to clean up.
 func (s *ManualCommitStrategy) FindSessionsForCommit(ctx context.Context, baseCommitSHA string) ([]*SessionState, error) {
 	return s.findSessionsForCommit(ctx, baseCommitSHA)
-}
-
-// ClearSessionState is the exported version of clearSessionState.
-// Used by `entire doctor` to clean up session state files.
-func (s *ManualCommitStrategy) ClearSessionState(ctx context.Context, sessionID string) error {
-	return s.clearSessionState(ctx, sessionID)
 }
 
 // CountOtherActiveSessionsWithCheckpoints counts how many other active sessions

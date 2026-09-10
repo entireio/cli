@@ -33,7 +33,7 @@ func TestTrailsCellClient_Contract(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			previous := trailRefreshAPIClient
-			trailRefreshAPIClient = func(context.Context, bool, string) (*api.Client, error) {
+			trailRefreshAPIClient = func(context.Context, bool, string, string, string) (*api.Client, error) {
 				if tc.clientErr != nil {
 					return nil, tc.clientErr
 				}
@@ -41,7 +41,7 @@ func TestTrailsCellClient_Contract(t *testing.T) {
 			}
 			t.Cleanup(func() { trailRefreshAPIClient = previous })
 
-			client, notOnboarded, err := trailsCellClient(context.Background(), false, "acme/widget")
+			client, notOnboarded, err := trailsCellClient(context.Background(), false, "gh", "acme", "widget")
 
 			if notOnboarded != tc.wantNotOnboard {
 				t.Errorf("notOnboarded = %v, want %v", notOnboarded, tc.wantNotOnboard)

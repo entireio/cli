@@ -1,6 +1,7 @@
 package osroot_test
 
 import (
+	"errors"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -659,4 +660,142 @@ func TestSymlinkPaths_ReportsASymlinkedWalkRootRatherThanDescending(t *testing.T
 	found, err := osroot.SymlinkPaths(root, "logs")
 	require.NoError(t, err)
 	require.Equal(t, []string{"logs"}, found)
+}
+
+func TestRemoveAllNoSymlinks(t *testing.T) {
+	t.Parallel()
+
+	t.Run("removes a real tree", func(t *testing.T) {
+		t.Parallel()
+		base := t.TempDir()
+		require.NoError(t, os.MkdirAll(filepath.Join(base, "a", "b", "c"), 0o750))
+		require.NoError(t, os.WriteFile(filepath.Join(base, "a", "b", "c", "f"), []byte("x"), 0o600))
+		root, err := os.OpenRoot(base)
+		require.NoError(t, err)
+		defer root.Close()
+
+		require.NoError(t, osroot.RemoveAllNoSymlinks(root, "a/b"))
+		_, statErr := os.Stat(filepath.Join(base, "a", "b"))
+		assert.True(t, os.IsNotExist(statErr))
+		assert.DirExists(t, filepath.Join(base, "a"), "only the named subtree goes")
+	})
+
+	t.Run("a missing name is not an error", func(t *testing.T) {
+		t.Parallel()
+		base := t.TempDir()
+		root, err := os.OpenRoot(base)
+		require.NoError(t, err)
+		defer root.Close()
+
+		assert.NoError(t, osroot.RemoveAllNoSymlinks(root, "a/b"))
+	})
+
+	// The case os.Root.RemoveAll does not cover on its own: every component it
+	// examines is nominally inside the root, but the deletion lands wherever the
+	// parent link points.
+	t.Run("refuses a symlinked parent component", func(t *testing.T) {
+		t.Parallel()
+		base := t.TempDir()
+		outside := t.TempDir()
+		victim := filepath.Join(outside, "extensions", "entire")
+		require.NoError(t, os.MkdirAll(victim, 0o750))
+		if err := os.Symlink(outside, filepath.Join(base, "link")); err != nil {
+			t.Skipf("symlink not supported: %v", err)
+		}
+		root, err := os.OpenRoot(base)
+		require.NoError(t, err)
+		defer root.Close()
+
+		err = osroot.RemoveAllNoSymlinks(root, "link/extensions/entire")
+		require.ErrorIs(t, err, osroot.ErrSymlinkedPath)
+		assert.DirExists(t, victim, "the deletion must not reach through the link")
+	})
+
+	// A link at the leaf costs the link, not the tree at the far end, which is
+	// os.RemoveAll's behaviour too.
+	t.Run("unlinks a symlinked leaf without following it", func(t *testing.T) {
+		t.Parallel()
+		base := t.TempDir()
+		outside := t.TempDir()
+		require.NoError(t, os.WriteFile(filepath.Join(outside, "keep"), []byte("x"), 0o600))
+		if err := os.Symlink(outside, filepath.Join(base, "leaf")); err != nil {
+			t.Skipf("symlink not supported: %v", err)
+		}
+		root, err := os.OpenRoot(base)
+		require.NoError(t, err)
+		defer root.Close()
+
+		require.NoError(t, osroot.RemoveAllNoSymlinks(root, "leaf"))
+		_, statErr := os.Lstat(filepath.Join(base, "leaf"))
+		assert.True(t, os.IsNotExist(statErr), "the link is gone")
+		assert.FileExists(t, filepath.Join(outside, "keep"), "its target is not")
+	})
+}
+
+// TestOpenNoFollow_RejectsDirectory pins the portable half of the non-regular
+// refusal. A directory used to open fine and fail a step later, inside the
+// caller's io.ReadAll, with a platform-dependent errno.
+func TestOpenNoFollow_RejectsDirectory(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "sub"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+
+	if _, err := osroot.OpenNoFollow(root, "sub"); !errors.Is(err, osroot.ErrNotRegularFile) {
+		t.Errorf("OpenNoFollow(dir) error = %v, want ErrNotRegularFile", err)
+	}
+	if _, err := osroot.ReadFileNoFollow(root, "sub"); !errors.Is(err, osroot.ErrNotRegularFile) {
+		t.Errorf("ReadFileNoFollow(dir) error = %v, want ErrNotRegularFile", err)
+	}
+}
+
+// A regular file is unaffected — the refusal must not have become a blanket one.
+func TestOpenNoFollow_AllowsRegularFile(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "f.json"), []byte(`{"a":1}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+
+	data, err := osroot.ReadFileNoFollow(root, "f.json")
+	if err != nil {
+		t.Fatalf("ReadFileNoFollow() error = %v", err)
+	}
+	if string(data) != `{"a":1}` {
+		t.Errorf("ReadFileNoFollow() = %q", data)
+	}
+}
+
+// A missing file must still classify as os.ErrNotExist, because callers use that
+// to tell "no config here" from "broken config here".
+func TestOpenNoFollow_MissingStaysNotExist(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+
+	_, err = osroot.ReadFileNoFollow(root, "absent.json")
+	if !os.IsNotExist(err) {
+		t.Errorf("ReadFileNoFollow(absent) error = %v, want os.IsNotExist", err)
+	}
+	if errors.Is(err, osroot.ErrNotRegularFile) {
+		t.Error("an absent file must not report ErrNotRegularFile")
+	}
 }
