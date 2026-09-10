@@ -125,6 +125,9 @@ func EnsureGitHookIntegration(ctx context.Context, absolutePath bool) (int, erro
 	if err != nil {
 		return 0, err
 	}
+	if err := checkNativeHookRepairInDir(ctx, repoRoot); err != nil {
+		return 0, err
+	}
 	snapshots, err := snapshotHookIntegration(ctx, repoRoot)
 	if err != nil {
 		return 0, err

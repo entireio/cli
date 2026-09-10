@@ -68,7 +68,7 @@ func TestCheckGitHookIntegration(t *testing.T) {
 				Mode:       GitHookIntegrationNative,
 				State:      GitHookIntegrationOutdated,
 				ReasonCode: "native_hooks_outdated",
-				Reason:     "Entire Git hooks were installed by an older CLI version.",
+				Reason:     "Entire Git hooks are outdated or not executable.",
 			},
 		},
 	}

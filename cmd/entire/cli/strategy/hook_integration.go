@@ -95,6 +95,18 @@ func checkGitHookIntegrationInDir(ctx context.Context, repoRoot string) GitHookI
 			Reason:     fmt.Sprintf("Hook-manager ownership is ambiguous and no working native integration is available: %v", selectionErr),
 		}
 	}
+	if err := checkNativeHookRepairInDir(ctx, repoRoot); err != nil {
+		health := nativeHookInspectionError(err)
+		if selected {
+			health.Mode = GitHookIntegrationLefthook
+			health.Manager = manager.Name
+		}
+		if errors.Is(err, errModifiedNativeHook) {
+			health.State = GitHookIntegrationOutdated
+			health.ReasonCode = "native_hooks_modified"
+		}
+		return health
+	}
 	if selected {
 		root, err := worktreedir.OpenAt(repoRoot)
 		if err != nil {
@@ -170,7 +182,7 @@ func checkGitHookIntegrationInDir(ctx context.Context, repoRoot string) GitHookI
 			Mode:       GitHookIntegrationNative,
 			State:      GitHookIntegrationOutdated,
 			ReasonCode: nativeHooksOutdatedReasonCode,
-			Reason:     "Entire Git hooks were installed by an older CLI version.",
+			Reason:     "Entire Git hooks are outdated or not executable.",
 		}
 	case GitHooksAbsent:
 		return GitHookIntegrationHealth{

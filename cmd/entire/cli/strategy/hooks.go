@@ -516,6 +516,13 @@ func inspectGitHookStateInHooksDir(hooksDir string) (GitHookState, error) {
 		if !strings.Contains(content, entireHookMarker) {
 			return GitHooksAbsent, nil
 		}
+		info, err := osroot.LstatNoSymlinks(root, hook)
+		if err != nil {
+			return GitHooksAbsent, fmt.Errorf("inspect Git hook %s permissions: %w", hook, err)
+		}
+		if runtime.GOOS != goosWindows && info.Mode().Perm()&0o111 == 0 {
+			outdated = true
+		}
 		if !currentNativeHookContent(content, hook) {
 			outdated = true
 		}
@@ -728,6 +735,9 @@ func InstallGitHook(ctx context.Context, silent, absolutePath bool) (int, error)
 	if err != nil {
 		return 0, err
 	}
+	if err := checkNativeHookRepair(root); err != nil {
+		return 0, err
+	}
 	specs := buildHookSpecs(cmdPrefix)
 	installedCount := 0
 
@@ -795,7 +805,13 @@ func writeHookFile(root *os.Root, name, content string) (bool, error) {
 	// Check if file already exists with same content
 	existing, err := osroot.ReadFileNoFollow(root, name)
 	if err == nil && string(existing) == content {
-		return false, nil // Already up to date
+		info, statErr := osroot.LstatNoSymlinks(root, name)
+		if statErr != nil {
+			return false, fmt.Errorf("inspect hook %s permissions: %w", name, statErr)
+		}
+		if runtime.GOOS == goosWindows || info.Mode().Perm()&0o111 != 0 {
+			return false, nil // Already up to date, including execution permissions.
+		}
 	}
 
 	// Git hooks must be executable (0o755)
