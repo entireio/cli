@@ -735,16 +735,13 @@ func readFactorySettings(t *testing.T, tempDir string) FactorySettings {
 // with agentpkg.SetWindowsHookProbeForTesting and name the wrapper outright,
 // or the assertion would restate the implementation and pass either way.
 func droidHookCommand(verb string) string {
-	return agentpkg.WrapProductionSilentHookCommandForOS(
-		"entire hooks factoryai-droid "+verb, agentpkg.HookHostIsWindows())
+	return silentHookCommand(verb, agentpkg.HookHostIsWindows())
 }
 
 // droidStopHookCommand is droidHookCommand for the Stop hook, which uses the
 // plain-text-warning wrapper rather than the silent one.
 func droidStopHookCommand() string {
-	return agentpkg.WrapProductionPlainTextWarningHookCommandForOS(
-		"entire hooks factoryai-droid stop", agentpkg.WarningFormatSingleLine,
-		agentpkg.HookHostIsWindows())
+	return stopHookCommand(agentpkg.HookHostIsWindows())
 }
 
 func assertFactoryHookExists(t *testing.T, matchers []FactoryHookMatcher, matcher, command, description string) {
