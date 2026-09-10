@@ -71,18 +71,43 @@ func UnderTest() bool {
 	return testing.Testing() || os.Getenv(EnvTestTTY) != ""
 }
 
+// agentSubprocessEnvVars are vendor-set variables that mark a process spawned
+// by an agent's shell tool or hook runner. Presence alone is the signal —
+// vendors spell the value differently ("1", "true"), so only an empty or unset
+// value means absent.
+//
+// This is the single source of truth for the list: isAgentSubprocessEnv reads
+// it, and the tests both enumerate it and clear it. Adding a name here is the
+// whole change.
+//
+//   - CLAUDECODE is deliberately absent. Claude Code sets it to 1 in its tool
+//     subprocesses, so it could join this list, but doing so withdraws every
+//     interactive prompt from the largest agent population at once. That is a
+//     product call, not a detection fix.
+var agentSubprocessEnvVars = []string{
+	"COPILOT_CLI",     // Copilot CLI hook subprocesses (v0.0.421+)
+	"CURSOR_AGENT",    // cursor-agent shell tool; set alongside CURSOR_CONVERSATION_ID
+	"GEMINI_CLI",      // Gemini CLI shell tool (https://geminicli.com/docs/tools/shell/)
+	"OPENCODE",        // set on opencode's own process, so every child inherits it
+	"PI_CODING_AGENT", // Pi Coding Agent shell tool
+}
+
 // isAgentSubprocessEnv reports whether the env indicates we're running inside
 // an agent subprocess that inherited a TTY but can't respond to prompts:
-//   - GEMINI_CLI=1: Gemini CLI shell tool (https://geminicli.com/docs/tools/shell/)
-//   - COPILOT_CLI=1: Copilot CLI hook subprocesses (v0.0.421+)
-//   - PI_CODING_AGENT=true: Pi Coding Agent shell tool
-//   - GIT_TERMINAL_PROMPT=0: caller (CI, Factory AI Droid, etc.) asked git
-//     to stop prompting; respect it from git-hook context too.
+// either one of agentSubprocessEnvVars is set, or GIT_TERMINAL_PROMPT=0 —
+// the caller (CI, Factory AI Droid, etc.) asked git to stop prompting, and we
+// respect it from git-hook context too.
+//
+// GIT_TERMINAL_PROMPT stays outside the list because its semantics differ: it
+// is a tri-state the user may legitimately set to "1", so only the exact value
+// "0" counts, where the others are presence checks.
 func isAgentSubprocessEnv() bool {
-	return os.Getenv("GEMINI_CLI") != "" ||
-		os.Getenv("COPILOT_CLI") != "" ||
-		os.Getenv("PI_CODING_AGENT") != "" ||
-		os.Getenv("GIT_TERMINAL_PROMPT") == "0"
+	for _, name := range agentSubprocessEnvVars {
+		if os.Getenv(name) != "" {
+			return true
+		}
+	}
+	return os.Getenv("GIT_TERMINAL_PROMPT") == "0"
 }
 
 // IsTerminalReader reports whether r is an *os.File backed by a terminal.

@@ -580,6 +580,37 @@ entry resolves against the process's working directory, which for a git hook is
 whatever repository the caller was standing in, so a file committed to that
 repository would otherwise be a binary Entire executes.
 
+## Why agent instruction fields are local-only
+
+`investigate.always_prompt`, every review `prompt` (per-agent and judge, in
+`review_profiles` and the legacy `review` map), and every review profile's
+`task` are placed verbatim in the prompts of agents that `entire investigate`
+and `entire review` spawn with approval checks disabled (claude-code's
+`bypassPermissions`, codex's `--dangerously-bypass-approvals-and-sandbox`). The
+prompt is the stated control for those spawns, so whoever writes these strings
+gets the last word in it. `task` and `prompt` are adjacent sections of the same
+composed prompt, so they are gated together — a gate on one alone would just
+move the attacker's text to the other field. Honoring any of them from the
+committed `.entire/settings.json` would let an ordinary pull request steer an
+approvals-disabled agent on every developer who pulls — the same delivery route
+as the OPF [`command`](#why-command-is-local-only), carrying instructions
+instead of argv.
+
+They are therefore honored only from layers that are this developer's own:
+clone-local review preferences (stored inside `.git/`, which a clone never
+populates) or `.entire/settings.local.json` verified untracked in both the
+index and `HEAD`. Rejection is a downgrade, never an error — a dropped task
+falls back to the built-in text for conventional profile names, and
+`entire review` / `entire investigate` print a one-line notice naming the
+dropped field and where it has to move (suppressed when the dropped task equals
+the built-in default, since that drop changes nothing).
+
+Deliberately not gated: `skills` (review validates every configured skill
+against the locally installed set before spawning, so free text there fails the
+run rather than reaching an agent), `agent` and `model` (registry keys and
+routing hints, not instruction text), and `review_default_profile` (it only
+selects among profiles whose instruction content is itself gated).
+
 ## Reporting a vulnerability
 
 For vulnerability disclosure, see [SECURITY.md](../SECURITY.md) at the repo root: email `security@entire.io`, expect acknowledgment within 48 hours and resolution of criticals within 90 days.

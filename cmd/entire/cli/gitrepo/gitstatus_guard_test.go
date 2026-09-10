@@ -40,17 +40,41 @@ var gitInvocationMarkers = []string{
 func TestGitStatusCallSitesPassNoOptionalLocks(t *testing.T) {
 	t.Parallel()
 
-	root := strings.TrimSpace(testutil.RunGit(t, "", "rev-parse", "--show-toplevel"))
+	root, found := testutil.GitGrepGuardRepoRoot(t)
+	if !found {
+		return
+	}
 
-	// git grep exits non-zero on zero matches, so RunGit failing here means
-	// "found nothing", which cannot be right — see the checked == 0 guard below.
-	out := testutil.RunGit(t, root, "grep", "-n", "--", `"status"`, "--", "cmd", "internal")
+	// GitGrepGuard rather than RunGit: it passes --untracked, so a `git status`
+	// call site in a not-yet-staged file is visible (new call sites arrive in new
+	// files, which is the case this guard exists for), --no-color, and it scrubs
+	// GIT_DIR / GIT_WORK_TREE, which RunGit's env isolation does not — it filters
+	// GIT_CONFIG_* only, so a `go test` under a git hook scanned another
+	// repository. It also fails loudly on zero matches, which is the same
+	// staleness signal as the checked == 0 guard below.
+	// Pathspec narrowed to *.go, which is what lets the parse failure below be
+	// fatal: the bare `cmd internal` it used to pass also matched testdata
+	// .jsonl fixtures and a .md file, so a non-.go first field was an ordinary
+	// result rather than evidence of mangled output, and the skip that filtered
+	// them was also the only thing standing between colorized output and a
+	// guard that silently checked nothing.
+	out := testutil.GitGrepGuard(t, root, "-n", "--", `"status"`,
+		"--", ":(glob)cmd/**/*.go", ":(glob)internal/**/*.go")
 
 	var checked int
 	for line := range strings.SplitSeq(strings.TrimSpace(out), "\n") {
-		path, rest, ok := strings.Cut(line, ":")
-		if !ok || !strings.HasSuffix(path, ".go") {
+		if line == "" {
 			continue
+		}
+		path, rest, ok := strings.Cut(line, ":")
+		// Fatal, not skip. Colorized output puts escapes in the filename field,
+		// so every line failed this check, `checked` stayed 0, and the guard
+		// reported its detection pattern stale — the #2248 misdiagnosis, from a
+		// tree that was perfectly fine.
+		if !ok || !strings.HasSuffix(path, ".go") {
+			t.Fatalf("cannot parse git grep output; expected `path:line:content`, got:\n  %s\n"+
+				"The filename field is unusable, so this test can prove nothing. "+
+				"Check whether git is colorizing into a pipe (color.ui or color.grep set to `always`).", line)
 		}
 		// Test files and fixtures may assert on the unguarded argv shape.
 		if strings.HasSuffix(path, "_test.go") || strings.Contains(path, "/testutil/") {

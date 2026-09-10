@@ -766,6 +766,10 @@ func TestNewCommand_ContinueWithMissingState(t *testing.T) {
 
 // saveInvestigateSettings writes an InvestigateConfig into the CWD's
 // .entire/settings.json.
+// saveInvestigateSettings persists cfg into .entire/settings.local.json, the
+// file the production save path targets. The local file matters: an
+// always_prompt in the committed project file is dropped by the loader's
+// trust gate (settings.enforceAgentPromptTrust).
 func saveInvestigateSettings(cfg *settings.InvestigateConfig) error {
 	ctx := context.Background()
 	s, err := settings.Load(ctx)
@@ -776,7 +780,7 @@ func saveInvestigateSettings(cfg *settings.InvestigateConfig) error {
 		s = &settings.EntireSettings{}
 	}
 	s.Investigate = cfg
-	return settings.Save(ctx, s)
+	return settings.SaveLocal(ctx, s)
 }
 
 func equalStringSlices(a, b []string) bool {

@@ -2593,7 +2593,10 @@ func RedactBlobBytes(ctx context.Context, content []byte, treePath string, usePr
 		if err == nil {
 			return redacted.Bytes(), nil
 		}
-		if errors.Is(err, redact.ErrScannerDegraded) {
+		// ErrRedactionIncomplete is not a parse failure: the content parsed and
+		// redaction flagged a leaf it could not rewrite, so the plain-bytes
+		// fallback would ship exactly that leaf. Fail the write instead.
+		if errors.Is(err, redact.ErrScannerDegraded) || errors.Is(err, redact.ErrRedactionIncomplete) {
 			return nil, fmt.Errorf("redact %s: %w", treePath, err)
 		}
 		// JSONL parse failed — fall through to plain bytes.
@@ -2750,7 +2753,7 @@ func readTranscriptFromTree(ctx context.Context, tree *FetchingTree, agentType t
 			chunkFiles = append([]string{paths.TranscriptFileName}, chunkFiles...)
 		}
 
-		var chunks [][]byte
+		chunks := make([][]byte, 0, len(chunkFiles))
 		for _, chunkFile := range chunkFiles {
 			file, err := tree.File(chunkFile)
 			if err != nil {
@@ -2760,7 +2763,7 @@ func readTranscriptFromTree(ctx context.Context, tree *FetchingTree, agentType t
 				)
 				continue
 			}
-			content, err := file.Contents()
+			content, err := readTranscriptFile(file)
 			if err != nil {
 				logging.Warn(ctx, "failed to read transcript chunk contents",
 					slog.String("chunk_file", chunkFile),
@@ -2768,7 +2771,7 @@ func readTranscriptFromTree(ctx context.Context, tree *FetchingTree, agentType t
 				)
 				continue
 			}
-			chunks = append(chunks, []byte(content))
+			chunks = append(chunks, content)
 		}
 
 		if len(chunks) > 0 {
@@ -2782,19 +2785,46 @@ func readTranscriptFromTree(ctx context.Context, tree *FetchingTree, agentType t
 
 	// Fall back to reading base file (non-chunked or backwards compatibility)
 	if file, err := tree.File(paths.TranscriptFileName); err == nil {
-		if content, err := file.Contents(); err == nil {
-			return []byte(content), nil
+		if content, err := readTranscriptFile(file); err == nil {
+			return content, nil
 		}
 	}
 
 	// Try legacy filename
 	if file, err := tree.File(paths.TranscriptFileNameLegacy); err == nil {
-		if content, err := file.Contents(); err == nil {
-			return []byte(content), nil
+		if content, err := readTranscriptFile(file); err == nil {
+			return content, nil
 		}
 	}
 
 	return nil, nil
+}
+
+// readTranscriptFile keeps large transcript blobs as bytes throughout the read.
+// File.Contents grows a buffer and copies it to a string, which callers then
+// copy back to bytes. Reserve the known blob size plus ReadFrom's minimum
+// spare capacity so its final EOF probe does not double the whole buffer.
+func readTranscriptFile(file *object.File) (content []byte, err error) {
+	reader, err := file.Reader()
+	if err != nil {
+		return nil, fmt.Errorf("open transcript blob: %w", err)
+	}
+	defer func() {
+		if closeErr := reader.Close(); err == nil && closeErr != nil {
+			err = fmt.Errorf("close transcript blob: %w", closeErr)
+		}
+	}()
+
+	var buf bytes.Buffer
+	// Shadow transcripts can exceed MaxChunkSize without being chunked. Bound
+	// only the upfront allocation hint at 1 GiB; larger blobs still grow incrementally.
+	if file.Size >= 0 && file.Size <= 1<<30 {
+		buf.Grow(int(file.Size) + bytes.MinRead)
+	}
+	if _, err := buf.ReadFrom(reader); err != nil {
+		return nil, fmt.Errorf("read transcript blob: %w", err)
+	}
+	return buf.Bytes(), nil
 }
 
 func transcriptBlobHashesFromTreeEntries(entries []object.TreeEntry) []plumbing.Hash {

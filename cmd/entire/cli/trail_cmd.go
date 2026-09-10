@@ -1135,9 +1135,14 @@ func prepareTrailCreateBranch(ctx context.Context, w, errW io.Writer, repo *git.
 	// For branch-backed trails, always push the branch first: the trail binds to a
 	// remote branch, so deliver it before creating the trail rather than letting
 	// the server backfill it at the base tip. Branchless trails skip this entirely.
-	if err := pushBranchToRemote(ctx, remote, branch); err != nil {
+	if err := pushBranchToRemote(ctx, w, errW, remote, branch); err != nil {
 		cleanupCreatedTrailBranch(ctx, repo, remote, branch, state.LocalCreated, false, errW)
-		return state, fmt.Errorf("failed to push branch %q to %q: %w\nhint: the trail was not created because its branch could not be delivered to the remote.\n  - if this is an auth error, link your GitHub account and retry\n  - if this is a non-fast-forward, update branch %q from %q and retry", branch, remote, err, branch, remote)
+		// The push runs pre-push hooks, so a failure here is no longer only a
+		// delivery problem: Entire's hook can decline the push, and so can any
+		// hook the repo installed for its own reasons. The hook's own reason has
+		// already streamed to errW, so the hint names that cause and points at
+		// it rather than reprinting it.
+		return state, fmt.Errorf("failed to push branch %q to %q: %w\nhint: the trail was not created because its branch could not be delivered to the remote.\n  - if a pre-push hook rejected the push, see its output above and retry once it passes\n  - if this is an auth error, link your GitHub account and retry\n  - if this is a non-fast-forward, update branch %q from %q and retry", branch, remote, err, branch, remote)
 	}
 	state.RemotePushed = !existedOnRemote
 	fmt.Fprintf(w, "Pushed branch %s to %s\n", branch, remote)
@@ -2455,14 +2460,101 @@ func fetchBranchFromRemote(ctx context.Context, remote, branchName string) error
 	return nil
 }
 
+// trailBranchPushTimeout bounds the trail branch delivery, which now covers the
+// pre-push hook as well as the network push.
+//
+// The hook's compute cost is smaller than it looks: OPF makes exactly one
+// shell-out per push (see manual_commit_opf_rewrite.go and
+// manual_commit_opf_refs.go), bounded by
+// redaction.openai_privacy_filter.timeout_seconds — 30s by default — and an
+// oversized first run is rejected outright by BootstrapTooLargeError or
+// OPFRawBytesTooLargeError rather than allowed to run long. What is genuinely
+// unbounded is the OPF prompt, which waits on a person. Ten minutes is sized to
+// leave room for someone to answer it, not to cover a slow scan; two minutes
+// was not enough for either.
+//
+// Known limitation: timeout_seconds is validated only as >= 0, so a value
+// configured above this bound is truncated and the push is cut short. Deriving
+// the bound from that setting is the fix if anyone hits it.
+//
+// What expiry kills is git, and only git: exec.CommandContext's default Cancel
+// is Process.Kill() on the child's PID, no Setpgid is set, and no group signal
+// is sent. The OPF re-redaction and the checkpoint ref CAS-updates do not run
+// there — they run in the pre-push hook, a grandchild (.git/hooks/pre-push,
+// which execs `entire hooks pre-push`). So the hook is orphaned, not
+// interrupted: expiry cannot leave a half-rewritten ref or a stale lock the way
+// StatusWalkBudget's SIGKILL can, because that one kills the process holding
+// the lock and this one does not. Nor is expiry likely to land on a local write
+// at all — the reason it fires is the OPF prompt, and pre-push runs before any
+// transfer or ref update, so git is parked holding nothing.
+//
+// The orphan is the real cost, and it is deliberately accepted: the hook keeps
+// the inherited terminal and can go on publishing checkpoint refs and printing
+// after trail create has failed and begun retracting the branch. Killing the
+// process group instead would trade that for the mid-rewrite kill this note
+// used to describe, which is the worse of the two.
+//
+// A bound exists at all only because trail create is a multi-step command and a
+// wedged push must not hang it forever. A plain `git push` has none — the hook
+// runs undeadlined — so this ceiling is Entire's, not git's.
+const trailBranchPushTimeout = 10 * time.Minute
+
 // pushBranchToRemote pushes a branch to remote, which callers resolve through
-// resolveTrailPushRemote rather than assuming "origin".
-func pushBranchToRemote(ctx context.Context, remote, branchName string) error {
-	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+// resolveTrailPushRemote rather than assuming "origin". This must run Git's
+// pre-push hooks: Entire's hook publishes any checkpoint data that was captured
+// before the trail branch was created.
+//
+// Because the hook runs, this has to be a real push rather than an internal
+// subprocess whose output nobody reads, so stdout and stderr stream to the
+// caller's writers instead of into a CombinedOutput() buffer read only on
+// failure. Two things went wrong while that buffer swallowed them:
+//
+//   - Entire's hook reports on stderr both when it pushes checkpoint refs and
+//     when it withholds them, and on the git-refs backend it withholds them
+//     while still exiting zero. So trail create could print "Pushed branch" for
+//     a push that published nothing — the failure this path exists to prevent,
+//     with its only diagnostic discarded.
+//   - The OPF prompt became unanswerable-in-practice rather than skipped.
+//     interactive.CanPromptInteractively() decides from a /dev/tty probe and
+//     never consults stdio, so it still said yes; bubbletea then falls back to
+//     /dev/tty for prompt INPUT when stdin is not a terminal but has no such
+//     fallback for OUTPUT, which is unconditionally os.Stdout. The form
+//     therefore rendered into the buffer while reading real keystrokes: a push
+//     that blocks on a prompt the user cannot see.
+//
+// Both fixes rest on the writers arriving here being real *os.File values:
+// os/exec hands an *os.File's descriptor straight to the child, so the hook
+// inherits the terminal, whereas any other io.Writer gets an os.Pipe and the
+// child's stdout stops being a tty. Today they are — cobra's OutOrStdout and
+// ErrOrStderr fall through to os.Stdout/os.Stderr, and nothing on the path to
+// trail create calls SetOut/SetErr — so a pager or output tee added to the root
+// command would silently undo this.
+//
+// It would undo more than the tty. Once os/exec has to interpose a pipe,
+// Cmd.Wait blocks on its copy goroutine until every holder of the write end
+// closes it — and an orphaned hook (see trailBranchPushTimeout) holds one.
+// WaitDelay is unset, so that wait has no ceiling: the timeout above would stop
+// bounding this call at all, which is the one thing it exists to do.
+//
+// stdin is deliberately NOT inherited, though a real push would inherit it,
+// because nothing downstream reads it and /dev/null is what makes a
+// non-interactive trail create fail fast rather than block to the timeout. The
+// justification this note used to give — git prompting for credentials — does
+// not hold: git push has no --stdin mode, git's credential prompt uses /dev/tty
+// or askpass, the OPF prompt reads /dev/tty per bubbletea's fallback above, and
+// the hook never receives ours anyway, since git hands it a pipe carrying the
+// ref list. Inheriting it only converted an immediate EOF into a real blocking
+// read for an agent whose stdin is a long-lived pipe.
+func pushBranchToRemote(ctx context.Context, out, errOut io.Writer, remote, branchName string) error {
+	ctx, cancel := context.WithTimeout(ctx, trailBranchPushTimeout)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "git", "push", "--no-verify", "-u", remote, branchName)
-	if output, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("%s: %w", strings.TrimSpace(string(output)), err)
+	cmd := exec.CommandContext(ctx, "git", "push", "-u", remote, branchName)
+	cmd.Stdout = out
+	cmd.Stderr = errOut
+	if err := cmd.Run(); err != nil {
+		// git's own message already reached errOut, so this names the command
+		// and carries the exit status rather than repeating the diagnostic.
+		return fmt.Errorf("git push: %w", err)
 	}
 	return nil
 }
@@ -2488,6 +2580,13 @@ func remoteHasBranch(ctx context.Context, remote, branchName string) (bool, erro
 	return strings.TrimSpace(string(output)) != "", nil
 }
 
+// deleteBranchFromRemote keeps --no-verify, which is deliberate and is the
+// opposite of the rule pushBranchToRemote documents. That one must run the hook
+// because it delivers commits whose checkpoint data has to go with them; this
+// one retracts a branch on a failed trail create, so there is nothing to
+// publish, and running Entire's checkpoint sync (or the repo's own hooks) while
+// unwinding is work in the wrong direction on a path that is already handling
+// an error.
 func deleteBranchFromRemote(ctx context.Context, remote, branchName string) error {
 	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 	defer cancel()

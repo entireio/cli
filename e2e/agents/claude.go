@@ -88,6 +88,12 @@ func (c *Claude) RunPrompt(ctx context.Context, dir string, prompt string, opts 
 		o(cfg)
 	}
 
+	ctx, cancel, err := boundPrompt(ctx, 0, cfg)
+	if err != nil {
+		return Output{}, err
+	}
+	defer cancel()
+
 	configDir, err := cleanConfigDir()
 	if err != nil {
 		return Output{}, fmt.Errorf("create clean config dir: %w", err)

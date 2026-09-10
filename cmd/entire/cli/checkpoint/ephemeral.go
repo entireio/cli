@@ -452,9 +452,13 @@ func (s *ephemeralStore) addTaskMetadataToTree(ctx context.Context, baseTreeHash
 			if readErr == nil && !tooLarge {
 				// Try JSONL-aware redaction first; fall back to plain string redaction
 				// only on a JSONL parse error (avoids silently dropping the transcript).
+				// ErrRedactionIncomplete is NOT a parse error: the content parsed and
+				// redaction flagged a leaf it could not rewrite, so the plain fallback
+				// would ship exactly that leaf. Fail the write instead, like
+				// ErrScannerDegraded.
 				redacted, jsonlErr := redact.JSONLBytes(agentContent)
 				if jsonlErr != nil {
-					if errors.Is(jsonlErr, redact.ErrScannerDegraded) {
+					if errors.Is(jsonlErr, redact.ErrScannerDegraded) || errors.Is(jsonlErr, redact.ErrRedactionIncomplete) {
 						return plumbing.ZeroHash, fmt.Errorf("redact subagent transcript %s: %w", opts.SubagentTranscriptPath, jsonlErr)
 					}
 					logging.Warn(ctx, "subagent transcript is not valid JSONL, falling back to plain redaction",
