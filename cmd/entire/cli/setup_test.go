@@ -23,6 +23,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/agent/vogon"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
+	checkpointremote "github.com/entireio/cli/cmd/entire/cli/checkpoint/remote"
 	"github.com/entireio/cli/cmd/entire/cli/gitremote"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
@@ -4023,6 +4024,178 @@ func TestDetectOrSelectAgent_ReRun_EmptySelection_ReturnsError(t *testing.T) {
 }
 
 // Tests for configure --checkpoint-remote
+
+// TestParseCheckpointRemoteFlag exercises the real parser directly (issue
+// #2033): the github:owner/repo shorthand must keep working unchanged, and
+// the new git:<url> generic-provider form must validate the URL the same way
+// any other explicit git remote URL in this codebase is validated
+// (gitremote.ParseURL).
+func TestParseCheckpointRemoteFlag(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name         string
+		value        string
+		wantProvider string
+		wantTarget   string
+		wantErr      string // substring expected in the error, "" means no error
+	}{
+		{
+			name:         "github shorthand unchanged",
+			value:        "github:org/checkpoints-repo",
+			wantProvider: "github",
+			wantTarget:   "org/checkpoints-repo",
+		},
+		{
+			name:    "github shorthand still rejects a bare name without owner",
+			value:   "github:just-a-name",
+			wantErr: "owner/name format",
+		},
+		{
+			name:         "generic git provider with https url",
+			value:        "git:https://vc.hub.msg.team/org/checkpoints-repo.git",
+			wantProvider: "git",
+			wantTarget:   "https://vc.hub.msg.team/org/checkpoints-repo.git",
+		},
+		{
+			name:         "generic git provider with scp-style ssh url (colon inside target)",
+			value:        "git:git@vc.hub.msg.team:org/checkpoints-repo.git",
+			wantProvider: "git",
+			wantTarget:   "git@vc.hub.msg.team:org/checkpoints-repo.git",
+		},
+		{
+			name:    "generic git provider rejects an unparseable url",
+			value:   "git:not-a-url",
+			wantErr: "invalid git remote URL",
+		},
+		{
+			name:    "the issue's literal repro: a bare url with no provider prefix is still rejected",
+			value:   "https://vc.hub.msg.team/org/checkpoints-repo.git",
+			wantErr: `unsupported provider "https"`,
+		},
+		{
+			name:    "unsupported provider names both supported providers",
+			value:   "bitbucket:org/repo",
+			wantErr: "supported: github, git",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			provider, target, err := parseCheckpointRemoteFlag(tt.value)
+			if tt.wantErr != "" {
+				if err == nil {
+					t.Fatalf("parseCheckpointRemoteFlag(%q) error = nil, want error containing %q", tt.value, tt.wantErr)
+				}
+				if !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("parseCheckpointRemoteFlag(%q) error = %q, want it to contain %q", tt.value, err.Error(), tt.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("parseCheckpointRemoteFlag(%q) unexpected error = %v", tt.value, err)
+			}
+			if provider != tt.wantProvider || target != tt.wantTarget {
+				t.Fatalf("parseCheckpointRemoteFlag(%q) = (%q, %q), want (%q, %q)", tt.value, provider, target, tt.wantProvider, tt.wantTarget)
+			}
+		})
+	}
+}
+
+// initBareRepoForTest creates a real local bare git repository via the real
+// `git init --bare` binary (not a mock) and returns its file:// URL, suitable
+// as a --checkpoint-remote git:<url> target.
+func initBareRepoForTest(t *testing.T, dir string) string {
+	t.Helper()
+	cmd := exec.CommandContext(context.Background(), "git", "init", "--bare", dir)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git init --bare %s failed: %v\n%s", dir, err, out)
+	}
+	return "file://" + filepath.ToSlash(dir)
+}
+
+func TestConfigureCmd_CheckpointRemote_GenericGitProvider_UpdatesProjectSettings(t *testing.T) {
+	setupTestRepo(t)
+	writeSettings(t, testSettingsEnabled)
+
+	bareRepoDir := filepath.Join(t.TempDir(), "checkpoints-repo.git")
+	remoteURL := initBareRepoForTest(t, bareRepoDir)
+
+	cmd := newSetupCmd()
+	var stdout bytes.Buffer
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&bytes.Buffer{})
+	cmd.SetArgs([]string{"--checkpoint-remote", "git:" + remoteURL})
+
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("configure --checkpoint-remote git:<url> failed: %v", err)
+	}
+
+	if !strings.Contains(stdout.String(), "Settings updated") {
+		t.Errorf("expected 'Settings updated' output, got: %s", stdout.String())
+	}
+
+	s, err := settings.LoadFromFile(EntireSettingsFile)
+	if err != nil {
+		t.Fatalf("failed to load settings: %v", err)
+	}
+	remote := s.GetCheckpointRemote()
+	if remote == nil {
+		t.Fatal("expected checkpoint_remote to be set")
+	}
+	if remote.Provider != "git" {
+		t.Errorf("Provider = %q, want %q", remote.Provider, "git")
+	}
+	if remote.URL != remoteURL {
+		t.Errorf("URL = %q, want %q", remote.URL, remoteURL)
+	}
+	if remote.Repo != "" {
+		t.Errorf("Repo = %q, want empty for the generic provider", remote.Repo)
+	}
+
+	// Real end-to-end sanity check: with an origin remote present (as any
+	// real repo would have), the stored config resolves via remote.PushURL —
+	// the real production code path, not a mock — to exactly the real bare
+	// repo's URL. See util_test.go in checkpoint/remote for a full real
+	// push/fetch cycle against this same kind of URL.
+	runGit(t, ".", "remote", "add", "origin", "https://github.com/acme/app.git")
+	got, enabled, err := checkpointremote.PushURL(context.Background(), "origin")
+	if err != nil {
+		t.Fatalf("PushURL() error = %v", err)
+	}
+	if !enabled {
+		t.Fatal("PushURL() enabled = false, want true for a configured generic checkpoint remote")
+	}
+	if got != remoteURL {
+		t.Fatalf("PushURL() = %q, want %q", got, remoteURL)
+	}
+}
+
+func TestConfigureCmd_CheckpointRemote_GenericGitProvider_InvalidURLRejected(t *testing.T) {
+	setupTestRepo(t)
+	writeSettings(t, testSettingsEnabled)
+
+	cmd := newSetupCmd()
+	cmd.SetOut(&bytes.Buffer{})
+	cmd.SetErr(&bytes.Buffer{})
+	cmd.SetArgs([]string{"--checkpoint-remote", "git:not-a-url"})
+
+	err := cmd.Execute()
+	if err == nil {
+		t.Fatal("expected error for invalid git:<url> --checkpoint-remote")
+	}
+	if !strings.Contains(err.Error(), "invalid git remote URL") {
+		t.Errorf("expected 'invalid git remote URL' in error, got: %v", err)
+	}
+
+	// Nothing should have been written since validation happens before I/O.
+	if s, err := settings.LoadFromFile(EntireSettingsFile); err == nil {
+		if s.GetCheckpointRemote() != nil {
+			t.Error("checkpoint_remote should not be set after a rejected --checkpoint-remote")
+		}
+	}
+}
 
 func TestConfigureCmd_CheckpointRemote_UpdatesProjectSettings(t *testing.T) {
 	setupTestRepo(t)
