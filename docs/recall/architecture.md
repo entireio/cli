@@ -3,7 +3,9 @@
 Design notes for `entire recall`, written before implementation and kept as
 the rationale for the shape of `recall/` and the Go shim. The "expected to be
 hard" and "might be wrong" sections were written up front and are left as
-written; the README's privacy-boundary section records what changed since.
+written; the README's privacy-boundary section records what changed since, and
+`evaluation.md` carries the measured results that supersede the benchmark
+line below.
 
 ## What we are building
 
