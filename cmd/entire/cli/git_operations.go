@@ -228,6 +228,15 @@ func HasUncommittedChanges(ctx context.Context) (bool, error) {
 // via git ls-remote in case local refs are stale (e.g., after a fresh clone
 // that didn't fetch all branches).
 func BranchExistsOnRemote(ctx context.Context, branchName string) (bool, error) {
+	// The name reaches `git ls-remote` as an argument and reaches go-git as a
+	// reference name, and every caller takes it from CLI input or from a trail's
+	// metadata. "refs/heads/" in front rules out an option being read as one,
+	// but not a name carrying a newline or a glob, which ls-remote answers for
+	// some other branch entirely.
+	if err := ValidateBranchName(ctx, branchName); err != nil {
+		return false, err
+	}
+
 	repo, err := openRepository(ctx)
 	if err != nil {
 		return false, fmt.Errorf("failed to open git repository: %w", err)
@@ -259,6 +268,14 @@ func BranchExistsOnRemote(ctx context.Context, branchName string) (bool, error) 
 
 // BranchExistsLocally checks if a local branch exists.
 func BranchExistsLocally(ctx context.Context, branchName string) (bool, error) {
+	// Symmetry with BranchExistsOnRemote is the point: the two are called side
+	// by side on the same name, and a name that is not a branch name should get
+	// the same answer from both rather than "invalid" from one and "no such
+	// branch" from the other.
+	if err := ValidateBranchName(ctx, branchName); err != nil {
+		return false, err
+	}
+
 	repo, err := openRepository(ctx)
 	if err != nil {
 		return false, fmt.Errorf("failed to open git repository: %w", err)
@@ -276,16 +293,35 @@ func BranchExistsLocally(ctx context.Context, branchName string) (bool, error) {
 	return true, nil
 }
 
-// CheckoutBranch switches to the specified local branch or commit.
+// CheckoutBranch switches to the specified local branch.
 // Uses git CLI instead of go-git to work around go-git v5 bug where Checkout
 // deletes untracked files (see https://github.com/go-git/go-git/issues/970).
 // Should be switched back to go-git once we upgrade to go-git v6
 // Returns an error if the ref doesn't exist or checkout fails.
+//
+// Two guards, because neither covers the other.
+//
+// ValidateBranchName replaces a leading-dash check that was the narrowest part
+// of the problem: the ref arrives from `entire resume <branch>` and from a
+// trail's branch field, and `git checkout` also reads `@{-1}` and a name
+// carrying a newline. It still admits an object id, since `check-ref-format
+// --branch` accepts a hex string, so the "or commit" half of the old contract
+// survives even though no caller uses it.
+//
+// The trailing `--` covers what validation cannot, and validation cannot cover
+// it in principle: `git checkout <name>` falls back to treating <name> as a
+// PATHSPEC when no such ref exists, and a filename is very often a perfectly
+// legal branch name. `check-ref-format --branch README.md` exits 0, and
+// `git checkout README.md` in a repo with no such branch then restores that file
+// from the index, discarding the user's edits, and exits 0 -- a silent data loss
+// reported as success. With the `--`, the same call is `fatal: invalid
+// reference: README.md` and exits 128. A branch and a raw commit id both still
+// resolve, so nothing legitimate is lost.
 func CheckoutBranch(ctx context.Context, ref string) error {
-	if strings.HasPrefix(ref, "-") {
-		return fmt.Errorf("checkout failed: invalid ref %q", ref)
+	if err := ValidateBranchName(ctx, ref); err != nil {
+		return fmt.Errorf("checkout failed: %w", err)
 	}
-	cmd := exec.CommandContext(ctx, "git", "checkout", ref)
+	cmd := exec.CommandContext(ctx, "git", "checkout", ref, "--")
 	if output, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("checkout failed: %s: %w", strings.TrimSpace(string(output)), err)
 	}
@@ -552,7 +588,11 @@ func FetchMetadataFromCheckpointRemote(ctx context.Context) error {
 	if !configured {
 		return errors.New("no checkpoint_remote configured")
 	}
-	checkpointURL, err := remote.FetchURL(ctx)
+	// The elected remote joins FetchURL's ownership vote (see
+	// strategy.LeadCheckpointReadRemote). Safe here because a checkpoint_remote
+	// is confirmed configured, so the lead never selects the fetch target on
+	// the no-config path.
+	checkpointURL, err := remote.FetchURL(ctx, remote.FetchURLOptions{LeadReadRemote: strategy.LeadCheckpointReadRemote(ctx)})
 	if err != nil {
 		return fmt.Errorf("checkpoint_remote configured but could not resolve URL: %w", err)
 	}
@@ -636,7 +676,13 @@ func listCheckpointRefsOnRemote(ctx context.Context, candidateTimeout time.Durat
 		return nil, nil
 	}
 	if s.GetCheckpointRemote() != nil {
-		url, err := remote.FetchURL(ctx, remote.FetchURLOptions{WorktreeRoot: worktreeRoot})
+		// The elected remote joins FetchURL's ownership vote (see
+		// strategy.LeadCheckpointReadRemote); guarded by the configured
+		// checkpoint_remote above.
+		url, err := remote.FetchURL(ctx, remote.FetchURLOptions{
+			WorktreeRoot:   worktreeRoot,
+			LeadReadRemote: strategy.LeadCheckpointReadRemote(ctx),
+		})
 		if err != nil {
 			return nil, fmt.Errorf("resolve checkpoint remote URL: %w", err)
 		}

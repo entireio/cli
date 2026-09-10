@@ -21,6 +21,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
+	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 	"github.com/entireio/cli/redact"
 
@@ -2690,5 +2691,38 @@ func TestRunStatusJSON_CheckpointSync_AbsentWhenNoRemotes(t *testing.T) {
 	}
 	if strings.Contains(stdout.String(), "checkpoint_sync_remote") {
 		t.Errorf("omitempty should drop empty checkpoint sync fields, got: %s", stdout.String())
+	}
+}
+
+// A user who wrote external_agents into .entire/settings.json sees it there
+// and has no other way to learn it is not in effect: discovery just does not
+// happen, and the agent simply never appears. Detailed status renders the
+// files, so it is where the discrepancy has to be named.
+func TestRunStatusDetailed_ReportsRejectedExternalAgents(t *testing.T) { //nolint:paralleltest // t.Chdir
+	dir := t.TempDir()
+	testutil.InitRepo(t, dir)
+	entireDir := filepath.Join(dir, ".entire")
+	if err := os.MkdirAll(entireDir, 0o755); err != nil {
+		t.Fatalf("create .entire: %v", err)
+	}
+	projectPath := filepath.Join(entireDir, "settings.json")
+	if err := os.WriteFile(projectPath, []byte(`{"enabled":true,"external_agents":true}`), 0o644); err != nil {
+		t.Fatalf("write settings: %v", err)
+	}
+	t.Chdir(dir)
+
+	var out bytes.Buffer
+	sty := statusStyles{colorEnabled: false, width: 80}
+	if err := runStatusDetailed(t.Context(), &out, sty, projectPath,
+		filepath.Join(entireDir, "settings.local.json"), true, false); err != nil {
+		t.Fatalf("runStatusDetailed: %v", err)
+	}
+
+	got := out.String()
+	if !strings.Contains(got, "external_agents") {
+		t.Errorf("status does not mention external_agents:\n%s", got)
+	}
+	if !strings.Contains(got, settings.EntireSettingsLocalFile) {
+		t.Errorf("status does not name where the setting must live:\n%s", got)
 	}
 }

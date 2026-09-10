@@ -971,7 +971,14 @@ func TestMaybeCompactExternalTranscriptForSummary_RedactsExternalOutput(t *testi
 	require.NoError(t, os.MkdirAll(filepath.Join(tmpDir, ".entire"), 0o755))
 	require.NoError(t, os.WriteFile(
 		filepath.Join(tmpDir, ".entire", "settings.json"),
-		[]byte(`{"enabled":true,"external_agents":true}`),
+		[]byte(`{"enabled":true}`),
+		0o644,
+	))
+	// external_agents lives in the local file: it grants execution of
+	// entire-agent-* binaries on $PATH, so the loader honors it only there.
+	require.NoError(t, os.WriteFile(
+		filepath.Join(tmpDir, ".entire", "settings.local.json"),
+		[]byte(`{"external_agents":true}`),
 		0o644,
 	))
 
@@ -2203,7 +2210,14 @@ func setupExternalTranscriptExplainRepo(t *testing.T) (*git.Repository, string) 
 	require.NoError(t, os.MkdirAll(filepath.Join(tmpDir, ".entire"), 0o755))
 	require.NoError(t, os.WriteFile(
 		filepath.Join(tmpDir, ".entire", "settings.json"),
-		[]byte(`{"enabled":true,"external_agents":true}`),
+		[]byte(`{"enabled":true}`),
+		0o644,
+	))
+	// external_agents lives in the local file: it grants execution of
+	// entire-agent-* binaries on $PATH, so the loader honors it only there.
+	require.NoError(t, os.WriteFile(
+		filepath.Join(tmpDir, ".entire", "settings.local.json"),
+		[]byte(`{"external_agents":true}`),
 		0o644,
 	))
 
@@ -2486,6 +2500,42 @@ func TestFormatTranscriptBytes_PiNativeJSONL(t *testing.T) {
 	require.Contains(t, output, "[User] Review this trail")
 	require.Contains(t, output, "[Assistant] The trail needs two fixes.")
 	require.NotContains(t, output, "(failed to parse transcript)")
+}
+
+func TestFormatTranscriptBytes_SanitizesTerminalSequences(t *testing.T) {
+	t.Parallel()
+
+	// Transcript content is agent and user influenced and is rendered straight
+	// to the reader's terminal, so CSI and OSC sequences must be stripped
+	// whole at this display boundary while tabs and newlines survive.
+	piJSONL := []byte(`{"type":"session","version":3,"id":"pi-session","cwd":"/tmp/repo"}
+{"type":"message","id":"m1","parentId":null,"timestamp":"2026-07-25T10:00:00Z","message":{"role":"user","content":[{"type":"text","text":"one \u001b[31mred\u001b[0m\u001b]0;title\u0007 two\tthree\nfour"}]}}
+`)
+
+	output := formatTranscriptBytes(piJSONL, "", agent.AgentTypePi)
+	require.NotContains(t, output, "\x1b")
+	require.NotContains(t, output, "[31m")
+	require.Contains(t, output, "one red two\tthree\nfour")
+}
+
+func TestFormatTranscriptBytes_SanitizesFallbackText(t *testing.T) {
+	t.Parallel()
+
+	output := formatTranscriptBytes(nil, "plain \x1b[31mred\x1b[0m text", agent.AgentTypeClaudeCode)
+	require.Equal(t, "plain red text\n", output)
+}
+
+// The default explain body (stored AI summary, extracted intent) is the same
+// trust class as transcript content, and the non-color path returns the
+// markdown source without a renderer in between, so the sanitizer must be in
+// renderExplainBody itself.
+func TestRenderExplainBody_SanitizesTerminalSequencesOnNonColorPath(t *testing.T) {
+	t.Parallel()
+
+	var buf bytes.Buffer
+	got := renderExplainBody(&buf, "## Summary\n\nplain \x1b[31mred\x1b[0m\x1b]0;title\x07 text")
+	require.NotContains(t, got, "\x1b")
+	require.Contains(t, got, "plain red text")
 }
 
 func TestRunExplainCheckpoint_FullFallsBackWhenExternalCompactionFails(t *testing.T) {

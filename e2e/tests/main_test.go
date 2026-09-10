@@ -10,6 +10,7 @@ import (
 	"runtime"
 	"testing"
 
+	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/testutil/gitenv"
 	"github.com/entireio/cli/e2e/agents"
 	"github.com/entireio/cli/e2e/entire"
@@ -41,6 +42,24 @@ func TestMain(m *testing.M) {
 	// fallback cannot protect it).
 	os.Setenv("ENTIRE_CONFIG_DIR", filepath.Join(runDir, "entire-config"))
 	os.Setenv("XDG_CACHE_HOME", filepath.Join(runDir, "entire-cache"))
+
+	// And clear the agents' caller-session variables. E2E is usually run from
+	// inside an agent, which publishes its session ID into this process's
+	// environment; every spawned binary and git hook inherits it, so the
+	// harness's own `entire` invocations would resolve the DEVELOPER's session
+	// as their caller instead of the session the agent under test just
+	// created. Isolation here is absence rather than a redirected path, which
+	// is why it is an Unsetenv loop and not one of the Setenv calls above. The
+	// agent under test still publishes its own variables to its own children,
+	// so nothing under test is weakened.
+	//
+	// CallerSessionEnvVars is deliberately NOT registry-derived: this binary
+	// links eight of the nine agents (pi is absent from its import graph), and
+	// a registry-derived list would silently omit PI_SESSION_ID and leak a
+	// real pi session into the run. See agent.callerSessionEnvVars.
+	for _, name := range agent.CallerSessionEnvVars() {
+		os.Unsetenv(name)
+	}
 
 	// Select the checkpoint storage backend for the whole suite. E2E_CHECKPOINT_STORE
 	// (e.g. "git-refs") maps to the ENTIRE_CHECKPOINTS_PRIMARY override the spawned

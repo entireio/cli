@@ -1002,3 +1002,85 @@ func hooksInstalledNow(t *testing.T, ag interface {
 	}
 	return installed
 }
+
+// TestNew_RefusesRelativeBinaryPath pins that validation and execution refer
+// to the same file. run sets cmd.Dir to the worktree root and os/exec resolves
+// a relative Path against Dir, so a caller that stats "./x" in one directory
+// can spawn a different "./x" — the guarantee has to be anchored on an
+// absolute path, and it has to hold for the exported constructor, not only
+// for binaries the scanner produced.
+func TestNew_RefusesRelativeBinaryPath(t *testing.T) {
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("sh not available")
+	}
+
+	dir := t.TempDir()
+	t.Chdir(dir)
+	marker := filepath.Join(dir, "planted-ran")
+	// A relative path WITH a separator. exec.Command's own re-check only
+	// covers separator-free names, so this is the shape that still resolves.
+	relPath := "." + string(filepath.Separator) + binaryPrefix + "planted"
+	// `: >` is a shell builtin, so the marker does not depend on $PATH.
+	script := "#!/bin/sh\n: > " + marker + "\n" + mockInfoScript(makeInfoJSON("planted"))
+	if err := os.WriteFile(filepath.Join(dir, binaryPrefix+"planted"), []byte(script), 0o755); err != nil {
+		t.Fatalf("write planted binary: %v", err)
+	}
+
+	ea, err := New(context.Background(), relPath)
+
+	if err == nil {
+		t.Fatalf("New(%q) succeeded, want refusal", relPath)
+	}
+	if ea != nil {
+		t.Errorf("New returned agent %v alongside an error, want nil", ea)
+	}
+	if _, statErr := os.Stat(marker); !errors.Is(statErr, os.ErrNotExist) {
+		t.Errorf("planted binary was executed (marker stat err = %v), want it never spawned", statErr)
+	}
+}
+
+func TestAgentRun_RefusesRelativeBinaryPath(t *testing.T) {
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("sh not available")
+	}
+
+	dir := t.TempDir()
+	t.Chdir(dir)
+	marker := filepath.Join(dir, "planted-ran")
+	relPath := "." + string(filepath.Separator) + binaryPrefix + "planted"
+	script := "#!/bin/sh\n: > " + marker + "\n" + mockInfoScript(makeInfoJSON("planted"))
+	if err := os.WriteFile(filepath.Join(dir, binaryPrefix+"planted"), []byte(script), 0o755); err != nil {
+		t.Fatalf("write planted binary: %v", err)
+	}
+
+	ea := &Agent{binaryPath: relPath}
+
+	if _, err := ea.run(context.Background(), nil, "info"); err == nil {
+		t.Fatalf("run succeeded with a relative binaryPath, want refusal")
+	}
+	if _, statErr := os.Stat(marker); !errors.Is(statErr, os.ErrNotExist) {
+		t.Errorf("planted binary was executed (marker stat err = %v), want it never spawned", statErr)
+	}
+}
+
+// TestAgentRun_NoArgs pins that run reports the caller's mistake instead of
+// panicking on it. run is variadic and every error path it takes labels the
+// message with args[0], so a zero-arg call indexes an empty slice before any
+// of those paths can return. New is exported, so the reachable set is not
+// limited to this package's own call sites.
+func TestAgentRun_NoArgs(t *testing.T) {
+	t.Parallel()
+
+	// An absolute path, so the empty-args check is what has to fire rather
+	// than the absoluteness refusal above it.
+	ea := &Agent{binaryPath: filepath.Join(t.TempDir(), binaryPrefix+"noargs")}
+
+	out, err := ea.run(context.Background(), nil)
+
+	if err == nil {
+		t.Fatal("run with no args succeeded, want an error")
+	}
+	if out != nil {
+		t.Errorf("run returned %q alongside an error, want nil", out)
+	}
+}

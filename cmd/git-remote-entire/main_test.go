@@ -242,6 +242,28 @@ func TestMissingClusterHostMessage(t *testing.T) {
 			contains:    []string{`fatal: missing host in URL "entire://gh/owner/repo/extra"`},
 			notContains: []string{"entire repo clone"},
 		},
+		{
+			// The native forge token is recognized in the host slot too, so it
+			// gets the actionable message rather than an attempt to dial a
+			// cluster literally named "et" — and its segments are labelled
+			// <project>/<repo>, which is what /et/ paths actually take.
+			name:   "native forge in host slot is actionable",
+			rawURL: "entire://et/paul/dogbark",
+			contains: []string{
+				`("et" is a forge id, not a host)`,
+				"entire://<cluster-host>/et/<project>/<repo>",
+				"entire repo clone /et/paul/dogbark",
+			},
+			notContains: []string{"<owner>/<repo>"},
+		},
+		{
+			name:   "native forge with empty host is actionable",
+			rawURL: "entire:///et/paul/dogbark",
+			contains: []string{
+				"entire://<cluster-host>/et/<project>/<repo>",
+				"entire repo clone /et/paul/dogbark",
+			},
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -308,11 +330,43 @@ func makeTestJWT(t *testing.T, aud string) string {
 	return header + "." + payload + "." + enc.EncodeToString([]byte("sig"))
 }
 
+// testClusterHost is the cluster name the ENTIRE_TOKEN tests dial. It shares
+// entire.io with the cores they advertise, which the same-site gate on
+// discovery requires; the TLS test server itself answers on 127.0.0.1, so
+// pinnedClient rewrites the dial while the URL the code sees keeps this name.
+const testClusterHost = "cluster.entire.io"
+
+// pinnedClient returns srv.Client() with every request redirected to srv,
+// whatever host the URL names. TLS still verifies against 127.0.0.1, which
+// the httptest certificate covers.
+func pinnedClient(t *testing.T, srv *httptest.Server) *http.Client {
+	t.Helper()
+	u, err := url.Parse(srv.URL)
+	if err != nil {
+		t.Fatalf("parse server URL: %v", err)
+	}
+	c := srv.Client()
+	c.Transport = pinnedTransport{base: c.Transport, scheme: u.Scheme, host: u.Host}
+	return c
+}
+
+type pinnedTransport struct {
+	base   http.RoundTripper
+	scheme string
+	host   string
+}
+
+func (p pinnedTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	req.URL.Scheme = p.scheme
+	req.URL.Host = p.host
+	return p.base.RoundTrip(req)
+}
+
 // wellKnownServer serves /.well-known/entire-cluster.json advertising the
 // given cores, jurisdiction audience, and jurisdiction core over TLS,
-// returning the server and the host:port to use as clusterHost. An empty
-// audience models a cluster predating jurisdiction-token git auth.
-func wellKnownServer(t *testing.T, cores []string, jurisdictionAudience, jurisdictionCoreURL string) (*httptest.Server, string) {
+// returning a client pinned to it and testClusterHost to use as clusterHost.
+// An empty audience models a cluster predating jurisdiction-token git auth.
+func wellKnownServer(t *testing.T, cores []string, jurisdictionAudience, jurisdictionCoreURL string) (*http.Client, string) {
 	t.Helper()
 	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/.well-known/entire-cluster.json" {
@@ -329,22 +383,18 @@ func wellKnownServer(t *testing.T, cores []string, jurisdictionAudience, jurisdi
 		_ = json.NewEncoder(w).Encode(body) //nolint:errcheck // best-effort in test stub
 	}))
 	t.Cleanup(srv.Close)
-	u, err := url.Parse(srv.URL)
-	if err != nil {
-		t.Fatalf("parse server URL: %v", err)
-	}
-	return srv, u.Host
+	return pinnedClient(t, srv), testClusterHost
 }
 
 func TestResolveEnvTokenCreds_TrustedAudSucceeds(t *testing.T) {
 	t.Parallel()
 	const core = "https://core.us.entire.io"
 	const audience = "https://us.entire.io"
-	srv, clusterHost := wellKnownServer(t, []string{core}, audience, core)
+	client, clusterHost := wellKnownServer(t, []string{core}, audience, core)
 	envToken := makeTestJWT(t, core)
 
 	creds, _, err := resolveEnvTokenCreds(
-		t.Context(), envToken, clusterHost, t.TempDir(), srv.Client(),
+		t.Context(), envToken, clusterHost, t.TempDir(), client,
 	)
 	if err != nil {
 		t.Fatalf("expected trusted aud to succeed, got: %v", err)
@@ -364,11 +414,11 @@ func TestResolveEnvTokenCreds_CrossJurisdictionTokenUsesBearer(t *testing.T) {
 	// sibling core passes the trust gate and is used directly as the bearer.
 	const tokenCore = "https://core.eu.entire.io"
 	const jurisdictionCore = "https://core.us.entire.io"
-	srv, clusterHost := wellKnownServer(t, []string{tokenCore, jurisdictionCore}, "https://us.entire.io", jurisdictionCore)
+	client, clusterHost := wellKnownServer(t, []string{tokenCore, jurisdictionCore}, "https://us.entire.io", jurisdictionCore)
 	envToken := makeTestJWT(t, tokenCore)
 
 	creds, _, err := resolveEnvTokenCreds(
-		t.Context(), envToken, clusterHost, t.TempDir(), srv.Client(),
+		t.Context(), envToken, clusterHost, t.TempDir(), client,
 	)
 	if err != nil {
 		t.Fatalf("cross-jurisdiction token must resolve, got: %v", err)
@@ -385,11 +435,11 @@ func TestResolveEnvTokenCreds_CrossJurisdictionTokenUsesBearer(t *testing.T) {
 func TestResolveEnvTokenCreds_DoesNotRequireJurisdictionAudience(t *testing.T) {
 	t.Parallel()
 	const core = "https://core.us.entire.io"
-	srv, clusterHost := wellKnownServer(t, []string{core}, "", "")
+	client, clusterHost := wellKnownServer(t, []string{core}, "", "")
 	envToken := makeTestJWT(t, core)
 
 	creds, _, err := resolveEnvTokenCreds(
-		t.Context(), envToken, clusterHost, t.TempDir(), srv.Client(),
+		t.Context(), envToken, clusterHost, t.TempDir(), client,
 	)
 	if err != nil {
 		t.Fatalf("resolve direct bearer without jurisdiction audience: %v", err)
@@ -499,10 +549,10 @@ func TestResolveEnvTokenCreds_UntrustedAudAborts(t *testing.T) {
 	t.Parallel()
 	// The cluster advertises only core.us; the token's aud points elsewhere.
 	// The gate must abort before building creds (i.e. before any exchange).
-	srv, clusterHost := wellKnownServer(t, []string{"https://core.us.entire.io"}, "https://us.entire.io", "https://core.us.entire.io")
+	client, clusterHost := wellKnownServer(t, []string{"https://core.us.entire.io"}, "https://us.entire.io", "https://core.us.entire.io")
 
 	creds, _, err := resolveEnvTokenCreds(
-		t.Context(), makeTestJWT(t, "https://attacker.example.com"), clusterHost, t.TempDir(), srv.Client(),
+		t.Context(), makeTestJWT(t, "https://attacker.example.com"), clusterHost, t.TempDir(), client,
 	)
 	if err == nil {
 		t.Fatal("expected untrusted aud to be rejected")
@@ -519,16 +569,44 @@ func TestResolveEnvTokenCreds_EmptyAdvertisedCoresAborts(t *testing.T) {
 	t.Parallel()
 	// Discovery succeeds (HTTP 200) but advertises no cores. With nothing to
 	// trust, the gate must fail closed rather than trusting the token's aud.
-	srv, clusterHost := wellKnownServer(t, []string{}, "https://us.entire.io", "https://core.us.entire.io")
+	client, clusterHost := wellKnownServer(t, []string{}, "https://us.entire.io", "https://core.us.entire.io")
 
 	creds, _, err := resolveEnvTokenCreds(
-		t.Context(), makeTestJWT(t, "https://core.us.entire.io"), clusterHost, t.TempDir(), srv.Client(),
+		t.Context(), makeTestJWT(t, "https://core.us.entire.io"), clusterHost, t.TempDir(), client,
 	)
 	if err == nil {
 		t.Fatal("expected empty advertised core set to be rejected")
 	}
 	if creds != nil {
 		t.Fatal("expected nil creds when no cores are advertised")
+	}
+}
+
+func TestResolveEnvTokenCreds_CrossSiteCoresAbort(t *testing.T) {
+	t.Parallel()
+	// A cluster under one domain advertising a core under another is the
+	// shape of a token-stealing cluster: the token's aud WOULD match the
+	// advertised list, so coreTrusted alone would hand it over. The same-site
+	// gate on discovery must refuse first, naming both sides.
+	const foreignCore = "https://core.us.evil.example"
+	client, clusterHost := wellKnownServer(t, []string{foreignCore}, "https://us.entire.io", foreignCore)
+
+	creds, _, err := resolveEnvTokenCreds(
+		t.Context(), makeTestJWT(t, foreignCore), clusterHost, t.TempDir(), client,
+	)
+	if err == nil {
+		t.Fatal("expected a cross-site core to be refused")
+	}
+	if creds != nil {
+		t.Fatal("expected nil creds when a cross-site core is advertised")
+	}
+	for _, want := range []string{"cluster " + testClusterHost, foreignCore, "outside entire.io", "refusing"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("error %q must contain %q", err.Error(), want)
+		}
+	}
+	if strings.Contains(err.Error(), "not a trusted login server") {
+		t.Fatal("the same-site gate must refuse before the aud comparison runs")
 	}
 }
 

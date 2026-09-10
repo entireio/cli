@@ -105,7 +105,7 @@ func (s *ephemeralStore) writeCheckpoint(ctx context.Context, opts WriteEphemera
 
 	commitMsg := trailers.FormatShadowCommit(opts.CommitMessage, opts.MetadataDir, opts.SessionID)
 
-	repoRoot, commonDir, err := s.repoDirs(ctx)
+	repoRoot, commonDir, err := s.repoDirs()
 	if err != nil {
 		return WriteEphemeralResult{}, fmt.Errorf("failed to resolve repo dirs: %w", err)
 	}
@@ -307,7 +307,7 @@ func (s *ephemeralStore) writeTask(ctx context.Context, opts WriteEphemeralTaskO
 	candidateFiles = append(candidateFiles, opts.NewFiles...)
 	allFiles := filterGitIgnoredFiles(ctx, s.repo, candidateFiles)
 
-	repoRoot, commonDir, err := s.repoDirs(ctx)
+	repoRoot, commonDir, err := s.repoDirs()
 	if err != nil {
 		return plumbing.ZeroHash, fmt.Errorf("failed to resolve repo dirs: %w", err)
 	}
@@ -452,9 +452,13 @@ func (s *ephemeralStore) addTaskMetadataToTree(ctx context.Context, baseTreeHash
 			if readErr == nil && !tooLarge {
 				// Try JSONL-aware redaction first; fall back to plain string redaction
 				// only on a JSONL parse error (avoids silently dropping the transcript).
+				// ErrRedactionIncomplete is NOT a parse error: the content parsed and
+				// redaction flagged a leaf it could not rewrite, so the plain fallback
+				// would ship exactly that leaf. Fail the write instead, like
+				// ErrScannerDegraded.
 				redacted, jsonlErr := redact.JSONLBytes(agentContent)
 				if jsonlErr != nil {
-					if errors.Is(jsonlErr, redact.ErrScannerDegraded) {
+					if errors.Is(jsonlErr, redact.ErrScannerDegraded) || errors.Is(jsonlErr, redact.ErrRedactionIncomplete) {
 						return plumbing.ZeroHash, fmt.Errorf("redact subagent transcript %s: %w", opts.SubagentTranscriptPath, jsonlErr)
 					}
 					logging.Warn(ctx, "subagent transcript is not valid JSONL, falling back to plain redaction",
@@ -859,7 +863,7 @@ func (s *ephemeralStore) buildTreeWithChanges(
 		if relErr != nil {
 			logInvalidGitTreePath(ctx, "add metadata directory", metadataDir, relErr)
 		} else {
-			metaChanges, metaErr := addMetadataDirToChanges(ctx, s.repo, repoRedactCache(ctx, s.repo), repoRoot, metadataDir, metadataRel)
+			metaChanges, metaErr := addMetadataDirToChanges(ctx, s.repo, repoRedactCache(s.repo), repoRoot, metadataDir, metadataRel)
 			if metaErr != nil {
 				return plumbing.ZeroHash, fmt.Errorf("failed to add metadata directory: %w", metaErr)
 			}

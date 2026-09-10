@@ -2,6 +2,7 @@ package pi
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -9,6 +10,7 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/testutil"
+	"github.com/entireio/cli/cmd/entire/cli/osroot"
 )
 
 // Note: t.Parallel is incompatible with t.Chdir.
@@ -105,10 +107,11 @@ func TestInstallHooks_RewritesStaleRender(t *testing.T) {
 
 	// Seed the render the removed local-dev mode used to write, then reinstall:
 	// differing content must be rewritten to the binary form.
-	path, err := extensionPath(ctx)
+	cfg, err := extensionConfig(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
+	path := cfg.Path()
 	legacy := strings.ReplaceAll(extensionTemplate, entireCmdPlaceholder, testutil.LegacyLocalDevCommand(""))
 	if err := os.WriteFile(path, []byte(legacy), 0o644); err != nil {
 		t.Fatal(err)
@@ -289,10 +292,11 @@ func TestCheckHookConfig_LegacyLocalDevIsDrift(t *testing.T) {
 	if _, err := a.InstallHooks(ctx, false); err != nil {
 		t.Fatalf("InstallHooks: %v", err)
 	}
-	path, err := extensionPath(ctx)
+	cfg, err := extensionConfig(ctx)
 	if err != nil {
-		t.Fatalf("extensionPath: %v", err)
+		t.Fatalf("extensionConfig: %v", err)
 	}
+	path := cfg.Path()
 	legacy := strings.ReplaceAll(extensionTemplate, entireCmdPlaceholder, testutil.LegacyLocalDevCommand(""))
 	if err := os.WriteFile(path, []byte(legacy), 0o644); err != nil {
 		t.Fatal(err)
@@ -352,4 +356,76 @@ func hooksInstalledNow(t *testing.T, ag interface {
 		t.Fatalf("AreHooksInstalled() error = %v", err)
 	}
 	return installed
+}
+
+// TestHooks_RefuseSymlinkedExtensionDir pins the three operations that used to
+// resolve .pi through a checked-in symlink. A repository shipping
+// `.pi -> /somewhere/else` got arbitrary file creation outside the worktree from
+// InstallHooks and recursive deletion of an arbitrary directory from
+// UninstallHooks, and AreHooksInstalled read the far end as its own answer.
+//
+// It is reachable without the user naming pi: DetectPresence stats .pi, which
+// follows the link, so pi reads as present and `entire enable` installs through
+// it unprompted in CI or under --yes.
+func TestHooks_RefuseSymlinkedExtensionDir(t *testing.T) {
+	outside := t.TempDir()
+	worktree := t.TempDir()
+	if err := os.Symlink(outside, filepath.Join(worktree, ".pi")); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	// The link's far end already holds an extension, so a followed read has
+	// something to report and a followed delete has something to destroy.
+	planted := filepath.Join(outside, "extensions", "entire")
+	if err := os.MkdirAll(planted, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(planted, extensionFileName), []byte(entireMarker), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(worktree)
+
+	a := &PiAgent{}
+
+	if _, err := a.InstallHooks(context.Background(), false); !errors.Is(err, osroot.ErrSymlinkedPath) {
+		t.Errorf("InstallHooks err = %v, want osroot.ErrSymlinkedPath", err)
+	}
+
+	// An unreadable answer is not "no hooks": a caller deciding whether hooks
+	// can be left alone must not be told the far end's content is ours.
+	installed, err := a.AreHooksInstalled(context.Background())
+	if !errors.Is(err, osroot.ErrSymlinkedPath) {
+		t.Errorf("AreHooksInstalled err = %v, want osroot.ErrSymlinkedPath", err)
+	}
+	if installed {
+		t.Error("AreHooksInstalled followed the link and claimed the planted file")
+	}
+
+	if err := a.UninstallHooks(context.Background()); !errors.Is(err, osroot.ErrSymlinkedPath) {
+		t.Errorf("UninstallHooks err = %v, want osroot.ErrSymlinkedPath", err)
+	}
+	if _, err := os.Stat(planted); err != nil {
+		t.Errorf("UninstallHooks deleted outside the worktree: %v", err)
+	}
+
+	if state := a.CheckHookConfig(context.Background()); state != agent.HooksAbsent {
+		t.Errorf("CheckHookConfig = %v, want HooksAbsent", state)
+	}
+}
+
+// TestUninstallHooks_RemovesDirectoryNotJustFile pins the behaviour RemoveDir
+// exists for: pi discovers extensions by directory, so leaving an empty
+// .pi/extensions/entire behind is a half-uninstalled extension.
+func TestUninstallHooks_RemovesDirectoryNotJustFile(t *testing.T) {
+	dir := t.TempDir()
+	t.Chdir(dir)
+	a := &PiAgent{}
+	if _, err := a.InstallHooks(context.Background(), false); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.UninstallHooks(context.Background()); err != nil {
+		t.Fatalf("UninstallHooks: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, extensionDirName)); !os.IsNotExist(err) {
+		t.Errorf("extension directory survived uninstall: err = %v", err)
+	}
 }

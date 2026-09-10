@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"os"
 	"os/exec"
 	"runtime"
 	"slices"
@@ -14,9 +13,11 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
 )
 
-// GeneratedHookFileState reports hook-config drift for agents whose entire
+// generatedStateFromContent reports hook-config drift for agents whose entire
 // Entire integration is one generated file in the repo (Pi's extension,
-// OpenCode's plugin), for use by HookFreshness implementations.
+// OpenCode's plugin), for use by HookFreshness implementations. Reached through
+// HookConfigFile.GeneratedState, which reads the bytes through the worktree's
+// root.
 //
 // The file counts as ours only if it contains marker, and as current only if it
 // matches render — what InstallHooks writes today. Pass exactly that one render:
@@ -37,17 +38,6 @@ import (
 // A file that exists but lacks marker reads as HooksAbsent, not HooksOutdated:
 // InstallHooks refuses to overwrite a foreign file at our path, so there is no
 // Entire config there for us to call stale.
-func GeneratedHookFileState(path, marker, render string) HookConfigState {
-	data, err := os.ReadFile(path) //nolint:gosec // path constructed from validated repo root
-	if err != nil {
-		return HooksAbsent
-	}
-	return generatedStateFromContent(string(data), marker, render)
-}
-
-// generatedStateFromContent is GeneratedHookFileState once the bytes are in
-// hand, shared with HookConfigFile.GeneratedState, which reads them through a
-// root instead of through a path.
 func generatedStateFromContent(content, marker, render string) HookConfigState {
 	if !strings.Contains(content, marker) {
 		return HooksAbsent

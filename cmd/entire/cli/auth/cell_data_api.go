@@ -213,8 +213,8 @@ type cellSubject struct {
 // `--jurisdiction` mints a token for the caller's SELECTED environment, so with
 // (say) a partial.to context active it must mint a partial.to token even though
 // the data host defaults to entire.io. Discovery keys off api.BaseURL(), so it
-// would fail outright — clusterdiscovery.requireActiveContext validates the
-// active context against *that* host's trusted issuers and errors when they
+// would fail outright — clusterdiscovery.selectLoginContext validates the
+// selected context against *that* host's trusted issuers and errors when they
 // don't match, which for this command is the wrong question to ask: the target
 // jurisdiction comes from the flag, not from the default data host.
 // NewEntireAPICellClient is a different case — it dials the data plane — so it

@@ -2,10 +2,15 @@ package cli
 
 import (
 	"os"
+	"path"
 	"path/filepath"
+	"slices"
 	"testing"
 
+	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/osroot"
+
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -36,11 +41,11 @@ func TestWriteManagedScaffold_RefusesASymlinkedAgentDirectory(t *testing.T) {
 				t.Skipf("symlink not supported: %v", err)
 			}
 
-			root, rootErr := openScaffoldRoot(worktree)
+			rel := filepath.Join(".claude", "skills", "entire", "SKILL.md")
+			st, rootErr := openScaffoldTarget(worktree, rel)
 			require.NoError(t, rootErr)
 
-			rel := filepath.Join(".claude", "skills", "entire", "SKILL.md")
-			_, err := writeManagedScaffold(root, rel, []byte("managed\n"), func([]byte) bool { return true })
+			_, err := writeManagedScaffold(st, []byte("managed\n"), func([]byte) bool { return true })
 			require.ErrorIs(t, err, osroot.ErrSymlinkedPath)
 
 			entries, readErr := os.ReadDir(dest)
@@ -58,12 +63,11 @@ func TestWriteManagedScaffold_CreatesThroughARealDirectory(t *testing.T) {
 	t.Parallel()
 
 	worktree := t.TempDir()
-	root, err := openScaffoldRoot(worktree)
+	rel := filepath.Join(".claude", "skills", "entire", "SKILL.md")
+	st, err := openScaffoldTarget(worktree, rel)
 	require.NoError(t, err)
 
-	rel := filepath.Join(".claude", "skills", "entire", "SKILL.md")
-
-	res, err := writeManagedScaffold(root, rel, []byte("managed\n"), func([]byte) bool { return true })
+	res, err := writeManagedScaffold(st, []byte("managed\n"), func([]byte) bool { return true })
 	require.NoError(t, err)
 	require.Equal(t, managedScaffoldCreated, res.Status)
 
@@ -71,11 +75,11 @@ func TestWriteManagedScaffold_CreatesThroughARealDirectory(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "managed\n", string(got))
 
-	res, err = writeManagedScaffold(root, rel, []byte("managed\n"), func([]byte) bool { return true })
+	res, err = writeManagedScaffold(st, []byte("managed\n"), func([]byte) bool { return true })
 	require.NoError(t, err)
 	require.Equal(t, managedScaffoldUnchanged, res.Status)
 
-	res, err = writeManagedScaffold(root, rel, []byte("changed\n"), func([]byte) bool { return false })
+	res, err = writeManagedScaffold(st, []byte("changed\n"), func([]byte) bool { return false })
 	require.NoError(t, err)
 	require.Equal(t, managedScaffoldSkippedConflict, res.Status)
 }
@@ -86,18 +90,94 @@ func TestWriteManagedScaffold_RefusesSymlinkedLeaf(t *testing.T) {
 	worktree := t.TempDir()
 	rel := filepath.Join(".claude", "skills", "entire", "SKILL.md")
 	require.NoError(t, os.MkdirAll(filepath.Dir(filepath.Join(worktree, rel)), 0o750))
-	target := filepath.Join(worktree, "victim.md")
-	require.NoError(t, os.WriteFile(target, []byte("managed old\n"), 0o600))
+	victim := filepath.Join(worktree, "victim.md")
+	require.NoError(t, os.WriteFile(victim, []byte("managed old\n"), 0o600))
 	if err := os.Symlink(filepath.Join("..", "..", "..", "victim.md"), filepath.Join(worktree, rel)); err != nil {
 		t.Skipf("symlink not supported: %v", err)
 	}
 
-	root, rootErr := openScaffoldRoot(worktree)
+	st, rootErr := openScaffoldTarget(worktree, rel)
 	require.NoError(t, rootErr)
 
-	_, err := writeManagedScaffold(root, rel, []byte("managed new\n"), func([]byte) bool { return true })
+	_, err := writeManagedScaffold(st, []byte("managed new\n"), func([]byte) bool { return true })
 	require.ErrorIs(t, err, osroot.ErrSymlinkedPath)
-	got, err := os.ReadFile(target)
+	got, err := os.ReadFile(victim)
 	require.NoError(t, err)
 	require.Equal(t, "managed old\n", string(got))
+}
+
+// TestVouchableDirsMatchTheBuiltInAgents pins agent.vouchableDirs against the
+// registry, in the one package where every built-in agent is registered.
+//
+// The list is pinned rather than derived because the registry is mutable at
+// runtime and empty in most test binaries (see its doc comment), which costs
+// the automatic coverage deriving would have given. This is that coverage put
+// back: a new agent whose config directory is missing from the list fails here,
+// and so does an entry left behind by an agent that was removed.
+func TestVouchableDirsMatchTheBuiltInAgents(t *testing.T) {
+	t.Parallel()
+
+	// deliberatelyUnvouchable is the ledger of directories the derivation
+	// produces that must NOT be vouchable, each with its reason. A ledger rather
+	// than a filter reimplementing agent.neverVouchable, so the exclusion has to
+	// be argued for here and cannot quietly grow.
+	deliberatelyUnvouchable := map[string]string{
+		".pi/extensions/entire": "Entire both creates and deletes this directory (HookConfigFile.RemoveDir), " +
+			"so it cannot also be a link the user manages; vouching for it anchored the root ON it and " +
+			"left uninstall with nothing above it to delete from",
+	}
+
+	want := map[string]struct{}{}
+	for _, relPath := range agent.AllHookConfigRelPaths() {
+		dir := path.Dir(filepath.ToSlash(relPath))
+		for dir != "." && dir != "/" && dir != "" {
+			if _, excluded := deliberatelyUnvouchable[dir]; !excluded {
+				want[dir] = struct{}{}
+			}
+			dir = path.Dir(dir)
+		}
+	}
+	require.NotEmpty(t, want, "no built-in agent declares a hook config path; this guard proves nothing")
+
+	// A stale exclusion is its own failure: if the path stops existing, the
+	// entry has outlived its reason.
+	derived := map[string]struct{}{}
+	for _, relPath := range agent.AllHookConfigRelPaths() {
+		dir := path.Dir(filepath.ToSlash(relPath))
+		for dir != "." && dir != "/" && dir != "" {
+			derived[dir] = struct{}{}
+			dir = path.Dir(dir)
+		}
+	}
+	for d, reason := range deliberatelyUnvouchable {
+		if _, still := derived[d]; !still {
+			assert.Failf(t, "stale exclusion",
+				"%s is listed as deliberately unvouchable (%s) but no agent config lives under it "+
+					"any more; remove the entry", d, reason)
+		}
+		if slices.Contains(agent.VouchableSymlinkedDirs(), d) {
+			assert.Failf(t, "exclusion not enforced",
+				"%s is listed as deliberately unvouchable (%s) but agent.VouchableSymlinkedDirs "+
+					"still offers it", d, reason)
+		}
+	}
+
+	got := map[string]struct{}{}
+	for _, d := range agent.VouchableSymlinkedDirs() {
+		got[d] = struct{}{}
+	}
+
+	for d := range want {
+		if _, ok := got[d]; !ok {
+			assert.Failf(t, "missing vouchable directory",
+				"%s is a built-in agent's config directory but is not in agent.vouchableDirs; "+
+					"a user with it symlinked has no way to say so", d)
+		}
+	}
+	for d := range got {
+		if _, ok := want[d]; !ok {
+			assert.Failf(t, "stale vouchable directory",
+				"%s is in agent.vouchableDirs but no built-in agent's config lives under it; remove it", d)
+		}
+	}
 }

@@ -8,6 +8,11 @@ The Entire CLI supports external agent plugins — standalone binaries that impl
 
 The CLI discovers external agents by scanning `$PATH` for executables matching the pattern `entire-agent-<name>`. For example, `entire-agent-cursor` would register as the "cursor" agent.
 
+Two rules bound that scan, both because discovery *executes* what it finds (it calls each binary's `info` subcommand):
+
+- It is off unless `external_agents` is set in an untracked `.entire/settings.local.json`. The committed `.entire/settings.json` cannot grant it — see [Why `external_agents` is local-only](../security-and-privacy.md#why-external_agents-is-local-only). Interactive setup flows scan regardless, so you can still pick a plugin before the setting exists.
+- Only absolute `$PATH` entries are scanned. A relative entry resolves against the working directory, which for a git hook is whatever repository invoked it.
+
 - Binaries whose `<name>` conflicts with an already-registered built-in agent are skipped.
 - Discovery runs once during CLI initialization (before building the hooks command tree).
 - The binary must be executable and respond to the `info` subcommand.

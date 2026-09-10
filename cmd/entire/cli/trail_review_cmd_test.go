@@ -82,12 +82,52 @@ func TestResolveTrailReviewTargetRejectsUnsupportedForge(t *testing.T) {
 	testutil.RunGit(t, repoDir, "remote", "add", "origin", "git@gitlab.com:acme/my-app.git")
 	t.Chdir(repoDir)
 
-	_, err := resolveTrailReviewTarget(context.Background(), api.NewClient("tok"), "", "", "")
+	_, err := resolveTrailReviewTarget(context.Background(), api.NewClient("tok"), "", "", "", "")
 	if err == nil {
 		t.Fatal("expected error for gitlab.com origin, got nil")
 	}
 	if !strings.Contains(err.Error(), "not on a forge supported by Entire trails") {
 		t.Fatalf("error message does not mention unsupported forge: %v", err)
+	}
+}
+
+// Not parallel: uses t.Chdir() to resolve a native origin remote.
+func TestResolveTrailReviewTargetUsesNativeRepoBasePath(t *testing.T) {
+	const basePath = "/api/v1/repos/native-repo-id/trails"
+
+	repoDir := t.TempDir()
+	testutil.InitRepo(t, repoDir)
+	testutil.RunGit(t, repoDir, "remote", "add", "origin", "entire://aws-us-east-2.entire.io/et/entirehq/marvin")
+	t.Chdir(repoDir)
+
+	var paths []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		paths = append(paths, r.URL.Path)
+		switch r.URL.Path {
+		case basePath + "/3":
+			if err := json.NewEncoder(w).Encode(api.TrailResource{ID: "native-trail", Number: 3, Branch: "feature/native"}); err != nil {
+				t.Errorf("encode trail response: %v", err)
+			}
+		case basePath + "/3/reviews/comments":
+			if err := json.NewEncoder(w).Encode(api.TrailReviewCommentsResponse{}); err != nil {
+				t.Errorf("encode findings response: %v", err)
+			}
+		default:
+			http.Error(w, "unexpected path", http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	client := api.NewClientWithBaseURL("token", srv.URL)
+	target, err := resolveTrailReviewTarget(t.Context(), client, "native-repo-id", "3", "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fetchAllTrailReviewComments(t.Context(), client, target.Trail.ID, trailReviewSummaryOptions()); err != nil {
+		t.Fatal(err)
+	}
+	if len(paths) != 2 || paths[0] != basePath+"/3" || paths[1] != basePath+"/3/reviews/comments" {
+		t.Fatalf("request paths = %v, want native detail and findings routes", paths)
 	}
 }
 

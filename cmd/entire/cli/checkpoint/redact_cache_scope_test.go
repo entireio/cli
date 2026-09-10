@@ -181,7 +181,7 @@ func TestRedactTranscriptCached_SingleJSONValueNotSpliced(t *testing.T) {
 	_, err := RedactTranscriptCached(ctx, repo, "sess-oc", []byte(content), jsonlRedactor)
 	require.NoError(t, err)
 
-	cache := repoRedactCache(ctx, repo)
+	cache := repoRedactCache(repo)
 	require.NotNil(t, cache)
 	require.Nil(t, cache.load(transcriptCacheKey("sess-oc")),
 		"a single JSON value must never be cached for splicing")

@@ -19,12 +19,6 @@ import (
 
 const agentHelpTestRepo = "gh/acme/app"
 
-// testTrailCellRoutedFullName is the "owner/repo" fullName the entire-api
-// cell-routed client (trailRefreshAPIClient) is expected to receive when a
-// repo-scoped trails probe routes correctly through it, shared by the tests
-// covering the two legacy-BFF-routing fixes.
-const testTrailCellRoutedFullName = "acme/widget"
-
 // commandNames returns the Use-name of each command, for assertions.
 func commandNames(cmds []*cobra.Command) []string {
 	names := make([]string, 0, len(cmds))
@@ -230,10 +224,10 @@ func TestRefreshAgentHelpTrailsEnabledCacheIfStaleForScope_RoutesThroughRepoCell
 	t.Chdir(t.TempDir())
 
 	previous := trailRefreshAPIClient
-	var gotFullName string
+	var gotForge, gotOwner, gotRepo string
 	wantErr := errors.New("cell client unavailable")
-	trailRefreshAPIClient = func(_ context.Context, _ bool, fullName string) (*api.Client, error) {
-		gotFullName = fullName
+	trailRefreshAPIClient = func(_ context.Context, _ bool, forge, owner, repo string) (*api.Client, error) {
+		gotForge, gotOwner, gotRepo = forge, owner, repo
 		return nil, wantErr
 	}
 	t.Cleanup(func() { trailRefreshAPIClient = previous })
@@ -242,16 +236,16 @@ func TestRefreshAgentHelpTrailsEnabledCacheIfStaleForScope_RoutesThroughRepoCell
 		Forge:     "gh",
 		Owner:     "acme",
 		Repo:      "widget",
-		RepoKey:   trailEnablementRepoKey("gh", "acme", "widget"),
 		APIBase:   api.BaseURL(),
 		AuthKey:   "test-auth-key",
 		Supported: true,
 	}
+	scope.RepoKey = trailEnablementRepoKey(scope.Forge, scope.Owner, scope.Repo)
 
 	err := refreshAgentHelpTrailsEnabledCacheIfStaleForScope(t.Context(), scope)
 
-	if gotFullName != testTrailCellRoutedFullName {
-		t.Fatalf("trailRefreshAPIClient fullName = %q, want %s", gotFullName, testTrailCellRoutedFullName)
+	if gotForge != scope.Forge || gotOwner != scope.Owner || gotRepo != scope.Repo {
+		t.Fatalf("trailRefreshAPIClient repo = (%q,%q,%q), want (gh,acme,widget)", gotForge, gotOwner, gotRepo)
 	}
 	if !errors.Is(err, wantErr) {
 		t.Fatalf("err = %v, want %v", err, wantErr)
@@ -272,7 +266,7 @@ func TestRefreshAgentHelpTrailsEnabledCacheIfStaleForScope_NotOnboardedSavesDisa
 	runGitInDir(t, ".", "remote", "add", "origin", "https://github.com/acme/widget.git")
 
 	previous := trailRefreshAPIClient
-	trailRefreshAPIClient = func(context.Context, bool, string) (*api.Client, error) {
+	trailRefreshAPIClient = func(context.Context, bool, string, string, string) (*api.Client, error) {
 		return nil, fmt.Errorf("resolve the Entire cell for acme/widget: %w", errRepoNotOnboarded)
 	}
 	t.Cleanup(func() { trailRefreshAPIClient = previous })

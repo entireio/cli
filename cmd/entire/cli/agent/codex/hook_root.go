@@ -218,7 +218,7 @@ func (p WorktreeHooksPath) Path() string {
 // `.codex` a NAME inside the worktree, which is what MkdirAllNoSymlink can
 // refuse. It also covers the writes, which had no root at all.
 func (p WorktreeHooksPath) hookConfig() (*agent.HookConfigFile, error) {
-	return agent.OpenHookConfig(p.worktreeRoot, ".codex/"+HooksFileName) //nolint:wrapcheck // agent.HookConfigFile already names the file in its error
+	return agent.OpenHookConfig(p.worktreeRoot, (&CodexAgent{}).HookConfigRelPath()) //nolint:wrapcheck // agent.HookConfigFile already names the file in its error
 }
 
 // ResolveWorktreeHooksPath resolves the hooks file owned by the current

@@ -261,3 +261,10 @@ func (c *CursorAgent) ChunkTranscript(_ context.Context, content []byte, maxSize
 func (c *CursorAgent) ReassembleTranscript(chunks [][]byte) ([]byte, error) {
 	return agent.ReassembleJSONL(chunks), nil
 }
+
+// CallerSessionEnvVar names the variable holding the session ID Cursor
+// publishes into the environment of the processes its shell tool spawns,
+// alongside CURSOR_AGENT. It is the same conversation ID every Cursor
+// lifecycle event reports as its session ID, so it resolves against session
+// state without translation.
+func (c *CursorAgent) CallerSessionEnvVar() string { return "CURSOR_CONVERSATION_ID" }

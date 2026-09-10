@@ -853,19 +853,30 @@ func TestPostCommit_FilesTouched_ResetsAfterCondensation(t *testing.T) {
 	assert.Nil(t, state.FilesTouched,
 		"FilesTouched should be nil after condensation (all files were committed)")
 
+	// The staged transcript and prompt are released once the work is condensed:
+	// their content is in the checkpoint tree now, and nothing ever removed the
+	// transcript before, so it accumulated in the worktree forever. The metadata
+	// directory itself must survive — the next Stop writes into it.
+	assert.NoFileExists(t, filepath.Join(metadataDirAbs, paths.TranscriptFileName),
+		"staged full.jsonl should be released after condensation")
+	assert.NoFileExists(t, filepath.Join(metadataDirAbs, paths.PromptFileName),
+		"staged prompt.txt should be released after condensation")
+	assert.DirExists(t, metadataDirAbs,
+		"the session metadata directory must survive condensation")
+
 	// --- Round 2: Save checkpoint touching files C.txt and D.txt ---
 
-	// Append to transcript for round 2
-	transcript2 := `{"type":"human","message":{"content":"round 2 prompt"}}
+	// Restage the transcript for round 2 the way production does: lifecycle
+	// writes the WHOLE sanitized transcript from the agent's own rollout on
+	// every Stop, and condensation removes the staged copy, so round 2 recreates
+	// the file with the cumulative content rather than appending to a file it
+	// assumes survived.
+	transcript2 := transcript + `{"type":"human","message":{"content":"round 2 prompt"}}
 {"type":"assistant","message":{"content":"round 2 response"}}
 `
-	f, err := os.OpenFile(
+	require.NoError(t, os.WriteFile(
 		filepath.Join(metadataDirAbs, paths.TranscriptFileName),
-		os.O_APPEND|os.O_WRONLY, 0o644)
-	require.NoError(t, err)
-	_, err = f.WriteString(transcript2)
-	require.NoError(t, err)
-	require.NoError(t, f.Close())
+		[]byte(transcript2), 0o600))
 
 	// Create files C.txt and D.txt
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "C.txt"), []byte("file C"), 0o644))
