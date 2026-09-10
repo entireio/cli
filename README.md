@@ -384,6 +384,7 @@ These are visible in developer and nightly builds and hidden in stable releases,
 | `--yes`, `-y`                               | Accept all defaults without prompting                                                                             |
 | `--force`, `-f`                             | Force reinstall hooks (removes existing Entire hooks first)                                                       |
 | `--checkpoint-remote <provider:owner/repo>` | Push checkpoint data to a separate repo (e.g., `github:org/checkpoints-repo`)                                     |
+| `--checkpoint-push-remote <name>`           | Select an existing Git remote for checkpoints; always saves to this clone's `.entire/settings.local.json`, even with `--project` |
 | `--skip-push-sessions`                      | Disable automatic pushing of checkpoint data on git push                                                           |
 | `--local`                                   | Write settings to `.entire/settings.local.json` instead of `.entire/settings.json`                                |
 | `--project`                                 | Write settings to `.entire/settings.json` even if it already exists                                               |
@@ -550,6 +551,30 @@ By default, checkpoint data rides along with your own pushes — but only to **o
 5. The first remote in `.git/config` order
 
 A push to any *other* remote carries no checkpoint data. `entire status` shows the current destination, where it came from, and how many checkpoints are unpushed. This matters if you push code to several remotes: checkpoints go to exactly one of them.
+
+When several remotes need a choice, interactive `entire enable` offers a remote
+picker, including when you re-run it in an enabled repository. Keeping the current
+destination leaves its selection unchanged. During first-time setup, agent
+selection comes before the remote picker; both precede hook and settings changes.
+Choosing another remote saves
+`strategy_options.checkpoint_push_remote` in `.entire/settings.local.json`, so
+teammates do not inherit a remote name specific to your clone. Valid explicit
+selections and effective dedicated checkpoint repositories are preserved.
+If a saved selection names a missing remote, the picker offers eligible remotes
+to repair it; keeping the invalid selection leaves checkpoint sync disabled.
+
+To select a remote without the picker:
+
+```bash
+entire enable --yes --checkpoint-push-remote fork
+```
+
+The remote must already exist. An explicit flag pins the named remote, even if
+it is currently selected automatically. `--yes` alone does not change the
+checkpoint destination. The command confirms the effective destination and any
+local settings write. Selecting a destination does not re-enable disabled
+checkpoint pushing, upload existing checkpoints immediately, or move or delete
+checkpoint history from other remotes.
 
 If instead you want checkpoint data in a separate repo (e.g., a private repo for a public project), configure `checkpoint_remote` with a structured provider and repo. A dedicated `checkpoint_remote` is addressed directly and is exempt from the single-remote election above:
 

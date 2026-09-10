@@ -2007,6 +2007,67 @@ func (s *EntireSettings) GetCheckpointRemote() *CheckpointRemoteConfig {
 	return &CheckpointRemoteConfig{Provider: provider, Repo: repo}
 }
 
+// SetCheckpointPushRemoteLocal records an explicit clone-local checkpoint push
+// remote, preserving unrelated local fields and leaving project settings alone.
+// The caller must validate that name identifies an existing git remote.
+// It returns false without writing when the same local override is effective.
+func SetCheckpointPushRemoteLocal(ctx context.Context, name string) (bool, error) {
+	if name == "" {
+		return false, errors.New("checkpoint push remote name must not be empty")
+	}
+	effective, err := Load(ctx)
+	if err != nil {
+		return false, err
+	}
+	if reason := effective.LocalLayerRejection(); reason != "" {
+		return false, fmt.Errorf("cannot set checkpoint push remote: local settings ignored: %s", reason)
+	}
+	path, raw, _, err := LoadLocalRaw(ctx)
+	if err != nil {
+		return false, err
+	}
+	if raw == nil {
+		return false, errors.New("local settings must be a JSON object")
+	}
+	options := map[string]json.RawMessage{}
+	if data, exists := raw["strategy_options"]; exists {
+		if err := json.Unmarshal(data, &options); err != nil {
+			return false, fmt.Errorf("parsing local strategy_options: %w", err)
+		}
+		if options == nil {
+			return false, errors.New("local strategy_options must be a JSON object")
+		}
+	}
+	if data, exists := options["checkpoint_push_remote"]; exists {
+		var current string
+		if err := json.Unmarshal(data, &current); err != nil {
+			return false, fmt.Errorf("parsing local checkpoint_push_remote: %w", err)
+		}
+		if current == name && effective.GetCheckpointPushRemote() == name {
+			return false, nil
+		}
+	}
+	options["checkpoint_push_remote"], err = json.Marshal(name)
+	if err != nil {
+		return false, fmt.Errorf("encoding checkpoint push remote: %w", err)
+	}
+	raw["strategy_options"], err = json.Marshal(options)
+	if err != nil {
+		return false, fmt.Errorf("encoding local strategy_options: %w", err)
+	}
+	if err := SaveLocalRaw(path, raw); err != nil {
+		return false, err
+	}
+	effective, err = Load(ctx)
+	if err != nil {
+		return true, fmt.Errorf("verifying checkpoint push remote: %w", err)
+	}
+	if effective.GetCheckpointPushRemote() != name || effective.LocalLayerRejection() != "" {
+		return true, errors.New("saved local checkpoint push remote is not effective")
+	}
+	return true, nil
+}
+
 // GetCheckpointPushRemote returns the configured checkpoint push remote name.
 // Stored in strategy_options.checkpoint_push_remote as a plain git remote
 // name (e.g. "origin", "private"). This selects WHICH configured remote

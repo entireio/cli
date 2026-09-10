@@ -451,6 +451,24 @@ For the fork setup where `origin` is an unpushable base repo, capture elects
 the fork automatically on the first tracked push; `checkpoint_push_remote`
 remains the explicit override.
 
+`entire enable` offers a named-remote picker during interactive first setup or
+re-enable when multiple remotes need resolution. It uses the existing election
+and destination checks; it does not introduce another election tier. Keeping the
+current selection writes no override. Selecting a different remote, or supplying
+`--checkpoint-push-remote <name>`, persists an explicit override in the clone-local
+settings file. The write preserves unrelated settings and is verified through the
+effective settings loader before reporting success. On fresh enable, agent
+selection precedes remote selection; both happen before hook/settings setup
+side effects. Persistence happens after setup's settings saves but
+before destination-dependent checkpoint initialization.
+
+The picker is skipped for valid explicit or elected dedicated destinations, disabled
+checkpoint pushing, and non-interactive invocations. An explicit remote flag is
+still honored without prompting and does not enable disabled pushing. Destination
+selection does not migrate, publish, or delete existing remote checkpoint data.
+An invalid saved remote can be repaired interactively. Alternatives that still
+resolve to dedicated storage are not offered as ordinary named destinations.
+
 The pre-push hook carries checkpoint data only when the push targets the
 elected remote; pushes to any other remote or to a raw URL sync nothing, on
 both the git-branch and git-refs backends (git-refs leaves its push queue
