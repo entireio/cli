@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/entireio/cli/cmd/entire/cli/strategy"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 )
 
@@ -15,12 +16,17 @@ func TestCheckpointDestinationNote_ExplicitSelection(t *testing.T) {
 		name         string
 		selected     string
 		multipleURLs bool
+		otherURLs    bool
+		observed     bool
 		wantChoice   bool
 	}{
 		{name: "explicit fork", selected: "fork"},
 		{name: "default still offers choice", wantChoice: true},
 		{name: "missing selection is not resolved", selected: "gone", wantChoice: true},
 		{name: "explicit fork retains multiple URL warning", selected: "fork", multipleURLs: true},
+		{name: "explicit fork ignores origin fanout", selected: "fork", otherURLs: true},
+		{name: "explicit fork only describes its own fanout", selected: "fork", multipleURLs: true, otherURLs: true},
+		{name: "observed fork still explains choice", observed: true, wantChoice: true},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			testutil.IsolateGitConfigEnv(t)
@@ -40,11 +46,27 @@ func TestCheckpointDestinationNote_ExplicitSelection(t *testing.T) {
 				testutil.RunGit(t, dir, "remote", "set-url", "--add", "--push", "fork", "https://example.com/contributor/app.git")
 				testutil.RunGit(t, dir, "remote", "set-url", "--add", "--push", "fork", "https://example.com/contributor/backup.git")
 			}
+			if tt.otherURLs {
+				testutil.RunGit(t, dir, "remote", "set-url", "--add", "--push", "origin", "https://example.com/upstream/app.git")
+				testutil.RunGit(t, dir, "remote", "set-url", "--add", "--push", "origin", "https://example.com/upstream/backup.git")
+			}
+			if tt.observed {
+				testutil.WriteFile(t, dir, ".git/entire-checkpoint-sync-remotes.json", `{"remotes":["fork"]}`)
+			}
 			t.Chdir(dir)
+			if tt.observed {
+				elected, err := strategy.ResolveCheckpointSyncRemote(t.Context())
+				if err != nil || elected.Name != "fork" || elected.Source != strategy.SyncRemoteSourceObserved {
+					t.Fatalf("expected observed fork election, got %+v, error: %v", elected, err)
+				}
+			}
 
 			var out bytes.Buffer
 			printCheckpointDestinationNote(context.Background(), &out, "Checkpoint destination: REVIEW")
 			got := out.String()
+			if tt.otherURLs && strings.Contains(got, `Remote "origin"`) {
+				t.Errorf("unselected origin must not be described as carrying checkpoints:\n%s", got)
+			}
 			if choice := strings.Contains(got, "This repo has 2 remotes"); choice != tt.wantChoice {
 				t.Errorf("multi-remote choice warning = %v, want %v; output:\n%s", choice, tt.wantChoice, got)
 			}

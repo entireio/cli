@@ -52,9 +52,12 @@ type remoteTopology struct {
 	// primaryIsRefs reports whether the git-refs backend is active, which
 	// decides what a fanning-out remote means for checkpoints.
 	primaryIsRefs bool
-	// explicitlySelected means a valid checkpoint_push_remote already settles
-	// the choice among remotes. Multiple push URLs may still need a warning.
-	explicitlySelected bool
+	// selected is the remote a valid checkpoint_push_remote settles on, empty
+	// when nothing explicit is configured. That remote's own push URLs may
+	// still need a warning.
+	// Observed elections deliberately retain the choice explanation: they are
+	// inferred from a past push, not an explicit checkpoint destination choice.
+	selected string
 }
 
 // inspectRemoteTopology reads the repo's remotes and checkpoint configuration.
@@ -96,8 +99,8 @@ func inspectRemoteTopology(ctx context.Context) remoteTopology {
 	if cpCfg, err := settings.LoadCheckpointsConfig(ctx); err == nil {
 		t.primaryIsRefs = checkpoint.PrimaryIsRefs(cpCfg)
 	}
-	if elected, err := strategy.ResolveCheckpointSyncRemote(ctx); err == nil {
-		t.explicitlySelected = elected.Source == strategy.SyncRemoteSourceConfig
+	if elected, err := strategy.ResolveCheckpointSyncRemote(ctx); err == nil && elected.Source == strategy.SyncRemoteSourceConfig {
+		t.selected = elected.Name
 	}
 
 	return t
@@ -132,14 +135,20 @@ func pushURLsByRemote(ctx context.Context, dir string) (map[string][]string, err
 func (t remoteTopology) ambiguous() bool {
 	unpinned := 0
 	for _, d := range t.destinations {
-		if d.fansOut() {
+		if t.fanOutMatters(d) {
 			return true
 		}
 		if !d.pinned {
 			unpinned++
 		}
 	}
-	return !t.explicitlySelected && unpinned > 1
+	return t.selected == "" && unpinned > 1
+}
+
+// fanOutMatters excludes unselected remotes once checkpoint_push_remote settles
+// the destination: their push URLs carry code but no checkpoint data.
+func (t remoteTopology) fanOutMatters(d remoteDestination) bool {
+	return d.fansOut() && (t.selected == "" || d.name == t.selected)
 }
 
 // describeCheckpointDestination writes an explanation of where checkpoints go,
@@ -152,7 +161,7 @@ func (t remoteTopology) describeCheckpointDestination(w io.Writer, header string
 	fmt.Fprintln(w, header)
 
 	for _, d := range t.destinations {
-		if !d.fansOut() {
+		if !t.fanOutMatters(d) {
 			continue
 		}
 		fmt.Fprintf(w, "  Remote %q pushes to %d URLs:\n", d.name, len(d.pushURLs))
@@ -173,7 +182,7 @@ func (t remoteTopology) describeCheckpointDestination(w io.Writer, header string
 		}
 	}
 
-	if names := t.unpinnedNames(); !t.explicitlySelected && len(names) > 1 {
+	if names := t.unpinnedNames(); t.selected == "" && len(names) > 1 {
 		fmt.Fprintf(w, "  This repo has %d remotes (%s).\n", len(names), strings.Join(names, ", "))
 		fmt.Fprintln(w, "    Checkpoints sync to a single elected remote — not to whichever one you")
 		fmt.Fprintln(w, "    push to. A push to any other remote carries your code but no session")
