@@ -78,6 +78,11 @@ func (m *mockFullAgent) PrepareTranscript(context.Context, string) error { retur
 // TokenCalculator
 func (m *mockFullAgent) CalculateTokenUsage([]byte, int) (*TokenUsage, error) { return nil, nil } //nolint:nilnil // test mock
 
+// SidecarImageProvider
+func (m *mockFullAgent) SidecarImages(context.Context, string) ([]CompactedTranscriptAsset, error) {
+	return nil, nil
+}
+
 // ModelExtractor
 func (m *mockFullAgent) ExtractModel([]byte) (string, error) { return "mock-model", nil }
 
@@ -223,6 +228,34 @@ func TestAsTranscriptPreparer(t *testing.T) {
 		_, ok := AsTranscriptPreparer(ag)
 		if ok {
 			t.Error("expected false")
+		}
+	})
+}
+
+func TestAsSidecarImageProvider(t *testing.T) {
+	t.Parallel()
+
+	t.Run("nil agent", func(t *testing.T) {
+		t.Parallel()
+		provider, ok := AsSidecarImageProvider(nil)
+		if ok || provider != nil {
+			t.Errorf("AsSidecarImageProvider(nil) = (%v, %v), want (nil, false)", provider, ok)
+		}
+	})
+
+	t.Run("not implemented", func(t *testing.T) {
+		t.Parallel()
+		provider, ok := AsSidecarImageProvider(&mockBaseAgent{})
+		if ok || provider != nil {
+			t.Errorf("AsSidecarImageProvider(base agent) = (%v, %v), want (nil, false)", provider, ok)
+		}
+	})
+
+	t.Run("ignores capability declarations", func(t *testing.T) {
+		t.Parallel()
+		provider, ok := AsSidecarImageProvider(&mockFullAgent{})
+		if !ok || provider == nil {
+			t.Errorf("AsSidecarImageProvider(declarer) = (%v, %v), want non-nil/true", provider, ok)
 		}
 	})
 }
