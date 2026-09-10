@@ -41,7 +41,13 @@ func isWindowsCommand(command string) bool {
 	for i := range units {
 		units[i] = binary.LittleEndian.Uint16(data[2*i:])
 	}
-	rest, ok := strings.CutPrefix(string(utf16.Decode(units)), windowsScriptPrefix+"$exe=")
+	script := string(utf16.Decode(units))
+	prefix := windowsScriptPrefix
+	rest, ok := strings.CutPrefix(script, prefix+"$exe=")
+	if !ok {
+		prefix = previousWindowsScriptPrefix
+		rest, ok = strings.CutPrefix(script, prefix+"$exe=")
+	}
 	if !ok {
 		return false
 	}
@@ -54,7 +60,7 @@ func isWindowsCommand(command string) bool {
 		return false
 	}
 	name, verb, ok := invocationWords(rest, "''", windowsInvocationSuffix)
-	return ok && command == (Selection{Executable: executable, Launcher: launcher, Platform: windowsPlatform}).Command(name, verb)
+	return ok && command == (Selection{Executable: executable, Launcher: launcher, Platform: windowsPlatform}).windowsCommand(name, verb, prefix)
 }
 
 func absoluteWindowsPath(path string) bool {

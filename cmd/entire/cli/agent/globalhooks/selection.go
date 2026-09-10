@@ -101,7 +101,8 @@ func Save(ctx context.Context, s Selection) error {
 const posixScript = `# entire-global-hook-v1
 if [ ! -x "$1" ]; then printf '%s\n' 'Entire: selected hook installation is unavailable; use entire agent to select an installation.' >&2; exit 0; fi
 exec "$@"`
-const windowsScriptPrefix = "$ErrorActionPreference='Stop'; # entire-global-hook-v1\n"
+const previousWindowsScriptPrefix = "$ErrorActionPreference='Stop'; # entire-global-hook-v1\n"
+const windowsScriptPrefix = "$ProgressPreference='SilentlyContinue'; " + previousWindowsScriptPrefix
 const windowsInvocationPrefix = "; if (!(Test-Path -LiteralPath $exe -PathType Leaf)) { [Console]::Error.WriteLine('Entire: selected hook installation is unavailable; use entire agent to select an installation.'); exit 0 }; & $exe 'hooks' 'global' "
 const windowsInvocationSuffix = "; exit $LASTEXITCODE"
 
@@ -111,13 +112,17 @@ func psQuote(s string) string { return "'" + strings.ReplaceAll(s, "'", "''") + 
 // Command renders a launcher using only the enrolled absolute paths.
 func (s Selection) Command(agent, hook string) string {
 	if s.Platform == windowsPlatform {
-		script := windowsScriptPrefix + "$exe=" + psQuote(s.Executable) + windowsInvocationPrefix + psQuote(agent) + " " + psQuote(hook) + windowsInvocationSuffix
-		units := utf16.Encode([]rune(script))
-		data := make([]byte, 2*len(units))
-		for i, u := range units {
-			binary.LittleEndian.PutUint16(data[i*2:], u)
-		}
-		return `"` + s.Launcher + `" -NoProfile -NonInteractive -EncodedCommand ` + base64.StdEncoding.EncodeToString(data)
+		return s.windowsCommand(agent, hook, windowsScriptPrefix)
 	}
 	return quote(s.Launcher) + " -c " + quote(posixScript) + " entire-global-hook " + quote(s.Executable) + " hooks global " + quote(agent) + " " + quote(hook)
+}
+
+func (s Selection) windowsCommand(agent, hook, prefix string) string {
+	script := prefix + "$exe=" + psQuote(s.Executable) + windowsInvocationPrefix + psQuote(agent) + " " + psQuote(hook) + windowsInvocationSuffix
+	units := utf16.Encode([]rune(script))
+	data := make([]byte, 2*len(units))
+	for i, u := range units {
+		binary.LittleEndian.PutUint16(data[i*2:], u)
+	}
+	return `"` + s.Launcher + `" -NoProfile -NonInteractive -EncodedCommand ` + base64.StdEncoding.EncodeToString(data)
 }

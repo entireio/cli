@@ -102,6 +102,9 @@ func TestWindowsCommandCarriesLiteralSelectedPath(t *testing.T) {
 		units[i] = binary.LittleEndian.Uint16(data[2*i:])
 	}
 	script := string(utf16.Decode(units))
+	if !strings.HasPrefix(script, "$ProgressPreference='SilentlyContinue'; ") {
+		t.Fatal("launcher must suppress its own progress output before invoking commands")
+	}
 	if !strings.Contains(script, psQuote(s.Executable)) || strings.Contains(command, "100%") || !IsCommand(command) {
 		t.Fatalf("selected path not represented literally: %s", script)
 	}
