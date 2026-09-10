@@ -384,3 +384,46 @@ func TestEnableCheckpointPushRemote_DeferredCancellation(t *testing.T) {
 	require.NoFileExists(t, EntireSettingsLocalFile)
 	require.NoFileExists(t, filepath.Join(dir, ".git", "hooks", "pre-push"))
 }
+func TestEnableCheckpointPushRemote_RepairSavedPushURLOnly(t *testing.T) {
+	dir := setupTestRepo(t)
+	testutil.RunGit(t, dir, "remote", "add", "origin", "https://github.com/org/app.git")
+	testutil.RunGit(t, dir, "config", "remote.broken.pushurl", "https://github.com/me/app.git")
+	writeSettings(t, `{"strategy_options":{"checkpoint_push_remote":"broken"}}`)
+	called := false
+	choice, err := prepareEnableCheckpointRemoteSelection(t.Context(), EnableOptions{}, false, true, func(_ context.Context, options []huh.Option[string]) (string, error) {
+		called = true
+		require.Len(t, options, 2)
+		require.Contains(t, options[0].Key, "broken")
+		return defaultMirrorRemote, nil
+	})
+	require.NoError(t, err)
+	require.True(t, called, "an ineligible saved remote must be repairable")
+	require.Equal(t, "origin", choice.name)
+}
+
+func TestEnableCheckpointPushRemote_HintRequiresEligibleAlternative(t *testing.T) {
+	for _, eligible := range []bool{false, true} {
+		t.Run(strconv.FormatBool(eligible), func(t *testing.T) {
+			dir := setupTestRepo(t)
+			testutil.RunGit(t, dir, "remote", "add", "origin", "https://github.com/org/app.git")
+			testutil.RunGit(t, dir, "config", "remote.broken.pushurl", "https://github.com/me/app.git")
+			if eligible {
+				testutil.RunGit(t, dir, "remote", "add", "fork", "https://github.com/me/fork.git")
+			}
+			var output bytes.Buffer
+			(&enableCheckpointRemoteChoice{}).report(t.Context(), &output, nil)
+			require.Equal(t, eligible, strings.Contains(output.String(), "To choose another destination"))
+		})
+	}
+}
+
+func TestEnableCheckpointPushRemote_IneligibleSavedReport(t *testing.T) {
+	dir := setupTestRepo(t)
+	testutil.RunGit(t, dir, "remote", "add", "origin", "https://github.com/org/app.git")
+	testutil.RunGit(t, dir, "config", "remote.broken.pushurl", "https://github.com/me/app.git")
+	writeSettings(t, `{"strategy_options":{"checkpoint_push_remote":"broken"}}`)
+	var output bytes.Buffer
+	(&enableCheckpointRemoteChoice{}).report(t.Context(), &output, nil)
+	require.NotContains(t, output.String(), "Checkpoints will be uploaded")
+	require.Contains(t, output.String(), "--checkpoint-push-remote")
+}

@@ -79,15 +79,19 @@ func prepareEnableCheckpointRemoteSelection(ctx context.Context, opts EnableOpti
 		return choice, nil
 	}
 	resolved, resolveErr := strategy.ResolveCheckpointSyncRemote(ctx)
-	if resolveErr == nil && s.GetCheckpointPushRemote() != "" {
-		return choice, nil
-	}
 	if resolveErr == nil && resolved.Name != "" {
 		_, dedicated, err := remote.PushURL(ctx, resolved.Name)
 		if err != nil {
 			return nil, fmt.Errorf("resolve dedicated checkpoint destination: %w", err)
 		}
 		if dedicated {
+			return choice, nil
+		}
+	}
+	var eligibilityErr error
+	if resolveErr == nil && resolved.Name != "" {
+		eligibilityErr = validateCheckpointPushRemote(ctx, root, resolved.Name)
+		if eligibilityErr == nil && s.GetCheckpointPushRemote() != "" {
 			return choice, nil
 		}
 	}
@@ -99,7 +103,7 @@ func prepareEnableCheckpointRemoteSelection(ctx context.Context, opts EnableOpti
 			}
 		}
 	}
-	if len(topology.destinations) == 0 || (len(topology.destinations) == 1 && resolveErr == nil) {
+	if len(topology.destinations) == 0 || (len(topology.destinations) == 1 && resolveErr == nil && eligibilityErr == nil) {
 		return choice, nil
 	}
 	current := resolved.Name
@@ -107,6 +111,8 @@ func prepareEnableCheckpointRemoteSelection(ctx context.Context, opts EnableOpti
 	if resolveErr != nil {
 		current = s.GetCheckpointPushRemote()
 		label = fmt.Sprintf("Keep invalid destination: %s (checkpoint sync remains disabled; no settings change)", current)
+	} else if eligibilityErr != nil {
+		label = fmt.Sprintf("Keep unsupported destination: %s (no configured fetch URL; no settings change)", current)
 	}
 	options := []huh.Option[string]{huh.NewOption(label, "")}
 	for _, d := range topology.destinations {
@@ -302,6 +308,19 @@ func (c *enableCheckpointRemoteChoice) report(ctx context.Context, w io.Writer, 
 	if dedicated {
 		destination = gitremote.RedactURLOrPath(url)
 	}
+	root, rootErr := paths.WorktreeRoot(ctx)
+	if !dedicated {
+		eligibilityErr := rootErr
+		if eligibilityErr == nil {
+			eligibilityErr = validateCheckpointPushRemote(ctx, root, resolved.Name)
+		}
+		if eligibilityErr != nil {
+			fmt.Fprintf(w, "Cannot confirm checkpoint uploads to %s: %v\n", resolved.Name, eligibilityErr)
+			c.reportUnchangedDestination(w)
+			fmt.Fprintf(w, "Choose a configured remote with `entire enable --%s <name>`.\n", flagCheckpointPushRemote)
+			return
+		}
+	}
 	if !c.changed && !c.dedicatedRequested {
 		fmt.Fprintf(w, "Keeping checkpoint destination: %s (%s)\n", destination, checkpointRemoteSourceLabel(resolved.Source))
 	}
@@ -324,8 +343,13 @@ func (c *enableCheckpointRemoteChoice) report(ctx context.Context, w io.Writer, 
 		}
 		remoteTopology{destinations: []remoteDestination{d}, primaryIsRefs: topology.primaryIsRefs}.describeFanout(w)
 	}
-	if !dedicated && c.name == "" && resolved.Source != strategy.SyncRemoteSourceConfig && len(topology.destinations) > 1 {
-		fmt.Fprintf(w, "To choose another destination for this clone, run `entire enable --%s <name>`.\n", flagCheckpointPushRemote)
+	if !dedicated && c.name == "" && resolved.Source != strategy.SyncRemoteSourceConfig {
+		for _, d := range topology.destinations {
+			if d.name != resolved.Name && !d.pinned && validateCheckpointPushRemote(ctx, root, d.name) == nil {
+				fmt.Fprintf(w, "To choose another destination for this clone, run `entire enable --%s <name>`.\n", flagCheckpointPushRemote)
+				break
+			}
+		}
 	}
 }
 
