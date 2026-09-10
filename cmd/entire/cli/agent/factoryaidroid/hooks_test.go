@@ -54,14 +54,14 @@ func TestInstallHooks_FreshInstall(t *testing.T) {
 	}
 
 	// Verify hook commands
-	assertFactoryHookExists(t, settings.Hooks.SessionStart, "", agentpkg.WrapProductionSilentHookCommand("entire hooks factoryai-droid session-start"), "SessionStart")
-	assertFactoryHookExists(t, settings.Hooks.SessionStart, "", agentpkg.WrapProductionSilentHookCommand("entire hooks factoryai-droid user-prompt-submit"), "SessionStart user-prompt-submit")
-	assertFactoryHookExists(t, settings.Hooks.SessionEnd, "", agentpkg.WrapProductionSilentHookCommand("entire hooks factoryai-droid session-end"), "SessionEnd")
-	assertFactoryHookExists(t, settings.Hooks.Stop, "", agentpkg.WrapProductionPlainTextWarningHookCommand("entire hooks factoryai-droid stop", agentpkg.WarningFormatSingleLine), "Stop")
-	assertFactoryHookExists(t, settings.Hooks.UserPromptSubmit, "", agentpkg.WrapProductionSilentHookCommand("entire hooks factoryai-droid user-prompt-submit"), "UserPromptSubmit")
-	assertFactoryHookExists(t, settings.Hooks.PreToolUse, "Task", agentpkg.WrapProductionSilentHookCommand("entire hooks factoryai-droid pre-tool-use"), "PreToolUse[Task]")
-	assertFactoryHookExists(t, settings.Hooks.PostToolUse, "Task", agentpkg.WrapProductionSilentHookCommand("entire hooks factoryai-droid post-tool-use"), "PostToolUse[Task]")
-	assertFactoryHookExists(t, settings.Hooks.PreCompact, "", agentpkg.WrapProductionSilentHookCommand("entire hooks factoryai-droid pre-compact"), "PreCompact")
+	assertFactoryHookExists(t, settings.Hooks.SessionStart, "", droidHookCommand("session-start"), "SessionStart")
+	assertFactoryHookExists(t, settings.Hooks.SessionStart, "", droidHookCommand("user-prompt-submit"), "SessionStart user-prompt-submit")
+	assertFactoryHookExists(t, settings.Hooks.SessionEnd, "", droidHookCommand("session-end"), "SessionEnd")
+	assertFactoryHookExists(t, settings.Hooks.Stop, "", droidStopHookCommand(), "Stop")
+	assertFactoryHookExists(t, settings.Hooks.UserPromptSubmit, "", droidHookCommand("user-prompt-submit"), "UserPromptSubmit")
+	assertFactoryHookExists(t, settings.Hooks.PreToolUse, "Task", droidHookCommand("pre-tool-use"), "PreToolUse[Task]")
+	assertFactoryHookExists(t, settings.Hooks.PostToolUse, "Task", droidHookCommand("post-tool-use"), "PostToolUse[Task]")
+	assertFactoryHookExists(t, settings.Hooks.PreCompact, "", droidHookCommand("pre-compact"), "PreCompact")
 
 	// Verify AreHooksInstalled returns true
 	if !hooksInstalledNow(t, agent) {
@@ -111,7 +111,7 @@ func TestInstallHooks_ReplacesLegacyLocalDevHook(t *testing.T) {
 
 	testutil.AssertLegacyHookReplaced(t,
 		filepath.Join(tempDir, ".factory", "settings.json"),
-		agentpkg.WrapProductionPlainTextWarningHookCommand("entire hooks factoryai-droid stop", agentpkg.WarningFormatSingleLine),
+		droidStopHookCommand(),
 		testutil.LegacyLocalDevCommand("hooks factoryai-droid stop"),
 		func() {
 			if _, err := ag.InstallHooks(ctx, false); err != nil {
@@ -343,7 +343,7 @@ func TestInstallHooks_PreservesUserHooksOnSameType(t *testing.T) {
 			t.Fatalf("failed to parse Stop hooks: %v", err)
 		}
 		assertFactoryHookExists(t, matchers, "", "echo user stop hook", "user Stop hook")
-		assertFactoryHookExists(t, matchers, "", agentpkg.WrapProductionPlainTextWarningHookCommand("entire hooks factoryai-droid stop", agentpkg.WarningFormatSingleLine), "Entire Stop hook")
+		assertFactoryHookExists(t, matchers, "", droidStopHookCommand(), "Entire Stop hook")
 	})
 
 	t.Run("SessionStart", func(t *testing.T) {
@@ -353,8 +353,8 @@ func TestInstallHooks_PreservesUserHooksOnSameType(t *testing.T) {
 			t.Fatalf("failed to parse SessionStart hooks: %v", err)
 		}
 		assertFactoryHookExists(t, matchers, "", "echo user session start", "user SessionStart hook")
-		assertFactoryHookExists(t, matchers, "", agentpkg.WrapProductionSilentHookCommand("entire hooks factoryai-droid session-start"), "Entire SessionStart hook")
-		assertFactoryHookExists(t, matchers, "", agentpkg.WrapProductionSilentHookCommand("entire hooks factoryai-droid user-prompt-submit"), "Entire SessionStart user-prompt-submit hook")
+		assertFactoryHookExists(t, matchers, "", droidHookCommand("session-start"), "Entire SessionStart hook")
+		assertFactoryHookExists(t, matchers, "", droidHookCommand("user-prompt-submit"), "Entire SessionStart user-prompt-submit hook")
 	})
 
 	t.Run("PostToolUse", func(t *testing.T) {
@@ -364,7 +364,7 @@ func TestInstallHooks_PreservesUserHooksOnSameType(t *testing.T) {
 			t.Fatalf("failed to parse PostToolUse hooks: %v", err)
 		}
 		assertFactoryHookExists(t, matchers, "Write", "echo user wrote file", "user Write hook")
-		assertFactoryHookExists(t, matchers, "Task", agentpkg.WrapProductionSilentHookCommand("entire hooks factoryai-droid post-tool-use"), "Entire Task hook")
+		assertFactoryHookExists(t, matchers, "Task", droidHookCommand("post-tool-use"), "Entire Task hook")
 	})
 }
 
@@ -724,6 +724,27 @@ func readFactorySettings(t *testing.T, tempDir string) FactorySettings {
 		t.Fatalf("failed to parse settings.json: %v", err)
 	}
 	return settings
+}
+
+// droidHookCommand is the silent-wrapper command InstallHooks writes on THIS
+// host. The wrapper form is host-dependent — sh off Windows, cmd.exe on it —
+// so an expectation that names one form directly passes on Linux and fails on
+// Windows against the very same install.
+//
+// Tests that assert WHICH form is chosen do not use this: they pin the host
+// with agentpkg.SetWindowsHookProbeForTesting and name the wrapper outright,
+// or the assertion would restate the implementation and pass either way.
+func droidHookCommand(verb string) string {
+	return agentpkg.WrapProductionSilentHookCommandForOS(
+		"entire hooks factoryai-droid "+verb, agentpkg.HookHostIsWindows())
+}
+
+// droidStopHookCommand is droidHookCommand for the Stop hook, which uses the
+// plain-text-warning wrapper rather than the silent one.
+func droidStopHookCommand() string {
+	return agentpkg.WrapProductionPlainTextWarningHookCommandForOS(
+		"entire hooks factoryai-droid stop", agentpkg.WarningFormatSingleLine,
+		agentpkg.HookHostIsWindows())
 }
 
 func assertFactoryHookExists(t *testing.T, matchers []FactoryHookMatcher, matcher, command, description string) {
