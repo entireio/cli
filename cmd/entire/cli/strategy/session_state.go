@@ -160,17 +160,31 @@ func SaveSessionState(ctx context.Context, state *SessionState) error {
 
 // ListSessionStates returns all session states from the state directory.
 // This is a package-level function that doesn't require a specific strategy instance.
+//
+// Lossy in one direction, deliberately: a state file that cannot be read is
+// omitted rather than reported. Callers that weigh sessions against one
+// another, or that would otherwise present an incomplete store as an empty
+// one, use ListSessionStatesWithSkipped.
 func ListSessionStates(ctx context.Context) ([]*SessionState, error) {
+	states, _, err := ListSessionStatesWithSkipped(ctx)
+	return states, err
+}
+
+// ListSessionStatesWithSkipped is ListSessionStates plus every state file it
+// could not read, so a caller can tell "no sessions" from "we could not see
+// them". See session.SkippedState for why that distinction is a value rather
+// than a log line.
+func ListSessionStatesWithSkipped(ctx context.Context) ([]*SessionState, []session.SkippedState, error) {
 	store, err := session.NewStateStore(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create state store: %w", err)
+		return nil, nil, fmt.Errorf("failed to create state store: %w", err)
 	}
 
-	states, err := store.List(ctx)
+	states, skipped, err := store.ListWithSkipped(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("failed to list session states: %w", err)
+		return nil, nil, fmt.Errorf("failed to list session states: %w", err)
 	}
-	return states, nil
+	return states, skipped, nil
 }
 
 // FindMostRecentSessionInCurrentWorktree returns the most recently interacted

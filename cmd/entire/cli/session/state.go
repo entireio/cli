@@ -1083,33 +1083,94 @@ func (s *StateStore) RemoveAll() error {
 	return nil
 }
 
-// List returns all session states.
+// SkippedState names a state file the store found but could not turn into a
+// session, and why.
+//
+// It exists because the skip is otherwise invisible, and invisible is the
+// wrong default for it: a lost state file is a lost CANDIDATE, and the callers
+// that rank candidates against each other — commit linking, and the
+// caller-session resolver the `session adopt` ownership guard is built on —
+// can reach the opposite conclusion from a set with one entry missing than
+// from the whole one.
+//
+// Reporting the listing's own error does NOT cover that, which is the reason
+// this is a value rather than a log line. A single unreadable file leaves the
+// listing succeeding, so the error channel says nothing at all: measured, one
+// state file at mode 000 made `entire session list` print "No sessions." over
+// a store that held one, and made the adopt guard authorize against a
+// candidate set the rival session had silently dropped out of.
+type SkippedState struct {
+	// SessionID is the file's name with ".json" removed — what the session
+	// would have been keyed by. Not necessarily a VALID session ID: a name
+	// that is not one is among the reasons a file lands here.
+	SessionID string
+
+	// Err is why the file could not be loaded: unreadable (permissions, a
+	// truncated write, or a spurious ENOENT from a concurrent openat), JSON
+	// that will not parse, or a name that is not a usable session ID.
+	Err error
+}
+
+// List returns all session states it can read.
+//
+// A state file it cannot read or parse is SKIPPED rather than fatal. That is
+// deliberate — one corrupt file must not blind every caller to the rest of the
+// store — and it is lossy, which a caller weighing sessions against each other
+// cannot afford. Those callers use ListWithSkipped and decide for themselves.
 func (s *StateStore) List(ctx context.Context) ([]*State, error) {
+	states, _, err := s.ListWithSkipped(ctx)
+	return states, err
+}
+
+// ListWithSkipped returns all session states it can read, plus one entry for
+// every state file it could not.
+//
+// Skipped is empty on a healthy store, and non-empty only for a file that is
+// present and unusable. Entries that are not state files at all — temp files
+// mid-rename, subdirectories, anything without a .json name — are not skips,
+// and neither is a session Load reaps as stale: nothing was lost in either
+// case.
+func (s *StateStore) ListWithSkipped(ctx context.Context) ([]*State, []SkippedState, error) {
 	root, err := s.dirRoot()
 	if err != nil {
-		return nil, fmt.Errorf("failed to open session state directory: %w", err)
+		return nil, nil, fmt.Errorf("failed to open session state directory: %w", err)
 	}
 	entries, err := osroot.ReadDirNoSymlinks(root, s.dirName)
 	if os.IsNotExist(err) {
-		return nil, nil
+		return nil, nil, nil
 	}
 	if err != nil {
-		return nil, fmt.Errorf("failed to read session state directory: %w", err)
+		return nil, nil, fmt.Errorf("failed to read session state directory: %w", err)
 	}
 
-	var states []*State
+	var (
+		states  []*State
+		skipped []SkippedState
+	)
 	for _, entry := range entries {
-		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
+		// A temp file must never become a skip: skips now carry consequences
+		// (`session adopt` refuses on one), and mid-rename churn in this
+		// directory is routine. Redundant with the .json test today, since
+		// jsonutil.CreateTempIn's names end in ".tmp" — the point is that the
+		// exclusion asks the predicate that OWNS that format rather than
+		// resting on a suffix coincidence, so a format change carries it
+		// along.
+		if entry.IsDir() || jsonutil.IsTempName(entry.Name()) || !strings.HasSuffix(entry.Name(), ".json") {
 			continue
-		}
-		if strings.HasSuffix(entry.Name(), ".tmp") {
-			continue // Skip temp files
 		}
 
 		sessionID := strings.TrimSuffix(entry.Name(), ".json")
 		state, err := s.Load(ctx, sessionID)
 		if err != nil {
-			continue // Skip corrupted state files
+			// A broken repo condition rather than routine noise, and the only
+			// record of it for the callers that take List's lossy view.
+			logging.Warn(logging.WithComponent(ctx, "session"),
+				"session state file could not be read; skipping it",
+				slog.String("session_id", sessionID),
+				slog.String("error", err.Error()),
+			)
+			skipped = append(skipped, SkippedState{SessionID: sessionID, Err: err})
+			continue
 		}
 		if state == nil {
 			continue // Not found or stale (Load handles cleanup)
@@ -1117,7 +1178,7 @@ func (s *StateStore) List(ctx context.Context) ([]*State, error) {
 
 		states = append(states, state)
 	}
-	return states, nil
+	return states, skipped, nil
 }
 
 // ClearGitCommonDirCache clears the cached git common dir.

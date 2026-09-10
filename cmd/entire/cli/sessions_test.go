@@ -3392,3 +3392,54 @@ func TestTokensCmd_PrefersTheCallersSession(t *testing.T) {
 		t.Fatalf("expected the more recent decoy session to be ignored, got:\n%s", out)
 	}
 }
+
+// "No sessions." over a store that holds one is the symptom that made the
+// silent skip hard to notice at all, and the reason it is worth a line of
+// output rather than only a log entry. Measured before the fix: one state file
+// at mode 000 produced exactly that.
+func TestSessionList_SaysSoWhenAStateFileCouldNotBeRead(t *testing.T) {
+	setupStopTestRepo(t)
+
+	commonDir, err := session.GetGitCommonDir(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	stateDir := filepath.Join(commonDir, session.SessionStateDirName)
+	if err := os.MkdirAll(stateDir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(stateDir, "corrupt-session.json"), []byte("{not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, tc := range []struct {
+		name       string
+		jsonOutput bool
+	}{
+		{"text output", false},
+		{"json output", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cmd := &cobra.Command{}
+			var stdout, stderr bytes.Buffer
+			cmd.SetOut(&stdout)
+			cmd.SetErr(&stderr)
+
+			if err := runSessionList(context.Background(), cmd, tc.jsonOutput); err != nil {
+				t.Fatalf("runSessionList: %v", err)
+			}
+			if !strings.Contains(stderr.String(), "could not be read") {
+				t.Errorf("stderr should say a state file could not be read, got: %q", stderr.String())
+			}
+
+			// On stderr specifically, so a --json consumer's stdout stays the
+			// plain array the command promises.
+			if tc.jsonOutput {
+				var out []sessionInfoJSON
+				if err := json.Unmarshal(stdout.Bytes(), &out); err != nil {
+					t.Fatalf("stdout is not a JSON array: %v (%q)", err, stdout.String())
+				}
+			}
+		})
+	}
+}

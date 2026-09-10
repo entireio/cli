@@ -2789,3 +2789,121 @@ func TestSessionAdopt_StaleTargetOwnerDoesNotAuthorizeAnUnownedSourceCopy(t *tes
 		t.Errorf("refusal should report that nothing identified the caller, got: %q", out.String())
 	}
 }
+
+// plantUnusableSessionState puts a state file in repo's store that cannot be
+// loaded, so the store lists SUCCESSFULLY with one candidate missing.
+//
+// Unparseable rather than unreadable because it is portable and reaches the
+// identical skip: both are a Load error, and a mode-000 file cannot be staged
+// on every platform (nor by root, which CI sometimes is).
+func plantUnusableSessionState(t *testing.T, repo, sessionID string) {
+	t.Helper()
+	stateDir := filepath.Join(repo, ".git", session.SessionStateDirName)
+	if err := os.MkdirAll(stateDir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(stateDir, sessionID+".json"), []byte("{not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// The hole this closes: a session store that cannot be read COMPLETELY leaves
+// the ownership guard ranking the caller against a set the nearer owner has
+// silently dropped out of, and a partial set is exactly where an environment
+// claim wins uncontested. So the guard refuses even though the resolver did
+// identify a caller, and identified the session being adopted.
+//
+// Measured before the fix: one state file at mode 000 in the target store had
+// this adoption succeed, silently.
+func TestSessionAdopt_RefusesWhenTheTargetStoreCannotBeReadCompletely(t *testing.T) {
+	sourceRepo := setupAdoptRepo(t)
+	targetRepo := setupAdoptRepo(t)
+	saveAdoptableSession(t, sourceRepo, "the-callers-session")
+
+	t.Chdir(targetRepo)
+	// The environment names the session being adopted, so every other branch
+	// of the guard authorizes. Only incompleteness stands in the way.
+	adoptAsCaller(t, "the-callers-session")
+	plantUnusableSessionState(t, targetRepo, "unreadable-rival")
+
+	var out bytes.Buffer
+	err := runAdopt(context.Background(), &out, "the-callers-session", adoptOptions{
+		FromWorktree: sourceRepo,
+		Force:        true,
+	})
+	if err == nil {
+		t.Fatal("runAdopt authorized against a candidate set it could not read completely")
+	}
+	if !strings.Contains(out.String(), "could not be read") {
+		t.Fatalf("refusal should say the store could not be read, got: %q", out.String())
+	}
+	if !strings.Contains(out.String(), "--allow-foreign-session") {
+		t.Fatalf("refusal should name the flag that does grant it, got: %q", out.String())
+	}
+
+	store := session.NewStateStoreWithDir(filepath.Join(sourceRepo, ".git", session.SessionStateDirName))
+	state, loadErr := store.Load(context.Background(), "the-callers-session")
+	if loadErr != nil {
+		t.Fatal(loadErr)
+	}
+	if state == nil || state.WorktreePath != sourceRepo {
+		t.Fatalf("refused adoption still moved the source session: %+v", state)
+	}
+}
+
+// Same rule on the other side. The source listing is where the session being
+// adopted is ranked against its own repository's sessions, so a candidate lost
+// there hides a nearer owner just as effectively.
+func TestSessionAdopt_RefusesWhenTheSourceStoreCannotBeReadCompletely(t *testing.T) {
+	sourceRepo := setupAdoptRepo(t)
+	targetRepo := setupAdoptRepo(t)
+	saveAdoptableSession(t, sourceRepo, "the-callers-session")
+	plantUnusableSessionState(t, sourceRepo, "unreadable-rival")
+
+	t.Chdir(targetRepo)
+	adoptAsCaller(t, "the-callers-session")
+
+	var out bytes.Buffer
+	err := runAdopt(context.Background(), &out, "the-callers-session", adoptOptions{
+		FromWorktree: sourceRepo,
+		Force:        true,
+	})
+	if err == nil {
+		t.Fatal("runAdopt authorized against a source listing it could not read completely")
+	}
+	if !strings.Contains(out.String(), "source repository") {
+		t.Fatalf("refusal should name the source repository as the unreadable one, got: %q", out.String())
+	}
+}
+
+// Refusing is not walling the user out: the store is broken and the operator
+// may well know it, so the same override that covers every other unprovable
+// adoption covers this one. Without this the fix would strand a repo with one
+// stale corrupt file, with no way past it.
+func TestSessionAdopt_AllowForeignSessionOverridesAnIncompleteStore(t *testing.T) {
+	sourceRepo := setupAdoptRepo(t)
+	targetRepo := setupAdoptRepo(t)
+	saveAdoptableSession(t, sourceRepo, "the-callers-session")
+
+	t.Chdir(targetRepo)
+	adoptAsCaller(t, "the-callers-session")
+	plantUnusableSessionState(t, targetRepo, "unreadable-rival")
+
+	var out bytes.Buffer
+	if err := runAdopt(context.Background(), &out, "the-callers-session", adoptOptions{
+		FromWorktree: sourceRepo,
+		Force:        true,
+		AllowForeign: true,
+	}); err != nil {
+		t.Fatalf("--allow-foreign-session did not cover an incomplete store: %v\nOutput: %q", err, out.String())
+	}
+
+	store := session.NewStateStoreWithDir(filepath.Join(targetRepo, ".git", session.SessionStateDirName))
+	state, err := store.Load(context.Background(), "the-callers-session")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state == nil || state.WorktreePath != targetRepo {
+		t.Fatalf("session was not adopted into the target worktree: %+v", state)
+	}
+}

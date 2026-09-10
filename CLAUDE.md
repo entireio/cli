@@ -796,6 +796,14 @@ session adopt` is its one caller: adoption moves the named session and resets
 its checkpoint bookkeeping, so a wrong ID mutates a third party's running
 session.
 
+**`IsCaller()` alone is not sufficient for that, and `ResolvedSession.Incomplete`
+is the second half.** A session store listing skips a state file it cannot read
+rather than failing, so the loss arrives as a successful listing with a
+candidate missing — and a missing candidate is exactly the nearer owner whose
+absence lets a bare environment claim win. Anything that mutates checks both.
+`session.StateStore.ListWithSkipped` is where that is reported; plain `List`
+keeps the lossy contract on purpose.
+
 Both halves have subtleties that are load-bearing rather than stylistic, and
 several were arrived at by getting them wrong first. See
 [Resolving the Calling Session](docs/architecture/session-caller-resolution.md)

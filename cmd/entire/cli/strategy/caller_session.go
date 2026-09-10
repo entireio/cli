@@ -2,12 +2,15 @@ package strategy
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"log/slog"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/proclive"
+	"github.com/entireio/cli/cmd/entire/cli/session"
 )
 
 // SessionResolution says how a session was arrived at, so a caller can tell an
@@ -108,6 +111,25 @@ type ResolvedSession struct {
 	// explicitly rather than leaning on the zero value, matching the
 	// `Tracked: true` its sibling paths write.
 	Tracked bool
+
+	// Incomplete is non-nil when the candidate set this resolution was
+	// computed from was known to be missing entries — the session store could
+	// not be read at all, or an individual state file in it could not — and
+	// says which.
+	//
+	// A resolution is still returned, because a partial set still identifies
+	// the caller in the ordinary case and answering nothing at all would break
+	// `session current` on a repository with one corrupt file. What a partial
+	// set cannot support is a NEGATIVE: "no session nearer than this one
+	// exists" is precisely the claim a missing candidate invalidates, and that
+	// claim is what IsCaller is relied on for. So anything that ACTS on a
+	// session gates on this IN ADDITION to IsCaller — the two answer different
+	// questions and neither implies the other.
+	//
+	// Deliberately not folded into IsCaller: the resolution is still the best
+	// available answer and still worth displaying, labelled. Only mutation has
+	// to be conservative here.
+	Incomplete error
 }
 
 // Found reports whether any session was resolved.
@@ -139,7 +161,7 @@ func (r ResolvedSession) Found() bool { return r.SessionID != "" }
 // the outer session while the inner one sat in our ancestry one hop away. See
 // ResolutionAncestry.
 func ResolveCallerSession(ctx context.Context) ResolvedSession {
-	states, err := ListSessionStates(ctx)
+	states, skipped, err := ListSessionStatesWithSkipped(ctx)
 	if err != nil {
 		logging.Debug(logging.WithComponent(ctx, "session"),
 			"caller session resolution: cannot list session states",
@@ -147,6 +169,17 @@ func ResolveCallerSession(ctx context.Context) ResolvedSession {
 		states = nil
 	}
 
+	resolved := resolveSessionTiers(ctx, states)
+	resolved.Incomplete = incompleteCandidates(err, skipped)
+	return resolved
+}
+
+// resolveSessionTiers is the tier chain itself, with no completeness
+// bookkeeping. Split out so each entry point stamps
+// ResolvedSession.Incomplete in exactly one place: that field is what stops a
+// mutating caller acting on a partial candidate set, and a tier added later
+// must not be able to return without it.
+func resolveSessionTiers(ctx context.Context, states []*SessionState) ResolvedSession {
 	if resolved, ok := resolveCallerIdentity(ctx, states); ok {
 		return resolved
 	}
@@ -157,6 +190,30 @@ func ResolveCallerSession(ctx context.Context) ResolvedSession {
 		return ResolvedSession{SessionID: id, Resolution: ResolutionOtherWorktree, Tracked: true}
 	}
 	return ResolvedSession{Resolution: ResolutionNone}
+}
+
+// incompleteCandidates renders what a listing failed to see, or nil when it
+// saw everything.
+//
+// The two inputs are not redundant, and the second is the one that matters. A
+// store that cannot be opened at all is loud — every later read of it fails
+// the same way, so a command built on it stops on its own — whereas a single
+// unreadable state file leaves the listing SUCCEEDING with one candidate
+// quietly missing, which no error channel reports. Measured: one state file at
+// mode 000 had `entire session list` print "No sessions." over a store that
+// held one, and had the adopt ownership guard authorize against a set the
+// rival session had dropped out of.
+func incompleteCandidates(listErr error, skipped []session.SkippedState) error {
+	switch {
+	case listErr != nil:
+		return fmt.Errorf("this repository's session state could not be read: %w", listErr)
+	case len(skipped) == 1:
+		return errors.New("a session state file in this repository could not be read")
+	case len(skipped) > 1:
+		return fmt.Errorf("%d session state files in this repository could not be read", len(skipped))
+	default:
+		return nil
+	}
 }
 
 // IdentifyCallerSession runs ONLY the identification tier, over this
@@ -181,14 +238,17 @@ func ResolveCallerSession(ctx context.Context) ResolvedSession {
 // ok is false only when nothing claimed us and no owner placed us, which is
 // the caller's cue that identification is unavailable rather than negative.
 func IdentifyCallerSession(ctx context.Context, extra []*SessionState) (ResolvedSession, bool) {
-	states, err := ListSessionStates(ctx)
+	states, skipped, err := ListSessionStatesWithSkipped(ctx)
 	if err != nil {
 		logging.Debug(logging.WithComponent(ctx, "session"),
 			"caller session identification: cannot list session states",
 			slog.String("error", err.Error()))
 		states = nil
 	}
-	return resolveCallerIdentity(ctx, mergeSessionStates(states, extra))
+
+	resolved, ok := resolveCallerIdentity(ctx, mergeSessionStates(states, extra))
+	resolved.Incomplete = incompleteCandidates(err, skipped)
+	return resolved, ok
 }
 
 // mergeSessionStates combines this repository's listing with states a caller

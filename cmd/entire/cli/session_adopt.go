@@ -215,17 +215,39 @@ func ensureAdoptSourceIsCaller(ctx context.Context, w io.Writer, sourceStore *se
 // standard than display does, that belongs in the shared vocabulary (an
 // explicit IsSafeToMutate alongside IsCaller), not in an ordering private to
 // this file.
+//
+// Both stores must also be read COMPLETELY, and that is a separate question
+// from whether the resolver identified anybody. Neither listing is fatal on a
+// state file it cannot read — one corrupt file must not blind every command to
+// the rest of the store — so the loss arrives as a successful listing with a
+// candidate quietly absent, and a missing candidate is exactly the nearer
+// owner whose absence lets a match authorize. Refusing on it is not the same
+// as walling the user out: refuseForeignAdoption asks wherever there is a
+// terminal, and --allow-foreign-session covers the rest.
 func adoptSourceIsOwned(ctx context.Context, sourceStore *session.StateStore, source *session.State) (bool, string) {
 	// Listed fresh on every call, so the re-check under the state lock sees
 	// sessions created since the first decision.
-	sourceStates, err := sourceStore.List(ctx)
-	if err != nil {
+	sourceStates, sourceSkipped, err := sourceStore.ListWithSkipped(ctx)
+	switch {
+	case err != nil:
 		return false, fmt.Sprintf("the source repository's session store could not be read, so %s cannot be confirmed as yours",
+			shortSessionID(source.SessionID))
+	case len(sourceSkipped) > 0:
+		return false, fmt.Sprintf("the source repository's session state could not be fully read, so %s cannot be confirmed as yours",
 			shortSessionID(source.SessionID))
 	}
 
 	caller, ok := strategy.IdentifyCallerSession(ctx, sourceStates)
 	switch {
+	case caller.Incomplete != nil:
+		// Ordered ahead of the verdicts because it undermines them rather
+		// than competing with them: the candidate that went missing is
+		// exactly the one that could have been the nearer owner, so the
+		// answer this invalidates is "identified, and it IS the session you
+		// named" — the one branch here that authorizes.
+		return false, fmt.Sprintf("%s, so %s cannot be confirmed as yours",
+			caller.Incomplete, shortSessionID(source.SessionID))
+
 	case !ok:
 		// Nothing claimed this command and no session's owner places us, in
 		// either repository. Every cross-machine --from lands here too, since
