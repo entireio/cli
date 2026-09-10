@@ -392,10 +392,17 @@ func writeTurn(ctx context.Context, stores *cp.Stores, imp Importer, cid id.Chec
 		Prompts:                   []string{turn.Prompt},
 		CheckpointsCount:          1,
 		CheckpointTranscriptStart: turn.LineStart,
-		TokenUsage:                turn.Tokens,
-		CommitSHA:                 anchorCommitSHA,
-		AuthorName:                authorName,
-		AuthorEmail:               authorEmail,
+		// turn.Tokens is a per-turn delta over [LineStart, LineEnd), but every
+		// turn stores the same whole-session transcript, so the token window has
+		// to say where this turn's delta was measured from. Without it an
+		// imported turn reads as "v2, window starts at line 0" and a reader
+		// recomputing from the stored transcript re-reports the session's
+		// cumulative total — the exact over-report the window exists to prevent.
+		TokenTranscriptStart: turn.LineStart,
+		TokenUsage:           turn.Tokens,
+		CommitSHA:            anchorCommitSHA,
+		AuthorName:           authorName,
+		AuthorEmail:          authorEmail,
 	})); err != nil {
 		return fmt.Errorf("write imported checkpoint %s: %w", cid, err)
 	}

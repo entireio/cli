@@ -3,6 +3,7 @@ package claudecode
 import (
 	"encoding/json"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -856,5 +857,52 @@ func TestCalculateTotalTokenUsage_CountsSubagentSpawnedBeforeStartLine(t *testin
 	if usage.SubagentTokens.InputTokens != 50 || usage.SubagentTokens.OutputTokens != 25 {
 		t.Errorf("subagent tokens = input %d output %d, want input 50 output 25",
 			usage.SubagentTokens.InputTokens, usage.SubagentTokens.OutputTokens)
+	}
+}
+
+// Claude Code records thinking inside output_tokens (output_tokens_details.thinking_tokens)
+// and splits cache_creation into 5-minute and 1-hour TTL writes. Both are read
+// verbatim into the subset fields; a transcript without them yields 0.
+func TestCalculateTokenUsage_ThinkingAndCacheTTLSubsets(t *testing.T) {
+	t.Parallel()
+	data := []byte(`{"type":"assistant","message":{"id":"m1","model":"claude-fable-5","usage":{"input_tokens":2,"cache_creation_input_tokens":33584,"cache_read_input_tokens":26912,"output_tokens":344,"output_tokens_details":{"thinking_tokens":240},"cache_creation":{"ephemeral_5m_input_tokens":584,"ephemeral_1h_input_tokens":33000}}}}
+{"type":"assistant","message":{"id":"m2","model":"claude-fable-5","usage":{"input_tokens":1,"cache_creation_input_tokens":100,"cache_read_input_tokens":60000,"output_tokens":50}}}
+`)
+	usage, err := (&ClaudeCodeAgent{}).CalculateTokenUsage(data, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if usage.OutputTokens != 394 || usage.ThinkingTokens != 240 {
+		t.Errorf("output %d thinking %d, want 394 / 240 (thinking is a subset, not added)", usage.OutputTokens, usage.ThinkingTokens)
+	}
+	if usage.CacheCreationTokens != 33684 || usage.CacheCreation1hTokens != 33000 {
+		t.Errorf("cache creation %d / 1h %d, want 33684 / 33000", usage.CacheCreationTokens, usage.CacheCreation1hTokens)
+	}
+	if usage.Model != "" {
+		t.Errorf("main-transcript usage must not carry Model (session metadata does), got %q", usage.Model)
+	}
+}
+
+// A subagent's usage carries the model that produced it so cost can be weighted
+// per model; a subagent transcript on a single model records it.
+func TestCalculateTokenUsageFromFile_RecordsSubagentModel(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "agent-abc.jsonl")
+	data := `{"type":"assistant","message":{"id":"s1","model":"claude-haiku-4-5","usage":{"input_tokens":10,"output_tokens":20,"output_tokens_details":{"thinking_tokens":5}}}}
+{"type":"assistant","message":{"id":"s2","model":"claude-haiku-4-5","usage":{"input_tokens":10,"output_tokens":20}}}
+`
+	if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	usage, err := CalculateTokenUsageFromFile(path, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if usage.Model != "claude-haiku-4-5" {
+		t.Errorf("subagent Model = %q, want claude-haiku-4-5", usage.Model)
+	}
+	if usage.ThinkingTokens != 5 || usage.OutputTokens != 40 {
+		t.Errorf("thinking %d output %d, want 5 / 40", usage.ThinkingTokens, usage.OutputTokens)
 	}
 }

@@ -72,6 +72,23 @@ type Tokens struct {
 	Output    int   `json:"output"`
 	Reasoning int   `json:"reasoning"`
 	Cache     Cache `json:"cache"`
+	// Total is OpenCode's own sum. Whether it equals input+output+cache or
+	// input+output+reasoning+cache tells us if reasoning is already inside
+	// output — see BilledOutput.
+	Total int `json:"total"`
+}
+
+// BilledOutput returns the output tokens billed at the output rate, counting
+// reasoning exactly once. OpenCode has reported reasoning both inside and
+// outside output depending on version/provider; both shapes exist in this
+// repo's committed history (2026-08-27: 7,456 messages outside, 2,991 inside).
+// The total identity disambiguates per message: when total already covers
+// reasoning as a separate term, reasoning must be added to output.
+func (t Tokens) BilledOutput() int {
+	if t.Reasoning > 0 && t.Total == t.Input+t.Output+t.Reasoning+t.Cache.Read+t.Cache.Write {
+		return t.Output + t.Reasoning
+	}
+	return t.Output
 }
 
 // Cache holds cache-related token counts.

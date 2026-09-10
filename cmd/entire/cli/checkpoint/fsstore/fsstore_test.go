@@ -171,3 +171,68 @@ func TestStore_FactoryRequiresPath(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "config.path is required")
 }
+
+// A CLI upgrade between two writes to the same checkpoint must not assert the
+// delta scope over sessions whose token_usage predates it. token_usage_version
+// is a summary-level flag for a per-session property, so it may only claim the
+// delta scope once no legacy row is left.
+func TestWriteSession_KeepsLegacyTokenUsageVersionWhenLegacyRowsRemain(t *testing.T) {
+	t.Parallel()
+
+	store := New(t.TempDir())
+	checkpointID := id.MustCheckpointID("abc123abc123")
+
+	require.NoError(t, store.Write(context.Background(), cp.Session{
+		CheckpointID: checkpointID, SessionID: "legacy-session", Strategy: "manual-commit",
+		AuthorName: "T", AuthorEmail: "t@example.com",
+	}))
+
+	// Simulate a checkpoint written before token_usage_version existed: the row
+	// stays, the flag does not.
+	sc, err := store.load(checkpointID)
+	require.NoError(t, err)
+	sc.Summary.TokenUsageVersion = 0
+	require.NoError(t, store.save(sc))
+
+	// A newer CLI attaches a second session (e.g. a review session).
+	require.NoError(t, store.Write(context.Background(), cp.Session{
+		CheckpointID: checkpointID, SessionID: "new-session", Strategy: "manual-commit",
+		AuthorName: "T", AuthorEmail: "t@example.com",
+	}))
+
+	sc, err = store.load(checkpointID)
+	require.NoError(t, err)
+	require.Len(t, sc.Sessions, 2)
+	assert.Equal(t, 0, sc.Summary.TokenUsageVersion,
+		"the legacy row is still in the checkpoint, so readers must keep applying the legacy dedupe")
+}
+
+// The flag may move to the delta scope once the write leaves the checkpoint
+// holding only the row it just wrote — including the ordinary new-checkpoint case.
+func TestWriteSession_StampsDeltaVersionWhenNoLegacyRowRemains(t *testing.T) {
+	t.Parallel()
+
+	store := New(t.TempDir())
+	checkpointID := id.MustCheckpointID("def456def456")
+
+	require.NoError(t, store.Write(context.Background(), cp.Session{
+		CheckpointID: checkpointID, SessionID: "only-session", Strategy: "manual-commit",
+		AuthorName: "T", AuthorEmail: "t@example.com",
+	}))
+
+	sc, err := store.load(checkpointID)
+	require.NoError(t, err)
+	sc.Summary.TokenUsageVersion = 0
+	require.NoError(t, store.save(sc))
+
+	// Rewriting that same sole session replaces the legacy row outright.
+	require.NoError(t, store.Write(context.Background(), cp.Session{
+		CheckpointID: checkpointID, SessionID: "only-session", Strategy: "manual-commit",
+		AuthorName: "T", AuthorEmail: "t@example.com",
+	}))
+
+	sc, err = store.load(checkpointID)
+	require.NoError(t, err)
+	require.Len(t, sc.Sessions, 1)
+	assert.Equal(t, cp.TokenUsageVersionDelta, sc.Summary.TokenUsageVersion)
+}

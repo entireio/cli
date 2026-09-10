@@ -300,8 +300,16 @@ func (a *OpenCodeAgent) CalculateTokenUsage(transcriptData []byte, fromOffset in
 		if msg.Info.Role != roleAssistant || msg.Info.Tokens == nil {
 			continue
 		}
+		billedOutput := msg.Info.Tokens.BilledOutput()
 		usage.InputTokens += msg.Info.Tokens.Input
-		usage.OutputTokens += msg.Info.Tokens.Output
+		usage.OutputTokens += billedOutput
+		// ThinkingTokens is a documented subset of OutputTokens (readers derive
+		// non-thinking output by subtraction). BilledOutput folds reasoning into
+		// output only when the total identity confirms reasoning is billed as a
+		// separate term; a message carrying no total cannot confirm it, so cap the
+		// reasoning attributed here at the output actually counted rather than
+		// reporting more thinking than output.
+		usage.ThinkingTokens += min(msg.Info.Tokens.Reasoning, billedOutput)
 		usage.CacheReadTokens += msg.Info.Tokens.Cache.Read
 		usage.CacheCreationTokens += msg.Info.Tokens.Cache.Write
 		usage.APICallCount++

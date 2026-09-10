@@ -13,6 +13,26 @@ type TokenUsage struct {
 	OutputTokens int `json:"output_tokens"`
 	// APICallCount is the number of API calls made
 	APICallCount int `json:"api_call_count"`
+
+	// ThinkingTokens is the part of OutputTokens the model spent on reasoning
+	// ("thinking"/"reasoning"/"thoughts"). It is a SUBSET of OutputTokens, not a
+	// fifth class: the four classes above still sum to the provider's total.
+	// Read verbatim from the agent's own usage fields (Claude Code
+	// output_tokens_details.thinking_tokens, Codex reasoning_output_tokens,
+	// OpenCode tokens.reasoning, Gemini tokens.thoughts); 0 when the agent does
+	// not record it (Pi, Cursor, pre-Aug-2026 Claude transcripts) — readers must
+	// treat "absent" as "not recorded", never as zero thinking.
+	ThinkingTokens int `json:"thinking_tokens,omitempty"`
+	// CacheCreation1hTokens is the part of CacheCreationTokens written with a
+	// 1-hour TTL (priced 2× input by Anthropic, vs 1.25× for the 5-minute TTL).
+	// SUBSET of CacheCreationTokens. Anthropic-only; 0 elsewhere.
+	CacheCreation1hTokens int `json:"cache_creation_1h_tokens,omitempty"`
+	// Model that produced these tokens when it differs from the owning session's
+	// model — set on subagent entries so cost can be weighted per model. Empty on
+	// a top-level entry (the session metadata's `model` applies) and cleared when
+	// entries on different models are summed.
+	Model string `json:"model,omitempty"`
+
 	// SubagentTokens contains token usage from spawned subagents (if any)
 	SubagentTokens *TokenUsage `json:"subagent_tokens,omitempty"`
 }
@@ -50,6 +70,9 @@ func addTokenUsageAtDepth(a, b *TokenUsage, depth int) *TokenUsage {
 		sum.CacheReadTokens = a.CacheReadTokens
 		sum.OutputTokens = a.OutputTokens
 		sum.APICallCount = a.APICallCount
+		sum.ThinkingTokens = a.ThinkingTokens
+		sum.CacheCreation1hTokens = a.CacheCreation1hTokens
+		sum.Model = a.Model
 		aSub = a.SubagentTokens
 	}
 	if b != nil {
@@ -58,6 +81,9 @@ func addTokenUsageAtDepth(a, b *TokenUsage, depth int) *TokenUsage {
 		sum.CacheReadTokens += b.CacheReadTokens
 		sum.OutputTokens += b.OutputTokens
 		sum.APICallCount += b.APICallCount
+		sum.ThinkingTokens += b.ThinkingTokens
+		sum.CacheCreation1hTokens += b.CacheCreation1hTokens
+		sum.Model = mergeModel(sum.Model, b.Model)
 		bSub = b.SubagentTokens
 	}
 	if depth >= MaxSubagentDepth {
@@ -80,11 +106,14 @@ func SubtractTokenUsage(a, b *TokenUsage) *TokenUsage {
 		b = &TokenUsage{}
 	}
 	diff := &TokenUsage{
-		InputTokens:         clampSubtract(a.InputTokens, b.InputTokens),
-		CacheCreationTokens: clampSubtract(a.CacheCreationTokens, b.CacheCreationTokens),
-		CacheReadTokens:     clampSubtract(a.CacheReadTokens, b.CacheReadTokens),
-		OutputTokens:        clampSubtract(a.OutputTokens, b.OutputTokens),
-		APICallCount:        clampSubtract(a.APICallCount, b.APICallCount),
+		InputTokens:           clampSubtract(a.InputTokens, b.InputTokens),
+		CacheCreationTokens:   clampSubtract(a.CacheCreationTokens, b.CacheCreationTokens),
+		CacheReadTokens:       clampSubtract(a.CacheReadTokens, b.CacheReadTokens),
+		OutputTokens:          clampSubtract(a.OutputTokens, b.OutputTokens),
+		APICallCount:          clampSubtract(a.APICallCount, b.APICallCount),
+		ThinkingTokens:        clampSubtract(a.ThinkingTokens, b.ThinkingTokens),
+		CacheCreation1hTokens: clampSubtract(a.CacheCreation1hTokens, b.CacheCreation1hTokens),
+		Model:                 a.Model,
 	}
 	diff.SubagentTokens = SubtractTokenUsage(a.SubagentTokens, b.SubagentTokens)
 	return diff
@@ -97,4 +126,18 @@ func clampSubtract(a, b int) int {
 		return 0
 	}
 	return a - b
+}
+
+// mergeModel combines the Model labels of two summed entries: equal or one-sided
+// labels are kept, two different labels become "" (mixed), so a per-model cost
+// weight is never applied to tokens from another model.
+func mergeModel(a, b string) string {
+	switch {
+	case a == "":
+		return b
+	case b == "" || a == b:
+		return a
+	default:
+		return ""
+	}
 }

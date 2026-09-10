@@ -605,6 +605,8 @@ When files are carried forward (Scenario 4), `CheckpointTranscriptStart` is rese
 
 **Impact**: For long sessions with many partial commits, checkpoint storage grows linearly with session length × number of commits.
 
+**Token usage is not reset with it.** `TokenTranscriptStart` (session state) scopes the checkpoint's `token_usage` and is advanced together with `CheckpointTranscriptStart` at every condensation (`advanceTranscriptWindows`) but left alone by carry-forward, so a carry-forward checkpoint's `token_usage` covers only the calls since the previous checkpoint even though its transcript starts at line 0. Checkpoints written before this split (CLI ≤ 0.10.x) computed tokens from the transcript offset, so a non-first checkpoint with `checkpoint_transcript_start` 0/absent may hold the session's cumulative total; readers that sum checkpoints must dedupe those per session.
+
 ### 6. Crash Before HandleTurnEnd Leaves Provisional Transcripts
 
 In Scenarios 2 and 3 (Claude commits during turn), checkpoints are saved with "provisional" transcripts during PostCommit. The full transcript is written at HandleTurnEnd (Stop hook).

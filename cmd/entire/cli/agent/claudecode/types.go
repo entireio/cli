@@ -107,11 +107,23 @@ type messageUsage struct {
 	CacheCreationInputTokens int `json:"cache_creation_input_tokens"`
 	CacheReadInputTokens     int `json:"cache_read_input_tokens"`
 	OutputTokens             int `json:"output_tokens"`
+	// OutputTokensDetails.ThinkingTokens is the reasoning part of OutputTokens
+	// (a subset). Present since Claude Code 2.1.x (Aug 2026); absent → 0.
+	OutputTokensDetails struct {
+		ThinkingTokens int `json:"thinking_tokens"`
+	} `json:"output_tokens_details"`
+	// CacheCreation splits CacheCreationInputTokens by TTL; the 1-hour part is
+	// priced 2× input (5-minute: 1.25×). Absent on older transcripts → 0.
+	CacheCreation struct {
+		Ephemeral5mInputTokens int `json:"ephemeral_5m_input_tokens"`
+		Ephemeral1hInputTokens int `json:"ephemeral_1h_input_tokens"`
+	} `json:"cache_creation"`
 }
 
 // messageWithUsage represents an assistant message with usage data.
 // Used for extracting token counts from Claude Code transcripts.
 type messageWithUsage struct {
 	ID    string       `json:"id"`
+	Model string       `json:"model"`
 	Usage messageUsage `json:"usage"`
 }

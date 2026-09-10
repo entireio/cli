@@ -95,6 +95,8 @@ type Usage struct {
 	Output     int `json:"output"`
 	CacheRead  int `json:"cacheRead"`
 	CacheWrite int `json:"cacheWrite"`
+	// CacheWrite1h is the 1-hour-TTL part of CacheWrite (Anthropic providers only).
+	CacheWrite1h int `json:"cacheWrite1h"`
 }
 
 // ContentItem is one element of a Pi message's content array.

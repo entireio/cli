@@ -1051,3 +1051,44 @@ func TestState_LiveTaskRecords(t *testing.T) {
 
 	assert.Empty(t, (&State{}).LiveTaskRecords())
 }
+
+// A token window that legitimately starts at line 0 must survive a save/load
+// round trip. The turn-end advance after a mid-turn commit moves only
+// CheckpointTranscriptStart, so a session that has not yet condensed any
+// transcript loads in exactly the shape the legacy migration keys on
+// (token 0, transcript > 0). Re-coupling it there would silently drop the
+// turn-end tail's tokens from every later checkpoint.
+func TestNormalizeAfterLoad_KeepsDeliberateZeroTokenWindow(t *testing.T) {
+	t.Parallel()
+
+	s := &State{
+		SessionID:                 "deliberate-zero",
+		CheckpointTranscriptStart: 42,
+		TokenTranscriptStart:      0,
+		TokenWindowInitialized:    true,
+	}
+	s.NormalizeAfterLoad(context.Background())
+
+	if s.TokenTranscriptStart != 0 {
+		t.Errorf("TokenTranscriptStart = %d, want 0 preserved", s.TokenTranscriptStart)
+	}
+}
+
+// A state file written before the token window existed carries no marker, so
+// its token scope is still inferred from the transcript scope.
+func TestNormalizeAfterLoad_MigratesLegacyTokenWindow(t *testing.T) {
+	t.Parallel()
+
+	s := &State{
+		SessionID:                 "legacy-file",
+		CheckpointTranscriptStart: 42,
+	}
+	s.NormalizeAfterLoad(context.Background())
+
+	if s.TokenTranscriptStart != 42 {
+		t.Errorf("TokenTranscriptStart = %d, want the transcript offset 42", s.TokenTranscriptStart)
+	}
+	if !s.TokenWindowInitialized {
+		t.Error("the window is known after the migration and must be marked as such")
+	}
+}

@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
+	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/transcript"
 	"github.com/entireio/cli/cmd/entire/cli/validation"
@@ -81,8 +82,19 @@ func ExtractModifiedFiles(lines []TranscriptLine) []string {
 // Due to streaming, multiple transcript rows may share the same message.id.
 // We deduplicate by taking the row with the highest output_tokens for each message.id.
 func CalculateTokenUsage(transcript []TranscriptLine) *agent.TokenUsage {
+	usage, _ := calculateTokenUsageWithModel(transcript)
+	return usage
+}
+
+// calculateTokenUsageWithModel is CalculateTokenUsage plus the model the
+// messages were produced on: the single model when every deduplicated message
+// agrees, "" when they differ or none is recorded. Only subagent transcripts
+// record it onto TokenUsage.Model (CalculateTokenUsageFromFile); the main
+// transcript's model lives in the session metadata.
+func calculateTokenUsageWithModel(transcript []TranscriptLine) (*agent.TokenUsage, string) {
 	// Map from message.id to the usage with highest output_tokens
 	usageByMessageID := make(map[string]messageUsage)
+	modelByMessageID := make(map[string]string)
 
 	for _, line := range transcript {
 		if line.Type != envelopeTypeAssistant {
@@ -102,6 +114,7 @@ func CalculateTokenUsage(transcript []TranscriptLine) *agent.TokenUsage {
 		existing, exists := usageByMessageID[msg.ID]
 		if !exists || msg.Usage.OutputTokens > existing.OutputTokens {
 			usageByMessageID[msg.ID] = msg.Usage
+			modelByMessageID[msg.ID] = msg.Model
 		}
 	}
 
@@ -109,14 +122,27 @@ func CalculateTokenUsage(transcript []TranscriptLine) *agent.TokenUsage {
 	usage := &agent.TokenUsage{
 		APICallCount: len(usageByMessageID),
 	}
-	for _, u := range usageByMessageID {
+	model, mixed := "", false
+	for id, u := range usageByMessageID {
 		usage.InputTokens += u.InputTokens
 		usage.CacheCreationTokens += u.CacheCreationInputTokens
 		usage.CacheReadTokens += u.CacheReadInputTokens
 		usage.OutputTokens += u.OutputTokens
+		// Subsets, read verbatim — see types.TokenUsage.
+		usage.ThinkingTokens += u.OutputTokensDetails.ThinkingTokens
+		usage.CacheCreation1hTokens += u.CacheCreation.Ephemeral1hInputTokens
+		switch m := modelByMessageID[id]; {
+		case m == "":
+		case model == "":
+			model = m
+		case model != m:
+			mixed = true
+		}
 	}
-
-	return usage
+	if mixed {
+		model = ""
+	}
+	return usage, model
 }
 
 // CalculateTokenUsageFromFile calculates token usage from a Claude Code transcript file.
@@ -131,7 +157,12 @@ func CalculateTokenUsageFromFile(path string, startLine int) (*agent.TokenUsage,
 		return nil, err //nolint:wrapcheck // caller adds context
 	}
 
-	return CalculateTokenUsage(lines), nil
+	// This path reads subagent transcripts (agent-<id>.jsonl), which may run on
+	// a different model than the session; record it so cost can be weighted per
+	// model. See types.TokenUsage.Model.
+	usage, model := calculateTokenUsageWithModel(lines)
+	usage.Model = model
+	return usage, nil
 }
 
 // ExtractSpawnedAgentIDs extracts agent IDs from Task tool results in a transcript.
@@ -363,7 +394,11 @@ func (c *ClaudeCodeAgent) CalculateTotalTokenUsage(transcriptData []byte, startL
 	// session-start snapshot — see the CalculateTotalTokenUsage interface contract
 	// in cmd/entire/cli/agent for how callers must accumulate it.
 	if len(agentIDs) > 0 {
-		subagentUsage := &agent.TokenUsage{}
+		// types.AddTokenUsage is the single summing primitive: it carries the
+		// subset fields and merges Model (kept when every subagent ran on the
+		// same model, cleared when mixed). A field-by-field loop here is how
+		// fields go missing from the nested total.
+		var subagentUsage *agent.TokenUsage
 		for agentID := range agentIDs {
 			agentPath := filepath.Join(subagentsDir, paths.AgentTranscriptFileName(agentID))
 			agentUsage, err := CalculateTokenUsageFromFile(agentPath, 0)
@@ -371,13 +406,11 @@ func (c *ClaudeCodeAgent) CalculateTotalTokenUsage(transcriptData []byte, startL
 				// Agent transcript may not exist yet or may have been cleaned up
 				continue
 			}
-			subagentUsage.InputTokens += agentUsage.InputTokens
-			subagentUsage.CacheCreationTokens += agentUsage.CacheCreationTokens
-			subagentUsage.CacheReadTokens += agentUsage.CacheReadTokens
-			subagentUsage.OutputTokens += agentUsage.OutputTokens
-			subagentUsage.APICallCount += agentUsage.APICallCount
+			// Subagent transcripts carry no nested subagents of their own.
+			agentUsage.SubagentTokens = nil
+			subagentUsage = types.AddTokenUsage(subagentUsage, agentUsage)
 		}
-		if subagentUsage.APICallCount > 0 {
+		if subagentUsage != nil && subagentUsage.APICallCount > 0 {
 			mainUsage.SubagentTokens = subagentUsage
 		}
 	}
