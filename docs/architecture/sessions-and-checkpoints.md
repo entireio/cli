@@ -303,6 +303,11 @@ makes the comparison false forever and the session silently stops condensing.
 - Deleted after condensation to `entire/checkpoints/v1`
 - Reset if orphaned (no session state file exists)
 
+Observational session listings are best-effort and may skip an unreadable state
+file. Unattended post-push cleanup uses a strict inventory instead: if any state
+cannot be loaded, cleanup aborts without deleting shadow branches because it
+cannot prove they are orphaned.
+
 ### Task Records (Subagent Work)
 
 A subagent invocation (Claude Code's Task tool) is captured through a durable
