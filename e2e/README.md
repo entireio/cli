@@ -44,7 +44,7 @@ e2e/
 3. Add a `Bootstrap()` method for any CI-specific setup (auth config, warmup).
 4. Add a `RegisterGate("<name>", N)` call if concurrency needs limiting.
 5. Ensure the agent name is accepted by `mise run test:e2e --agent <name>`.
-6. Add the agent to `.github/workflows/e2e.yml` matrix and `e2e-isolated.yml` options.
+6. Add the agent to `.github/workflows/e2e.yml` matrix and dispatch options.
 
 ## Environment Variables
 
@@ -52,7 +52,7 @@ e2e/
 |----------|-------------|---------|
 | `E2E_AGENT` | Agent to test (`claude-code`, `gemini-cli`, `opencode`, `codex`, `cursor`, `factoryai-droid`, `copilot-cli`) | all registered |
 | `E2E_ENTIRE_BIN` | Path to a pre-built `entire` binary | builds from source |
-| `E2E_TIMEOUT` | Timeout per prompt | `2m` |
+| `E2E_TIMEOUT` | Per-prompt timeout, overriding every runner's own default. A per-test `agents.WithPromptTimeout(...)` still wins over it, and a malformed value is a hard error rather than a silent fall back. | per runner: 60s (codex, copilot-cli, gemini), 90s (cursor), 2m (opencode), none (claude-code, droid, pi, vogon, roger-roger — bounded only by the scenario timeout) |
 | `E2E_KEEP_REPOS` | Set to `1` to preserve temp repos after test | unset |
 | `E2E_CHECKPOINT_STORE` | Checkpoint backend to run the suite against (`git-branch`, `git-refs`). Maps to the `ENTIRE_CHECKPOINTS_PRIMARY` override that every spawned binary/hook honors. | `git-branch` |
 | `E2E_ARTIFACT_DIR` | Override artifact output directory | `e2e/artifacts/<timestamp>` |
@@ -88,7 +88,7 @@ To diagnose: read `console.log` in the failing test's artifact directory. Compar
 
 ## CI Workflows
 
-- **`.github/workflows/e2e.yml`** — Runs full suite on push to main. Matrix: `[claude-code, opencode, gemini-cli, codex, cursor-cli, factoryai-droid, copilot-cli]`.
-- **`.github/workflows/e2e-isolated.yml`** — Manual dispatch for debugging a single test. Inputs: agent + test name filter.
+- **`.github/workflows/e2e.yml`** runs the standard agent suite on pushes to main. Gemini remains opt-in through manual dispatch.
+- For debugging a single test, dispatch **`.github/workflows/e2e.yml`** with an agent and the optional `test` regex. An empty regex keeps the normal suite. The filter also reaches Windows when running Claude; selecting another agent skips the Windows Claude job.
 
-Both workflows run `go run ./e2e/bootstrap` before tests to handle agent-specific CI setup (auth config, warmup).
+The E2E workflow bootstraps agents before testing. `ci.yml` covers both checkpoint backends with the free canary; `nightly-e2e.yml` checks the published nightly installation.

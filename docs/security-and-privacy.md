@@ -36,6 +36,30 @@ Entire automatically scans transcript and metadata content before writing it to 
 
 Detected secrets are replaced with `REDACTED` before the data is ever written to a git object. Of the six secret-detection passes above, the scanner layer (pass 2) is configurable — see [Choosing secret-scanner engines](#choosing-secret-scanner-engines) below — while the other five are **always on** and cannot be disabled. User-defined rules (inline `custom_redactions` and rule packs) add a seventh secret-detection pass that only runs when configured.
 
+### What Entire does NOT understand: pasted images and screenshots
+
+**Every layer described above — all nine passes, including the opt-in PII and OpenAI Privacy Filter layers — reads transcript *text*. There is no OCR pass, no vision-model PII or secret scan, and no gate that holds an image back until someone reviews it. Nothing in Entire ever reads what an image depicts.**
+
+What that means for an image you paste is **not uniform across agents**, because it depends on how the agent writes the image into its transcript. There are three outcomes, and only the first is an exposure:
+
+| Agent | Default | With `redaction.externalize_images` on |
+| --- | --- | --- |
+| Claude Code | **Stored unredacted**, inline in the transcript as base64. The text scanner skips it (the `type: image` / `type: base64` skip rule below) rather than scanning it. | **Stored unredacted** as a raw binary blob under the checkpoint's `assets/` folder. |
+| Codex | **Destroyed.** Codex writes images as `data:` URIs inside `image_url` and tool-output strings, which the skip rule does not match, so the entropy layer treats the base64 as a secret and replaces it. The stored transcript keeps the surrounding message; the image is gone. | **Stored unredacted** under `assets/` (externalization runs before redaction, which is what preserves it). |
+| Cursor | **Not stored in the repository at all.** Cursor keeps images in its own per-session SQLite store, never in the transcript Entire reads. | **Stored unredacted** under `assets/`, captured from that store. |
+| Gemini CLI, OpenCode, Copilot CLI, Factory Droid, Pi | Depends on the agent's own transcript shape; Entire has no image handling for these. Assume the Claude Code row unless you have checked. | Unchanged — the setting only affects the three agents above. |
+
+**Do not treat the Codex row as a protection.** It is a side effect of a skip rule not matching a shape, not a deliberate safeguard: it destroys data you may want, it does not apply to the `assets/` path, and a change to either the rule or Codex's format would flip it to the exposure case without notice.
+
+Where an image *is* stored, it is byte-for-byte what you pasted — completely unredacted — because byte-level regex and entropy redaction cannot inspect binary image data without corrupting it, so Entire does not attempt it. That is a deliberate design choice, not a bug.
+
+Two things about *when* those bytes reach git, both of which narrow the window you have to catch a mistake:
+
+- **A checkpoint's copy** lands on `entire/checkpoints/v1` (or the equivalent per-checkpoint ref on the `git-refs` backend). Like all checkpoint data it is written locally and pushed separately, so it reaches your remote only when checkpoint data is pushed — see the **Review before pushing** bullet under [Recommendations](#recommendations).
+- **A shadow-branch copy** is written earlier, at the end of the agent turn, before you commit anything and regardless of the setting above. The shadow write does not externalize images, so for Claude Code the base64 is committed into your local git objects at turn end. Shadow branches are local-only and are never pushed (see [Where data is stored](#where-data-is-stored) above), but `entire checkpoint list` will not show this copy — it exists before any checkpoint does.
+
+**If you would not commit an image to your repository unredacted, do not paste it into an agent conversation.** This applies equally to a private repository — anyone with read access to checkpoint data can see it — and especially to a public one.
+
 ### Choosing secret-scanner engines
 
 Pattern matching (layer 2 above) is served by two independent scanner engines, each of which can be turned on or off:
@@ -362,6 +386,7 @@ If your AI sessions will touch sensitive data:
 
 - **Use a private repository.** This is the simplest and most complete protection. Committed checkpoints are then only visible to collaborators.
 - **Avoid passing sensitive files to your agent.** Content that never enters the agent conversation never appears in transcripts.
+- **Never paste a screenshot or image containing secrets or personal data.** Nothing in Entire reads what an image depicts, and on most agents the image is stored unredacted — see [What Entire does NOT understand: pasted images and screenshots](#what-entire-does-not-understand-pasted-images-and-screenshots).
 - **Review before pushing.** Checkpoints are written locally at commit time and pushed separately, so there is always a window to inspect them:
 
   ```fish
@@ -512,7 +537,7 @@ File an issue when the rule would benefit every Entire user (e.g., a major SaaS 
 
 - **Best-effort.** Novel or low-entropy secrets (short passwords, predictable tokens) may not be caught.
 - **Filenames and binary data.** Secrets in filenames, binary files, or deeply nested structures may not be detected.
-- **JSONL skip rules.** Entire skips scanning fields named `signature`, fields ending in `id`/`ids`, structural-path fields (`filepath`, `file_path`, `cwd`, `root`, `directory`, `dir`, `path`), and objects whose `type` starts with `image` or equals `base64` — all to avoid false positives.
+- **JSONL skip rules.** Entire skips scanning fields whose name *ends in* `signature` (so `thinkingSignature` too), fields ending in `id`/`ids`, and structural-path fields (`filepath`, `file_path`, `cwd`, `root`, `directory`, `dir`, `path`) to avoid false positives. Objects whose `type` starts with `image` or equals `base64` are also skipped — and that skip is what leaves a pasted image unredacted rather than merely unflagged. It matches some agents' image shapes and not others, which is why the outcome differs per agent: see [What Entire does NOT understand: pasted images and screenshots](#what-entire-does-not-understand-pasted-images-and-screenshots) above.
 - **Built-in PII patterns are US-centric.** `phone` matches North American (NANP) formats only — international formats, including E.164 numbers outside `+1`, are not detected. `address` matches the street line only; city, state, and ZIP/postcode are preserved. If you handle personal data from other regions, add `custom_patterns` for your locale rather than relying on the built-in categories alone.
 - **Custom PII patterns are user-authored.** Teams own the correctness of their `custom_patterns`. An invalid regex is logged and skipped, not enforced.
 - **Users are ultimately responsible** for reviewing what they commit and push. Redaction is a safety net, not a guarantee.
@@ -529,6 +554,63 @@ Opt out via any one of:
 - `"telemetry": false` in `.entire/settings.json` or `.entire/settings.local.json`.
 - `ENTIRE_TELEMETRY_OPTOUT=1` in the environment.
 
+## Why `external_agents` is local-only
+
+`external_agents` turns on the `$PATH` scan that looks for `entire-agent-*`
+binaries and runs each one's `info` subcommand, then keeps running the ones it
+registered for every hook thereafter. It is an execution grant, not a
+preference, so it is honored under exactly the same rule as the OPF
+[`command`](#why-command-is-local-only): only from `.entire/settings.local.json`,
+and only when that file is untracked in both the index and `HEAD`. Reading it
+from the committed `.entire/settings.json` would let an ordinary pull request
+turn on execution of whatever `entire-agent-*` binary it could get onto a
+developer's `$PATH`, and — as with `command` — one line of JSON does not read as
+executable to a reviewer. There is no prompt in front of this one at all.
+
+Rejection is a downgrade, never an error: discovery simply does not run.
+`entire status` names the setting and where it has to move, and the same reason
+is logged. The interactive setup flows (`entire enable`, `entire configure`,
+`entire agent add`, `entire plugin uninstall`) reach external agents regardless
+of the setting, so the remedy stays available from the commands that need it —
+and when one of them enables an external agent for you, it writes the setting to
+`.entire/settings.local.json`, which is where it takes effect.
+
+Every `$PATH` scanner in the CLI also drops non-absolute entries. A relative
+entry resolves against the process's working directory, which for a git hook is
+whatever repository the caller was standing in, so a file committed to that
+repository would otherwise be a binary Entire executes.
+
+## Why agent instruction fields are local-only
+
+`investigate.always_prompt`, every review `prompt` (per-agent and judge, in
+`review_profiles` and the legacy `review` map), and every review profile's
+`task` are placed verbatim in the prompts of agents that `entire investigate`
+and `entire review` spawn with approval checks disabled (claude-code's
+`bypassPermissions`, codex's `--dangerously-bypass-approvals-and-sandbox`). The
+prompt is the stated control for those spawns, so whoever writes these strings
+gets the last word in it. `task` and `prompt` are adjacent sections of the same
+composed prompt, so they are gated together — a gate on one alone would just
+move the attacker's text to the other field. Honoring any of them from the
+committed `.entire/settings.json` would let an ordinary pull request steer an
+approvals-disabled agent on every developer who pulls — the same delivery route
+as the OPF [`command`](#why-command-is-local-only), carrying instructions
+instead of argv.
+
+They are therefore honored only from layers that are this developer's own:
+clone-local review preferences (stored inside `.git/`, which a clone never
+populates) or `.entire/settings.local.json` verified untracked in both the
+index and `HEAD`. Rejection is a downgrade, never an error — a dropped task
+falls back to the built-in text for conventional profile names, and
+`entire review` / `entire investigate` print a one-line notice naming the
+dropped field and where it has to move (suppressed when the dropped task equals
+the built-in default, since that drop changes nothing).
+
+Deliberately not gated: `skills` (review validates every configured skill
+against the locally installed set before spawning, so free text there fails the
+run rather than reaching an agent), `agent` and `model` (registry keys and
+routing hints, not instruction text), and `review_default_profile` (it only
+selects among profiles whose instruction content is itself gated).
+
 ## Reporting a vulnerability
 
 For vulnerability disclosure, see [SECURITY.md](../SECURITY.md) at the repo root: email `security@entire.io`, expect acknowledgment within 48 hours and resolution of criticals within 90 days.
@@ -536,4 +618,4 @@ For vulnerability disclosure, see [SECURITY.md](../SECURITY.md) at the repo root
 ## Related
 
 - [Checkpoint commit signing](architecture/checkpoint-signing.md) — best-effort GPG/SSH signing of checkpoint commits, opt-out via `sign_checkpoint_commits: false`.
-- External agent plugins are arbitrary executables on `$PATH` invoked by the CLI; only install plugins you trust.
+- External agent plugins are arbitrary executables on `$PATH` invoked by the CLI; only install plugins you trust. Discovery is off unless you turn it on in `.entire/settings.local.json` — see [Why `external_agents` is local-only](#why-external_agents-is-local-only).

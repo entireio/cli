@@ -1337,7 +1337,10 @@ func installExternalAgentPluginForUninstall(t *testing.T, agentName string, hook
 	}
 
 	setupTestRepo(t)
-	writeSettings(t, `{"enabled":true,"external_agents":true}`)
+	writeSettings(t, testSettingsEnabled)
+	// external_agents goes in the local file — the only layer the loader
+	// honors it from, since it grants execution of entire-agent-* binaries.
+	writeLocalSettings(t, `{"external_agents":true}`)
 
 	externalDir := t.TempDir()
 	writeExternalAgentBinaryEx(t, externalDir, agentName, hooksInstalled)
@@ -4384,8 +4387,16 @@ func TestConfigureCmd_SummarizeProvider_ExternalEnablesExternalAgents(t *testing
 	if s.SummaryGeneration.Provider != provider {
 		t.Fatalf("summary provider = %q, want %q", s.SummaryGeneration.Provider, provider)
 	}
-	if !s.ExternalAgents {
-		t.Fatal("external summary provider should enable external_agents")
+	if s.ExternalAgents {
+		t.Fatal("external_agents must not be written to the project file, where the loader ignores it")
+	}
+	effective, err := settings.Load(t.Context())
+	if err != nil {
+		t.Fatalf("failed to load merged settings: %v", err)
+	}
+	if !effective.ExternalAgents {
+		reason, _ := effective.ExternalAgentsRejection()
+		t.Fatalf("external summary provider should enable external_agents (rejection: %q)", reason)
 	}
 	if !strings.Contains(stdout.String(), externalAgentsAutoEnabledNotice) {
 		t.Fatalf("expected notice surfacing the external_agents flip, got stdout:\n%s", stdout.String())
@@ -4398,7 +4409,10 @@ func TestConfigureCmd_SummarizeProvider_ExternalAlreadyEnabled_NoNotice(t *testi
 	}
 
 	setupTestRepo(t)
-	writeSettings(t, `{"enabled": true, "external_agents": true}`)
+	writeSettings(t, testSettingsEnabled)
+	// The local file is the only place the loader honors external_agents, so
+	// it is the only place "already enabled" can be expressed.
+	writeLocalSettings(t, `{"external_agents": true}`)
 
 	const provider = "external-summary-already-on"
 	externalDir := t.TempDir()
@@ -5100,5 +5114,203 @@ func TestPluginUninstallCommand_QuotesRepoRoot(t *testing.T) {
 	// A single quote in a path terminates the quoting unless escaped.
 	if got := pluginUninstallCommand("/tmp/it's", "flaky"); !strings.Contains(got, `'/tmp/it'\''s'`) {
 		t.Errorf("a single quote in the path must be escaped, got:\n%s", got)
+	}
+}
+
+// TestConfigureCmd_SummarizeProvider_ExternalLocalTarget_GrantSurvives covers
+// the case where the summary settings and the external_agents grant land in
+// the SAME file. The grant is a raw read-modify-write of the local file, so a
+// struct save that happens afterwards rewrites that file from a struct whose
+// ExternalAgents is still false — and the field is omitempty, so the key is
+// dropped rather than written as false. The user is told external agents were
+// enabled, and the very next load does not honor the setting.
+func TestConfigureCmd_SummarizeProvider_ExternalLocalTarget_GrantSurvives(t *testing.T) {
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("sh not available")
+	}
+
+	setupTestRepo(t)
+	writeSettings(t, testSettingsEnabled)
+
+	const provider = "external-summary-local-target"
+	externalDir := t.TempDir()
+	writeExternalSummaryAgentBinary(t, externalDir, provider)
+	t.Setenv("PATH", externalDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	cmd := newSetupCmd()
+	var stdout bytes.Buffer
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&bytes.Buffer{})
+	cmd.SetArgs([]string{"--local", "--summarize-provider", provider})
+
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("configure --local --summarize-provider external failed: %v", err)
+	}
+
+	local, err := settings.LoadFromFile(EntireSettingsLocalFile)
+	if err != nil {
+		t.Fatalf("failed to load local settings: %v", err)
+	}
+	if local.SummaryGeneration == nil || local.SummaryGeneration.Provider != provider {
+		t.Fatalf("local summary provider = %+v, want %q", local.SummaryGeneration, provider)
+	}
+
+	effective, err := settings.Load(t.Context())
+	if err != nil {
+		t.Fatalf("failed to load merged settings: %v", err)
+	}
+	if !effective.ExternalAgents {
+		reason, _ := effective.ExternalAgentsRejection()
+		t.Fatalf("external_agents grant did not survive the settings save (rejection: %q); stdout:\n%s",
+			reason, stdout.String())
+	}
+	if !strings.Contains(stdout.String(), externalAgentsAutoEnabledNotice) {
+		t.Fatalf("expected notice surfacing the external_agents flip, got stdout:\n%s", stdout.String())
+	}
+}
+
+// TestConfigureCmd_SummarizeProvider_ExternalLocalOnlyRepo_GrantSurvives is the
+// same collision reached without --local: in a repo that has only
+// settings.local.json, settingsTargetFile resolves there on its own.
+func TestConfigureCmd_SummarizeProvider_ExternalLocalOnlyRepo_GrantSurvives(t *testing.T) {
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("sh not available")
+	}
+
+	setupTestRepo(t)
+	writeLocalSettings(t, testSettingsEnabled)
+
+	const provider = "external-summary-local-only"
+	externalDir := t.TempDir()
+	writeExternalSummaryAgentBinary(t, externalDir, provider)
+	t.Setenv("PATH", externalDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	cmd := newSetupCmd()
+	var stdout bytes.Buffer
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&bytes.Buffer{})
+	cmd.SetArgs([]string{"--summarize-provider", provider})
+
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("configure --summarize-provider external failed: %v", err)
+	}
+
+	effective, err := settings.Load(t.Context())
+	if err != nil {
+		t.Fatalf("failed to load merged settings: %v", err)
+	}
+	if !effective.ExternalAgents {
+		reason, _ := effective.ExternalAgentsRejection()
+		t.Fatalf("external_agents grant did not survive the settings save (rejection: %q); stdout:\n%s",
+			reason, stdout.String())
+	}
+}
+
+// TestWorktreeFileName covers the shapes vercel.json can arrive in. The
+// absolute-in-repo row is the regression the helper exists for: os.Root reports
+// `vercel.json -> /abs/path/inside/repo/shared/vercel.json` as "path escapes
+// from parent", which is not os.ErrNotExist, so detection printed a note and
+// skipped — silently dropping the feature for a monorepo setup that worked
+// before the anchor went in.
+//
+// worktreedir.TestNameFollowingLinks asserts the link cases one layer down;
+// this table is the caller's view, plus the rows that never reach the resolve.
+func TestWorktreeFileName(t *testing.T) {
+	t.Parallel()
+
+	const name = "vercel.json"
+	for _, tc := range []struct {
+		desc     string
+		link     func(t *testing.T, dir string) // nil: a real file, no link
+		wantName string                         // "" means absent
+		wantErr  bool
+	}{
+		{
+			desc:     "a real file is read by its own name",
+			wantName: name,
+		},
+		{
+			desc: "an absolute link inside the worktree resolves to its target",
+			link: func(t *testing.T, dir string) {
+				linkTo(t, dir, filepath.Join(dir, "shared", name))
+			},
+			wantName: "shared/vercel.json",
+		},
+		{
+			// os.Root follows a RELATIVE link that stays inside it, so the fast
+			// path succeeds and the original name is what to read by. Only an
+			// absolute target reaches the resolve, which is the whole asymmetry
+			// this helper exists for.
+			desc: "a relative link inside the worktree needs no resolving",
+			link: func(t *testing.T, dir string) {
+				linkTo(t, dir, filepath.Join("shared", name))
+			},
+			wantName: name,
+		},
+		{
+			desc: "a link out of the worktree is refused, not followed",
+			link: func(t *testing.T, dir string) {
+				outside := filepath.Join(t.TempDir(), name)
+				if err := os.WriteFile(outside, []byte("{}"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+				linkTo(t, dir, outside)
+			},
+			wantErr: true,
+		},
+		{
+			desc: "a dangling link reads as absent, as os.Stat gave before",
+			link: func(t *testing.T, dir string) {
+				linkTo(t, dir, filepath.Join(dir, "missing.json"))
+			},
+		},
+		{
+			desc: "an absent file reads as absent",
+			link: func(*testing.T, string) {}, // no file at all
+		},
+	} {
+		t.Run(tc.desc, func(t *testing.T) {
+			t.Parallel()
+
+			dir := t.TempDir()
+			shared := filepath.Join(dir, "shared")
+			if err := os.MkdirAll(shared, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(shared, name), []byte("{}"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if tc.link == nil {
+				if err := os.WriteFile(filepath.Join(dir, name), []byte("{}"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				tc.link(t, dir)
+			}
+
+			root, err := os.OpenRoot(dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer root.Close()
+
+			gotName, gotErr := worktreeFileName(dir, root, name)
+			if (gotErr != nil) != tc.wantErr {
+				t.Fatalf("worktreeFileName() error = %v, wantErr %v", gotErr, tc.wantErr)
+			}
+			if gotName != tc.wantName {
+				t.Errorf("worktreeFileName() = %q, want %q", gotName, tc.wantName)
+			}
+		})
+	}
+}
+
+// linkTo symlinks the vercel.json under test inside dir to target, skipping
+// where symlinks need privileges.
+func linkTo(t *testing.T, dir, target string) {
+	t.Helper()
+	testutil.SkipWithoutSymlinks(t)
+	if err := os.Symlink(target, filepath.Join(dir, "vercel.json")); err != nil {
+		t.Fatal(err)
 	}
 }

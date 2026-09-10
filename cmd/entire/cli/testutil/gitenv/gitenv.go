@@ -162,6 +162,16 @@ func Run(t *testing.T, dir string, args ...string) string {
 	return string(out)
 }
 
+// EmptyConfigOverrides returns the GIT_CONFIG_GLOBAL / GIT_CONFIG_SYSTEM
+// settings Isolated applies, for callers that build their own environment on a
+// different base and still want the caller's git config kept out.
+func EmptyConfigOverrides() []string {
+	return []string{
+		"GIT_CONFIG_GLOBAL=" + emptyConfigPath(),
+		"GIT_CONFIG_SYSTEM=" + emptyConfigPath(),
+	}
+}
+
 func isGitConfigEnv(e string) bool {
 	return strings.HasPrefix(e, "GIT_CONFIG_")
 }

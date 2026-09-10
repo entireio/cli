@@ -50,8 +50,15 @@ func makeInfoJSON(name string) string {
 // NOTE: Tests in this file modify process-global state (os.Setenv, os.Chdir, agent registry)
 // and therefore cannot use t.Parallel().
 
-// externalAgentsRepo writes .entire/settings.json with the given external_agents
-// value and returns a context that names the directory as the worktree root.
+// externalAgentsRepo writes .entire/settings.local.json with the given
+// external_agents value and returns a context that names the directory as the
+// worktree root.
+//
+// The LOCAL file, because external_agents grants execution of every
+// entire-agent-* binary on $PATH and settings.Load honors that grant nowhere
+// else (settings.enforceExternalAgentsTrust). There is no repository here, so
+// nothing can have arrived by cloning and the file verifies as this clone's
+// own.
 //
 // The context is what makes this deterministic. settings.Load short-circuits on
 // a worktree root carried in the context and never consults entiredir's anchor,
@@ -77,9 +84,12 @@ func externalAgentsRepo(t *testing.T, enabled bool) context.Context {
 	if err := os.MkdirAll(entireDir, 0o755); err != nil {
 		t.Fatalf("create .entire: %v", err)
 	}
-	body := fmt.Sprintf(`{"enabled":true,"external_agents":%t}`, enabled)
-	if err := os.WriteFile(filepath.Join(entireDir, "settings.json"), []byte(body), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(entireDir, "settings.json"), []byte(`{"enabled":true}`), 0o644); err != nil {
 		t.Fatalf("write settings: %v", err)
+	}
+	body := fmt.Sprintf(`{"external_agents":%t}`, enabled)
+	if err := os.WriteFile(filepath.Join(entireDir, "settings.local.json"), []byte(body), 0o644); err != nil {
+		t.Fatalf("write local settings: %v", err)
 	}
 	t.Chdir(tmpDir)
 	return settings.WithWorktreeRoot(context.Background(), tmpDir)
@@ -720,5 +730,129 @@ func TestDiscoverAndRegisterNamedAlways_ReportsCallerDeadlineExpiredDuringLookup
 	err := DiscoverAndRegisterNamedAlways(caller, name)
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("DiscoverAndRegisterNamedAlways() error = %v, want context deadline exceeded", err)
+	}
+}
+
+// TestDiscoverAndRegister_SkipsRelativePATHEntry pins the rule the scanner
+// cannot get from Go: a globbed match never passes through exec.LookPath, so
+// nothing else refuses a binary reached through a relative $PATH entry. The
+// planted binary must not run at all, which is what the marker file checks —
+// "did not register" alone would also pass if it ran and merely failed.
+func TestDiscoverAndRegister_SkipsRelativePATHEntry(t *testing.T) {
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("sh not available")
+	}
+
+	ctx := enableExternalAgents(t)
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+
+	relDir := "planted"
+	if err := os.MkdirAll(filepath.Join(cwd, relDir), 0o755); err != nil {
+		t.Fatalf("create planted dir: %v", err)
+	}
+	marker := filepath.Join(cwd, "planted-ran")
+	planted := "disc-relative"
+	// `: >` is a shell builtin: PATH is reduced to the fixture dirs, so an
+	// external `touch` would not resolve and the marker would never appear.
+	script := "#!/bin/sh\n: > " + marker + "\n" + mockInfoScript(makeInfoJSON(planted))
+	if err := os.WriteFile(filepath.Join(cwd, relDir, binaryPrefix+planted), []byte(script), 0o755); err != nil {
+		t.Fatalf("write planted binary: %v", err)
+	}
+
+	// Control: an absolute entry proves the scan actually ran.
+	control := "disc-absolute"
+	controlDir := setupDiscoveryDir(t, control, makeInfoJSON(control))
+	t.Setenv("PATH", relDir+string(os.PathListSeparator)+controlDir)
+
+	DiscoverAndRegister(ctx)
+
+	if _, err := agent.Get(types.AgentName(control)); err != nil {
+		t.Fatalf("control agent %q should have registered, so the scan ran: %v", control, err)
+	}
+	if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("planted binary was executed (marker stat err = %v), want it never spawned", err)
+	}
+	if _, err := agent.Get(types.AgentName(planted)); err == nil {
+		t.Errorf("agent %q from a relative $PATH entry was registered, want it skipped", planted)
+	}
+}
+
+// TestDiscoverAndRegisterNamedAlways_RejectsRelativeLookPathResult covers the
+// named lookup, which resolves through exec.LookPath rather than a glob.
+// LookPath reports ErrDot for a bare "." entry but happily returns
+// "sub/entire-agent-x" for a relative entry that names a subdirectory.
+func TestDiscoverAndRegisterNamedAlways_RejectsRelativeLookPathResult(t *testing.T) {
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("sh not available")
+	}
+
+	dir := t.TempDir()
+	t.Chdir(dir)
+	relDir := "planted"
+	if err := os.MkdirAll(filepath.Join(dir, relDir), 0o755); err != nil {
+		t.Fatalf("create planted dir: %v", err)
+	}
+	marker := filepath.Join(dir, "planted-ran")
+	name := "named-relative"
+	script := "#!/bin/sh\n: > " + marker + "\n" + mockInfoScript(makeInfoJSON(name))
+	if err := os.WriteFile(filepath.Join(dir, relDir, binaryPrefix+name), []byte(script), 0o755); err != nil {
+		t.Fatalf("write planted binary: %v", err)
+	}
+	t.Setenv("PATH", relDir)
+
+	err := DiscoverAndRegisterNamedAlways(context.Background(), types.AgentName(name))
+
+	if err == nil {
+		t.Fatalf("DiscoverAndRegisterNamedAlways succeeded for a relative $PATH entry, want refusal")
+	}
+	if _, statErr := os.Stat(marker); !errors.Is(statErr, os.ErrNotExist) {
+		t.Errorf("planted binary was executed (marker stat err = %v), want it never spawned", statErr)
+	}
+	if _, getErr := agent.Get(types.AgentName(name)); getErr == nil {
+		t.Errorf("agent %q was registered from a relative $PATH entry, want it skipped", name)
+	}
+}
+
+// TestDiscoverAndRegister_ProjectSettingsGrantDoesNotRunBinaries is the
+// end-to-end half of the settings trust gate: a grant in the committed
+// .entire/settings.json is attacker-deliverable through a pull request, and
+// the consequence it must not have is *execution*, not merely registration.
+func TestDiscoverAndRegister_ProjectSettingsGrantDoesNotRunBinaries(t *testing.T) {
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("sh not available")
+	}
+
+	tmpDir := t.TempDir()
+	t.Cleanup(osroot.ResetShared)
+	entireDir := filepath.Join(tmpDir, ".entire")
+	if err := os.MkdirAll(entireDir, 0o755); err != nil {
+		t.Fatalf("create .entire: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(entireDir, "settings.json"),
+		[]byte(`{"enabled":true,"external_agents":true}`), 0o644); err != nil {
+		t.Fatalf("write settings: %v", err)
+	}
+	t.Chdir(tmpDir)
+	ctx := settings.WithWorktreeRoot(context.Background(), tmpDir)
+
+	marker := filepath.Join(tmpDir, "planted-ran")
+	name := "disc-project-grant"
+	dir := t.TempDir()
+	script := "#!/bin/sh\n: > " + marker + "\n" + mockInfoScript(makeInfoJSON(name))
+	if err := os.WriteFile(filepath.Join(dir, binaryPrefix+name), []byte(script), 0o755); err != nil {
+		t.Fatalf("write mock binary: %v", err)
+	}
+	t.Setenv("PATH", dir)
+
+	DiscoverAndRegister(ctx)
+
+	if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("binary was executed (marker stat err = %v) on a project-file grant, want no scan at all", err)
+	}
+	if _, err := agent.Get(types.AgentName(name)); err == nil {
+		t.Errorf("agent %q registered from a project-file grant, want it refused", name)
 	}
 }

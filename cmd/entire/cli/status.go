@@ -139,6 +139,35 @@ func runStatusDetailed(ctx context.Context, w io.Writer, sty statusStyles, setti
 		fmt.Fprintln(w, formatSettingsStatus("Project", projectSettings, sty))
 	}
 
+	// An external_agents grant the loader refused. The user can see the
+	// setting in their file and has no other way to learn it is inert:
+	// discovery simply does not run, and the agent never appears.
+	if reason, rejected := effectiveSettings.ExternalAgentsRejection(); rejected {
+		fmt.Fprintf(w, "  external_agents is ignored: %s\n  move it to %s, and keep that file out of version control\n",
+			reason, settings.EntireSettingsLocalFile)
+	}
+
+	// Same reasoning for allow_symlinked_agent_dirs: a refused grant and a
+	// setting nobody wrote both end in Entire refusing the link, so without
+	// this the two are indistinguishable from the outside.
+	if reason, rejected := effectiveSettings.SymlinkedAgentDirsRejection(); rejected {
+		fmt.Fprintf(w, "  allow_symlinked_agent_dirs is ignored: %s\n  move it to %s, and keep that file out of version control\n",
+			reason, settings.EntireSettingsLocalFile)
+	}
+
+	// And say what IS being followed. A link Entire writes through is worth
+	// stating plainly every time, not only when something is wrong with it.
+	//
+	// FollowedSymlinkedDirs, not VouchedSymlinkedDirs: the latter is the
+	// configuration, and a vouched path that is an ordinary directory, absent,
+	// or a dangling link is not something Entire is following. Scoped to this
+	// worktree too, so the report can never name links followed somewhere else.
+	if repoRoot, rootErr := paths.WorktreeRoot(ctx); rootErr == nil {
+		if followed := agent.FollowedSymlinkedDirs(repoRoot); len(followed) > 0 {
+			fmt.Fprintf(w, "  Following symlinked agent directories: %s\n", strings.Join(followed, ", "))
+		}
+	}
+
 	// Show local settings if it exists. LoadFromFile is ungated, so this
 	// renders the file's own contents — say so when the loader ignored them,
 	// or the display contradicts the settings actually in effect.
@@ -316,6 +345,12 @@ type checkpointSyncInfo struct {
 	// when none, when counting failed, or when the count would be a lie
 	// (dedicated URL mode on the git-branch backend).
 	Unpushed int
+	// IgnoredRemote and IgnoredReason report a configured checkpoint_remote
+	// that the ownership check rejected as inherited with the clone. Both
+	// reads and pushes then fall back to the elected remote, and status is
+	// where a user finds out why — the hooks only log the rejection.
+	IgnoredRemote string
+	IgnoredReason string
 }
 
 func computeCheckpointSyncInfo(ctx context.Context, s *EntireSettings) checkpointSyncInfo {
@@ -357,11 +392,26 @@ func computeCheckpointSyncInfo(ctx context.Context, s *EntireSettings) checkpoin
 		}
 	}
 
-	return checkpointSyncInfo{
+	info := checkpointSyncInfo{
 		Remote:   elected.Name,
 		Source:   string(elected.Source),
 		Unpushed: countUnpushedCheckpointsForStatus(ctx, elected.Name),
 	}
+	// A configured checkpoint_remote that did not enable above is being
+	// ignored. When the ownership check is what rejected it, say so: this is
+	// the one trust-gate rejection a user otherwise experiences only as
+	// checkpoints vanishing. Local-only, like everything else here.
+	// Accepted divergence: this verdict votes with the push identity set
+	// (origin + push URLs of the elected remote), while a fetch votes with its
+	// read candidate, so a push-only owner mismatch shows "not in use" here
+	// even though a lead-less fetch still resolves the checkpoint remote.
+	if s.GetCheckpointRemote() != nil {
+		if repo, reason, inherited := checkpointremote.InheritedCheckpointRemote(ctx, s, elected.Name); inherited {
+			info.IgnoredRemote = repo
+			info.IgnoredReason = reason
+		}
+	}
+	return info
 }
 
 // countUnpushedCheckpointsForStatus counts best-effort: status must never fail
@@ -400,6 +450,12 @@ func writeCheckpointSyncLines(ctx context.Context, b *strings.Builder, s *Entire
 		case string(strategy.SyncRemoteSourceObserved):
 			b.WriteString(sty.render(sty.dim, " (follows your branch's push destination)"))
 		}
+	}
+	if info.IgnoredRemote != "" {
+		b.WriteString("\n")
+		b.WriteString(sty.render(sty.yellow,
+			"  ! checkpoint_remote "+info.IgnoredRemote+" is not in use: "+info.IgnoredReason+
+				". If this checkpoint repo is yours, set checkpoint_remote in .entire/settings.local.json."))
 	}
 	if info.Unpushed > 0 {
 		b.WriteString("\n  ")
@@ -802,6 +858,11 @@ type statusJSON struct {
 	CheckpointSyncRemoteSource string `json:"checkpoint_sync_remote_source,omitempty"` // config|observed|default|sole|first|dedicated
 	CheckpointSyncError        string `json:"checkpoint_sync_error,omitempty"`         // fail-closed message
 	UnpushedCheckpoints        int    `json:"unpushed_checkpoints,omitempty"`
+	// CheckpointRemoteIgnored/-Reason report a configured checkpoint_remote the
+	// ownership check rejected as inherited with the clone (reads and pushes
+	// fall back to the elected remote). Mirrors the text path's warning line.
+	CheckpointRemoteIgnored       string `json:"checkpoint_remote_ignored,omitempty"`
+	CheckpointRemoteIgnoredReason string `json:"checkpoint_remote_ignored_reason,omitempty"`
 	// SecretScanners lists the enabled engines when non-default; omitted when default.
 	SecretScanners []string `json:"secret_scanners,omitempty"`
 	Error          string   `json:"error,omitempty"`
@@ -890,6 +951,8 @@ func runStatusJSON(ctx context.Context, w io.Writer) error {
 		result.CheckpointSyncRemoteSource = syncInfo.Source
 		result.CheckpointSyncError = syncInfo.Err
 		result.UnpushedCheckpoints = syncInfo.Unpushed
+		result.CheckpointRemoteIgnored = syncInfo.IgnoredRemote
+		result.CheckpointRemoteIgnoredReason = syncInfo.IgnoredReason
 
 		if store, err := session.NewStateStore(ctx); err == nil {
 			if states, err := store.List(ctx); err == nil {

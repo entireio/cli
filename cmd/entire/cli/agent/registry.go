@@ -228,6 +228,38 @@ func AllProtectedDirs() []string {
 	return dirs
 }
 
+// AllHookConfigRelPaths returns the worktree-relative path of every registered
+// agent's hook-configuration file, for the agents that declare one
+// (HookConfigLocator). Sorted and deduplicated.
+func AllHookConfigRelPaths() []string {
+	registryMu.RLock()
+	factories := make([]Factory, 0, len(registry))
+	for _, f := range registry {
+		factories = append(factories, f)
+	}
+	registryMu.RUnlock()
+
+	seen := make(map[string]struct{})
+	var out []string
+	for _, factory := range factories {
+		locator, ok := factory().(HookConfigLocator)
+		if !ok {
+			continue
+		}
+		p := locator.HookConfigRelPath()
+		if p == "" {
+			continue
+		}
+		if _, dup := seen[p]; dup {
+			continue
+		}
+		seen[p] = struct{}{}
+		out = append(out, p)
+	}
+	slices.Sort(out)
+	return out
+}
+
 // AllProtectedFiles returns the union of ProtectedFiles from all registered agents.
 func AllProtectedFiles() []string {
 	// Copy factories under the lock, then release before calling external code.

@@ -16,9 +16,9 @@ import (
 	"github.com/go-git/go-git/v6/plumbing"
 )
 
-// ErrShadowRefBusy is returned by casUpdateShadowBranchRef when the ref has
-// moved since the caller read it. Callers retry with a fresh parent.
-var ErrShadowRefBusy = errors.New("shadow branch ref moved (CAS mismatch)")
+// ErrShadowRefBusy is returned when a shadow ref changed or its native Git
+// lock is held. Checkpoint writers retry with a fresh read.
+var ErrShadowRefBusy = errors.New("shadow branch ref busy")
 
 // shadowRefMaxRetries bounds the WriteTemporary retry loop. With the
 // per-shadow-branch flock held, our own writers never collide; this budget
@@ -35,8 +35,8 @@ const shadowRefMaxJitter = 8 * time.Millisecond
 // repository. Callers use the worktree root as cmd.Dir for git invocations
 // and the common dir to locate filesystem paths (lock files, loose objects)
 // — both without depending on the process cwd.
-func (s *ephemeralStore) repoDirs(ctx context.Context) (worktreeRoot, commonDir string, err error) {
-	return repositoryDirs(ctx, s.repo)
+func (s *ephemeralStore) repoDirs() (worktreeRoot, commonDir string, err error) {
+	return repositoryDirs(s.repo)
 }
 
 // casUpdateShadowBranchRef atomically updates a shadow branch ref via
@@ -46,9 +46,8 @@ func (s *ephemeralStore) repoDirs(ctx context.Context) (worktreeRoot, commonDir 
 // repoRoot is used as cmd.Dir so the update targets the same repository as
 // the rest of WriteTemporary (i.e. s.repo) regardless of the process cwd.
 //
-// Returns ErrShadowRefBusy when git reports the ref moved since expectedHash
-// was observed; callers retry with a fresh parent. Any other failure is
-// returned wrapped.
+// Returns ErrShadowRefBusy when git reports stale state or lock contention;
+// callers retry with a fresh parent. Any other failure is returned wrapped.
 //
 // Why shell out: git's ref-locking is the canonical cross-process atomic
 // CAS — go-git's CheckAndSetReference doesn't interoperate with native git's

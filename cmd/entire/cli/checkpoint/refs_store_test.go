@@ -775,7 +775,7 @@ func TestGitRefsStore_EnqueuesAfterCancellationFollowingCAS(t *testing.T) {
 	require.NoError(t, err)
 
 	ctx, cancel := context.WithCancel(context.Background())
-	repoRoot, _, err := repositoryDirs(ctx, store.repo)
+	repoRoot, _, err := repositoryDirs(store.repo)
 	require.NoError(t, err)
 	require.NoError(t, casUpdateRef(ctx, repoRoot, refName, head.Hash(), plumbing.ZeroHash))
 

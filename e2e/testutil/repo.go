@@ -90,12 +90,29 @@ func SetupRepo(t *testing.T, agent agents.Agent) *RepoState {
 
 	// External agents need external_agents enabled in settings before enable,
 	// so the CLI can discover the agent binary via PATH during DiscoverAndRegister.
+	//
+	// The grant goes in settings.local.json: it enables execution of
+	// entire-agent-* binaries found on $PATH, so the loader honors it only
+	// from an untracked local file. Nothing commits this one — the repo has
+	// its initial commit already — so it verifies as this clone's own.
+	//
+	// An empty settings.json goes alongside it, and is load-bearing rather
+	// than decorative. `entire enable` picks its target file by asking
+	// whether project settings already exist, so a repo carrying only a local
+	// file would send enable's own write there too and never create
+	// settings.json — which PatchSettings below then cannot find. Creating
+	// both keeps the target resolution exactly where it was when this fixture
+	// wrote the grant into settings.json.
 	if ea, ok := agent.(agents.ExternalAgent); ok && ea.IsExternalAgent() {
 		entireDir := filepath.Join(dir, ".entire")
 		if err := os.MkdirAll(entireDir, 0o755); err != nil {
 			t.Fatalf("create .entire for external agent: %v", err)
 		}
 		if err := os.WriteFile(filepath.Join(entireDir, "settings.json"),
+			[]byte("{}\n"), 0o644); err != nil {
+			t.Fatalf("write project settings: %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(entireDir, "settings.local.json"),
 			[]byte("{\"external_agents\": true}\n"), 0o644); err != nil {
 			t.Fatalf("write external_agents setting: %v", err)
 		}
@@ -132,15 +149,15 @@ func SetupRepo(t *testing.T, agent agents.Agent) *RepoState {
 		}
 	}
 
-	// OpenCode's non-interactive mode auto-rejects external_directory permission
-	// since there's no user to prompt. Write a config to allow it.
-	if agent.Name() == "opencode" {
-		cfg := `{"$schema": "https://opencode.ai/config.json", "permission": {"external_directory": "allow"}}`
-		if key := os.Getenv("ANTHROPIC_API_KEY"); key != "" {
-			cfg = fmt.Sprintf(`{"$schema": "https://opencode.ai/config.json", "permission": {"external_directory": "allow"}, "provider": {"anthropic": {"options": {"apiKey": %q}}}}`, key)
-		}
-		if err := os.WriteFile(filepath.Join(dir, "opencode.json"), []byte(cfg+"\n"), 0o644); err != nil {
-			t.Fatalf("write opencode.json: %v", err)
+	// Agents that need files planted before their first run in a repo get them
+	// here — after `entire enable` has written the agent's own config, so a
+	// seed can sit alongside it. opencode uses this for its config file and for
+	// a pre-built .opencode dependency tree it would otherwise install on the
+	// clock; keeping both in the agent is why this is an interface rather than
+	// another arm of the name switch above.
+	if seeder, ok := agent.(agents.RepoSeeder); ok {
+		if err := seeder.SeedRepo(dir); err != nil {
+			t.Fatalf("seed repo for %s: %v", agent.Name(), err)
 		}
 	}
 

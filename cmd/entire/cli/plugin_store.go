@@ -18,6 +18,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent/external"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/osroot"
+	"github.com/entireio/cli/internal/entireclient/userdirs"
 )
 
 // Managed plugin storage. The kubectl-style dispatcher in plugin.go resolves
@@ -63,20 +64,17 @@ const (
 // degenerate environment with $LOCALAPPDATA or $XDG_DATA_HOME but no home
 // still returns a usable path.
 func pluginParentDir() (string, error) {
-	// ENTIRE_PLUGIN_DIR must be absolute. A relative value would resolve
-	// against the user's CWD at startup — typically inside their repo —
-	// which is the wrong place for managed plugin storage. Reject loudly
-	// rather than silently falling through to the platform default, since
-	// a misconfigured override is almost certainly a user error worth
-	// surfacing.
 	if v := os.Getenv(pluginEnvPluginDir); v != "" {
-		if !filepath.IsAbs(v) {
-			return "", fmt.Errorf("%s must be an absolute path, got %q", pluginEnvPluginDir, v)
+		if err := userdirs.RequireAbsoluteOverride(pluginEnvPluginDir, v); err != nil {
+			return "", err //nolint:wrapcheck // the error already names the override and its value
 		}
 		return v, nil
 	}
 	if runtime.GOOS == windowsGOOS {
 		if appData := os.Getenv("LOCALAPPDATA"); appData != "" {
+			if err := userdirs.RequireAbsoluteOverride("LOCALAPPDATA", appData); err != nil {
+				return "", err //nolint:wrapcheck // the error already names the override and its value
+			}
 			return filepath.Join(appData, pluginManagedTopDir, pluginManagedSubDir), nil
 		}
 		home, err := os.UserHomeDir()
@@ -86,6 +84,9 @@ func pluginParentDir() (string, error) {
 		return filepath.Join(home, "AppData", "Local", pluginManagedTopDir, pluginManagedSubDir), nil
 	}
 	if v := os.Getenv("XDG_DATA_HOME"); v != "" {
+		if err := userdirs.RequireAbsoluteOverride("XDG_DATA_HOME", v); err != nil {
+			return "", err //nolint:wrapcheck // the error already names the override and its value
+		}
 		return filepath.Join(v, pluginManagedTopDir, pluginManagedSubDir), nil
 	}
 	home, err := os.UserHomeDir()

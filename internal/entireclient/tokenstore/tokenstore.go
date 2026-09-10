@@ -122,14 +122,42 @@ func BackendDescription() string {
 	return keyringProviderName()
 }
 
+// tokenStoreFileName is the file backend's name inside the per-user config dir.
+const tokenStoreFileName = "tokens.json"
+
 // FileBackendPath resolves where the file backend stores (or would store)
 // tokens: PathEnvVar when set, else tokens.json in the per-user config
 // directory. Exported so user-facing guidance can name the concrete path.
+//
+// The string form cannot report a rejected override, so it returns the path it
+// would use; fileBackendPathChecked is what the store itself calls.
 func FileBackendPath() string {
+	path, _ := fileBackendPathChecked() //nolint:errcheck // see doc comment: the store reports it
+	return path
+}
+
+// fileBackendPathChecked is FileBackendPath with the override check.
+//
+// The config-directory case is checked here rather than being left to the root
+// that opens it, because there is no such root: fileStore.dir anchors on
+// filepath.Dir of this path (one of the two places CLAUDE.md permits that, since
+// PathEnvVar names a file the caller chose) and reaches it through
+// filepath.Abs. That Abs is exactly the laundering the contexts and discovery
+// roots stopped doing. Without a check here, ENTIRE_CONFIG_DIR=foo silently put
+// bearer tokens at ./foo/tokens.json, which for a CLI run from a repository
+// means inside the repository.
+//
+// PathEnvVar is deliberately NOT checked: it names a file the user chose
+// directly, the same reasoning that exempts it from the root-base rule.
+func fileBackendPathChecked() (string, error) {
 	if path := os.Getenv(PathEnvVar); path != "" {
-		return path
+		return path, nil
 	}
-	return filepath.Join(userdirs.Config(), "tokens.json")
+	dir, err := userdirs.ConfigDirChecked()
+	if err != nil {
+		return filepath.Join(dir, tokenStoreFileName), err
+	}
+	return filepath.Join(dir, tokenStoreFileName), nil
 }
 
 func resolveBackendLocked() store {
@@ -137,7 +165,12 @@ func resolveBackendLocked() store {
 		// Entire owns the directory only when it also picked it: an
 		// explicit PathEnvVar names a location the user chose, and its
 		// mode is theirs to set.
-		return &fileStore{path: FileBackendPath(), ownsDir: os.Getenv(PathEnvVar) == ""}
+		//
+		// pathErr is carried rather than resolved here: this function has no
+		// error return, and swallowing it is what put tokens in the working
+		// directory. Every operation reports it before touching the filesystem.
+		path, pathErr := fileBackendPathChecked()
+		return &fileStore{path: path, pathErr: pathErr, ownsDir: os.Getenv(PathEnvVar) == ""}
 	}
 	// Under `go test`, never fall through to the real OS keyring: a test
 	// that forgets tokenstore.UseFileBackendForTesting would otherwise write

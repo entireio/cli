@@ -240,12 +240,19 @@ func TestGitPlumbingEnv_ForcesCLocale(t *testing.T) {
 	t.Setenv("LANG", "de_DE.UTF-8")
 	t.Setenv("LC_ALL", "de_DE.UTF-8")
 	t.Setenv("LC_MESSAGES", "fr_FR.UTF-8")
+	t.Setenv("GIT_DIR", "/wrong/repo/.git")
+	t.Setenv("GIT_WORK_TREE", "/wrong/repo")
+	t.Setenv("GIT_INDEX_FILE", "/wrong/repo/index")
 
 	env := gitPlumbingEnv()
 	for key, want := range map[string]string{"LC_ALL": "C", "LANG": "C", "GIT_TERMINAL_PROMPT": "0"} {
 		got, found := lastEnvValue(env, key)
 		require.Truef(t, found, "%s must be set", key)
 		require.Equalf(t, want, got, "effective %s must be forced regardless of the caller's environment", key)
+	}
+	for _, key := range []string{"GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE"} {
+		_, found := lastEnvValue(env, key)
+		require.Falsef(t, found, "%s must not override the repository selected by the command", key)
 	}
 }
 
@@ -678,9 +685,21 @@ func TestRepoUsesReftable_Detection(t *testing.T) {
 	t.Parallel()
 
 	reftableRepo, _ := initReftableRepo(t, "a.txt", "a\n")
-	require.True(t, repoUsesReftable(filepath.Join(reftableRepo, ".git"), filepath.Join(reftableRepo, ".git")))
+	usesReftable, err := inspectRepoUsesReftable(filepath.Join(reftableRepo, ".git"), filepath.Join(reftableRepo, ".git"))
+	require.NoError(t, err)
+	require.True(t, usesReftable)
 
 	filesRepo := t.TempDir()
 	require.NoError(t, os.MkdirAll(filepath.Join(filesRepo, ".git", "refs"), 0o755))
-	require.False(t, repoUsesReftable(filepath.Join(filesRepo, ".git"), filepath.Join(filesRepo, ".git")))
+	usesReftable, err = inspectRepoUsesReftable(filepath.Join(filesRepo, ".git"), filepath.Join(filesRepo, ".git"))
+	require.NoError(t, err)
+	require.False(t, usesReftable)
+}
+
+func TestInspectRepoUsesReftable_ReportsInspectionFailure(t *testing.T) {
+	t.Parallel()
+
+	usesReftable, err := inspectRepoUsesReftable("invalid\x00gitdir", "")
+	require.ErrorContains(t, err, "inspect reftable directory")
+	require.False(t, usesReftable)
 }

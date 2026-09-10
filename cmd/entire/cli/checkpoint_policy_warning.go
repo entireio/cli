@@ -7,7 +7,6 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/checkpointpolicy"
 	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
-	"github.com/entireio/cli/cmd/entire/cli/versioncheck"
 	"github.com/spf13/cobra"
 )
 
@@ -54,8 +53,5 @@ func WarnCheckpointPolicyIfNeeded(ctx context.Context, w io.Writer, currentVersi
 		return
 	}
 
-	fmt.Fprint(w, checkpointpolicy.UnsupportedPolicyMessage(
-		state.Policy,
-		versioncheck.UpdateCommandForCurrentBinary(currentVersion),
-	))
+	fmt.Fprint(w, unsupportedCheckpointPolicyMessage(state.Policy, currentVersion))
 }
