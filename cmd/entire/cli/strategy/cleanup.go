@@ -219,6 +219,8 @@ func listShadowBranchHeads(ctx context.Context) (map[string]plumbing.Hash, error
 //     shadow branch contents have been copied to committed metadata.
 //   - Multiple sessions can share the same shadow branch (same base
 //     commit + worktree); ALL must satisfy the criteria above.
+//   - Fails closed before deletion if a complete session-state inventory
+//     cannot be loaded.
 //   - Shadow branches with no associated session state are deleted
 //     (no session to lose data from).
 func CleanupPushedShadowBranches(ctx context.Context) (int, error) {
@@ -230,7 +232,7 @@ func CleanupPushedShadowBranches(ctx context.Context) (int, error) {
 		return 0, nil
 	}
 
-	states, err := ListSessionStates(ctx)
+	states, err := listSessionStatesStrict(ctx)
 	if err != nil {
 		return 0, fmt.Errorf("list session states: %w", err)
 	}
@@ -283,6 +285,7 @@ func CleanupPushedShadowBranches(ctx context.Context) (int, error) {
 // the same check is repeated here as a second, independent gate rather than
 // relying solely on the caller's filtering, since this function is the one
 // place that actually deletes a ref with no human confirmation.
+// A failed session-state recheck also preserves the branch.
 func DeleteShadowBranchesIfUnchanged(ctx context.Context, branches map[string]plumbing.Hash) (deleted []string, failed []string) {
 	if len(branches) == 0 {
 		return []string{}, []string{}
@@ -333,7 +336,7 @@ func protectedShadowBranchForSession(s *SessionState) (string, bool) {
 }
 
 func shadowBranchProtectedByCurrentState(ctx context.Context, branch string) (bool, error) {
-	states, err := ListSessionStates(ctx)
+	states, err := listSessionStatesStrict(ctx)
 	if err != nil {
 		return false, err
 	}

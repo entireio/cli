@@ -2,10 +2,13 @@ package strategy
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
+	"github.com/entireio/cli/cmd/entire/cli/gitdir"
 	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 	"github.com/go-git/go-git/v6"
@@ -26,6 +29,7 @@ type shadowCleanupEnv struct {
 func newShadowCleanupEnv(t *testing.T) *shadowCleanupEnv {
 	t.Helper()
 	dir := t.TempDir()
+	t.Cleanup(gitdir.Reset)
 	testutil.InitRepo(t, dir)
 	repo, err := git.PlainOpen(dir)
 	require.NoError(t, err)
@@ -70,6 +74,17 @@ func (e *shadowCleanupEnv) addSessionState(sessionID, baseCommit, worktreeID str
 		TurnCheckpointIDs: pendingCheckpoints,
 	}
 	require.NoError(e.t, SaveSessionState(context.Background(), state))
+}
+
+func (e *shadowCleanupEnv) corruptSessionState(sessionID string) {
+	e.t.Helper()
+	stateDir, err := getSessionStateDir(context.Background())
+	require.NoError(e.t, err)
+	require.NoError(e.t, os.WriteFile(
+		filepath.Join(stateDir, sessionID+".json"),
+		[]byte(`{"session_id":`),
+		0o600,
+	))
 }
 
 func (e *shadowCleanupEnv) branchExists(name string) bool {
@@ -175,6 +190,36 @@ func TestCleanupPushedShadowBranches_NoBranches_NoOp(t *testing.T) {
 	deleted, err := CleanupPushedShadowBranches(context.Background())
 	require.NoError(t, err)
 	require.Equal(t, 0, deleted)
+}
+
+func TestCleanupPushedShadowBranches_MalformedStateFailsClosed(t *testing.T) {
+	env := newShadowCleanupEnv(t)
+	ctx := context.Background()
+
+	const sessionID = "malformed-session"
+	shadow := env.addShadowBranch(env.baseHash.String(), "worktree-a")
+	env.addSessionState(sessionID, env.baseHash.String(), "worktree-a", nil, nil, false)
+	env.corruptSessionState(sessionID)
+
+	deleted, err := CleanupPushedShadowBranches(ctx)
+	require.ErrorContains(t, err, `failed to load session state "malformed-session"`)
+	require.Zero(t, deleted)
+	require.True(t, env.branchExists(shadow), "cleanup must preserve the shadow branch")
+}
+
+func TestDeleteShadowBranchesIfUnchanged_MalformedStatePreservesBranch(t *testing.T) {
+	env := newShadowCleanupEnv(t)
+	ctx := context.Background()
+
+	const sessionID = "malformed-session"
+	shadow := env.addShadowBranch(env.baseHash.String(), "worktree-a")
+	env.addSessionState(sessionID, env.baseHash.String(), "worktree-a", nil, nil, false)
+	env.corruptSessionState(sessionID)
+
+	deleted, failed := DeleteShadowBranchesIfUnchanged(ctx, map[string]plumbing.Hash{shadow: env.baseHash})
+	require.Empty(t, deleted)
+	require.Equal(t, []string{shadow}, failed)
+	require.True(t, env.branchExists(shadow), "recheck must preserve the shadow branch")
 }
 
 func TestDeleteShadowBranchesIfUnchanged_PreservesMovedBranch(t *testing.T) {
