@@ -258,6 +258,50 @@ type TranscriptFetcher interface {
 	FetchTranscript(ctx context.Context, sessionID string) (string, error)
 }
 
+// NativeSessionInfo describes one session in an agent's own native session
+// store, surfaced by NativeSessionLister so `entire session attach` (no ID)
+// can offer a picker of sessions Entire's hooks never observed
+// (entireio/cli#1992) — e.g. a session started from an external host, or
+// before hooks were installed. It carries only display/scoping metadata:
+// attach still resolves the transcript itself (typically via
+// TranscriptFetcher) once a session is picked.
+type NativeSessionInfo struct {
+	// SessionID is the agent's own session identifier — the value to pass to
+	// `entire session attach <session-id>`.
+	SessionID string
+
+	// Title is a short agent-provided label for the session, for display only.
+	Title string
+
+	// Directory is the working directory the agent recorded for the session,
+	// in whatever form the agent itself reports it. Used to scope the picker
+	// to the current worktree — the same scope the agent applies to its own
+	// listing, never an Entire-invented rule.
+	Directory string
+
+	// UpdatedAt is when the session was last active, for sorting/display.
+	// Zero when the agent does not report it.
+	UpdatedAt time.Time
+}
+
+// NativeSessionLister is implemented by agents whose sessions can exist
+// entirely in the agent's own store without Entire ever having observed them
+// — e.g. OpenCode, which is DB-backed rather than file-based, so a session
+// started outside a hooked terminal leaves no trace in Entire's own session
+// state. `entire session attach --agent <name>` (no session ID) uses this to
+// list untracked native sessions instead of requiring the user to look one up
+// with the agent's own CLI first (entireio/cli#1992).
+type NativeSessionLister interface {
+	Agent
+
+	// ListNativeSessions returns sessions from the agent's own store, scoped
+	// to dir (the current worktree root) the same way the agent itself scopes
+	// its own session listing — implementations must not invent a different
+	// scoping rule. Must not mutate agent state (this is a listing, not an
+	// export).
+	ListNativeSessions(ctx context.Context, dir string) ([]NativeSessionInfo, error)
+}
+
 // SidecarImageProvider is implemented by agents that keep images OUTSIDE the
 // transcript Entire condenses — e.g. Cursor stores pasted images in a per-session
 // SQLite blob store, not the JSONL transcript. The strategy layer calls this

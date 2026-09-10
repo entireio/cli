@@ -18,9 +18,9 @@ type CapabilityDeclarer interface {
 //
 // Not every optional interface appears here: built-in-only capabilities that
 // have no external-protocol equivalent (SessionBaseDirProvider, ModelExtractor,
-// SkillEventExtractor, TranscriptSanitizer, TranscriptFetcher) are intentionally
-// excluded — their As* helpers resolve by type assertion alone (see
-// builtinCapability), with no DeclaredCaps gate.
+// SkillEventExtractor, TranscriptSanitizer, TranscriptFetcher,
+// NativeSessionLister) are intentionally excluded — their As* helpers resolve
+// by type assertion alone (see builtinCapability), with no DeclaredCaps gate.
 type DeclaredCaps struct {
 	Hooks                  bool `json:"hooks"`
 	TranscriptAnalyzer     bool `json:"transcript_analyzer"`
@@ -140,6 +140,14 @@ func SanitizeTranscriptForStorage(ag Agent, data []byte) []byte {
 // assertion alone with no DeclaredCaps gate.
 func AsTranscriptFetcher(ag Agent) (TranscriptFetcher, bool) {
 	return builtinCapability[TranscriptFetcher](ag)
+}
+
+// AsNativeSessionLister returns the agent as NativeSessionLister if it
+// implements the interface. This is an optional capability (listing untracked
+// native sessions for `session attach`'s no-ID picker), so it resolves by type
+// assertion alone with no DeclaredCaps gate — same as AsTranscriptFetcher.
+func AsNativeSessionLister(ag Agent) (NativeSessionLister, bool) {
+	return builtinCapability[NativeSessionLister](ag)
 }
 
 // AsTokenCalculator returns the agent as TokenCalculator if it both

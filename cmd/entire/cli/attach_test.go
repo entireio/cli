@@ -37,6 +37,11 @@ import (
 	"github.com/go-git/go-git/v6/plumbing"
 )
 
+// TestAttach_MissingSessionID covers the default agent (claude-code), which
+// does not support native session discovery: omitting the session ID must
+// still require one explicitly, rather than silently doing nothing. See
+// TestAttach_OpenCodeDiscoversUntrackedSessionsNonInteractive for the agent
+// that DOES support discovery (entireio/cli#1992).
 func TestAttach_MissingSessionID(t *testing.T) {
 	t.Parallel()
 
@@ -51,7 +56,10 @@ func TestAttach_MissingSessionID(t *testing.T) {
 	if err != nil {
 		t.Fatalf("expected help output, got error: %v", err)
 	}
-	if !strings.Contains(out.String(), "attach <session-id>") {
+	if !strings.Contains(out.String(), "does not support session discovery") {
+		t.Errorf("expected an explanation that claude-code needs an explicit session ID, got: %s", out.String())
+	}
+	if !strings.Contains(out.String(), "attach [session-id]") {
 		t.Errorf("expected help output containing usage, got: %s", out.String())
 	}
 }
