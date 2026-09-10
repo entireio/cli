@@ -436,11 +436,18 @@ func ClaimHookHealthWarning(ctx context.Context, sessionID, fingerprint string) 
 // native hook response could not be emitted. It replaces only an exact matching
 // claim with a neutral marker, leaving any newer fingerprint untouched. The
 // marker keeps retry fail-open even when stale durable state contains the same
-// fingerprint as the warning whose output failed.
+// fingerprint as the warning whose output failed. Cleanup has its own bounded
+// context because the failed turn may already be cancelled or out of lock budget.
 func RollbackHookHealthWarningClaim(ctx context.Context, sessionID, fingerprint string) error {
 	if err := validation.ValidateSessionID(sessionID); err != nil {
 		return fmt.Errorf("invalid session ID: %w", err)
 	}
+	const cleanupBudget = 2 * time.Second
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), cleanupBudget)
+	defer cancel()
+	// WithoutCancel preserves context values, including the turn's expired
+	// session-lock deadline. Replace that value as well as the cancellation.
+	ctx = WithSessionLockWait(ctx, cleanupBudget)
 	_, _, release, err := acquireSessionGate(ctx, sessionID)
 	if err != nil {
 		return err

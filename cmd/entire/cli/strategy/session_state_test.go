@@ -20,6 +20,45 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestRollbackHookHealthWarningClaimAfterCancellation(t *testing.T) {
+	for _, durable := range []bool{false, true} {
+		t.Run(fmt.Sprintf("durable=%t", durable), func(t *testing.T) {
+			dir := t.TempDir()
+			testutil.InitRepo(t, dir)
+			t.Chdir(dir)
+			const sessionID = "cancelled-hook-warning"
+			const fingerprint = `["native","outdated","","native_hooks_modified"]`
+			if durable {
+				require.NoError(t, SaveSessionState(t.Context(), &SessionState{
+					SessionID: sessionID, BaseCommit: "abc", StartedAt: time.Now(),
+				}))
+			}
+			claimed, err := ClaimHookHealthWarning(t.Context(), sessionID, fingerprint)
+			require.NoError(t, err)
+			require.True(t, claimed)
+			ctx, cancel := context.WithCancel(context.WithValue(t.Context(), sessionLockDeadlineKey{}, time.Now().Add(-time.Second)))
+			cancel()
+			// Uncontended flock acquisition succeeds even with a cancelled
+			// context. Brief contention reproduces the actual cleanup failure.
+			lock, err := stateLockForSession(t.Context(), sessionID)
+			require.NoError(t, err)
+			unlock, err := flock.AcquireIn(lock.root, lock.name)
+			require.NoError(t, err)
+			var releaseOnce sync.Once
+			release := func() { releaseOnce.Do(unlock) }
+			timer := time.AfterFunc(50*time.Millisecond, release)
+			t.Cleanup(func() {
+				timer.Stop()
+				release()
+			})
+			require.NoError(t, RollbackHookHealthWarningClaim(ctx, sessionID, fingerprint))
+			claimed, err = ClaimHookHealthWarning(t.Context(), sessionID, fingerprint)
+			require.NoError(t, err)
+			require.True(t, claimed, "a warning that never reached stdout must remain retryable")
+		})
+	}
+}
+
 func TestHookHealthWarningHintStoreLoadTransfer(t *testing.T) {
 	dir := t.TempDir()
 	testutil.InitRepo(t, dir)
