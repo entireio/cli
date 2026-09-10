@@ -3,43 +3,4 @@
 #USAGE arg "[filter]" help="Test name filter (regex)" default=""
 
 set -eu
-
-export E2E_AGENT="roger-roger"
-
-# Build entire CLI
-mise run build
-export E2E_ENTIRE_BIN="$PWD/entire"
-
-# Ensure roger-roger binaries are available on PATH before running E2E tests.
-# They are typically installed via mise (see mise.toml [tools]), but we fail fast
-# here if they are missing so the suite cannot silently "succeed" without
-# exercising the external agent.
-if ! command -v roger-roger >/dev/null 2>&1; then
-  echo "error: 'roger-roger' binary not found on PATH. Install it via 'mise install' or ensure it is available before running this task." >&2
-  exit 1
-fi
-
-if ! command -v entire-agent-roger-roger >/dev/null 2>&1; then
-  echo "error: 'entire-agent-roger-roger' binary not found on PATH. Install it via 'mise install' or ensure it is available before running this task." >&2
-  exit 1
-fi
-
-if [ -z "${E2E_ARTIFACT_DIR:-}" ]; then
-  E2E_ARTIFACT_DIR="$PWD/e2e/artifacts/roger-roger-$(date +%Y-%m-%dT%H-%M-%S)"
-fi
-export E2E_ARTIFACT_DIR
-mkdir -p "$E2E_ARTIFACT_DIR"
-echo "artifacts: $E2E_ARTIFACT_DIR"
-
-filter="${usage_filter:-}"
-
-gotestsum --format dots --jsonfile "$E2E_ARTIFACT_DIR/test-events.json" -- \
-  -tags=e2e -count=1 -timeout=10m \
-  ${filter:+-run "$filter"} \
-  ./e2e/tests/... || rc=$?
-
-go run ./e2e/cmd/testreport -color -o "$E2E_ARTIFACT_DIR/report.txt" "$E2E_ARTIFACT_DIR/test-events.json"
-echo ""
-cat "$E2E_ARTIFACT_DIR/entire-version.txt" 2>/dev/null
-echo "artifacts: $E2E_ARTIFACT_DIR"
-exit "${rc:-0}"
+exec sh scripts/e2e-run.sh roger-roger "${usage_filter:-}"

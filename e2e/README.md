@@ -18,6 +18,53 @@ go build ./...                                      # compile check (no agent CL
 
 **Do NOT run E2E tests proactively.** They make real API calls that consume tokens and cost money. Only run when explicitly asked.
 
+## Shared runner
+
+`sh scripts/e2e-run.sh <agent> [test-regex]` runs one agent against the matching
+Go tests. The mise E2E tasks use this same runner. Supply credentials through
+the agent's native environment variables, such as `ANTHROPIC_API_KEY` for
+Claude Code. Tokens are not command-line arguments.
+
+The runner builds Entire unless `E2E_ENTIRE_BIN` is set, writes reports, fails
+when no parent tests ran, and always prints the artifact path after reporting.
+Named tests that all skip remain successful. A subtest regex that matches a
+parent but no children is not detected as empty. Real agents get one gotestsum
+retry; vogon and roger-roger get none. `E2E_BOOTSTRAP=1` also runs the selected
+agent's bootstrap before testing; existing local invocations leave this off.
+
+For CI, call the reusable agent job:
+
+```yaml
+jobs:
+  smoke:
+    uses: ./.github/workflows/e2e-agent.yml
+    with:
+      agent: claude-code
+      test-regex: '^TestMultiSessionSequential$'
+    secrets:
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+```
+
+Each agent has a small caller job that passes only its named provider secret.
+The shared job exposes these as native environment variables, and the runner
+checks the selected agent's required key before building or running tests.
+Copilot passes `github.token` as `COPILOT_GITHUB_TOKEN`. Tokenless agents
+omit secrets. Local runs can still use stored agent logins. Droid uses
+Factory-managed Claude Haiku with only the Factory key. Roger-roger needs no secret.
+Vogon runs through the local canary task in `ci.yml`. The shared job installs
+and bootstraps only the selected agent and uploads
+artifacts even when tests fail. It accepts an optional `artifact-name` for
+callers that run the same agent and OS more than once. Optional inputs include
+`runner` (default `ubuntu-latest`), `cli-source` (`source` or `nightly`), and
+`test-timeout-minutes`. This job always uses `git-refs`; CI's free canary covers
+backend compatibility.
+
+For nightly runs, the job installs the published CLI through the OS-specific
+installer and runs the current tests against that binary. Agent configuration
+and reporting therefore stay consistent with source runs. Tests for features
+newer than the nightly binary may need a narrower `test-regex`. Copilot callers must grant `copilot-requests:
+write` when passing `github.token`; the shared job inherits caller permissions.
+
 ## Structure
 
 ```
@@ -44,7 +91,9 @@ e2e/
 3. Add a `Bootstrap()` method for any CI-specific setup (auth config, warmup).
 4. Add a `RegisterGate("<name>", N)` call if concurrency needs limiting.
 5. Ensure the agent name is accepted by `mise run test:e2e --agent <name>`.
-6. Add the agent to `.github/workflows/e2e.yml` matrix and `e2e-isolated.yml` options.
+6. Add installation support in `.github/workflows/e2e-agent.yml` and selections
+   in the workflow matrices and dispatch choices in `.github/workflows/e2e.yml`
+   and `.github/workflows/nightly-e2e.yml`.
 
 ## Environment Variables
 
@@ -54,7 +103,7 @@ e2e/
 | `E2E_ENTIRE_BIN` | Path to a pre-built `entire` binary | builds from source |
 | `E2E_TIMEOUT` | Per-prompt timeout, overriding every runner's own default. A per-test `agents.WithPromptTimeout(...)` still wins over it, and a malformed value is a hard error rather than a silent fall back. | per runner: 60s (codex, copilot-cli, gemini), 90s (cursor), 2m (opencode), none (claude-code, droid, pi, vogon, roger-roger — bounded only by the scenario timeout) |
 | `E2E_KEEP_REPOS` | Set to `1` to preserve temp repos after test | unset |
-| `E2E_CHECKPOINT_STORE` | Checkpoint backend to run the suite against (`git-branch`, `git-refs`). Maps to the `ENTIRE_CHECKPOINTS_PRIMARY` override that every spawned binary/hook honors. | `git-branch` |
+| `E2E_CHECKPOINT_STORE` | Checkpoint backend (`git-refs` or legacy `git-branch`). Maps to the `ENTIRE_CHECKPOINTS_PRIMARY` override that every spawned binary/hook honors. | `git-refs` |
 | `E2E_ARTIFACT_DIR` | Override artifact output directory | `e2e/artifacts/<timestamp>` |
 | `ANTHROPIC_API_KEY` | Required for Claude Code | — |
 | `GEMINI_API_KEY` | Required for Gemini CLI | — |
@@ -88,7 +137,31 @@ To diagnose: read `console.log` in the failing test's artifact directory. Compar
 
 ## CI Workflows
 
-- **`.github/workflows/e2e.yml`** — Runs full suite on push to main. Matrix: `[claude-code, opencode, gemini-cli, codex, cursor-cli, factoryai-droid, copilot-cli]`.
-- **`.github/workflows/e2e-isolated.yml`** — Manual dispatch for debugging a single test. Inputs: agent + test name filter.
+- **`e2e.yml`** runs the full source-built suite on pushes to main: seven Linux
+  agents plus Windows/Claude, using `git-refs`. Manual dispatch accepts `agent`,
+  `test` (regex), and `runner`. Selecting an agent selects one job; the default
+  runner is Linux. Selecting Windows without an agent selects Claude.
+  Gemini is available explicitly but excluded from the default matrix.
+- **`nightly-e2e.yml`** runs an installed-nightly smoke test on Linux, macOS, and
+  Windows with `git-refs`. Its YAML matrix excludes Cursor and Factory on
+  Windows and caps concurrency at three agent jobs. Each agent has
+  a separate job, result summary, and artifact bundle.
+- **`e2e-agent.yml`** is the reusable job both workflows call for installation,
+  bootstrap, execution, reporting, and artifact upload.
+- **`ci.yml`** retains the deterministic canary on PRs for both `git-refs` and
+  legacy `git-branch`, alongside the unit and integration checks. It also tests the E2E
+  external-agent integration with roger-roger. This free backend matrix is the
+  pre-merge gate; it does not require paid agent credentials.
 
-Both workflows run `go run ./e2e/bootstrap` before tests to handle agent-specific CI setup (auth config, warmup).
+The former isolated and Windows dispatches are inputs to `e2e.yml`. Backend
+coverage lives in `ci.yml`, replacing the checkpoint-store workflow. The obsolete
+checkpoints-v2 workflow was removed: its `E2E_CHECKPOINTS_MODE` variable was no
+longer read by the harness. For local legacy-backend testing, set
+`E2E_CHECKPOINT_STORE=git-branch` when running the canary task.
+
+Example manual dispatch:
+
+```bash
+gh workflow run e2e.yml -f agent=claude-code -f runner=windows-latest \
+  -f test='^TestMultiSessionSequential$'
+```

@@ -1,0 +1,216 @@
+name: E2E Agent
+
+on:
+  workflow_call:
+    inputs:
+      agent:
+        description: Agent to install and test
+        required: true
+        type: string
+      test-regex:
+        description: Go test regex (empty runs the whole suite)
+        default: ''
+        type: string
+      runner:
+        description: GitHub hosted runner
+        default: ubuntu-latest
+        type: string
+      cli-source:
+        description: Build from source or install the published nightly
+        default: source
+        type: string
+      test-timeout-minutes:
+        description: Bound bootstrap and tests while leaving time to upload artifacts
+        default: 35
+        type: number
+      artifact-name:
+        description: Override when calling the same agent and OS more than once
+        default: ''
+        type: string
+    secrets:
+      ANTHROPIC_API_KEY:
+        required: false
+      GEMINI_API_KEY:
+        required: false
+      FACTORY_API_KEY:
+        required: false
+      CURSOR_API_KEY:
+        required: false
+      COPILOT_GITHUB_TOKEN:
+        required: false
+      OPENAI_API_KEY:
+        required: false
+
+jobs:
+  test:
+    name: ${{ inputs.agent }}
+    runs-on: ${{ inputs.runner }}
+    timeout-minutes: 45
+    # Inherit the caller's permissions, including copilot-requests when needed.
+    # The caller passes its token only to the Copilot agent's test step.
+    defaults:
+      run:
+        shell: bash
+    env:
+      E2E_AGENT: ${{ inputs.agent }}
+      TEST_REGEX: ${{ inputs.test-regex }}
+      CLI_SOURCE: ${{ inputs.cli-source }}
+      # Backend compatibility is covered by the free canary in ci.yml.
+      E2E_CHECKPOINT_STORE: git-refs
+      E2E_ARTIFACT_DIR: ${{ github.workspace }}/e2e/artifacts
+      E2E_CODEX_MODEL: ${{ inputs.agent == 'codex' && 'gpt-5.4-mini' || '' }}
+      E2E_GEMINI_MODEL: ${{ inputs.agent == 'gemini-cli' && 'gemini-3.1-flash-lite' || '' }}
+      E2E_CONCURRENT_TEST_LIMIT: ${{ inputs.agent == 'gemini-cli' && '6' || inputs.agent == 'factoryai-droid' && '1' || inputs.agent == 'cursor-cli' && '2' || '' }}
+    steps:
+      - name: Checkout runner implementation
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Validate selection
+        run: |
+          case "$CLI_SOURCE" in source|nightly) ;; *) echo "invalid CLI source: $CLI_SOURCE" >&2; exit 2 ;; esac
+          case "$RUNNER_OS/$E2E_AGENT" in
+            Windows/cursor-cli|Windows/factoryai-droid)
+              echo "$E2E_AGENT is not supported by the Windows E2E harness" >&2; exit 2 ;;
+          esac
+
+      - name: Setup runner tools
+        uses: jdx/mise-action@f10502fc09dadecfefb962fff68ce77213930204 # v4
+
+      - name: Build reporter
+        run: |
+          binary="$RUNNER_TEMP/e2e-testreport.exe"
+          go build -o "$binary" ./e2e/cmd/testreport
+          if [ "$RUNNER_OS" = Windows ]; then binary=$(cygpath -u "$binary"); fi
+          echo "E2E_TESTREPORT_BIN=$binary" >> "$GITHUB_ENV"
+
+      - name: Install nightly CLI (Linux)
+        if: inputs.cli-source == 'nightly' && runner.os == 'Linux'
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          curl -fsSL https://entire.io/install.sh | bash -s -- --channel nightly
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Install nightly CLI (macOS)
+        if: inputs.cli-source == 'nightly' && runner.os == 'macOS'
+        run: |
+          brew tap entireio/tap
+          brew trust entireio/tap
+          brew install --cask entire@nightly
+
+      - name: Install nightly CLI (Windows)
+        if: inputs.cli-source == 'nightly' && runner.os == 'Windows'
+        shell: pwsh
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          iex "& {$(irm https://entire.io/install.ps1)} -Channel nightly"
+          "$HOME\.local\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
+      - name: Resolve nightly tag and binary (Unix)
+        if: inputs.cli-source == 'nightly' && runner.os != 'Windows'
+        run: |
+          version_line=$(entire version | head -1)
+          echo "$version_line"
+          tag="v$(echo "$version_line" | awk '{print $3}')"
+          case "$tag" in v*-nightly.*) ;; *) echo "expected a nightly version, got '$tag'" >&2; exit 1 ;; esac
+          {
+            echo "NIGHTLY_TAG=$tag"
+            echo "E2E_ENTIRE_BIN=$(command -v entire)"
+          } >> "$GITHUB_ENV"
+
+      - name: Resolve nightly tag and binary (Windows)
+        if: inputs.cli-source == 'nightly' && runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $versionLine = (entire version | Select-Object -First 1)
+          Write-Host $versionLine
+          $tag = "v$($versionLine.Split(' ')[2])"
+          if ($tag -notlike "v*-nightly.*") { throw "expected a nightly version, got '$tag'" }
+          "NIGHTLY_TAG=$tag" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "E2E_ENTIRE_BIN=$((Get-Command entire).Source)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Install tmux (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y tmux
+
+      - name: Install tmux (macOS)
+        if: runner.os == 'macOS'
+        run: brew install tmux
+
+      - name: Install selected agent (Unix)
+        if: runner.os != 'Windows'
+        run: |
+          case "$E2E_AGENT" in
+            claude-code) curl -fsSL https://claude.ai/install.sh | bash ;;
+            opencode) npm install -g opencode-ai ;;
+            gemini-cli) npm install -g @google/gemini-cli ;;
+            codex) npm install -g @openai/codex ;;
+            cursor-cli) curl -fsSL https://cursor.com/install | bash ;;
+            factoryai-droid) curl -fsSL https://app.factory.ai/cli | sh ;;
+            copilot-cli) npm install -g @github/copilot ;;
+            roger-roger) ;;
+            *) echo "unsupported agent: $E2E_AGENT" >&2; exit 2 ;;
+          esac
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Install selected agent (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          switch ($env:E2E_AGENT) {
+            'claude-code' { irm https://claude.ai/install.ps1 | iex }
+            'opencode' { npm install -g opencode-ai; if ($LASTEXITCODE -ne 0) { throw 'npm install failed' } }
+            'gemini-cli' { npm install -g @google/gemini-cli; if ($LASTEXITCODE -ne 0) { throw 'npm install failed' } }
+            'codex' { npm install -g @openai/codex; if ($LASTEXITCODE -ne 0) { throw 'npm install failed' } }
+            'copilot-cli' { npm install -g @github/copilot; if ($LASTEXITCODE -ne 0) { throw 'npm install failed' } }
+            'roger-roger' { }
+            default { throw "unsupported agent: $env:E2E_AGENT" }
+          }
+          "$HOME\.local\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
+      - name: Run agent tests
+        id: tests
+        timeout-minutes: ${{ inputs.test-timeout-minutes }}
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          FACTORY_API_KEY: ${{ secrets.FACTORY_API_KEY }}
+          CURSOR_API_KEY: ${{ secrets.CURSOR_API_KEY }}
+          COPILOT_GITHUB_TOKEN: ${{ secrets.COPILOT_GITHUB_TOKEN }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          E2E_REQUIRE_CREDENTIALS: '1'
+          E2E_BOOTSTRAP: '1'
+        run: |
+          runner_script="$PWD/scripts/e2e-run.sh"
+          mise exec -- sh "$runner_script" "$E2E_AGENT" "$TEST_REGEX"
+
+      - name: Collect opencode logs
+        if: always() && inputs.agent == 'opencode'
+        run: |
+          mkdir -p "$E2E_ARTIFACT_DIR/opencode-logs"
+          cp -R "$HOME/.local/share/opencode/log/." "$E2E_ARTIFACT_DIR/opencode-logs/" || true
+
+      - name: Summarize
+        if: always()
+        env:
+          TEST_OUTCOME: ${{ steps.tests.outcome }}
+        run: |
+          {
+            echo "### $E2E_AGENT on $RUNNER_OS"
+            echo ""
+            echo "Version: ${NIGHTLY_TAG:-$GITHUB_SHA}"
+            echo "Backend: $E2E_CHECKPOINT_STORE"
+            echo "Tests: ${TEST_OUTCOME:-not run}"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: ${{ inputs.artifact-name || format('e2e-{0}-{1}', inputs.agent, inputs.runner) }}
+          path: e2e/artifacts/
+          retention-days: 7

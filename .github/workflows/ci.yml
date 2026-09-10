@@ -56,10 +56,10 @@ jobs:
     timeout-minutes: 30
     strategy:
       fail-fast: false
-      # Run the (no-cost, no-API) Vogon canary against each checkpoint backend so
-      # the git-refs store is guarded on every PR alongside the default git-branch.
+      # Free PR coverage for the default git-refs store and legacy git-branch.
+      # The canary also covers the deterministic roger-roger external agent.
       matrix:
-        checkpoint_store: [git-branch, git-refs]
+        checkpoint_store: [git-refs, git-branch]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

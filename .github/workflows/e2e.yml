@@ -4,11 +4,12 @@ on:
   workflow_dispatch:
     inputs:
       agent:
-        description: 'Run a single agent (leave empty for all)'
+        description: 'Agent selection (all: standard matrix)'
         required: false
         type: choice
+        default: all
         options:
-          - ''
+          - all
           - claude-code
           - opencode
           - gemini-cli
@@ -17,160 +18,147 @@ on:
           - copilot-cli
           - roger-roger
           - codex
+      test:
+        description: 'Test regex (empty runs the full suite)'
+        required: false
+        type: string
+        default: ''
+      runner:
+        description: Runner for the selected agents
+        type: choice
+        default: ubuntu-latest
+        options: [ubuntu-latest, macos-latest, windows-latest]
   push:
     branches:
       - main
 
-# Concurrency: only one E2E job runs at a time
+# Cancel an older source-suite run when a new one starts.
 concurrency:
   group: e2e-tests
   cancel-in-progress: true
 
 jobs:
-  # Build the matrix dynamically so workflow_dispatch can select a single agent.
-  matrix-setup:
-    runs-on: ubuntu-latest
-    outputs:
-      agents: ${{ steps.set.outputs.agents }}
-    steps:
-      - id: set
-        # Pass the input through env rather than interpolating it into the script:
-        # `type: choice` only constrains the UI, so a REST-API dispatch could inject
-        # shell metacharacters here otherwise.
-        env:
-          AGENT_INPUT: ${{ github.event.inputs.agent }}
-        # gemini-cli is deliberately absent from the all-agents list. Since
-        # Gemini CLI 0.57.0 the agent forces `core.hooksPath=''` on every shell
-        # command it runs, so no checkpoint is recorded for a commit it makes and
-        # the leg fails for a reason no change on our side can fix. It stays in
-        # the workflow_dispatch choices above so the leg can be run by hand
-        # against a newer Gemini release; put it back in this list (it is still
-        # in the RED "reliable" tier in notify-slack) once one restores hooks.
-        run: |
-          input="$AGENT_INPUT"
-          if [ -n "$input" ]; then
-            echo "agents=[\"$input\"]" >> "$GITHUB_OUTPUT"
-          else
-            echo 'agents=["claude-code","opencode","factoryai-droid","cursor-cli","copilot-cli","roger-roger","codex"]' >> "$GITHUB_OUTPUT"
-          fi
-
-  e2e-tests:
-    needs: matrix-setup
-    runs-on: ubuntu-latest
-    timeout-minutes: 40
+  claude-code:
+    if: ${{ inputs.agent == 'claude-code' || inputs.agent == '' || inputs.agent == 'all' }}
+    name: claude-code (${{ inputs.runner || 'ubuntu-latest' }})
+    uses: ./.github/workflows/e2e-agent.yml
     permissions:
-      actions: read
       contents: read
-      # Needed by the copilot-cli leg. GitHub does not allow matrix expressions in
-      # `permissions:`, so this scope is granted to every leg's GITHUB_TOKEN. The
-      # token is kept away from non-copilot agents in two ways: it is only placed
-      # in COPILOT_GITHUB_TOKEN for the copilot-cli leg (see env blocks below), and
-      # checkout runs with persist-credentials: false so it is not left in
-      # .git/config for an agent process to read.
+    with:
+      agent: claude-code
+      runner: ${{ inputs.runner || 'ubuntu-latest' }}
+      test-regex: ${{ inputs.test }}
+    secrets:
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+
+  opencode:
+    if: ${{ inputs.agent == 'opencode' || ((inputs.agent == '' || inputs.agent == 'all') && inputs.runner != 'windows-latest') }}
+    name: opencode (${{ inputs.runner || 'ubuntu-latest' }})
+    uses: ./.github/workflows/e2e-agent.yml
+    permissions:
+      contents: read
+    with:
+      agent: opencode
+      runner: ${{ inputs.runner || 'ubuntu-latest' }}
+      test-regex: ${{ inputs.test }}
+    secrets:
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+
+  gemini-cli:
+    if: ${{ inputs.agent == 'gemini-cli' }}
+    name: gemini-cli (${{ inputs.runner || 'ubuntu-latest' }})
+    uses: ./.github/workflows/e2e-agent.yml
+    permissions:
+      contents: read
+    with:
+      agent: gemini-cli
+      runner: ${{ inputs.runner || 'ubuntu-latest' }}
+      test-regex: ${{ inputs.test }}
+    secrets:
+      GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+
+  factoryai-droid:
+    if: ${{ inputs.agent == 'factoryai-droid' || ((inputs.agent == '' || inputs.agent == 'all') && inputs.runner != 'windows-latest') }}
+    name: factoryai-droid (${{ inputs.runner || 'ubuntu-latest' }})
+    uses: ./.github/workflows/e2e-agent.yml
+    permissions:
+      contents: read
+    with:
+      agent: factoryai-droid
+      runner: ${{ inputs.runner || 'ubuntu-latest' }}
+      test-regex: ${{ inputs.test }}
+    secrets:
+      FACTORY_API_KEY: ${{ secrets.FACTORY_API_KEY }}
+
+  cursor-cli:
+    if: ${{ inputs.agent == 'cursor-cli' || ((inputs.agent == '' || inputs.agent == 'all') && inputs.runner != 'windows-latest') }}
+    name: cursor-cli (${{ inputs.runner || 'ubuntu-latest' }})
+    uses: ./.github/workflows/e2e-agent.yml
+    permissions:
+      contents: read
+    with:
+      agent: cursor-cli
+      runner: ${{ inputs.runner || 'ubuntu-latest' }}
+      test-regex: ${{ inputs.test }}
+    secrets:
+      CURSOR_API_KEY: ${{ secrets.CURSOR_API_KEY }}
+
+  copilot-cli:
+    if: ${{ inputs.agent == 'copilot-cli' || ((inputs.agent == '' || inputs.agent == 'all') && inputs.runner != 'windows-latest') }}
+    name: copilot-cli (${{ inputs.runner || 'ubuntu-latest' }})
+    uses: ./.github/workflows/e2e-agent.yml
+    permissions:
+      contents: read
       copilot-requests: write
-    strategy:
-      fail-fast: false
-      matrix:
-        agent: ${{ fromJson(needs.matrix-setup.outputs.agents) }}
+    with:
+      agent: copilot-cli
+      runner: ${{ inputs.runner || 'ubuntu-latest' }}
+      test-regex: ${{ inputs.test }}
+    secrets:
+      COPILOT_GITHUB_TOKEN: ${{ github.token }}
 
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          # Don't persist the (copilot-scoped) GITHUB_TOKEN in .git/config, where
-          # an agent process running in the checkout could read it.
-          persist-credentials: false
+  roger-roger:
+    if: ${{ inputs.agent == 'roger-roger' || ((inputs.agent == '' || inputs.agent == 'all') && inputs.runner != 'windows-latest') }}
+    name: roger-roger (${{ inputs.runner || 'ubuntu-latest' }})
+    uses: ./.github/workflows/e2e-agent.yml
+    permissions:
+      contents: read
+    with:
+      agent: roger-roger
+      runner: ${{ inputs.runner || 'ubuntu-latest' }}
+      test-regex: ${{ inputs.test || 'TestExternalAgent' }}
 
-      - name: Setup mise
-        uses: jdx/mise-action@f10502fc09dadecfefb962fff68ce77213930204 # v4
-
-      - name: Install system dependencies
-        run: sudo apt-get update && sudo apt-get install -y tmux
-
-      - name: Install agent CLI
-        run: |
-          case "${{ matrix.agent }}" in
-            claude-code) curl -fsSL https://claude.ai/install.sh | bash ;;
-            opencode)    curl -fsSL https://opencode.ai/install | bash ;;
-            gemini-cli)  npm install -g @google/gemini-cli ;;
-            codex)       npm install -g @openai/codex ;;
-            cursor-cli)  curl https://cursor.com/install -fsS | bash ;;
-            factoryai-droid) curl -fsSL https://app.factory.ai/cli | sh ;;
-            copilot-cli)  npm install -g @github/copilot  ;;
-            roger-roger) ;; # installed by mise (see mise.toml)
-          esac
-          echo "$HOME/.local/bin" >> $GITHUB_PATH
-
-      - name: Verify roger-roger agent
-        if: matrix.agent == 'roger-roger'
-        run: |
-          set -euo pipefail
-          echo "Verifying roger-roger binaries on PATH..."
-          command -v roger-roger
-          command -v entire-agent-roger-roger
-
-      - name: Bootstrap agent
-        if: matrix.agent != 'roger-roger'
-        env:
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-          CURSOR_API_KEY: ${{ secrets.CURSOR_API_KEY }}
-          FACTORY_API_KEY: ${{ secrets.FACTORY_API_KEY }}
-          # Only the copilot-cli leg gets the token; other agents must not receive it.
-          COPILOT_GITHUB_TOKEN: ${{ matrix.agent == 'copilot-cli' && github.token || '' }}
-        run: go run ./e2e/bootstrap
-
-      - name: Run E2E Tests
-        env:
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-          E2E_CODEX_MODEL: ${{ matrix.agent == 'codex' && 'gpt-5.4-mini' || '' }}
-          E2E_GEMINI_MODEL: ${{ matrix.agent == 'gemini-cli' && 'gemini-3.1-flash-lite' || '' }}
-          CURSOR_API_KEY: ${{ secrets.CURSOR_API_KEY }}
-          FACTORY_API_KEY: ${{ secrets.FACTORY_API_KEY }}
-          # Only the copilot-cli leg gets the token; other agents must not receive it.
-          COPILOT_GITHUB_TOKEN: ${{ matrix.agent == 'copilot-cli' && github.token || '' }}
-          E2E_CONCURRENT_TEST_LIMIT: ${{ matrix.agent == 'gemini-cli' && '6' || matrix.agent == 'factoryai-droid' && '1' || matrix.agent == 'cursor-cli' && '2' || '' }}
-        # roger-roger is deterministic, so it runs through its dedicated task,
-        # which does NOT enable --rerun-fails. Routing it through the default
-        # task (`test:e2e`) would retry a real regression and mask it.
-        run: |
-          if [ "${{ matrix.agent }}" = "roger-roger" ]; then
-            mise run test:e2e:roger-roger TestExternalAgent
-          else
-            mise run test:e2e --agent ${{ matrix.agent }}
-          fi
-
-      # opencode writes nothing to stdout or stderr while it stalls during
-      # startup, so a hung `opencode run` reaches us as an empty-output SIGKILL
-      # naming no cause — which is exactly how the 2026-09-03 red streak looked
-      # from the artifacts. Its own log dir is the only record of what it was
-      # waiting on, so fold it into the artifact tree. Best-effort: a leg that
-      # never got as far as writing logs must not fail here.
-      - name: Collect opencode logs
-        if: always() && matrix.agent == 'opencode'
-        run: |
-          mkdir -p e2e/artifacts/opencode-logs
-          cp -R "$HOME/.local/share/opencode/log/." e2e/artifacts/opencode-logs/ || true
-
-      - name: Upload artifacts
-        if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
-        with:
-          name: e2e-artifacts-${{ matrix.agent }}
-          path: e2e/artifacts/
-          retention-days: 7
+  codex:
+    if: ${{ inputs.agent == 'codex' || ((inputs.agent == '' || inputs.agent == 'all') && inputs.runner != 'windows-latest') }}
+    name: codex (${{ inputs.runner || 'ubuntu-latest' }})
+    uses: ./.github/workflows/e2e-agent.yml
+    permissions:
+      contents: read
+    with:
+      agent: codex
+      runner: ${{ inputs.runner || 'ubuntu-latest' }}
+      test-regex: ${{ inputs.test }}
+    secrets:
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
 
   e2e-windows:
-    uses: ./.github/workflows/e2e-windows.yml
-    secrets: inherit
+    if: github.event_name == 'push'
+    name: claude-code (windows-latest)
+    uses: ./.github/workflows/e2e-agent.yml
+    permissions:
+      contents: read
+    with:
+      agent: claude-code
+      runner: windows-latest
+    secrets:
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
 
   notify-slack:
     runs-on: ubuntu-latest
-    needs: [e2e-tests, e2e-windows]
-    if: ${{ always() && (needs.e2e-tests.result == 'failure' || needs.e2e-windows.result == 'failure') && github.event_name == 'push' }}
+    needs: [claude-code, opencode, gemini-cli, factoryai-droid, cursor-cli, copilot-cli, roger-roger, codex, e2e-windows]
+    if: ${{ always() && contains(needs.*.result, 'failure') && github.event_name == 'push' }}
+    permissions:
+      actions: read
     steps:
       # Classify the failed jobs into two severities:
       #   RED    — a "reliable" agent (or Windows) failed. These pass on every
@@ -183,8 +171,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          # Reliable tier (RED). The e2e-windows reusable job is also RED but
-          # is matched separately below since it has no "(agent)" suffix.
+          # Windows remains a reliable leg regardless of its selected agent.
           reliable="claude-code opencode gemini-cli roger-roger"
 
           failed_names=$(gh api --paginate \
@@ -196,13 +183,17 @@ jobs:
           while IFS= read -r name; do
             [ -z "$name" ] && continue
             case "$name" in
-              *e2e-windows*) red="$red windows"; continue ;;
+              *windows-latest*) red="$red windows"; continue ;;
             esac
-            # "e2e-tests (cursor-cli)" -> "cursor-cli"
-            agent="${name#*(}"; agent="${agent%)*}"
+            # Reusable jobs end in " / <agent>".
+            agent="${name##* / }"
             case " $reliable " in
               *" $agent "*) red="$red $agent" ;;
-              *)            yellow="$yellow $agent" ;;
+              *)
+                case "$agent" in
+                  codex|cursor-cli|factoryai-droid|copilot-cli) yellow="$yellow $agent" ;;
+                  *) red="$red infrastructure" ;;
+                esac ;;
             esac
           done <<EOF
           $failed_names

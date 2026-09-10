@@ -8,70 +8,20 @@ set -eu
 mise run build
 export E2E_ENTIRE_BIN="$PWD/entire"
 
-# Build vogon binary
-go build -o vogon ./e2e/vogon
-E2E_PATH="$PWD:$PATH"
-
 if [ -z "${E2E_ARTIFACT_DIR:-}" ]; then
   E2E_ARTIFACT_DIR="$PWD/e2e/artifacts/canary-$(date +%Y-%m-%dT%H-%M-%S)"
 fi
 export E2E_ARTIFACT_DIR
-mkdir -p "$E2E_ARTIFACT_DIR"
-echo "artifacts: $E2E_ARTIFACT_DIR"
-
 filter="${usage_filter:-}"
 vogon_rc=0
 rr_rc=0
 
-# --- vogon: runs all tests (built-in agent) ---
 echo "--- canary: vogon ---"
+E2E_REPORT_SUFFIX=-vogon sh scripts/e2e-run.sh vogon "$filter" || vogon_rc=$?
 
-# Preflight, mirroring the roger-roger check below: vogon registers itself only
-# if its binary is on PATH when the test binary starts. Without it nothing
-# registers, every test skips, and the lane exits 0 having run nothing.
-if ! PATH="$E2E_PATH" command -v vogon >/dev/null 2>&1; then
-  echo "error: vogon binary not found on PATH after build; the canary lane would skip every test and still report success." >&2
-  exit 1
-fi
-
-PATH="$E2E_PATH" E2E_AGENT=vogon gotestsum --format dots \
-  --jsonfile "$E2E_ARTIFACT_DIR/test-events-vogon.json" -- \
-  -tags=e2e -count=1 -timeout=10m \
-  ${filter:+-run "$filter"} \
-  ./e2e/tests/... || vogon_rc=$?
-
-go run ./e2e/cmd/testreport -color \
-  -o "$E2E_ARTIFACT_DIR/report-vogon.txt" \
-  "$E2E_ARTIFACT_DIR/test-events-vogon.json"
-
-# --- roger-roger: external agent tests only (binaries from mise) ---
 echo "--- canary: roger-roger ---"
+E2E_REPORT_SUFFIX=-roger-roger sh scripts/e2e-run.sh roger-roger "${filter:-TestExternalAgent}" || rr_rc=$?
 
-# Preflight: ensure required roger-roger binaries are on PATH so tests don't silently skip
-if ! command -v roger-roger >/dev/null 2>&1; then
-  echo "error: roger-roger binary not found on PATH; install/configure it before running roger-roger canary tests." >&2
-  exit 1
-fi
-
-if ! command -v entire-agent-roger-roger >/dev/null 2>&1; then
-  echo "error: entire-agent-roger-roger binary not found on PATH; install/configure it before running roger-roger canary tests." >&2
-  exit 1
-fi
-
-rr_filter="${filter:-TestExternalAgent}"
-E2E_AGENT=roger-roger gotestsum --format dots \
-  --jsonfile "$E2E_ARTIFACT_DIR/test-events-roger-roger.json" -- \
-  -tags=e2e -count=1 -timeout=10m \
-  -run "$rr_filter" \
-  ./e2e/tests/... || rr_rc=$?
-
-go run ./e2e/cmd/testreport -color \
-  -o "$E2E_ARTIFACT_DIR/report-roger-roger.txt" \
-  "$E2E_ARTIFACT_DIR/test-events-roger-roger.json"
-
-echo ""
-cat "$E2E_ARTIFACT_DIR/entire-version.txt" 2>/dev/null
-echo "artifacts: $E2E_ARTIFACT_DIR"
 if [ "$vogon_rc" -ne 0 ] || [ "$rr_rc" -ne 0 ]; then
   exit 1
 fi

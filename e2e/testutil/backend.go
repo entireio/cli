@@ -22,16 +22,15 @@ const (
 )
 
 // checkpointStoreMode reports the backend the suite is running against, defaulting
-// to the git-branch store.
+// to git-refs. An explicit E2E selection outranks an inherited CLI override.
 func checkpointStoreMode() string {
-	if envIsGitRefs("E2E_CHECKPOINT_STORE") || envIsGitRefs("ENTIRE_CHECKPOINTS_PRIMARY") {
-		return storeModeGitRefs
+	if mode := os.Getenv("E2E_CHECKPOINT_STORE"); mode != "" {
+		return mode
 	}
-	return storeModeGitBranch
-}
-
-func envIsGitRefs(key string) bool {
-	return os.Getenv(key) == storeModeGitRefs
+	if mode := os.Getenv("ENTIRE_CHECKPOINTS_PRIMARY"); mode != "" {
+		return mode
+	}
+	return storeModeGitRefs
 }
 
 // UsingGitRefs reports whether the suite is running against the per-checkpoint

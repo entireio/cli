@@ -242,15 +242,8 @@ func geminiTestHomeDir(repoDir string) string {
 }
 
 func configureDroidRepoSettings(repoDir string) error {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return fmt.Errorf("get home dir: %w", err)
-	}
-
-	globalSettingsPath := filepath.Join(home, ".factory", "settings.json")
 	repoSettingsPath := filepath.Join(repoDir, droidRepoSettingsPath)
-
-	if err := mergeDroidCustomModels(globalSettingsPath, repoSettingsPath); err != nil {
+	if err := writeDroidRepoSettings(repoSettingsPath); err != nil {
 		return err
 	}
 	if err := ensureGitInfoExcludeContains(repoDir, droidRepoSettingsPath); err != nil {
@@ -259,38 +252,13 @@ func configureDroidRepoSettings(repoDir string) error {
 	return nil
 }
 
-func mergeDroidCustomModels(globalSettingsPath, repoSettingsPath string) error {
-	globalSettings, err := loadJSONMap(globalSettingsPath, "global droid settings")
-	if err != nil {
-		return err
-	}
-
-	customModels, ok := globalSettings["customModels"]
-	if !ok {
-		return fmt.Errorf(
-			"global droid settings at %s missing customModels; repo-local %s shadows global settings",
-			globalSettingsPath,
-			repoSettingsPath,
-		)
-	}
-
-	var models []json.RawMessage
-	if err := json.Unmarshal(customModels, &models); err != nil {
-		return fmt.Errorf("parse customModels in %s: %w", globalSettingsPath, err)
-	}
-	if len(models) == 0 {
-		return fmt.Errorf("global droid settings at %s has empty customModels", globalSettingsPath)
-	}
-
+func writeDroidRepoSettings(repoSettingsPath string) error {
 	repoSettings, err := loadJSONMap(repoSettingsPath, "repo-local droid settings")
 	if err != nil {
 		return err
 	}
-	repoSettings["customModels"] = customModels
 
-	// Set the active custom model so interactive mode uses the BYOK model
-	// instead of prompting for selection. The value must match the Model
-	// field from the customModels entry (not the displayName).
+	// Select the Factory-managed model for interactive sessions too.
 	modelJSON, err := json.Marshal(agents.DefaultDroidModel())
 	if err != nil {
 		return fmt.Errorf("marshal model setting: %w", err)

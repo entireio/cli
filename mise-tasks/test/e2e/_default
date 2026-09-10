@@ -1,51 +1,8 @@
 #!/bin/sh
 #MISE description="Run E2E tests: mise run test:e2e --agent claude-code [filter]"
 #MISE quiet=true
-#USAGE flag "--agent <agent>" help="Agent (claude-code, gemini-cli, opencode, cursor-cli, copilot-cli)" default="" env="E2E_AGENT"
+#USAGE flag "--agent <agent>" help="Agent to test (empty: all installed agents)" default="" env="E2E_AGENT"
 #USAGE arg "[filter]" help="Test name filter (regex)" default=""
 
 set -eu
-
-export E2E_AGENT="${usage_agent:-}"
-
-# Build from source with version info unless a pre-built binary is provided.
-if [ -z "${E2E_ENTIRE_BIN:-}" ]; then
-  mise run build
-  if [ -f "$PWD/entire.exe" ]; then
-    export E2E_ENTIRE_BIN="$PWD/entire.exe"
-  else
-    export E2E_ENTIRE_BIN="$PWD/entire"
-  fi
-fi
-
-if [ -z "${E2E_ARTIFACT_DIR:-}" ]; then
-  E2E_ARTIFACT_DIR="$PWD/e2e/artifacts/$(date +%Y-%m-%dT%H-%M-%S)"
-fi
-export E2E_ARTIFACT_DIR
-mkdir -p "$E2E_ARTIFACT_DIR"
-echo "artifacts: $E2E_ARTIFACT_DIR"
-
-filter="${usage_filter:-}"
-
-# Use an explicit package path without the "..." wildcard. The wildcard
-# triggers a Go toolchain panic on Windows ARM64 in modload/search.go
-# (slice bounds out of range) and a GetFileInformationByHandleEx error
-# with relative paths.
-#
-# --rerun-fails retries only the tests that failed (one extra attempt) to
-# absorb transient real-agent non-determinism. It requires --packages (so the
-# package list can no longer be a trailing positional arg) and -count=1. The
-# default --rerun-fails-max-failures=10 means a broadly-broken run (>10
-# failures) is reported as-is rather than retried, so a genuine regression
-# still surfaces. Do NOT add reruns to the deterministic canary/roger-roger
-# tasks — there a failure is always a real bug and must not be masked.
-gotestsum --format dots --rerun-fails=1 --packages=./e2e/tests \
-  --jsonfile "$E2E_ARTIFACT_DIR/test-events.json" -- \
-  -tags=e2e -count=1 -timeout=30m \
-  ${filter:+-run "$filter"} || rc=$?
-
-go run ./e2e/cmd/testreport -color -o "$E2E_ARTIFACT_DIR/report.txt" "$E2E_ARTIFACT_DIR/test-events.json"
-echo ""
-cat "$E2E_ARTIFACT_DIR/entire-version.txt" 2>/dev/null
-echo "artifacts: $E2E_ARTIFACT_DIR"
-exit "${rc:-0}"
+exec sh scripts/e2e-run.sh "${usage_agent:-}" "${usage_filter:-}"

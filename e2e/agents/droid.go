@@ -2,12 +2,10 @@ package agents
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"strings"
 	"time"
 )
@@ -56,87 +54,13 @@ func (d *Droid) IsTransientError(out Output, err error) bool {
 	return false
 }
 
-// droidSettings represents the ~/.factory/settings.json structure used for
-// BYOK (Bring Your Own Key) configuration.
-type droidSettings struct {
-	CustomModels []droidCustomModel `json:"customModels,omitempty"`
-}
+const defaultDroidModel = "claude-haiku-4-5-20251001"
 
-type droidCustomModel struct {
-	DisplayName    string `json:"displayName"`
-	Model          string `json:"model"`
-	BaseURL        string `json:"baseUrl"`
-	APIKey         string `json:"apiKey"`
-	Provider       string `json:"provider"`
-	MaxOutputToken int    `json:"maxOutputTokens"`
-}
-
-const (
-	// Droid v0.63+ expects custom model selection using custom:<model-id>.
-	// The displayName in settings is not accepted by --model.
-	droidCustomModelDisplayName = "claude-haiku-custom"
-	droidCustomModelBaseID      = "claude-haiku-4-5-20251001"
-	defaultDroidModel           = "custom:" + droidCustomModelBaseID
-)
-
-// DefaultDroidModel returns the default model string for Droid BYOK configuration.
-// Format is "custom:<baseModelID>" which the Droid API expects for custom model selection.
+// DefaultDroidModel returns the Factory-managed model used by Droid tests.
 func DefaultDroidModel() string { return defaultDroidModel }
 
-func (d *Droid) Bootstrap() error {
-	apiKey := os.Getenv("ANTHROPIC_API_KEY")
-	if apiKey == "" {
-		return nil
-	}
-
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return fmt.Errorf("get home dir: %w", err)
-	}
-	dir := filepath.Join(home, ".factory")
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return fmt.Errorf("mkdir %s: %w", dir, err)
-	}
-
-	settingsPath := filepath.Join(dir, "settings.json")
-
-	// Read existing settings to merge (hooks may already be configured
-	// in the repo-local .factory/settings.json, but the global config
-	// at ~/.factory/settings.json might have other pre-existing entries).
-	var settings droidSettings
-	if data, readErr := os.ReadFile(settingsPath); readErr == nil {
-		// Best-effort merge: ignore parse errors and start fresh
-		_ = json.Unmarshal(data, &settings)
-	}
-
-	// Replace or add the BYOK model entry.
-	byokModel := droidCustomModel{
-		DisplayName:    droidCustomModelDisplayName,
-		Model:          droidCustomModelBaseID,
-		BaseURL:        "https://api.anthropic.com",
-		APIKey:         apiKey,
-		Provider:       "anthropic",
-		MaxOutputToken: 8192,
-	}
-
-	found := false
-	for i, m := range settings.CustomModels {
-		if m.Model == byokModel.Model {
-			settings.CustomModels[i] = byokModel
-			found = true
-			break
-		}
-	}
-	if !found {
-		settings.CustomModels = append(settings.CustomModels, byokModel)
-	}
-
-	data, err := json.MarshalIndent(settings, "", "  ")
-	if err != nil {
-		return fmt.Errorf("marshal settings: %w", err)
-	}
-	return os.WriteFile(settingsPath, data, 0o644)
-}
+// Bootstrap needs no model configuration: Factory authenticates with FACTORY_API_KEY.
+func (d *Droid) Bootstrap() error { return nil }
 
 func (d *Droid) RunPrompt(ctx context.Context, dir string, prompt string, opts ...Option) (Output, error) {
 	cfg := &runConfig{Model: defaultDroidModel}
