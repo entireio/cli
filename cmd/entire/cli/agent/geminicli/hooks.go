@@ -13,6 +13,7 @@ import (
 	"slices"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
+	"github.com/entireio/cli/cmd/entire/cli/agent/globalhooks"
 	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
@@ -94,7 +95,10 @@ var geminiHookSpecs = []geminiHookSpec{
 
 // productionCommand returns the exact production command an install writes
 // for this spec.
-func (s geminiHookSpec) productionCommand() string {
+func (s geminiHookSpec) productionCommand(selected ...globalhooks.Selection) string {
+	if len(selected) != 0 {
+		return selected[0].Command("gemini", s.hookName)
+	}
 	cmd := "entire hooks gemini " + s.hookName
 	if s.warnWrap {
 		return agent.WrapProductionJSONWarningHookCommand(cmd, agent.WarningFormatSingleLine)
@@ -109,25 +113,40 @@ func (s geminiHookSpec) productionCommand() string {
 // install while most hooks never fire. Entries are matched by name+command
 // within the section, tolerating a user-adjusted matcher, mirroring the Claude
 // Code predicate's leniency.
-func userHooksCurrent(sections map[string]*[]GeminiHookMatcher) bool {
+func userHooksCurrent(sections map[string]*[]GeminiHookMatcher, selected ...globalhooks.Selection) bool {
+	managed := 0
+	for _, matchers := range sections {
+		for _, matcher := range *matchers {
+			for _, hook := range matcher.Hooks {
+				if isEntireHookEntry(hook) {
+					managed++
+				}
+			}
+		}
+	}
+	if managed != len(geminiHookSpecs) {
+		return false
+	}
 	for _, spec := range geminiHookSpecs {
 		matchers := sections[spec.section]
-		if matchers == nil || !sectionHasEntry(*matchers, spec.name, spec.productionCommand()) {
+		present := false
+		if matchers != nil {
+			for _, matcher := range *matchers {
+				if matcher.Matcher != spec.matcher {
+					continue
+				}
+				for _, hook := range matcher.Hooks {
+					if hook.Type == "command" && hook.Name == spec.name && hook.Command == spec.productionCommand(selected...) {
+						present = true
+					}
+				}
+			}
+		}
+		if !present {
 			return false
 		}
 	}
 	return true
-}
-
-func sectionHasEntry(matchers []GeminiHookMatcher, name, command string) bool {
-	for _, matcher := range matchers {
-		for _, hook := range matcher.Hooks {
-			if hook.Name == name && hook.Command == command {
-				return true
-			}
-		}
-	}
-	return false
 }
 
 // hookSections exposes the managed hook sections keyed by their settings-file
@@ -157,7 +176,7 @@ func newGeminiHookSections() map[string]*[]GeminiHookMatcher {
 // expected Entire entry set in current production form — the user-scope
 // completeness predicate the user-scope install repairs to. A missing file is
 // an fs.ErrNotExist error, matching areHooksInstalledInFile.
-func areUserHooksCurrentInFile(file hookSettingsIO) (bool, error) {
+func areUserHooksCurrentInFile(file hookSettingsIO, selected ...globalhooks.Selection) (bool, error) {
 	data, err := file.Read()
 	if err != nil {
 		return false, fmt.Errorf("read %s: %w", file.Path(), err)
@@ -166,7 +185,7 @@ func areUserHooksCurrentInFile(file hookSettingsIO) (bool, error) {
 	if err := json.Unmarshal(data, &settings); err != nil {
 		return false, fmt.Errorf("parse %s: %w", file.Path(), err)
 	}
-	return userHooksCurrent(settings.Hooks.hookSections()), nil
+	return settings.HooksConfig.Enabled && userHooksCurrent(settings.Hooks.hookSections(), selected...), nil
 }
 
 // hookSettingsIO abstracts where a hook install reads and writes its settings
@@ -237,7 +256,7 @@ func (g *GeminiCLIAgent) InstallHooks(ctx context.Context, force bool) (int, err
 // repaired reports a user-scope rewrite that touched pre-existing Entire
 // entries or legacy fields, so the caller can report the repair instead of
 // "already installed". Repo-scope behavior is unchanged.
-func installHooksToFile(ctx context.Context, file hookSettingsIO, force, userScope bool) (count int, repaired bool, err error) {
+func installHooksToFile(ctx context.Context, file hookSettingsIO, force, userScope bool, selected ...globalhooks.Selection) (count int, repaired bool, err error) {
 	settingsPath := file.Path()
 	// Read existing settings if they exist
 	var rawSettings map[string]json.RawMessage
@@ -285,12 +304,13 @@ func installHooksToFile(ctx context.Context, file hookSettingsIO, force, userSco
 	cleanupDone := stripLegacyHooksEnabledField(ctx, rawHooks)
 
 	// hooksConfig.enabled must be true for Gemini CLI to execute hooks.
+	hooksWereEnabled := bytes.Equal(bytes.TrimSpace(hooksConfig["enabled"]), []byte("true"))
 	hooksConfig["enabled"] = json.RawMessage("true")
 
 	const cmdPrefix = "entire hooks gemini "
 	wantCommands := make([]string, 0, len(geminiHookSpecs))
 	for _, spec := range geminiHookSpecs {
-		wantCommands = append(wantCommands, spec.productionCommand())
+		wantCommands = append(wantCommands, spec.productionCommand(selected...))
 	}
 	sections := newGeminiHookSections()
 	if err := parseGeminiHookSections(rawHooks, settingsPath, sections); err != nil {
@@ -300,9 +320,9 @@ func installHooksToFile(ctx context.Context, file hookSettingsIO, force, userSco
 	// Check for idempotency BEFORE removing hooks. When cleanupDone, we still
 	// need to write the file to persist the cleanup, but we return 0 (not 12)
 	// so callers know no hooks were added.
-	if !force && installAlreadyCurrent(sections, cmdPrefix, userScope) &&
+	if !force && installAlreadyCurrent(sections, cmdPrefix, userScope, selected...) &&
 		!hasStaleEntireHook(sectionLists(sections), wantCommands) {
-		if !cleanupDone {
+		if !cleanupDone && (!userScope || hooksWereEnabled) {
 			return 0, false, nil // Already installed with same mode, nothing to write
 		}
 		// The legacy-field cleanup rewrote an otherwise-current file: a
@@ -320,7 +340,7 @@ func installHooksToFile(ctx context.Context, file hookSettingsIO, force, userSco
 	}
 	for _, spec := range geminiHookSpecs {
 		matchers := sections[spec.section]
-		*matchers = addGeminiHook(*matchers, spec.matcher, spec.name, spec.productionCommand())
+		*matchers = addGeminiHook(*matchers, spec.matcher, spec.name, spec.productionCommand(selected...))
 	}
 	count = len(geminiHookSpecs)
 	for section, matchers := range sections {
@@ -338,7 +358,7 @@ func installHooksToFile(ctx context.Context, file hookSettingsIO, force, userSco
 // the repair pass); repo scope keeps the historical check, where the
 // SessionStart entry in the exact current-mode form stands in for the whole
 // install.
-func installAlreadyCurrent(sections map[string]*[]GeminiHookMatcher, cmdPrefix string, userScope bool) bool {
+func installAlreadyCurrent(sections map[string]*[]GeminiHookMatcher, cmdPrefix string, userScope bool, selected ...globalhooks.Selection) bool {
 	// An exact duplicate of a current entry is not "current": it fires the
 	// hook twice per event — machine-wide in user scope — and only the
 	// remove-and-re-add pass below heals it (Claude Code's user-hook
@@ -347,7 +367,7 @@ func installAlreadyCurrent(sections map[string]*[]GeminiHookMatcher, cmdPrefix s
 		return false
 	}
 	if userScope {
-		return userHooksCurrent(sections)
+		return userHooksCurrent(sections, selected...)
 	}
 	expectedCmd := agent.WrapProductionJSONWarningHookCommand(cmdPrefix+"session-start", agent.WarningFormatSingleLine)
 	return getFirstEntireHookCommand(*sections["SessionStart"]) == expectedCmd

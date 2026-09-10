@@ -9,14 +9,13 @@ import (
 	"path/filepath"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
+	"github.com/entireio/cli/cmd/entire/cli/agent/globalhooks"
 )
 
 // Ensure GeminiCLIAgent implements UserHookSupport.
 var _ agent.UserHookSupport = (*GeminiCLIAgent)(nil)
 
-// UserSettingsPath returns ~/.gemini/settings.json. Gemini concatenates hook
-// scopes and deduplicates byte-identical name+command pairs, which is why the
-// user and repository installers share production forms.
+// UserSettingsPath returns ~/.gemini/settings.json.
 func UserSettingsPath() (string, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -27,9 +26,12 @@ func UserSettingsPath() (string, error) {
 
 // InstallUserHooks installs Entire's hooks in ~/.gemini/settings.json so they
 // fire in every repository (the user-level surface behind global tracking).
-// Always the plain production `entire` command form; preserves every
-// unrelated key in the user settings file.
+// Uses the explicitly selected installation and preserves unrelated settings.
 func (g *GeminiCLIAgent) InstallUserHooks(ctx context.Context) (agent.UserHookInstallResult, error) {
+	selected, err := globalhooks.Load()
+	if err != nil {
+		return agent.UserHookInstallResult{}, fmt.Errorf("select Gemini CLI user hook installation: %w", err)
+	}
 	settingsPath, err := UserSettingsPath()
 	if err != nil {
 		return agent.UserHookInstallResult{}, err
@@ -39,7 +41,7 @@ func (g *GeminiCLIAgent) InstallUserHooks(ctx context.Context) (agent.UserHookIn
 		return agent.UserHookInstallResult{}, fmt.Errorf("lock Gemini CLI user hook settings: %w", err)
 	}
 	defer release()
-	count, repaired, err := installHooksToFile(ctx, userSettingsIO{path: settingsPath}, false, true)
+	count, repaired, err := installHooksToFile(ctx, userSettingsIO{path: settingsPath}, false, true, selected)
 	return agent.UserHookInstallResult{Installed: count, Repaired: repaired}, err
 }
 
@@ -61,11 +63,15 @@ func (g *GeminiCLIAgent) UninstallUserHooks(ctx context.Context) error {
 // AreUserHooksInstalled requires the complete current inventory. Missing is
 // false; unreadable or invalid settings return an error.
 func (g *GeminiCLIAgent) AreUserHooksInstalled(_ context.Context) (bool, error) {
+	selected, err := globalhooks.Load()
+	if err != nil {
+		return false, nil //nolint:nilerr // An unavailable selection cannot own user hooks.
+	}
 	settingsPath, err := UserSettingsPath()
 	if err != nil {
 		return false, err
 	}
-	current, err := areUserHooksCurrentInFile(userSettingsIO{path: settingsPath})
+	current, err := areUserHooksCurrentInFile(userSettingsIO{path: settingsPath}, selected)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
 			return false, nil

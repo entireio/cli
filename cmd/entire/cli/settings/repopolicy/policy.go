@@ -5,7 +5,7 @@ import "context"
 // ClassifyRepoPolicy resolves one read-only repository-policy snapshot for
 // the current directory. It never writes.
 func ClassifyRepoPolicy(ctx context.Context) (RepoPolicy, error) {
-	return ClassifyRepoPolicyAt(ctx, ".")
+	return classifyRepoPolicy(ctx, ResolveRepository)
 }
 
 // ClassifyRepoPolicyAt classifies an explicit worktree. Precedence:
@@ -23,7 +23,13 @@ func ClassifyRepoPolicy(ctx context.Context) (RepoPolicy, error) {
 //
 // Trust (checkpoint egress) is decided last from the same inputs.
 func ClassifyRepoPolicyAt(ctx context.Context, dir string) (RepoPolicy, error) {
-	policy, inputs, err := classifyActivationAt(ctx, dir)
+	return classifyRepoPolicy(ctx, func(ctx context.Context) (Repository, error) {
+		return ResolveRepositoryAt(ctx, dir)
+	})
+}
+
+func classifyRepoPolicy(ctx context.Context, resolve RepositoryResolver) (RepoPolicy, error) {
+	policy, inputs, err := classifyActivation(ctx, resolve)
 	if err != nil || inputs.skipEgress {
 		return policy, err
 	}
@@ -45,7 +51,9 @@ func ClassifyRepoPolicyAt(ctx context.Context, dir string) (RepoPolicy, error) {
 // and that election is scoped to the current worktree, so computing it for
 // another root would read the wrong repository's remotes and settings.
 func ClassifyActivationAt(ctx context.Context, dir string) (RepoPolicy, error) {
-	policy, _, err := classifyActivationAt(ctx, dir)
+	policy, _, err := classifyActivation(ctx, func(ctx context.Context) (Repository, error) {
+		return ResolveRepositoryAt(ctx, dir)
+	})
 	return policy, err
 }
 
@@ -61,8 +69,8 @@ type activationInputs struct {
 	skipEgress bool
 }
 
-func classifyActivationAt(ctx context.Context, dir string) (RepoPolicy, activationInputs, error) {
-	repository, err := ResolveRepositoryAt(ctx, dir)
+func classifyActivation(ctx context.Context, resolve RepositoryResolver) (RepoPolicy, activationInputs, error) {
+	repository, err := resolve(ctx)
 	if err != nil {
 		return inactiveGlobalPolicy(InactiveReasonGlobalOff), activationInputs{}, err
 	}

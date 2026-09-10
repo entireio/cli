@@ -11,6 +11,8 @@ import (
 	"os/exec"
 	"strings"
 	"unicode"
+
+	"github.com/entireio/cli/cmd/entire/cli/execx"
 )
 
 const (
@@ -135,6 +137,7 @@ func GetRemoteURLInDir(ctx context.Context, dir, remoteName string) (string, err
 	cmd := exec.CommandContext(ctx, "git", "remote", "get-url", remoteName)
 	if dir != "" {
 		cmd.Dir = dir
+		cmd.Env = execx.EnvWithoutRepoOverrides()
 	}
 	output, err := cmd.Output()
 	if err != nil {
@@ -215,6 +218,7 @@ func getAllRemoteConfig(ctx context.Context, dir, remoteName, key string) (urls 
 	cmd := exec.CommandContext(ctx, "git", "config", "--get-all", "remote."+remoteName+"."+key)
 	if dir != "" {
 		cmd.Dir = dir
+		cmd.Env = execx.EnvWithoutRepoOverrides()
 	}
 	output, err := cmd.Output()
 	if err != nil {
@@ -256,6 +260,7 @@ func isGitRepoDir(ctx context.Context, dir string) bool {
 	cmd := exec.CommandContext(ctx, "git", "rev-parse", "--git-dir")
 	if dir != "" {
 		cmd.Dir = dir
+		cmd.Env = execx.EnvWithoutRepoOverrides()
 	}
 	return cmd.Run() == nil
 }

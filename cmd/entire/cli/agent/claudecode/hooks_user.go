@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
+	"github.com/entireio/cli/cmd/entire/cli/agent/globalhooks"
 )
 
 // Ensure ClaudeCodeAgent implements UserHookSupport.
@@ -25,10 +26,12 @@ func UserSettingsPath() (string, error) {
 	return filepath.Join(home, ".claude", ClaudeSettingsFileName), nil
 }
 
-// InstallUserHooks installs the production-form hook inventory in user
-// settings, preserving unrelated keys and permissions. Matching repo/user
-// commands let Claude deduplicate entries across scopes.
+// InstallUserHooks installs the selected global ingress, preserving unrelated settings.
 func (c *ClaudeCodeAgent) InstallUserHooks(ctx context.Context) (agent.UserHookInstallResult, error) {
+	selected, err := globalhooks.Load()
+	if err != nil {
+		return agent.UserHookInstallResult{}, fmt.Errorf("select Claude Code user hook installation: %w", err)
+	}
 	settingsPath, err := UserSettingsPath()
 	if err != nil {
 		return agent.UserHookInstallResult{}, err
@@ -38,7 +41,7 @@ func (c *ClaudeCodeAgent) InstallUserHooks(ctx context.Context) (agent.UserHookI
 		return agent.UserHookInstallResult{}, fmt.Errorf("lock Claude Code user hook settings: %w", err)
 	}
 	defer release()
-	count, repaired, err := installHooksToFile(userSettingsIO{path: settingsPath}, false, false)
+	count, repaired, err := installHooksToFile(userSettingsIO{path: settingsPath}, false, false, selected)
 	return agent.UserHookInstallResult{Installed: count, Repaired: repaired}, err
 }
 
@@ -60,6 +63,10 @@ func (c *ClaudeCodeAgent) UninstallUserHooks(ctx context.Context) error {
 // AreUserHooksInstalled requires the complete current inventory. Missing is
 // false; unreadable or invalid settings return an error.
 func (c *ClaudeCodeAgent) AreUserHooksInstalled(_ context.Context) (bool, error) {
+	selected, err := globalhooks.Load()
+	if err != nil {
+		return false, nil //nolint:nilerr // An unavailable selection cannot own user hooks.
+	}
 	settingsPath, err := UserSettingsPath()
 	if err != nil {
 		return false, err
@@ -72,12 +79,30 @@ func (c *ClaudeCodeAgent) AreUserHooksInstalled(_ context.Context) (bool, error)
 		return false, err
 	}
 	sections := settings.Hooks.hookSections()
+	managed := 0
+	for _, matchers := range sections {
+		for _, matcher := range *matchers {
+			for _, hook := range matcher.Hooks {
+				if agent.IsManagedHookCommand(hook.Command) {
+					managed++
+				}
+			}
+		}
+	}
+	if managed != len(claudeHookSpecs) {
+		return false, nil
+	}
 	for _, spec := range claudeHookSpecs {
 		var present bool
-		if spec.matcher == "" {
-			present = hookCommandExists(*sections[spec.section], spec.productionCommand())
-		} else {
-			present = hookCommandExistsWithMatcher(*sections[spec.section], spec.matcher, spec.productionCommand())
+		for _, matcher := range *sections[spec.section] {
+			if matcher.Matcher != spec.matcher {
+				continue
+			}
+			for _, hook := range matcher.Hooks {
+				if hook.Type == "command" && hook.Command == spec.productionCommand(selected) {
+					present = true
+				}
+			}
 		}
 		if !present {
 			return false, nil

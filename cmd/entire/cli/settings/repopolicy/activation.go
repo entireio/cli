@@ -9,6 +9,8 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+
+	"github.com/entireio/cli/cmd/entire/cli/osroot"
 )
 
 // WorktreeRegistryRelative is the git-common-dir subtree holding per-worktree
@@ -71,10 +73,19 @@ var ClassifyLocalSettings = func(_ context.Context, path string) LocalSettingsVe
 // JSON or a non-boolean "enabled" is an error so callers fail closed.
 func ReadRepoActivation(ctx context.Context, worktreeRoot string) (RepoActivation, error) {
 	var activation RepoActivation
+	root, err := os.OpenRoot(worktreeRoot)
+	if errors.Is(err, fs.ErrNotExist) {
+		return activation, nil
+	}
+	if err != nil {
+		return RepoActivation{}, fmt.Errorf("open repository settings root: %w", err)
+	}
+	defer root.Close()
 	for i, name := range repoSettingsFiles {
 		path := filepath.Join(worktreeRoot, ".entire", name) // entire-join-ok: repo configuration lives in the literal worktree, never runtime-routed
+		relative := ".entire/" + name
 		isProject := i == 0
-		data, err := os.ReadFile(path) //nolint:gosec // fixed repo-relative configuration path
+		_, err := osroot.LstatNoSymlinks(root, relative)
 		if errors.Is(err, fs.ErrNotExist) {
 			continue
 		}
@@ -88,6 +99,10 @@ func ReadRepoActivation(ctx context.Context, worktreeRoot string) (RepoActivatio
 			if verdict = ClassifyLocalSettings(ctx, path); verdict == LocalSettingsTracked {
 				continue
 			}
+		}
+		data, err := osroot.ReadFileNoFollow(root, relative)
+		if err != nil {
+			return RepoActivation{}, fmt.Errorf("read repository settings: %w", err)
 		}
 		enabled, err := enabledFromSettingsData(data)
 		if err != nil {

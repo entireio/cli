@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/entireio/cli/cmd/entire/cli/agent/globalhooks"
 	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
 )
 
@@ -260,6 +261,9 @@ func DropStaleManagedHooks[E any](entries []E, commandOf func(E) string, want []
 // could silently omit — and omitting the legacy entries is precisely what leaves
 // an old hook installed forever.
 func IsManagedHookCommand(command string) bool {
+	if globalhooks.IsCommand(command) {
+		return true
+	}
 	if hasManagedHookPrefix(command) {
 		return true
 	}

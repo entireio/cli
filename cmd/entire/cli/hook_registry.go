@@ -90,6 +90,10 @@ func getHookType(hookName string) string {
 // built-in and external hook commands both pass true; tests may pass false
 // when session stamping is irrelevant.
 func executeAgentHook(cmd *cobra.Command, agentName types.AgentName, hookName string, stampSession bool) error {
+	globalIngress := cmd.Annotations[globalHookIngressAnnotation] != ""
+	if !globalHookScopeReplayActive() && globalIngress != globalHookOwnsAgent(cmd.Context(), agentName) {
+		return nil
+	}
 	// Skip if not in a git repository - hooks shouldn't prevent the agent
 	// from working. On SessionStart only, and only when the user opted in to
 	// global tracking (tier configured AND enabled), leave a one-line notice:

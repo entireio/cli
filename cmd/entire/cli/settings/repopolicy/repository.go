@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/entireio/cli/cmd/entire/cli/execx"
 	"github.com/entireio/cli/cmd/entire/cli/gitremote"
 	"github.com/entireio/cli/cmd/entire/cli/internal/worktreeid"
 )
@@ -57,14 +58,19 @@ func runtimeKey(worktreeID string) string {
 
 // ResolveRepository resolves repository facts for the current directory.
 func ResolveRepository(ctx context.Context) (Repository, error) {
-	return ResolveRepositoryAt(ctx, ".")
+	return resolveRepository(ctx, ".", nil)
 }
 
 // ResolveRepositoryAt resolves repository facts without importing the parent
 // settings or paths packages.
 func ResolveRepositoryAt(ctx context.Context, dir string) (Repository, error) {
+	return resolveRepository(ctx, dir, execx.EnvWithoutRepoOverrides())
+}
+
+func resolveRepository(ctx context.Context, dir string, env []string) (Repository, error) {
 	cmd := exec.CommandContext(ctx, "git", "rev-parse", "--show-toplevel", "--git-common-dir")
 	cmd.Dir = dir
+	cmd.Env = env
 	output, err := cmd.Output()
 	if err != nil {
 		return Repository{}, fmt.Errorf("resolving repository: %w", err)

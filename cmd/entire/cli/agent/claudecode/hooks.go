@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
+	"github.com/entireio/cli/cmd/entire/cli/agent/globalhooks"
 	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
@@ -130,7 +131,10 @@ var claudeHookSpecs = []claudeHookSpec{
 	{section: "PostToolUse", matcher: taskToolMatcher, hookName: HookNamePostTodo},
 }
 
-func (s claudeHookSpec) productionCommand() string {
+func (s claudeHookSpec) productionCommand(selected ...globalhooks.Selection) string {
+	if len(selected) != 0 {
+		return selected[0].Command("claude-code", s.hookName)
+	}
 	cmd := "entire hooks claude-code " + s.hookName
 	if s.warnWrap {
 		return agent.WrapProductionJSONWarningHookCommand(cmd, agent.WarningFormatMultiLine)
@@ -214,7 +218,7 @@ func readClaudeRawSettings(file hookSettingsIO, projectScope bool) (rawSettings,
 // repaired reports a user-scope rewrite that normalized pre-existing Entire
 // entries (rather than a pure add or a no-op), so the caller can report the
 // repair instead of "already installed".
-func installHooksToFile(file hookSettingsIO, force, projectScope bool) (count int, repaired bool, err error) {
+func installHooksToFile(file hookSettingsIO, force, projectScope bool, selected ...globalhooks.Selection) (count int, repaired bool, err error) {
 	settingsPath := file.Path()
 	rawSettings, rawHooks, rawPermissions, err := readClaudeRawSettings(file, projectScope)
 	if err != nil {
@@ -297,7 +301,7 @@ func installHooksToFile(file hookSettingsIO, force, projectScope bool) (count in
 
 	for _, spec := range claudeHookSpecs {
 		matchers := sections[spec.section]
-		*matchers = ensureHook(*matchers, checks[spec.section], spec.matcher, spec.productionCommand())
+		*matchers = ensureHook(*matchers, checks[spec.section], spec.matcher, spec.productionCommand(selected...))
 	}
 
 	// A normal repo-scoped enable also removes Entire's retired metadata deny

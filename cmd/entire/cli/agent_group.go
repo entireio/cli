@@ -31,6 +31,9 @@ Examples:
   entire agent add claude-code
   entire agent remove claude-code`,
 		PersistentPreRunE: func(cmd *cobra.Command, _ []string) error {
+			if cmd.Name() == "agent" {
+				return nil
+			}
 			if _, err := paths.WorktreeRoot(cmd.Context()); err != nil {
 				return errors.New("not a git repository")
 			}
@@ -48,6 +51,16 @@ Examples:
 }
 
 func runAgentMenu(ctx context.Context, w io.Writer) error {
+	global, err := chooseGlobalHookInstallation(ctx)
+	if err != nil {
+		return err
+	}
+	if global {
+		return enrollCurrentGlobalHookInstallation(ctx, w)
+	}
+	if _, err := paths.WorktreeRoot(ctx); err != nil {
+		return errors.New("not a git repository; run entire agent interactively to select an installation for global hooks")
+	}
 	opts := EnableOptions{Telemetry: true}
 	// Repo-level setup routes to management; so does a repo the global tier
 	// already captures — it has no settings files, but it is not "not set

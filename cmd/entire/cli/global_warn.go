@@ -1,8 +1,8 @@
 package cli
 
 import (
-	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -14,6 +14,7 @@ import (
 	"strings"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
+	"github.com/entireio/cli/cmd/entire/cli/agent/globalhooks"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
@@ -128,6 +129,13 @@ func reconcileUserHooks(ctx context.Context, us *settings.UserSettings, errW io.
 	if us == nil || !us.GlobalConfigured() || userHookMutationSuppressed() {
 		return
 	}
+	selectionUsable := true
+	if us.GlobalEnabled() {
+		if _, err := globalhooks.Load(); err != nil {
+			fmt.Fprintf(errW, "Note: global hooks need a usable selected installation. Run `entire agent` interactively and choose 'Select this installation for global hooks': %v\n", err)
+			selectionUsable = false
+		}
+	}
 	supports, _ := agent.UserHookSupports()
 	for _, candidate := range supports {
 		installed, err := candidate.Support.AreUserHooksInstalled(ctx)
@@ -135,18 +143,24 @@ func reconcileUserHooks(ctx context.Context, us *settings.UserSettings, errW io.
 			continue // doctor reports unreadable agent configs
 		}
 		switch {
-		case us.GlobalEnabled() && !installed && userHookAgentPresent(candidate.Name):
+		case us.GlobalEnabled() && selectionUsable && !installed && userHookAgentPresent(candidate.Name):
 			if _, err := candidate.Support.InstallUserHooks(ctx); err != nil {
 				fmt.Fprintf(errW, "Note: could not install %s user-level hooks for global tracking: %v\n", candidate.Name, err)
 				continue
 			}
 			fmt.Fprintf(errW, "entire: installed user-level %s hooks (global tracking is on)\n", candidate.Name)
-		case !us.GlobalEnabled() && installed:
+			fmt.Fprintln(errW, globalHookRestartNotice)
+		case (!us.GlobalEnabled() || !selectionUsable) && (installed || userHookConfigContainsEntire(candidate.Name)):
 			if err := candidate.Support.UninstallUserHooks(ctx); err != nil {
 				fmt.Fprintf(errW, "Note: could not remove %s user-level hooks: %v\n", candidate.Name, err)
 				continue
 			}
-			fmt.Fprintf(errW, "entire: removed user-level %s hooks (global tracking is off)\n", candidate.Name)
+			reason := "global tracking is off"
+			if !selectionUsable {
+				reason = "no usable installation is selected"
+			}
+			fmt.Fprintf(errW, "entire: removed user-level %s hooks (%s)\n", candidate.Name, reason)
+			fmt.Fprintln(errW, globalHookRestartNotice)
 		}
 	}
 }
@@ -192,5 +206,29 @@ func userHookConfigContainsEntire(name types.AgentName) bool {
 	if err != nil {
 		return false
 	}
-	return bytes.Contains(data, []byte("entire hooks")) || bytes.Contains(data, []byte("entire-dev"))
+	var config any
+	if json.Unmarshal(data, &config) != nil {
+		return false
+	}
+	return containsManagedHookCommand(config)
+}
+
+func containsManagedHookCommand(value any) bool {
+	switch v := value.(type) {
+	case string:
+		return agent.IsManagedHookCommand(v)
+	case []any:
+		for _, item := range v {
+			if containsManagedHookCommand(item) {
+				return true
+			}
+		}
+	case map[string]any:
+		for _, item := range v {
+			if containsManagedHookCommand(item) {
+				return true
+			}
+		}
+	}
+	return false
 }

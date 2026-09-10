@@ -3,6 +3,7 @@ package claudecode
 import (
 	"context"
 	"encoding/json"
+	"github.com/entireio/cli/cmd/entire/cli/agent/globalhooks"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -32,6 +33,18 @@ func claudeUserSettings(t *testing.T) string {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("USERPROFILE", home)
+	t.Setenv("ENTIRE_CONFIG_DIR", t.TempDir())
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	selected, err := globalhooks.New(executable)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := globalhooks.Save(t.Context(), selected); err != nil {
+		t.Fatal(err)
+	}
 	path := filepath.Join(home, ".claude", ClaudeSettingsFileName)
 	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
 		t.Fatal(err)

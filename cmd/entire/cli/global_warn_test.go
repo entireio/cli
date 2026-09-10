@@ -90,6 +90,7 @@ func TestReconcileUserHooks(t *testing.T) {
 
 	// Enabled: both supported agents get their inventories.
 	writeUserSettings(t, `{"global":{"enabled":true}}`)
+	selectTestHookInstallation(t)
 	out.Reset()
 	globalPostRun(ctx, &out)
 	for _, name := range []string{string(agent.AgentNameClaudeCode), string(agent.AgentNameGemini)} {
@@ -139,6 +140,7 @@ func TestReconcileUserHooks_SkipsAgentsNotOnThisMachine(t *testing.T) {
 	home := isolatedUserHome(t)
 	pretendAgentBinaries(t, "claude") // gemini absent
 	writeUserSettings(t, `{"global":{"enabled":true}}`)
+	selectTestHookInstallation(t)
 
 	var out bytes.Buffer
 	globalPostRun(context.Background(), &out)
