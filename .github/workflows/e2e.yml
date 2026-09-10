@@ -115,7 +115,7 @@ jobs:
       runner: ${{ inputs.runner || 'ubuntu-latest' }}
       test-regex: ${{ inputs.test }}
     secrets:
-      COPILOT_GITHUB_TOKEN: ${{ github.token }}
+      COPILOT_GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   roger-roger:
     if: ${{ inputs.agent == 'roger-roger' || ((inputs.agent == '' || inputs.agent == 'all') && inputs.runner != 'windows-latest') }}

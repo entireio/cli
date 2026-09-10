@@ -133,7 +133,7 @@ jobs:
       test-timeout-minutes: 20
       artifact-name: nightly-smoke-${{ matrix.runner }}-copilot-cli
     secrets:
-      COPILOT_GITHUB_TOKEN: ${{ github.token }}
+      COPILOT_GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   notify-slack:
     runs-on: ubuntu-latest

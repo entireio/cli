@@ -48,7 +48,7 @@ jobs:
 Each agent has a small caller job that passes only its named provider secret.
 The shared job exposes these as native environment variables, and the runner
 checks the selected agent's required key before building or running tests.
-Copilot passes `github.token` as `COPILOT_GITHUB_TOKEN`. Tokenless agents
+Copilot passes `secrets.GITHUB_TOKEN` as `COPILOT_GITHUB_TOKEN`. Tokenless agents
 omit secrets. Local runs can still use stored agent logins. Droid uses
 Factory-managed Claude Haiku with only the Factory key. Roger-roger needs no secret.
 Vogon runs through the local canary task in `ci.yml`. The shared job installs
@@ -63,7 +63,7 @@ For nightly runs, the job installs the published CLI through the OS-specific
 installer and runs the current tests against that binary. Agent configuration
 and reporting therefore stay consistent with source runs. Tests for features
 newer than the nightly binary may need a narrower `test-regex`. Copilot callers must grant `copilot-requests:
-write` when passing `github.token`; the shared job inherits caller permissions.
+write` when passing `secrets.GITHUB_TOKEN`; the shared job inherits caller permissions.
 
 ## Structure
 
