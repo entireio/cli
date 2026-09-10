@@ -403,12 +403,13 @@ Tests that spawn the real `entire` or `git` binary need the child to be non-inte
    it withdraws prompts from the largest agent population at once, which is a
    product decision rather than a detection fix.
 4. `CI=<non-empty-non-false>` → false.
-5. `/dev/tty` probe, plus its terminal mode → a terminal held in raw mode
-   (canonical input off) belongs to a full-screen TUI that spawned us, not to a
-   shell we can prompt: TUI git clients (lazygit, gitui, tig) run `git commit`
-   as a child while owning the screen, so the hook inherits a `/dev/tty` it
-   must not prompt on. Fails open when the mode can't be read. See
-   `interactive/rawmode_unix.go` for the rationale.
+5. Controlling-terminal probe — `/dev/tty` on Unix, `CONIN$` + `CONOUT$` on
+   Windows. A terminal held in raw mode (canonical/line input off) belongs to a
+   full-screen TUI that spawned us, not to a shell we can prompt: TUI git clients
+   (lazygit, gitui, tig) run `git commit` as a child while owning the screen, so
+   the hook inherits the same terminal it must not prompt on. The mode check
+   fails open when it cannot read the mode. See `interactive/tty_*.go` and
+   `interactive/rawmode_{unix,windows}.go` for the platform split and rationale.
 
 For subprocesses spawning the real `entire` binary (e2e, integration tests, `entire` calling itself from a hook), prefer `execx.NonInteractive` over env-var plumbing:
 
@@ -420,9 +421,9 @@ cmd.Dir = repoDir
 out, err := cmd.CombinedOutput()
 ```
 
-`execx.NonInteractive` puts the child in a new session with no controlling terminal (`Setsid` on Unix, `DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP` on Windows), so the child's `/dev/tty` probe fails naturally. No env var required.
+`execx.NonInteractive` puts the child in a new session with no controlling terminal (`Setsid` on Unix, `DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP` on Windows), so the child's platform terminal probe fails naturally. No env var required.
 
-`interactive.UnderTest()` returns true when `testing.Testing()` or `ENTIRE_TEST_TTY` is set — use it where code needs to skip a real-terminal operation even if `CanPromptInteractively()` returns true (e.g., reading from `/dev/tty` directly inside `askConfirmTTY`).
+`interactive.UnderTest()` returns true when `testing.Testing()` or `ENTIRE_TEST_TTY` is set — use it where code needs to skip a real-terminal operation even if `CanPromptInteractively()` returns true (e.g., opening `interactive.OpenPromptTTY()` directly inside a prompt reader).
 
 ### Linting and Formatting
 
@@ -1351,9 +1352,9 @@ comments at each site say which case applies:
   statting, or removing a directory is an operation on it from the outside, which
   a root over it cannot perform. `setupEntireDirectory`, `removeEntireDirectory`,
   the `MkdirAll` behind each anchor, and the plugin index clone are all this case.
-- **Paths the user named** (`doctor bundle --out`, `api --input`) and the two
-  single fixed files `/dev/tty` and `/proc/<pid>/*`. No boundary exists to
-  enforce.
+- **Paths the user named** (`doctor bundle --out`, `api --input`) and fixed
+  platform files such as `/dev/tty`, `CONIN$`, `CONOUT$`, and `/proc/<pid>/*`.
+  No boundary exists to enforce.
 
 ### Git Operations
 
