@@ -39,6 +39,46 @@ func TestParseRolloutTokenCount(t *testing.T) {
 	}
 }
 
+// TestParseRolloutTokenUsage_AgreesWithTokenCount pins the wrapper to the
+// general parser: parseRolloutTokenCount must report exactly what
+// parseRolloutTokenUsage found, and the general form must additionally surface
+// cached_input_tokens, which the in/out wrapper drops.
+func TestParseRolloutTokenUsage_AgreesWithTokenCount(t *testing.T) {
+	t.Parallel()
+
+	line := []byte(`{"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":` +
+		`{"input_tokens":10000,"cached_input_tokens":8000,"output_tokens":200,"total_tokens":10200}}}}`)
+
+	usage, ok := parseRolloutTokenUsage(line)
+	if !ok {
+		t.Fatal("parseRolloutTokenUsage: got ok=false, want true")
+	}
+	if usage.CachedInputTokens != 8000 {
+		t.Errorf("cached_input_tokens: got %d, want 8000", usage.CachedInputTokens)
+	}
+
+	in, out, ok := parseRolloutTokenCount(line)
+	if !ok || in != usage.InputTokens || out != usage.OutputTokens {
+		t.Errorf("wrapper diverged: got in=%d out=%d ok=%v, want %d/%d/true",
+			in, out, ok, usage.InputTokens, usage.OutputTokens)
+	}
+
+	// Both forms must reject the same lines.
+	for _, bad := range []string{
+		`{"type":"response_item","payload":{"type":"reasoning"}}`,
+		`{"type":"event_msg","payload":{"type":"agent_message","message":"token_count"}}`,
+		`{"type":"event_msg","payload":{"type":"token_count","info":{}}}`,
+		`not json`,
+		``,
+	} {
+		_, usageOK := parseRolloutTokenUsage([]byte(bad))
+		_, _, countOK := parseRolloutTokenCount([]byte(bad))
+		if usageOK || countOK {
+			t.Errorf("expected both to reject %q, got usage=%v count=%v", bad, usageOK, countOK)
+		}
+	}
+}
+
 // TestTailRolloutTokens_TailsAppendedLines is the core behavior: the tailer
 // must emit Tokens for token_count lines that codex appends *after* the tailer
 // has already caught up to EOF (a plain bufio.Reader would miss these).
