@@ -17,6 +17,7 @@ import (
 	"charm.land/huh/v2"
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/codex"
+	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/entiredir"
 	"github.com/entireio/cli/cmd/entire/cli/interactive"
@@ -168,6 +169,10 @@ func runSessionsFix(cmd *cobra.Command, force bool) error {
 	// Retired permission rule that makes ordinary commands need approval.
 	// Fixes rather than only reporting: what it removes is a rule Entire wrote.
 	checkRetiredDenyRule(cmd)
+
+	// A configured summary provider that cannot generate text. After the hook
+	// checks: it breaks three commands, not capture, so it is the milder fault.
+	checkSummaryProvider(cmd)
 
 	// Where checkpoints land, when the repo's remotes make that ambiguous.
 	printCheckpointDestinationNote(ctx, cmd.OutOrStdout(), "Checkpoint destination: REVIEW")
@@ -1322,6 +1327,55 @@ func checkRetiredDenyRule(cmd *cobra.Command) {
 			fmt.Fprintln(w, "  The settings file changed — commit or revert it as you prefer.")
 		}
 	}
+}
+
+// checkSummaryProvider reports a configured summary_generation.provider naming
+// a registered agent that cannot generate text. See
+// unsupportedSummaryProviderError for how such a value gets written.
+//
+// Worth a check of its own because nothing else says a word about it: the
+// settings loader validates only model-without-provider, `entire status` never
+// mentions summary generation, and the resolver's error surfaces at
+// `checkpoint explain --generate` / `dispatch` / `runner setup` — commands a
+// user may not run for weeks after the edit, by which time the cause is not in
+// view. Read-only; the remedy is the user's choice of provider, and the value
+// may live in a committed settings.json where a rewrite changes everyone's.
+//
+// Two conditions are deliberately out of scope. An UNREGISTERED name is the
+// external-plugin shape, where telling "not installed" from "installed but the
+// external_agents grant is missing" means running discovery — and doctor must
+// not exec a plugin to write a diagnostic (`entire status` already reports the
+// grant rejection). An off-$PATH binary is machine-local and expected, so the
+// resolver reports it at the point of use instead.
+func checkSummaryProvider(cmd *cobra.Command) {
+	ctx := cmd.Context()
+	s, err := loadSummarySettings(ctx)
+	if err != nil {
+		// Not reported: a settings file that will not load is a louder problem
+		// than this check, and doctor's own PreRunE already reads it.
+		logging.Warn(ctx, "could not load settings for summary provider check",
+			slog.String("error", err.Error()))
+		return
+	}
+	if s.SummaryGeneration == nil || s.SummaryGeneration.Provider == "" {
+		return
+	}
+
+	name := types.AgentName(s.SummaryGeneration.Provider)
+	_, registered, capable := summaryCapableAgent(name)
+	if !registered || capable {
+		return
+	}
+
+	w := cmd.OutOrStdout()
+	fmt.Fprintln(w, "Summary provider: UNUSABLE")
+	fmt.Fprintf(w, "  summary_generation.provider is %q, which cannot generate text.\n", name)
+	fmt.Fprintln(w, "  `entire checkpoint explain --generate`, `entire dispatch`, and")
+	fmt.Fprintln(w, "  `entire runner setup` all fail while it is set.")
+	if capable := summaryCapableProviderNames(); len(capable) > 0 {
+		fmt.Fprintf(w, "  Fix: entire configure --summarize-provider <%s>\n", strings.Join(capable, "|"))
+	}
+	fmt.Fprintln(w, "  No `entire` command writes this value, so it was hand-edited or written by an agent.")
 }
 
 // checkCodexHookTrust reports whether Codex can discover its effective
