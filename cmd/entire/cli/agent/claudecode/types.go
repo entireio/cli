@@ -74,6 +74,14 @@ type postToolHookInputRaw struct {
 // parsed defensively: an absent field just leaves AgentTranscriptPath empty
 // rather than erroring, and the lifecycle layer then falls back to resolving
 // the subagent transcript from AgentID.
+//
+// ToolUseID is ALSO typically absent in a genuine payload: Claude Code's
+// documented hooks contract lists tool_use_id as a field of tool events only
+// (PreToolUse/PostToolUse/PostToolUseFailure), not SubagentStop, and a
+// live-payload capture confirmed the key is simply not present (GitHub issue
+// #2215). AgentID is what's reliably present here and is what the lifecycle
+// layer (handleSubagentStopFinal) falls back to correlating on when
+// ToolUseID is empty.
 type subagentStopHookInputRaw struct {
 	SessionID           string `json:"session_id"`
 	TranscriptPath      string `json:"transcript_path"`

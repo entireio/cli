@@ -227,14 +227,21 @@ func (c *ClaudeCodeAgent) parseSubagentStop(ctx context.Context, stdin io.Reader
 	}
 
 	// Tripwire for the defensive-parse assumption: a well-formed SubagentStop
-	// payload always carries these two fields, so an empty value here means
-	// the payload shape diverged from what this parse expects (e.g. an
-	// alternate key spelling — see the key-name log above).
-	if raw.ToolUseID == "" || raw.SessionID == "" {
+	// payload always carries session_id, so an empty value here means the
+	// payload shape diverged from what this parse expects (e.g. an alternate
+	// key spelling — see the key-name log above).
+	//
+	// tool_use_id is deliberately NOT part of this tripwire. Per Claude Code's
+	// documented hooks contract, tool_use_id is a field of *tool* events only
+	// (PreToolUse/PostToolUse/PostToolUseFailure) — SubagentStop does not
+	// carry it, and a live-payload capture (GitHub issue #2215) confirmed the
+	// key is absent, not merely empty. An empty ToolUseID here is therefore
+	// the normal case, not a sign of a malformed payload; the lifecycle layer
+	// (handleSubagentStopFinal) correlates on AgentID instead when
+	// ToolUseID is empty.
+	if raw.SessionID == "" {
 		logging.Warn(logging.WithComponent(ctx, "agent.claudecode"),
-			"subagent-stop payload missing tool_use_id or session_id — structurally impossible for a well-formed payload",
-			slog.Bool("has_tool_use_id", raw.ToolUseID != ""),
-			slog.Bool("has_session_id", raw.SessionID != ""))
+			"subagent-stop payload missing session_id — structurally impossible for a well-formed payload")
 	}
 
 	return &agent.Event{

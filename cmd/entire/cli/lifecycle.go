@@ -1389,10 +1389,22 @@ func handleSubagentStopFinal(logCtx context.Context, ag agent.Agent, event *agen
 	}
 
 	marker := state.FindTaskRecord(event.ToolUseID)
+	if marker == nil && event.SubagentID != "" {
+		// Claude Code's genuine SubagentStop payload never carries tool_use_id
+		// — that field is documented only on tool events (PreToolUse/
+		// PostToolUse/PostToolUseFailure) per Claude Code's hooks contract —
+		// so the ToolUseID lookup above always misses for it. agent_id is the
+		// one identifier the payload does carry that is also stamped on the
+		// launch marker (recordInFlightTaskLaunch stores AgentID from
+		// PostToolUse[Agent]'s tool_response.agentId), so fall back to it
+		// before concluding there is no marker at all (see
+		// FindTaskRecordByAgentID and GitHub issue #2215).
+		marker = state.FindTaskRecordByAgentID(event.SubagentID)
+	}
 	if marker == nil || !marker.CompletedAt.IsZero() {
-		// No live marker: this ToolUseID was already completed at launch-time
-		// post-task (foreground task), or another Final event for the same
-		// ToolUseID (a duplicate SubagentStop, or a race against the
+		// No live marker: this ToolUseID/AgentID was already completed at
+		// launch-time post-task (foreground task), or another Final event for
+		// the same task (a duplicate SubagentStop, or a race against the
 		// SessionEnd final capture) already completed it. Skip.
 		// An event carrying a SubagentID or a subagent transcript path is the
 		// louder variant: those fields mean a real subagent completed, so an
@@ -1410,6 +1422,15 @@ func handleSubagentStopFinal(logCtx context.Context, ag agent.Agent, event *agen
 			slog.String("session_id", event.SessionID),
 			slog.String("tool_use_id", event.ToolUseID))
 		return nil
+	}
+
+	// The marker may have been found via the AgentID fallback above, in which
+	// case event.ToolUseID is still empty — backfill it from the marker so
+	// every downstream keying (strategy.CompleteTaskRecord, TaskMetadataDir,
+	// Load/CleanupPreTaskState) uses the real tool_use_id recorded at launch
+	// time rather than the empty one this event's Stop payload carries.
+	if event.ToolUseID == "" && marker.ToolUseID != "" {
+		event.ToolUseID = marker.ToolUseID
 	}
 
 	// SubagentStop payloads carry no tool_input, so event.SubagentType/

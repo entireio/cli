@@ -527,6 +527,28 @@ func (s *State) FindTaskRecord(toolUseID string) *TaskRecord {
 	return nil
 }
 
+// FindTaskRecordByAgentID returns a pointer to the record whose AgentID
+// matches agentID, or nil if agentID is empty or none exists. This is the
+// fallback correlation key for Claude Code's genuine SubagentStop payload,
+// which per Claude Code's documented hooks contract never carries
+// tool_use_id (that field is documented only on tool events — PreToolUse/
+// PostToolUse/PostToolUseFailure) but always carries agent_id. The marker
+// this looks up was itself recorded with AgentID at launch time
+// (recordInFlightTaskLaunch, from PostToolUse[Agent]'s tool_response.agentId),
+// so agent_id is the one identifier genuinely shared between a subagent's
+// start and its stop. Same aliasing caveat as FindTaskRecord.
+func (s *State) FindTaskRecordByAgentID(agentID string) *TaskRecord {
+	if agentID == "" {
+		return nil
+	}
+	for i := range s.TaskRecords {
+		if s.TaskRecords[i].AgentID == agentID {
+			return &s.TaskRecords[i]
+		}
+	}
+	return nil
+}
+
 // CompleteTaskRecord marks the record for toolUseID as consumed exactly
 // once: it sets CompletedAt and returns true, or returns false — a no-op —
 // when no record exists for toolUseID or it was already completed
