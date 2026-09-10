@@ -777,32 +777,29 @@ func hooksInstalledNow(t *testing.T, ag interface {
 	return installed
 }
 
-// droidWindowsHookCommands is what InstallHooks must write on a Windows host:
-// native cmd.exe wrappers, because droid's Windows build hands every hook
-// command to `%ComSpec% /d /s /c <command>`.
-func droidWindowsHookCommands() map[string]string {
-	return map[string]string{
-		"session-start":      agentpkg.WrapWindowsProductionSilentHookCommand("entire hooks factoryai-droid session-start"),
-		"session-end":        agentpkg.WrapWindowsProductionSilentHookCommand("entire hooks factoryai-droid session-end"),
-		"user-prompt-submit": agentpkg.WrapWindowsProductionSilentHookCommand("entire hooks factoryai-droid user-prompt-submit"),
-		"pre-tool-use":       agentpkg.WrapWindowsProductionSilentHookCommand("entire hooks factoryai-droid pre-tool-use"),
-		"post-tool-use":      agentpkg.WrapWindowsProductionSilentHookCommand("entire hooks factoryai-droid post-tool-use"),
-		"pre-compact":        agentpkg.WrapWindowsProductionSilentHookCommand("entire hooks factoryai-droid pre-compact"),
-		"stop":               agentpkg.WrapWindowsProductionPlainTextWarningHookCommand("entire hooks factoryai-droid stop", agentpkg.WarningFormatSingleLine),
-	}
+// droidWindowsHookCommand names the Windows wrapper outright rather than
+// reusing the ForOS selector InstallHooks uses: these tests assert WHICH form
+// is chosen, so sharing the selector would restate the implementation and pass
+// either way.
+func droidWindowsHookCommand(verb string) string {
+	return agentpkg.WrapWindowsProductionSilentHookCommand("entire hooks factoryai-droid " + verb)
+}
+
+func droidWindowsStopHookCommand() string {
+	return agentpkg.WrapWindowsProductionPlainTextWarningHookCommand(
+		"entire hooks factoryai-droid stop", agentpkg.WarningFormatSingleLine)
 }
 
 func assertDroidWindowsHooks(t *testing.T, settings FactorySettings) {
 	t.Helper()
-	want := droidWindowsHookCommands()
-	assertFactoryHookExists(t, settings.Hooks.SessionStart, "", want["session-start"], "SessionStart")
-	assertFactoryHookExists(t, settings.Hooks.SessionStart, "", want["user-prompt-submit"], "SessionStart user-prompt-submit")
-	assertFactoryHookExists(t, settings.Hooks.SessionEnd, "", want["session-end"], "SessionEnd")
-	assertFactoryHookExists(t, settings.Hooks.Stop, "", want["stop"], "Stop")
-	assertFactoryHookExists(t, settings.Hooks.UserPromptSubmit, "", want["user-prompt-submit"], "UserPromptSubmit")
-	assertFactoryHookExists(t, settings.Hooks.PreToolUse, "Task", want["pre-tool-use"], "PreToolUse[Task]")
-	assertFactoryHookExists(t, settings.Hooks.PostToolUse, "Task", want["post-tool-use"], "PostToolUse[Task]")
-	assertFactoryHookExists(t, settings.Hooks.PreCompact, "", want["pre-compact"], "PreCompact")
+	assertFactoryHookExists(t, settings.Hooks.SessionStart, "", droidWindowsHookCommand("session-start"), "SessionStart")
+	assertFactoryHookExists(t, settings.Hooks.SessionStart, "", droidWindowsHookCommand("user-prompt-submit"), "SessionStart user-prompt-submit")
+	assertFactoryHookExists(t, settings.Hooks.SessionEnd, "", droidWindowsHookCommand("session-end"), "SessionEnd")
+	assertFactoryHookExists(t, settings.Hooks.Stop, "", droidWindowsStopHookCommand(), "Stop")
+	assertFactoryHookExists(t, settings.Hooks.UserPromptSubmit, "", droidWindowsHookCommand("user-prompt-submit"), "UserPromptSubmit")
+	assertFactoryHookExists(t, settings.Hooks.PreToolUse, "Task", droidWindowsHookCommand("pre-tool-use"), "PreToolUse[Task]")
+	assertFactoryHookExists(t, settings.Hooks.PostToolUse, "Task", droidWindowsHookCommand("post-tool-use"), "PostToolUse[Task]")
+	assertFactoryHookExists(t, settings.Hooks.PreCompact, "", droidWindowsHookCommand("pre-compact"), "PreCompact")
 }
 
 // TestInstallHooks_WindowsUsesCmdWrappersDespiteWorkingSh pins that droid picks
@@ -839,8 +836,7 @@ func TestInstallHooks_WindowsUsesCmdWrappersDespiteWorkingSh(t *testing.T) {
 // both — two entries would fire the same hook twice. Mutates the shared probe,
 // so no t.Parallel().
 func TestInstallHooks_WindowsMigratesShWrappers(t *testing.T) {
-	goos := "linux"
-	t.Cleanup(agentpkg.SetWindowsHookProbeForTesting(goos, func(context.Context, string) bool {
+	t.Cleanup(agentpkg.SetWindowsHookProbeForTesting("linux", func(context.Context, string) bool {
 		return true
 	}))
 
@@ -858,8 +854,7 @@ func TestInstallHooks_WindowsMigratesShWrappers(t *testing.T) {
 		agentpkg.WrapProductionPlainTextWarningHookCommand("entire hooks factoryai-droid stop", agentpkg.WarningFormatSingleLine),
 		"sh-wrapped Stop hook")
 
-	goos = "windows"
-	restore := agentpkg.SetWindowsHookProbeForTesting(goos, func(context.Context, string) bool {
+	restore := agentpkg.SetWindowsHookProbeForTesting("windows", func(context.Context, string) bool {
 		return true
 	})
 	t.Cleanup(restore)

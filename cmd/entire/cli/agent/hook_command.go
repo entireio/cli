@@ -388,9 +388,16 @@ func defaultSHHookWrapperWorks(ctx context.Context, command string) bool {
 // wrapper, which is full of `>` and `&`, is still cut apart by cmd.exe before
 // any sh sees it.
 //
-// Agents that resolve a shell themselves (Codex, Cursor) keep
-// UseWindowsProductionHooks: for them a working sh really does mean the sh
-// wrapper runs.
+// Codex and Cursor keep UseWindowsProductionHooks, but do NOT read that as
+// "their runners are different". WrapWindowsProductionSilentHookCommand's own
+// doc, runWindowsWrapper in hook_command_exec_windows_test.go, and cursor's
+// InstallHooks all describe those runners as going through cmd.exe too. What
+// separates them is only evidence: Codex demonstrably passes the Windows
+// nightly with the sh wrapper installed, so whatever its composition does, the
+// wrapper survives it. Cursor has no such evidence — it is excluded from the
+// Windows matrix (no tmux) — so it may well have this same defect. Establish
+// that the way it was established here, by reading the runner, before changing
+// its gate.
 func HookHostIsWindows() bool {
 	return hookCommandOS == hookWrapperOSWindows
 }

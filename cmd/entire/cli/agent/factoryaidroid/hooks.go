@@ -135,6 +135,18 @@ func (f *FactoryAIDroidAgent) InstallHooks(ctx context.Context, force bool) (int
 	// Unlike Codex and Cursor this is NOT gated on agent.UseWindowsProductionHooks:
 	// droid never hands a hook to sh on Windows, so whether a working sh exists
 	// there changes nothing. See agent.HookHostIsWindows.
+	//
+	// Scope: this fixes droid 0.178.0 and later, the two compositions verified
+	// end to end on Windows. 0.109.1 spawned `cmd.exe /c <H>` WITHOUT
+	// windowsVerbatimArguments, so libuv quotes the argument and
+	// backslash-escapes the inner quotes of the silent wrapper's nested
+	// `cmd.exe /d /s /c "…"` — an escape cmd.exe does not understand. That
+	// version stays broken, but it was equally broken before: the sh wrapper
+	// never survived its cmd.exe either. The bare (unnested) wrapper shape the
+	// Stop hook uses would likely work there too, and switching every hook to
+	// it is the fix if anyone still runs 0.109.1 — it is not taken here because
+	// it would trade the shape actually verified on current droid for one that
+	// is not.
 	useWindowsHooks := agent.HookHostIsWindows()
 	sessionStartCmd := agent.WrapProductionSilentHookCommandForOS("entire hooks factoryai-droid session-start", useWindowsHooks)
 	sessionEndCmd := agent.WrapProductionSilentHookCommandForOS("entire hooks factoryai-droid session-end", useWindowsHooks)
