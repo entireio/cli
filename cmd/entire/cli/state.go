@@ -527,6 +527,12 @@ type PreTaskState struct {
 	Timestamp      string   `json:"timestamp"`
 	UntrackedFiles []string `json:"untracked_files"`
 
+	// TaskDescription is the subagent task description captured at SubagentStart
+	// (e.g. Cursor's "task" field, Claude Code's Task tool "description"). It lets
+	// ResolvePreTaskToolUseID correlate a SubagentEnd event back to this file when
+	// the ending hook's own payload carries no ID — see that function's doc for why.
+	TaskDescription string `json:"task_description,omitempty"`
+
 	// UntrackedScanSkipped mirrors PrePromptState.UntrackedScanSkipped for the
 	// subagent path: when set, subagent-end must skip new-file detection.
 	UntrackedScanSkipped bool `json:"untracked_scan_skipped,omitempty"`
@@ -547,7 +553,19 @@ func (s *PreTaskState) PreUntrackedFiles() []string {
 // CapturePreTaskState captures current untracked files before a Task execution
 // and saves them to a state file.
 // Works correctly from any subdirectory within the repository.
+//
+// This is a thin wrapper around CapturePreTaskStateWithMeta for callers that
+// don't have a task description to record.
 func CapturePreTaskState(ctx context.Context, toolUseID string) error {
+	return CapturePreTaskStateWithMeta(ctx, toolUseID, "")
+}
+
+// CapturePreTaskStateWithMeta captures current untracked files before a Task
+// execution and saves them, along with the subagent's task description, to a
+// state file. The description is later used by ResolvePreTaskToolUseID to
+// correlate a SubagentEnd event that arrives with no ID — see its doc comment.
+// Works correctly from any subdirectory within the repository.
+func CapturePreTaskStateWithMeta(ctx context.Context, toolUseID, taskDescription string) error {
 	if toolUseID == "" {
 		return errors.New("tool_use_id is required")
 	}
@@ -571,6 +589,7 @@ func CapturePreTaskState(ctx context.Context, toolUseID string) error {
 		ToolUseID:            toolUseID,
 		Timestamp:            time.Now().UTC().Format(time.RFC3339),
 		UntrackedFiles:       untrackedFiles,
+		TaskDescription:      taskDescription,
 		UntrackedScanSkipped: scanSkipped,
 	}
 
@@ -676,6 +695,105 @@ func FindActivePreTaskFile(ctx context.Context) (taskToolUseID string, found boo
 	toolUseID := strings.TrimPrefix(latestFile, preTaskFilePrefix)
 	toolUseID = strings.TrimSuffix(toolUseID, ".json")
 	return toolUseID, true
+}
+
+// ResolvePreTaskToolUseID resolves the tool_use_id that should key a
+// SubagentEnd event's LoadPreTaskState/SaveTaskStep/CleanupPreTaskState calls,
+// for agents whose "subagent ended" hook payload does not carry the ID that
+// named the matching pre-task file.
+//
+// This exists because Cursor's subagentStop payload has no subagent_id field
+// (only subagentStart does — confirmed against Cursor's hooks documentation).
+// Without this, LoadPreTaskState looks up "pre-task-.json" (empty ID), misses
+// the real pre-task-<id>.json file CapturePreTaskState wrote at
+// SubagentStart, and SaveTaskStep/CleanupPreTaskState key off the same empty
+// string — orphaning the real file and colliding across parallel subagents
+// that all resolve to the same empty key.
+//
+// Resolution order:
+//  1. toolUseID, if non-empty: trust the caller's own ID (the existing,
+//     already-correct path for agents like Claude Code that do report one).
+//  2. Else, taskDescription, if non-empty: scan pre-task-*.json files in
+//     .entire/tmp for ones whose stored TaskDescription matches exactly.
+//     Exactly one match wins; zero or multiple matches are reported as
+//     not-found rather than falling back to case 3 — a task description that
+//     doesn't match anything, or matches more than one file, is a stronger
+//     negative signal than having no description at all.
+//  3. Else (no ID, no description): if exactly one active pre-task file
+//     exists, it's unambiguous — use it.
+//
+// Returns ("", false) when none of the above yields a candidate.
+func ResolvePreTaskToolUseID(ctx context.Context, toolUseID, taskDescription string) (id string, found bool) {
+	if toolUseID != "" {
+		return toolUseID, true
+	}
+
+	tmpDirAbs := resolveTmpDir(ctx)
+	entries, err := os.ReadDir(tmpDirAbs)
+	if err != nil {
+		return "", false
+	}
+
+	root, err := os.OpenRoot(tmpDirAbs)
+	if err != nil {
+		return "", false
+	}
+	defer root.Close()
+
+	var active []string
+	var matching []string
+
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		name := entry.Name()
+		if !strings.HasPrefix(name, preTaskFilePrefix) || !strings.HasSuffix(name, ".json") {
+			continue
+		}
+		candidateID := strings.TrimSuffix(strings.TrimPrefix(name, preTaskFilePrefix), ".json")
+		// ValidateToolUseID treats "" as valid (it's an optional field on other
+		// call paths), but an empty candidateID here means the filename itself
+		// is malformed (pre-task-.json) — not a usable tool_use_id. Reject it
+		// explicitly rather than letting it become the sole "active" candidate
+		// and have callers resolve to an empty ID as if that were a real match.
+		if candidateID == "" || validation.ValidateToolUseID(candidateID) != nil {
+			// Malformed filename (e.g. pre-task-.json or an invalid ID) — not
+			// a usable candidate, skip it rather than risk returning it below.
+			continue
+		}
+		active = append(active, candidateID)
+
+		if taskDescription == "" {
+			continue
+		}
+		// Use os.Root for traversal-resistant access, consistent with the
+		// other pre-task state I/O in this file.
+		data, readErr := osroot.ReadFile(root, name)
+		if readErr != nil {
+			continue
+		}
+		var state PreTaskState
+		if jsonErr := json.Unmarshal(data, &state); jsonErr != nil {
+			continue
+		}
+		if state.TaskDescription == taskDescription {
+			matching = append(matching, candidateID)
+		}
+	}
+
+	if taskDescription != "" {
+		if len(matching) != 1 {
+			return "", false
+		}
+		return matching[0], true
+	}
+
+	if len(active) == 1 {
+		return active[0], true
+	}
+
+	return "", false
 }
 
 // GetNextCheckpointSequence returns the next sequence number for incremental checkpoints.

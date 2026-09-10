@@ -1247,8 +1247,16 @@ func handleLifecycleSubagentStart(ctx context.Context, ag agent.Agent, event *ag
 		slog.String("transcript", event.SessionRef),
 	)
 
-	// Capture pre-task state
-	if err := CapturePreTaskState(ctx, event.ToolUseID); err != nil {
+	// Capture pre-task state, including the task description if the agent
+	// provided one (Cursor's "task", Claude Code's Task tool_input.description
+	// via ParseSubagentTypeAndDescription). ResolvePreTaskToolUseID uses it to
+	// correlate the matching SubagentEnd event later when that event's own
+	// payload carries no ID.
+	taskDescription := event.TaskDescription
+	if taskDescription == "" {
+		_, taskDescription = ParseSubagentTypeAndDescription(event.ToolInput)
+	}
+	if err := CapturePreTaskStateWithMeta(ctx, event.ToolUseID, taskDescription); err != nil {
 		return fmt.Errorf("failed to capture pre-task state: %w", err)
 	}
 
@@ -1274,6 +1282,15 @@ func declaredSubagentTranscript(ctx context.Context, event *agent.Event) string 
 	return declared
 }
 
+// afterAmbiguousSubagentEndResolve runs immediately after
+// handleLifecycleSubagentEnd's ambiguous-ID resolution, before LoadPreTaskState.
+// It receives (resolvedAmbiguously, toolUseID). No-op in production; tests
+// override it to deterministically simulate a concurrent SubagentEnd's
+// CleanupPreTaskState landing in that window.
+//
+//nolint:gochecknoglobals // test seam; see doc comment
+var afterAmbiguousSubagentEndResolve = func(bool, string) {}
+
 // handleLifecycleSubagentEnd handles subagent completion. It dispatches on
 // event.Final — never on any payload sentinel — to tell a real completion
 // signal (SubagentStop) from the launch-time PostToolUse (post-task) stub:
@@ -1296,15 +1313,47 @@ func handleLifecycleSubagentEnd(ctx context.Context, ag agent.Agent, event *agen
 		event.SubagentType, event.TaskDescription = ParseSubagentTypeAndDescription(event.ToolInput)
 	}
 
+	// Cursor's subagentStop payload carries no subagent_id (confirmed against
+	// Cursor's hooks documentation — only subagentStart has one), so
+	// event.ToolUseID/SubagentID arrive empty for real Cursor payloads. Resolve
+	// the real ID via the task description recorded at SubagentStart before any
+	// pre-task-state lookup keys off it — see ResolvePreTaskToolUseID's doc.
+	// resolvedAmbiguously tracks whether event.ToolUseID came from
+	// ResolvePreTaskToolUseID's best-effort fallback rather than an ID the agent
+	// itself reported. A concurrent SubagentEnd for a different subagent can
+	// clean up the very pre-task file this fallback just named between this
+	// resolution and the LoadPreTaskState call below — see the guard there.
+	resolvedAmbiguously := false
+	if event.ToolUseID == "" {
+		// Explicit empty ID: we are inside the no-ToolUseID branch, so the
+		// explicit-ID-wins path of ResolvePreTaskToolUseID is intentionally
+		// unreachable — resolve by TaskDescription (or single-active fallback).
+		if resolvedID, resolved := ResolvePreTaskToolUseID(ctx, "", event.TaskDescription); resolved {
+			event.ToolUseID = resolvedID
+			resolvedAmbiguously = true
+			if event.SubagentID == "" {
+				event.SubagentID = resolvedID
+			}
+		}
+	}
+	// Test seam: lets tests deterministically simulate a concurrent SubagentEnd's
+	// CleanupPreTaskState landing in the window between the ambiguous resolve
+	// above and the LoadPreTaskState below. No-op in production.
+	afterAmbiguousSubagentEndResolve(resolvedAmbiguously, event.ToolUseID)
+
 	if event.Final {
-		return handleSubagentStopFinal(logCtx, ag, event)
+		return handleSubagentStopFinal(logCtx, ag, event, resolvedAmbiguously)
 	}
 
 	if isBackgroundLaunch(logCtx, event.ToolInput) {
 		return recordInFlightTaskLaunch(logCtx, event)
 	}
 
-	return completeSubagentTaskRecord(logCtx, ag, event, subagentCaptureOptions{ensureSessionState: true})
+	return completeSubagentTaskRecord(logCtx, ag, event, subagentCaptureOptions{
+		ensureSessionState:          true,
+		resolvedAmbiguously:         resolvedAmbiguously,
+		ambiguousWithoutDescription: resolvedAmbiguously && event.TaskDescription == "",
+	})
 }
 
 // recordInFlightTaskLaunch handles a background Task launch. It records an
@@ -1364,7 +1413,7 @@ func recordInFlightTaskLaunch(logCtx context.Context, event *agent.Event) error 
 // interleaving reduces to ordering). The eager-condense decision near the end
 // of the function therefore reloads session state and decides on that fresh
 // phase, never on this initial snapshot.
-func handleSubagentStopFinal(logCtx context.Context, ag agent.Agent, event *agent.Event) error {
+func handleSubagentStopFinal(logCtx context.Context, ag agent.Agent, event *agent.Event, resolvedAmbiguously bool) error {
 	state, err := strategy.LoadSessionState(logCtx, event.SessionID)
 	if err != nil {
 		// A real load failure (corrupt/unreadable state file) — distinct from
@@ -1412,12 +1461,11 @@ func handleSubagentStopFinal(logCtx context.Context, ag agent.Agent, event *agen
 		return nil
 	}
 
-	// SubagentStop payloads carry no tool_input, so event.SubagentType/
-	// TaskDescription/SubagentID are typically empty at this point; the marker
-	// recorded all three at launch time. Each field falls back independently —
-	// not as an all-or-nothing pair — so a marker that only captured one of
-	// them (e.g. a legacy marker written before a field existed) still
-	// contributes what it has instead of being discarded wholesale.
+	// Must be computed before marker backfill: backfill can populate
+	// event.TaskDescription from the marker even when the SubagentStop payload
+	// carried none, which would falsely clear this guard.
+	ambiguousWithoutDescription := resolvedAmbiguously && event.TaskDescription == ""
+
 	if marker.SubagentType != "" {
 		event.SubagentType = marker.SubagentType
 	}
@@ -1434,7 +1482,12 @@ func handleSubagentStopFinal(logCtx context.Context, ag agent.Agent, event *agen
 	// are never marked in-flight), so the worktree-wide DetectFileChanges scan
 	// would risk sweeping in the parent's or another agent's later edits. See
 	// subagentCaptureOptions.analyzerFilesOnly.
-	captureErr := completeSubagentTaskRecord(logCtx, ag, event, subagentCaptureOptions{bypassNoChangesSkip: true, analyzerFilesOnly: true})
+	captureErr := completeSubagentTaskRecord(logCtx, ag, event, subagentCaptureOptions{
+		bypassNoChangesSkip:         true,
+		analyzerFilesOnly:           true,
+		resolvedAmbiguously:         resolvedAmbiguously,
+		ambiguousWithoutDescription: ambiguousWithoutDescription,
+	})
 	if captureErr != nil {
 		return captureErr
 	}
@@ -1509,12 +1562,25 @@ type subagentCaptureOptions struct {
 	// Set only for the foreground path; the Final path must never resurrect a
 	// swept session (handleSubagentStopFinal's zombie guard).
 	ensureSessionState bool
+
+	// resolvedAmbiguously, when true, means event.ToolUseID came from
+	// ResolvePreTaskToolUseID's fallback rather than the agent payload. Used to
+	// skip capture when the pre-task file vanished between resolve and load, and
+	// to avoid deleting an uncorroborated pre-task baseline on the no-changes path.
+	resolvedAmbiguously bool
+
+	// ambiguousWithoutDescription is set when resolvedAmbiguously was true before
+	// marker backfill could populate event.TaskDescription — the guard must not
+	// consult the backfilled description.
+	ambiguousWithoutDescription bool
 }
 
 // completeSubagentTaskRecord detects a completed subagent invocation's changes
 // and completes its durable task record (#2058): files, labels, tokens, and the
 // declared transcript path land on the record; condensation later materializes
 // the transcript into the checkpoint. No shadow task step is written.
+//
+//nolint:maintidx // sequential orchestration of validation, transcript resolve, file detection, token calc, record write, and cleanup — splitting would obscure the flow
 func completeSubagentTaskRecord(logCtx context.Context, ag agent.Agent, event *agent.Event, opts subagentCaptureOptions) error {
 	// Prefer what the agent declared (Claude Code's SubagentStop, Codex, and
 	// Cursor all carry agent_transcript_path); see Event.SubagentTranscriptPath.
@@ -1614,6 +1680,20 @@ func completeSubagentTaskRecord(logCtx context.Context, ag agent.Agent, event *a
 			logging.Warn(logCtx, "failed to load pre-task state",
 				slog.String("error", preErr.Error()))
 		}
+		// A resolvedAmbiguously ID that then fails to load its pre-task state means
+		// a concurrent SubagentEnd (for a sibling subagent, resolved via the same
+		// fallback) already ran CleanupPreTaskState on it between our resolve and
+		// this load — not "this agent never captured pre-task state" (that case has
+		// event.ToolUseID == "" going in, so resolvedAmbiguously is false). Treating
+		// it as the latter would fall through to DetectFileChanges(logCtx, nil), which
+		// treats every untracked file as new and mints a spurious checkpoint. Skip
+		// instead: we have no reliable baseline to attribute this subagent's actual
+		// changes to.
+		if opts.resolvedAmbiguously && preState == nil {
+			logging.Warn(logCtx, "pre-task state vanished after ambiguous resolution; a concurrent SubagentEnd likely cleaned it up first, skipping task record",
+				slog.String("tool_use_id", event.ToolUseID))
+			return nil
+		}
 		var preUntrackedFiles []string
 		if preState != nil {
 			preUntrackedFiles = preState.PreUntrackedFiles()
@@ -1666,7 +1746,26 @@ func completeSubagentTaskRecord(logCtx context.Context, ag agent.Agent, event *a
 	if len(relModifiedFiles) == 0 && len(relNewFiles) == 0 && len(relDeletedFiles) == 0 {
 		if !opts.bypassNoChangesSkip {
 			logging.Info(logCtx, "no file changes detected, skipping task record")
+			// Deleting the pre-task file is only safe when we know it is this
+			// subagent's. An ambiguous resolve corroborated by an exact
+			// task-description match has that evidence; the single-active-file
+			// fallback (no ID and no description, so event.TaskDescription is
+			// empty) has none, and the file it named may belong to a sibling that
+			// is still running and has simply not written anything yet. Deleting
+			// that baseline makes the sibling's own SubagentEnd hit the
+			// vanished-state guard above and drop a real checkpoint, so leave the
+			// file for the sibling — or for this subagent's own later retry.
+			if opts.ambiguousWithoutDescription {
+				logging.Warn(logCtx, "leaving pre-task state in place: resolved only by the single-active-file fallback with nothing to checkpoint",
+					slog.String("tool_use_id", event.ToolUseID))
+				return nil
+			}
 			_ = CleanupPreTaskState(logCtx, event.ToolUseID) //nolint:errcheck // best-effort cleanup
+			return nil
+		}
+		if opts.ambiguousWithoutDescription {
+			logging.Warn(logCtx, "leaving pre-task state in place: uncorroborated single-active-file resolve with nothing to checkpoint",
+				slog.String("tool_use_id", event.ToolUseID))
 			return nil
 		}
 		logging.Info(logCtx, "no file changes detected but completing record anyway (final subagent-stop capture)")
@@ -1698,7 +1797,6 @@ func completeSubagentTaskRecord(logCtx context.Context, ag agent.Agent, event *a
 		if err := strategy.UpsertCompletedTaskRecord(logCtx, event.SessionID, rec); err != nil {
 			return fmt.Errorf("failed to record uncorrelated task: %w", err)
 		}
-		_ = CleanupPreTaskState(logCtx, event.ToolUseID) //nolint:errcheck // best-effort cleanup
 		return nil
 	}
 	completed, err := strategy.CompleteTaskRecord(logCtx, event.SessionID, rec)
@@ -1713,6 +1811,10 @@ func completeSubagentTaskRecord(logCtx context.Context, ag agent.Agent, event *a
 			slog.String("tool_use_id", event.ToolUseID))
 	}
 
+	// Sibling protection for uncorroborated single-active-file resolves lives
+	// on the no-changes skip and ambiguousWithoutDescription paths above. Once
+	// a record is completed here the baseline was consumed — a stale pre-task
+	// file would break ResolvePreTaskToolUseID for later subagents.
 	_ = CleanupPreTaskState(logCtx, event.ToolUseID) //nolint:errcheck // best-effort cleanup
 	return nil
 }
@@ -1768,7 +1870,7 @@ func captureInFlightTaskFinal(logCtx context.Context, ag agent.Agent, sessionID,
 		Final:           true,
 		Timestamp:       time.Now(),
 	}
-	if err := handleSubagentStopFinal(logCtx, ag, event); err != nil {
+	if err := handleSubagentStopFinal(logCtx, ag, event, false); err != nil {
 		logging.Warn(logCtx, "failed to finalize in-flight task at session end",
 			slog.String("session_id", sessionID),
 			slog.String("tool_use_id", task.ToolUseID),

@@ -25,6 +25,25 @@ const (
 		`"verification_uri":"https://regional.example/device","expires_in":600,"interval":5}`
 )
 
+// newTestHTTPClient gives each test its own connection pool. Sharing
+// http.DefaultTransport (the deviceflow/authcode fallback when NewClient
+// gets a nil *http.Client) is unsafe here: httptest.Server.Close calls
+// http.DefaultTransport.CloseIdleConnections as a courtesy to its users
+// (net/http/httptest/server.go), so one parallel test's teardown can close
+// a pooled connection another parallel test is about to reuse — and
+// net/http does not retry that error, so it surfaces as "transport
+// connection broken: http: CloseIdleConnections called".
+func newTestHTTPClient(t *testing.T) *http.Client {
+	t.Helper()
+	base, ok := http.DefaultTransport.(*http.Transport)
+	if !ok {
+		t.Fatalf("http.DefaultTransport is %T, want *http.Transport", http.DefaultTransport)
+	}
+	tr := base.Clone()
+	t.Cleanup(tr.CloseIdleConnections)
+	return &http.Client{Transport: tr}
+}
+
 // newRegionalServer serves the endpoints a real regional login server does,
 // recording which paths it was asked for.
 func newRegionalServer(t *testing.T, seen *[]string) *httptest.Server {
@@ -70,7 +89,7 @@ func TestDeviceFlow_FollowsApexRedirectToRegionalTokenEndpoint(t *testing.T) {
 	}))
 	t.Cleanup(apex.Close)
 
-	c := NewClient(apex.URL, nil, false)
+	c := NewClient(apex.URL, newTestHTTPClient(t), false)
 
 	start, err := c.StartDeviceAuth(context.Background())
 	if err != nil {
@@ -110,7 +129,7 @@ func TestDeviceFlow_PollWithoutRetargetHitsTheApex(t *testing.T) {
 	}))
 	t.Cleanup(apex.Close)
 
-	c := NewClient(apex.URL, nil, false)
+	c := NewClient(apex.URL, newTestHTTPClient(t), false)
 	if _, err := c.PollDeviceAuth(context.Background(), "dev-1"); err == nil {
 		t.Fatal("PollDeviceAuth() = nil error, want the apex 404")
 	}
@@ -159,7 +178,7 @@ func TestUseTokenIssuer_EmptyClearsTheOverride(t *testing.T) {
 	var seen []string
 	regional := newRegionalServer(t, &seen)
 
-	c := NewClient(regional.URL, nil, false)
+	c := NewClient(regional.URL, newTestHTTPClient(t), false)
 	if err := c.UseTokenIssuer("https://elsewhere.example"); err != nil {
 		t.Fatalf("UseTokenIssuer() error = %v", err)
 	}
@@ -185,7 +204,7 @@ func TestBrowserFlow_ExchangesAtTheCallbackIssuer(t *testing.T) {
 	}))
 	t.Cleanup(apex.Close)
 
-	c := NewClient(apex.URL, nil, false)
+	c := NewClient(apex.URL, newTestHTTPClient(t), false)
 	flow, err := c.StartBrowserAuth(context.Background())
 	if err != nil {
 		t.Fatalf("StartBrowserAuth() error = %v", err)
