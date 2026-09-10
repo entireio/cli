@@ -62,6 +62,52 @@ func cursorHookConfig(ctx context.Context) (*agent.HookConfigFile, error) {
 	return agent.OpenHookConfig(worktreeRoot, (&CursorAgent{}).HookConfigRelPath()) //nolint:wrapcheck // agent.HookConfigFile already names the file in its error
 }
 
+// hookCommandPrefix is what every hook command Entire writes for Cursor begins
+// with; the verb is one of the HookName* constants.
+const hookCommandPrefix = "entire hooks cursor "
+
+// silentHookCommand wraps one hook verb in the silent production wrapper for
+// this host.
+//
+// Cursor runs every hook command through **PowerShell** on Windows — not
+// cmd.exe. Read out of the shipped builds (Cursor IDE 3.19.19 win32/x64, and
+// the native cursor-agent CLI windows/x64 2026.09.08-6caf4ff), the spawn is
+// `<pwsh|powershell> [-NoProfile -NonInteractive -ExecutionPolicy Bypass] -c
+// "$OutputEncoding = [System.Text.Encoding]::UTF8; Get-Content -LiteralPath
+// '<tmp>\cursor-hook-payload-*.json' -Raw | & { $input | <command> }"`, with the
+// stored command inserted verbatim. Both Windows runners read the same
+// .cursor/hooks.json, and both compose that identically.
+//
+// So the sh wrapper is not mangled the way droid's is: PowerShell single quotes
+// are literal, and the whole script reaches sh as one argument. It fails for a
+// different reason — `sh` has to resolve in the PATH of the PowerShell child
+// Cursor spawns, and agent.UseWindowsProductionHooks probes for sh in the
+// `entire enable` process instead. Git for Windows installs sh.exe under
+// …\Git\usr\bin and …\Git\bin, neither of which is on the machine PATH (only
+// …\Git\cmd is), while MSYS translates PATH for native children — so running
+// `entire enable` from Git Bash passes the probe and writes a wrapper Cursor
+// cannot run. That is issue #1424's reported environment (Windows 11 + Git
+// Bash), and no stronger probe COMMAND fixes it, because the probe is measuring
+// the wrong process. Hence agent.HookHostIsWindows rather than the probe.
+//
+// The failure is invisible rather than swallowed: a CommandNotFoundException
+// raised inside `& { $input | … }` does not set powershell.exe's exit code, so
+// Cursor sees exit 0 and has no error to report. The same command standalone
+// exits 1. TestWindowsWrappers_CursorComposition asserts this on a real Windows
+// runner — the sh-wrapper subtest is exactly this case.
+//
+// This moves the PATH dependency rather than removing it — the wrapper opens
+// with `where.exe entire`, so it needs `entire` on the child's PATH, which every
+// documented install method satisfies and Git for Windows' sh does not.
+//
+// Not fixed by any wrapper: the cursor-agent CLI picks a bash shell executor
+// whenever MSYSTEM is set (i.e. started from Git Bash) while still composing the
+// PowerShell script above, so hooks cannot run there at all. That is Cursor's to
+// fix, and it does not affect the IDE.
+func silentHookCommand(verb string, useWindows bool) string {
+	return agent.WrapProductionSilentHookCommandForOS(hookCommandPrefix+verb, useWindows)
+}
+
 // InstallHooks installs Cursor hooks in .cursor/hooks.json.
 // If force is true, removes existing Entire hooks before installing.
 // Returns the number of hooks installed.
@@ -120,33 +166,24 @@ func (c *CursorAgent) InstallHooks(ctx context.Context, force bool) (int, error)
 		subagentStop = removeEntireHooks(subagentStop)
 	}
 
-	// Define hook commands
-	const cmdPrefix = "entire hooks cursor "
-
-	// Cursor spawns hook commands through the native OS shell (cmd.exe on
-	// Windows), so a `sh -c '…'` wrapper silently fails to launch on a
-	// Windows host without a working POSIX sh — no hook fires and, because
-	// this is the *silent* wrapper, no error surfaces (issue #1424).
-	// UseWindowsProductionHooks probes for a runnable sh and only swaps in
-	// the native cmd.exe wrapper when one is absent, so this is a no-op on
-	// hosts (incl. all non-Windows) where the sh wrapper already works.
-	useWindowsHooks := agent.UseWindowsProductionHooks(ctx)
-	sessionStartCmd := agent.WrapProductionSilentHookCommandForOS(cmdPrefix+HookNameSessionStart, useWindowsHooks)
-	sessionEndCmd := agent.WrapProductionSilentHookCommandForOS(cmdPrefix+HookNameSessionEnd, useWindowsHooks)
-	beforeSubmitPromptCmd := agent.WrapProductionSilentHookCommandForOS(cmdPrefix+HookNameBeforeSubmitPrompt, useWindowsHooks)
-	stopCmd := agent.WrapProductionSilentHookCommandForOS(cmdPrefix+HookNameStop, useWindowsHooks)
-	preCompactCmd := agent.WrapProductionSilentHookCommandForOS(cmdPrefix+HookNamePreCompact, useWindowsHooks)
-	subagentStartCmd := agent.WrapProductionSilentHookCommandForOS(cmdPrefix+HookNameSubagentStart, useWindowsHooks)
-	subagentEndCmd := agent.WrapProductionSilentHookCommandForOS(cmdPrefix+HookNameSubagentStop, useWindowsHooks)
+	// Define hook commands. See silentHookCommand for why the host alone
+	// decides the wrapper.
+	useWindowsHooks := agent.HookHostIsWindows()
+	sessionStartCmd := silentHookCommand(HookNameSessionStart, useWindowsHooks)
+	sessionEndCmd := silentHookCommand(HookNameSessionEnd, useWindowsHooks)
+	beforeSubmitPromptCmd := silentHookCommand(HookNameBeforeSubmitPrompt, useWindowsHooks)
+	stopCmd := silentHookCommand(HookNameStop, useWindowsHooks)
+	preCompactCmd := silentHookCommand(HookNamePreCompact, useWindowsHooks)
+	subagentStartCmd := silentHookCommand(HookNameSubagentStart, useWindowsHooks)
+	subagentEndCmd := silentHookCommand(HookNameSubagentStop, useWindowsHooks)
 
 	count := 0
 
 	// Sync each hook to its desired command. syncEntireHook replaces any
 	// stale-form Entire hook (e.g. an sh-wrapped entry from a previous install)
-	// with the current command even without --force, so a wrapper-form change —
-	// notably the sh↔cmd.exe migration driven by UseWindowsProductionHooks when
-	// a Windows host gains or loses a working POSIX sh — cleanly replaces rather
-	// than leaving a dead duplicate entry that could double-fire (issue #1424).
+	// with the current command even without --force, so the sh→cmd.exe migration
+	// on an already-enabled Windows repo cleanly replaces rather than leaving a
+	// dead duplicate entry that could double-fire (issue #1424).
 	staleDropped := false
 	var dropped bool
 	sessionStart, count, dropped = syncEntireHook(sessionStart, sessionStartCmd, count)

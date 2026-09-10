@@ -378,26 +378,37 @@ func defaultSHHookWrapperWorks(ctx context.Context, command string) bool {
 // HookHostIsWindows reports whether hook commands will run on a Windows host,
 // without asking whether a POSIX sh is reachable there.
 //
-// It is the predicate for an agent that hands every hook command to cmd.exe on
-// Windows whatever else is installed. Factory Droid is one: its Windows build
-// runs each hook command as an argument of cmd.exe, while its macOS/Linux
-// build runs the same string under sh. For such an agent
-// UseWindowsProductionHooks answers the wrong question — its probe only
-// establishes that `sh -c 'exit 0'` runs, and that command carries no cmd.exe
-// metacharacters, so a host with Git Bash reports success while the real sh
-// wrapper, which is full of `>` and `&`, is still cut apart by cmd.exe before
-// any sh sees it.
+// It is the predicate for an agent whose Windows hook runner the sh wrapper
+// cannot survive, and two independent mechanisms put an agent in that group.
+// Both were established by reading the shipped per-platform binaries; neither
+// is detectable by a probe run from this process.
 //
-// Codex and Cursor keep UseWindowsProductionHooks, but do NOT read that as
-// "their runners are different". WrapWindowsProductionSilentHookCommand's own
-// doc, runWindowsWrapper in hook_command_exec_windows_test.go, and cursor's
-// InstallHooks all describe those runners as going through cmd.exe too. What
-// separates them is only evidence: Codex demonstrably passes the Windows
-// nightly with the sh wrapper installed, so whatever its composition does, the
-// wrapper survives it. Cursor has no such evidence — it is excluded from the
-// Windows matrix (no tmux) — so it may well have this same defect. Establish
-// that the way it was established here, by reading the runner, before changing
-// its gate.
+// The first is the shell mangling the wrapper. Factory Droid's Windows build
+// runs each hook command as an argument of cmd.exe, while its macOS/Linux build
+// runs the same string under sh. cmd.exe reads the sh wrapper's `>` and `&` as
+// its own redirections and separators, so the line is cut apart before any sh
+// sees it.
+//
+// The second is the wrapper's own dependency not being reachable where the hook
+// actually runs. Cursor spawns hooks through PowerShell, which passes the sh
+// wrapper through intact — single quotes are literal there — and then cannot
+// resolve `sh`, because Git for Windows keeps sh.exe off the machine PATH. See
+// cursor's silentHookCommand.
+//
+// In both cases UseWindowsProductionHooks answers a question that is not the
+// one being asked. Its probe establishes that `sh -c 'exit 0'` runs in THIS
+// process: a command carrying no cmd.exe metacharacters, resolved against this
+// process's PATH. So a host with Git Bash reports success while droid's real
+// wrapper is still cut apart, and `entire enable` run from Git Bash reports
+// success while Cursor's PowerShell child cannot find sh at all. The general
+// statement is that we cannot vouch for the environment of the process the
+// agent runs the hook in, so a probe of ours is not evidence about it.
+//
+// Codex keeps UseWindowsProductionHooks, and on evidence rather than on a
+// belief about its composition: it demonstrably passes the Windows nightly with
+// the sh wrapper installed, so whatever its runner does, the wrapper survives
+// it. Establish the same before changing any remaining gate — by reading the
+// runner, which is how both mechanisms above were found.
 func HookHostIsWindows() bool {
 	return hookCommandOS == hookWrapperOSWindows
 }
