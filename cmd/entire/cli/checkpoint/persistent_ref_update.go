@@ -6,10 +6,10 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
-	"os/exec"
 	"strings"
 
 	"github.com/entireio/cli/cmd/entire/cli/gitdir"
+	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/entireio/cli/cmd/entire/cli/internal/flock"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/osroot"
@@ -20,44 +20,24 @@ import (
 
 type persistentRefBuilder func() (newHash, expectedHash plumbing.Hash, err error)
 
-// casUpdateRef atomically updates refName through native Git's lock protocol.
-// Pass ZeroHash as expectedHash to require that the ref does not exist.
+// casUpdateRef adapts precise native Git CAS outcomes to the legacy retry
+// sentinel used by checkpoint writers.
 func casUpdateRef(ctx context.Context, repoRoot string, refName plumbing.ReferenceName, newHash, expectedHash plumbing.Hash) error {
-	newValue := newHash.String()
-	oldValue := strings.Repeat("0", newHash.HexSize())
-	if expectedHash != plumbing.ZeroHash {
-		oldValue = expectedHash.String()
-	}
-
-	cmd := exec.CommandContext(ctx, "git", "update-ref", refName.String(), newValue, oldValue)
-	cmd.Dir = repoRoot
-	cmd.Env = append(os.Environ(), "LC_ALL=C", "LANG=C")
-	output, err := cmd.CombinedOutput()
+	err := gitrepo.CompareAndSwapRef(ctx, repoRoot, refName, newHash, expectedHash)
 	if err == nil {
 		return nil
 	}
-
-	out := string(output)
-	if strings.Contains(out, "cannot lock ref") || strings.Contains(out, "but expected") {
-		return ErrShadowRefBusy
+	if !errors.Is(err, gitrepo.ErrRefSymbolic) && (errors.Is(err, gitrepo.ErrRefCASConflict) || errors.Is(err, gitrepo.ErrRefLocked)) {
+		return fmt.Errorf("%w: %w", ErrShadowRefBusy, err)
 	}
-	return fmt.Errorf("git update-ref %s: %s: %w", refName, strings.TrimSpace(out), err)
+	return fmt.Errorf("compare and swap ref %s: %w", refName, err)
 }
 
-// persistentRefLockDirName is the persistent-ref lock directory inside the git
-// common dir, alongside shadowLockDirName.
 const persistentRefLockDirName = "entire-persistent-ref-locks"
 
-// persistentRefLock returns the git common dir's root and the per-ref lock
-// file's name inside it, mirroring shadowBranchLock. Ref names are escaped
-// because "refs/entire/checkpoints/v1" would otherwise nest directories.
-//
-// Through the root like every other .git-resident lock: this was the last one
-// still opening by path, and flock's os.OpenFile(path, O_RDWR|O_CREATE) follows
-// a symlink at the lock path. Git will not check a path out into .git, so this
-// is defence in depth rather than a reachable escape — but it is the reason
-// openLockFileIn exists, and leaving one caller outside it is how the next one
-// gets written that way too.
+// persistentRefLock keeps lock paths inside the shared Git directory and rejects
+// symlinked directories. The caller must acquire the lock through flock's In API
+// to also reject a symlink at the lock file.
 func persistentRefLock(commonDir string, refName plumbing.ReferenceName) (*os.Root, string, error) {
 	root, err := gitdir.OpenAt(commonDir)
 	if err != nil {
@@ -83,16 +63,72 @@ func withPersistentRefFlock(ctx context.Context, commonDir string, refName plumb
 	return fn()
 }
 
-// updatePersistentRef serializes Entire writers for one ref and retains a CAS
-// retry for native Git or other external writers. build runs again after every
-// conflict, so each retry reconstructs its tree and commit from the fresh tip.
-func updatePersistentRef(ctx context.Context, repo *git.Repository, refName plumbing.ReferenceName, build persistentRefBuilder) error {
+func withLockedPersistentRef(
+	ctx context.Context,
+	repo *git.Repository,
+	refName plumbing.ReferenceName,
+	fn func(repoRoot, commonDir string) error,
+) error {
 	repoRoot, commonDir, err := repositoryDirs(repo)
 	if err != nil {
 		return fmt.Errorf("resolve repository directories: %w", err)
 	}
-
 	return withPersistentRefFlock(ctx, commonDir, refName, func() error {
+		return fn(repoRoot, commonDir)
+	})
+}
+
+// CASPersistentRef updates refName through native Git's cross-process
+// compare-and-swap protocol. It deliberately does not acquire the persistent
+// writer flock: the expected value predates this call, so native Git provides
+// the safety boundary without making deadline-free pre-push contexts wait
+// indefinitely. Native lock contention is retried with the original expected
+// hash; a CAS conflict remains terminal.
+func CASPersistentRef(
+	ctx context.Context,
+	repo *git.Repository,
+	refName plumbing.ReferenceName,
+	newHash, expectedHash plumbing.Hash,
+) error {
+	repoRoot, err := repositoryRoot(repo)
+	if err != nil {
+		return fmt.Errorf("resolve repository root: %w", err)
+	}
+	return retryPersistentRefLockContention(ctx, refName, func() error {
+		return gitrepo.CompareAndSwapRef(ctx, repoRoot, refName, newHash, expectedHash)
+	})
+}
+
+func retryPersistentRefLockContention(
+	ctx context.Context,
+	refName plumbing.ReferenceName,
+	update func() error,
+) error {
+	var lockErr error
+	for attempt := range shadowRefMaxRetries {
+		refErr := update()
+		if refErr == nil {
+			return nil
+		}
+		if errors.Is(refErr, gitrepo.ErrRefSymbolic) || !errors.Is(refErr, gitrepo.ErrRefLocked) {
+			return refErr
+		}
+		lockErr = refErr
+		if attempt+1 == shadowRefMaxRetries {
+			break
+		}
+		if backoffErr := shadowRefBackoff(ctx, attempt); backoffErr != nil {
+			return backoffErr
+		}
+	}
+	return fmt.Errorf("update persistent ref %s after %d lock attempts: %w", refName, shadowRefMaxRetries, lockErr)
+}
+
+// updatePersistentRef serializes Entire writers for one ref and retains a CAS
+// retry for native Git or other external writers. build runs again after every
+// conflict, so each retry reconstructs its tree and commit from the fresh tip.
+func updatePersistentRef(ctx context.Context, repo *git.Repository, refName plumbing.ReferenceName, build persistentRefBuilder) error {
+	return withLockedPersistentRef(ctx, repo, refName, func(repoRoot, commonDir string) error {
 		for attempt := range shadowRefMaxRetries {
 			newHash, expectedHash, buildErr := build()
 			if buildErr != nil {

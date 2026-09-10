@@ -173,28 +173,16 @@ func ListSessionStates(ctx context.Context) ([]*SessionState, error) {
 	return states, nil
 }
 
-// FindMostRecentSession returns the session ID of the most recently interacted session
-// (by LastInteractionTime) in the current worktree. Returns empty string if no sessions exist.
-// Scoping to the current worktree prevents cross-worktree pollution in log routing.
-// Falls back to unfiltered search if the worktree path can't be determined.
-func FindMostRecentSession(ctx context.Context) string {
-	states, err := ListSessionStates(ctx)
-	if err != nil || len(states) == 0 {
-		return ""
-	}
-
-	// Scope to current worktree to prevent cross-worktree pollution.
-	if filtered := sessionStatesForCurrentWorktree(ctx, states); len(filtered) > 0 {
-		states = filtered
-		// If no sessions match the worktree, fall back to all sessions.
-	}
-
-	return mostRecentSessionID(states)
-}
-
 // FindMostRecentSessionInCurrentWorktree returns the most recently interacted
-// session from the current worktree only. Unlike FindMostRecentSession, it does
-// not fall back to sessions from other worktrees.
+// session from the current worktree only, never falling back to another
+// worktree's.
+//
+// This is the whole of what it does, deliberately. Anything asking "which
+// session is running me" must go through strategy.ResolveCallerSession, which
+// identifies the caller first and reports which tier answered; a bare
+// most-recent lookup cannot tell "mine" from "whichever moved last", and
+// worktrees share one session store, so guessing there returns an unrelated
+// session that looks exactly like a real answer.
 func FindMostRecentSessionInCurrentWorktree(ctx context.Context) string {
 	states, err := ListSessionStates(ctx)
 	if err != nil || len(states) == 0 {

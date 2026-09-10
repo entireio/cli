@@ -125,10 +125,13 @@ func TestFetchURL_EdgeCases(t *testing.T) {
 		wantErr      bool
 	}{
 		{
-			name:         "unsupported origin protocol without token routes to provider checkpoint url (ssh default)",
+			// A file-path origin has no determinable owner, so the committed
+			// checkpoint_remote cannot be confirmed as ours and is ignored for
+			// reads, exactly as PushURL already ignores it for writes.
+			name:         "unsupported origin protocol without token falls back to origin because ownership cannot be established",
 			addOrigin:    true,
 			settingsJSON: `{"enabled":true,"strategy_options":{"checkpoint_remote":{"provider":"github","repo":"acme/checkpoints"}}}`,
-			wantURL:      "git@github.com:acme/checkpoints.git",
+			wantURL:      "",
 		},
 		{
 			name:         "entire:// origin without token derives mirror checkpoint url on same cluster",
@@ -149,17 +152,22 @@ func TestFetchURL_EdgeCases(t *testing.T) {
 			wantURL:      "",
 		},
 		{
-			name:         "unsupported origin protocol with token returns https checkpoint url",
+			// The ownership check runs before the token shortcut, matching the
+			// push side's ordering: a token does not vouch for ownership.
+			name:         "unsupported origin protocol with token falls back to origin because ownership cannot be established",
 			addOrigin:    true,
 			settingsJSON: `{"enabled":true,"strategy_options":{"checkpoint_remote":{"provider":"github","repo":"acme/checkpoints"}}}`,
 			token:        "secret-token",
-			wantURL:      "https://github.com/acme/checkpoints.git",
+			wantURL:      "",
 		},
 		{
-			name:         "missing origin with token returns https checkpoint url",
+			// With no remote at all there is no identity to establish ownership
+			// with, so the committed checkpoint_remote is ignored and resolution
+			// fails for want of any fetch URL.
+			name:         "missing origin with token errors because ownership cannot be established",
 			settingsJSON: `{"enabled":true,"strategy_options":{"checkpoint_remote":{"provider":"github","repo":"acme/checkpoints"}}}`,
 			token:        "secret-token",
-			wantURL:      "https://github.com/acme/checkpoints.git",
+			wantErr:      true,
 		},
 		{
 			name:         "malformed settings with token falls back to origin because checkpoint remote config is unavailable",
@@ -215,6 +223,158 @@ func TestFetchURL_EdgeCases(t *testing.T) {
 			}
 			if got != wantURL {
 				t.Fatalf("FetchURL() = %q, want %q", got, wantURL)
+			}
+		})
+	}
+}
+
+// TestFetchURL_OwnershipCheck pins that reads apply the same checkpoint_remote
+// ownership rule as writes: a committed setting whose owner does not match the
+// repo's own remotes arrived with the clone, and it must not select the
+// repository local checkpoint refs are populated from.
+func TestFetchURL_OwnershipCheck(t *testing.T) {
+	tests := []struct {
+		name         string
+		originURL    string
+		settingsJSON string
+		localJSON    string
+		leadRemote   string
+		leadURL      string
+		wantURL      string
+	}{
+		{
+			// The fork-first topology from checkpointRemoteIsInherited's doc
+			// comment, exercised through FetchURL: origin belongs to the fork
+			// owner, the committed checkpoint_remote to upstream.
+			name:         "committed checkpoint_remote owned by another account falls back to origin",
+			originURL:    "https://github.com/fork-owner/app.git",
+			settingsJSON: `{"enabled":true,"strategy_options":{"checkpoint_remote":{"provider":"github","repo":"upstream/checkpoints"}}}`,
+			wantURL:      "https://github.com/fork-owner/app.git",
+		},
+		{
+			name:         "committed checkpoint_remote with matching owner still resolves to the checkpoint repo",
+			originURL:    "https://github.com/acme/app.git",
+			settingsJSON: `{"enabled":true,"strategy_options":{"checkpoint_remote":{"provider":"github","repo":"acme/checkpoints"}}}`,
+			wantURL:      "https://github.com/acme/checkpoints.git",
+		},
+		{
+			// settings.local.json is the escape hatch for a checkpoint repo that
+			// is genuinely ours under a different owner.
+			name:         "local-layer checkpoint_remote is honored regardless of origin owner",
+			originURL:    "https://github.com/fork-owner/app.git",
+			settingsJSON: `{"enabled":true}`,
+			localJSON:    `{"strategy_options":{"checkpoint_remote":{"provider":"github","repo":"upstream/checkpoints"}}}`,
+			wantURL:      "https://github.com/upstream/checkpoints.git",
+		},
+		{
+			// The read candidate votes on ownership the way push URLs do on the
+			// push side: origin matches the checkpoint owner, but the elected
+			// read remote belongs to someone else, so the setting reads as
+			// inherited and resolution falls back to the candidate chain.
+			name:         "differently owned read candidate marks the checkpoint_remote inherited",
+			originURL:    "https://github.com/acme/app.git",
+			settingsJSON: `{"enabled":true,"strategy_options":{"checkpoint_remote":{"provider":"github","repo":"acme/checkpoints"}}}`,
+			leadRemote:   "fork",
+			leadURL:      "https://github.com/fork-owner/app.git",
+			wantURL:      "https://github.com/fork-owner/app.git",
+		},
+		{
+			// A read candidate that cannot be resolved is an identity whose
+			// owner cannot be confirmed, so the ownership check fails closed
+			// rather than proceeding without that identity's vote — omitting it
+			// would let a transient resolution failure skip the very identity
+			// that might have vetoed the setting.
+			name:         "unresolvable read candidate marks the checkpoint_remote inherited",
+			originURL:    "https://github.com/acme/app.git",
+			settingsJSON: `{"enabled":true,"strategy_options":{"checkpoint_remote":{"provider":"github","repo":"acme/checkpoints"}}}`,
+			leadRemote:   "ghost",
+			wantURL:      "https://github.com/acme/app.git",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			repoDir := t.TempDir()
+			testutil.InitRepo(t, repoDir)
+			runGit(t, repoDir, "remote", "add", "origin", tt.originURL)
+			if tt.leadRemote != "" && tt.leadURL != "" {
+				runGit(t, repoDir, "remote", "add", tt.leadRemote, tt.leadURL)
+			}
+			writeSettings(t, repoDir, tt.settingsJSON)
+			if tt.localJSON != "" {
+				writeLocalSettings(t, repoDir, tt.localJSON)
+			}
+			t.Chdir(repoDir)
+
+			var opts []FetchURLOptions
+			if tt.leadRemote != "" {
+				opts = append(opts, FetchURLOptions{LeadReadRemote: tt.leadRemote})
+			}
+			got, err := FetchURL(context.Background(), opts...)
+			if err != nil {
+				t.Fatalf("FetchURL() error = %v", err)
+			}
+			if got != tt.wantURL {
+				t.Fatalf("FetchURL() = %q, want %q", got, tt.wantURL)
+			}
+		})
+	}
+}
+
+// TestInheritedCheckpointRemote pins the status surface for the ownership
+// rejection: without it the rejection lives only in a Warn log and users
+// experience it as checkpoints silently vanishing.
+func TestInheritedCheckpointRemote(t *testing.T) {
+	tests := []struct {
+		name          string
+		originURL     string
+		settingsJSON  string
+		wantRepo      string
+		wantInherited bool
+	}{
+		{
+			name:          "differently owned committed checkpoint_remote reports inherited with the reason",
+			originURL:     "https://github.com/fork-owner/app.git",
+			settingsJSON:  `{"enabled":true,"strategy_options":{"checkpoint_remote":{"provider":"github","repo":"upstream/checkpoints"}}}`,
+			wantRepo:      "upstream/checkpoints",
+			wantInherited: true,
+		},
+		{
+			name:         "matching owner reports not inherited",
+			originURL:    "https://github.com/acme/app.git",
+			settingsJSON: `{"enabled":true,"strategy_options":{"checkpoint_remote":{"provider":"github","repo":"acme/checkpoints"}}}`,
+		},
+		{
+			name:         "no checkpoint_remote configured reports nothing",
+			originURL:    "https://github.com/acme/app.git",
+			settingsJSON: `{"enabled":true}`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			repoDir := t.TempDir()
+			testutil.InitRepo(t, repoDir)
+			runGit(t, repoDir, "remote", "add", "origin", tt.originURL)
+			writeSettings(t, repoDir, tt.settingsJSON)
+			t.Chdir(repoDir)
+
+			s, err := settings.Load(context.Background())
+			if err != nil {
+				t.Fatalf("settings.Load() error = %v", err)
+			}
+			repo, reason, inherited := InheritedCheckpointRemote(context.Background(), s, "origin")
+			if inherited != tt.wantInherited {
+				t.Fatalf("inherited = %v, want %v (reason %q)", inherited, tt.wantInherited, reason)
+			}
+			if !tt.wantInherited {
+				return
+			}
+			if repo != tt.wantRepo {
+				t.Fatalf("repo = %q, want %q", repo, tt.wantRepo)
+			}
+			if reason == "" {
+				t.Fatal("reason must name what mismatched")
 			}
 		})
 	}

@@ -11,6 +11,7 @@ import (
 	"runtime"
 	"testing"
 
+	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 )
 
@@ -60,6 +61,25 @@ func TestMain(m *testing.M) {
 	for k, v := range isolation {
 		if err := os.Setenv(k, v); err != nil {
 			fmt.Fprintf(os.Stderr, "failed to set %s: %v\n", k, err)
+			os.RemoveAll(tmpDir)
+			os.Exit(1)
+		}
+	}
+
+	// Unset the agents' caller-session variables, for the same reason as the
+	// config isolation above and with the same mechanism: the developer running
+	// `mise run test:integration` is usually inside an agent, that agent
+	// publishes its session ID into this process's environment, and every
+	// spawned `entire` inherits it — so the binary under test resolves the
+	// developer's real session as its caller and stamps it into hooks that are
+	// supposed to have no session at all. Not covered by the map above because
+	// isolation here means absence, not a redirected path. The list is static
+	// rather than registry-derived precisely so a harness whose binary does
+	// not link every agent still clears every variable — see
+	// agent.callerSessionEnvVars.
+	for _, name := range agent.CallerSessionEnvVars() {
+		if err := os.Unsetenv(name); err != nil {
+			fmt.Fprintf(os.Stderr, "failed to unset %s: %v\n", name, err)
 			os.RemoveAll(tmpDir)
 			os.Exit(1)
 		}

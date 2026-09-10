@@ -365,15 +365,9 @@ func (a *openCodeAgent) RunPrompt(ctx context.Context, dir string, prompt string
 	}
 	args = append(args, prompt)
 
-	timeout := a.timeout
-	if envTimeout := os.Getenv("E2E_TIMEOUT"); envTimeout != "" {
-		if parsed, err := time.ParseDuration(envTimeout); err == nil {
-			timeout = parsed
-		}
-	}
-	// Per-prompt timeout is the most specific override.
-	if cfg.PromptTimeout > 0 {
-		timeout = cfg.PromptTimeout
+	timeout, err := promptTimeout(a.timeout, cfg)
+	if err != nil {
+		return Output{}, err
 	}
 
 	ctx, cancel := context.WithTimeout(ctx, timeout)
@@ -387,7 +381,7 @@ func (a *openCodeAgent) RunPrompt(ctx context.Context, dir string, prompt string
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 
-	err := cmd.Run()
+	err = cmd.Run()
 	out := Output{
 		Command: a.Binary() + " " + strings.Join(args, " "),
 		Stdout:  stdout.String(),

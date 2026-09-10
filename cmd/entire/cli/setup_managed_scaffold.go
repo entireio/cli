@@ -14,7 +14,6 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
 	"github.com/entireio/cli/cmd/entire/cli/osroot"
-	"github.com/entireio/cli/cmd/entire/cli/worktreedir"
 )
 
 // managedScaffoldStatus is the outcome of writing an Entire-managed scaffold file
@@ -64,8 +63,8 @@ type managedScaffoldResult struct {
 // the atomic writer pins the real parent for the whole replacement. An
 // unmanaged file at the far end of a link therefore cannot be mistaken for one
 // of ours and rewritten.
-func writeManagedScaffold(root *os.Root, relPath string, content []byte, isManaged func([]byte) bool) (managedScaffoldResult, error) {
-	name := filepath.ToSlash(relPath)
+func writeManagedScaffold(t scaffoldTarget, content []byte, isManaged func([]byte) bool) (managedScaffoldResult, error) {
+	root, name, relPath := t.root, t.name, t.relPath
 	existingData, err := osroot.ReadFileNoFollow(root, name)
 	if err == nil {
 		if !isManaged(existingData) {
@@ -96,18 +95,39 @@ func writeManagedScaffold(root *os.Root, relPath string, content []byte, isManag
 	return managedScaffoldResult{Status: managedScaffoldCreated, RelPath: relPath}, nil
 }
 
-// openScaffoldRoot returns the shared worktree anchor for confined scaffold IO.
+// scaffoldTarget is where one managed scaffold is written: the root to write
+// inside, the name inside that root, and the worktree-relative path to report.
+//
+// name and relPath differ only when the scaffold sits under a symlinked agent
+// directory the user vouched for, in which case the root is anchored at the
+// link's target and name has lost the components consumed getting there.
+// Messages keep naming relPath, which is the path the user recognises.
+type scaffoldTarget struct {
+	root    *os.Root
+	name    string
+	relPath string
+}
+
+// openScaffoldTarget resolves where a scaffold at relPath should be written.
 //
 // It goes through worktreedir rather than opening its own root because the
 // worktree already has exactly one anchor and repoRoot is what a resolver
 // answered. The returned root is owned by the registry and shared with every
 // other reader and writer of this tree, so callers must not close it.
-func openScaffoldRoot(repoRoot string) (*os.Root, error) {
-	root, err := worktreedir.OpenAt(repoRoot)
+//
+// The vouched-directory step is not optional here even though scaffolds are not
+// hook configs: they are written under the SAME agent directories
+// (.claude/skills, .claude/agents, .codex/agents, .gemini/agents), by the same
+// `entire enable`. A vouched `.claude` that hook installation follows and
+// scaffolding refuses would leave enable half-applied, with the hook config at
+// the link's target and the skill nowhere, reporting success for both.
+func openScaffoldTarget(repoRoot, relPath string) (scaffoldTarget, error) {
+	name := filepath.ToSlash(relPath)
+	root, inner, err := agent.OpenAnchoredRoot(repoRoot, name)
 	if err != nil {
-		return nil, fmt.Errorf("open repository root for scaffolding: %w", err)
+		return scaffoldTarget{}, fmt.Errorf("open repository root for scaffolding: %w", err)
 	}
-	return root, nil
+	return scaffoldTarget{root: root, name: inner, relPath: name}, nil
 }
 
 // setupOptionalSkillForNames installs an optional skill (search, agent-help, ...)

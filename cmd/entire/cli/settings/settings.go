@@ -82,11 +82,21 @@ type EntireSettings struct {
 	// Unexported so it never serializes. Surfaced via LocalLayerRejection.
 	localLayerRejection string
 
+	// symlinkedAgentDirsRejection records why some or all of
+	// allow_symlinked_agent_dirs was dropped.
+	symlinkedAgentDirsRejection string
+
 	// externalAgentsRejection records why an external_agents grant was
 	// dropped by the trust gate, for the consumer to report. Unexported so it
 	// never serializes — a rejected grant must not be written back to disk as
 	// if the user had turned it off. See enforceExternalAgentsTrust.
 	externalAgentsRejection string
+
+	// agentPromptRejections records agent instruction fields dropped by the
+	// trust gate, for the consumers to report. Unexported so they never
+	// serialize — a rejected instruction must not be written back to disk as
+	// if the user had removed it. See enforceAgentPromptTrust.
+	agentPromptRejections []AgentPromptRejection
 
 	// Enabled indicates whether Entire is active. When false, CLI commands
 	// show a disabled message and hooks exit silently. Defaults to true.
@@ -164,9 +174,21 @@ type EntireSettings struct {
 	// and must not scan $PATH on it.
 	ExternalAgents bool `json:"external_agents,omitempty"`
 
-	// AsyncMirrorRequests selects the mirror creation route.
-	// nil/true = async request route (default), false = synchronous route.
-	AsyncMirrorRequests *bool `json:"async_mirror_requests,omitempty"`
+	// AllowSymlinkedAgentDirs lists worktree-relative agent config directories
+	// (".claude", ".codex/…") whose symlinks Entire may follow instead of
+	// refusing. Defaults to empty, which is the strict behaviour.
+	//
+	// A list rather than a boolean, on purpose: a flag would disable the whole
+	// class, where naming a path is the user saying which arrangement is theirs.
+	// Entries are checked against the directories actually derivable from the
+	// agents' hook-config paths, so `.entire` and `.git/hooks` cannot be
+	// spelled here at all.
+	//
+	// Following a link means writing where it points, so Load() honors this only
+	// from an untracked .entire/settings.local.json, the same gate as
+	// ExternalAgents. See enforceSymlinkedAgentDirsTrust and
+	// agent.SetVouchedSymlinkedDirs.
+	AllowSymlinkedAgentDirs []string `json:"allow_symlinked_agent_dirs,omitempty"`
 
 	// SummaryGeneration stores provider preferences for explain --generate.
 	// This is separate from strategy_options.summarize, which controls
@@ -430,6 +452,11 @@ func (s *EntireSettings) SummaryTimeoutValue() time.Duration {
 // ReviewProfileConfig is intentionally small: the review package owns built-in
 // default task text for conventional profile names like "general".
 type ReviewProfileConfig struct {
+	// Task is the canonical instruction every reviewer agent receives, so it
+	// gets the same provenance gate as ReviewConfig.Prompt: Load() honors it
+	// only from a developer-owned layer and resets it to "" otherwise, at
+	// which point review falls back to its built-in task text for
+	// conventional profile names. See enforceAgentPromptTrust.
 	Task   string                  `json:"task,omitempty"`
 	Agents map[string]ReviewConfig `json:"agents,omitempty"`
 	// Judge is the single agent (plus optional model) that consolidates the
@@ -477,6 +504,13 @@ type ReviewConfig struct {
 	// Prompt, when non-empty, carries saved agent-specific instructions. It is
 	// appended after the profile task (and after any Skills); it is not a
 	// verbatim replacement for the whole review prompt.
+	//
+	// The instructions reach agents spawned with approval checks disabled, so
+	// Load() honors this field only from a developer-owned layer (clone-local
+	// preferences, or an untracked .entire/settings.local.json) and resets it
+	// to "" otherwise. See enforceAgentPromptTrust. Readers that obtain
+	// settings by any route other than Load() (LoadFromFile, LoadFromBytes)
+	// get the ungated value and must not hand it to an agent.
 	Prompt string `json:"prompt,omitempty"`
 }
 
@@ -503,6 +537,11 @@ type InvestigateConfig struct {
 
 	// AlwaysPrompt is appended to every turn's composed prompt, parallel
 	// to ReviewConfig.Prompt.
+	//
+	// Investigate agents run with approval checks disabled, so Load() honors
+	// this field only from an untracked .entire/settings.local.json and resets
+	// it to "" otherwise, the same gate ReviewConfig.Prompt gets. See
+	// enforceAgentPromptTrust.
 	AlwaysPrompt string `json:"always_prompt,omitempty"`
 }
 
@@ -534,6 +573,19 @@ func (s *EntireSettings) ExternalAgentsRejection() (reason string, rejected bool
 		return "", false
 	}
 	return s.externalAgentsRejection, true
+}
+
+// SymlinkedAgentDirsRejection reports why Load dropped some or all of
+// allow_symlinked_agent_dirs, and whether a rejection happened.
+//
+// Surfaced for the same reason as ExternalAgentsRejection: without it, a grant
+// that was refused and a setting the user never wrote look identical from the
+// outside, since both end with Entire refusing the link.
+func (s *EntireSettings) SymlinkedAgentDirsRejection() (reason string, rejected bool) {
+	if s == nil || s.symlinkedAgentDirsRejection == "" {
+		return "", false
+	}
+	return s.symlinkedAgentDirsRejection, true
 }
 
 // InvestigateConfig returns the configured investigate config. Returns nil
@@ -664,6 +716,18 @@ func clonePreferencesPathForWorktreeRoot(ctx context.Context, worktreeRoot strin
 	return filepath.Join(filepath.Clean(commonDir), ClonePreferencesFile), nil
 }
 
+// worktreeRootOfSettingsFile recovers the worktree root a settings path was
+// built from: settingsAbsPaths joins <root>/.entire/<file>, so the root is two
+// levels up. Used only as the KEY the vouched-symlink policy is scoped by, never
+// as a base for I/O, so the derived-path rule in CLAUDE.md does not apply -- an
+// inconsistent key costs a refused symlink, which is the safe direction.
+func worktreeRootOfSettingsFile(settingsFileAbs string) string {
+	if settingsFileAbs == "" {
+		return ""
+	}
+	return filepath.Dir(filepath.Dir(settingsFileAbs))
+}
+
 func loadMergedSettings(ctx context.Context, settingsFileAbs, preferencesFileAbs, localSettingsFileAbs string) (*EntireSettings, error) {
 	// Load base settings
 	settings, err := loadFromFile(settingsFileAbs)
@@ -671,8 +735,9 @@ func loadMergedSettings(ctx context.Context, settingsFileAbs, preferencesFileAbs
 		return nil, fmt.Errorf("reading settings file: %w", err)
 	}
 
+	var preferences *ClonePreferences
 	if preferencesFileAbs != "" {
-		preferences, err := loadClonePreferencesFromFile(preferencesFileAbs)
+		preferences, err = loadClonePreferencesFromFile(preferencesFileAbs)
 		if err != nil {
 			return nil, fmt.Errorf("reading clone preferences file: %w", err)
 		}
@@ -701,9 +766,18 @@ func loadMergedSettings(ctx context.Context, settingsFileAbs, preferencesFileAbs
 	// openai_privacy_filter.command is executed, so it is honored only from a
 	// local file positively verified as this developer's own. external_agents
 	// grants execution of every entire-agent-* binary on $PATH, so it gets the
-	// same gate.
+	// same gate. Agent instruction fields (investigate.always_prompt, review
+	// prompts) are appended verbatim to prompts of agents spawned with
+	// approval checks disabled, so they get the same provenance requirement,
+	// with clone-local preferences as an additional trusted layer.
 	enforceOPFCommandTrust(ctx, settings, localSettingsFileAbs, localData)
 	enforceExternalAgentsTrust(ctx, settings, localSettingsFileAbs, localData)
+	enforceAgentPromptTrust(ctx, settings, localSettingsFileAbs, localData, preferences)
+	// allow_symlinked_agent_dirs decides where Entire writes an agent's hook
+	// config, so it gets the same gate, and then installs the surviving set as
+	// the process-wide policy.
+	enforceSymlinkedAgentDirsTrust(ctx, settings, localSettingsFileAbs, localData)
+	applyVouchedAgentDirs(settings, worktreeRootOfSettingsFile(settingsFileAbs))
 
 	// Re-validate after merge. Individual files are validated by loadFromFile,
 	// but mergeJSON patches fields independently and can produce combinations
@@ -1325,9 +1399,6 @@ func mergeScalarFields(settings *EntireSettings, raw map[string]json.RawMessage)
 	if err := mergeRawBool(raw, "external_agents", &settings.ExternalAgents); err != nil {
 		return err
 	}
-	if err := mergeRawBoolPtr(raw, "async_mirror_requests", &settings.AsyncMirrorRequests); err != nil {
-		return err
-	}
 	if err := mergeRawBool(raw, "vercel", &settings.Vercel); err != nil {
 		return err
 	}
@@ -1349,6 +1420,29 @@ func mergeScalarFields(settings *EntireSettings, raw map[string]json.RawMessage)
 	if err := mergeRawInt(raw, "summary_timeout_seconds", &settings.SummaryTimeoutSeconds); err != nil {
 		return err
 	}
+	if err := mergeRawStringSlice(raw, "allow_symlinked_agent_dirs", &settings.AllowSymlinkedAgentDirs); err != nil {
+		return err
+	}
+	return nil
+}
+
+// mergeRawStringSlice replaces dst when key is present, rather than appending.
+//
+// Replacement is the only sensible merge for allow_symlinked_agent_dirs: the
+// list is the complete set of directories this developer vouches for, and
+// appending would let the project layer contribute entries to a grant only the
+// local layer is trusted to make. An explicit empty list therefore means
+// "vouch for nothing", which is a thing a user can want to say.
+func mergeRawStringSlice(raw map[string]json.RawMessage, key string, dst *[]string) error {
+	v, ok := raw[key]
+	if !ok {
+		return nil
+	}
+	var parsed []string
+	if err := json.Unmarshal(v, &parsed); err != nil {
+		return fmt.Errorf("parsing %s: %w", key, err)
+	}
+	*dst = parsed
 	return nil
 }
 
@@ -1866,6 +1960,13 @@ func (s *EntireSettings) HasCheckpointRemoteKey() bool {
 // without it, the ownership signal this gates could be inherited from the very
 // upstream it is meant to distinguish.
 //
+// The DEEP (index AND HEAD) check, like the OPF command and unlike the layer
+// as a whole: this predicate overrides the checkpoint-remote ownership check
+// on both directions of checkpoint traffic, so being wrong means routing
+// session transcripts to a repository we cannot confirm is ours, not losing a
+// preference. The cost falls only on repos that actually have a local file
+// with the key, and the probe is memoized per process.
+//
 // Best-effort: an unreadable, malformed, or unverifiable local file reports
 // false, which is the conservative answer (callers then fall back to weaker
 // ownership signals).
@@ -1874,10 +1975,10 @@ func CheckpointRemoteIsLocalOnly(ctx context.Context) bool {
 	if err != nil || !exists {
 		return false
 	}
-	if classifyLocalSettings(ctx, path) != localOwn {
+	if !rawHasKey(raw, "strategy_options", "checkpoint_remote") {
 		return false
 	}
-	return rawHasKey(raw, "strategy_options", "checkpoint_remote")
+	return classifyLocalSettingsDeep(ctx, path) == localOwn
 }
 
 // GetCheckpointRemote returns the configured checkpoint remote.
@@ -1957,11 +2058,6 @@ func IsExternalAgentsEnabled(ctx context.Context) bool {
 		return false
 	}
 	return s.ExternalAgents
-}
-
-// IsAsyncMirrorRequestsEnabled reports whether mirror creation uses the async request route.
-func (s *EntireSettings) IsAsyncMirrorRequestsEnabled() bool {
-	return s.AsyncMirrorRequests == nil || *s.AsyncMirrorRequests
 }
 
 // IsSignCheckpointCommitsEnabled returns true if checkpoint commits should be signed.

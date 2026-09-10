@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -803,8 +804,14 @@ func TestResolveCheckpointSummaryProvider_ConfiguredExternalProvider(t *testing.
 	if err := os.MkdirAll(filepath.Join(tmpDir, ".entire"), 0o755); err != nil {
 		t.Fatalf("mkdir .entire: %v", err)
 	}
-	if err := os.WriteFile(filepath.Join(tmpDir, ".entire", "settings.json"), []byte(`{"enabled":true,"external_agents":true,"summary_generation":{"provider":"`+providerName+`","model":"external-model"}}`), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(tmpDir, ".entire", "settings.json"), []byte(`{"enabled":true,"summary_generation":{"provider":"`+providerName+`","model":"external-model"}}`), 0o644); err != nil {
 		t.Fatalf("write settings: %v", err)
+	}
+	// The grant lives in the untracked local layer, which is the only one
+	// settings.enforceExternalAgentsTrust honors — and the only one that lets
+	// the configured name reach discovery at all.
+	if err := os.WriteFile(filepath.Join(tmpDir, ".entire", "settings.local.json"), []byte(`{"external_agents":true}`), 0o644); err != nil {
+		t.Fatalf("write local settings: %v", err)
 	}
 	externalDir := t.TempDir()
 	writeExternalSummaryAgentBinary(t, externalDir, providerName)
@@ -956,6 +963,7 @@ func TestPersistSummaryProviderSelection_ExternalAlreadyEnabledNoSignal(t *testi
 func TestResolveCheckpointSummaryProvider_ConfiguredProviderUsesNamedDiscovery(t *testing.T) {
 	// Cannot use t.Parallel(): mutates package-level resolution seams.
 	ctx := context.Background()
+	grantExternalAgentsLocally(t)
 	const configuredName = types.AgentName("external-configured-provider")
 	stub := &stubTextAgent{name: configuredName, kind: agent.AgentTypeClaudeCode}
 
@@ -1012,17 +1020,23 @@ func TestResolveCheckpointSummaryProvider_ConfiguredProviderUsesNamedDiscovery(t
 	}
 }
 
-// TestPersistSummaryProviderSelection_AutoSelectDoesNotGrantExternalAgents
-// pins that the repo-wide external_agents grant needs a human.
+// TestPersistSummaryProviderSelection_AutoSelectPersistsNothingForAnExternal
+// pins both halves of the automatic case.
 //
-// The non-interactive branches of resolveCheckpointSummaryProvider auto-select
-// (single candidate, or first-of-many with no TTY) and used to persist the
-// grant on the way through. That grant is not scoped to the chosen provider:
-// it turns on the $PATH sweep that runs every entire-agent-* binary from then
-// on, so it must not be minted by a code path where nobody chose anything. The
-// chosen provider still resolves on later runs without it, through the named
-// ungated lookup in discoverSummaryProviderIfMissing.
-func TestPersistSummaryProviderSelection_AutoSelectDoesNotGrantExternalAgents(t *testing.T) {
+// The repo-wide external_agents grant needs a human: the non-interactive
+// branches of resolveCheckpointSummaryProvider auto-select (single candidate,
+// or first-of-many with no TTY) and used to persist the grant on the way
+// through. That grant is not scoped to the chosen provider, it turns on the
+// $PATH sweep that runs every entire-agent-* binary from then on, so it must
+// not be minted by a code path where nobody chose anything.
+//
+// And with the grant withheld, the provider NAME must not be persisted either.
+// It used to be, on the reasoning that it resolved through an ungated named
+// lookup. That lookup is gated now, so the write produced a settings file whose
+// very next read fails with "unknown summary provider" -- Entire breaking
+// itself with its own write. Persisting nothing leaves the working behaviour:
+// the next run re-discovers and auto-selects the same provider.
+func TestPersistSummaryProviderSelection_AutoSelectPersistsNothingForAnExternal(t *testing.T) {
 	// Cannot use t.Parallel(): mutates the package-level agent registry via discovery.
 	if _, err := exec.LookPath("sh"); err != nil {
 		t.Skip("sh not available")
@@ -1047,23 +1061,238 @@ func TestPersistSummaryProviderSelection_AutoSelectDoesNotGrantExternalAgents(t 
 	discoverSummaryProvidersAlways(ctx)
 
 	flagFlipped, err := persistSummaryProviderSelection(ctx, types.AgentName(providerName), "", selectionAutomatic)
-	if err != nil {
-		t.Fatalf("persistSummaryProviderSelection() error = %v", err)
+	if !errors.Is(err, errSelectionNotPersistable) {
+		t.Fatalf("persistSummaryProviderSelection() error = %v, want errSelectionNotPersistable", err)
 	}
 	if flagFlipped {
 		t.Error("an automatic selection must not flip external_agents")
 	}
 
-	s, err := settings.LoadFromFile(filepath.Join(tmpDir, ".entire", "settings.local.json"))
+	localFile := filepath.Join(tmpDir, ".entire", "settings.local.json")
+	if _, statErr := os.Stat(localFile); statErr == nil {
+		s, loadErr := settings.LoadFromFile(localFile)
+		if loadErr != nil {
+			t.Fatalf("LoadFromFile() error = %v", loadErr)
+		}
+		if s.ExternalAgents {
+			t.Error("external_agents granted without a human choosing the provider")
+		}
+		if s.SummaryGeneration != nil && s.SummaryGeneration.Provider != "" {
+			t.Errorf("provider %q persisted without the grant that makes it resolvable; "+
+				"the next run reads it back and fails", s.SummaryGeneration.Provider)
+		}
+	}
+}
+
+// The round trip the bug actually produced: auto-select, save, then resolve
+// again from the saved settings. It must not fail on what Entire itself wrote.
+//
+// The second resolution runs with the registry RESTORED to its pre-discovery
+// state, which is what a fresh process actually has. Without that this proves
+// much less than it appears to: the first call leaves the external agent
+// registered process-wide, so a second call in the same process resolves it
+// from memory whether or not anything usable was persisted. The bug is a
+// next-invocation bug, so the test has to be one too.
+func TestResolveCheckpointSummaryProvider_AutoSelectedExternalSurvivesTheNextRun(t *testing.T) {
+	// Cannot use t.Parallel(): mutates the package-level agent registry via discovery.
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("sh not available")
+	}
+
+	ctx := context.Background()
+	tmpDir := t.TempDir()
+	testutil.InitRepo(t, tmpDir)
+	t.Chdir(tmpDir)
+
+	if err := os.MkdirAll(filepath.Join(tmpDir, ".entire"), 0o750); err != nil {
+		t.Fatalf("mkdir .entire: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(tmpDir, ".entire", "settings.json"), []byte(`{"enabled":true}`), 0o600); err != nil {
+		t.Fatalf("write settings: %v", err)
+	}
+
+	const providerName = "external-summary-roundtrip"
+	externalDir := t.TempDir()
+	writeExternalSummaryAgentBinary(t, externalDir, providerName)
+	t.Setenv("PATH", externalDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	// The always-variant, which is what the real non-interactive path uses to
+	// build its candidate list: installation is the opt-in to "this plugin
+	// exists", and it is what makes the run in progress work without the grant.
+	restore := agent.SnapshotRegistryForTesting()
+	discoverSummaryProvidersAlways(ctx)
+
+	var first bytes.Buffer
+	got, err := autoSelectSummaryProvider(ctx, &first, types.AgentName(providerName),
+		"test: non-interactive auto-select", selectionAutomatic)
 	if err != nil {
-		t.Fatalf("LoadFromFile() error = %v", err)
+		t.Fatalf("autoSelectSummaryProvider() error = %v", err)
 	}
-	if s.ExternalAgents {
-		t.Error("external_agents granted without a human choosing the provider")
+	if got.Name != types.AgentName(providerName) {
+		t.Fatalf("provider = %q, want %q", got.Name, providerName)
 	}
-	// The provider choice itself is still worth persisting: it is what keeps
-	// the next run from re-deciding, and it grants nothing on its own.
-	if s.SummaryGeneration == nil || s.SummaryGeneration.Provider != providerName {
-		t.Fatalf("provider not persisted; got %+v", s.SummaryGeneration)
+	if !strings.Contains(first.String(), "entire agent") {
+		t.Errorf("output should say how to make the choice stick, got %q", first.String())
+	}
+
+	// A fresh process: the plugin is on $PATH but nothing is registered yet.
+	restore()
+
+	if _, err := resolveCheckpointSummaryProvider(ctx, io.Discard); err != nil {
+		t.Fatalf("a fresh process failed on the settings the first run wrote: %v", err)
+	}
+}
+
+// The negative control for the test above, and the reason not-persisting is the
+// fix rather than a dodge.
+//
+// It writes by hand what the old code wrote by itself -- the provider name with
+// no external_agents grant -- and then resolves as a fresh process would. That
+// configuration is unusable: discoverSummaryProviderIfMissing gates the named
+// lookup on the grant, so the name resolves to nothing and the command fails on
+// something Entire put there. If a future change makes this state reachable
+// again, this test says so.
+func TestResolveCheckpointSummaryProvider_PersistedExternalWithoutTheGrantIsBroken(t *testing.T) {
+	// Cannot use t.Parallel(): mutates the package-level agent registry via discovery.
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("sh not available")
+	}
+
+	ctx := context.Background()
+	tmpDir := t.TempDir()
+	testutil.InitRepo(t, tmpDir)
+	t.Chdir(tmpDir)
+
+	if err := os.MkdirAll(filepath.Join(tmpDir, ".entire"), 0o750); err != nil {
+		t.Fatalf("mkdir .entire: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(tmpDir, ".entire", "settings.json"), []byte(`{"enabled":true}`), 0o600); err != nil {
+		t.Fatalf("write settings: %v", err)
+	}
+
+	const providerName = "external-summary-persisted"
+	externalDir := t.TempDir()
+	writeExternalSummaryAgentBinary(t, externalDir, providerName)
+	t.Setenv("PATH", externalDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	// What persisting used to produce: the name, and no grant.
+	local := fmt.Sprintf(`{"summary_generation":{"provider":%q}}`, providerName)
+	if err := os.WriteFile(filepath.Join(tmpDir, ".entire", "settings.local.json"), []byte(local), 0o600); err != nil {
+		t.Fatalf("write local settings: %v", err)
+	}
+
+	_, err := resolveCheckpointSummaryProvider(ctx, io.Discard)
+	if err == nil {
+		t.Fatal("a persisted external provider with no grant resolved; the gate is not being applied")
+	}
+	if !strings.Contains(err.Error(), providerName) {
+		t.Errorf("error = %q, want it to name the unresolvable provider", err)
+	}
+}
+
+// grantExternalAgentsLocally puts the test in a repository whose UNTRACKED
+// .entire/settings.local.json enables external agents, which is the only layer
+// settings.enforceExternalAgentsTrust honors.
+func grantExternalAgentsLocally(t *testing.T) {
+	t.Helper()
+	dir := t.TempDir()
+	testutil.InitRepo(t, dir)
+	t.Chdir(dir)
+	if err := os.MkdirAll(filepath.Join(dir, ".entire"), 0o750); err != nil {
+		t.Fatalf("mkdir .entire: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, ".entire", "settings.local.json"), []byte(`{"external_agents":true}`), 0o600); err != nil {
+		t.Fatalf("write local settings: %v", err)
+	}
+}
+
+// summary_generation.provider is honored from the COMMITTED
+// .entire/settings.json, so the name deciding which binary to execute can
+// arrive in a pull request. Naming one binary rather than sweeping $PATH is not
+// enough on its own: without the external_agents grant, that one line would run
+// `entire-agent-<name> info` on everyone who pulls it.
+func TestDiscoverSummaryProviderIfMissing_ExternalNeedsTheGrant(t *testing.T) {
+	// Cannot use t.Parallel(): mutates package-level resolution seams.
+	dir := t.TempDir()
+	testutil.InitRepo(t, dir)
+	t.Chdir(dir)
+
+	originalGet := getSummaryAgent
+	originalNamed := discoverNamedSummaryProvider
+	t.Cleanup(func() {
+		getSummaryAgent = originalGet
+		discoverNamedSummaryProvider = originalNamed
+	})
+
+	getSummaryAgent = func(name types.AgentName) (agent.Agent, error) {
+		return nil, fmt.Errorf("agent %q not registered", name)
+	}
+	discoverNamedSummaryProvider = func(context.Context, types.AgentName) error {
+		t.Fatal("a committed provider name must not execute a plugin binary without the external_agents grant")
+		return nil
+	}
+
+	if blocked := discoverSummaryProviderIfMissing(context.Background(), "external-ungranted"); !blocked {
+		t.Fatal("discoverSummaryProviderIfMissing() should report that it declined for want of the grant")
+	}
+}
+
+// The gate must land only on the external case. A committed
+// `"provider": "claude-code"` is the ordinary configuration and has nothing to
+// do with plugins, so it must keep working with external agents off.
+func TestDiscoverSummaryProviderIfMissing_RegisteredProviderIsUnaffected(t *testing.T) {
+	// Cannot use t.Parallel(): mutates package-level resolution seams.
+	dir := t.TempDir()
+	testutil.InitRepo(t, dir)
+	t.Chdir(dir)
+
+	originalGet := getSummaryAgent
+	originalNamed := discoverNamedSummaryProvider
+	t.Cleanup(func() {
+		getSummaryAgent = originalGet
+		discoverNamedSummaryProvider = originalNamed
+	})
+
+	getSummaryAgent = func(types.AgentName) (agent.Agent, error) {
+		return &stubTextAgent{name: "claude-code", kind: agent.AgentTypeClaudeCode}, nil
+	}
+	discoverNamedSummaryProvider = func(context.Context, types.AgentName) error {
+		t.Fatal("a registered provider must not reach discovery at all")
+		return nil
+	}
+
+	if blocked := discoverSummaryProviderIfMissing(context.Background(), "claude-code"); blocked {
+		t.Fatal("a registered provider must resolve regardless of the external_agents grant")
+	}
+}
+
+// Once granted, the named lookup runs as before.
+func TestDiscoverSummaryProviderIfMissing_GrantedExternalIsDiscovered(t *testing.T) {
+	// Cannot use t.Parallel(): mutates package-level resolution seams.
+	grantExternalAgentsLocally(t)
+
+	originalGet := getSummaryAgent
+	originalNamed := discoverNamedSummaryProvider
+	t.Cleanup(func() {
+		getSummaryAgent = originalGet
+		discoverNamedSummaryProvider = originalNamed
+	})
+
+	getSummaryAgent = func(name types.AgentName) (agent.Agent, error) {
+		return nil, fmt.Errorf("agent %q not registered", name)
+	}
+	calls := 0
+	discoverNamedSummaryProvider = func(_ context.Context, name types.AgentName) error {
+		calls++
+		if name != "external-granted" {
+			t.Fatalf("named discovery for %q, want %q", name, "external-granted")
+		}
+		return nil
+	}
+
+	if blocked := discoverSummaryProviderIfMissing(context.Background(), "external-granted"); blocked {
+		t.Fatal("discoverSummaryProviderIfMissing() should not report a block once the grant is in place")
+	}
+	if calls != 1 {
+		t.Fatalf("named discovery called %d times, want exactly 1", calls)
 	}
 }
