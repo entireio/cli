@@ -24,7 +24,10 @@ func init() {
 }
 
 //nolint:revive // OpenCodeAgent is clearer than Agent in this context
-type OpenCodeAgent struct{}
+type OpenCodeAgent struct {
+	// CommandRunner overrides text-generation subprocess creation when non-nil.
+	CommandRunner agent.TextCommandRunner
+}
 
 // NewOpenCodeAgent creates a new OpenCode agent instance.
 func NewOpenCodeAgent() agent.Agent {

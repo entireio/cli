@@ -34,17 +34,20 @@ type TextCommandRunner func(ctx context.Context, name string, args ...string) *e
 // directory with all GIT_* environment variables removed. This avoids recursive
 // hook triggers and repo side effects while preserving provider-specific flags.
 //
+// Optional envOverrides take precedence over inherited values; GIT_* entries
+// are removed even from overrides.
+//
 // Returns (result, capturedStderr, stdoutByteCount, err). capturedStderr and
 // stdoutByteCount are populated even on error so callers can wrap them into a
 // *agent.TextGenerationError for timeout diagnostics.
-func RunIsolatedTextGeneratorCLI(ctx context.Context, runner TextCommandRunner, binary, displayName string, args []string, stdin string) (string, string, int, error) {
+func RunIsolatedTextGeneratorCLI(ctx context.Context, runner TextCommandRunner, binary, displayName string, args []string, stdin string, envOverrides ...string) (string, string, int, error) {
 	if runner == nil {
 		runner = exec.CommandContext
 	}
 
 	cmd := runner(ctx, binary, args...)
 	cmd.Dir = os.TempDir()
-	cmd.Env = StripGitEnv(os.Environ())
+	cmd.Env = StripGitEnv(append(os.Environ(), envOverrides...))
 	// A killed provider CLI can leave a sandbox/MCP grandchild holding the
 	// output pipe open, which blocks cmd.Run past the ctx deadline. Bound it.
 	execx.TerminateOnCancel(cmd)
@@ -106,6 +109,7 @@ var summaryProviderBinaries = map[types.AgentName]string{
 	AgentNameCursor:     "agent",
 	AgentNameGemini:     "gemini",
 	AgentNamePi:         "pi",
+	AgentNameOpenCode:   "opencode",
 }
 
 // SummaryCLIBinaryName returns the CLI binary name for a summary-capable

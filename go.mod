@@ -50,7 +50,10 @@ require (
 	gopkg.in/yaml.v3 v3.0.1
 )
 
-require github.com/lastpersonlabs/goredact v0.1.0
+require (
+	github.com/lastpersonlabs/goredact v0.1.0
+	github.com/tailscale/hujson v0.0.0-20260727124030-b80ff77dac4f
+)
 
 require (
 	dario.cat/mergo v1.0.2 // indirect

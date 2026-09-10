@@ -245,3 +245,15 @@ func TestStripGitEnv(t *testing.T) {
 		t.Fatalf("expected 3 entries, got %d: %v", len(filtered), filtered)
 	}
 }
+
+func TestRunIsolatedTextGeneratorCLI_EnvironmentOverrides(t *testing.T) {
+	t.Parallel()
+	runner := func(ctx context.Context, _ string, _ ...string) *exec.Cmd { return exec.CommandContext(ctx, "env") }
+	out, _, _, err := RunIsolatedTextGeneratorCLI(t.Context(), runner, "test", "test", nil, "", "ENTIRE_GENERATION_PROBE=first", "ENTIRE_GENERATION_PROBE=last", "GIT_DIR=must-not-leak")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, "ENTIRE_GENERATION_PROBE=last") || strings.Contains(out, "ENTIRE_GENERATION_PROBE=first") || strings.Contains(out, "GIT_DIR=") {
+		t.Fatalf("overrides not applied or Git environment leaked: %q", out)
+	}
+}
