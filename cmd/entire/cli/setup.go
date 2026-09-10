@@ -1186,6 +1186,11 @@ func runEnableOnConfiguredRepo(ctx context.Context, cmd *cobra.Command, opts Ena
 				return err
 			}
 		}
+		if hasGlobalSettingsFlags(cmd) {
+			if err := updateGlobalSettings(ctx, cmd, w, opts); err != nil {
+				return err
+			}
+		}
 		if enableNeedsAgentManagement(cmd) {
 			var selectFn func(available []string) ([]string, error)
 			if opts.Yes {
