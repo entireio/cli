@@ -217,13 +217,6 @@ func styledHeaders(st statusStyles, headers []string) []string {
 	return out
 }
 
-func orDash(s string) string {
-	if s == "" {
-		return "-"
-	}
-	return s
-}
-
 // visibilityDisplay renders the VISIBILITY cell (and the `get` record's
 // Visibility section): the repo's audience in GitHub's terms, not a yes/no.
 func visibilityDisplay(private bool) string {
