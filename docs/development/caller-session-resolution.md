@@ -123,6 +123,22 @@ Each fix corrected the divergence; combining the candidates removes it. Two test
 
 **Why the source repository's states have to be candidates at all**, since that is the part of the shape that is not obvious: `ResolveCallerSession` resolves against the *current* repository's session store, so in a cross-repository adoption the source state — and the owner process recorded on it — is not in the listing it searches. For an agent that publishes a session ID this is invisible, because the environment names the source session directly and matches. For Gemini CLI and opencode, which publish nothing, ancestry is the only signal and it was looking in the wrong place — so their own cross-repo adoption, the case the command exists for, was refused, with `--allow-foreign-session` as the only way through. Teaching an agent to waive a real check in order to do a legitimate thing is worse than the check not existing.
 
+**Both listings must also be COMPLETE, and that is a separate question from whether the resolver identified anybody.** Neither store listing is fatal on a state file it cannot read — one corrupt file must not blind every command to the rest of the store — so the loss arrives as a *successful* listing with a candidate quietly absent. A missing candidate is exactly the nearer owner whose absence lets a bare environment match win, so the guard refuses when either listing was short, ahead of the verdicts rather than among them: incompleteness undermines them rather than competing with them, and the one branch it invalidates is the one that authorizes.
+
+`session.StateStore.ListWithSkipped` reports what a listing could not read and `ResolvedSession.Incomplete` carries it out of the resolver; `SessionResolution.IsCaller()` deliberately does not fold it in, because the resolution is still the best available answer and still worth *displaying* — only mutation has to be conservative. Two properties are load-bearing:
+
+- **Reporting the listing's error is not enough**, which is why this is a value rather than a log line. A store that cannot be opened at all is loud (every later read fails the same way, so the command stops on its own — measured: a mode-000 store directory already failed the adoption at the mutation step, before any of this), whereas a single unreadable *file* leaves the listing succeeding and no error channel says anything. Measured before the fix: one state file at mode 000 in the target store had a matching environment claim adopt silently, and had `entire session list` print "No sessions." over a store that held one.
+- **Refusing is not walling the user out.** `refuseForeignAdoption` asks wherever there is a terminal, and `--allow-foreign-session` covers the rest, so a repo with one stale corrupt file is not stranded.
+
+The display side says so rather than refusing, since nothing is being mutated. `session list`, `session current` and `session tokens` warn on stderr — always stderr, so `--json` and `--agent-brief` stdout stay parseable, and always before the not-found branch, because "no active session" over a store that could not be read fully is the misreading, not the answer.
+
+**Every path that SELECTS a session reports completeness, including the weak ones.** `session tokens --current` goes through `FindMostRecentSessionInCurrentWorktree`, which returns a `ResolvedSession` rather than an ID for exactly this reason: "most recent" is a comparison, so a listing that lost a candidate can lose the winner, and the weaker path must not be the silent one. `session tokens` earns the warning more than the others do — its output is not a bare ID but per-session token figures plus recommendations to act on.
+
+The one consumer that deliberately ignores it is `withHookSession` (`hooks_git_cmd.go`), which uses the resolved ID to stamp a log field. Nothing is selected or acted on there, and the store's own per-skip `Warn` already lands in the same log, so the condition is recorded where a reader of that log would look for it.
+
+
+`--allow-foreign-session` is the escape hatch, and deliberately **not** folded into `--force`/`--yes`: those already carry two meanings (replace local state, confirm same-store adoption), and `--force` is the flag an agent reaches for on any refusal. Waiving a safety check on someone else's running session gets a name that says so.
+
 **Tier 1 is per-agent and declarative.** An agent implements
 `agent.CallerSessionIdentifier` by naming the variable it publishes
 (`CallerSessionEnvVar`), and the `agent` package does the reading and

@@ -2,13 +2,17 @@ package strategy
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/proclive"
+	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 )
 
@@ -587,4 +591,86 @@ func TestMergeSessionStates(t *testing.T) {
 			t.Errorf("ids = %v, want [a z]", ids(got))
 		}
 	})
+}
+
+// plantUnusableState writes a state file that will not load, so the listing
+// succeeds with one candidate missing — the shape no error channel reports.
+func plantUnusableState(t *testing.T, id string) {
+	t.Helper()
+	commonDir, err := session.GetGitCommonDir(context.Background())
+	if err != nil {
+		t.Fatalf("GetGitCommonDir() error = %v", err)
+	}
+	dir := filepath.Join(commonDir, session.SessionStateDirName)
+	if err := os.MkdirAll(dir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, id+".json"), []byte("{not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// A resolution computed from a set that lost a candidate says so, and still
+// answers. Both halves matter: the answer is the best available and worth
+// displaying, and the flag is the only thing that can stop a mutating caller
+// treating it as proof no nearer session exists.
+func TestIdentifyCallerSession_ReportsAnIncompleteCandidateSet(t *testing.T) {
+	repo := callerSessionRepo(t)
+	clearCallerSessionEnv(t)
+	t.Setenv("CLAUDE_CODE_SESSION_ID", "the-caller")
+	saveState(t, "the-caller", repo, time.Now())
+	plantUnusableState(t, "unreadable-rival")
+
+	resolved, ok := IdentifyCallerSession(context.Background(), nil)
+	if !ok {
+		t.Fatal("IdentifyCallerSession() found nothing; a partial set must still answer")
+	}
+	if resolved.SessionID != "the-caller" {
+		t.Fatalf("SessionID = %q, want the-caller", resolved.SessionID)
+	}
+	if !resolved.Resolution.IsCaller() {
+		t.Fatalf("Resolution = %q, want an identifying tier", resolved.Resolution)
+	}
+	if resolved.Incomplete == nil {
+		t.Fatal("Incomplete is nil, so a mutating caller cannot tell a candidate went missing")
+	}
+	if !strings.Contains(resolved.Incomplete.Error(), "could not be read") {
+		t.Fatalf("Incomplete = %q, should say what could not be read", resolved.Incomplete)
+	}
+}
+
+// The counterpart, so the flag is evidence rather than decoration: a healthy
+// store leaves it nil, and a caller gating on it is not gating on "always".
+func TestIdentifyCallerSession_HealthyStoreIsComplete(t *testing.T) {
+	repo := callerSessionRepo(t)
+	clearCallerSessionEnv(t)
+	t.Setenv("CLAUDE_CODE_SESSION_ID", "the-caller")
+	saveState(t, "the-caller", repo, time.Now())
+
+	resolved, ok := IdentifyCallerSession(context.Background(), nil)
+	if !ok {
+		t.Fatal("IdentifyCallerSession() found nothing")
+	}
+	if resolved.Incomplete != nil {
+		t.Fatalf("Incomplete = %v on a healthy store", resolved.Incomplete)
+	}
+}
+
+// Every tier carries it, not just the identifying ones. `session current`
+// falling back to another worktree's session over a store it could not read
+// fully is the same misreading, and the split between resolveSessionTiers and
+// the stamp is what guarantees a tier cannot answer without it.
+func TestResolveCallerSession_ReportsAnIncompleteCandidateSetOnAWeakTier(t *testing.T) {
+	repo := callerSessionRepo(t)
+	clearCallerSessionEnv(t)
+	saveState(t, "some-session", repo, time.Now())
+	plantUnusableState(t, "unreadable-rival")
+
+	resolved := ResolveCallerSession(context.Background())
+	if resolved.Resolution != ResolutionWorktree {
+		t.Fatalf("Resolution = %q, want the worktree tier", resolved.Resolution)
+	}
+	if resolved.Incomplete == nil {
+		t.Fatal("Incomplete is nil on a weak tier over an unreadable store")
+	}
 }
