@@ -13,6 +13,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
+	"github.com/entireio/cli/internal/entireclient/userdirs"
 )
 
 // nonAlphanumericRegex matches any non-alphanumeric character for path sanitization.
@@ -93,15 +94,39 @@ func (f *FactoryAIDroidAgent) ReassembleTranscript(chunks [][]byte) ([]byte, err
 // GetSessionID extracts the session ID from hook input.
 func (f *FactoryAIDroidAgent) GetSessionID(input *agent.HookInput) string { return input.SessionID }
 
-// GetSessionDir returns the directory where Factory AI Droid stores session transcripts.
-// Path: ~/.factory/sessions/<sanitized-repo-path>/
-func (f *FactoryAIDroidAgent) GetSessionDir(repoPath string) (string, error) {
-	if override := os.Getenv("ENTIRE_TEST_DROID_PROJECT_DIR"); override != "" {
-		return override, nil
+// factoryHomeEnvVar relocates the home directory Droid resolves ~ to. The
+// droid binary's getFactoryHome() returns this value in place of os.homedir()
+// and its session store appends .factory/sessions underneath, so like
+// GEMINI_CLI_HOME it moves the home, not the dot-directory. It is undocumented;
+// it is the only relocation mechanism the shipped binary has.
+const factoryHomeEnvVar = "FACTORY_HOME_OVERRIDE"
+
+// resolveFactoryHome returns the home directory Droid uses:
+// $FACTORY_HOME_OVERRIDE when set, else the user's home. A relative override is
+// refused rather than resolved against a per-process working directory.
+func resolveFactoryHome() (string, error) {
+	if dir := os.Getenv(factoryHomeEnvVar); dir != "" {
+		if err := userdirs.RequireAbsoluteOverride(factoryHomeEnvVar, dir); err != nil {
+			return "", err //nolint:wrapcheck // the error already names the override and its value
+		}
+		return dir, nil
 	}
 	homeDir, err := os.UserHomeDir()
 	if err != nil {
 		return "", fmt.Errorf("failed to get home directory: %w", err)
+	}
+	return homeDir, nil
+}
+
+// GetSessionDir returns the directory where Factory AI Droid stores session transcripts.
+// Path: <home>/.factory/sessions/<sanitized-repo-path>/
+func (f *FactoryAIDroidAgent) GetSessionDir(repoPath string) (string, error) {
+	if override := os.Getenv("ENTIRE_TEST_DROID_PROJECT_DIR"); override != "" {
+		return override, nil
+	}
+	homeDir, err := resolveFactoryHome()
+	if err != nil {
+		return "", err
 	}
 	projectDir := sanitizeRepoPath(repoPath)
 	return filepath.Join(homeDir, ".factory", "sessions", projectDir), nil
@@ -111,9 +136,9 @@ func (f *FactoryAIDroidAgent) GetSessionDir(repoPath string) (string, error) {
 // Unlike GetSessionDir, this does NOT use test overrides because the override
 // points to a specific project dir, not the base containing all projects.
 func (f *FactoryAIDroidAgent) GetSessionBaseDir() (string, error) {
-	homeDir, err := os.UserHomeDir()
+	homeDir, err := resolveFactoryHome()
 	if err != nil {
-		return "", fmt.Errorf("failed to get home directory: %w", err)
+		return "", err
 	}
 	return filepath.Join(homeDir, ".factory", "sessions"), nil
 }

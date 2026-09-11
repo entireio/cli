@@ -135,7 +135,9 @@ func TestChunkTranscript_RoundTrip(t *testing.T) {
 }
 
 func TestGetSessionDir(t *testing.T) {
-	t.Parallel()
+	// No t.Parallel — uses t.Setenv to keep a dev shell's overrides out.
+	t.Setenv("ENTIRE_TEST_DROID_PROJECT_DIR", "")
+	t.Setenv("FACTORY_HOME_OVERRIDE", "")
 	ag := &FactoryAIDroidAgent{}
 
 	dir, err := ag.GetSessionDir("/Users/alisha/Projects/test-repos/factoryai-droid")
@@ -342,5 +344,71 @@ func TestGetSessionDir_EnvOverride(t *testing.T) {
 	}
 	if dir != override {
 		t.Errorf("GetSessionDir() = %q, want %q (env override)", dir, override)
+	}
+}
+
+func TestGetSessionDir_HonorsFactoryHomeOverride(t *testing.T) {
+	factoryHome := t.TempDir()
+	t.Setenv("ENTIRE_TEST_DROID_PROJECT_DIR", "")
+	t.Setenv("FACTORY_HOME_OVERRIDE", factoryHome)
+
+	dir, err := (&FactoryAIDroidAgent{}).GetSessionDir("/some/repo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Droid treats the variable as the home directory and still appends
+	// .factory, so the result is $FACTORY_HOME_OVERRIDE/.factory/...
+	want := filepath.Join(factoryHome, ".factory", "sessions", sanitizeRepoPath("/some/repo"))
+	if dir != want {
+		t.Errorf("GetSessionDir = %q, want %q", dir, want)
+	}
+}
+
+func TestGetSessionBaseDir_HonorsFactoryHomeOverride(t *testing.T) {
+	factoryHome := t.TempDir()
+	t.Setenv("FACTORY_HOME_OVERRIDE", factoryHome)
+
+	base, err := (&FactoryAIDroidAgent{}).GetSessionBaseDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := filepath.Join(factoryHome, ".factory", "sessions"); base != want {
+		t.Errorf("GetSessionBaseDir = %q, want %q", base, want)
+	}
+}
+
+func TestResolveFactoryHome(t *testing.T) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	abs := t.TempDir()
+	tests := []struct {
+		name    string
+		env     string
+		want    string
+		wantErr bool
+	}{
+		{name: "unset falls back to the user home", env: "", want: home},
+		{name: "absolute override wins", env: abs, want: abs},
+		{name: "relative override is refused", env: filepath.Join("relative", "home"), wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("FACTORY_HOME_OVERRIDE", tt.env)
+			got, err := resolveFactoryHome()
+			if tt.wantErr {
+				if err == nil || !strings.Contains(err.Error(), "FACTORY_HOME_OVERRIDE") {
+					t.Fatalf("resolveFactoryHome() = %q, %v; want an error naming FACTORY_HOME_OVERRIDE", got, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got != tt.want {
+				t.Errorf("resolveFactoryHome() = %q, want %q", got, tt.want)
+			}
+		})
 	}
 }
