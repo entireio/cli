@@ -33,15 +33,42 @@ func installLefthookFilesAt(ctx context.Context, repoRoot string, absolutePath b
 	if err != nil {
 		return 0, err
 	}
+	// An unowned file at Entire's script path is backed up and replaced, the
+	// same way InstallGitHook treats a foreign .git/hooks/* file.
+	//
+	// This used to be a hard refusal, which protected a user's own script but
+	// also trapped Entire's: a corrupted script loses its ownership marker, so
+	// it reads as foreign and nothing could ever repair it — not a turn, not
+	// `entire doctor --force`. The native path had already settled this
+	// question by backing up rather than refusing, and the same answer applies
+	// here. Nothing is destroyed; the displaced file keeps its content at
+	// <script>.pre-entire.
 	specs := buildHookSpecs(cmdPrefix)
 	for _, spec := range specs {
 		name := lefthookScriptPath(spec.name)
-		current, _, readErr := readOptionalRegular(root, name)
+		current, info, readErr := readOptionalRegular(root, name)
 		if readErr != nil {
 			return 0, fmt.Errorf("read %s: %w", name, readErr)
 		}
-		if current != nil && !lefthookScriptOwned(string(current)) {
-			return 0, fmt.Errorf("%w: script path %s already exists", ErrLefthookOwnedEntryConflict, name)
+		if current == nil || lefthookScriptOwned(string(current)) {
+			continue
+		}
+		backup := name + backupSuffix
+		existingBackup, _, backupErr := readOptionalRegular(root, backup)
+		if backupErr != nil {
+			return 0, fmt.Errorf("read %s: %w", backup, backupErr)
+		}
+		if existingBackup != nil {
+			// Never bury an earlier displaced file under a newer one.
+			return 0, fmt.Errorf("%w: %s already exists; remove it to let Entire reinstall %s",
+				ErrLefthookOwnedEntryConflict, backup, name)
+		}
+		mode := os.FileMode(0o755)
+		if info != nil {
+			mode = info.Mode().Perm()
+		}
+		if err := jsonutil.WriteFileAtomicIn(root, backup, current, mode); err != nil {
+			return 0, fmt.Errorf("back up %s: %w", name, err)
 		}
 	}
 

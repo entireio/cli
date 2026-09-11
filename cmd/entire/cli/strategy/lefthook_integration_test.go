@@ -151,16 +151,55 @@ func TestInstallLefthookFilesRejectsBroadMarkerScriptConflict(t *testing.T) {
 	paths.ClearWorktreeRootCache()
 	t.Cleanup(paths.ClearWorktreeRootCache)
 
-	_, err := installLefthookFiles(t.Context(), false)
-	if !errors.Is(err, ErrLefthookOwnedEntryConflict) {
-		t.Fatalf("error = %v, want ErrLefthookOwnedEntryConflict", err)
+	if _, err := installLefthookFiles(t.Context(), false); err != nil {
+		t.Fatalf("install should displace an unowned script, not refuse: %v", err)
 	}
-	after, readErr := os.ReadFile(scriptPath)
+
+	// The user's file is preserved beside Entire's, exactly as InstallGitHook
+	// treats a foreign .git/hooks/* file. Refusing instead protected this file
+	// but also trapped Entire's own corrupted scripts, which lose their marker
+	// and so read as foreign with no way back.
+	backup, readErr := os.ReadFile(scriptPath + backupSuffix)
+	if readErr != nil {
+		t.Fatalf("displaced user script was not backed up: %v", readErr)
+	}
+	if !bytes.Equal(backup, userScript) {
+		t.Errorf("backup does not hold the user's script\nwant:\n%s\ngot:\n%s", userScript, backup)
+	}
+	installed, readErr := os.ReadFile(scriptPath)
 	if readErr != nil {
 		t.Fatal(readErr)
 	}
-	if !bytes.Equal(after, userScript) {
-		t.Errorf("conflicting user script was overwritten\nbefore:\n%s\nafter:\n%s", userScript, after)
+	if !lefthookScriptOwned(string(installed)) {
+		t.Errorf("Entire's script was not installed at %s:\n%s", scriptPath, installed)
+	}
+}
+
+// A second unowned file must not bury the first backup.
+func TestInstallLefthookFilesRefusesToOverwriteAnExistingBackup(t *testing.T) {
+	repoDir := newLefthookTestRepo(t)
+	scriptDir := filepath.Join(repoDir, lefthookLocalDir, "pre-push")
+	if err := os.MkdirAll(scriptDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	scriptPath := filepath.Join(scriptDir, lefthookScriptName)
+	if err := os.WriteFile(scriptPath, []byte("#!/bin/sh\necho one\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	keep := []byte("#!/bin/sh\necho earlier\n")
+	if err := os.WriteFile(scriptPath+backupSuffix, keep, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := installLefthookFiles(t.Context(), false); !errors.Is(err, ErrLefthookOwnedEntryConflict) {
+		t.Fatalf("error = %v, want ErrLefthookOwnedEntryConflict", err)
+	}
+	after, err := os.ReadFile(scriptPath + backupSuffix)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(after, keep) {
+		t.Error("an earlier backup was overwritten")
 	}
 }
 
