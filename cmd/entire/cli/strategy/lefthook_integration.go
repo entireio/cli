@@ -3,10 +3,11 @@ package strategy
 import "errors"
 
 const (
-	lefthookLocalConfigName = "lefthook-local.yml"
-	lefthookLocalDir        = ".lefthook-local"
-	lefthookScriptName      = "entire.sh"
-	lefthookOwnedMarker     = "entire-cli-owned:lefthook:v1"
+	lefthookLocalConfigName  = "lefthook-local.yml"
+	entireLefthookConfigName = "entire-lefthook.yml"
+	lefthookLocalDir         = ".lefthook-local"
+	lefthookScriptName       = "entire.sh"
+	lefthookOwnedMarker      = "entire-cli-owned:lefthook:v1"
 )
 
 var (
