@@ -128,25 +128,43 @@ func runSessionTokens(ctx context.Context, cmd *cobra.Command, sessionID string,
 		// --current pins the answer to this worktree and nothing else, which
 		// is the one thing the resolver deliberately will not do: it prefers
 		// the caller's own session wherever that session lives. Keep the flag
-		// literal, and let the default path identify the caller.
+		// literal, and let the default path identify the caller. Both return
+		// the same envelope, so everything below judges the selection rather
+		// than the branch that made it.
+		var resolved strategy.ResolvedSession
 		if current {
-			sessionID = strategy.FindMostRecentSessionInCurrentWorktree(ctx)
-			resolution = strategy.ResolutionWorktree
+			resolved = strategy.FindMostRecentSessionInCurrentWorktree(ctx)
 		} else {
-			resolved := strategy.ResolveCallerSession(ctx)
-			if resolved.Found() && !resolved.Tracked {
-				return reportUntrackedCallerSession(cmd, resolved, jsonOutput || agentBrief)
-			}
-			sessionID = resolved.SessionID
-			resolution = resolved.Resolution
-			if resolution == strategy.ResolutionCallerAmbiguous {
-				fmt.Fprintln(cmd.ErrOrStderr(),
-					"[entire] Caller session is ambiguous; these tokens may belong to another session. Confirm the session ID before acting on the recommendations.")
-			}
-			if resolved.Resolution == strategy.ResolutionOtherWorktree {
-				fmt.Fprintln(cmd.ErrOrStderr(),
-					"[entire] No session is recorded in this worktree; reporting the most recent one from elsewhere in this repository. It is not this command's caller.")
-			}
+			resolved = strategy.ResolveCallerSession(ctx)
+		}
+
+		// Ahead of every other branch, and on both paths. This report is not
+		// a bare ID: it carries per-session token figures and acts on them
+		// with recommendations, so attributing it to the wrong session is
+		// worse here than in `session current` — and a listing that lost a
+		// candidate can lose the one this should have been about, on the
+		// --current path by losing the most recent and on the default path by
+		// hiding a nearer owner. Printed before the not-found return for the
+		// same reason `session current` does it: "no active session" over a
+		// store that could not be read fully is the misreading, not the
+		// answer.
+		if resolved.Incomplete != nil {
+			fmt.Fprintf(cmd.ErrOrStderr(),
+				"[entire] These tokens may belong to another session: %s. Confirm the session ID before acting on the recommendations.\n",
+				resolved.Incomplete)
+		}
+		if resolved.Found() && !resolved.Tracked {
+			return reportUntrackedCallerSession(cmd, resolved, jsonOutput || agentBrief)
+		}
+		sessionID = resolved.SessionID
+		resolution = resolved.Resolution
+		if resolution == strategy.ResolutionCallerAmbiguous {
+			fmt.Fprintln(cmd.ErrOrStderr(),
+				"[entire] Caller session is ambiguous; these tokens may belong to another session. Confirm the session ID before acting on the recommendations.")
+		}
+		if resolution == strategy.ResolutionOtherWorktree {
+			fmt.Fprintln(cmd.ErrOrStderr(),
+				"[entire] No session is recorded in this worktree; reporting the most recent one from elsewhere in this repository. It is not this command's caller.")
 		}
 		if sessionID == "" {
 			fmt.Fprintln(cmd.OutOrStdout(), "No active session found in this worktree.")

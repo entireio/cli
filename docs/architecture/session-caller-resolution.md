@@ -230,10 +230,26 @@ only mutation has to be conservative. Two properties are load-bearing:
   wherever there is a terminal, and `--allow-foreign-session` covers the rest,
   so a repo with one stale corrupt file is not stranded.
 
-The display side says so rather than refusing, since nothing is being mutated:
-`session list` and `session current` both warn on stderr — before the
-not-found branch in `session current`'s case, because "no active session" over
-a store that could not be read fully is the misreading, not the answer.
+The display side says so rather than refusing, since nothing is being mutated.
+`session list`, `session current` and `session tokens` warn on stderr — always
+stderr, so `--json` and `--agent-brief` stdout stay parseable, and always
+before the not-found branch, because "no active session" over a store that
+could not be read fully is the misreading, not the answer.
+
+**Every path that SELECTS a session reports completeness, including the weak
+ones.** `session tokens --current` goes through
+`FindMostRecentSessionInCurrentWorktree`, which returns a `ResolvedSession`
+rather than an ID for exactly this reason: "most recent" is a comparison, so a
+listing that lost a candidate can lose the winner, and the weaker path must not
+be the silent one. `session tokens` earns the warning more than the others do —
+its output is not a bare ID but per-session token figures plus recommendations
+to act on.
+
+The one consumer that deliberately ignores it is `withHookSession`
+(`hooks_git_cmd.go`), which uses the resolved ID to stamp a log field. Nothing
+is selected or acted on there, and the store's own per-skip `Warn` already
+lands in the same log, so the condition is recorded where a reader of that log
+would look for it.
 
 
 `--allow-foreign-session` is the escape hatch, and deliberately **not** folded

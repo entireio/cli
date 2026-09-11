@@ -191,18 +191,31 @@ func ListSessionStatesWithSkipped(ctx context.Context) ([]*SessionState, []sessi
 // session from the current worktree only, never falling back to another
 // worktree's.
 //
-// This is the whole of what it does, deliberately. Anything asking "which
+// This is the whole of what it SELECTS, deliberately. Anything asking "which
 // session is running me" must go through strategy.ResolveCallerSession, which
 // identifies the caller first and reports which tier answered; a bare
 // most-recent lookup cannot tell "mine" from "whichever moved last", and
 // worktrees share one session store, so guessing there returns an unrelated
-// session that looks exactly like a real answer.
-func FindMostRecentSessionInCurrentWorktree(ctx context.Context) string {
-	states, err := ListSessionStates(ctx)
-	if err != nil || len(states) == 0 {
-		return ""
+// session that looks exactly like a real answer. The resolution is therefore
+// always ResolutionWorktree, which does not satisfy IsCaller.
+//
+// It returns the full envelope rather than an ID so that it reports
+// completeness like every other selection path: "most recent" is a comparison,
+// and a listing that lost a candidate can lose the winner. Its caller prints
+// one warning for both paths as a result, instead of the weaker path being the
+// one that says nothing.
+func FindMostRecentSessionInCurrentWorktree(ctx context.Context) ResolvedSession {
+	states, skipped, err := ListSessionStatesWithSkipped(ctx)
+	resolved := ResolvedSession{Resolution: ResolutionNone, Incomplete: incompleteCandidates(err, skipped)}
+	if err != nil {
+		return resolved
 	}
-	return mostRecentSessionID(sessionStatesForCurrentWorktree(ctx, states))
+	if id := mostRecentSessionID(sessionStatesForCurrentWorktree(ctx, states)); id != "" {
+		resolved.SessionID = id
+		resolved.Resolution = ResolutionWorktree
+		resolved.Tracked = true
+	}
+	return resolved
 }
 
 func sessionStatesForCurrentWorktree(ctx context.Context, states []*SessionState) []*SessionState {
