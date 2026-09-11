@@ -788,3 +788,58 @@ func TestEnsureSessionReplicated_FailedBaselineWalkDefersAdoption(t *testing.T) 
 		t.Fatalf("retry after the walk recovers must adopt: replicated=%v err=%v", replicated, err)
 	}
 }
+
+// disableEntireAt writes a settings file that explicitly turns Entire off — the
+// shape `entire disable` leaves behind. The file is still present, which is why
+// a presence check cannot distinguish it from an enabled repo.
+func disableEntireAt(t *testing.T, root string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Join(root, ".entire"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, ".entire", "settings.json"), []byte(`{"enabled":false}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestRecordForeignEvidence_DisabledRepoIsNotAdopted pins the veto that
+// ensureSessionReplicated's comment has always claimed and never had.
+//
+// A repo the user ran `entire disable` in keeps its settings file, so the old
+// presence check (IsSetUpAtRoot) still answered true and the session was
+// replicated into it — Entire writing session state and checkpoints into a
+// repository it had been turned off in. Evidence may still be RECORDED, since
+// the record is machine-level and outside every repo; what must not happen is
+// the write into the disabled repo.
+func TestRecordForeignEvidence_DisabledRepoIsNotAdopted(t *testing.T) {
+	t.Setenv("ENTIRE_CONFIG_DIR", t.TempDir())
+	ctx := context.Background()
+	rootA := newBindingRepo(t)
+	rootB := newBindingRepo(t)
+	commitInitial(t, rootB)
+	disableEntireAt(t, rootB)
+	commitInitial(t, rootA)
+	bindingSourceState(ctx, t, rootA, "sess-1")
+	t.Chdir(rootA)
+
+	recordForeignEvidence(ctx, "sess-1", bindingTestMeta(rootA), rootA,
+		[]string{filepath.Join(rootB, "pkg", "f.go")})
+
+	rec, err := binding.LoadRecord(ctx, "sess-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rec == nil || len(rec.BoundRepos) != 1 {
+		t.Fatalf("expected one bound repo, got %+v", rec)
+	}
+	br := rec.BoundRepos[0]
+	if br.Enabled {
+		t.Error("a repo with enabled:false must not be recorded as enabled")
+	}
+	if br.AdoptedAt != nil {
+		t.Error("a disabled repo must not be adopted")
+	}
+	if loadTargetState(ctx, t, rootB) != nil {
+		t.Error("a disabled repo must not receive replicated session state")
+	}
+}
