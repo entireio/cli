@@ -68,11 +68,13 @@ const externalAgentsAutoEnabledNotice = "Note: external agents are now enabled f
 
 // EnableOptions holds the flags for `entire enable`.
 type EnableOptions struct {
-	UseLocalSettings   bool
-	UseProjectSettings bool
-	ForceHooks         bool
-	SkipPushSessions   bool
-	CheckpointRemote   string
+	UseLocalSettings       bool
+	UseProjectSettings     bool
+	ForceHooks             bool
+	SkipPushSessions       bool
+	CheckpointRemote       string
+	CheckpointPushRemote   string
+	checkpointRemoteChoice *enableCheckpointRemoteChoice
 	// CheckpointBackend selects the persistent checkpoint storage backend
 	// ("branch"/"refs" or the canonical "git-branch"/"git-refs"). Empty leaves
 	// the current/default (git-branch) backend in place.
@@ -822,10 +824,14 @@ If the current directory is not a git repository, Entire can initialize one
 for you and (optionally) create a matching GitHub repository via the gh CLI.`,
 		RunE: func(cmd *cobra.Command, _ []string) (runErr error) {
 			ctx := cmd.Context()
+			// The destination report needs the choice pointer, not the answer,
+			// so it can be registered here (first, therefore run last) while
+			// the picker itself waits until every flag has been accepted.
+			opts.checkpointRemoteChoice = &enableCheckpointRemoteChoice{}
+			defer func() { opts.checkpointRemoteChoice.report(cmd.Context(), cmd.OutOrStdout(), runErr) }()
 			// Best-effort: after a successful enable, tell the backend which repo
 			// was enabled so the web onboarding reflects it (and we can warn when
-			// the GitHub App can't reach it). Registered first so it runs LAST
-			// (defers are LIFO) — after any bootstrap finalize that creates the
+			// the GitHub App can't reach it). Runs after any bootstrap finalize that creates the
 			// GitHub repo and pushes, by which point an origin remote exists.
 			defer func() {
 				if runErr != nil {
@@ -842,6 +848,18 @@ for you and (optionally) create a matching GitHub repository via the gh CLI.`,
 					return err
 				}
 			}
+
+			if err := validateSetupFlags(opts.UseLocalSettings, opts.UseProjectSettings); err != nil {
+				return err
+			}
+
+			// Ask where checkpoints should go only once every flag has been
+			// accepted, so an invocation that was always going to be rejected
+			// never opens a picker first.
+			if err := prepareEnableCheckpointRemoteCommand(cmd, &opts); err != nil {
+				return err
+			}
+			ctx = cmd.Context()
 
 			// Check if we're in a git repository first. If not, offer to
 			// bootstrap one (git init + optional GitHub repo). If the user
@@ -889,10 +907,6 @@ for you and (optionally) create a matching GitHub repository via the gh CLI.`,
 						runErr = err
 					}
 				}()
-			}
-
-			if err := validateSetupFlags(opts.UseLocalSettings, opts.UseProjectSettings); err != nil {
-				return err
 			}
 
 			// Discover the external agent --agent names, so it works on fresh
@@ -951,6 +965,7 @@ for you and (optionally) create a matching GitHub repository via the gh CLI.`,
 	}
 
 	cmd.Flags().BoolVar(&ignoreUntracked, "ignore-untracked", false, "Commit all new files without tracking pre-existing untracked files")
+	cmd.Flags().StringVar(&opts.CheckpointPushRemote, flagCheckpointPushRemote, "", "Git remote for checkpoint uploads (saved to .entire/settings.local.json, even with --project)")
 	cmd.Flags().MarkHidden("ignore-untracked") //nolint:errcheck,gosec // flag is defined above
 	cmd.Flags().BoolVar(&opts.UseLocalSettings, "local", false, "Write settings to .entire/settings.local.json instead of .entire/settings.json")
 	cmd.Flags().BoolVar(&opts.UseProjectSettings, "project", false, "Write settings to .entire/settings.json even if it already exists")
@@ -1210,6 +1225,9 @@ func runEnableOnConfiguredRepo(ctx context.Context, cmd *cobra.Command, opts Ena
 	// already-enabled branch below). EnsureSetup is idempotent and silent on a
 	// healthy repo (hooks stay installed, gitignore/vercel config already present),
 	// so this adds only the heal to the already-configured path.
+	if err := opts.checkpointRemoteChoice.persist(ctx); err != nil {
+		return err
+	}
 	if err := strategy.EnsureSetup(strategy.WithCheckpointRemoteBootstrap(ctx)); err != nil {
 		return fmt.Errorf("failed to setup strategy: %w", err)
 	}
@@ -1269,6 +1287,10 @@ func scopeExplicitlyDisabled(ctx context.Context, useProject bool) bool {
 }
 
 func runEnableInteractive(ctx context.Context, w io.Writer, agents []agent.Agent, opts EnableOptions) error {
+	// Agents have been chosen, but no setup settings or hooks have been changed.
+	if err := opts.checkpointRemoteChoice.selectAfterAgents(ctx, opts, nil); err != nil {
+		return err
+	}
 	// Capture first-run status before we write any settings: setupEntireDirectory
 	// and saveSettings below make IsSetUpAny report true. maybeOfferSessionImport
 	// uses this so the import offer only fires on the very first enable.
@@ -1399,6 +1421,9 @@ func runEnableInteractive(ctx context.Context, w io.Writer, agents []agent.Agent
 	if err := saveSettings(); err != nil {
 		return fmt.Errorf("failed to save settings: %w", err)
 	}
+	if err := opts.checkpointRemoteChoice.persist(ctx); err != nil {
+		return err
+	}
 
 	// Explicit, user-initiated setup: allow EnsurePrimaryRef to fetch a
 	// missing primary metadata ref from a configured checkpoint_remote
@@ -1430,7 +1455,7 @@ func runEnableInteractive(ctx context.Context, w io.Writer, agents []agent.Agent
 		}
 	}
 
-	printCheckpointDestinationNote(ctx, w, "\nNote: this repo's remotes make the checkpoint destination ambiguous.")
+	printSetupCheckpointDestinationNote(ctx, w)
 
 	return nil
 }
@@ -1441,7 +1466,7 @@ func printEnabledStatus(ctx context.Context, w io.Writer) {
 		fmt.Fprintf(w, "Agents: %s\n", strings.Join(displayNames, ", "))
 	}
 	fmt.Fprintln(w, "\nTo add more agents, run `entire agent add <name>`.")
-	printCheckpointDestinationNote(ctx, w, "\nNote: this repo's remotes make the checkpoint destination ambiguous.")
+	printSetupCheckpointDestinationNote(ctx, w)
 }
 
 // resolveFirstRunCheckpointBackend decides the checkpoint storage backend
@@ -2041,6 +2066,9 @@ func setupAgentHooksNonInteractive(ctx context.Context, w io.Writer, ag agent.Ag
 	if err := saveEnabledState(ctx, targetSettings, targetFile == EntireSettingsFile); err != nil {
 		return fmt.Errorf("failed to save settings: %w", err)
 	}
+	if err := opts.checkpointRemoteChoice.persist(ctx); err != nil {
+		return err
+	}
 
 	// Auto-enable external_agents if the agent is external. A separate write,
 	// after the one above and never onto targetSettings, because the loader
@@ -2298,7 +2326,7 @@ func isCompletionConfigured(rcFile string) bool {
 }
 
 // appendShellCompletion adds the completion line to the rc file.
-func appendShellCompletion(rcFile, completionLine string) error {
+func appendShellCompletion(rcFile, completionLine string) (err error) {
 	if err := os.MkdirAll(filepath.Dir(rcFile), 0o700); err != nil {
 		return fmt.Errorf("creating directory: %w", err)
 	}
@@ -2307,10 +2335,17 @@ func appendShellCompletion(rcFile, completionLine string) error {
 	if err != nil {
 		return fmt.Errorf("opening file: %w", err)
 	}
-	defer f.Close()
+	// Close reports a failed flush on a writable handle, so discarding it would
+	// drop the append while this function returned nil — the caller then tells
+	// the user completion is installed when the rc file never received the line.
+	// A write error already in flight is the more specific one, so it wins.
+	defer func() {
+		if cerr := f.Close(); cerr != nil && err == nil {
+			err = fmt.Errorf("closing file: %w", cerr)
+		}
+	}()
 
-	_, err = f.WriteString("\n" + shellCompletionComment + "\n" + completionLine + "\n")
-	if err != nil {
+	if _, err := f.WriteString("\n" + shellCompletionComment + "\n" + completionLine + "\n"); err != nil {
 		return fmt.Errorf("writing completion: %w", err)
 	}
 	return nil

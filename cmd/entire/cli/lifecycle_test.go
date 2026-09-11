@@ -134,6 +134,231 @@ func (m *mockAnalyzerAgent) ExtractModifiedFilesFromOffset(_ string, _ int) ([]s
 	return m.analyzerFiles, 0, nil
 }
 
+type mockInventoryAgent struct {
+	*mockLifecycleAgent
+
+	extraction   agent.InventoryExtraction
+	beforeReturn func()
+}
+
+var _ agent.InventoryAwareExtractor = (*mockInventoryAgent)(nil)
+
+func (m *mockInventoryAgent) ExtractWithSubagentInventory(_ context.Context, _ []byte, _ int, _ []agent.SubagentReference) (agent.InventoryExtraction, error) {
+	if m.beforeReturn != nil {
+		m.beforeReturn()
+	}
+	return m.extraction, nil
+}
+
+func TestRefreshCodexInventory_MultiTurnChildRefreshesCompletedTaskRecord(t *testing.T) {
+	// NOT parallel: setupStopTestRepo changes the process working directory.
+	setupStopTestRepo(t)
+	ctx := context.Background()
+	const (
+		sessionID = "codex-multi-turn-child"
+		agentID   = "child-1"
+	)
+	repoRoot, err := os.Getwd()
+	require.NoError(t, err)
+	completedAt := time.Now().UTC().Truncate(time.Microsecond)
+	complete := true
+	require.NoError(t, strategy.SaveSessionState(ctx, &strategy.SessionState{
+		SessionID:                 sessionID,
+		WorktreePath:              repoRoot,
+		StartedAt:                 time.Now(),
+		Phase:                     session.PhaseActive,
+		SubagentInventoryComplete: &complete,
+		SubagentLedgerVersion:     2,
+		SubagentInventory: []session.SubagentInventoryEntry{{
+			AgentID:          agentID,
+			ObservedTurnIDs:  []string{"turn-1", "turn-2"},
+			FinalizedTurnIDs: []string{"turn-1"},
+		}},
+		TaskRecords: []session.TaskRecord{{
+			ToolUseID:   agentID,
+			AgentID:     agentID,
+			StartedAt:   completedAt.Add(-time.Minute),
+			CompletedAt: completedAt,
+			Files:       []string{"first.go"},
+			TokenUsage:  &agent.TokenUsage{InputTokens: 10},
+		}},
+		FilesTouched: []string{"first.go"},
+	}))
+
+	ag := &mockInventoryAgent{
+		mockLifecycleAgent: newMockAgent(),
+		extraction: agent.InventoryExtraction{Children: []agent.SubagentAnalysis{{
+			AgentID:         agentID,
+			ResolvedPath:    "/tmp/child-1.jsonl",
+			ModifiedFiles:   []string{filepath.Join(repoRoot, "first.go"), filepath.Join(repoRoot, "second.go")},
+			TokenUsage:      &agent.TokenUsage{InputTokens: 25},
+			TerminalTurnIDs: []string{"turn-2"},
+		}}},
+	}
+
+	_, version := refreshCodexInventory(ctx, ag, sessionID, nil, 0)
+	require.NotNil(t, version)
+	require.Equal(t, uint64(2), *version)
+
+	state, err := strategy.LoadSessionState(ctx, sessionID)
+	require.NoError(t, err)
+	record := state.FindTaskRecord(agentID)
+	require.NotNil(t, record)
+	assert.Equal(t, completedAt, record.CompletedAt, "a later terminal turn updates evidence without completing the task twice")
+	assert.Equal(t, []string{"first.go", "second.go"}, record.Files)
+	require.NotNil(t, record.TokenUsage)
+	assert.Equal(t, 25, record.TokenUsage.InputTokens)
+	assert.Equal(t, "/tmp/child-1.jsonl", record.DeclaredTranscriptPath)
+	assert.ElementsMatch(t, []string{"first.go", "second.go"}, state.FilesTouched)
+	assert.Contains(t, state.FindSubagentInventory(agentID).FinalizedTurnIDs, "turn-2")
+}
+
+func TestFinalizeCodexObservedAtSessionEnd(t *testing.T) {
+	// A turn is force-closed only when the inventory carries a rollout path
+	// refreshCodexInventory verified by matching session_meta.id to AgentID.
+	// Without one there is no evidence to close on, and closing anyway would
+	// complete the record — hiding it from the SessionEnd sweep that runs next
+	// and letting condensation drop it with neither files nor a transcript.
+	const agentID = "child-1"
+	tests := []struct {
+		name             string
+		resolvedPath     string
+		seedCompleted    bool
+		wantFinalized    bool
+		wantCompletion   string // "unchanged" | "set" | "live"
+		wantDeclaredPath string
+	}{
+		{
+			name:             "verified path closes a live turn and completes the record",
+			resolvedPath:     "/tmp/verified-child-1.jsonl",
+			wantFinalized:    true,
+			wantCompletion:   "set",
+			wantDeclaredPath: "/tmp/verified-child-1.jsonl",
+		},
+		{
+			name:             "verified path closes a later turn without completing twice",
+			resolvedPath:     "/tmp/verified-child-1.jsonl",
+			seedCompleted:    true,
+			wantFinalized:    true,
+			wantCompletion:   "unchanged",
+			wantDeclaredPath: "/tmp/verified-child-1.jsonl",
+		},
+		{
+			name:           "unresolved rollout leaves the turn pending and the record retryable",
+			wantFinalized:  false,
+			wantCompletion: "live",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// NOT parallel: setupStopTestRepo changes the process working directory.
+			setupStopTestRepo(t)
+			ctx := context.Background()
+			sessionID := "codex-session-end-" + strings.ReplaceAll(tt.name, " ", "-")
+			seededAt := time.Now().UTC().Truncate(time.Microsecond)
+			record := session.TaskRecord{
+				ToolUseID:  agentID,
+				AgentID:    agentID,
+				StartedAt:  seededAt.Add(-time.Minute),
+				Files:      []string{"first.go"},
+				TokenUsage: &agent.TokenUsage{InputTokens: 10},
+			}
+			if tt.seedCompleted {
+				record.CompletedAt = seededAt
+			}
+			require.NoError(t, strategy.SaveSessionState(ctx, &strategy.SessionState{
+				SessionID: sessionID,
+				StartedAt: time.Now(),
+				Phase:     session.PhaseActive,
+				SubagentInventory: []session.SubagentInventoryEntry{{
+					AgentID:                agentID,
+					ResolvedTranscriptPath: tt.resolvedPath,
+					ObservedTurnIDs:        []string{"turn-1", "turn-2"},
+					FinalizedTurnIDs:       []string{"turn-1"},
+				}},
+				TaskRecords: []session.TaskRecord{record},
+			}))
+
+			finalizeCodexObservedAtSessionEnd(ctx, sessionID)
+
+			state, err := strategy.LoadSessionState(ctx, sessionID)
+			require.NoError(t, err)
+			got := state.FindTaskRecord(agentID)
+			require.NotNil(t, got)
+
+			entry := state.FindSubagentInventory(agentID)
+			require.NotNil(t, entry)
+			if tt.wantFinalized {
+				assert.Contains(t, entry.FinalizedTurnIDs, "turn-2")
+			} else {
+				assert.NotContains(t, entry.FinalizedTurnIDs, "turn-2",
+					"an unresolved rollout is not evidence the turn ended")
+			}
+
+			switch tt.wantCompletion {
+			case "unchanged":
+				assert.Equal(t, seededAt, got.CompletedAt, "force-closing a later turn must not complete the task twice")
+			case "set":
+				assert.False(t, got.CompletedAt.IsZero(), "a verified path closes the record")
+			case "live":
+				assert.True(t, got.CompletedAt.IsZero(),
+					"the record must stay live so the SessionEnd sweep can retry it and condensation retains it")
+			}
+
+			assert.Equal(t, tt.wantDeclaredPath, got.DeclaredTranscriptPath)
+			assert.Equal(t, []string{"first.go"}, got.Files, "closing a turn must preserve previously captured files")
+			assert.Equal(t, &agent.TokenUsage{InputTokens: 10}, got.TokenUsage, "without a new snapshot, preserve captured tokens")
+		})
+	}
+}
+
+func TestRefreshCodexInventory_UsesCurrentCompletenessWhenPersistingUsage(t *testing.T) {
+	// NOT parallel: setupStopTestRepo changes the process working directory.
+	setupStopTestRepo(t)
+	ctx := context.Background()
+	const sessionID = "codex-completeness-race"
+	complete := true
+	require.NoError(t, strategy.SaveSessionState(ctx, &strategy.SessionState{
+		SessionID:                 sessionID,
+		StartedAt:                 time.Now(),
+		Phase:                     session.PhaseActive,
+		SubagentInventoryComplete: &complete,
+		SubagentLedgerVersion:     2,
+	}))
+
+	extractedComplete := true
+	ag := &mockInventoryAgent{
+		mockLifecycleAgent: newMockAgent(),
+		extraction: agent.InventoryExtraction{TokenUsage: &agent.TokenUsage{
+			SubagentTokens:         &agent.TokenUsage{InputTokens: 25},
+			SubagentTokensComplete: &extractedComplete,
+		}},
+		beforeReturn: func() {
+			require.NoError(t, strategy.MutateSessionState(ctx, sessionID, func(state *strategy.SessionState) error {
+				incomplete := false
+				state.SubagentInventoryComplete = &incomplete
+				return nil
+			}))
+		},
+	}
+
+	usage, version := refreshCodexInventory(ctx, ag, sessionID, nil, 0)
+	require.NotNil(t, version)
+	assert.Equal(t, uint64(2), *version)
+	require.NotNil(t, usage)
+	require.NotNil(t, usage.SubagentTokensComplete)
+	assert.False(t, *usage.SubagentTokensComplete)
+	assert.Nil(t, usage.SubagentTokens)
+
+	state, err := strategy.LoadSessionState(ctx, sessionID)
+	require.NoError(t, err)
+	require.NotNil(t, state.TokenUsage)
+	require.NotNil(t, state.TokenUsage.SubagentTokensComplete)
+	assert.False(t, *state.TokenUsage.SubagentTokensComplete)
+	assert.Nil(t, state.TokenUsage.SubagentTokens)
+}
+
 // --- DispatchLifecycleEvent tests ---
 
 func TestDispatchLifecycleEvent_NilAgent(t *testing.T) {
@@ -3375,7 +3600,10 @@ func TestHandleLifecycleSubagentEnd_SubagentStop_MissingState_DoesNotResurrect(t
 	// already removed (ended + swept, or never existed).
 
 	ag := newMockAgent()
-	err := handleLifecycleSubagentEnd(ctx, ag, finalSubagentEvent(sessionID, "toolu_swept1", "agent-swept1"))
+	event := finalSubagentEvent(sessionID, "toolu_swept1", "agent-swept1")
+	event.CompletionWithoutLaunch = true
+	event.SubagentTranscriptUnavailable = true
+	err := handleLifecycleSubagentEnd(ctx, ag, event)
 	require.NoError(t, err)
 
 	state, loadErr := strategy.LoadSessionState(ctx, sessionID)
@@ -3386,6 +3614,53 @@ func TestHandleLifecycleSubagentEnd_SubagentStop_MissingState_DoesNotResurrect(t
 	if testutil.BranchExists(t, repoDir, shadowBranch) {
 		t.Error("a late subagent-stop for a missing session must not mint a shadow branch")
 	}
+}
+
+func TestHandleLifecycleSubagentEnd_CorrelatedCompletionCreatesDistinctRecord(t *testing.T) {
+	// NOT parallel: uses t.Chdir via setupSubagentEndTestRepo.
+	_, headHash := setupSubagentEndTestRepo(t)
+	ctx := context.Background()
+	const sessionID = "copilot-correlated-completion"
+	saveInFlightSession(ctx, t, sessionID, headHash)
+
+	event := finalSubagentEvent(sessionID, "toolu_copilot1", "24d8773a-06e8-435c-9257-8ccb89a54f33")
+	event.SubagentType = "general-purpose"
+	event.ModifiedFiles = []string{"child.txt"}
+	event.CompletionWithoutLaunch = true
+	event.SubagentTranscriptUnavailable = true
+
+	require.NoError(t, handleLifecycleSubagentEnd(ctx, newMockAgent(), event))
+	state, err := strategy.LoadSessionState(ctx, sessionID)
+	require.NoError(t, err)
+	require.NotNil(t, state)
+	rec := state.FindTaskRecord("toolu_copilot1")
+	require.NotNil(t, rec)
+	assert.False(t, rec.CompletedAt.IsZero())
+	assert.Equal(t, []string{"child.txt"}, rec.Files)
+	assert.Equal(t, "general-purpose", rec.SubagentType)
+	assert.True(t, rec.TranscriptUnavailable)
+
+	firstCompletedAt := rec.CompletedAt
+	require.NoError(t, handleLifecycleSubagentEnd(ctx, newMockAgent(), event))
+	state, err = strategy.LoadSessionState(ctx, sessionID)
+	require.NoError(t, err)
+	require.Len(t, state.TaskRecords, 1)
+	assert.Equal(t, firstCompletedAt, state.TaskRecords[0].CompletedAt)
+
+	endedAt := time.Now()
+	require.NoError(t, strategy.MutateSessionState(ctx, sessionID, func(s *strategy.SessionState) error {
+		// Persist the legacy/partially-written ended shape: EndedAt is set even
+		// though Phase has not transitioned yet.
+		s.EndedAt = &endedAt
+		return nil
+	}))
+	late := finalSubagentEvent(sessionID, "toolu_copilot_late", "late-child")
+	late.CompletionWithoutLaunch = true
+	late.SubagentTranscriptUnavailable = true
+	require.NoError(t, handleLifecycleSubagentEnd(ctx, newMockAgent(), late))
+	state, err = strategy.LoadSessionState(ctx, sessionID)
+	require.NoError(t, err)
+	assert.Nil(t, state.FindTaskRecord("toolu_copilot_late"))
 }
 
 // TestHandleLifecycleSubagentEnd_SubagentStop_PhaseEnded_TriggersEagerCondense
@@ -3926,4 +4201,51 @@ func TestAppendEventSkillEventsToState_ReturnsOnlyNewlyAppended(t *testing.T) {
 
 	// Full re-delivery is a no-op.
 	require.Nil(t, appendEventSkillEventsToState(&agent.Event{SkillEvents: []agent.SkillEvent{first, second}}, state))
+}
+
+func TestRefreshCodexInventory_RejectsStaleReturnedCoverage(t *testing.T) {
+	// NOT parallel: setupStopTestRepo changes CWD.
+	setupStopTestRepo(t)
+	ctx := t.Context()
+	const id = "stale-inventory-return"
+	complete := true
+	require.NoError(t, strategy.SaveSessionState(ctx, &strategy.SessionState{SessionID: id, StartedAt: time.Now(), SubagentInventoryComplete: &complete}))
+	ag := &mockInventoryAgent{mockLifecycleAgent: newMockAgent(), extraction: agent.InventoryExtraction{TokenUsage: &agent.TokenUsage{SubagentTokensComplete: &complete, SubagentTokens: &agent.TokenUsage{InputTokens: 99}}}, beforeReturn: func() {
+		require.NoError(t, strategy.MutateSessionState(ctx, id, func(s *strategy.SessionState) error { s.RegisterSubagent("new-child", "new-turn"); return nil }))
+	}}
+	usage, _ := refreshCodexInventory(ctx, ag, id, nil, 0)
+	require.NotNil(t, usage)
+	require.False(t, *usage.SubagentTokensComplete)
+	require.Nil(t, usage.SubagentTokens)
+}
+
+func TestCodexProvisionalStopBeforeStartRetainsObservation(t *testing.T) {
+	// NOT parallel: setupStopTestRepo changes CWD.
+	setupStopTestRepo(t)
+	ag := newMockAgent()
+	ag.agentType = agent.AgentTypeCodex
+	event := &agent.Event{SessionID: "stop-first", SubagentID: "child", TurnID: "turn", ProvisionalSubagentStop: true}
+	require.NoError(t, handleLifecycleSubagentEnd(t.Context(), ag, event))
+	state, err := strategy.LoadSessionState(t.Context(), event.SessionID)
+	require.NoError(t, err)
+	require.NotNil(t, state)
+	require.NotNil(t, state.FindSubagentInventory("child"))
+	require.NotNil(t, state.FindTaskRecord("child"))
+}
+
+func TestCodexSessionEndPersistsEndedBeforeInventoryRead(t *testing.T) {
+	// NOT parallel: setupStopTestRepo changes CWD.
+	setupStopTestRepo(t)
+	ctx := t.Context()
+	const id = "end-before-child-read"
+	complete := true
+	require.NoError(t, strategy.SaveSessionState(ctx, &strategy.SessionState{SessionID: id, StartedAt: time.Now(), Phase: session.PhaseActive, SubagentInventoryComplete: &complete}))
+	ag := &mockInventoryAgent{mockLifecycleAgent: newMockAgent(), beforeReturn: func() {
+		state, err := strategy.LoadSessionState(ctx, id)
+		require.NoError(t, err)
+		require.NotNil(t, state.EndedAt, "the host may kill the process during child reads")
+		require.Equal(t, session.PhaseEnded, state.Phase)
+	}}
+	ag.agentType = agent.AgentTypeCodex
+	require.NoError(t, handleLifecycleSessionEnd(ctx, ag, &agent.Event{SessionID: id}))
 }

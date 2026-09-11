@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -1294,5 +1295,92 @@ func TestDiscoverSummaryProviderIfMissing_GrantedExternalIsDiscovered(t *testing
 	}
 	if calls != 1 {
 		t.Fatalf("named discovery called %d times, want exactly 1", calls)
+	}
+}
+
+// stubSummaryRegistry points the resolution seams at a fixed set of agents.
+// capable names get a text generator, the rest get one with the capability
+// stripped, which is the opencode/factoryai-droid shape.
+func stubSummaryRegistry(t *testing.T, all []types.AgentName, capable ...types.AgentName) {
+	t.Helper()
+
+	originalList := listRegisteredAgents
+	originalGet := getSummaryAgent
+	t.Cleanup(func() {
+		listRegisteredAgents = originalList
+		getSummaryAgent = originalGet
+	})
+
+	isCapable := make(map[types.AgentName]bool, len(capable))
+	for _, name := range capable {
+		isCapable[name] = true
+	}
+	listRegisteredAgents = func() []types.AgentName { return all }
+	getSummaryAgent = func(name types.AgentName) (agent.Agent, error) {
+		if !slices.Contains(all, name) {
+			return nil, fmt.Errorf("agent %s not registered", name)
+		}
+		base := &stubTextAgent{name: name, kind: types.AgentType(name)}
+		if isCapable[name] {
+			return base, nil
+		}
+		return &stubNonTextAgent{Agent: base}, nil
+	}
+}
+
+// The list is the reason this error exists: the bare sentence told the user the
+// value was wrong without saying what a right one looks like.
+func TestUnsupportedSummaryProviderError_NamesTheCapableProviders(t *testing.T) {
+	// Cannot use t.Parallel(): mutates package-level resolution seams.
+	stubSummaryRegistry(t,
+		[]types.AgentName{"codex", "gemini", "opencode"},
+		"codex", "gemini")
+
+	err := unsupportedSummaryProviderError("opencode")
+	if err == nil {
+		t.Fatal("expected an error for a non-capable provider")
+	}
+	got := err.Error()
+
+	if !strings.Contains(got, `agent "opencode" does not support summary generation`) {
+		t.Errorf("error does not name the rejected provider: %q", got)
+	}
+	// One assertion covers both halves: the exact list, and that the rejected
+	// provider is absent from it. Counting occurrences in the prose instead
+	// would fail on any rewording that legitimately names the value twice.
+	if !strings.Contains(got, "supported agents: codex, gemini,") {
+		t.Errorf("error does not carry the capable list: %q", got)
+	}
+}
+
+// An empty capable set must not produce a dangling "one of" with nothing after
+// it. Unreachable in the shipped binary, reached by any test that stubs the
+// registry.
+func TestUnsupportedSummaryProviderError_DegradesWithNoCapableProviders(t *testing.T) {
+	// Cannot use t.Parallel(): mutates package-level resolution seams.
+	stubSummaryRegistry(t, []types.AgentName{"opencode"})
+
+	got := unsupportedSummaryProviderError("opencode").Error()
+	if got != `agent "opencode" does not support summary generation` {
+		t.Errorf("unexpected degraded message: %q", got)
+	}
+}
+
+// Pins the accepted values against the registry. This test runs in the cli
+// package, where every built-in agent is registered, so it is the enforced copy
+// of the set README documents — and it fails in both directions: an agent that
+// gains GenerateText without the docs following, and one listed here that
+// quietly loses the capability.
+func TestSummaryCapableProviderNames_MatchesTheBuiltInAgents(t *testing.T) {
+	t.Parallel()
+
+	// opencode and factoryai-droid are deliberately absent: both are registered
+	// agents with no GenerateText, and naming one is the fault this feature reports.
+	want := []string{"claude-code", "codex", "copilot-cli", "cursor", "gemini", "pi"}
+	got := summaryCapableProviderNames()
+	if !slices.Equal(got, want) {
+		t.Errorf("summary-capable providers = %v, want %v\n"+
+			"If an agent gained or lost GenerateText, update this list and README's\n"+
+			"\"cannot generate summaries\" note together.", got, want)
 	}
 }

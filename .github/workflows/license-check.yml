@@ -7,6 +7,11 @@ on:
     branches:
       - main
 
+# The reusable workflow checks out this repository and hands the token to
+# mise-action, so it needs read access and nothing more.
+permissions:
+  contents: read
+
 jobs:
   check-licenses:
     uses: entireio/shared/.github/workflows/license-check-reusable.yml@6e5ecde24c20a17b4146250287307718987b7317 # main

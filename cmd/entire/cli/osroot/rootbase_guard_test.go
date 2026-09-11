@@ -35,6 +35,7 @@ var rootOpeners = []string{".OpenRoot(", "osroot.Shared("}
 // (entiredir, gitdir, worktreedir, userdirs, agent.SessionStore) over a new
 // root; those exist so a call site does not have to decide what its base is.
 var allowedRootBases = map[string]string{
+	"cmd/entire/cli/agent/codex/codex.go": "configured Codex session and archive roots, resolved independently of hook-supplied transcript paths",
 	// The anchors themselves. Each opens exactly one directory, resolved
 	// independently of anything it is later asked to read.
 	"cmd/entire/cli/osroot/osroot.go":            "the registry",

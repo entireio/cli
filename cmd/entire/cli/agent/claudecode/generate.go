@@ -14,6 +14,13 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 )
 
+// flagOutputFormat selects the CLI's response encoding; modelHaiku is the
+// default model for Entire's own generation calls (fast and cheap).
+const (
+	flagOutputFormat = "--output-format"
+	modelHaiku       = "haiku"
+)
+
 // buildGenerateArgs assembles the claude CLI argv for a --print text-generation
 // call.
 //
@@ -41,7 +48,7 @@ import (
 // without any injection (settingsPath == "").
 func buildGenerateArgs(model, settingsPath string) []string {
 	args := []string{
-		"--print", "--output-format", "json",
+		"--print", flagOutputFormat, "json",
 		"--model", model,
 		"--setting-sources", "",
 	}
@@ -59,7 +66,7 @@ func buildGenerateArgs(model, settingsPath string) []string {
 func buildStreamingGenerateArgs(model, settingsPath string) []string {
 	args := []string{
 		"--print",
-		"--output-format", "stream-json",
+		flagOutputFormat, "stream-json",
 		"--include-partial-messages",
 		"--verbose",
 		"--model", model,
@@ -151,7 +158,7 @@ func readUserAPIKeyHelper() string {
 func (c *ClaudeCodeAgent) GenerateText(ctx context.Context, prompt string, model string) (string, error) {
 	claudePath := "claude"
 	if model == "" {
-		model = "haiku"
+		model = modelHaiku
 	}
 
 	commandRunner := c.CommandRunner

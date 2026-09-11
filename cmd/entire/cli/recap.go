@@ -258,7 +258,7 @@ func terminalWidth(w io.Writer) int {
 	if !isatty.IsTerminal(file.Fd()) {
 		return recap.DefaultWidth
 	}
-	width, _, err := term.GetSize(int(file.Fd())) //nolint:gosec // fd values fit in int on supported platforms
+	width, _, err := term.GetSize(int(file.Fd()))
 	if err != nil || width <= 0 {
 		return recap.DefaultWidth
 	}

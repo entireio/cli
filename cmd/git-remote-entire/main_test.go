@@ -13,8 +13,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/entireio/auth-go/sts"
 	"github.com/entireio/cli/cmd/entire/cli/auth"
-	"github.com/entireio/cli/internal/entireclient/httputil"
 )
 
 func TestInfoFlagText(t *testing.T) {
@@ -121,11 +121,10 @@ func TestGitActionFromRequest(t *testing.T) {
 func TestFatalMessage(t *testing.T) {
 	t.Parallel()
 	parsedURL := &url.URL{Scheme: "entire", Host: "aws-us-east-2.entire.io", Path: "/et/paul/dogbark"}
-	wrongCluster := &httputil.OAuthError{
-		Status:      http.StatusBadRequest,
+	wrongCluster := &sts.ExchangeError{
+		StatusCode:  http.StatusBadRequest,
 		Code:        "invalid_target",
 		Description: `audience host "aws-us-east-2.entire.io" does not host this repo; it lives on "aws-eu-central-1.entire.io" — re-target the request there`,
-		Body:        "{...}",
 	}
 	tests := []struct {
 		name        string
@@ -135,7 +134,7 @@ func TestFatalMessage(t *testing.T) {
 	}{
 		{
 			name: "wrong cluster names correct host and URL",
-			// Wrapped to mirror production: the OAuthError surfaces buried under
+			// Wrapped to mirror production: the ExchangeError surfaces buried under
 			// several fmt.Errorf layers, so errors.As must dig it out.
 			err: fmt.Errorf("stateless-connect v2 info/refs: fetching info/refs from entry domain: repo-scoped token exchange: oauth token exchange: %w", wrongCluster),
 			contains: []string{
@@ -146,7 +145,7 @@ func TestFatalMessage(t *testing.T) {
 		},
 		{
 			name:     "invalid_target without lives-on hint falls back",
-			err:      &httputil.OAuthError{Status: http.StatusBadRequest, Code: "invalid_target", Description: "no servable mirror", Body: "HTTP 400: no servable mirror"},
+			err:      &sts.ExchangeError{StatusCode: http.StatusBadRequest, Code: "invalid_target", Description: "no servable mirror"},
 			contains: []string{"fatal:", "no servable mirror"},
 		},
 		{

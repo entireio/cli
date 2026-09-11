@@ -17,6 +17,7 @@ import (
 	"charm.land/huh/v2"
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/codex"
+	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/entiredir"
 	"github.com/entireio/cli/cmd/entire/cli/interactive"
@@ -63,7 +64,12 @@ Checks performed:
      no longer fire, or a committed Pi/OpenCode extension has gone stale).
      Fix by re-running 'entire enable --force'.
 
-  5. Stuck sessions: sessions stuck in ACTIVE or ENDED phase that need cleanup.
+  5. Summary provider: warn when summary_generation.provider names a registered
+     agent that cannot generate text (e.g. opencode), which makes
+     'entire checkpoint explain --generate', 'entire dispatch' and
+     'entire runner setup' fail. Reports the file to change; does not rewrite it.
+
+  6. Stuck sessions: sessions stuck in ACTIVE or ENDED phase that need cleanup.
 
 A session is considered stuck if:
   - It is in ACTIVE phase with no interaction for over 1 hour
@@ -168,6 +174,10 @@ func runSessionsFix(cmd *cobra.Command, force bool) error {
 	// Retired permission rule that makes ordinary commands need approval.
 	// Fixes rather than only reporting: what it removes is a rule Entire wrote.
 	checkRetiredDenyRule(cmd)
+
+	// A configured summary provider that cannot generate text. After the hook
+	// checks: it breaks three commands, not capture, so it is the milder fault.
+	checkSummaryProvider(cmd)
 
 	// Where checkpoints land, when the repo's remotes make that ambiguous.
 	printCheckpointDestinationNote(ctx, cmd.OutOrStdout(), "Checkpoint destination: REVIEW")
@@ -1331,6 +1341,124 @@ func checkRetiredDenyRule(cmd *cobra.Command) {
 			fmt.Fprintln(w, "  The settings file changed — commit or revert it as you prefer.")
 		}
 	}
+}
+
+// checkSummaryProvider reports a configured summary_generation.provider naming
+// a registered agent that cannot generate text. See
+// unsupportedSummaryProviderError for how such a value gets written.
+//
+// Worth a check of its own because nothing else says a word about it: the
+// settings loader validates only model-without-provider, `entire status` never
+// mentions summary generation, and the resolver's error surfaces at
+// `checkpoint explain --generate` / `dispatch` / `runner setup` — commands a
+// user may not run for weeks after the edit, by which time the cause is not in
+// view. Read-only; the remedy is the user's choice of provider, and the value
+// may live in a committed settings.json where a rewrite changes everyone's.
+//
+// Two conditions are deliberately out of scope. An UNREGISTERED name is the
+// external-plugin shape, where telling "not installed" from "installed but the
+// external_agents grant is missing" means running discovery — and doctor must
+// not exec a plugin to write a diagnostic (`entire status` already reports the
+// grant rejection). An off-$PATH binary is machine-local and expected, so the
+// resolver reports it at the point of use instead.
+func checkSummaryProvider(cmd *cobra.Command) {
+	ctx := cmd.Context()
+	s, err := loadSummarySettings(ctx)
+	if err != nil {
+		// Not reported: a settings file that will not load is a louder problem
+		// than this check, and doctor's own PreRunE already reads it.
+		logging.Warn(ctx, "could not load settings for summary provider check",
+			slog.String("error", err.Error()))
+		return
+	}
+	if s.SummaryGeneration == nil || s.SummaryGeneration.Provider == "" {
+		return
+	}
+
+	name := types.AgentName(s.SummaryGeneration.Provider)
+	_, registered, capable := summaryCapableAgent(name)
+	if !registered || capable {
+		return
+	}
+
+	w := cmd.OutOrStdout()
+	sourceFile, isLocal := summaryProviderSourceLayer(ctx, s)
+	fmt.Fprintln(w, "Summary provider: UNUSABLE")
+	fmt.Fprintf(w, "  summary_generation.provider is %q in %s, which cannot generate text.\n", name, sourceFile)
+	fmt.Fprintln(w, "  `entire checkpoint explain --generate`, `entire dispatch`, and")
+	fmt.Fprintln(w, "  `entire runner setup` all fail while it is set.")
+	// The command names an INSTALLED provider, not merely a capable one.
+	// summaryCapableProviderNames is deliberately unfiltered by $PATH — it
+	// answers "what does this field accept" — but a command built from its
+	// first entry is alphabetical, so it says claude-code on a machine with no
+	// claude, and `configure` then rejects it for exactly that. The user this
+	// check fires for is the likeliest to have only one agent installed.
+	installed := listEnabledSummaryProviders(ctx)
+	if len(installed) > 0 {
+		fix := "entire configure --summarize-provider " + string(installed[0].Name)
+		if isLocal {
+			fix += " --local"
+		}
+		fmt.Fprintf(w, "  Fix: %s\n", fix)
+	}
+	if capable := summaryCapableProviderNames(); len(capable) > 0 {
+		// The accepted values, listed as data rather than as something to
+		// paste — a <a|b|c> placeholder is not copy-pasteable, since the shell
+		// reads < as a redirect and | as a pipe.
+		line := "  Supported: " + strings.Join(capable, ", ")
+		if len(installed) == 0 {
+			// No Fix line was printed above, so say why rather than leaving the
+			// reader to wonder where the command went.
+			line += " (none installed; install one first)"
+		}
+		fmt.Fprintln(w, line)
+	}
+	fmt.Fprintln(w, "  No `entire` command writes this value, so it was hand-edited or written by an agent.")
+}
+
+// summaryProviderSourceLayer reports which settings file supplies the effective
+// provider, and whether that file is the local layer.
+//
+// The remedy needs it. `entire configure` with no layer flag writes the PROJECT
+// file whenever one exists (settingsTargetFile), so a provider coming from
+// settings.local.json would be "fixed" in the wrong file: the command reports
+// success, the local layer still overrides it, and doctor still reports the
+// fault. Naming the file also answers the question the diagnosis otherwise
+// leaves open — which of two settings files to open.
+//
+// Local wins when it carries the key at all, which is the merge rule the loader
+// applies, so matching on the effective value is enough to identify the source.
+// A read failure or a missing file falls back to the project layer, matching
+// where `configure` would write.
+//
+// LocalLayerRejection is consulted first, and it is not an optimisation: a
+// TRACKED settings.local.json is dropped wholesale by the loader, so its
+// contents are not the effective value however well they match. Reading the
+// file directly cannot see that — it would attribute a provider both files
+// happen to share to the local layer and send the user to edit a file the
+// loader ignores, leaving the project-level fault in place behind a success
+// message. That is the same class of wrong-file advice as the missing --local.
+func summaryProviderSourceLayer(ctx context.Context, merged *settings.EntireSettings) (relPath string, isLocal bool) {
+	if merged == nil || merged.SummaryGeneration == nil {
+		return settings.EntireSettingsFile, false
+	}
+	if merged.LocalLayerRejection() != "" {
+		return settings.EntireSettingsFile, false
+	}
+	localAbs, err := paths.AbsPath(ctx, settings.EntireSettingsLocalFile)
+	if err != nil {
+		return settings.EntireSettingsFile, false
+	}
+	// loadFromFile returns empty settings for a missing file, so absence is
+	// simply "the local layer does not supply it".
+	local, err := loadSummarySettingsFromFile(localAbs)
+	if err != nil {
+		return settings.EntireSettingsFile, false
+	}
+	if local.SummaryGeneration != nil && local.SummaryGeneration.Provider == merged.SummaryGeneration.Provider {
+		return settings.EntireSettingsLocalFile, true
+	}
+	return settings.EntireSettingsFile, false
 }
 
 // checkCodexHookTrust reports whether Codex can discover its effective

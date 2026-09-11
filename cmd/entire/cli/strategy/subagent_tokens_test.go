@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
+	"github.com/entireio/cli/cmd/entire/cli/agent/claudecode"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	cpkg "github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
@@ -49,6 +50,50 @@ func TestAccumulateTokenUsage_SubagentTokensReplacedNotSummed(t *testing.T) {
 	require.NotNil(t, existing.SubagentTokens)
 	require.Equal(t, 500, existing.SubagentTokens.InputTokens, "SubagentTokens must be replaced, not summed")
 	require.Equal(t, 250, existing.SubagentTokens.OutputTokens, "SubagentTokens must be replaced, not summed")
+}
+
+func TestAccumulateTokenUsage_ExplicitIncompleteClearsPriorChildTotal(t *testing.T) {
+	t.Parallel()
+	complete := true
+	incomplete := false
+	existing := &agent.TokenUsage{InputTokens: 3, SubagentTokens: &agent.TokenUsage{InputTokens: 9}, SubagentTokensComplete: &complete}
+	got := accumulateTokenUsage(existing, &agent.TokenUsage{OutputTokens: 4, SubagentTokensComplete: &incomplete})
+	require.Nil(t, got.SubagentTokens)
+	require.NotNil(t, got.SubagentTokensComplete)
+	require.False(t, *got.SubagentTokensComplete)
+	require.Equal(t, 3, got.InputTokens)
+	require.Equal(t, 4, got.OutputTokens)
+}
+
+func TestAccumulateTokenUsage_ExplicitEmptyReplacesPriorChildTotal(t *testing.T) {
+	t.Parallel()
+	complete := true
+	got := accumulateTokenUsage(&agent.TokenUsage{SubagentTokens: &agent.TokenUsage{InputTokens: 9}}, &agent.TokenUsage{SubagentTokensComplete: &complete})
+	require.Nil(t, got.SubagentTokens)
+	require.NotNil(t, got.SubagentTokensComplete)
+	require.True(t, *got.SubagentTokensComplete)
+}
+
+func TestInvalidateStaleSubagentSnapshot_ZeroVersion(t *testing.T) {
+	t.Parallel()
+	complete := true
+	zero := uint64(0)
+	step := StepContext{
+		SubagentLedgerVersion: &zero,
+		TokenUsage: &agent.TokenUsage{
+			InputTokens:            11,
+			SubagentTokens:         &agent.TokenUsage{InputTokens: 7},
+			SubagentTokensComplete: &complete,
+		},
+	}
+
+	invalidateStaleSubagentSnapshot(&step, &SessionState{SubagentLedgerVersion: 1})
+
+	require.NotNil(t, step.TokenUsage)
+	require.Equal(t, 11, step.TokenUsage.InputTokens, "main-agent evidence must survive invalidation")
+	require.Nil(t, step.TokenUsage.SubagentTokens)
+	require.NotNil(t, step.TokenUsage.SubagentTokensComplete)
+	require.False(t, *step.TokenUsage.SubagentTokensComplete)
 }
 
 // TestSaveStep_SubagentTokensNotDoubleCountedAcrossCheckpoints exercises the
@@ -407,6 +452,151 @@ func TestSaveStep_CheckpointSubagentAlwaysDerivedFromSessionCumulative(t *testin
 	require.Equal(t, 150, checkpointSubIn(), "second nil step must not re-subtract baseline")
 }
 
+func TestLiveSubagentsDir_OnlyEnablesNeededSupportedDirectoryScan(t *testing.T) {
+	t.Parallel()
+
+	transcriptDir := t.TempDir()
+	sessionID := "claude-session-123"
+	transcriptPath := filepath.Join(transcriptDir, sessionID+".jsonl")
+	ag := claudecode.NewClaudeCodeAgent()
+	state := &SessionState{SessionID: sessionID}
+
+	require.Empty(t, liveSubagentsDir(ag, state, transcriptPath))
+
+	subagentsDir := paths.SubagentsDir(transcriptDir, sessionID)
+	require.NoError(t, os.MkdirAll(filepath.Dir(subagentsDir), 0o755))
+	require.NoError(t, os.WriteFile(subagentsDir, []byte("not a directory"), 0o644))
+	require.Empty(t, liveSubagentsDir(ag, state, transcriptPath), "a regular file must not enable a directory scan")
+	require.NoError(t, os.Remove(subagentsDir))
+	require.NoError(t, os.Mkdir(subagentsDir, 0o755))
+	require.Equal(t, subagentsDir, liveSubagentsDir(ag, state, transcriptPath))
+
+	require.NoError(t, os.Remove(subagentsDir))
+	sessionDir := filepath.Dir(subagentsDir)
+	require.NoError(t, os.Remove(sessionDir))
+	symlinkTarget := t.TempDir()
+	require.NoError(t, os.Mkdir(filepath.Join(symlinkTarget, filepath.Base(subagentsDir)), 0o755))
+	if err := os.Symlink(symlinkTarget, sessionDir); err != nil {
+		t.Logf("symlinks unavailable; skipping symlink assertion: %v", err)
+	} else {
+		require.Empty(t, liveSubagentsDir(ag, state, transcriptPath), "a symlinked session directory must not be followed")
+		require.NoError(t, os.Remove(sessionDir))
+	}
+
+	state.CheckpointTokenUsage = &agent.TokenUsage{SubagentTokens: &agent.TokenUsage{InputTokens: 1}}
+	require.Empty(t, liveSubagentsDir(ag, state, transcriptPath), "an existing checkpoint total is cheaper and authoritative")
+	state.CheckpointTokenUsage = nil
+	state.SessionID = ""
+	require.Empty(t, liveSubagentsDir(ag, state, transcriptPath), "an empty session ID must not collapse onto the parent subagents path")
+	require.Empty(t, liveSubagentsDir(nil, &SessionState{SessionID: sessionID}, transcriptPath), "an unsupported agent must stay on the cheap path")
+}
+
+func TestCalculateLiveTranscriptTokenUsage_RescopesSubagentCumulativeTotal(t *testing.T) {
+	t.Parallel()
+
+	transcriptDir := t.TempDir()
+	sessionID := "claude-session-123"
+	subagentsDir := paths.SubagentsDir(transcriptDir, sessionID)
+	require.NoError(t, os.MkdirAll(subagentsDir, 0o755))
+
+	mainTranscript := []byte(`{"type":"assistant","uuid":"a-main","message":{"id":"msg_main","type":"message","role":"assistant","content":[{"type":"tool_use","id":"toolu_task1","name":"Task","input":{"description":"write helper","prompt":"write helper"}}],"usage":{"input_tokens":100,"output_tokens":10}}}
+{"type":"user","uuid":"u-main","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_task1","content":"agentId: sub1"}]}}
+`)
+	subagentPath := filepath.Join(subagentsDir, paths.AgentTranscriptFileName("sub1"))
+	require.NoError(t, os.WriteFile(subagentPath, []byte(`{"type":"assistant","uuid":"a-sub","message":{"id":"msg_sub","type":"message","role":"assistant","content":[{"type":"text","text":"done"}],"usage":{"input_tokens":200,"output_tokens":20}}}
+`), 0o644))
+
+	ag := claudecode.NewClaudeCodeAgent()
+	state := &SessionState{SessionID: sessionID, AgentType: agent.AgentTypeClaudeCode}
+	usage := calculateLiveTranscriptTokenUsage(
+		t.Context(), ag, mainTranscript, state, filepath.Join(transcriptDir, sessionID+".jsonl"))
+	require.NotNil(t, usage)
+	require.NotNil(t, usage.SubagentTokens)
+	require.Equal(t, 200, usage.SubagentTokens.InputTokens)
+	require.Equal(t, 20, usage.SubagentTokens.OutputTokens)
+	require.NotNil(t, state.TokenUsage)
+	require.Equal(t, 200, state.TokenUsage.SubagentTokens.InputTokens,
+		"session state must retain the cumulative snapshot for the next baseline")
+
+	applyBackfilledSessionTokenUsage(t.Context(), ag, state, mainTranscript, usage)
+	require.Equal(t, 200, state.TokenUsage.SubagentTokens.InputTokens,
+		"main-token backfill must not replace the cumulative snapshot with the checkpoint delta")
+	state.RebaselineSubagentTokens()
+	require.NoError(t, os.WriteFile(subagentPath, []byte(`{"type":"assistant","uuid":"a-sub","message":{"id":"msg_sub","type":"message","role":"assistant","content":[{"type":"text","text":"done"}],"usage":{"input_tokens":260,"output_tokens":35}}}
+`), 0o644))
+
+	nextUsage := calculateLiveTranscriptTokenUsage(
+		t.Context(), ag, mainTranscript, state, filepath.Join(transcriptDir, sessionID+".jsonl"))
+	require.NotNil(t, nextUsage)
+	require.NotNil(t, nextUsage.SubagentTokens)
+	require.Equal(t, 60, nextUsage.SubagentTokens.InputTokens,
+		"second checkpoint must not re-report the first checkpoint's subagent input")
+	require.Equal(t, 15, nextUsage.SubagentTokens.OutputTokens,
+		"second checkpoint must not re-report the first checkpoint's subagent output")
+	require.Equal(t, 260, state.TokenUsage.SubagentTokens.InputTokens,
+		"session state must advance to the latest cumulative snapshot")
+
+	state.RebaselineSubagentTokens()
+	unchangedUsage := calculateLiveTranscriptTokenUsage(
+		t.Context(), ag, mainTranscript, state, filepath.Join(transcriptDir, sessionID+".jsonl"))
+	require.NotNil(t, unchangedUsage)
+	require.Nil(t, unchangedUsage.SubagentTokens,
+		"an unchanged cumulative snapshot must not produce an all-zero checkpoint object")
+
+	state.SubagentTokensBaseline = &agent.TokenUsage{InputTokens: 300, OutputTokens: 40, APICallCount: 2}
+	clampedUsage := calculateLiveTranscriptTokenUsage(
+		t.Context(), ag, mainTranscript, state, filepath.Join(transcriptDir, sessionID+".jsonl"))
+	require.NotNil(t, clampedUsage)
+	require.Nil(t, clampedUsage.SubagentTokens,
+		"a stale baseline above the cumulative snapshot must clamp to an absent delta")
+}
+
+func TestExtractSessionDataFromLiveTranscript_IncludesScopedSubagentTokens(t *testing.T) {
+	t.Parallel()
+
+	transcriptDir := t.TempDir()
+	sessionID := "claude-live-entry-point"
+	transcriptPath := filepath.Join(transcriptDir, sessionID+".jsonl")
+	mainTranscript := []byte(`{"type":"assistant","uuid":"a-main","message":{"id":"msg_main","type":"message","role":"assistant","content":[{"type":"tool_use","id":"toolu_task1","name":"Task","input":{"description":"write helper","prompt":"write helper"}}],"usage":{"input_tokens":100,"output_tokens":10}}}
+{"type":"user","uuid":"u-main","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_task1","content":"agentId: sub1"}]}}
+`)
+	require.NoError(t, os.WriteFile(transcriptPath, mainTranscript, 0o644))
+
+	subagentsDir := paths.SubagentsDir(transcriptDir, sessionID)
+	require.NoError(t, os.MkdirAll(subagentsDir, 0o755))
+	subagentPath := filepath.Join(subagentsDir, paths.AgentTranscriptFileName("sub1"))
+	writeSubagent := func(input, output int) {
+		t.Helper()
+		body := fmt.Sprintf(`{"type":"assistant","uuid":"a-sub","message":{"id":"msg_sub","type":"message","role":"assistant","content":[{"type":"text","text":"done"}],"usage":{"input_tokens":%d,"output_tokens":%d}}}
+`, input, output)
+		require.NoError(t, os.WriteFile(subagentPath, []byte(body), 0o644))
+	}
+
+	state := &SessionState{
+		SessionID:      sessionID,
+		AgentType:      agent.AgentTypeClaudeCode,
+		TranscriptPath: transcriptPath,
+	}
+	s := &ManualCommitStrategy{}
+	writeSubagent(200, 20)
+	first, err := s.extractSessionDataFromLiveTranscript(t.Context(), state)
+	require.NoError(t, err)
+	require.NotNil(t, first.TokenUsage)
+	require.NotNil(t, first.TokenUsage.SubagentTokens, "the production live extractor must wire in subagent usage")
+	require.Equal(t, 200, first.TokenUsage.SubagentTokens.InputTokens)
+
+	state.RebaselineSubagentTokens()
+	state.CheckpointTranscriptStart = 1
+	writeSubagent(260, 35)
+	second, err := s.extractSessionDataFromLiveTranscript(t.Context(), state)
+	require.NoError(t, err)
+	require.NotNil(t, second.TokenUsage)
+	require.NotNil(t, second.TokenUsage.SubagentTokens)
+	require.Equal(t, 60, second.TokenUsage.SubagentTokens.InputTokens,
+		"the entry point must subtract the prior cumulative baseline")
+	require.Equal(t, 15, second.TokenUsage.SubagentTokens.OutputTokens)
+}
+
 // TestCondenseSessionByID_CapturesSubagentBaselineViaRealResetPath drives a REAL
 // condensation (CondenseSessionByID) rather than hand-simulating the reset, so
 // the production baseline-snapshot code in resetCheckpointWindow — shared by the
@@ -530,13 +720,29 @@ func TestCondenseSessionByID_CapturesSubagentBaselineViaRealResetPath(t *testing
 // a copy on that path, so a mutate-in-place implementation passes them. Mutating
 // would overwrite the session-wide cumulative with a window delta and make
 // resetCheckpointWindow snapshot a too-small baseline for the next window.
-func TestWithSubagentTokensFrom_DoesNotMutateInput(t *testing.T) {
+func TestSubagentCoverageSurvivesBackfill(t *testing.T) {
+	t.Parallel()
+	incomplete := false
+	destination := &agent.TokenUsage{InputTokens: 1, SubagentTokens: &agent.TokenUsage{InputTokens: 7}}
+	source := &agent.TokenUsage{SubagentTokensComplete: &incomplete}
+	got := replaceSubagentTokensFrom(destination, source)
+	require.Nil(t, got.SubagentTokens)
+	require.NotNil(t, got.SubagentTokensComplete)
+	require.False(t, *got.SubagentTokensComplete)
+	require.Equal(t, 7, destination.SubagentTokens.InputTokens)
+	require.Same(t, got, fillMissingSubagentTokensFrom(got, destination), "explicit incomplete coverage must not be filled from an older total")
+	filled := fillMissingSubagentTokensFrom(&agent.TokenUsage{InputTokens: 2}, source)
+	require.NotNil(t, filled.SubagentTokensComplete)
+	require.False(t, *filled.SubagentTokensComplete)
+}
+
+func TestFillMissingSubagentTokensFrom_DoesNotMutateInput(t *testing.T) {
 	t.Parallel()
 
 	usage := &agent.TokenUsage{InputTokens: 1}
 	src := &agent.TokenUsage{SubagentTokens: &agent.TokenUsage{InputTokens: 9}}
 
-	got := withSubagentTokensFrom(usage, src)
+	got := fillMissingSubagentTokensFrom(usage, src)
 
 	require.Nil(t, usage.SubagentTokens, "must not mutate the input")
 	require.NotNil(t, got.SubagentTokens)

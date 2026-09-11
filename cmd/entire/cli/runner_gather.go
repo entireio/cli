@@ -28,6 +28,7 @@ const (
 )
 
 const (
+	sourceRepo        = "repo"
 	sourceCheckpoint  = "checkpoint"
 	sourceCheckpoints = "checkpoints"
 	sourceTrail       = "trail"
@@ -57,7 +58,7 @@ func parseTuneSources(list []string) (tuneSources, error) {
 			continue
 		case "all":
 			return allTuneSources(), nil
-		case "repo":
+		case sourceRepo:
 			s.repo = true
 		case "pr", "prs", "issue", "issues":
 			s.prs = true

@@ -20,7 +20,6 @@ import (
 
 // Hook marker used to identify Entire CLI hooks
 const entireHookMarker = "Entire CLI hooks"
-const postRewriteHookName = "post-rewrite"
 
 // GitHookBackupSuffix is what InstallGitHook moves a pre-existing hook to
 // before writing its own. Exported so diagnostics elsewhere can name the file
@@ -35,8 +34,12 @@ const goosWindows = "windows"
 const chainComment = "# Chain: run pre-existing hook"
 const missingEntireGitHookWarning = "[entire] Entire CLI is enabled but not installed or not on PATH. Skipping Entire Git hook; continuing. Installation guide: https://docs.entire.io/cli/installation#installation-methods"
 
+// postRewriteHook is named on its own because the rewrite hook is the one
+// Entire branches on by name (see below).
+const postRewriteHook = "post-rewrite"
+
 // gitHookNames are the git hooks managed by Entire CLI
-var gitHookNames = []string{"prepare-commit-msg", "commit-msg", "post-commit", "post-rewrite", "pre-push"}
+var gitHookNames = []string{"prepare-commit-msg", "commit-msg", "post-commit", postRewriteHook, "pre-push"}
 
 // ManagedGitHookNames returns the list of git hooks managed by Entire CLI.
 // This is useful for tests that need to manipulate hooks.
@@ -623,7 +626,7 @@ func buildHookSpecs(cmdPrefix string) []hookSpec {
 `, entireHookMarker, postCommitCmd),
 		},
 		{
-			name: "post-rewrite",
+			name: postRewriteHook,
 			content: fmt.Sprintf(`#!/bin/sh
 # %s
 # Post-rewrite hook: remap session linkage after amend/rebase rewrites
@@ -895,7 +898,7 @@ func RemoveGitHook(ctx context.Context) (int, error) {
 // generateChainedContent appends a chain call to the base hook content,
 // so the pre-existing hook (backed up to .pre-entire) is called after our hook.
 func generateChainedContent(baseContent, hookName string) string {
-	if hookName == postRewriteHookName {
+	if hookName == postRewriteHook {
 		return generatePostRewriteChainedContent(baseContent)
 	}
 

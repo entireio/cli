@@ -441,8 +441,8 @@ The framework dispatcher (`DispatchLifecycleEvent` in `lifecycle.go`) handles ea
 | `TurnEnd` | Validates transcript, extracts metadata (prompts, summary, files), detects file changes via git status, saves step + checkpoint, transitions phase to IDLE | `stop` | `after-agent` | `stop` | `turn-end` | `stop` | `agent-stop` |
 | `Compaction` | Fires compaction transition (stays ACTIVE), resets transcript offset | *(not used)* | `pre-compress` | `pre-compact` | `compaction` | `pre-compact` | *(not used)* |
 | `SessionEnd` | Marks session as ENDED in state machine | `session-end` | `session-end` | `session-end` | `session-end` | `session-end` | `session-end` |
-| `SubagentStart` | Captures pre-task state (git status snapshot) | `pre-task` (PreToolUse[Task]) | *(not used)* | `subagent-start` | *(not used)* | `pre-tool-use` (config-level `matcher: Task`) | *(not used)* |
-| `SubagentEnd` | Extracts subagent modified files and completes the task record (see the "Task Records (Subagent Work)" section of [Sessions and Checkpoints](sessions-and-checkpoints.md) for the launch-stub vs. `Final` split) | `post-task` (PostToolUse[Task], `Final: false`) + `subagent-stop` (SubagentStop, `Final: true`) | *(not used)* | `subagent-stop` | *(not used)* | `post-tool-use` (config-level `matcher: Task`) | `subagent-stop` |
+| `SubagentStart` | Captures pre-task state (git status snapshot) | `pre-task` (PreToolUse[Task]) | *(not used)* | `subagent-start` | *(not used)* | `pre-tool-use` (config-level `matcher: Task`) | `subagent-start` (observed pass-through; no child identity) |
+| `SubagentEnd` | Extracts subagent modified files and completes the task record (see the "Task Records (Subagent Work)" section of [Sessions and Checkpoints](sessions-and-checkpoints.md) for the launch-stub vs. `Final` split) | `post-task` (PostToolUse[Task], `Final: false`) + `subagent-stop` (SubagentStop, `Final: true`) | *(not used)* | `subagent-stop` | *(not used)* | `post-tool-use` (config-level `matcher: Task`) | `subagent-stop` (`agentId` joined to parent `subagent.started.toolCallId`) |
 
 ### Event Field Requirements
 

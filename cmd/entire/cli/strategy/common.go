@@ -756,7 +756,7 @@ func EnsurePrimaryRef(ctx context.Context, repo *git.Repository) error {
 	}
 
 	if localExists {
-		if remoteRef != nil && localRef.Hash() != remoteRef.Hash() {
+		if remoteRef != nil && !localRef.Hash().Equal(remoteRef.Hash()) {
 			// Local and remote exist but differ — determine relationship
 			hasData, checkErr := metadataBranchHasData(repo, localRef)
 			if checkErr != nil {

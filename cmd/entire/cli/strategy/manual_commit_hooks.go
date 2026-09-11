@@ -53,7 +53,8 @@ const (
 	ttyResultLinkAlways                  // Link and remember: add trailer + save "always" preference
 )
 
-// askConfirmTTY prompts the user via /dev/tty whether to link a commit to session context.
+// askConfirmTTY prompts via the controlling terminal whether to link a commit
+// to session context.
 // This requires a controlling terminal — callers must check
 // interactive.CanPromptInteractively() first and handle the no-TTY case
 // (agent subprocesses, CI) themselves.
@@ -71,10 +72,10 @@ func askConfirmTTY(header string, details []string, prompt string, defaultYes bo
 		return defaultResult
 	}
 
-	// Open /dev/tty for both reading and writing.
-	// This is the controlling terminal, which works even when stdin/stderr are redirected
-	// (e.g., human runs git commit -m where stdin is not a pipe).
-	tty, err := os.OpenFile("/dev/tty", os.O_RDWR, 0)
+	// Open the controlling terminal for both reading and writing. This works even
+	// when stdin/stderr are redirected (e.g., human runs git commit -m where
+	// stdin is not a pipe).
+	tty, err := interactive.OpenPromptTTY()
 	if err != nil {
 		return defaultResult
 	}
@@ -2528,6 +2529,52 @@ func correctSessionAgentType(ctx context.Context, currentType types.AgentType, t
 	return owner.Type(), true
 }
 
+// transitionSessionToCodex initializes Codex child-accounting state when a
+// transcript path proves that an existing session is Codex-owned. The
+// transition deliberately happens in the same session-state mutation as the
+// AgentType correction so readers can never observe a Codex session with
+// legacy, ambiguous child-coverage markers.
+func transitionSessionToCodex(state *SessionState) {
+	dirty := hasPriorSubagentEvidence(state)
+	complete := !dirty
+
+	// Task records predate the durable Codex inventory. Preserve their child
+	// identities without calling RegisterSubagent: this is a migration of known
+	// evidence, not a new observation, so it must not advance the ledger again.
+	for _, record := range state.TaskRecords {
+		if record.AgentID == "" || state.FindSubagentInventory(record.AgentID) != nil {
+			continue
+		}
+		state.SubagentInventory = append(state.SubagentInventory, session.SubagentInventoryEntry{
+			AgentID:                record.AgentID,
+			DeclaredTranscriptPath: record.DeclaredTranscriptPath,
+		})
+	}
+
+	state.TokenUsage = types.WithClearedSubagentTokens(state.TokenUsage, complete)
+	state.CheckpointTokenUsage = types.WithClearedSubagentTokens(state.CheckpointTokenUsage, complete)
+	state.SubagentTokensBaseline = nil
+	state.SubagentInventoryComplete = &complete
+	state.SubagentTokensBaselineComplete = &complete
+}
+
+func hasPriorSubagentEvidence(state *SessionState) bool {
+	if len(state.SubagentInventory) > 0 || len(state.TaskRecords) > 0 || state.SubagentLedgerVersion != 0 || state.SubagentTokensBaseline != nil {
+		return true
+	}
+	if state.TokenUsage != nil && (state.TokenUsage.SubagentTokens != nil || explicitlyIncomplete(state.TokenUsage.SubagentTokensComplete)) {
+		return true
+	}
+	if state.CheckpointTokenUsage != nil && (state.CheckpointTokenUsage.SubagentTokens != nil || explicitlyIncomplete(state.CheckpointTokenUsage.SubagentTokensComplete)) {
+		return true
+	}
+	return explicitlyIncomplete(state.SubagentInventoryComplete) || explicitlyIncomplete(state.SubagentTokensBaselineComplete)
+}
+
+func explicitlyIncomplete(complete *bool) bool {
+	return complete != nil && !*complete
+}
+
 // InitializeSession creates session state for a new session or updates an existing one.
 // This implements the optional SessionInitializer interface.
 // Called during UserPromptSubmit to allow git hooks to detect active sessions.
@@ -2585,17 +2632,22 @@ func (s *ManualCommitStrategy) InitializeSession(ctx context.Context, sessionID 
 		}
 		state.TurnID = turnID.String()
 
-		// Update AgentType when it isn't set yet, or when the transcript path
-		// proves we're a different agent than the one stored.
-		if state.AgentType == "" && resolvedAgentType != "" {
-			state.AgentType = resolvedAgentType
-		} else if corrected, changed := correctSessionAgentType(ctx, state.AgentType, transcriptPath); changed {
+		// A transcript path is stronger evidence than both a stored owner and
+		// the current hook. Apply transcript-proven corrections first, including
+		// the empty-owner case, so a Codex correction can initialize all of its
+		// child-accounting markers atomically.
+		if corrected, changed := correctSessionAgentType(ctx, state.AgentType, transcriptPath); changed {
 			logging.Info(logging.WithComponent(ctx, "hooks"), "corrected session agent type from transcript path",
 				slog.String("session_id", sessionID),
 				slog.String("from", string(state.AgentType)),
 				slog.String("to", string(corrected)),
 				slog.String("transcript_path", transcriptPath))
+			if corrected == agent.AgentTypeCodex && state.AgentType != agent.AgentTypeCodex {
+				transitionSessionToCodex(state)
+			}
 			state.AgentType = corrected
+		} else if state.AgentType == "" && resolvedAgentType != "" {
+			state.AgentType = resolvedAgentType
 		}
 		if model != "" {
 			state.ModelName = model

@@ -13,7 +13,7 @@ import (
 // delete organizations on the Entire control plane.
 func newOrgCmd() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "org",
+		Use:   cmdOrg,
 		Short: "Manage Entire organizations",
 	}
 	addControlPlaneFlags(cmd)
@@ -26,7 +26,7 @@ func newOrgCmd() *cobra.Command {
 
 // orgColumns is the human table/field view of an org, shared by list and
 // any future `org get`.
-var orgColumns = []string{"ID", "NAME", "REGION", "CREATED"}
+var orgColumns = []string{"ID", colHeaderName, colHeaderRegion, "CREATED"}
 
 func orgRow(o coreapi.Org) []string {
 	return []string{o.ID, o.Name, o.Region, o.CreatedAt.Format("2006-01-02")}
@@ -35,7 +35,7 @@ func orgRow(o coreapi.Org) []string {
 func newOrgCreateCmd() *cobra.Command {
 	var region string
 	cmd := &cobra.Command{
-		Use:   "create <name>",
+		Use:   cmdCreateName,
 		Short: "Create an organization",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -59,7 +59,7 @@ func newOrgCreateCmd() *cobra.Command {
 
 func newOrgListCmd() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "list",
+		Use:   cmdList,
 		Short: "List organizations you can see",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
