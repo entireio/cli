@@ -228,6 +228,10 @@ target-path string. The turn-end filter that drops transcript-reported files an
 agent already committed mid-turn (`filterToUncommittedFiles`) shares this
 comparison (`strategy.WorktreeMatchesCommitted`), so an autocrlf-only difference
 cannot mint a fresh shadow branch after the commit has condensed the session.
+If only raw bytes match, a batched temporary-index comparison asks Git whether
+a legacy CRLF blob is exempt from normalization. Explicit text attributes still
+make the file dirty. This exceptional path adds four Git subprocesses, shares
+the five-second hashing budget, and never refreshes the user's index.
 
 This enables splitting changes within a single file across multiple commits (see Scenario 7).
 

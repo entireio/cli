@@ -552,10 +552,10 @@ func filesWithRemainingAgentChanges(
 // WorktreeMatchesCommitted reports, per path, whether the working tree still
 // holds the content the commit holds, judged the way `git status` judges it.
 // Native hash-object applies the path's clean filters (core.autocrlf, LFS,
-// ident), so a CRLF working copy of an LF-normalized blob matches. Raw bytes
-// equal to the blob match too: git exempts a blob that already carries CRLF
-// from autocrlf conversion, while hash-object converts unconditionally, so the
-// filtered hash alone would call such a file dirty. Symlink blobs and paths Git
+// ident), so a CRLF working copy of an LF-normalized blob matches. When only raw
+// bytes match, a private index comparison asks Git whether a legacy CRLF blob
+// is exempt from normalization. Raw equality alone cannot override an explicit
+// text attribute or clean filter. Symlink blobs and paths Git
 // cannot hash take the confined raw comparison only, because hash-object
 // follows a link and hashes the target's content while the blob stores the
 // target path. Modes are not compared: an executable-bit-only change reads as
@@ -566,6 +566,9 @@ func WorktreeMatchesCommitted(ctx context.Context, worktreeRoot string, files ma
 	if worktreeRoot == "" || len(files) == 0 {
 		return matches
 	}
+	// Share one budget across hashing and the exceptional index comparison.
+	ctx, cancel := context.WithTimeout(ctx, gitrepo.WorktreeContentHashBudget)
+	defer cancel()
 
 	paths := make([]string, 0, len(files))
 	for path, file := range files {
@@ -580,12 +583,32 @@ func WorktreeMatchesCommitted(ctx context.Context, worktreeRoot string, files ma
 		)
 	}
 
+	var ambiguous map[string]*object.File
 	for path, file := range files {
-		if worktreeHash, ok := worktreeHashes[path]; ok && worktreeHash == file.Hash {
+		worktreeHash, hashed := worktreeHashes[path]
+		if hashed && worktreeHash == file.Hash {
 			matches[path] = true
 			continue
 		}
-		matches[path] = workingTreeMatchesBlob(worktreeRoot, path, file.Mode, file.Hash)
+		rawMatch := workingTreeMatchesBlob(worktreeRoot, path, file.Mode, file.Hash)
+		if !hashed {
+			matches[path] = rawMatch
+		} else if rawMatch {
+			if ambiguous == nil {
+				ambiguous = make(map[string]*object.File)
+			}
+			ambiguous[path] = file
+		}
+	}
+	if len(ambiguous) > 0 {
+		confirmed, err := gitrepo.MatchWorktreeFiles(ctx, worktreeRoot, ambiguous)
+		if err != nil {
+			logging.Warn(ctx, "could not confirm legacy working-tree matches; retaining candidates",
+				slog.String("error", err.Error()))
+		}
+		for path, match := range confirmed {
+			matches[path] = match
+		}
 	}
 	return matches
 }
