@@ -529,6 +529,21 @@ func TestCheckpointSyncRemote_MisconfiguredSettingFailsClosed(t *testing.T) {
 		if st.CheckpointSyncRemote != "" {
 			t.Errorf("checkpoint_sync_remote should be empty when fail-closed, got %q", st.CheckpointSyncRemote)
 		}
+
+		// So is doctor, which used to narrate the election's rules without
+		// consulting it. The wording is pinned by the unit tests in package cli;
+		// what only a real repo can prove is the wiring — that doctor resolves
+		// this election at all, and that the remote name survives the round trip
+		// into the report.
+		doctorOut := env.RunCLI("doctor")
+		for _, want := range []string{"Checkpoint sync: DISABLED", `"gone"`} {
+			if !strings.Contains(doctorOut, want) {
+				t.Errorf("doctor should report the fail-closed election (%q missing), got:\n%s", want, doctorOut)
+			}
+		}
+		if strings.Contains(doctorOut, "single elected remote") {
+			t.Errorf("doctor must not claim an elected destination when none was elected, got:\n%s", doctorOut)
+		}
 	})
 }
 

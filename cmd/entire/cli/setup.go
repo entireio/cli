@@ -1425,9 +1425,19 @@ func runEnableInteractive(ctx context.Context, w io.Writer, agents []agent.Agent
 		}
 	}
 
-	printCheckpointDestinationNote(ctx, w, "\nNote: this repo's remotes make the checkpoint destination ambiguous.")
+	printCheckpointDestinationNote(ctx, w, enableCheckpointNoteHeaders)
 
 	return nil
+}
+
+// enableCheckpointNoteHeaders phrases the checkpoint-destination note for the
+// setup flow, where it follows "Ready." and reads as a note rather than as a
+// doctor verdict.
+var enableCheckpointNoteHeaders = checkpointNoteHeaders{
+	// Neutral about the cause: the note reports an unreadable settings file
+	// under this header too, which no setting is responsible for.
+	disabled:  "\nNote: checkpoint sync is currently disabled in this repo.",
+	ambiguous: "\nNote: this repo's remotes make the checkpoint destination ambiguous.",
 }
 
 // printEnabledStatus prints agents and a hint about `entire agent`.
@@ -1436,7 +1446,7 @@ func printEnabledStatus(ctx context.Context, w io.Writer) {
 		fmt.Fprintf(w, "Agents: %s\n", strings.Join(displayNames, ", "))
 	}
 	fmt.Fprintln(w, "\nTo add more agents, run `entire agent add <name>`.")
-	printCheckpointDestinationNote(ctx, w, "\nNote: this repo's remotes make the checkpoint destination ambiguous.")
+	printCheckpointDestinationNote(ctx, w, enableCheckpointNoteHeaders)
 }
 
 // resolveFirstRunCheckpointBackend decides the checkpoint storage backend

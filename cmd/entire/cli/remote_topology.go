@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -14,6 +15,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
+	"github.com/entireio/cli/cmd/entire/cli/strategy"
 )
 
 // Checkpoint destinations are unambiguous in the ordinary single-remote,
@@ -51,6 +53,17 @@ type remoteTopology struct {
 	// primaryIsRefs reports whether the git-refs backend is active, which
 	// decides what a fanning-out remote means for checkpoints.
 	primaryIsRefs bool
+	// electionErr is the fail-closed outcome of the checkpoint sync election,
+	// nil when a remote was elected (or when there is simply nothing to elect).
+	//
+	// Asked of the resolver for the same reason `pinned` is: every sentence
+	// this type writes about where checkpoints go is a claim about what the
+	// election decided, and a note that narrates the election without consulting
+	// it states its rules as facts. It did — it told a repo whose election had
+	// failed closed that checkpoints "sync to a single elected remote" and to run
+	// `entire status` to see which one, when the answer was none and nothing was
+	// syncing anywhere.
+	electionErr error
 }
 
 // inspectRemoteTopology reads the repo's remotes and checkpoint configuration.
@@ -92,6 +105,11 @@ func inspectRemoteTopology(ctx context.Context) remoteTopology {
 	if cpCfg, err := settings.LoadCheckpointsConfig(ctx); err == nil {
 		t.primaryIsRefs = checkpoint.PrimaryIsRefs(cpCfg)
 	}
+
+	// Local-only, like everything else here: the resolver reads settings and
+	// .git/config, both memoized by the root context's git-remote cache, and
+	// never dials.
+	_, t.electionErr = strategy.ResolveCheckpointSyncRemote(ctx)
 
 	return t
 }
@@ -135,14 +153,79 @@ func (t remoteTopology) ambiguous() bool {
 	return unpinned > 1
 }
 
+// syncDisabled reports that the election failed closed AND that the failure
+// costs this repo something: at least one remote whose pushes would otherwise
+// have carried checkpoints now carries none.
+//
+// A pinned remote is exempt because the pre-push gate exempts it — a dedicated
+// checkpoint_remote URL is addressed directly rather than elected, so its
+// checkpoints still ship (the gate applies the election only when
+// ps.hasCheckpointURL() is false). A repo whose every remote is pinned is
+// therefore syncing normally and is told nothing. A repo with no remotes at all
+// is still told: nothing syncs there either way, but the broken setting is real
+// and travels with the settings file to clones that do have remotes.
+func (t remoteTopology) syncDisabled() bool {
+	if t.electionErr == nil {
+		return false
+	}
+	return len(t.destinations) == 0 || len(t.unpinnedNames()) > 0
+}
+
+// describeSyncDisabled writes the fail-closed election: what is broken, what it
+// costs, and — only for the cause we recognize — how to fix it.
+//
+// The remedy is gated on errors.As rather than printed unconditionally, because
+// the resolver also fails closed on an unreadable settings file; advice about
+// naming a real remote would be the wrong answer to a file we could not open.
+func (t remoteTopology) describeSyncDisabled(w io.Writer, header string) {
+	fmt.Fprintln(w, header)
+
+	var misconfigured *strategy.CheckpointPushRemoteNotConfiguredError
+	if errors.As(t.electionErr, &misconfigured) {
+		fmt.Fprintf(w, "  checkpoint_push_remote names %q, which is not one of this repo's remotes,\n",
+			misconfigured.Remote)
+		fmt.Fprintln(w, "  so nothing is elected to carry checkpoints.")
+	} else {
+		fmt.Fprintf(w, "  %s.\n", t.electionErr)
+	}
+
+	// The remote list gets a line of its own rather than a slot inside a
+	// sentence: every line here is hand-wrapped, and a name list interpolated
+	// mid-sentence moves the wrap by however long the names happen to be.
+	if names := t.unpinnedNames(); len(names) > 0 {
+		fmt.Fprintf(w, "  Affected remotes: %s\n", strings.Join(names, ", "))
+		fmt.Fprintln(w, "  Pushes to them carry your code but no session history, which stays in")
+		fmt.Fprintln(w, "  this clone.")
+	}
+
+	if misconfigured == nil {
+		return
+	}
+	fmt.Fprintln(w, "  Fix: remove strategy_options.checkpoint_push_remote to let Entire elect one,")
+	fmt.Fprintln(w, "  or point it at a remote this repo actually has.")
+	fmt.Fprintln(w, "  A remote name is a per-clone fact: prefer .entire/settings.local.json, since a")
+	fmt.Fprintln(w, "  committed one disables checkpoint sync in every clone that lacks that name.")
+}
+
 // describeCheckpointDestination writes an explanation of where checkpoints go,
-// under the given header. Writes nothing when the destination is unambiguous.
-func (t remoteTopology) describeCheckpointDestination(w io.Writer, header string) {
+// under the header matching what it found. Writes nothing when the destination
+// is unambiguous and the election succeeded.
+//
+// The two conditions are exclusive on purpose: while sync is disabled there is
+// no destination to describe, so the ambiguity paragraphs below — which all
+// narrate where checkpoints land — would be describing traffic that is not
+// flowing. They become true again once the setting is fixed, which is what the
+// remedy asks for.
+func (t remoteTopology) describeCheckpointDestination(w io.Writer, headers checkpointNoteHeaders) {
+	if t.syncDisabled() {
+		t.describeSyncDisabled(w, headers.disabled)
+		return
+	}
 	if !t.ambiguous() {
 		return
 	}
 
-	fmt.Fprintln(w, header)
+	fmt.Fprintln(w, headers.ambiguous)
 
 	for _, d := range t.destinations {
 		if !d.fansOut() {
@@ -190,11 +273,32 @@ func (t remoteTopology) unpinnedNames() []string {
 	return names
 }
 
+// checkpointNoteHeaders are the caller's headings for the two conditions this
+// note reports. Separate strings because they are separate verdicts: a disabled
+// sync is a misconfiguration to fix, while an ambiguous destination is a working
+// repo whose owner should know which remote gets the history.
+type checkpointNoteHeaders struct {
+	disabled  string
+	ambiguous string
+}
+
+// doctorCheckpointNoteHeaders phrases the note as one of doctor's verdicts,
+// matching the "<subject>: <STATE>" shape its other checks print.
+//
+// A var rather than a literal at the call site so the tests assert on the text
+// a user actually sees: a copy in the test file stays green when the heading
+// here changes, which is the one thing those tests exist to catch.
+var doctorCheckpointNoteHeaders = checkpointNoteHeaders{
+	disabled:  "Checkpoint sync: DISABLED",
+	ambiguous: "Checkpoint destination: REVIEW",
+}
+
 // printCheckpointDestinationNote explains where checkpoints go when this repo's
-// remotes make that a choice. Shared by `entire enable` — the moment a user is
-// most likely to be looking, and the least surprising place to learn it — and by
-// `entire doctor`, which reports it on demand. Silent on the ordinary repo, so it
-// adds nothing to the common output.
-func printCheckpointDestinationNote(ctx context.Context, w io.Writer, header string) {
-	inspectRemoteTopology(ctx).describeCheckpointDestination(w, header)
+// remotes make that a choice, and says so when they go nowhere. Shared by
+// `entire enable` — the moment a user is most likely to be looking, and the
+// least surprising place to learn it — and by `entire doctor`, which reports it
+// on demand. Silent on the ordinary repo, so it adds nothing to the common
+// output.
+func printCheckpointDestinationNote(ctx context.Context, w io.Writer, headers checkpointNoteHeaders) {
+	inspectRemoteTopology(ctx).describeCheckpointDestination(w, headers)
 }

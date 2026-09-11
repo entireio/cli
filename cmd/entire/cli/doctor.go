@@ -169,8 +169,9 @@ func runSessionsFix(cmd *cobra.Command, force bool) error {
 	// Fixes rather than only reporting: what it removes is a rule Entire wrote.
 	checkRetiredDenyRule(cmd)
 
-	// Where checkpoints land, when the repo's remotes make that ambiguous.
-	printCheckpointDestinationNote(ctx, cmd.OutOrStdout(), "Checkpoint destination: REVIEW")
+	// Where checkpoints land, when the repo's remotes make that ambiguous — or
+	// that they land nowhere, when the sync election has failed closed.
+	printCheckpointDestinationNote(ctx, cmd.OutOrStdout(), doctorCheckpointNoteHeaders)
 
 	// Stuck sessions
 	// Load all session states

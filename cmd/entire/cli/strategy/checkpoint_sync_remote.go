@@ -40,6 +40,29 @@ type CheckpointSyncRemote struct {
 	Source CheckpointSyncRemoteSource
 }
 
+// CheckpointPushRemoteNotConfiguredError is one of the two ways election fails
+// closed: strategy_options.checkpoint_push_remote names a remote this repo does
+// not have, so nothing is elected and no push carries checkpoint data until the
+// setting is fixed. The other way is an unreadable settings file, which stays an
+// opaque wrapped error.
+//
+// A distinct type (match it with errors.As) because the two want different
+// remedies, and a caller that cannot tell them apart must offer neither — the
+// same rule the .entire directory errors follow. The message is what
+// `entire status` prints verbatim, so it states the consequence as well as the
+// cause.
+type CheckpointPushRemoteNotConfiguredError struct {
+	// Remote is the name the setting gave, kept so a caller can name it
+	// without re-reading settings.
+	Remote string
+}
+
+func (e *CheckpointPushRemoteNotConfiguredError) Error() string {
+	return fmt.Sprintf(
+		"checkpoint_push_remote %q is not a configured git remote; checkpoint sync disabled until fixed",
+		e.Remote)
+}
+
 // ResolveCheckpointSyncRemote elects the one configured git remote that
 // checkpoint data syncs to. Pure local lookup — no network. Precedence:
 // checkpoint_push_remote setting (fail-closed if the named remote does not
@@ -81,8 +104,7 @@ func ResolveCheckpointSyncRemote(ctx context.Context) (CheckpointSyncRemote, err
 	}
 	if name := s.GetCheckpointPushRemote(); name != "" {
 		if !isConfiguredRemote(ctx, name) {
-			return CheckpointSyncRemote{}, fmt.Errorf(
-				"checkpoint_push_remote %q is not a configured git remote; checkpoint sync disabled until fixed", name)
+			return CheckpointSyncRemote{}, &CheckpointPushRemoteNotConfiguredError{Remote: name}
 		}
 		return CheckpointSyncRemote{Name: name, Source: SyncRemoteSourceConfig}, nil
 	}
