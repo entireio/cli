@@ -163,7 +163,7 @@ func sanitizeReviewEnv(env []string) []string {
 // prepareReviewLaunch) rather than letting this degrade quietly.
 func claudeReviewFlags(settingsPath, pluginDir string) []string {
 	args := []string{
-		"--setting-sources", reviewSettingSources,
+		flagSettingSources, reviewSettingSources,
 		"--strict-mcp-config",
 		"--permission-mode", "default",
 		"--settings", settingsPath,
