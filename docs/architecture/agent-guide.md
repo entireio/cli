@@ -383,16 +383,32 @@ var (
 If your agent uses a JSON config file for hooks (like Claude Code's `.claude/settings.json`, Gemini's `.gemini/settings.json`, Cursor's `.cursor/hooks.json`, Factory AI Droid's `.factory/settings.json`, or Copilot CLI's `.github/hooks/entire.json`), implement `HookSupport`:
 
 ```go
+// HookConfigRelPath implements agent.HookConfigLocator: the same
+// worktree-relative, slash-separated path passed to OpenHookConfig. Callers
+// that reason about the path without doing I/O on it (doctor's symlink
+// diagnosis) read it from here.
+func (a *YourAgent) HookConfigRelPath() string { return ".youragent/settings.json" }
+
 func (a *YourAgent) InstallHooks(ctx context.Context, force bool) (int, error) {
-    // 1. Find the worktree root
+    // 1. Open the config file through its root. Never filepath.Join the path
+    // and hand the result to os.ReadFile/os.WriteFile: an agent's hook config
+    // is one of the trees CLAUDE.md's "Root Anchors" gives an owner, because a
+    // symlinked `.youragent` supplied by the checkout would otherwise be
+    // resolved before any boundary exists — and this file names the command
+    // Entire executes on every agent turn.
     repoRoot, err := paths.WorktreeRoot(ctx)
     if err != nil {
         return 0, err
     }
+    cfg, err := agent.OpenHookConfig(repoRoot, a.HookConfigRelPath())
+    if err != nil {
+        return 0, err
+    }
 
-    // 2. Read existing settings (preserve unknown fields)
-    settingsPath := filepath.Join(repoRoot, ".youragent", "settings.json")
-    // ... read and parse ...
+    // 2. Read existing settings (preserve unknown fields). A missing file comes
+    // back unwrapped, so os.IsNotExist picks "write fresh" over "merge".
+    existing, err := cfg.Read()
+    // ... parse into map[string]json.RawMessage, or start empty if absent ...
 
     // 3. Build hook commands.
     // Always name the "entire" binary, resolved through PATH. Never build a
@@ -411,7 +427,9 @@ func (a *YourAgent) InstallHooks(ctx context.Context, force bool) (int, error) {
     // matched for exactly this reason; see entireHookPrefixes in any agent.
 
     // 4. Add hooks if they don't exist (idempotent)
-    // 5. Write settings back (preserving unknown fields)
+    // 5. Write settings back through the same handle, preserving unknown fields.
+    // Write creates the parent directories, refusing a symlinked one.
+    // if err := cfg.Write(output, 0o600); err != nil { return 0, err }
 
     return count, nil
 }
