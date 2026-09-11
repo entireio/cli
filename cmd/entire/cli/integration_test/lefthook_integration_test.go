@@ -22,7 +22,7 @@ func TestLefthookAlreadyActiveThenEntireEnablePreservesEveryHook(t *testing.T) {
 	t.Parallel()
 	env := NewRepoWithCommit(t)
 	writeLefthookConfig(t, env.RepoDir)
-	installSimulatedLefthookHooks(t, env.RepoDir)
+	installSimulatedLefthookHooks(t, env, env.RepoDir)
 
 	env.RunCLI("enable", "--agent", agentClaudeCode, "--telemetry=false")
 	assertEveryLefthookDispatch(t, env, env.RepoDir)
@@ -46,7 +46,7 @@ func TestEntireNativeHooksThenLefthookRefreshPreservesEveryHook(t *testing.T) {
 	// durable local integration before Lefthook refreshes its shared wrappers.
 	writeLefthookConfig(t, env.RepoDir)
 	env.RunCLI("enable", "--agent", agentClaudeCode, "--telemetry=false")
-	installSimulatedLefthookHooks(t, env.RepoDir)
+	installSimulatedLefthookHooks(t, env, env.RepoDir)
 
 	assertEveryLefthookDispatch(t, env, env.RepoDir)
 }
@@ -55,7 +55,7 @@ func TestLefthookIntegrationIsWorktreeLocalWithSharedHooks(t *testing.T) {
 	t.Parallel()
 	env := NewRepoWithCommit(t)
 	writeLefthookConfig(t, env.RepoDir)
-	installSimulatedLefthookHooks(t, env.RepoDir)
+	installSimulatedLefthookHooks(t, env, env.RepoDir)
 	env.RunCLI("enable", "--agent", agentClaudeCode, "--telemetry=false")
 
 	linked := filepath.Join(t.TempDir(), "linked")
@@ -87,7 +87,7 @@ func TestUninstallLefthookIntegrationRollsBackObstructionAndRetries(t *testing.T
 	t.Parallel()
 	env := NewRepoWithCommit(t)
 	writeLefthookConfig(t, env.RepoDir)
-	installSimulatedLefthookHooks(t, env.RepoDir)
+	installSimulatedLefthookHooks(t, env, env.RepoDir)
 	env.RunCLI("enable", "--agent", agentClaudeCode, "--telemetry=false")
 
 	obstruction := filepath.Join(env.RepoDir, ".lefthook-local", "pre-push", "entire.sh")
@@ -118,8 +118,44 @@ func writeLefthookConfig(t *testing.T, root string) {
 	require.NoError(t, os.WriteFile(filepath.Join(root, "lefthook.yml"), []byte(validLefthookConfig), 0o644))
 }
 
-func installSimulatedLefthookHooks(t *testing.T, repoRoot string) {
+// writeLefthookShim writes a stand-in for the lefthook binary into dir. It
+// resolves the hook's owned script the way `lefthook run <hook>` would, via
+// the worktree root rather than $PWD so it works from a linked worktree that
+// shares .git/hooks.
+func writeLefthookShim(t *testing.T, dir string) {
 	t.Helper()
+	shim := `#!/bin/sh
+# simulated lefthook binary
+[ "$1" = "run" ] || exit 0
+hook="$2"
+shift 2
+root="$(git rev-parse --show-toplevel)" || exit 0
+script="$root/.lefthook-local/$hook/entire.sh"
+[ -x "$script" ] || exit 0
+exec "$script" "$@"
+`
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "lefthook"), []byte(shim), 0o755))
+}
+
+// installSimulatedLefthookHooks writes launchers shaped like Lefthook's
+// generated wrapper, dispatching to a shim binary named `lefthook` on PATH
+// instead of calling Entire's script inline.
+//
+// The shim matters. Production tells "Lefthook owns this hook" from the
+// wrapper's dispatch line, and real Lefthook always invokes a binary whose
+// basename is `lefthook`. A fixture that execs .lefthook-local/<hook>/entire.sh
+// directly carries no such line, so it is not a Lefthook launcher in any sense
+// production can detect — recognizing it once required a whitelist of these
+// exact fixture strings in shipping code. Dispatching through the shim needs
+// no special case, works from a linked worktree (PATH, not $PWD), and
+// exercises the same path a real install does without the real binary.
+func installSimulatedLefthookHooks(t *testing.T, env *TestEnv, repoRoot string) {
+	t.Helper()
+
+	shimDir := t.TempDir()
+	writeLefthookShim(t, shimDir)
+	env.ExtraEnv = append(env.ExtraEnv, "PATH="+shimDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
 	hooksDir := filepath.Join(repoRoot, ".git", "hooks")
 	require.NoError(t, os.MkdirAll(hooksDir, 0o755))
 	for _, hook := range strategy.ManagedGitHookNames() {
@@ -136,10 +172,7 @@ fi
 # lefthook generated wrapper
 call_lefthook()
 {
-  shift
-  hook="$1"
-  shift
-  exec "$PWD/.lefthook-local/$hook/entire.sh" "$@"
+  lefthook "$@"
 }
 
 call_lefthook run "%s" "$@"
@@ -160,6 +193,9 @@ printf 'call\n' >> "$ENTIRE_HOOK_LOG.$hook.calls"
 if [ "$hook" = pre-push ]; then exit "${ENTIRE_PRE_PUSH_EXIT:-0}"; fi
 `
 	require.NoError(t, os.WriteFile(filepath.Join(fakeBin, "entire"), []byte(fake), 0o755))
+	// This helper overrides PATH below, so the lefthook shim has to live here
+	// too or the wrapper's dispatch line cannot resolve it.
+	writeLefthookShim(t, fakeBin)
 
 	msg := filepath.Join(worktree, ".git", "COMMIT_EDITMSG")
 	cases := []struct {

@@ -765,6 +765,26 @@ func TestLefthookGeneratedHookProvenance(t *testing.T) {
 	}
 }
 
+// A Lefthook release that adds a package-manager probe must still read as
+// Lefthook's launcher. Byte-matching the generated body pinned every existing
+// probe branch, so the next release read as a foreign hook — and Entire then
+// wrote native wrappers over Lefthook's own hooks, which is #1349 in reverse.
+func TestLooksLikeLefthookHook_ToleratesTemplateDrift(t *testing.T) {
+	t.Parallel()
+	drifted := "#!/bin/sh\n\n" +
+		"if [ \"$LEFTHOOK_VERBOSE\" = \"1\" -o \"$LEFTHOOK_VERBOSE\" = \"true\" ]; then\n  set -x\nfi\n\n" +
+		"if [ \"$LEFTHOOK\" = \"0\" ]; then\n  exit 0\nfi\n\n" +
+		"call_lefthook()\n{\n" +
+		"  if some_new_package_manager run lefthook -h >/dev/null 2>&1\n" +
+		"  then\n    some_new_package_manager run lefthook \"$@\"\n" +
+		"  else\n    lefthook \"$@\"\n  fi\n" +
+		"}\n\n" +
+		"call_lefthook run \"pre-push\" \"$@\"\n"
+	if !looksLikeLefthookHook([]byte(drifted), "pre-push") {
+		t.Error("a Lefthook launcher with an unrecognized probe branch must still be recognized")
+	}
+}
+
 func noOpLefthookWrapper(hook string) string {
 	return "#!/bin/sh\n\n" +
 		"if [ \"$LEFTHOOK_VERBOSE\" = \"1\" -o \"$LEFTHOOK_VERBOSE\" = \"true\" ]; then\n  set -x\nfi\n\n" +

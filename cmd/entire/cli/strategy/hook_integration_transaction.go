@@ -5,7 +5,9 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path"
 	"path/filepath"
+	"regexp"
 	"strings"
 
 	"github.com/entireio/cli/cmd/entire/cli/gitdir"
@@ -282,6 +284,45 @@ func restoreProvenLefthookBridges(ctx context.Context, absolutePath bool) error 
 	return nil
 }
 
+// lefthookBodyDispatches reports whether a launcher body actually invokes the
+// lefthook binary.
+//
+// It replaces a byte-exact whitelist of Lefthook's generated body. That
+// whitelist pinned every package-manager probe branch (mise, devbox, uv,
+// bundle, yarn, pnpm, mint, go tool), so the next Lefthook release read as a
+// foreign hook — and Entire then wrote native wrappers over Lefthook's own
+// hooks, which is #1349 in reverse.
+//
+// Structure alone is not enough to replace it: a no-op wrapper whose body is
+// ":" carries the same preamble and dispatch line, and treating that as
+// working delivery would have status report healthy while no hook runs.
+//
+// A bare substring test is not enough either, in both directions. The word
+// appears in paths (.lefthook-local/<hook>/entire.sh dispatches to ENTIRE,
+// not lefthook) and in messages (Lefthook's own fallback ends
+// `echo "Can't find lefthook in PATH"`). So drop quoted literals containing
+// whitespace — those are messages, never commands — then require a word whose
+// basename is the binary. A quoted token WITHOUT internal whitespace is a
+// quoted command word ("$LEFTHOOK_BIN") and survives that strip.
+func lefthookBodyDispatches(body string) bool {
+	for line := range strings.SplitSeq(body, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+		for _, word := range strings.Fields(lefthookQuotedPhrase.ReplaceAllString(trimmed, " ")) {
+			word = strings.Trim(word, `"'`)
+			if word == "$LEFTHOOK_BIN" || path.Base(word) == "lefthook" {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// lefthookQuotedPhrase matches a quoted string literal containing whitespace.
+var lefthookQuotedPhrase = regexp.MustCompile(`"[^"]*\s[^"]*"|'[^']*\s[^']*'`)
+
 func looksLikeLefthookHook(data []byte, hook string) bool {
 	content := string(data)
 	const prefix = `#!/bin/sh
@@ -307,92 +348,7 @@ call_lefthook()
 		return false
 	}
 	body := strings.TrimSuffix(strings.TrimPrefix(content, matchedPrefix), suffix)
-	return knownLefthookV2Body(body) || knownDirectEntireLefthookBody(body, hook)
-}
-
-func knownLefthookV2Body(body string) bool {
-	if body == "  lefthook \"$@\"\n" {
-		return true
-	}
-	const installedBranchPrefix = `  if test -n "$LEFTHOOK_BIN"
-  then
-    "$LEFTHOOK_BIN" "$@"
-  elif lefthook -h >/dev/null 2>&1
-  then
-    lefthook "$@"
-  elif `
-	const installedProbeSuffix = ` -h >/dev/null 2>&1
-  then
-    `
-	if !strings.HasPrefix(body, installedBranchPrefix) {
-		return false
-	}
-	remainder := strings.TrimPrefix(body, installedBranchPrefix)
-	probeEnd := strings.Index(remainder, installedProbeSuffix)
-	if probeEnd <= 0 {
-		return false
-	}
-	installedPath := remainder[:probeEnd]
-	if !filepath.IsAbs(installedPath) || strings.ContainsAny(installedPath, "\n\r\t") {
-		return false
-	}
-	const generatedTail = ` "$@"
-  else
-    dir="$(git rev-parse --show-toplevel)"
-    osArch=$(uname | tr '[:upper:]' '[:lower:]')
-    cpuArch=$(uname -m | sed 's/aarch64/arm64/;s/x86_64/x64/')
-    if test -f "$dir/node_modules/lefthook-${osArch}-${cpuArch}/bin/lefthook"
-    then
-      "$dir/node_modules/lefthook-${osArch}-${cpuArch}/bin/lefthook" "$@"
-    elif test -f "$dir/node_modules/@evilmartians/lefthook/bin/lefthook-${osArch}-${cpuArch}/lefthook"
-    then
-      "$dir/node_modules/@evilmartians/lefthook/bin/lefthook-${osArch}-${cpuArch}/lefthook" "$@"
-    elif test -f "$dir/node_modules/@evilmartians/lefthook-installer/bin/lefthook"
-    then
-      "$dir/node_modules/@evilmartians/lefthook-installer/bin/lefthook" "$@"
-    elif test -f "$dir/node_modules/lefthook/bin/index.js"
-    then
-      "$dir/node_modules/lefthook/bin/index.js" "$@"
-    elif go tool lefthook -h >/dev/null 2>&1
-    then
-      go tool lefthook "$@"
-    elif bundle exec lefthook -h >/dev/null 2>&1
-    then
-      bundle exec lefthook "$@"
-    elif yarn lefthook -h >/dev/null 2>&1
-    then
-      yarn lefthook "$@"
-    elif pnpm lefthook -h >/dev/null 2>&1
-    then
-      pnpm lefthook "$@"
-    elif swift package lefthook >/dev/null 2>&1
-    then
-      swift package --build-path .build/lefthook --disable-sandbox lefthook "$@"
-    elif command -v mint >/dev/null 2>&1
-    then
-      mint run csjones/lefthook-plugin "$@"
-    elif uv run lefthook -h >/dev/null 2>&1
-    then
-      uv run lefthook "$@"
-    elif mise exec -- lefthook -h >/dev/null 2>&1
-    then
-      mise exec -- lefthook "$@"
-    elif devbox run lefthook -h >/dev/null 2>&1
-    then
-      devbox run lefthook "$@"
-    else
-      echo "Can't find lefthook in PATH"
-    fi
-  fi
-`
-	want := installedPath + installedProbeSuffix + installedPath + generatedTail
-	return remainder == want
-}
-
-func knownDirectEntireLefthookBody(body, hook string) bool {
-	const integrationLauncher = "  shift\n  hook=\"$1\"\n  shift\n  exec \"$PWD/.lefthook-local/$hook/entire.sh\" \"$@\"\n"
-	e2eLauncher := "  shift 2\n  sh \".lefthook-local/" + hook + "/entire.sh\" \"$@\"\n"
-	return body == integrationLauncher || body == e2eLauncher
+	return lefthookBodyDispatches(body)
 }
 
 // RemoveGitHookIntegration removes only artifacts whose exact ownership marker

@@ -42,7 +42,7 @@ func TestHookOverwrite_LefthookRefreshKeepsCurrentCommitCovered(t *testing.T) {
 	require.NotEmpty(t, env.GetCheckpointIDFromCommitMessage(env.GetHeadHash()))
 
 	// Simulate `lefthook install` refreshing every shared hook between commits.
-	installSimulatedLefthookHooks(t, env.RepoDir)
+	installSimulatedLefthookHooks(t, env, env.RepoDir)
 	env.GitAdd("fileB.go")
 	cmd := execx.NonInteractive(context.Background(), "git", "commit", "-m", "Add file B")
 	cmd.Dir = env.RepoDir
