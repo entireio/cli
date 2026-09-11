@@ -50,14 +50,14 @@ fail() { printf 'FAIL  %-28s %s\n' "$1" "${2:-}"; }
 echo "== Phase 2: static checks ($AGENT_NAME)"
 if command -v "$AGENT_BIN" >/dev/null; then pass "binary present" "$(command -v "$AGENT_BIN")"; else fail "binary present" "install opencode"; exit 1; fi
 VERSION="$("$AGENT_BIN" --version 2>/dev/null | head -1 || true)"
-[ -n "$VERSION" ] && pass "version" "$VERSION" || warn "version" "no --version output"
-"$AGENT_BIN" run --help 2>&1 | grep -q -- '--agent' && pass "run --agent flag" || warn "run --agent flag" "absent"
-"$AGENT_BIN" export --help 2>&1 | grep -q 'export session data' && pass "export subcommand" || fail "export subcommand" "absent"
-"$AGENT_BIN" models 2>/dev/null | grep -qx "$MODEL" && pass "model available" "$MODEL" || warn "model available" "$MODEL not listed"
-[ -f "$HOME/.local/share/opencode/opencode.db" ] && pass "sqlite store" "$HOME/.local/share/opencode/opencode.db" || warn "sqlite store" "not found (older storage layout?)"
+if [ -n "$VERSION" ]; then pass "version" "$VERSION"; else warn "version" "no --version output"; fi
+if "$AGENT_BIN" run --help 2>&1 | grep -q -- '--agent'; then pass "run --agent flag"; else warn "run --agent flag" "absent"; fi
+if "$AGENT_BIN" export --help 2>&1 | grep -q 'export session data'; then pass "export subcommand"; else fail "export subcommand" "absent"; fi
+if "$AGENT_BIN" models 2>/dev/null | grep -qx "$MODEL"; then pass "model available" "$MODEL"; else warn "model available" "$MODEL not listed"; fi
+if [ -f "$HOME/.local/share/opencode/opencode.db" ]; then pass "sqlite store" "$HOME/.local/share/opencode/opencode.db"; else warn "sqlite store" "not found (older storage layout?)"; fi
 if [ "$WITH_ENTIRE" = 1 ]; then
   if [ -n "${ENTIRE_BIN:-}" ]; then ENTIRE_BIN_DIR="$(dirname "$ENTIRE_BIN")"; export PATH="$ENTIRE_BIN_DIR:$PATH"; fi
-  command -v entire >/dev/null && pass "entire binary" "$(command -v entire) ($(entire version 2>/dev/null | head -1))" || { fail "entire binary" "not on PATH; set ENTIRE_BIN"; exit 1; }
+  if command -v entire >/dev/null; then pass "entire binary" "$(command -v entire) ($(entire version 2>/dev/null | head -1))"; else fail "entire binary" "not on PATH; set ENTIRE_BIN"; exit 1; fi
 fi
 
 echo
@@ -125,7 +125,7 @@ if [ "$WITH_ENTIRE" = 1 ]; then
   # Isolate Entire's per-user state from the developer's real config.
   export ENTIRE_CONFIG_DIR="$WORK/entire-config" XDG_CACHE_HOME="$WORK/entire-cache" ENTIRE_TOKEN_STORE=file ENTIRE_TOKEN_STORE_PATH="$WORK/entire-config/tokens.json"
   mkdir -p "$ENTIRE_CONFIG_DIR" "$XDG_CACHE_HOME"
-  ( cd "$REPO" && entire enable --agent opencode --local >"$WORK/enable.log" 2>&1 ) && pass "entire enable" "--agent opencode --local" || { fail "entire enable" "see $WORK/enable.log"; cat "$WORK/enable.log"; exit 1; }
+  if ( cd "$REPO" && entire enable --agent opencode --local >"$WORK/enable.log" 2>&1 ); then pass "entire enable" "--agent opencode --local"; else fail "entire enable" "see $WORK/enable.log"; cat "$WORK/enable.log"; exit 1; fi
   git -C "$REPO" add -A && git -C "$REPO" commit -q -m "enable entire" || true
 fi
 
@@ -201,9 +201,9 @@ if [ -s "$CAPTURES/events.jsonl" ]; then
   CHILD=$(jq -c 'select(.kind=="event" and .payload.type=="session.created" and .payload.properties.info.parentID != null)' "$CAPTURES/events.jsonl" | wc -l | tr -d ' ')
   TASK_AFTER=$(jq -c 'select(.kind=="tool.execute.after" and .payload.input.tool=="task")' "$CAPTURES/events.jsonl" | wc -l | tr -d ' ')
   TASK_BEFORE=$(jq -c 'select(.kind=="tool.execute.before" and .payload.input.tool=="task")' "$CAPTURES/events.jsonl" | wc -l | tr -d ' ')
-  [ "$CHILD" -gt 0 ] && pass "SubagentStart signal" "$CHILD child session.created carrying parentID" || fail "SubagentStart signal" "no child session.created seen"
-  [ "$TASK_BEFORE" -gt 0 ] && pass "task launch hook" "$TASK_BEFORE tool.execute.before(task)" || warn "task launch hook" "none"
-  [ "$TASK_AFTER" -gt 0 ] && pass "SubagentEnd signal" "$TASK_AFTER tool.execute.after(task) with child sessionId in metadata" || fail "SubagentEnd signal" "no tool.execute.after(task)"
+  if [ "$CHILD" -gt 0 ]; then pass "SubagentStart signal" "$CHILD child session.created carrying parentID"; else fail "SubagentStart signal" "no child session.created seen"; fi
+  if [ "$TASK_BEFORE" -gt 0 ]; then pass "task launch hook" "$TASK_BEFORE tool.execute.before(task)"; else warn "task launch hook" "none"; fi
+  if [ "$TASK_AFTER" -gt 0 ]; then pass "SubagentEnd signal" "$TASK_AFTER tool.execute.after(task) with child sessionId in metadata"; else fail "SubagentEnd signal" "no tool.execute.after(task)"; fi
   if [ "$CHILD" -gt 0 ] && [ "$TASK_AFTER" -gt 0 ]; then echo "COMPATIBLE"; else echo "PARTIAL"; fi
 else
   echo "INCOMPATIBLE (no signals captured)"
