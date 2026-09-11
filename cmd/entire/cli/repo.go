@@ -308,7 +308,7 @@ func newRepoGetCmd() *cobra.Command {
 	var project string
 	cmd := &cobra.Command{
 		Use:   "get <repo>",
-		Short: "Show a repository by name or ULID",
+		Short: "Show a repository by /et/<project>/<repo> path, name, or ULID",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runCoreObject(cmd, repoDetailColumns, repoDetailRow, func(ctx context.Context, c *coreapi.Client) (*coreapi.Repo, error) {
@@ -329,7 +329,7 @@ func newRepoDeleteCmd() *cobra.Command {
 	var project string
 	cmd := &cobra.Command{
 		Use:   "delete <repo>",
-		Short: "Delete a repository by name or ULID",
+		Short: "Delete a repository by /et/<project>/<repo> path, name, or ULID",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runControlPlaneDelete(cmd, "repo", args[0],
@@ -450,7 +450,8 @@ func newRepoVisibilitySetCmd() *cobra.Command {
 
 // bindRepoProjectFlag wires the shared --project scope used to resolve a repo
 // addressed by name (a repo name is unique only within its project). Ignored
-// when the repo arg is already a ULID.
+// when the repo arg is already a ULID; checked for agreement when it is a
+// /et/<project>/<repo> path, which names its own project.
 func bindRepoProjectFlag(cmd *cobra.Command, project *string) {
-	cmd.Flags().StringVar(project, "project", "", "Owning project (name or ULID); required when <repo> is a name")
+	cmd.Flags().StringVar(project, "project", "", "Owning project (name or ULID); required when <repo> is a bare name")
 }
