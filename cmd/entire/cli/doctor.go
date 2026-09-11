@@ -669,6 +669,12 @@ func checkGitHooks(cmd *cobra.Command, force bool) error {
 		if _, err := strategy.EnsureLefthookIntegration(ctx, false); err != nil {
 			return fmt.Errorf("register Entire with Lefthook: %w", err)
 		}
+		// Registering is not enough when Lefthook has no hook file for a hook
+		// — git runs nothing there. The native install fills exactly those
+		// gaps: it skips every path Lefthook already owns.
+		if _, err := strategy.ReinstallGitHooks(ctx); err != nil {
+			return fmt.Errorf("install git hooks alongside Lefthook: %w", err)
+		}
 		fmt.Fprintln(w, "  ✓ Re-registered")
 		return nil
 	}
