@@ -1835,6 +1835,34 @@ func IsSetUpAtRoot(root string) bool {
 	return err == nil
 }
 
+// IsEnabledAtRoot reports whether Entire is set up AND enabled in the repository
+// whose worktree root is the given directory. It is the at-root sibling of
+// IsSetUpAndEnabled, for a hook process deciding what it may do to a FOREIGN
+// repo (see binding adoption).
+//
+// Use this, not IsSetUpAtRoot, for any decision that writes to that repo.
+// IsSetUpAtRoot only Lstats for a settings file, so a repo the user explicitly
+// disabled still answers true: `entire disable` sets enabled:false and leaves
+// the file in place. A gate built on presence therefore cannot be the "absolute
+// veto" an explicit disable is supposed to be.
+//
+// Any read error is disabled (fail closed), matching IsSetUpAndEnabled: a
+// repository whose settings we cannot parse is not one we may write into.
+//
+// NOTE: once the repository-policy classifier is available on this branch, this
+// should give way to it — the classifier answers the same question and also
+// honors the user-global tier and its exclude lists, which this cannot see.
+func IsEnabledAtRoot(ctx context.Context, root string) bool {
+	if !IsSetUpAtRoot(root) {
+		return false
+	}
+	s, err := loadForWorktreeRoot(ctx, root)
+	if err != nil {
+		return false
+	}
+	return s.Enabled
+}
+
 // IsSetUpAndEnabled returns true if Entire is both set up and enabled.
 // "Set up" spans either scope — .entire/settings.json OR
 // .entire/settings.local.json — so it must check IsSetUpAny, not IsSetUp.

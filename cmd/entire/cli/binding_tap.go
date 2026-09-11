@@ -170,7 +170,7 @@ func resolveForeignRepos(ctx context.Context, sessionID, currentWorktreeRoot str
 	evs := make([]binding.Evidence, 0, len(order))
 	for _, commonDir := range order {
 		id := found[commonDir]
-		evs = append(evs, binding.Evidence{Repo: id, Enabled: settings.IsSetUpAtRoot(id.WorktreeRoot)})
+		evs = append(evs, binding.Evidence{Repo: id, Enabled: settings.IsEnabledAtRoot(ctx, id.WorktreeRoot)})
 	}
 	return evs
 }

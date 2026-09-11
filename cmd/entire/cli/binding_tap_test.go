@@ -627,3 +627,71 @@ func TestFilterAndNormalizePathsCollectingForeign(t *testing.T) {
 		}
 	}
 }
+
+// disableEntireAt writes the settings file `entire disable` leaves behind: the
+// file is still present, it just says enabled:false. That presence is why a
+// check built on Lstat cannot tell it apart from an enabled repo.
+func disableEntireAt(t *testing.T, root string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Join(root, ".entire"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, ".entire", "settings.json"), []byte(`{"enabled":false}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestRecordForeignEvidence_DisabledRepoIsNotAdopted pins the veto that
+// ensureSessionReplicated's comment has always claimed and never had.
+//
+// The check was IsSetUpAtRoot, which only Lstats for a settings file, so a repo
+// the user had run `entire disable` in still answered true: Entire replicated
+// the session into it, writing state under that repo's .git. Recording the
+// evidence is fine — the record is machine-level and outside every repo — but
+// the write into the disabled repo is not.
+func TestRecordForeignEvidence_DisabledRepoIsNotAdopted(t *testing.T) {
+	t.Setenv("ENTIRE_CONFIG_DIR", t.TempDir())
+	ctx := context.Background()
+	rootA := newBindingRepo(t)
+	rootB := newBindingRepo(t)
+	for _, root := range []string{rootA, rootB} {
+		testutil.WriteFile(t, root, "tracked.txt", "base\n")
+		testutil.GitAdd(t, root, "tracked.txt")
+		testutil.GitCommit(t, root, "initial")
+	}
+	disableEntireAt(t, rootB)
+	testutil.WriteFile(t, rootB, "agent.go", "package agent\n")
+	t.Chdir(rootA)
+
+	source := &session.State{
+		SessionID:    "sess-1",
+		BaseCommit:   testutil.GetHeadHash(t, rootA),
+		WorktreePath: rootA,
+		StartedAt:    time.Now().Add(-time.Hour),
+		Phase:        session.PhaseActive,
+		AgentType:    types.AgentType("Claude Code"),
+	}
+	sourceStore := session.NewStateStoreWithDir(filepath.Join(rootA, ".git", session.SessionStateDirName))
+	if err := sourceStore.Save(ctx, source); err != nil {
+		t.Fatal(err)
+	}
+
+	recordForeignEvidence(ctx, "sess-1", bindingTestMeta(rootA), rootA,
+		[]string{filepath.Join(rootB, "agent.go")})
+
+	rec, err := binding.LoadRecord(ctx, "sess-1")
+	if err != nil || rec == nil || len(rec.BoundRepos) != 1 {
+		t.Fatalf("expected one bound repo: rec=%+v err=%v", rec, err)
+	}
+	if br := rec.BoundRepos[0]; br.Enabled || br.AdoptedAt != nil {
+		t.Errorf("a disabled repo must be recorded disabled and never adopted: %+v", br)
+	}
+	targetStore := session.NewStateStoreWithDir(filepath.Join(rootB, ".git", session.SessionStateDirName))
+	target, loadErr := targetStore.Load(ctx, "sess-1")
+	if loadErr != nil {
+		t.Fatalf("load target state: %v", loadErr)
+	}
+	if target != nil {
+		t.Error("a disabled repo must not receive replicated session state")
+	}
+}
