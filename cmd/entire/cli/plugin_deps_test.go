@@ -357,7 +357,7 @@ func TestRunPluginDoctor_ChecksBinEntry(t *testing.T) { //nolint:paralleltest //
 		t.Fatal(err)
 	}
 	problems, _ = doctor()
-	if !strings.Contains(problems, "managed bin entry no longer matches the installed binary") {
+	if !strings.Contains(problems, "managed bin entry is not the installed release binary") {
 		t.Errorf("doctor missed the drifted bin entry: %s", problems)
 	}
 	if strings.Contains(problems, "digest recorded at install") {

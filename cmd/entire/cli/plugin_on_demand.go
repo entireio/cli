@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 
 	"github.com/entireio/cli/cmd/entire/cli/interactive"
 	"github.com/spf13/cobra"
@@ -38,12 +39,8 @@ func installMissingPlugin(ctx context.Context, rootCmd *cobra.Command, name stri
 		// Reinstalling automatically would be the other option, and it is
 		// deliberately not taken: replacing a developer's deliberate symlink
 		// with a released binary is their call to make, not ours.
-		if reinstallFixes, cerr := checkManagedPluginRunnable(installed.Path); cerr != nil {
-			broken := fmt.Errorf("the entire-%s plugin is installed at %s but cannot be run: %w", name, installed.Path, cerr)
-			if !reinstallFixes {
-				return "", broken
-			}
-			return "", fmt.Errorf("%w; reinstall it with 'entire plugin install %s --force'", broken, name)
+		if err := managedEntryUnrunnable(name, installed.Path); err != nil {
+			return "", err
 		}
 		return installed.Path, nil
 	}
@@ -126,6 +123,27 @@ func installMissingPlugin(ctx context.Context, rootCmd *cobra.Command, name stri
 	// Execute the managed entry directly, even if the managed directory could
 	// not be prepended to PATH at startup.
 	return installed.Path, nil
+}
+
+// managedEntryUnrunnable wraps checkManagedPluginRunnable's verdict for a
+// managed bin/ entry into the user-facing error, attaching the reinstall
+// remedy only when a reinstall repairs the condition. Nil when it runs.
+func managedEntryUnrunnable(name, path string) error {
+	reinstallFixes, err := checkManagedPluginRunnable(path)
+	if err == nil {
+		return nil
+	}
+	broken := fmt.Errorf("the entire-%s plugin is installed at %s but cannot be run: %w", name, path, err)
+	if !reinstallFixes {
+		return broken
+	}
+	return fmt.Errorf("%w; reinstall it with 'entire plugin install %s --force'", broken, name)
+}
+
+// isManagedBinEntry reports whether path sits directly in the managed bin dir.
+func isManagedBinEntry(path string) bool {
+	binDir, err := PluginBinDir()
+	return err == nil && pathEntriesEqual(filepath.Dir(path), binDir)
 }
 
 // checkManagedPluginRunnable reports why a managed plugin entry cannot be

@@ -326,6 +326,42 @@ func TestMaybeRunPlugin_BrokenManagedEntryReportsARemedy(t *testing.T) { //nolin
 	}
 }
 
+// A 0-byte managed entry is found by exec.LookPath, so it reaches dispatch
+// rather than the on-demand path; exec would then fail with an opaque "exec
+// format error". Dispatch must diagnose it with the same remedy.
+func TestMaybeRunPlugin_EmptyManagedEntryOnPathReportsARemedy(t *testing.T) { //nolint:paralleltest // isolates PATH and managed plugins
+	withIsolatedPluginEnv(t)
+	interceptVersionCheck(t)
+	binDir, err := EnsurePluginBinDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	entry := filepath.Join(binDir, pluginBinaryName("graph"))
+	if err := os.WriteFile(entry, nil, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	if _, err := exec.LookPath(pluginBinaryPrefix + "graph"); err != nil {
+		t.Fatalf("precondition: LookPath must resolve the empty entry: %v", err)
+	}
+
+	root := newTestRoot()
+	var stderr bytes.Buffer
+	root.SetErr(&stderr)
+	handled, code, _ := MaybeRunPlugin(t.Context(), root, []string{"graph", "search"})
+	if !handled || code != 1 {
+		t.Fatalf("handled=%v code=%d, want true, 1; stderr=%s", handled, code, &stderr)
+	}
+	for _, want := range []string{entry, "cannot be run", "it is an empty file", "entire plugin install graph --force"} {
+		if !strings.Contains(stderr.String(), want) {
+			t.Errorf("missing %q in the diagnosis: %q", want, stderr.String())
+		}
+	}
+	if strings.Contains(stderr.String(), "exec format error") || strings.Contains(stderr.String(), "Failed to run plugin") {
+		t.Errorf("fell through to exec: %q", stderr.String())
+	}
+}
+
 // The remedy is offered only for conditions a reinstall repairs, so it cannot
 // be hung off an error it would not resolve. Both identified conditions are
 // repairable; the unidentified branch (a stat failure that is not ENOENT) is
@@ -406,6 +442,12 @@ func TestCheckManagedPluginRunnable_WindowsUnfollowableSymlink(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = root.Close() })
 	if err := root.Symlink(target, "entire-unfollowable"); err != nil {
+		// CI's Windows runners hold SeCreateSymbolicLinkPrivilege, so there a
+		// failure to create the link is a broken test, not a reason to skip;
+		// a developer's non-elevated shell legitimately cannot.
+		if os.Getenv("CI") != "" {
+			t.Fatalf("CI runner could not create the symlink this test exists for: %v", err)
+		}
 		t.Skipf("symlink creation needs SeCreateSymbolicLinkPrivilege or Developer Mode: %v", err)
 	}
 	runnableCase{path: filepath.Join(dir, "entire-unfollowable"), wantErr: "cannot be followed", wantReinstallFix: true}.check(t)

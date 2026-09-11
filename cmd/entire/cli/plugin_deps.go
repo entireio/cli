@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"fmt"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
@@ -309,9 +310,13 @@ func RunPluginDoctor(ctx context.Context) ([]PluginDoctorIssue, error) {
 	for _, p := range installed {
 		installedByName[p.Name] = p
 		if _, err := checkManagedPluginRunnable(p.Path); err != nil {
+			problem := "managed entry cannot be run: " + err.Error()
+			if p.Symlink {
+				problem += " (link to " + p.LinkTarget + ")"
+			}
 			issues = append(issues, PluginDoctorIssue{
 				Plugin:  p.Name,
-				Problem: "managed entry cannot be run: " + err.Error(),
+				Problem: problem,
 				Fix:     entryRepairFix(p.Name),
 			})
 		} else if p.Symlink {
@@ -442,14 +447,29 @@ func checkManagedBinaryIntegrity(m *PluginManifest) []PluginDoctorIssue {
 		})
 		return issues
 	}
-	if entry, err := FindInstalledPlugin(m.Name); err == nil && entry != nil && !entry.Symlink {
-		if entryDigest, err := fileSHA256(entry.Path); err == nil && !strings.EqualFold(entryDigest, m.BinarySHA256) {
-			issues = append(issues, PluginDoctorIssue{
-				Plugin:  m.Name,
-				Problem: "managed bin entry no longer matches the installed binary; it was modified or replaced outside entire",
-				Fix:     "reinstall from the recorded source: " + reinstallCommand(m),
-			})
-		}
+	// The bin/ entry normally IS the pkg/ binary (a hardlink or a symlink to
+	// it), which os.SameFile settles without reading it. Anything else is
+	// hashed: a byte-identical copy (the cross-volume fallback) is fine, and a
+	// different file is reported without presuming tampering, since a local
+	// `entire plugin install <path> --force` over a release produces exactly
+	// this shape and is the developer's choice.
+	entry, err := FindInstalledPlugin(m.Name)
+	if err != nil || entry == nil {
+		return issues
+	}
+	entryInfo, err := os.Stat(entry.Path)
+	if err != nil {
+		return issues // unrunnable entries are reported by the entry check
+	}
+	if pkgInfo, err := os.Stat(binPath); err == nil && os.SameFile(entryInfo, pkgInfo) {
+		return issues
+	}
+	if entryDigest, err := fileSHA256(entry.Path); err == nil && !strings.EqualFold(entryDigest, m.BinarySHA256) {
+		issues = append(issues, PluginDoctorIssue{
+			Plugin:  m.Name,
+			Problem: "managed bin entry is not the installed release binary; a local 'entire plugin install <path> --force' replaced it, or it was modified outside entire",
+			Fix:     "keep it if the local build is intended; to return to the release: " + reinstallCommand(m),
+		})
 	}
 	return issues
 }
