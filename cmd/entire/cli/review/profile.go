@@ -16,7 +16,14 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/tuiutil"
 )
 
-const DefaultProfileName = "general"
+// Built-in profile names. DefaultProfileName is the profile used when none is
+// named; the other two are the presets the picker offers and profileTask knows
+// a built-in task for.
+const (
+	DefaultProfileName       = "general"
+	SecurityProfileName      = "security"
+	AccessibilityProfileName = "accessibility"
+)
 
 // Review output destinations. ReviewOutputLocal prints the verdict and writes
 // the local review manifest; ReviewOutputTrail additionally posts the verdict
@@ -63,9 +70,9 @@ func profileTask(name string, cfg settings.ReviewProfileConfig) string {
 	switch strings.ToLower(name) {
 	case "", DefaultProfileName:
 		return defaultGeneralTask
-	case "security":
+	case SecurityProfileName:
 		return defaultSecurityTask
-	case "accessibility", "a11y":
+	case AccessibilityProfileName, "a11y":
 		return defaultAccessibilityTask
 	default:
 		return defaultGeneralTask
@@ -398,7 +405,7 @@ func defaultReviewAgentConfig(profileName, agentName string) settings.ReviewConf
 	focus := defaultProfileFocus(profileName)
 	switch agentName {
 	case string(agent.AgentNameClaudeCode):
-		if strings.EqualFold(profileName, "security") {
+		if strings.EqualFold(profileName, SecurityProfileName) {
 			return settings.ReviewConfig{Skills: []string{"/security-review"}}
 		}
 		return settings.ReviewConfig{Skills: []string{"/review"}, Prompt: focus}
@@ -415,9 +422,9 @@ func defaultReviewAgentConfig(profileName, agentName string) settings.ReviewConf
 
 func defaultProfileFocus(profileName string) string {
 	switch strings.ToLower(strings.TrimSpace(profileName)) {
-	case "security":
+	case SecurityProfileName:
 		return "Focus specifically on security issues."
-	case "accessibility", "a11y":
+	case AccessibilityProfileName, "a11y":
 		return "Focus specifically on accessibility issues."
 	default:
 		return ""

@@ -134,10 +134,22 @@ func GetRemoteURL(ctx context.Context, remoteName string) (string, error) {
 
 // GetRemoteURLInDir returns the URL configured for the named git remote in dir.
 func GetRemoteURLInDir(ctx context.Context, dir, remoteName string) (string, error) {
+	return GetRemoteURLInDirEnv(ctx, dir, nil, remoteName)
+}
+
+// GetRemoteURLInDirEnv is GetRemoteURLInDir with an explicit child environment,
+// the fetch-side counterpart of GetPushURLsInDir's env parameter — see there
+// for when to pass one, including why an empty dir takes nil. Both halves of
+// an ownership vote must make the same choice, or they reach git differently
+// and can describe different repositories.
+func GetRemoteURLInDirEnv(ctx context.Context, dir string, env []string, remoteName string) (string, error) {
 	cmd := exec.CommandContext(ctx, "git", "remote", "get-url", remoteName)
 	if dir != "" {
 		cmd.Dir = dir
 		cmd.Env = execx.EnvWithoutRepoOverrides()
+	}
+	if env != nil {
+		cmd.Env = env
 	}
 	output, err := cmd.Output()
 	if err != nil {
@@ -157,7 +169,29 @@ func GetRemoteURLInDir(ctx context.Context, dir, remoteName string) (string, err
 //
 // Returns at least one entry on success.
 func GetPushURLs(ctx context.Context, remoteName string) ([]string, error) {
+	return GetPushURLsInDir(ctx, "", nil, remoteName)
+}
+
+// GetPushURLsInDir is GetPushURLs against a specific worktree, the push-side
+// counterpart of GetRemoteURLInDir.
+//
+// env, when non-nil, replaces the child's environment. Pass
+// gitrepo.EnvWithoutRepoOverrides() when dir names the target and the caller
+// can run inside a git hook: git exports GIT_DIR and GIT_WORK_TREE to its
+// hooks and they outrank cmd.Dir. Pass nil when dir is empty — there the
+// ambient environment is what names the repository, and filtering it would
+// silently retarget the child at the process working directory.
+//
+// Filtered by the caller, because this package depends on nothing beyond the
+// standard library while gitrepo pulls in go-git.
+func GetPushURLsInDir(ctx context.Context, dir string, env []string, remoteName string) ([]string, error) {
 	cmd := exec.CommandContext(ctx, "git", "remote", "get-url", "--push", "--all", remoteName)
+	if dir != "" {
+		cmd.Dir = dir
+	}
+	if env != nil {
+		cmd.Env = env
+	}
 	output, err := cmd.Output()
 	if err != nil {
 		return nil, fmt.Errorf("remote %q not found", remoteName)

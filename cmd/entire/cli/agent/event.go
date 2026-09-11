@@ -108,19 +108,39 @@ type Event struct {
 	// ToolUseID identifies the tool invocation (for SubagentStart/SubagentEnd events).
 	ToolUseID string
 
+	// TurnID identifies the agent turn that produced the event.
+	TurnID string
+
 	// SubagentID identifies the subagent instance (for SubagentEnd events).
 	SubagentID string
 
+	// ProvisionalSubagentStop is true when a subagent-stop event may arrive
+	// before the root rollout has reached its final state.
+	ProvisionalSubagentStop bool
+
 	// Final is true only for events that represent true completion of a
-	// subagent (Claude Code's SubagentStop), never for the launch-time
+	// subagent (for example Claude Code or Copilot CLI's SubagentStop), never
+	// for the launch-time
 	// PostToolUse SubagentEnd, which fires at the background launch stub
 	// seconds after launch. Downstream lifecycle branching keys off this flag,
 	// not any payload sentinel. Final is the disambiguator for agents with a
 	// two-signal model (a launch-time stub plus a separate completion hook,
 	// like Claude Code's background tasks); agents whose single subagent-end
-	// event already fires at true completion must leave it false so the
-	// existing pipeline handles them unchanged.
+	// event already fires at true completion normally leaves it false so the
+	// existing pipeline handles it unchanged. CompletionWithoutLaunch marks the
+	// narrow final-event shape whose identity becomes available only at stop.
 	Final bool
+
+	// CompletionWithoutLaunch marks a true completion whose stable identity was
+	// learned at completion time rather than from a correlated start hook.
+	// Shared lifecycle may create the task record only when the parent session
+	// is still active; it must never create parent state for this path.
+	CompletionWithoutLaunch bool
+
+	// SubagentTranscriptUnavailable records an agent contract with no standalone
+	// child transcript. It prevents later generic layout probing from mistaking
+	// an unrelated agent-<id>.jsonl file for this child's transcript.
+	SubagentTranscriptUnavailable bool
 
 	// SubagentTranscriptPath is the agent-declared path to the subagent's own
 	// transcript (SubagentEnd). Set it whenever the hook payload names the file;
@@ -248,5 +268,5 @@ func ReadHookInputRawLimited(stdin io.Reader, limit int64) (json.RawMessage, err
 // instead of blocking on a read that will never complete (issue #1398).
 func StdinLooksInteractive(r io.Reader) bool {
 	f, ok := r.(*os.File)
-	return ok && term.IsTerminal(int(f.Fd())) //nolint:gosec // G115: uintptr->int is safe for fd
+	return ok && term.IsTerminal(int(f.Fd()))
 }

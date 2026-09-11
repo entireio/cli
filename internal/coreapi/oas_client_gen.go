@@ -27,12 +27,6 @@ type Invoker interface {
 	//
 	// POST /orgs/{orgId}/members
 	AddOrgMember(ctx context.Context, request *AddOrgMemberInputBody, params AddOrgMemberParams) (*Membership, error)
-	// BatchLookup invokes batchLookup operation.
-	//
-	// Batch-resolve (type, id) refs to enriched records.
-	//
-	// POST /lookup
-	BatchLookup(ctx context.Context, request *BatchLookupInputBody) (*BatchLookupOutputBody, error)
 	// CancelDeletion invokes cancelDeletion operation.
 	//
 	// Cancel a pending deletion request for the calling account.
@@ -45,6 +39,12 @@ type Invoker interface {
 	//
 	// POST /me/onboarding/complete
 	CompleteOnboarding(ctx context.Context) (*CompleteOnboardingOutputBody, error)
+	// ConnectOrgCIBuildkiteCredential invokes connectOrgCIBuildkiteCredential operation.
+	//
+	// Connect or rotate an org's Buildkite API credential.
+	//
+	// POST /orgs/{orgId}/ci/buildkite/credential
+	ConnectOrgCIBuildkiteCredential(ctx context.Context, request *ConnectOrgCIBuildkiteCredentialInputBody, params ConnectOrgCIBuildkiteCredentialParams) (*OrgCIBuildkiteCredentialView, error)
 	// CreateBinding invokes createBinding operation.
 	//
 	// Create OIDC binding.
@@ -64,6 +64,12 @@ type Invoker interface {
 	//
 	// POST /mirror-requests
 	CreateMirrorRequest(ctx context.Context, request *CreateMirrorRequestInputBody) (*MirrorRequestHeaders, error)
+	// CreateNativeMirror invokes createNativeMirror operation.
+	//
+	// Create a native-mirror placement.
+	//
+	// POST /repos/{repoId}/native-mirrors
+	CreateNativeMirror(ctx context.Context, request *CreateNativeMirrorInputBody, params CreateNativeMirrorParams) (*NativeMirrorPlacement, error)
 	// CreateOrg invokes createOrg operation.
 	//
 	// Create organization.
@@ -87,7 +93,7 @@ type Invoker interface {
 	// Enroll a repo into a CI webhook (Buildkite).
 	//
 	// POST /repos/{repoId}/ci-webhooks
-	CreateRepoCIWebhook(ctx context.Context, request *CreateRepoCIWebhookInputBody, params CreateRepoCIWebhookParams) (*CIWebhookView, error)
+	CreateRepoCIWebhook(ctx context.Context, request *CreateRepoCIWebhookInputBody, params CreateRepoCIWebhookParams) (*CreateRepoCIWebhookBody, error)
 	// CreateServiceAccount invokes createServiceAccount operation.
 	//
 	// Create service account.
@@ -112,12 +118,30 @@ type Invoker interface {
 	//
 	// DELETE /mirrors
 	DeleteMirror(ctx context.Context, params DeleteMirrorParams) error
+	// DeleteNativeMirror invokes deleteNativeMirror operation.
+	//
+	// Delete a native-mirror placement.
+	//
+	// DELETE /repos/{repoId}/native-mirrors/{clusterSlug}
+	DeleteNativeMirror(ctx context.Context, params DeleteNativeMirrorParams) (*NativeMirrorPlacement, error)
 	// DeleteOrg invokes deleteOrg operation.
 	//
 	// Delete an organization.
 	//
 	// DELETE /orgs/{orgId}
 	DeleteOrg(ctx context.Context, params DeleteOrgParams) error
+	// DeleteOrgCIBuildkiteCluster invokes deleteOrgCIBuildkiteCluster operation.
+	//
+	// Remove a registered Buildkite cluster from an org.
+	//
+	// DELETE /orgs/{orgId}/ci/buildkite/clusters/{bkOrg}/{bkClusterId}
+	DeleteOrgCIBuildkiteCluster(ctx context.Context, params DeleteOrgCIBuildkiteClusterParams) error
+	// DeleteOrgCIBuildkiteCredential invokes deleteOrgCIBuildkiteCredential operation.
+	//
+	// Delete an org's connected Buildkite credential.
+	//
+	// DELETE /orgs/{orgId}/ci/buildkite/credential/{bkOrg}
+	DeleteOrgCIBuildkiteCredential(ctx context.Context, params DeleteOrgCIBuildkiteCredentialParams) error
 	// DeleteProject invokes deleteProject operation.
 	//
 	// Delete a project.
@@ -132,7 +156,15 @@ type Invoker interface {
 	DeleteRepo(ctx context.Context, params DeleteRepoParams) error
 	// DeleteRepoCIWebhook invokes deleteRepoCIWebhook operation.
 	//
-	// Delete a repo's CI webhook.
+	// Deletes the subscription AND tears down its enrollment identity: the automation row (when no
+	// sibling repo shares it), its expiring repo grant, and its Buildkite OIDC binding. The Buildkite
+	// pipeline itself is always kept. Pass keep_identity=true to delete only the subscription — for an
+	// immediate re-enroll that must preserve automation_id, since teardown retires it and a re-enroll
+	// declares a new one that only bk_force_rescaffold pushes into the pipeline. A retained identity
+	// holds read access on this repo until its grant lapses. A subscription enrolled before the
+	// automation principal has no automation to retire: the delete succeeds and removes only the
+	// subscription, reported as identity_retired=false on the ci_webhook_deleted audit event — the
+	// list an operator queries to hand-delete the leftover service accounts.
 	//
 	// DELETE /repos/{repoId}/ci-webhooks/{id}
 	DeleteRepoCIWebhook(ctx context.Context, params DeleteRepoCIWebhookParams) error
@@ -142,6 +174,12 @@ type Invoker interface {
 	//
 	// DELETE /service-accounts/{accountId}
 	DeleteServiceAccount(ctx context.Context, params DeleteServiceAccountParams) error
+	// GetBranchProtection invokes getBranchProtection operation.
+	//
+	// Get repository branch protection.
+	//
+	// GET /repos/{repoId}/branch-protection
+	GetBranchProtection(ctx context.Context, params GetBranchProtectionParams) (*BranchProtection, error)
 	// GetDeletionPreview invokes getDeletionPreview operation.
 	//
 	// Preview what deleting the calling account will erase, unlink, and block on.
@@ -274,12 +312,30 @@ type Invoker interface {
 	//
 	// GET /mirrors
 	ListMirrors(ctx context.Context, params ListMirrorsParams) (*ListMirrorsOutputBody, error)
+	// ListNativeMirrors invokes listNativeMirrors operation.
+	//
+	// List native-mirror placement status.
+	//
+	// GET /repos/{repoId}/native-mirrors
+	ListNativeMirrors(ctx context.Context, params ListNativeMirrorsParams) (*ListNativeMirrorsOutputBody, error)
 	// ListOIDCProviders invokes listOIDCProviders operation.
 	//
 	// List federated OIDC identity providers.
 	//
 	// GET /oidc-providers
 	ListOIDCProviders(ctx context.Context, params ListOIDCProvidersParams) (*ListOIDCProvidersOutputBody, error)
+	// ListOrgCIBuildkiteClusters invokes listOrgCIBuildkiteClusters operation.
+	//
+	// List an org's registered Buildkite clusters.
+	//
+	// GET /orgs/{orgId}/ci/buildkite/clusters
+	ListOrgCIBuildkiteClusters(ctx context.Context, params ListOrgCIBuildkiteClustersParams) (*ListOrgCIBuildkiteClustersOutputBody, error)
+	// ListOrgCIBuildkiteCredentials invokes listOrgCIBuildkiteCredentials operation.
+	//
+	// List an org's connected Buildkite credentials.
+	//
+	// GET /orgs/{orgId}/ci/buildkite/credentials
+	ListOrgCIBuildkiteCredentials(ctx context.Context, params ListOrgCIBuildkiteCredentialsParams) (*ListOrgCIBuildkiteCredentialsOutputBody, error)
 	// ListOrgMembers invokes listOrgMembers operation.
 	//
 	// List members of an organization.
@@ -316,18 +372,62 @@ type Invoker interface {
 	//
 	// GET /projects
 	ListProjects(ctx context.Context, params ListProjectsParams) (*ListProjectsOutputBody, error)
+	// ListRepoCIBuilds invokes listRepoCIBuilds operation.
+	//
+	// List a repo's CI build statuses.
+	//
+	// GET /repos/{repoId}/ci-builds
+	ListRepoCIBuilds(ctx context.Context, params ListRepoCIBuildsParams) (*ListRepoCIBuildsOutputBody, error)
+	// ListRepoCIProviders invokes listRepoCIProviders operation.
+	//
+	// Returns each provider's enrolment form AS DATA: its modes, its fields, and the select options
+	// drawn from this repo's owning org's connected credentials and registered clusters. A client
+	// renders what it is handed and posts back provider/provider_account/target_ref/mode/config, so it
+	// never names a CI vendor in its own source. A provider the org cannot enrol into yet comes back
+	// enrollable=false with a reason a customer can act on, rather than being omitted. Authz:
+	// repo#manage_ci, the same gate as enrolling.
+	//
+	// GET /repos/{repoId}/ci-webhooks/providers
+	ListRepoCIProviders(ctx context.Context, params ListRepoCIProvidersParams) (*ListRepoCIProvidersOutputBody, error)
+	// ListRepoCIWebhookAudit invokes listRepoCIWebhookAudit operation.
+	//
+	// Audited ci_webhook_enrolled / _updated / _deleted / _identity_rolled_back / _identity_orphaned
+	// events for this repo, newest first, from core's domain audit log. The entire-ci-webhooks
+	// subscription row records no actor, so this is the only way to attribute an enrollment — and it
+	// covers subscriptions created before this endpoint existed. Authz: repo#manage_ci.
+	//
+	// GET /repos/{repoId}/ci-webhooks/audit
+	ListRepoCIWebhookAudit(ctx context.Context, params ListRepoCIWebhookAuditParams) (*ListRepoCIWebhookAuditOutputBody, error)
 	// ListRepoCIWebhooks invokes listRepoCIWebhooks operation.
 	//
 	// List a repo's CI webhooks.
 	//
 	// GET /repos/{repoId}/ci-webhooks
 	ListRepoCIWebhooks(ctx context.Context, params ListRepoCIWebhooksParams) (*ListRepoCIWebhooksOutputBody, error)
+	// ListRepoCollaborators invokes listRepoCollaborators operation.
+	//
+	// List repo collaborators.
+	//
+	// GET /repos/{repoId}/collaborators
+	ListRepoCollaborators(ctx context.Context, params ListRepoCollaboratorsParams) (*ListRepoCollaboratorsOutputBody, error)
 	// ListRepoGrants invokes listRepoGrants operation.
 	//
 	// List repo grants.
 	//
 	// GET /repos/{repoId}/grants
 	ListRepoGrants(ctx context.Context, params ListRepoGrantsParams) (*ListRepoGrantsOutputBody, error)
+	// ListRepoLanguageFacets invokes listRepoLanguageFacets operation.
+	//
+	// List repository language facets.
+	//
+	// GET /repos/facets/languages
+	ListRepoLanguageFacets(ctx context.Context, params ListRepoLanguageFacetsParams) (*RepoFacetPage, error)
+	// ListRepoOrgFacets invokes listRepoOrgFacets operation.
+	//
+	// List repository org facets.
+	//
+	// GET /repos/facets/orgs
+	ListRepoOrgFacets(ctx context.Context, params ListRepoOrgFacetsParams) (*RepoFacetPage, error)
 	// ListRepos invokes listRepos operation.
 	//
 	// List the caller's readable repositories (placement index).
@@ -352,18 +452,29 @@ type Invoker interface {
 	//
 	// GET /repos/lookup-by-slug
 	LookupRepoBySlug(ctx context.Context, params LookupRepoBySlugParams) (*LookupBySlugOutputBody, error)
-	// LookupResources invokes lookupResources operation.
+	// MintOrgCIGitHubActionsCredential invokes mintOrgCIGitHubActionsCredential operation.
 	//
-	// List resources of a type the caller can access.
+	// Operator-only: requires platform#admin, unlike the Buildkite routes beside it, because GitHub
+	// Actions has no enrolment path yet and a credential minted here cannot be used. Mints the inbound
+	// webhook credential for one GitHub account: a fresh webhook secret (returned once, in this 201) and
+	// the endpoint URL to configure the GitHub webhook with, plus optionally the outbound dispatch
+	// api_token (write-only, never returned; has_api_token confirms storage). With api_token, an
+	// already-minted github-actions row gets the token stored/rotated instead (200, no secret re-issued).
 	//
-	// GET /access/{resourceType}
-	LookupResources(ctx context.Context, params LookupResourcesParams) (*LookupResourcesOutputBody, error)
+	// POST /orgs/{orgId}/ci/github-actions/credential
+	MintOrgCIGitHubActionsCredential(ctx context.Context, request *MintOrgCIGitHubActionsCredentialInputBody, params MintOrgCIGitHubActionsCredentialParams) (*OrgCIGitHubActionsCredentialView, error)
 	// PatchRepoCIWebhook invokes patchRepoCIWebhook operation.
 	//
 	// Update a repo's CI webhook.
 	//
 	// PATCH /repos/{repoId}/ci-webhooks/{id}
 	PatchRepoCIWebhook(ctx context.Context, request *PatchRepoCIWebhookInputBody, params PatchRepoCIWebhookParams) (*CIWebhookView, error)
+	// RegisterOrgCIBuildkiteCluster invokes registerOrgCIBuildkiteCluster operation.
+	//
+	// Register or update a Buildkite hosted cluster for an org.
+	//
+	// POST /orgs/{orgId}/ci/buildkite/clusters
+	RegisterOrgCIBuildkiteCluster(ctx context.Context, request *RegisterOrgCIBuildkiteClusterInputBody, params RegisterOrgCIBuildkiteClusterParams) (*OrgCIBuildkiteClusterView, error)
 	// RemoveOrgMember invokes removeOrgMember operation.
 	//
 	// Remove a member from an organization.
@@ -382,6 +493,18 @@ type Invoker interface {
 	//
 	// GET /mirrors/placements
 	ResolveMirrorPlacements(ctx context.Context, params ResolveMirrorPlacementsParams) (*ResolvePlacementsOutputBody, error)
+	// ResolveRepoIDs invokes resolveRepoIDs operation.
+	//
+	// Resolve repository ids to full name and provider.
+	//
+	// POST /repos/resolve-ids
+	ResolveRepoIDs(ctx context.Context, request *ResolveRepoIDsInputBody) (*ResolveRepoIDsResponse, error)
+	// ResolveRepos invokes resolveRepos operation.
+	//
+	// Resolve provider-qualified repository lifecycle states.
+	//
+	// POST /repos/resolve
+	ResolveRepos(ctx context.Context, request *ResolveReposInputBody) (*ResolveReposResponse, error)
 	// RevokeProjectAccess invokes revokeProjectAccess operation.
 	//
 	// Revoke project access by grantee id.
@@ -412,12 +535,30 @@ type Invoker interface {
 	//
 	// DELETE /service-accounts/{accountId}/grants/{resourceType}/{resourceId}
 	RevokeServiceAccountAccess(ctx context.Context, params RevokeServiceAccountAccessParams) error
+	// RotateOrgCIBuildkiteInboundSecret invokes rotateOrgCIBuildkiteInboundSecret operation.
+	//
+	// Rotate an org's inbound Buildkite webhook secret.
+	//
+	// PUT /orgs/{orgId}/ci/buildkite/credential/{bkOrg}/inbound-secret
+	RotateOrgCIBuildkiteInboundSecret(ctx context.Context, params RotateOrgCIBuildkiteInboundSecretParams) (*OrgCIBuildkiteCredentialView, error)
+	// SetBranchProtection invokes setBranchProtection operation.
+	//
+	// Set repository branch protection.
+	//
+	// PUT /repos/{repoId}/branch-protection
+	SetBranchProtection(ctx context.Context, request *BranchProtection, params SetBranchProtectionParams) (*BranchProtection, error)
 	// SetRepoVisibility invokes setRepoVisibility operation.
 	//
 	// Set repository visibility.
 	//
 	// PUT /repos/{repoId}/visibility
 	SetRepoVisibility(ctx context.Context, request *SetRepoVisibilityInputBody, params SetRepoVisibilityParams) (*SetRepoVisibilityOutputBody, error)
+	// UpdateBranchProtection invokes updateBranchProtection operation.
+	//
+	// Add or remove protected branches.
+	//
+	// PATCH /repos/{repoId}/branch-protection
+	UpdateBranchProtection(ctx context.Context, request *UpdateBranchProtectionInputBody, params UpdateBranchProtectionParams) (*BranchProtection, error)
 }
 
 // Client implements OAS client.
@@ -558,91 +699,6 @@ func (c *Client) sendAddOrgMember(ctx context.Context, request *AddOrgMemberInpu
 	defer body.Close()
 
 	result, err := decodeAddOrgMemberResponse(resp)
-	if err != nil {
-		return res, errors.Wrap(err, "decode response")
-	}
-
-	return result, nil
-}
-
-// BatchLookup invokes batchLookup operation.
-//
-// Batch-resolve (type, id) refs to enriched records.
-//
-// POST /lookup
-func (c *Client) BatchLookup(ctx context.Context, request *BatchLookupInputBody) (*BatchLookupOutputBody, error) {
-	res, err := c.sendBatchLookup(ctx, request)
-	return res, err
-}
-
-func (c *Client) sendBatchLookup(ctx context.Context, request *BatchLookupInputBody) (res *BatchLookupOutputBody, err error) {
-
-	u := uri.Clone(c.requestURL(ctx))
-	var pathParts [1]string
-	pathParts[0] = "/lookup"
-	uri.AddPathParts(u, pathParts[:]...)
-
-	r, err := ht.NewRequest(ctx, "POST", u)
-	if err != nil {
-		return res, errors.Wrap(err, "create request")
-	}
-	if err := encodeBatchLookupRequest(request, r); err != nil {
-		return res, errors.Wrap(err, "encode request")
-	}
-
-	{
-		type bitset = [1]uint8
-		var satisfied bitset
-		{
-
-			switch err := c.securityBearerAuth(ctx, BatchLookupOperation, r); {
-			case err == nil: // if NO error
-				satisfied[0] |= 1 << 0
-			case errors.Is(err, ogenerrors.ErrSkipClientSecurity):
-				// Skip this security.
-			default:
-				return res, errors.Wrap(err, "security \"BearerAuth\"")
-			}
-		}
-		{
-
-			switch err := c.securitySessionAuth(ctx, BatchLookupOperation, r); {
-			case err == nil: // if NO error
-				satisfied[0] |= 1 << 1
-			case errors.Is(err, ogenerrors.ErrSkipClientSecurity):
-				// Skip this security.
-			default:
-				return res, errors.Wrap(err, "security \"SessionAuth\"")
-			}
-		}
-
-		if ok := func() bool {
-		nextRequirement:
-			for _, requirement := range []bitset{
-				{0b00000001},
-				{0b00000010},
-			} {
-				for i, mask := range requirement {
-					if satisfied[i]&mask != mask {
-						continue nextRequirement
-					}
-				}
-				return true
-			}
-			return false
-		}(); !ok {
-			return res, ogenerrors.ErrSecurityRequirementIsNotSatisfied
-		}
-	}
-
-	resp, err := c.cfg.Client.Do(r)
-	if err != nil {
-		return res, errors.Wrap(err, "do request")
-	}
-	body := resp.Body
-	defer body.Close()
-
-	result, err := decodeBatchLookupResponse(resp)
 	if err != nil {
 		return res, errors.Wrap(err, "decode response")
 	}
@@ -807,6 +863,110 @@ func (c *Client) sendCompleteOnboarding(ctx context.Context) (res *CompleteOnboa
 	defer body.Close()
 
 	result, err := decodeCompleteOnboardingResponse(resp)
+	if err != nil {
+		return res, errors.Wrap(err, "decode response")
+	}
+
+	return result, nil
+}
+
+// ConnectOrgCIBuildkiteCredential invokes connectOrgCIBuildkiteCredential operation.
+//
+// Connect or rotate an org's Buildkite API credential.
+//
+// POST /orgs/{orgId}/ci/buildkite/credential
+func (c *Client) ConnectOrgCIBuildkiteCredential(ctx context.Context, request *ConnectOrgCIBuildkiteCredentialInputBody, params ConnectOrgCIBuildkiteCredentialParams) (*OrgCIBuildkiteCredentialView, error) {
+	res, err := c.sendConnectOrgCIBuildkiteCredential(ctx, request, params)
+	return res, err
+}
+
+func (c *Client) sendConnectOrgCIBuildkiteCredential(ctx context.Context, request *ConnectOrgCIBuildkiteCredentialInputBody, params ConnectOrgCIBuildkiteCredentialParams) (res *OrgCIBuildkiteCredentialView, err error) {
+
+	u := uri.Clone(c.requestURL(ctx))
+	var pathParts [3]string
+	pathParts[0] = "/orgs/"
+	{
+		// Encode "orgId" parameter.
+		e := uri.NewPathEncoder(uri.PathEncoderConfig{
+			Param:   "orgId",
+			Style:   uri.PathStyleSimple,
+			Explode: false,
+		})
+		if err := func() error {
+			return e.EncodeValue(conv.StringToString(params.OrgId))
+		}(); err != nil {
+			return res, errors.Wrap(err, "encode path")
+		}
+		encoded, err := e.Result()
+		if err != nil {
+			return res, errors.Wrap(err, "encode path")
+		}
+		pathParts[1] = encoded
+	}
+	pathParts[2] = "/ci/buildkite/credential"
+	uri.AddPathParts(u, pathParts[:]...)
+
+	r, err := ht.NewRequest(ctx, "POST", u)
+	if err != nil {
+		return res, errors.Wrap(err, "create request")
+	}
+	if err := encodeConnectOrgCIBuildkiteCredentialRequest(request, r); err != nil {
+		return res, errors.Wrap(err, "encode request")
+	}
+
+	{
+		type bitset = [1]uint8
+		var satisfied bitset
+		{
+
+			switch err := c.securityBearerAuth(ctx, ConnectOrgCIBuildkiteCredentialOperation, r); {
+			case err == nil: // if NO error
+				satisfied[0] |= 1 << 0
+			case errors.Is(err, ogenerrors.ErrSkipClientSecurity):
+				// Skip this security.
+			default:
+				return res, errors.Wrap(err, "security \"BearerAuth\"")
+			}
+		}
+		{
+
+			switch err := c.securitySessionAuth(ctx, ConnectOrgCIBuildkiteCredentialOperation, r); {
+			case err == nil: // if NO error
+				satisfied[0] |= 1 << 1
+			case errors.Is(err, ogenerrors.ErrSkipClientSecurity):
+				// Skip this security.
+			default:
+				return res, errors.Wrap(err, "security \"SessionAuth\"")
+			}
+		}
+
+		if ok := func() bool {
+		nextRequirement:
+			for _, requirement := range []bitset{
+				{0b00000001},
+				{0b00000010},
+			} {
+				for i, mask := range requirement {
+					if satisfied[i]&mask != mask {
+						continue nextRequirement
+					}
+				}
+				return true
+			}
+			return false
+		}(); !ok {
+			return res, ogenerrors.ErrSecurityRequirementIsNotSatisfied
+		}
+	}
+
+	resp, err := c.cfg.Client.Do(r)
+	if err != nil {
+		return res, errors.Wrap(err, "do request")
+	}
+	body := resp.Body
+	defer body.Close()
+
+	result, err := decodeConnectOrgCIBuildkiteCredentialResponse(resp)
 	if err != nil {
 		return res, errors.Wrap(err, "decode response")
 	}
@@ -1089,6 +1249,110 @@ func (c *Client) sendCreateMirrorRequest(ctx context.Context, request *CreateMir
 	return result, nil
 }
 
+// CreateNativeMirror invokes createNativeMirror operation.
+//
+// Create a native-mirror placement.
+//
+// POST /repos/{repoId}/native-mirrors
+func (c *Client) CreateNativeMirror(ctx context.Context, request *CreateNativeMirrorInputBody, params CreateNativeMirrorParams) (*NativeMirrorPlacement, error) {
+	res, err := c.sendCreateNativeMirror(ctx, request, params)
+	return res, err
+}
+
+func (c *Client) sendCreateNativeMirror(ctx context.Context, request *CreateNativeMirrorInputBody, params CreateNativeMirrorParams) (res *NativeMirrorPlacement, err error) {
+
+	u := uri.Clone(c.requestURL(ctx))
+	var pathParts [3]string
+	pathParts[0] = "/repos/"
+	{
+		// Encode "repoId" parameter.
+		e := uri.NewPathEncoder(uri.PathEncoderConfig{
+			Param:   "repoId",
+			Style:   uri.PathStyleSimple,
+			Explode: false,
+		})
+		if err := func() error {
+			return e.EncodeValue(conv.StringToString(params.RepoId))
+		}(); err != nil {
+			return res, errors.Wrap(err, "encode path")
+		}
+		encoded, err := e.Result()
+		if err != nil {
+			return res, errors.Wrap(err, "encode path")
+		}
+		pathParts[1] = encoded
+	}
+	pathParts[2] = "/native-mirrors"
+	uri.AddPathParts(u, pathParts[:]...)
+
+	r, err := ht.NewRequest(ctx, "POST", u)
+	if err != nil {
+		return res, errors.Wrap(err, "create request")
+	}
+	if err := encodeCreateNativeMirrorRequest(request, r); err != nil {
+		return res, errors.Wrap(err, "encode request")
+	}
+
+	{
+		type bitset = [1]uint8
+		var satisfied bitset
+		{
+
+			switch err := c.securityBearerAuth(ctx, CreateNativeMirrorOperation, r); {
+			case err == nil: // if NO error
+				satisfied[0] |= 1 << 0
+			case errors.Is(err, ogenerrors.ErrSkipClientSecurity):
+				// Skip this security.
+			default:
+				return res, errors.Wrap(err, "security \"BearerAuth\"")
+			}
+		}
+		{
+
+			switch err := c.securitySessionAuth(ctx, CreateNativeMirrorOperation, r); {
+			case err == nil: // if NO error
+				satisfied[0] |= 1 << 1
+			case errors.Is(err, ogenerrors.ErrSkipClientSecurity):
+				// Skip this security.
+			default:
+				return res, errors.Wrap(err, "security \"SessionAuth\"")
+			}
+		}
+
+		if ok := func() bool {
+		nextRequirement:
+			for _, requirement := range []bitset{
+				{0b00000001},
+				{0b00000010},
+			} {
+				for i, mask := range requirement {
+					if satisfied[i]&mask != mask {
+						continue nextRequirement
+					}
+				}
+				return true
+			}
+			return false
+		}(); !ok {
+			return res, ogenerrors.ErrSecurityRequirementIsNotSatisfied
+		}
+	}
+
+	resp, err := c.cfg.Client.Do(r)
+	if err != nil {
+		return res, errors.Wrap(err, "do request")
+	}
+	body := resp.Body
+	defer body.Close()
+
+	result, err := decodeCreateNativeMirrorResponse(resp)
+	if err != nil {
+		return res, errors.Wrap(err, "decode response")
+	}
+
+	return result, nil
+}
+
 // CreateOrg invokes createOrg operation.
 //
 // Create organization.
@@ -1349,12 +1613,12 @@ func (c *Client) sendCreateRepo(ctx context.Context, request *CreateRepoInputBod
 // Enroll a repo into a CI webhook (Buildkite).
 //
 // POST /repos/{repoId}/ci-webhooks
-func (c *Client) CreateRepoCIWebhook(ctx context.Context, request *CreateRepoCIWebhookInputBody, params CreateRepoCIWebhookParams) (*CIWebhookView, error) {
+func (c *Client) CreateRepoCIWebhook(ctx context.Context, request *CreateRepoCIWebhookInputBody, params CreateRepoCIWebhookParams) (*CreateRepoCIWebhookBody, error) {
 	res, err := c.sendCreateRepoCIWebhook(ctx, request, params)
 	return res, err
 }
 
-func (c *Client) sendCreateRepoCIWebhook(ctx context.Context, request *CreateRepoCIWebhookInputBody, params CreateRepoCIWebhookParams) (res *CIWebhookView, err error) {
+func (c *Client) sendCreateRepoCIWebhook(ctx context.Context, request *CreateRepoCIWebhookInputBody, params CreateRepoCIWebhookParams) (res *CreateRepoCIWebhookBody, err error) {
 
 	u := uri.Clone(c.requestURL(ctx))
 	var pathParts [3]string
@@ -1875,6 +2139,125 @@ func (c *Client) sendDeleteMirror(ctx context.Context, params DeleteMirrorParams
 	return result, nil
 }
 
+// DeleteNativeMirror invokes deleteNativeMirror operation.
+//
+// Delete a native-mirror placement.
+//
+// DELETE /repos/{repoId}/native-mirrors/{clusterSlug}
+func (c *Client) DeleteNativeMirror(ctx context.Context, params DeleteNativeMirrorParams) (*NativeMirrorPlacement, error) {
+	res, err := c.sendDeleteNativeMirror(ctx, params)
+	return res, err
+}
+
+func (c *Client) sendDeleteNativeMirror(ctx context.Context, params DeleteNativeMirrorParams) (res *NativeMirrorPlacement, err error) {
+
+	u := uri.Clone(c.requestURL(ctx))
+	var pathParts [4]string
+	pathParts[0] = "/repos/"
+	{
+		// Encode "repoId" parameter.
+		e := uri.NewPathEncoder(uri.PathEncoderConfig{
+			Param:   "repoId",
+			Style:   uri.PathStyleSimple,
+			Explode: false,
+		})
+		if err := func() error {
+			return e.EncodeValue(conv.StringToString(params.RepoId))
+		}(); err != nil {
+			return res, errors.Wrap(err, "encode path")
+		}
+		encoded, err := e.Result()
+		if err != nil {
+			return res, errors.Wrap(err, "encode path")
+		}
+		pathParts[1] = encoded
+	}
+	pathParts[2] = "/native-mirrors/"
+	{
+		// Encode "clusterSlug" parameter.
+		e := uri.NewPathEncoder(uri.PathEncoderConfig{
+			Param:   "clusterSlug",
+			Style:   uri.PathStyleSimple,
+			Explode: false,
+		})
+		if err := func() error {
+			return e.EncodeValue(conv.StringToString(params.ClusterSlug))
+		}(); err != nil {
+			return res, errors.Wrap(err, "encode path")
+		}
+		encoded, err := e.Result()
+		if err != nil {
+			return res, errors.Wrap(err, "encode path")
+		}
+		pathParts[3] = encoded
+	}
+	uri.AddPathParts(u, pathParts[:]...)
+
+	r, err := ht.NewRequest(ctx, "DELETE", u)
+	if err != nil {
+		return res, errors.Wrap(err, "create request")
+	}
+
+	{
+		type bitset = [1]uint8
+		var satisfied bitset
+		{
+
+			switch err := c.securityBearerAuth(ctx, DeleteNativeMirrorOperation, r); {
+			case err == nil: // if NO error
+				satisfied[0] |= 1 << 0
+			case errors.Is(err, ogenerrors.ErrSkipClientSecurity):
+				// Skip this security.
+			default:
+				return res, errors.Wrap(err, "security \"BearerAuth\"")
+			}
+		}
+		{
+
+			switch err := c.securitySessionAuth(ctx, DeleteNativeMirrorOperation, r); {
+			case err == nil: // if NO error
+				satisfied[0] |= 1 << 1
+			case errors.Is(err, ogenerrors.ErrSkipClientSecurity):
+				// Skip this security.
+			default:
+				return res, errors.Wrap(err, "security \"SessionAuth\"")
+			}
+		}
+
+		if ok := func() bool {
+		nextRequirement:
+			for _, requirement := range []bitset{
+				{0b00000001},
+				{0b00000010},
+			} {
+				for i, mask := range requirement {
+					if satisfied[i]&mask != mask {
+						continue nextRequirement
+					}
+				}
+				return true
+			}
+			return false
+		}(); !ok {
+			return res, ogenerrors.ErrSecurityRequirementIsNotSatisfied
+		}
+	}
+
+	resp, err := c.cfg.Client.Do(r)
+	if err != nil {
+		return res, errors.Wrap(err, "do request")
+	}
+	body := resp.Body
+	defer body.Close()
+
+	result, err := decodeDeleteNativeMirrorResponse(resp)
+	if err != nil {
+		return res, errors.Wrap(err, "decode response")
+	}
+
+	return result, nil
+}
+
 // DeleteOrg invokes deleteOrg operation.
 //
 // Delete an organization.
@@ -1968,6 +2351,263 @@ func (c *Client) sendDeleteOrg(ctx context.Context, params DeleteOrgParams) (res
 	defer body.Close()
 
 	result, err := decodeDeleteOrgResponse(resp)
+	if err != nil {
+		return res, errors.Wrap(err, "decode response")
+	}
+
+	return result, nil
+}
+
+// DeleteOrgCIBuildkiteCluster invokes deleteOrgCIBuildkiteCluster operation.
+//
+// Remove a registered Buildkite cluster from an org.
+//
+// DELETE /orgs/{orgId}/ci/buildkite/clusters/{bkOrg}/{bkClusterId}
+func (c *Client) DeleteOrgCIBuildkiteCluster(ctx context.Context, params DeleteOrgCIBuildkiteClusterParams) error {
+	_, err := c.sendDeleteOrgCIBuildkiteCluster(ctx, params)
+	return err
+}
+
+func (c *Client) sendDeleteOrgCIBuildkiteCluster(ctx context.Context, params DeleteOrgCIBuildkiteClusterParams) (res *DeleteOrgCIBuildkiteClusterNoContent, err error) {
+
+	u := uri.Clone(c.requestURL(ctx))
+	var pathParts [6]string
+	pathParts[0] = "/orgs/"
+	{
+		// Encode "orgId" parameter.
+		e := uri.NewPathEncoder(uri.PathEncoderConfig{
+			Param:   "orgId",
+			Style:   uri.PathStyleSimple,
+			Explode: false,
+		})
+		if err := func() error {
+			return e.EncodeValue(conv.StringToString(params.OrgId))
+		}(); err != nil {
+			return res, errors.Wrap(err, "encode path")
+		}
+		encoded, err := e.Result()
+		if err != nil {
+			return res, errors.Wrap(err, "encode path")
+		}
+		pathParts[1] = encoded
+	}
+	pathParts[2] = "/ci/buildkite/clusters/"
+	{
+		// Encode "bkOrg" parameter.
+		e := uri.NewPathEncoder(uri.PathEncoderConfig{
+			Param:   "bkOrg",
+			Style:   uri.PathStyleSimple,
+			Explode: false,
+		})
+		if err := func() error {
+			return e.EncodeValue(conv.StringToString(params.BkOrg))
+		}(); err != nil {
+			return res, errors.Wrap(err, "encode path")
+		}
+		encoded, err := e.Result()
+		if err != nil {
+			return res, errors.Wrap(err, "encode path")
+		}
+		pathParts[3] = encoded
+	}
+	pathParts[4] = "/"
+	{
+		// Encode "bkClusterId" parameter.
+		e := uri.NewPathEncoder(uri.PathEncoderConfig{
+			Param:   "bkClusterId",
+			Style:   uri.PathStyleSimple,
+			Explode: false,
+		})
+		if err := func() error {
+			return e.EncodeValue(conv.StringToString(params.BkClusterId))
+		}(); err != nil {
+			return res, errors.Wrap(err, "encode path")
+		}
+		encoded, err := e.Result()
+		if err != nil {
+			return res, errors.Wrap(err, "encode path")
+		}
+		pathParts[5] = encoded
+	}
+	uri.AddPathParts(u, pathParts[:]...)
+
+	r, err := ht.NewRequest(ctx, "DELETE", u)
+	if err != nil {
+		return res, errors.Wrap(err, "create request")
+	}
+
+	{
+		type bitset = [1]uint8
+		var satisfied bitset
+		{
+
+			switch err := c.securityBearerAuth(ctx, DeleteOrgCIBuildkiteClusterOperation, r); {
+			case err == nil: // if NO error
+				satisfied[0] |= 1 << 0
+			case errors.Is(err, ogenerrors.ErrSkipClientSecurity):
+				// Skip this security.
+			default:
+				return res, errors.Wrap(err, "security \"BearerAuth\"")
+			}
+		}
+		{
+
+			switch err := c.securitySessionAuth(ctx, DeleteOrgCIBuildkiteClusterOperation, r); {
+			case err == nil: // if NO error
+				satisfied[0] |= 1 << 1
+			case errors.Is(err, ogenerrors.ErrSkipClientSecurity):
+				// Skip this security.
+			default:
+				return res, errors.Wrap(err, "security \"SessionAuth\"")
+			}
+		}
+
+		if ok := func() bool {
+		nextRequirement:
+			for _, requirement := range []bitset{
+				{0b00000001},
+				{0b00000010},
+			} {
+				for i, mask := range requirement {
+					if satisfied[i]&mask != mask {
+						continue nextRequirement
+					}
+				}
+				return true
+			}
+			return false
+		}(); !ok {
+			return res, ogenerrors.ErrSecurityRequirementIsNotSatisfied
+		}
+	}
+
+	resp, err := c.cfg.Client.Do(r)
+	if err != nil {
+		return res, errors.Wrap(err, "do request")
+	}
+	body := resp.Body
+	defer body.Close()
+
+	result, err := decodeDeleteOrgCIBuildkiteClusterResponse(resp)
+	if err != nil {
+		return res, errors.Wrap(err, "decode response")
+	}
+
+	return result, nil
+}
+
+// DeleteOrgCIBuildkiteCredential invokes deleteOrgCIBuildkiteCredential operation.
+//
+// Delete an org's connected Buildkite credential.
+//
+// DELETE /orgs/{orgId}/ci/buildkite/credential/{bkOrg}
+func (c *Client) DeleteOrgCIBuildkiteCredential(ctx context.Context, params DeleteOrgCIBuildkiteCredentialParams) error {
+	_, err := c.sendDeleteOrgCIBuildkiteCredential(ctx, params)
+	return err
+}
+
+func (c *Client) sendDeleteOrgCIBuildkiteCredential(ctx context.Context, params DeleteOrgCIBuildkiteCredentialParams) (res *DeleteOrgCIBuildkiteCredentialNoContent, err error) {
+
+	u := uri.Clone(c.requestURL(ctx))
+	var pathParts [4]string
+	pathParts[0] = "/orgs/"
+	{
+		// Encode "orgId" parameter.
+		e := uri.NewPathEncoder(uri.PathEncoderConfig{
+			Param:   "orgId",
+			Style:   uri.PathStyleSimple,
+			Explode: false,
+		})
+		if err := func() error {
+			return e.EncodeValue(conv.StringToString(params.OrgId))
+		}(); err != nil {
+			return res, errors.Wrap(err, "encode path")
+		}
+		encoded, err := e.Result()
+		if err != nil {
+			return res, errors.Wrap(err, "encode path")
+		}
+		pathParts[1] = encoded
+	}
+	pathParts[2] = "/ci/buildkite/credential/"
+	{
+		// Encode "bkOrg" parameter.
+		e := uri.NewPathEncoder(uri.PathEncoderConfig{
+			Param:   "bkOrg",
+			Style:   uri.PathStyleSimple,
+			Explode: false,
+		})
+		if err := func() error {
+			return e.EncodeValue(conv.StringToString(params.BkOrg))
+		}(); err != nil {
+			return res, errors.Wrap(err, "encode path")
+		}
+		encoded, err := e.Result()
+		if err != nil {
+			return res, errors.Wrap(err, "encode path")
+		}
+		pathParts[3] = encoded
+	}
+	uri.AddPathParts(u, pathParts[:]...)
+
+	r, err := ht.NewRequest(ctx, "DELETE", u)
+	if err != nil {
+		return res, errors.Wrap(err, "create request")
+	}
+
+	{
+		type bitset = [1]uint8
+		var satisfied bitset
+		{
+
+			switch err := c.securityBearerAuth(ctx, DeleteOrgCIBuildkiteCredentialOperation, r); {
+			case err == nil: // if NO error
+				satisfied[0] |= 1 << 0
+			case errors.Is(err, ogenerrors.ErrSkipClientSecurity):
+				// Skip this security.
+			default:
+				return res, errors.Wrap(err, "security \"BearerAuth\"")
+			}
+		}
+		{
+
+			switch err := c.securitySessionAuth(ctx, DeleteOrgCIBuildkiteCredentialOperation, r); {
+			case err == nil: // if NO error
+				satisfied[0] |= 1 << 1
+			case errors.Is(err, ogenerrors.ErrSkipClientSecurity):
+				// Skip this security.
+			default:
+				return res, errors.Wrap(err, "security \"SessionAuth\"")
+			}
+		}
+
+		if ok := func() bool {
+		nextRequirement:
+			for _, requirement := range []bitset{
+				{0b00000001},
+				{0b00000010},
+			} {
+				for i, mask := range requirement {
+					if satisfied[i]&mask != mask {
+						continue nextRequirement
+					}
+				}
+				return true
+			}
+			return false
+		}(); !ok {
+			return res, ogenerrors.ErrSecurityRequirementIsNotSatisfied
+		}
+	}
+
+	resp, err := c.cfg.Client.Do(r)
+	if err != nil {
+		return res, errors.Wrap(err, "do request")
+	}
+	body := resp.Body
+	defer body.Close()
+
+	result, err := decodeDeleteOrgCIBuildkiteCredentialResponse(resp)
 	if err != nil {
 		return res, errors.Wrap(err, "decode response")
 	}
@@ -2177,7 +2817,15 @@ func (c *Client) sendDeleteRepo(ctx context.Context, params DeleteRepoParams) (r
 
 // DeleteRepoCIWebhook invokes deleteRepoCIWebhook operation.
 //
-// Delete a repo's CI webhook.
+// Deletes the subscription AND tears down its enrollment identity: the automation row (when no
+// sibling repo shares it), its expiring repo grant, and its Buildkite OIDC binding. The Buildkite
+// pipeline itself is always kept. Pass keep_identity=true to delete only the subscription — for an
+// immediate re-enroll that must preserve automation_id, since teardown retires it and a re-enroll
+// declares a new one that only bk_force_rescaffold pushes into the pipeline. A retained identity
+// holds read access on this repo until its grant lapses. A subscription enrolled before the
+// automation principal has no automation to retire: the delete succeeds and removes only the
+// subscription, reported as identity_retired=false on the ci_webhook_deleted audit event — the
+// list an operator queries to hand-delete the leftover service accounts.
 //
 // DELETE /repos/{repoId}/ci-webhooks/{id}
 func (c *Client) DeleteRepoCIWebhook(ctx context.Context, params DeleteRepoCIWebhookParams) error {
@@ -2231,15 +2879,15 @@ func (c *Client) sendDeleteRepoCIWebhook(ctx context.Context, params DeleteRepoC
 
 	q := uri.NewQueryEncoder()
 	{
-		// Encode "teardown" parameter.
+		// Encode "keep_identity" parameter.
 		cfg := uri.QueryParameterEncodingConfig{
-			Name:    "teardown",
+			Name:    "keep_identity",
 			Style:   uri.QueryStyleForm,
 			Explode: false,
 		}
 
 		if err := q.EncodeParam(cfg, func(e uri.Encoder) error {
-			if val, ok := params.Teardown.Get(); ok {
+			if val, ok := params.KeepIdentity.Get(); ok {
 				return e.EncodeValue(conv.BoolToString(val))
 			}
 			return nil
@@ -2407,6 +3055,107 @@ func (c *Client) sendDeleteServiceAccount(ctx context.Context, params DeleteServ
 	defer body.Close()
 
 	result, err := decodeDeleteServiceAccountResponse(resp)
+	if err != nil {
+		return res, errors.Wrap(err, "decode response")
+	}
+
+	return result, nil
+}
+
+// GetBranchProtection invokes getBranchProtection operation.
+//
+// Get repository branch protection.
+//
+// GET /repos/{repoId}/branch-protection
+func (c *Client) GetBranchProtection(ctx context.Context, params GetBranchProtectionParams) (*BranchProtection, error) {
+	res, err := c.sendGetBranchProtection(ctx, params)
+	return res, err
+}
+
+func (c *Client) sendGetBranchProtection(ctx context.Context, params GetBranchProtectionParams) (res *BranchProtection, err error) {
+
+	u := uri.Clone(c.requestURL(ctx))
+	var pathParts [3]string
+	pathParts[0] = "/repos/"
+	{
+		// Encode "repoId" parameter.
+		e := uri.NewPathEncoder(uri.PathEncoderConfig{
+			Param:   "repoId",
+			Style:   uri.PathStyleSimple,
+			Explode: false,
+		})
+		if err := func() error {
+			return e.EncodeValue(conv.StringToString(params.RepoId))
+		}(); err != nil {
+			return res, errors.Wrap(err, "encode path")
+		}
+		encoded, err := e.Result()
+		if err != nil {
+			return res, errors.Wrap(err, "encode path")
+		}
+		pathParts[1] = encoded
+	}
+	pathParts[2] = "/branch-protection"
+	uri.AddPathParts(u, pathParts[:]...)
+
+	r, err := ht.NewRequest(ctx, "GET", u)
+	if err != nil {
+		return res, errors.Wrap(err, "create request")
+	}
+
+	{
+		type bitset = [1]uint8
+		var satisfied bitset
+		{
+
+			switch err := c.securityBearerAuth(ctx, GetBranchProtectionOperation, r); {
+			case err == nil: // if NO error
+				satisfied[0] |= 1 << 0
+			case errors.Is(err, ogenerrors.ErrSkipClientSecurity):
+				// Skip this security.
+			default:
+				return res, errors.Wrap(err, "security \"BearerAuth\"")
+			}
+		}
+		{
+
+			switch err := c.securitySessionAuth(ctx, GetBranchProtectionOperation, r); {
+			case err == nil: // if NO error
+				satisfied[0] |= 1 << 1
+			case errors.Is(err, ogenerrors.ErrSkipClientSecurity):
+				// Skip this security.
+			default:
+				return res, errors.Wrap(err, "security \"SessionAuth\"")
+			}
+		}
+
+		if ok := func() bool {
+		nextRequirement:
+			for _, requirement := range []bitset{
+				{0b00000001},
+				{0b00000010},
+			} {
+				for i, mask := range requirement {
+					if satisfied[i]&mask != mask {
+						continue nextRequirement
+					}
+				}
+				return true
+			}
+			return false
+		}(); !ok {
+			return res, ogenerrors.ErrSecurityRequirementIsNotSatisfied
+		}
+	}
+
+	resp, err := c.cfg.Client.Do(r)
+	if err != nil {
+		return res, errors.Wrap(err, "do request")
+	}
+	body := resp.Body
+	defer body.Close()
+
+	result, err := decodeGetBranchProtectionResponse(resp)
 	if err != nil {
 		return res, errors.Wrap(err, "decode response")
 	}
@@ -4683,6 +5432,107 @@ func (c *Client) sendListMirrors(ctx context.Context, params ListMirrorsParams) 
 	return result, nil
 }
 
+// ListNativeMirrors invokes listNativeMirrors operation.
+//
+// List native-mirror placement status.
+//
+// GET /repos/{repoId}/native-mirrors
+func (c *Client) ListNativeMirrors(ctx context.Context, params ListNativeMirrorsParams) (*ListNativeMirrorsOutputBody, error) {
+	res, err := c.sendListNativeMirrors(ctx, params)
+	return res, err
+}
+
+func (c *Client) sendListNativeMirrors(ctx context.Context, params ListNativeMirrorsParams) (res *ListNativeMirrorsOutputBody, err error) {
+
+	u := uri.Clone(c.requestURL(ctx))
+	var pathParts [3]string
+	pathParts[0] = "/repos/"
+	{
+		// Encode "repoId" parameter.
+		e := uri.NewPathEncoder(uri.PathEncoderConfig{
+			Param:   "repoId",
+			Style:   uri.PathStyleSimple,
+			Explode: false,
+		})
+		if err := func() error {
+			return e.EncodeValue(conv.StringToString(params.RepoId))
+		}(); err != nil {
+			return res, errors.Wrap(err, "encode path")
+		}
+		encoded, err := e.Result()
+		if err != nil {
+			return res, errors.Wrap(err, "encode path")
+		}
+		pathParts[1] = encoded
+	}
+	pathParts[2] = "/native-mirrors"
+	uri.AddPathParts(u, pathParts[:]...)
+
+	r, err := ht.NewRequest(ctx, "GET", u)
+	if err != nil {
+		return res, errors.Wrap(err, "create request")
+	}
+
+	{
+		type bitset = [1]uint8
+		var satisfied bitset
+		{
+
+			switch err := c.securityBearerAuth(ctx, ListNativeMirrorsOperation, r); {
+			case err == nil: // if NO error
+				satisfied[0] |= 1 << 0
+			case errors.Is(err, ogenerrors.ErrSkipClientSecurity):
+				// Skip this security.
+			default:
+				return res, errors.Wrap(err, "security \"BearerAuth\"")
+			}
+		}
+		{
+
+			switch err := c.securitySessionAuth(ctx, ListNativeMirrorsOperation, r); {
+			case err == nil: // if NO error
+				satisfied[0] |= 1 << 1
+			case errors.Is(err, ogenerrors.ErrSkipClientSecurity):
+				// Skip this security.
+			default:
+				return res, errors.Wrap(err, "security \"SessionAuth\"")
+			}
+		}
+
+		if ok := func() bool {
+		nextRequirement:
+			for _, requirement := range []bitset{
+				{0b00000001},
+				{0b00000010},
+			} {
+				for i, mask := range requirement {
+					if satisfied[i]&mask != mask {
+						continue nextRequirement
+					}
+				}
+				return true
+			}
+			return false
+		}(); !ok {
+			return res, ogenerrors.ErrSecurityRequirementIsNotSatisfied
+		}
+	}
+
+	resp, err := c.cfg.Client.Do(r)
+	if err != nil {
+		return res, errors.Wrap(err, "do request")
+	}
+	body := resp.Body
+	defer body.Close()
+
+	result, err := decodeListNativeMirrorsResponse(resp)
+	if err != nil {
+		return res, errors.Wrap(err, "decode response")
+	}
+
+	return result, nil
+}
+
 // ListOIDCProviders invokes listOIDCProviders operation.
 //
 // List federated OIDC identity providers.
@@ -4795,6 +5645,228 @@ func (c *Client) sendListOIDCProviders(ctx context.Context, params ListOIDCProvi
 	defer body.Close()
 
 	result, err := decodeListOIDCProvidersResponse(resp)
+	if err != nil {
+		return res, errors.Wrap(err, "decode response")
+	}
+
+	return result, nil
+}
+
+// ListOrgCIBuildkiteClusters invokes listOrgCIBuildkiteClusters operation.
+//
+// List an org's registered Buildkite clusters.
+//
+// GET /orgs/{orgId}/ci/buildkite/clusters
+func (c *Client) ListOrgCIBuildkiteClusters(ctx context.Context, params ListOrgCIBuildkiteClustersParams) (*ListOrgCIBuildkiteClustersOutputBody, error) {
+	res, err := c.sendListOrgCIBuildkiteClusters(ctx, params)
+	return res, err
+}
+
+func (c *Client) sendListOrgCIBuildkiteClusters(ctx context.Context, params ListOrgCIBuildkiteClustersParams) (res *ListOrgCIBuildkiteClustersOutputBody, err error) {
+
+	u := uri.Clone(c.requestURL(ctx))
+	var pathParts [3]string
+	pathParts[0] = "/orgs/"
+	{
+		// Encode "orgId" parameter.
+		e := uri.NewPathEncoder(uri.PathEncoderConfig{
+			Param:   "orgId",
+			Style:   uri.PathStyleSimple,
+			Explode: false,
+		})
+		if err := func() error {
+			return e.EncodeValue(conv.StringToString(params.OrgId))
+		}(); err != nil {
+			return res, errors.Wrap(err, "encode path")
+		}
+		encoded, err := e.Result()
+		if err != nil {
+			return res, errors.Wrap(err, "encode path")
+		}
+		pathParts[1] = encoded
+	}
+	pathParts[2] = "/ci/buildkite/clusters"
+	uri.AddPathParts(u, pathParts[:]...)
+
+	q := uri.NewQueryEncoder()
+	{
+		// Encode "bk_organization" parameter.
+		cfg := uri.QueryParameterEncodingConfig{
+			Name:    "bk_organization",
+			Style:   uri.QueryStyleForm,
+			Explode: false,
+		}
+
+		if err := q.EncodeParam(cfg, func(e uri.Encoder) error {
+			if val, ok := params.BkOrganization.Get(); ok {
+				return e.EncodeValue(conv.StringToString(val))
+			}
+			return nil
+		}); err != nil {
+			return res, errors.Wrap(err, "encode query")
+		}
+	}
+	u.RawQuery = q.Values().Encode()
+
+	r, err := ht.NewRequest(ctx, "GET", u)
+	if err != nil {
+		return res, errors.Wrap(err, "create request")
+	}
+
+	{
+		type bitset = [1]uint8
+		var satisfied bitset
+		{
+
+			switch err := c.securityBearerAuth(ctx, ListOrgCIBuildkiteClustersOperation, r); {
+			case err == nil: // if NO error
+				satisfied[0] |= 1 << 0
+			case errors.Is(err, ogenerrors.ErrSkipClientSecurity):
+				// Skip this security.
+			default:
+				return res, errors.Wrap(err, "security \"BearerAuth\"")
+			}
+		}
+		{
+
+			switch err := c.securitySessionAuth(ctx, ListOrgCIBuildkiteClustersOperation, r); {
+			case err == nil: // if NO error
+				satisfied[0] |= 1 << 1
+			case errors.Is(err, ogenerrors.ErrSkipClientSecurity):
+				// Skip this security.
+			default:
+				return res, errors.Wrap(err, "security \"SessionAuth\"")
+			}
+		}
+
+		if ok := func() bool {
+		nextRequirement:
+			for _, requirement := range []bitset{
+				{0b00000001},
+				{0b00000010},
+			} {
+				for i, mask := range requirement {
+					if satisfied[i]&mask != mask {
+						continue nextRequirement
+					}
+				}
+				return true
+			}
+			return false
+		}(); !ok {
+			return res, ogenerrors.ErrSecurityRequirementIsNotSatisfied
+		}
+	}
+
+	resp, err := c.cfg.Client.Do(r)
+	if err != nil {
+		return res, errors.Wrap(err, "do request")
+	}
+	body := resp.Body
+	defer body.Close()
+
+	result, err := decodeListOrgCIBuildkiteClustersResponse(resp)
+	if err != nil {
+		return res, errors.Wrap(err, "decode response")
+	}
+
+	return result, nil
+}
+
+// ListOrgCIBuildkiteCredentials invokes listOrgCIBuildkiteCredentials operation.
+//
+// List an org's connected Buildkite credentials.
+//
+// GET /orgs/{orgId}/ci/buildkite/credentials
+func (c *Client) ListOrgCIBuildkiteCredentials(ctx context.Context, params ListOrgCIBuildkiteCredentialsParams) (*ListOrgCIBuildkiteCredentialsOutputBody, error) {
+	res, err := c.sendListOrgCIBuildkiteCredentials(ctx, params)
+	return res, err
+}
+
+func (c *Client) sendListOrgCIBuildkiteCredentials(ctx context.Context, params ListOrgCIBuildkiteCredentialsParams) (res *ListOrgCIBuildkiteCredentialsOutputBody, err error) {
+
+	u := uri.Clone(c.requestURL(ctx))
+	var pathParts [3]string
+	pathParts[0] = "/orgs/"
+	{
+		// Encode "orgId" parameter.
+		e := uri.NewPathEncoder(uri.PathEncoderConfig{
+			Param:   "orgId",
+			Style:   uri.PathStyleSimple,
+			Explode: false,
+		})
+		if err := func() error {
+			return e.EncodeValue(conv.StringToString(params.OrgId))
+		}(); err != nil {
+			return res, errors.Wrap(err, "encode path")
+		}
+		encoded, err := e.Result()
+		if err != nil {
+			return res, errors.Wrap(err, "encode path")
+		}
+		pathParts[1] = encoded
+	}
+	pathParts[2] = "/ci/buildkite/credentials"
+	uri.AddPathParts(u, pathParts[:]...)
+
+	r, err := ht.NewRequest(ctx, "GET", u)
+	if err != nil {
+		return res, errors.Wrap(err, "create request")
+	}
+
+	{
+		type bitset = [1]uint8
+		var satisfied bitset
+		{
+
+			switch err := c.securityBearerAuth(ctx, ListOrgCIBuildkiteCredentialsOperation, r); {
+			case err == nil: // if NO error
+				satisfied[0] |= 1 << 0
+			case errors.Is(err, ogenerrors.ErrSkipClientSecurity):
+				// Skip this security.
+			default:
+				return res, errors.Wrap(err, "security \"BearerAuth\"")
+			}
+		}
+		{
+
+			switch err := c.securitySessionAuth(ctx, ListOrgCIBuildkiteCredentialsOperation, r); {
+			case err == nil: // if NO error
+				satisfied[0] |= 1 << 1
+			case errors.Is(err, ogenerrors.ErrSkipClientSecurity):
+				// Skip this security.
+			default:
+				return res, errors.Wrap(err, "security \"SessionAuth\"")
+			}
+		}
+
+		if ok := func() bool {
+		nextRequirement:
+			for _, requirement := range []bitset{
+				{0b00000001},
+				{0b00000010},
+			} {
+				for i, mask := range requirement {
+					if satisfied[i]&mask != mask {
+						continue nextRequirement
+					}
+				}
+				return true
+			}
+			return false
+		}(); !ok {
+			return res, ogenerrors.ErrSecurityRequirementIsNotSatisfied
+		}
+	}
+
+	resp, err := c.cfg.Client.Do(r)
+	if err != nil {
+		return res, errors.Wrap(err, "do request")
+	}
+	body := resp.Body
+	defer body.Close()
+
+	result, err := decodeListOrgCIBuildkiteCredentialsResponse(resp)
 	if err != nil {
 		return res, errors.Wrap(err, "decode response")
 	}
@@ -5676,6 +6748,442 @@ func (c *Client) sendListProjects(ctx context.Context, params ListProjectsParams
 	return result, nil
 }
 
+// ListRepoCIBuilds invokes listRepoCIBuilds operation.
+//
+// List a repo's CI build statuses.
+//
+// GET /repos/{repoId}/ci-builds
+func (c *Client) ListRepoCIBuilds(ctx context.Context, params ListRepoCIBuildsParams) (*ListRepoCIBuildsOutputBody, error) {
+	res, err := c.sendListRepoCIBuilds(ctx, params)
+	return res, err
+}
+
+func (c *Client) sendListRepoCIBuilds(ctx context.Context, params ListRepoCIBuildsParams) (res *ListRepoCIBuildsOutputBody, err error) {
+
+	u := uri.Clone(c.requestURL(ctx))
+	var pathParts [3]string
+	pathParts[0] = "/repos/"
+	{
+		// Encode "repoId" parameter.
+		e := uri.NewPathEncoder(uri.PathEncoderConfig{
+			Param:   "repoId",
+			Style:   uri.PathStyleSimple,
+			Explode: false,
+		})
+		if err := func() error {
+			return e.EncodeValue(conv.StringToString(params.RepoId))
+		}(); err != nil {
+			return res, errors.Wrap(err, "encode path")
+		}
+		encoded, err := e.Result()
+		if err != nil {
+			return res, errors.Wrap(err, "encode path")
+		}
+		pathParts[1] = encoded
+	}
+	pathParts[2] = "/ci-builds"
+	uri.AddPathParts(u, pathParts[:]...)
+
+	q := uri.NewQueryEncoder()
+	{
+		// Encode "commit" parameter.
+		cfg := uri.QueryParameterEncodingConfig{
+			Name:    "commit",
+			Style:   uri.QueryStyleForm,
+			Explode: false,
+		}
+
+		if err := q.EncodeParam(cfg, func(e uri.Encoder) error {
+			if val, ok := params.Commit.Get(); ok {
+				return e.EncodeValue(conv.StringToString(val))
+			}
+			return nil
+		}); err != nil {
+			return res, errors.Wrap(err, "encode query")
+		}
+	}
+	{
+		// Encode "pipeline" parameter.
+		cfg := uri.QueryParameterEncodingConfig{
+			Name:    "pipeline",
+			Style:   uri.QueryStyleForm,
+			Explode: false,
+		}
+
+		if err := q.EncodeParam(cfg, func(e uri.Encoder) error {
+			if val, ok := params.Pipeline.Get(); ok {
+				return e.EncodeValue(conv.StringToString(val))
+			}
+			return nil
+		}); err != nil {
+			return res, errors.Wrap(err, "encode query")
+		}
+	}
+	{
+		// Encode "build_number" parameter.
+		cfg := uri.QueryParameterEncodingConfig{
+			Name:    "build_number",
+			Style:   uri.QueryStyleForm,
+			Explode: false,
+		}
+
+		if err := q.EncodeParam(cfg, func(e uri.Encoder) error {
+			if val, ok := params.BuildNumber.Get(); ok {
+				return e.EncodeValue(conv.Int64ToString(val))
+			}
+			return nil
+		}); err != nil {
+			return res, errors.Wrap(err, "encode query")
+		}
+	}
+	{
+		// Encode "limit" parameter.
+		cfg := uri.QueryParameterEncodingConfig{
+			Name:    "limit",
+			Style:   uri.QueryStyleForm,
+			Explode: false,
+		}
+
+		if err := q.EncodeParam(cfg, func(e uri.Encoder) error {
+			if val, ok := params.Limit.Get(); ok {
+				return e.EncodeValue(conv.Int64ToString(val))
+			}
+			return nil
+		}); err != nil {
+			return res, errors.Wrap(err, "encode query")
+		}
+	}
+	u.RawQuery = q.Values().Encode()
+
+	r, err := ht.NewRequest(ctx, "GET", u)
+	if err != nil {
+		return res, errors.Wrap(err, "create request")
+	}
+
+	{
+		type bitset = [1]uint8
+		var satisfied bitset
+		{
+
+			switch err := c.securityBearerAuth(ctx, ListRepoCIBuildsOperation, r); {
+			case err == nil: // if NO error
+				satisfied[0] |= 1 << 0
+			case errors.Is(err, ogenerrors.ErrSkipClientSecurity):
+				// Skip this security.
+			default:
+				return res, errors.Wrap(err, "security \"BearerAuth\"")
+			}
+		}
+		{
+
+			switch err := c.securitySessionAuth(ctx, ListRepoCIBuildsOperation, r); {
+			case err == nil: // if NO error
+				satisfied[0] |= 1 << 1
+			case errors.Is(err, ogenerrors.ErrSkipClientSecurity):
+				// Skip this security.
+			default:
+				return res, errors.Wrap(err, "security \"SessionAuth\"")
+			}
+		}
+
+		if ok := func() bool {
+		nextRequirement:
+			for _, requirement := range []bitset{
+				{0b00000001},
+				{0b00000010},
+			} {
+				for i, mask := range requirement {
+					if satisfied[i]&mask != mask {
+						continue nextRequirement
+					}
+				}
+				return true
+			}
+			return false
+		}(); !ok {
+			return res, ogenerrors.ErrSecurityRequirementIsNotSatisfied
+		}
+	}
+
+	resp, err := c.cfg.Client.Do(r)
+	if err != nil {
+		return res, errors.Wrap(err, "do request")
+	}
+	body := resp.Body
+	defer body.Close()
+
+	result, err := decodeListRepoCIBuildsResponse(resp)
+	if err != nil {
+		return res, errors.Wrap(err, "decode response")
+	}
+
+	return result, nil
+}
+
+// ListRepoCIProviders invokes listRepoCIProviders operation.
+//
+// Returns each provider's enrolment form AS DATA: its modes, its fields, and the select options
+// drawn from this repo's owning org's connected credentials and registered clusters. A client
+// renders what it is handed and posts back provider/provider_account/target_ref/mode/config, so it
+// never names a CI vendor in its own source. A provider the org cannot enrol into yet comes back
+// enrollable=false with a reason a customer can act on, rather than being omitted. Authz:
+// repo#manage_ci, the same gate as enrolling.
+//
+// GET /repos/{repoId}/ci-webhooks/providers
+func (c *Client) ListRepoCIProviders(ctx context.Context, params ListRepoCIProvidersParams) (*ListRepoCIProvidersOutputBody, error) {
+	res, err := c.sendListRepoCIProviders(ctx, params)
+	return res, err
+}
+
+func (c *Client) sendListRepoCIProviders(ctx context.Context, params ListRepoCIProvidersParams) (res *ListRepoCIProvidersOutputBody, err error) {
+
+	u := uri.Clone(c.requestURL(ctx))
+	var pathParts [3]string
+	pathParts[0] = "/repos/"
+	{
+		// Encode "repoId" parameter.
+		e := uri.NewPathEncoder(uri.PathEncoderConfig{
+			Param:   "repoId",
+			Style:   uri.PathStyleSimple,
+			Explode: false,
+		})
+		if err := func() error {
+			return e.EncodeValue(conv.StringToString(params.RepoId))
+		}(); err != nil {
+			return res, errors.Wrap(err, "encode path")
+		}
+		encoded, err := e.Result()
+		if err != nil {
+			return res, errors.Wrap(err, "encode path")
+		}
+		pathParts[1] = encoded
+	}
+	pathParts[2] = "/ci-webhooks/providers"
+	uri.AddPathParts(u, pathParts[:]...)
+
+	r, err := ht.NewRequest(ctx, "GET", u)
+	if err != nil {
+		return res, errors.Wrap(err, "create request")
+	}
+
+	{
+		type bitset = [1]uint8
+		var satisfied bitset
+		{
+
+			switch err := c.securityBearerAuth(ctx, ListRepoCIProvidersOperation, r); {
+			case err == nil: // if NO error
+				satisfied[0] |= 1 << 0
+			case errors.Is(err, ogenerrors.ErrSkipClientSecurity):
+				// Skip this security.
+			default:
+				return res, errors.Wrap(err, "security \"BearerAuth\"")
+			}
+		}
+		{
+
+			switch err := c.securitySessionAuth(ctx, ListRepoCIProvidersOperation, r); {
+			case err == nil: // if NO error
+				satisfied[0] |= 1 << 1
+			case errors.Is(err, ogenerrors.ErrSkipClientSecurity):
+				// Skip this security.
+			default:
+				return res, errors.Wrap(err, "security \"SessionAuth\"")
+			}
+		}
+
+		if ok := func() bool {
+		nextRequirement:
+			for _, requirement := range []bitset{
+				{0b00000001},
+				{0b00000010},
+			} {
+				for i, mask := range requirement {
+					if satisfied[i]&mask != mask {
+						continue nextRequirement
+					}
+				}
+				return true
+			}
+			return false
+		}(); !ok {
+			return res, ogenerrors.ErrSecurityRequirementIsNotSatisfied
+		}
+	}
+
+	resp, err := c.cfg.Client.Do(r)
+	if err != nil {
+		return res, errors.Wrap(err, "do request")
+	}
+	body := resp.Body
+	defer body.Close()
+
+	result, err := decodeListRepoCIProvidersResponse(resp)
+	if err != nil {
+		return res, errors.Wrap(err, "decode response")
+	}
+
+	return result, nil
+}
+
+// ListRepoCIWebhookAudit invokes listRepoCIWebhookAudit operation.
+//
+// Audited ci_webhook_enrolled / _updated / _deleted / _identity_rolled_back / _identity_orphaned
+// events for this repo, newest first, from core's domain audit log. The entire-ci-webhooks
+// subscription row records no actor, so this is the only way to attribute an enrollment — and it
+// covers subscriptions created before this endpoint existed. Authz: repo#manage_ci.
+//
+// GET /repos/{repoId}/ci-webhooks/audit
+func (c *Client) ListRepoCIWebhookAudit(ctx context.Context, params ListRepoCIWebhookAuditParams) (*ListRepoCIWebhookAuditOutputBody, error) {
+	res, err := c.sendListRepoCIWebhookAudit(ctx, params)
+	return res, err
+}
+
+func (c *Client) sendListRepoCIWebhookAudit(ctx context.Context, params ListRepoCIWebhookAuditParams) (res *ListRepoCIWebhookAuditOutputBody, err error) {
+
+	u := uri.Clone(c.requestURL(ctx))
+	var pathParts [3]string
+	pathParts[0] = "/repos/"
+	{
+		// Encode "repoId" parameter.
+		e := uri.NewPathEncoder(uri.PathEncoderConfig{
+			Param:   "repoId",
+			Style:   uri.PathStyleSimple,
+			Explode: false,
+		})
+		if err := func() error {
+			return e.EncodeValue(conv.StringToString(params.RepoId))
+		}(); err != nil {
+			return res, errors.Wrap(err, "encode path")
+		}
+		encoded, err := e.Result()
+		if err != nil {
+			return res, errors.Wrap(err, "encode path")
+		}
+		pathParts[1] = encoded
+	}
+	pathParts[2] = "/ci-webhooks/audit"
+	uri.AddPathParts(u, pathParts[:]...)
+
+	q := uri.NewQueryEncoder()
+	{
+		// Encode "event_type" parameter.
+		cfg := uri.QueryParameterEncodingConfig{
+			Name:    "event_type",
+			Style:   uri.QueryStyleForm,
+			Explode: false,
+		}
+
+		if err := q.EncodeParam(cfg, func(e uri.Encoder) error {
+			if val, ok := params.EventType.Get(); ok {
+				return e.EncodeValue(conv.StringToString(val))
+			}
+			return nil
+		}); err != nil {
+			return res, errors.Wrap(err, "encode query")
+		}
+	}
+	{
+		// Encode "limit" parameter.
+		cfg := uri.QueryParameterEncodingConfig{
+			Name:    "limit",
+			Style:   uri.QueryStyleForm,
+			Explode: false,
+		}
+
+		if err := q.EncodeParam(cfg, func(e uri.Encoder) error {
+			if val, ok := params.Limit.Get(); ok {
+				return e.EncodeValue(conv.Int64ToString(val))
+			}
+			return nil
+		}); err != nil {
+			return res, errors.Wrap(err, "encode query")
+		}
+	}
+	{
+		// Encode "offset" parameter.
+		cfg := uri.QueryParameterEncodingConfig{
+			Name:    "offset",
+			Style:   uri.QueryStyleForm,
+			Explode: false,
+		}
+
+		if err := q.EncodeParam(cfg, func(e uri.Encoder) error {
+			if val, ok := params.Offset.Get(); ok {
+				return e.EncodeValue(conv.Int64ToString(val))
+			}
+			return nil
+		}); err != nil {
+			return res, errors.Wrap(err, "encode query")
+		}
+	}
+	u.RawQuery = q.Values().Encode()
+
+	r, err := ht.NewRequest(ctx, "GET", u)
+	if err != nil {
+		return res, errors.Wrap(err, "create request")
+	}
+
+	{
+		type bitset = [1]uint8
+		var satisfied bitset
+		{
+
+			switch err := c.securityBearerAuth(ctx, ListRepoCIWebhookAuditOperation, r); {
+			case err == nil: // if NO error
+				satisfied[0] |= 1 << 0
+			case errors.Is(err, ogenerrors.ErrSkipClientSecurity):
+				// Skip this security.
+			default:
+				return res, errors.Wrap(err, "security \"BearerAuth\"")
+			}
+		}
+		{
+
+			switch err := c.securitySessionAuth(ctx, ListRepoCIWebhookAuditOperation, r); {
+			case err == nil: // if NO error
+				satisfied[0] |= 1 << 1
+			case errors.Is(err, ogenerrors.ErrSkipClientSecurity):
+				// Skip this security.
+			default:
+				return res, errors.Wrap(err, "security \"SessionAuth\"")
+			}
+		}
+
+		if ok := func() bool {
+		nextRequirement:
+			for _, requirement := range []bitset{
+				{0b00000001},
+				{0b00000010},
+			} {
+				for i, mask := range requirement {
+					if satisfied[i]&mask != mask {
+						continue nextRequirement
+					}
+				}
+				return true
+			}
+			return false
+		}(); !ok {
+			return res, ogenerrors.ErrSecurityRequirementIsNotSatisfied
+		}
+	}
+
+	resp, err := c.cfg.Client.Do(r)
+	if err != nil {
+		return res, errors.Wrap(err, "do request")
+	}
+	body := resp.Body
+	defer body.Close()
+
+	result, err := decodeListRepoCIWebhookAuditResponse(resp)
+	if err != nil {
+		return res, errors.Wrap(err, "decode response")
+	}
+
+	return result, nil
+}
+
 // ListRepoCIWebhooks invokes listRepoCIWebhooks operation.
 //
 // List a repo's CI webhooks.
@@ -5770,6 +7278,144 @@ func (c *Client) sendListRepoCIWebhooks(ctx context.Context, params ListRepoCIWe
 	defer body.Close()
 
 	result, err := decodeListRepoCIWebhooksResponse(resp)
+	if err != nil {
+		return res, errors.Wrap(err, "decode response")
+	}
+
+	return result, nil
+}
+
+// ListRepoCollaborators invokes listRepoCollaborators operation.
+//
+// List repo collaborators.
+//
+// GET /repos/{repoId}/collaborators
+func (c *Client) ListRepoCollaborators(ctx context.Context, params ListRepoCollaboratorsParams) (*ListRepoCollaboratorsOutputBody, error) {
+	res, err := c.sendListRepoCollaborators(ctx, params)
+	return res, err
+}
+
+func (c *Client) sendListRepoCollaborators(ctx context.Context, params ListRepoCollaboratorsParams) (res *ListRepoCollaboratorsOutputBody, err error) {
+
+	u := uri.Clone(c.requestURL(ctx))
+	var pathParts [3]string
+	pathParts[0] = "/repos/"
+	{
+		// Encode "repoId" parameter.
+		e := uri.NewPathEncoder(uri.PathEncoderConfig{
+			Param:   "repoId",
+			Style:   uri.PathStyleSimple,
+			Explode: false,
+		})
+		if err := func() error {
+			return e.EncodeValue(conv.StringToString(params.RepoId))
+		}(); err != nil {
+			return res, errors.Wrap(err, "encode path")
+		}
+		encoded, err := e.Result()
+		if err != nil {
+			return res, errors.Wrap(err, "encode path")
+		}
+		pathParts[1] = encoded
+	}
+	pathParts[2] = "/collaborators"
+	uri.AddPathParts(u, pathParts[:]...)
+
+	q := uri.NewQueryEncoder()
+	{
+		// Encode "pageSize" parameter.
+		cfg := uri.QueryParameterEncodingConfig{
+			Name:    "pageSize",
+			Style:   uri.QueryStyleForm,
+			Explode: false,
+		}
+
+		if err := q.EncodeParam(cfg, func(e uri.Encoder) error {
+			if val, ok := params.PageSize.Get(); ok {
+				return e.EncodeValue(conv.Int32ToString(val))
+			}
+			return nil
+		}); err != nil {
+			return res, errors.Wrap(err, "encode query")
+		}
+	}
+	{
+		// Encode "pageToken" parameter.
+		cfg := uri.QueryParameterEncodingConfig{
+			Name:    "pageToken",
+			Style:   uri.QueryStyleForm,
+			Explode: false,
+		}
+
+		if err := q.EncodeParam(cfg, func(e uri.Encoder) error {
+			if val, ok := params.PageToken.Get(); ok {
+				return e.EncodeValue(conv.StringToString(val))
+			}
+			return nil
+		}); err != nil {
+			return res, errors.Wrap(err, "encode query")
+		}
+	}
+	u.RawQuery = q.Values().Encode()
+
+	r, err := ht.NewRequest(ctx, "GET", u)
+	if err != nil {
+		return res, errors.Wrap(err, "create request")
+	}
+
+	{
+		type bitset = [1]uint8
+		var satisfied bitset
+		{
+
+			switch err := c.securityBearerAuth(ctx, ListRepoCollaboratorsOperation, r); {
+			case err == nil: // if NO error
+				satisfied[0] |= 1 << 0
+			case errors.Is(err, ogenerrors.ErrSkipClientSecurity):
+				// Skip this security.
+			default:
+				return res, errors.Wrap(err, "security \"BearerAuth\"")
+			}
+		}
+		{
+
+			switch err := c.securitySessionAuth(ctx, ListRepoCollaboratorsOperation, r); {
+			case err == nil: // if NO error
+				satisfied[0] |= 1 << 1
+			case errors.Is(err, ogenerrors.ErrSkipClientSecurity):
+				// Skip this security.
+			default:
+				return res, errors.Wrap(err, "security \"SessionAuth\"")
+			}
+		}
+
+		if ok := func() bool {
+		nextRequirement:
+			for _, requirement := range []bitset{
+				{0b00000001},
+				{0b00000010},
+			} {
+				for i, mask := range requirement {
+					if satisfied[i]&mask != mask {
+						continue nextRequirement
+					}
+				}
+				return true
+			}
+			return false
+		}(); !ok {
+			return res, ogenerrors.ErrSecurityRequirementIsNotSatisfied
+		}
+	}
+
+	resp, err := c.cfg.Client.Do(r)
+	if err != nil {
+		return res, errors.Wrap(err, "do request")
+	}
+	body := resp.Body
+	defer body.Close()
+
+	result, err := decodeListRepoCollaboratorsResponse(resp)
 	if err != nil {
 		return res, errors.Wrap(err, "decode response")
 	}
@@ -5915,6 +7561,278 @@ func (c *Client) sendListRepoGrants(ctx context.Context, params ListRepoGrantsPa
 	return result, nil
 }
 
+// ListRepoLanguageFacets invokes listRepoLanguageFacets operation.
+//
+// List repository language facets.
+//
+// GET /repos/facets/languages
+func (c *Client) ListRepoLanguageFacets(ctx context.Context, params ListRepoLanguageFacetsParams) (*RepoFacetPage, error) {
+	res, err := c.sendListRepoLanguageFacets(ctx, params)
+	return res, err
+}
+
+func (c *Client) sendListRepoLanguageFacets(ctx context.Context, params ListRepoLanguageFacetsParams) (res *RepoFacetPage, err error) {
+
+	u := uri.Clone(c.requestURL(ctx))
+	var pathParts [1]string
+	pathParts[0] = "/repos/facets/languages"
+	uri.AddPathParts(u, pathParts[:]...)
+
+	q := uri.NewQueryEncoder()
+	{
+		// Encode "pageSize" parameter.
+		cfg := uri.QueryParameterEncodingConfig{
+			Name:    "pageSize",
+			Style:   uri.QueryStyleForm,
+			Explode: false,
+		}
+
+		if err := q.EncodeParam(cfg, func(e uri.Encoder) error {
+			if val, ok := params.PageSize.Get(); ok {
+				return e.EncodeValue(conv.Int32ToString(val))
+			}
+			return nil
+		}); err != nil {
+			return res, errors.Wrap(err, "encode query")
+		}
+	}
+	{
+		// Encode "pageToken" parameter.
+		cfg := uri.QueryParameterEncodingConfig{
+			Name:    "pageToken",
+			Style:   uri.QueryStyleForm,
+			Explode: false,
+		}
+
+		if err := q.EncodeParam(cfg, func(e uri.Encoder) error {
+			if val, ok := params.PageToken.Get(); ok {
+				return e.EncodeValue(conv.StringToString(val))
+			}
+			return nil
+		}); err != nil {
+			return res, errors.Wrap(err, "encode query")
+		}
+	}
+	{
+		// Encode "q" parameter.
+		cfg := uri.QueryParameterEncodingConfig{
+			Name:    "q",
+			Style:   uri.QueryStyleForm,
+			Explode: false,
+		}
+
+		if err := q.EncodeParam(cfg, func(e uri.Encoder) error {
+			if val, ok := params.Q.Get(); ok {
+				return e.EncodeValue(conv.StringToString(val))
+			}
+			return nil
+		}); err != nil {
+			return res, errors.Wrap(err, "encode query")
+		}
+	}
+	u.RawQuery = q.Values().Encode()
+
+	r, err := ht.NewRequest(ctx, "GET", u)
+	if err != nil {
+		return res, errors.Wrap(err, "create request")
+	}
+
+	{
+		type bitset = [1]uint8
+		var satisfied bitset
+		{
+
+			switch err := c.securityBearerAuth(ctx, ListRepoLanguageFacetsOperation, r); {
+			case err == nil: // if NO error
+				satisfied[0] |= 1 << 0
+			case errors.Is(err, ogenerrors.ErrSkipClientSecurity):
+				// Skip this security.
+			default:
+				return res, errors.Wrap(err, "security \"BearerAuth\"")
+			}
+		}
+		{
+
+			switch err := c.securitySessionAuth(ctx, ListRepoLanguageFacetsOperation, r); {
+			case err == nil: // if NO error
+				satisfied[0] |= 1 << 1
+			case errors.Is(err, ogenerrors.ErrSkipClientSecurity):
+				// Skip this security.
+			default:
+				return res, errors.Wrap(err, "security \"SessionAuth\"")
+			}
+		}
+
+		if ok := func() bool {
+		nextRequirement:
+			for _, requirement := range []bitset{
+				{0b00000001},
+				{0b00000010},
+			} {
+				for i, mask := range requirement {
+					if satisfied[i]&mask != mask {
+						continue nextRequirement
+					}
+				}
+				return true
+			}
+			return false
+		}(); !ok {
+			return res, ogenerrors.ErrSecurityRequirementIsNotSatisfied
+		}
+	}
+
+	resp, err := c.cfg.Client.Do(r)
+	if err != nil {
+		return res, errors.Wrap(err, "do request")
+	}
+	body := resp.Body
+	defer body.Close()
+
+	result, err := decodeListRepoLanguageFacetsResponse(resp)
+	if err != nil {
+		return res, errors.Wrap(err, "decode response")
+	}
+
+	return result, nil
+}
+
+// ListRepoOrgFacets invokes listRepoOrgFacets operation.
+//
+// List repository org facets.
+//
+// GET /repos/facets/orgs
+func (c *Client) ListRepoOrgFacets(ctx context.Context, params ListRepoOrgFacetsParams) (*RepoFacetPage, error) {
+	res, err := c.sendListRepoOrgFacets(ctx, params)
+	return res, err
+}
+
+func (c *Client) sendListRepoOrgFacets(ctx context.Context, params ListRepoOrgFacetsParams) (res *RepoFacetPage, err error) {
+
+	u := uri.Clone(c.requestURL(ctx))
+	var pathParts [1]string
+	pathParts[0] = "/repos/facets/orgs"
+	uri.AddPathParts(u, pathParts[:]...)
+
+	q := uri.NewQueryEncoder()
+	{
+		// Encode "pageSize" parameter.
+		cfg := uri.QueryParameterEncodingConfig{
+			Name:    "pageSize",
+			Style:   uri.QueryStyleForm,
+			Explode: false,
+		}
+
+		if err := q.EncodeParam(cfg, func(e uri.Encoder) error {
+			if val, ok := params.PageSize.Get(); ok {
+				return e.EncodeValue(conv.Int32ToString(val))
+			}
+			return nil
+		}); err != nil {
+			return res, errors.Wrap(err, "encode query")
+		}
+	}
+	{
+		// Encode "pageToken" parameter.
+		cfg := uri.QueryParameterEncodingConfig{
+			Name:    "pageToken",
+			Style:   uri.QueryStyleForm,
+			Explode: false,
+		}
+
+		if err := q.EncodeParam(cfg, func(e uri.Encoder) error {
+			if val, ok := params.PageToken.Get(); ok {
+				return e.EncodeValue(conv.StringToString(val))
+			}
+			return nil
+		}); err != nil {
+			return res, errors.Wrap(err, "encode query")
+		}
+	}
+	{
+		// Encode "q" parameter.
+		cfg := uri.QueryParameterEncodingConfig{
+			Name:    "q",
+			Style:   uri.QueryStyleForm,
+			Explode: false,
+		}
+
+		if err := q.EncodeParam(cfg, func(e uri.Encoder) error {
+			if val, ok := params.Q.Get(); ok {
+				return e.EncodeValue(conv.StringToString(val))
+			}
+			return nil
+		}); err != nil {
+			return res, errors.Wrap(err, "encode query")
+		}
+	}
+	u.RawQuery = q.Values().Encode()
+
+	r, err := ht.NewRequest(ctx, "GET", u)
+	if err != nil {
+		return res, errors.Wrap(err, "create request")
+	}
+
+	{
+		type bitset = [1]uint8
+		var satisfied bitset
+		{
+
+			switch err := c.securityBearerAuth(ctx, ListRepoOrgFacetsOperation, r); {
+			case err == nil: // if NO error
+				satisfied[0] |= 1 << 0
+			case errors.Is(err, ogenerrors.ErrSkipClientSecurity):
+				// Skip this security.
+			default:
+				return res, errors.Wrap(err, "security \"BearerAuth\"")
+			}
+		}
+		{
+
+			switch err := c.securitySessionAuth(ctx, ListRepoOrgFacetsOperation, r); {
+			case err == nil: // if NO error
+				satisfied[0] |= 1 << 1
+			case errors.Is(err, ogenerrors.ErrSkipClientSecurity):
+				// Skip this security.
+			default:
+				return res, errors.Wrap(err, "security \"SessionAuth\"")
+			}
+		}
+
+		if ok := func() bool {
+		nextRequirement:
+			for _, requirement := range []bitset{
+				{0b00000001},
+				{0b00000010},
+			} {
+				for i, mask := range requirement {
+					if satisfied[i]&mask != mask {
+						continue nextRequirement
+					}
+				}
+				return true
+			}
+			return false
+		}(); !ok {
+			return res, ogenerrors.ErrSecurityRequirementIsNotSatisfied
+		}
+	}
+
+	resp, err := c.cfg.Client.Do(r)
+	if err != nil {
+		return res, errors.Wrap(err, "do request")
+	}
+	body := resp.Body
+	defer body.Close()
+
+	result, err := decodeListRepoOrgFacetsResponse(resp)
+	if err != nil {
+		return res, errors.Wrap(err, "decode response")
+	}
+
+	return result, nil
+}
+
 // ListRepos invokes listRepos operation.
 //
 // List the caller's readable repositories (placement index).
@@ -5995,6 +7913,176 @@ func (c *Client) sendListRepos(ctx context.Context, params ListReposParams) (res
 		if err := q.EncodeParam(cfg, func(e uri.Encoder) error {
 			if val, ok := params.Filter.Get(); ok {
 				return e.EncodeValue(conv.StringToString(val))
+			}
+			return nil
+		}); err != nil {
+			return res, errors.Wrap(err, "encode query")
+		}
+	}
+	{
+		// Encode "sort" parameter.
+		cfg := uri.QueryParameterEncodingConfig{
+			Name:    "sort",
+			Style:   uri.QueryStyleForm,
+			Explode: false,
+		}
+
+		if err := q.EncodeParam(cfg, func(e uri.Encoder) error {
+			if val, ok := params.Sort.Get(); ok {
+				return e.EncodeValue(conv.StringToString(val))
+			}
+			return nil
+		}); err != nil {
+			return res, errors.Wrap(err, "encode query")
+		}
+	}
+	{
+		// Encode "order" parameter.
+		cfg := uri.QueryParameterEncodingConfig{
+			Name:    "order",
+			Style:   uri.QueryStyleForm,
+			Explode: false,
+		}
+
+		if err := q.EncodeParam(cfg, func(e uri.Encoder) error {
+			if val, ok := params.Order.Get(); ok {
+				return e.EncodeValue(conv.StringToString(string(val)))
+			}
+			return nil
+		}); err != nil {
+			return res, errors.Wrap(err, "encode query")
+		}
+	}
+	{
+		// Encode "language" parameter.
+		cfg := uri.QueryParameterEncodingConfig{
+			Name:    "language",
+			Style:   uri.QueryStyleForm,
+			Explode: false,
+		}
+
+		if err := q.EncodeParam(cfg, func(e uri.Encoder) error {
+			if val, ok := params.Language.Get(); ok {
+				return e.EncodeValue(conv.StringToString(val))
+			}
+			return nil
+		}); err != nil {
+			return res, errors.Wrap(err, "encode query")
+		}
+	}
+	{
+		// Encode "visibility" parameter.
+		cfg := uri.QueryParameterEncodingConfig{
+			Name:    "visibility",
+			Style:   uri.QueryStyleForm,
+			Explode: false,
+		}
+
+		if err := q.EncodeParam(cfg, func(e uri.Encoder) error {
+			if val, ok := params.Visibility.Get(); ok {
+				return e.EncodeValue(conv.StringToString(string(val)))
+			}
+			return nil
+		}); err != nil {
+			return res, errors.Wrap(err, "encode query")
+		}
+	}
+	{
+		// Encode "archived" parameter.
+		cfg := uri.QueryParameterEncodingConfig{
+			Name:    "archived",
+			Style:   uri.QueryStyleForm,
+			Explode: false,
+		}
+
+		if err := q.EncodeParam(cfg, func(e uri.Encoder) error {
+			if val, ok := params.Archived.Get(); ok {
+				return e.EncodeValue(conv.StringToString(string(val)))
+			}
+			return nil
+		}); err != nil {
+			return res, errors.Wrap(err, "encode query")
+		}
+	}
+	{
+		// Encode "hasCheckpoints" parameter.
+		cfg := uri.QueryParameterEncodingConfig{
+			Name:    "hasCheckpoints",
+			Style:   uri.QueryStyleForm,
+			Explode: false,
+		}
+
+		if err := q.EncodeParam(cfg, func(e uri.Encoder) error {
+			if val, ok := params.HasCheckpoints.Get(); ok {
+				return e.EncodeValue(conv.StringToString(string(val)))
+			}
+			return nil
+		}); err != nil {
+			return res, errors.Wrap(err, "encode query")
+		}
+	}
+	{
+		// Encode "org" parameter.
+		cfg := uri.QueryParameterEncodingConfig{
+			Name:    "org",
+			Style:   uri.QueryStyleForm,
+			Explode: false,
+		}
+
+		if err := q.EncodeParam(cfg, func(e uri.Encoder) error {
+			if val, ok := params.Org.Get(); ok {
+				return e.EncodeValue(conv.StringToString(val))
+			}
+			return nil
+		}); err != nil {
+			return res, errors.Wrap(err, "encode query")
+		}
+	}
+	{
+		// Encode "q" parameter.
+		cfg := uri.QueryParameterEncodingConfig{
+			Name:    "q",
+			Style:   uri.QueryStyleForm,
+			Explode: false,
+		}
+
+		if err := q.EncodeParam(cfg, func(e uri.Encoder) error {
+			if val, ok := params.Q.Get(); ok {
+				return e.EncodeValue(conv.StringToString(val))
+			}
+			return nil
+		}); err != nil {
+			return res, errors.Wrap(err, "encode query")
+		}
+	}
+	{
+		// Encode "status" parameter.
+		cfg := uri.QueryParameterEncodingConfig{
+			Name:    "status",
+			Style:   uri.QueryStyleForm,
+			Explode: false,
+		}
+
+		if err := q.EncodeParam(cfg, func(e uri.Encoder) error {
+			if val, ok := params.Status.Get(); ok {
+				return e.EncodeValue(conv.StringToString(string(val)))
+			}
+			return nil
+		}); err != nil {
+			return res, errors.Wrap(err, "encode query")
+		}
+	}
+	{
+		// Encode "permission" parameter.
+		cfg := uri.QueryParameterEncodingConfig{
+			Name:    "permission",
+			Style:   uri.QueryStyleForm,
+			Explode: false,
+		}
+
+		if err := q.EncodeParam(cfg, func(e uri.Encoder) error {
+			if val, ok := params.Permission.Get(); ok {
+				return e.EncodeValue(conv.StringToString(string(val)))
 			}
 			return nil
 		}); err != nil {
@@ -6393,30 +8481,35 @@ func (c *Client) sendLookupRepoBySlug(ctx context.Context, params LookupRepoBySl
 	return result, nil
 }
 
-// LookupResources invokes lookupResources operation.
+// MintOrgCIGitHubActionsCredential invokes mintOrgCIGitHubActionsCredential operation.
 //
-// List resources of a type the caller can access.
+// Operator-only: requires platform#admin, unlike the Buildkite routes beside it, because GitHub
+// Actions has no enrolment path yet and a credential minted here cannot be used. Mints the inbound
+// webhook credential for one GitHub account: a fresh webhook secret (returned once, in this 201) and
+// the endpoint URL to configure the GitHub webhook with, plus optionally the outbound dispatch
+// api_token (write-only, never returned; has_api_token confirms storage). With api_token, an
+// already-minted github-actions row gets the token stored/rotated instead (200, no secret re-issued).
 //
-// GET /access/{resourceType}
-func (c *Client) LookupResources(ctx context.Context, params LookupResourcesParams) (*LookupResourcesOutputBody, error) {
-	res, err := c.sendLookupResources(ctx, params)
+// POST /orgs/{orgId}/ci/github-actions/credential
+func (c *Client) MintOrgCIGitHubActionsCredential(ctx context.Context, request *MintOrgCIGitHubActionsCredentialInputBody, params MintOrgCIGitHubActionsCredentialParams) (*OrgCIGitHubActionsCredentialView, error) {
+	res, err := c.sendMintOrgCIGitHubActionsCredential(ctx, request, params)
 	return res, err
 }
 
-func (c *Client) sendLookupResources(ctx context.Context, params LookupResourcesParams) (res *LookupResourcesOutputBody, err error) {
+func (c *Client) sendMintOrgCIGitHubActionsCredential(ctx context.Context, request *MintOrgCIGitHubActionsCredentialInputBody, params MintOrgCIGitHubActionsCredentialParams) (res *OrgCIGitHubActionsCredentialView, err error) {
 
 	u := uri.Clone(c.requestURL(ctx))
-	var pathParts [2]string
-	pathParts[0] = "/access/"
+	var pathParts [3]string
+	pathParts[0] = "/orgs/"
 	{
-		// Encode "resourceType" parameter.
+		// Encode "orgId" parameter.
 		e := uri.NewPathEncoder(uri.PathEncoderConfig{
-			Param:   "resourceType",
+			Param:   "orgId",
 			Style:   uri.PathStyleSimple,
 			Explode: false,
 		})
 		if err := func() error {
-			return e.EncodeValue(conv.StringToString(params.ResourceType))
+			return e.EncodeValue(conv.StringToString(params.OrgId))
 		}(); err != nil {
 			return res, errors.Wrap(err, "encode path")
 		}
@@ -6426,65 +8519,15 @@ func (c *Client) sendLookupResources(ctx context.Context, params LookupResources
 		}
 		pathParts[1] = encoded
 	}
+	pathParts[2] = "/ci/github-actions/credential"
 	uri.AddPathParts(u, pathParts[:]...)
 
-	q := uri.NewQueryEncoder()
-	{
-		// Encode "pageSize" parameter.
-		cfg := uri.QueryParameterEncodingConfig{
-			Name:    "pageSize",
-			Style:   uri.QueryStyleForm,
-			Explode: false,
-		}
-
-		if err := q.EncodeParam(cfg, func(e uri.Encoder) error {
-			if val, ok := params.PageSize.Get(); ok {
-				return e.EncodeValue(conv.Int32ToString(val))
-			}
-			return nil
-		}); err != nil {
-			return res, errors.Wrap(err, "encode query")
-		}
-	}
-	{
-		// Encode "pageToken" parameter.
-		cfg := uri.QueryParameterEncodingConfig{
-			Name:    "pageToken",
-			Style:   uri.QueryStyleForm,
-			Explode: false,
-		}
-
-		if err := q.EncodeParam(cfg, func(e uri.Encoder) error {
-			if val, ok := params.PageToken.Get(); ok {
-				return e.EncodeValue(conv.StringToString(val))
-			}
-			return nil
-		}); err != nil {
-			return res, errors.Wrap(err, "encode query")
-		}
-	}
-	{
-		// Encode "permission" parameter.
-		cfg := uri.QueryParameterEncodingConfig{
-			Name:    "permission",
-			Style:   uri.QueryStyleForm,
-			Explode: false,
-		}
-
-		if err := q.EncodeParam(cfg, func(e uri.Encoder) error {
-			if val, ok := params.Permission.Get(); ok {
-				return e.EncodeValue(conv.StringToString(val))
-			}
-			return nil
-		}); err != nil {
-			return res, errors.Wrap(err, "encode query")
-		}
-	}
-	u.RawQuery = q.Values().Encode()
-
-	r, err := ht.NewRequest(ctx, "GET", u)
+	r, err := ht.NewRequest(ctx, "POST", u)
 	if err != nil {
 		return res, errors.Wrap(err, "create request")
+	}
+	if err := encodeMintOrgCIGitHubActionsCredentialRequest(request, r); err != nil {
+		return res, errors.Wrap(err, "encode request")
 	}
 
 	{
@@ -6492,7 +8535,7 @@ func (c *Client) sendLookupResources(ctx context.Context, params LookupResources
 		var satisfied bitset
 		{
 
-			switch err := c.securityBearerAuth(ctx, LookupResourcesOperation, r); {
+			switch err := c.securityBearerAuth(ctx, MintOrgCIGitHubActionsCredentialOperation, r); {
 			case err == nil: // if NO error
 				satisfied[0] |= 1 << 0
 			case errors.Is(err, ogenerrors.ErrSkipClientSecurity):
@@ -6503,7 +8546,7 @@ func (c *Client) sendLookupResources(ctx context.Context, params LookupResources
 		}
 		{
 
-			switch err := c.securitySessionAuth(ctx, LookupResourcesOperation, r); {
+			switch err := c.securitySessionAuth(ctx, MintOrgCIGitHubActionsCredentialOperation, r); {
 			case err == nil: // if NO error
 				satisfied[0] |= 1 << 1
 			case errors.Is(err, ogenerrors.ErrSkipClientSecurity):
@@ -6539,7 +8582,7 @@ func (c *Client) sendLookupResources(ctx context.Context, params LookupResources
 	body := resp.Body
 	defer body.Close()
 
-	result, err := decodeLookupResourcesResponse(resp)
+	result, err := decodeMintOrgCIGitHubActionsCredentialResponse(resp)
 	if err != nil {
 		return res, errors.Wrap(err, "decode response")
 	}
@@ -6662,6 +8705,110 @@ func (c *Client) sendPatchRepoCIWebhook(ctx context.Context, request *PatchRepoC
 	defer body.Close()
 
 	result, err := decodePatchRepoCIWebhookResponse(resp)
+	if err != nil {
+		return res, errors.Wrap(err, "decode response")
+	}
+
+	return result, nil
+}
+
+// RegisterOrgCIBuildkiteCluster invokes registerOrgCIBuildkiteCluster operation.
+//
+// Register or update a Buildkite hosted cluster for an org.
+//
+// POST /orgs/{orgId}/ci/buildkite/clusters
+func (c *Client) RegisterOrgCIBuildkiteCluster(ctx context.Context, request *RegisterOrgCIBuildkiteClusterInputBody, params RegisterOrgCIBuildkiteClusterParams) (*OrgCIBuildkiteClusterView, error) {
+	res, err := c.sendRegisterOrgCIBuildkiteCluster(ctx, request, params)
+	return res, err
+}
+
+func (c *Client) sendRegisterOrgCIBuildkiteCluster(ctx context.Context, request *RegisterOrgCIBuildkiteClusterInputBody, params RegisterOrgCIBuildkiteClusterParams) (res *OrgCIBuildkiteClusterView, err error) {
+
+	u := uri.Clone(c.requestURL(ctx))
+	var pathParts [3]string
+	pathParts[0] = "/orgs/"
+	{
+		// Encode "orgId" parameter.
+		e := uri.NewPathEncoder(uri.PathEncoderConfig{
+			Param:   "orgId",
+			Style:   uri.PathStyleSimple,
+			Explode: false,
+		})
+		if err := func() error {
+			return e.EncodeValue(conv.StringToString(params.OrgId))
+		}(); err != nil {
+			return res, errors.Wrap(err, "encode path")
+		}
+		encoded, err := e.Result()
+		if err != nil {
+			return res, errors.Wrap(err, "encode path")
+		}
+		pathParts[1] = encoded
+	}
+	pathParts[2] = "/ci/buildkite/clusters"
+	uri.AddPathParts(u, pathParts[:]...)
+
+	r, err := ht.NewRequest(ctx, "POST", u)
+	if err != nil {
+		return res, errors.Wrap(err, "create request")
+	}
+	if err := encodeRegisterOrgCIBuildkiteClusterRequest(request, r); err != nil {
+		return res, errors.Wrap(err, "encode request")
+	}
+
+	{
+		type bitset = [1]uint8
+		var satisfied bitset
+		{
+
+			switch err := c.securityBearerAuth(ctx, RegisterOrgCIBuildkiteClusterOperation, r); {
+			case err == nil: // if NO error
+				satisfied[0] |= 1 << 0
+			case errors.Is(err, ogenerrors.ErrSkipClientSecurity):
+				// Skip this security.
+			default:
+				return res, errors.Wrap(err, "security \"BearerAuth\"")
+			}
+		}
+		{
+
+			switch err := c.securitySessionAuth(ctx, RegisterOrgCIBuildkiteClusterOperation, r); {
+			case err == nil: // if NO error
+				satisfied[0] |= 1 << 1
+			case errors.Is(err, ogenerrors.ErrSkipClientSecurity):
+				// Skip this security.
+			default:
+				return res, errors.Wrap(err, "security \"SessionAuth\"")
+			}
+		}
+
+		if ok := func() bool {
+		nextRequirement:
+			for _, requirement := range []bitset{
+				{0b00000001},
+				{0b00000010},
+			} {
+				for i, mask := range requirement {
+					if satisfied[i]&mask != mask {
+						continue nextRequirement
+					}
+				}
+				return true
+			}
+			return false
+		}(); !ok {
+			return res, ogenerrors.ErrSecurityRequirementIsNotSatisfied
+		}
+	}
+
+	resp, err := c.cfg.Client.Do(r)
+	if err != nil {
+		return res, errors.Wrap(err, "do request")
+	}
+	body := resp.Body
+	defer body.Close()
+
+	result, err := decodeRegisterOrgCIBuildkiteClusterResponse(resp)
 	if err != nil {
 		return res, errors.Wrap(err, "decode response")
 	}
@@ -7046,6 +9193,176 @@ func (c *Client) sendResolveMirrorPlacements(ctx context.Context, params Resolve
 	defer body.Close()
 
 	result, err := decodeResolveMirrorPlacementsResponse(resp)
+	if err != nil {
+		return res, errors.Wrap(err, "decode response")
+	}
+
+	return result, nil
+}
+
+// ResolveRepoIDs invokes resolveRepoIDs operation.
+//
+// Resolve repository ids to full name and provider.
+//
+// POST /repos/resolve-ids
+func (c *Client) ResolveRepoIDs(ctx context.Context, request *ResolveRepoIDsInputBody) (*ResolveRepoIDsResponse, error) {
+	res, err := c.sendResolveRepoIDs(ctx, request)
+	return res, err
+}
+
+func (c *Client) sendResolveRepoIDs(ctx context.Context, request *ResolveRepoIDsInputBody) (res *ResolveRepoIDsResponse, err error) {
+
+	u := uri.Clone(c.requestURL(ctx))
+	var pathParts [1]string
+	pathParts[0] = "/repos/resolve-ids"
+	uri.AddPathParts(u, pathParts[:]...)
+
+	r, err := ht.NewRequest(ctx, "POST", u)
+	if err != nil {
+		return res, errors.Wrap(err, "create request")
+	}
+	if err := encodeResolveRepoIDsRequest(request, r); err != nil {
+		return res, errors.Wrap(err, "encode request")
+	}
+
+	{
+		type bitset = [1]uint8
+		var satisfied bitset
+		{
+
+			switch err := c.securityBearerAuth(ctx, ResolveRepoIDsOperation, r); {
+			case err == nil: // if NO error
+				satisfied[0] |= 1 << 0
+			case errors.Is(err, ogenerrors.ErrSkipClientSecurity):
+				// Skip this security.
+			default:
+				return res, errors.Wrap(err, "security \"BearerAuth\"")
+			}
+		}
+		{
+
+			switch err := c.securitySessionAuth(ctx, ResolveRepoIDsOperation, r); {
+			case err == nil: // if NO error
+				satisfied[0] |= 1 << 1
+			case errors.Is(err, ogenerrors.ErrSkipClientSecurity):
+				// Skip this security.
+			default:
+				return res, errors.Wrap(err, "security \"SessionAuth\"")
+			}
+		}
+
+		if ok := func() bool {
+		nextRequirement:
+			for _, requirement := range []bitset{
+				{0b00000001},
+				{0b00000010},
+			} {
+				for i, mask := range requirement {
+					if satisfied[i]&mask != mask {
+						continue nextRequirement
+					}
+				}
+				return true
+			}
+			return false
+		}(); !ok {
+			return res, ogenerrors.ErrSecurityRequirementIsNotSatisfied
+		}
+	}
+
+	resp, err := c.cfg.Client.Do(r)
+	if err != nil {
+		return res, errors.Wrap(err, "do request")
+	}
+	body := resp.Body
+	defer body.Close()
+
+	result, err := decodeResolveRepoIDsResponse(resp)
+	if err != nil {
+		return res, errors.Wrap(err, "decode response")
+	}
+
+	return result, nil
+}
+
+// ResolveRepos invokes resolveRepos operation.
+//
+// Resolve provider-qualified repository lifecycle states.
+//
+// POST /repos/resolve
+func (c *Client) ResolveRepos(ctx context.Context, request *ResolveReposInputBody) (*ResolveReposResponse, error) {
+	res, err := c.sendResolveRepos(ctx, request)
+	return res, err
+}
+
+func (c *Client) sendResolveRepos(ctx context.Context, request *ResolveReposInputBody) (res *ResolveReposResponse, err error) {
+
+	u := uri.Clone(c.requestURL(ctx))
+	var pathParts [1]string
+	pathParts[0] = "/repos/resolve"
+	uri.AddPathParts(u, pathParts[:]...)
+
+	r, err := ht.NewRequest(ctx, "POST", u)
+	if err != nil {
+		return res, errors.Wrap(err, "create request")
+	}
+	if err := encodeResolveReposRequest(request, r); err != nil {
+		return res, errors.Wrap(err, "encode request")
+	}
+
+	{
+		type bitset = [1]uint8
+		var satisfied bitset
+		{
+
+			switch err := c.securityBearerAuth(ctx, ResolveReposOperation, r); {
+			case err == nil: // if NO error
+				satisfied[0] |= 1 << 0
+			case errors.Is(err, ogenerrors.ErrSkipClientSecurity):
+				// Skip this security.
+			default:
+				return res, errors.Wrap(err, "security \"BearerAuth\"")
+			}
+		}
+		{
+
+			switch err := c.securitySessionAuth(ctx, ResolveReposOperation, r); {
+			case err == nil: // if NO error
+				satisfied[0] |= 1 << 1
+			case errors.Is(err, ogenerrors.ErrSkipClientSecurity):
+				// Skip this security.
+			default:
+				return res, errors.Wrap(err, "security \"SessionAuth\"")
+			}
+		}
+
+		if ok := func() bool {
+		nextRequirement:
+			for _, requirement := range []bitset{
+				{0b00000001},
+				{0b00000010},
+			} {
+				for i, mask := range requirement {
+					if satisfied[i]&mask != mask {
+						continue nextRequirement
+					}
+				}
+				return true
+			}
+			return false
+		}(); !ok {
+			return res, ogenerrors.ErrSecurityRequirementIsNotSatisfied
+		}
+	}
+
+	resp, err := c.cfg.Client.Do(r)
+	if err != nil {
+		return res, errors.Wrap(err, "do request")
+	}
+	body := resp.Body
+	defer body.Close()
+
+	result, err := decodeResolveReposResponse(resp)
 	if err != nil {
 		return res, errors.Wrap(err, "decode response")
 	}
@@ -7743,6 +10060,230 @@ func (c *Client) sendRevokeServiceAccountAccess(ctx context.Context, params Revo
 	return result, nil
 }
 
+// RotateOrgCIBuildkiteInboundSecret invokes rotateOrgCIBuildkiteInboundSecret operation.
+//
+// Rotate an org's inbound Buildkite webhook secret.
+//
+// PUT /orgs/{orgId}/ci/buildkite/credential/{bkOrg}/inbound-secret
+func (c *Client) RotateOrgCIBuildkiteInboundSecret(ctx context.Context, params RotateOrgCIBuildkiteInboundSecretParams) (*OrgCIBuildkiteCredentialView, error) {
+	res, err := c.sendRotateOrgCIBuildkiteInboundSecret(ctx, params)
+	return res, err
+}
+
+func (c *Client) sendRotateOrgCIBuildkiteInboundSecret(ctx context.Context, params RotateOrgCIBuildkiteInboundSecretParams) (res *OrgCIBuildkiteCredentialView, err error) {
+
+	u := uri.Clone(c.requestURL(ctx))
+	var pathParts [5]string
+	pathParts[0] = "/orgs/"
+	{
+		// Encode "orgId" parameter.
+		e := uri.NewPathEncoder(uri.PathEncoderConfig{
+			Param:   "orgId",
+			Style:   uri.PathStyleSimple,
+			Explode: false,
+		})
+		if err := func() error {
+			return e.EncodeValue(conv.StringToString(params.OrgId))
+		}(); err != nil {
+			return res, errors.Wrap(err, "encode path")
+		}
+		encoded, err := e.Result()
+		if err != nil {
+			return res, errors.Wrap(err, "encode path")
+		}
+		pathParts[1] = encoded
+	}
+	pathParts[2] = "/ci/buildkite/credential/"
+	{
+		// Encode "bkOrg" parameter.
+		e := uri.NewPathEncoder(uri.PathEncoderConfig{
+			Param:   "bkOrg",
+			Style:   uri.PathStyleSimple,
+			Explode: false,
+		})
+		if err := func() error {
+			return e.EncodeValue(conv.StringToString(params.BkOrg))
+		}(); err != nil {
+			return res, errors.Wrap(err, "encode path")
+		}
+		encoded, err := e.Result()
+		if err != nil {
+			return res, errors.Wrap(err, "encode path")
+		}
+		pathParts[3] = encoded
+	}
+	pathParts[4] = "/inbound-secret"
+	uri.AddPathParts(u, pathParts[:]...)
+
+	r, err := ht.NewRequest(ctx, "PUT", u)
+	if err != nil {
+		return res, errors.Wrap(err, "create request")
+	}
+
+	{
+		type bitset = [1]uint8
+		var satisfied bitset
+		{
+
+			switch err := c.securityBearerAuth(ctx, RotateOrgCIBuildkiteInboundSecretOperation, r); {
+			case err == nil: // if NO error
+				satisfied[0] |= 1 << 0
+			case errors.Is(err, ogenerrors.ErrSkipClientSecurity):
+				// Skip this security.
+			default:
+				return res, errors.Wrap(err, "security \"BearerAuth\"")
+			}
+		}
+		{
+
+			switch err := c.securitySessionAuth(ctx, RotateOrgCIBuildkiteInboundSecretOperation, r); {
+			case err == nil: // if NO error
+				satisfied[0] |= 1 << 1
+			case errors.Is(err, ogenerrors.ErrSkipClientSecurity):
+				// Skip this security.
+			default:
+				return res, errors.Wrap(err, "security \"SessionAuth\"")
+			}
+		}
+
+		if ok := func() bool {
+		nextRequirement:
+			for _, requirement := range []bitset{
+				{0b00000001},
+				{0b00000010},
+			} {
+				for i, mask := range requirement {
+					if satisfied[i]&mask != mask {
+						continue nextRequirement
+					}
+				}
+				return true
+			}
+			return false
+		}(); !ok {
+			return res, ogenerrors.ErrSecurityRequirementIsNotSatisfied
+		}
+	}
+
+	resp, err := c.cfg.Client.Do(r)
+	if err != nil {
+		return res, errors.Wrap(err, "do request")
+	}
+	body := resp.Body
+	defer body.Close()
+
+	result, err := decodeRotateOrgCIBuildkiteInboundSecretResponse(resp)
+	if err != nil {
+		return res, errors.Wrap(err, "decode response")
+	}
+
+	return result, nil
+}
+
+// SetBranchProtection invokes setBranchProtection operation.
+//
+// Set repository branch protection.
+//
+// PUT /repos/{repoId}/branch-protection
+func (c *Client) SetBranchProtection(ctx context.Context, request *BranchProtection, params SetBranchProtectionParams) (*BranchProtection, error) {
+	res, err := c.sendSetBranchProtection(ctx, request, params)
+	return res, err
+}
+
+func (c *Client) sendSetBranchProtection(ctx context.Context, request *BranchProtection, params SetBranchProtectionParams) (res *BranchProtection, err error) {
+
+	u := uri.Clone(c.requestURL(ctx))
+	var pathParts [3]string
+	pathParts[0] = "/repos/"
+	{
+		// Encode "repoId" parameter.
+		e := uri.NewPathEncoder(uri.PathEncoderConfig{
+			Param:   "repoId",
+			Style:   uri.PathStyleSimple,
+			Explode: false,
+		})
+		if err := func() error {
+			return e.EncodeValue(conv.StringToString(params.RepoId))
+		}(); err != nil {
+			return res, errors.Wrap(err, "encode path")
+		}
+		encoded, err := e.Result()
+		if err != nil {
+			return res, errors.Wrap(err, "encode path")
+		}
+		pathParts[1] = encoded
+	}
+	pathParts[2] = "/branch-protection"
+	uri.AddPathParts(u, pathParts[:]...)
+
+	r, err := ht.NewRequest(ctx, "PUT", u)
+	if err != nil {
+		return res, errors.Wrap(err, "create request")
+	}
+	if err := encodeSetBranchProtectionRequest(request, r); err != nil {
+		return res, errors.Wrap(err, "encode request")
+	}
+
+	{
+		type bitset = [1]uint8
+		var satisfied bitset
+		{
+
+			switch err := c.securityBearerAuth(ctx, SetBranchProtectionOperation, r); {
+			case err == nil: // if NO error
+				satisfied[0] |= 1 << 0
+			case errors.Is(err, ogenerrors.ErrSkipClientSecurity):
+				// Skip this security.
+			default:
+				return res, errors.Wrap(err, "security \"BearerAuth\"")
+			}
+		}
+		{
+
+			switch err := c.securitySessionAuth(ctx, SetBranchProtectionOperation, r); {
+			case err == nil: // if NO error
+				satisfied[0] |= 1 << 1
+			case errors.Is(err, ogenerrors.ErrSkipClientSecurity):
+				// Skip this security.
+			default:
+				return res, errors.Wrap(err, "security \"SessionAuth\"")
+			}
+		}
+
+		if ok := func() bool {
+		nextRequirement:
+			for _, requirement := range []bitset{
+				{0b00000001},
+				{0b00000010},
+			} {
+				for i, mask := range requirement {
+					if satisfied[i]&mask != mask {
+						continue nextRequirement
+					}
+				}
+				return true
+			}
+			return false
+		}(); !ok {
+			return res, ogenerrors.ErrSecurityRequirementIsNotSatisfied
+		}
+	}
+
+	resp, err := c.cfg.Client.Do(r)
+	if err != nil {
+		return res, errors.Wrap(err, "do request")
+	}
+	body := resp.Body
+	defer body.Close()
+
+	result, err := decodeSetBranchProtectionResponse(resp)
+	if err != nil {
+		return res, errors.Wrap(err, "decode response")
+	}
+
+	return result, nil
+}
+
 // SetRepoVisibility invokes setRepoVisibility operation.
 //
 // Set repository visibility.
@@ -7840,6 +10381,110 @@ func (c *Client) sendSetRepoVisibility(ctx context.Context, request *SetRepoVisi
 	defer body.Close()
 
 	result, err := decodeSetRepoVisibilityResponse(resp)
+	if err != nil {
+		return res, errors.Wrap(err, "decode response")
+	}
+
+	return result, nil
+}
+
+// UpdateBranchProtection invokes updateBranchProtection operation.
+//
+// Add or remove protected branches.
+//
+// PATCH /repos/{repoId}/branch-protection
+func (c *Client) UpdateBranchProtection(ctx context.Context, request *UpdateBranchProtectionInputBody, params UpdateBranchProtectionParams) (*BranchProtection, error) {
+	res, err := c.sendUpdateBranchProtection(ctx, request, params)
+	return res, err
+}
+
+func (c *Client) sendUpdateBranchProtection(ctx context.Context, request *UpdateBranchProtectionInputBody, params UpdateBranchProtectionParams) (res *BranchProtection, err error) {
+
+	u := uri.Clone(c.requestURL(ctx))
+	var pathParts [3]string
+	pathParts[0] = "/repos/"
+	{
+		// Encode "repoId" parameter.
+		e := uri.NewPathEncoder(uri.PathEncoderConfig{
+			Param:   "repoId",
+			Style:   uri.PathStyleSimple,
+			Explode: false,
+		})
+		if err := func() error {
+			return e.EncodeValue(conv.StringToString(params.RepoId))
+		}(); err != nil {
+			return res, errors.Wrap(err, "encode path")
+		}
+		encoded, err := e.Result()
+		if err != nil {
+			return res, errors.Wrap(err, "encode path")
+		}
+		pathParts[1] = encoded
+	}
+	pathParts[2] = "/branch-protection"
+	uri.AddPathParts(u, pathParts[:]...)
+
+	r, err := ht.NewRequest(ctx, "PATCH", u)
+	if err != nil {
+		return res, errors.Wrap(err, "create request")
+	}
+	if err := encodeUpdateBranchProtectionRequest(request, r); err != nil {
+		return res, errors.Wrap(err, "encode request")
+	}
+
+	{
+		type bitset = [1]uint8
+		var satisfied bitset
+		{
+
+			switch err := c.securityBearerAuth(ctx, UpdateBranchProtectionOperation, r); {
+			case err == nil: // if NO error
+				satisfied[0] |= 1 << 0
+			case errors.Is(err, ogenerrors.ErrSkipClientSecurity):
+				// Skip this security.
+			default:
+				return res, errors.Wrap(err, "security \"BearerAuth\"")
+			}
+		}
+		{
+
+			switch err := c.securitySessionAuth(ctx, UpdateBranchProtectionOperation, r); {
+			case err == nil: // if NO error
+				satisfied[0] |= 1 << 1
+			case errors.Is(err, ogenerrors.ErrSkipClientSecurity):
+				// Skip this security.
+			default:
+				return res, errors.Wrap(err, "security \"SessionAuth\"")
+			}
+		}
+
+		if ok := func() bool {
+		nextRequirement:
+			for _, requirement := range []bitset{
+				{0b00000001},
+				{0b00000010},
+			} {
+				for i, mask := range requirement {
+					if satisfied[i]&mask != mask {
+						continue nextRequirement
+					}
+				}
+				return true
+			}
+			return false
+		}(); !ok {
+			return res, ogenerrors.ErrSecurityRequirementIsNotSatisfied
+		}
+	}
+
+	resp, err := c.cfg.Client.Do(r)
+	if err != nil {
+		return res, errors.Wrap(err, "do request")
+	}
+	body := resp.Body
+	defer body.Close()
+
+	result, err := decodeUpdateBranchProtectionResponse(resp)
 	if err != nil {
 		return res, errors.Wrap(err, "decode response")
 	}
