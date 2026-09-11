@@ -154,17 +154,30 @@ func GetRemoteURLInDir(ctx context.Context, dir, remoteName string) (string, err
 //
 // Returns at least one entry on success.
 func GetPushURLs(ctx context.Context, remoteName string) ([]string, error) {
-	return GetPushURLsInDir(ctx, "", remoteName)
+	return GetPushURLsInDir(ctx, "", nil, remoteName)
 }
 
 // GetPushURLsInDir is GetPushURLs against a specific worktree, the push-side
 // counterpart of GetRemoteURLInDir. Callers that resolve a remote's fetch URL
 // in a named directory must resolve its push URLs in the same one, or the two
 // halves of an ownership vote describe different repositories.
-func GetPushURLsInDir(ctx context.Context, dir, remoteName string) ([]string, error) {
+//
+// env, when non-nil, replaces the child's environment. A caller that can run
+// inside a git hook MUST pass one with git's repo-selector variables removed
+// (gitrepo.EnvWithoutRepoOverrides): git exports GIT_DIR and GIT_WORK_TREE to
+// its hooks and they outrank cmd.Dir, so the child would otherwise report the
+// HOOK's remotes rather than dir's — and this output feeds an ownership vote,
+// so the wrong repository's URLs would decide where checkpoints are read from.
+//
+// Passed in rather than filtered here because this package depends on nothing
+// beyond the standard library, while gitrepo pulls in go-git.
+func GetPushURLsInDir(ctx context.Context, dir string, env []string, remoteName string) ([]string, error) {
 	cmd := exec.CommandContext(ctx, "git", "remote", "get-url", "--push", "--all", remoteName)
 	if dir != "" {
 		cmd.Dir = dir
+	}
+	if env != nil {
+		cmd.Env = env
 	}
 	output, err := cmd.Output()
 	if err != nil {

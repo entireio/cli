@@ -28,6 +28,18 @@ func checkpointForgeTransport(t *testing.T, origin, fork, dedicated string) []st
 	realGit, err := exec.LookPath("git")
 	require.NoError(t, err)
 	binDir := t.TempDir()
+	// Deliberately a LITERAL script, duplicated with the near-identical shim in
+	// cmd/entire/cli/checkpoint/remote/checkpoint_ref_from_test.go. The two
+	// differ on purpose — this one also maps bare remote names and matches
+	// fetch-pack|push because it drives a spawned binary; that one maps URLs
+	// for an in-process caller and matches ls-remote|fetch.
+	//
+	// They were shared once, as a helper that built this script by
+	// interpolating the subcommand set and rewrite table. That turned two
+	// literals into a shell-code generator whose inputs reached an executable
+	// placed first on PATH, so a rewrite key carrying `;` or `)` was command
+	// execution. Keep them literal: dedupe by giving each caller its own
+	// script, never by generating one from parameters.
 	testutil.WriteFile(t, binDir, "git", `#!/bin/bash
 args=("$@")
 for arg in "$@"; do

@@ -197,6 +197,18 @@ func dedicatedCandidatesFixture(t *testing.T, refOnFork, refOnOrigin bool) (stri
 	t.Setenv("GIT_ALLOW_PROTOCOL", "file")
 	t.Setenv(CheckpointTokenEnvVar, "")
 	binDir := t.TempDir()
+	// Deliberately a LITERAL script, duplicated with the near-identical shim in
+	// cmd/entire/cli/integration_test/checkpoint_read_remotes_test.go. The two
+	// differ on purpose — this one maps URLs for an in-process caller and
+	// matches ls-remote|fetch; that one also maps bare remote names and
+	// matches fetch-pack|push, because it drives a spawned binary.
+	//
+	// They were shared once, as a helper that built this script by
+	// interpolating the subcommand set and rewrite table. That turned two
+	// literals into a shell-code generator whose inputs reached an executable
+	// placed first on PATH, so a rewrite key carrying `;` or `)` was command
+	// execution. Keep them literal: dedupe by giving each caller its own
+	// script, never by generating one from parameters.
 	testutil.WriteFile(t, binDir, "git", `#!/bin/bash
 args=("$@")
 for arg in "$@"; do

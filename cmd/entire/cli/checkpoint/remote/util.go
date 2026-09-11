@@ -162,7 +162,7 @@ func fetchURLResolved(ctx context.Context, opts ...FetchURLOptions) (string, boo
 		// absence. The FIRST push url, matching the push side's own transport
 		// derivation and the single destination checkpoint refs are sent to.
 		if servedByCandidate && opt.LeadReadRemote != "" {
-			pushURLs, pushErr := gitremote.GetPushURLsInDir(ctx, opt.WorktreeRoot, opt.LeadReadRemote)
+			pushURLs, pushErr := gitremote.GetPushURLsInDir(ctx, opt.WorktreeRoot, gitrepo.EnvWithoutRepoOverrides(), opt.LeadReadRemote)
 			if pushErr != nil {
 				return "", false, true, fmt.Errorf("resolve push destination for read candidate %q: %w", opt.LeadReadRemote, pushErr)
 			}
@@ -305,7 +305,7 @@ func fetchOwnershipURLs(ctx context.Context, opt FetchURLOptions) ([]string, err
 // an identity whose owner cannot be determined counts as inherited, because
 // dropping it fails OPEN.
 func pushOwnershipURLs(ctx context.Context, opt FetchURLOptions, lead string) ([]string, error) {
-	pushURLs, err := gitremote.GetPushURLsInDir(ctx, opt.WorktreeRoot, lead)
+	pushURLs, err := gitremote.GetPushURLsInDir(ctx, opt.WorktreeRoot, gitrepo.EnvWithoutRepoOverrides(), lead)
 	if err != nil {
 		return nil, fmt.Errorf("resolve read candidate push URLs for remote %q: %w", lead, err)
 	}
