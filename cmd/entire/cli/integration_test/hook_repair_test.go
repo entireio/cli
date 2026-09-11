@@ -14,7 +14,14 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestHookRepair_UserEditWarnsOnAgentTurn(t *testing.T) {
+// A hook the user edited must survive an agent turn untouched, and status
+// must say so. Repair never silently overwrites hand-edited hooks.
+//
+// This also asserted a systemMessage warning on the turn's stdout. Proactive
+// warnings are not part of this change — they are #1965's feature — so the
+// warning half moved out with them. The protection itself is what matters
+// here and is unchanged.
+func TestHookRepair_UserEditSurvivesAgentTurn(t *testing.T) {
 	t.Parallel()
 	env := NewRepoWithCommit(t)
 	env.RunCLI("enable", "--agent", agentClaudeCode, "--telemetry=false")
@@ -32,14 +39,8 @@ func TestHookRepair_UserEditWarnsOnAgentTurn(t *testing.T) {
 	cmd.Dir = env.RepoDir
 	cmd.Env = env.cliEnv()
 	cmd.Stdin = bytes.NewReader(input)
-	out, err := cmd.Output()
+	_, err = cmd.Output()
 	require.NoError(t, err)
-	var response struct {
-		SystemMessage string `json:"systemMessage"`
-	}
-	require.NoError(t, json.Unmarshal(out, &response))
-	require.Contains(t, response.SystemMessage, "Git hook integration is outdated")
-	require.Contains(t, response.SystemMessage, "entire doctor")
 	after, err := os.ReadFile(hookPath)
 	require.NoError(t, err)
 	require.Equal(t, edited, after)

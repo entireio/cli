@@ -13,11 +13,10 @@ import (
 
 // Compile-time interface assertions for new interfaces.
 var (
-	_ agent.TranscriptAnalyzer           = (*GeminiCLIAgent)(nil)
-	_ agent.TokenCalculator              = (*GeminiCLIAgent)(nil)
-	_ agent.HookResponseWriter           = (*GeminiCLIAgent)(nil)
-	_ agent.StandaloneHookResponseWriter = (*GeminiCLIAgent)(nil)
-	_ agent.ContextInjector              = (*GeminiCLIAgent)(nil)
+	_ agent.TranscriptAnalyzer = (*GeminiCLIAgent)(nil)
+	_ agent.TokenCalculator    = (*GeminiCLIAgent)(nil)
+	_ agent.HookResponseWriter = (*GeminiCLIAgent)(nil)
+	_ agent.ContextInjector    = (*GeminiCLIAgent)(nil)
 )
 
 // WriteHookResponse outputs a hook response message as plain text to stdout.
@@ -38,10 +37,6 @@ func (g *GeminiCLIAgent) WriteHookResponse(message string) error {
 	}
 	return nil
 }
-
-// RequiresStandaloneHookResponse preserves Gemini's plain-text response path;
-// JSON systemMessage is displayed twice by Gemini CLI.
-func (g *GeminiCLIAgent) RequiresStandaloneHookResponse() {}
 
 // InjectionEvent reports that Gemini injects model context at TurnStart (its
 // BeforeAgent hook). Gemini CLI's hook runner merges

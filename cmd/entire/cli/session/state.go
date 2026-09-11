@@ -217,11 +217,6 @@ type State struct {
 	// warning by `entire status`.
 	CaptureDegradedAt *time.Time `json:"capture_degraded_at,omitempty"`
 
-	// LastHookHealthWarning is the stable health fingerprint most recently
-	// shown to this session. Human-readable warning copy is deliberately not
-	// persisted so copy changes do not cause repeated warnings.
-	LastHookHealthWarning string `json:"last_hook_health_warning,omitempty"`
-
 	// StepCount is the number of checkpoints/steps created in this session.
 	// JSON tag kept as "checkpoint_count" for backward compatibility with existing state files.
 	StepCount int `json:"checkpoint_count"`
@@ -476,11 +471,6 @@ type TaskRecord struct {
 	// when no declared path was available; the materializer falls back to
 	// ResolveAgentTranscriptPath in that case.
 	DeclaredTranscriptPath string `json:"declared_transcript_path,omitempty"`
-
-	// TranscriptUnavailable is set when the agent stores child activity only in
-	// the parent transcript. It prevents generic layout fallback from attaching
-	// an unrelated file to this record during condensation.
-	TranscriptUnavailable bool `json:"transcript_unavailable,omitempty"`
 
 	// Files is the set of files touched by this subagent, merged into the
 	// session's FilesTouched at completion time. Populated when the record
