@@ -88,15 +88,14 @@ func inspectHookTrustForDeclared(hooksJSONPath string, declared []string) HookTr
 	return inspection
 }
 
+// codexConfigPath returns the user-level config.toml, or "" when the Codex
+// home cannot be resolved, which the caller reads as "trust unknown".
 func codexConfigPath() string {
-	if h := os.Getenv("CODEX_HOME"); h != "" {
-		return filepath.Join(h, "config.toml")
-	}
-	home, err := os.UserHomeDir()
+	codexHome, err := resolveCodexHome()
 	if err != nil {
 		return ""
 	}
-	return filepath.Join(home, ".codex", "config.toml")
+	return filepath.Join(codexHome, "config.toml")
 }
 
 // declaredCodexEvents reads hooks.json and returns the snake_case labels

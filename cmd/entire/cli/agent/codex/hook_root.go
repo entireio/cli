@@ -243,19 +243,15 @@ func resolveWorktreeHooksPath(worktreeRoot string) (WorktreeHooksPath, error) {
 }
 
 func isUserHookRoot(hookRoot string) bool {
-	home, err := os.UserHomeDir()
-	if err == nil {
+	if home, err := os.UserHomeDir(); err == nil {
 		canonicalHome, canonicalErr := canonicalPath(home)
 		if canonicalErr == nil && hookRoot == canonicalHome {
 			return true
 		}
 	}
-	codexHome := os.Getenv("CODEX_HOME")
-	if codexHome == "" {
-		if home == "" {
-			return false
-		}
-		codexHome = filepath.Join(home, ".codex")
+	codexHome, err := resolveCodexHome()
+	if err != nil {
+		return false
 	}
 	canonicalCodexHome, err := canonicalPath(codexHome)
 	if err != nil {
