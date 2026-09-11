@@ -894,8 +894,12 @@ type sessionBriefJSON struct {
 	// SessionID distinguishes two sessions for the same agent, which the
 	// previous one-entry-per-agent shape could not represent.
 	SessionID string `json:"session_id,omitempty"`
-	Model     string `json:"model,omitempty"`
-	Status    string `json:"status"`
+	// WorktreePath and Branch say WHERE a session is, which is the whole
+	// reason two entries for one agent are distinguishable in practice.
+	WorktreePath string `json:"worktree_path,omitempty"`
+	Branch       string `json:"branch,omitempty"`
+	Model        string `json:"model,omitempty"`
+	Status       string `json:"status"`
 	// CaptureDegraded reports that a session for this agent last turned with a
 	// status scan over budget, so new-file detection was skipped.
 	CaptureDegraded bool `json:"capture_degraded,omitempty"`
@@ -967,9 +971,15 @@ func runStatusJSON(ctx context.Context, w io.Writer) error {
 					if agentName == "" {
 						agentName = unknownPlaceholder
 					}
+					branch := st.Branch
+					if branch == "" && st.WorktreePath != "" {
+						branch = resolveWorktreeBranch(ctx, st.WorktreePath)
+					}
 					result.ActiveSessions = append(result.ActiveSessions, sessionBriefJSON{
 						Agent:           agentName,
 						SessionID:       st.SessionID,
+						WorktreePath:    st.WorktreePath,
+						Branch:          branch,
 						Model:           st.ModelName,
 						Status:          sessionStatusLabel(st),
 						CaptureDegraded: st.CaptureDegradedAt != nil,
