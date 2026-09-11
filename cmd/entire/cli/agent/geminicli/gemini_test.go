@@ -836,3 +836,69 @@ func TestGeminiCLIAgent_LaunchCmd(t *testing.T) {
 		t.Errorf("args missing prompt: %v", cmd.Args)
 	}
 }
+
+func TestGetSessionDir_HonorsGeminiCLIHome(t *testing.T) {
+	geminiHome := t.TempDir()
+	t.Setenv("ENTIRE_TEST_GEMINI_PROJECT_DIR", "")
+	t.Setenv("GEMINI_CLI_HOME", geminiHome)
+
+	dir, err := (&GeminiCLIAgent{}).GetSessionDir("/some/repo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Gemini treats the variable as the home directory and still creates
+	// .gemini inside it, so the result is $GEMINI_CLI_HOME/.gemini/...
+	want := filepath.Join(geminiHome, ".gemini", "tmp", GetProjectHash("/some/repo"), "chats")
+	if dir != want {
+		t.Errorf("GetSessionDir = %q, want %q", dir, want)
+	}
+}
+
+func TestGetSessionBaseDir_HonorsGeminiCLIHome(t *testing.T) {
+	geminiHome := t.TempDir()
+	t.Setenv("GEMINI_CLI_HOME", geminiHome)
+
+	base, err := (&GeminiCLIAgent{}).GetSessionBaseDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := filepath.Join(geminiHome, ".gemini", "tmp"); base != want {
+		t.Errorf("GetSessionBaseDir = %q, want %q", base, want)
+	}
+}
+
+func TestResolveGeminiHome(t *testing.T) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	abs := t.TempDir()
+	tests := []struct {
+		name    string
+		env     string
+		want    string
+		wantErr bool
+	}{
+		{name: "unset falls back to the user home", env: "", want: home},
+		{name: "absolute override wins", env: abs, want: abs},
+		{name: "relative override is refused", env: filepath.Join("relative", "home"), wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("GEMINI_CLI_HOME", tt.env)
+			got, err := resolveGeminiHome()
+			if tt.wantErr {
+				if err == nil || !strings.Contains(err.Error(), "GEMINI_CLI_HOME") {
+					t.Fatalf("resolveGeminiHome() = %q, %v; want an error naming GEMINI_CLI_HOME", got, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got != tt.want {
+				t.Errorf("resolveGeminiHome() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
