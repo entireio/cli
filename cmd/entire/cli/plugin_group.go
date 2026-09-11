@@ -74,6 +74,18 @@ type installSource struct {
 	// Ref is the repository URL, the filesystem path, or the catalog name,
 	// according to Kind.
 	Ref string
+	// Resolved is the catalog entry a caller already looked up for Ref.
+	//
+	// Set it whenever the caller has SHOWN the user which repository will be
+	// installed. runRemoteInstall reads the index for its own reasons, and
+	// that second read can disagree with the first: a refresh that failed
+	// leaves the freshness marker untouched, so the next call retries the
+	// fetch and may succeed with different content, and a concurrent
+	// `plugin index update --force` rewrites the clone under the lock either
+	// way. Re-resolving after a confirmation therefore lets the prompt name
+	// repository A while repository B is downloaded and executed — which
+	// makes naming the repository worse than useless.
+	Resolved *PluginIndexEntry
 }
 
 // parseInstallSource classifies an install argument and validates it in one
@@ -202,6 +214,7 @@ type remoteInstallFlags struct {
 
 func runRemoteInstall(ctx context.Context, cmd *cobra.Command, src installSource, flags remoteInstallFlags) error {
 	out, errOut := cmd.OutOrStdout(), cmd.ErrOrStderr()
+	ctx = withPluginProgress(ctx, errOut)
 
 	repoURL := src.Ref
 	var trusted bool
@@ -210,13 +223,23 @@ func runRemoteInstall(ctx context.Context, cmd *cobra.Command, src installSource
 	// Both paths need the catalog: one to resolve a name, the other for the
 	// trust check. Sync once. An unreachable index is fatal only for the
 	// name-resolution path; a URL install degrades to "not listed".
+	stopIndex := startPluginStep(ctx, "Checking plugin index...")
 	idx, idxErr := SyncPluginIndex(ctx, resolvePluginIndexURL(flags.index), false)
+	stopIndex()
 
 	if src.Kind == installFromIndex {
-		if idxErr != nil {
-			return fmt.Errorf("resolve %q via plugin index: %w", src.Ref, idxErr)
+		entry := src.Resolved
+		// Only consult the index when the caller did not already resolve the
+		// name. An idxErr is fatal only in that case: a caller that arrives
+		// with an entry has done the lookup, and the index is needed after
+		// this only for dependency planning, which already degrades to a
+		// warning when it is unavailable.
+		if entry == nil {
+			if idxErr != nil {
+				return fmt.Errorf("resolve %q via plugin index: %w", src.Ref, idxErr)
+			}
+			entry = idx.Find(src.Ref)
 		}
-		entry := idx.Find(src.Ref)
 		if entry == nil {
 			// Bare names never resolve to local files (see
 			// parseInstallSource), but a user who typed one expecting a
@@ -250,7 +273,7 @@ func runRemoteInstall(ctx context.Context, cmd *cobra.Command, src installSource
 		// An untrusted source cannot proceed unconfirmed: automation never
 		// reaches this prompt, because the non-interactive path fails above
 		// with the --yes hint.
-		proceed, err := confirmInstallOrCancel(ctx, out,
+		proceed, err := confirmInstallOrCancel(ctx, errOut,
 			fmt.Sprintf("Install from %s? The repository is not listed in the plugin index.", redactURL(repoURL)),
 			flags.yes)
 		if err != nil || !proceed {
@@ -300,7 +323,9 @@ func runRemoteInstall(ctx context.Context, cmd *cobra.Command, src installSource
 // error — doctor reports the gap afterwards.
 func installPlannedDeps(ctx context.Context, cmd *cobra.Command, reqs []PluginRequirement, idx *PluginIndex, flags remoteInstallFlags) error {
 	out, errOut := cmd.OutOrStdout(), cmd.ErrOrStderr()
+	stopPlan := startPluginStep(ctx, "Checking plugin dependencies...")
 	plan, err := PlanDependencyInstalls(ctx, reqs, idx)
+	stopPlan()
 	if err != nil {
 		return fmt.Errorf("resolve dependencies: %w", err)
 	}
@@ -325,7 +350,7 @@ func installPlannedDeps(ctx context.Context, cmd *cobra.Command, reqs []PluginRe
 			fmt.Fprintf(out, "  %s  (%s)\n", a.Name, redactURL(a.RepoURL))
 		}
 	}
-	ok, err := confirmPluginAction(ctx, "Install them now?", flags.yes)
+	ok, err := confirmPluginAction(ctx, errOut, "Install them now?", flags.yes)
 	switch {
 	case errors.Is(err, errConfirmNeedsTerminal):
 		// Non-interactive without --yes: the main install already
@@ -375,19 +400,15 @@ var errConfirmNeedsTerminal = errors.New("confirmation required but no terminal 
 // non-interactive runs without --yes return errConfirmNeedsTerminal rather
 // than guessing. Prompt errors (including huh.ErrUserAborted on Ctrl+C/Esc)
 // are returned raw for callers to map via handleFormCancellation.
-func confirmPluginAction(ctx context.Context, prompt string, assumeYes bool) (bool, error) {
+func confirmPluginAction(ctx context.Context, out io.Writer, prompt string, assumeYes bool) (bool, error) {
 	if assumeYes {
 		return true, nil
 	}
 	if !interactive.CanPromptInteractively() {
 		return false, fmt.Errorf("%w (%s)", errConfirmNeedsTerminal, prompt)
 	}
-	confirmed := false
-	form := NewAccessibleForm(huh.NewGroup(
-		huh.NewConfirm().Title(prompt).Value(&confirmed),
-	))
-	if err := form.RunWithContext(ctx); err != nil {
-		// %w keeps huh.ErrUserAborted reachable for handleFormCancellation.
+	confirmed, err := runPluginConfirm(ctx, out, prompt, false)
+	if err != nil {
 		return false, fmt.Errorf("confirm: %w", err)
 	}
 	return confirmed, nil
@@ -400,7 +421,7 @@ func confirmPluginAction(ctx context.Context, prompt string, assumeYes bool) (bo
 // wrapped, and errConfirmNeedsTerminal propagates unchanged so the caller
 // decides whether an unattended run may proceed without an answer.
 func confirmInstallOrCancel(ctx context.Context, out io.Writer, prompt string, assumeYes bool) (bool, error) {
-	ok, err := confirmPluginAction(ctx, prompt, assumeYes)
+	ok, err := confirmPluginAction(ctx, out, prompt, assumeYes)
 	switch {
 	case errors.Is(err, errConfirmNeedsTerminal):
 		return false, err
@@ -540,7 +561,11 @@ manifest upgrades need; local-dev symlink installs are skipped. Plugins
 installed with --pin are skipped until reinstalled without the pin.`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			ctx := cmd.Context()
+			// Upgrading does the same network work as installing — list tags,
+			// fetch metadata, download, place the binary — so it reports the
+			// same stages. Without this the startPluginStep calls on that path
+			// are no-ops, because progress travels on the context.
+			ctx := withPluginProgress(cmd.Context(), cmd.ErrOrStderr())
 			out := cmd.OutOrStdout()
 			var names []string
 			switch {
@@ -738,7 +763,9 @@ in scripts and non-interactive runs.`,
 				huh.NewSelect[string]().Title("Install a plugin").Options(options...).Value(&choice),
 			))
 			if err := form.RunWithContext(ctx); err != nil {
-				return handleFormCancellation(cmd.OutOrStdout(), "Browse", err)
+				// Stderr, like the confirmation below it: stdout carries the
+				// install result and nothing else.
+				return handleFormCancellation(cmd.ErrOrStderr(), "Browse", err)
 			}
 			if choice == "" {
 				return nil
@@ -750,7 +777,7 @@ in scripts and non-interactive runs.`,
 			// binary and links it onto PATH in one keystroke. The picker also
 			// only shows name and description, so the repository the binary
 			// actually comes from is named here for the first time.
-			out := cmd.OutOrStdout()
+			out := cmd.ErrOrStderr()
 			prompt := fmt.Sprintf("Install %q?", choice)
 			if entry := idx.Find(choice); entry != nil {
 				prompt = fmt.Sprintf("Install %q from %s?", choice, redactURL(entry.RepoURL))

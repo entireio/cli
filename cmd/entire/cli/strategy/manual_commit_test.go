@@ -28,6 +28,67 @@ import (
 
 const testTrailerCheckpointID id.CheckpointID = "a1b2c3d4e5f6"
 
+func TestCodexInventoryInitialization(t *testing.T) {
+	dir := t.TempDir()
+	testutil.InitRepo(t, dir)
+	testutil.WriteFile(t, dir, "initial.txt", "initial\n")
+	testutil.GitAdd(t, dir, "initial.txt")
+	testutil.GitCommit(t, dir, "initial")
+	t.Chdir(dir)
+
+	s := NewManualCommitStrategy()
+	repo, err := OpenRepository(context.Background())
+	require.NoError(t, err)
+	defer repo.Close()
+	require.NoError(t, s.initializeSession(context.Background(), repo, "codex-inventory-new", agent.AgentTypeCodex, "", "", ""))
+	newState, err := s.loadSessionState(context.Background(), "codex-inventory-new")
+	require.NoError(t, err)
+	require.NotNil(t, newState.SubagentInventoryComplete)
+	assert.True(t, *newState.SubagentInventoryComplete)
+	require.NotNil(t, newState.SubagentTokensBaselineComplete)
+	assert.True(t, *newState.SubagentTokensBaselineComplete)
+
+	incomplete := false
+	pendingAt := time.Now().UTC().Truncate(time.Second)
+	partialInventory := []session.SubagentInventoryEntry{{
+		AgentID:          "child-observed-before-parent",
+		ObservedTurnIDs:  []string{"turn-pending", "turn-finalized"},
+		FinalizedTurnIDs: []string{"turn-finalized"},
+	}}
+	partialTokenUsage := &agent.TokenUsage{InputTokens: 100, SubagentTokens: &agent.TokenUsage{InputTokens: 60}, SubagentTokensComplete: &incomplete}
+	partialCheckpointUsage := &agent.TokenUsage{OutputTokens: 50, SubagentTokens: &agent.TokenUsage{OutputTokens: 30}, SubagentTokensComplete: &incomplete}
+	partialBaseline := &agent.TokenUsage{SubagentTokens: &agent.TokenUsage{InputTokens: 40}, SubagentTokensComplete: &incomplete}
+	partialRecords := []session.TaskRecord{
+		{ToolUseID: "child-live", AgentID: "child-observed-before-parent", StartedAt: pendingAt},
+		{ToolUseID: "child-completed", AgentID: "child-observed-before-parent", StartedAt: pendingAt, CompletedAt: pendingAt.Add(time.Second)},
+	}
+	require.NoError(t, s.saveSessionState(context.Background(), &SessionState{
+		SessionID:                      "codex-inventory-partial",
+		StartedAt:                      time.Now(),
+		AgentType:                      agent.AgentTypeCodex,
+		SubagentInventory:              partialInventory,
+		SubagentLedgerVersion:          9,
+		SubagentInventoryComplete:      &incomplete,
+		SubagentTokensBaselineComplete: &incomplete,
+		TokenUsage:                     partialTokenUsage,
+		CheckpointTokenUsage:           partialCheckpointUsage,
+		SubagentTokensBaseline:         partialBaseline,
+		TaskRecords:                    partialRecords,
+	}))
+	require.NoError(t, s.initializeSession(context.Background(), repo, "codex-inventory-partial", agent.AgentTypeCodex, "", "", ""))
+	partial, err := s.loadSessionState(context.Background(), "codex-inventory-partial")
+	require.NoError(t, err)
+	assert.False(t, *partial.SubagentInventoryComplete, "partial-state repair must not promote unknown inventory coverage")
+	assert.False(t, *partial.SubagentTokensBaselineComplete)
+	assert.Equal(t, uint64(9), partial.SubagentLedgerVersion)
+	assert.Equal(t, partialInventory, partial.SubagentInventory)
+	assert.True(t, partial.HasTaskContent(), "repair must retain both live and completed-unmaterialized task content")
+	assert.Equal(t, partialRecords, partial.TaskRecords)
+	assert.Equal(t, partialTokenUsage, partial.TokenUsage)
+	assert.Equal(t, partialCheckpointUsage, partial.CheckpointTokenUsage)
+	assert.Equal(t, partialBaseline, partial.SubagentTokensBaseline)
+}
+
 // testTranscriptPromptResponse is a minimal transcript used across strategy tests.
 const testTranscriptPromptResponse = "{\"type\":\"human\",\"message\":{\"content\":\"test prompt\"}}\n{\"type\":\"assistant\",\"message\":{\"content\":\"test response\"}}\n"
 

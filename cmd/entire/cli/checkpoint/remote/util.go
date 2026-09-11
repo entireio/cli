@@ -55,6 +55,38 @@ func FetchURL(ctx context.Context, opts ...FetchURLOptions) (string, error) {
 	return url, err
 }
 
+// ReadsDedicatedStore reports whether checkpoint READS resolve to the
+// configured dedicated checkpoint_remote.
+//
+// leadReadRemote contributes an IDENTITY to the ownership vote, and nothing
+// else: when a checkpoint_remote is configured the URL is always derived from
+// origin, which is why FetchURLOptions.LeadReadRemote says the dedicated path
+// "ignores it entirely". Pass the elected sync remote so the vote sees the
+// same fork-shaped identity the push side sees.
+//
+// The read counterpart of PushURL's enabled bit, and deliberately a separate
+// question: both require every identity to be owned by the checkpoint repo's
+// owner, but the push identity set is origin plus the elected remote's PUSH
+// URLs while the fetch set is origin plus leadReadRemote's FETCH URL — so a
+// remote whose two URLs have different owners is eligible on one side and not
+// the other. A caller reporting where checkpoints COME FROM must ask this
+// one; PushURL answers where they would GO.
+//
+// False covers every reason reads do not land on the configured store, not
+// only an inherited one: no checkpoint_remote configured, ownership not
+// confirmed, unreadable settings, an origin URL that will not parse, or a
+// protocol that maps to no checkpoint URL and no provider host. A caller that
+// needs to explain WHY cannot read it off this bool; the reasons are logged
+// where they are decided.
+//
+// Local-only, like FetchURL: git config and settings reads, no dialing. An
+// error means no read URL resolves at all — distinct from false, which means
+// reads resolve somewhere else.
+func ReadsDedicatedStore(ctx context.Context, leadReadRemote string) (bool, error) {
+	_, authoritative, err := fetchURLAuthoritative(ctx, FetchURLOptions{LeadReadRemote: leadReadRemote})
+	return authoritative, err
+}
+
 // fetchURLAuthoritative is FetchURL plus whether the returned URL is
 // authoritative for checkpoint refs. It is false exactly when a
 // checkpoint_remote IS configured (or cannot be determined) but resolution

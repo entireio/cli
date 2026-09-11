@@ -661,7 +661,7 @@ func (r *CodexHookRunner) runCodexHook(hookName string, inputJSON []byte) error 
 	cmd := exec.CommandContext(context.Background(), getTestBinary(), "hooks", "codex", hookName)
 	cmd.Dir = r.RepoDir
 	cmd.Stdin = bytes.NewReader(inputJSON)
-	cmd.Env = testutil.GitIsolatedEnv()
+	cmd.Env = append(testutil.GitIsolatedEnv(), "ENTIRE_TEST_CODEX_SESSION_DIR="+filepath.Join(r.RepoDir, ".entire", "tmp"))
 
 	output, err := cmd.CombinedOutput()
 	if err != nil {

@@ -1125,30 +1125,20 @@ func hasTokenUsageData(usage *agent.TokenUsage) bool {
 	return hasTokenUsageData(usage.SubagentTokens)
 }
 
-// fillMissingSubagentTokensFrom fills destination's SubagentTokens from source
-// only when destination has none, returning a copy. It exists because the
-// transcript recompute runs with subagentsDir="" and so always yields nil
-// SubagentTokens (see extractSessionData), which would otherwise replace a total
-// already computed.
-//
-// Condensation sources the fill from state.CheckpointTokenUsage, which SaveStep
-// already rescoped to this window, so committed checkpoints stay summable rather
-// than each re-reporting the session total. It copies rather than mutating a
-// value that session state may also reference.
+// fillMissingSubagentTokensFrom fills absent child coverage from this checkpoint
+// window. Explicit completeness (including incomplete coverage) is authoritative.
 func fillMissingSubagentTokensFrom(destination, source *agent.TokenUsage) *agent.TokenUsage {
-	if destination == nil || destination.SubagentTokens != nil || source == nil || source.SubagentTokens == nil {
+	if destination == nil || destination.SubagentTokens != nil || destination.SubagentTokensComplete != nil {
 		return destination
 	}
-	filled := *destination
-	filled.SubagentTokens = source.SubagentTokens
-	return &filled
+	return replaceSubagentTokensFrom(destination, source)
 }
 
-// replaceSubagentTokensFrom replaces destination's nested total with source's.
-// Session state needs the latest cumulative snapshot even when checkpoint usage
-// carries a baseline-scoped delta; checkpoint metadata keeps the delta.
+// replaceSubagentTokensFrom replaces child coverage with the source snapshot.
+// Session state needs cumulative coverage while checkpoint metadata keeps its
+// window delta. Copying preserves both values when they share a pointer.
 func replaceSubagentTokensFrom(destination, source *agent.TokenUsage) *agent.TokenUsage {
-	if source == nil || source.SubagentTokens == nil {
+	if source == nil || (source.SubagentTokens == nil && source.SubagentTokensComplete == nil) {
 		return destination
 	}
 	if destination == nil {
@@ -1156,6 +1146,14 @@ func replaceSubagentTokensFrom(destination, source *agent.TokenUsage) *agent.Tok
 	}
 	filled := *destination
 	filled.SubagentTokens = source.SubagentTokens
+	filled.SubagentTokensComplete = nil
+	if source.SubagentTokensComplete != nil {
+		complete := *source.SubagentTokensComplete
+		filled.SubagentTokensComplete = &complete
+		if !complete {
+			filled.SubagentTokens = nil
+		}
+	}
 	return &filled
 }
 
