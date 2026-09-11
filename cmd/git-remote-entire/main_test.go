@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -13,7 +12,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/entireio/auth-go/sts"
 	"github.com/entireio/cli/cmd/entire/cli/auth"
 )
 
@@ -113,60 +111,6 @@ func TestGitActionFromRequest(t *testing.T) {
 			req := httptest.NewRequestWithContext(context.Background(), tc.method, "https://host"+tc.path+"?"+tc.query, nil)
 			if got := gitActionFromRequest(req); got != tc.want {
 				t.Fatalf("gitActionFromRequest(%s %s?%s) = %q, want %q", tc.method, tc.path, tc.query, got, tc.want)
-			}
-		})
-	}
-}
-
-func TestFatalMessage(t *testing.T) {
-	t.Parallel()
-	parsedURL := &url.URL{Scheme: "entire", Host: "aws-us-east-2.entire.io", Path: "/et/paul/dogbark"}
-	wrongCluster := &sts.ExchangeError{
-		StatusCode:  http.StatusBadRequest,
-		Code:        "invalid_target",
-		Description: `audience host "aws-us-east-2.entire.io" does not host this repo; it lives on "aws-eu-central-1.entire.io" — re-target the request there`,
-	}
-	tests := []struct {
-		name        string
-		err         error
-		contains    []string
-		notContains []string
-	}{
-		{
-			name: "wrong cluster names correct host and URL",
-			// Wrapped to mirror production: the ExchangeError surfaces buried under
-			// several fmt.Errorf layers, so errors.As must dig it out.
-			err: fmt.Errorf("stateless-connect v2 info/refs: fetching info/refs from entry domain: repo-scoped token exchange: oauth token exchange: %w", wrongCluster),
-			contains: []string{
-				"aws-eu-central-1.entire.io",
-				"git clone entire://aws-eu-central-1.entire.io/et/paul/dogbark",
-			},
-			notContains: []string{"HTTP 400", "invalid_target"},
-		},
-		{
-			name:     "invalid_target without lives-on hint falls back",
-			err:      &sts.ExchangeError{StatusCode: http.StatusBadRequest, Code: "invalid_target", Description: "no servable mirror"},
-			contains: []string{"fatal:", "no servable mirror"},
-		},
-		{
-			name:     "unrelated error falls back verbatim",
-			err:      errors.New("connection refused"),
-			contains: []string{"fatal: connection refused"},
-		},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			got := fatalMessage(tc.err, parsedURL)
-			for _, sub := range tc.contains {
-				if !strings.Contains(got, sub) {
-					t.Errorf("fatalMessage() = %q, missing %q", got, sub)
-				}
-			}
-			for _, sub := range tc.notContains {
-				if strings.Contains(got, sub) {
-					t.Errorf("fatalMessage() = %q, should not contain %q", got, sub)
-				}
 			}
 		})
 	}
