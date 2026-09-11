@@ -3,6 +3,7 @@ package opencode
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -140,9 +141,54 @@ func (a *OpenCodeAgent) ParseHookEvent(ctx context.Context, hookName string, std
 			Timestamp: time.Now(),
 		}, nil
 
+	case HookNameSubagentStart:
+		raw, err := agent.ReadAndParseHookInput[subagentStartRaw](stdin)
+		if err != nil {
+			return nil, err
+		}
+		if err := validateSubagentIdentity(raw.SessionID, raw.ToolUseID, raw.SubagentID); err != nil {
+			return nil, err
+		}
+		parentRef, err := sessionTranscriptPath(ctx, raw.SessionID)
+		if err != nil {
+			return nil, err
+		}
+		return &agent.Event{
+			Type:               agent.SubagentStart,
+			SessionID:          raw.SessionID,
+			SessionRef:         parentRef,
+			ToolUseID:          raw.ToolUseID,
+			SubagentID:         raw.SubagentID,
+			SubagentType:       raw.SubagentType,
+			TaskDescription:    raw.TaskDescription,
+			DeferredCompletion: true,
+			Timestamp:          time.Now(),
+		}, nil
+
 	default:
 		return nil, nil //nolint:nilnil // nil event = no lifecycle action for unknown hooks
 	}
+}
+
+// validateSubagentIdentity checks the three IDs an OpenCode subagent payload
+// must carry. The child ID becomes an `opencode export` argument and a file
+// name under .entire/tmp; the tool-use ID becomes tasks/<id>/ in the
+// checkpoint. ValidateToolUseID accepts the empty string, so the explicit
+// emptiness check is load-bearing.
+func validateSubagentIdentity(parentID, toolUseID, childID string) error {
+	if err := validation.ValidateSessionID(parentID); err != nil {
+		return fmt.Errorf("invalid parent session ID: %w", err)
+	}
+	if toolUseID == "" {
+		return errors.New("opencode subagent payload missing tool_use_id")
+	}
+	if err := validation.ValidateToolUseID(toolUseID); err != nil {
+		return fmt.Errorf("invalid tool_use_id: %w", err)
+	}
+	if err := validation.ValidateSessionID(childID); err != nil {
+		return fmt.Errorf("invalid subagent session ID: %w", err)
+	}
+	return nil
 }
 
 // PrepareTranscript ensures the OpenCode transcript file is up-to-date by calling `opencode export`.

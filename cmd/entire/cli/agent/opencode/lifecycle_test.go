@@ -12,6 +12,7 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -253,6 +254,40 @@ func TestHookNames(t *testing.T) {
 		if !nameSet[e] {
 			t.Errorf("missing expected hook name: %s", e)
 		}
+	}
+}
+
+func TestParseHookEvent_SubagentStart(t *testing.T) {
+	t.Parallel()
+	ag := &OpenCodeAgent{}
+	input := `{"session_id":"ses_parent","tool_use_id":"call_red","subagent_id":"ses_child","subagent_type":"general","task_description":"Create docs/red.md"}`
+
+	event, err := ag.ParseHookEvent(context.Background(), HookNameSubagentStart, strings.NewReader(input))
+	require.NoError(t, err)
+	require.NotNil(t, event)
+	assert.Equal(t, agent.SubagentStart, event.Type)
+	assert.Equal(t, "ses_parent", event.SessionID)
+	assert.True(t, strings.HasSuffix(event.SessionRef, filepath.Join(paths.EntireTmpDir, "ses_parent.json")), event.SessionRef)
+	assert.Equal(t, "call_red", event.ToolUseID)
+	assert.Equal(t, "ses_child", event.SubagentID)
+	assert.Equal(t, "general", event.SubagentType)
+	assert.Equal(t, "Create docs/red.md", event.TaskDescription)
+	assert.True(t, event.DeferredCompletion, "OpenCode completes from tool.execute.after, so the start must record a marker")
+}
+
+func TestParseHookEvent_SubagentStart_RejectsUnsafeIDs(t *testing.T) {
+	t.Parallel()
+	ag := &OpenCodeAgent{}
+	for name, input := range map[string]string{
+		"child traversal": `{"session_id":"ses_parent","tool_use_id":"call_red","subagent_id":"../etc"}`,
+		"missing tool id": `{"session_id":"ses_parent","subagent_id":"ses_child"}`,
+		"missing child":   `{"session_id":"ses_parent","tool_use_id":"call_red"}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			_, err := ag.ParseHookEvent(context.Background(), HookNameSubagentStart, strings.NewReader(input))
+			require.Error(t, err)
+		})
 	}
 }
 
