@@ -78,20 +78,27 @@ func (r *claudeReviewLaunch) prepare(ctx context.Context, cfg reviewtypes.RunCon
 // build builds the exec.Cmd for a claude review run.
 // Exposed via buildReviewCmd at package level for test inspection of argv and env.
 func (r *claudeReviewLaunch) build(ctx context.Context, cfg reviewtypes.RunConfig) *exec.Cmd {
-	// The staged copies are addressed under Entire's own plugin name, so the
-	// prompt must name them the way Claude will resolve them.
-	cfg.Skills = r.staged.apply(cfg.Skills)
-	return buildReviewCmd(ctx, cfg, r.settingsPath, r.staged.pluginDir)
+	return buildReviewCmd(ctx, cfg, r.settingsPath, r.staged)
 }
 
 // buildReviewCmd builds the exec.Cmd for a claude review run.
 // Exposed at package level for test inspection of argv and env.
-func buildReviewCmd(ctx context.Context, cfg reviewtypes.RunConfig, settingsPath, pluginDir string) *exec.Cmd {
-	prompt := review.ComposeReviewPrompt(cfg)
+//
+// staged carries the plugin dir and the invocation rewrites for the profile's
+// skills. The rewrites apply to the PROMPT only — Claude resolves a staged
+// skill as /entire-review:<name> — while the review env keeps cfg.Skills as the
+// user configured them, so ENTIRE_REVIEW_SKILLS (and the session's ReviewSkills
+// provenance that lifecycle.go decodes from it) records the real skill, not
+// Entire's internal staging alias.
+func buildReviewCmd(ctx context.Context, cfg reviewtypes.RunConfig, settingsPath string, staged stagedSkills) *exec.Cmd {
+	promptCfg := cfg
+	promptCfg.Skills = staged.apply(cfg.Skills)
+	prompt := review.ComposeReviewPrompt(promptCfg)
 	args := []string{"-p", prompt, "--output-format", "stream-json", "--verbose"}
-	args = append(args, claudeReviewFlags(settingsPath, pluginDir)...)
+	args = append(args, claudeReviewFlags(settingsPath, staged.pluginDir)...)
 	args = review.AppendModelFlag(args, cfg.Model)
 	cmd := exec.CommandContext(ctx, "claude", args...)
+	// cfg (not promptCfg): the env must carry the user-configured skill names.
 	cmd.Env = sanitizeReviewEnv(review.AppendReviewEnv(os.Environ(), "claude-code", cfg, prompt))
 	return cmd
 }
