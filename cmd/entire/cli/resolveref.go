@@ -208,33 +208,91 @@ func resolveProjectRef(ctx context.Context, c projectRefClient, ref string) (str
 }
 
 // resolveRepoRef turns a repo reference into its ULID. A ULID passes through.
-// A name requires a project scope (projectRef, itself a name or ULID) because
-// repo names are unique only within a project: the repo is resolved via the
-// server's case-insensitive by-name lookup, scoped to that project. Like the
-// org/project endpoints, a name-filtered list returns the single match under the
-// response's singular `repo` field (the plural `repos` is only populated for an
-// unfiltered page) — reading `repos` here was the COR-699 bug.
+// A native path ref (`/et/<project>/<repo>`, the `path` the API returns and
+// `repo clone` accepts) carries its own project scope. A bare name requires a
+// project scope (projectRef, itself a name or ULID) because repo names are
+// unique only within a project. Either way the repo is resolved via the
+// server's case-insensitive by-name lookup, scoped to that project.
+//
+// Repo names can never contain '/' (see nativeRepoRe), so any slash-bearing
+// ref is dispatched to the path grammar and never sent to the by-name lookup —
+// and per #2252 a ref must name its forge: a bare `<a>/<b>` is refused with a
+// suggestion rather than read as native, and a `/gh/` mirror ref is refused
+// rather than read as a name.
 func resolveRepoRef(ctx context.Context, c repoRefClient, ref, projectRef string) (string, error) {
 	if looksLikeULID(ref) {
 		return ref, nil
 	}
+	if strings.Contains(trimRefPrefix(ref), "/") {
+		return resolveRepoPathRef(ctx, c, ref, projectRef)
+	}
 	if projectRef == "" {
-		return "", fmt.Errorf("repo %q is a name; pass --project <name|ULID> to resolve it, or use a repo ULID", ref)
+		return "", fmt.Errorf("repo %q is a name; pass --project <name|ULID> to resolve it, use its /%s/<project>/<repo> path, or a repo ULID", ref, nativeCloneForge)
 	}
 	projID, err := resolveProjectRef(ctx, c, projectRef)
 	if err != nil {
 		return "", err
 	}
-	out, err := c.ListProjectRepos(ctx, coreapi.ListProjectReposParams{ProjectId: projID, Name: coreapi.NewOptString(ref)})
+	return resolveRepoInProject(ctx, c, ref, projID)
+}
+
+// resolveRepoPathRef resolves a slash-bearing repo ref: the native
+// `/et/<project>/<repo>` path (leading slash optional, `.git` suffix dropped —
+// parseNativeCloneRef owns that grammar). The ref names its own project, so a
+// --project given alongside it is checked for agreement rather than trusted or
+// ignored: a name compares case-insensitively (the server matches lower(name)
+// and project names are globally unique), a ULID against the resolved project
+// id — neither costs an extra round trip.
+func resolveRepoPathRef(ctx context.Context, c repoRefClient, ref, projectRef string) (string, error) {
+	if declaresForge(ref, mirrorCloneForge) {
+		return "", fmt.Errorf("repo %q is a GitHub mirror ref; this command addresses Entire-native repos — manage mirrors with `entire repo mirror`", ref)
+	}
+	project, repoName, parseErr := parseNativeCloneRef(ref)
+	if parseErr != nil {
+		if declaresForge(ref, nativeCloneForge) {
+			return "", fmt.Errorf("invalid repo ref %q: %w", ref, parseErr)
+		}
+		// A bare <a>/<b> names no forge (#2252): suggest the native reading when
+		// it would parse, instead of guessing it or 404ing a by-name lookup that
+		// can never match a slash-bearing name.
+		native := "/" + nativeCloneForge + "/" + trimRefPrefix(ref)
+		if _, _, err := parseNativeCloneRef(native); err == nil {
+			return "", fmt.Errorf("repo ref %q must name its forge — did you mean %s?", ref, native)
+		}
+		return "", fmt.Errorf("invalid repo ref %q: expected /%s/<project>/<repo>, a repo name with --project, or a repo ULID", ref, nativeCloneForge)
+	}
+	if projectRef != "" && !looksLikeULID(projectRef) && !strings.EqualFold(projectRef, project) {
+		return "", projectMismatchErr(projectRef, project, ref)
+	}
+	projID, err := resolveProjectRef(ctx, c, project)
+	if err != nil {
+		return "", err
+	}
+	if projectRef != "" && looksLikeULID(projectRef) && !strings.EqualFold(projectRef, projID) {
+		return "", projectMismatchErr(projectRef, project, ref)
+	}
+	return resolveRepoInProject(ctx, c, repoName, projID)
+}
+
+func projectMismatchErr(projectRef, project, ref string) error {
+	return fmt.Errorf("supplied --project %q does not match the project %q named in %q", projectRef, project, ref)
+}
+
+// resolveRepoInProject resolves a repo name inside an already-resolved project
+// ULID. Like the org/project endpoints, a name-filtered list returns the single
+// match under the response's singular `repo` field (the plural `repos` is only
+// populated for an unfiltered page) — reading `repos` here was the COR-699 bug.
+func resolveRepoInProject(ctx context.Context, c repoRefClient, name, projID string) (string, error) {
+	out, err := c.ListProjectRepos(ctx, coreapi.ListProjectReposParams{ProjectId: projID, Name: coreapi.NewOptString(name)})
 	if err != nil {
 		if isCoreNotFound(err) {
-			return "", noRepoNamedErr(ref)
+			return "", noRepoNamedErr(name)
 		}
 		return "", fmt.Errorf("list project repos: %w", err)
 	}
 	repo, ok := out.Repo.Get()
 	if !ok {
-		return "", noRepoNamedErr(ref)
+		return "", noRepoNamedErr(name)
 	}
 	return repo.ID, nil
 }
