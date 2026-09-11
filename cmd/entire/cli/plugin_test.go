@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"syscall"
 	"testing"
 
 	"github.com/spf13/cobra"
@@ -210,7 +211,7 @@ func TestMaybeRunPlugin_RelativePathEntry_ErrDotNotBypassed(t *testing.T) { //no
 	// exec.LookPath call inside resolvePlugin will observe.
 	t.Setenv("PATH", "bin"+string(os.PathListSeparator)+origPath)
 
-	handled, _ := MaybeRunPlugin(context.Background(), newTestRoot(), []string{"errdotcheck"})
+	handled, _, _ := MaybeRunPlugin(context.Background(), newTestRoot(), []string{"errdotcheck"})
 	if handled {
 		t.Fatal("a plugin reachable only via a RELATIVE PATH entry must not resolve/execute " +
 			"(this is the exec.ErrDot bypass / RCE the fix prevents)")
@@ -225,9 +226,12 @@ func TestRunPlugin_ExitCodePropagation(t *testing.T) {
 	dir := t.TempDir()
 	binPath := writePluginBinary(t, dir, "entire-exit42", filepath.Join(dir, "args.txt"), 42)
 
-	code := runPlugin(context.Background(), "exit42", binPath, []string{"a", "b"})
+	code, killedBy := runPlugin(context.Background(), "exit42", binPath, []string{"a", "b"})
 	if code != 42 {
 		t.Errorf("exit code: got %d, want 42", code)
+	}
+	if killedBy != nil {
+		t.Errorf("ordinary exit reported signal %v", killedBy)
 	}
 	contents, err := os.ReadFile(filepath.Join(dir, "args.txt"))
 	if err != nil {
@@ -255,7 +259,7 @@ func TestMaybeRunPlugin_VersionCheckAfterSuccess(t *testing.T) { //nolint:parall
 	withPathDir(t, dir)
 	calls := interceptVersionCheck(t)
 
-	handled, code := MaybeRunPlugin(context.Background(), newTestRoot(), []string{"pgr"})
+	handled, code, _ := MaybeRunPlugin(context.Background(), newTestRoot(), []string{"pgr"})
 	if !handled || code != 0 {
 		t.Fatalf("handled=%v code=%d, want handled=true code=0", handled, code)
 	}
@@ -273,7 +277,7 @@ func TestMaybeRunPlugin_NoVersionCheckAfterSelfUpdate(t *testing.T) { //nolint:p
 	withPathDir(t, dir)
 	calls := interceptVersionCheck(t)
 
-	handled, code := MaybeRunPlugin(context.Background(), newTestRoot(), []string{"upgrade", "--nightly"})
+	handled, code, _ := MaybeRunPlugin(context.Background(), newTestRoot(), []string{"upgrade", "--nightly"})
 	if !handled || code != 0 {
 		t.Fatalf("handled=%v code=%d, want handled=true code=0", handled, code)
 	}
@@ -288,7 +292,7 @@ func TestMaybeRunPlugin_NoVersionCheckAfterFailure(t *testing.T) { //nolint:para
 	withPathDir(t, dir)
 	calls := interceptVersionCheck(t)
 
-	handled, code := MaybeRunPlugin(context.Background(), newTestRoot(), []string{"pgr"})
+	handled, code, _ := MaybeRunPlugin(context.Background(), newTestRoot(), []string{"pgr"})
 	if !handled || code != 3 {
 		t.Fatalf("handled=%v code=%d, want handled=true code=3", handled, code)
 	}
@@ -326,5 +330,66 @@ func TestFindInaccessiblePlugin_SkipsRelativePATHEntry(t *testing.T) {
 
 	if got, found := findInaccessiblePlugin("entire-planted"); found {
 		t.Errorf("findInaccessiblePlugin found %q via a relative $PATH entry, want no match", got)
+	}
+}
+
+// A signal that reaches only the plugin still has to propagate. Ctrl-C hits
+// the whole foreground process group, so the parent sees it too — but a
+// `kill -TERM` aimed at the plugin and a SIGPIPE from a closed pipe do not,
+// and reporting those as a plain exit-1 loses the signal that kubectl-style
+// dispatch exists to pass through.
+func TestRunPlugin_ReportsTheChildsOwnSignal(t *testing.T) {
+	t.Parallel()
+	if runtime.GOOS == windowsGOOS {
+		t.Skip("no signals to propagate on Windows")
+	}
+	for _, tc := range []struct {
+		name   string
+		script string
+		want   syscall.Signal
+	}{
+		{name: "self-terminated", script: "kill -TERM $$", want: syscall.SIGTERM},
+		{name: "self-interrupted", script: "kill -INT $$", want: syscall.SIGINT},
+		{name: "broken pipe", script: "kill -PIPE $$", want: syscall.SIGPIPE},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			dir := t.TempDir()
+			binPath := filepath.Join(dir, "entire-signaller")
+			script := "#!/bin/sh\ntrap - TERM INT PIPE\n" + tc.script + "\n"
+			if err := os.WriteFile(binPath, []byte(script), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			code, killedBy := runPlugin(t.Context(), "signaller", binPath, nil)
+			if code != ExitPluginSignalled {
+				t.Fatalf("exit code=%d, want ExitPluginSignalled", code)
+			}
+			if killedBy != tc.want {
+				t.Errorf("killedBy=%v, want %v — the signal reached only the child, so it has to come off the wait status", killedBy, tc.want)
+			}
+		})
+	}
+}
+
+// The signal has to survive the trip out of the dispatcher too: MaybeRunPlugin
+// is what main.go sees, and it is main.go that re-raises.
+func TestMaybeRunPlugin_PropagatesTheChildsSignal(t *testing.T) { //nolint:paralleltest // mutates PATH
+	if runtime.GOOS == windowsGOOS {
+		t.Skip("no signals to propagate on Windows")
+	}
+	dir := t.TempDir()
+	binPath := filepath.Join(dir, "entire-signaller")
+	if err := os.WriteFile(binPath, []byte("#!/bin/sh\ntrap - TERM\nkill -TERM $$\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir)
+	interceptVersionCheck(t)
+
+	handled, code, killedBy := MaybeRunPlugin(t.Context(), newTestRoot(), []string{"signaller"})
+	if !handled || code != ExitPluginSignalled {
+		t.Fatalf("handled=%v code=%d, want true, ExitPluginSignalled", handled, code)
+	}
+	if killedBy != syscall.SIGTERM {
+		t.Errorf("killedBy=%v, want SIGTERM; main.go re-raises this, so losing it here exits 1 instead of 143", killedBy)
 	}
 }

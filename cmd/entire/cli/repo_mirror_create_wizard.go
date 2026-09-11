@@ -292,7 +292,7 @@ type mirrorResult struct {
 	err         error
 }
 
-var mirrorCreateResultColumns = []string{"REPO", "REGION", "STATUS", "CLONE URL"}
+var mirrorCreateResultColumns = []string{"REPO", colHeaderRegion, colHeaderStatus, colHeaderCloneURL}
 
 func mirrorCreateResultRow(r mirrorResult) []string {
 	url := r.cloneURL

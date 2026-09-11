@@ -92,6 +92,11 @@
           "owner": {
             "type": "string"
           },
+          "pushedAt": {
+            "description": "Time of the latest push to the upstream repository.",
+            "format": "date-time",
+            "type": "string"
+          },
           "repo": {
             "type": "string"
           },
@@ -110,56 +115,6 @@
           "repo",
           "access",
           "status"
-        ],
-        "type": "object"
-      },
-      "BatchLookupInputBody": {
-        "additionalProperties": true,
-        "properties": {
-          "$schema": {
-            "description": "A URL to the JSON Schema for this object.",
-            "examples": [
-              "/api/v1/schemas/BatchLookupInputBody.json"
-            ],
-            "format": "uri",
-            "readOnly": true,
-            "type": "string"
-          },
-          "refs": {
-            "items": {
-              "$ref": "#/components/schemas/LookupRef"
-            },
-            "maxItems": 100,
-            "minItems": 1,
-            "type": "array"
-          }
-        },
-        "required": [
-          "refs"
-        ],
-        "type": "object"
-      },
-      "BatchLookupOutputBody": {
-        "additionalProperties": true,
-        "properties": {
-          "$schema": {
-            "description": "A URL to the JSON Schema for this object.",
-            "examples": [
-              "/api/v1/schemas/BatchLookupOutputBody.json"
-            ],
-            "format": "uri",
-            "readOnly": true,
-            "type": "string"
-          },
-          "refs": {
-            "items": {
-              "$ref": "#/components/schemas/LookupRefResult"
-            },
-            "type": "array"
-          }
-        },
-        "required": [
-          "refs"
         ],
         "type": "object"
       },
@@ -196,6 +151,391 @@
           "providerId",
           "attributeFilter",
           "createdAt"
+        ],
+        "type": "object"
+      },
+      "BranchProtection": {
+        "additionalProperties": true,
+        "properties": {
+          "$schema": {
+            "description": "A URL to the JSON Schema for this object.",
+            "examples": [
+              "/api/v1/schemas/BranchProtection.json"
+            ],
+            "format": "uri",
+            "readOnly": true,
+            "type": "string"
+          },
+          "rules": {
+            "description": "Protection rules, one per pattern; each ref at most once. Empty protects nothing.",
+            "items": {
+              "$ref": "#/components/schemas/BranchRule"
+            },
+            "maxItems": 64,
+            "type": "array"
+          }
+        },
+        "required": [
+          "rules"
+        ],
+        "type": "object"
+      },
+      "BranchRule": {
+        "additionalProperties": true,
+        "properties": {
+          "ref": {
+            "description": "\"HEAD\" or a refs/heads/ name, fnmatch wildcards allowed.",
+            "type": "string"
+          },
+          "serverSideMergeOnly": {
+            "description": "The branch moves only through a server-side merge by Entire; every direct write, fast-forward included, is refused. Defaults to false.",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "ref"
+        ],
+        "type": "object"
+      },
+      "CIBuildView": {
+        "additionalProperties": true,
+        "properties": {
+          "bk_build_uuid": {
+            "type": "string"
+          },
+          "bk_organization": {
+            "type": "string"
+          },
+          "bk_pipeline": {
+            "type": "string"
+          },
+          "branch": {
+            "type": "string"
+          },
+          "build_number": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "commit": {
+            "type": "string"
+          },
+          "created_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "event_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "finished_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "jobs": {
+            "items": {
+              "$ref": "#/components/schemas/CIJobView"
+            },
+            "type": "array"
+          },
+          "last_event": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "stale": {
+            "type": "boolean"
+          },
+          "started_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "state": {
+            "type": "string"
+          },
+          "terminal": {
+            "type": "boolean"
+          },
+          "updated_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "web_url": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "bk_build_uuid",
+          "bk_organization",
+          "bk_pipeline",
+          "build_number",
+          "state",
+          "commit",
+          "branch",
+          "message",
+          "web_url",
+          "last_event",
+          "event_at",
+          "terminal",
+          "stale",
+          "updated_at",
+          "jobs"
+        ],
+        "type": "object"
+      },
+      "CIJobView": {
+        "additionalProperties": true,
+        "properties": {
+          "bk_job_id": {
+            "type": "string"
+          },
+          "exit_status": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "finished_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "started_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "state": {
+            "type": "string"
+          },
+          "step_key": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "bk_job_id",
+          "type",
+          "name",
+          "step_key",
+          "state"
+        ],
+        "type": "object"
+      },
+      "CIProviderDescriptor": {
+        "additionalProperties": true,
+        "properties": {
+          "enrollable": {
+            "description": "Whether this org can enrol into this provider right now",
+            "type": "boolean"
+          },
+          "fields": {
+            "description": "Form fields, in the order a client should render them",
+            "items": {
+              "$ref": "#/components/schemas/CIProviderField"
+            },
+            "type": "array"
+          },
+          "label": {
+            "description": "Human-readable provider name",
+            "type": "string"
+          },
+          "modes": {
+            "description": "Ways of enrolling; exactly one is marked default",
+            "items": {
+              "$ref": "#/components/schemas/CIProviderMode"
+            },
+            "type": "array"
+          },
+          "name": {
+            "description": "Provider key, posted back as the request's provider",
+            "type": "string"
+          },
+          "reason": {
+            "description": "Why enrolment is unavailable; set only when enrollable is false",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "label",
+          "enrollable",
+          "modes",
+          "fields"
+        ],
+        "type": "object"
+      },
+      "CIProviderField": {
+        "additionalProperties": true,
+        "properties": {
+          "help": {
+            "description": "Longer explanation shown beneath the field",
+            "type": "string"
+          },
+          "key": {
+            "description": "Body key this field's value posts under",
+            "type": "string"
+          },
+          "kind": {
+            "description": "Widget to render: text, select, secret, bool",
+            "type": "string"
+          },
+          "label": {
+            "description": "Human-readable field label",
+            "type": "string"
+          },
+          "options": {
+            "description": "Choices for a select field; absent for every other kind",
+            "items": {
+              "$ref": "#/components/schemas/CIProviderOption"
+            },
+            "type": "array"
+          },
+          "placeholder": {
+            "description": "Placeholder text for an empty field",
+            "type": "string"
+          },
+          "required_in": {
+            "description": "Mode keys this field is required in; empty means never required",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "target": {
+            "description": "Where the value goes: body (top level) or config (opaque map)",
+            "type": "string"
+          }
+        },
+        "required": [
+          "key",
+          "target",
+          "kind",
+          "label",
+          "required_in"
+        ],
+        "type": "object"
+      },
+      "CIProviderMode": {
+        "additionalProperties": true,
+        "properties": {
+          "default": {
+            "description": "Whether a client should preselect this mode",
+            "type": "boolean"
+          },
+          "help": {
+            "description": "Longer explanation of what this mode does",
+            "type": "string"
+          },
+          "key": {
+            "description": "Mode key to post back as the request's mode",
+            "type": "string"
+          },
+          "label": {
+            "description": "Human-readable label",
+            "type": "string"
+          }
+        },
+        "required": [
+          "key",
+          "label"
+        ],
+        "type": "object"
+      },
+      "CIProviderOption": {
+        "additionalProperties": true,
+        "properties": {
+          "label": {
+            "description": "Human-readable label",
+            "type": "string"
+          },
+          "value": {
+            "description": "Value to post back for this choice",
+            "type": "string"
+          }
+        },
+        "required": [
+          "value",
+          "label"
+        ],
+        "type": "object"
+      },
+      "CISetupBlock": {
+        "additionalProperties": true,
+        "properties": {
+          "content": {
+            "description": "The content itself, ready to use verbatim",
+            "type": "string"
+          },
+          "format": {
+            "description": "The content's syntax, for highlighting: yaml, json",
+            "type": "string"
+          },
+          "heading": {
+            "description": "Short instruction naming what to do with the content",
+            "type": "string"
+          }
+        },
+        "required": [
+          "heading",
+          "format",
+          "content"
+        ],
+        "type": "object"
+      },
+      "CIWebhookAuditActor": {
+        "additionalProperties": true,
+        "properties": {
+          "account_id": {
+            "description": "Entire account ULID that performed the action",
+            "type": "string"
+          },
+          "handle": {
+            "description": "Actor's primary handle; empty when they have none",
+            "type": "string"
+          },
+          "handle_provider": {
+            "description": "Provider the handle came from: github, workos, system",
+            "type": "string"
+          }
+        },
+        "required": [
+          "account_id"
+        ],
+        "type": "object"
+      },
+      "CIWebhookAuditEventView": {
+        "additionalProperties": true,
+        "properties": {
+          "actor": {
+            "$ref": "#/components/schemas/CIWebhookAuditActor",
+            "description": "Who performed the action"
+          },
+          "event_type": {
+            "description": "ci_webhook_enrolled | ci_webhook_updated | ci_webhook_deleted | ci_webhook_identity_rolled_back | ci_webhook_identity_orphaned",
+            "type": "string"
+          },
+          "id": {
+            "description": "Audit event ULID",
+            "type": "string"
+          },
+          "metadata": {
+            "additionalProperties": {},
+            "description": "Event detail as recorded, e.g. bk_organization/bk_pipeline",
+            "type": "object"
+          },
+          "occurred_at": {
+            "description": "When the action was recorded (UTC)",
+            "format": "date-time",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "event_type",
+          "actor",
+          "occurred_at"
         ],
         "type": "object"
       },
@@ -239,6 +579,9 @@
           "provider": {
             "type": "string"
           },
+          "publish_checks": {
+            "type": "boolean"
+          },
           "ref_filter": {
             "type": "string"
           },
@@ -260,6 +603,7 @@
           "ref_filter",
           "events",
           "enabled",
+          "publish_checks",
           "created_at",
           "updated_at"
         ],
@@ -311,6 +655,33 @@
         },
         "required": [
           "needsOnboarding"
+        ],
+        "type": "object"
+      },
+      "ConnectOrgCIBuildkiteCredentialInputBody": {
+        "additionalProperties": true,
+        "properties": {
+          "$schema": {
+            "description": "A URL to the JSON Schema for this object.",
+            "examples": [
+              "/api/v1/schemas/ConnectOrgCIBuildkiteCredentialInputBody.json"
+            ],
+            "format": "uri",
+            "readOnly": true,
+            "type": "string"
+          },
+          "bk_api_token": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "bk_organization": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "bk_organization",
+          "bk_api_token"
         ],
         "type": "object"
       },
@@ -419,6 +790,28 @@
         ],
         "type": "object"
       },
+      "CreateNativeMirrorInputBody": {
+        "additionalProperties": true,
+        "properties": {
+          "$schema": {
+            "description": "A URL to the JSON Schema for this object.",
+            "examples": [
+              "/api/v1/schemas/CreateNativeMirrorInputBody.json"
+            ],
+            "format": "uri",
+            "readOnly": true,
+            "type": "string"
+          },
+          "clusterSlug": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "clusterSlug"
+        ],
+        "type": "object"
+      },
       "CreateOrgInputBody": {
         "additionalProperties": true,
         "properties": {
@@ -486,6 +879,95 @@
         ],
         "type": "object"
       },
+      "CreateRepoCIWebhookBody": {
+        "additionalProperties": true,
+        "properties": {
+          "$schema": {
+            "description": "A URL to the JSON Schema for this object.",
+            "examples": [
+              "/api/v1/schemas/CreateRepoCIWebhookBody.json"
+            ],
+            "format": "uri",
+            "readOnly": true,
+            "type": "string"
+          },
+          "auth_plugin_ref": {
+            "description": "entire-core-auth Buildkite plugin ref this pipeline is built with: the registered cluster's override, else the pinned default; goes in the bootstrap config's plugins list",
+            "type": "string"
+          },
+          "automation_id": {
+            "description": "Automation (aut_<ulid>) the enrolled pipeline's builds exchange their OIDC token for; goes in the bootstrap config as the automation:<id> resource (ENTIRE_CORE_AUTH_RESOURCE)",
+            "type": "string"
+          },
+          "bk_organization": {
+            "type": "string"
+          },
+          "bk_pipeline": {
+            "type": "string"
+          },
+          "core_url": {
+            "description": "entire-core base URL the bootstrap auth plugin talks to; goes in the bootstrap config as ENTIRE_CORE_AUTH_URL",
+            "type": "string"
+          },
+          "created_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "display_name": {
+            "type": "string"
+          },
+          "enabled": {
+            "type": "boolean"
+          },
+          "events": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "id": {
+            "type": "string"
+          },
+          "provider": {
+            "type": "string"
+          },
+          "publish_checks": {
+            "type": "boolean"
+          },
+          "ref_filter": {
+            "type": "string"
+          },
+          "repo_id": {
+            "type": "string"
+          },
+          "setup": {
+            "$ref": "#/components/schemas/CISetupBlock",
+            "description": "What to do next, rendered ready to use. Present on a self-managed enrolment."
+          },
+          "updated_at": {
+            "format": "date-time",
+            "type": "string"
+          }
+        },
+        "required": [
+          "automation_id",
+          "core_url",
+          "auth_plugin_ref",
+          "id",
+          "repo_id",
+          "provider",
+          "display_name",
+          "bk_organization",
+          "bk_pipeline",
+          "ref_filter",
+          "events",
+          "enabled",
+          "publish_checks",
+          "created_at",
+          "updated_at"
+        ],
+        "type": "object"
+      },
       "CreateRepoCIWebhookInputBody": {
         "additionalProperties": true,
         "properties": {
@@ -499,15 +981,32 @@
             "type": "string"
           },
           "bk_cluster_id": {
-            "minLength": 1,
             "type": "string"
           },
+          "bk_force_rescaffold": {
+            "description": "Overwrite an existing pipeline's configuration with the generated bootstrap step, DISCARDING manual edits. Repairs a pipeline left naming an automation that a teardown retired. Requires bk_provisioning_token; refused on a self-managed pipeline.",
+            "type": "boolean"
+          },
           "bk_organization": {
-            "minLength": 1,
             "type": "string"
           },
           "bk_pipeline": {
             "type": "string"
+          },
+          "bk_pipeline_self_managed": {
+            "description": "The customer created and maintains this Buildkite pipeline. entire never creates, reconciles or reads it, and bk_provisioning_token is neither required nor accepted.",
+            "type": "boolean"
+          },
+          "bk_provisioning_token": {
+            "description": "Transient Buildkite token (write_pipelines) to create the pipeline; write-only, never stored. Required on first enroll; omit on a routing-only re-enroll. Refused for an existing pipeline unless bk_force_rescaffold is also set.",
+            "type": "string"
+          },
+          "config": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "description": "Provider-specific values from the providers listing; opaque to core. For buildkite: cluster_id, provisioning_token, force_rescaffold.",
+            "type": "object"
           },
           "display_name": {
             "type": "string"
@@ -518,20 +1017,27 @@
             },
             "type": "array"
           },
+          "mode": {
+            "description": "How to enrol, from the chosen provider's modes. For buildkite: self_managed or provisioned.",
+            "type": "string"
+          },
           "provider": {
-            "enum": [
-              "buildkite"
-            ],
+            "type": "string"
+          },
+          "provider_account": {
+            "description": "Vendor-side account to enrol against (for buildkite, the organization slug). Use with provider/mode/config; omit when sending the bk_* fields.",
             "type": "string"
           },
           "ref_filter": {
             "type": "string"
+          },
+          "target_ref": {
+            "description": "Vendor-side build target (for buildkite, the pipeline slug). Defaults to a slug derived from the repo.",
+            "type": "string"
           }
         },
         "required": [
-          "provider",
-          "bk_organization",
-          "bk_cluster_id"
+          "provider"
         ],
         "type": "object"
       },
@@ -835,6 +1341,22 @@
         },
         "type": "object"
       },
+      "ForgeRepoIdentity": {
+        "additionalProperties": true,
+        "properties": {
+          "forge": {
+            "type": "string"
+          },
+          "repo_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "forge",
+          "repo_id"
+        ],
+        "type": "object"
+      },
       "GetDeletionPreviewOutputBody": {
         "additionalProperties": true,
         "properties": {
@@ -900,7 +1422,6 @@
           },
           "mode": {
             "enum": [
-              "standalone",
               "global",
               "regional"
             ],
@@ -931,13 +1452,18 @@
             "readOnly": true,
             "type": "string"
           },
+          "cliLoggedIn": {
+            "description": "True once the account has completed a CLI login (either grant type).",
+            "type": "boolean"
+          },
           "needsOnboarding": {
             "description": "True until the account completes web onboarding at least once.",
             "type": "boolean"
           }
         },
         "required": [
-          "needsOnboarding"
+          "needsOnboarding",
+          "cliLoggedIn"
         ],
         "type": "object"
       },
@@ -959,6 +1485,17 @@
           },
           "permissions": {
             "items": {
+              "enum": [
+                "manage",
+                "view",
+                "read",
+                "write",
+                "push",
+                "pull",
+                "create_repo",
+                "admin",
+                "admin_read"
+              ],
               "type": "string"
             },
             "type": "array"
@@ -1040,7 +1577,6 @@
           "mode": {
             "description": "Server mode.",
             "enum": [
-              "standalone",
               "global",
               "regional"
             ],
@@ -1151,8 +1687,7 @@
             "enum": [
               "reader",
               "writer",
-              "admin",
-              "ci_manager"
+              "admin"
             ],
             "type": "string"
           }
@@ -1401,6 +1936,30 @@
         ],
         "type": "object"
       },
+      "ListNativeMirrorsOutputBody": {
+        "additionalProperties": true,
+        "properties": {
+          "$schema": {
+            "description": "A URL to the JSON Schema for this object.",
+            "examples": [
+              "/api/v1/schemas/ListNativeMirrorsOutputBody.json"
+            ],
+            "format": "uri",
+            "readOnly": true,
+            "type": "string"
+          },
+          "nativeMirrors": {
+            "items": {
+              "$ref": "#/components/schemas/NativeMirrorPlacement"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "nativeMirrors"
+        ],
+        "type": "object"
+      },
       "ListOIDCProvidersOutputBody": {
         "additionalProperties": true,
         "properties": {
@@ -1426,6 +1985,54 @@
         },
         "required": [
           "providers"
+        ],
+        "type": "object"
+      },
+      "ListOrgCIBuildkiteClustersOutputBody": {
+        "additionalProperties": true,
+        "properties": {
+          "$schema": {
+            "description": "A URL to the JSON Schema for this object.",
+            "examples": [
+              "/api/v1/schemas/ListOrgCIBuildkiteClustersOutputBody.json"
+            ],
+            "format": "uri",
+            "readOnly": true,
+            "type": "string"
+          },
+          "clusters": {
+            "items": {
+              "$ref": "#/components/schemas/OrgCIBuildkiteClusterView"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "clusters"
+        ],
+        "type": "object"
+      },
+      "ListOrgCIBuildkiteCredentialsOutputBody": {
+        "additionalProperties": true,
+        "properties": {
+          "$schema": {
+            "description": "A URL to the JSON Schema for this object.",
+            "examples": [
+              "/api/v1/schemas/ListOrgCIBuildkiteCredentialsOutputBody.json"
+            ],
+            "format": "uri",
+            "readOnly": true,
+            "type": "string"
+          },
+          "credentials": {
+            "items": {
+              "$ref": "#/components/schemas/OrgCIBuildkiteCredentialView"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "credentials"
         ],
         "type": "object"
       },
@@ -1597,6 +2204,78 @@
         },
         "type": "object"
       },
+      "ListRepoCIBuildsOutputBody": {
+        "additionalProperties": true,
+        "properties": {
+          "$schema": {
+            "description": "A URL to the JSON Schema for this object.",
+            "examples": [
+              "/api/v1/schemas/ListRepoCIBuildsOutputBody.json"
+            ],
+            "format": "uri",
+            "readOnly": true,
+            "type": "string"
+          },
+          "builds": {
+            "items": {
+              "$ref": "#/components/schemas/CIBuildView"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "builds"
+        ],
+        "type": "object"
+      },
+      "ListRepoCIProvidersOutputBody": {
+        "additionalProperties": true,
+        "properties": {
+          "$schema": {
+            "description": "A URL to the JSON Schema for this object.",
+            "examples": [
+              "/api/v1/schemas/ListRepoCIProvidersOutputBody.json"
+            ],
+            "format": "uri",
+            "readOnly": true,
+            "type": "string"
+          },
+          "providers": {
+            "items": {
+              "$ref": "#/components/schemas/CIProviderDescriptor"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "providers"
+        ],
+        "type": "object"
+      },
+      "ListRepoCIWebhookAuditOutputBody": {
+        "additionalProperties": true,
+        "properties": {
+          "$schema": {
+            "description": "A URL to the JSON Schema for this object.",
+            "examples": [
+              "/api/v1/schemas/ListRepoCIWebhookAuditOutputBody.json"
+            ],
+            "format": "uri",
+            "readOnly": true,
+            "type": "string"
+          },
+          "events": {
+            "items": {
+              "$ref": "#/components/schemas/CIWebhookAuditEventView"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "events"
+        ],
+        "type": "object"
+      },
       "ListRepoCIWebhooksOutputBody": {
         "additionalProperties": true,
         "properties": {
@@ -1618,6 +2297,34 @@
         },
         "required": [
           "subscriptions"
+        ],
+        "type": "object"
+      },
+      "ListRepoCollaboratorsOutputBody": {
+        "additionalProperties": true,
+        "properties": {
+          "$schema": {
+            "description": "A URL to the JSON Schema for this object.",
+            "examples": [
+              "/api/v1/schemas/ListRepoCollaboratorsOutputBody.json"
+            ],
+            "format": "uri",
+            "readOnly": true,
+            "type": "string"
+          },
+          "collaborators": {
+            "items": {
+              "$ref": "#/components/schemas/RepoCollaborator"
+            },
+            "type": "array"
+          },
+          "nextPageToken": {
+            "description": "Pass back to fetch the next page; empty when no more entries.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "collaborators"
         ],
         "type": "object"
       },
@@ -1660,6 +2367,9 @@
             "format": "uri",
             "readOnly": true,
             "type": "string"
+          },
+          "candidatesIncomplete": {
+            "type": "boolean"
           },
           "nextPageToken": {
             "description": "Pass back to fetch the next page; empty when no more entries.",
@@ -1771,100 +2481,6 @@
           "jurisdiction",
           "owner",
           "repo"
-        ],
-        "type": "object"
-      },
-      "LookupRef": {
-        "additionalProperties": true,
-        "properties": {
-          "id": {
-            "minLength": 1,
-            "type": "string"
-          },
-          "type": {
-            "description": "Resource type slug; \"org\", \"project\", \"repo\" are enriched, unknown types pass through.",
-            "minLength": 1,
-            "type": "string"
-          }
-        },
-        "required": [
-          "type",
-          "id"
-        ],
-        "type": "object"
-      },
-      "LookupRefResult": {
-        "additionalProperties": true,
-        "properties": {
-          "id": {
-            "type": "string"
-          },
-          "name": {
-            "type": "string"
-          },
-          "ownerId": {
-            "type": "string"
-          },
-          "ownerType": {
-            "enum": [
-              "org",
-              "account"
-            ],
-            "type": "string"
-          },
-          "projectId": {
-            "type": "string"
-          },
-          "type": {
-            "type": "string"
-          },
-          "url": {
-            "type": "string"
-          }
-        },
-        "required": [
-          "type",
-          "id"
-        ],
-        "type": "object"
-      },
-      "LookupResourcesOutputBody": {
-        "additionalProperties": true,
-        "properties": {
-          "$schema": {
-            "description": "A URL to the JSON Schema for this object.",
-            "examples": [
-              "/api/v1/schemas/LookupResourcesOutputBody.json"
-            ],
-            "format": "uri",
-            "readOnly": true,
-            "type": "string"
-          },
-          "nextPageToken": {
-            "description": "Pass back to fetch the next page; empty when no more entries.",
-            "type": "string"
-          },
-          "permission": {
-            "type": "string"
-          },
-          "resourceIds": {
-            "items": {
-              "type": "string"
-            },
-            "type": "array"
-          },
-          "resourceType": {
-            "type": "string"
-          },
-          "resources": {
-            "items": {
-              "$ref": "#/components/schemas/ResourceAccess"
-            },
-            "type": "array"
-          }
-        },
-        "required": [
-          "resourceType"
         ],
         "type": "object"
       },
@@ -1994,7 +2610,7 @@
             "type": "string"
           },
           "homeCoreUrl": {
-            "description": "Deep link into the home console for this account.",
+            "description": "Origin of the account's home core — its OIDC issuer, e.g. 'https://us.auth.entire.io'. Not a browser link and not the console.",
             "type": "string"
           },
           "jurisdiction": {
@@ -2033,10 +2649,16 @@
             "format": "date-time",
             "type": "string"
           },
+          "handle": {
+            "type": "string"
+          },
           "id": {
             "type": "string"
           },
           "orgId": {
+            "type": "string"
+          },
+          "provider": {
             "type": "string"
           },
           "role": {
@@ -2056,6 +2678,33 @@
           "role",
           "status",
           "createdAt"
+        ],
+        "type": "object"
+      },
+      "MintOrgCIGitHubActionsCredentialInputBody": {
+        "additionalProperties": true,
+        "properties": {
+          "$schema": {
+            "description": "A URL to the JSON Schema for this object.",
+            "examples": [
+              "/api/v1/schemas/MintOrgCIGitHubActionsCredentialInputBody.json"
+            ],
+            "format": "uri",
+            "readOnly": true,
+            "type": "string"
+          },
+          "account": {
+            "description": "GitHub login (user or organization) whose webhooks this credential verifies",
+            "minLength": 1,
+            "type": "string"
+          },
+          "api_token": {
+            "description": "GitHub API token for outbound workflow dispatch. Optional: omit for an inbound-only credential. On an existing github-actions row this stores/rotates the token instead of conflicting.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "account"
         ],
         "type": "object"
       },
@@ -2234,6 +2883,81 @@
         ],
         "type": "object"
       },
+      "NativeMirrorPlacement": {
+        "additionalProperties": true,
+        "properties": {
+          "$schema": {
+            "description": "A URL to the JSON Schema for this object.",
+            "examples": [
+              "/api/v1/schemas/NativeMirrorPlacement.json"
+            ],
+            "format": "uri",
+            "readOnly": true,
+            "type": "string"
+          },
+          "attempts": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "clusterSlug": {
+            "type": "string"
+          },
+          "createdAt": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "creationFailedAt": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "desiredState": {
+            "enum": [
+              "active",
+              "deleted"
+            ],
+            "type": "string"
+          },
+          "lastError": {
+            "type": "string"
+          },
+          "nextRetryAt": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "placementId": {
+            "type": "string"
+          },
+          "stage": {
+            "enum": [
+              "pending",
+              "provisioned",
+              "registered",
+              "seeded",
+              "announced"
+            ],
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "processing",
+              "ready",
+              "failed",
+              "suspended"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "placementId",
+          "clusterSlug",
+          "stage",
+          "status",
+          "desiredState",
+          "attempts",
+          "createdAt"
+        ],
+        "type": "object"
+      },
       "OIDCProvider": {
         "additionalProperties": true,
         "properties": {
@@ -2268,6 +2992,9 @@
             "readOnly": true,
             "type": "string"
           },
+          "capabilities": {
+            "$ref": "#/components/schemas/OrgCapabilities"
+          },
           "createdAt": {
             "format": "date-time",
             "type": "string"
@@ -2290,6 +3017,186 @@
           "name",
           "region",
           "createdAt"
+        ],
+        "type": "object"
+      },
+      "OrgCIBuildkiteClusterView": {
+        "additionalProperties": true,
+        "properties": {
+          "$schema": {
+            "description": "A URL to the JSON Schema for this object.",
+            "examples": [
+              "/api/v1/schemas/OrgCIBuildkiteClusterView.json"
+            ],
+            "format": "uri",
+            "readOnly": true,
+            "type": "string"
+          },
+          "auth_plugin_ref": {
+            "type": "string"
+          },
+          "bk_cluster_id": {
+            "type": "string"
+          },
+          "bk_organization": {
+            "type": "string"
+          },
+          "created_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "label": {
+            "type": "string"
+          },
+          "owner": {
+            "type": "string"
+          },
+          "updated_at": {
+            "format": "date-time",
+            "type": "string"
+          }
+        },
+        "required": [
+          "bk_organization",
+          "owner",
+          "bk_cluster_id",
+          "label",
+          "auth_plugin_ref",
+          "created_at",
+          "updated_at"
+        ],
+        "type": "object"
+      },
+      "OrgCIBuildkiteCredentialView": {
+        "additionalProperties": true,
+        "properties": {
+          "$schema": {
+            "description": "A URL to the JSON Schema for this object.",
+            "examples": [
+              "/api/v1/schemas/OrgCIBuildkiteCredentialView.json"
+            ],
+            "format": "uri",
+            "readOnly": true,
+            "type": "string"
+          },
+          "bk_organization": {
+            "type": "string"
+          },
+          "cipher_version": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "created_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "inbound_endpoint_id": {
+            "type": "string"
+          },
+          "inbound_endpoint_path": {
+            "type": "string"
+          },
+          "inbound_endpoint_url": {
+            "type": "string"
+          },
+          "inbound_secret": {
+            "type": "string"
+          },
+          "inbound_secret_issued_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "inbound_secret_set": {
+            "type": "boolean"
+          },
+          "owner": {
+            "type": "string"
+          },
+          "token_len": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "updated_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "verified_at": {
+            "format": "date-time",
+            "type": "string"
+          }
+        },
+        "required": [
+          "bk_organization",
+          "owner",
+          "cipher_version",
+          "token_len",
+          "inbound_secret_set",
+          "created_at",
+          "updated_at"
+        ],
+        "type": "object"
+      },
+      "OrgCIGitHubActionsCredentialView": {
+        "additionalProperties": true,
+        "properties": {
+          "$schema": {
+            "description": "A URL to the JSON Schema for this object.",
+            "examples": [
+              "/api/v1/schemas/OrgCIGitHubActionsCredentialView.json"
+            ],
+            "format": "uri",
+            "readOnly": true,
+            "type": "string"
+          },
+          "account": {
+            "type": "string"
+          },
+          "has_api_token": {
+            "type": "boolean"
+          },
+          "inbound_endpoint_id": {
+            "type": "string"
+          },
+          "inbound_endpoint_path": {
+            "type": "string"
+          },
+          "inbound_endpoint_url": {
+            "type": "string"
+          },
+          "inbound_secret": {
+            "type": "string"
+          },
+          "owner": {
+            "type": "string"
+          },
+          "provider": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "provider",
+          "account",
+          "owner"
+        ],
+        "type": "object"
+      },
+      "OrgCapabilities": {
+        "additionalProperties": true,
+        "properties": {
+          "canCreateProject": {
+            "type": "boolean"
+          },
+          "canDelete": {
+            "type": "boolean"
+          },
+          "canManageMembers": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "canCreateProject",
+          "canManageMembers",
+          "canDelete"
         ],
         "type": "object"
       },
@@ -2317,6 +3224,9 @@
             },
             "type": "array"
           },
+          "publish_checks": {
+            "type": "boolean"
+          },
           "ref_filter": {
             "type": "string"
           }
@@ -2335,6 +3245,9 @@
             "readOnly": true,
             "type": "string"
           },
+          "capabilities": {
+            "$ref": "#/components/schemas/ProjectCapabilities"
+          },
           "createdAt": {
             "format": "date-time",
             "type": "string"
@@ -2346,6 +3259,9 @@
             "type": "string"
           },
           "ownerId": {
+            "type": "string"
+          },
+          "ownerName": {
             "type": "string"
           },
           "ownerType": {
@@ -2366,6 +3282,30 @@
           "ownerId",
           "region",
           "createdAt"
+        ],
+        "type": "object"
+      },
+      "ProjectCapabilities": {
+        "additionalProperties": true,
+        "properties": {
+          "canCreateRepository": {
+            "type": "boolean"
+          },
+          "canDelete": {
+            "type": "boolean"
+          },
+          "canManageAccess": {
+            "type": "boolean"
+          },
+          "canManageTrails": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "canDelete",
+          "canManageAccess",
+          "canCreateRepository",
+          "canManageTrails"
         ],
         "type": "object"
       },
@@ -2396,6 +3336,39 @@
         ],
         "type": "object"
       },
+      "RegisterOrgCIBuildkiteClusterInputBody": {
+        "additionalProperties": true,
+        "properties": {
+          "$schema": {
+            "description": "A URL to the JSON Schema for this object.",
+            "examples": [
+              "/api/v1/schemas/RegisterOrgCIBuildkiteClusterInputBody.json"
+            ],
+            "format": "uri",
+            "readOnly": true,
+            "type": "string"
+          },
+          "auth_plugin_ref": {
+            "type": "string"
+          },
+          "bk_cluster_id": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "bk_organization": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "label": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "bk_organization",
+          "bk_cluster_id"
+        ],
+        "type": "object"
+      },
       "Repo": {
         "additionalProperties": true,
         "properties": {
@@ -2408,7 +3381,13 @@
             "readOnly": true,
             "type": "string"
           },
+          "capabilities": {
+            "$ref": "#/components/schemas/RepoCapabilities"
+          },
           "clusterHost": {
+            "type": "string"
+          },
+          "clusterSlug": {
             "type": "string"
           },
           "foreign": {
@@ -2418,6 +3397,9 @@
             "type": "string"
           },
           "id": {
+            "type": "string"
+          },
+          "jurisdiction": {
             "type": "string"
           },
           "mirrorSuspended": {
@@ -2436,6 +3418,12 @@
             "type": "string"
           },
           "path": {
+            "type": "string"
+          },
+          "primaries": {
+            "$ref": "#/components/schemas/RepoPrimaries"
+          },
+          "provider": {
             "type": "string"
           },
           "provisionAttempts": {
@@ -2483,6 +3471,73 @@
         ],
         "type": "object"
       },
+      "RepoCapabilities": {
+        "additionalProperties": true,
+        "properties": {
+          "canManage": {
+            "type": "boolean"
+          },
+          "canPull": {
+            "type": "boolean"
+          },
+          "canPush": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "canManage",
+          "canPush",
+          "canPull"
+        ],
+        "type": "object"
+      },
+      "RepoCollaborator": {
+        "additionalProperties": true,
+        "properties": {
+          "accountId": {
+            "type": "string"
+          },
+          "handle": {
+            "type": "string"
+          },
+          "role": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "accountId",
+          "role"
+        ],
+        "type": "object"
+      },
+      "RepoFacetPage": {
+        "additionalProperties": true,
+        "properties": {
+          "$schema": {
+            "description": "A URL to the JSON Schema for this object.",
+            "examples": [
+              "/api/v1/schemas/RepoFacetPage.json"
+            ],
+            "format": "uri",
+            "readOnly": true,
+            "type": "string"
+          },
+          "items": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "nextPageToken": {
+            "description": "Pass back to fetch the next page; empty when no more entries.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "items"
+        ],
+        "type": "object"
+      },
       "RepoGrant": {
         "additionalProperties": true,
         "properties": {
@@ -2510,9 +3565,42 @@
         ],
         "type": "object"
       },
+      "RepoIDResolution": {
+        "additionalProperties": true,
+        "properties": {
+          "fullName": {
+            "type": "string"
+          },
+          "provider": {
+            "type": "string"
+          },
+          "repoId": {
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "resolved",
+              "unavailable"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "repoId",
+          "status"
+        ],
+        "type": "object"
+      },
       "RepoIndexEntry": {
         "additionalProperties": true,
         "properties": {
+          "activityHotness": {
+            "format": "double",
+            "type": "number"
+          },
+          "archived": {
+            "type": "boolean"
+          },
           "candidate": {
             "$ref": "#/components/schemas/RepoCandidate"
           },
@@ -2520,9 +3608,17 @@
             "deprecated": true,
             "type": "string"
           },
+          "checkpointCount": {
+            "format": "int64",
+            "type": "integer"
+          },
           "clusterSlug": {
             "deprecated": true,
             "type": "string"
+          },
+          "forks": {
+            "format": "int64",
+            "type": "integer"
           },
           "full_name": {
             "type": "string"
@@ -2534,7 +3630,28 @@
             "deprecated": true,
             "type": "string"
           },
+          "language": {
+            "type": "string"
+          },
+          "lastActivityAt": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "lastPushedAt": {
+            "format": "date-time",
+            "type": "string"
+          },
           "name": {
+            "type": "string"
+          },
+          "openPrCount": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "org": {
+            "type": "string"
+          },
+          "permission": {
             "type": "string"
           },
           "placements": {
@@ -2545,6 +3662,13 @@
           },
           "primaries": {
             "$ref": "#/components/schemas/RepoPrimaries"
+          },
+          "provider": {
+            "type": "string"
+          },
+          "pushedAt": {
+            "format": "date-time",
+            "type": "string"
           },
           "stars": {
             "format": "int64",
@@ -2607,16 +3731,84 @@
       "RepoPrimaries": {
         "additionalProperties": true,
         "properties": {
+          "data_primary": {
+            "$ref": "#/components/schemas/ForgeRepoIdentity"
+          },
           "git_data": {
             "type": "string"
           },
           "processing": {
             "type": "string"
+          },
+          "processing_primary": {
+            "$ref": "#/components/schemas/ForgeRepoIdentity"
           }
         },
         "required": [
           "git_data",
-          "processing"
+          "processing",
+          "data_primary"
+        ],
+        "type": "object"
+      },
+      "RepoReference": {
+        "additionalProperties": true,
+        "properties": {
+          "fullName": {
+            "maxLength": 256,
+            "type": "string"
+          },
+          "provider": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "provider",
+          "fullName"
+        ],
+        "type": "object"
+      },
+      "RepoResolution": {
+        "additionalProperties": true,
+        "properties": {
+          "candidate": {
+            "$ref": "#/components/schemas/RepoCandidate"
+          },
+          "fullName": {
+            "type": "string"
+          },
+          "placements": {
+            "items": {
+              "$ref": "#/components/schemas/RepoPlacement"
+            },
+            "type": "array"
+          },
+          "primaries": {
+            "$ref": "#/components/schemas/RepoPrimaries"
+          },
+          "provider": {
+            "type": "string"
+          },
+          "repoId": {
+            "type": "string"
+          },
+          "requestedFullName": {
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "ready",
+              "processing",
+              "no-mirror",
+              "unavailable"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "provider",
+          "requestedFullName",
+          "status"
         ],
         "type": "object"
       },
@@ -2641,6 +3833,104 @@
         },
         "required": [
           "placements"
+        ],
+        "type": "object"
+      },
+      "ResolveRepoIDsInputBody": {
+        "additionalProperties": true,
+        "properties": {
+          "$schema": {
+            "description": "A URL to the JSON Schema for this object.",
+            "examples": [
+              "/api/v1/schemas/ResolveRepoIDsInputBody.json"
+            ],
+            "format": "uri",
+            "readOnly": true,
+            "type": "string"
+          },
+          "repoIds": {
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 100,
+            "type": "array"
+          }
+        },
+        "required": [
+          "repoIds"
+        ],
+        "type": "object"
+      },
+      "ResolveRepoIDsResponse": {
+        "additionalProperties": true,
+        "properties": {
+          "$schema": {
+            "description": "A URL to the JSON Schema for this object.",
+            "examples": [
+              "/api/v1/schemas/ResolveRepoIDsResponse.json"
+            ],
+            "format": "uri",
+            "readOnly": true,
+            "type": "string"
+          },
+          "resolutions": {
+            "items": {
+              "$ref": "#/components/schemas/RepoIDResolution"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "resolutions"
+        ],
+        "type": "object"
+      },
+      "ResolveReposInputBody": {
+        "additionalProperties": true,
+        "properties": {
+          "$schema": {
+            "description": "A URL to the JSON Schema for this object.",
+            "examples": [
+              "/api/v1/schemas/ResolveReposInputBody.json"
+            ],
+            "format": "uri",
+            "readOnly": true,
+            "type": "string"
+          },
+          "repositories": {
+            "items": {
+              "$ref": "#/components/schemas/RepoReference"
+            },
+            "maxItems": 100,
+            "type": "array"
+          }
+        },
+        "required": [
+          "repositories"
+        ],
+        "type": "object"
+      },
+      "ResolveReposResponse": {
+        "additionalProperties": true,
+        "properties": {
+          "$schema": {
+            "description": "A URL to the JSON Schema for this object.",
+            "examples": [
+              "/api/v1/schemas/ResolveReposResponse.json"
+            ],
+            "format": "uri",
+            "readOnly": true,
+            "type": "string"
+          },
+          "resolutions": {
+            "items": {
+              "$ref": "#/components/schemas/RepoResolution"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "resolutions"
         ],
         "type": "object"
       },
@@ -2698,25 +3988,6 @@
         "required": [
           "mirrorId",
           "clusterHost"
-        ],
-        "type": "object"
-      },
-      "ResourceAccess": {
-        "additionalProperties": true,
-        "properties": {
-          "permissions": {
-            "items": {
-              "type": "string"
-            },
-            "type": "array"
-          },
-          "resourceId": {
-            "type": "string"
-          }
-        },
-        "required": [
-          "resourceId",
-          "permissions"
         ],
         "type": "object"
       },
@@ -2953,6 +4224,37 @@
         ],
         "type": "object"
       },
+      "UpdateBranchProtectionInputBody": {
+        "additionalProperties": true,
+        "properties": {
+          "$schema": {
+            "description": "A URL to the JSON Schema for this object.",
+            "examples": [
+              "/api/v1/schemas/UpdateBranchProtectionInputBody.json"
+            ],
+            "format": "uri",
+            "readOnly": true,
+            "type": "string"
+          },
+          "addRules": {
+            "description": "Rules to add or replace by ref: an existing rule keeps its position and takes the new flag.",
+            "items": {
+              "$ref": "#/components/schemas/BranchRule"
+            },
+            "maxItems": 64,
+            "type": "array"
+          },
+          "removeRefs": {
+            "description": "Patterns to remove; absent entries are ignored.",
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 64,
+            "type": "array"
+          }
+        },
+        "type": "object"
+      },
       "WillDeleteStruct": {
         "additionalProperties": true,
         "properties": {
@@ -3002,7 +4304,7 @@
     "securitySchemes": {
       "bearerAuth": {
         "bearerFormat": "JWT",
-        "description": "Bearer token minted by entire-core's device-code flow or STS exchange.",
+        "description": "Bearer access token.",
         "scheme": "bearer",
         "type": "http"
       },
@@ -3021,91 +4323,6 @@
   },
   "openapi": "3.1.0",
   "paths": {
-    "/access/{resourceType}": {
-      "get": {
-        "operationId": "lookupResources",
-        "parameters": [
-          {
-            "description": "Maximum entries to return; server may cap further.",
-            "explode": false,
-            "in": "query",
-            "name": "pageSize",
-            "schema": {
-              "description": "Maximum entries to return; server may cap further.",
-              "format": "int32",
-              "maximum": 500,
-              "minimum": 0,
-              "type": "integer"
-            }
-          },
-          {
-            "description": "Opaque cursor from a previous response's nextPageToken.",
-            "explode": false,
-            "in": "query",
-            "name": "pageToken",
-            "schema": {
-              "description": "Opaque cursor from a previous response's nextPageToken.",
-              "type": "string"
-            }
-          },
-          {
-            "description": "SpiceDB resource type (e.g. \"repo\", \"project\", \"org\").",
-            "in": "path",
-            "name": "resourceType",
-            "required": true,
-            "schema": {
-              "description": "SpiceDB resource type (e.g. \"repo\", \"project\", \"org\").",
-              "minLength": 1,
-              "type": "string"
-            }
-          },
-          {
-            "description": "Optional: only list resources where the caller has this permission. pageSize/pageToken apply only when set.",
-            "explode": false,
-            "in": "query",
-            "name": "permission",
-            "schema": {
-              "description": "Optional: only list resources where the caller has this permission. pageSize/pageToken apply only when set.",
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/LookupResourcesOutputBody"
-                }
-              }
-            },
-            "description": "OK"
-          },
-          "default": {
-            "content": {
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorModel"
-                }
-              }
-            },
-            "description": "Error"
-          }
-        },
-        "security": [
-          {
-            "bearerAuth": []
-          },
-          {
-            "sessionAuth": []
-          }
-        ],
-        "summary": "List resources of a type the caller can access",
-        "tags": [
-          "identity"
-        ]
-      }
-    },
     "/access/{resourceType}/{resourceId}": {
       "get": {
         "operationId": "getPermissions",
@@ -3336,55 +4553,6 @@
           }
         ],
         "summary": "Resolve account by external provider handle",
-        "tags": [
-          "identity"
-        ]
-      }
-    },
-    "/lookup": {
-      "post": {
-        "operationId": "batchLookup",
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/BatchLookupInputBody"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/BatchLookupOutputBody"
-                }
-              }
-            },
-            "description": "OK"
-          },
-          "default": {
-            "content": {
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorModel"
-                }
-              }
-            },
-            "description": "Error"
-          }
-        },
-        "security": [
-          {
-            "bearerAuth": []
-          },
-          {
-            "sessionAuth": []
-          }
-        ],
-        "summary": "Batch-resolve (type, id) refs to enriched records",
         "tags": [
           "identity"
         ]
@@ -4496,6 +5664,465 @@
         ]
       }
     },
+    "/orgs/{orgId}/ci/buildkite/clusters": {
+      "get": {
+        "operationId": "listOrgCIBuildkiteClusters",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "orgId",
+            "required": true,
+            "schema": {
+              "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+              "type": "string"
+            }
+          },
+          {
+            "explode": false,
+            "in": "query",
+            "name": "bk_organization",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ListOrgCIBuildkiteClustersOutputBody"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionAuth": []
+          }
+        ],
+        "summary": "List an org's registered Buildkite clusters",
+        "tags": [
+          "org-ci-webhooks"
+        ]
+      },
+      "post": {
+        "operationId": "registerOrgCIBuildkiteCluster",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "orgId",
+            "required": true,
+            "schema": {
+              "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RegisterOrgCIBuildkiteClusterInputBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OrgCIBuildkiteClusterView"
+                }
+              }
+            },
+            "description": "Created"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionAuth": []
+          }
+        ],
+        "summary": "Register or update a Buildkite hosted cluster for an org",
+        "tags": [
+          "org-ci-webhooks"
+        ]
+      }
+    },
+    "/orgs/{orgId}/ci/buildkite/clusters/{bkOrg}/{bkClusterId}": {
+      "delete": {
+        "operationId": "deleteOrgCIBuildkiteCluster",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "orgId",
+            "required": true,
+            "schema": {
+              "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "bkOrg",
+            "required": true,
+            "schema": {
+              "pattern": "^[a-z0-9][a-z0-9-]*$",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "bkClusterId",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "No Content"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionAuth": []
+          }
+        ],
+        "summary": "Remove a registered Buildkite cluster from an org",
+        "tags": [
+          "org-ci-webhooks"
+        ]
+      }
+    },
+    "/orgs/{orgId}/ci/buildkite/credential": {
+      "post": {
+        "operationId": "connectOrgCIBuildkiteCredential",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "orgId",
+            "required": true,
+            "schema": {
+              "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ConnectOrgCIBuildkiteCredentialInputBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OrgCIBuildkiteCredentialView"
+                }
+              }
+            },
+            "description": "Created"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionAuth": []
+          }
+        ],
+        "summary": "Connect or rotate an org's Buildkite API credential",
+        "tags": [
+          "org-ci-webhooks"
+        ]
+      }
+    },
+    "/orgs/{orgId}/ci/buildkite/credential/{bkOrg}": {
+      "delete": {
+        "operationId": "deleteOrgCIBuildkiteCredential",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "orgId",
+            "required": true,
+            "schema": {
+              "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "bkOrg",
+            "required": true,
+            "schema": {
+              "pattern": "^[a-z0-9][a-z0-9-]*$",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "No Content"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionAuth": []
+          }
+        ],
+        "summary": "Delete an org's connected Buildkite credential",
+        "tags": [
+          "org-ci-webhooks"
+        ]
+      }
+    },
+    "/orgs/{orgId}/ci/buildkite/credential/{bkOrg}/inbound-secret": {
+      "put": {
+        "operationId": "rotateOrgCIBuildkiteInboundSecret",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "orgId",
+            "required": true,
+            "schema": {
+              "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "bkOrg",
+            "required": true,
+            "schema": {
+              "pattern": "^[a-z0-9][a-z0-9-]*$",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OrgCIBuildkiteCredentialView"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionAuth": []
+          }
+        ],
+        "summary": "Rotate an org's inbound Buildkite webhook secret",
+        "tags": [
+          "org-ci-webhooks"
+        ]
+      }
+    },
+    "/orgs/{orgId}/ci/buildkite/credentials": {
+      "get": {
+        "operationId": "listOrgCIBuildkiteCredentials",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "orgId",
+            "required": true,
+            "schema": {
+              "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ListOrgCIBuildkiteCredentialsOutputBody"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionAuth": []
+          }
+        ],
+        "summary": "List an org's connected Buildkite credentials",
+        "tags": [
+          "org-ci-webhooks"
+        ]
+      }
+    },
+    "/orgs/{orgId}/ci/github-actions/credential": {
+      "post": {
+        "description": "Operator-only: requires platform#admin, unlike the Buildkite routes beside it, because GitHub Actions has no enrolment path yet and a credential minted here cannot be used. Mints the inbound webhook credential for one GitHub account: a fresh webhook secret (returned once, in this 201) and the endpoint URL to configure the GitHub webhook with, plus optionally the outbound dispatch api_token (write-only, never returned; has_api_token confirms storage). With api_token, an already-minted github-actions row gets the token stored/rotated instead (200, no secret re-issued).",
+        "operationId": "mintOrgCIGitHubActionsCredential",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "orgId",
+            "required": true,
+            "schema": {
+              "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MintOrgCIGitHubActionsCredentialInputBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OrgCIGitHubActionsCredentialView"
+                }
+              }
+            },
+            "description": "Created"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionAuth": []
+          }
+        ],
+        "summary": "Mint an org's GitHub Actions webhook credential",
+        "tags": [
+          "org-ci-webhooks"
+        ]
+      }
+    },
     "/orgs/{orgId}/members": {
       "get": {
         "operationId": "listOrgMembers",
@@ -5364,12 +6991,138 @@
             }
           },
           {
-            "description": "Optional: exact-match full_name (owner/repo, case-insensitive). Returns that repo's zero-or-one entries; pagination and scope are ignored.",
+            "description": "Optional: exact-match full_name (owner/repo, case-insensitive). Returns that repo's zero-or-one entries; pagination and scope are ignored, but the fact filters below still apply (a repo whose facts don't match returns empty).",
             "explode": false,
             "in": "query",
             "name": "filter",
             "schema": {
-              "description": "Optional: exact-match full_name (owner/repo, case-insensitive). Returns that repo's zero-or-one entries; pagination and scope are ignored.",
+              "description": "Optional: exact-match full_name (owner/repo, case-insensitive). Returns that repo's zero-or-one entries; pagination and scope are ignored, but the fact filters below still apply (a repo whose facts don't match returns empty).",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Multi-key sort spec, e.g. org:asc,stars:desc. Keys: name,org,language,candidacy,stars,forks,pushed_at,last_activity_at,last_pushed_at,activity_hotness,checkpoint_count,open_pr_count. A single bare key uses the order param. Encoded into the cursor (authoritative on continuation).",
+            "explode": false,
+            "in": "query",
+            "name": "sort",
+            "schema": {
+              "description": "Multi-key sort spec, e.g. org:asc,stars:desc. Keys: name,org,language,candidacy,stars,forks,pushed_at,last_activity_at,last_pushed_at,activity_hotness,checkpoint_count,open_pr_count. A single bare key uses the order param. Encoded into the cursor (authoritative on continuation).",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Direction for a single bare sort key; defaults to asc. Ignored when sort carries per-key :asc/:desc suffixes. Encoded into the cursor (authoritative on continuation).",
+            "explode": false,
+            "in": "query",
+            "name": "order",
+            "schema": {
+              "description": "Direction for a single bare sort key; defaults to asc. Ignored when sort carries per-key :asc/:desc suffixes. Encoded into the cursor (authoritative on continuation).",
+              "enum": [
+                "asc",
+                "desc"
+              ],
+              "type": "string"
+            }
+          },
+          {
+            "description": "Exact-match repo_facts.language. Also accepts language[eq]/language[ne] (bare is sugar for [eq]).",
+            "explode": false,
+            "in": "query",
+            "name": "language",
+            "schema": {
+              "description": "Exact-match repo_facts.language. Also accepts language[eq]/language[ne] (bare is sugar for [eq]).",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Filter on the observed repo_facts.private fact (public: private=false; private: private=true). Also accepts visibility[eq]/visibility[ne].",
+            "explode": false,
+            "in": "query",
+            "name": "visibility",
+            "schema": {
+              "description": "Filter on the observed repo_facts.private fact (public: private=false; private: private=true). Also accepts visibility[eq]/visibility[ne].",
+              "enum": [
+                "public",
+                "private"
+              ],
+              "type": "string"
+            }
+          },
+          {
+            "description": "Filter on repo_facts.archived.",
+            "explode": false,
+            "in": "query",
+            "name": "archived",
+            "schema": {
+              "description": "Filter on repo_facts.archived.",
+              "enum": [
+                "true",
+                "false"
+              ],
+              "type": "string"
+            }
+          },
+          {
+            "description": "true: repo_facts.checkpoint_count > 0; false: no checkpoints (0 or unobserved).",
+            "explode": false,
+            "in": "query",
+            "name": "hasCheckpoints",
+            "schema": {
+              "description": "true: repo_facts.checkpoint_count > 0; false: no checkpoints (0 or unobserved).",
+              "enum": [
+                "true",
+                "false"
+              ],
+              "type": "string"
+            }
+          },
+          {
+            "description": "Exact-match owner/project org (case-insensitive). Also accepts org[eq]/org[ne].",
+            "explode": false,
+            "in": "query",
+            "name": "org",
+            "schema": {
+              "description": "Exact-match owner/project org (case-insensitive). Also accepts org[eq]/org[ne].",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Literal case-insensitive substring match on the full name (owner/repo).",
+            "explode": false,
+            "in": "query",
+            "name": "q",
+            "schema": {
+              "description": "Literal case-insensitive substring match on the full name (owner/repo).",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Filter on placement/candidacy lifecycle. inactive requires scope=all. Also accepts status[eq]/status[ne].",
+            "explode": false,
+            "in": "query",
+            "name": "status",
+            "schema": {
+              "description": "Filter on placement/candidacy lifecycle. inactive requires scope=all. Also accepts status[eq]/status[ne].",
+              "enum": [
+                "mirrored",
+                "processing",
+                "inactive"
+              ],
+              "type": "string"
+            }
+          },
+          {
+            "description": "Minimum caller access tier: read (all), write (write+admin), or admin. Also accepts permission[eq]; permission[ne] is rejected.",
+            "explode": false,
+            "in": "query",
+            "name": "permission",
+            "schema": {
+              "description": "Minimum caller access tier: read (all), write (write+admin), or admin. Also accepts permission[eq]; permission[ne] is rejected.",
+              "enum": [
+                "read",
+                "write",
+                "admin"
+              ],
               "type": "string"
             }
           }
@@ -5457,6 +7210,156 @@
         ]
       }
     },
+    "/repos/facets/languages": {
+      "get": {
+        "operationId": "listRepoLanguageFacets",
+        "parameters": [
+          {
+            "description": "Maximum facet values to return.",
+            "explode": false,
+            "in": "query",
+            "name": "pageSize",
+            "schema": {
+              "default": 50,
+              "description": "Maximum facet values to return.",
+              "format": "int32",
+              "maximum": 100,
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Opaque cursor from a previous response's nextPageToken.",
+            "explode": false,
+            "in": "query",
+            "name": "pageToken",
+            "schema": {
+              "description": "Opaque cursor from a previous response's nextPageToken.",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Case-insensitive substring match over facet values.",
+            "explode": false,
+            "in": "query",
+            "name": "q",
+            "schema": {
+              "description": "Case-insensitive substring match over facet values.",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RepoFacetPage"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionAuth": []
+          }
+        ],
+        "summary": "List repository language facets",
+        "tags": [
+          "repos"
+        ]
+      }
+    },
+    "/repos/facets/orgs": {
+      "get": {
+        "operationId": "listRepoOrgFacets",
+        "parameters": [
+          {
+            "description": "Maximum facet values to return.",
+            "explode": false,
+            "in": "query",
+            "name": "pageSize",
+            "schema": {
+              "default": 50,
+              "description": "Maximum facet values to return.",
+              "format": "int32",
+              "maximum": 100,
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Opaque cursor from a previous response's nextPageToken.",
+            "explode": false,
+            "in": "query",
+            "name": "pageToken",
+            "schema": {
+              "description": "Opaque cursor from a previous response's nextPageToken.",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Case-insensitive substring match over facet values.",
+            "explode": false,
+            "in": "query",
+            "name": "q",
+            "schema": {
+              "description": "Case-insensitive substring match over facet values.",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RepoFacetPage"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionAuth": []
+          }
+        ],
+        "summary": "List repository org facets",
+        "tags": [
+          "repos"
+        ]
+      }
+    },
     "/repos/lookup-by-slug": {
       "get": {
         "operationId": "lookupRepoBySlug",
@@ -5496,6 +7399,104 @@
           }
         },
         "summary": "Resolve a repo slug to routing info (unauthenticated)",
+        "tags": [
+          "repos"
+        ]
+      }
+    },
+    "/repos/resolve": {
+      "post": {
+        "operationId": "resolveRepos",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ResolveReposInputBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResolveReposResponse"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionAuth": []
+          }
+        ],
+        "summary": "Resolve provider-qualified repository lifecycle states",
+        "tags": [
+          "repos"
+        ]
+      }
+    },
+    "/repos/resolve-ids": {
+      "post": {
+        "operationId": "resolveRepoIDs",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ResolveRepoIDsInputBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResolveRepoIDsResponse"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionAuth": []
+          }
+        ],
+        "summary": "Resolve repository ids to full name and provider",
         "tags": [
           "repos"
         ]
@@ -5592,6 +7593,257 @@
         ]
       }
     },
+    "/repos/{repoId}/branch-protection": {
+      "get": {
+        "operationId": "getBranchProtection",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "repoId",
+            "required": true,
+            "schema": {
+              "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BranchProtection"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionAuth": []
+          }
+        ],
+        "summary": "Get repository branch protection",
+        "tags": [
+          "repos"
+        ]
+      },
+      "patch": {
+        "operationId": "updateBranchProtection",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "repoId",
+            "required": true,
+            "schema": {
+              "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateBranchProtectionInputBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BranchProtection"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionAuth": []
+          }
+        ],
+        "summary": "Add or remove protected branches",
+        "tags": [
+          "repos"
+        ]
+      },
+      "put": {
+        "operationId": "setBranchProtection",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "repoId",
+            "required": true,
+            "schema": {
+              "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BranchProtection"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BranchProtection"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionAuth": []
+          }
+        ],
+        "summary": "Set repository branch protection",
+        "tags": [
+          "repos"
+        ]
+      }
+    },
+    "/repos/{repoId}/ci-builds": {
+      "get": {
+        "operationId": "listRepoCIBuilds",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "repoId",
+            "required": true,
+            "schema": {
+              "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+              "type": "string"
+            }
+          },
+          {
+            "explode": false,
+            "in": "query",
+            "name": "commit",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "explode": false,
+            "in": "query",
+            "name": "pipeline",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "explode": false,
+            "in": "query",
+            "name": "build_number",
+            "schema": {
+              "format": "int64",
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          {
+            "explode": false,
+            "in": "query",
+            "name": "limit",
+            "schema": {
+              "format": "int64",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ListRepoCIBuildsOutputBody"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionAuth": []
+          }
+        ],
+        "summary": "List a repo's CI build statuses",
+        "tags": [
+          "ci-webhooks"
+        ]
+      }
+    },
     "/repos/{repoId}/ci-webhooks": {
       "get": {
         "operationId": "listRepoCIWebhooks",
@@ -5669,7 +7921,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/CIWebhookView"
+                  "$ref": "#/components/schemas/CreateRepoCIWebhookBody"
                 }
               }
             },
@@ -5700,8 +7952,141 @@
         ]
       }
     },
+    "/repos/{repoId}/ci-webhooks/audit": {
+      "get": {
+        "description": "Audited ci_webhook_enrolled / _updated / _deleted / _identity_rolled_back / _identity_orphaned events for this repo, newest first, from core's domain audit log. The entire-ci-webhooks subscription row records no actor, so this is the only way to attribute an enrollment — and it covers subscriptions created before this endpoint existed. Authz: repo#manage_ci.",
+        "operationId": "listRepoCIWebhookAudit",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "repoId",
+            "required": true,
+            "schema": {
+              "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+              "type": "string"
+            }
+          },
+          {
+            "explode": false,
+            "in": "query",
+            "name": "event_type",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "explode": false,
+            "in": "query",
+            "name": "limit",
+            "schema": {
+              "default": 50,
+              "format": "int64",
+              "maximum": 200,
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          {
+            "explode": false,
+            "in": "query",
+            "name": "offset",
+            "schema": {
+              "format": "int64",
+              "minimum": 0,
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ListRepoCIWebhookAuditOutputBody"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionAuth": []
+          }
+        ],
+        "summary": "List who changed a repo's CI webhooks, and when",
+        "tags": [
+          "ci-webhooks"
+        ]
+      }
+    },
+    "/repos/{repoId}/ci-webhooks/providers": {
+      "get": {
+        "description": "Returns each provider's enrolment form AS DATA: its modes, its fields, and the select options drawn from this repo's owning org's connected credentials and registered clusters. A client renders what it is handed and posts back provider/provider_account/target_ref/mode/config, so it never names a CI vendor in its own source. A provider the org cannot enrol into yet comes back enrollable=false with a reason a customer can act on, rather than being omitted. Authz: repo#manage_ci, the same gate as enrolling.",
+        "operationId": "listRepoCIProviders",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "repoId",
+            "required": true,
+            "schema": {
+              "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ListRepoCIProvidersOutputBody"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionAuth": []
+          }
+        ],
+        "summary": "Describe the enrolment form for every CI provider",
+        "tags": [
+          "ci-webhooks"
+        ]
+      }
+    },
     "/repos/{repoId}/ci-webhooks/{id}": {
       "delete": {
+        "description": "Deletes the subscription AND tears down its enrollment identity: the automation row (when no sibling repo shares it), its expiring repo grant, and its Buildkite OIDC binding. The Buildkite pipeline itself is always kept. Pass keep_identity=true to delete only the subscription — for an immediate re-enroll that must preserve automation_id, since teardown retires it and a re-enroll declares a new one that only bk_force_rescaffold pushes into the pipeline. A retained identity holds read access on this repo until its grant lapses. A subscription enrolled before the automation principal has no automation to retire: the delete succeeds and removes only the subscription, reported as identity_retired=false on the ci_webhook_deleted audit event — the list an operator queries to hand-delete the leftover service accounts.",
         "operationId": "deleteRepoCIWebhook",
         "parameters": [
           {
@@ -5724,7 +8109,7 @@
           {
             "explode": false,
             "in": "query",
-            "name": "teardown",
+            "name": "keep_identity",
             "schema": {
               "type": "boolean"
             }
@@ -5822,6 +8207,79 @@
         "summary": "Update a repo's CI webhook",
         "tags": [
           "ci-webhooks"
+        ]
+      }
+    },
+    "/repos/{repoId}/collaborators": {
+      "get": {
+        "operationId": "listRepoCollaborators",
+        "parameters": [
+          {
+            "description": "Maximum entries to return; server may cap further.",
+            "explode": false,
+            "in": "query",
+            "name": "pageSize",
+            "schema": {
+              "description": "Maximum entries to return; server may cap further.",
+              "format": "int32",
+              "maximum": 500,
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Opaque cursor from a previous response's nextPageToken.",
+            "explode": false,
+            "in": "query",
+            "name": "pageToken",
+            "schema": {
+              "description": "Opaque cursor from a previous response's nextPageToken.",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "repoId",
+            "required": true,
+            "schema": {
+              "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ListRepoCollaboratorsOutputBody"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionAuth": []
+          }
+        ],
+        "summary": "List repo collaborators",
+        "tags": [
+          "repos"
         ]
       }
     },
@@ -6075,6 +8533,173 @@
         "summary": "Revoke repo access by grantee id",
         "tags": [
           "repos"
+        ]
+      }
+    },
+    "/repos/{repoId}/native-mirrors": {
+      "get": {
+        "operationId": "listNativeMirrors",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "repoId",
+            "required": true,
+            "schema": {
+              "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ListNativeMirrorsOutputBody"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionAuth": []
+          }
+        ],
+        "summary": "List native-mirror placement status",
+        "tags": [
+          "native-mirrors"
+        ]
+      },
+      "post": {
+        "operationId": "createNativeMirror",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "repoId",
+            "required": true,
+            "schema": {
+              "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateNativeMirrorInputBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NativeMirrorPlacement"
+                }
+              }
+            },
+            "description": "Accepted"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionAuth": []
+          }
+        ],
+        "summary": "Create a native-mirror placement",
+        "tags": [
+          "native-mirrors"
+        ]
+      }
+    },
+    "/repos/{repoId}/native-mirrors/{clusterSlug}": {
+      "delete": {
+        "operationId": "deleteNativeMirror",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "repoId",
+            "required": true,
+            "schema": {
+              "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "clusterSlug",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NativeMirrorPlacement"
+                }
+              }
+            },
+            "description": "Accepted"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionAuth": []
+          }
+        ],
+        "summary": "Delete a native-mirror placement",
+        "tags": [
+          "native-mirrors"
         ]
       }
     },
