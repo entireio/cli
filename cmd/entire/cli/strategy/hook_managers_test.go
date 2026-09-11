@@ -38,9 +38,6 @@ func TestDetectHookManagers_Husky(t *testing.T) {
 	if managers[0].ConfigPath != ".husky/" {
 		t.Errorf("expected .husky/, got %s", managers[0].ConfigPath)
 	}
-	if !managers[0].OverwritesHooks {
-		t.Error("Husky should have OverwritesHooks=true")
-	}
 }
 
 func TestDetectHookManagers_Lefthook(t *testing.T) {
@@ -60,9 +57,6 @@ func TestDetectHookManagers_Lefthook(t *testing.T) {
 	}
 	if managers[0].ConfigPath != "lefthook.yml" {
 		t.Errorf("expected lefthook.yml, got %s", managers[0].ConfigPath)
-	}
-	if managers[0].OverwritesHooks {
-		t.Error("Lefthook should have OverwritesHooks=false")
 	}
 }
 
@@ -165,9 +159,6 @@ func TestDetectHookManagers_PreCommit(t *testing.T) {
 	if managers[0].ConfigPath != ".pre-commit-config.yaml" {
 		t.Errorf("expected .pre-commit-config.yaml, got %s", managers[0].ConfigPath)
 	}
-	if managers[0].OverwritesHooks {
-		t.Error("pre-commit should have OverwritesHooks=false")
-	}
 }
 
 func TestDetectHookManagers_Overcommit(t *testing.T) {
@@ -188,9 +179,6 @@ func TestDetectHookManagers_Overcommit(t *testing.T) {
 	if managers[0].ConfigPath != ".overcommit.yml" {
 		t.Errorf("expected .overcommit.yml, got %s", managers[0].ConfigPath)
 	}
-	if managers[0].OverwritesHooks {
-		t.Error("Overcommit should have OverwritesHooks=false")
-	}
 }
 
 func TestDetectHookManagers_Hk(t *testing.T) {
@@ -210,9 +198,6 @@ func TestDetectHookManagers_Hk(t *testing.T) {
 	}
 	if managers[0].ConfigPath != "hk.pkl" {
 		t.Errorf("expected hk.pkl, got %s", managers[0].ConfigPath)
-	}
-	if managers[0].OverwritesHooks {
-		t.Error("hk should have OverwritesHooks=false")
 	}
 }
 
@@ -314,7 +299,7 @@ func TestHookManagerWarning_Husky(t *testing.T) {
 	t.Parallel()
 
 	managers := []hookManager{
-		{Name: "Husky", ConfigPath: ".husky/", OverwritesHooks: true},
+		{Name: "Husky", ConfigPath: ".husky/"},
 	}
 
 	warning := hookManagerWarning(managers, "entire")
@@ -348,26 +333,52 @@ func TestHookManagerWarning_Husky(t *testing.T) {
 	}
 }
 
-func TestHookManagerWarning_GitHooksManager(t *testing.T) {
+func TestHookManagerWarning_Lefthook(t *testing.T) {
 	t.Parallel()
 
 	managers := []hookManager{
-		{Name: "Lefthook", ConfigPath: "lefthook.yml", OverwritesHooks: false},
+		{Name: "Lefthook", ConfigPath: "lefthook.yml"},
 	}
 
 	warning := hookManagerWarning(managers, "entire")
 
-	// Category B: should be a Note, not a Warning
+	// Lefthook is the one manager Entire integrates with at the config level,
+	// so the message must not ask the user to do anything.
 	if !strings.Contains(warning, "Note: Lefthook detected") {
 		t.Error("warning should contain 'Note: Lefthook detected'")
 	}
-	if !strings.Contains(warning, "run 'entire enable' to restore") {
-		t.Error("warning should mention running 'entire enable'")
+	if !strings.Contains(warning, "No action needed") {
+		t.Error("warning should say no action is needed")
 	}
-
-	// Should NOT contain hook file copy-paste instructions
+	if strings.Contains(warning, "entire enable") {
+		t.Error("warning should not tell the user to re-run entire enable")
+	}
 	if strings.Contains(warning, "prepare-commit-msg:") {
-		t.Error("category B warning should not contain hook file instructions")
+		t.Error("warning should not contain hook file instructions")
+	}
+}
+
+// pre-commit, Overcommit and hk each overwrite Entire's hooks at install time
+// but do not reclaim them afterwards, so the next agent turn repairs it.
+func TestHookManagerWarning_OverwritesAtInstall(t *testing.T) {
+	t.Parallel()
+
+	for _, name := range []string{"pre-commit", "Overcommit", "hk"} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			warning := hookManagerWarning([]hookManager{{Name: name, ConfigPath: "cfg"}}, "entire")
+
+			if !strings.Contains(warning, "Warning: "+name+" detected") {
+				t.Errorf("warning should name %s, got %q", name, warning)
+			}
+			if !strings.Contains(warning, "next agent turn") {
+				t.Error("warning should say Entire reinstalls on the next agent turn")
+			}
+			if !strings.Contains(warning, "entire enable") {
+				t.Error("warning should offer 'entire enable' to restore now")
+			}
+		})
 	}
 }
 
@@ -389,7 +400,7 @@ func TestHookManagerWarning_AbsolutePathPrefix(t *testing.T) {
 	t.Parallel()
 
 	managers := []hookManager{
-		{Name: "Husky", ConfigPath: ".husky/", OverwritesHooks: true},
+		{Name: "Husky", ConfigPath: ".husky/"},
 	}
 
 	// The prefix is whatever hookCmdPrefix resolved to — bare "entire" or, with
@@ -408,8 +419,8 @@ func TestHookManagerWarning_Multiple(t *testing.T) {
 	t.Parallel()
 
 	managers := []hookManager{
-		{Name: "Husky", ConfigPath: ".husky/", OverwritesHooks: true},
-		{Name: "Lefthook", ConfigPath: "lefthook.yml", OverwritesHooks: false},
+		{Name: "Husky", ConfigPath: ".husky/"},
+		{Name: "Lefthook", ConfigPath: "lefthook.yml"},
 	}
 
 	warning := hookManagerWarning(managers, "entire")

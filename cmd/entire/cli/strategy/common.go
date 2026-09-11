@@ -111,6 +111,15 @@ func EnsureSetup(ctx context.Context) error {
 		return fmt.Errorf("failed to ensure primary metadata ref: %w", err)
 	}
 
+	// Lefthook first, because whether Lefthook runs Entire from its own config
+	// decides which hook files Entire should own — see installSkipsHook. Owning
+	// .git/hooks/* is no fix in a Lefthook repo anyway: Lefthook takes those
+	// files back at the top of its next run, which is typically the pre-commit
+	// of the very commit being made.
+	if err := ensureLefthookIntegrationIfManaged(ctx); err != nil {
+		return err
+	}
+
 	// Install generic hooks (they delegate to strategy at runtime)
 	if !IsGitHookInstalled(ctx) {
 		if _, err := ReinstallGitHooks(ctx); err != nil {
@@ -1807,4 +1816,34 @@ func prepareTranscriptIfNeeded(ctx context.Context, ag agent.Agent, transcriptPa
 		// Transcript may not be available yet (e.g., agent not installed).
 		_ = preparer.PrepareTranscript(ctx, transcriptPath) //nolint:errcheck // Best-effort in hook path
 	}
+}
+
+// ensureLefthookIntegrationIfManaged installs or repairs Entire's Lefthook
+// registration when this repository is Lefthook-managed. A repo that declines
+// the integration (a non-YAML local config Entire will not shadow) keeps the
+// native hooks and is not an error.
+//
+// An already-current integration still reconciles the hook files, because
+// that is where a repo left mid-fight — Entire's hook chaining to Lefthook's
+// displaced launcher, running Entire twice — gets straightened out.
+func ensureLefthookIntegrationIfManaged(ctx context.Context) error {
+	repoRoot, err := paths.WorktreeRoot(ctx)
+	if err != nil || !LefthookManaged(repoRoot) {
+		return nil //nolint:nilerr // not a Lefthook repo: nothing to do
+	}
+	absolute := hookSettingsFromConfig(ctx)
+	current, err := LefthookIntegrationCurrent(ctx, absolute)
+	if err != nil {
+		return nil //nolint:nilerr // inspection failure falls back to native hooks
+	}
+	if current {
+		return reconcileHookFiles(ctx, repoRoot)
+	}
+	if _, err := EnsureLefthookIntegration(ctx, absolute); err != nil {
+		if errors.Is(err, ErrLefthookLocalConfigUnwritable) {
+			return nil
+		}
+		return fmt.Errorf("failed to register Entire with Lefthook: %w", err)
+	}
+	return nil
 }
