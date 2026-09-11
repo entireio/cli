@@ -91,7 +91,7 @@ func fetchURLResolved(ctx context.Context, opts ...FetchURLOptions) (string, boo
 	if opt.WorktreeRoot != "" {
 		ctx = settings.WithWorktreeRoot(ctx, opt.WorktreeRoot)
 		getRemoteURL = func(ctx context.Context, remoteName string) (string, error) {
-			return GetRemoteURLInDir(ctx, opt.WorktreeRoot, remoteName)
+			return getRemoteURLInDirHookSafe(ctx, opt.WorktreeRoot, remoteName)
 		}
 	}
 
@@ -161,13 +161,26 @@ func fetchURLResolved(ctx context.Context, opts ...FetchURLOptions) (string, boo
 		// fetch url queried the wrong repository, so a stale ref or a false
 		// absence. The FIRST push url, matching the push side's own transport
 		// derivation and the single destination checkpoint refs are sent to.
+		if servedByCandidate && opt.LeadReadRemote != "" && len(ownershipURLs) == 0 {
+			// A candidate was named and the vote could not resolve its push
+			// destinations, so there is no identity to read from. Falling
+			// through would use its FETCH url — the misroute this branch
+			// exists to prevent — and the vote already treats an unresolvable
+			// identity as inherited rather than dropping it, because dropping
+			// it fails OPEN. Same reasoning, same answer.
+			//
+			// Named is the operative word: with no candidate the vote has no
+			// URLs to produce and origin is the target by default, which is
+			// the ordinary no-lead path rather than a failure.
+			return "", false, true, fmt.Errorf("resolve push destination for read candidate %q: %w", opt.LeadReadRemote, ownershipErr)
+		}
 		if servedByCandidate && len(ownershipURLs) > 0 {
 			// The very push destinations the vote just resolved, so the target
 			// IS the identity the veto was decided on rather than a second
 			// read of the same config that could in principle disagree with
-			// it. Non-empty exactly when the vote consulted
-			// checkpointRemoteIsInherited, since an ownership error is treated
-			// as inherited without one.
+			// it. The length is checked rather than inferred from the branch
+			// above: the no-candidate path reaches here with none, and origin
+			// is already the target there.
 			fallbackURL = ownershipURLs[0]
 			if withToken {
 				if tokenURL, ok := deriveTokenOriginURL(fallbackURL); ok {
@@ -306,6 +319,11 @@ func fetchOwnershipURLs(ctx context.Context, opt FetchURLOptions) ([]string, err
 // A failure is an error rather than a skip, matching the fetch URL beside it:
 // an identity whose owner cannot be determined counts as inherited, because
 // dropping it fails OPEN.
+//
+// Both halves of a vote must resolve in the same worktree, or they describe
+// different repositories — and both reach git the same way, with git's
+// repo-selector variables filtered, so cmd.Dir decides rather than agreeing
+// by accident with what would override it.
 func pushOwnershipURLs(ctx context.Context, opt FetchURLOptions, lead string) ([]string, error) {
 	pushURLs, err := gitremote.GetPushURLsInDir(ctx, opt.WorktreeRoot, gitrepo.EnvWithoutRepoOverrides(), lead)
 	if err != nil {
@@ -623,6 +641,21 @@ func InheritedCheckpointRemote(ctx context.Context, s *settings.EntireSettings, 
 	}
 	inherited, reason = checkpointRemoteIsInherited(ctx, config, originURL, pushURLs)
 	return config.Repo, reason, inherited
+}
+
+// getRemoteURLInDirHookSafe is GetRemoteURLInDir with git's repo-selector
+// variables filtered, for the ownership vote. Its other half
+// (pushOwnershipURLs) filters them too, so both reach git the same way and
+// cmd.Dir decides rather than agreeing by accident with what would override
+// it. The exported GetRemoteURLInDir is left alone: its remaining callers are
+// user-invoked commands acting on the current directory, where a GIT_DIR the
+// user exported is an instruction rather than contamination.
+func getRemoteURLInDirHookSafe(ctx context.Context, dir, remoteName string) (string, error) {
+	url, err := gitremote.GetRemoteURLInDirEnv(ctx, dir, gitrepo.EnvWithoutRepoOverrides(), remoteName)
+	if err != nil {
+		return "", fmt.Errorf("get remote URL: %w", err)
+	}
+	return url, nil
 }
 
 // GetRemoteURLInDir returns the URL configured for the named git remote in dir.
