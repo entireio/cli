@@ -519,7 +519,7 @@ func listUnpushedV1Commits(repo *git.Repository, localTip, remoteTip plumbing.Ha
 
 	var unpushed []*object.Commit
 	if walkErr := iter.ForEach(func(c *object.Commit) error {
-		if !remoteTip.IsZero() && c.Hash == remoteTip {
+		if !remoteTip.IsZero() && c.Hash.Equal(remoteTip) {
 			return errStop
 		}
 		unpushed = append(unpushed, c)

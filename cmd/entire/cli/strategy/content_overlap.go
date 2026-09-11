@@ -165,7 +165,7 @@ func filesOverlapWithContent(ctx context.Context, repo *git.Repository, shadowBr
 		}
 
 		// Compare by hash (blob hash) - exact content match required for new files
-		if headFile.Hash == shadowFile.Hash {
+		if headFile.Hash.Equal(shadowFile.Hash) {
 			logging.Debug(logCtx, "filesOverlapWithContent: new file content match found",
 				slog.String("file", filePath),
 				slog.String("hash", headFile.Hash.String()),
@@ -494,7 +494,7 @@ func filesWithRemainingAgentChanges(
 			continue
 		}
 
-		if commitFile.Hash == shadowFile.Hash {
+		if commitFile.Hash.Equal(shadowFile.Hash) {
 			logging.Debug(logCtx, "filesWithRemainingAgentChanges: content fully committed",
 				slog.String("file", filePath),
 			)
