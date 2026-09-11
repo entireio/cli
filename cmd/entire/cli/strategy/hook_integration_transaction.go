@@ -123,7 +123,7 @@ func EnsureGitHookIntegration(ctx context.Context, absolutePath bool) (int, erro
 	if err != nil {
 		return 0, err
 	}
-	manager, lefthook, err := selectLefthookIntegrationManager(managers)
+	_, lefthook, err := selectLefthookIntegrationManager(managers)
 	if err != nil {
 		return 0, err
 	}
@@ -137,27 +137,10 @@ func EnsureGitHookIntegration(ctx context.Context, absolutePath bool) (int, erro
 	fail := func(primary error) (int, error) {
 		return 0, errors.Join(primary, restoreHookIntegrationSnapshots(snapshots))
 	}
-	if lefthook {
-		root, openErr := worktreedir.OpenAt(repoRoot)
-		if openErr != nil {
-			return fail(fmt.Errorf("open worktree for Lefthook validation: %w", openErr))
-		}
-		validationErr := validateLefthookMainConfig(root, manager)
-		if errors.Is(validationErr, errLefthookUnsupportedLayout) {
-			written, installErr := InstallGitHook(ctx, true, absolutePath)
-			if installErr != nil {
-				return fail(installErr)
-			}
-			health := CheckGitHookIntegration(ctx)
-			if health.Mode != GitHookIntegrationLefthook || health.State != GitHookIntegrationDegraded || health.ReasonCode != "lefthook_unsupported_native_bridge" {
-				return fail(fmt.Errorf("unsupported Lefthook native fallback verification failed: %s", health.Reason))
-			}
-			return written, nil
-		}
-		if validationErr != nil {
-			return fail(validationErr)
-		}
-	}
+	// No main-config validation here any more: Entire owns entire-lefthook.yml
+	// and adds one extends entry to the local config, so the main config's
+	// format and contents are irrelevant. A local config Entire cannot write
+	// safely is refused earlier, by selectLefthookIntegrationManager.
 
 	if !lefthook {
 		written, installErr := InstallGitHook(ctx, true, absolutePath)
@@ -444,11 +427,11 @@ func AnyGitHookIntegrationInstalled(ctx context.Context) bool {
 	if err != nil {
 		return false
 	}
-	if data, _, readErr := readOptionalRegular(root, lefthookLocalConfigName); readErr == nil && data != nil {
-		owned, ownershipErr := hasOwnedLefthookConfigEntries(data)
-		if ownershipErr == nil && owned {
-			return true
-		}
+	if data, _, readErr := readOptionalRegular(root, entireLefthookConfigName); readErr == nil && data != nil {
+		return true
+	}
+	if present, presentErr := lefthookExtendsEntryPresent(root); presentErr == nil && present {
+		return true
 	}
 	for _, hook := range gitHookNames {
 		data, _, readErr := readOptionalRegular(root, lefthookScriptPath(hook))
@@ -464,14 +447,8 @@ func verifyGitHookIntegrationRemoved(ctx context.Context, repoRoot string) error
 	if err != nil {
 		return fmt.Errorf("open worktree: %w", err)
 	}
-	if data, _, err := readOptionalRegular(root, lefthookLocalConfigName); err == nil && data != nil {
-		owned, ownershipErr := hasOwnedLefthookConfigEntries(data)
-		if ownershipErr != nil {
-			return fmt.Errorf("verify %s ownership: %w", lefthookLocalConfigName, ownershipErr)
-		}
-		if owned {
-			return errors.New("lefthook local config still contains Entire-owned entries")
-		}
+	if data, _, err := readOptionalRegular(root, entireLefthookConfigName); err == nil && data != nil {
+		return fmt.Errorf("%s still present", entireLefthookConfigName)
 	} else if err != nil {
 		return fmt.Errorf("verify %s removal: %w", lefthookLocalConfigName, err)
 	}
@@ -506,26 +483,21 @@ func removeOwnedLefthookArtifacts(ctx context.Context, repoRoot string) (int, er
 	if err != nil {
 		return 0, fmt.Errorf("open worktree: %w", err)
 	}
-	if data, info, err := readOptionalRegular(root, lefthookLocalConfigName); err == nil && data != nil {
-		updated, changed, updateErr := removeOwnedLefthookConfig(data)
-		if updateErr != nil {
-			return 0, updateErr
+	if data, _, err := readOptionalRegular(root, entireLefthookConfigName); err == nil && data != nil {
+		if err := integrationFault("write", entireLefthookConfigName); err != nil {
+			return 0, err
 		}
-		if changed {
-			if err := integrationFault("write", lefthookLocalConfigName); err != nil {
-				return 0, err
-			}
-			if len(strings.TrimSpace(string(updated))) == 0 || string(updated) == "{}\n" {
-				if err := osroot.RemoveNoSymlinks(root, lefthookLocalConfigName); err != nil {
-					return 0, fmt.Errorf("remove %s: %w", lefthookLocalConfigName, err)
-				}
-			} else if err := jsonutil.WriteFileAtomicIn(root, lefthookLocalConfigName, updated, info.Mode().Perm()); err != nil {
-				return 0, fmt.Errorf("write %s: %w", lefthookLocalConfigName, err)
-			}
-			removed++
+		if err := osroot.RemoveNoSymlinks(root, entireLefthookConfigName); err != nil && !os.IsNotExist(err) {
+			return 0, fmt.Errorf("remove %s: %w", entireLefthookConfigName, err)
 		}
+		removed++
 	} else if err != nil {
-		return 0, fmt.Errorf("read %s: %w", lefthookLocalConfigName, err)
+		return 0, fmt.Errorf("read %s: %w", entireLefthookConfigName, err)
+	}
+	if dropped, err := removeLefthookExtendsEntry(root); err != nil {
+		return 0, err
+	} else if dropped {
+		removed++
 	}
 	for _, hook := range gitHookNames {
 		name := lefthookScriptPath(hook)

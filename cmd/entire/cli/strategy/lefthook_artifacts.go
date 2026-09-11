@@ -1,14 +1,11 @@
 package strategy
 
 import (
-	"errors"
 	"fmt"
+	"github.com/entireio/cli/cmd/entire/cli/osroot"
 	"os"
 	"path/filepath"
 	"strings"
-
-	"github.com/entireio/cli/cmd/entire/cli/osroot"
-	"gopkg.in/yaml.v3"
 )
 
 func renderLefthookScript(spec hookSpec) string {
@@ -43,156 +40,38 @@ func lefthookScriptOwned(content string) bool {
 }
 
 func inspectLefthookArtifacts(root *os.Root, cmdPrefix string) (bool, error) {
-	data, _, err := readOptionalRegular(root, lefthookLocalConfigName)
-	if err != nil {
-		return false, fmt.Errorf("read %s: %w", lefthookLocalConfigName, err)
-	}
-	if data == nil {
-		return false, nil
-	}
-	config, err := parseYAMLMapping(data, lefthookLocalConfigName)
-	if err != nil {
+	// Three facts, in the order they become true during an install: Entire's
+	// own config is present and current, the user's local config extends it,
+	// and every owned script is ours and current. The old check instead walked
+	// the user's local config for source_dir_local plus a nested scripts entry
+	// per hook, which is what required node-level surgery over their content.
+	configCurrent, err := entireLefthookConfigCurrent(root)
+	if err != nil || !configCurrent {
 		return false, err
 	}
-	if current, sourceErr := inspectOwnedLefthookSourceDir(config); sourceErr != nil || !current {
-		return current, sourceErr
+	extendsPresent, err := lefthookExtendsEntryPresent(root)
+	if err != nil || !extendsPresent {
+		return false, err
 	}
-
 	for _, spec := range buildHookSpecs(cmdPrefix) {
-		entry, owned, found, entryErr := findLefthookScriptEntry(config, spec.name)
-		if entryErr != nil {
-			return false, entryErr
-		}
-		if !found {
-			return false, nil
-		}
-		if !owned {
-			return false, fmt.Errorf("%s: %w", spec.name, ErrLefthookOwnedEntryConflict)
-		}
-		if !lefthookEntryCurrent(entry, spec.name) {
-			return false, nil
-		}
-
 		scriptName := lefthookScriptPath(spec.name)
 		content, info, readErr := readOptionalRegular(root, scriptName)
 		if readErr != nil {
 			return false, fmt.Errorf("read %s: %w", scriptName, readErr)
 		}
-		if content == nil || string(content) != renderLefthookScript(spec) ||
-			!lefthookScriptOwned(string(content)) || info.Mode().Perm()&0o111 == 0 {
+		// Any mismatch is "ours but outdated", including a script that lost
+		// its ownership marker: by content alone a stale Entire script and a
+		// foreign one are indistinguishable, and treating the stale case as a
+		// conflict would report a repo Entire itself installed as someone
+		// else's. A genuinely foreign script is refused at install time, where
+		// installLefthookFilesAt checks ownership before writing.
+		if content == nil || info.Mode().Perm()&0o111 == 0 ||
+			!lefthookScriptOwned(string(content)) ||
+			string(content) != renderLefthookScript(spec) {
 			return false, nil
 		}
 	}
 	return true, nil
-}
-
-func inspectOwnedLefthookSourceDir(root *yaml.Node) (bool, error) {
-	value, found, duplicate := mappingValueCount(root, "source_dir_local")
-	if duplicate {
-		return false, errors.New("duplicate source_dir_local setting")
-	}
-	if !found {
-		return false, nil
-	}
-	// A compatible unowned value may predate Entire. The owned hook nodes and
-	// scripts prove Entire's participation without claiming this user setting.
-	return value.Kind == yaml.ScalarNode && value.Value == lefthookLocalDir, nil
-}
-
-func hasOwnedLefthookConfigEntries(data []byte) (bool, error) {
-	root, err := parseYAMLMapping(data, lefthookLocalConfigName)
-	if err != nil {
-		return false, err
-	}
-	if value, found, duplicate := mappingValueCount(root, "source_dir_local"); duplicate {
-		return false, errors.New("duplicate source_dir_local setting")
-	} else if found {
-		key := mappingKey(root, "source_dir_local")
-		if key != nil && lefthookNodeOwned(key, value) {
-			return true, nil
-		}
-	}
-	for _, hook := range gitHookNames {
-		_, owned, found, findErr := findLefthookScriptEntry(root, hook)
-		if findErr != nil {
-			return false, findErr
-		}
-		if found && owned {
-			return true, nil
-		}
-	}
-	return false, nil
-}
-
-func findLefthookScriptEntry(root *yaml.Node, hook string) (*yaml.Node, bool, bool, error) {
-	hookNode, found, duplicate := mappingValueCount(root, hook)
-	if duplicate {
-		return nil, false, false, fmt.Errorf("duplicate %s mapping", hook)
-	}
-	if !found || hookNode.Kind != yaml.MappingNode {
-		return nil, false, false, nil
-	}
-	scripts, found, duplicate := mappingValueCount(hookNode, "scripts")
-	if duplicate {
-		return nil, false, false, fmt.Errorf("duplicate scripts mapping in %s", hook)
-	}
-	if !found || scripts.Kind != yaml.MappingNode {
-		return nil, false, false, nil
-	}
-	var key, value *yaml.Node
-	for i := 0; i+1 < len(scripts.Content); i += 2 {
-		if scripts.Content[i].Value != lefthookScriptName {
-			continue
-		}
-		if key != nil {
-			return nil, false, false, fmt.Errorf("duplicate %s in %s scripts", lefthookScriptName, hook)
-		}
-		key, value = scripts.Content[i], scripts.Content[i+1]
-	}
-	if key == nil {
-		return nil, false, false, nil
-	}
-	return value, lefthookNodeOwned(key, value), true, nil
-}
-
-func mappingValue(parent *yaml.Node, key string) (*yaml.Node, bool) {
-	for i := 0; i+1 < len(parent.Content); i += 2 {
-		if parent.Content[i].Value == key {
-			return parent.Content[i+1], true
-		}
-	}
-	return nil, false
-}
-
-func mappingKey(parent *yaml.Node, key string) *yaml.Node {
-	for i := 0; i+1 < len(parent.Content); i += 2 {
-		if parent.Content[i].Value == key {
-			return parent.Content[i]
-		}
-	}
-	return nil
-}
-
-func lefthookRunnerIsBash(entry *yaml.Node) bool {
-	if entry.Kind != yaml.MappingNode {
-		return false
-	}
-	runner, ok := mappingValue(entry, "runner")
-	return ok && runner.Kind == yaml.ScalarNode && runner.Value == "bash"
-}
-
-func lefthookEntryCurrent(entry *yaml.Node, hook string) bool {
-	if !lefthookRunnerIsBash(entry) {
-		return false
-	}
-	useStdin, found, duplicate := mappingValueCount(entry, "use_stdin")
-	if duplicate {
-		return false
-	}
-	if hook == postRewriteHookName {
-		return found && useStdin.Kind == yaml.ScalarNode && useStdin.Tag == "!!bool" && useStdin.Value == "true"
-	}
-	return !found
 }
 
 func mergeLefthookInfoExclude(existing []byte) []byte {

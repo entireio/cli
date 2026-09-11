@@ -131,3 +131,61 @@ func TestEnsureLefthookExtends_IgnoresMainConfig(t *testing.T) {
 		})
 	}
 }
+
+// Golden shape for Entire's own config. This replaces the merge tests that
+// asserted the same structure node by node inside the user's local config:
+// Entire owns this file outright, so a byte comparison is the whole contract.
+// Notably no use_stdin — post-rewrite reads stdin through the script itself.
+func TestRenderEntireLefthookConfig(t *testing.T) {
+	t.Parallel()
+	got := string(renderEntireLefthookConfig())
+
+	require.Contains(t, got, "# "+lefthookOwnedMarker, "must be marked as ours")
+	require.Contains(t, got, "source_dir_local: "+lefthookLocalDir)
+	require.NotContains(t, got, "use_stdin")
+	for _, hook := range gitHookNames {
+		require.Contains(t, got, hook+":\n  scripts:\n    \""+lefthookScriptName+"\":\n      runner: bash\n",
+			"hook %s must have exactly one owned bash script entry", hook)
+	}
+	require.Equal(t, len(gitHookNames), strings.Count(got, "runner: bash"), "one entry per managed hook")
+}
+
+// Malformed YAML in the local config must be reported, not silently replaced.
+func TestEnsureExtendsEntry_RejectsMalformedYAML(t *testing.T) {
+	t.Parallel()
+	_, _, err := ensureExtendsEntry([]byte("pre-push: [\n"), entireLefthookConfigName)
+	require.Error(t, err)
+}
+
+// A duplicate extends key is ambiguous: which sequence would we append to?
+func TestEnsureExtendsEntry_RejectsDuplicateExtendsKey(t *testing.T) {
+	t.Parallel()
+	_, _, err := ensureExtendsEntry([]byte("extends:\n  - a.yml\nextends:\n  - b.yml\n"), entireLefthookConfigName)
+	require.Error(t, err)
+}
+
+// A non-YAML local config must never be shadowed.
+//
+// Lefthook reads a single local config and lefthook-local.yml takes
+// precedence over lefthook-local.toml, so creating the former would silently
+// disable the latter — the user's hooks would stop running with no error.
+// Detection refuses the repo as ambiguous rather than risk that, and the
+// point of this test is that nothing is written either way.
+func TestEnsureGitHookIntegration_NeverShadowsANonYAMLLocalConfig(t *testing.T) {
+	repoDir := newLefthookTestRepo(t)
+	tomlPath := filepath.Join(repoDir, "lefthook-local.toml")
+	require.NoError(t, os.WriteFile(tomlPath, []byte("[pre-commit.commands.mine]\nrun = \"echo hi\"\n"), 0o644))
+	original, err := os.ReadFile(tomlPath)
+	require.NoError(t, err)
+
+	_, ensureErr := EnsureGitHookIntegration(t.Context(), false)
+	require.ErrorIs(t, ensureErr, ErrLefthookAmbiguous)
+
+	after, err := os.ReadFile(tomlPath)
+	require.NoError(t, err)
+	require.Equal(t, original, after, "the user's local config must be untouched")
+	_, statErr := os.Stat(filepath.Join(repoDir, lefthookLocalConfigName))
+	require.True(t, os.IsNotExist(statErr), "must not create a shadowing lefthook-local.yml")
+	_, statErr = os.Stat(filepath.Join(repoDir, entireLefthookConfigName))
+	require.True(t, os.IsNotExist(statErr), "must not write Entire's config either")
+}

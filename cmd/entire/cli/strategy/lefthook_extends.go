@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
+	"github.com/entireio/cli/cmd/entire/cli/osroot"
 	"gopkg.in/yaml.v3"
 )
 
@@ -16,6 +17,8 @@ import (
 // shadows lefthook-local.toml — so creating a .yml beside a user's .toml
 // would silently disable their config. Rather than risk that, Entire declines
 // and falls back to the native bridge; the caller tells the user what to add.
+const lefthookExtendsKey = "extends"
+
 var errLefthookLocalConfigUnwritable = errors.New("lefthook local config is not YAML")
 
 // ensureLefthookExtends makes the local Lefthook config extend Entire's own
@@ -124,7 +127,7 @@ func ensureExtendsEntry(existing []byte, entry string) ([]byte, bool, error) {
 func ensureExtendsSequence(root *yaml.Node) (*yaml.Node, error) {
 	foundAt := -1
 	for i := 0; i+1 < len(root.Content); i += 2 {
-		if root.Content[i].Value != "extends" {
+		if root.Content[i].Value != lefthookExtendsKey {
 			continue
 		}
 		if foundAt >= 0 {
@@ -139,8 +142,137 @@ func ensureExtendsSequence(root *yaml.Node) (*yaml.Node, error) {
 		}
 		return value, nil
 	}
-	keyNode := &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: "extends"}
+	keyNode := &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: lefthookExtendsKey}
 	valueNode := &yaml.Node{Kind: yaml.SequenceNode, Tag: "!!seq"}
 	root.Content = append(root.Content, keyNode, valueNode)
 	return valueNode, nil
+}
+
+// renderEntireLefthookConfig builds Entire's own Lefthook config. Entire owns
+// this file outright, so it is rendered as a whole rather than merged: there
+// is no user content in it to preserve, which is the entire point of pointing
+// the local config at it with one extends entry.
+func renderEntireLefthookConfig() []byte {
+	var b bytes.Buffer
+	fmt.Fprintf(&b, "# %s\n", lefthookOwnedMarker)
+	b.WriteString("# Managed by Entire. Edits are overwritten; remove the extends entry\n")
+	b.WriteString("# in your Lefthook local config to detach.\n")
+	fmt.Fprintf(&b, "source_dir_local: %s\n", lefthookLocalDir)
+	for _, hook := range gitHookNames {
+		fmt.Fprintf(&b, "%s:\n  scripts:\n    %q:\n      runner: bash\n", hook, lefthookScriptName)
+	}
+	return b.Bytes()
+}
+
+// entireLefthookConfigCurrent reports whether Entire's config file is present
+// and exactly what renderEntireLefthookConfig would write.
+func entireLefthookConfigCurrent(root *os.Root) (bool, error) {
+	data, _, err := readOptionalRegular(root, entireLefthookConfigName)
+	if err != nil {
+		return false, fmt.Errorf("read %s: %w", entireLefthookConfigName, err)
+	}
+	return data != nil && bytes.Equal(data, renderEntireLefthookConfig()), nil
+}
+
+// lefthookExtendsEntryPresent reports whether the local Lefthook config
+// extends Entire's config file.
+func lefthookExtendsEntryPresent(root *os.Root) (bool, error) {
+	name, data, err := findLefthookLocalConfig(root)
+	if err != nil {
+		// An unwritable local config is not an extends entry; the caller
+		// reports it and falls back to the native bridge.
+		if errors.Is(err, errLefthookLocalConfigUnwritable) {
+			return false, nil
+		}
+		return false, err
+	}
+	if name == "" || data == nil {
+		return false, nil
+	}
+	document := &yaml.Node{}
+	if err := yaml.Unmarshal(data, document); err != nil {
+		return false, fmt.Errorf("parse %s: %w", name, err)
+	}
+	if len(document.Content) != 1 || document.Content[0].Kind != yaml.MappingNode {
+		return false, nil
+	}
+	root0 := document.Content[0]
+	for i := 0; i+1 < len(root0.Content); i += 2 {
+		if root0.Content[i].Value != lefthookExtendsKey {
+			continue
+		}
+		for _, item := range root0.Content[i+1].Content {
+			if item.Value == entireLefthookConfigName {
+				return true, nil
+			}
+		}
+	}
+	return false, nil
+}
+
+// removeLefthookExtendsEntry drops Entire's entry from the local config,
+// removing the now-empty extends key with it. Anything else in the file is
+// left alone.
+func removeLefthookExtendsEntry(root *os.Root) (bool, error) {
+	name, data, err := findLefthookLocalConfig(root)
+	if err != nil {
+		if errors.Is(err, errLefthookLocalConfigUnwritable) {
+			return false, nil
+		}
+		return false, err
+	}
+	if name == "" || data == nil {
+		return false, nil
+	}
+	document := &yaml.Node{}
+	if err := yaml.Unmarshal(data, document); err != nil {
+		return false, fmt.Errorf("parse %s: %w", name, err)
+	}
+	if len(document.Content) != 1 || document.Content[0].Kind != yaml.MappingNode {
+		return false, nil
+	}
+	docRoot := document.Content[0]
+	changed := false
+	for i := 0; i+1 < len(docRoot.Content); i += 2 {
+		if docRoot.Content[i].Value != lefthookExtendsKey {
+			continue
+		}
+		seq := docRoot.Content[i+1]
+		kept := make([]*yaml.Node, 0, len(seq.Content))
+		for _, item := range seq.Content {
+			if item.Value == entireLefthookConfigName {
+				changed = true
+				continue
+			}
+			kept = append(kept, item)
+		}
+		seq.Content = kept
+		if len(kept) == 0 {
+			docRoot.Content = append(docRoot.Content[:i], docRoot.Content[i+2:]...)
+		}
+		break
+	}
+	if !changed {
+		return false, nil
+	}
+	// A file that held nothing but our entry is ours to delete.
+	if len(docRoot.Content) == 0 {
+		if err := osroot.RemoveNoSymlinks(root, name); err != nil && !os.IsNotExist(err) {
+			return false, fmt.Errorf("remove %s: %w", name, err)
+		}
+		return true, nil
+	}
+	var out bytes.Buffer
+	encoder := yaml.NewEncoder(&out)
+	encoder.SetIndent(2)
+	if err := encoder.Encode(document); err != nil {
+		return false, fmt.Errorf("encode %s: %w", name, err)
+	}
+	if err := encoder.Close(); err != nil {
+		return false, fmt.Errorf("encode %s: %w", name, err)
+	}
+	if err := jsonutil.WriteFileAtomicIn(root, name, out.Bytes(), 0o644); err != nil {
+		return false, fmt.Errorf("write %s: %w", name, err)
+	}
+	return true, nil
 }

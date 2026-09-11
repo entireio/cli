@@ -13,111 +13,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
-	"gopkg.in/yaml.v3"
 )
-
-func TestMergeLefthookLocalConfig(t *testing.T) {
-	t.Parallel()
-
-	t.Run("creates config and all marked script entries", func(t *testing.T) {
-		t.Parallel()
-		got, err := mergeLefthookLocalConfig(nil)
-		if err != nil {
-			t.Fatal(err)
-		}
-		for _, hook := range gitHookNames {
-			want := hook + ":"
-			if !bytes.Contains(got, []byte(want)) {
-				t.Errorf("config missing %q", want)
-			}
-		}
-		if gotCount := bytes.Count(got, []byte(lefthookOwnedMarker)); gotCount != len(gitHookNames)+1 {
-			t.Errorf("marker count = %d, want %d\n%s", gotCount, len(gitHookNames)+1, got)
-		}
-		var document yaml.Node
-		if err := yaml.Unmarshal(got, &document); err != nil {
-			t.Fatalf("generated YAML is invalid: %v", err)
-		}
-	})
-
-	t.Run("preserves unrelated nodes comments and order", func(t *testing.T) {
-		t.Parallel()
-		input := []byte("# top comment\npre_commit:\n  commands:\n    lint:\n      run: mise run lint # inline\nprepare-commit-msg:\n  scripts:\n    user.sh:\n      runner: bash\npost_merge:\n  commands: {}\n")
-		got, err := mergeLefthookLocalConfig(input)
-		if err != nil {
-			t.Fatal(err)
-		}
-		text := string(got)
-		for _, preserved := range []string{"# top comment", "lint:", "mise run lint", "# inline", "user.sh:", "post_merge:"} {
-			if !strings.Contains(text, preserved) {
-				t.Errorf("merged config lost %q\n%s", preserved, text)
-			}
-		}
-		if strings.Index(text, "pre_commit:") > strings.Index(text, "prepare-commit-msg:") || strings.Index(text, "prepare-commit-msg:") > strings.Index(text, "post_merge:") {
-			t.Errorf("existing top-level ordering changed\n%s", text)
-		}
-	})
-
-	t.Run("replaces only marked entry", func(t *testing.T) {
-		t.Parallel()
-		input := []byte("pre-push:\n  scripts:\n    user.sh:\n      runner: zsh\n    entire.sh: # " + lefthookOwnedMarker + "\n      runner: stale\n")
-		got, err := mergeLefthookLocalConfig(input)
-		if err != nil {
-			t.Fatal(err)
-		}
-		text := string(got)
-		if !strings.Contains(text, "user.sh:") || !strings.Contains(text, "runner: zsh") {
-			t.Fatalf("user entry was not preserved\n%s", text)
-		}
-		if strings.Contains(text, "runner: stale") || !strings.Contains(text, "runner: bash") {
-			t.Fatalf("owned entry was not replaced\n%s", text)
-		}
-		gotAgain, err := mergeLefthookLocalConfig(got)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if !bytes.Equal(got, gotAgain) {
-			t.Errorf("merge is not idempotent\nfirst:\n%s\nsecond:\n%s", got, gotAgain)
-		}
-	})
-
-	t.Run("rejects user owned entire script", func(t *testing.T) {
-		t.Parallel()
-		_, err := mergeLefthookLocalConfig([]byte("pre-push:\n  scripts:\n    entire.sh:\n      runner: custom\n"))
-		if !errors.Is(err, ErrLefthookOwnedEntryConflict) {
-			t.Fatalf("error = %v, want ErrLefthookOwnedEntryConflict", err)
-		}
-	})
-
-	t.Run("broad native marker text does not grant ownership", func(t *testing.T) {
-		t.Parallel()
-		input := []byte("pre-push:\n  scripts:\n    entire.sh: # user note about Entire CLI hooks\n      runner: custom\n")
-		before := bytes.Clone(input)
-		_, err := mergeLefthookLocalConfig(input)
-		if !errors.Is(err, ErrLefthookOwnedEntryConflict) {
-			t.Fatalf("error = %v, want ErrLefthookOwnedEntryConflict", err)
-		}
-		if !bytes.Equal(input, before) {
-			t.Errorf("conflicting user config was mutated\nbefore:\n%s\nafter:\n%s", before, input)
-		}
-	})
-
-	t.Run("rejects duplicate entire script keys", func(t *testing.T) {
-		t.Parallel()
-		input := []byte("pre-push:\n  scripts:\n    entire.sh: # " + lefthookOwnedMarker + "\n      runner: bash\n    entire.sh:\n      runner: custom\n")
-		_, err := mergeLefthookLocalConfig(input)
-		if !errors.Is(err, ErrLefthookOwnedEntryConflict) {
-			t.Fatalf("error = %v, want ErrLefthookOwnedEntryConflict", err)
-		}
-	})
-
-	t.Run("rejects malformed YAML", func(t *testing.T) {
-		t.Parallel()
-		if _, err := mergeLefthookLocalConfig([]byte("pre-push: [\n")); err == nil {
-			t.Fatal("expected malformed YAML error")
-		}
-	})
-}
 
 func TestRenderLefthookScript(t *testing.T) {
 	t.Parallel()
@@ -233,25 +129,6 @@ func TestInstallLefthookFiles(t *testing.T) {
 		!configInfoAfter.ModTime().Equal(configInfoBefore.ModTime()) || !os.SameFile(configInfoBefore, configInfoAfter) {
 		t.Errorf("no-op reinstall replaced or changed config: same bytes=%v mode before/after=%v/%v mtime before/after=%v/%v same file=%v",
 			bytes.Equal(configAfter, configBefore), configInfoBefore.Mode(), configInfoAfter.Mode(), configInfoBefore.ModTime(), configInfoAfter.ModTime(), os.SameFile(configInfoBefore, configInfoAfter))
-	}
-}
-
-func TestInstallLefthookFilesRejectsAlternateLocalConfig(t *testing.T) {
-	repoDir := t.TempDir()
-	testutil.InitRepo(t, repoDir)
-	if err := os.WriteFile(filepath.Join(repoDir, "lefthook.yml"), nil, 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(repoDir, ".lefthook-local.yaml"), nil, 0o644); err != nil {
-		t.Fatal(err)
-	}
-	t.Chdir(repoDir)
-	paths.ClearWorktreeRootCache()
-	t.Cleanup(paths.ClearWorktreeRootCache)
-
-	_, err := installLefthookFiles(context.Background(), false)
-	if !errors.Is(err, ErrLefthookAmbiguous) {
-		t.Fatalf("error = %v, want ErrLefthookAmbiguous", err)
 	}
 }
 

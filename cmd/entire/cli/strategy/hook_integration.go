@@ -112,12 +112,6 @@ func checkGitHookIntegrationInDir(ctx context.Context, repoRoot string) GitHookI
 		if err != nil {
 			return lefthookInspectionError(manager, err)
 		}
-		if err := validateLefthookMainConfig(root, manager); err != nil {
-			if errors.Is(err, errLefthookUnsupportedLayout) {
-				return unsupportedLefthookLayoutHealth(ctx, repoRoot, manager, err)
-			}
-			return lefthookInspectionError(manager, err)
-		}
 		configCtx := settings.WithWorktreeRoot(ctx, repoRoot)
 		cmdPrefix, err := hookCmdPrefix(hookSettingsFromConfig(configCtx))
 		if err != nil {
@@ -193,25 +187,6 @@ func checkGitHookIntegrationInDir(ctx context.Context, repoRoot string) GitHookI
 		}
 	}
 	return nativeHookInspectionError(fmt.Errorf("unknown native Git hook state %d", nativeState))
-}
-
-func unsupportedLefthookLayoutHealth(
-	ctx context.Context,
-	repoRoot string,
-	manager hookManager,
-	validationErr error,
-) GitHookIntegrationHealth {
-	nativeState, nativeErr := inspectNativeHookIntegration(ctx, repoRoot)
-	if nativeErr == nil && nativeState == GitHooksCurrent {
-		return GitHookIntegrationHealth{
-			Mode:       GitHookIntegrationLefthook,
-			State:      GitHookIntegrationDegraded,
-			Manager:    manager.Name,
-			ReasonCode: "lefthook_unsupported_native_bridge",
-			Reason:     fmt.Sprintf("Entire's native Git hooks work, but this Lefthook layout cannot be integrated safely: %v", validationErr),
-		}
-	}
-	return lefthookInspectionError(manager, validationErr)
 }
 
 func inspectNativeHookIntegration(ctx context.Context, repoRoot string) (GitHookState, error) {

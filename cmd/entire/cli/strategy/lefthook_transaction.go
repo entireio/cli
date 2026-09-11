@@ -28,29 +28,6 @@ func installLefthookFilesAt(ctx context.Context, repoRoot string, absolutePath b
 	if err != nil {
 		return 0, fmt.Errorf("open worktree: %w", err)
 	}
-	managers, detectErr := detectHookManagersForIntegration(repoRoot)
-	if detectErr != nil {
-		return 0, detectErr
-	}
-	manager, ok, selectErr := selectLefthookIntegrationManager(managers)
-	if selectErr != nil {
-		return 0, selectErr
-	}
-	if !ok {
-		return 0, errors.New("lefthook main config not found")
-	}
-	if err := validateLefthookMainConfig(root, manager); err != nil {
-		return 0, err
-	}
-
-	existing, _, err := readOptionalRegular(root, lefthookLocalConfigName)
-	if err != nil {
-		return 0, fmt.Errorf("read %s: %w", lefthookLocalConfigName, err)
-	}
-	merged, err := mergeLefthookLocalConfig(existing)
-	if err != nil {
-		return 0, err
-	}
 
 	cmdPrefix, err := hookCmdPrefix(absolutePath)
 	if err != nil {
@@ -86,19 +63,22 @@ func installLefthookFilesAt(ctx context.Context, repoRoot string, absolutePath b
 	if err != nil {
 		return 0, err
 	}
+	bail := func(e error) (int, error) {
+		cleanupLefthookDirs(root, createdDirs)
+		cleanupGitInfoDir(gitRoot, gitInfoCreated)
+		return 0, e
+	}
 
-	// Write order is the transaction. Scripts and the exclude entry land
-	// first; the config lands last, because the config is what makes Lefthook
-	// dispatch to them — so no run can ever see a config pointing at a script
-	// that is not there yet. A failure part way through leaves orphan scripts
-	// that the next run overwrites, and EnsureGitHookIntegration runs at every
-	// turn start, so "the next run" is a guarantee rather than a hope.
+	// Write order is the transaction. Scripts, Entire's own config, and the
+	// exclude entry land first; the extends entry in the user's local config
+	// lands last, because that entry is what makes Lefthook load any of this —
+	// so no run can see a config pointing at a script that is not there yet.
+	// A failure part way through leaves orphan artifacts the next install
+	// overwrites, and EnsureGitHookIntegration runs at every turn start.
 	//
-	// This deliberately has no rollback of its own. EnsureGitHookIntegration
-	// snapshots every path touched here — config, exclude, scripts, native
-	// hooks and their backups — before calling in, and restores all of them on
-	// any error. A second, narrower rollback nested inside that one could only
-	// ever undo a subset of what the outer one already undoes.
+	// This has no rollback of its own: EnsureGitHookIntegration snapshots
+	// every path touched here, plus the native hooks and their backups, and
+	// restores all of them on any error.
 	writes := make([]lefthookWrite, 0, len(specs)+2)
 	for _, spec := range specs {
 		writes = append(writes, lefthookWrite{
@@ -108,20 +88,22 @@ func installLefthookFilesAt(ctx context.Context, repoRoot string, absolutePath b
 	}
 	writes = append(writes,
 		lefthookWrite{root: gitRoot, name: "info/exclude", data: mergedExclude, mode: 0o644},
-		lefthookWrite{root: root, name: lefthookLocalConfigName, data: merged, mode: 0o644, counted: true},
+		lefthookWrite{root: root, name: entireLefthookConfigName, data: renderEntireLefthookConfig(), mode: 0o644, counted: true},
 	)
 
 	written := 0
 	for _, w := range writes {
 		changed, writeErr := applyLefthookWrite(w, beforePublish)
 		if writeErr != nil {
-			cleanupLefthookDirs(root, createdDirs)
-			cleanupGitInfoDir(gitRoot, gitInfoCreated)
-			return 0, writeErr
+			return bail(writeErr)
 		}
 		if changed && w.counted {
 			written++
 		}
+	}
+
+	if _, err := ensureLefthookExtends(root); err != nil {
+		return bail(err)
 	}
 	return written, nil
 }

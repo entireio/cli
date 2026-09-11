@@ -310,7 +310,15 @@ func TestEnsureGitHookIntegration_SupportsDottedRootYAMLConfigs(t *testing.T) {
 	}
 }
 
-func TestEnsureGitHookIntegration_UnsupportedLefthookLayoutKeepsNativeDelivery(t *testing.T) {
+// Layouts the old mechanism refused now work.
+//
+// Entire used to parse the Lefthook main config to find source_dir_local, so
+// it declined anything it could not read that way — .toml, .jsonc, a config
+// under .config/ — and fell back to the native bridge, which Lefthook then
+// clobbered on its next refresh. Entire now owns its own YAML config and adds
+// one extends entry to the LOCAL config, so the main config is never read and
+// its format is irrelevant.
+func TestEnsureGitHookIntegration_MainConfigFormatIsIrrelevant(t *testing.T) {
 	for _, configName := range []string{"lefthook.toml", "lefthook.jsonc", ".config/lefthook.yml"} {
 		t.Run(configName, func(t *testing.T) {
 			repoDir := t.TempDir()
@@ -332,20 +340,19 @@ func TestEnsureGitHookIntegration_UnsupportedLefthookLayoutKeepsNativeDelivery(t
 				t.Fatalf("EnsureGitHookIntegration() for %s error = %v", configName, err)
 			}
 			got := CheckGitHookIntegration(t.Context())
-			if got.Mode != GitHookIntegrationLefthook || got.State != GitHookIntegrationDegraded || got.ReasonCode != "lefthook_unsupported_native_bridge" {
-				t.Fatalf("health = %+v, want degraded unsupported-layout native bridge", got)
+			if got.Mode != GitHookIntegrationLefthook || got.State != GitHookIntegrationCurrent {
+				t.Fatalf("health = %+v, want current Lefthook", got)
 			}
 			data, err := os.ReadFile(configPath)
 			if err != nil {
 				t.Fatal(err)
 			}
 			if !bytes.Equal(data, original) {
-				t.Fatalf("unsupported config was modified: got %q, want %q", data, original)
+				t.Fatalf("main config was modified: got %q, want %q", data, original)
 			}
 		})
 	}
 }
-
 func TestCheckGitHookIntegration_ManagerCandidateDetectionError(t *testing.T) {
 	repoDir := t.TempDir()
 	testutil.InitRepo(t, repoDir)
@@ -567,7 +574,15 @@ func TestRemoveGitHookIntegration_PreservesUnrelatedLefthookContent(t *testing.T
 	}
 }
 
-func TestLefthookIntegration_RoundTripPreservesCompatibleUserSourceDirLocal(t *testing.T) {
+// Install adds exactly one line to the user's Lefthook local config, and
+// uninstall takes exactly that line back out.
+//
+// This used to assert something weaker and more fragile: that merging
+// source_dir_local plus five nested script entries into the user's file
+// preserved their own source_dir_local and its trailing comment. Entire now
+// keeps all of that in its own file, so the property is simply that their
+// config is untouched apart from the extends entry.
+func TestLefthookIntegration_RoundTripOnlyTouchesTheExtendsEntry(t *testing.T) {
 	repoDir := t.TempDir()
 	testutil.InitRepo(t, repoDir)
 	clearGlobalHooksPath(t, repoDir)
@@ -588,23 +603,20 @@ func TestLefthookIntegration_RoundTripPreservesCompatibleUserSourceDirLocal(t *t
 	if err != nil {
 		t.Fatal(err)
 	}
-	installedRoot, err := parseYAMLMapping(installed, lefthookLocalConfigName)
-	if err != nil {
-		t.Fatal(err)
+	for _, want := range []string{"# user config", "user_key: keep-me", "# user-selected shared directory"} {
+		if !strings.Contains(string(installed), want) {
+			t.Errorf("install lost user content %q:\n%s", want, installed)
+		}
 	}
-	sourceValue, found, duplicate := mappingValueCount(installedRoot, "source_dir_local")
-	sourceKey := mappingKey(installedRoot, "source_dir_local")
-	if !found || duplicate || sourceValue == nil {
-		t.Fatalf("installed source_dir_local = found %v duplicate %v value %#v", found, duplicate, sourceValue)
+	if !strings.Contains(string(installed), entireLefthookConfigName) {
+		t.Errorf("install did not add the extends entry:\n%s", installed)
 	}
-	if sourceValue.Value != lefthookLocalDir {
-		t.Fatalf("installed source_dir_local = %q, want %q", sourceValue.Value, lefthookLocalDir)
+	// Entire's own settings belong in Entire's own file, not the user's.
+	if got := strings.Count(string(installed), "source_dir_local"); got != 1 {
+		t.Errorf("source_dir_local appears %d times in the user config, want 1 (theirs):\n%s", got, installed)
 	}
-	if lefthookNodeOwned(sourceKey, sourceValue) {
-		t.Fatal("install claimed the compatible user source_dir_local")
-	}
-	if !strings.Contains(string(installed), "# user-selected shared directory") {
-		t.Errorf("install lost user source_dir_local comment:\n%s", installed)
+	if strings.Contains(string(installed), "runner: bash") {
+		t.Errorf("install wrote script entries into the user config:\n%s", installed)
 	}
 
 	if _, err := RemoveGitHookIntegration(t.Context()); err != nil {
@@ -614,16 +626,18 @@ func TestLefthookIntegration_RoundTripPreservesCompatibleUserSourceDirLocal(t *t
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"source_dir_local: .lefthook-local", "# user-selected shared directory", "user_key: keep-me"} {
+	if strings.Contains(string(uninstalled), entireLefthookConfigName) {
+		t.Errorf("uninstall left the extends entry behind:\n%s", uninstalled)
+	}
+	for _, want := range []string{"# user config", "user_key: keep-me", "# user-selected shared directory"} {
 		if !strings.Contains(string(uninstalled), want) {
-			t.Errorf("uninstall lost %q:\n%s", want, uninstalled)
+			t.Errorf("uninstall lost user content %q:\n%s", want, uninstalled)
 		}
 	}
-	if strings.Contains(string(uninstalled), lefthookOwnedMarker) {
-		t.Errorf("uninstall retained Entire-owned YAML:\n%s", uninstalled)
+	if _, err := os.Stat(filepath.Join(repoDir, entireLefthookConfigName)); !os.IsNotExist(err) {
+		t.Errorf("uninstall left %s behind: %v", entireLefthookConfigName, err)
 	}
 }
-
 func TestRemoveGitHookIntegration_RollsBackAfterOwnedScriptObstruction(t *testing.T) {
 	repoDir := t.TempDir()
 	testutil.InitRepo(t, repoDir)
