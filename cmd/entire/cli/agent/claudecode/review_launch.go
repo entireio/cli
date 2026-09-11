@@ -3,96 +3,35 @@ package claudecode
 // review_launch.go holds the configuration-isolation contract for the Claude
 // reviewer.
 //
-// Why it exists: `claude -p` loads the Claude configuration of the directory it
-// starts in, and in non-interactive mode it treats that directory as trusted —
-// there is no workspace-trust prompt. During a review that directory holds the
-// code under review, which for `--target` was fetched from a branch nobody on
-// this machine wrote. Anything executable in that checkout's Claude
-// configuration therefore runs as the reviewing user *before* the model
-// receives its first request, so no instruction given to the model can prevent
-// it.
+// The threat: `claude -p` loads the Claude configuration of its working
+// directory and, non-interactively, trusts it with no workspace-trust prompt.
+// During a review that directory is the code under review (for --target, a
+// branch nobody here wrote), so anything executable in its Claude config would
+// run as the reviewing user before the model's first request. The launch below
+// closes that; the design rationale — why no settings sources at all (not even
+// the user's), why skills are staged rather than dropped, and why not Claude's
+// --restricted flag — is in docs/architecture/review-command.md.
 //
-// The contract, and what each part is load-bearing for:
+// The argv it builds:
 //
-//	--setting-sources ""       no settings are read at all: the branch controls
-//	                           project and local, and a user hook would run with
-//	                           the reviewed checkout as its working directory
-//	--plugin-dir <dir>         only the profile's configured skills, copied into
-//	                           a directory Entire owns (see review_skills.go)
-//	--strict-mcp-config        no MCP servers start, so a committed .mcp.json
-//	                           cannot launch one. Needed separately: setting
-//	                           sources do not gate MCP (Claude's own --restricted
-//	                           documentation says to add this flag to skip them)
-//	--permission-mode default  pinned explicitly, so neither a future change to
-//	                           Claude's default nor a user-level defaultMode
-//	                           silently widens the reviewer
-//	--settings <file>          written by this CLI outside the reviewed worktree:
-//	                           Entire's own lifecycle hooks, so the review is
-//	                           still captured without reading them back out of
-//	                           the branch. Nothing else — see the note on
-//	                           apiKeyHelper below
+//	--setting-sources ""       load no settings: project and local are
+//	                           branch-controlled, and a user hook would run with
+//	                           the reviewed checkout as its cwd (npm/make/./script)
+//	--strict-mcp-config        no MCP servers; setting sources do not gate MCP
+//	--permission-mode default  pinned, so no default/user change widens the reviewer
+//	--settings <file>          Entire's own lifecycle hooks, written outside the
+//	                           worktree, so review is still captured — nothing else
+//	                           (notably not apiKeyHelper; see trustedReviewSettings)
+//	--plugin-dir <dir>         only the profile's configured skills, staged into an
+//	                           Entire-owned dir (see review_skills.go)
 //	--append-system-prompt     defense in depth only; see reviewSystemPrompt
 //
-// The reviewer's environment is additionally hardened: PATH is stripped of
-// non-absolute entries and the trusted entire binary's directory is prepended
-// (sanitizeReviewEnv), so a relative PATH entry cannot cause a branch's
-// ./entire — run by Entire's own review hooks — to execute against the
-// checkout cwd.
+// sanitizeReviewEnv additionally strips non-absolute PATH entries and prepends
+// the trusted entire binary's dir, so a relative PATH cannot make a branch's
+// ./entire run via the hooks against the checkout cwd.
 //
-// Why no settings sources at all, including the user's:
-//
-// The branch controls the project and local sources, so excluding those closes
-// the reported path. Excluding the user's too is not redundant: the reviewer
-// runs with the reviewed checkout as its working directory, so a user hook
-// invoking `npm run …`, `make …`, or any checkout-relative script executes code
-// from the branch under review. That is the same class of problem, one hop
-// removed, and it is the machine owner's ordinary configuration rather than
-// anything exotic.
-//
-// Loading nothing would normally cost the feature — skills resolve through
-// those sources, and a profile built on e.g. /pr-review-toolkit:review-pr would
-// degrade to "Unknown command" and review nothing while still exiting
-// successfully. That is why the profile's skills are staged instead: copied
-// into an Entire-owned plugin directory and loaded with --plugin-dir, so the
-// user's chosen skill still runs and nothing else of theirs does. See
-// review_skills.go.
-//
-// Why not --restricted:
-//
-// Claude ships --restricted for exactly this job — it ignores user, project and
-// local settings (managed settings and --settings still apply), refuses
-// bypassPermissions, and additionally confines the file tools to the working
-// directories. As an isolation *primitive* it is better than the hand-rolled
-// flag set here: it tracks Claude's evolution (a new cwd-loaded config surface
-// would be covered automatically), and the file-tool confinement is a security
-// property this launch lacks. Two measured facts keep it out of this change:
-//
-//   - Version floor. --restricted is documented 2.1.248+. Against Claude 2.1.237
-//     (the version the report was filed on) the reviewer exits non-zero and
-//     captures no session — verified. Isolation that only works on new Claude
-//     cannot be the sole mechanism while 2.1.237 must be supported.
-//   - It removes the command-running tools (Bash et al.) unless --tools names
-//     them, and the review model relies on them: ComposeReviewPrompt hands the
-//     agent a scope clause naming a base ref ("commits unique to this branch vs
-//     <base>"), not the diff itself, so the agent runs git to see what changed.
-//     Under --restricted it could Read the current tree but not compute the diff
-//     it was asked to review.
-//
-// Adopting --restricted is a good follow-up once the reviewer no longer needs
-// ad-hoc command execution — feed the diff into the prompt, or --tools-allowlist
-// a git-only capability — and once the supported-Claude floor is >= 2.1.248 or
-// the flag is version-gated. On 2.1.248+ it was verified to preserve capture and
-// block every canary here, so the migration path is real. It does not remove the
-// skill-staging need: --restricted also ignores user settings, so configured
-// skills would still have to be staged via --plugin-dir.
-//
-// The generation path reached "" first, for simpler reasons: it needs no
-// skills, no repository context and no working directory. See
-// buildGenerateArgs in generate.go.
-//
-// Scope: this is configuration isolation, not an OS sandbox. The reviewer still
-// runs with the invoking account's privileges, and user-level and managed
-// policy configuration remain trusted.
+// This is configuration isolation, not an OS sandbox: the reviewer keeps the
+// invoking account's privileges, and user-level and managed policy stay trusted.
 
 import (
 	"encoding/json"
