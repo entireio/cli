@@ -99,6 +99,12 @@ func LefthookManaged(repoRoot string) bool {
 // a failure part way through leaves inert files that the next install
 // overwrites. EnsureSetup runs at every turn start, so "the next install" is a
 // guarantee rather than a hope.
+//
+// That argument only holds for a failure that eventually stops happening, so
+// two things come before the writes: the non-YAML local config is refused up
+// front, because it is a decision not to touch the repo rather than a failure
+// that will pass, and the exclude entries go in while the paths are still
+// empty, so a partial write is never left unignored.
 func EnsureLefthookIntegration(ctx context.Context, absolutePath bool) (int, error) {
 	repoRoot, err := paths.WorktreeRoot(ctx)
 	if err != nil {
@@ -108,8 +114,26 @@ func EnsureLefthookIntegration(ctx context.Context, absolutePath bool) (int, err
 	if err != nil {
 		return 0, fmt.Errorf("open worktree: %w", err)
 	}
+	// Refuse BEFORE writing anything. Declining to shadow a non-YAML local
+	// config has to mean leaving the repo untouched: the extends entry is what
+	// makes the other artifacts do anything, so writing them first left six
+	// untracked files in the worktree that this same function had not reached
+	// the point of excluding — and because ensureLefthookIntegrationIfManaged
+	// treats this refusal as a decision rather than a failure, that recurred
+	// on every turn instead of resolving itself.
+	if _, _, err := findLocalConfig(root); err != nil {
+		return 0, err
+	}
 	cmdPrefix, err := hookCmdPrefix(absolutePath)
 	if err != nil {
+		return 0, err
+	}
+
+	// Before the writes, not after: a write that fails part way through (a
+	// blocked artifact path, a full disk) otherwise leaves files in the
+	// worktree that nothing has excluded yet, and the entries name paths
+	// rather than existing files, so writing them early costs nothing.
+	if err := excludeArtifacts(ctx, repoRoot); err != nil {
 		return 0, err
 	}
 
@@ -144,9 +168,6 @@ func EnsureLefthookIntegration(ctx context.Context, absolutePath bool) (int, err
 
 	// Last: this is what makes Lefthook load any of the above.
 	if _, err := ensureExtendsEntry(root); err != nil {
-		return 0, err
-	}
-	if err := excludeArtifacts(ctx, repoRoot); err != nil {
 		return 0, err
 	}
 	if err := reconcileHookFiles(ctx, repoRoot); err != nil {
@@ -658,10 +679,15 @@ func lefthookDeliversHooks(ctx context.Context, absolutePath bool) bool {
 type HookDelivery struct {
 	// OK is true when capture and delivery are wired up.
 	OK bool
-	// Manager names the hook manager that owns the hook files, if any.
+	// Manager names the hook manager that delivers Entire, if one does.
 	Manager string
 	// Reason explains a false OK, ready to show a user.
 	Reason string
+	// Declined names the Lefthook local config Entire will not write to, when
+	// that is why Lefthook is not the one delivering. It is set whether or not
+	// OK is true, because it is the answer to "why is Entire not in Lefthook's
+	// config" in a repository whose hooks are working fine without it.
+	Declined string
 }
 
 // CheckHookDelivery reports whether Entire's hooks will fire in this
@@ -677,6 +703,7 @@ func CheckHookDelivery(ctx context.Context, absolutePath bool) HookDelivery {
 	if err != nil {
 		return HookDelivery{Reason: "Could not resolve the repository root."}
 	}
+	declined := ""
 	if LefthookManaged(repoRoot) {
 		current, checkErr := LefthookIntegrationCurrent(ctx, absolutePath)
 		switch {
@@ -685,17 +712,36 @@ func CheckHookDelivery(ctx context.Context, absolutePath bool) HookDelivery {
 				Reason: fmt.Sprintf("Could not inspect Entire's Lefthook integration: %v", checkErr)}
 		case current:
 			return HookDelivery{OK: true, Manager: LefthookManagerName}
-		default:
+		}
+		// A declined integration is permanent, not a repair pending: Entire's
+		// own hooks are the arrangement in such a repo, so the answer is the
+		// native one. Saying "not registered with Lefthook" here would report
+		// a working repository as broken, forever and with no fix to offer.
+		if declined = declinedLefthookLocalConfig(repoRoot); declined == "" {
 			return HookDelivery{Manager: LefthookManagerName,
 				Reason: "Entire is not registered with Lefthook, so Lefthook's hooks do not run it."}
 		}
 	}
 	switch CheckGitHookState(ctx) {
 	case GitHooksCurrent:
-		return HookDelivery{OK: true}
+		return HookDelivery{OK: true, Declined: declined}
 	case GitHooksOutdated:
-		return HookDelivery{Reason: "Entire's Git hooks are outdated."}
+		return HookDelivery{Reason: "Entire's Git hooks are outdated.", Declined: declined}
 	case GitHooksAbsent:
 	}
-	return HookDelivery{Reason: "Entire's Git hooks are not installed."}
+	return HookDelivery{Reason: "Entire's Git hooks are not installed.", Declined: declined}
+}
+
+// declinedLefthookLocalConfig names the local config Entire refuses to write
+// to, or "" when there is none to refuse.
+func declinedLefthookLocalConfig(repoRoot string) string {
+	root, err := worktreedir.OpenAt(repoRoot)
+	if err != nil {
+		return ""
+	}
+	name, _, err := findLocalConfig(root)
+	if errors.Is(err, ErrLefthookLocalConfigUnwritable) {
+		return name
+	}
+	return ""
 }

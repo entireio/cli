@@ -637,7 +637,15 @@ func checkGitHooks(cmd *cobra.Command, force bool) error {
 	// their contents say nothing about whether Entire runs. Every other
 	// manager only overwrites at install time, so for those the hook files
 	// remain the answer and the check below is the right one.
-	if delivery := strategy.CheckHookDelivery(ctx, false); delivery.Manager == strategy.LefthookManagerName {
+	delivery := strategy.CheckHookDelivery(ctx, false)
+	if delivery.Declined != "" {
+		// Entire's own hooks are the arrangement here, so the checks below are
+		// the right ones — but say why Lefthook is not carrying it, since
+		// otherwise a Lefthook repo silently looks like any other.
+		fmt.Fprintf(w, "Note: Entire is not registered in Lefthook's config (%s is not YAML,\n", delivery.Declined)
+		fmt.Fprintln(w, "  and Entire will not shadow it). Entire's own Git hooks are used instead.")
+	}
+	if delivery.Manager == strategy.LefthookManagerName {
 		if delivery.OK {
 			// --force also reconciles .git/hooks/*, which is where a repo left
 			// mid-fight — Entire's own hook chaining to Lefthook's displaced

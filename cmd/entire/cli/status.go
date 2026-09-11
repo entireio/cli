@@ -1082,6 +1082,9 @@ type statusJSON struct {
 	HooksDeliver       bool   `json:"hooks_deliver"`
 	HooksManager       string `json:"hooks_manager,omitempty"`
 	HooksDeliverReason string `json:"hooks_deliver_reason,omitempty"`
+	// HooksLefthookDeclined names a Lefthook local config Entire will not
+	// write to, which is why Lefthook is not the one delivering.
+	HooksLefthookDeclined string `json:"hooks_lefthook_declined,omitempty"`
 	// CheckpointReadSourceUnknown reports that the read-source probe failed,
 	// so no read source could be determined. Emitted only alongside
 	// checkpoint_push_disabled, and checkpoint_sync_remote is then absent
@@ -1193,6 +1196,7 @@ func runStatusJSON(ctx context.Context, w io.Writer) error {
 		result.HooksDeliver = delivery.OK
 		result.HooksManager = delivery.Manager
 		result.HooksDeliverReason = delivery.Reason
+		result.HooksLefthookDeclined = delivery.Declined
 		result.CheckpointReadFallback = syncInfo.ReadFallback
 		result.CheckpointReadSourceUnknown = syncInfo.ReadSourceUnknown
 		result.UnpushedCheckpoints = syncInfo.Unpushed
