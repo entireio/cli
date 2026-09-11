@@ -118,13 +118,19 @@ type mockAnalyzerAgent struct {
 	// returns. Tests use it to simulate a racing SessionEnd landing exactly in
 	// that window.
 	onExtract func()
+
+	// scannedPath records the path ExtractModifiedFilesFromOffset was called
+	// with, so tests can prove which transcript (parent or declared child) the
+	// capture actually scanned.
+	scannedPath string
 }
 
 var _ agent.TranscriptAnalyzer = (*mockAnalyzerAgent)(nil)
 
 func (m *mockAnalyzerAgent) GetTranscriptPosition(_ string) (int, error) { return 0, nil }
 
-func (m *mockAnalyzerAgent) ExtractModifiedFilesFromOffset(_ string, _ int) ([]string, int, error) {
+func (m *mockAnalyzerAgent) ExtractModifiedFilesFromOffset(path string, _ int) ([]string, int, error) {
+	m.scannedPath = path
 	if m.onExtract != nil {
 		m.onExtract()
 	}
@@ -4013,6 +4019,49 @@ func TestHandleLifecycleSubagentEnd_SubagentStop_TranscriptOnlyBeforeFirstSaveSt
 	assert.True(t, gotDirt,
 		"the first SaveStep must snapshot pre-existing uncommitted state (IsFirstCheckpoint baseline) even after a transcript-only task step")
 	assert.Equal(t, "pre-existing uncommitted work", content)
+}
+
+// TestHandleLifecycleSubagentEnd_CompletionWithoutLaunch_UsesDeclaredTranscript
+// pins the OpenCode stop shape: no launch marker is required, but a child
+// transcript IS declared, so the final capture must extract the child's files
+// from it instead of treating the completion as event-files-only (Copilot's
+// shape, which additionally sets SubagentTranscriptUnavailable).
+func TestHandleLifecycleSubagentEnd_CompletionWithoutLaunch_UsesDeclaredTranscript(t *testing.T) {
+	// NOT parallel: setupSubagentEndTestRepo uses t.Chdir.
+	_, headHash := setupSubagentEndTestRepo(t)
+	ctx := context.Background()
+	const sessionID = "opencode-completion-declared"
+	saveInFlightSession(ctx, t, sessionID, headHash)
+
+	mainPath, childPath := writeSubagentTranscripts(t, "ses_child_red")
+
+	ag := &mockAnalyzerAgent{
+		mockLifecycleAgent: newMockAgent(),
+		analyzerFiles:      []string{"docs_red.md"},
+	}
+
+	event := finalSubagentEvent(sessionID, "call_red", "ses_child_red")
+	event.SessionRef = mainPath
+	event.SubagentTranscriptPath = childPath
+	event.CompletionWithoutLaunch = true
+	event.SubagentType = "general"
+	event.TokenUsage = &agent.TokenUsage{InputTokens: 12, OutputTokens: 3}
+
+	require.NoError(t, handleLifecycleSubagentEnd(ctx, ag, event))
+
+	assert.Equal(t, childPath, ag.scannedPath, "files must be extracted from the declared child transcript, not the parent")
+
+	state, err := strategy.LoadSessionState(ctx, sessionID)
+	require.NoError(t, err)
+	rec := state.FindTaskRecord("call_red")
+	require.NotNil(t, rec, "a completion learned at stop time creates the record when no launch marker exists")
+	assert.False(t, rec.CompletedAt.IsZero())
+	assert.Equal(t, []string{"docs_red.md"}, rec.Files)
+	assert.Equal(t, childPath, rec.DeclaredTranscriptPath)
+	assert.False(t, rec.TranscriptUnavailable)
+	require.NotNil(t, rec.TokenUsage)
+	assert.Equal(t, 12, rec.TokenUsage.InputTokens)
+	assert.Contains(t, state.FilesTouched, "docs_red.md")
 }
 
 // TestHandleLifecycleSubagentEnd_SubagentStop_UnresolvableTranscript_SkipsParentAttribution

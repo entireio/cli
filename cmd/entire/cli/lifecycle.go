@@ -1696,16 +1696,19 @@ func handleSubagentStopFinal(logCtx context.Context, ag agent.Agent, event *agen
 		event.SubagentID = marker.AgentID
 	}
 
-	// analyzerFilesOnly: true because reaching this point means a live marker
-	// WAS found above — every Final capture that runs through this function is
-	// a background task (foreground tasks complete immediately at launch and
-	// are never marked in-flight), so the worktree-wide DetectFileChanges scan
-	// would risk sweeping in the parent's or another agent's later edits. See
-	// subagentCaptureOptions.analyzerFilesOnly.
+	// analyzerFilesOnly: true because either a live marker was found above (a
+	// background task — foreground tasks complete immediately at launch and
+	// are never marked in-flight) or this is a CompletionWithoutLaunch event,
+	// which reaches this point with no marker at all. Either way the
+	// worktree-wide DetectFileChanges scan would risk sweeping in the parent's
+	// or another agent's later edits. See subagentCaptureOptions.analyzerFilesOnly.
 	captureErr := completeSubagentTaskRecord(logCtx, ag, event, subagentCaptureOptions{
 		bypassNoChangesSkip: true,
 		analyzerFilesOnly:   true,
-		eventFilesOnly:      event.CompletionWithoutLaunch,
+		// Only an agent with no standalone child transcript (Copilot CLI) has
+		// nothing to scan; a completion learned at stop time that DOES declare a
+		// transcript (OpenCode) still attributes files from it.
+		eventFilesOnly: event.SubagentTranscriptUnavailable,
 	})
 	if captureErr != nil {
 		return captureErr
@@ -1776,8 +1779,12 @@ type subagentCaptureOptions struct {
 	// its original (correct, worktree-scan-based) behavior unchanged.
 	analyzerFilesOnly bool
 
-	// eventFilesOnly means the adapter already derived child-scoped files from
-	// a shared parent transcript. Do not resolve or scan a child transcript.
+	// eventFilesOnly means the agent has no standalone child transcript at all
+	// (Event.SubagentTranscriptUnavailable) — its child activity lives only in
+	// a shared parent transcript. Do not resolve or scan a child transcript;
+	// rely solely on event.ModifiedFiles. Keyed on transcript unavailability,
+	// not on CompletionWithoutLaunch: a completion whose identity was learned
+	// at stop time can still declare a real child transcript worth scanning.
 	eventFilesOnly bool
 
 	// ensureSessionState, when true, creates missing session state before
