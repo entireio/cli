@@ -23,10 +23,39 @@ type runConfig struct {
 	Model          string
 	PermissionMode string
 	PromptTimeout  time.Duration
+
+	// promptTimeoutExact suppresses TimeoutMultiplier scaling of
+	// PromptTimeout. See withExactPromptTimeout.
+	promptTimeoutExact bool
 }
 
+// WithPromptTimeout bounds one prompt at d, scaled by the runner's
+// TimeoutMultiplier. It is for TESTS: a duration in a test file is authored for
+// the work, not for whichever of the ten runners draws the subtest.
 func WithPromptTimeout(d time.Duration) Option {
-	return func(c *runConfig) { c.PromptTimeout = d }
+	return func(c *runConfig) {
+		c.PromptTimeout = d
+		c.promptTimeoutExact = false
+	}
+}
+
+// withExactPromptTimeout bounds one prompt at exactly d, with no scaling. It is
+// for the harness's OWN deadlines, where the premise behind scaling is false:
+// such a number was written by one runner, for that runner, already knowing how
+// slow it is, so multiplying it by that same runner's multiplier double-counts.
+//
+// opencode's Bootstrap warmup is the case that motivated splitting these.
+// openCodeWarmupRetryBudget exists precisely because "3 x 90s is over four
+// minutes of blocked CI"; scaling it by opencode's 2.0 turned the sequence into
+// 180s + 60s + 60s and broke the bound the constant was written to enforce.
+//
+// Unexported on purpose, and TestHarnessDeadlinesAreNotScaled pins that the
+// package's own runners reach for this one rather than WithPromptTimeout.
+func withExactPromptTimeout(d time.Duration) Option {
+	return func(c *runConfig) {
+		c.PromptTimeout = d
+		c.promptTimeoutExact = true
+	}
 }
 
 // PromptTimeoutEnv is the environment variable that overrides every agent's
@@ -88,8 +117,9 @@ func scalePromptTimeout(d time.Duration, scaler timeoutScaler) time.Duration {
 // ignoring it is how you widen a budget, watch the run fail at the old ceiling
 // anyway, and conclude the agent is slow.
 //
-// The per-test value is scaled by the runner's TimeoutMultiplier; see
-// scalePromptTimeout for why that one and not the other two.
+// A per-test value is scaled by the runner's TimeoutMultiplier; see
+// scalePromptTimeout for why that one and not the other two, and
+// withExactPromptTimeout for the harness's own deadlines, which are not.
 func promptTimeout(scaler timeoutScaler, agentDefault time.Duration, cfg *runConfig) (time.Duration, error) {
 	timeout := agentDefault
 	if v := strings.TrimSpace(os.Getenv(PromptTimeoutEnv)); v != "" {
@@ -103,7 +133,11 @@ func promptTimeout(scaler timeoutScaler, agentDefault time.Duration, cfg *runCon
 		timeout = parsed
 	}
 	if cfg != nil && cfg.PromptTimeout > 0 {
-		timeout = scalePromptTimeout(cfg.PromptTimeout, scaler)
+		if cfg.promptTimeoutExact {
+			timeout = cfg.PromptTimeout
+		} else {
+			timeout = scalePromptTimeout(cfg.PromptTimeout, scaler)
+		}
 	}
 	return timeout, nil
 }
