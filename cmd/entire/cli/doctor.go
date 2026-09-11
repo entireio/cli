@@ -64,7 +64,12 @@ Checks performed:
      no longer fire, or a committed Pi/OpenCode extension has gone stale).
      Fix by re-running 'entire enable --force'.
 
-  5. Stuck sessions: sessions stuck in ACTIVE or ENDED phase that need cleanup.
+  5. Summary provider: warn when summary_generation.provider names a registered
+     agent that cannot generate text (e.g. opencode), which makes
+     'entire checkpoint explain --generate', 'entire dispatch' and
+     'entire runner setup' fail. Reports the file to change; does not rewrite it.
+
+  6. Stuck sessions: sessions stuck in ACTIVE or ENDED phase that need cleanup.
 
 A session is considered stuck if:
   - It is in ACTIVE phase with no interaction for over 1 hour
@@ -1368,14 +1373,57 @@ func checkSummaryProvider(cmd *cobra.Command) {
 	}
 
 	w := cmd.OutOrStdout()
+	sourceFile, isLocal := summaryProviderSourceLayer(ctx, s.SummaryGeneration.Provider)
 	fmt.Fprintln(w, "Summary provider: UNUSABLE")
-	fmt.Fprintf(w, "  summary_generation.provider is %q, which cannot generate text.\n", name)
+	fmt.Fprintf(w, "  summary_generation.provider is %q in %s, which cannot generate text.\n", name, sourceFile)
 	fmt.Fprintln(w, "  `entire checkpoint explain --generate`, `entire dispatch`, and")
 	fmt.Fprintln(w, "  `entire runner setup` all fail while it is set.")
 	if capable := summaryCapableProviderNames(); len(capable) > 0 {
-		fmt.Fprintf(w, "  Fix: entire configure --summarize-provider <%s>\n", strings.Join(capable, "|"))
+		// One runnable command, not a <a|b|c> placeholder: the shell reads < as
+		// a redirect and | as a pipe, so the obvious copy-paste fails. The rest
+		// of the choices go on their own line, where they are data rather than
+		// something the reader is invited to paste.
+		fix := "entire configure --summarize-provider " + capable[0]
+		if isLocal {
+			fix += " --local"
+		}
+		fmt.Fprintf(w, "  Fix: %s\n", fix)
+		if len(capable) > 1 {
+			fmt.Fprintf(w, "  Supported: %s\n", strings.Join(capable, ", "))
+		}
 	}
 	fmt.Fprintln(w, "  No `entire` command writes this value, so it was hand-edited or written by an agent.")
+}
+
+// summaryProviderSourceLayer reports which settings file supplies the effective
+// provider, and whether that file is the local layer.
+//
+// The remedy needs it. `entire configure` with no layer flag writes the PROJECT
+// file whenever one exists (settingsTargetFile), so a provider coming from
+// settings.local.json would be "fixed" in the wrong file: the command reports
+// success, the local layer still overrides it, and doctor still reports the
+// fault. Naming the file also answers the question the diagnosis otherwise
+// leaves open — which of two settings files to open.
+//
+// Local wins when it carries the key at all, which is the merge rule the loader
+// applies, so matching on the effective value is enough to identify the source.
+// A read failure or a missing file falls back to the project layer, matching
+// where `configure` would write.
+func summaryProviderSourceLayer(ctx context.Context, effective string) (relPath string, isLocal bool) {
+	localAbs, err := paths.AbsPath(ctx, settings.EntireSettingsLocalFile)
+	if err != nil {
+		return settings.EntireSettingsFile, false
+	}
+	// loadFromFile returns empty settings for a missing file, so absence is
+	// simply "the local layer does not supply it".
+	local, err := loadSummarySettingsFromFile(localAbs)
+	if err != nil {
+		return settings.EntireSettingsFile, false
+	}
+	if local.SummaryGeneration != nil && local.SummaryGeneration.Provider == effective {
+		return settings.EntireSettingsLocalFile, true
+	}
+	return settings.EntireSettingsFile, false
 }
 
 // checkCodexHookTrust reports whether Codex can discover its effective

@@ -3,11 +3,14 @@ package cli
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
+	"github.com/entireio/cli/cmd/entire/cli/testutil"
 )
 
 // stubSummaryProviderSettings points the settings seam at one configured
@@ -49,11 +52,15 @@ func TestCheckSummaryProvider_ReportsANonCapableProvider(t *testing.T) {
 		t.Errorf("diagnosis does not name the provider:\n%s", got)
 	}
 	// The remedy must be runnable, not just a statement of the problem.
-	if !strings.Contains(got, "entire configure --summarize-provider") {
-		t.Errorf("diagnosis carries no remedy command:\n%s", got)
+	if !strings.Contains(got, "entire configure --summarize-provider codex") {
+		t.Errorf("diagnosis carries no runnable remedy command:\n%s", got)
 	}
-	if !strings.Contains(got, "codex") {
-		t.Errorf("remedy does not name a usable provider:\n%s", got)
+	// A <a|b|c> placeholder is not copy-pasteable: the shell reads < as a
+	// redirect and | as a pipe, so the obvious paste fails before it runs.
+	for _, meta := range []string{"<", "|", ">"} {
+		if strings.Contains(got, meta) {
+			t.Errorf("diagnosis contains shell metacharacter %q, so it cannot be pasted:\n%s", meta, got)
+		}
 	}
 }
 
@@ -108,5 +115,67 @@ func TestCheckSummaryProvider_SilentWhenSettingsWillNotLoad(t *testing.T) {
 	checkSummaryProvider(cmd)
 	if out.String() != "" {
 		t.Errorf("expected silence, got:\n%s", out.String())
+	}
+}
+
+// The remedy must name the layer `entire configure` would actually write.
+// With no flag it writes the PROJECT file whenever one exists, so a provider
+// coming from settings.local.json needs --local or the "fix" lands in a file
+// the local layer still overrides.
+func TestCheckSummaryProvider_RemedyTargetsTheLayerHoldingTheValue(t *testing.T) {
+	// Cannot use t.Parallel(): t.Chdir and package-level resolution seams.
+	cases := []struct {
+		name      string
+		localFile string
+		wantFile  string
+		wantLocal bool
+	}{
+		{
+			name:      "provider from the project layer",
+			localFile: "",
+			wantFile:  settings.EntireSettingsFile,
+			wantLocal: false,
+		},
+		{
+			name:      "provider from the local layer",
+			localFile: `{"summary_generation":{"provider":"opencode"}}`,
+			wantFile:  settings.EntireSettingsLocalFile,
+			wantLocal: true,
+		},
+		{
+			name:      "local layer exists but supplies a different provider",
+			localFile: `{"summary_generation":{"provider":"codex"}}`,
+			wantFile:  settings.EntireSettingsFile,
+			wantLocal: false,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			tmpDir := t.TempDir()
+			testutil.InitRepo(t, tmpDir)
+			if err := os.MkdirAll(filepath.Join(tmpDir, ".entire"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if tc.localFile != "" {
+				if err := os.WriteFile(filepath.Join(tmpDir, settings.EntireSettingsLocalFile), []byte(tc.localFile), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			t.Chdir(tmpDir)
+
+			stubSummaryProviderSettings(t, "opencode")
+			cmd, out := newTestCmd(t)
+			checkSummaryProvider(cmd)
+			got := out.String()
+
+			if !strings.Contains(got, tc.wantFile) {
+				t.Errorf("diagnosis does not name %s:\n%s", tc.wantFile, got)
+			}
+			hasLocalFlag := strings.Contains(got, "--local")
+			if hasLocalFlag != tc.wantLocal {
+				t.Errorf("remedy --local = %v, want %v:\n%s", hasLocalFlag, tc.wantLocal, got)
+			}
+		})
 	}
 }
