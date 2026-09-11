@@ -13,6 +13,39 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 )
 
+// newHookIntegrationRepo creates an isolated repository for hook-integration
+// tests: git init, no global core.hooksPath leaking in, and cwd pointed at it
+// so the CWD-resolving helpers under test see this repo and not the real one.
+// Per-test setup between those two halves stays in the test.
+func newHookIntegrationRepo(t *testing.T) string {
+	t.Helper()
+	repoDir := t.TempDir()
+	testutil.InitRepo(t, repoDir)
+	clearGlobalHooksPath(t, repoDir)
+	t.Chdir(repoDir)
+	return repoDir
+}
+
+// writeHookFixture writes a fixture file or fails the test. Replaces ~25 copies
+// of the same three-line write-or-Fatal block.
+func writeHookFixture(t *testing.T, path string, data any, mode os.FileMode) {
+	t.Helper()
+	var b []byte
+	switch v := data.(type) {
+	case nil:
+		b = nil
+	case []byte:
+		b = v
+	case string:
+		b = []byte(v)
+	default:
+		t.Fatalf("writeHookFixture: unsupported fixture type %T", data)
+	}
+	if err := os.WriteFile(path, b, mode); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestCheckGitHookIntegration(t *testing.T) {
 	tests := []struct {
 		name  string
@@ -99,9 +132,7 @@ func TestCheckGitHookIntegration_Lefthook(t *testing.T) {
 		repoDir := t.TempDir()
 		testutil.InitRepo(t, repoDir)
 		clearGlobalHooksPath(t, repoDir)
-		if err := os.WriteFile(filepath.Join(repoDir, "lefthook.yml"), nil, 0o644); err != nil {
-			t.Fatal(err)
-		}
+		writeHookFixture(t, filepath.Join(repoDir, "lefthook.yml"), nil, 0o644)
 		hooksDir := filepath.Join(repoDir, ".git", "hooks")
 		if err := os.MkdirAll(hooksDir, 0o755); err != nil {
 			t.Fatal(err)
@@ -134,9 +165,7 @@ func TestCheckGitHookIntegration_Lefthook(t *testing.T) {
 	t.Run("ambiguity with working native hooks is degraded native", func(t *testing.T) {
 		repoDir, hooksDir := setup(t)
 		writeCurrentManagedHooks(t, hooksDir)
-		if err := os.WriteFile(filepath.Join(repoDir, ".lefthook.yaml"), nil, 0o644); err != nil {
-			t.Fatal(err)
-		}
+		writeHookFixture(t, filepath.Join(repoDir, ".lefthook.yaml"), nil, 0o644)
 		got := checkGitHookIntegrationInDir(t.Context(), repoDir)
 		if got.Mode != GitHookIntegrationNative || got.State != GitHookIntegrationDegraded || got.ReasonCode != "hook_manager_ambiguous" {
 			t.Errorf("health = %+v, want degraded native", got)
@@ -148,9 +177,7 @@ func TestCheckGitHookIntegration_Lefthook(t *testing.T) {
 		if _, err := installLefthookFiles(t.Context(), false); err != nil {
 			t.Fatal(err)
 		}
-		if err := os.WriteFile(filepath.Join(repoDir, ".lefthook-local", "pre-push", lefthookScriptName), []byte("# stale\n"), 0o755); err != nil {
-			t.Fatal(err)
-		}
+		writeHookFixture(t, filepath.Join(repoDir, ".lefthook-local", "pre-push", lefthookScriptName), []byte("# stale\n"), 0o755)
 		got := checkGitHookIntegrationInDir(t.Context(), repoDir)
 		if got.Mode != GitHookIntegrationLefthook || got.State != GitHookIntegrationOutdated || got.ReasonCode != "lefthook_artifacts_outdated" {
 			t.Errorf("health = %+v, want outdated Lefthook", got)
@@ -173,9 +200,7 @@ func TestCheckGitHookIntegration_Lefthook(t *testing.T) {
 
 	t.Run("ambiguity without native hooks is error", func(t *testing.T) {
 		repoDir, _ := setup(t)
-		if err := os.WriteFile(filepath.Join(repoDir, ".lefthook.yaml"), nil, 0o644); err != nil {
-			t.Fatal(err)
-		}
+		writeHookFixture(t, filepath.Join(repoDir, ".lefthook.yaml"), nil, 0o644)
 		got := checkGitHookIntegrationInDir(t.Context(), repoDir)
 		if got.Mode != GitHookIntegrationNative || got.State != GitHookIntegrationError || got.ReasonCode != "hook_manager_ambiguous_no_native" {
 			t.Errorf("health = %+v, want ambiguity error", got)
@@ -184,13 +209,8 @@ func TestCheckGitHookIntegration_Lefthook(t *testing.T) {
 }
 
 func TestLegacyGitHookStateRemainsNativeOnlyWithCurrentLefthook(t *testing.T) {
-	repoDir := t.TempDir()
-	testutil.InitRepo(t, repoDir)
-	clearGlobalHooksPath(t, repoDir)
-	if err := os.WriteFile(filepath.Join(repoDir, "lefthook.yml"), nil, 0o644); err != nil {
-		t.Fatal(err)
-	}
-	t.Chdir(repoDir)
+	repoDir := newHookIntegrationRepo(t)
+	writeHookFixture(t, filepath.Join(repoDir, "lefthook.yml"), nil, 0o644)
 	if _, err := installLefthookFiles(t.Context(), false); err != nil {
 		t.Fatal(err)
 	}
@@ -209,9 +229,7 @@ func TestLegacyGitHookStateRemainsNativeOnlyWithCurrentLefthook(t *testing.T) {
 }
 
 func TestCheckGitHookIntegration_InspectionError(t *testing.T) {
-	repoDir := t.TempDir()
-	testutil.InitRepo(t, repoDir)
-	clearGlobalHooksPath(t, repoDir)
+	repoDir := newHookIntegrationRepo(t)
 	hooksDir := filepath.Join(repoDir, ".git", "hooks")
 	if err := os.MkdirAll(hooksDir, 0o755); err != nil {
 		t.Fatal(err)
@@ -225,7 +243,6 @@ func TestCheckGitHookIntegration_InspectionError(t *testing.T) {
 	if err := os.Mkdir(brokenHook, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	t.Chdir(repoDir)
 
 	got := CheckGitHookIntegration(context.Background())
 	if got.Mode != GitHookIntegrationNative {
@@ -246,19 +263,14 @@ func TestCheckGitHookIntegration_InspectionError(t *testing.T) {
 }
 
 func TestCheckGitHookIntegration_MarkerOnlyNativeHookIsNotCurrent(t *testing.T) {
-	repoDir := t.TempDir()
-	testutil.InitRepo(t, repoDir)
-	clearGlobalHooksPath(t, repoDir)
+	repoDir := newHookIntegrationRepo(t)
 	hooksDir := filepath.Join(repoDir, ".git", "hooks")
 	if err := os.MkdirAll(hooksDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
 	writeCurrentManagedHooks(t, hooksDir)
 	markerOnly := "#!/bin/sh\n# " + entireHookMarker + "\nexit 0\n"
-	if err := os.WriteFile(filepath.Join(hooksDir, "pre-push"), []byte(markerOnly), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	t.Chdir(repoDir)
+	writeHookFixture(t, filepath.Join(hooksDir, "pre-push"), []byte(markerOnly), 0o755)
 
 	if got := CheckGitHookIntegration(t.Context()); got.State == GitHookIntegrationCurrent {
 		t.Errorf("health = %+v, marker-only native hook must not be current", got)
@@ -266,22 +278,15 @@ func TestCheckGitHookIntegration_MarkerOnlyNativeHookIsNotCurrent(t *testing.T) 
 }
 
 func TestCheckGitHookIntegration_MarkerOnlyLefthookBridgeIsNotCurrent(t *testing.T) {
-	repoDir := t.TempDir()
-	testutil.InitRepo(t, repoDir)
-	clearGlobalHooksPath(t, repoDir)
-	if err := os.WriteFile(filepath.Join(repoDir, "lefthook.yml"), []byte("pre_commit: {}\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	repoDir := newHookIntegrationRepo(t)
+	writeHookFixture(t, filepath.Join(repoDir, "lefthook.yml"), []byte("pre_commit: {}\n"), 0o644)
 	hooksDir := filepath.Join(repoDir, ".git", "hooks")
 	writeRealLefthookHooks(t, hooksDir)
-	t.Chdir(repoDir)
 	if _, err := installLefthookFiles(t.Context(), false); err != nil {
 		t.Fatal(err)
 	}
 	markerOnly := "#!/bin/sh\n# " + entireHookMarker + "\nexit 0\n"
-	if err := os.WriteFile(filepath.Join(hooksDir, "pre-push"), []byte(markerOnly), 0o755); err != nil {
-		t.Fatal(err)
-	}
+	writeHookFixture(t, filepath.Join(hooksDir, "pre-push"), []byte(markerOnly), 0o755)
 
 	if got := CheckGitHookIntegration(t.Context()); got.State == GitHookIntegrationCurrent {
 		t.Errorf("health = %+v, marker-only bridge must not deliver Entire", got)
@@ -354,13 +359,8 @@ func TestEnsureGitHookIntegration_MainConfigFormatIsIrrelevant(t *testing.T) {
 	}
 }
 func TestCheckGitHookIntegration_ManagerCandidateDetectionError(t *testing.T) {
-	repoDir := t.TempDir()
-	testutil.InitRepo(t, repoDir)
-	clearGlobalHooksPath(t, repoDir)
-	if err := os.WriteFile(filepath.Join(repoDir, ".husky"), []byte("not a directory\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	t.Chdir(repoDir)
+	repoDir := newHookIntegrationRepo(t)
+	writeHookFixture(t, filepath.Join(repoDir, ".husky"), []byte("not a directory\n"), 0o644)
 
 	got := CheckGitHookIntegration(t.Context())
 	if got.State != GitHookIntegrationError {
@@ -395,13 +395,8 @@ func TestCheckGitHookStateCompatibilityMapping(t *testing.T) {
 }
 
 func TestEnsureGitHookIntegration_InstallsLefthookArtifacts(t *testing.T) {
-	repoDir := t.TempDir()
-	testutil.InitRepo(t, repoDir)
-	clearGlobalHooksPath(t, repoDir)
-	if err := os.WriteFile(filepath.Join(repoDir, "lefthook.yml"), []byte("pre_commit:\n  commands:\n    lint:\n      run: true\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	t.Chdir(repoDir)
+	repoDir := newHookIntegrationRepo(t)
+	writeHookFixture(t, filepath.Join(repoDir, "lefthook.yml"), []byte("pre_commit:\n  commands:\n    lint:\n      run: true\n"), 0o644)
 
 	written, err := EnsureGitHookIntegration(t.Context(), false)
 	if err != nil {
@@ -416,13 +411,8 @@ func TestEnsureGitHookIntegration_InstallsLefthookArtifacts(t *testing.T) {
 }
 
 func TestEnsureGitHookIntegration_LefthookWithoutActiveHooksInstallsNativeBridge(t *testing.T) {
-	repoDir := t.TempDir()
-	testutil.InitRepo(t, repoDir)
-	clearGlobalHooksPath(t, repoDir)
-	if err := os.WriteFile(filepath.Join(repoDir, "lefthook.yml"), []byte("pre_commit: {}\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	t.Chdir(repoDir)
+	repoDir := newHookIntegrationRepo(t)
+	writeHookFixture(t, filepath.Join(repoDir, "lefthook.yml"), []byte("pre_commit: {}\n"), 0o644)
 
 	if _, err := EnsureGitHookIntegration(t.Context(), false); err != nil {
 		t.Fatalf("EnsureGitHookIntegration() error = %v", err)
@@ -442,21 +432,14 @@ func TestEnsureGitHookIntegration_LefthookWithoutActiveHooksInstallsNativeBridge
 }
 
 func TestEnsureGitHookIntegration_RestoresProvenSavedLefthookHook(t *testing.T) {
-	repoDir := t.TempDir()
-	testutil.InitRepo(t, repoDir)
-	clearGlobalHooksPath(t, repoDir)
-	if err := os.WriteFile(filepath.Join(repoDir, "lefthook.yml"), nil, 0o644); err != nil {
-		t.Fatal(err)
-	}
+	repoDir := newHookIntegrationRepo(t)
+	writeHookFixture(t, filepath.Join(repoDir, "lefthook.yml"), nil, 0o644)
 	hooksDir := filepath.Join(repoDir, ".git", "hooks")
 	if err := os.MkdirAll(hooksDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
 	saved := realLefthookWrapper("pre-push")
-	if err := os.WriteFile(filepath.Join(hooksDir, "pre-push"), []byte(saved), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	t.Chdir(repoDir)
+	writeHookFixture(t, filepath.Join(hooksDir, "pre-push"), []byte(saved), 0o755)
 	if _, err := InstallGitHook(t.Context(), true, false); err != nil {
 		t.Fatal(err)
 	}
@@ -477,21 +460,14 @@ func TestEnsureGitHookIntegration_RestoresProvenSavedLefthookHook(t *testing.T) 
 }
 
 func TestEnsureGitHookIntegration_DoesNotRestoreNoOpSavedLefthookHook(t *testing.T) {
-	repoDir := t.TempDir()
-	testutil.InitRepo(t, repoDir)
-	clearGlobalHooksPath(t, repoDir)
-	if err := os.WriteFile(filepath.Join(repoDir, "lefthook.yml"), nil, 0o644); err != nil {
-		t.Fatal(err)
-	}
+	repoDir := newHookIntegrationRepo(t)
+	writeHookFixture(t, filepath.Join(repoDir, "lefthook.yml"), nil, 0o644)
 	hooksDir := filepath.Join(repoDir, ".git", "hooks")
 	if err := os.MkdirAll(hooksDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
 	saved := noOpLefthookWrapper("pre-push")
-	if err := os.WriteFile(filepath.Join(hooksDir, "pre-push"), []byte(saved), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	t.Chdir(repoDir)
+	writeHookFixture(t, filepath.Join(hooksDir, "pre-push"), []byte(saved), 0o755)
 	if _, err := InstallGitHook(t.Context(), true, false); err != nil {
 		t.Fatal(err)
 	}
@@ -516,21 +492,14 @@ func TestEnsureGitHookIntegration_DoesNotRestoreNoOpSavedLefthookHook(t *testing
 }
 
 func TestCheckGitHookIntegration_NoOpLefthookWrappersAreNotCurrent(t *testing.T) {
-	repoDir := t.TempDir()
-	testutil.InitRepo(t, repoDir)
-	clearGlobalHooksPath(t, repoDir)
-	if err := os.WriteFile(filepath.Join(repoDir, "lefthook.yml"), nil, 0o644); err != nil {
-		t.Fatal(err)
-	}
-	t.Chdir(repoDir)
+	repoDir := newHookIntegrationRepo(t)
+	writeHookFixture(t, filepath.Join(repoDir, "lefthook.yml"), nil, 0o644)
 	if _, err := EnsureGitHookIntegration(t.Context(), false); err != nil {
 		t.Fatal(err)
 	}
 	hooksDir := filepath.Join(repoDir, ".git", "hooks")
 	for _, hook := range gitHookNames {
-		if err := os.WriteFile(filepath.Join(hooksDir, hook), []byte(noOpLefthookWrapper(hook)), 0o755); err != nil {
-			t.Fatal(err)
-		}
+		writeHookFixture(t, filepath.Join(hooksDir, hook), []byte(noOpLefthookWrapper(hook)), 0o755)
 	}
 
 	if got := CheckGitHookIntegration(t.Context()); got.State == GitHookIntegrationCurrent {
@@ -539,14 +508,9 @@ func TestCheckGitHookIntegration_NoOpLefthookWrappersAreNotCurrent(t *testing.T)
 }
 
 func TestRemoveGitHookIntegration_PreservesUnrelatedLefthookContent(t *testing.T) {
-	repoDir := t.TempDir()
-	testutil.InitRepo(t, repoDir)
-	clearGlobalHooksPath(t, repoDir)
+	repoDir := newHookIntegrationRepo(t)
 	mainConfig := "# keep me\npre_commit:\n  commands:\n    lint:\n      run: true\n"
-	if err := os.WriteFile(filepath.Join(repoDir, "lefthook.yml"), []byte(mainConfig), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	t.Chdir(repoDir)
+	writeHookFixture(t, filepath.Join(repoDir, "lefthook.yml"), []byte(mainConfig), 0o644)
 	if _, err := EnsureGitHookIntegration(t.Context(), false); err != nil {
 		t.Fatal(err)
 	}
@@ -583,18 +547,11 @@ func TestRemoveGitHookIntegration_PreservesUnrelatedLefthookContent(t *testing.T
 // keeps all of that in its own file, so the property is simply that their
 // config is untouched apart from the extends entry.
 func TestLefthookIntegration_RoundTripOnlyTouchesTheExtendsEntry(t *testing.T) {
-	repoDir := t.TempDir()
-	testutil.InitRepo(t, repoDir)
-	clearGlobalHooksPath(t, repoDir)
-	if err := os.WriteFile(filepath.Join(repoDir, "lefthook.yml"), nil, 0o644); err != nil {
-		t.Fatal(err)
-	}
+	repoDir := newHookIntegrationRepo(t)
+	writeHookFixture(t, filepath.Join(repoDir, "lefthook.yml"), nil, 0o644)
 	localPath := filepath.Join(repoDir, lefthookLocalConfigName)
 	const userConfig = "# user config\nsource_dir_local: .lefthook-local # user-selected shared directory\nuser_key: keep-me\n"
-	if err := os.WriteFile(localPath, []byte(userConfig), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	t.Chdir(repoDir)
+	writeHookFixture(t, localPath, []byte(userConfig), 0o644)
 
 	if _, err := EnsureGitHookIntegration(t.Context(), false); err != nil {
 		t.Fatalf("EnsureGitHookIntegration() error = %v", err)
@@ -639,13 +596,8 @@ func TestLefthookIntegration_RoundTripOnlyTouchesTheExtendsEntry(t *testing.T) {
 	}
 }
 func TestRemoveGitHookIntegration_RollsBackAfterOwnedScriptObstruction(t *testing.T) {
-	repoDir := t.TempDir()
-	testutil.InitRepo(t, repoDir)
-	clearGlobalHooksPath(t, repoDir)
-	if err := os.WriteFile(filepath.Join(repoDir, "lefthook.yml"), nil, 0o644); err != nil {
-		t.Fatal(err)
-	}
-	t.Chdir(repoDir)
+	repoDir := newHookIntegrationRepo(t)
+	writeHookFixture(t, filepath.Join(repoDir, "lefthook.yml"), nil, 0o644)
 	if _, err := EnsureGitHookIntegration(t.Context(), false); err != nil {
 		t.Fatal(err)
 	}
@@ -688,18 +640,11 @@ func TestRemoveGitHookIntegration_RollsBackAfterOwnedScriptObstruction(t *testin
 }
 
 func TestEnsureGitHookIntegration_FinalVerificationRollbackRestoresBytesAndMode(t *testing.T) {
-	repoDir := t.TempDir()
-	testutil.InitRepo(t, repoDir)
-	clearGlobalHooksPath(t, repoDir)
-	if err := os.WriteFile(filepath.Join(repoDir, "lefthook.yml"), nil, 0o644); err != nil {
-		t.Fatal(err)
-	}
+	repoDir := newHookIntegrationRepo(t)
+	writeHookFixture(t, filepath.Join(repoDir, "lefthook.yml"), nil, 0o644)
 	configPath := filepath.Join(repoDir, lefthookLocalConfigName)
 	want := []byte("# user local config\npre_commit:\n  commands:\n    lint:\n      run: true\n")
-	if err := os.WriteFile(configPath, want, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	t.Chdir(repoDir)
+	writeHookFixture(t, configPath, want, 0o600)
 	hookIntegrationFault = func(stage, _ string) error {
 		if stage == "final-verification" {
 			return errors.New("injected verification failure")
@@ -728,20 +673,13 @@ func TestEnsureGitHookIntegration_FinalVerificationRollbackRestoresBytesAndMode(
 }
 
 func TestEnsureGitHookIntegration_VerifiesArtifactsBeforeSavedHookRestore(t *testing.T) {
-	repoDir := t.TempDir()
-	testutil.InitRepo(t, repoDir)
-	clearGlobalHooksPath(t, repoDir)
-	if err := os.WriteFile(filepath.Join(repoDir, "lefthook.yml"), []byte("pre_commit: {}\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	repoDir := newHookIntegrationRepo(t)
+	writeHookFixture(t, filepath.Join(repoDir, "lefthook.yml"), []byte("pre_commit: {}\n"), 0o644)
 	hooksDir := filepath.Join(repoDir, ".git", "hooks")
 	if err := os.MkdirAll(hooksDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(hooksDir, "pre-push"), []byte(realLefthookWrapper("pre-push")), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	t.Chdir(repoDir)
+	writeHookFixture(t, filepath.Join(hooksDir, "pre-push"), []byte(realLefthookWrapper("pre-push")), 0o755)
 	if _, err := InstallGitHook(t.Context(), true, false); err != nil {
 		t.Fatal(err)
 	}
@@ -821,29 +759,22 @@ func writeRealLefthookHooks(t *testing.T, hooksDir string) {
 		t.Fatal(err)
 	}
 	for _, hook := range gitHookNames {
-		if err := os.WriteFile(filepath.Join(hooksDir, hook), []byte(realLefthookWrapper(hook)), 0o755); err != nil {
-			t.Fatal(err)
-		}
+		writeHookFixture(t, filepath.Join(hooksDir, hook), []byte(realLefthookWrapper(hook)), 0o755)
 	}
 }
 
 func TestRemoveGitHookIntegration_RejectsSymlinkedLefthookRoot(t *testing.T) {
-	repoDir := t.TempDir()
-	testutil.InitRepo(t, repoDir)
-	clearGlobalHooksPath(t, repoDir)
+	repoDir := newHookIntegrationRepo(t)
 	external := t.TempDir()
 	externalScript := filepath.Join(external, "pre-push", lefthookScriptName)
 	if err := os.MkdirAll(filepath.Dir(externalScript), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	want := "#!/bin/sh\n# " + lefthookOwnedMarker + "\nexit 0\n"
-	if err := os.WriteFile(externalScript, []byte(want), 0o755); err != nil {
-		t.Fatal(err)
-	}
+	writeHookFixture(t, externalScript, []byte(want), 0o755)
 	if err := os.Symlink(external, filepath.Join(repoDir, lefthookLocalDir)); err != nil {
 		t.Fatal(err)
 	}
-	t.Chdir(repoDir)
 
 	if _, err := RemoveGitHookIntegration(t.Context()); err == nil {
 		t.Fatal("RemoveGitHookIntegration() should reject symlinked Lefthook root")
@@ -858,15 +789,11 @@ func TestRemoveGitHookIntegration_RejectsSymlinkedLefthookRoot(t *testing.T) {
 }
 
 func TestRemoveGitHookIntegration_RejectsSymlinkedHookSubdirectory(t *testing.T) {
-	repoDir := t.TempDir()
-	testutil.InitRepo(t, repoDir)
-	clearGlobalHooksPath(t, repoDir)
+	repoDir := newHookIntegrationRepo(t)
 	external := t.TempDir()
 	externalScript := filepath.Join(external, lefthookScriptName)
 	want := "#!/bin/sh\n# " + lefthookOwnedMarker + "\nexit 0\n"
-	if err := os.WriteFile(externalScript, []byte(want), 0o755); err != nil {
-		t.Fatal(err)
-	}
+	writeHookFixture(t, externalScript, []byte(want), 0o755)
 	localRoot := filepath.Join(repoDir, lefthookLocalDir)
 	if err := os.Mkdir(localRoot, 0o755); err != nil {
 		t.Fatal(err)
@@ -874,7 +801,6 @@ func TestRemoveGitHookIntegration_RejectsSymlinkedHookSubdirectory(t *testing.T)
 	if err := os.Symlink(external, filepath.Join(localRoot, "pre-push")); err != nil {
 		t.Fatal(err)
 	}
-	t.Chdir(repoDir)
 
 	if _, err := RemoveGitHookIntegration(t.Context()); err == nil {
 		t.Fatal("RemoveGitHookIntegration() should reject symlinked hook subdirectory")
@@ -889,20 +815,15 @@ func TestRemoveGitHookIntegration_RejectsSymlinkedHookSubdirectory(t *testing.T)
 }
 
 func TestRemoveGitHookIntegration_RejectsSymlinkedEffectiveHooksDirectory(t *testing.T) {
-	repoDir := t.TempDir()
-	testutil.InitRepo(t, repoDir)
-	clearGlobalHooksPath(t, repoDir)
+	repoDir := newHookIntegrationRepo(t)
 	testutil.RunGit(t, repoDir, "config", "core.hooksPath", "managed-hooks")
 	external := t.TempDir()
 	externalHook := filepath.Join(external, "pre-push")
 	want := "#!/bin/sh\n# " + entireHookMarker + "\nexit 0\n"
-	if err := os.WriteFile(externalHook, []byte(want), 0o755); err != nil {
-		t.Fatal(err)
-	}
+	writeHookFixture(t, externalHook, []byte(want), 0o755)
 	if err := os.Symlink(external, filepath.Join(repoDir, "managed-hooks")); err != nil {
 		t.Fatal(err)
 	}
-	t.Chdir(repoDir)
 	ClearHooksDirCache()
 
 	if _, err := RemoveGitHookIntegration(t.Context()); err == nil {
@@ -952,14 +873,9 @@ func TestRemoveGitHookIntegration_RejectsSymlinkedNativeHookAndBackup(t *testing
 }
 
 func TestGitHookIntegrationIgnoresOwnershipMarkerInUnrelatedYAML(t *testing.T) {
-	repoDir := t.TempDir()
-	testutil.InitRepo(t, repoDir)
-	clearGlobalHooksPath(t, repoDir)
+	repoDir := newHookIntegrationRepo(t)
 	want := []byte("user_setting: value # " + lefthookOwnedMarker + "\n")
-	if err := os.WriteFile(filepath.Join(repoDir, lefthookLocalConfigName), want, 0o644); err != nil {
-		t.Fatal(err)
-	}
-	t.Chdir(repoDir)
+	writeHookFixture(t, filepath.Join(repoDir, lefthookLocalConfigName), want, 0o644)
 
 	if AnyGitHookIntegrationInstalled(t.Context()) {
 		t.Fatal("unrelated YAML marker must not claim Entire ownership")
