@@ -9,6 +9,8 @@ import (
 	"github.com/go-git/go-git/v6/x/plugin"
 	"github.com/go-git/go-git/v6/x/plugin/config"
 	"github.com/zalando/go-keyring"
+
+	"github.com/entireio/cli/cmd/entire/cli/agent"
 )
 
 func TestMain(m *testing.M) {
@@ -40,9 +42,11 @@ func TestMain(m *testing.M) {
 
 	// Tests steer the agents' homes through HOME and ENTIRE_TEST_*_PROJECT_DIR;
 	// a developer's relocated agent home would outrank HOME in every base-dir
-	// fallback walk, in-process and in children.
-	os.Unsetenv("CLAUDE_CONFIG_DIR")
-	os.Unsetenv("GEMINI_CLI_HOME")
+	// fallback walk, in-process and in children. The list is static so a harness
+	// that links fewer agents still clears every variable.
+	for _, name := range agent.RelocationEnvVars() {
+		os.Unsetenv(name)
+	}
 
 	// Register a default ConfigSource so tests that call ConfigScoped
 	// (directly or indirectly via Commit/CreateTag) don't fail with
