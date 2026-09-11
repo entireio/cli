@@ -142,6 +142,16 @@ func installMissingPlugin(ctx context.Context, rootCmd *cobra.Command, name stri
 // brought this function into being. The executable bit is left to the exec —
 // findInaccessiblePlugin draws the same line for PATH entries, and the mode
 // does not mean the same thing on Windows.
+//
+// A symlink whose target cannot be reached for any other reason is treated the
+// same way as a dangling one. The case that exists in the field is the entry an
+// earlier Windows build created through os.Root.Symlink with an absolute
+// target, which Windows refuses to follow with ERROR_INVALID_NAME (see
+// materializeManagedEntry); the errno names the entry rather than the fault,
+// and replacing the link is exactly what a reinstall does.
+//
+// An empty regular file is refused for the same reason: nothing runs a 0-byte
+// executable, exec's own error for one is opaque, and a reinstall repairs it.
 func checkManagedPluginRunnable(path string) (reinstallFixes bool, err error) {
 	info, statErr := os.Stat(path)
 	if statErr != nil {
@@ -151,10 +161,16 @@ func checkManagedPluginRunnable(path string) (reinstallFixes bool, err error) {
 			// exists; what is missing is whatever it points at.
 			return true, errors.New("it points at a file that no longer exists")
 		}
+		if linkInfo, lerr := os.Lstat(path); lerr == nil && linkInfo.Mode()&os.ModeSymlink != 0 {
+			return true, fmt.Errorf("it is a symlink whose target cannot be followed: %w", statErr)
+		}
 		return false, statErr //nolint:wrapcheck // the caller adds the plugin name and path
 	}
 	if info.IsDir() {
 		return true, errors.New("it is a directory")
+	}
+	if info.Mode().IsRegular() && info.Size() == 0 {
+		return true, errors.New("it is an empty file")
 	}
 	return false, nil
 }

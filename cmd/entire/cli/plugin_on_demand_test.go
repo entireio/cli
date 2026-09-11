@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -345,7 +346,11 @@ func TestCheckManagedPluginRunnable(t *testing.T) {
 	if err := os.Mkdir(asDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	for _, tc := range []struct {
+	empty := filepath.Join(dir, "entire-empty")
+	if err := os.WriteFile(empty, nil, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cases := []struct {
 		name             string
 		path             string
 		wantErr          string
@@ -354,7 +359,28 @@ func TestCheckManagedPluginRunnable(t *testing.T) {
 		{name: "regular file", path: runnable},
 		{name: "dangling symlink", path: dangling, wantErr: "points at a file that no longer exists", wantReinstallFix: true},
 		{name: "directory", path: asDir, wantErr: "it is a directory", wantReinstallFix: true},
-	} {
+		{name: "empty file", path: empty, wantErr: "it is an empty file", wantReinstallFix: true},
+	}
+	if runtime.GOOS == windowsGOOS {
+		// The entry earlier Windows builds left behind: an absolute symlink
+		// created through os.Root.Symlink, which stores the target without the
+		// `\??\` prefix and so cannot be followed. Its target exists, so this is
+		// not the dangling case, yet a reinstall is what fixes it.
+		root, err := os.OpenRoot(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = root.Close() })
+		if err := root.Symlink(runnable, "entire-unfollowable"); err == nil {
+			cases = append(cases, struct {
+				name             string
+				path             string
+				wantErr          string
+				wantReinstallFix bool
+			}{name: "unfollowable symlink", path: filepath.Join(dir, "entire-unfollowable"), wantErr: "cannot be followed", wantReinstallFix: true})
+		}
+	}
+	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			reinstallFixes, err := checkManagedPluginRunnable(tc.path)

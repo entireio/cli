@@ -1316,6 +1316,19 @@ comments at each site say which case applies:
   Those operations (`setupEntireDirectory`, `removeEntireDirectory`, the one
   `MkdirAll` of an agent's session dir in `resume.go`) legitimately use plain
   `os` calls.
+- **`Root.Link` takes two root-relative names, and `Root.Symlink` with an
+  absolute target is unusable on Windows.** `Root.Link(absPath, name)` fails as
+  a path escape on every platform — the plugin store's hardlink fallback did
+  exactly that and never ran once. `Root.Symlink(absPath, name)` on Windows
+  (Go 1.27) writes the reparse target verbatim, without the `\??\` prefix that
+  `CreateSymbolicLinkW` adds, so the link is created (Go re-enables
+  `SeCreateSymbolicLinkPrivilege` itself, so an elevated shell does not even
+  get an error) and then every follow — `Stat`, open, `exec` — fails with
+  `ERROR_INVALID_NAME`. That is how `entire graph` installed a 0-byte
+  `bin\entire-graph.exe` it could not run. `materializeManagedEntry` is the
+  reference: symlink only off Windows, hardlink by root-relative name
+  (`managedTreeName`), copy otherwise. Go's own tests do not catch this — they
+  compare `Readlink` output, which normalises the prefix away.
 
 **Deliberately not rooted**, with the reason:
 
