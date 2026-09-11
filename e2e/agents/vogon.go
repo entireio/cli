@@ -48,7 +48,7 @@ func (v *Vogon) RunPrompt(ctx context.Context, dir string, prompt string, opts .
 	// No default: the canary answers in seconds, so a ceiling of our own would
 	// only ever misfire. It still honors an explicit one — a hung fake agent is
 	// the reason someone reaches for E2E_TIMEOUT on the canary leg.
-	ctx, cancel, err := boundPrompt(ctx, 0, cfg)
+	ctx, cancel, err := boundPrompt(ctx, v, 0, cfg)
 	if err != nil {
 		return Output{}, err
 	}

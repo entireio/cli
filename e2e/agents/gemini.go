@@ -101,7 +101,7 @@ func (g *Gemini) RunPrompt(ctx context.Context, dir string, prompt string, opts 
 	// Per-prompt timeout so a slow response gets killed early enough to
 	// retry within the test's overall budget. Note the 60s is not scaled by
 	// TimeoutMultiplier, which applies to the scenario budget, not to this.
-	timeout, err := promptTimeout(60*time.Second, cfg)
+	timeout, err := promptTimeout(g, 60*time.Second, cfg)
 	if err != nil {
 		return Output{}, err
 	}

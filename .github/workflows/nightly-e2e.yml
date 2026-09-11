@@ -267,6 +267,7 @@ jobs:
         env:
           AGENT: cursor-cli
           CURSOR_API_KEY: ${{ secrets.CURSOR_API_KEY }}
+          E2E_CURSOR_MODEL: gpt-5.4-nano-medium
         run: |
           set +e
           set -uo pipefail

@@ -97,22 +97,43 @@ func cursorConfigDir() (string, error) {
 	return tmp, nil
 }
 
+// cursorModel returns the model to pin for e2e runs, or "" to leave Cursor's
+// own routing in charge. E2E_CURSOR_MODEL sets it, mirroring E2E_CODEX_MODEL /
+// E2E_GEMINI_MODEL / E2E_OPENCODE_MODEL / E2E_CLAUDE_MODEL / E2E_COPILOT_MODEL.
+//
+// Unset, Cursor routes through "auto" — its own listed default — which picks a
+// model per run, so turn duration moves for reasons unrelated to the change
+// under test and a single slow measurement cannot be read.
+//
+// The default is empty rather than a cheap model, the one way this differs from
+// the other runners, and NOT because a stale id would fail quietly: it exits 1
+// naming every valid id. The reasons are that `agent --list-models` is
+// account-scoped, so an id this account is entitled to may not exist for a
+// contributor running the leg locally, and that Cursor offers no haiku-tier
+// model to be the obvious cheap default — the cost/determinism call is a CI
+// one, so it is pinned in .github/workflows/e2e.yml beside codex's and
+// gemini's. Refresh it from `agent --list-models`.
+func cursorModel() string {
+	return strings.TrimSpace(os.Getenv("E2E_CURSOR_MODEL"))
+}
+
 func (a *CursorCLI) RunPrompt(ctx context.Context, dir string, prompt string, opts ...Option) (Output, error) {
-	cfg := &runConfig{}
+	cfg := &runConfig{Model: cursorModel()}
 	for _, o := range opts {
 		o(cfg)
 	}
 
-	timeout, err := promptTimeout(90*time.Second, cfg)
+	timeout, err := promptTimeout(a, 90*time.Second, cfg)
 	if err != nil {
 		return Output{}, err
 	}
 
-	displayCmd := a.Binary() + " --force --workspace " + dir + " (interactive prompt: " + prompt + ")"
+	displayCmd := a.Binary() + " " + strings.Join(cursorArgs(dir, cfg.Model), " ") +
+		" (interactive prompt: " + prompt + ")"
 
 	// Start an interactive tmux session so all hooks fire
 	// (beforeSubmitPrompt and stop don't fire in headless -p mode).
-	s, err := a.startInteractiveSession(dir)
+	s, err := a.startInteractiveSession(dir, cfg.Model)
 	if err != nil {
 		return Output{Command: displayCmd, ExitCode: -1},
 			fmt.Errorf("start interactive session: %w", err)
@@ -186,7 +207,7 @@ func (a *CursorCLI) RunPrompt(ctx context.Context, dir string, prompt string, op
 }
 
 func (a *CursorCLI) StartSession(ctx context.Context, dir string) (Session, error) {
-	s, err := a.startInteractiveSession(dir)
+	s, err := a.startInteractiveSession(dir, cursorModel())
 	if err != nil {
 		return nil, err
 	}
@@ -206,9 +227,20 @@ func (a *CursorCLI) StartSession(ctx context.Context, dir string) (Session, erro
 	return s, nil
 }
 
+// cursorArgs returns the Cursor CLI arguments shared by the real exec and the
+// displayed command, so an artifact can never name a model the run did not use.
+func cursorArgs(dir, model string) []string {
+	args := []string{"--force", "--workspace", dir}
+	if model != "" {
+		args = append(args, "--model", model)
+	}
+	return args
+}
+
 // startInteractiveSession creates a new tmux session running the Cursor CLI
-// in interactive mode (no -p flag) so all hooks fire.
-func (a *CursorCLI) startInteractiveSession(dir string) (*TmuxSession, error) {
+// in interactive mode (no -p flag) so all hooks fire. An empty model leaves
+// Cursor's own routing in charge; see cursorModel.
+func (a *CursorCLI) startInteractiveSession(dir, model string) (*TmuxSession, error) {
 	// Resolve to absolute path so tmux can find the binary even if its
 	// shell doesn't inherit the test process's PATH (common on CI).
 	bin, err := exec.LookPath(a.Binary())
@@ -237,7 +269,8 @@ func (a *CursorCLI) startInteractiveSession(dir string) (*TmuxSession, error) {
 	envArgs = append(envArgs, "XDG_CONFIG_HOME="+configDir)
 
 	args := append([]string{"env"}, envArgs...)
-	args = append(args, bin, "--force", "--workspace", dir)
+	args = append(args, bin)
+	args = append(args, cursorArgs(dir, model)...)
 
 	name := fmt.Sprintf("cursor-cli-test-%d", time.Now().UnixNano())
 	unset := []string{"CI"}
