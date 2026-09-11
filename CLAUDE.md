@@ -1598,14 +1598,24 @@ caller, so it also covers the exported `New`.
 implementation of that rule: `userdirs.RequireAbsoluteOverride`. A relative
 value resolves against the working directory, so the same environment names a
 different directory in every process — usually one inside whatever repository
-the command ran from. It covers all three trees an override can redirect:
-`pluginParentDir` (`ENTIRE_PLUGIN_DIR`, `XDG_DATA_HOME`, `LOCALAPPDATA` — a
-tree whose `bin` subdirectory `main.go` prepends to `$PATH`), and the config and
-cache directories (`ENTIRE_CONFIG_DIR`, `XDG_CACHE_HOME`), which hold the login
-tokens and the discovery caches. Leaving it to `osroot` (which refuses a
-relative root open) and to `main.go`'s `PATH` restore was not wrong, but each
-backstop answers a question of its own, two layers from where this one is
-decided.
+the command ran from. For Entire's own directories it covers all three trees an
+override can redirect: `pluginParentDir` (`ENTIRE_PLUGIN_DIR`, `XDG_DATA_HOME`,
+`LOCALAPPDATA` — a tree whose `bin` subdirectory `main.go` prepends to `$PATH`),
+and the config and cache directories (`ENTIRE_CONFIG_DIR`, `XDG_CACHE_HOME`),
+which hold the login tokens and the discovery caches. Leaving it to `osroot`
+(which refuses a relative root open) and to `main.go`'s `PATH` restore was not
+wrong, but each backstop answers a question of its own, two layers from where
+this one is decided.
+
+The same rule reaches the agents' own relocation variables through
+`agent.ResolveHome` (`CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `COPILOT_HOME`,
+`FACTORY_HOME_OVERRIDE`, `GEMINI_CLI_HOME`, `PI_CODING_AGENT_DIR`), for a
+different reason: nothing of Entire's is protected there, but Entire has to
+agree with where the agent wrote, and a relative value resolves against the repo
+root inside a hook and against the user's cwd in `session resume`. The list is
+static and `ResolveHome` refuses a name missing from it, so the test harnesses
+that scrub it through `agent.RelocationEnvVars()` cannot fall behind an agent
+that starts honoring a new one.
 
 Rejecting beats falling through to the platform default: for the config
 directory that default is the developer's REAL `~/.config/entire`, so quietly
