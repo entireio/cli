@@ -3,6 +3,7 @@ package binding
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -10,6 +11,7 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/internal/flock"
 	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
+	"github.com/entireio/cli/cmd/entire/cli/osroot"
 	"github.com/entireio/cli/cmd/entire/cli/validation"
 	"github.com/entireio/cli/internal/entireclient/userdirs"
 )
@@ -71,14 +73,51 @@ type SessionMeta struct {
 	LaunchRoot     string
 }
 
-func recordPath(sessionID string) (string, error) {
+func recordName(sessionID string) (string, error) {
 	// Session IDs are already filename-safe per validation.ValidateSessionID,
 	// but the record store is a new attack surface for path traversal —
 	// validate before touching the filesystem.
 	if err := validation.ValidateSessionID(sessionID); err != nil {
 		return "", fmt.Errorf("session record: %w", err)
 	}
-	return filepath.Join(userdirs.Config(), "sessions", sessionID+".json"), nil
+	return sessionID + ".json", nil
+}
+
+func recordPath(sessionID string) (string, error) {
+	name, err := recordName(sessionID)
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(userdirs.Config(), "sessions", name), nil
+}
+
+func sessionsRoot(create bool) (*os.Root, error) {
+	var (
+		configRoot *os.Root
+		err        error
+	)
+	if create {
+		configRoot, err = userdirs.ConfigRoot()
+	} else {
+		configRoot, err = userdirs.ConfigRootForRead()
+	}
+	if err != nil {
+		return nil, fmt.Errorf("open config directory: %w", err)
+	}
+	if create {
+		if err := osroot.MkdirAllNoSymlink(configRoot, "sessions", 0o700); err != nil {
+			return nil, fmt.Errorf("create sessions directory: %w", err)
+		}
+	}
+	sessionsDir, err := filepath.Abs(filepath.Join(userdirs.Config(), "sessions"))
+	if err != nil {
+		return nil, fmt.Errorf("resolve sessions directory: %w", err)
+	}
+	root, err := osroot.SharedChild(configRoot, sessionsDir, "sessions")
+	if err != nil {
+		return nil, fmt.Errorf("open sessions directory: %w", err)
+	}
+	return root, nil
 }
 
 // Evidence is one observation that a session touched a repo. Enabled notes
@@ -197,12 +236,23 @@ func LoadRecord(_ context.Context, sessionID string) (*SessionRecord, error) {
 	if err != nil {
 		return nil, err
 	}
-	return loadRecordFromFile(path)
+	name, err := recordName(sessionID)
+	if err != nil {
+		return nil, err
+	}
+	root, err := sessionsRoot(false)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil //nolint:nilnil // a missing config/sessions directory means the record is absent
+	}
+	if err != nil {
+		return nil, fmt.Errorf("open sessions directory: %w", err)
+	}
+	return loadRecord(root, name, path)
 }
 
-func loadRecordFromFile(path string) (*SessionRecord, error) {
-	data, err := os.ReadFile(path) //nolint:gosec // path is userdirs.Config()-rooted with a validated session ID
-	if os.IsNotExist(err) {
+func loadRecord(root *os.Root, name, path string) (*SessionRecord, error) {
+	data, err := osroot.ReadFileNoFollow(root, name)
+	if errors.Is(err, os.ErrNotExist) {
 		return nil, nil //nolint:nilnil // absence is a normal outcome, distinct from a malformed record
 	}
 	if err != nil {
@@ -233,18 +283,23 @@ func mutateRecord(ctx context.Context, sessionID string, fn func(now time.Time, 
 	if err != nil {
 		return err
 	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		return fmt.Errorf("create sessions directory: %w", err)
+	name, err := recordName(sessionID)
+	if err != nil {
+		return err
+	}
+	root, err := sessionsRoot(true)
+	if err != nil {
+		return err
 	}
 	lockCtx, cancel := context.WithTimeout(ctx, recordLockTimeout)
 	defer cancel()
-	release, err := flock.AcquireContext(lockCtx, path+".lock")
+	release, err := flock.AcquireContextIn(lockCtx, root, name+".lock")
 	if err != nil {
 		return fmt.Errorf("lock session record: %w", err)
 	}
 	defer release()
 
-	rec, err := loadRecordFromFile(path)
+	rec, err := loadRecord(root, name, path)
 	if err != nil {
 		return err
 	}
@@ -265,7 +320,7 @@ func mutateRecord(ctx context.Context, sessionID string, fn func(now time.Time, 
 	if err != nil {
 		return fmt.Errorf("marshal session record: %w", err)
 	}
-	if err := jsonutil.WriteFileAtomic(path, data, 0o600); err != nil {
+	if err := jsonutil.WriteFileAtomicIn(root, name, data, 0o600); err != nil {
 		return fmt.Errorf("write session record: %w", err)
 	}
 	return nil

@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/internal/flock"
+	"github.com/entireio/cli/cmd/entire/cli/osroot"
 	"github.com/entireio/cli/internal/entireclient/userdirs"
 )
 
@@ -105,6 +106,27 @@ func TestRecordBinding_CreatesRecordOnFirstWrite(t *testing.T) {
 		if perm := dirInfo.Mode().Perm(); perm != 0o700 {
 			t.Errorf("sessions dir perm = %o, want 700", perm)
 		}
+	}
+}
+
+func TestRecordBinding_RejectsSymlinkedSessionsDirectory(t *testing.T) {
+	configDir := t.TempDir()
+	t.Setenv("ENTIRE_CONFIG_DIR", configDir)
+	outDir := t.TempDir()
+	if err := os.Symlink(outDir, filepath.Join(configDir, "sessions")); err != nil {
+		t.Fatal(err)
+	}
+
+	err := RecordBinding(context.Background(), "sess-1", testMeta(), testEvidence("b", true))
+	if !errors.Is(err, osroot.ErrSymlinkedPath) {
+		t.Fatalf("RecordBinding error = %v, want ErrSymlinkedPath", err)
+	}
+	entries, err := os.ReadDir(outDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("symlink target received files: %v", entries)
 	}
 }
 
