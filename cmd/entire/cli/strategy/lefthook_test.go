@@ -128,8 +128,20 @@ func TestEnsureLefthookIntegration_RefusesToShadowANonYAMLLocalConfig(t *testing
 	after, err := os.ReadFile(tomlPath)
 	require.NoError(t, err)
 	require.Equal(t, original, after)
-	_, statErr := os.Stat(filepath.Join(dir, "lefthook-local.yml"))
-	require.True(t, os.IsNotExist(statErr), "must not create a shadowing lefthook-local.yml")
+
+	// Declining must leave the repo untouched. Writing the artifacts first and
+	// only then failing left them untracked and un-excluded — and the refusal
+	// is a decision rather than a transient failure, so every turn rewrote
+	// them and none of them ever reached excludeArtifacts.
+	for _, path := range []string{
+		"lefthook-local.yml",
+		entireLefthookConfig,
+		lefthookScriptDir,
+		lefthookScriptPath("pre-push"),
+	} {
+		_, statErr := os.Stat(filepath.Join(dir, path))
+		require.True(t, os.IsNotExist(statErr), "%s must not be created", path)
+	}
 }
 
 // A file Entire did not write is displaced, never destroyed. Corruption
@@ -389,6 +401,13 @@ func TestEnsureLefthookIntegration_RefusesToBuryABackup(t *testing.T) {
 	got, err := os.ReadFile(scriptPath + GitHookBackupSuffix)
 	require.NoError(t, err)
 	require.Equal(t, older, got, "the existing backup must be untouched")
+
+	// This failure stops the install part way through, so whatever it did
+	// manage to write must already be excluded.
+	exclude, err := os.ReadFile(filepath.Join(dir, ".git", "info", "exclude"))
+	require.NoError(t, err)
+	require.Contains(t, string(exclude), lefthookExcludeBlock(),
+		"a partial install must not leave unignored artifacts")
 }
 
 // A visible install that installed nothing must not claim otherwise.
@@ -425,4 +444,30 @@ func captureStdout(t *testing.T, fn func()) string {
 	data, err := io.ReadAll(r)
 	require.NoError(t, err)
 	return string(data)
+}
+
+// A repo whose local config Entire will not write to is a permanent
+// arrangement, not a repair pending: Entire's own hooks deliver there, so
+// reporting "not registered with Lefthook" would call a working repository
+// broken forever with no fix to offer.
+func TestCheckHookDelivery_DeclinedLefthookConfigFallsBackToNativeHooks(t *testing.T) {
+	dir := newLefthookRepo(t, "")
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "lefthook-local.toml"),
+		[]byte("[pre-commit.commands.mine]\nrun = \"true\"\n"), 0o644))
+	ClearHooksDirCache()
+
+	got := CheckHookDelivery(t.Context(), false)
+	require.False(t, got.OK, "no hooks installed yet")
+	require.Empty(t, got.Manager, "Lefthook is not the one delivering")
+	require.Equal(t, "lefthook-local.toml", got.Declined)
+	require.Contains(t, got.Reason, "not installed", "the reason must be the native one")
+
+	_, err := ReinstallGitHooks(t.Context())
+	require.NoError(t, err)
+	ClearHooksDirCache()
+
+	got = CheckHookDelivery(t.Context(), false)
+	require.True(t, got.OK, "Entire's own hooks deliver here")
+	require.Empty(t, got.Manager)
+	require.Equal(t, "lefthook-local.toml", got.Declined, "and the reason why is still reported")
 }
