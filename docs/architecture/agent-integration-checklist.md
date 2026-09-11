@@ -91,6 +91,13 @@ See Guide: [Step 6 - InstallHooks](agent-guide.md)
       path that resolves inside the working tree. A repo-relative command runs
       whatever the checked-out branch contains, on every agent turn, and any repo
       could opt its cloners into it. This is why `local_dev` was removed.
+- [ ] **The hook wrapper is chosen per host**, via the `*ForOS` selectors and one
+      of `agent.UseWindowsProductionHooks(ctx)` (the agent may reach a real sh on
+      Windows) or `agent.HookHostIsWindows()` (it always hands hooks to
+      `cmd.exe` there). An unconditional sh wrapper is cut apart by cmd.exe at
+      exit 0, so hooks silently never fire — droid shipped that way. Decide by
+      reading the agent's runner; the probe only proves a metacharacter-free
+      command runs, so a Git Bash host passes it while still being broken.
 - [ ] **Stale Entire hooks are dropped on every install, not just `--force`**, via
       `agent.DropStaleManagedHooks`. Adding the current hook without removing an
       older one leaves both firing. Two agents got this wrong independently, so
