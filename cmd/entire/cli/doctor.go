@@ -1378,19 +1378,31 @@ func checkSummaryProvider(cmd *cobra.Command) {
 	fmt.Fprintf(w, "  summary_generation.provider is %q in %s, which cannot generate text.\n", name, sourceFile)
 	fmt.Fprintln(w, "  `entire checkpoint explain --generate`, `entire dispatch`, and")
 	fmt.Fprintln(w, "  `entire runner setup` all fail while it is set.")
-	if capable := summaryCapableProviderNames(); len(capable) > 0 {
-		// One runnable command, not a <a|b|c> placeholder: the shell reads < as
-		// a redirect and | as a pipe, so the obvious copy-paste fails. The rest
-		// of the choices go on their own line, where they are data rather than
-		// something the reader is invited to paste.
-		fix := "entire configure --summarize-provider " + capable[0]
+	// The command names an INSTALLED provider, not merely a capable one.
+	// summaryCapableProviderNames is deliberately unfiltered by $PATH — it
+	// answers "what does this field accept" — but a command built from its
+	// first entry is alphabetical, so it says claude-code on a machine with no
+	// claude, and `configure` then rejects it for exactly that. The user this
+	// check fires for is the likeliest to have only one agent installed.
+	installed := listEnabledSummaryProviders(ctx)
+	if len(installed) > 0 {
+		fix := "entire configure --summarize-provider " + string(installed[0].Name)
 		if isLocal {
 			fix += " --local"
 		}
 		fmt.Fprintf(w, "  Fix: %s\n", fix)
-		if len(capable) > 1 {
-			fmt.Fprintf(w, "  Supported: %s\n", strings.Join(capable, ", "))
+	}
+	if capable := summaryCapableProviderNames(); len(capable) > 0 {
+		// The accepted values, listed as data rather than as something to
+		// paste — a <a|b|c> placeholder is not copy-pasteable, since the shell
+		// reads < as a redirect and | as a pipe.
+		line := "  Supported: " + strings.Join(capable, ", ")
+		if len(installed) == 0 {
+			// No Fix line was printed above, so say why rather than leaving the
+			// reader to wonder where the command went.
+			line += " (none installed; install one first)"
 		}
+		fmt.Fprintln(w, line)
 	}
 	fmt.Fprintln(w, "  No `entire` command writes this value, so it was hand-edited or written by an agent.")
 }

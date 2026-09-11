@@ -5,9 +5,11 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
+	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
@@ -26,7 +28,16 @@ func stubSummaryProviderSettings(t *testing.T, configured string) {
 	t.Helper()
 
 	isolateRepoForSummaryProviderCheck(t)
+	stubSummaryCLIAvailable(t, "codex")
 	stubSummaryRegistry(t, []types.AgentName{"codex", "opencode"}, "codex")
+	stubSummaryProviderSettingsOnly(t, configured)
+}
+
+// stubSummaryProviderSettingsOnly points the settings seam at one configured
+// provider without touching the registry, availability, or the repo — for
+// tests that set those up themselves.
+func stubSummaryProviderSettingsOnly(t *testing.T, configured string) {
+	t.Helper()
 
 	originalLoad := loadSummarySettings
 	t.Cleanup(func() { loadSummarySettings = originalLoad })
@@ -52,6 +63,17 @@ func isolateRepoForSummaryProviderCheck(t *testing.T) string {
 	}
 	t.Chdir(tmpDir)
 	return tmpDir
+}
+
+// stubSummaryCLIAvailable reports only the named agents as installed.
+func stubSummaryCLIAvailable(t *testing.T, available ...types.AgentName) {
+	t.Helper()
+
+	original := isSummaryCLIAvailable
+	t.Cleanup(func() { isSummaryCLIAvailable = original })
+	isSummaryCLIAvailable = func(name types.AgentName) bool {
+		return slices.Contains(available, name)
+	}
 }
 
 func runCheckSummaryProvider(t *testing.T, configured string) string {
@@ -198,6 +220,10 @@ func TestCheckSummaryProvider_RemedyTargetsTheLayerHoldingTheValue(t *testing.T)
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			tmpDir := isolateRepoForSummaryProviderCheck(t)
+			// Pin availability: the Fix line names an INSTALLED provider, so
+			// without this the assertions depend on which agents the developer
+			// happens to have on $PATH.
+			stubSummaryCLIAvailable(t, agent.AgentNameCodex)
 			testutil.WriteFile(t, tmpDir, settings.EntireSettingsFile, tc.project)
 			if tc.local != "" {
 				testutil.WriteFile(t, tmpDir, settings.EntireSettingsLocalFile, tc.local)
@@ -229,4 +255,53 @@ func TestCheckSummaryProvider_RemedyTargetsTheLayerHoldingTheValue(t *testing.T)
 			}
 		})
 	}
+}
+
+// The Fix command must name a provider that is actually installed. Building it
+// from summaryCapableProviderNames()[0] picks alphabetically — claude-code — so
+// on a machine without claude the suggested command fails `configure`'s own
+// PATH check. An opencode-only user is both the likeliest to see this check and
+// the likeliest to have no claude.
+func TestCheckSummaryProvider_FixNamesAnInstalledProvider(t *testing.T) {
+	// Cannot use t.Parallel(): t.Chdir and package-level resolution seams.
+	t.Run("prefers the installed provider over the alphabetical one", func(t *testing.T) {
+		isolateRepoForSummaryProviderCheck(t)
+		stubSummaryRegistry(t, []types.AgentName{"claude-code", "codex", "opencode"}, "claude-code", "codex")
+		stubSummaryCLIAvailable(t, agent.AgentNameCodex)
+		stubSummaryProviderSettingsOnly(t, "opencode")
+
+		cmd, out := newTestCmd(t)
+		checkSummaryProvider(cmd)
+		got := out.String()
+
+		if !strings.Contains(got, "Fix: entire configure --summarize-provider codex") {
+			t.Errorf("Fix does not name the installed provider:\n%s", got)
+		}
+		if strings.Contains(got, "--summarize-provider claude-code") {
+			t.Errorf("Fix names claude-code, which is not installed:\n%s", got)
+		}
+		// The accepted values are still all of them, installed or not.
+		if !strings.Contains(got, "Supported: claude-code, codex") {
+			t.Errorf("Supported list should carry every accepted value:\n%s", got)
+		}
+	})
+
+	t.Run("says so when nothing capable is installed", func(t *testing.T) {
+		isolateRepoForSummaryProviderCheck(t)
+		stubSummaryRegistry(t, []types.AgentName{"claude-code", "codex", "opencode"}, "claude-code", "codex")
+		stubSummaryCLIAvailable(t) // nothing on PATH
+		stubSummaryProviderSettingsOnly(t, "opencode")
+
+		cmd, out := newTestCmd(t)
+		checkSummaryProvider(cmd)
+		got := out.String()
+
+		// A command that cannot work is worse than no command.
+		if strings.Contains(got, "Fix:") {
+			t.Errorf("suggested a command with no installed provider:\n%s", got)
+		}
+		if !strings.Contains(got, "none installed; install one first") {
+			t.Errorf("does not explain the missing Fix line:\n%s", got)
+		}
+	})
 }
