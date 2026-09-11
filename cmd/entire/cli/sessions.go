@@ -156,8 +156,8 @@ func writeWholeDocumentJSONTranscript(ctx context.Context, w io.Writer, r io.Rea
 
 func newSessionsCmd() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:     "session",
-		Aliases: []string{"sessions"},
+		Use:     cmdSession,
+		Aliases: []string{cmdSessionsAlias},
 		Short:   "Manage agent sessions tracked by Entire",
 		Long: `View and manage agent sessions tracked by Entire.
 
@@ -325,7 +325,7 @@ func newListCmd() *cobra.Command {
 	var jsonFlag bool
 
 	cmd := &cobra.Command{
-		Use:   "list",
+		Use:   cmdList,
 		Short: "List all sessions",
 		Long: `List all sessions tracked by Entire, including ended sessions.
 

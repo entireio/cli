@@ -108,8 +108,15 @@ type Event struct {
 	// ToolUseID identifies the tool invocation (for SubagentStart/SubagentEnd events).
 	ToolUseID string
 
+	// TurnID identifies the agent turn that produced the event.
+	TurnID string
+
 	// SubagentID identifies the subagent instance (for SubagentEnd events).
 	SubagentID string
+
+	// ProvisionalSubagentStop is true when a subagent-stop event may arrive
+	// before the root rollout has reached its final state.
+	ProvisionalSubagentStop bool
 
 	// Final is true only for events that represent true completion of a
 	// subagent (for example Claude Code or Copilot CLI's SubagentStop), never
@@ -261,5 +268,5 @@ func ReadHookInputRawLimited(stdin io.Reader, limit int64) (json.RawMessage, err
 // instead of blocking on a read that will never complete (issue #1398).
 func StdinLooksInteractive(r io.Reader) bool {
 	f, ok := r.(*os.File)
-	return ok && term.IsTerminal(int(f.Fd())) //nolint:gosec // G115: uintptr->int is safe for fd
+	return ok && term.IsTerminal(int(f.Fd()))
 }

@@ -165,7 +165,7 @@ func filesOverlapWithContent(ctx context.Context, repo *git.Repository, shadowBr
 		}
 
 		// Compare by hash (blob hash) - exact content match required for new files
-		if headFile.Hash == shadowFile.Hash {
+		if headFile.Hash.Equal(shadowFile.Hash) {
 			logging.Debug(logCtx, "filesOverlapWithContent: new file content match found",
 				slog.String("file", filePath),
 				slog.String("hash", headFile.Hash.String()),
@@ -282,7 +282,7 @@ func stagedFilesOverlapWithContent(ctx context.Context, repo *git.Repository, sh
 		}
 
 		// Compare hashes - exact match means file is unchanged
-		if stagedHash == shadowFile.Hash {
+		if stagedHash.Equal(shadowFile.Hash) {
 			logging.Debug(logCtx, "stagedFilesOverlapWithContent: new file content match found",
 				slog.String("file", stagedPath),
 				slog.String("hash", stagedHash.String()),
@@ -494,7 +494,7 @@ func filesWithRemainingAgentChanges(
 			continue
 		}
 
-		if commitFile.Hash == shadowFile.Hash {
+		if commitFile.Hash.Equal(shadowFile.Hash) {
 			logging.Debug(logCtx, "filesWithRemainingAgentChanges: content fully committed",
 				slog.String("file", filePath),
 			)
@@ -533,7 +533,13 @@ func filesWithRemainingAgentChanges(
 	for _, candidate := range candidates {
 		workingTreeClean := false
 		if worktreeHash, ok := worktreeHashes[candidate.path]; ok {
-			workingTreeClean = worktreeHash == candidate.commitHash
+			// Equal, not ==: plumbing.Hash carries an object-format field
+			// alongside its bytes, and `==` compares that field too. FromHex
+			// leaves it unset for a 40-char hash while stamping SHA256 on a
+			// 64-char one, so `==` only works while the tree decoder happens to
+			// agree. If it ever stamped "sha1", every candidate would read dirty
+			// and the phantom carry-forward would return with no test failing.
+			workingTreeClean = worktreeHash.Equal(candidate.commitHash)
 		} else if worktreeRoot != "" {
 			workingTreeClean = workingTreeMatchesBlob(worktreeRoot, candidate.path, candidate.commitMode, candidate.commitHash)
 		}

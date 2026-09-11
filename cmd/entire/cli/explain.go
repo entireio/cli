@@ -1037,7 +1037,7 @@ func generateCheckpointSummary(ctx context.Context, w, errW io.Writer, store che
 	if content.Metadata.Summary != nil && !force {
 		return renderExplainFailure(errW, "Summary already exists", []explainRow{
 			{Label: "id", Value: checkpointID.String()},
-			{Label: "try", Value: fmt.Sprintf("entire checkpoint explain --generate --force %s", checkpointID)},
+			{Label: explainLabelTry, Value: fmt.Sprintf("entire checkpoint explain --generate --force %s", checkpointID)},
 		}, fmt.Errorf("checkpoint %s already has a summary", checkpointID))
 	}
 
@@ -1257,28 +1257,28 @@ func formatCheckpointSummaryError(err error, attempt *summaryAttempt) (string, [
 		case claudecode.ClaudeErrorAuth:
 			label := "Claude authentication failed"
 			rows := []explainRow{
-				{Label: "try", Value: "run `claude login` and retry"},
+				{Label: explainLabelTry, Value: "run `claude login` and retry"},
 			}
 			if claudeErr.Message != "" {
-				rows = append([]explainRow{{Label: "message", Value: claudeErr.Message}}, rows...)
+				rows = append([]explainRow{{Label: explainLabelMessage, Value: claudeErr.Message}}, rows...)
 			}
 			return label, rows, fmt.Errorf("Claude authentication failed%s", formatMessageSuffix(claudeErr.Message)) //nolint:staticcheck // ST1005: Claude is a proper noun
 		case claudecode.ClaudeErrorRateLimit:
 			label := "Claude rejected the summary request due to rate limits or quota"
 			rows := []explainRow{
-				{Label: "try", Value: "wait and retry"},
+				{Label: explainLabelTry, Value: "wait and retry"},
 			}
 			if claudeErr.Message != "" {
-				rows = append([]explainRow{{Label: "message", Value: claudeErr.Message}}, rows...)
+				rows = append([]explainRow{{Label: explainLabelMessage, Value: claudeErr.Message}}, rows...)
 			}
 			return label, rows, fmt.Errorf("Claude rejected the summary request due to rate limits or quota%s", formatMessageSuffix(claudeErr.Message)) //nolint:staticcheck // ST1005
 		case claudecode.ClaudeErrorConfig:
 			label := "Claude rejected the summary request"
 			rows := []explainRow{
-				{Label: "try", Value: "check your Claude CLI config and selected model"},
+				{Label: explainLabelTry, Value: "check your Claude CLI config and selected model"},
 			}
 			if claudeErr.Message != "" {
-				rows = append([]explainRow{{Label: "message", Value: claudeErr.Message}}, rows...)
+				rows = append([]explainRow{{Label: explainLabelMessage, Value: claudeErr.Message}}, rows...)
 			}
 			return label, rows, fmt.Errorf("Claude rejected the summary request%s", formatMessageSuffix(claudeErr.Message)) //nolint:staticcheck // ST1005
 		case claudecode.ClaudeErrorCLIMissing:
@@ -1356,33 +1356,33 @@ func timeoutDiagnostic(_ error, attempt *summaryAttempt) (string, []explainRow) 
 		case attempt.phasesReached[agent.PhaseDone]:
 			label = "model finished but the result was not delivered in time"
 			rows = []explainRow{
-				{Label: "cause", Value: "the deadline fired while the finished result was being read"},
-				{Label: "try", Value: "raise --summary-timeout-seconds and retry"},
+				{Label: explainLabelCause, Value: "the deadline fired while the finished result was being read"},
+				{Label: explainLabelTry, Value: "raise --summary-timeout-seconds and retry"},
 			}
 		case attempt.phasesReached[agent.PhaseGenerating], attempt.phasesReached[agent.PhaseFirstToken]:
 			label = "model responded but did not finish"
 			rows = []explainRow{
-				{Label: "cause", Value: "transcript may be too large for the chosen cap, or model is slow"},
-				{Label: "try", Value: "raise --summary-timeout-seconds or pick a faster model"},
+				{Label: explainLabelCause, Value: "transcript may be too large for the chosen cap, or model is slow"},
+				{Label: explainLabelTry, Value: "raise --summary-timeout-seconds or pick a faster model"},
 			}
 		case attempt.phasesReached[agent.PhaseConnecting]:
 			label = "provider sent request but received no response"
 			rows = []explainRow{
-				{Label: "cause", Value: "network/firewall, provider API degraded, or auth check stuck"},
-				{Label: "try", Value: "check connectivity to the provider, then retry"},
+				{Label: explainLabelCause, Value: "network/firewall, provider API degraded, or auth check stuck"},
+				{Label: explainLabelTry, Value: "check connectivity to the provider, then retry"},
 			}
 		default:
 			label = "provider never sent its request"
 			rows = []explainRow{
-				{Label: "cause", Value: "the provider CLI may be stalled before subprocess startup"},
-				{Label: "try", Value: tryRunCLI},
+				{Label: explainLabelCause, Value: "the provider CLI may be stalled before subprocess startup"},
+				{Label: explainLabelTry, Value: tryRunCLI},
 			}
 		}
 		// attempt.streaming is set eagerly when a streaming-capable provider
 		// is selected, so a provider that stalls before its first event lands
 		// here — surface the captured stderr rather than dropping it.
 		if stderr != "" {
-			rows = append(rows, explainRow{Label: "stderr", Value: stderr})
+			rows = append(rows, explainRow{Label: explainLabelStderr, Value: stderr})
 		}
 		return prefix + label, rows
 	}
@@ -1391,21 +1391,21 @@ func timeoutDiagnostic(_ error, attempt *summaryAttempt) (string, []explainRow) 
 
 	if stdoutBytes == 0 {
 		rows := []explainRow{
-			{Label: "cause", Value: "provider CLI produced no output (likely network/auth/CLI path issue)"},
-			{Label: "try", Value: tryRunCLI},
+			{Label: explainLabelCause, Value: "provider CLI produced no output (likely network/auth/CLI path issue)"},
+			{Label: explainLabelTry, Value: tryRunCLI},
 		}
 		if stderr != "" {
-			rows = append(rows, explainRow{Label: "stderr", Value: stderr})
+			rows = append(rows, explainRow{Label: explainLabelStderr, Value: stderr})
 		}
 		return prefix + "provider produced no output", rows
 	}
 
 	rows := []explainRow{
-		{Label: "cause", Value: "provider was generating output but did not finish before cap"},
-		{Label: "try", Value: "raise --summary-timeout-seconds"},
+		{Label: explainLabelCause, Value: "provider was generating output but did not finish before cap"},
+		{Label: explainLabelTry, Value: "raise --summary-timeout-seconds"},
 	}
 	if stderr != "" {
-		rows = append(rows, explainRow{Label: "stderr", Value: stderr})
+		rows = append(rows, explainRow{Label: explainLabelStderr, Value: stderr})
 	}
 	return prefix + "provider was generating output when killed", rows
 }
@@ -1728,7 +1728,7 @@ func explainTemporaryCheckpoint(ctx context.Context, w, errW io.Writer, repo *gi
 
 	label := fmt.Sprintf("Checkpoint %s [temporary]", shortID)
 	rows := []explainRow{
-		{Label: "session", Value: tc.SessionID},
+		{Label: explainLabelSession, Value: tc.SessionID},
 		{Label: "created", Value: tc.Timestamp.Format("2006-01-02 15:04:05")},
 	}
 	sb.WriteString(styles.renderIdentity(label, "", rows))
@@ -3083,7 +3083,7 @@ func outputWithPager(w io.Writer, content string) {
 	// Check if we're writing to stdout and it's a terminal
 	if f, ok := w.(*os.File); ok && f == os.Stdout && interactive.IsTerminalWriter(w) {
 		// Get terminal height
-		_, height, err := term.GetSize(int(f.Fd())) //nolint:gosec // G115: same as above
+		_, height, err := term.GetSize(int(f.Fd()))
 		if err != nil {
 			height = 24 // Default fallback
 		}
@@ -3153,9 +3153,9 @@ func formatBranchCheckpoints(w io.Writer, branchName string, points []strategy.P
 		{Label: "branch", Value: branchName},
 	}
 	if sessionFilter != "" {
-		branchRows = append(branchRows, explainRow{Label: "session", Value: sessionFilter})
+		branchRows = append(branchRows, explainRow{Label: explainLabelSession, Value: sessionFilter})
 	}
-	branchRows = append(branchRows, explainRow{Label: "checkpoints", Value: strconv.Itoa(len(groups))})
+	branchRows = append(branchRows, explainRow{Label: explainLabelCheckpoints, Value: strconv.Itoa(len(groups))})
 
 	sb.WriteString(styles.metadataRows(branchRows))
 	sb.WriteString("\n")

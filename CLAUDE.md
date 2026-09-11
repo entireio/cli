@@ -80,8 +80,17 @@ the commands are always runnable in every build.
 - `org`: control-plane organization management — `create`, `list`, `get`, `delete`
 - `project`: control-plane project management — `create`, `list`, `get`, `delete`
 - `repo`: control-plane repository lifecycle — `create`, `list`, `get`, `delete`,
-  `clone`, plus the `mirror` and `visibility` subtrees. Git content operations
-  (log, diff, …) are intentionally out of scope. The `mirror` subtree is
+  `clone`, plus the `mirror`, `visibility` and `protection` subtrees. Git
+  content operations (log, diff, …) are intentionally out of scope.
+  `protection` (`list`, `add [--server-side-merge-only]`, `remove`) edits a
+  native repo's branch-protection rules through core's
+  `/repos/{repoId}/branch-protection` resource: `add` and `remove` are one
+  PATCH each (`addRules` upserts by ref), never a read-modify-write of the
+  list. `add` sends `serverSideMergeOnly` only when the flag was given: the
+  server keeps an existing rule's level when it is absent, so re-adding a
+  branch without the flag never lowers it and `--server-side-merge-only=false`
+  is the explicit way down. A short branch name expands to `refs/heads/`,
+  `HEAD` and `refs/...` pass through. The `mirror` subtree is
   server-side (`create`, `list`, `get`, `remove`, `collaborators`) with one
   exception: `mirror use` repoints the *current clone's* git remote at a mirror
   (local git config only — it creates nothing server-side). Interactively it
@@ -234,7 +243,7 @@ named `<noun>_group.go` and `<noun>_<verb>.go` respectively.
 
 ## Tech Stack
 
-- Language: Go 1.26.x
+- Language: Go 1.27.x (`go.mod` pins the 1.27.1 minimum)
 - Build tool: mise, go modules
 - Linting: golangci-lint
 

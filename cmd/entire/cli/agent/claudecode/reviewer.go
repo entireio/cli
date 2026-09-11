@@ -94,7 +94,7 @@ func buildReviewCmd(ctx context.Context, cfg reviewtypes.RunConfig, settingsPath
 	promptCfg := cfg
 	promptCfg.Skills = staged.apply(cfg.Skills)
 	prompt := review.ComposeReviewPrompt(promptCfg)
-	args := []string{"-p", prompt, "--output-format", "stream-json", "--verbose"}
+	args := []string{"-p", prompt, flagOutputFormat, "stream-json", "--verbose"}
 	args = append(args, claudeReviewFlags(settingsPath, staged.pluginDir)...)
 	args = review.AppendModelFlag(args, cfg.Model)
 	cmd := exec.CommandContext(ctx, "claude", args...)
