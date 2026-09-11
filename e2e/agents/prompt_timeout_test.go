@@ -32,6 +32,7 @@ func TestPromptTimeoutPrecedence(t *testing.T) {
 		env        string
 		mult       float64 // 0 means "no scaler", i.e. the nil branch
 		perTest    time.Duration
+		exact      bool // perTest arrived via withExactPromptTimeout
 		want       time.Duration
 		wantErrSub string
 	}{
@@ -47,6 +48,11 @@ func TestPromptTimeoutPrecedence(t *testing.T) {
 		{name: "per-test scales up for a slow runner", agentDflt: 60 * time.Second, mult: 2.5, perTest: 2 * time.Minute, want: 5 * time.Minute},
 		{name: "per-test is untouched at 1x", agentDflt: 60 * time.Second, mult: 1.0, perTest: 2 * time.Minute, want: 2 * time.Minute},
 		{name: "per-test never scales down for a fast runner", agentDflt: 60 * time.Second, mult: 0.5, perTest: 2 * time.Minute, want: 2 * time.Minute},
+
+		// A harness deadline was written by one runner for that runner, so
+		// scaling it by that runner's own multiplier double-counts.
+		{name: "exact timeout is not scaled", agentDflt: 60 * time.Second, mult: 2.5, perTest: 90 * time.Second, exact: true, want: 90 * time.Second},
+		{name: "exact timeout still beats env", agentDflt: 60 * time.Second, mult: 2.0, env: "4m", perTest: 30 * time.Second, exact: true, want: 30 * time.Second},
 
 		// The other two inputs stay verbatim: a runner default is already
 		// agent-specific, and E2E_TIMEOUT is typed by a human for one run.
@@ -82,7 +88,17 @@ func TestPromptTimeoutPrecedence(t *testing.T) {
 			if tc.mult != 0 {
 				scaler = stubScaler(tc.mult)
 			}
-			got, err := promptTimeout(scaler, tc.agentDflt, &runConfig{PromptTimeout: tc.perTest})
+			cfg := &runConfig{}
+			if tc.perTest > 0 {
+				// Through the options, so the test cannot disagree with them
+				// about which one sets promptTimeoutExact.
+				opt := WithPromptTimeout(tc.perTest)
+				if tc.exact {
+					opt = withExactPromptTimeout(tc.perTest)
+				}
+				opt(cfg)
+			}
+			got, err := promptTimeout(scaler, tc.agentDflt, cfg)
 
 			if tc.wantErrSub != "" {
 				if err == nil {
@@ -267,6 +283,63 @@ func TestEveryRunPromptResolvesThroughPromptTimeout(t *testing.T) {
 	// this guard could stop guarding.
 	if checked < 5 {
 		t.Fatalf("found only %d RunPrompt implementations; the AST walk is broken", checked)
+	}
+}
+
+// TestHarnessDeadlinesAreNotScaled fails the build when a non-test file in this
+// package bounds a prompt with WithPromptTimeout instead of
+// withExactPromptTimeout.
+//
+// The exported option scales by the runner's TimeoutMultiplier, which is right
+// for a duration written in a test file and wrong for one the harness wrote
+// about itself. opencode's Bootstrap warmup was exactly that: it passed
+// WithPromptTimeout(openCodeWarmupBudget), so scaling turned a documented
+// 90s/30s/30s retry sequence into 180s/60s/60s and broke the four-minute bound
+// those constants exist to enforce. Nothing failed — CI just blocked for longer
+// on the path the warmup exists to survive, which is why this is a source guard
+// and not an assertion.
+func TestHarnessDeadlinesAreNotScaled(t *testing.T) {
+	t.Parallel()
+
+	entries, err := os.ReadDir(".")
+	if err != nil {
+		t.Fatalf("read package dir: %v", err)
+	}
+
+	fset := token.NewFileSet()
+	var scanned int
+	for _, entry := range entries {
+		name := entry.Name()
+		if entry.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		// agent.go declares both options; a mention there is the declaration.
+		if name == "agent.go" {
+			continue
+		}
+		file, err := parser.ParseFile(fset, name, nil, 0)
+		if err != nil {
+			t.Fatalf("parse %s: %v", name, err)
+		}
+		scanned++
+		ast.Inspect(file, func(n ast.Node) bool {
+			call, ok := n.(*ast.CallExpr)
+			if !ok {
+				return true
+			}
+			if id, ok := call.Fun.(*ast.Ident); ok && id.Name == "WithPromptTimeout" {
+				t.Errorf("%s:%d: harness code calls WithPromptTimeout, which scales the "+
+					"budget by the runner's TimeoutMultiplier.\nA deadline this package "+
+					"wrote about itself already accounts for how slow that runner is, so "+
+					"scaling double-counts it. Use withExactPromptTimeout.",
+					name, fset.Position(call.Pos()).Line)
+			}
+			return true
+		})
+	}
+
+	if scanned < 5 {
+		t.Fatalf("scanned only %d files; the walk is broken", scanned)
 	}
 }
 
