@@ -85,6 +85,15 @@ func TestMain(m *testing.M) {
 		}
 	}
 
+	// Same reason for Claude Code's relocated config dir: tests steer Claude's
+	// home through HOME and ENTIRE_TEST_CLAUDE_PROJECT_DIR in the child env, and
+	// an inherited CLAUDE_CONFIG_DIR would outrank HOME in the base-dir fallback.
+	if err := os.Unsetenv("CLAUDE_CONFIG_DIR"); err != nil {
+		fmt.Fprintf(os.Stderr, "failed to unset CLAUDE_CONFIG_DIR: %v\n", err)
+		os.RemoveAll(tmpDir)
+		os.Exit(1)
+	}
+
 	moduleRoot := findModuleRoot()
 	buildCmd := exec.CommandContext(context.Background(), "go", "build", "-o", testBinaryPath, ".")
 	buildCmd.Dir = filepath.Join(moduleRoot, "cmd", "entire")

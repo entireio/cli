@@ -38,6 +38,11 @@ func TestMain(m *testing.M) {
 	os.Setenv("ENTIRE_CONFIG_DIR", filepath.Join(isolationDir, "config"))
 	os.Setenv("XDG_CACHE_HOME", filepath.Join(isolationDir, "cache"))
 
+	// Tests steer Claude Code's home through HOME and
+	// ENTIRE_TEST_CLAUDE_PROJECT_DIR; a developer's relocated config dir would
+	// outrank HOME in every base-dir fallback walk, in-process and in children.
+	os.Unsetenv("CLAUDE_CONFIG_DIR")
+
 	// Register a default ConfigSource so tests that call ConfigScoped
 	// (directly or indirectly via Commit/CreateTag) don't fail with
 	// "no config loader registered".

@@ -286,3 +286,67 @@ func TestGenerateText_StderrAuthFallback(t *testing.T) {
 		t.Fatalf("Kind = %v; want %v", ce.Kind, ClaudeErrorAuth)
 	}
 }
+
+func TestGetSessionDir_HonorsClaudeConfigDir(t *testing.T) {
+	configDir := t.TempDir()
+	t.Setenv("ENTIRE_TEST_CLAUDE_PROJECT_DIR", "")
+	t.Setenv("CLAUDE_CONFIG_DIR", configDir)
+
+	dir, err := (&ClaudeCodeAgent{}).GetSessionDir("/Users/foo/repo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := filepath.Join(configDir, "projects", SanitizePathForClaude("/Users/foo/repo"))
+	if dir != want {
+		t.Errorf("GetSessionDir = %q, want %q", dir, want)
+	}
+}
+
+func TestGetSessionBaseDir_HonorsClaudeConfigDir(t *testing.T) {
+	configDir := t.TempDir()
+	t.Setenv("CLAUDE_CONFIG_DIR", configDir)
+
+	base, err := (&ClaudeCodeAgent{}).GetSessionBaseDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := filepath.Join(configDir, "projects"); base != want {
+		t.Errorf("GetSessionBaseDir = %q, want %q", base, want)
+	}
+}
+
+func TestResolveClaudeConfigDir(t *testing.T) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	abs := t.TempDir()
+	tests := []struct {
+		name    string
+		env     string
+		want    string
+		wantErr bool
+	}{
+		{name: "unset falls back to ~/.claude", env: "", want: filepath.Join(home, ".claude")},
+		{name: "absolute override wins", env: abs, want: abs},
+		{name: "relative override is refused", env: filepath.Join("relative", "cfg"), wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("CLAUDE_CONFIG_DIR", tt.env)
+			got, err := resolveClaudeConfigDir()
+			if tt.wantErr {
+				if err == nil || !strings.Contains(err.Error(), "CLAUDE_CONFIG_DIR") {
+					t.Fatalf("resolveClaudeConfigDir() = %q, %v; want an error naming CLAUDE_CONFIG_DIR", got, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got != tt.want {
+				t.Errorf("resolveClaudeConfigDir() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
