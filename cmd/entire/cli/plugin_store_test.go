@@ -23,10 +23,8 @@ func withPluginDir(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
 	t.Setenv(pluginEnvPluginDir, dir)
-	// pluginRoot memoizes an *os.Root over dir for the life of the process. On
-	// Windows an open directory handle blocks the directory's removal, so
-	// without releasing it t.TempDir's cleanup fails every plugin test with
-	// "being used by another process" even when the assertions passed.
+	// Release the memoized root: an open directory handle blocks TempDir's
+	// cleanup on Windows.
 	t.Cleanup(func() { osroot.Forget(dir) })
 	return dir
 }
@@ -151,8 +149,6 @@ func TestInstallPluginFromPath_SymlinksAndLists(t *testing.T) { //nolint:paralle
 	if p.Name != testPluginName {
 		t.Errorf("Name = %q, want %s", p.Name, testPluginName)
 	}
-	// Unix symlinks a local-dev source; Windows copies it, never links (see
-	// materializeManagedEntry). Both must be readable through the entry.
 	if wantSymlink := runtime.GOOS != windowsGOOS; p.Symlink != wantSymlink {
 		t.Errorf("Symlink = %v, want %v; got %+v", p.Symlink, wantSymlink, p)
 	}
@@ -342,10 +338,8 @@ func materializeEntryFixture(t *testing.T, base, srcRel string, body []byte) (st
 	return src, srcInfo, root
 }
 
-// assertMaterializedEntry checks the invariants every platform shares: the
-// entry exists, and reading THROUGH it yields the source bytes. That read is
-// the assertion that was missing on Windows — an entry Lstat reports but the
-// kernel cannot follow passes every other check.
+// assertMaterializedEntry reads THROUGH the entry — the check an unfollowable
+// Windows symlink fails — and returns its Lstat.
 func assertMaterializedEntry(t *testing.T, dest string, body []byte) os.FileInfo {
 	t.Helper()
 	got, err := os.ReadFile(dest)
@@ -362,13 +356,8 @@ func assertMaterializedEntry(t *testing.T, dest string, body []byte) os.FileInfo
 	return info
 }
 
-// A source inside the managed tree is every remote install's shape
-// (pkg/<name>/<binary>). Unix symlinks it, keeping the dev-loop property;
-// Windows hardlinks it, because os.Root.Symlink there writes an absolute
-// target that Windows cannot follow (see materializeManagedEntry). Either way
-// the entry must be readable through, and on Windows it must not be a reparse
-// point — that is the regression `entire graph` shipped, and it was hidden by
-// this test skipping on Windows.
+// An in-tree source (every remote install): Unix symlinks, Windows hardlinks
+// and must never produce a symlink (see plugin_store_windows.go).
 func TestMaterializeManagedEntry_SourceInsideTree(t *testing.T) {
 	t.Parallel()
 	base := t.TempDir()
@@ -400,8 +389,7 @@ func TestMaterializeManagedEntry_SourceInsideTree(t *testing.T) {
 	}
 }
 
-// A source outside the managed tree is the local-dev install. Unix still
-// symlinks; Windows has no root-relative name for it and must copy.
+// An out-of-tree source (local-dev install): Unix symlinks, Windows copies.
 func TestMaterializeManagedEntry_SourceOutsideTree(t *testing.T) {
 	t.Parallel()
 	body := []byte("#!/bin/sh\nexit 0\n")
@@ -438,9 +426,6 @@ func TestMaterializeManagedEntry_SourceOutsideTree(t *testing.T) {
 	}
 }
 
-// managedTreeName is a coordinate conversion, not a containment check: it
-// answers "what is this path called inside the root", and says no for anything
-// the root cannot name.
 func TestManagedTreeName(t *testing.T) {
 	t.Parallel()
 	base := t.TempDir()

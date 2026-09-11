@@ -113,10 +113,8 @@ func TestInstallPluginFromRepo_EndToEnd(t *testing.T) { //nolint:paralleltest //
 	if got := installedPayload(t); got != "payload-0.2.0" {
 		t.Errorf("installed payload = %q, want payload-0.2.0", got)
 	}
-	// The bin/ entry is what the dispatcher execs. It must hash to the binary
-	// the manifest recorded, and on Windows it must not be a symlink: an
-	// os.Root.Symlink with an absolute target cannot be followed there, which
-	// is how `entire graph` came to install a 0-byte entry it could not run.
+	// The bin/ entry is what the dispatcher execs: it must hash to the recorded
+	// binary and, on Windows, must not be a symlink (see plugin_store_windows.go).
 	if entryDigest, err := fileSHA256(res.Installed.Path); err != nil {
 		t.Errorf("hash bin entry: %v", err)
 	} else if entryDigest != res.Manifest.BinarySHA256 {

@@ -362,10 +362,9 @@ func TestCheckManagedPluginRunnable(t *testing.T) {
 		{name: "empty file", path: empty, wantErr: "it is an empty file", wantReinstallFix: true},
 	}
 	if runtime.GOOS == windowsGOOS {
-		// The entry earlier Windows builds left behind: an absolute symlink
-		// created through os.Root.Symlink, which stores the target without the
-		// `\??\` prefix and so cannot be followed. Its target exists, so this is
-		// not the dangling case, yet a reinstall is what fixes it.
+		// The unfollowable absolute os.Root.Symlink earlier Windows builds left
+		// behind (see plugin_store_windows.go). Its target exists, so it is not
+		// the dangling case.
 		root, err := os.OpenRoot(dir)
 		if err != nil {
 			t.Fatal(err)

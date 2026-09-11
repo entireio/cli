@@ -515,45 +515,15 @@ func makeInstallTmpName() (string, error) {
 	return pluginBinName(".install-" + hex.EncodeToString(b[:])), nil
 }
 
-// materializeManagedEntry creates dest as a reference to src, falling back
-// through symlink → hardlink → copy in that order on Unix, and hardlink → copy
-// on Windows.
-//
-// Symlink-first preserves the dev-loop property that rebuilding the source
-// is immediately reflected in the managed entry. destName is a name inside
-// root; src is an absolute path, because a local-dev install's source is the
-// user's own file outside the managed tree.
-//
-// Windows never gets a symlink, for two reasons that together cover every
-// user. os.Root.Symlink there does not call CreateSymbolicLinkW: it sets the
-// reparse point itself and stores the target string verbatim, without the
-// `\??\` NT-namespace prefix that CreateSymbolicLinkW adds to an absolute
-// target (Go 1.27, internal/syscall/windows.symlinkat). The kernel then reads
-// `C:\...` as an NT object path, and following the link — Stat, open, exec —
-// fails with ERROR_INVALID_NAME ("The filename, directory name, or volume
-// label syntax is incorrect"). Go also re-enables SeCreateSymbolicLinkPrivilege
-// around the call, so in an elevated shell the link is CREATED rather than
-// refused: `entire graph` installed a 0-byte reparse point and then could not
-// exec it. In a non-elevated shell without Developer Mode the same call fails
-// outright. Unfollowable when it works and an error when it does not, so the
-// branch is skipped instead of attempted.
-//
-// The hardlink needs src as a name inside root: os.Root.Link resolves BOTH
-// operands in the root and rejects an absolute oldname as an escape, so the
-// earlier call that passed the absolute path could never succeed on any
-// platform. Every remote install's source is pkg/<name>/<binary> inside the
-// tree, so it links; a local-dev source outside the tree falls through to the
-// copy, which is what a hardlink across volumes would have done anyway.
-//
-// On a successful copy the file mode of the source is preserved so the
-// executable bit survives.
+// materializeManagedEntry creates destName (a name inside root) as a reference
+// to src (an absolute path): symlink where the platform supports it
+// (symlinkManagedEntry), then hardlink when src is inside the managed tree,
+// then copy. os.Root.Link takes root-relative names, which is why the hardlink
+// needs managedTreeName and only applies to in-tree sources (every remote
+// install); a local-dev source outside the tree is copied.
 func materializeManagedEntry(root *os.Root, src, destName string, srcInfo os.FileInfo) error {
-	if runtime.GOOS != windowsGOOS {
-		// Symlink takes src as the target, not as something to resolve inside
-		// the root; the target is recorded verbatim.
-		if err := root.Symlink(src, destName); err == nil {
-			return nil
-		}
+	if symlinkManagedEntry(root, src, destName) {
+		return nil
 	}
 	if srcName, ok := managedTreeName(root, src); ok {
 		if err := root.Link(srcName, destName); err == nil {
@@ -563,16 +533,8 @@ func materializeManagedEntry(root *os.Root, src, destName string, srcInfo os.Fil
 	return copyFileStreaming(root, src, destName, srcInfo)
 }
 
-// managedTreeName converts an absolute path inside the managed plugin tree
-// into the slash-separated name os.Root operations take. ok is false for a
-// path outside the tree (or the tree itself), which is the local-dev install
-// case: the caller has no root-relative spelling for such a source and must
-// use the absolute path.
-//
-// root.Name() and src both derive from pluginParentDir, so their spelling and
-// case agree and a plain filepath.Rel is enough; this is not a containment
-// check, only a coordinate conversion, and fs.ValidPath is the guard that a
-// Rel result with a `..` prefix never reaches the root.
+// managedTreeName returns src as a slash-separated name inside root, or false
+// when src is outside the tree (or is the tree itself).
 func managedTreeName(root *os.Root, src string) (string, bool) {
 	rel, err := filepath.Rel(root.Name(), src)
 	if err != nil || rel == "." || !filepath.IsLocal(rel) {

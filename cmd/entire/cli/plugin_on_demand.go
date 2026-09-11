@@ -143,15 +143,8 @@ func installMissingPlugin(ctx context.Context, rootCmd *cobra.Command, name stri
 // findInaccessiblePlugin draws the same line for PATH entries, and the mode
 // does not mean the same thing on Windows.
 //
-// A symlink whose target cannot be reached for any other reason is treated the
-// same way as a dangling one. The case that exists in the field is the entry an
-// earlier Windows build created through os.Root.Symlink with an absolute
-// target, which Windows refuses to follow with ERROR_INVALID_NAME (see
-// materializeManagedEntry); the errno names the entry rather than the fault,
-// and replacing the link is exactly what a reinstall does.
-//
-// An empty regular file is refused for the same reason: nothing runs a 0-byte
-// executable, exec's own error for one is opaque, and a reinstall repairs it.
+// An unfollowable symlink (the entry earlier Windows builds left behind, see
+// plugin_store_windows.go) and an empty file are both repaired by a reinstall.
 func checkManagedPluginRunnable(path string) (reinstallFixes bool, err error) {
 	info, statErr := os.Stat(path)
 	if statErr != nil {
