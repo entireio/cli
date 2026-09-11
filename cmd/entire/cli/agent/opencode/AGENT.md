@@ -159,6 +159,19 @@ event itself is the authoritative parent link.
   probe ran on `google/gemini-2.5-flash`. Nothing in the contract is
   provider-specific except `callID` spelling.
 
+## Verification Runs (2026-09-11, OpenCode 1.18.30, gemini-2.5-flash)
+
+| Scenario | Children | Result |
+|----------|----------|--------|
+| `single` — one `general` child writes `docs/red.md` | 1 | Order above. Entire: child became its own session and took the checkpoint; parent "no files modified". |
+| `concurrent` — two `general` children launched in one assistant message (`red.md`, `blue.md`) | 2 | Both `tool.execute.before(task)` fired (seq 106, 116) before either child finished (221, 303). Each `tool.execute.after.metadata.sessionId` named a different child; each child's `write` carried its own `sessionID`, so per-child file attribution is disjoint by construction. Second child's `session.created` came 190 ms after the first's; per task the order `before → session.created → part running (metadata binds callID→sessionId)` held. Entire: three top-level sessions, checkpoint condensed both children, parent again empty. |
+| `readonly` — one `explore` child lists files and reads README | 1 | Identical signals, no `write`/`edit`, child export has tokens but no file parts. Entire: child still became a separate session (no prompt shown in `session list` because its first hook was `turn-start`), no checkpoint anywhere. |
+
+Design consequence: bind `callID → childID` from the task part's
+`state.metadata` (or `tool.execute.after.output.metadata`), never from
+"the next `session.created` after a `tool.execute.before`" — with two
+launches in one message the creations can interleave.
+
 ## Captured Payloads
 
 - Contract captured 2026-09-11 with OpenCode 1.18.30, one foreground `general`
@@ -169,4 +182,5 @@ event itself is the authoritative parent link.
   which was added later — treat `parentSessionId` as optional.
 - Probe script: `scripts/test-opencode-subagent-integration.sh`
   (`--run-cmd` automated, `--manual-live` interactive, `--no-entire` raw
-  signals only; `OPENCODE_MODEL`, `ENTIRE_BIN`, `PROBE_KEEP=1`).
+  signals only, `--scenario single|concurrent|readonly`; `OPENCODE_MODEL`,
+  `ENTIRE_BIN`, `PROBE_KEEP=1`).

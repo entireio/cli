@@ -12,6 +12,8 @@
 #   scripts/test-opencode-subagent-integration.sh --run-cmd            # automated: opencode run <prompt>
 #   scripts/test-opencode-subagent-integration.sh --manual-live        # you drive opencode in the repo, press Enter when done
 #   scripts/test-opencode-subagent-integration.sh --run-cmd --no-entire # raw OpenCode signals only
+#   scripts/test-opencode-subagent-integration.sh --run-cmd --scenario concurrent   # two children in one turn
+#   scripts/test-opencode-subagent-integration.sh --run-cmd --scenario readonly     # one read-only explore child
 #
 # Env:
 #   OPENCODE_MODEL   model for `opencode run` (default anthropic/claude-haiku-4-5)
@@ -25,11 +27,16 @@ AGENT_BIN="opencode"
 MODEL="${OPENCODE_MODEL:-anthropic/claude-haiku-4-5}"
 MODE=""
 WITH_ENTIRE=1
+SCENARIO="single"
+NEXT_IS_SCENARIO=0
 for arg in "$@"; do
+  if [ "$NEXT_IS_SCENARIO" = 1 ]; then SCENARIO="$arg"; NEXT_IS_SCENARIO=0; continue; fi
   case "$arg" in
     --run-cmd) MODE="run" ;;
     --manual-live) MODE="manual" ;;
     --no-entire) WITH_ENTIRE=0 ;;
+    --scenario) NEXT_IS_SCENARIO=1 ;;
+    --scenario=*) SCENARIO="${arg#--scenario=}" ;;
     -h|--help) sed -n 2,20p "$0"; exit 0 ;;
     *) echo "unknown arg: $arg" >&2; exit 2 ;;
   esac
@@ -124,7 +131,16 @@ fi
 
 echo
 echo "== Phase 4: run"
-PROMPT="Use the general subagent (the task tool with subagent_type general) exactly once to create docs/red.md containing one paragraph about the colour red. Run it in the foreground and wait for it to finish; never run it in the background. Do not create or edit the file yourself, do not delegate again, do not commit, and do not ask for confirmation."
+case "$SCENARIO" in
+  single)
+    PROMPT="Use the general subagent (the task tool with subagent_type general) exactly once to create docs/red.md containing one paragraph about the colour red. Run it in the foreground and wait for it to finish; never run it in the background. Do not create or edit the file yourself, do not delegate again, do not commit, and do not ask for confirmation." ;;
+  concurrent)
+    PROMPT="Call the task tool twice in the same response, in parallel, both with subagent_type general: the first creates docs/red.md containing one paragraph about the colour red, the second creates docs/blue.md containing one paragraph about the colour blue. Wait for both to finish. Do not create or edit any file yourself, do not delegate again, do not commit, and do not ask for confirmation." ;;
+  readonly)
+    PROMPT="Use the explore subagent (the task tool with subagent_type explore) exactly once to report which files exist in this repository and what README.md says. Wait for it to finish and repeat its answer. Do not create or edit any file, do not commit, and do not ask for confirmation." ;;
+  *) echo "unknown scenario: $SCENARIO (single|concurrent|readonly)" >&2; exit 2 ;;
+esac
+echo "scenario: $SCENARIO"
 case "$MODE" in
   run)
     echo "opencode run --model $MODEL <prompt>  (in $REPO)"
