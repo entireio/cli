@@ -257,12 +257,19 @@ func TestFetchCheckpointRefFrom_AcceptedDedicatedRemainsAuthoritative(t *testing
 // and PUSHES to contributor/app. The dedicated store is unreachable, so before
 // the push URLs joined the vote this errored instead of reading the fork.
 func TestFetchCheckpointRefFrom_DedicatedVetoedByLeadPushOwner(t *testing.T) {
-	workDir, ref, _, originHash := dedicatedCandidatesFixture(t, false, true)
+	// Both repositories carry the ref at DIFFERENT hashes, so the assertion
+	// distinguishes which one was read. Without that the fixture seeds them
+	// such that either spelling satisfies the same expectation, and a target
+	// resolved from the wrong url passes unnoticed.
+	workDir, ref, pushDestHash, fetchRepoHash := dedicatedCandidatesFixture(t, true, true)
 	testutil.RunGit(t, workDir, "remote", "set-url", "fork", "https://github.com/acme/app.git")
 	testutil.RunGit(t, workDir, "remote", "set-url", "--push", "fork", "https://github.com/contributor/app.git")
 
 	require.NoError(t, FetchCheckpointRefFrom(t.Context(), ref, []string{"fork", "origin"}, nil))
-	require.Equal(t, originHash, localRefHash(t, workDir, ref))
+	// The refs are where the writes went: the PUSH destination, not the
+	// repository fork's fetch url names.
+	require.Equal(t, pushDestHash, localRefHash(t, workDir, ref))
+	require.NotEqual(t, fetchRepoHash, localRefHash(t, workDir, ref))
 }
 
 // The other direction of the same symmetry. fork FETCHES from contributor/app
@@ -279,17 +286,37 @@ func TestFetchCheckpointRefFrom_DedicatedAcceptedWhenLeadPushesToCheckpointOwner
 	require.NotEqual(t, forkHash, localRefHash(t, workDir, ref), "reads must follow the writes to the dedicated store")
 }
 
+// The origin fallback is not the candidate, and its emptiness proves nothing.
+// It is reached precisely BECAUSE the candidate was unusable, so writes never
+// went there — unlike a vetoed store's candidate, where they did. Classifying
+// it as absence would report "no such checkpoint" for one that exists on a
+// remote nobody could ask.
+//
+// Reachability is narrow (every election tier passes isConfiguredRemote), so
+// the candidate is removed after the election, matching the observed shape.
+func TestFetchCheckpointRefFrom_OriginFallbackStillRefusesAbsence(t *testing.T) {
+	workDir, ref, _, _ := dedicatedCandidatesFixture(t, false, false)
+	testutil.RunGit(t, workDir, "remote", "remove", "fork")
+
+	err := FetchCheckpointRefFrom(t.Context(), ref, []string{"fork", "origin"}, nil)
+	require.Error(t, err)
+	require.NotErrorIs(t, err, plumbing.ErrReferenceNotFound,
+		"emptiness on the origin fallback must not be classified as absence")
+}
+
 // origin is not exempt from the push-url half of the vote. Its fetch url is
 // already counted, but a remote.origin.pushurl naming another owner makes the
 // push side veto the store while the fetch side — which skipped origin's push
 // urls entirely — still accepted it.
 func TestFetchCheckpointRefFrom_DedicatedVetoedByOriginPushOwner(t *testing.T) {
-	workDir, ref, _, originHash := dedicatedCandidatesFixture(t, false, true)
+	workDir, ref, pushDestHash, fetchRepoHash := dedicatedCandidatesFixture(t, true, true)
 	testutil.RunGit(t, workDir, "remote", "set-url", "--push", "origin", "https://github.com/contributor/app.git")
 
-	// origin alone, so it is the read candidate whose push urls must vote.
+	// origin alone, so it is the read candidate whose push urls must vote —
+	// and whose push destination must be read.
 	require.NoError(t, FetchCheckpointRefFrom(t.Context(), ref, []string{"origin"}, nil))
-	require.Equal(t, originHash, localRefHash(t, workDir, ref))
+	require.Equal(t, pushDestHash, localRefHash(t, workDir, ref))
+	require.NotEqual(t, fetchRepoHash, localRefHash(t, workDir, ref))
 }
 
 // The name still holds: origin is never retried. What changed is how a MISS on

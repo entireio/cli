@@ -151,15 +151,39 @@ func fetchURLResolved(ctx context.Context, opts ...FetchURLOptions) (string, boo
 			slog.String("reason", reason),
 			slog.String("hint", "if this checkpoint repo is yours, configure checkpoint_remote in .entire/settings.local.json"),
 		)
-		fallbackURL, _, fallbackErr := fetchURLFromReadCandidates(ctx, getRemoteURL, opt, originURL, originErr, withToken)
+		fallbackURL, servedByCandidate, fallbackErr := fetchURLFromReadCandidates(ctx, getRemoteURL, opt, originURL, originErr, withToken)
 		if fallbackErr != nil {
 			return "", false, true, fallbackErr
 		}
+		// The refs are wherever the writes went, and writes go to the
+		// candidate's PUSH destination — which remote.<name>.pushurl can point
+		// at a different repository than its fetch url names. Reading the
+		// fetch url queried the wrong repository, so a stale ref or a false
+		// absence. The FIRST push url, matching the push side's own transport
+		// derivation and the single destination checkpoint refs are sent to.
+		if servedByCandidate && opt.LeadReadRemote != "" {
+			pushURLs, pushErr := gitremote.GetPushURLsInDir(ctx, opt.WorktreeRoot, opt.LeadReadRemote)
+			if pushErr != nil {
+				return "", false, true, fmt.Errorf("resolve push destination for read candidate %q: %w", opt.LeadReadRemote, pushErr)
+			}
+			fallbackURL = pushURLs[0]
+			if withToken {
+				if tokenURL, ok := deriveTokenOriginURL(fallbackURL); ok {
+					fallbackURL = tokenURL
+				}
+			}
+		}
 		// Never authoritative: a checkpoint_remote IS configured, so this URL
-		// is not the dedicated store. Reported as VETOED, which is what lets
-		// a caller that knows writes were routed here treat emptiness as
-		// absence. A caller that does not must keep refusing to.
-		return fallbackURL, false, true, nil
+		// is not the dedicated store.
+		//
+		// vetoed carries whether the CANDIDATE is serving, not merely that a
+		// veto happened. It is what makes a caller treat emptiness as
+		// absence, and that reasoning holds only where writes were routed:
+		// when the candidate could not be resolved this falls back to origin,
+		// which is reached BECAUSE the candidate was unusable, so writes never
+		// went there and its emptiness proves nothing. fetchURLFromReadCandidates
+		// already draws exactly that line.
+		return fallbackURL, false, servedByCandidate, nil
 	}
 
 	if withToken {
