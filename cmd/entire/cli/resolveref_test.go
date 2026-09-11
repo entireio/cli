@@ -379,7 +379,12 @@ func TestResolveRepoRef_NativePath(t *testing.T) {
 
 	t.Run("a slash-bearing ref matching no grammar lists the accepted shapes", func(t *testing.T) {
 		t.Parallel()
-		refuseLocally(t, "a/b/c/d", "/et/<project>/<repo>")
+		// "/web" pins that dispatch reads the ref as given: trimming the leading
+		// slash first would send it to the by-name lookup slash and all — a
+		// guaranteed 404, since names can never contain '/'.
+		for _, ref := range []string{"a/b/c/d", "/web", "web/"} {
+			refuseLocally(t, ref, "/et/<project>/<repo>")
+		}
 	})
 }
 

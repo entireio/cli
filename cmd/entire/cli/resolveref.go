@@ -223,7 +223,11 @@ func resolveRepoRef(ctx context.Context, c repoRefClient, ref, projectRef string
 	if looksLikeULID(ref) {
 		return ref, nil
 	}
-	if strings.Contains(trimRefPrefix(ref), "/") {
+	// Dispatch on the ref as given, not on trimRefPrefix's output: trimming
+	// first would let `/web` (leading slash, one segment) slip through to the
+	// by-name lookup with the slash still in it — a guaranteed server 404,
+	// since names can never contain '/'.
+	if strings.Contains(strings.TrimSpace(ref), "/") {
 		return resolveRepoPathRef(ctx, c, ref, projectRef)
 	}
 	if projectRef == "" {
