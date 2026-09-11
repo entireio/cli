@@ -76,7 +76,7 @@ func TestReviewArgv_PointsAtTrustedSettingsFile(t *testing.T) {
 	if cmd.Args[i+1] != "/tmp/trusted.json" {
 		t.Errorf("--settings = %q, want the prepared path", cmd.Args[i+1])
 	}
-	// Inline JSON would put a possibly key-bearing apiKeyHelper into argv.
+	// Inline JSON would put configuration into argv, which is visible via ps.
 	if strings.HasPrefix(cmd.Args[i+1], "{") {
 		t.Error("--settings must be a path, not inline JSON (argv is world-readable via ps)")
 	}
@@ -105,7 +105,7 @@ func TestReviewArgv_CarriesTrustBoundaryPrompt(t *testing.T) {
 // only.
 func TestTrustedReviewSettings_CarriesFullHookInventory(t *testing.T) {
 	t.Parallel()
-	got := buildTrustedReviewSettings("")
+	got := buildTrustedReviewSettings()
 
 	for _, spec := range entireHookSpecs() {
 		matchers, ok := got.Hooks[spec.hookType]
@@ -124,7 +124,7 @@ func TestTrustedReviewSettings_CarriesFullHookInventory(t *testing.T) {
 // not quietly acquire additional fields.
 func TestTrustedReviewSettings_CarriesNothingElse(t *testing.T) {
 	t.Parallel()
-	data, err := json.Marshal(buildTrustedReviewSettings("helper-cmd"))
+	data, err := json.Marshal(buildTrustedReviewSettings())
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}
@@ -133,25 +133,44 @@ func TestTrustedReviewSettings_CarriesNothingElse(t *testing.T) {
 		t.Fatalf("unmarshal: %v", err)
 	}
 	for key := range raw {
-		if key != "hooks" && key != "apiKeyHelper" {
+		if key != "hooks" {
 			t.Errorf("unexpected key %q in trusted review settings; every field is a capability restored to the reviewer", key)
 		}
 	}
 	if _, ok := raw["permissions"]; ok {
 		t.Error("trusted settings must not grant permissions")
 	}
+	// apiKeyHelper is a shell command Claude runs with the reviewed checkout as
+	// cwd, so a relative helper executes branch content pre-prompt. It must
+	// never be re-introduced here (it is safe in generate.go only because that
+	// path runs in os.TempDir()).
+	if _, ok := raw["apiKeyHelper"]; ok {
+		t.Error("trusted settings must not carry apiKeyHelper: it would execute inside the reviewed checkout")
+	}
 }
 
-// TestTrustedReviewSettings_OmitsEmptyAPIKeyHelper keeps the file free of an
-// empty helper, which claude would otherwise try to execute.
-func TestTrustedReviewSettings_OmitsEmptyAPIKeyHelper(t *testing.T) {
-	t.Parallel()
-	data, err := json.Marshal(buildTrustedReviewSettings(""))
+// TestTrustedReviewSettings_NeverCarriesAuthHelper pins the absence of any
+// auth helper in the file, regardless of what the user has configured.
+func TestTrustedReviewSettings_NeverCarriesAuthHelper(t *testing.T) {
+	// No t.Parallel: t.Setenv.
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("CLAUDE_CONFIG_DIR", filepath.Join(home, ".claude"))
+	if err := os.MkdirAll(filepath.Join(home, ".claude"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	// A user with a relative helper configured — the shape that would execute
+	// branch content if it were ever copied into the reviewer's settings.
+	if err := os.WriteFile(filepath.Join(home, ".claude", "settings.json"),
+		[]byte(`{"apiKeyHelper":"sh ./scripts/key.sh"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	data, err := json.Marshal(buildTrustedReviewSettings())
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}
-	if strings.Contains(string(data), "apiKeyHelper") {
-		t.Errorf("apiKeyHelper must be omitted when unset: %s", data)
+	if strings.Contains(string(data), "apiKeyHelper") || strings.Contains(string(data), "key.sh") {
+		t.Errorf("user's apiKeyHelper leaked into the trusted review settings: %s", data)
 	}
 }
 
@@ -247,7 +266,7 @@ func TestValidateTrustedReviewSettings_RejectsIncompleteCapture(t *testing.T) {
 		{
 			name: "one hook type dropped",
 			settings: func() trustedReviewSettings {
-				s := buildTrustedReviewSettings("")
+				s := buildTrustedReviewSettings()
 				delete(s.Hooks, "Stop")
 				return s
 			}(),
@@ -271,7 +290,7 @@ func TestValidateTrustedReviewSettings_RejectsIncompleteCapture(t *testing.T) {
 // case: what the code actually builds must pass its own check.
 func TestValidateTrustedReviewSettings_AcceptsComposedSettings(t *testing.T) {
 	t.Parallel()
-	if err := validateTrustedReviewSettings(buildTrustedReviewSettings("helper")); err != nil {
+	if err := validateTrustedReviewSettings(buildTrustedReviewSettings()); err != nil {
 		t.Fatalf("composed settings rejected by their own validation: %v", err)
 	}
 }

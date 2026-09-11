@@ -130,8 +130,11 @@ reports `Unknown command` and reviews nothing.
 The `--settings` file carries Entire's own lifecycle hooks — the same inventory
 `entire enable` installs, composed from `entireHookSpecs()` — so reviews are still captured
 as sessions with transcripts, without reading those hooks back out of the reviewed
-checkout. It also carries the user's `apiKeyHelper` if they have one, since that lives in
-user settings; `ANTHROPIC_API_KEY` and keychain/OAuth need no re-injection.
+checkout. It deliberately does **not** carry the user's `apiKeyHelper`: Claude runs that
+helper as a shell command with the reviewed checkout as its working directory,
+so a relative helper would execute branch content before the first request.
+Reviewers authenticate with `ANTHROPIC_API_KEY` or a Claude sign-in; Entire
+prints a note before launch if a helper is configured and no env key is set.
 
 Consequences worth knowing:
 

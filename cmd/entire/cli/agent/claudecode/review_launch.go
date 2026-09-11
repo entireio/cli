@@ -27,9 +27,10 @@ package claudecode
 //	                           Claude's default nor a user-level defaultMode
 //	                           silently widens the reviewer
 //	--settings <file>          written by this CLI outside the reviewed worktree:
-//	                           Entire's own lifecycle hooks (so the review is
-//	                           still captured, without reading them back out of
-//	                           the branch) plus the user's apiKeyHelper
+//	                           Entire's own lifecycle hooks, so the review is
+//	                           still captured without reading them back out of
+//	                           the branch. Nothing else — see the note on
+//	                           apiKeyHelper below
 //	--append-system-prompt     defense in depth only; see reviewSystemPrompt
 //
 // Why no settings sources at all, including the user's:
@@ -105,25 +106,41 @@ Inspect code without running repository applications, scripts, tests, build comm
 // trustedReviewSettings is the settings document handed to the reviewer. Only
 // fields Entire deliberately re-introduces belong here — every addition is a
 // capability restored to a process reading untrusted code.
+//
+// Deliberately absent: apiKeyHelper. Claude runs that helper as a shell command
+// with the reviewer's working directory as cwd, and that directory is the
+// reviewed checkout — so a relative helper ("./scripts/key.sh") executes branch
+// content before the first request. The generation path re-injects the helper
+// safely only because it runs Claude in os.TempDir() (generate.go); review
+// cannot move its cwd, so it cannot run a helper at all. API-billing users
+// authenticate the reviewer with ANTHROPIC_API_KEY; OAuth and keychain need
+// nothing. prepareReviewLaunch warns when a helper is configured and no env key
+// is present, so the resulting auth failure is not a mystery.
 type trustedReviewSettings struct {
 	Hooks map[string][]ClaudeHookMatcher `json:"hooks"`
-	// APIKeyHelper carries the user's own auth command. Retained from when the
-	// reviewer loaded no settings at all; under "user" sources it is usually
-	// already present, and re-injecting the same value is harmless. Kept so the
-	// trusted file remains sufficient on its own if the source set ever narrows.
-	APIKeyHelper string `json:"apiKeyHelper,omitempty"`
 }
 
 // buildTrustedReviewSettings composes the settings document from the same hook
 // inventory the project installer writes (entireHookSpecs), so the reviewer
 // runs Entire's real lifecycle hooks without reading them back out of the
 // reviewed checkout.
-func buildTrustedReviewSettings(apiKeyHelper string) trustedReviewSettings {
+func buildTrustedReviewSettings() trustedReviewSettings {
 	hooks := map[string][]ClaudeHookMatcher{}
 	for _, spec := range entireHookSpecs() {
 		hooks[spec.hookType] = addHookToMatcher(hooks[spec.hookType], spec.matcher, spec.command)
 	}
-	return trustedReviewSettings{Hooks: hooks, APIKeyHelper: apiKeyHelper}
+	return trustedReviewSettings{Hooks: hooks}
+}
+
+// warnIfAuthHelperUnavailable tells the user, before launch, that their
+// apiKeyHelper will not run for review. Without this the first symptom is an
+// authentication failure from claude with no explanation of why the helper that
+// works everywhere else did not here.
+func warnIfAuthHelperUnavailable() {
+	if readUserAPIKeyHelper() == "" || os.Getenv("ANTHROPIC_API_KEY") != "" {
+		return
+	}
+	fmt.Fprintln(os.Stderr, "Note: your Claude apiKeyHelper is not run for reviews (it would execute inside the reviewed checkout). Export ANTHROPIC_API_KEY, or sign in to Claude, to authenticate the reviewer.")
 }
 
 // errReviewCaptureUnavailable reports that the reviewer cannot be launched with
@@ -165,14 +182,15 @@ func validateTrustedReviewSettings(settings trustedReviewSettings) error {
 // plus a cleanup func.
 //
 // The file goes to the OS temp directory, never the reviewed worktree, and is
-// created 0600: apiKeyHelper can embed a literal key, which is also why it is
-// passed by path rather than as an inline --settings JSON string (argv is
-// visible via ps and EDR tooling). This mirrors writeAuthSettingsFile.
+// created 0600 and passed by path rather than as inline --settings JSON: it is
+// Entire-owned configuration, and argv is visible via ps and EDR tooling. It
+// carries no secrets — see trustedReviewSettings for why no auth helper.
 //
 // An error here fails the review. That is the point: if the trusted
 // configuration cannot be established there is no safe launch to fall back to.
 func prepareReviewLaunch() (path string, cleanup func(), err error) {
-	settings := buildTrustedReviewSettings(readUserAPIKeyHelper())
+	warnIfAuthHelperUnavailable()
+	settings := buildTrustedReviewSettings()
 	if err := validateTrustedReviewSettings(settings); err != nil {
 		return "", nil, err
 	}
