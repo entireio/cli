@@ -161,12 +161,14 @@ func fetchURLResolved(ctx context.Context, opts ...FetchURLOptions) (string, boo
 		// fetch url queried the wrong repository, so a stale ref or a false
 		// absence. The FIRST push url, matching the push side's own transport
 		// derivation and the single destination checkpoint refs are sent to.
-		if servedByCandidate && opt.LeadReadRemote != "" {
-			pushURLs, pushErr := gitremote.GetPushURLsInDir(ctx, opt.WorktreeRoot, gitrepo.EnvWithoutRepoOverrides(), opt.LeadReadRemote)
-			if pushErr != nil {
-				return "", false, true, fmt.Errorf("resolve push destination for read candidate %q: %w", opt.LeadReadRemote, pushErr)
-			}
-			fallbackURL = pushURLs[0]
+		if servedByCandidate && len(ownershipURLs) > 0 {
+			// The very push destinations the vote just resolved, so the target
+			// IS the identity the veto was decided on rather than a second
+			// read of the same config that could in principle disagree with
+			// it. Non-empty exactly when the vote consulted
+			// checkpointRemoteIsInherited, since an ownership error is treated
+			// as inherited without one.
+			fallbackURL = ownershipURLs[0]
 			if withToken {
 				if tokenURL, ok := deriveTokenOriginURL(fallbackURL); ok {
 					fallbackURL = tokenURL

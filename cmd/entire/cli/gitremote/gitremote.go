@@ -162,15 +162,28 @@ func GetPushURLs(ctx context.Context, remoteName string) ([]string, error) {
 // in a named directory must resolve its push URLs in the same one, or the two
 // halves of an ownership vote describe different repositories.
 //
-// env, when non-nil, replaces the child's environment. A caller that can run
-// inside a git hook MUST pass one with git's repo-selector variables removed
-// (gitrepo.EnvWithoutRepoOverrides): git exports GIT_DIR and GIT_WORK_TREE to
-// its hooks and they outrank cmd.Dir, so the child would otherwise report the
-// HOOK's remotes rather than dir's — and this output feeds an ownership vote,
-// so the wrong repository's URLs would decide where checkpoints are read from.
+// env, when non-nil, replaces the child's environment. Pass one with git's
+// repo-selector variables removed (gitrepo.EnvWithoutRepoOverrides) from any
+// caller that can run inside a git hook: git exports GIT_DIR and GIT_WORK_TREE
+// to its hooks and they outrank cmd.Dir, so the child would otherwise report
+// the HOOK's remotes rather than dir's.
+//
+// Hygiene rather than a fix for a reachable bug, and worth being exact about.
+// Every caller today derives dir from paths.WorktreeRoot, which itself honours
+// GIT_DIR/GIT_WORK_TREE — so under a hook it already resolves to the hook's
+// repository, the same one those variables would have forced. cmd.Dir is
+// correct today only because it agrees with what would override it; filtering
+// removes that dependence.
 //
 // Passed in rather than filtered here because this package depends on nothing
 // beyond the standard library, while gitrepo pulls in go-git.
+//
+// Known asymmetry: a checkpoint ownership vote now resolves its origin half
+// through an unfiltered GetRemoteURLInDir and its candidate half through this,
+// so the two halves reach git differently. Harmless while both land on the
+// same repository, for the reason above — but whoever gives GetRemoteURLInDir
+// the same treatment should do both halves together rather than leave a vote
+// split across two mechanisms.
 func GetPushURLsInDir(ctx context.Context, dir string, env []string, remoteName string) ([]string, error) {
 	cmd := exec.CommandContext(ctx, "git", "remote", "get-url", "--push", "--all", remoteName)
 	if dir != "" {
