@@ -137,8 +137,9 @@ func GetRemoteURLInDir(ctx context.Context, dir, remoteName string) (string, err
 
 // GetRemoteURLInDirEnv is GetRemoteURLInDir with an explicit child environment,
 // the fetch-side counterpart of GetPushURLsInDir's env parameter — see there
-// for when to pass one. Both halves of an ownership vote should use the same
-// form, or they reach git differently.
+// for when to pass one, including why an empty dir takes nil. Both halves of
+// an ownership vote must make the same choice, or they reach git differently
+// and can describe different repositories.
 func GetRemoteURLInDirEnv(ctx context.Context, dir string, env []string, remoteName string) (string, error) {
 	cmd := exec.CommandContext(ctx, "git", "remote", "get-url", remoteName)
 	if dir != "" {
@@ -172,10 +173,14 @@ func GetPushURLs(ctx context.Context, remoteName string) ([]string, error) {
 // counterpart of GetRemoteURLInDir.
 //
 // env, when non-nil, replaces the child's environment. Pass
-// gitrepo.EnvWithoutRepoOverrides() from any caller that can run inside a git
-// hook: git exports GIT_DIR and GIT_WORK_TREE to its hooks and they outrank
-// cmd.Dir. Filtered by the caller, because this package depends on nothing
-// beyond the standard library while gitrepo pulls in go-git.
+// gitrepo.EnvWithoutRepoOverrides() when dir names the target and the caller
+// can run inside a git hook: git exports GIT_DIR and GIT_WORK_TREE to its
+// hooks and they outrank cmd.Dir. Pass nil when dir is empty — there the
+// ambient environment is what names the repository, and filtering it would
+// silently retarget the child at the process working directory.
+//
+// Filtered by the caller, because this package depends on nothing beyond the
+// standard library while gitrepo pulls in go-git.
 func GetPushURLsInDir(ctx context.Context, dir string, env []string, remoteName string) ([]string, error) {
 	cmd := exec.CommandContext(ctx, "git", "remote", "get-url", "--push", "--all", remoteName)
 	if dir != "" {

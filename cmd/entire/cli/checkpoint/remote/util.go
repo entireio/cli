@@ -91,7 +91,7 @@ func fetchURLResolved(ctx context.Context, opts ...FetchURLOptions) (string, boo
 	if opt.WorktreeRoot != "" {
 		ctx = settings.WithWorktreeRoot(ctx, opt.WorktreeRoot)
 		getRemoteURL = func(ctx context.Context, remoteName string) (string, error) {
-			return getRemoteURLInDirHookSafe(ctx, opt.WorktreeRoot, remoteName)
+			return getRemoteURLInDirForVote(ctx, opt, remoteName)
 		}
 	}
 
@@ -321,11 +321,12 @@ func fetchOwnershipURLs(ctx context.Context, opt FetchURLOptions) ([]string, err
 // dropping it fails OPEN.
 //
 // Both halves of a vote must resolve in the same worktree, or they describe
-// different repositories — and both reach git the same way, with git's
-// repo-selector variables filtered, so cmd.Dir decides rather than agreeing
-// by accident with what would override it.
+// different repositories — so both reach git the same way: filtered when a
+// directory is named, so cmd.Dir decides rather than agreeing by accident
+// with what would override it, and ambient when none is, where the
+// environment is the only thing naming a repository at all.
 func pushOwnershipURLs(ctx context.Context, opt FetchURLOptions, lead string) ([]string, error) {
-	pushURLs, err := gitremote.GetPushURLsInDir(ctx, opt.WorktreeRoot, gitrepo.EnvWithoutRepoOverrides(), lead)
+	pushURLs, err := gitremote.GetPushURLsInDir(ctx, opt.WorktreeRoot, voteEnv(opt), lead)
 	if err != nil {
 		return nil, fmt.Errorf("resolve read candidate push URLs for remote %q: %w", lead, err)
 	}
@@ -643,15 +644,29 @@ func InheritedCheckpointRemote(ctx context.Context, s *settings.EntireSettings, 
 	return config.Repo, reason, inherited
 }
 
-// getRemoteURLInDirHookSafe is GetRemoteURLInDir with git's repo-selector
-// variables filtered, for the ownership vote. Its other half
-// (pushOwnershipURLs) filters them too, so both reach git the same way and
-// cmd.Dir decides rather than agreeing by accident with what would override
-// it. The exported GetRemoteURLInDir is left alone: its remaining callers are
+// voteEnv is the child environment BOTH halves of an ownership vote must use,
+// in one place because they have diverged twice.
+//
+// Filtered when opt names a directory: cmd.Dir must decide there, and git's
+// repo-selector variables would outrank it. Ambient when it does not: nothing
+// else names a repository then, so stripping GIT_DIR would silently retarget
+// the child at the process working directory — inside a hook, a different
+// repository than the other half resolves in. Filtering unconditionally fixes
+// the first case and breaks the second, which is how the halves diverged the
+// second time.
+func voteEnv(opt FetchURLOptions) []string {
+	if opt.WorktreeRoot == "" {
+		return nil
+	}
+	return gitrepo.EnvWithoutRepoOverrides()
+}
+
+// getRemoteURLInDirForVote is GetRemoteURLInDir under voteEnv, the origin half.
+// The exported GetRemoteURLInDir is left alone: its remaining callers are
 // user-invoked commands acting on the current directory, where a GIT_DIR the
 // user exported is an instruction rather than contamination.
-func getRemoteURLInDirHookSafe(ctx context.Context, dir, remoteName string) (string, error) {
-	url, err := gitremote.GetRemoteURLInDirEnv(ctx, dir, gitrepo.EnvWithoutRepoOverrides(), remoteName)
+func getRemoteURLInDirForVote(ctx context.Context, opt FetchURLOptions, remoteName string) (string, error) {
+	url, err := gitremote.GetRemoteURLInDirEnv(ctx, opt.WorktreeRoot, voteEnv(opt), remoteName)
 	if err != nil {
 		return "", fmt.Errorf("get remote URL: %w", err)
 	}
