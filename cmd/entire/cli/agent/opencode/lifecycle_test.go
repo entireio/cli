@@ -237,6 +237,8 @@ func TestHookNames(t *testing.T) {
 		HookNameTurnStart,
 		HookNameTurnEnd,
 		HookNameCompaction,
+		HookNameSubagentStart,
+		HookNameSubagentStop,
 	}
 
 	if len(names) != len(expected) {

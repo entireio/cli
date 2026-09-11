@@ -46,11 +46,13 @@ func (a *OpenCodeAgent) RenderContextInjection(inj agent.ContextInjection) ([]by
 
 // Hook name constants — these become CLI subcommands under `entire hooks opencode`.
 const (
-	HookNameSessionStart = "session-start"
-	HookNameSessionEnd   = "session-end"
-	HookNameTurnStart    = "turn-start"
-	HookNameTurnEnd      = "turn-end"
-	HookNameCompaction   = "compaction"
+	HookNameSessionStart  = "session-start"
+	HookNameSessionEnd    = "session-end"
+	HookNameTurnStart     = "turn-start"
+	HookNameTurnEnd       = "turn-end"
+	HookNameCompaction    = "compaction"
+	HookNameSubagentStart = "subagent-start"
+	HookNameSubagentStop  = "subagent-stop"
 )
 
 // HookNames returns the hook verbs this agent supports.
@@ -61,6 +63,8 @@ func (a *OpenCodeAgent) HookNames() []string {
 		HookNameTurnStart,
 		HookNameTurnEnd,
 		HookNameCompaction,
+		HookNameSubagentStart,
+		HookNameSubagentStop,
 	}
 }
 
