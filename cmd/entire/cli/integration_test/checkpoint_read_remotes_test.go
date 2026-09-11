@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
@@ -20,28 +21,34 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// checkpointForgeTransport maps transport destinations onto local paths for a
-// spawned binary, leaving forge identities intact so ownership checks see the
-// real topology. Bare remote names are mapped too, because the spawned CLI
-// reaches its remotes by name as well as by URL.
+// checkpointForgeTransport maps transport destinations without rewriting the
+// forge identities used by remote ownership checks (including remote get-url).
 func checkpointForgeTransport(t *testing.T, origin, fork, dedicated string) []string {
 	t.Helper()
 	realGit, err := exec.LookPath("git")
 	require.NoError(t, err)
-	binDir := testutil.GitTransportShim(t,
-		[]string{"ls-remote", "fetch", "fetch-pack", "push"},
-		map[string]string{
-			"fork":                                   "CHECKPOINT_TEST_FORK",
-			"origin":                                 "CHECKPOINT_TEST_ORIGIN",
-			"https://github.com/contributor/app.git": "CHECKPOINT_TEST_FORK",
-			"https://github.com/acme/app.git":        "CHECKPOINT_TEST_ORIGIN",
-			"https://github.com/acme/checkpoints.git": "CHECKPOINT_TEST_DEDICATED",
-		})
-	// A spawned binary inherits none of this process's t.Setenv calls, so the
-	// variables the shim dereferences travel in the child's environment.
+	binDir := t.TempDir()
+	testutil.WriteFile(t, binDir, "git", `#!/bin/bash
+args=("$@")
+for arg in "$@"; do
+  case "$arg" in
+    ls-remote|fetch|fetch-pack|push)
+      for i in "${!args[@]}"; do
+        case "${args[$i]}" in
+          fork|https://github.com/contributor/app.git) args[$i]="$CHECKPOINT_TEST_FORK" ;;
+          origin|https://github.com/acme/app.git) args[$i]="$CHECKPOINT_TEST_ORIGIN" ;;
+          https://github.com/acme/checkpoints.git) args[$i]="$CHECKPOINT_TEST_DEDICATED" ;;
+        esac
+      done
+      break ;;
+  esac
+done
+exec "$CHECKPOINT_TEST_GIT" "${args[@]}"
+`)
+	require.NoError(t, os.Chmod(filepath.Join(binDir, "git"), 0o755))
 	return []string{
 		"PATH=" + binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
-		testutil.GitTransportRealGitEnv + "=" + realGit,
+		"CHECKPOINT_TEST_GIT=" + realGit,
 		"CHECKPOINT_TEST_ORIGIN=" + origin,
 		"CHECKPOINT_TEST_FORK=" + fork,
 		"CHECKPOINT_TEST_DEDICATED=" + dedicated,
