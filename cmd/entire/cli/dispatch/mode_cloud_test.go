@@ -422,3 +422,70 @@ func TestServerMode_RejectsPlainHTTPBaseURL(t *testing.T) {
 		t.Fatalf("expected ErrInsecureHTTP, got %v", err)
 	}
 }
+
+func TestServerMode_JurisdictionIsSentAsQuerySelector(t *testing.T) {
+	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != testDispatchEndpoint {
+			http.NotFound(w, r)
+			return
+		}
+		if got := r.URL.Query().Get("jurisdiction"); got != "eu" {
+			t.Errorf("expected ?jurisdiction=eu, got query %q", r.URL.RawQuery)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		if err := json.NewEncoder(w).Encode(map[string]any{
+			// The gateway echoes the jurisdiction whenever the caller named
+			// one; runServer fails closed without it.
+			"jurisdiction":       "eu",
+			"window":             map[string]any{"normalized_since": "2026-04-09T00:00:00Z", "normalized_until": "2026-04-16T00:00:00Z"},
+			"covered_repos":      []string{testRepoFullName},
+			"repos":              []any{},
+			"generated_markdown": testDispatchGeneratedHello,
+		}); err != nil {
+			t.Error(err)
+		}
+	}))
+	defer mock.Close()
+
+	stubCloudDispatchAuth(t)
+	oldNow := nowUTC
+	nowUTC = func() time.Time { return time.Date(2026, 4, 16, 0, 0, 0, 0, time.UTC) }
+	t.Cleanup(func() { nowUTC = oldNow })
+	t.Setenv("ENTIRE_API_BASE_URL", mock.URL)
+
+	got, err := Run(context.Background(), Options{
+		Mode:         ModeServer,
+		RepoPaths:    []string{testRepoFullName},
+		Since:        "7d",
+		Jurisdiction: "eu",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.GeneratedText != testDispatchGeneratedHello {
+		t.Fatalf("bad text: %q", got.GeneratedText)
+	}
+}
+
+func TestCheckDispatchJurisdiction(t *testing.T) {
+	t.Parallel()
+
+	if err := checkDispatchJurisdiction("", "us"); err != nil {
+		t.Fatalf("no selector sent: any stamp is fine, got %v", err)
+	}
+	if err := checkDispatchJurisdiction("", ""); err != nil {
+		t.Fatalf("no selector, no stamp: fine, got %v", err)
+	}
+	if err := checkDispatchJurisdiction("eu", " EU "); err != nil {
+		t.Fatalf("matching stamp must pass, got %v", err)
+	}
+	err := checkDispatchJurisdiction("eu", "")
+	if err == nil || !strings.Contains(err.Error(), "ignored --jurisdiction eu") {
+		t.Fatalf("an unconfirmed selector must fail (the gateway echoes it whenever sent), got %v", err)
+	}
+	err = checkDispatchJurisdiction("eu", "us")
+	if err == nil || err.Error() != "dispatch was generated in jurisdiction US, not the requested EU" {
+		t.Fatalf("a wrong-region result must fail, got %v", err)
+	}
+}

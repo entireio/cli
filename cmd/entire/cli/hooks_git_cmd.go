@@ -15,7 +15,6 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
 	"github.com/entireio/cli/cmd/entire/cli/telemetry"
-	"github.com/entireio/cli/cmd/entire/cli/versioncheck"
 	"github.com/entireio/cli/cmd/entire/cli/versioninfo"
 	"github.com/entireio/cli/perf"
 
@@ -89,10 +88,7 @@ func (g *gitHookContext) skipUnsupportedCheckpointPolicy() bool {
 		slog.String("checkpoint_version", policy.CheckpointVersion),
 		slog.String("checkpoint_min_version", policy.CheckpointMinVersion))
 	if interactive.CanPromptInteractively() {
-		fmt.Fprint(os.Stderr, checkpointpolicy.UnsupportedPolicyMessage(
-			policy,
-			versioncheck.UpdateCommandForCurrentBinary(versioninfo.Version),
-		))
+		fmt.Fprint(os.Stderr, unsupportedCheckpointPolicyMessage(policy, versioninfo.Version))
 	}
 	emitCheckpointPolicyBlocked(g.ctx, telemetry.CheckpointPolicyBlockedEvent{
 		Hook:                 g.hookName,
@@ -132,7 +128,11 @@ func (g *gitHookContext) skipUnreadableCheckpointPolicy(err error) bool {
 // enabled Entire. The check is not repeated here: it costs an uncached
 // settings.Load, and this runs on the per-commit and per-turn paths.
 func withHookSession(ctx context.Context) context.Context {
-	ctx = logging.WithSessionID(ctx, strategy.FindMostRecentSession(ctx))
+	// Resolve the caller rather than the most recent session: a git hook an
+	// agent triggered inherits that agent's session ID in its environment, so
+	// log lines get attributed to the session that actually ran the commit
+	// instead of whichever session in the shared store moved last.
+	ctx = logging.WithSessionID(ctx, strategy.ResolveCallerSession(ctx).SessionID)
 
 	// Hooks are the checkpoint-writing path, so this cannot be left to the root
 	// pre-run: without it only always-on secret scanning would run.

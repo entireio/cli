@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -116,12 +115,7 @@ func setBranchTrackingRemote(t *testing.T, env *TestEnv, remoteName string) {
 	if branch == "" {
 		t.Fatal("cannot set tracking remote: no current branch")
 	}
-	cmd := exec.CommandContext(t.Context(), "git", "config", "branch."+branch+".remote", remoteName)
-	cmd.Dir = env.RepoDir
-	cmd.Env = testutil.GitIsolatedEnv()
-	if output, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("failed to set branch tracking remote: %v\n%s", err, output)
-	}
+	testutil.RunGit(t, env.RepoDir, "config", "branch."+branch+".remote", remoteName)
 	// The edit is deliberate test setup, not drift — refresh the baseline the
 	// harness compares .git/config against at teardown.
 	env.setGitConfigBaseline()
@@ -136,12 +130,7 @@ const forkRemote = "fork"
 // while leaving the remote configured and its tracking refs in place.
 func setRemoteURL(t *testing.T, env *TestEnv, remote, url string) {
 	t.Helper()
-	cmd := exec.CommandContext(t.Context(), "git", "remote", "set-url", remote, url)
-	cmd.Dir = env.RepoDir
-	cmd.Env = testutil.GitIsolatedEnv()
-	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("git remote set-url %s: %v\n%s", remote, err, out)
-	}
+	testutil.RunGit(t, env.RepoDir, "remote", "set-url", remote, url)
 	// Deliberate test setup, not drift — refresh the teardown baseline.
 	env.setGitConfigBaseline()
 }
@@ -764,12 +753,7 @@ func initUnregisteredBareRepo(t *testing.T) string {
 	if resolved, err := filepath.EvalSymlinks(dir); err == nil {
 		dir = resolved
 	}
-	cmd := exec.CommandContext(t.Context(), "git", "init", "--bare")
-	cmd.Dir = dir
-	cmd.Env = testutil.GitIsolatedEnv()
-	if output, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("git init --bare: %v\n%s", err, output)
-	}
+	testutil.RunGit(t, dir, "init", "--bare")
 	return dir
 }
 

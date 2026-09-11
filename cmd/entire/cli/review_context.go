@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
@@ -13,6 +12,7 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	checkpointid "github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
+	"github.com/entireio/cli/cmd/entire/cli/entiredir"
 	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
@@ -239,8 +239,11 @@ func canonicalisePath(p string) string {
 // formatReviewSessionLine renders one entry of the in-progress section.
 // Returns "" when the session has no prompt content to report.
 func formatReviewSessionLine(worktreeRoot string, st *session.State) string {
-	promptPath := filepath.Join(worktreeRoot, paths.SessionMetadataDirFromSessionID(st.SessionID), paths.PromptFileName)
-	raw, err := os.ReadFile(promptPath) //nolint:gosec // path constructed from validated session ID + fixed constants
+	root, err := entiredir.OpenAtForRead(worktreeRoot)
+	if err != nil {
+		return ""
+	}
+	raw, err := entiredir.ReadFile(root, sessionMetadataName(st.SessionID)+"/"+paths.PromptFileName)
 	if err != nil {
 		return ""
 	}

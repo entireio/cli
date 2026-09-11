@@ -36,6 +36,8 @@ type TaskPayload struct {
 	AgentID string
 
 	// SubagentType and TaskDescription label the task in task.json.
+	// TaskDescription is free text from the agent and is redacted by the
+	// writer; callers pass it as recorded.
 	SubagentType    string
 	TaskDescription string
 
@@ -511,7 +513,7 @@ func (m Metadata) GetCompactTranscriptStart() (offset int, ok bool) {
 type SessionFilePaths struct {
 	Metadata string `json:"metadata"`
 	// Transcript points at the raw full.jsonl, which CLI read paths
-	// (rewind/resume/explain) resolve by filename.
+	// (resume/explain) resolve by filename.
 	Transcript string `json:"transcript,omitempty"`
 	// CompactTranscript points at the compact transcript.jsonl when one was
 	// generated alongside full.jsonl. Omitted otherwise (non-compactable,

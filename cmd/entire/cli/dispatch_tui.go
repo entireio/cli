@@ -168,7 +168,11 @@ func dispatchStatusDetails(opts dispatchpkg.Options) []string {
 		window += " → " + strings.TrimSpace(opts.Until)
 	}
 
-	return []string{scope, branches, window}
+	details := []string{scope, branches, window}
+	if j := strings.TrimSpace(opts.Jurisdiction); j != "" && opts.Mode != dispatchpkg.ModeLocal {
+		details = append(details, "Jurisdiction: "+j)
+	}
+	return details
 }
 
 func (m dispatchStatusModel) Init() tea.Cmd {

@@ -18,3 +18,7 @@ func detachFromTTY(cmd *exec.Cmd) {
 	}
 	cmd.SysProcAttr.CreationFlags |= windows.CREATE_NEW_PROCESS_GROUP | windows.DETACHED_PROCESS
 }
+
+// killProcessGroupOnCancel is a no-op on Windows: reliable tree-kill needs a Job
+// Object. The WaitDelay backstop still bounds the wait on a hung subprocess.
+func killProcessGroupOnCancel(_ *exec.Cmd) {}

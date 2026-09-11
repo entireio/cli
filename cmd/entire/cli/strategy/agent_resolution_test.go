@@ -7,9 +7,12 @@ import (
 	"testing"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
+	"github.com/entireio/cli/cmd/entire/cli/agent/types"
+	"github.com/entireio/cli/cmd/entire/cli/session"
 
 	// Register agents so AgentForTranscriptPath can resolve them.
 	_ "github.com/entireio/cli/cmd/entire/cli/agent/claudecode"
+	_ "github.com/entireio/cli/cmd/entire/cli/agent/codex"
 	_ "github.com/entireio/cli/cmd/entire/cli/agent/cursor"
 
 	"github.com/stretchr/testify/assert"
@@ -31,6 +34,148 @@ func withClaudeSessionDir(t *testing.T) string {
 	sessionDir := filepath.Join(t.TempDir(), "claude-projects")
 	t.Setenv("ENTIRE_TEST_CLAUDE_PROJECT_DIR", sessionDir)
 	return filepath.Join(sessionDir, "abc-123.jsonl")
+}
+
+func withCodexSessionDir(t *testing.T) string {
+	t.Helper()
+	sessionDir := filepath.Join(t.TempDir(), "codex-sessions")
+	t.Setenv("ENTIRE_TEST_CODEX_SESSION_DIR", sessionDir)
+	return filepath.Join(sessionDir, "2026", "09", "02", "rollout.jsonl")
+}
+
+func TestInitializeSession_CodexCorrection_CleanOwners(t *testing.T) {
+	dir := setupGitRepo(t)
+	t.Chdir(dir)
+	codexTranscript := withCodexSessionDir(t)
+	ctx := context.Background()
+	s := &ManualCommitStrategy{}
+	for _, owner := range []struct {
+		name      string
+		agentType types.AgentType
+	}{
+		{name: "known", agentType: agent.AgentTypeClaudeCode},
+		{name: "unknown"},
+	} {
+		sessionID := "codex-clean-" + owner.name
+		require.NoError(t, s.InitializeSession(ctx, sessionID, agent.AgentTypeClaudeCode, "", "first", ""))
+		state, err := s.loadSessionState(ctx, sessionID)
+		require.NoError(t, err)
+		state.AgentType = owner.agentType
+		require.NoError(t, s.saveSessionState(ctx, state))
+
+		require.NoError(t, s.InitializeSession(ctx, sessionID, agent.AgentTypeCodex, codexTranscript, "second", ""))
+		state, err = s.loadSessionState(ctx, sessionID)
+		require.NoError(t, err)
+		assertCleanCodexCorrection(t, state)
+	}
+}
+
+func TestHasPriorSubagentEvidence(t *testing.T) {
+	t.Parallel()
+
+	incomplete := false
+	tests := []struct {
+		name string
+		set  func(*SessionState)
+	}{
+		{"inventory", func(s *SessionState) { s.SubagentInventory = []session.SubagentInventoryEntry{{AgentID: "child"}} }},
+		{"task record", func(s *SessionState) {
+			s.TaskRecords = []session.TaskRecord{{ToolUseID: "task", AgentID: "child-from-task"}}
+		}},
+		{"ledger", func(s *SessionState) { s.SubagentLedgerVersion = 4 }},
+		{"session child total", func(s *SessionState) { s.TokenUsage = &agent.TokenUsage{SubagentTokens: &agent.TokenUsage{}} }},
+		{"checkpoint child total", func(s *SessionState) { s.CheckpointTokenUsage = &agent.TokenUsage{SubagentTokens: &agent.TokenUsage{}} }},
+		{"baseline", func(s *SessionState) { s.SubagentTokensBaseline = &agent.TokenUsage{} }},
+		{"inventory incomplete", func(s *SessionState) { s.SubagentInventoryComplete = &incomplete }},
+		{"baseline incomplete", func(s *SessionState) { s.SubagentTokensBaselineComplete = &incomplete }},
+		{"session usage incomplete", func(s *SessionState) { s.TokenUsage = &agent.TokenUsage{SubagentTokensComplete: &incomplete} }},
+		{"checkpoint usage incomplete", func(s *SessionState) { s.CheckpointTokenUsage = &agent.TokenUsage{SubagentTokensComplete: &incomplete} }},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			state := &SessionState{}
+			tt.set(state)
+			require.True(t, hasPriorSubagentEvidence(state))
+		})
+	}
+	require.False(t, hasPriorSubagentEvidence(&SessionState{}))
+}
+
+func TestTransitionSessionToCodex_PreservesDirtyEvidence(t *testing.T) {
+	t.Parallel()
+
+	incomplete := false
+	state := &SessionState{
+		TaskRecords:                    []session.TaskRecord{{ToolUseID: "task", AgentID: "child"}},
+		SubagentLedgerVersion:          4,
+		SubagentTokensBaseline:         &agent.TokenUsage{InputTokens: 3},
+		TokenUsage:                     &agent.TokenUsage{SubagentTokens: &agent.TokenUsage{InputTokens: 1}},
+		CheckpointTokenUsage:           &agent.TokenUsage{SubagentTokens: &agent.TokenUsage{InputTokens: 2}},
+		SubagentInventoryComplete:      &incomplete,
+		SubagentTokensBaselineComplete: &incomplete,
+	}
+
+	transitionSessionToCodex(state)
+	require.Equal(t, uint64(4), state.SubagentLedgerVersion)
+	require.NotNil(t, state.FindSubagentInventory("child"))
+	require.Nil(t, state.SubagentTokensBaseline)
+	assertIncompleteUsage(t, state.TokenUsage)
+	assertIncompleteUsage(t, state.CheckpointTokenUsage)
+	require.False(t, *state.SubagentInventoryComplete)
+	require.False(t, *state.SubagentTokensBaselineComplete)
+}
+
+func assertIncompleteUsage(t *testing.T, usage *agent.TokenUsage) {
+	t.Helper()
+	require.NotNil(t, usage)
+	require.Nil(t, usage.SubagentTokens)
+	require.NotNil(t, usage.SubagentTokensComplete)
+	require.False(t, *usage.SubagentTokensComplete)
+}
+
+func TestInitializeSession_CodexCallerWithoutTranscriptDoesNotMigrateAccounting(t *testing.T) {
+	dir := setupGitRepo(t)
+	t.Chdir(dir)
+
+	ctx := context.Background()
+	sessionID := "codex-unproven-owner"
+	s := &ManualCommitStrategy{}
+	require.NoError(t, s.InitializeSession(ctx, sessionID, agent.AgentTypeClaudeCode, "", "first", ""))
+	state, err := s.loadSessionState(ctx, sessionID)
+	require.NoError(t, err)
+	state.AgentType = ""
+	state.SubagentTokensBaseline = &agent.TokenUsage{InputTokens: 7}
+	require.NoError(t, s.saveSessionState(ctx, state))
+
+	require.NoError(t, s.InitializeSession(ctx, sessionID, agent.AgentTypeCodex, "", "second", ""))
+	state, err = s.loadSessionState(ctx, sessionID)
+	require.NoError(t, err)
+	require.Equal(t, agent.AgentTypeCodex, state.AgentType)
+	require.NotNil(t, state.SubagentTokensBaseline)
+	require.Equal(t, 7, state.SubagentTokensBaseline.InputTokens,
+		"the firing hook alone must not rewrite legacy accounting evidence")
+}
+
+func assertCleanCodexCorrection(t *testing.T, state *SessionState) {
+	t.Helper()
+	require.Equal(t, agent.AgentTypeCodex, state.AgentType)
+	require.Empty(t, state.SubagentInventory)
+	require.Zero(t, state.SubagentLedgerVersion)
+	require.Nil(t, state.SubagentTokensBaseline)
+	require.NotNil(t, state.SubagentInventoryComplete)
+	require.True(t, *state.SubagentInventoryComplete)
+	require.NotNil(t, state.SubagentTokensBaselineComplete)
+	require.True(t, *state.SubagentTokensBaselineComplete)
+	require.NotNil(t, state.TokenUsage)
+	require.Nil(t, state.TokenUsage.SubagentTokens)
+	require.NotNil(t, state.TokenUsage.SubagentTokensComplete)
+	require.True(t, *state.TokenUsage.SubagentTokensComplete)
+	require.NotNil(t, state.CheckpointTokenUsage)
+	require.Nil(t, state.CheckpointTokenUsage.SubagentTokens)
+	require.NotNil(t, state.CheckpointTokenUsage.SubagentTokensComplete)
+	require.True(t, *state.CheckpointTokenUsage.SubagentTokensComplete)
 }
 
 func TestResolveSessionAgentType_TranscriptPathBeatsHook(t *testing.T) {

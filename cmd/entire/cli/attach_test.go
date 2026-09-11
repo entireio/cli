@@ -931,7 +931,7 @@ func TestExtractTranscriptMetadataForAgent_Pi(t *testing.T) {
 // review sessions (and any session where the agent injects an instruction
 // preamble) record the <environment_context> block as the first user message.
 // Attach must use the first genuine user prompt as the checkpoint title — the
-// same filter the rewind display path applies (strategy.FirstDisplayPrompt).
+// same filter the resume display path applies (strategy.FirstDisplayPrompt).
 func TestExtractTranscriptMetadataForAgent_CodexSkipsEnvironmentContext(t *testing.T) {
 	t.Parallel()
 
@@ -2089,11 +2089,12 @@ func TestAttach_DiscoversExternalAgents(t *testing.T) {
 
 	setupAttachTestRepo(t)
 
-	// Overwrite settings to enable external_agents (enableEntire writes the
-	// file without it).
+	// Enable external_agents. It goes in the local file: the setting grants
+	// execution of entire-agent-* binaries on $PATH, so the loader honors it
+	// only from an untracked local override.
 	cwd := mustGetwd(t)
-	settingsPath := filepath.Join(cwd, ".entire", "settings.json")
-	if err := os.WriteFile(settingsPath, []byte(`{"enabled":true,"external_agents":true}`), 0o600); err != nil {
+	settingsPath := filepath.Join(cwd, ".entire", "settings.local.json")
+	if err := os.WriteFile(settingsPath, []byte(`{"external_agents":true}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
 

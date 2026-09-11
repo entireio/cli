@@ -39,8 +39,8 @@ type Agent interface {
 	// DetectPresence checks if this agent is configured in the repository
 	DetectPresence(ctx context.Context) (bool, error)
 
-	// ProtectedDirs returns repo-root-relative directories that should never be
-	// modified or deleted during rewind or other destructive operations.
+	// ProtectedDirs returns repo-root-relative directories that Entire must never
+	// record as session changes or capture into a checkpoint.
 	// Examples: [".claude"] for Claude, [".gemini"] for Gemini.
 	ProtectedDirs() []string
 
@@ -73,7 +73,7 @@ type Agent interface {
 	// it verbatim when absolute. Callers that source agentSessionID from
 	// untrusted data (e.g. checkpoint metadata on the shared
 	// entire/checkpoints/v1 branch, hook input) MUST validate it with
-	// validation.ValidateSessionID first. The resume/rewind restore paths do
+	// validation.ValidateSessionID first. The resume/log-restore paths do
 	// this at their choke points (transcript.resolveTranscriptPath and
 	// strategy.RestoreLogsOnly); do not call this with unvalidated input.
 	ResolveSessionFile(sessionDir, agentSessionID string) string
@@ -121,8 +121,16 @@ type HookSupport interface {
 	// UninstallHooks removes installed hooks
 	UninstallHooks(ctx context.Context) error
 
-	// AreHooksInstalled checks if hooks are currently installed
-	AreHooksInstalled(ctx context.Context) bool
+	// AreHooksInstalled reports whether hooks are currently installed, and
+	// returns an error when the agent could not find out.
+	//
+	// The two are different answers and callers may act on the difference: "no
+	// hooks" means there is nothing to remove, while an error means the state is
+	// unknown and hooks may well be installed. Built-in agents read a local
+	// config file, where absent means absent, so they report no error. An
+	// external agent answers over a subprocess that can crash, time out, or
+	// print junk, and reports that as an error rather than as "no hooks".
+	AreHooksInstalled(ctx context.Context) (bool, error)
 }
 
 // HookConfigState describes how an agent's installed Entire hook config
@@ -159,6 +167,13 @@ type HookFreshness interface {
 	// CheckHookConfig reports whether this agent's Entire hook config is
 	// absent, current, or outdated in the current repo.
 	CheckHookConfig(ctx context.Context) HookConfigState
+}
+
+// EffectiveHookDiagnostics marks agents whose effective hook state is reported
+// by an agent-owned diagnostic surface rather than generic freshness output.
+type EffectiveHookDiagnostics interface {
+	Agent
+	OwnsEffectiveHookDiagnostics()
 }
 
 // FileWatcher is implemented by agents that use file-based detection.
@@ -287,6 +302,44 @@ type TokenCalculator interface {
 
 	// CalculateTokenUsage computes token usage from the transcript starting at the given offset.
 	CalculateTokenUsage(transcriptData []byte, fromOffset int) (*TokenUsage, error)
+}
+
+// SubagentReference is the authoritative record of one spawned agent supplied
+// by the session ledger. Transcript paths are hints only: implementations must
+// verify that a path's native metadata identifies this exact AgentID.
+type SubagentReference struct {
+	// ObservedTurnIDs are child turn identities recorded by native hooks.
+	ObservedTurnIDs        []string
+	AgentID                string
+	DeclaredTranscriptPath string
+	ResolvedTranscriptPath string
+}
+
+// SubagentAnalysis is the exact evidence available for one supplied subagent.
+// TokenUsage is nil when its cumulative native usage cannot be read exactly.
+type SubagentAnalysis struct {
+	AgentID         string
+	ResolvedPath    string
+	ModifiedFiles   []string
+	TokenUsage      *TokenUsage
+	TerminalTurnIDs []string
+}
+
+// InventoryExtraction contains parent evidence plus analysis of the supplied
+// authoritative child inventory. TokenUsage records parent usage and, when
+// complete, its exact cumulative child aggregate in SubagentTokens.
+type InventoryExtraction struct {
+	TokenUsage *TokenUsage
+	Children   []SubagentAnalysis
+}
+
+// InventoryAwareExtractor analyzes only an already-authoritative inventory of
+// children. It is intentionally built-in only: external agents have no
+// equivalent protocol capability yet.
+type InventoryAwareExtractor interface {
+	Agent
+
+	ExtractWithSubagentInventory(ctx context.Context, parent []byte, fromOffset int, refs []SubagentReference) (InventoryExtraction, error)
 }
 
 // ModelExtractor extracts the LLM model identifier from a transcript for agents

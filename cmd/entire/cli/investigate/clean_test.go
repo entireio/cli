@@ -34,6 +34,12 @@ func (e *cleanTestEnv) runDir(runID string) string {
 	return filepath.Join(e.runDirRoot, runID)
 }
 
+// removeRun deletes the per-run dir for runID. Mirrors StateStore.RemoveRun,
+// including its "absent is not an error" contract.
+func (e *cleanTestEnv) removeRun(runID string) error {
+	return os.RemoveAll(e.runDir(runID))
+}
+
 // deps builds a CleanDeps targeted at this env, with the supplied confirm
 // behavior. Pass nil confirm to force a "yes" answer.
 func (e *cleanTestEnv) deps(confirm func(ctx context.Context, message string) (bool, error)) CleanDeps {
@@ -41,10 +47,10 @@ func (e *cleanTestEnv) deps(confirm func(ctx context.Context, message string) (b
 		confirm = func(_ context.Context, _ string) (bool, error) { return true, nil }
 	}
 	return CleanDeps{
-		ManifestStore: e.store,
-		RunDir:        e.runDir,
-		ManifestPath:  e.store.PathFor,
-		Confirm:       confirm,
+		ManifestStore:  e.store,
+		RemoveRun:      e.removeRun,
+		RemoveManifest: e.store.Remove,
+		Confirm:        confirm,
 	}
 }
 
@@ -330,20 +336,15 @@ func TestRunClean_AggregatesFailures(t *testing.T) {
 	env.seed(t, "bbbbbbbbbbbb", "second", t2)
 	env.seed(t, "cccccccccccc", "third", t3)
 
-	// Inject a failing ManifestPath for runID "bbbbbbbbbbbb" — point at a
-	// directory we can't os.Remove (because it has children). The real
-	// path remains untouched.
-	badDir := filepath.Join(t.TempDir(), "not-removable")
-	if err := os.MkdirAll(filepath.Join(badDir, "child"), 0o750); err != nil {
-		t.Fatalf("setup bad dir: %v", err)
-	}
-
+	// Make the manifest removal fail for runID "bbbbbbbbbbbb" only. The other
+	// two must still be deleted, and the summary must count them separately.
 	deps := env.deps(nil)
-	deps.ManifestPath = func(m LocalManifest) string {
+	realRemove := env.store.Remove
+	deps.RemoveManifest = func(m LocalManifest) error {
 		if m.RunID == "bbbbbbbbbbbb" {
-			return badDir
+			return errors.New("simulated manifest removal failure")
 		}
-		return env.store.PathFor(m)
+		return realRemove(m)
 	}
 
 	var out, errOut bytes.Buffer

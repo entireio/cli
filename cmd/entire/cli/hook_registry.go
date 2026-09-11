@@ -22,7 +22,6 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
 	"github.com/entireio/cli/cmd/entire/cli/telemetry"
-	"github.com/entireio/cli/cmd/entire/cli/versioncheck"
 	"github.com/entireio/cli/cmd/entire/cli/versioninfo"
 	"github.com/entireio/cli/perf"
 
@@ -78,6 +77,13 @@ func newAgentHooksCmd(agentName types.AgentName, handler agent.HookSupport) *cob
 	return cmd
 }
 
+// Hook categories reported by getHookType.
+const (
+	hookTypeAgent    = "agent"
+	hookTypeTool     = "tool"
+	hookTypeSubagent = "subagent"
+)
+
 // getHookType returns the hook type based on the hook name.
 // Returns "subagent" for task-related hooks (pre-task, post-task, post-todo,
 // subagent-stop), "tool" for tool-related hooks (before-tool, after-tool),
@@ -86,11 +92,11 @@ func getHookType(hookName string) string {
 	switch hookName {
 	case claudecode.HookNamePreTask, claudecode.HookNamePostTask, claudecode.HookNamePostTodo,
 		claudecode.HookNameSubagentStop:
-		return "subagent"
+		return hookTypeSubagent
 	case geminicli.HookNameBeforeTool, geminicli.HookNameAfterTool:
-		return "tool"
+		return hookTypeTool
 	default:
-		return "agent"
+		return hookTypeAgent
 	}
 }
 
@@ -316,7 +322,7 @@ func agentWriteHookLabel(eventType agent.EventType, claudePostTodoCheckpointHook
 
 func sessionStartPolicyWarning(policy checkpointpolicy.Policy) string {
 	message := "Entire CLI is enabled, but this repository's checkpoint policy requires a newer Entire CLI. No Entire checkpoints will be created for this session until you upgrade."
-	details := strings.TrimSpace(checkpointpolicy.UnsupportedPolicyMessage(policy, versioncheck.UpdateCommandForCurrentBinary(versioninfo.Version)))
+	details := strings.TrimSpace(unsupportedCheckpointPolicyMessage(policy, versioninfo.Version))
 	if details == "" {
 		return message
 	}
@@ -331,7 +337,7 @@ func agentCheckpointCaptureDisabledMessage(policy checkpointpolicy.Policy) strin
 	var b strings.Builder
 	b.WriteString("[entire] Checkpoint capture is disabled for this repository.\n")
 	b.WriteString("[entire] No Entire checkpoints will be created until the CLI is upgraded.\n")
-	if details := strings.TrimSpace(checkpointpolicy.UnsupportedPolicyMessage(policy, versioncheck.UpdateCommandForCurrentBinary(versioninfo.Version))); details != "" {
+	if details := strings.TrimSpace(unsupportedCheckpointPolicyMessage(policy, versioninfo.Version)); details != "" {
 		b.WriteString(details)
 		b.WriteByte('\n')
 	}

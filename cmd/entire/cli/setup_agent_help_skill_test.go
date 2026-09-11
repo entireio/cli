@@ -12,7 +12,6 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent/claudecode"
 	"github.com/entireio/cli/cmd/entire/cli/agent/codex"
 	"github.com/entireio/cli/cmd/entire/cli/agent/geminicli"
-	"github.com/entireio/cli/cmd/entire/cli/testutil"
 )
 
 // The agent-help skill scaffolds a marker-managed, near-immutable file that
@@ -49,7 +48,7 @@ func TestScaffoldAgentHelpSkill_CreatesManagedFiles(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			tmpDir := setupTestDir(t)
+			tmpDir := setupTestRepo(t)
 
 			result, err := tc.scaffN()
 			if err != nil {
@@ -91,7 +90,7 @@ func TestScaffoldAgentHelpSkill_CreatesManagedFiles(t *testing.T) {
 
 // An unmanaged pre-existing file is never overwritten.
 func TestScaffoldAgentHelpSkill_SkipsUnmanagedConflict(t *testing.T) {
-	tmpDir := setupTestDir(t)
+	tmpDir := setupTestRepo(t)
 	rel := filepath.Join(".claude", "skills", "entire", "SKILL.md")
 	target := filepath.Join(tmpDir, rel)
 	if err := os.MkdirAll(filepath.Dir(target), 0o750); err != nil {
@@ -113,7 +112,7 @@ func TestScaffoldAgentHelpSkill_SkipsUnmanagedConflict(t *testing.T) {
 // A pre-existing Entire-managed agent-help file with stale content is rewritten
 // to the current template (Updated), not left as-is or treated as a conflict.
 func TestScaffoldAgentHelpSkill_UpdatesManagedFile(t *testing.T) {
-	tmpDir := setupTestDir(t)
+	tmpDir := setupTestRepo(t)
 
 	ag := claudecode.NewClaudeCodeAgent()
 	relPath, _, ok := agentHelpSkillTemplate(ag.Name())
@@ -153,8 +152,7 @@ func TestScaffoldAgentHelpSkill_UpdatesManagedFile(t *testing.T) {
 // The agent-help skill is opt-in: a default enable installs nothing; only
 // --agent-help-skill (EnableOptions.AgentHelpSkill) scaffolds it.
 func TestSetupAgentHooksNonInteractive_AgentHelpSkillOptInOnly(t *testing.T) {
-	tmpDir := setupTestDir(t)
-	testutil.InitRepo(t, tmpDir)
+	tmpDir := setupTestRepo(t)
 	ag := claudecode.NewClaudeCodeAgent()
 	skillPath := filepath.Join(tmpDir, ".claude", "skills", "entire", "SKILL.md")
 
@@ -233,8 +231,7 @@ func TestManageAgentsNonInteractive_BothSkillFlagsWithoutAgentsShowsBothGuidance
 // The multi-agent dispatcher dedups repeated names and reports (without erroring)
 // agents that have no agent-help template.
 func TestSetupOptionalAgentHelpSkillForNames_DedupsAndSkipsUnsupported(t *testing.T) {
-	tmpDir := setupTestDir(t)
-	testutil.InitRepo(t, tmpDir)
+	tmpDir := setupTestRepo(t)
 
 	var out bytes.Buffer
 	err := setupOptionalAgentHelpSkillForNames(context.Background(), &out,

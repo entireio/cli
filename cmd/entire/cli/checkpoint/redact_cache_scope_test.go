@@ -2,11 +2,11 @@ package checkpoint
 
 import (
 	"context"
-	"os/exec"
 	"path/filepath"
 	"testing"
 
 	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
+	"github.com/entireio/cli/cmd/entire/cli/testutil"
 	"github.com/entireio/cli/redact"
 
 	"github.com/stretchr/testify/require"
@@ -181,7 +181,7 @@ func TestRedactTranscriptCached_SingleJSONValueNotSpliced(t *testing.T) {
 	_, err := RedactTranscriptCached(ctx, repo, "sess-oc", []byte(content), jsonlRedactor)
 	require.NoError(t, err)
 
-	cache := repoRedactCache(ctx, repo)
+	cache := repoRedactCache(repo)
 	require.NotNil(t, cache)
 	require.Nil(t, cache.load(transcriptCacheKey("sess-oc")),
 		"a single JSON value must never be cached for splicing")
@@ -201,10 +201,7 @@ func TestRedactTranscriptCached_PrefixSurvivesGC(t *testing.T) {
 	_, err := RedactTranscriptCached(ctx, repo, session, []byte(content), jsonlRedactor)
 	require.NoError(t, err)
 
-	gc := exec.CommandContext(ctx, "git", "gc", "--prune=all", "--quiet")
-	gc.Dir = dir
-	out, gcErr := gc.CombinedOutput()
-	require.NoError(t, gcErr, "git gc failed: %s", out)
+	testutil.RunGit(t, dir, "gc", "--prune=all", "--quiet")
 
 	// Reopen: gc rewrote the object store underneath the cached handle.
 	reopened, err := gitrepo.OpenPath(dir)

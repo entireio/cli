@@ -7,23 +7,17 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"os/exec"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/spf13/cobra"
+
 	"github.com/entireio/cli/cmd/entire/cli/api"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
-	"github.com/spf13/cobra"
 )
 
 const agentHelpTestRepo = "gh/acme/app"
-
-// testTrailCellRoutedFullName is the "owner/repo" fullName the entire-api
-// cell-routed client (trailRefreshAPIClient) is expected to receive when a
-// repo-scoped trails probe routes correctly through it, shared by the tests
-// covering the two legacy-BFF-routing fixes.
-const testTrailCellRoutedFullName = "acme/widget"
 
 // commandNames returns the Use-name of each command, for assertions.
 func commandNames(cmds []*cobra.Command) []string {
@@ -116,12 +110,7 @@ func TestAgentHelpRepoContext_RefreshesUnknownTrailsEnablement(t *testing.T) {
 	testutil.IsolateGitConfigEnv(t)
 	t.Setenv("ENTIRE_CONFIG_DIR", t.TempDir())
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
-	cmd := exec.CommandContext(t.Context(), "git", "remote", "add", "origin", "git@github.com:acme/app.git")
-	cmd.Dir = repoDir
-	cmd.Env = testutil.GitIsolatedEnv()
-	if err := cmd.Run(); err != nil {
-		t.Fatalf("git remote add: %v", err)
-	}
+	testutil.RunGit(t, repoDir, "remote", "add", "origin", "git@github.com:acme/app.git")
 	t.Chdir(repoDir)
 
 	refreshCalls := 0
@@ -151,12 +140,7 @@ func TestAgentHelpRepoContext_CachesRefreshFailureBriefly(t *testing.T) {
 	t.Setenv("ENTIRE_TOKEN", makeTestJWT(t, `{"iss":"https://auth.entire.io","sub":"user-1","handle":"alice","aud":"https://entire.io"}`))
 	repoDir := t.TempDir()
 	testutil.InitRepo(t, repoDir)
-	cmd := exec.CommandContext(t.Context(), "git", "remote", "add", "origin", "git@github.com:acme/app.git")
-	cmd.Dir = repoDir
-	cmd.Env = testutil.GitIsolatedEnv()
-	if err := cmd.Run(); err != nil {
-		t.Fatalf("git remote add: %v", err)
-	}
+	testutil.RunGit(t, repoDir, "remote", "add", "origin", "git@github.com:acme/app.git")
 	t.Chdir(repoDir)
 
 	refreshCalls := 0
@@ -209,12 +193,7 @@ func TestAgentHelpRepoContext_SkipsRefreshWithoutLocalIdentity(t *testing.T) {
 	t.Setenv("ENTIRE_CONFIG_DIR", t.TempDir())
 	repoDir := t.TempDir()
 	testutil.InitRepo(t, repoDir)
-	cmd := exec.CommandContext(t.Context(), "git", "remote", "add", "origin", "git@github.com:acme/app.git")
-	cmd.Dir = repoDir
-	cmd.Env = testutil.GitIsolatedEnv()
-	if err := cmd.Run(); err != nil {
-		t.Fatalf("git remote add: %v", err)
-	}
+	testutil.RunGit(t, repoDir, "remote", "add", "origin", "git@github.com:acme/app.git")
 	t.Chdir(repoDir)
 
 	refreshCalls := 0
@@ -245,10 +224,10 @@ func TestRefreshAgentHelpTrailsEnabledCacheIfStaleForScope_RoutesThroughRepoCell
 	t.Chdir(t.TempDir())
 
 	previous := trailRefreshAPIClient
-	var gotFullName string
+	var gotForge, gotOwner, gotRepo string
 	wantErr := errors.New("cell client unavailable")
-	trailRefreshAPIClient = func(_ context.Context, _ bool, fullName string) (*api.Client, error) {
-		gotFullName = fullName
+	trailRefreshAPIClient = func(_ context.Context, _ bool, forge, owner, repo string) (*api.Client, error) {
+		gotForge, gotOwner, gotRepo = forge, owner, repo
 		return nil, wantErr
 	}
 	t.Cleanup(func() { trailRefreshAPIClient = previous })
@@ -257,16 +236,16 @@ func TestRefreshAgentHelpTrailsEnabledCacheIfStaleForScope_RoutesThroughRepoCell
 		Forge:     "gh",
 		Owner:     "acme",
 		Repo:      "widget",
-		RepoKey:   trailEnablementRepoKey("gh", "acme", "widget"),
 		APIBase:   api.BaseURL(),
 		AuthKey:   "test-auth-key",
 		Supported: true,
 	}
+	scope.RepoKey = trailEnablementRepoKey(scope.Forge, scope.Owner, scope.Repo)
 
 	err := refreshAgentHelpTrailsEnabledCacheIfStaleForScope(t.Context(), scope)
 
-	if gotFullName != testTrailCellRoutedFullName {
-		t.Fatalf("trailRefreshAPIClient fullName = %q, want %s", gotFullName, testTrailCellRoutedFullName)
+	if gotForge != scope.Forge || gotOwner != scope.Owner || gotRepo != scope.Repo {
+		t.Fatalf("trailRefreshAPIClient repo = (%q,%q,%q), want (gh,acme,widget)", gotForge, gotOwner, gotRepo)
 	}
 	if !errors.Is(err, wantErr) {
 		t.Fatalf("err = %v, want %v", err, wantErr)
@@ -287,7 +266,7 @@ func TestRefreshAgentHelpTrailsEnabledCacheIfStaleForScope_NotOnboardedSavesDisa
 	runGitInDir(t, ".", "remote", "add", "origin", "https://github.com/acme/widget.git")
 
 	previous := trailRefreshAPIClient
-	trailRefreshAPIClient = func(context.Context, bool, string) (*api.Client, error) {
+	trailRefreshAPIClient = func(context.Context, bool, string, string, string) (*api.Client, error) {
 		return nil, fmt.Errorf("resolve the Entire cell for acme/widget: %w", errRepoNotOnboarded)
 	}
 	t.Cleanup(func() { trailRefreshAPIClient = previous })

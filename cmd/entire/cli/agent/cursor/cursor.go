@@ -227,8 +227,8 @@ func (c *CursorAgent) WriteSession(_ context.Context, session *agent.AgentSessio
 		return errors.New("session has no native data to write")
 	}
 
-	if err := os.WriteFile(session.SessionRef, session.NativeData, 0o600); err != nil {
-		return fmt.Errorf("failed to write transcript: %w", err)
+	if err := agent.WriteSessionFile(c, session, session.NativeData, 0o600); err != nil {
+		return fmt.Errorf("write transcript: %w", err)
 	}
 
 	return nil
@@ -261,3 +261,10 @@ func (c *CursorAgent) ChunkTranscript(_ context.Context, content []byte, maxSize
 func (c *CursorAgent) ReassembleTranscript(chunks [][]byte) ([]byte, error) {
 	return agent.ReassembleJSONL(chunks), nil
 }
+
+// CallerSessionEnvVar names the variable holding the session ID Cursor
+// publishes into the environment of the processes its shell tool spawns,
+// alongside CURSOR_AGENT. It is the same conversation ID every Cursor
+// lifecycle event reports as its session ID, so it resolves against session
+// state without translation.
+func (c *CursorAgent) CallerSessionEnvVar() string { return "CURSOR_CONVERSATION_ID" }

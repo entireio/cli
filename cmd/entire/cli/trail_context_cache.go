@@ -14,10 +14,12 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/api"
 	"github.com/entireio/cli/cmd/entire/cli/auth"
 	"github.com/entireio/cli/cmd/entire/cli/execx"
+	"github.com/entireio/cli/cmd/entire/cli/gitdir"
 	"github.com/entireio/cli/cmd/entire/cli/gitremote"
 	"github.com/entireio/cli/cmd/entire/cli/internal/flock"
 	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
+	"github.com/entireio/cli/cmd/entire/cli/osroot"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
@@ -289,8 +291,9 @@ func refreshTrailsEnabledCacheIfStaleForScope(ctx context.Context, scope trailEn
 // data-API/BFF client: the BFF does not proxy /api/v1/trails/... for bearer
 // callers (COR-666), so probing it via the generic client silently misreads a
 // supported repo as disabled.
-var trailRefreshAPIClient = func(ctx context.Context, insecureHTTP bool, fullName string) (*api.Client, error) {
-	return newTrailAPIClient(ctx, insecureHTTP, fullName)
+var trailRefreshAPIClient = func(ctx context.Context, insecureHTTP bool, forge, owner, repo string) (*api.Client, error) {
+	client, _, err := newTrailAPIClient(ctx, insecureHTTP, forge, owner, repo)
+	return client, err
 }
 
 // trailsCellClient resolves the entire-api cell client for ownerRepo via
@@ -308,8 +311,8 @@ var trailRefreshAPIClient = func(ctx context.Context, insecureHTTP bool, fullNam
 // a caller can log it without having to know which of the two it got. When
 // notOnboarded is true, err is the sentinel-wrapping error, kept for logging;
 // callers must act on notOnboarded, not propagate err.
-func trailsCellClient(ctx context.Context, insecureHTTP bool, ownerRepo string) (client *api.Client, notOnboarded bool, err error) {
-	client, err = trailRefreshAPIClient(ctx, insecureHTTP, ownerRepo)
+func trailsCellClient(ctx context.Context, insecureHTTP bool, forge, owner, repo string) (client *api.Client, notOnboarded bool, err error) {
+	client, err = trailRefreshAPIClient(ctx, insecureHTTP, forge, owner, repo)
 	switch {
 	case err == nil:
 		return client, false, nil
@@ -350,7 +353,7 @@ func runTrailEnablementRefresh(ctx context.Context) error {
 		}
 		return nil
 	}
-	client, notOnboarded, err := trailsCellClient(ctx, false, scope.Owner+"/"+scope.Repo)
+	client, notOnboarded, err := trailsCellClient(ctx, false, scope.Forge, scope.Owner, scope.Repo)
 	if notOnboarded {
 		// A definitive, permanent negative: without this, every SessionStart
 		// re-forks a refresh child for this repo forever (see
@@ -444,30 +447,37 @@ func trailRefreshRecentlySpawned(commonDir string, now time.Time) bool {
 // trail-enablement refresh and the zombie-session sweep, each with its own
 // marker name and ttl.
 func recentlySpawnedMarker(commonDir, marker string, ttl time.Duration, now time.Time) bool {
-	dir := filepath.Join(commonDir, "entire")
-	// Create the directory before acquiring the lock: flock.Acquire opens the
-	// lock file, which fails if its parent doesn't exist yet (mirrors
-	// ModifyClonePreferences, which MkdirAlls before locking).
-	if err := os.MkdirAll(dir, 0o750); err != nil {
+	root, err := gitdir.OpenAt(commonDir)
+	if err != nil {
 		return false
 	}
-	markerPath := filepath.Join(dir, marker)
-	release, err := flock.Acquire(markerPath + ".lock")
+	// Create the directory before acquiring the lock: flock opens the lock file,
+	// which fails if its parent doesn't exist yet (mirrors
+	// ModifyClonePreferences, which creates before locking).
+	if err := osroot.MkdirAllNoSymlink(root, spawnMarkerDirName, 0o750); err != nil {
+		return false
+	}
+	markerName := spawnMarkerDirName + "/" + marker
+	release, err := flock.AcquireIn(root, markerName+".lock")
 	if err != nil {
 		return false
 	}
 	defer release()
 
-	if data, readErr := os.ReadFile(markerPath); readErr == nil { //nolint:gosec // markerPath is derived from the trusted git-common-dir, not user input
+	if data, readErr := osroot.ReadFileNoFollow(root, markerName); readErr == nil {
 		if last, parseErr := time.Parse(time.RFC3339Nano, strings.TrimSpace(string(data))); parseErr == nil &&
 			now.After(last) && now.Sub(last) < ttl {
 			return true
 		}
 	}
 	//nolint:errcheck // best-effort marker; a failed write just means the next hook re-spawns
-	_ = os.WriteFile(markerPath, []byte(now.UTC().Format(time.RFC3339Nano)), 0o600)
+	_ = jsonutil.WriteFileAtomicIn(root, markerName, []byte(now.UTC().Format(time.RFC3339Nano)), 0o600)
 	return false
 }
+
+// spawnMarkerDirName is the marker directory inside the git common dir. It is
+// the same "entire" directory clone preferences live in.
+const spawnMarkerDirName = "entire"
 
 // newRefreshTrailEnablementCmd creates the hidden command that performs the
 // (potentially slow) trails-enablement network refresh out of band. It is
@@ -543,19 +553,20 @@ func noteTrailCommandEnablement(ctx context.Context, client *api.Client, command
 }
 
 // runAuthenticatedTrailAPI runs fn against the entire-api cell that owns the
-// target repository. repoOverride is the raw --repo flag: when non-empty the
-// local clone's enablement cache is skipped because the result belongs to a
-// different repository.
-func runAuthenticatedTrailAPI(ctx context.Context, errW io.Writer, insecureHTTP bool, repoOverride string, fn func(context.Context, *api.Client) error) error {
-	_, owner, repo, err := resolveTrailRepoOrRemote(ctx, repoOverride)
+// target repository and exposes the repo ID needed to address native trail
+// routes. repoOverride is the raw --repo flag: when non-empty the local clone's
+// enablement cache is skipped because the result belongs to a different
+// repository.
+func runAuthenticatedTrailAPI(ctx context.Context, errW io.Writer, insecureHTTP bool, repoOverride string, fn func(context.Context, *api.Client, string) error) error {
+	forge, owner, repo, err := resolveTrailRepoOrRemote(ctx, repoOverride)
 	if err != nil {
 		return err
 	}
-	client, err := newTrailAPIClient(ctx, insecureHTTP, owner+"/"+repo)
+	client, repoID, err := newTrailAPIClient(ctx, insecureHTTP, forge, owner, repo)
 	if err != nil {
 		return renderDataAPIAuthError(ctx, errW, owner+"/"+repo, err)
 	}
-	err = fn(ctx, client)
+	err = fn(ctx, client, repoID)
 	if repoOverride == "" {
 		noteTrailCommandEnablement(ctx, client, err)
 	}

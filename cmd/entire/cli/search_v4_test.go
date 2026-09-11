@@ -765,11 +765,9 @@ func TestNewSemanticSearcher_RejectsMultipleRepoFilters(t *testing.T) {
 }
 
 // TestMergeSemanticV4Responses_AllCellsRepoUnmatched verifies the error when
-// every queried cell answered but none matched the repo filter (not indexed,
-// or the owner org isn't flag-enabled — a typo can't reach this point, the
-// slug already resolved). The old behavior lumped this in with undeployed
-// cells and told the user their REGION lacked semantic search — a
-// misdiagnosis that sent a flag-enrollment gap to the wrong team.
+// every queried cell answered but none has indexed the repo. A typo cannot
+// reach this point because the slug already resolved. The error must not
+// misdiagnose the miss as a region without semantic search.
 func TestMergeSemanticV4Responses_AllCellsRepoUnmatched(t *testing.T) {
 	t.Parallel()
 
@@ -783,8 +781,8 @@ func TestMergeSemanticV4Responses_AllCellsRepoUnmatched(t *testing.T) {
 	if strings.Contains(err.Error(), "region") {
 		t.Errorf("error = %q, must not blame the region for a repo-filter miss", err.Error())
 	}
-	if !strings.Contains(err.Error(), "repo") || !strings.Contains(err.Error(), "enabled") {
-		t.Errorf("error = %q, want it to point at the repo name, access, or semantic-search enablement", err.Error())
+	if !strings.Contains(err.Error(), "repo") || !strings.Contains(err.Error(), "indexed") {
+		t.Errorf("error = %q, want it to identify the repository as not indexed", err.Error())
 	}
 }
 

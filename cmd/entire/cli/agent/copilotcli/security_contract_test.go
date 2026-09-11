@@ -16,8 +16,8 @@ import (
 // must validate first.
 //
 // This test fails if the validator stops rejecting ".." (regressing the
-// resume/rewind guard) or if the layout changes such that the ID is no longer a
-// directory component without a matching guard update.
+// checkpoint-session restoration guard) or if the layout changes such that the
+// ID is no longer a directory component without a matching guard update.
 func TestResolveSessionFile_DirComponent_GuardedByValidator(t *testing.T) {
 	t.Parallel()
 

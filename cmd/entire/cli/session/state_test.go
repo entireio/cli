@@ -10,7 +10,9 @@ import (
 	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
+	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
+	"github.com/entireio/cli/cmd/entire/cli/osroot"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -556,43 +558,66 @@ func TestStateStore_Clear_NonexistentDir(t *testing.T) {
 	assert.NoError(t, err)
 }
 
-func TestStateStore_SaveLoadClear_SymlinkedDir(t *testing.T) {
+// macOS resolves /tmp through a symlink to /private/tmp, so a t.TempDir() path
+// has a symlinked ANCESTOR. That must keep working: the state directory is a
+// name inside a root opened on its parent, and os.OpenRoot resolves the path it
+// is handed normally — the refusal below applies to components inside the root,
+// not to the path used to open it.
+func TestStateStore_SaveLoadClear_SymlinkedAncestor(t *testing.T) {
 	t.Parallel()
 
-	// Simulate macOS-style symlinked temp paths: create the real dir,
-	// then point a symlink at it, and use the symlink path as stateDir.
-	realDir := filepath.Join(t.TempDir(), "real-sessions")
-	require.NoError(t, os.MkdirAll(realDir, 0o750))
+	realParent := filepath.Join(t.TempDir(), "real-parent")
+	require.NoError(t, os.MkdirAll(realParent, 0o750))
 
-	linkParent := t.TempDir()
-	symlinkedDir := filepath.Join(linkParent, "linked-sessions")
-	require.NoError(t, os.Symlink(realDir, symlinkedDir))
+	linkedParent := filepath.Join(t.TempDir(), "linked-parent")
+	if err := os.Symlink(realParent, linkedParent); err != nil {
+		t.Skipf("symlink not supported: %v", err)
+	}
 
-	store := NewStateStoreWithDir(symlinkedDir)
+	store := NewStateStoreWithDir(filepath.Join(linkedParent, SessionStateDirName))
 	ctx := context.Background()
 
-	// Save through the symlinked path
-	state := &State{
-		SessionID:  "symlink-test",
-		BaseCommit: "abc123",
-		StartedAt:  time.Now(),
-	}
+	state := &State{SessionID: "symlink-test", BaseCommit: "abc123", StartedAt: time.Now()}
 	require.NoError(t, store.Save(ctx, state))
 
-	// Load should work through the symlink
 	loaded, err := store.Load(ctx, "symlink-test")
 	require.NoError(t, err)
 	require.NotNil(t, loaded)
 	assert.Equal(t, "symlink-test", loaded.SessionID)
 
-	// File should exist in the real directory
-	_, err = os.Stat(filepath.Join(realDir, "symlink-test.json"))
-	assert.NoError(t, err, "file should exist in the real directory behind the symlink")
+	_, err = os.Stat(filepath.Join(realParent, SessionStateDirName, "symlink-test.json"))
+	assert.NoError(t, err, "file should exist behind the symlinked ancestor")
 
-	// Clear should work through the symlink
 	require.NoError(t, store.Clear(ctx, "symlink-test"))
-	_, err = os.Stat(filepath.Join(realDir, "symlink-test.json"))
+	_, err = os.Stat(filepath.Join(realParent, SessionStateDirName, "symlink-test.json"))
 	assert.True(t, os.IsNotExist(err), "file should be removed after Clear")
+}
+
+// The state directory ITSELF being a symlink is refused, not followed. Entire
+// creates this directory; one that is a link is a directory it did not create
+// and cannot vouch for, and following it would put session state — which commit
+// linking depends on — somewhere outside the clone without anyone being told.
+// `entire doctor` reports it by name.
+func TestStateStore_Save_RefusesSymlinkedStateDir(t *testing.T) {
+	t.Parallel()
+
+	realDir := filepath.Join(t.TempDir(), "real-sessions")
+	require.NoError(t, os.MkdirAll(realDir, 0o750))
+
+	parent := t.TempDir()
+	if err := os.Symlink(realDir, filepath.Join(parent, SessionStateDirName)); err != nil {
+		t.Skipf("symlink not supported: %v", err)
+	}
+
+	store := NewStateStoreWithDir(filepath.Join(parent, SessionStateDirName))
+	err := store.Save(context.Background(), &State{
+		SessionID: "symlink-test", BaseCommit: "abc123", StartedAt: time.Now(),
+	})
+	require.ErrorIs(t, err, osroot.ErrSymlinkedPath)
+
+	entries, readErr := os.ReadDir(realDir)
+	require.NoError(t, readErr)
+	assert.Empty(t, entries, "nothing may be written through the link")
 }
 
 func TestStateStore_List_EmptyDir(t *testing.T) {
@@ -625,13 +650,14 @@ func initTestRepo(t *testing.T) string {
 func TestGetGitCommonDir_ReturnsValidPath(t *testing.T) {
 	dir := initTestRepo(t)
 
-	commonDir, err := getGitCommonDir(context.Background())
+	commonDir, err := GetGitCommonDir(context.Background())
 	require.NoError(t, err)
 
-	// getGitCommonDir returns a relative path from cwd; resolve it to absolute for comparison
-	absCommonDir, err := filepath.Abs(commonDir)
-	require.NoError(t, err)
-	assert.Equal(t, filepath.Join(dir, ".git"), absCommonDir)
+	// Absolute by contract: `git rev-parse --git-common-dir` answers relative to
+	// cwd, and every path built on the result would otherwise stop being valid
+	// as soon as anything changed directory.
+	assert.True(t, filepath.IsAbs(commonDir), "common dir must be absolute, got %q", commonDir)
+	assert.Equal(t, filepath.Join(dir, ".git"), commonDir)
 
 	// The path should actually exist
 	info, err := os.Stat(commonDir)
@@ -643,11 +669,11 @@ func TestGetGitCommonDir_CachesResult(t *testing.T) {
 	initTestRepo(t)
 
 	// First call populates cache
-	first, err := getGitCommonDir(context.Background())
+	first, err := GetGitCommonDir(context.Background())
 	require.NoError(t, err)
 
 	// Second call should return the same result (from cache)
-	second, err := getGitCommonDir(context.Background())
+	second, err := GetGitCommonDir(context.Background())
 	require.NoError(t, err)
 
 	assert.Equal(t, first, second)
@@ -656,22 +682,13 @@ func TestGetGitCommonDir_CachesResult(t *testing.T) {
 func TestGetGitCommonDir_ClearCache(t *testing.T) {
 	initTestRepo(t)
 
-	// Populate cache
-	_, err := getGitCommonDir(context.Background())
+	first, err := GetGitCommonDir(context.Background())
 	require.NoError(t, err)
 
-	// Verify cache is populated
-	gitCommonDirMu.RLock()
-	assert.NotEmpty(t, gitCommonDirCache)
-	gitCommonDirMu.RUnlock()
-
-	// Clear and verify
 	ClearGitCommonDirCache()
-
-	gitCommonDirMu.RLock()
-	assert.Empty(t, gitCommonDirCache)
-	assert.Empty(t, gitCommonDirCacheDir)
-	gitCommonDirMu.RUnlock()
+	second, err := GetGitCommonDir(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, first, second)
 }
 
 func TestGetGitCommonDir_InvalidatesOnCwdChange(t *testing.T) {
@@ -692,7 +709,7 @@ func TestGetGitCommonDir_InvalidatesOnCwdChange(t *testing.T) {
 
 	// Populate cache from dir1
 	t.Chdir(dir1)
-	first, err := getGitCommonDir(context.Background())
+	first, err := GetGitCommonDir(context.Background())
 	require.NoError(t, err)
 	absFirst, err := filepath.Abs(first)
 	require.NoError(t, err)
@@ -700,7 +717,7 @@ func TestGetGitCommonDir_InvalidatesOnCwdChange(t *testing.T) {
 
 	// Change to dir2 — cache should miss and resolve to dir2's .git
 	t.Chdir(dir2)
-	second, err := getGitCommonDir(context.Background())
+	second, err := GetGitCommonDir(context.Background())
 	require.NoError(t, err)
 	absSecond, err := filepath.Abs(second)
 	require.NoError(t, err)
@@ -714,7 +731,7 @@ func TestGetGitCommonDir_ErrorOutsideRepo(t *testing.T) {
 	t.Chdir(dir)
 	ClearGitCommonDirCache()
 
-	_, err := getGitCommonDir(context.Background())
+	_, err := GetGitCommonDir(context.Background())
 	assert.Error(t, err)
 }
 
@@ -859,6 +876,7 @@ func TestState_TaskRecords_RoundTrip(t *testing.T) {
 				SubagentType:           "code-reviewer",
 				TaskDescription:        "Review the diff",
 				DeclaredTranscriptPath: "/tmp/agent-a123.jsonl",
+				TranscriptUnavailable:  true,
 				Files:                  []string{"foo.go", "bar.go"},
 				TokenUsage:             &agent.TokenUsage{InputTokens: 100, OutputTokens: 50},
 				CompletedAt:            completedAt,
@@ -888,6 +906,7 @@ func TestState_TaskRecords_RoundTrip(t *testing.T) {
 	assert.Equal(t, "code-reviewer", record.SubagentType)
 	assert.Equal(t, "Review the diff", record.TaskDescription)
 	assert.Equal(t, "/tmp/agent-a123.jsonl", record.DeclaredTranscriptPath)
+	assert.True(t, record.TranscriptUnavailable)
 	assert.Equal(t, []string{"foo.go", "bar.go"}, record.Files)
 	require.NotNil(t, record.TokenUsage)
 	assert.Equal(t, 100, record.TokenUsage.InputTokens)
@@ -1034,4 +1053,202 @@ func TestState_LiveTaskRecords(t *testing.T) {
 	assert.Equal(t, "toolu_live", live[0].ToolUseID)
 
 	assert.Empty(t, (&State{}).LiveTaskRecords())
+}
+
+func TestState_SubagentInventoryLedger(t *testing.T) {
+	t.Parallel()
+
+	stopFirst := &State{}
+	if !stopFirst.RecordSubagentStop("child-stop-first", "turn-stop-first") {
+		t.Fatal("stop-before-start observation must be recorded")
+	}
+	record := stopFirst.FindTaskRecord("child-stop-first")
+	require.NotNil(t, record, "a stop-before-start observation must preserve pending task content")
+	assert.Equal(t, "child-stop-first", record.AgentID)
+	assert.True(t, stopFirst.HasTaskContent())
+	startedAt := time.Now().UTC()
+	assert.False(t, stopFirst.EnsureTaskRecord(TaskRecord{
+		ToolUseID:       "child-stop-first",
+		AgentID:         "child-stop-first",
+		StartedAt:       startedAt,
+		SubagentType:    "default",
+		TaskDescription: "late start metadata",
+	}), "the late start must enrich, not replace, the pending record")
+	assert.Equal(t, startedAt, record.StartedAt)
+	assert.Equal(t, "default", record.SubagentType)
+	assert.Equal(t, "late start metadata", record.TaskDescription)
+
+	complete := true
+	state := &State{
+		TokenUsage:           &agent.TokenUsage{InputTokens: 5, SubagentTokens: &agent.TokenUsage{InputTokens: 3}, SubagentTokensComplete: &complete},
+		CheckpointTokenUsage: &agent.TokenUsage{OutputTokens: 2, SubagentTokens: &agent.TokenUsage{OutputTokens: 1}, SubagentTokensComplete: &complete},
+	}
+	if !state.RegisterSubagent("child-1", "turn-1") {
+		t.Fatal("first child observation must be recorded")
+	}
+	assert.Equal(t, uint64(1), state.SubagentLedgerVersion)
+	assertIncompleteSubagentUsage(t, state)
+
+	// A later exact extraction may have refreshed both aggregates. Duplicate
+	// observations and path-only enrichment must preserve that fresh coverage.
+	refreshedComplete := true
+	state.TokenUsage.SubagentTokens = &agent.TokenUsage{InputTokens: 21}
+	state.TokenUsage.SubagentTokensComplete = &refreshedComplete
+	state.CheckpointTokenUsage.SubagentTokens = &agent.TokenUsage{OutputTokens: 13}
+	state.CheckpointTokenUsage.SubagentTokensComplete = &refreshedComplete
+	versionBeforeDuplicate := state.SubagentLedgerVersion
+	if state.RegisterSubagent("child-1", "turn-1") {
+		t.Fatal("duplicate agent/turn observation must be a true no-op")
+	}
+	assert.Equal(t, versionBeforeDuplicate, state.SubagentLedgerVersion)
+	assertCompleteSubagentUsage(t, state, 21, 13)
+	versionBeforePathEnrichment := state.SubagentLedgerVersion
+	assert.True(t, state.UpdateSubagentTranscriptPaths("child-1", "/tmp/declared.jsonl", "/tmp/resolved.jsonl"))
+	assert.Equal(t, versionBeforePathEnrichment, state.SubagentLedgerVersion, "path enrichment must not churn the ledger generation")
+	assertCompleteSubagentUsage(t, state, 21, 13)
+
+	if !state.RecordSubagentStop("child-1", "turn-2") {
+		t.Fatal("stop-first new turn must be recorded")
+	}
+	assert.Equal(t, uint64(2), state.SubagentLedgerVersion)
+	assertIncompleteSubagentUsage(t, state)
+	entry := state.FindSubagentInventory("child-1")
+	require.NotNil(t, entry)
+	require.Contains(t, entry.ObservedTurnIDs, "turn-2")
+	require.NotContains(t, entry.FinalizedTurnIDs, "turn-2")
+
+	// A stop retry must leave already-calculated token coverage intact.
+	stopRefreshComplete := true
+	state.TokenUsage.SubagentTokens = &agent.TokenUsage{InputTokens: 34}
+	state.TokenUsage.SubagentTokensComplete = &stopRefreshComplete
+	state.CheckpointTokenUsage.SubagentTokens = &agent.TokenUsage{OutputTokens: 21}
+	state.CheckpointTokenUsage.SubagentTokensComplete = &stopRefreshComplete
+	versionBeforeStopRefresh := state.SubagentLedgerVersion
+	assert.False(t, state.RecordSubagentStop("child-1", "turn-2"), "duplicate stop must be a no-op")
+	assert.Equal(t, versionBeforeStopRefresh, state.SubagentLedgerVersion)
+	assertCompleteSubagentUsage(t, state, 34, 21)
+
+	state.RecordSubagentStop("child-1", "turn-3")
+	require.Contains(t, entry.ObservedTurnIDs, "turn-3", "several pending turns must coexist")
+	if !state.FinalizeSubagentTurn("child-1", "turn-2") {
+		t.Fatal("pending turn must finalize")
+	}
+	assert.Contains(t, entry.FinalizedTurnIDs, "turn-2")
+	if state.FinalizeSubagentTurn("child-1", "turn-2") {
+		t.Fatal("finalized turn must be exactly once")
+	}
+}
+
+func assertIncompleteSubagentUsage(t *testing.T, state *State) {
+	t.Helper()
+	for _, usage := range []*agent.TokenUsage{state.TokenUsage, state.CheckpointTokenUsage} {
+		require.NotNil(t, usage)
+		assert.Nil(t, usage.SubagentTokens)
+		require.NotNil(t, usage.SubagentTokensComplete)
+		assert.False(t, *usage.SubagentTokensComplete)
+	}
+}
+
+func assertCompleteSubagentUsage(t *testing.T, state *State, sessionInput, checkpointOutput int) {
+	t.Helper()
+	assert.Equal(t, &agent.TokenUsage{InputTokens: sessionInput}, state.TokenUsage.SubagentTokens)
+	assert.Equal(t, &agent.TokenUsage{OutputTokens: checkpointOutput}, state.CheckpointTokenUsage.SubagentTokens)
+	assert.True(t, *state.TokenUsage.SubagentTokensComplete)
+	assert.True(t, *state.CheckpointTokenUsage.SubagentTokensComplete)
+}
+
+func TestState_SubagentInventoryRoundTripAndTaskRecordRecovery(t *testing.T) {
+	t.Parallel()
+	now := time.Now().UTC().Truncate(time.Second)
+	complete := true
+	state := State{
+		AgentType:                      agent.AgentTypeCodex,
+		SubagentInventoryComplete:      &complete,
+		SubagentTokensBaselineComplete: &complete,
+		SubagentLedgerVersion:          7,
+		SubagentInventory: []SubagentInventoryEntry{{
+			AgentID:                "child-1",
+			DeclaredTranscriptPath: "/tmp/child.jsonl",
+			ResolvedTranscriptPath: "/tmp/resolved.jsonl",
+			ObservedTurnIDs:        []string{"turn-1"},
+			FinalizedTurnIDs:       []string{"turn-0"},
+		}},
+	}
+	data, err := json.Marshal(state)
+	require.NoError(t, err)
+	var got State
+	require.NoError(t, json.Unmarshal(data, &got))
+	require.NotNil(t, got.SubagentInventoryComplete)
+	assert.True(t, *got.SubagentInventoryComplete)
+	require.NotNil(t, got.SubagentTokensBaselineComplete)
+	assert.True(t, *got.SubagentTokensBaselineComplete)
+	assert.Equal(t, uint64(7), got.SubagentLedgerVersion)
+	assert.Equal(t, state.SubagentInventory, got.SubagentInventory)
+
+	materialized := TaskRecord{ToolUseID: "child-1", AgentID: "child-1", StartedAt: now, CompletedAt: now}
+	got.AddTaskRecord(materialized)
+	assert.False(t, got.EnsureTaskRecord(TaskRecord{ToolUseID: "child-1", AgentID: "child-1", StartedAt: now.Add(time.Minute)}), "unmaterialized record must not be replaced")
+	assert.True(t, got.TaskRecords[0].CompletedAt.Equal(now))
+	got.RemoveTaskRecord("child-1")
+	assert.True(t, got.EnsureTaskRecord(TaskRecord{ToolUseID: "child-1", AgentID: "child-1", StartedAt: now.Add(time.Minute)}), "follow-up must recreate a materialized record")
+}
+
+func TestState_NormalizeAfterLoad_CodexInventoryMigration(t *testing.T) {
+	t.Parallel()
+	legacy := &State{
+		AgentType:            agent.AgentTypeCodex,
+		TokenUsage:           &agent.TokenUsage{SubagentTokens: &agent.TokenUsage{InputTokens: 4}},
+		CheckpointTokenUsage: &agent.TokenUsage{SubagentTokens: &agent.TokenUsage{InputTokens: 2}},
+		TaskRecords:          []TaskRecord{{AgentID: "child-1"}},
+	}
+	legacy.NormalizeAfterLoad(context.Background())
+	require.NotNil(t, legacy.SubagentInventoryComplete)
+	assert.False(t, *legacy.SubagentInventoryComplete)
+	require.NotNil(t, legacy.SubagentTokensBaselineComplete)
+	assert.False(t, *legacy.SubagentTokensBaselineComplete)
+	assertIncompleteSubagentUsage(t, legacy)
+	require.Len(t, legacy.SubagentInventory, 1)
+	assert.Equal(t, "child-1", legacy.SubagentInventory[0].AgentID)
+
+	nonCodex := &State{AgentType: agent.AgentTypeClaudeCode}
+	nonCodex.NormalizeAfterLoad(context.Background())
+	assert.Nil(t, nonCodex.SubagentInventoryComplete)
+	assert.Nil(t, nonCodex.SubagentTokensBaselineComplete)
+
+	explicitComplete := true
+	explicit := &State{AgentType: agent.AgentTypeCodex, SubagentInventoryComplete: &explicitComplete, SubagentTokensBaselineComplete: &explicitComplete, TokenUsage: &agent.TokenUsage{SubagentTokens: &agent.TokenUsage{InputTokens: 9}}}
+	explicit.NormalizeAfterLoad(context.Background())
+	assert.True(t, *explicit.SubagentInventoryComplete)
+	assert.NotNil(t, explicit.TokenUsage.SubagentTokens, "an explicit state must not be migrated again")
+}
+
+func TestState_RebaselineSubagentTokensPreservesTriState(t *testing.T) {
+	t.Parallel()
+	complete := true
+	incomplete := false
+
+	exactEmpty := &State{TokenUsage: &agent.TokenUsage{SubagentTokensComplete: &complete}}
+	exactEmpty.RebaselineSubagentTokens()
+	require.NotNil(t, exactEmpty.SubagentTokensBaselineComplete)
+	assert.True(t, *exactEmpty.SubagentTokensBaselineComplete)
+	assert.Nil(t, exactEmpty.SubagentTokensBaseline)
+
+	unknown := &State{TokenUsage: &agent.TokenUsage{SubagentTokens: &agent.TokenUsage{InputTokens: 9}, SubagentTokensComplete: &incomplete}}
+	unknown.RebaselineSubagentTokens()
+	require.NotNil(t, unknown.SubagentTokensBaselineComplete)
+	assert.False(t, *unknown.SubagentTokensBaselineComplete)
+	assert.Nil(t, unknown.SubagentTokensBaseline)
+}
+
+func TestState_RebaselineSubagentTokensPreservesLegacyNilUsage(t *testing.T) {
+	t.Parallel()
+	for _, agentType := range []types.AgentType{agent.AgentTypeClaudeCode, agent.AgentTypeFactoryAIDroid} {
+		t.Run(string(agentType), func(t *testing.T) {
+			t.Parallel()
+			state := &State{AgentType: agentType, SubagentTokensBaseline: &agent.TokenUsage{InputTokens: 7}}
+			state.RebaselineSubagentTokens()
+			require.Equal(t, &agent.TokenUsage{InputTokens: 7}, state.SubagentTokensBaseline)
+			require.Nil(t, state.SubagentTokensBaselineComplete)
+		})
+	}
 }

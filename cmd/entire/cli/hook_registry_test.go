@@ -14,6 +14,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/claudecode"
 	"github.com/entireio/cli/cmd/entire/cli/checkpointpolicy"
+	"github.com/entireio/cli/cmd/entire/cli/entiredir"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
@@ -86,7 +87,7 @@ func TestNewAgentHookVerbCmd_LogsInvocation(t *testing.T) {
 	t.Setenv(logging.LogLevelEnvVar, "DEBUG")
 
 	// Open the log sink (normally done by the root PersistentPreRun)
-	l, err := logging.New(logging.Config{Dir: logsDir, Level: resolveLogLevel(context.Background())})
+	l, err := logging.New(logging.Config{Root: entiredir.OpenerAt(tmpDir), Dir: logging.LogsName, Level: resolveLogLevel(context.Background())})
 	if err != nil {
 		t.Fatalf("logging.New() error = %v", err)
 	}

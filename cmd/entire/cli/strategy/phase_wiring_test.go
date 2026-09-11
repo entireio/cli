@@ -182,22 +182,11 @@ func setupGitRepo(t *testing.T) string {
 	dir := t.TempDir()
 
 	testutil.InitRepo(t, dir)
-	repo, err := git.PlainOpen(dir)
-	require.NoError(t, err)
 
-	// Create initial commit (required for HEAD to exist)
-	wt, err := repo.Worktree()
-	require.NoError(t, err)
-
-	// Create a test file
-	testFile := filepath.Join(dir, "test.txt")
-	require.NoError(t, writeTestFile(testFile, "initial content"))
-
-	_, err = wt.Add("test.txt")
-	require.NoError(t, err)
-
-	_, err = wt.Commit("initial commit", &git.CommitOptions{})
-	require.NoError(t, err)
+	// Create initial commit (required for HEAD to exist).
+	testutil.WriteFile(t, dir, "test.txt", "initial content")
+	testutil.GitAdd(t, dir, "test.txt")
+	testutil.GitCommit(t, dir, "initial commit")
 
 	return dir
 }
@@ -476,11 +465,6 @@ func TestCondenseAndMarkFullyCondensed_FilesWaitingForCommitDoesNotWaitForStateL
 	released = true
 }
 
-// writeTestFile is a helper to create a test file with given content.
-func writeTestFile(path, content string) error {
-	return os.WriteFile(path, []byte(content), 0o644)
-}
-
 // TestCondenseAndMarkFullyCondensed_WithDataNoFiles verifies that a session with
 // uncondensed data (StepCount > 0, shadow branch exists) but no FilesTouched
 // is condensed and marked FullyCondensed. This is the subagent case from #591:
@@ -506,15 +490,14 @@ func TestCondenseAndMarkFullyCondensed_WithDataNoFiles(t *testing.T) {
 
 	// SaveStep creates the shadow branch
 	err = s.SaveStep(context.Background(), StepContext{
-		SessionID:      sessionID,
-		ModifiedFiles:  []string{},
-		NewFiles:       []string{"agent_file.txt"},
-		DeletedFiles:   []string{},
-		MetadataDir:    metadataDir,
-		MetadataDirAbs: metadataDirAbs,
-		CommitMessage:  "Checkpoint 1",
-		AuthorName:     "Test",
-		AuthorEmail:    "test@test.com",
+		SessionID:     sessionID,
+		ModifiedFiles: []string{},
+		NewFiles:      []string{"agent_file.txt"},
+		DeletedFiles:  []string{},
+		MetadataDir:   metadataDir,
+		CommitMessage: "Checkpoint 1",
+		AuthorName:    "Test",
+		AuthorEmail:   "test@test.com",
 	})
 	require.NoError(t, err)
 

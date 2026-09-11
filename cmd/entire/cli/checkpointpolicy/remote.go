@@ -41,6 +41,14 @@ type RemoteState struct {
 	Hash   plumbing.Hash
 }
 
+// ResolveTarget resolves the policy sync target via remote.FetchURL.
+//
+// Accepted divergence: the ownership check inside FetchURL votes with origin
+// only here. This package cannot resolve the elected sync remote (strategy
+// imports checkpointpolicy, so importing back would cycle), which means the
+// fork-shaped topology that only the elected remote's owner exposes is not
+// detected on this path, unlike the strategy and cli fetch paths that pass
+// strategy.LeadCheckpointReadRemote.
 func ResolveTarget(ctx context.Context) (Target, error) {
 	dir, err := paths.WorktreeRoot(ctx)
 	if err != nil {
@@ -93,7 +101,7 @@ func SyncFrom(ctx context.Context, repo *git.Repository, targets []Target) (Stat
 	if !remoteFound {
 		return local, nil
 	}
-	if local.Hash == baseline.Hash {
+	if local.Hash.Equal(baseline.Hash) {
 		return baseline, nil
 	}
 
@@ -179,7 +187,7 @@ func findRemoteBaseline(ctx context.Context, repo *git.Repository, targets []Tar
 		if !remoteState.Exists {
 			continue
 		}
-		if local.Hash == remoteState.Hash {
+		if local.Hash.Equal(remoteState.Hash) {
 			baseline := local
 			baseline.Source = SourceRemote
 			baseline.RemoteHash = remoteState.Hash
@@ -273,7 +281,7 @@ func isAncestorOf(ctx context.Context, repo *git.Repository, ancestor, target pl
 		if err := ctx.Err(); err != nil {
 			return fmt.Errorf("checkpoint policy ancestry context: %w", err)
 		}
-		if commit.Hash == ancestor {
+		if commit.Hash.Equal(ancestor) {
 			found = true
 			return errStopTraversal
 		}

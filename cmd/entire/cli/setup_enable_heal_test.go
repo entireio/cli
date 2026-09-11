@@ -82,31 +82,17 @@ func TestEnableCmd_BareEnableHealsEmptyOrphanFromCheckpointRemote(t *testing.T) 
 
 func healTestGit(t *testing.T, dir string, args ...string) {
 	t.Helper()
-	cmd := exec.CommandContext(context.Background(), "git", args...)
-	cmd.Dir = dir
-	cmd.Env = testutil.GitIsolatedEnv()
-	out, err := cmd.CombinedOutput()
-	require.NoError(t, err, "git %v in %s failed: %s", args, dir, out)
+	testutil.RunGit(t, dir, args...)
 }
 
 func healTestCurrentBranch(t *testing.T, dir string) string {
 	t.Helper()
-	cmd := exec.CommandContext(context.Background(), "git", "rev-parse", "--abbrev-ref", "HEAD")
-	cmd.Dir = dir
-	cmd.Env = testutil.GitIsolatedEnv()
-	out, err := cmd.Output()
-	require.NoError(t, err)
-	return strings.TrimSpace(string(out))
+	return strings.TrimSpace(testutil.RunGit(t, dir, "rev-parse", "--abbrev-ref", "HEAD"))
 }
 
 func healTestRevParse(t *testing.T, dir, rev string) string {
 	t.Helper()
-	cmd := exec.CommandContext(context.Background(), "git", "rev-parse", rev)
-	cmd.Dir = dir
-	cmd.Env = testutil.GitIsolatedEnv()
-	out, err := cmd.Output()
-	require.NoError(t, err)
-	return strings.TrimSpace(string(out))
+	return strings.TrimSpace(testutil.RunGit(t, dir, "rev-parse", rev))
 }
 
 func healTestWriteCheckpoint(t *testing.T, dir, checkpointID string) {

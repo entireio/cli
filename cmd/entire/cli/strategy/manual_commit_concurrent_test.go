@@ -126,14 +126,13 @@ func TestSaveStep_ConcurrentSessionsSameShadowBranch(t *testing.T) {
 				}
 
 				err := s.SaveStep(ctx, StepContext{
-					SessionID:      sess.id,
-					ModifiedFiles:  modified,
-					NewFiles:       newFiles,
-					MetadataDir:    sess.metadataDir,
-					MetadataDirAbs: sess.metadataDirAbs,
-					CommitMessage:  fmt.Sprintf("Checkpoint %d for %s", step, sess.id),
-					AuthorName:     "Test",
-					AuthorEmail:    "test@example.com",
+					SessionID:     sess.id,
+					ModifiedFiles: modified,
+					NewFiles:      newFiles,
+					MetadataDir:   sess.metadataDir,
+					CommitMessage: fmt.Sprintf("Checkpoint %d for %s", step, sess.id),
+					AuthorName:    "Test",
+					AuthorEmail:   "test@example.com",
 				})
 				if err != nil {
 					errCh <- goroutineErr{session: sess.id, step: step, err: fmt.Errorf("SaveStep: %w", err)}

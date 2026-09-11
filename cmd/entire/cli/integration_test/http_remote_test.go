@@ -65,12 +65,7 @@ func startGitHTTPSServer(t *testing.T, repoNames ...string) *httpGitServer {
 		if err := os.MkdirAll(bareDir, 0o755); err != nil {
 			t.Fatalf("mkdir %s: %v", bareDir, err)
 		}
-		cmd := exec.CommandContext(t.Context(), "git", "init", "--bare")
-		cmd.Dir = bareDir
-		cmd.Env = testutil.GitIsolatedEnv()
-		if output, err := cmd.CombinedOutput(); err != nil {
-			t.Fatalf("git init --bare %s: %v\n%s", bareDir, err, output)
-		}
+		testutil.RunGit(t, bareDir, "init", "--bare")
 		bareDirs[name] = bareDir
 	}
 
@@ -107,30 +102,14 @@ func startGitHTTPSServer(t *testing.T, repoNames ...string) *httpGitServer {
 // remote with initial content so subsequent HTTPS operations have a base.
 func seedBareRepo(t *testing.T, env *TestEnv, bareDir, httpsOriginURL string) {
 	t.Helper()
-	ctx := t.Context()
 
 	// Add origin pointing to the bare repo on disk (no auth needed).
-	cmd := exec.CommandContext(ctx, "git", "remote", "add", "origin", bareDir)
-	cmd.Dir = env.RepoDir
-	cmd.Env = testutil.GitIsolatedEnv()
-	if output, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("remote add origin: %v\n%s", err, output)
-	}
+	testutil.RunGit(t, env.RepoDir, "remote", "add", "origin", bareDir)
 
-	cmd = exec.CommandContext(ctx, "git", "push", "--no-verify", "-u", "origin", "HEAD")
-	cmd.Dir = env.RepoDir
-	cmd.Env = testutil.GitIsolatedEnv()
-	if output, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("push to bare: %v\n%s", err, output)
-	}
+	testutil.RunGit(t, env.RepoDir, "push", "--no-verify", "-u", "origin", "HEAD")
 
 	// Switch origin to the HTTPS URL for subsequent operations.
-	cmd = exec.CommandContext(ctx, "git", "remote", "set-url", "origin", httpsOriginURL)
-	cmd.Dir = env.RepoDir
-	cmd.Env = testutil.GitIsolatedEnv()
-	if output, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("set-url to https: %v\n%s", err, output)
-	}
+	testutil.RunGit(t, env.RepoDir, "remote", "set-url", "origin", httpsOriginURL)
 
 	// Re-baseline the git config guard so the URL change isn't flagged.
 	env.setGitConfigBaseline()
@@ -142,12 +121,7 @@ func cloneFromBareWithHTTPS(t *testing.T, env *TestEnv, bareDir, httpsOriginURL 
 	t.Helper()
 	clone := env.CloneFrom(bareDir)
 
-	cmd := exec.CommandContext(t.Context(), "git", "remote", "set-url", "origin", httpsOriginURL)
-	cmd.Dir = clone.RepoDir
-	cmd.Env = testutil.GitIsolatedEnv()
-	if output, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("set-url to https in clone: %v\n%s", err, output)
-	}
+	testutil.RunGit(t, clone.RepoDir, "remote", "set-url", "origin", httpsOriginURL)
 
 	clone.setGitConfigBaseline()
 	return clone

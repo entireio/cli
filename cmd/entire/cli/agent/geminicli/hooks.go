@@ -4,10 +4,10 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
-	"path/filepath"
 	"slices"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
@@ -17,7 +17,10 @@ import (
 )
 
 // Ensure GeminiCLIAgent implements HookSupport
-var _ agent.HookSupport = (*GeminiCLIAgent)(nil)
+var (
+	_ agent.HookSupport       = (*GeminiCLIAgent)(nil)
+	_ agent.HookConfigLocator = (*GeminiCLIAgent)(nil)
+)
 
 // Gemini CLI hook names - these become subcommands under `entire hooks gemini`
 const (
@@ -37,22 +40,35 @@ const (
 // GeminiSettingsFileName is the settings file used by Gemini CLI.
 const GeminiSettingsFileName = "settings.json"
 
+// geminiHookConfig returns .gemini/settings.json for the current worktree,
+// opened through the worktree's root. That directory lives in the working tree,
+// which arrives by clone, so a checked-in symlink at `.gemini` must not be
+// something Entire creates directories under and writes through. See
+// agent.HookConfigFile.
+func geminiHookConfig(ctx context.Context) (*agent.HookConfigFile, error) {
+	// Repo root rather than CWD, so hooks land correctly when run from a
+	// subdirectory.
+	repoRoot, err := paths.WorktreeRoot(ctx)
+	if err != nil {
+		// Not a repository (tests, and `enable` before `git init`): the process
+		// directory is the only candidate, and it is one the caller chose rather
+		// than one derived from anything read off disk.
+		repoRoot, err = os.Getwd() //nolint:forbidigo // Intentional fallback when WorktreeRoot() fails
+		if err != nil {
+			return nil, fmt.Errorf("failed to get current directory: %w", err)
+		}
+	}
+	return agent.OpenHookConfig(repoRoot, (&GeminiCLIAgent{}).HookConfigRelPath()) //nolint:wrapcheck // agent.HookConfigFile already names the file in its error
+}
+
 // InstallHooks installs Gemini CLI hooks in .gemini/settings.json.
 // If force is true, removes existing Entire hooks before installing.
 // Returns the number of hooks installed.
 func (g *GeminiCLIAgent) InstallHooks(ctx context.Context, force bool) (int, error) {
-	// Use repo root instead of CWD to find .gemini directory
-	// This ensures hooks are installed correctly when run from a subdirectory
-	repoRoot, err := paths.WorktreeRoot(ctx)
+	cfg, err := geminiHookConfig(ctx)
 	if err != nil {
-		// Fallback to CWD if not in a git repo (e.g., during tests)
-		repoRoot, err = os.Getwd() //nolint:forbidigo // Intentional fallback when WorktreeRoot() fails (tests run outside git repos)
-		if err != nil {
-			return 0, fmt.Errorf("failed to get current directory: %w", err)
-		}
+		return 0, err
 	}
-
-	settingsPath := filepath.Join(repoRoot, ".gemini", GeminiSettingsFileName)
 
 	// Read existing settings if they exist
 	var rawSettings map[string]json.RawMessage
@@ -62,7 +78,7 @@ func (g *GeminiCLIAgent) InstallHooks(ctx context.Context, force bool) (int, err
 
 	var hooksConfig GeminiHooksConfig
 
-	existingData, readErr := os.ReadFile(settingsPath) //nolint:gosec // path is constructed from cwd + fixed path
+	existingData, readErr := cfg.Read()
 	if readErr == nil {
 		if err := json.Unmarshal(existingData, &rawSettings); err != nil {
 			return 0, fmt.Errorf("failed to parse existing settings.json: %w", err)
@@ -152,7 +168,7 @@ func (g *GeminiCLIAgent) InstallHooks(ctx context.Context, force bool) (int, err
 			}
 			// Cleanup needed but hooks already installed — write cleaned rawHooks
 			// without running the full remove+add cycle.
-			return 0, writeGeminiSettingsFile(rawSettings, rawHooks, hooksConfig, settingsPath)
+			return 0, writeGeminiSettingsFile(rawSettings, rawHooks, hooksConfig, cfg)
 		}
 	}
 
@@ -224,7 +240,7 @@ func (g *GeminiCLIAgent) InstallHooks(ctx context.Context, force bool) (int, err
 	marshalGeminiHookType(rawHooks, "PreCompress", preCompress)
 	marshalGeminiHookType(rawHooks, "Notification", notification)
 
-	if err := writeGeminiSettingsFile(rawSettings, rawHooks, hooksConfig, settingsPath); err != nil {
+	if err := writeGeminiSettingsFile(rawSettings, rawHooks, hooksConfig, cfg); err != nil {
 		return 0, err
 	}
 	return count, nil
@@ -248,7 +264,7 @@ func stripNonArrayHookFields(ctx context.Context, rawHooks map[string]json.RawMe
 }
 
 // writeGeminiSettingsFile marshals rawHooks and hooksConfig back into rawSettings and writes to disk.
-func writeGeminiSettingsFile(rawSettings map[string]json.RawMessage, rawHooks map[string]json.RawMessage, hooksConfig GeminiHooksConfig, settingsPath string) error {
+func writeGeminiSettingsFile(rawSettings map[string]json.RawMessage, rawHooks map[string]json.RawMessage, hooksConfig GeminiHooksConfig, cfg *agent.HookConfigFile) error {
 	hooksConfigJSON, err := jsonutil.MarshalWithNoHTMLEscape(hooksConfig)
 	if err != nil {
 		return fmt.Errorf("failed to marshal hooksConfig: %w", err)
@@ -261,19 +277,13 @@ func writeGeminiSettingsFile(rawSettings map[string]json.RawMessage, rawHooks ma
 	}
 	rawSettings["hooks"] = hooksJSON
 
-	if err := os.MkdirAll(filepath.Dir(settingsPath), 0o750); err != nil {
-		return fmt.Errorf("failed to create .gemini directory: %w", err)
-	}
-
 	output, err := jsonutil.MarshalIndentWithNewline(rawSettings, "", "  ")
 	if err != nil {
 		return fmt.Errorf("failed to marshal settings: %w", err)
 	}
 
-	if err := os.WriteFile(settingsPath, output, 0o600); err != nil {
-		return fmt.Errorf("failed to write settings.json: %w", err)
-	}
-	return nil
+	// Write creates .gemini with MkdirAllNoSymlink.
+	return cfg.Write(output, 0o600) //nolint:wrapcheck // agent.HookConfigFile already names the file in its error
 }
 
 // parseGeminiHookType parses a specific hook type from rawHooks into the target slice.
@@ -302,14 +312,18 @@ func marshalGeminiHookType(rawHooks map[string]json.RawMessage, hookType string,
 // UninstallHooks removes Entire hooks from Gemini CLI settings.
 func (g *GeminiCLIAgent) UninstallHooks(ctx context.Context) error {
 	// Use repo root to find .gemini directory when run from a subdirectory
-	repoRoot, err := paths.WorktreeRoot(ctx)
+	cfg, err := geminiHookConfig(ctx)
 	if err != nil {
-		repoRoot = "." // Fallback to CWD if not in a git repo
+		return err
 	}
-	settingsPath := filepath.Join(repoRoot, ".gemini", GeminiSettingsFileName)
-	data, err := os.ReadFile(settingsPath) //nolint:gosec // path is constructed from repo root + fixed path
+	data, err := cfg.Read()
 	if err != nil {
-		return nil //nolint:nilerr // No settings file means nothing to uninstall
+		// An absent file means nothing to uninstall; an unreadable one does not.
+		// Collapsing both leaves hooks on disk while reporting success.
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return fmt.Errorf("read %s: %w", cfg.Path(), err)
 	}
 
 	var rawSettings map[string]json.RawMessage
@@ -390,28 +404,38 @@ func (g *GeminiCLIAgent) UninstallHooks(ctx context.Context) error {
 		return fmt.Errorf("failed to marshal settings: %w", err)
 	}
 
-	if err := os.WriteFile(settingsPath, output, 0o600); err != nil {
-		return fmt.Errorf("failed to write settings.json: %w", err)
+	if err := cfg.Write(output, 0o600); err != nil {
+		return err //nolint:wrapcheck // agent.HookConfigFile already names the file in its error
 	}
 	return nil
 }
 
 // AreHooksInstalled checks if Entire hooks are installed.
-func (g *GeminiCLIAgent) AreHooksInstalled(ctx context.Context) bool {
+//
+// A missing config file is an answer, not a failure: that file is where the
+// state lives, so its absence means no hooks. Anything that stops us reading the
+// answer — an unreadable file, malformed config — is returned as an error, since
+// "we could not tell" and "there are none" are different things to a caller
+// deciding whether hooks can be left alone.
+func (g *GeminiCLIAgent) AreHooksInstalled(ctx context.Context) (bool, error) {
 	// Use repo root to find .gemini directory when run from a subdirectory
-	repoRoot, err := paths.WorktreeRoot(ctx)
+	cfg, err := geminiHookConfig(ctx)
 	if err != nil {
-		repoRoot = "." // Fallback to CWD if not in a git repo
+		return false, err
 	}
-	settingsPath := filepath.Join(repoRoot, ".gemini", GeminiSettingsFileName)
-	data, err := os.ReadFile(settingsPath) //nolint:gosec // path is constructed from repo root + fixed path
+	data, err := cfg.Read()
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
 	if err != nil {
-		return false
+		logging.Warn(ctx, "gemini: failed to read settings file", "path", cfg.Path(), "err", err)
+		return false, fmt.Errorf("read %s: %w", cfg.Path(), err)
 	}
 
 	var settings GeminiSettings
 	if err := json.Unmarshal(data, &settings); err != nil {
-		return false
+		logging.Warn(ctx, "gemini: failed to parse settings file", "path", cfg.Path(), "err", err)
+		return false, fmt.Errorf("parse hook config: %w", err)
 	}
 
 	// Check for at least one of our hooks using isEntireHook (matches legacy hook shapes too)
@@ -425,7 +449,7 @@ func (g *GeminiCLIAgent) AreHooksInstalled(ctx context.Context) bool {
 		hasEntireHook(settings.Hooks.BeforeTool) ||
 		hasEntireHook(settings.Hooks.AfterTool) ||
 		hasEntireHook(settings.Hooks.PreCompress) ||
-		hasEntireHook(settings.Hooks.Notification)
+		hasEntireHook(settings.Hooks.Notification), nil
 }
 
 // Helper functions for hook management
@@ -521,3 +545,6 @@ func removeEntireHooks(matchers []GeminiHookMatcher) []GeminiHookMatcher {
 	}
 	return result
 }
+
+// HookConfigRelPath implements agent.HookConfigLocator.
+func (g *GeminiCLIAgent) HookConfigRelPath() string { return ".gemini/" + GeminiSettingsFileName }

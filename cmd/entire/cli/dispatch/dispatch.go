@@ -36,10 +36,14 @@ type Options struct {
 	AllBranches           bool
 	ImplicitCurrentBranch bool
 	Voice                 string
-	InsecureHTTPAuth      bool
-	TextGenerator         TextGenerator
-	Model                 string
-	localPreflight        *localPreflight
+	// Jurisdiction is the slug (e.g. "us") of the jurisdiction whose cell
+	// generates a cloud dispatch. Empty means the caller's home
+	// jurisdiction — the pre-selector behaviour. Cloud mode only.
+	Jurisdiction     string
+	InsecureHTTPAuth bool
+	TextGenerator    TextGenerator
+	Model            string
+	localPreflight   *localPreflight
 }
 
 // CloudRepoLimit caps how many repos the cloud mode may query in one request.

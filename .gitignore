@@ -53,6 +53,7 @@ e2e/artifacts/
 
 # worktrees
 .worktrees/
+.entire/worktrees/
 .claude/worktrees/
 test-gemini.txt
 entire-main

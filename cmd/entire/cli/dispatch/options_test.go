@@ -15,6 +15,7 @@ func TestResolveOptions_NormalizesScopeValues(t *testing.T) {
 		false,
 		[]string{" entireio/cli ", "", "entireio/cli"},
 		"",
+		"",
 		false,
 		func() (string, error) { return testDefaultBranchName, nil },
 	)
@@ -39,6 +40,7 @@ func TestResolveOptions_CloudRejectsAllBranches(t *testing.T) {
 		true,
 		[]string{"entireio/cli"},
 		"",
+		"",
 		false,
 		func() (string, error) { return testDefaultBranchName, nil },
 	)
@@ -58,6 +60,7 @@ func TestResolveOptions_CloudCapsReposAtFive(t *testing.T) {
 		false,
 		repos,
 		"",
+		"",
 		false,
 		func() (string, error) { return testDefaultBranchName, nil },
 	)
@@ -75,6 +78,7 @@ func TestResolveOptions_LocalSetsImplicitCurrentBranch(t *testing.T) {
 		"",
 		false,
 		nil,
+		"",
 		"",
 		false,
 		func() (string, error) { return "my-feature", nil },
@@ -100,6 +104,7 @@ func TestResolveOptions_ForwardsInsecureHTTPAuth(t *testing.T) {
 		false,
 		[]string{"entireio/cli"},
 		"",
+		"",
 		true,
 		func() (string, error) { return testDefaultBranchName, nil },
 	)
@@ -120,6 +125,7 @@ func TestResolveOptions_LocalAllBranchesSkipsImplicit(t *testing.T) {
 		"",
 		true,
 		nil,
+		"",
 		"",
 		false,
 		func() (string, error) { return "", nil },
@@ -148,10 +154,83 @@ func TestResolveOptions_CloudRejectsInvalidRepoSlug(t *testing.T) {
 		false,
 		[]string{"../../etc/passwd"},
 		"",
+		"",
 		false,
 		func() (string, error) { return testDefaultBranchName, nil },
 	)
 	if err == nil || !strings.Contains(err.Error(), `invalid repo "../../etc/passwd": expected owner/repo`) {
 		t.Fatalf("expected repo slug validation error, got %v", err)
+	}
+}
+
+func TestResolveOptions_JurisdictionNormalizedForCloud(t *testing.T) {
+	t.Parallel()
+
+	opts, err := ResolveOptions(
+		false,
+		"7d",
+		"",
+		false,
+		[]string{"entireio/cli"},
+		"",
+		"  US ",
+		false,
+		func() (string, error) { return testDefaultBranchName, nil },
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if opts.Jurisdiction != "us" {
+		t.Fatalf("expected lowercased jurisdiction slug, got %q", opts.Jurisdiction)
+	}
+}
+
+func TestResolveOptions_JurisdictionRejectedWithLocal(t *testing.T) {
+	t.Parallel()
+
+	_, err := ResolveOptions(
+		true,
+		"7d",
+		"",
+		false,
+		nil,
+		"",
+		"us",
+		false,
+		func() (string, error) { return testDefaultBranchName, nil },
+	)
+	if err == nil || !strings.Contains(err.Error(), "--jurisdiction cannot be used with --local") {
+		t.Fatalf("expected local rejection, got %v", err)
+	}
+}
+
+func TestNormalizeJurisdiction(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		in, want string
+		wantErr  bool
+	}{
+		{in: "", want: ""},
+		{in: "   ", want: ""},
+		{in: "us", want: "us"},
+		{in: " EU ", want: "eu"},
+		{in: "ap-southeast-2", want: "ap-southeast-2"},
+		{in: "-us", wantErr: true},
+		{in: "us east", wantErr: true},
+		{in: "us.entire.io", wantErr: true},
+		{in: "us-", wantErr: true},
+		{in: strings.Repeat("a", 41), wantErr: true},
+	} {
+		got, err := normalizeJurisdiction(tc.in)
+		if tc.wantErr {
+			if err == nil || !strings.Contains(err.Error(), "invalid --jurisdiction") {
+				t.Errorf("normalizeJurisdiction(%q): expected slug error, got %q, %v", tc.in, got, err)
+			}
+			continue
+		}
+		if err != nil || got != tc.want {
+			t.Errorf("normalizeJurisdiction(%q) = %q, %v; want %q", tc.in, got, err, tc.want)
+		}
 	}
 }

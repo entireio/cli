@@ -10,6 +10,7 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
+	"github.com/entireio/cli/cmd/entire/cli/entiredir"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
@@ -19,14 +20,16 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// TestWithHookSession_StampsMostRecentSession pins the one thing the hook path
+// TestWithHookSession_StampsResolvedSession pins the one thing the hook path
 // adds over the root prerun: lines logged under the returned context carry the
 // session, which root cannot know without scanning session state on every
-// command.
-func TestWithHookSession_StampsMostRecentSession(t *testing.T) {
+// command. With no agent variable in the environment this is the worktree
+// tier; see the caller-env case below.
+func TestWithHookSession_StampsResolvedSession(t *testing.T) {
 	tmpDir := t.TempDir()
 	t.Chdir(tmpDir)
 	testutil.InitRepo(t, tmpDir)
+	clearCallerSessionEnv(t)
 
 	enableEntire(t, tmpDir)
 	entireDir := filepath.Join(tmpDir, paths.EntireDir)
@@ -36,7 +39,7 @@ func TestWithHookSession_StampsMostRecentSession(t *testing.T) {
 
 	// Stand in for the root prerun, which is now the only thing that opens the
 	// log sink.
-	l, err := logging.New(logging.Config{Dir: filepath.Join(entireDir, "logs")})
+	l, err := logging.New(logging.Config{Root: entiredir.OpenerAt(tmpDir), Dir: logging.LogsName})
 	if err != nil {
 		t.Fatalf("logging.New() error = %v", err)
 	}
@@ -130,14 +133,20 @@ func TestHooksGitCmd_DiscoverExternalAgents_WhenEnabled(t *testing.T) {
 	// Reset global state before the test
 	gitHooksDisabled = false
 
-	// Create .entire/settings.json with enabled: true and external_agents: true
+	// Create .entire/settings.json with enabled: true, and external_agents in
+	// the local file — the only place the loader honors that grant, since it
+	// enables execution of entire-agent-* binaries found on $PATH.
 	entireDir := filepath.Join(tmpDir, paths.EntireDir)
 	if err := os.MkdirAll(entireDir, 0o755); err != nil {
 		t.Fatalf("failed to create .entire directory: %v", err)
 	}
 	settingsFile := filepath.Join(entireDir, "settings.json")
-	if err := os.WriteFile(settingsFile, []byte(`{"enabled":true,"external_agents":true}`), 0o644); err != nil {
+	if err := os.WriteFile(settingsFile, []byte(`{"enabled":true}`), 0o644); err != nil {
 		t.Fatalf("failed to write settings file: %v", err)
+	}
+	localSettingsFile := filepath.Join(entireDir, "settings.local.json")
+	if err := os.WriteFile(localSettingsFile, []byte(`{"external_agents":true}`), 0o644); err != nil {
+		t.Fatalf("failed to write local settings file: %v", err)
 	}
 
 	// Create a mock external agent binary in a temp PATH directory.
@@ -311,4 +320,49 @@ func agentHooksCmd(t *testing.T, agentName string) *cobra.Command {
 	}
 	t.Fatalf("no hooks subcommand for %q", agentName)
 	return nil
+}
+
+// A git hook an agent triggered inherits that agent's session ID in its
+// environment, so log lines are attributed to the session that actually ran
+// the commit rather than whichever session in the shared store moved last.
+// Worktrees share one session store, so "last to move" is routinely a
+// different worktree's session.
+func TestWithHookSession_StampsTheCallersSessionFromEnv(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Chdir(tmpDir)
+	testutil.InitRepo(t, tmpDir)
+	clearCallerSessionEnv(t)
+
+	enableEntire(t, tmpDir)
+	entireDir := filepath.Join(tmpDir, paths.EntireDir)
+
+	// Write order is load-bearing: writeTestSessionState stamps
+	// LastInteractionTime at call time, so the SECOND state is the most recent
+	// one and is what the fallback tiers would pick. The caller therefore goes
+	// first, leaving the environment claim as the only thing that can select
+	// it — otherwise this test passes with the claim removed and proves
+	// nothing.
+	writeTestSessionState(t, tmpDir, "caller-session-id")
+	writeTestSessionState(t, tmpDir, "decoy-most-recent")
+	t.Setenv("CODEX_SESSION_ID", "caller-session-id")
+
+	l, err := logging.New(logging.Config{Root: entiredir.OpenerAt(tmpDir), Dir: logging.LogsName})
+	if err != nil {
+		t.Fatalf("logging.New() error = %v", err)
+	}
+	t.Cleanup(func() { _ = l.Close() })
+
+	ctx := withHookSession(logging.WithLogger(context.Background(), l))
+	logging.Warn(ctx, "hook session stamped")
+	if err := l.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+
+	content, err := os.ReadFile(filepath.Join(entireDir, "logs", "entire.log"))
+	if err != nil {
+		t.Fatalf("failed to read log file: %v", err)
+	}
+	if !strings.Contains(string(content), `"session_id":"caller-session-id"`) {
+		t.Errorf("log line missing the caller's session_id: %s", content)
+	}
 }

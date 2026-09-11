@@ -8,7 +8,7 @@ For step-by-step implementation instructions, code templates, and testing patter
 
 Entire stores the **complete session transcript** at every checkpoint, not incremental diffs. This enables:
 
-- Simple rewind: restore the full transcript, agent resumes from that state
+- Simple resume: `RestoreLogsOnly` writes the full transcript back to the agent's session directory, and the agent resumes from that state
 - No dependency on previous checkpoints being intact
 - Consistent behavior across all checkpoint types (committed, uncommitted)
 
@@ -16,7 +16,7 @@ Entire stores the **complete session transcript** at every checkpoint, not incre
 
 ## Core Principle: Native Format Preservation
 
-Store transcripts in the **agent's native format**. Any transformation or normalization should only be done to support CLI features (rewind, resume, summarization, file extraction), not for backend or web UI consumption.
+Store transcripts in the **agent's native format**. Any transformation or normalization should only be done to support CLI features (resume, summarization, file extraction), not for backend or web UI consumption.
 
 **Why:**
 - The backend/web UI should handle format differences, not the CLI
@@ -102,9 +102,8 @@ See Guide: [Step 6 - InstallHooks](agent-guide.md)
       `testutil.AssertCommittedDogfoodFile` / `AssertCommittedDogfoodConfigStable`
       if this repo commits the agent's config for its own dogfooding.
 
-### Rewind/Resume Support
+### Resume Support
 
-- [ ] **Rewind restores full state**: After rewind, agent can continue from that point with full context
 - [ ] **Resume command**: `FormatResumeCommand()` returns the CLI command to resume a session
 - [ ] **Session ID preservation**: Restored sessions maintain original session ID where possible
 
@@ -114,6 +113,6 @@ See Guide: [Testing Patterns](agent-guide.md#testing-patterns)
 
 - [ ] **New session**: Create session, multiple turns, verify full transcript at each checkpoint
 - [ ] **Resumed session**: Resume existing session, add turns, verify checkpoint includes historical messages
-- [ ] **Rewind**: Rewind to earlier checkpoint, verify agent can continue from that state
+- [ ] **Restored session**: Restore logs from an earlier checkpoint, verify the agent can continue from that state
 - [ ] **Agent shutdown**: Verify graceful handling if agent exits during checkpoint
 - [ ] **Manual token validation for session-wide aggregate agents**: If an agent emits authoritative token totals only at session end (for example Copilot CLI `session.shutdown`), manually verify checkpoint-scoped metadata and full-session status separately. See [Copilot Token Validation](copilot-token-validation.md).
