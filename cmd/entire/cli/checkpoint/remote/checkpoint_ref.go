@@ -205,10 +205,15 @@ func FetchCheckpointRef(ctx context.Context, ref plumbing.ReferenceName) error {
 // plumbing.ErrReferenceNotFound. A provably remoteless repository (below) also
 // wraps plumbing.ErrReferenceNotFound.
 //
-// A configured checkpoint_remote keeps a single target, resolved with the
-// elected lead candidate so inherited settings use that candidate's fallback.
-// The legacy single-target behavior is preserved when the election or settings
-// cannot be read, or no valid dedicated configuration or lead is available.
+// A configured checkpoint_remote keeps a single target either way; what the
+// lead candidate changes is how that target is RESOLVED. It joins FetchURL's
+// ownership vote, so the fork-shaped topology only its owner exposes is
+// vetoed here as it is on the push side and reads land where the writes went.
+// When ownership confirms the store, the lead changes nothing and the
+// dedicated URL is still the target — the lead is never the target itself
+// unless the store is vetoed. Resolution falls back to the lead-less target
+// (FetchCheckpointRef) when settings or the election cannot be read, or when
+// no valid dedicated configuration or lead candidate is available.
 //
 // An empty chain classifies the ref as absent only on positive evidence on
 // every axis: a live caller context, readable settings without a

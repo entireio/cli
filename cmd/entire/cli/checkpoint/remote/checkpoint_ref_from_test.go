@@ -192,28 +192,18 @@ func dedicatedCandidatesFixture(t *testing.T, refOnFork, refOnOrigin bool) (stri
 	testutil.RunGit(t, workDir, "remote", "set-url", "fork", "https://github.com/contributor/app.git")
 	testutil.RunGit(t, workDir, "remote", "set-url", "origin", "https://github.com/acme/app.git")
 	testutil.WriteFile(t, workDir, ".entire/settings.json", `{"enabled":true,"strategy_options":{"checkpoint_remote":{"provider":"github","repo":"acme/checkpoints"},"checkpoint_push_remote":"fork"}}`)
-	t.Setenv("CHECKPOINT_TEST_GIT", realGit)
+	t.Setenv(testutil.GitTransportRealGitEnv, realGit)
 	t.Setenv("CHECKPOINT_TEST_DEDICATED", filepath.Join(workDir, "missing-dedicated"))
 	t.Setenv("GIT_ALLOW_PROTOCOL", "file")
 	t.Setenv(CheckpointTokenEnvVar, "")
-	binDir := t.TempDir()
-	testutil.WriteFile(t, binDir, "git", `#!/bin/bash
-args=("$@")
-for arg in "$@"; do
-  if [[ "$arg" == ls-remote || "$arg" == fetch ]]; then
-    for i in "${!args[@]}"; do
-      case "${args[$i]}" in
-        https://github.com/contributor/app.git) args[$i]="$CHECKPOINT_TEST_UPSTREAM" ;;
-        https://github.com/acme/app.git) args[$i]="$CHECKPOINT_TEST_ORIGIN" ;;
-        https://github.com/acme/checkpoints.git) args[$i]="$CHECKPOINT_TEST_DEDICATED" ;;
-      esac
-    done
-    break
-  fi
-done
-exec "$CHECKPOINT_TEST_GIT" "${args[@]}"
-`)
-	require.NoError(t, os.Chmod(filepath.Join(binDir, "git"), 0o755))
+	// In-process, so the shim is reached through PATH and the variables it
+	// dereferences are this process's own — which is what lets a subtest
+	// repoint CHECKPOINT_TEST_UPSTREAM at a missing repository afterwards.
+	binDir := testutil.GitTransportShim(t, []string{"ls-remote", "fetch"}, map[string]string{
+		"https://github.com/contributor/app.git":  "CHECKPOINT_TEST_UPSTREAM",
+		"https://github.com/acme/app.git":         "CHECKPOINT_TEST_ORIGIN",
+		"https://github.com/acme/checkpoints.git": "CHECKPOINT_TEST_DEDICATED",
+	})
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	return workDir, ref, forkHash, originHash
 }
@@ -262,6 +252,12 @@ func TestFetchCheckpointRefFrom_InheritedDedicatedDoesNotRetry(t *testing.T) {
 			err := FetchCheckpointRefFrom(t.Context(), ref, []string{"fork", "origin"}, nil)
 			require.Error(t, err)
 			require.NotErrorIs(t, err, plumbing.ErrReferenceNotFound)
+			// Names the remote the error came from. Without this the
+			// assertions above pass on unfixed code: the lead-less ownership
+			// vote ACCEPTS the dedicated store (origin and the checkpoint
+			// repo share an owner), so the probe fails against the store
+			// instead of the fork and produces an equally non-absence error.
+			require.ErrorContains(t, err, "contributor/app")
 			_, err = exec.CommandContext(t.Context(), "git", "rev-parse", "--verify", ref.String()).Output()
 			require.Error(t, err, "origin must not install a ref after the selected fallback fails")
 		})
