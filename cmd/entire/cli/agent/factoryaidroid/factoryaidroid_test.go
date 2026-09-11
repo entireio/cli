@@ -376,39 +376,3 @@ func TestGetSessionBaseDir_HonorsFactoryHomeOverride(t *testing.T) {
 		t.Errorf("GetSessionBaseDir = %q, want %q", base, want)
 	}
 }
-
-func TestResolveFactoryHome(t *testing.T) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		t.Fatal(err)
-	}
-	abs := t.TempDir()
-	tests := []struct {
-		name    string
-		env     string
-		want    string
-		wantErr bool
-	}{
-		{name: "unset falls back to the user home", env: "", want: home},
-		{name: "absolute override wins", env: abs, want: abs},
-		{name: "relative override is refused", env: filepath.Join("relative", "home"), wantErr: true},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Setenv("FACTORY_HOME_OVERRIDE", tt.env)
-			got, err := resolveFactoryHome()
-			if tt.wantErr {
-				if err == nil || !strings.Contains(err.Error(), "FACTORY_HOME_OVERRIDE") {
-					t.Fatalf("resolveFactoryHome() = %q, %v; want an error naming FACTORY_HOME_OVERRIDE", got, err)
-				}
-				return
-			}
-			if err != nil {
-				t.Fatal(err)
-			}
-			if got != tt.want {
-				t.Errorf("resolveFactoryHome() = %q, want %q", got, tt.want)
-			}
-		})
-	}
-}

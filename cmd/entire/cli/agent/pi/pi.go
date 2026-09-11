@@ -182,16 +182,9 @@ func (a *PiAgent) ResolveSessionFile(sessionDir, agentSessionID string) string {
 }
 
 // resolvePiHome returns Pi's home directory: $PI_CODING_AGENT_DIR or
-// ~/.pi/agent.
+// ~/.pi/agent. See agent.ResolveHome for the override policy.
 func resolvePiHome() (string, error) {
-	if dir := os.Getenv(piHomeEnvVar); dir != "" {
-		return dir, nil
-	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return "", fmt.Errorf("resolve user home: %w", err)
-	}
-	return filepath.Join(home, ".pi", "agent"), nil
+	return agent.ResolveHome(piHomeEnvVar, filepath.Join(".pi", "agent")) //nolint:wrapcheck // the error already names the override and its value
 }
 
 // encodeRepoPathForPi encodes an absolute repo path into Pi's

@@ -62,15 +62,9 @@ func (c *CodexAgent) GetSessionID(input *agent.HookInput) string {
 }
 
 // resolveCodexHome returns the Codex home directory (CODEX_HOME or ~/.codex).
+// See agent.ResolveHome for the override policy.
 func resolveCodexHome() (string, error) {
-	if codexHome := os.Getenv("CODEX_HOME"); codexHome != "" {
-		return codexHome, nil
-	}
-	homeDir, err := os.UserHomeDir()
-	if err != nil {
-		return "", fmt.Errorf("failed to get home directory: %w", err)
-	}
-	return filepath.Join(homeDir, ".codex"), nil
+	return agent.ResolveHome("CODEX_HOME", ".codex") //nolint:wrapcheck // the error already names the override and its value
 }
 
 // GetSessionDir returns the directory where Codex stores session transcripts.

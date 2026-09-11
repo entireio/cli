@@ -70,16 +70,11 @@ func (c *CopilotCLIAgent) GetSessionDir(_ string) (string, error) {
 	// wherever the agent actually wrote, rather than at a directory it never
 	// used — which is what a user with COPILOT_HOME set, or a harness that
 	// isolates Copilot state per session, would otherwise get.
-	if copilotHome := os.Getenv("COPILOT_HOME"); copilotHome != "" {
-		return filepath.Join(copilotHome, "session-state"), nil
-	}
-
-	homeDir, err := os.UserHomeDir()
+	copilotHome, err := agent.ResolveHome("COPILOT_HOME", ".copilot")
 	if err != nil {
-		return "", fmt.Errorf("failed to get home directory: %w", err)
+		return "", err //nolint:wrapcheck // the error already names the override and its value
 	}
-
-	return filepath.Join(homeDir, ".copilot", "session-state"), nil
+	return filepath.Join(copilotHome, "session-state"), nil
 }
 
 // ResolveSessionFile returns the path to a Copilot CLI session transcript file.

@@ -314,39 +314,3 @@ func TestGetSessionBaseDir_HonorsClaudeConfigDir(t *testing.T) {
 		t.Errorf("GetSessionBaseDir = %q, want %q", base, want)
 	}
 }
-
-func TestResolveClaudeConfigDir(t *testing.T) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		t.Fatal(err)
-	}
-	abs := t.TempDir()
-	tests := []struct {
-		name    string
-		env     string
-		want    string
-		wantErr bool
-	}{
-		{name: "unset falls back to ~/.claude", env: "", want: filepath.Join(home, ".claude")},
-		{name: "absolute override wins", env: abs, want: abs},
-		{name: "relative override is refused", env: filepath.Join("relative", "cfg"), wantErr: true},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Setenv("CLAUDE_CONFIG_DIR", tt.env)
-			got, err := resolveClaudeConfigDir()
-			if tt.wantErr {
-				if err == nil || !strings.Contains(err.Error(), "CLAUDE_CONFIG_DIR") {
-					t.Fatalf("resolveClaudeConfigDir() = %q, %v; want an error naming CLAUDE_CONFIG_DIR", got, err)
-				}
-				return
-			}
-			if err != nil {
-				t.Fatal(err)
-			}
-			if got != tt.want {
-				t.Errorf("resolveClaudeConfigDir() = %q, want %q", got, tt.want)
-			}
-		})
-	}
-}

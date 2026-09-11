@@ -13,7 +13,6 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
-	"github.com/entireio/cli/internal/entireclient/userdirs"
 )
 
 // nonAlphanumericRegex matches any non-alphanumeric character for path sanitization.
@@ -102,20 +101,10 @@ func (f *FactoryAIDroidAgent) GetSessionID(input *agent.HookInput) string { retu
 const factoryHomeEnvVar = "FACTORY_HOME_OVERRIDE"
 
 // resolveFactoryHome returns the home directory Droid uses:
-// $FACTORY_HOME_OVERRIDE when set, else the user's home. A relative override is
-// refused rather than resolved against a per-process working directory.
+// $FACTORY_HOME_OVERRIDE when set, else the user's home. See agent.ResolveHome
+// for the override policy.
 func resolveFactoryHome() (string, error) {
-	if dir := os.Getenv(factoryHomeEnvVar); dir != "" {
-		if err := userdirs.RequireAbsoluteOverride(factoryHomeEnvVar, dir); err != nil {
-			return "", err //nolint:wrapcheck // the error already names the override and its value
-		}
-		return dir, nil
-	}
-	homeDir, err := os.UserHomeDir()
-	if err != nil {
-		return "", fmt.Errorf("failed to get home directory: %w", err)
-	}
-	return homeDir, nil
+	return agent.ResolveHome(factoryHomeEnvVar, "") //nolint:wrapcheck // the error already names the override and its value
 }
 
 // GetSessionDir returns the directory where Factory AI Droid stores session transcripts.

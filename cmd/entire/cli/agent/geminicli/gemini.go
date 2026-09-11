@@ -18,7 +18,6 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
-	"github.com/entireio/cli/internal/entireclient/userdirs"
 )
 
 //nolint:gochecknoinits // Agent self-registration is the intended pattern
@@ -116,20 +115,10 @@ func (g *GeminiCLIAgent) ResolveSessionFile(sessionDir, agentSessionID string) s
 const geminiHomeEnvVar = "GEMINI_CLI_HOME"
 
 // resolveGeminiHome returns the home directory Gemini CLI uses:
-// $GEMINI_CLI_HOME when set, else the user's home. A relative override is
-// refused rather than resolved against a per-process working directory.
+// $GEMINI_CLI_HOME when set, else the user's home. See agent.ResolveHome for
+// the override policy.
 func resolveGeminiHome() (string, error) {
-	if dir := os.Getenv(geminiHomeEnvVar); dir != "" {
-		if err := userdirs.RequireAbsoluteOverride(geminiHomeEnvVar, dir); err != nil {
-			return "", err //nolint:wrapcheck // the error already names the override and its value
-		}
-		return dir, nil
-	}
-	homeDir, err := os.UserHomeDir()
-	if err != nil {
-		return "", fmt.Errorf("failed to get home directory: %w", err)
-	}
-	return homeDir, nil
+	return agent.ResolveHome(geminiHomeEnvVar, "") //nolint:wrapcheck // the error already names the override and its value
 }
 
 // GetSessionDir returns the directory where Gemini stores session transcripts.

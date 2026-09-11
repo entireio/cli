@@ -18,7 +18,6 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/transcript"
-	"github.com/entireio/cli/internal/entireclient/userdirs"
 )
 
 //nolint:gochecknoinits // Agent self-registration is the intended pattern
@@ -99,22 +98,10 @@ func (c *ClaudeCodeAgent) ProtectedDirs() []string { return []string{".claude"} 
 const claudeConfigDirEnvVar = "CLAUDE_CONFIG_DIR"
 
 // resolveClaudeConfigDir returns Claude Code's configuration directory:
-// $CLAUDE_CONFIG_DIR when set, else ~/.claude. A relative override is refused
-// rather than resolved against the working directory, which is the repo root
-// inside a hook but wherever the user stands for `session resume` — the same
-// environment would otherwise name a different directory in each process.
+// $CLAUDE_CONFIG_DIR when set, else ~/.claude. See agent.ResolveHome for the
+// override policy.
 func resolveClaudeConfigDir() (string, error) {
-	if dir := os.Getenv(claudeConfigDirEnvVar); dir != "" {
-		if err := userdirs.RequireAbsoluteOverride(claudeConfigDirEnvVar, dir); err != nil {
-			return "", err //nolint:wrapcheck // the error already names the override and its value
-		}
-		return dir, nil
-	}
-	homeDir, err := os.UserHomeDir()
-	if err != nil {
-		return "", fmt.Errorf("failed to get home directory: %w", err)
-	}
-	return filepath.Join(homeDir, ".claude"), nil
+	return agent.ResolveHome(claudeConfigDirEnvVar, ".claude") //nolint:wrapcheck // the error already names the override and its value
 }
 
 // GetSessionDir returns the directory where Claude stores session transcripts.
