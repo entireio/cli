@@ -26,6 +26,12 @@ func TestReportCommand(t *testing.T) {
 		code   int
 		banner string
 	}{
+		{"run only", "{\"Action\":\"run\",\"Test\":\"TestFoo\"}\n", true, 1, "INCOMPLETE"},
+		{"output only", "{\"Action\":\"output\",\"Test\":\"TestFoo\",\"Output\":\"hello\"}\n", true, 1, "INCOMPLETE"},
+		{"child only", "{\"Action\":\"pass\",\"Test\":\"TestFoo/agent\"}\n", true, 1, "INCOMPLETE"},
+		{"diagnostic incomplete", "{\"Action\":\"run\",\"Test\":\"TestFoo\"}\n", false, 0, "INCOMPLETE"},
+		{"mixed complete and incomplete", "{\"Action\":\"pass\",\"Test\":\"TestFoo\"}\n{\"Action\":\"run\",\"Test\":\"TestBar\"}\n", true, 0, "INCOMPLETE"},
+		{"incomplete retry", "{\"Action\":\"pass\",\"Test\":\"TestFoo\"}\n{\"Action\":\"run\",\"Test\":\"TestFoo\"}\n", true, 1, "INCOMPLETE"},
 		{"empty", "", true, 1, "NO TESTS RAN"},
 		{"package only", "{\"Action\":\"pass\",\"Package\":\"tests\"}\n", true, 1, "NO TESTS RAN"},
 		{"malformed only", "not json\n", true, 1, "NO TESTS RAN"},
@@ -61,6 +67,9 @@ func TestReportCommand(t *testing.T) {
 				data, err := os.ReadFile(filepath.Join(dir, name))
 				if err != nil {
 					t.Fatal(err)
+				}
+				if tc.banner == "INCOMPLETE" && strings.Contains(string(data), "TESTS PASSED") {
+					t.Errorf("%s reports incomplete tests as passing: %s", name, data)
 				}
 				if !strings.Contains(string(data), tc.banner) {
 					t.Errorf("%s missing %q: %s", name, tc.banner, data)

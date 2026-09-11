@@ -100,6 +100,12 @@ still written and show `NO TESTS RAN`. Named tests that skip remain successful;
 a regex matching a parent but no subtests is not treated as an empty selection.
 
 The reporter's `-fail-on-empty` flag enables this exit status. Without it, the
-reporter can still render empty event files for diagnosis. Nightly retains its
+reporter can still render empty or incomplete event files for diagnosis. Only
+parent tests with a terminal pass, fail, or skip event count as completed;
+strict mode fails if none completed. Incomplete runs show an `INCOMPLETE`
+banner, including when other tests completed. A retry must have its own
+terminal event to count as completed.
+
+Nightly retains its
 existing report check because it runs the test tasks from the installed tag,
 which may predate this flag.
