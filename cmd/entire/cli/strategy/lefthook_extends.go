@@ -164,6 +164,14 @@ func renderEntireLefthookConfig() []byte {
 	return b.Bytes()
 }
 
+// entireLefthookConfigOwned reports whether a file at Entire's config path
+// carries Entire's ownership marker. The path is one Entire chose, but the
+// user's repository is theirs: a file there that Entire did not write is
+// theirs to keep, exactly as an unowned script is.
+func entireLefthookConfigOwned(data []byte) bool {
+	return bytes.Contains(data, []byte(lefthookOwnedMarker))
+}
+
 // entireLefthookConfigCurrent reports whether Entire's config file is present
 // and exactly what renderEntireLefthookConfig would write.
 func entireLefthookConfigCurrent(root *os.Root) (bool, error) {

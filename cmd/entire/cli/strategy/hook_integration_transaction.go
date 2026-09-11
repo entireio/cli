@@ -435,7 +435,7 @@ func AnyGitHookIntegrationInstalled(ctx context.Context) bool {
 	if err != nil {
 		return false
 	}
-	if data, _, readErr := readOptionalRegular(root, entireLefthookConfigName); readErr == nil && data != nil {
+	if data, _, readErr := readOptionalRegular(root, entireLefthookConfigName); readErr == nil && data != nil && entireLefthookConfigOwned(data) {
 		return true
 	}
 	if present, presentErr := lefthookExtendsEntryPresent(root); presentErr == nil && present {
@@ -455,7 +455,9 @@ func verifyGitHookIntegrationRemoved(ctx context.Context, repoRoot string) error
 	if err != nil {
 		return fmt.Errorf("open worktree: %w", err)
 	}
-	if data, _, err := readOptionalRegular(root, entireLefthookConfigName); err == nil && data != nil {
+	// A file Entire did not write is deliberately left behind, so only an
+	// OWNED one remaining means removal failed.
+	if data, _, err := readOptionalRegular(root, entireLefthookConfigName); err == nil && data != nil && entireLefthookConfigOwned(data) {
 		return fmt.Errorf("%s still present", entireLefthookConfigName)
 	} else if err != nil {
 		return fmt.Errorf("verify %s removal: %w", lefthookLocalConfigName, err)
@@ -491,7 +493,10 @@ func removeOwnedLefthookArtifacts(ctx context.Context, repoRoot string) (int, er
 	if err != nil {
 		return 0, fmt.Errorf("open worktree: %w", err)
 	}
-	if data, _, err := readOptionalRegular(root, entireLefthookConfigName); err == nil && data != nil {
+	// Only delete a file that proves it is ours. The name alone is not proof:
+	// a user may have written their own entire-lefthook.yml, and uninstall
+	// must not destroy it.
+	if data, _, err := readOptionalRegular(root, entireLefthookConfigName); err == nil && data != nil && entireLefthookConfigOwned(data) {
 		if err := integrationFault("write", entireLefthookConfigName); err != nil {
 			return 0, err
 		}

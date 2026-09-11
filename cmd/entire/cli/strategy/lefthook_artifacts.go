@@ -89,7 +89,11 @@ func mergeLefthookInfoExclude(existing []byte) []byte {
 func lefthookExcludeBlock() string {
 	const begin = "# entire-cli-owned:lefthook:v1 begin\n"
 	const end = "# entire-cli-owned:lefthook:v1 end\n"
-	entries := []string{"/" + lefthookLocalConfigName}
+	// entire-lefthook.yml is generated and clone-local like the scripts. Left
+	// out of this block it shows as untracked in every Lefthook repo, which
+	// makes a dirty worktree the normal state and invites an agent to commit
+	// Entire's integration file into the user's repository.
+	entries := []string{"/" + lefthookLocalConfigName, "/" + entireLefthookConfigName}
 	for _, hook := range gitHookNames {
 		entries = append(entries, "/"+filepath.ToSlash(filepath.Join(lefthookLocalDir, hook, lefthookScriptName)))
 	}

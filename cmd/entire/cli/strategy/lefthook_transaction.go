@@ -72,6 +72,30 @@ func installLefthookFilesAt(ctx context.Context, repoRoot string, absolutePath b
 		}
 	}
 
+	// Entire's own config file gets the same treatment as the scripts: the
+	// path is one Entire chose, but a file there it did not write belongs to
+	// the user. Displace it, never destroy it.
+	if current, info, readErr := readOptionalRegular(root, entireLefthookConfigName); readErr != nil {
+		return 0, fmt.Errorf("read %s: %w", entireLefthookConfigName, readErr)
+	} else if current != nil && !entireLefthookConfigOwned(current) {
+		backup := entireLefthookConfigName + backupSuffix
+		existing, _, backupErr := readOptionalRegular(root, backup)
+		if backupErr != nil {
+			return 0, fmt.Errorf("read %s: %w", backup, backupErr)
+		}
+		if existing != nil {
+			return 0, fmt.Errorf("%w: %s already exists; remove it to let Entire reinstall %s",
+				ErrLefthookOwnedEntryConflict, backup, entireLefthookConfigName)
+		}
+		mode := os.FileMode(0o644)
+		if info != nil {
+			mode = info.Mode().Perm()
+		}
+		if err := jsonutil.WriteFileAtomicIn(root, backup, current, mode); err != nil {
+			return 0, fmt.Errorf("back up %s: %w", entireLefthookConfigName, err)
+		}
+	}
+
 	commonDir, err := gitdir.CommonDirForWorktree(ctx, repoRoot)
 	if err != nil {
 		return 0, fmt.Errorf("resolve git common directory: %w", err)

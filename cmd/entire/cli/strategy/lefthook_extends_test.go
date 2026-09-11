@@ -189,3 +189,44 @@ func TestEnsureGitHookIntegration_NeverShadowsANonYAMLLocalConfig(t *testing.T) 
 	_, statErr = os.Stat(filepath.Join(repoDir, entireLefthookConfigName))
 	require.True(t, os.IsNotExist(statErr), "must not write Entire's config either")
 }
+
+// Every generated artifact must be excluded, or a Lefthook repo is dirty from
+// the moment Entire is enabled — and an agent will eventually commit Entire's
+// integration file into the user's repository.
+func TestLefthookExcludeBlockCoversEveryGeneratedArtifact(t *testing.T) {
+	t.Parallel()
+	block := lefthookExcludeBlock()
+	want := []string{"/" + entireLefthookConfigName, "/" + lefthookLocalConfigName}
+	for _, hook := range gitHookNames {
+		want = append(want, "/"+lefthookLocalDir+"/"+hook+"/"+lefthookScriptName)
+	}
+	for _, entry := range want {
+		require.Contains(t, block, entry+"\n", "exclude block must cover %s", entry)
+	}
+}
+
+// The config path is one Entire chose, but the repository is the user's. A
+// file there that Entire did not write must survive both install and
+// uninstall — the filename alone is not proof of ownership.
+func TestEntireLefthookConfig_ForeignFileIsPreserved(t *testing.T) {
+	repoDir := newLefthookTestRepo(t)
+	configPath := filepath.Join(repoDir, entireLefthookConfigName)
+	userContent := []byte("# my own file, nothing to do with Entire\nkey: value\n")
+	require.NoError(t, os.WriteFile(configPath, userContent, 0o644))
+
+	if _, err := EnsureGitHookIntegration(t.Context(), false); err != nil {
+		t.Fatalf("EnsureGitHookIntegration() error = %v", err)
+	}
+	backup, err := os.ReadFile(configPath + backupSuffix)
+	require.NoError(t, err, "the user's file must be displaced, not destroyed")
+	require.Equal(t, userContent, backup)
+
+	// Uninstall must not delete a foreign file at that path either.
+	require.NoError(t, os.WriteFile(configPath, userContent, 0o644))
+	if _, err := RemoveGitHookIntegration(t.Context()); err != nil {
+		t.Fatalf("RemoveGitHookIntegration() error = %v", err)
+	}
+	after, err := os.ReadFile(configPath)
+	require.NoError(t, err, "uninstall deleted a file Entire did not write")
+	require.Equal(t, userContent, after)
+}
