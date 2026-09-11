@@ -146,6 +146,15 @@ Consequences worth knowing:
 - If the trusted configuration cannot be written, the review fails before starting the
   agent. There is no unisolated fallback.
 
+**Why not Claude's `--restricted` flag?** It is a better isolation primitive (it
+ignores non-managed settings as a first-class flag, refuses `bypassPermissions`, and
+confines file tools to the working directories), but it is documented 2.1.248+ and the
+reviewer exits without capturing a session on 2.1.237 (the reported version), and it
+removes the command-running tools the review model uses to compute the diff (the prompt
+gives a scope-vs-base clause, not the diff itself). It is a good follow-up once the diff
+is fed into the prompt or a git-only tool is allow-listed and the supported floor is
+2.1.248+. See the `Why not --restricted` note in `review_launch.go`.
+
 This is configuration isolation, not an OS sandbox: the reviewer still runs with the
 invoking account's privileges, and user-level and managed policy configuration remain
 trusted. The system prompt reduces the chance the reviewer *follows* instructions embedded

@@ -57,6 +57,35 @@ package claudecode
 // user's chosen skill still runs and nothing else of theirs does. See
 // review_skills.go.
 //
+// Why not --restricted:
+//
+// Claude ships --restricted for exactly this job — it ignores user, project and
+// local settings (managed settings and --settings still apply), refuses
+// bypassPermissions, and additionally confines the file tools to the working
+// directories. As an isolation *primitive* it is better than the hand-rolled
+// flag set here: it tracks Claude's evolution (a new cwd-loaded config surface
+// would be covered automatically), and the file-tool confinement is a security
+// property this launch lacks. Two measured facts keep it out of this change:
+//
+//   - Version floor. --restricted is documented 2.1.248+. Against Claude 2.1.237
+//     (the version the report was filed on) the reviewer exits non-zero and
+//     captures no session — verified. Isolation that only works on new Claude
+//     cannot be the sole mechanism while 2.1.237 must be supported.
+//   - It removes the command-running tools (Bash et al.) unless --tools names
+//     them, and the review model relies on them: ComposeReviewPrompt hands the
+//     agent a scope clause naming a base ref ("commits unique to this branch vs
+//     <base>"), not the diff itself, so the agent runs git to see what changed.
+//     Under --restricted it could Read the current tree but not compute the diff
+//     it was asked to review.
+//
+// Adopting --restricted is a good follow-up once the reviewer no longer needs
+// ad-hoc command execution — feed the diff into the prompt, or --tools-allowlist
+// a git-only capability — and once the supported-Claude floor is >= 2.1.248 or
+// the flag is version-gated. On 2.1.248+ it was verified to preserve capture and
+// block every canary here, so the migration path is real. It does not remove the
+// skill-staging need: --restricted also ignores user settings, so configured
+// skills would still have to be staged via --plugin-dir.
+//
 // The generation path reached "" first, for simpler reasons: it needs no
 // skills, no repository context and no working directory. See
 // buildGenerateArgs in generate.go.
