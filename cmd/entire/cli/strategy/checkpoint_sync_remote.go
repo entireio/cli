@@ -9,6 +9,7 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/entireio/cli/cmd/entire/cli/gitremote"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
 )
@@ -25,6 +26,12 @@ const (
 	// commitCapturedSyncRemote). Named for what was observed, not for the
 	// latch that recorded it, which is why the internal names still say "capture".
 	SyncRemoteSourceObserved CheckpointSyncRemoteSource = "observed"
+	// SyncRemoteSourceEntire: exactly one configured remote is an entire://
+	// remote (Entire's own git remote helper). Checkpoint data belongs on
+	// Entire, so it outranks the default tiers but not an explicit setting or
+	// a capture already in force. Two or more entire:// remotes make the tier
+	// ambiguous and it does not apply.
+	SyncRemoteSourceEntire CheckpointSyncRemoteSource = "entire"
 	// SyncRemoteSourceDefault: "origin" exists.
 	SyncRemoteSourceDefault CheckpointSyncRemoteSource = "default"
 	// SyncRemoteSourceSole: exactly one remote configured.
@@ -45,9 +52,10 @@ type CheckpointSyncRemote struct {
 // checkpoint_push_remote setting (fail-closed if the named remote does not
 // exist), then the captured election (evidence-elected by a past push that
 // agreed with the branch's declared push destination; fail-soft if that
-// remote is gone), then "origin", then the sole remote, then the first remote
-// in .git/config order. It knows nothing about the checkpoint_remote URL
-// feature; callers exempt that case themselves.
+// remote is gone), then the sole entire:// remote (Entire's own store, see
+// configuredEntireRemotes), then "origin", then the sole remote, then the
+// first remote in .git/config order. It knows nothing about the
+// checkpoint_remote URL feature; callers exempt that case themselves.
 //
 // Deliberately NOT keyed on the branch's tracking config alone
 // (branch.<name>.pushRemote / remote.pushDefault / branch.<name>.remote).
@@ -96,6 +104,18 @@ func ResolveCheckpointSyncRemote(ctx context.Context) (CheckpointSyncRemote, err
 		}
 		logging.Debug(ctx, "captured checkpoint sync remote is not configured; falling through",
 			slog.String("remote", name))
+	}
+
+	// Entire tier: the one entire:// remote is where checkpoint data belongs.
+	// Placed below the explicit setting and the capture (both are decisions
+	// already made) and above the guesses. Ambiguous with two or more, so it
+	// falls through rather than pick one — an explicit checkpoint_push_remote is
+	// the way to choose.
+	if entire := configuredEntireRemotes(ctx); len(entire) == 1 {
+		return CheckpointSyncRemote{Name: entire[0], Source: SyncRemoteSourceEntire}, nil
+	} else if len(entire) > 1 {
+		logging.Debug(ctx, "several entire:// remotes configured; entire tier does not apply",
+			slog.Int("count", len(entire)))
 	}
 
 	remotes := configuredRemotesInConfigOrder(ctx)
@@ -164,6 +184,28 @@ func hintGatedCheckpointSync(ctx context.Context, pushRemote string) {
 	if err != nil || syncRemote.Name == "" || syncRemote.Source == SyncRemoteSourceConfig {
 		return
 	}
+	// Several Entire remotes: the entire tier declined to pick one, so the
+	// user pushed to an Entire remote and the checkpoints stayed home. This
+	// runs BEFORE the declared-destination gate below, because that gate exists
+	// to avoid recommending a one-off destination for transcripts — and an
+	// Entire remote is not a leak surface, whichever of them it is.
+	if entire := configuredEntireRemotes(ctx); len(entire) > 1 && slices.Contains(entire, pushRemote) {
+		count, ok := waitingCheckpointCount(ctx, syncRemote.Name)
+		if !ok || count == 0 {
+			return
+		}
+		fmt.Fprintf(stderrWriter,
+			"[entire] %d checkpoint(s) are waiting to sync to %q; this push to %q, one of this repo's %d Entire remotes, does not carry them.\n",
+			count, syncRemote.Name, pushRemote, len(entire))
+		fmt.Fprintf(stderrWriter,
+			"[entire] To make it the checkpoint sync remote, set strategy_options.checkpoint_push_remote to %q in .entire/settings.local.json.\n",
+			pushRemote)
+		logging.Info(ctx, "gated checkpoint sync hint shown (several entire remotes)",
+			slog.Int("unpushed_checkpoints", count),
+			slog.String("checkpoint_sync_remote", syncRemote.Name),
+			slog.String("push_remote", pushRemote))
+		return
+	}
 	// Only for a remote this branch actually pushes to. The advice is "point
 	// checkpoint_push_remote at the remote you just pushed", which is right for a
 	// habitual destination and wrong — actively harmful — for a one-off: a
@@ -186,17 +228,8 @@ func hintGatedCheckpointSync(ctx context.Context, pushRemote string) {
 			slog.String("checkpoint_sync_remote", syncRemote.Name))
 		return
 	}
-	count, err := CountUnpushedCheckpoints(ctx, syncRemote.Name)
-	if err != nil {
-		// Stay quiet toward the user (best-effort hint in their push), but
-		// leave a trace: a persistently failing count would otherwise
-		// re-create the silent stall this hint exists to surface.
-		logging.Debug(ctx, "gated checkpoint sync hint suppressed: cannot count unpushed checkpoints",
-			slog.String("checkpoint_sync_remote", syncRemote.Name),
-			slog.String("error", err.Error()))
-		return
-	}
-	if count == 0 {
+	count, ok := waitingCheckpointCount(ctx, syncRemote.Name)
+	if !ok || count == 0 {
 		return
 	}
 	fmt.Fprintf(stderrWriter,
@@ -211,24 +244,144 @@ func hintGatedCheckpointSync(ctx context.Context, pushRemote string) {
 		slog.String("push_remote", pushRemote))
 }
 
+// waitingCheckpointCount counts the checkpoints not yet on syncRemote for a
+// hint. ok is false when counting failed: the hint stays quiet toward the user
+// (best-effort, inside their push) but leaves a trace, because a persistently
+// failing count would otherwise re-create the silent stall the hint exists to
+// surface.
+func waitingCheckpointCount(ctx context.Context, syncRemote string) (count int, ok bool) {
+	count, err := CountUnpushedCheckpoints(ctx, syncRemote)
+	if err != nil {
+		logging.Debug(ctx, "gated checkpoint sync hint suppressed: cannot count unpushed checkpoints",
+			slog.String("checkpoint_sync_remote", syncRemote),
+			slog.String("error", err.Error()))
+		return 0, false
+	}
+	return count, true
+}
+
+// configuredRemote is one remote's url/pushurl entries from .git/config, in
+// config order. URLs are the RAW configured values: `url.<base>.insteadOf`
+// rewrites are deliberately not applied. Git applies those rewrites BEFORE
+// picking a transport, so a remote whose raw url is entire:// but is rewritten
+// to another scheme pushes to the rewritten target and the entire helper is
+// never invoked; classifying on the raw value therefore answers "which remote
+// did the user declare as their Entire remote", not "where do bytes go". That
+// is the intended question: insteadOf is user-local config the user wrote
+// themselves, never repo-supplied, so a declared Entire remote that the same
+// user redirects elsewhere is their own choice — and it is also what lets tests
+// stand in a file:// bare for an Entire remote. The removal engine reads the
+// EXPANDED push URL instead because it addresses a concrete destination for a
+// delete; the two halves ask different questions on purpose. (`git remote
+// get-url` expands insteadOf; isConfiguredRemote uses it for membership, and
+// the two must stay separate.)
+type configuredRemote struct {
+	Name string
+	// URLs holds every remote.<name>.url value; a remote with none is not
+	// listed at all (pushurl-only remotes stay invisible, spec Unit 1).
+	URLs []string
+	// PushURLs holds every remote.<name>.pushurl value, which git uses INSTEAD
+	// of URLs for pushes when any is set.
+	PushURLs []string
+}
+
 // configuredRemotesInConfigOrder lists remote names in .git/config section
 // order (approximates "first remote added"; `git remote` output is
 // alphabetical and unsuitable). Remotes configured with only pushurl are
 // deliberately invisible (spec Unit 1). Errors yield an empty list.
 func configuredRemotesInConfigOrder(ctx context.Context) []string {
-	return cachedRemotesInConfigOrder(ctx, readRemotesInConfigOrder)
+	remotes := cachedRemotesInConfigOrder(ctx, readRemotesInConfigOrder)
+	names := make([]string, 0, len(remotes))
+	for _, r := range remotes {
+		names = append(names, r.Name)
+	}
+	return names
 }
 
-// readRemotesInConfigOrder lists remote names, distinguishing "this repo has no
-// remotes" from "the read failed". Both used to collapse to nil, which was
-// harmless while every caller re-ran the command — but the per-invocation cache
-// would memoize a failure's nil as a legitimately empty list and then skip
-// checkpoint sync for the rest of the process. `git config --get-regexp` exits 1
-// for no match, so that exit code alone is the empty answer; anything else (a
-// fork failure under load, a cancelled context, a locked config) is an error the
-// cache must not keep.
-func readRemotesInConfigOrder(ctx context.Context) ([]string, error) {
-	cmd := exec.CommandContext(ctx, "git", "config", "--local", "--get-regexp", `^remote\..*\.url$`)
+// configuredEntireRemotes lists the configured remotes that are Entire's own —
+// every url AND every pushurl is an entire:// URL. All of them, not any: a
+// remote with an entire:// fetch url and a GitHub pushurl fans pushes out to
+// GitHub, and the entire tier must never elect a destination that can carry
+// transcripts to a non-Entire mirror. Same cached .git/config read as the
+// ordered list, so the tier costs no extra subprocess.
+func configuredEntireRemotes(ctx context.Context) []string {
+	return entireRemotesOf(cachedRemotesInConfigOrder(ctx, readRemotesInConfigOrder))
+}
+
+// entireRemotesOf is configuredEntireRemotes's pure half.
+func entireRemotesOf(remotes []configuredRemote) []string {
+	var names []string
+	for _, r := range remotes {
+		if len(r.URLs) == 0 {
+			continue
+		}
+		allEntire := true
+		for _, u := range r.URLs {
+			allEntire = allEntire && gitremote.IsEntireURL(u)
+		}
+		for _, u := range r.PushURLs {
+			allEntire = allEntire && gitremote.IsEntireURL(u)
+		}
+		if allEntire {
+			names = append(names, r.Name)
+		}
+	}
+	return names
+}
+
+// entireRemotes lists the configured remotes whose every URL is entire://, in
+// .git/config order. Read from raw config (insteadOf not expanded); see
+// configuredRemote. Empty when there are none or the read failed.
+func entireRemotes(ctx context.Context) []string {
+	return configuredEntireRemotes(ctx)
+}
+
+// LegacyCheckpointRemote names the remote the default election would pick if
+// the entire tier did not exist — origin, else the sole non-Entire remote, else
+// the first in .git/config order — restricted to non-Entire remotes. It is the
+// remote most likely to hold checkpoints from before an Entire remote was
+// added, which is what the pre-push announcement and `entire status` name when
+// pointing at the backlog. Empty when every remote is Entire's or
+// there are none.
+func LegacyCheckpointRemote(ctx context.Context) string {
+	legacy := nonEntireRemotes(ctx)
+	switch {
+	case len(legacy) == 0:
+		return ""
+	case slices.Contains(legacy, "origin"):
+		return "origin"
+	default:
+		return legacy[0]
+	}
+}
+
+// nonEntireRemotes lists the configured remotes that are not Entire remotes, in
+// .git/config order. Under the Entire tier these are exactly the remotes that
+// may still hold checkpoints from before it took over, which is why the read
+// chain consults all of them rather than one computed pick (see
+// CheckpointReadRemotesWithElection).
+func nonEntireRemotes(ctx context.Context) []string {
+	remotes := cachedRemotesInConfigOrder(ctx, readRemotesInConfigOrder)
+	entire := entireRemotesOf(remotes)
+	var legacy []string
+	for _, r := range remotes {
+		if !slices.Contains(entire, r.Name) {
+			legacy = append(legacy, r.Name)
+		}
+	}
+	return legacy
+}
+
+// readRemotesInConfigOrder lists remotes with their raw URLs, distinguishing
+// "this repo has no remotes" from "the read failed". Both used to collapse to
+// nil, which was harmless while every caller re-ran the command — but the
+// per-invocation cache would memoize a failure's nil as a legitimately empty
+// list and then skip checkpoint sync for the rest of the process. `git config
+// --get-regexp` exits 1 for no match, so that exit code alone is the empty
+// answer; anything else (a fork failure under load, a cancelled context, a
+// locked config) is an error the cache must not keep.
+func readRemotesInConfigOrder(ctx context.Context) ([]configuredRemote, error) {
+	cmd := exec.CommandContext(ctx, "git", "config", "--local", "--get-regexp", `^remote\..*\.(url|pushurl)$`)
 	if worktreeRoot, ok := settings.WorktreeRoot(ctx); ok {
 		cmd.Dir = worktreeRoot
 	}
@@ -240,21 +393,49 @@ func readRemotesInConfigOrder(ctx context.Context) ([]string, error) {
 		}
 		return nil, fmt.Errorf("list configured remotes: %w", err)
 	}
-	var names []string
-	seen := map[string]bool{}
+	var remotes []configuredRemote
+	index := map[string]int{}
 	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
-		// line: "remote.<name>.url <url>"; <name> may contain dots, so trim
-		// the fixed prefix and the ".url <value>" suffix instead of splitting.
-		key, _, ok := strings.Cut(line, " ")
-		if !ok {
+		// line: "remote.<name>.url <url>" or "remote.<name>.pushurl <url>";
+		// <name> may contain dots, so trim the fixed prefix and the key suffix
+		// instead of splitting.
+		key, value, ok := strings.Cut(line, " ")
+		if !ok || !strings.HasPrefix(key, "remote.") {
 			continue
 		}
-		name := strings.TrimSuffix(strings.TrimPrefix(key, "remote."), ".url")
-		if name == "" || name == key || seen[name] {
+		rest := strings.TrimPrefix(key, "remote.")
+		var name string
+		isPush := false
+		switch {
+		case strings.HasSuffix(rest, ".pushurl"):
+			name, isPush = strings.TrimSuffix(rest, ".pushurl"), true
+		case strings.HasSuffix(rest, ".url"):
+			name = strings.TrimSuffix(rest, ".url")
+		default:
 			continue
 		}
-		seen[name] = true
-		names = append(names, name)
+		if name == "" {
+			continue
+		}
+		i, seen := index[name]
+		if !seen {
+			index[name] = len(remotes)
+			i = len(remotes)
+			remotes = append(remotes, configuredRemote{Name: name})
+		}
+		if isPush {
+			remotes[i].PushURLs = append(remotes[i].PushURLs, value)
+		} else {
+			remotes[i].URLs = append(remotes[i].URLs, value)
+		}
 	}
-	return names, nil
+	// A pushurl-only remote was recorded to keep config order, but it is not a
+	// configured remote for election purposes (spec Unit 1).
+	visible := remotes[:0]
+	for _, r := range remotes {
+		if len(r.URLs) > 0 {
+			visible = append(visible, r)
+		}
+	}
+	return visible, nil
 }

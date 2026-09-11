@@ -3,6 +3,7 @@ package strategy
 import (
 	"context"
 	"log/slog"
+	"slices"
 
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 )
@@ -10,7 +11,9 @@ import (
 // CheckpointReadRemotes returns the ordered, deduped remotes that checkpoint
 // READS consult: the elected sync remote first, then "origin" as the legacy
 // tier (pre-single-remote-sync checkpoints live there, and a fresh clone
-// may lack the local settings that elected a non-origin remote).
+// may lack the local settings that elected a non-origin remote), then — under
+// the Entire tier — the non-Entire remote that tier displaced, so checkpoints
+// pushed there before the Entire remote existed stay readable.
 //
 // Unlike the write-side election, this fails OPEN: on an election error
 // (misconfigured checkpoint_push_remote, unreadable settings) the chain is
@@ -88,6 +91,25 @@ func CheckpointReadRemotesWithElection(ctx context.Context) CheckpointReadResolu
 	}
 	if isConfiguredRemote(ctx, "origin") && (len(res.Candidates) == 0 || res.Candidates[0] != "origin") {
 		res.Candidates = append(res.Candidates, "origin")
+	}
+	// Under the Entire tier, every non-Entire remote may hold checkpoints from
+	// before the Entire remote existed: the tier displaced whichever one the
+	// default tiers elected, and nothing deleted what was already pushed there.
+	// The recorded displaced remote comes first (it is the one the tier actually
+	// took over from), then the rest in config order.
+	//
+	// All of them, not just that one: naming a single fallback means picking it,
+	// and any pick computed from the current remote set moves when the set does.
+	// A repo that accumulated checkpoints on "gh" and later gained an "origin"
+	// would see the single answer swap to the new, empty origin. Reads are
+	// best-effort and fail open per candidate, so listing every non-Entire
+	// remote costs a bounded probe and cannot lose a holder.
+	if err == nil && elected.Source == SyncRemoteSourceEntire {
+		for _, name := range append([]string{DisplacedCheckpointRemote(ctx)}, nonEntireRemotes(ctx)...) {
+			if name != "" && !slices.Contains(res.Candidates, name) {
+				res.Candidates = append(res.Candidates, name)
+			}
+		}
 	}
 	return res
 }

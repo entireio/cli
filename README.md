@@ -545,11 +545,14 @@ By default, checkpoint data rides along with your own pushes — but only to **o
 
 1. `strategy_options.checkpoint_push_remote`, if set. This is fail-closed: if it names a remote that isn't configured, checkpoints don't sync.
 2. A remote captured from your own habits: the first push whose target matches the branch's declared push destination elects that remote, announces it on stderr, and carries the checkpoints. The first capture sticks.
-3. `origin`
-4. The sole remote, if the repo has exactly one
-5. The first remote in `.git/config` order
+3. Your Entire remote (`entire://…`), when exactly one of your remotes is one. Entire is built to hold checkpoints alongside your code, and checkpoint refs pushed to an Entire mirror stay on Entire rather than being forwarded to the upstream forge.
+4. `origin`
+5. The sole remote, if the repo has exactly one
+6. The first remote in `.git/config` order
 
 A push to any *other* remote carries no checkpoint data. `entire status` shows the current destination, where it came from, and how many checkpoints are unpushed. This matters if you push code to several remotes: checkpoints go to exactly one of them.
+
+The Entire remote is the one exception to "only pushes that name the remote carry checkpoints": once it is elected, **every** `git push`, whatever remote or URL it names, carries checkpoints to the Entire remote. Otherwise a habit of `git push origin` would strand them locally.
 
 If instead you want checkpoint data in a separate repo (e.g., a private repo for a public project), configure `checkpoint_remote` with a structured provider and repo. A dedicated `checkpoint_remote` is addressed directly and is exempt from the single-remote election above:
 

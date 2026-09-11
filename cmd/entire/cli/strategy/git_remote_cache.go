@@ -63,9 +63,11 @@ type gitRemoteCache struct {
 // own mutex so a git read for one repository never blocks another's.
 type remoteSnapshot struct {
 	mu sync.Mutex
-	// ordered is configuredRemotesInConfigOrder's result; orderedSet
-	// distinguishes "not yet read" from a legitimately empty remote list.
-	ordered    []string
+	// ordered is readRemotesInConfigOrder's result — names with their raw
+	// URLs, so configuredRemotesInConfigOrder and the entire-remote tier are
+	// both served from one .git/config read; orderedSet distinguishes "not yet
+	// read" from a legitimately empty remote list.
+	ordered    []configuredRemote
 	orderedSet bool
 	// member holds isConfiguredRemote answers per remote name. Kept separate
 	// from ordered because the two ask git different questions: ordered lists
@@ -175,28 +177,28 @@ func (c *gitRemoteCache) snapshotFor(ctx context.Context) *remoteSnapshot {
 // tell" as distinct outcomes precisely so this can hold: caching a failure's empty
 // list would turn one transient git hiccup into a process-long "this repo has no
 // remotes", and the election answers that by silently skipping checkpoint sync.
-func cachedRemotesInConfigOrder(ctx context.Context, read func(context.Context) ([]string, error)) []string {
+func cachedRemotesInConfigOrder(ctx context.Context, read func(context.Context) ([]configuredRemote, error)) []configuredRemote {
 	c := cacheFromContext(ctx)
 	if c == nil {
-		names, _ := read(ctx) //nolint:errcheck // uncached path keeps the historical best-effort contract
-		return names
+		remotes, _ := read(ctx) //nolint:errcheck // uncached path keeps the historical best-effort contract
+		return remotes
 	}
 	snap := c.snapshotFor(ctx)
 	if snap == nil {
-		names, _ := read(ctx) //nolint:errcheck // unidentifiable repo: same best-effort contract
-		return names
+		remotes, _ := read(ctx) //nolint:errcheck // unidentifiable repo: same best-effort contract
+		return remotes
 	}
 	snap.mu.Lock()
 	defer snap.mu.Unlock()
 	if snap.orderedSet {
 		return snap.ordered
 	}
-	names, err := read(ctx)
+	remotes, err := read(ctx)
 	if err != nil {
 		// Transient: answer this call, leave the slot unset so the next one retries.
 		return nil
 	}
-	snap.ordered, snap.orderedSet = names, true
+	snap.ordered, snap.orderedSet = remotes, true
 	return snap.ordered
 }
 

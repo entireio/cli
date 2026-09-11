@@ -14,6 +14,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
+	"github.com/entireio/cli/cmd/entire/cli/strategy"
 )
 
 // Checkpoint destinations are unambiguous in the ordinary single-remote,
@@ -51,6 +52,11 @@ type remoteTopology struct {
 	// primaryIsRefs reports whether the git-refs backend is active, which
 	// decides what a fanning-out remote means for checkpoints.
 	primaryIsRefs bool
+	// entireElected names the entire:// remote the election picked, or "" when
+	// checkpoints go elsewhere. With an Entire remote elected, having several
+	// remotes is not ambiguous: checkpoints have a home, whichever remote the
+	// code is pushed to.
+	entireElected string
 }
 
 // inspectRemoteTopology reads the repo's remotes and checkpoint configuration.
@@ -93,6 +99,10 @@ func inspectRemoteTopology(ctx context.Context) remoteTopology {
 		t.primaryIsRefs = checkpoint.PrimaryIsRefs(cpCfg)
 	}
 
+	if elected, err := strategy.ResolveCheckpointSyncRemote(ctx); err == nil && elected.Source == strategy.SyncRemoteSourceEntire {
+		t.entireElected = elected.Name
+	}
+
 	return t
 }
 
@@ -121,24 +131,37 @@ func pushURLsByRemote(ctx context.Context, dir string) (map[string][]string, err
 }
 
 // ambiguous reports whether anything is worth telling the user: a remote whose
-// checkpoints face several push URLs, or several remotes to choose between.
+// checkpoints face several push URLs, or several remotes to choose between. An
+// elected Entire remote settles the second question, not the first.
 func (t remoteTopology) ambiguous() bool {
-	unpinned := 0
+	return t.fansOutAnywhere() || t.severalUnpinned()
+}
+
+func (t remoteTopology) fansOutAnywhere() bool {
 	for _, d := range t.destinations {
 		if d.fansOut() {
 			return true
 		}
-		if !d.pinned {
-			unpinned++
-		}
 	}
-	return unpinned > 1
+	return false
+}
+
+// severalUnpinned reports the multi-remote choice, which an elected Entire
+// remote has already made.
+func (t remoteTopology) severalUnpinned() bool {
+	return t.entireElected == "" && len(t.unpinnedNames()) > 1
 }
 
 // describeCheckpointDestination writes an explanation of where checkpoints go,
-// under the given header. Writes nothing when the destination is unambiguous.
+// under the given header. With an Entire remote elected among several remotes
+// and no fan-out it writes the one positive line instead; with nothing to say
+// it writes nothing.
 func (t remoteTopology) describeCheckpointDestination(w io.Writer, header string) {
 	if !t.ambiguous() {
+		if t.entireElected != "" && len(t.destinations) > 1 {
+			fmt.Fprintln(w)
+			fmt.Fprintln(w, entireElectedLine(t.entireElected))
+		}
 		return
 	}
 
@@ -151,19 +174,30 @@ func (t remoteTopology) describeCheckpointDestination(w io.Writer, header string
 		fmt.Fprintf(w, "  Remote %q pushes to %d URLs:\n", d.name, len(d.pushURLs))
 		for i, u := range d.pushURLs {
 			marker := "  "
-			if i == 0 && t.primaryIsRefs {
+			if i == 0 && t.primaryIsRefs && t.entireElected == "" {
 				marker = "→ "
 			}
 			fmt.Fprintf(w, "    %s%s\n", marker, gitremote.RedactURLOrPath(u))
 		}
-		if t.primaryIsRefs {
+		switch {
+		case t.entireElected != "":
+			// The pre-push hook redirects checkpoints to the Entire remote, so
+			// this remote's fan-out carries code only.
+			fmt.Fprintln(w, "    Your code goes to every URL; checkpoints do not fan out with it.")
+		case t.primaryIsRefs:
 			fmt.Fprintln(w, "    Checkpoints go to the first URL only; the others receive your code but")
 			fmt.Fprintln(w, "    no session history. Clone that first repository to resume elsewhere.")
-		} else {
+		default:
 			fmt.Fprintln(w, "    Checkpoints are pushed to every URL. If one rejects them or is")
 			fmt.Fprintln(w, "    unreachable it is reported and left behind, and only the fetch URL is")
 			fmt.Fprintln(w, "    ever reconciled — so those URLs can fall permanently out of date.")
 		}
+	}
+
+	if t.entireElected != "" {
+		// Fan-out was worth reporting, but the destination itself is settled.
+		fmt.Fprintln(w, "  "+entireElectedLine(t.entireElected))
+		return
 	}
 
 	if names := t.unpinnedNames(); len(names) > 1 {
@@ -174,8 +208,19 @@ func (t remoteTopology) describeCheckpointDestination(w io.Writer, header string
 		fmt.Fprintln(w, "    checkpoints are waiting for it.")
 	}
 
-	fmt.Fprintln(w, "  To pin one repository for checkpoints, set checkpoint_remote in")
-	fmt.Fprintln(w, "  .entire/settings.json (or .entire/settings.local.json to keep it to this clone).")
+	// The picker is strategy_options.checkpoint_push_remote, a remote NAME in
+	// the per-clone local file. It is not checkpoint_remote, which names a
+	// separate {provider, repo} checkpoint repository and silently ignores a
+	// remote name; earlier copy sent people there.
+	fmt.Fprintln(w, "  To choose the remote that carries checkpoints, set strategy_options.checkpoint_push_remote")
+	fmt.Fprintln(w, "  to its name in .entire/settings.local.json; that file is per-clone, so the remote name is")
+	fmt.Fprintln(w, "  never committed for teammates whose clone lacks it. To keep checkpoints in a separate")
+	fmt.Fprintln(w, "  repository instead, see checkpoint_remote in the README.")
+}
+
+// entireElectedLine is the positive statement shared by enable and doctor.
+func entireElectedLine(remote string) string {
+	return "✓ Checkpoints sync to " + remote + " (your Entire remote)."
 }
 
 // unpinnedNames lists the remotes whose checkpoint destination is not already

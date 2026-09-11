@@ -152,6 +152,10 @@ func captureEligible(ctx context.Context, pushRemote string) (previouslyElected 
 	case SyncRemoteSourceConfig, SyncRemoteSourceObserved:
 		// An explicit override, or a capture already in force: nothing to displace.
 		return "", false
+	case SyncRemoteSourceEntire:
+		// The Entire remote is where checkpoints belong; a push habit toward
+		// another remote must not move them off it.
+		return "", false
 	case SyncRemoteSourceDefault, SyncRemoteSourceSole, SyncRemoteSourceFirst:
 		// Exactly the tiers a capture may displace. Enumerated rather than left to
 		// a default so `exhaustive` turns a new tier into a decision here instead

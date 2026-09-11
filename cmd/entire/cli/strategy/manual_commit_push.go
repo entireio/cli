@@ -33,6 +33,22 @@ var ErrOPFAbortedByUser = errors.New("OPF prompt aborted by user; push cancelled
 
 var opfPrePushProgressWriter io.Writer = os.Stderr
 
+// refsPushProgressWriter receives the "[entire] Pushing N checkpoint ref(s)…"
+// progress line and its dots from flushCheckpointRefsQueue. Stderr in the
+// pre-push hook, where git shows it; a foreground command that runs its own
+// spinner around the same flush swaps it out (SetRefsPushProgressWriter).
+// Warnings are not routed through it — they must reach the user regardless.
+var refsPushProgressWriter io.Writer = os.Stderr
+
+// SetRefsPushProgressWriter redirects the checkpoint-ref push progress output
+// and returns a function restoring the previous writer. Not goroutine-safe:
+// meant for a command that owns the process for the duration of one flush.
+func SetRefsPushProgressWriter(w io.Writer) (restore func()) {
+	prev := refsPushProgressWriter
+	refsPushProgressWriter = w
+	return func() { refsPushProgressWriter = prev }
+}
+
 // PrePush is called by the git pre-push hook before pushing to a remote.
 // It pushes each ref in refs.Push alongside the user's push.
 //
@@ -95,14 +111,24 @@ func (s *ManualCommitStrategy) prePush(ctx context.Context, remote string, prote
 	// Everything in between can still stop delivery, and the election is
 	// permanent, so intent is not enough to move it. The hint below then speaks
 	// only for what capture left gated — see hintGatedCheckpointSync.
+	//
+	// The entire tier sits in front of all of that: when the election elected
+	// the one entire:// remote, every push carries checkpoints there (redirected
+	// by name when the user pushed elsewhere), so there is no gate to pass, no
+	// hint to give, and nothing for capture to displace — see
+	// redirectToEntireSyncRemote.
 	var pendingCapture string
+	var entireTier bool
 	if !ps.hasCheckpointURL() {
-		if pendingCaptureCheckpointSyncRemote(ctx, ps.remote) {
-			pendingCapture = ps.remote
-		}
-		if !checkpointSyncAllowedForRemote(ctx, ps.remote, pendingCapture) {
-			hintGatedCheckpointSync(ctx, ps.remote)
-			return nil
+		_, entireTier = redirectToEntireSyncRemote(ctx, &ps)
+		if !entireTier {
+			if pendingCaptureCheckpointSyncRemote(ctx, ps.remote) {
+				pendingCapture = ps.remote
+			}
+			if !checkpointSyncAllowedForRemote(ctx, ps.remote, pendingCapture) {
+				hintGatedCheckpointSync(ctx, ps.remote)
+				return nil
+			}
 		}
 	}
 
@@ -113,7 +139,7 @@ func (s *ManualCommitStrategy) prePush(ctx context.Context, remote string, prote
 	// (A configured git-branch mirror's v1 ref is not pushed here yet — mirror
 	// push for downgrade safety is a later step.)
 	if ps.primaryIsRefs {
-		return s.prePushCheckpointRefs(ctx, ps, pendingCapture)
+		return s.prePushCheckpointRefs(ctx, ps, pendingCapture, entireTier)
 	}
 
 	// git-branch primary: entire/checkpoints/v1 is a real refs/heads branch, so
@@ -144,6 +170,10 @@ func (s *ManualCommitStrategy) prePush(ctx context.Context, remote string, prote
 	if redact.OPFEnabled() {
 		decision, decisionErr := opfPrePushDecision(ctx)
 		if decisionErr != nil {
+			if ps.targetsEntireRemote() {
+				withholdEntireCheckpointPush(ctx, ps, decisionErr)
+				return nil
+			}
 			logging.Warn(ctx, "OPF pre-push decision failed; aborting push",
 				slog.String("error", decisionErr.Error()),
 			)
@@ -166,9 +196,28 @@ func (s *ManualCommitStrategy) prePush(ctx context.Context, remote string, prote
 				)
 				return repoErr
 			}
-			if _, rewriteErr := RewriteUnpushedV1WithOPF(ctx, repo, ps.pushTarget()); rewriteErr != nil {
+			// Under the Entire tier the destination has no v1 yet, so bounding
+			// the rewrite by its tip alone would count the whole local history
+			// as unpushed — BootstrapTooLargeError above the cap, a full-history
+			// rewrite below it. Commits already published to the remote the tier
+			// displaced are not unpushed; bound by that tip when the Entire
+			// remote has none.
+			//
+			// Keyed on the tier, not on whether this push was redirected: the
+			// destination is the same Entire remote either way, so a direct
+			// `git push entire` has exactly the same missing v1 and needs the
+			// same bound.
+			var boundFallback string
+			if ps.targetsEntireRemote() {
+				boundFallback = DisplacedCheckpointRemote(ctx)
+			}
+			if _, rewriteErr := rewriteUnpushedV1WithOPFBounded(ctx, repo, ps.pushTarget(), boundFallback); rewriteErr != nil {
 				opfSpan.RecordError(rewriteErr)
 				opfSpan.End()
+				if ps.targetsEntireRemote() {
+					withholdEntireCheckpointPush(ctx, ps, rewriteErr)
+					return nil
+				}
 				logging.Warn(ctx, "OPF pre-push rewrite failed; aborting push",
 					slog.String("error", rewriteErr.Error()),
 				)
@@ -182,7 +231,7 @@ func (s *ManualCommitStrategy) prePush(ctx context.Context, remote string, prote
 		// Do this only after OPF has had a chance to rewrite v1: the outer
 		// user push may explicitly include the metadata branch.
 		logging.Info(ctx, "automatic checkpoint push deferred until the remote has a branch",
-			slog.String("remote", ps.remote),
+			slog.String("remote", ps.pushTarget()),
 		)
 		return nil
 	}
@@ -219,6 +268,10 @@ func (s *ManualCommitStrategy) prePush(ctx context.Context, remote string, prote
 	// making. The next push that carries a checkpoint captures instead.
 	if pendingCapture != "" && deliveredCount > 0 && !anyFailed {
 		commitCapturedSyncRemote(ctx, pendingCapture)
+	}
+	// Same delivery-not-intent rule for the entire tier's one-time announcement.
+	if entireTier && deliveredCount > 0 && !anyFailed {
+		announceEntireSyncRemoteOnce(ctx, ps.pushTarget())
 	}
 
 	cleanupPushedShadowBranches(ctx)
@@ -328,8 +381,40 @@ func warnOPFCheckpointRefsWithheld(ctx context.Context, err error) {
 //
 // A separate checkpoint remote is exempt: it is a dedicated metadata store, not
 // the repository the user pushes to.
+// withholdEntireCheckpointPush withholds this push's checkpoint delivery to the
+// Entire remote after an OPF failure and lets the user's own push proceed.
+//
+// Still fail-closed — nothing un-OPF'd ships, the checkpoints stay local and go
+// with the next push once the cause is fixed — but it does not also veto the
+// push the user typed. The v1 path's usual response is to abort, which is right
+// when the push IS the checkpoint delivery; under the tier it is not. Every
+// push carries checkpoints to the Entire remote, so the delivery is machinery
+// we attached rather than what the user aimed at, and whether the remote they
+// named happens to BE the Entire remote is incidental — that is why this is
+// keyed on the tier and not on the redirect. Same stance the git-refs backend
+// already takes for a failed OPF gate (see the OPF bullet in CLAUDE.md).
+func withholdEntireCheckpointPush(ctx context.Context, ps pushSettings, cause error) {
+	logging.Warn(ctx, "OPF pre-push failed under the Entire tier; checkpoints withheld, user push continues",
+		slog.String("checkpoint_sync_remote", ps.pushTarget()),
+		slog.String("error", cause.Error()))
+	fmt.Fprintf(stderrWriter,
+		"[entire] Checkpoints were not pushed to %q this time: %v. Your push continues; they go with the next push once this is fixed.\n",
+		ps.pushTarget(), cause)
+}
+
 func deferCheckpointPushOnEmptyRemote(ctx context.Context, ps pushSettings) bool {
 	if ps.hasCheckpointURL() {
+		return false
+	}
+	// A push whose checkpoints land on the Entire remote (entire tier) is
+	// exempt for the same reason as the dedicated store: it is Entire's own,
+	// not the repository the user pushes to. That covers a redirected `git push
+	// origin` and a direct `git push entire` alike. Keying the defer on the
+	// Entire remote's tracking refs would defer v1 forever for a user who only
+	// ever pushes code to GitHub — no refs/remotes/<entire>/* is ever created by
+	// their pushes. This assumes the Entire server never adopts
+	// entire/checkpoints/v1 as a mirror's default branch.
+	if ps.targetsEntireRemote() {
 		return false
 	}
 
@@ -408,7 +493,11 @@ func remoteHasTrackingRefs(ctx context.Context, remote string) bool {
 // checkpoint *format* compatibility (diverged from the remote, or an unsupported
 // local format), which is independent of the storage backend, so a blocked
 // policy skips the ref push (leaving refs queued) rather than pushing.
-func (s *ManualCommitStrategy) prePushCheckpointRefs(ctx context.Context, ps pushSettings, pendingCapture string) error {
+//
+// entireTier reports that the entire election tier is in force for this push
+// (see redirectToEntireSyncRemote); a delivery then announces the destination
+// once per clone instead of moving the election.
+func (s *ManualCommitStrategy) prePushCheckpointRefs(ctx context.Context, ps pushSettings, pendingCapture string, entireTier bool) error {
 	repo, err := OpenRepository(ctx)
 	if err != nil {
 		logging.Warn(ctx, "git-refs pre-push: open repo failed; skipping checkpoint push",
@@ -440,6 +529,9 @@ func (s *ManualCommitStrategy) prePushCheckpointRefs(ctx context.Context, ps pus
 		// nothing, so it must not move the election or announce that it had.
 		if pendingCapture != "" && flushed > 0 {
 			commitCapturedSyncRemote(ctx, pendingCapture)
+		}
+		if entireTier && flushed > 0 {
+			announceEntireSyncRemoteOnce(ctx, ps.pushTarget())
 		}
 	} else {
 		// Fail-soft: a checkpoint-ref push failure must never block the user's
@@ -532,8 +624,8 @@ func flushCheckpointRefsQueue(ctx context.Context, repo *git.Repository, ps push
 	// surface it (matching the v1 path's "[entire] Pushing ..." line) instead of
 	// leaving the user's git push apparently hung. Written to stderr, which git
 	// shows during the pre-push hook.
-	fmt.Fprintf(os.Stderr, "[entire] Pushing %d checkpoint ref(s) to %s...", len(existing), dest.display())
-	stop := startProgressDots(os.Stderr)
+	fmt.Fprintf(refsPushProgressWriter, "[entire] Pushing %d checkpoint ref(s) to %s...", len(existing), dest.display())
+	stop := startProgressDots(refsPushProgressWriter)
 
 	// Fast path: push all refs in one round-trip (fast-forward-only). If every
 	// ref was up to date or fast-forwarded, we're done.
@@ -569,8 +661,8 @@ func flushCheckpointRefsQueue(ctx context.Context, repo *git.Repository, ps push
 	// often on an unreachable or unauthorized destination. Telling a user with a
 	// dead remote that their refs "diverged" — or were "rejected", which equally
 	// implies the remote answered — sends them after the wrong problem.
-	fmt.Fprintf(os.Stderr, "[entire] Checkpoint ref push failed; retrying %d ref(s) individually...", len(existing))
-	stop = startProgressDots(os.Stderr)
+	fmt.Fprintf(refsPushProgressWriter, "[entire] Checkpoint ref push failed; retrying %d ref(s) individually...", len(existing))
+	stop = startProgressDots(refsPushProgressWriter)
 	pushed := make([]plumbing.ReferenceName, 0, len(existing))
 	var firstErr error
 	for _, ref := range existing {

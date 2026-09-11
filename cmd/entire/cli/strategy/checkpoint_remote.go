@@ -42,20 +42,49 @@ type pushSettings struct {
 	checkpointURL string
 	// pushDisabled is true if push_sessions is explicitly set to false.
 	pushDisabled bool
+	// entireTier records that the Entire tier elected the destination: set
+	// whenever the elected sync remote is entire://, whether or not this push
+	// had to be redirected to reach it. Read through targetsEntireRemote.
+	entireTier bool
 	// primaryIsRefs records whether the git-refs backend is the configured
 	// primary, resolved once here so the pre-push path does not re-read the
 	// checkpoints config (LoadCheckpointsConfig is uncached: two whole-file
 	// reads and JSON parses per call).
 	primaryIsRefs bool
+	// syncRemote, when set, is the elected entire:// checkpoint sync remote and
+	// differs from remote: this push was made to some other target, and the
+	// checkpoints ride to the Entire remote regardless (the entire tier behaves
+	// like the dedicated checkpoint_remote URL mode, but addressed by remote
+	// name so tracking refs and the fast-forward recovery keep working). Empty
+	// in every other topology. See redirectToEntireSyncRemote.
+	syncRemote string
 }
 
-// pushTarget returns the target to use for git push/fetch commands for checkpoint branches.
-// If a checkpoint URL is configured, returns that; otherwise returns the remote name.
+// pushTarget returns the target to use for git push/fetch commands for
+// checkpoint branches: the dedicated checkpoint URL when configured, else the
+// elected Entire remote this push was redirected to, else the remote pushed.
 func (ps *pushSettings) pushTarget() string {
 	if ps.checkpointURL != "" {
 		return ps.checkpointURL
 	}
+	if ps.syncRemote != "" {
+		return ps.syncRemote
+	}
 	return ps.remote
+}
+
+// targetsEntireRemote reports whether checkpoint data for this push lands on
+// the elected Entire remote — redirected there, or pushed to it directly.
+//
+// Every decision that hinges on "is the destination Entire's own store" keys on
+// this: the empty-remote defer, the OPF rewrite's fallback bound, and the OPF
+// withhold. Deliberately NOT "was this push redirected" (syncRemote != ""),
+// which is true only when the user named some other remote: the destination is
+// the same Entire remote either way, so gating on the redirect gave a direct
+// `git push entire` the untreated path — no fallback bound, and the abort the
+// bound exists to prevent.
+func (ps *pushSettings) targetsEntireRemote() bool {
+	return ps.entireTier
 }
 
 // hasCheckpointURL returns true if a dedicated checkpoint URL is configured.
