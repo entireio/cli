@@ -907,16 +907,6 @@ Multiple AI sessions can run concurrently on the same base commit:
 3. **Identification** - Each checkpoint is tagged with its session ID; `checkpoint list --pending` shows the session prompt
 4. **Condensation** - On commit, all sessions are condensed together with archived subfolders
 
-`entire status` is a read-only observer of this state. It does not finalize a
-session, condense a transcript, or rewrite session files when the owning agent
-has exited; the dedicated sweeper and doctor own those mutations. Until that
-cleanup persists an ended phase, status keeps the session in `active_sessions`
-and derives the display state `exited`. Text and JSON use the same complete
-collection, including multiple sessions from the same agent, sorted by most
-recent activity and then session ID. JSON includes session and worktree IDs,
-worktree path, branch, and available start/last-active timestamps so entries
-remain distinguishable.
-
 ### Conflict Handling
 
 | Scenario | Behavior |

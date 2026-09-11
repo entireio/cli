@@ -477,6 +477,11 @@ type TaskRecord struct {
 	// ResolveAgentTranscriptPath in that case.
 	DeclaredTranscriptPath string `json:"declared_transcript_path,omitempty"`
 
+	// TranscriptUnavailable is set when the agent stores child activity only in
+	// the parent transcript. It prevents generic layout fallback from attaching
+	// an unrelated file to this record during condensation.
+	TranscriptUnavailable bool `json:"transcript_unavailable,omitempty"`
+
 	// Files is the set of files touched by this subagent, merged into the
 	// session's FilesTouched at completion time. Populated when the record
 	// is completed; empty for a still in-flight record and for a completed
@@ -955,12 +960,6 @@ func NewStateStoreWithDir(stateDir string) *StateStore {
 // Returns (nil, nil) when session file doesn't exist or session is stale (not an error condition).
 // Stale sessions (ended longer than StaleSessionThreshold ago) are automatically deleted.
 func (s *StateStore) Load(ctx context.Context, sessionID string) (*State, error) {
-	return s.load(ctx, sessionID, true)
-}
-
-// load reads one session. When deleteStale is false, stale records are omitted
-// without performing the best-effort cleanup used by ordinary store reads.
-func (s *StateStore) load(ctx context.Context, sessionID string, deleteStale bool) (*State, error) {
 	// Validate session ID to prevent path traversal
 	if err := validation.ValidateSessionID(sessionID); err != nil {
 		return nil, fmt.Errorf("invalid session ID: %w", err)
@@ -991,9 +990,6 @@ func (s *StateStore) load(ctx context.Context, sessionID string, deleteStale boo
 	state.NormalizeAfterLoad(ctx)
 
 	if state.IsStale() {
-		if !deleteStale {
-			return &state, nil
-		}
 		logCtx := logging.WithComponent(ctx, "session")
 		logging.Debug(logCtx, "deleting stale session state",
 			slog.String("session_id", sessionID),
@@ -1099,17 +1095,6 @@ func (s *StateStore) RemoveAll() error {
 
 // List returns all session states.
 func (s *StateStore) List(ctx context.Context) ([]*State, error) {
-	return s.list(ctx, true)
-}
-
-// ListReadOnly returns every persisted session without deleting or hiding stale
-// records. Passive surfaces such as status derive display state without letting
-// observation change repository state.
-func (s *StateStore) ListReadOnly(ctx context.Context) ([]*State, error) {
-	return s.list(ctx, false)
-}
-
-func (s *StateStore) list(ctx context.Context, deleteStale bool) ([]*State, error) {
 	root, err := s.dirRoot()
 	if err != nil {
 		return nil, fmt.Errorf("failed to open session state directory: %w", err)
@@ -1132,7 +1117,7 @@ func (s *StateStore) list(ctx context.Context, deleteStale bool) ([]*State, erro
 		}
 
 		sessionID := strings.TrimSuffix(entry.Name(), ".json")
-		state, err := s.load(ctx, sessionID, deleteStale)
+		state, err := s.Load(ctx, sessionID)
 		if err != nil {
 			continue // Skip corrupted state files
 		}

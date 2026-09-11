@@ -20,7 +20,6 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
-	"github.com/entireio/cli/cmd/entire/cli/proclive"
 	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
@@ -2084,6 +2083,76 @@ func TestRunStatusJSON_NotGitRepo(t *testing.T) {
 	}
 }
 
+func TestRunStatusJSON_DeduplicatesSessions(t *testing.T) {
+	setupTestRepo(t)
+	writeSettings(t, testSettingsEnabled)
+
+	store, err := session.NewStateStore(context.Background())
+	if err != nil {
+		t.Fatalf("NewStateStore() error = %v", err)
+	}
+
+	now := time.Now()
+	states := []*session.State{
+		{
+			SessionID:    "codex-idle-1",
+			WorktreePath: "/test/repo",
+			StartedAt:    now.Add(-30 * time.Minute),
+			Phase:        session.PhaseIdle,
+			AgentType:    "Codex",
+		},
+		{
+			SessionID:    "codex-idle-2",
+			WorktreePath: "/test/repo",
+			StartedAt:    now.Add(-20 * time.Minute),
+			Phase:        session.PhaseIdle,
+			AgentType:    "Codex",
+		},
+		{
+			SessionID:    "codex-active",
+			WorktreePath: "/test/repo",
+			StartedAt:    now.Add(-5 * time.Minute),
+			Phase:        session.PhaseActive,
+			AgentType:    "Codex",
+			ModelName:    "codex-mini",
+		},
+	}
+	for _, s := range states {
+		if err := store.Save(context.Background(), s); err != nil {
+			t.Fatalf("Save() error = %v", err)
+		}
+	}
+
+	var stdout bytes.Buffer
+	if err := runStatus(context.Background(), &stdout, false, true); err != nil {
+		t.Fatalf("runStatus() error = %v", err)
+	}
+
+	var result statusJSON
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v", err)
+	}
+
+	if len(result.ActiveSessions) != 1 {
+		t.Fatalf("Expected 1 deduplicated session, got %d", len(result.ActiveSessions))
+	}
+	s := result.ActiveSessions[0]
+	if s.Agent != "Codex" {
+		t.Errorf("Expected agent='Codex', got %q", s.Agent)
+	}
+	if s.Status != "active" {
+		t.Errorf("Expected status='active' (active wins over idle), got %q", s.Status)
+	}
+	if s.Model != "codex-mini" {
+		t.Errorf("Expected model='codex-mini' from active session, got %q", s.Model)
+	}
+}
+
+// writeStatusHeadCheckpoint writes a v1 checkpoint with the requested
+// review/investigation flags, then amends HEAD to carry the
+// Entire-Checkpoint trailer. Mirrors the helper used in
+// head_checkpoint_flags_test.go but inlined to keep status_test.go
+// self-contained for readers comparing to other status tests.
 func TestRunStatusJSON_WithActiveSessions(t *testing.T) {
 	setupTestRepo(t)
 	writeSettings(t, testSettingsEnabled)
@@ -2134,78 +2203,6 @@ func TestRunStatusJSON_WithActiveSessions(t *testing.T) {
 	}
 }
 
-func TestRunStatusJSON_ReturnsEverySession(t *testing.T) {
-	setupTestRepo(t)
-	writeSettings(t, testSettingsEnabled)
-
-	store, err := session.NewStateStore(context.Background())
-	if err != nil {
-		t.Fatalf("NewStateStore() error = %v", err)
-	}
-
-	now := time.Now()
-	states := []*session.State{
-		{
-			SessionID:    "codex-idle-1",
-			WorktreePath: "/test/repo",
-			StartedAt:    now.Add(-30 * time.Minute),
-			Phase:        session.PhaseIdle,
-			AgentType:    "Codex",
-		},
-		{
-			SessionID:    "codex-idle-2",
-			WorktreePath: "/test/repo",
-			StartedAt:    now.Add(-20 * time.Minute),
-			Phase:        session.PhaseIdle,
-			AgentType:    "Codex",
-		},
-		{
-			SessionID:    "codex-active",
-			WorktreePath: "/test/repo",
-			StartedAt:    now.Add(-5 * time.Minute),
-			Phase:        session.PhaseActive,
-			AgentType:    "Codex",
-			ModelName:    "codex-mini",
-		},
-	}
-	for _, s := range states {
-		if err := store.Save(context.Background(), s); err != nil {
-			t.Fatalf("Save() error = %v", err)
-		}
-	}
-
-	var stdout bytes.Buffer
-	if err := runStatus(context.Background(), &stdout, false, true); err != nil {
-		t.Fatalf("runStatus() error = %v", err)
-	}
-
-	var result statusJSON
-	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
-		t.Fatalf("json.Unmarshal() error = %v", err)
-	}
-
-	if len(result.ActiveSessions) != 3 {
-		t.Fatalf("Expected all 3 sessions, got %d", len(result.ActiveSessions))
-	}
-	for i, want := range []struct {
-		id, status, model string
-	}{
-		{id: "codex-active", status: "active", model: "codex-mini"},
-		{id: "codex-idle-2", status: "idle"},
-		{id: "codex-idle-1", status: "idle"},
-	} {
-		got := result.ActiveSessions[i]
-		if got.Agent != "Codex" || got.SessionID != want.id || got.Status != want.status || got.Model != want.model {
-			t.Errorf("active_sessions[%d] = %+v, want agent Codex, id/status/model %+v", i, got, want)
-		}
-	}
-}
-
-// writeStatusHeadCheckpoint writes a v1 checkpoint with the requested
-// review/investigation flags, then amends HEAD to carry the
-// Entire-Checkpoint trailer. Mirrors the helper used in
-// head_checkpoint_flags_test.go but inlined to keep status_test.go
-// self-contained for readers comparing to other status tests.
 func writeStatusHeadCheckpoint(t *testing.T, hasReview, hasInvestigation bool) {
 	t.Helper()
 	cwd, err := os.Getwd()
@@ -2820,25 +2817,6 @@ func TestStatusShowsSyncResolutionErrorAndBlockedHookHealth(t *testing.T) {
 	require.Contains(t, text, "entire doctor")
 }
 
-func TestStatusJSONPreservesEmptyWorktreePath(t *testing.T) {
-	testutil.IsolateGitConfigEnv(t)
-	setupTestRepo(t)
-	writeSettings(t, testSettingsEnabled)
-	installStatusGitHooks(t)
-	store, err := session.NewStateStore(t.Context())
-	require.NoError(t, err)
-	require.NoError(t, store.Save(t.Context(), &session.State{
-		SessionID: "legacy-no-worktree", StartedAt: time.Now(), Phase: session.PhaseActive,
-	}))
-
-	var out bytes.Buffer
-	require.NoError(t, runStatus(t.Context(), &out, false, true))
-	var got statusJSON
-	require.NoError(t, json.Unmarshal(out.Bytes(), &got))
-	require.Len(t, got.ActiveSessions, 1)
-	require.Empty(t, got.ActiveSessions[0].WorktreePath)
-}
-
 func TestStatusCheckpointStorageAndDedicatedDestinationAreIndependent(t *testing.T) {
 	testutil.IsolateGitConfigEnv(t)
 	setupTestRepo(t)
@@ -3024,178 +3002,5 @@ func TestStatusCheckpointStorageUsesEffectiveLocalOverride(t *testing.T) {
 	}
 	if got["checkpoint_storage_backend"] != "git-refs" {
 		t.Errorf("checkpoint_storage_backend = %#v, want effective local git-refs override", got["checkpoint_storage_backend"])
-	}
-}
-
-func TestStatusMultipleSessionsAreCompleteAndDeterministic(t *testing.T) {
-	testutil.IsolateGitConfigEnv(t)
-	repoDir := setupTestRepo(t)
-	writeSettings(t, testSettingsEnabled)
-	installStatusGitHooks(t)
-
-	store, err := session.NewStateStore(t.Context())
-	if err != nil {
-		t.Fatal(err)
-	}
-	newest := time.Now().UTC().Add(-time.Minute)
-	oldest := newest.Add(-time.Minute)
-	states := []*session.State{
-		{SessionID: "same-b", WorktreeID: "wt-b", WorktreePath: filepath.Join(repoDir, "wt-b"), Branch: "feature-b", StartedAt: oldest.Add(-time.Hour), LastInteractionTime: &newest, Phase: session.PhaseActive, AgentType: agent.AgentTypeClaudeCode},
-		{SessionID: "other-c", WorktreeID: "wt-c", WorktreePath: filepath.Join(repoDir, "wt-c"), Branch: "feature-c", StartedAt: oldest.Add(-2 * time.Hour), LastInteractionTime: &oldest, Phase: session.PhaseIdle, AgentType: agent.AgentTypeCursor},
-		{SessionID: "same-a", WorktreeID: "wt-a", WorktreePath: filepath.Join(repoDir, "wt-a"), Branch: "feature-a", StartedAt: oldest.Add(-3 * time.Hour), LastInteractionTime: &newest, Phase: session.PhaseActive, AgentType: agent.AgentTypeClaudeCode},
-	}
-	for _, state := range states {
-		if err := store.Save(t.Context(), state); err != nil {
-			t.Fatal(err)
-		}
-	}
-
-	var textOut bytes.Buffer
-	if err := runStatus(t.Context(), &textOut, false, false); err != nil {
-		t.Fatal(err)
-	}
-	text := textOut.String()
-	indices := []int{strings.Index(text, "same-a"), strings.Index(text, "same-b"), strings.Index(text, "other-c")}
-	if indices[0] < 0 || indices[1] <= indices[0] || indices[2] <= indices[1] {
-		t.Fatalf("text sessions not sorted by last-active desc then ID asc: %v\n%s", indices, text)
-	}
-	for _, want := range []string{filepath.Join(repoDir, "wt-a"), filepath.Join(repoDir, "wt-b"), filepath.Join(repoDir, "wt-c"), "feature-a", "feature-b", "feature-c"} {
-		if !strings.Contains(text, want) {
-			t.Errorf("text status missing session worktree identity %q:\n%s", want, text)
-		}
-	}
-
-	var jsonOut bytes.Buffer
-	if err := runStatus(t.Context(), &jsonOut, false, true); err != nil {
-		t.Fatal(err)
-	}
-	var got struct {
-		ActiveSessions []struct {
-			SessionID    string     `json:"session_id"`
-			WorktreeID   string     `json:"worktree_id"`
-			WorktreePath string     `json:"worktree_path"`
-			Branch       string     `json:"branch"`
-			StartedAt    time.Time  `json:"started_at"`
-			LastActiveAt *time.Time `json:"last_active_at"`
-		} `json:"active_sessions"`
-	}
-	if err := json.Unmarshal(jsonOut.Bytes(), &got); err != nil {
-		t.Fatal(err)
-	}
-	if len(got.ActiveSessions) != 3 {
-		t.Fatalf("active_sessions length = %d, want 3: %s", len(got.ActiveSessions), jsonOut.String())
-	}
-	for i, want := range []string{"same-a", "same-b", "other-c"} {
-		if got.ActiveSessions[i].SessionID != want {
-			t.Fatalf("active_sessions[%d].session_id = %q, want %q", i, got.ActiveSessions[i].SessionID, want)
-		}
-		if got.ActiveSessions[i].WorktreeID == "" || got.ActiveSessions[i].WorktreePath == "" || got.ActiveSessions[i].Branch == "" || got.ActiveSessions[i].StartedAt.IsZero() || got.ActiveSessions[i].LastActiveAt == nil {
-			t.Errorf("active_sessions[%d] missing identity/timestamps: %+v", i, got.ActiveSessions[i])
-		}
-	}
-}
-
-func TestStatusReadOnlyKeepsDeadOwnerSessionAndArtifacts(t *testing.T) {
-	testutil.IsolateGitConfigEnv(t)
-	repoDir := setupTestRepo(t)
-	writeSettings(t, testSettingsEnabled)
-	installStatusGitHooks(t)
-
-	transcriptPath := filepath.Join(repoDir, "dead-owner-transcript.jsonl")
-	if err := os.WriteFile(transcriptPath, []byte("unchanged transcript\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	store, err := session.NewStateStore(t.Context())
-	if err != nil {
-		t.Fatal(err)
-	}
-	lastActive := time.Now().UTC().Add(-time.Minute)
-	state := &session.State{
-		SessionID: "dead-owner", WorktreeID: "main", WorktreePath: repoDir, Branch: "main",
-		StartedAt: lastActive.Add(-time.Hour), LastInteractionTime: &lastActive,
-		Phase: session.PhaseActive, AgentType: agent.AgentTypeClaudeCode,
-		Owner: &proclive.Identity{PID: os.Getpid(), Start: "not-this-process"}, TranscriptPath: transcriptPath,
-	}
-	if err := store.Save(t.Context(), state); err != nil {
-		t.Fatal(err)
-	}
-	staleEndedAt := time.Now().UTC().Add(-8 * 24 * time.Hour)
-	staleEnded := &session.State{
-		SessionID: "stale-ended", StartedAt: staleEndedAt, EndedAt: &staleEndedAt, Phase: session.PhaseEnded,
-	}
-	if err := store.Save(t.Context(), staleEnded); err != nil {
-		t.Fatal(err)
-	}
-	statePath := filepath.Join(repoDir, ".git", session.SessionStateDirName, state.SessionID+".json")
-	staleEndedPath := filepath.Join(repoDir, ".git", session.SessionStateDirName, staleEnded.SessionID+".json")
-	beforeStaleEnded, err := os.ReadFile(staleEndedPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	beforeState, err := os.ReadFile(statePath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	beforeStateInfo, err := os.Stat(statePath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	beforeTranscript, err := os.ReadFile(transcriptPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	beforeTranscriptInfo, err := os.Stat(transcriptPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	var textOut, jsonOut bytes.Buffer
-	if err := runStatus(t.Context(), &textOut, false, false); err != nil {
-		t.Fatal(err)
-	}
-	if err := runStatus(t.Context(), &jsonOut, false, true); err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(textOut.String(), "dead-owner") || !strings.Contains(textOut.String(), "exited") {
-		t.Fatalf("text status omitted derived exited session:\n%s", textOut.String())
-	}
-	var got struct {
-		ActiveSessions []sessionBriefJSON `json:"active_sessions"`
-	}
-	if err := json.Unmarshal(jsonOut.Bytes(), &got); err != nil {
-		t.Fatal(err)
-	}
-	if len(got.ActiveSessions) != 1 || got.ActiveSessions[0].SessionID != state.SessionID || got.ActiveSessions[0].Status != "exited" {
-		t.Fatalf("JSON status omitted derived exited session: %s", jsonOut.String())
-	}
-
-	afterState, err := os.ReadFile(statePath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	afterStateInfo, err := os.Stat(statePath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	afterTranscript, err := os.ReadFile(transcriptPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	afterTranscriptInfo, err := os.Stat(transcriptPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !bytes.Equal(beforeState, afterState) || !beforeStateInfo.ModTime().Equal(afterStateInfo.ModTime()) {
-		t.Error("status mutated dead-owner session state")
-	}
-	if !bytes.Equal(beforeTranscript, afterTranscript) || !beforeTranscriptInfo.ModTime().Equal(afterTranscriptInfo.ModTime()) {
-		t.Error("status mutated dead-owner transcript")
-	}
-	afterStaleEnded, err := os.ReadFile(staleEndedPath)
-	if err != nil {
-		t.Fatalf("status deleted stale ended session during a passive read: %v", err)
-	}
-	if !bytes.Equal(beforeStaleEnded, afterStaleEnded) {
-		t.Error("status mutated stale ended session state")
 	}
 }

@@ -265,33 +265,6 @@ func TestState_NormalizeAfterLoad_JSONRoundTrip(t *testing.T) {
 	}
 }
 
-func TestState_LastHookHealthWarningRoundTrip(t *testing.T) {
-	t.Parallel()
-	want := `["lefthook","error","Lefthook","owned_entry_conflict"]`
-	data, err := json.Marshal(&State{SessionID: "hook-health", LastHookHealthWarning: want})
-	require.NoError(t, err)
-	var got State
-	require.NoError(t, json.Unmarshal(data, &got))
-	require.Equal(t, want, got.LastHookHealthWarning)
-}
-
-func TestStateStoreListReadOnlyRetainsStaleActiveAndIdleSessions(t *testing.T) {
-	t.Parallel()
-	store := NewStateStoreWithDir(filepath.Join(t.TempDir(), SessionStateDirName))
-	old := time.Now().Add(-2 * StaleSessionThreshold)
-	for _, state := range []*State{
-		{SessionID: "stale-active", StartedAt: old, LastInteractionTime: &old, Phase: PhaseActive},
-		{SessionID: "stale-idle", StartedAt: old, LastInteractionTime: &old, Phase: PhaseIdle},
-	} {
-		require.NoError(t, store.Save(t.Context(), state))
-	}
-
-	got, err := store.ListReadOnly(t.Context())
-	require.NoError(t, err)
-	require.Len(t, got, 2)
-	require.Equal(t, []string{"stale-active", "stale-idle"}, []string{got[0].SessionID, got[1].SessionID})
-}
-
 func TestState_IsStale(t *testing.T) {
 	t.Parallel()
 
@@ -902,6 +875,7 @@ func TestState_TaskRecords_RoundTrip(t *testing.T) {
 				SubagentType:           "code-reviewer",
 				TaskDescription:        "Review the diff",
 				DeclaredTranscriptPath: "/tmp/agent-a123.jsonl",
+				TranscriptUnavailable:  true,
 				Files:                  []string{"foo.go", "bar.go"},
 				TokenUsage:             &agent.TokenUsage{InputTokens: 100, OutputTokens: 50},
 				CompletedAt:            completedAt,
@@ -931,6 +905,7 @@ func TestState_TaskRecords_RoundTrip(t *testing.T) {
 	assert.Equal(t, "code-reviewer", record.SubagentType)
 	assert.Equal(t, "Review the diff", record.TaskDescription)
 	assert.Equal(t, "/tmp/agent-a123.jsonl", record.DeclaredTranscriptPath)
+	assert.True(t, record.TranscriptUnavailable)
 	assert.Equal(t, []string{"foo.go", "bar.go"}, record.Files)
 	require.NotNil(t, record.TokenUsage)
 	assert.Equal(t, 100, record.TokenUsage.InputTokens)
