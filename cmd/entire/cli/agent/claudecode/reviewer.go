@@ -44,36 +44,52 @@ func NewReviewer() *reviewtypes.ReviewerTemplate {
 	}
 }
 
-// claudeReviewLaunch carries the trusted settings path from PrepareCmd to
-// BuildCmd for a single review worker.
+// claudeReviewLaunch carries what PrepareCmd established through to BuildCmd
+// for a single review worker: the trusted settings file, and the staged copies
+// of the profile's skills.
 type claudeReviewLaunch struct {
 	settingsPath string
+	staged       stagedSkills
 }
 
 // prepare establishes the trusted configuration before any process starts.
 // Its error aborts the review rather than falling back to an unisolated
 // launch.
-func (r *claudeReviewLaunch) prepare(_ context.Context, _ reviewtypes.RunConfig) (func(), error) {
-	path, cleanup, err := prepareReviewLaunch()
+func (r *claudeReviewLaunch) prepare(ctx context.Context, cfg reviewtypes.RunConfig) (func(), error) {
+	path, cleanupSettings, err := prepareReviewLaunch()
 	if err != nil {
 		return nil, err
 	}
+	staged, cleanupSkills, err := stageReviewSkills(ctx, cfg.Skills)
+	if err != nil {
+		cleanupSettings()
+		return nil, err
+	}
 	r.settingsPath = path
-	return cleanup, nil
+	r.staged = staged
+	return func() {
+		if cleanupSkills != nil {
+			cleanupSkills()
+		}
+		cleanupSettings()
+	}, nil
 }
 
 // build builds the exec.Cmd for a claude review run.
 // Exposed via buildReviewCmd at package level for test inspection of argv and env.
 func (r *claudeReviewLaunch) build(ctx context.Context, cfg reviewtypes.RunConfig) *exec.Cmd {
-	return buildReviewCmd(ctx, cfg, r.settingsPath)
+	// The staged copies are addressed under Entire's own plugin name, so the
+	// prompt must name them the way Claude will resolve them.
+	cfg.Skills = r.staged.apply(cfg.Skills)
+	return buildReviewCmd(ctx, cfg, r.settingsPath, r.staged.pluginDir)
 }
 
 // buildReviewCmd builds the exec.Cmd for a claude review run.
 // Exposed at package level for test inspection of argv and env.
-func buildReviewCmd(ctx context.Context, cfg reviewtypes.RunConfig, settingsPath string) *exec.Cmd {
+func buildReviewCmd(ctx context.Context, cfg reviewtypes.RunConfig, settingsPath, pluginDir string) *exec.Cmd {
 	prompt := review.ComposeReviewPrompt(cfg)
 	args := []string{"-p", prompt, "--output-format", "stream-json", "--verbose"}
-	args = append(args, claudeReviewFlags(settingsPath)...)
+	args = append(args, claudeReviewFlags(settingsPath, pluginDir)...)
 	args = review.AppendModelFlag(args, cfg.Model)
 	cmd := exec.CommandContext(ctx, "claude", args...)
 	cmd.Env = review.AppendReviewEnv(os.Environ(), "claude-code", cfg, prompt)

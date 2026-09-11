@@ -14,10 +14,11 @@ package claudecode
 //
 // The contract, and what each part is load-bearing for:
 //
-//	--setting-sources user     project and local settings are not read, so a
-//	                           settings hook committed to the reviewed branch
-//	                           cannot run and a committed permissions.defaultMode
-//	                           cannot widen the reviewer
+//	--setting-sources ""       no settings are read at all: the branch controls
+//	                           project and local, and a user hook would run with
+//	                           the reviewed checkout as its working directory
+//	--plugin-dir <dir>         only the profile's configured skills, copied into
+//	                           a directory Entire owns (see review_skills.go)
 //	--strict-mcp-config        no MCP servers start, so a committed .mcp.json
 //	                           cannot launch one. Needed separately: setting
 //	                           sources do not gate MCP (Claude's own --restricted
@@ -31,28 +32,27 @@ package claudecode
 //	                           the branch) plus the user's apiKeyHelper
 //	--append-system-prompt     defense in depth only; see reviewSystemPrompt
 //
-// Why "user" and not "" (load nothing):
+// Why no settings sources at all, including the user's:
 //
-// The reported boundary is branch-controlled configuration, and the branch
-// controls exactly the project and local sources. User settings come from the
-// machine's owner, not from the code under review, so dropping them buys no
-// protection against this report — and it costs the feature: measured against
-// a real Claude, "" stops user- and plugin-provided skills resolving, so a
-// profile built on e.g. /pr-review-toolkit:review-pr degrades to "Unknown
-// command" and reviews nothing. Entire's own skill picker steers users toward
-// exactly those skills.
+// The branch controls the project and local sources, so excluding those closes
+// the reported path. Excluding the user's too is not redundant: the reviewer
+// runs with the reviewed checkout as its working directory, so a user hook
+// invoking `npm run …`, `make …`, or any checkout-relative script executes code
+// from the branch under review. That is the same class of problem, one hop
+// removed, and it is the machine owner's ordinary configuration rather than
+// anything exotic.
 //
-// The accepted residual: a user-level hook still runs, and a user hook that
-// invokes a checkout-relative script (./scripts/foo.sh) executes branch content,
-// because the reviewer's working directory is the reviewed worktree. That is
-// the machine owner's own configuration rather than an attacker's, and it is a
-// far smaller exposure than a review that silently does nothing. If that
-// residual ever needs closing, close it on its own evidence — do not reach back
-// for "", which trades a narrow risk for a broken feature.
+// Loading nothing would normally cost the feature — skills resolve through
+// those sources, and a profile built on e.g. /pr-review-toolkit:review-pr would
+// degrade to "Unknown command" and review nothing while still exiting
+// successfully. That is why the profile's skills are staged instead: copied
+// into an Entire-owned plugin directory and loaded with --plugin-dir, so the
+// user's chosen skill still runs and nothing else of theirs does. See
+// review_skills.go.
 //
-// The generation path uses "" instead, correctly: it needs no skills, no
-// repository context and no working directory, so it can afford to load
-// nothing. See buildGenerateArgs in generate.go.
+// The generation path reached "" first, for simpler reasons: it needs no
+// skills, no repository context and no working directory. See
+// buildGenerateArgs in generate.go.
 //
 // Scope: this is configuration isolation, not an OS sandbox. The reviewer still
 // runs with the invoking account's privileges, and user-level and managed
@@ -67,22 +67,28 @@ import (
 )
 
 // reviewSettingSources is the set of Claude settings sources the reviewer may
-// load. "user" deliberately excludes "project" and "local", which are the two
-// the reviewed branch controls. See the file comment for why this is not "".
-const reviewSettingSources = "user"
+// load: none. Project and local are controlled by the reviewed branch, and user
+// settings would run the machine owner's hooks with that branch as the working
+// directory. The profile's skills are preserved separately, by staging them —
+// see review_skills.go.
+const reviewSettingSources = ""
 
 // claudeReviewFlags returns the isolation flags appended to the reviewer argv.
 // settingsPath must be non-empty: without it Claude would load no hooks at all
 // and the review would go uncaptured, so the caller establishes it first (see
 // prepareReviewLaunch) rather than letting this degrade quietly.
-func claudeReviewFlags(settingsPath string) []string {
-	return []string{
+func claudeReviewFlags(settingsPath, pluginDir string) []string {
+	args := []string{
 		"--setting-sources", reviewSettingSources,
 		"--strict-mcp-config",
 		"--permission-mode", "default",
 		"--settings", settingsPath,
-		"--append-system-prompt", reviewSystemPrompt,
 	}
+	// Only the skills the profile names, copied into a directory Entire owns.
+	if pluginDir != "" {
+		args = append(args, "--plugin-dir", pluginDir)
+	}
+	return append(args, "--append-system-prompt", reviewSystemPrompt)
 }
 
 // reviewSystemPrompt is defense in depth against instructions embedded in the

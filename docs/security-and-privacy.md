@@ -414,16 +414,15 @@ fetched from a remote. A non-interactive `claude -p` would otherwise load the Cl
 configuration committed in that checkout — settings hooks, MCP servers, permission mode —
 and act on it before the model receives its first request, with no workspace-trust prompt.
 
-Entire suppresses the sources the branch controls — project and local settings, and MCP
-configuration — and supplies its own lifecycle hooks through a settings file it writes
-outside the reviewed worktree with mode 0600, so reviews stay captured without reading
-those hooks back out of the branch. If that file cannot be established the review fails
-rather than starting an unisolated agent.
-
-The machine owner's own user-level configuration is still loaded. It is not written by the
-code under review, so excluding it would not close this boundary, while excluding it does
-break user- and plugin-provided review skills. The residual is that a user-level hook which
-invokes a checkout-relative script would execute branch content.
+Entire loads no Claude settings at all for the reviewer and starts no MCP servers. Project
+and local settings are controlled by the branch; user-level settings are excluded too,
+because the reviewer's working directory is the reviewed checkout, so a user hook that
+runs `npm run …` or a checkout-relative script would execute branch code. Entire supplies
+its own lifecycle hooks through a settings file it writes outside the worktree with mode
+0600, so reviews stay captured without reading those hooks back out of the branch, and
+stages the profile's configured skills into a temporary plugin directory it owns so the
+user's chosen skills still run. If either cannot be established, the review fails rather
+than starting an agent without it.
 
 A trust-boundary system instruction is appended as defense in depth, telling the reviewer
 to treat repository content, diffs, transcripts and tool output as evidence rather than

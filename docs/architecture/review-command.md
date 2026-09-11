@@ -107,18 +107,25 @@ reviewer with checkout configuration suppressed:
 
 | Flag | Purpose |
 | --- | --- |
-| `--setting-sources user` | Project and local settings are not read — those are the two sources the reviewed branch controls |
+| `--setting-sources ""` | No settings are read at all — project and local are controlled by the reviewed branch, and a user-level hook would run with that branch as its working directory |
 | `--strict-mcp-config` (and no `--mcp-config`) | No MCP servers start; setting sources do not gate these |
-| `--permission-mode default` | Pinned, so neither a future default nor a user-level `defaultMode` widens the reviewer |
+| `--permission-mode default` | Pinned, so a future default cannot widen the reviewer |
 | `--settings <file>` | Entire's own lifecycle hooks, written outside the worktree, mode 0600 |
+| `--plugin-dir <dir>` | Only the profile's configured skills, copied into a directory Entire owns |
 | `--append-system-prompt` | Trust-boundary instruction; appended so a profile prompt cannot displace it |
 
-User settings are kept deliberately. They come from the machine's owner, not
-from the code under review, so excluding them would not close this boundary —
-and it would stop user- and plugin-provided review skills resolving, which
-degrades a profile built on e.g. `/pr-review-toolkit:review-pr` into a review
-that runs nothing. The accepted residual is that a user-level hook still runs,
-so a user hook invoking a checkout-relative script would execute branch content.
+User settings are excluded as well as project and local ones. The reviewer's
+working directory is the reviewed checkout, so a user-level hook that runs
+`npm run …`, `make …`, or any checkout-relative script would execute code from
+the branch under review — the same problem one hop removed. Excluding them
+would normally stop user- and plugin-provided review skills resolving, so
+instead Entire stages exactly the skills the profile names: it copies them
+from the user's own configuration into a temporary plugin directory and loads
+that with `--plugin-dir`, rewriting the invocation to `/entire-review:<name>`.
+The user's chosen skill runs; nothing else of theirs is loaded. Curated
+builtins such as `/review` need no staging. A configured skill that cannot be
+staged fails the review before launch — a reviewer started without its skill
+reports `Unknown command` and reviews nothing.
 
 The `--settings` file carries Entire's own lifecycle hooks — the same inventory
 `entire enable` installs, composed from `entireHookSpecs()` — so reviews are still captured

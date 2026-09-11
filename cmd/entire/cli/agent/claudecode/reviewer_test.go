@@ -48,7 +48,7 @@ func TestReviewer_EnvVarsSet(t *testing.T) {
 		PerRunPrompt: "Focus on the auth module.",
 		StartingSHA:  "abc123def456",
 	}
-	cmd := buildReviewCmd(context.Background(), cfg, "/tmp/entire-test-settings.json")
+	cmd := buildReviewCmd(context.Background(), cfg, "/tmp/entire-test-settings.json", "")
 
 	wantEnvKeys := []string{
 		review.EnvSession,
@@ -93,7 +93,7 @@ func TestReviewer_ArgvShape(t *testing.T) {
 		Skills:       []string{"/skill-a"},
 		PerRunPrompt: "extra context",
 	}
-	cmd := buildReviewCmd(context.Background(), cfg, "/tmp/entire-test-settings.json")
+	cmd := buildReviewCmd(context.Background(), cfg, "/tmp/entire-test-settings.json", "")
 
 	// Expect: claude -p <prompt> --output-format stream-json --verbose,
 	// followed by the isolation flags (asserted in review_launch_test.go).
@@ -133,8 +133,9 @@ func TestReviewer_NoBinaryRequiredAtConstruction(t *testing.T) {
 	t.Setenv("PATH", "")
 
 	r := NewReviewer()
+	// No skills: a configured skill must exist on disk to be staged, and this
+	// test is about PATH lookup at construction, not skill resolution.
 	cfg := reviewtypes.RunConfig{
-		Skills:      []string{"/test"},
 		StartingSHA: "abc123",
 	}
 
