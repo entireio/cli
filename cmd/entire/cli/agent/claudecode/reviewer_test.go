@@ -48,7 +48,7 @@ func TestReviewer_EnvVarsSet(t *testing.T) {
 		PerRunPrompt: "Focus on the auth module.",
 		StartingSHA:  "abc123def456",
 	}
-	cmd := buildReviewCmd(context.Background(), cfg)
+	cmd := buildReviewCmd(context.Background(), cfg, "/tmp/entire-test-settings.json")
 
 	wantEnvKeys := []string{
 		review.EnvSession,
@@ -93,12 +93,13 @@ func TestReviewer_ArgvShape(t *testing.T) {
 		Skills:       []string{"/skill-a"},
 		PerRunPrompt: "extra context",
 	}
-	cmd := buildReviewCmd(context.Background(), cfg)
+	cmd := buildReviewCmd(context.Background(), cfg, "/tmp/entire-test-settings.json")
 
-	// Expect: claude -p <prompt> --output-format stream-json --verbose
-	wantSuffix := []string{"--output-format", "stream-json", "--verbose"}
-	if len(cmd.Args) != 3+len(wantSuffix) {
-		t.Fatalf("expected %d args, got %d: %v", 3+len(wantSuffix), len(cmd.Args), cmd.Args)
+	// Expect: claude -p <prompt> --output-format stream-json --verbose,
+	// followed by the isolation flags (asserted in review_launch_test.go).
+	wantPrefix := []string{"--output-format", "stream-json", "--verbose"}
+	if len(cmd.Args) < 3+len(wantPrefix) {
+		t.Fatalf("expected at least %d args, got %d: %v", 3+len(wantPrefix), len(cmd.Args), cmd.Args)
 	}
 	if cmd.Args[0] != "claude" {
 		t.Errorf("Args[0] = %q, want %q", cmd.Args[0], "claude")
@@ -110,7 +111,7 @@ func TestReviewer_ArgvShape(t *testing.T) {
 	if cmd.Args[2] == "" {
 		t.Error("Args[2] (prompt) is empty")
 	}
-	for i, want := range wantSuffix {
+	for i, want := range wantPrefix {
 		got := cmd.Args[3+i]
 		if got != want {
 			t.Errorf("Args[%d] = %q, want %q", 3+i, got, want)

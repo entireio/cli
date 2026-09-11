@@ -401,6 +401,52 @@ If your AI sessions will touch sensitive data:
 
 - **Know your push destination.** Checkpoint data syncs to exactly one elected remote; `entire status` names it and reports how many checkpoints are still unpushed.
 
+## Agent launch isolation
+
+Entire launches agent processes for several tasks. Where a launch reads code the user has
+not vetted, the launch treats that checkout's agent configuration as untrusted rather than
+loading it.
+
+### `entire review` with Claude Code
+
+Reviews run against code the reviewer did not write, and with `--target` against a branch
+fetched from a remote. A non-interactive `claude -p` would otherwise load the Claude
+configuration committed in that checkout — settings hooks, MCP servers, permission mode —
+and act on it before the model receives its first request, with no workspace-trust prompt.
+
+Entire suppresses the sources the branch controls — project and local settings, and MCP
+configuration — and supplies its own lifecycle hooks through a settings file it writes
+outside the reviewed worktree with mode 0600, so reviews stay captured without reading
+those hooks back out of the branch. If that file cannot be established the review fails
+rather than starting an unisolated agent.
+
+The machine owner's own user-level configuration is still loaded. It is not written by the
+code under review, so excluding it would not close this boundary, while excluding it does
+break user- and plugin-provided review skills. The residual is that a user-level hook which
+invokes a checkout-relative script would execute branch content.
+
+A trust-boundary system instruction is appended as defense in depth, telling the reviewer
+to treat repository content, diffs, transcripts and tool output as evidence rather than
+instructions. It is a second layer, not the boundary: it arrives with the first request,
+and configuration-driven execution happens before that.
+
+Scope and limits:
+
+- This is configuration isolation, **not** an OS sandbox. The reviewer runs with the
+  invoking account's privileges and can read what that account can read.
+- User-level configuration and managed policy remain trusted.
+- Project-level MCP servers and project-level Claude settings do not apply during review.
+- User-level configuration is trusted and still applies.
+
+See [Reviewer isolation](architecture/review-command.md#reviewer-isolation-claude-code) for
+the flags and their rationale.
+
+### Text generation
+
+The Claude text-generation path (summaries, synthesis, the review judge) loads no settings
+at all and runs without repository tools, for the same reason: it processes untrusted input
+and has no need of ambient configuration.
+
 ## What Gets Redacted
 
 ### Secrets (always on)

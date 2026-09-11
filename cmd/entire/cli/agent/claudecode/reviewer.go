@@ -19,25 +19,61 @@ const envelopeTypeAssistant = "assistant"
 
 // NewReviewer returns the AgentReviewer for claude-code.
 //
-// Argv shape: claude -p <prompt> --output-format stream-json --verbose.
+// Argv shape: claude -p <prompt> --output-format stream-json --verbose,
+// followed by the isolation flags in review_launch.go — the reviewer reads code
+// it does not trust, so the reviewed checkout's own Claude configuration must
+// not be loaded. That contract cannot be enforced at the prompt layer; see
+// review_launch.go for why.
+//
 // The prompt is passed as a command-line argument; stdin is unused.
 // Stdout is newline-delimited JSON envelopes (one event per line), which the
 // parser decodes into the review Event stream. This format gives the parser
 // per-message granularity (each assistant content block surfaces as it is
 // produced) instead of buffering until end-of-run like plain-text -p mode.
+//
+// Each call returns a fresh instance (the runner builds one reviewer per
+// worker), so the per-run settings path is not shared between concurrent
+// reviewers.
 func NewReviewer() *reviewtypes.ReviewerTemplate {
+	r := &claudeReviewLaunch{}
 	return &reviewtypes.ReviewerTemplate{
-		AgentName: "claude-code",
-		BuildCmd:  buildReviewCmd,
-		Parser:    parseClaudeOutput,
+		AgentName:  "claude-code",
+		PrepareCmd: r.prepare,
+		BuildCmd:   r.build,
+		Parser:     parseClaudeOutput,
 	}
+}
+
+// claudeReviewLaunch carries the trusted settings path from PrepareCmd to
+// BuildCmd for a single review worker.
+type claudeReviewLaunch struct {
+	settingsPath string
+}
+
+// prepare establishes the trusted configuration before any process starts.
+// Its error aborts the review rather than falling back to an unisolated
+// launch.
+func (r *claudeReviewLaunch) prepare(_ context.Context, _ reviewtypes.RunConfig) (func(), error) {
+	path, cleanup, err := prepareReviewLaunch()
+	if err != nil {
+		return nil, err
+	}
+	r.settingsPath = path
+	return cleanup, nil
+}
+
+// build builds the exec.Cmd for a claude review run.
+// Exposed via buildReviewCmd at package level for test inspection of argv and env.
+func (r *claudeReviewLaunch) build(ctx context.Context, cfg reviewtypes.RunConfig) *exec.Cmd {
+	return buildReviewCmd(ctx, cfg, r.settingsPath)
 }
 
 // buildReviewCmd builds the exec.Cmd for a claude review run.
 // Exposed at package level for test inspection of argv and env.
-func buildReviewCmd(ctx context.Context, cfg reviewtypes.RunConfig) *exec.Cmd {
+func buildReviewCmd(ctx context.Context, cfg reviewtypes.RunConfig, settingsPath string) *exec.Cmd {
 	prompt := review.ComposeReviewPrompt(cfg)
 	args := []string{"-p", prompt, "--output-format", "stream-json", "--verbose"}
+	args = append(args, claudeReviewFlags(settingsPath)...)
 	args = review.AppendModelFlag(args, cfg.Model)
 	cmd := exec.CommandContext(ctx, "claude", args...)
 	cmd.Env = review.AppendReviewEnv(os.Environ(), "claude-code", cfg, prompt)

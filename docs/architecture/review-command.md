@@ -97,6 +97,53 @@ The profile-level `task` is the shared work item. Each `agents` map entry is a w
 7. On the next `git commit`, the PostCommit hook condenses worker review sessions into the checkpoint on `entire/checkpoints/v1`, with `Kind`, `ReviewSkills`, and `ReviewPrompt` recorded in `CommittedMetadata`.
 8. `CheckpointSummary.HasReview` is set for O(1) lookup. `entire status` and the re-run guard read this flag from checkpoint metadata.
 
+## Reviewer isolation (Claude Code)
+
+A review reads code the reviewer did not write — with `--target`, code fetched from a
+branch nobody on this machine controls. `claude -p` otherwise loads the Claude
+configuration of the directory it starts in and, in non-interactive mode, treats that
+directory as trusted with no workspace-trust prompt. Entire therefore launches the Claude
+reviewer with checkout configuration suppressed:
+
+| Flag | Purpose |
+| --- | --- |
+| `--setting-sources user` | Project and local settings are not read — those are the two sources the reviewed branch controls |
+| `--strict-mcp-config` (and no `--mcp-config`) | No MCP servers start; setting sources do not gate these |
+| `--permission-mode default` | Pinned, so neither a future default nor a user-level `defaultMode` widens the reviewer |
+| `--settings <file>` | Entire's own lifecycle hooks, written outside the worktree, mode 0600 |
+| `--append-system-prompt` | Trust-boundary instruction; appended so a profile prompt cannot displace it |
+
+User settings are kept deliberately. They come from the machine's owner, not
+from the code under review, so excluding them would not close this boundary —
+and it would stop user- and plugin-provided review skills resolving, which
+degrades a profile built on e.g. `/pr-review-toolkit:review-pr` into a review
+that runs nothing. The accepted residual is that a user-level hook still runs,
+so a user hook invoking a checkout-relative script would execute branch content.
+
+The `--settings` file carries Entire's own lifecycle hooks — the same inventory
+`entire enable` installs, composed from `entireHookSpecs()` — so reviews are still captured
+as sessions with transcripts, without reading those hooks back out of the reviewed
+checkout. It also carries the user's `apiKeyHelper` if they have one, since that lives in
+user settings; `ANTHROPIC_API_KEY` and keychain/OAuth need no re-injection.
+
+Consequences worth knowing:
+
+- Project-level MCP servers do not run during review. Configure them at user level if a
+  review needs them.
+- Project-level Claude settings, including permissions, do not apply to reviewers.
+- User-level settings, skills and plugins keep working, so existing review profiles are
+  unaffected.
+- If the trusted configuration cannot be written, the review fails before starting the
+  agent. There is no unisolated fallback.
+
+This is configuration isolation, not an OS sandbox: the reviewer still runs with the
+invoking account's privileges, and user-level and managed policy configuration remain
+trusted. The system prompt reduces the chance the reviewer *follows* instructions embedded
+in the material under review; it cannot prevent execution that happens before the model's
+first request, which is what the flags above are for.
+
+See `cmd/entire/cli/agent/claudecode/review_launch.go`.
+
 ## Checkpoint Metadata
 
 Review metadata is stored at two levels on `entire/checkpoints/v1`:
