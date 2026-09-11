@@ -176,7 +176,16 @@ func TestInstallLefthookFilesRejectsSymlinkEscapes(t *testing.T) {
 	})
 }
 
-func TestInstallLefthookFilesRollsBackPublishedArtifacts(t *testing.T) {
+// A failed install must leave every artifact exactly as it was found.
+//
+// This drives EnsureGitHookIntegration rather than the installer directly.
+// The installer used to carry its own staging-and-rollback layer, which this
+// test injected into; that layer was redundant — EnsureGitHookIntegration
+// snapshots the same paths plus the native hooks and their backups, and
+// restores all of them on any error, so the inner one could only ever undo a
+// subset of what the outer one already undoes. The property under test is
+// unchanged: partial work is not left behind.
+func TestEnsureGitHookIntegrationRollsBackPublishedArtifacts(t *testing.T) {
 	repoDir := newLefthookTestRepo(t)
 	if _, err := installLefthookFiles(t.Context(), false); err != nil {
 		t.Fatal(err)
@@ -205,16 +214,17 @@ func TestInstallLefthookFilesRollsBackPublishedArtifacts(t *testing.T) {
 	}
 
 	before := snapshotTestFiles(t, repoDir, pathsToSnapshot)
-	publishes := 0
-	failPublish := func(string) error {
-		publishes++
-		if publishes == 3 {
-			return errors.New("injected publish failure")
+	// Fail after the artifacts have been written, so rollback has real work.
+	hookIntegrationFault = func(stage, _ string) error {
+		if stage == "artifact-verification" {
+			return errors.New("injected artifact verification failure")
 		}
 		return nil
 	}
-	if _, err := installLefthookFilesAt(t.Context(), repoDir, false, failPublish); err == nil {
-		t.Fatal("expected injected publish failure")
+	t.Cleanup(func() { hookIntegrationFault = nil })
+
+	if _, err := EnsureGitHookIntegration(t.Context(), false); err == nil {
+		t.Fatal("expected injected artifact verification failure")
 	}
 	after := snapshotTestFiles(t, repoDir, pathsToSnapshot)
 	for path, want := range before {
@@ -224,10 +234,9 @@ func TestInstallLefthookFilesRollsBackPublishedArtifacts(t *testing.T) {
 		}
 	}
 	if matches, err := filepath.Glob(filepath.Join(repoDir, ".lefthook-local", "**", "*.tmp")); err != nil || len(matches) != 0 {
-		t.Errorf("staged temp artifacts remain: %v, err=%v", matches, err)
+		t.Errorf("temp artifacts remain: %v, err=%v", matches, err)
 	}
 }
-
 func TestValidateLefthookMainConfig(t *testing.T) {
 	tests := []struct {
 		name       string

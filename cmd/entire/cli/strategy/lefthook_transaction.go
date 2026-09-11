@@ -86,22 +86,75 @@ func installLefthookFilesAt(ctx context.Context, repoRoot string, absolutePath b
 	if err != nil {
 		return 0, err
 	}
-	staged, configFile, err := stageLefthookArtifacts(root, gitRoot, specs, mergedExclude, merged)
+
+	// Write order is the transaction. Scripts and the exclude entry land
+	// first; the config lands last, because the config is what makes Lefthook
+	// dispatch to them — so no run can ever see a config pointing at a script
+	// that is not there yet. A failure part way through leaves orphan scripts
+	// that the next run overwrites, and EnsureGitHookIntegration runs at every
+	// turn start, so "the next run" is a guarantee rather than a hope.
+	//
+	// This deliberately has no rollback of its own. EnsureGitHookIntegration
+	// snapshots every path touched here — config, exclude, scripts, native
+	// hooks and their backups — before calling in, and restores all of them on
+	// any error. A second, narrower rollback nested inside that one could only
+	// ever undo a subset of what the outer one already undoes.
+	writes := make([]lefthookWrite, 0, len(specs)+2)
+	for _, spec := range specs {
+		writes = append(writes, lefthookWrite{
+			root: root, name: lefthookScriptPath(spec.name),
+			data: []byte(renderLefthookScript(spec)), mode: 0o755, counted: true,
+		})
+	}
+	writes = append(writes,
+		lefthookWrite{root: gitRoot, name: "info/exclude", data: mergedExclude, mode: 0o644},
+		lefthookWrite{root: root, name: lefthookLocalConfigName, data: merged, mode: 0o644, counted: true},
+	)
+
+	written := 0
+	for _, w := range writes {
+		changed, writeErr := applyLefthookWrite(w, beforePublish)
+		if writeErr != nil {
+			cleanupLefthookDirs(root, createdDirs)
+			cleanupGitInfoDir(gitRoot, gitInfoCreated)
+			return 0, writeErr
+		}
+		if changed && w.counted {
+			written++
+		}
+	}
+	return written, nil
+}
+
+// lefthookWrite is one artifact to place. counted marks the files whose
+// creation the caller reports as "installed"; info/exclude is bookkeeping.
+type lefthookWrite struct {
+	root    *os.Root
+	name    string
+	data    []byte
+	mode    os.FileMode
+	counted bool
+}
+
+// applyLefthookWrite writes one artifact atomically, skipping the write when
+// the content and mode already match so repeated installs are no-ops.
+func applyLefthookWrite(w lefthookWrite, beforeWrite func(string) error) (bool, error) {
+	current, info, err := readOptionalRegular(w.root, w.name)
 	if err != nil {
-		cleanupLefthookDirs(root, createdDirs)
-		cleanupGitInfoDir(gitRoot, gitInfoCreated)
-		return 0, err
+		return false, fmt.Errorf("read %s: %w", w.name, err)
 	}
-	if len(staged) == 0 {
-		return 0, nil
+	if current != nil && bytes.Equal(current, w.data) && info != nil && info.Mode().Perm() == w.mode {
+		return false, nil
 	}
-	defer cleanupStagedLefthookFiles(staged)
-	written, err := publishLefthookTransaction(staged, configFile, beforePublish)
-	if err != nil {
-		cleanupLefthookDirs(root, createdDirs)
-		cleanupGitInfoDir(gitRoot, gitInfoCreated)
+	if beforeWrite != nil {
+		if err := beforeWrite(w.name); err != nil {
+			return false, err
+		}
 	}
-	return written, err
+	if err := jsonutil.WriteFileAtomicIn(w.root, w.name, w.data, w.mode); err != nil {
+		return false, fmt.Errorf("write %s: %w", w.name, err)
+	}
+	return true, nil
 }
 
 func prepareLefthookDirectories(root, gitRoot *os.Root, specs []hookSpec) ([]string, bool, error) {
@@ -146,235 +199,14 @@ func prepareLefthookDirectories(root, gitRoot *os.Root, specs []hookSpec) ([]str
 	return created, gitInfoCreated, nil
 }
 
-func stageLefthookArtifacts(root, gitRoot *os.Root, specs []hookSpec, exclude, config []byte) ([]*stagedLefthookFile, *stagedLefthookFile, error) {
-	staged := make([]*stagedLefthookFile, 0, len(specs)+2)
-	stage := func(target *os.Root, name string, data []byte, mode os.FileMode, counted, force bool) error {
-		file, err := stageLefthookFile(target, name, data, mode, counted, force)
-		if errors.Is(err, errLefthookFileUnchanged) {
-			return nil
-		}
-		if err != nil {
-			return err
-		}
-		staged = append(staged, file)
-		return nil
-	}
-	for _, spec := range specs {
-		if err := stage(root, lefthookScriptPath(spec.name), []byte(renderLefthookScript(spec)), 0o755, true, false); err != nil {
-			cleanupStagedLefthookFiles(staged)
-			return nil, nil, err
-		}
-	}
-	if err := stage(gitRoot, "info/exclude", exclude, 0o644, false, false); err != nil {
-		cleanupStagedLefthookFiles(staged)
-		return nil, nil, err
-	}
-	configFile, err := stageLefthookFile(root, lefthookLocalConfigName, config, 0o644, true, len(staged) > 0)
-	if errors.Is(err, errLefthookFileUnchanged) {
-		return staged, nil, nil
-	}
-	if err != nil {
-		cleanupStagedLefthookFiles(staged)
-		return nil, nil, err
-	}
-	staged = append(staged, configFile)
-	return staged, configFile, nil
-}
-
-func publishLefthookTransaction(staged []*stagedLefthookFile, config *stagedLefthookFile, beforePublish func(string) error) (int, error) {
-	if err := config.deactivate(); err != nil {
-		return 0, errors.Join(err, rollbackStagedLefthookFiles(staged))
-	}
-	written := 0
-	for _, file := range staged {
-		if beforePublish != nil {
-			if err := beforePublish(file.name); err != nil {
-				return 0, errors.Join(err, rollbackStagedLefthookFiles(staged))
-			}
-		}
-		if err := file.publish(); err != nil {
-			return 0, errors.Join(err, rollbackStagedLefthookFiles(staged))
-		}
-		if file.counted {
-			written++
-		}
-	}
-	if err := config.finishDeactivation(); err != nil {
-		return 0, errors.Join(err, rollbackStagedLefthookFiles(staged))
-	}
-	return written, nil
-}
-
-type stagedLefthookFile struct {
-	parent         *os.Root
-	name           string
-	leaf           string
-	temp           string
-	original       []byte
-	originalMode   os.FileMode
-	originalExists bool
-	published      bool
-	counted        bool
-	closeParent    func()
-	deactivated    string
-}
-
-func stageLefthookFile(root *os.Root, name string, data []byte, mode os.FileMode, counted, force bool) (*stagedLefthookFile, error) {
-	parent, leaf, closeParent, err := osroot.OpenParentNoSymlinks(root, name)
-	if err != nil {
-		return nil, fmt.Errorf("open parent for %s: %w", name, err)
-	}
-	original, info, err := readOptionalRegular(parent, leaf)
-	if err != nil {
-		closeParent()
-		return nil, fmt.Errorf("read existing %s: %w", name, err)
-	}
-	changed := original == nil || !bytes.Equal(original, data) || info.Mode().Perm() != mode.Perm()
-	if !changed && !force {
-		closeParent()
-		return nil, errLefthookFileUnchanged
-	}
-	temp, tempName, err := jsonutil.CreateTempIn(parent, leaf)
-	if err != nil {
-		closeParent()
-		return nil, fmt.Errorf("stage %s: %w", name, err)
-	}
-	removeTemp := true
-	defer func() {
-		if removeTemp {
-			_ = temp.Close()
-			_ = parent.Remove(tempName) //nolint:errcheck // best-effort cleanup after a staging failure
-			closeParent()
-		}
-	}()
-	if err := integrationFault("write", name); err != nil {
-		return nil, err
-	}
-	if _, err := temp.Write(data); err != nil {
-		return nil, fmt.Errorf("stage %s: %w", name, err)
-	}
-	if err := temp.Close(); err != nil {
-		return nil, fmt.Errorf("stage %s: %w", name, err)
-	}
-	if err := parent.Chmod(tempName, mode); err != nil {
-		return nil, fmt.Errorf("stage %s: %w", name, err)
-	}
-	removeTemp = false
-	file := &stagedLefthookFile{
-		parent: parent, name: name, leaf: leaf, temp: tempName, original: original,
-		counted: counted && changed, closeParent: closeParent,
-	}
-	if info != nil {
-		file.originalExists = true
-		file.originalMode = info.Mode().Perm()
-	}
-	return file, nil
-}
-
-func (file *stagedLefthookFile) deactivate() error {
-	if !file.originalExists {
-		return nil
-	}
-	placeholder, backupName, err := jsonutil.CreateTempIn(file.parent, file.leaf+".backup")
-	if err != nil {
-		return fmt.Errorf("prepare deactivation of %s: %w", file.name, err)
-	}
-	if err := placeholder.Close(); err != nil {
-		_ = file.parent.Remove(backupName) //nolint:errcheck // best-effort cleanup after closing the placeholder fails
-		return fmt.Errorf("prepare deactivation of %s: %w", file.name, err)
-	}
-	if err := file.parent.Remove(backupName); err != nil {
-		return fmt.Errorf("prepare deactivation of %s: %w", file.name, err)
-	}
-	if err := file.parent.Rename(file.leaf, backupName); err != nil {
-		return fmt.Errorf("deactivate %s: %w", file.name, err)
-	}
-	file.deactivated = backupName
-	return nil
-}
-
-func (file *stagedLefthookFile) finishDeactivation() error {
-	if file.deactivated == "" {
-		return nil
-	}
-	if err := file.parent.Remove(file.deactivated); err != nil && !os.IsNotExist(err) {
-		return fmt.Errorf("remove deactivated %s backup: %w", file.name, err)
-	}
-	file.deactivated = ""
-	return nil
-}
-
-func (file *stagedLefthookFile) publish() error {
-	if err := file.parent.Rename(file.temp, file.leaf); err != nil {
-		return fmt.Errorf("publish %s: %w", file.name, err)
-	}
-	file.temp = ""
-	file.published = true
-	return nil
-}
-
-func rollbackStagedLefthookFiles(files []*stagedLefthookFile) error {
-	var rollbackErrs []error
-	for i := len(files) - 1; i >= 0; i-- {
-		file := files[i]
-		if file.deactivated != "" {
-			if file.published {
-				if err := file.parent.Remove(file.leaf); err != nil && !os.IsNotExist(err) {
-					rollbackErrs = append(rollbackErrs, fmt.Errorf("remove published %s: %w", file.name, err))
-				}
-				file.published = false
-			}
-			if err := file.parent.Rename(file.deactivated, file.leaf); err != nil {
-				rollbackErrs = append(rollbackErrs, fmt.Errorf("reactivate %s: %w", file.name, err))
-			} else {
-				file.deactivated = ""
-			}
-			if file.temp != "" {
-				if err := file.parent.Remove(file.temp); err != nil && !os.IsNotExist(err) {
-					rollbackErrs = append(rollbackErrs, fmt.Errorf("remove staged %s: %w", file.name, err))
-				}
-				file.temp = ""
-			}
-			continue
-		}
-		if file.published {
-			if file.originalExists {
-				if err := jsonutil.WriteFileAtomicIn(file.parent, file.leaf, file.original, file.originalMode); err != nil {
-					rollbackErrs = append(rollbackErrs, fmt.Errorf("restore %s: %w", file.name, err))
-				}
-			} else if err := file.parent.Remove(file.leaf); err != nil && !os.IsNotExist(err) {
-				rollbackErrs = append(rollbackErrs, fmt.Errorf("remove %s: %w", file.name, err))
-			}
-			file.published = false
-		}
-		if file.temp != "" {
-			if err := file.parent.Remove(file.temp); err != nil && !os.IsNotExist(err) {
-				rollbackErrs = append(rollbackErrs, fmt.Errorf("remove staged %s: %w", file.name, err))
-			}
-			file.temp = ""
-		}
-	}
-	return errors.Join(rollbackErrs...)
-}
-
-func cleanupStagedLefthookFiles(files []*stagedLefthookFile) {
-	for _, file := range files {
-		if file.temp != "" {
-			_ = file.parent.Remove(file.temp) //nolint:errcheck // best-effort deferred cleanup; rollback reports material failures
-			file.temp = ""
-		}
-		file.closeParent()
+func cleanupGitInfoDir(root *os.Root, created bool) {
+	if created {
+		_ = root.Remove("info") //nolint:errcheck // best-effort cleanup; non-empty means the directory was not ours to remove
 	}
 }
 
 func cleanupLefthookDirs(root *os.Root, dirs []string) {
 	for i := len(dirs) - 1; i >= 0; i-- {
 		_ = root.Remove(dirs[i]) //nolint:errcheck // best-effort cleanup of directories created during a failed transaction
-	}
-}
-
-func cleanupGitInfoDir(root *os.Root, created bool) {
-	if created {
-		_ = root.Remove("info") //nolint:errcheck // best-effort cleanup; non-empty means the directory was not ours to remove
 	}
 }
