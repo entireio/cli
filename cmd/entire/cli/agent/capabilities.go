@@ -105,6 +105,31 @@ func AsSidecarImageProvider(ag Agent) (SidecarImageProvider, bool) {
 	return p, ok
 }
 
+// CacheWriteTTLRecorder marks an agent whose transcript parser reads the
+// 1-hour cache-write figure, so that an absent value genuinely means "no
+// 1-hour writes" rather than "this parser cannot see them".
+//
+// The distinction is load-bearing for cost: Anthropic prices a 1-hour cache
+// write at 2x input against 1.25x for the 5-minute one, so an agent that
+// cannot report the split must have its cache writes left unpriced rather than
+// costed at the cheaper rate. A committed checkpoint answers the same question
+// with token_usage_version; a live session has no version, so it asks the
+// agent.
+//
+// It is a marker: implementing it asserts the parser populates
+// TokenUsage.CacheCreation1hTokens whenever the provider reports it.
+type CacheWriteTTLRecorder interface {
+	RecordsCacheWriteTTLSplit()
+}
+
+// AsCacheWriteTTLRecorder reports whether the agent records the cache-write TTL
+// split. Like the sanitizer above it is a pure local parse property, so it
+// needs no DeclaredCaps gate.
+func AsCacheWriteTTLRecorder(ag Agent) (CacheWriteTTLRecorder, bool) {
+	c, ok := ag.(CacheWriteTTLRecorder)
+	return c, ok
+}
+
 // AsTranscriptSanitizer returns the agent as TranscriptSanitizer if it implements
 // the interface. This is a pure local byte transform with no external process to
 // negotiate with, so it needs no DeclaredCaps gate.

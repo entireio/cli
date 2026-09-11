@@ -110,14 +110,93 @@ func tokenWeightsForModel(model string) (tokenWeights, bool) {
 	return priceFamilyWeights[family], true
 }
 
+// tokenWeightsForSession resolves the price weights for one session's usage,
+// returning the specific withheld-cost reason when it cannot ("" when the
+// generic no-ratios reason is the true one).
+//
+// It is the single pricing decision behind both commands. `checkpoint tokens`
+// reaches it once per session in a multi-session checkpoint; `session tokens`
+// reaches it once for the live session. Keeping one function means the two
+// cannot disagree about the same data — a live session and its own committed
+// checkpoint showing a cost column in one and withholding it in the other is a
+// contradiction a user cannot resolve.
+func tokenWeightsForSession(model string, usage *types.TokenUsage) (tokenWeights, string) {
+	weights, ok := tokenWeightsForModel(model)
+	if !ok {
+		return tokenWeights{}, ""
+	}
+	if reason := subagentPricingReason(usage, weights.Family); reason != "" {
+		return tokenWeights{}, reason
+	}
+	return weights, ""
+}
+
+// subagentPricingReason reports why family's ratios cannot price this usage's
+// subagent entries, or "" when every entry that records a model is consistent
+// with family. Subagent tokens are flattened into the classes, so an entry
+// billed at other ratios would be costed at its parent's rate while the report
+// claims the whole total is priced — #2155 records Model on these entries
+// precisely so that cannot be assumed away.
+//
+// It returns a reason rather than a bool because the two ways an entry can be
+// inconsistent are two different facts, and the report prints the reason
+// verbatim: a recognised model in another family really does mean differing
+// ratios (unpricedMixedModels), while an unrecognised one means there are no
+// ratios for those tokens at all (unpricedSomeTokensNoRatios). One bool made both
+// print the mixed-models line, which is false of the second.
+//
+// An entry with no recorded model inherits the parent's family rather than
+// unpricing the report: absence is the norm, and for a single-provider agent
+// the parent is the best available evidence. That inference is wrong only for an
+// agent that mixes providers within one session (Pi), and only when it also
+// fails to record the subagent's model.
+//
+// The walk is deliberately unbounded, unlike flattenTokenUsageForClasses, which
+// stops at types.MaxSubagentDepth. The two disagreeing means an entry past that
+// bound contributes no tokens to the table yet can still withhold cost — safe
+// (it withholds rather than misprices) but not true. Bounding it is deferred to
+// the incremental plan's known-bugs list, where it lands together with
+// SubagentTotal's unbounded totalTokens walk and the un-audited exactPercents
+// math; splitting one of the three into this PR would fragment that follow-up.
+func subagentPricingReason(usage *types.TokenUsage, family string) string {
+	for u := usage; u != nil; u = u.SubagentTokens {
+		if u.Model == "" {
+			continue
+		}
+		weights, ok := tokenWeightsForModel(u.Model)
+		switch {
+		case !ok:
+			return unpricedSomeTokensNoRatios
+		case weights.Family != family:
+			return unpricedMixedModels
+		}
+	}
+	return ""
+}
+
 // Reasons cost can be withheld. The report prints these verbatim, so each one
 // must be true of the case it names — a report that misstates why it withheld a
-// number is the same class of error as withholding the wrong one.
+// number is the same class of error as withholding the wrong one. Because this
+// renderer is shared by `checkpoint tokens` and `session tokens`, a reason must
+// also not name one command's scope: unpricedUnknownTTL is the single
+// deliberate exception, since only a committed checkpoint can predate the
+// cache-write TTL field — live state always knows the split.
 const (
-	unpricedNoModel     = "no verified price ratios for this checkpoint's model"
-	unpricedMixedModels = "this checkpoint's sessions use models with different price ratios"
-	unpricedUnknownTTL  = "this checkpoint predates the cache-write TTL split, which changes the rate"
-	unpricedNoCost      = "this checkpoint's classes carry no priced tokens"
+	unpricedNoModel     = "no model with verified price ratios"
+	unpricedMixedModels = "these tokens span models with different price ratios"
+	// unpricedSomeTokensNoRatios covers "part of this report was billed by a
+	// model with no ratio row, and part was not". Neither neighbour is true of
+	// it: unpricedMixedModels claims differing ratios when there are none to
+	// differ from, and unpricedNoModel claims nothing here is priceable when
+	// something demonstrably is.
+	//
+	// Two callers, which is why it names neither a subagent nor a session: a
+	// subagent entry on an unrecognised model, and a multi-session checkpoint
+	// where only some sessions' models are recognised. "Some of these tokens"
+	// is true of both and needs no mechanism the user did not ask about.
+	unpricedSomeTokensNoRatios = "some of these tokens were billed by a model with no verified price ratios"
+	unpricedUnknownTTL         = "this checkpoint predates the cache-write TTL split, which changes the rate"
+	unpricedNoCost             = "this provider bills none of these tokens"
 )
 
 // tokenClassShare is one billing class's contribution to a checkpoint.

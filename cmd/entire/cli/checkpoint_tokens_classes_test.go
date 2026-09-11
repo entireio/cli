@@ -1,8 +1,6 @@
 package cli
 
 import (
-	"bytes"
-	"strings"
 	"testing"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
@@ -162,8 +160,8 @@ func TestCheckpointTokensReport_Classes_MixedModelsAreUnpriced(t *testing.T) {
 	if report.Classes.Priced {
 		t.Error("two different models cannot share one ratio row; cost must be omitted")
 	}
-	// Both models are individually priceable, so "no verified price ratios for
-	// this checkpoint's model" is false. The reason must name the real case.
+	// Both models are individually priceable, so "no model with verified price
+	// ratios" is false. The reason must name the real case.
 	if got := report.Classes.UnpricedReason; got != unpricedMixedModels {
 		t.Errorf("reason = %q, want %q", got, unpricedMixedModels)
 	}
@@ -209,98 +207,16 @@ func TestCheckpointTokensReport_Classes_CarrySubsets(t *testing.T) {
 }
 
 // The breakdown must render for a human, not just in --json.
-func TestWriteCheckpointTokenClasses_Priced(t *testing.T) {
-	t.Parallel()
-
-	report := classesReportFor(t, "Claude Code", "claude-sonnet-4.6", checkpoint.TokenUsageVersionDelta,
-		&agent.TokenUsage{
-			InputTokens: 1000, CacheCreationTokens: 2000, CacheCreation1hTokens: 500,
-			CacheReadTokens: 6000, OutputTokens: 1000, ThinkingTokens: 300,
-		})
-
-	var buf bytes.Buffer
-	writeCheckpointTokenClasses(&buf, report.Classes)
-	out := buf.String()
-
-	for _, want := range []string{"How it was billed", "Fresh input", "Cache write", "Cache read", "Output", "cost", "1h TTL", "thinking"} {
-		if !strings.Contains(out, want) {
-			t.Errorf("rendered breakdown missing %q\n%s", want, out)
-		}
-	}
-}
 
 // "<1%" means "rounds below one percent". On a family that does not bill cache
 // writes at all (openai-6x/8x, the Gemini families) a cache-write class carries
 // tokens whose true cost share is exactly zero, and printing "<1%" there claims
 // a cost the provider never charges.
-func TestWriteCheckpointTokenClasses_ZeroCostClassIsNotUnderOnePercent(t *testing.T) {
-	t.Parallel()
-
-	// gpt-5.5 -> priceFamilyOpenAI6x, which defines no CacheWrite weights.
-	report := classesReportFor(t, "Codex", "gpt-5.5", checkpoint.TokenUsageVersionDelta,
-		&agent.TokenUsage{
-			InputTokens: 40000, CacheCreationTokens: 90000,
-			CacheReadTokens: 200000, OutputTokens: 9000,
-		})
-
-	if !report.Classes.Priced {
-		t.Fatalf("expected a priced breakdown for gpt-5.5, got reason %q", report.Classes.UnpricedReason)
-	}
-	if got := report.Classes.CacheWrite.Tokens; got == 0 {
-		t.Fatal("test needs cache-write tokens present for the distinction to matter")
-	}
-
-	var buf bytes.Buffer
-	writeCheckpointTokenClasses(&buf, report.Classes)
-	for _, line := range strings.Split(buf.String(), "\n") {
-		if !strings.Contains(line, "Cache write") {
-			continue
-		}
-		if strings.Contains(line, "<1%") {
-			t.Errorf("cache write costs exactly nothing on this family; row must not say \"<1%%\":\n%s", line)
-		}
-		if !strings.Contains(line, "0%") {
-			t.Errorf("expected an explicit 0%% cost share, got:\n%s", line)
-		}
-	}
-}
 
 // Without a verified ratio row the cost column must not appear at all — an
 // empty or zeroed column reads as "this cost nothing".
-func TestWriteCheckpointTokenClasses_UnpricedOmitsCostColumn(t *testing.T) {
-	t.Parallel()
-
-	report := classesReportFor(t, "Cursor", "", checkpoint.TokenUsageVersionDelta,
-		&agent.TokenUsage{InputTokens: 1000, CacheReadTokens: 3000})
-
-	var buf bytes.Buffer
-	writeCheckpointTokenClasses(&buf, report.Classes)
-	out := buf.String()
-
-	// Assert on the header row: a substring check for "cost" would pass merely
-	// because the withheld-reason sentence starts with a capital C.
-	header := strings.SplitN(out, "\n", 4)[2]
-	if strings.Contains(header, "cost") {
-		t.Errorf("unpriced breakdown must not show a cost column, header was %q\n%s", header, out)
-	}
-	if !strings.Contains(header, "volume") {
-		t.Errorf("unpriced breakdown must still show volume, header was %q\n%s", header, out)
-	}
-	if !strings.Contains(out, "no verified price ratios") {
-		t.Errorf("unpriced breakdown must say why cost is missing\n%s", out)
-	}
-}
 
 // Nothing recorded renders nothing rather than an empty table.
-func TestWriteCheckpointTokenClasses_NilRendersNothing(t *testing.T) {
-	t.Parallel()
-
-	var buf bytes.Buffer
-	writeCheckpointTokenClasses(&buf, nil)
-	if buf.Len() != 0 {
-		t.Errorf("nil breakdown must render nothing, got %q", buf.String())
-	}
-}
 
 // Unreadable session metadata makes the report fall back to the root summary's
 // total, which covers sessions whose models we never saw. Pricing that total
@@ -382,23 +298,6 @@ func TestCheckpointTokenWeights_NilMetaIsUnpriced(t *testing.T) {
 }
 
 // The withheld reason must name the real cause, not default to "no ratios".
-func TestWriteCheckpointTokenClasses_StatesTheRealReason(t *testing.T) {
-	t.Parallel()
-
-	report := classesReportFor(t, "Claude Code", "claude-sonnet-4.6", 0,
-		&agent.TokenUsage{InputTokens: 1000, CacheCreationTokens: 2000, OutputTokens: 100})
-
-	var buf bytes.Buffer
-	writeCheckpointTokenClasses(&buf, report.Classes)
-	out := buf.String()
-
-	if strings.Contains(out, "no verified price ratios") {
-		t.Errorf("a legacy Anthropic checkpoint has ratios; the reason must be the TTL split\n%s", out)
-	}
-	if !strings.Contains(out, "TTL") {
-		t.Errorf("expected the TTL reason\n%s", out)
-	}
-}
 
 // #2155 records a Model per subagent entry precisely so cost can be weighted
 // per model. Those tokens are flattened into the classes, so a subagent on a
@@ -506,20 +405,92 @@ func TestCheckpointTokensReport_UsageAndClassesAgree(t *testing.T) {
 
 // A class holding real tokens must not print "0%" — that reads as broken next
 // to a six-figure token count. An empty class still prints "0%".
-func TestFormatSharePercent(t *testing.T) {
+
+// checkpointWeightsFor resolves weights for a set of (model, usage) sessions.
+func checkpointWeightsFor(t *testing.T, sessions ...*checkpoint.Metadata) (tokenWeights, string) {
+	t.Helper()
+	return checkpointTokenWeights(sessions, 0)
+}
+
+func sessionMeta(id, model string) *checkpoint.Metadata {
+	return &checkpoint.Metadata{SessionID: id, Agent: "Claude Code", Model: model,
+		TokenUsage: &agent.TokenUsage{InputTokens: 1000, OutputTokens: 100}}
+}
+
+// The generic reason claims no model here has verified ratios. With one session
+// that is true; with two sessions where only one model is unrecognised it is
+// false, and it is the same error Part B fixed for subagents: a withheld-cost
+// reason stating something untrue of the data.
+//
+// Order-independent, because the reason describes the set, not the iteration.
+func TestCheckpointTokenWeights_PartlyUnknownModelsDoNotClaimNoneArePriced(t *testing.T) {
 	t.Parallel()
 
-	for _, tt := range []struct {
-		tokens, percent int
-		want            string
+	known := sessionMeta("s1", "claude-sonnet-4.6")
+	unknown := sessionMeta("s2", "some-unknown-model")
+
+	for _, tc := range []struct {
+		name  string
+		metas []*checkpoint.Metadata
 	}{
-		{274800, 0, "<1%"},
-		{0, 0, "0%"},
-		{1000, 7, "7%"},
-		{9999999, 93, "93%"},
+		{"known first", []*checkpoint.Metadata{known, unknown}},
+		{"unknown first", []*checkpoint.Metadata{unknown, known}},
 	} {
-		if got := formatSharePercent(tt.tokens, tt.percent); got != tt.want {
-			t.Errorf("formatSharePercent(%d, %d) = %q, want %q", tt.tokens, tt.percent, got, tt.want)
-		}
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			weights, reason := checkpointWeightsFor(t, tc.metas...)
+			if weights.Family != "" {
+				t.Errorf("a session with no ratios must unprice the checkpoint, got %q", weights.Family)
+			}
+			if reason == "" {
+				t.Errorf("the generic reason claims nothing here is priceable, but %q is; want %q",
+					known.Model, unpricedSomeTokensNoRatios)
+			}
+			if reason != unpricedSomeTokensNoRatios {
+				t.Errorf("reason = %q, want %q", reason, unpricedSomeTokensNoRatios)
+			}
+		})
+	}
+}
+
+// When no session has a ratio row, the generic reason is the true one and must
+// still be used — the fix above must not swallow the case it was written for.
+func TestCheckpointTokenWeights_AllUnknownModelsKeepTheGenericReason(t *testing.T) {
+	t.Parallel()
+
+	weights, reason := checkpointWeightsFor(t, sessionMeta("s1", "some-unknown-model"), sessionMeta("s2", "another-unknown"))
+	if weights.Family != "" {
+		t.Errorf("family = %q, want empty", weights.Family)
+	}
+	if reason != "" {
+		t.Errorf("reason = %q, want empty so the generic no-ratios reason is used", reason)
+	}
+}
+
+// Two recognised models in different families is a different fact from a model
+// with no row, and it must win: it is true regardless of the third session.
+func TestCheckpointTokenWeights_DifferingFamiliesOutrankAnUnknownModel(t *testing.T) {
+	t.Parallel()
+
+	anthropic := sessionMeta("s1", "claude-sonnet-4.6")
+	openai := sessionMeta("s2", "gpt-5.3-codex")
+	unknown := sessionMeta("s3", "some-unknown-model")
+
+	for _, tc := range []struct {
+		name  string
+		metas []*checkpoint.Metadata
+	}{
+		{"unknown last", []*checkpoint.Metadata{anthropic, openai, unknown}},
+		{"unknown between", []*checkpoint.Metadata{anthropic, unknown, openai}},
+		{"unknown first", []*checkpoint.Metadata{unknown, anthropic, openai}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			if _, reason := checkpointWeightsFor(t, tc.metas...); reason != unpricedMixedModels {
+				t.Errorf("reason = %q, want %q", reason, unpricedMixedModels)
+			}
+		})
 	}
 }

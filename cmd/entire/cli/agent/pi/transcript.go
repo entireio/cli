@@ -162,3 +162,8 @@ func (a *PiAgent) ExtractPrompts(sessionRef string, fromOffset int) ([]string, e
 	}
 	return prompts, nil
 }
+
+// RecordsCacheWriteTTLSplit marks this parser as reading the 1-hour cache-write
+// figure (see the CacheCreation1hTokens accumulation below/above), so an absent
+// value means the provider reported none — not that this parser cannot see it.
+func (a *PiAgent) RecordsCacheWriteTTLSplit() {}
