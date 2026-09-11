@@ -2293,7 +2293,7 @@ func isCompletionConfigured(rcFile string) bool {
 }
 
 // appendShellCompletion adds the completion line to the rc file.
-func appendShellCompletion(rcFile, completionLine string) error {
+func appendShellCompletion(rcFile, completionLine string) (err error) {
 	if err := os.MkdirAll(filepath.Dir(rcFile), 0o700); err != nil {
 		return fmt.Errorf("creating directory: %w", err)
 	}
@@ -2302,10 +2302,17 @@ func appendShellCompletion(rcFile, completionLine string) error {
 	if err != nil {
 		return fmt.Errorf("opening file: %w", err)
 	}
-	defer f.Close()
+	// Close reports a failed flush on a writable handle, so discarding it would
+	// drop the append while this function returned nil — the caller then tells
+	// the user completion is installed when the rc file never received the line.
+	// A write error already in flight is the more specific one, so it wins.
+	defer func() {
+		if cerr := f.Close(); cerr != nil && err == nil {
+			err = fmt.Errorf("closing file: %w", cerr)
+		}
+	}()
 
-	_, err = f.WriteString("\n" + shellCompletionComment + "\n" + completionLine + "\n")
-	if err != nil {
+	if _, err := f.WriteString("\n" + shellCompletionComment + "\n" + completionLine + "\n"); err != nil {
 		return fmt.Errorf("writing completion: %w", err)
 	}
 	return nil
