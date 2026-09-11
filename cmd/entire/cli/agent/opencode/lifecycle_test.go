@@ -291,6 +291,82 @@ func TestParseHookEvent_SubagentStart_RejectsUnsafeIDs(t *testing.T) {
 	}
 }
 
+const childExportFixture = `{"info":{"id":"ses_child","parentID":"ses_parent","agent":"general"},"messages":[` +
+	`{"info":{"id":"m1","role":"user","time":{"created":1}},"parts":[{"type":"text","text":"make red"}]},` +
+	`{"info":{"id":"m2","role":"assistant","time":{"created":2},"tokens":{"input":100,"output":20,"reasoning":0,"cache":{"read":5,"write":0}}},` +
+	`"parts":[{"type":"tool","tool":"write","callID":"w1","state":{"status":"completed","input":{"filePath":"/repo/docs/red.md"},"metadata":{"files":[{"filePath":"/repo/docs/red.md"}]}}}]}]}`
+
+func TestParseHookEvent_SubagentStop_ExportsChildAndDeclaresTranscript(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Chdir(tmpDir)
+	paths.ClearWorktreeRootCache()
+	t.Cleanup(paths.ClearWorktreeRootCache)
+
+	original := runOpenCodeExportToFileFn
+	var exported []string
+	runOpenCodeExportToFileFn = func(_ context.Context, root *os.Root, sessionID, outputName string) error {
+		exported = append(exported, sessionID)
+		return root.WriteFile(outputName, []byte(childExportFixture), 0o600)
+	}
+	t.Cleanup(func() { runOpenCodeExportToFileFn = original })
+
+	ag := &OpenCodeAgent{}
+	input := `{"session_id":"ses_parent","tool_use_id":"call_red","subagent_id":"ses_child","subagent_type":"general","task_description":"Create docs/red.md","model":"gemini-2.5-flash"}`
+	event, err := ag.ParseHookEvent(context.Background(), HookNameSubagentStop, strings.NewReader(input))
+	require.NoError(t, err)
+	require.NotNil(t, event)
+
+	assert.Equal(t, []string{"ses_child"}, exported, "stop must export exactly the child")
+	assert.Equal(t, agent.SubagentEnd, event.Type)
+	assert.True(t, event.Final)
+	assert.True(t, event.CompletionWithoutLaunch)
+	assert.False(t, event.SubagentTranscriptUnavailable)
+	assert.Equal(t, "ses_parent", event.SessionID)
+	assert.Equal(t, "call_red", event.ToolUseID)
+	assert.Equal(t, "ses_child", event.SubagentID)
+	assert.Equal(t, "general", event.SubagentType)
+	assert.Equal(t, "Create docs/red.md", event.TaskDescription)
+	assert.Equal(t, "gemini-2.5-flash", event.Model)
+	assert.True(t, strings.HasSuffix(event.SubagentTranscriptPath, filepath.Join(paths.EntireTmpDir, "ses_child.json")), event.SubagentTranscriptPath)
+	assert.FileExists(t, event.SubagentTranscriptPath)
+	require.NotNil(t, event.TokenUsage)
+	assert.Equal(t, 100, event.TokenUsage.InputTokens)
+	assert.Equal(t, 20, event.TokenUsage.OutputTokens)
+	assert.Empty(t, event.ModifiedFiles, "files come from the declared transcript at capture time, not the event")
+}
+
+func TestParseHookEvent_SubagentStop_ExportFailureStillCompletes(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Chdir(tmpDir)
+	paths.ClearWorktreeRootCache()
+	t.Cleanup(paths.ClearWorktreeRootCache)
+
+	original := runOpenCodeExportToFileFn
+	runOpenCodeExportToFileFn = func(context.Context, *os.Root, string, string) error {
+		return errors.New("opencode not reachable")
+	}
+	t.Cleanup(func() { runOpenCodeExportToFileFn = original })
+
+	ag := &OpenCodeAgent{}
+	input := `{"session_id":"ses_parent","tool_use_id":"call_red","subagent_id":"ses_child"}`
+	event, err := ag.ParseHookEvent(context.Background(), HookNameSubagentStop, strings.NewReader(input))
+	require.NoError(t, err, "a failed export must degrade the record, not drop the completion")
+	require.NotNil(t, event)
+	assert.True(t, event.Final)
+	assert.True(t, event.CompletionWithoutLaunch)
+	assert.True(t, event.SubagentTranscriptUnavailable)
+	assert.Empty(t, event.SubagentTranscriptPath)
+	assert.Nil(t, event.TokenUsage)
+}
+
+func TestParseHookEvent_SubagentStop_RejectsUnsafeIDs(t *testing.T) {
+	t.Parallel()
+	ag := &OpenCodeAgent{}
+	_, err := ag.ParseHookEvent(context.Background(), HookNameSubagentStop,
+		strings.NewReader(`{"session_id":"ses_parent","tool_use_id":"call_red","subagent_id":"../../evil"}`))
+	require.Error(t, err)
+}
+
 func TestPrepareTranscript_AlwaysRefreshesTranscript(t *testing.T) {
 	// t.Chdir, not just t.TempDir: fetchAndCacheExport resolves the repo root from
 	// CWD, so without this the export is staged in the developer's own repo.

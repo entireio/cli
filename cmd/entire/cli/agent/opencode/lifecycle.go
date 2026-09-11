@@ -165,6 +165,39 @@ func (a *OpenCodeAgent) ParseHookEvent(ctx context.Context, hookName string, std
 			Timestamp:          time.Now(),
 		}, nil
 
+	case HookNameSubagentStop:
+		raw, err := agent.ReadAndParseHookInput[subagentStopRaw](stdin)
+		if err != nil {
+			return nil, err
+		}
+		if err := validateSubagentIdentity(raw.SessionID, raw.ToolUseID, raw.SubagentID); err != nil {
+			return nil, err
+		}
+		parentRef, err := sessionTranscriptPath(ctx, raw.SessionID)
+		if err != nil {
+			return nil, err
+		}
+		event := &agent.Event{
+			Type:            agent.SubagentEnd,
+			SessionID:       raw.SessionID,
+			SessionRef:      parentRef,
+			ToolUseID:       raw.ToolUseID,
+			SubagentID:      raw.SubagentID,
+			SubagentType:    raw.SubagentType,
+			TaskDescription: raw.TaskDescription,
+			Model:           raw.Model,
+			Timestamp:       time.Now(),
+			// tool.execute.after fires once, at true completion, and is the
+			// first signal that can name both the tool call and the finished
+			// child — so it is the authoritative final capture, and it must not
+			// depend on the start having been seen (a plugin restarted
+			// mid-task never saw it).
+			Final:                   true,
+			CompletionWithoutLaunch: true,
+		}
+		a.attachSubagentTranscript(ctx, event)
+		return event, nil
+
 	default:
 		return nil, nil //nolint:nilnil // nil event = no lifecycle action for unknown hooks
 	}
@@ -189,6 +222,38 @@ func validateSubagentIdentity(parentID, toolUseID, childID string) error {
 		return fmt.Errorf("invalid subagent session ID: %w", err)
 	}
 	return nil
+}
+
+// attachSubagentTranscript exports the child session and declares it on the
+// event with its exact token usage. On failure the event is left marked
+// transcript-unavailable: a record that says so is more useful than no record,
+// and the sweep has no other way to fetch a child.
+func (a *OpenCodeAgent) attachSubagentTranscript(ctx context.Context, event *agent.Event) {
+	logCtx := logging.WithComponent(ctx, "lifecycle")
+	path, err := a.fetchAndCacheExport(ctx, event.SubagentID)
+	if err != nil {
+		logging.Warn(logCtx, "opencode: could not export subagent transcript; completing task without it",
+			slog.String("session_id", event.SessionID),
+			slog.String("tool_use_id", event.ToolUseID),
+			slog.String("subagent_id", event.SubagentID),
+			slog.String("error", err.Error()))
+		event.SubagentTranscriptUnavailable = true
+		return
+	}
+	event.SubagentTranscriptPath = path
+	data, err := a.ReadTranscript(path)
+	if err != nil {
+		logging.Warn(logCtx, "opencode: could not read exported subagent transcript for token usage",
+			slog.String("subagent_id", event.SubagentID), slog.String("error", err.Error()))
+		return
+	}
+	usage, err := a.CalculateTokenUsage(data, 0)
+	if err != nil {
+		logging.Warn(logCtx, "opencode: could not compute subagent token usage",
+			slog.String("subagent_id", event.SubagentID), slog.String("error", err.Error()))
+		return
+	}
+	event.TokenUsage = usage
 }
 
 // PrepareTranscript ensures the OpenCode transcript file is up-to-date by calling `opencode export`.
