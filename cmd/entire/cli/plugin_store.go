@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"io/fs"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -373,7 +372,8 @@ type InstallPluginOptions struct {
 	Force bool
 }
 
-// InstallPluginFromPath symlinks SourcePath into the managed bin dir. The
+// InstallPluginFromPath links or copies SourcePath into the managed bin dir
+// (materializeManagedEntry). The
 // caller is responsible for built-in conflict checks (resolvePlugin already
 // gates dispatch on rootCmd.Find — installing a name that shadows a built-in
 // is allowed but the built-in still wins at runtime).
@@ -381,7 +381,7 @@ type InstallPluginOptions struct {
 // Refuses names the dispatcher will never invoke (agent-protocol prefix,
 // flag-shaped, "."/"..", slashes), and refuses self-install when the source
 // is the same file as the would-be managed entry. The replace step is
-// atomic: a new symlink is created at <dest>.tmp and renamed onto <dest>,
+// atomic: the new entry is created under a temp name and renamed onto <dest>,
 // so a failed --force never leaves the previous install missing.
 func InstallPluginFromPath(opts InstallPluginOptions) (*InstalledPlugin, error) {
 	src, err := filepath.Abs(opts.SourcePath)
@@ -540,11 +540,7 @@ func managedTreeName(root *os.Root, src string) (string, bool) {
 	if err != nil || rel == "." || !filepath.IsLocal(rel) {
 		return "", false
 	}
-	name := filepath.ToSlash(rel)
-	if !fs.ValidPath(name) {
-		return "", false
-	}
-	return name, true
+	return filepath.ToSlash(rel), true
 }
 
 // copyFileStreaming copies src to dest in fixed-size buffers, preserving the

@@ -49,7 +49,7 @@ Confirmations read from the **controlling terminal**, never stdin, so a plugin's
 |---|---|---|
 | bare name | `entire plugin install run` | Resolved through the [plugin index](#plugin-index-discovery) |
 | repository URL | `entire plugin install https://github.com/entireio/entire-run` | Installs from any git host. Also accepts git's scp-like form with any SSH username (`deploy@git.corp.io:group/entire-foo.git`) — the same set `validatePluginRepoURL` allows |
-| local path | `entire plugin install ./dist/entire-run` | Symlink/copy into the managed dir (unchanged) |
+| local path | `entire plugin install ./dist/entire-run` | Linked into the managed dir on Unix, copied on Windows (see step 5 below) |
 
 Remote installs are deliberately forge-agnostic:
 
@@ -169,7 +169,7 @@ Resolution is **install-time only** — dispatch stays zero-cost. The outcome is
 Planning tracks the strictest `min_version` seen per plugin rather than a plain visited set. In a diamond where two requirers demand different minimums of the same plugin (A needs `sem >= v1.0.0`, B needs `sem >= v2.0.0`), a name-only set would mark `sem` handled on A's satisfied requirement and skip B's stricter one entirely — no action, no warning — completing the install with B running against a too-old `sem`. `doctor` caught that afterwards, since it walks each manifest's requirements independently, but the install plans the upgrade instead of deferring the discovery. One action per plugin name either way. The requirement list is copied into the install manifest so reverse-dependency checks work offline:
 
 - `entire plugin remove sem` refuses when another manifest requires it (`--force` overrides).
-- `entire plugin doctor` reports missing/outdated dependencies, manifest/bin-dir drift, binaries that no longer match the `binary_sha256` recorded at install, installs that were never checksum-verified, dangling local-dev symlinks, and (macOS) a `com.apple.quarantine` attribute that would block execution. Exit code 1 when issues are found. The integrity check covers the `pkg/` binary the manifest describes; where `bin/` holds a copy rather than a link (Windows without Developer Mode), the dangling/non-executable link check is what guards that surface.
+- `entire plugin doctor` reports missing/outdated dependencies, manifest/bin-dir drift, binaries that no longer match the `binary_sha256` recorded at install, installs that were never checksum-verified, dangling local-dev symlinks, and (macOS) a `com.apple.quarantine` attribute that would block execution. Exit code 1 when issues are found. The integrity check covers the `pkg/` binary the manifest describes and, when `bin/` holds a file rather than a symlink, the `bin/` entry too; every `bin/` entry is also checked to be runnable (not dangling, unfollowable, a directory, or empty).
 
 > **Compatibility note:** the `entire plugin` command group is itself a built-in. Per the "built-ins win" rule above, it shadows any external command named `entire-plugin` that may have existed on `$PATH` previously. The collision is intentional — managing plugins is a built-in concern — but worth flagging for anyone who shipped an `entire-plugin` external command before this layer landed.
 

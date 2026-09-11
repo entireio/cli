@@ -308,12 +308,18 @@ func RunPluginDoctor(ctx context.Context) ([]PluginDoctorIssue, error) {
 	installedByName := map[string]*InstalledPlugin{}
 	for _, p := range installed {
 		installedByName[p.Name] = p
-		if p.Symlink {
+		if _, err := checkManagedPluginRunnable(p.Path); err != nil {
+			issues = append(issues, PluginDoctorIssue{
+				Plugin:  p.Name,
+				Problem: "managed entry cannot be run: " + err.Error(),
+				Fix:     entryRepairFix(p.Name),
+			})
+		} else if p.Symlink {
 			if _, err := exec.LookPath(p.Path); err != nil {
 				issues = append(issues, PluginDoctorIssue{
 					Plugin:  p.Name,
 					Problem: "managed entry is a dangling or non-executable link to " + p.LinkTarget,
-					Fix:     "rebuild the target or run: entire plugin remove " + p.Name,
+					Fix:     entryRepairFix(p.Name),
 				})
 			}
 		}
@@ -387,14 +393,17 @@ func reinstallCommand(m *PluginManifest) string {
 	return cmd
 }
 
+// entryRepairFix is the remedy for a bin/ entry that cannot be run. It names
+// the same command the on-demand dispatcher does (installMissingPlugin).
+func entryRepairFix(name string) string {
+	return fmt.Sprintf("reinstall: entire plugin install %s --force, or remove it: entire plugin remove %s", name, name)
+}
+
 // checkManagedBinaryIntegrity re-hashes a managed plugin's binary and
 // compares it to the digest recorded at install time, catching a binary
-// swapped out under the managed directory after install.
-//
-// This checks the pkg/ binary, which is the copy the manifest describes and
-// the target bin/ links to. Where the bin/ entry is a copy rather than a link
-// (Windows without Developer Mode), a tampered copy is not covered — the
-// dangling/non-executable link check above is what guards that surface.
+// swapped out under the managed directory after install. It checks the pkg/
+// binary the manifest describes and, when the bin/ entry is a file rather
+// than a symlink, that entry too.
 //
 // A manifest without BinarySHA256 predates integrity recording, so there is
 // nothing to compare and silence is correct; nagging about it would only tell
@@ -431,6 +440,16 @@ func checkManagedBinaryIntegrity(m *PluginManifest) []PluginDoctorIssue {
 			Problem: "managed binary no longer matches the digest recorded at install; it was modified or replaced outside entire",
 			Fix:     "reinstall from the recorded source: " + reinstallCommand(m),
 		})
+		return issues
+	}
+	if entry, err := FindInstalledPlugin(m.Name); err == nil && entry != nil && !entry.Symlink {
+		if entryDigest, err := fileSHA256(entry.Path); err == nil && !strings.EqualFold(entryDigest, m.BinarySHA256) {
+			issues = append(issues, PluginDoctorIssue{
+				Plugin:  m.Name,
+				Problem: "managed bin entry no longer matches the installed binary; it was modified or replaced outside entire",
+				Fix:     "reinstall from the recorded source: " + reinstallCommand(m),
+			})
+		}
 	}
 	return issues
 }

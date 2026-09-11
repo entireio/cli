@@ -358,7 +358,7 @@ func assertMaterializedEntry(t *testing.T, dest string, body []byte) os.FileInfo
 
 // An in-tree source (every remote install): Unix symlinks, Windows hardlinks
 // and must never produce a symlink (see plugin_store_windows.go).
-func TestMaterializeManagedEntry_SourceInsideTree(t *testing.T) {
+func TestMaterializeManagedEntry_InsideTree_NoSymlinkOnWindows(t *testing.T) {
 	t.Parallel()
 	base := t.TempDir()
 	body := []byte("#!/bin/sh\nexit 0\n")
@@ -390,7 +390,7 @@ func TestMaterializeManagedEntry_SourceInsideTree(t *testing.T) {
 }
 
 // An out-of-tree source (local-dev install): Unix symlinks, Windows copies.
-func TestMaterializeManagedEntry_SourceOutsideTree(t *testing.T) {
+func TestMaterializeManagedEntry_OutsideTree_CopiesOnWindows(t *testing.T) {
 	t.Parallel()
 	body := []byte("#!/bin/sh\nexit 0\n")
 	src, srcInfo, _ := materializeEntryFixture(t, t.TempDir(), "entire-pgr", body)
@@ -426,7 +426,7 @@ func TestMaterializeManagedEntry_SourceOutsideTree(t *testing.T) {
 	}
 }
 
-func TestManagedTreeName(t *testing.T) {
+func TestManagedTreeName_WindowsAndUnixPaths(t *testing.T) {
 	t.Parallel()
 	base := t.TempDir()
 	root, err := os.OpenRoot(base)
