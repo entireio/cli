@@ -3538,6 +3538,53 @@ func TestHandleLifecycleSubagentEnd_LaunchDispatch(t *testing.T) {
 	})
 }
 
+// TestHandleLifecycleSubagentStart_DeferredCompletion_RecordsInFlightMarker pins
+// the OpenCode launch shape: the start hook knows the tool call, the child ID and
+// the labels, and completion arrives later as a Final SubagentEnd. The start
+// must leave a live record (so `checkpoint list --pending` shows it and the
+// SessionEnd sweep can complete it) and must not disturb a record a racing
+// Final already completed.
+func TestHandleLifecycleSubagentStart_DeferredCompletion_RecordsInFlightMarker(t *testing.T) {
+	// NOT parallel: setupSubagentEndTestRepo uses t.Chdir.
+	_, headHash := setupSubagentEndTestRepo(t)
+	ctx := context.Background()
+	const sessionID = "opencode-deferred-start"
+	saveInFlightSession(ctx, t, sessionID, headHash)
+
+	start := &agent.Event{
+		Type:               agent.SubagentStart,
+		SessionID:          sessionID,
+		ToolUseID:          "call_red",
+		SubagentID:         "ses_child_red",
+		SubagentType:       "general",
+		TaskDescription:    "Create docs/red.md",
+		DeferredCompletion: true,
+		Timestamp:          time.Now(),
+	}
+	require.NoError(t, handleLifecycleSubagentStart(ctx, newMockAgent(), start))
+
+	state, err := strategy.LoadSessionState(ctx, sessionID)
+	require.NoError(t, err)
+	require.NotNil(t, state)
+	rec := state.FindTaskRecord("call_red")
+	require.NotNil(t, rec, "deferred start must record an in-flight marker")
+	assert.True(t, rec.CompletedAt.IsZero())
+	assert.Equal(t, "ses_child_red", rec.AgentID)
+	assert.Equal(t, "general", rec.SubagentType)
+	assert.Equal(t, "Create docs/red.md", rec.TaskDescription)
+
+	// A late duplicate start after completion must not reopen the record.
+	require.NoError(t, strategy.MutateSessionState(ctx, sessionID, func(s *strategy.SessionState) error {
+		require.True(t, s.CompleteTaskRecord("call_red", time.Now()))
+		return nil
+	}))
+	require.NoError(t, handleLifecycleSubagentStart(ctx, newMockAgent(), start))
+	state, err = strategy.LoadSessionState(ctx, sessionID)
+	require.NoError(t, err)
+	require.Len(t, state.TaskRecords, 1)
+	assert.False(t, state.TaskRecords[0].CompletedAt.IsZero(), "duplicate start must not overwrite a completed record")
+}
+
 // TestHandleLifecycleSubagentEnd_SubagentStop_CapturesUsingLaunchRecordedLabel
 // is the addendum from Task 1's code review: SubagentStop payloads carry no
 // tool_input, so a Final capture can't derive subagent_type/description from

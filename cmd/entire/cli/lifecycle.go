@@ -1447,6 +1447,13 @@ func handleLifecycleSubagentStart(ctx context.Context, ag agent.Agent, event *ag
 		return nil
 	}
 
+	if event.DeferredCompletion {
+		// The launch already names the tool call, the child and the labels;
+		// completion arrives as a separate Final SubagentEnd whose capture is
+		// analyzer-only, so the worktree baseline would never be read.
+		return recordDeferredTaskLaunch(logCtx, event)
+	}
+
 	// Capture pre-task state
 	if err := CapturePreTaskState(ctx, event.ToolUseID); err != nil {
 		return fmt.Errorf("failed to capture pre-task state: %w", err)
@@ -1533,36 +1540,61 @@ func handleLifecycleSubagentEnd(ctx context.Context, ag agent.Agent, event *agen
 	return completeSubagentTaskRecord(logCtx, ag, event, subagentCaptureOptions{ensureSessionState: true})
 }
 
-// recordInFlightTaskLaunch handles a background Task launch. It records an
-// in-flight marker on session state and completes nothing yet;
-// the real capture happens at SubagentStop (handleSubagentStopFinal), which
-// is the first point that sees the subagent's actual work. Tolerates
-// strategy.ErrStateNotFound the way the completion producers tolerate a launch
-// event arriving before session state exists.
+// recordInFlightTaskLaunch handles a background Task launch (Claude Code's
+// run_in_background post-task stub): the record is replaced wholesale, which
+// is what a retried launch event wants. The real capture happens at
+// SubagentStop (handleSubagentStopFinal), which is the first point that sees
+// the subagent's actual work.
 func recordInFlightTaskLaunch(logCtx context.Context, event *agent.Event) error {
 	logging.Debug(logCtx, "background subagent launch detected; deferring capture to subagent-stop",
 		slog.String("session_id", event.SessionID),
 		slog.String("tool_use_id", event.ToolUseID),
 		slog.String("agent_id", event.SubagentID),
 	)
+	return recordTaskLaunchMarker(logCtx, event, func(state *strategy.SessionState, rec session.TaskRecord) {
+		state.AddTaskRecord(rec)
+	})
+}
 
+// recordDeferredTaskLaunch handles a start hook that already carries full
+// identity and whose completion is a later Final event
+// (Event.DeferredCompletion). EnsureTaskRecord rather than AddTaskRecord: a
+// start replayed after the Final completed the record must enrich, never
+// overwrite, so a completed record is never reopened.
+func recordDeferredTaskLaunch(logCtx context.Context, event *agent.Event) error {
+	logging.Debug(logCtx, "deferred-completion subagent start detected; deferring capture to subagent-stop",
+		slog.String("session_id", event.SessionID),
+		slog.String("tool_use_id", event.ToolUseID),
+		slog.String("agent_id", event.SubagentID),
+	)
+	return recordTaskLaunchMarker(logCtx, event, func(state *strategy.SessionState, rec session.TaskRecord) {
+		_ = state.EnsureTaskRecord(rec)
+	})
+}
+
+// recordTaskLaunchMarker writes the launch-time task record through mutate.
+// Tolerates strategy.ErrStateNotFound the way the completion producers do: a
+// launch can arrive before session state exists, and the Final capture
+// creates the record itself in that case.
+func recordTaskLaunchMarker(logCtx context.Context, event *agent.Event, mutate func(*strategy.SessionState, session.TaskRecord)) error {
+	rec := session.TaskRecord{
+		ToolUseID:       event.ToolUseID,
+		AgentID:         event.SubagentID,
+		StartedAt:       time.Now(),
+		SubagentType:    event.SubagentType,
+		TaskDescription: event.TaskDescription,
+	}
 	mutErr := strategy.MutateSessionState(logCtx, event.SessionID, func(state *strategy.SessionState) error {
-		state.AddTaskRecord(session.TaskRecord{
-			ToolUseID:       event.ToolUseID,
-			AgentID:         event.SubagentID,
-			StartedAt:       time.Now(),
-			SubagentType:    event.SubagentType,
-			TaskDescription: event.TaskDescription,
-		})
+		mutate(state, rec)
 		return nil
 	})
 	switch {
 	case errors.Is(mutErr, strategy.ErrStateNotFound):
-		logging.Info(logCtx, "no session state to record in-flight marker on; background task will not be captured",
+		logging.Info(logCtx, "no session state to record task launch marker on",
 			slog.String("session_id", event.SessionID),
 			slog.String("tool_use_id", event.ToolUseID))
 	case mutErr != nil:
-		logging.Warn(logCtx, "failed to record in-flight task marker",
+		logging.Warn(logCtx, "failed to record task launch marker",
 			slog.String("session_id", event.SessionID),
 			slog.String("tool_use_id", event.ToolUseID),
 			slog.String("error", mutErr.Error()))
