@@ -212,6 +212,16 @@ type GlobalConfig struct {
 // a block without switching the tier off for every older binary that shares
 // the machine. New features therefore add top-level blocks, not keys inside
 // `global`.
+//
+// The mixed receivers are deliberate and recvcheck is suppressed rather than
+// satisfied: MarshalJSON takes a VALUE receiver so a UserSettings marshalled by
+// value still carries its preserved unknown blocks (a pointer receiver is skipped
+// in that case, and the round-trip would silently drop every setting another tool
+// stored in the file), while UnmarshalJSON must take a pointer to populate one.
+// That pairing is the standard encoding/json idiom; see MarshalJSON in
+// user_settings.go.
+//
+//nolint:recvcheck // see above: the value receiver on MarshalJSON is load-bearing
 type UserSettings struct {
 	Global *GlobalConfig `json:"global,omitempty"`
 	// extra holds top-level blocks this binary does not know, preserved
