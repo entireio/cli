@@ -373,8 +373,15 @@ func TestHookManagerWarning_GitHooksManager(t *testing.T) {
 	if !strings.Contains(warning, "Warning: Lefthook detected") {
 		t.Error("warning should contain 'Warning: Lefthook detected'")
 	}
-	if !strings.Contains(warning, "run 'entire enable' to restore") {
-		t.Error("warning should mention running 'entire enable'")
+	// Entire registers in Lefthook's own config, so Lefthook regenerating its
+	// hooks no longer removes it. Telling the user to re-run 'entire enable'
+	// after every Lefthook refresh is the advice #2263 was filed about, and it
+	// is false once the integration is in place.
+	if !strings.Contains(warning, "no action is needed") {
+		t.Errorf("warning should say no action is needed:\n%s", warning)
+	}
+	if strings.Contains(warning, "run 'entire enable' to restore") {
+		t.Errorf("warning must not tell the user to restore hooks Lefthook cannot remove:\n%s", warning)
 	}
 
 	// Should NOT contain hook file copy-paste instructions

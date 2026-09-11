@@ -89,6 +89,16 @@ func hookManagerWarning(managers []hookManager, cmdPrefix string) string {
 		if m.OverwritesHooks {
 			fmt.Fprintf(&b, "Warning: %s detected (%s)\n", m.Name, m.ConfigPath)
 			fmt.Fprintf(&b, "\n")
+			// Lefthook is integrated at its own config level, so its
+			// reinstalls are harmless and there is nothing to restore.
+			// Telling the user otherwise is what #2263 was filed about.
+			if m.IntegrationKind == hookManagerIntegrationLefthook {
+				fmt.Fprintf(&b, "  %s regenerates Git hooks whenever its config changes or it is reinstalled.\n", m.Name)
+				fmt.Fprintf(&b, "  Entire registers itself in %s's own configuration instead of owning the hook\n", m.Name)
+				fmt.Fprintf(&b, "  files, so those regenerations no longer remove it and no action is needed.\n")
+				fmt.Fprintf(&b, "\n")
+				continue
+			}
 			if m.IntegrationKind != hookManagerIntegrationHookDirectory {
 				fmt.Fprintf(&b, "  %s may overwrite hooks installed by Entire when it installs or refreshes hooks.\n", m.Name)
 				fmt.Fprintf(&b, "  If %s reinstalls hooks, run 'entire enable' to restore Entire's hooks.\n", m.Name)

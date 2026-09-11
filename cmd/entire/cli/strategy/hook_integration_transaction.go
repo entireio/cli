@@ -195,6 +195,14 @@ func EnsureGitHookIntegration(ctx context.Context, absolutePath bool) (int, erro
 	if err := restoreProvenLefthookBridges(ctx, absolutePath); err != nil {
 		return fail(err)
 	}
+	// Entire no longer owns these files, so backups from the era when it did
+	// are stale — and Lefthook's own .old backup makes it error on every sync
+	// until removed (#1349 step 4).
+	if hooks, hooksErr := openEffectiveHooksRoot(ctx, repoRoot); hooksErr == nil {
+		if _, clearErr := clearStaleNativeBackups(hooks); clearErr != nil {
+			return fail(clearErr)
+		}
+	}
 	if err := integrationFault("final-verification", "lefthook"); err != nil {
 		return fail(err)
 	}

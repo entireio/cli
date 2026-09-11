@@ -276,3 +276,56 @@ func removeLefthookExtendsEntry(root *os.Root) (bool, error) {
 	}
 	return true, nil
 }
+
+// lefthookManagerBackupSuffix is the name Lefthook moves a hook aside to when
+// it reclaims one it did not install.
+const lefthookManagerBackupSuffix = ".old"
+
+// clearStaleNativeBackups removes hook backups left over from the era when
+// Entire and Lefthook fought over .git/hooks/*.
+//
+// A repo that hit #1349 carries two of them per hook: <hook>.pre-entire, where
+// Entire stashed Lefthook's launcher before overwriting it, and <hook>.old,
+// where Lefthook then stashed Entire's wrapper when it took the file back.
+// Both describe a conflict that no longer exists — Lefthook owns the hook file
+// outright and Entire registers through its config.
+//
+// The .old one is not merely untidy. Lefthook refuses to move a hook aside
+// when its backup already exists, so it reports
+//
+//	could not replace the hook: can't rename pre-push to pre-push.old - file already exists
+//
+// on every subsequent sync until the file is gone. That is #1349's step 4, and
+// it outlives the fix unless the leftovers are cleared.
+//
+// Each file is removed only when its contents prove whose it was: a
+// .pre-entire holding a Lefthook launcher, or a .old holding an Entire
+// wrapper. Anything else is a real user hook and is left alone.
+func clearStaleNativeBackups(hooks effectiveHooksRoot) (int, error) {
+	removed := 0
+	for _, hook := range gitHookNames {
+		for _, candidate := range []struct {
+			name  string
+			stale func([]byte) bool
+		}{
+			{hook + backupSuffix, func(b []byte) bool { return looksLikeLefthookHook(b, hook) }},
+			{hook + lefthookManagerBackupSuffix, func(b []byte) bool {
+				return strings.Contains(string(b), entireHookMarker)
+			}},
+		} {
+			name := hooks.name(candidate.name)
+			data, _, err := readOptionalRegular(hooks.root, name)
+			if err != nil {
+				return removed, fmt.Errorf("read %s: %w", candidate.name, err)
+			}
+			if data == nil || !candidate.stale(data) {
+				continue
+			}
+			if err := osroot.RemoveNoSymlinks(hooks.root, name); err != nil && !os.IsNotExist(err) {
+				return removed, fmt.Errorf("remove stale backup %s: %w", candidate.name, err)
+			}
+			removed++
+		}
+	}
+	return removed, nil
+}
