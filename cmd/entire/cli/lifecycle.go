@@ -1412,7 +1412,9 @@ func condenseEndedSession(ctx context.Context, sessionID string, condenseDeadlin
 	}
 }
 
-// handleLifecycleSubagentStart handles subagent start: captures pre-task state.
+// handleLifecycleSubagentStart handles subagent start: it captures pre-task
+// state, or records a deferred launch marker (Event.DeferredCompletion), or
+// registers a Codex child — exactly one of the three, depending on the event.
 func handleLifecycleSubagentStart(ctx context.Context, ag agent.Agent, event *agent.Event) error {
 	logCtx := logging.WithAgent(logging.WithComponent(ctx, "lifecycle"), ag.Name())
 	logging.Info(logCtx, "subagent started",
@@ -1697,11 +1699,11 @@ func handleSubagentStopFinal(logCtx context.Context, ag agent.Agent, event *agen
 	}
 
 	// analyzerFilesOnly: true because either a live marker was found above (a
-	// background task — foreground tasks complete immediately at launch and
-	// are never marked in-flight) or this is a CompletionWithoutLaunch event,
-	// which reaches this point with no marker at all. Either way the
-	// worktree-wide DetectFileChanges scan would risk sweeping in the parent's
-	// or another agent's later edits. See subagentCaptureOptions.analyzerFilesOnly.
+	// background or deferred-completion launch) or this is a
+	// CompletionWithoutLaunch event, which may reach this point without one.
+	// Either way the worktree-wide DetectFileChanges scan would risk sweeping
+	// in the parent's or another agent's later edits. See
+	// subagentCaptureOptions.analyzerFilesOnly.
 	captureErr := completeSubagentTaskRecord(logCtx, ag, event, subagentCaptureOptions{
 		bypassNoChangesSkip: true,
 		analyzerFilesOnly:   true,
@@ -1773,10 +1775,11 @@ type subagentCaptureOptions struct {
 	// analyzerFilesOnly, when true, skips the whole-worktree
 	// LoadPreTaskState/DetectFileChanges merge in completeSubagentTaskRecord and
 	// captures only event.ModifiedFiles plus the transcript-analyzer-extracted
-	// files. Set ONLY for background Final (SubagentStop) captures — see the
-	// comment on that skip in completeSubagentTaskRecord for the attribution
-	// rationale. Never set for the foreground launch-time path, which keeps
-	// its original (correct, worktree-scan-based) behavior unchanged.
+	// files. Set ONLY for any Final capture whose launch was recorded in flight
+	// or learned at stop time (SubagentStop) — see the comment on that skip in
+	// completeSubagentTaskRecord for the attribution rationale. Never set for
+	// the foreground launch-time path, which keeps its original (correct,
+	// worktree-scan-based) behavior unchanged.
 	analyzerFilesOnly bool
 
 	// eventFilesOnly means the agent has no standalone child transcript at all
