@@ -2664,6 +2664,15 @@ func uninstallGitHooks(ctx context.Context, p *uninstallPrinter) bool {
 		p.warnUnder("failed to remove git hooks: %v", err)
 		return false
 	}
+	// The Lefthook registration is separate from the hook files, so uninstall
+	// has to take both. Only artifacts carrying Entire's marker are removed.
+	lefthookRemoved, err := strategy.RemoveLefthookIntegration(ctx)
+	if err != nil {
+		p.stepFailed("Failed to remove the Lefthook integration")
+		p.warnUnder("failed to remove the Lefthook integration: %v", err)
+		return false
+	}
+	removed += lefthookRemoved
 	if removed > 0 {
 		p.step("Removed git hooks (%d)", removed)
 	} else {
