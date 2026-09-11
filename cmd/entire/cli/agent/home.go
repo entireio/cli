@@ -37,10 +37,13 @@ func RelocationEnvVars() []string {
 // ResolveHome returns the directory an agent keeps its per-user state in:
 // $envVar when set, else the user's home joined with defaultRel.
 //
-// A blank value counts as unset, which is how the agents read their own
-// variable. A relative value is refused rather than resolved against the
-// working directory: inside a hook that is the repo root, for `session resume`
-// it is wherever the user stands, so one environment would name a different
+// A blank value counts as unset, and a non-blank value is used exactly as
+// set, whitespace included, because that is what the agents do: Cursor tests
+// e?.trim() and then uses e, Claude reads process.env raw. Trimming the value
+// we return would make "/tmp/x " resolve to a directory the agent never wrote
+// to. A relative value is refused rather than resolved against the working
+// directory: inside a hook that is the repo root, for `session resume` it is
+// wherever the user stands, so one environment would name a different
 // directory in each process. The refusal reuses userdirs.RequireAbsoluteOverride
 // so that rule keeps a single implementation.
 //
@@ -55,7 +58,7 @@ func ResolveHome(envVar, defaultRel string) (string, error) {
 	if !slices.Contains(relocationEnvVars, envVar) {
 		return "", fmt.Errorf("%s is not listed in agent.relocationEnvVars", envVar)
 	}
-	if dir := strings.TrimSpace(os.Getenv(envVar)); dir != "" {
+	if dir := os.Getenv(envVar); strings.TrimSpace(dir) != "" {
 		if err := userdirs.RequireAbsoluteOverride(envVar, dir); err != nil {
 			return "", err //nolint:wrapcheck // the error already names the override and its value
 		}

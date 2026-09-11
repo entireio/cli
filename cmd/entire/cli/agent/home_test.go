@@ -25,6 +25,7 @@ func TestResolveHome(t *testing.T) {
 		{name: "unset with no default is the home itself", env: "", rel: "", want: home},
 		{name: "blank counts as unset", env: "  ", rel: ".claude", want: filepath.Join(home, ".claude")},
 		{name: "absolute override wins", env: abs, rel: ".claude", want: abs},
+		{name: "surrounding whitespace is kept, as the agents keep it", env: abs + " ", rel: ".claude", want: abs + " "},
 		{name: "relative override is refused", env: filepath.Join("relative", "dir"), rel: ".claude", wantErr: "CLAUDE_CONFIG_DIR"},
 	}
 	for _, tt := range tests {
