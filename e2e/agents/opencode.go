@@ -365,7 +365,7 @@ func (a *openCodeAgent) RunPrompt(ctx context.Context, dir string, prompt string
 	}
 	args = append(args, prompt)
 
-	timeout, err := promptTimeout(a.timeout, cfg)
+	timeout, err := promptTimeout(a, a.timeout, cfg)
 	if err != nil {
 		return Output{}, err
 	}
