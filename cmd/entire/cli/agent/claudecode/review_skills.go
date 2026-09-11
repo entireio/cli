@@ -28,6 +28,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
@@ -119,13 +120,30 @@ func stageReviewSkills(ctx context.Context, skills []string) (stagedSkills, func
 	}
 
 	staged := stagedSkills{pluginDir: root, rewrites: map[string]string{}}
+	used := map[string]bool{}
 	for _, skill := range toStage {
 		source, ok := sources[skill]
 		if !ok {
 			cleanup()
 			return stagedSkills{}, nil, fmt.Errorf("%w: %s is not installed", errReviewSkillUnavailable, skill)
 		}
-		invocation, err := stageOneSkill(root, skill, source)
+		base, err := stagedBaseName(skill)
+		if err != nil {
+			cleanup()
+			return stagedSkills{}, nil, err
+		}
+		// Two configured invocations can flatten to the same base — e.g. "/a:b"
+		// and "/a-b" both become "a-b". Give each its own name so the second
+		// does not overwrite the first's staged file (and the reviewer does not
+		// silently load the wrong skill). The loop also covers a natural base
+		// that collides with a disambiguated one.
+		unique := base
+		for i := 2; used[unique]; i++ {
+			unique = base + "-" + strconv.Itoa(i)
+		}
+		used[unique] = true
+
+		invocation, err := stageOneSkill(root, skill, source, unique)
 		if err != nil {
 			cleanup()
 			return stagedSkills{}, nil, err
@@ -153,14 +171,12 @@ func discoveredSkillSources(ctx context.Context) (map[string]string, error) {
 // stageOneSkill copies one skill into the staged plugin and returns the
 // invocation that addresses the copy.
 //
-// The staged base name embeds the original invocation so two plugins providing
-// the same command name cannot collide once flattened into one plugin.
-func stageOneSkill(root, invocation, sourcePath string) (string, error) {
+// base is the unique, validated file-name segment the caller allocated for this
+// invocation (see stageReviewSkills); stageOneSkill only copies the skill under
+// it. Two invocations that flatten to the same base get distinct base values
+// from the caller, so staged files never overwrite one another.
+func stageOneSkill(root, invocation, sourcePath, base string) (string, error) {
 	kind := filepath.Base(filepath.Dir(sourcePath))
-	base, err := stagedBaseName(invocation)
-	if err != nil {
-		return "", err
-	}
 
 	// A skills/ entry is a directory holding SKILL.md; commands/ and agents/
 	// are flat markdown. Anything else is a layout this code has not seen.

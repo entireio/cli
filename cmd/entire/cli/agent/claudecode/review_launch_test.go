@@ -533,3 +533,72 @@ func TestBuildReviewCmd_EnvKeepsConfiguredSkillNames(t *testing.T) {
 		t.Errorf("prompt does not name the staged skill %q: %q", stagedName, cmd.Args[2])
 	}
 }
+
+// TestStageReviewSkills_CollidingNamesDoNotClobber pins the trail finding:
+// "/review:x" and "/review-x" both flatten to base "review-x", but must stage
+// to distinct files with distinct invocations so the reviewer loads the right
+// content for each — not whichever was copied last.
+func TestStageReviewSkills_CollidingNamesDoNotClobber(t *testing.T) {
+	// No t.Parallel: t.Setenv.
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("CLAUDE_CONFIG_DIR", filepath.Join(home, ".claude"))
+
+	// "/review-x": an unqualified user command (name contains a review keyword
+	// so discovery keeps it).
+	cmds := filepath.Join(home, ".claude", "commands")
+	if err := os.MkdirAll(cmds, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cmds, "review-x.md"),
+		[]byte("---\ndescription: d\n---\nUNQUALIFIED_BODY\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// "/review:x": a plugin "review" providing command "x".
+	vroot := filepath.Join(home, ".claude", "plugins", "cache", "mkt", "review", "1.0.0")
+	if err := os.MkdirAll(filepath.Join(vroot, "commands"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(vroot, ".claude-plugin"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(vroot, ".claude-plugin", "plugin.json"),
+		[]byte(`{"name":"review","version":"1.0.0","description":"d"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(vroot, "commands", "x.md"),
+		[]byte("---\ndescription: d\n---\nPLUGIN_BODY\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	staged, cleanup, err := stageReviewSkills(context.Background(), []string{"/review:x", "/review-x"})
+	if err != nil {
+		t.Fatalf("stageReviewSkills: %v", err)
+	}
+	defer cleanup()
+
+	inv1 := staged.rewrites["/review:x"]
+	inv2 := staged.rewrites["/review-x"]
+	if inv1 == "" || inv2 == "" {
+		t.Fatalf("both skills must be staged: %q, %q", inv1, inv2)
+	}
+	if inv1 == inv2 {
+		t.Fatalf("colliding skills got the same staged invocation %q — one clobbered the other", inv1)
+	}
+
+	// Each staged file must carry its own source body, proving no overwrite.
+	readStaged := func(inv string) string {
+		name := strings.TrimPrefix(inv, "/"+stagedPluginName+":")
+		data, err := os.ReadFile(filepath.Join(staged.pluginDir, "commands", name+".md"))
+		if err != nil {
+			t.Fatalf("staged file for %q not readable: %v", inv, err)
+		}
+		return string(data)
+	}
+	if !strings.Contains(readStaged(inv1), "PLUGIN_BODY") {
+		t.Errorf("/review:x staged the wrong content: %q", readStaged(inv1))
+	}
+	if !strings.Contains(readStaged(inv2), "UNQUALIFIED_BODY") {
+		t.Errorf("/review-x staged the wrong content: %q", readStaged(inv2))
+	}
+}
