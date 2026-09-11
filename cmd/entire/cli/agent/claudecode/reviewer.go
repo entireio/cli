@@ -92,7 +92,7 @@ func buildReviewCmd(ctx context.Context, cfg reviewtypes.RunConfig, settingsPath
 	args = append(args, claudeReviewFlags(settingsPath, pluginDir)...)
 	args = review.AppendModelFlag(args, cfg.Model)
 	cmd := exec.CommandContext(ctx, "claude", args...)
-	cmd.Env = review.AppendReviewEnv(os.Environ(), "claude-code", cfg, prompt)
+	cmd.Env = sanitizeReviewEnv(review.AppendReviewEnv(os.Environ(), "claude-code", cfg, prompt))
 	return cmd
 }
 

@@ -33,6 +33,12 @@ package claudecode
 //	                           apiKeyHelper below
 //	--append-system-prompt     defense in depth only; see reviewSystemPrompt
 //
+// The reviewer's environment is additionally hardened: PATH is stripped of
+// non-absolute entries and the trusted entire binary's directory is prepended
+// (sanitizeReviewEnv), so a relative PATH entry cannot cause a branch's
+// ./entire — run by Entire's own review hooks — to execute against the
+// checkout cwd.
+//
 // Why no settings sources at all, including the user's:
 //
 // The branch controls the project and local sources, so excluding those closes
@@ -64,6 +70,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 )
 
@@ -73,6 +80,53 @@ import (
 // directory. The profile's skills are preserved separately, by staging them —
 // see review_skills.go.
 const reviewSettingSources = ""
+
+// sanitizeReviewEnv rewrites PATH in the reviewer's environment so that the
+// reviewer — and every lifecycle hook it spawns — resolves commands only from
+// absolute directories, with the trusted entire binary's own directory first.
+//
+// The reviewer runs with the reviewed checkout as its working directory (review
+// cannot move it, because Entire's capture hooks resolve the repo from cwd), so
+// a relative PATH entry (".", "", or any non-absolute directory) resolves
+// against that checkout. Entire's own review hooks run `entire hooks …`, so a
+// branch shipping ./entire — or ./git, ./sh — would be executed by those hooks
+// at startup, before the first model request. Dropping non-absolute PATH
+// entries removes that, and prepending the running binary's directory
+// guarantees `command -v entire` finds the trusted CLI. This is the launch-cwd
+// analogue of why generate.go is safe (it runs in os.TempDir()); see the
+// package comment.
+func sanitizeReviewEnv(env []string) []string {
+	self, err := os.Executable()
+	selfDir := ""
+	if err == nil {
+		selfDir = filepath.Dir(self)
+	}
+	out := make([]string, 0, len(env))
+	for _, kv := range env {
+		key, val, ok := strings.Cut(kv, "=")
+		if !ok || !strings.EqualFold(key, "PATH") {
+			out = append(out, kv)
+			continue
+		}
+		var kept []string
+		if selfDir != "" && filepath.IsAbs(selfDir) {
+			kept = append(kept, selfDir)
+		}
+		for _, dir := range filepath.SplitList(val) {
+			// Drop "" (which means cwd), "." and every other non-absolute
+			// entry — each of those resolves against the reviewed checkout.
+			if dir == "" || !filepath.IsAbs(dir) {
+				continue
+			}
+			if dir == selfDir {
+				continue // already prepended
+			}
+			kept = append(kept, dir)
+		}
+		out = append(out, key+"="+strings.Join(kept, string(os.PathListSeparator)))
+	}
+	return out
+}
 
 // claudeReviewFlags returns the isolation flags appended to the reviewer argv.
 // settingsPath must be non-empty: without it Claude would load no hooks at all

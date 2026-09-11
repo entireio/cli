@@ -439,3 +439,61 @@ func TestStagedBaseName_RefusesEscapes(t *testing.T) {
 		t.Errorf("stagedBaseName(plugin invocation) = %q, %v", got, err)
 	}
 }
+
+// TestSanitizeReviewEnv_DropsCheckoutRelativePATH pins the PATH-hardening: the
+// reviewer runs with the checkout as cwd, so a relative PATH entry would let a
+// branch's ./entire be executed by Entire's own review hooks. Non-absolute
+// entries must be dropped and the trusted binary's dir must come first.
+func TestSanitizeReviewEnv_DropsCheckoutRelativePATH(t *testing.T) {
+	t.Parallel()
+	sep := string(os.PathListSeparator)
+	// A PATH mixing absolute dirs with the dangerous relative forms.
+	abs1 := string(os.PathSeparator) + "usr" + string(os.PathSeparator) + "bin"
+	abs2 := string(os.PathSeparator) + "bin"
+	in := []string{
+		"FOO=bar",
+		"PATH=" + strings.Join([]string{abs1, ".", "", "rel/dir", abs2}, sep),
+	}
+	out := sanitizeReviewEnv(in)
+
+	var path string
+	for _, kv := range out {
+		if k, v, ok := strings.Cut(kv, "="); ok && k == "PATH" {
+			path = v
+		}
+		if kv == "FOO=bar" {
+			continue
+		}
+	}
+	if path == "" {
+		t.Fatal("PATH missing from sanitized env")
+	}
+	for _, entry := range filepath.SplitList(path) {
+		if entry == "" || entry == "." || !filepath.IsAbs(entry) {
+			t.Errorf("sanitized PATH still contains a checkout-relative entry %q (full: %q)", entry, path)
+		}
+	}
+	// The two absolute entries survive.
+	if !strings.Contains(path, abs1) || !strings.Contains(path, abs2) {
+		t.Errorf("sanitized PATH dropped a legitimate absolute entry: %q", path)
+	}
+}
+
+// TestBuildReviewCmd_SanitizesPATH is the end-to-end wiring check: the argv the
+// reviewer launches with carries a PATH free of relative entries.
+func TestBuildReviewCmd_SanitizesPATH(t *testing.T) {
+	// No t.Parallel: mutates PATH via the process environment snapshot.
+	t.Setenv("PATH", strings.Join([]string{"/usr/bin", ".", "relative"}, string(os.PathListSeparator)))
+	cmd := buildReviewCmd(context.Background(), reviewtypes.RunConfig{}, "/tmp/t.json", "")
+	for _, kv := range cmd.Env {
+		if k, v, ok := strings.Cut(kv, "="); ok && k == "PATH" {
+			for _, entry := range filepath.SplitList(v) {
+				if entry == "" || entry == "." || !filepath.IsAbs(entry) {
+					t.Errorf("reviewer launched with a checkout-relative PATH entry %q", entry)
+				}
+			}
+			return
+		}
+	}
+	t.Fatal("reviewer cmd has no PATH in its env")
+}
