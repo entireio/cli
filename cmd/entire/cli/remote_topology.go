@@ -51,6 +51,12 @@ type remoteTopology struct {
 	// primaryIsRefs reports whether the git-refs backend is active, which
 	// decides what a fanning-out remote means for checkpoints.
 	primaryIsRefs bool
+	// pushDisabled reports that push_sessions is off, which makes every claim
+	// below about where a push delivers checkpoints conditional: nothing is
+	// pushed at all. Read as a caveat on the note, not a reason to suppress
+	// it — the ambiguity is still what re-enabling pushing would run into,
+	// and still what a user pins with checkpoint_remote.
+	pushDisabled bool
 }
 
 // inspectRemoteTopology reads the repo's remotes and checkpoint configuration.
@@ -91,6 +97,11 @@ func inspectRemoteTopology(ctx context.Context) remoteTopology {
 
 	if cpCfg, err := settings.LoadCheckpointsConfig(ctx); err == nil {
 		t.primaryIsRefs = checkpoint.PrimaryIsRefs(cpCfg)
+	}
+	// Best-effort like everything else here: an unreadable settings file reads
+	// as "pushing enabled", which is the note this code has always printed.
+	if s, err := settings.Load(ctx); err == nil {
+		t.pushDisabled = s.IsPushSessionsDisabled()
 	}
 
 	return t
@@ -144,6 +155,27 @@ func (t remoteTopology) describeCheckpointDestination(w io.Writer, header string
 
 	fmt.Fprintln(w, header)
 
+	// Said first, because it qualifies every "pushes to" below. The note is
+	// still worth printing: the ambiguity it describes is what re-enabling
+	// pushing would run into, and it is what checkpoint_remote pins.
+	//
+	// Deliberately silent about where checkpoints are READ from, even though
+	// that is the live question when nothing is pushed: what this note lists
+	// is PUSH URLs, and a fan-out remote's reads use its fetch URL instead
+	// (the git-branch branch below says as much — "only the fetch URL is ever
+	// reconciled").
+	//
+	// It points at `entire status` for that rather than answering it, and
+	// without promising an answer: status names a read source where it can
+	// establish one, and says so when it cannot — a failed election with a
+	// configured checkpoint_remote resolves to neither.
+	if t.pushDisabled {
+		fmt.Fprintln(w, "  Automatic checkpoint pushing is disabled (push_sessions=false), so no")
+		fmt.Fprintln(w, "  checkpoints are pushed anywhere right now. The destination below is where")
+		fmt.Fprintln(w, "  they would go if you re-enabled it; for where they are read from today,")
+		fmt.Fprintln(w, "  see `entire status`.")
+	}
+
 	for _, d := range t.destinations {
 		if !d.fansOut() {
 			continue
@@ -170,8 +202,8 @@ func (t remoteTopology) describeCheckpointDestination(w io.Writer, header string
 		fmt.Fprintf(w, "  This repo has %d remotes (%s).\n", len(names), strings.Join(names, ", "))
 		fmt.Fprintln(w, "    Checkpoints sync to a single elected remote — not to whichever one you")
 		fmt.Fprintln(w, "    push to. A push to any other remote carries your code but no session")
-		fmt.Fprintln(w, "    history. Run `entire status` to see the elected destination and how many")
-		fmt.Fprintln(w, "    checkpoints are waiting for it.")
+		fmt.Fprintln(w, "    history. Run `entire status` to see the elected destination and how much")
+		fmt.Fprintln(w, "    checkpoint data has not reached it.")
 	}
 
 	fmt.Fprintln(w, "  To pin one repository for checkpoints, set checkpoint_remote in")

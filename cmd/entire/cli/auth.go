@@ -215,7 +215,7 @@ func newAuthTokenCmd() *cobra.Command {
 func newAuthStatusCmd() *cobra.Command {
 	var insecureHTTPAuth bool
 	cmd := &cobra.Command{
-		Use:   "status",
+		Use:   cmdStatus,
 		Short: "Show authentication status",
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			target, err := resolveAuthStatusTarget(cmd.Context(), auth.Contexts, auth.RefreshedLoginToken)

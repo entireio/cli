@@ -35,11 +35,11 @@ type column struct {
 // so a --sort value needs no quoting; headers stay upper-case display text.
 var (
 	colName       = column{key: "name", header: "NAME (owner/repo)"}
-	colCloneURL   = column{key: "clone-url", header: "CLONE URL"}
+	colCloneURL   = column{key: "clone-url", header: colHeaderCloneURL}
 	colClusters   = column{key: "clusters", header: "CLUSTERS"}
 	colVisibility = column{key: "visibility", header: "VISIBILITY"}
 	colAccess     = column{key: "access", header: "ACCESS"}
-	colStatus     = column{key: "status", header: "STATUS"}
+	colStatus     = column{key: "status", header: colHeaderStatus}
 )
 
 // columnHeaders is the display-header view of a column set, for the table/field
@@ -923,7 +923,7 @@ func newRepoMirrorListCmd() *cobra.Command {
 	var pageToken string
 	var noPager, all bool
 	cmd := &cobra.Command{
-		Use:   "list",
+		Use:   cmdList,
 		Short: "List repos you can see: existing mirrors and GitHub repos you could onboard",
 		Long: "List repos visible from your login in one table: existing mirrors " +
 			"(one row per repo, with the clusters it is mirrored on and the clone " +
@@ -1140,7 +1140,7 @@ func renderRepoDetail(w io.Writer, row repoDirRow) {
 		return
 	}
 
-	headers := styledHeaders(st, []string{"CLUSTER", "CLONE URL", "STATUS"})
+	headers := styledHeaders(st, []string{colHeaderCluster, colHeaderCloneURL, colHeaderStatus})
 	rows := make([][]string, len(row.Placements))
 	for i, p := range row.Placements {
 		cluster, status := p.Cluster, p.Status

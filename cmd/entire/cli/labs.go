@@ -16,7 +16,7 @@ type experimentalCommandInfo struct {
 
 var experimentalCommands = []experimentalCommandInfo{
 	{
-		CommandPath: []string{"review"},
+		CommandPath: []string{cmdReview},
 		Invocation:  "entire review",
 		Summary:     "Run a multi-agent review against the current branch",
 	},
@@ -31,7 +31,7 @@ var experimentalCommands = []experimentalCommandInfo{
 		Summary:     "Import existing Claude Code transcripts as local, read-only history",
 	},
 	{
-		CommandPath: []string{"tokens"},
+		CommandPath: []string{cmdTokens},
 		Invocation:  "entire tokens",
 		Summary:     "Analyze experimental token usage diagnostics",
 	},
@@ -41,7 +41,7 @@ var experimentalCommands = []experimentalCommandInfo{
 		Summary:     "Aggregate token usage across committed checkpoints",
 	},
 	{
-		CommandPath: []string{"session", "tokens"},
+		CommandPath: []string{cmdSession, cmdTokens},
 		Invocation:  "entire session tokens",
 		Summary:     "Show token usage and recommendations for a session",
 	},

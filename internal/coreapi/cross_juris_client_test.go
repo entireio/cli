@@ -424,6 +424,60 @@ func TestRoundTripper_RejectsOffOrigin401ExchangeURL(t *testing.T) {
 	}
 }
 
+// TestRoundTripper_RejectsRedirectedExchangePOST: an impeccable 401 hint whose
+// origin then 307s the exchange POST elsewhere must not leak the JWT.
+//
+// auth-go owns the guard and tests the mechanism; this one is about the CLI's
+// wiring, which is a property no auth-go test can assert. The guard was added
+// to httputil.PostOAuthToken in #2224, and #2235 moved this path off that
+// helper twelve hours later, unnoticed, because #2224's regression test sat in
+// httputil and kept passing. A test anchored where the CLI actually makes the
+// call is what notices.
+func TestRoundTripper_RejectsRedirectedExchangePOST(t *testing.T) {
+	t.Parallel()
+	attackerSawJWT := atomic.Bool{}
+	attacker := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := r.ParseForm(); err == nil && r.PostForm.Get("subject_token") == "user-jwt" {
+			attackerSawJWT.Store(true)
+		}
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"access_token":"attacker-issued","expires_in":300}`)) //nolint:errcheck // test
+	}))
+	t.Cleanup(attacker.Close)
+
+	api := newCrossJurisTestServer(t, func(s *crossJurisTestServer, w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == crossjuris.TokenPath {
+			// An open redirect or a misconfigured proxy in front of a core
+			// the caller legitimately dials.
+			http.Redirect(w, r, attacker.URL+crossjuris.TokenPath, http.StatusTemporaryRedirect)
+			return
+		}
+		s.record(r)
+		w.WriteHeader(http.StatusUnauthorized)
+		w.Write([]byte(`{"error":"cross_juris_token_required","token_exchange_url":"` + s.srv.URL + crossjuris.TokenPath + `","audience":"` + s.srv.URL + `"}`)) //nolint:errcheck // test
+	})
+
+	client := &http.Client{Transport: transportFor(t)}
+	req, _ := http.NewRequestWithContext(context.Background(), http.MethodGet, api.srv.URL+"/api/v1/me", nil) //nolint:errcheck // test
+	req.Header.Set("Authorization", "Bearer user-jwt")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	// Leak first: it is this test's headline claim, and t.Fatal below would
+	// abort before it was ever evaluated.
+	if attackerSawJWT.Load() {
+		t.Errorf("REGRESSION: the login JWT reached the redirect target")
+	}
+	// A refused exchange surfaces the server's original 401 untouched.
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("got %d, want the original 401 passed through", resp.StatusCode)
+	}
+}
+
 // TestRoundTripper_BodyReplayedOnRetry: a retried request replays its body.
 func TestRoundTripper_BodyReplayedOnRetry(t *testing.T) {
 	t.Parallel()

@@ -18,7 +18,8 @@ type CapabilityDeclarer interface {
 //
 // Not every optional interface appears here: built-in-only capabilities that
 // have no external-protocol equivalent (SessionBaseDirProvider, ModelExtractor,
-// SkillEventExtractor, TranscriptSanitizer, TranscriptFetcher) are intentionally
+// SkillEventExtractor, TranscriptSanitizer, TranscriptFetcher,
+// InventoryAwareExtractor) are intentionally
 // excluded — their As* helpers resolve by type assertion alone (see
 // builtinCapability), with no DeclaredCaps gate.
 type DeclaredCaps struct {
@@ -146,6 +147,14 @@ func AsTranscriptFetcher(ag Agent) (TranscriptFetcher, bool) {
 // implements the interface and (for CapabilityDeclarer agents) has declared the capability.
 func AsTokenCalculator(ag Agent) (TokenCalculator, bool) {
 	return declaredCapability[TokenCalculator](ag, func(c DeclaredCaps) bool { return c.TokenCalculator })
+}
+
+// AsInventoryAwareExtractor returns the agent as InventoryAwareExtractor when
+// it implements the built-in-only inventory protocol. External agents cannot
+// declare this capability because its authoritative child ledger is internal to
+// Entire rather than the external-agent protocol.
+func AsInventoryAwareExtractor(ag Agent) (InventoryAwareExtractor, bool) {
+	return builtinCapability[InventoryAwareExtractor](ag)
 }
 
 // AsTextGenerator returns the agent as TextGenerator if it both

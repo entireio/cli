@@ -1192,7 +1192,10 @@ func tokenStreamHasDuplicateKeys(dec *json.Decoder) bool {
 					return true
 				}
 				if len(seenSlice) == duplicateKeySliceThreshold {
-					seenMap = make(map[string]struct{}, len(seenSlice)+1)
+					// Sized from the constant, not len(seenSlice): they are equal
+					// on this branch, and the spilled keys plus k are exactly
+					// what the map has to hold.
+					seenMap = make(map[string]struct{}, duplicateKeySliceThreshold+1)
 					for _, seenKey := range seenSlice {
 						seenMap[seenKey] = struct{}{}
 					}

@@ -11,9 +11,19 @@ type AddOrgMemberParams struct {
 	OrgId string
 }
 
+// ConnectOrgCIBuildkiteCredentialParams is parameters of connectOrgCIBuildkiteCredential operation.
+type ConnectOrgCIBuildkiteCredentialParams struct {
+	OrgId string
+}
+
 // CreateBindingParams is parameters of createBinding operation.
 type CreateBindingParams struct {
 	AccountId string
+}
+
+// CreateNativeMirrorParams is parameters of createNativeMirror operation.
+type CreateNativeMirrorParams struct {
+	RepoId string
 }
 
 // CreateRepoCIWebhookParams is parameters of createRepoCIWebhook operation.
@@ -36,9 +46,28 @@ type DeleteMirrorParams struct {
 	ClusterHost string
 }
 
+// DeleteNativeMirrorParams is parameters of deleteNativeMirror operation.
+type DeleteNativeMirrorParams struct {
+	RepoId      string
+	ClusterSlug string
+}
+
 // DeleteOrgParams is parameters of deleteOrg operation.
 type DeleteOrgParams struct {
 	OrgId string
+}
+
+// DeleteOrgCIBuildkiteClusterParams is parameters of deleteOrgCIBuildkiteCluster operation.
+type DeleteOrgCIBuildkiteClusterParams struct {
+	OrgId       string
+	BkOrg       string
+	BkClusterId string
+}
+
+// DeleteOrgCIBuildkiteCredentialParams is parameters of deleteOrgCIBuildkiteCredential operation.
+type DeleteOrgCIBuildkiteCredentialParams struct {
+	OrgId string
+	BkOrg string
 }
 
 // DeleteProjectParams is parameters of deleteProject operation.
@@ -53,14 +82,19 @@ type DeleteRepoParams struct {
 
 // DeleteRepoCIWebhookParams is parameters of deleteRepoCIWebhook operation.
 type DeleteRepoCIWebhookParams struct {
-	RepoId   string
-	ID       string
-	Teardown OptBool `json:",omitempty,omitzero"`
+	RepoId       string
+	ID           string
+	KeepIdentity OptBool `json:",omitempty,omitzero"`
 }
 
 // DeleteServiceAccountParams is parameters of deleteServiceAccount operation.
 type DeleteServiceAccountParams struct {
 	AccountId string
+}
+
+// GetBranchProtectionParams is parameters of getBranchProtection operation.
+type GetBranchProtectionParams struct {
+	RepoId string
 }
 
 // GetMirrorParams is parameters of getMirror operation.
@@ -168,12 +202,28 @@ type ListMirrorsParams struct {
 	Owner OptString `json:",omitempty,omitzero"`
 }
 
+// ListNativeMirrorsParams is parameters of listNativeMirrors operation.
+type ListNativeMirrorsParams struct {
+	RepoId string
+}
+
 // ListOIDCProvidersParams is parameters of listOIDCProviders operation.
 type ListOIDCProvidersParams struct {
 	// Maximum entries to return; server may cap further.
 	PageSize OptInt32 `json:",omitempty,omitzero"`
 	// Opaque cursor from a previous response's nextPageToken.
 	PageToken OptString `json:",omitempty,omitzero"`
+}
+
+// ListOrgCIBuildkiteClustersParams is parameters of listOrgCIBuildkiteClusters operation.
+type ListOrgCIBuildkiteClustersParams struct {
+	OrgId          string
+	BkOrganization OptString `json:",omitempty,omitzero"`
+}
+
+// ListOrgCIBuildkiteCredentialsParams is parameters of listOrgCIBuildkiteCredentials operation.
+type ListOrgCIBuildkiteCredentialsParams struct {
+	OrgId string
 }
 
 // ListOrgMembersParams is parameters of listOrgMembers operation.
@@ -237,9 +287,40 @@ type ListProjectsParams struct {
 	Name OptString `json:",omitempty,omitzero"`
 }
 
+// ListRepoCIBuildsParams is parameters of listRepoCIBuilds operation.
+type ListRepoCIBuildsParams struct {
+	RepoId      string
+	Commit      OptString `json:",omitempty,omitzero"`
+	Pipeline    OptString `json:",omitempty,omitzero"`
+	BuildNumber OptInt64  `json:",omitempty,omitzero"`
+	Limit       OptInt64  `json:",omitempty,omitzero"`
+}
+
+// ListRepoCIProvidersParams is parameters of listRepoCIProviders operation.
+type ListRepoCIProvidersParams struct {
+	RepoId string
+}
+
+// ListRepoCIWebhookAuditParams is parameters of listRepoCIWebhookAudit operation.
+type ListRepoCIWebhookAuditParams struct {
+	RepoId    string
+	EventType OptString `json:",omitempty,omitzero"`
+	Limit     OptInt64  `json:",omitempty,omitzero"`
+	Offset    OptInt64  `json:",omitempty,omitzero"`
+}
+
 // ListRepoCIWebhooksParams is parameters of listRepoCIWebhooks operation.
 type ListRepoCIWebhooksParams struct {
 	RepoId string
+}
+
+// ListRepoCollaboratorsParams is parameters of listRepoCollaborators operation.
+type ListRepoCollaboratorsParams struct {
+	// Maximum entries to return; server may cap further.
+	PageSize OptInt32 `json:",omitempty,omitzero"`
+	// Opaque cursor from a previous response's nextPageToken.
+	PageToken OptString `json:",omitempty,omitzero"`
+	RepoId    string
 }
 
 // ListRepoGrantsParams is parameters of listRepoGrants operation.
@@ -251,6 +332,26 @@ type ListRepoGrantsParams struct {
 	RepoId    string
 }
 
+// ListRepoLanguageFacetsParams is parameters of listRepoLanguageFacets operation.
+type ListRepoLanguageFacetsParams struct {
+	// Maximum facet values to return.
+	PageSize OptInt32 `json:",omitempty,omitzero"`
+	// Opaque cursor from a previous response's nextPageToken.
+	PageToken OptString `json:",omitempty,omitzero"`
+	// Case-insensitive substring match over facet values.
+	Q OptString `json:",omitempty,omitzero"`
+}
+
+// ListRepoOrgFacetsParams is parameters of listRepoOrgFacets operation.
+type ListRepoOrgFacetsParams struct {
+	// Maximum facet values to return.
+	PageSize OptInt32 `json:",omitempty,omitzero"`
+	// Opaque cursor from a previous response's nextPageToken.
+	PageToken OptString `json:",omitempty,omitzero"`
+	// Case-insensitive substring match over facet values.
+	Q OptString `json:",omitempty,omitzero"`
+}
+
 // ListReposParams is parameters of listRepos operation.
 type ListReposParams struct {
 	// Maximum entries to return; server may cap further.
@@ -260,8 +361,35 @@ type ListReposParams struct {
 	// Onboarded (default): repos in Entire; all: also include onboardable GitHub candidates.
 	Scope OptListReposScope `json:",omitempty,omitzero"`
 	// Optional: exact-match full_name (owner/repo, case-insensitive). Returns that repo's zero-or-one
-	// entries; pagination and scope are ignored.
+	// entries; pagination and scope are ignored, but the fact filters below still apply (a repo whose
+	// facts don't match returns empty).
 	Filter OptString `json:",omitempty,omitzero"`
+	// Multi-key sort spec, e.g. org:asc,stars:desc. Keys: name,org,language,candidacy,stars,forks,
+	// pushed_at,last_activity_at,last_pushed_at,activity_hotness,checkpoint_count,open_pr_count. A
+	// single bare key uses the order param. Encoded into the cursor (authoritative on continuation).
+	Sort OptString `json:",omitempty,omitzero"`
+	// Direction for a single bare sort key; defaults to asc. Ignored when sort carries per-key
+	// :asc/:desc suffixes. Encoded into the cursor (authoritative on continuation).
+	Order OptListReposOrder `json:",omitempty,omitzero"`
+	// Exact-match repo_facts.language. Also accepts language[eq]/language[ne] (bare is sugar for [eq]).
+	Language OptString `json:",omitempty,omitzero"`
+	// Filter on the observed repo_facts.private fact (public: private=false; private: private=true).
+	// Also accepts visibility[eq]/visibility[ne].
+	Visibility OptListReposVisibility `json:",omitempty,omitzero"`
+	// Filter on repo_facts.archived.
+	Archived OptListReposArchived `json:",omitempty,omitzero"`
+	// True: repo_facts.checkpoint_count > 0; false: no checkpoints (0 or unobserved).
+	HasCheckpoints OptListReposHasCheckpoints `json:",omitempty,omitzero"`
+	// Exact-match owner/project org (case-insensitive). Also accepts org[eq]/org[ne].
+	Org OptString `json:",omitempty,omitzero"`
+	// Literal case-insensitive substring match on the full name (owner/repo).
+	Q OptString `json:",omitempty,omitzero"`
+	// Filter on placement/candidacy lifecycle. inactive requires scope=all. Also accepts
+	// status[eq]/status[ne].
+	Status OptListReposStatus `json:",omitempty,omitzero"`
+	// Minimum caller access tier: read (all), write (write+admin), or admin. Also accepts permission[eq];
+	//  permission[ne] is rejected.
+	Permission OptListReposPermission `json:",omitempty,omitzero"`
 }
 
 // ListServiceAccountGrantsParams is parameters of listServiceAccountGrants operation.
@@ -288,23 +416,20 @@ type LookupRepoBySlugParams struct {
 	Slug string
 }
 
-// LookupResourcesParams is parameters of lookupResources operation.
-type LookupResourcesParams struct {
-	// Maximum entries to return; server may cap further.
-	PageSize OptInt32 `json:",omitempty,omitzero"`
-	// Opaque cursor from a previous response's nextPageToken.
-	PageToken OptString `json:",omitempty,omitzero"`
-	// SpiceDB resource type (e.g. "repo", "project", "org").
-	ResourceType string
-	// Optional: only list resources where the caller has this permission. pageSize/pageToken apply only
-	// when set.
-	Permission OptString `json:",omitempty,omitzero"`
+// MintOrgCIGitHubActionsCredentialParams is parameters of mintOrgCIGitHubActionsCredential operation.
+type MintOrgCIGitHubActionsCredentialParams struct {
+	OrgId string
 }
 
 // PatchRepoCIWebhookParams is parameters of patchRepoCIWebhook operation.
 type PatchRepoCIWebhookParams struct {
 	RepoId string
 	ID     string
+}
+
+// RegisterOrgCIBuildkiteClusterParams is parameters of registerOrgCIBuildkiteCluster operation.
+type RegisterOrgCIBuildkiteClusterParams struct {
+	OrgId string
 }
 
 // RemoveOrgMemberParams is parameters of removeOrgMember operation.
@@ -366,7 +491,23 @@ type RevokeServiceAccountAccessParams struct {
 	ResourceId   string
 }
 
+// RotateOrgCIBuildkiteInboundSecretParams is parameters of rotateOrgCIBuildkiteInboundSecret operation.
+type RotateOrgCIBuildkiteInboundSecretParams struct {
+	OrgId string
+	BkOrg string
+}
+
+// SetBranchProtectionParams is parameters of setBranchProtection operation.
+type SetBranchProtectionParams struct {
+	RepoId string
+}
+
 // SetRepoVisibilityParams is parameters of setRepoVisibility operation.
 type SetRepoVisibilityParams struct {
+	RepoId string
+}
+
+// UpdateBranchProtectionParams is parameters of updateBranchProtection operation.
+type UpdateBranchProtectionParams struct {
 	RepoId string
 }

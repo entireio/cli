@@ -16,8 +16,6 @@ import (
 // CheckpointID identifies a checkpoint. It comes in two formats: a legacy
 // 12-character lowercase hex ID and a 26-character Crockford base32 ULID (see
 // Kind / CheckpointPattern). It links code commits to their checkpoint metadata.
-//
-//nolint:recvcheck // UnmarshalJSON requires pointer receiver, others use value receiver - standard pattern
 type CheckpointID string
 
 // EmptyCheckpointID represents an unset or invalid checkpoint ID.
