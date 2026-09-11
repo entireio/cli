@@ -922,3 +922,29 @@ func TestFilterToUncommittedFiles_ReallyModified(t *testing.T) {
 		t.Errorf("filterToUncommittedFiles() = %v, want [file.txt]", result)
 	}
 }
+
+// TestFilterToUncommittedFiles_AutocrlfNormalizedWorkingTree pins that the
+// filter agrees with git about what is committed: under core.autocrlf=true the
+// committed blob is LF-normalized while the working tree keeps CRLF, and git
+// reports the file clean.
+func TestFilterToUncommittedFiles_AutocrlfNormalizedWorkingTree(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Chdir(tmpDir)
+
+	testutil.InitRepo(t, tmpDir) // enables core.autocrlf
+
+	const content = "# Blue\r\n\r\nBlue is a colour.\r\n"
+	testutil.WriteFile(t, tmpDir, "blue.md", content)
+	testutil.RunGit(t, tmpDir, "add", "--", "blue.md")
+	testutil.RunGit(t, tmpDir, "commit", "-m", "Add blue")
+
+	require.NotContains(t, testutil.RunGit(t, tmpDir, "cat-file", "-p", "HEAD:blue.md"), "\r",
+		"native git add must normalize the committed blob to LF")
+	disk, err := os.ReadFile(filepath.Join(tmpDir, "blue.md"))
+	require.NoError(t, err)
+	require.Equal(t, content, string(disk), "the working tree must retain CRLF bytes")
+	testutil.RunGit(t, tmpDir, "diff", "--exit-code", "--", "blue.md")
+
+	result := filterToUncommittedFiles(context.Background(), []string{"blue.md"}, tmpDir)
+	require.Empty(t, result, "autocrlf-only working tree differences are not uncommitted changes")
+}

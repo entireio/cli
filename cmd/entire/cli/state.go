@@ -23,6 +23,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/validation"
 
 	"github.com/go-git/go-git/v6"
+	"github.com/go-git/go-git/v6/plumbing/object"
 )
 
 // PrePromptState stores the state captured before a user prompt
@@ -326,9 +327,12 @@ func detectFileChanges(ctx context.Context, previouslyUntracked []string, status
 
 // filterToUncommittedFiles removes files from the list that are already committed to HEAD
 // with matching content. This prevents re-adding files that an agent committed mid-turn
-// (already condensed by PostCommit) back to FilesTouched via SaveStep. Files not in
-// HEAD or with different content in the working tree are kept. Fails open: if any git
-// operation errors, returns the original list unchanged.
+// (already condensed by PostCommit) back to FilesTouched via SaveStep, which would mint a
+// shadow branch nothing condenses again. "Matching" is Git's verdict on content, clean
+// filters applied (strategy.WorktreeMatchesCommitted): a CRLF working copy of an LF blob
+// under core.autocrlf is committed; the executable bit is not compared. Files not in HEAD
+// or with different content in the working tree are kept. Fails open: if any git operation
+// errors, returns the original list unchanged.
 func filterToUncommittedFiles(ctx context.Context, files []string, repoRoot string) []string {
 	if len(files) == 0 {
 		return files
@@ -357,39 +361,26 @@ func filterToUncommittedFiles(ctx context.Context, files []string, repoRoot stri
 
 	logCtx := logging.WithComponent(ctx, "filter-uncommitted")
 
-	var result []string
+	// relPath comes from git, so it is already the coordinate both the tree
+	// lookup and the working-tree hash read in.
+	committed := make(map[string]*object.File, len(files))
 	for _, relPath := range files {
-		headFile, err := headTree.File(relPath)
-		if err != nil {
-			// File not in HEAD — it's uncommitted
+		headFile, fileErr := headTree.File(relPath)
+		if fileErr != nil {
 			logging.Debug(logCtx, "file not in HEAD tree, keeping",
 				slog.String("file", relPath),
-				slog.String("error", err.Error()))
-			result = append(result, relPath)
+				slog.String("error", fileErr.Error()))
 			continue
 		}
+		committed[relPath] = headFile
+	}
+	matches := strategy.WorktreeMatchesCommitted(logCtx, repoRoot, committed)
 
-		// File is in HEAD — compare content with working tree, through the
-		// worktree's shared root. relPath comes from git, so it is already the
-		// coordinate the root reads in.
-		workingContent, ok := readWorktreeFileSafely(repoRoot, relPath)
-		if !ok {
-			// Can't read working tree file (deleted?) — keep it
-			result = append(result, relPath)
-			continue
-		}
-
-		headContent, err := headFile.Contents()
-		if err != nil {
-			result = append(result, relPath)
-			continue
-		}
-
-		if string(workingContent) != headContent {
-			// Working tree differs from HEAD — uncommitted changes
+	var result []string
+	for _, relPath := range files {
+		if !matches[relPath] {
 			result = append(result, relPath)
 		}
-		// else: content matches HEAD — already committed, skip
 	}
 
 	return result

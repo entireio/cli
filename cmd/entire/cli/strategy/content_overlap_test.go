@@ -5,6 +5,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -1452,4 +1453,73 @@ func TestTrimLine(t *testing.T) {
 			}
 		})
 	}
+}
+
+// headFileForTest returns the HEAD tree entry for path.
+func headFileForTest(t *testing.T, repo *git.Repository, path string) *object.File {
+	t.Helper()
+	head, err := repo.Head()
+	require.NoError(t, err)
+	commit, err := repo.CommitObject(head.Hash())
+	require.NoError(t, err)
+	file, err := commit.File(path)
+	require.NoError(t, err)
+	return file
+}
+
+// TestWorktreeMatchesCommitted_LegacyCRLFBlob pins git-status parity for a
+// blob that already carries CRLF: git exempts such a path from autocrlf
+// conversion, so the CRLF working copy is clean even though hash-object, which
+// converts unconditionally, hashes it to something else.
+func TestWorktreeMatchesCommitted_LegacyCRLFBlob(t *testing.T) {
+	t.Parallel()
+	dir := setupGitRepo(t) // InitRepo enables core.autocrlf
+
+	const content = "a\r\nb\r\n"
+	testutil.WriteFile(t, dir, "legacy.txt", content)
+	testutil.RunGit(t, dir, "-c", "core.autocrlf=false", "add", "--", "legacy.txt")
+	testutil.RunGit(t, dir, "commit", "-m", "Commit CRLF bytes")
+	require.Contains(t, testutil.RunGit(t, dir, "cat-file", "-p", "HEAD:legacy.txt"), "\r",
+		"the committed blob must keep CRLF")
+	testutil.RunGit(t, dir, "diff", "--exit-code", "--", "legacy.txt")
+
+	repo, err := gitrepo.OpenPath(dir)
+	require.NoError(t, err)
+	defer repo.Close()
+	files := map[string]*object.File{"legacy.txt": headFileForTest(t, repo, "legacy.txt")}
+
+	assert.True(t, WorktreeMatchesCommitted(t.Context(), dir, files)["legacy.txt"],
+		"a CRLF working copy of a CRLF blob is clean")
+
+	testutil.WriteFile(t, dir, "legacy.txt", "a\r\nchanged\r\n")
+	assert.False(t, WorktreeMatchesCommitted(t.Context(), dir, files)["legacy.txt"],
+		"changed content is not committed")
+}
+
+// TestWorktreeMatchesCommitted_SymlinkBlobCheckedOutAsFile pins the
+// core.symlinks=false layout: git checks a mode-120000 entry out as a regular
+// file holding the link text and keeps the mode on add, so the file is clean
+// when its bytes are the blob's.
+func TestWorktreeMatchesCommitted_SymlinkBlobCheckedOutAsFile(t *testing.T) {
+	t.Parallel()
+	dir := setupGitRepo(t)
+
+	testutil.WriteFile(t, dir, "link-text", "target.txt")
+	blob := strings.TrimSpace(testutil.RunGit(t, dir, "hash-object", "-w", "--", "link-text"))
+	testutil.RunGit(t, dir, "update-index", "--add", "--cacheinfo", "120000,"+blob+",link.txt")
+	testutil.RunGit(t, dir, "commit", "-m", "Commit a symlink entry")
+	testutil.WriteFile(t, dir, "link.txt", "target.txt")
+
+	repo, err := gitrepo.OpenPath(dir)
+	require.NoError(t, err)
+	defer repo.Close()
+	files := map[string]*object.File{"link.txt": headFileForTest(t, repo, "link.txt")}
+	require.Equal(t, filemode.Symlink, files["link.txt"].Mode)
+
+	assert.True(t, WorktreeMatchesCommitted(t.Context(), dir, files)["link.txt"],
+		"a regular file holding the link text is the blob's content")
+
+	testutil.WriteFile(t, dir, "link.txt", "elsewhere.txt")
+	assert.False(t, WorktreeMatchesCommitted(t.Context(), dir, files)["link.txt"],
+		"a different link text is not committed")
 }
