@@ -5,6 +5,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -1450,6 +1451,118 @@ func TestTrimLine(t *testing.T) {
 			if got != tt.want {
 				t.Errorf("trimLine(%q) = %q, want %q", tt.line, got, tt.want)
 			}
+		})
+	}
+}
+
+// headFileForTest returns the HEAD tree entry for path.
+func headFileForTest(t *testing.T, repo *git.Repository, path string) *object.File {
+	t.Helper()
+	head, err := repo.Head()
+	require.NoError(t, err)
+	commit, err := repo.CommitObject(head.Hash())
+	require.NoError(t, err)
+	file, err := commit.File(path)
+	require.NoError(t, err)
+	return file
+}
+
+// TestWorktreeMatchesCommitted_LegacyCRLFBlob pins git-status parity for a
+// blob that already carries CRLF: git exempts such a path from autocrlf
+// conversion, so the CRLF working copy is clean even though hash-object, which
+// converts unconditionally, hashes it to something else.
+func TestWorktreeMatchesCommitted_LegacyCRLFBlob(t *testing.T) {
+	t.Parallel()
+	dir := setupGitRepo(t) // InitRepo enables core.autocrlf
+
+	const content = "a\r\nb\r\n"
+	testutil.WriteFile(t, dir, "legacy.txt", content)
+	testutil.RunGit(t, dir, "-c", "core.autocrlf=false", "add", "--", "legacy.txt")
+	testutil.RunGit(t, dir, "commit", "-m", "Commit CRLF bytes")
+	require.Contains(t, testutil.RunGit(t, dir, "cat-file", "-p", "HEAD:legacy.txt"), "\r",
+		"the committed blob must keep CRLF")
+	testutil.RunGit(t, dir, "diff", "--exit-code", "--", "legacy.txt")
+
+	repo, err := gitrepo.OpenPath(dir)
+	require.NoError(t, err)
+	defer repo.Close()
+	files := map[string]*object.File{"legacy.txt": headFileForTest(t, repo, "legacy.txt")}
+
+	assert.True(t, WorktreeMatchesCommitted(t.Context(), dir, files)["legacy.txt"],
+		"a CRLF working copy of a CRLF blob is clean")
+
+	// The user's index can advance while this caller still compares the older
+	// commit. Copying its content or refreshing its stat cache would be wrong.
+	testutil.WriteFile(t, dir, "legacy.txt", "next staged content\n")
+	testutil.RunGit(t, dir, "add", "--", "legacy.txt")
+	testutil.WriteFile(t, dir, "legacy.txt", content)
+	indexBefore := testutil.RunGit(t, dir, "ls-files", "--stage", "--debug")
+	assert.True(t, WorktreeMatchesCommitted(t.Context(), dir, files)["legacy.txt"],
+		"legacy comparison must use the supplied commit, not the advanced index")
+	assert.Equal(t, indexBefore, testutil.RunGit(t, dir, "ls-files", "--stage", "--debug"))
+
+	testutil.WriteFile(t, dir, "legacy.txt", "a\r\nchanged\r\n")
+	assert.False(t, WorktreeMatchesCommitted(t.Context(), dir, files)["legacy.txt"],
+		"changed content is not committed")
+}
+
+// TestWorktreeMatchesCommitted_SymlinkBlobCheckedOutAsFile pins the
+// core.symlinks=false layout: git checks a mode-120000 entry out as a regular
+// file holding the link text and keeps the mode on add, so the file is clean
+// when its bytes are the blob's.
+func TestWorktreeMatchesCommitted_SymlinkBlobCheckedOutAsFile(t *testing.T) {
+	t.Parallel()
+	dir := setupGitRepo(t)
+
+	testutil.WriteFile(t, dir, "link-text", "target.txt")
+	blob := strings.TrimSpace(testutil.RunGit(t, dir, "hash-object", "-w", "--", "link-text"))
+	testutil.RunGit(t, dir, "update-index", "--add", "--cacheinfo", "120000,"+blob+",link.txt")
+	testutil.RunGit(t, dir, "commit", "-m", "Commit a symlink entry")
+	testutil.WriteFile(t, dir, "link.txt", "target.txt")
+
+	repo, err := gitrepo.OpenPath(dir)
+	require.NoError(t, err)
+	defer repo.Close()
+	files := map[string]*object.File{"link.txt": headFileForTest(t, repo, "link.txt")}
+	require.Equal(t, filemode.Symlink, files["link.txt"].Mode)
+
+	assert.True(t, WorktreeMatchesCommitted(t.Context(), dir, files)["link.txt"],
+		"a regular file holding the link text is the blob's content")
+
+	testutil.WriteFile(t, dir, "link.txt", "elsewhere.txt")
+	assert.False(t, WorktreeMatchesCommitted(t.Context(), dir, files)["link.txt"],
+		"a different link text is not committed")
+}
+
+func TestWorktreeMatchesCommitted_ExplicitTextAttributes(t *testing.T) {
+	t.Parallel()
+	for _, indexOnly := range []bool{false, true} {
+		name := "working-tree-attributes"
+		if indexOnly {
+			name = "index-only-attributes"
+		}
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			dir := setupGitRepo(t)
+			const path = "legacy.txt"
+			testutil.WriteFile(t, dir, path, "a\r\nb\r\n")
+			testutil.RunGit(t, dir, "-c", "core.autocrlf=false", "add", "--", path)
+			testutil.RunGit(t, dir, "commit", "-m", "Commit CRLF bytes")
+			testutil.WriteFile(t, dir, ".gitattributes", path+" text eol=lf\n")
+			testutil.RunGit(t, dir, "add", "--", ".gitattributes")
+			if indexOnly {
+				require.NoError(t, os.Remove(filepath.Join(dir, ".gitattributes")))
+			}
+			require.Contains(t, testutil.RunGit(t, dir, "diff", "--name-only", "--", path), path)
+			indexBefore := testutil.RunGit(t, dir, "ls-files", "--stage", "--debug")
+			repo, err := gitrepo.OpenPath(dir)
+			require.NoError(t, err)
+			defer repo.Close()
+			files := map[string]*object.File{path: headFileForTest(t, repo, path)}
+			assert.False(t, WorktreeMatchesCommitted(t.Context(), dir, files)[path],
+				"explicit text attributes require normalization even when raw bytes match HEAD")
+			assert.Equal(t, indexBefore, testutil.RunGit(t, dir, "ls-files", "--stage", "--debug"),
+				"comparison must not refresh or replace the real index")
 		})
 	}
 }
