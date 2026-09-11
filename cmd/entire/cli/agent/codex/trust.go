@@ -3,11 +3,14 @@ package codex
 import (
 	"context"
 	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
+
+	"github.com/entireio/cli/cmd/entire/cli/logging"
 )
 
 // HookTrustGaps returns the snake_case event labels declared in the hooks.json
@@ -93,6 +96,8 @@ func inspectHookTrustForDeclared(hooksJSONPath string, declared []string) HookTr
 func codexConfigPath() string {
 	codexHome, err := resolveCodexHome()
 	if err != nil {
+		logging.Debug(context.Background(), "codex home unresolved; hook trust is unknown",
+			slog.String("error", err.Error()))
 		return ""
 	}
 	return filepath.Join(codexHome, "config.toml")

@@ -4,12 +4,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
+	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 )
 
@@ -251,6 +253,11 @@ func isUserHookRoot(hookRoot string) bool {
 	}
 	codexHome, err := resolveCodexHome()
 	if err != nil {
+		// Fail open as for an unresolvable home, but say so: a refused
+		// CODEX_HOME otherwise looks like a project hook root and the only
+		// symptom is hook discovery quietly picking the wrong file.
+		logging.Debug(context.Background(), "codex home unresolved; treating hook root as project-level",
+			slog.String("error", err.Error()))
 		return false
 	}
 	canonicalCodexHome, err := canonicalPath(codexHome)
