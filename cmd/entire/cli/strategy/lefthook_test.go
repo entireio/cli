@@ -23,8 +23,17 @@ func newLefthookRepo(t *testing.T, mainConfig string) string {
 	}
 	require.NoError(t, os.WriteFile(filepath.Join(dir, mainConfig), []byte("pre-commit: {}\n"), 0o644))
 	t.Chdir(dir)
+	// Both caches are process-global and keyed by the directory this test just
+	// left, so a stale entry would point the hooks-dir and common-dir lookups
+	// at another test's repository.
 	paths.ClearWorktreeRootCache()
-	t.Cleanup(paths.ClearWorktreeRootCache)
+	ClearHooksDirCache()
+	clearGitCommonDirCache()
+	t.Cleanup(func() {
+		paths.ClearWorktreeRootCache()
+		ClearHooksDirCache()
+		clearGitCommonDirCache()
+	})
 	return dir
 }
 
