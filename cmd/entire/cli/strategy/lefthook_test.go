@@ -9,6 +9,7 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
+	"github.com/entireio/cli/cmd/entire/cli/worktreedir"
 	"github.com/stretchr/testify/require"
 )
 
@@ -228,7 +229,7 @@ func TestEnsureLefthookIntegration_ReconcilesHookFiles(t *testing.T) {
 	hooksDir := filepath.Join(dir, ".git", "hooks")
 	require.NoError(t, os.MkdirAll(hooksDir, 0o755))
 
-	launcher := []byte("#!/bin/sh\ncall_lefthook run \"pre-push\" \"$@\"\n")
+	launcher := lefthookLauncher("pre-push")
 	entireHook := []byte("#!/bin/sh\n# " + entireHookMarker + "\nentire hooks git pre-push \"$1\"\n")
 	write := func(name string, body []byte) {
 		require.NoError(t, os.WriteFile(filepath.Join(hooksDir, name), body, 0o755))
@@ -277,21 +278,51 @@ func TestEnsureLefthookIntegration_ReconcilesHookFiles(t *testing.T) {
 		"a hook Lefthook has not taken over is still Entire's to install")
 }
 
-// Delivery is judged on the integration in a Lefthook repo, because Lefthook
-// owns .git/hooks/* and rewrites them constantly.
+// Delivery in a Lefthook repo is judged on the integration rather than on the
+// contents of .git/hooks/*, which Lefthook owns and rewrites — but it still
+// takes a hook FILE to exist, because that is what git runs. Lefthook creates
+// one per hook it knew about at its last install, so a repo whose lefthook.yml
+// declares only pre-commit has none for the rest, and every artifact Entire
+// owns can be present and correct while nothing dispatches Entire at all.
 func TestCheckHookDelivery_Lefthook(t *testing.T) {
-	newLefthookRepo(t, "")
+	dir := newLefthookRepo(t, "")
 	got := CheckHookDelivery(t.Context(), false)
 	require.False(t, got.OK, "not registered yet")
-	require.Equal(t, "Lefthook", got.Manager)
+	require.Equal(t, LefthookManagerName, got.Manager)
 	require.NotEmpty(t, got.Reason)
 
 	_, err := EnsureLefthookIntegration(t.Context(), false)
 	require.NoError(t, err)
+
+	// Registered, but no hook file exists for any hook yet.
 	got = CheckHookDelivery(t.Context(), false)
-	require.True(t, got.OK)
-	require.Equal(t, "Lefthook", got.Manager)
+	require.False(t, got.OK, "a registration nothing triggers is not delivery")
+	require.Equal(t, LefthookManagerName, got.Manager)
+	for _, hook := range gitHookNames {
+		require.Contains(t, got.Reason, hook)
+	}
+
+	// Lefthook owns one hook; Entire's own hooks cover the rest. Both reach
+	// Entire, so both count.
+	hooksDir := filepath.Join(dir, ".git", "hooks")
+	require.NoError(t, os.MkdirAll(hooksDir, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(hooksDir, "pre-commit"), lefthookLauncher("pre-commit"), 0o755))
+	ClearHooksDirCache()
+	_, err = ReinstallGitHooks(t.Context())
+	require.NoError(t, err)
+	ClearHooksDirCache()
+
+	got = CheckHookDelivery(t.Context(), false)
+	require.True(t, got.OK, "reason: %s", got.Reason)
+	require.Equal(t, LefthookManagerName, got.Manager)
 	require.Empty(t, got.Reason)
+
+	// A hook file that belongs to neither is not delivery either.
+	require.NoError(t, os.WriteFile(filepath.Join(hooksDir, "pre-push"),
+		[]byte("#!/bin/sh\necho someone else\n"), 0o755))
+	got = CheckHookDelivery(t.Context(), false)
+	require.False(t, got.OK)
+	require.Contains(t, got.Reason, "pre-push")
 }
 
 // In a repo with no hook manager, delivery is the native hook state.
@@ -428,8 +459,7 @@ func TestInstallGitHook_ReportsLefthookDeliveryInsteadOfAFalseInstall(t *testing
 	hooksDir := filepath.Join(dir, ".git", "hooks")
 	require.NoError(t, os.MkdirAll(hooksDir, 0o755))
 	for _, hook := range gitHookNames {
-		require.NoError(t, os.WriteFile(filepath.Join(hooksDir, hook),
-			[]byte("#!/bin/sh\ncall_lefthook run \""+hook+"\" \"$@\"\n"), 0o755))
+		require.NoError(t, os.WriteFile(filepath.Join(hooksDir, hook), lefthookLauncher(hook), 0o755))
 	}
 	ClearHooksDirCache()
 
@@ -479,4 +509,48 @@ func TestCheckHookDelivery_DeclinedLefthookConfigFallsBackToNativeHooks(t *testi
 	require.True(t, got.OK, "Entire's own hooks deliver here")
 	require.Empty(t, got.Manager)
 	require.Equal(t, "lefthook-local.toml", got.Declined, "and the reason why is still reported")
+}
+
+// lefthookLauncher is shaped like the hook Lefthook 2.1.10 generates: a
+// call_lefthook shell function, then a dispatch of this hook through it.
+func lefthookLauncher(hook string) []byte {
+	return []byte("#!/bin/sh\n" +
+		"if [ \"$LEFTHOOK\" = \"0\" ]; then\n  exit 0\nfi\n" +
+		"call_lefthook()\n{\n  lefthook \"$@\"\n}\n\n" +
+		"call_lefthook run \"" + hook + "\" \"$@\"\n")
+}
+
+// Misreading a hook as Lefthook's is silent and permanent — reconcileHookFiles
+// restores it over Entire's and installSkipsHook then skips it forever — so
+// recognition is structural, not a search for the word "lefthook".
+func TestIsLefthookLauncher(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	root, err := worktreedir.OpenAt(dir)
+	require.NoError(t, err)
+
+	for _, tc := range []struct {
+		name string
+		body []byte
+		want bool
+	}{
+		{"lefthook's own launcher", lefthookLauncher("pre-push"), true},
+		{"a launcher for another hook", lefthookLauncher("pre-commit"), false},
+		{"a hand-written hook that runs lefthook",
+			[]byte("#!/bin/sh\n# call_lefthook when staged\nexec lefthook run pre-push \"$@\"\n"), false},
+		{"a hook that only names the function",
+			[]byte("#!/bin/sh\ncall_lefthook run \"pre-push\" \"$@\"\n"), false},
+		{"Entire's own hook", []byte("#!/bin/sh\n# " + entireHookMarker + "\nentire hooks git pre-push\n"), false},
+		{"absent", nil, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			name := "hook-" + strings.ReplaceAll(tc.name, " ", "-")
+			if tc.body != nil {
+				require.NoError(t, os.WriteFile(filepath.Join(dir, name), tc.body, 0o755))
+			}
+			require.Equal(t, tc.want, isLefthookLauncher(root, name, "pre-push"))
+		})
+	}
 }

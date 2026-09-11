@@ -642,9 +642,26 @@ func encodeYAML(doc *yaml.Node) ([]byte, error) {
 	return []byte(out.String()), nil
 }
 
-// lefthookLauncherMarker appears in every hook file Lefthook generates. It is
-// how Entire recognises a hook path Lefthook has taken over.
-const lefthookLauncherMarker = "call_lefthook"
+// isLefthookLauncher reports whether a file is the hook Lefthook generates for
+// this hook name.
+//
+// The test is deliberately structural rather than a search for the word
+// "lefthook", because a false positive here is silent and permanent: a hook
+// misread as Lefthook's gets restored over Entire's by reconcileHookFiles and
+// then skipped forever by installSkipsHook, so capture stops for that hook and
+// nothing ever repairs it. Lefthook's template defines a call_lefthook shell
+// function and ends by dispatching THIS hook through it; a hand-written script
+// that merely runs lefthook does neither, and a launcher for a different hook
+// fails the second test.
+func isLefthookLauncher(root *os.Root, name, hook string) bool {
+	data, err := osroot.ReadFileNoFollow(root, name)
+	if err != nil {
+		return false
+	}
+	body := string(data)
+	return strings.Contains(body, "call_lefthook()") &&
+		strings.Contains(body, `call_lefthook run "`+hook+`"`)
+}
 
 // reconcileHookFiles hands .git/hooks/* back to Lefthook and clears the
 // wreckage of the era when the two fought over those files.
@@ -676,7 +693,7 @@ func reconcileHookFiles(ctx context.Context) error {
 	}
 	for _, hook := range gitHookNames {
 		backup := hook + GitHookBackupSuffix
-		if fileContains(root, backup, lefthookLauncherMarker) && fileContains(root, hook, entireHookMarker) {
+		if isLefthookLauncher(root, backup, hook) && fileContains(root, hook, entireHookMarker) {
 			if err := root.Rename(backup, hook); err != nil && !os.IsNotExist(err) {
 				return fmt.Errorf("restore %s: %w", hook, err)
 			}
@@ -708,7 +725,39 @@ func fileContains(root *os.Root, name, marker string) bool {
 // nobody has run `lefthook install` yet, Entire's own hooks are the only
 // delivery there is.
 func installSkipsHook(root *os.Root, hook string, lefthookDelivers bool) bool {
-	return lefthookDelivers && fileContains(root, hook, lefthookLauncherMarker)
+	return lefthookDelivers && isLefthookLauncher(root, hook, hook)
+}
+
+// uncoveredHookPaths names the hooks nothing would run Entire for.
+//
+// Registering with Lefthook is not enough on its own: git runs a hook only if
+// the FILE exists, and Lefthook creates one per hook it knew about when it last
+// installed. Entire's config reaches Lefthook through `extends` at run time, so
+// a repo whose lefthook.yml declares only pre-commit has no file for the other
+// four and nothing dispatches Entire there — while every artifact Entire owns
+// is present and correct. Reporting that as delivering is the same false OK
+// this integration exists to remove, so the check asks the question git asks:
+// is there a file here, and does it lead to Entire?
+func uncoveredHookPaths(ctx context.Context) []string {
+	hooksDir, err := GetHooksDir(ctx)
+	if err != nil {
+		return gitHookNames
+	}
+	root, err := hooksRootForRemoval(hooksDir)
+	if err != nil {
+		return gitHookNames
+	}
+	var uncovered []string
+	for _, hook := range gitHookNames {
+		// Lefthook's launcher reaches Entire through the integration; Entire's
+		// own hook reaches it directly. Anything else — absent, a symlink, or
+		// another tool's script — does not.
+		if isLefthookLauncher(root, hook, hook) || fileContains(root, hook, entireHookMarker) {
+			continue
+		}
+		uncovered = append(uncovered, hook)
+	}
+	return uncovered
 }
 
 // lefthookDeliversHooks reports whether Lefthook will run Entire from its own
@@ -758,6 +807,11 @@ func CheckHookDelivery(ctx context.Context, absolutePath bool) HookDelivery {
 			return HookDelivery{Manager: LefthookManagerName,
 				Reason: fmt.Sprintf("Could not inspect Entire's Lefthook integration: %v", checkErr)}
 		case current:
+			if uncovered := uncoveredHookPaths(ctx); len(uncovered) > 0 {
+				return HookDelivery{Manager: LefthookManagerName,
+					Reason: fmt.Sprintf("Lefthook has no hook file for %s, so nothing runs Entire there.",
+						strings.Join(uncovered, ", "))}
+			}
 			return HookDelivery{OK: true, Manager: LefthookManagerName}
 		}
 		// A declined integration is permanent, not a repair pending: Entire's

@@ -3213,6 +3213,13 @@ func TestRunStatus_HookDeliveryLine(t *testing.T) {
 	if _, err := strategy.EnsureLefthookIntegration(context.Background(), false); err != nil {
 		t.Fatalf("EnsureLefthookIntegration() error = %v", err)
 	}
+	// Registering is not delivery on its own: git runs a hook only if the file
+	// exists, and Lefthook creates one per hook it knew about at its last
+	// install. The native install fills the paths Lefthook has not taken.
+	if _, err := strategy.ReinstallGitHooks(context.Background()); err != nil {
+		t.Fatalf("ReinstallGitHooks() error = %v", err)
+	}
+	strategy.ClearHooksDirCache()
 
 	stdout.Reset()
 	if err := runStatus(context.Background(), &stdout, false, false); err != nil {
