@@ -1910,7 +1910,11 @@ func TestCheckAgentDirSymlinks_ScansBeneathAVouchedLink(t *testing.T) {
 	if err := os.Symlink(t.TempDir(), filepath.Join(dest, "skills")); err != nil {
 		t.Skipf("symlink not supported: %v", err)
 	}
-	agent.SetVouchedSymlinkedDirs(dir, []string{claudeDirName})
+	// git rev-parse --show-toplevel (what checkAgentDirSymlinks reads) resolves
+	// symlinks, so on macOS the vouch must be keyed on the resolved path.
+	vouchRoot, err := filepath.EvalSymlinks(dir)
+	require.NoError(t, err)
+	agent.SetVouchedSymlinkedDirs(vouchRoot, []string{claudeDirName})
 
 	cmd, stdout := newTestCmd(t)
 	checkAgentDirSymlinks(cmd)
@@ -1937,7 +1941,11 @@ func TestCheckAgentDirSymlinks_VouchedLinkWithCleanTargetReportsOnlyTheLink(t *t
 	if err := os.Symlink(dest, filepath.Join(dir, claudeDirName)); err != nil {
 		t.Skipf("symlink not supported: %v", err)
 	}
-	agent.SetVouchedSymlinkedDirs(dir, []string{claudeDirName})
+	// git rev-parse --show-toplevel (what checkAgentDirSymlinks reads) resolves
+	// symlinks, so on macOS the vouch must be keyed on the resolved path.
+	vouchRoot, err := filepath.EvalSymlinks(dir)
+	require.NoError(t, err)
+	agent.SetVouchedSymlinkedDirs(vouchRoot, []string{claudeDirName})
 
 	cmd, stdout := newTestCmd(t)
 	checkAgentDirSymlinks(cmd)

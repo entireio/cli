@@ -472,6 +472,11 @@ type TaskRecord struct {
 	// ResolveAgentTranscriptPath in that case.
 	DeclaredTranscriptPath string `json:"declared_transcript_path,omitempty"`
 
+	// TranscriptUnavailable is set when the agent stores child activity only in
+	// the parent transcript. It prevents generic layout fallback from attaching
+	// an unrelated file to this record during condensation.
+	TranscriptUnavailable bool `json:"transcript_unavailable,omitempty"`
+
 	// Files is the set of files touched by this subagent, merged into the
 	// session's FilesTouched at completion time. Populated when the record
 	// is completed; empty for a still in-flight record and for a completed

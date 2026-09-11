@@ -88,6 +88,25 @@ func SetupRepo(t *testing.T, agent agents.Agent) *RepoState {
 	Git(t, dir, "config", "core.autocrlf", "true")
 	Git(t, dir, "commit", "--allow-empty", "-m", "initial commit")
 
+	// Copilot prompt mode requires repository instructions. Commit the custom
+	// agent fixture before Entire starts capture so setup files cannot be
+	// attributed to the child under test.
+	if agent.Name() == "copilot-cli" {
+		agentsDir := filepath.Join(dir, ".github", "agents")
+		if err := os.MkdirAll(agentsDir, 0o755); err != nil {
+			t.Fatalf("create Copilot agent directory: %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, ".github", "copilot-instructions.md"), []byte("# E2E Test\n"), 0o644); err != nil {
+			t.Fatalf("write copilot-instructions.md: %v", err)
+		}
+		agentFile := "---\nname: entire-e2e-subagent\ndescription: Creates the single file delegated by the parent.\ntools: [\"*\"]\n---\nCreate only the requested file and do not delegate further.\n"
+		if err := os.WriteFile(filepath.Join(agentsDir, "entire-e2e-subagent.agent.md"), []byte(agentFile), 0o644); err != nil {
+			t.Fatalf("write Copilot custom agent: %v", err)
+		}
+		Git(t, dir, "add", ".github")
+		Git(t, dir, "commit", "-m", "Add Copilot E2E agent fixture")
+	}
+
 	// External agents need external_agents enabled in settings before enable,
 	// so the CLI can discover the agent binary via PATH during DiscoverAndRegister.
 	//
@@ -135,19 +154,6 @@ func SetupRepo(t *testing.T, agent agents.Agent) *RepoState {
 	// exercise the !CanPromptInteractively() fast path since they have no TTY
 	// regardless of this setting.
 	PatchSettings(t, dir, map[string]any{"log_level": "debug", "commit_linking": "always"})
-
-	// Copilot CLI blocks on a "No copilot instructions found" notice in fresh
-	// repos that lack .github/copilot-instructions.md, preventing the interactive
-	// prompt from appearing.
-	if agent.Name() == "copilot-cli" {
-		ghDir := filepath.Join(dir, ".github")
-		if err := os.MkdirAll(ghDir, 0o755); err != nil {
-			t.Fatalf("create .github dir: %v", err)
-		}
-		if err := os.WriteFile(filepath.Join(ghDir, "copilot-instructions.md"), []byte("# E2E Test\n"), 0o644); err != nil {
-			t.Fatalf("write copilot-instructions.md: %v", err)
-		}
-	}
 
 	// Agents that need files planted before their first run in a repo get them
 	// here — after `entire enable` has written the agent's own config, so a

@@ -22,6 +22,16 @@ func IsAccessibleMode() bool {
 	return os.Getenv("ACCESSIBLE") != ""
 }
 
+// SelectOptionIndent is the blank prefix huh reserves for a select's cursor,
+// so text put above the options (a column header in the field description)
+// lines up with the option text instead of with the cursor.
+//
+// It is the width of the SelectSelector string, "> ", which Theme inherits
+// from ThemeBase16 and recolors without changing. A caller that overrides the
+// selector string needs its own indent. TestSelectOptionIndentMatchesSelector
+// pins the two together.
+const SelectOptionIndent = "  "
+
 // Theme returns Entire's standard huh theme: base16 (ANSI 0–15) colors so
 // form prompts respect the user's terminal palette and stay consistent with
 // the rest of the CLI's styling. Derived from huh.ThemeBase16 with a few

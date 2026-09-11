@@ -3375,7 +3375,10 @@ func TestHandleLifecycleSubagentEnd_SubagentStop_MissingState_DoesNotResurrect(t
 	// already removed (ended + swept, or never existed).
 
 	ag := newMockAgent()
-	err := handleLifecycleSubagentEnd(ctx, ag, finalSubagentEvent(sessionID, "toolu_swept1", "agent-swept1"))
+	event := finalSubagentEvent(sessionID, "toolu_swept1", "agent-swept1")
+	event.CompletionWithoutLaunch = true
+	event.SubagentTranscriptUnavailable = true
+	err := handleLifecycleSubagentEnd(ctx, ag, event)
 	require.NoError(t, err)
 
 	state, loadErr := strategy.LoadSessionState(ctx, sessionID)
@@ -3386,6 +3389,53 @@ func TestHandleLifecycleSubagentEnd_SubagentStop_MissingState_DoesNotResurrect(t
 	if testutil.BranchExists(t, repoDir, shadowBranch) {
 		t.Error("a late subagent-stop for a missing session must not mint a shadow branch")
 	}
+}
+
+func TestHandleLifecycleSubagentEnd_CorrelatedCompletionCreatesDistinctRecord(t *testing.T) {
+	// NOT parallel: uses t.Chdir via setupSubagentEndTestRepo.
+	_, headHash := setupSubagentEndTestRepo(t)
+	ctx := context.Background()
+	const sessionID = "copilot-correlated-completion"
+	saveInFlightSession(ctx, t, sessionID, headHash)
+
+	event := finalSubagentEvent(sessionID, "toolu_copilot1", "24d8773a-06e8-435c-9257-8ccb89a54f33")
+	event.SubagentType = "general-purpose"
+	event.ModifiedFiles = []string{"child.txt"}
+	event.CompletionWithoutLaunch = true
+	event.SubagentTranscriptUnavailable = true
+
+	require.NoError(t, handleLifecycleSubagentEnd(ctx, newMockAgent(), event))
+	state, err := strategy.LoadSessionState(ctx, sessionID)
+	require.NoError(t, err)
+	require.NotNil(t, state)
+	rec := state.FindTaskRecord("toolu_copilot1")
+	require.NotNil(t, rec)
+	assert.False(t, rec.CompletedAt.IsZero())
+	assert.Equal(t, []string{"child.txt"}, rec.Files)
+	assert.Equal(t, "general-purpose", rec.SubagentType)
+	assert.True(t, rec.TranscriptUnavailable)
+
+	firstCompletedAt := rec.CompletedAt
+	require.NoError(t, handleLifecycleSubagentEnd(ctx, newMockAgent(), event))
+	state, err = strategy.LoadSessionState(ctx, sessionID)
+	require.NoError(t, err)
+	require.Len(t, state.TaskRecords, 1)
+	assert.Equal(t, firstCompletedAt, state.TaskRecords[0].CompletedAt)
+
+	endedAt := time.Now()
+	require.NoError(t, strategy.MutateSessionState(ctx, sessionID, func(s *strategy.SessionState) error {
+		// Persist the legacy/partially-written ended shape: EndedAt is set even
+		// though Phase has not transitioned yet.
+		s.EndedAt = &endedAt
+		return nil
+	}))
+	late := finalSubagentEvent(sessionID, "toolu_copilot_late", "late-child")
+	late.CompletionWithoutLaunch = true
+	late.SubagentTranscriptUnavailable = true
+	require.NoError(t, handleLifecycleSubagentEnd(ctx, newMockAgent(), late))
+	state, err = strategy.LoadSessionState(ctx, sessionID)
+	require.NoError(t, err)
+	assert.Nil(t, state.FindTaskRecord("toolu_copilot_late"))
 }
 
 // TestHandleLifecycleSubagentEnd_SubagentStop_PhaseEnded_TriggersEagerCondense

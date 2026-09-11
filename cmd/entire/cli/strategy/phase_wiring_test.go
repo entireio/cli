@@ -182,22 +182,11 @@ func setupGitRepo(t *testing.T) string {
 	dir := t.TempDir()
 
 	testutil.InitRepo(t, dir)
-	repo, err := git.PlainOpen(dir)
-	require.NoError(t, err)
 
-	// Create initial commit (required for HEAD to exist)
-	wt, err := repo.Worktree()
-	require.NoError(t, err)
-
-	// Create a test file
-	testFile := filepath.Join(dir, "test.txt")
-	require.NoError(t, writeTestFile(testFile, "initial content"))
-
-	_, err = wt.Add("test.txt")
-	require.NoError(t, err)
-
-	_, err = wt.Commit("initial commit", &git.CommitOptions{})
-	require.NoError(t, err)
+	// Create initial commit (required for HEAD to exist).
+	testutil.WriteFile(t, dir, "test.txt", "initial content")
+	testutil.GitAdd(t, dir, "test.txt")
+	testutil.GitCommit(t, dir, "initial commit")
 
 	return dir
 }
@@ -474,11 +463,6 @@ func TestCondenseAndMarkFullyCondensed_FilesWaitingForCommitDoesNotWaitForStateL
 
 	release()
 	released = true
-}
-
-// writeTestFile is a helper to create a test file with given content.
-func writeTestFile(path, content string) error {
-	return os.WriteFile(path, []byte(content), 0o644)
 }
 
 // TestCondenseAndMarkFullyCondensed_WithDataNoFiles verifies that a session with

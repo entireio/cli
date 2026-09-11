@@ -2,7 +2,7 @@
 
 ## Verdict: COMPATIBLE
 
-Copilot CLI has a complete hook system with 8 hook types, JSONL transcripts, and session management. All required lifecycle events map cleanly.
+Copilot CLI has a complete hook system with 9 hook types, JSONL transcripts, and session management. All required lifecycle events map cleanly.
 
 ## Static Checks
 
@@ -10,8 +10,8 @@ Copilot CLI has a complete hook system with 8 hook types, JSONL transcripts, and
 |-------|--------|-------|
 | Binary present | PASS | `/opt/homebrew/bin/copilot` |
 | Help available | PASS | Full `--help` with subcommands |
-| Version info | PASS | `0.0.420` |
-| Hook keywords | PASS | 8 hook types in `.github/hooks/*.json` |
+| Version info | PASS | Native subagent contract verified with `1.0.82` |
+| Hook keywords | PASS | 9 hook types in `.github/hooks/*.json` |
 | Session keywords | PASS | `--resume`, `--continue`, `--share` |
 | Config directory | PASS | `~/.copilot/` (user-level), `.github/hooks/` (repo-level) |
 | Documentation | PASS | docs.github.com/en/copilot/reference/hooks-configuration |
@@ -19,7 +19,7 @@ Copilot CLI has a complete hook system with 8 hook types, JSONL transcripts, and
 ## Binary
 
 - Name: `copilot`
-- Version: `0.0.420` (GA as of 2026-02-25)
+- Verified version: `1.0.82`
 - Install: `brew install copilot-cli` or `npm install -g @github/copilot`
 
 ## Hook Mechanism
@@ -55,7 +55,8 @@ Note: Uses `bash` key (not `command` like Claude Code/Gemini). Also supports `po
 | `sessionStart` | Agent session begins/resumes | `timestamp`, `cwd`, `sessionId`, `source`, `initialPrompt` | `SessionStart` |
 | `agentStop` | Agent finishes a turn | `timestamp`, `cwd`, `sessionId`, `transcriptPath`, `stopReason` | `TurnEnd` |
 | `sessionEnd` | Session completed/terminated | `timestamp`, `cwd`, `sessionId`, `reason` | `SessionEnd` |
-| `subagentStop` | Subagent finishes | `timestamp`, `cwd`, `sessionId`, *(TBD — needs capture)* | `SubagentEnd` |
+| `subagentStart` | Subagent starts | parent `sessionId`/`transcriptPath`, agent name | pass-through; payload has no child identity |
+| `subagentStop` | Subagent finishes | parent `sessionId`/`transcriptPath`, child `agentId`, `agentType`, `agentName` | correlated `SubagentEnd` |
 | `preToolUse` | Before tool execution | *(TBD — needs capture)* | *(pass-through)* |
 | `postToolUse` | After tool execution | *(TBD — needs capture)* | *(pass-through)* |
 | `errorOccurred` | Error during execution | *(TBD — needs capture)* | *(pass-through)* |
@@ -102,7 +103,9 @@ Each line has: `type`, `data`, `id` (UUID), `timestamp` (ISO 8601), `parentId`
 - `user.message` — User messages (`content`, `transformedContent`, `attachments`, `interactionId`)
 - `assistant.turn_start` — Start of assistant turn (`turnId`, `interactionId`)
 - `assistant.message` — Assistant response (`content`, `toolRequests[]`, `reasoningText`)
-- `tool.execution_complete` — Tool result (`toolCallId`, `toolTelemetry.properties.filePaths` (JSON-encoded string array), `linesAdded`, `linesRemoved`)
+- `tool.execution_complete` — Tool result (`toolCallId`, `parentToolCallId`, top-level `agentId`, and JSON-encoded `filePaths` under `toolTelemetry.properties` or `restrictedProperties`)
+- `subagent.started` — Stable join between top-level child `agentId` and the parent task `toolCallId`
+- `subagent.completed` — Completion totals, written after the synchronous `subagentStop` hook returns
 - `assistant.turn_end` — End of assistant turn (`turnId`)
 
 **Example entries:**
@@ -116,7 +119,7 @@ Each line has: `type`, `data`, `id` (UUID), `timestamp` (ISO 8601), `parentId`
 
 ### Tool Usage in Transcripts
 
-The `assistant.message` entries have a `toolRequests` array with tool call IDs. After each tool executes, a `tool.execution_complete` event is emitted with `toolTelemetry.properties.filePaths`, where `filePaths` is a string containing a JSON array of file paths modified by that tool call. The `TranscriptAnalyzer` implementation parses this `filePaths` property to extract modified files for checkpoint metadata.
+The `assistant.message` entries have a `toolRequests` array with tool call IDs. After each tool executes, a `tool.execution_complete` event is emitted with a JSON-encoded `filePaths` value. Current releases place sensitive telemetry under `restrictedProperties`; older fixtures use `properties`, so the parser supports both.
 
 **Token usage:** Extracted via `TokenCalculator` from `session.shutdown` events, which contain aggregate `modelMetrics` with per-model `inputTokens`, `outputTokens`, `cacheReadTokens`, `cacheWriteTokens`, and `requests.count`. Mid-session checkpoints use per-message `outputTokens` fallback from `assistant.message` events. **Timing constraint:** Copilot CLI writes `session.shutdown` AFTER all hooks (including `sessionEnd`) return — hooks are synchronous/blocking. This means in-hook token extraction can only use the per-message fallback. The authoritative aggregate is captured at condensation time (commit/push), when the framework re-reads the full transcript and `session.shutdown` is present. Condensation also backfills `state.TokenUsage` so the session JSON reflects the authoritative totals after the first commit.
 
@@ -200,29 +203,46 @@ for the implementation.
 
 ## Subagent Lifecycle
 
-Copilot CLI has **one-sided** subagent hooks: `subagentStop` fires but `subagentStart` does NOT
-(tested by registering the hook — Copilot CLI ignores it). The transcript does contain
-`subagent.started` / `subagent.completed` events with `toolCallId`, but these are not
-surfaced as hooks.
+Copilot CLI 1.0.82 emits both native hooks for custom agents and the built-in
+`general-purpose` agent. `subagentStart` names the parent session and agent type but
+does not expose a child ID or task call ID; two concurrent same-type starts can be
+identical, so Entire deliberately treats it as pass-through.
 
-The `preToolUse` / `postToolUse` hooks fire with `toolName: "task"` for subagent lifecycle,
-which could be used as an alternative mechanism for `SubagentStart`/`SubagentEnd` in the future.
+At true completion, `subagentStop` adds the child UUID as `agentId`. Before invoking
+that hook, Copilot has already written `subagent.started` to the parent
+`events.jsonl`; that event carries the same top-level child UUID and the stable parent
+task `toolCallId`. Entire reads the parent transcript through `SessionStore` and joins
+on the UUID. Child tool events carry the same UUID plus `parentToolCallId`, allowing
+two concurrent children to receive disjoint file lists even when they share a type.
+Copilot 1.0.63 omits the stop `agentId`; Entire falls back only when exactly one
+not-yet-completed start matches the stop's agent name, so ambiguous concurrent
+children still fail closed.
 
-Because there is no `SubagentStart` hook, the framework cannot capture pre-task state (untracked
-files snapshot). The `handleLifecycleSubagentEnd` dispatcher falls back to the session's
-pre-prompt state to avoid spurious task checkpoints from pre-existing untracked files
-(e.g., `.github/hooks/entire.json`).
+Current children also emit ordinary `userPromptSubmitted` and `agentStop` hooks
+with the child UUID as `sessionId`, while `agentStop.transcriptPath` still names
+the parent transcript. Entire uses that mismatch to retire any transient child
+session state without scanning the parent transcript as the child. The older
+`toolu_…` child-session shape remains ignored at hook parsing time.
+
+Copilot does not create standalone child transcript files. Task metadata therefore
+records transcript unavailability and never probes the generic Claude-style
+`agent-<id>.jsonl` layout. Per-child token breakdown is also unavailable at hook time:
+`session.shutdown.modelMetrics` is authoritative but is appended only after
+`sessionEnd` returns. Entire leaves child token usage unset rather than misclassifying
+Copilot's total-only completion value.
 
 ## Gaps & Limitations
 
 - No `Compaction` event — Copilot CLI doesn't appear to have a context compaction hook
-- No `SubagentStart` hook — only `subagentStop` fires; framework falls back to pre-prompt state
-- `subagentStop` payload fields beyond `timestamp`/`cwd`/`sessionId` not yet fully captured
-- `preToolUse` / `postToolUse` payloads not yet leveraged (could provide SubagentStart equivalent)
-- Tool request schema in transcripts needs verification with a real tool-using session
+- No standalone child transcript; Copilot interleaves child events into the parent JSONL
+- Exact per-child token breakdown becomes available only after the last synchronous hook
+- `subagentStart` cannot be correlated safely and is retained as an observed pass-through hook
 - `transcriptPath` only available in `agentStop` hook — `userPromptSubmitted` and `sessionStart` don't include it, so we compute it from `~/.copilot/session-state/<sessionId>/events.jsonl`
 
 ## Captured Payloads
 
-- Hook capture logs: `tmp/test-copilot/logs/copilot-hooks.jsonl`
-- Local transcript: `~/.copilot/session-state/4de47255-3d43-4938-b8fa-b6e49f1d0aca/events.jsonl`
+- Contract reverified on 2026-09-03 with Copilot CLI 1.0.82 using two
+  concurrent same-type custom agents (one writing, one read-only) and one
+  built-in `general-purpose` agent.
+- Tests retain only synthetic structural fixtures; prompts, responses, and
+  local capture paths are not committed.

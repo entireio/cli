@@ -1338,9 +1338,11 @@ func recordInFlightTaskLaunch(logCtx context.Context, event *agent.Event) error 
 // no-changes skip gate: a read-only subagent still produced a transcript worth
 // materializing). Completion happens LAST, inside completeSubagentTaskRecord's
 // exactly-once mutation (strategy.CompleteTaskRecord), so a failed capture —
-// analyzer error, worktree error — leaves the record live for the SessionEnd
-// sweep to retry, and two Final events racing for the same ToolUseID complete
-// it exactly once (the loser's extraction is discarded; nothing was written).
+// analyzer error, worktree error — leaves an existing record live for the
+// SessionEnd sweep to retry, and two Final events racing for the same ToolUseID
+// complete it exactly once (the loser's extraction is discarded; nothing was
+// written). CompletionWithoutLaunch events may create the record here, but
+// only while their parent session exists and is active.
 //
 // The state loaded at the top of the function is only good for the zombie
 // guard above (state missing entirely), the live-record skip check, and
@@ -1374,7 +1376,13 @@ func handleSubagentStopFinal(logCtx context.Context, ag agent.Agent, event *agen
 	}
 
 	marker := state.FindTaskRecord(event.ToolUseID)
-	if marker == nil || !marker.CompletedAt.IsZero() {
+	if event.CompletionWithoutLaunch && state.IsEnded() {
+		logging.Info(logCtx, "skipping completion-only subagent capture: parent session already ended",
+			slog.String("session_id", event.SessionID),
+			slog.String("tool_use_id", event.ToolUseID))
+		return nil
+	}
+	if (marker == nil && !event.CompletionWithoutLaunch) || (marker != nil && !marker.CompletedAt.IsZero()) {
 		// No live marker: this ToolUseID was already completed at launch-time
 		// post-task (foreground task), or another Final event for the same
 		// ToolUseID (a duplicate SubagentStop, or a race against the
@@ -1383,8 +1391,10 @@ func handleSubagentStopFinal(logCtx context.Context, ag agent.Agent, event *agen
 		// louder variant: those fields mean a real subagent completed, so an
 		// unclaimed skip is either the expected foreground dedup, a duplicate
 		// event, or a misintegrated agent that sets Final without ever
-		// emitting the launch-time marker — worth surfacing over Debug.
-		if event.SubagentID != "" || event.SubagentTranscriptPath != "" {
+		// emitting the launch-time marker — worth surfacing over Debug. A
+		// CompletionWithoutLaunch event is an explicit exception: it requires
+		// no launch marker, and duplicate completions are expected.
+		if !event.CompletionWithoutLaunch && (event.SubagentID != "" || event.SubagentTranscriptPath != "") {
 			logging.Warn(logCtx, "no in-flight marker for completed subagent — foreground dedup, a duplicate event, or a misintegrated agent setting Final without launch markers",
 				slog.String("session_id", event.SessionID),
 				slog.String("tool_use_id", event.ToolUseID),
@@ -1403,13 +1413,13 @@ func handleSubagentStopFinal(logCtx context.Context, ag agent.Agent, event *agen
 	// not as an all-or-nothing pair — so a marker that only captured one of
 	// them (e.g. a legacy marker written before a field existed) still
 	// contributes what it has instead of being discarded wholesale.
-	if marker.SubagentType != "" {
+	if marker != nil && marker.SubagentType != "" {
 		event.SubagentType = marker.SubagentType
 	}
-	if marker.TaskDescription != "" {
+	if marker != nil && marker.TaskDescription != "" {
 		event.TaskDescription = marker.TaskDescription
 	}
-	if event.SubagentID == "" && marker.AgentID != "" {
+	if marker != nil && event.SubagentID == "" && marker.AgentID != "" {
 		event.SubagentID = marker.AgentID
 	}
 
@@ -1419,7 +1429,11 @@ func handleSubagentStopFinal(logCtx context.Context, ag agent.Agent, event *agen
 	// are never marked in-flight), so the worktree-wide DetectFileChanges scan
 	// would risk sweeping in the parent's or another agent's later edits. See
 	// subagentCaptureOptions.analyzerFilesOnly.
-	captureErr := completeSubagentTaskRecord(logCtx, ag, event, subagentCaptureOptions{bypassNoChangesSkip: true, analyzerFilesOnly: true})
+	captureErr := completeSubagentTaskRecord(logCtx, ag, event, subagentCaptureOptions{
+		bypassNoChangesSkip: true,
+		analyzerFilesOnly:   true,
+		eventFilesOnly:      event.CompletionWithoutLaunch,
+	})
 	if captureErr != nil {
 		return captureErr
 	}
@@ -1489,6 +1503,10 @@ type subagentCaptureOptions struct {
 	// its original (correct, worktree-scan-based) behavior unchanged.
 	analyzerFilesOnly bool
 
+	// eventFilesOnly means the adapter already derived child-scoped files from
+	// a shared parent transcript. Do not resolve or scan a child transcript.
+	eventFilesOnly bool
+
 	// ensureSessionState, when true, creates missing session state before
 	// completing the record — SaveTaskStep's old create-if-missing guarantee.
 	// Set only for the foreground path; the Final path must never resurrect a
@@ -1496,18 +1514,67 @@ type subagentCaptureOptions struct {
 	ensureSessionState bool
 }
 
+// subagentTranscriptAndFiles selects the capture's trusted file source. Some
+// adapters provide exact child-scoped files because the child has no standalone
+// transcript; other agents retain the established transcript-analyzer path.
+func subagentTranscriptAndFiles(
+	logCtx context.Context,
+	ag agent.Agent,
+	event *agent.Event,
+	opts subagentCaptureOptions,
+) (string, []string, error) {
+	var transcriptPath string
+	if !opts.eventFilesOnly {
+		transcriptPath = declaredSubagentTranscript(logCtx, event)
+		if transcriptPath == "" {
+			transcriptPath = ResolveAgentTranscriptPath(filepath.Dir(event.SessionRef), event.SessionID, event.SubagentID)
+		}
+	}
+
+	modifiedFiles := append([]string(nil), event.ModifiedFiles...)
+	analyzer, ok := agent.AsTranscriptAnalyzer(ag)
+	switch {
+	case opts.eventFilesOnly, !ok:
+		return transcriptPath, modifiedFiles, nil
+	case opts.analyzerFilesOnly && transcriptPath == "":
+		// Scanning event.SessionRef here would attribute the parent transcript's
+		// entire file activity to one background task.
+		logging.Warn(logCtx, "subagent transcript unresolvable; final capture proceeding without file attribution",
+			slog.String("session_id", event.SessionID),
+			slog.String("tool_use_id", event.ToolUseID),
+			slog.String("agent_id", event.SubagentID))
+		return transcriptPath, modifiedFiles, nil
+	}
+
+	transcriptToScan := event.SessionRef
+	if transcriptPath != "" {
+		transcriptToScan = transcriptPath
+	}
+	files, _, err := analyzer.ExtractModifiedFilesFromOffset(transcriptToScan, 0)
+	if err != nil && opts.analyzerFilesOnly {
+		// With no worktree-diff backup, leave the live record for SessionEnd to
+		// retry rather than permanently completing it as read-only.
+		logging.Warn(logCtx, "failed to extract modified files from subagent; aborting final capture",
+			slog.String("session_id", event.SessionID),
+			slog.String("tool_use_id", event.ToolUseID),
+			slog.String("error", err.Error()))
+		return "", nil, fmt.Errorf("extract modified files from subagent transcript: %w", err)
+	}
+	if err != nil {
+		logging.Warn(logCtx, "failed to extract modified files from subagent", slog.String("error", err.Error()))
+		return transcriptPath, modifiedFiles, nil
+	}
+	return transcriptPath, mergeUnique(modifiedFiles, files), nil
+}
+
 // completeSubagentTaskRecord detects a completed subagent invocation's changes
 // and completes its durable task record (#2058): files, labels, tokens, and the
 // declared transcript path land on the record; condensation later materializes
 // the transcript into the checkpoint. No shadow task step is written.
 func completeSubagentTaskRecord(logCtx context.Context, ag agent.Agent, event *agent.Event, opts subagentCaptureOptions) error {
-	// Prefer what the agent declared (Claude Code's SubagentStop, Codex, and
-	// Cursor all carry agent_transcript_path); see Event.SubagentTranscriptPath.
-	// The layout probe is the fallback for launch-time PostToolUse events, which
-	// don't carry it.
-	subagentTranscriptPath := declaredSubagentTranscript(logCtx, event)
-	if subagentTranscriptPath == "" {
-		subagentTranscriptPath = ResolveAgentTranscriptPath(filepath.Dir(event.SessionRef), event.SessionID, event.SubagentID)
+	subagentTranscriptPath, modifiedFiles, err := subagentTranscriptAndFiles(logCtx, ag, event, opts)
+	if err != nil {
+		return err
 	}
 
 	// Log context
@@ -1523,54 +1590,6 @@ func completeSubagentTaskRecord(logCtx context.Context, ag agent.Agent, event *a
 		subagentEndAttrs = append(subagentEndAttrs, slog.String("subagent_transcript", subagentTranscriptPath))
 	}
 	logging.Info(logCtx, "subagent completed", subagentEndAttrs...)
-
-	// Extract modified files from hook payload and/or subagent transcript
-	var modifiedFiles []string
-	modifiedFiles = append(modifiedFiles, event.ModifiedFiles...)
-	switch analyzer, ok := agent.AsTranscriptAnalyzer(ag); {
-	case !ok:
-		// No analyzer: modifiedFiles stays event.ModifiedFiles only.
-	case opts.analyzerFilesOnly && subagentTranscriptPath == "":
-		// Background Final capture with no resolvable subagent transcript:
-		// falling back to scanning event.SessionRef (the PARENT transcript)
-		// from offset 0 would attribute the whole session's file activity to
-		// this one background task. Skip the analyzer scan entirely — the
-		// capture proceeds with only event.ModifiedFiles (typically empty,
-		// yielding a transcript-less, file-less record). The foreground
-		// path (analyzerFilesOnly unset) keeps the parent-scan fallback: there
-		// the worktree-diff merge below dominates the file lists anyway.
-		logging.Warn(logCtx, "subagent transcript unresolvable; final capture proceeding without file attribution",
-			slog.String("session_id", event.SessionID),
-			slog.String("tool_use_id", event.ToolUseID),
-			slog.String("agent_id", event.SubagentID))
-	default:
-		transcriptToScan := event.SessionRef
-		if subagentTranscriptPath != "" {
-			transcriptToScan = subagentTranscriptPath
-		}
-		files, _, fileErr := analyzer.ExtractModifiedFilesFromOffset(transcriptToScan, 0)
-		switch {
-		case fileErr != nil && opts.analyzerFilesOnly:
-			// The analyzer scan is this capture's ONLY file source (no
-			// worktree-diff backup in analyzer-only mode), so a transient
-			// read error here must fail the capture rather than complete a
-			// zero-file record that permanently misstates the task as
-			// read-only. Returning BEFORE completion leaves the record live,
-			// so the SessionEnd sweep retries it.
-			logging.Warn(logCtx, "failed to extract modified files from subagent; aborting final capture",
-				slog.String("session_id", event.SessionID),
-				slog.String("tool_use_id", event.ToolUseID),
-				slog.String("error", fileErr.Error()))
-			return fmt.Errorf("extract modified files from subagent transcript: %w", fileErr)
-		case fileErr != nil:
-			// Foreground path: the worktree-diff merge below is the backup
-			// file source, so the capture proceeds without the analyzer.
-			logging.Warn(logCtx, "failed to extract modified files from subagent",
-				slog.String("error", fileErr.Error()))
-		default:
-			modifiedFiles = mergeUnique(modifiedFiles, files)
-		}
-	}
 
 	// Load pre-task state and detect file changes.
 	// If no pre-task state exists (agent doesn't support pre-task hook), fall back
@@ -1671,6 +1690,7 @@ func completeSubagentTaskRecord(logCtx context.Context, ag agent.Agent, event *a
 		SubagentType:           event.SubagentType,
 		TaskDescription:        event.TaskDescription,
 		DeclaredTranscriptPath: subagentTranscriptPath,
+		TranscriptUnavailable:  event.SubagentTranscriptUnavailable,
 		Files:                  files,
 		TokenUsage:             event.TokenUsage,
 	}

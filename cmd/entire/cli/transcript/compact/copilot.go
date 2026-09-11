@@ -149,6 +149,10 @@ func copilotAssistantLine(base transcriptLine, line copilotLine) *transcriptLine
 		return nil
 	}
 
+	// Capacity hint only: the +1 is the optional text block. It cannot
+	// overflow — a []copilotToolRequest (56B elements) can never reach
+	// MaxInt entries, so CodeQL's go/allocation-size-overflow here is
+	// unreachable.
 	content := make([]map[string]json.RawMessage, 0, 1+len(data.ToolReqs))
 	if data.Content != "" {
 		tb, err := json.Marshal(transcript.ContentTypeText)

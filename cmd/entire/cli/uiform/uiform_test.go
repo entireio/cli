@@ -9,6 +9,26 @@ import (
 	"charm.land/lipgloss/v2"
 )
 
+// TestSelectOptionIndentMatchesSelector pins SelectOptionIndent to the width
+// of the theme's actual select cursor. A caller uses the indent to put a
+// column header above a select's options; if the selector string ever changes
+// width, the header silently stops lining up with the rows underneath it.
+func TestSelectOptionIndentMatchesSelector(t *testing.T) {
+	t.Parallel()
+
+	for _, isDark := range []bool{true, false} {
+		styles := Theme().Theme(isDark)
+		for name, selector := range map[string]lipgloss.Style{
+			"focused": styles.Focused.SelectSelector,
+			"blurred": styles.Blurred.SelectSelector,
+		} {
+			if got, want := lipgloss.Width(selector.String()), lipgloss.Width(SelectOptionIndent); got != want {
+				t.Errorf("isDark=%v %s selector width = %d, SelectOptionIndent width = %d", isDark, name, got, want)
+			}
+		}
+	}
+}
+
 // TestTheme_BlurredTitlesInheritTerminalForeground guards against the theme
 // pinning base16 foreground colors on blurred (inactive) fields. ThemeBase16
 // copies Focused into Blurred wholesale, so clearing only the Focused variants

@@ -345,11 +345,12 @@ func (s *ManualCommitStrategy) EnsureSessionExists(ctx context.Context, sessionI
 // create the record at completion time (foreground tasks, Droid Workers).
 func launchStubTaskRecord(rec session.TaskRecord) session.TaskRecord {
 	return session.TaskRecord{
-		ToolUseID:       rec.ToolUseID,
-		AgentID:         rec.AgentID,
-		StartedAt:       rec.StartedAt,
-		SubagentType:    rec.SubagentType,
-		TaskDescription: rec.TaskDescription,
+		ToolUseID:             rec.ToolUseID,
+		AgentID:               rec.AgentID,
+		StartedAt:             rec.StartedAt,
+		SubagentType:          rec.SubagentType,
+		TaskDescription:       rec.TaskDescription,
+		TranscriptUnavailable: rec.TranscriptUnavailable,
 	}
 }
 
@@ -371,6 +372,9 @@ func applyTaskRecordCompletion(state *SessionState, rec session.TaskRecord) erro
 	// is empty) must not erase an earlier turn's declared path.
 	if rec.DeclaredTranscriptPath != "" {
 		live.DeclaredTranscriptPath = rec.DeclaredTranscriptPath
+	}
+	if rec.TranscriptUnavailable {
+		live.TranscriptUnavailable = true
 	}
 	if rec.TokenUsage != nil {
 		live.TokenUsage = rec.TokenUsage

@@ -875,6 +875,7 @@ func TestState_TaskRecords_RoundTrip(t *testing.T) {
 				SubagentType:           "code-reviewer",
 				TaskDescription:        "Review the diff",
 				DeclaredTranscriptPath: "/tmp/agent-a123.jsonl",
+				TranscriptUnavailable:  true,
 				Files:                  []string{"foo.go", "bar.go"},
 				TokenUsage:             &agent.TokenUsage{InputTokens: 100, OutputTokens: 50},
 				CompletedAt:            completedAt,
@@ -904,6 +905,7 @@ func TestState_TaskRecords_RoundTrip(t *testing.T) {
 	assert.Equal(t, "code-reviewer", record.SubagentType)
 	assert.Equal(t, "Review the diff", record.TaskDescription)
 	assert.Equal(t, "/tmp/agent-a123.jsonl", record.DeclaredTranscriptPath)
+	assert.True(t, record.TranscriptUnavailable)
 	assert.Equal(t, []string{"foo.go", "bar.go"}, record.Files)
 	require.NotNil(t, record.TokenUsage)
 	assert.Equal(t, 100, record.TokenUsage.InputTokens)

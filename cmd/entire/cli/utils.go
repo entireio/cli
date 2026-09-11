@@ -27,6 +27,10 @@ func NewAccessibleForm(groups ...*huh.Group) *huh.Form {
 	return uiform.New(groups...)
 }
 
+// selectOptionIndent aligns text placed above a select's options with the
+// option text. See uiform.SelectOptionIndent.
+const selectOptionIndent = uiform.SelectOptionIndent
+
 // handleFormCancellation handles cancellation from huh form prompts.
 // User abort (Ctrl+C), timeout, and a cancelled/expired context (when the form
 // ran via RunWithContext and the command's context was cancelled) all print a

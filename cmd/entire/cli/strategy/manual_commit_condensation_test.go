@@ -891,6 +891,34 @@ func TestCondenseSession_MaterializesCompletedTaskRecord_RegressionFor2058(t *te
 	require.Empty(t, state.TaskRecords, "completed task record must be removed after materialization")
 }
 
+func TestCondenseSession_TranscriptUnavailableDoesNotProbeGenericLayout(t *testing.T) {
+	const (
+		sessionID = "2026-09-03-copilot-no-child-transcript"
+		toolUseID = "toolu_copilot_no_transcript"
+		agentID   = "24d8773a-06e8-435c-9257-8ccb89a54f33"
+	)
+	repo, state := setupCondensableSessionWithTranscript(t, sessionID)
+	coincidental := filepath.Join(filepath.Dir(state.TranscriptPath), "agent-"+agentID+".jsonl")
+	require.NoError(t, os.WriteFile(coincidental, []byte(`{"secret":"must not be attributed"}`), 0o600))
+	state.TaskRecords = []session.TaskRecord{{
+		ToolUseID:             toolUseID,
+		AgentID:               agentID,
+		StartedAt:             time.Now(),
+		CompletedAt:           time.Now(),
+		TranscriptUnavailable: true,
+	}}
+	require.NoError(t, SaveSessionState(context.Background(), state))
+
+	checkpointID := id.MustCheckpointID("aabbccddaa09")
+	_, err := (&ManualCommitStrategy{}).CondenseSession(context.Background(), repo, checkpointID, state, nil)
+	require.NoError(t, err)
+	_, found := checkpointTaskFile(t, repo, checkpointID, "tasks/"+toolUseID+"/agent-"+agentID+".jsonl")
+	require.False(t, found)
+	taskJSON, found := checkpointTaskFile(t, repo, checkpointID, "tasks/"+toolUseID+"/task.json")
+	require.True(t, found)
+	require.Contains(t, taskJSON, taskTranscriptReasonUnresolvable)
+}
+
 // TestCondenseSession_InFlightTaskRecord_TranscriptSoFarStoredRecordSurvives
 // covers the in-flight half of the materializer contract: a record with
 // CompletedAt still zero has its transcript-so-far stored (every checkpoint
@@ -1025,7 +1053,7 @@ func TestCondenseSession_TaskRecordMissingTranscriptPath_RecordsUnavailableReaso
 
 // TestCondenseSession_PoisonedTaskRecord_SkippedNotWedged is the regression
 // for the "poisoned record must not wedge condensation forever" hardening: a
-// record with an unsafe ToolUseID must not abort the whole checkpoint write
+// record with an unsafe ToolUseID or AgentID must not abort the whole checkpoint write
 // (which would re-fail on every future condensation, since completed records
 // are only removed after a successful write), nor should it silently produce
 // a task.json it can't safely be placed under. Alongside a valid record, the
@@ -1049,6 +1077,13 @@ func TestCondenseSession_PoisonedTaskRecord_SkippedNotWedged(t *testing.T) {
 			AgentID:                "agent-poison",
 			DeclaredTranscriptPath: validTranscriptPath,
 			CompletedAt:            completedAt,
+		},
+		{
+			// Path-unsafe even when the agent reports that no transcript exists.
+			ToolUseID:             "toolu_poisoned_agent",
+			AgentID:               "../escape",
+			TranscriptUnavailable: true,
+			CompletedAt:           completedAt,
 		},
 		{
 			ToolUseID:              "toolu_valid",
@@ -1092,6 +1127,8 @@ func TestCondenseSession_PoisonedTaskRecord_SkippedNotWedged(t *testing.T) {
 	}
 	require.False(t, remaining["../escape"],
 		"a completed poisoned record can never materialize, so it must still be removed rather than retried forever")
+	require.False(t, remaining["toolu_poisoned_agent"],
+		"a completed record with a poisoned agent ID must be removed rather than retried forever")
 	require.False(t, remaining["toolu_valid"], "the completed valid record was materialized and must also be removed")
 }
 

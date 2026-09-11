@@ -2,10 +2,13 @@ package copilotcli
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/stretchr/testify/require"
 )
 
 const (
@@ -81,6 +84,78 @@ func TestExtractModifiedFilesFromEvents(t *testing.T) {
 			t.Errorf("expected second file '/tmp/test/world.txt', got %q", files[1])
 		}
 	})
+}
+
+func TestExtractSubagentEvidence_ConcurrentChildrenStayDisjoint(t *testing.T) {
+	t.Parallel()
+
+	const (
+		firstAgent  = "406b3f9d-707d-497b-95e4-8879cb34dfef"
+		secondAgent = "4f7e5668-1189-4ed6-95c2-2fa3f30a511e"
+		firstTask   = "toolu_01WQPHjHsYsR4tbaDa7FuLn6"
+		secondTask  = "toolu_01PTijiEhCKVraGkEwH52FQC"
+	)
+	content := strings.Join([]string{
+		`{"type":"subagent.started","agentId":"` + secondAgent + `","data":{"toolCallId":"` + secondTask + `"}}`,
+		`{"type":"subagent.started","agentId":"` + firstAgent + `","data":{"toolCallId":"` + firstTask + `"}}`,
+		`{"type":"tool.execution_complete","agentId":"` + secondAgent + `","data":{"parentToolCallId":"` + secondTask + `","toolTelemetry":{"restrictedProperties":{"filePaths":"[\"/repo/second.txt\"]"}}}}`,
+		`{"type":"tool.execution_complete","agentId":"` + firstAgent + `","data":{"parentToolCallId":"` + firstTask + `","toolTelemetry":{"restrictedProperties":{"filePaths":"[\"/repo/first.txt\"]"}}}}`,
+	}, "\n")
+	events, err := parseEventsFromBytes([]byte(content))
+	require.NoError(t, err)
+
+	first, ok := extractSubagentEvidence(events, firstAgent, "")
+	require.True(t, ok)
+	require.Equal(t, firstTask, first.ToolUseID)
+	require.Equal(t, []string{"/repo/first.txt"}, first.Files)
+
+	second, ok := extractSubagentEvidence(events, secondAgent, "")
+	require.True(t, ok)
+	require.Equal(t, secondTask, second.ToolUseID)
+	require.Equal(t, []string{"/repo/second.txt"}, second.Files)
+}
+
+func TestExtractSubagentEvidence_RequiresUniqueStartedIdentity(t *testing.T) {
+	t.Parallel()
+
+	const child = "24d8773a-06e8-435c-9257-8ccb89a54f33"
+	for _, content := range []string{
+		`{"type":"tool.execution_complete","agentId":"` + child + `","data":{"parentToolCallId":"toolu_orphan"}}`,
+		`{"type":"subagent.started","agentId":"` + child + `","data":{"toolCallId":"toolu_one"}}` + "\n" +
+			`{"type":"subagent.started","agentId":"` + child + `","data":{"toolCallId":"toolu_two"}}`,
+	} {
+		events, err := parseEventsFromBytes([]byte(content))
+		require.NoError(t, err)
+		_, ok := extractSubagentEvidence(events, child, "")
+		require.False(t, ok)
+	}
+}
+
+func TestExtractSubagentEvidence_LegacyNameFallback(t *testing.T) {
+	t.Parallel()
+
+	const agentName = "entire-e2e-subagent"
+	events, err := parseEventsFromBytes([]byte(strings.Join([]string{
+		`{"type":"subagent.started","agentId":"toolu_previous","data":{"toolCallId":"toolu_previous","agentName":"` + agentName + `"}}`,
+		`{"type":"subagent.completed","agentId":"toolu_previous","data":{"toolCallId":"toolu_previous","agentName":"` + agentName + `"}}`,
+		`{"type":"subagent.started","agentId":"toolu_current","data":{"toolCallId":"toolu_current","agentName":"` + agentName + `","agentDescription":"Create docs/red.md"}}`,
+		`{"type":"tool.execution_complete","agentId":"toolu_current","data":{"parentToolCallId":"toolu_current"}}`,
+	}, "\n")))
+	require.NoError(t, err)
+
+	evidence, ok := extractSubagentEvidence(events, "", agentName)
+	require.True(t, ok)
+	require.Equal(t, "toolu_current", evidence.AgentID)
+	require.Equal(t, "toolu_current", evidence.ToolUseID)
+	require.Equal(t, "Create docs/red.md", evidence.TaskDescription)
+
+	events = append(events, copilotEvent{
+		Type:    eventTypeSubagentStarted,
+		AgentID: "toolu_concurrent",
+		Data:    json.RawMessage(`{"toolCallId":"toolu_concurrent","agentName":"` + agentName + `"}`),
+	})
+	_, ok = extractSubagentEvidence(events, "", agentName)
+	require.False(t, ok, "same-name concurrent children must fail closed")
 }
 
 func TestExtractPromptsFromEvents(t *testing.T) {

@@ -18,6 +18,7 @@ type CopilotHooks struct {
 	SessionStart        []CopilotHookEntry `json:"sessionStart,omitempty"`
 	AgentStop           []CopilotHookEntry `json:"agentStop,omitempty"`
 	SessionEnd          []CopilotHookEntry `json:"sessionEnd,omitempty"`
+	SubagentStart       []CopilotHookEntry `json:"subagentStart,omitempty"`
 	SubagentStop        []CopilotHookEntry `json:"subagentStop,omitempty"`
 	PreToolUse          []CopilotHookEntry `json:"preToolUse,omitempty"`
 	PostToolUse         []CopilotHookEntry `json:"postToolUse,omitempty"`

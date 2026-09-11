@@ -3,13 +3,16 @@ package strategy
 import (
 	"context"
 	"io"
+	"io/fs"
 	"log/slog"
 
+	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/osroot"
 	"github.com/entireio/cli/cmd/entire/cli/worktreedir"
 	"github.com/go-git/go-git/v6"
 	"github.com/go-git/go-git/v6/plumbing"
+	"github.com/go-git/go-git/v6/plumbing/filemode"
 	"github.com/go-git/go-git/v6/plumbing/format/config"
 	"github.com/go-git/go-git/v6/plumbing/object"
 )
@@ -445,9 +448,17 @@ func filesWithRemainingAgentChanges(
 		worktreeRoot = wt.Filesystem().Root()
 	}
 
-	var remaining []string
+	type worktreeCandidate struct {
+		index      int
+		path       string
+		commitHash plumbing.Hash
+		commitMode filemode.FileMode
+		shadowHash plumbing.Hash
+	}
+	keep := make([]bool, len(filesTouched))
+	var candidates []worktreeCandidate
 
-	for _, filePath := range filesTouched {
+	for i, filePath := range filesTouched {
 		// Skip files absent from the shadow tree — nothing to carry forward.
 		// This covers two cases:
 		//  1. Phantom paths: transcript mentions files the agent never created
@@ -466,7 +477,7 @@ func filesWithRemainingAgentChanges(
 
 		// File wasn't committed at all — it has remaining changes
 		if _, wasCommitted := committedFiles[filePath]; !wasCommitted {
-			remaining = append(remaining, filePath)
+			keep[i] = true
 			logging.Debug(logCtx, "filesWithRemainingAgentChanges: file not committed, keeping",
 				slog.String("file", filePath),
 			)
@@ -476,7 +487,7 @@ func filesWithRemainingAgentChanges(
 		commitFile, err := commitTree.File(filePath)
 		if err != nil {
 			// File not in commit tree (deleted?) - keep it if it's in shadow
-			remaining = append(remaining, filePath)
+			keep[i] = true
 			logging.Debug(logCtx, "filesWithRemainingAgentChanges: file not in commit tree but in shadow, keeping",
 				slog.String("file", filePath),
 			)
@@ -490,24 +501,64 @@ func filesWithRemainingAgentChanges(
 			continue
 		}
 
-		// Committed content differs from shadow. Check whether the working tree
-		// still has changes — if clean, the user intentionally replaced the content
-		// and there's nothing left to carry forward.
-		if worktreeRoot != "" && workingTreeMatchesCommit(worktreeRoot, filePath, commitFile.Hash) {
+		candidates = append(candidates, worktreeCandidate{
+			index:      i,
+			path:       filePath,
+			commitHash: commitFile.Hash,
+			commitMode: commitFile.Mode,
+			shadowHash: shadowFile.Hash,
+		})
+	}
+
+	worktreeHashes := make(map[string]plumbing.Hash)
+	if worktreeRoot != "" && len(candidates) > 0 {
+		paths := make([]string, 0, len(candidates))
+		for _, candidate := range candidates {
+			// hash-object follows symlinks and hashes target content, while a Git
+			// symlink blob stores the target path. Compare either side of a mode
+			// mismatch through the confined fallback instead.
+			if !requiresConfinedWorktreeHash(worktreeRoot, candidate.path, candidate.commitMode) {
+				paths = append(paths, candidate.path)
+			}
+		}
+		var err error
+		worktreeHashes, err = gitrepo.HashWorktreeFiles(ctx, worktreeRoot, paths)
+		if err != nil {
+			logging.Warn(logCtx, "native git could not hash every carry-forward candidate; checking failed paths conservatively without clean filters",
+				slog.String("error", err.Error()),
+			)
+		}
+	}
+
+	for _, candidate := range candidates {
+		workingTreeClean := false
+		if worktreeHash, ok := worktreeHashes[candidate.path]; ok {
+			workingTreeClean = worktreeHash == candidate.commitHash
+		} else if worktreeRoot != "" {
+			workingTreeClean = workingTreeMatchesBlob(worktreeRoot, candidate.path, candidate.commitMode, candidate.commitHash)
+		}
+		if workingTreeClean {
 			logging.Debug(logCtx, "filesWithRemainingAgentChanges: content differs from shadow but working tree is clean, skipping",
-				slog.String("file", filePath),
-				slog.String("commit_hash", commitFile.Hash.String()[:7]),
-				slog.String("shadow_hash", shadowFile.Hash.String()[:7]),
+				slog.String("file", candidate.path),
+				slog.String("commit_hash", candidate.commitHash.String()[:7]),
+				slog.String("shadow_hash", candidate.shadowHash.String()[:7]),
 			)
 			continue
 		}
 
-		remaining = append(remaining, filePath)
+		keep[candidate.index] = true
 		logging.Debug(logCtx, "filesWithRemainingAgentChanges: content mismatch with dirty working tree, keeping for carry-forward",
-			slog.String("file", filePath),
-			slog.String("commit_hash", commitFile.Hash.String()[:7]),
-			slog.String("shadow_hash", shadowFile.Hash.String()[:7]),
+			slog.String("file", candidate.path),
+			slog.String("commit_hash", candidate.commitHash.String()[:7]),
+			slog.String("shadow_hash", candidate.shadowHash.String()[:7]),
 		)
+	}
+
+	remaining := make([]string, 0, len(filesTouched))
+	for i, filePath := range filesTouched {
+		if keep[i] {
+			remaining = append(remaining, filePath)
+		}
 	}
 
 	logging.Debug(logCtx, "filesWithRemainingAgentChanges: result",
@@ -519,9 +570,33 @@ func filesWithRemainingAgentChanges(
 	return remaining
 }
 
-// workingTreeMatchesCommit checks if the file on disk matches the committed blob hash.
-// Returns true if the working tree is clean for this file (no remaining changes).
-func workingTreeMatchesCommit(worktreeRoot, filePath string, commitHash plumbing.Hash) bool {
+func requiresConfinedWorktreeHash(worktreeRoot, filePath string, commitMode filemode.FileMode) bool {
+	if commitMode == filemode.Symlink {
+		return true
+	}
+	root, err := worktreedir.OpenAt(worktreeRoot)
+	if err != nil {
+		return true
+	}
+	name, err := worktreedir.Name(worktreeRoot, filePath)
+	if err != nil {
+		return true
+	}
+	info, err := root.Lstat(name)
+	return err != nil || requiresConfinedWorktreeMode(info.Mode())
+}
+
+func requiresConfinedWorktreeMode(mode fs.FileMode) bool {
+	// Windows uses ModeIrregular for OneDrive Files On-Demand placeholders.
+	// Mask it so placeholder files still receive Git's clean-filter handling,
+	// while every substantive non-regular type remains confined.
+	return mode.Type()&^fs.ModeIrregular != 0
+}
+
+// workingTreeMatchesBlob checks whether the raw file representation hashes to
+// commitHash. It is the filter-unaware fallback for when native Git cannot hash
+// a regular file and the symlink-aware path for Git symlink blobs.
+func workingTreeMatchesBlob(worktreeRoot, filePath string, commitMode filemode.FileMode, commitHash plumbing.Hash) bool {
 	root, err := worktreedir.OpenAt(worktreeRoot)
 	if err != nil {
 		return false
@@ -530,9 +605,18 @@ func workingTreeMatchesCommit(worktreeRoot, filePath string, commitHash plumbing
 	if err != nil {
 		return false
 	}
-	diskContent, err := osroot.ReadFileNoFollow(root, name)
-	if err != nil {
-		return false
+	var diskContent []byte
+	if commitMode == filemode.Symlink {
+		target, readErr := root.Readlink(name)
+		if readErr != nil {
+			return false
+		}
+		diskContent = []byte(target)
+	} else {
+		diskContent, err = osroot.ReadFileNoFollow(root, name)
+		if err != nil {
+			return false
+		}
 	}
 	of := config.SHA1
 	if commitHash.Size() == config.SHA256.Size() {
