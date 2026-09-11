@@ -786,14 +786,13 @@ func TestSaveStep_TokensAttributedElsewhereKeepSessionTotal(t *testing.T) {
 	step := func(content string, elsewhere bool, subagentCumulative int) {
 		require.NoError(t, os.WriteFile(filepath.Join(dir, "test.txt"), []byte(content), 0o644))
 		require.NoError(t, s.SaveStep(ctx, StepContext{
-			SessionID:      sessionID,
-			MetadataDir:    metadataDir,
-			MetadataDirAbs: metadataDirAbs,
-			ModifiedFiles:  []string{"test.txt"},
-			CommitMessage:  "step",
-			AuthorName:     "Test",
-			AuthorEmail:    "test@test.com",
-			AgentType:      agent.AgentTypeClaudeCode,
+			SessionID:     sessionID,
+			MetadataDir:   metadataDir,
+			ModifiedFiles: []string{"test.txt"},
+			CommitMessage: "step",
+			AuthorName:    "Test",
+			AuthorEmail:   "test@test.com",
+			AgentType:     agent.AgentTypeClaudeCode,
 			TokenUsage: &agent.TokenUsage{
 				InputTokens: 100, OutputTokens: 50, APICallCount: 1,
 				SubagentTokens: &agent.TokenUsage{InputTokens: subagentCumulative, APICallCount: 1},

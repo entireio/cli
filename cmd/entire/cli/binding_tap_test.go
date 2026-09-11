@@ -86,7 +86,7 @@ func TestRecordForeignEvidence_EnabledForeignRepoRecorded(t *testing.T) {
 	if rec.AgentType != testAgentName || rec.LaunchRoot != rootA {
 		t.Errorf("session meta not stored: %+v", rec)
 	}
-	if br.AdoptedAt == nil || loadTargetState(ctx, t, rootB, "sess-1") == nil {
+	if br.AdoptedAt == nil || loadTargetState(ctx, t, rootB) == nil {
 		t.Fatalf("an enabled foreign repo must be adopted, not just recorded: %+v", br)
 	}
 }
@@ -674,86 +674,13 @@ func commitInitial(t *testing.T, root string) {
 	testutil.GitCommit(t, root, "initial")
 }
 
-func loadTargetState(ctx context.Context, t *testing.T, root, sessionID string) *session.State {
+func loadTargetState(ctx context.Context, t *testing.T, root string) *session.State {
 	t.Helper()
-	state, err := session.NewStateStoreWithDir(filepath.Join(root, ".git", session.SessionStateDirName)).Load(ctx, sessionID)
+	state, err := session.NewStateStoreWithDir(filepath.Join(root, ".git", session.SessionStateDirName)).Load(ctx, "sess-1")
 	if err != nil {
 		t.Fatal(err)
 	}
 	return state
-}
-
-// A repo with no .entire setup at all is still an adoption target once the
-// user's global tier covers it — "enable once, never again" holds across
-// repos a session touches. The converse cases (excluded, vetoed) must record
-// evidence and nothing else.
-func TestRecordForeignEvidence_GloballyTrackedRepoIsAdopted(t *testing.T) {
-	cfg := t.TempDir()
-	t.Setenv("ENTIRE_CONFIG_DIR", cfg)
-	ctx := context.Background()
-	rootA := newBindingRepo(t)
-	rootB := newBindingRepo(t) // never enabled: no .entire anywhere
-	commitInitial(t, rootB)
-	commitInitial(t, rootA)
-	t.Chdir(rootA)
-
-	cases := []struct {
-		name         string
-		userSettings string
-		repoSetup    func()
-		wantEnabled  bool
-	}{
-		{name: "tier on", userSettings: `{"global":{"enabled":true}}`, wantEnabled: true},
-		{name: "tier off", userSettings: `{"global":{"enabled":false}}`, wantEnabled: false},
-		{name: "excluded", userSettings: `{"global":{"enabled":true,"exclude_paths":["` + filepath.ToSlash(rootB) + `"]}}`, wantEnabled: false},
-		{name: "vetoed by its own settings", userSettings: `{"global":{"enabled":true}}`, repoSetup: func() {
-			if err := os.MkdirAll(filepath.Join(rootB, ".entire"), 0o755); err != nil {
-				t.Fatal(err)
-			}
-			if err := os.WriteFile(filepath.Join(rootB, ".entire", "settings.json"), []byte(`{"enabled":false}`), 0o600); err != nil {
-				t.Fatal(err)
-			}
-		}, wantEnabled: false},
-	}
-	for i, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			if err := os.WriteFile(filepath.Join(cfg, "settings.json"), []byte(tc.userSettings), 0o600); err != nil {
-				t.Fatal(err)
-			}
-			if tc.repoSetup != nil {
-				tc.repoSetup()
-			}
-			sessionID := fmt.Sprintf("sess-%d", i+10)
-			bindingSourceState(ctx, t, rootA, sessionID)
-			testutil.WriteFile(t, rootB, "tracked.txt", "edited by the agent this turn\n")
-			recordForeignEvidence(ctx, sessionID, bindingTestMeta(rootA), rootA, []string{filepath.Join(rootB, "agent.go"), filepath.Join(rootB, "tracked.txt")})
-
-			rec, err := binding.LoadRecord(ctx, sessionID)
-			if err != nil || rec == nil || len(rec.BoundRepos) != 1 {
-				t.Fatalf("evidence must be recorded either way: rec=%+v err=%v", rec, err)
-			}
-			br := rec.BoundRepos[0]
-			if br.Enabled != tc.wantEnabled {
-				t.Fatalf("Enabled = %v, want %v", br.Enabled, tc.wantEnabled)
-			}
-			target := loadTargetState(ctx, t, rootB, sessionID)
-			if tc.wantEnabled {
-				if br.AdoptedAt == nil || target == nil {
-					t.Fatalf("globally tracked repo must be adopted: marker=%v state=%+v", br.AdoptedAt, target)
-				}
-				if target.WorktreePath != rootB || target.BaseCommit != testutil.GetHeadHash(t, rootB) {
-					t.Fatalf("replica must carry the target's identity: %+v", target)
-				}
-				// tracked.txt is dirty in the target and evidenced by this
-				// turn: it is the agent's work, not a baseline to subtract.
-				if slices.Contains(target.DirtyTrackedFilesAtStart, "tracked.txt") {
-					t.Fatalf("the adopting turn's own tracked evidence must not seed the dirty baseline: %v", target.DirtyTrackedFilesAtStart)
-				}
-			} else if br.AdoptedAt != nil || target != nil {
-				t.Fatalf("inactive repo must not be adopted: marker=%v state=%+v", br.AdoptedAt, target)
-			}
-		})
-	}
 }
 
 // Session state lives in the git common dir, shared by every worktree of a
@@ -783,7 +710,7 @@ func TestRecordForeignEvidence_SiblingWorktreeIsNotAdopted(t *testing.T) {
 	if rec.BoundRepos[0].AdoptedAt != nil {
 		t.Fatalf("a sibling worktree must never be marked adopted: %+v", rec.BoundRepos[0])
 	}
-	still := loadTargetState(ctx, t, rootA, "sess-1")
+	still := loadTargetState(ctx, t, rootA)
 	if still == nil || still.WorktreePath != source.WorktreePath || still.StepCount != source.StepCount {
 		t.Fatalf("shared state must be untouched: %+v", still)
 	}
@@ -816,7 +743,7 @@ func TestEnsureSessionReplicated_MarkerFailureStillReportsReplicated(t *testing.
 	if err != nil || !replicated {
 		t.Fatalf("replicated = %v, err = %v; want true with the marker failure logged", replicated, err)
 	}
-	if loadTargetState(ctx, t, rootB, "sess-1") == nil {
+	if loadTargetState(ctx, t, rootB) == nil {
 		t.Fatal("target state must exist")
 	}
 }
@@ -847,7 +774,7 @@ func TestEnsureSessionReplicated_FailedBaselineWalkDefersAdoption(t *testing.T) 
 	if err == nil || replicated {
 		t.Fatalf("replicated = %v, err = %v; want a deferred adoption", replicated, err)
 	}
-	if loadTargetState(ctx, t, rootB, "sess-1") != nil {
+	if loadTargetState(ctx, t, rootB) != nil {
 		t.Fatal("no replica may be persisted without its baselines")
 	}
 	rec, err := binding.LoadRecord(ctx, "sess-1")

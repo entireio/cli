@@ -27,7 +27,7 @@ import (
 const CurrentRecordVersion = 3
 
 // SessionRecord is the machine-level record of a session: which repos its
-// activity has touched. Lives under userdirs.Config()/sessions/, outside any
+// activity has touched. Lives under the user config directory's sessions/,
 // repo, because a session is not owned by a repo — repos are bound to it.
 //
 // ANY schema addition must bump CurrentRecordVersion: the refuse-on-newer
@@ -88,7 +88,11 @@ func recordPath(sessionID string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(userdirs.Config(), "sessions", name), nil
+	configDir, err := userdirs.ConfigDirChecked()
+	if err != nil {
+		return "", fmt.Errorf("resolve config directory: %w", err)
+	}
+	return filepath.Join(configDir, "sessions", name), nil
 }
 
 func sessionsRoot(create bool) (*os.Root, error) {
@@ -109,7 +113,11 @@ func sessionsRoot(create bool) (*os.Root, error) {
 			return nil, fmt.Errorf("create sessions directory: %w", err)
 		}
 	}
-	sessionsDir, err := filepath.Abs(filepath.Join(userdirs.Config(), "sessions"))
+	configDir, err := userdirs.ConfigDirChecked()
+	if err != nil {
+		return nil, fmt.Errorf("resolve config directory: %w", err)
+	}
+	sessionsDir, err := filepath.Abs(filepath.Join(configDir, "sessions"))
 	if err != nil {
 		return nil, fmt.Errorf("resolve sessions directory: %w", err)
 	}
