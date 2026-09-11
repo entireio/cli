@@ -15,10 +15,17 @@ import (
 
 // stubSummaryProviderSettings points the settings seam at one configured
 // provider ("" for none), against a registry of codex (capable) + opencode
-// (not).
+// (not), inside an isolated repo.
+//
+// The isolation is required, not hygiene: checkSummaryProvider's fault branch
+// calls summaryProviderSourceLayer, which resolves the CURRENT repository and
+// reads its real .entire/settings.local.json. Without a temp repo these tests
+// read the developer's own settings and their output depends on whose machine
+// they run on.
 func stubSummaryProviderSettings(t *testing.T, configured string) {
 	t.Helper()
 
+	isolateRepoForSummaryProviderCheck(t)
 	stubSummaryRegistry(t, []types.AgentName{"codex", "opencode"}, "codex")
 
 	originalLoad := loadSummarySettings
@@ -30,6 +37,21 @@ func stubSummaryProviderSettings(t *testing.T, configured string) {
 		}
 		return s, nil
 	}
+}
+
+// isolateRepoForSummaryProviderCheck creates an empty repo with a .entire
+// directory and points the process at it. Returns the repo root so callers can
+// plant settings layers in it.
+func isolateRepoForSummaryProviderCheck(t *testing.T) string {
+	t.Helper()
+
+	tmpDir := t.TempDir()
+	testutil.InitRepo(t, tmpDir)
+	if err := os.MkdirAll(filepath.Join(tmpDir, ".entire"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(tmpDir)
+	return tmpDir
 }
 
 func runCheckSummaryProvider(t *testing.T, configured string) string {
@@ -122,59 +144,88 @@ func TestCheckSummaryProvider_SilentWhenSettingsWillNotLoad(t *testing.T) {
 // With no flag it writes the PROJECT file whenever one exists, so a provider
 // coming from settings.local.json needs --local or the "fix" lands in a file
 // the local layer still overrides.
+//
+// Runs against REAL settings loading and the REAL registry rather than the
+// stubs the other tests use. Two reasons: opencode is genuinely incapable, so
+// the registry needs no help; and the tracked-local case cannot be stubbed at
+// all, because localLayerRejection is unexported — only a real Load over a real
+// tracked file produces it.
 func TestCheckSummaryProvider_RemedyTargetsTheLayerHoldingTheValue(t *testing.T) {
-	// Cannot use t.Parallel(): t.Chdir and package-level resolution seams.
+	// Cannot use t.Parallel(): t.Chdir is process-global.
 	cases := []struct {
-		name      string
-		localFile string
-		wantFile  string
-		wantLocal bool
+		name       string
+		project    string
+		local      string
+		trackLocal bool
+		wantFile   string
+		wantLocal  bool
+		why        string
 	}{
 		{
 			name:      "provider from the project layer",
-			localFile: "",
+			project:   `{"enabled":true,"summary_generation":{"provider":"opencode"}}`,
 			wantFile:  settings.EntireSettingsFile,
 			wantLocal: false,
+			why:       "only the project file carries it",
 		},
 		{
 			name:      "provider from the local layer",
-			localFile: `{"summary_generation":{"provider":"opencode"}}`,
+			project:   `{"enabled":true}`,
+			local:     `{"summary_generation":{"provider":"opencode"}}`,
 			wantFile:  settings.EntireSettingsLocalFile,
 			wantLocal: true,
+			why:       "the local layer supplies it, so configure needs --local",
 		},
 		{
-			name:      "local layer exists but supplies a different provider",
-			localFile: `{"summary_generation":{"provider":"codex"}}`,
+			name:      "local layer supplies a different provider",
+			project:   `{"enabled":true,"summary_generation":{"provider":"opencode"}}`,
+			local:     `{"summary_generation":{"provider":"claude-code"}}`,
 			wantFile:  settings.EntireSettingsFile,
 			wantLocal: false,
+			why:       "local wins, so a local claude-code means the fault is not reported at all",
+		},
+		{
+			name:       "tracked local layer is ignored by the loader",
+			project:    `{"enabled":true,"summary_generation":{"provider":"opencode"}}`,
+			local:      `{"summary_generation":{"provider":"opencode"}}`,
+			trackLocal: true,
+			wantFile:   settings.EntireSettingsFile,
+			wantLocal:  false,
+			why:        "a tracked local file is dropped wholesale, so editing it fixes nothing",
 		},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			tmpDir := t.TempDir()
-			testutil.InitRepo(t, tmpDir)
-			if err := os.MkdirAll(filepath.Join(tmpDir, ".entire"), 0o755); err != nil {
-				t.Fatal(err)
-			}
-			if tc.localFile != "" {
-				if err := os.WriteFile(filepath.Join(tmpDir, settings.EntireSettingsLocalFile), []byte(tc.localFile), 0o644); err != nil {
-					t.Fatal(err)
+			tmpDir := isolateRepoForSummaryProviderCheck(t)
+			testutil.WriteFile(t, tmpDir, settings.EntireSettingsFile, tc.project)
+			if tc.local != "" {
+				testutil.WriteFile(t, tmpDir, settings.EntireSettingsLocalFile, tc.local)
+				if tc.trackLocal {
+					testutil.GitAdd(t, tmpDir, settings.EntireSettingsLocalFile)
 				}
 			}
-			t.Chdir(tmpDir)
 
-			stubSummaryProviderSettings(t, "opencode")
 			cmd, out := newTestCmd(t)
 			checkSummaryProvider(cmd)
 			got := out.String()
 
-			if !strings.Contains(got, tc.wantFile) {
-				t.Errorf("diagnosis does not name %s:\n%s", tc.wantFile, got)
+			// The third case reports nothing at all (a capable provider wins),
+			// which is itself the correct answer; the rest must diagnose.
+			if tc.name == "local layer supplies a different provider" {
+				if got != "" {
+					t.Fatalf("expected silence (%s), got:\n%s", tc.why, got)
+				}
+				return
 			}
-			hasLocalFlag := strings.Contains(got, "--local")
-			if hasLocalFlag != tc.wantLocal {
-				t.Errorf("remedy --local = %v, want %v:\n%s", hasLocalFlag, tc.wantLocal, got)
+			if !strings.Contains(got, "Summary provider: UNUSABLE") {
+				t.Fatalf("no diagnosis printed (%s):\n%s", tc.why, got)
+			}
+			if !strings.Contains(got, tc.wantFile) {
+				t.Errorf("diagnosis does not name %s (%s):\n%s", tc.wantFile, tc.why, got)
+			}
+			if hasLocal := strings.Contains(got, "--local"); hasLocal != tc.wantLocal {
+				t.Errorf("remedy --local = %v, want %v (%s):\n%s", hasLocal, tc.wantLocal, tc.why, got)
 			}
 		})
 	}

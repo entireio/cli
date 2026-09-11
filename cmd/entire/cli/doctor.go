@@ -1373,7 +1373,7 @@ func checkSummaryProvider(cmd *cobra.Command) {
 	}
 
 	w := cmd.OutOrStdout()
-	sourceFile, isLocal := summaryProviderSourceLayer(ctx, s.SummaryGeneration.Provider)
+	sourceFile, isLocal := summaryProviderSourceLayer(ctx, s)
 	fmt.Fprintln(w, "Summary provider: UNUSABLE")
 	fmt.Fprintf(w, "  summary_generation.provider is %q in %s, which cannot generate text.\n", name, sourceFile)
 	fmt.Fprintln(w, "  `entire checkpoint explain --generate`, `entire dispatch`, and")
@@ -1409,7 +1409,21 @@ func checkSummaryProvider(cmd *cobra.Command) {
 // applies, so matching on the effective value is enough to identify the source.
 // A read failure or a missing file falls back to the project layer, matching
 // where `configure` would write.
-func summaryProviderSourceLayer(ctx context.Context, effective string) (relPath string, isLocal bool) {
+//
+// LocalLayerRejection is consulted first, and it is not an optimisation: a
+// TRACKED settings.local.json is dropped wholesale by the loader, so its
+// contents are not the effective value however well they match. Reading the
+// file directly cannot see that — it would attribute a provider both files
+// happen to share to the local layer and send the user to edit a file the
+// loader ignores, leaving the project-level fault in place behind a success
+// message. That is the same class of wrong-file advice as the missing --local.
+func summaryProviderSourceLayer(ctx context.Context, merged *settings.EntireSettings) (relPath string, isLocal bool) {
+	if merged == nil || merged.SummaryGeneration == nil {
+		return settings.EntireSettingsFile, false
+	}
+	if merged.LocalLayerRejection() != "" {
+		return settings.EntireSettingsFile, false
+	}
 	localAbs, err := paths.AbsPath(ctx, settings.EntireSettingsLocalFile)
 	if err != nil {
 		return settings.EntireSettingsFile, false
@@ -1420,7 +1434,7 @@ func summaryProviderSourceLayer(ctx context.Context, effective string) (relPath 
 	if err != nil {
 		return settings.EntireSettingsFile, false
 	}
-	if local.SummaryGeneration != nil && local.SummaryGeneration.Provider == effective {
+	if local.SummaryGeneration != nil && local.SummaryGeneration.Provider == merged.SummaryGeneration.Provider {
 		return settings.EntireSettingsLocalFile, true
 	}
 	return settings.EntireSettingsFile, false
