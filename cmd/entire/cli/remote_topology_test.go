@@ -118,6 +118,26 @@ func TestCheckpointNote_PinnedRemoteKeepsSyncingThroughAFailedElection(t *testin
 	}
 }
 
+func TestCheckpointNote_MixedDedicatedDestinationsReportPartialSync(t *testing.T) {
+	t.Parallel()
+
+	topo := remoteTopology{
+		destinations: []remoteDestination{
+			{name: "origin", pushURLs: []string{"https://example.com/a.git"}, pinned: true},
+			{name: "publish", pushURLs: []string{"https://example.com/b.git"}},
+		},
+		electionErr: &strategy.CheckpointPushRemoteNotConfiguredError{Remote: "gone"},
+	}
+
+	out := describeTopology(t, topo)
+	if !strings.Contains(out, "Checkpoint sync: PARTIAL") || !strings.Contains(out, "Affected remotes: publish") {
+		t.Errorf("only the unpinned remote should be reported as affected, got:\n%s", out)
+	}
+	if strings.Contains(out, "Checkpoint sync: DISABLED") || strings.Contains(out, "Affected remotes: origin") {
+		t.Errorf("the dedicated destination still syncs and must not be called disabled, got:\n%s", out)
+	}
+}
+
 // TestCheckpointNote_FailedElectionWithNoRemotes covers syncDisabled's other
 // disjunct: a repo with no remotes syncs nowhere regardless, but the broken
 // setting travels with the settings file to clones that do have remotes, so it

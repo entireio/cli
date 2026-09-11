@@ -209,25 +209,36 @@ func cachedRemotesInConfigOrder(ctx context.Context, read func(context.Context) 
 // checkpoint_push_remote ("is not a configured git remote") for the rest of the
 // process, from one git that could not run.
 func cachedIsConfiguredRemote(ctx context.Context, name string, probe func() (bool, error)) bool {
+	got, _ := cachedIsConfiguredRemoteChecked(ctx, name, probe) //nolint:errcheck // best-effort callers deliberately collapse probe failures
+	return got
+}
+
+// cachedIsConfiguredRemoteChecked is the error-preserving form used where
+// "missing" and "could not inspect" require different user-facing remedies.
+// Failed probes are returned but never memoized, so a transient git failure
+// cannot poison the rest of the command.
+func cachedIsConfiguredRemoteChecked(
+	ctx context.Context,
+	name string,
+	probe func() (bool, error),
+) (bool, error) {
 	c := cacheFromContext(ctx)
 	if c == nil {
-		got, _ := probe() //nolint:errcheck // uncached path keeps the historical best-effort contract
-		return got
+		return probe()
 	}
 	snap := c.snapshotFor(ctx)
 	if snap == nil {
-		got, _ := probe() //nolint:errcheck // unidentifiable repo: same best-effort contract
-		return got
+		return probe()
 	}
 	snap.mu.Lock()
 	defer snap.mu.Unlock()
 	if got, ok := snap.member[name]; ok {
-		return got
+		return got, nil
 	}
 	got, err := probe()
 	if err != nil {
-		return false // answer this call; the next one retries
+		return false, err
 	}
 	snap.member[name] = got
-	return got
+	return got, nil
 }

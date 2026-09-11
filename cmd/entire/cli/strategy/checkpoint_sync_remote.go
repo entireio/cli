@@ -103,7 +103,11 @@ func ResolveCheckpointSyncRemote(ctx context.Context) (CheckpointSyncRemote, err
 		return CheckpointSyncRemote{}, fmt.Errorf("cannot read settings to resolve the checkpoint sync remote: %w", err)
 	}
 	if name := s.GetCheckpointPushRemote(); name != "" {
-		if !isConfiguredRemote(ctx, name) {
+		configured, probeErr := configuredRemote(ctx, name)
+		if probeErr != nil {
+			return CheckpointSyncRemote{}, fmt.Errorf("cannot inspect checkpoint_push_remote %q: %w", name, probeErr)
+		}
+		if !configured {
 			return CheckpointSyncRemote{}, &CheckpointPushRemoteNotConfiguredError{Remote: name}
 		}
 		return CheckpointSyncRemote{Name: name, Source: SyncRemoteSourceConfig}, nil

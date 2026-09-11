@@ -153,7 +153,7 @@ func (t remoteTopology) ambiguous() bool {
 	return unpinned > 1
 }
 
-// syncDisabled reports that the election failed closed AND that the failure
+// syncAffected reports that the election failed closed AND that the failure
 // costs this repo something: at least one remote whose pushes would otherwise
 // have carried checkpoints now carries none.
 //
@@ -164,11 +164,20 @@ func (t remoteTopology) ambiguous() bool {
 // therefore syncing normally and is told nothing. A repo with no remotes at all
 // is still told: nothing syncs there either way, but the broken setting is real
 // and travels with the settings file to clones that do have remotes.
-func (t remoteTopology) syncDisabled() bool {
+func (t remoteTopology) syncAffected() bool {
 	if t.electionErr == nil {
 		return false
 	}
 	return len(t.destinations) == 0 || len(t.unpinnedNames()) > 0
+}
+
+func (t remoteTopology) hasPinnedDestination() bool {
+	for _, destination := range t.destinations {
+		if destination.pinned {
+			return true
+		}
+	}
+	return false
 }
 
 // describeSyncDisabled writes the fail-closed election: what is broken, what it
@@ -211,14 +220,17 @@ func (t remoteTopology) describeSyncDisabled(w io.Writer, header string) {
 // under the header matching what it found. Writes nothing when the destination
 // is unambiguous and the election succeeded.
 //
-// The two conditions are exclusive on purpose: while sync is disabled there is
-// no destination to describe, so the ambiguity paragraphs below — which all
-// narrate where checkpoints land — would be describing traffic that is not
-// flowing. They become true again once the setting is fixed, which is what the
-// remedy asks for.
+// Election-failure and ambiguity reports are exclusive on purpose: while an
+// unpinned destination is disabled there is no elected destination to describe.
+// A mixed topology uses the partial heading because pinned destinations bypass
+// election and continue syncing.
 func (t remoteTopology) describeCheckpointDestination(w io.Writer, headers checkpointNoteHeaders) {
-	if t.syncDisabled() {
-		t.describeSyncDisabled(w, headers.disabled)
+	if t.syncAffected() {
+		header := headers.disabled
+		if t.hasPinnedDestination() {
+			header = headers.partial
+		}
+		t.describeSyncDisabled(w, header)
 		return
 	}
 	if !t.ambiguous() {
@@ -273,12 +285,13 @@ func (t remoteTopology) unpinnedNames() []string {
 	return names
 }
 
-// checkpointNoteHeaders are the caller's headings for the two conditions this
-// note reports. Separate strings because they are separate verdicts: a disabled
-// sync is a misconfiguration to fix, while an ambiguous destination is a working
-// repo whose owner should know which remote gets the history.
+// checkpointNoteHeaders are the caller's headings for the verdicts this note
+// reports. Disabled and partial sync are misconfigurations to fix, while an
+// ambiguous destination is a working repo whose owner should know which remote
+// gets the history.
 type checkpointNoteHeaders struct {
 	disabled  string
+	partial   string
 	ambiguous string
 }
 
@@ -290,6 +303,7 @@ type checkpointNoteHeaders struct {
 // here changes, which is the one thing those tests exist to catch.
 var doctorCheckpointNoteHeaders = checkpointNoteHeaders{
 	disabled:  "Checkpoint sync: DISABLED",
+	partial:   "Checkpoint sync: PARTIAL",
 	ambiguous: "Checkpoint destination: REVIEW",
 }
 

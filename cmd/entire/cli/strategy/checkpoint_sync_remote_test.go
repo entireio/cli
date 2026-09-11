@@ -11,6 +11,7 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/osroot"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
+	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 
 	"github.com/stretchr/testify/assert"
@@ -68,7 +69,29 @@ func TestResolveCheckpointSyncRemote_ConfigSettingMissingRemote_FailsClosed(t *t
 	got, err := ResolveCheckpointSyncRemote(ctx)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "gone")
+	var missing *CheckpointPushRemoteNotConfiguredError
+	require.ErrorAs(t, err, &missing)
 	assert.Empty(t, got.Name)
+}
+
+// Not parallel: uses t.Chdir()
+func TestConfiguredRemote_ConfigReadFailureIsNotAbsence(t *testing.T) {
+	testutil.IsolateGitConfigEnv(t)
+	tmpDir := t.TempDir()
+	testutil.InitRepo(t, tmpDir)
+	testutil.AddRemote(t, tmpDir, "origin", "https://example.com/origin.git")
+
+	configPath := filepath.Join(tmpDir, ".git", "config")
+	f, err := os.OpenFile(configPath, os.O_APPEND|os.O_WRONLY, 0)
+	require.NoError(t, err)
+	_, err = f.WriteString("\n[broken\n")
+	require.NoError(t, err)
+	require.NoError(t, f.Close())
+
+	ctx := settings.WithWorktreeRoot(context.Background(), tmpDir)
+	configured, err := configuredRemote(ctx, "origin")
+	require.Error(t, err)
+	assert.False(t, configured)
 }
 
 // Not parallel: uses t.Chdir()

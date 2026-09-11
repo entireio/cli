@@ -356,13 +356,13 @@ type checkpointSyncInfo struct {
 func computeCheckpointSyncInfo(ctx context.Context, s *EntireSettings) checkpointSyncInfo {
 	elected, err := strategy.ResolveCheckpointSyncRemote(ctx)
 	if err != nil {
-		// Fail-closed: checkpoint_push_remote names a remote that does not
-		// exist. The pre-push gate is silently skipping checkpoint sync, so
-		// status is the user's signal.
-		// Accepted divergence: if a structured checkpoint_remote is also
-		// configured, the gate's dedicated exemption may still sync checkpoint
-		// data even while this fail-closed warning is shown, since there is no
-		// elected remote left to probe PushURL against here.
+		// A dedicated checkpoint_remote bypasses election per push remote. Probe
+		// every configured remote before calling the whole sync path disabled: at
+		// least one eligible dedicated destination means checkpoints do still
+		// ship, while doctor reports any unpinned remotes as partially affected.
+		if cr := s.GetCheckpointRemote(); cr != nil && inspectRemoteTopology(ctx).hasPinnedDestination() {
+			return newDedicatedCheckpointSyncInfo(ctx, cr)
+		}
 		return checkpointSyncInfo{Err: err.Error()}
 	}
 	if elected.Name == "" {
@@ -379,16 +379,7 @@ func computeCheckpointSyncInfo(ctx context.Context, s *EntireSettings) checkpoin
 	// PushURL differently than this elected-remote probe does.
 	if cr := s.GetCheckpointRemote(); cr != nil {
 		if _, enabled, purlErr := checkpointremote.PushURL(ctx, elected.Name); purlErr == nil && enabled {
-			info := checkpointSyncInfo{Remote: cr.Repo, Source: checkpointSyncSourceDedicated}
-			// The unpushed counter is meaningful here only on the git-refs
-			// backend (push-queue length is local and accurate). The
-			// git-branch comparison is omitted: pushes to a raw URL update
-			// no remote-tracking ref, so it would permanently read "all
-			// unpushed".
-			if cpCfg, cfgErr := settings.LoadCheckpointsConfig(ctx); cfgErr == nil && checkpoint.PrimaryIsRefs(cpCfg) {
-				info.Unpushed = countUnpushedCheckpointsForStatus(ctx, "")
-			}
-			return info
+			return newDedicatedCheckpointSyncInfo(ctx, cr)
 		}
 	}
 
@@ -410,6 +401,18 @@ func computeCheckpointSyncInfo(ctx context.Context, s *EntireSettings) checkpoin
 			info.IgnoredRemote = repo
 			info.IgnoredReason = reason
 		}
+	}
+	return info
+}
+
+func newDedicatedCheckpointSyncInfo(ctx context.Context, cr *settings.CheckpointRemoteConfig) checkpointSyncInfo {
+	info := checkpointSyncInfo{Remote: cr.Repo, Source: checkpointSyncSourceDedicated}
+	// The unpushed counter is meaningful here only on the git-refs backend
+	// (push-queue length is local and accurate). The git-branch comparison is
+	// omitted: pushes to a raw URL update no remote-tracking ref, so it would
+	// permanently read "all unpushed".
+	if cpCfg, err := settings.LoadCheckpointsConfig(ctx); err == nil && checkpoint.PrimaryIsRefs(cpCfg) {
+		info.Unpushed = countUnpushedCheckpointsForStatus(ctx, "")
 	}
 	return info
 }

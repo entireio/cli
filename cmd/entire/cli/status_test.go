@@ -2490,6 +2490,26 @@ func TestRunStatus_CheckpointSyncDedicated_GitBranch_NoCounter(t *testing.T) {
 	}
 }
 
+func TestRunStatus_CheckpointSyncDedicated_FailedElectionStillReportsDedicated(t *testing.T) {
+	testutil.IsolateGitConfigEnv(t)
+	setupTestRepo(t)
+	writeSettings(t, `{"enabled": true, "strategy_options": {"checkpoint_push_remote": "gone", "checkpoint_remote": {"provider": "github", "repo": "org/checkpoints"}}}`)
+	testutil.AddRemote(t, ".", "origin", "https://github.com/org/repo.git")
+
+	var stdout bytes.Buffer
+	if err := runStatus(context.Background(), &stdout, false, false); err != nil {
+		t.Fatalf("runStatus() error = %v", err)
+	}
+
+	out := stdout.String()
+	if !strings.Contains(out, "Checkpoints sync to: dedicated checkpoint remote (org/checkpoints)") {
+		t.Errorf("the dedicated destination bypasses the failed election, got:\n%s", out)
+	}
+	if strings.Contains(out, "Checkpoints NOT syncing") {
+		t.Errorf("status must not contradict the dedicated delivery path, got:\n%s", out)
+	}
+}
+
 func TestRunStatus_CheckpointSyncDedicated_GitRefs_QueueCounter(t *testing.T) {
 	testutil.IsolateGitConfigEnv(t)
 	setupTestRepo(t)
