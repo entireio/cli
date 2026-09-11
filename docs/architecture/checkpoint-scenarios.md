@@ -216,7 +216,15 @@ The carry-forward logic uses **content-aware comparison** to determine which fil
 
 1. **File not in commit** → definitely has remaining changes
 2. **File in commit, hash matches shadow branch** → fully committed, no carry-forward
-3. **File in commit, hash differs from shadow branch** → partial commit (e.g., `git add -p`), carry forward
+3. **File in commit, hash differs from shadow branch, but the clean-filtered working-tree hash matches the commit** → the user replaced the agent content and committed it fully, no carry-forward
+4. **File in commit, hash differs from both the shadow branch and clean-filtered working tree** → partial commit (e.g., `git add -p`), carry forward
+
+The working-tree hash is computed by native Git so `core.autocrlf`, Git LFS,
+`ident`, and custom clean filters do not create phantom differences. If Git
+cannot hash a path, carry-forward falls back conservatively to a confined raw
+representation comparison and records a warning. Symlink blobs always take the
+confined path because `git hash-object` follows the link rather than hashing its
+target-path string.
 
 This enables splitting changes within a single file across multiple commits (see Scenario 7).
 

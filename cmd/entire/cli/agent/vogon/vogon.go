@@ -119,10 +119,8 @@ func (v *Agent) WriteSession(_ context.Context, session *agent.AgentSession) err
 	if session.SessionRef == "" {
 		return errors.New("session reference is required")
 	}
-	if err := os.MkdirAll(filepath.Dir(session.SessionRef), 0o750); err != nil {
-		return fmt.Errorf("create session dir: %w", err)
-	}
-	if err := os.WriteFile(session.SessionRef, session.NativeData, 0o600); err != nil {
+	// WriteSessionFile creates the parent directory as part of the write.
+	if err := agent.WriteSessionFile(v, session, session.NativeData, 0o600); err != nil {
 		return fmt.Errorf("write session: %w", err)
 	}
 	return nil

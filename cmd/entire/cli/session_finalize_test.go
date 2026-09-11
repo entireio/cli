@@ -55,7 +55,7 @@ func TestFinalizeExitedSessions(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if n := finalizeExitedSessions(ctx, states); n != len(exitedIDs) {
+	if n := finalizeExitedSessions(ctx, states, time.Time{}); n != len(exitedIDs) {
 		t.Fatalf("finalizeExitedSessions = %d, want %d", n, len(exitedIDs))
 	}
 
@@ -114,7 +114,7 @@ func TestFinalizeExitedSessions_StampsLastSeenNotNow(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if n := finalizeExitedSessions(ctx, states); n != 1 {
+	if n := finalizeExitedSessions(ctx, states, time.Time{}); n != 1 {
 		t.Fatalf("finalizeExitedSessions = %d, want 1", n)
 	}
 
@@ -129,6 +129,32 @@ func TestFinalizeExitedSessions_StampsLastSeenNotNow(t *testing.T) {
 		t.Errorf("EndedAt = %s, want the last-seen time %s (sweep back-stamped 'now')",
 			got.EndedAt.Format(time.RFC3339), lastSeen.Format(time.RFC3339))
 	}
+}
+
+// Imported sessions are immutable historical records. Even a malformed legacy
+// record that looks non-ended and carries a dead owner must not be finalized.
+// Not parallel: setupAttachTestRepo uses t.Chdir.
+func TestFinalizeExitedSessions_SkipsImported(t *testing.T) {
+	setupAttachTestRepo(t)
+	ctx := context.Background()
+
+	store, err := session.NewStateStore(ctx)
+	require.NoError(t, err)
+	st := &session.State{
+		SessionID: "imported-dead-owner",
+		Phase:     session.PhaseIdle,
+		StartedAt: time.Now(),
+		Owner:     &proclive.Identity{PID: os.Getpid(), Start: "bogus-start-fingerprint"},
+		Kind:      session.KindImported,
+	}
+	require.NoError(t, store.Save(ctx, st))
+
+	require.Zero(t, finalizeExitedSessions(ctx, []*session.State{st}, time.Time{}))
+	got, err := store.Load(ctx, st.SessionID)
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	assert.Equal(t, session.PhaseIdle, got.Phase)
+	assert.Nil(t, got.EndedAt)
 }
 
 // A hard-killed agent fires neither SubagentStop nor SessionEnd, leaving its
@@ -150,7 +176,9 @@ func TestFinalizeExitedSessions_CompletesLiveTaskRecords(t *testing.T) {
 		TaskRecords: []session.TaskRecord{{ToolUseID: "toolu_sweep1", AgentID: "sweeprec1", StartedAt: time.Now(), SubagentType: "reviewer"}},
 	}
 	require.NoError(t, store.Save(ctx, st))
-	require.Equal(t, 1, finalizeExitedSessions(ctx, []*session.State{st}))
+	// A zero deadline is the detached-sweep policy: nobody is waiting, so all
+	// exited sessions should get their eager-condense attempt.
+	require.Equal(t, 1, finalizeExitedSessions(ctx, []*session.State{st}, time.Time{}))
 
 	got, err := store.Load(ctx, sessionID)
 	require.NoError(t, err)
@@ -247,7 +275,7 @@ func TestFinalizeExitedSessions_RevalidatesUnderLock(t *testing.T) {
 		Owner:     &proclive.Identity{PID: os.Getpid(), Start: "bogus-start-fingerprint"},
 	}
 
-	if n := finalizeExitedSessions(ctx, []*session.State{stale}); n != 0 {
+	if n := finalizeExitedSessions(ctx, []*session.State{stale}, time.Time{}); n != 0 {
 		t.Fatalf("finalizeExitedSessions = %d, want 0 (revalidation should skip the revived session)", n)
 	}
 

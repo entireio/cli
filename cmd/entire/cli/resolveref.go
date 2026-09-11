@@ -23,9 +23,40 @@ import (
 // providerGitHub is the identity-provider slug for GitHub-backed accounts, the
 // provider half of a qualified grantee handle like "github:alice". GitHub is the
 // only provider with backing accounts today; other slugs resolve once they exist
-// server-side. (Distinct from setup.go's checkpointProviderGitHub, which names
-// the checkpoint hosting provider — same string, unrelated concern.)
+// server-side.
+//
+// Three unrelated concerns spell GitHub the same way, and each keeps its own
+// constant so a rename upstream moves one of them rather than all three: this
+// one (which account provider backs a grantee), repoProviderGitHub below (which
+// forge backs a repository), and setup.go's checkpointProviderGitHub (which
+// service hosts a repo's checkpoints).
 const providerGitHub = "github"
+
+// repoProviderGitHub and repoProviderEntire are the values of a repository's
+// `provider` field; the wire enum is "github" | "entire". They answer "which
+// forge backs this repo", which is a different question from providerGitHub's
+// "which provider backs this account" — see the note there.
+//
+// The field is optional and open on the client (normalize.go drops it from
+// `required` and strips its enum), so a caller must test for the value it
+// wants and treat everything else as unknown rather than as the other one.
+const (
+	repoProviderGitHub = "github"
+	repoProviderEntire = "entire"
+)
+
+// projectRefClient and repoRefClient are the narrow control-plane surfaces the
+// name resolvers need. Keeping the helpers on interfaces lets repo-scoped
+// callers resolve a native /et/<project>/<repo> identity with the same client
+// they use to locate its home cell.
+type projectRefClient interface {
+	ListProjects(ctx context.Context, params coreapi.ListProjectsParams) (*coreapi.ListProjectsOutputBody, error)
+}
+
+type repoRefClient interface {
+	projectRefClient
+	ListProjectRepos(ctx context.Context, params coreapi.ListProjectReposParams) (*coreapi.ListProjectReposOutputBody, error)
+}
 
 // looksLikeULID reports whether s has the shape of a ULID: 26 characters drawn
 // from Crockford base32 (digits plus uppercase letters, excluding I, L, O, U).
@@ -158,7 +189,7 @@ func parseQualifiedHandle(ref string) (provider, handle string, err error) {
 // ULID is returned unchanged; a name is resolved via the server's
 // case-insensitive by-name lookup (the same call `entire project list --name`
 // uses). Project names are globally unique, so a name maps to at most one project.
-func resolveProjectRef(ctx context.Context, c *coreapi.Client, ref string) (string, error) {
+func resolveProjectRef(ctx context.Context, c projectRefClient, ref string) (string, error) {
 	if looksLikeULID(ref) {
 		return ref, nil
 	}
@@ -167,7 +198,7 @@ func resolveProjectRef(ctx context.Context, c *coreapi.Client, ref string) (stri
 		if isCoreNotFound(err) {
 			return "", noProjectNamedErr(ref)
 		}
-		return "", err
+		return "", fmt.Errorf("list projects: %w", err)
 	}
 	project, ok := out.Project.Get()
 	if !ok {
@@ -183,7 +214,7 @@ func resolveProjectRef(ctx context.Context, c *coreapi.Client, ref string) (stri
 // org/project endpoints, a name-filtered list returns the single match under the
 // response's singular `repo` field (the plural `repos` is only populated for an
 // unfiltered page) — reading `repos` here was the COR-699 bug.
-func resolveRepoRef(ctx context.Context, c *coreapi.Client, ref, projectRef string) (string, error) {
+func resolveRepoRef(ctx context.Context, c repoRefClient, ref, projectRef string) (string, error) {
 	if looksLikeULID(ref) {
 		return ref, nil
 	}
@@ -199,7 +230,7 @@ func resolveRepoRef(ctx context.Context, c *coreapi.Client, ref, projectRef stri
 		if isCoreNotFound(err) {
 			return "", noRepoNamedErr(ref)
 		}
-		return "", err
+		return "", fmt.Errorf("list project repos: %w", err)
 	}
 	repo, ok := out.Repo.Get()
 	if !ok {
@@ -212,12 +243,21 @@ func noOrgNamedErr(name string) error {
 	return fmt.Errorf("no org named %q (run `entire org list` to see names, or pass a ULID)", name)
 }
 
+var errNamedRefNotFound = errors.New("named reference not found")
+
+// namedRefNotFoundError preserves the actionable user-facing message while
+// allowing repository-routing callers to classify a definitive lookup miss.
+type namedRefNotFoundError struct{ message string }
+
+func (e *namedRefNotFoundError) Error() string { return e.message }
+func (e *namedRefNotFoundError) Unwrap() error { return errNamedRefNotFound }
+
 func noProjectNamedErr(name string) error {
-	return fmt.Errorf("no project named %q (run `entire project list` to see names, or pass a ULID)", name)
+	return &namedRefNotFoundError{message: fmt.Sprintf("no project named %q (run `entire project list` to see names, or pass a ULID)", name)}
 }
 
 func noRepoNamedErr(name string) error {
-	return fmt.Errorf("no repo named %q in that project (run `entire repo list <project>` to see names, or pass a ULID)", name)
+	return &namedRefNotFoundError{message: fmt.Sprintf("no repo named %q in that project (run `entire repo list <project>` to see names, or pass a ULID)", name)}
 }
 
 // resolvedRefLabel formats a reference for a success message so it always

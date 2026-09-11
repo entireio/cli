@@ -5,15 +5,16 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
 
+	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
+	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
@@ -51,8 +52,17 @@ func (s *ManualCommitStrategy) saveSessionState(ctx context.Context, state *Sess
 	return nil
 }
 
-// clearSessionState clears session state using the StateStore.
-func (s *ManualCommitStrategy) clearSessionState(ctx context.Context, sessionID string) error {
+// clearSessionStateLocked clears session state using the StateStore. Callers
+// must already hold sessionID's gate -- either by having called
+// acquireSessionGate themselves, or by running inside a
+// MutateSessionState/MutateSessionStateOnSaved closure for the same session
+// (see CondenseSessionByID's clearAfter path, which clears while still
+// inside its own locked mutation rather than after releasing it). Calling
+// this without the gate held reintroduces the race clearSessionState exists
+// to close: a concurrent, properly-locked write landing in the gap between
+// a caller's "safe to clear" decision and the actual delete would be
+// silently destroyed.
+func (s *ManualCommitStrategy) clearSessionStateLocked(ctx context.Context, sessionID string) error {
 	store, err := s.getStateStore(ctx)
 	if err != nil {
 		return err
@@ -61,6 +71,38 @@ func (s *ManualCommitStrategy) clearSessionState(ctx context.Context, sessionID 
 		return fmt.Errorf("failed to clear session state: %w", err)
 	}
 	return nil
+}
+
+// clearSessionState clears session state using the StateStore, under
+// sessionID's gate -- the same per-session lock MutateSessionState uses for
+// every other mutation of this state. Without it, a concurrently-running,
+// properly-locked write (e.g. a PostToolUse hook for the same session)
+// landing in the gap between a caller's decision to clear and this call
+// actually clearing would be silently destroyed: the file the write just
+// produced gets deleted out from under it, with nothing surfacing the loss.
+// initializeSession documents and fixes the identical hazard class
+// elsewhere in this file ("take the gate, then re-check under lock");
+// this closes the same gap for the clear path.
+func (s *ManualCommitStrategy) clearSessionState(ctx context.Context, sessionID string) error {
+	if sessionID == "" {
+		return ErrStateNotFound
+	}
+	_, isOuter, release, err := acquireSessionGate(ctx, sessionID)
+	if err != nil {
+		return err
+	}
+	defer release()
+	if !isOuter {
+		// A MutateSessionState frame for this session is already active on
+		// this goroutine. Reaching clearSessionState reentrantly from
+		// inside one is not something any current caller does (they clear
+		// only after their own mutation closure has already returned and
+		// released) -- if that ever changes, call clearSessionStateLocked
+		// directly from inside the active closure instead, the way
+		// CondenseSessionByID's clearAfter path does.
+		return fmt.Errorf("clearSessionState: session %s gate already held by an active MutateSessionState frame on this goroutine", sessionID)
+	}
+	return s.clearSessionStateLocked(ctx, sessionID)
 }
 
 // listAllSessionStates returns all active session states.
@@ -126,23 +168,38 @@ func (s *ManualCommitStrategy) listAllSessionStates(ctx context.Context) ([]*Ses
 	return states, nil
 }
 
-// isWarnableStaleEndedSession reports whether an ENDED session is still both
-// expensive in PostCommit and actionable via 'entire doctor'.
-func isWarnableStaleEndedSession(repo *git.Repository, state *SessionState) bool {
+// IsCondensableEndedSession reports whether an ENDED session still carries
+// uncondensed content AND can be salvaged by condensing
+// (CondenseSessionByID). Two shapes qualify: checkpoint steps whose shadow
+// branch still exists, and record-bearing sessions (pending subagent task
+// records), whose content never lives on the shadow branch and so needs no
+// branch to condense. ENDED sessions with steps but no shadow branch and no
+// task records are NOT condensable; fixing those means discarding state,
+// which the background sweep never initiates — those sessions are left to
+// `entire doctor` (and the existing orphan cleanup in listAllSessionStates).
+// Used by the PostCommit stale-session warning and the background zombie
+// sweep.
+func IsCondensableEndedSession(repo *git.Repository, state *SessionState) bool {
 	if state.Phase != session.PhaseEnded || state.FullyCondensed ||
 		(state.StepCount <= 0 && !state.HasTaskContent()) {
 		return false
 	}
 
-	// Re-check shadow branch existence even though listAllSessionStates already
-	// filters orphaned sessions. This is intentional: PostCommit deletes shadow
-	// branches during condensation, so a branch that existed at list-load time
-	// may be gone by the time we reach the warning check. Without this re-check
-	// we would warn about sessions that this commit just cleaned up.
-	// Record-bearing sessions stay warnable: their content never lives on the shadow branch.
+	// Record-bearing sessions qualify without a shadow branch: task records
+	// are stored off-branch, so condensation can materialize them regardless.
 	if state.HasTaskContent() {
 		return true
 	}
+
+	// Check shadow branch existence. For PostCommit this is a re-check —
+	// its list arrives via listAllSessionStates, which already filters
+	// orphaned sessions — and it is intentional even there: condensation
+	// deletes shadow branches, so a branch that existed at list-load time may
+	// be gone by the time the warning re-checks here, and we'd otherwise warn
+	// about a session this commit (or a concurrent condense) just cleaned up.
+	// The background zombie sweep, by contrast, arrives via the raw
+	// ListSessionStates, so for the sweep this is the PRIMARY shadow-branch
+	// check, not a re-check — it is what keeps the sweep condense-only.
 	shadowBranch := getShadowBranchNameForCommit(state.BaseCommit, state.WorktreeID)
 	refName := plumbing.NewBranchReferenceName(shadowBranch)
 	_, err := repo.Reference(refName, true)
@@ -154,7 +211,7 @@ func isWarnableStaleEndedSession(repo *git.Repository, state *SessionState) bool
 func countWarnableStaleEndedSessions(repo *git.Repository, sessions []*SessionState) int {
 	n := 0
 	for _, state := range sessions {
-		if isWarnableStaleEndedSession(repo, state) {
+		if IsCondensableEndedSession(repo, state) {
 			n++
 		}
 	}
@@ -177,6 +234,13 @@ func (s *ManualCommitStrategy) findExactSessionsForWorktree(ctx context.Context,
 func exactWorktreeMatches(states []*SessionState, worktreePath string) []*SessionState {
 	var exact []*SessionState
 	for _, state := range states {
+		// Imported sessions are historical records reconstructed from
+		// transcripts; a fresh commit must never link to one (a leaked
+		// imported fixture once hijacked a commit's trailer — the sessC
+		// incident).
+		if state.Kind.IsImported() {
+			continue
+		}
 		if state.WorktreePath == worktreePath {
 			exact = append(exact, state)
 		}
@@ -187,27 +251,43 @@ func exactWorktreeMatches(states []*SessionState, worktreePath string) []*Sessio
 // findSessionsForWorktree finds all sessions for the given worktree path.
 // Exact WorktreePath matches win; otherwise sessions recorded in another
 // worktree of the same repository (shared git common dir) are matched, as long
-// as all candidates come from a single worktree.
+// as all candidates come from a single worktree. Callers that also run
+// identity matching use findSessionsForWorktreeFromStates to share one state
+// listing; this wrapper serves the paths that only need worktree semantics
+// (amend, post-rewrite) and deliberately drops the ambiguity signal — their
+// commits are history edits where an adopt hint would be noise.
 func (s *ManualCommitStrategy) findSessionsForWorktree(ctx context.Context, worktreePath string) ([]*SessionState, error) {
 	allStates, err := s.listAllSessionStates(ctx)
 	if err != nil {
 		return nil, err
 	}
+	matches, _ := s.findSessionsForWorktreeFromStates(ctx, allStates, worktreePath)
+	return matches, nil
+}
 
+// findSessionsForWorktreeFromStates is findSessionsForWorktree over an
+// already-loaded state list. The second result reports a multi-worktree
+// ambiguity decline — candidates existed but spanned several worktrees, so
+// nothing was linked; findSessionsForCommitLinking surfaces it to the user
+// only when identity matching cannot rescue the commit either.
+func (s *ManualCommitStrategy) findSessionsForWorktreeFromStates(ctx context.Context, allStates []*SessionState, worktreePath string) ([]*SessionState, bool) {
 	if exact := exactWorktreeMatches(allStates, worktreePath); len(exact) > 0 {
-		return exact, nil
+		return exact, false
 	}
 
 	worktreeCommonDir, err := gitCommonDirForWorktree(ctx, worktreePath)
 	if err != nil {
-		return nil, fmt.Errorf("resolve common dir for fallback session matching: %w", err)
+		logging.Debug(logging.WithComponent(ctx, "checkpoint"),
+			"session matching: cannot resolve common dir for fallback matching",
+			slog.String("error", err.Error()))
+		return nil, false
 	}
 
 	var parentWorktreeMatches []*SessionState
 	var commonDirMatches []*SessionState
 	commonDirByPath := make(map[string]string)
 	for _, state := range allStates {
-		if state.WorktreePath == "" {
+		if state.WorktreePath == "" || state.Kind.IsImported() {
 			continue
 		}
 
@@ -229,17 +309,50 @@ func (s *ManualCommitStrategy) findSessionsForWorktree(ctx context.Context, work
 	}
 
 	if len(parentWorktreeMatches) > 0 {
-		matches := sessionsFromSingleWorktree(parentWorktreeMatches)
-		if matches == nil {
-			warnAmbiguousWorktreeSessions(ctx, worktreePath, parentWorktreeMatches)
+		return resolveWorktreeCandidates(ctx, worktreePath, parentWorktreeMatches)
+	}
+	return resolveWorktreeCandidates(ctx, worktreePath, commonDirMatches)
+}
+
+// recentSessionWindow bounds the liveness filter below: a session that
+// interacted within this window is plausibly the one whose work is being
+// committed right now; one idle for days is not. This deliberately converts
+// some multi-worktree cases the old code declined into a best-candidate link:
+// a session in a long-running build or tool call can age out and leave the
+// other recent worktree to win. Commits normally follow agent activity by
+// seconds to minutes, so 15 minutes is the chosen correctness tradeoff.
+const recentSessionWindow = 15 * time.Minute
+
+// resolveWorktreeCandidates reduces fallback candidates to a linkable set.
+// All from one worktree: linked (the supported concurrent-session case).
+// Spanning several worktrees: filter to recently-interacting sessions and
+// link only if a single worktree remains — days-idle stragglers must not
+// veto the obviously-live session, but between two live worktrees there is
+// no safe guess. A refusal logs here and reports true, so the
+// commit-linking caller can announce it on stderr with the remedy (#1852:
+// silent loss of linkage) — but only after identity matching has also failed
+// to rescue the commit, and never on amend/post-rewrite.
+func resolveWorktreeCandidates(ctx context.Context, worktreePath string, candidates []*SessionState) (matches []*SessionState, ambiguous bool) {
+	if len(candidates) == 0 {
+		return nil, false
+	}
+	if matches := sessionsFromSingleWorktree(candidates); matches != nil {
+		return matches, false
+	}
+	cutoff := time.Now().Add(-recentSessionWindow)
+	var live []*SessionState
+	for _, state := range candidates {
+		if state.LastInteractionTime != nil && state.LastInteractionTime.After(cutoff) {
+			live = append(live, state)
 		}
-		return matches, nil
 	}
-	matches := sessionsFromSingleWorktree(commonDirMatches)
-	if matches == nil && len(commonDirMatches) > 0 {
-		warnAmbiguousWorktreeSessions(ctx, worktreePath, commonDirMatches)
+	if len(live) > 0 {
+		if matches := sessionsFromSingleWorktree(live); matches != nil {
+			return matches, false
+		}
 	}
-	return matches, nil
+	warnAmbiguousWorktreeSessions(ctx, worktreePath, candidates)
+	return nil, true
 }
 
 // warnAmbiguousWorktreeSessions surfaces refused fallback matches: live
@@ -369,7 +482,7 @@ func gitCommonDirForWorktree(ctx context.Context, worktreePath string) (string, 
 	}
 
 	cmd := exec.CommandContext(ctx, "git", "-C", worktreePath, "rev-parse", "--git-common-dir")
-	cmd.Env = gitEnvWithoutRepoOverrides()
+	cmd.Env = gitrepo.EnvWithoutRepoOverrides()
 	output, err := cmd.Output()
 	if err != nil {
 		return "", fmt.Errorf("failed to get git common dir for %s: %w", worktreePath, err)
@@ -387,25 +500,6 @@ func gitCommonDirForWorktree(ctx context.Context, worktreePath string) (string, 
 		commonDir = resolved
 	}
 	return commonDir, nil
-}
-
-// gitEnvWithoutRepoOverrides returns the current environment minus git's
-// repo-selector variables. Git hooks run with GIT_DIR (and sometimes
-// GIT_WORK_TREE / GIT_INDEX_FILE) exported for the hook's own repo; inheriting
-// them would make `git -C <other-worktree>` resolve against the hook's repo
-// instead of the requested path.
-func gitEnvWithoutRepoOverrides() []string {
-	env := os.Environ()
-	filtered := make([]string, 0, len(env))
-	for _, kv := range env {
-		if strings.HasPrefix(kv, "GIT_DIR=") ||
-			strings.HasPrefix(kv, "GIT_WORK_TREE=") ||
-			strings.HasPrefix(kv, "GIT_INDEX_FILE=") {
-			continue
-		}
-		filtered = append(filtered, kv)
-	}
-	return filtered
 }
 
 func isNestedWorktreeOfRecordedRepo(recordedWorktreePath, commitWorktreePath string) bool {
@@ -485,15 +579,9 @@ func (s *ManualCommitStrategy) findSessionsForCommit(ctx context.Context, baseCo
 }
 
 // FindSessionsForCommit is the exported version of findSessionsForCommit.
-// Used by the rewind reset command to find sessions to clean up.
+// Used by `entire clean` to find sessions to clean up.
 func (s *ManualCommitStrategy) FindSessionsForCommit(ctx context.Context, baseCommitSHA string) ([]*SessionState, error) {
 	return s.findSessionsForCommit(ctx, baseCommitSHA)
-}
-
-// ClearSessionState is the exported version of clearSessionState.
-// Used by the rewind reset command to clean up session state files.
-func (s *ManualCommitStrategy) ClearSessionState(ctx context.Context, sessionID string) error {
-	return s.clearSessionState(ctx, sessionID)
 }
 
 // CountOtherActiveSessionsWithCheckpoints counts how many other active sessions
@@ -562,7 +650,8 @@ func (s *ManualCommitStrategy) initializeSession(ctx context.Context, repo *git.
 		return fmt.Errorf("failed to get worktree ID: %w", err)
 	}
 
-	// Capture untracked files at session start to preserve them during rewind
+	// Capture untracked files at session start so checkpoint bookkeeping can tell
+	// them apart from files the session created
 	untrackedFiles, err := collectUntrackedFiles(ctx)
 	if err != nil {
 		// Non-fatal: continue even if we can't collect untracked files
@@ -594,6 +683,11 @@ func (s *ManualCommitStrategy) initializeSession(ctx context.Context, repo *git.
 		TranscriptPath:        transcriptPath,
 		LastPrompt:            truncatePromptForStorage(userPrompt),
 	}
+	if agentType == agent.AgentTypeCodex {
+		complete := true
+		state.SubagentInventoryComplete = &complete
+		state.SubagentTokensBaselineComplete = &complete
+	}
 
 	// Take the gate, then re-check under lock. Without this re-check a
 	// concurrent turn-start hook that wrote a richer state in the gap
@@ -611,6 +705,41 @@ func (s *ManualCommitStrategy) initializeSession(ctx context.Context, repo *git.
 	}
 	if existing != nil && existing.BaseCommit != "" {
 		return nil
+	}
+	if existing != nil && agentType == agent.AgentTypeCodex {
+		// Repair the partial state in place. A child hook can have recorded task
+		// content and accounting before the parent session initializes, so a
+		// fresh replacement would silently discard durable child state.
+		state = existing
+		state.CLIVersion = versioninfo.Version
+		state.BaseCommit = headHash
+		state.AttributionBaseCommit = headHash
+		state.WorktreePath = worktreePath
+		state.WorktreeID = worktreeID
+		if state.StartedAt.IsZero() {
+			state.StartedAt = now
+		}
+		state.LastInteractionTime = &now
+		state.TurnID = turnID.String()
+		state.AgentType = agentType
+		if model != "" {
+			state.ModelName = model
+		}
+		if transcriptPath != "" {
+			state.TranscriptPath = transcriptPath
+		}
+		if userPrompt != "" {
+			state.LastPrompt = truncatePromptForStorage(userPrompt)
+		}
+		if state.UntrackedFilesAtStart == nil {
+			state.UntrackedFilesAtStart = untrackedFiles
+		}
+
+		// This is a repair, not an authoritative SessionStart inventory. Keep
+		// the ledger and token data but retain conservative coverage markers.
+		incomplete := false
+		state.SubagentInventoryComplete = &incomplete
+		state.SubagentTokensBaselineComplete = &incomplete
 	}
 	return s.saveSessionState(ctx, state)
 }

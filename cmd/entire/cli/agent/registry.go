@@ -186,7 +186,7 @@ const DefaultAgentName types.AgentName = AgentNameClaudeCode
 // This is acceptable because:
 //   - Agent count is small (~2-20 agents)
 //   - Agent factories are lightweight (empty struct allocation)
-//   - Called infrequently (commit hooks, rewind, debug commands - not hot paths)
+//   - Called infrequently (commit hooks, resume, debug commands - not hot paths)
 //   - Cost is ~400ns worst case vs milliseconds for I/O operations
 //
 // Only optimize if agent count exceeds 100 or profiling shows this as a bottleneck.
@@ -226,6 +226,38 @@ func AllProtectedDirs() []string {
 	}
 	slices.Sort(dirs)
 	return dirs
+}
+
+// AllHookConfigRelPaths returns the worktree-relative path of every registered
+// agent's hook-configuration file, for the agents that declare one
+// (HookConfigLocator). Sorted and deduplicated.
+func AllHookConfigRelPaths() []string {
+	registryMu.RLock()
+	factories := make([]Factory, 0, len(registry))
+	for _, f := range registry {
+		factories = append(factories, f)
+	}
+	registryMu.RUnlock()
+
+	seen := make(map[string]struct{})
+	var out []string
+	for _, factory := range factories {
+		locator, ok := factory().(HookConfigLocator)
+		if !ok {
+			continue
+		}
+		p := locator.HookConfigRelPath()
+		if p == "" {
+			continue
+		}
+		if _, dup := seen[p]; dup {
+			continue
+		}
+		seen[p] = struct{}{}
+		out = append(out, p)
+	}
+	slices.Sort(out)
+	return out
 }
 
 // AllProtectedFiles returns the union of ProtectedFiles from all registered agents.

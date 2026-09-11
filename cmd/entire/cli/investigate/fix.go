@@ -5,8 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"os"
-	"path/filepath"
 	"strings"
 )
 
@@ -22,6 +20,12 @@ type FixDeps struct {
 	// ManifestStore loads local manifests by run ID.
 	ManifestStore *LocalManifestStore
 
+	// StateStore reads the per-run findings document for manifests that do
+	// not embed one. Nil means "resolve from the current repository"; RunFix
+	// fills it in, and a nil result is soft — the findings section falls
+	// back to "(no findings recorded)".
+	StateStore *StateStore
+
 	// FixAgent is the agent registry name to launch. When empty, RunFix
 	// falls back to defaultFixAgent.
 	FixAgent string
@@ -29,9 +33,6 @@ type FixDeps struct {
 	// Launch runs the actual coding agent session. Production wires this
 	// to agentlaunch.LaunchFixAgent.
 	Launch func(ctx context.Context, agentName string, prompt string) error
-
-	// ReadFile, when non-nil, replaces os.ReadFile.
-	ReadFile func(name string) ([]byte, error)
 }
 
 // FixInput drives RunFix.
@@ -42,7 +43,10 @@ type FixInput struct {
 	// Out is the user-facing stream for the launch banner.
 	Out io.Writer
 
-	// ErrOut is the user-facing stream for warnings (e.g. missing doc).
+	// ErrOut is the user-facing stream for warnings. RunFix currently has
+	// none to emit (findings resolution is soft, matching RunShow), but
+	// callers wire it for parity with the other investigate subcommands and
+	// in case a future warning needs it.
 	ErrOut io.Writer
 }
 
@@ -65,18 +69,31 @@ func RunFix(ctx context.Context, in FixInput, deps FixDeps) error {
 		return err
 	}
 
-	readFile := deps.ReadFile
-	if readFile == nil {
-		readFile = os.ReadFile
+	if deps.StateStore == nil {
+		// Best-effort: a repo-less invocation (or a store that fails to
+		// open) still launches the fix agent, just without a findings
+		// section — the same soft fallback RunShow uses.
+		if store, err := NewStateStore(ctx); err == nil {
+			deps.StateStore = store
+		}
 	}
 
 	// Prefer the manifest's embedded findings content (populated on
 	// terminal outcomes — the per-run dir is auto-cleaned, so FindingsDoc
-	// points at a deleted path). Fall back to reading the on-disk file
-	// for paused/cancelled runs where the dir is preserved.
+	// points at a deleted path). Fall back to reading the per-run findings
+	// document for paused/cancelled runs where the dir is preserved.
+	//
+	// Resolved by run id through the store, never by following
+	// manifest.FindingsDoc directly: that field is an absolute path decoded
+	// from a JSON manifest file on disk, so following it would let whoever
+	// writes the manifest choose which file on the filesystem gets read and
+	// fed into the launched agent's prompt. The run id is the part of the
+	// manifest that is validated, and ReadRunFindings resolves it as a name
+	// inside the store's root, matching cmd.go's findingsContentFor and
+	// show.go's printShowFindings.
 	findingsBody := manifest.FindingsContent
 	if findingsBody == "" {
-		findingsBody = readDocOrWarn(readFile, manifest.FindingsDoc, "findings", in.ErrOut)
+		findingsBody = ReadRunFindings(deps.StateStore, manifest.RunID)
 	}
 
 	prompt := composeFixPrompt(manifest, findingsBody)
@@ -115,36 +132,6 @@ func resolveFixManifest(ctx context.Context, store *LocalManifestStore, runID st
 		return LocalManifest{}, errors.New("no local investigations found")
 	}
 	return m, nil
-}
-
-// readDocOrWarn reads path with the supplied reader. A missing or
-// unreadable path yields an empty string and a warning to errOut (when
-// non-nil); the caller is expected to handle empty doc bodies gracefully
-// in the composed prompt. An empty path yields "" without a warning,
-// since the manifest legitimately may not record both documents.
-//
-// Relative paths are rejected with a warning rather than silently resolving
-// against the process cwd — the manifest contract is absolute paths only
-// (see LocalManifest.FindingsDoc), and a relative path here typically
-// means a writer wrote bad data.
-func readDocOrWarn(read func(string) ([]byte, error), path string, label string, errOut io.Writer) string {
-	if path == "" {
-		return ""
-	}
-	if !filepath.IsAbs(path) {
-		if errOut != nil {
-			fmt.Fprintf(errOut, "warning: %s doc path %q is not absolute; skipping\n", label, path)
-		}
-		return ""
-	}
-	b, err := read(path)
-	if err != nil {
-		if errOut != nil {
-			fmt.Fprintf(errOut, "warning: could not read %s doc %q: %v\n", label, path, err)
-		}
-		return ""
-	}
-	return string(b)
 }
 
 // composeFixPrompt builds the follow-up prompt sent to the fix agent: a

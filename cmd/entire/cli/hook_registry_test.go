@@ -14,6 +14,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/claudecode"
 	"github.com/entireio/cli/cmd/entire/cli/checkpointpolicy"
+	"github.com/entireio/cli/cmd/entire/cli/entiredir"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
@@ -86,7 +87,7 @@ func TestNewAgentHookVerbCmd_LogsInvocation(t *testing.T) {
 	t.Setenv(logging.LogLevelEnvVar, "DEBUG")
 
 	// Open the log sink (normally done by the root PersistentPreRun)
-	l, err := logging.New(logging.Config{Dir: logsDir, Level: resolveLogLevel(context.Background())})
+	l, err := logging.New(logging.Config{Root: entiredir.OpenerAt(tmpDir), Dir: logging.LogsName, Level: resolveLogLevel(context.Background())})
 	if err != nil {
 		t.Fatalf("logging.New() error = %v", err)
 	}
@@ -581,9 +582,8 @@ func TestExecuteAgentHookPostTodoFailsWhenPolicyUnsupported(t *testing.T) {
 // TestAgentHooksCmd_AttachesHookSessionContext pins where each agent hook tree
 // gets its context and where flushing happens. PersistentPreRun attaches the
 // hook session context; PersistentPostRun/E must stay unset, because the log
-// sink is opened by the root PersistentPreRun and flushed by its
-// PersistentPostRun (and again by main.go for the error path cobra skips
-// post-runs on).
+// sink is opened by the root PersistentPreRun and closed by main.go, which is
+// the only close site.
 //
 // Both variants are asserted because cobra picks PersistentPreRunE over
 // PersistentPreRun when both are set, so a stray E would silently shadow this
@@ -607,9 +607,9 @@ func TestAgentHooksCmd_AttachesHookSessionContext(t *testing.T) {
 			require.Nil(t, agentCmd.PersistentPreRunE,
 				"PersistentPreRunE must stay unset: cobra would run it instead of PersistentPreRun")
 			require.Nil(t, agentCmd.PersistentPostRun,
-				"PersistentPostRun must stay unset: the root PersistentPostRun and main.go flush the log sink")
+				"PersistentPostRun must stay unset: main.go flushes the log sink")
 			require.Nil(t, agentCmd.PersistentPostRunE,
-				"PersistentPostRunE must stay unset: the root PersistentPostRun and main.go flush the log sink")
+				"PersistentPostRunE must stay unset: main.go flushes the log sink")
 		})
 	}
 }

@@ -4,7 +4,7 @@
 
 - **Windows 10 1809+** (required for ConPTY support in E2E tests)
 - **Git for Windows** — provides `git.exe` and bundled bash for git hooks
-- **Go 1.26+** — for building from source
+- **Go 1.27.1+** — for building from source
 
 ## Building
 

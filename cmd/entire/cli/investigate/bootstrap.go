@@ -57,8 +57,7 @@ func DeriveTopicFromSeed(body []byte, fallbackFilename string) string {
 	return strings.TrimSuffix(base, filepath.Ext(base))
 }
 
-// BootstrapInput carries the data needed to produce the initial findings
-// doc on disk.
+// BootstrapInput carries the data needed to render the initial findings doc.
 //
 // Exactly one of SeedDoc / Topic / IssueLinkSeed must be set:
 //   - SeedDoc:       the user passed a positional [seed-doc] path; render
@@ -89,10 +88,6 @@ type BootstrapInput struct {
 	// IssueLinkTopic is the topic derived from the resolved issue/PR
 	// title. Used only when IssueLinkSeed is non-empty.
 	IssueLinkTopic string
-
-	// FindingsDoc is the absolute path the findings doc must be written
-	// to.
-	FindingsDoc string
 }
 
 // BootstrapResult reports what was produced.
@@ -101,25 +96,22 @@ type BootstrapResult struct {
 	// manifest entries, and prompt rendering.
 	Topic string
 
-	// FindingsDoc is the absolute path the findings doc was written to
-	// (echoes BootstrapInput.FindingsDoc).
-	FindingsDoc string
+	// Body is the rendered findings document. The caller persists it —
+	// see StateStore.WriteFindings.
+	Body []byte
 }
 
-// Bootstrap writes the initial findings doc to disk.
+// Bootstrap renders the initial findings doc. It does not touch the filesystem.
 //
-// File-write semantics: creates parent directories as needed and writes
-// the findings file unconditionally. Callers that want "skip if findings
-// doc exists" semantics should stat the path themselves; Bootstrap is
-// idempotent at the byte level (same input → same output) but does not
-// protect existing files — protecting an existing investigation belongs
-// to a layer above this one.
+// It used to take the destination path and write there itself, which put a
+// write into the git common dir behind a string parameter that nothing in this
+// package owned. Rendering and persisting are now separate: the caller hands
+// the body to StateStore.WriteFindings, which resolves the run id as a name
+// inside the store's root. Bootstrap is idempotent (same input → same output)
+// and, having no destination, cannot overwrite anything — protecting an
+// existing investigation belongs to the layer that writes.
 func Bootstrap(ctx context.Context, in BootstrapInput) (BootstrapResult, error) {
 	_ = ctx // Reserved for future use (e.g. cancellation during long renders).
-
-	if in.FindingsDoc == "" {
-		return BootstrapResult{}, errors.New("FindingsDoc is required")
-	}
 
 	var (
 		topic string
@@ -142,7 +134,7 @@ func Bootstrap(ctx context.Context, in BootstrapInput) (BootstrapResult, error) 
 	case len(in.IssueLinkSeed) > 0:
 		topic = in.IssueLinkTopic
 		if topic == "" {
-			topic = DeriveTopicFromSeed(in.IssueLinkSeed, in.FindingsDoc)
+			topic = DeriveTopicFromSeed(in.IssueLinkSeed, "")
 		}
 		body = []byte(renderInvestigationScaffold(
 			topic,
@@ -162,18 +154,7 @@ func Bootstrap(ctx context.Context, in BootstrapInput) (BootstrapResult, error) 
 		return BootstrapResult{}, errors.New("Bootstrap: one of SeedDoc, Topic, or IssueLinkSeed is required")
 	}
 
-	if err := os.MkdirAll(filepath.Dir(in.FindingsDoc), 0o750); err != nil {
-		return BootstrapResult{}, fmt.Errorf("create findings dir: %w", err)
-	}
-
-	if err := os.WriteFile(in.FindingsDoc, body, 0o600); err != nil {
-		return BootstrapResult{}, fmt.Errorf("write findings doc: %w", err)
-	}
-
-	return BootstrapResult{
-		Topic:       topic,
-		FindingsDoc: in.FindingsDoc,
-	}, nil
+	return BootstrapResult{Topic: topic, Body: body}, nil
 }
 
 // renderInvestigationScaffold returns the investigation scaffold body.

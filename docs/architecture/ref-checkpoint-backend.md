@@ -163,6 +163,7 @@ Backend selection lives in the `checkpoints` block of settings (`settings/checkp
 ```
 
 - `primary.type` is required. When the whole block is absent, the layer defaults to the **git-branch** backend with no mirrors — so existing repos are unchanged.
+- **A first-time `entire enable` writes `git-refs` explicitly, with no prompt.** Both setup paths do it — the interactive flow and the non-interactive `--agent` flow — via `resolveFirstRunCheckpointBackend` / `firstRunCheckpointBackendDefault` (`setup.go`). There is deliberately **no setup question**: storage topology is not answerable at first-run, so the recommended backend is written silently and `git-branch` is reachable only by typing `--checkpoint-backend branch`. The one case that writes nothing is an active `ENTIRE_CHECKPOINTS_PRIMARY`, since the env fully replaces the settings block and persisting a default would only record diverging config.
 - `settings.local.json`'s `checkpoints` block **replaces** the one in `settings.json` wholesale (this is a selection config, not a deep-merged document).
 - Config loading is **fail-soft**: a missing file, a whole-file JSON syntax error, or unrelated invalid fields all resolve to "no config" → default git-branch. It errors *only* when a present `checkpoints` block is itself invalid.
 - Unknown fields are rejected (`DisallowUnknownFields`) to surface typos. The trade-off: adding a `checkpoints` field is a coordinated rollout — ship the reader before any writer emits the field.
@@ -177,7 +178,7 @@ The switch is a **primary flip**, not a dual-write phase. There is no "run both 
 
 | State | `primary` | Behavior |
 |-------|-----------|----------|
-| **Config-less fallback** | `git-branch` | Hex checkpoints on the `v1` branch; unchanged legacy behavior for repos set up before the git-refs default (new setups write an explicit primary — `git-refs` as the recommended pick unless the setup question chose branch) |
+| **Config-less fallback** | `git-branch` | Hex checkpoints on the `v1` branch; unchanged legacy behavior for repos set up before the git-refs default. A repo reaches this state only by predating that default (or by having its `checkpoints` block removed) — a first-time `entire enable` always writes an explicit primary |
 | **Refs-only** | `git-refs` | New checkpoints are ULIDs written as per-checkpoint refs; pre-existing hex/`v1` checkpoints stay readable via the read-routing fallback |
 
 ## Checkpoint version and policy

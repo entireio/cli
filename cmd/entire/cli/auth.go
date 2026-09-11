@@ -215,7 +215,7 @@ func newAuthTokenCmd() *cobra.Command {
 func newAuthStatusCmd() *cobra.Command {
 	var insecureHTTPAuth bool
 	cmd := &cobra.Command{
-		Use:   "status",
+		Use:   cmdStatus,
 		Short: "Show authentication status",
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			target, err := resolveAuthStatusTarget(cmd.Context(), auth.Contexts, auth.RefreshedLoginToken)
@@ -568,6 +568,21 @@ func (s authTableStyles) render(style lipgloss.Style, text string) string {
 // sizing each column to its widest (possibly pre-styled) cell. Column widths
 // use lipgloss.Width so ANSI escapes don't inflate the padding.
 func renderAlignedTable(w io.Writer, header []string, rows [][]string) {
+	for _, line := range alignTableLines(header, rows) {
+		fmt.Fprintln(w, line)
+	}
+}
+
+// alignTableLines lays header and rows out in left-aligned columns and returns
+// one string per line, header first, with no trailing newline.
+//
+// Separate from renderAlignedTable because the context picker needs the same
+// columns as strings rather than written out: huh takes each row as an option
+// label and the header as the field description, so there is no writer to
+// render into. Trailing padding is trimmed, which matters there — huh styles
+// the whole label, so padding on the end would widen the selected row's
+// highlight past its text.
+func alignTableLines(header []string, rows [][]string) []string {
 	widths := make([]int, len(header))
 	for i, h := range header {
 		widths[i] = lipgloss.Width(h)
@@ -580,25 +595,31 @@ func renderAlignedTable(w io.Writer, header []string, rows [][]string) {
 		}
 	}
 
-	writeRow(w, header, widths)
-	for _, row := range rows {
-		writeRow(w, row, widths)
+	lines := make([]string, 0, len(rows)+1)
+	for _, cells := range append([][]string{header}, rows...) {
+		lines = append(lines, rowLine(cells, widths))
 	}
+	return lines
 }
 
-func writeRow(w io.Writer, cells []string, widths []int) {
+func rowLine(cells []string, widths []int) string {
+	var b strings.Builder
 	for i, c := range cells {
-		fmt.Fprint(w, c)
+		b.WriteString(c)
 		if i < len(cells)-1 {
-			fmt.Fprint(w, strings.Repeat(" ", widths[i]-lipgloss.Width(c)+2))
+			b.WriteString(strings.Repeat(" ", widths[i]-lipgloss.Width(c)+2))
 		}
 	}
-	fmt.Fprintln(w)
+	return strings.TrimRight(b.String(), " ")
 }
 
-func fallback(s, alt string) string {
+// orDash renders an empty table cell as placeholderDash, so a column keeps its
+// width and a missing value reads as absent rather than as a blank gap. Shared
+// by the auth, context, and mirror tables — a whitespace-only value counts as
+// empty, since a cell of spaces would silently break column alignment.
+func orDash(s string) string {
 	if strings.TrimSpace(s) == "" {
-		return alt
+		return placeholderDash
 	}
 	return s
 }
@@ -616,7 +637,7 @@ func renderAuthSessionsTable(w io.Writer, sty authTableStyles, sessions []api.Au
 	rows := make([][]string, 0, len(sessions))
 	for _, s := range sessions {
 		rows = append(rows, []string{
-			sty.render(sty.name, fallback(s.Name, placeholderDash)),
+			sty.render(sty.name, orDash(s.Name)),
 			sty.render(sty.value, formatAuthDate(s.CreatedAt)),
 			sty.render(sty.value, formatLastUsed(s.LastUsedAt)),
 			sty.render(sty.value, formatAuthDate(s.ExpiresAt)),

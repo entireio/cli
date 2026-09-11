@@ -74,6 +74,31 @@ linters:
     - whitespace
     - wrapcheck
   settings:
+    goconst:
+      # golangci-lint 2.13's goconst upgrade began scanning composite literals,
+      # which turned ~2.3k previously-unreported strings into findings. The two
+      # knobs below are NOT equivalent in what they give up:
+      #
+      #   ignore-map-keys restores the prior scope exactly: a map-literal key
+      #   was never reported before 2.13, so nothing is lost.
+      #
+      #   ignore-tests is broader than the 2.13 change and DOES give up
+      #   coverage this repo had. goconst used to lint test logic -- the proof
+      #   is the three //nolint:goconst directives in _test.go files that the
+      #   Go 1.27 bump deleted as unused; they were suppressing real
+      #   comparison/assignment findings under 2.11. Those shapes are no longer
+      #   checked in tests.
+      #
+      # It is accepted anyway because no narrower exclusion exists. goconst
+      # settings are global (there is no per-path variant), the remainder is
+      # 2016 findings across 62 packages so a path-scoped rule would have to
+      # name nearly every one, and the field that looks like the right tool --
+      # exclude-types: [CompositeLit] -- REPLACES the default exclusion set
+      # rather than adding to it, so it re-enables Call findings and takes the
+      # count up to 6255. Revisit if goconst gains per-path settings or fixes
+      # exclude-types.
+      ignore-tests: true
+      ignore-map-keys: true
     gosec:
       excludes:
         - G204 # subprocess with variables is expected for git/opencode CLI wrappers

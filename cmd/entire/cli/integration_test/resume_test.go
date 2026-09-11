@@ -11,10 +11,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/entireio/cli/cmd/entire/cli/execx"
-	"github.com/entireio/cli/cmd/entire/cli/testutil"
 	"github.com/go-git/go-git/v6"
 	"github.com/go-git/go-git/v6/plumbing"
+
+	"github.com/entireio/cli/cmd/entire/cli/execx"
+	"github.com/entireio/cli/cmd/entire/cli/testutil"
 )
 
 const masterBranch = "master"
@@ -519,17 +520,10 @@ func (env *TestEnv) RunResumeForce(branchName string) (string, error) {
 func (env *TestEnv) GitMerge(branchName string) {
 	env.T.Helper()
 
-	ctx := env.T.Context()
 	// Use --no-verify to skip hooks - git-triggered hooks are not exercised here
 	// from test temp directories. This is fine since we're testing merge behavior,
 	// not hook execution during merge.
-	cmd := exec.CommandContext(ctx, "git", "merge", branchName, "-m", "Merge branch '"+branchName+"'", "--no-verify")
-	cmd.Dir = env.RepoDir
-
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		env.T.Fatalf("failed to merge branch %s: %v\nOutput: %s", branchName, err, output)
-	}
+	testutil.RunGit(env.T, env.RepoDir, "merge", branchName, "-m", "Merge branch '"+branchName+"'", "--no-verify")
 }
 
 // GetHeadCommitMessage returns the message of the HEAD commit.

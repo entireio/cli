@@ -72,7 +72,10 @@ func LoadCheckpointsConfig(ctx context.Context) (*CheckpointsConfig, error) {
 		return cfg, nil
 	}
 
-	base, local := checkpointsSettingsPaths(ctx)
+	base, local, err := checkpointsSettingsPaths(ctx)
+	if err != nil {
+		return nil, err
+	}
 
 	// "local replaces base wholesale": prefer a checkpoints block from local
 	// settings; fall back to base only when local has none. We extract the raw
@@ -166,9 +169,10 @@ func (c *CheckpointsConfig) validate() error {
 
 // checkpointsSettingsPaths resolves the base and local settings file paths the
 // same way Load does (minus clone preferences, which carry no checkpoint config).
-func checkpointsSettingsPaths(ctx context.Context) (base, local string) {
+func checkpointsSettingsPaths(ctx context.Context) (base, local string, err error) {
 	if worktreeRoot, ok := worktreeRootFromContext(ctx); ok {
-		return worktreeSettingsPaths(worktreeRoot)
+		base, local = worktreeSettingsPaths(worktreeRoot)
+		return base, local, nil
 	}
 	return settingsAbsPaths(ctx)
 }

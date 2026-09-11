@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path"
@@ -14,8 +15,11 @@ import (
 	"strings"
 	"time"
 
+	"github.com/entireio/cli/cmd/entire/cli/entiredir"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
+	"github.com/entireio/cli/cmd/entire/cli/osroot"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
+	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/cmd/entire/cli/versioninfo"
 	"github.com/entireio/cli/redact"
 	"github.com/spf13/cobra"
@@ -102,19 +106,30 @@ func writeDoctorBundle(ctx context.Context, repoRoot, outPath string, raw bool) 
 		}
 	}()
 
-	logsDir := filepath.Join(repoRoot, logging.LogsDir)
-	if err := addDirToZip(zw, logsDir, "logs", raw); err != nil {
-		return err
+	// Everything the bundle collects from .entire is read through the shared
+	// root, so a symlink under .entire cannot pull an arbitrary file into a
+	// bundle the user is about to send somewhere. A repo with no .entire
+	// contributes no log or settings entries and is not an error.
+	entireRoot, err := entiredir.OpenAtForRead(repoRoot)
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+		entireRoot = nil
+	case err != nil:
+		return fmt.Errorf("open %s: %w", paths.EntireDir, err)
 	}
-
-	for _, name := range []string{"settings.json", "settings.local.json"} {
-		src := filepath.Join(repoRoot, ".entire", name)
-		if err := addFileToZip(zw, src, path.Join("settings", name), raw); err != nil {
+	if entireRoot != nil {
+		if err := addDirToZip(zw, entireRoot, logging.LogsName, "logs", raw); err != nil {
 			return err
+		}
+
+		for _, name := range []string{settings.SettingsName, settings.SettingsLocalName} {
+			if err := addFileToZip(zw, entireRoot, name, path.Join("settings", name), raw); err != nil {
+				return err
+			}
 		}
 	}
 
-	if err := addCommandOutput(ctx, zw, "git-status.txt", repoRoot, raw, "git", "status", "--short", "--branch"); err != nil {
+	if err := addCommandOutput(ctx, zw, "git-status.txt", repoRoot, raw, "git", "--no-optional-locks", "status", "--short", "--branch"); err != nil {
 		return err
 	}
 	if err := addCommandOutput(ctx, zw, "git-log.txt", repoRoot, raw, "git", "log", "-n", "50", "--oneline"); err != nil {
@@ -172,29 +187,39 @@ func versionInfoString() string {
 	return sb.String()
 }
 
-func addDirToZip(zw *zip.Writer, srcDir, archivePrefix string, raw bool) error {
-	info, err := os.Stat(srcDir)
+func addDirToZip(zw *zip.Writer, root *os.Root, srcDir, archivePrefix string, raw bool) error {
+	// Lstat, not Stat. Stat follows a symlink, and so does fs.WalkDir on its
+	// own walk root, so a symlinked .entire/logs used to be bundled as whatever
+	// it pointed at — presented to whoever reads the bundle as this repo's logs.
+	info, err := root.Lstat(srcDir)
 	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
+		if errors.Is(err, fs.ErrNotExist) {
 			return nil
 		}
 		return fmt.Errorf("stat %s: %w", srcDir, err)
 	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		// Doctor is the command a user runs when the repo is already broken, so
+		// this records the finding instead of failing the bundle the way the
+		// checkpoint walks do. addFileToZip takes the same line.
+		return addStringToZip(zw, zipEntryName(archivePrefix, "SYMLINK.txt"),
+			fmt.Sprintf("[skipped: %s is a symlink, not a directory; its target was not bundled]\n", srcDir), raw)
+	}
 	if !info.IsDir() {
 		return nil
 	}
-	walkErr := filepath.Walk(srcDir, func(path string, fi os.FileInfo, werr error) error {
+	walkErr := fs.WalkDir(root.FS(), srcDir, func(name string, d fs.DirEntry, werr error) error {
 		if werr != nil {
 			return werr
 		}
-		if fi.IsDir() {
+		if d.IsDir() {
 			return nil
 		}
-		rel, err := filepath.Rel(srcDir, path)
+		rel, err := filepath.Rel(srcDir, name)
 		if err != nil {
 			return fmt.Errorf("rel: %w", err)
 		}
-		return addFileToZip(zw, path, zipEntryName(archivePrefix, rel), raw)
+		return addFileToZip(zw, root, name, zipEntryName(archivePrefix, rel), raw)
 	})
 	if walkErr != nil {
 		return fmt.Errorf("walk %s: %w", srcDir, walkErr)
@@ -213,13 +238,19 @@ func zipEntryName(parts ...string) string {
 	return path.Join(cleanParts...)
 }
 
-func addFileToZip(zw *zip.Writer, src, archivePath string, raw bool) error {
-	f, err := os.Open(src) //nolint:gosec // path comes from repo-internal walk
+func addFileToZip(zw *zip.Writer, root *os.Root, src, archivePath string, raw bool) error {
+	f, err := osroot.OpenNoFollow(root, src)
 	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
+		if errors.Is(err, fs.ErrNotExist) {
 			return nil
 		}
-		return fmt.Errorf("open %s: %w", src, err)
+		// A bundle that aborts is worse than a bundle with a gap: this is the
+		// command a user runs when something is already wrong. The most likely
+		// cause here is a symlink under .entire pointing outside it, which the
+		// root refuses to follow — before that refusal existed the target was
+		// silently bundled instead, so record the reason rather than either
+		// including it or failing.
+		return addStringToZip(zw, archivePath, fmt.Sprintf("[error: open %s: %v]\n", src, err), raw)
 	}
 	defer f.Close()
 
@@ -280,9 +311,24 @@ func addCommandOutput(ctx context.Context, zw *zip.Writer, archivePath, dir stri
 func redactBundleEntry(entryName string, contents []byte) []byte {
 	ext := strings.ToLower(path.Ext(entryName))
 	if ext == ".json" || ext == ".jsonl" {
-		out, err := redact.JSONLContent(string(contents))
+		// JSONLBytes, not JSONLContent, and the choice is load-bearing: only
+		// JSONLBytes converts scanner degradation into ErrScannerDegraded, so
+		// with JSONLContent the degradation branch below could never fire and
+		// a bundle built while the sole configured scanner was down would
+		// export under-scanned entries.
+		redacted, err := redact.JSONLBytes(contents)
 		if err == nil {
-			return []byte(out)
+			return redacted.Bytes()
+		}
+		// ErrRedactionIncomplete is not malformed input: the content parsed and
+		// redaction flagged a leaf it could not rewrite. The byte-level
+		// fallback below would ship exactly that leaf (a \uXXXX-escaped secret
+		// survives a byte-level scan verbatim), and the bundle leaves the
+		// machine, so the entry's content is withheld instead.
+		// ErrScannerDegraded is the same do-not-ship condition: the configured
+		// scanner did not run.
+		if errors.Is(err, redact.ErrRedactionIncomplete) || errors.Is(err, redact.ErrScannerDegraded) {
+			return []byte("[entry withheld: redaction could not certify this content: " + err.Error() + "]\n")
 		}
 		// Fall through to plain redaction if the JSON redactor refuses (malformed input, etc.)
 	}

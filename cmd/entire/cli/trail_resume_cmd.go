@@ -201,7 +201,7 @@ func validateTrailResumeOptions(opts trailResumeOptions) error {
 }
 
 func runTrailResume(cmd *cobra.Command, opts trailResumeOptions) error {
-	return runAuthenticatedTrailAPI(cmd.Context(), cmd.ErrOrStderr(), trailInsecureHTTP(cmd), "", func(ctx context.Context, client *api.Client) error {
+	return runAuthenticatedTrailAPI(cmd.Context(), cmd.ErrOrStderr(), trailInsecureHTTP(cmd), "", func(ctx context.Context, client *api.Client, repoID string) error {
 		forge, owner, repo, err := resolveTrailRemote(ctx)
 		if err != nil {
 			return err
@@ -218,7 +218,11 @@ func runTrailResume(cmd *cobra.Command, opts trailResumeOptions) error {
 			forge, owner, repo = expectedRepo.Forge, expectedRepo.Owner, expectedRepo.Repo
 		}
 
-		found, err := resolveTrailBySelector(ctx, client, forge, owner, repo, opts.Selector, opts.ExpectedBranch)
+		basePath, err := trailRepoBasePath(forge, owner, repo, repoID)
+		if err != nil {
+			return err
+		}
+		found, err := resolveTrailBySelectorAtPath(ctx, client, basePath, forge, owner, repo, opts.Selector, opts.ExpectedBranch)
 		if err != nil {
 			return err
 		}
@@ -236,7 +240,7 @@ func runTrailResume(cmd *cobra.Command, opts trailResumeOptions) error {
 			fmt.Fprintf(cmd.ErrOrStderr(), "Warning: could not load trail checkpoint sessions: %s\n", sessionsUnavailable)
 		}
 
-		client.SetTrailRoute(found.ID, trailNumberPath(forge, owner, repo, found.Number))
+		client.SetTrailRoute(found.ID, trailNumberPathForBase(basePath, found.Number))
 		findings, findingsErr := loadTrailResumeFindingsContext(ctx, client, found.ID)
 		if findingsErr != nil {
 			findings.Unavailable = findingsErr.Error()
@@ -404,7 +408,7 @@ func displayTrailRestoredSessions(w io.Writer, sessions []strategy.RestoredSessi
 	isMulti := len(choices) > 1
 	mostRecentSessionID := mostRecentRestoredSessionID(sessions)
 	for _, choice := range choices {
-		sessionAgent, err := strategy.ResolveAgentForRewind(choice.Session.Agent)
+		sessionAgent, err := strategy.ResolveAgentForResume(choice.Session.Agent)
 		if err != nil {
 			return fmt.Errorf("failed to resolve agent for session %s: %w", choice.SessionID, err)
 		}
@@ -827,9 +831,9 @@ func printTrailResumeSkippedSessions(w io.Writer, skipped int) {
 	if skipped == 0 {
 		return
 	}
-	label := "session"
+	label := nounSession
 	if skipped != 1 {
-		label = "sessions"
+		label = nounSessions
 	}
 	fmt.Fprintf(w, "    skipped %d checkpoint %s due to read errors\n", skipped, label)
 }
@@ -996,7 +1000,7 @@ func trailRestoredSessionChoiceLabel(session strategy.RestoredSession, isDefault
 func trailRestoredSessionKindLabel(kind string) string {
 	switch sessionpkg.Kind(kind) {
 	case sessionpkg.KindAgentReview:
-		return "review"
+		return sessionKindLabelReview
 	case sessionpkg.KindAgentInvestigate:
 		return "investigation"
 	case sessionpkg.KindImported:
@@ -1079,7 +1083,7 @@ func findTrailRestoredSession(sessions []strategy.RestoredSession, sessionID str
 }
 
 func launchTrailRestoredSession(ctx context.Context, w io.Writer, session strategy.RestoredSession) error {
-	resumeAgent, err := strategy.ResolveAgentForRewind(session.Agent)
+	resumeAgent, err := strategy.ResolveAgentForResume(session.Agent)
 	if err != nil {
 		return fmt.Errorf("failed to resolve agent for session %s: %w", session.SessionID, err)
 	}

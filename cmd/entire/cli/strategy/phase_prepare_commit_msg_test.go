@@ -5,9 +5,14 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
+
+	"github.com/go-git/go-git/v6"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
+	"github.com/entireio/cli/cmd/entire/cli/paths"
+	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/trailers"
 
 	"github.com/stretchr/testify/assert"
@@ -127,4 +132,60 @@ func TestPrepareCommitMsg_AmendNoTrailerNoLastCheckpointID(t *testing.T) {
 	// Message should be unchanged
 	assert.Equal(t, newMsg, string(content),
 		"commit message should be unchanged when no trailer to restore")
+}
+
+// TestPrepareCommitMsg_StaleTaskRecordOnly_NoTrailerButStillCondensable pins the
+// split between "condensable" and "may claim a trailer". An IDLE session whose
+// only content is a task record past idleWithTaskContent's 24h bound used to be
+// stamped by the slow path (sessionHasNewContent says yes on HasTaskContent with
+// no bound) and then refused by PostCommit's overlap check, leaving
+// Entire-Checkpoint pointing at a checkpoint nothing ever wrote. The trailer is
+// now bounded, but sessionHasNewContent deliberately is not: the record stays
+// recognized content so the session's transcript-so-far still materializes at
+// its eventual condensation rather than being stranded.
+func TestPrepareCommitMsg_StaleTaskRecordOnly_NoTrailerButStillCondensable(t *testing.T) {
+	dir := setupGitRepo(t)
+	t.Chdir(dir)
+
+	ctx := context.Background()
+	repo, err := git.PlainOpen(dir)
+	require.NoError(t, err)
+
+	s := &ManualCommitStrategy{}
+	worktreePath, err := paths.WorktreeRoot(ctx)
+	require.NoError(t, err)
+	worktreeID, err := paths.GetWorktreeID(worktreePath)
+	require.NoError(t, err)
+	head, err := repo.Head()
+	require.NoError(t, err)
+
+	// Sole content: a record started 30h ago. No transcript, no files, no steps.
+	state := &SessionState{
+		SessionID:    "test-session-stale-record-only",
+		BaseCommit:   head.Hash().String(),
+		WorktreePath: worktreePath,
+		WorktreeID:   worktreeID,
+		StartedAt:    time.Now().Add(-30 * time.Hour),
+		Phase:        session.PhaseIdle,
+		AgentType:    agent.AgentTypeClaudeCode,
+		TaskRecords: []session.TaskRecord{
+			{ToolUseID: "toolu_stale1", AgentID: "agent-stale1", StartedAt: time.Now().Add(-30 * time.Hour)},
+		},
+	}
+	require.NoError(t, s.saveSessionState(ctx, state))
+
+	commitMsgFile := filepath.Join(t.TempDir(), "COMMIT_EDITMSG")
+	require.NoError(t, os.WriteFile(commitMsgFile, []byte("unrelated human commit\n"), 0o644))
+	require.NoError(t, s.PrepareCommitMsg(ctx, commitMsgFile, ""))
+
+	content, err := os.ReadFile(commitMsgFile)
+	require.NoError(t, err)
+	_, found := trailers.ParseCheckpoint(string(content))
+	assert.False(t, found,
+		"a session whose only content is a stale task record must not claim a trailer")
+
+	hasNew, err := s.sessionHasNewContent(ctx, repo, state, contentCheckOpts{})
+	require.NoError(t, err)
+	assert.True(t, hasNew,
+		"the stale record must remain condensable content so it is not stranded unmaterialized")
 }

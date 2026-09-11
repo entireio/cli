@@ -3,8 +3,9 @@ package cli
 import (
 	"errors"
 	"fmt"
-	"path/filepath"
+	"io/fs"
 
+	"github.com/entireio/cli/cmd/entire/cli/entiredir"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/perf"
@@ -65,11 +66,20 @@ Examples:
 				return NewSilentError(fmt.Errorf("not a git repository: %w", err))
 			}
 
-			logFile := filepath.Join(repoRoot, logging.LogsDir, "entire.log")
-
-			entries, err := collectTraceEntries(logFile, last, hookFilter, slowOnly)
-			if err != nil {
-				return fmt.Errorf("collecting trace entries: %w", err)
+			// A repo with no .entire has no log, which is the same "no traces
+			// yet" outcome as an absent log file — render an empty result
+			// rather than an error.
+			var entries []traceEntry
+			root, err := entiredir.OpenAtForRead(repoRoot)
+			switch {
+			case errors.Is(err, fs.ErrNotExist):
+			case err != nil:
+				return fmt.Errorf("open %s: %w", paths.EntireDir, err)
+			default:
+				entries, err = collectTraceEntries(root, logging.LogName, last, hookFilter, slowOnly)
+				if err != nil {
+					return fmt.Errorf("collecting trace entries: %w", err)
+				}
 			}
 
 			switch {

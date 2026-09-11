@@ -34,6 +34,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/trailers"
 	"github.com/entireio/cli/cmd/entire/cli/transcript"
 	transcriptcompact "github.com/entireio/cli/cmd/entire/cli/transcript/compact"
+	"github.com/entireio/cli/cmd/entire/cli/tuiutil"
 	"github.com/entireio/cli/redact"
 
 	"charm.land/lipgloss/v2"
@@ -778,8 +779,8 @@ func runExplainCheckpointWithLookup(ctx context.Context, w, errW io.Writer, chec
 	}
 
 	// One spinner covers the entire data-loading pipeline: prefetch's
-	// missing-blob analysis (which spawns one cat-file -e per blob and
-	// can take seconds on a deep checkpoint subtree), the prefetch fetch
+	// missing-blob analysis (one batched cat-file over the subtree, which
+	// can still take a moment on a deep one), the prefetch fetch
 	// itself, the committed checkpoint metadata read, session content
 	// reads, and getAssociatedCommits' git log walk. Stop strictly before
 	// any write to w (stdout) so stderr spinner frames and stdout output
@@ -896,9 +897,9 @@ func loadCheckpointForExplain(ctx context.Context, lookup *explainCheckpointLook
 // FetchingTree's per-File fetcher.
 //
 // Caller is expected to wrap this with a spinner; both the missing-blob
-// analysis (one cat-file -e per blob) and the actual fetch are silent
-// inside this function so the caller's spinner provides continuous
-// feedback.
+// analysis (one batched cat-file over the subtree) and the actual fetch
+// are silent inside this function so the caller's spinner provides
+// continuous feedback.
 func prefetchCheckpointBlobs(ctx context.Context, repo *git.Repository, cpID id.CheckpointID) {
 	refs := checkpoint.ResolveRefs(ctx)
 	loadPrimaryRoot := func(repo *git.Repository) (*object.Tree, error) {
@@ -1036,7 +1037,7 @@ func generateCheckpointSummary(ctx context.Context, w, errW io.Writer, store che
 	if content.Metadata.Summary != nil && !force {
 		return renderExplainFailure(errW, "Summary already exists", []explainRow{
 			{Label: "id", Value: checkpointID.String()},
-			{Label: "try", Value: fmt.Sprintf("entire checkpoint explain --generate --force %s", checkpointID)},
+			{Label: explainLabelTry, Value: fmt.Sprintf("entire checkpoint explain --generate --force %s", checkpointID)},
 		}, fmt.Errorf("checkpoint %s already has a summary", checkpointID))
 	}
 
@@ -1256,28 +1257,28 @@ func formatCheckpointSummaryError(err error, attempt *summaryAttempt) (string, [
 		case claudecode.ClaudeErrorAuth:
 			label := "Claude authentication failed"
 			rows := []explainRow{
-				{Label: "try", Value: "run `claude login` and retry"},
+				{Label: explainLabelTry, Value: "run `claude login` and retry"},
 			}
 			if claudeErr.Message != "" {
-				rows = append([]explainRow{{Label: "message", Value: claudeErr.Message}}, rows...)
+				rows = append([]explainRow{{Label: explainLabelMessage, Value: claudeErr.Message}}, rows...)
 			}
 			return label, rows, fmt.Errorf("Claude authentication failed%s", formatMessageSuffix(claudeErr.Message)) //nolint:staticcheck // ST1005: Claude is a proper noun
 		case claudecode.ClaudeErrorRateLimit:
 			label := "Claude rejected the summary request due to rate limits or quota"
 			rows := []explainRow{
-				{Label: "try", Value: "wait and retry"},
+				{Label: explainLabelTry, Value: "wait and retry"},
 			}
 			if claudeErr.Message != "" {
-				rows = append([]explainRow{{Label: "message", Value: claudeErr.Message}}, rows...)
+				rows = append([]explainRow{{Label: explainLabelMessage, Value: claudeErr.Message}}, rows...)
 			}
 			return label, rows, fmt.Errorf("Claude rejected the summary request due to rate limits or quota%s", formatMessageSuffix(claudeErr.Message)) //nolint:staticcheck // ST1005
 		case claudecode.ClaudeErrorConfig:
 			label := "Claude rejected the summary request"
 			rows := []explainRow{
-				{Label: "try", Value: "check your Claude CLI config and selected model"},
+				{Label: explainLabelTry, Value: "check your Claude CLI config and selected model"},
 			}
 			if claudeErr.Message != "" {
-				rows = append([]explainRow{{Label: "message", Value: claudeErr.Message}}, rows...)
+				rows = append([]explainRow{{Label: explainLabelMessage, Value: claudeErr.Message}}, rows...)
 			}
 			return label, rows, fmt.Errorf("Claude rejected the summary request%s", formatMessageSuffix(claudeErr.Message)) //nolint:staticcheck // ST1005
 		case claudecode.ClaudeErrorCLIMissing:
@@ -1355,33 +1356,33 @@ func timeoutDiagnostic(_ error, attempt *summaryAttempt) (string, []explainRow) 
 		case attempt.phasesReached[agent.PhaseDone]:
 			label = "model finished but the result was not delivered in time"
 			rows = []explainRow{
-				{Label: "cause", Value: "the deadline fired while the finished result was being read"},
-				{Label: "try", Value: "raise --summary-timeout-seconds and retry"},
+				{Label: explainLabelCause, Value: "the deadline fired while the finished result was being read"},
+				{Label: explainLabelTry, Value: "raise --summary-timeout-seconds and retry"},
 			}
 		case attempt.phasesReached[agent.PhaseGenerating], attempt.phasesReached[agent.PhaseFirstToken]:
 			label = "model responded but did not finish"
 			rows = []explainRow{
-				{Label: "cause", Value: "transcript may be too large for the chosen cap, or model is slow"},
-				{Label: "try", Value: "raise --summary-timeout-seconds or pick a faster model"},
+				{Label: explainLabelCause, Value: "transcript may be too large for the chosen cap, or model is slow"},
+				{Label: explainLabelTry, Value: "raise --summary-timeout-seconds or pick a faster model"},
 			}
 		case attempt.phasesReached[agent.PhaseConnecting]:
 			label = "provider sent request but received no response"
 			rows = []explainRow{
-				{Label: "cause", Value: "network/firewall, provider API degraded, or auth check stuck"},
-				{Label: "try", Value: "check connectivity to the provider, then retry"},
+				{Label: explainLabelCause, Value: "network/firewall, provider API degraded, or auth check stuck"},
+				{Label: explainLabelTry, Value: "check connectivity to the provider, then retry"},
 			}
 		default:
 			label = "provider never sent its request"
 			rows = []explainRow{
-				{Label: "cause", Value: "the provider CLI may be stalled before subprocess startup"},
-				{Label: "try", Value: tryRunCLI},
+				{Label: explainLabelCause, Value: "the provider CLI may be stalled before subprocess startup"},
+				{Label: explainLabelTry, Value: tryRunCLI},
 			}
 		}
 		// attempt.streaming is set eagerly when a streaming-capable provider
 		// is selected, so a provider that stalls before its first event lands
 		// here — surface the captured stderr rather than dropping it.
 		if stderr != "" {
-			rows = append(rows, explainRow{Label: "stderr", Value: stderr})
+			rows = append(rows, explainRow{Label: explainLabelStderr, Value: stderr})
 		}
 		return prefix + label, rows
 	}
@@ -1390,21 +1391,21 @@ func timeoutDiagnostic(_ error, attempt *summaryAttempt) (string, []explainRow) 
 
 	if stdoutBytes == 0 {
 		rows := []explainRow{
-			{Label: "cause", Value: "provider CLI produced no output (likely network/auth/CLI path issue)"},
-			{Label: "try", Value: tryRunCLI},
+			{Label: explainLabelCause, Value: "provider CLI produced no output (likely network/auth/CLI path issue)"},
+			{Label: explainLabelTry, Value: tryRunCLI},
 		}
 		if stderr != "" {
-			rows = append(rows, explainRow{Label: "stderr", Value: stderr})
+			rows = append(rows, explainRow{Label: explainLabelStderr, Value: stderr})
 		}
 		return prefix + "provider produced no output", rows
 	}
 
 	rows := []explainRow{
-		{Label: "cause", Value: "provider was generating output but did not finish before cap"},
-		{Label: "try", Value: "raise --summary-timeout-seconds"},
+		{Label: explainLabelCause, Value: "provider was generating output but did not finish before cap"},
+		{Label: explainLabelTry, Value: "raise --summary-timeout-seconds"},
 	}
 	if stderr != "" {
-		rows = append(rows, explainRow{Label: "stderr", Value: stderr})
+		rows = append(rows, explainRow{Label: explainLabelStderr, Value: stderr})
 	}
 	return prefix + "provider was generating output when killed", rows
 }
@@ -1727,7 +1728,7 @@ func explainTemporaryCheckpoint(ctx context.Context, w, errW io.Writer, repo *gi
 
 	label := fmt.Sprintf("Checkpoint %s [temporary]", shortID)
 	rows := []explainRow{
-		{Label: "session", Value: tc.SessionID},
+		{Label: explainLabelSession, Value: tc.SessionID},
 		{Label: "created", Value: tc.Timestamp.Format("2006-01-02 15:04:05")},
 	}
 	sb.WriteString(styles.renderIdentity(label, "", rows))
@@ -2040,9 +2041,17 @@ func buildAmbiguousCheckpointMatches(ids []id.CheckpointID, committed []checkpoi
 }
 
 // renderExplainBody routes a markdown body through the brand renderer when
-// the writer supports color, and returns the markdown source verbatim
-// otherwise. Single point of policy for every explain body section.
+// the writer supports color, and returns the markdown source otherwise.
+// Single point of policy for every explain body section.
+//
+// The body is built from stored checkpoint content (AI summaries, extracted
+// prompts, file lists), which is agent and user influenced, so it passes
+// through the shared terminal sanitizer here regardless of path: the
+// non-color return would otherwise hand raw escape sequences to the
+// terminal, and sanitizing before the markdown renderer means its output
+// cannot re-carry them either.
 func renderExplainBody(w io.Writer, md string) string {
+	md = tuiutil.SanitizeTerminalText(md)
 	if !shouldUseColor(w) {
 		return md
 	}
@@ -2086,17 +2095,10 @@ func formatCheckpointOutput(ctx context.Context, summary *checkpoint.CheckpointS
 		if verbose || full {
 			md += buildFilesMarkdown(meta.FilesTouched)
 		}
-		if shouldUseColor(w) {
-			rendered, err := defaultRenderTerminalMarkdown(w, md)
-			if err != nil {
-				logging.Debug(context.Background(), "explain markdown render failed", slog.String("error", err.Error()))
-				sb.WriteString(md)
-			} else {
-				sb.WriteString(rendered)
-			}
-		} else {
-			sb.WriteString(md)
-		}
+		// renderExplainBody rather than an inline color branch: it is the single
+		// point of policy for explain bodies, including the terminal sanitizer
+		// the stored (agent-authored) summary must pass through.
+		sb.WriteString(renderExplainBody(w, md))
 	} else {
 		intent := extractIntent(scopedPrompts, content.Prompts)
 
@@ -2164,7 +2166,7 @@ func appendTranscriptSection(sb *strings.Builder, verbose, full bool, fullTransc
 func formatTranscriptBytes(transcriptBytes []byte, fallback string, agentType types.AgentType) string {
 	if len(transcriptBytes) == 0 {
 		if fallback != "" {
-			return fallback + "\n"
+			return tuiutil.SanitizeTerminalText(fallback) + "\n"
 		}
 		return "  (none)\n"
 	}
@@ -2176,9 +2178,19 @@ func formatTranscriptBytes(transcriptBytes []byte, fallback string, agentType ty
 	}
 	if err != nil || len(condensed) == 0 {
 		if fallback != "" {
-			return fallback + "\n"
+			return tuiutil.SanitizeTerminalText(fallback) + "\n"
 		}
 		return "  (failed to parse transcript)\n"
+	}
+
+	// Transcript content is agent and user influenced, so it goes through the
+	// shared terminal sanitizer at this display boundary. The sanitization is
+	// deliberately not inside FormatCondensedTranscript, which also builds LLM
+	// prompt input where mutation is unwanted.
+	for i := range condensed {
+		condensed[i].Content = tuiutil.SanitizeTerminalText(condensed[i].Content)
+		condensed[i].ToolName = tuiutil.SanitizeTerminalText(condensed[i].ToolName)
+		condensed[i].ToolDetail = tuiutil.SanitizeTerminalText(condensed[i].ToolDetail)
 	}
 
 	input := summarize.Input{Transcript: condensed}
@@ -2497,7 +2509,7 @@ func walkFirstParentCommits(ctx context.Context, repo *git.Repository, from plum
 // applied here, so callers cannot reconstruct it from the returned length
 // (the two budgets are independent, so the slice can hold up to 2*limit
 // entries without anything being dropped).
-func getBranchCheckpoints(ctx context.Context, repo *git.Repository, limit int) ([]strategy.RewindPoint, bool, error) {
+func getBranchCheckpoints(ctx context.Context, repo *git.Repository, limit int) ([]strategy.PendingCheckpoint, bool, error) {
 	// Warn (once per process) if metadata branches are disconnected
 	strategy.WarnIfMetadataDisconnected(ctx)
 
@@ -2543,7 +2555,7 @@ func getBranchCheckpoints(ctx context.Context, repo *git.Repository, limit int) 
 	if err != nil {
 		// Unborn HEAD (no commits yet) - return empty list instead of erroring
 		if errors.Is(err, plumbing.ErrReferenceNotFound) {
-			return []strategy.RewindPoint{}, false, nil
+			return []strategy.PendingCheckpoint{}, false, nil
 		}
 		return nil, false, fmt.Errorf("failed to get HEAD: %w", err)
 	}
@@ -2551,7 +2563,7 @@ func getBranchCheckpoints(ctx context.Context, repo *git.Repository, limit int) 
 	// Check if we're on the default branch (needed for getReachableTemporaryCheckpoints)
 	isOnDefault, _ := strategy.IsOnDefaultBranch(repo)
 
-	var points []strategy.RewindPoint
+	var points []strategy.PendingCheckpoint
 
 	collectCheckpoint := func(c *object.Commit) {
 		cpID, found := trailers.ParseCheckpoint(c.Message)
@@ -2569,7 +2581,7 @@ func getBranchCheckpoints(ctx context.Context, repo *git.Repository, limit int) 
 		// fills them before --session filters run.
 
 		message := strings.Split(c.Message, "\n")[0]
-		point := strategy.RewindPoint{
+		point := strategy.PendingCheckpoint{
 			ID:               c.Hash.String(),
 			Message:          message,
 			Date:             c.Committer.When,
@@ -2656,7 +2668,7 @@ func getBranchCheckpoints(ctx context.Context, repo *git.Repository, limit int) 
 	// Append imported (read-only, commit-less) checkpoints after the live points,
 	// bounded by the same limit so a one-month import doesn't produce an
 	// unbounded list. They get their own budget and never displace live points.
-	imported := getImportedRewindPoints(ctx, repo)
+	imported := getImportedPendingCheckpoints(ctx, repo)
 	sort.Slice(imported, func(i, j int) bool {
 		return imported[i].Date.After(imported[j].Date)
 	})
@@ -2670,7 +2682,7 @@ func getBranchCheckpoints(ctx context.Context, repo *git.Repository, limit int) 
 }
 
 // hydrateListedBranchCheckpoints fills SessionID/etc for remote-discovered List
-// stubs among the already-truncated RewindPoints. The whole pass is capped by
+// stubs among the already-truncated PendingCheckpoints. The whole pass is capped by
 // ListHydrationPassTimeout, and each ref additionally gets ListHydrationTimeout
 // (much shorter than the default on-demand fetch). Failures clear ListedStub
 // (fail-once) inside HydrateListedCheckpointInfo; when any stub still lacks
@@ -2683,7 +2695,7 @@ func hydrateListedBranchCheckpoints(
 		Read(ctx context.Context, checkpointID id.CheckpointID) (*checkpoint.CheckpointSummary, error)
 		ReadSessionMetadata(ctx context.Context, checkpointID id.CheckpointID, sessionIndex int) (*checkpoint.Metadata, error)
 	},
-	points []strategy.RewindPoint,
+	points []strategy.PendingCheckpoint,
 	committedByID map[id.CheckpointID]checkpoint.CheckpointInfo,
 ) {
 	passCtx, passCancel := context.WithTimeout(ctx, checkpoint.ListHydrationPassTimeout)
@@ -2727,11 +2739,11 @@ func hydrateListedBranchCheckpoints(
 	}
 }
 
-// getImportedRewindPoints returns read-only imported checkpoints (Kind
-// "imported", flagged Imported) as RewindPoint entries. They live on the v1
+// getImportedPendingCheckpoints returns read-only imported checkpoints (Kind
+// "imported", flagged Imported) as PendingCheckpoint entries. They live on the v1
 // metadata branch but carry no commit trailer, so the commit-driven branch
 // walk never surfaces them. Best-effort: returns nil on read failure.
-func getImportedRewindPoints(ctx context.Context, repo *git.Repository) []strategy.RewindPoint {
+func getImportedPendingCheckpoints(ctx context.Context, repo *git.Repository) []strategy.PendingCheckpoint {
 	stores, err := checkpoint.Open(ctx, repo, checkpoint.OpenOptions{ReadRemotes: strategy.CheckpointReadRemotes(ctx)})
 	if err != nil {
 		return nil
@@ -2740,7 +2752,7 @@ func getImportedRewindPoints(ctx context.Context, repo *git.Repository) []strate
 	if err != nil {
 		return nil
 	}
-	points := make([]strategy.RewindPoint, 0)
+	points := make([]strategy.PendingCheckpoint, 0)
 	for _, info := range infos {
 		// Imported checkpoints live on v1 alongside normal ones but have no
 		// commit trailer, so the commit-driven walk above never surfaces them.
@@ -2748,7 +2760,7 @@ func getImportedRewindPoints(ctx context.Context, repo *git.Repository) []strate
 		if !info.Imported {
 			continue
 		}
-		point := strategy.RewindPoint{
+		point := strategy.PendingCheckpoint{
 			ID:           info.CheckpointID.String(),
 			Message:      readLatestCommittedSessionPrompt(ctx, stores.Persistent, info.CheckpointID, info.SessionCount),
 			Date:         info.CreatedAt,
@@ -2786,8 +2798,8 @@ func readLatestCommittedSessionPrompt(ctx context.Context, store checkpoint.Sess
 // whose base commit is reachable from the given HEAD hash and that belong to this worktree.
 // For default branches, all shadow branches for this worktree are included.
 // For feature branches, only shadow branches whose base commit is in HEAD's history are included.
-func getReachableTemporaryCheckpoints(ctx context.Context, repo *git.Repository, store checkpoint.EphemeralStore, headHash plumbing.Hash, isOnDefault bool, limit int) []strategy.RewindPoint {
-	var points []strategy.RewindPoint
+func getReachableTemporaryCheckpoints(ctx context.Context, repo *git.Repository, store checkpoint.EphemeralStore, headHash plumbing.Hash, isOnDefault bool, limit int) []strategy.PendingCheckpoint {
+	var points []strategy.PendingCheckpoint
 
 	// Compute current worktree's hash for filtering shadow branches
 	currentWorktreeHash := getCurrentWorktreeHash(ctx)
@@ -2842,14 +2854,14 @@ func isShadowBranchReachable(ctx context.Context, repo *git.Repository, baseComm
 	return found
 }
 
-// convertTemporaryCheckpoint converts a EphemeralCheckpointInfo to a RewindPoint.
+// convertTemporaryCheckpoint converts a EphemeralCheckpointInfo to a PendingCheckpoint.
 // Returns nil if the checkpoint should be skipped (no tree changes or can't be read).
 //
 // Filtering uses hasAnyChanges (O(1) tree hash comparison) rather than a full
 // O(files) diff. This means metadata-only checkpoints (.entire/ changes without
 // code changes) are kept — only true no-ops (identical tree as parent) are dropped.
 // This trade-off is intentional for list-view performance.
-func convertTemporaryCheckpoint(repo *git.Repository, tc checkpoint.EphemeralCheckpointInfo) *strategy.RewindPoint {
+func convertTemporaryCheckpoint(repo *git.Repository, tc checkpoint.EphemeralCheckpointInfo) *strategy.PendingCheckpoint {
 	shadowCommit, commitErr := repo.CommitObject(tc.CommitHash)
 	if commitErr != nil {
 		return nil
@@ -2870,7 +2882,7 @@ func convertTemporaryCheckpoint(repo *git.Repository, tc checkpoint.EphemeralChe
 		sessionPrompt = strategy.ReadSessionPromptFromTree(shadowTree, tc.MetadataDir)
 	}
 
-	return &strategy.RewindPoint{
+	return &strategy.PendingCheckpoint{
 		ID:               tc.CommitHash.String(),
 		Message:          tc.Message,
 		MetadataDir:      tc.MetadataDir,
@@ -3071,7 +3083,7 @@ func outputWithPager(w io.Writer, content string) {
 	// Check if we're writing to stdout and it's a terminal
 	if f, ok := w.(*os.File); ok && f == os.Stdout && interactive.IsTerminalWriter(w) {
 		// Get terminal height
-		_, height, err := term.GetSize(int(f.Fd())) //nolint:gosec // G115: same as above
+		_, height, err := term.GetSize(int(f.Fd()))
 		if err != nil {
 			height = 24 // Default fallback
 		}
@@ -3116,7 +3128,7 @@ const (
 // formatBranchCheckpoints formats checkpoint information for a branch.
 // Groups commits by checkpoint ID and shows the prompt for each checkpoint.
 // If sessionFilter is non-empty, only shows checkpoints matching that session ID (or prefix).
-func formatBranchCheckpoints(w io.Writer, branchName string, points []strategy.RewindPoint, sessionFilter string) string {
+func formatBranchCheckpoints(w io.Writer, branchName string, points []strategy.PendingCheckpoint, sessionFilter string) string {
 	var sb strings.Builder
 	styles := newStatusStyles(w)
 
@@ -3125,7 +3137,7 @@ func formatBranchCheckpoints(w io.Writer, branchName string, points []strategy.R
 	// matching only SessionID (latest contributor) silently drops multi-session
 	// checkpoints where the requested session was archived.
 	if sessionFilter != "" {
-		var filtered []strategy.RewindPoint
+		var filtered []strategy.PendingCheckpoint
 		for _, p := range points {
 			if checkpointMatchesSessionFilter(p, sessionFilter) {
 				filtered = append(filtered, p)
@@ -3141,9 +3153,9 @@ func formatBranchCheckpoints(w io.Writer, branchName string, points []strategy.R
 		{Label: "branch", Value: branchName},
 	}
 	if sessionFilter != "" {
-		branchRows = append(branchRows, explainRow{Label: "session", Value: sessionFilter})
+		branchRows = append(branchRows, explainRow{Label: explainLabelSession, Value: sessionFilter})
 	}
-	branchRows = append(branchRows, explainRow{Label: "checkpoints", Value: strconv.Itoa(len(groups))})
+	branchRows = append(branchRows, explainRow{Label: explainLabelCheckpoints, Value: strconv.Itoa(len(groups))})
 
 	sb.WriteString(styles.metadataRows(branchRows))
 	sb.WriteString("\n")
@@ -3180,9 +3192,9 @@ type commitEntry struct {
 	message string
 }
 
-// groupByCheckpointID groups rewind points by their checkpoint ID.
+// groupByCheckpointID groups pending checkpoints by their checkpoint ID.
 // Returns groups sorted by latest commit timestamp (most recent first).
-func groupByCheckpointID(points []strategy.RewindPoint) []checkpointGroup {
+func groupByCheckpointID(points []strategy.PendingCheckpoint) []checkpointGroup {
 	if len(points) == 0 {
 		return nil
 	}

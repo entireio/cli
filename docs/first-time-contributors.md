@@ -78,7 +78,7 @@ Entire is a Go project managed by `mise`. Three commands and you're set up:
 # Install mise (skip if you already have it)
 curl https://mise.run | sh
 
-# Trust this repo's mise config and install Go 1.26
+# Trust this repo's mise config and install Go 1.27
 mise trust
 mise install
 

@@ -58,13 +58,49 @@ var forgeToHost = func() map[string]string {
 	return m
 }()
 
-// IsSupportedForge reports whether forge is a known short forge id (e.g. "gh")
-// understood by the trails API. It rejects forge hostnames ("github.com") and
-// any other unrecognized value, so callers parsing a bare forge/owner/repo
-// triple can fail clearly instead of forwarding a malformed forge to the API.
-func IsSupportedForge(forge string) bool {
-	_, ok := forgeToHost[forge]
+// pathForges are the forge tokens Entire uses in an entire:// URL path
+// (`entire://<cluster-host>/<forge>/…`), mapped to the placeholder spelling of
+// the two segments that follow — a mirror is addressed by owner, a native repo
+// by project.
+//
+// Deliberately NOT derived from forgeToHost, which answers a different
+// question: that map is upstream git hosts, and a native repo has no upstream
+// host at all, which is exactly why "et" is absent there and present here.
+// Conflating the two is what made `entire://et/<project>/<repo>` try to dial a
+// cluster named "et" while `entire://gh/…` got an actionable message.
+//
+// The legacy "/git/" prefix is excluded on purpose: rows stamped with it are
+// addressed internally by ULID and `entire repo clone` does not accept a /git/
+// ref, so admitting it would have callers suggest a command that then fails.
+var pathForges = map[string]string{
+	"gh": "<owner>/<repo>",
+	"et": "<project>/<repo>",
+}
+
+// IsForgePathToken reports whether forge is one of the forge tokens Entire uses
+// in an entire:// path ("gh", "et"). It rejects forge hostnames ("github.com")
+// and any other unrecognized value, so a caller parsing a bare
+// forge/owner/repo triple can fail clearly instead of forwarding a malformed
+// forge, and a caller holding a URL can tell a forge id typed in the
+// cluster-host slot apart from a real host.
+//
+// The name says syntax deliberately: this is NOT a capability check, and it
+// once was one (it read the upstream-host map, so it answered `{gh}`). Widening
+// it to the real path tokens is what a URL needs, but it means a caller after a
+// capability has to narrow afterwards — the trail API takes `et` in a path and
+// resolves only `gh`, so `entire trail` refuses it separately
+// (errTrailsNativeUnsupported). A caller that skips that step gets a token this
+// says yes to and an API that 404s.
+func IsForgePathToken(forge string) bool {
+	_, ok := pathForges[forge]
 	return ok
+}
+
+// ForgePathLabels returns the placeholder spelling of the two path segments
+// that follow forge in an entire:// URL, for error messages. Empty for a forge
+// IsForgePathToken rejects.
+func ForgePathLabels(forge string) string {
+	return pathForges[forge]
 }
 
 // CanonicalHost returns the canonical public host of the upstream forge.
@@ -96,9 +132,21 @@ func GetRemoteURL(ctx context.Context, remoteName string) (string, error) {
 
 // GetRemoteURLInDir returns the URL configured for the named git remote in dir.
 func GetRemoteURLInDir(ctx context.Context, dir, remoteName string) (string, error) {
+	return GetRemoteURLInDirEnv(ctx, dir, nil, remoteName)
+}
+
+// GetRemoteURLInDirEnv is GetRemoteURLInDir with an explicit child environment,
+// the fetch-side counterpart of GetPushURLsInDir's env parameter — see there
+// for when to pass one, including why an empty dir takes nil. Both halves of
+// an ownership vote must make the same choice, or they reach git differently
+// and can describe different repositories.
+func GetRemoteURLInDirEnv(ctx context.Context, dir string, env []string, remoteName string) (string, error) {
 	cmd := exec.CommandContext(ctx, "git", "remote", "get-url", remoteName)
 	if dir != "" {
 		cmd.Dir = dir
+	}
+	if env != nil {
+		cmd.Env = env
 	}
 	output, err := cmd.Output()
 	if err != nil {
@@ -118,7 +166,29 @@ func GetRemoteURLInDir(ctx context.Context, dir, remoteName string) (string, err
 //
 // Returns at least one entry on success.
 func GetPushURLs(ctx context.Context, remoteName string) ([]string, error) {
+	return GetPushURLsInDir(ctx, "", nil, remoteName)
+}
+
+// GetPushURLsInDir is GetPushURLs against a specific worktree, the push-side
+// counterpart of GetRemoteURLInDir.
+//
+// env, when non-nil, replaces the child's environment. Pass
+// gitrepo.EnvWithoutRepoOverrides() when dir names the target and the caller
+// can run inside a git hook: git exports GIT_DIR and GIT_WORK_TREE to its
+// hooks and they outrank cmd.Dir. Pass nil when dir is empty — there the
+// ambient environment is what names the repository, and filtering it would
+// silently retarget the child at the process working directory.
+//
+// Filtered by the caller, because this package depends on nothing beyond the
+// standard library while gitrepo pulls in go-git.
+func GetPushURLsInDir(ctx context.Context, dir string, env []string, remoteName string) ([]string, error) {
 	cmd := exec.CommandContext(ctx, "git", "remote", "get-url", "--push", "--all", remoteName)
+	if dir != "" {
+		cmd.Dir = dir
+	}
+	if env != nil {
+		cmd.Env = env
+	}
 	output, err := cmd.Output()
 	if err != nil {
 		return nil, fmt.Errorf("remote %q not found", remoteName)
