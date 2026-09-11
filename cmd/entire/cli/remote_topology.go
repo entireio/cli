@@ -202,6 +202,22 @@ func (t remoteTopology) describeCheckpointDestination(w io.Writer, header string
 		fmt.Fprintln(w, "  see `entire status`.")
 	}
 
+	t.describeFanout(w)
+	if names := t.unpinnedNames(); t.explicitRemote == "" && len(names) > 1 {
+		fmt.Fprintf(w, "  This repo has %d remotes (%s).\n", len(names), strings.Join(names, ", "))
+		fmt.Fprintln(w, "    Checkpoints sync to a single elected remote — not to whichever one you")
+		fmt.Fprintln(w, "    push to. A push to any other remote carries your code but no session")
+		fmt.Fprintln(w, "    history. Run `entire status` to see the elected destination and how much")
+		fmt.Fprintln(w, "    checkpoint data has not reached it.")
+	}
+
+	fmt.Fprintln(w, "  To pin one repository for checkpoints, set checkpoint_remote in")
+	fmt.Fprintln(w, "  .entire/settings.json (or .entire/settings.local.json to keep it to this clone).")
+}
+
+// describeFanout is shared by doctor's complete topology report and enable's
+// report of the selected checkpoint destination.
+func (t remoteTopology) describeFanout(w io.Writer) {
 	for _, d := range t.destinations {
 		if !t.fanOutMatters(d) {
 			continue
@@ -223,17 +239,6 @@ func (t remoteTopology) describeCheckpointDestination(w io.Writer, header string
 			fmt.Fprintln(w, "    ever reconciled — so those URLs can fall permanently out of date.")
 		}
 	}
-
-	if names := t.unpinnedNames(); t.explicitRemote == "" && len(names) > 1 {
-		fmt.Fprintf(w, "  This repo has %d remotes (%s).\n", len(names), strings.Join(names, ", "))
-		fmt.Fprintln(w, "    Checkpoints sync to a single elected remote — not to whichever one you")
-		fmt.Fprintln(w, "    push to. A push to any other remote carries your code but no session")
-		fmt.Fprintln(w, "    history. Run `entire status` to see the elected destination and how much")
-		fmt.Fprintln(w, "    checkpoint data has not reached it.")
-	}
-
-	fmt.Fprintln(w, "  To pin one repository for checkpoints, set checkpoint_remote in")
-	fmt.Fprintln(w, "  .entire/settings.json (or .entire/settings.local.json to keep it to this clone).")
 }
 
 // unpinnedNames lists the remotes whose checkpoint destination is not already
