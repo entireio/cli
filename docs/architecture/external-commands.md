@@ -16,6 +16,11 @@ Rules, in order:
 2. **Reserved names are skipped.** Names beginning with `agent-` are reserved for the [agent protocol](external-agent-protocol.md). The resolver refuses to invoke them as external commands.
 3. **Path-traversal candidates are rejected.** Names containing `/` or `\` never resolve.
 4. **Found-but-not-executable surfaces as a launch error.** If `entire-<name>` exists on `$PATH` but lacks the executable bit, the resolver reports `Failed to run plugin entire-<name>` with exit code 1, rather than falling through to Cobra's "unknown command" path.
+5. **Missing Graph offers installation.** When `entire-graph` is absent, `entire graph <command>` resolves `graph` in the configured plugin index and asks `Install the entire-graph plugin from <repo url>?` with Yes selected by default. The repository is named because this prompt is the only human checkpoint on the path — an index-listed install never prompts inside `runRemoteInstall`, since the catalog is the trust decision. A name the index does not carry is reported instead of offered, rather than prompting and then failing on a request that could never be honored. Accepting installs `graph` through the normal managed installer, then executes the installed binary with all remaining arguments unchanged. This also works for bare `entire graph` and `entire graph --help`. Installation output goes to stderr, and the run that follows is announced as `Running entire-graph` — the binary's name only, never the arguments, which are the user's own command line and could carry a token, a newline or a terminal escape into stderr and anything capturing it. Declining or a failed installation exits nonzero without running the command; a cancelled one terminates by signal, so a single Ctrl-C escapes an enclosing shell loop. Non-interactive sessions receive an `entire plugin install graph` hint instead of a prompt. Other missing plugin names still fall through to Cobra.
+
+   A `graph` that is already in the [managed install directory](#managed-install-directory) but unreachable through `$PATH` — a managed dir that could not be prepended at startup — is **executed**, not offered for installation. Installing over it cannot work: an existing install needs `--force`, which the on-demand path deliberately does not pass, so prompting would spend the user's Yes and several network round-trips on a guaranteed "already installed; use --force to replace".
+
+   A managed entry that exists but **cannot be run** — a local-dev symlink whose target moved, or a directory in its place — is reported with its path and a `entire plugin install <name> --force` remedy. It is neither executed (a `fork/exec` ENOENT names a path the user never chose) nor reinstalled over: replacing a developer's deliberate symlink with a released binary is their call.
 
 ### Managed install directory
 
@@ -27,6 +32,14 @@ Users can drop binaries anywhere on `$PATH`, but a per-user managed directory is
 The CLI prepends this directory to `$PATH` at startup via `cli.PrependPluginBinDirToPATH()` so the existing `exec.LookPath` resolution finds managed installs without any special-casing. This is purely additive — the kubectl-style `$PATH` model is unchanged.
 
 `entire plugin install/list/remove/upgrade` manage the contents of this directory. Authors who prefer the raw "drop a binary on `$PATH`" model don't need to use it.
+
+### Install progress and confirmations
+
+`entire plugin install`, `entire plugin upgrade`, dependency installs, and the on-demand `entire graph` install report their stages — index lookup, release metadata, download and checksum verification, placement — on **stderr**, so stdout carries only the result and stays pipeable. A styled terminal gets a spinner; a non-terminal writer and accessibility mode get one plain line per stage as it starts. Progress stops before any confirmation or result is printed, including on failure. Asset-name probing shares one download status per release rather than one per candidate.
+
+Progress travels on the context (`withPluginProgress`), so a caller that has not opted in prints nothing — a library caller never writes to the process's terminal on its own.
+
+Confirmations read from the **controlling terminal**, never stdin, so a plugin's piped input survives being prompted about. They render to the writer the caller supplies, except when that writer is not itself a terminal (`entire graph 2>log`): then the prompt renders on the terminal the answer is read from, because a prompt nobody can see still blocks on a keypress — and with Yes as the default, an unwitting Enter would authorize the install. An input that reaches EOF never becomes a Yes, but the two modes get there differently: accessibility mode declines outright — huh's scanner would otherwise read EOF as the field's default, which is Yes here — while the default full-screen prompt keeps waiting until the context is cancelled. Both fail closed; only one of them answers. Cancellation stops the prompt either way, and still terminates by signal.
 
 ### Remote install
 
@@ -279,6 +292,7 @@ The resolver lives in `cmd/entire/cli/plugin.go`. The entry point is `MaybeRunPl
 Key files:
 
 - `cmd/entire/cli/plugin.go` — entry point, `resolvePlugin`, `runPlugin`
+- `cmd/entire/cli/plugin_on_demand.go` — missing Graph installation prompt and managed-install handoff
 - `cmd/entire/cli/plugin_env.go` — `pluginEnv`, the allowlist, and `ENTIRE_PLUGIN_ENV` parsing
 - `cmd/entire/cli/plugin_official.go` — `officialPlugins` allowlist, `IsOfficialPlugin`
 - `cmd/entire/cli/plugin_store.go` — managed install directory, `PluginBinDir`, `PluginDataDir`, `InstallPluginFromPath`, `ListInstalledPlugins`, `RemoveInstalledPlugin`, `PrependPluginBinDirToPATH`

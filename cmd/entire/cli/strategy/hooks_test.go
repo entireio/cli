@@ -2088,7 +2088,10 @@ func TestRemoveGitHook_LeavesAnUnreadableHookAndItsBackup(t *testing.T) {
 func TestSymlinkedHooksDirError_RemedyIsPasteable(t *testing.T) {
 	t.Parallel()
 
-	dir := t.TempDir()
+	// symlinkedHooksDirError resolves its target, so the expectation has to be
+	// composed from the resolved temp dir (/private/var/... on macOS).
+	dir, err := filepath.EvalSymlinks(t.TempDir())
+	require.NoError(t, err)
 	realHooks := filepath.Join(dir, "real-hooks")
 	require.NoError(t, os.MkdirAll(realHooks, 0o750))
 	link := filepath.Join(dir, "hooks")
@@ -2147,7 +2150,8 @@ func TestSymlinkedHooksDirError_UsesTheQuotedCommand(t *testing.T) {
 		t.Skip("POSIX quoting")
 	}
 
-	dir := t.TempDir()
+	dir, err := filepath.EvalSymlinks(t.TempDir())
+	require.NoError(t, err)
 	realHooks := filepath.Join(dir, "real hooks")
 	require.NoError(t, os.MkdirAll(realHooks, 0o750))
 	link := filepath.Join(dir, "hooks")

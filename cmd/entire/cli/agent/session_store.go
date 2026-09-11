@@ -205,6 +205,18 @@ func (s *SessionStore) Exists(name string) bool {
 	return err == nil
 }
 
+// IsDir reports whether name is a real directory in the store. Symlinks in the
+// path are rejected by LstatNoSymlinks rather than followed.
+func (s *SessionStore) IsDir(name string) bool {
+	root, err := s.openRoot()
+	if err != nil {
+		return false
+	}
+	defer root.Close()
+	info, err := osroot.LstatNoSymlinks(root, name)
+	return err == nil && info.IsDir()
+}
+
 // WriteSessionFile writes data to s.SessionRef through ag's own session store,
 // creating parent directories.
 //

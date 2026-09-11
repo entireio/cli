@@ -11,6 +11,7 @@ import (
 
 var regexMap = map[string]ogenregex.Regexp{
 	"^[0-9A-HJKMNP-TV-Z]{26}$": ogenregex.MustCompile("^[0-9A-HJKMNP-TV-Z]{26}$"),
+	"^[a-z0-9][a-z0-9-]*$":     ogenregex.MustCompile("^[a-z0-9][a-z0-9-]*$"),
 }
 
 type (

@@ -67,8 +67,8 @@ func newGrantCmd() *cobra.Command {
 // grants, so GRANTEE shows a friendly name (handle/org name) with SOURCE
 // saying where the grant comes from; ID keeps the ULID for revoke.
 var (
-	orgMemberColumns = []string{"ACCOUNT", "ROLE", "STATUS"}
-	grantColumns     = []string{"GRANTEE", "ROLE", "SOURCE", "TYPE", "ID"}
+	orgMemberColumns = []string{"ACCOUNT", colHeaderRole, colHeaderStatus}
+	grantColumns     = []string{"GRANTEE", colHeaderRole, "SOURCE", "TYPE", "ID"}
 )
 
 func orgMemberRow(m coreapi.Membership) []string {
@@ -98,7 +98,7 @@ func granteeName(name coreapi.OptString, granteeID string) string {
 
 func newGrantOrgCmd() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "org",
+		Use:   cmdOrg,
 		Short: "Manage org membership",
 	}
 	cmd.AddCommand(newGrantOrgAddCmd())
@@ -313,6 +313,10 @@ func newGrantProjectRemoveCmd() *cobra.Command {
 	return cmd
 }
 
+// granteeTypeAccount is the only grantee kind the revoke-by-id calls take; the
+// provider-qualified variant has its own endpoint.
+const granteeTypeAccount = "account"
+
 // revokeProjectGrantee revokes a grantee (provider:handle or account ULID) from
 // a resolved project. projectRef is the user's original (pre-resolution) project
 // ref, used only for the success message.
@@ -321,7 +325,7 @@ func revokeProjectGrantee(ctx context.Context, cmd *cobra.Command, c *coreapi.Cl
 		func() error {
 			return c.RevokeProjectAccess(ctx, coreapi.RevokeProjectAccessParams{
 				ProjectId:   projID,
-				GranteeType: "account",
+				GranteeType: granteeTypeAccount,
 				GranteeId:   grantee,
 			})
 		},
@@ -363,7 +367,7 @@ func revokeGrantee(
 
 func newGrantRepoCmd() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "repo",
+		Use:   cmdRepo,
 		Short: "Manage repo access",
 	}
 	cmd.AddCommand(newGrantRepoAddCmd())
@@ -476,7 +480,7 @@ func revokeRepoGrantee(ctx context.Context, cmd *cobra.Command, c *coreapi.Clien
 		func() error {
 			return c.RevokeRepoAccess(ctx, coreapi.RevokeRepoAccessParams{
 				RepoId:      repoID,
-				GranteeType: "account",
+				GranteeType: granteeTypeAccount,
 				GranteeId:   grantee,
 			})
 		},

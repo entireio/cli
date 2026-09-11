@@ -10,14 +10,14 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 )
 
-// subagentSessionIDPrefix is the prefix Copilot uses when it reuses a Task
-// tool-use id as the sessionId on lifecycle hooks fired for a subagent turn.
-// Real Copilot session ids are UUIDs, so this prefix unambiguously marks a
-// subagent context (e.g. "toolu_bdrk_01K…" on Bedrock-backed models).
+// subagentSessionIDPrefix is the prefix older Copilot releases used when they
+// reused a Task tool-use id as the sessionId on child lifecycle hooks. Current
+// releases use a child UUID instead; buildAgentStop detects that shape from its
+// parent transcript path.
 const subagentSessionIDPrefix = "toolu_"
 
-// isSubagentSessionID reports whether a Copilot sessionId is actually a
-// subagent's tool-use id rather than a real interactive session id.
+// isSubagentSessionID reports whether a Copilot sessionId uses the historical
+// child tool-use-id shape rather than a real interactive session ID.
 func isSubagentSessionID(sessionID string) bool {
 	return strings.HasPrefix(sessionID, subagentSessionIDPrefix)
 }
@@ -34,6 +34,7 @@ const (
 	HookNameSessionStart        = "session-start"
 	HookNameAgentStop           = "agent-stop"
 	HookNameSessionEnd          = "session-end"
+	HookNameSubagentStart       = "subagent-start"
 	HookNameSubagentStop        = "subagent-stop"
 	HookNamePreToolUse          = "pre-tool-use"
 	HookNamePostToolUse         = "post-tool-use"
@@ -48,6 +49,7 @@ func (c *CopilotCLIAgent) HookNames() []string {
 		HookNameSessionStart,
 		HookNameAgentStop,
 		HookNameSessionEnd,
+		HookNameSubagentStart,
 		HookNameSubagentStop,
 		HookNamePreToolUse,
 		HookNamePostToolUse,
@@ -84,15 +86,15 @@ func (c *CopilotCLIAgent) ParseHookEvent(ctx context.Context, hookName string, s
 		}
 	}
 
-	// Copilot fires the per-turn/session lifecycle hooks for subagent turns too,
-	// using the subagent's Task tool-use id (e.g. "toolu_…") as the sessionId.
+	// Older Copilot releases fire per-turn/session lifecycle hooks for children
+	// using the Task tool-use id (e.g. "toolu_…") as the sessionId.
 	// Those must NOT spin up a top-level Entire session: the subagent never gets
 	// a matching stop for that id, so the phantom session would stay "active"
 	// forever and pin its shadow branch open after the user commits. The
 	// subagent's work is still captured via the main session's subagentStop →
 	// task checkpoint path, so we drop only the session-lifecycle hooks here and
 	// leave subagentStop itself to run.
-	if hookName != HookNameSubagentStop && isSubagentSessionID(env.SessionID) {
+	if hookName != HookNameSubagentStop && hookName != HookNameSubagentStart && isSubagentSessionID(env.SessionID) {
 		logging.Debug(ctx, "copilot-cli: skipping lifecycle event for subagent session",
 			"sessionID", env.SessionID, "hook", hookName)
 		return nil, nil //nolint:nilnil // Subagent lifecycle hook — no top-level session action.
@@ -107,8 +109,13 @@ func (c *CopilotCLIAgent) ParseHookEvent(ctx context.Context, hookName string, s
 		return c.buildAgentStop(ctx, env), nil
 	case HookNameSessionEnd:
 		return c.buildSessionEnd(env), nil
+	case HookNameSubagentStart:
+		// Current Copilot start payloads identify only the parent and agent type;
+		// concurrent same-type children are indistinguishable until stop provides
+		// agentId. The parent transcript then supplies the stable task ID.
+		return nil, nil //nolint:nilnil // Start has no safe correlation identity.
 	case HookNameSubagentStop:
-		return c.buildSubagentStop(env), nil
+		return c.buildSubagentStop(ctx, env), nil
 	default:
 		logging.Debug(ctx, "copilot-cli: ignoring unknown hook", "hook", hookName)
 		return nil, nil //nolint:nilnil // Unknown hooks have no lifecycle action
@@ -141,6 +148,18 @@ func (c *CopilotCLIAgent) buildSessionStart(env *hookEnvelope) *agent.Event {
 }
 
 func (c *CopilotCLIAgent) buildAgentStop(ctx context.Context, env *hookEnvelope) *agent.Event {
+	// Current Copilot children emit their own agentStop with the child UUID as
+	// sessionId but the parent's transcriptPath. A child userPromptSubmitted may
+	// already have created transient Entire state; end that state without
+	// scanning the parent transcript as if it belonged to the child.
+	if c.isSubagentAgentStop(env) {
+		return &agent.Event{
+			Type:      agent.SessionEnd,
+			SessionID: env.SessionID,
+			Timestamp: env.Timestamp,
+		}
+	}
+
 	var model string
 	if env.TranscriptPath != "" {
 		model = ExtractModelFromTranscript(ctx, env.TranscriptPath)
@@ -155,6 +174,22 @@ func (c *CopilotCLIAgent) buildAgentStop(ctx context.Context, env *hookEnvelope)
 	}
 }
 
+func (c *CopilotCLIAgent) isSubagentAgentStop(env *hookEnvelope) bool {
+	if env.SessionID == "" || env.TranscriptPath == "" {
+		return false
+	}
+	store, err := agent.OpenSessionStore(c, env.CWD)
+	if err != nil {
+		return false
+	}
+	actualName, err := store.Name(env.TranscriptPath)
+	if err != nil {
+		return false
+	}
+	expectedName, _, err := store.SessionFile(env.SessionID)
+	return err == nil && actualName != expectedName
+}
+
 func (c *CopilotCLIAgent) buildSessionEnd(env *hookEnvelope) *agent.Event {
 	return &agent.Event{
 		Type:      agent.SessionEnd,
@@ -163,12 +198,69 @@ func (c *CopilotCLIAgent) buildSessionEnd(env *hookEnvelope) *agent.Event {
 	}
 }
 
-func (c *CopilotCLIAgent) buildSubagentStop(env *hookEnvelope) *agent.Event {
-	return &agent.Event{
-		Type:      agent.SubagentEnd,
-		SessionID: env.SessionID,
-		Timestamp: env.Timestamp,
+func (c *CopilotCLIAgent) buildSubagentStop(ctx context.Context, env *hookEnvelope) *agent.Event {
+	evidence, ok := c.readSubagentEvidence(ctx, env)
+	if !ok {
+		return nil
 	}
+	subagentType := env.AgentType
+	if subagentType == "" {
+		subagentType = env.AgentName
+	}
+	if subagentType == "" {
+		subagentType = evidence.SubagentType
+	}
+	description := env.AgentDescription
+	if description == "" {
+		description = evidence.TaskDescription
+	}
+	return &agent.Event{
+		Type:                          agent.SubagentEnd,
+		SessionID:                     env.SessionID,
+		SessionRef:                    env.TranscriptPath,
+		Timestamp:                     env.Timestamp,
+		ToolUseID:                     evidence.ToolUseID,
+		SubagentID:                    evidence.AgentID,
+		SubagentType:                  subagentType,
+		TaskDescription:               description,
+		ModifiedFiles:                 evidence.Files,
+		Final:                         true,
+		CompletionWithoutLaunch:       true,
+		SubagentTranscriptUnavailable: true,
+	}
+}
+
+func (c *CopilotCLIAgent) readSubagentEvidence(ctx context.Context, env *hookEnvelope) (subagentEvidence, bool) {
+	if env.SessionID == "" || (env.AgentID == "" && env.AgentName == "") || env.TranscriptPath == "" {
+		return subagentEvidence{}, false
+	}
+	store, err := agent.OpenSessionStore(c, env.CWD)
+	if err != nil {
+		logging.Warn(ctx, "copilot-cli: cannot open session store for subagent stop", "err", err)
+		return subagentEvidence{}, false
+	}
+	name, err := store.Name(env.TranscriptPath)
+	if err != nil {
+		logging.Warn(ctx, "copilot-cli: rejecting subagent stop transcript outside session store", "err", err)
+		return subagentEvidence{}, false
+	}
+	expectedName, _, err := store.SessionFile(env.SessionID)
+	if err != nil || name != expectedName {
+		logging.Warn(ctx, "copilot-cli: rejecting subagent stop transcript with unexpected layout",
+			"sessionID", env.SessionID)
+		return subagentEvidence{}, false
+	}
+	raw, err := store.ReadFile(name)
+	if err != nil {
+		logging.Warn(ctx, "copilot-cli: cannot read parent transcript for subagent stop", "err", err)
+		return subagentEvidence{}, false
+	}
+	events, err := parseEventsFromBytes(raw)
+	if err != nil {
+		logging.Warn(ctx, "copilot-cli: cannot parse parent transcript for subagent stop", "err", err)
+		return subagentEvidence{}, false
+	}
+	return extractSubagentEvidence(events, env.AgentID, env.AgentName)
 }
 
 func (c *CopilotCLIAgent) readHookEnvelope(stdin io.Reader) (*hookEnvelope, error) {
