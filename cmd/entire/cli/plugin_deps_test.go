@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"os"
 	"os/exec"
@@ -362,6 +363,19 @@ func TestRunPluginDoctor_ChecksBinEntry(t *testing.T) { //nolint:paralleltest //
 	}
 	if strings.Contains(problems, "digest recorded at install") {
 		t.Errorf("pkg/ is intact and must not be reported: %s", problems)
+	}
+	// A local override is a note, not a fault: `plugin doctor` prints it and
+	// still exits 0, as it did before the bin/ entry was checked at all.
+	cmd := newPluginDoctorCmd()
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetErr(&out)
+	cmd.SetContext(context.Background())
+	if err := cmd.RunE(cmd, nil); err != nil {
+		t.Errorf("doctor exited non-zero on a note-only report: %v\n%s", err, out.String())
+	}
+	if !strings.Contains(out.String(), "note: managed bin entry is not the installed release binary") || !strings.Contains(out.String(), "All plugins healthy.") {
+		t.Errorf("doctor output lacks the note or the healthy verdict:\n%s", out.String())
 	}
 
 	// A faithful copy is healthy.

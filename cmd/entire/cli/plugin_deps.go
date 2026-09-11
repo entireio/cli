@@ -294,6 +294,9 @@ type PluginDoctorIssue struct {
 	Plugin  string
 	Problem string
 	Fix     string
+	// Note marks a state worth reporting that is not a fault — nothing needs
+	// fixing, so it does not make `plugin doctor` exit non-zero.
+	Note bool
 }
 
 // RunPluginDoctor checks every managed plugin: bin entry present, dangling
@@ -469,6 +472,7 @@ func checkManagedBinaryIntegrity(m *PluginManifest) []PluginDoctorIssue {
 			Plugin:  m.Name,
 			Problem: "managed bin entry is not the installed release binary; a local 'entire plugin install <path> --force' replaced it, or it was modified outside entire",
 			Fix:     "keep it if the local build is intended; to return to the release: " + reinstallCommand(m),
+			Note:    true,
 		})
 	}
 	return issues
