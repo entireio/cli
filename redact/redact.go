@@ -1152,10 +1152,13 @@ func hasDuplicateJSONKeys(s string) bool {
 }
 
 // tokenStreamHasDuplicateKeys consumes exactly one JSON value from dec,
-// recursing through containers. Per-object keys are compared through a small
-// slice rather than a map: transcript objects carry a handful of keys, and a
-// map allocation per object would be paid on every parsed line.
+// recursing through containers. Per-object keys stay in a small slice until an
+// object exceeds duplicateKeySliceThreshold: transcript objects usually carry
+// only a handful of keys, so allocating a map for every object would tax every
+// parsed line, while a slice alone becomes quadratic for wide tool output.
 func tokenStreamHasDuplicateKeys(dec *json.Decoder) bool {
+	const duplicateKeySliceThreshold = 16
+
 	t, err := dec.Token()
 	if err != nil {
 		return false
@@ -1166,7 +1169,10 @@ func tokenStreamHasDuplicateKeys(dec *json.Decoder) bool {
 	}
 	switch d {
 	case '{':
-		var seen []string
+		var (
+			seenSlice []string
+			seenMap   map[string]struct{}
+		)
 		for dec.More() {
 			kt, err := dec.Token()
 			if err != nil {
@@ -1176,10 +1182,29 @@ func tokenStreamHasDuplicateKeys(dec *json.Decoder) bool {
 			if !ok {
 				return false
 			}
-			if slices.Contains(seen, k) {
-				return true
+			if seenMap != nil {
+				if _, duplicate := seenMap[k]; duplicate {
+					return true
+				}
+				seenMap[k] = struct{}{}
+			} else {
+				if slices.Contains(seenSlice, k) {
+					return true
+				}
+				if len(seenSlice) == duplicateKeySliceThreshold {
+					// Sized from the constant, not len(seenSlice): they are equal
+					// on this branch, and the spilled keys plus k are exactly
+					// what the map has to hold.
+					seenMap = make(map[string]struct{}, duplicateKeySliceThreshold+1)
+					for _, seenKey := range seenSlice {
+						seenMap[seenKey] = struct{}{}
+					}
+					seenMap[k] = struct{}{}
+					seenSlice = nil
+				} else {
+					seenSlice = append(seenSlice, k)
+				}
 			}
-			seen = append(seen, k)
 			if tokenStreamHasDuplicateKeys(dec) {
 				return true
 			}

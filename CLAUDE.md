@@ -80,8 +80,17 @@ the commands are always runnable in every build.
 - `org`: control-plane organization management — `create`, `list`, `get`, `delete`
 - `project`: control-plane project management — `create`, `list`, `get`, `delete`
 - `repo`: control-plane repository lifecycle — `create`, `list`, `get`, `delete`,
-  `clone`, plus the `mirror` and `visibility` subtrees. Git content operations
-  (log, diff, …) are intentionally out of scope. The `mirror` subtree is
+  `clone`, plus the `mirror`, `visibility` and `protection` subtrees. Git
+  content operations (log, diff, …) are intentionally out of scope.
+  `protection` (`list`, `add [--server-side-merge-only]`, `remove`) edits a
+  native repo's branch-protection rules through core's
+  `/repos/{repoId}/branch-protection` resource: `add` and `remove` are one
+  PATCH each (`addRules` upserts by ref), never a read-modify-write of the
+  list. `add` sends `serverSideMergeOnly` only when the flag was given: the
+  server keeps an existing rule's level when it is absent, so re-adding a
+  branch without the flag never lowers it and `--server-side-merge-only=false`
+  is the explicit way down. A short branch name expands to `refs/heads/`,
+  `HEAD` and `refs/...` pass through. The `mirror` subtree is
   server-side (`create`, `list`, `get`, `remove`, `collaborators`) with one
   exception: `mirror use` repoints the *current clone's* git remote at a mirror
   (local git config only — it creates nothing server-side). Interactively it
@@ -234,7 +243,7 @@ named `<noun>_group.go` and `<noun>_<verb>.go` respectively.
 
 ## Tech Stack
 
-- Language: Go 1.26.x
+- Language: Go 1.27.x (`go.mod` pins the 1.27.1 minimum)
 - Build tool: mise, go modules
 - Linting: golangci-lint
 
@@ -403,12 +412,13 @@ Tests that spawn the real `entire` or `git` binary need the child to be non-inte
    it withdraws prompts from the largest agent population at once, which is a
    product decision rather than a detection fix.
 4. `CI=<non-empty-non-false>` → false.
-5. `/dev/tty` probe, plus its terminal mode → a terminal held in raw mode
-   (canonical input off) belongs to a full-screen TUI that spawned us, not to a
-   shell we can prompt: TUI git clients (lazygit, gitui, tig) run `git commit`
-   as a child while owning the screen, so the hook inherits a `/dev/tty` it
-   must not prompt on. Fails open when the mode can't be read. See
-   `interactive/rawmode_unix.go` for the rationale.
+5. Controlling-terminal probe — `/dev/tty` on Unix, `CONIN$` + `CONOUT$` on
+   Windows. A terminal held in raw mode (canonical/line input off) belongs to a
+   full-screen TUI that spawned us, not to a shell we can prompt: TUI git clients
+   (lazygit, gitui, tig) run `git commit` as a child while owning the screen, so
+   the hook inherits the same terminal it must not prompt on. The mode check
+   fails open when it cannot read the mode. See `interactive/tty_*.go` and
+   `interactive/rawmode_{unix,windows}.go` for the platform split and rationale.
 
 For subprocesses spawning the real `entire` binary (e2e, integration tests, `entire` calling itself from a hook), prefer `execx.NonInteractive` over env-var plumbing:
 
@@ -420,9 +430,9 @@ cmd.Dir = repoDir
 out, err := cmd.CombinedOutput()
 ```
 
-`execx.NonInteractive` puts the child in a new session with no controlling terminal (`Setsid` on Unix, `DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP` on Windows), so the child's `/dev/tty` probe fails naturally. No env var required.
+`execx.NonInteractive` puts the child in a new session with no controlling terminal (`Setsid` on Unix, `DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP` on Windows), so the child's platform terminal probe fails naturally. No env var required.
 
-`interactive.UnderTest()` returns true when `testing.Testing()` or `ENTIRE_TEST_TTY` is set — use it where code needs to skip a real-terminal operation even if `CanPromptInteractively()` returns true (e.g., reading from `/dev/tty` directly inside `askConfirmTTY`).
+`interactive.UnderTest()` returns true when `testing.Testing()` or `ENTIRE_TEST_TTY` is set — use it where code needs to skip a real-terminal operation even if `CanPromptInteractively()` returns true (e.g., opening `interactive.OpenPromptTTY()` directly inside a prompt reader).
 
 ### Linting and Formatting
 
@@ -1351,9 +1361,9 @@ comments at each site say which case applies:
   statting, or removing a directory is an operation on it from the outside, which
   a root over it cannot perform. `setupEntireDirectory`, `removeEntireDirectory`,
   the `MkdirAll` behind each anchor, and the plugin index clone are all this case.
-- **Paths the user named** (`doctor bundle --out`, `api --input`) and the two
-  single fixed files `/dev/tty` and `/proc/<pid>/*`. No boundary exists to
-  enforce.
+- **Paths the user named** (`doctor bundle --out`, `api --input`) and fixed
+  platform files such as `/dev/tty`, `CONIN$`, `CONOUT$`, and `/proc/<pid>/*`.
+  No boundary exists to enforce.
 
 ### Git Operations
 
@@ -1450,6 +1460,17 @@ and `GIT_OPTIONAL_LOCKS=0` in the environment is an equivalent user-side
 mitigation. Output is byte-identical either way. The write fires on
 mtime-moved-but-content-identical files — the ordinary aftermath of an agent
 turn, a formatter, or an editor save — not on content edits.
+
+**The flag does not disable the equivalent refresh in worktree-comparing `git
+diff`.** `builtin/diff.c`'s `refresh_index_quietly()` does not consult
+`use_optional_locks()`: measured on Git 2.50.1, both `git diff <tree> --
+<paths>` and `git --no-optional-locks diff <tree> -- <paths>` rewrote a
+stat-stale index. `git diff --cached` and a two-tree diff do not read the
+worktree and are unaffected. Hook code needing exact clean-filtered content
+uses `git hash-object`; `git diff-index` is also non-refreshing but can report a
+stat-dirty, content-identical file as changed. The source guard
+`TestGitWorktreeDiffCallSitesDoNotRefreshTheIndex` prevents the unsafe form from
+being introduced on the hook path.
 
 That refresh is git working as designed, and running `git status` is not itself
 a mistake. The reason we always drop the write is that **Entire never benefits
@@ -1826,7 +1847,7 @@ The manual-commit strategy (`manual_commit*.go`) does not modify the active bran
 - Uses the `post-rewrite` Git hook to keep local session linkage aligned after amend/rebase rewrites
 - Builds git trees in-memory using go-git plumbing APIs
 - **Location-independent transcript resolution** - transcript paths are always computed dynamically from the current repo location (via `agent.GetSessionDir` + `agent.ResolveSessionFile`), never stored in checkpoint metadata. This ensures log restore (`RestoreLogsOnly`) works after repo relocation or across machines.
-- **Token usage scoping** - `SessionState.TokenUsage` is the session-wide total used by `entire status`; `SessionState.CheckpointTokenUsage` is the pending checkpoint delta since the last condensation. Checkpoint metadata must stay scoped to `CheckpointTranscriptStart` or the pending checkpoint delta. Cursor tokens come only from stop-hook payloads, while Copilot CLI can also backfill full-session totals from `session.shutdown`. Condensation's transcript recompute runs with `subagentsDir=""` and so drops `SubagentTokens`; `withSubagentTokensFrom` refills it from the already-rescoped `state.CheckpointTokenUsage`, and the store sums it across a checkpoint's sessions via `types.AddTokenUsage` (the single token-summing primitive — do not hand-roll another; a field-by-field copy is how the nested total came to be dropped in the first place).
+- **Token usage scoping** - `SessionState.TokenUsage` is the session-wide total used by `entire status`; `SessionState.CheckpointTokenUsage` is the pending checkpoint delta since the last condensation. Checkpoint metadata must stay scoped to `CheckpointTranscriptStart` or the pending checkpoint delta. Cursor tokens come only from stop-hook payloads, while Copilot CLI can also backfill full-session totals from `session.shutdown`. Shadow-branch condensation's transcript recompute runs with `subagentsDir=""` and so drops `SubagentTokens`; `fillMissingSubagentTokensFrom` refills it from the already-rescoped `state.CheckpointTokenUsage`. A live mid-turn condensation when no shadow branch resolves instead reads the still-available subagent transcripts only when no checkpoint-scoped subagent total already exists, the agent supports that extraction, and a real subagent directory exists. It subtracts `SubagentTokensBaseline` for checkpoint metadata and keeps the cumulative snapshot on `state.TokenUsage` so the reset advances the next baseline; an empty delta stays nil. The scan is substantially more expensive for subagent-heavy sessions, so every gate is load-bearing. The store sums those scoped values across a checkpoint's sessions via `types.AddTokenUsage` (the single token-summing primitive — do not hand-roll another; a field-by-field copy is how the nested total came to be dropped in the first place).
 - Tracks session state in `.git/entire-sessions/` (shared across worktrees)
 - **Commit-to-session linking is identity-first** (`strategy/session_identity.go`): identity comes from `SessionState.Owner`, the `proclive.Identity` that `captureSessionOwner` already records on every turn start (first non-transient ancestor — proclive skips shells, `entire` itself, and the Go toolchain, so a human commit typed in the same terminal never matches). Commit hooks snapshot their own ancestry once (`proclive.CurrentAncestry`) and match every candidate against it in memory (`Ancestry.Depth`) — one hostname/boot-id/proc walk per commit, not one per session state — linking the commit to the session whose agent process is an ancestor — in any worktree (nearest ancestor wins, so a nested agent beats the outer agent that spawned it, and only a tie at equal depth falls to the latest interaction; host/boot/start-time guards defeat PID reuse and cross-machine matches; Windows cannot introspect and falls back to worktree matching). The identity match is UNIONED with the worktree-matched set, never a replacement: a commit condenses every session with pending content in its worktree. Any session matched outside its home worktree is guest-linked — whether identity-matched or selected by the pre-existing single-worktree fallback — and is condensed and linked without mutating worktree-coupled state (`BaseCommit`, shadow-branch realignment) from the foreign worktree (`isSessionHomeWorktree`). Worktree matching is always computed (it is the sole mechanism for commits with no agent ancestry): imported sessions never link, and multi-worktree ambiguity is filtered to recently-interacting sessions (15 min) before declining. This deliberately turns some former ambiguity declines into a best-candidate link; `recentSessionWindow` is a correctness tradeoff because a session in a long-running build or tool call can age out and leave the other recent worktree to win. The stderr hint naming `entire session adopt` fires only from the commit-linking path, and only when identity matching could not rescue the commit either. Under `go test`, `session.NewStateStore` and `NewStateStoreForWorktree` refuse to open outside the temp root so non-isolated tests fail loudly instead of leaking fixture sessions into a real repo.
 - **Reclaiming sessions whose agent vanished** - not every agent fires a session-end hook, and any agent can be killed before its hook runs, so a session can be left un-finalized forever. `SessionState.Owner` — the same fingerprint commit linking matches above — is captured at every turn start by `captureSessionOwner`, and `State.OwnerExited()` reports it gone via `proclive.Check`. `finalizeExitedSessions` sweeps those inside `entire status` (text and `--json`) and `entire doctor`, ending them exactly as a clean stop would. **`OwnerExited` deliberately covers IDLE as well as ACTIVE** — an agent that finishes its last turn and then quits leaves IDLE, so gating on ACTIVE alone missed the common case; only already-finalized sessions are excluded, per the shared `State.IsEnded()` predicate. Liveness is Unknown on Windows and for cross-host state, where behaviour degrades to the `StuckActiveThreshold` timeout. Because the sweep runs inside interactive commands, its eager condensing is capped by `sweepCondenseBudget` across the whole sweep: every candidate is always marked ENDED (a single atomic rename — that is what un-sticks it from `entire status`), while condensing runs only while the budget lasts, so a multi-day backlog drains over successive invocations instead of stalling one. Skipping a condense is the existing fail-open path — PostCommit retries, and `doctor` reports the session as "ended with uncondensed checkpoint data".

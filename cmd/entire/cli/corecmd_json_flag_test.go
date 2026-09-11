@@ -50,6 +50,10 @@ func TestControlPlaneJSONFlag_OnlyOnHonoringCommands(t *testing.T) {
 		"repo mirror collaborators list": true,
 		"repo visibility get":            true,
 		"repo visibility set":            true,
+		// add/remove print the resulting rule list, so they render JSON too.
+		"repo protection list":   true,
+		"repo protection add":    true,
+		"repo protection remove": true,
 		// grant
 		"grant org add":        true,
 		"grant org list":       true,

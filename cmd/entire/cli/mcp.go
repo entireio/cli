@@ -61,6 +61,9 @@ type mcpRequest struct {
 	Params  json.RawMessage `json:"params,omitempty"`
 }
 
+// jsonRPCVersion is the only JSON-RPC version this server speaks.
+const jsonRPCVersion = "2.0"
+
 type mcpResponse struct {
 	JSONRPC string          `json:"jsonrpc"`
 	ID      json.RawMessage `json:"id"`
@@ -91,7 +94,7 @@ func runMCPServer(ctx context.Context, rootCmd *cobra.Command, in io.Reader, out
 
 		var req mcpRequest
 		if err := json.Unmarshal(line, &req); err != nil {
-			if encErr := enc.Encode(mcpResponse{JSONRPC: "2.0", ID: json.RawMessage("null"), Error: &mcpError{Code: -32700, Message: "parse error"}}); encErr != nil {
+			if encErr := enc.Encode(mcpResponse{JSONRPC: jsonRPCVersion, ID: json.RawMessage("null"), Error: &mcpError{Code: -32700, Message: "parse error"}}); encErr != nil {
 				return fmt.Errorf("write mcp parse-error response: %w", encErr)
 			}
 			continue
@@ -100,12 +103,12 @@ func runMCPServer(ctx context.Context, rootCmd *cobra.Command, in io.Reader, out
 		// Reject a parseable-but-invalid request (missing/incorrect jsonrpc version
 		// or empty method) with -32600 before dispatch, per JSON-RPC, rather than
 		// treating it as method-not-found.
-		if req.JSONRPC != "2.0" || req.Method == "" {
+		if req.JSONRPC != jsonRPCVersion || req.Method == "" {
 			id := req.ID
 			if len(id) == 0 {
 				id = json.RawMessage("null")
 			}
-			if encErr := enc.Encode(mcpResponse{JSONRPC: "2.0", ID: id, Error: &mcpError{Code: -32600, Message: "invalid request"}}); encErr != nil {
+			if encErr := enc.Encode(mcpResponse{JSONRPC: jsonRPCVersion, ID: id, Error: &mcpError{Code: -32600, Message: "invalid request"}}); encErr != nil {
 				return fmt.Errorf("write mcp invalid-request response: %w", encErr)
 			}
 			continue
@@ -124,7 +127,7 @@ func runMCPServer(ctx context.Context, rootCmd *cobra.Command, in io.Reader, out
 			continue
 		}
 
-		resp := mcpResponse{JSONRPC: "2.0", ID: req.ID}
+		resp := mcpResponse{JSONRPC: jsonRPCVersion, ID: req.ID}
 		if rpcErr != nil {
 			resp.Error = rpcErr
 		} else {
@@ -138,7 +141,7 @@ func runMCPServer(ctx context.Context, rootCmd *cobra.Command, in io.Reader, out
 		// A single line exceeded maxMCPMessageBytes (the scanner can't resynchronize
 		// past an over-long token) or the read failed; report once and stop.
 		if errors.Is(err, bufio.ErrTooLong) {
-			if encErr := enc.Encode(mcpResponse{JSONRPC: "2.0", ID: json.RawMessage("null"), Error: &mcpError{Code: -32600, Message: "request too large"}}); encErr != nil {
+			if encErr := enc.Encode(mcpResponse{JSONRPC: jsonRPCVersion, ID: json.RawMessage("null"), Error: &mcpError{Code: -32600, Message: "request too large"}}); encErr != nil {
 				return fmt.Errorf("write mcp oversize response: %w", encErr)
 			}
 			return nil

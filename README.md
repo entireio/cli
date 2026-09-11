@@ -45,7 +45,7 @@ With Entire, you can:
 - Git
 - macOS, Linux or Windows
 - [Supported agent](#agent-hook-configuration) installed and authenticated
-- Go 1.26+ only if you install with `go install` (the packaged installs bundle their own runtime)
+- Go 1.27.1+ only if you install with `go install` (the packaged installs bundle their own runtime)
 
 ## Quick Start
 

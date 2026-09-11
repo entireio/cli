@@ -1,6 +1,7 @@
 package redact
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -129,6 +130,24 @@ func TestJSONLContent_SingleJSONValueDuplicateKeyIsRebuilt(t *testing.T) {
 	got, err := JSONLContent(content)
 	require.NoError(t, err)
 	assert.NotContains(t, got, highEntropySecret)
+}
+
+func TestJSONLContent_RedactsSecretShadowedByPreMigrationDuplicateKey(t *testing.T) {
+	t.Parallel()
+
+	fields := []string{`"k0":"` + highEntropySecret + `"`}
+	for i := 1; i < 25; i++ {
+		fields = append(fields, fmt.Sprintf(`"k%d":"filler %d"`, i, i))
+	}
+	assert.False(t, hasDuplicateJSONKeys("{"+strings.Join(fields, ",")+"}"))
+
+	fields = append(fields, `"k0":"safe"`)
+	line := "{" + strings.Join(fields, ",") + "}"
+
+	got, err := JSONLContent(line)
+	require.NoError(t, err)
+	assert.NotContains(t, got, highEntropySecret)
+	assert.Contains(t, got, `"k0":"safe"`)
 }
 
 func TestJSONLContent_RedactsNULAmbiguousReplacementPairs(t *testing.T) {

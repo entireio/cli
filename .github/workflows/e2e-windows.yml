@@ -2,6 +2,12 @@ name: E2E Tests (Windows)
 
 on:
   workflow_call:
+    inputs:
+      test:
+        description: "Test name filter (regex)"
+        required: false
+        type: string
+        default: ""
   workflow_dispatch:
     inputs:
       test:
@@ -12,6 +18,12 @@ on:
 concurrency:
   group: e2e-windows-tests
   cancel-in-progress: true
+
+# Least privilege: this job only checks out the repository. Called via
+# `workflow_call` from e2e.yml, whose calling job must therefore grant at least
+# `contents: read` — a reusable workflow can never hold more than its caller.
+permissions:
+  contents: read
 
 jobs:
   e2e-windows:
@@ -39,12 +51,13 @@ jobs:
       - name: Run isolated test
         shell: bash
         env:
+          TEST_FILTER: ${{ inputs.test }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           E2E_ARTIFACT_DIR: ${{ github.workspace }}/e2e-artifacts
           E2E_PARALLEL: 1
         run: |
           mkdir -p "$E2E_ARTIFACT_DIR"
-          mise run test:e2e --agent claude-code "${{ inputs.test }}"
+          mise run test:e2e --agent claude-code "$TEST_FILTER"
 
       - name: Upload artifacts
         if: always()
