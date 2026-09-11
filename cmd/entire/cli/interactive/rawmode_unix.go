@@ -40,7 +40,7 @@ import (
 // rawModeIoctl is the platform's termios read ioctl (rawmode_darwin.go,
 // rawmode_linux.go); rawmode_other.go covers platforms without termios.
 func ttyInRawMode(f *os.File) bool {
-	termios, err := unix.IoctlGetTermios(int(f.Fd()), rawModeIoctl) //nolint:gosec // G115: uintptr->int is safe for fd
+	termios, err := unix.IoctlGetTermios(int(f.Fd()), rawModeIoctl)
 	if err != nil {
 		// Can't tell — fail open so an unexpected ioctl failure never silently
 		// disables prompting. This check may only ever suppress prompts we

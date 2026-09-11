@@ -204,8 +204,8 @@ func promptForReviewFocus(ctx context.Context, current string) (string, string, 
 	picked := DefaultProfileName
 	presets := []struct{ label, value string }{
 		{"General - correctness, regressions, tests", DefaultProfileName},
-		{"Security - auth, injection, secrets", "security"},
-		{"Accessibility - keyboard, screen readers, contrast", "accessibility"},
+		{"Security - auth, injection, secrets", SecurityProfileName},
+		{"Accessibility - keyboard, screen readers, contrast", AccessibilityProfileName},
 	}
 	options := make([]huh.Option[string], 0, len(presets)+1)
 	for _, p := range presets {

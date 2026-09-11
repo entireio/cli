@@ -12,8 +12,8 @@ import (
 // registers list/explain/tokens/search/resume as children.
 func newCheckpointGroupCmd() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:     "checkpoint",
-		Aliases: []string{"cp", "checkpoints"},
+		Use:     cmdCheckpoint,
+		Aliases: []string{"cp", cmdCheckpointsAlias},
 		Short:   "Inspect and search checkpoints",
 		Long: `Operations on checkpoints — the persistent records of agent work tied to commits.
 
@@ -75,7 +75,7 @@ func newCheckpointListCmd() *cobra.Command {
 	var pendingFlag bool
 
 	cmd := &cobra.Command{
-		Use:   "list",
+		Use:   cmdList,
 		Short: "List checkpoints on the current branch",
 		Long: `List checkpoints on the current branch.
 

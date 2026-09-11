@@ -49,7 +49,7 @@ func newTrailCmd() *cobra.Command {
 	var repoOverride string
 
 	cmd := &cobra.Command{
-		Use:    "trail",
+		Use:    cmdTrail,
 		Short:  "Manage trails for your branches",
 		Hidden: true,
 		// Hidden from root help while the surface matures, but advertised to
@@ -470,7 +470,7 @@ func newTrailListCmd() *cobra.Command {
 	var opts trailListOptions
 
 	cmd := &cobra.Command{
-		Use:   "list",
+		Use:   cmdList,
 		Short: "List recent trails",
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			opts.InsecureHTTP = trailInsecureHTTP(cmd)

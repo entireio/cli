@@ -29,6 +29,12 @@ import (
 	"github.com/go-git/go-git/v6/plumbing/object"
 )
 
+// Fixture identity for every benchmark repo and commit this package builds.
+const (
+	benchAuthorName  = "Bench User"
+	benchAuthorEmail = "bench@example.com"
+)
+
 // BenchRepo is a fully initialized git repository with Entire configured,
 // ready for checkpoint benchmarks.
 type BenchRepo struct {
@@ -150,8 +156,8 @@ func NewBenchRepo(b *testing.B, opts RepoOpts) *BenchRepo {
 		}
 		headHash, err = wt.Commit(fmt.Sprintf("Commit %d", c+1), &git.CommitOptions{
 			Author: &object.Signature{
-				Name:  "Bench User",
-				Email: "bench@example.com",
+				Name:  benchAuthorName,
+				Email: benchAuthorEmail,
 				When:  time.Now(),
 			},
 		})
@@ -371,8 +377,8 @@ func (br *BenchRepo) SeedShadowBranch(b *testing.B, sessionID string, checkpoint
 			ModifiedFiles:     modified,
 			MetadataDir:       metadataDir,
 			CommitMessage:     fmt.Sprintf("Checkpoint %d", i+1),
-			AuthorName:        "Bench User",
-			AuthorEmail:       "bench@example.com",
+			AuthorName:        benchAuthorName,
+			AuthorEmail:       benchAuthorEmail,
 			IsFirstCheckpoint: i == 0,
 		})
 		if err != nil {
@@ -412,8 +418,8 @@ func (br *BenchRepo) SeedMetadataBranch(b *testing.B, checkpointCount int) {
 			Prompts:          []string{fmt.Sprintf("Implement feature %d", i)},
 			FilesTouched:     files,
 			CheckpointsCount: 3,
-			AuthorName:       "Bench User",
-			AuthorEmail:      "bench@example.com",
+			AuthorName:       benchAuthorName,
+			AuthorEmail:      benchAuthorEmail,
 			Agent:            agent.AgentTypeClaudeCode,
 		})
 		if err != nil {

@@ -34,12 +34,13 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/entireio/auth-go/sts"
+
 	"github.com/entireio/cli/cmd/entire/cli/auth"
 	"github.com/entireio/cli/cmd/entire/cli/gitremote"
 	"github.com/entireio/cli/cmd/entire/cli/versioninfo"
 	"github.com/entireio/cli/internal/entireclient/clusterdiscovery"
 	"github.com/entireio/cli/internal/entireclient/httpclient"
-	"github.com/entireio/cli/internal/entireclient/httputil"
 	"github.com/entireio/cli/internal/entireclient/userdirs"
 	"github.com/entireio/cli/internal/remotehelper"
 	"github.com/entireio/cli/internal/remotehelper/debuglog"
@@ -242,7 +243,7 @@ var wrongClusterRe = regexp.MustCompile(`lives on "([^"]+)"`)
 // naming the correct host (and the corrected entire:// URL). Everything else
 // falls back to the verbatim error.
 func fatalMessage(err error, parsedURL *url.URL) string {
-	var oe *httputil.OAuthError
+	var oe *sts.ExchangeError
 	if errors.As(err, &oe) && oe.Code == "invalid_target" {
 		if m := wrongClusterRe.FindStringSubmatch(oe.Description); m != nil {
 			host := m[1]

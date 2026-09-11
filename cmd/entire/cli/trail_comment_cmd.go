@@ -99,7 +99,7 @@ replies. Code-review comments are managed separately under 'entire trail finding
 func newTrailCommentListCmd() *cobra.Command {
 	var jsonOut, all bool
 	cmd := &cobra.Command{
-		Use:   "list",
+		Use:   cmdList,
 		Short: "List discussion threads on a trail",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {

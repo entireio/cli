@@ -102,6 +102,11 @@ func RunIsolatedTextGeneratorCLI(ctx context.Context, runner TextCommandRunner, 
 // Callers outside this package that need the binary name (e.g., the explain
 // diagnostic's "run `claude` directly" suggestion) should use
 // SummaryCLIBinaryName rather than duplicating the mapping.
+// openCodeBinary is the OpenCode CLI executable. It happens to spell the same
+// as AgentNameOpenCode, but it names a program on $PATH rather than a registry
+// key, so it is its own constant instead of a cast of the agent name.
+const openCodeBinary = "opencode"
+
 var summaryProviderBinaries = map[types.AgentName]string{
 	AgentNameClaudeCode: "claude",
 	AgentNameCodex:      "codex",
@@ -109,7 +114,7 @@ var summaryProviderBinaries = map[types.AgentName]string{
 	AgentNameCursor:     "agent",
 	AgentNameGemini:     "gemini",
 	AgentNamePi:         "pi",
-	AgentNameOpenCode:   "opencode",
+	AgentNameOpenCode:   openCodeBinary,
 }
 
 // SummaryCLIBinaryName returns the CLI binary name for a summary-capable

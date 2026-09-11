@@ -28,7 +28,7 @@ func NewTranscriptBuilder() *TranscriptBuilder {
 func (b *TranscriptBuilder) AddUserMessage(content string) {
 	b.messages = append(b.messages, map[string]interface{}{
 		"uuid":      fmt.Sprintf("user-%d", len(b.messages)+1),
-		"type":      "user",
+		"type":      roleUser,
 		"message":   map[string]interface{}{"content": content},
 		"timestamp": time.Now().UTC().Format(time.RFC3339),
 	})
@@ -38,10 +38,10 @@ func (b *TranscriptBuilder) AddUserMessage(content string) {
 func (b *TranscriptBuilder) AddAssistantMessage(content string) {
 	b.messages = append(b.messages, map[string]interface{}{
 		"uuid": fmt.Sprintf("asst-%d", len(b.messages)+1),
-		"type": "assistant",
+		"type": roleAssistant,
 		"message": map[string]interface{}{
 			"content": []map[string]interface{}{
-				{"type": "text", "text": content},
+				{"type": blockTypeText, "text": content},
 			},
 		},
 		"timestamp": time.Now().UTC().Format(time.RFC3339),
@@ -55,7 +55,7 @@ func (b *TranscriptBuilder) AddToolUse(toolName, filePath, content string) strin
 	toolUseID := fmt.Sprintf("toolu_%d", b.toolUseCounter)
 
 	toolUse := map[string]interface{}{
-		"type": "tool_use",
+		"type": blockTypeToolUse,
 		"id":   toolUseID,
 		"name": toolName,
 		"input": map[string]interface{}{
@@ -66,7 +66,7 @@ func (b *TranscriptBuilder) AddToolUse(toolName, filePath, content string) strin
 
 	b.messages = append(b.messages, map[string]interface{}{
 		"uuid": fmt.Sprintf("asst-%d", len(b.messages)+1),
-		"type": "assistant",
+		"type": roleAssistant,
 		"message": map[string]interface{}{
 			"content": []interface{}{toolUse},
 		},
@@ -80,11 +80,11 @@ func (b *TranscriptBuilder) AddToolUse(toolName, filePath, content string) strin
 func (b *TranscriptBuilder) AddToolResult(toolUseID string) {
 	b.messages = append(b.messages, map[string]interface{}{
 		"uuid": fmt.Sprintf("user-%d", len(b.messages)+1),
-		"type": "user",
+		"type": roleUser,
 		"message": map[string]interface{}{
 			"content": []map[string]interface{}{
 				{
-					"type":        "tool_result",
+					"type":        blockTypeToolResult,
 					"tool_use_id": toolUseID,
 					"content":     "Success",
 				},
@@ -103,7 +103,7 @@ func (b *TranscriptBuilder) AddTaskToolUse(toolUseID, prompt string) string {
 	}
 
 	toolUse := map[string]interface{}{
-		"type": "tool_use",
+		"type": blockTypeToolUse,
 		"id":   toolUseID,
 		"name": "Task",
 		"input": map[string]interface{}{
@@ -114,7 +114,7 @@ func (b *TranscriptBuilder) AddTaskToolUse(toolUseID, prompt string) string {
 
 	b.messages = append(b.messages, map[string]interface{}{
 		"uuid": fmt.Sprintf("asst-%d", len(b.messages)+1),
-		"type": "assistant",
+		"type": roleAssistant,
 		"message": map[string]interface{}{
 			"content": []interface{}{toolUse},
 		},
@@ -131,11 +131,11 @@ func (b *TranscriptBuilder) AddTaskToolResult(toolUseID, agentID string) string 
 
 	b.messages = append(b.messages, map[string]interface{}{
 		"uuid": uuid,
-		"type": "user",
+		"type": roleUser,
 		"message": map[string]interface{}{
 			"content": []map[string]interface{}{
 				{
-					"type":        "tool_result",
+					"type":        blockTypeToolResult,
 					"tool_use_id": toolUseID,
 					"content":     "agentId: " + agentID,
 				},
