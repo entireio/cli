@@ -112,6 +112,20 @@ func CheckpointFetchTargetFrom(ctx context.Context, leadRemote string) string {
 	return target
 }
 
+// checkpointFetchTargetResolvedFrom is checkpointFetchTargetFrom plus whether a
+// configured store was vetoed by the ownership vote, for the one caller that
+// can act on the difference. See fetchURLResolved.
+func checkpointFetchTargetResolvedFrom(ctx context.Context, leadRemote string) (target string, authoritative, vetoed bool) {
+	url, authoritative, vetoed, err := fetchURLResolved(ctx, FetchURLOptions{LeadReadRemote: leadRemote})
+	if err == nil && url != "" {
+		return url, authoritative, vetoed
+	}
+	if leadRemote != "" {
+		return leadRemote, false, false
+	}
+	return originRemote, false, false
+}
+
 // checkpointFetchTargetFrom resolves the fetch target for checkpoint data,
 // honoring an optional read candidate (see FetchURLOptions.LeadReadRemote).
 // The bare remote-name fallbacks are non-authoritative: they exist so a fetch
@@ -238,8 +252,23 @@ func fetchCheckpointRefFrom(
 		if loadErr == nil && s.GetCheckpointRemote() != nil && electionErr == nil && len(readRemotes) > 0 && readRemotes[0] != "" {
 			fetchCtx, cancel := context.WithTimeout(ctx, fetchTimeout)
 			defer cancel()
-			target, authoritative := checkpointFetchTargetFrom(fetchCtx, readRemotes[0])
-			return probeAndFetchCheckpointRef(fetchCtx, ref, target, authoritative)
+			target, authoritative, vetoed := checkpointFetchTargetResolvedFrom(fetchCtx, readRemotes[0])
+			// A VETOED store serves no reads, and the single-remote gate has
+			// already routed writes to this elected remote — so it is the
+			// checkpoint destination, and a missing ref on it means the ref
+			// does not exist. Classifying that as absence is what lets callers
+			// distinguish "no such checkpoint" from "could not reach it".
+			//
+			// Scoped to this candidate-aware entry point on purpose. The
+			// lead-less FetchCheckpointRef must keep refusing, because its
+			// fallback is a remote that may never host the store's refs and it
+			// has nothing else to consult — see
+			// TestFetchCheckpointRef_FallbackTargetNeverClassifiesAbsence.
+			//
+			// Still a single target: the legacy origin tier is NOT retried
+			// after this, so a stale tip there can never be installed as the
+			// canonical local ref on the strength of an elected-remote miss.
+			return probeAndFetchCheckpointRef(fetchCtx, ref, target, authoritative || vetoed)
 		}
 		return FetchCheckpointRef(ctx, ref)
 	}

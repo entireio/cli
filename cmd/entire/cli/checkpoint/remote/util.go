@@ -63,6 +63,25 @@ func FetchURL(ctx context.Context, opts ...FetchURLOptions) (string, error) {
 // remote" (FetchCheckpointRef's ls-remote probe) must not treat emptiness on
 // a non-authoritative target as absence.
 func fetchURLAuthoritative(ctx context.Context, opts ...FetchURLOptions) (string, bool, error) {
+	url, authoritative, _, err := fetchURLResolved(ctx, opts...)
+	return url, authoritative, err
+}
+
+// fetchURLResolved is fetchURLAuthoritative plus whether a CONFIGURED
+// checkpoint_remote was rejected by the ownership vote, as distinct from being
+// absent or unresolvable.
+//
+// The distinction exists for absence classification and nothing else. A VETOED
+// store serves no reads, so the URL returned beside it is where writes went and
+// where reads go, and emptiness there means the ref does not exist. An
+// UNRESOLVABLE store leaves genuine uncertainty and the URL may be a remote
+// that never hosts checkpoint refs, so emptiness there proves nothing.
+//
+// authoritative answers a third question — "is the dedicated store what serves
+// reads" — and is false for both, which is why callers wanting the store's own
+// verdict (FetchURL, ReadsDedicatedStore) use fetchURLAuthoritative and see no
+// change.
+func fetchURLResolved(ctx context.Context, opts ...FetchURLOptions) (string, bool, bool, error) {
 	var opt FetchURLOptions
 	if len(opts) > 0 {
 		opt = opts[0]
@@ -95,14 +114,15 @@ func fetchURLAuthoritative(ctx context.Context, opts ...FetchURLOptions) (string
 			logFallback(ctx, "fetch", originURL, "load settings", err)
 			// Settings unreadable → checkpoint_remote unknown; conservative:
 			// do not certify origin as authoritative for checkpoint refs.
-			return originURL, false, nil
+			return originURL, false, false, nil
 		}
-		return "", false, fmt.Errorf("load settings: %w", err)
+		return "", false, false, fmt.Errorf("load settings: %w", err)
 	}
 
 	config := s.GetCheckpointRemote()
 	if config == nil {
-		return fetchURLFromReadCandidates(ctx, getRemoteURL, opt, originURL, originErr, withToken)
+		url, authoritative, err := fetchURLFromReadCandidates(ctx, getRemoteURL, opt, originURL, originErr, withToken)
+		return url, authoritative, false, err
 	}
 
 	// The push side confirms a configured checkpoint_remote is ours before
@@ -133,12 +153,13 @@ func fetchURLAuthoritative(ctx context.Context, opts ...FetchURLOptions) (string
 		)
 		fallbackURL, _, fallbackErr := fetchURLFromReadCandidates(ctx, getRemoteURL, opt, originURL, originErr, withToken)
 		if fallbackErr != nil {
-			return "", false, fallbackErr
+			return "", false, true, fallbackErr
 		}
-		// Never authoritative: a checkpoint_remote IS configured, and the
-		// fallback by construction does not host its refs, so emptiness there
-		// must not be classified as absence.
-		return fallbackURL, false, nil
+		// Never authoritative: a checkpoint_remote IS configured, so this URL
+		// is not the dedicated store. Reported as VETOED, which is what lets
+		// a caller that knows writes were routed here treat emptiness as
+		// absence. A caller that does not must keep refusing to.
+		return fallbackURL, false, true, nil
 	}
 
 	if withToken {
@@ -149,25 +170,25 @@ func fetchURLAuthoritative(ctx context.Context, opts ...FetchURLOptions) (string
 				Host:     host,
 			}, config)
 			if err == nil {
-				return checkpointURL, true, nil
+				return checkpointURL, true, false, nil
 			}
 		}
 
 		// In token-based execution path, short-circuit to avoid additional
 		// change in protocol.
 		if originURL != "" {
-			return originURL, false, nil
+			return originURL, false, false, nil
 		}
 	}
 
 	if originURL == "" {
-		return "", false, fmt.Errorf("no fetch URL found: %w", originErr)
+		return "", false, false, fmt.Errorf("no fetch URL found: %w", originErr)
 	}
 
 	info, err := ParseURL(originURL)
 	if err != nil {
 		logFallback(ctx, "fetch", originURL, "parse origin remote URL", err)
-		return originURL, false, nil
+		return originURL, false, false, nil
 	}
 
 	checkpointURL, err := deriveCheckpointURLFromInfo(info, config)
@@ -177,13 +198,13 @@ func fetchURLAuthoritative(ctx context.Context, opts ...FetchURLOptions) (string
 		// provider). Honor the configured checkpoint_remote by targeting the
 		// provider's canonical host over HTTPS rather than falling back to origin.
 		if providerURL, ok := resolveProviderCheckpointURL(ctx, config, opt.WorktreeRoot); ok {
-			return providerURL, true, nil
+			return providerURL, true, false, nil
 		}
 		logFallback(ctx, "fetch", originURL, "derive checkpoint remote URL", err)
-		return originURL, false, nil
+		return originURL, false, false, nil
 	}
 
-	return checkpointURL, true, nil
+	return checkpointURL, true, false, nil
 }
 
 // fetchURLFromReadCandidates resolves the fetch URL when no configured

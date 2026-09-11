@@ -278,28 +278,45 @@ func TestFetchCheckpointRefFrom_DedicatedVetoedByOriginPushOwner(t *testing.T) {
 	require.Equal(t, originHash, localRefHash(t, workDir, ref))
 }
 
+// The name still holds: origin is never retried. What changed is how a MISS on
+// the vetoed target is classified — writes were routed there by the same veto,
+// so its emptiness means the ref does not exist, while an unreachable one still
+// means only that it could not be asked.
+//
+// Both halves matter. Classifying absence is what lets a caller tell "no such
+// checkpoint" from "could not reach it"; refusing to retry origin is what stops
+// a stale legacy tip being installed as the canonical local ref on the strength
+// of an elected-remote miss.
 func TestFetchCheckpointRefFrom_InheritedDedicatedDoesNotRetry(t *testing.T) {
-	for _, transportFailure := range []bool{false, true} {
-		name := "missing ref is not authoritative absence"
-		if transportFailure {
-			name = "selected transport failure"
-		}
-		t.Run(name, func(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		unreachable bool
+		wantAbsence bool
+	}{
+		{name: "missing ref on the vetoed target is absence", wantAbsence: true},
+		{name: "selected transport failure is not absence", unreachable: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
 			workDir, ref, _, _ := dedicatedCandidatesFixture(t, false, true)
-			if transportFailure {
+			if tc.unreachable {
 				t.Setenv("CHECKPOINT_TEST_UPSTREAM", filepath.Join(workDir, "unreachable-fork"))
 			}
+
 			err := FetchCheckpointRefFrom(t.Context(), ref, []string{"fork", "origin"}, nil)
 			require.Error(t, err)
-			require.NotErrorIs(t, err, plumbing.ErrReferenceNotFound)
-			// Names the remote the error came from. Without this the
-			// assertions above pass on unfixed code: the lead-less ownership
-			// vote ACCEPTS the dedicated store (origin and the checkpoint
-			// repo share an owner), so the probe fails against the store
-			// instead of the fork and produces an equally non-absence error.
+			if tc.wantAbsence {
+				require.ErrorIs(t, err, plumbing.ErrReferenceNotFound)
+			} else {
+				require.NotErrorIs(t, err, plumbing.ErrReferenceNotFound)
+			}
+			// Names the remote the verdict came from. Without it these
+			// assertions pass on unfixed code, where the lead-less ownership
+			// vote accepts the dedicated store and the probe never reaches
+			// the fork at all.
 			require.ErrorContains(t, err, "contributor/app")
+
 			_, err = exec.CommandContext(t.Context(), "git", "rev-parse", "--verify", ref.String()).Output()
-			require.Error(t, err, "origin must not install a ref after the selected fallback fails")
+			require.Error(t, err, "origin must not install a ref after the selected candidate fails")
 		})
 	}
 }
