@@ -35,10 +35,17 @@ type ClaudeHookEntry struct {
 
 // sessionInfoRaw is the JSON structure from SessionStart/SessionEnd/Stop hooks.
 // SessionStart includes a "model" field with the LLM model identifier.
+//
+// Cwd is the directory Claude was working in when the hook fired. It follows
+// Claude: it is the worktree root once Claude enters a worktree, and the new
+// directory after Claude runs `cd`. The directory the session started in stays
+// available to hook commands as ${CLAUDE_PROJECT_DIR} and is deliberately not
+// what we want here — capture must follow the turn.
 type sessionInfoRaw struct {
 	SessionID      string `json:"session_id"`
 	TranscriptPath string `json:"transcript_path"`
 	Model          string `json:"model,omitempty"`
+	Cwd            string `json:"cwd,omitempty"`
 }
 
 // userPromptSubmitRaw is the JSON structure from UserPromptSubmit hooks.
@@ -47,6 +54,7 @@ type userPromptSubmitRaw struct {
 	SessionID      string `json:"session_id"`
 	TranscriptPath string `json:"transcript_path"`
 	Prompt         string `json:"prompt"`
+	Cwd            string `json:"cwd,omitempty"`
 }
 
 // taskHookInputRaw is the JSON structure from PreToolUse[Task] hook

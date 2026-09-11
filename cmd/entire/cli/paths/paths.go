@@ -61,6 +61,42 @@ var (
 	worktreeRootCacheDir string
 )
 
+type worktreeRootContextKey struct{}
+
+// WithWorktreeRoot returns a context in which WorktreeRoot resolves to root
+// instead of the process working directory, so an agent turn that happened in a
+// linked worktree is captured against that worktree rather than against
+// whichever directory the hook process happens to sit in.
+//
+// The root must already be validated by the caller — WorktreeRoot returns it
+// verbatim. It reaches everything that resolves a repo-relative path, because
+// forbidigo forbids os.Getwd (.golangci.yaml) and so makes WorktreeRoot the
+// single resolver: AbsPath, gitrepo.OpenCurrent, the metadata and tmp
+// directories, and the ephemeral store's own tree build all route through it.
+//
+// It does NOT pin settings, and callers must not assume it does.
+// settingsAbsPaths resolves through AbsPath, so an override here also moves
+// which .entire/settings.json governs redaction, scanner selection and the OPF
+// command trust gate. Callers that move the path root across a worktree
+// boundary must ALSO set settings.WithWorktreeRoot to the session's own root;
+// settings.Load short-circuits on its own context value before it ever reaches
+// AbsPath, so the two are set independently and deliberately.
+func WithWorktreeRoot(ctx context.Context, root string) context.Context {
+	if root == "" {
+		return ctx
+	}
+	return context.WithValue(ctx, worktreeRootContextKey{}, filepath.Clean(root))
+}
+
+// WorktreeRootFromContext returns the explicit worktree root carried by ctx, if
+// any. Callers that need to hand a directory to a subprocess or to another
+// process (which inherits neither ctx nor, deliberately, the cwd) use this
+// rather than re-deriving it.
+func WorktreeRootFromContext(ctx context.Context) (string, bool) {
+	root, ok := ctx.Value(worktreeRootContextKey{}).(string)
+	return root, ok && root != ""
+}
+
 // WorktreeRoot returns the git worktree root directory — in a linked worktree
 // that worktree's root, not the main repository's. The result is cached per
 // working directory. Callers that need to distinguish "outside a repository"
@@ -77,7 +113,18 @@ var (
 // is the common one — so those two outcomes are separated rather than merged:
 // only ErrNotARepository means "there is nothing here", and it is the only
 // failure any caller is allowed to answer with a directory of its own.
+//
+// An explicit root carried by ctx (WithWorktreeRoot) wins over the process
+// working directory and is returned without touching git or the cache: it is
+// already an answer, and caching it under the cwd key would poison the cache for
+// callers that did not set it. It is also the one path that does not consult
+// git, which is what lets a caller that already knows the root skip the
+// subprocess entirely.
 func WorktreeRoot(ctx context.Context) (string, error) {
+	if root, ok := WorktreeRootFromContext(ctx); ok {
+		return root, nil
+	}
+
 	// Get current working directory to check cache validity
 	cwd, err := os.Getwd() //nolint:forbidigo // already present in codebase
 	if err != nil {
