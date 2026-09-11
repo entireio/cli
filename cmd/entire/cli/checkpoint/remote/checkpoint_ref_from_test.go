@@ -265,6 +265,19 @@ func TestFetchCheckpointRefFrom_DedicatedVetoedByLeadPushOwner(t *testing.T) {
 	require.Equal(t, originHash, localRefHash(t, workDir, ref))
 }
 
+// origin is not exempt from the push-url half of the vote. Its fetch url is
+// already counted, but a remote.origin.pushurl naming another owner makes the
+// push side veto the store while the fetch side — which skipped origin's push
+// urls entirely — still accepted it.
+func TestFetchCheckpointRefFrom_DedicatedVetoedByOriginPushOwner(t *testing.T) {
+	workDir, ref, _, originHash := dedicatedCandidatesFixture(t, false, true)
+	testutil.RunGit(t, workDir, "remote", "set-url", "--push", "origin", "https://github.com/contributor/app.git")
+
+	// origin alone, so it is the read candidate whose push urls must vote.
+	require.NoError(t, FetchCheckpointRefFrom(t.Context(), ref, []string{"origin"}, nil))
+	require.Equal(t, originHash, localRefHash(t, workDir, ref))
+}
+
 func TestFetchCheckpointRefFrom_InheritedDedicatedDoesNotRetry(t *testing.T) {
 	for _, transportFailure := range []bool{false, true} {
 		name := "missing ref is not authoritative absence"

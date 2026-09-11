@@ -233,8 +233,18 @@ func fetchURLFromReadCandidates(ctx context.Context, getRemoteURL func(context.C
 // verdict the predicate gives an identity whose owner cannot be determined.
 func fetchOwnershipURLs(ctx context.Context, getRemoteURL func(context.Context, string) (string, error), opt FetchURLOptions) ([]string, error) {
 	lead := opt.LeadReadRemote
-	if lead == "" || lead == originRemote {
+	if lead == "" {
 		return nil, nil
+	}
+	if lead == originRemote {
+		// origin's FETCH url is already in the vote (the caller resolves it
+		// separately), but its PUSH destinations are not — and origin can
+		// carry a remote.origin.pushurl naming another owner just as any
+		// remote can. Skipping them here left the same asymmetry this
+		// function exists to close: the push side vetoes the store because
+		// it votes on push urls, the fetch side accepted it because it did
+		// not.
+		return pushOwnershipURLs(ctx, opt, lead)
 	}
 	leadURL, err := getRemoteURL(ctx, lead)
 	if err != nil {
@@ -256,14 +266,25 @@ func fetchOwnershipURLs(ctx context.Context, getRemoteURL func(context.Context, 
 	// the set can only turn accept into veto: no read that falls back to the
 	// candidate today can start using the store. Substituting would drop an
 	// identity and could do the reverse.
-	pushURLs, err := gitremote.GetPushURLsInDir(ctx, opt.WorktreeRoot, lead)
+	pushURLs, err := pushOwnershipURLs(ctx, opt, lead)
 	if err != nil {
-		// Same reasoning as an unresolvable fetch URL above: an identity whose
-		// owner cannot be determined counts as inherited rather than being
-		// dropped, because dropping it fails OPEN.
-		return nil, fmt.Errorf("resolve read candidate push URLs for remote %q: %w", lead, err)
+		return nil, err
 	}
 	return append([]string{leadURL}, pushURLs...), nil
+}
+
+// pushOwnershipURLs returns the push destinations of a read candidate, for the
+// ownership vote.
+//
+// A failure is an error rather than a skip, matching the fetch URL beside it:
+// an identity whose owner cannot be determined counts as inherited, because
+// dropping it fails OPEN.
+func pushOwnershipURLs(ctx context.Context, opt FetchURLOptions, lead string) ([]string, error) {
+	pushURLs, err := gitremote.GetPushURLsInDir(ctx, opt.WorktreeRoot, lead)
+	if err != nil {
+		return nil, fmt.Errorf("resolve read candidate push URLs for remote %q: %w", lead, err)
+	}
+	return pushURLs, nil
 }
 
 // PushURL returns the effective checkpoint push URL for the current repository.
