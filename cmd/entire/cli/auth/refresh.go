@@ -112,7 +112,7 @@ func (s contextTokenStore) DeleteTokens(string) error {
 // multi-core user's credentials never travel to (or get keyed under) a host
 // the context doesn't belong to. No RFC 8693 exchange runs through it any
 // more — data-plane bearers are the login JWT itself (ResolveDataAPIToken) and
-// jurisdiction tokens are minted via httputil.PostOAuthToken.
+// jurisdiction tokens are minted via sts (exchangeJurisdictionToken).
 //
 // transport carries the caller's TLS configuration; allowInsecureHTTP permits
 // an http:// core/resource for loopback/dev.

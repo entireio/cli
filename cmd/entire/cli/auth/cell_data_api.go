@@ -14,11 +14,12 @@ import (
 	"strings"
 	"time"
 
+	"github.com/entireio/auth-go/sts"
+
 	"github.com/entireio/cli/cmd/entire/cli/api"
 	"github.com/entireio/cli/cmd/entire/cli/versioninfo"
 	"github.com/entireio/cli/internal/entireclient/clusterdiscovery"
 	"github.com/entireio/cli/internal/entireclient/contexts"
-	"github.com/entireio/cli/internal/entireclient/httputil"
 	"github.com/entireio/cli/internal/entireclient/userdirs"
 )
 
@@ -185,7 +186,7 @@ func JurisdictionToken(ctx context.Context, insecureHTTP bool, jurisdiction stri
 	}
 
 	audience := jurisdictionAudience(j, subject.dataOrigin, subject.discoveredCore)
-	token, err := exchangeJurisdictionToken(ctx, coreURL, subject.loginJWT, audience, subject.httpClient)
+	token, err := exchangeJurisdictionToken(ctx, coreURL, subject.loginJWT, audience, subject.httpClient.Transport)
 	if err != nil {
 		return "", fmt.Errorf("exchange jurisdictional identity token: %w", err)
 	}
@@ -676,18 +677,47 @@ func resolveCellAPIBaseURL(ctx context.Context, coreURL, loginJWT, jurisdiction 
 	return strings.TrimRight(chosen.APIURL, "/"), nil
 }
 
-func exchangeJurisdictionToken(ctx context.Context, coreURL, loginJWT, audience string, httpClient *http.Client) (string, error) {
+// exchangeJurisdictionToken mints the jurisdictional identity token for a
+// cell, trading the login JWT for one pinned to audience.
+//
+// Through auth-go's sts client rather than a hand-rolled POST, so the CLI has
+// one RFC 8693 implementation: the duplicate this replaced had drifted, losing
+// auth-go's terminal-escape sanitisation of server error text and keeping its
+// own redirect guard in the CLI rather than the library.
+//
+// Takes the transport, not the caller's *http.Client: only the transport (and
+// so the connection pool) carries over. The Timeout deliberately does not —
+// sts applies the same budget via context.WithTimeout, which unlike
+// Client.Timeout does not cancel the post-response body read. Note sts also
+// narrows plain HTTP to loopback on top of AllowInsecureHTTP, so that is the
+// effective policy here regardless of --insecure-http-auth.
+//
+// subject_token_type stays access_token, not JWT — what the replaced form sent
+// and what entire-core matches on.
+func exchangeJurisdictionToken(ctx context.Context, coreURL, loginJWT, audience string, transport http.RoundTripper) (string, error) {
 	if coreURL == "" {
 		return "", errors.New("no entire-core URL configured for jurisdiction token exchange")
 	}
-	form := httputil.TokenExchangeForm(loginJWT, audience, JurisdictionIdentityScope)
-
-	token, _, err := httputil.PostOAuthToken(ctx, httpClient, coreURL, form)
+	client := &sts.Client{
+		Transport:         transport,
+		BaseURL:           coreURL,
+		Path:              oauthTokenPath,
+		AllowInsecureHTTP: shouldUsePlainHTTPDiscovery(coreURL),
+		RequestTimeout:    cellDataAPITimeout,
+	}
+	ts, err := client.Exchange(ctx, sts.ExchangeRequest{
+		SubjectToken:       loginJWT,
+		SubjectTokenType:   sts.SubjectTokenTypeAccessToken,
+		RequestedTokenType: sts.SubjectTokenTypeAccessToken,
+		Audience:           audience,
+		Scope:              JurisdictionIdentityScope,
+		ClientID:           oauthClientID,
+	})
 	if err != nil {
 		return "", fmt.Errorf("post token exchange: %w", err)
 	}
-	if strings.TrimSpace(token) == "" {
+	if strings.TrimSpace(ts.AccessToken) == "" {
 		return "", errors.New("token exchange returned an empty access token")
 	}
-	return token, nil
+	return ts.AccessToken, nil
 }
