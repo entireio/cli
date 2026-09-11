@@ -373,10 +373,10 @@ type InstallPluginOptions struct {
 }
 
 // InstallPluginFromPath links or copies SourcePath into the managed bin dir
-// (materializeManagedEntry). The
-// caller is responsible for built-in conflict checks (resolvePlugin already
-// gates dispatch on rootCmd.Find — installing a name that shadows a built-in
-// is allowed but the built-in still wins at runtime).
+// (materializeManagedEntry). The caller is responsible for built-in conflict
+// checks (resolvePlugin already gates dispatch on rootCmd.Find — installing a
+// name that shadows a built-in is allowed but the built-in still wins at
+// runtime).
 //
 // Refuses names the dispatcher will never invoke (agent-protocol prefix,
 // flag-shaped, "."/"..", slashes), and refuses self-install when the source

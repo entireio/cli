@@ -297,6 +297,82 @@ func TestRunPluginDoctor_DetectsTamperedBinary(t *testing.T) { //nolint:parallel
 	}
 }
 
+// The bin/ entry is what the dispatcher execs, so doctor checks it too: an
+// entry that cannot be run gets the same remedy the on-demand path prints, and
+// a non-symlink entry whose bytes drifted from pkg/ is reported even when pkg/
+// still matches the manifest.
+func TestRunPluginDoctor_ChecksBinEntry(t *testing.T) { //nolint:paralleltest // mutates env
+	withIsolatedPluginEnv(t)
+
+	pkgDir, err := EnsurePluginPkgDir("demo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	pkgBin := filepath.Join(pkgDir, pluginBinaryName("demo"))
+	if err := os.WriteFile(pkgBin, []byte("original"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	digest, err := fileSHA256(pkgBin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := SavePluginManifest(&PluginManifest{Name: "demo", RepoURL: "https://x.example/entire-demo", Tag: "v1.0.0", BinarySHA256: digest}); err != nil {
+		t.Fatal(err)
+	}
+	binDir, err := EnsurePluginBinDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	entry := filepath.Join(binDir, pluginBinaryName("demo"))
+
+	doctor := func() (problems, fixes string) {
+		t.Helper()
+		issues, err := RunPluginDoctor(context.Background())
+		if err != nil {
+			t.Fatalf("RunPluginDoctor: %v", err)
+		}
+		var p, f []string
+		for _, i := range issues {
+			p = append(p, i.Problem)
+			f = append(f, i.Fix)
+		}
+		return strings.Join(p, " | "), strings.Join(f, " | ")
+	}
+
+	// An empty entry cannot be run; the remedy names the same command as the
+	// on-demand dispatcher.
+	if err := os.WriteFile(entry, nil, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	problems, fixes := doctor()
+	if !strings.Contains(problems, "managed entry cannot be run: it is an empty file") {
+		t.Errorf("doctor missed the empty bin entry: %s", problems)
+	}
+	if !strings.Contains(fixes, "entire plugin install demo --force") {
+		t.Errorf("doctor remedy does not match the on-demand path: %s", fixes)
+	}
+
+	// A copy whose bytes drifted from pkg/ while pkg/ still matches the manifest.
+	if err := os.WriteFile(entry, []byte("drifted"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	problems, _ = doctor()
+	if !strings.Contains(problems, "managed bin entry no longer matches the installed binary") {
+		t.Errorf("doctor missed the drifted bin entry: %s", problems)
+	}
+	if strings.Contains(problems, "digest recorded at install") {
+		t.Errorf("pkg/ is intact and must not be reported: %s", problems)
+	}
+
+	// A faithful copy is healthy.
+	if err := os.WriteFile(entry, []byte("original"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if problems, _ = doctor(); problems != "" {
+		t.Errorf("doctor flagged a healthy install: %s", problems)
+	}
+}
+
 // Diamond dependency with differing minimums: A needs sem >= v1.0.0, B needs
 // sem >= v2.0.0, and sem is installed at v1.5.0. A name-only visited set
 // marked sem handled on the first (satisfied) requirement and skipped the
