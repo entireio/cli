@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"strings"
@@ -29,6 +30,11 @@ type enableCheckpointRemoteChoice struct {
 	saved              bool
 	dedicatedRequested bool
 	pending            bool // Fresh setup asks after agent selection, before installing hooks.
+	// offered records that the picker was actually shown. The ambiguity note
+	// printed at the end of setup is suppressed only then, because on every
+	// other path — non-interactive, --agent, a repo with nothing to choose
+	// between — nobody has been told which remote checkpoints go to.
+	offered bool
 }
 
 func prepareEnableCheckpointRemoteCommand(cmd *cobra.Command, opts *EnableOptions) error {
@@ -76,6 +82,15 @@ func prepareEnableCheckpointRemoteSelection(ctx context.Context, opts EnableOpti
 		return nil, fmt.Errorf("load checkpoint destination settings: %w", err)
 	}
 	if s.IsPushSessionsDisabled() {
+		return choice, nil
+	}
+	// The picked remote is saved to .entire/settings.local.json, and a rejected
+	// local layer makes that write fail. Asking first and failing after the
+	// answer costs the user their agent selection on the fresh-setup path, so
+	// do not offer a choice that cannot be honoured. An explicit
+	// --checkpoint-push-remote still reports the rejection, in
+	// prepareEnableCheckpointRemote.
+	if s.LocalLayerRejection() != "" {
 		return choice, nil
 	}
 	resolved, resolveErr := strategy.ResolveCheckpointSyncRemote(ctx)
@@ -141,7 +156,15 @@ func prepareEnableCheckpointRemoteSelection(ctx context.Context, opts EnableOpti
 		}
 	}
 	name, err := selectFn(ctx, options)
+	choice.offered = true
 	if err != nil {
+		// esc (and ctrl+c, which is bound to the same Quit) at an optional
+		// question means "skip this", which this picker already offers as
+		// "Keep current destination". A cancelled context is the command
+		// itself going away and still aborts.
+		if errors.Is(err, huh.ErrUserAborted) && ctx.Err() == nil {
+			return choice, nil
+		}
 		return nil, fmt.Errorf("checkpoint destination selection cancelled: %w", err)
 	}
 	if err := ctx.Err(); err != nil {
@@ -153,7 +176,12 @@ func prepareEnableCheckpointRemoteSelection(ctx context.Context, opts EnableOpti
 	// Apply exactly the same strict validation as the explicit flag, including
 	// dedicated-URL precedence. Preparing a selection never writes settings.
 	opts.CheckpointPushRemote = name
-	return prepareEnableCheckpointRemote(ctx, opts, true)
+	picked, err := prepareEnableCheckpointRemote(ctx, opts, true)
+	if err != nil {
+		return nil, err
+	}
+	picked.offered = true
+	return picked, nil
 }
 
 func selectEnableCheckpointRemote(ctx context.Context, options []huh.Option[string], remoteCount int) (string, error) {
@@ -359,8 +387,14 @@ func (c *enableCheckpointRemoteChoice) reportUnchangedDestination(w io.Writer) {
 	}
 }
 
+// printSetupCheckpointDestinationNote drops the multi-remote ambiguity note
+// only when `entire enable` has already put the same question to the user. The
+// gate is "a picker was shown", not "the prepare step ran": the latter runs on
+// every invocation, including the non-interactive ones where no picker can
+// appear and the note is the only thing that describes the ambiguity.
 func printSetupCheckpointDestinationNote(ctx context.Context, w io.Writer) {
-	if ctx.Value(enableCheckpointRemoteKey{}) == nil {
-		printCheckpointDestinationNote(ctx, w, "\nNote: this repo's remotes make the checkpoint destination ambiguous.")
+	if c, ok := ctx.Value(enableCheckpointRemoteKey{}).(*enableCheckpointRemoteChoice); ok && c != nil && c.offered {
+		return
 	}
+	printCheckpointDestinationNote(ctx, w, "\nNote: this repo's remotes make the checkpoint destination ambiguous.")
 }

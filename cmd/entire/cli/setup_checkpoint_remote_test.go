@@ -116,16 +116,106 @@ func TestEnableCheckpointPushRemote_RepairSoleRemainingRemote(t *testing.T) {
 }
 
 func TestEnableCheckpointPushRemote_PickerCancellation(t *testing.T) {
-	for _, cancelErr := range []error{huh.ErrUserAborted, context.Canceled} {
-		t.Run(cancelErr.Error(), func(t *testing.T) {
+	// esc/ctrl+c at the picker means the same as its own "Keep current
+	// destination" option; only the command's context going away aborts.
+	for _, tc := range []struct {
+		cancelErr error
+		wantAbort bool
+	}{
+		{cancelErr: huh.ErrUserAborted},
+		{cancelErr: context.Canceled, wantAbort: true},
+	} {
+		t.Run(tc.cancelErr.Error(), func(t *testing.T) {
 			dir := setupTestRepo(t)
 			testutil.RunGit(t, dir, "remote", "add", "origin", "https://github.com/org/repo.git")
 			testutil.RunGit(t, dir, "remote", "add", "fork", "https://github.com/me/repo.git")
-			_, err := prepareEnableCheckpointRemoteSelection(t.Context(), EnableOptions{}, false, true, func(context.Context, []huh.Option[string]) (string, error) { return "", cancelErr })
-			require.ErrorIs(t, err, cancelErr)
+			choice, err := prepareEnableCheckpointRemoteSelection(t.Context(), EnableOptions{}, false, true, func(context.Context, []huh.Option[string]) (string, error) { return "", tc.cancelErr })
+			if tc.wantAbort {
+				require.ErrorIs(t, err, tc.cancelErr)
+			} else {
+				require.NoError(t, err)
+				require.Empty(t, choice.name)
+				require.True(t, choice.offered)
+				require.NoError(t, choice.persist(t.Context()))
+			}
 			require.NoDirExists(t, filepath.Join(dir, ".entire"))
 		})
 	}
+}
+
+// A rejected local settings layer makes the write the picker leads to fail, so
+// the question must not be asked at all — answering it would otherwise abort
+// `entire enable` and, on fresh setup, discard the agent selection.
+func TestEnableCheckpointPushRemote_RejectedLocalLayerSkipsPicker(t *testing.T) {
+	dir := setupTestRepo(t)
+	testutil.RunGit(t, dir, "remote", "add", "origin", "https://github.com/org/repo.git")
+	testutil.RunGit(t, dir, "remote", "add", "fork", "https://github.com/me/repo.git")
+	require.NoError(t, os.MkdirAll(filepath.Dir(EntireSettingsLocalFile), 0o755))
+	require.NoError(t, os.WriteFile(EntireSettingsLocalFile, []byte(`{"enabled":true}`), 0o644))
+	testutil.RunGit(t, dir, "add", "-f", EntireSettingsLocalFile)
+	testutil.RunGit(t, dir, "commit", "-m", "track local settings", "--no-gpg-sign")
+
+	s, err := settings.Load(t.Context())
+	require.NoError(t, err)
+	require.NotEmpty(t, s.LocalLayerRejection(), "fixture must produce a rejected local layer")
+
+	choice, err := prepareEnableCheckpointRemoteSelection(t.Context(), EnableOptions{}, false, true, func(context.Context, []huh.Option[string]) (string, error) {
+		t.Fatal("picker offered in a repo where the choice cannot be saved")
+		return "", nil
+	})
+	require.NoError(t, err)
+	require.Empty(t, choice.name)
+	require.False(t, choice.offered)
+}
+
+// The ambiguity note is the only description of multi-remote routing on the
+// paths where no picker can run, so it is suppressed only once the user has
+// actually been asked.
+func TestEnableCheckpointPushRemote_AmbiguityNoteFollowsThePicker(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		choice   *enableCheckpointRemoteChoice
+		wantNote bool
+	}{
+		{name: "no prepare step", wantNote: true},
+		{name: "prepared but never offered", choice: &enableCheckpointRemoteChoice{}, wantNote: true},
+		{name: "offered", choice: &enableCheckpointRemoteChoice{offered: true}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := setupTestRepo(t)
+			testutil.RunGit(t, dir, "remote", "add", "origin", "https://github.com/org/repo.git")
+			testutil.RunGit(t, dir, "remote", "add", "fork", "https://github.com/me/repo.git")
+			ctx := t.Context()
+			if tc.choice != nil {
+				ctx = context.WithValue(ctx, enableCheckpointRemoteKey{}, tc.choice)
+			}
+			var out bytes.Buffer
+			printSetupCheckpointDestinationNote(ctx, &out)
+			if tc.wantNote {
+				require.Contains(t, out.String(), "This repo has 2 remotes (fork, origin)")
+			} else {
+				require.Empty(t, out.String())
+			}
+		})
+	}
+}
+
+// The picker must not open for an invocation the command was always going to
+// reject: a bad --checkpoint-backend fails before anything asks a question.
+func TestEnableCheckpointPushRemote_PickerRunsAfterFlagValidation(t *testing.T) {
+	t.Setenv("ENTIRE_TEST_TTY", "1")
+	dir := setupTestRepo(t)
+	testutil.RunGit(t, dir, "remote", "add", "origin", "https://github.com/org/repo.git")
+	testutil.RunGit(t, dir, "remote", "add", "fork", "https://github.com/me/repo.git")
+	writeSettings(t, `{"enabled":true}`)
+	cmd := newEnableCmd()
+	var output bytes.Buffer
+	cmd.SetOut(&output)
+	cmd.SetErr(&output)
+	cmd.SetArgs([]string{"--checkpoint-backend", "bogus"})
+	err := cmd.Execute()
+	require.ErrorContains(t, err, "invalid --checkpoint-backend")
+	require.NotContains(t, err.Error(), "checkpoint destination selection")
 }
 
 func TestEnableCheckpointPushRemote_InvalidBeforeWrites(t *testing.T) {
@@ -376,7 +466,7 @@ func TestEnableCheckpointPushRemote_DeferredCancellation(t *testing.T) {
 	testutil.RunGit(t, dir, "remote", "add", "fork", "https://github.com/me/app.git")
 	choice := &enableCheckpointRemoteChoice{pending: true}
 	err := choice.selectAfterAgents(t.Context(), EnableOptions{}, func(context.Context, []huh.Option[string]) (string, error) {
-		return "", huh.ErrUserAborted
+		return "", context.Canceled
 	})
 	require.Error(t, err)
 	require.Empty(t, choice.name)

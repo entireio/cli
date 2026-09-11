@@ -823,10 +823,11 @@ If Entire is already configured but disabled, this re-enables it.
 If the current directory is not a git repository, Entire can initialize one
 for you and (optionally) create a matching GitHub repository via the gh CLI.`,
 		RunE: func(cmd *cobra.Command, _ []string) (runErr error) {
-			if err := prepareEnableCheckpointRemoteCommand(cmd, &opts); err != nil {
-				return err
-			}
 			ctx := cmd.Context()
+			// The destination report needs the choice pointer, not the answer,
+			// so it can be registered here (first, therefore run last) while
+			// the picker itself waits until every flag has been accepted.
+			opts.checkpointRemoteChoice = &enableCheckpointRemoteChoice{}
 			defer func() { opts.checkpointRemoteChoice.report(cmd.Context(), cmd.OutOrStdout(), runErr) }()
 			// Best-effort: after a successful enable, tell the backend which repo
 			// was enabled so the web onboarding reflects it (and we can warn when
@@ -847,6 +848,18 @@ for you and (optionally) create a matching GitHub repository via the gh CLI.`,
 					return err
 				}
 			}
+
+			if err := validateSetupFlags(opts.UseLocalSettings, opts.UseProjectSettings); err != nil {
+				return err
+			}
+
+			// Ask where checkpoints should go only once every flag has been
+			// accepted, so an invocation that was always going to be rejected
+			// never opens a picker first.
+			if err := prepareEnableCheckpointRemoteCommand(cmd, &opts); err != nil {
+				return err
+			}
+			ctx = cmd.Context()
 
 			// Check if we're in a git repository first. If not, offer to
 			// bootstrap one (git init + optional GitHub repo). If the user
@@ -894,10 +907,6 @@ for you and (optionally) create a matching GitHub repository via the gh CLI.`,
 						runErr = err
 					}
 				}()
-			}
-
-			if err := validateSetupFlags(opts.UseLocalSettings, opts.UseProjectSettings); err != nil {
-				return err
 			}
 
 			// Discover the external agent --agent names, so it works on fresh
