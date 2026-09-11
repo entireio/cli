@@ -533,7 +533,13 @@ func filesWithRemainingAgentChanges(
 	for _, candidate := range candidates {
 		workingTreeClean := false
 		if worktreeHash, ok := worktreeHashes[candidate.path]; ok {
-			workingTreeClean = worktreeHash == candidate.commitHash
+			// Equal, not ==: plumbing.Hash carries an object-format field
+			// alongside its bytes, and `==` compares that field too. FromHex
+			// leaves it unset for a 40-char hash while stamping SHA256 on a
+			// 64-char one, so `==` only works while the tree decoder happens to
+			// agree. If it ever stamped "sha1", every candidate would read dirty
+			// and the phantom carry-forward would return with no test failing.
+			workingTreeClean = worktreeHash.Equal(candidate.commitHash)
 		} else if worktreeRoot != "" {
 			workingTreeClean = workingTreeMatchesBlob(worktreeRoot, candidate.path, candidate.commitMode, candidate.commitHash)
 		}
