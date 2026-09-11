@@ -265,6 +265,20 @@ func TestFetchCheckpointRefFrom_DedicatedVetoedByLeadPushOwner(t *testing.T) {
 	require.Equal(t, originHash, localRefHash(t, workDir, ref))
 }
 
+// The other direction of the same symmetry. fork FETCHES from contributor/app
+// and PUSHES to acme/app, so the push side sees only acme identities, accepts
+// the store, and writes go there — and reads must follow. Voting on the
+// candidate's fetch url too vetoed it and sent reads to the fork instead.
+func TestFetchCheckpointRefFrom_DedicatedAcceptedWhenLeadPushesToCheckpointOwner(t *testing.T) {
+	workDir, ref, forkHash, dedicatedHash := dedicatedCandidatesFixture(t, true, true)
+	t.Setenv("CHECKPOINT_TEST_DEDICATED", os.Getenv("CHECKPOINT_TEST_ORIGIN"))
+	testutil.RunGit(t, workDir, "remote", "set-url", "--push", "fork", "https://github.com/acme/app.git")
+
+	require.NoError(t, FetchCheckpointRefFrom(t.Context(), ref, []string{"fork", "origin"}, nil))
+	require.Equal(t, dedicatedHash, localRefHash(t, workDir, ref))
+	require.NotEqual(t, forkHash, localRefHash(t, workDir, ref), "reads must follow the writes to the dedicated store")
+}
+
 // origin is not exempt from the push-url half of the vote. Its fetch url is
 // already counted, but a remote.origin.pushurl naming another owner makes the
 // push side veto the store while the fetch side — which skipped origin's push

@@ -137,7 +137,7 @@ func fetchURLResolved(ctx context.Context, opts ...FetchURLOptions) (string, boo
 	// owner cannot be determined, and omitting it would fail OPEN, trusting a
 	// checkpoint_remote that a healthy read of the same candidate might have
 	// vetoed.
-	ownershipURLs, ownershipErr := fetchOwnershipURLs(ctx, getRemoteURL, opt)
+	ownershipURLs, ownershipErr := fetchOwnershipURLs(ctx, opt)
 	var inherited bool
 	var reason string
 	if ownershipErr != nil {
@@ -252,46 +252,26 @@ func fetchURLFromReadCandidates(ctx context.Context, getRemoteURL func(context.C
 // identity that might have vetoed the checkpoint_remote. The caller treats
 // the error as "ownership could not be confirmed" and falls back, the same
 // verdict the predicate gives an identity whose owner cannot be determined.
-func fetchOwnershipURLs(ctx context.Context, getRemoteURL func(context.Context, string) (string, error), opt FetchURLOptions) ([]string, error) {
+func fetchOwnershipURLs(ctx context.Context, opt FetchURLOptions) ([]string, error) {
 	lead := opt.LeadReadRemote
 	if lead == "" {
 		return nil, nil
 	}
-	if lead == originRemote {
-		// origin's FETCH url is already in the vote (the caller resolves it
-		// separately), but its PUSH destinations are not — and origin can
-		// carry a remote.origin.pushurl naming another owner just as any
-		// remote can. Skipping them here left the same asymmetry this
-		// function exists to close: the push side vetoes the store because
-		// it votes on push urls, the fetch side accepted it because it did
-		// not.
-		return pushOwnershipURLs(ctx, opt, lead)
-	}
-	leadURL, err := getRemoteURL(ctx, lead)
-	if err != nil {
-		return nil, fmt.Errorf("resolve read candidate remote %q: %w", lead, err)
-	}
-	if leadURL == "" {
-		return nil, fmt.Errorf("read candidate remote %q has an empty URL", lead)
-	}
-
-	// The candidate's PUSH destinations vote too, because the whole purpose of
-	// consulting it is to make reads land where the writes went — and a remote
-	// can fetch from one owner and push to another (remote.<name>.pushurl).
-	// Voting on the fetch URL alone accepted a dedicated store the push side
-	// had already vetoed, so writes went to the fork while reads came from the
-	// store.
+	// Exactly the push side's identity set: origin, which the caller supplies,
+	// plus the candidate's PUSH destinations. Its FETCH url is deliberately
+	// NOT here.
 	//
-	// ADDED to the fetch URL rather than substituted for it. The rule is that
-	// EVERY identity must be owned by the checkpoint repo's owner, so widening
-	// the set can only turn accept into veto: no read that falls back to the
-	// candidate today can start using the store. Substituting would drop an
-	// identity and could do the reverse.
-	pushURLs, err := pushOwnershipURLs(ctx, opt, lead)
-	if err != nil {
-		return nil, err
-	}
-	return append([]string{leadURL}, pushURLs...), nil
+	// The point of consulting the candidate at all is that reads must land
+	// where writes went, and writes are decided by origin plus push urls
+	// (PushURL -> checkpointRemoteIsInherited). Voting on the fetch url as
+	// well was stricter than that, which is not safer — merely asymmetric in
+	// the other direction: a remote fetching from another owner but pushing to
+	// the checkpoint owner had writes use the store while reads vetoed it and
+	// fell back to the fetch repo.
+	//
+	// origin is included for the same reason as every other case: its own
+	// pushurl can name another owner, and the push side counts it.
+	return pushOwnershipURLs(ctx, opt, lead)
 }
 
 // pushOwnershipURLs returns the push destinations of a read candidate, for the
