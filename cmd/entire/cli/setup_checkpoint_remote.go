@@ -29,7 +29,13 @@ type enableCheckpointRemoteChoice struct {
 	changed            bool
 	saved              bool
 	dedicatedRequested bool
-	pending            bool // Fresh setup asks after agent selection, before installing hooks.
+	// pending marks a fresh setup, the only path that opens the picker: it
+	// asks after agent selection, before installing hooks. A bare re-enable in
+	// a configured repo never prompts — "Keep current destination" writes
+	// nothing, so a picker there would return on every run with no way to say
+	// "stop asking" short of pinning a remote. Changing the destination later
+	// is --checkpoint-push-remote.
+	pending bool
 	// offered records that the picker was actually shown. The ambiguity note
 	// printed at the end of setup is suppressed only then, because on every
 	// other path — non-interactive, --agent, a repo with nothing to choose
@@ -44,7 +50,7 @@ func prepareEnableCheckpointRemoteCommand(cmd *cobra.Command, opts *EnableOption
 	explicit := cmd.Flags().Changed(flagCheckpointPushRemote)
 	canPrompt := !cmd.Flags().Changed(agentFlagName) && interactive.CanPromptInteractively()
 	pending := canPrompt && !explicit && !settings.IsSetUpAny(cmd.Context())
-	choice, err := prepareEnableCheckpointRemoteSelection(cmd.Context(), *opts, explicit, canPrompt && !pending, nil)
+	choice, err := prepareEnableCheckpointRemote(cmd.Context(), *opts, explicit)
 	if err != nil {
 		cmd.SilenceUsage = true
 		return err
@@ -59,7 +65,7 @@ func (c *enableCheckpointRemoteChoice) selectAfterAgents(ctx context.Context, op
 	if c == nil || !c.pending {
 		return nil
 	}
-	choice, err := prepareEnableCheckpointRemoteSelection(ctx, opts, false, true, selectFn)
+	choice, err := prepareEnableCheckpointRemoteSelection(ctx, opts, false, selectFn)
 	if err != nil {
 		return err
 	}
@@ -68,9 +74,9 @@ func (c *enableCheckpointRemoteChoice) selectAfterAgents(ctx context.Context, op
 	return nil
 }
 
-func prepareEnableCheckpointRemoteSelection(ctx context.Context, opts EnableOptions, explicit, canPrompt bool, selectFn func(context.Context, []huh.Option[string]) (string, error)) (*enableCheckpointRemoteChoice, error) {
+func prepareEnableCheckpointRemoteSelection(ctx context.Context, opts EnableOptions, explicit bool, selectFn func(context.Context, []huh.Option[string]) (string, error)) (*enableCheckpointRemoteChoice, error) {
 	choice, err := prepareEnableCheckpointRemote(ctx, opts, explicit)
-	if err != nil || explicit || !canPrompt || opts.Yes || opts.SkipPushSessions || opts.CheckpointRemote != "" {
+	if err != nil || explicit || opts.Yes || opts.SkipPushSessions || opts.CheckpointRemote != "" {
 		return choice, err
 	}
 	root, err := paths.WorktreeRoot(ctx)
@@ -130,6 +136,7 @@ func prepareEnableCheckpointRemoteSelection(ctx context.Context, opts EnableOpti
 		label = fmt.Sprintf("Keep unsupported destination: %s (no configured fetch URL; no settings change)", current)
 	}
 	options := []huh.Option[string]{huh.NewOption(label, "")}
+	eligible := 0 // remotes the picker can actually name, current one included
 	for _, d := range topology.destinations {
 		if d.pinned {
 			continue
@@ -137,6 +144,7 @@ func prepareEnableCheckpointRemoteSelection(ctx context.Context, opts EnableOpti
 		if err := validateCheckpointPushRemote(ctx, root, d.name); err != nil {
 			continue
 		}
+		eligible++
 		urls := make([]string, 0, len(d.pushURLs))
 		for _, u := range d.pushURLs {
 			urls = append(urls, gitremote.RedactURLOrPath(u))
@@ -152,7 +160,7 @@ func prepareEnableCheckpointRemoteSelection(ctx context.Context, opts EnableOpti
 	}
 	if selectFn == nil {
 		selectFn = func(ctx context.Context, options []huh.Option[string]) (string, error) {
-			return selectEnableCheckpointRemote(ctx, options, len(topology.destinations))
+			return selectEnableCheckpointRemote(ctx, options, eligible)
 		}
 	}
 	name, err := selectFn(ctx, options)
@@ -184,13 +192,13 @@ func prepareEnableCheckpointRemoteSelection(ctx context.Context, opts EnableOpti
 	return picked, nil
 }
 
-func selectEnableCheckpointRemote(ctx context.Context, options []huh.Option[string], remoteCount int) (string, error) {
+func selectEnableCheckpointRemote(ctx context.Context, options []huh.Option[string], eligible int) (string, error) {
 	var selected string
 	keys := huh.NewDefaultKeyMap()
 	keys.Quit.SetKeys("ctrl+c", "esc")
 	form := NewAccessibleForm(huh.NewGroup(huh.NewSelect[string]().
 		Title("Where should checkpoints go?").
-		Description(fmt.Sprintf("Detected %d Git remotes. Choose where this clone uploads checkpoints. Keeping the current destination changes no destination settings.", remoteCount)).
+		Description(fmt.Sprintf("%d Git remotes can receive checkpoints. Choose where this clone uploads them. Keeping the current destination changes no destination settings.", eligible)).
 		Options(options...).Value(&selected))).WithKeyMap(keys)
 	if err := form.RunWithContext(ctx); err != nil {
 		return "", fmt.Errorf("checkpoint destination form: %w", err)
@@ -210,9 +218,6 @@ func checkpointRemoteSourceLabel(source strategy.CheckpointSyncRemoteSource) str
 
 func prepareEnableCheckpointRemote(ctx context.Context, opts EnableOptions, explicit bool) (*enableCheckpointRemoteChoice, error) {
 	choice := &enableCheckpointRemoteChoice{dedicatedRequested: opts.CheckpointRemote != ""}
-	if explicit && opts.CheckpointRemote != "" {
-		return nil, fmt.Errorf("--%s and --%s cannot be combined", flagCheckpointPushRemote, flagCheckpointRemote)
-	}
 	if explicit && opts.CheckpointPushRemote == "" {
 		return nil, fmt.Errorf("--%s must not be empty", flagCheckpointPushRemote)
 	}
@@ -223,12 +228,12 @@ func prepareEnableCheckpointRemote(ctx context.Context, opts EnableOptions, expl
 		}
 		return choice, nil
 	}
+	if !explicit {
+		return choice, nil
+	}
 	s, err := settings.Load(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("cannot read checkpoint destination settings: %w", err)
-	}
-	if !explicit {
-		return choice, nil
 	}
 	remotes, err := pushURLsByRemote(ctx, root)
 	if err != nil {
@@ -252,12 +257,11 @@ func prepareEnableCheckpointRemote(ctx context.Context, opts EnableOptions, expl
 	return choice, nil
 }
 
+// validateCheckpointPushRemote reads remote.<name>.url directly rather than
+// asking `git remote get-url`: some Git versions answer that with the remote's
+// name for a pushurl-only remote, which has no fetch destination, and an unset
+// url is also what an unknown remote looks like — one read covers both.
 func validateCheckpointPushRemote(ctx context.Context, root, name string) error {
-	if _, err := gitremote.GetRemoteURLInDir(ctx, root, name); err != nil {
-		return fmt.Errorf("read checkpoint remote URL: %w", err)
-	}
-	// Some Git versions return the remote's name successfully when it has
-	// only pushurl entries. Such a remote has no configured fetch destination.
 	url, err := gitRunner(ctx, root, "config", "--get", "remote."+name+".url")
 	if err != nil || strings.TrimSpace(url) == "" {
 		return fmt.Errorf("remote %q has no configured fetch URL", name)
@@ -289,14 +293,21 @@ func (c *enableCheckpointRemoteChoice) report(ctx context.Context, w io.Writer, 
 		fmt.Fprintf(w, "Checkpoint destination set to: %s\n", c.name)
 		fmt.Fprintln(w, "Saved to .entire/settings.local.json for this clone.")
 	}
+	// A healthy destination nobody asked about is not reported: the command
+	// ends at "Ready." and the multi-remote note covers the ambiguous repos. A
+	// broken destination is reported on every run, because the user cannot
+	// otherwise learn that checkpoint sync is off.
+	touched := c.name != "" || c.offered || c.dedicatedRequested
 	s, err := settings.Load(ctx)
 	if err != nil {
 		fmt.Fprintf(w, "Cannot determine checkpoint destination: %v\n", err)
 		return
 	}
 	if s.IsPushSessionsDisabled() {
-		c.reportUnchangedDestination(w)
-		fmt.Fprintln(w, "Checkpoint pushing remains disabled.")
+		if touched {
+			c.reportUnchangedDestination(w)
+			fmt.Fprintln(w, "Checkpoint pushing remains disabled.")
+		}
 		return
 	}
 	resolved, err := strategy.ResolveCheckpointSyncRemote(ctx)
@@ -323,8 +334,10 @@ func (c *enableCheckpointRemoteChoice) report(ctx context.Context, w io.Writer, 
 		return
 	}
 	if resolved.Name == "" {
-		fmt.Fprintln(w, "No Git remotes configured. Checkpoints stay local until a remote is configured.")
-		c.reportUnchangedDestination(w)
+		if touched {
+			fmt.Fprintln(w, "No Git remotes configured. Checkpoints stay local until a remote is configured.")
+			c.reportUnchangedDestination(w)
+		}
 		return
 	}
 	destination := resolved.Name
@@ -348,6 +361,9 @@ func (c *enableCheckpointRemoteChoice) report(ctx context.Context, w io.Writer, 
 			fmt.Fprintf(w, "Choose a configured remote with `entire enable --%s <name>`.\n", flagCheckpointPushRemote)
 			return
 		}
+	}
+	if !touched {
+		return
 	}
 	if !c.changed && !c.dedicatedRequested {
 		fmt.Fprintf(w, "Keeping checkpoint destination: %s (%s)\n", destination, checkpointRemoteSourceLabel(resolved.Source))
@@ -381,8 +397,10 @@ func (c *enableCheckpointRemoteChoice) report(ctx context.Context, w io.Writer, 
 	}
 }
 
+// reportUnchangedDestination announces the absence of a change only when one
+// was asked for: an explicit or picked remote that was already in effect.
 func (c *enableCheckpointRemoteChoice) reportUnchangedDestination(w io.Writer) {
-	if !c.changed && !c.dedicatedRequested {
+	if c.name != "" && !c.changed {
 		fmt.Fprintln(w, "No checkpoint destination settings changed.")
 	}
 }

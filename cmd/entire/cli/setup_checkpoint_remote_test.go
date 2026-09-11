@@ -71,7 +71,7 @@ func TestEnableCheckpointPushRemote_Picker(t *testing.T) {
 				writeSettings(t, tc.config)
 			}
 			called := false
-			choice, err := prepareEnableCheckpointRemoteSelection(t.Context(), tc.opts, false, true, func(_ context.Context, options []huh.Option[string]) (string, error) {
+			choice, err := prepareEnableCheckpointRemoteSelection(t.Context(), tc.opts, false, func(_ context.Context, options []huh.Option[string]) (string, error) {
 				called = true
 				require.Empty(t, options[0].Value)
 				if tc.name == "keep" {
@@ -105,7 +105,7 @@ func TestEnableCheckpointPushRemote_RepairSoleRemainingRemote(t *testing.T) {
 	testutil.RunGit(t, dir, "remote", "add", "fork", "https://github.com/me/repo.git")
 	writeSettings(t, `{"strategy_options":{"checkpoint_push_remote":"missing"}}`)
 	called := false
-	choice, err := prepareEnableCheckpointRemoteSelection(t.Context(), EnableOptions{}, false, true, func(_ context.Context, options []huh.Option[string]) (string, error) {
+	choice, err := prepareEnableCheckpointRemoteSelection(t.Context(), EnableOptions{}, false, func(_ context.Context, options []huh.Option[string]) (string, error) {
 		called = true
 		require.Len(t, options, 2)
 		return "fork", nil
@@ -129,7 +129,7 @@ func TestEnableCheckpointPushRemote_PickerCancellation(t *testing.T) {
 			dir := setupTestRepo(t)
 			testutil.RunGit(t, dir, "remote", "add", "origin", "https://github.com/org/repo.git")
 			testutil.RunGit(t, dir, "remote", "add", "fork", "https://github.com/me/repo.git")
-			choice, err := prepareEnableCheckpointRemoteSelection(t.Context(), EnableOptions{}, false, true, func(context.Context, []huh.Option[string]) (string, error) { return "", tc.cancelErr })
+			choice, err := prepareEnableCheckpointRemoteSelection(t.Context(), EnableOptions{}, false, func(context.Context, []huh.Option[string]) (string, error) { return "", tc.cancelErr })
 			if tc.wantAbort {
 				require.ErrorIs(t, err, tc.cancelErr)
 			} else {
@@ -159,7 +159,7 @@ func TestEnableCheckpointPushRemote_RejectedLocalLayerSkipsPicker(t *testing.T) 
 	require.NoError(t, err)
 	require.NotEmpty(t, s.LocalLayerRejection(), "fixture must produce a rejected local layer")
 
-	choice, err := prepareEnableCheckpointRemoteSelection(t.Context(), EnableOptions{}, false, true, func(context.Context, []huh.Option[string]) (string, error) {
+	choice, err := prepareEnableCheckpointRemoteSelection(t.Context(), EnableOptions{}, false, func(context.Context, []huh.Option[string]) (string, error) {
 		t.Fatal("picker offered in a repo where the choice cannot be saved")
 		return "", nil
 	})
@@ -259,18 +259,17 @@ func TestEnableCheckpointPushRemote_InvalidBeforeWrites(t *testing.T) {
 
 func TestEnableCheckpointPushRemote_SkipsPicker(t *testing.T) {
 	for _, tc := range []struct {
-		name      string
-		remotes   int
-		canPrompt bool
+		name    string
+		remotes int
 	}{
-		{"no remotes", 0, true}, {"one remote", 1, true}, {"noninteractive", 2, false},
+		{"no remotes", 0}, {"one remote", 1},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := setupTestRepo(t)
 			for i := range tc.remotes {
 				testutil.RunGit(t, dir, "remote", "add", []string{"origin", "fork"}[i], "https://github.com/org/repo.git")
 			}
-			choice, err := prepareEnableCheckpointRemoteSelection(t.Context(), EnableOptions{}, false, tc.canPrompt, func(context.Context, []huh.Option[string]) (string, error) {
+			choice, err := prepareEnableCheckpointRemoteSelection(t.Context(), EnableOptions{}, false, func(context.Context, []huh.Option[string]) (string, error) {
 				t.Fatal("unexpected picker")
 				return "", nil
 			})
@@ -312,7 +311,7 @@ func TestEnableCheckpointPushRemote_ExplicitSameLocalDoesNotWrite(t *testing.T) 
 	writeSettings(t, `{"enabled":true}`)
 	const local = "{\n  \"strategy_options\": {\"checkpoint_push_remote\": \"fork\", \"push_sessions\": false}\n}\n"
 	testutil.WriteFile(t, dir, EntireSettingsLocalFile, local)
-	choice, err := prepareEnableCheckpointRemoteSelection(t.Context(), EnableOptions{CheckpointPushRemote: "fork", Yes: true}, true, false, nil)
+	choice, err := prepareEnableCheckpointRemoteSelection(t.Context(), EnableOptions{CheckpointPushRemote: "fork", Yes: true}, true, nil)
 	require.NoError(t, err)
 	require.NoError(t, choice.persist(t.Context()))
 	require.False(t, choice.changed)
@@ -321,26 +320,66 @@ func TestEnableCheckpointPushRemote_ExplicitSameLocalDoesNotWrite(t *testing.T) 
 	require.Equal(t, []byte(local), after) //nolint:testifylint // Idempotence must preserve bytes and formatting, not merely equivalent JSON.
 }
 
+// A healthy destination nobody asked about is not reported, so an ordinary
+// enable ends at "Ready."; a broken one is reported on every run; and "No
+// checkpoint destination settings changed." appears only when a change was
+// asked for and turned out to be a no-op.
 func TestEnableCheckpointPushRemote_Report(t *testing.T) {
-	for _, tc := range []struct{ name, config, want string }{
-		{"ordinary", `{"enabled":true}`, "Keeping checkpoint destination: origin (automatic)"},
-		{"invalid", `{"strategy_options":{"checkpoint_push_remote":"missing"}}`, "Checkpoint sync remains disabled:"},
-		{"dedicated", `{"strategy_options":{"checkpoint_remote":{"provider":"github","repo":"org/checkpoints"}}}`, "https://github.com/org/checkpoints.git"},
-		{"invalid with dedicated", `{"strategy_options":{"checkpoint_push_remote":"missing","checkpoint_remote":{"provider":"github","repo":"org/checkpoints"}}}`, "Dedicated checkpoint destination for pushes to origin: https://github.com/org/checkpoints.git"},
+	const dedicatedURL = "https://github.com/org/checkpoints.git"
+	for _, tc := range []struct {
+		name, config, want string
+		choice             enableCheckpointRemoteChoice
+		wantUnchangedLine  bool
+	}{
+		{name: "ordinary untouched", config: `{"enabled":true}`},
+		{name: "ordinary offered", config: `{"enabled":true}`, choice: enableCheckpointRemoteChoice{offered: true}, want: "Keeping checkpoint destination: origin (automatic)"},
+		{name: "explicit already set", config: `{"enabled":true,"strategy_options":{"checkpoint_push_remote":"origin"}}`, choice: enableCheckpointRemoteChoice{name: "origin"}, want: "Keeping checkpoint destination: origin (configured)", wantUnchangedLine: true},
+		{name: "invalid", config: `{"strategy_options":{"checkpoint_push_remote":"missing"}}`, want: "Checkpoint sync remains disabled:"},
+		{name: "dedicated untouched", config: `{"strategy_options":{"checkpoint_remote":{"provider":"github","repo":"org/checkpoints"}}}`},
+		{name: "dedicated requested", config: `{"strategy_options":{"checkpoint_remote":{"provider":"github","repo":"org/checkpoints"}}}`, choice: enableCheckpointRemoteChoice{dedicatedRequested: true}, want: dedicatedURL},
+		{name: "invalid with dedicated", config: `{"strategy_options":{"checkpoint_push_remote":"missing","checkpoint_remote":{"provider":"github","repo":"org/checkpoints"}}}`, want: "Dedicated checkpoint destination for pushes to origin: " + dedicatedURL},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := setupTestRepo(t)
 			testutil.RunGit(t, dir, "remote", "add", "origin", "https://github.com/org/repo.git")
 			writeSettings(t, tc.config)
 			var output bytes.Buffer
-			(&enableCheckpointRemoteChoice{}).report(t.Context(), &output, nil)
+			choice := tc.choice
+			choice.report(t.Context(), &output, nil)
+			if tc.want == "" {
+				require.Empty(t, output.String())
+				return
+			}
 			require.Contains(t, output.String(), tc.want)
-			require.Contains(t, output.String(), "No checkpoint destination settings changed.")
+			require.Equal(t, tc.wantUnchangedLine, strings.Contains(output.String(), "No checkpoint destination settings changed."))
 			if tc.name == "invalid with dedicated" {
 				require.NotContains(t, output.String(), "sync remains disabled")
 			}
 		})
 	}
+}
+
+// A configured repo never opens the picker on a bare re-enable, even on a
+// terminal: "Keep current destination" writes nothing, so it would come back
+// every run. Under ENTIRE_TEST_TTY=1 a picker would fail opening the TTY, so
+// a clean exit is the assertion.
+func TestEnableCheckpointPushRemote_ReenableDoesNotPrompt(t *testing.T) {
+	t.Setenv("ENTIRE_TEST_TTY", "1")
+	dir := setupTestRepo(t)
+	testutil.RunGit(t, dir, "remote", "add", "origin", "https://github.com/org/repo.git")
+	testutil.RunGit(t, dir, "remote", "add", "fork", "https://github.com/me/repo.git")
+	writeSettings(t, `{"enabled":true}`)
+	cmd := newEnableCmd()
+	var output bytes.Buffer
+	cmd.SetOut(&output)
+	cmd.SetErr(&output)
+	cmd.SetArgs([]string{})
+	require.NoError(t, cmd.Execute())
+	require.NotContains(t, output.String(), "checkpoint destination selection")
+	require.NotContains(t, output.String(), "Keeping checkpoint destination")
+	require.NotContains(t, output.String(), "No checkpoint destination settings changed.")
+	require.Contains(t, output.String(), "This repo has 2 remotes (fork, origin)")
+	require.NoFileExists(t, EntireSettingsLocalFile)
 }
 
 func TestEnableCheckpointPushRemote_NoBootstrap(t *testing.T) {
@@ -372,7 +411,7 @@ func TestEnableCheckpointPushRemote_MixedDedicatedAlternatives(t *testing.T) {
 			}
 			writeSettings(t, `{"strategy_options":{"checkpoint_remote":{"provider":"github","repo":"org/checkpoints"}}}`)
 			called := false
-			choice, err := prepareEnableCheckpointRemoteSelection(t.Context(), EnableOptions{}, false, true, func(_ context.Context, options []huh.Option[string]) (string, error) {
+			choice, err := prepareEnableCheckpointRemoteSelection(t.Context(), EnableOptions{}, false, func(_ context.Context, options []huh.Option[string]) (string, error) {
 				called = true
 				for _, option := range options {
 					require.NotEqual(t, "b", option.Value)
@@ -384,6 +423,10 @@ func TestEnableCheckpointPushRemote_MixedDedicatedAlternatives(t *testing.T) {
 			require.NoError(t, choice.persist(t.Context()))
 			var output bytes.Buffer
 			choice.report(t.Context(), &output, nil)
+			if !called {
+				require.Empty(t, output.String(), "an untouched healthy destination is not reported")
+				return
+			}
 			require.Contains(t, output.String(), "Pushes to b still upload checkpoints to the dedicated destination: https://github.com/org/checkpoints.git")
 		})
 	}
@@ -412,7 +455,7 @@ func TestEnableCheckpointPushRemote_PickerExcludesPushURLOnly(t *testing.T) {
 	dir := setupTestRepo(t)
 	testutil.RunGit(t, dir, "remote", "add", "origin", "https://github.com/org/app.git")
 	testutil.RunGit(t, dir, "config", "remote.broken.pushurl", "https://github.com/org/other.git")
-	choice, err := prepareEnableCheckpointRemoteSelection(t.Context(), EnableOptions{}, false, true, func(context.Context, []huh.Option[string]) (string, error) {
+	choice, err := prepareEnableCheckpointRemoteSelection(t.Context(), EnableOptions{}, false, func(context.Context, []huh.Option[string]) (string, error) {
 		t.Fatal("no eligible alternative: picker must not open")
 		return "", nil
 	})
@@ -426,7 +469,7 @@ func TestEnableCheckpointPushRemote_DedicatedFlagReport(t *testing.T) {
 		t.Run(strconv.FormatBool(disabled), func(t *testing.T) {
 			dir := setupTestRepo(t)
 			testutil.RunGit(t, dir, "remote", "add", "origin", "https://github.com/org/app.git")
-			choice, err := prepareEnableCheckpointRemoteSelection(t.Context(), EnableOptions{CheckpointRemote: "github:org/checkpoints"}, false, false, nil)
+			choice, err := prepareEnableCheckpointRemoteSelection(t.Context(), EnableOptions{CheckpointRemote: "github:org/checkpoints"}, false, nil)
 			require.NoError(t, err)
 			writeSettings(t, `{"strategy_options":{"checkpoint_remote":{"provider":"github","repo":"org/checkpoints"},"push_sessions":`+strconv.FormatBool(!disabled)+`}}`)
 			var output bytes.Buffer
@@ -480,7 +523,7 @@ func TestEnableCheckpointPushRemote_RepairSavedPushURLOnly(t *testing.T) {
 	testutil.RunGit(t, dir, "config", "remote.broken.pushurl", "https://github.com/me/app.git")
 	writeSettings(t, `{"strategy_options":{"checkpoint_push_remote":"broken"}}`)
 	called := false
-	choice, err := prepareEnableCheckpointRemoteSelection(t.Context(), EnableOptions{}, false, true, func(_ context.Context, options []huh.Option[string]) (string, error) {
+	choice, err := prepareEnableCheckpointRemoteSelection(t.Context(), EnableOptions{}, false, func(_ context.Context, options []huh.Option[string]) (string, error) {
 		called = true
 		require.Len(t, options, 2)
 		require.Contains(t, options[0].Key, "broken")
@@ -501,7 +544,7 @@ func TestEnableCheckpointPushRemote_HintRequiresEligibleAlternative(t *testing.T
 				testutil.RunGit(t, dir, "remote", "add", "fork", "https://github.com/me/fork.git")
 			}
 			var output bytes.Buffer
-			(&enableCheckpointRemoteChoice{}).report(t.Context(), &output, nil)
+			(&enableCheckpointRemoteChoice{offered: true}).report(t.Context(), &output, nil)
 			require.Equal(t, eligible, strings.Contains(output.String(), "To choose another destination"))
 		})
 	}
