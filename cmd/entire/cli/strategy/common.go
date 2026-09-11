@@ -1837,7 +1837,7 @@ func ensureLefthookIntegrationIfManaged(ctx context.Context) error {
 		return nil //nolint:nilerr // inspection failure falls back to native hooks
 	}
 	if current {
-		return reconcileHookFiles(ctx, repoRoot)
+		return reconcileHookFiles(ctx)
 	}
 	if _, err := EnsureLefthookIntegration(ctx, absolute); err != nil {
 		if errors.Is(err, ErrLefthookLocalConfigUnwritable) {

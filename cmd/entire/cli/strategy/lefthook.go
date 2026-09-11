@@ -27,6 +27,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 
 	"github.com/entireio/cli/cmd/entire/cli/gitdir"
 	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
@@ -170,7 +171,7 @@ func EnsureLefthookIntegration(ctx context.Context, absolutePath bool) (int, err
 	if _, err := ensureExtendsEntry(root); err != nil {
 		return 0, err
 	}
-	if err := reconcileHookFiles(ctx, repoRoot); err != nil {
+	if err := reconcileHookFiles(ctx); err != nil {
 		return 0, err
 	}
 	return written, nil
@@ -262,15 +263,51 @@ func rewriteExcludeBlock(ctx context.Context, repoRoot, block string) error {
 }
 
 func openGitCommonDir(ctx context.Context, repoRoot string) (*os.Root, error) {
-	commonDir, err := gitdir.CommonDirForWorktree(ctx, repoRoot)
+	commonDir, err := gitCommonDirFor(ctx, repoRoot)
 	if err != nil {
-		return nil, fmt.Errorf("resolve git common dir: %w", err)
+		return nil, err
 	}
 	root, err := gitdir.OpenAt(commonDir)
 	if err != nil {
 		return nil, fmt.Errorf("open git common dir: %w", err)
 	}
 	return root, nil
+}
+
+// gitCommonDirCache memoizes the git common dir per worktree root. Resolving
+// it is a `git rev-parse` subprocess — measured at ~10ms, against ~0.3µs for
+// the root open it feeds — and the exclude check that needs it is part of the
+// currency test, which a single turn-start runs two or three times. A
+// worktree's common dir does not move while the process lives. Only the path
+// is cached; the root itself is already memoized by osroot.Shared, which is
+// also what keeps a handle from outliving a deleted directory here.
+var (
+	gitCommonDirMu    sync.RWMutex
+	gitCommonDirCache = map[string]string{}
+)
+
+func gitCommonDirFor(ctx context.Context, repoRoot string) (string, error) {
+	gitCommonDirMu.RLock()
+	cached, ok := gitCommonDirCache[repoRoot]
+	gitCommonDirMu.RUnlock()
+	if ok {
+		return cached, nil
+	}
+	commonDir, err := gitdir.CommonDirForWorktree(ctx, repoRoot)
+	if err != nil {
+		return "", fmt.Errorf("resolve git common dir: %w", err)
+	}
+	gitCommonDirMu.Lock()
+	gitCommonDirCache[repoRoot] = commonDir
+	gitCommonDirMu.Unlock()
+	return commonDir, nil
+}
+
+// clearGitCommonDirCache exists for tests that reuse a worktree root path.
+func clearGitCommonDirCache() {
+	gitCommonDirMu.Lock()
+	gitCommonDirCache = map[string]string{}
+	gitCommonDirMu.Unlock()
 }
 
 // LefthookIntegrationCurrent reports whether Entire's artifacts are present
@@ -322,7 +359,21 @@ func RemoveLefthookIntegration(ctx context.Context) (int, error) {
 	if err != nil {
 		return 0, fmt.Errorf("open worktree: %w", err)
 	}
+	// The extends entry goes first, mirroring the install, which writes it
+	// last: at no point should Lefthook's config name a file that is not
+	// there. Lefthook 2.1.10 tolerates a dangling extends (run, install,
+	// validate and dump all succeed), so this is not repairing a break — it is
+	// declining to depend on another tool's tolerance, and it fails in the
+	// better direction, since giving up here leaves the integration whole
+	// rather than half-deleted.
 	removed := 0
+	dropped, err := removeExtendsEntry(root)
+	if err != nil {
+		return removed, err
+	}
+	if dropped {
+		removed++
+	}
 	for _, hook := range gitHookNames {
 		name := lefthookScriptPath(hook)
 		owned, err := fileIsOwned(root, name)
@@ -338,13 +389,6 @@ func RemoveLefthookIntegration(ctx context.Context) (int, error) {
 		if err := osroot.RemoveNoSymlinks(root, entireLefthookConfig); err != nil && !os.IsNotExist(err) {
 			return removed, fmt.Errorf("remove %s: %w", entireLefthookConfig, err)
 		}
-		removed++
-	}
-	dropped, err := removeExtendsEntry(root)
-	if err != nil {
-		return removed, err
-	}
-	if dropped {
 		removed++
 	}
 	if err := rewriteExcludeBlock(ctx, repoRoot, ""); err != nil {
@@ -618,8 +662,11 @@ const lefthookLauncherMarker = "call_lefthook"
 // every repo the fight has already touched is in exactly that state.
 //
 // Nothing is touched unless its contents prove whose it was.
-func reconcileHookFiles(ctx context.Context, repoRoot string) error {
-	hooksDir, err := getHooksDirInPath(ctx, repoRoot)
+func reconcileHookFiles(ctx context.Context) error {
+	// GetHooksDir rather than the by-path variant: both callers resolved their
+	// worktree root from this same process's directory, and this one is
+	// memoized. The by-path variant is another ~13ms `git rev-parse` per turn.
+	hooksDir, err := GetHooksDir(ctx)
 	if err != nil {
 		return nil //nolint:nilerr // best effort: no hooks dir, nothing to do
 	}
