@@ -814,7 +814,7 @@ func atomicSetV1Ref(ctx context.Context, repo *git.Repository, expectedOld, newH
 		return nil
 	}
 	if errors.Is(err, gitrepo.ErrRefCASConflict) {
-		if cur, refErr := repo.Reference(refName, true); refErr == nil && cur.Hash() != expectedOld {
+		if cur, refErr := repo.Reference(refName, true); refErr == nil && !cur.Hash().Equal(expectedOld) {
 			return &V1RefMovedError{Expected: expectedOld, Actual: cur.Hash()}
 		}
 	}

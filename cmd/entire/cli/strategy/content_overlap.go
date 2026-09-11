@@ -282,7 +282,7 @@ func stagedFilesOverlapWithContent(ctx context.Context, repo *git.Repository, sh
 		}
 
 		// Compare hashes - exact match means file is unchanged
-		if stagedHash == shadowFile.Hash {
+		if stagedHash.Equal(shadowFile.Hash) {
 			logging.Debug(logCtx, "stagedFilesOverlapWithContent: new file content match found",
 				slog.String("file", stagedPath),
 				slog.String("hash", stagedHash.String()),

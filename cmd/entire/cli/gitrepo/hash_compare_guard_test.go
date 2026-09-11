@@ -27,15 +27,27 @@ import (
 // distinguish the two operators: a call site reverted to == stays green. The
 // convention can only be enforced where it is written.
 //
+// The pattern covers a .Hash field or a .Hash() method call (Reference.Hash()
+// returns one) on EITHER side of the operator. The first version of this guard
+// matched only the left-hand side and so missed `stagedHash == shadowFile.Hash`
+// in content_overlap.go — in the file the guard was written for. Widening it
+// turned up five more in strategy/, so "the left-hand shape is all of them" was
+// not a small error.
+//
 // Two limitations, both deliberate:
 //
-//   - It catches the `.Hash ==` shape, which is every occurrence in this
-//     repository today. Two local variables of type plumbing.Hash compared
-//     directly (`if a == b`) need type information a textual guard does not
-//     have.
+//   - Two local variables compared directly (`if a == b`, neither spelled
+//     `.Hash`) need type information a textual guard does not have. That shape
+//     has no occurrences today, but unlike the ones above it cannot be ruled
+//     out by grepping.
 //   - It skips _test.go, matching the two sibling guards in this package. Note
 //     that assert.Equal on two hashes compares the format field too, via
 //     reflect.DeepEqual.
+//
+// Do not reach for \b or \s to tighten the pattern: git grep -E is POSIX ERE
+// and supports neither, so it matches NOTHING and the guard reports a clean
+// tree. Verified here — `\.Hash\b` found 0 lines in a file where `\.Hash`
+// found 20.
 //
 // A second family, `== plumbing.ZeroHash`, is NOT covered here and is not the
 // same severity: a 64-char zero hash carries format "sha256", so it is
@@ -51,7 +63,8 @@ func TestHashComparisonsUseEqual(t *testing.T) {
 
 	// A literal space rather than \s: git grep -E silently matches nothing for
 	// the shorthand classes, so a pattern using one reports a clean tree.
-	out := testutil.GitGrepGuard(t, root, "-n", "-E", "--", `\.Hash (==|!=) `,
+	const hashComparison = `(\.Hash(\(\))? (==|!=) )|((==|!=) [A-Za-z_][A-Za-z0-9_.]*\.Hash(\(\))?)`
+	out := testutil.GitGrepGuard(t, root, "-n", "-E", "--", hashComparison,
 		"--", ":(glob)cmd/**/*.go", ":(glob)internal/**/*.go")
 
 	var checked int
@@ -77,7 +90,7 @@ func TestHashComparisonsUseEqual(t *testing.T) {
 	// guards: this one exists to keep the count at zero. Prove the pattern
 	// still works instead, so a detection regression cannot masquerade as
 	// success.
-	probe := testutil.GitGrepGuard(t, root, "-n", "-E", "--", `\.Hash (==|!=) `,
+	probe := testutil.GitGrepGuard(t, root, "-n", "-E", "--", hashComparison,
 		"--", ":(glob)cmd/**/*_test.go")
 	if strings.TrimSpace(probe) == "" {
 		t.Error("guard matched nothing in non-test or test sources; the detection pattern has gone stale")
