@@ -39,6 +39,7 @@ type parentTest struct {
 func main() {
 	colorFlag := flag.Bool("color", false, "Force color output (default: auto-detect TTY)")
 	outputFile := flag.String("o", "", "Write output to file (ANSI + .nocolor.txt)")
+	failOnEmpty := flag.Bool("fail-on-empty", false, "Fail after writing the report if no parent tests ran")
 	flag.Parse()
 
 	useColor := *colorFlag || interactive.IsTerminalWriter(os.Stdout)
@@ -66,6 +67,12 @@ func main() {
 			fmt.Fprintf(os.Stderr, "error writing %s: %v\n", noColorFile, err)
 			os.Exit(1)
 		}
+	}
+	// Count parents so named tests that skip, including parents whose children
+	// all skip, remain successful. A subtest-only mismatch still runs its parent.
+	if *failOnEmpty && len(parents) == 0 {
+		fmt.Fprintf(os.Stderr, "no tests ran in %q: check the test filter and the test output for build, regex, or preflight errors\n", flag.Arg(0))
+		os.Exit(1)
 	}
 }
 
@@ -243,14 +250,17 @@ func renderReport(parents []*parentTest, color bool) string {
 	}
 
 	// Footer banner
-	if failed > 0 {
+	switch {
+	case total == 0:
+		b.WriteString("NO TESTS RAN\n")
+	case failed > 0:
 		banner := fmt.Sprintf("💥 FAILED (%d/%d passed) 💥", passed, total)
 		if color {
 			fmt.Fprintf(&b, "%s%s%s\n", colorRed, banner, colorReset)
 		} else {
 			b.WriteString(banner + "\n")
 		}
-	} else {
+	default:
 		banner := fmt.Sprintf("🎉 ALL %d TESTS PASSED 🎉", total)
 		if color {
 			fmt.Fprintf(&b, "%s%s%s\n", colorGreen, banner, colorReset)

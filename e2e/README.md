@@ -92,3 +92,14 @@ To diagnose: read `console.log` in the failing test's artifact directory. Compar
 - **`.github/workflows/e2e-isolated.yml`** — Manual dispatch for debugging a single test. Inputs: agent + test name filter.
 
 Both workflows run `go run ./e2e/bootstrap` before tests to handle agent-specific CI setup (auth config, warmup).
+
+### Empty test selections
+
+The E2E mise tasks fail when the regex selects no top-level tests. Reports are
+still written and show `NO TESTS RAN`. Named tests that skip remain successful;
+a regex matching a parent but no subtests is not treated as an empty selection.
+
+The reporter's `-fail-on-empty` flag enables this exit status. Without it, the
+reporter can still render empty event files for diagnosis. Nightly retains its
+existing report check because it runs the test tasks from the installed tag,
+which may predate this flag.
