@@ -5,7 +5,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
 	"path"
 	"regexp"
 	"strconv"
@@ -44,13 +43,9 @@ func resolveTrailReviewPatchAnchor(ctx context.Context, patch string) (*trailRev
 	if err != nil {
 		return nil, fmt.Errorf("resolve worktree root: %w", err)
 	}
-	fullPath, ok := safeWorktreeFilePath(root, target.Path)
+	content, ok := readWorktreeFileSafely(root, target.Path)
 	if !ok {
-		return nil, fmt.Errorf("patch path %s does not resolve inside the worktree", target.Path)
-	}
-	content, err := os.ReadFile(fullPath) //nolint:gosec // path is constrained to the current worktree root.
-	if err != nil {
-		return nil, fmt.Errorf("read %s to anchor the suggested change: %w", target.Path, err)
+		return nil, fmt.Errorf("read %s to anchor the suggested change: it does not resolve inside the worktree, or could not be read", target.Path)
 	}
 	lines, err := patchAnchorLines(content, target.StartLine, target.EndLine)
 	if err != nil {

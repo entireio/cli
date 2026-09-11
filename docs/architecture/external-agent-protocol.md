@@ -8,6 +8,11 @@ The Entire CLI supports external agent plugins — standalone binaries that impl
 
 The CLI discovers external agents by scanning `$PATH` for executables matching the pattern `entire-agent-<name>`. For example, `entire-agent-cursor` would register as the "cursor" agent.
 
+Two rules bound that scan, both because discovery *executes* what it finds (it calls each binary's `info` subcommand):
+
+- It is off unless `external_agents` is set in an untracked `.entire/settings.local.json`. The committed `.entire/settings.json` cannot grant it — see [Why `external_agents` is local-only](../security-and-privacy.md#why-external_agents-is-local-only). Interactive setup flows scan regardless, so you can still pick a plugin before the setting exists.
+- Only absolute `$PATH` entries are scanned. A relative entry resolves against the working directory, which for a git hook is whatever repository invoked it.
+
 - Binaries whose `<name>` conflicts with an already-registered built-in agent are skipped.
 - Discovery runs once during CLI initialization (before building the hooks command tree).
 - The binary must be executable and respond to the `info` subcommand.
@@ -236,6 +241,13 @@ Removes installed agent hooks.
 
 **Output:** Exit 0 on success.
 
+Only your binary can remove your hooks, so `entire disable --uninstall` cannot
+finish without you. A non-zero exit fails the whole uninstall: the command
+exits non-zero, reports that Entire was not fully removed, and prints the exact
+command line the user can run to invoke this subcommand by hand. Write anything
+the user needs in order to act to stderr — the CLI captures it and shows it
+verbatim.
+
 #### `are-hooks-installed`
 
 Checks whether hooks are currently installed.
@@ -247,6 +259,13 @@ Checks whether hooks are currently installed.
 ```json
 {"installed": true}
 ```
+
+A non-zero exit or unparseable stdout is not read as "no hooks" — it means the
+state is unknown, which the CLI must treat as "hooks may still be installed".
+`entire disable --uninstall` then exits non-zero and hands the user the manual
+`uninstall-hooks` command rather than claiming Entire was fully removed. Report
+"installed": false when you know there are none; fail only when you genuinely
+could not find out.
 
 ### Capability: `transcript_analyzer`
 

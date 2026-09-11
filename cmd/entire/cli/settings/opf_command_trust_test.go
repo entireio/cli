@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -224,8 +223,14 @@ func TestLocalSetsOPFCommand(t *testing.T) {
 // runs several times per hook and each probe is a git subprocess. The cached
 // answer is deliberately stale within a process; this pins that contract so a
 // future change to the cache key is a visible decision.
+//
+// Not parallel: this is the one test that asserts on the cache RETAINING an
+// entry across two probes, and the sibling table tests call
+// ClearVersionedPathCache() from parallel subtests. Running here in the
+// sequential phase keeps those clears out of the window between `first` and
+// `second` (a git subprocess wide), which otherwise re-probes the by-then
+// tracked file and reads back true.
 func TestPathIsVersioned_MemoizesWithinProcess(t *testing.T) {
-	t.Parallel()
 	root, _, local := newOPFRepo(t)
 	writeSettingsFile(t, local, localOPFSettings(attackerCommand))
 
@@ -294,11 +299,7 @@ func TestPathIsVersioned_LinkedWorktreeUsesOwnIndex(t *testing.T) {
 func TestPathIsVersioned_ReftableRepo(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
-	init := exec.CommandContext(t.Context(), "git", "init", "-q", "--ref-format=reftable", ".")
-	init.Dir = root
-	init.Env = testutil.GitIsolatedEnv()
-	out, err := init.CombinedOutput()
-	require.NoError(t, err, "reftable init: %s", out)
+	testutil.RunGit(t, root, "init", "-q", "--ref-format=reftable", ".")
 	for _, kv := range [][]string{{"user.email", "t@t.io"}, {"user.name", "T"}, {"commit.gpgsign", "false"}} {
 		testutil.RunGit(t, root, "config", kv[0], kv[1])
 	}
@@ -559,4 +560,34 @@ func TestPathIsVersioned_Win32TrailingCharVariantsAreTracked(t *testing.T) {
 			assert.True(t, got, "a Win32-equivalent committed name must count as tracked")
 		})
 	}
+}
+
+const localCheckpointRemoteJSON = `{"strategy_options":{"checkpoint_remote":{"provider":"github","repo":"me/checkpoints"}}}`
+
+// Not parallel: uses t.Chdir().
+func TestCheckpointRemoteIsLocalOnly_UntrackedLocalIsOwn(t *testing.T) {
+	root, _, local := newOPFRepo(t)
+	writeSettingsFile(t, local, localCheckpointRemoteJSON)
+	t.Chdir(root)
+
+	assert.True(t, CheckpointRemoteIsLocalOnly(t.Context()),
+		"an untracked local checkpoint_remote is this developer's own choice")
+}
+
+// Not parallel: uses t.Chdir().
+// CheckpointRemoteIsLocalOnly overrides the checkpoint-remote ownership check
+// on both directions of checkpoint traffic, so it uses the deep (index AND
+// HEAD) verification like the OPF command: content still reachable from HEAD
+// after a git rm --cached must not read as developer-owned.
+func TestCheckpointRemoteIsLocalOnly_CommittedThenUnstagedIsNotOwn(t *testing.T) {
+	root, _, local := newOPFRepo(t)
+	writeSettingsFile(t, local, localCheckpointRemoteJSON)
+
+	testutil.RunGit(t, root, "add", "-f", EntireSettingsLocalFile)
+	testutil.RunGit(t, root, "commit", "-m", "carry local settings")
+	testutil.RunGit(t, root, "rm", "--cached", EntireSettingsLocalFile)
+	t.Chdir(root)
+
+	assert.False(t, CheckpointRemoteIsLocalOnly(t.Context()),
+		"content still reachable from HEAD must not read as developer-owned")
 }

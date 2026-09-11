@@ -20,6 +20,7 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/remote"
+	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/trailers"
@@ -28,7 +29,6 @@ import (
 	"github.com/go-git/go-git/v6/plumbing"
 	"github.com/go-git/go-git/v6/plumbing/filemode"
 	"github.com/go-git/go-git/v6/plumbing/object"
-	"github.com/go-git/go-git/v6/storage"
 )
 
 // assetsDirName mirrors paths.AssetsDirName, captured at package scope so the
@@ -51,15 +51,17 @@ func (e *V1DivergedError) Error() string {
 		e.Local.String()[:7], e.Remote.String()[:7], e.MergeBase.String()[:7])
 }
 
-// BootstrapTooLargeError: first push to a remote with no v1 yet, but
-// more unpushed commits than the safety cap. OPF inference is ~30s per
-// commit, so unbounded bootstraps could take hours.
+// BootstrapTooLargeError: more un-OPF'd commits to rewrite than the
+// safety cap — a first push to a remote with no v1 yet, or a checkpoint
+// ref whose un-trailered ancestry runs deep because OPF was enabled
+// late. OPF inference is ~30s per commit, so unbounded bootstraps could
+// take hours.
 type BootstrapTooLargeError struct {
 	Count, Limit int
 }
 
 func (e *BootstrapTooLargeError) Error() string {
-	return fmt.Sprintf("OPF bootstrap would rewrite %d entire/checkpoints/v1 commits "+
+	return fmt.Sprintf("OPF bootstrap would rewrite %d checkpoint commits "+
 		"(limit %d). Set ENTIRE_OPF_BOOTSTRAP_LIMIT=<N> or =unlimited to override, "+
 		"or push without OPF (ENTIRE_OPF=no git push) to bring the remote into sync first",
 		e.Count, e.Limit)
@@ -395,14 +397,14 @@ func RewriteUnpushedV1WithOPF(ctx context.Context, repo *git.Repository, target 
 				redactedByPath[path] = globalRedacted[pc.startIdx+i]
 			}
 		}
-		newHash, err := rebuildV1Commit(ctx, repo, pc.commit, parent, redactedByPath)
+		newHash, err := rebuildCheckpointCommit(ctx, repo, pc.commit, parent, redactedByPath)
 		if err != nil {
 			return plumbing.ZeroHash, fmt.Errorf("rebuild commit %s: %w", pc.commit.Hash.String()[:7], err)
 		}
 		parent = newHash
 	}
 
-	if err := atomicSetV1Ref(repo, localTip, parent); err != nil {
+	if err := atomicSetV1Ref(ctx, repo, localTip, parent); err != nil {
 		return plumbing.ZeroHash, err
 	}
 	return parent, nil
@@ -517,7 +519,7 @@ func listUnpushedV1Commits(repo *git.Repository, localTip, remoteTip plumbing.Ha
 
 	var unpushed []*object.Commit
 	if walkErr := iter.ForEach(func(c *object.Commit) error {
-		if !remoteTip.IsZero() && c.Hash == remoteTip {
+		if !remoteTip.IsZero() && c.Hash.Equal(remoteTip) {
 			return errStop
 		}
 		unpushed = append(unpushed, c)
@@ -532,7 +534,9 @@ func listUnpushedV1Commits(repo *git.Repository, localTip, remoteTip plumbing.Ha
 	return unpushed, nil
 }
 
-// rebuildV1Commit re-parents the commit onto parent. Already-applied
+// rebuildCheckpointCommit re-parents the commit onto parent (backend-agnostic:
+// the v1 chain passes the rewritten predecessor, a standalone checkpoint ref
+// passes the commit's own original parent). Already-applied
 // commits keep their tree (idempotent); unapplied commits get a tree
 // rebuilt from redactedByPath (precomputed by the orchestrator's single
 // OPF batch call) plus an Entire-OPF-Applied: true trailer.
@@ -546,7 +550,7 @@ func listUnpushedV1Commits(repo *git.Repository, localTip, remoteTip plumbing.Ha
 // regex-only before this rewrite. The collect/apply walkers redact the whole
 // tree for every unapplied commit so the final rewritten tip cannot
 // reintroduce an older un-OPF-redacted shard.
-func rebuildV1Commit(ctx context.Context, repo *git.Repository, oldCommit *object.Commit, parent plumbing.Hash, redactedByPath map[string][]byte) (plumbing.Hash, error) {
+func rebuildCheckpointCommit(ctx context.Context, repo *git.Repository, oldCommit *object.Commit, parent plumbing.Hash, redactedByPath map[string][]byte) (plumbing.Hash, error) {
 	newTree := oldCommit.TreeHash
 	if !trailers.HasOPFApplied(oldCommit.Message) {
 		tree, err := repo.TreeObject(oldCommit.TreeHash)
@@ -800,27 +804,19 @@ func readBlob(repo *git.Repository, hash plumbing.Hash) ([]byte, error) {
 	return data, nil
 }
 
-// atomicSetV1Ref CAS-updates the local v1 ref. A concrete
-// ErrReferenceHasChanged from the storer means another worktree
-// advanced the ref during our rewrite — return V1RefMovedError so the
-// hook aborts the push. Other errors (I/O, packed-ref locks, storage
-// bugs) get wrapped as-is so they aren't misreported as concurrency
-// failures.
-func atomicSetV1Ref(repo *git.Repository, expectedOld, newHash plumbing.Hash) error {
+// atomicSetV1Ref CAS-updates the local v1 ref through the same lock protocol as
+// checkpoint writers. A stale expected value becomes V1RefMovedError; lock
+// contention remains distinct because it does not prove the ref moved.
+func atomicSetV1Ref(ctx context.Context, repo *git.Repository, expectedOld, newHash plumbing.Hash) error {
 	refName := plumbing.NewBranchReferenceName(paths.MetadataBranchName)
-	err := repo.Storer.CheckAndSetReference(
-		plumbing.NewHashReference(refName, newHash),
-		plumbing.NewHashReference(refName, expectedOld),
-	)
+	err := checkpoint.CASPersistentRef(ctx, repo, refName, newHash, expectedOld)
 	if err == nil {
 		return nil
 	}
-	if errors.Is(err, storage.ErrReferenceHasChanged) {
-		actual := plumbing.ZeroHash
-		if cur, refErr := repo.Reference(refName, true); refErr == nil {
-			actual = cur.Hash()
+	if errors.Is(err, gitrepo.ErrRefCASConflict) {
+		if cur, refErr := repo.Reference(refName, true); refErr == nil && !cur.Hash().Equal(expectedOld) {
+			return &V1RefMovedError{Expected: expectedOld, Actual: cur.Hash()}
 		}
-		return &V1RefMovedError{Expected: expectedOld, Actual: actual}
 	}
 	return fmt.Errorf("set v1 ref: %w", err)
 }

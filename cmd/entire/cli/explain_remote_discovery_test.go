@@ -20,7 +20,7 @@ import (
 // TestGetBranchCheckpoints_HydratesRemoteDiscoveredStub is the trail-871 /
 // PR-1771 headline integration: device B has the trailer commit (pulled) but no
 // local checkpoint ref; with checkpoint_remote configured against a local bare
-// remote that advertises the ref, getBranchCheckpoints must return a RewindPoint
+// remote that advertises the ref, getBranchCheckpoints must return a PendingCheckpoint
 // with the real SessionID (not an empty stub that --session would drop).
 //
 // Offline: provider "local" is unknown to providerHost, so FetchURL falls back
@@ -108,5 +108,5 @@ func TestGetBranchCheckpoints_HydratesRemoteDiscoveredStub(t *testing.T) {
 			break
 		}
 	}
-	require.True(t, found, "RewindPoint for remote-discovered checkpoint %s missing; got %+v", cid, points)
+	require.True(t, found, "PendingCheckpoint for remote-discovered checkpoint %s missing; got %+v", cid, points)
 }

@@ -14,83 +14,80 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent/testutil"
 )
 
-// metadataDenyRuleTest is the rule that blocks Claude from reading Entire metadata
-const metadataDenyRuleTest = "Read(./.entire/metadata/**)"
-
-func TestInstallHooks_PermissionsDeny_FreshInstall(t *testing.T) {
+// TestInstallHooks_DoesNotAddDenyRule pins the retirement: a fresh install must
+// leave no metadata deny rule behind. See agent.MetadataDenyRule for why.
+func TestInstallHooks_DoesNotAddDenyRule(t *testing.T) {
 	tempDir := t.TempDir()
 	t.Chdir(tempDir)
 
-	agent := &ClaudeCodeAgent{}
-	_, err := agent.InstallHooks(context.Background(), false)
-	if err != nil {
+	a := &ClaudeCodeAgent{}
+	if _, err := a.InstallHooks(context.Background(), false); err != nil {
 		t.Fatalf("InstallHooks() error = %v", err)
 	}
 
 	perms := readPermissions(t, tempDir)
-
-	// Verify permissions.deny contains our rule
-	if !containsRule(perms.Deny, metadataDenyRuleTest) {
-		t.Errorf("permissions.deny = %v, want to contain %q", perms.Deny, metadataDenyRuleTest)
+	if containsRule(perms.Deny, agentpkg.MetadataDenyRule) {
+		t.Errorf("permissions.deny = %v, want no metadata deny rule", perms.Deny)
 	}
 }
 
-func TestInstallHooks_PermissionsDeny_Idempotent(t *testing.T) {
+// TestInstallHooks_RemovesStaleDenyRule is the migration that heals an existing
+// repo: a config written by an older CLI still carries the rule, and a plain
+// `entire enable` (no --force) has to drop it. Removal is what makes the write
+// happen at all, so the second install must also leave it gone rather than
+// re-adding it.
+func TestInstallHooks_RemovesStaleDenyRule(t *testing.T) {
 	tempDir := t.TempDir()
 	t.Chdir(tempDir)
 
-	agent := &ClaudeCodeAgent{}
-	// First install
-	_, err := agent.InstallHooks(context.Background(), false)
-	if err != nil {
-		t.Fatalf("first InstallHooks() error = %v", err)
-	}
-
-	// Second install
-	_, err = agent.InstallHooks(context.Background(), false)
-	if err != nil {
-		t.Fatalf("second InstallHooks() error = %v", err)
-	}
-
-	perms := readPermissions(t, tempDir)
-
-	// Count occurrences of our rule
-	count := 0
-	for _, rule := range perms.Deny {
-		if rule == metadataDenyRuleTest {
-			count++
-		}
-	}
-	if count != 1 {
-		t.Errorf("permissions.deny contains %d copies of rule, want 1", count)
-	}
-}
-
-func TestInstallHooks_PermissionsDeny_PreservesUserRules(t *testing.T) {
-	tempDir := t.TempDir()
-	t.Chdir(tempDir)
-
-	// Create settings.json with existing user deny rule
 	writeSettingsFile(t, tempDir, `{
   "permissions": {
-    "deny": ["Bash(rm -rf *)"]
+    "deny": ["`+agentpkg.MetadataDenyRule+`"]
   }
 }`)
 
-	agent := &ClaudeCodeAgent{}
-	_, err := agent.InstallHooks(context.Background(), false)
-	if err != nil {
+	a := &ClaudeCodeAgent{}
+	if _, err := a.InstallHooks(context.Background(), false); err != nil {
+		t.Fatalf("first InstallHooks() error = %v", err)
+	}
+	if perms := readPermissions(t, tempDir); containsRule(perms.Deny, agentpkg.MetadataDenyRule) {
+		t.Fatalf("permissions.deny = %v, want the stale rule removed", perms.Deny)
+	}
+
+	if _, err := a.InstallHooks(context.Background(), false); err != nil {
+		t.Fatalf("second InstallHooks() error = %v", err)
+	}
+	if perms := readPermissions(t, tempDir); containsRule(perms.Deny, agentpkg.MetadataDenyRule) {
+		t.Errorf("permissions.deny = %v, want it to stay removed", perms.Deny)
+	}
+}
+
+// TestInstallHooks_RemovesOnlyOurDenyRule is the safety half of the migration:
+// removal is keyed on the exact rule string Entire wrote, so a user's own deny
+// rules survive untouched.
+func TestInstallHooks_RemovesOnlyOurDenyRule(t *testing.T) {
+	tempDir := t.TempDir()
+	t.Chdir(tempDir)
+
+	writeSettingsFile(t, tempDir, `{
+  "permissions": {
+    "deny": ["Bash(rm -rf *)", "`+agentpkg.MetadataDenyRule+`", "Read(./.env)"]
+  }
+}`)
+
+	a := &ClaudeCodeAgent{}
+	if _, err := a.InstallHooks(context.Background(), false); err != nil {
 		t.Fatalf("InstallHooks() error = %v", err)
 	}
 
 	perms := readPermissions(t, tempDir)
-
-	// Verify both rules exist
-	if !containsRule(perms.Deny, "Bash(rm -rf *)") {
-		t.Errorf("permissions.deny = %v, want to contain user rule", perms.Deny)
+	for _, want := range []string{"Bash(rm -rf *)", "Read(./.env)"} {
+		if !containsRule(perms.Deny, want) {
+			t.Errorf("permissions.deny = %v, want to still contain user rule %q", perms.Deny, want)
+		}
 	}
-	if !containsRule(perms.Deny, metadataDenyRuleTest) {
-		t.Errorf("permissions.deny = %v, want to contain Entire rule", perms.Deny)
+	if containsRule(perms.Deny, agentpkg.MetadataDenyRule) {
+		t.Errorf("permissions.deny = %v, want the Entire rule removed", perms.Deny)
 	}
 }
 
@@ -125,28 +122,28 @@ func TestInstallHooks_PermissionsDeny_PreservesAllowRules(t *testing.T) {
 	}
 }
 
-func TestInstallHooks_PermissionsDeny_SkipsExistingRule(t *testing.T) {
+// TestInstallHooks_DropsEmptyDenyArray covers the config Entire fully owned: with
+// its only rule removed, `deny` is deleted rather than left as an empty array.
+func TestInstallHooks_DropsEmptyDenyArray(t *testing.T) {
 	tempDir := t.TempDir()
 	t.Chdir(tempDir)
 
-	// Create settings.json with the rule already present
 	writeSettingsFile(t, tempDir, `{
   "permissions": {
-    "deny": ["Read(./.entire/metadata/**)"]
+    "deny": ["`+agentpkg.MetadataDenyRule+`"]
   }
 }`)
 
-	agent := &ClaudeCodeAgent{}
-	_, err := agent.InstallHooks(context.Background(), false)
-	if err != nil {
+	a := &ClaudeCodeAgent{}
+	if _, err := a.InstallHooks(context.Background(), false); err != nil {
 		t.Fatalf("InstallHooks() error = %v", err)
 	}
 
-	perms := readPermissions(t, tempDir)
-
-	// Should still have exactly 1 rule
-	if len(perms.Deny) != 1 {
-		t.Errorf("permissions.deny = %v, want exactly 1 rule", perms.Deny)
+	// nil means the key is gone; "deny": [] would unmarshal to a non-nil empty
+	// slice. An absent permissions block leaves the struct zero-valued, which is
+	// also correct here.
+	if perms := readPermissions(t, tempDir); perms.Deny != nil {
+		t.Errorf("permissions.deny should be dropped once empty, got %v", perms.Deny)
 	}
 }
 
@@ -205,13 +202,17 @@ func TestInstallHooks_PermissionsDeny_PreservesUnknownFields(t *testing.T) {
 		t.Errorf("permissions.ask = %v, want [Write(**), Bash(*)]", askRules)
 	}
 
-	// Verify the deny rule was added
-	var denyRules []string
-	if err := json.Unmarshal(rawPermissions["deny"], &denyRules); err != nil {
-		t.Fatalf("failed to parse permissions.deny: %v", err)
-	}
-	if !containsRule(denyRules, metadataDenyRuleTest) {
-		t.Errorf("permissions.deny = %v, want to contain %q", denyRules, metadataDenyRuleTest)
+	// The deny rule is no longer added. The seed carried no `deny` key, so the
+	// key staying absent is the expected outcome — install must not create one
+	// just to hold a rule it no longer writes.
+	if denyRaw, present := rawPermissions["deny"]; present {
+		var denyRules []string
+		if err := json.Unmarshal(denyRaw, &denyRules); err != nil {
+			t.Fatalf("failed to parse permissions.deny: %v", err)
+		}
+		if containsRule(denyRules, agentpkg.MetadataDenyRule) {
+			t.Errorf("permissions.deny = %v, want no metadata deny rule", denyRules)
+		}
 	}
 
 	// Verify "allow" is preserved
@@ -283,8 +284,12 @@ func TestUninstallHooks(t *testing.T) {
 	}
 
 	// Verify hooks are installed
-	if !agent.AreHooksInstalled(context.Background()) {
+	if !hooksInstalledNow(t, agent) {
 		t.Error("hooks should be installed before uninstall")
+	}
+	settings := readClaudeSettings(t, tempDir)
+	if !hasEntireHook(settings.Hooks.SubagentStop) {
+		t.Fatal("SubagentStop hook should be installed before uninstall")
 	}
 
 	// Uninstall
@@ -294,9 +299,19 @@ func TestUninstallHooks(t *testing.T) {
 	}
 
 	// Verify hooks are removed
-	if agent.AreHooksInstalled(context.Background()) {
+	if hooksInstalledNow(t, agent) {
 		t.Error("hooks should not be installed after uninstall")
 	}
+
+	// RemovesSubagentStop: `entire disable` must strip the SubagentStop hook
+	// installed by InstallHooks — without threading it through UninstallHooks,
+	// disabling Entire would leave this hook behind.
+	t.Run("removes SubagentStop", func(t *testing.T) {
+		settings := readClaudeSettings(t, tempDir)
+		if hasEntireHook(settings.Hooks.SubagentStop) {
+			t.Error("SubagentStop hook should be removed after uninstall")
+		}
+	})
 }
 
 func TestUninstallHooks_NoSettingsFile(t *testing.T) {
@@ -309,6 +324,24 @@ func TestUninstallHooks_NoSettingsFile(t *testing.T) {
 	err := agent.UninstallHooks(context.Background())
 	if err != nil {
 		t.Fatalf("UninstallHooks() should not error when no settings file: %v", err)
+	}
+}
+
+// TestUninstallHooks_UnreadableSettingsErrors pins the absent-vs-unreadable
+// split: an absent settings file means nothing to uninstall, but a read error
+// must surface instead of reporting success with hooks still on disk. The
+// settings path is created as a directory so os.ReadFile fails with a
+// non-ErrNotExist error on every platform.
+func TestUninstallHooks_UnreadableSettingsErrors(t *testing.T) {
+	tempDir := t.TempDir()
+	t.Chdir(tempDir)
+
+	if err := os.MkdirAll(filepath.Join(tempDir, ".claude", ClaudeSettingsFileName), 0o755); err != nil {
+		t.Fatalf("MkdirAll() error = %v", err)
+	}
+
+	if err := (&ClaudeCodeAgent{}).UninstallHooks(context.Background()); err == nil {
+		t.Fatal("UninstallHooks() = nil for unreadable settings, want error")
 	}
 }
 
@@ -357,29 +390,21 @@ func TestUninstallHooks_RemovesDenyRule(t *testing.T) {
 	tempDir := t.TempDir()
 	t.Chdir(tempDir)
 
+	// Install no longer adds the rule, so stand in for a config written by an
+	// older CLI: uninstall still has to clean it up.
+	writeSettingsFile(t, tempDir, `{
+  "permissions": {
+    "deny": ["`+agentpkg.MetadataDenyRule+`"]
+  }
+}`)
+
 	agent := &ClaudeCodeAgent{}
-
-	// First install (which adds the deny rule)
-	_, err := agent.InstallHooks(context.Background(), false)
-	if err != nil {
-		t.Fatalf("InstallHooks() error = %v", err)
-	}
-
-	// Verify deny rule was added
-	perms := readPermissions(t, tempDir)
-	if !containsRule(perms.Deny, metadataDenyRuleTest) {
-		t.Fatal("deny rule should be present after install")
-	}
-
-	// Uninstall
-	err = agent.UninstallHooks(context.Background())
-	if err != nil {
+	if err := agent.UninstallHooks(context.Background()); err != nil {
 		t.Fatalf("UninstallHooks() error = %v", err)
 	}
 
-	// Verify deny rule was removed
-	perms = readPermissions(t, tempDir)
-	if containsRule(perms.Deny, metadataDenyRuleTest) {
+	perms := readPermissions(t, tempDir)
+	if containsRule(perms.Deny, agentpkg.MetadataDenyRule) {
 		t.Error("deny rule should be removed after uninstall")
 	}
 }
@@ -416,7 +441,7 @@ func TestUninstallHooks_PreservesUserDenyRules(t *testing.T) {
 	}
 
 	// Verify entire deny rule is removed
-	if containsRule(perms.Deny, metadataDenyRuleTest) {
+	if containsRule(perms.Deny, agentpkg.MetadataDenyRule) {
 		t.Errorf("entire deny rule should be removed, got: %v", perms.Deny)
 	}
 }
@@ -505,13 +530,13 @@ func TestUninstallHooks_RemovesLegacyLocalDevHooks(t *testing.T) {
 	ag := &ClaudeCodeAgent{}
 
 	seedClaudeSettings(t, tempDir, testutil.LegacyClaudeProjectDirCommand("hooks claude-code stop"))
-	if !ag.AreHooksInstalled(ctx) {
+	if !hooksInstalledNow(t, ag) {
 		t.Fatal("legacy local-dev hooks should be detected as installed")
 	}
 	if err := ag.UninstallHooks(ctx); err != nil {
 		t.Fatalf("UninstallHooks() error = %v", err)
 	}
-	if ag.AreHooksInstalled(ctx) {
+	if hooksInstalledNow(t, ag) {
 		t.Fatal("legacy local-dev hooks should be removed after uninstall")
 	}
 }
@@ -694,7 +719,10 @@ func TestInstallHooks_PreservesUnknownHookTypes(t *testing.T) {
 	tempDir := t.TempDir()
 	t.Chdir(tempDir)
 
-	// Create settings with a hook type we don't handle (Notification is a real Claude Code hook type)
+	// Create settings with hook types we don't handle (Notification and
+	// PreCompact are real Claude Code hook types). SubagentStop used to be the
+	// second example here, but it is now a managed hook type (see
+	// TestInstallHooks_SubagentStop_*), so PreCompact stands in for it.
 	writeSettingsFile(t, tempDir, `{
   "hooks": {
     "Notification": [
@@ -703,10 +731,10 @@ func TestInstallHooks_PreservesUnknownHookTypes(t *testing.T) {
         "hooks": [{"type": "command", "command": "echo notification received"}]
       }
     ],
-    "SubagentStop": [
+    "PreCompact": [
       {
         "matcher": ".*",
-        "hooks": [{"type": "command", "command": "echo subagent stopped"}]
+        "hooks": [{"type": "command", "command": "echo pre compact"}]
       }
     ]
   }
@@ -726,9 +754,9 @@ func TestInstallHooks_PreservesUnknownHookTypes(t *testing.T) {
 		t.Errorf("Notification hook type was not preserved, got keys: %v", testutil.GetKeys(rawHooks))
 	}
 
-	// Verify SubagentStop hook is preserved
-	if _, ok := rawHooks["SubagentStop"]; !ok {
-		t.Errorf("SubagentStop hook type was not preserved, got keys: %v", testutil.GetKeys(rawHooks))
+	// Verify PreCompact hook is preserved
+	if _, ok := rawHooks["PreCompact"]; !ok {
+		t.Errorf("PreCompact hook type was not preserved, got keys: %v", testutil.GetKeys(rawHooks))
 	}
 
 	// Verify the Notification hook content is intact
@@ -746,22 +774,22 @@ func TestInstallHooks_PreservesUnknownHookTypes(t *testing.T) {
 		}
 	}
 
-	// Verify the SubagentStop hook content is intact
-	var subagentStopMatchers []ClaudeHookMatcher
-	if err := json.Unmarshal(rawHooks["SubagentStop"], &subagentStopMatchers); err != nil {
-		t.Fatalf("failed to parse SubagentStop hooks: %v", err)
+	// Verify the PreCompact hook content is intact
+	var preCompactMatchers []ClaudeHookMatcher
+	if err := json.Unmarshal(rawHooks["PreCompact"], &preCompactMatchers); err != nil {
+		t.Fatalf("failed to parse PreCompact hooks: %v", err)
 	}
-	if len(subagentStopMatchers) != 1 {
-		t.Errorf("SubagentStop matchers = %d, want 1", len(subagentStopMatchers))
+	if len(preCompactMatchers) != 1 {
+		t.Errorf("PreCompact matchers = %d, want 1", len(preCompactMatchers))
 	}
-	if len(subagentStopMatchers) > 0 {
-		if subagentStopMatchers[0].Matcher != ".*" {
-			t.Errorf("SubagentStop matcher = %q, want %q", subagentStopMatchers[0].Matcher, ".*")
+	if len(preCompactMatchers) > 0 {
+		if preCompactMatchers[0].Matcher != ".*" {
+			t.Errorf("PreCompact matcher = %q, want %q", preCompactMatchers[0].Matcher, ".*")
 		}
-		if len(subagentStopMatchers[0].Hooks) > 0 {
-			if subagentStopMatchers[0].Hooks[0].Command != "echo subagent stopped" {
-				t.Errorf("SubagentStop hook command = %q, want %q",
-					subagentStopMatchers[0].Hooks[0].Command, "echo subagent stopped")
+		if len(preCompactMatchers[0].Hooks) > 0 {
+			if preCompactMatchers[0].Hooks[0].Command != "echo pre compact" {
+				t.Errorf("PreCompact hook command = %q, want %q",
+					preCompactMatchers[0].Hooks[0].Command, "echo pre compact")
 			}
 		}
 	}
@@ -791,10 +819,10 @@ func TestUninstallHooks_PreservesUnknownHookTypes(t *testing.T) {
         "hooks": [{"type": "command", "command": "echo notification received"}]
       }
     ],
-    "SubagentStop": [
+    "PreCompact": [
       {
         "matcher": ".*",
-        "hooks": [{"type": "command", "command": "echo subagent stopped"}]
+        "hooks": [{"type": "command", "command": "echo pre compact"}]
       }
     ]
   }
@@ -814,9 +842,9 @@ func TestUninstallHooks_PreservesUnknownHookTypes(t *testing.T) {
 		t.Errorf("Notification hook type was not preserved, got keys: %v", testutil.GetKeys(rawHooks))
 	}
 
-	// Verify SubagentStop hook is preserved
-	if _, ok := rawHooks["SubagentStop"]; !ok {
-		t.Errorf("SubagentStop hook type was not preserved, got keys: %v", testutil.GetKeys(rawHooks))
+	// Verify PreCompact hook is preserved
+	if _, ok := rawHooks["PreCompact"]; !ok {
+		t.Errorf("PreCompact hook type was not preserved, got keys: %v", testutil.GetKeys(rawHooks))
 	}
 
 	// Verify our hooks were removed
@@ -852,6 +880,138 @@ func TestInstallHooks_UsesCurrentToolMatchers(t *testing.T) {
 		agentpkg.WrapProductionSilentHookCommand("entire hooks claude-code post-task"), "post-task subagent hook")
 	assertHookExists(t, settings.Hooks.PostToolUse, "TaskCreate|TaskUpdate",
 		agentpkg.WrapProductionSilentHookCommand("entire hooks claude-code post-todo"), "post-todo task-list hook")
+
+	// SubagentStop fresh install is the regression for wiring up the real
+	// background-subagent-completion signal (SubagentStop fires at true
+	// completion, even for background subagents whose PostToolUse fires
+	// seconds after launch at the launch stub). A fresh install must write the
+	// SubagentStop hook with the same empty-matcher, availability-guarded
+	// `sh -c` shape as Stop.
+	t.Run("SubagentStop fresh install", func(t *testing.T) {
+		wantCmd := agentpkg.WrapProductionSilentHookCommand("entire hooks claude-code subagent-stop")
+		assertHookExists(t, settings.Hooks.SubagentStop, "", wantCmd, "SubagentStop hook")
+
+		// Same shape as Stop: single command, empty matcher, no timeout.
+		if len(settings.Hooks.SubagentStop) != 1 || settings.Hooks.SubagentStop[0].Matcher != "" {
+			t.Fatalf("SubagentStop = %+v, want a single matcher with an empty string matcher (same shape as Stop)", settings.Hooks.SubagentStop)
+		}
+		if len(settings.Hooks.SubagentStop[0].Hooks) != 1 {
+			t.Fatalf("SubagentStop hooks = %d, want 1", len(settings.Hooks.SubagentStop[0].Hooks))
+		}
+		if got := settings.Hooks.SubagentStop[0].Hooks[0].Timeout; got != 0 {
+			t.Errorf("SubagentStop timeout = %d, want 0 (no explicit timeout, same as Stop)", got)
+		}
+	})
+}
+
+// TestInstallHooks_SubagentStop_UpgradeInPlace is the upgrade-path regression:
+// a settings file written by a pre-SubagentStop CLI carries the seven other
+// Entire hooks, current and healthy. A plain `entire enable` (InstallHooks
+// with force=false) must repair it — add exactly the missing SubagentStop
+// entry (count == 1) and leave every other hook type untouched. Existing
+// installs must be repaired by enable, not just flagged by doctor forever.
+func TestInstallHooks_SubagentStop_UpgradeInPlace(t *testing.T) {
+	tempDir := t.TempDir()
+	t.Chdir(tempDir)
+
+	a := &ClaudeCodeAgent{}
+
+	// Produce a full current install, then delete the SubagentStop entry to
+	// reproduce a settings file written by a pre-SubagentStop CLI. Using the
+	// installer's own output (rather than a hand-written fixture) keeps the
+	// other seven hook entries in exactly the shape a real old install left.
+	if _, err := a.InstallHooks(context.Background(), false); err != nil {
+		t.Fatalf("initial InstallHooks() error = %v", err)
+	}
+	settingsPath := filepath.Join(tempDir, ".claude", "settings.json")
+	data, err := os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatalf("failed to read settings.json: %v", err)
+	}
+	var rawSettings map[string]json.RawMessage
+	if err := json.Unmarshal(data, &rawSettings); err != nil {
+		t.Fatalf("failed to parse settings.json: %v", err)
+	}
+	var rawHooks map[string]json.RawMessage
+	if err := json.Unmarshal(rawSettings["hooks"], &rawHooks); err != nil {
+		t.Fatalf("failed to parse hooks: %v", err)
+	}
+	if _, ok := rawHooks["SubagentStop"]; !ok {
+		t.Fatal("precondition: full install must contain a SubagentStop entry")
+	}
+	delete(rawHooks, "SubagentStop")
+	before := make(map[string]string, len(rawHooks))
+	for hookType, raw := range rawHooks {
+		before[hookType] = string(raw)
+	}
+	hooksJSON, err := json.Marshal(rawHooks)
+	if err != nil {
+		t.Fatalf("failed to marshal hooks: %v", err)
+	}
+	rawSettings["hooks"] = hooksJSON
+	settingsJSON, err := json.Marshal(rawSettings)
+	if err != nil {
+		t.Fatalf("failed to marshal settings: %v", err)
+	}
+	if err := os.WriteFile(settingsPath, settingsJSON, 0o600); err != nil {
+		t.Fatalf("failed to write pre-SubagentStop settings: %v", err)
+	}
+
+	count, err := a.InstallHooks(context.Background(), false)
+	if err != nil {
+		t.Fatalf("upgrade InstallHooks() error = %v", err)
+	}
+	if count != 1 {
+		t.Errorf("upgrade InstallHooks() count = %d, want exactly 1 (the SubagentStop entry)", count)
+	}
+
+	after := testutil.ReadRawHooks(t, tempDir, ".claude")
+	wantCmd := agentpkg.WrapProductionSilentHookCommand("entire hooks claude-code subagent-stop")
+	var subagentStop []ClaudeHookMatcher
+	if err := json.Unmarshal(after["SubagentStop"], &subagentStop); err != nil {
+		t.Fatalf("failed to parse repaired SubagentStop entry: %v", err)
+	}
+	assertHookExists(t, subagentStop, "", wantCmd, "repaired SubagentStop hook")
+
+	for hookType, beforeRaw := range before {
+		afterRaw, ok := after[hookType]
+		if !ok {
+			t.Errorf("hook type %s disappeared during the upgrade", hookType)
+			continue
+		}
+		if string(afterRaw) != beforeRaw {
+			t.Errorf("hook type %s was rewritten during the upgrade:\nbefore: %s\nafter:  %s", hookType, beforeRaw, afterRaw)
+		}
+	}
+}
+
+// TestCheckHookConfig_Outdated_MissingSubagentStop pins CheckHookConfig's
+// drift detection for the new hook: an install that predates SubagentStop
+// (Stop + current tool-use matchers present, but no SubagentStop entry) must
+// read as outdated so `entire doctor`/`entire enable --force` picks it up,
+// not silently stay HooksCurrent forever.
+func TestCheckHookConfig_Outdated_MissingSubagentStop(t *testing.T) {
+	tempDir := t.TempDir()
+	t.Chdir(tempDir)
+
+	stop := agentpkg.WrapProductionSilentHookCommand("entire hooks claude-code stop")
+	pre := agentpkg.WrapProductionSilentHookCommand("entire hooks claude-code pre-task")
+	post := agentpkg.WrapProductionSilentHookCommand("entire hooks claude-code post-task")
+	todo := agentpkg.WrapProductionSilentHookCommand("entire hooks claude-code post-todo")
+	writeSettingsFile(t, tempDir, fmt.Sprintf(`{
+  "hooks": {
+    "Stop": [{"matcher": "", "hooks": [{"type": "command", "command": %q}]}],
+    "PreToolUse": [{"matcher": "Agent", "hooks": [{"type": "command", "command": %q}]}],
+    "PostToolUse": [
+      {"matcher": "Agent", "hooks": [{"type": "command", "command": %q}]},
+      {"matcher": "TaskCreate|TaskUpdate", "hooks": [{"type": "command", "command": %q}]}
+    ]
+  }
+}`, stop, pre, post, todo))
+
+	if got := CheckHookConfig(context.Background()); got != HooksOutdated {
+		t.Errorf("CheckHookConfig() = %v, want HooksOutdated (missing SubagentStop)", got)
+	}
 }
 
 func TestCheckHookConfig_Absent(t *testing.T) {
@@ -909,6 +1069,7 @@ func TestCheckHookConfig_SupersetMatchersAreCurrent(t *testing.T) {
 	t.Chdir(tempDir)
 
 	stop := agentpkg.WrapProductionSilentHookCommand("entire hooks claude-code stop")
+	subagentStop := agentpkg.WrapProductionSilentHookCommand("entire hooks claude-code subagent-stop")
 	pre := agentpkg.WrapProductionSilentHookCommand("entire hooks claude-code pre-task")
 	post := agentpkg.WrapProductionSilentHookCommand("entire hooks claude-code post-task")
 	todo := agentpkg.WrapProductionSilentHookCommand("entire hooks claude-code post-todo")
@@ -917,13 +1078,14 @@ func TestCheckHookConfig_SupersetMatchersAreCurrent(t *testing.T) {
 	writeSettingsFile(t, tempDir, fmt.Sprintf(`{
   "hooks": {
     "Stop": [{"matcher": "", "hooks": [{"type": "command", "command": %q}]}],
+    "SubagentStop": [{"matcher": "", "hooks": [{"type": "command", "command": %q}]}],
     "PreToolUse": [{"matcher": "Agent|Foo", "hooks": [{"type": "command", "command": %q}]}],
     "PostToolUse": [
       {"matcher": "Agent|Foo", "hooks": [{"type": "command", "command": %q}]},
       {"matcher": "TaskCreate|TaskUpdate|TaskGet", "hooks": [{"type": "command", "command": %q}]}
     ]
   }
-}`, stop, pre, post, todo))
+}`, stop, subagentStop, pre, post, todo))
 
 	if got := CheckHookConfig(context.Background()); got != HooksCurrent {
 		t.Errorf("CheckHookConfig() = %v, want HooksCurrent (superset matcher)", got)
@@ -982,4 +1144,117 @@ func TestCommittedDogfoodSettingsIsCurrent(t *testing.T) {
 		t.Chdir(dir)
 		return (&ClaudeCodeAgent{}).InstallHooks(context.Background(), false)
 	})
+}
+
+// hooksInstalledNow reports whether the agent's hooks are installed, failing the
+// test if it could not tell. Built-in agents read a local config file where
+// absent means absent, so an error here is a bug, not a state to tolerate.
+func hooksInstalledNow(t *testing.T, ag interface {
+	AreHooksInstalled(ctx context.Context) (bool, error)
+},
+) bool {
+	t.Helper()
+
+	installed, err := ag.AreHooksInstalled(context.Background())
+	if err != nil {
+		t.Fatalf("AreHooksInstalled() error = %v", err)
+	}
+	return installed
+}
+
+// TestPermissionConfigOwner_RepairsRetiredDenyRule exercises the shared repair
+// path end to end through the real agent: the capability wiring, the read, the
+// removal, and the write-back. This is what `entire doctor` calls, and it is a
+// separate path from InstallHooks (a user who already enabled Entire has no
+// reason to run enable again).
+func TestPermissionConfigOwner_RepairsRetiredDenyRule(t *testing.T) {
+	tempDir := t.TempDir()
+	t.Chdir(tempDir)
+
+	writeSettingsFile(t, tempDir, `{
+  "permissions": {
+    "allow": ["Read(**)"],
+    "deny": ["Bash(rm -rf *)", "`+agentpkg.MetadataDenyRule+`"]
+  }
+}`)
+
+	a := &ClaudeCodeAgent{}
+	ctx := context.Background()
+
+	if !agentpkg.HasRetiredMetadataDenyRule(ctx, a) {
+		t.Fatal("HasRetiredMetadataDenyRule = false, want true before repair")
+	}
+
+	changed, err := agentpkg.RepairRetiredMetadataDenyRule(ctx, a)
+	if err != nil {
+		t.Fatalf("RepairRetiredMetadataDenyRule() error = %v", err)
+	}
+	if !changed {
+		t.Error("RepairRetiredMetadataDenyRule() changed = false, want true")
+	}
+
+	perms := readPermissions(t, tempDir)
+	if containsRule(perms.Deny, agentpkg.MetadataDenyRule) {
+		t.Errorf("permissions.deny = %v, want the retired rule removed", perms.Deny)
+	}
+	if !containsRule(perms.Deny, "Bash(rm -rf *)") {
+		t.Errorf("permissions.deny = %v, want the user rule preserved", perms.Deny)
+	}
+	if !containsRule(perms.Allow, "Read(**)") {
+		t.Errorf("permissions.allow = %v, want it preserved", perms.Allow)
+	}
+
+	// Idempotent: doctor runs repeatedly, and the second run must report no
+	// change rather than rewriting the file every time.
+	if agentpkg.HasRetiredMetadataDenyRule(ctx, a) {
+		t.Error("HasRetiredMetadataDenyRule = true after repair")
+	}
+	changed, err = agentpkg.RepairRetiredMetadataDenyRule(ctx, a)
+	if err != nil {
+		t.Fatalf("second RepairRetiredMetadataDenyRule() error = %v", err)
+	}
+	if changed {
+		t.Error("second RepairRetiredMetadataDenyRule() changed = true, want false")
+	}
+}
+
+// TestPermissionConfigOwner_NoConfigFile: doctor runs in repos where the agent
+// was never set up. Absent must read as "nothing to report", not an error.
+func TestPermissionConfigOwner_NoConfigFile(t *testing.T) {
+	tempDir := t.TempDir()
+	t.Chdir(tempDir)
+
+	a := &ClaudeCodeAgent{}
+	ctx := context.Background()
+
+	if agentpkg.HasRetiredMetadataDenyRule(ctx, a) {
+		t.Error("HasRetiredMetadataDenyRule = true with no settings file")
+	}
+	changed, err := agentpkg.RepairRetiredMetadataDenyRule(ctx, a)
+	if err != nil {
+		t.Errorf("RepairRetiredMetadataDenyRule() error = %v, want nil", err)
+	}
+	if changed {
+		t.Error("RepairRetiredMetadataDenyRule() changed = true with no settings file")
+	}
+}
+
+// TestPermissionConfigOwner_UnparseableConfig splits the two contracts: the
+// detector stays quiet (diagnostics must not accuse on a failed read) while the
+// repair reports, because in doctor an unparseable config is the answer.
+func TestPermissionConfigOwner_UnparseableConfig(t *testing.T) {
+	tempDir := t.TempDir()
+	t.Chdir(tempDir)
+
+	writeSettingsFile(t, tempDir, `{not json`)
+
+	a := &ClaudeCodeAgent{}
+	ctx := context.Background()
+
+	if agentpkg.HasRetiredMetadataDenyRule(ctx, a) {
+		t.Error("HasRetiredMetadataDenyRule = true on an unparseable config")
+	}
+	if _, err := agentpkg.RepairRetiredMetadataDenyRule(ctx, a); err == nil {
+		t.Error("RepairRetiredMetadataDenyRule() error = nil, want a parse error")
+	}
 }

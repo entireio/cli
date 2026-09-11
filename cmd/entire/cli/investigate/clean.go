@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"os"
 	"sort"
 	"strings"
 )
@@ -28,14 +27,21 @@ type CleanInput struct {
 }
 
 // CleanDeps is what RunClean needs that's test-injectable.
+//
+// The two removal hooks are deletions, not paths. They used to be functions
+// returning an absolute path that RunClean handed to os.RemoveAll and os.Remove,
+// which put the most destructive operation in the package on the far side of a
+// string — exactly what StateStore.RunDir's doc comment warns about. Each store
+// now performs its own delete through its own root, so a run id resolves as a
+// name inside the git common dir instead of being joined into a path.
 type CleanDeps struct {
 	ManifestStore *LocalManifestStore
-	// RunDir returns the per-run directory path for a given run id. In
-	// production this is StateStore.RunDir; tests inject a fake.
-	RunDir func(runID string) string
-	// ManifestPath returns the on-disk path for a manifest. In
-	// production this is LocalManifestStore.PathFor(m).
-	ManifestPath func(m LocalManifest) string
+	// RemoveRun deletes the per-run directory for a given run id. In
+	// production this is StateStore.RemoveRun; tests inject a fake.
+	RemoveRun func(runID string) error
+	// RemoveManifest deletes a manifest record. In production this is
+	// LocalManifestStore.Remove.
+	RemoveManifest func(m LocalManifest) error
 	// Confirm prompts the user with the given message and returns the
 	// y/N answer. Nil → real huh-backed prompt (use newAccessibleForm).
 	Confirm func(ctx context.Context, message string) (bool, error)
@@ -43,8 +49,8 @@ type CleanDeps struct {
 
 // RunClean implements `entire investigate clean`.
 func RunClean(ctx context.Context, in CleanInput, deps CleanDeps) error {
-	if deps.ManifestStore == nil || deps.RunDir == nil || deps.ManifestPath == nil {
-		return errors.New("clean: deps not wired (manifest store, RunDir, ManifestPath required)")
+	if deps.ManifestStore == nil || deps.RemoveRun == nil || deps.RemoveManifest == nil {
+		return errors.New("clean: deps not wired (manifest store, RemoveRun, RemoveManifest required)")
 	}
 	if in.RunID == "" && !in.All {
 		return errors.New("clean: pass a run id (or unique prefix) or --all")
@@ -143,15 +149,13 @@ func printCleanSummary(w io.Writer, targets []LocalManifest, all bool) {
 func deleteOneInvestigation(m LocalManifest, deps CleanDeps) error {
 	var errs []string
 
-	runDir := deps.RunDir(m.RunID)
-	if err := os.RemoveAll(runDir); err != nil {
-		// RemoveAll returns nil when the path doesn't exist, so this is
-		// a real failure (permissions, etc.).
+	if err := deps.RemoveRun(m.RunID); err != nil {
+		// Both hooks treat an absent target as success, so anything reported
+		// here is a real failure (permissions, a non-empty parent, etc.).
 		errs = append(errs, fmt.Sprintf("run dir: %v", err))
 	}
 
-	manifestPath := deps.ManifestPath(m)
-	if err := os.Remove(manifestPath); err != nil && !os.IsNotExist(err) {
+	if err := deps.RemoveManifest(m); err != nil {
 		errs = append(errs, fmt.Sprintf("manifest: %v", err))
 	}
 

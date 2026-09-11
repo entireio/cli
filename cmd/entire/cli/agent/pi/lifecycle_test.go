@@ -106,6 +106,19 @@ func TestPiAgent_UsesLiveSkillCaptureNotTranscriptExtraction(t *testing.T) {
 	}
 }
 
+// TestPiAgent_MustNotImplementToolInvocationScanner keeps Pi out of the
+// tool-invocation probe. Pi's transcript has no walker here, so implementing
+// the interface would turn "cannot tell" into a fabricated "did not run" —
+// indistinguishable in aggregate from a real one (see
+// agent.ToolInvocationScanner).
+func TestPiAgent_MustNotImplementToolInvocationScanner(t *testing.T) {
+	t.Parallel()
+	if _, ok := agent.AsToolInvocationScanner(NewPiAgent()); ok {
+		t.Fatal("PiAgent must not implement ToolInvocationScanner: no walker exists for Pi's " +
+			"transcript, and reporting a fabricated negative is worse than reporting unsupported")
+	}
+}
+
 func TestParseHookEvent_SessionShutdown_NoLifecycleEvent(t *testing.T) {
 	t.Parallel()
 	a := &PiAgent{}

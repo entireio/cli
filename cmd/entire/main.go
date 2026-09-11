@@ -13,6 +13,7 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli"
 	"github.com/entireio/cli/cmd/entire/cli/api"
+	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
 	"github.com/entireio/cli/cmd/entire/cli/versioninfo"
 	"github.com/entireio/cli/internal/procsignal"
@@ -79,8 +80,46 @@ func main() {
 	// inherits the prepended PATH so it can spawn sibling managed plugins.
 	restorePATH := cli.PrependPluginBinDirToPATH(ctx)
 
-	if handled, code := cli.MaybeRunPlugin(ctx, rootCmd, os.Args[1:]); handled {
+	if handled, code, killedBy := cli.MaybeRunPlugin(ctx, rootCmd, os.Args[1:]); handled {
 		cancel()
+		if code == cli.ExitPluginSignalled {
+			// The plugin was terminated by a signal, or a signal interrupted
+			// the on-demand install before it ran. Re-raise so the shell sees
+			// WIFSIGNALED: an enclosing loop breaks on one Ctrl-C, and the
+			// conventional 128+signum reaches whoever ran us.
+			//
+			// Gated on the plugin's own outcome rather than on a signal
+			// having fired somewhere in this process: Ctrl-C reaches the whole
+			// foreground process group, so a plugin that handles it itself and
+			// exits with a meaningful code (a TUI quitting on Ctrl-C exits 0)
+			// must keep that code instead of being reported as killed.
+			switch {
+			case procsignal.Load() != nil:
+				// A signal we received outranks the child's, because when we
+				// were signalled the child's signal is usually OUR signal
+				// laundered — and laundered lossily. Cancelling the context
+				// makes runPlugin's cmd.Cancel send the child SIGINT whatever
+				// we got, so a supervisor's SIGTERM comes back as a SIGINT
+				// child and would report 130 for a shutdown that must report
+				// 143. That is the exact confusion dieFromSignal exists to
+				// prevent.
+				dieFromSignal(terminatingSignal())
+			case killedBy != nil:
+				// We were not signalled, so the child's signal is genuinely
+				// its own: `kill -TERM` aimed at the plugin still exits 143,
+				// and a SIGPIPE from `entire graph | head -1` still exits
+				// 141. Nothing laundered it, so it is the outcome to
+				// propagate.
+				dieFromSignal(killedBy)
+			default:
+				// -1 with no signal on either side. Windows reports a killed
+				// child as an ordinary exit code, so it never lands here;
+				// anything that does is unaccounted for, and -1 is not an
+				// exit status (os.Exit would truncate it to 255), so report a
+				// plain failure rather than inventing a signal.
+				os.Exit(1)
+			}
+		}
 		os.Exit(code)
 	}
 	restorePATH()
@@ -95,6 +134,16 @@ func main() {
 	}
 
 	executed, err := rootCmd.ExecuteContextC(ctx)
+	// The only place the logger is closed, and it must be here: cobra returns out
+	// of Command.execute() as soon as RunE errors or required-flag validation
+	// fails, both before its PersistentPostRun loop, so those paths would
+	// otherwise exit with up to 8KB of buffered diagnostics unwritten. The logger
+	// rides the executed command's context, where the root pre-run put it; a
+	// failure raised before any pre-run carries none, and nothing logged yet.
+	if l := logging.LoggerFromContext(executed.Context()); l != nil {
+		_ = l.Close()
+	}
+
 	if err != nil {
 		var silent *cli.SilentError
 

@@ -27,6 +27,7 @@ func TestParseDispatchFlags_ServerReposAreAllowed(t *testing.T) {
 		false,
 		[]string{"entireio/cli", "entireio/entire.io"},
 		"",
+		"",
 		false,
 	)
 	if err != nil {
@@ -57,6 +58,7 @@ func TestParseDispatchFlags_NormalizesRepoScopeValues(t *testing.T) {
 		false,
 		[]string{" entireio/cli ", "", "entireio/cli", " otherco/service ", "   "},
 		"",
+		"",
 		false,
 	)
 	if err != nil {
@@ -81,6 +83,7 @@ func TestParseDispatchFlags_LocalRejectsRepos(t *testing.T) {
 		false,
 		[]string{"entireio/cli"},
 		"",
+		"",
 		false,
 	)
 	if err == nil {
@@ -101,6 +104,7 @@ func TestParseDispatchFlags_CloudRejectsAllBranches(t *testing.T) {
 		"",
 		true,
 		[]string{"entireio/cli"},
+		"",
 		"",
 		false,
 	)
@@ -124,6 +128,7 @@ func TestParseDispatchFlags_CloudCapsReposAtFive(t *testing.T) {
 		false,
 		repos,
 		"",
+		"",
 		false,
 	)
 	if err == nil {
@@ -144,6 +149,7 @@ func TestParseDispatchFlags_LocalAllBranchesFlag(t *testing.T) {
 		"",
 		true,
 		nil,
+		"",
 		"",
 		false,
 	)
@@ -168,6 +174,7 @@ func TestParseDispatchFlags_InsecureHTTPAuthFlag(t *testing.T) {
 		"",
 		false,
 		[]string{"entireio/cli"},
+		"",
 		"",
 		true,
 	)
@@ -898,5 +905,24 @@ func TestNewDispatchCmd_AccessibleModeSkipsInteractiveRenderer(t *testing.T) {
 	}
 	if got := stderr.String(); got != "" {
 		t.Fatalf("unexpected stderr: %q", got)
+	}
+}
+
+func TestNewDispatchCmd_JurisdictionFlagHelpText(t *testing.T) {
+	t.Parallel()
+
+	cmd := newDispatchCmd()
+	flag := cmd.Flags().Lookup("jurisdiction")
+	if flag == nil {
+		t.Fatal("expected --jurisdiction flag")
+	}
+	if flag.Shorthand != "j" {
+		t.Fatalf("expected -j shorthand to match `entire api`/`entire auth token`, got %q", flag.Shorthand)
+	}
+	if !strings.Contains(flag.Usage, "home jurisdiction") {
+		t.Fatalf("expected usage to explain the home default, got %q", flag.Usage)
+	}
+	if !strings.Contains(cmd.Long, "--jurisdiction us") {
+		t.Fatalf("expected a --jurisdiction example in long help, got %q", cmd.Long)
 	}
 }

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -12,6 +13,7 @@ import (
 	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
+	"github.com/entireio/cli/cmd/entire/cli/entiredir"
 	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
@@ -28,6 +30,13 @@ type PrePromptState struct {
 	SessionID      string   `json:"session_id"`
 	Timestamp      string   `json:"timestamp"`
 	UntrackedFiles []string `json:"untracked_files"`
+
+	// UntrackedScanSkipped records that the pre-prompt untracked scan failed
+	// (e.g. the status walk breached its wall-clock budget). Turn-end must
+	// then skip new-file detection entirely: with no baseline, every
+	// untracked file in the worktree would be misreported as created by this
+	// turn.
+	UntrackedScanSkipped bool `json:"untracked_scan_skipped,omitempty"`
 
 	// TranscriptOffset is the unified transcript position when this state was captured.
 	// For Claude Code (JSONL), this is the line count.
@@ -107,19 +116,17 @@ func CapturePrePromptState(ctx context.Context, ag agent.Agent, sessionID, sessi
 		return fmt.Errorf("invalid session ID for pre-prompt state: %w", err)
 	}
 
-	// Get absolute path for tmp directory
-	tmpDirAbs := resolveTmpDir(ctx)
-
-	// Create tmp directory if it doesn't exist
-	if err := os.MkdirAll(tmpDirAbs, 0o750); err != nil {
-		return fmt.Errorf("failed to create tmp directory: %w", err)
-	}
-
-	// Get list of untracked files (excluding .entire directory itself)
-	untrackedFiles, err := getUntrackedFilesForState(ctx)
+	// Open the shared .entire root and ensure tmp/ exists under it.
+	root, err := openTmpDir(ctx)
 	if err != nil {
-		return fmt.Errorf("failed to get untracked files: %w", err)
+		return err
 	}
+
+	// Get list of untracked files (excluding .entire directory itself).
+	// Fail open on error: hooks must never break the agent, and the rest of
+	// the snapshot (transcript position) is still worth capturing. The
+	// skipped-scan marker tells turn-end to disable new-file detection.
+	untrackedFiles, scanSkipped := untrackedFilesOrSkip(ctx)
 
 	// Get transcript position using TranscriptAnalyzer if available
 	var transcriptOffset int
@@ -135,10 +142,11 @@ func CapturePrePromptState(ctx context.Context, ag agent.Agent, sessionID, sessi
 
 	// Create state file using os.Root for traversal-resistant write
 	state := PrePromptState{
-		SessionID:        sessionID,
-		Timestamp:        time.Now().UTC().Format(time.RFC3339),
-		UntrackedFiles:   untrackedFiles,
-		TranscriptOffset: transcriptOffset,
+		SessionID:            sessionID,
+		Timestamp:            time.Now().UTC().Format(time.RFC3339),
+		UntrackedFiles:       untrackedFiles,
+		UntrackedScanSkipped: scanSkipped,
+		TranscriptOffset:     transcriptOffset,
 	}
 
 	data, err := jsonutil.MarshalIndentWithNewline(state, "", "  ")
@@ -146,14 +154,7 @@ func CapturePrePromptState(ctx context.Context, ag agent.Agent, sessionID, sessi
 		return fmt.Errorf("failed to marshal state: %w", err)
 	}
 
-	fileName := fmt.Sprintf("pre-prompt-%s.json", sessionID)
-	root, err := os.OpenRoot(tmpDirAbs)
-	if err != nil {
-		return fmt.Errorf("failed to open tmp directory root: %w", err)
-	}
-	defer root.Close()
-
-	if err := osroot.WriteFile(root, fileName, data, 0o600); err != nil {
+	if err := entiredir.WriteFile(root, tmpFile("pre-prompt-%s.json", sessionID), data, 0o600); err != nil {
 		return fmt.Errorf("failed to write state file: %w", err)
 	}
 
@@ -170,20 +171,16 @@ func LoadPrePromptState(ctx context.Context, sessionID string) (*PrePromptState,
 		return nil, fmt.Errorf("invalid session ID for pre-prompt state: %w", err)
 	}
 
-	tmpDirAbs := resolveTmpDir(ctx)
-
-	root, err := os.OpenRoot(tmpDirAbs)
+	root, err := entiredir.OpenForRead(ctx)
 	if err != nil {
-		// Directory doesn't exist yet — no state file
-		if os.IsNotExist(err) {
+		// .entire doesn't exist yet — no state file
+		if errors.Is(err, fs.ErrNotExist) {
 			return nil, nil //nolint:nilnil // already present in codebase
 		}
-		return nil, fmt.Errorf("failed to open tmp directory root: %w", err)
+		return nil, fmt.Errorf("failed to open %s: %w", paths.EntireDir, err)
 	}
-	defer root.Close()
 
-	fileName := fmt.Sprintf("pre-prompt-%s.json", sessionID)
-	data, err := osroot.ReadFile(root, fileName)
+	data, err := entiredir.ReadFile(root, tmpFile("pre-prompt-%s.json", sessionID))
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, nil //nolint:nilnil // already present in codebase
@@ -212,18 +209,15 @@ func CleanupPrePromptState(ctx context.Context, sessionID string) error {
 // cleanupTmpStateFile removes one state file from .entire/tmp, treating a
 // missing directory as already clean.
 func cleanupTmpStateFile(ctx context.Context, fileName string) error {
-	tmpDirAbs := resolveTmpDir(ctx)
-
-	root, err := os.OpenRoot(tmpDirAbs)
+	root, err := entiredir.OpenForRead(ctx)
 	if err != nil {
-		if os.IsNotExist(err) {
-			return nil // Directory doesn't exist, nothing to clean up
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil // .entire doesn't exist, nothing to clean up
 		}
-		return fmt.Errorf("failed to open tmp directory root: %w", err)
+		return fmt.Errorf("failed to open %s: %w", paths.EntireDir, err)
 	}
-	defer root.Close()
 
-	return osroot.Remove(root, fileName) //nolint:wrapcheck // best-effort cleanup, caller adds context via wrapping function name
+	return osroot.RemoveNoSymlinks(root, entireTmpName+"/"+fileName) //nolint:wrapcheck // best-effort cleanup, caller adds context via wrapping function name
 }
 
 // FileChanges holds categorized file changes from git status.
@@ -266,14 +260,31 @@ func shouldIgnoreSessionTrackingPath(relPath string) bool {
 // Modified includes both worktree and staging modified/added files.
 // Deleted includes both staged and unstaged deletions.
 // All results exclude .entire/ directory.
+//
+// The status walk is budget-bounded (gitrepo.StatusWithBudget) because every
+// caller but one is an agent-hook capture path. User-attended commands use
+// detectFileChangesUnbounded instead.
 func DetectFileChanges(ctx context.Context, previouslyUntracked []string) (*FileChanges, error) {
+	return detectFileChanges(ctx, previouslyUntracked, gitrepo.StatusWithBudget)
+}
+
+// detectFileChangesUnbounded is DetectFileChanges without the status-walk
+// budget, for user-attended commands (`entire session adopt`) where a
+// slow-but-healthy repo (NFS, cold cache) should finish rather than error at
+// the budget — the user is watching and can Ctrl-C, so there is no orphaned
+// process to prevent. Hook paths must never use this.
+func detectFileChangesUnbounded(ctx context.Context) (*FileChanges, error) {
+	return detectFileChanges(ctx, nil, gitrepo.Status)
+}
+
+func detectFileChanges(ctx context.Context, previouslyUntracked []string, statusFn func(context.Context, *git.Repository) (git.Status, error)) (*FileChanges, error) {
 	repo, err := openRepository(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open repository: %w", err)
 	}
 	defer repo.Close()
 
-	status, err := gitrepo.Status(ctx, repo)
+	status, err := statusFn(ctx, repo)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get status: %w", err)
 	}
@@ -358,10 +369,11 @@ func filterToUncommittedFiles(ctx context.Context, files []string, repoRoot stri
 			continue
 		}
 
-		// File is in HEAD — compare content with working tree
-		absPath := filepath.Join(repoRoot, relPath)
-		workingContent, err := os.ReadFile(absPath) //nolint:gosec // path from controlled source
-		if err != nil {
+		// File is in HEAD — compare content with working tree, through the
+		// worktree's shared root. relPath comes from git, so it is already the
+		// coordinate the root reads in.
+		workingContent, ok := readWorktreeFileSafely(repoRoot, relPath)
+		if !ok {
 			// Can't read working tree file (deleted?) — keep it
 			result = append(result, relPath)
 			continue
@@ -418,14 +430,69 @@ func mergeUnique(base, extra []string) []string {
 	return base
 }
 
-// resolveTmpDir returns the absolute path to the .entire/tmp directory,
-// falling back to a relative path if the repo root can't be determined.
-func resolveTmpDir(ctx context.Context) string {
-	abs, err := paths.AbsPath(ctx, paths.EntireTmpDir)
+// entireTmpName is .entire/tmp expressed relative to the .entire root, which is
+// the coordinate every read and write below uses.
+var entireTmpName = entiredir.MustName(paths.EntireTmpDir)
+
+// tmpFile formats a state file name relative to the .entire root. The format
+// arguments are already-validated session and tool-use IDs; the root confines
+// the resulting open regardless.
+func tmpFile(format string, args ...any) string {
+	return entireTmpName + "/" + fmt.Sprintf(format, args...)
+}
+
+// sessionMetadataName returns a session's metadata directory relative to the
+// .entire root. sessionID reaches here from agent hook input; callers validate
+// it, and the root confines the open either way.
+func sessionMetadataName(sessionID string) string {
+	return entiredir.MustName(paths.SessionMetadataDirFromSessionID(sessionID))
+}
+
+// openTmpDir returns the shared .entire root with tmp/ created under it, for
+// the capture paths that are about to write a state file.
+func openTmpDir(ctx context.Context) (*os.Root, error) {
+	root, err := entiredir.Open(ctx)
 	if err != nil {
-		return paths.EntireTmpDir
+		return nil, fmt.Errorf("failed to open %s: %w", paths.EntireDir, err)
 	}
-	return abs
+	if err := osroot.MkdirAllNoSymlink(root, entireTmpName, 0o750); err != nil {
+		return nil, fmt.Errorf("failed to create tmp directory: %w", err)
+	}
+	return root, nil
+}
+
+// untrackedFilesOrSkip runs the pre-prompt/pre-task untracked scan, degrading
+// instead of failing. Deliberately wider than the status-budget feature that
+// introduced it: EVERY scan error fails open — budget breach, repo-open
+// failure, corrupted .git, anything — because these captures run inside
+// TurnStart/SubagentStart hooks, and any error propagated from here used to
+// fail the hook and break the agent's turn. That fail-hook behavior was the
+// bug, not a safety property: the scan only feeds new-file detection, so the
+// correct degrade is to warn, mark the scan skipped (the paired end-hook then
+// disables new-file detection for the turn), and let capture proceed with
+// transcript-derived data.
+func untrackedFilesOrSkip(ctx context.Context) (untrackedFiles []string, scanSkipped bool) {
+	untrackedFiles, err := getUntrackedFilesForState(ctx)
+	if err != nil {
+		logStatusDegrade(logging.WithComponent(ctx, "state"),
+			"untracked-file scan failed; capture degraded: new-file detection disabled for this turn", err)
+		return nil, true
+	}
+	return untrackedFiles, false
+}
+
+// logStatusDegrade logs a status-derived degrade at the appropriate level:
+// budget breaches were already warned about — with repo root, elapsed, and
+// budget — by the gitrepo layer at the moment of the breach, so re-warning
+// here would double-log the same event; they get Debug. Any other status
+// error (repo-open failure, corrupted .git, …) has no other warning source
+// and keeps Warn.
+func logStatusDegrade(ctx context.Context, msg string, err error) {
+	if errors.Is(err, gitrepo.ErrStatusBudgetExceeded) {
+		logging.Debug(ctx, msg, slog.String("error", err.Error()))
+		return
+	}
+	logging.Warn(ctx, msg, slog.String("error", err.Error()))
 }
 
 // getUntrackedFilesForState returns a list of untracked files using go-git
@@ -437,7 +504,7 @@ func getUntrackedFilesForState(ctx context.Context) ([]string, error) {
 	}
 	defer repo.Close()
 
-	status, err := gitrepo.Status(ctx, repo)
+	status, err := gitrepo.StatusWithBudget(ctx, repo)
 	if err != nil {
 		return nil, err //nolint:wrapcheck // already present in codebase
 	}
@@ -459,6 +526,10 @@ type PreTaskState struct {
 	ToolUseID      string   `json:"tool_use_id"`
 	Timestamp      string   `json:"timestamp"`
 	UntrackedFiles []string `json:"untracked_files"`
+
+	// UntrackedScanSkipped mirrors PrePromptState.UntrackedScanSkipped for the
+	// subagent path: when set, subagent-end must skip new-file detection.
+	UntrackedScanSkipped bool `json:"untracked_scan_skipped,omitempty"`
 }
 
 // PreUntrackedFiles returns the untracked files list, or nil if the receiver is nil.
@@ -485,25 +556,22 @@ func CapturePreTaskState(ctx context.Context, toolUseID string) error {
 		return fmt.Errorf("invalid tool use ID for pre-task state: %w", err)
 	}
 
-	// Get absolute path for tmp directory
-	tmpDirAbs := resolveTmpDir(ctx)
-
-	// Create tmp directory if it doesn't exist
-	if err := os.MkdirAll(tmpDirAbs, 0o750); err != nil {
-		return fmt.Errorf("failed to create tmp directory: %w", err)
-	}
-
-	// Get list of untracked files (excluding .entire directory itself)
-	untrackedFiles, err := getUntrackedFilesForState(ctx)
+	// Open the shared .entire root and ensure tmp/ exists under it.
+	root, err := openTmpDir(ctx)
 	if err != nil {
-		return fmt.Errorf("failed to get untracked files: %w", err)
+		return err
 	}
+
+	// Get list of untracked files (excluding .entire directory itself).
+	// Fail open on error, same as CapturePrePromptState.
+	untrackedFiles, scanSkipped := untrackedFilesOrSkip(ctx)
 
 	// Create state file using os.Root for traversal-resistant write
 	state := PreTaskState{
-		ToolUseID:      toolUseID,
-		Timestamp:      time.Now().UTC().Format(time.RFC3339),
-		UntrackedFiles: untrackedFiles,
+		ToolUseID:            toolUseID,
+		Timestamp:            time.Now().UTC().Format(time.RFC3339),
+		UntrackedFiles:       untrackedFiles,
+		UntrackedScanSkipped: scanSkipped,
 	}
 
 	data, err := jsonutil.MarshalIndentWithNewline(state, "", "  ")
@@ -511,14 +579,7 @@ func CapturePreTaskState(ctx context.Context, toolUseID string) error {
 		return fmt.Errorf("failed to marshal state: %w", err)
 	}
 
-	fileName := fmt.Sprintf("pre-task-%s.json", toolUseID)
-	root, err := os.OpenRoot(tmpDirAbs)
-	if err != nil {
-		return fmt.Errorf("failed to open tmp directory root: %w", err)
-	}
-	defer root.Close()
-
-	if err := osroot.WriteFile(root, fileName, data, 0o600); err != nil {
+	if err := entiredir.WriteFile(root, tmpFile("pre-task-%s.json", toolUseID), data, 0o600); err != nil {
 		return fmt.Errorf("failed to write state file: %w", err)
 	}
 
@@ -534,19 +595,15 @@ func LoadPreTaskState(ctx context.Context, toolUseID string) (*PreTaskState, err
 		return nil, fmt.Errorf("invalid tool use ID for pre-task state: %w", err)
 	}
 
-	tmpDirAbs := resolveTmpDir(ctx)
-
-	root, err := os.OpenRoot(tmpDirAbs)
+	root, err := entiredir.OpenForRead(ctx)
 	if err != nil {
-		if os.IsNotExist(err) {
+		if errors.Is(err, fs.ErrNotExist) {
 			return nil, nil //nolint:nilnil // already present in codebase
 		}
-		return nil, fmt.Errorf("failed to open tmp directory root: %w", err)
+		return nil, fmt.Errorf("failed to open %s: %w", paths.EntireDir, err)
 	}
-	defer root.Close()
 
-	fileName := fmt.Sprintf("pre-task-%s.json", toolUseID)
-	data, err := osroot.ReadFile(root, fileName)
+	data, err := entiredir.ReadFile(root, tmpFile("pre-task-%s.json", toolUseID))
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, nil //nolint:nilnil // already present in codebase
@@ -579,8 +636,11 @@ const preTaskFilePrefix = "pre-task-"
 // modified one.
 // Works correctly from any subdirectory within the repository.
 func FindActivePreTaskFile(ctx context.Context) (taskToolUseID string, found bool) {
-	tmpDirAbs := resolveTmpDir(ctx)
-	entries, err := os.ReadDir(tmpDirAbs)
+	root, err := entiredir.OpenForRead(ctx)
+	if err != nil {
+		return "", false
+	}
+	entries, err := osroot.ReadDirNoSymlinks(root, entireTmpName)
 	if err != nil {
 		return "", false
 	}
@@ -621,7 +681,7 @@ func FindActivePreTaskFile(ctx context.Context) (taskToolUseID string, found boo
 // GetNextCheckpointSequence returns the next sequence number for incremental checkpoints.
 // It counts existing checkpoint files in the task metadata checkpoints directory.
 // Returns 1 if no checkpoints exist yet.
-func GetNextCheckpointSequence(sessionID, taskToolUseID string) int {
+func GetNextCheckpointSequence(ctx context.Context, sessionID, taskToolUseID string) int {
 	// sessionID/taskToolUseID arrive from agent hook input and are used as path
 	// components below. Reject unsafe values so a crafted "../.." cannot redirect
 	// the os.ReadDir to an arbitrary directory; an invalid ID just starts at 1.
@@ -629,12 +689,17 @@ func GetNextCheckpointSequence(sessionID, taskToolUseID string) int {
 		return 1
 	}
 
-	// Use the session ID directly as the metadata directory name
-	sessionMetadataDir := paths.SessionMetadataDirFromSessionID(sessionID)
-	taskMetadataDir := strategy.TaskMetadataDir(sessionMetadataDir, taskToolUseID)
-	checkpointsDir := filepath.Join(taskMetadataDir, "checkpoints")
+	root, err := entiredir.OpenForRead(ctx)
+	if err != nil {
+		// No .entire yet - start at 1
+		return 1
+	}
 
-	entries, err := os.ReadDir(checkpointsDir)
+	// Use the session ID directly as the metadata directory name
+	sessionMetadataDir := sessionMetadataName(sessionID)
+	taskMetadataDir := strategy.TaskMetadataDir(sessionMetadataDir, taskToolUseID)
+
+	entries, err := osroot.ReadDirNoSymlinks(root, taskMetadataDir+"/checkpoints")
 	if err != nil {
 		// Directory doesn't exist or can't be read - start at 1
 		return 1

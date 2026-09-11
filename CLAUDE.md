@@ -46,6 +46,9 @@ the commands are always runnable in every build.
   `adopt` moves an active session from another repo or worktree into the current
   worktree and resets target-local checkpoint bookkeeping so future commits link
   to the adopted session from the new location.
+  `current` and a bare `tokens` answer "which session is running this command?"
+  through `strategy.ResolveCallerSession`, not "which state file moved last" —
+  see [Resolving the calling session](#resolving-the-calling-session).
 - `checkpoint` (aliases: `cp`, `checkpoints`): `list`, `explain`, `tokens`, `search`.
   `explain` also takes `--repo <owner/name>`, the drill-down for a cross-repo
   `search` hit: it reads the checkpoint from that repo's entire-api cell over
@@ -77,17 +80,87 @@ the commands are always runnable in every build.
 - `org`: control-plane organization management — `create`, `list`, `get`, `delete`
 - `project`: control-plane project management — `create`, `list`, `get`, `delete`
 - `repo`: control-plane repository lifecycle — `create`, `list`, `get`, `delete`,
-  `clone`, plus the `mirror` and `visibility` subtrees. Git content operations
-  (log, diff, …) are intentionally out of scope. The `mirror` subtree is
+  `clone`, plus the `mirror`, `visibility` and `protection` subtrees. Git
+  content operations (log, diff, …) are intentionally out of scope.
+  `protection` (`list`, `add [--server-side-merge-only]`, `remove`) edits a
+  native repo's branch-protection rules through core's
+  `/repos/{repoId}/branch-protection` resource: `add` and `remove` are one
+  PATCH each (`addRules` upserts by ref), never a read-modify-write of the
+  list. `add` sends `serverSideMergeOnly` only when the flag was given: the
+  server keeps an existing rule's level when it is absent, so re-adding a
+  branch without the flag never lowers it and `--server-side-merge-only=false`
+  is the explicit way down. A short branch name expands to `refs/heads/`,
+  `HEAD` and `refs/...` pass through. The `mirror` subtree is
   server-side (`create`, `list`, `get`, `remove`, `collaborators`) with one
   exception: `mirror use` repoints the *current clone's* git remote at a mirror
   (local git config only — it creates nothing server-side). Interactively it
   picks among the repo's placements and asks whether to replace the remote
   (preserving the old URL under `--upstream`) or add a separate one;
   non-interactively it repoints `--remote` directly. Both `use` and `clone`
-  choose a placement through the shared `selectPlacement` picker.
+  choose a placement through the shared `selectPlacement` picker. `clone`
+  accepts a native `/et/<project>/<repo>` ref, a mirror `/gh/<owner>/<repo>`
+  ref, or a full `entire://` URL passed through verbatim. **Every ref names its
+  forge**: the leading token alone decides which grammar is tried, and the bare
+  `<project>/<repo>` shorthand was removed because both forges take that shape
+  and nothing in it says which was meant (#2252).
+  Requiring the prefix is a **namesquatting** guard, not tidiness: without it,
+  whichever namespace the CLI defaulted to could shadow the other, and
+  `TestCloneRefAlwaysRequiresItsForgePrefix` pins that no forge-less pair
+  resolves in either parser or in the command. It holds only for *intent* —
+  lookups are already unambiguous because native rows are stored prefixed in the
+  same `full_name` index (`et/<project>/<repo>`), which is why the bare-pair
+  `--repo` filters on `search`/`experts`/`explain` cannot cross namespaces
+  either.
+  Native names are validated client-side against the server's own rules
+  (`nativeProjectRe`/`nativeRepoRe`, mirroring `normalizeName` in entiredb
+  `core/resource/project_name.go`); those bounds are server parity only and buy
+  a local error instead of a control-plane round trip, so a failure is phrased
+  as what the server accepts rather than as a rule of ours — drift is
+  one-directional and only a *looser* server would make us wrong. A ref matching
+  no grammar gets a targeted error (`invalidCloneRefError`) in descending
+  confidence: a ref naming `github.com` is pointed at its `/gh/` form, a ref
+  that declared a forge token keeps its own parser's reason, a bare pair is
+  offered the forge-qualified readings that would actually parse
+  (`bareRefSuggestions`), and anything left lists the accepted shapes.
+  A native ref resolves project → repo ULID → `GetRepo`, whose response is the
+  only one carrying both `clusterHost` and `path`, and clones
+  `entire://<clusterHost><path>` from the repo's home cluster (`--cluster` is
+  rejected on native refs).
+  A trailing `.git` is never part of a repo name, on **either** backend
+  (`gitDirSuffix` documents the mechanics): every ref parser drops it and `repo
+  create` refuses a name ending in it. This is a deliberate client-side
+  narrowing — GitHub rejects such a name outright, but the server accepts a
+  native `foo.git` (interior dot, same rule that makes `entire-trails.el` legal)
+  and strips the suffix for `/gh/` paths only. `gitremote.splitOwnerRepo` trims
+  unconditionally when reading a remote back, so such a repo is unaddressable by
+  name once cloned regardless; dropping it everywhere makes the CLI agree with
+  itself instead of leaving `repo clone` the one path that keeps it. Escape
+  hatches: the repo's ULID, or a full `entire://` URL. Two consequences worth
+  knowing — a `foo.git` created through the API or web UI *aliases* onto `foo`
+  in `resolveRepoRef`, and the durable fix is a server-side rule in
+  `normalizeName`, not this check.
 - `grant`: manage access grants and org membership — `org`, `project`, and `repo`
   each support `add` / `list` / `remove`
+
+Forge tokens (`gh`, `et`) are the path segments of an `entire://` URL, and
+`gitremote.pathForges` owns the *set* — `IsForgePathToken` answers "is this a
+forge token", `ForgePathLabels` gives the placeholder spelling of the segments
+after it (`<owner>/<repo>` vs `<project>/<repo>`) so messages read correctly for
+both. The token strings are still spelled in a dozen call sites; only the set
+lives in one place. It is deliberately **not** `hostToForge`, which maps an
+*upstream* git host to its id: a native repo has no upstream host, so `et` is
+absent there, and conflating the two made `entire://et/<project>/<repo>` dial a
+cluster named `et` while `entire://gh/...` got an actionable message.
+`CanonicalHost` still reads `forgeToHost`, so a native remote falls back to its
+cluster host rather than inventing a forge host. The legacy `/git/` prefix is
+excluded because `repo clone` cannot act on such a ref.
+
+**Being a forge token says nothing about which APIs accept it** — the name says
+syntax on purpose. Trails are the current example: entire-api takes `et` in the
+path but cannot resolve it, so `entire trail` refuses it locally with the real
+reason (`errTrailsNativeUnsupported`). That refusal has to cover *both* ways a
+forge reaches the API — named in `--repo` and inferred from the origin remote —
+and the inferred one is the common path.
 
 Experimental commands (gated by the build-time visibility flag above — visible
 and grouped under "Experimental commands:" in developer/nightly builds, hidden
@@ -161,8 +234,8 @@ Cobra-native aliases (no hint): `sessions` → `session`, `cp`/`checkpoints` →
 `checkpoint`.
 
 Hidden infrastructure commands: `hooks`, `trail`,
-`curl-bash-post-install`, `__send_analytics`, `mcp` (MCP stdio server for
-MCP-host agents).
+`curl-bash-post-install`, `__send_analytics`, `__sweep_sessions`, `mcp` (MCP
+stdio server for MCP-host agents).
 
 Diagnostic subcommands live alongside `doctor.go` as `doctor_logs.go` and
 `doctor_bundle.go`. Group roots and noun-group children live in files
@@ -170,7 +243,7 @@ named `<noun>_group.go` and `<noun>_<verb>.go` respectively.
 
 ## Tech Stack
 
-- Language: Go 1.26.x
+- Language: Go 1.27.x (`go.mod` pins the 1.27.1 minimum)
 - Build tool: mise, go modules
 - Linting: golangci-lint
 
@@ -187,6 +260,18 @@ mise run test
 ```bash
 mise run test:integration
 ```
+
+### Running the Windows Installer Tests
+
+`scripts/install.ps1` has its own Pester suite and PSScriptAnalyzer pass under
+`scripts/test/`; `.github/workflows/install-ps1-e2e.yml` runs it in both
+Windows PowerShell 5.1 and pwsh on PRs that touch the installer or its tests,
+followed by a real install on a Windows runner, and `mise run test:ps1` runs
+the suite locally when `pwsh` is installed (it skips cleanly otherwise; it is
+not part of `check`). On a fresh machine run
+`scripts/test/init.ps1` once first: it installs Pester and PSScriptAnalyzer for
+the current user and, on Windows PowerShell 5.1, the NuGet package provider
+that `Install-Module` needs there.
 
 ### Running All Tests (CI)
 
@@ -234,7 +319,9 @@ E2E tests:
 
 - `E2E_AGENT` - Agent to test with (default: `claude-code`)
 - `E2E_CLAUDE_MODEL` - Claude model to use (default: `haiku` for cost efficiency)
-- `E2E_TIMEOUT` - Timeout per prompt (default: `2m`)
+- `E2E_TIMEOUT` - Per-prompt timeout, overriding each runner's own default (e.g. `E2E_TIMEOUT=4m`)
+
+The per-prompt default is the runner's, not a single number: codex, copilot-cli and gemini use 60s, cursor 90s, opencode 2m, and claude-code, droid, pi, vogon and roger-roger impose no per-prompt bound at all — for those the scenario timeout passed to `ForEachAgent` is the only deadline. `E2E_TIMEOUT` sets a bound for every runner including those, and a per-test `agents.WithPromptTimeout(...)` overrides it. All ten resolve through `promptTimeout` in `e2e/agents/agent.go`; a runner that resolves its own is a build failure (`TestEveryRunPromptResolvesThroughPromptTimeout`). A malformed value is an error rather than a silent fall back to the default.
 
 ### Test Parallelization
 
@@ -316,14 +403,22 @@ Tests that spawn the real `entire` or `git` binary need the child to be non-inte
 
 1. `ENTIRE_TEST_TTY=1` → force interactive ON (any other non-empty value → force OFF).
 2. `testing.Testing()` → false. In-process `go test` runs are non-interactive by default; no per-test `t.Setenv("ENTIRE_TEST_TTY", "0")` is needed.
-3. Agent sentinels (`GEMINI_CLI`, `COPILOT_CLI`, `PI_CODING_AGENT`, `GIT_TERMINAL_PROMPT=0`) → false.
+3. Agent sentinels → false. `interactive.agentSubprocessEnvVars` is the single
+   source of truth for the presence-checked ones (`COPILOT_CLI`, `CURSOR_AGENT`,
+   `GEMINI_CLI`, `OPENCODE`, `PI_CODING_AGENT`) — the function reads it and the
+   tests both enumerate and clear it, so adding a vendor is a one-line change.
+   `GIT_TERMINAL_PROMPT=0` stays separate because only that exact value counts.
+   `CLAUDECODE` is deliberately not a sentinel: Claude Code sets it, but adding
+   it withdraws prompts from the largest agent population at once, which is a
+   product decision rather than a detection fix.
 4. `CI=<non-empty-non-false>` → false.
-5. `/dev/tty` probe, plus its terminal mode → a terminal held in raw mode
-   (canonical input off) belongs to a full-screen TUI that spawned us, not to a
-   shell we can prompt: TUI git clients (lazygit, gitui, tig) run `git commit`
-   as a child while owning the screen, so the hook inherits a `/dev/tty` it
-   must not prompt on. Fails open when the mode can't be read. See
-   `interactive/rawmode_unix.go` for the rationale.
+5. Controlling-terminal probe — `/dev/tty` on Unix, `CONIN$` + `CONOUT$` on
+   Windows. A terminal held in raw mode (canonical/line input off) belongs to a
+   full-screen TUI that spawned us, not to a shell we can prompt: TUI git clients
+   (lazygit, gitui, tig) run `git commit` as a child while owning the screen, so
+   the hook inherits the same terminal it must not prompt on. The mode check
+   fails open when it cannot read the mode. See `interactive/tty_*.go` and
+   `interactive/rawmode_{unix,windows}.go` for the platform split and rationale.
 
 For subprocesses spawning the real `entire` binary (e2e, integration tests, `entire` calling itself from a hook), prefer `execx.NonInteractive` over env-var plumbing:
 
@@ -335,9 +430,9 @@ cmd.Dir = repoDir
 out, err := cmd.CombinedOutput()
 ```
 
-`execx.NonInteractive` puts the child in a new session with no controlling terminal (`Setsid` on Unix, `DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP` on Windows), so the child's `/dev/tty` probe fails naturally. No env var required.
+`execx.NonInteractive` puts the child in a new session with no controlling terminal (`Setsid` on Unix, `DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP` on Windows), so the child's platform terminal probe fails naturally. No env var required.
 
-`interactive.UnderTest()` returns true when `testing.Testing()` or `ENTIRE_TEST_TTY` is set — use it where code needs to skip a real-terminal operation even if `CanPromptInteractively()` returns true (e.g., reading from `/dev/tty` directly inside `askConfirmTTY`).
+`interactive.UnderTest()` returns true when `testing.Testing()` or `ENTIRE_TEST_TTY` is set — use it where code needs to skip a real-terminal operation even if `CanPromptInteractively()` returns true (e.g., opening `interactive.OpenPromptTTY()` directly inside a prompt reader).
 
 ### Linting and Formatting
 
@@ -376,6 +471,45 @@ Before pushing commits or otherwise sending code changes to any remote, run `mis
 - `gofmt` formatting differences → run `mise run fmt`
 - Lint errors → run `mise run lint` and fix issues
 - Test failures → run `mise run test` and fix
+
+### Source-Level Guard Tests
+
+Four tests scan this repo's own source with `git grep` to enforce an invariant
+the compiler cannot: `TestRootBasesAreTrusted` (root bases are trusted paths),
+`TestTranscriptReadsOnlyShrink` (the unconfined transcript-read ratchet),
+`TestGitStatusCallSitesPassNoOptionalLocks`, and
+`TestAllHookConfigRelPaths_CoversEveryWorktreeConfigAgent`.
+
+**They all go through `testutil.GitGrepGuard`, which owns three flags.** Each was
+missing from at least one guard, and the same one was missing from three:
+
+- `--untracked`. `git grep` searches the INDEX. Every one of these guards has
+  "someone just added a file" as its subject, so the file it most needs to see is
+  the one not yet staged. Two failure shapes were worse than a miss: the
+  hook-config guard compares two sets built from the same blind grep, so a new
+  agent package calling `OpenHookConfig` without declaring `HookConfigRelPath`
+  was absent from both and the comparison *passed*; and the root-base guard's
+  staleness half reported a just-added entry as STALE, telling the author to
+  delete the entry that legitimised their new root.
+- `--no-color`. `color.ui`/`color.grep` set to `always` colorizes into a pipe and
+  the escapes land in the **filename** field. True of `-l` too, which looks
+  immune. Guards then either misparse (read as staleness, #2248) or compare
+  garbage to garbage while their "did we match anything" assertion still passes.
+- Repo-selector scrubbing. Git exports `GIT_DIR`/`GIT_WORK_TREE` to hooks and
+  they outrank `cmd.Dir`, so a `go test` under a hook or `git rebase --exec`
+  scanned a different repository. `RunGit`'s isolation does **not** cover this:
+  it filters `GIT_CONFIG_*` only.
+
+Two rules for writing one:
+
+- **A pathspec restricted to `*.go`, so an unparseable path can be fatal.** The
+  `git status` guard passed a bare `cmd internal`, which also matched testdata
+  `.jsonl` and a `.md`, so its non-`.go` branch had to `continue` — and that
+  skip was the only thing between colorized output and a guard that silently
+  checked nothing.
+- **Fail on zero matches.** A detection pattern that goes stale otherwise passes
+  forever. `GitGrepGuard` does this itself; the `checked == 0` tallies are the
+  second half of the same idea.
 
 ### Code Duplication Prevention
 
@@ -439,6 +573,382 @@ return fmt.Errorf("unknown strategy: %s", name)
 - `root.go` - Sets `SilenceErrors: true` on root command
 - `main.go` - Checks for `SilentError` before printing
 
+### `.entire` Must Be a Directory
+
+`<worktree-root>/.entire` is either absent or a real directory. A regular file, a
+symlink — **including a symlink pointing at a perfectly good directory** — a
+FIFO, a socket, or a device is a broken repo, and a command that would read or
+write through the path stops instead.
+
+**The entries directly inside it must be regular files or directories.** That is
+an allowlist, not a list of known-bad types: Entire only ever creates files and
+directories under `.entire`, so anything else arrived some other way and a mode
+bit nobody has considered yet is refused by default. A symlinked
+`.entire/metadata` redirects transcripts; a symlinked `.entire/settings.local.json`
+redirects the file that names the command Entire executes at pre-push; a FIFO in
+either place hangs the read instead. The scan is one level deep, and
+`fs.ModeIrregular` is its one deliberate exception — see the entry-scan
+mechanics below.
+
+`paths.ValidateEntireDirAt(worktreeRoot)` / `paths.RequireEntireDir(ctx)`
+(`paths/entiredir.go`) are the only implementation. The stat is `Lstat`, not
+`Stat`, which is the whole point: `.entire` holds session metadata, transcripts,
+and the redaction settings that decide what may be committed, so a path someone
+else owns the far end of is not one we write through. Absent is fine (Entire is
+not enabled yet, or `enable` is about to create it). A stat error other than
+"not exist" is a failure — it is not evidence the invariant is violated, but it
+is not evidence it holds either, and the caller's next move is to write there.
+Not memoized, deliberately: the `Lstat` and the one-level listing are free next
+to the `git rev-parse` that precedes them, and a cached "it was fine" is stale in
+a long-lived `entire mcp`.
+
+**Four failure conditions, each identified positively.** `ErrEntireDirNotDirectory`
+(the path exists and is the wrong type), `ErrEntireDirUnsupportedEntry` (an entry
+directly inside it is neither a regular file nor a directory), `ErrEntireDirUnreadable` (`Lstat` or the
+directory listing failed, so nothing is known about the path), and
+`ErrRepositoryUnresolved` (the worktree root would not resolve, so there is no
+path to inspect yet). Callers print a remedy, and the remedies are different
+things: replace the path, replace the entry, fix ownership/permissions, fix git.
+Match them with `errors.Is` and give an unmatched error **no** remedy — an `else`
+branch is how a filesystem `EACCES` came to be answered with advice about
+`safe.directory`, printed directly under a line that already said "permission
+denied". `writeEntireDirRemedy` and `writeEntireDirDiagnosis` (doctor's
+labelled variant: BROKEN / UNREADABLE / UNVERIFIED) both take the error as a
+parameter so every branch is reachable in a test; staging a genuinely
+unreadable `.entire` is impractical, since removing execute permission on the
+repo root breaks worktree-root discovery first and exercises the wrong branch.
+An unsupported entry and a wrong-typed `.entire` share doctor's BROKEN heading:
+to the reader they are one condition — something replaced a path Entire owns —
+differing only in which path and what to put back.
+
+**`ErrEntireDirNotDirectory` is not reused for an unsupported entry**, even though
+both remedies are "replace it". `.entire/settings.json` is not required to be a
+directory, so telling someone it is not one names the wrong problem. The entry
+remedy says "replace it with a real file or directory"; the `.entire` remedy says
+"replace it with a real directory", and `TestEntireDirRemedyMatchesTheCondition`
+asserts neither branch prints the other's phrase.
+
+**Entry-scan mechanics.** `validateEntireDirEntries` does one `os.ReadDir` and
+passes each `DirEntry.Type()` to `unsupportedEntryType`, with **no `Lstat` of its
+own** — the type comes from the directory read where the platform reports one,
+and where it does not, `os.ReadDir` does the `Lstat` internally, *skipping an
+entry that vanished between the read and the stat*. `DirEntry.Type()` is
+therefore never unresolved, and `Type() == 0` means a regular file, not unknown
+(`direntType` returns `^FileMode(0)` for unknown, which sets every bit including
+`ModeSymlink`, so even a leak would fail closed). Adding an `Lstat` here
+reintroduces that race, which matters because `.entire/tmp` and
+`.entire/metadata/<session>` churn under concurrent hooks. The entries are
+checked **before** `ReadDir`'s error, because `os.ReadDir` returns what it
+managed to read alongside a partial-read error and an unsupported entry among
+those is a positive finding — a stronger statement than "the listing failed". One
+error names the first offender in `ReadDir`'s sorted order (so the message is
+deterministic) and counts the rest, rather than one error per entry: the remedy
+is identical for all of them, and a user who reruns the command once per planted
+entry is paying for our formatting.
+
+**`fs.ModeIrregular` is tolerated, and that is the one place the allowlist
+bends.** Windows overloads the bit: Go maps every reparse tag it has no category
+for onto it (the `default` arm of `fileStat.mode` in `os/types_windows.go`),
+which lands NTFS directory junctions *and* OneDrive Files On-Demand placeholders
+in the same bucket, indistinguishable from a `DirEntry`. Refusing the bucket
+would hard-fail every command in a repo inside a synced folder, with a remedy the
+user cannot act on, and the placeholder arrives with nobody attacking anything.
+The junction it would also catch cannot arrive by checkout — git has no
+tree-object mode for one — so planting it already requires local code execution,
+at which point this check is not what stands in the way. **The bit is masked
+out of the type, not matched against it** — `mode.Type() &^ fs.ModeIrregular`
+must equal `0` or `fs.ModeDir` — because Windows does not hand it over alone:
+`ModeDir` is withheld only for a *name-surrogate* reparse tag, and the cloud
+tags are not surrogates, so a placeholder **directory** arrives as
+`ModeDir|ModeIrregular` while a junction (a surrogate) arrives as
+`ModeIrregular` by itself. `.entire`'s own entries are mostly directories, so an
+exact match on the bare bit would reject `metadata`, `logs`, and `tmp` in exactly
+the synced folder the tolerance exists for. Masking does not soften the rest of
+the field: anything carrying a rejected type is rejected whatever else it
+carries, `ModeIrregular` included.
+
+**The comparison is against the whole type field, never `IsRegular`/`IsDir`.**
+Those examine single bits (`IsDir` is `mode&ModeDir != 0`), so an allowlist
+keyed on them lets a rejected type in by *also* setting an accepted bit:
+`ModeDir|ModeSymlink` and `ModeDir|ModeNamedPipe` both satisfy `IsDir`, and so
+does the all-bits-set unknown mode above — which is what made the "even a leak
+would fail closed" claim false until it was fixed. An allowlist a rejected type
+can enter by setting an extra bit is not an allowlist.
+`TestUnsupportedEntryType` pins each combination. Distinguishing junction from
+placeholder would mean reading the reparse tag through a
+Windows-only syscall (`FindFirstFile`, then `Reserved0 & 0x20000000` for the
+name-surrogate tags); that is the upgrade path if junctions ever become worth
+catching.
+
+**A settings file is never read through a link, and the settings reader enforces
+that itself.** `readConfined` (`settings/settings.go`) — the chokepoint every
+settings read funnels through, including `LoadFromFile`, `LoadProjectRaw`,
+`LoadLocalRaw`, and clone preferences — `Lstat`s the entry through its own
+`os.Root` handle and refuses a symlink outright, wrapping
+`paths.ErrEntireDirUnsupportedEntry` via the shared `paths.SymlinkedEntryError`
+(the symlink-specific message builder, which names the link target; the entry
+scan reaches it through `unsupportedEntryError` and describes other types with
+`describeMode`).
+
+This is deliberately redundant with the `.entire` entry scan, because the two
+cover different callers: the scan hangs off the root pre-run and
+`LoadEntireSettings`, while **eighteen files call `settings.Load` directly** —
+`strategy/hooks.go`, `manual_commit_hooks.go`, `checkpoint/remote/*`, `review/*`,
+`investigate/*` — and reach settings without ever passing the pre-run.
+
+**`os.Root` confinement is not the invariant, and was not sufficient.** Measured
+against `readConfined` before the change: an absolute target (even one pointing
+inside `.entire`) and an escaping relative target were refused, but as `path
+escapes from parent`, naming neither cause nor fix; and two shapes got through:
+
+| link | before | after |
+| --- | --- | --- |
+| `settings.local.json -> planted.json` (relative, stays inside) | **followed** | refused |
+| `settings.json -> missing.json` (dangling) | **ENOENT → silently default settings** | refused |
+
+The dangling case was the worse of the two: every caller reads ENOENT as
+"absent", so a planted link made Entire ignore the project's settings without
+saying anything. Do not "simplify" the `Lstat` away on the grounds that
+`os.OpenRoot` already confines the read — it confines it, which is a different
+property from refusing a link.
+
+Writes are already safe and need no equivalent: `jsonutil.WriteFileAtomic`
+finishes with `os.Rename` over the target, which *replaces* a symlink rather
+than writing through it.
+
+**Non-goals, deliberately.** The scan is *not* recursive — walking deeper would
+traverse every session's transcripts on every command, and the checkpoint writer
+already skips symlinks as it walks the metadata directory. It does *not* look at
+permissions or ownership, only at type. Relocating `.entire/logs` and
+`.entire/tmp` out of the worktree is a separate change; until then, redirecting
+them with a symlink is refused rather than supported, and the remedy text says
+so.
+
+Cost of the second phase: measured 8.2µs against 1.0µs for the `Lstat` alone, on
+a `.entire` holding six subdirectories, three files, and 51 session directories
+it does not descend into. That is ~0.1% of the `git rev-parse` subprocess that
+`WorktreeRoot` runs immediately before it, which is why the deliberate
+non-memoization below still holds.
+
+**Guarded is the default.** The root `PersistentPreRunE` runs the check for every
+command, above both `settings.IsSetUpAny` and `ensureLogger` because each of
+those already touches the path. A command opts out with
+`exemptFromEntireDirCheck(cmd)` (`entiredir_guard.go`), which sets an annotation
+that `skipsEntireDirCheck` inherits down the parent chain, so annotating a group
+root covers its children. Exemption is registered at the `AddCommand` call in
+`root.go`, so the whole set reads as one list.
+
+Exempt means "this command needs nothing under `.entire`" — control-plane and
+account commands, `version`/`labs`/`completion`, and `doctor`. It does **not**
+mean "write through it anyway": `checkEntireDirBeforeRun` returns
+`safe == false` for an exempt command in a broken repo, which is what keeps
+`ensureLogger` from creating `.entire/logs` through the symlink. `newLogger`
+repeats the check for the callers that build a logger outside the pre-run.
+
+The pre-run is not the only enforcement point. `LoadEntireSettings` repeats the
+check, because the pre-run does not cover everything: external plugins are
+dispatched from `main.go` before cobra runs at all, and exempt commands still
+reach settings through the post-run telemetry path. Settings are read *from* the
+directory in question, so loading them is the one operation those callers have
+in common — the duplicated `Lstat` on the ordinary path buys the guarantee that
+the check happens at least once on the unusual ones.
+
+Outside a git repository there is no worktree root and so nothing to validate,
+and the check is skipped rather than failing. Commands that need a repository
+report its absence themselves, with a message about the repository rather than
+about `.entire`.
+
+**That skip requires git's positive verdict, not merely a failed lookup.**
+`WorktreeRoot` classifies its own failure and wraps `paths.ErrNotARepository`
+only when git ran, exited non-zero, and said "not a git repository"; exit code
+128 alone is not the signal, since git also uses it for dubious ownership and
+permission failures, both of which happen *inside* a repository. Locale
+variables are pinned to C for that subprocess so the message is recognisable on
+a translated machine. Every other outcome — git missing from `PATH`, a cancelled
+context, a killed child, success with empty output — fails closed.
+
+The reason is that "we could not find out" is not the same as "there is nothing
+here", and guessing costs more than a skipped check: `settingsAbsPaths` falls
+back to a path relative to the *current directory* when the root will not
+resolve, so a wrong guess reads `./.entire/settings.json` — through the very
+symlink the guard exists to reject. Refusing to run on a machine whose git is
+broken is the cheaper mistake. Do not "simplify" `RequireEntireDir` back to
+treating any `WorktreeRoot` error as absence.
+
+Every exemption needs an entry in `entireDirCheckExemptions`
+(`entiredir_guard_test.go`) giving the reason; `TestEntireDirCheckExemptions`
+fails both on an unlisted exemption and on a stale entry, so an exemption added
+to silence a failing test does not pass for a considered one. `help` and
+`agent-help` are deliberately guarded — someone asking what they can do in this
+repo is told the repo is broken rather than handed a working command list.
+`entire <command> --help` is unaffected in every case, because cobra returns
+`flag.ErrHelp` before it runs any `PersistentPreRunE`; that and `doctor` are the
+escape hatches.
+
+`doctor` is exempt so that it can run **on** a broken repo, which is only worth
+doing if it says what is wrong: `reportBrokenEntireDir` runs in the doctor
+group's `PersistentPreRunE` — ahead of doctor's own `PreRunE`, which loads
+redaction settings from `.entire/settings.json`, and ahead of `doctor logs` /
+`doctor bundle`, which read `.entire/logs` — prints the diagnosis, and stops. It
+does not auto-fix: what occupies the path may be someone's data.
+
+### Resolving the calling session
+
+`strategy.ResolveCallerSession` answers "which session is running this
+process?", degrading to "which session is current here?" only when nothing can
+identify the caller. Tiers, strongest first, each reported back as
+`SessionResolution`:
+
+1. **Identification** — the environment and process ancestry ranked
+   *together*, reporting `caller-env`, `ancestry`, or `caller-ambiguous`.
+2. **`worktree`** — the most recently active session recorded in this worktree.
+3. **`other-worktree`** — this worktree has no sessions at all, so the most
+   recent one from anywhere in the shared store.
+
+**Environment and ancestry are one tier, and a nearer owner outranks an
+environment claim.** They were two tiers, environment first, returning on any
+hit — which is wrong for nesting: an inner agent that publishes no ID of its
+own (Gemini CLI, opencode) forwards the OUTER agent's variable straight
+through, so the only claim named the outer session while the inner one sat one
+hop away in our ancestry. The resolver reported the outer session as
+`caller-env` and `IsCaller()` true — "safe to act on" — which is exactly the
+mistake the type exists to prevent. Depth is the only signal that separates
+"Codex ran me" from "Codex ran Gemini ran me", so the nearest owner wins
+wherever ancestry can rank at all. The environment's remaining job is real and
+narrower: naming a session ancestry *cannot* rank — one whose owner was never
+recorded (no turn yet), or any session on a platform that cannot introspect
+processes.
+
+`session tokens` preserves this provenance in its JSON `resolution` field and
+in text/agent-brief `Resolved:` lines (omitted for an explicit session ID).
+Ambiguous matches warn on stderr before recommendations are printed. Untracked
+callers reuse `session current`'s diagnostic; JSON and agent-brief modes leave
+stdout empty and exit non-zero rather than emitting a token report.
+
+**`caller-ambiguous` is a third outcome of that tier, and it does not satisfy
+`IsCaller()`.** The rule (`claimsRuledOut`) is that **the winner is believed
+only when no session the environment named could be nearer to us than it is.**
+A claim reached our environment, so its agent is certainly somewhere in our
+ancestry; what is unknown is where. A claim we could not place — untracked, so
+no owner to compare, or tracked with no owner recorded yet — therefore sits at
+an unmeasured depth, and unmeasured means possibly nearer. Exactly two
+exemptions: a winner at depth 0 owns our immediate parent, so nothing can be
+nearer; and a claim that IS the winner shadows nothing, which is the ordinary
+single-agent shape.
+
+Three revisions of this rule were wrong in review, each in the same direction —
+overclaiming identification — and the sequence is worth knowing because the
+next attempt will be tempted by the same shortcut:
+
+1. Environment first, returning on any hit. Wrong for nesting: the lone claim
+   named the *outer* session while the inner one sat a hop away in ancestry.
+2. Ambiguous only when several claims went unplaced. Missed the mixed case:
+   only sessions with state enter the ranking, so a tracked outer session won
+   by default while an untracked inner claim was never examined.
+3. Exempting "exactly one claim", on the reasoning that a lone claim has
+   nothing to be nearer than. True of a lone claim that *wins* — and the
+   revision assumed those were the same thing. A claim with no state cannot
+   enter the ranking at all, so a session found purely by ancestry won instead
+   and was reported as identified while the claim naming itself in our own
+   environment went unexamined.
+
+**Do not reintroduce a count-based exemption.** The question is about the
+winner, not about how many claims exist. The reported session is still the most
+useful of the candidates (a tracked one over an ID Entire knows nothing about);
+what the resolution says is whether it was identified or guessed.
+
+**The command must not narrate a guess as a fact either.** `session current`'s
+untracked diagnostic used to say "This command is running inside X session Y",
+which states an arbitrary pick as the answer when several untracked claims
+exist. It now says which sessions claim it and that the caller could not be
+determined; the diagnosis survives, the identification does not.
+
+**Tier 3 is why this exists.** `entire session current` used to collapse tiers
+2 and 3 and describe either as "the active session for the current worktree".
+Worktrees share one session store, so in a worktree with no sessions of its own
+it returned a live session belonging to a *different* worktree —
+indistinguishably from a real answer, with that worktree's path in the JSON.
+Agents read the ID back and fed it to `entire session adopt`, which moves the
+named session into the current worktree and resets its checkpoint bookkeeping:
+a wrong ID there mutates a third party's running session. The tier still
+exists, because "what has been happening in this repo" is a real question — it
+just has to say that is what it answered. `SessionResolution.IsCaller()` is the
+gate for anything that *acts* on a session rather than displaying it; only
+tier 1 passes, and then only when it resolves to `caller-env` or `ancestry`.
+
+**`IsCaller()` currently guards nothing, and that is the open half of this
+work.** `session adopt` — the command whose damage motivated the tiering, since
+it moves a session and resets its checkpoint bookkeeping — does not consult it.
+Its own checks are narrower than a most-recent guess (an explicit `--from`, and
+auto-selection scoped to that worktree's recent adoptable sessions) but none of
+them asks "is this session mine": `sessionBelongsToSourceWorktree` only checks
+that the ID and the worktree agree with each other, which the weak tiers'
+output satisfies by construction. Reaching it does not even need `session
+current`, since `adopt --from <path>` with one recent session there
+auto-adopts. Wiring the guard is a separate change with its own question to
+settle — what "mine" means for a `--from` on another machine, where ancestry
+cannot apply.
+
+**Tier 1 is per-agent and declarative.** An agent implements
+`agent.CallerSessionIdentifier` by naming the variable it publishes
+(`CallerSessionEnvVar`), and the `agent` package does the reading and
+validation — so the ID is checked with `validation.ValidateAgentSessionID` in
+one place (it becomes a path component in `ResolveSessionFile`, so an
+unvalidated one is a traversal sink), and `agent.CallerSessionEnvVars()` can
+enumerate the set. Five agents publish one: Claude Code
+(`CLAUDE_CODE_SESSION_ID`), Codex (`CODEX_SESSION_ID` — the root-session
+identity, *not* `CODEX_THREAD_ID`, which follows forks and subagent threads),
+Cursor (`CURSOR_CONVERSATION_ID`), Copilot CLI
+(`COPILOT_AGENT_SESSION_ID`), and pi (`PI_SESSION_ID`). Each was established
+against the shipped agent rather than inferred, and each resolves to the same
+ID that agent's lifecycle events report — so no translation is needed.
+
+These names are stated in four places (here, each agent's
+`CallerSessionEnvVar`, the static `agent.callerSessionEnvVars`, and
+`callerSessionEnvVarByAgent` in `agent/caller_session_test.go`); **the test
+table is the enforced copy**, so trust it if they ever diverge, and
+`TestCallerSessionEnvVars_MatchesTheRegistry` pins the static list against the
+live registry.
+
+**`CallerSessionEnvVars()` is static rather than registry-derived on purpose**,
+which looks backwards until you see the failure: its consumers are the test
+harnesses that isolate themselves from the developer's real agent session, and
+not every test binary links every agent implementation — the e2e harness links
+eight of the nine, omitting pi. A registry-derived list silently shortens to
+that binary's subset, and a missing name is not an error, it is one variable
+left set, so a real session leaks into the run and surfaces as an unrelated
+assertion failure on one machine. Registration cannot be the source of truth
+for "every name that exists". Worth knowing because a wrong name fails
+silently — it degrades to a weaker tier rather than erroring — and the guard
+test catches a newly capable agent going unlisted, not a vendor renaming a
+variable we already track.
+
+Gemini CLI and opencode publish **nothing**, and that is a finding rather than
+a gap in our table: Gemini passes its session ID to its shell executor for
+background-process bookkeeping but never into the child environment, and
+opencode's shell tool performs no environment augmentation at all. Tier 2 is
+what covers them, which is why it is not optional.
+`TestCallerSessionEnvVar_UnpublishedAgentsStayUnpublished` fails if either
+gains the capability without its variable being pinned.
+
+Two states worth distinguishing, both on tier 1:
+`ResolvedSession.Tracked == false` means the agent named a session Entire holds
+no state for — hooks are not installed, they failed, or the first turn has not
+landed (state is created at turn start). That is a diagnosis, so the ID and
+agent are reported; falling through to a weaker tier would answer a question
+nobody asked with someone else's session.
+
+Several tier-1 claims at once is the normal **nested** case, not a conflict: a
+`codex exec` run from Claude Code's shell tool inherits the outer agent's
+variables through the inner agent's process. Tracked claims are ranked by
+ancestry depth (nearest wins), then by most recent interaction when ancestry
+cannot separate them.
+
+**Tests that touch this must clear the variables**, derived from
+`agent.CallerSessionEnvVars()` rather than hand-listed. `go test` is routinely
+run from inside one of these agents, so a leaked variable makes fixture-based
+assertions pass on CI and fail on a contributor's machine.
+
 ### Settings
 
 All settings access should go through the `settings` package (`cmd/entire/cli/settings/`).
@@ -487,6 +997,374 @@ Don't use `fmt.Print*` for operational messages (checkpoint saves, hook invocati
 
 **Privacy**: Don't log user content (prompts, file contents, commit messages). Log only operational metadata (IDs, counts, paths, durations).
 
+### The Root Anchors
+
+Entire does filesystem I/O in eight trees, and each has one package that owns a
+shared `*os.Root` over it. **Never assemble a path into one of these and hand it
+to `os.ReadFile`/`os.WriteFile`/`os.MkdirAll`/`os.ReadDir`/`filepath.Walk`.**
+
+| Tree | Owner | Anchored on |
+| --- | --- | --- |
+| `.entire` | `entiredir` | worktree root (`paths.WorktreeRoot`), cwd only when there is provably no repo |
+| git common dir | `gitdir` | `git rev-parse --git-common-dir`, absolutized |
+| the working tree | `worktreedir` | worktree root |
+| an agent's hook config | `agent.HookConfigFile` | worktree root (`.claude/`, `.cursor/`, `.gemini/`, `.github/hooks/`, `.factory/`, `.codex/`, `.opencode/plugins/`, `.pi/extensions/entire/`) |
+| an agent's session store | `agent.SessionStore` | the agent's own `GetSessionDir` |
+| the active git hooks dir | `strategy.hooksRootForInstall` / `ForRemoval` | `git rev-parse --git-path hooks`, absolutized |
+| per-user config / cache | `userdirs.ConfigRoot` / `CacheRoot` | `$ENTIRE_CONFIG_DIR` else `~/.config/entire`; `$XDG_CACHE_HOME/entire` else `~/.cache/entire` |
+| managed plugin tree | `pluginRoot` (`plugin_store.go`) | `pluginParentDir()` — `$ENTIRE_PLUGIN_DIR`, `%LOCALAPPDATA%`, or `$XDG_DATA_HOME` |
+
+**An `os.Root`'s base directory must always be a trusted path — one a resolver
+produced — never `filepath.Dir` of the file being opened, and never a path that
+arrived as data.** This is the rule the table above encodes, and it is the one
+that is easy to get wrong because the wrong version *looks* like the fix:
+
+```go
+// WRONG — the root contains exactly the one name it was handed
+root, _ := osroot.Shared(filepath.Dir(target))
+data, _ := osroot.ReadFile(root, filepath.Base(target))
+
+// RIGHT — the base is what a resolver answered; the rest is a name inside it
+root, _ := worktreedir.OpenAt(worktreeRoot)
+name, _ := worktreedir.Name(worktreeRoot, target)
+data, _ := osroot.ReadFile(root, name)
+```
+
+Anchoring on the target's own parent puts every component the caller resolved
+*above* the root, so containment covers only the final component and enforces
+nothing the `filepath.Join` had not already decided. A symlink at `.claude`, at
+`.entire`, or at `entire-investigations` is resolved before the root exists.
+Anchoring one level up makes those components **names inside** the root, which is
+what `os.Root` and `osroot.MkdirAllNoSymlink` can actually refuse. The same
+reasoning kills a containment *check* built on a derived base:
+`settings.clonePreferencesRoot` used to compute its common dir as
+`filepath.Dir(filepath.Dir(abs))` and hand both to `gitdir.OpenPathIn`, so the
+relative path was correct by construction and the check could never fire.
+
+`TestRootBasesAreTrusted` (`osroot/rootbase_guard_test.go`) enforces this: a file
+that opens a root without being in `allowedRootBases` fails the build, and an
+entry whose file no longer opens one fails too, so the allowlist cannot outlive
+its reasons. **Prefer an existing anchor over a new root** — that is what the
+anchors are for. Two entries are genuine exceptions, both on a path the *caller*
+named, where the file's parent IS the caller's choice and no other base exists:
+`tokenstore` (`$ENTIRE_TOKEN_STORE_PATH`) and `settings.readConfinedOutsideEntire`'s
+explicit-path fallback. Each says so at the call site.
+
+All of them memoize through **one** registry, `osroot.Shared(dir)` — a directory
+is opened at most once per process. `osroot.ResetShared` clears every anchor;
+`osroot.Forget(dir)` drops a single one, which is what a caller about to delete
+and recreate one directory needs (the plugin index cache is a git clone this
+process may `RemoveAll` mid-run — a root cached across that is a handle to an
+unlinked inode). There were three copies of that map before; do not add another.
+
+Pair the roots with `osroot` (`ReadFile`, `WriteFile`, `MkdirAllNoSymlink`,
+`Remove`, `ReadDir`) and `jsonutil.WriteFileAtomicIn` / `CreateTempIn`.
+
+**A subdirectory of an anchor is opened with `osroot.SharedChild` (memoized,
+registry-owned) or `osroot.OpenChild` (short-lived, caller closes), never a bare
+`parent.OpenRoot(name)`.** `os.Root` refuses a symlink that escapes the parent
+but follows one pointing elsewhere *inside* it, so the bare call silently
+accepts a redirected `.git/entire-sessions` or `.entire`. Both helpers `Lstat`
+before and `SameFile` after, which also closes the Lstat/OpenRoot race. Neither
+appears in `rootOpeners`, deliberately: their base is an already-open root, so
+it is trusted by construction and flagging their callers would defeat the point
+of having them.
+
+**An atomic write leaves its temp file in the same directory as its target, and
+one of those directories is walked wholesale into every checkpoint tree.**
+`jsonutil.CreateTempIn` writes `<base>.<16 hex>.tmp` beside the file it is
+replacing; `.entire/metadata/<session>` holds `full.jsonl` and is copied into
+the tree by `addDirectoryToChanges` (ephemeral) and `copyMetadataDir`
+(persistent). A hook killed between the create and the rename — an agent hook
+timeout, Codex's session-end process-tree kill, a crash — leaves the temp
+behind, and without a filter it is redacted, committed, and pushed on every
+later checkpoint. Both walks therefore skip `jsonutil.IsTempName`. Keep that
+predicate matching `CreateTempIn`'s output exactly
+(`TestIsTempName_MatchesWhatCreateTempInProduces` pins it): a naming change that
+outruns it turns both filters into no-ops silently. `agent.ParseChunkIndex` is
+the second half of the same defence — it requires the suffix to be *entirely*
+digits, because `fmt.Sscanf("%03d")` stopped at the first non-digit and so read
+`full.jsonl.123abc….tmp` back as chunk 123 and reassembled it into the
+transcript.
+
+**The test is "is there a containment boundary?", not "is traversal reachable
+today?"** A root is cheap and it is what keeps a *future* change safe: the names
+under several of these directories are fixed constants right now, and that is not
+a reason to skip the root. Two places already carried hand-written comments
+saying validation was the only thing keeping a path inside its tree —
+`PluginDataDir` ("guarantees ENTIRE_PLUGIN_DATA_DIR always points inside the
+managed data subtree") and `investigate.RunDir` ("an unvalidated id would be a
+path-traversal sink") — which is the argument for the primitive, not against it.
+
+**What each anchor is actually protecting.** These are not uniform, and the
+comments at each site say which case applies:
+
+- `.entire` and the git common dir hold names built from agent-supplied session
+  IDs, tool-use IDs, and investigation run IDs. Several call sites used to carry
+  hand-written comments explaining that an unvalidated ID would be a traversal
+  sink feeding `os.RemoveAll`. The root makes that structural.
+- The working tree holds names from `git status` and from checkpoint **tree
+  entries**, which may have been fetched from a remote. Rewind's restore half
+  already opened a root for that reason; its reads did not.
+- An agent's session store is where a hook payload's session ID becomes a path,
+  via the agent's own `ResolveSessionFile`. `SessionStore.SessionFile` converts
+  the result back to a name inside the store and **rejects** an ID that left it.
+- The git hooks directory holds no untrusted *name* — the five hook filenames are
+  compile-time constants — so it is anchored for the opposite reason: what is at
+  those names arrived from somewhere else. It was the last tree Entire wrote to
+  with bare `os.ReadFile`/`os.WriteFile` on a joined path, so a symlink at
+  `.git/hooks/pre-push` was read through and then *written* through, replacing
+  whatever the link named with a shell script. `hooksRootForInstall` refuses a
+  link at the directory (git's own `--git-path hooks` answer, which `core.hooksPath` can put
+  anywhere, which is why no other anchor reaches it); the four reads go through
+  `osroot.ReadFileNoFollow`; and the write is `jsonutil.WriteFileAtomicIn`,
+  whose rename **replaces** a leaf link rather than following it.
+  `osroot.OpenFileNoFollow` is not the tool for that write — it rejects
+  `O_TRUNC` by design, precisely to push truncating writes onto the rename.
+  A symlinked hook is then classified as *foreign* rather than as absent, so it
+  is backed up to `<hook>.pre-entire` and chained to exactly as a foreign script
+  would be: refusing to read through someone's link must not mean silently
+  discarding it.
+
+  **The directory refusal is install-only, and that asymmetry is load-bearing.**
+  `hooksRootForRemoval` resolves the link and anchors on its target; only
+  `hooksRootForInstall` refuses. Removal deletes files carrying Entire's marker
+  and renames back the backups Entire itself made, so it acts only on files
+  Entire created and the redirect costs nothing. Sharing one function cost a
+  great deal: `entire disable` exited non-zero forever with no other uninstall
+  path, and `gitHookStateInHooksDir` reported `GitHooksAbsent`, which sent
+  `EnsureSetup` to `InstallGitHook` and failed **every agent turn** on the same
+  refusal. A refusal a user can neither act on nor uninstall past is worse than
+  the redirect it declines to follow.
+
+  **A hook that cannot be READ is never replaced.** `classifyExistingHook`
+  identifies absent / ours / foreign positively and returns an error for
+  anything else, because the write is `jsonutil.WriteFileAtomicIn` and
+  `rename(2)` needs no permission on the target at all: a mode-0000 hook was
+  classified "not foreign", got no backup, and was silently destroyed. The
+  in-place truncating write this replaced failed loudly with `EACCES`, so
+  switching to the rename (correct, for symlinks) turned a loud failure into
+  data loss. Removal treats the same case as present-and-not-ours, so a backup
+  is not renamed over it either, and warns rather than erroring so uninstall
+  still finishes. `doctor`'s `checkGitHookSymlinks` reports both conditions, and
+  it is a separate function from `checkAgentDirSymlinks` because that one scans
+  worktree-relative paths through the worktree root and `core.hooksPath` can
+  name a directory outside the worktree entirely.
+
+**Rules that are load-bearing rather than stylistic:**
+
+- **`entiredir.Open` creates, `entiredir.OpenForRead` does not.** A command that
+  only looks must leave an untouched repo untouched — which is why
+  `logging.Config.Root` takes a *function*: the log file is created by the first
+  line actually written, so a command that logs nothing leaves no `.entire`.
+- **No symlinked directories.** Every create goes through
+  `osroot.MkdirAllNoSymlink`, which refuses when a component already exists as a
+  symlink (`osroot.ErrSymlinkedPath`). `os.Root` alone is not enough: it blocks a
+  symlink that *escapes* a root but follows one pointing elsewhere *inside* it,
+  and an escaping one otherwise fails later with an opaque errno far from the
+  cause. `entire doctor` reports what is already there
+  (`checkEntireDirSymlinks` for `.entire`, `checkAgentDirSymlinks` for every path
+  Entire creates or writes on an agent's behalf — derived from
+  `agent.HookConfigLocator` and the scaffold templates, deliberately not from
+  `ProtectedDirs`, which both misses the levels Entire creates under an agent's
+  directory and includes directories it never writes to). `.entire` **itself is
+  refused too**: `entiredir`
+  opens it as a checked child of the worktree root (`osroot.SharedChild`), which
+  `Lstat`s before and `SameFile`s after. An earlier revision allowed it on the
+  grounds that `os.OpenRoot` follows a symlinked root and an existing setup
+  should keep working; that was reversed, because `.entire` holds the redaction
+  settings deciding what may be committed, and "we follow it, so your data lands
+  somewhere else" is not a property to grandfather. `doctor` is exempt from the
+  pre-run guard so it still runs on such a repo, and its message says the repo is
+  stopped rather than that the setup is fine.
+  The agent hook-config directories get the same treatment via
+  `agent.HookConfigFile`: a symlinked `.claude` / `.cursor` / `.gemini` /
+  `.codex` / `.pi` is refused at the create, because a working tree arrives by
+  clone and `entire enable` must not create directories and write JSON through a
+  link the repository supplied. Pi was the last agent still joining its path onto
+  the repo root and calling `os.ReadFile` / `os.MkdirAll` / `os.WriteFile` /
+  `os.RemoveAll` on the result, which was worse there than for the settings-file
+  agents because pi is **auto-detected**: `DetectPresence` stats `.pi`, which
+  follows the link, so a repository shipping one had `entire enable` install
+  through it — and uninstall `RemoveAll` through it — without the user ever
+  naming pi. Its uninstall is also the one caller of
+  `HookConfigFile.RemoveDir`, because pi discovers extensions by directory, so
+  removing only the file would leave a half-uninstalled extension behind.
+
+  **One escape hatch, and only for these directories.**
+  `allow_symlinked_agent_dirs` in `.entire/settings.local.json` names
+  worktree-relative agent config directories whose symlinks Entire follows
+  instead of refusing, anchoring its root on the resolved target
+  (`agent.AnchorWorktreePath` / `OpenAnchoredRoot`). It exists because a
+  dotfile-managed `.claude` (chezmoi, stow, yadm) is an ordinary setup among
+  exactly the people who run coding agents, and the previous answer was "stop
+  managing it that way".
+
+  Three properties make it a hatch rather than a hole, and all three are load
+  bearing:
+
+  - **A list, not a boolean.** A flag would disable the class; naming a path is
+    the user saying which arrangement is theirs.
+  - **Two independent boundaries.** `enforceSymlinkedAgentDirsTrust` answers
+    "may this FILE grant anything" with the same untracked-and-verified gate as
+    the OPF command and `external_agents` (a repository that could both ship the
+    link and vouch for it is the whole attack). `agent.SetVouchedSymlinkedDirs`
+    then answers "is this PATH one an agent config lives under", against a
+    pinned list plus a structural `neverVouchable` rule, so `.entire` and
+    `.git/hooks` are unspellable *even from a verified local file*.
+  - **Pinned, not derived.** `agent.vouchableDirs` was first derived from
+    `AllHookConfigRelPaths()`, which is wrong twice: that registry is mutable at
+    runtime, so an external plugin could widen what a user may vouch for, and it
+    is empty in a binary that has not imported the agent packages, so the set
+    silently collapsed depending on the caller's import graph.
+    `TestVouchableDirsMatchTheBuiltInAgents` (in the `cli` package, where every
+    built-in agent is registered) fails on drift in both directions.
+
+  **The Entire-owned directory is not vouchable, and `RemoveDir` reads the
+  worktree-relative name.** `.pi/extensions/entire` is the one directory Entire
+  both creates *and* deletes, so it cannot also be a link the user manages;
+  `neverVouchable` refuses any path whose base is `entire`, and the pinned list
+  omits it. `HookConfigFile` therefore carries **two coordinates** — `name`
+  (root-relative, for I/O) and `relName` (worktree-relative, for decisions) —
+  the same split `entiredir.Name` draws. `RemoveDir` decides on `relName` and
+  removes on `name`: deciding on the root-relative name let a vouch for
+  `.pi/extensions/entire` anchor the root *on* that directory, collapse the name
+  to `index.ts`, and refuse with "refusing to remove the worktree root" about a
+  path that was neither — leaving an extension pi still discovers. Reading
+  either coordinate for both jobs gets one of them wrong.
+
+  **The policy is scoped to the worktree it was loaded for.** It has to be a
+  package global — `settings` may import `agent`, not the reverse, so the
+  package that owns the value pushes it in — and an unscoped global would mean
+  last-load-wins deciding for a process that loads settings for one tree and
+  writes an agent config for another. `SetVouchedSymlinkedDirs` records the
+  root, `AnchorWorktreePath` and the doctor/status reporting compare against it,
+  and a mismatch refuses (degrading to the strict behaviour, never to following
+  another tree's link). The key is **canonicalized and typed**
+  (`agent.worktreeKey`, built only by `keyFor`), so a raw path cannot be
+  compared against a stored key — that does not compile. The first version
+  compared plain strings and silently disabled the feature on Windows: readers
+  pass git's `--show-toplevel` (`C:/repo`) while settings derives its root
+  through `entiredir.PathTo`, whose `filepath.Join` rewrites it (`C:\repo`).
+  One directory, two spellings, never equal, and every symptom looked exactly
+  like an absent grant. This is a different question from why `vouchableDirs` is
+  pinned: that is the set a user MAY name, which must not be widenable at
+  runtime; this is the set a user DID name, which is per-configuration and has
+  to come from somewhere mutable.
+
+  Scope notes: vouching for `.claude` does **not** vouch for links inside it,
+  since below the anchor everything is a name in a root again; the scaffolds go
+  through the same anchor (`openScaffoldTarget`), because a vouched directory
+  that hook installation follows and scaffolding refuses leaves `entire enable`
+  half-applied across two directories; and a vouched but *unresolvable* link is
+  an error, not a quiet fall back to refusing. `entire status` prints what is
+  being followed and any rejected entries, and `doctor` reports the link under
+  FOLLOWING SYMLINKS rather than as a fault. `.entire`, the settings files, and
+  the git hooks directory are deliberately excluded — the settings case is
+  circular (a symlinked `settings.local.json` vouching for symlinked settings
+  files authorizes itself) and the hooks case already has git's own
+  `core.hooksPath`.
+
+  The config FILE is refused too, not just its parents: the merge READ would
+  otherwise pull the link target's contents into
+  what Entire then writes, and the write is a rename, which replaces the link
+  with a regular file rather than following it. Both happen silently, so
+  refusing is the legible version of the same outcome. Pointing
+  `.claude/settings.json` at a dotfile repo is still a real setup — it just has
+  to stay out of the repository (`git rm --cached` plus a .gitignore entry),
+  which is what makes it the developer's rather than the checkout's.
+  `checkAgentDirSymlinks` reports every one of these paths, so the condition is
+  named rather than showing up as hooks that mysteriously will not install.
+
+  **A symlinked agent DIRECTORY is refused by every operation, not just the ones
+  that create.** `os.Root` blocks a link that escapes the worktree and follows
+  one pointing elsewhere inside it, so `.claude -> vendor/x` was previously read
+  by `Read`/`GeneratedState`, reported present by `Exists`, and had `Remove`
+  delete the file at the far end; only `Write` checked, because
+  `MkdirAllNoSymlink` was the only check there was. `osroot.NoSymlinkedParent` is
+  that function's read-only counterpart, and every `HookConfigFile` method calls
+  it. `HookConfigFile.Root()` hands over the raw primitives, so its one caller
+  (Codex's `hooksDocumentRoot`) makes the check itself.
+
+  **`writeManagedScaffold` is the same rule for the skill scaffolds** —
+  `.claude/skills/`, `.claude/agents/`, `.codex/agents/`, `.gemini/agents/`. It
+  was not one of the seven call sites `HookConfigFile` replaced, and until it was
+  anchored it did `os.MkdirAll` two levels and `os.WriteFile` through a symlinked
+  `.claude`, landing files outside the repository and reporting Created. It now
+  takes a worktree root rather than an assembled absolute path, and its callers
+  no longer fall back to `os.Getwd()` when `WorktreeRoot` fails.
+- **Call `Reset()` before deleting a rooted directory** (see
+  `removeEntireDirectory`). A root that outlives its directory is a handle to an
+  unlinked inode: writes succeed and land nowhere.
+- **Two coordinates, one directory.** Repo-relative constants
+  (`paths.EntireTmpDir`, `settings.EntireSettingsFile`, `logging.LogsDir`,
+  `session.SessionStateDirName`) stay as they are — git tree paths, commit
+  trailers, gitignore entries and messages all need them. `entiredir.Name` /
+  `MustName` is the one bridge to the root-relative name used for I/O. Do not
+  introduce an absolute twin of a path that already has a repo-relative spelling:
+  `checkpoint.WriteOptions.MetadataDirAbs` existed alongside `MetadataDir` and
+  was deleted for exactly that reason. Guard tests pin the pairs that must agree.
+- **Absolute paths stay absolute when they cross a process boundary** —
+  `opencode export` takes a path, `entire investigate` hands the agent its
+  `state.json` path, a transcript path becomes a checkpoint's `SessionRef`.
+  Those keep an absolute spelling; the reads and writes around them still go
+  through a root.
+- **Anything outside the CLI packages takes an `fs.FS`, not a path.**
+  `redact.LoadPacks(fsys, dir, logger)` is handed `root.FS()`, which is how pack
+  discovery stays confined without `redact` depending on the CLI.
+- **A directory cannot be created, statted, or removed through its own root.**
+  Those operations (`setupEntireDirectory`, `removeEntireDirectory`, the one
+  `MkdirAll` of an agent's session dir in `resume.go`) legitimately use plain
+  `os` calls.
+
+**Deliberately not rooted**, with the reason:
+
+- **Global/system git config** — `checkpoint/configloader.go` installs a
+  *symlink-following* `billy.Basic` on purpose. `os.Root` documents that
+  "symbolic links must not be absolute" unconditionally, so go-git's default
+  (`osfs.Default`, a boundOS over `os.Root` anchored at `/`) silently dropped the
+  global config of anyone whose `~/.config` is a symlink — author identity fell
+  back to "Unknown" and signing was skipped. Scope is global + system only;
+  `.git/config` is served by `r.Storer.Config()` and never reaches this. Its
+  mutating methods fail closed.
+- **Agent `ReadTranscript(path)` / `ReadSession(input)`** — neither carries a
+  repo path, so neither can build its own store, and the path they receive was
+  already resolved through one (`ResolveTranscriptPath`, `resolveTranscriptPath`).
+  Containment is applied at resolution. Rooting them properly needs `RepoPath` on
+  `HookInput`, which is part of the external-plugin protocol.
+
+  **This is the one place the rooting is knowingly asymmetric, and it is the
+  largest gap left**, so do not read it as settled. The WRITE half is contained
+  — every agent's `WriteSession` goes through `agent.WriteSessionFile` and
+  `SessionStore`, which rejects a `SessionRef` outside the agent's session
+  directory — while the `os.ReadFile(sessionRef)` reads are not (the count is
+  pinned per file by `agent.TestTranscriptReadsOnlyShrink`), and the
+  read is what pulls transcript content into checkpoints. Closing it is a
+  protocol change rather than a refactor, which is why it is scoped separately;
+  the shape it wants is `HookInput.RepoPath` plus the same
+  `sessionStoreForWrite` resolution the write half already uses. Do not "fix"
+  it by anchoring a root on `filepath.Dir(sessionRef)` — that is the derived
+  base the rule above refuses, and it would contain nothing while looking like
+  it did.
+
+  `TestTranscriptReadsOnlyShrink` (`agent/transcript_read_guard_test.go`) is a
+  **ratchet** over that set: it pins the per-file count of
+  `os.ReadFile(sessionRef)`-shaped reads and fails the build when one grows or a
+  new file appears, and equally when a listed one goes away without its entry
+  following. Growth is the regression it exists to stop — a new agent
+  integration copies the nearest existing one, so the shape spreads by
+  imitation — and a stale entry is the slower failure, since the count is the
+  only record of how much of the gap is left.
+- **Global/system git config** — see the config-loader bullet above; that is the
+  one place rooting is actively wrong.
+- **A directory the caller is about to create, replace, or delete** — creating,
+  statting, or removing a directory is an operation on it from the outside, which
+  a root over it cannot perform. `setupEntireDirectory`, `removeEntireDirectory`,
+  the `MkdirAll` behind each anchor, and the plugin index clone are all this case.
+- **Paths the user named** (`doctor bundle --out`, `api --input`) and fixed
+  platform files such as `/dev/tty`, `CONIN$`, `CONOUT$`, and `/proc/<pid>/*`.
+  No boundary exists to enforce.
+
 ### Git Operations
 
 We use github.com/go-git/go-git for most git operations, but with important exceptions:
@@ -513,7 +1391,22 @@ Routing every open through `gitrepo` guarantees two behaviours no ad-hoc
 
 If a code path opens a repo with a bare go-git call, it silently breaks on
 reftable and sha256 repositories. Reviewers should flag any new
-`git.PlainOpen*`/`git.Open` outside `gitrepo`. Key files: `gitrepo/repository.go`
+`git.PlainOpen*`/`git.Open` outside `gitrepo`.
+
+**`OpenCurrent` fails rather than opening the current directory.** It used to
+fall back to `OpenPath(".")` when `paths.WorktreeRoot` could not resolve, and
+"." is a *different repository* whenever git and the process's directory
+disagree — which is precisely what the cases that break the resolution look
+like. Git exports `GIT_DIR`/`GIT_WORK_TREE` to the hooks it runs and
+`WorktreeRoot` honours them, while `OpenPath(".")` cannot see them, so a hook
+running for repo A opened repo B; and go-git applies neither git's
+`safe.directory` ownership check nor its `.git` parse, so the fallback opened
+repositories the user's own git refuses. Use `gitrepo.OpenCurrentOrCwd` only for
+`WarnCheckpointPolicyIfNeeded`, whose three properties do not generalise: it is
+dispatched from `main.go` after cobra, so it is the one repository open with no
+pre-run guard ahead of it; it only reads a policy ref; and it discards every
+error. Anything that writes must stop instead — that is what "we could not
+find out which repository this is" means. Key files: `gitrepo/repository.go`
 (open entry points) and `gitrepo/reftable.go` (`reftableStorer`).
 
 #### Reading Worktree Status - Always Use `gitrepo.Status`
@@ -530,6 +1423,99 @@ the write-free window it required cost more to maintain than the walk saved (see
 `git log` on `gitrepo/status.go` for the measurements). The turn-start hook
 currently walks twice — `CapturePrePromptState` and the strategy's prompt
 attribution each read their own status.
+
+Agent-hook capture paths must use `gitrepo.StatusWithBudget` instead: it bounds
+the walk with a wall-clock budget (`gitrepo.StatusWalkBudget`) because go-git's walk is
+not context-cancellable and a pathological worktree (e.g. a stray `git init` in
+`$HOME`) otherwise leaves the hook process grinding for hours after the agent's
+own hook timeout fires. On breach it returns an error wrapping
+`gitrepo.ErrStatusBudgetExceeded` — hook callers warn and continue with
+transcript-derived data (capture is fail-open; new-file detection is skipped for
+the turn via the pre-prompt/pre-task `UntrackedScanSkipped` marker) — and a
+process-local latch makes every later `StatusWithBudget` call in the same hook
+process fail fast rather than re-entering the walk. The first-checkpoint
+`git status` subprocess in the checkpoint store is bounded by the same
+`StatusWalkBudget` (a killed child, not an abandoned goroutine) and reports the
+same sentinel; the lifecycle handlers warn-and-skip the checkpoint on it. Turn
+end persists whether the turn degraded (`SessionState.CaptureDegradedAt` — set
+on breach, cleared by the next healthy turn) so `entire status` surfaces the
+degradation instead of it living only in `.entire/logs`. Paths
+where a user is actively waiting on a command (review, and `session adopt`
+via `detectFileChangesUnbounded`) keep the unbounded
+`gitrepo.Status`.
+
+#### `git status` Is a Write - Always Pass `--no-optional-locks`
+
+**Every `git status` Entire runs must pass `--no-optional-locks`.** A guard test
+(`TestGitStatusCallSitesPassNoOptionalLocks` in `cmd/entire/cli/gitrepo/`) fails the build on
+any call site that omits it.
+
+`git status` is not a read. It refreshes the index's stat cache and, whenever any
+entry is stale, writes the result back: `builtin/commit.c` takes
+`.git/index.lock` for the duration of the *whole worktree walk*, then renames a
+fresh index over `.git/index` (`tempfile.c`, `rename(2)`). The gate is
+`use_optional_locks()`, and `--no-optional-locks` is literally `setenv(
+GIT_OPTIONAL_LOCKS, "0")` — so the flag also propagates to child git processes,
+and `GIT_OPTIONAL_LOCKS=0` in the environment is an equivalent user-side
+mitigation. Output is byte-identical either way. The write fires on
+mtime-moved-but-content-identical files — the ordinary aftermath of an agent
+turn, a formatter, or an editor save — not on content edits.
+
+**The flag does not disable the equivalent refresh in worktree-comparing `git
+diff`.** `builtin/diff.c`'s `refresh_index_quietly()` does not consult
+`use_optional_locks()`: measured on Git 2.50.1, both `git diff <tree> --
+<paths>` and `git --no-optional-locks diff <tree> -- <paths>` rewrote a
+stat-stale index. `git diff --cached` and a two-tree diff do not read the
+worktree and are unaffected. Hook code needing exact clean-filtered content
+uses `git hash-object`; `git diff-index` is also non-refreshing but can report a
+stat-dirty, content-identical file as changed. The source guard
+`TestGitWorktreeDiffCallSitesDoNotRefreshTheIndex` prevents the unsafe form from
+being introduced on the hook path.
+
+That refresh is git working as designed, and running `git status` is not itself
+a mistake. The reason we always drop the write is that **Entire never benefits
+from it**: every call site reads the porcelain output once and discards it, so
+the stat-cache update is a cost with no return.
+
+Three consequences, all observed in the field (issue #2111):
+
+- **A repo-deleting commit.** The rename replaces `.git/index` with a new inode.
+  On a filesystem where rename-over-existing is not atomic against a concurrent
+  lookup — Docker Desktop / virtiofs bind mounts, measured at 9.9% of opens
+  during continuous replacement versus 0 on ext4 — a concurrent reader gets
+  ENOENT. Git silently treats ENOENT on the index, **and only ENOENT**, as an
+  *empty* index (every other errno calls `die_errno`), so a `git commit` landing
+  in that window records the empty tree with exit code 0 and no warning: a commit
+  that deletes every tracked file. Recovery is `git reset --mixed HEAD~1`.
+- **The user's own `git add` failing** with `Unable to create '.git/index.lock':
+  File exists` while Entire holds the lock across its walk.
+- **A permanently stale `index.lock`** when a budget (`StatusWalkBudget`)
+  SIGKILLs the child mid-walk, breaking every later `git add`/`git commit` until
+  someone removes the file by hand.
+
+**Passing the flag does not make the hazard go away, and must not be described
+as if it did.** On an affected filesystem *any* concurrent `git status` opens the
+same window: the user's own, another tool's, a file watcher's — and in
+particular **N agents working the same repo**, each running its own hooks, which
+is precisely the workflow Entire encourages. Our share is the one write that is
+both unnecessary and asynchronous to the human's terminal, so it is the one that
+can land between someone's `git add` and their `git commit`. For the writers we
+do not control, the mitigation is `GIT_OPTIONAL_LOCKS=0` in the environment
+(devcontainers: `containerEnv`), which covers every git process in the session.
+
+Related: any git subprocess that can run inside a git hook and names its target
+with `cmd.Dir` or `-C` must also set `cmd.Env = gitrepo.EnvWithoutRepoOverrides()`
+(`gitrepo/env.go`). Git exports `GIT_DIR` / `GIT_WORK_TREE` / `GIT_INDEX_FILE` to
+hooks and those take precedence over `cmd.Dir`, so a bare `exec.Command`
+silently operates on the hook's repo. Deliberately *not* applied to user-invoked
+commands that act on the current directory (`status`, `doctor`, `review`): there
+a `GIT_DIR` the user exported is an instruction, not contamination.
+
+This exact producer was diagnosed once before (ENT-242, Feb 2026) and lost: the
+fix was closed unmerged on the premise that `git status --porcelain -z` "reads
+without rewriting", which is false, and it would have grown the number of
+index-rewriting call sites from one to eleven. That is why the guard test exists
+rather than a comment.
 
 #### go-git v5 Bugs - Use CLI Instead
 
@@ -586,6 +1572,110 @@ relPath := paths.ToRelativePath("/repo/api/file.ts", repoRoot)  // returns "api/
 
 Test case in `state_test.go`: `TestFilterAndNormalizePaths_SiblingDirectories` documents this bug pattern.
 
+#### Executable Resolution - Absolute Paths Only
+
+Two rules, each with exactly one implementation, because Go's own protections
+do not reach far enough on their own.
+
+**Every `$PATH` scanner goes through `execx.PathScanDirs()`** (`execx/pathscan.go`),
+which returns only absolute entries. `exec.LookPath` reports `ErrDot` for a
+match found through a "." entry and `exec.Command` re-checks a separator-free
+`Path`, but neither protection reaches a scanner that resolves by
+`filepath.Glob`: a globbed match never passes through `LookPath`, and it arrives
+with separators in it. The external-agent scanner
+(`agent/external/discovery.go`) is exactly that shape and *executes* what it
+finds, so a relative entry would make a file committed to the caller's
+repository a binary Entire runs. `findInaccessiblePlugin` (`plugin.go`) carries
+the same rule; they are one helper because two copies is how they drifted.
+
+**`external.Agent.run` refuses a non-absolute `binaryPath` before spawning.**
+`run` sets `cmd.Dir` to the worktree root and `os/exec` resolves a relative
+`Path` against `Dir`, so the file `registerExternalAgent` statted is not
+necessarily the file that executes. The check lives at the exec, not at the
+caller, so it also covers the exported `New`.
+
+**A per-user directory override must be absolute**, and there is one
+implementation of that rule: `userdirs.RequireAbsoluteOverride`. A relative
+value resolves against the working directory, so the same environment names a
+different directory in every process — usually one inside whatever repository
+the command ran from. It covers all three trees an override can redirect:
+`pluginParentDir` (`ENTIRE_PLUGIN_DIR`, `XDG_DATA_HOME`, `LOCALAPPDATA` — a
+tree whose `bin` subdirectory `main.go` prepends to `$PATH`), and the config and
+cache directories (`ENTIRE_CONFIG_DIR`, `XDG_CACHE_HOME`), which hold the login
+tokens and the discovery caches. Leaving it to `osroot` (which refuses a
+relative root open) and to `main.go`'s `PATH` restore was not wrong, but each
+backstop answers a question of its own, two layers from where this one is
+decided.
+
+Rejecting beats falling through to the platform default: for the config
+directory that default is the developer's REAL `~/.config/entire`, so quietly
+substituting it for a test harness's mistyped override is worse than an error.
+`userdirs.Config()`/`Cache()` cannot report — too many callers only want the
+string — so **every consumer that turns one into I/O checks, and there are
+four**: `userdirs`' own roots, `contexts`, `discovery`, and the token store.
+The first three used to launder a relative directory through `filepath.Abs`,
+which produced a plausible-looking absolute path out of the exact mistake being
+guarded against. Do not reintroduce it.
+
+Two rules about *where* the check goes, both learned by getting them wrong:
+
+- **Who checks is enforced, not enumerated.** `TestUserDirConsumersAreAudited`
+  requires every caller of `Config()`/`Cache()` to appear in a ledger with the
+  reason it is safe. Two successive doc comments tried to list the consumers
+  instead and both were wrong within a commit or two: the token store slipped
+  past the first (bearer tokens at `./<value>/tokens.json`) and `plugin_index`
+  past the second (an index clone and its lock file in the working directory).
+  Converting a caller to `ConfigDirChecked`/`CacheDirChecked` removes it from
+  the ledger, since it is then safe by construction; the list is meant to
+  shrink.
+
+- **It must precede every `MkdirAll`, not merely every root open.** Checking at
+  the root is checking at the READ, and `contexts.FilePath` and
+  `withCacheFileLock` run several steps earlier: they created `./<value>` and
+  dropped a `.lock` inside it on the way to reporting the refusal, which is the
+  mistake itself. `resolveUserRoot` already had this right; the other two did
+  not.
+- **A root whose base is DERIVED cannot enforce this, so its owner must check
+  for itself.** The token store is the fourth consumer, and it does open a root
+  — the claim that it had none was wrong. `fileStore.dir` anchors on
+  `filepath.Dir` of its own path, one of the two places the root-base rule
+  permits a derived base (`ENTIRE_TOKEN_STORE_PATH` names a file the caller
+  chose), and gets there through `filepath.Abs`. That `Abs` is precisely why the
+  root can never refuse a relative config dir: it launders `./relative-config`
+  into a plausible absolute path *before* the root exists, which is the same
+  laundering removed from `contexts` and `discovery`. So the store calls
+  `userdirs.ConfigDirChecked` and carries the error on `fileStore.pathErr`,
+  reported by `dir` and `ensureDir` ahead of any filesystem access — verified
+  through `Get`/`Set`/`Delete`, not just the resolver. Left out, it put bearer
+  tokens at `./<value>/tokens.json`. An explicit `ENTIRE_TOKEN_STORE_PATH` is
+  deliberately still exempt: the user named that file.
+
+- **Only a USER-supplied override is refused; Entire's own fallback is
+  absolutized.** `userdirs.ownFallbackDir` resolves the home-relative default
+  that `configDir`/`cacheDir` produce when `os.UserHomeDir` fails, because by
+  the time a consumer sees a plain string it can no longer tell a value the user
+  set from one Entire made up — and refusing both was a regression: on a machine
+  with no resolvable home (no `HOME`, an odd container, a service account) every
+  command touching a saved login or a discovery cache began failing with advice
+  about a variable the user had never set. There is nothing for them to fix
+  there, and a cwd-relative directory that works beats a hard failure, so the
+  distinction is drawn in the one place that still has the information.
+
+**The OPF `command` is the deliberate exception, and stays one.**
+`redaction.openai_privacy_filter.command` becomes `argv[0]` of an
+`exec.CommandContext` in `redact/opf.go` with no `cmd.Dir` and no absoluteness
+check, so `"command": "./tools/opf"` resolves against the pre-push process's
+working directory. That is allowed because the field is not repo-supplied: the
+ownership gate above honors it only from an untracked, index-and-HEAD-verified
+`.entire/settings.local.json`, so a relative path there is the developer's own
+choice about their own machine, and a bare name is still covered by
+`exec.Command`'s `ErrDot` re-check. The scanners are the opposite case — they
+resolve names nobody chose, out of a `$PATH` the repository can reach — which
+is why the rule is theirs and not this field's. Do not "finish the job" by
+rejecting a relative OPF `command`: it would break the GUI-git-client setups
+the explicit `command` exists to serve, without closing anything the trust gate
+leaves open.
+
 #### Invoking Commands on Windows - Never Put a Dynamic Value on a cmd.exe Line
 
 **When Entire performs the exec itself, do not go through `cmd.exe`.** Pass the
@@ -614,6 +1704,26 @@ Key files: `cmd/entire/cli/browser_open_windows.go` (ShellExecute, the
 avoid-the-shell side) and `cmd/entire/cli/agent/hook_command.go`
 (`escapeWindowsCMD`, the third-party-exec side). Each doc comment points at the
 other.
+
+**The auto-updater's `sh -c` is a considered exception, and it is enforced
+rather than asserted.** `versioncheck.realRunInstaller` (unix only) runs the
+update command through a shell, which the rule above would otherwise forbid. It
+is allowed because there is no dynamic value in it: on unix
+`UpdateCommandForCurrentBinary` returns one of five compile-time literals, and
+the binary's path and version choose *between* them and never appear *in* them —
+while the shell is load-bearing for the fallback, which is a pipeline
+(`curl … | bash`). The tempting next change is exactly the one that breaks this:
+interpolating a channel or a version into the command.
+`TestUpdateCommandIsAlwaysALiteral` (in `versioncheck_unix_test.go`) drives every
+unix install manager and channel with adversarial paths and versions and fails
+when the result is not a known string. A command that genuinely needs a runtime
+value must be built and run as argv, not added to that set.
+
+Windows is deliberately outside that invariant rather than an exception to it:
+`fallbackInstallCommand` there interpolates the running binary's directory into
+`-InstallDir`, and it is safe to because Windows never *runs* the command —
+`realRunInstaller` is unimplemented there, so the string is only ever printed
+for the user to paste.
 
 ### Control-Plane Core Resolution (which core am I talking to?)
 
@@ -656,10 +1766,12 @@ therefore has exactly three routing shapes, mirroring the entire.io BFF:
   suspended processing placement, control-plane error, timeout) returns an
   error instead of falling back to home-jurisdiction routing — a wrong-region
   "success" is worse than a command failure for repo-scoped data. Used by
-  trails and experts (`NewAuthenticatedEntireAPICellClient` in
-  `api_client.go`). `resolveRepoCellPlacement` performs the same lookup for
-  callers that also need the placement's id (repo_id) alongside its cell —
-  used by cross-repo checkpoint reads (`explain --repo`, `explain_repo.go`).
+  trails (`NewAuthenticatedEntireAPICellClient` in `api_client.go`) and by
+  `experts --repo <ulid>`. `resolveRepoCellPlacement` performs the same lookup
+  for callers that also need the placement's id (repo_id) alongside its cell —
+  used by cross-repo checkpoint reads (`explain --repo`, `explain_repo.go`) and
+  by `experts --repo owner/repo`, which sends that placement id to entire-api
+  instead of re-deriving it from a data-plane repo listing.
 - **User-scoped `/me` → home cell, never fan out**:
   `auth.NewEntireAPICellClient(ctx, insecure, nil)` routes by the
   `home_jurisdiction` JWT claim; activity/recap use it with a data-API
@@ -669,7 +1781,16 @@ therefore has exactly three routing shapes, mirroring the entire.io BFF:
   `ClusterSlug`↔`Cluster.Slug`, NOT the cell name, which the catalog does not
   expose), `resolveCellBaseURLs`, and `fanOutCells` (parallel per-cell calls,
   per-cell timeout, partial failures isolated per slot). Merge semantics stay
-  with the command.
+  with the command. Each repo routes to exactly ONE placement — its home,
+  picked by `routedRepoPlacement` (the elected `primaries.processing`, else
+  the canonical row-ID convention). Mirrors are never searched: they are
+  replicated copies indexed under their own namespaces, so an extra leg
+  returns duplicate and stale rows, and diverges from the web
+  (ENT-1672/ENT-1776). Unlike the repo-scoped resolver above, this one fails
+  SOFT — a home placement that is not ready is skipped and reported
+  (`reportableSkippedRepos`: pinned requests always warn, broad ones only
+  when the skips left no cell to query), never substituted with a ready
+  mirror.
 
 Token rule: identity tokens are **per-jurisdiction, not per-cell**. Multi-cell
 callers must build one `auth.CellClientFactory`
@@ -679,28 +1800,35 @@ this automatically; do not call `NewEntireAPICellClient` in a loop.
 
 ### Session Strategy (`cmd/entire/cli/strategy/`)
 
-The CLI uses a manual-commit strategy for managing session data and checkpoints. The strategy implements the `Strategy` interface defined in `strategy.go`.
+The CLI uses a manual-commit strategy for managing session data and checkpoints. There is no `Strategy` interface: `*ManualCommitStrategy` (`manual_commit.go`, constructed by `NewManualCommitStrategy()`) is the only implementation and callers hold it concretely. `strategy.go` holds the types its methods take and return.
 
-#### Strategy Interface
+#### Strategy Methods
 
-The `Strategy` interface provides:
+`*ManualCommitStrategy`'s main entry points:
 
 - `SaveStep()` - Save session step checkpoint (code + metadata)
 - `SaveTaskStep()` - Save subagent task step checkpoint
-- `GetRewindPoints()` / `Rewind()` - List and restore to checkpoints
+- `ListPendingCheckpoints()` - List pending checkpoints (see the note below: there is no restore path)
 - `GetSessionLog()` / `GetSessionInfo()` - Retrieve session data
 
-`Rewind()` has **no CLI surface**. The `rewind` commands were removed, so
-nothing outside tests calls it; `GetRewindPoints()` is still live, feeding
-`checkpoint list --pending`. Treat the restore path as machinery pending
-removal rather than as a supported entry point — do not build on it, and do not
-re-expose it without deciding whether the removal was meant to be permanent.
-Mind the split in its test coverage: `PreviewRewind` tests cover which untracked
-files are *planned* for deletion, while
-`TestShadowStrategy_Rewind_PreservesIgnoredFiles` covers what survives an actual
-execution — that ignored paths such as `.entire/` are still there afterwards.
-The second half is where the go-git hazard lives, so keep it covered for as long
-as the restore path exists.
+**There is no restore path.** `Rewind()`, `PreviewRewind()`, `CanRewind()` and
+their helpers were removed once the `rewind` commands went and nothing outside
+tests still called them. Nothing in the strategy writes checkpoint contents back
+over the worktree, and re-adding that is a product decision, not a refactor.
+
+What survives is everything that reads a checkpoint without touching working
+files. `ListPendingCheckpoints()` / `ListLogsOnlyPendingCheckpoints()` feed
+`checkpoint list --pending`. `RestoreLogsOnly()` writes a checkpoint's session
+logs into the agent's session directory — logs only, never worktree files — and
+feeds `entire resume` and `entire trail resume`. The type they return is
+`PendingCheckpoint`, and it covers both shapes that listing contains: a live
+checkpoint on the session's shadow branch, not yet condensed onto
+`entire/checkpoints/v1`, **or** a logs-only resume point — a commit on the
+current branch whose logs *are* already condensed there, listed so the
+transcript can be restored. "Pending" names the listing, not a promise that the
+work is un-condensed. Either way you can list it and resume from it, but the
+CLI cannot restore working files from it. The `--pending` flag, the command
+paths, and the `--json` shape are unchanged by that rename.
 
 #### How It Works
 
@@ -711,31 +1839,94 @@ The manual-commit strategy (`manual_commit*.go`) does not modify the active bran
 - **Supports multiple concurrent sessions** - checkpoints from different sessions in the same directory interleave on the same shadow branch
 - Condenses session logs to permanent `entire/checkpoints/v1` branch on user commits
 - Every path that builds a stored transcript sanitizes before redacting; the committed paths also externalize images in between, giving **sanitize → externalize images → redact**. Sanitization is the agent's optional `agent.TranscriptSanitizer` capability, applied via `agent.SanitizeTranscriptForStorage`; it strips non-portable agent state (Codex's encrypted reasoning payloads and compaction blobs, which are bound to the originating session and cannot be replayed out of a checkpoint). The three paths are the Stop/shadow write (`lifecycle.go` sanitizes before `.entire/metadata/<session>/full.jsonl` is written, then the metadata-dir walker redacts it into the shadow tree — **no externalization**, so inline images in a shadow transcript are subject to redaction and assets exist only under committed checkpoints), post-commit condensation (`prepareTranscriptForStorage` in `manual_commit_condensation.go`), and the Stop finalize full-session rewrite (`manual_commit_hooks.go`). Where all three steps run, order is load-bearing at each step: sanitizing first avoids externalizing images out of items about to be discarded (storing an asset whose referencing line disappears) and avoids redacting megabytes of ciphertext only to discard it — base64 is the pathological input for the entropy layer, so a large Codex rollout otherwise costs tens of seconds per Stop *and* per commit; externalizing before redaction is required because redaction would otherwise flag and destroy the high-entropy base64. Sanitization is idempotent, so downstream paths call it without knowing whether an upstream path already did (`checkpoint.sanitizeForAgentType` is the store's belt-and-braces call). The agent's own transcript is never modified. Coupling to respect: `SessionState.CheckpointTranscriptSize` is a growth baseline compared against the shadow transcript blob size in `sessionHasNewContent`, so it must be measured in the same sanitized (pre-externalization) coordinate — that is `CondenseResult.TranscriptSizeBaseline`; using the raw size makes the comparison false forever and the session silently stops condensing.
+- **Redaction cost and the two mechanisms that contain it.** Redaction dominates the Stop hook on a large session: it is ~99.7% of the metadata-walk blob write (git object writing is milliseconds), and ~82% of that is the betterleaks regex ruleset. Two things keep it bounded, and both rest on redaction being **per-line and stateless** (`redact.redactJSONLLines`) — a rule that looked at neighbouring lines would silently break both:
+  - `jsonlContentImpl` shards the line pass into ~1MiB byte-balanced groups across goroutines. Output is byte-identical to the sequential pass. Sharding is gated on an explicit `concurrencySafe` argument describing the **redactor**, not on which entry point was called: `String` is pure and opts in (including `batch.go`'s OPF-disabled fast path), while the OPF collector closures accumulate into a shared map/slice and pass `concurrencyUnsafeRedactor`. Shards are balanced by bytes rather than line count because transcripts mix short lines with occasional multi-MB tool results.
+  - The checkpoint metadata walk reuses the previous checkpoint's redacted blob as a prefix and redacts only appended lines (`checkpoint/redact_cache.go`), turning a per-Stop cost of O(whole transcript) into O(appended). The stored prefix must always end immediately after a `\n`, which is what makes plain byte concatenation reproduce the full result; content with a partial trailing line is therefore never cached. Eligibility is keyed on `paths.TranscriptFileName` (`full.jsonl`), **not** a `.jsonl` suffix — `transcript.jsonl` is regenerated in full each checkpoint and `full.jsonl.001` chunks are not appended, so neither should qualify. Reuse requires the prefix bytes to still hash the same and `redactionFingerprint()` (CLI version + commit + `redact.ConfigFingerprint()`) to match, so a rewritten transcript, changed custom rules, or a CLI upgrade all fall back to a full redaction. Bump `configFingerprintVersion` in `redact/fingerprint.go` whenever the regex layers change behaviour, or stale output can be reused. The cache lives in the git common dir, resolved without caching from the explicit worktree root through `gitrepo.ResolveWorktreeMetadata`, never under `.entire/`, because anything in the metadata directory would be walked into the checkpoint tree and committed. All three whole-transcript paths are covered: the shadow write walks files through `createRedactedBlobFromFile`, while condensation and the Stop finalize rewrite hold the transcript in memory and go through `checkpoint.RedactTranscriptCached`. Those paths do **not** redact the same bytes — the shadow write stores a sanitized transcript, condensation and finalize a sanitized *and* image-externalized one — and they stay separate simply because their keys are different strings: the walk uses its real tree path, the in-memory callers a synthetic key carrying the session ID (so concurrent sessions never share an entry). There is deliberately no scope enum; sharing a key would be safe (the prefix hash rejects a mismatch) but would miss on every checkpoint. The in-memory prefix is stored as a **file** in the cache dir, not a git blob: go-git deflates the whole payload before discovering the object exists (dotgit dedups the rename, not the compression), and above `agent.MaxChunkSize` the whole-transcript blob matches no chunk the store writes, so it would linger unreachable until `git gc` pruned it and silently reverted the cache to full redaction. `redactIncrementally` owns the whole-content fallback and takes the redactor as a parameter, so prefix and suffix cannot come from different pipelines; condensation and finalize share that pipeline by both routing through `redactSessionTranscript`. A per-subagent task transcript opts out with a nil repo: it is written once per task rather than appended across checkpoints.
 - Each committed session stores the (sanitized, redacted) transcript (`full.jsonl`, read by CLI resume/explain) plus a best-effort compact transcript (`transcript.jsonl`, generated via `transcript/compact`). Like `full.jsonl`, `transcript.jsonl` stores the **full compacted session** on every checkpoint (via `compact.FullWithBoundary`), so each checkpoint is self-contained and the session survives a mid-history checkpoint being lost/reverted/rebased. This checkpoint's slice begins at the session metadata's `compact_transcript_start` (a line offset in compact-output coordinates, distinct from `checkpoint_transcript_start` which indexes raw `full.jsonl` lines); a nil/absent marker means a legacy delta-only `transcript.jsonl` (read from line 0). The marker rounds toward inclusion when a streaming message straddles the boundary, so the slice never drops this checkpoint's content but may repeat ≤1 merged line at its head. Compact generation is best-effort and is skipped when the compacted output exceeds the 50MB blob cap (unlike `full.jsonl`, `transcript.jsonl` is not chunked — `full.jsonl` stays authoritative and the compact is regenerable); in the OPF finalize rewrite a failed/skipped regeneration drops the prior `transcript.jsonl` and clears the marker rather than shipping a stale, less-redacted compact. Both files are pushed with the v1 branch. The root `metadata.json` `sessions[].transcript` pointer keeps targeting `full.jsonl`; when the compact transcript was generated the session entry also carries a `compact_transcript` path pointing at `transcript.jsonl` (omitted otherwise) so external readers can locate it next to `full.jsonl`.
+- **Subagent task records** - subagent work (Claude Code's Task tool) is captured as durable `session.TaskRecord` entries on session state, a pointer mid-turn (declared transcript path + labels; background launches record at launch, completions attach files/tokens/path exactly-once via `strategy.CompleteTaskRecord`, Factory Droid Workers upsert). Condensation materializes each record — declared path first, agent-layout fallback, same sanitize → externalize → redact pipeline — into `tasks/<toolUseID>/{agent-<agentID>.jsonl, task.json}` inside the parent session's checkpoint (unavailable transcript → `task.json` with a stable path-free reason; the writer redacts `task.json`'s free-text `task_description` itself, since the record carries it verbatim); live records store transcript-so-far each condensation, completed records are removed after a successful write. `State.HasTaskContent()` is the trigger currency: records-only sessions condense, records never live on the shadow branch, and shadow-branch existence does not imply task content (shadow pinning keys on `StepCount` only). `SaveTaskStep` is incremental-only (post-todo).
 - Uses the `post-rewrite` Git hook to keep local session linkage aligned after amend/rebase rewrites
 - Builds git trees in-memory using go-git plumbing APIs
-- Rewind restores files from shadow branch commit tree (does not use `git reset`)
-- **Location-independent transcript resolution** - transcript paths are always computed dynamically from the current repo location (via `agent.GetSessionDir` + `agent.ResolveSessionFile`), never stored in checkpoint metadata. This ensures restore/rewind works after repo relocation or across machines.
-- **Token usage scoping** - `SessionState.TokenUsage` is the session-wide total used by `entire status`; `SessionState.CheckpointTokenUsage` is the pending checkpoint delta since the last condensation. Checkpoint metadata must stay scoped to `CheckpointTranscriptStart` or the pending checkpoint delta. Cursor tokens come only from stop-hook payloads, while Copilot CLI can also backfill full-session totals from `session.shutdown`. Condensation's transcript recompute runs with `subagentsDir=""` and so drops `SubagentTokens`; `withSubagentTokensFrom` refills it from the already-rescoped `state.CheckpointTokenUsage`, and the store sums it across a checkpoint's sessions via `types.AddTokenUsage` (the single token-summing primitive — do not hand-roll another; a field-by-field copy is how the nested total came to be dropped in the first place).
+- **Location-independent transcript resolution** - transcript paths are always computed dynamically from the current repo location (via `agent.GetSessionDir` + `agent.ResolveSessionFile`), never stored in checkpoint metadata. This ensures log restore (`RestoreLogsOnly`) works after repo relocation or across machines.
+- **Token usage scoping** - `SessionState.TokenUsage` is the session-wide total used by `entire status`; `SessionState.CheckpointTokenUsage` is the pending checkpoint delta since the last condensation. Checkpoint metadata must stay scoped to `CheckpointTranscriptStart` or the pending checkpoint delta. Cursor tokens come only from stop-hook payloads, while Copilot CLI can also backfill full-session totals from `session.shutdown`. Shadow-branch condensation's transcript recompute runs with `subagentsDir=""` and so drops `SubagentTokens`; `fillMissingSubagentTokensFrom` refills it from the already-rescoped `state.CheckpointTokenUsage`. A live mid-turn condensation when no shadow branch resolves instead reads the still-available subagent transcripts only when no checkpoint-scoped subagent total already exists, the agent supports that extraction, and a real subagent directory exists. It subtracts `SubagentTokensBaseline` for checkpoint metadata and keeps the cumulative snapshot on `state.TokenUsage` so the reset advances the next baseline; an empty delta stays nil. The scan is substantially more expensive for subagent-heavy sessions, so every gate is load-bearing. The store sums those scoped values across a checkpoint's sessions via `types.AddTokenUsage` (the single token-summing primitive — do not hand-roll another; a field-by-field copy is how the nested total came to be dropped in the first place).
 - Tracks session state in `.git/entire-sessions/` (shared across worktrees)
-- **Reclaiming sessions whose agent vanished** - not every agent fires a session-end hook, and any agent can be killed before its hook runs, so a session can be left un-finalized forever. `SessionState.Owner` fingerprints the owning agent process (PID + start time + boot + host, captured at every turn start by `captureSessionOwner`), and `State.OwnerExited()` reports it gone via `proclive.Check`. `finalizeExitedSessions` sweeps those inside `entire status` (text and `--json`) and `entire doctor`, ending them exactly as a clean stop would. **`OwnerExited` deliberately covers IDLE as well as ACTIVE** — an agent that finishes its last turn and then quits leaves IDLE, so gating on ACTIVE alone missed the common case; only already-finalized sessions are excluded, per the shared `State.IsEnded()` predicate. Liveness is Unknown on Windows and for cross-host state, where behaviour degrades to the `StuckActiveThreshold` timeout. Because the sweep runs inside interactive commands, its eager condensing is capped by `sweepCondenseBudget` across the whole sweep: every candidate is always marked ENDED (a single atomic rename — that is what un-sticks it from `entire status`), while condensing runs only while the budget lasts, so a multi-day backlog drains over successive invocations instead of stalling one. Skipping a condense is the existing fail-open path — PostCommit retries, and `doctor` reports the session as "ended with uncondensed checkpoint data".
+- **Commit-to-session linking is identity-first** (`strategy/session_identity.go`): identity comes from `SessionState.Owner`, the `proclive.Identity` that `captureSessionOwner` already records on every turn start (first non-transient ancestor — proclive skips shells, `entire` itself, and the Go toolchain, so a human commit typed in the same terminal never matches). Commit hooks snapshot their own ancestry once (`proclive.CurrentAncestry`) and match every candidate against it in memory (`Ancestry.Depth`) — one hostname/boot-id/proc walk per commit, not one per session state — linking the commit to the session whose agent process is an ancestor — in any worktree (nearest ancestor wins, so a nested agent beats the outer agent that spawned it, and only a tie at equal depth falls to the latest interaction; host/boot/start-time guards defeat PID reuse and cross-machine matches; Windows cannot introspect and falls back to worktree matching). The identity match is UNIONED with the worktree-matched set, never a replacement: a commit condenses every session with pending content in its worktree. Any session matched outside its home worktree is guest-linked — whether identity-matched or selected by the pre-existing single-worktree fallback — and is condensed and linked without mutating worktree-coupled state (`BaseCommit`, shadow-branch realignment) from the foreign worktree (`isSessionHomeWorktree`). Worktree matching is always computed (it is the sole mechanism for commits with no agent ancestry): imported sessions never link, and multi-worktree ambiguity is filtered to recently-interacting sessions (15 min) before declining. This deliberately turns some former ambiguity declines into a best-candidate link; `recentSessionWindow` is a correctness tradeoff because a session in a long-running build or tool call can age out and leave the other recent worktree to win. The stderr hint naming `entire session adopt` fires only from the commit-linking path, and only when identity matching could not rescue the commit either. Under `go test`, `session.NewStateStore` and `NewStateStoreForWorktree` refuse to open outside the temp root so non-isolated tests fail loudly instead of leaking fixture sessions into a real repo.
+- **Reclaiming sessions whose agent vanished** - not every agent fires a session-end hook, and any agent can be killed before its hook runs, so a session can be left un-finalized forever. `SessionState.Owner` — the same fingerprint commit linking matches above — is captured at every turn start by `captureSessionOwner`, and `State.OwnerExited()` reports it gone via `proclive.Check`. `finalizeExitedSessions` sweeps those inside `entire status` (text and `--json`) and `entire doctor`, ending them exactly as a clean stop would. **`OwnerExited` deliberately covers IDLE as well as ACTIVE** — an agent that finishes its last turn and then quits leaves IDLE, so gating on ACTIVE alone missed the common case; only already-finalized sessions are excluded, per the shared `State.IsEnded()` predicate. Liveness is Unknown on Windows and for cross-host state, where behaviour degrades to the `StuckActiveThreshold` timeout. Because the sweep runs inside interactive commands, its eager condensing is capped by `sweepCondenseBudget` across the whole sweep: every candidate is always marked ENDED (a single atomic rename — that is what un-sticks it from `entire status`), while condensing runs only while the budget lasts, so a multi-day backlog drains over successive invocations instead of stalling one. Skipping a condense is the existing fail-open path — PostCommit retries, and `doctor` reports the session as "ended with uncondensed checkpoint data".
 - **Session-end hooks that run under a host deadline** - an agent whose session-end hook fires inside its own shutdown may be killed part-way through. Such agents declare `agent.SessionEndBudgeter` (Codex: 3s cap, process tree killed on expiry). The budget bounds **only** the eager condense in `endSessionNow`, so the cheap step that un-sticks the session is never the one given up on; it is set below the host cap with enough headroom for the shell wrapper and binary load, which happen before Entire's own clock starts. Unbounded is not the same as guaranteed, though: mark-ended runs under `MutateSessionState`, whose flock acquire blocks, so a concurrent condense holding the lock can push it past the cap and get the tree killed — the exited-owner sweep above is the backstop. The bound is best-effort (condensation doesn't poll ctx between stages), and being cut off costs duplication rather than data: an incomplete condense leaves `FullyCondensed` false and PostCommit retries, except in the window between the v1 checkpoint write and the state save, where the checkpoint is already committed and PostCommit mints a second one over the same transcript range.
 - **Shadow branch migration** - if user does stash/pull/rebase (HEAD changes without commit), shadow branch is automatically moved to new base commit
 - **Orphaned branch cleanup** - if a shadow branch exists without a corresponding session state file, it is automatically reset when a new session starts
 - PrePush hook can push `entire/checkpoints/v1` branch alongside user pushes
 - **Single checkpoint sync remote** - checkpoint data syncs only to the elected checkpoint sync remote (`strategy_options.checkpoint_push_remote` setting → captured election → `origin` → sole remote → first remote in `.git/config` order; fail-closed only when the setting names a missing remote — the captured tier is fail-soft), on both the git-branch and git-refs backends. **Capture**: during pre-push, a push whose target agrees with the branch's declared push destination (`branch.<name>.pushRemote` → `remote.pushDefault` → `branch.<name>.remote`) and differs from the current election persists that remote as the captured election (git common dir, `entire-checkpoint-sync-remotes.json`), announces it on stderr, and the same push carries the checkpoints — see `strategy/checkpoint_sync_capture.go`. Declaration alone is deliberately **not** a tier: electing from tracking config at rest silently drops checkpoint sync on every push to a different remote (`git push <other> HEAD`, a `git clone -o base` pushing checkpoints to a separately added `origin`, any repo with `remote.pushDefault` — the `74e239a9` regression), and a bare push to an undeclared remote never elects (the pre-single-remote transcript leak). Phase-1 capture rules: at most one captured remote, first still-configured capture sticks (no per-push ping-pong in mixed-habit repos; a captured remote that was renamed or removed no longer vetoes the next capture), explicit `checkpoint_push_remote` outranks and disables capture. Pushes to any other remote or to a raw URL never carry checkpoint data; the dedicated `checkpoint_remote` URL mode is exempt. `entire status` shows the sync destination, its source (`observed` renders as "follows your branch's push destination"), and an unpushed-checkpoint count.
 - **Checkpoint reads follow the election** - reads consult an ordered candidate chain: the elected sync remote first, then `origin` as a **read-only legacy tier** (pre-single-remote checkpoints live there; `strategy.CheckpointReadRemotes` / `CheckpointReadRemotesWithElection` resolve the chain, failing OPEN to `[origin]` on an election error). Metadata-branch fetches refresh every candidate tracking ref because branch existence does not prove a requested checkpoint exists there; other fetch targets, tracking-ref readers, blob hydration, and checkpoint-policy reads try candidates in order. Git-refs remote discovery ls-remotes every candidate **without** needing a dedicated `checkpoint_remote` and merges the listings. Local-ref writers stay **elected-remote-only**: `EnsurePrimaryRef`, the metadata-fetch advance, `promoteRemoteTrackingPrimary`, and the local checkpoint-policy ref update never act on the legacy tier (a stale origin feeding `SafelyAdvanceLocalRef` is the #1374-class hazard), keyed on the explicit election result, never on the chain's first entry. A remoteless repo keeps its "checkpoint absent" classification, which requires positive evidence (successful empty `git remote` listing, live ctx, readable settings without a `checkpoint_remote` key).
-- **OPF (OpenAI Privacy Filter) runs at pre-push, not post-commit**: when `redaction.openai_privacy_filter.enabled` is true, the PrePush hook re-redacts unpushed `entire/checkpoints/v1` commits with the OPF 9th layer, builds new commits carrying an `Entire-OPF-Applied: true` trailer, and atomically updates the local v1 ref before pushing. Per-commit condensation stays on the fast 8-layer pipeline. See `strategy/manual_commit_opf_rewrite.go` and `docs/security-and-privacy.md` for the full flow, including divergence detection, bootstrap caps, and CAS-on-conflict semantics.
+- **Scanner engine selection is a settings-only, fail-closed choice**: `redaction.betterleaks.enabled` (default `true`) and `redaction.goredact.enabled` (default `false`) pick which pattern-matching engine(s) feed layer 2 of `detectAllLayers` (`redact.ConfigureScanners`, `redact/scanners.go`). Both keys are honored from committed `.entire/settings.json` only — a `settings.local.json` copy is ignored with a logged warning, because the choice affects everyone who reads the repo's checkpoints, not just the developer who set it. `validateScannerSettings` fails settings load with `settings.ErrScannerConfig` when both engines are disabled. If goredact is the sole enabled engine and its scan fails at runtime, `redact.ErrScannerDegraded` propagates out of `JSONLBytes`/`JSONLBytesWithPrivacyFilter`; every checkpoint-write call site (`checkpoint/ephemeral.go`, `checkpoint/persistent.go`, `strategy/manual_commit_hooks.go`) must `errors.Is` for it and fail the write rather than fall back to under-scanned content. See `docs/security-and-privacy.md` for user-facing details.
+- **OPF (OpenAI Privacy Filter) runs at pre-push, not post-commit**: when `redaction.openai_privacy_filter.enabled` is true, the PrePush hook re-redacts unpushed commits with the OPF 9th layer, builds new commits carrying an `Entire-OPF-Applied: true` trailer, and updates the local refs before pushing. Per-commit condensation stays on the fast 8-layer pipeline. **Both backends are covered, by two rewrites sharing one policy**: `manual_commit_opf_rewrite.go` walks unpushed `entire/checkpoints/v1` commits bounded by the remote tip and CAS-updates the branch; `manual_commit_opf_refs.go` walks the push queue and, per queued ref, rewrites every unpushed commit — stopping at the first commit already carrying the trailer, which makes the trailer its own watermark (steady state stops at the tip's parent) and is bounded by the shared `BootstrapTooLargeError` cap for repos that enable OPF late. Blob policy, byte caps, the single batched shell-out, and the error taxonomy are shared; only discovery and ref update differ. **Fail-closed differs by backend on purpose**: git-branch aborts the user's push, while git-refs withholds the (separately-pushed) checkpoint refs and leaves them queued, so nothing under-redacted ships without blocking the user's own push. See `docs/security-and-privacy.md` for the full flow, including divergence detection, bootstrap caps, and CAS-on-conflict semantics.
 - **OPF's `command` is a trust boundary, not a setting**: `redaction.openai_privacy_filter.command` becomes `argv[0]` of an exec during pre-push, and `.entire/settings.json` is version-controlled — so reading it from the project file would let a pull request execute code on every developer who pushes (the prompt is no defense: it never names the command, `prompt_default: "always"` skips it, and non-TTY pushes auto-run). `settings.enforceOPFCommandTrust` (`settings/opf_command_trust.go`) honors `command` only from `.entire/settings.local.json`, and only when that file is untracked in **both** the index and `HEAD` — the filename is not the check, because `.gitignore` does not apply to an already-tracked path. The probe goes through go-git (`gitrepo.OpenPath`), not the git CLI, and is memoized per process: shelling out cost ~15 subprocesses per hook (`settings.Load` is uncached and runs several times per hook) and would fail verification wherever `git` is off `$PATH` — the GUI-git-client population that most needs an explicit `command`. **Two depths**: the layer check reads the index only, because a PR-delivered file is always in the index of a clone that checks it out, and checkout cannot produce a file absent from the index; the `command` check also reads HEAD. That split matters because HEAD is the expensive half — measured 8.3ms → 2.5ms per hook process in this repo, and 39ms → 11ms on reftable, where `gitrepo` routes reference reads back through the git CLI. The cost falls on everyone with a `settings.local.json`, not just OPF users, so keep it off the HEAD path. Rejection is a downgrade to the documented `$PATH` default plus a warning, never a hard error; verification failure (no repo, git missing) counts as untrusted. Do not add other exec-bearing fields to the project settings file without the same gate.
-- **A tracked `.entire/settings.local.json` is ignored wholesale**: the local layer's premise is that it is per-clone and per-developer (it is gitignored, `entire enable --local` writes it, and `CheckpointRemoteIsLocalOnly` treats presence there as proof the developer chose it). `.gitignore` does not apply to an already-tracked path, so a committed one arrives by cloning and would override project settings for everyone. `loadMergedSettings` drops the layer when the file is **proven** tracked, records `EntireSettings.LocalLayerRejection()`, and the redaction consumer prints it with the `git rm --cached` fix. It never errors — one committed file must not brick `status`/`doctor`. Two deliberately opposite failure directions, expressed as the three-state `localTrust` (`localUnverifiable` is the zero value so a forgotten assignment fails safe): an *unverifiable* repo keeps the layer (losing all local settings is worse than the risk) but still drops the exec-bearing OPF `command` (being wrong means running someone else's binary); *no* repository counts as proof of locality. `CheckpointRemoteIsLocalOnly` reads the raw file outside the loader, so it repeats the check itself.
+- **`external_agents` is the second exec-bearing setting, gated the same way**:
+  it enables the `$PATH` scan that globs for `entire-agent-*` binaries and runs
+  each one's `info` subcommand, so a committed `{"external_agents": true}` would
+  let a pull request turn on execution of whatever binary it could get onto a
+  developer's `$PATH` — the `enforceOPFCommandTrust` rationale verbatim, minus
+  even a prompt. `settings.enforceExternalAgentsTrust`
+  (`settings/external_agents_trust.go`) honors it only from a
+  `classifyLocalSettingsDeep`-verified `.entire/settings.local.json`, reusing
+  the OPF gate's helpers; only a `true` value is gated, since `false` grants
+  nothing. Rejection is a downgrade recorded on
+  `EntireSettings.ExternalAgentsRejection()`, surfaced by `entire status` and by
+  `external.DiscoverAndRegister` — without it, a refused grant and a setting the
+  user never wrote look identical (no agent appears). **Consequence for every
+  write site**: the auto-enable that fires when a user picks an external agent
+  must go through `enableExternalAgentsLocally` (`setup_external_agents.go`),
+  which raw-writes the single key to the local file whatever `--local`/`--project`
+  said about the rest — writing it into the project file produces a setting the
+  user can read back and that never takes effect.
+  **The grant also gates `summary_generation.provider`**, which is the other
+  place a tracked file names a binary to execute: `discoverSummaryProviderIfMissing`
+  resolves an unregistered provider by name, so `{"summary_generation":
+  {"provider": "evil"}}` in a pull request was enough to run
+  `entire-agent-evil info` on whoever pulled it and ran `entire explain`.
+  Resolving by name rather than sweeping `$PATH` bounds the blast radius to one
+  binary; it does not make it zero. The check sits *after* the
+  already-registered early return, so a committed `"provider": "claude-code"`
+  is unaffected — the gate lands only on the external case — and the
+  unresolvable-provider error gains a line naming the grant, since "unknown
+  summary provider" about a plugin that is plainly installed is not actionable.
+  A dedicated `enforceSummaryProviderTrust` beside the other two gates would let
+  a developer name an external provider in their own `settings.local.json`
+  without granting the `$PATH` sweep; that is a real want, but it costs a third
+  settings-layer classification and a third rejection channel, so it waits until
+  someone asks for the combination.
+- **Agent instruction fields get the same provenance gate**:
+  `investigate.always_prompt`, every `ReviewConfig.Prompt` (per-worker and
+  judge, in `review_profiles` and the legacy `review` map), and every
+  `ReviewProfileConfig.Task` land verbatim in prompts of agents that
+  investigate/review spawn with approval checks disabled, so a committed value
+  would let a pull request steer a permission-bypassed agent. Task and Prompt
+  are adjacent sections of the same composed prompt, which is why gating one
+  without the other would be a formality. `settings.enforceAgentPromptTrust`
+  (`settings/agent_prompt_trust.go`) honors them only from a developer-owned
+  layer: clone-local preferences (in `.git/`, unreachable by clone) or a
+  `classifyLocalSettingsDeep`-verified `.entire/settings.local.json`.
+  Provenance follows merge order (local replaces investigate wholesale and
+  review profiles per profile name). Rejection is a downgrade recorded in
+  `EntireSettings.AgentPromptRejections()`, and review/investigate print a
+  one-line stderr notice for fields they would have used — suppressed for a
+  dropped task equal to review's built-in default, which the fallback
+  reproduces anyway (the non-interactive first-run setup persists exactly
+  that). Deliberately ungated, each with a mechanism or reason: Skills
+  (validated against installed skills before spawning), Agent/Model (registry
+  keys and routing hints), review_default_profile (selects among profiles whose
+  instruction content is itself gated).
+  `TestAgentPromptGate_CoversEveryReviewConfigInSchema`
+  pins that a future `ReviewConfig` placement cannot bypass the gate.
+- **A tracked `.entire/settings.local.json` is ignored wholesale**: the local layer's premise is that it is per-clone and per-developer (it is gitignored, `entire enable --local` writes it, and `CheckpointRemoteIsLocalOnly` treats presence there as proof the developer chose it). `.gitignore` does not apply to an already-tracked path, so a committed one arrives by cloning and would override project settings for everyone. `loadMergedSettings` drops the layer when the file is **proven** tracked, records `EntireSettings.LocalLayerRejection()`, and the redaction consumer prints it with the `git rm --cached` fix. It never errors — one committed file must not brick `status`/`doctor`. Two deliberately opposite failure directions, expressed as the three-state `localTrust` (`localUnverifiable` is the zero value so a forgotten assignment fails safe): an *unverifiable* repo keeps the layer (losing all local settings is worse than the risk) but still drops the exec-bearing settings, OPF `command` and `external_agents` (being wrong there means running someone else's binary); *no* repository counts as proof of locality. `CheckpointRemoteIsLocalOnly` reads the raw file outside the loader, so it repeats the check itself.
 - Safe to use on main/master since it never modifies commit history
 
 #### Key Files
 
-- `strategy.go` - Interface definition and context structs (`StepContext`, `TaskStepContext`, `RewindPoint`, etc.)
-- `common.go` - Helpers for metadata extraction, tree building, rewind validation, `ListCheckpoints()`
-- `manual_commit*.go` - Manual-commit strategy: main impl, types, session state, condensation, rewind, git ops, logs, hook handlers (prepare-commit-msg, post-commit, post-rewrite, pre-push), reset
+- `strategy.go` - Shared types only, no behaviour: the sentinel errors (`ErrNoMetadata`, `ErrNoSession`, `ErrNotTaskCheckpoint`, `ErrEmptyRepository`), the argument and result structs (`SessionInfo`, `PendingCheckpoint`, `StepContext`, `TaskStepContext`, `TaskCheckpoint`, `SubagentCheckpoint`, `RestoredSession`), and `TaskMetadataDir()`. The strategy type itself and its constructor live in `manual_commit.go`.
+- `common.go` - Helpers for metadata extraction, tree building, `ListCheckpoints()`
+- `manual_commit*.go` - Manual-commit strategy: main impl, types, session state, condensation, pending-checkpoint listing + log restore (`manual_commit_pending.go`), git ops, logs, hook handlers (prepare-commit-msg, post-commit, post-rewrite, pre-push), reset
 - `manual_commit_opf_rewrite.go` - Pre-push OPF re-redaction: walks unpushed v1 commits, runs OPF over their blobs, rebuilds commits with `Entire-OPF-Applied: true` trailer, CAS-updates the local ref. Sentinel error types (use `errors.As`): `V1DivergedError`, `BootstrapTooLargeError`, `V1RefMovedError`, `OPFRuntimeFailedError`, `OPFBatchTooLargeError`, `OPFRawBytesTooLargeError`, `OPFNoCategoriesError` (OPF enabled with zero effective categories — the pre-push decision and the rewrite both fail closed instead of stamping the trailer without a scan).
+- `manual_commit_opf_refs.go` - The git-refs half of pre-push OPF: `RewriteQueuedCheckpointRefsWithOPF` walks the push queue and rewrites every unpushed commit on each queued ref, reusing the v1 rewrite's blob walk, caps, and error types. See the OPF bullet above for why the two backends fail closed differently.
 - `settings/opf_command_trust.go` - Ownership gate for the executed OPF `command` (local-only + untracked); see the OPF trust-boundary bullet above
 - `cleanup.go` - Cleanup discovery/deletion for shadow branches, session states, and checkpoint metadata
 - `session_state.go` - Package-level session state functions
@@ -753,7 +1944,7 @@ The phase state machine, metadata directory layout, sharded checkpoint format, m
 
 #### When Modifying the Strategy
 
-- The strategy must implement the full `Strategy` interface
+- Adding a method to `*ManualCommitStrategy` is enough — there is no interface to satisfy, and no second implementation to keep in step
 - Test with `mise run test` - strategy tests are in `*_test.go` files
 - Keep this file and `docs/architecture/sessions-and-checkpoints.md` current when changing strategy behavior (`AGENTS.md` is a symlink to this file)
 

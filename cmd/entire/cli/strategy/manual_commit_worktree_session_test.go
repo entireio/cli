@@ -8,13 +8,15 @@ import (
 	"testing"
 	"time"
 
+	"github.com/go-git/go-git/v6/plumbing"
+	"github.com/stretchr/testify/require"
+
+	"github.com/entireio/cli/cmd/entire/cli/entiredir"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 	"github.com/entireio/cli/cmd/entire/cli/trailers"
-	"github.com/go-git/go-git/v6/plumbing"
-	"github.com/stretchr/testify/require"
 )
 
 func TestManualCommitStrategy_FindSessionsForWorktree_MatchesParentSessionFromNestedWorktree(t *testing.T) {
@@ -350,15 +352,19 @@ func TestManualCommitStrategy_FindSessionsForWorktree_WarnsOnAmbiguousSiblingSes
 
 	t.Chdir(commitWorktree)
 	clearSessionMatchCaches()
-	require.NoError(t, logging.Init(ctx, "warn-test-session"))
-	t.Cleanup(logging.Close)
+	initialized, logErr := logging.New(logging.Config{Root: entiredir.OpenerAt(commitWorktree), Dir: logging.LogsName})
+	require.NoError(t, logErr)
+	require.NotNil(t, initialized)
+	ctx = logging.WithLogger(ctx, initialized)
+	ctx = logging.WithSessionID(ctx, "warn-test-session")
+	t.Cleanup(func() { _ = initialized.Close() })
 
 	finder := &ManualCommitStrategy{}
 	matching, err := finder.findSessionsForWorktree(ctx, commitWorktree)
 	require.NoError(t, err)
 	require.Empty(t, matching)
 
-	logging.Close()
+	require.NoError(t, initialized.Close())
 	logs := readSessionMatchLogs(t, commitWorktree)
 	require.Contains(t, logs, `"level":"WARN"`, "ambiguous sibling sessions must be surfaced at WARN, not DEBUG")
 	require.Contains(t, logs, "ambiguous sessions across worktrees")
@@ -413,11 +419,7 @@ func createSessionMatchWorktree(t *testing.T, repoDir, worktreeDir, branch strin
 	t.Helper()
 
 	require.NoError(t, os.MkdirAll(filepath.Dir(worktreeDir), 0o755))
-	cmd := exec.CommandContext(context.Background(), "git", "worktree", "add", worktreeDir, "-b", branch)
-	cmd.Dir = repoDir
-	cmd.Env = testutil.GitIsolatedEnv()
-	output, err := cmd.CombinedOutput()
-	require.NoError(t, err, "git worktree add output:\n%s", output)
+	testutil.RunGit(t, repoDir, "worktree", "add", worktreeDir, "-b", branch)
 }
 
 func removeSessionMatchWorktree(repoDir, worktreeDir string) {

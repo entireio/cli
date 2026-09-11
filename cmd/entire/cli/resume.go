@@ -7,7 +7,6 @@ import (
 	"io"
 	"log/slog"
 	"os"
-	"path/filepath"
 	"sort"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
@@ -79,15 +78,6 @@ most recent commit with a checkpoint.  You'll be prompted to confirm resuming in
 }
 
 func runResume(ctx context.Context, cmd *cobra.Command, branchName string, force bool) error {
-	// Only initialize logging when inside a git worktree to avoid
-	// creating .entire/logs/ in arbitrary directories.
-	if _, err := paths.WorktreeRoot(ctx); err == nil {
-		logging.SetLogLevelGetter(GetLogLevel)
-		if err := logging.Init(ctx, ""); err == nil {
-			defer logging.Close()
-		}
-	}
-
 	w := cmd.OutOrStdout()
 	errW := cmd.ErrOrStderr()
 
@@ -171,13 +161,6 @@ func switchToBranchForResume(ctx context.Context, w, errW io.Writer, branchName 
 // branch. The interactive picker uses this so that selecting one of several
 // sessions on the same branch resumes exactly that session.
 func resumeSessionOnBranch(ctx context.Context, cmd *cobra.Command, branchName string, checkpointID id.CheckpointID, force bool) error {
-	if _, err := paths.WorktreeRoot(ctx); err == nil {
-		logging.SetLogLevelGetter(GetLogLevel)
-		if err := logging.Init(ctx, ""); err == nil {
-			defer logging.Close()
-		}
-	}
-
 	w := cmd.OutOrStdout()
 	errW := cmd.ErrOrStderr()
 
@@ -697,7 +680,7 @@ func findCheckpointInHistory(start *object.Commit, stopAt *plumbing.Hash) *branc
 	current := start
 	for current != nil && totalChecked < maxCommits {
 		// Stop if we've reached the boundary
-		if stopAt != nil && current.Hash == *stopAt {
+		if stopAt != nil && current.Hash.Equal(*stopAt) {
 			break
 		}
 
@@ -791,7 +774,9 @@ func checkRemoteMetadata(
 	var checkpointURL string
 	var resolveErr error
 	if hasCheckpointRemote {
-		checkpointURL, resolveErr = remote.FetchURL(ctx)
+		// The elected remote joins FetchURL's ownership vote (see
+		// strategy.LeadCheckpointReadRemote); guarded by hasCheckpointRemote.
+		checkpointURL, resolveErr = remote.FetchURL(ctx, remote.FetchURLOptions{LeadReadRemote: strategy.LeadCheckpointReadRemote(ctx)})
 		if resolveErr == nil {
 			if fetchErr := strategy.FetchMetadataBranch(ctx, checkpointURL); fetchErr == nil {
 				freshRepo, freshErr := openRepository(ctx)
@@ -915,8 +900,8 @@ func restoreResumeSessions(ctx context.Context, w, errW io.Writer, metadata *str
 	checkpointID := metadata.CheckpointID
 	sessionID := metadata.SessionID
 
-	// Resolve agent from checkpoint metadata (same as rewind)
-	ag, err := strategy.ResolveAgentForRewind(metadata.Agent)
+	// Resolve agent from checkpoint metadata
+	ag, err := strategy.ResolveAgentForResume(metadata.Agent)
 	if err != nil {
 		return nil, fmt.Errorf("failed to resolve agent: %w", err)
 	}
@@ -940,7 +925,9 @@ func restoreResumeSessions(ctx context.Context, w, errW io.Writer, metadata *str
 		return nil, fmt.Errorf("failed to determine session directory: %w", err)
 	}
 
-	// Create directory if it doesn't exist
+	// Create the agent's session directory. This is the one place it is created
+	// from the outside — agent.OpenSessionStore requires it to exist, because a
+	// store for a directory that is not there has nothing to resolve.
 	if err := os.MkdirAll(sessionDir, 0o700); err != nil {
 		return nil, fmt.Errorf("failed to create session directory: %w", err)
 	}
@@ -949,8 +936,8 @@ func restoreResumeSessions(ctx context.Context, w, errW io.Writer, metadata *str
 	strat := GetStrategy(ctx)
 
 	// Use RestoreLogsOnly via LogsOnlyRestorer interface for multi-session support
-	// Create a logs-only rewind point with Agent populated (same as rewind)
-	point := strategy.RewindPoint{
+	// Create a logs-only pending checkpoint with Agent populated
+	point := strategy.PendingCheckpoint{
 		IsLogsOnly:   true,
 		CheckpointID: checkpointID,
 		Agent:        metadata.Agent,
@@ -989,7 +976,7 @@ func displayRestoredSessions(w io.Writer, sessions []strategy.RestoredSession) e
 
 	isMulti := len(sessions) > 1
 	for i, sess := range sessions {
-		sessionAgent, err := strategy.ResolveAgentForRewind(sess.Agent)
+		sessionAgent, err := strategy.ResolveAgentForResume(sess.Agent)
 		if err != nil {
 			return fmt.Errorf("failed to resolve agent for session %s: %w", sess.SessionID, err)
 		}
@@ -1047,17 +1034,13 @@ func restoreSingleSession(ctx context.Context, w io.Writer, ag agent.Agent, sess
 	// By default, never overwrite a session log that already exists locally: the
 	// on-disk transcript is the live session the user is resuming, so we keep it
 	// and just print the resume command. --force overwrites it from the checkpoint.
-	if !force {
-		if _, statErr := os.Stat(sessionLogPath); statErr == nil {
-			fmt.Fprintf(w, "Keeping existing local session log for '%s' (use --force to overwrite from checkpoint).\n", sessionID)
-			return restored, true, nil
-		}
+	if !force && sessionLogExists(ag, repoRoot, sessionLogPath) {
+		fmt.Fprintf(w, "Keeping existing local session log for '%s' (use --force to overwrite from checkpoint).\n", sessionID)
+		return restored, true, nil
 	}
 
-	// Ensure parent directory exists
-	if err := os.MkdirAll(filepath.Dir(sessionLogPath), 0o750); err != nil {
-		return strategy.RestoredSession{}, false, fmt.Errorf("failed to create session directory: %w", err)
-	}
+	// No MkdirAll here: WriteSession routes through agent.WriteSessionFile,
+	// which creates the parent as part of the write.
 
 	agentSession := &agent.AgentSession{
 		SessionID:  sessionID,
@@ -1088,8 +1071,24 @@ func restoreSingleSession(ctx context.Context, w io.Writer, ag agent.Agent, sess
 	return restored, true, nil
 }
 
+// sessionLogExists reports whether a session log is already on disk, checked
+// through the agent's own session store rather than by statting the path. Lstat,
+// not Stat: a present-but-dangling log still exists and must not be silently
+// overwritten, which is the same distinction the rewind path draws.
+func sessionLogExists(ag agent.Agent, repoRoot, sessionLogPath string) bool {
+	store, err := agent.OpenSessionStore(ag, repoRoot)
+	if err != nil {
+		return false
+	}
+	name, err := store.Name(sessionLogPath)
+	if err != nil {
+		return false
+	}
+	return store.Exists(name)
+}
+
 func unavailableSessionLogResult(w io.Writer, ag agent.Agent, restored strategy.RestoredSession, sessionLogPath string, force bool) (strategy.RestoredSession, bool, error) {
-	if _, statErr := os.Stat(sessionLogPath); statErr == nil {
+	if _, statErr := agent.StatTranscriptFile(sessionLogPath); statErr == nil {
 		if force {
 			fmt.Fprintf(w, "Checkpoint session log for '%s' not available; keeping existing local session log.\n", restored.SessionID)
 		} else {

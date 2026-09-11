@@ -63,7 +63,7 @@ func TestInstallHooks_FreshInstall(t *testing.T) {
 	assertFactoryHookExists(t, settings.Hooks.PreCompact, "", agentpkg.WrapProductionSilentHookCommand("entire hooks factoryai-droid pre-compact"), "PreCompact")
 
 	// Verify AreHooksInstalled returns true
-	if !agent.AreHooksInstalled(context.Background()) {
+	if !hooksInstalledNow(t, agent) {
 		t.Error("AreHooksInstalled() should return true after install")
 	}
 }
@@ -141,80 +141,83 @@ func TestInstallHooks_Force(t *testing.T) {
 	}
 }
 
-func TestInstallHooks_PermissionsDeny_FreshInstall(t *testing.T) {
+// TestInstallHooks_DoesNotAddDenyRule pins the retirement: a fresh install must
+// leave no metadata deny rule behind. See agent.MetadataDenyRule for why.
+func TestInstallHooks_DoesNotAddDenyRule(t *testing.T) {
 	tempDir := t.TempDir()
 	t.Chdir(tempDir)
 
-	agent := &FactoryAIDroidAgent{}
-	_, err := agent.InstallHooks(context.Background(), false)
+	a := &FactoryAIDroidAgent{}
+	_, err := a.InstallHooks(context.Background(), false)
 	if err != nil {
 		t.Fatalf("InstallHooks() error = %v", err)
 	}
 
 	perms := readFactoryPermissions(t, tempDir)
-
-	// Verify permissions.deny contains our rule
-	if !slices.Contains(perms.Deny, metadataDenyRule) {
-		t.Errorf("permissions.deny = %v, want to contain %q", perms.Deny, metadataDenyRule)
+	if slices.Contains(perms.Deny, agentpkg.MetadataDenyRule) {
+		t.Errorf("permissions.deny = %v, want no metadata deny rule", perms.Deny)
 	}
 }
 
-func TestInstallHooks_PermissionsDeny_Idempotent(t *testing.T) {
+// TestInstallHooks_RemovesStaleDenyRule is the migration: a config written by an
+// older CLI still carries the rule, and a plain `entire enable` (no --force) has
+// to drop it. This is the only thing that heals an existing repo on reinstall.
+func TestInstallHooks_RemovesStaleDenyRule(t *testing.T) {
 	tempDir := t.TempDir()
 	t.Chdir(tempDir)
 
-	agent := &FactoryAIDroidAgent{}
-	// First install
-	_, err := agent.InstallHooks(context.Background(), false)
-	if err != nil {
-		t.Fatalf("first InstallHooks() error = %v", err)
-	}
-
-	// Second install
-	_, err = agent.InstallHooks(context.Background(), false)
-	if err != nil {
-		t.Fatalf("second InstallHooks() error = %v", err)
-	}
-
-	perms := readFactoryPermissions(t, tempDir)
-
-	// Count occurrences of our rule
-	count := 0
-	for _, rule := range perms.Deny {
-		if rule == metadataDenyRule {
-			count++
-		}
-	}
-	if count != 1 {
-		t.Errorf("permissions.deny contains %d copies of rule, want 1", count)
-	}
-}
-
-func TestInstallHooks_PermissionsDeny_PreservesUserRules(t *testing.T) {
-	tempDir := t.TempDir()
-	t.Chdir(tempDir)
-
-	// Create settings.json with existing user deny rule
 	writeFactorySettingsFile(t, tempDir, `{
   "permissions": {
-    "deny": ["Bash(rm -rf *)"]
+    "deny": ["`+agentpkg.MetadataDenyRule+`"]
   }
 }`)
 
-	agent := &FactoryAIDroidAgent{}
-	_, err := agent.InstallHooks(context.Background(), false)
-	if err != nil {
+	a := &FactoryAIDroidAgent{}
+	if _, err := a.InstallHooks(context.Background(), false); err != nil {
 		t.Fatalf("InstallHooks() error = %v", err)
 	}
 
 	perms := readFactoryPermissions(t, tempDir)
-
-	// Verify both rules exist
-	if !slices.Contains(perms.Deny, "Bash(rm -rf *)") {
-		t.Errorf("permissions.deny = %v, want to contain user rule", perms.Deny)
+	if slices.Contains(perms.Deny, agentpkg.MetadataDenyRule) {
+		t.Errorf("permissions.deny = %v, want the stale rule removed", perms.Deny)
 	}
-	if !slices.Contains(perms.Deny, metadataDenyRule) {
-		t.Errorf("permissions.deny = %v, want to contain Entire rule", perms.Deny)
+
+	// And a second install stays clean rather than re-adding it.
+	if _, err := a.InstallHooks(context.Background(), false); err != nil {
+		t.Fatalf("second InstallHooks() error = %v", err)
+	}
+	perms = readFactoryPermissions(t, tempDir)
+	if slices.Contains(perms.Deny, agentpkg.MetadataDenyRule) {
+		t.Errorf("permissions.deny = %v, want it to stay removed", perms.Deny)
+	}
+}
+
+// TestInstallHooks_RemovesOnlyOurDenyRule is the safety half of the migration:
+// removal is keyed on the exact rule string Entire wrote, so a user's own deny
+// rules survive untouched.
+func TestInstallHooks_RemovesOnlyOurDenyRule(t *testing.T) {
+	tempDir := t.TempDir()
+	t.Chdir(tempDir)
+
+	writeFactorySettingsFile(t, tempDir, `{
+  "permissions": {
+    "deny": ["Bash(rm -rf *)", "`+agentpkg.MetadataDenyRule+`", "Read(./.env)"]
+  }
+}`)
+
+	a := &FactoryAIDroidAgent{}
+	if _, err := a.InstallHooks(context.Background(), false); err != nil {
+		t.Fatalf("InstallHooks() error = %v", err)
+	}
+
+	perms := readFactoryPermissions(t, tempDir)
+	for _, want := range []string{"Bash(rm -rf *)", "Read(./.env)"} {
+		if !slices.Contains(perms.Deny, want) {
+			t.Errorf("permissions.deny = %v, want to still contain user rule %q", perms.Deny, want)
+		}
+	}
+	if slices.Contains(perms.Deny, agentpkg.MetadataDenyRule) {
+		t.Errorf("permissions.deny = %v, want the Entire rule removed", perms.Deny)
 	}
 }
 
@@ -273,13 +276,16 @@ func TestInstallHooks_PermissionsDeny_PreservesUnknownFields(t *testing.T) {
 		t.Errorf("permissions.ask = %v, want [Write(**), Bash(*)]", askRules)
 	}
 
-	// Verify the deny rule was added
-	var denyRules []string
-	if err := json.Unmarshal(rawPermissions["deny"], &denyRules); err != nil {
-		t.Fatalf("failed to parse permissions.deny: %v", err)
-	}
-	if !slices.Contains(denyRules, metadataDenyRule) {
-		t.Errorf("permissions.deny = %v, want to contain %q", denyRules, metadataDenyRule)
+	// The deny rule is no longer added, and an empty deny array is dropped
+	// rather than left behind.
+	if denyRaw, ok := rawPermissions["deny"]; ok {
+		var denyRules []string
+		if err := json.Unmarshal(denyRaw, &denyRules); err != nil {
+			t.Fatalf("failed to parse permissions.deny: %v", err)
+		}
+		if slices.Contains(denyRules, agentpkg.MetadataDenyRule) {
+			t.Errorf("permissions.deny = %v, want no metadata deny rule", denyRules)
+		}
 	}
 
 	// Verify "allow" is preserved
@@ -456,7 +462,7 @@ func TestUninstallHooks(t *testing.T) {
 	}
 
 	// Verify hooks are installed
-	if !agent.AreHooksInstalled(context.Background()) {
+	if !hooksInstalledNow(t, agent) {
 		t.Error("hooks should be installed before uninstall")
 	}
 
@@ -467,7 +473,7 @@ func TestUninstallHooks(t *testing.T) {
 	}
 
 	// Verify hooks are removed
-	if agent.AreHooksInstalled(context.Background()) {
+	if hooksInstalledNow(t, agent) {
 		t.Error("hooks should not be installed after uninstall")
 	}
 }
@@ -482,6 +488,24 @@ func TestUninstallHooks_NoSettingsFile(t *testing.T) {
 	err := agent.UninstallHooks(context.Background())
 	if err != nil {
 		t.Fatalf("UninstallHooks() should not error when no settings file: %v", err)
+	}
+}
+
+// TestUninstallHooks_UnreadableSettingsErrors pins the absent-vs-unreadable
+// split: an absent settings file means nothing to uninstall, but a read error
+// must surface instead of reporting success with hooks still on disk. The
+// settings path is created as a directory so os.ReadFile fails with a
+// non-ErrNotExist error on every platform.
+func TestUninstallHooks_UnreadableSettingsErrors(t *testing.T) {
+	tempDir := t.TempDir()
+	t.Chdir(tempDir)
+
+	if err := os.MkdirAll(filepath.Join(tempDir, ".factory", FactorySettingsFileName), 0o755); err != nil {
+		t.Fatalf("MkdirAll() error = %v", err)
+	}
+
+	if err := (&FactoryAIDroidAgent{}).UninstallHooks(context.Background()); err == nil {
+		t.Fatal("UninstallHooks() = nil for unreadable settings, want error")
 	}
 }
 
@@ -530,29 +554,22 @@ func TestUninstallHooks_RemovesDenyRule(t *testing.T) {
 	tempDir := t.TempDir()
 	t.Chdir(tempDir)
 
+	// Install no longer adds the rule, so stand in for a config written by an
+	// older CLI: uninstall still has to clean it up.
+	writeFactorySettingsFile(t, tempDir, `{
+  "permissions": {
+    "deny": ["`+agentpkg.MetadataDenyRule+`"]
+  }
+}`)
+
 	agent := &FactoryAIDroidAgent{}
 
-	// First install (which adds the deny rule)
-	_, err := agent.InstallHooks(context.Background(), false)
-	if err != nil {
-		t.Fatalf("InstallHooks() error = %v", err)
-	}
-
-	// Verify deny rule was added
-	perms := readFactoryPermissions(t, tempDir)
-	if !slices.Contains(perms.Deny, metadataDenyRule) {
-		t.Fatal("deny rule should be present after install")
-	}
-
-	// Uninstall
-	err = agent.UninstallHooks(context.Background())
-	if err != nil {
+	if err := agent.UninstallHooks(context.Background()); err != nil {
 		t.Fatalf("UninstallHooks() error = %v", err)
 	}
 
-	// Verify deny rule was removed
-	perms = readFactoryPermissions(t, tempDir)
-	if slices.Contains(perms.Deny, metadataDenyRule) {
+	perms := readFactoryPermissions(t, tempDir)
+	if slices.Contains(perms.Deny, agentpkg.MetadataDenyRule) {
 		t.Error("deny rule should be removed after uninstall")
 	}
 }
@@ -589,7 +606,7 @@ func TestUninstallHooks_PreservesUserDenyRules(t *testing.T) {
 	}
 
 	// Verify entire deny rule is removed
-	if slices.Contains(perms.Deny, metadataDenyRule) {
+	if slices.Contains(perms.Deny, agentpkg.MetadataDenyRule) {
 		t.Errorf("entire deny rule should be removed, got: %v", perms.Deny)
 	}
 }
@@ -720,4 +737,20 @@ func assertFactoryHookExists(t *testing.T, matchers []FactoryHookMatcher, matche
 		}
 	}
 	t.Errorf("%s was not found (matcher=%q, command=%q)", description, matcher, command)
+}
+
+// hooksInstalledNow reports whether the agent's hooks are installed, failing the
+// test if it could not tell. Built-in agents read a local config file where
+// absent means absent, so an error here is a bug, not a state to tolerate.
+func hooksInstalledNow(t *testing.T, ag interface {
+	AreHooksInstalled(ctx context.Context) (bool, error)
+},
+) bool {
+	t.Helper()
+
+	installed, err := ag.AreHooksInstalled(context.Background())
+	if err != nil {
+		t.Fatalf("AreHooksInstalled() error = %v", err)
+	}
+	return installed
 }

@@ -318,14 +318,51 @@ func serveRepoCreate(t *testing.T) <-chan []byte {
 // carrying the control-plane persistent flags, mirroring execRepoList.
 func execRepoCreate(t *testing.T, args ...string) error {
 	t.Helper()
+	return execRepoCreateNamed(t, "web", args...)
+}
+
+// execRepoCreateNamed is execRepoCreate with the repo name itself under test.
+func execRepoCreateNamed(t *testing.T, name string, args ...string) error {
+	t.Helper()
 	parent := &cobra.Command{Use: "repo"}
 	addControlPlaneFlags(parent)
 	parent.AddCommand(newRepoCreateCmd())
 	var out, errOut bytes.Buffer
 	parent.SetOut(&out)
 	parent.SetErr(&errOut)
-	parent.SetArgs(append([]string{"create", "web", "--project", testProjectULID}, args...))
+	parent.SetArgs(append([]string{"create", name, "--project", testProjectULID}, args...))
 	return parent.ExecuteContext(t.Context())
+}
+
+// TestRepoCreate_RejectsGitSuffix pins that the CLI refuses a name it would not
+// be able to address afterwards. The server accepts "web.git" — an interior dot
+// is legal — but every ref parser drops the suffix (see gitDirSuffix), so such
+// a repo would be reachable only by ULID. The check must fire before the
+// request, since the server would happily create it.
+//
+// Not parallel: swaps the package-level activeCoreClient seam.
+func TestRepoCreate_RejectsGitSuffix(t *testing.T) {
+	for _, name := range []string{"web.git", "trails.el.git"} {
+		t.Run(name, func(t *testing.T) {
+			bodyCh := serveRepoCreate(t)
+			err := execRepoCreateNamed(t, name)
+			require.ErrorContains(t, err, gitDirSuffix)
+			require.ErrorContains(t, err, strings.TrimSuffix(name, gitDirSuffix))
+			select {
+			case raw := <-bodyCh:
+				t.Fatalf("no create request expected, got body %s", raw)
+			default:
+			}
+		})
+	}
+
+	t.Run("a dotted name that does not end in the suffix is accepted", func(t *testing.T) {
+		bodyCh := serveRepoCreate(t)
+		require.NoError(t, execRepoCreateNamed(t, "trails.el"))
+		var body map[string]any
+		require.NoError(t, json.Unmarshal(<-bodyCh, &body))
+		require.Equal(t, "trails.el", body["name"])
+	})
 }
 
 // TestRepoCreate_ObjectFormat pins the --object-format wiring: a set flag

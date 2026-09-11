@@ -46,9 +46,12 @@ func TestGenerateText_PromptViaStdin(t *testing.T) {
 			},
 		},
 		{
-			name:          "copilot",
-			agent:         &copilotcli.CopilotCLIAgent{},
-			requiredFlags: []string{"--allow-all-tools", "--disable-builtin-mcps"},
+			name:  "copilot",
+			agent: &copilotcli.CopilotCLIAgent{},
+			// The full tool policy is pinned in the copilotcli package
+			// (TestGenerateText_PinsMinimalToolSurface). Here only the flags
+			// tied to this test's stdin contract are asserted.
+			requiredFlags: []string{"--disable-builtin-mcps", "--no-ask-user"},
 		},
 		{
 			name:          "cursor",

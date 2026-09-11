@@ -18,8 +18,8 @@ func TestRunnerDefaults_AreValidAndComplete(t *testing.T) {
 	if err != nil {
 		t.Fatalf("runnerdefaults.Files: %v", err)
 	}
-	if len(files) < 7 {
-		t.Fatalf("expected at least 7 default runners, got %d", len(files))
+	if len(files) < 6 {
+		t.Fatalf("expected at least 6 default runners, got %d", len(files))
 	}
 	for _, f := range files {
 		var doc struct {
@@ -46,7 +46,6 @@ func TestRunnerDefaults_AreValidAndComplete(t *testing.T) {
 		contractToken := map[string]string{
 			"trail_monitor":        `"value"`,
 			"code_review_comments": `"comments"`,
-			"trail_review_focus":   `"files"`,
 			"trail_summary":        "Problem",
 		}[doc.Output.ResultType]
 		if contractToken == "" {
@@ -76,25 +75,25 @@ func TestWriteTuneDebug(t *testing.T) {
 	}
 }
 
-func TestEnsureRunnersPresent_CreatesDefaultsWhenEmpty(t *testing.T) {
+func TestCreateDefaultRunners_WritesTheWholeSet(t *testing.T) {
 	t.Parallel()
 
 	repoRoot := t.TempDir()
-	var out, errOut bytes.Buffer
+	var out bytes.Buffer
 
-	created, err := ensureRunnersPresent(&out, &errOut, repoRoot, true /* assumeYes */)
+	created, err := createDefaultRunners(&out, repoRoot)
 	if err != nil {
-		t.Fatalf("ensureRunnersPresent: %v", err)
+		t.Fatalf("createDefaultRunners: %v", err)
 	}
-	if len(created) < 7 {
-		t.Fatalf("expected >=7 created runner IDs, got %d: %v", len(created), created)
+	if len(created) < 6 {
+		t.Fatalf("expected >=6 created runner IDs, got %d: %v", len(created), created)
 	}
 
 	written, err := filepath.Glob(filepath.Join(repoRoot, ".entire", "runners", "*.json"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(written) < 7 {
+	if len(written) < 6 {
 		t.Fatalf("expected the default set written, got %d files", len(written))
 	}
 	// And every written file is loadable by the tuner.
@@ -107,32 +106,29 @@ func TestEnsureRunnersPresent_CreatesDefaultsWhenEmpty(t *testing.T) {
 	}
 }
 
-func TestEnsureRunnersPresent_NoopWhenRunnersExist(t *testing.T) {
+// TestRunnerConfigsExist_GatesTheScaffold covers what used to be
+// createDefaultRunners' own no-op check: the caller asks this predicate and
+// only writes when it says the repo has none, so the invariant has one home.
+func TestRunnerConfigsExist_GatesTheScaffold(t *testing.T) {
 	t.Parallel()
 
 	repoRoot := t.TempDir()
+	if runnerConfigsExist(repoRoot) {
+		t.Error("an empty repo should report no runner configs")
+	}
+
 	dir := filepath.Join(repoRoot, ".entire", "runners")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
+	}
+	if runnerConfigsExist(repoRoot) {
+		t.Error("an empty runners directory should report no runner configs")
 	}
 	if err := os.WriteFile(filepath.Join(dir, "trail-risk.json"),
 		[]byte(`{"id":"trail-risk","prompt":{"template":"x"}}`), 0o644); err != nil {
 		t.Fatal(err)
 	}
-
-	created, err := ensureRunnersPresent(&bytes.Buffer{}, &bytes.Buffer{}, repoRoot, true)
-	if err != nil {
-		t.Fatalf("ensureRunnersPresent: %v", err)
-	}
-	if len(created) != 0 {
-		t.Errorf("expected no created runners when they already exist, got %v", created)
-	}
-	// No defaults should have been scaffolded over the existing runner.
-	after, err := filepath.Glob(filepath.Join(dir, "*.json"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(after) != 1 {
-		t.Errorf("expected the existing single runner untouched, got %d files", len(after))
+	if !runnerConfigsExist(repoRoot) {
+		t.Error("a repo with a runner config should report that it has one")
 	}
 }

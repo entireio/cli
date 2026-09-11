@@ -24,7 +24,11 @@ import (
 	"slices"
 	"time"
 
+	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
+	"github.com/entireio/cli/cmd/entire/cli/osroot"
 	"github.com/gofrs/flock"
+
+	"github.com/entireio/cli/internal/entireclient/userdirs"
 )
 
 // Context is a single kubectl-style entry: which core to talk to, as
@@ -58,13 +62,30 @@ type File struct {
 	Contexts []*Context `json:"contexts,omitempty"`
 }
 
+// contextsFileName is the contexts file's name inside the config directory.
+// It is the only name configRoot ever resolves.
+const contextsFileName = "contexts.json"
+
 // FilePath returns $configDir/contexts.json after ensuring the directory
-// exists with 0700 perms.
+// exists and is private to its owner — 0700, or stricter if the user already
+// made it so; see userdirs.EnsurePrivateDir.
+//
+// The path is for messages and for the flock, which takes one. Reads and writes
+// go through configRoot.
 func FilePath(configDir string) (string, error) {
-	if err := os.MkdirAll(configDir, 0700); err != nil {
+	// Before EnsurePrivateDir, not after. configRoot refuses a relative
+	// directory, but it runs at the READ, several steps past this one: by then
+	// EnsurePrivateDir has created ./<value> relative to the working directory
+	// and lockFile has put a .lock inside it. Creating that directory is the
+	// exact mistake the check exists to prevent, so it cannot happen on the way
+	// to reporting it.
+	if err := userdirs.RequireAbsoluteOverride("config dir", configDir); err != nil {
+		return "", err //nolint:wrapcheck // the error already names the directory and its value
+	}
+	if err := userdirs.EnsurePrivateDir(configDir); err != nil {
 		return "", fmt.Errorf("create config dir: %w", err)
 	}
-	return filepath.Join(configDir, "contexts.json"), nil
+	return filepath.Join(configDir, contextsFileName), nil
 }
 
 // Load reads contexts.json under configDir, returning an empty *File
@@ -80,7 +101,7 @@ func Load(configDir string) (*File, error) {
 		return nil, err
 	}
 	defer unlock()
-	return readNoLock(path)
+	return readNoLock(configDir)
 }
 
 // Save writes f to contexts.json atomically (temp+rename) under an
@@ -95,7 +116,7 @@ func Save(configDir string, f *File) error {
 		return err
 	}
 	defer unlock()
-	return writeNoLock(path, f)
+	return writeNoLock(configDir, f)
 }
 
 // ContextsForIssuer returns every context whose CoreURL matches issuer
@@ -195,7 +216,7 @@ func Modify(configDir string, fn func(*File) (changed bool, err error)) error {
 	}
 	defer unlock()
 
-	f, err := readNoLock(path)
+	f, err := readNoLock(configDir)
 	if err != nil {
 		return err
 	}
@@ -206,7 +227,7 @@ func Modify(configDir string, fn func(*File) (changed bool, err error)) error {
 	if !changed {
 		return nil
 	}
-	return writeNoLock(path, f)
+	return writeNoLock(configDir, f)
 }
 
 func lockFile(path string) (func(), error) {
@@ -228,10 +249,37 @@ func lockFile(path string) (func(), error) {
 	}, nil
 }
 
-func readNoLock(path string) (*File, error) {
-	// #nosec G304 -- path comes from ENTIRE_CONFIG_DIR or the user's home,
-	// the same trust boundary credentials.go runs under.
-	data, err := os.ReadFile(path)
+// configRoot returns the root over configDir and the contexts file's name
+// inside it.
+//
+// It takes the DIRECTORY, not the file. Anchoring on filepath.Dir of the target
+// looks equivalent — the paths are the same string — but it is not: it puts
+// every component the caller resolved above the root, so the root contains
+// exactly one fixed name and enforces nothing. The directory is what the caller
+// actually chose (userdirs.Config(), or $ENTIRE_CONFIG_DIR), so that is the base.
+//
+// A relative configDir is refused rather than absolutized. It arrives from
+// $ENTIRE_CONFIG_DIR (see userdirs.RequireAbsoluteOverride), and resolving it
+// against the working directory would put the login tokens in a different place
+// in every process — usually inside whatever repository the command was run
+// from. filepath.Abs used to launder exactly that into a plausible-looking path.
+func configRoot(configDir string) (*os.Root, string, error) {
+	if err := userdirs.RequireAbsoluteOverride("config dir", configDir); err != nil {
+		return nil, "", err //nolint:wrapcheck // the error already names the directory and its value
+	}
+	root, err := osroot.Shared(configDir)
+	if err != nil {
+		return nil, "", fmt.Errorf("open config dir: %w", err)
+	}
+	return root, contextsFileName, nil
+}
+
+func readNoLock(configDir string) (*File, error) {
+	root, name, err := configRoot(configDir)
+	if err != nil {
+		return nil, err
+	}
+	data, err := osroot.ReadFileNoFollow(root, name)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return &File{}, nil
@@ -248,20 +296,23 @@ func readNoLock(path string) (*File, error) {
 	return &f, nil
 }
 
-func writeNoLock(path string, f *File) error {
+func writeNoLock(configDir string, f *File) error {
 	data, err := json.MarshalIndent(f, "", "  ")
 	if err != nil {
 		return fmt.Errorf("marshal contexts: %w", err)
 	}
-	tmp, err := os.CreateTemp(filepath.Dir(path), ".contexts.json.tmp.*")
+	root, name, err := configRoot(configDir)
+	if err != nil {
+		return err
+	}
+	tmp, tmpName, err := jsonutil.CreateTempIn(root, name)
 	if err != nil {
 		return fmt.Errorf("create temp contexts file: %w", err)
 	}
-	tmpPath := tmp.Name()
 	cleanup := func() {
 		if tmp != nil {
 			_ = tmp.Close()
-			_ = os.Remove(tmpPath)
+			_ = root.Remove(tmpName) //nolint:errcheck // best-effort cleanup; a successful rename already consumed it
 		}
 	}
 	defer cleanup()
@@ -274,10 +325,10 @@ func writeNoLock(path string, f *File) error {
 	if err := tmp.Close(); err != nil {
 		return fmt.Errorf("close temp contexts file: %w", err)
 	}
-	if err := os.Chmod(tmpPath, 0600); err != nil {
+	if err := root.Chmod(tmpName, 0600); err != nil {
 		return fmt.Errorf("chmod temp contexts file: %w", err)
 	}
-	if err := os.Rename(tmpPath, path); err != nil {
+	if err := root.Rename(tmpName, name); err != nil {
 		return fmt.Errorf("rename temp contexts file: %w", err)
 	}
 	tmp = nil

@@ -46,6 +46,48 @@ func TestMarkSessionEnded_SetsPhaseEnded(t *testing.T) {
 		"markSessionEnded should set LastInteractionTime")
 }
 
+func TestMarkSessionEnded_ReservesEagerCondensationAttempt(t *testing.T) {
+	dir := setupGitRepoForPhaseTest(t)
+	t.Chdir(dir)
+
+	state := &strategy.SessionState{
+		SessionID: "test-session-end-reservation",
+		StartedAt: time.Now(),
+		Phase:     session.PhaseActive,
+		StepCount: 1,
+	}
+	require.NoError(t, strategy.SaveSessionState(context.Background(), state))
+
+	_, err := markSessionEnded(context.Background(), nil, state.SessionID, nil, endedNow)
+	require.NoError(t, err)
+
+	loaded, err := strategy.LoadSessionState(context.Background(), state.SessionID)
+	require.NoError(t, err)
+	require.NotNil(t, loaded)
+	require.False(t, loaded.PendingCondensationID().IsEmpty())
+}
+
+func TestMarkSessionEnded_EmptySessionMarksFullyCondensed(t *testing.T) {
+	dir := setupGitRepoForPhaseTest(t)
+	t.Chdir(dir)
+
+	state := &strategy.SessionState{
+		SessionID: "test-session-end-empty",
+		StartedAt: time.Now(),
+		Phase:     session.PhaseActive,
+	}
+	require.NoError(t, strategy.SaveSessionState(context.Background(), state))
+
+	_, err := markSessionEnded(context.Background(), nil, state.SessionID, nil, endedNow)
+	require.NoError(t, err)
+
+	loaded, err := strategy.LoadSessionState(context.Background(), state.SessionID)
+	require.NoError(t, err)
+	require.NotNil(t, loaded)
+	assert.True(t, loaded.FullyCondensed)
+	assert.True(t, loaded.PendingCondensationID().IsEmpty())
+}
+
 // TestMarkSessionEnded_IdleToEnded verifies IDLE → ENDED transition.
 func TestMarkSessionEnded_IdleToEnded(t *testing.T) {
 	dir := setupGitRepoForPhaseTest(t)

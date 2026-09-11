@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
+	"github.com/entireio/cli/cmd/entire/cli/execx"
 )
 
 // TextGenerationError carries captured subprocess output alongside a
@@ -44,6 +45,9 @@ func RunIsolatedTextGeneratorCLI(ctx context.Context, runner TextCommandRunner, 
 	cmd := runner(ctx, binary, args...)
 	cmd.Dir = os.TempDir()
 	cmd.Env = StripGitEnv(os.Environ())
+	// A killed provider CLI can leave a sandbox/MCP grandchild holding the
+	// output pipe open, which blocks cmd.Run past the ctx deadline. Bound it.
+	execx.TerminateOnCancel(cmd)
 	if stdin != "" {
 		cmd.Stdin = strings.NewReader(stdin)
 	}

@@ -6,11 +6,16 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 )
 
 const (
 	testSettingsEnabled  = `{"enabled": true}`
 	testSettingsDisabled = `{"enabled": false}`
+	// testSettingsGoredactOnly enables goredact and disables betterleaks — the
+	// non-default secret-scanner selection used across status scanner tests.
+	testSettingsGoredactOnly = `{"enabled": true, "redaction": {"betterleaks": {"enabled": false}, "goredact": {"enabled": true}}}`
 )
 
 func TestLoadEntireSettings_EnabledDefaultsToTrue(t *testing.T) {
@@ -325,5 +330,23 @@ func TestLoadEntireSettings_RejectsUnknownKeysInLocal(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "unknown field") {
 		t.Errorf("Error should mention 'unknown field', got: %v", err)
+	}
+}
+
+// TestAgentDisplayName_FallsBackToRegistryName pins the fallback for a name the
+// registry cannot resolve. These names are how the user learns what a command is
+// about to touch, or has left behind, so an unresolvable one must still appear:
+// dropping it lists one fewer agent than will be acted on, and returning "" puts
+// a gap where the name belongs ("  hooks are still installed").
+func TestAgentDisplayName_FallsBackToRegistryName(t *testing.T) {
+	t.Parallel()
+
+	const unregistered types.AgentName = "not-a-registered-agent"
+
+	if got := agentDisplayName(unregistered); got != string(unregistered) {
+		t.Errorf("agentDisplayName(%q) = %q, want the registry name back", unregistered, got)
+	}
+	if got := agentDisplayNames([]types.AgentName{unregistered}); len(got) != 1 || got[0] != string(unregistered) {
+		t.Errorf("agentDisplayNames(%q) = %q, want the name kept, not dropped", unregistered, got)
 	}
 }

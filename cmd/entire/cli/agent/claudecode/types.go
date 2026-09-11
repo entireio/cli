@@ -13,6 +13,7 @@ type ClaudeHooks struct {
 	SessionEnd       []ClaudeHookMatcher `json:"SessionEnd,omitempty"`
 	UserPromptSubmit []ClaudeHookMatcher `json:"UserPromptSubmit,omitempty"`
 	Stop             []ClaudeHookMatcher `json:"Stop,omitempty"`
+	SubagentStop     []ClaudeHookMatcher `json:"SubagentStop,omitempty"`
 	PreToolUse       []ClaudeHookMatcher `json:"PreToolUse,omitempty"`
 	PostToolUse      []ClaudeHookMatcher `json:"PostToolUse,omitempty"`
 }
@@ -65,6 +66,20 @@ type postToolHookInputRaw struct {
 	ToolResponse   struct {
 		AgentID string `json:"agentId"`
 	} `json:"tool_response"`
+}
+
+// subagentStopHookInputRaw is the JSON structure from the SubagentStop hook.
+// Per the Agent SDK docs this also carries hook_event_name and cwd, which
+// entire has no use for and so doesn't parse. agent_transcript_path is
+// parsed defensively: an absent field just leaves AgentTranscriptPath empty
+// rather than erroring, and the lifecycle layer then falls back to resolving
+// the subagent transcript from AgentID.
+type subagentStopHookInputRaw struct {
+	SessionID           string `json:"session_id"`
+	TranscriptPath      string `json:"transcript_path"`
+	AgentID             string `json:"agent_id"`
+	AgentTranscriptPath string `json:"agent_transcript_path"`
+	ToolUseID           string `json:"tool_use_id"`
 }
 
 // Tool names used in Claude Code transcripts

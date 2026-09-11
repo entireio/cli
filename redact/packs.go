@@ -8,8 +8,7 @@ import (
 	"io"
 	"io/fs"
 	"log/slog"
-	"os"
-	"path/filepath"
+	gopath "path"
 	"regexp"
 	"strings"
 
@@ -86,7 +85,7 @@ type Sample struct {
 // does not sanitize sourcePath beyond reading its extension.
 func ParsePack(data []byte, sourcePath string) (*Pack, error) {
 	var pack Pack
-	switch strings.ToLower(filepath.Ext(sourcePath)) {
+	switch strings.ToLower(gopath.Ext(sourcePath)) {
 	case ".json":
 		decoder := json.NewDecoder(bytes.NewReader(data))
 		decoder.DisallowUnknownFields()
@@ -137,7 +136,7 @@ func validatePack(p *Pack) error {
 	}
 
 	// Name must match filename stem so log lines and discovery stay consistent.
-	stem := strings.TrimSuffix(filepath.Base(p.sourcePath), filepath.Ext(p.sourcePath))
+	stem := strings.TrimSuffix(gopath.Base(p.sourcePath), gopath.Ext(p.sourcePath))
 	if stem != p.Name {
 		return fmt.Errorf("%s: pack name %q does not match filename stem %q", p.sourcePath, p.Name, stem)
 	}
@@ -175,28 +174,57 @@ func validateIdentifier(field, value, sourcePath string) error {
 	return nil
 }
 
-// LoadPacks discovers and parses all rule packs in dir, including any
-// subdirectories (so the conventional .entire/redactors/local/ path for
+// LoadPacks discovers and parses all rule packs in dir within fsys, including
+// any subdirectories (so the conventional .entire/redactors/local/ path for
 // personal/uncommitted rules is picked up automatically). Files with the
 // extensions .yaml, .yml, and .json are considered packs; other files are
 // ignored. A missing directory is treated as "no packs configured" and
-// returns no error. Per-file parse errors are slog.Warn'd and the file is
-// skipped — never fatal — so one bad file does not silence the rest.
+// returns no error. Per-file parse errors are warned to logger (nil means
+// slog.Default()) and the file is skipped — never fatal — so one bad file
+// does not silence the rest.
+//
+// Taking an fs.FS rather than a directory path is what lets the CLI hand this
+// the .entire root's FS, so pack discovery is confined to .entire like every
+// other read there, while this package keeps no dependency on the CLI. Names
+// in warnings and in a pack's SourcePath are therefore relative to fsys
+// (redactors/local/foo.yaml), not absolute.
 //
 // Soft caps: files larger than maxPackFileBytes are skipped with a warning,
 // and discovery stops after maxPackFiles parsed packs. The trust boundary is
 // "user owns repo," so these are runaway-input guards, not security limits.
-func LoadPacks(dir string) ([]*Pack, error) {
+func LoadPacks(fsys fs.FS, dir string, logger *slog.Logger) ([]*Pack, error) {
+	logger = loggerOrDefault(logger)
+
+	// fs.WalkDir takes its ROOT's DirEntry from fs.Stat, which follows a
+	// symlink; only entries beneath it come from ReadDir, which does not. So
+	// the ModeSymlink guard below never applied to dir itself, and a
+	// .entire/redactors pointing elsewhere silently supplied the rules that
+	// decide what gets scrubbed out of a checkpoint. Lstat it first.
+	//
+	// The assertion is how this stays a pure fs.FS consumer with no dependency
+	// on the CLI: os.Root.FS() implements fs.ReadLinkFS, so the caller that
+	// hands us a confined tree gets the check, and a plain fs.FS that cannot
+	// express symlinks at all is unaffected.
+	if linkFS, ok := fsys.(fs.ReadLinkFS); ok {
+		info, err := linkFS.Lstat(dir)
+		switch {
+		case err != nil && !errors.Is(err, fs.ErrNotExist):
+			return nil, fmt.Errorf("read redactors dir %s: %w", dir, err)
+		case err == nil && info.Mode()&fs.ModeSymlink != 0:
+			return nil, fmt.Errorf("redactors path %s is a symlink", dir)
+		}
+	}
+
 	var packs []*Pack
-	walkErr := filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
+	walkErr := fs.WalkDir(fsys, dir, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			if path == dir {
-				if os.IsNotExist(err) {
+				if errors.Is(err, fs.ErrNotExist) {
 					return nil
 				}
 				return fmt.Errorf("read redactors dir %s: %w", dir, err)
 			}
-			slog.Warn("skipping unreadable redactor pack path",
+			logger.Warn("skipping unreadable redactor pack path",
 				componentAttr,
 				slog.String("path", path),
 				slog.String("error", err.Error()))
@@ -205,8 +233,14 @@ func LoadPacks(dir string) ([]*Pack, error) {
 		if path == dir && !d.IsDir() {
 			return fmt.Errorf("redactors path %s is not a directory", dir)
 		}
+		// A symlinked pack FILE stays a skip, unlike the walk root above.
+		// .entire/redactors is not gitignored, so a link here can arrive with a
+		// checkout — and skipping already denies it any effect on redaction,
+		// exactly as failing would, without letting one file in a pull request
+		// make every command error. Redirecting the DIRECTORY is the different
+		// case: that substitutes the whole rule set, so it is refused.
 		if d.Type()&fs.ModeSymlink != 0 {
-			slog.Warn("skipping symlinked redactor pack path",
+			logger.Warn("skipping symlinked redactor pack path",
 				componentAttr,
 				slog.String("path", path))
 			return nil
@@ -214,30 +248,30 @@ func LoadPacks(dir string) ([]*Pack, error) {
 		if d.IsDir() {
 			return nil
 		}
-		switch strings.ToLower(filepath.Ext(d.Name())) {
+		switch strings.ToLower(gopath.Ext(d.Name())) {
 		case ".yaml", ".yml", ".json":
 		default:
 			return nil
 		}
 
 		if len(packs) >= maxPackFiles {
-			slog.Warn("skipping redactor pack: file cap reached",
+			logger.Warn("skipping redactor pack: file cap reached",
 				componentAttr,
 				slog.String("path", path),
 				slog.Int("max_files", maxPackFiles))
-			return filepath.SkipAll
+			return fs.SkipAll
 		}
 
 		info, statErr := d.Info()
 		if statErr != nil {
-			slog.Warn("skipping redactor pack: stat failed",
+			logger.Warn("skipping redactor pack: stat failed",
 				componentAttr,
 				slog.String("path", path),
 				slog.String("error", statErr.Error()))
 			return nil
 		}
 		if info.Size() > maxPackFileBytes {
-			slog.Warn("skipping redactor pack: file exceeds size cap",
+			logger.Warn("skipping redactor pack: file exceeds size cap",
 				componentAttr,
 				slog.String("path", path),
 				slog.Int64("size_bytes", info.Size()),
@@ -245,9 +279,9 @@ func LoadPacks(dir string) ([]*Pack, error) {
 			return nil
 		}
 
-		data, err := os.ReadFile(path) //nolint:gosec // path comes from WalkDir under a configured dir
+		data, err := fs.ReadFile(fsys, path)
 		if err != nil {
-			slog.Warn("skipping unreadable redactor pack",
+			logger.Warn("skipping unreadable redactor pack",
 				componentAttr,
 				slog.String("path", path),
 				slog.String("error", err.Error()))
@@ -255,7 +289,7 @@ func LoadPacks(dir string) ([]*Pack, error) {
 		}
 		pack, err := ParsePack(data, path)
 		if err != nil {
-			slog.Warn("skipping invalid redactor pack",
+			logger.Warn("skipping invalid redactor pack",
 				componentAttr,
 				slog.String("path", path),
 				slog.String("error", err.Error()))

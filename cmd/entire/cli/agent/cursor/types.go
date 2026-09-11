@@ -188,3 +188,23 @@ type subagentStopHookInputRaw struct {
 	Description          string      `json:"description"`
 	AgentTranscriptPath  string      `json:"agent_transcript_path"`
 }
+
+// FileModificationTools lists the Cursor tool names that create or modify files.
+//
+// Captured from a real Cursor session (testdata/real_session_tool_use.jsonl):
+// Write creates or overwrites a file, StrReplace edits one in place. Cursor's
+// read-only tools (Read, Grep, Glob, Shell) are deliberately absent — Shell can
+// of course modify files, but the transcript records only the command string, so
+// attributing files to it would mean parsing shell, not reading a path.
+//
+// Cursor's names differ from Claude Code's (Write/Edit), so this list cannot be
+// shared with claudecode.FileModificationTools.
+var FileModificationTools = []string{"Write", "StrReplace"}
+
+// toolInput is the subset of a Cursor tool_use input that carries the target file.
+//
+// Cursor keys it "path", where Claude Code uses "file_path" — which is why the
+// shared transcript.ToolInput type does not fit. Values observed are absolute.
+type toolInput struct {
+	Path string `json:"path"`
+}

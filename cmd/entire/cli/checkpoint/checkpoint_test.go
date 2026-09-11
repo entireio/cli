@@ -18,6 +18,8 @@ import (
 	_ "github.com/entireio/cli/cmd/entire/cli/agent/claudecode" // register claude-code so its .claude protected dir is discoverable
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
+	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
+	"github.com/entireio/cli/cmd/entire/cli/osroot"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 	"github.com/entireio/cli/cmd/entire/cli/trailers"
@@ -46,7 +48,7 @@ func TestCheckpointType_Values(t *testing.T) {
 	}
 }
 
-func TestCopyMetadataDir_SkipsSymlinks(t *testing.T) {
+func TestCopyMetadataDir_RefusesSymlinks(t *testing.T) {
 	// Create a temp directory for the test
 	tempDir := t.TempDir()
 
@@ -85,17 +87,16 @@ func TestCopyMetadataDir_SkipsSymlinks(t *testing.T) {
 	store := NewGitStore(repo, DefaultV1Refs())
 	entries := make(map[string]object.TreeEntry)
 
-	err = store.copyMetadataDir(context.Background(), metadataDir, "checkpoint/", entries)
-	if err != nil {
-		t.Fatalf("copyMetadataDir failed: %v", err)
+	err = store.copyMetadataDir(context.Background(), mustWalkRoot(t, metadataDir), "metadata", "checkpoint/", entries)
+	// The walk refuses rather than skipping: .entire/metadata is gitignored, so
+	// a link here cannot arrive with a checkout, and quietly dropping it would
+	// write a checkpoint missing session content with nobody told.
+	if !errors.Is(err, osroot.ErrSymlinkedPath) {
+		t.Fatalf("copyMetadataDir should refuse a symlinked entry, got: %v", err)
 	}
 
-	// Verify regular file was included
-	if _, ok := entries["checkpoint/regular.txt"]; !ok {
-		t.Error("regular.txt should be included in entries")
-	}
-
-	// Verify symlink was NOT included (security fix)
+	// Whatever it did before stopping, the symlink's target must not be in the
+	// tree — that is the property this test has always been about.
 	if _, ok := entries["checkpoint/sneaky-link"]; ok {
 		t.Error("symlink should NOT be included in entries - this would allow reading files outside the metadata directory")
 	}
@@ -197,6 +198,34 @@ func TestCollectChangedFiles_ExcludesProtectedDirs(t *testing.T) {
 		"infrastructure dir must not be captured into the checkpoint")
 	require.Contains(t, result.Changed, "src/keep.txt",
 		"ordinary untracked files must still be captured")
+}
+
+// TestCollectChangedFiles_BudgetExceededReturnsSentinel pins the second half
+// of the zombie-hook regression: the first-checkpoint `git status` subprocess
+// had no deadline, so on a pathological worktree the hook process could
+// outlive the agent's ~60s hook timeout stuck in a child git rather than a
+// goroutine. When the budget expires, the child is killed and the error must
+// wrap gitrepo.ErrStatusBudgetExceeded so the lifecycle handlers' warn-and-skip
+// degrade path recognizes it (rather than failing the hook on a generic error).
+func TestCollectChangedFiles_BudgetExceededReturnsSentinel(t *testing.T) {
+	// Not parallel: overrides the package-level budget seam.
+	origBudget := gitStatusBudget
+	// An already-expired deadline deterministically forces the breach path
+	// without needing a slow git or a multi-million-file fixture.
+	gitStatusBudget = time.Nanosecond
+	t.Cleanup(func() { gitStatusBudget = origBudget })
+
+	tempDir := t.TempDir()
+	testutil.InitRepo(t, tempDir)
+	testutil.WriteFile(t, tempDir, "base.txt", "base")
+	testutil.GitAdd(t, tempDir, "base.txt")
+	testutil.GitCommit(t, tempDir, "init")
+
+	repo, err := git.PlainOpen(tempDir)
+	require.NoError(t, err)
+
+	_, err = collectChangedFiles(context.Background(), repo)
+	require.ErrorIs(t, err, gitrepo.ErrStatusBudgetExceeded)
 }
 
 // TestWriteCommitted_AgentField verifies that the Agent field is written
@@ -451,7 +480,6 @@ func TestWriteTemporary_Deduplication(t *testing.T) {
 		BaseCommit:        baseCommit,
 		ModifiedFiles:     []string{"test.go"},
 		MetadataDir:       ".entire/metadata/test-session",
-		MetadataDirAbs:    metadataDir,
 		CommitMessage:     "Checkpoint 1",
 		AuthorName:        "Test",
 		AuthorEmail:       "test@test.com",
@@ -473,7 +501,6 @@ func TestWriteTemporary_Deduplication(t *testing.T) {
 		BaseCommit:        baseCommit,
 		ModifiedFiles:     []string{"test.go"},
 		MetadataDir:       ".entire/metadata/test-session",
-		MetadataDirAbs:    metadataDir,
 		CommitMessage:     "Checkpoint 2",
 		AuthorName:        "Test",
 		AuthorEmail:       "test@test.com",
@@ -500,7 +527,6 @@ func TestWriteTemporary_Deduplication(t *testing.T) {
 		BaseCommit:        baseCommit,
 		ModifiedFiles:     []string{"test.go"},
 		MetadataDir:       ".entire/metadata/test-session",
-		MetadataDirAbs:    metadataDir,
 		CommitMessage:     "Checkpoint 3",
 		AuthorName:        "Test",
 		AuthorEmail:       "test@test.com",
@@ -2143,7 +2169,6 @@ func TestWriteTemporary_FirstCheckpoint_CapturesModifiedTrackedFiles(t *testing.
 		BaseCommit:        baseCommit,
 		ModifiedFiles:     []string{}, // Agent hasn't modified anything
 		MetadataDir:       ".entire/metadata/test-session",
-		MetadataDirAbs:    metadataDir,
 		CommitMessage:     "First checkpoint",
 		AuthorName:        "Test",
 		AuthorEmail:       "test@test.com",
@@ -2267,14 +2292,13 @@ func TestWriteTemporary_PathNormalizationAndSkipping(t *testing.T) {
 
 			store := newEphemeralStore(repo, DefaultV1Refs())
 			result, err := store.Write(context.Background(), Step{
-				SessionID:      "test-session",
-				BaseCommit:     initialCommit.String(),
-				ModifiedFiles:  tt.modifiedFiles(tempDir, mainFile),
-				MetadataDir:    ".entire/metadata/test-session",
-				MetadataDirAbs: metadataDir,
-				CommitMessage:  "Checkpoint with path normalization",
-				AuthorName:     "Test",
-				AuthorEmail:    "test@test.com",
+				SessionID:     "test-session",
+				BaseCommit:    initialCommit.String(),
+				ModifiedFiles: tt.modifiedFiles(tempDir, mainFile),
+				MetadataDir:   ".entire/metadata/test-session",
+				CommitMessage: "Checkpoint with path normalization",
+				AuthorName:    "Test",
+				AuthorEmail:   "test@test.com",
 			})
 			if err != nil {
 				t.Fatalf("WriteTemporary() error = %v", err)
@@ -2374,7 +2398,6 @@ func TestWriteTemporary_FirstCheckpoint_CapturesUntrackedFiles(t *testing.T) {
 		ModifiedFiles:     []string{},
 		NewFiles:          []string{}, // NewFiles might be empty if this is truly "at session start"
 		MetadataDir:       ".entire/metadata/test-session",
-		MetadataDirAbs:    metadataDir,
 		CommitMessage:     "First checkpoint",
 		AuthorName:        "Test",
 		AuthorEmail:       "test@test.com",
@@ -2489,7 +2512,6 @@ func TestWriteTemporary_PreservesSymlinkWithoutReadingTarget(t *testing.T) {
 				BaseCommit:        initialCommit.String(),
 				NewFiles:          newFiles,
 				MetadataDir:       ".entire/metadata/test-session",
-				MetadataDirAbs:    metadataDir,
 				CommitMessage:     "Checkpoint symlink",
 				AuthorName:        "Test",
 				AuthorEmail:       "test@test.com",
@@ -2606,7 +2628,6 @@ func TestWriteTemporary_FirstCheckpoint_ExcludesGitIgnoredFiles(t *testing.T) {
 		BaseCommit:        baseCommit,
 		ModifiedFiles:     []string{},
 		MetadataDir:       ".entire/metadata/test-session",
-		MetadataDirAbs:    metadataDir,
 		CommitMessage:     "First checkpoint",
 		AuthorName:        "Test",
 		AuthorEmail:       "test@test.com",
@@ -2707,7 +2728,6 @@ func TestWriteTemporary_SubsequentCheckpoint_ExcludesGitIgnoredModifiedFiles(t *
 		BaseCommit:        baseCommit,
 		ModifiedFiles:     []string{},
 		MetadataDir:       ".entire/metadata/test-session",
-		MetadataDirAbs:    metadataDir,
 		CommitMessage:     "First checkpoint",
 		AuthorName:        "Test",
 		AuthorEmail:       "test@test.com",
@@ -2728,7 +2748,6 @@ func TestWriteTemporary_SubsequentCheckpoint_ExcludesGitIgnoredModifiedFiles(t *
 		NewFiles:          []string{},
 		DeletedFiles:      []string{},
 		MetadataDir:       ".entire/metadata/test-session",
-		MetadataDirAbs:    metadataDir,
 		CommitMessage:     "Second checkpoint",
 		AuthorName:        "Test",
 		AuthorEmail:       "test@test.com",
@@ -2827,7 +2846,6 @@ func TestWriteTemporary_SubsequentCheckpoint_ExcludesGitIgnoredNewFiles(t *testi
 		SessionID:         "test-session",
 		BaseCommit:        baseCommit,
 		MetadataDir:       ".entire/metadata/test-session",
-		MetadataDirAbs:    metadataDir,
 		CommitMessage:     "First checkpoint",
 		AuthorName:        "Test",
 		AuthorEmail:       "test@test.com",
@@ -2846,7 +2864,6 @@ func TestWriteTemporary_SubsequentCheckpoint_ExcludesGitIgnoredNewFiles(t *testi
 		NewFiles:          []string{"config.go", ".env"}, // Agent created both
 		DeletedFiles:      []string{},
 		MetadataDir:       ".entire/metadata/test-session",
-		MetadataDirAbs:    metadataDir,
 		CommitMessage:     "Second checkpoint",
 		AuthorName:        "Test",
 		AuthorEmail:       "test@test.com",
@@ -2938,7 +2955,6 @@ func TestWriteTemporary_SubsequentCheckpoint_ExcludesNestedGitIgnoredFiles(t *te
 		SessionID:         "test-session",
 		BaseCommit:        baseCommit,
 		MetadataDir:       ".entire/metadata/test-session",
-		MetadataDirAbs:    metadataDir,
 		CommitMessage:     "First checkpoint",
 		AuthorName:        "Test",
 		AuthorEmail:       "test@test.com",
@@ -2957,7 +2973,6 @@ func TestWriteTemporary_SubsequentCheckpoint_ExcludesNestedGitIgnoredFiles(t *te
 		NewFiles:          []string{},
 		DeletedFiles:      []string{},
 		MetadataDir:       ".entire/metadata/test-session",
-		MetadataDirAbs:    metadataDir,
 		CommitMessage:     "Second checkpoint",
 		AuthorName:        "Test",
 		AuthorEmail:       "test@test.com",
@@ -3062,7 +3077,6 @@ func TestWriteTemporary_FirstCheckpoint_UserAndAgentChanges(t *testing.T) {
 		BaseCommit:        baseCommit,
 		ModifiedFiles:     []string{"main.go"}, // Only agent-modified file in list
 		MetadataDir:       ".entire/metadata/test-session",
-		MetadataDirAbs:    metadataDir,
 		CommitMessage:     "First checkpoint",
 		AuthorName:        "Test",
 		AuthorEmail:       "test@test.com",
@@ -3178,7 +3192,6 @@ func TestWriteTemporary_FirstCheckpoint_CapturesUserDeletedFiles(t *testing.T) {
 		ModifiedFiles:     []string{},
 		DeletedFiles:      []string{}, // No agent deletions
 		MetadataDir:       ".entire/metadata/test-session",
-		MetadataDirAbs:    metadataDir,
 		CommitMessage:     "First checkpoint",
 		AuthorName:        "Test",
 		AuthorEmail:       "test@test.com",
@@ -3277,7 +3290,6 @@ func TestWriteTemporary_FirstCheckpoint_CapturesRenamedFiles(t *testing.T) {
 		ModifiedFiles:     []string{},
 		DeletedFiles:      []string{},
 		MetadataDir:       ".entire/metadata/test-session",
-		MetadataDirAbs:    metadataDir,
 		CommitMessage:     "First checkpoint",
 		AuthorName:        "Test",
 		AuthorEmail:       "test@test.com",
@@ -3374,7 +3386,6 @@ func TestWriteTemporary_FirstCheckpoint_FilenamesWithSpaces(t *testing.T) {
 		ModifiedFiles:     []string{},
 		DeletedFiles:      []string{},
 		MetadataDir:       ".entire/metadata/test-session",
-		MetadataDirAbs:    metadataDir,
 		CommitMessage:     "First checkpoint",
 		AuthorName:        "Test",
 		AuthorEmail:       "test@test.com",
@@ -3882,7 +3893,7 @@ func TestCopyMetadataDir_RedactsSecrets(t *testing.T) {
 	store := NewGitStore(repo, DefaultV1Refs())
 	entries := make(map[string]object.TreeEntry)
 
-	if err := store.copyMetadataDir(context.Background(), metadataDir, "cp/", entries); err != nil {
+	if err := store.copyMetadataDir(context.Background(), mustWalkRoot(t, metadataDir), "metadata", "cp/", entries); err != nil {
 		t.Fatalf("copyMetadataDir() error = %v", err)
 	}
 
@@ -4367,38 +4378,172 @@ func TestUpdateSummary_RedactsSecrets(t *testing.T) {
 	}
 }
 
-func TestWriteCommitted_SubagentTranscript_JSONLFallback(t *testing.T) {
+// TestWriteCommitted_TaskPayload_MaterializesTranscriptAndMetadata is the core
+// #2058 regression: subagent task data used to die at condensation because no
+// producer ever set the old IsTask/ToolUseID route, leaving
+// writeTaskCheckpointEntries permanently unreachable. WriteOptions.Tasks
+// replaces that route; this proves a TaskPayload actually lands under the
+// checkpoint's tasks/<tool-use-id>/ subtree on both persistent backends —
+// which applySessionWrite backs identically (see writeTaskRecordEntries), so
+// covering both here guards against a backend later shadowing or
+// de-embedding that shared write path.
+func TestWriteCommitted_TaskPayload_MaterializesTranscriptAndMetadata(t *testing.T) {
+	tests := []struct {
+		name      string
+		newStore  func(repo *git.Repository) sessionMetadataStore
+		fetchTree func(t *testing.T, repo *git.Repository, cid id.CheckpointID) *FetchingTree
+	}{
+		{
+			name:     "git-branch store",
+			newStore: func(repo *git.Repository) sessionMetadataStore { return NewGitStore(repo, DefaultV1Refs()) },
+			fetchTree: func(t *testing.T, repo *git.Repository, cid id.CheckpointID) *FetchingTree {
+				t.Helper()
+				store := NewGitStore(repo, DefaultV1Refs())
+				tree, err := store.getCheckpointFetchingTree(context.Background(), cid)
+				if err != nil {
+					t.Fatalf("getCheckpointFetchingTree() error = %v", err)
+				}
+				return tree
+			},
+		},
+		{
+			name:     "git-refs store",
+			newStore: func(repo *git.Repository) sessionMetadataStore { return newGitRefsStore(repo) },
+			fetchTree: func(t *testing.T, repo *git.Repository, cid id.CheckpointID) *FetchingTree {
+				t.Helper()
+				store := newGitRefsStore(repo)
+				tree, err := store.checkpointTree(context.Background(), cid)
+				if err != nil {
+					t.Fatalf("checkpointTree() error = %v", err)
+				}
+				return tree
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			repo, _ := setupBranchTestRepo(t)
+			store := tt.newStore(repo)
+			checkpointID := id.MustCheckpointID("aabbccddeef9")
+
+			redactedTranscript := `{"role":"assistant","content":"secret is ` + highEntropySecret + `"}` + "\n"
+			redacted, err := redact.JSONLBytes([]byte(redactedTranscript))
+			if err != nil {
+				t.Fatalf("redact.JSONLBytes() error = %v", err)
+			}
+
+			started := time.Date(2026, 8, 19, 10, 0, 0, 0, time.UTC)
+			completed := started.Add(2 * time.Minute)
+
+			err = store.Write(context.Background(), Session{
+				CheckpointID:     checkpointID,
+				SessionID:        "task-payload-session",
+				Strategy:         "manual-commit",
+				Transcript:       redact.AlreadyRedacted([]byte(`{"msg":"safe"}` + "\n")),
+				CheckpointsCount: 1,
+				AuthorName:       "Test Author",
+				AuthorEmail:      "test@example.com",
+				Tasks: []TaskPayload{
+					{
+						ToolUseID:       "toolu_test123",
+						AgentID:         "agent1",
+						SubagentType:    "explore",
+						TaskDescription: "look for the bug",
+						Transcript:      redacted,
+						Files:           []string{"a.go"},
+						StartedAt:       started,
+						CompletedAt:     completed,
+					},
+				},
+			})
+			if err != nil {
+				t.Fatalf("Write() error = %v", err)
+			}
+
+			tree := tt.fetchTree(t, repo, checkpointID)
+
+			agentPath := "tasks/toolu_test123/agent-agent1.jsonl"
+			file, err := tree.File(agentPath)
+			if err != nil {
+				t.Fatalf("task transcript should exist at %s: %v", agentPath, err)
+			}
+			content, err := file.Contents()
+			if err != nil {
+				t.Fatalf("failed to read task transcript: %v", err)
+			}
+			if strings.Contains(content, highEntropySecret) {
+				t.Error("task transcript should not contain the raw secret")
+			}
+			if !strings.Contains(content, "REDACTED") {
+				t.Error("task transcript should contain REDACTED placeholder")
+			}
+
+			taskJSONPath := "tasks/toolu_test123/task.json"
+			taskFile, err := tree.File(taskJSONPath)
+			if err != nil {
+				t.Fatalf("task.json should exist at %s: %v", taskJSONPath, err)
+			}
+			taskContent, err := taskFile.Contents()
+			if err != nil {
+				t.Fatalf("failed to read task.json: %v", err)
+			}
+			var meta taskRecordMetadata
+			if err := json.Unmarshal([]byte(taskContent), &meta); err != nil {
+				t.Fatalf("failed to unmarshal task.json: %v", err)
+			}
+			if meta.ToolUseID != "toolu_test123" || meta.AgentID != "agent1" {
+				t.Errorf("task.json identifiers = %+v, want tool_use_id=toolu_test123 agent_id=agent1", meta)
+			}
+			if meta.SubagentType != "explore" || meta.TaskDescription != "look for the bug" {
+				t.Errorf("task.json labels = %+v, want subagent_type=explore task_description=%q", meta, "look for the bug")
+			}
+			if !slices.Equal(meta.Files, []string{"a.go"}) {
+				t.Errorf("task.json Files = %v, want [a.go]", meta.Files)
+			}
+			if !meta.StartedAt.Equal(started) || !meta.CompletedAt.Equal(completed) {
+				t.Errorf("task.json timestamps = started=%v completed=%v, want started=%v completed=%v",
+					meta.StartedAt, meta.CompletedAt, started, completed)
+			}
+			if meta.TranscriptUnavailableReason != "" {
+				t.Errorf("task.json TranscriptUnavailableReason = %q, want empty", meta.TranscriptUnavailableReason)
+			}
+		})
+	}
+}
+
+// TestWriteCommitted_TaskPayload_UnavailableTranscript_RecordsReasonWithoutJSONL
+// covers the "missing/unreadable transcript" half of the materializer contract:
+// an empty TaskPayload.Transcript must still produce task.json (with the
+// unavailable reason recorded so the pointer is not silently lost) but no
+// agent-<id>.jsonl, and the rest of the checkpoint (the session's own
+// transcript) must be unaffected.
+func TestWriteCommitted_TaskPayload_UnavailableTranscript_RecordsReasonWithoutJSONL(t *testing.T) {
 	t.Parallel()
 	repo, _ := setupBranchTestRepo(t)
 	store := NewGitStore(repo, DefaultV1Refs())
-	checkpointID := id.MustCheckpointID("aabbccddeef9")
-
-	// Create a temp file with invalid JSONL containing a secret
-	tmpDir := t.TempDir()
-	transcriptPath := filepath.Join(tmpDir, "agent.jsonl")
-	invalidJSONL := "this is not valid JSON but has a secret " + highEntropySecret + " in it"
-	if err := os.WriteFile(transcriptPath, []byte(invalidJSONL), 0o644); err != nil {
-		t.Fatalf("failed to write transcript: %v", err)
-	}
+	checkpointID := id.MustCheckpointID("aabbccddeefa")
 
 	err := store.Write(context.Background(), Session{
-		CheckpointID:           checkpointID,
-		SessionID:              "jsonl-fallback-session",
-		Strategy:               "manual-commit",
-		Transcript:             redact.AlreadyRedacted([]byte(`{"msg":"safe"}` + "\n")),
-		CheckpointsCount:       1,
-		AuthorName:             "Test Author",
-		AuthorEmail:            "test@example.com",
-		IsTask:                 true,
-		ToolUseID:              "toolu_test123",
-		AgentID:                "agent1",
-		SubagentTranscriptPath: transcriptPath,
+		CheckpointID:     checkpointID,
+		SessionID:        "task-payload-unavailable-session",
+		Strategy:         "manual-commit",
+		Transcript:       redact.AlreadyRedacted([]byte(`{"msg":"session transcript intact"}` + "\n")),
+		CheckpointsCount: 1,
+		AuthorName:       "Test Author",
+		AuthorEmail:      "test@example.com",
+		Tasks: []TaskPayload{
+			{
+				ToolUseID:                   "toolu_missing",
+				AgentID:                     "agent2",
+				TranscriptUnavailableReason: "transcript path unresolvable",
+			},
+		},
 	})
 	if err != nil {
-		t.Fatalf("WriteCommitted() error = %v", err)
+		t.Fatalf("Write() error = %v", err)
 	}
 
-	// Read back the subagent transcript from the tree
 	ref, err := repo.Reference(plumbing.NewBranchReferenceName(paths.MetadataBranchName), true)
 	if err != nil {
 		t.Fatalf("failed to get branch ref: %v", err)
@@ -4412,26 +4557,181 @@ func TestWriteCommitted_SubagentTranscript_JSONLFallback(t *testing.T) {
 		t.Fatalf("failed to get tree: %v", err)
 	}
 
-	agentPath := checkpointID.Path() + "/tasks/toolu_test123/agent-agent1.jsonl"
-	file, err := tree.File(agentPath)
-	if err != nil {
-		t.Fatalf("subagent transcript should exist at %s (JSONL fallback should not drop it): %v", agentPath, err)
+	agentPath := checkpointID.Path() + "/tasks/toolu_missing/agent-agent2.jsonl"
+	if _, err := tree.File(agentPath); err == nil {
+		t.Errorf("agent-agent2.jsonl should not exist when Transcript is nil, but was found at %s", agentPath)
 	}
 
-	content, err := file.Contents()
+	taskJSONPath := checkpointID.Path() + "/tasks/toolu_missing/task.json"
+	taskFile, err := tree.File(taskJSONPath)
 	if err != nil {
-		t.Fatalf("failed to read subagent transcript: %v", err)
+		t.Fatalf("task.json should exist at %s: %v", taskJSONPath, err)
+	}
+	taskContent, err := taskFile.Contents()
+	if err != nil {
+		t.Fatalf("failed to read task.json: %v", err)
+	}
+	var meta taskRecordMetadata
+	if err := json.Unmarshal([]byte(taskContent), &meta); err != nil {
+		t.Fatalf("failed to unmarshal task.json: %v", err)
+	}
+	if meta.TranscriptUnavailableReason != "transcript path unresolvable" {
+		t.Errorf("task.json TranscriptUnavailableReason = %q, want %q", meta.TranscriptUnavailableReason, "transcript path unresolvable")
 	}
 
-	// Verify the transcript was stored (not dropped) and secret was redacted
-	if content == "" {
-		t.Error("subagent transcript should not be empty")
+	// The session's own transcript must be unaffected by the unavailable task transcript.
+	sessionContent, err := store.ReadSessionContent(context.Background(), checkpointID, 0)
+	if err != nil {
+		t.Fatalf("ReadSessionContent() error = %v", err)
 	}
-	if strings.Contains(content, highEntropySecret) {
-		t.Error("subagent transcript should not contain the secret after fallback redaction")
+	if !strings.Contains(string(sessionContent.Transcript), "session transcript intact") {
+		t.Errorf("session transcript = %q, want it to contain %q", sessionContent.Transcript, "session transcript intact")
 	}
-	if !strings.Contains(content, "REDACTED") {
-		t.Error("subagent transcript should contain REDACTED from fallback redaction")
+}
+
+// TestWriteCommitted_TaskDescriptionRedacted: task.json's task_description is
+// the agent's free text for the Task call and is pushed with the checkpoint,
+// so the writer must redact it like the summary fields — the transcript beside
+// it is pre-redacted by condensation, but the description used to be copied
+// verbatim. A low-entropy AWS-key shaped secret keeps this deterministic on
+// the regex-only pipeline.
+//
+// Table-driven across both persistent backends. They share one writer
+// (treeWriter.writeTaskRecordEntry, embedded by GitStore and gitRefsStore), so
+// this pins that sharing rather than guarding two implementations: if a future
+// change gives either store its own task-record path, the redaction has to
+// come with it.
+func TestWriteCommitted_TaskDescriptionRedacted(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		newStore  func(repo *git.Repository) sessionMetadataStore
+		fetchTree func(t *testing.T, repo *git.Repository, cid id.CheckpointID) *FetchingTree
+	}{
+		{
+			name:     "git-branch store",
+			newStore: func(repo *git.Repository) sessionMetadataStore { return NewGitStore(repo, DefaultV1Refs()) },
+			fetchTree: func(t *testing.T, repo *git.Repository, cid id.CheckpointID) *FetchingTree {
+				t.Helper()
+				store := NewGitStore(repo, DefaultV1Refs())
+				tree, err := store.getCheckpointFetchingTree(context.Background(), cid)
+				if err != nil {
+					t.Fatalf("getCheckpointFetchingTree() error = %v", err)
+				}
+				return tree
+			},
+		},
+		{
+			name:     "git-refs store",
+			newStore: func(repo *git.Repository) sessionMetadataStore { return newGitRefsStore(repo) },
+			fetchTree: func(t *testing.T, repo *git.Repository, cid id.CheckpointID) *FetchingTree {
+				t.Helper()
+				store := newGitRefsStore(repo)
+				tree, err := store.checkpointTree(context.Background(), cid)
+				if err != nil {
+					t.Fatalf("checkpointTree() error = %v", err)
+				}
+				return tree
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			repo, _ := setupBranchTestRepo(t)
+			store := tt.newStore(repo)
+			checkpointID := id.MustCheckpointID("aabbccddeefc")
+
+			err := store.Write(context.Background(), Session{
+				CheckpointID:     checkpointID,
+				SessionID:        "task-description-session",
+				Strategy:         "manual-commit",
+				Transcript:       redact.AlreadyRedacted([]byte(`{"msg":"safe"}` + "\n")),
+				CheckpointsCount: 1,
+				AuthorName:       "Test Author",
+				AuthorEmail:      "test@example.com",
+				Tasks: []TaskPayload{
+					{
+						ToolUseID:       "toolu_desc",
+						AgentID:         "agent3",
+						SubagentType:    "general-purpose",
+						TaskDescription: "rotate key=AKIAYRWQG5EJLPZLBYNP in staging",
+						Transcript:      redact.AlreadyRedacted([]byte(`{"msg":"child"}` + "\n")),
+					},
+				},
+			})
+			if err != nil {
+				t.Fatalf("Write() error = %v", err)
+			}
+
+			tree := tt.fetchTree(t, repo, checkpointID)
+
+			taskJSONPath := "tasks/toolu_desc/task.json"
+			taskFile, err := tree.File(taskJSONPath)
+			if err != nil {
+				t.Fatalf("task.json should exist at %s: %v", taskJSONPath, err)
+			}
+			taskContent, err := taskFile.Contents()
+			if err != nil {
+				t.Fatalf("failed to read task.json: %v", err)
+			}
+			if strings.Contains(taskContent, "AKIAYRWQG5EJLPZLBYNP") {
+				t.Errorf("task.json still carries the secret: %s", taskContent)
+			}
+			var meta taskRecordMetadata
+			if err := json.Unmarshal([]byte(taskContent), &meta); err != nil {
+				t.Fatalf("failed to unmarshal task.json: %v", err)
+			}
+			if !strings.Contains(meta.TaskDescription, "REDACTED") || !strings.HasPrefix(meta.TaskDescription, "rotate key=") {
+				t.Errorf("task_description = %q, want the secret replaced in place", meta.TaskDescription)
+			}
+			if meta.SubagentType != "general-purpose" {
+				t.Errorf("subagent_type = %q, want it untouched", meta.SubagentType)
+			}
+		})
+	}
+}
+
+// TestWriteCommitted_NoTasks_NoTaskDirectory guards the no-op path: an empty
+// Tasks slice (every session before subagent-work durability landed, and
+// every ordinary session with no subagent work) must not create a tasks/
+// subtree at all.
+func TestWriteCommitted_NoTasks_NoTaskDirectory(t *testing.T) {
+	t.Parallel()
+	repo, _ := setupBranchTestRepo(t)
+	store := NewGitStore(repo, DefaultV1Refs())
+	checkpointID := id.MustCheckpointID("aabbccddeefb")
+
+	err := store.Write(context.Background(), Session{
+		CheckpointID:     checkpointID,
+		SessionID:        "no-tasks-session",
+		Strategy:         "manual-commit",
+		Transcript:       redact.AlreadyRedacted([]byte(`{"msg":"safe"}` + "\n")),
+		CheckpointsCount: 1,
+		AuthorName:       "Test Author",
+		AuthorEmail:      "test@example.com",
+	})
+	if err != nil {
+		t.Fatalf("Write() error = %v", err)
+	}
+
+	ref, err := repo.Reference(plumbing.NewBranchReferenceName(paths.MetadataBranchName), true)
+	if err != nil {
+		t.Fatalf("failed to get branch ref: %v", err)
+	}
+	commit, err := repo.CommitObject(ref.Hash())
+	if err != nil {
+		t.Fatalf("failed to get commit: %v", err)
+	}
+	tree, err := commit.Tree()
+	if err != nil {
+		t.Fatalf("failed to get tree: %v", err)
+	}
+
+	if _, err := tree.Tree(checkpointID.Path() + "/tasks"); err == nil {
+		t.Error("tasks/ subtree should not exist when Tasks is empty")
 	}
 }
 
@@ -4526,6 +4826,26 @@ func TestWriteTemporaryTask_SubagentTranscript_RedactsSecrets(t *testing.T) {
 	if !strings.Contains(content, "REDACTED") {
 		t.Error("subagent transcript on shadow branch should contain REDACTED")
 	}
+
+	// The same task write must fail closed instead of persisting a
+	// plain-redaction fallback blob like the write above.
+	t.Run("degraded sole scanner", func(t *testing.T) {
+		redact.WithScannerDegradedSole(t)
+		_, err := store.Write(context.Background(), TaskStep{
+			SessionID:              "degraded-task-session",
+			BaseCommit:             baseCommit,
+			ToolUseID:              "toolu_degraded",
+			AgentID:                "agent1",
+			SubagentTranscriptPath: transcriptPath,
+			CheckpointUUID:         "test-uuid-degraded",
+			CommitMessage:          "Task checkpoint",
+			AuthorName:             "Test",
+			AuthorEmail:            "test@test.com",
+		})
+		if !errors.Is(err, redact.ErrScannerDegraded) {
+			t.Fatalf("Write() under degraded sole scanner error = %v, want ErrScannerDegraded", err)
+		}
+	})
 }
 
 func TestAddDirectoryToChanges_PathTraversal(t *testing.T) {
@@ -4551,7 +4871,7 @@ func TestAddDirectoryToChanges_PathTraversal(t *testing.T) {
 		t.Fatalf("failed to write file: %v", err)
 	}
 
-	changes, err := addDirectoryToChanges(context.Background(), repo, metadataDir, ".entire/metadata/session")
+	changes, err := addDirectoryToChanges(context.Background(), repo, nil, mustWalkRoot(t, metadataDir), "metadata", ".entire/metadata/session")
 	if err != nil {
 		t.Fatalf("addDirectoryToChanges failed: %v", err)
 	}
@@ -4560,6 +4880,59 @@ func TestAddDirectoryToChanges_PathTraversal(t *testing.T) {
 	expectedPath := filepath.ToSlash(filepath.Join(".entire/metadata/session", "sub", "data.txt"))
 	if len(changes) != 1 || changes[0].Path != expectedPath {
 		t.Errorf("expected one change at %q, got %#v", expectedPath, changes)
+	}
+}
+
+// TestMetadataDirectoryWalkersSkipInterruptedAtomicWrites pins the fix for a
+// hook killed between jsonutil.CreateTempIn and its Rename. The orphan temp
+// file sits in the session's metadata directory, which is walked wholesale into
+// every checkpoint tree, so without the filter it is redacted, committed, and
+// pushed forever after — and "full.jsonl.<hex>.tmp" is read back as a transcript
+// CHUNK whenever the hex starts with a digit.
+func TestMetadataDirectoryWalkersSkipInterruptedAtomicWrites(t *testing.T) {
+	t.Parallel()
+	tempDir := t.TempDir()
+
+	testutil.InitRepo(t, tempDir)
+	repo, err := gitrepo.OpenPath(tempDir)
+	if err != nil {
+		t.Fatalf("failed to open repo: %v", err)
+	}
+
+	metadataDir := filepath.Join(tempDir, "metadata")
+	if err := os.MkdirAll(metadataDir, 0o755); err != nil {
+		t.Fatalf("failed to create dirs: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(metadataDir, "full.jsonl"), []byte("{}\n"), 0o644); err != nil {
+		t.Fatalf("failed to write transcript: %v", err)
+	}
+	// The hex deliberately begins with a digit: that is the shape ParseChunkIndex
+	// used to accept as chunk 123.
+	orphan := "full.jsonl.123abcdef0123456.tmp"
+	if err := os.WriteFile(filepath.Join(metadataDir, orphan), []byte("partial"), 0o600); err != nil {
+		t.Fatalf("failed to write orphan temp: %v", err)
+	}
+
+	changes, err := addDirectoryToChanges(context.Background(), repo, nil, mustWalkRoot(t, metadataDir), "metadata", ".entire/metadata/session")
+	if err != nil {
+		t.Fatalf("addDirectoryToChanges failed: %v", err)
+	}
+	if len(changes) != 1 || changes[0].Path != ".entire/metadata/session/full.jsonl" {
+		t.Errorf("expected only the transcript to be staged, got %#v", changes)
+	}
+
+	entries := map[string]object.TreeEntry{}
+	writer := &treeWriter{repo: repo}
+	if err := writer.copyMetadataDir(context.Background(), mustWalkRoot(t, metadataDir), "metadata", "session", entries); err != nil {
+		t.Fatalf("copyMetadataDir failed: %v", err)
+	}
+	for path := range entries {
+		if strings.Contains(path, orphan) {
+			t.Errorf("copyMetadataDir staged the interrupted write %q", path)
+		}
+	}
+	if len(entries) != 1 {
+		t.Errorf("expected only the transcript in the tree, got %#v", entries)
 	}
 }
 
@@ -4582,7 +4955,7 @@ func TestMetadataDirectoryWalkersAllowDotDotPrefixedNames(t *testing.T) {
 
 	expectedPath := filepath.ToSlash(filepath.Join("checkpoint", "..generated", "schema.json"))
 
-	changes, err := addDirectoryToChanges(context.Background(), repo, metadataDir, "checkpoint")
+	changes, err := addDirectoryToChanges(context.Background(), repo, nil, mustWalkRoot(t, metadataDir), "metadata", "checkpoint")
 	if err != nil {
 		t.Fatalf("addDirectoryToChanges failed: %v", err)
 	}
@@ -4592,7 +4965,7 @@ func TestMetadataDirectoryWalkersAllowDotDotPrefixedNames(t *testing.T) {
 
 	committedEntries := make(map[string]object.TreeEntry)
 	store := NewGitStore(repo, DefaultV1Refs())
-	if err := store.copyMetadataDir(context.Background(), metadataDir, "checkpoint/", committedEntries); err != nil {
+	if err := store.copyMetadataDir(context.Background(), mustWalkRoot(t, metadataDir), "metadata", "checkpoint/", committedEntries); err != nil {
 		t.Fatalf("copyMetadataDir failed: %v", err)
 	}
 	if _, ok := committedEntries[expectedPath]; !ok {
@@ -4600,7 +4973,7 @@ func TestMetadataDirectoryWalkersAllowDotDotPrefixedNames(t *testing.T) {
 	}
 }
 
-func TestAddDirectoryToChanges_SkipsSymlinks(t *testing.T) {
+func TestAddDirectoryToChanges_RefusesSymlinks(t *testing.T) {
 	t.Parallel()
 	tempDir := t.TempDir()
 
@@ -4634,9 +5007,9 @@ func TestAddDirectoryToChanges_SkipsSymlinks(t *testing.T) {
 		t.Fatalf("failed to create symlink: %v", err)
 	}
 
-	changes, err := addDirectoryToChanges(context.Background(), repo, metadataDir, "checkpoint/")
-	if err != nil {
-		t.Fatalf("addDirectoryToChanges failed: %v", err)
+	changes, err := addDirectoryToChanges(context.Background(), repo, nil, mustWalkRoot(t, metadataDir), "metadata", "checkpoint/")
+	if !errors.Is(err, osroot.ErrSymlinkedPath) {
+		t.Fatalf("addDirectoryToChanges should refuse a symlinked entry, got: %v", err)
 	}
 
 	paths := make(map[string]bool, len(changes))
@@ -4644,22 +5017,12 @@ func TestAddDirectoryToChanges_SkipsSymlinks(t *testing.T) {
 		paths[c.Path] = true
 	}
 
-	// Verify regular file was included
-	if !paths["checkpoint/regular.txt"] {
-		t.Error("regular.txt should be included in changes")
-	}
-
-	// Verify symlink was NOT included
 	if paths["checkpoint/sneaky-link"] {
 		t.Error("symlink should NOT be included in changes — this would allow reading files outside the metadata directory")
 	}
-
-	if len(changes) != 1 {
-		t.Errorf("expected 1 change, got %d", len(changes))
-	}
 }
 
-func TestAddDirectoryToChanges_SkipsSymlinkedDirectories(t *testing.T) {
+func TestAddDirectoryToChanges_RefusesSymlinkedDirectories(t *testing.T) {
 	t.Parallel()
 	tempDir := t.TempDir()
 
@@ -4694,9 +5057,9 @@ func TestAddDirectoryToChanges_SkipsSymlinkedDirectories(t *testing.T) {
 		t.Fatalf("failed to create directory symlink: %v", err)
 	}
 
-	changes, err := addDirectoryToChanges(context.Background(), repo, metadataDir, "checkpoint/")
-	if err != nil {
-		t.Fatalf("addDirectoryToChanges failed: %v", err)
+	changes, err := addDirectoryToChanges(context.Background(), repo, nil, mustWalkRoot(t, metadataDir), "metadata", "checkpoint/")
+	if !errors.Is(err, osroot.ErrSymlinkedPath) {
+		t.Fatalf("addDirectoryToChanges should refuse a symlinked directory, got: %v", err)
 	}
 
 	paths := make(map[string]bool, len(changes))
@@ -4704,19 +5067,14 @@ func TestAddDirectoryToChanges_SkipsSymlinkedDirectories(t *testing.T) {
 		paths[c.Path] = true
 	}
 
-	// Verify regular file was included
-	if !paths["checkpoint/regular.txt"] {
-		t.Error("regular.txt should be included in changes")
-	}
-
 	// Verify files from the symlinked directory were NOT included
 	if paths["checkpoint/evil-dir-link/secret.txt"] {
 		t.Error("files inside symlinked directory should NOT be included — this would allow reading files outside the metadata directory")
 	}
-
-	if len(changes) != 1 {
-		t.Errorf("expected 1 change (regular.txt only), got %d: %v", len(changes), changes)
-	}
+	// No assertion on how many entries were collected first: the walk stops at
+	// the offending name, and "evil-dir-link" sorts before "regular.txt", so
+	// whether anything was gathered is an artifact of ordering. The contract is
+	// that the caller is told and the target is not captured.
 }
 
 // TestWriteTemporaryTask_PreservesSymlinkWithoutReadingTarget verifies that task
@@ -5046,7 +5404,10 @@ func TestRedactBlobBytes_JSONMetadata(t *testing.T) {
 		t.Fatalf("marshal: %v", err)
 	}
 
-	got := RedactBlobBytes(context.Background(), b, "metadata.json", false)
+	got, err := RedactBlobBytes(context.Background(), b, "metadata.json", false)
+	if err != nil {
+		t.Fatalf("RedactBlobBytes() error = %v", err)
+	}
 	if strings.Contains(string(got), "AKIAYRWQG5EJLPZLBYNP") {
 		t.Errorf("expected AWS key redacted in metadata.json blob, got %s", string(got))
 	}
@@ -5061,6 +5422,42 @@ func TestRedactBlobBytes_JSONMetadata(t *testing.T) {
 	}
 	if roundTripped["kind"] != "agent_review" {
 		t.Errorf(`expected "kind":"agent_review" preserved after redaction, got %v`, roundTripped["kind"])
+	}
+}
+
+// TestRedactBlobBytes_ScannerDegraded pins both directions of the sentinel
+// dispatch: a JSON-shaped path fails closed under a degraded sole scanner,
+// while a plain path still falls through to infallible redact.Bytes.
+func TestRedactBlobBytes_ScannerDegraded(t *testing.T) {
+	// No t.Parallel: mutates redact's process-global scanner state.
+	redact.WithScannerDegradedSole(t)
+
+	content := []byte(`{"msg":"hello"}` + "\n")
+	got, err := RedactBlobBytes(context.Background(), content, "full.jsonl", false)
+	if !errors.Is(err, redact.ErrScannerDegraded) {
+		t.Fatalf("RedactBlobBytes(.jsonl) error = %v, want ErrScannerDegraded", err)
+	}
+	if got != nil {
+		t.Errorf("RedactBlobBytes(.jsonl) content = %q, want nil under degradation", got)
+	}
+
+	// Non-JSON paths never hit the JSON-aware branch, so they stay infallible
+	// even while the flag is set — the sentinel is confined to transcript-shaped
+	// blobs whose only scanner produced no coverage. The AWS-key shaped secret
+	// is caught by the always-on regex layers, independent of scanner selection.
+	secretContent := []byte("credential leak: key=AKIAYRWQG5EJLPZLBYNP")
+	got, err = RedactBlobBytes(context.Background(), secretContent, "prompt.txt", false)
+	if err != nil {
+		t.Fatalf("RedactBlobBytes(.txt) error = %v, want nil", err)
+	}
+	if want := redact.Bytes(secretContent); string(got) != string(want) {
+		t.Errorf("RedactBlobBytes(.txt) = %q, want redact.Bytes output %q", got, want)
+	}
+	if strings.Contains(string(got), "AKIAYRWQG5EJLPZLBYNP") {
+		t.Error("RedactBlobBytes(.txt) left the secret unredacted")
+	}
+	if !strings.Contains(string(got), "REDACTED") {
+		t.Error("RedactBlobBytes(.txt) should contain REDACTED placeholder")
 	}
 }
 
@@ -5338,4 +5735,17 @@ func TestWriteCommitted_CodexSanitizesTranscriptFromPath(t *testing.T) {
 	require.Contains(t, got, "hello", "conversation content was lost")
 	require.Len(t, strings.Split(strings.TrimRight(got, "\n"), "\n"), 3,
 		"stored transcript must stay line-aligned with the rollout")
+}
+
+// mustWalkRoot opens metadataDir's parent as an os.Root, standing in for the
+// shared .entire root the production walkers are handed. The directory's own
+// name is passed alongside it, exactly as entiredir.Name would produce.
+func mustWalkRoot(t *testing.T, metadataDir string) *os.Root {
+	t.Helper()
+	root, err := os.OpenRoot(filepath.Dir(metadataDir))
+	if err != nil {
+		t.Fatalf("os.OpenRoot(%s): %v", filepath.Dir(metadataDir), err)
+	}
+	t.Cleanup(func() { _ = root.Close() })
+	return root
 }

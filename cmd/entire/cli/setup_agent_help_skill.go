@@ -5,7 +5,6 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"os"
 	"path/filepath"
 	"strings"
 
@@ -45,16 +44,22 @@ func scaffoldAgentHelpSkill(ctx context.Context, ag agent.Agent) (managedScaffol
 		return managedScaffoldResult{Status: managedScaffoldUnsupported}, nil
 	}
 
+	// The worktree root is the anchor the scaffold is written through, so a
+	// failure to resolve it is not something to paper over with the current
+	// directory: relPath names a file under an agent's own directory, and
+	// writing that beside the process instead of in the repository is the
+	// mistake, not the fallback. paths.ErrNotARepository never reaches here,
+	// because enable has already refused.
 	repoRoot, err := paths.WorktreeRoot(ctx)
 	if err != nil {
-		repoRoot, err = os.Getwd() //nolint:forbidigo // Intentional fallback when WorktreeRoot() fails in tests
-		if err != nil {
-			return managedScaffoldResult{}, fmt.Errorf("failed to get current directory: %w", err)
-		}
+		return managedScaffoldResult{}, fmt.Errorf("resolve worktree root: %w", err)
 	}
 
-	targetPath := filepath.Join(repoRoot, relPath)
-	return writeManagedScaffold(targetPath, relPath, content, isManagedAgentHelpSkill)
+	target, err := openScaffoldTarget(repoRoot, relPath)
+	if err != nil {
+		return managedScaffoldResult{}, err
+	}
+	return writeManagedScaffold(target, content, isManagedAgentHelpSkill)
 }
 
 func isManagedAgentHelpSkill(data []byte) bool {
@@ -81,17 +86,39 @@ func reportAgentHelpSkillScaffold(w io.Writer, ag agent.Agent, result managedSca
 	}
 }
 
-func agentHelpSkillTemplate(agentName types.AgentName) (string, []byte, bool) {
+// agentHelpSkillTemplatePath is where the agent-help skill goes for an agent, or
+// "" for one that gets none. Split out from agentHelpSkillTemplate for the same
+// reason as searchSkillTemplatePath: doctor's symlink scan wants the path, not
+// the file.
+func agentHelpSkillTemplatePath(agentName types.AgentName) string {
 	switch agentName {
 	case agent.AgentNameClaudeCode:
-		return filepath.Join(".claude", "skills", "entire", "SKILL.md"), []byte(strings.TrimSpace(claudeAgentHelpSkillTemplate) + "\n"), true
+		return filepath.Join(claudeDirName, "skills", "entire", "SKILL.md")
 	case agent.AgentNameCodex:
-		return filepath.Join(".codex", "agents", "entire.toml"), []byte(strings.TrimSpace(codexAgentHelpSkillTemplate) + "\n"), true
+		return filepath.Join(".codex", "agents", "entire.toml")
 	case agent.AgentNameGemini:
-		return filepath.Join(".gemini", "agents", "entire.md"), []byte(strings.TrimSpace(geminiAgentHelpSkillTemplate) + "\n"), true
+		return filepath.Join(".gemini", "agents", "entire.md")
+	default:
+		return ""
+	}
+}
+
+func agentHelpSkillTemplate(agentName types.AgentName) (string, []byte, bool) {
+	// One switch, so a fourth agent cannot get a path with no body or a body
+	// with no path — which is the failure splitting the path out would otherwise
+	// introduce.
+	var content string
+	switch agentName {
+	case agent.AgentNameClaudeCode:
+		content = claudeAgentHelpSkillTemplate
+	case agent.AgentNameCodex:
+		content = codexAgentHelpSkillTemplate
+	case agent.AgentNameGemini:
+		content = geminiAgentHelpSkillTemplate
 	default:
 		return "", nil, false
 	}
+	return agentHelpSkillTemplatePath(agentName), []byte(strings.TrimSpace(content) + "\n"), true
 }
 
 // agentHelpSkillBody is the shared, format-agnostic instruction body for the

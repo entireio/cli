@@ -5,11 +5,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/url"
 	"regexp"
 	"strings"
 	"time"
 
 	"github.com/entireio/cli/internal/coreapi"
+	"github.com/google/uuid"
 )
 
 // gitHubHTTPSRe / gitHubSSHRe / gitHubBareRe parse the GitHub URL shapes
@@ -33,12 +35,24 @@ import (
 const (
 	gitHubOwnerPat = `([A-Za-z0-9-]+)`
 	gitHubRepoPat  = `([A-Za-z0-9._-]+?)`
+	// gitHubOwnerRepoPat is the pair every GitHub shape ends in. One spelling,
+	// so the charset boundary above has one place to change: `.git` handling
+	// moved CLI-wide once while these patterns' own `(?:\.git)?` groups stayed
+	// put, which is the kind of miss five copies invite.
+	gitHubOwnerRepoPat = gitHubOwnerPat + `/` + gitHubRepoPat
 )
 
 var (
-	gitHubHTTPSRe = regexp.MustCompile(`^https?://github\.com/` + gitHubOwnerPat + `/` + gitHubRepoPat + `(?:\.git)?$`)
-	gitHubSSHRe   = regexp.MustCompile(`^git@github\.com:` + gitHubOwnerPat + `/` + gitHubRepoPat + `(?:\.git)?$`)
-	gitHubBareRe  = regexp.MustCompile(`^(?:github\.com/)?` + gitHubOwnerPat + `/` + gitHubRepoPat + `(?:\.git)?$`)
+	gitHubHTTPSRe = regexp.MustCompile(`^https?://github\.com/` + gitHubOwnerRepoPat + `(?:\.git)?$`)
+	gitHubSSHRe   = regexp.MustCompile(`^git@github\.com:` + gitHubOwnerRepoPat + `(?:\.git)?$`)
+	gitHubBareRe  = regexp.MustCompile(`^(?:github\.com/)?` + gitHubOwnerRepoPat + `(?:\.git)?$`)
+
+	// gitHubHostedBareRe is gitHubBareRe with the host REQUIRED. The optional
+	// `github.com/` in gitHubBareRe is what keeps it out of
+	// parseHostedGitHubURL: it also matches a bare `owner/repo`, which names no
+	// forge at all. Anchoring the host makes the shape unambiguous, so a caller
+	// that must not guess a forge can still recognise `github.com/owner/repo`.
+	gitHubHostedBareRe = regexp.MustCompile(`^github\.com/` + gitHubOwnerRepoPat + `(?:\.git)?$`)
 
 	// gitHubDotOnlyRe matches repo segments that are entirely dots
 	// (".", "..", ...). The tightened owner charset already excludes
@@ -49,7 +63,21 @@ var (
 )
 
 func parseGitHubURL(rawURL string) (owner, repo string, err error) {
-	for _, re := range []*regexp.Regexp{gitHubHTTPSRe, gitHubSSHRe, gitHubBareRe} {
+	return matchGitHubURL(rawURL, gitHubHTTPSRe, gitHubSSHRe, gitHubBareRe)
+}
+
+// parseHostedGitHubURL accepts the shapes that name github.com explicitly —
+// https, ssh, and the host-qualified bare form — but never an unqualified
+// `owner/repo`, which names no forge and so cannot be attributed to one. Its
+// caller uses that to point a GitHub URL at the `/gh/` ref it should have been;
+// guessing a forge for a bare pair is exactly what `repo clone`'s grammar
+// refuses to do. Same dot-only guard as parseGitHubURL.
+func parseHostedGitHubURL(rawURL string) (owner, repo string, err error) {
+	return matchGitHubURL(rawURL, gitHubHTTPSRe, gitHubSSHRe, gitHubHostedBareRe)
+}
+
+func matchGitHubURL(rawURL string, res ...*regexp.Regexp) (owner, repo string, err error) {
+	for _, re := range res {
 		m := re.FindStringSubmatch(rawURL)
 		if m == nil {
 			continue
@@ -63,23 +91,12 @@ func parseGitHubURL(rawURL string) (owner, repo string, err error) {
 	return "", "", fmt.Errorf("not a recognized GitHub URL: %s", rawURL)
 }
 
-// mirrorPollInterval is the cadence between mirror-status polls while waiting
-// for the initial clone. A package var (not const) so tests can shorten it.
+// mirrorPollInterval is the cadence for placement and clone-status polls.
 var mirrorPollInterval = 2 * time.Second
 
-// maxConsecutivePollErrors bounds how many back-to-back GetMirror failures the
-// clone wait tolerates before giving up. Two failure modes share this budget: a
-// brief network/API glitch during a long clone, and — the common one — the
-// stale-read window right after create, where the control plane returns 404
-// "mirror not found" because the just-written repo#list grant / placement row
-// isn't yet visible to the region's minimize_latency + follower reads (~4.8s
-// nominal, but it spikes under concurrent multi-region creates). At the 2s
-// cadence, 15 tolerated errors ≈ 30s — enough to ride out that window, while a
-// genuinely persistent error (deleted mirror, revoked auth) still surfaces well
-// before the 30m --wait-timeout. This is a stopgap: the durable fix is
-// server-side, making GetMirror check the grant fully-consistent and read the
-// row from the CRDB leaseholder so a fresh mirror is visible on the first poll.
-// The counter resets on any successful poll.
+// maxConsecutivePollErrors keeps both poll phases bounded. In the clone phase,
+// 15 attempts at the two-second cadence preserve the accepted ~30s tolerance
+// for a newly placed mirror to become visible.
 const maxConsecutivePollErrors = 15
 
 var (
@@ -97,6 +114,128 @@ type mirrorStatusGetter interface {
 	GetMirror(ctx context.Context, params coreapi.GetMirrorParams) (*coreapi.Mirror, error)
 }
 
+type mirrorRequestGetter interface {
+	GetMirrorRequest(ctx context.Context, params coreapi.GetMirrorRequestParams) (*coreapi.MirrorRequest, error)
+}
+
+func awaitMirrorPlacement(ctx context.Context, c mirrorRequestGetter, initial coreapi.MirrorRequest, location string, onStatus func(coreapi.MirrorRequestStatus)) (*coreapi.CreatedMirror, error) {
+	serverURL, requestID, err := mirrorRequestPollTarget(location)
+	if err != nil {
+		return nil, err
+	}
+	if serverURL != nil {
+		ctx = coreapi.WithServerURL(ctx, serverURL)
+	}
+	if initial.RequestId != requestID {
+		return nil, fmt.Errorf("mirror request Location identifies %s but response identifies %s", requestID, initial.RequestId)
+	}
+
+	ticker := time.NewTicker(mirrorPollInterval)
+	defer ticker.Stop()
+
+	request := &initial
+	var consecutiveErrs int
+	for {
+		if onStatus != nil {
+			onStatus(request.Status)
+		}
+		switch request.Status {
+		case coreapi.MirrorRequestStatusSucceeded:
+			result, ok := request.Result.Get()
+			if !ok || result.MirrorId == "" || result.MirrorUrl == "" {
+				return nil, errors.New("mirror request succeeded without a mirror id and URL")
+			}
+			return &coreapi.CreatedMirror{
+				MirrorId:  result.MirrorId,
+				MirrorUrl: result.MirrorUrl,
+				PublicUrl: result.PublicUrl,
+			}, nil
+		case coreapi.MirrorRequestStatusFailed:
+			return nil, mirrorRequestFailureError(*request)
+		case coreapi.MirrorRequestStatusPending, coreapi.MirrorRequestStatusProcessing:
+		default:
+			return nil, fmt.Errorf("mirror request returned unknown status %q", request.Status)
+		}
+
+		select {
+		case <-ctx.Done():
+			return nil, classifyWaitContextErr(ctx.Err(), "waiting for mirror placement")
+		case <-ticker.C:
+		}
+
+		next, err := c.GetMirrorRequest(ctx, coreapi.GetMirrorRequestParams{RequestId: requestID})
+		if err != nil {
+			if ctx.Err() != nil {
+				return nil, classifyWaitContextErr(ctx.Err(), "waiting for mirror placement")
+			}
+			consecutiveErrs++
+			if consecutiveErrs >= maxConsecutivePollErrors {
+				return nil, fmt.Errorf("poll mirror request: %w", err)
+			}
+			continue
+		}
+		consecutiveErrs = 0
+		if next.RequestId != requestID {
+			return nil, fmt.Errorf("mirror request poll returned id %s, want %s", next.RequestId, requestID)
+		}
+		request = next
+	}
+}
+
+func mirrorRequestPollTarget(location string) (*url.URL, uuid.UUID, error) {
+	if strings.TrimSpace(location) == "" {
+		return nil, uuid.Nil, errors.New("mirror request response is missing Location")
+	}
+	locationURL, err := url.Parse(location)
+	if err != nil || locationURL.User != nil || locationURL.RawQuery != "" || locationURL.Fragment != "" {
+		return nil, uuid.Nil, fmt.Errorf("invalid mirror request Location %q", location)
+	}
+	const prefix = "/api/v1/mirror-requests/"
+	requestIDText, ok := strings.CutPrefix(locationURL.Path, prefix)
+	if !ok || requestIDText == "" || strings.Contains(requestIDText, "/") {
+		return nil, uuid.Nil, fmt.Errorf("invalid mirror request Location %q", location)
+	}
+	requestID, err := uuid.Parse(requestIDText)
+	if err != nil {
+		return nil, uuid.Nil, fmt.Errorf("invalid mirror request Location %q: %w", location, err)
+	}
+	if locationURL.IsAbs() {
+		if locationURL.Scheme != "https" && locationURL.Scheme != "http" {
+			return nil, uuid.Nil, fmt.Errorf("invalid mirror request Location %q", location)
+		}
+		return &url.URL{Scheme: locationURL.Scheme, Host: locationURL.Host, Path: "/api/v1"}, requestID, nil
+	}
+	if locationURL.Host != "" {
+		return nil, uuid.Nil, fmt.Errorf("invalid mirror request Location %q", location)
+	}
+	return nil, requestID, nil
+}
+
+func mirrorRequestFailureError(request coreapi.MirrorRequest) error {
+	failure, ok := request.Failure.Get()
+	if !ok {
+		return errors.New("mirror placement failed without failure details")
+	}
+
+	known := false
+	switch failure.Code {
+	case "repo_inaccessible", "github_link_required", "source_too_large", "github_unavailable",
+		"mirror_url_conflict", "mirror_conflict", "placement_deleted", "mirror_name_conflict",
+		"invalid_request", "internal":
+		known = true
+	}
+	var message string
+	if known {
+		message = fmt.Sprintf("mirror placement failed (%s): %s", failure.Code, failure.Message)
+	} else {
+		message = fmt.Sprintf("mirror placement failed with unknown failure code %q: %s", failure.Code, failure.Message)
+	}
+	if failure.Retryable {
+		message += "; retry this command"
+	}
+	return errors.New(message)
+}
+
 // awaitMirrorReady polls the control plane for a mirror's clone lifecycle until
 // it reaches a terminal status or the deadline/cancellation fires. It returns
 // the last observed status plus:
@@ -111,10 +250,7 @@ type mirrorStatusGetter interface {
 // info/refs probe: the control plane now reports clone readiness directly via
 // Mirror.status, so a single authenticated control-plane call per tick suffices
 // — no repo-scoped token exchange or data-plane round trip.
-//
-// onStatus (may be nil) is invoked with each observed status so callers can show
-// live per-mirror progress (e.g. the wizard's Docker-style line list).
-func awaitMirrorReady(ctx context.Context, c mirrorStatusGetter, mirrorID string, timeout time.Duration, onStatus func(coreapi.MirrorStatus)) (coreapi.MirrorStatus, error) {
+func awaitMirrorReady(ctx context.Context, c mirrorStatusGetter, mirrorID string, timeout time.Duration) (coreapi.MirrorStatus, error) {
 	if timeout > 0 {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, timeout)
@@ -130,7 +266,7 @@ func awaitMirrorReady(ctx context.Context, c mirrorStatusGetter, mirrorID string
 		switch {
 		case err != nil:
 			if ctx.Err() != nil {
-				return last, classifyWaitContextErr(ctx.Err())
+				return last, classifyWaitContextErr(ctx.Err(), "waiting for initial clone")
 			}
 			// Tolerate transient glitches: the clone may still be progressing,
 			// so retry on the next tick. Only give up once errors persist.
@@ -142,9 +278,6 @@ func awaitMirrorReady(ctx context.Context, c mirrorStatusGetter, mirrorID string
 			consecutiveErrs = 0
 			if s, ok := m.Status.Get(); ok {
 				last = s
-				if onStatus != nil {
-					onStatus(s)
-				}
 				switch s {
 				case coreapi.MirrorStatusReady:
 					return s, nil
@@ -159,20 +292,17 @@ func awaitMirrorReady(ctx context.Context, c mirrorStatusGetter, mirrorID string
 		}
 		select {
 		case <-ctx.Done():
-			return last, classifyWaitContextErr(ctx.Err())
+			return last, classifyWaitContextErr(ctx.Err(), "waiting for initial clone")
 		case <-ticker.C:
 		}
 	}
 }
 
-// classifyWaitContextErr maps the clone wait's context error to a user-facing
-// error: a user Ctrl+C exits quietly (SilentError, so main.go doesn't reprint
-// it), while a real deadline reports the timeout.
-func classifyWaitContextErr(err error) error {
+func classifyWaitContextErr(err error, what string) error {
 	if errors.Is(err, context.Canceled) {
 		return NewSilentError(err)
 	}
-	return fmt.Errorf("timed out waiting for initial clone: %w", err)
+	return fmt.Errorf("timed out %s: %w", what, err)
 }
 
 // explainSuspendedMirror tells the user a suspended placement can't be served

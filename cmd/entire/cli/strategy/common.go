@@ -5,9 +5,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -20,12 +22,15 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/remote"
+	"github.com/entireio/cli/cmd/entire/cli/entiredir"
 	"github.com/entireio/cli/cmd/entire/cli/gitrepo"
 	"github.com/entireio/cli/cmd/entire/cli/interactive"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
+	"github.com/entireio/cli/cmd/entire/cli/osroot"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/cmd/entire/cli/vercelconfig"
+	"github.com/entireio/cli/cmd/entire/cli/worktreedir"
 	"github.com/entireio/cli/redact"
 
 	"github.com/go-git/go-git/v6"
@@ -358,7 +363,7 @@ const (
 )
 
 // isProtectedPath returns true if relPath is inside a directory that should
-// never be modified or deleted during rewind or other destructive operations.
+// never be recorded as session changes or captured into a checkpoint.
 // Protected directories include git internals, entire metadata, and all
 // registered agent config directories.
 func isProtectedPath(relPath string) bool {
@@ -402,21 +407,72 @@ func warnUser(ctx context.Context, component, msg, breadcrumb string, attrs ...a
 	}
 }
 
-var initRedactionOnce sync.Once
+var (
+	initRedactionOnce sync.Once
+	// errRedactionScanner is set inside the Once and returned by every
+	// subsequent EnsureRedactionConfigured call (sticky failure).
+	errRedactionScanner error
+)
+
+// resetRedactionConfiguredForTest reinitializes the Once so tests can
+// exercise different settings fixtures in one process.
+func resetRedactionConfiguredForTest() {
+	initRedactionOnce = sync.Once{}
+	errRedactionScanner = nil
+}
 
 // EnsureRedactionConfigured loads redaction settings and configures the
-// redact package: PII detection (opt-in), inline custom_redactions, and rule
-// packs auto-discovered from .entire/redactors/.
+// redact package: scanner engines, PII detection (opt-in), inline
+// custom_redactions, and rule packs auto-discovered from .entire/redactors/.
 //
 // Must be called at each process entry point before checkpoint writes.
-func EnsureRedactionConfigured() {
+// Returns an error ONLY for scanner-specific failures (invalid scanner
+// config, goredact engine construction) — proceeding would run a scanner
+// set the team's committed settings did not choose. All other settings
+// problems keep the historical warn-and-default behavior.
+//
+// Pass a context descended from the root pre-run, so redact's diagnostics
+// reach .entire/logs/: hook contexts swallow stderr, so otherwise a user
+// grepping for component=redaction finds nothing and concludes their rules
+// never ran. Without a context logger they fall back to stderr and the
+// load-time summary is skipped.
+//
+// sync.Once: the first caller's context wins, and every caller is an entry
+// point that just built one.
+func EnsureRedactionConfigured(ctx context.Context) error {
 	initRedactionOnce.Do(func() {
-		ctx := context.Background()
+		// Session-stamped: redact calls this logger without a context, so it
+		// cannot pick the session up the way logging.Warn does.
+		logger := logging.SessionLoggerFromContext(ctx)
+
+		// A canceled ctx (Ctrl-C mid-hook) would fail the settings read, consume
+		// the Once, and leave custom rules unconfigured — fail-open — for the
+		// rest of the process. Keep the ctx values, not its cancellation.
+		ctx := context.WithoutCancel(ctx)
+
 		s, err := settings.Load(ctx)
 		if err != nil {
+			if errors.Is(err, settings.ErrScannerConfig) {
+				errRedactionScanner = err
+				return
+			}
 			logCtx := logging.WithComponent(ctx, "redaction")
 			logging.Warn(logCtx, "failed to load settings for redaction", slog.String("error", err.Error()))
 			return
+		}
+
+		if err := redact.ConfigureScanners(redact.ScannersConfig{
+			Betterleaks: s.BetterleaksEnabled(),
+			Goredact:    s.GoredactEnabled(),
+		}); err != nil {
+			// Keep configuring the rest: the sticky error still fails the
+			// callers that fail closed, and the one caller that only logs must
+			// not also lose the user's PII and custom rules for the whole
+			// process. No narrowed-coverage notice — the selection that would
+			// have narrowed coverage never took effect.
+			errRedactionScanner = fmt.Errorf("%w: %w", settings.ErrScannerConfig, err)
+		} else {
+			maybeWarnNarrowedScanners(ctx, s)
 		}
 
 		// A tracked .entire/settings.local.json was ignored. Report it: the
@@ -438,6 +494,7 @@ func EnsureRedactionConfigured() {
 				Enabled:        true,
 				Categories:     make(map[redact.PIICategory]bool),
 				CustomPatterns: pii.CustomPatterns,
+				Logger:         logger,
 			}
 			cfg.Categories[redact.PIIEmail] = pii.Email == nil || *pii.Email
 			cfg.Categories[redact.PIIPhone] = pii.Phone == nil || *pii.Phone
@@ -450,14 +507,14 @@ func EnsureRedactionConfigured() {
 		if s.Redaction != nil {
 			inline = s.Redaction.CustomRedactions
 		}
-		packsRelPath := filepath.Join(paths.EntireDir, redact.RedactorsDirName)
-		packsDir, perr := paths.AbsPath(ctx, packsRelPath)
-		if perr != nil {
+		var packs []*redact.Pack
+		var lerr error
+		if root, rerr := entiredir.OpenForRead(ctx); rerr == nil {
+			packs, lerr = redact.LoadPacks(root.FS(), redact.RedactorsDirName, logger)
+		} else if !errors.Is(rerr, fs.ErrNotExist) {
 			logCtx := logging.WithComponent(ctx, "redaction")
-			logging.Warn(logCtx, "failed to resolve redactors path", slog.String("error", perr.Error()))
-			packsDir = packsRelPath
+			logging.Warn(logCtx, "failed to open .entire for redactor packs", slog.String("error", rerr.Error()))
 		}
-		packs, lerr := redact.LoadPacks(packsDir)
 		if lerr != nil {
 			warnUser(ctx, "redaction",
 				"failed to load redactor packs",
@@ -469,6 +526,7 @@ func EnsureRedactionConfigured() {
 			redact.ConfigureCustomRules(redact.CustomRulesConfig{
 				Inline: inline,
 				Packs:  packs,
+				Logger: logger,
 			})
 		}
 
@@ -492,9 +550,73 @@ func EnsureRedactionConfigured() {
 				Categories: opf.Categories,
 				Command:    opf.Command,
 				Timeout:    opf.TimeoutSeconds,
+				Logger:     logger,
 			})
 		}
+
+		// Load-time summary so "are my rules active?" is answerable from the
+		// log alone.
+		//
+		// Gated on an initialized logger: without one, logging.Info falls
+		// through to the process-default stderr logger, and an INFO line the
+		// user did not ask for would surface as terminal noise. WARN
+		// diagnostics are deliberately not gated — a broken rule is worth
+		// showing wherever it can be shown.
+		if logger != nil {
+			packRules := 0
+			for _, p := range packs {
+				packRules += len(p.Rules)
+			}
+			piiEnabled := s.Redaction != nil && s.Redaction.PII != nil && s.Redaction.PII.Enabled
+			logging.Info(logging.WithComponent(ctx, "redaction"), "redaction configured",
+				slog.Int("packs", len(packs)),
+				slog.Int("pack_rules", packRules),
+				slog.Int("inline_patterns", len(inline)),
+				// Configured counts above, compiled below: a gap between
+				// them means a rule failed to compile (warned separately).
+				slog.Int("active_rules", redact.ActiveCustomRules()),
+				slog.Bool("pii", piiEnabled),
+				slog.Bool("opf", redact.OPFEnabled()),
+			)
+		}
 	})
+	return errRedactionScanner
+}
+
+// maybeWarnNarrowedScanners warns, once per marker file, when betterleaks is
+// disabled. validateScannerSettings guarantees goredact is on whenever
+// betterleaks is off, so exactly one narrowed configuration is reachable
+// today. Best-effort: marker IO failures degrade to warning every run, never
+// to silence.
+// Revisit the fixed marker content when a third engine is added.
+func maybeWarnNarrowedScanners(ctx context.Context, s *settings.EntireSettings) {
+	if s.BetterleaksEnabled() {
+		return
+	}
+	const marker = "betterleaks=false goredact=true\n"
+	markerName := entiredir.MustName(paths.EntireTmpDir) + "/scanner-notice"
+	// Read without creating: a repo that has never made .entire has no marker,
+	// and the warning below is what earns the directory.
+	if root, rerr := entiredir.OpenForRead(ctx); rerr == nil {
+		if prev, prerr := entiredir.ReadFile(root, markerName); prerr == nil && string(prev) == marker {
+			return
+		}
+	}
+	// warnUser always logs but prints only on a TTY: if the first fire is in a
+	// non-TTY hook the notice is log-only and the marker still suppresses later
+	// prints — acceptable, the setting is a committed, team-reviewed choice.
+	warnUser(ctx, "redaction",
+		"betterleaks scanning disabled; checkpoint redaction narrowed to the remaining layers plus goredact",
+		"betterleaks scanning is disabled in .entire/settings.json; checkpoint redaction relies on the remaining layers plus goredact.",
+	)
+	root, err := entiredir.Open(ctx)
+	if err != nil {
+		return
+	}
+	//nolint:errcheck // best-effort marker; failure degrades to warning every run
+	_ = osroot.MkdirAllNoSymlink(root, path.Dir(markerName), 0o750)
+	//nolint:errcheck // best-effort non-sensitive marker file
+	_ = entiredir.WriteFile(root, markerName, []byte(marker), 0o640)
 }
 
 // resolveAgentType picks the best agent type from the context and existing state.
@@ -634,7 +756,7 @@ func EnsurePrimaryRef(ctx context.Context, repo *git.Repository) error {
 	}
 
 	if localExists {
-		if remoteRef != nil && localRef.Hash() != remoteRef.Hash() {
+		if remoteRef != nil && !localRef.Hash().Equal(remoteRef.Hash()) {
 			// Local and remote exist but differ — determine relationship
 			hasData, checkErr := metadataBranchHasData(repo, localRef)
 			if checkErr != nil {
@@ -1281,15 +1403,17 @@ func GetGitCommonDir(ctx context.Context) (string, error) {
 // EnsureEntireGitignore ensures all required entries are in .entire/.gitignore
 // Works correctly from any subdirectory within the repository.
 func EnsureEntireGitignore(ctx context.Context) error {
-	// Get absolute path for the gitignore file
-	gitignoreAbs, err := paths.AbsPath(ctx, entireGitignore)
+	// Open (creating if needed) the shared .entire root; the gitignore lives at
+	// its top level, so the root is also the directory this would have created.
+	root, err := entiredir.Open(ctx)
 	if err != nil {
-		gitignoreAbs = entireGitignore // Fallback to relative
+		return fmt.Errorf("failed to create .entire directory: %w", err)
 	}
+	gitignoreName := entiredir.MustName(entireGitignore)
 
 	// Read existing content
 	var content string
-	if data, err := os.ReadFile(gitignoreAbs); err == nil { //nolint:gosec // path is from AbsPath or constant
+	if data, rerr := entiredir.ReadFile(root, gitignoreName); rerr == nil {
 		content = string(data)
 	}
 
@@ -1315,11 +1439,6 @@ func EnsureEntireGitignore(ctx context.Context) error {
 		return nil
 	}
 
-	// Ensure .entire directory exists
-	if err := os.MkdirAll(filepath.Dir(gitignoreAbs), 0o750); err != nil {
-		return fmt.Errorf("failed to create .entire directory: %w", err)
-	}
-
 	// Append missing entries to gitignore
 	var sb strings.Builder
 	for _, entry := range toAdd {
@@ -1327,201 +1446,31 @@ func EnsureEntireGitignore(ctx context.Context) error {
 	}
 	content += sb.String()
 
-	if err := os.WriteFile(gitignoreAbs, []byte(content), 0o644); err != nil { //nolint:gosec // path is from AbsPath or constant
+	if err := entiredir.WriteFile(root, gitignoreName, []byte(content), 0o644); err != nil {
 		return fmt.Errorf("failed to write gitignore: %w", err)
 	}
 	return nil
 }
 
-// checkCanRewindWithWarning checks working directory and returns a warning with diff stats.
-// Always returns canRewind=true but includes a warning message with +/- line stats for
-// uncommitted changes. Used by manual-commit strategy.
-func checkCanRewindWithWarning(ctx context.Context) (bool, string, error) {
-	repo, err := OpenRepository(ctx)
+// readWorktreeFile reads a repo-relative file through the worktree's shared
+// root. The names come from git status, so they are already the coordinate the
+// root reads in — joining them onto repoRoot and reading the result was the
+// thing that made "which directory is this relative to?" a per-call-site
+// question.
+func readWorktreeFile(repoRoot, file string) ([]byte, error) {
+	root, err := worktreedir.OpenAt(repoRoot)
 	if err != nil {
-		// Can't open repo - still allow rewind but without stats
-		return true, "", nil
+		return nil, fmt.Errorf("open worktree root: %w", err)
 	}
-	defer repo.Close()
-
-	status, err := gitrepo.Status(ctx, repo)
+	name, err := worktreedir.Name(repoRoot, file)
 	if err != nil {
-		return true, "", nil
+		return nil, fmt.Errorf("resolve %s in worktree: %w", file, err)
 	}
-
-	if status.IsClean() {
-		return true, "", nil
-	}
-
-	// Get HEAD commit tree for comparison - if we can't get it, just return without stats
-	head, err := repo.Head()
+	content, err := osroot.ReadFileNoFollow(root, name)
 	if err != nil {
-		return true, "", nil
+		return nil, fmt.Errorf("read %s: %w", file, err)
 	}
-
-	headCommit, err := repo.CommitObject(head.Hash())
-	if err != nil {
-		return true, "", nil
-	}
-
-	headTree, err := headCommit.Tree()
-	if err != nil {
-		return true, "", nil
-	}
-
-	type fileChange struct {
-		status   string // "modified", "added", "deleted"
-		added    int
-		removed  int
-		filename string
-	}
-
-	var changes []fileChange
-	// Use repo root, not cwd - git status returns paths relative to repo root
-	repoRoot, err := paths.WorktreeRoot(ctx)
-	if err != nil {
-		return true, "", nil
-	}
-
-	for file, st := range status {
-		// Skip .entire directory
-		if paths.IsInfrastructurePath(file) {
-			continue
-		}
-
-		// Skip untracked files
-		if st.Worktree == git.Untracked {
-			continue
-		}
-
-		var change fileChange
-		change.filename = file
-
-		switch {
-		case st.Staging == git.Added || st.Worktree == git.Added:
-			change.status = "added"
-			// New file - count all lines as added
-			absPath := filepath.Join(repoRoot, file)
-			if content, err := os.ReadFile(absPath); err == nil { //nolint:gosec // absPath is repo root + relative path from git status
-				change.added = countLines(content)
-			}
-		case st.Staging == git.Deleted || st.Worktree == git.Deleted:
-			change.status = "deleted"
-			// Deleted file - count lines from HEAD as removed
-			if entry, err := headTree.File(file); err == nil {
-				if content, err := entry.Contents(); err == nil {
-					change.removed = countLines([]byte(content))
-				}
-			}
-		case st.Staging == git.Modified || st.Worktree == git.Modified:
-			change.status = "modified"
-			// Modified file - compute diff stats
-			var headContent, workContent []byte
-			if entry, err := headTree.File(file); err == nil {
-				if content, err := entry.Contents(); err == nil {
-					headContent = []byte(content)
-				}
-			}
-			absPath := filepath.Join(repoRoot, file)
-			if content, err := os.ReadFile(absPath); err == nil { //nolint:gosec // absPath is repo root + relative path from git status
-				workContent = content
-			}
-			if headContent != nil && workContent != nil {
-				change.added, change.removed = computeDiffStats(headContent, workContent)
-			}
-		default:
-			continue
-		}
-
-		changes = append(changes, change)
-	}
-
-	if len(changes) == 0 {
-		return true, "", nil
-	}
-
-	// Sort changes by filename for consistent output
-	sort.Slice(changes, func(i, j int) bool {
-		return changes[i].filename < changes[j].filename
-	})
-
-	var msg strings.Builder
-	msg.WriteString("The following uncommitted changes will be reverted:\n")
-
-	totalAdded, totalRemoved := 0, 0
-	for _, c := range changes {
-		totalAdded += c.added
-		totalRemoved += c.removed
-
-		var stats string
-		switch {
-		case c.added > 0 && c.removed > 0:
-			stats = fmt.Sprintf("+%d/-%d", c.added, c.removed)
-		case c.added > 0:
-			stats = fmt.Sprintf("+%d", c.added)
-		case c.removed > 0:
-			stats = fmt.Sprintf("-%d", c.removed)
-		}
-
-		fmt.Fprintf(&msg, "  %-10s %s", c.status+":", c.filename)
-		if stats != "" {
-			fmt.Fprintf(&msg, " (%s)", stats)
-		}
-		msg.WriteString("\n")
-	}
-
-	if totalAdded > 0 || totalRemoved > 0 {
-		fmt.Fprintf(&msg, "\nTotal: +%d/-%d lines\n", totalAdded, totalRemoved)
-	}
-
-	return true, msg.String(), nil
-}
-
-// countLines counts the number of lines in content.
-func countLines(content []byte) int {
-	if len(content) == 0 {
-		return 0
-	}
-	count := 1
-	for _, b := range content {
-		if b == '\n' {
-			count++
-		}
-	}
-	// Don't count trailing newline as extra line
-	if len(content) > 0 && content[len(content)-1] == '\n' {
-		count--
-	}
-	return count
-}
-
-// computeDiffStats computes added and removed line counts between old and new content.
-// Uses a simple line-based diff algorithm.
-func computeDiffStats(oldContent, newContent []byte) (added, removed int) {
-	oldLines := splitLines(oldContent)
-	newLines := splitLines(newContent)
-
-	// Build a set of old lines with counts
-	oldSet := make(map[string]int)
-	for _, line := range oldLines {
-		oldSet[line]++
-	}
-
-	// Check which new lines are truly new
-	for _, line := range newLines {
-		if oldSet[line] > 0 {
-			oldSet[line]--
-		} else {
-			added++
-		}
-	}
-
-	// Remaining old lines are removed
-	for _, count := range oldSet {
-		removed += count
-	}
-
-	return added, removed
+	return content, nil
 }
 
 // splitLines splits content into lines, preserving empty lines.
@@ -1546,7 +1495,7 @@ func fileExists(path string) bool {
 
 // getTaskCheckpointFromTree retrieves a task checkpoint from a commit tree.
 // Shared implementation for shadow and linear-shadow strategies.
-func getTaskCheckpointFromTree(ctx context.Context, point RewindPoint) (*TaskCheckpoint, error) {
+func getTaskCheckpointFromTree(ctx context.Context, point PendingCheckpoint) (*TaskCheckpoint, error) {
 	if !point.IsTaskCheckpoint {
 		return nil, ErrNotTaskCheckpoint
 	}
@@ -1590,7 +1539,7 @@ func getTaskCheckpointFromTree(ctx context.Context, point RewindPoint) (*TaskChe
 
 // getTaskTranscriptFromTree retrieves a task transcript from a commit tree.
 // Shared implementation for shadow and linear-shadow strategies.
-func getTaskTranscriptFromTree(ctx context.Context, point RewindPoint) ([]byte, error) {
+func getTaskTranscriptFromTree(ctx context.Context, point PendingCheckpoint) ([]byte, error) {
 	if !point.IsTaskCheckpoint {
 		return nil, ErrNotTaskCheckpoint
 	}
@@ -1642,7 +1591,8 @@ var ErrBranchNotFound = errors.New("branch not found")
 // Uses `git branch -D` instead of go-git's RemoveReference because go-git v5
 // doesn't properly persist deletions when refs are packed (.git/packed-refs)
 // or in a worktree context. This is the same class of go-git v5 bug that
-// affects checkout and reset --hard (see HardResetWithProtection).
+// affects checkout and reset --hard (see CheckoutBranch in git_operations.go,
+// which shells out to the git CLI for the same reason).
 //
 // Returns ErrBranchNotFound if the branch does not exist, allowing callers
 // to use errors.Is for idempotent deletion patterns.
@@ -1680,7 +1630,7 @@ func branchExistsCLI(ctx context.Context, branchName string) error {
 
 // collectUntrackedFiles collects untracked files in the working directory that are
 // NOT ignored by .gitignore. This is used to capture the initial state when starting
-// a session, ensuring untracked files present at session start are preserved during rewind.
+// a session, distinguishing files present at session start from ones it created.
 // Uses "git ls-files --others --exclude-standard -z" to respect .gitignore rules,
 // avoiding bloated session state from large ignored directories like node_modules/.
 // Returns paths relative to the repository root.

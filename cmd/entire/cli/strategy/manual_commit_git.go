@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"path/filepath"
 	"sort"
+	"time"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
@@ -14,6 +15,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
 	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
+	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/trailers"
 	"github.com/entireio/cli/perf"
 
@@ -44,6 +46,7 @@ func (s *ManualCommitStrategy) SaveStep(ctx context.Context, step StepContext) e
 	}
 
 	mutErr := MutateSessionState(ctx, sessionID, func(state *SessionState) error {
+		invalidateStaleSubagentSnapshot(&step, state)
 		_, migrateSpan := perf.Start(ctx, "migrate_shadow_branch")
 		if _, _, err := s.migrateShadowBranchIfNeeded(ctx, repo, state); err != nil {
 			migrateSpan.RecordError(err)
@@ -87,7 +90,6 @@ func (s *ManualCommitStrategy) SaveStep(ctx context.Context, step StepContext) e
 			NewFiles:          step.NewFiles,
 			DeletedFiles:      step.DeletedFiles,
 			MetadataDir:       step.MetadataDir,
-			MetadataDirAbs:    step.MetadataDirAbs,
 			CommitMessage:     step.CommitMessage,
 			AuthorName:        step.AuthorName,
 			AuthorEmail:       step.AuthorEmail,
@@ -146,9 +148,23 @@ func (s *ManualCommitStrategy) SaveStep(ctx context.Context, step StepContext) e
 			// that would double-subtract and (via clampSubtract) shrink or zero a
 			// real subagent total. Recomputing from the session-wide cumulative
 			// is idempotent regardless of whether this step carried a snapshot.
-			if state.CheckpointTokenUsage != nil {
-				state.CheckpointTokenUsage.SubagentTokens = types.SubtractTokenUsage(
-					state.TokenUsage.SubagentTokens, state.SubagentTokensBaseline)
+			if state.CheckpointTokenUsage != nil && state.TokenUsage != nil {
+				complete := state.TokenUsage.SubagentTokensComplete
+				switch {
+				case complete != nil && !*complete:
+					state.CheckpointTokenUsage = types.WithClearedSubagentTokens(state.CheckpointTokenUsage, false)
+				case state.SubagentTokensBaselineComplete != nil && !*state.SubagentTokensBaselineComplete:
+					// A known-incomplete baseline cannot yield an exact delta, even
+					// when the current inventory has become complete again.
+					state.CheckpointTokenUsage = types.WithClearedSubagentTokens(state.CheckpointTokenUsage, false)
+				default:
+					state.CheckpointTokenUsage.SubagentTokens = types.SubtractTokenUsage(
+						state.TokenUsage.SubagentTokens, state.SubagentTokensBaseline)
+					if complete != nil {
+						value := *complete
+						state.CheckpointTokenUsage.SubagentTokensComplete = &value
+					}
+				}
 			}
 		}
 
@@ -179,6 +195,16 @@ func (s *ManualCommitStrategy) SaveStep(ctx context.Context, step StepContext) e
 	return mutErr
 }
 
+func invalidateStaleSubagentSnapshot(step *StepContext, state *SessionState) {
+	if step.SubagentLedgerVersion == nil || step.TokenUsage == nil ||
+		state.SubagentLedgerVersion == *step.SubagentLedgerVersion {
+		return
+	}
+	// Keep valid main-agent deltas but never persist a child aggregate
+	// computed against an older authoritative inventory.
+	step.TokenUsage = types.WithClearedSubagentTokens(step.TokenUsage, false)
+}
+
 // ensureSessionInitialized creates the session state file if it doesn't yet
 // exist (or has empty BaseCommit). Idempotent: the existence check and the
 // create both happen inside initializeSession's session gate so a concurrent
@@ -196,9 +222,16 @@ func (s *ManualCommitStrategy) ensureSessionInitialized(ctx context.Context, rep
 	return nil
 }
 
-// SaveTaskStep saves a task step checkpoint to the shadow branch.
-// Uses checkpoint.EphemeralStore.Write with a checkpoint.TaskStep request.
+// SaveTaskStep saves an incremental task step checkpoint to the shadow branch
+// (checkpoint.EphemeralStore.Write with a checkpoint.TaskStep request). It
+// exists for post-todo incrementals only — its sole production caller is
+// handleClaudeCodePostTodo — so non-incremental steps are rejected: final
+// subagent captures write task records instead (CompleteTaskRecord /
+// UpsertCompletedTaskRecord).
 func (s *ManualCommitStrategy) SaveTaskStep(ctx context.Context, step TaskStepContext) error {
+	if !step.IsIncremental {
+		return errors.New("SaveTaskStep only writes incremental task checkpoints; final captures write task records")
+	}
 	repo, err := OpenRepository(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to open git repository: %w", err)
@@ -230,19 +263,7 @@ func (s *ManualCommitStrategy) SaveTaskStep(ctx context.Context, step TaskStepCo
 			shortToolUseID = shortToolUseID[:id.ShortIDLength]
 		}
 
-		var messageSubject string
-		if step.IsIncremental {
-			messageSubject = FormatIncrementalSubject(
-				step.IncrementalType,
-				step.SubagentType,
-				step.TaskDescription,
-				step.TodoContent,
-				step.IncrementalSequence,
-				shortToolUseID,
-			)
-		} else {
-			messageSubject = FormatSubagentEndMessage(step.SubagentType, step.TaskDescription, shortToolUseID)
-		}
+		messageSubject := FormatIncrementalMessage(step.TodoContent, step.IncrementalSequence, shortToolUseID)
 		commitMsg := trailers.FormatShadowTaskCommit(
 			messageSubject,
 			taskMetadataDir,
@@ -295,13 +316,8 @@ func (s *ManualCommitStrategy) SaveTaskStep(ctx context.Context, step TaskStepCo
 			slog.Int("deleted_files", len(step.DeletedFiles)),
 			slog.String("shadow_branch", shadowBranchName),
 			slog.Bool("branch_created", !branchExisted),
-		}
-		if step.IsIncremental {
-			attrs = append(attrs,
-				slog.Bool("is_incremental", true),
-				slog.String("incremental_type", step.IncrementalType),
-				slog.Int("incremental_sequence", step.IncrementalSequence),
-			)
+			slog.String("incremental_type", step.IncrementalType),
+			slog.Int("incremental_sequence", step.IncrementalSequence),
 		}
 		logging.Info(logCtx, "task checkpoint saved", attrs...)
 
@@ -337,6 +353,108 @@ func mergeFilesTouched(existing []string, fileLists ...[]string) []string {
 	return result
 }
 
+// EnsureSessionExists creates sessionID's state when missing — SaveTaskStep's
+// old parent-state guarantee, for producers that write task records instead
+// of shadow task steps.
+func (s *ManualCommitStrategy) EnsureSessionExists(ctx context.Context, sessionID string, agentType types.AgentType) error {
+	repo, err := OpenRepository(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to open git repository: %w", err)
+	}
+	defer repo.Close()
+	return s.ensureSessionInitialized(ctx, repo, sessionID, agentType)
+}
+
+// launchStubTaskRecord returns the launch-shaped subset of rec — exactly the
+// fields recordInFlightTaskLaunch would have stubbed — for producers that
+// create the record at completion time (foreground tasks, Droid Workers).
+func launchStubTaskRecord(rec session.TaskRecord) session.TaskRecord {
+	return session.TaskRecord{
+		ToolUseID:             rec.ToolUseID,
+		AgentID:               rec.AgentID,
+		StartedAt:             rec.StartedAt,
+		SubagentType:          rec.SubagentType,
+		TaskDescription:       rec.TaskDescription,
+		TranscriptUnavailable: rec.TranscriptUnavailable,
+	}
+}
+
+// applyTaskRecordCompletion attaches a completed task's results to its record
+// and to the session: files merge into FilesTouched (invariant: carry-forward
+// and PostCommit gating must see task files exactly as the shadow task write
+// used to provide). The record itself is what condensation triggers key on
+// (State.HasTaskContent), so a zero-file read-only completion needs no
+// separate counter.
+// Callers must pre-merge rec.Files with any existing record's files — this
+// overwrites live.Files rather than merging.
+func applyTaskRecordCompletion(state *SessionState, rec session.TaskRecord) error {
+	live := state.FindTaskRecord(rec.ToolUseID)
+	if live == nil {
+		return fmt.Errorf("no task record for tool use %s", rec.ToolUseID)
+	}
+	live.Files = mergeFilesTouched(nil, rec.Files)
+	// A completion with no path (e.g. a later Worker turn whose transcript ref
+	// is empty) must not erase an earlier turn's declared path.
+	if rec.DeclaredTranscriptPath != "" {
+		live.DeclaredTranscriptPath = rec.DeclaredTranscriptPath
+	}
+	if rec.TranscriptUnavailable {
+		live.TranscriptUnavailable = true
+	}
+	if rec.TokenUsage != nil {
+		live.TokenUsage = rec.TokenUsage
+	}
+	if live.AgentID == "" {
+		live.AgentID = rec.AgentID
+	}
+	state.FilesTouched = mergeFilesTouched(state.FilesTouched, rec.Files)
+	return nil
+}
+
+// CompleteTaskRecord marks the record for rec.ToolUseID completed exactly once
+// and attaches the capture's results (files, declared transcript path, tokens)
+// in the same MutateSessionState closure, per session.State.CompleteTaskRecord's
+// contract. When no launch stub exists the record is created first: foreground
+// tasks have no launch hook, so completion is the only event that can produce
+// their record. Returns false without error when a racing Final event already
+// completed the record, or when no session state exists.
+func CompleteTaskRecord(ctx context.Context, sessionID string, rec session.TaskRecord) (bool, error) {
+	completed := false
+	mutErr := MutateSessionState(ctx, sessionID, func(state *SessionState) error {
+		if state.FindTaskRecord(rec.ToolUseID) == nil {
+			state.AddTaskRecord(launchStubTaskRecord(rec))
+		}
+		if !state.CompleteTaskRecord(rec.ToolUseID, time.Now()) {
+			return ErrMutationSkip
+		}
+		if err := applyTaskRecordCompletion(state, rec); err != nil {
+			return err
+		}
+		completed = true
+		return nil
+	})
+	if errors.Is(mutErr, ErrStateNotFound) {
+		return false, nil
+	}
+	return completed, mutErr
+}
+
+// UpsertCompletedTaskRecord writes a COMPLETED task record, merging files into
+// any existing record for the same ToolUseID — the multi-turn producer shape
+// (Factory Droid Workers reach turn-end once per Worker turn, all attributed
+// to one parent tool use), unlike CompleteTaskRecord's exactly-once claim.
+func UpsertCompletedTaskRecord(ctx context.Context, sessionID string, rec session.TaskRecord) error {
+	return MutateSessionState(ctx, sessionID, func(state *SessionState) error {
+		if existing := state.FindTaskRecord(rec.ToolUseID); existing != nil {
+			rec.Files = mergeFilesTouched(existing.Files, rec.Files)
+		} else {
+			state.AddTaskRecord(launchStubTaskRecord(rec))
+		}
+		state.CompleteTaskRecord(rec.ToolUseID, time.Now())
+		return applyTaskRecordCompletion(state, rec)
+	})
+}
+
 // accumulateTokenUsage adds new token usage to existing accumulated usage.
 // If existing is nil, returns a copy of incoming. If incoming is nil, returns existing unchanged.
 //
@@ -356,7 +474,7 @@ func accumulateTokenUsage(existing, incoming *agent.TokenUsage) *agent.TokenUsag
 	}
 	if existing == nil {
 		// Return a copy to avoid sharing the pointer
-		return &agent.TokenUsage{
+		result := &agent.TokenUsage{
 			InputTokens:         incoming.InputTokens,
 			CacheCreationTokens: incoming.CacheCreationTokens,
 			CacheReadTokens:     incoming.CacheReadTokens,
@@ -364,6 +482,14 @@ func accumulateTokenUsage(existing, incoming *agent.TokenUsage) *agent.TokenUsag
 			APICallCount:        incoming.APICallCount,
 			SubagentTokens:      incoming.SubagentTokens,
 		}
+		if incoming.SubagentTokensComplete != nil {
+			complete := *incoming.SubagentTokensComplete
+			result.SubagentTokensComplete = &complete
+			if !complete {
+				result.SubagentTokens = nil
+			}
+		}
+		return result
 	}
 
 	// Accumulate values
@@ -376,7 +502,13 @@ func accumulateTokenUsage(existing, incoming *agent.TokenUsage) *agent.TokenUsag
 	// Replace (not add) subagent tokens: incoming.SubagentTokens is already
 	// the cumulative total as of this step, so the latest snapshot supersedes
 	// whatever was recorded before rather than stacking on top of it.
-	if incoming.SubagentTokens != nil {
+	if incoming.SubagentTokensComplete != nil {
+		complete := *incoming.SubagentTokensComplete
+		existing.SubagentTokensComplete = &complete
+		// An explicit inventory result is authoritative, including exact empty
+		// (complete with nil) and unavailable (incomplete with nil).
+		existing.SubagentTokens = incoming.SubagentTokens
+	} else if incoming.SubagentTokens != nil {
 		existing.SubagentTokens = incoming.SubagentTokens
 	}
 
@@ -392,10 +524,41 @@ func accumulateTokenUsage(existing, incoming *agent.TokenUsage) *agent.TokenUsag
 // in this file, plus SessionState.SubagentTokensBaseline). Shared by all three
 // condensation reset sites (CondenseSessionByID, CondenseAndMarkFullyCondensed,
 // condenseAndUpdateState) so the baseline capture cannot drift between them.
+//
+// It is also the single post-write mutation site for the task-record
+// lifecycle (#2058): every one of the three callers only reaches here after a
+// successful (non-skipped) CondenseSession write, so this is exactly the
+// point at which materializeTaskRecords' payloads have just been durably
+// stored — see removeCompletedTaskRecords.
 func resetCheckpointWindow(state *SessionState) {
 	state.StepCount = 0
 	state.CheckpointTokenUsage = nil
+	state.ClearCondensationAttempt()
 	state.RebaselineSubagentTokens()
+	removeCompletedTaskRecords(state)
+}
+
+// removeCompletedTaskRecords drops every completed task record (CompletedAt
+// non-zero) from state after a successful condensation write: the record's
+// payload — a transcript or, when unavailable, the reason it wasn't — is now
+// durably stored under this checkpoint's tasks/<tool-use-id>/ subtree, so the
+// pointer no longer needs to live in session state (RemoveTaskRecord's
+// contract). In-flight records (CompletedAt zero) are left alone; the next
+// condensation re-materializes their transcript-so-far.
+//
+// Collects the IDs to remove before calling RemoveTaskRecord: that method
+// mutates state.TaskRecords in place (shifting the backing array), so
+// removing while ranging over the live slice would skip elements.
+func removeCompletedTaskRecords(state *SessionState) {
+	var completedIDs []string
+	for _, record := range state.TaskRecords {
+		if !record.CompletedAt.IsZero() {
+			completedIDs = append(completedIDs, record.ToolUseID)
+		}
+	}
+	for _, toolUseID := range completedIDs {
+		state.RemoveTaskRecord(toolUseID)
+	}
 }
 
 // deleteShadowBranch deletes a shadow branch by name.

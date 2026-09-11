@@ -478,6 +478,7 @@ func buildAdoptedSessionState(ctx context.Context, source *session.State) (*sess
 	adopted.TurnID = ""
 	adopted.TurnCheckpointIDs = nil
 	adopted.LastCheckpointID = id.EmptyCheckpointID
+	adopted.ClearCondensationAttempt()
 	adopted.LastCheckpointCommitHash = ""
 	adopted.CheckpointTokenUsage = nil
 	// Re-baseline the subagent cumulative for the fresh target-local window. The
@@ -592,7 +593,9 @@ func canonicalAdoptPath(path string) string {
 }
 
 func currentFilesTouched(ctx context.Context) ([]string, error) {
-	changes, err := DetectFileChanges(ctx, nil)
+	// Unbounded walk: adopt is a user-attended command, so a slow-but-healthy
+	// repo should finish rather than fail at the hook-path status budget.
+	changes, err := detectFileChangesUnbounded(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("detect current file changes: %w", err)
 	}

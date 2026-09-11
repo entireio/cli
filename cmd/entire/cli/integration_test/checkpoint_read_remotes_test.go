@@ -3,10 +3,16 @@
 package integration
 
 import (
+	"bytes"
+	"encoding/json"
+	"os"
 	"os/exec"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
+	"github.com/entireio/cli/cmd/entire/cli/execx"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 
@@ -14,6 +20,177 @@ import (
 	"github.com/go-git/go-git/v6/plumbing"
 	"github.com/stretchr/testify/require"
 )
+
+// checkpointForgeTransport maps transport destinations without rewriting the
+// forge identities used by remote ownership checks (including remote get-url).
+func checkpointForgeTransport(t *testing.T, origin, fork, dedicated string) []string {
+	t.Helper()
+	realGit, err := exec.LookPath("git")
+	require.NoError(t, err)
+	binDir := t.TempDir()
+	// Deliberately a LITERAL script, duplicated with the near-identical shim in
+	// cmd/entire/cli/checkpoint/remote/checkpoint_ref_from_test.go. The two
+	// differ on purpose — this one also maps bare remote names and matches
+	// fetch-pack|push because it drives a spawned binary; that one maps URLs
+	// for an in-process caller and matches ls-remote|fetch.
+	//
+	// They were shared once, as a helper that built this script by
+	// interpolating the subcommand set and rewrite table. That turned two
+	// literals into a shell-code generator whose inputs reached an executable
+	// placed first on PATH, so a rewrite key carrying `;` or `)` was command
+	// execution. Keep them literal: dedupe by giving each caller its own
+	// script, never by generating one from parameters.
+	testutil.WriteFile(t, binDir, "git", `#!/bin/bash
+args=("$@")
+for arg in "$@"; do
+  case "$arg" in
+    ls-remote|fetch|fetch-pack|push)
+      for i in "${!args[@]}"; do
+        case "${args[$i]}" in
+          fork|https://github.com/contributor/app.git) args[$i]="$CHECKPOINT_TEST_FORK" ;;
+          origin|https://github.com/acme/app.git) args[$i]="$CHECKPOINT_TEST_ORIGIN" ;;
+          https://github.com/acme/checkpoints.git) args[$i]="$CHECKPOINT_TEST_DEDICATED" ;;
+        esac
+      done
+      break ;;
+  esac
+done
+exec "$CHECKPOINT_TEST_GIT" "${args[@]}"
+`)
+	require.NoError(t, os.Chmod(filepath.Join(binDir, "git"), 0o755))
+	return []string{
+		"PATH=" + binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+		"CHECKPOINT_TEST_GIT=" + realGit,
+		"CHECKPOINT_TEST_ORIGIN=" + origin,
+		"CHECKPOINT_TEST_FORK=" + fork,
+		"CHECKPOINT_TEST_DEDICATED=" + dedicated,
+		"GIT_ALLOW_PROTOCOL=file",
+		"ENTIRE_CHECKPOINT_TOKEN=",
+	}
+}
+
+func TestCheckpointReadRemotes_InheritedDedicatedFork(t *testing.T) {
+	t.Parallel()
+	if runtime.GOOS == "windows" {
+		t.Skip("transport mapping uses a bash git wrapper")
+	}
+	env := NewFeatureBranchEnv(t)
+	env.CheckpointStore = StoreGitRefs
+	bareOrigin := env.SetupBareRemote()
+	bareFork := env.SetupNamedBareRemote("fork")
+	bareDedicated := env.SetupEmptyNamedBareRemote("dedicated")
+	testutil.RunGit(t, env.RepoDir, "remote", "remove", "dedicated")
+	testutil.RunGit(t, env.RepoDir, "remote", "set-url", "origin", "https://github.com/acme/app.git")
+	testutil.RunGit(t, env.RepoDir, "remote", "set-url", "fork", "https://github.com/contributor/app.git")
+	env.setGitConfigBaseline()
+	env.ExtraEnv = checkpointForgeTransport(t, bareOrigin, bareFork, bareDedicated)
+	env.PatchSettings(map[string]any{
+		"strategy_options": map[string]any{
+			"checkpoint_push_remote": "fork",
+			"checkpoint_remote":      map[string]any{"provider": "github", "repo": "acme/checkpoints"},
+		},
+	})
+	// NewFeatureBranchEnv ignores .entire; explicitly publish the shared setting
+	// so every fresh clone inherits the same configuration as the producer.
+	testutil.RunGit(t, env.RepoDir, "add", "--force", ".entire/settings.json")
+	env.GitCommit("Share inherited checkpoint settings")
+	checkpointID := createCheckpointedCommit(t, env, "Add fork readback", "fork.go", "package fork", "Add fork readback")
+	env.RunPrePush("fork")
+	require.True(t, env.CheckpointExistsOnRemote(bareFork, checkpointID))
+	require.False(t, env.CheckpointsPresentOnRemote(bareOrigin))
+	require.False(t, env.CheckpointsPresentOnRemote(bareDedicated))
+	// Publish only code here: delivery above must have used the real pre-push hook.
+	env.GitPush(bareFork, "HEAD")
+	checkpointRef := checkpointRefName(checkpointID)
+	checkpointHash := env.gitOutput(bareFork, "rev-parse", checkpointRef)
+	transcript, found := checkpointBlob(env, checkpointID, "0/"+paths.TranscriptFileName)
+	require.True(t, found)
+	require.NotEmpty(t, transcript)
+	metadata, found := checkpointBlob(env, checkpointID, "0/"+paths.MetadataFileName)
+	require.True(t, found)
+	var session struct {
+		SessionID string `json:"session_id"`
+	}
+	require.NoError(t, json.Unmarshal([]byte(metadata), &session))
+	require.NotEmpty(t, session.SessionID)
+	branch := env.GetCurrentBranch()
+
+	for _, inherited := range []bool{true, false} {
+		name := "inherited"
+		if !inherited {
+			name = "without_inherited_setting"
+		}
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			for _, read := range []struct {
+				name string
+				args []string
+			}{
+				{"list", []string{"checkpoint", "list", "--json", "--no-pager"}},
+				{"explain_list", []string{"checkpoint", "explain", "--json", "--no-pager"}},
+				{"session_list", []string{"checkpoint", "list", "--session", session.SessionID, "--json", "--no-pager"}},
+				{"detail", []string{"checkpoint", "explain", "--checkpoint", checkpointID, "--json", "--no-pager"}},
+				{"transcript", []string{"checkpoint", "explain", "--checkpoint", checkpointID, "--transcript", "--no-pager"}},
+			} {
+				t.Run(read.name, func(t *testing.T) {
+					t.Parallel()
+					clone := NewTestEnv(t)
+					clone.CheckpointStore = StoreGitRefs
+					clone.ExtraEnv = env.ExtraEnv
+					testutil.RunGit(t, "", "clone", "--no-local", "--single-branch", "--branch", branch,
+						"--origin", "fork", "file://"+bareFork, clone.RepoDir)
+					testutil.RunGit(t, clone.RepoDir, "remote", "set-url", "fork", "https://github.com/contributor/app.git")
+					testutil.RunGit(t, clone.RepoDir, "remote", "add", "origin", "https://github.com/acme/app.git")
+					if !inherited {
+						clone.PatchSettings(map[string]any{"strategy_options": map[string]any{"checkpoint_push_remote": "fork"}})
+					}
+					// No local refs or objects may satisfy any of these independent reads.
+					for _, args := range [][]string{
+						{"show-ref", "--verify", checkpointRef},
+						{"cat-file", "-e", checkpointHash + "^{commit}"},
+					} {
+						cmd := execx.NonInteractive(t.Context(), "git", args...)
+						cmd.Dir, cmd.Env = clone.RepoDir, clone.cliEnv()
+						out, err := cmd.CombinedOutput()
+						require.Error(t, err, "checkpoint already available: %v: %s", args, out)
+					}
+					cmd := execx.NonInteractive(t.Context(), getTestBinary(), read.args...)
+					cmd.Dir, cmd.Env = clone.RepoDir, clone.cliEnv()
+					var stdout, stderr bytes.Buffer
+					cmd.Stdout, cmd.Stderr = &stdout, &stderr
+					require.NoError(t, cmd.Run(), "stdout: %s\nstderr: %s", &stdout, &stderr)
+					require.NotContains(t, stderr.String(), "could not load session metadata")
+					if read.name == "transcript" {
+						require.Equal(t, transcript, stdout.String())
+						return
+					}
+					type result struct {
+						CheckpointID string `json:"checkpoint_id"`
+						SessionID    string `json:"session_id"`
+						SessionCount int    `json:"session_count"`
+						Sessions     []struct {
+							SessionID string `json:"session_id"`
+						} `json:"sessions"`
+					}
+					var got result
+					if read.name == "detail" {
+						require.NoError(t, json.Unmarshal(stdout.Bytes(), &got))
+						require.Len(t, got.Sessions, 1)
+						require.Equal(t, session.SessionID, got.Sessions[0].SessionID)
+					} else {
+						var listed []result
+						require.NoError(t, json.Unmarshal(stdout.Bytes(), &listed))
+						require.Len(t, listed, 1)
+						got = listed[0]
+						require.Equal(t, session.SessionID, got.SessionID)
+					}
+					require.Equal(t, checkpointID, got.CheckpointID)
+					require.Equal(t, 1, got.SessionCount)
+				})
+			}
+		})
+	}
+}
 
 // wipeLocalCheckpointState ensures subsequent reads can only succeed remotely.
 func wipeLocalCheckpointState(t *testing.T, env *TestEnv) {
@@ -216,12 +393,7 @@ func TestCheckpointReadRemotes_ElectedUnreachableLegacyStillServes(t *testing.T)
 			},
 		})
 		// The elected remote goes dark: point it at a path that doesn't exist.
-		cmd := exec.CommandContext(t.Context(), "git", "remote", "set-url", "upstream", env.RepoDir+"/nonexistent-remote")
-		cmd.Dir = env.RepoDir
-		cmd.Env = testutil.GitIsolatedEnv()
-		if out, err := cmd.CombinedOutput(); err != nil {
-			t.Fatalf("git remote set-url: %v\n%s", err, out)
-		}
+		testutil.RunGit(t, env.RepoDir, "remote", "set-url", "upstream", env.RepoDir+"/nonexistent-remote")
 		env.setGitConfigBaseline()
 
 		wipeLocalCheckpointState(t, env)

@@ -44,19 +44,12 @@ const pushQueueFileName = "entire-checkpoint-push-queue.jsonl"
 func (env *TestEnv) AddSecondPushURL(remoteName string) string {
 	env.T.Helper()
 
-	ctx := env.T.Context()
-
 	secondBare := env.T.TempDir()
 	if resolved, err := filepath.EvalSymlinks(secondBare); err == nil {
 		secondBare = resolved
 	}
 
-	cmd := exec.CommandContext(ctx, "git", "init", "--bare")
-	cmd.Dir = secondBare
-	cmd.Env = testutil.GitIsolatedEnv()
-	if output, err := cmd.CombinedOutput(); err != nil {
-		env.T.Fatalf("failed to init second bare repo: %v\n%s", err, output)
-	}
+	testutil.RunGit(env.T, secondBare, "init", "--bare")
 
 	// The original URL is re-added explicitly because configuring ANY pushurl
 	// replaces url for push purposes — adding only the new one would silently

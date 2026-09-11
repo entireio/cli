@@ -22,7 +22,7 @@ Both backends are **git-backed** — they store the committed record in the repo
 
 Checkpoint storage is pluggable. The topology is a single **primary** plus zero or more **mirrors**:
 
-- **Primary** — the source of truth. It serves all reads and writes, and the full checkpoint lifecycle (resume bootstrap, `doctor` reconcile, `explain` tree reads, push, cleanup, pre-push OPF) drives *its* record.
+- **Primary** — the source of truth. It serves all reads and writes, and the full checkpoint lifecycle (resume bootstrap, `doctor` reconcile, `explain` tree reads, push, cleanup) drives *its* record. Pre-push OPF follows the primary too: each backend has its own rewrite (`manual_commit_opf_rewrite.go` for the v1 branch, `manual_commit_opf_refs.go` for the per-ref push).
 - **Mirror** — an independent backend that receives best-effort **write fan-out** only. Reads never come from a mirror.
 
 Backends register in `checkpoint/registry.go`. Each carries a `gitBacked` capability:
@@ -163,6 +163,7 @@ Backend selection lives in the `checkpoints` block of settings (`settings/checkp
 ```
 
 - `primary.type` is required. When the whole block is absent, the layer defaults to the **git-branch** backend with no mirrors — so existing repos are unchanged.
+- **A first-time `entire enable` writes `git-refs` explicitly, with no prompt.** Both setup paths do it — the interactive flow and the non-interactive `--agent` flow — via `resolveFirstRunCheckpointBackend` / `firstRunCheckpointBackendDefault` (`setup.go`). There is deliberately **no setup question**: storage topology is not answerable at first-run, so the recommended backend is written silently and `git-branch` is reachable only by typing `--checkpoint-backend branch`. The one case that writes nothing is an active `ENTIRE_CHECKPOINTS_PRIMARY`, since the env fully replaces the settings block and persisting a default would only record diverging config.
 - `settings.local.json`'s `checkpoints` block **replaces** the one in `settings.json` wholesale (this is a selection config, not a deep-merged document).
 - Config loading is **fail-soft**: a missing file, a whole-file JSON syntax error, or unrelated invalid fields all resolve to "no config" → default git-branch. It errors *only* when a present `checkpoints` block is itself invalid.
 - Unknown fields are rejected (`DisallowUnknownFields`) to surface typos. The trade-off: adding a `checkpoints` field is a coordinated rollout — ship the reader before any writer emits the field.
@@ -177,7 +178,7 @@ The switch is a **primary flip**, not a dual-write phase. There is no "run both 
 
 | State | `primary` | Behavior |
 |-------|-----------|----------|
-| **Config-less fallback** | `git-branch` | Hex checkpoints on the `v1` branch; unchanged legacy behavior for repos set up before the git-refs default (new setups write an explicit primary — `git-refs` as the recommended pick unless the setup question chose branch) |
+| **Config-less fallback** | `git-branch` | Hex checkpoints on the `v1` branch; unchanged legacy behavior for repos set up before the git-refs default. A repo reaches this state only by predating that default (or by having its `checkpoints` block removed) — a first-time `entire enable` always writes an explicit primary |
 | **Refs-only** | `git-refs` | New checkpoints are ULIDs written as per-checkpoint refs; pre-existing hex/`v1` checkpoints stay readable via the read-routing fallback |
 
 ## Checkpoint version and policy
@@ -225,5 +226,5 @@ When checkpoints *are* actively migrated from the branch into refs (a path that 
 ## Known limitations and deferred work
 
 - **Storage-level `List` is local-only by default**, with **opt-in remote discovery** for user-facing enumeration (see [List and remote discovery](#list-and-remote-discovery)): an `ls-remote` of `refs/entire/checkpoints/*` surfaces checkpoints written on another machine, hydrated lazily on read. It queries the dedicated `checkpoint_remote` when one is configured, else the checkpoint read candidates with merged listings, and is kept off the per-turn hook hot path.
-- **OPF (OpenAI Privacy Filter) at pre-push is git-branch-only for now.** The per-ref push does not run OPF re-redaction; that is deferred until after the store lands. See `strategy/manual_commit_opf_rewrite.go` and [security-and-privacy.md](../security-and-privacy.md).
+- ~~**OPF (OpenAI Privacy Filter) at pre-push is git-branch-only.**~~ **Resolved.** The per-ref push now runs OPF re-redaction over every unpushed commit on each queued ref. See `strategy/manual_commit_opf_refs.go` and [security-and-privacy.md](../security-and-privacy.md).
 - **The "ULIDs never land on the branch" invariant is not yet enforced at write time.** A config flip or a missing `ENTIRE_CHECKPOINTS_PRIMARY` in an amending environment could, in principle, condense a ULID checkpoint onto the `v1` branch, which readers (routing ULIDs to refs only) would then fail to find. Because git-branch is *not* a mirror of git-refs (see [Migration and coexistence](#migration-and-coexistence)), a ULID reaching the git-branch write path is unambiguously a bug — so enforcing this is a straightforward reject at that write path, not a topology-role-aware check.

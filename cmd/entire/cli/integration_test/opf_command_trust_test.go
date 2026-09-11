@@ -48,12 +48,13 @@ func setupOPFAttack(t *testing.T, env *TestEnv) (marker, command string) {
 // A pull request can carry both a payload and a .entire/settings.json naming
 // it, because that file is version-controlled. Pushing must not execute it.
 //
-// This test also exercises a path no unit test reaches: the real binary runs
-// logging.Init, which resolves the log level through settings.Load. When this
-// gate logged from inside the loader, that re-entered the logger's
-// non-reentrant RWMutex and hung every hook. The root cause is fixed in
-// logging.Init (see TestInit_GetterThatLogsDoesNotDeadlock); this test is what
-// surfaced it, and a recurrence shows up here as a timeout.
+// This test also exercises a path no unit test reaches: the real binary builds
+// its logger, resolving the log level through settings.Load. When this gate
+// logged from inside the loader, that re-entered the logger's non-reentrant
+// RWMutex and hung every hook. The level is now resolved in the cli package
+// before the logger exists, so the logging package never calls out while
+// holding a lock — but this test is what surfaced the hang, and a recurrence
+// still shows up here as a timeout.
 //
 // The push is expected to FAIL: with the command correctly ignored, OPF falls
 // back to resolving "opf" on $PATH, which is absent here, and the pre-push

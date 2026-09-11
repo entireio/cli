@@ -12,7 +12,7 @@ import (
 // and non-blocking; failures to load settings simply suppress the event.
 func emitCheckpointPolicyBlocked(ctx context.Context, event telemetry.CheckpointPolicyBlockedEvent) {
 	s, err := LoadEntireSettings(ctx)
-	if err != nil || s.Telemetry == nil || !*s.Telemetry {
+	if err != nil || !s.IsTelemetryEnabled() {
 		return
 	}
 	telemetry.TrackCheckpointPolicyBlocked(event, versioninfo.Version)

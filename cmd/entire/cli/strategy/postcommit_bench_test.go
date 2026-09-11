@@ -158,15 +158,14 @@ func benchSetupPostCommitRepo(b *testing.B, phase session.Phase, sessionCount in
 		paths.ClearWorktreeRootCache()
 
 		if err := s.SaveStep(context.Background(), StepContext{
-			SessionID:      sessionID,
-			ModifiedFiles:  modifiedFiles,
-			NewFiles:       []string{},
-			DeletedFiles:   []string{},
-			MetadataDir:    metadataDir,
-			MetadataDirAbs: metadataDirAbs,
-			CommitMessage:  "Checkpoint 1",
-			AuthorName:     "Bench",
-			AuthorEmail:    "bench@test.com",
+			SessionID:     sessionID,
+			ModifiedFiles: modifiedFiles,
+			NewFiles:      []string{},
+			DeletedFiles:  []string{},
+			MetadataDir:   metadataDir,
+			CommitMessage: "Checkpoint 1",
+			AuthorName:    "Bench",
+			AuthorEmail:   "bench@test.com",
 		}); err != nil {
 			b.Fatalf("SaveStep: %v", err)
 		}

@@ -12,5 +12,7 @@ golangci-lint config verify
 if [ "$CI" = "true" ]; then
   echo "skipped because CI=true"
 else
-  golangci-lint run --timeout=30m --fix ./...
+  # No --fix: lint is read-only, like CI. `mise run fmt` owns rewriting.
+  # --fix let nolintlint delete //nolint directives in architecture_test.go.
+  golangci-lint run --timeout=30m ./...
 fi

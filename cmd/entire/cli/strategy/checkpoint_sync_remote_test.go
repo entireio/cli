@@ -5,11 +5,11 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/entireio/cli/cmd/entire/cli/osroot"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 
@@ -20,21 +20,13 @@ import (
 // currentBranchName returns the short name of the current branch in repoDir.
 func currentBranchName(t *testing.T, repoDir string) string {
 	t.Helper()
-	cmd := exec.CommandContext(context.Background(), "git", "symbolic-ref", "--short", "HEAD")
-	cmd.Dir = repoDir
-	cmd.Env = testutil.GitIsolatedEnv()
-	out, err := cmd.Output()
-	require.NoError(t, err)
-	return strings.TrimSpace(string(out))
+	return strings.TrimSpace(testutil.RunGit(t, repoDir, "symbolic-ref", "--short", "HEAD"))
 }
 
 // setGitConfig sets a git config key to value in repoDir.
 func setGitConfig(t *testing.T, repoDir, key, value string) {
 	t.Helper()
-	cmd := exec.CommandContext(context.Background(), "git", "config", key, value)
-	cmd.Dir = repoDir
-	cmd.Env = testutil.GitIsolatedEnv()
-	require.NoError(t, cmd.Run())
+	testutil.RunGit(t, repoDir, "config", key, value)
 }
 
 // Not parallel: uses t.Chdir()
@@ -196,10 +188,7 @@ func TestResolveCheckpointSyncRemote_PushurlOnlyRemoteIsInvisible(t *testing.T) 
 
 	// A remote configured with only a pushurl (no url) added first. If it
 	// were counted, it would sort first in .git/config order and get elected.
-	cmd := exec.CommandContext(ctx, "git", "config", "remote.pushonly.pushurl", "https://example.com/pushonly.git")
-	cmd.Dir = tmpDir
-	cmd.Env = testutil.GitIsolatedEnv()
-	require.NoError(t, cmd.Run())
+	testutil.RunGit(t, tmpDir, "config", "remote.pushonly.pushurl", "https://example.com/pushonly.git")
 
 	// Two real remotes added after it, no "origin" — this keeps the visible
 	// remote count at 2 so the resolver exercises the "first" precedence
@@ -388,12 +377,7 @@ func TestCheckpointSyncAllowedForRemote(t *testing.T) {
 // testutil helpers do not cover (remote rename).
 func gitInRepo(t *testing.T, repoDir string, args ...string) {
 	t.Helper()
-	cmd := exec.CommandContext(t.Context(), "git", args...)
-	cmd.Dir = repoDir
-	cmd.Env = testutil.GitIsolatedEnv()
-	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("git %v failed: %v\n%s", args, err, out)
-	}
+	testutil.RunGit(t, repoDir, args...)
 }
 
 func newCaptureTestRepo(t *testing.T) string {
@@ -588,9 +572,9 @@ func TestResolveCheckpointSyncRemote_CapturedTier(t *testing.T) {
 	t.Run("corrupt capture state falls through to origin", func(t *testing.T) {
 		dir := newCaptureTestRepo(t)
 		t.Chdir(dir)
-		path, err := capturedSyncRemotesPath(ctx)
+		root, err := capturedSyncRemotesRoot(ctx)
 		require.NoError(t, err)
-		require.NoError(t, os.WriteFile(path, []byte("{not json"), 0o600))
+		require.NoError(t, osroot.WriteFile(root, capturedSyncRemotesFileName, []byte("{not json"), 0o600))
 
 		got, resolveErr := ResolveCheckpointSyncRemote(ctx)
 		require.NoError(t, resolveErr)

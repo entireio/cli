@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -962,17 +961,21 @@ func TestSessionAdopt_ResetsSourceCheckpointWindow(t *testing.T) {
 		ContextWindowSize:           200_000,
 		CheckpointTranscriptStart:   2,
 		CheckpointTranscriptSize:    1234,
-		CondensedTranscriptLines:    2,
-		TranscriptLinesAtStart:      2,
+		CondensedTranscriptLines:    2, //nolint:staticcheck // legacy field, asserted so migration keeps working
+		TranscriptLinesAtStart:      2, //nolint:staticcheck // legacy field, asserted so migration keeps working
 		TranscriptIdentifierAtStart: "source-assistant",
 		TurnID:                      "source-turn",
 		TurnCheckpointIDs:           []string{"abc123def456"},
 		LastCheckpointID:            id.MustCheckpointID("abc123def456"),
-		LastCheckpointCommitHash:    "source-commit",
-		CheckpointTokenUsage:        &agent.TokenUsage{InputTokens: 100, OutputTokens: 25, APICallCount: 1},
-		UntrackedFilesAtStart:       []string{"source-only.txt"},
-		PromptWindowBase:            3,
-		PromptWindowResetPending:    true,
+		CondensationAttempt: &session.CondensationAttempt{
+			CheckpointID:    id.MustCheckpointID("fedcba987654"),
+			RecoveryPending: true,
+		},
+		LastCheckpointCommitHash: "source-commit",
+		CheckpointTokenUsage:     &agent.TokenUsage{InputTokens: 100, OutputTokens: 25, APICallCount: 1},
+		UntrackedFilesAtStart:    []string{"source-only.txt"},
+		PromptWindowBase:         3,
+		PromptWindowResetPending: true,
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -1044,6 +1047,9 @@ func TestSessionAdopt_ResetsSourceCheckpointWindow(t *testing.T) {
 	if !adopted.LastCheckpointID.IsEmpty() {
 		t.Fatalf("LastCheckpointID = %s, want empty", adopted.LastCheckpointID.String())
 	}
+	if adopted.CondensationAttempt != nil {
+		t.Fatalf("CondensationAttempt = %#v, want nil", adopted.CondensationAttempt)
+	}
 	if adopted.LastCheckpointCommitHash != "" {
 		t.Fatalf("LastCheckpointCommitHash = %q, want empty", adopted.LastCheckpointCommitHash)
 	}
@@ -1080,8 +1086,8 @@ func TestSessionAdopt_ClearsLegacyTranscriptOffsets(t *testing.T) {
 		BaseCommit:                "source-head",
 		WorktreePath:              "/source/repo",
 		CheckpointTranscriptStart: 9,
-		CondensedTranscriptLines:  9,
-		TranscriptLinesAtStart:    9,
+		CondensedTranscriptLines:  9, //nolint:staticcheck // legacy field, asserted so migration keeps working
+		TranscriptLinesAtStart:    9, //nolint:staticcheck // legacy field, asserted so migration keeps working
 	})
 	if err != nil {
 		t.Fatalf("buildAdoptedSessionState failed: %v", err)
@@ -1784,10 +1790,5 @@ func claudeAdoptTranscriptPath(t *testing.T, sourceRepo, sessionID string) strin
 func runAdoptGit(t *testing.T, dir string, args ...string) {
 	t.Helper()
 
-	cmd := exec.CommandContext(context.Background(), "git", args...)
-	cmd.Dir = dir
-	cmd.Env = testutil.GitIsolatedEnv()
-	if output, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("git %s failed: %v\n%s", strings.Join(args, " "), err, output)
-	}
+	testutil.RunGit(t, dir, args...)
 }

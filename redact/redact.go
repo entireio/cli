@@ -4,17 +4,23 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"math"
 	"net/url"
 	"regexp"
+	"runtime"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"github.com/betterleaks/betterleaks/detect"
+	"golang.org/x/sync/errgroup"
 )
 
 // secretPattern matches high-entropy strings that may be secrets.
@@ -158,7 +164,9 @@ var connectionStringRules = []connectionStringRule{
 
 // String replaces secrets and PII in s using layered detection:
 //  1. Entropy-based: high-entropy alphanumeric sequences (threshold 4.5)
-//  2. Pattern-based: betterleaks regex rules (260+ known secret formats)
+//  2. Pattern-based: scanner engines selected via ConfigureScanners —
+//     betterleaks regex rules (several hundred known secret formats) and/or the
+//     goredact engine; betterleaks-only when unconfigured
 //  3. Provider token prefixes: deterministic prefix rules for credential
 //     formats betterleaks misses in isolation (e.g. Supabase sb_secret_)
 //  4. Credentialed URIs: URLs containing userinfo passwords
@@ -172,8 +180,8 @@ func String(s string) string {
 	return applyRegions(s, detectAllLayers(s))
 }
 
-// detectAllLayers runs the eight always-on/opt-in regex-based redaction
-// layers and returns their tagged regions. The OpenAI Privacy Filter
+// detectAllLayers runs the always-on, opt-in, and scanner-configurable
+// detection layers and returns their tagged regions. The OpenAI Privacy Filter
 // (the final, network-backed layer) is NOT included — callers that want it
 // append detectOPF spans to the result before passing to applyRegions. See
 // StringWithPrivacyFilter for the augmented flow.
@@ -205,24 +213,40 @@ func detectAllLayers(s string) []taggedRegion {
 		}
 	}
 
-	// 2. Pattern-based detection via betterleaks (secrets — always on).
-	if d := getDetector(); d != nil {
-		for _, f := range d.DetectString(s) {
-			if f.Secret == "" {
-				continue
-			}
-			searchFrom := 0
-			for {
-				idx := strings.Index(s[searchFrom:], f.Secret)
-				if idx < 0 {
-					break
+	// 2. Pattern-based detection via scanner engines (secrets — selected
+	// via ConfigureScanners; betterleaks-only when unconfigured).
+	if getScanners().betterleaks {
+		if d := getDetector(); d != nil {
+			seenSecrets := make(map[string]struct{})
+			for _, f := range d.DetectString(s) {
+				// Placeholder-valued findings (changeme, secret_here, mask runs)
+				// stay visible — but only on an exact match: splitting a greedy
+				// finding at a placeholder head can leak a real secret in the tail.
+				if isPlaceholderSecretValue(f.Secret) {
+					continue
 				}
-				absIdx := searchFrom + idx
-				regions = append(regions, taggedRegion{region: region{absIdx, absIdx + len(f.Secret)}})
-				searchFrom = absIdx + len(f.Secret)
+				// A finding reports one occurrence, but the search below already
+				// covers every copy of its secret. Repeated findings must not
+				// rescan the input and accumulate quadratically many regions.
+				if _, seen := seenSecrets[f.Secret]; seen {
+					continue
+				}
+				seenSecrets[f.Secret] = struct{}{}
+				searchFrom := 0
+				for {
+					idx := strings.Index(s[searchFrom:], f.Secret)
+					if idx < 0 {
+						break
+					}
+					absIdx := searchFrom + idx
+					regions = append(regions, taggedRegion{region: region{absIdx, absIdx + len(f.Secret)}})
+					searchFrom = absIdx + len(f.Secret)
+				}
 			}
 		}
 	}
+	// goredact engine findings (only runs when enabled via ConfigureScanners).
+	regions = append(regions, detectGoredact(s)...)
 
 	// 3. Provider-specific deterministic token prefixes (secrets — always on).
 	// Catches low-entropy credential formats (e.g. Supabase sb_secret_) that
@@ -510,11 +534,21 @@ func Bytes(b []byte) []byte {
 
 // JSONLBytes redacts secrets in JSONL-formatted byte content and returns
 // the result as RedactedBytes, certifying the output has been through redaction.
+// Returns ErrScannerDegraded when the goredact scanner degraded while
+// betterleaks is disabled.
 func JSONLBytes(b []byte) (RedactedBytes, error) {
 	s := string(b)
 	redacted, err := JSONLContent(s)
 	if err != nil {
+		// Degradation outranks a walk error: callers' errors.Is guards must
+		// see the sentinel so no error path can reach a Bytes fallback.
+		if scannerDegradedSole() {
+			return RedactedBytes{}, fmt.Errorf("%w (content walk also failed: %w)", ErrScannerDegraded, err)
+		}
 		return RedactedBytes{}, err
+	}
+	if scannerDegradedSole() {
+		return RedactedBytes{}, ErrScannerDegraded
 	}
 	if redacted == s {
 		return RedactedBytes{data: b}, nil
@@ -525,11 +559,20 @@ func JSONLBytes(b []byte) (RedactedBytes, error) {
 // JSONLBytesWithPrivacyFilter augments JSONLBytes with the OpenAI Privacy
 // Filter. Use only at condensation/export boundaries; per-turn writes must
 // use JSONLBytes.
+// Returns ErrScannerDegraded when the goredact scanner degraded while
+// betterleaks is disabled.
 func JSONLBytesWithPrivacyFilter(ctx context.Context, b []byte) (RedactedBytes, error) {
 	s := string(b)
 	redacted, err := JSONLContentWithPrivacyFilter(ctx, s)
 	if err != nil {
+		// Degradation outranks a walk error; see JSONLBytes.
+		if scannerDegradedSole() {
+			return RedactedBytes{}, fmt.Errorf("%w (content walk also failed: %w)", ErrScannerDegraded, err)
+		}
 		return RedactedBytes{}, err
+	}
+	if scannerDegradedSole() {
+		return RedactedBytes{}, ErrScannerDegraded
 	}
 	if redacted == s {
 		return RedactedBytes{data: b}, nil
@@ -558,37 +601,218 @@ func BytesWithPrivacyFilter(ctx context.Context, b []byte) []byte {
 // a single JSON value. This ensures field-aware redaction (which skips ID fields)
 // is used instead of falling back to entropy-based detection on raw text lines,
 // which would corrupt high-entropy identifiers.
+//
+// Large content is sharded across goroutines; output is byte-identical either
+// way. See jsonlContent.
 func JSONLContent(content string) (string, error) {
-	return jsonlContentImpl(content, String)
+	return jsonlContentImpl(content, String, concurrencySafeRedactor)
 }
+
+// Whether a per-leaf redactor may be called from several goroutines at once.
+//
+// This is a property of the redactor, not of the entry point that supplies it,
+// so it is passed explicitly rather than implied by which internal function a
+// caller happens to reach: String is pure and shardable, while the OPF flow's
+// collector closures accumulate into a shared map and slice and are not.
+const (
+	concurrencySafeRedactor   = true
+	concurrencyUnsafeRedactor = false
+)
 
 // jsonlContentImpl is the body of JSONLContent parameterized by a per-leaf
 // redactor. JSONLContent passes String (regex layers only). The OPF-enabled
 // flow uses two passes: one with a collector that records leaves and returns
 // identity, one with a redactor that combines regex layers with cached OPF
 // spans for the recorded leaves.
-func jsonlContentImpl(content string, redactor func(string) string) (string, error) {
-	// Try parsing the entire content as a single JSON value first.
-	// Uses a streaming decoder to avoid copying the full content into []byte.
-	// After decoding, attempts a second Decode to confirm EOF — if it succeeds,
-	// the content is JSONL (multiple values) and we fall through to line-by-line.
+//
+// concurrencySafe reports whether redactor tolerates concurrent calls; when it
+// does, large content is sharded across goroutines.
+func jsonlContentImpl(content string, redactor func(string) string, concurrencySafe bool) (string, error) {
+	if result, handled, err := redactSingleJSONValue(content, redactor); handled {
+		return result, err
+	}
+	lines := strings.Split(content, "\n")
+	if !concurrencySafe {
+		return redactJSONLLines(lines, redactor)
+	}
+	return redactJSONLLinesSharded(lines, redactor)
+}
+
+// redactSingleJSONValue handles the case where the whole content is one JSON
+// value (e.g. pretty-printed single objects like OpenCode export) so
+// field-aware redaction is used instead of falling back to entropy-based
+// detection on raw text lines, which would corrupt high-entropy identifiers.
+//
+// handled is false when the content is JSONL, so the caller processes it line by
+// line. Neither the shard split nor the incremental prefix cache in
+// checkpoint/redact_cache.go applies to the single-value shape.
+func redactSingleJSONValue(content string, redactor func(string) string) (result string, handled bool, err error) {
 	trimmed := strings.TrimSpace(content)
-	if len(trimmed) > 0 {
-		dec := json.NewDecoder(strings.NewReader(trimmed))
-		var parsed any
-		if err := dec.Decode(&parsed); err == nil && isSingleJSONValue(dec) {
-			// Content is a single JSON value (object/array) — redact field-aware.
-			result, err := applyJSONReplacements(content, collectJSONLReplacements(parsed, redactor))
-			if err != nil {
-				return "", err
-			}
-			return result, nil
+	if len(trimmed) == 0 {
+		return "", false, nil
+	}
+	parsed, ok := parseSingleJSONValue(trimmed)
+	if !ok {
+		return "", false, nil
+	}
+	// Same duplicate-key rule as the line path: a shadowed value is invisible
+	// to the decoded tree, so the document is rebuilt structurally instead of
+	// spliced.
+	if hasDuplicateJSONKeys(trimmed) {
+		result, err = reencodeRedacted(content, redactor)
+		if err != nil {
+			return "", true, err
+		}
+		return result, true, nil
+	}
+	repls := collectJSONLReplacements(parsed, redactor)
+	result, err = applyJSONReplacements(content, repls)
+	if err != nil {
+		return "", true, err
+	}
+	if len(repls) > 0 {
+		result, err = ensureReplacementsLanded(content, result, repls, redactor)
+		if err != nil {
+			return "", true, err
 		}
 	}
+	return result, true, nil
+}
 
-	// Fall back to line-by-line JSONL processing.
-	lines := strings.Split(content, "\n")
+// IsLineDelimited reports whether JSONLContent will redact content line by line
+// rather than as a single JSON value.
+//
+// Callers that split content and redact the pieces separately MUST check this
+// first. The line path composes -- redact(A+B) == redact(A)+redact(B) for
+// newline-terminated A -- because each line is redacted in isolation. The
+// single-JSON-value path does NOT: it is field-aware across the whole document,
+// so redacting a fragment of it instead falls back to raw regex and entropy
+// detection over partial JSON, which is the identifier corruption
+// redactSingleJSONValue exists to avoid.
+//
+// A filename is not a safe proxy for this. OpenCode writes a single JSON object
+// to the same full.jsonl path that other agents write JSONL to.
+func IsLineDelimited(content []byte) bool {
+	trimmed := bytes.TrimSpace(content)
+	if len(trimmed) == 0 {
+		return false
+	}
+	// Decode stops at the first complete value, so this does not scan a large
+	// JSONL body. Content that is not JSON at all still goes down the line path,
+	// where each line is redacted independently.
+	dec := json.NewDecoder(bytes.NewReader(trimmed))
+	var parsed any
+	if err := dec.Decode(&parsed); err != nil {
+		return true
+	}
+	return !isSingleJSONValue(dec)
+}
+
+// parseSingleJSONValue reports whether s decodes as exactly one JSON value.
+//
+// Uses a streaming decoder so a large JSONL input is not copied: Decode stops at
+// the first complete value, then isSingleJSONValue checks for a second one. A
+// decode failure is a routing signal, not an error — it just means the content
+// is not a single JSON value.
+func parseSingleJSONValue(s string) (any, bool) {
+	dec := json.NewDecoder(strings.NewReader(s))
+	var parsed any
+	if err := dec.Decode(&parsed); err != nil {
+		return nil, false
+	}
+	return parsed, isSingleJSONValue(dec)
+}
+
+// jsonlShardTargetBytes is the rough content size per shard, and hence also the
+// sharding threshold: content under 2x this yields fewer than two shards and
+// runs sequentially.
+//
+// The win is not purely parallelism: redaction cost per byte climbs with input
+// size (allocation and GC pressure over one large buffer), so cutting the
+// content into small pieces is cheaper per byte *and* lets pieces run
+// concurrently. Measured on a 20MB Codex transcript: 43s sequential vs 2.1s
+// across 12 shards. Hence a byte-sized shard target rather than one shard per
+// core, with worker count bounding actual concurrency.
+const jsonlShardTargetBytes = 1 << 20 // 1MiB
+
+// redactJSONLLinesSharded splits lines into contiguous byte-balanced groups,
+// redacts them concurrently, and rejoins them in order. Output is byte-identical
+// to redactJSONLLines over the same lines, because each line is redacted in
+// isolation and shard boundaries fall between lines.
+//
+// redactor MUST be safe for concurrent use.
+func redactJSONLLinesSharded(lines []string, redactor func(string) string) (string, error) {
+	// Balance shards by bytes, not by line count: agent transcripts mix
+	// thousands of short lines with occasional multi-MB tool results, so equal
+	// line counts would leave one oversized shard as the tail.
+	bounds := shardLineBounds(lines, jsonlShardTargetBytes)
+	if len(bounds) < 2 {
+		return redactJSONLLines(lines, redactor)
+	}
+
+	results := make([]string, len(bounds))
+	g := new(errgroup.Group)
+	g.SetLimit(runtime.GOMAXPROCS(0))
+	for i, b := range bounds {
+		g.Go(func() error {
+			out, err := redactJSONLLines(lines[b.lo:b.hi], redactor)
+			if err != nil {
+				return err
+			}
+			results[i] = out
+			return nil
+		})
+	}
+	if err := g.Wait(); err != nil {
+		return "", fmt.Errorf("redacting JSONL shard: %w", err)
+	}
+
+	// Shards are contiguous line ranges, so rejoining them with "\n" in order
+	// reproduces the sequential join exactly.
+	return strings.Join(results, "\n"), nil
+}
+
+// lineRange is a half-open range of line indexes forming one shard.
+type lineRange struct{ lo, hi int }
+
+// shardLineBounds groups lines into contiguous ranges of roughly targetBytes
+// each. A single line larger than targetBytes becomes its own shard rather than
+// being split, since lines are the indivisible unit of redaction.
+func shardLineBounds(lines []string, targetBytes int) []lineRange {
+	var bounds []lineRange
+	lo, running := 0, 0
+	for i, line := range lines {
+		running += len(line) + 1 // +1 for the rejoined newline
+		if running >= targetBytes && i+1 < len(lines) {
+			bounds = append(bounds, lineRange{lo: lo, hi: i + 1})
+			lo, running = i+1, 0
+		}
+	}
+	if lo < len(lines) {
+		bounds = append(bounds, lineRange{lo: lo, hi: len(lines)})
+	}
+	return bounds
+}
+
+// redactJSONLLines redacts each line independently and rejoins them with "\n".
+//
+// Every line is handled in isolation: no state carries between lines, which is
+// what makes sharding across goroutines (jsonlContentConcurrent) produce
+// byte-identical output to a sequential pass. Keep it that way — a redactor or
+// line rule that depended on earlier lines would silently break that guarantee.
+func redactJSONLLines(lines []string, redactor func(string) string) (string, error) {
 	var b strings.Builder
+	// The input size is a capacity hint that avoids repeated doubling of a
+	// large buffer. It is only a hint: splicing shrinks or preserves a line,
+	// but the structural re-encode fallback can grow one (Go escapes U+2028
+	// and U+2029 unconditionally).
+	size := len(lines) - 1
+	for _, line := range lines {
+		size += len(line)
+	}
+	if size > 0 {
+		b.Grow(size)
+	}
 	for i, line := range lines {
 		if i > 0 {
 			b.WriteByte('\n')
@@ -603,9 +827,28 @@ func jsonlContentImpl(content string, redactor func(string) string) (string, err
 			b.WriteString(redactor(line))
 			continue
 		}
-		result, err := applyJSONReplacements(line, collectJSONLReplacements(parsed, redactor))
+		// Duplicate keys make the decoded tree an incomplete view of the raw
+		// text (a shadowed value could hide a secret from both the splice and
+		// its verification), so such a line skips the splice entirely and is
+		// rebuilt structurally, dropping shadowed values.
+		if hasDuplicateJSONKeys(lineTrimmed) {
+			result, err := reencodeRedacted(line, redactor)
+			if err != nil {
+				return "", err
+			}
+			b.WriteString(result)
+			continue
+		}
+		repls := collectJSONLReplacements(parsed, redactor)
+		result, err := applyJSONReplacements(line, repls)
 		if err != nil {
 			return "", err
+		}
+		if len(repls) > 0 {
+			result, err = ensureReplacementsLanded(line, result, repls, redactor)
+			if err != nil {
+				return "", err
+			}
 		}
 		b.WriteString(result)
 	}
@@ -634,11 +877,11 @@ func StringWithPrivacyFilter(ctx context.Context, s string) string {
 func JSONLContentWithPrivacyFilter(ctx context.Context, content string) (string, error) {
 	cfg := getOPFConfig()
 	if cfg == nil || !cfg.Enabled || cfg.runtime == nil || opfBreakerTripped.Load() {
-		return jsonlContentImpl(content, String)
+		return jsonlContentImpl(content, String, concurrencySafeRedactor)
 	}
 	cats := enabledCategories(cfg)
 	if len(cats) == 0 {
-		return jsonlContentImpl(content, String)
+		return jsonlContentImpl(content, String, concurrencySafeRedactor)
 	}
 
 	// Pass 1: collect eligible (has-space, deduped) leaves. The collector
@@ -653,7 +896,7 @@ func JSONLContentWithPrivacyFilter(ctx context.Context, content string) (string,
 			}
 		}
 		return v
-	}); err != nil {
+	}, concurrencyUnsafeRedactor); err != nil {
 		return "", err
 	}
 
@@ -665,7 +908,7 @@ func JSONLContentWithPrivacyFilter(ctx context.Context, content string) (string,
 		batched, err := cfg.runtime.RedactBatch(ctx, inputs, cats)
 		if err != nil {
 			handleOPFFailure(ctx, cfg, err)
-			return jsonlContentImpl(content, String)
+			return jsonlContentImpl(content, String, concurrencySafeRedactor)
 		}
 		fmt.Fprintf(opfStderr, "✓ OpenAI Privacy Filter: done (%.1fs)\n", time.Since(start).Seconds())
 		// A short return means the runtime gave us fewer span slices than
@@ -682,7 +925,7 @@ func JSONLContentWithPrivacyFilter(ctx context.Context, content string) (string,
 		if len(batched) != len(inputs) {
 			shortErr := fmt.Errorf("opf runtime returned %d span slices for %d inputs", len(batched), len(inputs))
 			handleOPFFailure(ctx, cfg, shortErr)
-			return jsonlContentImpl(content, String)
+			return jsonlContentImpl(content, String, concurrencySafeRedactor)
 		}
 		for i, in := range inputs {
 			spansByInput[in] = batched[i]
@@ -694,7 +937,7 @@ func JSONLContentWithPrivacyFilter(ctx context.Context, content string) (string,
 		regions := detectAllLayers(v)
 		regions = append(regions, opfSpanRegions(v, spansByInput[v], cfg)...)
 		return applyRegions(v, regions)
-	})
+	}, concurrencySafeRedactor)
 }
 
 // applyJSONReplacements applies collected (original, redacted) string pairs
@@ -783,47 +1026,312 @@ func isSingleJSONValue(dec *json.Decoder) bool {
 	return dec.Decode(&discard) == io.EOF
 }
 
+// walkRedactableStrings walks a parsed JSON value with the shared JSONL skip
+// rules (shouldSkipJSONLField, shouldSkipJSONLObject, credential context),
+// applying transform to each eligible string leaf. key is the leaf's object
+// key, empty inside arrays and at the root.
+//
+// It returns a copy-on-write tree: containers are re-allocated only along
+// paths where transform changed a leaf, and changed reports whether any leaf
+// did. Every consumer of the skip rules goes through this one walk. The splice
+// collection pass, the post-splice verification, and the structural re-encode
+// fallback must all agree on which leaves are redactable, and a second copy of
+// the rules is how they would drift apart.
+func walkRedactableStrings(v any, transform func(key string, credentialContext bool, val string) string) (any, bool) {
+	var walk func(key string, credentialContext bool, v any) (any, bool)
+	walk = func(key string, credentialContext bool, v any) (any, bool) {
+		switch val := v.(type) {
+		case map[string]any:
+			if shouldSkipJSONLObject(val) {
+				return v, false
+			}
+			childCredentialContext := credentialContext || isCredentialJSONObject(val)
+			var out map[string]any
+			for k, child := range val {
+				if shouldSkipJSONLField(k) {
+					continue
+				}
+				newChild, childChanged := walk(k, childCredentialContext, child)
+				if !childChanged {
+					continue
+				}
+				if out == nil {
+					out = maps.Clone(val)
+				}
+				out[k] = newChild
+			}
+			if out == nil {
+				return v, false
+			}
+			return out, true
+		case []any:
+			var out []any
+			for i, child := range val {
+				newChild, childChanged := walk("", credentialContext, child)
+				if !childChanged {
+					continue
+				}
+				if out == nil {
+					out = make([]any, len(val))
+					copy(out, val)
+				}
+				out[i] = newChild
+			}
+			if out == nil {
+				return v, false
+			}
+			return out, true
+		case string:
+			redacted := transform(key, credentialContext, val)
+			if redacted == val {
+				return v, false
+			}
+			return redacted, true
+		default:
+			return v, false
+		}
+	}
+	return walk("", false, v)
+}
+
+// redactLeafValue is the per-leaf redaction rule shared by the splice
+// collection pass and the structural re-encode fallback: the redactor first,
+// then the credential-key placeholder for values the redactor left alone.
+func redactLeafValue(key string, credentialContext bool, val string, redactor func(string) string) string {
+	redacted := redactor(val)
+	if redacted == val && isCredentialJSONSecretKey(key, credentialContext) && hasNonPlaceholderPasswordValue(val) {
+		redacted = RedactedPlaceholder
+	}
+	return redacted
+}
+
+// replKey identifies one (key, original) replacement pair for deduplication.
+// A struct, not a delimited string concatenation: JSON strings may contain any
+// byte including NUL, so no in-band delimiter is unambiguous, and a collision
+// here silently drops a replacement that the post-splice verification then
+// cannot know to check for.
+type replKey struct {
+	key      string
+	original string
+}
+
 // collectJSONLReplacements walks a parsed JSON value and collects unique
 // string replacements via the supplied per-leaf redactor. JSONLContent
 // passes String; the OPF-enabled flow passes a closure that combines the
 // regex layers with cached batched OPF spans.
 func collectJSONLReplacements(v any, redactor func(string) string) []jsonReplacement {
-	seen := make(map[string]bool)
+	seen := make(map[replKey]bool)
 	var repls []jsonReplacement
-	var walk func(key string, credentialContext bool, v any)
-	walk = func(key string, credentialContext bool, v any) {
-		switch val := v.(type) {
-		case map[string]any:
-			if shouldSkipJSONLObject(val) {
-				return
-			}
-			childCredentialContext := credentialContext || isCredentialJSONObject(val)
-			for k, child := range val {
-				if shouldSkipJSONLField(k) {
-					continue
-				}
-				walk(k, childCredentialContext, child)
-			}
-		case []any:
-			for _, child := range val {
-				walk("", credentialContext, child)
-			}
-		case string:
-			redacted := redactor(val)
-			if redacted == val && isCredentialJSONSecretKey(key, credentialContext) && hasNonPlaceholderPasswordValue(val) {
-				redacted = RedactedPlaceholder
-			}
-			if redacted != val {
-				seenKey := key + "\x00" + val
-				if !seen[seenKey] {
-					seen[seenKey] = true
-					repls = append(repls, jsonReplacement{key: key, original: val, redacted: redacted})
-				}
+	walkRedactableStrings(v, func(key string, credentialContext bool, val string) string {
+		redacted := redactLeafValue(key, credentialContext, val, redactor)
+		if redacted != val {
+			k := replKey{key: key, original: val}
+			if !seen[k] {
+				seen[k] = true
+				repls = append(repls, jsonReplacement{key: key, original: val, redacted: redacted})
 			}
 		}
-	}
-	walk("", false, v)
+		// Collection only. The fast path splices the raw text, so the tree is
+		// left unchanged and the copy-on-write walk allocates nothing.
+		return val
+	})
 	return repls
+}
+
+// hasDuplicateJSONKeys reports whether any object in the JSON document spells
+// the same key twice. encoding/json keeps only the LAST duplicate, so every
+// shadowed value is invisible to the decoded tree that drives both the splice
+// collection and the post-splice verification, while the raw text still
+// carries it. A secret in a shadowed value would ship in certified output, so
+// such content must be rebuilt structurally (which drops shadowed values
+// outright) rather than spliced. A token error reports false: the caller only
+// asks about content that already decoded once.
+func hasDuplicateJSONKeys(s string) bool {
+	dec := json.NewDecoder(strings.NewReader(s))
+	return tokenStreamHasDuplicateKeys(dec)
+}
+
+// tokenStreamHasDuplicateKeys consumes exactly one JSON value from dec,
+// recursing through containers. Per-object keys stay in a small slice until an
+// object exceeds duplicateKeySliceThreshold: transcript objects usually carry
+// only a handful of keys, so allocating a map for every object would tax every
+// parsed line, while a slice alone becomes quadratic for wide tool output.
+func tokenStreamHasDuplicateKeys(dec *json.Decoder) bool {
+	const duplicateKeySliceThreshold = 16
+
+	t, err := dec.Token()
+	if err != nil {
+		return false
+	}
+	d, ok := t.(json.Delim)
+	if !ok {
+		return false
+	}
+	switch d {
+	case '{':
+		var (
+			seenSlice []string
+			seenMap   map[string]struct{}
+		)
+		for dec.More() {
+			kt, err := dec.Token()
+			if err != nil {
+				return false
+			}
+			k, ok := kt.(string)
+			if !ok {
+				return false
+			}
+			if seenMap != nil {
+				if _, duplicate := seenMap[k]; duplicate {
+					return true
+				}
+				seenMap[k] = struct{}{}
+			} else {
+				if slices.Contains(seenSlice, k) {
+					return true
+				}
+				if len(seenSlice) == duplicateKeySliceThreshold {
+					// Sized from the constant, not len(seenSlice): they are equal
+					// on this branch, and the spilled keys plus k are exactly
+					// what the map has to hold.
+					seenMap = make(map[string]struct{}, duplicateKeySliceThreshold+1)
+					for _, seenKey := range seenSlice {
+						seenMap[seenKey] = struct{}{}
+					}
+					seenMap[k] = struct{}{}
+					seenSlice = nil
+				} else {
+					seenSlice = append(seenSlice, k)
+				}
+			}
+			if tokenStreamHasDuplicateKeys(dec) {
+				return true
+			}
+		}
+		if _, err := dec.Token(); err != nil {
+			return false
+		}
+	case '[':
+		for dec.More() {
+			if tokenStreamHasDuplicateKeys(dec) {
+				return true
+			}
+		}
+		if _, err := dec.Token(); err != nil {
+			return false
+		}
+	}
+	return false
+}
+
+// ensureReplacementsLanded verifies that applyJSONReplacements rewrote every
+// collected leaf, re-encoding the content from a redacted tree when it did
+// not.
+//
+// The splice matches the JSON re-encoding of each original leaf against the
+// raw text, and JSON admits more than one encoding of the same string. A raw
+// U+2028 (Go's encoder escapes it even with HTML escaping off), a \/ escape,
+// \uXXXX escapes of ASCII, and ensure_ascii-style escaping of non-ASCII all
+// spell the leaf differently in the producer's bytes than in ours, so the
+// replacement silently misses and the secret ships in certified RedactedBytes.
+// Decoding the spliced result and comparing its leaves against the recorded
+// originals catches every such miss without assuming the redactor is
+// idempotent.
+//
+// Formatting fidelity is deliberately sacrificed for exactly the lines the
+// splice could not rewrite. Content that cannot be re-encoded fails the
+// redaction, so JSONLBytes refuses to certify rather than shipping the line.
+func ensureReplacementsLanded(content, spliced string, repls []jsonReplacement, redactor func(string) string) (string, error) {
+	if !spliceMissed(spliced, repls) {
+		return spliced, nil
+	}
+	return reencodeRedacted(content, redactor)
+}
+
+// spliceMissed reports whether any eligible string leaf of the spliced content
+// still equals a replacement's original, honoring each pair's key scoping. A
+// spliced result that no longer parses also counts as a miss, so the
+// structural fallback replaces it with well-formed redacted output.
+func spliceMissed(spliced string, repls []jsonReplacement) bool {
+	var parsed any
+	if err := json.Unmarshal([]byte(strings.TrimSpace(spliced)), &parsed); err != nil {
+		return true
+	}
+
+	// The originals are indexed by their key scope up front, so the check is
+	// linear in leaves plus replacements rather than their product. A large
+	// object can carry thousands of redactable leaves, and this runs on the
+	// redaction hot path for every line that had replacements. The empty key
+	// scopes to every leaf. Two map probes per leaf, no per-leaf allocation.
+	originalsByKey := make(map[string]map[string]struct{}, len(repls))
+	for _, r := range repls {
+		set := originalsByKey[r.key]
+		if set == nil {
+			set = make(map[string]struct{})
+			originalsByKey[r.key] = set
+		}
+		set[r.original] = struct{}{}
+	}
+
+	missed := false
+	walkRedactableStrings(parsed, func(key string, _ bool, val string) string {
+		if missed {
+			return val
+		}
+		if _, ok := originalsByKey[""][val]; ok {
+			missed = true
+			return val
+		}
+		if _, ok := originalsByKey[key][val]; ok {
+			missed = true
+		}
+		return val
+	})
+	return missed
+}
+
+// ErrRedactionIncomplete marks content that redaction flagged but could not
+// fully rewrite: the splice missed and the structural re-encode failed too.
+//
+// It exists to keep the "fail rather than certify" contract holding at the
+// call sites that fall back to plain-text redaction when JSONLBytes errors.
+// That fallback is for content that is not JSONL at all. Content carrying this
+// sentinel parsed fine, and the plain-text fallback would scan the very
+// variant-encoded spelling the verification caught the splice missing, so
+// those callers must fail the write instead. Match with errors.Is.
+var ErrRedactionIncomplete = errors.New("redaction incomplete")
+
+// reencodeRedacted rebuilds JSON content the splice could not rewrite: parse,
+// redact every eligible leaf through the shared walk, marshal. Numbers are
+// decoded with UseNumber so integer literals beyond float64 precision survive
+// the round-trip. The content's surrounding whitespace is reattached so
+// rejoining lines with "\n" preserves the original layout.
+//
+// Both failure paths wrap ErrRedactionIncomplete: the content already parsed
+// once to get here, so an error is "redaction flagged this and could not
+// finish", never "this is not JSONL".
+func reencodeRedacted(content string, redactor func(string) string) (string, error) {
+	trimmed := strings.TrimSpace(content)
+	dec := json.NewDecoder(strings.NewReader(trimmed))
+	dec.UseNumber()
+	var parsed any
+	if err := dec.Decode(&parsed); err != nil {
+		return "", fmt.Errorf("%w: re-parse content for structural redaction: %w", ErrRedactionIncomplete, err)
+	}
+	redactedTree, _ := walkRedactableStrings(parsed, func(key string, credentialContext bool, val string) string {
+		return redactLeafValue(key, credentialContext, val, redactor)
+	})
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(redactedTree); err != nil {
+		return "", fmt.Errorf("%w: re-encode redacted content: %w", ErrRedactionIncomplete, err)
+	}
+	encoded := strings.TrimSuffix(buf.String(), "\n")
+	lead := content[:len(content)-len(strings.TrimLeftFunc(content, unicode.IsSpace))]
+	trail := content[len(strings.TrimRightFunc(content, unicode.IsSpace)):]
+	return lead + encoded + trail, nil
 }
 
 // shouldSkipJSONLField returns true if a JSON key should be excluded from scanning/redaction.

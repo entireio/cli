@@ -12,11 +12,12 @@ import (
 // PostToolUse hook fires when the Worker is launched, before it has touched the
 // worktree, and the Worker then runs its own SessionStart/UserPromptSubmit/Stop
 // cycle. These tests pin the resulting attribution — a Worker's turn must land
-// as a task checkpoint on the parent, not as an unrelated top-level session.
+// as a task record on the parent, not as an unrelated top-level session.
 
 // TestFactoryDroidWorkerSessionBecomesTaskCheckpoint covers the regression that
-// broke TestFactoryTaskCheckpointExistsBeforeCommit: a Worker's work reached the
-// shadow branch, but under its own session ID, so no task checkpoint existed.
+// broke the E2E TestFactoryTaskRecordExistsBeforeCommit: a Worker's work reached
+// the shadow branch, but under its own session ID, so the parent had nothing
+// attributing it to the task.
 func TestFactoryDroidWorkerSessionBecomesTaskCheckpoint(t *testing.T) {
 	t.Parallel()
 
@@ -52,37 +53,78 @@ func TestFactoryDroidWorkerSessionBecomesTaskCheckpoint(t *testing.T) {
 		t.Fatalf("worker Stop failed: %v", err)
 	}
 
-	shadowBranch := env.GetShadowBranchName()
-	if !env.BranchExists(shadowBranch) {
-		t.Fatalf("shadow branch %s should exist after the Worker's turn", shadowBranch)
+	// The work belongs to the parent's task, not to the Worker's own session:
+	// a COMPLETED task record on the PARENT, keyed by the launch tool use,
+	// carrying the Worker's files and declaring its transcript path for the
+	// materializer (create-if-missing parent state is part of the guarantee).
+	state, err := env.GetSessionState(parent.ID)
+	if err != nil {
+		t.Fatalf("GetSessionState(parent) failed: %v", err)
+	}
+	if state == nil {
+		t.Fatal("parent session state must exist after the Worker's turn (create-if-missing guarantee)")
+	}
+	rec := state.FindTaskRecord(toolUseID)
+	if rec == nil || rec.CompletedAt.IsZero() {
+		t.Fatalf("expected a completed task record on the parent for %s, got %+v", toolUseID, rec)
+	}
+	if rec.AgentID != worker.ID {
+		t.Errorf("the Worker's session ID must double as the record's agent ID: got %q, want %q", rec.AgentID, worker.ID)
+	}
+	if rec.DeclaredTranscriptPath != worker.TranscriptPath {
+		t.Errorf("the record must declare the Worker's transcript path: got %q, want %q",
+			rec.DeclaredTranscriptPath, worker.TranscriptPath)
+	}
+	if !containsFile(rec.Files, "docs/summary.md") {
+		t.Errorf("the record must carry the Worker's files, got %v", rec.Files)
+	}
+	if !containsFile(state.FilesTouched, "docs/summary.md") {
+		t.Errorf("the Worker's files must merge into the parent's FilesTouched, got %v", state.FilesTouched)
 	}
 
-	// The work belongs to the parent's task, not to the Worker's own session.
-	taskCheckpoint := ".entire/metadata/" + parent.ID + "/tasks/" + toolUseID + "/" + paths.CheckpointFileName
-	if !env.FileExistsInBranch(shadowBranch, taskCheckpoint) {
-		t.Errorf("expected task checkpoint %s on shadow branch %s", taskCheckpoint, shadowBranch)
+	// A shadow write for the Worker session would misattribute the work to a
+	// session the user never drove — the exact shape of the regression.
+	if got := shadowBranches(env); len(got) != 0 {
+		t.Errorf("a Worker's turn must write a task record, not shadow data: %v", got)
 	}
 
-	// A top-level checkpoint for the Worker session would misattribute the work
-	// to a session the user never drove — the exact shape of the regression.
-	// A session checkpoint is what writes the session's own transcript.
-	workerSessionCheckpoint := ".entire/metadata/" + worker.ID + "/" + paths.TranscriptFileName
-	if env.FileExistsInBranch(shadowBranch, workerSessionCheckpoint) {
-		t.Errorf("Worker session must not produce its own session checkpoint at %s", workerSessionCheckpoint)
-	}
+	// Multi-turn Workers upsert into the SAME record: a second turn must MERGE
+	// its files with turn 1's (not overwrite them) and re-declare the
+	// transcript path, with the record staying completed throughout.
+	t.Run("second worker turn merges files", func(t *testing.T) {
+		t.Parallel()
+		if err := env.SimulateFactoryDroidUserPromptSubmit(worker.ID); err != nil {
+			t.Fatalf("worker second UserPromptSubmit failed: %v", err)
+		}
+		env.WriteFile("docs/details.md", "More detail.\n")
+		// Turn 2's transcript names ONLY the new file, so turn 1's file can
+		// reappear on the record only via the upsert's merge.
+		worker.CreateDroidTranscript("# Task Tool Invocation", []FileChange{
+			{Path: "docs/details.md", Content: "More detail.\n"},
+		})
+		worker.MarkAsWorkerSession(parent.ID, toolUseID, "worker: Summarize the repo")
+		if err := env.SimulateFactoryDroidStop(worker.ID, worker.TranscriptPath); err != nil {
+			t.Fatalf("worker second Stop failed: %v", err)
+		}
 
-	// The parent's transcript rides along, so the task reads back in context.
-	parentTranscript := ".entire/metadata/" + parent.ID + "/" + paths.TranscriptFileName
-	if !env.FileExistsInBranch(shadowBranch, parentTranscript) {
-		t.Errorf("expected the parent transcript at %s", parentTranscript)
-	}
-
-	// The Worker's transcript is preserved under the task, keyed by its session ID.
-	workerTranscript := ".entire/metadata/" + parent.ID + "/tasks/" + toolUseID + "/" +
-		paths.AgentTranscriptFileName(worker.ID)
-	if !env.FileExistsInBranch(shadowBranch, workerTranscript) {
-		t.Errorf("expected the Worker transcript at %s", workerTranscript)
-	}
+		state, err := env.GetSessionState(parent.ID)
+		if err != nil {
+			t.Fatalf("GetSessionState(parent) failed: %v", err)
+		}
+		rec := state.FindTaskRecord(toolUseID)
+		if rec == nil || rec.CompletedAt.IsZero() {
+			t.Fatalf("the record must stay completed across Worker turns, got %+v", rec)
+		}
+		if !containsFile(rec.Files, "docs/summary.md") || !containsFile(rec.Files, "docs/details.md") {
+			t.Errorf("a second Worker turn must merge files with turn 1's, got %v", rec.Files)
+		}
+		if !containsFile(state.FilesTouched, "docs/summary.md") || !containsFile(state.FilesTouched, "docs/details.md") {
+			t.Errorf("both turns' files must be in the parent's FilesTouched, got %v", state.FilesTouched)
+		}
+		if rec.DeclaredTranscriptPath != worker.TranscriptPath {
+			t.Errorf("turn 2 must re-declare the Worker transcript path, got %q", rec.DeclaredTranscriptPath)
+		}
+	})
 }
 
 // TestFactoryDroidTopLevelSessionStillCheckpoints guards the fallback: an

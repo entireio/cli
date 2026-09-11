@@ -912,6 +912,7 @@ func runReview(ctx context.Context, cmd *cobra.Command, agentOverride, modelOver
 		fmt.Fprintln(cmd.ErrOrStderr(), err.Error())
 		return silentErr(err)
 	}
+	notifyDroppedReviewPrompts(cmd.ErrOrStderr(), s, profileName)
 	profile.Task = profileTask(profileName, profile)
 	profile.Agents = nonZeroAgentConfigs(profile.Agents)
 	outputMode := profileOutput(profile)

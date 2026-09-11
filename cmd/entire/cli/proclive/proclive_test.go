@@ -40,6 +40,20 @@ func TestCheck_HostMismatchIsUnknown(t *testing.T) {
 	}
 }
 
+func TestAncestryDepth_MatchesWhenCurrentBootIDIsUnavailable(t *testing.T) {
+	t.Parallel()
+
+	ancestry := Ancestry{
+		host:  "host-a",
+		chain: []Identity{{PID: 42, Start: "100"}},
+	}
+	recorded := Identity{PID: 42, Start: "100", Boot: "boot-a", Host: "host-a"}
+
+	if depth := ancestry.Depth(recorded); depth != 0 {
+		t.Fatalf("Depth() = %d, want 0 when only the current boot ID is unavailable", depth)
+	}
+}
+
 func TestIsTransient(t *testing.T) {
 	t.Parallel()
 	for _, name := range []string{"entire", "sh", "bash", "ZSH", " dash ", "Fish", "go"} {

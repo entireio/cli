@@ -1,10 +1,13 @@
 package cli
 
 import (
+	"context"
 	"encoding/json"
 	"io"
+	"log/slog"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
+	"github.com/entireio/cli/cmd/entire/cli/logging"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
 )
 
@@ -47,6 +50,31 @@ func ParseSubagentTypeAndDescription(toolInput json.RawMessage) (agentType, desc
 	}
 
 	return input.SubagentType, input.Description
+}
+
+// backgroundTaskToolInput represents the tool_input structure for the Task
+// tool, used to detect a background subagent launch.
+type backgroundTaskToolInput struct {
+	RunInBackground bool `json:"run_in_background"`
+}
+
+// isBackgroundLaunch reports whether a Task tool invocation requested
+// run_in_background: true. Mirrors ParseSubagentTypeAndDescription's
+// ToolInput parsing. Returns false (foreground) when toolInput is empty or
+// invalid — defaulting to the existing foreground behavior is always safe.
+func isBackgroundLaunch(ctx context.Context, toolInput json.RawMessage) bool {
+	if len(toolInput) == 0 {
+		return false
+	}
+
+	var input backgroundTaskToolInput
+	if err := json.Unmarshal(toolInput, &input); err != nil {
+		logging.Debug(ctx, "failed to parse tool_input for background-launch detection; treating as foreground",
+			slog.String("error", err.Error()))
+		return false
+	}
+
+	return input.RunInBackground
 }
 
 // todoWriteToolInput represents the tool_input structure for the TodoWrite tool.

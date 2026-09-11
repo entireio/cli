@@ -4,24 +4,33 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
-	"os"
 	"path/filepath"
 	"sort"
 	"strings"
 
+	"github.com/entireio/cli/cmd/entire/cli/entiredir"
+	"github.com/entireio/cli/cmd/entire/cli/osroot"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
+	"github.com/entireio/cli/cmd/entire/cli/runnerdefaults"
 )
 
-// runnersDir is the canonical location of the trail runner configs for a repo.
+// runnersName is the runner-config directory relative to the .entire root, which
+// is how it is read and written. runnersDir is the same directory as an absolute
+// path, for messages and for the glob in ensureRunnersPresent.
+const runnersName = "runners"
+
 func runnersDir(repoRoot string) string {
-	return filepath.Join(repoRoot, paths.EntireDir, "runners")
+	return filepath.Join(repoRoot, paths.EntireDir, runnersName)
 }
 
 // tuneRunner is one .entire/runners/*.json file loaded for tuning. Raw holds
-// the verbatim file bytes (used for surgical template replacement); Template is
-// the current prompt.template extracted for display in the prompt.
+// the verbatim file bytes (used for surgical template replacement); Name is the
+// file relative to the .entire root, which is how it is read back and rewritten;
+// Path is the same file absolute, for messages. Template is the current
+// prompt.template extracted for display in the prompt.
 type tuneRunner struct {
 	ID       string
+	Name     string
 	Path     string
 	Raw      []byte
 	Template string
@@ -33,44 +42,75 @@ type tuneRunner struct {
 // or the filter matches nothing.
 func loadTuneRunners(repoRoot, filter string) ([]tuneRunner, error) {
 	dir := runnersDir(repoRoot)
-	entries, err := os.ReadDir(dir)
+	root, err := entiredir.OpenAtForRead(repoRoot)
+	if err != nil {
+		return nil, fmt.Errorf("reading %s: %w", dir, err)
+	}
+	entries, err := osroot.ReadDirNoSymlinks(root, runnersName)
 	if err != nil {
 		return nil, fmt.Errorf("reading %s: %w", dir, err)
 	}
 
-	var runners []tuneRunner
+	var files []runnerdefaults.File
 	for _, e := range entries {
 		if e.IsDir() || !strings.HasSuffix(e.Name(), ".json") {
 			continue
 		}
-		path := filepath.Join(dir, e.Name())
-		raw, err := os.ReadFile(path) //nolint:gosec // path is derived from repo root + dir listing
+		raw, err := entiredir.ReadFile(root, runnersName+"/"+e.Name())
 		if err != nil {
-			return nil, fmt.Errorf("reading %s: %w", path, err)
+			return nil, fmt.Errorf("reading %s: %w", filepath.Join(dir, e.Name()), err)
 		}
+		files = append(files, runnerdefaults.File{Name: e.Name(), Data: raw})
+	}
+	return parseTuneRunners(files, dir, filter)
+}
+
+// defaultTuneRunners returns the embedded default set as tuneRunner values
+// without touching the repo. It backs --dry-run in a repo that has no runners
+// yet: the preview is of tailoring the set setup would have created, and a dry
+// run must not create it. Name and Path describe where each file would go, so
+// messages read the same as the on-disk case; nothing writes them.
+func defaultTuneRunners(repoRoot, filter string) ([]tuneRunner, error) {
+	files, err := runnerdefaults.Files()
+	if err != nil {
+		return nil, fmt.Errorf("loading default runners: %w", err)
+	}
+	return parseTuneRunners(files, runnersDir(repoRoot), filter)
+}
+
+// parseTuneRunners turns raw runner files into tuneRunner values: it reads each
+// id and current template, applies the id filter, and sorts by id. dir is the
+// directory the files belong to, used for the file paths in messages.
+func parseTuneRunners(files []runnerdefaults.File, dir, filter string) ([]tuneRunner, error) {
+	var runners []tuneRunner
+	for _, f := range files {
+		path := filepath.Join(dir, f.Name)
 		var doc struct {
 			ID     string `json:"id"`
 			Prompt struct {
 				Template string `json:"template"`
 			} `json:"prompt"`
 		}
-		if err := json.Unmarshal(raw, &doc); err != nil {
+		if err := json.Unmarshal(f.Data, &doc); err != nil {
 			return nil, fmt.Errorf("parsing %s: %w", path, err)
 		}
 		if doc.ID == "" {
-			doc.ID = strings.TrimSuffix(e.Name(), ".json")
+			doc.ID = strings.TrimSuffix(f.Name, ".json")
 		}
 		runners = append(runners, tuneRunner{
 			ID:       doc.ID,
+			Name:     runnersName + "/" + f.Name,
 			Path:     path,
-			Raw:      raw,
+			Raw:      f.Data,
 			Template: doc.Prompt.Template,
 		})
 	}
 
 	if filter != "" {
+		// A fresh slice, not runners[:0]: compacting in place would keep every
+		// unselected runner's Raw bytes alive through the shared array.
 		want := normalizeRunnerID(filter)
-		filtered := runners[:0]
+		var filtered []tuneRunner
 		for _, r := range runners {
 			if normalizeRunnerID(r.ID) == want {
 				filtered = append(filtered, r)

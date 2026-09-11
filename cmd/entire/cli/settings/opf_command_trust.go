@@ -81,7 +81,7 @@ func enforceOPFCommandTrust(ctx context.Context, s *EntireSettings, localSetting
 	// Record rather than log, for two reasons. A log line in
 	// .entire/logs/entire.log is not a signal the user will see, and the
 	// consumer can put this on stderr where it belongs. And the loader is
-	// reached from logging.Init through logLevelGetter, so keeping it
+	// reached while the cli package resolves the log level, so keeping it
 	// log-free keeps it off any future re-entrancy path into the logger
 	// (Init no longer calls out under its lock, but the loader should not
 	// depend on that).

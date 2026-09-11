@@ -36,6 +36,12 @@ func FormatSubagentEndMessage(agentType, description, toolUseID string) string {
 	return formatSubagentMessage("Completed", agentType, description, toolUseID)
 }
 
+// FormatSubagentRunningMessage is FormatSubagentEndMessage's in-flight
+// counterpart, for pending-list rows whose task record is still live.
+func FormatSubagentRunningMessage(agentType, description, toolUseID string) string {
+	return formatSubagentMessage("Running", agentType, description, toolUseID)
+}
+
 // formatSubagentMessage is a shared helper for start/end messages.
 func formatSubagentMessage(verb, agentType, description, toolUseID string) string {
 	// Both empty - fall back to simple format
@@ -57,25 +63,6 @@ func formatSubagentMessage(verb, agentType, description, toolUseID string) strin
 	}
 	// agentType is empty, description is present
 	return fmt.Sprintf("%s agent: %s (%s)", verb, description, toolUseID)
-}
-
-// FormatIncrementalSubject formats the commit message subject for incremental checkpoints.
-// Delegates to FormatIncrementalMessage.
-//
-// Note: The incrementalType, subagentType, and taskDescription parameters are kept for
-// API compatibility but are not currently used. They may be used in the future for
-// different checkpoint types.
-func FormatIncrementalSubject(
-	incrementalType string, //nolint:unparam // kept for API compatibility
-	subagentType string, //nolint:unparam // kept for API compatibility
-	taskDescription string, //nolint:unparam // kept for API compatibility
-	todoContent string,
-	incrementalSequence int,
-	shortToolUseID string,
-) string {
-	// Currently all incremental checkpoints use the same format
-	_, _, _ = incrementalType, subagentType, taskDescription // Silence unused warnings
-	return FormatIncrementalMessage(todoContent, incrementalSequence, shortToolUseID)
 }
 
 // FormatIncrementalMessage formats a commit message for an incremental checkpoint.
