@@ -179,17 +179,23 @@ func TestGetSessionDir(t *testing.T) {
 func TestGetSessionDir_DefaultPath(t *testing.T) {
 	ag := &GeminiCLIAgent{}
 
-	// Make sure env var is not set
+	// Clear both overrides so the test exercises the home fallback rather
+	// than a dev shell's relocated Gemini home.
 	t.Setenv("ENTIRE_TEST_GEMINI_PROJECT_DIR", "")
+	t.Setenv("GEMINI_CLI_HOME", "")
 
 	dir, err := ag.GetSessionDir("/some/repo")
 	if err != nil {
 		t.Fatalf("GetSessionDir() error = %v", err)
 	}
 
-	// Should contain .gemini/tmp and end with /chats
-	if !filepath.IsAbs(dir) {
-		t.Errorf("GetSessionDir() should return absolute path, got %q", dir)
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := filepath.Join(home, ".gemini", "tmp", GetProjectHash("/some/repo"), "chats")
+	if dir != want {
+		t.Errorf("GetSessionDir() = %q, want %q", dir, want)
 	}
 }
 
