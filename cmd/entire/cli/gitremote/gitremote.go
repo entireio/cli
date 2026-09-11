@@ -154,7 +154,18 @@ func GetRemoteURLInDir(ctx context.Context, dir, remoteName string) (string, err
 //
 // Returns at least one entry on success.
 func GetPushURLs(ctx context.Context, remoteName string) ([]string, error) {
+	return GetPushURLsInDir(ctx, "", remoteName)
+}
+
+// GetPushURLsInDir is GetPushURLs against a specific worktree, the push-side
+// counterpart of GetRemoteURLInDir. Callers that resolve a remote's fetch URL
+// in a named directory must resolve its push URLs in the same one, or the two
+// halves of an ownership vote describe different repositories.
+func GetPushURLsInDir(ctx context.Context, dir, remoteName string) ([]string, error) {
 	cmd := exec.CommandContext(ctx, "git", "remote", "get-url", "--push", "--all", remoteName)
+	if dir != "" {
+		cmd.Dir = dir
+	}
 	output, err := cmd.Output()
 	if err != nil {
 		return nil, fmt.Errorf("remote %q not found", remoteName)

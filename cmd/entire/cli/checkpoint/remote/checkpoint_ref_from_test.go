@@ -238,6 +238,23 @@ func TestFetchCheckpointRefFrom_AcceptedDedicatedRemainsAuthoritative(t *testing
 	}
 }
 
+// A remote can fetch from one owner and push to another (remote.<name>.pushurl).
+// Voting on its fetch URL alone accepted the dedicated store here while the push
+// side had already vetoed it, so writes went to the fork and reads came from the
+// store — the same asymmetry this file exists to close, one topology over.
+//
+// fork FETCHES from acme/app (so the fetch-only vote saw all-acme and accepted)
+// and PUSHES to contributor/app. The dedicated store is unreachable, so before
+// the push URLs joined the vote this errored instead of reading the fork.
+func TestFetchCheckpointRefFrom_DedicatedVetoedByLeadPushOwner(t *testing.T) {
+	workDir, ref, _, originHash := dedicatedCandidatesFixture(t, false, true)
+	testutil.RunGit(t, workDir, "remote", "set-url", "fork", "https://github.com/acme/app.git")
+	testutil.RunGit(t, workDir, "remote", "set-url", "--push", "fork", "https://github.com/contributor/app.git")
+
+	require.NoError(t, FetchCheckpointRefFrom(t.Context(), ref, []string{"fork", "origin"}, nil))
+	require.Equal(t, originHash, localRefHash(t, workDir, ref))
+}
+
 func TestFetchCheckpointRefFrom_InheritedDedicatedDoesNotRetry(t *testing.T) {
 	for _, transportFailure := range []bool{false, true} {
 		name := "missing ref is not authoritative absence"

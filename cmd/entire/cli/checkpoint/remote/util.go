@@ -243,7 +243,27 @@ func fetchOwnershipURLs(ctx context.Context, getRemoteURL func(context.Context, 
 	if leadURL == "" {
 		return nil, fmt.Errorf("read candidate remote %q has an empty URL", lead)
 	}
-	return []string{leadURL}, nil
+
+	// The candidate's PUSH destinations vote too, because the whole purpose of
+	// consulting it is to make reads land where the writes went — and a remote
+	// can fetch from one owner and push to another (remote.<name>.pushurl).
+	// Voting on the fetch URL alone accepted a dedicated store the push side
+	// had already vetoed, so writes went to the fork while reads came from the
+	// store.
+	//
+	// ADDED to the fetch URL rather than substituted for it. The rule is that
+	// EVERY identity must be owned by the checkpoint repo's owner, so widening
+	// the set can only turn accept into veto: no read that falls back to the
+	// candidate today can start using the store. Substituting would drop an
+	// identity and could do the reverse.
+	pushURLs, err := gitremote.GetPushURLsInDir(ctx, opt.WorktreeRoot, lead)
+	if err != nil {
+		// Same reasoning as an unresolvable fetch URL above: an identity whose
+		// owner cannot be determined counts as inherited rather than being
+		// dropped, because dropping it fails OPEN.
+		return nil, fmt.Errorf("resolve read candidate push URLs for remote %q: %w", lead, err)
+	}
+	return append([]string{leadURL}, pushURLs...), nil
 }
 
 // PushURL returns the effective checkpoint push URL for the current repository.
