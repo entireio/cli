@@ -93,7 +93,7 @@ Please answer these questions in your bug report:
 
 ### Prerequisites
 
-- **Go 1.26.x** - Check with `go version`
+- **Go 1.27.1+** - Check with `go version`. `go.mod` pins the minimum, so an older toolchain fails unless it can download the pinned one (`GOTOOLCHAIN=local` cannot).
 - **mise** - Task runner and version manager. Install with `curl https://mise.run | sh`
 
 ### Clone and Install

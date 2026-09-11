@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -50,6 +51,12 @@ const (
 	dispatchWizardBranchAll     = "all"
 
 	dispatchWizardVoiceCustom = "custom"
+
+	// dispatchWizardJurisdictionHome is the jurisdiction select's value for
+	// "send no selector" (the gateway then routes to the caller's home) and
+	// the summary label for it. A sentinel rather than "" because huh
+	// pre-selects the option matching the field's initial "" value.
+	dispatchWizardJurisdictionHome = "home"
 )
 
 type dispatchWizardState struct {
@@ -59,6 +66,7 @@ type dispatchWizardState struct {
 	currentBranch    string
 	currentBranchErr error
 	selectedRepos    []string
+	jurisdiction     string
 	voicePreset      string
 	voiceCustom      string
 	confirmRun       bool
@@ -115,6 +123,10 @@ func (s dispatchWizardState) showLocalBranchMode() bool {
 
 func (s dispatchWizardState) resolve() (dispatchpkg.Options, error) {
 	allBranches := s.isLocal() && s.localBranchMode == dispatchWizardBranchAll
+	jurisdiction := ""
+	if !s.isLocal() && s.jurisdiction != dispatchWizardJurisdictionHome {
+		jurisdiction = s.jurisdiction
+	}
 	if s.isLocal() && !allBranches && s.currentBranchErr != nil {
 		return dispatchpkg.Options{}, fmt.Errorf("resolve current branch for local dispatch: %w", s.currentBranchErr)
 	}
@@ -125,6 +137,7 @@ func (s dispatchWizardState) resolve() (dispatchpkg.Options, error) {
 		allBranches,
 		s.resolveCloudRepos(),
 		s.voiceValue(),
+		jurisdiction,
 		false,
 		func() (string, error) {
 			return s.currentBranch, nil
@@ -158,16 +171,12 @@ func buildDispatchWizardSummary(opts dispatchpkg.Options, scope string) string {
 		branches = "default branches"
 	}
 
-	mode := "cloud"
-	if opts.Mode == dispatchpkg.ModeLocal {
-		mode = "local"
+	lines := []string{"Mode: local", "Scope: " + scope, "Branches: " + branches}
+	if opts.Mode != dispatchpkg.ModeLocal {
+		lines[0] = "Mode: cloud"
+		lines = append(lines, "Jurisdiction: "+cmp.Or(strings.TrimSpace(opts.Jurisdiction), dispatchWizardJurisdictionHome))
 	}
-
-	return strings.Join([]string{
-		"Mode: " + mode,
-		"Scope: " + scope,
-		"Branches: " + branches,
-	}, "\n")
+	return strings.Join(lines, "\n")
 }
 
 func resolvedDispatchScope(opts dispatchpkg.Options) string {
@@ -195,6 +204,7 @@ func buildDispatchCommand(opts dispatchpkg.Options) string {
 		renderStringFlag("--since", strings.TrimSpace(opts.Since)),
 		mapBoolToFlag(opts.AllBranches, "--all-branches"),
 		renderStringFlag("--repos", strings.Join(opts.RepoPaths, ",")),
+		renderStringFlag("--jurisdiction", strings.TrimSpace(opts.Jurisdiction)),
 		renderStringFlag("--voice", strings.TrimSpace(opts.Voice)),
 	}), " ")
 }
@@ -241,18 +251,36 @@ func runDispatchWizard(cmd *cobra.Command) (dispatchpkg.Options, error) {
 		return dispatchpkg.Options{}, fmt.Errorf("not in a git repository: %w", err)
 	}
 
-	loadRepos := newLazyOptions(func() []huh.Option[string] {
-		slugs, listErr := listDispatchWizardRepos(ctx)
-		if listErr != nil || len(slugs) == 0 {
-			slugs = discoverLocalRepoSlugs(ctx, currentRepo)
-		}
-		return buildDispatchRepoOptions(slugs)
-	})
-
 	state := newDispatchWizardState()
 	state.currentBranch, state.currentBranchErr = getDispatchWizardCurrentBranch(ctx)
 
-	form := NewAccessibleForm(
+	// The cloud catalogue (see dispatchWizardScope) loads once, on first use
+	// by the Jurisdiction select's OptionsFunc — which huh runs on a tea.Cmd
+	// goroutine under its own spinner, so the form never blocks on it and a
+	// local dispatch never pays for it.
+	loadScope := sync.OnceValue(func() *dispatchWizardScope {
+		return loadDispatchWizardScope(ctx, currentRepo)
+	})
+	jurisdiction := &dispatchJurisdictionAccessor{state: &state}
+
+	validateRepos := func(value []string) error {
+		selected := normalizeDispatchWizardSelections(value)
+		if len(selected) == 0 {
+			return errors.New("select at least one repo")
+		}
+		if len(selected) > dispatchpkg.CloudRepoLimit {
+			return fmt.Errorf("select at most %d repos", dispatchpkg.CloudRepoLimit)
+		}
+		return nil
+	}
+	repoPicker := huh.NewMultiSelect[string]().
+		Title("Repos").
+		Description(fmt.Sprintf("Press / to filter. Up to %d repos.", dispatchpkg.CloudRepoLimit)).
+		Filterable(true).
+		Value(&state.selectedRepos).
+		Validate(validateRepos)
+
+	groups := []*huh.Group{
 		huh.NewGroup(
 			huh.NewSelect[string]().
 				Options(
@@ -261,26 +289,55 @@ func runDispatchWizard(cmd *cobra.Command) (dispatchpkg.Options, error) {
 				).
 				Value(&state.modeChoice),
 		).Title("Mode").Description("Choose where the dispatch should run."),
-		huh.NewGroup(
-			huh.NewMultiSelect[string]().
-				Title("Repos").
-				Description(fmt.Sprintf("Press / to filter. Up to %d repos.", dispatchpkg.CloudRepoLimit)).
-				Filterable(true).
-				OptionsFunc(loadRepos, nil).
-				Value(&state.selectedRepos).
-				Validate(func(value []string) error {
-					selected := normalizeDispatchWizardSelections(value)
-					if len(selected) == 0 {
-						return errors.New("select at least one repo")
-					}
-					if len(selected) > dispatchpkg.CloudRepoLimit {
-						return fmt.Errorf("select at most %d repos", dispatchpkg.CloudRepoLimit)
-					}
-					return nil
+	}
+	if IsAccessibleMode() {
+		// huh's accessible runner ignores hide funcs and never evaluates an
+		// OptionsFunc, so the jurisdiction picker cannot be dynamic there and
+		// the repo options must be static. Ask Mode as its own form first, so
+		// a local answer never pays for the cloud catalogue; only a cloud
+		// answer loads it (synchronously — accessible mode has no spinner).
+		// The picker then routes to the default jurisdiction (home when the
+		// caller has repos there) and offers only the repos placed in it, so
+		// what is offered and where the request is sent agree. Scoping to
+		// another jurisdiction is `entire dispatch --jurisdiction <slug>
+		// --repos <slug>` (no wizard).
+		fmt.Fprintln(cmd.OutOrStdout())
+		if err := runDispatchWizardForm(NewAccessibleForm(groups...)); err != nil {
+			if handled := handleFormCancellation(cmd.OutOrStdout(), "dispatch", err); handled == nil {
+				return dispatchpkg.Options{}, errDispatchCancelled
+			}
+			return dispatchpkg.Options{}, fmt.Errorf("run dispatch wizard: %w", err)
+		}
+		groups = nil
+		if !state.isLocal() {
+			scope := loadScope()
+			state.jurisdiction = scope.defaultJurisdiction
+			repoPicker.Options(buildDispatchRepoOptions(scope.reposIn(scope.defaultJurisdiction))...)
+			groups = append(groups, huh.NewGroup(repoPicker))
+		}
+	} else {
+		groups = append(groups,
+			huh.NewGroup(
+				huh.NewSelect[string]().
+					OptionsFunc(func() []huh.Option[string] { return loadScope().options() }, nil).
+					Accessor(jurisdiction),
+			).Title("Jurisdiction").Description("A dispatch covers repos placed in one jurisdiction and is generated there. Only repos placed in the selection are offered next.").
+				WithHideFunc(func() bool {
+					return !state.showRepoPicker()
 				}),
-		).WithHideFunc(func() bool {
-			return !state.showRepoPicker()
-		}),
+			huh.NewGroup(
+				// Re-evaluated when the jurisdiction changes; huh also narrows
+				// the bound selection to the new options, so a repo picked
+				// under another jurisdiction never rides along.
+				repoPicker.OptionsFunc(func() []huh.Option[string] {
+					return buildDispatchRepoOptions(loadScope().reposIn(jurisdiction.Snapshot()))
+				}, &state.jurisdiction),
+			).WithHideFunc(func() bool {
+				return !state.showRepoPicker()
+			}),
+		)
+	}
+	groups = append(groups,
 		huh.NewGroup(
 			huh.NewSelect[string]().
 				Options(
@@ -349,6 +406,7 @@ func runDispatchWizard(cmd *cobra.Command) (dispatchpkg.Options, error) {
 				Value(&state.confirmRun),
 		).Title("Confirm").Description("Review the resolved command and run it."),
 	)
+	form := NewAccessibleForm(groups...)
 
 	fmt.Fprintln(cmd.OutOrStdout())
 
@@ -364,21 +422,6 @@ func runDispatchWizard(cmd *cobra.Command) (dispatchpkg.Options, error) {
 	}
 
 	return state.resolve()
-}
-
-// newLazyOptions returns a func that runs loader once (under sync.Once) and
-// returns the cached result on subsequent calls. Safe for concurrent use.
-func newLazyOptions(loader func() []huh.Option[string]) func() []huh.Option[string] {
-	var (
-		once    sync.Once
-		options []huh.Option[string]
-	)
-	return func() []huh.Option[string] {
-		once.Do(func() {
-			options = loader()
-		})
-		return options
-	}
 }
 
 // buildDispatchRepoOptions dedupes but preserves the caller's order so each

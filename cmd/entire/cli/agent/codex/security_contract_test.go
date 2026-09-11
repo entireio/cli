@@ -14,8 +14,8 @@ import (
 // reject it first via validation.ValidateSessionID.
 //
 // This test fails if either the verbatim behavior changes silently OR the shared
-// validator stops rejecting absolute IDs — i.e. it guards the resume/rewind fix
-// from regressing out from under this agent.
+// validator stops rejecting absolute IDs — i.e. it guards checkpoint-session
+// restoration from regressing out from under this agent.
 func TestResolveSessionFile_AbsoluteVerbatim_GuardedByValidator(t *testing.T) {
 	t.Parallel()
 

@@ -6,34 +6,59 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 )
 
+// TestHashWorktreeID pins the derivation to fixed values, not just to its
+// shape.
+//
+// The hash is half of every shadow branch name, and shadow branches are how a
+// running session finds its own pending checkpoints across invocations. Change
+// the derivation and an upgraded CLI computes a different branch name for the
+// same worktree: the in-flight checkpoints are still on disk but nothing looks
+// for them again, and intra-session rewind silently loses its history. Nothing
+// re-derives the old name, so the break is invisible.
+//
+// Shape assertions cannot see that. A mutation to sha256("wt:" + worktreeID) is
+// still 6 hex chars, still deterministic, still collision-free — and until
+// these vectors existed it left every package in the repo green, including the
+// integration suite, whose shadow-branch assertions compare against
+// checkpoint.ShadowBranchNameForCommit (the function under test) rather than a
+// literal.
+//
+// Vectors are the first 6 hex chars of SHA-256 over the raw worktree ID;
+// reproduce with:
+//
+//	printf %s 'test-123' | shasum -a 256 | cut -c1-6
 func TestHashWorktreeID(t *testing.T) {
 	tests := []struct {
 		name       string
 		worktreeID string
-		wantLen    int
+		want       string
 	}{
 		{
 			name:       "empty string (main worktree)",
 			worktreeID: "",
-			wantLen:    6,
+			want:       "e3b0c4",
 		},
 		{
 			name:       "simple worktree name",
 			worktreeID: "test-123",
-			wantLen:    6,
+			want:       "37eb19",
 		},
 		{
 			name:       "complex worktree name",
 			worktreeID: "feature/auth-system",
-			wantLen:    6,
+			want:       "16b0aa",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			got := HashWorktreeID(tt.worktreeID)
-			if len(got) != tt.wantLen {
-				t.Errorf("HashWorktreeID(%q) length = %d, want %d", tt.worktreeID, len(got), tt.wantLen)
+			if len(got) != WorktreeIDHashLength {
+				t.Errorf("HashWorktreeID(%q) length = %d, want %d", tt.worktreeID, len(got), WorktreeIDHashLength)
+			}
+			if got != tt.want {
+				t.Errorf("HashWorktreeID(%q) = %q, want %q — this names the shadow branch; a change orphans every in-flight session's pending checkpoints",
+					tt.worktreeID, got, tt.want)
 			}
 		})
 	}
@@ -65,23 +90,26 @@ func TestShadowBranchNameForCommit(t *testing.T) {
 		worktreeID string
 		want       string
 	}{
+		// want is spelled out rather than built with HashWorktreeID: composing
+		// the expectation from the function under test makes the assertion
+		// vacuous for the half of the name that function produces.
 		{
 			name:       "main worktree",
 			baseCommit: "abc1234567890",
 			worktreeID: "",
-			want:       "entire/abc1234-" + HashWorktreeID(""),
+			want:       "entire/abc1234-e3b0c4",
 		},
 		{
 			name:       "linked worktree",
 			baseCommit: "abc1234567890",
 			worktreeID: "test-123",
-			want:       "entire/abc1234-" + HashWorktreeID("test-123"),
+			want:       "entire/abc1234-37eb19",
 		},
 		{
 			name:       "short commit hash",
 			baseCommit: "abc",
 			worktreeID: "wt",
-			want:       "entire/abc-" + HashWorktreeID("wt"),
+			want:       "entire/abc-a721db",
 		},
 	}
 

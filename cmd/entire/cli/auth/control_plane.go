@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/entireio/cli/cmd/entire/cli/versioninfo"
 	"github.com/entireio/cli/internal/entireclient/clusterdiscovery"
 	"github.com/entireio/cli/internal/entireclient/contexts"
 	"github.com/entireio/cli/internal/entireclient/userdirs"
@@ -81,7 +82,7 @@ func ResolveControlPlaneTargetForCluster(ctx context.Context, clusterHost string
 	if clusterHost == "" {
 		return ControlPlaneTarget{}, errors.New("cluster-addressed control-plane command requires a target cluster host")
 	}
-	httpClient := &http.Client{Timeout: controlPlaneClusterDiscoveryTimeout}
+	httpClient := &http.Client{Timeout: controlPlaneClusterDiscoveryTimeout, Transport: versioninfo.WrapTransport(nil)}
 	c, err := resolveContextForCluster(ctx, userdirs.Config(), userdirs.Cache(), clusterHost, httpClient, nil)
 	if err != nil {
 		return ControlPlaneTarget{}, err

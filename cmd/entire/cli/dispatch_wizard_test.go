@@ -363,6 +363,8 @@ func TestRunDispatchWizard_ProceedsWhenCurrentBranchCannotBeResolved(t *testing.
 	t.Cleanup(func() {
 		runDispatchWizardForm = oldRunForm
 	})
+	// Keep the wizard's cloud catalogue off the network.
+	stubDispatchWizardScopeSources(t, []string{"entireio/cli"}, nil, "")
 
 	cmd := &cobra.Command{}
 	cmd.SetContext(context.Background())
@@ -429,4 +431,79 @@ func optionKeys(options []huh.Option[string]) []string {
 		keys = append(keys, option.Key)
 	}
 	return keys
+}
+
+func TestDispatchWizardState_JurisdictionIsCloudOnly(t *testing.T) {
+	t.Parallel()
+
+	state := newDispatchWizardState()
+	state.jurisdiction = " us "
+	opts, err := state.resolve()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if opts.Jurisdiction != "" {
+		t.Fatalf("local mode must not carry a jurisdiction, got %q", opts.Jurisdiction)
+	}
+
+	state.modeChoice = dispatchWizardModeServer
+	state.selectedRepos = []string{"entireio/cli"}
+	opts, err = state.resolve()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if opts.Jurisdiction != "us" {
+		t.Fatalf("expected resolved options to carry the normalized jurisdiction, got %q", opts.Jurisdiction)
+	}
+
+	state.jurisdiction = "not a slug"
+	if _, err := state.resolve(); err == nil || !strings.Contains(err.Error(), "invalid --jurisdiction") {
+		t.Fatalf("expected slug validation through resolve, got %v", err)
+	}
+
+	// The select's "Home" choice is a sentinel; it must resolve to "no selector".
+	state.jurisdiction = dispatchWizardJurisdictionHome
+	opts, err = state.resolve()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if opts.Jurisdiction != "" {
+		t.Fatalf("Home must resolve to an empty jurisdiction, got %q", opts.Jurisdiction)
+	}
+}
+
+func TestBuildDispatchCommand_Jurisdiction(t *testing.T) {
+	t.Parallel()
+
+	command := buildDispatchCommand(dispatchpkg.Options{
+		Mode:         dispatchpkg.ModeServer,
+		Since:        "7d",
+		RepoPaths:    []string{"entirehq/ferrata"},
+		Jurisdiction: "us",
+	})
+	if !strings.Contains(command, "--jurisdiction us") {
+		t.Fatalf("expected jurisdiction flag, got %q", command)
+	}
+
+	command = buildDispatchCommand(dispatchpkg.Options{Mode: dispatchpkg.ModeServer, Since: "7d", RepoPaths: []string{"entireio/cli"}})
+	if strings.Contains(command, "--jurisdiction") {
+		t.Fatalf("home default must not render a jurisdiction flag, got %q", command)
+	}
+}
+
+func TestBuildDispatchWizardSummary_Jurisdiction(t *testing.T) {
+	t.Parallel()
+
+	summary := buildDispatchWizardSummary(dispatchpkg.Options{Mode: dispatchpkg.ModeServer, RepoPaths: []string{"entireio/cli"}}, "")
+	if !strings.Contains(summary, "Jurisdiction: home") {
+		t.Fatalf("expected home jurisdiction in cloud summary, got %q", summary)
+	}
+	summary = buildDispatchWizardSummary(dispatchpkg.Options{Mode: dispatchpkg.ModeServer, RepoPaths: []string{"entireio/cli"}, Jurisdiction: "eu"}, "")
+	if !strings.Contains(summary, "Jurisdiction: eu") {
+		t.Fatalf("expected selected jurisdiction in cloud summary, got %q", summary)
+	}
+	summary = buildDispatchWizardSummary(dispatchpkg.Options{Mode: dispatchpkg.ModeLocal}, "")
+	if strings.Contains(summary, "Jurisdiction") {
+		t.Fatalf("local summary must not mention a jurisdiction, got %q", summary)
+	}
 }

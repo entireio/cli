@@ -17,6 +17,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
+	"github.com/entireio/cli/cmd/entire/cli/trailers"
 )
 
 // mustRefName builds a checkpoint ref for a known-valid ID in tests.
@@ -31,7 +32,6 @@ func mustRefName(t *testing.T, cid id.CheckpointID) plumbing.ReferenceName {
 // pointing at HEAD, plus a fresh bare remote. Returns (workDir, bareDir, refs).
 func setupRepoWithCheckpointRefs(t *testing.T) (string, string, []plumbing.ReferenceName) {
 	t.Helper()
-	ctx := context.Background()
 
 	workDir := t.TempDir()
 	testutil.InitRepo(t, workDir)
@@ -53,11 +53,7 @@ func setupRepoWithCheckpointRefs(t *testing.T) (string, string, []plumbing.Refer
 	}
 
 	bareDir := t.TempDir()
-	initCmd := exec.CommandContext(ctx, "git", "init", "--bare")
-	initCmd.Dir = bareDir
-	initCmd.Env = testutil.GitIsolatedEnv()
-	out, err := initCmd.CombinedOutput()
-	require.NoError(t, err, "git init --bare failed: %s", out)
+	testutil.RunGit(t, bareDir, "init", "--bare")
 
 	return workDir, bareDir, refs
 }
@@ -136,12 +132,7 @@ func TestBatchPushRefs_RejectsNonFastForward(t *testing.T) {
 	// Point refs[0] at an orphan commit (no parent) — not a descendant of what was
 	// pushed, so the update is non-fast-forward.
 	runGit := func(args ...string) string {
-		c := exec.CommandContext(ctx, "git", args...)
-		c.Dir = workDir
-		c.Env = testutil.GitIsolatedEnv()
-		out, gitErr := c.CombinedOutput()
-		require.NoError(t, gitErr, "git %v failed: %s", args, out)
-		return strings.TrimSpace(string(out))
+		return strings.TrimSpace(testutil.RunGit(t, workDir, args...))
 	}
 	tree := runGit("rev-parse", "HEAD^{tree}")
 	orphan := runGit("commit-tree", tree, "-m", "divergent")
@@ -283,13 +274,7 @@ func TestPushQueuedCheckpointRefs_PolicyBlocked(t *testing.T) {
 	require.NoError(t, err)
 	assert.ElementsMatch(t, refs, remaining, "blocked push leaves refs queued")
 
-	lsCmd := exec.CommandContext(context.Background(), "git", "ls-remote", bareDir)
-	lsCmd.Env = testutil.GitIsolatedEnv()
-	out, err := lsCmd.CombinedOutput()
-	require.NoError(t, err, "ls-remote failed: %s", out)
-	for _, ref := range refs {
-		assert.NotContains(t, string(out), ref.String(), "blocked push must not reach the remote")
-	}
+	assertRefsAbsentFromRemote(t, bareDir, refs, "blocked push must not reach the remote")
 }
 
 func TestPushQueuedCheckpointRefs_FailureLeavesRefsQueued(t *testing.T) {
@@ -321,6 +306,15 @@ func remoteRefFiles(t *testing.T, bareDir string, ref plumbing.ReferenceName) st
 	return string(out)
 }
 
+// assertRefsAbsentFromRemote fails if any of refs reached the bare remote.
+func assertRefsAbsentFromRemote(t *testing.T, bareDir string, refs []plumbing.ReferenceName, msg string) {
+	t.Helper()
+	out := testutil.RunGit(t, bareDir, "ls-remote", bareDir)
+	for _, ref := range refs {
+		assert.NotContains(t, out, ref.String(), msg)
+	}
+}
+
 // remoteRefHash returns the object hash a ref points at on the bare remote.
 func remoteRefHash(t *testing.T, bareDir string, ref plumbing.ReferenceName) string {
 	t.Helper()
@@ -331,4 +325,48 @@ func remoteRefHash(t *testing.T, bareDir string, ref plumbing.ReferenceName) str
 	fields := strings.Fields(strings.TrimSpace(string(out)))
 	require.NotEmpty(t, fields, "ref %s not found on remote", ref)
 	return fields[0]
+}
+
+// TestPushQueuedCheckpointRefs_OPFAppliedBeforePush pins the gate this path was
+// missing: with OPF enabled, the migration command's opt-in push must re-redact
+// the queued refs before they leave the machine, so what lands on the remote is
+// the rewritten, OPF-applied commit rather than the 8-layer one.
+func TestPushQueuedCheckpointRefs_OPFAppliedBeforePush(t *testing.T) {
+	configureFakeOPF(t, &fakeOPFForRewrite{})
+	bareDir, repo, refs := setupGitRefsOPFRepo(t, "a1b2c3d4e5f6", "b2c3d4e5f6a1")
+	before := refHashes(t, repo, refs)
+
+	pushed, pushDisabled, err := PushQueuedCheckpointRefs(t.Context(), repo, bareDir)
+	require.NoError(t, err)
+	assert.False(t, pushDisabled)
+	assert.Equal(t, len(refs), pushed)
+
+	after := refHashes(t, repo, refs)
+	for i, ref := range refs {
+		require.NotEqual(t, before[i], after[i], "ref %s must be rewritten before it is pushed", ref)
+		commit, commitErr := repo.CommitObject(after[i])
+		require.NoError(t, commitErr)
+		assert.True(t, trailers.HasOPFApplied(commit.Message), "pushed commit must carry the OPF trailer")
+		assert.NotContains(t, treeContents(t, repo, after[i]), "PERSONABC", "the sentinel must be scrubbed")
+		assert.Equal(t, after[i].String(), remoteRefHash(t, bareDir, ref),
+			"the rewritten commit is what reached the remote, not the 8-layer one")
+	}
+	assert.Empty(t, queuedRefs(t, repo), "pushed refs leave the queue")
+}
+
+// TestPushQueuedCheckpointRefs_OPFFailureWithholdsPush is the fail-closed half:
+// when OPF is enabled but the rewrite cannot run, nothing may reach the remote.
+func TestPushQueuedCheckpointRefs_OPFFailureWithholdsPush(t *testing.T) {
+	configureFakeOPF(t, &fakeRuntimeAlwaysFails{})
+	bareDir, repo, refs := setupGitRefsOPFRepo(t, "a1b2c3d4e5f6", "b2c3d4e5f6a1")
+	before := refHashes(t, repo, refs)
+
+	pushed, pushDisabled, err := PushQueuedCheckpointRefs(t.Context(), repo, bareDir)
+	require.Error(t, err)
+	assert.False(t, pushDisabled)
+	assert.Equal(t, 0, pushed)
+
+	assert.Equal(t, before, refHashes(t, repo, refs), "a withheld push must leave every ref unmoved")
+	assert.ElementsMatch(t, refs, queuedRefs(t, repo), "withheld refs stay queued")
+	assertRefsAbsentFromRemote(t, bareDir, refs, "withheld push must not reach the remote")
 }

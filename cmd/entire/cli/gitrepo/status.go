@@ -77,7 +77,8 @@ func SetStatusBudgetBreachedForTesting(breached bool) {
 // breach the walk goroutine is abandoned — it dies with the short-lived hook
 // process, which is the point — and the returned error wraps
 // ErrStatusBudgetExceeded so callers' warn-and-continue degrade paths apply.
-// Paths where a user is actively waiting on a command (review, rewind) keep
+// Paths where a user is actively waiting on a command (review via
+// review_target.go, and `session adopt` via detectFileChangesUnbounded) keep
 // calling Status directly.
 func StatusWithBudget(ctx context.Context, repo *git.Repository) (git.Status, error) {
 	worktree, err := repo.Worktree()

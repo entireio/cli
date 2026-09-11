@@ -170,12 +170,9 @@ func (f *FactoryAIDroidAgent) WriteSession(_ context.Context, session *agent.Age
 		return errors.New("session has no native data to write")
 	}
 
-	if err := os.MkdirAll(filepath.Dir(session.SessionRef), 0o750); err != nil {
-		return fmt.Errorf("failed to create session directory: %w", err)
-	}
-
-	if err := os.WriteFile(session.SessionRef, session.NativeData, 0o600); err != nil {
-		return fmt.Errorf("failed to write transcript: %w", err)
+	// WriteSessionFile creates the parent directory as part of the write.
+	if err := agent.WriteSessionFile(f, session, session.NativeData, 0o600); err != nil {
+		return fmt.Errorf("write transcript: %w", err)
 	}
 
 	return nil

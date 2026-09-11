@@ -454,7 +454,7 @@ func TestExternalAgent_HookSupport(t *testing.T) {
 		t.Errorf("InstallHooks() = %d, want 2", installed)
 	}
 
-	if !ea.AreHooksInstalled(context.Background()) {
+	if !hooksInstalledNow(t, ea) {
 		t.Error("AreHooksInstalled() = false, want true")
 	}
 }
@@ -882,5 +882,205 @@ func TestStripExeExt(t *testing.T) {
 				t.Errorf("StripExeExt(%q) = %q, want %q", tt.in, got, tt.want)
 			}
 		})
+	}
+}
+
+// probeScript returns a mock whose are-hooks-installed behaves as mode says:
+// "installed", "absent", "crash", or "garbage".
+func probeScript(mode string) string {
+	return probeScriptWithInfo(validInfoJSON, mode)
+}
+
+func probeScriptWithInfo(infoJSON, mode string) string {
+	base := mockInfoScript(infoJSON)
+	var reply string
+	switch mode {
+	case "installed":
+		reply = `echo '{"installed": true}'`
+	case "absent":
+		reply = `echo '{"installed": false}'`
+	case "crash":
+		reply = `echo 'plugin exploded' >&2; exit 3`
+	case "garbage":
+		reply = `echo 'not json at all'`
+	}
+	return strings.Replace(base,
+		`  are-hooks-installed)
+    echo '{"installed": true}'
+    ;;`,
+		"  are-hooks-installed)\n    "+reply+"\n    ;;", 1)
+}
+
+func TestAreHooksInstalled_ReportsWhyItCouldNotAnswer(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		mode          string
+		wantInstalled bool
+		wantErr       bool
+		// errContains pins that the plugin's own stderr survives into the error,
+		// since that text is what the user is shown to act on.
+		errContains string
+	}{
+		{mode: "installed", wantInstalled: true},
+		{mode: "absent"},
+		{mode: "crash", wantErr: true, errContains: "plugin exploded"},
+		{mode: "garbage", wantErr: true, errContains: "invalid JSON"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.mode, func(t *testing.T) {
+			t.Parallel()
+
+			ea := newExternalAgent(t, testBinaryDir(t, probeScript(tt.mode)))
+
+			installed, err := ea.AreHooksInstalled(context.Background())
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("AreHooksInstalled() error = nil, want an error for a plugin that cannot answer")
+				}
+				if tt.errContains != "" && !strings.Contains(err.Error(), tt.errContains) {
+					t.Errorf("error = %q, want it to carry %q", err, tt.errContains)
+				}
+			} else if err != nil {
+				t.Fatalf("AreHooksInstalled() error = %v", err)
+			}
+			if installed != tt.wantInstalled {
+				t.Errorf("AreHooksInstalled() = %v, want %v", installed, tt.wantInstalled)
+			}
+		})
+	}
+}
+
+func TestWrappedAgentForwardsAreHooksInstalled(t *testing.T) {
+	t.Parallel()
+
+	// Both wrappers, because wrappedAgentWithProtectedFiles embeds *wrappedAgent
+	// and inherits the forwarder by promotion — a plugin declaring protected_files
+	// must still be able to report why it could not answer.
+	for _, tt := range []struct {
+		name     string
+		infoJSON string
+	}{
+		{name: "plain wrapper", infoJSON: validInfoJSON},
+		{name: "protected-files wrapper", infoJSON: strings.Replace(validInfoJSON,
+			`"protected_dirs": [".test"],`,
+			`"protected_dirs": [".test"], "protected_files": [".testrc"],`, 1)},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			ea := newExternalAgent(t, testBinaryDir(t, probeScriptWithInfo(tt.infoJSON, "crash")))
+			wrapped, err := Wrap(ea)
+			if err != nil {
+				t.Fatalf("Wrap() error = %v", err)
+			}
+
+			hs, ok := agent.AsHookSupport(wrapped)
+			if !ok {
+				t.Fatalf("AsHookSupport() ok = false, want true")
+			}
+			if _, err := hs.AreHooksInstalled(context.Background()); err == nil {
+				t.Error("AreHooksInstalled() error = nil through the wrapper, want the plugin's failure")
+			}
+		})
+	}
+}
+
+// hooksInstalledNow reports whether the plugin's hooks are installed, failing the
+// test if it could not answer. For the tests that exercise a plugin which cannot
+// answer, the error is asserted directly instead.
+func hooksInstalledNow(t *testing.T, ag interface {
+	AreHooksInstalled(ctx context.Context) (bool, error)
+},
+) bool {
+	t.Helper()
+
+	installed, err := ag.AreHooksInstalled(context.Background())
+	if err != nil {
+		t.Fatalf("AreHooksInstalled() error = %v", err)
+	}
+	return installed
+}
+
+// TestNew_RefusesRelativeBinaryPath pins that validation and execution refer
+// to the same file. run sets cmd.Dir to the worktree root and os/exec resolves
+// a relative Path against Dir, so a caller that stats "./x" in one directory
+// can spawn a different "./x" — the guarantee has to be anchored on an
+// absolute path, and it has to hold for the exported constructor, not only
+// for binaries the scanner produced.
+func TestNew_RefusesRelativeBinaryPath(t *testing.T) {
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("sh not available")
+	}
+
+	dir := t.TempDir()
+	t.Chdir(dir)
+	marker := filepath.Join(dir, "planted-ran")
+	// A relative path WITH a separator. exec.Command's own re-check only
+	// covers separator-free names, so this is the shape that still resolves.
+	relPath := "." + string(filepath.Separator) + binaryPrefix + "planted"
+	// `: >` is a shell builtin, so the marker does not depend on $PATH.
+	script := "#!/bin/sh\n: > " + marker + "\n" + mockInfoScript(makeInfoJSON("planted"))
+	if err := os.WriteFile(filepath.Join(dir, binaryPrefix+"planted"), []byte(script), 0o755); err != nil {
+		t.Fatalf("write planted binary: %v", err)
+	}
+
+	ea, err := New(context.Background(), relPath)
+
+	if err == nil {
+		t.Fatalf("New(%q) succeeded, want refusal", relPath)
+	}
+	if ea != nil {
+		t.Errorf("New returned agent %v alongside an error, want nil", ea)
+	}
+	if _, statErr := os.Stat(marker); !errors.Is(statErr, os.ErrNotExist) {
+		t.Errorf("planted binary was executed (marker stat err = %v), want it never spawned", statErr)
+	}
+}
+
+func TestAgentRun_RefusesRelativeBinaryPath(t *testing.T) {
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("sh not available")
+	}
+
+	dir := t.TempDir()
+	t.Chdir(dir)
+	marker := filepath.Join(dir, "planted-ran")
+	relPath := "." + string(filepath.Separator) + binaryPrefix + "planted"
+	script := "#!/bin/sh\n: > " + marker + "\n" + mockInfoScript(makeInfoJSON("planted"))
+	if err := os.WriteFile(filepath.Join(dir, binaryPrefix+"planted"), []byte(script), 0o755); err != nil {
+		t.Fatalf("write planted binary: %v", err)
+	}
+
+	ea := &Agent{binaryPath: relPath}
+
+	if _, err := ea.run(context.Background(), nil, "info"); err == nil {
+		t.Fatalf("run succeeded with a relative binaryPath, want refusal")
+	}
+	if _, statErr := os.Stat(marker); !errors.Is(statErr, os.ErrNotExist) {
+		t.Errorf("planted binary was executed (marker stat err = %v), want it never spawned", statErr)
+	}
+}
+
+// TestAgentRun_NoArgs pins that run reports the caller's mistake instead of
+// panicking on it. run is variadic and every error path it takes labels the
+// message with args[0], so a zero-arg call indexes an empty slice before any
+// of those paths can return. New is exported, so the reachable set is not
+// limited to this package's own call sites.
+func TestAgentRun_NoArgs(t *testing.T) {
+	t.Parallel()
+
+	// An absolute path, so the empty-args check is what has to fire rather
+	// than the absoluteness refusal above it.
+	ea := &Agent{binaryPath: filepath.Join(t.TempDir(), binaryPrefix+"noargs")}
+
+	out, err := ea.run(context.Background(), nil)
+
+	if err == nil {
+		t.Fatal("run with no args succeeded, want an error")
+	}
+	if out != nil {
+		t.Errorf("run returned %q alongside an error, want nil", out)
 	}
 }

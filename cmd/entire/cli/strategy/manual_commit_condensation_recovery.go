@@ -157,6 +157,12 @@ func recoverInterruptedCondensation(
 			Prompts:                sessionData.Prompts,
 			TotalTranscriptLines:   sessionData.FullTranscriptLines,
 			TranscriptSizeBaseline: transcriptSizeBaseline,
+			// Set once in CondenseSession before recovery runs, so this result
+			// carries the same probe as the normal path. Recovery is reachable
+			// only from the non-emitting condensation paths today, but a
+			// CondenseResult that silently drops the field is the trap
+			// searchProbe.measured exists to catch — keep it carried.
+			SearchProbe: sessionData.SearchProbe,
 		},
 		done: true,
 	}

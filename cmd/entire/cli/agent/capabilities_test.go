@@ -43,8 +43,8 @@ func (m *mockBuiltinHookAgent) ParseHookEvent(context.Context, string, io.Reader
 func (m *mockBuiltinHookAgent) InstallHooks(context.Context, bool) (int, error) {
 	return 0, nil
 }
-func (m *mockBuiltinHookAgent) UninstallHooks(context.Context) error   { return nil }
-func (m *mockBuiltinHookAgent) AreHooksInstalled(context.Context) bool { return false }
+func (m *mockBuiltinHookAgent) UninstallHooks(context.Context) error            { return nil }
+func (m *mockBuiltinHookAgent) AreHooksInstalled(context.Context) (bool, error) { return false, nil }
 
 // mockFullAgent implements all optional interfaces AND CapabilityDeclarer.
 type mockFullAgent struct {
@@ -62,7 +62,7 @@ func (m *mockFullAgent) ParseHookEvent(context.Context, string, io.Reader) (*Eve
 }
 func (m *mockFullAgent) InstallHooks(context.Context, bool) (int, error) { return 0, nil }
 func (m *mockFullAgent) UninstallHooks(context.Context) error            { return nil }
-func (m *mockFullAgent) AreHooksInstalled(context.Context) bool          { return false }
+func (m *mockFullAgent) AreHooksInstalled(context.Context) (bool, error) { return false, nil }
 
 // TranscriptAnalyzer
 func (m *mockFullAgent) GetTranscriptPosition(string) (int, error) { return 0, nil }
@@ -77,6 +77,11 @@ func (m *mockFullAgent) PrepareTranscript(context.Context, string) error { retur
 
 // TokenCalculator
 func (m *mockFullAgent) CalculateTokenUsage([]byte, int) (*TokenUsage, error) { return nil, nil } //nolint:nilnil // test mock
+
+// InventoryAwareExtractor is built-in only and deliberately has no DeclaredCaps bit.
+func (m *mockFullAgent) ExtractWithSubagentInventory(context.Context, []byte, int, []SubagentReference) (InventoryExtraction, error) {
+	return InventoryExtraction{}, nil
+}
 
 // ModelExtractor
 func (m *mockFullAgent) ExtractModel([]byte) (string, error) { return "mock-model", nil }
@@ -253,6 +258,26 @@ func TestAsTokenCalculator(t *testing.T) {
 		_, ok := AsTokenCalculator(ag)
 		if ok {
 			t.Error("expected false")
+		}
+	})
+}
+
+func TestAsInventoryAwareExtractor(t *testing.T) {
+	t.Parallel()
+
+	t.Run("not implemented", func(t *testing.T) {
+		t.Parallel()
+		_, ok := AsInventoryAwareExtractor(&mockBaseAgent{})
+		if ok {
+			t.Error("expected false")
+		}
+	})
+
+	t.Run("implemented without declared capability", func(t *testing.T) {
+		t.Parallel()
+		extractor, ok := AsInventoryAwareExtractor(&mockFullAgent{})
+		if !ok || extractor == nil {
+			t.Error("expected built-in-only type assertion to succeed")
 		}
 	})
 }

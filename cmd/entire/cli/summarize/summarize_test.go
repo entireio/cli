@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 
@@ -719,15 +720,43 @@ func TestGenerateFromTranscript_EmptyTranscript(t *testing.T) {
 	}
 }
 
+// TestGenerateFromTranscript_NilGenerator pins the nil-generator contract: the
+// call must fall back to the default ClaudeGenerator and return that
+// generator's summary, not silently produce nothing.
+//
+// The default generator is stubbed via defaultTextGeneratorFactory. Without the
+// stub this test launches the real `claude` binary — on a developer machine
+// that spends model quota, rewrites ~/.claude.json (keeping a backup) and
+// leaves a session transcript under ~/.claude/projects, all from `mise run
+// check`. The factory swap is process-global, so this test must not be
+// parallel.
 func TestGenerateFromTranscript_NilGenerator(t *testing.T) {
 	transcript := []byte(`{"type":"user","message":{"content":"Hello"}}`)
 
-	// With nil generator, should use default ClaudeGenerator
-	// This will fail because claude CLI isn't available in test, but tests the nil handling
-	_, err := GenerateFromTranscript(context.Background(), redact.AlreadyRedacted(transcript), []string{}, "", nil, nil)
-	// Error is expected (claude CLI not available), but function should not panic
-	if err == nil {
-		t.Log("Unexpectedly succeeded - claude CLI must be available")
+	factoryCalls := 0
+	originalFactory := defaultTextGeneratorFactory
+	defaultTextGeneratorFactory = func() (agent.TextGenerator, error) {
+		factoryCalls++
+		return &stubTextGenerator{
+			text: `{"intent":"stubbed intent","outcome":"stubbed outcome","learnings":{"repo":[],"code":[],"workflow":[]},"friction":[],"open_items":[]}`,
+		}, nil
+	}
+	t.Cleanup(func() {
+		defaultTextGeneratorFactory = originalFactory
+	})
+
+	summary, err := GenerateFromTranscript(context.Background(), redact.AlreadyRedacted(transcript), []string{}, "", nil, nil)
+	if err != nil {
+		t.Fatalf("GenerateFromTranscript with nil generator: %v", err)
+	}
+	if factoryCalls != 1 {
+		t.Errorf("default text generator factory called %d times, want 1 — a nil generator must fall back to ClaudeGenerator", factoryCalls)
+	}
+	if summary == nil {
+		t.Fatal("summary is nil; a nil generator must still produce the default generator's summary")
+	}
+	if summary.Intent != "stubbed intent" || summary.Outcome != "stubbed outcome" {
+		t.Errorf("summary = {Intent:%q Outcome:%q}, want the default generator's output", summary.Intent, summary.Outcome)
 	}
 }
 
@@ -1037,9 +1066,11 @@ func TestBuildCondensedTranscriptFromBytes_CursorRoleBasedJSONL(t *testing.T) {
 	}
 }
 
-func TestBuildCondensedTranscriptFromBytes_CursorNoToolUseBlocks(t *testing.T) {
-	// Cursor transcripts have no tool_use blocks — only text content.
-	// This verifies we get entries (not an empty result) even without tool calls.
+func TestBuildCondensedTranscriptFromBytes_CursorTextOnly(t *testing.T) {
+	t.Parallel()
+	// A text-only Cursor exchange still yields entries (not an empty result).
+	// Cursor transcripts can also carry tool_use blocks -- see
+	// TestBuildCondensedTranscriptFromBytes_CursorToolUse for that case.
 	cursorJSONL := `{"role":"user","message":{"content":[{"type":"text","text":"write a poem"}]}}
 {"role":"assistant","message":{"content":[{"type":"text","text":"Here is a poem about code."}]}}
 `
@@ -1053,11 +1084,41 @@ func TestBuildCondensedTranscriptFromBytes_CursorNoToolUseBlocks(t *testing.T) {
 		t.Fatalf("expected 2 entries, got %d", len(entries))
 	}
 
-	// No tool entries should appear
+	// This exchange makes no tool calls, so no tool entries should appear.
 	for i, e := range entries {
 		if e.Type == EntryTypeTool {
-			t.Errorf("entry %d: unexpected tool entry in Cursor transcript", i)
+			t.Errorf("entry %d: unexpected tool entry in a text-only Cursor transcript", i)
 		}
+	}
+}
+
+// TestBuildCondensedTranscriptFromBytes_CursorToolUse pins that Cursor tool calls
+// reach the condensed transcript. Cursor shares Claude Code's JSONL shape and is
+// routed through the same parser, so this needs no Cursor-specific code -- but
+// nothing covered it while this package assumed Cursor had no tool_use blocks.
+// Tool names and input keys here match a real session
+// (cmd/entire/cli/agent/cursor/testdata/real_session_tool_use.jsonl).
+func TestBuildCondensedTranscriptFromBytes_CursorToolUse(t *testing.T) {
+	t.Parallel()
+	cursorJSONL := `{"role":"user","message":{"content":[{"type":"text","text":"create notes.md"}]}}
+{"role":"assistant","message":{"content":[{"type":"text","text":"Creating it."},{"type":"tool_use","name":"Write","input":{"path":"/tmp/cursor-probe/notes.md","contents":"line 1\n"}}]}}
+{"role":"assistant","message":{"content":[{"type":"tool_use","name":"StrReplace","input":{"new_string":"line 1 CHANGED","old_string":"line 1","path":"/tmp/cursor-probe/notes.md"}}]}}
+`
+
+	entries, err := BuildCondensedTranscriptFromBytes(redact.AlreadyRedacted([]byte(cursorJSONL)), agent.AgentTypeCursor)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var tools []string
+	for _, e := range entries {
+		if e.Type == EntryTypeTool {
+			tools = append(tools, e.ToolName)
+		}
+	}
+	want := []string{"Write", "StrReplace"}
+	if !slices.Equal(tools, want) {
+		t.Errorf("tool entries = %v, want %v", tools, want)
 	}
 }
 

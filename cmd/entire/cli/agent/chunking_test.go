@@ -116,6 +116,16 @@ func TestParseChunkIndex(t *testing.T) {
 		{"full.jsonl.100", "full.jsonl", 100},
 		{"other.txt", "full.jsonl", -1},
 		{"full.jsonl.abc", "full.jsonl", -1},
+		// jsonutil.CreateTempIn residue: a suffix that merely STARTS with
+		// digits is not a chunk index. "%03d" via fmt.Sscanf accepted these.
+		{"full.jsonl.123abcdef0123456.tmp", "full.jsonl", -1},
+		{"full.jsonl.9f0e1d2c3b4a5968.tmp", "full.jsonl", -1},
+		{"full.jsonl.0a1b2c3d4e5f6071.tmp", "full.jsonl", -1},
+		{"full.jsonl.001.tmp", "full.jsonl", -1},
+		{"full.jsonl.", "full.jsonl", -1},
+		// More than 999 chunks still parses: the format string pads to three
+		// digits but does not truncate above them.
+		{"full.jsonl.1000", "full.jsonl", 1000},
 	}
 
 	for _, tt := range tests {

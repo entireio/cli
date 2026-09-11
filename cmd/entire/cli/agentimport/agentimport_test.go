@@ -13,6 +13,7 @@ import (
 	"github.com/go-git/go-git/v6/plumbing/object"
 
 	cp "github.com/entireio/cli/cmd/entire/cli/checkpoint"
+	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 	"github.com/entireio/cli/redact"
 )
@@ -153,6 +154,23 @@ func TestRun_ImportsAndIsIdempotent(t *testing.T) {
 		if !in.Imported {
 			t.Fatalf("checkpoint %s missing Imported flag: %+v", in.CheckpointID, in)
 		}
+	}
+
+	// Regression: the session state must land in the repo being imported
+	// into (opts.RepoRoot), not wherever the process runs — a CWD-resolved
+	// store once leaked fixture sessions into the developer's real
+	// .git/entire-sessions, where commit linking picked one up and stamped a
+	// dangling trailer.
+	store, err := session.NewStateStoreForWorktree(context.Background(), repoDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	imported, err := store.Load(context.Background(), "sess1")
+	if err != nil || imported == nil {
+		t.Fatalf("imported session state should exist in the target repo's store: %v", err)
+	}
+	if !imported.Kind.IsImported() {
+		t.Fatalf("imported session state must be Kind=imported, got %q", imported.Kind)
 	}
 }
 

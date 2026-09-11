@@ -69,7 +69,6 @@ func benchWriteTemporaryFirstCheckpoint(fileCount, fileSizeLines int) func(*test
 				WorktreeID:        repo.WorktreeID,
 				ModifiedFiles:     []string{"src/file_000.go", "src/file_001.go", "src/file_002.go"},
 				MetadataDir:       metadataDir,
-				MetadataDirAbs:    metadataDirAbs,
 				CommitMessage:     "benchmark checkpoint",
 				AuthorName:        "Bench",
 				AuthorEmail:       "bench@test.com",
@@ -132,7 +131,6 @@ func benchWriteTemporaryIncremental(modified, newFiles, deleted int) func(*testi
 				NewFiles:          newFileList,
 				DeletedFiles:      deletedFiles,
 				MetadataDir:       metadataDir,
-				MetadataDirAbs:    metadataDirAbs,
 				CommitMessage:     "benchmark checkpoint",
 				AuthorName:        "Bench",
 				AuthorEmail:       "bench@test.com",
@@ -179,7 +177,6 @@ func benchWriteTemporaryIncrementalLargeFiles(fileCount, linesPerFile int) func(
 				WorktreeID:        repo.WorktreeID,
 				ModifiedFiles:     modifiedFiles,
 				MetadataDir:       metadataDir,
-				MetadataDirAbs:    metadataDirAbs,
 				CommitMessage:     "benchmark checkpoint",
 				AuthorName:        "Bench",
 				AuthorEmail:       "bench@test.com",
@@ -202,7 +199,6 @@ func benchWriteTemporaryDedup() func(*testing.B) {
 
 		// Don't modify any files — tree will match the previous checkpoint
 		metadataDir := paths.SessionMetadataDirFromSessionID(sessionID)
-		metadataDirAbs := filepath.Join(repo.Dir, metadataDir)
 
 		b.Chdir(repo.Dir)
 
@@ -215,7 +211,6 @@ func benchWriteTemporaryDedup() func(*testing.B) {
 				WorktreeID:        repo.WorktreeID,
 				ModifiedFiles:     []string{"src/file_000.go", "src/file_001.go", "src/file_002.go"},
 				MetadataDir:       metadataDir,
-				MetadataDirAbs:    metadataDirAbs,
 				CommitMessage:     "benchmark checkpoint",
 				AuthorName:        "Bench",
 				AuthorEmail:       "bench@test.com",
@@ -262,7 +257,6 @@ func benchWriteTemporaryWithHistory(priorCheckpoints int) func(*testing.B) {
 				WorktreeID:        repo.WorktreeID,
 				ModifiedFiles:     []string{"src/file_000.go", "src/file_001.go", "src/file_002.go"},
 				MetadataDir:       metadataDir,
-				MetadataDirAbs:    metadataDirAbs,
 				CommitMessage:     "benchmark checkpoint",
 				AuthorName:        "Bench",
 				AuthorEmail:       "bench@test.com",

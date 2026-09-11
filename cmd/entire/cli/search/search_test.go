@@ -3,6 +3,7 @@ package search
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -149,6 +150,14 @@ func TestCellV4_ErrorJSON(t *testing.T) {
 	if got := err.Error(); got != "search service error (401): Invalid token" {
 		t.Errorf("error = %q, want 'search service error (401): Invalid token'", got)
 	}
+	// Outcome telemetry classifies by status code, so the error must be typed.
+	var statusErr *HTTPStatusError
+	if !errors.As(err, &statusErr) {
+		t.Fatalf("error is %T, want *HTTPStatusError", err)
+	}
+	if statusErr.StatusCode != http.StatusUnauthorized {
+		t.Errorf("StatusCode = %d, want %d", statusErr.StatusCode, http.StatusUnauthorized)
+	}
 }
 
 func TestCellV4_ErrorRawBody(t *testing.T) {
@@ -221,6 +230,12 @@ func TestCellV4_ErrorFieldOn200(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "user not found") {
 		t.Errorf("error = %q, want message containing 'user not found'", err.Error())
+	}
+	// Outcome telemetry classifies a 200-with-error-field as a server
+	// failure, so the error must be typed.
+	var malformedErr *MalformedResponseError
+	if !errors.As(err, &malformedErr) {
+		t.Fatalf("error is %T, want *MalformedResponseError", err)
 	}
 }
 

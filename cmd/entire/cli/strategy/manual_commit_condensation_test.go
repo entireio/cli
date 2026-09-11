@@ -113,7 +113,14 @@ func TestBuildSummaryGenerator_ExternalProvider(t *testing.T) { //nolint:paralle
 	require.NoError(t, os.MkdirAll(filepath.Join(dir, ".entire"), 0o755))
 	require.NoError(t, os.WriteFile(
 		filepath.Join(dir, ".entire", "settings.json"),
-		[]byte(`{"enabled":true,"external_agents":true,"summary_generation":{"provider":"`+provider+`","model":"test-model"}}`),
+		[]byte(`{"enabled":true,"summary_generation":{"provider":"`+provider+`","model":"test-model"}}`),
+		0o644,
+	))
+	// external_agents lives in the local file: it grants execution of
+	// entire-agent-* binaries on $PATH, so the loader honors it only there.
+	require.NoError(t, os.WriteFile(
+		filepath.Join(dir, ".entire", "settings.local.json"),
+		[]byte(`{"external_agents":true}`),
 		0o644,
 	))
 
@@ -480,13 +487,12 @@ func TestCondenseSession_TagsCheckpointSummaryWithHasInvestigation(t *testing.T)
 	require.NoError(t, os.WriteFile(trackedFile, []byte("agent-modified content"), 0o644))
 
 	require.NoError(t, s.SaveStep(context.Background(), StepContext{
-		SessionID:      sessionID,
-		ModifiedFiles:  []string{"test.txt"},
-		MetadataDir:    metadataDir,
-		MetadataDirAbs: metadataDirAbs,
-		CommitMessage:  "Investigate checkpoint 1",
-		AuthorName:     "Test",
-		AuthorEmail:    "test@test.com",
+		SessionID:     sessionID,
+		ModifiedFiles: []string{"test.txt"},
+		MetadataDir:   metadataDir,
+		CommitMessage: "Investigate checkpoint 1",
+		AuthorName:    "Test",
+		AuthorEmail:   "test@test.com",
 	}))
 
 	state, err := s.loadSessionState(context.Background(), sessionID)
@@ -734,12 +740,11 @@ func TestCondenseSessionByID_DoesNotReuseCheckpointAfterSessionAdvances(t *testi
 	advancedTranscript := testTranscriptPromptResponse + `{"type":"human","message":{"content":"another prompt"}}` + "\n"
 	require.NoError(t, os.WriteFile(filepath.Join(metadataDirAbs, paths.TranscriptFileName), []byte(advancedTranscript), 0o644))
 	require.NoError(t, s.SaveStep(context.Background(), StepContext{
-		SessionID:      sessionID,
-		MetadataDir:    metadataDir,
-		MetadataDirAbs: metadataDirAbs,
-		CommitMessage:  "Checkpoint 2",
-		AuthorName:     "Test",
-		AuthorEmail:    "test@test.com",
+		SessionID:     sessionID,
+		MetadataDir:   metadataDir,
+		CommitMessage: "Checkpoint 2",
+		AuthorName:    "Test",
+		AuthorEmail:   "test@test.com",
 	}))
 
 	require.NoError(t, s.CondenseSessionByID(context.Background(), sessionID))
@@ -786,13 +791,12 @@ func setupCondensableSessionWithTranscript(t *testing.T, sessionID string) (*git
 	require.NoError(t, os.WriteFile(trackedFile, []byte("agent-modified content"), 0o644))
 
 	require.NoError(t, s.SaveStep(context.Background(), StepContext{
-		SessionID:      sessionID,
-		ModifiedFiles:  []string{"test.txt"},
-		MetadataDir:    metadataDir,
-		MetadataDirAbs: metadataDirAbs,
-		CommitMessage:  "checkpoint 1",
-		AuthorName:     "Test",
-		AuthorEmail:    "test@test.com",
+		SessionID:     sessionID,
+		ModifiedFiles: []string{"test.txt"},
+		MetadataDir:   metadataDir,
+		CommitMessage: "checkpoint 1",
+		AuthorName:    "Test",
+		AuthorEmail:   "test@test.com",
 	}))
 
 	state, err := s.loadSessionState(context.Background(), sessionID)
@@ -885,6 +889,34 @@ func TestCondenseSession_MaterializesCompletedTaskRecord_RegressionFor2058(t *te
 	// is now durably stored, so it must be removed from session state.
 	resetCheckpointWindow(state)
 	require.Empty(t, state.TaskRecords, "completed task record must be removed after materialization")
+}
+
+func TestCondenseSession_TranscriptUnavailableDoesNotProbeGenericLayout(t *testing.T) {
+	const (
+		sessionID = "2026-09-03-copilot-no-child-transcript"
+		toolUseID = "toolu_copilot_no_transcript"
+		agentID   = "24d8773a-06e8-435c-9257-8ccb89a54f33"
+	)
+	repo, state := setupCondensableSessionWithTranscript(t, sessionID)
+	coincidental := filepath.Join(filepath.Dir(state.TranscriptPath), "agent-"+agentID+".jsonl")
+	require.NoError(t, os.WriteFile(coincidental, []byte(`{"secret":"must not be attributed"}`), 0o600))
+	state.TaskRecords = []session.TaskRecord{{
+		ToolUseID:             toolUseID,
+		AgentID:               agentID,
+		StartedAt:             time.Now(),
+		CompletedAt:           time.Now(),
+		TranscriptUnavailable: true,
+	}}
+	require.NoError(t, SaveSessionState(context.Background(), state))
+
+	checkpointID := id.MustCheckpointID("aabbccddaa09")
+	_, err := (&ManualCommitStrategy{}).CondenseSession(context.Background(), repo, checkpointID, state, nil)
+	require.NoError(t, err)
+	_, found := checkpointTaskFile(t, repo, checkpointID, "tasks/"+toolUseID+"/agent-"+agentID+".jsonl")
+	require.False(t, found)
+	taskJSON, found := checkpointTaskFile(t, repo, checkpointID, "tasks/"+toolUseID+"/task.json")
+	require.True(t, found)
+	require.Contains(t, taskJSON, taskTranscriptReasonUnresolvable)
 }
 
 // TestCondenseSession_InFlightTaskRecord_TranscriptSoFarStoredRecordSurvives
@@ -1021,7 +1053,7 @@ func TestCondenseSession_TaskRecordMissingTranscriptPath_RecordsUnavailableReaso
 
 // TestCondenseSession_PoisonedTaskRecord_SkippedNotWedged is the regression
 // for the "poisoned record must not wedge condensation forever" hardening: a
-// record with an unsafe ToolUseID must not abort the whole checkpoint write
+// record with an unsafe ToolUseID or AgentID must not abort the whole checkpoint write
 // (which would re-fail on every future condensation, since completed records
 // are only removed after a successful write), nor should it silently produce
 // a task.json it can't safely be placed under. Alongside a valid record, the
@@ -1045,6 +1077,13 @@ func TestCondenseSession_PoisonedTaskRecord_SkippedNotWedged(t *testing.T) {
 			AgentID:                "agent-poison",
 			DeclaredTranscriptPath: validTranscriptPath,
 			CompletedAt:            completedAt,
+		},
+		{
+			// Path-unsafe even when the agent reports that no transcript exists.
+			ToolUseID:             "toolu_poisoned_agent",
+			AgentID:               "../escape",
+			TranscriptUnavailable: true,
+			CompletedAt:           completedAt,
 		},
 		{
 			ToolUseID:              "toolu_valid",
@@ -1088,6 +1127,8 @@ func TestCondenseSession_PoisonedTaskRecord_SkippedNotWedged(t *testing.T) {
 	}
 	require.False(t, remaining["../escape"],
 		"a completed poisoned record can never materialize, so it must still be removed rather than retried forever")
+	require.False(t, remaining["toolu_poisoned_agent"],
+		"a completed record with a poisoned agent ID must be removed rather than retried forever")
 	require.False(t, remaining["toolu_valid"], "the completed valid record was materialized and must also be removed")
 }
 
@@ -1187,4 +1228,63 @@ func TestCheckpointStepCount(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestClearFilesystemStagedFiles_ReleasesAllStagedFiles pins the leak fix: the
+// staged files are a buffer for the checkpoint writer, so once a session's work
+// is condensed they must not stay in the worktree. Before this, nothing ever
+// removed the transcript and a few hundred sessions accumulated hundreds of MB.
+//
+// Not parallel: entiredir resolves the worktree root from the process CWD.
+func TestClearFilesystemStagedFiles_ReleasesAllStagedFiles(t *testing.T) {
+	repoDir := t.TempDir()
+	testutil.InitRepo(t, repoDir)
+	testutil.WriteFile(t, repoDir, "f.txt", "init")
+	testutil.GitAdd(t, repoDir, "f.txt")
+	testutil.GitCommit(t, repoDir, "init")
+	t.Chdir(repoDir)
+
+	const sessionID = "session-clear-staged"
+	metaDir := filepath.Join(repoDir, paths.SessionMetadataDirFromSessionID(sessionID))
+	require.NoError(t, os.MkdirAll(metaDir, 0o750))
+
+	// A file that is not staged metadata, to pin that the release is scoped to
+	// the known names rather than emptying the directory.
+	keep := filepath.Join(metaDir, "content_hash.txt")
+	staged := make([]string, 0, len(stagedSessionFiles))
+	for _, name := range stagedSessionFiles {
+		staged = append(staged, filepath.Join(metaDir, name))
+	}
+	for _, p := range append(append([]string{}, staged...), keep) {
+		require.NoError(t, os.WriteFile(p, []byte(`{"x":1}`+"\n"), 0o600))
+	}
+
+	clearFilesystemStagedFiles(context.Background(), sessionID)
+
+	for _, p := range staged {
+		assert.NoFileExists(t, p, "%s should be released after condensation", filepath.Base(p))
+	}
+	assert.FileExists(t, keep, "a non-staged file must not be swept up")
+	assert.DirExists(t, metaDir, "the session metadata directory must survive")
+}
+
+// TestClearFilesystemStagedFiles_MissingFilesAreNotAnError covers the ordinary
+// steady state after the first condensation: the files are already gone, and a
+// later commit for the same session must not fail or panic. The legacy full.log
+// name is absent on every session this CLI captured, so that path is the norm.
+func TestClearFilesystemStagedFiles_MissingFilesAreNotAnError(t *testing.T) {
+	repoDir := t.TempDir()
+	testutil.InitRepo(t, repoDir)
+	testutil.WriteFile(t, repoDir, "f.txt", "init")
+	testutil.GitAdd(t, repoDir, "f.txt")
+	testutil.GitCommit(t, repoDir, "init")
+	t.Chdir(repoDir)
+
+	// No metadata directory at all, then an empty one.
+	clearFilesystemStagedFiles(context.Background(), "session-never-staged")
+
+	metaDir := filepath.Join(repoDir, paths.SessionMetadataDirFromSessionID("session-empty"))
+	require.NoError(t, os.MkdirAll(metaDir, 0o750))
+	clearFilesystemStagedFiles(context.Background(), "session-empty")
+	assert.DirExists(t, metaDir)
 }

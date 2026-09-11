@@ -20,6 +20,19 @@ const (
 	checkpointBackendRefsAlias   = "refs"
 )
 
+// checkpointBackendFlagUsage is the shared --checkpoint-backend help text. Both
+// `enable` and `configure` register the flag, so it lives here rather than being
+// spelled twice: the two commands drifting would advertise two different stories
+// about which backend a repo gets.
+//
+// It names refs as the default rather than merely "recommended", because that is
+// what a first-time `entire enable` writes, with no prompt (see
+// resolveFirstRunCheckpointBackend). branch is labelled legacy: it is an explicit
+// escape hatch for interoperating with older clients, not a co-equal choice.
+const checkpointBackendFlagUsage = "Checkpoint storage backend: " +
+	checkpointBackendRefsAlias + " (default; one git ref per checkpoint) or " +
+	checkpointBackendBranchAlias + " (legacy shared entire/checkpoints/v1 branch)"
+
 // resolveCheckpointBackendType maps a user-facing backend name to the canonical
 // settings backend type and validates it may serve as the primary. It accepts
 // the friendly aliases "branch"/"refs" and the canonical "git-branch"/"git-refs"

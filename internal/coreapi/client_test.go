@@ -263,8 +263,9 @@ func TestListProjectRepos_UnknownEnumValuesPassThrough(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
-		// Values the current spec's enums did NOT allow.
-		if _, err := w.Write([]byte(`{"repos":[{"id":"01H000000000000000000000A1","owningProjectId":"01H000000000000000000000P1","name":"demo","state":"archiving","visibility":"internal","objectFormat":"sha512"}]}`)); err != nil {
+		// Values the current spec's enums did NOT allow, and no
+		// "capabilities": a required-but-unread field must not be needed.
+		if _, err := w.Write([]byte(`{"repos":[{"id":"01H000000000000000000000A1","owningProjectId":"01H000000000000000000000P1","name":"demo","state":"archiving","visibility":"internal","objectFormat":"sha512","provider":"gitlab"}]}`)); err != nil {
 			t.Errorf("writing test response: %v", err)
 		}
 	}))
@@ -291,5 +292,132 @@ func TestListProjectRepos_UnknownEnumValuesPassThrough(t *testing.T) {
 	}
 	if got := repo.ObjectFormat.Or(""); got != "sha512" {
 		t.Errorf("ObjectFormat = %q, want the unknown value %q passed through verbatim", got, "sha512")
+	}
+}
+
+// TestListRepos_UnsentRequiredReadFieldsDecode locks in the backward-compat
+// contract for spec/normalize.go's loosenReadModelRequired on RepoIndexEntry:
+// `org` and `provider` ship as "required" upstream, but the CLI reads neither,
+// so a core that predates them — or a mixed-version roll mid-deploy — must not
+// fail the response. ogen's decoder rejects a missing required field outright,
+// which would take out the whole index read rather than one field.
+//
+// RepoIndexEntry gets its own test because ListRepos is the widest consumer of
+// the loosening: the consolidated repos index is what resolveRepoCellTarget
+// routes repo-scoped requests with, and what `search`, `repo mirror` and the
+// dispatch wizard page through. A decode failure here is not one command
+// erroring, it is cell routing and search going dark at once — a materially
+// different blast radius from TestListProjectRepos_UnknownEnumValuesPassThrough,
+// which covers the sibling loosening on Repo.
+//
+// The unknown `permission` value pins the matching loosenReadModelEnums entry
+// in the same request: it was a closed enum upstream, and a value added later
+// must pass through rather than abort the read.
+func TestListRepos_UnsentRequiredReadFieldsDecode(t *testing.T) {
+	t.Parallel()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		// No "org", no "provider", no "candidatesIncomplete" — all required
+		// upstream, none read here. "permission" carries a value the current
+		// spec's enum did NOT allow.
+		if _, err := w.Write([]byte(`{"repos":[{` +
+			`"id":"01H000000000000000000000R1","name":"web","full_name":"gh/acme/web",` +
+			`"jurisdiction":"us","cell":"aws-us-east-2","clusterSlug":"us","visibility":"private",` +
+			`"permission":"triage",` +
+			`"placements":[{"id":"01H000000000000000000000R1","jurisdiction":"us","cell":"aws-us-east-2","clusterSlug":"us","mirror":false,"status":"ready"}]` +
+			`}],"truncated":false}`)); err != nil {
+			t.Errorf("writing test response: %v", err)
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	c, err := NewClient(srv.URL, bearerOnlySource{})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+
+	out, err := c.ListRepos(context.Background(), ListReposParams{})
+	if err != nil {
+		t.Fatalf("ListRepos without org/provider must not fail (backward-compat), got: %v", err)
+	}
+	if len(out.Repos) != 1 {
+		t.Fatalf("Repos len = %d, want 1", len(out.Repos))
+	}
+	entry := out.Repos[0]
+	if entry.Org.IsSet() {
+		t.Errorf("Org.IsSet() = true, want false: an absent field must decode as unset, not fail the read")
+	}
+	if entry.Provider.IsSet() {
+		t.Errorf("Provider.IsSet() = true, want false: an absent field must decode as unset, not fail the read")
+	}
+	if got := entry.Permission.Or(""); got != "triage" {
+		t.Errorf("Permission = %q, want the unknown value %q passed through verbatim", got, "triage")
+	}
+	if got := entry.FullName; got != "gh/acme/web" {
+		t.Errorf("FullName = %q, want the entry to decode intact alongside the absent fields", got)
+	}
+}
+
+// TestListOrgsAndProjects_UnsentCapabilitiesDecode is the same contract for the
+// other two schemas that gained a required `capabilities` the CLI never reads.
+// Cheaper to lose than the repo index, but the loosening is only real if a
+// response without the field actually decodes.
+func TestListOrgsAndProjects_UnsentCapabilitiesDecode(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name string
+		body string
+		call func(*Client) (int, error)
+	}{
+		{
+			name: "orgs",
+			body: `{"orgs":[{"id":"01H000000000000000000000O1","name":"acme","region":"us","createdAt":"2026-01-01T00:00:00Z"}]}`,
+			call: func(c *Client) (int, error) {
+				out, err := c.ListOrgs(context.Background(), ListOrgsParams{})
+				if err != nil {
+					return 0, err
+				}
+				return len(out.Response.Orgs), nil
+			},
+		},
+		{
+			name: "projects",
+			body: `{"projects":[{"id":"01H000000000000000000000P1","name":"core","ownerType":"org","ownerId":"01H000000000000000000000O1","region":"us","createdAt":"2026-01-01T00:00:00Z"}]}`,
+			call: func(c *Client) (int, error) {
+				out, err := c.ListProjects(context.Background(), ListProjectsParams{})
+				if err != nil {
+					return 0, err
+				}
+				return len(out.Projects), nil
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusOK)
+				if _, err := w.Write([]byte(tc.body)); err != nil {
+					t.Errorf("writing test response: %v", err)
+				}
+			}))
+			t.Cleanup(srv.Close)
+
+			c, err := NewClient(srv.URL, bearerOnlySource{})
+			if err != nil {
+				t.Fatalf("NewClient: %v", err)
+			}
+			n, err := tc.call(c)
+			if err != nil {
+				t.Fatalf("list without capabilities must not fail (backward-compat), got: %v", err)
+			}
+			if n != 1 {
+				t.Fatalf("decoded %d item(s), want 1", n)
+			}
+		})
 	}
 }

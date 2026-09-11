@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -13,6 +14,52 @@ var benchmarkOpenSSHPrivateKey = makeFakeOpenSSHPrivateKey(`b3BlbnNzaC1rZXktdjEA
 QyNTUxOQAAACB7ZlJ8tkWCKdRJRGF1BngP3bkNbz8bMF6Yl5xLJp9m1QAAAJj2M3UO9jN1
 DgAAAAtzc2gtZWQyNTUxOQAAACB7ZlJ8tkWCKdRJRGF1BngP3bkNbz8bMF6Yl5xLJp9m1QA
 AAEAGZmFrZS1rZXktZm9yLXJlZGFjdGlvbi1iZW5jaG1hcmstb25seQECAwQF`)
+
+// Repeated credentials can occur in captured tool output, such as request logs.
+// Each matching scanner finding must not trigger another whole-input scan for
+// all copies of the same secret within one String call. Parsed JSONL is redacted
+// per string field, so repeated values in separate fields or lines are not deduped.
+// Compare benchmark results manually against a base ref; CI does not enforce
+// a performance baseline.
+func BenchmarkRedactStringRepeatedSecret(b *testing.B) {
+	for _, repeats := range []int{1, 10, 100, 1000} {
+		b.Run(fmt.Sprintf("Occurrences%d", repeats), func(b *testing.B) {
+			input := strings.Repeat("request key=AKIAYRWQG5EJLPZLBYNP completed\n", repeats)
+			want := strings.Repeat("request key=REDACTED completed\n", repeats)
+			b.ReportAllocs()
+			b.SetBytes(int64(len(input)))
+			for b.Loop() {
+				if got := String(input); got != want {
+					b.Fatal("redacted output did not match expected request log")
+				}
+			}
+		})
+	}
+}
+
+// BenchmarkJSONLContent_WideObject pins duplicate-key scanning across object
+// widths. Wide objects occur in tool results such as npm ls output, coverage
+// reports, and flattened configuration dumps. Null values deliberately isolate
+// key scanning from the per-string regex layers; the existing JSONL benchmarks
+// cover realistic string-heavy redaction throughput.
+func BenchmarkJSONLContent_WideObject(b *testing.B) {
+	for _, keys := range []int{200, 2_000, 8_000} {
+		b.Run(fmt.Sprintf("Keys%d", keys), func(b *testing.B) {
+			input := generateBenchmarkWideObject(keys)
+			b.ReportAllocs()
+			b.SetBytes(int64(len(input)))
+			for b.Loop() {
+				got, err := JSONLContent(input)
+				if err != nil {
+					b.Fatal(err)
+				}
+				if got != input {
+					b.Fatal("redaction changed secret-free input")
+				}
+			}
+		})
+	}
+}
 
 // BenchmarkRedactJSONLBytes gives us a stable redaction performance baseline.
 //
@@ -70,6 +117,22 @@ func BenchmarkRedactJSONLBytes(b *testing.B) {
 			}
 		})
 	}
+}
+
+func generateBenchmarkWideObject(keys int) string {
+	var out strings.Builder
+	out.Grow(keys * 20)
+	out.WriteByte('{')
+	for i := range keys {
+		if i > 0 {
+			out.WriteByte(',')
+		}
+		out.WriteString(`"key_`)
+		out.WriteString(strconv.Itoa(i))
+		out.WriteString(`":null`)
+	}
+	out.WriteByte('}')
+	return out.String()
 }
 
 func readBenchmarkFixture(b *testing.B, path string) []byte {

@@ -2,6 +2,7 @@ package settings
 
 import (
 	"context"
+	"github.com/entireio/cli/cmd/entire/cli/testutil"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -17,7 +18,7 @@ func newCheckpointsSettingsRepo(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
 	require.NoError(t, os.MkdirAll(filepath.Join(dir, ".entire"), 0o755))
-	require.NoError(t, os.MkdirAll(filepath.Join(dir, ".git"), 0o755))
+	testutil.InitRepo(t, dir)
 	t.Chdir(dir)
 	return dir
 }

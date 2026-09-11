@@ -87,7 +87,7 @@ func (w *wrappedAgent) InstallHooks(ctx context.Context, force bool) (int, error
 	return w.ea.InstallHooks(ctx, force)
 }
 func (w *wrappedAgent) UninstallHooks(ctx context.Context) error { return w.ea.UninstallHooks(ctx) }
-func (w *wrappedAgent) AreHooksInstalled(ctx context.Context) bool {
+func (w *wrappedAgent) AreHooksInstalled(ctx context.Context) (bool, error) {
 	return w.ea.AreHooksInstalled(ctx)
 }
 

@@ -130,7 +130,7 @@ func TestRescopeSubagentTokensToDeltas_NilCumulativeThenReappears(t *testing.T) 
 // follow, then asserts the subagent's tokens are counted exactly once both in
 // the summed per-turn/per-checkpoint usage and in the imported session total.
 func TestImport_ClaudeSubagentTokensCountedOnceAcrossTurns(t *testing.T) {
-	importRepo(t) // chdir into a repo for session-state storage; no t.Parallel (t.Chdir)
+	repoDir := importRepo(t) // chdir into a repo for session-state storage; no t.Parallel (t.Chdir)
 
 	dir := t.TempDir()
 	sf := SessionFile{Path: filepath.Join(dir, "s.jsonl"), SessionID: "s"}
@@ -159,14 +159,14 @@ func TestImport_ClaudeSubagentTokensCountedOnceAcrossTurns(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SplitTurns: %v", err)
 	}
-	assertSubagentTurns(t, claudeImporter{}, sf, turns)
+	assertSubagentTurns(t, claudeImporter{}, sf, turns, repoDir)
 }
 
 // TestImport_FactorySubagentTokensCountedOnceAcrossTurns is the Factory AI Droid
 // analogue: Droid envelopes, subagent spawned in the first turn, three prompt
 // turns, subagent tokens counted exactly once.
 func TestImport_FactorySubagentTokensCountedOnceAcrossTurns(t *testing.T) {
-	importRepo(t)
+	repoDir := importRepo(t)
 
 	dir := t.TempDir()
 	sf := SessionFile{Path: filepath.Join(dir, "s.jsonl"), SessionID: "s"}
@@ -191,14 +191,14 @@ func TestImport_FactorySubagentTokensCountedOnceAcrossTurns(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SplitTurns: %v", err)
 	}
-	assertSubagentTurns(t, factoryImporter{}, sf, turns)
+	assertSubagentTurns(t, factoryImporter{}, sf, turns, repoDir)
 }
 
 // assertSubagentTurns runs the shared assertions for a 3-turn session with one
 // spawned subagent: the summed per-turn (== per-checkpoint) subagent tokens and
 // the imported session total each count the subagent exactly once, while the
 // main-agent totals still sum across turns.
-func assertSubagentTurns(t *testing.T, imp Importer, sf SessionFile, turns []Turn) {
+func assertSubagentTurns(t *testing.T, imp Importer, sf SessionFile, turns []Turn, repoDir string) {
 	t.Helper()
 	ctx := context.Background()
 	if len(turns) != 3 {
@@ -213,7 +213,7 @@ func assertSubagentTurns(t *testing.T, imp Importer, sf SessionFile, turns []Tur
 
 	// Session-total proof: the imported session.State.TokenUsage folds the
 	// turns via writeSessionState the same way production Run does.
-	if err := writeSessionState(ctx, imp, sf, turns); err != nil {
+	if err := writeSessionState(ctx, imp, sf, turns, repoDir); err != nil {
 		t.Fatalf("writeSessionState: %v", err)
 	}
 	st := loadState(t, sf.SessionID)

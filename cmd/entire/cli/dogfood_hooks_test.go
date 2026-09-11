@@ -8,16 +8,27 @@ import (
 	"testing"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
+	"github.com/entireio/cli/cmd/entire/cli/testutil"
 )
 
 // committedHookConfigAgents are the agents whose Entire hook config this repo
-// commits: .claude/settings.json, .opencode/plugins/entire.ts, and
-// .pi/extensions/entire/index.ts. Each must be found and current.
+// commits: .claude/settings.json, .codex/hooks.json,
+// .opencode/plugins/entire.ts, and .pi/extensions/entire/index.ts. Each must be
+// found and current. The path travels with the agent name so the test can copy
+// that exact committed config into its isolated repository.
 //
 // Named rather than counted. A count would let a newly added agent paper over a
 // committed config that went missing — one appears, one disappears, the total
 // still matches and the test keeps passing while silently guarding less.
-var committedHookConfigAgents = []string{"claude-code", "opencode", "pi"}
+var committedHookConfigAgents = []struct {
+	name string
+	path string
+}{
+	{name: "claude-code", path: ".claude/settings.json"},
+	{name: "codex", path: ".codex/hooks.json"},
+	{name: "opencode", path: ".opencode/plugins/entire.ts"},
+	{name: "pi", path: ".pi/extensions/entire/index.ts"},
+}
 
 // TestCommittedHookConfigsAreCurrent pins this repo's own committed Entire hook
 // configs against what the CLI would install today.
@@ -44,7 +55,17 @@ func TestCommittedHookConfigsAreCurrent(t *testing.T) {
 	// directory via paths.WorktreeRoot. That resolution is cached, but the cache
 	// is keyed on the working directory, so chdir invalidates it rather than
 	// handing us a root some earlier test left behind.
-	t.Chdir(repoRootFromSource(t))
+	//
+	// Copy the committed files into a normal temporary repository before changing
+	// directory. The source checkout may itself be a linked worktree, where an
+	// agent can deliberately resolve its repository-wide config outside this
+	// checkout. This test is about the committed files, not that surrounding Git
+	// topology, so the fixture must make the checkout root authoritative.
+	sourceRoot := repoRootFromSource(t)
+	repoRoot := t.TempDir()
+	testutil.InitRepo(t, repoRoot)
+	copyCommittedHookConfigs(t, sourceRoot, repoRoot)
+	t.Chdir(repoRoot)
 
 	ctx := context.Background()
 	checked := make(map[string]agent.HookConfigState)
@@ -70,17 +91,28 @@ func TestCommittedHookConfigsAreCurrent(t *testing.T) {
 	// Assert per agent, not in aggregate. Checking only that *something* was
 	// compared would let this test keep passing while quietly no longer guarding
 	// one of the configs — the same silent-rot failure mode it exists to catch.
-	for _, name := range committedHookConfigAgents {
-		state, ok := checked[name]
+	for _, config := range committedHookConfigAgents {
+		state, ok := checked[config.name]
 		switch {
 		case !ok:
 			t.Errorf("%s reported no hook-config drift check; this repo commits a "+
-				"config for it, so it must still implement agent.HookFreshness", name)
+				"config for it, so it must still implement agent.HookFreshness", config.name)
 		case state == agent.HooksAbsent:
 			t.Errorf("no committed hook config found for %s; this repo is supposed to "+
 				"commit one. If it was intentionally removed, drop %s from "+
-				"committedHookConfigAgents", name, name)
+				"committedHookConfigAgents", config.name, config.name)
 		}
+	}
+}
+
+func copyCommittedHookConfigs(t *testing.T, sourceRoot, destinationRoot string) {
+	t.Helper()
+	for _, config := range committedHookConfigAgents {
+		data, err := os.ReadFile(filepath.Join(sourceRoot, config.path))
+		if err != nil {
+			t.Fatalf("read committed %s: %v", config.path, err)
+		}
+		testutil.WriteFile(t, destinationRoot, config.path, string(data))
 	}
 }
 

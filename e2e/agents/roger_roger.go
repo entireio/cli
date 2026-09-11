@@ -42,6 +42,19 @@ func (r *RogerRoger) IsTransientError(_ Output, _ error) bool { return false }
 func (r *RogerRoger) IsExternalAgent() bool { return true }
 
 func (r *RogerRoger) RunPrompt(ctx context.Context, dir string, prompt string, opts ...Option) (Output, error) {
+	cfg := &runConfig{}
+	for _, o := range opts {
+		o(cfg)
+	}
+
+	// No default, same reasoning as vogon: a local stub needs no ceiling of
+	// ours, but an explicitly requested one must still apply.
+	ctx, cancel, err := boundPrompt(ctx, 0, cfg)
+	if err != nil {
+		return Output{}, err
+	}
+	defer cancel()
+
 	// roger-roger reads prompts from stdin line by line.
 	// An empty line causes the REPL to exit gracefully.
 	cmd := exec.CommandContext(ctx, r.Binary())
@@ -55,7 +68,7 @@ func (r *RogerRoger) RunPrompt(ctx context.Context, dir string, prompt string, o
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 
-	err := cmd.Run()
+	err = cmd.Run()
 	exitCode := 0
 	if err != nil {
 		exitErr := &exec.ExitError{}

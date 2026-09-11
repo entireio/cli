@@ -84,8 +84,7 @@ func (a *PiAgent) ReadTranscript(sessionRef string) ([]byte, error) {
 	if sessionRef == "" {
 		return nil, errors.New("empty session ref")
 	}
-	//nolint:gosec // SessionRef from validated lifecycle hook input
-	data, err := os.ReadFile(sessionRef)
+	data, err := agent.ReadTranscriptFile(sessionRef)
 	if err != nil {
 		return nil, fmt.Errorf("read pi transcript %s: %w", sessionRef, err)
 	}
@@ -237,7 +236,7 @@ func (a *PiAgent) ReadSession(input *agent.HookInput) (*agent.AgentSession, erro
 		return nil, errors.New("no session ref provided")
 	}
 
-	data, err := os.ReadFile(input.SessionRef)
+	data, err := agent.ReadTranscriptFile(input.SessionRef)
 	if err != nil {
 		return nil, fmt.Errorf("read pi session: %w", err)
 	}
@@ -262,11 +261,8 @@ func (a *PiAgent) WriteSession(_ context.Context, session *agent.AgentSession) e
 	if len(session.NativeData) == 0 {
 		return errors.New("session has empty NativeData")
 	}
-	if err := os.MkdirAll(filepath.Dir(session.SessionRef), 0o750); err != nil {
-		return fmt.Errorf("create pi session dir: %w", err)
-	}
-
-	if err := os.WriteFile(session.SessionRef, session.NativeData, 0o600); err != nil {
+	// WriteSessionFile creates the parent directory as part of the write.
+	if err := agent.WriteSessionFile(a, session, session.NativeData, 0o600); err != nil {
 		return fmt.Errorf("write pi session file: %w", err)
 	}
 	return nil
@@ -283,3 +279,10 @@ func (a *PiAgent) FormatResumeCommand(sessionID string) string {
 	}
 	return "pi --session " + id
 }
+
+// CallerSessionEnvVar names the variable holding the session ID Pi publishes
+// into the environment of the processes it spawns. Pi also publishes
+// PI_SESSION_FILE, the transcript path itself; the ID is preferred because
+// ResolveSessionFile derives the same path from it, keeping one resolution
+// point instead of two.
+func (a *PiAgent) CallerSessionEnvVar() string { return "PI_SESSION_ID" }

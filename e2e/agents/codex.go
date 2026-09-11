@@ -88,9 +88,9 @@ func (c *Codex) RunPrompt(ctx context.Context, dir string, prompt string, opts .
 		o(cfg)
 	}
 
-	timeout := 60 * time.Second
-	if cfg.PromptTimeout > 0 {
-		timeout = cfg.PromptTimeout
+	timeout, err := promptTimeout(60*time.Second, cfg)
+	if err != nil {
+		return Output{}, err
 	}
 	promptCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()

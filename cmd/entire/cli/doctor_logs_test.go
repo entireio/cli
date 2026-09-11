@@ -51,14 +51,15 @@ func TestPrintTail_ZeroNCopiesAll(t *testing.T) {
 	t.Parallel()
 
 	dir := t.TempDir()
-	path := filepath.Join(dir, "log.txt")
+	const name = "log.txt"
+	path := filepath.Join(dir, name)
 	contents := "alpha\nbeta\ngamma\n"
 	if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
 		t.Fatalf("write log: %v", err)
 	}
 
 	var buf bytes.Buffer
-	if err := printTail(&buf, path, 0); err != nil {
+	if err := printTail(&buf, mustLogRoot(t, dir), name, 0); err != nil {
 		t.Fatalf("printTail: %v", err)
 	}
 	if buf.String() != contents {
@@ -70,14 +71,15 @@ func TestPrintTail_TailsLastN(t *testing.T) {
 	t.Parallel()
 
 	dir := t.TempDir()
-	path := filepath.Join(dir, "log.txt")
+	const name = "log.txt"
+	path := filepath.Join(dir, name)
 	contents := "1\n2\n3\n4\n5\n"
 	if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
 		t.Fatalf("write log: %v", err)
 	}
 
 	var buf bytes.Buffer
-	if err := printTail(&buf, path, 2); err != nil {
+	if err := printTail(&buf, mustLogRoot(t, dir), name, 2); err != nil {
 		t.Fatalf("printTail: %v", err)
 	}
 	if buf.String() != "4\n5\n" {
@@ -89,7 +91,8 @@ func TestFollowFile_ExitsWhenContextCanceled(t *testing.T) {
 	t.Parallel()
 
 	dir := t.TempDir()
-	path := filepath.Join(dir, "log.txt")
+	const name = "log.txt"
+	path := filepath.Join(dir, name)
 	if err := os.WriteFile(path, []byte("existing\n"), 0o600); err != nil {
 		t.Fatalf("write log: %v", err)
 	}
@@ -98,10 +101,22 @@ func TestFollowFile_ExitsWhenContextCanceled(t *testing.T) {
 	cancel()
 
 	var buf bytes.Buffer
-	if err := followFile(ctx, &buf, path); err != nil {
+	if err := followFile(ctx, &buf, mustLogRoot(t, dir), name); err != nil {
 		t.Fatalf("followFile: %v", err)
 	}
 	if buf.Len() != 0 {
 		t.Fatalf("followFile wrote %q after cancellation", buf.String())
 	}
+}
+
+// mustLogRoot opens dir as an os.Root, standing in for the shared .entire root
+// the log readers are handed.
+func mustLogRoot(t *testing.T, dir string) *os.Root {
+	t.Helper()
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		t.Fatalf("os.OpenRoot(%s): %v", dir, err)
+	}
+	t.Cleanup(func() { _ = root.Close() })
+	return root
 }

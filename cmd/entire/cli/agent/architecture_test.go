@@ -44,8 +44,11 @@ func TestAgentPackages_NoForbiddenImports(t *testing.T) {
 	// Packages within the repo that agents ARE allowed to import.
 	allowedPrefixes := []string{
 		repoPrefix + "agent",      // agent contract + sub-packages
+		repoPrefix + "gitrepo",    // repository layout utilities
 		repoPrefix + "logging",    // logging utilities
 		repoPrefix + "paths",      // path utilities
+		repoPrefix + "entiredir",  // the shared .entire root; the only sanctioned way to read or write there
+		repoPrefix + "osroot",     // traversal-resistant os.Root helpers, used with the above
 		repoPrefix + "jsonutil",   // JSON utilities
 		repoPrefix + "textutil",   // text utilities
 		repoPrefix + "transcript", // transcript utilities
@@ -55,6 +58,7 @@ func TestAgentPackages_NoForbiddenImports(t *testing.T) {
 		repoPrefix + "validation", // validation utilities
 		repoPrefix + "settings",   // settings (read-only access)
 		repoPrefix + "review",     // review env contract + AgentReviewer types (used by per-agent reviewer.go files)
+		repoPrefix + "testutil",   // canonical isolated repository fixtures for agent tests
 	}
 
 	agentDir := findAgentDir(t)

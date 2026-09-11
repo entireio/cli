@@ -88,14 +88,50 @@ func SetupRepo(t *testing.T, agent agents.Agent) *RepoState {
 	Git(t, dir, "config", "core.autocrlf", "true")
 	Git(t, dir, "commit", "--allow-empty", "-m", "initial commit")
 
+	// Copilot prompt mode requires repository instructions. Commit the custom
+	// agent fixture before Entire starts capture so setup files cannot be
+	// attributed to the child under test.
+	if agent.Name() == "copilot-cli" {
+		agentsDir := filepath.Join(dir, ".github", "agents")
+		if err := os.MkdirAll(agentsDir, 0o755); err != nil {
+			t.Fatalf("create Copilot agent directory: %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, ".github", "copilot-instructions.md"), []byte("# E2E Test\n"), 0o644); err != nil {
+			t.Fatalf("write copilot-instructions.md: %v", err)
+		}
+		agentFile := "---\nname: entire-e2e-subagent\ndescription: Creates the single file delegated by the parent.\ntools: [\"*\"]\n---\nCreate only the requested file and do not delegate further.\n"
+		if err := os.WriteFile(filepath.Join(agentsDir, "entire-e2e-subagent.agent.md"), []byte(agentFile), 0o644); err != nil {
+			t.Fatalf("write Copilot custom agent: %v", err)
+		}
+		Git(t, dir, "add", ".github")
+		Git(t, dir, "commit", "-m", "Add Copilot E2E agent fixture")
+	}
+
 	// External agents need external_agents enabled in settings before enable,
 	// so the CLI can discover the agent binary via PATH during DiscoverAndRegister.
+	//
+	// The grant goes in settings.local.json: it enables execution of
+	// entire-agent-* binaries found on $PATH, so the loader honors it only
+	// from an untracked local file. Nothing commits this one — the repo has
+	// its initial commit already — so it verifies as this clone's own.
+	//
+	// An empty settings.json goes alongside it, and is load-bearing rather
+	// than decorative. `entire enable` picks its target file by asking
+	// whether project settings already exist, so a repo carrying only a local
+	// file would send enable's own write there too and never create
+	// settings.json — which PatchSettings below then cannot find. Creating
+	// both keeps the target resolution exactly where it was when this fixture
+	// wrote the grant into settings.json.
 	if ea, ok := agent.(agents.ExternalAgent); ok && ea.IsExternalAgent() {
 		entireDir := filepath.Join(dir, ".entire")
 		if err := os.MkdirAll(entireDir, 0o755); err != nil {
 			t.Fatalf("create .entire for external agent: %v", err)
 		}
 		if err := os.WriteFile(filepath.Join(entireDir, "settings.json"),
+			[]byte("{}\n"), 0o644); err != nil {
+			t.Fatalf("write project settings: %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(entireDir, "settings.local.json"),
 			[]byte("{\"external_agents\": true}\n"), 0o644); err != nil {
 			t.Fatalf("write external_agents setting: %v", err)
 		}
@@ -119,28 +155,15 @@ func SetupRepo(t *testing.T, agent agents.Agent) *RepoState {
 	// regardless of this setting.
 	PatchSettings(t, dir, map[string]any{"log_level": "debug", "commit_linking": "always"})
 
-	// Copilot CLI blocks on a "No copilot instructions found" notice in fresh
-	// repos that lack .github/copilot-instructions.md, preventing the interactive
-	// prompt from appearing.
-	if agent.Name() == "copilot-cli" {
-		ghDir := filepath.Join(dir, ".github")
-		if err := os.MkdirAll(ghDir, 0o755); err != nil {
-			t.Fatalf("create .github dir: %v", err)
-		}
-		if err := os.WriteFile(filepath.Join(ghDir, "copilot-instructions.md"), []byte("# E2E Test\n"), 0o644); err != nil {
-			t.Fatalf("write copilot-instructions.md: %v", err)
-		}
-	}
-
-	// OpenCode's non-interactive mode auto-rejects external_directory permission
-	// since there's no user to prompt. Write a config to allow it.
-	if agent.Name() == "opencode" {
-		cfg := `{"$schema": "https://opencode.ai/config.json", "permission": {"external_directory": "allow"}}`
-		if key := os.Getenv("ANTHROPIC_API_KEY"); key != "" {
-			cfg = fmt.Sprintf(`{"$schema": "https://opencode.ai/config.json", "permission": {"external_directory": "allow"}, "provider": {"anthropic": {"options": {"apiKey": %q}}}}`, key)
-		}
-		if err := os.WriteFile(filepath.Join(dir, "opencode.json"), []byte(cfg+"\n"), 0o644); err != nil {
-			t.Fatalf("write opencode.json: %v", err)
+	// Agents that need files planted before their first run in a repo get them
+	// here — after `entire enable` has written the agent's own config, so a
+	// seed can sit alongside it. opencode uses this for its config file and for
+	// a pre-built .opencode dependency tree it would otherwise install on the
+	// clock; keeping both in the agent is why this is an interface rather than
+	// another arm of the name switch above.
+	if seeder, ok := agent.(agents.RepoSeeder); ok {
+		if err := seeder.SeedRepo(dir); err != nil {
+			t.Fatalf("seed repo for %s: %v", agent.Name(), err)
 		}
 	}
 

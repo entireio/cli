@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"syscall"
@@ -418,3 +419,78 @@ func failRoundTripper(t *testing.T) http.RoundTripper {
 type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+// TestNewContextTokenManager_LockNeverInRealUserCache is the end-to-end guard:
+// drive one real refresh through the per-context manager and prove auth-go's
+// cross-process lock file did not land in the user cache directory. HOME and
+// XDG_CACHE_HOME are redirected so os.UserCacheDir resolves inside the test's
+// own tree on both macOS ($HOME/Library/Caches) and Linux ($XDG_CACHE_HOME);
+// anything appearing under <home>/auth-go there would be written to the
+// developer's real cache in a normal run.
+//
+// Not parallel: it sets process-wide environment.
+func TestNewContextTokenManager_LockNeverInRealUserCache(t *testing.T) {
+	t.Cleanup(tokenstore.UseFileBackendForTesting(filepath.Join(t.TempDir(), "tokens.json")))
+
+	fakeHome := t.TempDir()
+	t.Setenv("HOME", fakeHome)
+	t.Setenv("XDG_CACHE_HOME", fakeHome)
+
+	newJWT := makeJWT(t, fmt.Sprintf(`{"iss":"https://core.example","handle":"alice","exp":%d}`, time.Now().Add(time.Hour).Unix()))
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprintf(w, `{"access_token":%q,"refresh_token":"entr_new","token_type":"Bearer","expires_in":3600}`, newJWT)
+	}))
+	defer srv.Close()
+
+	svc := tokenstore.CoreKeyringService(srv.URL)
+	staleJWT := makeJWT(t, fmt.Sprintf(`{"iss":%q,"handle":"alice","exp":%d}`, srv.URL, time.Now().Add(2*time.Hour).Unix()))
+	if err := tokenstore.Set(svc, "alice", tokenstore.EncodeTokenWithExpiration(staleJWT, 7200)); err != nil {
+		t.Fatalf("seed access token: %v", err)
+	}
+	if err := tokenstore.Set(tokenstore.RefreshService(svc), "alice", "entr_old"); err != nil {
+		t.Fatalf("seed refresh token: %v", err)
+	}
+
+	c := &contexts.Context{Name: "alice@core", CoreURL: srv.URL, Handle: "alice", KeychainService: svc}
+	credential, err := NewRefreshingLoginCredential(c, srv.Client().Transport, true)
+	if err != nil {
+		t.Fatalf("NewRefreshingLoginCredential: %v", err)
+	}
+	// ForceRefresh takes the cross-process lock before re-minting.
+	if _, err := credential.ForceRefresh(t.Context(), staleJWT); err != nil {
+		t.Fatalf("ForceRefresh: %v", err)
+	}
+
+	for _, dir := range []string{
+		filepath.Join(fakeHome, "auth-go"),                      // Linux: XDG_CACHE_HOME/auth-go
+		filepath.Join(fakeHome, "Library", "Caches", "auth-go"), // macOS: HOME/Library/Caches/auth-go
+	} {
+		if _, statErr := os.Stat(dir); statErr == nil {
+			t.Errorf("auth-go lock directory %q was created; the token manager must not write into the user cache dir under test", dir)
+		}
+	}
+}
+
+// TestTokenManagerLockDir_NeverRealUserCache pins the test-isolation half of
+// the LockDir contract: under `go test`, auth-go's cross-process lock must not
+// land in the developer's real user cache directory. Returning "" here would
+// hand auth-go its production default, os.UserCacheDir()/auth-go, which on
+// macOS is ~/Library/Caches/auth-go regardless of XDG_CACHE_HOME.
+func TestTokenManagerLockDir_NeverRealUserCache(t *testing.T) {
+	t.Parallel()
+
+	dir := tokenManagerLockDir()
+	if dir == "" {
+		t.Fatal("tokenManagerLockDir() = \"\" under go test; auth-go would fall back to the real user cache dir")
+	}
+
+	cache, err := os.UserCacheDir()
+	if err != nil {
+		t.Skipf("os.UserCacheDir unavailable: %v", err)
+	}
+	realLockDir := filepath.Join(cache, "auth-go")
+	if dir == realLockDir || strings.HasPrefix(dir, realLockDir+string(os.PathSeparator)) {
+		t.Fatalf("tokenManagerLockDir() = %q, which resolves under the real %q", dir, realLockDir)
+	}
+}

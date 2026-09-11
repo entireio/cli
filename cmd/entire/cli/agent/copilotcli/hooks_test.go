@@ -3,13 +3,14 @@ package copilotcli
 import (
 	"context"
 	"encoding/json"
-	"github.com/entireio/cli/cmd/entire/cli/agent"
-	"github.com/entireio/cli/cmd/entire/cli/agent/testutil"
-	"github.com/stretchr/testify/require"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/entireio/cli/cmd/entire/cli/agent"
+	"github.com/entireio/cli/cmd/entire/cli/agent/testutil"
+	"github.com/stretchr/testify/require"
 )
 
 func TestInstallHooks_FreshInstall(t *testing.T) {
@@ -22,8 +23,8 @@ func TestInstallHooks_FreshInstall(t *testing.T) {
 		t.Fatalf("InstallHooks() error = %v", err)
 	}
 
-	if count != 8 {
-		t.Errorf("InstallHooks() count = %d, want 8", count)
+	if count != 9 {
+		t.Errorf("InstallHooks() count = %d, want 9", count)
 	}
 
 	hooksFile := readHooksFile(t, tempDir)
@@ -43,6 +44,9 @@ func TestInstallHooks_FreshInstall(t *testing.T) {
 	}
 	if len(hooksFile.Hooks.SubagentStop) != 1 {
 		t.Errorf("SubagentStop hooks = %d, want 1", len(hooksFile.Hooks.SubagentStop))
+	}
+	if len(hooksFile.Hooks.SubagentStart) != 1 {
+		t.Errorf("SubagentStart hooks = %d, want 1", len(hooksFile.Hooks.SubagentStart))
 	}
 	if len(hooksFile.Hooks.PreToolUse) != 1 {
 		t.Errorf("PreToolUse hooks = %d, want 1", len(hooksFile.Hooks.PreToolUse))
@@ -65,6 +69,7 @@ func TestInstallHooks_FreshInstall(t *testing.T) {
 	assertEntryBash(t, hooksFile.Hooks.AgentStop, agent.WrapProductionSilentHookCommand("entire hooks copilot-cli agent-stop"))
 	assertEntryBash(t, hooksFile.Hooks.SessionEnd, agent.WrapProductionSilentHookCommand("entire hooks copilot-cli session-end"))
 	assertEntryBash(t, hooksFile.Hooks.SubagentStop, agent.WrapProductionSilentHookCommand("entire hooks copilot-cli subagent-stop"))
+	assertEntryBash(t, hooksFile.Hooks.SubagentStart, agent.WrapProductionSilentHookCommand("entire hooks copilot-cli subagent-start"))
 	assertEntryBash(t, hooksFile.Hooks.PreToolUse, agent.WrapProductionSilentHookCommand("entire hooks copilot-cli pre-tool-use"))
 	assertEntryBash(t, hooksFile.Hooks.PostToolUse, agent.WrapProductionSilentHookCommand("entire hooks copilot-cli post-tool-use"))
 	assertEntryBash(t, hooksFile.Hooks.ErrorOccurred, agent.WrapProductionSilentHookCommand("entire hooks copilot-cli error-occurred"))
@@ -87,8 +92,8 @@ func TestInstallHooks_Idempotent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("first InstallHooks() error = %v", err)
 	}
-	if count1 != 8 {
-		t.Errorf("first InstallHooks() count = %d, want 8", count1)
+	if count1 != 9 {
+		t.Errorf("first InstallHooks() count = %d, want 9", count1)
 	}
 
 	// Second install
@@ -112,7 +117,7 @@ func TestAreHooksInstalled_NotInstalled(t *testing.T) {
 	t.Chdir(tempDir)
 
 	ag := &CopilotCLIAgent{}
-	if ag.AreHooksInstalled(context.Background()) {
+	if hooksInstalledNow(t, ag) {
 		t.Error("AreHooksInstalled() = true, want false (no hooks file)")
 	}
 }
@@ -128,8 +133,36 @@ func TestAreHooksInstalled_AfterInstall(t *testing.T) {
 		t.Fatalf("InstallHooks() error = %v", err)
 	}
 
-	if !ag.AreHooksInstalled(context.Background()) {
+	if !hooksInstalledNow(t, ag) {
 		t.Error("AreHooksInstalled() = false, want true")
+	}
+}
+
+func TestCheckHookConfig_DetectsMissingSubagentStartAndUpgrade(t *testing.T) {
+	tempDir := t.TempDir()
+	t.Chdir(tempDir)
+	ag := &CopilotCLIAgent{}
+
+	if got := ag.CheckHookConfig(context.Background()); got != agent.HooksAbsent {
+		t.Fatalf("missing config = %v, want absent", got)
+	}
+	_, err := ag.InstallHooks(context.Background(), false)
+	require.NoError(t, err)
+	if got := ag.CheckHookConfig(context.Background()); got != agent.HooksCurrent {
+		t.Fatalf("fresh config = %v, want current", got)
+	}
+
+	hooksFile := readHooksFile(t, tempDir)
+	hooksFile.Hooks.SubagentStart = nil
+	writeHooksFile(t, tempDir, hooksFile)
+	if got := ag.CheckHookConfig(context.Background()); got != agent.HooksOutdated {
+		t.Fatalf("config missing subagentStart = %v, want outdated", got)
+	}
+	count, err := ag.InstallHooks(context.Background(), false)
+	require.NoError(t, err)
+	require.Equal(t, 1, count)
+	if got := ag.CheckHookConfig(context.Background()); got != agent.HooksCurrent {
+		t.Fatalf("upgraded config = %v, want current", got)
 	}
 }
 
@@ -144,7 +177,7 @@ func TestUninstallHooks(t *testing.T) {
 	if err != nil {
 		t.Fatalf("InstallHooks() error = %v", err)
 	}
-	if !ag.AreHooksInstalled(context.Background()) {
+	if !hooksInstalledNow(t, ag) {
 		t.Fatal("hooks should be installed before uninstall")
 	}
 
@@ -154,7 +187,7 @@ func TestUninstallHooks(t *testing.T) {
 		t.Fatalf("UninstallHooks() error = %v", err)
 	}
 
-	if ag.AreHooksInstalled(context.Background()) {
+	if hooksInstalledNow(t, ag) {
 		t.Error("AreHooksInstalled() = true after uninstall, want false")
 	}
 }
@@ -189,8 +222,8 @@ func TestInstallHooks_ForceReinstall(t *testing.T) {
 	if err != nil {
 		t.Fatalf("force InstallHooks() error = %v", err)
 	}
-	if count != 8 {
-		t.Errorf("force InstallHooks() count = %d, want 8", count)
+	if count != 9 {
+		t.Errorf("force InstallHooks() count = %d, want 9", count)
 	}
 
 	// Verify no duplicates
@@ -274,8 +307,8 @@ func TestInstallHooks_PreservesUnknownFields(t *testing.T) {
 	if err != nil {
 		t.Fatalf("InstallHooks() error = %v", err)
 	}
-	if count != 8 {
-		t.Errorf("InstallHooks() count = %d, want 8", count)
+	if count != 9 {
+		t.Errorf("InstallHooks() count = %d, want 9", count)
 	}
 
 	// Read the raw JSON to verify unknown fields are preserved
@@ -390,7 +423,7 @@ func TestUninstallHooks_PreservesUnknownFields(t *testing.T) {
 	}
 
 	// Verify Entire hooks were actually removed
-	if ag.AreHooksInstalled(context.Background()) {
+	if hooksInstalledNow(t, ag) {
 		t.Error("Entire hooks should be removed after uninstall")
 	}
 }
@@ -729,4 +762,20 @@ func TestInstallHooks_PreservesUserCommandInvokingEntire(t *testing.T) {
 	if !found {
 		t.Errorf("a user-authored hook invoking the entire binary was deleted by a plain install:\n%+v", after.Hooks.AgentStop)
 	}
+}
+
+// hooksInstalledNow reports whether the agent's hooks are installed, failing the
+// test if it could not tell. Built-in agents read a local config file where
+// absent means absent, so an error here is a bug, not a state to tolerate.
+func hooksInstalledNow(t *testing.T, ag interface {
+	AreHooksInstalled(ctx context.Context) (bool, error)
+},
+) bool {
+	t.Helper()
+
+	installed, err := ag.AreHooksInstalled(context.Background())
+	if err != nil {
+		t.Fatalf("AreHooksInstalled() error = %v", err)
+	}
+	return installed
 }

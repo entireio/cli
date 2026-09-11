@@ -3,9 +3,11 @@ package cursor
 import (
 	"bufio"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
+	"slices"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/transcript"
@@ -106,9 +108,64 @@ func (c *CursorAgent) ExtractSummary(sessionRef string) (string, error) {
 	return "", nil
 }
 
-// ExtractModifiedFilesFromOffset returns no modified files for Cursor and a constant
-// position of 0, because Cursor transcripts do not contain tool_use blocks.
-// File detection relies on git status and hook-provided modified_files instead.
-func (c *CursorAgent) ExtractModifiedFilesFromOffset(_ string, _ int) ([]string, int, error) {
-	return nil, 0, nil
+// ExtractModifiedFiles extracts the files modified by Cursor tool calls in the
+// given transcript lines, in first-seen order and deduplicated.
+//
+// Cursor records tool_use content blocks in the same shape as Claude Code
+// (message.content[i].type == "tool_use", with name and input), so this mirrors
+// claudecode.ExtractModifiedFiles. The divergences are the tool names and the
+// input key — see FileModificationTools and toolInput.
+func ExtractModifiedFiles(lines []transcript.Line) []string {
+	seen := make(map[string]bool)
+	var files []string
+
+	for i := range lines {
+		if lines[i].Type != transcript.TypeAssistant {
+			continue
+		}
+		var msg transcript.AssistantMessage
+		if err := json.Unmarshal(lines[i].Message, &msg); err != nil {
+			continue
+		}
+		for _, block := range msg.Content {
+			if block.Type != transcript.ContentTypeToolUse {
+				continue
+			}
+			if !slices.Contains(FileModificationTools, block.Name) {
+				continue
+			}
+			var input toolInput
+			if err := json.Unmarshal(block.Input, &input); err != nil {
+				continue
+			}
+			if input.Path == "" || seen[input.Path] {
+				continue
+			}
+			seen[input.Path] = true
+			files = append(files, input.Path)
+		}
+	}
+	return files
+}
+
+// ExtractModifiedFilesFromOffset extracts files modified by tool calls appearing at
+// or after startOffset, and returns the transcript's current line count.
+//
+// A missing transcript is not an error: Cursor reports transcript_path as null in
+// CLI mode, so ResolveSessionFile predicts a path that may not exist yet, and this
+// runs on capture paths that must fail open (matching GetTranscriptPosition).
+func (c *CursorAgent) ExtractModifiedFilesFromOffset(path string, startOffset int) ([]string, int, error) {
+	if path == "" {
+		return nil, 0, nil
+	}
+
+	lines, total, err := transcript.ParseFromFileAtLineWithTotal(path, startOffset)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, 0, nil
+		}
+		return nil, 0, fmt.Errorf("failed to parse transcript: %w", err)
+	}
+
+	return ExtractModifiedFiles(lines), total, nil
 }

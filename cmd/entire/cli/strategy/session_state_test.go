@@ -13,7 +13,6 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/internal/flock"
-	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 	"github.com/stretchr/testify/assert"
@@ -443,96 +442,6 @@ func TestManualCommitStrategy_SessionState_UsesPackageFunctions(t *testing.T) {
 
 	if loaded2.SessionID != state2.SessionID {
 		t.Errorf("SessionID = %q, want %q", loaded2.SessionID, state2.SessionID)
-	}
-}
-
-// TestFindMostRecentSession_FiltersByWorktree tests that FindMostRecentSession
-// returns sessions from the current worktree, not from other worktrees.
-func TestFindMostRecentSession_FiltersByWorktree(t *testing.T) {
-	dir := t.TempDir()
-	testutil.InitRepo(t, dir)
-
-	t.Chdir(dir)
-
-	// Get the resolved worktree path (git resolves symlinks, e.g. /var → /private/var on macOS)
-	resolvedDir, err := paths.WorktreeRoot(context.Background())
-	if err != nil {
-		t.Fatalf("paths.WorktreeRoot() error = %v", err)
-	}
-
-	older := time.Now().Add(-1 * time.Hour)
-	newer := time.Now()
-
-	// Session from a different worktree (more recent)
-	otherWorktree := &SessionState{
-		SessionID:           "other-worktree-session",
-		BaseCommit:          "abc1234",
-		WorktreePath:        "/some/other/worktree",
-		StartedAt:           newer,
-		LastInteractionTime: &newer,
-		Phase:               "idle",
-	}
-
-	// Session from current worktree (older)
-	currentWorktree := &SessionState{
-		SessionID:           "current-worktree-session",
-		BaseCommit:          "xyz7890",
-		WorktreePath:        resolvedDir, // matches current worktree
-		StartedAt:           older,
-		LastInteractionTime: &older,
-		Phase:               "idle",
-	}
-
-	if err := SaveSessionState(context.Background(), otherWorktree); err != nil {
-		t.Fatalf("SaveSessionState() error = %v", err)
-	}
-	if err := SaveSessionState(context.Background(), currentWorktree); err != nil {
-		t.Fatalf("SaveSessionState() error = %v", err)
-	}
-
-	// FindMostRecentSession should return the current worktree's session,
-	// not the other worktree's session (even though it's more recent).
-	result := FindMostRecentSession(context.Background())
-	if result != "current-worktree-session" {
-		t.Errorf("FindMostRecentSession(context.Background()) = %q, want %q (should prefer current worktree)",
-			result, "current-worktree-session")
-	}
-}
-
-// TestFindMostRecentSession_FallsBackWhenNoWorktreeMatch tests that
-// FindMostRecentSession falls back to all sessions when none match the current worktree.
-func TestFindMostRecentSession_FallsBackWhenNoWorktreeMatch(t *testing.T) {
-	dir := t.TempDir()
-	testutil.InitRepo(t, dir)
-
-	t.Chdir(dir)
-
-	newer := time.Now()
-
-	// Session from a different worktree only (no sessions for current worktree)
-	otherWorktree := &SessionState{
-		SessionID:           "only-session",
-		BaseCommit:          "abc1234",
-		WorktreePath:        "/some/other/worktree",
-		StartedAt:           newer,
-		LastInteractionTime: &newer,
-		Phase:               "idle",
-	}
-
-	if err := SaveSessionState(context.Background(), otherWorktree); err != nil {
-		t.Fatalf("SaveSessionState() error = %v", err)
-	}
-
-	// Should fall back to the only available session since none match current worktree
-	result := FindMostRecentSession(context.Background())
-	if result != "only-session" {
-		t.Errorf("FindMostRecentSession(context.Background()) = %q, want %q (should fall back when no worktree match)",
-			result, "only-session")
-	}
-
-	// Cleanup
-	if err := os.Remove(dir + "/.git/entire-sessions/only-session.json"); err != nil && !os.IsNotExist(err) {
-		t.Logf("cleanup warning: %v", err)
 	}
 }
 
@@ -1039,12 +948,19 @@ func TestMutateSessionState_UnboundedByDefault(t *testing.T) {
 	require.NoError(t, err)
 
 	const holdFor = 400 * time.Millisecond
+	// start is captured BEFORE the holder goroutine launches, so it is always
+	// at or before the moment the sleep begins. Capturing it after the `go`
+	// statement made the assertion below depend on this goroutine reaching
+	// time.Now() before the new one reaches time.Sleep -- an ordering nothing
+	// guarantees. When it lost, the measured elapsed fell just under holdFor
+	// and the test failed with no real defect (seen on CI at 398.881573ms
+	// against a 400ms bound).
+	start := time.Now()
 	go func() {
 		time.Sleep(holdFor)
 		release()
 	}()
 
-	start := time.Now()
 	ran := false
 	// No WithSessionLockWait: must wait for the holder rather than time out.
 	err = MutateSessionState(ctx, sessionID, func(state *SessionState) error {
@@ -1057,4 +973,66 @@ func TestMutateSessionState_UnboundedByDefault(t *testing.T) {
 	assert.True(t, ran, "unbounded mutation must eventually run")
 	assert.GreaterOrEqual(t, elapsed, holdFor,
 		"unbounded acquire should block until the holder releases, not time out")
+}
+
+// TestClearSessionState_PackageLevel_SerializesAgainstConcurrentMutation
+// covers the implementation `entire doctor` actually reaches
+// (doctor.go's discardSession -> strategy.ClearSessionState), which is a
+// different function from (*ManualCommitStrategy).clearSessionState and was
+// left ungated when that one was hardened -- so the race stayed open on the
+// command most likely to run while other sessions are live. Same shape as
+// the strategy-method test: a writer holds the real gate mid-mutation, and
+// the clear must block until it releases.
+func TestClearSessionState_PackageLevel_SerializesAgainstConcurrentMutation(t *testing.T) {
+	dir := t.TempDir()
+	testutil.InitRepo(t, dir)
+	t.Chdir(dir)
+
+	ctx := context.Background()
+	const sessionID = "pkg-clear-race-session"
+	if err := SaveSessionState(ctx, &SessionState{
+		SessionID:  sessionID,
+		BaseCommit: "abc123",
+		StartedAt:  time.Now(),
+	}); err != nil {
+		t.Fatalf("SaveSessionState: %v", err)
+	}
+
+	writerStarted := make(chan struct{})
+	writerMayFinish := make(chan struct{})
+	writerFinished := make(chan struct{})
+	go func() {
+		defer close(writerFinished)
+		if err := MutateSessionState(ctx, sessionID, func(state *SessionState) error {
+			close(writerStarted)
+			<-writerMayFinish
+			state.StepCount = 1
+			return nil
+		}); err != nil {
+			t.Errorf("MutateSessionState: %v", err)
+		}
+	}()
+	<-writerStarted // writer holds the gate now, mid-mutation
+
+	clearStarted := make(chan struct{})
+	clearReturned := make(chan struct{})
+	go func() {
+		defer close(clearReturned)
+		close(clearStarted)
+		if err := ClearSessionState(ctx, sessionID); err != nil {
+			t.Errorf("ClearSessionState: %v", err)
+		}
+	}()
+	<-clearStarted
+
+	select {
+	case <-clearReturned:
+		t.Fatal("package-level ClearSessionState returned while a concurrent MutateSessionState was still mid-mutation -- not serialized (this is doctor's path)")
+	case <-time.After(100 * time.Millisecond):
+		// Expected: still blocked on the gate.
+	}
+
+	close(writerMayFinish)
+	<-writerFinished
+	<-clearReturned
 }

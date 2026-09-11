@@ -24,6 +24,7 @@ var (
 	_ agent.ModelExtractor         = (*ClaudeCodeAgent)(nil)
 	_ agent.SkillEventExtractor    = (*ClaudeCodeAgent)(nil)
 	_ agent.SubagentAwareExtractor = (*ClaudeCodeAgent)(nil)
+	_ agent.ToolInvocationScanner  = (*ClaudeCodeAgent)(nil)
 	_ agent.HookResponseWriter     = (*ClaudeCodeAgent)(nil)
 	_ agent.ContextInjector        = (*ClaudeCodeAgent)(nil)
 )

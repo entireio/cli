@@ -13,7 +13,7 @@ import (
 // collaborator: the display handle, the reader/writer role, and the Entire
 // account ULID (the stable identifier, shown last as the fallback when no
 // handle resolves).
-var mirrorCollaboratorColumns = []string{"HANDLE", "ROLE", "ACCOUNT"}
+var mirrorCollaboratorColumns = []string{"HANDLE", colHeaderRole, "ACCOUNT"}
 
 func mirrorCollaboratorRow(c coreapi.MirrorCollaborator) []string {
 	handle := c.Handle.Or("")
