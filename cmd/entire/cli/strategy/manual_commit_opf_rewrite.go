@@ -246,6 +246,25 @@ func (e *OPFRawBytesTooLargeError) Error() string {
 // pathological RAM blowups (a 5 GiB pasted dump aborts before loading).
 const rawByteCapMultiplier = 100
 
+// startOPFRewriteProgress reports the start of the actual OPF re-redaction
+// work — the single OPF shell-out per push, shared by both the v1 rewrite
+// (RewriteUnpushedV1WithOPF) and the git-refs rewrite
+// (RewriteQueuedCheckpointRefsWithOPF) — to opfPrePushProgressWriter, the
+// same writer resolveOPFDecisionForPrePush uses for the pre-run OPF notice.
+// Without this line a push that already announced "OPF will run" then goes
+// silent for the whole batch call, which is exactly the "feels stuck" gap
+// issue #1683 reports (pre-push checkpoint sync showing no phase indication
+// during a long push). Uses the same "verb... + dots" convention as the git
+// transfer phases (startProgressDots, push_common.go) so OPF's progress line
+// looks like the rest of this command's output rather than inventing new UI.
+// Returns the stop function with startProgressDots' contract: "" on
+// failure, a trailing status suffix on success.
+func startOPFRewriteProgress(commitCount int) func(suffix string) {
+	fmt.Fprintf(opfPrePushProgressWriter,
+		"[entire] Re-redacting %d checkpoint commit(s) via OpenAI Privacy Filter...", commitCount)
+	return startProgressDots(opfPrePushProgressWriter)
+}
+
 // RewriteUnpushedV1WithOPF re-redacts unpushed entire/checkpoints/v1
 // commits with OPF, builds new commits carrying Entire-OPF-Applied:
 // true, and CAS-updates the local ref. Idempotent: already-applied
@@ -336,9 +355,15 @@ func RewriteUnpushedV1WithOPF(ctx context.Context, repo *git.Repository, target 
 	// trips on every push.
 	rawCap := scaleBatchLimit(resolveBatchLimit(), rawByteCapMultiplier)
 	var rawBytesSoFar int
+	// unappliedCount is the number of commits this rewrite actually redacts
+	// (as opposed to len(unpushed), which also counts already-applied commits
+	// that are only re-parented). Reported to the user below so the progress
+	// line names real work, not the whole unpushed range.
+	var unappliedCount int
 	for _, c := range unpushed {
 		pc := pendingCommit{commit: c}
 		if !trailers.HasOPFApplied(c.Message) {
+			unappliedCount++
 			tree, err := repo.TreeObject(c.TreeHash)
 			if err != nil {
 				return plumbing.ZeroHash, fmt.Errorf("load tree for %s: %w", c.Hash.String()[:7], err)
@@ -373,8 +398,16 @@ func RewriteUnpushedV1WithOPF(ctx context.Context, repo *git.Repository, target 
 		if limit := resolveBatchLimit(); leafBytes > limit {
 			return plumbing.ZeroHash, &OPFBatchTooLargeError{LeafBytes: leafBytes, Limit: limit}
 		}
+		// This shell-out is the one real wall-clock cost in the whole
+		// rewrite (collection/rebuild around it are local and fast), so it
+		// is the phase a slow push goes silent on without this line (issue
+		// #1683: pre-push checkpoint sync showed no progress during long
+		// pushes). stopOPFProgress follows startProgressDots' contract:
+		// "" on failure, a trailing status on success.
+		stopOPFProgress := startOPFRewriteProgress(unappliedCount)
 		globalRedacted, err = redact.BatchBytesWithPrivacyFilter(ctx, globalBlobs)
 		if err != nil {
+			stopOPFProgress("")
 			// Converge with the up-front gate: the misconfiguration
 			// sentinel must surface config remediation, not "verify
 			// your OPF install".
@@ -383,6 +416,7 @@ func RewriteUnpushedV1WithOPF(ctx context.Context, repo *git.Repository, target 
 			}
 			return plumbing.ZeroHash, &OPFRuntimeFailedError{OPFCommand: redact.OPFCommand(), Cause: err}
 		}
+		stopOPFProgress(" done")
 	}
 
 	// Pass 3: rebuild each commit. For OPF-applied commits, this is
