@@ -1,12 +1,14 @@
 package review_test
 
 import (
+	"context"
 	"reflect"
 	"strings"
 	"testing"
 
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/agent/skilldiscovery"
+	"github.com/entireio/cli/cmd/entire/cli/agent/types"
 	"github.com/entireio/cli/cmd/entire/cli/review"
 	"github.com/entireio/cli/cmd/entire/cli/settings"
 )
@@ -246,5 +248,28 @@ func TestBuildReviewPickerFields_SingleBuiltinDefaultsSelectedAndRenders(t *test
 	field.Focus()
 	if got := field.View(); !strings.Contains(got, "/review") {
 		t.Fatalf("single built-in option did not render:\n%s", got)
+	}
+}
+
+// TestRunReviewProfileConfigPicker_NoInstalledAgentsHintsAgentAdd calls the
+// real `entire review --configure` entry point (picker.go) with no agents
+// installed and asserts the error hints at `entire agent add`, not the stale
+// `entire configure --agent` flag (issue #2249).
+func TestRunReviewProfileConfigPicker_NoInstalledAgentsHintsAgentAdd(t *testing.T) {
+	t.Parallel()
+	err := review.RunReviewProfileConfigPicker(
+		context.Background(),
+		&strings.Builder{},
+		func(_ context.Context) []types.AgentName { return nil },
+		"",
+	)
+	if err == nil {
+		t.Fatal("expected error when no agents have hooks installed")
+	}
+	if !strings.Contains(err.Error(), "entire agent add") {
+		t.Errorf("error should hint at `entire agent add`, got: %v", err)
+	}
+	if strings.Contains(err.Error(), "configure --agent") {
+		t.Errorf("error should NOT hint at the stale `configure --agent` flag, got: %v", err)
 	}
 }

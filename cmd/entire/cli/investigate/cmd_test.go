@@ -451,8 +451,11 @@ func TestNewCommand_FreshRunRejectsAgentWithoutHooks(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error when configured agent has no hooks")
 	}
-	if !strings.Contains(errBuf.String(), "entire configure --agent") {
-		t.Errorf("stderr should hint at `entire configure --agent`, got: %s", errBuf.String())
+	if !strings.Contains(errBuf.String(), "entire agent add") {
+		t.Errorf("stderr should hint at `entire agent add`, got: %s", errBuf.String())
+	}
+	if strings.Contains(errBuf.String(), "configure --agent") {
+		t.Errorf("stderr should NOT hint at the stale `configure --agent` flag, got: %s", errBuf.String())
 	}
 }
 
