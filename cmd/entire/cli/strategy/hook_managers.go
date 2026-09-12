@@ -67,8 +67,10 @@ func detectHookManagers(repoRoot string) []hookManager {
 }
 
 // hookManagerWarning builds a warning string for detected hook managers.
-// cmdPrefix is the CLI command prefix (e.g., "entire" or an absolute binary path).
-func hookManagerWarning(managers []hookManager, cmdPrefix string) string {
+// cmdPrefix is the CLI command prefix (e.g., "entire" or an absolute binary
+// path); declined is the phrase from declinedLefthookLocalConfig, empty when
+// Entire is able to register with Lefthook.
+func hookManagerWarning(managers []hookManager, cmdPrefix, declined string) string {
 	if len(managers) == 0 {
 		return ""
 	}
@@ -78,6 +80,18 @@ func hookManagerWarning(managers []hookManager, cmdPrefix string) string {
 	for _, m := range managers {
 		switch m.Name {
 		case LefthookManagerName:
+			if declined != "" {
+				// "No action needed" is true only when Entire can register.
+				// Where it has declined, the repo is on native hooks that
+				// Lefthook reclaims — telling the user otherwise is the false
+				// advice this integration was meant to remove (#2263).
+				fmt.Fprintf(&b, "Warning: %s detected (%s)\n\n", m.Name, m.ConfigPath)
+				fmt.Fprintf(&b, "  Entire could not register in %s's configuration: %s,\n", m.Name, declined)
+				fmt.Fprintf(&b, "  and Entire will not modify it. Entire's own hooks are used instead,\n")
+				fmt.Fprintf(&b, "  and %s reclaims the hooks it manages — Entire reinstalls them on\n", m.Name)
+				fmt.Fprintf(&b, "  the next agent turn, so a commit made in between is not captured.\n\n")
+				break
+			}
 			// Entire registers itself in Lefthook's own config, so Lefthook's
 			// regenerations no longer remove it and there is nothing for the
 			// user to do. See EnsureLefthookIntegration.
@@ -143,7 +157,7 @@ func CheckAndWarnHookManagers(ctx context.Context, w io.Writer, absolutePath boo
 		// Best-effort: hook manager warnings are advisory, skip on resolution failure
 		return
 	}
-	warning := hookManagerWarning(managers, cmdPrefix)
+	warning := hookManagerWarning(managers, cmdPrefix, declinedLefthookLocalConfig(ctx, repoRoot))
 	if warning != "" {
 		fmt.Fprintln(w)
 		fmt.Fprint(w, warning)

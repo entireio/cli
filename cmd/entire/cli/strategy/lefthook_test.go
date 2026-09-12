@@ -9,6 +9,7 @@ import (
 
 	"github.com/entireio/cli/cmd/entire/cli/osroot"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
+	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/cmd/entire/cli/testutil"
 	"github.com/entireio/cli/cmd/entire/cli/worktreedir"
 	"github.com/stretchr/testify/require"
@@ -32,6 +33,9 @@ func newLefthookRepo(t *testing.T, mainConfig string) string {
 		paths.ClearWorktreeRootCache()
 		ClearHooksDirCache()
 		clearGitCommonDirCache()
+		// PathIsTracked memoizes per (root, path) for the process, and these
+		// tests change a file's tracked state inside one.
+		settings.ClearVersionedPathCache()
 		// osroot.Shared memoizes a *os.Root per directory, and an open handle
 		// keeps Windows from deleting the directory under it — t.TempDir's
 		// own cleanup then fails with "used by another process" on .git.
@@ -503,7 +507,7 @@ func TestCheckHookDelivery_DeclinedLefthookConfigFallsBackToNativeHooks(t *testi
 	got := CheckHookDelivery(t.Context(), false)
 	require.False(t, got.OK, "no hooks installed yet")
 	require.Empty(t, got.Manager, "Lefthook is not the one delivering")
-	require.Equal(t, "lefthook-local.toml", got.Declined)
+	require.Equal(t, "lefthook-local.toml is not YAML", got.Declined)
 	require.Contains(t, got.Reason, "not installed", "the reason must be the native one")
 
 	_, err := ReinstallGitHooks(t.Context())
@@ -513,7 +517,7 @@ func TestCheckHookDelivery_DeclinedLefthookConfigFallsBackToNativeHooks(t *testi
 	got = CheckHookDelivery(t.Context(), false)
 	require.True(t, got.OK, "Entire's own hooks deliver here")
 	require.Empty(t, got.Manager)
-	require.Equal(t, "lefthook-local.toml", got.Declined, "and the reason why is still reported")
+	require.Equal(t, "lefthook-local.toml is not YAML", got.Declined, "and the reason why is still reported")
 }
 
 // lefthookLauncher is shaped like the hook Lefthook 2.1.10 generates: a
@@ -558,4 +562,39 @@ func TestIsLefthookLauncher(t *testing.T) {
 			require.Equal(t, tc.want, isLefthookLauncher(root, name, "pre-push"))
 		})
 	}
+}
+
+// Lefthook documents lefthook-local.* as personal and gitignored. A tracked
+// one is the team's file: adding Entire's entry modifies something shared, and
+// a developer who reverts it gets it back next turn. Entire declines instead —
+// but only when it would actually add the entry, so a config that already
+// carries it (committed, or added by hand) is honoured.
+func TestEnsureLefthookIntegration_TrackedLocalConfig(t *testing.T) {
+	dir := newLefthookRepo(t, "")
+	localPath := filepath.Join(dir, "lefthook-local.yml")
+	original := []byte("pre-commit:\n  commands:\n    ours:\n      run: true\n")
+	require.NoError(t, os.WriteFile(localPath, original, 0o644))
+	testutil.GitAdd(t, dir, "lefthook-local.yml")
+	testutil.GitCommit(t, dir, "team config")
+
+	_, err := EnsureLefthookIntegration(t.Context(), false)
+	require.ErrorIs(t, err, ErrLefthookLocalConfigTracked)
+
+	after, err := os.ReadFile(localPath)
+	require.NoError(t, err)
+	require.Equal(t, original, after, "a tracked config must not be modified")
+
+	got := CheckHookDelivery(t.Context(), false)
+	require.Empty(t, got.Manager, "Lefthook is not the one delivering")
+	require.Equal(t, "lefthook-local.yml is tracked by git", got.Declined)
+
+	// Once the entry is there — committed by the team, or added by hand —
+	// Entire has nothing to write and the integration proceeds.
+	require.NoError(t, os.WriteFile(localPath,
+		append([]byte("extends:\n  - "+entireLefthookConfig+"\n"), original...), 0o644))
+	_, err = EnsureLefthookIntegration(t.Context(), false)
+	require.NoError(t, err)
+	current, err := LefthookIntegrationCurrent(t.Context(), false)
+	require.NoError(t, err)
+	require.True(t, current)
 }

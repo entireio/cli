@@ -642,8 +642,8 @@ func checkGitHooks(cmd *cobra.Command, force bool) error {
 		// Entire's own hooks are the arrangement here, so the checks below are
 		// the right ones — but say why Lefthook is not carrying it, since
 		// otherwise a Lefthook repo silently looks like any other.
-		fmt.Fprintf(w, "Note: Entire is not registered in Lefthook's config (%s is not YAML,\n", delivery.Declined)
-		fmt.Fprintln(w, "  and Entire will not shadow it). Entire's own Git hooks are used instead.")
+		fmt.Fprintf(w, "Note: Entire is not registered in Lefthook's config (%s,\n", delivery.Declined)
+		fmt.Fprintln(w, "  and Entire will not modify it). Entire's own Git hooks are used instead.")
 	}
 	if delivery.Manager == strategy.LefthookManagerName {
 		if delivery.OK {

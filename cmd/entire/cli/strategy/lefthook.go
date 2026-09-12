@@ -33,6 +33,7 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/jsonutil"
 	"github.com/entireio/cli/cmd/entire/cli/osroot"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
+	"github.com/entireio/cli/cmd/entire/cli/settings"
 	"github.com/entireio/cli/cmd/entire/cli/worktreedir"
 	"gopkg.in/yaml.v3"
 )
@@ -64,6 +65,13 @@ var ErrLefthookLocalConfigUnwritable = errors.New("lefthook local config is not 
 // unlike ErrLefthookLocalConfigUnwritable, which is a deliberate decision not
 // to touch the repo and is handled silently.
 var ErrLefthookArtifactBlocked = errors.New("lefthook artifact path is blocked by an existing backup")
+
+// ErrLefthookLocalConfigTracked reports a local config the repository carries.
+// Lefthook documents lefthook-local.* as personal and gitignored; a tracked
+// one is the team's file, so Entire declines to add its entry rather than
+// modify something shared. Like ErrLefthookLocalConfigUnwritable this is a
+// decision, not a failure, and the native hooks stay.
+var ErrLefthookLocalConfigTracked = errors.New("lefthook local config is tracked by git")
 
 // lefthookLocalConfigNames are the local config names Lefthook reads, in its
 // own precedence order. Writing into anything but the first match present
@@ -122,8 +130,13 @@ func EnsureLefthookIntegration(ctx context.Context, absolutePath bool) (int, err
 	// the point of excluding — and because ensureLefthookIntegrationIfManaged
 	// treats this refusal as a decision rather than a failure, that recurred
 	// on every turn instead of resolving itself.
-	if _, _, err := findLocalConfig(root); err != nil {
+	if name, existing, err := findLocalConfig(root); err != nil {
 		return 0, err
+	} else if existing != nil && !extendsEntryPresent(root) && lefthookLocalConfigTracked(ctx, repoRoot, name) {
+		// Only when the entry would actually be ADDED: a tracked config that
+		// already carries it (committed by the team, or added by hand) is
+		// working as intended, and nothing here writes to it.
+		return 0, fmt.Errorf("%w: %s", ErrLefthookLocalConfigTracked, name)
 	}
 	cmdPrefix, err := hookCmdPrefix(absolutePath)
 	if err != nil {
@@ -818,7 +831,7 @@ func CheckHookDelivery(ctx context.Context, absolutePath bool) HookDelivery {
 		// own hooks are the arrangement in such a repo, so the answer is the
 		// native one. Saying "not registered with Lefthook" here would report
 		// a working repository as broken, forever and with no fix to offer.
-		if declined = declinedLefthookLocalConfig(repoRoot); declined == "" {
+		if declined = declinedLefthookLocalConfig(ctx, repoRoot); declined == "" {
 			return HookDelivery{Manager: LefthookManagerName,
 				Reason: "Entire is not registered with Lefthook, so Lefthook's hooks do not run it."}
 		}
@@ -833,16 +846,42 @@ func CheckHookDelivery(ctx context.Context, absolutePath bool) HookDelivery {
 	return HookDelivery{Reason: "Entire's Git hooks are not installed.", Declined: declined}
 }
 
-// declinedLefthookLocalConfig names the local config Entire refuses to write
-// to, or "" when there is none to refuse.
-func declinedLefthookLocalConfig(repoRoot string) string {
+// declinedLefthookLocalConfig describes the local config Entire refuses to
+// write to, as a phrase naming the file and why — or "" when nothing is being
+// refused. A phrase rather than a name because the two reasons need different
+// remedies and every consumer of HookDelivery.Declined is reporting it to a
+// person.
+func declinedLefthookLocalConfig(ctx context.Context, repoRoot string) string {
 	root, err := worktreedir.OpenAt(repoRoot)
 	if err != nil {
 		return ""
 	}
-	name, _, err := findLocalConfig(root)
-	if errors.Is(err, ErrLefthookLocalConfigUnwritable) {
-		return name
+	name, existing, err := findLocalConfig(root)
+	switch {
+	case errors.Is(err, ErrLefthookLocalConfigUnwritable):
+		return name + " is not YAML"
+	case err != nil:
+		return ""
+	case existing != nil && !extendsEntryPresent(root) && lefthookLocalConfigTracked(ctx, repoRoot, name):
+		return name + " is tracked by git"
 	}
 	return ""
+}
+
+// lefthookLocalConfigTracked reports whether the local config is carried by
+// the repository rather than being the per-clone file Lefthook documents.
+//
+// A tracked one is shared with the team, so adding Entire's extends entry to
+// it modifies their file, not the developer's — and a revert followed by a
+// reinstall next turn is a fight Entire should not pick.
+//
+// settings.PathIsTracked rather than an index scan here: that probe carries
+// two commits' worth of correctness an open-coded one does not, in particular
+// comparing paths the way the filesystem would, because on a case-insensitive
+// volume a differently-cased tracked path is the same file. It is consulted
+// only when Entire is about to add the entry, so after a successful install it
+// never runs again.
+func lefthookLocalConfigTracked(ctx context.Context, repoRoot, name string) bool {
+	tracked, err := settings.PathIsTracked(ctx, repoRoot, name)
+	return err == nil && tracked
 }

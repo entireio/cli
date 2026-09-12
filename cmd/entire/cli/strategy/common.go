@@ -1840,7 +1840,9 @@ func ensureLefthookIntegrationIfManaged(ctx context.Context) error {
 		return reconcileHookFiles(ctx)
 	}
 	if _, err := EnsureLefthookIntegration(ctx, absolute); err != nil {
-		if errors.Is(err, ErrLefthookLocalConfigUnwritable) {
+		// Both refusals are decisions about the user's repository, not
+		// failures: the native hooks stay and status/doctor report why.
+		if errors.Is(err, ErrLefthookLocalConfigUnwritable) || errors.Is(err, ErrLefthookLocalConfigTracked) {
 			return nil
 		}
 		return fmt.Errorf("failed to register Entire with Lefthook: %w", err)
