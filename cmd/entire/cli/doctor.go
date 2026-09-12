@@ -65,7 +65,7 @@ Checks performed:
      Fix by re-running 'entire enable --force'.
 
   5. Summary provider: warn when summary_generation.provider names a registered
-     agent that cannot generate text (e.g. opencode), which makes
+     agent that cannot generate text (e.g. factoryai-droid), which makes
      'entire checkpoint explain --generate', 'entire dispatch' and
      'entire runner setup' fail. Reports the file to change; does not rewrite it.
 

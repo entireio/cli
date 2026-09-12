@@ -620,13 +620,13 @@ When enabled, Entire automatically generates AI summaries for checkpoints at com
 
 Summaries are also generated on demand, with or without this setting, by `entire checkpoint explain --generate`.
 
-**Which agent writes them.** By default Claude Code (`claude` on your `PATH`, model `sonnet`). Set a different one with `summary_generation.provider` — `claude-code`, `codex`, `copilot-cli`, `cursor`, `gemini`, or `pi`, plus an optional `summary_generation.model` hint:
+**Which agent writes them.** By default Claude Code (`claude` on your `PATH`, model `sonnet`). Set a different one with `summary_generation.provider` — `claude-code`, `codex`, `copilot-cli`, `cursor`, `gemini`, `opencode`, or `pi`, plus an optional `summary_generation.model` hint:
 
 ```bash
 entire configure --summarize-provider codex
 ```
 
-`opencode` and `factoryai-droid` cannot generate summaries. Whichever provider you pick must be installed and authenticated.
+`factoryai-droid` cannot generate summaries. Whichever provider you pick must be installed and authenticated.
 
 **Requirements:**
 

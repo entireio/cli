@@ -4441,7 +4441,7 @@ func TestConfigureCmd_SummarizeProvider_InvalidProvider(t *testing.T) {
 	cmd := newSetupCmd()
 	cmd.SetOut(&bytes.Buffer{})
 	cmd.SetErr(&bytes.Buffer{})
-	cmd.SetArgs([]string{"--summarize-provider", "opencode"})
+	cmd.SetArgs([]string{"--summarize-provider", "factoryai-droid"})
 
 	err := cmd.Execute()
 	if err == nil {
