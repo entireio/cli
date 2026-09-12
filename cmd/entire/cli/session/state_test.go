@@ -1055,6 +1055,85 @@ func TestState_LiveTaskRecords(t *testing.T) {
 	assert.Empty(t, (&State{}).LiveTaskRecords())
 }
 
+// A state file that cannot be parsed is reported, not merely dropped.
+//
+// Unparseable stands in for unreadable throughout these tests: both reach the
+// same Load error and the same skip, and a mode-000 file cannot be staged on
+// every platform (nor by root, which CI sometimes is).
+func TestStateStore_ListWithSkipped_ReportsAnUnusableStateFile(t *testing.T) {
+	t.Parallel()
+
+	stateDir := filepath.Join(t.TempDir(), "entire-sessions")
+	require.NoError(t, os.MkdirAll(stateDir, 0o750))
+	store := NewStateStoreWithDir(stateDir)
+	ctx := context.Background()
+
+	require.NoError(t, store.Save(ctx, &State{SessionID: "readable-session", StartedAt: time.Now()}))
+	require.NoError(t, os.WriteFile(filepath.Join(stateDir, "corrupt-session.json"), []byte("{not json"), 0o600))
+
+	states, skipped, err := store.ListWithSkipped(ctx)
+	require.NoError(t, err, "one unusable file must not fail the whole listing")
+	require.Len(t, states, 1)
+	assert.Equal(t, "readable-session", states[0].SessionID)
+
+	require.Len(t, skipped, 1, "the unusable file must be reported")
+	assert.Equal(t, "corrupt-session", skipped[0].SessionID)
+	assert.Error(t, skipped[0].Err, "a skip carries why, so a caller can say so")
+}
+
+// List keeps its lossy contract: same states, and no way to learn what was
+// lost. This is the property that made the omission invisible, so it is pinned
+// rather than left implied — a caller reading List is choosing not to know.
+func TestStateStore_List_StaysLossyOnAnUnusableStateFile(t *testing.T) {
+	t.Parallel()
+
+	stateDir := filepath.Join(t.TempDir(), "entire-sessions")
+	require.NoError(t, os.MkdirAll(stateDir, 0o750))
+	store := NewStateStoreWithDir(stateDir)
+	ctx := context.Background()
+
+	require.NoError(t, store.Save(ctx, &State{SessionID: "readable-session", StartedAt: time.Now()}))
+	require.NoError(t, os.WriteFile(filepath.Join(stateDir, "corrupt-session.json"), []byte("{not json"), 0o600))
+
+	states, err := store.List(ctx)
+	require.NoError(t, err)
+	require.Len(t, states, 1)
+	assert.Equal(t, "readable-session", states[0].SessionID)
+}
+
+// Only a lost session counts as a skip. Everything else in that directory —
+// a temp file mid-rename, a subdirectory, a stale session Load reaps — costs
+// the caller no candidate, and reporting those would make the signal useless
+// on a perfectly healthy store.
+func TestStateStore_ListWithSkipped_IgnoresWhatWasNeverASession(t *testing.T) {
+	t.Parallel()
+
+	stateDir := filepath.Join(t.TempDir(), "entire-sessions")
+	require.NoError(t, os.MkdirAll(stateDir, 0o750))
+	store := NewStateStoreWithDir(stateDir)
+	ctx := context.Background()
+
+	require.NoError(t, store.Save(ctx, &State{SessionID: "readable-session", StartedAt: time.Now()}))
+	// A temp file as jsonutil.CreateTempIn actually writes one. A skip now
+	// makes `session adopt` refuse, so mid-rename churn must never become one.
+	require.NoError(t, os.WriteFile(filepath.Join(stateDir, "live-session.json.0123456789abcdef.tmp"), []byte("{not json"), 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(stateDir, "notes.txt"), []byte("hello"), 0o600))
+	require.NoError(t, os.MkdirAll(filepath.Join(stateDir, "a-directory.json"), 0o750))
+
+	staleInteracted := time.Now().Add(-2 * StaleSessionThreshold)
+	require.NoError(t, store.Save(ctx, &State{
+		SessionID:           "stale-session",
+		StartedAt:           time.Now().Add(-3 * StaleSessionThreshold),
+		LastInteractionTime: &staleInteracted,
+	}))
+
+	states, skipped, err := store.ListWithSkipped(ctx)
+	require.NoError(t, err)
+	require.Len(t, states, 1)
+	assert.Equal(t, "readable-session", states[0].SessionID)
+	assert.Empty(t, skipped, "nothing here cost the caller a candidate")
+}
+
 func TestState_SubagentInventoryLedger(t *testing.T) {
 	t.Parallel()
 

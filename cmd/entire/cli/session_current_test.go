@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -462,5 +464,49 @@ func TestSessionInfo_TextModeHasNoResolutionLine(t *testing.T) {
 	}
 	if strings.Contains(stdout.String(), "Resolved:") {
 		t.Errorf("session info explained a resolution it was handed, got: %q", stdout.String())
+	}
+}
+
+// The same store problem, on the command an agent uses to ask "which session
+// am I" before feeding the answer to `session adopt`. Warned ahead of the
+// not-found branch, because "no active session" over a store that could not be
+// read fully is the misreading, not the answer.
+func TestSessionCurrent_WarnsWhenAStateFileCouldNotBeRead(t *testing.T) {
+	// t.Chdir cannot coexist with t.Parallel; this test mutates process CWD.
+	dir := t.TempDir()
+	testutil.InitRepo(t, dir)
+	t.Chdir(dir)
+	clearCallerSessionEnv(t)
+
+	commonDir, err := session.GetGitCommonDir(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	stateDir := filepath.Join(commonDir, session.SessionStateDirName)
+	if err := os.MkdirAll(stateDir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(stateDir, "corrupt-session.json"), []byte("{not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := newSessionCurrentCmd()
+	var stdout, stderr bytes.Buffer
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&stderr)
+	cmd.SetContext(context.Background())
+	cmd.SetArgs([]string{})
+
+	// The store holds nothing loadable, so this reports no session on stdout
+	// and exits zero (text mode). The point is that it does not report that as
+	// a bare fact.
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("execute: %v\nstderr: %s", err, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "No active session") {
+		t.Errorf("expected the no-session report on stdout, got: %q", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "could not be read") {
+		t.Errorf("expected a stderr warning that a state file could not be read, got: %q", stderr.String())
 	}
 }

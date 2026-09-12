@@ -14,8 +14,10 @@ import (
 	"strings"
 	"time"
 
+	"charm.land/huh/v2"
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
+	"github.com/entireio/cli/cmd/entire/cli/interactive"
 	"github.com/entireio/cli/cmd/entire/cli/paths"
 	"github.com/entireio/cli/cmd/entire/cli/session"
 	"github.com/entireio/cli/cmd/entire/cli/strategy"
@@ -26,6 +28,7 @@ import (
 type adoptOptions struct {
 	FromWorktree string
 	Force        bool
+	AllowForeign bool
 }
 
 const adoptRecentWindow = 12 * time.Hour
@@ -44,7 +47,13 @@ current repo and seeds it with the current repo's uncommitted file changes so
 the next commit can be linked normally.
 
 When the source and target share a Git session store, adoption moves the same
-session state file to the current worktree and requires --force or --yes.`,
+session state file to the current worktree and requires --force or --yes.
+
+Adoption only proceeds silently for your own session. Because it moves the
+named session and resets its checkpoint bookkeeping, a session Entire cannot
+confirm belongs to this command is refused: you are asked to confirm at a
+terminal, and without one the command fails rather than acting. Pass
+--allow-foreign-session to adopt a session that is deliberately not yours.`,
 		Example: `  entire session adopt 019ed5fe-ec49-7a72-89fd-f38e323f5448 --from ../cli
   entire session adopt --from /path/to/source/worktree
   entire session adopt --from ../source-worktree --yes`,
@@ -61,6 +70,13 @@ session state file to the current worktree and requires --force or --yes.`,
 	cmd.Flags().StringVar(&opts.FromWorktree, "from", "", "source worktree that already tracks the session")
 	cmd.Flags().BoolVar(&opts.Force, "force", false, "replace an existing local state file for the same session")
 	cmd.Flags().BoolVar(&opts.Force, "yes", false, "confirm same-store adoption and replacement without prompting")
+	// Deliberately NOT folded into --force/--yes, which already carry two
+	// meanings (replace local state; confirm same-store adoption). This one
+	// waives a safety check on someone else's running session, so it says so
+	// in its own name and cannot be granted by an agent reaching for the
+	// familiar flag.
+	cmd.Flags().BoolVar(&opts.AllowForeign, "allow-foreign-session", false,
+		"adopt a session that is not this command's own caller (overrides the ownership check)")
 
 	return cmd
 }
@@ -91,11 +107,15 @@ func runAdopt(ctx context.Context, w io.Writer, sessionID string, opts adoptOpti
 	if err := validateAdoptSourceTranscript(sourceState, sourceWorktree); err != nil {
 		return err
 	}
+	overridden, err := ensureAdoptSourceIsCaller(ctx, w, sourceStore, sourceState, opts)
+	if err != nil {
+		return err
+	}
 
 	var adopted *session.State
 	var filesTouched []string
 	if sameSessionStore {
-		adopted, filesTouched, err = adoptFromSameSessionStore(ctx, sourceWorktree, sourceState, opts)
+		adopted, filesTouched, err = adoptFromSameSessionStore(ctx, sourceStore, sourceWorktree, sourceState, opts, overridden)
 	} else {
 		adopted, filesTouched, err = adoptFromExternalSessionStore(
 			ctx,
@@ -106,6 +126,7 @@ func runAdopt(ctx context.Context, w io.Writer, sessionID string, opts adoptOpti
 			targetCommonDir,
 			sourceState.SessionID,
 			opts,
+			overridden,
 		)
 	}
 	if err != nil {
@@ -122,6 +143,221 @@ func runAdopt(ctx context.Context, w io.Writer, sessionID string, opts adoptOpti
 	return nil
 }
 
+// ensureAdoptSourceIsCaller refuses to move a session that is not this
+// command's own, which is the hazard the whole command carries: adoption
+// rewrites the session's worktree and resets its checkpoint bookkeeping
+// (StepCount, CheckpointTranscriptStart, LastCheckpointID, FilesTouched), so
+// naming the wrong session mutates a third party's RUNNING session and
+// silently detaches their next commit from it.
+//
+// The pre-existing checks do not cover this and cannot: sessionBelongsToSourceWorktree
+// only asks whether the ID and the worktree agree with EACH OTHER, which any
+// pair read out of `entire session current` satisfies by construction, and
+// isAdoptableSourceSession only asks whether the session is still live —
+// being live is what makes hijacking it harmful. Neither asks "is this mine".
+//
+// Verified adoption is silent, because it is the case the command exists for:
+// an agent whose session moved to another worktree adopting its own session.
+// Everything else needs a human to say yes, or the explicit flag.
+func ensureAdoptSourceIsCaller(ctx context.Context, w io.Writer, sourceStore *session.StateStore, source *session.State, opts adoptOptions) (overridden bool, err error) {
+	if opts.AllowForeign {
+		return true, nil
+	}
+	// One call, both results. Asking twice — once for the verdict, once for
+	// the reason — reads the mutable session store and walks the process tree
+	// twice, and the second answer can differ from the first: a false-to-true
+	// flip returns no reason, so a legitimate session gets refused with an
+	// empty explanation.
+	owned, reason := adoptSourceIsOwned(ctx, sourceStore, source)
+	if owned {
+		return false, nil
+	}
+	if err := refuseForeignAdoption(ctx, w, source, reason); err != nil {
+		return false, err
+	}
+	// A human said yes to a session we could not prove is theirs, so from here
+	// on this adoption rests on that answer rather than on ownership — which
+	// is what revalidateAdoptOwnership needs to know so it does not re-ask.
+	return true, nil
+}
+
+// adoptSourceIsOwned is the ownership decision with no interaction and no side
+// effects, so it can be taken twice: once to decide whether to ask, and again
+// under the state lock to confirm the answer still holds. Returns the reason
+// when it does not, for whichever of those two callers needs to say why.
+//
+// The source repository's sessions are weighed as FIRST-CLASS candidates, not
+// as a fallback, and adopt applies no ownership rule of its own — the shared
+// resolver's policy is the whole policy. This is the fourth shape of this
+// function; the previous three each authorized on something that looked like
+// proof:
+//
+//   - The environment names the source session, so it is ours. No: an
+//     environment variable says only that SOME ancestor published it, and an
+//     inner agent that publishes nothing (Gemini CLI, opencode) forwards the
+//     outer agent's variable verbatim.
+//   - The source session's owner is somewhere in our ancestry, so it is ours.
+//     No: the outer agent of a nested pair really is an ancestor, several hops
+//     up.
+//   - Consult the source store only when the resolver identifies nobody. No:
+//     a matching inherited claim makes the resolver identify the OUTER
+//     session, so the nearer inner owner in the source store is never
+//     examined.
+//
+// Each of those was an adopt-local rule layered on the shared one, and each
+// diverged from it somewhere. Asking one question over every candidate at once
+// removes the divergence rather than correcting it again: adoption is
+// authorized exactly when the session being adopted IS the caller the shared
+// resolver identifies.
+//
+// That inherits the resolver's acknowledged limit — a session equally near the
+// winner and invisible to the ranking. If mutation ever needs a stricter
+// standard than display does, that belongs in the shared vocabulary (an
+// explicit IsSafeToMutate alongside IsCaller), not in an ordering private to
+// this file.
+//
+// Both stores must also be read COMPLETELY, and that is a separate question
+// from whether the resolver identified anybody. Neither listing is fatal on a
+// state file it cannot read — one corrupt file must not blind every command to
+// the rest of the store — so the loss arrives as a successful listing with a
+// candidate quietly absent, and a missing candidate is exactly the nearer
+// owner whose absence lets a match authorize. Refusing on it is not the same
+// as walling the user out: refuseForeignAdoption asks wherever there is a
+// terminal, and --allow-foreign-session covers the rest.
+func adoptSourceIsOwned(ctx context.Context, sourceStore *session.StateStore, source *session.State) (bool, string) {
+	// Listed fresh on every call, so the re-check under the state lock sees
+	// sessions created since the first decision.
+	sourceStates, sourceSkipped, err := sourceStore.ListWithSkipped(ctx)
+	switch {
+	case err != nil:
+		return false, fmt.Sprintf("the source repository's session store could not be read, so %s cannot be confirmed as yours",
+			shortSessionID(source.SessionID))
+	case len(sourceSkipped) > 0:
+		return false, fmt.Sprintf("the source repository's session state could not be fully read, so %s cannot be confirmed as yours",
+			shortSessionID(source.SessionID))
+	}
+
+	caller, ok := strategy.IdentifyCallerSession(ctx, sourceStates)
+	switch {
+	case caller.Incomplete != nil:
+		// Ordered ahead of the verdicts because it undermines them rather
+		// than competing with them: the candidate that went missing is
+		// exactly the one that could have been the nearer owner, so the
+		// answer this invalidates is "identified, and it IS the session you
+		// named" — the one branch here that authorizes.
+		return false, fmt.Sprintf("%s, so %s cannot be confirmed as yours",
+			caller.Incomplete, shortSessionID(source.SessionID))
+
+	case !ok:
+		// Nothing claimed this command and no session's owner places us, in
+		// either repository. Every cross-machine --from lands here too, since
+		// ancestry cannot speak to another host.
+		return false, fmt.Sprintf("this command's own session could not be identified, so %s cannot be confirmed as yours",
+			shortSessionID(source.SessionID))
+
+	case caller.Resolution == strategy.ResolutionCallerAmbiguous:
+		return false, "several agent sessions claim this command and none could be ordered, so none of them can be confirmed as its caller"
+
+	case caller.SessionID == source.SessionID:
+		return true, ""
+
+	default:
+		return false, fmt.Sprintf("this command is running inside session %s, not %s",
+			shortSessionID(caller.SessionID), shortSessionID(source.SessionID))
+	}
+}
+
+// revalidateAdoptOwnership re-takes the ownership decision against the state
+// as it exists UNDER THE LOCK, immediately before the mutation.
+//
+// The first decision was made on an unlocked snapshot, and both mutation paths
+// already re-check every other precondition after reloading — adoptability,
+// worktree membership, transcript ownership — because the window between
+// reading and locking is real. Ownership was the one precondition left outside
+// that pattern, and it is not stable across the window either: a turn start
+// re-records SessionState.Owner (captureSessionOwner), and a session created
+// in the source store meanwhile can be a NEARER owner than the one this
+// adoption was authorized against.
+//
+// It fails rather than asks. An override — the flag, or a human who already
+// answered — is honoured without re-checking, because that answer was about
+// this session and re-prompting for it would be asking the same person the
+// same question twice. Everything else must still be provable, and if it is
+// not, the caller retries rather than being walked through a second dialogue
+// mid-mutation.
+func revalidateAdoptOwnership(ctx context.Context, sourceStore *session.StateStore, locked *session.State, overridden bool) error {
+	if overridden {
+		return nil
+	}
+	owned, reason := adoptSourceIsOwned(ctx, sourceStore, locked)
+	if owned {
+		return nil
+	}
+	return fmt.Errorf(
+		"session %s could no longer be confirmed as this command's caller once its state was locked (%s); rerun, or pass --allow-foreign-session if adopting it is intended",
+		shortSessionID(locked.SessionID), reason)
+}
+
+// refuseForeignAdoption asks a human, or fails when there is none to ask.
+func refuseForeignAdoption(ctx context.Context, w io.Writer, source *session.State, reason string) error {
+	confirmed, err := confirmAdoptForeignSession(ctx, w, reason, source)
+	if err != nil {
+		return err
+	}
+	if !confirmed {
+		return NewSilentError(errors.New("adoption cancelled"))
+	}
+	return nil
+}
+
+// confirmAdoptForeignSession asks before moving a session we could not confirm
+// is ours, and refuses outright when nobody can be asked.
+//
+// Failing closed without a terminal is the point rather than an inconvenience:
+// the reported incident was an AGENT running this non-interactively on an ID it
+// had read out of `session current`, so a prompt nobody sees must not be
+// treated as consent. A human gets the question; a script states its intent
+// with the flag.
+func confirmAdoptForeignSession(ctx context.Context, w io.Writer, reason string, source *session.State) (bool, error) {
+	fmt.Fprintf(w, "Session %s is recorded in %s and is still active.\n",
+		shortSessionID(source.SessionID), adoptSessionWorktreeLabel(source))
+	fmt.Fprintf(w, "Cannot confirm it is yours: %s.\n", reason)
+	fmt.Fprintln(w, "Adopting it moves that session here and resets its checkpoint bookkeeping.")
+
+	if !interactive.CanPromptInteractively() {
+		// The remedy has to be PRINTED, not just carried on the error. This
+		// returns a SilentError, and main.go's SilentError branch prints
+		// nothing — it assumes the command already spoke. Leaving the flag
+		// name only inside the error meant the one audience this branch exists
+		// for, a non-interactive caller, never saw it in any output.
+		fmt.Fprintln(w, "There is no terminal to confirm on, so the adoption was refused.")
+		fmt.Fprintln(w, "Pass --allow-foreign-session if adopting a session that is not this command's own is intended.")
+		return false, NewSilentError(fmt.Errorf("refusing to adopt session %s: %s",
+			shortSessionID(source.SessionID), reason))
+	}
+
+	confirmed := false
+	form := NewAccessibleForm(huh.NewGroup(
+		huh.NewConfirm().
+			Title(fmt.Sprintf("Adopt session %s anyway?", shortSessionID(source.SessionID))).
+			Value(&confirmed),
+	))
+	if err := form.RunWithContext(ctx); err != nil {
+		// Route aborts through the shared classifier, like every other huh
+		// prompt in this package, so Ctrl-C prints "Adoption cancelled."
+		// rather than a raw "confirm: user aborted".
+		//
+		// An abort returns (false, nil) so it behaves exactly like answering
+		// "no": the caller refuses. An interrupted prompt must never be the
+		// path by which a mutation proceeds.
+		if failed := handleFormCancellation(w, "Adoption", err); failed != nil {
+			return false, failed
+		}
+		return false, nil
+	}
+	return confirmed, nil
+}
+
 func adoptFromExternalSessionStore(
 	ctx context.Context,
 	sourceStore *session.StateStore,
@@ -131,6 +367,7 @@ func adoptFromExternalSessionStore(
 	targetCommonDir string,
 	sessionID string,
 	opts adoptOptions,
+	overridden bool,
 ) (*session.State, []string, error) {
 	sourceWorktreeID, worktreeIDErr := paths.GetWorktreeID(sourceWorktree)
 	if worktreeIDErr != nil {
@@ -155,6 +392,9 @@ func adoptFromExternalSessionStore(
 				sessionID, adoptSessionWorktreeLabel(sourceState), sourceWorktree)
 		}
 		if err := validateAdoptSourceTranscript(sourceState, sourceWorktree); err != nil {
+			return err
+		}
+		if err := revalidateAdoptOwnership(ctx, sourceStore, sourceState, overridden); err != nil {
 			return err
 		}
 
@@ -217,7 +457,7 @@ func retireAdoptedSourceSession(source, target *session.State) session.State {
 	return retired
 }
 
-func adoptFromSameSessionStore(ctx context.Context, sourceWorktree string, sourceState *session.State, opts adoptOptions) (*session.State, []string, error) {
+func adoptFromSameSessionStore(ctx context.Context, sourceStore *session.StateStore, sourceWorktree string, sourceState *session.State, opts adoptOptions, overridden bool) (*session.State, []string, error) {
 	if !opts.Force {
 		return nil, nil, fmt.Errorf("session %s is already tracked in this repo; rerun with --force to replace it", sourceState.SessionID)
 	}
@@ -238,6 +478,9 @@ func adoptFromSameSessionStore(ctx context.Context, sourceWorktree string, sourc
 				sourceState.SessionID, adoptSessionWorktreeLabel(current), sourceWorktree)
 		}
 		if err := validateAdoptSourceTranscript(current, sourceWorktree); err != nil {
+			return err
+		}
+		if err := revalidateAdoptOwnership(ctx, sourceStore, current, overridden); err != nil {
 			return err
 		}
 

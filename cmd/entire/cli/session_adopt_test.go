@@ -38,6 +38,13 @@ func TestSessionAdopt_HelpDistinguishesForceAndYes(t *testing.T) {
 		"replace an existing local state file for the same session",
 		"--yes",
 		"confirm same-store adoption and replacement without prompting",
+		// NOTE: this only proves the flag is DOCUMENTED. The name also
+		// appears in the command's Long prose, so this assertion passes even
+		// with the flag misregistered — verified by renaming it and watching
+		// this test stay green. Registration is pinned by
+		// TestSessionAdopt_ForceDoesNotSetAllowForeignSession instead.
+		"--allow-foreign-session",
+		"adopt a session that is not this command's own caller",
 	} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("help missing %q:\n%s", want, out)
@@ -46,6 +53,53 @@ func TestSessionAdopt_HelpDistinguishesForceAndYes(t *testing.T) {
 	if strings.Count(out, "replace an existing local state file for the same session") != 1 {
 		t.Fatalf("--force and --yes should not share replacement help text:\n%s", out)
 	}
+}
+
+// Three flags, three meanings — asserted at the FLAG layer, because every
+// behavioural test in this file constructs adoptOptions directly and so would
+// pass with the flag misregistered or not registered at all.
+func TestSessionAdopt_ForceDoesNotSetAllowForeignSession(t *testing.T) {
+	cmd := newAdoptCmd()
+	if err := cmd.Flags().Parse([]string{"--force", "--from", "../somewhere"}); err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	const foreignFlag = "allow-foreign-session"
+	if cmd.Flags().Lookup(foreignFlag) == nil {
+		t.Fatalf("--%s is not registered on the command", foreignFlag)
+	}
+	granted, err := cmd.Flags().GetBool(foreignFlag)
+	if err != nil {
+		t.Fatalf("GetBool(%q): %v", foreignFlag, err)
+	}
+	if granted {
+		t.Errorf("--force granted %s; the ownership waiver must be its own flag", foreignFlag)
+	}
+
+	// And it does take effect on its own.
+	cmd = newAdoptCmd()
+	if err := cmd.Flags().Parse([]string{"--" + foreignFlag}); err != nil {
+		t.Fatalf("parse --%s: %v", foreignFlag, err)
+	}
+	granted, err = cmd.Flags().GetBool(foreignFlag)
+	if err != nil {
+		t.Fatalf("GetBool(%q): %v", foreignFlag, err)
+	}
+	if !granted {
+		t.Errorf("--%s did not take effect when passed", foreignFlag)
+	}
+}
+
+// adoptAsCaller publishes sessionID as the caller's own, the way the agent
+// that owns it would, so a test exercises adoption's MECHANICS through the
+// supported path instead of the --allow-foreign-session escape hatch.
+//
+// Needed because adoption now refuses a session it cannot confirm is the
+// caller's, and `go test` inherits the developer's real agent variable — which
+// names a session that is emphatically not the fixture.
+func adoptAsCaller(t *testing.T, sessionID string) {
+	t.Helper()
+	clearCallerSessionEnv(t)
+	t.Setenv("CLAUDE_CODE_SESSION_ID", sessionID)
 }
 
 func TestSessionAdopt_MovesExternalSessionIntoCurrentWorktree(t *testing.T) {
@@ -85,6 +139,7 @@ func TestSessionAdopt_MovesExternalSessionIntoCurrentWorktree(t *testing.T) {
 	t.Chdir(targetRepo)
 
 	var out bytes.Buffer
+	adoptAsCaller(t, sessionID)
 	err := runAdopt(context.Background(), &out, sessionID, adoptOptions{
 		FromWorktree: sourceRepo,
 		Force:        true,
@@ -155,6 +210,7 @@ func TestSessionAdopt_ExternalStoreRetiresSourceSession(t *testing.T) {
 	t.Chdir(targetRepo)
 
 	var out bytes.Buffer
+	adoptAsCaller(t, sessionID)
 	err := runAdopt(context.Background(), &out, sessionID, adoptOptions{
 		FromWorktree: sourceRepo,
 		Force:        true,
@@ -328,6 +384,7 @@ func TestSessionAdopt_ExternalStoreRollsBackTargetWhenSourceRetireFails(t *testi
 		targetCommonDir,
 		sessionID,
 		adoptOptions{Force: true},
+		true, // ownership already authorized; this test covers mutation mechanics
 	)
 	if err := restoreSourceStateDir(); err != nil {
 		t.Fatalf("restore source state dir permissions: %v", err)
@@ -428,6 +485,7 @@ func TestSessionAdopt_ExternalStoreClearsNewTargetWhenSourceRetireFails(t *testi
 		targetCommonDir,
 		sessionID,
 		adoptOptions{Force: true},
+		true, // ownership already authorized; this test covers mutation mechanics
 	)
 	if err := restoreSourceStateDir(); err != nil {
 		t.Fatalf("restore source state dir permissions: %v", err)
@@ -473,6 +531,7 @@ func TestSessionAdopt_ClearsSourceOwner(t *testing.T) {
 	t.Chdir(targetRepo)
 
 	var out bytes.Buffer
+	adoptAsCaller(t, sessionID)
 	err := runAdopt(context.Background(), &out, sessionID, adoptOptions{
 		FromWorktree: sourceRepo,
 		Force:        true,
@@ -528,6 +587,7 @@ func TestSessionAdopt_RejectsUnexpectedSourceTranscriptPath(t *testing.T) {
 	t.Chdir(targetRepo)
 
 	var out bytes.Buffer
+	adoptAsCaller(t, sessionID)
 	err := runAdopt(context.Background(), &out, sessionID, adoptOptions{
 		FromWorktree: sourceRepo,
 		Force:        true,
@@ -614,6 +674,7 @@ func TestSessionAdopt_ExternalStoreRejectsSourceEndedAfterInitialSelection(t *te
 		targetCommonDir,
 		sessionID,
 		adoptOptions{Force: true},
+		true, // ownership already authorized; this test covers mutation mechanics
 	)
 	if err == nil {
 		t.Fatal("adoptFromExternalSessionStore succeeded from stale ended source, want refusal")
@@ -678,6 +739,7 @@ func TestSessionAdopt_ExternalStoreChecksTargetStateAfterLockWait(t *testing.T) 
 			targetCommonDir,
 			sessionID,
 			adoptOptions{},
+			true, // ownership already authorized; this test covers the lock wait
 		)
 		done <- adoptErr
 	}()
@@ -766,6 +828,7 @@ func TestSessionAdopt_EnablesPrepareCommitMsgTrailer(t *testing.T) {
 	t.Chdir(targetRepo)
 
 	var out bytes.Buffer
+	adoptAsCaller(t, sessionID)
 	err := runAdopt(context.Background(), &out, sessionID, adoptOptions{
 		FromWorktree: sourceRepo,
 		Force:        true,
@@ -832,6 +895,7 @@ func TestSessionAdopt_IdleSourceSurvivesPrepareCommitMsgTrailer(t *testing.T) {
 	t.Chdir(targetRepo)
 
 	var out bytes.Buffer
+	adoptAsCaller(t, sessionID)
 	err := runAdopt(context.Background(), &out, sessionID, adoptOptions{
 		FromWorktree: sourceRepo,
 		Force:        true,
@@ -900,6 +964,7 @@ func TestSessionAdopt_RejectsEndedAtSourceSession(t *testing.T) {
 	t.Chdir(targetRepo)
 
 	var out bytes.Buffer
+	adoptAsCaller(t, sessionID)
 	err := runAdopt(context.Background(), &out, sessionID, adoptOptions{
 		FromWorktree: sourceRepo,
 		Force:        true,
@@ -986,6 +1051,7 @@ func TestSessionAdopt_ResetsSourceCheckpointWindow(t *testing.T) {
 	t.Chdir(targetRepo)
 
 	var out bytes.Buffer
+	adoptAsCaller(t, sessionID)
 	err := runAdopt(context.Background(), &out, sessionID, adoptOptions{
 		FromWorktree: sourceRepo,
 		Force:        true,
@@ -1345,6 +1411,7 @@ func TestSessionAdopt_FromSubdirectoryReadsSourceStore(t *testing.T) {
 	t.Chdir(targetRepo)
 
 	var out bytes.Buffer
+	adoptAsCaller(t, sessionID)
 	err := runAdopt(context.Background(), &out, sessionID, adoptOptions{
 		FromWorktree: sourceSubdir,
 		Force:        true,
@@ -1408,6 +1475,10 @@ func TestSessionAdopt_FiltersSharedSourceStoreByFromWorktree(t *testing.T) {
 	t.Chdir(targetRepo)
 
 	var out bytes.Buffer
+	// Auto-selection is guarded too: whatever --from resolves to still has to
+	// be the caller's own session, which is what closes the
+	// `adopt --from <path>` shape that needs no session ID at all.
+	adoptAsCaller(t, "source-worktree-session")
 	err = runAdopt(context.Background(), &out, "", adoptOptions{
 		FromWorktree: sourceRepo,
 	})
@@ -1617,9 +1688,9 @@ func TestSessionAdopt_SameStoreReloadsSourceStateUnderLock(t *testing.T) {
 	testutil.GitAdd(t, targetWorktree, "feature.txt")
 	t.Chdir(targetWorktree)
 
-	adopted, _, err := adoptFromSameSessionStore(context.Background(), sourceRepo, staleSelected, adoptOptions{
+	adopted, _, err := adoptFromSameSessionStore(context.Background(), sourceStore, sourceRepo, staleSelected, adoptOptions{
 		Force: true,
-	})
+	}, true) // ownership already authorized; this test covers the locked reload
 	if err != nil {
 		t.Fatalf("adoptFromSameSessionStore failed: %v", err)
 	}
@@ -1695,6 +1766,7 @@ func TestSessionAdopt_MovesSameStoreSessionIntoCurrentWorktree(t *testing.T) {
 	t.Chdir(targetWorktree)
 
 	var out bytes.Buffer
+	adoptAsCaller(t, sessionID)
 	err = runAdopt(context.Background(), &out, sessionID, adoptOptions{
 		FromWorktree: sourceRepo,
 	})
@@ -1791,4 +1863,1047 @@ func runAdoptGit(t *testing.T, dir string, args ...string) {
 	t.Helper()
 
 	testutil.RunGit(t, dir, args...)
+}
+
+// saveAdoptableSession writes a live, adoptable session into a worktree's
+// store, with a transcript so validateAdoptSourceTranscript is satisfied and
+// the ownership gate is what the test actually exercises.
+func saveAdoptableSession(t *testing.T, repo, sessionID string) {
+	t.Helper()
+	transcriptPath := claudeAdoptTranscriptPath(t, repo, sessionID)
+	if err := os.MkdirAll(filepath.Dir(transcriptPath), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(transcriptPath, []byte(`{"type":"user","message":{"role":"user","content":"hi"},"uuid":"u1"}`+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	lastInteraction := time.Now().Add(-1 * time.Minute)
+	store := session.NewStateStoreWithDir(filepath.Join(repo, ".git", session.SessionStateDirName))
+	if err := store.Save(context.Background(), &session.State{
+		SessionID:           sessionID,
+		AgentType:           agent.AgentTypeClaudeCode,
+		StartedAt:           time.Now().Add(-5 * time.Minute),
+		LastInteractionTime: &lastInteraction,
+		Phase:               session.PhaseActive,
+		BaseCommit:          testutil.GetHeadHash(t, repo),
+		WorktreePath:        repo,
+		TranscriptPath:      transcriptPath,
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// The reported incident, as a test. An agent read a session ID out of
+// `entire session current` — which used to answer with a foreign worktree's
+// live session — and adopted it, moving a third party's running session and
+// resetting its checkpoint bookkeeping. The pre-existing checks all pass here:
+// the ID and the worktree agree with each other, and the session is live.
+func TestSessionAdopt_RefusesASessionThatIsNotTheCallers(t *testing.T) {
+	sourceRepo := setupAdoptRepo(t)
+	targetRepo := setupAdoptRepo(t)
+	saveAdoptableSession(t, sourceRepo, "someone-elses-session")
+
+	t.Chdir(targetRepo)
+	adoptAsCaller(t, "my-own-session")
+
+	var out bytes.Buffer
+	err := runAdopt(context.Background(), &out, "someone-elses-session", adoptOptions{
+		FromWorktree: sourceRepo,
+		Force:        true,
+	})
+	if err == nil {
+		t.Fatal("runAdopt succeeded on a session belonging to another caller")
+	}
+	if !strings.Contains(err.Error(), "refusing to adopt") {
+		t.Fatalf("error should name the refusal, got: %v", err)
+	}
+	// The message must say which session is ours, or the operator cannot tell
+	// a mistake from a legitimate cross-session action. Compared through
+	// shortSessionID so the assertion tracks the command's own rendering
+	// instead of a hardcoded prefix.
+	for _, want := range []string{shortSessionID("my-own-session"), shortSessionID("someone-elses-session")} {
+		if !strings.Contains(out.String(), want) {
+			t.Fatalf("output should name %q, got: %q", want, out.String())
+		}
+	}
+	if store := session.NewStateStoreWithDir(filepath.Join(sourceRepo, ".git", session.SessionStateDirName)); true {
+		state, err := store.Load(context.Background(), "someone-elses-session")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if state == nil || state.WorktreePath != sourceRepo || state.Phase != session.PhaseActive {
+			t.Fatalf("refused adoption still mutated the source session: %+v", state)
+		}
+	}
+}
+
+// --force must not grant this. It already means two other things (replace
+// local state; confirm same-store adoption), and it is the flag an agent
+// reaches for on any refusal — so waiving a check on someone else's running
+// session needs a name that says that.
+func TestSessionAdopt_ForceDoesNotWaiveTheOwnershipCheck(t *testing.T) {
+	sourceRepo := setupAdoptRepo(t)
+	targetRepo := setupAdoptRepo(t)
+	saveAdoptableSession(t, sourceRepo, "someone-elses-session")
+
+	t.Chdir(targetRepo)
+	adoptAsCaller(t, "my-own-session")
+
+	var out bytes.Buffer
+	err := runAdopt(context.Background(), &out, "someone-elses-session", adoptOptions{
+		FromWorktree: sourceRepo,
+		Force:        true,
+	})
+	if err == nil {
+		t.Fatal("--force waived the ownership check")
+	}
+	// Assert on the OUTPUT, not the error. The refusal is a SilentError and
+	// main.go prints nothing for those, so an error string containing the
+	// flag name is invisible to the caller — this assertion used to pass
+	// while the remedy never reached any output.
+	if !strings.Contains(out.String(), "--allow-foreign-session") {
+		t.Fatalf("refusal should print the flag that does grant it, got: %q (err: %v)", out.String(), err)
+	}
+}
+
+// The escape hatch works, because deliberately adopting another session is a
+// real (if rare) operator action — it just has to be stated.
+func TestSessionAdopt_AllowForeignSessionOverridesTheCheck(t *testing.T) {
+	sourceRepo := setupAdoptRepo(t)
+	targetRepo := setupAdoptRepo(t)
+	saveAdoptableSession(t, sourceRepo, "someone-elses-session")
+
+	testutil.WriteFile(t, targetRepo, "feature.txt", "change\n")
+	t.Chdir(targetRepo)
+	adoptAsCaller(t, "my-own-session")
+
+	var out bytes.Buffer
+	if err := runAdopt(context.Background(), &out, "someone-elses-session", adoptOptions{
+		FromWorktree: sourceRepo,
+		Force:        true,
+		AllowForeign: true,
+	}); err != nil {
+		t.Fatalf("runAdopt failed with --allow-foreign-session: %v", err)
+	}
+	targetStore, err := session.NewStateStore(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	adopted, err := targetStore.Load(context.Background(), "someone-elses-session")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if adopted == nil {
+		t.Fatal("session was not adopted despite the override")
+	}
+}
+
+// No caller could be identified at all — no agent variable, no owner of ours
+// in the ancestry. That covers every cross-machine --from, where ancestry
+// cannot speak to another host. Unverifiable is refused, not waved through:
+// a prompt nobody can see must never count as consent.
+func TestSessionAdopt_RefusesWhenTheCallerCannotBeIdentified(t *testing.T) {
+	sourceRepo := setupAdoptRepo(t)
+	targetRepo := setupAdoptRepo(t)
+	saveAdoptableSession(t, sourceRepo, "unverifiable-session")
+
+	t.Chdir(targetRepo)
+	clearCallerSessionEnv(t)
+
+	var out bytes.Buffer
+	err := runAdopt(context.Background(), &out, "unverifiable-session", adoptOptions{
+		FromWorktree: sourceRepo,
+		Force:        true,
+	})
+	if err == nil {
+		t.Fatal("runAdopt succeeded without being able to identify its caller")
+	}
+	if !strings.Contains(out.String(), "could not be identified") {
+		t.Fatalf("output should say the caller is unknown, got: %q", out.String())
+	}
+}
+
+// An ambiguous identification does not satisfy IsCaller, so it must not
+// satisfy adoption either — being inside *some* agent session is not knowing
+// which, and the reported session is explicitly a guess.
+func TestSessionAdopt_RefusesOnAnAmbiguousCaller(t *testing.T) {
+	sourceRepo := setupAdoptRepo(t)
+	targetRepo := setupAdoptRepo(t)
+	saveAdoptableSession(t, sourceRepo, "contested-session")
+
+	t.Chdir(targetRepo)
+	clearCallerSessionEnv(t)
+	// Two claims, neither placeable in our ancestry: caller-ambiguous.
+	t.Setenv("CLAUDE_CODE_SESSION_ID", "contested-session")
+	t.Setenv("CODEX_SESSION_ID", "other-claim")
+
+	var out bytes.Buffer
+	err := runAdopt(context.Background(), &out, "contested-session", adoptOptions{
+		FromWorktree: sourceRepo,
+		Force:        true,
+	})
+	if err == nil {
+		t.Fatal("runAdopt succeeded on an ambiguous caller identification")
+	}
+	// The reason must reach the output, not just exist: the refusal renders
+	// it as "Cannot confirm it is yours: <reason>.", so an empty reason —
+	// which is what asking for the verdict and the reason in two separate
+	// calls could produce — shows up as a bare full stop.
+	if !strings.Contains(out.String(), "none could be ordered") {
+		t.Errorf("refusal lost its reason, got: %q", out.String())
+	}
+	if strings.Contains(out.String(), "Cannot confirm it is yours: .") {
+		t.Errorf("refusal rendered an empty reason: %q", out.String())
+	}
+}
+
+// The command's primary use case for the agents that publish no session ID.
+// Gemini CLI and opencode are recognised only by process ancestry, and
+// ResolveCallerSession searches the CURRENT repository's store — so in a
+// cross-repository adoption the source state, and the owner recorded on it,
+// was never in the listing. Without checking that owner directly, such an
+// agent adopting its OWN session is refused, and the only way through is
+// --allow-foreign-session: teaching agents to waive a real check to do a
+// legitimate thing.
+func TestSessionAdopt_CrossRepoOwnerAncestryIdentifiesAnAgentWithoutAnEnvVar(t *testing.T) {
+	ancestry, ok := proclive.CurrentAncestry()
+	if !ok {
+		t.Skip("platform cannot introspect processes; ancestry cannot identify a caller here by design")
+	}
+	chain := ancestry.Chain()
+	if len(chain) == 0 {
+		t.Skip("no ancestors visible; nothing to match against")
+	}
+	owner := chain[0]
+
+	sourceRepo := setupAdoptRepo(t)
+	targetRepo := setupAdoptRepo(t)
+
+	sessionID := "gemini-owned-session"
+	transcriptPath := claudeAdoptTranscriptPath(t, sourceRepo, sessionID)
+	if err := os.MkdirAll(filepath.Dir(transcriptPath), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(transcriptPath, []byte(`{"type":"user","message":{"role":"user","content":"hi"},"uuid":"u1"}`+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	lastInteraction := time.Now().Add(-1 * time.Minute)
+	sourceStore := session.NewStateStoreWithDir(filepath.Join(sourceRepo, ".git", session.SessionStateDirName))
+	if err := sourceStore.Save(context.Background(), &session.State{
+		SessionID:           sessionID,
+		AgentType:           agent.AgentTypeClaudeCode,
+		StartedAt:           time.Now().Add(-5 * time.Minute),
+		LastInteractionTime: &lastInteraction,
+		Phase:               session.PhaseActive,
+		BaseCommit:          testutil.GetHeadHash(t, sourceRepo),
+		WorktreePath:        sourceRepo,
+		TranscriptPath:      transcriptPath,
+		// The signal a no-env-var agent leaves: its own process recorded as
+		// the session owner, which really is an ancestor of this test.
+		Owner: &owner,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	testutil.WriteFile(t, targetRepo, "feature.txt", "agent change\n")
+	t.Chdir(targetRepo)
+	// No agent variable at all — Gemini CLI and opencode publish none.
+	clearCallerSessionEnv(t)
+
+	var out bytes.Buffer
+	if err := runAdopt(context.Background(), &out, sessionID, adoptOptions{
+		FromWorktree: sourceRepo,
+		Force:        true,
+	}); err != nil {
+		t.Fatalf("runAdopt refused an agent adopting its own cross-repo session: %v\noutput: %s", err, out.String())
+	}
+	targetStore, err := session.NewStateStore(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	adopted, err := targetStore.Load(context.Background(), sessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if adopted == nil {
+		t.Fatal("session was not adopted")
+	}
+	if strings.Contains(out.String(), "Cannot confirm it is yours") {
+		t.Errorf("adoption of the caller's own session should be silent, got: %q", out.String())
+	}
+}
+
+// Two no-env-var agents nested, both sessions in the SOURCE store, command run
+// from a different repository. The resolver sees neither state, so nothing
+// contradicts either — and asking only whether the selected session's owner
+// appears somewhere in our ancestry says yes for the OUTER agent, whose
+// process really did spawn us several hops up. Naming it would adopt the outer
+// session silently while the inner agent is the actual caller.
+func TestSessionAdopt_RefusesTheOuterSessionWhenANearerOwnerExists(t *testing.T) {
+	ancestry, ok := proclive.CurrentAncestry()
+	if !ok {
+		t.Skip("platform cannot introspect processes")
+	}
+	chain := ancestry.Chain()
+	if len(chain) < 2 {
+		t.Skip("need two ancestors to model a nested pair")
+	}
+	inner, outer := chain[0], chain[1]
+
+	sourceRepo := setupAdoptRepo(t)
+	targetRepo := setupAdoptRepo(t)
+	sourceStore := session.NewStateStoreWithDir(filepath.Join(sourceRepo, ".git", session.SessionStateDirName))
+
+	save := func(sessionID string, owner proclive.Identity) {
+		transcriptPath := claudeAdoptTranscriptPath(t, sourceRepo, sessionID)
+		if err := os.MkdirAll(filepath.Dir(transcriptPath), 0o750); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(transcriptPath, []byte(`{"type":"user","message":{"role":"user","content":"hi"},"uuid":"u1"}`+"\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		lastInteraction := time.Now().Add(-1 * time.Minute)
+		ownerCopy := owner
+		if err := sourceStore.Save(context.Background(), &session.State{
+			SessionID:           sessionID,
+			AgentType:           agent.AgentTypeClaudeCode,
+			StartedAt:           time.Now().Add(-5 * time.Minute),
+			LastInteractionTime: &lastInteraction,
+			Phase:               session.PhaseActive,
+			BaseCommit:          testutil.GetHeadHash(t, sourceRepo),
+			WorktreePath:        sourceRepo,
+			TranscriptPath:      transcriptPath,
+			Owner:               &ownerCopy,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	save("outer-agent-session", outer)
+	save("inner-agent-session", inner)
+
+	t.Chdir(targetRepo)
+	clearCallerSessionEnv(t)
+
+	var out bytes.Buffer
+	err := runAdopt(context.Background(), &out, "outer-agent-session", adoptOptions{
+		FromWorktree: sourceRepo,
+		Force:        true,
+	})
+	if err == nil {
+		t.Fatal("adopted the outer session while a nearer owner was recorded")
+	}
+	state, err := sourceStore.Load(context.Background(), "outer-agent-session")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state == nil || state.WorktreePath != sourceRepo {
+		t.Fatalf("refused adoption mutated the source session: %+v", state)
+	}
+}
+
+// The other half of the same comparison: the NEAREST of the nested pair is the
+// caller's own session and must still adopt silently, or the fix would have
+// blocked the case the command exists for.
+func TestSessionAdopt_AdoptsTheNearestNestedSessionSilently(t *testing.T) {
+	ancestry, ok := proclive.CurrentAncestry()
+	if !ok {
+		t.Skip("platform cannot introspect processes")
+	}
+	chain := ancestry.Chain()
+	if len(chain) < 2 {
+		t.Skip("need two ancestors to model a nested pair")
+	}
+	inner, outer := chain[0], chain[1]
+
+	sourceRepo := setupAdoptRepo(t)
+	targetRepo := setupAdoptRepo(t)
+	sourceStore := session.NewStateStoreWithDir(filepath.Join(sourceRepo, ".git", session.SessionStateDirName))
+
+	save := func(sessionID string, owner proclive.Identity) {
+		transcriptPath := claudeAdoptTranscriptPath(t, sourceRepo, sessionID)
+		if err := os.MkdirAll(filepath.Dir(transcriptPath), 0o750); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(transcriptPath, []byte(`{"type":"user","message":{"role":"user","content":"hi"},"uuid":"u1"}`+"\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		lastInteraction := time.Now().Add(-1 * time.Minute)
+		ownerCopy := owner
+		if err := sourceStore.Save(context.Background(), &session.State{
+			SessionID:           sessionID,
+			AgentType:           agent.AgentTypeClaudeCode,
+			StartedAt:           time.Now().Add(-5 * time.Minute),
+			LastInteractionTime: &lastInteraction,
+			Phase:               session.PhaseActive,
+			BaseCommit:          testutil.GetHeadHash(t, sourceRepo),
+			WorktreePath:        sourceRepo,
+			TranscriptPath:      transcriptPath,
+			Owner:               &ownerCopy,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	save("outer-agent-session", outer)
+	save("inner-agent-session", inner)
+
+	testutil.WriteFile(t, targetRepo, "feature.txt", "agent change\n")
+	t.Chdir(targetRepo)
+	clearCallerSessionEnv(t)
+
+	var out bytes.Buffer
+	if err := runAdopt(context.Background(), &out, "inner-agent-session", adoptOptions{
+		FromWorktree: sourceRepo,
+		Force:        true,
+	}); err != nil {
+		t.Fatalf("refused the nearest nested session: %v\noutput: %s", err, out.String())
+	}
+	if strings.Contains(out.String(), "Cannot confirm it is yours") {
+		t.Errorf("adoption of the caller's own session should be silent, got: %q", out.String())
+	}
+}
+
+// saveOwnedSession writes an adoptable session owned by a specific process,
+// with a chosen last-interaction time, so a test can put two sessions at the
+// SAME ancestry depth and differ only in recency.
+func saveOwnedSession(t *testing.T, repo, sessionID string, owner proclive.Identity, lastInteraction time.Time) {
+	t.Helper()
+	transcriptPath := claudeAdoptTranscriptPath(t, repo, sessionID)
+	if err := os.MkdirAll(filepath.Dir(transcriptPath), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(transcriptPath, []byte(`{"type":"user","message":{"role":"user","content":"hi"},"uuid":"u1"}`+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ownerCopy := owner
+	store := session.NewStateStoreWithDir(filepath.Join(repo, ".git", session.SessionStateDirName))
+	if err := store.Save(context.Background(), &session.State{
+		SessionID:           sessionID,
+		AgentType:           agent.AgentTypeClaudeCode,
+		StartedAt:           lastInteraction.Add(-5 * time.Minute),
+		LastInteractionTime: &lastInteraction,
+		Phase:               session.PhaseActive,
+		BaseCommit:          testutil.GetHeadHash(t, repo),
+		WorktreePath:        repo,
+		TranscriptPath:      transcriptPath,
+		Owner:               &ownerCopy,
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// One long-lived agent process can own several sessions — a stale one and the
+// resumed one it is now running — and they sit at the SAME ancestry depth.
+// Rejecting only a STRICTLY nearer owner accepts the stale sibling silently,
+// which disagrees with the resolver about a case it had already decided: at
+// equal depth the rule is recency, not "either will do".
+func TestSessionAdopt_RefusesAStaleSiblingAtTheSameOwnerDepth(t *testing.T) {
+	ancestry, ok := proclive.CurrentAncestry()
+	if !ok {
+		t.Skip("platform cannot introspect processes")
+	}
+	chain := ancestry.Chain()
+	if len(chain) == 0 {
+		t.Skip("no ancestors visible")
+	}
+	owner := chain[0]
+
+	sourceRepo := setupAdoptRepo(t)
+	targetRepo := setupAdoptRepo(t)
+
+	now := time.Now()
+	// Same owner process, so identical ancestry depth; only recency differs.
+	saveOwnedSession(t, sourceRepo, "stale-session", owner, now.Add(-2*time.Hour))
+	saveOwnedSession(t, sourceRepo, "resumed-session", owner, now.Add(-1*time.Minute))
+
+	t.Chdir(targetRepo)
+	clearCallerSessionEnv(t)
+
+	var out bytes.Buffer
+	err := runAdopt(context.Background(), &out, "stale-session", adoptOptions{
+		FromWorktree: sourceRepo,
+		Force:        true,
+	})
+	if err == nil {
+		t.Fatal("adopted a stale session while a more recent one shares its owner depth")
+	}
+	store := session.NewStateStoreWithDir(filepath.Join(sourceRepo, ".git", session.SessionStateDirName))
+	state, loadErr := store.Load(context.Background(), "stale-session")
+	if loadErr != nil {
+		t.Fatal(loadErr)
+	}
+	if state == nil || state.WorktreePath != sourceRepo {
+		t.Fatalf("refused adoption mutated the source session: %+v", state)
+	}
+}
+
+// The other direction: the most recently interacting of the equal-depth pair
+// IS the caller's session and must still adopt silently, or the tie-break
+// would have clamped the feature shut instead of aiming it.
+func TestSessionAdopt_AdoptsTheMostRecentSiblingAtTheSameOwnerDepth(t *testing.T) {
+	ancestry, ok := proclive.CurrentAncestry()
+	if !ok {
+		t.Skip("platform cannot introspect processes")
+	}
+	chain := ancestry.Chain()
+	if len(chain) == 0 {
+		t.Skip("no ancestors visible")
+	}
+	owner := chain[0]
+
+	sourceRepo := setupAdoptRepo(t)
+	targetRepo := setupAdoptRepo(t)
+
+	now := time.Now()
+	saveOwnedSession(t, sourceRepo, "stale-session", owner, now.Add(-2*time.Hour))
+	saveOwnedSession(t, sourceRepo, "resumed-session", owner, now.Add(-1*time.Minute))
+
+	testutil.WriteFile(t, targetRepo, "feature.txt", "agent change\n")
+	t.Chdir(targetRepo)
+	clearCallerSessionEnv(t)
+
+	var out bytes.Buffer
+	if err := runAdopt(context.Background(), &out, "resumed-session", adoptOptions{
+		FromWorktree: sourceRepo,
+		Force:        true,
+	}); err != nil {
+		t.Fatalf("refused the most recent session at the caller's owner depth: %v\noutput: %s", err, out.String())
+	}
+	if strings.Contains(out.String(), "Cannot confirm it is yours") {
+		t.Errorf("adoption of the caller's own session should be silent, got: %q", out.String())
+	}
+}
+
+// addAdoptLinkedWorktree adds a linked worktree of repo and returns its
+// symlink-resolved path. Linked worktrees share one session store, which is
+// what puts adoption on the adoptFromSameSessionStore path — a second repo
+// would take the external-store path instead, where MutateSessionState
+// resolves its store from the cwd and cannot see the source session at all.
+func addAdoptLinkedWorktree(t *testing.T, repo, name string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), name)
+	runAdoptGit(t, repo, "worktree", "add", path, "-b", name)
+	resolved, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		runAdoptGit(t, repo, "worktree", "remove", resolved, "--force")
+	})
+	return resolved
+}
+
+// The ownership decision is taken on an UNLOCKED snapshot, so it has to be
+// retaken under the lock — both mutation paths already reload and re-check
+// every other precondition for exactly this reason. Ownership is not stable
+// across that window: a turn start re-records SessionState.Owner, and a
+// session created in the source store meanwhile can be a nearer owner.
+//
+// Simulated with the seam the neighbouring lock tests use: authorize against
+// one state, then replace it before the mutation reloads.
+func TestSessionAdopt_RevalidatesOwnershipAgainstTheLockedState(t *testing.T) {
+	ancestry, ok := proclive.CurrentAncestry()
+	if !ok {
+		t.Skip("platform cannot introspect processes")
+	}
+	chain := ancestry.Chain()
+	if len(chain) == 0 {
+		t.Skip("no ancestors visible")
+	}
+	owner := chain[0]
+
+	sourceRepo := setupAdoptRepo(t)
+	targetWorktree := addAdoptLinkedWorktree(t, sourceRepo, "revalidate-target")
+	sourceStore := session.NewStateStoreWithDir(filepath.Join(sourceRepo, ".git", session.SessionStateDirName))
+
+	const sessionID = "ownership-revalidated-session"
+	// Authorized against this: owner is our nearest ancestor.
+	saveOwnedSession(t, sourceRepo, sessionID, owner, time.Now().Add(-1*time.Minute))
+	authorized, err := sourceStore.Load(context.Background(), sessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Meanwhile a turn start re-records the owner as a process that is not in
+	// our ancestry, so the evidence the adoption rested on is gone.
+	elsewhere := owner
+	elsewhere.PID = 999999
+	elsewhere.Start = "not-our-process"
+	saveOwnedSession(t, sourceRepo, sessionID, elsewhere, time.Now())
+
+	testutil.WriteFile(t, targetWorktree, "feature.txt", "agent change\n")
+	t.Chdir(targetWorktree)
+	clearCallerSessionEnv(t)
+
+	_, _, err = adoptFromSameSessionStore(context.Background(), sourceStore, sourceRepo, authorized,
+		adoptOptions{Force: true}, false)
+	if err == nil {
+		t.Fatal("adopted on ownership evidence that no longer held under the lock")
+	}
+	if !strings.Contains(err.Error(), "could no longer be confirmed") {
+		t.Fatalf("error should name the stale authorization, got: %v", err)
+	}
+
+	// And the source session is untouched — still where it was, still active.
+	state, loadErr := sourceStore.Load(context.Background(), sessionID)
+	if loadErr != nil {
+		t.Fatal(loadErr)
+	}
+	if state == nil || state.WorktreePath != sourceRepo {
+		t.Fatalf("failed revalidation still mutated the source session: %+v", state)
+	}
+}
+
+// An override is honoured without re-checking: the flag, or a human who
+// already answered, decided about THIS session, and re-prompting mid-mutation
+// would ask the same person the same question twice.
+func TestSessionAdopt_OverriddenOwnershipIsNotRevalidated(t *testing.T) {
+	ancestry, ok := proclive.CurrentAncestry()
+	if !ok {
+		t.Skip("platform cannot introspect processes")
+	}
+	chain := ancestry.Chain()
+	if len(chain) == 0 {
+		t.Skip("no ancestors visible")
+	}
+	owner := chain[0]
+
+	sourceRepo := setupAdoptRepo(t)
+	targetWorktree := addAdoptLinkedWorktree(t, sourceRepo, "override-target")
+	sourceStore := session.NewStateStoreWithDir(filepath.Join(sourceRepo, ".git", session.SessionStateDirName))
+
+	const sessionID = "ownership-overridden-session"
+	saveOwnedSession(t, sourceRepo, sessionID, owner, time.Now().Add(-1*time.Minute))
+	authorized, err := sourceStore.Load(context.Background(), sessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Same disappearing evidence as above.
+	elsewhere := owner
+	elsewhere.PID = 999999
+	elsewhere.Start = "not-our-process"
+	saveOwnedSession(t, sourceRepo, sessionID, elsewhere, time.Now())
+
+	testutil.WriteFile(t, targetWorktree, "feature.txt", "agent change\n")
+	t.Chdir(targetWorktree)
+	clearCallerSessionEnv(t)
+
+	if _, _, err := adoptFromSameSessionStore(context.Background(), sourceStore, sourceRepo, authorized,
+		adoptOptions{Force: true}, true); err != nil {
+		t.Fatalf("an overridden adoption was re-checked and refused: %v", err)
+	}
+}
+
+// The combined-candidate semantics, pinned as policy rather than as artifacts
+// of how ownership happens to be computed.
+//
+// Adoption asks the shared resolver one question over every candidate in both
+// repositories — "which session is running this command?" — and authorizes
+// only when the answer is the session being adopted. It applies no rule of its
+// own, so these tests are assertions about strategy's policy as adopt
+// experiences it, and each names the policy it depends on.
+
+// (1) An inherited environment claim does not outrank a nearer source owner.
+// The outer agent publishes its ID, the inner agent forwards it, and both
+// sessions live in the source store: the inner owner is nearer, so the inner
+// session is the caller and adopting the outer one is refused.
+func TestSessionAdopt_NearerSourceOwnerBeatsAnInheritedEnvClaim(t *testing.T) {
+	ancestry, ok := proclive.CurrentAncestry()
+	if !ok {
+		t.Skip("platform cannot introspect processes")
+	}
+	chain := ancestry.Chain()
+	if len(chain) < 2 {
+		t.Skip("need two ancestors to model a nested pair")
+	}
+	inner, outer := chain[0], chain[1]
+
+	sourceRepo := setupAdoptRepo(t)
+	targetRepo := setupAdoptRepo(t)
+
+	now := time.Now()
+	saveOwnedSession(t, sourceRepo, "outer-session", outer, now)
+	saveOwnedSession(t, sourceRepo, "inner-session", inner, now)
+
+	t.Chdir(targetRepo)
+	clearCallerSessionEnv(t)
+	// The outer agent's variable, inherited by the inner agent that publishes
+	// none of its own.
+	t.Setenv("CLAUDE_CODE_SESSION_ID", "outer-session")
+
+	var out bytes.Buffer
+	err := runAdopt(context.Background(), &out, "outer-session", adoptOptions{
+		FromWorktree: sourceRepo,
+		Force:        true,
+	})
+	if err == nil {
+		t.Fatal("an inherited env claim authorized the outer session over a nearer source owner")
+	}
+	if !strings.Contains(out.String(), shortSessionID("inner-session")) {
+		t.Errorf("refusal should name the session actually identified, got: %q", out.String())
+	}
+}
+
+// (2) The depth-0 exemption, explicitly. An unplaceable claim names X, while
+// source session Y's owner is our immediate parent — nothing can be nearer
+// than that, so Y is the caller and adopting it is authorized. This is shared
+// resolver policy (claimsRuledOut), not an adopt decision.
+func TestSessionAdopt_DepthZeroSourceOwnerWinsOverAnUnplaceableClaim(t *testing.T) {
+	ancestry, ok := proclive.CurrentAncestry()
+	if !ok {
+		t.Skip("platform cannot introspect processes")
+	}
+	chain := ancestry.Chain()
+	if len(chain) == 0 {
+		t.Skip("no ancestors visible")
+	}
+	parent := chain[0]
+
+	sourceRepo := setupAdoptRepo(t)
+	targetRepo := setupAdoptRepo(t)
+	saveOwnedSession(t, sourceRepo, "parent-owned-session", parent, time.Now())
+
+	testutil.WriteFile(t, targetRepo, "feature.txt", "agent change\n")
+	t.Chdir(targetRepo)
+	clearCallerSessionEnv(t)
+	// Named by the environment but tracked nowhere, so it cannot be placed.
+	t.Setenv("CODEX_SESSION_ID", "claim-with-no-state")
+
+	var out bytes.Buffer
+	if err := runAdopt(context.Background(), &out, "parent-owned-session", adoptOptions{
+		FromWorktree: sourceRepo,
+		Force:        true,
+	}); err != nil {
+		t.Fatalf("depth-0 source owner was not accepted as the caller: %v\noutput: %s", err, out.String())
+	}
+	if strings.Contains(out.String(), "Cannot confirm it is yours") {
+		t.Errorf("adoption of the identified caller should be silent, got: %q", out.String())
+	}
+}
+
+// (3) The same shape one hop further out is ambiguous. With the winner deeper
+// than our immediate parent, an unplaceable claim could be nearer, so nothing
+// is identified and adoption refuses — including of the deeper session.
+func TestSessionAdopt_UnplaceableClaimMakesADeeperSourceOwnerAmbiguous(t *testing.T) {
+	ancestry, ok := proclive.CurrentAncestry()
+	if !ok {
+		t.Skip("platform cannot introspect processes")
+	}
+	chain := ancestry.Chain()
+	if len(chain) < 2 {
+		t.Skip("need an ancestor beyond our parent")
+	}
+	distant := chain[1]
+
+	sourceRepo := setupAdoptRepo(t)
+	targetRepo := setupAdoptRepo(t)
+	saveOwnedSession(t, sourceRepo, "distant-owned-session", distant, time.Now())
+
+	t.Chdir(targetRepo)
+	clearCallerSessionEnv(t)
+	t.Setenv("CODEX_SESSION_ID", "claim-with-no-state")
+
+	var out bytes.Buffer
+	err := runAdopt(context.Background(), &out, "distant-owned-session", adoptOptions{
+		FromWorktree: sourceRepo,
+		Force:        true,
+	})
+	if err == nil {
+		t.Fatal("adopted a session an unplaceable claim could still be nearer than")
+	}
+	if !strings.Contains(out.String(), "none could be ordered") {
+		t.Errorf("refusal should report the ambiguity, got: %q", out.String())
+	}
+}
+
+// (4) A different session identified in the combined set refuses the selected
+// one, with no ancestry involved: the environment names a tracked source
+// session, so that one is the caller and any other is not.
+func TestSessionAdopt_IdentifiedDifferentWinnerRefusesTheSelectedSession(t *testing.T) {
+	sourceRepo := setupAdoptRepo(t)
+	targetRepo := setupAdoptRepo(t)
+
+	now := time.Now()
+	saveAdoptableSessionAt(t, sourceRepo, "the-callers-session", now)
+	saveAdoptableSessionAt(t, sourceRepo, "some-other-session", now)
+
+	t.Chdir(targetRepo)
+	clearCallerSessionEnv(t)
+	t.Setenv("PI_SESSION_ID", "the-callers-session")
+
+	var out bytes.Buffer
+	err := runAdopt(context.Background(), &out, "some-other-session", adoptOptions{
+		FromWorktree: sourceRepo,
+		Force:        true,
+	})
+	if err == nil {
+		t.Fatal("adopted a session other than the identified caller")
+	}
+	for _, want := range []string{shortSessionID("the-callers-session"), shortSessionID("some-other-session")} {
+		if !strings.Contains(out.String(), want) {
+			t.Errorf("refusal should name both sessions, missing %q in: %q", want, out.String())
+		}
+	}
+}
+
+// (5) Equal depth is broken by recency, which is
+// TestSessionAdopt_RefusesAStaleSiblingAtTheSameOwnerDepth and its
+// AdoptsTheMostRecent counterpart above — one owner process, two sessions,
+// identical depth. Kept there rather than duplicated here.
+
+// saveAdoptableSessionAt writes a live, ownerless adoptable session with a
+// chosen last-interaction time.
+func saveAdoptableSessionAt(t *testing.T, repo, sessionID string, lastInteraction time.Time) {
+	t.Helper()
+	transcriptPath := claudeAdoptTranscriptPath(t, repo, sessionID)
+	if err := os.MkdirAll(filepath.Dir(transcriptPath), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(transcriptPath, []byte(`{"type":"user","message":{"role":"user","content":"hi"},"uuid":"u1"}`+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store := session.NewStateStoreWithDir(filepath.Join(repo, ".git", session.SessionStateDirName))
+	if err := store.Save(context.Background(), &session.State{
+		SessionID:           sessionID,
+		AgentType:           agent.AgentTypeClaudeCode,
+		StartedAt:           lastInteraction.Add(-5 * time.Minute),
+		LastInteractionTime: &lastInteraction,
+		Phase:               session.PhaseActive,
+		BaseCommit:          testutil.GetHeadHash(t, repo),
+		WorktreePath:        repo,
+		TranscriptPath:      transcriptPath,
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// saveBareSessionState writes a session state with NO transcript path and
+// without touching ENTIRE_TEST_CLAUDE_PROJECT_DIR.
+//
+// Both matter for a colliding-ID fixture. claudeAdoptTranscriptPath sets that
+// override, so calling it for a second repository repoints it and the
+// SELECTED source state's transcript then fails validation for a reason
+// unrelated to the test. And an empty transcript path short-circuits
+// validateAdoptSourceTranscript, which is correct here: the leftover copy is
+// evidence about ownership, not a transcript under test.
+func saveBareSessionState(t *testing.T, repo, sessionID string, owner *proclive.Identity, lastInteraction time.Time) {
+	t.Helper()
+	store := session.NewStateStoreWithDir(filepath.Join(repo, ".git", session.SessionStateDirName))
+	state := &session.State{
+		SessionID:           sessionID,
+		AgentType:           agent.AgentTypeClaudeCode,
+		StartedAt:           lastInteraction.Add(-5 * time.Minute),
+		LastInteractionTime: &lastInteraction,
+		Phase:               session.PhaseActive,
+		BaseCommit:          testutil.GetHeadHash(t, repo),
+		WorktreePath:        repo,
+	}
+	if owner != nil {
+		ownerCopy := *owner
+		state.Owner = &ownerCopy
+	}
+	if err := store.Save(context.Background(), state); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// Colliding session IDs across the two stores are a SUPPORTED condition —
+// --force exists to replace a state the target already holds for the session
+// being adopted — so which copy supplies the ownership evidence matters.
+//
+// (a) The live source copy is owned by this caller while the target's leftover
+// is ownerless. Preferring the target's copy left no candidate at all and
+// refused a legitimate adoption.
+func TestSessionAdopt_SourceCopyWinsOverAStaleTargetCopyWhenIdentifying(t *testing.T) {
+	ancestry, ok := proclive.CurrentAncestry()
+	if !ok {
+		t.Skip("platform cannot introspect processes")
+	}
+	chain := ancestry.Chain()
+	if len(chain) == 0 {
+		t.Skip("no ancestors visible")
+	}
+	owner := chain[0]
+
+	sourceRepo := setupAdoptRepo(t)
+	targetRepo := setupAdoptRepo(t)
+
+	const sessionID = "collision-owned-in-source"
+	// Live: owned by us, in the repository we are adopting from.
+	saveOwnedSession(t, sourceRepo, sessionID, owner, time.Now())
+	// Leftover from a previous adoption: same ID, no owner recorded. This is
+	// the state --force replaces.
+	saveBareSessionState(t, targetRepo, sessionID, nil, time.Now().Add(-2*time.Hour))
+
+	testutil.WriteFile(t, targetRepo, "feature.txt", "agent change\n")
+	t.Chdir(targetRepo)
+	clearCallerSessionEnv(t) // env-less agent: ancestry is the only signal
+
+	var out bytes.Buffer
+	if err := runAdopt(context.Background(), &out, sessionID, adoptOptions{
+		FromWorktree: sourceRepo,
+		Force:        true,
+	}); err != nil {
+		t.Fatalf("a stale target copy shadowed the caller-owned source state: %v\noutput: %s", err, out.String())
+	}
+	if strings.Contains(out.String(), "Cannot confirm it is yours") {
+		t.Errorf("adoption of the caller's own session should be silent, got: %q", out.String())
+	}
+}
+
+// (b) The other direction: the target's leftover still carries an owner from a
+// previous adoption while the live source copy has none. Authorizing on the
+// leftover would rest on evidence about a state nobody is adopting, so this
+// must refuse.
+func TestSessionAdopt_StaleTargetOwnerDoesNotAuthorizeAnUnownedSourceCopy(t *testing.T) {
+	ancestry, ok := proclive.CurrentAncestry()
+	if !ok {
+		t.Skip("platform cannot introspect processes")
+	}
+	chain := ancestry.Chain()
+	if len(chain) == 0 {
+		t.Skip("no ancestors visible")
+	}
+	owner := chain[0]
+
+	sourceRepo := setupAdoptRepo(t)
+	targetRepo := setupAdoptRepo(t)
+
+	const sessionID = "collision-owned-in-target"
+	// Live copy: no owner recorded, so nothing places it in our ancestry.
+	saveAdoptableSessionAt(t, sourceRepo, sessionID, time.Now())
+	// Leftover carrying an owner that IS our ancestor — stale evidence.
+	saveBareSessionState(t, targetRepo, sessionID, &owner, time.Now().Add(-2*time.Hour))
+
+	t.Chdir(targetRepo)
+	clearCallerSessionEnv(t)
+
+	var out bytes.Buffer
+	err := runAdopt(context.Background(), &out, sessionID, adoptOptions{
+		FromWorktree: sourceRepo,
+		Force:        true,
+	})
+	if err == nil {
+		t.Fatalf("authorized on a stale target copy's owner\noutput: %s", out.String())
+	}
+	if !strings.Contains(out.String(), "could not be identified") {
+		t.Errorf("refusal should report that nothing identified the caller, got: %q", out.String())
+	}
+}
+
+// plantUnusableSessionState puts a state file in repo's store that cannot be
+// loaded, so the store lists SUCCESSFULLY with one candidate missing.
+//
+// Unparseable rather than unreadable because it is portable and reaches the
+// identical skip: both are a Load error, and a mode-000 file cannot be staged
+// on every platform (nor by root, which CI sometimes is).
+func plantUnusableSessionState(t *testing.T, repo, sessionID string) {
+	t.Helper()
+	stateDir := filepath.Join(repo, ".git", session.SessionStateDirName)
+	if err := os.MkdirAll(stateDir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(stateDir, sessionID+".json"), []byte("{not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// The hole this closes: a session store that cannot be read COMPLETELY leaves
+// the ownership guard ranking the caller against a set the nearer owner has
+// silently dropped out of, and a partial set is exactly where an environment
+// claim wins uncontested. So the guard refuses even though the resolver did
+// identify a caller, and identified the session being adopted.
+//
+// Measured before the fix: one state file at mode 000 in the target store had
+// this adoption succeed, silently.
+func TestSessionAdopt_RefusesWhenTheTargetStoreCannotBeReadCompletely(t *testing.T) {
+	sourceRepo := setupAdoptRepo(t)
+	targetRepo := setupAdoptRepo(t)
+	saveAdoptableSession(t, sourceRepo, "the-callers-session")
+
+	t.Chdir(targetRepo)
+	// The environment names the session being adopted, so every other branch
+	// of the guard authorizes. Only incompleteness stands in the way.
+	adoptAsCaller(t, "the-callers-session")
+	plantUnusableSessionState(t, targetRepo, "unreadable-rival")
+
+	var out bytes.Buffer
+	err := runAdopt(context.Background(), &out, "the-callers-session", adoptOptions{
+		FromWorktree: sourceRepo,
+		Force:        true,
+	})
+	if err == nil {
+		t.Fatal("runAdopt authorized against a candidate set it could not read completely")
+	}
+	if !strings.Contains(out.String(), "could not be read") {
+		t.Fatalf("refusal should say the store could not be read, got: %q", out.String())
+	}
+	if !strings.Contains(out.String(), "--allow-foreign-session") {
+		t.Fatalf("refusal should name the flag that does grant it, got: %q", out.String())
+	}
+
+	store := session.NewStateStoreWithDir(filepath.Join(sourceRepo, ".git", session.SessionStateDirName))
+	state, loadErr := store.Load(context.Background(), "the-callers-session")
+	if loadErr != nil {
+		t.Fatal(loadErr)
+	}
+	if state == nil || state.WorktreePath != sourceRepo {
+		t.Fatalf("refused adoption still moved the source session: %+v", state)
+	}
+}
+
+// Same rule on the other side. The source listing is where the session being
+// adopted is ranked against its own repository's sessions, so a candidate lost
+// there hides a nearer owner just as effectively.
+func TestSessionAdopt_RefusesWhenTheSourceStoreCannotBeReadCompletely(t *testing.T) {
+	sourceRepo := setupAdoptRepo(t)
+	targetRepo := setupAdoptRepo(t)
+	saveAdoptableSession(t, sourceRepo, "the-callers-session")
+	plantUnusableSessionState(t, sourceRepo, "unreadable-rival")
+
+	t.Chdir(targetRepo)
+	adoptAsCaller(t, "the-callers-session")
+
+	var out bytes.Buffer
+	err := runAdopt(context.Background(), &out, "the-callers-session", adoptOptions{
+		FromWorktree: sourceRepo,
+		Force:        true,
+	})
+	if err == nil {
+		t.Fatal("runAdopt authorized against a source listing it could not read completely")
+	}
+	if !strings.Contains(out.String(), "source repository") {
+		t.Fatalf("refusal should name the source repository as the unreadable one, got: %q", out.String())
+	}
+}
+
+// Refusing is not walling the user out: the store is broken and the operator
+// may well know it, so the same override that covers every other unprovable
+// adoption covers this one. Without this the fix would strand a repo with one
+// stale corrupt file, with no way past it.
+func TestSessionAdopt_AllowForeignSessionOverridesAnIncompleteStore(t *testing.T) {
+	sourceRepo := setupAdoptRepo(t)
+	targetRepo := setupAdoptRepo(t)
+	saveAdoptableSession(t, sourceRepo, "the-callers-session")
+
+	t.Chdir(targetRepo)
+	adoptAsCaller(t, "the-callers-session")
+	plantUnusableSessionState(t, targetRepo, "unreadable-rival")
+
+	var out bytes.Buffer
+	if err := runAdopt(context.Background(), &out, "the-callers-session", adoptOptions{
+		FromWorktree: sourceRepo,
+		Force:        true,
+		AllowForeign: true,
+	}); err != nil {
+		t.Fatalf("--allow-foreign-session did not cover an incomplete store: %v\nOutput: %q", err, out.String())
+	}
+
+	store := session.NewStateStoreWithDir(filepath.Join(targetRepo, ".git", session.SessionStateDirName))
+	state, err := store.Load(context.Background(), "the-callers-session")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state == nil || state.WorktreePath != targetRepo {
+		t.Fatalf("session was not adopted into the target worktree: %+v", state)
+	}
 }
