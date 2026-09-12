@@ -241,7 +241,10 @@ func (c *CursorAgent) FormatResumeCommand(_ string) string {
 }
 
 // sanitizePathForCursor converts a path to Cursor's project directory format.
-var nonAlphanumericRegex = regexp.MustCompile(`[^a-zA-Z0-9]`)
+// Cursor collapses runs of non-alphanumeric characters into a single "-", so
+// a path with adjacent separators (e.g. "/cli/.worktrees/feat") does not gain
+// a double dash on disk.
+var nonAlphanumericRegex = regexp.MustCompile(`[^a-zA-Z0-9]+`)
 
 func sanitizePathForCursor(path string) string {
 	path = strings.TrimLeft(path, "/")
