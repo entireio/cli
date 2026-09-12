@@ -715,7 +715,9 @@ func InstallGitHook(ctx context.Context, silent, absolutePath bool) (int, error)
 	installedCount := 0
 	// In a Lefthook repo the hooks Lefthook owns already run Entire from its
 	// own config; see installSkipsHook.
-	lefthookDelivers := lefthookDeliversHooks(ctx, absolutePath)
+	// Resolved from settings, not from this call's absolutePath: the question
+	// is what the repository's own installed integration says.
+	lefthookDelivers := lefthookDeliversHooks(ctx)
 
 	skipped := 0
 

@@ -3210,7 +3210,7 @@ func TestRunStatus_HookDeliveryLine(t *testing.T) {
 		t.Errorf("unregistered Lefthook repo must warn, got:\n%s", out)
 	}
 
-	if _, err := strategy.EnsureLefthookIntegration(context.Background(), false); err != nil {
+	if _, err := strategy.EnsureLefthookIntegration(context.Background()); err != nil {
 		t.Fatalf("EnsureLefthookIntegration() error = %v", err)
 	}
 	// Registering is not delivery on its own: git runs a hook only if the file

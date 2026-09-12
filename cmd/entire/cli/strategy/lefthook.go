@@ -103,6 +103,13 @@ func LefthookManaged(repoRoot string) bool {
 // EnsureLefthookIntegration registers Entire with Lefthook, returning the
 // number of artifacts written.
 //
+// The hook-command prefix is read from this repository's settings rather than
+// taken as an argument, for the reason ReinstallGitHooks exists: a caller that
+// passes the wrong value does not fail, it silently drops
+// absolute_git_hook_path — and here that means rewriting a working
+// absolute-path install down to a bare `entire`, breaking delivery for the GUI
+// git clients that setting exists to serve. `entire doctor` did exactly that.
+//
 // There is deliberately no rollback. Every write is atomic and content-
 // idempotent, and the entry that activates the integration is written last, so
 // a failure part way through leaves inert files that the next install
@@ -114,7 +121,7 @@ func LefthookManaged(repoRoot string) bool {
 // front, because it is a decision not to touch the repo rather than a failure
 // that will pass, and the exclude entries go in while the paths are still
 // empty, so a partial write is never left unignored.
-func EnsureLefthookIntegration(ctx context.Context, absolutePath bool) (int, error) {
+func EnsureLefthookIntegration(ctx context.Context) (int, error) {
 	repoRoot, err := paths.WorktreeRoot(ctx)
 	if err != nil {
 		return 0, fmt.Errorf("resolve worktree root: %w", err)
@@ -138,7 +145,7 @@ func EnsureLefthookIntegration(ctx context.Context, absolutePath bool) (int, err
 		// working as intended, and nothing here writes to it.
 		return 0, fmt.Errorf("%w: %s", ErrLefthookLocalConfigTracked, name)
 	}
-	cmdPrefix, err := hookCmdPrefix(absolutePath)
+	cmdPrefix, err := hookCmdPrefix(hookSettingsFromConfig(ctx))
 	if err != nil {
 		return 0, err
 	}
@@ -325,7 +332,8 @@ func clearGitCommonDirCache() {
 
 // LefthookIntegrationCurrent reports whether Entire's artifacts are present
 // and current: its config, the extends entry pointing at it, and every script.
-func LefthookIntegrationCurrent(ctx context.Context, absolutePath bool) (bool, error) {
+// The prefix comes from settings; see EnsureLefthookIntegration.
+func LefthookIntegrationCurrent(ctx context.Context) (bool, error) {
 	repoRoot, err := paths.WorktreeRoot(ctx)
 	if err != nil {
 		return false, fmt.Errorf("resolve worktree root: %w", err)
@@ -345,7 +353,7 @@ func LefthookIntegrationCurrent(ctx context.Context, absolutePath bool) (bool, e
 	if !extendsEntryPresent(root) {
 		return false, nil
 	}
-	cmdPrefix, err := hookCmdPrefix(absolutePath)
+	cmdPrefix, err := hookCmdPrefix(hookSettingsFromConfig(ctx))
 	if err != nil {
 		return false, err
 	}
@@ -775,12 +783,12 @@ func uncoveredHookPaths(ctx context.Context) []string {
 
 // lefthookDeliversHooks reports whether Lefthook will run Entire from its own
 // configuration, which is what makes Entire's own hook files redundant.
-func lefthookDeliversHooks(ctx context.Context, absolutePath bool) bool {
+func lefthookDeliversHooks(ctx context.Context) bool {
 	repoRoot, err := paths.WorktreeRoot(ctx)
 	if err != nil || !LefthookManaged(repoRoot) {
 		return false
 	}
-	current, err := LefthookIntegrationCurrent(ctx, absolutePath)
+	current, err := LefthookIntegrationCurrent(ctx)
 	return err == nil && current
 }
 
@@ -807,14 +815,14 @@ type HookDelivery struct {
 // A Lefthook repo is judged on the integration, not on .git/hooks/*: Lefthook
 // owns those files and rewrites them constantly, so their contents say nothing
 // about whether Entire will run.
-func CheckHookDelivery(ctx context.Context, absolutePath bool) HookDelivery {
+func CheckHookDelivery(ctx context.Context) HookDelivery {
 	repoRoot, err := paths.WorktreeRoot(ctx)
 	if err != nil {
 		return HookDelivery{Reason: "Could not resolve the repository root."}
 	}
 	declined := ""
 	if LefthookManaged(repoRoot) {
-		current, checkErr := LefthookIntegrationCurrent(ctx, absolutePath)
+		current, checkErr := LefthookIntegrationCurrent(ctx)
 		switch {
 		case checkErr != nil:
 			return HookDelivery{Manager: LefthookManagerName,

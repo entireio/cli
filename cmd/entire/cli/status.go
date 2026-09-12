@@ -247,7 +247,7 @@ func formatSettingsStatusShort(ctx context.Context, s *EntireSettings, sty statu
 	// Where checkpoint data syncs (the single elected remote), and how many
 	// checkpoints have not reached it yet. Local-only computation.
 	if s.Enabled {
-		writeHookDeliveryLine(ctx, &b, s, sty)
+		writeHookDeliveryLine(ctx, &b, sty)
 		writeCheckpointSyncLines(ctx, &b, s, sty)
 	}
 
@@ -563,8 +563,8 @@ func countUnpushedCheckpointsForStatus(ctx context.Context, remoteName string) i
 // reach it, which is issue #2264. The destination line below is still shown —
 // it is true, and status is the only place it appears — but this line above it
 // removes the claim that delivery is working.
-func writeHookDeliveryLine(ctx context.Context, b *strings.Builder, s *EntireSettings, sty statusStyles) {
-	delivery := strategy.CheckHookDelivery(ctx, s.AbsoluteGitHookPath)
+func writeHookDeliveryLine(ctx context.Context, b *strings.Builder, sty statusStyles) {
+	delivery := strategy.CheckHookDelivery(ctx)
 	b.WriteString("\n")
 	switch {
 	case delivery.OK && delivery.Manager != "":
@@ -1192,7 +1192,7 @@ func runStatusJSON(ctx context.Context, w io.Writer) error {
 		result.CheckpointSyncRemote = syncInfo.Remote
 		result.CheckpointSyncRemoteSource = syncInfo.Source
 		result.CheckpointSyncError = syncInfo.Err
-		delivery := strategy.CheckHookDelivery(ctx, s.AbsoluteGitHookPath)
+		delivery := strategy.CheckHookDelivery(ctx)
 		result.HooksDeliver = delivery.OK
 		result.HooksManager = delivery.Manager
 		result.HooksDeliverReason = delivery.Reason

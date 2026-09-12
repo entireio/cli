@@ -115,7 +115,7 @@ func TestLefthookDeliversEntireOnWindows(t *testing.T) {
 	run("git", "add", "a.txt")
 	run("git", "commit", "-m", "init", "--no-verify")
 
-	_, err = EnsureLefthookIntegration(t.Context(), false)
+	_, err = EnsureLefthookIntegration(t.Context())
 	require.NoError(t, err)
 	// Lefthook only generates a hook file per hook it knows about, and it
 	// learns Entire's from the extends entry written above.
