@@ -40,8 +40,11 @@ func TestLefthookScriptRunsUnderItsRunnerOnWindows(t *testing.T) {
 
 	// A stand-in for the entire binary, so the script's `command -v entire`
 	// guard is satisfied and the arguments it forwards can be observed.
+	// ToSlash because the path is interpolated into a shell script: bash keeps
+	// backslashes literal inside single quotes, so a Windows path would be a
+	// mangled filename rather than a directory walk.
 	record := filepath.Join(dir, "args.txt")
-	stub := "#!/bin/sh\nprintf '%s\\n' \"$*\" >> " + shellQuote(record) + "\n"
+	stub := "#!/bin/sh\nprintf '%s\\n' \"$*\" >> " + shellQuote(filepath.ToSlash(record)) + "\n"
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "entire"), []byte(stub), 0o755))
 
 	var prePush hookSpec
@@ -96,7 +99,7 @@ func TestLefthookDeliversEntireOnWindows(t *testing.T) {
 	record := filepath.Join(binDir, "args.txt")
 	// hookCmdPrefix resolves to a bare "entire", so a stub on PATH stands in.
 	require.NoError(t, os.WriteFile(filepath.Join(binDir, "entire"),
-		[]byte("#!/bin/sh\nprintf '%s\\n' \"$*\" >> "+shellQuote(record)+"\n"), 0o755))
+		[]byte("#!/bin/sh\nprintf '%s\\n' \"$*\" >> "+shellQuote(filepath.ToSlash(record))+"\n"), 0o755))
 
 	env := append(os.Environ(), "PATH="+binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	run := func(name string, args ...string) {
